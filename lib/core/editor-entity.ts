@@ -580,6 +580,12 @@ export function boxFaceCorners(
  */
 export interface EditorEntityContext {
   readonly scene: SceneDescription;
+  /**
+   * The running solver's id, for capabilities gated on the method — the voxel
+   * sculpt tools declare their own availability against it. Optional for the
+   * same reason `pickingAvailable` is: a pure entity test needs no solver.
+   */
+  readonly methodId?: string;
   readonly bodies: readonly EditorBodyPose[];
   /**
    * True only when the complete scene generation is the image being presented,

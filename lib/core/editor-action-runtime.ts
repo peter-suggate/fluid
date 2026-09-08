@@ -8,6 +8,8 @@ import {
 } from "./compare/compare-mode";
 import type { EditorActionEffect } from "./editor-action";
 import { createInflowAt, INFLOW_SELECTION_ID } from "./editor-inflow";
+import { serializeScene } from "./model";
+import { enableWaterLockReason } from "./scene-fluid-readiness";
 import { simulation } from "./simulation/controller";
 import { resolveSession, type PaneSession } from "./session/session";
 
@@ -107,6 +109,79 @@ export function performEditorAction(
       // The session this ring was composed under, so the wedge chooses a scene
       // for the pane it was opened on rather than for pane A.
       ui.setSceneSelectorOpen(true);
+      return;
+    }
+    case "voxel-tool": {
+      // The store's own setter already means "enter INTERACT, put every other
+      // mode away": arming a sculpt tool from a wedge is the same state change
+      // the old shelf's chooser made.
+      ui.setVoxelTool(effect.toolId);
+      return;
+    }
+    case "scene-document": {
+      // A stroke in flight owns the document; every one of these verbs replaces
+      // or serializes it, so they all wait the way the shelf's buttons did.
+      if (ui.voxelStrokePending) {
+        session.runtime.getState().setNotice("Finish the voxel stroke first.", "warn");
+        return;
+      }
+      const scene = session.scene.getState().scene;
+      switch (effect.op) {
+        case "new": {
+          ui.setVoxelTool(undefined);
+          simulation.newScene(undefined, session.id);
+          return;
+        }
+        case "save": {
+          // Under the document's own id — the same save the scene chip's SAVE
+          // performs, so the two surfaces can never write different entries.
+          simulation.saveNamedScene(scene.sceneId, session.id);
+          return;
+        }
+        case "export": {
+          const url = URL.createObjectURL(new Blob([serializeScene(scene)], { type: "application/json" }));
+          const anchor = document.createElement("a");
+          anchor.href = url;
+          anchor.download = `${scene.sceneId.trim().replace(/[^a-z0-9-]/gi, "-") || "scene"}.json`;
+          anchor.click();
+          setTimeout(() => URL.revokeObjectURL(url), 1000);
+          return;
+        }
+        case "import": {
+          // Built on demand inside the user gesture the wedge or row is — the
+          // one moment a file picker is allowed to open.
+          const input = document.createElement("input");
+          input.type = "file";
+          input.accept = "application/json,.json";
+          input.onchange = async () => {
+            const file = input.files?.[0];
+            if (!file) return;
+            try {
+              const contents = await file.text();
+              if (session.ui.getState().voxelStrokePending) {
+                session.runtime.getState().setNotice("Finish the voxel stroke before importing a scene.", "warn");
+                return;
+              }
+              session.ui.getState().setVoxelTool(undefined);
+              simulation.importScene(file.name, contents, session.id);
+            }
+            catch { session.runtime.getState().setNotice("Could not read the scene file.", "warn"); }
+          };
+          input.click();
+          return;
+        }
+        case "enable-water": {
+          const diagnostics = session.diagnostics.getState();
+          const locked = enableWaterLockReason(diagnostics.gpuInfo, diagnostics.resourceReadiness.svo);
+          if (locked) {
+            session.runtime.getState().setNotice(locked, "warn");
+            return;
+          }
+          ui.setVoxelTool(undefined);
+          simulation.setFluidSystem(true, session.id);
+          return;
+        }
+      }
       return;
     }
     case "probe": {

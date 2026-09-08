@@ -37,6 +37,17 @@ Primary sources, reviewed 2026-09-08:
 
 ## Contextual UX
 
+> **Superseded 2026-09-08.** The compact Scene / Tools / Undo / Redo strip and the collapsed
+> "Scene settings" / "Object settings" disclosures described below shipped and were then removed:
+> frequent controls were a click behind a label, and the strip was persistent chrome. Current
+> behaviour: the sculpt tools are wedges on the scene's right-click ring (Build / Carve / Water
+> shapes, composed from the plugin registry); the document verbs (Open / New / Save / Export /
+> Import / Add water) live on the ring's Scene wedge and as rows in the container strip while the
+> tank is selected; scene and selected-object rows stand open; undo/redo are keyboard-only. The
+> armed tool's contextual card, gesture host, plugin contract and acceptance path below are
+> unchanged. See `docs/VOXEL_EDITOR_GUIDE.md`.
+
+
 The review separated three intents that had accumulated in a tall persistent panel: document operations, tool choice and detailed settings. At rest the viewport shows a compact **Scene / Tools / Undo / Redo** strip. **Tools** opens a grouped chooser and closes after selection. A small active-tool card shows the gesture hint and primary width/depth controls; **More** reveals targeting, construction height and symmetry. Nondefault advanced settings stay visible as badges. **Done** disarms the tool; closing the chooser does not.
 
 Scene and selected-object settings start collapsed. Voxel tools hide those ambient strips while armed. **Add tree** enters EDIT and selects the new oak; its tree settings live beside that selected object. Each voxel plugin declares its icon, label, group, order and control prominence alongside its behavior, so the contextual host does not dispatch on tool IDs.

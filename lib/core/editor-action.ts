@@ -145,7 +145,26 @@ export type EditorActionEffect =
    * chooser, not a chooser itself, because a wedge per scene would be a
    * fifty-slice pie and the thing a reader actually does is type three letters.
    */
-  | { readonly kind: "choose-scene" };
+  | { readonly kind: "choose-scene" }
+  /**
+   * Arm one of the voxel editor's plugin tools, so drags sculpt with it.
+   *
+   * The id is the plugin's own: the ring composes these wedges from the
+   * registry, so a tool added there appears here without a second table. An
+   * armed tool shows its contextual card in the viewport; Done or Escape puts
+   * it away.
+   */
+  | { readonly kind: "voxel-tool"; readonly toolId: string }
+  /**
+   * One of the scene document's own verbs: what used to be a persistent Scene
+   * popover, now reached from the scene's ring and from the container strip
+   * while the tank is selected. Save writes the library entry under the
+   * document's own id — the same save the scene chip performs.
+   */
+  | {
+    readonly kind: "scene-document";
+    readonly op: "new" | "save" | "export" | "import" | "enable-water";
+  };
 
 /** Palette token, shared with `EditorEntityTone` so a wedge is coloured like its entity. */
 export type EditorActionTone = "fluid" | "tank" | "body" | "prop" | "inflow" | "region" | "danger";
@@ -188,6 +207,10 @@ export type EditorActionIcon =
   | "trace-ray"
   | "inspect-cell"
   | "scene"
+  | "scene-new"
+  | "scene-save"
+  | "scene-export"
+  | "scene-import"
   | "compare"
   | "compare-close"
   | "compare-keep"
@@ -202,6 +225,13 @@ export interface EditorAction {
   readonly hint?: string;
   /** The picture drawn above the caption. Never the only cue. */
   readonly icon?: EditorActionIcon;
+  /**
+   * A raw 24-box SVG path, for verbs whose picture is declared by a plugin
+   * rather than drawn from the closed vocabulary above. `icon` wins when both
+   * are present; a plugin's icon travels as data because core may not name a
+   * component.
+   */
+  readonly iconPath?: string;
   readonly tone: EditorActionTone;
   /**
    * False renders the wedge visible but unselectable — the same bargain

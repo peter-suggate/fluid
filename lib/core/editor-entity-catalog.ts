@@ -1,4 +1,5 @@
 import { fluidBodyEntity, fluidPlayActions } from "./editor-fluid-body";
+import { voxelSculptActions } from "./editor-voxel-tool-actions";
 import { inflowEntity } from "./editor-inflow";
 import { refinementRegionEntity } from "./editor-refinement-region";
 import { sceneryEntity } from "./editor-scenery";
@@ -34,8 +35,14 @@ import type {
  * method registry in behind it and make a pure geometry test require an
  * installed method package. A whole `PaneSession` is structurally assignable
  * here, which is what WP2/WP3 will hand it.
+ *
+ * The method store rides along optionally, for the sculpt tools' availability:
+ * optional rather than in the Pick because its module imports the method
+ * registry, and the default session below must stay reachable from the CPU
+ * test lane without dragging an installed method package in.
  */
-export type EditorCatalogSession = Pick<PaneSession, "scene" | "sceneDraft" | "ui" | "diagnostics">;
+export type EditorCatalogSession = Pick<PaneSession, "scene" | "sceneDraft" | "ui" | "diagnostics">
+  & Partial<Pick<PaneSession, "method">>;
 
 const defaultCatalogSession: EditorCatalogSession = {
   scene: useSceneStore,
@@ -102,6 +109,7 @@ export const EDITOR_ENTITIES: readonly EditorEntityDefinition[] = Object.freeze(
 export function editorEntityContext(session: EditorCatalogSession = defaultCatalogSession): EditorEntityContext {
   return {
     scene: displaySceneSnapshot(session.scene, session.sceneDraft),
+    methodId: session.method?.getState().methodId,
     voxelRegion: session.ui.getState().voxelRegion,
     fluidCell: fluidCellSnapshot(session),
     // One definition of "a ray can hit something", shared with the viewport:
@@ -298,10 +306,12 @@ export function sceneActionsAt(
   // click landed on. Up when the caller has no better answer — the room's
   // fallback point is a floor.
   normal: Vec3 = { x: 0, y: 1, z: 0 },
-  options: { readonly placement?: boolean } = {},
+  options: { readonly placement?: boolean; readonly methodId?: string } = {},
 ): readonly EditorAction[] {
-  const placement = options.placement !== false ? fluidPlayActions(point_m, normal) : [];
-  return [...placement, sceneWedge(), sceneInstrumentWedge(scene), compareWedge()];
+  const placement = options.placement !== false
+    ? [...fluidPlayActions(point_m, normal), ...voxelSculptActions(scene, options.methodId)]
+    : [];
+  return [...placement, sceneWedge(scene), sceneInstrumentWedge(scene), compareWedge()];
 }
 
 /**
@@ -310,18 +320,73 @@ export function sceneActionsAt(
  * Which scene is loaded is a property of the *pane*, like compare and unlike
  * anything in the document, so it belongs out here beside it rather than on the
  * tank — and in compare mode this is the wedge that makes the mode worth
- * opening at its coarsest: pane B running a different scene. One wedge and no
- * children, because the chooser is a search box: fifty scenes cannot be a pie,
- * and the reader who knows which one they want is going to type it.
+ * opening at its coarsest: pane B running a different scene. The chooser stays
+ * a search box behind one child — fifty scenes cannot be a pie — and the
+ * document's other verbs sit beside it: they were a persistent Scene popover,
+ * and a popover that is about the document belongs on the document's ring.
+ *
+ * "Add water" appears only on a dry document, like the pipeline wedge swapping
+ * contents in a dry scene: enabling water where it already runs is not a
+ * disabled verb, it is no verb at all.
  */
-function sceneWedge(): EditorAction {
+function sceneWedge(scene: SceneDescription): EditorAction {
+  const dry = scene.systems?.fluid === false;
   return {
-    id: "choose-scene",
-    label: "Scene…",
+    id: "scene",
+    label: "Scene",
     icon: "scene",
     tone: "prop",
-    hint: "Choose the scene this pane runs, without leaving the studio",
-    effect: { kind: "choose-scene" },
+    hint: "This pane's document: open another, start fresh, save it, or move it as JSON",
+    children: [
+      {
+        id: "choose-scene",
+        label: "Open…",
+        icon: "scene",
+        tone: "prop",
+        hint: "Choose the scene this pane runs, without leaving the studio",
+        effect: { kind: "choose-scene" },
+      },
+      {
+        id: "scene-new",
+        label: "New",
+        icon: "scene-new",
+        tone: "prop",
+        hint: "Start a fresh document. Water is added later, deliberately",
+        effect: { kind: "scene-document", op: "new" },
+      },
+      {
+        id: "scene-save",
+        label: "Save",
+        icon: "scene-save",
+        tone: "prop",
+        hint: "Save to this browser's library under the document's own name",
+        effect: { kind: "scene-document", op: "save" },
+      },
+      {
+        id: "scene-export",
+        label: "Export",
+        icon: "scene-export",
+        tone: "prop",
+        hint: "Download the document as scene JSON",
+        effect: { kind: "scene-document", op: "export" },
+      },
+      {
+        id: "scene-import",
+        label: "Import…",
+        icon: "scene-import",
+        tone: "prop",
+        hint: "Open a scene JSON file from this machine",
+        effect: { kind: "scene-document", op: "import" },
+      },
+      ...(dry ? [{
+        id: "scene-enable-water",
+        label: "Add water",
+        icon: "water-ball" as const,
+        tone: "fluid" as const,
+        hint: "Hand the document to the fluid solver, starting from its authored setup",
+        effect: { kind: "scene-document" as const, op: "enable-water" as const },
+      }] : []),
+    ],
   };
 }
 

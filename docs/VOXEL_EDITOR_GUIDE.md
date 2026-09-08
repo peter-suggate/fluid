@@ -1,6 +1,6 @@
 # Live voxel editor
 
-Choose **Tools** from the compact strip beside the viewport. Selecting a tool closes the chooser and enters EDIT mode. Hover over the viewport to see its proposed bounds; hold the primary mouse button and drag to edit. Accepted samples change solid geometry while the fluid continues running. Releasing completes one history entry.
+Right-click the scene and choose a tool from the **Build**, **Carve** or **Water shapes** wedges (the persistent Scene/Tools strip is gone — every capability is contextual now). Choosing a tool closes the ring and enters EDIT mode. Hover over the viewport to see its proposed bounds; hold the primary mouse button and drag to edit. Accepted samples change solid geometry while the fluid continues running. Releasing completes one history entry.
 
 For water scenes, use **Sparse CM12**. A new scene starts as a dry room with its fluid system disabled; wait for its live scene resources to become ready before stamping. New/Open/Import replace the document and restart its initial setup. They are scene-loading operations, not live strokes.
 
@@ -45,8 +45,8 @@ While **Applying stroke…** is visible, the final update may still be awaiting 
 
 ## Create and keep scenes
 
-1. Open **Scene**, then choose **New scene** for an empty room, or **Open scene** for a preset or browser-saved scene. In the chooser, search by name and press Enter, or click a tile.
-2. Edit, enter a **Scene name**, and select **Save scene**. Saves belong to this browser's local scene library. Saving the same name replaces that named entry.
+1. Right-click the scene and open the **Scene** wedge, then choose **New** for an empty room, or **Open…** for a preset or browser-saved scene. In the chooser, search by name and press Enter, or click a tile. The same verbs appear as rows in the container strip while the tank is selected.
+2. Edit, then choose **Save** (on the ring, the container strip, or the scene chip's SAVE). Saves belong to this browser's local scene library under the document's name; saving the same name replaces that entry. Rename from the library.
 3. Use **Export JSON** for a portable file. **Import JSON** validates a chosen file and replaces the current document; an invalid file leaves the document and history unchanged.
 
 A saved/exported scene contains authored voxel edits and the scene's initial water setup. It is not a checkpoint of the current fluid motion, solver memory, or undo history. Reopening starts from that authored setup. JSON contains the scene document; the active solver/quality controls are not part of this file. Use a named save or exported file to retain new work rather than relying on a starter's URL.
@@ -66,7 +66,7 @@ The **Fluid** group adds **Water ball**, **Water cube** and **Water torus**. Wat
 must already be enabled with a ready Sparse CM12 solver. These tools are
 transient edits to the moving fluid, separate from the solid tools above.
 
-A new scene starts with water disabled. Choose **Scene → Enable water** to
+A new scene starts with water disabled. Choose **Scene → Add water** on the ring (or the **Add water** row while the tank is selected) to
 initialize fluid from the scene's starting setup. The action appears only in
 dry scenes. Enabling water leaves playback paused at time zero; wait for
 readiness, then use Play for moving water. This is initial setup, separate from
@@ -93,7 +93,7 @@ emitters.
 
 ## Scene and object controls
 
-When no voxel tool is active, **Scene settings** and selected-object settings start collapsed. Select an oak to reveal **Tree settings**; use **Tools → Add tree** to create one at the view centre. Changing the selection closes the old object's details.
+When no voxel tool is active, the scene's rows stand beside the tank and a selected object's rows stand at its own corner — nothing is behind a disclosure. Select an oak to get its growth rows in the same column; plant one from the ring's **Prop → Fractal oak**. While a sculpt tool is armed, both strips stand down for the tool's card.
 
 In EDIT, selectable objects under the pointer show faint dotted selection bounds.
 An idle tool preview can coexist with those bounds; an active stroke owns the
@@ -112,7 +112,7 @@ Rejected proposals are not silently clipped. Reduce the width/depth or span, or 
 ## Hero garden availability
 
 `hero-garden-hose-x10` is intentionally a dry rendering stress scene. Its fluid
-tools become usable after **Scene → Enable water** initializes a supported
+tools become usable after **Scene → Add water** initializes a supported
 solver. The former blanket terrain guard also disabled all eight solid tools;
 the live terrain-overlay implementation removes that restriction without
 rebaking terrain heights. Native checks verify fill, deep carve and Undo against

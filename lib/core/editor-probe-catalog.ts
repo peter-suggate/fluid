@@ -534,7 +534,7 @@ export function targetActionsAt(
   const definition = EDITOR_PROBES.find((candidate) => candidate.id === target.probeId);
   const particular = definition?.actions?.(context, target, aim) ?? [];
   const composed = !target.selection
-    ? [...particular, ...sceneActionsAt(context.scene, target.point_m, target.normal)]
+    ? [...particular, ...sceneActionsAt(context.scene, target.point_m, target.normal, { methodId: context.methodId })]
     : [...particular, ...entityActionsAt(context, {
       selection: target.selection,
       point_m: target.point_m,

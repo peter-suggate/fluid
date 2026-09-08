@@ -1,11 +1,12 @@
 "use client";
 
-import { useId, useState } from "react";
-import { Cuboid, Sigma, Waves } from "lucide-react";
+import { useState } from "react";
+import { Cuboid, Download, Droplet, FilePlus2, Save, Sigma, Upload } from "lucide-react";
 import type { EditorEntity, EditorField } from "../lib/core/editor-entity";
 import { sceneryIdFromSelection } from "../lib/core/editor-scenery";
 import { TANK_SELECTION_ID, tankExtentFields } from "../lib/core/editor-tank";
 import { vesselNameFromSelection } from "../lib/core/editor-vessel-rim";
+import { performEditorAction } from "../lib/core/editor-action-runtime";
 import { getMethod, interactiveSimulationMethods } from "../lib/core/method-registry";
 import { simulation } from "../lib/core/simulation/controller";
 import { sceneStoneNode } from "../lib/core/stone-look-controls";
@@ -23,7 +24,6 @@ import { CanopyDialRows } from "./TreeCanopyFlyout";
 import { RimDialRows } from "./VesselRimFlyout";
 import {
   Toolstrip,
-  ToolstripChoice,
   ToolstripMenuButton,
   ToolstripMenuItem,
   ToolstripMoreRow,
@@ -144,6 +144,60 @@ function SolverRow() {
   />;
 }
 
+/**
+ * The scene document's own verbs, as rows while the scene is selected.
+ *
+ * They were a persistent Scene popover on a shelf that stood in the corner of
+ * every viewport. A document verb is contextual like any other: selecting the
+ * tank is selecting the scene, so the rows join this column — and the same
+ * verbs sit on the scene's ring, one state seen from two places, exactly as
+ * the making rows and their wedges are.
+ */
+function SceneDocumentRows({ fluid }: { fluid: boolean }) {
+  const session = useSession();
+  const scene = session.scene((state) => state.scene);
+  const glyph = (Icon: typeof Save) => <Icon width={14} height={14} strokeWidth={1.7} aria-hidden />;
+  const perform = (op: "new" | "save" | "export" | "import" | "enable-water") =>
+    performEditorAction({ kind: "scene-document", op }, session);
+  return <>
+    {!fluid && <ToolstripRow
+      icon={glyph(Droplet)}
+      name="Add water"
+      hint="Hand the document to the fluid solver, starting from its authored setup."
+      testId="scene-enable-water-row"
+      onClick={() => perform("enable-water")}
+    />}
+    <ToolstripRow
+      icon={glyph(Save)}
+      name="Save scene"
+      hint={`Save to this browser's library as “${scene.sceneId}”, replacing an earlier save of the same name.`}
+      testId="scene-save-row"
+      onClick={() => perform("save")}
+    />
+    <ToolstripRow
+      icon={glyph(FilePlus2)}
+      name="New scene"
+      hint="Start a fresh document. Water is added later, deliberately."
+      testId="scene-new-row"
+      onClick={() => perform("new")}
+    />
+    <ToolstripRow
+      icon={glyph(Download)}
+      name="Export JSON"
+      hint="Download the document as scene JSON."
+      testId="scene-export-row"
+      onClick={() => perform("export")}
+    />
+    <ToolstripRow
+      icon={glyph(Upload)}
+      name="Import JSON"
+      hint="Open a scene JSON file from this machine."
+      testId="scene-import-row"
+      onClick={() => perform("import")}
+    />
+  </>;
+}
+
 /** Whether an entity declares anything for `EntityOptionRows` to draw. */
 function entityHasOptions(entity: EditorEntity): boolean {
   return (entity.choices?.length ?? 0)
@@ -151,7 +205,17 @@ function entityHasOptions(entity: EditorEntity): boolean {
     + (entity.groups?.length ?? 0) > 0;
 }
 
-/** Scene controls stay beside the tank, disclosed only when requested. */
+/**
+ * The strip at the container's corner: the scene's fixed readings, and — when
+ * the tank is selected — everything else about the thing being solved.
+ *
+ * The rows stand open. They were briefly one closed "Scene settings" disclosure,
+ * which put the most-reached-for controls in the studio a click behind a label;
+ * contextual means the column appears with its subject, not that it hides from
+ * it. Selecting the tank still *grows* this column rather than swapping it for
+ * a panel, and while a sculpt tool is armed the viewport withholds it entirely —
+ * the tool's own card is the context then.
+ */
 export function ContainerToolstrip({
   leftFraction,
   topFraction,
@@ -177,16 +241,6 @@ export function ContainerToolstrip({
     ariaLabel="Scene"
     testId="field-quick-bar"
   >
-    <details key={entity?.selection.id ?? "ambient"} className="contextual-scene-settings"
-      onKeyDown={event => {
-        if (event.key === "Escape") {
-          event.currentTarget.open = false;
-          event.currentTarget.querySelector("summary")?.focus();
-          event.stopPropagation();
-        }
-      }}>
-      <summary>{entity ? "Tank settings" : "Scene settings"}</summary>
-      <div className="contextual-scene-settings-body">
     {hasFields && <FieldViewRows />}
     <FeatureSlot slot="scene.visibility" />
     <TankRow />
@@ -225,18 +279,29 @@ export function ContainerToolstrip({
             Those used to be a row of their own — one line reporting the quality
             over a card of nine controls, the tallest thing the column opened
             and the most often opened. They are the panel's first face now. */}
+        {/* The document's own verbs, above the door: selecting the tank is
+            selecting the scene, so what used to be a persistent Scene popover
+            answers here. The same verbs sit on the scene's ring. */}
+        <ToolstripRule />
+        <SceneDocumentRows fluid={hasSolver} />
         <EntityMoreRow
           key={`more:${entity.selection.id}`}
           entity={entity}
           leadingTabs={methodSetupTabs(methodId)}
         />
       </>}
-      </div>
-    </details>
   </Toolstrip>;
 }
 
-/** A selected object's settings travel with it; another selection starts closed. */
+/**
+ * The strip at any other selected thing's own corner.
+ *
+ * Titled, because a boulder's outline does not say "boulder" the way the tank's
+ * does. Its rows stand open for the same reason the container's do: selection
+ * *is* the disclosure, and a second one under it was burying the controls the
+ * selection was made for. A tree's growth dials are toolstrip rows like the
+ * rest, so an oak's column is taller, not deeper.
+ */
 export function EntityToolstrip({
   leftFraction,
   topFraction,
@@ -248,7 +313,6 @@ export function EntityToolstrip({
 }) {
   const session = useSession();
   const scene = session.scene((state) => state.scene);
-  const disclosureGroup = useId();
   const selection = entity.selection;
   const sceneryId = selection.kind === "scenery" ? sceneryIdFromSelection(selection.id) : undefined;
   const oakId = sceneryId !== undefined && isEditableOak(findSceneryNode(scene, sceneryId)) ? sceneryId : undefined;
@@ -271,27 +335,7 @@ export function EntityToolstrip({
     testId="entity-toolstrip"
   >
     <ToolstripTitle>{entity.label}</ToolstripTitle>
-    {oakId !== undefined && <details key={`tree:${oakId}`} name={disclosureGroup} className="contextual-object-settings"
-      onKeyDown={event => {
-        if (event.key === "Escape" && !event.defaultPrevented) {
-          event.currentTarget.open = false;
-          event.currentTarget.querySelector("summary")?.focus();
-          event.stopPropagation();
-        }
-      }}>
-      <summary>Tree settings</summary>
-      <div className="contextual-object-settings-body"><OakTreeEditor contextual /></div>
-    </details>}
-    <details key={`object:${selection.kind}:${selection.id}`} name={disclosureGroup} className="contextual-object-settings"
-      onKeyDown={event => {
-        if (event.key === "Escape" && !event.defaultPrevented) {
-          event.currentTarget.open = false;
-          event.currentTarget.querySelector("summary")?.focus();
-          event.stopPropagation();
-        }
-      }}>
-      <summary>{oakId !== undefined ? "Placement and object" : "Object settings"}</summary>
-      <div className="contextual-object-settings-body">
+    {oakId !== undefined && <OakTreeEditor key={`tree:${oakId}`} contextual />}
     {canopyId !== undefined && <CanopyDialRows nodeId={canopyId} />}
     {stoneId !== undefined && <StoneDialRows nodeId={stoneId} />}
     {vesselName !== undefined && <RimDialRows vesselName={vesselName} />}
@@ -304,7 +348,5 @@ export function EntityToolstrip({
         ends the object, so it is where the object's own list ends. */}
     <EntityDeleteRow key={`delete:${selection.id}`} entity={entity} />
     <EntityMoreRow key={`more:${selection.id}`} entity={placementEntity} />
-      </div>
-    </details>
   </Toolstrip>;
 }

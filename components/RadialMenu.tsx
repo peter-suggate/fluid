@@ -309,7 +309,7 @@ export function RadialMenu() {
             onClick={() => choose(action, index)}
           >
             <path d={wedgePath(from, to)} />
-            {action.icon && <EditorActionIconMark name={action.icon} x={iconX} y={iconY} />}
+            {(action.icon || action.iconPath) && <EditorActionIconMark name={action.icon} path={action.iconPath} x={iconX} y={iconY} />}
             <text className="radial-label" x={labelX} y={labelY}>{action.label}</text>
             {(action.children?.length ?? 0) > 0 && <path
               className="radial-more"

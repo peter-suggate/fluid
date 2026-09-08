@@ -1708,7 +1708,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       ? targetActionsAt(context, target, aim)
       // LOOK has no target by construction, so the room answers from the point
       // the ray reaches rather than from a thing.
-      : sceneActionsAt(context.scene, roomPointForRay(context.scene, ray), undefined, { placement: false });
+      : sceneActionsAt(context.scene, roomPointForRay(context.scene, ray), undefined, { placement: false, methodId: context.methodId });
     if (actions.length === 0) { session.ui.getState().closeRadialMenu(); return; }
     // Client coordinates: the ring is a fixed-position layer over the window,
     // not a child of the canvas, so it must not be told canvas-relative ones.

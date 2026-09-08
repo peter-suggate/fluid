@@ -3,6 +3,10 @@
 import {
   Aperture,
   ArrowDownToLine,
+  Download,
+  FilePlus2,
+  Save,
+  Upload,
   Beaker,
   Box,
   Brush,
@@ -70,8 +74,13 @@ const ICONS = {
   // a framed magnifier for the one that reads the cell behind it.
   "trace-ray": Crosshair,
   "inspect-cell": ScanSearch,
-  // The shelf a scene comes off, for the wedge that raises the chooser.
+  // The shelf a scene comes off, for the wedge that raises the chooser; the
+  // document verbs beside it wear the file they act on.
   scene: Library,
+  "scene-new": FilePlus2,
+  "scene-save": Save,
+  "scene-export": Download,
+  "scene-import": Upload,
   // The mode itself is two panes; its three verbs are what happens to them.
   compare: Columns2,
   "compare-close": PanelLeftClose,
@@ -99,6 +108,17 @@ export function EditorActionGlyph({ name, size = 14 }: {
 }
 
 /**
+ * Draw a plugin-declared 24-box path the same way — for verbs whose picture is
+ * data rather than a name, e.g. a voxel tool's own icon. Same box, stroke and
+ * colour handling as the lucide set, so the two are indistinguishable in a row
+ * or on a wedge.
+ */
+export function EditorActionPathGlyph({ path, size = 14 }: { path: string; size?: number }) {
+  return <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor"
+    strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" aria-hidden><path d={path} /></svg>;
+}
+
+/**
  * Draw one, centred on a point in an SVG's own coordinate system.
  *
  * Nested `<svg>` inside a `<g>` rather than a `<foreignObject>`: the icon is
@@ -106,14 +126,18 @@ export function EditorActionGlyph({ name, size = 14 }: {
  * that owns it and scales with the ring instead of being a rectangle of HTML
  * pinned over it.
  */
-export function EditorActionIconMark({ name, x, y, size = 21 }: {
-  name: EditorActionIconName;
+export function EditorActionIconMark({ name, path, x, y, size = 21 }: {
+  name?: EditorActionIconName;
+  /** A raw 24-box path, drawn when no `name` is given — see `EditorAction.iconPath`. */
+  path?: string;
   x: number;
   y: number;
   size?: number;
 }) {
-  const Icon = ICONS[name];
+  const Icon = name ? ICONS[name] : undefined;
   return <g transform={`translate(${x - size / 2} ${y - size / 2})`} className="radial-icon">
-    <Icon width={size} height={size} strokeWidth={1.6} aria-hidden />
+    {Icon ? <Icon width={size} height={size} strokeWidth={1.6} aria-hidden />
+      : <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor"
+        strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" aria-hidden><path d={path} /></svg>}
   </g>;
 }
