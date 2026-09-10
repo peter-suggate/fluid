@@ -26,6 +26,7 @@ assert.ok(relativeExpression);
 const relativeStencil = runInNewContext(relativeExpression, {
   geometricTransportStencil: production("effectiveTransportStencilAtSpansMode"),
 });
+
 async function execute(device: GPUDevice, code: string, floats: number): Promise<Float32Array> {
   const shader = device.createShaderModule({ code });
   assert.deepEqual((await shader.getCompilationInfo()).messages.filter(m => m.type === "error"), []);
@@ -98,20 +99,6 @@ fn cm12TransportOwnerAtFine(q:vec3i,direct:bool)->Owner{
   return Owner(cell);
 }
 fn ownerCellAt(q:vec3i)->u32{_=q;return 0u;}
-// This analytic fixture has no IBO image. The full solver A/B covers that
-// address path; retain the identical incidence fallback here.
-const FIXTURE_USE_IBO=false;
-fn ta(at:u32)->u32{_=at;return select(0u,1u,FIXTURE_USE_IBO);}
-fn cm12IBOAcceptedSlot()->u32{return 0u;}
-fn cm12IBOLeafActive(slot:u32,brick:u32)->bool{_=slot;_=brick;return FIXTURE_USE_IBO;}
-fn cm12IBOLeafCellFirst(slot:u32,brick:u32)->u32{_=slot;_=brick;return 0u;}
-fn cm12IBOLeafDimensions(slot:u32,brick:u32)->vec3u{_=slot;_=brick;return vec3u(1);}
-fn cm12IBOTRAPacketForLocal(brick:u32,local:vec3u,slot:u32)->vec2u{
-  _=brick;_=local;_=slot;return vec2u(0u);
-}
-fn itr1StableRowForOwner(packet:u32,axis:u32,lane:u32)->u32{
-  _=packet;_=axis;_=lane;return currentRow;
-}
 fn incidenceBegin(cell:u32)->u32{_=cell;return 0u;}
 fn incidenceEnd(cell:u32)->u32{_=cell;return 1u;}
 fn incidenceRow(at:u32)->u32{_=at;return currentRow;}
@@ -168,10 +155,6 @@ fn main(@builtin(global_invocation_id)gid:vec3u){
       `width ${1 << (i % 4)}: a zero-length characteristic must not dissipate the face mode`);
     for (let i = 8; i < 12; i++) assert.equal(values[12 + i], 3,
       "new dry receiver faces must acquire extended jet velocity, not retain their old zero");
-    const addressed = await execute(device, fixture.replace(
-      "const FIXTURE_USE_IBO=false;", "const FIXTURE_USE_IBO=true;"), fixtureFloats);
-    assert.deepEqual(addressed.slice(12, 24), values.slice(12, 24),
-      "accepted ITR face addresses preserve the incidence-path staggered authority");
     const brickFaces = await execute(device, fixture.replace(
       "fn rowKind(row:u32)->u32{_=row;return 0u;}",
       "fn rowKind(row:u32)->u32{_=row;return 1u;}"), fixtureFloats);
@@ -225,6 +208,65 @@ fn main(@builtin(global_invocation_id)gid:vec3u){
         `width ${width}, travel ${travel}: native wave translation`);
     }
     assert.deepEqual(errors, []);
+  } finally {
+    device?.destroy(); await releaseWebGPUExclusiveLock(); if (gpu) live.delete(gpu);
+  }
+});
+
+dawnTest("native face donors retain incidence identity when an accepted ITR row is coincident", async () => {
+  await acquireWebGPUExclusiveLock("dawn-test", "face-remap-incidence-identity");
+  let gpu: GPU | undefined, device: GPUDevice | undefined;
+  try {
+    const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);
+    Object.assign(globalThis, dawn.globals);
+    gpu = dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]); live.add(gpu!);
+    const adapter = await gpu!.requestAdapter(); assert.ok(adapter);
+    device = await adapter.requestDevice();
+    // A geometric match alone cannot replace the incidence authority. The
+    // alternate accepted row deliberately has a distinct velocity, despite
+    // agreeing in axis, center, wetness and physical width. Keep the ITR hooks
+    // so this same fixture rejects the former direct-address shortcut.
+    const fixture = `
+const INVALID=0xffffffffu;
+const CM12_LIQUID_ISOVALUE=0.5;
+struct Params { dimensions:vec4u }
+const p=Params(vec4u(32));
+@group(0)@binding(0)var<storage,read_write>state:array<f32>;
+fn ownerCellAt(q:vec3i)->u32{_=q;return 0u;}
+fn cellMinimumWidth(cell:u32)->f32{_=cell;return 1.0;}
+fn cellBrick(cell:u32)->u32{_=cell;return 0u;}
+fn rowAxis(row:u32)->u32{_=row;return 0u;}
+fn rowCenter(row:u32)->vec3f{_=row;return vec3f(8,8.5,8.5);}
+fn rowAccepted(row:u32)->bool{return row<2u;}
+fn rowTermOffset(row:u32)->u32{return row;}
+fn rowTermCount(row:u32)->u32{_=row;return 1u;}
+fn termCell(term:u32)->u32{return term;}
+fn sourceDensity()->u32{return 2u;}
+fn sourceFaceVelocity()->u32{return 0u;}
+fn incidenceBegin(cell:u32)->u32{_=cell;return 0u;}
+fn incidenceEnd(cell:u32)->u32{_=cell;return 1u;}
+fn incidenceRow(at:u32)->u32{_=at;return 0u;}
+fn ta(at:u32)->u32{_=at;return 2u;}
+fn cm12IBOAcceptedSlot()->u32{return 0u;}
+fn cm12IBOLeafActive(slot:u32,brick:u32)->bool{_=slot;_=brick;return true;}
+fn cm12IBOLeafCellFirst(slot:u32,brick:u32)->u32{_=slot;_=brick;return 0u;}
+fn cm12IBOLeafDimensions(slot:u32,brick:u32)->vec3u{_=slot;_=brick;return vec3u(1);}
+fn cm12IBOTRAPacketForLocal(brick:u32,local:vec3u,slot:u32)->vec2u{
+  _=brick;_=local;_=slot;return vec2u(0u);
+}
+fn itr1StableRowForOwner(packet:u32,axis:u32,lane:u32)->u32{
+  _=packet;_=axis;_=lane;return 1u;
+}
+${["transferLocalCoordinate", "nativeTransportFaceValue", "nativeTransportFaceAt"].map(production).join("\n")}
+@compute @workgroup_size(1)
+fn main(){
+  state[0]=7.0;state[1]=-11.0;state[2]=1.0;state[3]=1.0;
+  let sampled=nativeTransportFaceAt(rowCenter(0u),0u,1.0);
+  state[4]=sampled.x;state[5]=sampled.y;
+}`;
+    const values = await execute(device, fixture, 6);
+    assert.deepEqual([...values.slice(4)], [7, 1],
+      "same center and axis do not authorize replacing the queried owner's incident row");
   } finally {
     device?.destroy(); await releaseWebGPUExclusiveLock(); if (gpu) live.delete(gpu);
   }
