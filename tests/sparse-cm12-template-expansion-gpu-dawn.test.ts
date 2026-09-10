@@ -5,7 +5,6 @@ import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/h
 import { createSparseAdaptiveMassAtlas, sparseAtlasBrickKey, type SparseBrickResolution } from "../lib/methods/adaptive-mass/sparse-brick-atlas";
 import { buildSparseAtlasCompositeGrid } from "../lib/methods/adaptive-mass/sparse-atlas-composite-projection";
 import { packSparseCM12ResidentTopologyArchetypesForQA,
-  packSparseCM12ResidentTopologyBlocksForQA,
   packSparseCM12ResidentTopologyTemplatesForQA } from "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
 import { expandSparseCM12TemplateArchetypesGPU } from "../lib/methods/adaptive-mass/sparse-cm12-template-expansion-gpu";
 
@@ -23,13 +22,8 @@ const fixtures: readonly Fixture[] = [
   { name: "immutable macro guard", dimensions: [24, 16, 16], bricks: [{ q: [0, 0, 0], span: 2, r: 2 }, { q: [2, 0, 0], span: 1, r: 4 }] },
   { name: "three accepted rungs", dimensions: [24, 8, 8], bricks: [{ q: [0, 0, 0], span: 1, r: 1 }, { q: [1, 0, 0], span: 1, r: 2 }, { q: [2, 0, 0], span: 1, r: 4 }] },
 ];
-const recipeBuilders = [
-  { name: "archetypes", pack: packSparseCM12ResidentTopologyArchetypesForQA },
-  { name: "blocks", pack: packSparseCM12ResidentTopologyBlocksForQA },
-] as const;
-type RecipeBuilder = typeof recipeBuilders[number];
 
-function prepare(fixture: Fixture, builder: RecipeBuilder) {
+function prepare(fixture: Fixture) {
   const brickDimensions = fixture.dimensions.map(value => Math.ceil(value / 8)) as [number, number, number];
   const atlas = createSparseAdaptiveMassAtlas(fixture.dimensions, fixture.bricks.map(brick => ({
     key: sparseAtlasBrickKey(brick.q, { brickDimensions, signedCoordinates: true }),
@@ -39,15 +33,14 @@ function prepare(fixture: Fixture, builder: RecipeBuilder) {
   })), 0, 8, true);
   const grid = buildSparseAtlasCompositeGrid(atlas);
   const reference = packSparseCM12ResidentTopologyTemplatesForQA(atlas, grid);
-  const compact = builder.pack(atlas, grid);
-  assert.ok(compact.gpuExpansion, `${builder.name}: fixture must exercise the GPU expansion recipe`);
+  const compact = packSparseCM12ResidentTopologyArchetypesForQA(atlas, grid);
+  assert.ok(compact.gpuExpansion, "fixture must exercise the production GPU expansion recipe");
   return { reference, compact };
 }
 const cache = new Map<string, ReturnType<typeof prepare>>();
-function prepared(fixture: Fixture, builder: RecipeBuilder) {
-  const key = `${builder.name}/${fixture.name}`;
-  let result = cache.get(key);
-  if (!result) { result = prepare(fixture, builder); cache.set(key, result); }
+function prepared(fixture: Fixture) {
+  let result = cache.get(fixture.name);
+  if (!result) { result = prepare(fixture); cache.set(fixture.name, result); }
   return result;
 }
 
@@ -68,10 +61,9 @@ function exactWords(actual: Uint32Array, reference: Uint32Array, label: string) 
     + `actual 0x${actual[first]?.toString(16)}, expected 0x${reference[first]?.toString(16)}`);
 }
 
-for (const builder of recipeBuilders) for (const fixture of fixtures) test(
-  `${builder.name} / ${fixture.name}: expansion CPU preparation matches legacy geometry and row terms`, () => {
-  const { reference, compact } = prepared(fixture, builder);
-  exactWords(compact.words, reference.words, `${builder.name} / ${fixture.name}`);
+for (const fixture of fixtures) test(`${fixture.name}: expansion CPU preparation matches legacy geometry and row terms`, () => {
+  const { reference, compact } = prepared(fixture);
+  exactWords(compact.words, reference.words, fixture.name);
   assert.equal(compact.cellCount, reference.cellCount);
   assert.equal(compact.rowCount, reference.rowCount);
   const w = reference.words, f = new Float32Array(w.buffer);
@@ -100,10 +92,10 @@ const liveDawn = new Set<GPU>();
 const guardWords = Uint32Array.from({ length: 256 }, (_, index) =>
   (0xc7000000 | ([0, 64, 128, 255][index % 4]! << 8) | index) >>> 0);
 
-for (const builder of recipeBuilders) for (const fixture of fixtures) (dawnModule ? test : test.skip)(
-  `${builder.name} / ${fixture.name}: GPU expansion is word-exact and preserves surrounding arena data`,
+for (const fixture of fixtures) (dawnModule ? test : test.skip)(
+  `${fixture.name}: GPU expansion is word-exact and preserves surrounding arena data`,
   { timeout: 120_000 }, async () => {
-    await acquireWebGPUExclusiveLock("dawn-test", `template-expansion-${builder.name}-${fixture.name}`);
+    await acquireWebGPUExclusiveLock("dawn-test", `template-expansion-${fixture.name}`);
     let gpu: GPU | undefined, device: GPUDevice | undefined, output: GPUBuffer | undefined, readback: GPUBuffer | undefined;
     try {
       const dawn = await import(pathToFileURL(dawnModule!).href); Object.assign(globalThis, dawn.globals);
@@ -111,7 +103,7 @@ for (const builder of recipeBuilders) for (const fixture of fixtures) (dawnModul
       const adapter = await gpu!.requestAdapter(); assert.ok(adapter); device = await adapter.requestDevice();
       const errors: string[] = [];
       device.addEventListener("uncapturederror", event => { event.preventDefault(); errors.push(event.error.message); });
-      const { reference, compact } = prepared(fixture, builder);
+      const { reference, compact } = prepared(fixture);
       const cellBase = compact.words[6]!, incidenceBase = compact.words[9]!;
       const totalWords = reference.words.length + guardWords.length;
       output = device.createBuffer({ label: "GPU-expanded SCMT with foreign arena guard", size: 4 * totalWords,
@@ -135,13 +127,12 @@ for (const builder of recipeBuilders) for (const fixture of fixtures) (dawnModul
         device.queue.submit([encoder.finish()]); await readback.mapAsync(GPUMapMode.READ);
         try {
           const actual: Uint32Array = new Uint32Array(readback.getMappedRange());
-          exactWords(actual.subarray(0, reference.words.length), reference.words,
-            `${builder.name} / ${fixture.name} poison ${poison}`);
+          exactWords(actual.subarray(0, reference.words.length), reference.words, `${fixture.name} poison ${poison}`);
           assert.deepEqual(actual.subarray(reference.words.length), guardWords, "expansion must not overwrite foreign arena/occupancy guards");
         } finally { readback.unmap(); }
       }
       await device.queue.onSubmittedWorkDone(); assert.deepEqual(errors, []);
-      console.log(JSON.stringify({ recipeBuilder: builder.name, fixture: fixture.name, words: reference.words.length,
+      console.log(JSON.stringify({ fixture: fixture.name, words: reference.words.length,
         cells: reference.cellCount, rows: reference.rowCount, terms: reference.words[4],
         archetypes: compact.gpuExpansion!.archetypeCount, checkedGuardWords: guardWords.length,
         repeatedExpansions: 2, mismatchedWords: 0 }));
