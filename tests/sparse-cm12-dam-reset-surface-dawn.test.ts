@@ -62,7 +62,10 @@ const nativeInstances = new Set<GPU>();
     assert.ok(maximumTopError < .002, `top displaced ${maximumTopError} finest cells`);
     assert.ok(maximumSideError < .25, `vertical side displaced ${maximumSideError} finest cells`);
     assert.equal(solver.info.encodedSteps, 0, "reset geometry must require no physics advance");
-    await solver.assertSimulationHealthy();
+    const healthEncoder = device.createCommandEncoder();
+    const readHealth = solver.captureSimulationHealth(healthEncoder);
+    device.queue.submit([healthEncoder.finish()]);
+    await readHealth();
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ topSamples, sideSamples, maximumTopError, maximumSideError }));
   } finally {
