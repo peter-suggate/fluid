@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createSolidWorld, SOLID_WORLD_TERRAIN_MATERIAL_ID } from "../lib/core/solid-world";
 import { compileRetainedOpenSceneFineMeans } from "../lib/methods/adaptive-mass/sparse-cm12-retained-open-density";
-import { bindRetainedSceneSupportLattice, compileRetainedSceneFineMeans, retainedSceneDensity } from "../lib/methods/adaptive-mass/sparse-cm12-retained-scene-density";
+import { compileRetainedSceneFineMeans, retainedSceneDensity } from "../lib/methods/adaptive-mass/sparse-cm12-retained-scene-density";
 import { compileRetainedSceneSubcellMoments } from "../lib/methods/adaptive-mass/sparse-cm12-retained-subcell-moments";
 
 const dimensions = [8, 8, 8] as const, h = .125;
@@ -20,21 +20,6 @@ test("subcell ABI integrates an affine ramp exactly and preserves its physical h
   }
   assert.equal(result.receipt.integratedSubcells + result.receipt.constantSubcells + result.receipt.reflectedSubcells, 4096);
   assert.ok(result.receipt.reflectedSubcells > 0);
-});
-
-test("clipped lattice edge subcells preserve full volume without f32 endpoint slivers", () => {
-  const domain = { lower: [-.325, 0, -.225], upper: [.325, .5, .225] } as const;
-  const dimensions = [13, 10, 9] as const, h = .05;
-  const full = bindRetainedSceneSupportLattice(retainedSceneDensity({ generation: 1,
-    transitionWidth: h, domain, primitives: [{ kind: "box", ...domain }] }), dimensions, h);
-  const world = createSolidWorld();
-  const result = compileRetainedSceneSubcellMoments(full, dimensions, h, world);
-  const open = compileRetainedOpenSceneFineMeans(full, dimensions, h, world);
-  assert.ok(result.seedAmounts.every(amount => amount === .125));
-  assert.ok(result.openVolumes.every(volume => volume === .125));
-  assert.equal(result.seedAmounts.reduce((sum, amount) => sum + amount, 0), 1170);
-  assert.ok(open.effectiveMeans.every(mean => mean === 1));
-  assert.ok(open.openFractions.every(fraction => fraction === 1));
 });
 
 test("a rigid mask selects true open subbox integrals rather than multiplying density by capacity", () => {

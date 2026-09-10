@@ -326,42 +326,29 @@ fn valid(v: f32) -> bool { return abs(v) <= 3.402823e38; }
 
 /** Fully prepared commands; publication never creates buffers or pipelines. */
 export class PreparedSparseCM12GenerationTransfer {
-  private encodedForValidation = false;
   constructor(private readonly device: GPUDevice, private readonly pipelines: GPUComputePipeline[],
     private readonly bindings: GPUBindGroup, private readonly buffers: GPUBuffer[],
     private readonly fault: GPUBuffer, private readonly readback: GPUBuffer,
-    private readonly cellCount: number, private readonly rowCount: number,
-    private readonly dispatchCounts?: readonly number[],
-    private readonly clearBeforeEncode?: readonly GPUBuffer[]) {}
+    private readonly cellCount: number, private readonly rowCount: number) {}
   encode(encoder: GPUCommandEncoder): void {
     // An invalid command buffer must not look like a successful zero-fault
     // transfer. Only an executed command buffer clears this sentinel.
     this.device.queue.writeBuffer(this.fault, 0, new Uint32Array([0xffffffff]));
-    this.device.queue.writeBuffer(this.readback, 0, new Uint32Array([0xffffffff]));
-    this.encodedForValidation = true;
     encoder.clearBuffer(this.fault);
-    for (const buffer of this.clearBeforeEncode ?? []) encoder.clearBuffer(buffer);
-    const counts = this.dispatchCounts ?? [this.cellCount, this.rowCount];
-    for (let index = 0; index < counts.length; index++) {
-      const count = counts[index]!;
+    for (let index = 0; index < 2; index++) {
+      const count = index === 0 ? this.cellCount : this.rowCount;
       if (!count) continue;
       const pass = encoder.beginComputePass();
       pass.setPipeline(this.pipelines[index]!); pass.setBindGroup(0, this.bindings);
-      const groups = Math.ceil(count / 64);
-      const width = this.dispatchCounts
-        ? Math.min(groups, this.device.limits.maxComputeWorkgroupsPerDimension) : groups;
-      pass.dispatchWorkgroups(width, Math.ceil(groups / width)); pass.end();
+      pass.dispatchWorkgroups(Math.ceil(count / 64)); pass.end();
     }
     encoder.copyBufferToBuffer(this.fault, 0, this.readback, 0, 4);
   }
   async validate(): Promise<void> {
-    if (!this.encodedForValidation) throw new Error("CM12 generation transfer has no encoded publication receipt");
-    this.encodedForValidation = false;
     await this.readback.mapAsync(GPUMapMode.READ);
     try {
-      const fault = new Uint32Array(this.readback.getMappedRange())[0]!;
-      if (fault !== 0)
-        throw new Error(`CM12 generation transfer rejected invalid accepted fields (fault ${fault})`);
+      if (new Uint32Array(this.readback.getMappedRange())[0] !== 0)
+        throw new Error("CM12 generation transfer rejected invalid accepted fields");
     } finally { this.readback.unmap(); }
   }
   destroy(): void { for (const buffer of this.buffers) buffer.destroy(); }

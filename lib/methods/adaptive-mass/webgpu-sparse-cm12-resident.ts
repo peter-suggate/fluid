@@ -7,8 +7,6 @@ import { SPARSE_CM12_COMMON_HEIGHT_ENABLED, SPARSE_CM12_HEIGHT_ENTRY_POINTS, SPA
   SPARSE_CM12_HEIGHT_HEADER_FLOATS, SPARSE_CM12_HEIGHT_ITERATIONS } from
   "./sparse-cm12-height-reconstruction.wgsl";
 import { compileCM12CapturedGeometry, type CM12CapturedGeometryRecipe } from "./sparse-cm12-captured-geometry";
-import { SparseCM12TemplateArchetypes, type SparseCM12TemplateExpansion } from "./sparse-cm12-template-archetypes";
-import { expandSparseCM12TemplateArchetypesGPU } from "./sparse-cm12-template-expansion-gpu";
 import { createCM12ResourceRecorder, realizeCM12ResourceRecipe, type CM12ResourceRecipe } from "./sparse-cm12-resource-recipe";
 import { SparseCM12GenerationBudgetDeferred, SparseCM12GenerationStale } from "./sparse-cm12-generation-budget";
 import { SparseCM12GenerationPlanningGate } from "./sparse-cm12-generation-planning-gate";
@@ -1275,7 +1273,6 @@ interface PackedResidentTopologyTemplates {
   readonly initialGamma: Float32Array;
   /** Maximum rows in one [owner brick, accepted resolution] interval. */
   readonly maximumOwnedRowCount: number;
-  readonly gpuExpansion?: SparseCM12TemplateExpansion;
   /** Present only for a requested complete candidate generation. */
   readonly candidateCellWorklist?: Uint32Array;
   readonly candidateRowWorklist?: Uint32Array;
@@ -1631,11 +1628,10 @@ function packAcceptedTopologyTemplates(
   words[26] = candidateFaceRowOffset;
   for (const cell of cells) {
     const base = cellOffset + TEMPLATE_CELL_RECORD_WORDS * cell.id;
-    const center = cell.centerFine, width = cell.widthsFine;
-    setF32(words, base, center[0]); setF32(words, base + 1, center[1]);
-    setF32(words, base + 2, center[2]); setF32(words, base + 3, cell.volume);
-    setF32(words, base + 4, width[0]); setF32(words, base + 5, width[1]);
-    setF32(words, base + 6, width[2]);
+    setF32(words, base, cell.centerFine[0]); setF32(words, base + 1, cell.centerFine[1]);
+    setF32(words, base + 2, cell.centerFine[2]); setF32(words, base + 3, cell.volume);
+    setF32(words, base + 4, cell.widthsFine[0]); setF32(words, base + 5, cell.widthsFine[1]);
+    setF32(words, base + 6, cell.widthsFine[2]);
     words[base + 7] = packedTemplateCellMetadata(
       brickIndex.get(cell.brickKey)!, cell.brickResolution,
     );
@@ -1792,8 +1788,6 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
     budget: SparseCM12TopologyPreparationBudget;
   }>,
   mutableKeys?: ReadonlySet<number>,
-  useArchetypes = true,
-  report: (phase: string) => void = () => {},
 ): PackedResidentTopologyTemplates {
   const templateLevels = sparseCM12TemplateLevels(atlas.brickFineResolution);
   const mutableBrickKeys = new Set(atlas.bricks.filter((brick) => preparation
@@ -1860,9 +1854,8 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
   // one transient variant. Only cells/rows touching the mutable frontier are
   // copied into the persistent template library.
   const variantWorkspace = createSparseAtlasCompositeGridBuildWorkspace();
-  const archetypes = useArchetypes ? new SparseCM12TemplateArchetypes(atlas) : undefined;
-  const cells: SparseAtlasCompositeCell[] = archetypes?.cells ?? [];
-  const cellId = archetypes?.cellIds ?? new Map<number, number>();
+  const cells: SparseAtlasCompositeCell[] = [];
+  const cellId = new Map<number, number>();
   const cellRanges = new Uint32Array(atlas.bricks.length * templateLevels.length * 2);
   const brickIndex = new Map(atlas.bricks.map((brick, index) => [brick.key, index]));
   const compactBrickCellRange = (grid: SparseAtlasCompositeGrid,
@@ -1907,29 +1900,14 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
     cellRanges[range + 1] = accepted.count;
   }
 
-  let rows: SparseAtlasGradientRow[] = archetypes?.rows ?? [];
-  let rowRequirements: (readonly number[])[] = archetypes?.requirements ?? [];
+  let rows: SparseAtlasGradientRow[] = [];
+  let rowRequirements: (readonly number[])[] = [];
   const rowKeys = new Set<string>();
   const interiorRowKeys = new Set<number>();
   const appendRows = (grid: SparseAtlasCompositeGrid,
     accept: (row: SparseAtlasGradientRow) => boolean): void => {
-    const remap = (cell: number) => {
-      const sourceCell = grid.cells[cell];
-      if (!sourceCell) throw new Error(`Sparse CM12 template row references cell ${cell} outside ${grid.cells.length}`);
-      const id = cellId.get(templateCellKey(sourceCell.brickKey, sourceCell.brickResolution, sourceCell.localIndex));
-      if (id === undefined) throw new Error("Sparse CM12 template cell remap failed");
-      return id;
-    };
     for (const source of grid.gradientRows) {
       if (!accept(source)) continue;
-      if (archetypes) {
-        const before = rows.length;
-        const limit = preparation?.budget.maximumRows ?? Number.POSITIVE_INFINITY;
-        if (archetypes.appendRow(source, source.terms, limit, remap) && before >= limit) {
-          throw new SparseCM12TopologyPreparationCapacity("rows", before + 1, limit);
-        }
-        continue;
-      }
       const requirements = new Map<number, number>();
       const terms = source.terms.map((term) => {
         const sourceCell = grid.cells[term.cellId]!;
@@ -2050,28 +2028,16 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
   // Deduplication and resampling are finished. Release their large string
   // maps before row reordering and final packing peak together.
   rowKeys.clear(); interiorRowKeys.clear(); cellId.clear(); resampledBricks.clear();
-  if (archetypes) {
-    // Every retained value is now a relative archetype or numeric instance.
-    // The reference builder's bounded scratch must not overlap the packed
-    // certification shadow and the GPU placement recipe in host residency.
-    variantWorkspace.cells.length = 0; variantWorkspace.rows.length = 0;
-    variantWorkspace.cellPool.length = 0; variantWorkspace.rowPool.length = 0;
-    variantWorkspace.cellBaseByBrick.clear(); variantWorkspace.grid = undefined;
-  }
-  report("Order interned topology instances");
-  const ownership = archetypes ? archetypes.orderRows(atlas.bricks.length, templateLevels)
-    : sparseCM12ContiguousRowOwnership(atlas.bricks.length,
-      templateLevels, rows, rowRequirements, true);
-  rows = archetypes ? archetypes.rows : Array.from(ownership.rows);
-  rowRequirements = archetypes ? archetypes.requirements : Array.from(ownership.requirements);
-  report("Compile topology incidence and candidate faces");
+  const ownership = sparseCM12ContiguousRowOwnership(atlas.bricks.length,
+    templateLevels, rows, rowRequirements, true);
+  rows = Array.from(ownership.rows);
+  rowRequirements = Array.from(ownership.requirements);
 
   // Pack cell incidence as CSR directly, preserving the original row/term
   // order without millions of temporary JS objects in tall coarse worlds.
   const incidenceCounts = new Uint32Array(cells.length);
-  const pressureEdgeCounts = new Uint32Array(cells.length);
-  let termCount = archetypes?.incidenceCounts(incidenceCounts, pressureEdgeCounts) ?? 0;
-  if (!archetypes) for (const row of rows) for (const term of row.terms) {
+  let termCount = 0;
+  for (const row of rows) for (const term of row.terms) {
     incidenceCounts[term.cellId]++; termCount++;
   }
   const incidenceStarts = new Uint32Array(cells.length + 1);
@@ -2079,7 +2045,8 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
     incidenceStarts[cell + 1] = incidenceStarts[cell]! + incidenceCounts[cell]!;
   }
   const incidenceCount = termCount;
-  if (!archetypes) for (const row of rows) for (const own of row.terms) {
+  const pressureEdgeCounts = new Uint32Array(cells.length);
+  for (const row of rows) for (const own of row.terms) {
     pressureEdgeCounts[own.cellId] += row.terms.length - 1;
   }
   const pressureEdgeOffsets = new Uint32Array(cells.length + 1);
@@ -2087,8 +2054,8 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
     pressureEdgeOffsets[cell + 1] = pressureEdgeOffsets[cell]! + pressureEdgeCounts[cell]!;
   }
   const pressureEdgeCount = pressureEdgeOffsets[cells.length]!;
-  const structure = archetypes ? { candidateFaces: archetypes.candidateFaces(templateLevels) }
-    : sparseCM12AdaptiveStructureCatalog(atlas, templateLevels, cells, rows, rowRequirements, brickIndex);
+  const structure = sparseCM12AdaptiveStructureCatalog(
+    atlas, templateLevels, cells, rows, rowRequirements, brickIndex);
   const candidateFaces = structure.candidateFaces;
   let at = TEMPLATE_HEADER_WORDS;
   const cellOffset = at; at += TEMPLATE_CELL_RECORD_WORDS * cells.length;
@@ -2098,8 +2065,8 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
   const incidenceRecordOffset = at; at += 2 * incidenceCount;
   const cellRangeOffset = at; at += cellRanges.length;
   const rowRequirementOffset = at;
-  const rowRequirementOffsets = Uint32Array.from({ length: rows.length }, (_, row) => {
-    const result = at; at += 1 + (archetypes?.requirementCount(row) ?? rowRequirements[row]!.length); return result;
+  const rowRequirementOffsets = rowRequirements.map((requirements) => {
+    const result = at; at += 1 + requirements.length; return result;
   });
   const rowOwnerRangeOffset = at; at += ownership.offsets.length;
   const candidateFaceConfigurationOffset = at; at += candidateFaces.configurations.length;
@@ -2112,7 +2079,6 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
       preparation.budget.maximumBytes);
   }
   const words = new Uint32Array(at);
-  report("Build typed topology certification shadow");
   words.set([TEMPLATE_MAGIC, 1, cells.length, rows.length, termCount, incidenceCount,
     cellOffset, rowOffset, termOffset, incidenceOffset, incidenceRecordOffset,
     cellRangeOffset, rowRequirementOffset, atlas.bricks.length], 0);
@@ -2123,20 +2089,18 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
   words[24] = candidateFaceConfigurationOffset;
   words[25] = candidateFacePatchOffset;
   words[26] = candidateFaceRowOffset;
-  if (archetypes) archetypes.writeNativeShadow(words, rowRequirementOffsets);
-  if (!archetypes) for (const cell of cells) {
+  for (const cell of cells) {
     const base = cellOffset + TEMPLATE_CELL_RECORD_WORDS * cell.id;
-    const center = cell.centerFine, width = cell.widthsFine;
-    setF32(words, base, center[0]); setF32(words, base + 1, center[1]);
-    setF32(words, base + 2, center[2]); setF32(words, base + 3, cell.volume);
-    setF32(words, base + 4, width[0]); setF32(words, base + 5, width[1]);
-    setF32(words, base + 6, width[2]);
+    setF32(words, base, cell.centerFine[0]); setF32(words, base + 1, cell.centerFine[1]);
+    setF32(words, base + 2, cell.centerFine[2]); setF32(words, base + 3, cell.volume);
+    setF32(words, base + 4, cell.widthsFine[0]); setF32(words, base + 5, cell.widthsFine[1]);
+    setF32(words, base + 6, cell.widthsFine[2]);
     words[base + 7] = packedTemplateCellMetadata(
       brickIndex.get(cell.brickKey)!, cell.brickResolution,
     );
   }
   let nextTerm = 0;
-  if (!archetypes) for (const row of rows) {
+  for (const row of rows) {
     words[templateRowWord(rowOffset, rows.length, 0, row.id)]
       = packedTemplateRowTerms(nextTerm, row.terms.length);
     words[templateRowWord(rowOffset, rows.length, 1, row.id)]
@@ -2156,15 +2120,13 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
   words.set(incidenceStarts, incidenceOffset);
   const incidenceCursor = incidenceStarts.slice(0, cells.length);
   let incidenceTerm = 0;
-  if (archetypes) archetypes.writeIncidenceShadow(words, incidenceRecordOffset, incidenceCursor);
-  if (!archetypes) for (const row of rows) for (const term of row.terms) {
+  for (const row of rows) for (const term of row.terms) {
     const at = incidenceRecordOffset + 2 * incidenceCursor[term.cellId]++;
     words[at] = row.id; words[at + 1] = incidenceTerm++;
   }
   words.set(cellRanges, cellRangeOffset);
   let requirementAt = rowRequirementOffset;
-  if (archetypes) archetypes.writeRequirementsShadow(words, rowRequirementOffset);
-  if (!archetypes) for (const requirements of rowRequirements) {
+  for (const requirements of rowRequirements) {
     words[requirementAt++] = requirements.length;
     words.set(requirements, requirementAt); requirementAt += requirements.length;
   }
@@ -2181,8 +2143,7 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
   words.set(candidateFaces.rows, candidateFaceRowOffset);
   words.set(pressureEdgeOffsets, pressureEdgeOffset);
   const pressureEdgeCursor = pressureEdgeOffsets.slice(0, cells.length);
-  if (archetypes) archetypes.writePressureEdgesShadow(words, pressureEdgeRecordOffset, pressureEdgeCursor);
-  if (!archetypes) for (const row of rows) for (const own of row.terms) for (const other of row.terms) {
+  for (const row of rows) for (const own of row.terms) for (const other of row.terms) {
     if (other.cellId === own.cellId) continue;
     const edge = pressureEdgeCursor[own.cellId]++;
     const record = pressureEdgeRecordOffset + 3 * edge;
@@ -2203,12 +2164,10 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
     rowRequirements[row.id]!.every((requirement) =>
       (requirement & TEMPLATE_CELL_RESOLUTION_MASK)
         === selected[requirement >>> TEMPLATE_CELL_RESOLUTION_BITS]) ? [row.id] : [])) : undefined;
-  report("Pack native topology GPU placement recipe");
   return { words, cellCount: cells.length, rowCount: rows.length,
     initialCellWorklist, initialRowWorklist, candidateCellWorklist, candidateRowWorklist,
-    initialDensity: archetypes?.initialScalars(0) ?? Float32Array.from(cells, (cell) => cell.density),
-    initialGamma: archetypes?.initialScalars(1) ?? Float32Array.from(cells, (cell) => cell.gamma),
-    ...(archetypes ? { gpuExpansion: archetypes.expansion(rowRequirementOffsets) } : {}),
+    initialDensity: Float32Array.from(cells, (cell) => cell.density),
+    initialGamma: Float32Array.from(cells, (cell) => cell.gamma),
     maximumOwnedRowCount: ownership.maximumOwnedRowCount };
 }
 
@@ -2216,19 +2175,11 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
 export function packSparseCM12ResidentTopologyTemplatesForQA(
   atlas: SparseAdaptiveMassAtlas,
   acceptedGrid: SparseAtlasCompositeGrid,
-  mutableKeys?: ReadonlySet<number>,
 ): Readonly<{ words: Uint32Array; cellCount: number; rowCount: number }> {
-  const packed = packResidentTopologyTemplates(atlas, acceptedGrid, undefined, mutableKeys, false);
+  const packed = packResidentTopologyTemplates(atlas, acceptedGrid);
   return Object.freeze({ words: packed.words,
     cellCount: packed.cellCount, rowCount: packed.rowCount });
 }
-
-/** Word-exact QA seam for the compact production archetype compiler. */
-export function packSparseCM12ResidentTopologyArchetypesForQA(
-  atlas: SparseAdaptiveMassAtlas, acceptedGrid: SparseAtlasCompositeGrid,
-  mutableKeys?: ReadonlySet<number>,
-  report?: (phase: string) => void,
-) { return packResidentTopologyTemplates(atlas, acceptedGrid, undefined, mutableKeys, true, report); }
 
 /** CPU-only QA seam for the accepted-only production template branch. */
 export function packSparseCM12AcceptedTopologyTemplatesForQA(
@@ -4250,7 +4201,7 @@ export class WebGPUSparseCM12Resident {
       ? "Build four-rung and 2:1 seam topology templates"
       : "Pack accepted topology templates");
     const templates = hostTemplateVariants
-      ? packResidentTopologyTemplates(atlas, grid, undefined, mutableBrickKeys, true, report)
+      ? packResidentTopologyTemplates(atlas, grid, undefined, mutableBrickKeys)
       : packAcceptedTopologyTemplates(atlas, grid);
     const dynamicCellsPerPage = atlas.brickFineResolution ** 3;
     const dynamicRowsPerPage = 3 * (atlas.brickFineResolution + 1)
@@ -5061,18 +5012,8 @@ export class WebGPUSparseCM12Resident {
       size: Math.max(4, 4 * topologyArenaWords),
       usage: storage | (topologyEffectsAuthorityLayout ? GPUBufferUsage.INDIRECT : 0),
     });
-    if (templates.gpuExpansion) {
-      const nativeBegin = templates.words[6]!, nativeEnd = templates.words[9]!;
-      device.queue.writeBuffer(topologyArena, 0, templates.words.buffer as ArrayBuffer,
-        templates.words.byteOffset, 4 * nativeBegin);
-      device.queue.writeBuffer(topologyArena, 4 * nativeEnd, templates.words.buffer as ArrayBuffer,
-        templates.words.byteOffset + 4 * nativeEnd, physicalTemplateBytes - 4 * nativeEnd);
-      report("Expand interned native topology on GPU");
-      await expandSparseCM12TemplateArchetypesGPU(device, topologyArena, templates.words, templates.gpuExpansion);
-    } else {
-      device.queue.writeBuffer(topologyArena, 0, templates.words.buffer as ArrayBuffer,
-        templates.words.byteOffset, physicalTemplateBytes);
-    }
+    device.queue.writeBuffer(topologyArena, 0, templates.words.buffer as ArrayBuffer,
+      templates.words.byteOffset, physicalTemplateBytes);
     device.queue.writeBuffer(topologyArena, 4 * immutableHostIncidenceBaseWords,
       immutableHostIncidenceWords.buffer as ArrayBuffer,
       immutableHostIncidenceWords.byteOffset, immutableHostIncidenceWords.byteLength);

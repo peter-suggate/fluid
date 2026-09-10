@@ -4,9 +4,9 @@ import { cloneScene, defaultScene } from "../lib/core/model";
 import { createCoarseFirstPoolImpactHalfScene, createCoarseFirstPoolImpactQuarterScene } from "../lib/core/scenes";
 import { sceneCellSizes_m, sceneLatticeDimensions } from "../lib/core/scene-lattice-dimensions";
 import {
-  assertRetainedSceneIsotropicLattice, bindRetainedSceneSupportLattice, compileRetainedSceneDensity, compileRetainedSceneFineMeans, evaluateRetainedSceneDensity,
+  assertRetainedSceneIsotropicLattice, compileRetainedSceneDensity, compileRetainedSceneFineMeans, evaluateRetainedSceneDensity,
   evaluateRetainedScenePhi, integrateRetainedSceneDensity, integrateRetainedSceneVertical,
-  packRetainedSceneDensity, retainedSceneDensity, retainedSceneSupportBox, type RetainedSceneDensity, type RetainedScenePoint, type RetainedSceneFineMeansReceipt,
+  packRetainedSceneDensity, retainedSceneDensity, type RetainedSceneDensity, type RetainedScenePoint, type RetainedSceneFineMeansReceipt,
 } from "../lib/methods/adaptive-mass/sparse-cm12-retained-scene-density";
 
 const close = (actual: number, expected: number, tolerance = 1e-12) => assert.ok(Math.abs(actual - expected) <= tolerance,
@@ -61,45 +61,6 @@ test("production admission rejects rounded and minimum-eight anisotropic scene l
     assert.throws(() => assertRetainedSceneIsotropicLattice(f, sceneLatticeDimensions(scene),
       Math.min(...sceneCellSizes_m(scene))), /isotropic realized lattice/);
   }
-});
-
-test("a clipped 13 by 10 by 9 full domain has exactly 1170 complete physical cell integrals", () => {
-  const scene = cloneScene(defaultScene);
-  scene.container = { ...scene.container, width_m: .65, height_m: .5, depth_m: .45, fillFraction: 1 };
-  scene.voxelDomain.finestCellSize_m = .05;
-  scene.fluid.initialCondition = "dam-break";
-  scene.fluid.initialDamBreakDimensions_m = { x: .65, y: .5, z: .45 };
-  const authored = compileRetainedSceneDensity(scene); assert.ok(authored);
-  const dimensions = sceneLatticeDimensions(scene), h = Math.min(...sceneCellSizes_m(scene));
-  const bound = bindRetainedSceneSupportLattice(authored, dimensions, h);
-  assert.deepEqual(bound.primitives, authored.primitives, "domain admission never rounds density or reauthors liquid primitives");
-  assert.deepEqual(bound.domain, authored.domain, "authored wall attachment remains unchanged");
-  const means = compileRetainedSceneFineMeans(bound, dimensions, h);
-  assert.ok(means.every(mean => mean === 1));
-  assert.equal(means.reduce((sum, mean) => sum + mean, 0), 1170);
-  const support = retainedSceneSupportBox(bound), receipt = integrateRetainedSceneDensity(bound, support);
-  assert.equal(receipt.mean, 1);
-  assert.deepEqual(support.upper, support.lower.map((lo, axis) => lo + dimensions[axis] * Math.fround(h)));
-  const packed = packRetainedSceneDensity(bound);
-  assert.deepEqual([packed[7], packed[11], packed[15]], dimensions);
-  assert.equal(evaluateRetainedSceneDensity(bound, [support.upper[0] + .001, .25, 0]), 0);
-  assert.equal(bindRetainedSceneSupportLattice(bound, dimensions, h), bound);
-});
-
-test("support-lattice admission preserves sphere and interior-box coefficients and density values", () => {
-  const authored = retainedSceneDensity({ generation: 4, transitionWidth: .05,
-    domain: { lower: [-.325, 0, -.225], upper: [.325, .5, .225] },
-    primitives: [{ kind: "ellipsoid", center: [0, .3, 0], radii: [.1, .1, .1] },
-      { kind: "box", lower: [-.15, .05, -.15], upper: [.15, .125, .15] }] });
-  const bound = bindRetainedSceneSupportLattice(authored, [13, 10, 9], .05);
-  assert.deepEqual(packRetainedSceneDensity(bound).slice(16), packRetainedSceneDensity(authored).slice(16));
-  for (let i = 0; i < 101; i++) {
-    const point: RetainedScenePoint = [.2 * Math.sin(i), .25 + .2 * Math.cos(i), .15 * Math.sin(2 * i)];
-    assert.equal(evaluateRetainedSceneDensity(bound, point), evaluateRetainedSceneDensity(authored, point));
-  }
-  const box = { lower: [-.15, .2, -.15], upper: [.15, .45, .15] } as const;
-  assert.equal(integrateRetainedSceneDensity(bound, box).amount, integrateRetainedSceneDensity(authored, box).amount);
-  assert.throws(() => bindRetainedSceneSupportLattice(bound, [26, 20, 18], .025), /support lattice cannot change/);
 });
 
 test("packing matches the production float-arena ABI exactly", () => {
