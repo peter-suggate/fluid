@@ -4612,6 +4612,23 @@ fn sampleSharpeningDensity(position:vec3f)->f32{
   return result/max(visible,1e-9);
 }
 
+// The accepted TEI leaf already certifies contiguous regular cell storage.
+// Interior neighbours are offsets in that storage, just as in the implicit
+// pressure operator. Clipped cells and leaf boundaries use the incidence path.
+fn sharpeningInteriorStrides(cell:u32)->vec4u{
+  let brick=cellBrick(cell);
+  if(!brickHasUnclippedWorldGeometry(brick)){return vec4u(INVALID);}
+  let leaf=cm12TeiLoadLeaf(acceptedTopologySlot(),brick);
+  if((leaf.flags&0x80000000u)==0u||leaf.scale==0u
+    ||any(leaf.valid<vec3u(3u))||cell<leaf.first
+    ||cell-leaf.first>=leaf.count){return vec4u(INVALID);}
+  let index=cell-leaf.first;let plane=leaf.valid.x*leaf.valid.y;
+  let local=vec3u(index%leaf.valid.x,(index/leaf.valid.x)%leaf.valid.y,index/plane);
+  if(any(local==vec3u(0u))||any(local+vec3u(1u)>=leaf.valid)){
+    return vec4u(INVALID);}
+  return vec4u(1u,leaf.valid.x,plane,leaf.scale);
+}
+
 fn sampleSharpeningField(position:vec3f,density:f32)->vec4f{
   // A cell centre is a knot of the piecewise-trilinear interpolant. Its
   // analytic derivative has two one-sided values; floor() chose the positive
@@ -4636,6 +4653,27 @@ fn sampleSharpeningField(position:vec3f,density:f32)->vec4f{
       *inverseDistance);
 }
 
+// At the six half-cell offsets of a regular interior centre, only the
+// source and its normal neighbour have nonzero density weights. Reuse the
+// accepted leaf's cell strides; seam/clipped sources keep the general basis.
+fn initialSharpeningField(source:u32,density:f32)->vec4f{
+  let interior=sharpeningInteriorStrides(source);
+  if(interior.x==INVALID){return sampleSharpeningField(cellCenter(source),density);}
+  let inverseDistance=0.5/(0.5*f32(interior.w));var gradient=vec3f(0.0);
+  for(var axis=0u;axis<3u;axis+=1u){
+    let beforeCell=source-interior[axis];let afterCell=source+interior[axis];
+    var before=density;var after=density;
+    if(cellTransportActive(beforeCell)){
+      before=0.5*conditionedDensity(beforeCell)+0.5*density;
+    }
+    if(cellTransportActive(afterCell)){
+      after=0.5*density+0.5*conditionedDensity(afterCell);
+    }
+    gradient[axis]=(after-before)*inverseDistance;
+  }
+  return vec4f(density,gradient);
+}
+
 // CM12 Algorithm 2's TraceAlongField in composite-grid coordinates. As in the
 // Uniform reference, half-cell forward-Euler substeps follow the frozen density
 // gradient until rho=.5 or the configured paper-range D bound is reached. An invalid
@@ -4656,7 +4694,9 @@ fn traceSharpeningMass(source:u32)->vec3f{
     var density=conditionedDensity(source);
     if(step>0u){density=sampleSharpeningDensity(position);}
     if(density>=CM12_LIQUID_ISOVALUE){break;}
-    let field=sampleSharpeningField(position,density);
+    var field:vec4f;
+    if(step==0u){field=initialSharpeningField(source,density);}
+    else{field=sampleSharpeningField(position,density);}
     let owner=${implicitSharpeningOwnerArithmeticForQA
       ? "cm12ImplicitAuthoredOwnerAtFine(vec3i(floor(position)))"
       : "cm12TeiOwnerAtFine(vec3i(floor(position))).cell"};
