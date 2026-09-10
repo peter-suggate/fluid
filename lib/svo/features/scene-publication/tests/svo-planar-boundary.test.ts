@@ -177,7 +177,7 @@ test("transparent symmetric-expansion tank shell is physical-only, never opaque 
     "the opaque renderer cannot publish a second floor below the glass");
 });
 
-test("explicit legacy glass keeps its dielectric shell in the voxel residual", () => {
+test("explicit legacy glass is disabled and uses the physical-only shell", () => {
   const scene = getScenePreset("sparse-cm12-symmetric-expansion").create();
   scene.container.vessel = "glass";
   const world = createSolidWorld(scene.solidVoxels);
@@ -185,10 +185,10 @@ test("explicit legacy glass keeps its dielectric shell in the voxel residual", (
   const residual = svoPlanarResidualSolidWorld(world, catalog);
 
   assert.equal(catalog.sources.length, 0,
-    "container glass must never be promoted into the opaque planar catalogue");
-  assert.equal(catalog.residualExcludedPatchIndices.size, 0);
-  assert.equal(sampleSolidWorld(residual, [8, -1, 8]).materialId, 1,
-    "the explicit glass option retains the thin-dielectric voxel shell");
+    "canonical tank walls must never be promoted into the opaque planar catalogue");
+  assert.deepEqual([...catalog.residualExcludedPatchIndices], [0, 1, 2, 3, 4, 5]);
+  assert.equal(sampleSolidWorld(residual, [8, -1, 8]).materialId, 0,
+    "the disabled glass option does not retain a dielectric voxel shell");
 });
 
 test("a cut tank face stays voxel-owned instead of receiving a false outline owner", () => {
@@ -241,7 +241,9 @@ test("planar classification follows render ownership while retaining visible and
   assert.deepEqual(classify(shell, "outline"), {
     kind: SPARSE_BRICK_LEAF_TERMINAL.planarBoundary, index: 0,
   }, "physics-only shell cannot force visible floor traversal into voxels");
-  assert.equal(classify(shell, "glass").kind, SPARSE_BRICK_LEAF_TERMINAL.voxels);
+  assert.deepEqual(classify(shell, "glass"), {
+    kind: SPARSE_BRICK_LEAF_TERMINAL.planarBoundary, index: 0,
+  }, "disabled glass follows the cheap physical-only presentation path");
   assert.equal(classify([...shell, {
     operation: "clear", minimum: [7, -1, 7], maximumExclusive: [8, 0, 8],
   }], "outline").kind, SPARSE_BRICK_LEAF_TERMINAL.voxels,

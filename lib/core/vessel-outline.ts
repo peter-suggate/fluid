@@ -11,10 +11,15 @@ import type { DecorationGeometry } from "./webgpu-decoration-overlay";
 
 export type VesselPresentation = "outline" | "glass" | "none";
 
-/** Missing is the cheap product default; garden terrain never gains a tank. */
+/**
+ * Tank glass is disabled: it shades every canonical wall as a dielectric and
+ * adds substantial full-frame SVO work. Preserve the document value for
+ * compatibility, but present explicit glass requests with the cheap outline.
+ */
 export function sceneVesselPresentation(scene: SceneDescription): VesselPresentation {
-  return scene.environment === "garden" ? "none"
-    : scene.container.vessel ?? "outline";
+  if (scene.environment === "garden") return "none";
+  const requested = scene.container.vessel ?? "outline";
+  return requested === "glass" ? "outline" : requested;
 }
 
 export interface VesselOutlineGeometry {

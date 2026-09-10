@@ -238,16 +238,15 @@ export function buildSvoSolidWorldPlanarBoundaryCatalog(
     && !scene.solidVoxels.some(({ operation }) => operation === "clear"))
     ? canonicalTankShellSources
     : uncutCanonicalTankShellSources;
-  // Explicit glass keeps the historical voxel/dielectric presentation. The
-  // default outline and hidden modes have no filled wall surface, so their
-  // canonical shell is removed from the opaque/voxel render residual entirely.
-  const residualExcludedPatchIndices = new Set<number>(
-    (scene.container.vessel ?? "outline") === "glass" ? [] : canonicalTankShell,
-  );
+  // Tank glass is disabled. Keep the canonical shell as physical SolidWorld
+  // authority, but remove every unedited wall from the render residual. The
+  // vessel outline supplies the cheap visual cue, including for documents that
+  // still request the legacy glass mode.
+  const residualExcludedPatchIndices = new Set<number>(canonicalTankShell);
   patches.forEach((voxelPatch, patchIndex) => {
     // The canonical vessel shell is physical SolidWorld authority for the
-    // solver. Glass retains the dielectric voxel surface; outline/hidden omit
-    // it from the ray field. None of those modes may also promote it to an
+    // solver. Presentation omits it from the ray field, and edited shell pieces
+    // remain visible as ordinary voxel geometry. Neither case may promote it to an
     // opaque embedded-plane hit, which caused the black tank floor.
     if (canonicalTankShellSources.has(patchIndex)) return;
     const patch = planarBoundaryForSolidWorldVoxelPatch(scene, voxelPatch);

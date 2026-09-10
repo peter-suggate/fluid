@@ -55,15 +55,20 @@ test("an edited shell face is not falsely represented by the volume wireframe", 
   assert.equal(outline.geometry.segmentCount, 52);
 });
 
-test("glass and hidden vessel modes publish no outline geometry", () => {
-  for (const vessel of ["glass", "none"] as const) {
-    const scene = cloneScene(defaultScene);
-    scene.environment = "stage";
-    scene.container.vessel = vessel;
-    assert.equal(sceneVesselPresentation(scene), vessel);
-    assert.equal(buildVesselOutlineGeometry(scene), undefined);
-    assert.deepEqual(validateScene(scene), []);
-  }
+test("legacy glass requests use the cheap outline while hidden vessels stay hidden", () => {
+  const glass = cloneScene(defaultScene);
+  glass.environment = "stage";
+  glass.container.vessel = "glass";
+  assert.equal(sceneVesselPresentation(glass), "outline");
+  assert.ok(buildVesselOutlineGeometry(glass));
+  assert.deepEqual(validateScene(glass), []);
+
+  const hidden = cloneScene(defaultScene);
+  hidden.environment = "stage";
+  hidden.container.vessel = "none";
+  assert.equal(sceneVesselPresentation(hidden), "none");
+  assert.equal(buildVesselOutlineGeometry(hidden), undefined);
+  assert.deepEqual(validateScene(hidden), []);
 });
 
 test("spherical outline is three staircase sections of the canonical voxel cavity", () => {
