@@ -1,4 +1,4 @@
-import { svoDualMarchingCubesFitWGSL } from "../svo/features/meshing/dual-marching-cubes";
+import { svoDualMarchingCubesCachedFitWGSL } from "../svo/features/meshing/dual-marching-cubes";
 import { svoDualContouringFitWGSL } from "../svo/features/meshing/dual-contouring";
 import { svoRenderTerrainSamplingWGSL } from "../svo/features/construction/svo-render-terrain-sampling";
 import { svoCellContourFitWGSL } from "../svo/features/construction/svo-cell-contour-fit";
@@ -2044,6 +2044,14 @@ fn primitiveDistance(primitive: ScenePrimitive, world: vec3f) -> f32 {
  * \`sparseScenePrimitiveFeatureRadius\`.
  */
 ${dual ? `
+${dualMarchingCubes ? `// Candidate indices are immutable for this dispatch. Avoid an atomic arena
+// read at every field/gradient evaluation in a workgroup's shared sample grid.
+var<workgroup> dmcCandidateIndices:array<u32,64>;
+var<private> dmcCandidatesCached:bool;
+fn dmcCandidateIndex(dirty:u32,i:u32)->u32{
+  if(dmcCandidatesCached){return dmcCandidateIndices[i];}
+  return atomicLoad(&maintenance[candidateOffset()+dirty*candidatesPerBrick()+i]);
+}` : ""}
 fn dcField(world:vec3f,dirty:u32,count:u32)->f32{
   var value=1e20;
   ${renderTerrainLayout ? `let origin=vec2f(rtFloat(RT_BASE),rtFloat(RT_BASE+1u));let pitch=vec2f(rtFloat(RT_BASE+2u),rtFloat(RT_BASE+3u));
@@ -2058,10 +2066,10 @@ fn dcField(world:vec3f,dirty:u32,count:u32)->f32{
     let d=boxDistance(world-.5*(lo+hi),.5*(hi-lo));
     if(atomicLoad(&maintenance[at+3u])==0u){value=max(value,-d);}else{value=min(value,d);}
   }` : solidWorldLayout ? `let solid=sampleSolidWorld(world,params.cell.xyz);if(solid.fraction>0.){value=-max(abs(solid.distance),1e-6);}` : ""}
-  for(var i=0u;i<count;i+=1u){let p=primitives[atomicLoad(&maintenance[candidateOffset()+dirty*candidatesPerBrick()+i])];value=min(value,primitiveDistance(p,world));}
+  for(var i=0u;i<count;i+=1u){let p=primitives[${dualMarchingCubes ? "dmcCandidateIndex(dirty,i)" : "atomicLoad(&maintenance[candidateOffset()+dirty*candidatesPerBrick()+i])"}];value=min(value,primitiveDistance(p,world));}
   return value;
 }
-${dualMarchingCubes ? svoDualMarchingCubesFitWGSL : svoDualContouringFitWGSL}
+${dualMarchingCubes ? svoDualMarchingCubesCachedFitWGSL : svoDualContouringFitWGSL}
 ` : ""}
 fn primitiveFeatureRadius(primitive: ScenePrimitive) -> f32 {
   if (scenePrimitiveType(primitive) == ${SPARSE_SCENE_PRIMITIVE_TYPES.cup}u) { return primitive.extentIdentity.z; }
@@ -2253,7 +2261,7 @@ fn prepareMaintenanceDispatch(){
     writeDispatch(stateOffset()+${SPARSE_SCENE_MAINTENANCE_STATE_WORDS.binDispatch}u,chunk*primitiveCount(),256u);
   }
   let brickSize=controlLoad(11u);
-  writeDispatch(stateOffset()+${SPARSE_SCENE_MAINTENANCE_STATE_WORDS.rebuildDispatch}u,chunk*brickSize*brickSize*brickSize,256u);
+  writeDispatch(stateOffset()+${SPARSE_SCENE_MAINTENANCE_STATE_WORDS.rebuildDispatch}u,chunk*brickSize*brickSize*brickSize,${dual && dualMarchingCubes ? 64 : 256}u);
   writeDispatch(stateOffset()+${SPARSE_SCENE_MAINTENANCE_STATE_WORDS.finalizeDispatch}u,chunk,64u);
   // One workgroup a dirty brick: the banded encoder's reductions are whole-leaf,
   // so a leaf cannot be split across workgroups.
@@ -2353,18 +2361,22 @@ fn binDirtyBrickCandidatesIndexed(
   }
 }
 
-@compute @workgroup_size(256)
+@compute @workgroup_size(${dual && dualMarchingCubes ? 64 : 256})
 fn rebuildDirtyBrickPayload(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
-  let index=linearIndex256(gid,groups);
+  let index=${dual && dualMarchingCubes ? "gid.x+gid.y*groups.x*64u+gid.z*groups.x*groups.y*64u" : "linearIndex256(gid,groups)"};
   let brickSize = controlLoad(11u);
   let voxelsPerBrick = brickSize * brickSize * brickSize;
   let chunkSlot=index/voxelsPerBrick;
   let dirtyIndex=chunkBegin()+chunkSlot;
-  if(dirtyIndex>=chunkEnd()){return;}
-  let localIndex=index-chunkSlot*voxelsPerBrick;
+  ${dual && dualMarchingCubes ? "let fitActive=dirtyIndex<chunkEnd();" : "if(dirtyIndex>=chunkEnd()){return;}"}
+  var localIndex=index-chunkSlot*voxelsPerBrick;
   let record=dirtyBrickOffset()+dirtyIndex*4u;
   let leafIndex=atomicLoad(&maintenance[record]);
-  let local = vec3u(localIndex % brickSize, (localIndex / brickSize) % brickSize, localIndex / (brickSize * brickSize));
+  var local = vec3u(localIndex % brickSize, (localIndex / brickSize) % brickSize, localIndex / (brickSize * brickSize));
+  ${dual && dualMarchingCubes ? `let tiled=brickSize>=4u&&(brickSize%4u)==0u;let tiles=max(brickSize/4u,1u);let tile=localIndex/64u;
+  let tileBase=vec3u(tile%tiles,(tile/tiles)%tiles,tile/(tiles*tiles))*4u;
+  let lane=index%64u;
+  if(tiled){local=tileBase+vec3u(lane%4u,(lane/4u)%4u,lane/16u);localIndex=local.x+brickSize*local.y+brickSize*brickSize*local.z;}` : ""}
   let leafBase = controlLoad(16u) + leafIndex * 4u;
   let nodeIndex = topologyLoad(leafBase);
   let voxelOffset = topologyLoad(leafBase + 1u);
@@ -2381,6 +2393,13 @@ fn rebuildDirtyBrickPayload(@builtin(global_invocation_id) gid:vec3u,@builtin(nu
   // derived builder differentiates it for radiance normals, while coverage may
   // read a nearer sample elsewhere in the cell.
   let cellExtent = params.cell.xyz * f32(scale);
+  ${dual && dualMarchingCubes ? `let fitCandidateCount=min(atomicLoad(&maintenance[record+1u]),candidatesPerBrick());
+  dmcCandidatesCached=fitActive&&tiled&&fitCandidateCount<=64u;
+  if(dmcCandidatesCached&&lane<fitCandidateCount){dmcCandidateIndices[lane]=atomicLoad(&maintenance[candidateOffset()+dirtyIndex*candidatesPerBrick()+lane]);}
+  workgroupBarrier();
+  let tileWorld=params.worldOrigin.xyz+vec3f((brick*brickSize+tileBase)*scale)*params.cell.xyz;
+  dmcCacheSamples(tileWorld,cellExtent,dirtyIndex,fitCandidateCount,lane,fitActive&&tiled);
+  if(!fitActive){return;}` : ""}
   let cellRadius = 0.5 * length(cellExtent);
   var bestDistance = 1e20;
   var bestCoverage = 1e20;

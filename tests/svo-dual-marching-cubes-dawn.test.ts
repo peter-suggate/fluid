@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { createDawnRenderDevice } from "../tools/svo-dry-frame-harness";
-import { svoDualMarchingCubesFitWGSL } from "../lib/svo/features/meshing/dual-marching-cubes";
+import { svoDualMarchingCubesCachedFitWGSL } from "../lib/svo/features/meshing/dual-marching-cubes";
 import { svoDualMarchingCubesMeshWGSL } from "../lib/svo/features/meshing/dual-marching-cubes-mesh";
 import { svoDualContouringMeshWGSL } from "../lib/svo/features/meshing/dual-contouring-mesh";
 import { sparseSceneProxyVoxelizationShaderFor } from "../lib/core/webgpu-sparse-scene-proxies";
@@ -46,9 +46,13 @@ import { sparseSceneProxyVoxelizationShaderFor } from "../lib/core/webgpu-sparse
    q=vec3f(.8660254*q.x+.5*q.z,q.y,-.5*q.x+.8660254*q.z);
    let d=abs(q)-vec3f(3.3,2.7,3.1);return length(max(d,vec3f(0)))+min(max(d.x,max(d.y,d.z)),0.);
   }
-  ${svoDualMarchingCubesFitWGSL}
+  ${svoDualMarchingCubesCachedFitWGSL}
   @compute @workgroup_size(64) fn fit(@builtin(global_invocation_id) id:vec3u){
-   let i=id.x;if(i>=4096u){return;}let base=vec3f(f32(i%16u),f32((i/16u)%16u),f32(i/256u));
+   let tile=id.x/64u;let lane=id.x%64u;
+   let tileBase=vec3u(tile%4u,(tile/4u)%4u,tile/16u)*4u;
+   let cell=tileBase+vec3u(lane%4u,(lane/4u)%4u,lane/16u);
+   let i=cell.x+16u*cell.y+256u*cell.z;let base=vec3f(cell);
+   dmcCacheSamples(vec3f(tileBase),vec3f(1),0u,0u,lane,true);
    let fitted=dmcFit(base,vec3f(1),0u,0u);var p=base+fitted.point;var value=fitted.value;
    // Direct dual-grid checkerboard stresses shared-face ambiguity independently of fitting.
    if(shape.x==4.){p=base+vec3f(.5);value=1.;if(all(base>=vec3f(6))&&all(base<=vec3f(9))&&((u32(base.x+base.y+base.z)&1u)==0u)){value=-1.;}}

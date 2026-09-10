@@ -68,10 +68,60 @@ The frame harness accepts `FLUID_SVO_DRY_FRAME_MESHER=dual-marching-cubes` with 
 ## Costs and current limits
 
 - The attachment costs 16 bytes per allocated voxel, equal to Hermite DC's attachment, plus the emitted mesh. The attachment kind check is metadata, not another geometry allocation.
-- Function fitting samples every resident cell, and therefore costs more field evaluations away from the surface than DC's corner-sign early exit. Samples are not cached across neighbours yet. All fitting is construction/edit work, not warm-frame work.
+- Function fitting samples every resident cell, and therefore costs more field evaluations away from the surface than DC's corner-sign early exit. Neighbouring cells now share a workgroup sample lattice as described below. All fitting is construction/edit work, not warm-frame work.
 - Initial topology is uniform at the selected render resolution. No adaptive transitions, adaptive error refinement or manifold/multi-component fitting guarantee is supplied.
 - Shared-face consistency and the tested closed meshes do not prove that arbitrary fitted dual cells cannot fold or self-intersect. A cell containing multiple unresolved function features still needs refinement.
 - The garden capture still has visible artifacts around some intersections. Secondary shadow/GI visibility continues to use the existing voxel representation, which can disagree with the raster mesh. This variant is available for comparison rather than being a universal quality replacement.
+
+## Construction performance improvement
+
+DMC rebuilds now dispatch 64 lanes over a 4×4×4 cell tile. Each group computes
+the 9×9×9 half-cell lattice of field values and gradients once, in workgroup
+memory. This reduces the per-tile sample/gradient evaluations from 1,728 to
+729 (58% fewer). The fitted-point gradient still evaluates the original field.
+Groups also cache up to 64 immutable candidate indices to avoid repeated
+atomic arena reads. Larger candidate lists use the original read path.
+
+This needs 11,920 bytes of workgroup memory, within WebGPU's 16 KiB minimum,
+and adds no persistent GPU allocation or CPU construction pass. Bricks smaller
+than four cells use the uncached fitter. The dispatch mapping writes each
+result back to its original voxel address; inactive tail groups reach both
+barriers before exiting. The banded encoder retains its whole-brick dispatch.
+
+The original field, 27-point sampling stencil, gradients, QEF accumulation,
+constrained solver, snapping threshold and quantization are retained. When
+the zero-level fit is accepted, the unused general QEF solve is skipped.
+There is no corner-sign early exit, so thin features remain supported.
+
+On M1 Max/Metal, native `hero-garden-hose` construction measured **4.08 s before
+and 3.49 s after**, approximately **15% faster**. These are separate end-to-end
+smoke runs, including CPU publication and shader setup, not isolated GPU
+timings. The preceding shared-sample-only run measured 3.47 s; the candidate
+index cache did not show an additional measurable benefit in this scene.
+The final scene produced 523,838 triangles versus 523,804 before, with no
+overflow. Canonical shared sample coordinates can round differently from
+independently formed world coordinates on non-binary grids.
+
+`tools/benchmark-svo-dmc-fit.ts` compares the production cached fitter against
+the frozen pre-optimization shader using interleaved GPU timestamps. On its
+cheap analytic field, cache synchronization costs more than the saved work:
+2.16 ms versus 1.84 ms for 262,144 cells. This is therefore an improvement for
+the measured large procedural scene, not a universal speedup for cheap fields.
+Its exactly representable sample lattice produces identical fitted positions,
+values and signs across all 262,144 cells against the reference. The existing Dawn surface cases additionally
+check closed topology, winding, sharp edges and the sub-cell wall.
+
+```sh
+WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_WEBGPU_BACKEND=metal \
+node --import tsx tools/benchmark-svo-dmc-fit.ts
+```
+
+Captures, build receipts and the microbenchmark report are retained under
+`artifacts/svo-dmc-performance/`. Eleven focused tests pass; TypeScript
+checking still has unrelated repository errors, with none in the changed files.
+The post-optimization CM12 gate still fails symmetry, hydrostatic/adaptivity
+and min8 surface checks, then reaches performance/time-budget limits. Its full
+log is retained with the benchmark artifacts; no thresholds were changed.
 
 ## Seam visibility investigation
 
