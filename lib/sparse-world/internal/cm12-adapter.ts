@@ -163,7 +163,7 @@ export interface CM12SparseWorldRuntime {
   readTracers(): ReturnType<WebGPUSparseCM12Resident["readTracers"]>;
   armPressureJournal(armed: boolean): boolean;
   readPressureJournal(): ReturnType<WebGPUSparseCM12Resident["readPressureJournal"]>;
-  encodeInitialPresentation(encoder: GPUCommandEncoder, finestCellSize_m: number): void;
+  encodeInitialPresentation(encoder: GPUCommandEncoder, finestCellSize_m: number, columnHeightEnabled?: boolean): void;
   assertSimulationHealthy(): Promise<void>;
   captureSimulationFailure(encoder: GPUCommandEncoder): ReturnType<WebGPUSparseCM12Resident["captureSimulationFailure"]>;
   encodePressureIterationReceipt(
@@ -702,8 +702,9 @@ class AdoptedCM12SparseWorldRuntime implements CM12SparseWorldRuntime {
   readTracers() { return this.generationState.read((resident) => resident.readTracers()); }
   armPressureJournal(armed: boolean) { return this.resident.armPressureJournal(armed); }
   readPressureJournal() { return this.generationState.read((resident) => resident.readPressureJournal()); }
-  encodeInitialPresentation(encoder: GPUCommandEncoder, finestCellSize_m: number) {
-    this.resident.encodeInitialPresentation(encoder, finestCellSize_m);
+  encodeInitialPresentation(encoder: GPUCommandEncoder, finestCellSize_m: number,
+    columnHeightEnabled?: boolean) {
+    this.resident.encodeInitialPresentation(encoder, finestCellSize_m, columnHeightEnabled);
   }
   assertSimulationHealthy(): Promise<void> {
     return this.resident.assertSimulationHealthy();

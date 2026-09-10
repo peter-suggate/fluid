@@ -249,6 +249,7 @@ export interface SharpeningTrace extends SparseCM12CorrectionControls {
   readonly gammaDiffusionEnabled?: boolean;
   /** Defaults on; the mandatory final-scalar publication is independent. */
   readonly surfaceSharpeningEnabled?: boolean;
+  readonly presentationColumnHeightEnabled?: boolean;
 }
 
 /** Shared CM12 Algorithm 2 return distance; longer traces remain an explicit setting. */
@@ -7336,7 +7337,9 @@ export class WebGPUSparseCM12Resident {
   }
 
   /** Publish generation zero without executing a physics step or mapping state. */
-  encodeInitialPresentation(encoder: GPUCommandEncoder, finestCellSize_m: number): void {
+  encodeInitialPresentation(encoder: GPUCommandEncoder, finestCellSize_m: number,
+    columnHeightEnabled = this.presentationColumnHeightEnabled): void {
+    this.presentationColumnHeightEnabled = columnHeightEnabled;
     this.assertLive();
     this.writeParameters(this.lastPacked!, 0.004, finestCellSize_m, 1, [0, 0, 0]);
     this.encodeFailureGate(encoder);
@@ -7631,6 +7634,7 @@ export class WebGPUSparseCM12Resident {
     }
   }
 
+  private presentationColumnHeightEnabled = false;
   private lastPacked?: PackedResidentTopology;
   private lastInflow?: SparseCM12InflowControl;
   /**
@@ -7746,6 +7750,9 @@ export class WebGPUSparseCM12Resident {
       f, u, surfaceProofWord, policy, finestCellSize_m, dt_s,
       this.brickFineResolution, this.coarseFirstPolicySignature,
     );
+    if (sharpening?.presentationColumnHeightEnabled !== undefined) {
+      this.presentationColumnHeightEnabled = sharpening.presentationColumnHeightEnabled;
+    }
     const corrections = normalizedCorrections(sharpening);
     f.set([
       corrections.massConservationEnabled ? corrections.massConservationStrength : 0,
@@ -7754,7 +7761,7 @@ export class WebGPUSparseCM12Resident {
       corrections.densityCapacityRepairEnabled ? corrections.densityCapacityRepairStrength : 0,
       corrections.volumeCorrectionEnabled ? corrections.volumeCorrectionStrength : 0,
       corrections.volumeCorrectionCap, 0,
-      0, 0, 0, 0,
+      this.presentationColumnHeightEnabled ? 0 : 1, 0, 0, 0,
     ], (SPARSE_CM12_FAILURE_PARAMETER_OFFSET - 48) / 4);
     this.device.queue.writeBuffer(this.parameters, 0, this.parameterWords, 0, SPARSE_CM12_FAILURE_PARAMETER_OFFSET);
   }
@@ -8412,7 +8419,7 @@ export class WebGPUSparseCM12Resident {
         encoder.copyBufferToBuffer(this.activity, 0, next.activity, 0, 4);
         if (this.tracerLattice.count) encoder.copyBufferToBuffer(this.state, 4 * this.layout.tracers,
           next.state, 4 * next.layout.tracers, 16 * this.tracerLattice.count);
-        next.encodeInitialPresentation(encoder, finestCellSize_m);
+        next.encodeInitialPresentation(encoder, finestCellSize_m, this.presentationColumnHeightEnabled);
         this.device.queue.submit([encoder.finish()]);
         await transfer.validate();
         await next.assertSimulationHealthy();

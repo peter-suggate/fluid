@@ -1349,7 +1349,7 @@ struct Params {
   coarseFirstHistory:vec4f, // search radius, surface proof epochs, reserved
   transportCorrections:vec4f, // conservation, gamma history, diffusion dose, sharpening tau
   recoveryCorrections:vec4f, // capacity dose, volume lambda multiplier, eta cap, reserved
-  correctionReserved:vec4f,
+  correctionReserved:vec4f, // x: disable column-height presentation
   failure:vec4u, // GPU-owned sticky stage halt
 }
 
@@ -2996,7 +2996,7 @@ fn preparePresentationColumnHeights(lane:u32,brick:u32,pageOrigin:vec3i,
 fn presentationHeightPolicyEnabled(brick:u32)->bool{
   // A validated monotone column retains subcell horizontal waterlines. The
   // same geometric receipt is used at reset and after an accepted advance.
-  return brick<p.dispatch.w&&p.injectionCenter.w<=0.5;
+  return p.correctionReserved.x<0.5&&brick<p.dispatch.w&&p.injectionCenter.w<=0.5;
 }
 
 fn presentationColumnHeight(localX:i32,localZ:i32,halo:bool)->f32{

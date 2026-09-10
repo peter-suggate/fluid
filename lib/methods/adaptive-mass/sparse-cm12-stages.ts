@@ -837,6 +837,12 @@ export const SPARSE_CM12_STAGES = Object.freeze({
   "presentation-publication": {
     label: "Presentation pages", band: "output", side: "left",
     controls: [{
+      kind: "param-choice", param: "presentationColumnHeight", label: "Column height",
+      options: [
+        { value: "on", label: "On", hint: "Use validated integrated column heights. Applies on the next simulation step." },
+        { value: "off", label: "Off", hint: "Contour density instead. Applies on the next simulation step without resetting." },
+      ],
+    }, {
       kind: "param-choice", param: "surfaceMeshRefinement", label: "Mesh refinement",
       options: [
         { value: "1", label: "×1", hint: "One target subdivision per accepted surface-cell edge." },

@@ -720,6 +720,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
           sparseWorldNumerics.current = {
             finestCellSize_m: cellSize_m,
             pressureScale: 1,
+            sharpening: { presentationColumnHeightEnabled: options.presentationColumnHeightEnabled },
             origin_m: fluidDomainPlan.origin_m,
           };
           sparseRuntime = await createCM12SparseWorld({
@@ -809,7 +810,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
             label: "Sparse CM12 initial GPU publication",
           });
           sparseRuntime!.runtime.encodeInitialPresentation(
-            encoder, finestCellSize(scene, atlas!));
+            encoder, finestCellSize(scene, atlas!), options.presentationColumnHeightEnabled);
           device.queue.submit([encoder.finish()]);
         },
       }, {
@@ -926,10 +927,13 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       : Number(values.surfaceMeshRefinement) === 4 ? 4 : 2,
       sharpeningStrength,
       gammaDiffusionEnabled, surfaceSharpeningEnabled,
+      presentationColumnHeightEnabled: values.presentationColumnHeight === "on",
       pressureIterations, pressureRelativeTolerance, activityPolicy };
     // Live liquid edits can arrive while paused, before advanceTo publishes
     // the next step configuration. New support must use the current controls.
-    this.sparseWorldNumerics.current = { ...this.sparseWorldNumerics.current, activityPolicy };
+    this.sparseWorldNumerics.current = { ...this.sparseWorldNumerics.current, activityPolicy,
+      sharpening: { ...this.sparseWorldNumerics.current.sharpening,
+        presentationColumnHeightEnabled: this.options.presentationColumnHeightEnabled } };
   }
 
   private resetPressureIterationFeedback(): void {

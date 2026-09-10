@@ -56,6 +56,8 @@ export interface AdaptiveMassSolverOptions extends SparseCM12CorrectionControls 
   readonly gammaDiffusionEnabled?: boolean;
   /** Whether Sec. 3.5's conservative surface-sharpening transform runs. */
   readonly surfaceSharpeningEnabled?: boolean;
+  /** Use validated column heights for presentation; defaults off. */
+  readonly presentationColumnHeightEnabled?: boolean;
   /** Maximum one-reduction sparse MGPCG iterations encoded for each pressure solve. */
   readonly pressureIterations?: number;
   /** Relative L2 residual that stops further PCG arithmetic; zero runs the full budget. */
@@ -76,6 +78,17 @@ const params: MethodParamSpec[] = [
   ...CORRECTION_PARAMS,
   ...ADAPTIVITY_PARAMS,
 
+  {
+    kind: "select",
+    key: "presentationColumnHeight",
+    label: "Column height",
+    default: "off",
+    tier: "coarse",
+    update: "runtime",
+    options: [{ value: "on", label: "On · validated column heights" },
+      { value: "off", label: "Off · density surface" }],
+    hint: "Use integrated column heights where valid, or contour density everywhere. Applies on the next simulation step; changes the published surface without resetting the scene.",
+  },
   {
     kind: "select",
     key: "surfaceMeshRefinement",
@@ -220,6 +233,7 @@ export function adaptiveMassSolverOptions(
     ...correctionOptions(values),
     gammaDiffusionEnabled: values.gammaDiffusion !== "off",
     surfaceSharpeningEnabled: values.surfaceSharpening !== "off",
+    presentationColumnHeightEnabled: values.presentationColumnHeight === "on",
     pressureIterations: sparseCM12PressureIterations(values.pressureIterations),
     pressureRelativeTolerance:
       sparseCM12PressureRelativeTolerance(values.pressureRelativeTolerance),
@@ -301,6 +315,7 @@ export const adaptiveMassMethod: SimulationMethod = {
       timeStep: values.timeStep === "scene" ? "scene" : "paper",
       gammaDiffusion: values.gammaDiffusion === "off" ? "off" : "on",
       surfaceSharpening: values.surfaceSharpening === "off" ? "off" : "on",
+      presentationColumnHeight: values.presentationColumnHeight === "on" ? "on" : "off",
       pressureIterations: sparseCM12PressureIterations(values.pressureIterations),
       pressureRelativeTolerance:
         sparseCM12PressureRelativeTolerance(values.pressureRelativeTolerance),
@@ -325,6 +340,7 @@ export const adaptiveMassMethod: SimulationMethod = {
       timeStep: "paper",
       gammaDiffusion: "on",
       surfaceSharpening: "on",
+      presentationColumnHeight: "off",
       pressureIterations: SPARSE_CM12_PRESSURE_ITERATIONS,
       pressureRelativeTolerance: SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE,
       sharpeningDistance: SPARSE_CM12_SHARPENING_DISTANCE_CELLS,
