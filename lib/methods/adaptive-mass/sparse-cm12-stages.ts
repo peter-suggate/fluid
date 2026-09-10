@@ -423,8 +423,11 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       "sharpening-receipt-setup": {
         id: "fine-sdf-redistance", label: "Sharpening receipt/indirect setup",
       },
+      "sharpening-dose": {
+        id: "fine-sdf-redistance", label: "Sharpening density-gradient dose",
+      },
       "sharpening-transform": {
-        id: "fine-sdf-redistance", label: "Sharpening dose + TEI mass scatter",
+        id: "fine-sdf-redistance", label: "Sharpening gradient trace + mass scatter",
       },
       "sharpening-finalize": {
         id: "fine-sdf-redistance", label: "Sharpening scalar finalization + dependency publication",

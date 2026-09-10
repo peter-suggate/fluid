@@ -4474,7 +4474,10 @@ fn sharpeningStats(cell:u32)->SharpeningStats{
   result.positiveArea=vec3f(0.0);result.negativeDensity=vec3f(0.0);
   result.positiveDensity=vec3f(0.0);result.negativeDistance=vec3f(0.0);
   result.positiveDistance=vec3f(0.0);
-  for(var at=incidenceBegin(cell);at<incidenceEnd(cell);at+=1u){
+  // Topology is immutable throughout this dispatch. Validate its incidence
+  // range once, rather than revalidating every term at each loop condition.
+  let incidence=incidenceRange(cell);
+  for(var at=incidence.x;at<incidence.y;at+=1u){
     let row=incidenceRow(at);if(!rowAccepted(row)){continue;}
     let own=termCoefficient(incidenceTerm(at));
     let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
@@ -4550,7 +4553,7 @@ fn sharpeningDelta(cell:u32,stats:SharpeningStats)->f32{
 }
 
 // Freeze the per-cell sharpening dose once. The trace itself differentiates
-// the exact continuous adaptive density interpolant analytically below.
+// the same continuous adaptive density interpolant with centred differences.
 fn prepareSharpeningCell(cell:u32){
   if(!cellTransportActive(cell)){
     state[p.stateOffsets5.x+cell]=0.0;return;
@@ -4579,7 +4582,7 @@ fn sampleSharpeningDensity(position:vec3f)->f32{
   return result/max(visible,1e-9);
 }
 
-fn sampleSharpeningField(position:vec3f)->vec4f{
+fn sampleSharpeningField(position:vec3f,density:f32)->vec4f{
   // A cell centre is a knot of the piecewise-trilinear interpolant. Its
   // analytic derivative has two one-sided values; floor() chose the positive
   // side on both reflected cells, which is not a reflected gradient. CM12's
@@ -4594,7 +4597,7 @@ fn sampleSharpeningField(position:vec3f)->vec4f{
   let dy=vec3f(0.0,halfDistance,0.0);
   let dz=vec3f(0.0,0.0,halfDistance);
   let inverseDistance=0.5/halfDistance;
-  return vec4f(sampleSharpeningDensity(position),
+  return vec4f(density,
     (sampleSharpeningDensity(position+dx)-sampleSharpeningDensity(position-dx))
       *inverseDistance,
     (sampleSharpeningDensity(position+dy)-sampleSharpeningDensity(position-dy))
@@ -4613,8 +4616,17 @@ fn traceSharpeningMass(source:u32)->vec3f{
   var travelled=0.0;
   for(var step=0u;step<40u;step+=1u){
     if(step>=u32(p.sharpening.y)){break;}
-    let field=sampleSharpeningField(position);
-    if(field.x>=CM12_LIQUID_ISOVALUE||travelled>=maximumDistance){break;}
+    // A stopped trace needs no gradient: those six adaptive stencil samples
+    // cannot affect its destination. Keep the same density stop and centred
+    // differences for every step that actually advances.
+    if(travelled>=maximumDistance){break;}
+    // The interpolation basis is exactly cardinal at the source centre.
+    // Reuse its conditioned value on the first step instead of locating the
+    // eight surrounding owners only to assign seven zero weights.
+    var density=conditionedDensity(source);
+    if(step>0u){density=sampleSharpeningDensity(position);}
+    if(density>=CM12_LIQUID_ISOVALUE){break;}
+    let field=sampleSharpeningField(position,density);
     let owner=${implicitSharpeningOwnerArithmeticForQA
       ? "cm12ImplicitAuthoredOwnerAtFine(vec3i(floor(position)))"
       : "cm12TeiOwnerAtFine(vec3i(floor(position))).cell"};
@@ -4650,6 +4662,10 @@ fn scatterSharpeningCell(cell:u32){
   state[p.stateOffsets5.x+cell]=delta;if(delta>=0.0){return;}
   let removed=-delta*cellVolume(cell);let removedFixed=i32(round(
     removed*cm12PhysicalMassFixedScale()));
+  // The receipt representation rounds this transfer to zero. The frozen
+  // debit still finalizes exactly as before; no destination can receive mass,
+  // so tracing and constructing its adaptive stencil have no observable work.
+  if(removedFixed==0){return;}
   let position=traceSharpeningMass(cell);
   let stencil=${implicitSharpeningOwnerArithmeticForQA
     ? "effectiveImplicitSharpeningStencilAtSpans(position,cellWidths(cell))"

@@ -412,6 +412,7 @@ export const SPARSE_CM12_RESIDENT_STAGE_SUBSTAGES = Object.freeze({
   "gamma-diffusion": [],
   "surface-sharpening": [
     "sharpening-receipt-setup",
+    "sharpening-dose",
     "sharpening-transform",
     "sharpening-finalize",
   ],
@@ -6449,6 +6450,9 @@ export class WebGPUSparseCM12Resident {
       useBindGroup(this.transportBindGroup);
       if (surfaceSharpeningEnabled) {
         dispatchSharpeningPacket("prepareSharpeningField");
+      }
+      closeSubstage("sharpening-dose");
+      if (surfaceSharpeningEnabled) {
         dispatchSharpeningPacket("scatterSharpeningMass");
       }
       closeSubstage("sharpening-transform");
