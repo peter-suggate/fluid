@@ -84,7 +84,7 @@ test("fine-rung candidate transfer computes each parent mass correction once", (
     /let correction=candidateRefinementDensityCorrection\[sourceLocal\]/,
     "each child must consume its workgroup's generation-local parent correction");
   assert.match(wgsl,
-    /array<vec4f,CANDIDATE_CELLS_PER_BRICK\/8u>/,
+    /array<f32,CANDIDATE_CELLS_PER_BRICK\/8u>/,
     "the cache must scale with the B4/B8/B16 parent rung, not a fixed data size");
 });
 
@@ -95,7 +95,7 @@ test("liquid injection opens and composes its tile-population journal", () => {
   const injection = host.slice(begin, end);
   const openPressureTopology = injection.indexOf(
     'dispatchTopology("beginSparseCM12PressureTopologyRepair", 1)');
-  const plan = injection.indexOf('dispatchTopology(mode === 0 ? "planEditedRegionResolution" : "planBrickResolution", bricks)');
+  const plan = injection.indexOf('dispatchTopology("planBrickResolution", bricks)');
   assert.ok(openPressureTopology >= 0 && plan > openPressureTopology,
     "a first-frame injection must open its tile-population journal before planning pages");
   assert.match(pressureRepairWgsl,
@@ -262,7 +262,7 @@ test("aggregate authorization consumes ISA and TFX receipts after every fallible
   assert.match(validate, /\$\{internedBoundaryCommitReceipt\}/,
     "the aggregate decision must consume the IBO/ISA receipt expression");
   const iboReceiptBegin = wgsl.indexOf("const internedBoundaryCommitReceipt");
-  const iboReceiptEnd = wgsl.indexOf("const ", iboReceiptBegin + "const internedBoundaryCommitReceipt".length);
+  const iboReceiptEnd = wgsl.indexOf("return /* wgsl */", iboReceiptBegin);
   assert.ok(iboReceiptBegin >= 0 && iboReceiptEnd > iboReceiptBegin);
   assert.match(wgsl.slice(iboReceiptBegin, iboReceiptEnd), /cm12ISAAuthorityReady\(\)/,
     "the integrated IBO receipt must include ISA generation, closure, and semantic coverage");

@@ -76,7 +76,7 @@ test("scene and rigid-body edits cross the same public world boundary", () => {
   assert.match(advance, /liquidInflow,[\s\S]*this\.sparseWorld\.edit\(\{[\s\S]*kind: "liquid-jet"/);
   assert.doesNotMatch(advance, /outletFine|radiusFine|velocityFinePerSecond/,
     "hose features must remain in world-space SI units");
-  assert.doesNotMatch(advance, /rigidSystem\?\.encode/);
+  assert.doesNotMatch(advance, /rigidSystem\?\.syncBodies|rigidSystem\?\.encode/);
   assert.doesNotMatch(advance, /sparseRuntime\.encodeLiquidJetInjection/);
 
   const runtime = sourceBetween(adapter,

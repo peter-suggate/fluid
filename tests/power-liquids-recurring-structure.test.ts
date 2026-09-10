@@ -213,22 +213,17 @@ test("recurring Power Liquids entry graphs contain only reviewed transaction ato
         // a fallback, so rejecting there invalidated the rest of the advance.
         // `rejectOwnerDirectoryBounds` keeps the fail-closed rejection for the
         // case that has no fallback: a directory outside its own arena.
-        // The flattened boundary compacts non-carried handles with one integer
-        // atomicAdd; its advector reads the sealed compact count with atomicLoad.
-        ? ["acc", "accumulateBodyImpulse", "advectStructuredFamiliesFlattenedBoundary",
-          "candidateTransferItem", "classifyStructuredBoundaryDryProbes", "countOutOfCorridorRead",
+        ? ["acc", "accumulateBodyImpulse", "candidateTransferItem", "countOutOfCorridorRead",
           "prepareStructuredDynamics", "rejectCandidateTransfer", "rejectOwnerDirectoryBounds",
           "rejectSample", "rejectVector", "transferStructuredTopologyCandidate"]
       : graph.name === "fine level-set summaries"
-        // The all-parent reducer atomically reads rank/generation authority;
-        // its workgroups write distinct summaries after cooperative reduction.
         ? ["addFineBase", "addFineSummaryPages", "changedKey", "coarseEntryAt", "dirLoad", "dirStore",
           "ensureDirectoryPage", "ensureFineSummaryCoarseDirectoryPages", "ensureFineSummaryCoarseRanks",
           "ensureFineSummaryDirectoryPages", "ensureFineSummaryRanks", "ensureRank", "popDirectoryPage",
           "popRank", "prepareFineSummaryDirect", "prepareFineSummaryPageReclamation",
           "prepareFineSummaryRecompute",
           "publishFineSummaryCoarseRows", "publishFineSummaryDirect",
-          "reclaimFineSummaryDirectoryPages", "recomputeFineSummaryAllParents", "recomputeFineSummaryBase", "recomputeFineSummaryParents",
+          "reclaimFineSummaryDirectoryPages", "recomputeFineSummaryBase", "recomputeFineSummaryParents",
           "releaseKey", "removeFineBase",
           "removeFineSummaryPages", "retireFineSummaryCoarse", "setError", "validateFineSummaryCoarse",
           "validateFineSummaryDelta", "writeDispatch"]

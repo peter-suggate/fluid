@@ -52,14 +52,14 @@ test("factor-8 B4 topology pre-dilates and clips while redistance remains fixed-
     "fn sampleCoarseOctreePhi(position:vec3f)->f32{return position.x;}",
   );
   assert.match(topology,
-    /fn initializeDesiredSamples[\s\S]*if\(any\(q>=params\.sampleDimensions\)\)\{targetWritePacked\(index,0\.,0u\);\}[\s\S]*fn initializeDesiredWorkSamples/,
+    /fn initializeDesiredSamples[\s\S]*if\(any\(q>=params\.sampleDimensions\)\)\{targetA\[index\]=0u;targetB\[index\]=0u;\}[\s\S]*fn initializeDesiredWorkSamples/,
     "topology owns factor-8 B4 domain clipping before fixed-resident redistance begins");
   assert.match(topology,
     /redistanceValid=arrayLength\(&redistanceControl\)>=4u&&redistanceControl\[0\]==0u&&\(redistanceControl\[2\]>0u\|\|pageDelta\[2\]==0u\)&&redistanceControl\[3\]!=0u/,
     "factor-8 topology remains provisional until redistance commits, while an exact empty dirty set needs no work");
 
-  const projection = readFileSync(new URL("../lib/methods/power/octree-power-lane.ts", import.meta.url), "utf8");
-  const construction = projection.match(/const structured = new WebGPUDirectStructuredVelocityAuthority[\s\S]*?this\.engine\.globalFineTransportB = new WebGPUFineLevelSetTransport[\s\S]*?\);/)?.[0];
+  const projection = readFileSync(new URL("../lib/methods/octree-shared/webgpu-octree.ts", import.meta.url), "utf8");
+  const construction = projection.match(/const structured = new WebGPUDirectStructuredVelocityAuthority[\s\S]*?this\.globalFineTransportB = new WebGPUFineLevelSetTransport[\s\S]*?\);/)?.[0];
   assert.ok(construction, "production direct structured velocity and fine-transport construction must exist");
   assert.match(construction,
     /const fineTransportResources = \{[\s\S]*?structured: structuredSource,[\s\S]*?airSupport: \{[\s\S]*?arena: this\.airVelocitySupport\.source\.arena/,
@@ -73,7 +73,7 @@ test("factor-8 B4 topology pre-dilates and clips while redistance remains fixed-
     /globalFineFaceExtension|globalFineVelocityPrepass|globalFinePowerVelocity|powerFaceControl/,
     "production orchestration must contain no retired face-band authority");
   assert.match(topology,
-    /var value=sampleCoarseOctreePhi\(position\);[\s\S]*let seeded=externalSeedPhi[\s\S]*if\(finite\(seeded\)\)\{value=seeded;\}/,
+    /var value=sampleCoarseOctreePhi\(position\);let seeded=externalSeedPhi[\s\S]*if\(finite\(seeded\)\)\{value=seeded;\}/,
     "new fine pages preserve coarse phi unless a real interface affine seed is finite");
   assert.match(topology,
     /fn exactAnalyticSeedPhi[\s\S]*heightFraction=max\(0\.92,fill\)[\s\S]*length\(max\(q,vec3f\(0\.0\)\)\)\+min\(max\(q\.x,max\(q\.y,q\.z\)\),0\.0\)/,
@@ -82,7 +82,7 @@ test("factor-8 B4 topology pre-dilates and clips while redistance remains fixed-
     /tail=4u\+10u\*params\.pageCapacity[\s\S]*damDimensions=select\(fallback,authored[\s\S]*exposedMaximum=params\.domainOrigin\+damDimensions/,
     "the global fine cold seed reads authored absolute reservoir extents from its ABI tail");
   assert.match(topology,
-    /mode==3u[\s\S]*minimum=vec3f[\s\S]*maximum=vec3f[\s\S]*return boxSeedPhi\(finePoint,minimum,maximum\)\*params\.fineCellWidth/,
+    /mode==3u[\s\S]*minimum=vec3f[\s\S]*maximum=vec3f[\s\S]*abs\(finestPoint\*f32\(params\.fineFactor\)-centre\)-half/,
     "a rectangular brick union is sampled as its exact box SDF on the cold fine grid");
   assert.match(topology,
     /exposedMaximum=params\.domainOrigin\+damDimensions[\s\S]*let q=point-exposedMaximum/,

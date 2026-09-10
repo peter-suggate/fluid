@@ -109,8 +109,6 @@ export interface SparseBrickAtlasInitializationOptions {
   readonly brickFineResolution?: SparseBrickFineResolution;
   /** Reuse the caller's canonical fluid-collider world when it is already built. */
   readonly solidWorld?: SolidWorld;
-  /** Authoritative full-cell volume averages, already clipped to open space. */
-  readonly initialFineDensity?: Float32Array;
   /** Optional caller-owned construction guard; Sparse CM12 itself has no cell-count cap. */
   readonly maximumFinestCells?: number;
   /** Largest dyadic macro edge, in ordinary bricks. One disables macro leaves. */
@@ -315,9 +313,6 @@ function initialDensityAt(
   const [nx, ny, nz] = dimensions;
   if (scene.systems?.fluid === false
     || x < 0 || y < 0 || z < 0 || x >= nx || y >= ny || z >= nz) return 0;
-  const retained = initialFineDensityCache.get(scene);
-  if (retained && retained.dimensions.every((n, axis) => n === dimensions[axis]))
-    return retained.means[x + nx * (y + ny * z)]!;
   const baseFraction = baseInitialLiquidFractionAtCell(
     scene, x, y, z, dimensions,
   );
@@ -331,9 +326,6 @@ function initialDensityAt(
 }
 
 const initialSolidWorldCache = new WeakMap<SceneDescription, SolidWorld>();
-const initialFineDensityCache = new WeakMap<SceneDescription, {
-  dimensions: SparseBrickVec3; means: Float32Array;
-}>();
 
 /** Maximum fine-field RMS discarded by one static-solid restriction rung. */
 export const SPARSE_CM12_SOLID_RESTRICTION_TOLERANCE = 0.08;
@@ -1538,11 +1530,6 @@ export function initializeSparseBrickAtlasFromScene(
   options: SparseBrickAtlasInitializationOptions,
 ): SparseAdaptiveMassAtlas {
   positiveDimensions(options.finestDimensions);
-  if (options.initialFineDensity) {
-    if (options.initialFineDensity.length !== options.finestDimensions.reduce((a, b) => a * b, 1))
-      throw new Error("Initial retained density does not match atlas geometry");
-    initialFineDensityCache.set(scene, { dimensions: options.finestDimensions, means: options.initialFineDensity });
-  } else initialFineDensityCache.delete(scene);
   // The adaptive solver has already constructed the canonical SolidWorld for
   // resident upload. Reusing it avoids a second terrain bake and also ensures
   // fluid-collider regions participate in atlas sampling.
@@ -1589,7 +1576,7 @@ export function initializeSparseBrickAtlasFromScene(
   };
   const refinementRegionParameters = packSparseCM12RefinementRegions(
     refinementRegions, refinementLattice);
-  if (!options.initialFineDensity && !options.resolutionForBrick && options.coarseFirstCurvatureTolerance === undefined) {
+  if (!options.resolutionForBrick && options.coarseFirstCurvatureTolerance === undefined) {
     // A macro leaf may be rerung, but it cannot be spatially split after it is
     // packed into the resident catalogue. A partial minimum-cell-size box is
     // nevertheless safe: an intersecting macro is conservatively coarsened as
@@ -1625,17 +1612,6 @@ export function initializeSparseBrickAtlasFromScene(
   const candidateCoordinates = [...candidateInitialBrickCoordinates(
     scene, options.finestDimensions, brickDimensions, brickFineResolution,
   )];
-  if (options.initialFineDensity) {
-    const coordinates = new Map(candidateCoordinates.map(q => [q.join("/"), q]));
-    const [nx, ny] = options.finestDimensions;
-    for (let i = 0; i < options.initialFineDensity.length; i++) {
-      if (!(options.initialFineDensity[i]! > epsilon)) continue;
-      const x = i % nx, yz = Math.floor(i / nx), y = yz % ny, z = Math.floor(yz / ny);
-      const coordinate: SparseBrickVec3 = [Math.floor(x / brickFineResolution), Math.floor(y / brickFineResolution), Math.floor(z / brickFineResolution)];
-      coordinates.set(coordinate.join("/"), coordinate);
-    }
-    candidateCoordinates.splice(0, candidateCoordinates.length, ...coordinates.values());
-  }
   const structuralCoordinates = structuralSeedBrickCoordinates(
     scene, options.finestDimensions, brickDimensions, brickFineResolution,
     SPARSE_CM12_STRUCTURAL_TO_FLUID_PAGE_RATIO * candidateCoordinates.length,

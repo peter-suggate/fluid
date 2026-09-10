@@ -22,33 +22,6 @@ export interface RetainedSceneDensity {
 
 export const RETAINED_SCENE_HEADER_FLOATS = 16;
 export const RETAINED_SCENE_PRIMITIVE_FLOATS = 16;
-
-/** Production's retained fine-coordinate transform is scalar and isotropic.
- * Validate the whole initial lattice before atlas seeding and resident
- * allocation; individual clipped leaves need not span whole domain axes.
- * Rounding or the minimum lattice dimension can produce anisotropic realized
- * scene cells, which require a vector transform throughout the solver. Taking
- * their minimum here would silently change the authored physical geometry.
- * Raw physical-box integration is independent of this adoption precondition. */
-export function assertRetainedSceneIsotropicLattice(field: RetainedSceneDensity,
-  dimensions: readonly [number, number, number], cellSize: number): void {
-  const h = Math.fround(cellSize);
-  if (!(h > 0) || !Number.isFinite(h)
-    || dimensions.some(n => !Number.isSafeInteger(n) || n < 1)) {
-    throw new Error("Invalid retained physical lattice");
-  }
-  for (let axis = 0; axis < 3; axis++) {
-    const extent = field.domain.upper[axis] - field.domain.lower[axis];
-    const realized = dimensions[axis] * h;
-    // Both domain endpoints and GPU h have already been rounded to f32.
-    const tolerance = 8 * 2 ** -23 * Math.max(extent, realized, h);
-    if (!Number.isFinite(extent) || !Number.isFinite(realized) || !(extent > 0)
-      || Math.abs(extent - realized) > tolerance) {
-      throw new Error(`Retained density requires an isotropic realized lattice: axis ${axis} has extent ${extent}, ${dimensions[axis]} cells at ${h} cover ${realized}`);
-    }
-  }
-}
-
 const clamp = (v: number) => Math.max(0, Math.min(1, v));
 const finite = (v: number) => {
   const f = Math.fround(v);
@@ -296,22 +269,8 @@ function densityRange(field: RetainedSceneDensity, box: RetainedSceneBox): reado
   return [low, high];
 }
 
-/** Algebraic density bounds for a physical box, including hard domain support.
- * These permit exact constant-region fast paths; they are not outward-rounded
- * certified interval arithmetic for arbitrary binary64 inputs. */
-export function retainedSceneDensityRange(field: RetainedSceneDensity, query: RetainedSceneBox): readonly [number, number] {
-  if ([...query.lower, ...query.upper].some(v => !Number.isFinite(v))
-    || query.lower.some((v, axis) => v >= query.upper[axis])) throw new Error("Invalid retained density range box");
-  const lower = query.lower.map((v, axis) => Math.max(v, field.domain.lower[axis])) as unknown as RetainedScenePoint;
-  const upper = query.upper.map((v, axis) => Math.min(v, field.domain.upper[axis])) as unknown as RetainedScenePoint;
-  if (lower.some((v, axis) => v >= upper[axis])) return [0, 0];
-  const [low, high] = densityRange(field, { lower, upper });
-  return [query.lower.some((v, axis) => v < field.domain.lower[axis])
-    || query.upper.some((v, axis) => v > field.domain.upper[axis]) ? 0 : low, high];
-}
-
+const GAUSS3 = [[-.7745966692414834, .5555555555555556], [0, .8888888888888888], [.7745966692414834, .5555555555555556]] as const;
 const GAUSS5 = [[-.906179845938664, .2369268850561891], [-.5384693101056831, .4786286704993665], [0, .5688888888888889], [.5384693101056831, .4786286704993665], [.906179845938664, .2369268850561891]] as const;
-const GAUSS9 = [[-.9681602395076261, .08127438836157441], [-.8360311073266358, .1806481606948574], [-.6133714327005904, .2606106964029354], [-.3242534234038089, .3123470770400029], [0, .3302393550012598], [.3242534234038089, .3123470770400029], [.6133714327005904, .2606106964029354], [.8360311073266358, .1806481606948574], [.9681602395076261, .08127438836157441]] as const;
 export interface RetainedSceneIntegralReceipt {
   readonly amount: number;
   readonly mean: number;
@@ -325,7 +284,7 @@ export interface RetainedSceneIntegralReceipt {
 interface Rectangle { readonly box: RetainedSceneBox; readonly amount: number; readonly error: number }
 
 /** Initialization/topology integral, with an exact y profile and adaptive
- * tensor Gauss 5/9 in x,z. Full/dry boxes are exact; compact primitive bounds
+ * tensor Gauss 3/5 in x,z. Full/dry boxes are exact; compact primitive bounds
  * seed the partition so quadrature cannot skip an isolated body. The receipt
  * reports numerical convergence, not a certified interval enclosure. */
 export function integrateRetainedSceneDensity(field: RetainedSceneDensity, query: RetainedSceneBox,
@@ -333,7 +292,7 @@ export function integrateRetainedSceneDensity(field: RetainedSceneDensity, query
   const widths = query.upper.map((v, axis) => v - query.lower[axis]);
   if ([...query.lower, ...query.upper].some(v => !Number.isFinite(v)) || widths.some(v => !(v > 0))) throw new Error("Invalid retained scene integration box");
   const volume = widths[0] * widths[1] * widths[2];
-  const tolerance = options.absoluteTolerance ?? Math.max(1e-15, volume * 2e-7), maximum = options.maximumRectangles ?? 8192;
+  const tolerance = options.absoluteTolerance ?? Math.max(1e-15, volume * 2e-7), maximum = options.maximumRectangles ?? 2048;
   if (!(tolerance > 0) || !Number.isFinite(tolerance) || !Number.isSafeInteger(maximum) || maximum < 1) throw new Error("Invalid retained integration budget");
   const lower = query.lower.map((v, axis) => Math.max(v, field.domain.lower[axis])) as unknown as RetainedScenePoint;
   const upper = query.upper.map((v, axis) => Math.min(v, field.domain.upper[axis])) as unknown as RetainedScenePoint;
@@ -365,9 +324,9 @@ export function integrateRetainedSceneDensity(field: RetainedSceneDensity, query
         else { fraction = 0; break; }
       }
       if (fraction > 0) {
-        const upperLog = 2.5 * Math.log1p(ratio), lowerLog = ratio < 1 ? 2.5 * Math.log1p(-ratio) : -Infinity;
-        const difference = ratio < 1 ? Math.exp(lowerLog) * Math.expm1(upperLog - lowerLog) : Math.exp(upperLog);
-        return receipt(fraction * 4 * Math.PI * p.radii[0] * p.radii[1] * p.radii[2] * difference / (15 * ratio), 0, 1);
+        const inner = Math.sqrt(Math.max(0, 1 - ratio)), k = 1 / (2 * ratio);
+        const radial = inner ** 3 / 3 + (.5 + k) * (outer ** 3 - inner ** 3) / 3 - k * (outer ** 5 - inner ** 5) / 5;
+        return receipt(fraction * 4 * Math.PI * p.radii[0] * p.radii[1] * p.radii[2] * radial, 0, 1);
       }
     }
   }
@@ -377,14 +336,14 @@ export function integrateRetainedSceneDensity(field: RetainedSceneDensity, query
     if (range[1] === 0 || range[0] === 1) return { box, amount: volume * range[0], error: 0 };
     const mx = (box.lower[0] + box.upper[0]) / 2, mz = (box.lower[2] + box.upper[2]) / 2;
     const hx = (box.upper[0] - box.lower[0]) / 2, hz = (box.upper[2] - box.lower[2]) / 2;
-    const quadrature = (rule: typeof GAUSS5 | typeof GAUSS9) => {
+    const quadrature = (rule: typeof GAUSS3 | typeof GAUSS5) => {
       let amount = 0;
       for (const [x, wx] of rule) for (const [z, wz] of rule) {
         amount += wx * wz * integrateRetainedSceneVertical(field, mx + hx * x, mz + hz * z, box.lower[1], box.upper[1]); evaluations++;
       }
       return amount * hx * hz;
     };
-    const coarse = quadrature(GAUSS5), fine = quadrature(GAUSS9);
+    const coarse = quadrature(GAUSS3), fine = quadrature(GAUSS5);
     let error = 8 * Math.abs(fine - coarse) + volume * 2e-14;
     if (fine === 0 && coarse === 0) error = volume * range[1];
     else if (Math.abs(fine - volume) < volume * 1e-14 && Math.abs(coarse - volume) < volume * 1e-14) error = volume * (1 - range[0]);
@@ -406,12 +365,6 @@ export function integrateRetainedSceneDensity(field: RetainedSceneDensity, query
     return sortedBreaks(positions);
   });
   const nodes: Rectangle[] = [];
-  if ((cuts[0].length - 1) * (cuts[1].length - 1) > maximum) {
-    const only = make(clipped);
-    // A budget too small even for compact-support partitioning cannot accept
-    // agreement between rules that might both have missed the same component.
-    return receipt(only.amount, Math.max(only.error, clippedVolume), 1);
-  }
   for (let x = 1; x < cuts[0].length; x++) for (let z = 1; z < cuts[1].length; z++) nodes.push(make({
     lower: [cuts[0][x - 1], lower[1], cuts[1][z - 1]], upper: [cuts[0][x], upper[1], cuts[1][z]] }));
   let amount = nodes.reduce((sum, node) => sum + node.amount, 0), error = nodes.reduce((sum, node) => sum + node.error, 0);
@@ -428,84 +381,4 @@ export function integrateRetainedSceneDensity(field: RetainedSceneDensity, query
     nodes[worst] = children[0]; nodes.push(...children.slice(1));
   }
   return receipt(Math.max(0, Math.min(volume, amount)), error, nodes.length);
-}
-
-export interface RetainedSceneFineMeansReceipt {
-  readonly cells: number;
-  readonly integratedCells: number;
-  readonly constantCells: number;
-  readonly reflectedCells: number;
-  readonly verticalEvaluations: number;
-  readonly estimatedAbsoluteError: number;
-  readonly maximumEstimatedMeanError: number;
-}
-
-/** Compile physical finest-cell moments once. Interval full/dry blocks avoid
- * marching the empty domain; numeric reflection symmetries avoid duplicate
- * boundary integrals. Native partitions subsequently restrict these moments.
- * An unresolved quadrature receipt is an error, never an accepted seed mean.
- * The caller owns the returned snapshot and must retain its field generation. */
-export function compileRetainedSceneFineMeans(field: RetainedSceneDensity,
-  dimensions: readonly [number, number, number], cellSize: number,
-  options: { absoluteMeanTolerance?: number; maximumRectangles?: number;
-    onReceipt?: (receipt: RetainedSceneFineMeansReceipt) => void } = {}): Float32Array {
-  const h = finite(cellSize), meanTolerance = options.absoluteMeanTolerance ?? 2e-7;
-  if (!(h > 0) || !(meanTolerance > 0) || !Number.isFinite(meanTolerance)
-    || dimensions.some(v => !Number.isSafeInteger(v) || v < 1)) throw new Error("Invalid retained finest-cell lattice");
-  const count = dimensions[0] * dimensions[1] * dimensions[2];
-  if (!Number.isSafeInteger(count) || count > 0x1000_0000) throw new Error("Retained finest-cell lattice exceeds storage budget");
-  const means = new Float32Array(count), origin = field.domain.lower;
-  const reflected = dimensions.map((n, axis) => {
-    if (Math.abs(n * h - (field.domain.upper[axis] - origin[axis])) > n * h * 1e-12) return false;
-    const center = (origin[axis] + field.domain.upper[axis]) / 2;
-    return field.primitives.every(p => {
-      if (p.kind === "ellipsoid") return p.center[axis] === center;
-      if (p.kind === "box") return p.lower[axis] + p.upper[axis] === 2 * center;
-      return axis !== 1 && (p.curvature[axis] === 0 || p.center[axis] === center);
-    });
-  });
-  const work = dimensions.map((n, axis) => reflected[axis] ? Math.ceil(n / 2) : n);
-  const index = (x: number, y: number, z: number) => x + dimensions[0] * (y + dimensions[1] * z);
-  let integratedCells = 0, constantCells = 0, verticalEvaluations = 0, error = 0, maxMeanError = 0;
-  const visit = (lo: readonly number[], hi: readonly number[]) => {
-    const box: RetainedSceneBox = { lower: lo.map((v, axis) => origin[axis] + h * v) as unknown as RetainedScenePoint,
-      upper: hi.map((v, axis) => origin[axis] + h * v) as unknown as RetainedScenePoint };
-    const outside = box.lower.some((v, axis) => v >= field.domain.upper[axis])
-      || box.upper.some((v, axis) => v <= field.domain.lower[axis]);
-    const inside = box.lower.every((v, axis) => v >= field.domain.lower[axis])
-      && box.upper.every((v, axis) => v <= field.domain.upper[axis]);
-    const range = outside ? [0, 0] : densityRange(field, box);
-    if (range[1] === 0 || (inside && range[0] === 1)) {
-      const value = range[1] === 0 ? 0 : 1;
-      for (let z = lo[2]; z < hi[2]; z++) for (let y = lo[1]; y < hi[1]; y++) means.fill(value, index(lo[0], y, z), index(hi[0] - 1, y, z) + 1);
-      constantCells += (hi[0] - lo[0]) * (hi[1] - lo[1]) * (hi[2] - lo[2]); return;
-    }
-    if (hi.every((v, axis) => v - lo[axis] === 1)) {
-      const integral = integrateRetainedSceneDensity(field, box, { absoluteTolerance: h ** 3 * meanTolerance,
-        maximumRectangles: options.maximumRectangles });
-      if (!integral.toleranceMet) throw new Error(`Retained scene integral did not converge at ${lo.join(",")}: estimated mean error ${integral.estimatedAbsoluteError / h ** 3}`);
-      means[index(lo[0], lo[1], lo[2])] = integral.mean;
-      integratedCells++; verticalEvaluations += integral.verticalEvaluations;
-      error += integral.estimatedAbsoluteError; maxMeanError = Math.max(maxMeanError, integral.estimatedAbsoluteError / h ** 3); return;
-    }
-    const sizes = hi.map((v, axis) => v - lo[axis]);
-    // Prefer Y on ties: horizontal fills then terminate in whole x/z slabs.
-    let axis = 1;
-    for (const candidate of [0, 2]) if (sizes[candidate] > sizes[axis]) axis = candidate;
-    const middle = Math.floor((lo[axis] + hi[axis]) / 2), leftHi = [...hi], rightLo = [...lo];
-    leftHi[axis] = middle; rightLo[axis] = middle;
-    visit(lo, leftHi); visit(rightLo, hi);
-  };
-  visit([0, 0, 0], work);
-  let reflectedCells = 0;
-  for (let z = 0; z < dimensions[2]; z++) for (let y = 0; y < dimensions[1]; y++) for (let x = 0; x < dimensions[0]; x++) {
-    const coordinates = [x, y, z].map((v, axis) => reflected[axis] ? Math.min(v, dimensions[axis] - 1 - v) : v);
-    if (coordinates[0] !== x || coordinates[1] !== y || coordinates[2] !== z) {
-      means[index(x, y, z)] = means[index(coordinates[0], coordinates[1], coordinates[2])]; reflectedCells++;
-    }
-  }
-  const multiplier = reflected.reduce((value, reflect) => value * (reflect ? 2 : 1), 1);
-  options.onReceipt?.(Object.freeze({ cells: count, integratedCells, constantCells, reflectedCells, verticalEvaluations,
-    estimatedAbsoluteError: error * multiplier, maximumEstimatedMeanError: maxMeanError }));
-  return means;
 }

@@ -1,15 +1,8 @@
 # Retained density cutover status — 8 September 2026
 
-Historical pre-adoption checkpoint. The later
-[production acceptance record](retained-density-production-progress-2026-09-08.md)
-supersedes the status below: a positive diffuse numeric field now supplies
-production native integrals and initial surface geometry, with conservative
-low-order support evolution. That adoption does not complete the roadmap's
-prescribed-motion or high-order curvature-transport stages.
-
 The retained-field execution and integration components now exist, and their
-focused tests pass. **At this checkpoint the production Sparse CM12 simulation
-and renderer had not been switched to them.** A field representation that preserves mass is
+focused tests pass. **The production Sparse CM12 simulation and renderer have
+not been switched to them.** A field representation that preserves mass is
 not sufficient: its half-density surface must also preserve the intended
 geometry. The first conservative positive reconstruction failed that test.
 The clamped-affine alternative passes planar and two-plane crease tests, but

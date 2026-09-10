@@ -19,7 +19,6 @@ const reasons: Readonly<Record<number, readonly [string, string]>> = {
   3: ["EMPTY_SHARPENING_STENCIL", "Sharpening has no recipient support; donor self-return refused"],
   5: ["TRANSPORT_STENCIL_GEOMETRY", "Could not locate a positive geometric transport stencil"],
   4: ["INVALID_CONSERVED_VALUE", "Nonfinite or negative transported density/gamma would have been clamped"],
-  6: ["RETAINED_DENSITY_INTEGRAL", "Retained density support could not represent the accepted native amount"],
 };
 export function decodeCM12SimulationFailure(words: Uint32Array, kernelNames: readonly string[] = []): SimulationFailure | undefined {
   if (words.length !== CM12_FAILURE_WORDS) throw new Error("Incomplete CM12 failure receipt");
@@ -36,11 +35,8 @@ export function decodeCM12SimulationFailure(words: Uint32Array, kernelNames: rea
       3: ["recipientWeight", "removedFixed", "reserved", "reserved"],
       5: ["positionX", "positionY", "positionZ", "reserved"],
       4: ["rawDensity", "rawGamma", "reserved", "reserved"],
-      6: ["stage", "density", "targetDensity", "reserved"],
     } as Record<number, string[]>)[words[1]],
-    operands: words[1] === 6
-      ? [words[6], ...new Float32Array(words.slice(7, 9).buffer), words[9]]
-      : words[1] >= 2 && words[1] <= 5
+    operands: words[1] >= 2 && words[1] <= 5
       ? [...new Float32Array(words.slice(6, 10).buffer)] : [...words.slice(6, 10)], rawWords: [...words],
   };
 }

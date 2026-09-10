@@ -34,30 +34,6 @@ export function exactPoolImpactDistance(oracle: PoolImpactOracle, p: Point): num
   return Math.min(p[1] - oracle.poolHeight,
     Math.hypot(...p.map((v, a) => v - oracle.sphereCenter[a]!)) - oracle.sphereRadius);
 }
-/** Physical quadratic defining function used by the numeric representation.
- * This is not a signed distance away from the sphere, but its zero set and
- * normalized gradient are the exact authored sphere. Kept in geometric form,
- * independent of retained record packing and GPU polynomial evaluation.
- */
-export function exactPoolImpactImplicitPhi(oracle: PoolImpactOracle, p: Point): number {
-  const squaredRadius = p.reduce((sum, v, axis) => sum + (v - oracle.sphereCenter[axis]!) ** 2, 0);
-  return Math.min(p[1] - oracle.poolHeight,
-    (squaredRadius - oracle.sphereRadius ** 2) / (2 * oracle.sphereRadius));
-}
-/** Closed-form integral of the retained fixed-width density, independently
- * derived in spherical coordinates. Pool and sphere transition supports are
- * disjoint in both actual catalog scenes, and wholly inside the container.
- */
-export function exactPoolImpactDensityAmount(oracle: PoolImpactOracle): number {
-  const r = oracle.sphereRadius, w = oracle.h;
-  const inner = Math.sqrt(r * r - r * w), outer = Math.sqrt(r * r + r * w);
-  if (oracle.sphereCenter[1] - outer <= oracle.poolHeight + w / 2)
-    throw new Error("analytic amount oracle requires disconnected transition supports");
-  const a = (r * r + r * w) / (2 * r * w), b = 1 / (2 * r * w);
-  const sphereAmount = 4 * Math.PI * (inner ** 3 / 3
-    + a * (outer ** 3 - inner ** 3) / 3 - b * (outer ** 5 - inner ** 5) / 5);
-  return oracle.scene.container.width_m * oracle.scene.container.depth_m * oracle.poolHeight + sphereAmount;
-}
 export function exactPoolImpactNormal(oracle: PoolImpactOracle, p: Point): Point {
   const d = p.map((v, a) => v - oracle.sphereCenter[a]!);
   const length = Math.hypot(...d);
@@ -87,8 +63,6 @@ export function measurePublishedPoolImpact(phi: Float32Array, oracle: PoolImpact
   let expectedCrossings = 0, observedCrossings = 0, missingOrExtraCrossingColumns = 0;
   let maximumPoolHeightError_m = 0, maximumSphereCrossingError_m = 0;
   let maximumSphereDistanceError_m = 0, sphereCrossings = 0;
-  let analyticSampleCount = 0, missingAnalyticSamples = 0;
-  let maximumAnalyticSampleError_m = 0, maximumSamplePrecisionBudgetRatio = 0;
   let firstBadColumn: unknown;
   // Include every lattice column, even those inside the original minmax8
   // region. A highest-surface scan would silently omit the bottom of the ball.
@@ -111,27 +85,9 @@ export function measurePublishedPoolImpact(phi: Float32Array, oracle: PoolImpact
       sphereCrossings++;
     }
   }
-  const ny = oracle.dimensions[1];
-  for (let z = 0; z < nz; z++) for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
-    const point: Point = [oracle.origin[0] + (x + .5) * oracle.h, (y + .5) * oracle.h,
-      oracle.origin[2] + (z + .5) * oracle.h];
-    const expected = exactPoolImpactImplicitPhi(oracle, point);
-    if (Math.abs(expected) > 1.5 * oracle.h) continue;
-    const actual = phi[x + nx * (y + ny * z)]!;
-    analyticSampleCount++;
-    if (!Number.isFinite(actual)) { missingAnalyticSamples++; continue; }
-    const error = Math.abs(actual - expected);
-    maximumAnalyticSampleError_m = Math.max(maximumAnalyticSampleError_m, error);
-    // Binary16 nearest rounding <= half an ulp, plus a float32 physical-frame
-    // allowance. This prevents a geometrically plausible but unrelated field
-    // or a density-derived reconstruction from satisfying the analytic gate.
-    const precisionBudget = Math.abs(expected) / 2048 + 1e-6;
-    maximumSamplePrecisionBudgetRatio = Math.max(maximumSamplePrecisionBudgetRatio, error / precisionBudget);
-  }
   return { expectedCrossings, observedCrossings, missingOrExtraCrossingColumns,
     maximumPoolHeightError_m, maximumSphereCrossingError_m, maximumSphereDistanceError_m,
-    sphereCrossings, firstBadColumn, analyticSampleCount, missingAnalyticSamples,
-    maximumAnalyticSampleError_m, maximumSamplePrecisionBudgetRatio };
+    sphereCrossings, firstBadColumn };
 }
 
 /** Budgets declared from precision and sampling, before measuring a candidate.
@@ -144,12 +100,9 @@ export function poolImpactBudgets(oracle: PoolImpactOracle) {
   const { h, sphereRadius: r } = oracle;
   return { poolPlanarity_m: 2e-6,
     spherePublishedRadial_m: h * h / (4 * r) + 5e-5,
-    // Trilinear interpolation of the quadratic sphere has maximum scalar
-    // error 3h²/(8R). The mesh fan allows only h/32 additional interior error;
-    // this is finest-sampling error, not a coarse-cell faceting allowance.
-    sphereMeshVertexRadial_m: 3 * h * h / (8 * r) + 5e-5,
-    sphereMeshInteriorRadial_m: 3 * h * h / (8 * r) + h / 32 + 5e-5,
-    sphereMeshNormalVector: .005,
+    sphereMeshVertexRadial_m: 3 * h * h / (4 * r) + 5e-5,
+    sphereMeshInteriorRadial_m: 3 * h * h / (2 * r) + 5e-5,
+    sphereMeshNormalVector: 2 * h * h / (r * r) + .005,
     pausedPublication_m: 1e-6,
     nativeMean: 2e-5,
   };
@@ -174,6 +127,7 @@ export function measurePoolImpactMesh(mesh: Float32Array, oracle: PoolImpactOrac
       maximumSphereNormalError = Math.max(maximumSphereNormalError, Math.hypot(...n.map((v, a) => v - expected[a]!)));
     } else if (Math.abs(p[1] - oracle.poolHeight) < h) {
       poolVertices++;
+      maximumPoolHeightError_m = Math.max(maximumPoolHeightError_m, Math.abs(p[1] - oracle.poolHeight));
       // Wall normals are appropriate at the pool's perimeter. The interior
       // free-surface normals must be upward independently of the wall closure.
       if (p[0] > oracle.origin[0] + h && p[0] < -oracle.origin[0] - h
@@ -187,44 +141,16 @@ export function measurePoolImpactMesh(mesh: Float32Array, oracle: PoolImpactOrac
     const b: Point = [mesh[at + 8]!, mesh[at + 9]!, mesh[at + 10]!];
     const c: Point = [mesh[at + 16]!, mesh[at + 17]!, mesh[at + 18]!];
     if ([a, b, c].every(p => p[1] > split)) {
-      // Norm is convex: its triangle maximum is at a vertex. Its minimum is
-      // the perpendicular plane projection when that lies inside the face,
-      // otherwise the closest point on an edge. This measures the entire
-      // triangle, including the worst chord sag, not only a few sample points.
-      const points = [a, b, c].map(p => p.map((v, k) => v - oracle.sphereCenter[k]!));
-      const dot = (p: number[], q: number[]) => p.reduce((sum, v, k) => sum + v * q[k]!, 0);
-      let minimumSquaredRadius = Infinity, maximumSquaredRadius = 0;
-      for (let edge = 0; edge < 3; edge++) {
-        const p = points[edge]!, q = points[(edge + 1) % 3]!;
-        const delta = q.map((v, k) => v - p[k]!);
-        const t = Math.max(0, Math.min(1, -dot(p, delta) / Math.max(dot(delta, delta), 1e-30)));
-        const closest = p.map((v, k) => v + t * delta[k]!);
-        minimumSquaredRadius = Math.min(minimumSquaredRadius, dot(closest, closest));
-        maximumSquaredRadius = Math.max(maximumSquaredRadius, dot(p, p));
-      }
-      const first = points[0]!, ab = points[1]!.map((v, k) => v - first[k]!), ac = points[2]!.map((v, k) => v - first[k]!);
-      const aa = dot(ab, ab), cc = dot(ac, ac), cross = dot(ab, ac), determinant = aa * cc - cross * cross;
-      if (determinant > 1e-24) {
-        const rhsB = -dot(first, ab), rhsC = -dot(first, ac);
-        const u = (rhsB * cc - rhsC * cross) / determinant, v = (rhsC * aa - rhsB * cross) / determinant;
-        if (u >= 0 && v >= 0 && u + v <= 1) {
-          const closest = first.map((p, k) => p + u * ab[k]! + v * ac[k]!);
-          minimumSquaredRadius = Math.min(minimumSquaredRadius, dot(closest, closest));
-        }
-      }
-      maximumSphereInteriorError_m = Math.max(maximumSphereInteriorError_m,
-        Math.abs(Math.sqrt(minimumSquaredRadius) - oracle.sphereRadius),
-        Math.abs(Math.sqrt(maximumSquaredRadius) - oracle.sphereRadius));
+      // Triangle interiors are chords; include all edge midpoints and the
+      // centroid so an exact set of sphere vertices cannot conceal faceting.
+      for (const p of [a.map((v, k) => (v + b[k]!) / 2), b.map((v, k) => (v + c[k]!) / 2),
+        c.map((v, k) => (v + a[k]!) / 2), a.map((v, k) => (v + b[k]! + c[k]!) / 3)])
+        maximumSphereInteriorError_m = Math.max(maximumSphereInteriorError_m,
+          Math.abs(exactPoolImpactDistance(oracle, p as unknown as Point)));
     }
     if ([a, b, c].every(p => Math.abs(p[1] - oracle.poolHeight) < h)) {
       const area = ((b[2] - a[2]) * (c[0] - a[0]) - (b[0] - a[0]) * (c[2] - a[2])) / 2;
       upwardPoolArea_m2 += Math.max(0, area); downwardPoolArea_m2 += Math.max(0, -area);
-      // A vertical wall cap has exactly zero projected area and legitimately
-      // contains vertices below the waterline. Only the actual free-surface
-      // triangles measure planarity; counting nearby wall vertices would
-      // report a false h/2 displacement of an exactly planar pool.
-      if (Math.abs(area) > 1e-12) for (const p of [a, b, c])
-        maximumPoolHeightError_m = Math.max(maximumPoolHeightError_m, Math.abs(p[1] - oracle.poolHeight));
     }
   }
   return { vertexCount: mesh.length / 8, poolVertices, sphereVertices, unexpectedInteriorVertices,

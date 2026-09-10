@@ -50,12 +50,12 @@ test("IBO faults cannot disappear on weak CAS and replay mirrors either outcome"
 
 test("signed SparseWorld retains the authored all-rung mutation catalogue", () => {
   assert.match(host,
-    /let mutableBrickKeysForBudget = atlas\.bricks\.filter[\s\S]*initiallyActiveBrickKeys\.has\(brick\.key\)[\s\S]*apron\.has\(brick\.coordinate\.join/);
+    /const mutableBrickKeysForBudget = atlas\.bricks\.filter\(\(brick\) =>\s*sparseBrickSpan\(brick\) === 1\)/);
   assert.match(host,
     /const mutableBrickKeys[^=]*= hostTemplateVariants\s*\? new Set\(mutableBrickKeysForBudget\)/);
   assert.match(host, /packResidentTopology\(atlas, grid, mutableBrickKeys\)/);
   assert.match(host,
-    /const templates = hostTemplateVariants\s*\? packResidentTopologyTemplates\(atlas, grid, undefined, mutableBrickKeys\)\s*: packAcceptedTopologyTemplates\(atlas, grid\)/);
+    /const templates = hostTemplateVariants\s*\? packResidentTopologyTemplates\(atlas, grid\)\s*: packAcceptedTopologyTemplates\(atlas, grid\)/);
   assert.match(host, /\(candidateSlotByBrick\[brick\]! \+ 1\) << 5/,
     "authored leaf records must expose candidate slots to GPU lifecycle planning");
 });

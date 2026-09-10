@@ -136,9 +136,8 @@ test("production publication uses guarded column height and floor continuation",
     /fn presentationIntegratedAdaptiveFloorHeight[\s\S]*compactOwnerCellAt[\s\S]*fill>previous\+0\.01[\s\S]*massHeight>f32\(BRICK_FINE_RESOLUTION\)\+0\.125/,
     "ordinary adaptivity must prove a short monotone floor column from accepted owners");
   assert.match(shader,
-    /adaptiveFloorColumn=brickOrigin\.y==0[\s\S]*activityReasons&\(1u\|256u\)[\s\S]*presentationContinuousColumnHeight\(brick,x,z,densityOffset,true\)/,
+    /adaptiveFloorColumn=brickOrigin\.y==0[\s\S]*activityReasons&\(1u\|256u\)[\s\S]*presentationIntegratedAdaptiveFloorHeight/,
     "ordinary surface and thin-fluid floor pages must reach the adaptive receipt");
-  assert.match(shader, /fn presentationContinuousColumnHeight[\s\S]*if\(floorColumn\)\{return presentationIntegratedAdaptiveFloorHeight/);
   const adaptiveGate = shader.slice(shader.indexOf("let adaptiveFloorColumn="),
     shader.indexOf("let worldColumnField="));
   assert.doesNotMatch(adaptiveGate, /refinementRegionControl|acceptedBrickResolution/,
@@ -188,8 +187,8 @@ test("production publication uses guarded column height and floor continuation",
     /presentationHeightCache\[column\][\s\S]*fn presentationColumnHeightValid[\s\S]*presentationHeightPhi/,
     "height validity must remain column-local instead of rejecting an entire page");
   assert.match(shader,
-    /let stencilCandidate=\(presentationCandidates&1u\)!=0u&&\(!heightReady\|\|scale>1u\)/,
-    "mixed-validity and coarse pages retain the limited-linear fallback cache");
+    /let stencilCandidate=\(presentationCandidates&1u\)!=0u&&!heightReady/,
+    "a mixed-validity page must retain the limited-linear fallback cache");
   assert.match(shader,
     /presentationColumnHeightValid\(i32\(localX\),i32\(localZ\),false\)[\s\S]*presentationHeightPhi/,
     "each valid column must publish its own height while rejected neighbours fall back locally");

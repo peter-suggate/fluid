@@ -29,11 +29,11 @@ To add a concern, define its state/codec, controls and placements with its imple
 
 ## Verification
 
-Progress commits: `9a7070ed` (persistence, metadata and lifecycle), `ed5a9539` (pressure inspection and host state), `3c577fa6` (integration checks), and `74df5c12` (capture capacity policy). Only this task's patches were staged; concurrent editor, scenery and numerical changes were left to their owners.
+Progress commits: `9a7070ed` (persistence, metadata and lifecycle) and `ed5a9539` (pressure inspection and host state). Only this task's patches were staged; concurrent editor, scenery and numerical changes were left to their owners.
 
 - Production build passes.
 - Focused checks: 40 passed, 8 GPU cases skipped in the CPU run, no failures.
 - Full CPU suite: 1,160 passed, 24 failed, 168 skipped. All 24 failing names match the recorded pre-cleanup baseline.
 - No TypeScript errors were reported in the new feature/lifecycle code. The shared checkout still has pre-existing errors and a concurrent scenery-test error; global typecheck is not green.
 - Module boundaries retain the same three pre-existing diagnostic-route violations in `app/cm12-hole-probe/page.tsx`.
-- `npm run test:dawn:sparse-cm12` exited 1 before running any lane: another task held the WebGPU lease for active browser QA. After waiting more than 18 minutes, the gate remained blocked. The other task was not interrupted. GPU acceptance remains unverified; see `feature-cleanup-validation.json`.
+- GPU gate results are recorded separately after the exclusive WebGPU lease becomes available. Passing CPU checks are not a GPU acceptance claim.

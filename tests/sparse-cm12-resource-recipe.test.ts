@@ -170,8 +170,7 @@ test("a tiny B8 resident records and clones its complete construction without a 
    assert.ok(recipe.operations.some(operation=>operation.method===method),
     `aperture initialization must record ${method}`);
   const state=(recipe.state as {resident:Record<string,unknown>}).resident;
-  assert.equal(state.cellCount, 1 + 8 + 64 + 512,
-    "recorded capacity includes the B1/B2/B4/B8 mutation catalogue, not just the one accepted cell");
+  assert.equal(state.cellCount,1);
   assert.equal(state.simulationPipelinesReady,true);
   assert.ok(state.templateWords instanceof Uint32Array);
   assert.ok(state.currentSolidWorld);
