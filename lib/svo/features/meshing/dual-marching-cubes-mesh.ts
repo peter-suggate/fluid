@@ -23,16 +23,37 @@ fn dmcConnect(adjacency:ptr<function,array<vec2u,12>>,a:u32,b:u32,face:u32,signs
 }
 fn meshDmcExtract(base:vec3u,scale:u32,depth:u32,local:u32,n:u32){
   if(local>=n){return;}
+  // Uniform dual grids have contiguous payloads within a brick. Resolve the
+  // eight incident bricks once per slice instead of walking the tree eight
+  // times for each cell. Missing/coarser neighbours still reject the cell.
+  var bricks:array<MeshRegion,8>;
+  for(var c=0u;c<8u;c+=1u){
+    bricks[c]=meshRegionAt(vec3f(base)+(dmcCorner(c)-vec3f(1))*f32(n*scale)+vec3f(.5*f32(scale)));
+  }
   for(var y=0u;y<n;y+=1u){for(var x=0u;x<n;x+=1u){
     let vertex=vec3f(base+vec3u(x,y,local)*scale);let origin=vertex-vec3f(f32(scale));
     if(any(origin<vec3f(0))){continue;}
     var positions:array<vec3f,8>;var values:array<f32,8>;var signs=0u;var valid=true;var identity=0u;var sharp=0u;
+    var gradients:array<vec3f,8>;var gradientCount=0u;
     for(var c=0u;c<8u;c+=1u){
-      let region=meshRegionAt(vertex+(dmcCorner(c)-vec3f(.5))*f32(scale));
+      let q=vec3i(vec3u(x,y,local))+vec3i(dmcCorner(c))-vec3i(1);
+      let upper=q>=vec3i(0);
+      let region=bricks[select(0u,1u,upper.x)|select(0u,2u,upper.y)|select(0u,4u,upper.z)];
       if(region.voxel==SVO_INVALID||region.size!=f32(scale)){valid=false;break;}
-      positions[c]=meshDcPoint(region.voxel);values[c]=bitcast<f32>(meshDcWord(region.voxel,3u));
-      if(values[c]==0.){sharp=1u;}
-      if(values[c]<0.){signs|=1u<<c;identity=region.identity;}
+      let cell=vec3u((q+vec3i(i32(n)))%vec3i(i32(n)));
+      let voxel=region.voxel+cell.x+n*cell.y+n*n*cell.z;
+      positions[c]=meshDcPoint(voxel);values[c]=bitcast<f32>(meshDcWord(voxel,3u));
+      let material=sceneIdentityAt(voxel);
+      // A zero fitted value is sliver elimination, not evidence of a crease.
+      // Compare published field gradients instead. Smooth patches keep their
+      // interpolated normals; corners with >~37 degrees of disagreement retain
+      // the geometric triangle normal. Absent air normals contribute nothing.
+      if(sceneIdentitySolid(material)&&sceneIdentityHasNormal(material)){
+        let gradient=sceneIdentityNormal(material);
+        for(var j=0u;j<gradientCount;j+=1u){if(dot(gradient,gradients[j])<0.8){sharp=1u;}}
+        gradients[gradientCount]=gradient;gradientCount+=1u;
+      }
+      if(values[c]<0.){signs|=1u<<c;identity=material;}
     }
     if(!valid||signs==0u||signs==255u){continue;}
     var points:array<vec3f,12>;var adjacency:array<vec2u,12>;var crossingMask=0u;

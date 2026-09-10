@@ -3335,7 +3335,7 @@ export class FluidLabRenderer {
     // prepass + full-resolution relight, with 0.5 retained by the quality tier.
     if (sparsePresentationRequired) {
       this.svoDryScenePipeline?.setLightingOptions({ ...svoLightingOptions, coneLightingScale: activeSvoTuning.coneLightingScale });
-      this.svoDryScenePipeline?.setRenderTuning(activeSvoTuning);
+      this.svoDryScenePipeline?.setRenderTuning(activeSvoTuning, readyGPUFluid === undefined);
     }
     // Its own channel, taken every frame: a withheld stage is an encode-time
     // decision and must never reach the code that rebuilds shaders or bundles.

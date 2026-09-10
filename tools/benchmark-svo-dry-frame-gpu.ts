@@ -414,7 +414,7 @@ const derivedTraversalStructures =
 const brickOccupancyMode = brickOccupancyModeRaw as SvoBrickOccupancyMode;
 const shadingPath = shadingPathRaw as SvoDryShadingPath;
 
-const log = (message: string) => process.stderr.write(`${message}\n`);
+const log = (message: string) => process.stderr.write(`[${(performance.now() / 1000).toFixed(3)}s] ${message}\n`);
 
 function median(values: number[]): number {
   const sorted = [...values].sort((a, b) => a - b);
@@ -958,7 +958,7 @@ if (requestedRefinementDepth !== undefined) {
   log(`Environment refinement depth ${environmentRefinementDepth}`
     + ` — set drawn at ${(scene.voxelDomain.detailCellSize_m ?? scene.voxelDomain.finestCellSize_m) * 1000} mm`
     + ` under a ${scene.voxelDomain.finestCellSize_m * 1000} mm lattice`);
-  assert.equal(solver.builtRefinementDepth, environmentRefinementDepth,
+  if (process.env.FLUID_SVO_DRY_FRAME_ALLOW_RESOLUTION_FALLBACK !== "1") assert.equal(solver.builtRefinementDepth, environmentRefinementDepth,
     `requested refinement depth ${environmentRefinementDepth} degraded to ${solver.builtRefinementDepth}`
     + " during allocation; the capture would be labelled with a rung it did not draw");
 }
@@ -1113,6 +1113,26 @@ function encodeFrame(
     ? isolateComputePassEncoders(encoder, passEncoderIsolationScratch) : encoder;
   const result = renderer.encode(instrumentedEncoder, target, tracePhase);
   assert.ok(result && result.encoded, "production dry-scene encode declined the frame (raster fallback)");
+}
+
+// Wait for an actual ready raster mesh, servicing receipts/growth between
+// submissions as the browser does. Fixed warmup counts can time the fallback
+// and incorrectly report a successful large-scene meshing run.
+let surfaceMeshBuild_ms: number | undefined;
+if (optimizationExperiments.surfaceMesh) {
+  const started = performance.now();
+  for (let frame = 0; ; frame++) {
+    assert.ok(performance.now() - started < 120_000, `mesh did not publish: ${JSON.stringify(renderer.surfaceMeshStatus)}`);
+    const encoder = device.createCommandEncoder({ label: `Bench mesh readiness ${frame}` });
+    encodeFrame(encoder); device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    await new Promise(resolve => setImmediate(resolve));
+    if (frame % 10 === 0) log(`  [mesh readiness] ${JSON.stringify(renderer.surfaceMeshStatus)}`);
+    if (renderer.surfaceMeshStatus?.state === "blocked") throw new Error(`Mesh blocked: ${JSON.stringify(renderer.surfaceMeshStatus)}`);
+    if (renderer.surfaceMeshStatus?.state === "ready" && renderer.surfaceMeshStatus.drawn) break;
+  }
+  surfaceMeshBuild_ms = performance.now() - started;
+  log(`  [mesh ready] ${surfaceMeshBuild_ms.toFixed(3)} ms`);
 }
 
 // Warmup + first-frame validation for every variant this process will time.
@@ -2226,6 +2246,9 @@ const result = {
   rigidMotionTransition_ms,
   scene: {
     worldBuild_ms,
+    requestedRefinementDepth: environmentRefinementDepth,
+    builtRefinementDepth: solver.builtRefinementDepth,
+    surfaceMeshBuild_ms,
     cellContourCensus,
     surfaceMeshContours: configuredRenderTuning.surfaceMeshContours,
     surfaceMeshing: configuredRenderTuning.surfaceMeshing,

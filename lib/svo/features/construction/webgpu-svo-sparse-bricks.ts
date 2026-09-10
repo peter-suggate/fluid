@@ -1,3 +1,4 @@
+import { assertDualGridAttachmentFits } from "../meshing/dual-grid-capacity";
 import { terrainFieldStamp } from "../../../core/live-terrain-overlay";
 import type { RigidBodyDescription, SceneDescription } from "../../../core/model";
 import type { RenderFrameSeam } from "../../../core/render-frame-stages";
@@ -1706,6 +1707,17 @@ export class OctreeSparseBrickWorld {
       primitiveBricks, sceneSolids, worldOrigin, renderCellSize, brickSize, pinnedBricks));
     const gpuNodeClassification = (options.surfaceDualContouring !== true && options.surfaceDualMarchingCubes !== true) && (refinementDepth > 0 || !dryWorld) && !surfaceRefinement
       ? options.classifyEnvironmentNodesGpu : undefined;
+    if ((options.surfaceDualContouring || options.surfaceDualMarchingCubes) && gpuOccupancy) {
+      // These strategies force occupied leaves to maximumDepth. Their fitted samples
+      // and candidate slots can exceed a storage binding before the planner
+      // allocates millions of nodes or any payload arenas. Let the existing
+      // resolution ladder answer this failure immediately.
+      assertDualGridAttachmentFits(gpuOccupancy.keys(maximumDepth), brickSize,
+        Math.min(device.limits.maxStorageBufferBindingSize, device.limits.maxBufferSize),
+        OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK,
+        Math.min(sceneDomain.brickDimensions.reduce((a, b) => a * b, 1),
+          options.sceneMutationBrickCapacity ?? OCTREE_LIVE_SCENE_MUTATION_BRICK_CAPACITY));
+    }
     reportStage("Plan the adaptive octree");
     yield;
     // The interruptible form of the same plan. This is the longest block in a

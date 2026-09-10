@@ -4801,9 +4801,17 @@ export class SparseVoxelDrySceneRenderer {
   }
 
   /** Update bounded shader work budgets without rebuilding scene resources. */
-  setRenderTuning(tuning: SvoRenderTuning): void {
+  setRenderTuning(tuning: SvoRenderTuning, retainSurfaceMeshing = false): void {
     resolveSvoPipelineComposition({ coneRadianceReconstruction: tuning.coneRadianceReconstruction, coneTracingMode: this.lightingOptions.coneTracingMode });
-    const normalized = normalizeSvoRenderTuning(tuning);
+    // During a producer replacement the current attachment still belongs to
+    // the old mesher. Changing the extraction mode early invalidates its ready
+    // raster mesh and reports a misleading completed-but-unavailable build.
+    const normalized = normalizeSvoRenderTuning(retainSurfaceMeshing ? {
+      ...tuning,
+      surfaceMeshing: this.renderTuning.surfaceMeshing,
+      surfaceMeshContours: this.renderTuning.surfaceMeshContours,
+      surfaceMeshContourInflation: this.renderTuning.surfaceMeshContourInflation,
+    } : tuning);
     if (Object.keys(normalized).every((key) => normalized[key as keyof SvoRenderTuning] === this.renderTuning[key as keyof SvoRenderTuning])) return;
     // The band is a *visibility* control and nothing else: it decides which pass
     // resolves a pixel, never what a light sees. Lighting reads the node-mip

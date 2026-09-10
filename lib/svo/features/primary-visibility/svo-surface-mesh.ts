@@ -361,7 +361,7 @@ fn meshQuadDead(quad:SurfaceQuad)->bool{return all(quad.extent==vec3u(0u));}
 // Levels a brick can offer: the voxel boundary plus one per halving of the
 // brick edge down to a single cell.
 fn meshLevelCount()->u32{return countTrailingZeros(max(dry.mapping.brickSize,1u))+1u;}
-fn meshJobsPerBrick()->u32{return ${contours ? "6u*dry.mapping.brickSize+select(meshLevelCount()-1u,0u,meshContoursEnabled()||meshDcEnabled())" : "6u*dry.mapping.brickSize+meshLevelCount()-1u"};}
+fn meshJobsPerBrick()->u32{${contours ? "if(meshDmcEnabled()){return dry.mapping.brickSize;}" : ""}return ${contours ? "6u*dry.mapping.brickSize+select(meshLevelCount()-1u,0u,meshContoursEnabled()||meshDcEnabled())" : "6u*dry.mapping.brickSize+meshLevelCount()-1u"};}
 // Filtered-detail threshold in live pixels; zero is the exact voxel mesh.
 // Authored at the screen-space contract's reference height so it stays angular.
 fn dryMeshLodPixels()->f32{

@@ -26,3 +26,23 @@ test("changing mesher does not reset the simulation allocation", async () => {
     assert.equal(gpuSceneSolverKey(defaultScene,config),gpuSceneSolverKey(defaultScene,{...config,values:{[key]:true}}));
   }
 });
+
+test("a pending producer replacement retains the published meshing mode", async () => {
+  const { SparseVoxelDrySceneRenderer } = await import("../lib/svo/pipeline/webgpu-svo-dry-scene");
+  // Exercise the production setter without allocating a GPU: only the final
+  // uniform upload is stubbed. A pending request must not change extraction.
+  const renderer = Object.create(SparseVoxelDrySceneRenderer.prototype);
+  renderer.lightingOptions = { coneTracingMode: "cones" };
+  renderer.writeBandParams = () => {};
+  for (const previous of ["voxels", "contours", "dual-contouring"] as const) {
+    renderer.renderTuning = normalizeSvoRenderTuning({ ...DEFAULT_SVO_RENDER_TUNING, surfaceMeshing: previous, surfaceMeshContourInflation: .25 });
+    const before = renderer.renderTuning;
+    const requested = normalizeSvoRenderTuning({ ...before, surfaceMeshing: "dual-marching-cubes" });
+    renderer.setRenderTuning(requested, true);
+    assert.equal(renderer.renderTuning.surfaceMeshing, previous);
+    assert.equal(renderer.renderTuning.surfaceMeshContours, before.surfaceMeshContours);
+    assert.equal(renderer.renderTuning.surfaceMeshContourInflation, before.surfaceMeshContourInflation);
+    renderer.setRenderTuning(requested, false);
+    assert.equal(renderer.renderTuning.surfaceMeshing, "dual-marching-cubes");
+  }
+});
