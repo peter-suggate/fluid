@@ -3579,27 +3579,52 @@ fn accumulateTransportDeficit(rank:u32,cell:u32,density:i32,gamma:i32,
 // Collocated values have already averaged opposite faces: interpolating them
 // back to a face applies a [1/4, 1/2, 1/4] filter even when dt is zero.
 // Dry donor faces have no pressure authority yet and retain velocity extension.
+fn nativeTransportFaceValue(donor:u32,width:f32)->vec2f{
+  var wet=false;
+  let begin=rowTermOffset(donor);let end=begin+rowTermCount(donor);
+  for(var term=begin;term<end;term+=1u){
+    let cell=termCell(term);
+    if(cellMinimumWidth(cell)>width){return vec2f(0.0);}
+    wet=wet||state[sourceDensity()+cell]>CM12_LIQUID_ISOVALUE;
+  }
+  return select(vec2f(0.0),vec2f(state[sourceFaceVelocity()+donor],1.0),wet);
+}
 fn nativeTransportFaceAt(position:vec3f,axis:u32,width:f32)->vec2f{
   var normal=vec3f(0.0);normal[axis]=0.25*width;
   let query=clamp(position+normal,vec3f(0.5),vec3f(p.dimensions.xyz)-vec3f(0.5));
   let owner=ownerCellAt(vec3i(floor(query)));
   if(owner==INVALID||cellMinimumWidth(owner)>width){return vec2f(0.0);}
-  for(var at=incidenceBegin(owner);at<incidenceEnd(owner);at+=1u){
+  // The accepted IBO/ITR address image already maps a regular positive-side
+  // cell to its negative face. Reuse the same packet/lane mapping as BFA1
+  // preparation instead of searching every template incident on that cell.
+  // Mixed-width donors, dynamic pages and exterior positive faces retain the
+  // general incidence lookup whenever this exact address does not match.
+  if(owner<ta(2u)&&cellMinimumWidth(owner)==width){
+    let brick=cellBrick(owner);let slot=cm12IBOAcceptedSlot();
+    if(cm12IBOLeafActive(slot,brick)){
+      let first=cm12IBOLeafCellFirst(slot,brick);
+      let dimensions=cm12IBOLeafDimensions(slot,brick);
+      if(owner>=first&&owner-first<dimensions.x*dimensions.y*dimensions.z){
+        let local=transferLocalCoordinate(owner-first,dimensions);
+        let address=cm12IBOTRAPacketForLocal(brick,local,slot);
+        if(address.x!=INVALID){
+          let donor=itr1StableRowForOwner(address.x,axis,address.y);
+          if(donor!=INVALID&&rowAxis(donor)==axis
+            &&all(abs(rowCenter(donor)-position)<=vec3f(1e-4))&&rowAccepted(donor)){
+            return nativeTransportFaceValue(donor,width);
+          }
+        }
+      }
+    }
+  }
+  let incidenceStart=incidenceBegin(owner);let incidenceStop=incidenceEnd(owner);
+  for(var at=incidenceStart;at<incidenceStop;at+=1u){
     let donor=incidenceRow(at);
-    if(!rowAccepted(donor)||rowAxis(donor)!=axis
-      ||any(abs(rowCenter(donor)-position)>vec3f(1e-4))){continue;}
-    var wet=false;
-    for(var term=rowTermOffset(donor);term<rowTermOffset(donor)+rowTermCount(donor);term+=1u){
-      let cell=termCell(term);
-      if(cellMinimumWidth(cell)>width){return vec2f(0.0);}
-      wet=wet||state[sourceDensity()+cell]>CM12_LIQUID_ISOVALUE;
-    }
-    if(wet){
-      return vec2f(state[sourceFaceVelocity()+donor],1.0);
-    }
+    if(rowAxis(donor)!=axis
+      ||any(abs(rowCenter(donor)-position)>vec3f(1e-4))||!rowAccepted(donor)){continue;}
     // Dry rows have no projected authority. Let the caller use its existing
     // extension interpolant, which represents all children at this point.
-    return vec2f(0.0);
+    return nativeTransportFaceValue(donor,width);
   }
   return vec2f(0.0);
 }
@@ -3686,7 +3711,8 @@ fn finishTransportFaceRow(row:u32,characteristic:f32,touchesLiquid:bool){
 struct TransportFaceSupport { width:f32, extended:bool, liquid:bool }
 fn transportFaceSupport(row:u32)->TransportFaceSupport{
   var support=TransportFaceSupport(1.0,false,false);
-  for(var term=rowTermOffset(row);term<rowTermOffset(row)+rowTermCount(row);term+=1u){
+  let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+  for(var term=begin;term<end;term+=1u){
     let cell=termCell(term);
     support.extended=support.extended||cm12ExtendedCellSelected(cell);
     support.liquid=support.liquid||state[sourceDensity()+cell]>CM12_LIQUID_ISOVALUE;
@@ -3738,8 +3764,12 @@ fn prepareTransportFaceRow(row:u32){
   var spans=vec3f(1.0);
   if(regionWidth>1.0){spans=transportFaceSamplingSpans(row,regionWidth);}
   let origin=rowCenter(row);let displacement=traceRelativeFaceDisplacement(origin,spans);
-  var characteristic=sampleRelativeFaceVelocity(origin,displacement,spans)[axis];
-  if(retainFaceDetail){characteristic=sampleRelativeNativeTransportFace(origin,displacement,axis,regionWidth);}
+  var characteristic=0.0;
+  if(retainFaceDetail){
+    characteristic=sampleRelativeNativeTransportFace(origin,displacement,axis,regionWidth);
+  }else{
+    characteristic=sampleRelativeFaceVelocity(origin,displacement,spans)[axis];
+  }
   finishTransportFaceRow(row,characteristic,touchesLiquid);
 }
 // BFA1 is the immutable host-template fast path. Signed frontier rows do not

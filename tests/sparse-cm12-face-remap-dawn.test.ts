@@ -2,15 +2,30 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
+import { runInNewContext } from "node:vm";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
 
 const source = readFileSync(process.env.CM12_FACE_SOURCE ?? new URL(
   "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url), "utf8");
 function production(name: string): string {
-  const body = source.match(new RegExp(`fn ${name}\\([\\s\\S]*?\\n}`))?.[0];
-  assert.ok(body, name); return body;
+  const start = source.indexOf(`fn ${name}(`);
+  assert.ok(start >= 0, name);
+  let depth = 0;
+  for (let at = source.indexOf("{", start); at < source.length; at++) {
+    if (source[at] === "{") depth++;
+    if (source[at] === "}" && --depth === 0) return source.slice(start, at + 1);
+  }
+  throw new Error(`Unclosed production function ${name}`);
 }
+// Evaluate the production string transformation, so this fixture exercises
+// the same relative-coordinate basis as the real generated shader.
+const relativeExpression = source.match(
+  /const relativeTransportStencil = ([\s\S]*?);\n/)?.[1];
+assert.ok(relativeExpression);
+const relativeStencil = runInNewContext(relativeExpression, {
+  geometricTransportStencil: production("effectiveTransportStencilAtSpansMode"),
+});
 async function execute(device: GPUDevice, code: string, floats: number): Promise<Float32Array> {
   const shader = device.createShaderModule({ code });
   assert.deepEqual((await shader.getCompilationInfo()).messages.filter(m => m.type === "error"), []);
@@ -59,6 +74,8 @@ fn cm12RecordFailure(code:u32,cell:u32,data:vec4u){_=code;_=cell;_=data;}
 fn cm12ClampToResidentWorld(q:vec3f,margin:vec3f)->vec3f{
   return clamp(q,margin,vec3f(p.dimensions.xyz)-margin);
 }
+fn cm12WorldFineLower()->vec3f{return vec3f(0.0);}
+fn cm12WorldFineUpper()->vec3f{return vec3f(p.dimensions.xyz);}
 fn cellWidths(cell:u32)->vec3f{_=cell;return vec3f(width);}
 fn cellTransportActive(cell:u32)->bool{return cell<12u*FIXTURE_CELLS_PER_ROW;}
 fn fixtureCellOrigin()->vec3i{return vec3i(floor(rowCenter(currentRow)/width))-vec3i(8);}
@@ -81,6 +98,20 @@ fn cm12TransportOwnerAtFine(q:vec3i,direct:bool)->Owner{
   return Owner(cell);
 }
 fn ownerCellAt(q:vec3i)->u32{_=q;return 0u;}
+// This analytic fixture has no IBO image. The full solver A/B covers that
+// address path; retain the identical incidence fallback here.
+const FIXTURE_USE_IBO=false;
+fn ta(at:u32)->u32{_=at;return select(0u,1u,FIXTURE_USE_IBO);}
+fn cm12IBOAcceptedSlot()->u32{return 0u;}
+fn cm12IBOLeafActive(slot:u32,brick:u32)->bool{_=slot;_=brick;return FIXTURE_USE_IBO;}
+fn cm12IBOLeafCellFirst(slot:u32,brick:u32)->u32{_=slot;_=brick;return 0u;}
+fn cm12IBOLeafDimensions(slot:u32,brick:u32)->vec3u{_=slot;_=brick;return vec3u(1);}
+fn cm12IBOTRAPacketForLocal(brick:u32,local:vec3u,slot:u32)->vec2u{
+  _=brick;_=local;_=slot;return vec2u(0u);
+}
+fn itr1StableRowForOwner(packet:u32,axis:u32,lane:u32)->u32{
+  _=packet;_=axis;_=lane;return currentRow;
+}
 fn incidenceBegin(cell:u32)->u32{_=cell;return 0u;}
 fn incidenceEnd(cell:u32)->u32{_=cell;return 1u;}
 fn incidenceRow(at:u32)->u32{_=at;return currentRow;}
@@ -116,8 +147,12 @@ fn faceVelocitySupportAt(q:vec3i)->FaceVelocitySupport{
   let collocated=velocity(center)*cos(3.14159265359*width/32.0);
   return FaceVelocitySupport(select(collocated,vec3f(3,0,0),front),vec3f(width),true,true,!front&&(!oneWet||q.x>=24));
 }
-${["effectiveTransportStencilAtSpansMode", "sampleFaceVelocitySupport", "sampleFaceVelocitySupportAtSpans", "traceFaceDeparture",
-  "traceFaceDepartureAtSpans", "nativeTransportFaceAt", "sampleNativeTransportFace", "finishTransportFaceRow", "transportFaceSupport", "transportFaceSamplingSpans", "prepareTransportFaceRow"].map(production).join("\n")}
+${relativeStencil}
+${["clampRelativeTransportPosition", "clipRelativeTransportSegment",
+  "orderedScalarPair", "orderedVectorPair", "transportScalarSum", "transportVectorSum",
+  "sampleRelativeFaceVelocity", "traceRelativeFaceDisplacement", "sampleRelativeNativeTransportFace",
+  "transferLocalCoordinate", "nativeTransportFaceValue", "nativeTransportFaceAt",
+  "finishTransportFaceRow", "transportFaceSupport", "transportFaceSamplingSpans", "prepareTransportFaceRow"].map(production).join("\n")}
 @compute @workgroup_size(12)
 fn main(@builtin(global_invocation_id)gid:vec3u){
   let row=gid.x;width=f32(1u<<(row%4u));front=row>=8u;oneWet=row>=4u;currentRow=row;
@@ -133,6 +168,10 @@ fn main(@builtin(global_invocation_id)gid:vec3u){
       `width ${1 << (i % 4)}: a zero-length characteristic must not dissipate the face mode`);
     for (let i = 8; i < 12; i++) assert.equal(values[12 + i], 3,
       "new dry receiver faces must acquire extended jet velocity, not retain their old zero");
+    const addressed = await execute(device, fixture.replace(
+      "const FIXTURE_USE_IBO=false;", "const FIXTURE_USE_IBO=true;"), fixtureFloats);
+    assert.deepEqual(addressed.slice(12, 24), values.slice(12, 24),
+      "accepted ITR face addresses preserve the incidence-path staggered authority");
     const brickFaces = await execute(device, fixture.replace(
       "fn rowKind(row:u32)->u32{_=row;return 0u;}",
       "fn rowKind(row:u32)->u32{_=row;return 1u;}"), fixtureFloats);

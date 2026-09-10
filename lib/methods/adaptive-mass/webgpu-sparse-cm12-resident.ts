@@ -401,6 +401,9 @@ export const SPARSE_CM12_RESIDENT_STAGE_SUBSTAGES = Object.freeze({
   ],
   "face-preparation": [
     "face-support-publication",
+    "interior-face-row-preparation",
+    "seam-face-row-preparation",
+    "sparse-air-face-row-preparation",
     "dirty-face-row-preparation",
   ],
   "conservative-transport": [
@@ -6349,15 +6352,18 @@ export class WebGPUSparseCM12Resident {
       dispatch("prepareSparseCM12InteriorFaceTiles",
         Math.min(this.faceAddressLayout.dispatchWidth,
           this.faceAddressLayout.interiorTileCount),
-        this.faceAddressLayout.interiorDispatchRows);
+        this.faceAddressLayout.interiorDispatchRows, 3);
+      closeSubstage("interior-face-row-preparation");
       dispatch("prepareSparseCM12SeamFacePackets",
         Math.min(this.faceAddressLayout.dispatchWidth,
           this.faceAddressLayout.seamPacketCount),
         this.faceAddressLayout.seamDispatchRows);
+      closeSubstage("seam-face-row-preparation");
       dispatch("prepareSparseCM12SparseAirFacePackets",
         Math.min(this.faceAddressLayout.dispatchWidth,
           this.faceAddressLayout.seamPacketCount),
         this.faceAddressLayout.seamDispatchRows);
+      closeSubstage("sparse-air-face-row-preparation");
       dispatchAccepted("prepareSparseCM12DynamicFaceRows", "row");
       closeSubstage("dirty-face-row-preparation");
     });

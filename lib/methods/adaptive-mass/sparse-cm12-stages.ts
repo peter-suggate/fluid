@@ -335,7 +335,19 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       },
       "dirty-face-row-preparation": {
         id: "power-topology",
-        label: "Supported oriented face-row preparation",
+        label: "Dynamic frontier face-row preparation",
+      },
+      "interior-face-row-preparation": {
+        id: "power-topology",
+        label: "Accepted leaf interior face preparation",
+      },
+      "seam-face-row-preparation": {
+        id: "power-topology",
+        label: "Accepted leaf seam face preparation",
+      },
+      "sparse-air-face-row-preparation": {
+        id: "power-topology",
+        label: "Sparse air boundary face preparation",
       },
     },
     lens: null,
