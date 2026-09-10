@@ -83,8 +83,6 @@ import {
   createWebgpuSparseCM12ResidentWGSL,
   type SparseCM12PressureRepairLayout,
 } from "./webgpu-sparse-cm12-resident.wgsl";
-import { packRetainedSceneDensity, type RetainedSceneDensity } from "./sparse-cm12-retained-scene-density";
-import { compileRetainedNativeIntegrals } from "./sparse-cm12-retained-native-integrals";
 import {
   createSparseCM12LogicalOwnerDirectory,
 } from "./sparse-cm12-logical-owner-directory";
@@ -3360,8 +3358,7 @@ export class WebGPUSparseCM12Resident {
   private currentSolidWorld!: SolidWorld;
   private replacementConfiguration!: { finestCellSize_m: number; rigid?: SparseCM12RigidResources;
     journal?: SparseCM12PressureJournalCapacityRequest; presentationPageResolution: SparseCM12PresentationPageResolution;
-    topologyPageCapacityMaximum: number; retainedDensity?: RetainedSceneDensity };
-  private retainedDensityLayout?: { fieldBaseWords: number; integralBaseWords: number; controlBaseWords: number };
+    topologyPageCapacityMaximum: number };
   private preparedGenerationTransfer?: PreparedSparseCM12GenerationTransfer;
   generationPreparationMaximumSliceMs = 0;
   generationPreparationMaximumSliceOperation?: string;
@@ -3754,12 +3751,11 @@ export class WebGPUSparseCM12Resident {
     report?: SparseCM12ResidentInitializationReporter,
     topologyPageCapacityMaximum?: number,
     initialVelocity_m_s?: readonly [number, number, number],
-    retainedDensity?: RetainedSceneDensity,
   ): Promise<WebGPUSparseCM12Resident> {
     return this.createConfigured(device, atlas, grid, finestCellSize_m,
       solidWorld, initiallyActiveBrickKeys, rigid, journal, presentationPageResolution,
       false, false, false, true, true, report, false, true, false, false, false,
-      topologyPageCapacityMaximum, false, undefined, initialVelocity_m_s, undefined, retainedDensity);
+      topologyPageCapacityMaximum, false, undefined, initialVelocity_m_s);
   }
 
   /** Retained rejected QA experiment: density-capacity relay with an exact
@@ -4088,7 +4084,6 @@ export class WebGPUSparseCM12Resident {
     transferredSymmetry?: { scalar: boolean; face: boolean },
     initialVelocity_m_s?: readonly [number, number, number],
     candidateKeys?: ReadonlySet<number>,
-    retainedDensity?: RetainedSceneDensity,
   ): Promise<WebGPUSparseCM12Resident> {
     if (atlas.brickFineResolution !== 8 || presentationPageResolution !== 8) {
       throw new Error("Sparse CM12 PEI1 production is an aggressive B8/P8 cutover");
@@ -4260,29 +4255,15 @@ export class WebGPUSparseCM12Resident {
       residentTopologyWords, storage);
     // WebGPU buffers start zeroed. Upload only the nonzero ranges instead of
     // materializing the complete (mostly-zero) resident state on the host.
-    const retainedRecords = retainedDensity ? packRetainedSceneDensity(retainedDensity) : undefined;
-    const retainedDensityLayout = retainedRecords ? {
-      fieldBaseWords: layout.floatCount,
-      integralBaseWords: layout.floatCount + retainedRecords.length,
-      controlBaseWords: layout.floatCount + retainedRecords.length + physicsCellCapacity,
-    } : undefined;
     const state = device.createBuffer({ label: "Sparse CM12 resident state",
-      size: Math.max(4, 4 * (retainedDensityLayout ? retainedDensityLayout.controlBaseWords + 1 : layout.floatCount)), usage: storage });
+      size: Math.max(4, 4 * layout.floatCount), usage: storage });
     const seed = (floatOffset: number, values: Float32Array) => {
       if (values.byteLength === 0) return;
       device.queue.writeBuffer(state, 4 * floatOffset, values.buffer as ArrayBuffer,
         values.byteOffset, values.byteLength);
     };
-    const initialDensity = retainedDensity
-      ? compileRetainedNativeIntegrals(retainedDensity, templates.words, templates.cellCount, finestCellSize_m)
-      : templates.initialDensity;
-    seed(layout.densityA, initialDensity);
-    seed(layout.densityB, initialDensity);
-    if (retainedDensityLayout && retainedRecords) {
-      seed(retainedDensityLayout.fieldBaseWords, retainedRecords);
-      seed(retainedDensityLayout.integralBaseWords, initialDensity);
-      seed(retainedDensityLayout.controlBaseWords, new Float32Array([1]));
-    }
+    seed(layout.densityA, templates.initialDensity);
+    seed(layout.densityB, templates.initialDensity);
     seed(layout.gammaA, templates.initialGamma);
     seed(layout.gammaB, templates.initialGamma);
     if (initialVelocity_m_s?.some(value => value !== 0)) {
@@ -5412,7 +5393,6 @@ export class WebGPUSparseCM12Resident {
         implicitSharpeningOwnerArithmeticForQA,
         alternatingCapacityRepairReceiptsForQA,
         gatherCapacityRepairForQA,
-        retainedDensityLayout,
       );
     const shaderSource = createResidentShaderSource();
     const sourceByShaderModule = new WeakMap<GPUShaderModule, string>();
@@ -5937,8 +5917,7 @@ export class WebGPUSparseCM12Resident {
     result.initialGenerationRowIds = templates.initialRowWorklist;
     result.currentSolidWorld = solidWorld;
     result.replacementConfiguration = { finestCellSize_m, rigid, journal, presentationPageResolution,
-      topologyPageCapacityMaximum, retainedDensity };
-    result.retainedDensityLayout = retainedDensityLayout;
+      topologyPageCapacityMaximum };
 
     return result;
   }

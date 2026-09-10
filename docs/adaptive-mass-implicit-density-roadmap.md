@@ -13,12 +13,6 @@ The [first implementation results](implicit-density-ladder-results-2026-09-08.md
 record the completed exact-family algebra ladder and mean-reconstruction tests,
 with independent reference overlays. Later rungs remain open.
 
-The [cutover implementation status](retained-density-cutover-status-2026-09-08.md)
-records the subsequent native coupling and GPU ownership work, the rejected
-Bernstein mean correction, retained affine/curved primitives, and the remaining
-production adoption requirements. It includes actual production partition
-failures and distinguishes them from passing component tests.
-
 ## Current module scope
 
 [`field.ts`](../tools/implicit-density/field.ts) provides physical-coordinate
