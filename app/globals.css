@@ -2767,3 +2767,15 @@ button:hover .iso-water-side { fill-opacity: .26; }
    standalone panel's frame. */
 .toolstrip .oak-tree-editor { width: 100%; border: 0; margin: 0; padding: 0; pointer-events: auto; }
 .oak-tree-editor { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+
+.toolstrip-gravity-direction {
+  max-width: 130px;
+  height: 20px;
+  padding: 0 5px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  background: var(--panel);
+  color: var(--ink);
+  font: var(--text-micro);
+}
+.toolstrip-gravity-direction:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

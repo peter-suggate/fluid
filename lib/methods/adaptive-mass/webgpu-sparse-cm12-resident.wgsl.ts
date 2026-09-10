@@ -1324,7 +1324,7 @@ struct Params {
   stateOffsets4:vec4u,      // applied, divergence, presentation brick wet, reserved
   stateOffsets5:vec4u,      // sharpening/pressure scratch, gamma scratch, tracers, dense face support
   frame:vec4f,              // dt, finest cell metres, pressure scale, parity
-  acceleration:vec4f,       // finest cells / second^2
+  acceleration:vec4f,       // xyz: finest cells / second^2; w: acceleration changed
   dispatch:vec4u,           // cell workgroups, row workgroups, pcg iterations, brick count
   injectionCenter:vec4f,
   injectionRadius:vec4f,
@@ -5582,10 +5582,12 @@ fn classifyPressureRow(row:u32)->bool{
   // Hydrostatic pressure is an affine field along gravity. On a locally flat,
   // floor-connected surface, place its p=0 boundary at the density-integrated
   // physical waterline rather than at a rung-dependent interpolation of rho.
+  // This Y-column proof is valid only for downward gravity. Tilted and reversed
+  // gravity use the general ghost-fluid boundary above.
   let gravityLength=length(p.acceleration.xyz);
   if(cut&&rowAxis(row)==1u&&gravityLength>1e-6
     &&pressureHasPartialRefinementRegion()
-    &&p.acceleration.y<=-0.5*gravityLength){
+    &&p.acceleration.y<0.0&&length(p.acceleration.xz)<=1e-6*gravityLength){
     let heightReceipt=pressurePlanarColumnHeight(row);
     let liquidCenterY=liquidCenterYSum/max(liquidWeight,1e-9);
     let airCenterY=airCenterYSum/max(airWeight,1e-9);
@@ -5627,7 +5629,9 @@ fn compileCanonicalPressureRows(@builtin(workgroup_id)wid:vec3u,
       }
     }
     let topologyStable=pcmRowPriorTopologyGeneration()==ptrTopologyGeneration();
-    if(accepted&&topologyStable&&!scalarChanged&&!hasStaticSolidVoxels()){
+    // Gravity changes invalidate hydrostatic theta and wall-release membership,
+    // even when a resting liquid has unchanged density and topology.
+    if(accepted&&topologyStable&&!scalarChanged&&p.acceleration.w<0.5&&!hasStaticSolidVoxels()){
       enabled=previous;
     }else{
       enabled=classifyPressureRow(row);

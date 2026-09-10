@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import "../lib/methods";
+import { cloneScene, defaultScene } from "../lib/core/model";
 import { createMinimalPowerDamBreak64Scene, getSceneDefinition } from "../lib/core/scenes";
 import { sceneDocument } from "../lib/core/scene-definition";
 import {
@@ -115,4 +116,16 @@ test("async region publication invalidates the paused mesh and ignores detached 
   renderer.gpuFluid = undefined;
   complete(); await Promise.resolve();
   assert.equal(invalidated, 1, "an old edit cannot invalidate a replacement solver's mesh");
+});
+
+test("horizontal gravity edits reach live uniforms without rebuilding the solver", () => {
+  for (const axis of ["x", "z"] as const) {
+    const before = cloneScene(defaultScene);
+    const after = cloneScene(before);
+    after.fluid.gravity_m_s2[axis] = 9.81;
+    assert.notEqual(gpuSceneUniformKey(before), gpuSceneUniformKey(after));
+    const config: SimulationRunConfig = { methodId: "adaptive-mass", quality: "balanced", values: {} };
+    assert.equal(gpuSceneSolverKey(before, config), gpuSceneSolverKey(after, config));
+    assert.equal(sceneEditRequiresReset(before, after, "adaptive-mass"), false);
+  }
 });

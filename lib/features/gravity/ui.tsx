@@ -5,7 +5,7 @@ import { ToolstripNumber, ToolstripRow } from "../../../components/toolstrip";
 import { useSession } from "../../core/session/session-context";
 import { simulation } from "../../core/simulation/controller";
 import { gravityFeature } from "./definition";
-import { gravityEnabled, setGravity, toggleGravity } from "./state";
+import { GRAVITY_DIRECTIONS, gravityDirection, setGravityDirection, gravityEnabled, setGravity, toggleGravity } from "./state";
 
 export function GravityRow() {
   const session = useSession();
@@ -28,6 +28,7 @@ export function GravityRow() {
         title={enabled ? "Disable gravity" : "Enable gravity"}
         data-testid="scene-gravity-toggle" onClick={toggle}
       >Gravity {enabled ? "on" : "off"}</button>
+      <GravityDirectionControl />
     </div>}
   />;
 }
@@ -49,4 +50,21 @@ export function GravityYRow() {
           { reseed: true }, session.id);
       }} />}
   />;
+}
+
+function GravityDirectionControl() {
+  const session = useSession();
+  const fluid = session.scene(state => state.scene.fluid);
+  const methodId = session.method(state => state.methodId);
+  if (methodId !== "adaptive-mass") return null;
+  const direction = gravityDirection(fluid);
+  return <select className="toolstrip-gravity-direction" aria-label="Gravity direction" title="World direction; keeps gravity strength and remembers the choice while off" value={direction}
+      data-testid="scene-gravity-direction" onChange={event => {
+        const current = session.scene.getState().scene.fluid;
+        simulation.beginEdit("Change gravity direction", session.id);
+        simulation.commitEdit({ fluid: setGravityDirection(current, event.target.value) }, { reseed: true }, session.id);
+      }}>
+      {direction === "custom" && <option value="custom" disabled>Custom direction</option>}
+      {GRAVITY_DIRECTIONS.map(choice => <option key={choice.id} value={choice.id}>{choice.label}</option>)}
+    </select>;
 }

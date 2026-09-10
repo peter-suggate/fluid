@@ -6010,6 +6010,8 @@ export class WebGPUSparseCM12Resident {
     }
   }
 
+  private lastEncodedAcceleration?: readonly [number, number, number];
+
   encode(
     encoder: GPUCommandEncoder,
     dt_s: number,
@@ -6029,7 +6031,10 @@ export class WebGPUSparseCM12Resident {
     const packed = this.lastPacked!;
     this.writeParameters(packed, dt_s, finestCellSize_m, pressureScale,
       accelerationFinePerSecond2, sharpening, activityPolicy, pressureControl, bodyCount,
-      worldDimensions_m, inflow);
+      worldDimensions_m, inflow,
+      !this.lastEncodedAcceleration || accelerationFinePerSecond2.some(
+        (value, axis) => value !== this.lastEncodedAcceleration![axis]));
+    this.lastEncodedAcceleration = [...accelerationFinePerSecond2];
     const topologyFrozen = activityPolicy?.freezeTopology === true;
     const pressureIterations = sparseCM12PressureIterations(pressureControl?.iterations);
     const corrections = normalizedCorrections(sharpening);
@@ -7652,6 +7657,7 @@ export class WebGPUSparseCM12Resident {
     bodyCount = 0,
     worldDimensions_m?: readonly [number, number, number],
     inflow?: SparseCM12InflowControl,
+    accelerationChanged = false,
   ): void {
     this.lastPacked = packed;
     const u = this.parameterU32, f = this.parameterF32, l = this.layout;
@@ -7680,7 +7686,7 @@ export class WebGPUSparseCM12Resident {
     u.set([l.sharpeningDelta, l.symmetryGamma, l.tracers,
       l.faceVelocitySupport], 36);
     f.set([dt_s, finestCellSize_m, pressureScale, 0], 40);
-    f.set([...acceleration, 0], 44);
+    f.set([...acceleration, accelerationChanged ? 1 : 0], 44);
     u.set([Math.ceil(this.cellCount / WORKGROUP_SIZE),
       Math.ceil(this.rowCount / WORKGROUP_SIZE),
       sparseCM12PressureIterations(pressureControl?.iterations),

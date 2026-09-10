@@ -39,3 +39,16 @@ test("fresh zero-gravity scene cannot inherit another scene's remembered vector"
   assert.deepEqual(toggleGravity(fresh).gravity_m_s2, defaultScene.fluid.gravity_m_s2);
   assert.deepEqual(toggleGravity(first).gravity_m_s2, { x: 3, y: -2, z: 0 });
 });
+
+test("direction preserves strength and off-state memory", async () => {
+  const { setGravityDirection, gravityDirection } = await import("./state");
+  const authored = setGravity(defaultScene.fluid, { x: 3, y: -4, z: 0 });
+  const side = setGravityDirection(authored, "positive-z");
+  assert.deepEqual(side.gravity_m_s2, { x: 0, y: 0, z: 5 });
+  assert.equal(gravityDirection(side), "positive-z");
+  const off = setGravityDirection(toggleGravity(side), "up");
+  assert.deepEqual(off.gravity_m_s2, { x: 0, y: 0, z: 0 });
+  assert.equal(gravityDirection(off), "up");
+  assert.deepEqual(toggleGravity(off).gravity_m_s2, { x: 0, y: 5, z: 0 });
+  assert.equal(gravityDirection(authored), "custom");
+});

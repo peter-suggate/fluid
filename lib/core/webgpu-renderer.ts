@@ -650,7 +650,7 @@ function inflowAimKey(inflow: SceneDescription["fluid"]["inflow"]): string {
  * the GPU as params rather than as geometry.
  */
 export function gpuSceneUniformKey(scene: SceneDescription): string {
-  return `${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}:${scene.numerics.fixedDt_s}:${scene.numerics.maxDt_s}:${inflowAimKey(scene.fluid.inflow)}:${rigidBodyRosterKey(scene.rigidBodies)}:${refinementRegionKey(scene)}:${JSON.stringify(scene.solidVoxels)}`;
+  return `${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.x}:${scene.fluid.gravity_m_s2.y}:${scene.fluid.gravity_m_s2.z}:${scene.numerics.fixedDt_s}:${scene.numerics.maxDt_s}:${inflowAimKey(scene.fluid.inflow)}:${rigidBodyRosterKey(scene.rigidBodies)}:${refinementRegionKey(scene)}:${JSON.stringify(scene.solidVoxels)}`;
 }
 
 /**
