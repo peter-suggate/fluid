@@ -1,5 +1,6 @@
 "use client";
 
+import { SVO_MESHING_PLUGINS } from "../meshing/plugins";
 import { PipeButton, PipeChoice, PipeRange, PipeReadout, PipeToggle } from "../../../../components/PipeControls";
 import { formatPipelineDuration } from "../../../../components/PipelineGraph";
 import { WorkProgress } from "../../../../components/WorkProgress";
@@ -22,9 +23,11 @@ export function renderPrimaryTraversalControls({ resolvedPrimary, partitioned, d
         <PipeReadout label="Mesh memory" value={`${(effectiveRendererStatus.surfaceMesh.allocatedBytes / (1024 * 1024)).toFixed(1)} / ${((effectiveRendererStatus.surfaceMesh.maximumBytes ?? 0) / (1024 * 1024)).toFixed(1)} MiB`} />
         <PipeReadout label="Mesh builds" value={effectiveRendererStatus.surfaceMesh.builds ?? "—"} />
       </>}
-      <PipeToggle field label="Contour geometry" checked={tuning.surfaceMeshContours}
-        disabled={smoothSurfaceEnabled} onChange={(value) => updateTuning("surfaceMeshContours", value)}
-        hint="Rebuild native raster geometry with conservative surface clips. Unsupported cells keep their voxel shape; coarse filtering is suspended." />
+      <PipeChoice label="Meshing method" value={tuning.surfaceMeshing}
+        options={SVO_MESHING_PLUGINS.map(p=>({value:p.id,label:p.label}))}
+        disabled={smoothSurfaceEnabled} onChange={value=>updateTuning("surfaceMeshing",value as typeof tuning.surfaceMeshing)}
+        />
+      <p className="pipe-hint">The dual-grid methods construct geometry on GPU using a uniform grid. Sub-grid features may need finer resolution.</p>
       <PipeRange label="Contour inflation" unit="cells" value={tuning.surfaceMeshContourInflation}
         min={0} max={0.5} step={0.01} digits={2} editable
         disabled={smoothSurfaceEnabled || !tuning.surfaceMeshContours}

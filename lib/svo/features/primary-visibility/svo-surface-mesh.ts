@@ -1,3 +1,4 @@
+import { svoDualMarchingCubesMeshWGSL, svoVoxelMeshWGSL, svoContourMeshWGSL, svoDualContouringMeshWGSL } from "../meshing/plugins";
 import { svoCellContourWGSL } from "../construction/svo-cell-contour";
 import { SPARSE_SCENE_MAINTENANCE_INCOMPLETE_OVERFLOW, SPARSE_SCENE_MAINTENANCE_STATE_WORDS } from "../../../core/webgpu-sparse-scene-proxies";
 import type { WorkProgress } from "../../../core/work-progress";
@@ -152,6 +153,8 @@ export const SVO_SURFACE_MESH_STATE = Object.freeze({
   /** host: dirty brick records the maintenance buffer can hold. */
   hostMaintenanceCapacity: 45,
   contourMode: 46,
+  /** Word offset in low 31 bits; high bit tags function-graph (DMC) records. */
+  hostSurfaceVertices: 47,
   lodBricks: 48,
   wordCount: 56,
 } as const);
@@ -297,18 +300,23 @@ struct SurfaceQuad { origin:vec3u, identity:u32, extent:vec3u, face:u32 }
 // Bit 31 selects a triangle: origin is the cell base and extent contains
 // three packed 10-bit-per-axis local vertices. Vertex 3 repeats vertex 2.
 ${contours ? svoCellContourWGSL : ""}
-fn meshContoursEnabled()->bool{return ${contours ? "dry.meshFilterNormals.w>0.5" : "false"};}
+fn meshContoursEnabled()->bool{return ${contours ? "dry.meshFilterNormals.w>0.5&&dry.meshFilterNormals.w<2.0" : "false"};}
 // Inflation is baked into each triangle record so the old front stays valid
 // while replacement geometry is built with a new setting.
 fn meshInflationCode()->u32{return ${contours ? "u32(round(clamp(dry.meshFilterNormals.w-1.0,0.0,0.5)*100.0))" : "0u"};}
 fn meshRecordInflation(quad:SurfaceQuad)->f32{return f32((quad.face>>11u)&63u)/100.0;}
 ${contours ? `fn meshTrianglePoint(quad:SurfaceQuad,word:u32)->vec3f{
+  if(meshDualTriangle(quad)){return vec3f(f32(word&1023u),f32((word>>10u)&1023u),f32((word>>20u)&1023u))/512.0;}
   let inflation=meshRecordInflation(quad);
   return vec3f(0.5)+(contourUnpackPoint(word)-vec3f(0.5))*(1.0+2.0*inflation);
 }` : ""}
+fn meshDmcEnabled()->bool{return dry.meshFilterNormals.w>=3.0;}
+// Shared dual-grid policy (uniform resolution, expanded dirty masks and normals).
+fn meshDcEnabled()->bool{return dry.meshFilterNormals.w>=2.0;}
+fn meshDualTriangle(quad:SurfaceQuad)->bool{return (quad.face&0x40000000u)!=0u;}
 fn meshTriangle(quad:SurfaceQuad)->bool{return (quad.face&0x80000000u)!=0u;}
 fn meshQuadExtent(quad:SurfaceQuad)->vec3u{
-  if(meshTriangle(quad)){return vec3u(1u<<(dry.mapping.maximumDepth-meshQuadDepth(quad.face)));}
+  if(meshTriangle(quad)){return vec3u((1u<<(dry.mapping.maximumDepth-meshQuadDepth(quad.face)))*select(1u,2u,meshDualTriangle(quad)));}
   return quad.extent;
 }
 fn meshContourCode(voxel:u32)->u32{
@@ -353,11 +361,11 @@ fn meshQuadDead(quad:SurfaceQuad)->bool{return all(quad.extent==vec3u(0u));}
 // Levels a brick can offer: the voxel boundary plus one per halving of the
 // brick edge down to a single cell.
 fn meshLevelCount()->u32{return countTrailingZeros(max(dry.mapping.brickSize,1u))+1u;}
-fn meshJobsPerBrick()->u32{return ${contours ? "6u*dry.mapping.brickSize+select(meshLevelCount()-1u,0u,meshContoursEnabled())" : "6u*dry.mapping.brickSize+meshLevelCount()-1u"};}
+fn meshJobsPerBrick()->u32{return ${contours ? "6u*dry.mapping.brickSize+select(meshLevelCount()-1u,0u,meshContoursEnabled()||meshDcEnabled())" : "6u*dry.mapping.brickSize+meshLevelCount()-1u"};}
 // Filtered-detail threshold in live pixels; zero is the exact voxel mesh.
 // Authored at the screen-space contract's reference height so it stays angular.
 fn dryMeshLodPixels()->f32{
-  ${contours ? "if(meshContoursEnabled()){return 0.0;}" : ""}
+  ${contours ? "if(meshContoursEnabled()||meshDcEnabled()){return 0.0;}" : ""}
   return select(0.0,max(dry.lod.w,0.0),dry.meshFilter.x>0.5)*uniforms.viewport.y/${SVO_SCREEN_SPACE_TERMINATION_CONTRACT.referenceViewportHeightPixels};
 }
 // Quads merge on material alone. A level-0 quad reads its voxel's baked normal
@@ -441,34 +449,34 @@ fn meshBoxesContain(minimum:vec3u,maximum:vec3u)->bool{
   return false;
 }
 
-struct MeshRegion { origin:vec3f, size:f32, identity:u32, contour:u32 }
+struct MeshRegion { origin:vec3f, size:f32, identity:u32, contour:u32, voxel:u32 }
 // Lookup returns the containing cell OR empty octree region. Its extent lets
 // a coarse boundary stop subdividing as soon as its neighbour is uniform.
 fn meshRegionAt(p:vec3f)->MeshRegion {
   let rootSize=f32((1u<<dry.mapping.maximumDepth)*dry.mapping.brickSize);
-  if(any(p<vec3f(0.0))||any(p>=vec3f(rootSize))){return MeshRegion(vec3f(-rootSize),rootSize*3.0,0u,0u);}
+  if(any(p<vec3f(0.0))||any(p>=vec3f(rootSize))){return MeshRegion(vec3f(-rootSize),rootSize*3.0,0u,0u,SVO_INVALID);}
   var origin=vec3f(0.0);var size=rootSize;var index=0u;
   for(var level=0u;level<=dry.mapping.maximumDepth;level+=1u){
-    if(index>=svoControlLoad(0u)){return MeshRegion(origin,size,0u,0u);}
+    if(index>=svoControlLoad(0u)){return MeshRegion(origin,size,0u,0u,SVO_INVALID);}
     let node=svoNodeLoad(index);
     if(node.links.z!=SVO_INVALID){
       let leaf=svoLeafLoad(node.links.z).topology;
-      if(leaf.x!=index||leaf.z!=0u){return MeshRegion(origin,size,0u,0u);}
-      if(!svoBrickLifecycleCurrent(svoBrickLifecycleDecode(node.links.w))){return MeshRegion(origin,size,0u,0u);}
+      if(leaf.x!=index||leaf.z!=0u){return MeshRegion(origin,size,0u,0u,SVO_INVALID);}
+      if(!svoBrickLifecycleCurrent(svoBrickLifecycleDecode(node.links.w))){return MeshRegion(origin,size,0u,0u,SVO_INVALID);}
       let cellSize=size/f32(dry.mapping.brickSize);
       let local=vec3u(clamp(floor((p-origin)/cellSize),vec3f(0.0),vec3f(f32(dry.mapping.brickSize-1u))));
       let voxel=svoBrickVoxelIndex(leaf.y,local,dry.mapping.brickSize);
       var identity=0u;if(voxel<dryVoxelCapacity()){identity=sceneIdentityAt(voxel);}
-      return MeshRegion(origin+vec3f(local)*cellSize,cellSize,identity,select(0u,meshContourCode(voxel),sceneIdentitySolid(identity)));
+      return MeshRegion(origin+vec3f(local)*cellSize,cellSize,identity,select(0u,meshContourCode(voxel),sceneIdentitySolid(identity)),voxel);
     }
     size*=0.5;let upper=p>=origin+vec3f(size);
     let octant=select(0u,1u,upper.x)|select(0u,2u,upper.y)|select(0u,4u,upper.z);
     origin+=select(vec3f(0.0),vec3f(size),upper);
     let mask=node.address.w&255u;let bit=1u<<octant;
-    if((mask&bit)==0u){return MeshRegion(origin,size,0u,0u);}
+    if((mask&bit)==0u){return MeshRegion(origin,size,0u,0u,SVO_INVALID);}
     index=node.links.x+countOneBits(mask&(bit-1u));
   }
-  return MeshRegion(origin,size,0u,0u);
+  return MeshRegion(origin,size,0u,0u,SVO_INVALID);
 }
 fn meshPointSolid(p:vec3f)->bool{
   let region=meshRegionAt(p);if(!sceneIdentitySolid(region.identity)){return false;}
@@ -582,164 +590,19 @@ fn meshAppend(origin:vec3u,extent:vec3u,packedFace:u32,identity:u32){
   if(slot>=meshEmitCount){atomicOr(&meshState[${W.errorFlags}],2u);return;}
   meshArenaStore(meshEmitArena,meshEmitBase+slot,SurfaceQuad(origin,identity,extent,packedFace));
 }
-${contours ? `
-fn meshAppendContourPolygon(base:vec3u,depth:u32,identity:u32,polygon:ContourPolygon){
-  for(var i=1u;i+1u<polygon.count;i+=1u){
-    let a=contourPackPoint(polygon.points[0]);let b=contourPackPoint(polygon.points[i]);let c=contourPackPoint(polygon.points[i+1u]);
-    if(a==b||b==c||c==a){continue;}
-    let n=cross(contourUnpackPoint(b)-contourUnpackPoint(a),contourUnpackPoint(c)-contourUnpackPoint(a));
-    if(dot(n,n)<1e-12){continue;}
-    meshAppend(base,vec3u(a,b,c),0x80000000u|(meshInflationCode()<<11u)|meshPackFace(0u,0u,depth),identity);
-  }
-}
-fn meshEmitContour(base:vec3u,scale:u32,depth:u32,identity:u32,code:u32){
-  var contour=cellContour(sceneIdentityNormal(identity),dry.mapping.cellSize*f32(scale),code);
-  let inflation=f32(meshInflationCode())/100.0;
-  // Work in the expanded cube's normalized coordinates. Scaling the support
-  // inversely keeps the world-space plane fixed instead of inflating the solid.
-  contour.high/=1.0+2.0*inflation;
-  if(contour.valid==0u){return;}
-  for(var face=0u;face<6u;face+=1u){
-    var polygon=contourClipPolygon(contourCubeFace(face),contour);
-    if(polygon.count<3u){continue;}
-    let axis=face/2u;let u=(axis+1u)%3u;let v=(axis+2u)%3u;
-    var p=vec3f(base)+vec3f(0.5*f32(scale));
-    p[axis]=f32(base[axis])+select(-0.25,f32(scale)+0.25,(face&1u)!=0u);
-    let neighbour=meshRegionAt(p);
-    let fits=f32(base[u])>=neighbour.origin[u]&&f32(base[v])>=neighbour.origin[v]
-      &&f32(base[u]+scale)<=neighbour.origin[u]+neighbour.size
-      &&f32(base[v]+scale)<=neighbour.origin[v]+neighbour.size;
-    if(inflation==0.0&&fits&&sceneIdentitySolid(neighbour.identity)){
-      if(neighbour.contour==0u){continue;}
-      // Keep only the face outside the neighbour's clipped solid. Translate
-      // its support plane into this cell, including coarse/fine scale changes.
-      let other=cellContour(sceneIdentityNormal(neighbour.identity),dry.mapping.cellSize*neighbour.size,neighbour.contour);
-      let ratio=f32(scale)/neighbour.size;
-      let offset=dot(other.normal,(vec3f(base)-neighbour.origin)/neighbour.size+vec3f(0.5*ratio-0.5));
-      polygon=contourClipPolygon(polygon,CellContour(-other.normal,(offset-other.high)/ratio,1u));
-    }
-    // A face spanning several finer neighbours remains conservative; their
-    // closed surfaces hide its covered portions in the depth test.
-    meshAppendContourPolygon(base,depth,identity,polygon);
-  }
-  meshAppendContourPolygon(base,depth,identity,contourCap(contour));
-}
-` : ""}
-// Greedy rectangles over one face layer's exposed-cell mask. \`m\` cells per
-// side, each \`cell\` lattice units wide; the mask is consumed as it is merged.
-fn meshEmitMask(mask:ptr<function,array<u32,64>>,m:u32,base:vec3u,cell:u32,face:u32,layer:u32,packedFace:u32){
-  let axis=face/2u;let u=(axis+1u)%3u;let v=(axis+2u)%3u;
-  for(var y=0u;y<m;y+=1u){for(var x=0u;x<m;x+=1u){
-    let identity=(*mask)[x+y*m];if(identity==0u){continue;}
-    let agreement=meshMaskAgreement[x+y*m];
-    var width=1u;loop{if(x+width>=m){break;}if((*mask)[x+width+y*m]!=identity||meshMaskAgreement[x+width+y*m]!=agreement){break;}width+=1u;}
-    var height=1u;loop{if(y+height>=m){break;}var same=true;for(var k=0u;k<width;k+=1u){if((*mask)[x+k+(y+height)*m]!=identity||meshMaskAgreement[x+k+(y+height)*m]!=agreement){same=false;}}
-      if(!same){break;}height+=1u;}
-    for(var j=0u;j<height;j+=1u){for(var k=0u;k<width;k+=1u){(*mask)[x+k+(y+j)*m]=0u;}}
-    var origin=base;origin[axis]+=(layer+select(0u,1u,(face&1u)!=0u))*cell;origin[u]+=x*cell;origin[v]+=y*cell;
-    var extent=vec3u(0u);extent[u]=width*cell;extent[v]=height*cell;meshAppend(origin,extent,packedFace|(agreement<<11u),identity);
-  }}
-}
-// Neighbour coverage at mixed-resolution boundaries is resolved recursively,
-// including partially empty fine children. A DFS needs at most 3*depth+1 slots.
-fn meshBoundary(origin:vec3u,size:u32,face:u32,identity:u32,packedFace:u32){
-  let axis=face/2u;let u=(axis+1u)%3u;let v=(axis+2u)%3u;
-  var pending:array<vec4u,64>;var count=1u;pending[0]=vec4u(origin,size);
-  loop {
-    if(count==0u){break;}
-    count-=1u;let item=pending[count];let o=item.xyz;let s=item.w;
-    var p=vec3f(o);p[u]+=f32(s)*0.5;p[v]+=f32(s)*0.5;
-    p[axis]+=select(-0.25,0.25,(face&1u)!=0u);
-    let neighbour=meshRegionAt(p);
-    let fits=f32(o[u])>=neighbour.origin[u]&&f32(o[v])>=neighbour.origin[v]
-      &&f32(o[u]+s)<=neighbour.origin[u]+neighbour.size
-      &&f32(o[v]+s)<=neighbour.origin[v]+neighbour.size;
-    if(fits||s==1u){
-      if((!sceneIdentitySolid(neighbour.identity)||neighbour.contour!=0u)){var extent=vec3u(0u);extent[u]=s;extent[v]=s;meshAppend(o,extent,packedFace,identity);}
-    }else{
-      if(count+4u>64u){atomicOr(&meshState[${W.errorFlags}],2u);break;}
-      let half=s/2u;
-      for(var child=0u;child<4u;child+=1u){var q=o;q[u]+=(child&1u)*half;q[v]+=((child>>1u)&1u)*half;pending[count]=vec4u(q,half);count+=1u;}
-    }
-  }
-}
-// One coarse level of one brick in a single invocation: every cell's material
-// is derived once from the brick's own voxels, then all six faces' layers are
-// masked from that table. Within the brick both sides of a face use the same
-// dilated cells; across a brick boundary the face hides only behind complete
-// coverage, so mixed levels between neighbours stay watertight. Exposure is a
-// property of the cell, so it is decided from the table, but the identity a
-// quad carries is the exposed face's own mean normal, read from the cell's
-// voxels once per exposed face; an interior cell reads none.
-fn meshBuildLevel(payload:u32,base:vec3u,scale:u32,depth:u32,level:u32,n:u32){
-  let m=n>>level;let cell=scale<<level;
-  var cells:array<u32,64>;
-  for(var i=0u;i<m*m*m;i+=1u){cells[i]=meshCellMaterial(payload,vec3u(i%m,(i/m)%m,i/(m*m)),level,n);}
-  let packedBase=meshPackFace(0u,level,depth);
-  for(var face=0u;face<6u;face+=1u){
-    let axis=face/2u;let u=(axis+1u)%3u;let v=(axis+2u)%3u;let positive=(face&1u)!=0u;
-    for(var layer=0u;layer<m;layer+=1u){
-      var mask:array<u32,64>;
-      for(var y=0u;y<m;y+=1u){for(var x=0u;x<m;x+=1u){
-        let index=x+y*m;mask[index]=0u;var c=vec3u(0u);c[axis]=layer;c[u]=x;c[v]=y;
-        if(cells[c.x+c.y*m+c.z*m*m]==0u){continue;}
-        let boundary=select(layer==0u,layer==m-1u,positive);
-        var exposed=false;
-        if(boundary){
-          var p=vec3f(base+c*cell);p[u]+=f32(cell)*0.5;p[v]+=f32(cell)*0.5;
-          p[axis]+=select(-0.25,f32(cell)+0.25,positive);
-          exposed=!meshNeighbourCovered(p,cell);
-        }else{
-          var adjacent=c;adjacent[axis]=u32(i32(layer)+select(-1,1,positive));
-          exposed=cells[adjacent.x+adjacent.y*m+adjacent.z*m*m]==0u;
-        }
-        if(exposed){mask[index]=meshFaceIdentity(payload,c,level,n,face);meshMaskAgreement[index]=meshFaceAgreement;}
-      }}
-      meshEmitMask(&mask,m,base,cell,face,layer,packedBase|face);
-    }
-  }
-}
-// One face layer or one coarse level of one brick.
+${contours ? svoContourMeshWGSL : ""}
+${svoVoxelMeshWGSL(W.errorFlags, contours)}
+${contours ? svoDualContouringMeshWGSL + svoDualMarchingCubesMeshWGSL : ""}
 fn meshExtractJob(leafIndex:u32,local:u32){
-  let n=dry.mapping.brickSize;
-  let leaf=svoLeafLoad(leafIndex).topology;
-  let node=svoNodeLoad(leaf.x);
-  let scale=1u<<(dry.mapping.maximumDepth-node.address.z);
-  let base=svoDecodeMorton(node.address.x,node.address.y,node.address.z)*(scale*n);
-  if(local>=6u*n){meshBuildLevel(leaf.y,base,scale,node.address.z,local-6u*n+1u,n);return;}
-  // Face/layer masks are independent: each invocation owns exactly one.
-  // Greedy rectangles and mixed-level boundary subdivision are unchanged;
-  // only append order within a brick's range may differ.
-  let face=local/n;let layer=local%n;
-  let axis=face/2u;let u=(axis+1u)%3u;let v=(axis+2u)%3u;
-  let packedFace=meshPackFace(face,0u,node.address.z);
-  var mask:array<u32,64>;
-  for(var y=0u;y<n;y+=1u){for(var x=0u;x<n;x+=1u){
-    let m=x+y*n;mask[m]=0u;var c=vec3u(0u);c[axis]=layer;c[u]=x;c[v]=y;
-    let voxel=svoBrickVoxelIndex(leaf.y,c,n);if(voxel>=dryVoxelCapacity()){continue;}
-    let identity=meshMergeIdentity(sceneIdentityAt(voxel));if(!sceneIdentitySolid(identity)){continue;}
-    ${contours ? `let code=meshContourCode(voxel);
-    if(code!=0u){
-      // The first face job for this cell emits its entire closed clipped cube.
-      if(face==0u){meshEmitContour(base+c*scale,scale,node.address.z,sceneIdentityAt(voxel),code);}
-      continue;
-    }` : ""}
-    var origin=base+c*scale;origin[axis]+=select(0u,scale,(face&1u)!=0u);
-    let boundary=select(layer==0u,layer==n-1u,(face&1u)!=0u);
-    if(boundary){
-      var p=vec3f(origin);p[u]+=f32(scale)*0.5;p[v]+=f32(scale)*0.5;p[axis]+=select(-0.25,0.25,(face&1u)!=0u);
-      let neighbour=meshRegionAt(p);
-      let fits=f32(origin[u])>=neighbour.origin[u]&&f32(origin[v])>=neighbour.origin[v]
-        &&f32(origin[u]+scale)<=neighbour.origin[u]+neighbour.size&&f32(origin[v]+scale)<=neighbour.origin[v]+neighbour.size;
-      if(fits){if((!sceneIdentitySolid(neighbour.identity)||neighbour.contour!=0u)){mask[m]=identity;}}
-      else{meshBoundary(origin,scale,face,identity,packedFace);}
-      continue;
-    }
-    var adjacent=c;adjacent[axis]=u32(i32(layer)+select(-1,1,(face&1u)!=0u));
-    let other=svoBrickVoxelIndex(leaf.y,adjacent,n);
-    if(!sceneIdentitySolid(sceneIdentityAt(other))||meshContourCode(other)!=0u){mask[m]=identity;}
-  }}
-  meshEmitMask(&mask,n,base,scale,face,layer,packedFace);
+  ${contours ? `if(meshDcEnabled()){
+    let leaf=svoLeafLoad(leafIndex).topology;let node=svoNodeLoad(leaf.x);
+    let scale=1u<<(dry.mapping.maximumDepth-node.address.z);
+    let base=svoDecodeMorton(node.address.x,node.address.y,node.address.z)*(scale*dry.mapping.brickSize);
+    if(meshDmcEnabled()){meshDmcExtract(base,scale,node.address.z,local,dry.mapping.brickSize);}
+    else{meshDcExtract(base,scale,node.address.z,local,dry.mapping.brickSize);}
+    return;
+  }` : ""}
+  meshVoxelExtractJob(leafIndex,local);
 }
 fn meshStoreDispatch(word:u32,groups:u32){
   atomicStore(&meshState[word],min(groups,65535u));
@@ -775,7 +638,9 @@ fn surfaceMeshPrepare(){
   // Smooth reconstruction has a view-dependent face fallback and cannot be
   // represented by these cached boundary quads. Withhold raster geometry for this unsupported representation.
   if((dry.materialPublication.w&${flatNormalsFlag}u)==0u){atomicStore(&meshState[${W.withheld}],2u);atomicStore(&meshState[${W.drawInstanceCount}],0u);return;}
-  let valid=dryPublicationWord(0u)!=0u&&(dryPublicationWord(1u)&REQUIRED_FIELDS)==REQUIRED_FIELDS;
+  let attachment=atomicLoad(&meshState[${W.hostSurfaceVertices}]);
+  let dualReady=!meshDcEnabled()||((attachment&0x7fffffffu)!=0u&&((attachment&0x80000000u)!=0u)==meshDmcEnabled());
+  let valid=dryPublicationWord(0u)!=0u&&(dryPublicationWord(1u)&REQUIRED_FIELDS)==REQUIRED_FIELDS&&dualReady;
   if(!valid){
     atomicStore(&meshState[${W.usable}],0u);atomicStore(&meshState[${W.drawInstanceCount}],0u);
     atomicStore(&meshState[${W.building}],0u);atomicStore(&meshState[${W.errorFlags}],0u);atomicStore(&meshState[${W.mode}],0u);
@@ -890,7 +755,11 @@ fn surfaceMeshBoxes(@builtin(local_invocation_index) lane:u32){
     for(var i=lane;i<count;i+=64u){
       let leaf=meshMaintenanceDirtyLeaf(i);
       var minimum=vec3u(0xffffffffu);var maximum=vec3u(0u);
-      if(leaf!=MESH_NO_ENTRY&&meshLeafCurrent(leaf)){let box=meshLeafBox(leaf);minimum=box.minimum;maximum=box.maximum;}
+      if(leaf!=MESH_NO_ENTRY&&meshLeafCurrent(leaf)){let box=meshLeafBox(leaf);minimum=box.minimum;maximum=box.maximum;
+        // DC faces depend on cells across both face and diagonal neighbours.
+        // Include the complete two-cell face footprint during replacement.
+        if(meshDcEnabled()){minimum-=min(minimum,vec3u(1u));maximum+=vec3u(1u);}
+      }
       if(individual){
         let out=(base+i)*MESH_BOX_WORDS;
         atomicStore(&meshWork[out],minimum.x);atomicStore(&meshWork[out+1u],minimum.y);atomicStore(&meshWork[out+2u],minimum.z);
@@ -1233,10 +1102,11 @@ struct MeshVertexOut {
   @builtin(position) position:vec4f,
   @location(0) world:vec3f,
   @location(1) @interpolate(flat) identity:u32,
-  @location(2) @interpolate(flat) normal:vec3f,
+  @location(2) normal:vec3f,
   @location(3) @interpolate(flat) level:u32,
   @location(4) @interpolate(flat) agreement:f32,
   @location(5) @interpolate(flat) cellPixels:f32,
+  @location(6) @interpolate(flat) geometricNormal:vec3f,
 }
 @vertex fn surfaceMeshVertex(@builtin(vertex_index) vertex:u32,@builtin(instance_index) instance:u32)->MeshVertexOut{
   let quad=meshDrawnQuad(${culling ? "meshVisible[instance]" : "instance"});
@@ -1258,9 +1128,14 @@ struct MeshVertexOut {
     let a=meshTrianglePoint(quad,quad.extent.x);let b=meshTrianglePoint(quad,quad.extent.y);let c=meshTrianglePoint(quad,quad.extent.z);
     normal=normalize(cross((b-a)*dry.mapping.cellSize,(c-a)*dry.mapping.cellSize));
   }` : ""}
+  let geometricNormal=normal;
+  ${contours ? `if(meshDualTriangle(quad)&&(quad.face&0x20000000u)==0u){
+    let region=meshRegionAt((world-dry.mapping.worldOrigin)/dry.mapping.cellSize);
+    if(sceneIdentityHasNormal(region.identity)){normal=sceneIdentityNormal(region.identity);}
+  }` : ""}
   let brickLattice=dry.mapping.brickSize*(1u<<(dry.mapping.maximumDepth-meshQuadDepth(quad.face)));
   return MeshVertexOut(position,world,quad.identity,normal,meshQuadLevel(quad.face),f32((quad.face>>11u)&255u)/255.0,
-    meshCellFootprint(meshQuadBrickBase(quad),brickLattice));
+    meshCellFootprint(meshQuadBrickBase(quad),brickLattice),geometricNormal);
 }
 struct MeshSurfaceOut {
   @location(0) packedSurface:vec4u,@location(1) identityMedia:vec4u,
@@ -1278,8 +1153,8 @@ fn meshFilteredNormal(face:vec3f,baked:vec3f,level:u32,agreement:f32,cellPixels:
 }
 @fragment fn surfaceMeshFragment(input:MeshVertexOut)->MeshSurfaceOut{
   let camera=dryRasterPrimaryCamera();let rd=normalize(input.world-camera[0]);let t=length(input.world-camera[0]);
-  var normal=input.normal;
-  if(!meshContoursEnabled()&&dry.meshFilter.x>0.5&&dry.meshFilterNormals.x>0.5&&dry.meshFilter.y>0.0){
+  var normal=normalize(input.normal);
+  if(!meshContoursEnabled()&&!meshDcEnabled()&&dry.meshFilter.x>0.5&&dry.meshFilterNormals.x>0.5&&dry.meshFilter.y>0.0){
     // Filtered detail shades the baked normal: a coarse quad carries its cells'
     // mean, an exact quad reads the voxel just behind its face. The surface
     // itself stays the quad, so depth is unchanged; a baked normal facing away
@@ -1294,14 +1169,17 @@ fn meshFilteredNormal(face:vec3f,baked:vec3f,level:u32,agreement:f32,cellPixels:
       normal=meshFilteredNormal(input.normal,sceneIdentityNormal(word),input.level,input.agreement,input.cellPixels);
     }
   }
-  let shading=dryShadingNormal(input.identity,normal);
-  let hit=DryHit(t,shading.normal,sceneIdentityMaterial(input.identity),DRY_OWNER_NONE,shading.featureId,DRY_GBUFFER_FIELD_VOXEL,DRY_GBUFFER_MOTION_STATIC,0u,0.0,vec3u(0u));
+  var shading=dryShadingNormal(input.identity,normal);
+  if(meshDcEnabled()){shading=DryShadingNormal(normal,SVO_FEATURE_SMOOTH);}
+  // Tag reconstructed receivers for the shared lighting encoder. Their implicit
+  // no-owner slot carries the geometric normal through both deferred passes.
+  let hit=DryHit(t,shading.normal,sceneIdentityMaterial(input.identity),DRY_OWNER_NONE,shading.featureId,DRY_GBUFFER_FIELD_VOXEL,DRY_GBUFFER_MOTION_STATIC,0u,0.0,vec3u(0u,0u,select(0u,1u,meshDcEnabled()||meshContoursEnabled())));
   // The quad is the surface; the baked normal is only how it is lit. Publishing
   // the face as the geometric normal is what lets the deferred lighting start
   // its shadow and contact rays outside this cube: biased along a baked normal
   // that leans toward the light, a silhouette's side face fires its shadow ray
   // back through its own solid and reads as black.
-  var out=dryRasterPrimaryFacedSurface(hit,input.normal,camera[0],rd,camera[1],SVO_GBUFFER_PRODUCER_BRICK);
+  var out=dryRasterPrimaryFacedSurface(hit,input.geometricNormal,camera[0],rd,camera[1],SVO_GBUFFER_PRODUCER_BRICK);
   // Raster material bits 27..30 carry level+1 for the read-only LOD overlay.
   // Production mesh shading masks these bits in drySplitIdentityAt.
   out.opaqueIdentity.x|=(input.level+1u)<<27u;

@@ -254,7 +254,7 @@ export function sparseVoxelDrySceneBindGroupLayoutEntries(
   const computeBindings = new Set([0, 1, 2, 3, 4, 5, 6, 9, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]);
   // Raster analytic impostors consume the camera/body uniforms, their scene
   // record arena, and the live primitive-count/structural-offset parameters.
-  const vertexBindings = new Set([0, 1, 2, 4, 9]);
+  const vertexBindings = new Set([0, 1, 2, 3, 4, 9]);
   const usesDerivedTraversal = traversalMode === "compact" || traversalMode === "wide" || traversalMode === "hybrid";
   return SVO_DRY_SCENE_BINDING_CONTRACT
     .filter(({ binding }) => binding !== 5 || usesDerivedTraversal)
@@ -1927,6 +1927,7 @@ export class SparseVoxelDrySceneRenderer {
     const bound = maintenance !== undefined && this.surfaceMeshMaintenanceBuffer === maintenance.buffer;
     this.device.queue.writeBuffer(this.surfaceMeshState, W.hostMaintenance * 4,
       new Uint32Array([bound ? 1 : 0, this.surfaceMeshWorkLeafCapacity, this.surfaceMeshBackGeneration]));
+    this.device.queue.writeBuffer(this.surfaceMeshState, W.hostSurfaceVertices * 4, new Uint32Array([bound ? ((maintenance?.surfaceVertexOffsetBytes ?? 0) / 4) | (maintenance?.surfaceVertexKind === "dual-marching-cubes" ? 0x80000000 : 0) : 0]));
     this.device.queue.writeBuffer(this.surfaceMeshState, W.hostMaintenanceStateWords * 4,
       new Uint32Array([(maintenance?.stateOffsetBytes ?? 0) / 4, (maintenance?.dirtyBrickOffsetBytes ?? 0) / 4, maintenance?.dirtyBrickCapacity ?? 0]));
   }
@@ -5055,7 +5056,7 @@ export class SparseVoxelDrySceneRenderer {
     floats.set([Number(t.surfaceMeshFilteringEnabled), t.surfaceMeshNormalStrength,
       t.surfaceMeshMaxCoarsening, t.surfaceMeshLodHysteresis,
       Number(t.surfaceMeshNormalSmoothing), t.surfaceMeshNormalAgreement,
-      Number(t.surfaceMeshPreserveCloseNormals), t.surfaceMeshContours ? 1 + t.surfaceMeshContourInflation : 0], offset);
+      Number(t.surfaceMeshPreserveCloseNormals), t.surfaceMeshing === "dual-marching-cubes" ? 3 : t.surfaceMeshing === "dual-contouring" ? 2 : t.surfaceMeshContours ? 1 + t.surfaceMeshContourInflation : 0], offset);
   }
 
   private writeLodParams(): void {

@@ -1,3 +1,5 @@
+import { svoDualMarchingCubesFitWGSL } from "../svo/features/meshing/dual-marching-cubes";
+import { svoDualContouringFitWGSL } from "../svo/features/meshing/dual-contouring";
 import { svoRenderTerrainSamplingWGSL } from "../svo/features/construction/svo-render-terrain-sampling";
 import { svoCellContourFitWGSL } from "../svo/features/construction/svo-cell-contour-fit";
 import { LIVE_TERRAIN_PATCH_RESERVE, packTerrainOverlay, terrainOverlayPatches } from "./live-terrain-overlay";
@@ -478,6 +480,8 @@ export interface SparseSceneCellSample {
 export interface SparseSceneProxyVoxelizerOptions {
   /** Bake conservative native-cell raster contours in packed dry payloads. */
   surfaceContours?: boolean;
+  surfaceDualContouring?: boolean;
+  surfaceDualMarchingCubes?: boolean;
   cellSize: SparseSceneVector3;
   /** World-space position of cell-coordinate (0, 0, 0)'s minimum corner. */
   worldOrigin?: SparseSceneVector3;
@@ -1606,10 +1610,13 @@ export function sparseSceneProxyVoxelizationShaderFor(
   solidWorldLayout?: WebgpuSolidWorldPageLayout,
   renderTerrainLayout?: RenderTerrainShaderLayout,
   surfaceContours = false,
+  dualOffsetWords = 0,
+  dualMarchingCubes = false,
 ): string {
   const dry = profile === "dry";
   const format = dry ? sceneGeometryFormat : "f32x2";
   const mode = dry ? leafPayloadMode : "dense";
+  const dual = dualOffsetWords > 0 && dry;
   const contours = surfaceContours && dry && format === "f16-unorm8";
   // A payload word shared by more than one invocation of this dispatch needs an
   // atomic binding. Atomicity used to be keyed on the geometry format as well,
@@ -2036,6 +2043,26 @@ fn primitiveDistance(primitive: ScenePrimitive, world: vec3f) -> f32 {
  * its only feature is the shape itself. Mirrors
  * \`sparseScenePrimitiveFeatureRadius\`.
  */
+${dual ? `
+fn dcField(world:vec3f,dirty:u32,count:u32)->f32{
+  var value=1e20;
+  ${renderTerrainLayout ? `let origin=vec2f(rtFloat(RT_BASE),rtFloat(RT_BASE+1u));let pitch=vec2f(rtFloat(RT_BASE+2u),rtFloat(RT_BASE+3u));
+  ${dualMarchingCubes ? `// A finite exterior is required by dual-edge interpolation. Preserve the
+  // bounded heightfield's sign while continuing its field through the halo.
+  let high=origin+pitch*vec2f(f32(RT_WIDTH),f32(RT_DEPTH));let half=.5*(high-origin);
+  let q=abs(world.xz-(origin+half))-half;
+  let lateral=length(max(q,vec2f(0)))+min(max(q.x,q.y),0.);
+  value=max(world.y-rtSurface(clamp(world.xz,origin,high)).x,lateral);` : `if(all(world.xz>=origin)&&all(world.xz<=origin+pitch*vec2f(f32(RT_WIDTH),f32(RT_DEPTH)))){value=world.y-rtSurface(world.xz).x;}` }
+  for(var i=0u;i<min(atomicLoad(&maintenance[RT_BASE+7u]),RT_PATCH_CAPACITY);i+=1u){
+    let at=RT_PATCH_BASE+i*8u;let lo=vec3f(rtFloat(at),rtFloat(at+1u),rtFloat(at+2u));let hi=vec3f(rtFloat(at+4u),rtFloat(at+5u),rtFloat(at+6u));
+    let d=boxDistance(world-.5*(lo+hi),.5*(hi-lo));
+    if(atomicLoad(&maintenance[at+3u])==0u){value=max(value,-d);}else{value=min(value,d);}
+  }` : solidWorldLayout ? `let solid=sampleSolidWorld(world,params.cell.xyz);if(solid.fraction>0.){value=-max(abs(solid.distance),1e-6);}` : ""}
+  for(var i=0u;i<count;i+=1u){let p=primitives[atomicLoad(&maintenance[candidateOffset()+dirty*candidatesPerBrick()+i])];value=min(value,primitiveDistance(p,world));}
+  return value;
+}
+${dualMarchingCubes ? svoDualMarchingCubesFitWGSL : svoDualContouringFitWGSL}
+` : ""}
 fn primitiveFeatureRadius(primitive: ScenePrimitive) -> f32 {
   if (scenePrimitiveType(primitive) == ${SPARSE_SCENE_PRIMITIVE_TYPES.cup}u) { return primitive.extentIdentity.z; }
   if (scenePrimitiveType(primitive) != ${SPARSE_SCENE_PRIMITIVE_TYPES["smooth-union-cluster"]}u) { return 1e20; }
@@ -2409,6 +2436,20 @@ ${contours ? `  var contourCode=fitSceneContour(world,cellExtent,bestNormal,prim
   // Distinguish a proved-empty cell from an unsupported/full-cube contour.
   // Clear all occupancy consumers together, including identity and band masks.
   if(contourCode==255u){primitiveFraction=0.0;contourCode=0u;}` : ""}
+${dual && dualMarchingCubes ? `
+  let fitted=dmcFit(world-.5*cellExtent,cellExtent,dirtyIndex,candidateCount);
+  let dcAt=${dualOffsetWords}u+output*4u;
+  let point=(world-.5*cellExtent+fitted.point*cellExtent-params.worldOrigin.xyz)/params.cell.xyz;
+  atomicStore(&maintenance[dcAt],bitcast<u32>(point.x));atomicStore(&maintenance[dcAt+1u],bitcast<u32>(point.y));atomicStore(&maintenance[dcAt+2u],bitcast<u32>(point.z));
+  atomicStore(&maintenance[dcAt+3u],bitcast<u32>(fitted.value));
+  if(fitted.value<0.){primitiveFraction=max(primitiveFraction,1.0/255.0);}
+  if(primitiveFraction>0.){bestNormal=fitted.normal;}
+` : dual ? `  let fitted=dcFit(world-.5*cellExtent,cellExtent,dirtyIndex,candidateCount);
+  let dcAt=${dualOffsetWords}u+output*4u;
+  let point=(world-.5*cellExtent+fitted.point*cellExtent-params.worldOrigin.xyz)/params.cell.xyz;
+  atomicStore(&maintenance[dcAt],bitcast<u32>(point.x));atomicStore(&maintenance[dcAt+1u],bitcast<u32>(point.y));atomicStore(&maintenance[dcAt+2u],bitcast<u32>(point.z));
+  atomicStore(&maintenance[dcAt+3u],fitted.signs|(svoGBufferPackNormalOct8(fitted.normal)<<8u)|(fitted.sharp<<24u));
+  if(fitted.signs!=0u&&fitted.signs!=255u){primitiveFraction=max(primitiveFraction,1.0/255.0);bestNormal=fitted.normal;}` : ""}
   // The scene lane is exclusively owned by this transaction. Fluid and
   // velocity live in disjoint payload lanes, so every material ID—including
   // terrain and rigid-body IDs below the scenery range—can update atomically.
@@ -2833,6 +2874,8 @@ export interface SparseSceneMaintenanceBinding {
   stateOffsetBytes: number;
   dirtyBrickOffsetBytes: number;
   dirtyBrickCapacity: number;
+  surfaceVertexOffsetBytes?: number;
+  surfaceVertexKind?: "dual-contouring" | "dual-marching-cubes";
 }
 
 /** Maintenance stages, in encode order, as timestamped by {@link SparseSceneMaintenanceTimestamps}. */
@@ -2889,6 +2932,7 @@ export class SparseSceneProxyVoxelizer {
   private readonly pipelineLayout: GPUPipelineLayout;
   private readonly label: string;
   private readonly bindGroup: GPUBindGroup;
+  private readonly dualOffsetWords: number;
   private readonly options: Readonly<SparseSceneProxyVoxelizerOptions>;
   private readonly primitiveBoundsOffsetWords = 0;
   private readonly dirtyRegionOffsetWords: number;
@@ -3011,10 +3055,13 @@ export class SparseSceneProxyVoxelizer {
       width: options.renderTerrain.dimensions[0],
       depth: options.renderTerrain.dimensions[1],
     }) : undefined;
-    const arenaWords = checkedArenaWords(
+    const baseArenaWords = checkedArenaWords(
       this.renderTerrainLayout?.totalWords
         ?? this.solidWorldLayout?.totalWords ?? solidWorldBaseWords,
       "Scene maintenance arena");
+    this.dualOffsetWords = (options.surfaceDualContouring || options.surfaceDualMarchingCubes) ? baseArenaWords : 0;
+    const arenaWords = baseArenaWords + ((options.surfaceDualContouring || options.surfaceDualMarchingCubes) ? tree.voxelCapacity * 4 : 0);
+    if(arenaWords * 4 > device.limits.maxStorageBufferBindingSize) throw new RangeError("Meshing construction arena exceeds GPU storage limit; reduce render grid resolution");
     this.brickBudget = nonNegativeInteger(options.bricksPerFrameBudget ?? 0, "Bricks per frame budget");
     const maintenanceDispatchBytes = 4 * 3 * 4;
     this.allocatedBytes = primitiveBytes + arenaWords * 4 + maintenanceDispatchBytes + 128;
@@ -3086,6 +3133,8 @@ export class SparseSceneProxyVoxelizer {
       stateOffsetBytes: this.stateOffsetWords * 4,
       dirtyBrickOffsetBytes: this.dirtyBrickOffsetWords * 4,
       dirtyBrickCapacity,
+      surfaceVertexOffsetBytes: this.dualOffsetWords ? this.dualOffsetWords*4 : undefined,
+      surfaceVertexKind: this.dualOffsetWords ? (this.options.surfaceDualMarchingCubes ? "dual-marching-cubes" : "dual-contouring") : undefined,
     });
   }
 
@@ -3096,7 +3145,7 @@ export class SparseSceneProxyVoxelizer {
       code: sparseSceneProxyVoxelizationShaderFor(
         this.tree.payloadProfile, this.tree.sceneGeometryFormat,
         this.tree.leafPayloadMode, this.solidWorldLayout,
-        this.renderTerrainLayout, this.options.surfaceContours === true),
+        this.renderTerrainLayout, this.options.surfaceContours === true, this.dualOffsetWords, this.options.surfaceDualMarchingCubes === true),
     });
     const pipeline = (entryPoint: string, stage: string) => this.device.createComputePipelineAsync({
       label: `${this.label} ${stage} pipeline`, layout: this.pipelineLayout,
@@ -3207,16 +3256,24 @@ export class SparseSceneProxyVoxelizer {
     const fieldProgramArena = tapes > 0
       ? packSparseSceneFieldProgramArena(publication.primitives, this.fieldProgramCapacity)
       : undefined;
-    const bounds = publication.primitives.map(sparseScenePrimitiveBounds);
+    // DMC needs positive function samples in cells outside the solid's AABB.
+    // Expand both candidate indexing and edit invalidation, never the SDF.
+    const halo=this.options.surfaceDualMarchingCubes ? Math.max(...this.options.cellSize) : 0;
+    const samplingBounds=(bounds:SparseSceneAxisAlignedBounds):SparseSceneAxisAlignedBounds=>halo===0 ? bounds : ({
+      minimum:bounds.minimum.map(v=>v-halo) as unknown as SparseSceneVector3,
+      maximum:bounds.maximum.map(v=>v+halo) as unknown as SparseSceneVector3,
+    });
+    const bounds = publication.primitives.map(p=>samplingBounds(sparseScenePrimitiveBounds(p)));
+    const dirtyRegions=publication.dirtyRegions.map(samplingBounds);
     const primitiveBounds = packBounds(bounds);
-    const dirtyBounds = packBounds(publication.dirtyRegions);
+    const dirtyBounds = packBounds(dirtyRegions);
     const worldOrigin = (this.options.worldOrigin ?? [0, 0, 0]) as SparseSceneVector3;
     // The dirty regions' brick-cell volume is a strict upper bound on the leaves
     // they can dirty (leaves are disjoint unions of those cells), so it decides
     // both the indexed invalidation dispatch and how many budgeted frames this
     // revision needs — without a readback and without ever under-planning.
     const regionCells = this.options.finestLevel === undefined ? undefined : planSparseSceneRegionCells(
-      publication.dirtyRegions, worldOrigin, this.options.cellSize, this.tree.brickSize, this.options.finestLevel,
+      dirtyRegions, worldOrigin, this.options.cellSize, this.tree.brickSize, this.options.finestLevel,
     );
     const upperBoundDirtyBricks = Math.min(
       this.options.dirtyBrickCapacity, regionCells?.cellCount ?? this.options.dirtyBrickCapacity,

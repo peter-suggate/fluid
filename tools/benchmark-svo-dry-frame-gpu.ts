@@ -133,7 +133,7 @@ import { createHeroGardenHoseStressScene } from "../lib/core/hero-garden-stress-
 import { sceneDefinitionTakesLattice, sceneDocumentAtLattice } from "../lib/core/scene-definition";
 import { getSceneDefinition, getScenePreset } from "../lib/core/scenes";
 import type { SvoConeTracingMode } from "../lib/svo/pipeline/svo-render-options";
-import { DEFAULT_SVO_RENDER_TUNING, svoEnvironmentTreeRefinementDepth, svoSceneryDetailCellSize_m, SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM } from "../lib/svo/pipeline/svo-render-tuning";
+import { type SvoRenderTuning, DEFAULT_SVO_RENDER_TUNING, svoEnvironmentTreeRefinementDepth, svoSceneryDetailCellSize_m, SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM } from "../lib/svo/pipeline/svo-render-tuning";
 import { type SvoConeRadianceReconstruction } from "../lib/svo/features/radiance/definition";
 import { effectiveSvoScreenSpaceThresholdPixels, SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "../lib/svo/features/lighting-visibility/svo-screen-space-termination";
 import { WebGPULiveSvoScene } from "../lib/svo/features/scene-publication/webgpu-live-svo-scene";
@@ -943,6 +943,8 @@ const solver = await WebGPULiveSvoScene.create(
   {
     ...(renderBrickSize === undefined ? {} : { renderBrickSize }),
     surfaceContours: process.env.FLUID_SVO_DRY_FRAME_MESH_CONTOURS === "1",
+    surfaceDualContouring: process.env.FLUID_SVO_DRY_FRAME_MESHER === "dual-contouring",
+    surfaceDualMarchingCubes: process.env.FLUID_SVO_DRY_FRAME_MESHER === "dual-marching-cubes",
     environmentRefinementDepth,
     radianceFeedback: radianceFeedbackEnabled,
     derivedTraversalStructures,
@@ -1037,7 +1039,8 @@ renderer.setRigidBodyCount(rasterRigidForced ? 12 : bodies.count);
 // surface mesh, so it is the only one that can price the toggle.
 const meshLodPixelsRaw = Number(process.env.FLUID_SVO_DRY_FRAME_MESH_LOD_PIXELS ?? DEFAULT_SVO_RENDER_TUNING.surfaceMeshLodPixels);
 const meshLodPixels = Number.isFinite(meshLodPixelsRaw) ? Math.min(Math.max(meshLodPixelsRaw, 0), 8) : DEFAULT_SVO_RENDER_TUNING.surfaceMeshLodPixels;
-const configuredRenderTuning = { ...DEFAULT_SVO_RENDER_TUNING,
+const configuredRenderTuning: SvoRenderTuning = { ...DEFAULT_SVO_RENDER_TUNING,
+  surfaceMeshing: process.env.FLUID_SVO_DRY_FRAME_MESHER === "dual-marching-cubes" ? "dual-marching-cubes" : process.env.FLUID_SVO_DRY_FRAME_MESHER === "dual-contouring" ? "dual-contouring" : process.env.FLUID_SVO_DRY_FRAME_MESH_CONTOURS === "1" ? "contours" : "voxels",
   surfaceMeshContours: process.env.FLUID_SVO_DRY_FRAME_MESH_CONTOURS === "1",
   surfaceMeshContourInflation: Number(process.env.FLUID_SVO_DRY_FRAME_CONTOUR_INFLATION ?? 0), coneLightingScale: coneScale,
   coneRadianceReconstruction: radianceReconstruction, maximumShadedLights, surfaceMeshLodPixels: meshLodPixels, surfaceMeshFilteringEnabled: process.env.FLUID_SVO_DRY_FRAME_MESH_LOD_PIXELS !== undefined ? meshLodPixels > 0 : DEFAULT_SVO_RENDER_TUNING.surfaceMeshFilteringEnabled,
@@ -2225,6 +2228,7 @@ const result = {
     worldBuild_ms,
     cellContourCensus,
     surfaceMeshContours: configuredRenderTuning.surfaceMeshContours,
+    surfaceMeshing: configuredRenderTuning.surfaceMeshing,
     surfaceMeshContourInflation: configuredRenderTuning.surfaceMeshContourInflation,
     presetId: scenePresetId,
     sceneId: scene.sceneId,

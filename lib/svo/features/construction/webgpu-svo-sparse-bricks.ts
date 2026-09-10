@@ -157,6 +157,8 @@ import {
 
 export interface OctreeSparseBrickWorldOptions {
   surfaceContours?: boolean;
+  surfaceDualContouring?: boolean;
+  surfaceDualMarchingCubes?: boolean;
   buildRenderTerrainGpu?: (cellSize: readonly [number,number,number], materialId: number) => Promise<import("../scene-publication/svo-render-solid-field").SvoRenderTerrainField | undefined>;
   classifyEnvironmentNodesGpu?: (input: import("./webgpu-svo-node-classification").SvoNodeClassificationInput) => Promise<import("../../../core/adaptive-sparse-brick-plan").SparseBrickEnvironmentClassification[]>;
   /** Async renderer startup selection; the synchronous constructor retains the CPU oracle. */
@@ -1484,7 +1486,7 @@ export class OctreeSparseBrickWorld {
       nodeEdge_m.push(refinedBrickEdge.map((value) => value * scale));
     }
     let renderTerrain: import("../scene-publication/svo-render-solid-field").SvoRenderTerrainField | undefined;
-    if (dryWorld && (refinementDepth > 0 || options.surfaceContours === true)) {
+    if (dryWorld && (refinementDepth > 0 || options.surfaceContours === true || (options.surfaceDualContouring === true || options.surfaceDualMarchingCubes === true))) {
       if (options.buildRenderTerrainGpu) yield options.buildRenderTerrainGpu(renderCellSize, SOLID_WORLD_TERRAIN_MATERIAL_ID)
         .then(field => { renderTerrain = field; });
       renderTerrain ??= yield* buildSvoRenderTerrainFieldSteps(scene, renderCellSize, SOLID_WORLD_TERRAIN_MATERIAL_ID);
@@ -1647,13 +1649,14 @@ export class OctreeSparseBrickWorld {
         retainedRegions: [...solidWorldBounds, ...scene.rigidBodies.flatMap((body, ownerId) => body.motion === "static"
           ? [sparseScenePrimitiveBounds(sparseScenePrimitiveForRigidBody(body, ownerId))] : [])],
         worldOrigin, cellSize:renderCellSize, brickSize, brickDimensions:refinedBrickDimensions, maximumDepth,
+        haloCells: options.surfaceDualMarchingCubes ? 1 : 0,
       }).then(result => { gpuOccupancy = result; });
     }
-    const primitiveBricks = gpuOccupancy ? [] : (refinementDepth > 0
+    const primitiveBricks = gpuOccupancy ? [] : (refinementDepth > 0 || options.surfaceDualMarchingCubes
       ? yield* liveSceneBrickCoordinatesForRegionsSteps(
         environmentPrimitives.map((primitive) => ({
-          minimum: [primitive.aabb_m.min.x, primitive.aabb_m.min.y, primitive.aabb_m.min.z] as const,
-          maximum: [primitive.aabb_m.max.x, primitive.aabb_m.max.y, primitive.aabb_m.max.z] as const,
+          minimum: [primitive.aabb_m.min.x, primitive.aabb_m.min.y, primitive.aabb_m.min.z].map(v=>v-(options.surfaceDualMarchingCubes ? Math.max(...renderCellSize) : 0)) as [number,number,number],
+          maximum: [primitive.aabb_m.max.x, primitive.aabb_m.max.y, primitive.aabb_m.max.z].map(v=>v+(options.surfaceDualMarchingCubes ? Math.max(...renderCellSize) : 0)) as [number,number,number],
         })),
         worldOrigin, renderCellSize, brickSize, refinedBrickDimensions)
       : sceneDomain.proxyBrickCoordinates.slice(0, environmentPrimitives.length).flat());
@@ -1699,9 +1702,9 @@ export class OctreeSparseBrickWorld {
      * sat in the one place between two yield points where nothing could
      * interrupt it, and it was the longest such block in the whole build.
      */
-    const reachablePrimitiveBricks = gpuOccupancy ? [] : (yield* liveSceneReachableBrickCoordinatesSteps(
+    const reachablePrimitiveBricks = gpuOccupancy ? [] : options.surfaceDualMarchingCubes ? primitiveBricks : (yield* liveSceneReachableBrickCoordinatesSteps(
       primitiveBricks, sceneSolids, worldOrigin, renderCellSize, brickSize, pinnedBricks));
-    const gpuNodeClassification = (refinementDepth > 0 || !dryWorld) && !surfaceRefinement
+    const gpuNodeClassification = (options.surfaceDualContouring !== true && options.surfaceDualMarchingCubes !== true) && (refinementDepth > 0 || !dryWorld) && !surfaceRefinement
       ? options.classifyEnvironmentNodesGpu : undefined;
     reportStage("Plan the adaptive octree");
     yield;
@@ -1754,7 +1757,8 @@ export class OctreeSparseBrickWorld {
       // SolidWorld boxes already claim their exact voxel bricks and therefore
       // need no heightfield-shaped refinement arm.
       refineEnvironmentLeaf: (level, coordinate) =>
-        terrainRefinement?.refineEnvironmentLeaf(level, coordinate)
+        ((options.surfaceDualContouring === true || options.surfaceDualMarchingCubes === true) && level < maximumDepth)
+        || terrainRefinement?.refineEnvironmentLeaf(level, coordinate)
         || solidPatchRefinement?.refineEnvironmentLeaf(level, coordinate)
         || (!gpuNodeClassification && (planarLeafClassifier.requiresFineVoxelResidual(level, coordinate)
         || (surfaceRefinement
@@ -1763,7 +1767,7 @@ export class OctreeSparseBrickWorld {
             ? candidatesInBrick(level, coordinate, OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET)
               > OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET
             : environmentCoarsening?.refineEnvironmentLeaf(level, coordinate) ?? false))),
-      classifyEnvironmentLeaf: planarLeafClassifier,
+      classifyEnvironmentLeaf: (options.surfaceDualContouring || options.surfaceDualMarchingCubes) ? undefined : planarLeafClassifier,
     });
     this.finestLevel = plan.maximumDepth;
     this.sceneBrickDimensions = refinedBrickDimensions;
@@ -1981,6 +1985,8 @@ export class OctreeSparseBrickWorld {
     this.cellSize = renderCellSize;
     this.proxyVoxelizer = new SparseSceneProxyVoxelizer(device, this.tree, {
       surfaceContours: options.surfaceContours,
+      surfaceDualContouring: options.surfaceDualContouring,
+      surfaceDualMarchingCubes: options.surfaceDualMarchingCubes,
       cellSize: this.cellSize,
       worldOrigin: [sceneDomain.worldOrigin_m.x, sceneDomain.worldOrigin_m.y, sceneDomain.worldOrigin_m.z],
       finestLevel: plan.maximumDepth,

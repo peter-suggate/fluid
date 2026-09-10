@@ -37,9 +37,9 @@ test("the packed contract keeps a geometric normal distinct from a shading norma
 test("the mesh fragment is the one producer that publishes a face of its own", () => {
   const source = svoSurfaceMeshWGSL(3, 1 << 7, true);
   // The face of the rasterised quad, never the normal the fragment shades with.
-  assert.match(source, /dryRasterPrimaryFacedSurface\(hit,input\.normal,camera\[0\],rd,camera\[1\],SVO_GBUFFER_PRODUCER_BRICK\)/);
+  assert.match(source, /dryRasterPrimaryFacedSurface\(hit,input\.geometricNormal,camera\[0\],rd,camera\[1\],SVO_GBUFFER_PRODUCER_BRICK\)/);
   // The face -> baked blend and the shading-normal call are untouched by the split.
-  assert.match(source, /let shading=dryShadingNormal\(input\.identity,normal\);/);
+  assert.match(source, /var shading=dryShadingNormal\(input\.identity,normal\);/);
   assert.match(source, /let hit=DryHit\(t,shading\.normal,/);
   // The background entry has one normal and keeps the plain publisher.
   assert.match(source, /return dryRasterPrimarySurface\(hit,camera\[0\],rd,camera\[1\],producer\);/);
@@ -56,11 +56,11 @@ test("every other producer publishes one normal twice, bit for bit", async () =>
   const faced = source.match(/dryRasterPrimaryFacedSurface\([^)]*\)/g) ?? [];
   const distinct = faced.filter((call) => !call.includes("opaque,opaque.normal") && !call.startsWith("dryRasterPrimaryFacedSurface(opaque:"));
   assert.equal(distinct.length, 1, distinct.join(" | "));
-  assert.match(distinct[0], /hit,input\.normal/);
+  assert.match(distinct[0], /hit,input\.geometricNormal/);
   // A cleared face word is what every one of them writes, and it reads back as
   // the shading normal itself rather than a decoded approximation of it.
   assert.match(source, /if\(all\(geometricNormal==shadingNormal\)\)\{return 0u;\}/);
-  assert.match(source, /fn dryGeometricNormal\(hit:DryHit\)->vec3f\{\s*if\(\(hit\.aux\.y&DRY_OPAQUE_FACE_VALID\)==0u\)\{return hit\.normal;\}/);
+  assert.match(source, /fn dryGeometricNormal\(hit:DryHit\)->vec3f\{[\s\S]*?if\(\(hit\.aux\.y&DRY_OPAQUE_FACE_VALID\)==0u\)\{return hit\.normal;\}/);
 });
 
 test("the deferred lighting biases rays along the face and shades with the normal", async () => {
@@ -73,10 +73,10 @@ test("the deferred lighting biases rays along the face and shades with the norma
   // Both entries that rebuild a hit from the split planes: the seam sample and
   // the lighting entry. The reduced composition adds a third, its cached
   // reconstruction entry.
-  assert.equal(source.match(/vec3u\(0u,metadata&DRY_OPAQUE_FACE_MASK,0u\)/g)?.length, 2);
+  assert.equal(source.match(/vec3u\(0u,metadata,0u\)/g)?.length, 2);
   const reduced = createSvoDrySceneFragmentWGSL(0.5, "raster-primary", "bounds", "split", 0, false, true, false, false,
     { surfaceMesh: true, surfaceMeshCulling: true });
-  assert.equal(reduced.match(/vec3u\(0u,metadata&DRY_OPAQUE_FACE_MASK,0u\)/g)?.length, 3);
+  assert.equal(reduced.match(/vec3u\(0u,metadata,0u\)/g)?.length, 5);
   // Shadow rays and the contact hemisphere leave along the face.
   assert.match(source, /dryLightVisibility\(position,geometricNormal,hit\.ownerId,/);
   assert.match(source, /dryContactVisibility\(position,geometricNormal,hit\.featureId,hit\.ownerId\)/);

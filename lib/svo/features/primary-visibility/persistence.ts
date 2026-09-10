@@ -6,8 +6,9 @@ export const primaryQuery = queryRecord<PrimaryQueryState>({
   svoPrimaryTraversal: choiceQuery("svoPrimary", DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal, ["mesh", "traced", "raster"]),
   silhouetteRefinementEnabled: booleanQuery("svoPrimarySeamClosure", DEFAULT_SVO_LIGHTING_OPTIONS.silhouetteRefinementEnabled),
 });
-const primaryTuningFields = queryRecord<Pick<SvoRenderTuning, "surfaceMeshContourInflation" | "surfaceMeshContours" | "surfaceMeshLodPixels" | "surfaceMeshFilteringEnabled" | "surfaceMeshNormalSmoothing" | "surfaceMeshNormalStrength" | "surfaceMeshMaxCoarsening" | "surfaceMeshLodHysteresis" | "surfaceMeshNormalAgreement" | "surfaceMeshPreserveCloseNormals">>({
+const primaryTuningFields = queryRecord<Pick<SvoRenderTuning, "surfaceMeshing" | "surfaceMeshContourInflation" | "surfaceMeshContours" | "surfaceMeshLodPixels" | "surfaceMeshFilteringEnabled" | "surfaceMeshNormalSmoothing" | "surfaceMeshNormalStrength" | "surfaceMeshMaxCoarsening" | "surfaceMeshLodHysteresis" | "surfaceMeshNormalAgreement" | "surfaceMeshPreserveCloseNormals">>({
   surfaceMeshContourInflation: numberQuery("svoMeshContourInflation", 0, 0, 0.5),
+  surfaceMeshing: choiceQuery("svoMesher", "voxels", ["voxels", "contours", "dual-contouring", "dual-marching-cubes"]),
   surfaceMeshContours: booleanQuery("svoMeshContours", false),
   surfaceMeshFilteringEnabled: booleanQuery("svoMeshFilter", false),
   surfaceMeshNormalSmoothing: booleanQuery("svoMeshNormals", true),
@@ -28,7 +29,9 @@ export const primaryTuningQuery = {
     if (query.has("svoMeshLodPixels")) query.set("svoMeshFilter", value.surfaceMeshFilteringEnabled ? "1" : "0");
   },
   read(query: URLSearchParams) {
-    const value = primaryTuningFields.read(query);
+    const raw = primaryTuningFields.read(query);
+    const surfaceMeshing = !query.has("svoMesher") && raw.surfaceMeshContours ? "contours" : raw.surfaceMeshing;
+    const value = {...raw, surfaceMeshing, surfaceMeshContours: surfaceMeshing === "contours"};
     if (!query.has("svoMeshFilter") && query.has("svoMeshLodPixels")) {
       const legacy = Number(query.get("svoMeshLodPixels"));
       return { ...value, surfaceMeshLodPixels: legacy === 0 ? DEFAULT_SVO_RENDER_TUNING.surfaceMeshLodPixels : value.surfaceMeshLodPixels,

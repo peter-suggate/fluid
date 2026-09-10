@@ -1,3 +1,4 @@
+import type { SvoMeshingPluginId } from "../features/meshing/plugins";
 import type { SvoConeTracingMode } from "./svo-render-options";
 import type { SvoConeLightingScale } from "../features/shading/program";
 
@@ -259,6 +260,7 @@ export interface SvoRenderTuning {
   readonly surfaceMeshLodPixels: number;
   /** Native-resolution conservative contour geometry; rebuilds the render source. */
   readonly surfaceMeshContours: boolean;
+  readonly surfaceMeshing: SvoMeshingPluginId;
   /** Expansion per face in cell widths, before clipping; raster mesh only. */
   readonly surfaceMeshContourInflation: number;
   readonly surfaceMeshFilteringEnabled: boolean;
@@ -386,6 +388,7 @@ const balancedTuning: SvoRenderTuning = Object.freeze({
   surfaceMeshLodHysteresis: 0.15,
   surfaceMeshNormalAgreement: 0.5,
   surfaceMeshContours: false,
+  surfaceMeshing: "voxels",
   surfaceMeshContourInflation: 0,
   surfaceMeshPreserveCloseNormals: true,
   primaryLeafVisits: 48,
@@ -594,7 +597,8 @@ export function normalizeSvoRenderTuning(value: SvoRenderTuning): SvoRenderTunin
     surfaceMeshMaxCoarsening: integer(value.surfaceMeshMaxCoarsening ?? 3, 0, 3),
     surfaceMeshLodHysteresis: bounded(value.surfaceMeshLodHysteresis ?? 0.15, 0, 0.3),
     surfaceMeshNormalAgreement: bounded(value.surfaceMeshNormalAgreement ?? 0.5, 0, 1),
-    surfaceMeshContours: value.surfaceMeshContours ?? false,
+    surfaceMeshing: value.surfaceMeshing ?? (value.surfaceMeshContours ? "contours" : "voxels"),
+    surfaceMeshContours: (value.surfaceMeshing ?? (value.surfaceMeshContours ? "contours" : "voxels")) === "contours",
     surfaceMeshContourInflation: Math.round(bounded(value.surfaceMeshContourInflation ?? 0, 0, 0.5) * 100) / 100,
     surfaceMeshPreserveCloseNormals: value.surfaceMeshPreserveCloseNormals ?? true,
     primaryLeafVisits: integer(value.primaryLeafVisits, 1, SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT),

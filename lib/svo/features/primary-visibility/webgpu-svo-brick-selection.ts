@@ -15,6 +15,8 @@ export interface SvoGpuBrickSelectionInput {
   brickSize: number;
   brickDimensions: readonly [number, number, number];
   maximumDepth: number;
+  /** Extra cell shell needed by dual-grid scalar sampling. */
+  haloCells?: number;
   /** Optional exact integer claims from the shared solver-lattice rounding. */
   brickRanges?: readonly import("../../../core/sparse-scene-domain").SparseSceneCellRange[];
   /** SolidWorld and static bodies retain their complete bounded claim. */
@@ -152,7 +154,10 @@ export async function selectSvoBrickOccupancyGpu(device: GPUDevice, build: SvoSc
     levels[level]={dims:d,offset:pyramidWords,words};pyramidWords+=words;
   }
   const edge=cellSize.map(v=>v*brickSize);
-  const margin=(brickSize+2)*0.5*Math.hypot(...cellSize);
+  const haloCells=input.haloCells ?? 0;
+  if(!Number.isInteger(haloCells)||haloCells<0)throw new RangeError("Invalid sampling halo");
+  const halo=haloCells*Math.max(...cellSize);
+  const margin=(brickSize+2+2*haloCells)*0.5*Math.hypot(...cellSize);
   const regions:number[]=[],tasks:number[]=[];let tileCount=0;
   function addRange(lo:number[],hi:number[],primitive:number,retained=0) {
     const size=hi.map((v,a)=>Math.max(0,v-lo[a]+1));const count=size[0]*size[1]*size[2];
@@ -173,10 +178,10 @@ export async function selectSvoBrickOccupancyGpu(device: GPUDevice, build: SvoSc
     const hi=ranges.map((r,a)=>Math.min(dims[a]-1,r[1]));
     addRange(lo,hi,primitive,retained);
   }
-  if(input.brickRanges) for(const range of input.brickRanges) {
+  if(input.brickRanges && haloCells===0) for(const range of input.brickRanges) {
     addRange(range.min.map(v=>Math.max(0,v)),range.maxExclusive.map((v,a)=>Math.min(dims[a]-1,v-1)),0);
-  } else for(const bounds of input.regions)add(bounds,0,0);
-  for(const bounds of input.retainedRegions??[])add(bounds,0,0,1);
+  } else for(const bounds of input.regions)add(bounds,0,halo);
+  for(const bounds of input.retainedRegions??[])add(bounds,0,halo,1);
   const claimTasks=tileCount;
   for(const entry of build.metadata){const {min,max}=entry.coverageBounds.conservative_m;
     add({minimum:[min.x,min.y,min.z],maximum:[max.x,max.y,max.z]},entry.primitiveIndex,margin);}

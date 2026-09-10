@@ -253,6 +253,8 @@ export interface SparseVoxelStructuralRenderSource {
     /** Byte offset of the four-word dirty brick records; word zero is the leaf index. */
     dirtyBrickOffsetBytes: number;
     dirtyBrickCapacity: number;
+    surfaceVertexOffsetBytes?: number;
+    surfaceVertexKind?: "dual-contouring" | "dual-marching-cubes";
   }>;
   capacities: Readonly<{ nodes: number; leaves: number; voxels: number }>;
   /** Accepted initial topology census; runtime fluid growth adds voxel terminals. */

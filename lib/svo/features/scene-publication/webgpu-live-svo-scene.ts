@@ -33,6 +33,8 @@ export const liveSvoSceneResourcePlugin: ResourcePluginDefinition = Object.freez
 
 export interface LiveSvoSceneOptions {
   surfaceContours?: boolean;
+  surfaceDualContouring?: boolean;
+  surfaceDualMarchingCubes?: boolean;
   /** CPU oracle for allocation censuses and paired startup benchmarks. */
   cpuBrickSelection?: boolean;
   /**
@@ -194,6 +196,8 @@ export class WebGPULiveSvoScene implements GPUSolverInstance {
       rendererOnly: true,
       environmentBrickRefinementLevels: options.environmentBrickRefinementLevels,
       surfaceContours: options.surfaceContours,
+      surfaceDualContouring: options.surfaceDualContouring,
+      surfaceDualMarchingCubes: options.surfaceDualMarchingCubes,
       environmentRefinementDepth: options.environmentRefinementDepth,
       environmentPlanarRefinementExemption: options.environmentPlanarRefinementExemption,
       radianceFeedback: options.radianceFeedback,
