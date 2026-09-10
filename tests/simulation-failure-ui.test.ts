@@ -46,3 +46,42 @@ test("a failure check retired during receipt readback never submits against dest
   await check;
   await solver.assertSimulationHealthy();
 });
+
+
+test("presentation health maps its submitted receipt once without another GPU checkpoint", async () => {
+  const encoder = {} as GPUCommandEncoder;
+  let captures = 0, reads = 0;
+  const solver = Object.assign(Object.create(WebGPUAdaptiveMassSolver.prototype), {
+    disposed: false, lastTime_s: 1 / 30, failureReceipts: new Set(),
+    sparseRuntime: {
+      captureSimulationFailure: (actual: GPUCommandEncoder) => {
+        assert.equal(actual, encoder); captures++;
+        return async () => { reads++; return undefined; };
+      },
+      assertSimulationHealthy: () => assert.fail("redundant GPU checkpoint"),
+    },
+  });
+  const read = solver.captureSimulationHealth(encoder);
+  assert.equal(captures, 1); assert.equal(reads, 0);
+  await Promise.all([read(), read()]);
+  assert.equal(reads, 1); assert.equal(solver.failureReceipts.size, 0);
+});
+
+test("presentation health preserves the first GPU failure and retires stale receipts", async () => {
+  let reads = 0, cancellations = 0;
+  const solver = Object.assign(Object.create(WebGPUAdaptiveMassSolver.prototype), {
+    disposed: false, lastTime_s: 1 / 30, failureReceipts: new Set(),
+    scene: { sceneId: "fixture" }, info: {},
+    sparseRuntime: {
+      captureSimulationFailure: () => async () => { reads++; return failure; },
+      cancelTopologyPreparation: () => { cancellations++; },
+    },
+  });
+  await assert.rejects(solver.captureSimulationHealth({} as GPUCommandEncoder)(), /INCIDENCE_RANGE/);
+  assert.equal(cancellations, 1);
+  assert.equal(solver.info.simulationFailure.scene, "fixture");
+  const stale = solver.captureSimulationHealth({} as GPUCommandEncoder);
+  solver.disposed = true;
+  await stale();
+  assert.equal(reads, 2); assert.equal(solver.failureReceipts.size, 0);
+});

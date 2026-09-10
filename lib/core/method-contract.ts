@@ -251,6 +251,8 @@ export interface GPUSolverInstance {
   waitForSimulationReady?(): Promise<void>;
   /** Mandatory completed-frame invariant receipt; rejects on a latched failure. */
   assertSimulationHealthy?(): Promise<void>;
+  /** Capture a health receipt in the caller's submission; read only after submitting it. */
+  captureSimulationHealth?(encoder: GPUCommandEncoder): () => Promise<void>;
   readonly volumeTexture: GPUTexture;
   /** Field the renderer contours; a smooth level set when the solver keeps one separate from volumeTexture. */
   readonly surfaceFieldTexture?: GPUTexture;

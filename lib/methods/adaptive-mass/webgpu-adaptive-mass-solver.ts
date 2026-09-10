@@ -281,7 +281,17 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     }
   }
 
-  private observeSimulationFailure(read: ReturnType<CM12SparseWorldRuntime["captureSimulationFailure"]>, time_s: number): void {
+  captureSimulationHealth(encoder: GPUCommandEncoder): () => Promise<void> {
+    const read = this.sparseRuntime.captureSimulationFailure(encoder);
+    const time_s = this.lastTime_s;
+    let receipt: Promise<void> | undefined;
+    return () => receipt ??= (async () => {
+      await this.observeSimulationFailure(read, time_s);
+      if (!this.disposed && this.simulationFailureError) throw this.simulationFailureError;
+    })();
+  }
+
+  private observeSimulationFailure(read: ReturnType<CM12SparseWorldRuntime["captureSimulationFailure"]>, time_s: number): Promise<void> {
     const receipt = read().then((failure) => {
       if (!failure || this.disposed || this.simulationFailureError) return;
       const contextual = { ...failure, scene: this.scene.sceneId, time_s };
@@ -294,6 +304,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       }
     }).finally(() => { this.failureReceipts.delete(receipt); });
     this.failureReceipts.add(receipt);
+    return receipt;
   }
 
   private physicsTraceSampleId = 0;

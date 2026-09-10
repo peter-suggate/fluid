@@ -3728,7 +3728,15 @@ export class FluidLabRenderer {
     // queue. One end-of-presentation completion therefore retires both without
     // an extra queue-wide promise between simulation and rendering.
     const completedGPUAdvances = this.pendingGPUAdvanceCompletions.splice(0);
+    // Capture after presentation maintenance, including paused live edits. A
+    // later standalone checkpoint waits behind newly queued frames and holds
+    // this presentation's throughput slot for an unnecessary second submission.
+    const readPresentationHealth = this.gpuFluid?.captureSimulationHealth?.(encoder);
     this.device.queue.submit([encoder.finish()]);
+    const presentationHealth = readPresentationHealth?.();
+    // Mapping can overlap completion. Always drain the receipt, even if a
+    // solver rebuild makes the presentation callback below obsolete.
+    void presentationHealth?.catch(() => {});
     this.presentationsInFlight+=1;
     const completedPresentationDevice=this.device;
     let presentationRetired=false;
@@ -3745,7 +3753,8 @@ export class FluidLabRenderer {
         retirePresentation();
         return;
       }
-      await validatedFluid?.assertSimulationHealthy?.();
+      if (presentationHealth) await presentationHealth;
+      else await validatedFluid?.assertSimulationHealthy?.();
       retirePresentation();
       if(!this.disposed&&!this.runtimeFailure&&!this.deviceLost&&this.device===completedPresentationDevice&&this.gpuFluid===validatedFluid){
         this.completedPresentations+=1;
