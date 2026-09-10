@@ -140,13 +140,13 @@ Adjacent native comparisons, with the unsafe donor shortcut already removed:
 | deep hydrostatic, warm-up1/measured3 | 2.294 → 1.573 | 15.925 → 14.549 |
 
 Both scenes retained identical density and gamma hashes. The eight-step
-symmetric-expansion D4 error remained exactly0.014906167984008789, matching the
+symmetric-expansion D4 error remained exactly 0.014906167984008789, matching the
 pre-optimization control. Ten CPU topology/scheduling checks, the stage timing
 contract and the build passed. The full unchanged gate is rerun after cutover.
 
 A diagnostic in the real symmetric scene additionally identified the removed
-shortcut's alias: row13967 had one term (cell3072), while incidence row37472
-had two terms (cells11344 and3072). The shortcut selected the coincident
+shortcut's alias: row 13967 had one term (cell 3072), while incidence row 37472
+had two terms (cells 11344 and 3072). The shortcut selected the coincident
 one-sided row after neighboring sparse support appeared. Geometry equality
 and `rowAccepted` alone did not establish donor authority.
 
@@ -157,22 +157,46 @@ counts actual work in frame15 of the same mini32 run. Its atomics are excluded
 from production and its timings are not performance measurements. Full density
 and gamma hashes still matched the uninstrumented control.
 
-- 65,778 supported faces were traced: 7,770 used one RK substep and58,008
-  needed multiple substeps; total145,504 substeps.
-- 291,008 RK vector interpolations and57,680 terminal scalar interpolations.
-- 336,096 regular dual-cell visits and17,523 mixed visits (visits include
-  locator retries); mixed solves performed82,703 Newton iterations.
-- 228,936 native face donor queries, with21,647 collocated fallback samples.
+- 65,778 supported faces were traced: 7,770 used one RK substep and 58,008
+  needed multiple substeps; total 145,504 substeps.
+- 291,008 RK vector interpolations and 57,680 terminal scalar interpolations.
+- 336,096 regular dual-cell visits and 17,523 mixed visits (visits include
+  locator retries); mixed solves performed 82,703 Newton iterations.
+- 228,936 native face donor queries, with 21,647 collocated fallback samples.
 - No traced face had an exactly zero initial velocity.
 
-Approximately95% of visited dual cells were regular, but the generic sampler
+Approximately 95% of visited dual cells were regular, but the generic sampler
 still rediscovered ownership and geometry at each query. The one-substep-only
-midpoint optimization would cover at most7,770 /291,008 (2.7%) of RK samples
+midpoint optimization would cover at most 7,770 / 291,008 (2.7%) of RK samples
 before its containment checks. There is no stationary-face opportunity in this
 evolved frame. These counts redirect work toward repeated regular midpoints
 across all existing RK substeps; substep counts and physical timestep stay fixed.
 
-The post-cutover full gate again used its unchanged180-second budget: six
-passes, symmetry and mini32 timing failures (44.106 ms against40 ms), four
+The post-cutover full gate again used its unchanged 180-second budget: six
+passes, symmetry and mini32 timing failures (44.106 ms against 40 ms), four
 lane timeouts, and five later lanes not reached. The symmetry error remained
-the pre-optimization0.014906; the new incidence-identity native regression passes.
+the pre-optimization 0.014906; the new incidence-identity native regression passes.
+
+## Rejected midpoint specialization
+
+`cf8babe0` on `codex/face-midpoint-interior-experiment` attempts contiguous
+accepted-leaf donors at every RK midpoint, keeping initial and later first
+samples generic. The manufactured interpolation oracle differed by at most
+1.19e-7, but this was insufficient scene validation: after fifteen mini32
+steps the maximum pointwise differences were 0.768764 density, 2.36627 gamma,
+2.10030 m/s velocity, and 190.706 Pa pressure. Total density differed by only
+-0.008894, and the separate symmetric-scene D4 score remained near its control.
+
+The paired face timing also regressed from 9.9615 to 10.6168 ms, and whole
+advance from 43.778 to 44.3679 ms. The experiment is excluded from production.
+Full fields, donor identity and stage timings are required acceptance evidence;
+similar mass totals and symmetry scores alone cannot establish equivalence.
+
+A follow-up actual-scene diagnostic (`3d7cb9bb`,
+`codex/face-midpoint-owner-diagnostic`) compared every accepted fast midpoint
+with the original generic stencil for fifteen steps. It found zero donor-ID
+mismatches, but 7,739,958 weight-bit differences, with maximum absolute weight
+delta 2.4437904e-6. Instrumented and uninstrumented candidate fields matched.
+This locates the discrepancy in weight computation; it does not establish
+whether reassociation or an omitted geometric branch caused it. The shortcut
+remains rejected.
