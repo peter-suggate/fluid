@@ -80,7 +80,7 @@ test("surface receipts are output-space, generation-stamped, and camera independ
   assert.match(proof, /generationReceipt[\s\S]*==acceptedGeneration/);
   assert.match(proof, /topologyGeneration[\s\S]*==atomicLoad\(&activity\[12\]\)/);
   assert.match(proof, /surfaceProofAcceptedPhi/);
-  assert.match(proof, /surfaceProofVirtualVolumePhi/);
+  assert.match(proof, /surfaceProofVirtualDensityPhi/);
   assert.match(proof, /surfaceProofRestrictionFactor/);
   assert.match(proof,
     /surfaceProofGenerationWord\(surfaceProofTarget\)[\s\S]*activity\[12\]/);

@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-/** Isolate the *production* volume interpolation from page/cache/mesh paths.
+/** Isolate the *production* density interpolation from page/cache/mesh paths.
  * The fixture remains inside one native vertical interface bracket in the ROI.
  */
 export async function sampleCoarseBowlVolumeKernel(device: GPUDevice, nx: number, ny: number,
   nz: number, h: number, width: number, phase: number): Promise<Float32Array> {
   const source = await readFile(new URL("../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url), "utf8");
-  const functions = ["presentationResolvedColumnPhi", "presentationInteriorColumnPhi", "presentationColumnContinuation", "presentationContinuationWeights", "presentationCoarseColumnPhi", "presentationVolumeWeights", "presentationInterpolatedVolumePhi"].map(name => {
+  const functions = ["interpolatedPresentationDensityAt", "presentationInterpolatedDensityPhi"].map(name => {
     const fn = source.match(new RegExp(`fn ${name}\\([\\s\\S]*?\\n}`))?.[0];
     assert.ok(fn, `production ${name}`); return fn;
   }).join("\n");
@@ -36,8 +36,8 @@ ${functions}
   let x=gid.x%${nx}u;let z=gid.x/${nx}u;
   let expected=17.3+.003*(pow(f32(x)+.5-${nx / 2 + phase},2.)+.7*pow(f32(z)+.5-${nz / 2},2.));
   let y=i32(floor(expected-.5));
-  let lo=presentationInterpolatedVolumePhi(vec3i(i32(x),y,i32(z)),${width}u,vec3i(0),vec3u(0),false,0u);
-  let hi=presentationInterpolatedVolumePhi(vec3i(i32(x),y+1,i32(z)),${width}u,vec3i(0),vec3u(0),false,0u);
+  let lo=presentationInterpolatedDensityPhi(vec3i(i32(x),y,i32(z)),${width}u,vec3i(0),vec3u(0),false,0u);
+  let hi=presentationInterpolatedDensityPhi(vec3i(i32(x),y+1,i32(z)),${width}u,vec3i(0),vec3u(0),false,0u);
   result[gid.x]=vec4f(lo,hi,unpack2x16float(pack2x16float(vec2f(lo,hi))));
 }`;
   device.pushErrorScope("validation");
