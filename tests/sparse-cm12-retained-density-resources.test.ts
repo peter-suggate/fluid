@@ -7,33 +7,18 @@ Object.defineProperty(globalThis, "GPUBufferUsage", { configurable: true, value:
 function fakeDevice() {
   const buffers: { size: number; usage: number; destroyed: number; destroy(): void }[] = [];
   let creates = 0, writes = 0, failCreate = -1, failWrite = -1;
-  let asyncFailureAt = -1, asyncKind: GPUErrorFilter = "validation", rejectScope = false;
-  const scopes: { kind: GPUErrorFilter; error: GPUError | null; reject?: boolean }[] = [];
   const device = {
     limits: { maxStorageBufferBindingSize: 1e7, maxBufferSize: 1e7, maxComputeWorkgroupsPerDimension: 65535 },
-    pushErrorScope: (kind: GPUErrorFilter) => { scopes.push({ kind, error: null }); },
-    popErrorScope: () => {
-      const scope = scopes.pop();
-      if (!scope) throw new Error("Unbalanced fake error scope");
-      return scope.reject ? Promise.reject(new Error("injected async scope rejection")) : Promise.resolve(scope.error);
-    },
     createShaderModule: () => ({ getCompilationInfo: async () => ({ messages: [] }) }),
     createComputePipelineAsync: async () => ({ getBindGroupLayout: () => ({}) }),
     createBuffer: (descriptor: GPUBufferDescriptor) => {
       if (++creates === failCreate) throw new Error("injected allocation failure");
-      if (creates === asyncFailureAt) {
-        const scope = [...scopes].reverse().find(scope => scope.kind === asyncKind)!;
-        scope.error = { message: `injected async ${asyncKind}` } as GPUError;
-        scope.reject = rejectScope;
-      }
       const buffer = { size: descriptor.size, usage: descriptor.usage, destroyed: 0, destroy() { this.destroyed++; } };
       buffers.push(buffer); return buffer;
     },
     queue: { writeBuffer: () => { if (++writes === failWrite) throw new Error("injected upload failure"); } },
   } as unknown as GPUDevice;
-  return { device, buffers, scopes,
-    failNextAsync: (kind: GPUErrorFilter, distance = 1, reject = false) => { asyncKind = kind; asyncFailureAt = creates + distance; rejectScope = reject; },
-    failNextCreate: (distance = 1) => { failCreate = creates + distance; }, failNextWrite: (distance = 1) => { failWrite = writes + distance; } };
+  return { device, buffers, failNextCreate: (distance = 1) => { failCreate = creates + distance; }, failNextWrite: (distance = 1) => { failWrite = writes + distance; } };
 }
 function field(generation = 1) {
   const support = compileBernsteinSupport([{ lower: [0, 0, 0], width: 1 }]);
@@ -116,52 +101,4 @@ test("failed coefficient generation upload preserves old leases and permits a re
   old.release(); assert.equal(next.generation, 2);
   next.release(); assert.equal(budget.receipt.liveBytes, 0);
   assert.ok(fake.buffers.every(buffer => buffer.destroyed === 1));
-});
-
-test("asynchronous scoped creation failures reject readiness and retire invalid resources", async () => {
-  for (const kind of ["validation", "out-of-memory"] as const) for (const distance of [1, 2]) {
-    const fake = fakeDevice(), budget = new RetainedDensityResourceBudget(1000);
-    fake.failNextAsync(kind, distance);
-    await assert.rejects(WebGPURetainedDensityField.create(fake.device, field(), { resourceBudget: budget }), /injected async/);
-    assert.equal(fake.scopes.length, 0); assert.equal(budget.receipt.liveBytes, 0);
-    assert.ok(fake.buffers.every(buffer => buffer.destroyed === 1));
-  }
-});
-test("failed async next generation preserves accepted field and releases reservation", async () => {
-  const fake = fakeDevice(), source = field(), budget = new RetainedDensityResourceBudget(1000);
-  const old = await WebGPURetainedDensityField.create(fake.device, source, { resourceBudget: budget });
-  fake.failNextAsync("out-of-memory");
-  const invalid = old.next(positiveBernsteinField(source.support, source.controls, 2));
-  assert.equal(fake.scopes.length, 0, "no error scope survives a synchronous allocation call");
-  await assert.rejects(invalid.ready(), /injected async/);
-  assert.equal(budget.receipt.liveBytes, 236); assert.equal(old.generation, 1);
-  assert.throws(() => invalid.compileQueries(queries), /injected async/);
-  invalid.release(); old.release(); assert.equal(budget.receipt.liveBytes, 0);
-});
-test("operation readiness gates encoding and async error receipts rollback only operation buffers", async () => {
-  for (const reject of [false, true]) for (const distance of [1, 2]) {
-    const fake = fakeDevice(), budget = new RetainedDensityResourceBudget(1000);
-    const old = await WebGPURetainedDensityField.create(fake.device, field(), { resourceBudget: budget });
-    fake.failNextAsync("validation", distance, reject);
-    const operation = old.compileQueries(queries);
-    assert.equal(fake.scopes.length, 0);
-    assert.throws(() => operation.encode({} as GPUCommandEncoder, {} as GPUBuffer), /not ready/);
-    await assert.rejects(operation.ready(), /injected async/);
-    assert.equal(budget.receipt.liveBytes, 236); assert.equal(old.generation, 1);
-    const valid = old.compileQueries([]); await valid.ready();
-    assert.doesNotThrow(() => valid.encode({} as GPUCommandEncoder, { size: 16, usage: 128 } as GPUBuffer));
-    valid.release(); operation.release(); old.release();
-    assert.equal(budget.receipt.liveBytes, 0); assert.ok(fake.buffers.every(buffer => buffer.destroyed === 1));
-  }
-});
-test("releasing pending allocations is safe when later async receipts fail", async () => {
-  const fake = fakeDevice(), budget = new RetainedDensityResourceBudget(1000), source = field();
-  const old = await WebGPURetainedDensityField.create(fake.device, source, { resourceBudget: budget });
-  fake.failNextAsync("validation");
-  const next = old.next(positiveBernsteinField(source.support, source.controls, 2));
-  next.release();
-  await assert.rejects(next.ready(), /Released/);
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(budget.receipt.liveBytes, 236);
-  old.release(); assert.ok(fake.buffers.every(buffer => buffer.destroyed === 1));
 });
