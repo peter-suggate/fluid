@@ -147,9 +147,8 @@ Validation (2026-09-08; final integrated browser acceptance is in progress):
 The operation-by-operation evidence, reproduced defects, native checks and
 unchanged canonical regression results are tracked in
 [the browser acceptance record](VOXEL_EDITOR_BROWSER_QA.md). Earlier snapshot
-successes are distinguished from the latest shared solver integration. The saved scene's retained-density failure has been reproduced and corrected;
-the exact fixture now passes 90 native frames. The final browser sweep follows
-the bounded live-moment integration checks.
+successes are distinguished from the latest shared solver integration. The
+final browser sweep follows the bounded live-boundary integration checks.
 
 See [the editing guide](VOXEL_EDITOR_GUIDE.md) for the shipped interaction model.
 

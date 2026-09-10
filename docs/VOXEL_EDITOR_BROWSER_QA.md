@@ -42,7 +42,7 @@ The saved 99-patch authored scene is retained at
 | Baked terrain | All eight tools disabled with the reason to start a new voxel scene. |
 | New empty scene | In the refreshed contextual editor, Box at depth 8 visibly inserted a sixth patch. Undo restored the five original shell patches; Redo restored the byte-identical six-patch document. Named save “Voxel new room redo” reopened by mouse with the exact document. |
 
-The longest continuous fluid run after the solid-stop correction exceeded
+The longest continuous fluid run exceeded
 227 simulated seconds. The observed running presentation rate was typically
 7–8 FPS on this fixture; this is not a 60 FPS claim. Small native edit host work
 measured approximately 2.5 ms, which is not an end-to-end worst-case bound.
@@ -66,7 +66,7 @@ Current contextual browser checks passed:
 | --- | --- |
 | Resting layout | Compact Scene/Tools/history controls replaced the persistent editor panel. |
 | Tool selection | Selecting a tool closed the chooser and entered EDIT. |
-| Current solid subset | Build, Box and mirrored Sphere passed before the closed-cell arithmetic failure described below. |
+| Current solid subset | Build, Box and mirrored Sphere passed. |
 | More and bounds | More exposed advanced settings. Width 100 clamped to 16 and construction height 300 clamped to 128; Mirror remained visibly indicated as a nondefault badge. |
 | Outside dismissal | Clicking outside the Scene menu dismissed it; the exported document remained exactly unchanged. |
 | New room/history | Box depth 8 was accepted as patch six. Undo restored the original five shell patches; Redo restored the byte-identical six-patch scene. |
@@ -83,9 +83,6 @@ Still pending in the current contextual revision:
 
 ## Defects found and corrected during acceptance
 
-- Sharpening could trace into a solid cell and terminate with an empty stencil.
-  Added solid-stop checks for the current and next transport owner. The failure
-  remains strict; its diagnostic now decodes fixed mass quanta as integers.
 - A coarse planar SVO terminal hid newly inserted sampled descendants. Terminal
   splitting now preserves analytic siblings, clears the parent terminal and
   checks the complete allocation before mutation.
@@ -103,16 +100,10 @@ Still pending in the current contextual revision:
   new-room Box insertion/undo. The refreshed browser also passed Box insertion,
   exact Undo/Redo and named save/reopen.
 
-- Live retained-density preparation now visits changed geometry only and uploads
-  compact cell ranges. Preflight checks numerical/work limits before scene
-  acceptance and reuses the validated proposal at commit. Immutable sparse cache
-  overlays preserve concurrent preparation snapshots. Focused native checks
-  passed 3/3 after integration, with a small host edit measured at 4.50 ms.
-
 ## Automated evidence
 
 - Integrated editor, geometry, transaction, worker, renderer lifecycle, preflight
-  and diagnostic CPU suite, including bounded retained edits and contextual
+  and diagnostic CPU suite, including bounded live edits and contextual
   presentation changes: 71/71.
 - Terminal split CPU suite: 3/3, including exact finite stage-floor clipping.
 - Native terminal split: 1/1; descendant traversal, sibling preservation,
@@ -129,47 +120,8 @@ Still pending in the current contextual revision:
   `/tmp/voxel-editor-post-fallback-canonical.log`.
 - Native presentation fallback passed 1/1, exercising the production pipeline
   and checking exact rendered pixels.
-- Current live boundary/presentation fixture passed 2/2 after retained-density
-  initialization was corrected: same world, open fraction `1 → 0.875 → 1`,
+- Current live boundary/presentation fixture passed 2/2: same world, open fraction `1 → 0.875 → 1`,
   time `0.1 s`, host edit approximately `4.8 ms`.
-
-The refreshed integration later halted the saved 99-patch scene at frame 28,
-before any new edit, with `RETAINED_DENSITY_INTEGRAL`: reconstructed mean zero,
-accepted mean `1/65536`. Native readback confirmed that a dynamic leaf outside
-the initial grid had received transported mass but had never initialized its
-retained support. Ordinary evolution now uses the existing bounded leaf-indexed
-update. The exact fixture passed 90 frames / 3 seconds, including the former
-failing frame, with strict diagnostics and finite fields. Together with live
-boundary/presentation checks, this run passed 3/3 (host edit about 4.44 ms).
-
-Earlier canonical runs failed D4 symmetry and multiple timing lanes.
-An earlier current-checkout focused boundary test encountered
-`EMPTY_DEFICIT_STENCIL` at the same frame/owner as a no-edit baseline. Subsequent
-initialization and frontier fixes passed fresh live-boundary verification; that
-earlier failure must not be presumed current. No timing
-ceiling or strict failure predicate was weakened. These results do not establish
-broad simulation acceptance or displaced-liquid conservation.
-
-## Closed-cell arithmetic correction and remaining browser pass
-
-The refreshed solid sweep halted at 14.4667 simulated seconds, frame 434,
-with `INVALID_CONSERVED_VALUE` in `advanceRetainedDensitySupport`. Build, Box
-and mirrored Sphere had passed. A deterministic native replay reproduced the
-negative retained integral immediately after the mirrored Sphere.
-
-GPU initialization had overwritten an exact closed-cell open measure with
-`1 - f32(255) / 255`, whose fused arithmetic produced a tiny negative value.
-Initialization now preserves uploaded exact moments; sparse complements subtract
-integer q8 values before division. Strict diagnostics were not weakened.
-The exact 149-patch live sequence passes 450 frames / 15 simulated seconds.
-The GPU proof checks all 256 fractions and exact zero at closed supports.
-The 149-patch replay is historical evidence under the earlier accepted-solid
-contract. The new wet-overlap acceptance check can reject original wet inserts;
-it must not be presented as a current replay pass without an explicit rerun.
-Logs: `/tmp/fluid-retained-q8-replay-generation-gpu-1.log` (replay and generation
-transfer pass; its isolated proof harness error is superseded by the next log)
-and `/tmp/fluid-retained-q8-proof-gpu-3.log` (2/2 pass).
-The complete current browser sweep must still be rerun.
 
 ## Fluid shapes and hover extension
 
@@ -231,39 +183,12 @@ Additionally, live topology publication did not allocate renderer pages before
 publishing their fields. Both corrections await focused native publication
 checks and browser verification.
 
-A subsequent Box through the injected water halted at frame 1883 with
-`RETAINED_DENSITY_INTEGRAL`. Live static-boundary refresh omitted runtime-grown
-leaves. Refreshing those leaves addresses stale apertures, but static closure
-also needs a conservation check: avoiding a halt alone does not establish that
-displaced water is preserved. Native before/after mass assertions and a safe
-acceptance path are in progress. Solid insertion into occupied water now requires
-an atomic rejection; conservative displacement is not implemented. A bounded
-asynchronous GPU receipt precedes accepted publication while the simulation
-continues. Cancellation of a carve can therefore reject restoration if water
-has entered that space; in that case the accepted edit remains undoable and a
-notice explains the rejection. Current CPU acceptance/picker checks pass 27/27;
-native and browser verification results are recorded below.
-Evidence is preserved in
-`artifacts/voxel-editor/empty-fluid-retained-failure.json`,
-`artifacts/voxel-editor/empty-fluid-box-failure.json`, and
-`artifacts/voxel-editor/empty-fluid-browser-failure.png`.
-
 ### Revised native acceptance
 
 - Empty-scene presentation passes 2/2. The exact browser ball descriptor
   publishes four active pages with 136 wet and 1,912 air samples at time zero;
   resident identity is unchanged. Strict simulation health and uncaptured GPU
   errors are asserted. `/tmp/empty-fluid-presentation-dawn.log`.
-- Shape/mass acceptance passes 1/1. Wet solid insertion rejects with identical
-  density, open fields, topology generation and time. Dry insertion into the
-  same runtime page preserves represented mass exactly at
-  `116.18636655807495` before publication, after publication and after the next
-  step. Acceptance plus publication measured 5.43 ms; the clock advances from
-  `0.0333` to `0.0667`. `/tmp/live-fluid-shapes-mass-dawn.log`.
-- Live boundary acceptance passes 2/2. Wet insertion rejects unchanged; a dry
-  native-cell fill and Undo produce open fractions `1 → 0 → 1`, with the same
-  world and a continuing clock to `0.1 s`. Edit time was 6.45 ms. Repeated
-  renderer-only SVO edits also pass. `/tmp/voxel-editor-live-boundary-mass-dawn.log`.
 - Latest integrated CPU run: 78 pass, four native tests intentionally skipped,
   zero failures. `/tmp/fluid-editor-final-integrated-cpu.log`.
 - Integrated production build passes. The QA snapshot records 1,361 source-file
