@@ -24,7 +24,6 @@ import type { AnyStageLens } from "./stage-lens";
 export interface FluidPipelineBand {
   readonly id: string;
   readonly label: string;
-  readonly labelForContext?: (context: FluidPipelineContext) => string;
 }
 
 /**
@@ -98,8 +97,6 @@ export type FluidStageControl =
   };
 
 export interface FluidPipelineStage {
-  /** Context-specific display and gates; timing seam identities stay fixed. */
-  readonly presentation?: (context: FluidPipelineContext) => Partial<Pick<FluidPipelineStage, "label" | "tip" | "toggle" | "controls" | "state">>;
   readonly id: string;
   readonly band: string;
   readonly side: "left" | "right";

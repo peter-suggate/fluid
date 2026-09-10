@@ -3,20 +3,6 @@ import test from "node:test";
 import { SimulationFailureError } from "../lib/core/simulation-failure";
 import { CM12_FAILURE_WORDS, cm12FailureKernelId, decodeCM12SimulationFailure } from "../lib/methods/adaptive-mass/sparse-cm12-simulation-failure";
 
-test("current spatial field failures distinguish proof rejection from integration accuracy", () => {
-  const words = new Uint32Array(CM12_FAILURE_WORDS);
-  words.set([1, 6, cm12FailureKernelId("certifyCurrentMap"), 5, 7, 696399, 103]);
-  assert.equal(decodeCM12SimulationFailure(words)?.code, "CURRENT_FIELD_ORIENTATION");
-  words[6] = 121;
-  words.set(new Uint32Array(new Float32Array([0.0009, 0.00015, -0.545]).buffer), 7);
-  const failure = decodeCM12SimulationFailure(words)!;
-  assert.equal(failure.code, "CURRENT_FIELD_QUADRATURE");
-  assert.deepEqual(failure.operandNames, ["stage", "integrationError", "tolerance", "measureComponent"]);
-  assert.ok(Math.abs(failure.operands![1]! - 0.0009) < 1e-10);
-  assert.ok(failure.operands![1]! > failure.operands![2]!);
-  assert.deepEqual(failure.rawWords, [...words]);
-});
-
 test("failure receipts preserve raw provenance through JSON and reject incomplete reads", () => {
   const words = new Uint32Array(CM12_FAILURE_WORDS);
   assert.equal(decodeCM12SimulationFailure(words), undefined);
@@ -47,14 +33,4 @@ test("sharpening failure decodes integer mass quanta without disguising them as 
   assert.deepEqual(failure.operands, [0, 2, 0, 0]);
   assert.equal(failure.rawWords[7], 2);
   assert.match(new SimulationFailureError(failure).message, /operands=0,2,0,0/);
-});
-
-
-test("incomplete current-field dispatch keeps integer completion provenance", () => {
-  const words = new Uint32Array(CM12_FAILURE_WORDS);
-  words.set([1, 6, cm12FailureKernelId("commitRetainedDensityGeneration"), 6, 3, 12, 124, 12, 23892, 24576]);
-  const failure = decodeCM12SimulationFailure(words)!;
-  assert.equal(failure.code, "CURRENT_FIELD_INCOMPLETE_DISPATCH");
-  assert.deepEqual(failure.operandNames, ["stage", "receiptSlot", "completedInvocations", "expectedInvocations"]);
-  assert.deepEqual(failure.operands, [124, 12, 23892, 24576]);
 });

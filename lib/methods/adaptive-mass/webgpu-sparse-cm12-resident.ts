@@ -1,7 +1,3 @@
-import { createSparseCM12CurrentMapLayout } from "./sparse-cm12-current-map.wgsl";
-import { SPARSE_CM12_CURRENT_MAP_VELOCITY_EXTENSION_SWEEPS } from "./sparse-cm12-current-map-velocity.wgsl";
-import { prepareSolidEditUpload } from "./sparse-cm12-solid-edit-upload";
-import { liveFluidEditMode, type LiveFluidEdit } from "../../core/live-fluid-edit";
 import { SPARSE_CM12_PRESSURE_JOURNAL_SNAPSHOTS, type SparseCM12PressureJournalCapacityRequest } from "./features/pressure-inspection/definition";
 import { packAdaptivitySurfaceParameters } from "./features/adaptivity/packing";
 import { sparseCM12ActivityPolicy, type SparseCM12ActivityPolicy } from "./features/adaptivity/policy";
@@ -10,15 +6,14 @@ import { SimulationFailureError } from "../../core/simulation-failure";
 import { SPARSE_CM12_COMMON_HEIGHT_ENABLED, SPARSE_CM12_HEIGHT_ENTRY_POINTS, SPARSE_CM12_HEIGHT_FIELDS,
   SPARSE_CM12_HEIGHT_HEADER_FLOATS, SPARSE_CM12_HEIGHT_ITERATIONS } from
   "./sparse-cm12-height-reconstruction.wgsl";
-import { prepareSparseCM12GPUGenerationTransfer, type SparseCM12GPUCapturedGeometryRecipe } from "./sparse-cm12-generation-transfer-gpu";
+import { compileCM12CapturedGeometry, type CM12CapturedGeometryRecipe } from "./sparse-cm12-captured-geometry";
 import { SparseCM12TemplateArchetypes, type SparseCM12TemplateExpansion } from "./sparse-cm12-template-archetypes";
 import { expandSparseCM12TemplateArchetypesGPU } from "./sparse-cm12-template-expansion-gpu";
-import { SparseCM12TemplateBlockCache, visitSparseCM12TemplateBlocks } from "./sparse-cm12-template-blocks";
 import { createCM12ResourceRecorder, realizeCM12ResourceRecipe, type CM12ResourceRecipe } from "./sparse-cm12-resource-recipe";
 import { SparseCM12GenerationBudgetDeferred, SparseCM12GenerationStale } from "./sparse-cm12-generation-budget";
 import { SparseCM12GenerationPlanningGate } from "./sparse-cm12-generation-planning-gate";
 import { sparseAtlasBrickKey, sparseBrickMaximumFine } from "./sparse-brick-atlas";
-import { type SparseCM12NewAirCoverage, type SparseCM12GenerationFields, PreparedSparseCM12GenerationTransfer } from "./sparse-cm12-generation-transfer";
+import { sparseCM12TransferFaceGeometry, type SparseCM12NewAirCoverage, type SparseCM12TransferBox, type SparseCM12GenerationFields, type SparseCM12GenerationGeometry, PreparedSparseCM12GenerationTransfer, prepareSparseCM12GenerationTransfer } from "./sparse-cm12-generation-transfer";
 import {
   buildSparseAtlasCompositeGrid,
   createSparseAtlasCompositeGridBuildWorkspace,
@@ -86,20 +81,12 @@ import {
   type SparseCM12PressureJournal,
   type SparseCM12PressureJournalLayout,
 } from "./features/pressure-inspection/decoder";
-import { createSparseCM12WGSLPruner } from "./sparse-cm12-wgsl-pruning";
-export { sparseCM12WGSLForEntryPoints } from "./sparse-cm12-wgsl-pruning";
 import {
   createWebgpuSparseCM12ResidentWGSL,
-  SPARSE_CM12_RETAINED_RIGID_DISPLACEMENT_HOPS,
   type SparseCM12PressureRepairLayout,
-  type SparseCM12RetainedDensityResidentLayout,
 } from "./webgpu-sparse-cm12-resident.wgsl";
-import { assertRetainedSceneIsotropicLattice, bindRetainedSceneSupportLattice, packRetainedSceneDensity, type RetainedSceneDensity } from "./sparse-cm12-retained-scene-density";
-import { compileRetainedScenePreparationCache, validateRetainedScenePreparationCache, withRetainedSolidEdit,
-  type RetainedScenePreparationCache } from "./sparse-cm12-retained-preparation-cache";
+import { packRetainedSceneDensity, type RetainedSceneDensity } from "./sparse-cm12-retained-scene-density";
 import { compileRetainedNativeIntegrals } from "./sparse-cm12-retained-native-integrals";
-import { compileRetainedSolidEditDelta } from "./sparse-cm12-retained-solid-edit";
-import { type RetainedSceneSubcellMoments } from "./sparse-cm12-retained-subcell-moments";
 import {
   createSparseCM12LogicalOwnerDirectory,
 } from "./sparse-cm12-logical-owner-directory";
@@ -612,11 +599,7 @@ fn allocateSparseCM12PresentationPages(@builtin(global_invocation_id)gid:vec3u){
   let activityRecord=ACTIVITY_HEADER+ACTIVITY_RECORD_WORDS*brick;
   if(atomicLoad(&activity[activityRecord+10u])==0u
     ||atomicLoad(&activity[BRICK_PAGES+brick])!=INVALID){return;}
-  // WDR-backed leaves have no dependency on authored atlas records. In an
-  // initially empty world that atlas has zero entries; even a discarded
-  // out-of-bounds read may terminate the invocation before WDR lookup.
-  var key=INVALID;
-  ${worldDirectoryLayout ? "" : "if(brick<INITIAL_BRICK_COUNT){key=topology[BRICK_RECORD_BASE+2u*brick+1u];}"}
+  var key=topology[BRICK_RECORD_BASE+2u*min(brick,INITIAL_BRICK_COUNT-1u)+1u];
   if(${worldDirectoryLayout ? "true" : "brick>=INITIAL_BRICK_COUNT"}){
     let leaf=${worldDirectoryLayout?.baseWords ?? 0}u
       +${worldDirectoryLayout?.leafBaseWords ?? 0}u+5u*brick;
@@ -822,6 +805,130 @@ SparseCM12DeviceCompilationCache {
   return cache;
 }
 
+/**
+ * Retain the WGSL declarations and only the function call graph needed by a
+ * small entry-point family. Metal otherwise compiles every function in the
+ * monolithic CM12 module even when a pipeline names one presentation kernel.
+ */
+export function sparseCM12WGSLForEntryPoints(source: string, roots: readonly string[]): string {
+  type FunctionSpan = { name: string; start: number; end: number; body: string };
+  type GlobalSpan = { name: string; start: number; end: number; text: string };
+  // Mask comments while preserving offsets/newlines. Generated WGSL is often
+  // deliberately compact (several declarations per line), so line anchoring
+  // misses real globals while an unmasked regex mistakes prose for syntax.
+  const syntaxCharacters = source.split("");
+  for (let index = 0; index < syntaxCharacters.length;) {
+    if (source[index] === "/" && source[index + 1] === "/") {
+      while (index < syntaxCharacters.length && source[index] !== "\n") {
+        syntaxCharacters[index++] = " ";
+      }
+    } else if (source[index] === "/" && source[index + 1] === "*") {
+      syntaxCharacters[index++] = " ";syntaxCharacters[index++] = " ";
+      while (index < syntaxCharacters.length
+        && !(source[index] === "*" && source[index + 1] === "/")) {
+        if (source[index] !== "\n") syntaxCharacters[index] = " ";
+        index += 1;
+      }
+      if (index < syntaxCharacters.length) {
+        syntaxCharacters[index++] = " ";syntaxCharacters[index++] = " ";
+      }
+    } else index += 1;
+  }
+  const syntaxSource = syntaxCharacters.join("");
+  const spans: FunctionSpan[] = [];
+  const declaration = /(?:@\w+(?:\([^)]*\))?\s*)*fn\s+([A-Za-z_]\w*)\s*\(/g;
+  for (let match = declaration.exec(syntaxSource); match;
+    match = declaration.exec(syntaxSource)) {
+    const open = syntaxSource.indexOf("{", declaration.lastIndex);
+    if (open < 0) throw new Error(`WGSL function ${match[1]} has no body`);
+    let depth = 0, end = open;
+    for (; end < syntaxSource.length; end += 1) {
+      const character = syntaxSource[end]!;
+      if (character === "{") depth += 1;
+      else if (character === "}" && --depth === 0) { end += 1; break; }
+    }
+    if (depth !== 0) throw new Error(`WGSL function ${match[1]} has an unclosed body`);
+    spans.push({ name: match[1]!, start: match.index, end,
+      body: syntaxSource.slice(open, end) });
+    declaration.lastIndex = end;
+  }
+  const byName = new Map(spans.map((span) => [span.name, span]));
+  const retained = new Set<string>();
+  const pending = roots.filter((root) => byName.has(root));
+  while (pending.length > 0) {
+    const name = pending.pop()!;
+    if (retained.has(name)) continue;
+    retained.add(name);
+    const body = byName.get(name)!.body;
+    for (const call of body.matchAll(/\b([A-Za-z_]\w*)\s*\(/g)) {
+      const dependency = call[1]!;
+      if (byName.has(dependency) && !retained.has(dependency)) pending.push(dependency);
+    }
+  }
+  const insideFunction = (offset: number) => spans.some((span) =>
+    offset >= span.start && offset < span.end);
+  const globals: GlobalSpan[] = [];
+  const addSimpleGlobals = (pattern: RegExp) => {
+    for (let match = pattern.exec(syntaxSource); match;
+      match = pattern.exec(syntaxSource)) {
+      if (insideFunction(match.index)) continue;
+      globals.push({ name: match[1]!, start: match.index,
+        end: pattern.lastIndex, text: match[0] });
+    }
+  };
+  // WGSL has no executable global initializers. These declaration forms are
+  // therefore sufficient to close the lexical dependency graph of a sliced
+  // entry point. Keeping every declaration had left each tiny pipeline with
+  // the monolith's complete binding and workgroup-memory topology.
+  addSimpleGlobals(/(?:@\w+(?:\([^)]*\))?\s*)*\bvar(?:<[^>]+>)?\s*([A-Za-z_]\w*)[^;]*;/g);
+  addSimpleGlobals(/\b(?:const|override|alias)\s+([A-Za-z_]\w*)[^;]*;/g);
+  const structPattern = /\bstruct\s+([A-Za-z_]\w*)\s*\{/g;
+  for (let match = structPattern.exec(syntaxSource); match;
+    match = structPattern.exec(syntaxSource)) {
+    if (insideFunction(match.index)) continue;
+    const open = syntaxSource.indexOf("{", match.index);
+    let depth = 0, end = open;
+    for (; end < syntaxSource.length; end += 1) {
+      if (syntaxSource[end] === "{") depth += 1;
+      else if (syntaxSource[end] === "}" && --depth === 0) {
+        end += 1;
+        if (syntaxSource[end] === ";") end += 1;
+        break;
+      }
+    }
+    globals.push({ name: match[1]!, start: match.index, end,
+      text: source.slice(match.index, end) });
+    structPattern.lastIndex = end;
+  }
+  const globalByName = new Map(globals.map((span) => [span.name, span]));
+  const requiredGlobals = new Set<string>();
+  const globalPending: string[] = [];
+  const enqueueIdentifiers = (text: string) => {
+    for (const token of text.matchAll(/\b([A-Za-z_]\w*)\b/g)) {
+      const name = token[1]!;
+      if (globalByName.has(name) && !requiredGlobals.has(name)) globalPending.push(name);
+    }
+  };
+  for (const name of retained) enqueueIdentifiers(
+    source.slice(byName.get(name)!.start, byName.get(name)!.end));
+  while (globalPending.length > 0) {
+    const name = globalPending.pop()!;
+    if (requiredGlobals.has(name)) continue;
+    requiredGlobals.add(name);
+    enqueueIdentifiers(globalByName.get(name)!.text);
+  }
+  const removable = [
+    ...spans.filter((span) => !retained.has(span.name)),
+    ...globals.filter((span) => !requiredGlobals.has(span.name)),
+  ].sort((left, right) => left.start - right.start);
+  let result = "", cursor = 0;
+  for (const span of removable) {
+    if (span.start < cursor) continue;
+    result += source.slice(cursor, span.start);
+    cursor = span.end;
+  }
+  return result + source.slice(cursor);
+}
 const SPARSE_CM12_PHASE1_TRANSPORT_PROFILE_WORDS = 64;
 /** Params in the resident WGSL, including the fixed authored-region tail. */
 const SPARSE_CM12_FAILURE_PARAMETER_OFFSET = SPARSE_CM12_REFINEMENT_REGION_PARAMETER_OFFSET
@@ -1671,9 +1778,9 @@ function sparseCM12BrickLiveCellCount(atlas: SparseAdaptiveMassAtlas,
 }
 
 /**
- * Construction-time physical template library. Four uniform placements provide
+ * Construction-time physical template library. Four uniform builds provide
  * every cell, intra-brick row, same-level face, and sparse-air face. Eighteen
- * alternating placements provide both orientations of every valid 2:1 face pair.
+ * alternating builds provide both orientations of every valid 2:1 face pair.
  * Runtime publication can therefore switch cells and pressure rows by only
  * rebuilding compact worklists; no host topology build is needed after create.
  */
@@ -1687,7 +1794,6 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
   mutableKeys?: ReadonlySet<number>,
   useArchetypes = true,
   report: (phase: string) => void = () => {},
-  useBlocks = false,
 ): PackedResidentTopologyTemplates {
   const templateLevels = sparseCM12TemplateLevels(atlas.brickFineResolution);
   const mutableBrickKeys = new Set(atlas.bricks.filter((brick) => preparation
@@ -1755,8 +1861,6 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
   // copied into the persistent template library.
   const variantWorkspace = createSparseAtlasCompositeGridBuildWorkspace();
   const archetypes = useArchetypes ? new SparseCM12TemplateArchetypes(atlas) : undefined;
-  const blocks = useBlocks ? new SparseCM12TemplateBlockCache() : undefined;
-  if (blocks && (!archetypes || preparation)) throw new Error("CM12 local blocks require the all-rung archetype compiler");
   const cells: SparseAtlasCompositeCell[] = archetypes?.cells ?? [];
   const cellId = archetypes?.cellIds ?? new Map<number, number>();
   const cellRanges = new Uint32Array(atlas.bricks.length * templateLevels.length * 2);
@@ -1895,19 +1999,6 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
       levelIndex < templateLevels.length; levelIndex += 1) {
       const level = templateLevels[levelIndex]!;
       for (const { coreKeys, localBricks } of chunkContexts) {
-        if (blocks) {
-          const variant = variantAtlasAtLevels((brick) => mutableBrickKeys.has(brick.key)
-            ? level : brick.resolution, localBricks);
-          for (const brick of variant.bricks) if (mutableBrickKeys.has(brick.key)) {
-            const range = archetypes!.appendBrick(brick);
-            const at = 2 * (templateLevels.length * brickIndex.get(brick.key)! + levelIndex);
-            cellRanges[at] = range.first; cellRanges[at + 1] = range.count;
-          }
-          visitSparseCM12TemplateBlocks(variant, blocks,
-            (block, bricks) => archetypes!.appendBlock(block, bricks),
-            (_kind, bricks) => bricks.some(brick => coreKeys.has(brick.key)));
-          continue;
-        }
         const grid = buildSparseAtlasCompositeGrid(
           variantAtlasAtLevels((brick) => mutableBrickKeys.has(brick.key)
             ? level : brick.resolution, localBricks), 0.5, variantWorkspace,
@@ -1944,15 +2035,6 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
           const variant = variantAtlasAtLevels((brick) => mutableBrickKeys.has(brick.key)
             ? ((brick.coordinate[axis]! & 1) ^ phase) === 0 ? low : high
             : brick.resolution, localBricks);
-          if (blocks) {
-            visitSparseCM12TemplateBlocks(variant, blocks,
-              (block, bricks) => archetypes!.appendBlock(block, bricks),
-              (kind, bricks, faceAxis) => kind === "interface" && faceAxis === axis
-                && sparseBrickSpan(bricks[0]!) / bricks[0]!.resolution
-                  !== sparseBrickSpan(bricks[1]!) / bricks[1]!.resolution
-                && bricks.some(brick => coreKeys.has(brick.key)));
-            continue;
-          }
           const variantGrid = buildSparseAtlasCompositeGrid(
             variant, 0.5, variantWorkspace,
           );
@@ -1977,7 +2059,6 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
     variantWorkspace.cellBaseByBrick.clear(); variantWorkspace.grid = undefined;
   }
   report("Order interned topology instances");
-  if (blocks) report(`Local topology block census ${JSON.stringify(blocks.statistics)}`);
   const ownership = archetypes ? archetypes.orderRows(atlas.bricks.length, templateLevels)
     : sparseCM12ContiguousRowOwnership(atlas.bricks.length,
       templateLevels, rows, rowRequirements, true);
@@ -2148,12 +2229,6 @@ export function packSparseCM12ResidentTopologyArchetypesForQA(
   mutableKeys?: ReadonlySet<number>,
   report?: (phase: string) => void,
 ) { return packResidentTopologyTemplates(atlas, acceptedGrid, undefined, mutableKeys, true, report); }
-
-/** QA seam for the production local-block planner and GPU placement recipe. */
-export function packSparseCM12ResidentTopologyBlocksForQA(
-  atlas: SparseAdaptiveMassAtlas, acceptedGrid: SparseAtlasCompositeGrid,
-  mutableKeys?: ReadonlySet<number>, report?: (phase: string) => void,
-) { return packResidentTopologyTemplates(atlas, acceptedGrid, undefined, mutableKeys, true, report, true); }
 
 /** CPU-only QA seam for the accepted-only production template branch. */
 export function packSparseCM12AcceptedTopologyTemplatesForQA(
@@ -3335,32 +3410,7 @@ export class WebGPUSparseCM12Resident {
   private replacementConfiguration!: { finestCellSize_m: number; rigid?: SparseCM12RigidResources;
     journal?: SparseCM12PressureJournalCapacityRequest; presentationPageResolution: SparseCM12PresentationPageResolution;
     topologyPageCapacityMaximum: number; retainedDensity?: RetainedSceneDensity };
-  private retainedDensityLayout?: SparseCM12RetainedDensityResidentLayout;
-  private retainedDensitySupportCount = 0;
-  private retainedUnrestrictedMeans?: Float32Array;
-  private retainedPreparationCache?: RetainedScenePreparationCache;
-  private preparedSolidEdit?: {
-    previous: SolidWorld; next: SolidWorld; field?: RetainedSceneDensity;
-    sourceCache?: RetainedScenePreparationCache; cache?: RetainedScenePreparationCache;
-    delta?: ReturnType<typeof compileRetainedSolidEditDelta>;
-    wetRevision?: number;
-  };
-  // A zero initial field cannot become wet through conservative transport.
-  // Revoke permanently before any source command is queued; removal alone
-  // never proves dryness. Carry this fact across resident replacements.
-  private liquidMayExist = true;
-  private atomicSolidEditInFlight = false;
-  get solidEditPending(): boolean { return this.atomicSolidEditInFlight; }
-  isSolidWorldAccepted(solidWorld: SolidWorld): boolean { return this.currentSolidWorld === solidWorld; }
-  private solidEditRevision = 0;
-  get solidEditStateRevision(): number { return this.solidEditRevision; }
-  private retainedRigidSubcellMoments?: RetainedSceneSubcellMoments;
-  private retainedBoundaryDirty = false;
-  // Nonphysics publications and topology edits retain the last accepted body
-  // metadata. Only an explicit physics count, including zero, changes it.
-  private rigidBodyCount = 0;
-  private rigidWorldDimensions_m: readonly [number, number, number] = [0, 0, 0];
-  private retainedInitialNativeCounts?: readonly [number, number];
+  private retainedDensityLayout?: { fieldBaseWords: number; integralBaseWords: number; controlBaseWords: number };
   private preparedGenerationTransfer?: PreparedSparseCM12GenerationTransfer;
   generationPreparationMaximumSliceMs = 0;
   generationPreparationMaximumSliceOperation?: string;
@@ -3385,11 +3435,7 @@ export class WebGPUSparseCM12Resident {
     active: ReadonlySet<number>, scalar: boolean, face: boolean, maximumBytes: number,
     source?: Awaited<ReturnType<WebGPUSparseCM12Resident["captureGenerationTransferSource"]>>, signal?: AbortSignal,
     newAirCoverage: readonly SparseCM12NewAirCoverage[] = [], preserveCandidateBacking = false): Promise<WebGPUSparseCM12Resident> {
-    const { finestCellSize_m, journal, presentationPageResolution, retainedDensity } = this.replacementConfiguration;
-    const rigid = this.replacementConfiguration.rigid ? {
-      ...this.replacementConfiguration.rigid, initialBodyCount: this.rigidBodyCount,
-      worldDimensions_m: this.rigidWorldDimensions_m,
-    } : undefined;
+    const { finestCellSize_m, rigid, journal, presentationPageResolution } = this.replacementConfiguration;
     const topologyPageCapacityMaximum = preserveCandidateBacking
       ? Math.min(this.replacementConfiguration.topologyPageCapacityMaximum, this.topologyPageCapacity)
       : this.replacementConfiguration.topologyPageCapacityMaximum;
@@ -3410,22 +3456,17 @@ export class WebGPUSparseCM12Resident {
               signal?.addEventListener("abort", () => { worker.terminate(); reject(signal.reason); }, {once:true});
               worker.onmessage = event => event.data.error ? reject(new Error(event.data.error)) : resolve(event.data.recipe);
               worker.onerror = event => reject(new Error(event.message));
-              // Clone rather than transfer the advancing owner's immutable
-              // cache: preparation must own independent buffer storage.
-              worker.postMessage({ atlas: nextAtlas, active, finestCellSize_m, newAirCoverage, candidateKeys, retainedDensity,
-                retainedPreparationCache: this.retainedPreparationCache,
+              worker.postMessage({ atlas: nextAtlas, active, finestCellSize_m, newAirCoverage, candidateKeys,
                 solidWorld: this.currentSolidWorld, maximumBytes, topologyPageCapacityMaximum,
-                symmetry: { scalar, face }, limits: { maxComputeWorkgroupsPerDimension: device.limits.maxComputeWorkgroupsPerDimension,
-                  maxBufferSize: device.limits.maxBufferSize, maxStorageBufferBindingSize: device.limits.maxStorageBufferBindingSize },
-                source: source ? { geometryRecipe:source.geometryRecipe, cellIds: source.cellIds, rowIds: source.rowIds,
+                symmetry: { scalar, face }, limits: { maxComputeWorkgroupsPerDimension: device.limits.maxComputeWorkgroupsPerDimension },
+                source: source ? { geometry: source.geometry, geometryRecipe:source.geometryRecipe, cellIds: source.cellIds, rowIds: source.rowIds,
                   densityOffset: source.densityOffset, gammaOffset: source.gammaOffset,
                   velocityOffset: source.velocityOffset, pressureOffset: source.pressureOffset, faceOffset: source.faceOffset,
                   stateDescriptor: {size:this.state.size,usage:this.state.usage},
                   controlDescriptor: {size:this.topologyArena.size,usage:this.topologyArena.usage},
                   liveControl: this.generationTransferControlDescription() } : undefined,
                 journal, rigid: rigid ? { bodies: {size:rigid.bodies.size,usage:rigid.bodies.usage},
-                  exchange: {size:rigid.exchange.size,usage:rigid.exchange.usage}, worldDimensions_m:rigid.worldDimensions_m,
-                  initialBodyCount: rigid.initialBodyCount } : undefined });
+                  exchange: {size:rigid.exchange.size,usage:rigid.exchange.usage}, worldDimensions_m:rigid.worldDimensions_m } : undefined });
             });
           } finally { worker.terminate(); }
           const realized = await realizeCM12ResourceRecipe(allocation.device, recipe,
@@ -3452,7 +3493,7 @@ export class WebGPUSparseCM12Resident {
         return await WebGPUSparseCM12Resident.createConfigured(allocation.device, nextAtlas, nextGrid ?? buildSparseAtlasCompositeGrid(nextAtlas), finestCellSize_m,
           this.currentSolidWorld, active, rigid, journal, presentationPageResolution,
           false, false, false, true, true, () => {}, false, false, false, false, false,
-          topologyPageCapacityMaximum, false, { scalar, face }, undefined, candidateKeys, retainedDensity, this.retainedPreparationCache);
+          topologyPageCapacityMaximum, false, { scalar, face }, undefined, candidateKeys);
       } catch (error) { allocation.rollback(); throw error; }
       finally { allocation.finish(); }
   }
@@ -3700,9 +3741,6 @@ export class WebGPUSparseCM12Resident {
   get fieldSnapshotSourceForQA() {
     return { state: this.state, conditioning: this.conditioning, topologyArena: this.topologyArena,
       effectiveTransportVelocity: this.effectiveTransportVelocity,
-      activity: this.activity, velocityExtensionLayout: this.velocityExtensionLayout,
-      currentMap: this.retainedDensityLayout?.currentMap, currentMapMeasure: this.retainedDensityLayout?.currentMapMeasure,
-      retainedControlBaseWords: this.retainedDensityLayout?.controlBaseWords,
       acceptedIndirectArguments: this.acceptedIndirectArguments,
       topologyWorklistBaseWords: this.topologyWorklistBaseBytes / 4,
       acceptedLeafManifestBaseWords: this.acceptedLeafManifestBaseBytes / 4,
@@ -3766,13 +3804,11 @@ export class WebGPUSparseCM12Resident {
     topologyPageCapacityMaximum?: number,
     initialVelocity_m_s?: readonly [number, number, number],
     retainedDensity?: RetainedSceneDensity,
-    retainedPreparationCache?: RetainedScenePreparationCache,
   ): Promise<WebGPUSparseCM12Resident> {
     return this.createConfigured(device, atlas, grid, finestCellSize_m,
       solidWorld, initiallyActiveBrickKeys, rigid, journal, presentationPageResolution,
       false, false, false, true, true, report, false, true, false, false, false,
-      topologyPageCapacityMaximum, false, undefined, initialVelocity_m_s, undefined, retainedDensity,
-      retainedPreparationCache);
+      topologyPageCapacityMaximum, false, undefined, initialVelocity_m_s, undefined, retainedDensity);
   }
 
   /** Retained rejected QA experiment: density-capacity relay with an exact
@@ -4102,18 +4138,9 @@ export class WebGPUSparseCM12Resident {
     initialVelocity_m_s?: readonly [number, number, number],
     candidateKeys?: ReadonlySet<number>,
     retainedDensity?: RetainedSceneDensity,
-    preparationCache?: RetainedScenePreparationCache,
   ): Promise<WebGPUSparseCM12Resident> {
     if (atlas.brickFineResolution !== 8 || presentationPageResolution !== 8) {
       throw new Error("Sparse CM12 PEI1 production is an aggressive B8/P8 cutover");
-    }
-    if (retainedDensity) {
-      assertRetainedSceneIsotropicLattice(retainedDensity, atlas.dimensions, finestCellSize_m);
-      retainedDensity = bindRetainedSceneSupportLattice(retainedDensity, atlas.dimensions, finestCellSize_m);
-    }
-    if (preparationCache) {
-      if (!retainedDensity) throw new Error("Retained preparation cache requires its numeric field");
-      validateRetainedScenePreparationCache(preparationCache, retainedDensity, atlas.dimensions, finestCellSize_m);
     }
     const initialSolidWorld = solidWorld;
     const dynamicWorldGrowth = true;
@@ -4223,7 +4250,7 @@ export class WebGPUSparseCM12Resident {
       ? "Build four-rung and 2:1 seam topology templates"
       : "Pack accepted topology templates");
     const templates = hostTemplateVariants
-      ? packResidentTopologyTemplates(atlas, grid, undefined, mutableBrickKeys, true, report, true)
+      ? packResidentTopologyTemplates(atlas, grid, undefined, mutableBrickKeys, true, report)
       : packAcceptedTopologyTemplates(atlas, grid);
     const dynamicCellsPerPage = atlas.brickFineResolution ** 3;
     const dynamicRowsPerPage = 3 * (atlas.brickFineResolution + 1)
@@ -4283,102 +4310,27 @@ export class WebGPUSparseCM12Resident {
     // WebGPU buffers start zeroed. Upload only the nonzero ranges instead of
     // materializing the complete (mostly-zero) resident state on the host.
     const retainedRecords = retainedDensity ? packRetainedSceneDensity(retainedDensity) : undefined;
-    const retainedDimensions = retainedDensity ? [...atlas.dimensions] as [number, number, number] : undefined;
-    if (retainedDimensions) {
-      const denseCount = retainedDimensions.reduce((a, b) => a * b, 1);
-      const supportCount = denseCount + 512 * worldLeafCapacity;
-      const stateBytes = 4 * (layout.floatCount + retainedRecords!.length + physicsCellCapacity + 4
-        + 6 * denseCount + (4 * 512 + 8) * worldLeafCapacity
-        + (rigid ? 17 * denseCount + 512 * worldLeafCapacity : 0));
-      if (stateBytes > Math.min(device.limits.maxBufferSize, device.limits.maxStorageBufferBindingSize)
-        || Math.ceil(supportCount / WORKGROUP_SIZE) > device.limits.maxComputeWorkgroupsPerDimension) {
-        throw new RangeError(`Retained density support exceeds the admitted device arena (${stateBytes} bytes, ${supportCount} support cells)`);
-      }
-    }
-    const retainedPreparationCache = retainedDensity && retainedDimensions
-      ? compileRetainedScenePreparationCache(retainedDensity, retainedDimensions, finestCellSize_m,
-        solidWorld, { previous: preparationCache, rigid: Boolean(rigid) }) : undefined;
-    const retainedFullFineMeans = retainedPreparationCache?.unrestrictedMeans;
-    const retainedOpenMeans = retainedPreparationCache?.openMeans;
-    const retainedFineMeans = retainedOpenMeans?.effectiveMeans;
-    const retainedFineCount = retainedFineMeans?.length ?? 0;
-    const retainedGrowthLeaves = retainedDensity ? worldLeafCapacity : 0;
-    const retainedSupportCount = retainedFineCount + 512 * retainedGrowthLeaves;
-    const retainedRigidBase = layout.floatCount + (retainedRecords?.length ?? 0)
-      + physicsCellCapacity + 4 + 2 * retainedFineCount + 4 * retainedSupportCount + 8 * retainedGrowthLeaves;
-    const currentMapLayout = retainedDensity?.transport === "current-map"
-      ? createSparseCM12CurrentMapLayout(retainedRigidBase + (rigid ? 16 * retainedFineCount + retainedSupportCount : 0), retainedDimensions!) : undefined;
-    if (currentMapLayout && (rigid || retainedOpenMeans!.openFractions.some(value => value !== 1)))
-      throw new Error("Current-field transport requires an unclipped fluid domain without rigid bodies");
-    if (currentMapLayout && 6 * retainedFineCount > 3 * currentMapLayout.nodeCount)
-      throw new Error("Current-field fine range cache exceeds reusable map scratch");
-    const currentMapMeasure = currentMapLayout ? { baseWords: currentMapLayout.endWords,
-      dimensions: retainedDimensions!, rangeCacheBaseWords: currentMapLayout.scratchBaseWords } : undefined;
-    const currentMapEndWords = currentMapMeasure ? currentMapMeasure.baseWords + 8 * retainedFineCount : undefined;
-    if (currentMapEndWords !== undefined && 4 * currentMapEndWords > Math.min(device.limits.maxBufferSize, device.limits.maxStorageBufferBindingSize))
-      throw new Error("Current-field transport exceeds the device storage budget");
     const retainedDensityLayout = retainedRecords ? {
-      currentMap: currentMapLayout, currentMapMeasure,
       fieldBaseWords: layout.floatCount,
       integralBaseWords: layout.floatCount + retainedRecords.length,
       controlBaseWords: layout.floatCount + retainedRecords.length + physicsCellCapacity,
-      support: {
-        dimensions: retainedDimensions!,
-        seedMeanBaseWords: layout.floatCount + retainedRecords.length + physicsCellCapacity + 4,
-        openFractionBaseWords: layout.floatCount + retainedRecords.length + physicsCellCapacity + 4 + retainedFineCount,
-        coefficientBaseWords: [
-          layout.floatCount + retainedRecords.length + physicsCellCapacity + 4 + 2 * retainedFineCount,
-          layout.floatCount + retainedRecords.length + physicsCellCapacity + 4 + 2 * retainedFineCount + 2 * retainedSupportCount,
-        ] as const,
-        dynamic: { firstLeaf: 0, leafCount: retainedGrowthLeaves,
-          stampBaseWords: [
-            layout.floatCount + retainedRecords.length + physicsCellCapacity + 4 + 2 * retainedFineCount + 4 * retainedSupportCount,
-            layout.floatCount + retainedRecords.length + physicsCellCapacity + 4 + 2 * retainedFineCount + 4 * retainedSupportCount + 4 * retainedGrowthLeaves,
-          ] as const },
-        ...(rigid ? { rigid: {
-          seedSubcellAmountBaseWords: retainedRigidBase,
-          staticOpenSubcellVolumeBaseWords: retainedRigidBase + 8 * retainedFineCount,
-          coveredMaskBaseWords: retainedRigidBase + 16 * retainedFineCount,
-        } } : {}),
-      },
     } : undefined;
     const state = device.createBuffer({ label: "Sparse CM12 resident state",
-      size: Math.max(4, 4 * (currentMapEndWords ?? (retainedDensityLayout ? retainedRigidBase
-        + (rigid ? 16 * retainedFineCount + retainedSupportCount : 0) : layout.floatCount))), usage: storage });
+      size: Math.max(4, 4 * (retainedDensityLayout ? retainedDensityLayout.controlBaseWords + 1 : layout.floatCount)), usage: storage });
     const seed = (floatOffset: number, values: Float32Array) => {
       if (values.byteLength === 0) return;
       device.queue.writeBuffer(state, 4 * floatOffset, values.buffer as ArrayBuffer,
         values.byteOffset, values.byteLength);
     };
     const initialDensity = retainedDensity
-      ? compileRetainedNativeIntegrals(retainedDensity, templates.words, templates.cellCount, finestCellSize_m,
-        { means: retainedFineMeans!, dimensions: retainedDimensions! })
+      ? compileRetainedNativeIntegrals(retainedDensity, templates.words, templates.cellCount, finestCellSize_m)
       : templates.initialDensity;
-    let retainedRigidSubcellMoments: RetainedSceneSubcellMoments | undefined;
     seed(layout.densityA, initialDensity);
     seed(layout.densityB, initialDensity);
     if (retainedDensityLayout && retainedRecords) {
       seed(retainedDensityLayout.fieldBaseWords, retainedRecords);
       seed(retainedDensityLayout.integralBaseWords, initialDensity);
-      seed(retainedDensityLayout.controlBaseWords, new Float32Array([1, 0, retainedDensity!.generation, 0]));
-      seed(retainedDensityLayout.support.seedMeanBaseWords, retainedFineMeans!);
-      seed(retainedDensityLayout.support.openFractionBaseWords, retainedOpenMeans!.openFractions);
-      const coefficients = new Float32Array(2 * retainedFineCount);
-      for (let i = 0; i < retainedFineCount; i++) coefficients[2 * i] = 1;
-      for (const bank of retainedDensityLayout.support.coefficientBaseWords) seed(bank, coefficients);
-      if (retainedDensityLayout.support.rigid) {
-        const subcells = retainedRigidSubcellMoments = retainedPreparationCache!.subcellMoments!;
-        seed(retainedDensityLayout.support.rigid.seedSubcellAmountBaseWords, subcells.seedAmounts);
-        seed(retainedDensityLayout.support.rigid.staticOpenSubcellVolumeBaseWords, subcells.openVolumes);
-      }
-    }
-    if (currentMapMeasure) {
-      const values = new Float32Array(4 * retainedFineCount);
-      for (let i = 0; i < retainedFineCount; i++) {
-        const rho = retainedFineMeans![i]!; values[4 * i] = rho;
-        for (let axis = 0; axis < 3; axis++) values[4 * i + axis + 1] = rho * (initialVelocity_m_s?.[axis] ?? 0) / finestCellSize_m;
-      }
-      seed(currentMapMeasure.baseWords, values); seed(currentMapMeasure.baseWords + 4 * retainedFineCount, values);
+      seed(retainedDensityLayout.controlBaseWords, new Float32Array([1]));
     }
     seed(layout.gammaA, templates.initialGamma);
     seed(layout.gammaB, templates.initialGamma);
@@ -5103,7 +5055,7 @@ export class WebGPUSparseCM12Resident {
     const immutableHostIncidenceWords = templates.words.subarray(
       templates.words[10]!, templates.words[10]! + 2 * hostIncidenceCount);
     const topologyArenaWords = immutableHostIncidenceBaseWords
-      + immutableHostIncidenceWords.length + CM12_FAILURE_WORDS + (currentMapLayout ? 32 : 0);
+      + immutableHostIncidenceWords.length + CM12_FAILURE_WORDS;
     const topologyArena = device.createBuffer({
       label: "Sparse CM12 physical topology templates and worklists",
       size: Math.max(4, 4 * topologyArenaWords),
@@ -5181,9 +5133,6 @@ export class WebGPUSparseCM12Resident {
     if (solidOccupancyLayout && initialSolidWorld) {
       writeSparseCM12SolidOccupancy(device.queue, topologyArena,
         solidOccupancyLayout, initialSolidWorld, [0, 0, 0]);
-      device.queue.writeBuffer(topologyArena, 4 * (solidOccupancyLayout.baseWords + 23),
-        new Float32Array([sparseCM12PhysicalMassFixedScale(finestCellSize_m,
-          solidWorldHasClosedBoxShell(initialSolidWorld, atlas.dimensions))]));
     }
     const pressureTemplates = uploadBuffer(device,
       "Sparse CM12 read-only pressure topology", pressureTopology,
@@ -5525,7 +5474,6 @@ export class WebGPUSparseCM12Resident {
         retainedDensityLayout,
       );
     const shaderSource = createResidentShaderSource();
-    const pruneResidentShader = createSparseCM12WGSLPruner(shaderSource);
     const sourceByShaderModule = new WeakMap<GPUShaderModule, string>();
     const shaderModuleFor = (source: string, label: string) => {
       let promise = deviceCompilation.shaderModules.get(source);
@@ -5543,13 +5491,11 @@ export class WebGPUSparseCM12Resident {
     };
     const presentationShaderRoots = presentationPublisherOracleForQA
       ? ["refreshSparseCM12SolidWorldCells", "refreshSparseCM12SolidWorldRows",
-        "refreshSparseCM12FrontierSolidWorld", "inspectSparseCM12SolidEditWetOverlap", "applySparseCM12SolidEditScatter",
         "refreshSparseCM12StaticSolidGeometryEvidence",
         "clearSparseWorldFrontierResolutionCache",
         "classifyPresentationBricks", "validateSparseCM12InternedBoundaryImmutable",
         "publishSparseLevelSet", ...(SPARSE_CM12_COMMON_HEIGHT_ENABLED ? SPARSE_CM12_HEIGHT_ENTRY_POINTS : [])]
       : ["refreshSparseCM12SolidWorldCells", "refreshSparseCM12SolidWorldRows",
-        "refreshSparseCM12FrontierSolidWorld", "inspectSparseCM12SolidEditWetOverlap", "applySparseCM12SolidEditScatter",
         "refreshSparseCM12StaticSolidGeometryEvidence",
         "clearSparseWorldFrontierResolutionCache",
         "classifyPresentationBricks", "validateSparseCM12InternedBoundaryImmutable",
@@ -5566,45 +5512,15 @@ export class WebGPUSparseCM12Resident {
         "finalizeSparseCM12FramePlanPresentationExecution",
         "publishSparseCM12SurfaceRepresentabilityReceipts",
         "rejectSparseCM12FramePlanPresentationFaults", ...(SPARSE_CM12_COMMON_HEIGHT_ENABLED ? SPARSE_CM12_HEIGHT_ENTRY_POINTS : [])] as const;
-    const retainedInitializationNames = retainedDensityLayout?.support
-      ? ["initializeRetainedDensityOpenSupport", "adoptRetainedDensitySupportStamps", "initializeRetainedDensityNativeIntegrals"] : [];
-    const presentationShaderSource = pruneResidentShader(
-      [...presentationShaderRoots, ...retainedInitializationNames],
+    const presentationShaderSource = sparseCM12WGSLForEntryPoints(
+      shaderSource, presentationShaderRoots,
     );
     report("Compile first-frame presentation pipelines");
     const shaderModule = await shaderModuleFor(
       presentationShaderSource, "Sparse CM12 presentation shader",
     );
     const pipelineLayout = deviceCompilation.pipelineLayout;
-    const solidEditProposalLayout = device.createBindGroupLayout({
-      label: "Sparse CM12 private solid overlap proposal",
-      entries: [{ binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } }],
-    });
-    const solidEditReadLayout = device.createBindGroupLayout({
-      label: "Sparse CM12 solid overlap accepted-state subset",
-      entries: [
-        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
-        { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-        ...[2, 12, 16].map(binding => ({ binding, visibility: GPUShaderStage.COMPUTE,
-          buffer: { type: "storage" as const } })),
-      ],
-    });
-    const solidEditPipelineLayout = device.createPipelineLayout({
-      label: "Sparse CM12 solid overlap receipt layout",
-      bindGroupLayouts: [solidEditReadLayout, solidEditProposalLayout],
-    });
-    const names = [
-      ...(currentMapLayout ? ["compileCurrentMapVelocity", "extendCurrentMapVelocityToScratch", "extendCurrentMapVelocityFromScratch", "compileCurrentMapTraceSchedule", "sealCurrentMapTraceSchedule", "advanceCurrentMapNodes", "filterCurrentMapX", "filterCurrentMapY", "filterCurrentMapZ", "certifyCurrentMap", "compileCurrentMapPhysicalBoundary", "boundCurrentMapPhysicalBoundary", "validateCurrentMapMaterialCoverage", "compileCurrentMapFineMeasureRanges", "integrateCurrentMapFineMeasureCooperative", "validateCurrentMapCoverage", "validateCurrentMapBeforeNative", "validateCurrentMapPublication", "publishCurrentMapIncrement"] : []),
-      "injectLiquid", "injectLiquidFaces", "inspectSparseCM12SolidEditWetOverlap", "applySparseCM12SolidEditScatter",
-      ...(retainedDensityLayout?.support ? ["advanceRetainedDensitySupport", "compileRetainedDensityNativeIntegrals", "commitRetainedDensityGeneration",
-        "refreshRetainedDensityNativeIntegralImage",
-        "advanceRetainedDensityDynamicSupport",
-        "initializeRetainedDensityOpenSupport", "adoptRetainedDensitySupportStamps", "initializeRetainedDensityNativeIntegrals"] as const : []),
-      ...(retainedDensityLayout?.support?.rigid ? ["initializeRetainedRigidDisplacement",
-        "propagateRetainedRigidDisplacementAtoB", "propagateRetainedRigidDisplacementBtoA",
-        "validateRetainedRigidDisplacement", "gatherRetainedRigidDisplacementAtoB",
-        "gatherRetainedRigidDisplacementBtoA", "validateRetainedRigidDisplacementPackets",
-        "finalizeRetainedRigidDisplacement"] as const : []),
+    const names = ["injectLiquid", "injectLiquidFaces",
       "clearLiquidJetOverflowReceipts", "scatterLiquidJetOverflow",
       "finalizeLiquidJetOverflow",
       "beginSparseCM12FrameControl", "publishSparseCM12FrameBodyAuthority",
@@ -5714,10 +5630,12 @@ export class WebGPUSparseCM12Resident {
       "compileSparseWorldFrontierExecutionImage",
       "clearShadowRowMembership", "beginShadowTopology", "buildShadowLeafWorklist",
       "buildShadowStructureWorklist",
-      "finalizeShadowWorklists",
+      "buildShadowCellWorklist", "buildShadowRowWorklist",
+      "finalizeShadowWorklists", "transferCandidateCells",
       "transferCandidateCellsFromTopologyDelta",
+      "prepareCandidateFaceReceipts", "transferCandidateFaces",
       "transferCandidateFacesFromTopologyDelta",
-      "publishCandidateTopologyDeltaFromWorklist",
+      "publishCandidateTopologyDelta", "publishCandidateTopologyDeltaFromWorklist",
       "validateCandidateShadowFaces", "publishCandidateShadowFaces",
       "validateAndAuthorizeShadowTopology", "finalizeAuthorizedShadowTopology",
       "sealSparseCM12AuthorizedTopologyEffects",
@@ -5770,13 +5688,11 @@ export class WebGPUSparseCM12Resident {
     ] as const;
     const presentationEntryNames = new Set<string>(presentationPublisherOracleForQA
       ? ["refreshSparseCM12SolidWorldCells", "refreshSparseCM12SolidWorldRows",
-        "refreshSparseCM12FrontierSolidWorld", "inspectSparseCM12SolidEditWetOverlap", "applySparseCM12SolidEditScatter",
         "refreshSparseCM12StaticSolidGeometryEvidence",
         "clearSparseWorldFrontierResolutionCache",
         "classifyPresentationBricks", "validateSparseCM12InternedBoundaryImmutable",
         "publishSparseLevelSet", ...(SPARSE_CM12_COMMON_HEIGHT_ENABLED ? SPARSE_CM12_HEIGHT_ENTRY_POINTS : [])]
       : ["refreshSparseCM12SolidWorldCells", "refreshSparseCM12SolidWorldRows",
-        "refreshSparseCM12FrontierSolidWorld", "inspectSparseCM12SolidEditWetOverlap", "applySparseCM12SolidEditScatter",
         "refreshSparseCM12StaticSolidGeometryEvidence",
         "clearSparseWorldFrontierResolutionCache",
         "classifyPresentationBricks", "validateSparseCM12InternedBoundaryImmutable",
@@ -5792,7 +5708,6 @@ export class WebGPUSparseCM12Resident {
         "finalizeSparseCM12FramePlanPresentationExecution",
         "publishSparseCM12SurfaceRepresentabilityReceipts",
         "rejectSparseCM12FramePlanPresentationFaults", ...(SPARSE_CM12_COMMON_HEIGHT_ENABLED ? SPARSE_CM12_HEIGHT_ENTRY_POINTS : [])]);
-    for (const name of retainedInitializationNames) presentationEntryNames.add(name);
     const presentationNames = names.filter((name) => presentationEntryNames.has(name));
     const simulationNames = names.filter((name) => !presentationEntryNames.has(name));
     const compileNamedEntries = async (
@@ -5802,8 +5717,7 @@ export class WebGPUSparseCM12Resident {
     ) => Promise.all(selectedNames.map(async (name) => {
       try {
         const descriptor: GPUComputePipelineDescriptor = {
-          label: `Sparse CM12 ${name}`, layout: (name === "inspectSparseCM12SolidEditWetOverlap" || name === "applySparseCM12SolidEditScatter")
-            ? solidEditPipelineLayout : pipelineLayout,
+          label: `Sparse CM12 ${name}`, layout: pipelineLayout,
           compute: { module, entryPoint: name },
         };
         const pipeline = await compiler.compileComputePipeline(descriptor, { priority });
@@ -5894,7 +5808,7 @@ export class WebGPUSparseCM12Resident {
           for (let chunkIndex = 0; chunkIndex < simulationNameChunks.length;
             chunkIndex += 1) {
             const chunkNames = simulationNameChunks[chunkIndex]!;
-            const chunkSource = pruneResidentShader(chunkNames);
+            const chunkSource = sparseCM12WGSLForEntryPoints(shaderSource, chunkNames);
             const chunkModule = await shaderModuleFor(chunkSource,
               `Sparse CM12 simulation shader ${chunkIndex + 1}/${simulationNameChunks.length}`);
             try {
@@ -5907,10 +5821,12 @@ export class WebGPUSparseCM12Resident {
           // Two pipelines from one entry point: the snapshot variant additionally
           // advances the device-side snapshot cursor and stamps its slot.
           const journalEntries = layout.journal === 0 ? [] : await (async () => {
-            const journalSource = pruneResidentShader(["journalIteration"]);
             const journalShaderModule = await shaderModuleFor(
-              journalSource, "Sparse CM12 journal snapshot shader",
+              sparseCM12WGSLForEntryPoints(shaderSource, ["journalIteration"]),
+              "Sparse CM12 journal snapshot shader",
             );
+            const journalSource = sparseCM12WGSLForEntryPoints(
+              shaderSource, ["journalIteration"]);
             try {
               return [["journalIterationSnapshot", await compiler.compileComputePipeline({
                 label: "Sparse CM12 journalIteration with field snapshot",
@@ -5922,17 +5838,18 @@ export class WebGPUSparseCM12Resident {
               deviceCompilation.shaderModules.delete(journalSource);
             }
           })();
-          const pruneAllocatorShader = createSparseCM12WGSLPruner(presentationAllocatorShaderSource);
           const presentationAllocatorEntries = await Promise.all([
             "allocateSparseCM12PresentationPages",
             "sortSparseCM12PresentationPageDirectory",
             "retireSparseCM12PresentationPages",
             "compactSparseCM12PresentationPageDirectory",
           ].map(async (entryPoint) => {
-            const allocatorSource = pruneAllocatorShader([entryPoint]);
             const module = await shaderModuleFor(
-              allocatorSource, `Sparse CM12 ${entryPoint} shader`,
+              sparseCM12WGSLForEntryPoints(presentationAllocatorShaderSource, [entryPoint]),
+              `Sparse CM12 ${entryPoint} shader`,
             );
+            const allocatorSource = sparseCM12WGSLForEntryPoints(
+              presentationAllocatorShaderSource, [entryPoint]);
             try {
               return [entryPoint, await compiler.compileComputePipeline({
                 label: `Sparse CM12 ${entryPoint}`,
@@ -5965,12 +5882,8 @@ export class WebGPUSparseCM12Resident {
         state,
         topologyArena,
         frameControlIndirectArguments,
-        acceptedIndirectArguments,
         rigidBodies: rigid.bodies,
         exchange: rigid.exchange,
-        retainedDensityLayout,
-        worldDirectoryLayout,
-        solidOccupancyLayout,
       })
       : undefined;
     const result = new WebGPUSparseCM12Resident(
@@ -6059,8 +5972,8 @@ export class WebGPUSparseCM12Resident {
       atlas.bricks.map((brick) => brick.coordinate),
       templates.words,
       rigidCoupling);
-    result.writeParameters(packed, 0.004, finestCellSize_m, 1, [0, 0, 0], undefined, undefined,
-      undefined, rigid?.initialBodyCount ?? 0, rigid?.worldDimensions_m);
+    result.writeParameters(packed, 0.004, 1, 1, [0, 0, 0], undefined, undefined,
+      undefined, 0, undefined);
     if (solidOccupancyLayout) {
       const initialization = device.createCommandEncoder({
         label: "Sparse CM12 SolidWorld aperture initialization",
@@ -6068,7 +5981,7 @@ export class WebGPUSparseCM12Resident {
       result.encodeSolidWorldApertureRefresh(initialization);
       device.queue.submit([initialization.finish()]);
     }
-    if (rigidCoupling && !retainedDensityLayout?.support) {
+    if (rigidCoupling) {
       const initialization = device.createCommandEncoder({
         label: "Sparse CM12 solid topology initialization",
       });
@@ -6085,18 +5998,6 @@ export class WebGPUSparseCM12Resident {
     result.replacementConfiguration = { finestCellSize_m, rigid, journal, presentationPageResolution,
       topologyPageCapacityMaximum, retainedDensity };
     result.retainedDensityLayout = retainedDensityLayout;
-    result.retainedDensitySupportCount = retainedSupportCount;
-    result.retainedUnrestrictedMeans = retainedFullFineMeans;
-    result.liquidMayExist = !retainedFineMeans || retainedFineMeans.some(value => value !== 0);
-    result.retainedPreparationCache = retainedPreparationCache;
-    result.retainedRigidSubcellMoments = retainedRigidSubcellMoments;
-    result.retainedInitialNativeCounts = [templates.cellCount, templates.rowCount];
-    if (retainedDensityLayout?.support) {
-      result.writeParameters(packed, .004, finestCellSize_m, 1, [0, 0, 0]);
-      const initialization = device.createCommandEncoder({ label: "Retained density initial native integrals" });
-      result.encodeRetainedDensityInitialization(initialization, true);
-      device.queue.submit([initialization.finish()]);
-    }
 
     return result;
   }
@@ -6109,33 +6010,31 @@ export class WebGPUSparseCM12Resident {
     symmetry: { scalar: boolean; face: boolean }; limits: GPUSupportedLimits;
     newAirCoverage?: readonly SparseCM12NewAirCoverage[];
     candidateKeys?: ReadonlySet<number>;
-    retainedDensity?: RetainedSceneDensity;
-    retainedPreparationCache?: RetainedScenePreparationCache;
     journal?: SparseCM12PressureJournalCapacityRequest;
     source?: Omit<SparseCM12GenerationFields, "state" | "liveControl"> & {
-      geometryRecipe: SparseCM12GPUCapturedGeometryRecipe; stateDescriptor: {size:number;usage:number};
+      geometry?: SparseCM12GenerationGeometry; geometryRecipe?: CM12CapturedGeometryRecipe; stateDescriptor: {size:number;usage:number};
       controlDescriptor: {size:number;usage:number};
       liveControl: Omit<NonNullable<SparseCM12GenerationFields["liveControl"]>, "buffer"> };
     rigid?: { bodies: {size:number;usage:number}; exchange: {size:number;usage:number};
-      worldDimensions_m: readonly [number, number, number]; initialBodyCount?: number };
+      worldDimensions_m: readonly [number, number, number] };
   }): Promise<CM12ResourceRecipe> {
     const recorder = createCM12ResourceRecorder(input.limits,
       [...(input.rigid ? [input.rigid.bodies, input.rigid.exchange] : []),
         ...(input.source ? [input.source.stateDescriptor, input.source.controlDescriptor] : [])]);
     const allocation = boundedGenerationDevice(recorder.device, input.maximumBytes);
     const rigid = input.rigid ? { bodies: recorder.externalResources[0] as GPUBuffer,
-      exchange: recorder.externalResources[1] as GPUBuffer, worldDimensions_m: input.rigid.worldDimensions_m,
-      initialBodyCount: input.rigid.initialBodyCount } : undefined;
+      exchange: recorder.externalResources[1] as GPUBuffer, worldDimensions_m: input.rigid.worldDimensions_m } : undefined;
     const grid = buildSparseAtlasCompositeGrid(input.atlas);
     const resident = await this.createConfigured(allocation.device, input.atlas,
       grid, input.finestCellSize_m, input.solidWorld,
       input.active, rigid, input.journal, 8, false, false, false, true, true,
       () => {}, false, false, false, false, false, input.topologyPageCapacityMaximum,
-      false, input.symmetry, undefined, input.candidateKeys, input.retainedDensity, input.retainedPreparationCache);
+      false, input.symmetry, undefined, input.candidateKeys);
     await resident.waitForSimulationPipelines();
     const firstSource = input.rigid ? 2 : 0;
-    const transfer = input.source ? await prepareSparseCM12GPUGenerationTransfer(recorder.device,
-      input.source.geometryRecipe, { ...input.source,
+    if (input.source?.geometryRecipe) Object.assign(input.source, compileCM12CapturedGeometry(input.source.geometryRecipe));
+    const transfer = input.source ? await prepareSparseCM12GenerationTransfer(recorder.device,
+      input.source.geometry!, grid, { ...input.source,
         state: recorder.externalResources[firstSource] as GPUBuffer,
         liveControl: { ...input.source.liveControl, buffer: recorder.externalResources[firstSource+1] as GPUBuffer } },
       resident.generationTransferTarget(), input.maximumBytes - resident.allocatedBytes,
@@ -6205,20 +6104,15 @@ export class WebGPUSparseCM12Resident {
     inflow?: SparseCM12InflowControl,
   ): void {
     this.assertLive();
-    this.solidEditRevision++;
-    if (inflow) this.liquidMayExist = true;
     this.lastInflow = inflow;
     const packed = this.lastPacked!;
     this.writeParameters(packed, dt_s, finestCellSize_m, pressureScale,
       accelerationFinePerSecond2, sharpening, activityPolicy, pressureControl, bodyCount,
       worldDimensions_m, inflow);
-    this.encodeAcceptedSolidQuantum(encoder);
     const topologyFrozen = activityPolicy?.freezeTopology === true;
     const pressureIterations = sparseCM12PressureIterations(pressureControl?.iterations);
-    const currentMap = this.retainedDensityLayout?.currentMap;
-    if (currentMap && (inflow || bodyCount > 0)) throw new Error("Current-field transport cannot accept inflow or rigid bodies");
-    const gammaDiffusionEnabled = !currentMap && sharpening?.gammaDiffusionEnabled !== false;
-    const surfaceSharpeningEnabled = !currentMap && sharpening?.surfaceSharpeningEnabled !== false;
+    const gammaDiffusionEnabled = sharpening?.gammaDiffusionEnabled !== false;
+    const surfaceSharpeningEnabled = sharpening?.surfaceSharpeningEnabled !== false;
     // The header carries the two device-side cursors, so it starts each
     // captured frame at zero. The records and snapshots behind it are
     // overwritten in place and never read past their cursor.
@@ -6541,45 +6435,6 @@ export class WebGPUSparseCM12Resident {
     });
     stage("conservative-transport", ({ closeSubstage }) => {
       useBindGroup(this.transportBindGroup);
-      if (currentMap) {
-        closePass();
-        encoder.clearBuffer(this.topologyArena, this.topologyArena.size - CM12_FAILURE_BYTES - 128, 128);
-        // The effective velocity plane is still the immutable VEX output.
-        // All candidate field and measure checks precede native publication.
-        dispatch("compileCurrentMapVelocity", Math.ceil(currentMap.nodeCount / WORKGROUP_SIZE));
-        for (let sweep = 0; sweep < SPARSE_CM12_CURRENT_MAP_VELOCITY_EXTENSION_SWEEPS; sweep += 2) {
-          dispatch("extendCurrentMapVelocityToScratch", Math.ceil(currentMap.nodeCount / WORKGROUP_SIZE));
-          dispatch("extendCurrentMapVelocityFromScratch", Math.ceil(currentMap.nodeCount / WORKGROUP_SIZE));
-        }
-        dispatch("compileCurrentMapTraceSchedule", Math.ceil(currentMap.lineCounts[0] / WORKGROUP_SIZE));
-        dispatch("sealCurrentMapTraceSchedule", 1);
-        dispatch("advanceCurrentMapNodes", Math.ceil(currentMap.nodeCount / WORKGROUP_SIZE));
-        dispatch("filterCurrentMapX", Math.ceil(currentMap.lineCounts[0] / WORKGROUP_SIZE));
-        dispatch("filterCurrentMapY", Math.ceil(currentMap.lineCounts[1] / WORKGROUP_SIZE));
-        dispatch("filterCurrentMapZ", Math.ceil(currentMap.lineCounts[2] / WORKGROUP_SIZE));
-        dispatch("certifyCurrentMap", Math.ceil(currentMap.cellCount / WORKGROUP_SIZE));
-        dispatch("compileCurrentMapPhysicalBoundary", Math.ceil(currentMap.boundarySampleCount / WORKGROUP_SIZE));
-        dispatch("boundCurrentMapPhysicalBoundary", 6);
-        closePass(); this.encodeFailureGate(encoder);
-        dispatch("validateCurrentMapMaterialCoverage", 1);
-        // Filtering no longer uses the scratch plane. Compute identical
-        // whole-chain bounds with one worker per support before cooperative
-        // quadrature, where a lane-zero calculation would idle 63 workers.
-        dispatch("compileCurrentMapFineMeasureRanges", Math.ceil(currentMap.dimensions.reduce((a, b) => a * b, 1) / WORKGROUP_SIZE));
-        closePass();
-        dispatch("integrateCurrentMapFineMeasureCooperative", currentMap.dimensions.reduce((a, b) => a * b, 1));
-        closePass(); this.encodeFailureGate(encoder);
-        dispatch("validateCurrentMapCoverage", Math.ceil(currentMap.dimensions.reduce((a, b) => a * b, 1) / WORKGROUP_SIZE));
-        dispatch("validateCurrentMapBeforeNative", 1);
-        closePass(); this.encodeFailureGate(encoder);
-        dispatch("compileRetainedDensityNativeIntegrals", Math.ceil(this.templateCellCount / WORKGROUP_SIZE));
-        closePass(); this.encodeFailureGate(encoder);
-        dispatch("publishCurrentMapIncrement", Math.ceil(currentMap.nodeCount / WORKGROUP_SIZE));
-        closePass(); this.encodeFailureGate(encoder);
-        dispatch("commitRetainedDensityGeneration", 1);
-        closeSubstage("transport-gather");
-        return;
-      }
       dispatchAccepted("clearSparseCM12TransportReceipts", "cell");
       if (this.phase1TransportQALayout) {
         dispatchAccepted("captureSparseCM12Phase1TransportPackets", "cell");
@@ -6640,20 +6495,6 @@ export class WebGPUSparseCM12Resident {
       dispatchAccepted("finalizeGammaSnapshot", "cell");
     });
     stage("surface-sharpening", ({ closeSubstage }) => {
-      if (currentMap) {
-        dispatch("validateCurrentMapPublication", 1);
-        closePass(); this.encodeFailureGate(encoder);
-        // Gamma diffusion, sharpening and native capacity redistribution belong
-        // to the former CM12 transport matrix. The current field already owns
-        // the density and momentum measure; these are not additional writers.
-        useBindGroup(this.transportBindGroup);
-        dispatch("beginSparseCM12FinalScalarMasks", 1);
-        dispatch("publishSparseCM12FinalScalarMasks", leafCapacity);
-        dispatch("sealSparseCM12FinalScalarMasks", 1);
-        closeSubstage("final-scalar-mask-publication");
-        useBindGroup(this.pressureBindGroup);
-        return;
-      }
       // Start the stage with real, already-required GPU work. Besides resetting
       // the downstream counters before any producer can observe them, this pass
       // materializes the preceding stage's timestamp before the native receipt
@@ -6696,22 +6537,6 @@ export class WebGPUSparseCM12Resident {
       }
       closeSubstage("sharpening-finalize");
       if (sharpeningPhaseLimitForQA === "finalize") return;
-      if (this.retainedDensityLayout?.support?.rigid && this.rigidBodyCount > 0) {
-        dispatchAccepted("initializeRetainedRigidDisplacement", "cell");
-        for (let hop = 0; hop < SPARSE_CM12_RETAINED_RIGID_DISPLACEMENT_HOPS; hop += 2) {
-          dispatchAccepted("propagateRetainedRigidDisplacementAtoB", "cell");
-          dispatchAccepted("propagateRetainedRigidDisplacementBtoA", "cell");
-        }
-        // Prove bounded routes before moving packets. All descending physical
-        // faces receive an area/distance share from the immutable source bank.
-        dispatchAccepted("validateRetainedRigidDisplacement", "cell");
-        for (let hop = 0; hop < SPARSE_CM12_RETAINED_RIGID_DISPLACEMENT_HOPS; hop += 2) {
-          dispatchAccepted("gatherRetainedRigidDisplacementAtoB", "cell");
-          dispatchAccepted("gatherRetainedRigidDisplacementBtoA", "cell");
-        }
-        dispatchAccepted("validateRetainedRigidDisplacementPackets", "cell");
-        dispatchAccepted("finalizeRetainedRigidDisplacement", "cell");
-      }
       // Relay over no more than one B8 page width (the accepted support reach).
       // One pass only moved an over-capacity packet into an already-full
       // neighbour; after floor impact that concentrated conserved mass into a
@@ -6769,21 +6594,6 @@ export class WebGPUSparseCM12Resident {
       closeSubstage("density-capacity-repair");
       if (sharpeningPhaseLimitForQA === "capacity"
         || capacityPassLimitForQA !== undefined) return;
-      if (this.retainedDensityLayout?.support) {
-        const count = this.retainedDensityLayout.support.dimensions.reduce((a, b) => a * b, 1);
-        if (this.retainedBoundaryDirty || this.retainedDensityLayout.support.rigid) {
-          dispatch("refreshRetainedDensityNativeIntegralImage", Math.ceil(this.templateCellCount / WORKGROUP_SIZE));
-          this.retainedBoundaryDirty = false;
-        }
-        dispatch("advanceRetainedDensitySupport", Math.ceil(count / WORKGROUP_SIZE));
-        // Frontier allocation can activate transport before its leaf enters
-        // the compact accepted manifest. Stamp every allocated support page
-        // before compiling native amounts, just as the injection path does.
-        const dynamicLeaves = this.retainedDensityLayout.support.dynamic?.leafCount ?? 0;
-        if (dynamicLeaves > 0) dispatch("advanceRetainedDensityDynamicSupport", dynamicLeaves);
-        dispatch("compileRetainedDensityNativeIntegrals", Math.ceil(this.templateCellCount / WORKGROUP_SIZE));
-        dispatch("commitRetainedDensityGeneration", 1);
-      }
       // Final scalar facts are authored once in the accepted TEI packet space.
       // Every remaining dirty carrier below is a mask consumer; finalization no
       // longer walks incidence or appends a tile event per changed cell.
@@ -7426,20 +7236,7 @@ export class WebGPUSparseCM12Resident {
   private encodeFramePlanPresentation(
     encoder: GPUCommandEncoder,
     label: string,
-    allocatePages = false,
   ): void {
-    // Live edits can activate the first wet leaves while the simulation is
-    // paused. Publish their page mappings before FPP1 validates those leaves;
-    // waiting for an ordinary frame leaves the accepted fluid invisible.
-    if (allocatePages) {
-      const allocation = encoder.beginComputePass({ label: `${label} page allocation` });
-      allocation.setBindGroup(0, this.presentationAllocatorBindGroup);
-      allocation.setPipeline(this.pipelines.allocateSparseCM12PresentationPages!);
-      allocation.dispatchWorkgroups(Math.ceil(this.worldDirectoryLayout.leafCapacity / WORKGROUP_SIZE));
-      allocation.setPipeline(this.pipelines.sortSparseCM12PresentationPageDirectory!);
-      allocation.dispatchWorkgroups(1);
-      allocation.end();
-    }
     this.encodeFailureGate(encoder);
     this.encodeCommonHeightReconstruction(encoder, label);
     if (this.presentationPublisherOracleForQA) {
@@ -7533,8 +7330,6 @@ export class WebGPUSparseCM12Resident {
 
   /** Adopt one accepted uniform solid generation without rebuilding fluid topology. */
   validateSolidWorld(solidWorld: SolidWorld): void {
-    if (this.retainedDensityLayout?.currentMap && solidWorld !== this.currentSolidWorld)
-      throw new Error("Current-field transport does not yet admit live solid edits");
     this.assertLive();
     const layout = this.solidOccupancyLayout;
     if (!layout) throw new Error("This world does not support live solid editing");
@@ -7542,138 +7337,11 @@ export class WebGPUSparseCM12Resident {
       || (solidWorld.regions?.length ?? 0) > layout.regionCapacity) {
       throw new Error("Live solid capacity reached; remove some geometry before adding more.");
     }
-    const field = this.replacementConfiguration.retainedDensity;
-    const support = this.retainedDensityLayout?.support;
-    const prepared = this.preparedSolidEdit;
-    if (prepared?.previous === this.currentSolidWorld && prepared.next === solidWorld
-      && prepared.field === field && prepared.sourceCache === this.retainedPreparationCache) return;
-    const delta = field && support ? compileRetainedSolidEditDelta(field, support.dimensions,
-      this.replacementConfiguration.finestCellSize_m, this.currentSolidWorld, solidWorld,
-      { seedMeans: this.retainedUnrestrictedMeans!, rigid: Boolean(support.rigid) }) : undefined;
-    const cache = delta && this.retainedPreparationCache
-      ? withRetainedSolidEdit(this.retainedPreparationCache, delta) : this.retainedPreparationCache;
-    this.preparedSolidEdit = { previous: this.currentSolidWorld, next: solidWorld, field,
-      sourceCache: this.retainedPreparationCache, delta, cache };
-
-  }
-
-  /** GPU admission and publication are one ordered command buffer. Mapping
-   * its receipt never suspends ordinary fluid steps or invalidates admission. */
-  async prepareSolidWorldWetOverlap(solidWorld: SolidWorld): Promise<number> {
-    if (this.atomicSolidEditInFlight) throw new Error("A solid edit is still being accepted.");
-    this.validateSolidWorld(solidWorld);
-    const proposal = this.preparedSolidEdit!;
-    const delta = proposal.delta, support = this.retainedDensityLayout?.support;
-    if (!delta && solidWorld !== this.currentSolidWorld) {
-      throw new Error("This fluid world cannot verify safe live solid edits; use a scene with retained density support.");
-    }
-    const indices = delta ? delta.indices.filter((_, index) =>
-      delta.solidFractions[index]! > delta.previousSolidFractions[index]!) : new Uint32Array();
-    const revision = this.solidEditRevision;
-    if (!indices.length || !this.liquidMayExist) { proposal.wetRevision = revision; return revision; }
-    const upload = prepareSolidEditUpload(this.solidOccupancyLayout!, this.currentSolidWorld, solidWorld);
-    const closedShell = solidWorldHasClosedBoxShell(solidWorld, this.dimensions);
-    const fixedScale = new Float32Array([sparseCM12PhysicalMassFixedScale(
-      this.replacementConfiguration.finestCellSize_m, closedShell)]);
-    upload.add("topology", this.solidOccupancyLayout!.baseWords + 23,
-      new Uint32Array(fixedScale.buffer));
-    if (delta && support) for (const { firstCell, cellCount, compactOffset } of delta.changedCellRanges) {
-      upload.add("state", support.seedMeanBaseWords + firstCell,
-        new Uint32Array(delta.effectiveMeans.buffer, 4 * compactOffset, cellCount));
-      upload.add("state", support.openFractionBaseWords + firstCell,
-        new Uint32Array(delta.openFractions.buffer, 4 * compactOffset, cellCount));
-      if (support.rigid && delta.subcells) {
-        upload.add("state", support.rigid.seedSubcellAmountBaseWords + 8 * firstCell,
-          new Uint32Array(delta.subcells.seedAmounts.buffer, 32 * compactOffset, 8 * cellCount));
-        upload.add("state", support.rigid.staticOpenSubcellVolumeBaseWords + 8 * firstCell,
-          new Uint32Array(delta.subcells.openVolumes.buffer, 32 * compactOffset, 8 * cellCount));
-      }
-    }
-    const scatter = upload.finish(), scatterOffset = 64 + indices.length;
-    const data = new Uint32Array(scatterOffset + scatter.length);
-    data.set([2, indices.length, scatter.length / 2, scatterOffset]);
-    data.set(indices, 64); data.set(scatter, scatterOffset);
-    const rows = planSparseCM12LinearDispatch(Math.ceil(this.templateRowCount / WORKGROUP_SIZE),
-      this.device.limits.maxComputeWorkgroupsPerDimension);
-    const rigid = this.rigidCoupling?.staticGeometryRefreshWorkgroups(this.templateCellCount) ?? [0, 0];
-    data.set([
-      Math.ceil(this.templateCellCount / WORKGROUP_SIZE), 1, 1,
-      ...rows, this.worldDirectoryLayout.leafCapacity, 1, 1,
-      this.initialWorldLeafCount, 1, 1,
-      Math.ceil(this.worldDirectoryLayout.leafCapacity / WORKGROUP_SIZE), 1, 1,
-      support ? Math.ceil(this.templateCellCount / WORKGROUP_SIZE) : 0, 1, 1,
-      rigid[0]!, 1, 1, rigid[1]!, 1, 1,
-    ], 32);
-    const buffer = this.device.createBuffer({ label: "Bounded atomic solid edit",
-      size: data.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
-    const receipt = this.device.createBuffer({ label: "Atomic solid edit acceptance",
-      size: 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-    this.atomicSolidEditInFlight = true;
-    try {
-      this.device.queue.writeBuffer(buffer, 0, data);
-      const pipeline = this.pipelines.inspectSparseCM12SolidEditWetOverlap!;
-      const group = this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(1),
-        entries: [{ binding: 0, resource: { buffer } }] });
-      const accepted = this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: this.parameters } },
-          { binding: 1, resource: { buffer: this.topology } },
-          { binding: 2, resource: { buffer: this.state } },
-          { binding: 12, resource: { buffer: this.activity } },
-          { binding: 16, resource: { buffer: this.topologyArena } },
-        ] });
-      const encoder = this.device.createCommandEncoder({ label: "Atomic bounded solid acceptance" });
-      const inspect = encoder.beginComputePass();
-      inspect.setPipeline(pipeline); inspect.setBindGroup(0, accepted); inspect.setBindGroup(1, group);
-      inspect.dispatchWorkgroups(Math.ceil(indices.length / WORKGROUP_SIZE)); inspect.end();
-      const apply = encoder.beginComputePass();
-      apply.setPipeline(this.pipelines.applySparseCM12SolidEditScatter!);
-      apply.setBindGroup(0, accepted); apply.setBindGroup(1, group);
-      apply.dispatchWorkgroups(Math.max(1, Math.ceil(scatter.length / 2 / WORKGROUP_SIZE))); apply.end();
-      this.encodeSolidWorldApertureRefresh(encoder, buffer);
-      if (support?.rigid) this.rigidCoupling!.encodeStaticGeometryRefresh(encoder,
-        this.templateCellCount, { buffer, offset: 88 });
-      if (support) {
-        const refresh = encoder.beginComputePass(); refresh.setBindGroup(0, this.bindGroup);
-        refresh.setPipeline(this.pipelines.refreshRetainedDensityNativeIntegralImage!);
-        refresh.dispatchWorkgroupsIndirect(buffer, 76); refresh.end();
-      }
-      encoder.copyBufferToBuffer(buffer, 0, receipt, 0, 4);
-      // The next ordinary frame may be encoded before this receipt maps. It
-      // must refresh its source integral after the ordered geometry command.
-      // A rejected candidate merely causes an idempotent extra refresh.
-      this.retainedBoundaryDirty ||= Boolean(support);
-      this.device.queue.submit([encoder.finish()]);
-      await receipt.mapAsync(GPUMapMode.READ);
-      const result = new Uint32Array(receipt.getMappedRange())[0]; receipt.unmap();
-      this.assertLive();
-      if (result === 1) throw new Error("Solid insertion overlaps moving water. Remove water from this space or place the solid in an empty area.");
-      if (result !== 0) throw new Error("The GPU did not publish this solid edit.");
-      this.currentSolidWorld = solidWorld; this.closedSolidShell = closedShell;
-      this.retainedPreparationCache = proposal.cache;
-      this.preparedSolidEdit = undefined;
-      this.solidEditRevision++;
-      return this.solidEditRevision;
-    } finally { this.atomicSolidEditInFlight = false; receipt.destroy(); buffer.destroy(); }
   }
 
   setSolidWorld(solidWorld: SolidWorld): void {
-    if (solidWorld === this.currentSolidWorld) return;
-    if (this.atomicSolidEditInFlight) throw new Error("A solid edit is still being accepted.");
     this.validateSolidWorld(solidWorld);
-    const support = this.retainedDensityLayout?.support;
     const previous = this.currentSolidWorld;
-    // validateSolidWorld prepared this immutable proposal before publication.
-    const { delta, cache: preparationCache, wetRevision } = this.preparedSolidEdit!;
-    if (!delta && solidWorld !== this.currentSolidWorld) {
-      throw new Error("This fluid world cannot verify safe live solid edits; use a scene with retained density support.");
-    }
-    if (delta?.solidFractions.some((fraction, index) => fraction > delta.previousSolidFractions[index]!)
-      && this.liquidMayExist && wetRevision !== this.solidEditRevision) {
-      throw new Error("Solid insertion needs a current water-overlap check before publication.");
-    }
-    this.solidEditRevision++;
-    this.preparedSolidEdit = undefined;
     this.currentSolidWorld = solidWorld;
     if (!this.solidOccupancyLayout) return;
     this.closedSolidShell = solidWorldHasClosedBoxShell(solidWorld, this.dimensions);
@@ -7688,40 +7356,10 @@ export class WebGPUSparseCM12Resident {
     this.device.queue.submit([clear.finish()]);
     writeSparseCM12SolidOccupancy(this.device.queue, this.topologyArena,
       this.solidOccupancyLayout, solidWorld, [0, 0, 0], previous);
-    this.device.queue.writeBuffer(this.topologyArena, 4 * (this.solidOccupancyLayout.baseWords + 23),
-      new Float32Array([sparseCM12PhysicalMassFixedScale(this.replacementConfiguration.finestCellSize_m, this.closedSolidShell)]));
-    if (delta && support) {
-      for (const { firstCell, cellCount, compactOffset } of delta.changedCellRanges) {
-        this.device.queue.writeBuffer(this.state, 4 * (support.seedMeanBaseWords + firstCell),
-          delta.effectiveMeans.buffer as ArrayBuffer, 4 * compactOffset, 4 * cellCount);
-        this.device.queue.writeBuffer(this.state, 4 * (support.openFractionBaseWords + firstCell),
-          delta.openFractions.buffer as ArrayBuffer, 4 * compactOffset, 4 * cellCount);
-        if (support.rigid && delta.subcells) {
-          this.device.queue.writeBuffer(this.state, 4 * support.rigid.seedSubcellAmountBaseWords + 32 * firstCell,
-            delta.subcells.seedAmounts.buffer as ArrayBuffer, 32 * compactOffset, 32 * cellCount);
-          this.device.queue.writeBuffer(this.state, 4 * support.rigid.staticOpenSubcellVolumeBaseWords + 32 * firstCell,
-            delta.subcells.openVolumes.buffer as ArrayBuffer, 32 * compactOffset, 32 * cellCount);
-        }
-      }
-      this.retainedPreparationCache = preparationCache;
-      // The next accepted scalar update reconciles the new open basis with
-      // transported/capacity-repaired amounts before publishing its field.
-      this.retainedBoundaryDirty = true;
-    }
-    this.writeParameters(this.lastPacked!, .004, this.replacementConfiguration.finestCellSize_m,
-      1, [0, 0, 0]);
     const refresh = this.device.createCommandEncoder({
-      label: "Sparse CM12 refresh SolidWorld apertures and retained moments",
+      label: "Sparse CM12 refresh SolidWorld apertures",
     });
     this.encodeSolidWorldApertureRefresh(refresh);
-    if (support?.rigid) this.rigidCoupling!.encodeStaticGeometryRefresh(refresh, this.templateCellCount);
-    if (support) {
-      const pass = refresh.beginComputePass({ label: "Retained density edited open integral image" });
-      pass.setBindGroup(0, this.bindGroup);
-      pass.setPipeline(this.pipelines.refreshRetainedDensityNativeIntegralImage!);
-      pass.dispatchWorkgroups(Math.ceil(this.templateCellCount / WORKGROUP_SIZE));
-      pass.end();
-    }
     this.device.queue.submit([refresh.finish()]);
   }
 
@@ -7750,60 +7388,24 @@ export class WebGPUSparseCM12Resident {
   }
 
   /** Derive finite-volume apertures from the canonical GPU voxel occupancy. */
-  private encodeSolidWorldApertureRefresh(encoder: GPUCommandEncoder,
-    indirect?: GPUBuffer): void {
+  private encodeSolidWorldApertureRefresh(encoder: GPUCommandEncoder): void {
     if (!this.solidOccupancyLayout || this.layout.solidVoxelCellOpen === 0) return;
     const pass = encoder.beginComputePass({
       label: "Sparse CM12 derive SolidWorld apertures",
     });
     pass.setBindGroup(0, this.bindGroup);
     pass.setPipeline(this.pipelines.refreshSparseCM12SolidWorldCells!);
-    if (indirect) pass.dispatchWorkgroupsIndirect(indirect, 16);
-    else pass.dispatchWorkgroups(Math.ceil(this.templateCellCount / WORKGROUP_SIZE));
+    pass.dispatchWorkgroups(Math.ceil(this.templateCellCount / WORKGROUP_SIZE));
     pass.setPipeline(this.pipelines.refreshSparseCM12SolidWorldRows!);
-    if (indirect) pass.dispatchWorkgroupsIndirect(indirect, 28);
-    else pass.dispatchWorkgroups(...planSparseCM12LinearDispatch(
+    pass.dispatchWorkgroups(...planSparseCM12LinearDispatch(
       Math.ceil(this.templateRowCount / WORKGROUP_SIZE),
       this.device.limits.maxComputeWorkgroupsPerDimension,
     ));
-    // Live liquid injection can own cells outside the immutable template
-    // catalogue. Their cached cell/row apertures must adopt this solid edit
-    // before retained support is integrated against the new open geometry.
-    pass.setPipeline(this.pipelines.refreshSparseCM12FrontierSolidWorld!);
-    if (indirect) pass.dispatchWorkgroupsIndirect(indirect, 40);
-    else pass.dispatchWorkgroups(this.worldDirectoryLayout.leafCapacity);
     pass.setPipeline(this.pipelines.refreshSparseCM12StaticSolidGeometryEvidence!);
-    if (indirect) pass.dispatchWorkgroupsIndirect(indirect, 52);
-    else pass.dispatchWorkgroups(this.initialWorldLeafCount);
+    pass.dispatchWorkgroups(this.initialWorldLeafCount);
     pass.setPipeline(this.pipelines.clearSparseWorldFrontierResolutionCache!);
-    if (indirect) pass.dispatchWorkgroupsIndirect(indirect, 64);
-    else pass.dispatchWorkgroups(Math.ceil(
+    pass.dispatchWorkgroups(Math.ceil(
       this.worldDirectoryLayout.leafCapacity / WORKGROUP_SIZE));
-    pass.end();
-  }
-
-  /** Publish generation zero without executing a physics step or mapping state. */
-  private encodeRetainedDensityInitialization(encoder: GPUCommandEncoder, initializeSupport: boolean): void {
-    const support = this.retainedDensityLayout?.support;
-    if (!support) return;
-    let pass = encoder.beginComputePass({ label: "Integrate retained density into native ownership" });
-    pass.setBindGroup(0, this.bindGroup);
-    if (initializeSupport) {
-      pass.setPipeline(this.pipelines.initializeRetainedDensityOpenSupport!);
-      pass.dispatchWorkgroups(Math.ceil(this.retainedDensitySupportCount / WORKGROUP_SIZE));
-    }
-    if (support.dynamic?.leafCount) {
-      pass.setPipeline(this.pipelines.adoptRetainedDensitySupportStamps!);
-      pass.dispatchWorkgroups(Math.ceil(support.dynamic.leafCount / WORKGROUP_SIZE));
-    }
-    if (initializeSupport && this.rigidCoupling) {
-      pass.end();
-      this.rigidCoupling.encodeInitialization(encoder, this.retainedInitialNativeCounts![0], this.retainedInitialNativeCounts![1]);
-      pass = encoder.beginComputePass({ label: "Integrate retained density through rigid open support" });
-      pass.setBindGroup(0, this.bindGroup);
-    }
-    pass.setPipeline(this.pipelines.initializeRetainedDensityNativeIntegrals!);
-    pass.dispatchWorkgroups(Math.ceil(this.templateCellCount / WORKGROUP_SIZE));
     pass.end();
   }
 
@@ -7811,7 +7413,6 @@ export class WebGPUSparseCM12Resident {
   encodeInitialPresentation(encoder: GPUCommandEncoder, finestCellSize_m: number): void {
     this.assertLive();
     this.writeParameters(this.lastPacked!, 0.004, finestCellSize_m, 1, [0, 0, 0]);
-    this.encodeAcceptedSolidQuantum(encoder);
     this.encodeFailureGate(encoder);
     const pass = encoder.beginComputePass({ label: "Sparse CM12 resident initial presentation" });
     pass.setBindGroup(0, this.bindGroup);
@@ -7853,29 +7454,6 @@ export class WebGPUSparseCM12Resident {
       [0, 0, 0], 0, 0, 0.004, true, activityPolicy);
   }
 
-  /** Bounded editor transaction; removal reads only already accepted cells. */
-  encodeFluidVolumeEdit(encoder: GPUCommandEncoder, edit: LiveFluidEdit,
-    finestCellSize_m: number, origin_m: readonly [number, number, number],
-    activityPolicy: SparseCM12ActivityPolicy | undefined, receipt: GPUBuffer): void {
-    const h = finestCellSize_m;
-    const center = [edit.center_m.x, edit.center_m.y, edit.center_m.z].map((v, axis) => (v - origin_m[axis]!) / h) as [number, number, number];
-    const radius = [edit.radius_m, edit.shape === "torus" ? edit.tubeRadius_m! : edit.radius_m, edit.radius_m].map(v => v / h) as [number, number, number];
-    const coveredCells = radius.reduce((volume, r, axis) => volume
-      * (Math.ceil(center[axis]! + r) - Math.floor(center[axis]! - r)), 1);
-    if (radius.some(v => !(v >= 1)) || coveredCells > 32768) {
-      throw new RangeError("Fluid edit exceeds the bounded 32768-cell work budget, or is smaller than one fluid cell.");
-    }
-    if (center.some((v, axis) => v - radius[axis]! < 0 || v + radius[axis]! > this.dimensions[axis]!)) {
-      throw new RangeError("Place the complete fluid volume inside the live fluid domain.");
-    }
-    if (edit.operation === "add" && activityPolicy?.freezeTopology) {
-      throw new RangeError("Live fluid addition is unavailable while topology is frozen.");
-    }
-    this.encodeTopologyEditTransaction(encoder, h, center, radius, liveFluidEditMode(edit),
-      (edit.tubeRadius_m ?? 0) / h, .004, true, activityPolicy, edit.operation === "remove" ? "apply" : "complete");
-    encoder.copyBufferToBuffer(this.activity, 4 * REGION_EDIT_BACKING_RECEIPT_WORD, receipt, 0, 4);
-  }
-
   encodeLiquidInjection(
     encoder: GPUCommandEncoder,
     finestCellSize_m: number,
@@ -7913,7 +7491,7 @@ export class WebGPUSparseCM12Resident {
     finestCellSize_m: number,
     centerFine: readonly [number, number, number],
     radiusFine: readonly [number, number, number],
-    mode: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7,
+    mode: 0 | 1 | 2,
     jetRadiusFine: number,
     injectionDt_s: number,
     publishPresentation: boolean,
@@ -7921,18 +7499,13 @@ export class WebGPUSparseCM12Resident {
     phase: "complete" | "prepare" | "apply" = "complete",
   ): void {
     this.assertLive();
-    if (this.retainedDensityLayout?.currentMap && mode !== 0)
-      throw new Error("Current-field transport does not yet admit live liquid edits");
-    this.solidEditRevision++;
-    if (mode > 0 && mode < 5) this.liquidMayExist = true;
     this.writeParameters(this.lastPacked!, injectionDt_s, finestCellSize_m, 1,
-      [0, 0, 0], undefined, activityPolicy, undefined, undefined, undefined, this.lastInflow);
+      [0, 0, 0], undefined, activityPolicy, undefined, 0, undefined, this.lastInflow);
     // Ordinary frames write zero, injections use positive modes, and a
     // topology-only region edit uses -1. No injection writer runs for an edit.
     this.parameterF32.set([...centerFine, mode === 0 ? -1 : mode], 52);
     this.parameterF32.set([...radiusFine, jetRadiusFine], 56);
     this.device.queue.writeBuffer(this.parameters, 0, this.parameterWords, 0, SPARSE_CM12_FAILURE_PARAMETER_OFFSET);
-    this.encodeAcceptedSolidQuantum(encoder);
     this.encodeFailureGate(encoder);
     const packed = this.lastPacked!;
     const leafCapacity = this.worldDirectoryLayout.leafCapacity;
@@ -8083,7 +7656,7 @@ export class WebGPUSparseCM12Resident {
     // after that topology is ready; a deferred page must not lose its dose.
     if (phase === "prepare") return;
     if (mode === 0) {
-      this.encodeFramePlanPresentation(encoder, "Sparse CM12 region edit presentation", true);
+      this.encodeFramePlanPresentation(encoder, "Sparse CM12 region edit presentation");
       return;
     }
 
@@ -8111,27 +7684,6 @@ export class WebGPUSparseCM12Resident {
     }
     injectionPass.setPipeline(this.pipelines.injectLiquidFaces!);
     injectionPass.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments, 12);
-    if (this.retainedDensityLayout?.support) {
-      const support = this.retainedDensityLayout.support;
-      const count = support.dimensions.reduce((a, b) => a * b, 1);
-      if (this.retainedBoundaryDirty || support.rigid) {
-        injectionPass.setPipeline(this.pipelines.refreshRetainedDensityNativeIntegralImage!);
-        injectionPass.dispatchWorkgroups(Math.ceil(this.templateCellCount / WORKGROUP_SIZE));
-        this.retainedBoundaryDirty = false;
-      }
-      injectionPass.setPipeline(this.pipelines.advanceRetainedDensitySupport!);
-      injectionPass.dispatchWorkgroups(Math.ceil(count / WORKGROUP_SIZE));
-      if (support.dynamic?.leafCount) {
-        // The shader adds CM12_RETAINED_DYNAMIC_FIRST_LEAF itself; leafCount
-        // is the reserved support range, including runtime frontier pages.
-        injectionPass.setPipeline(this.pipelines.advanceRetainedDensityDynamicSupport!);
-        injectionPass.dispatchWorkgroups(support.dynamic.leafCount);
-      }
-      injectionPass.setPipeline(this.pipelines.compileRetainedDensityNativeIntegrals!);
-      injectionPass.dispatchWorkgroups(Math.ceil(this.templateCellCount / WORKGROUP_SIZE));
-      injectionPass.setPipeline(this.pipelines.commitRetainedDensityGeneration!);
-      injectionPass.dispatchWorkgroups(1);
-    }
     // This is accepted-state occupancy, not merely renderer bookkeeping. A
     // post-step hose plug must publish its wet reason before the next frame's
     // topology planner runs, otherwise that planner can retire the just-wet
@@ -8140,7 +7692,7 @@ export class WebGPUSparseCM12Resident {
     injectionPass.dispatchWorkgroups(bricks);
     injectionPass.end();
     if (publishPresentation) {
-      this.encodeFramePlanPresentation(encoder, "Sparse CM12 injection presentation", true);
+      this.encodeFramePlanPresentation(encoder, "Sparse CM12 injection presentation");
     }
   }
 
@@ -8156,15 +7708,6 @@ export class WebGPUSparseCM12Resident {
    */
   private stageLenses?: SparseCM12StageLensSource;
 
-  /** Keep the numerical kernels' existing uniform quantum ABI. This ordered
-   * GPU copy follows any pending geometry transaction, so later CPU parameter
-   * uploads cannot overwrite its accepted shell-dependent value. */
-  private encodeAcceptedSolidQuantum(encoder: GPUCommandEncoder): void {
-    if (!this.solidOccupancyLayout) return;
-    encoder.copyBufferToBuffer(this.topologyArena, 4 * (this.solidOccupancyLayout.baseWords + 23),
-      this.parameters, SPARSE_CM12_REFINEMENT_REGION_PARAMETER_OFFSET + 4, 4);
-  }
-
   private writeParameters(
     packed: PackedResidentTopology,
     dt_s: number,
@@ -8174,13 +7717,11 @@ export class WebGPUSparseCM12Resident {
     sharpening?: SharpeningTrace,
     activityPolicy?: SparseCM12ActivityPolicy,
     pressureControl?: SparseCM12PressureControl,
-    bodyCount?: number,
+    bodyCount = 0,
     worldDimensions_m?: readonly [number, number, number],
     inflow?: SparseCM12InflowControl,
   ): void {
     this.lastPacked = packed;
-    if (bodyCount !== undefined) this.rigidBodyCount = bodyCount;
-    if (worldDimensions_m !== undefined) this.rigidWorldDimensions_m = worldDimensions_m;
     const u = this.parameterU32, f = this.parameterF32, l = this.layout;
     u.fill(0);
     u.set([this.cellCount, this.rowCount, packed.incidenceCount,
@@ -8238,14 +7779,14 @@ export class WebGPUSparseCM12Resident {
     // this single voxel authority. The otherwise-reserved fourth lane carries
     // the sharpening dose as float bits without changing the uniform ABI.
     const staticSolidWorld = Boolean(this.solidOccupancyLayout);
-    const dynamicSolidWorld = this.rigidBodyCount > 0 && l.solidRowData !== 0;
+    const dynamicSolidWorld = bodyCount > 0 && l.solidRowData !== 0;
     u.set([l.solidCellOpen, l.solidRowData,
       (staticSolidWorld || dynamicSolidWorld ? 1 : 0)
         | (staticSolidWorld ? 4 : 0)
         | (this.closedSolidShell ? 8 : 0),
       0], 84);
     f[87] = sparseCM12SharpeningStrength(sharpening?.strength);
-    f.set([...this.rigidWorldDimensions_m, this.rigidBodyCount], 88);
+    f.set([...(worldDimensions_m ?? [0, 0, 0]), bodyCount], 88);
     u.set([...this.tracerLattice.dimensions, this.tracerLattice.count], 92);
     f.set([...this.tracerLattice.originFine, this.tracerLattice.spacingFine], 96);
     const journal = this.layout.journalLayout;
@@ -8881,75 +8422,11 @@ export class WebGPUSparseCM12Resident {
     };
   }
   private generationTransferTarget() {
-    return { state: this.state, topology: this.topologyArena, atlas: this.constructionAtlas,
-      cellIds: this.initialGenerationCellIds, rowIds: this.initialGenerationRowIds,
+    return { state: this.state, cellIds: this.initialGenerationCellIds, rowIds: this.initialGenerationRowIds,
       densityOffset:this.layout.densityA, densityOtherOffset:this.layout.densityB,
       gammaOffset:this.layout.gammaA, gammaOtherOffset:this.layout.gammaB,
       velocityOffset:this.layout.cellVelocityA, velocityOtherOffset:this.layout.cellVelocityB,
       pressureOffset:this.layout.pressure, faceOffset:this.layout.faceA, faceOtherOffset:this.layout.faceB };
-  }
-
-  /** Transfer the field's own physical support, independently of the new
-   * physics partition. Native averages are integrated only after this copy. */
-  private encodeRetainedDensityTransfer(encoder: GPUCommandEncoder,
-    next: WebGPUSparseCM12Resident, records: readonly SparseCM12GPUActivityRecord[]): void {
-    // Preparation may overlap normal frames. Copy current accepted metadata
-    // at adoption rather than retaining the worker's earlier snapshot.
-    next.liquidMayExist ||= this.liquidMayExist;
-    next.writeParameters(next.lastPacked!, .004, this.replacementConfiguration.finestCellSize_m,
-      1, [0, 0, 0], undefined, undefined, undefined, this.rigidBodyCount, this.rigidWorldDimensions_m);
-    const previous = this.retainedDensityLayout, target = next.retainedDensityLayout;
-    if (!previous?.support || !target?.support) {
-      if (Boolean(previous) !== Boolean(target)) throw new Error("Resident replacement lost its retained density authority");
-      return;
-    }
-    const oldSupport = previous.support, newSupport = target.support;
-    if (oldSupport.dimensions.some((n, axis) => n !== newSupport.dimensions[axis]))
-      throw new Error("A topology replacement cannot change retained physical support coordinates");
-    const count = oldSupport.dimensions.reduce((a, b) => a * b, 1);
-    const copy = (from: number, to: number, length: number) => {
-      if (length) encoder.copyBufferToBuffer(this.state, 4 * from, next.state, 4 * to, 4 * length);
-    };
-    if (Boolean(previous.currentMap) !== Boolean(target.currentMap)) throw new Error("Replacement lost current spatial map");
-    if (previous.currentMap && target.currentMap && previous.currentMapMeasure && target.currentMapMeasure) {
-      if (previous.currentMap.totalWords !== target.currentMap.totalWords) throw new Error("Replacement changed spatial map support");
-      copy(previous.currentMap.baseWords, target.currentMap.baseWords, previous.currentMap.totalWords);
-      copy(previous.currentMapMeasure.baseWords, target.currentMapMeasure.baseWords, 8 * count);
-    }
-    copy(previous.controlBaseWords, target.controlBaseWords, 4);
-    copy(oldSupport.seedMeanBaseWords, newSupport.seedMeanBaseWords, count);
-    copy(oldSupport.openFractionBaseWords, newSupport.openFractionBaseWords, count);
-    for (const bank of [0, 1] as const) copy(oldSupport.coefficientBaseWords[bank], newSupport.coefficientBaseWords[bank], 2 * count);
-    if (oldSupport.rigid && newSupport.rigid) {
-      copy(oldSupport.rigid.seedSubcellAmountBaseWords, newSupport.rigid.seedSubcellAmountBaseWords, 8 * count);
-      copy(oldSupport.rigid.staticOpenSubcellVolumeBaseWords, newSupport.rigid.staticOpenSubcellVolumeBaseWords, 8 * count);
-      copy(oldSupport.rigid.coveredMaskBaseWords, newSupport.rigid.coveredMaskBaseWords, count);
-    } else if (Boolean(oldSupport.rigid) !== Boolean(newSupport.rigid)) {
-      throw new Error("Resident replacement changed its retained rigid measure");
-    }
-    if (oldSupport.dynamic && newSupport.dynamic) {
-      const oldLeaves = new Map(records.map(record => {
-        const coordinate = record.coordinate ?? this.constructionAtlas.bricks[record.leafId]?.coordinate;
-        if (!coordinate) throw new Error("Retained support transfer requires physical leaf coordinates");
-        return [coordinate.join("/"), record] as const;
-      }));
-      for (let leaf = 0; leaf < next.constructionAtlas.bricks.length; leaf++) {
-        const brick = next.constructionAtlas.bricks[leaf]!;
-        const record = oldLeaves.get(brick.coordinate.join("/"));
-        if (!record || sparseBrickSpan(brick) !== 1
-          || record.leafId < oldSupport.dynamic.firstLeaf || leaf < newSupport.dynamic.firstLeaf) continue;
-        const oldIndex = count + 512 * (record.leafId - oldSupport.dynamic.firstLeaf);
-        const newIndex = count + 512 * (leaf - newSupport.dynamic.firstLeaf);
-        for (const bank of [0, 1] as const) copy(oldSupport.coefficientBaseWords[bank] + 2 * oldIndex,
-          newSupport.coefficientBaseWords[bank] + 2 * newIndex, 1024);
-        if (oldSupport.rigid && newSupport.rigid) copy(oldSupport.rigid.coveredMaskBaseWords + oldIndex,
-          newSupport.rigid.coveredMaskBaseWords + newIndex, 512);
-      }
-    }
-    next.retainedBoundaryDirty = this.retainedBoundaryDirty;
-    next.retainedRigidSubcellMoments = this.retainedRigidSubcellMoments;
-    next.retainedPreparationCache = this.retainedPreparationCache;
-    next.encodeRetainedDensityInitialization(encoder, false);
   }
 
   async prepareGenerationReplacement(
@@ -8958,18 +8435,16 @@ export class WebGPUSparseCM12Resident {
     maximumBytes = Number.POSITIVE_INFINITY, signal?: AbortSignal,
     newAirCoverage: readonly SparseCM12NewAirCoverage[] = [], preserveCandidateBacking = false,
   ) {
-    if (this.atomicSolidEditInFlight) throw new DOMException("Solid acceptance is pending", "AbortError");
     const grid = typeof Worker === "undefined" ? buildSparseAtlasCompositeGrid(atlas) : undefined;
     const next = await this.createReplacement(atlas, grid, active, source.scalarD4, source.faceD4, maximumBytes, source, signal, newAirCoverage, preserveCandidateBacking);
     try {
       await next.waitForSimulationPipelines();
-      const transfer = next.preparedGenerationTransfer ?? await prepareSparseCM12GPUGenerationTransfer(
-        this.device, source.geometryRecipe, { ...source,
+      const transfer = next.preparedGenerationTransfer ?? await prepareSparseCM12GenerationTransfer(
+        this.device, source.geometry!, grid!, { ...source,
           liveControl: {buffer:this.topologyArena, ...this.generationTransferControlDescription()} },
         next.generationTransferTarget(), maximumBytes - next.allocatedBytes, newAirCoverage);
       next.preparedGenerationTransfer = undefined;
       return { resident: next, disposePreparation: () => transfer.destroy(), commit: async () => {
-        if (this.atomicSolidEditInFlight) throw new DOMException("Solid acceptance is pending", "AbortError");
         // Only this short publication boundary suspends advances. The candidate
         // owns every buffer and pipeline before it enters this method.
         // Never replace a failed arena with a fresh, apparently healthy one.
@@ -8988,7 +8463,6 @@ export class WebGPUSparseCM12Resident {
         next.tracersEnabled = this.tracersEnabled;
         const encoder = this.device.createCommandEncoder({ label: "CM12 transferred generation publication" });
         transfer.encode(encoder);
-        this.encodeRetainedDensityTransfer(encoder, next, latest.records);
         encoder.copyBufferToBuffer(this.activity, 0, next.activity, 0, 4);
         if (this.tracerLattice.count) encoder.copyBufferToBuffer(this.state, 4 * this.layout.tracers,
           next.state, 4 * next.layout.tracers, 16 * this.tracerLattice.count);
@@ -9081,9 +8555,9 @@ export class WebGPUSparseCM12Resident {
   ) {
     const { atlas, active, sourceFirst, sourcePageCoordinates, dynamicKeys,
       planned, activity, recordsByKey } = planning ?? await this.captureGenerationPlanningSourceWhileLeased();
-    // Capture compact leaf descriptors and accepted native field addresses.
-    // Their geometry remains in the leased GPU arena, including connected
-    // signed frontier pages; no host cell/face overlap graph is constructed.
+    // Capture only overlap geometry and field addresses, not another complete
+    // pressure/incidence object graph. The GPU's accepted row list below is
+    // the source face authority, including connected signed frontier pages.
     const header = this.device.createBuffer({ label: "CM12 transfer generation header",
       size: 4 * (32 + 64), usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     let words: Uint32Array;
@@ -9096,20 +8570,17 @@ export class WebGPUSparseCM12Resident {
       await header.mapAsync(GPUMapMode.READ);
       words = new Uint32Array(header.getMappedRange()).slice();
     } finally { header.destroy(); }
-    const cellCount = words[4]!, count = words[5]!, slot = words[2]! & 1;
-    const rowBuffer = this.device.createBuffer({ label: "CM12 transfer accepted native IDs",
-      size: Math.max(4, 4 * (cellCount + count)), usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-    let cellIds: Uint32Array, rows: Uint32Array;
+    const count = words[5]!, slot = words[2]! & 1;
+    const rowBuffer = this.device.createBuffer({ label: "CM12 transfer accepted row IDs",
+      size: Math.max(4, 4 * count), usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    let rows: Uint32Array;
     try {
       const encoder = this.device.createCommandEncoder();
-      if (cellCount > 0) encoder.copyBufferToBuffer(this.topologyArena,
-        this.topologyWorklistBaseBytes + 4 * words[14 + slot]!, rowBuffer, 0, 4 * cellCount);
       if (count > 0) encoder.copyBufferToBuffer(this.topologyArena,
-        this.topologyWorklistBaseBytes + 4 * words[16 + slot]!, rowBuffer, 4 * cellCount, 4 * count);
+        this.topologyWorklistBaseBytes + 4 * words[16 + slot]!, rowBuffer, 0, 4 * count);
       this.device.queue.submit([encoder.finish()]);
       await rowBuffer.mapAsync(GPUMapMode.READ);
-      const nativeIds = new Uint32Array(rowBuffer.getMappedRange());
-      cellIds = nativeIds.slice(0, cellCount); rows = nativeIds.slice(cellCount, cellCount + count);
+      rows = new Uint32Array(rowBuffer.getMappedRange()).slice(0, count);
     } finally { rowBuffer.destroy(); }
     // Earlier reads are separate queue submissions while physics advances.
     // Validate the lease after the last topology read, so urgent GPU revocation
@@ -9125,11 +8596,13 @@ export class WebGPUSparseCM12Resident {
       if (observed[0] !== 1 || observed[1] !== 0 || observed[2] !== activity.acceptedTopologyGeneration
         || words[0] !== activity.acceptedTopologyGeneration) throw new SparseCM12GenerationStale();
     } finally { check.destroy(); }
-    const geometryRecipe = { atlas, active, sourceFirst, sourcePageCoordinates, dynamicKeys, rows };
+    const geometryRecipe = { atlas, active, sourceFirst, sourcePageCoordinates, dynamicKeys,
+      rows, templateWords: this.templateWords };
+    const compiledGeometry = typeof Worker === "undefined" ? compileCM12CapturedGeometry(geometryRecipe) : undefined;
     const scalarParity = words[32 + SPARSE_CM12_FRAME_CONTROL_HEADER.scalarParity]! & 1;
     const faceParity = words[32 + SPARSE_CM12_FRAME_CONTROL_HEADER.faceParity]! & 1;
-    return { atlas, geometryRecipe,
-      active, planned, activity, recordsByKey, cellIds, rowIds:rows,
+    return { atlas, geometry: compiledGeometry?.geometry, geometryRecipe,
+      active, planned, activity, recordsByKey, cellIds:compiledGeometry?.cellIds ?? new Uint32Array(0), rowIds:rows,
       state: this.state,
       densityOffset: scalarParity ? this.layout.densityB : this.layout.densityA,
       gammaOffset: scalarParity ? this.layout.gammaB : this.layout.gammaA,
@@ -9147,11 +8620,7 @@ export class WebGPUSparseCM12Resident {
     this.assertLive();
     await this.assertSimulationHealthy();
     const activitySnapshot = await this.readActivitySnapshot(includeWorldLeaves);
-    // Native QA planes precede the current-field arena; do not map unused
-    // spatial archive capacity just to inspect density and pressure.
-    const stateBytes = this.retainedDensityLayout?.currentMap
-      ? 4 * this.retainedDensityLayout.currentMap.baseWords : this.state.size;
-    const readbackBytes = stateBytes + this.conditioning.size + 4;
+    const readbackBytes = this.state.size + this.conditioning.size + 4;
     const readback = this.device.createBuffer({
       label: "Sparse CM12 QA field readback",
       size: readbackBytes,
@@ -9161,20 +8630,20 @@ export class WebGPUSparseCM12Resident {
       const encoder = this.device.createCommandEncoder({
         label: "Sparse CM12 QA field copy",
       });
-      encoder.copyBufferToBuffer(this.state, 0, readback, 0, stateBytes);
+      encoder.copyBufferToBuffer(this.state, 0, readback, 0, this.state.size);
       encoder.copyBufferToBuffer(this.conditioning, 0, readback,
-        stateBytes, this.conditioning.size);
+        this.state.size, this.conditioning.size);
       encoder.copyBufferToBuffer(this.topologyArena,
         4 * (this.frameControlLayout.baseWords
           + SPARSE_CM12_FRAME_CONTROL_HEADER.scalarParity),
-        readback, stateBytes + this.conditioning.size, 4);
+        readback, this.state.size + this.conditioning.size, 4);
       this.device.queue.submit([encoder.finish()]);
       await readback.mapAsync(GPUMapMode.READ);
       const state = new Float32Array(readback.getMappedRange());
       const acceptedParity = new Uint32Array(state.buffer,
-        state.byteOffset + stateBytes + this.conditioning.size, 1)[0]! & 1;
+        state.byteOffset + this.state.size + this.conditioning.size, 1)[0]! & 1;
       const conditioning = new Int32Array(state.buffer,
-        state.byteOffset + stateBytes, this.conditioning.size / 4);
+        state.byteOffset + this.state.size, this.conditioning.size / 4);
       const fieldParity = acceptedParity ^ Number(frameBank === "candidate");
       const [nx, ny, nz] = this.dimensions;
       const count = nx * ny * nz;

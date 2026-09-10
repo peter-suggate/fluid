@@ -24,8 +24,6 @@ import type {
 export type AdaptiveMassResolutionMode = "adaptive";
 
 export interface AdaptiveMassSolverOptions {
-  /** Rebuild-time density authority. Current-map advects the spatial field. */
-  readonly densityTransport?: "native-cm12" | "retained-cm12" | "current-map";
   /** Optional compatibility spelling; adaptive is the only production policy. */
   readonly resolutionMode?: AdaptiveMassResolutionMode;
   /** Test-only construction seam for manufacturing a fine-start transition. */
@@ -75,19 +73,6 @@ export interface AdaptiveMassSolverOptions {
 const params: MethodParamSpec[] = [
   ...ALGORITHM_PARAMS,
   ...ADAPTIVITY_PARAMS,
-
-  {
-    kind: "select",
-    key: "densityTransport",
-    label: "Density transport",
-    default: "native-cm12",
-    tier: "coarse",
-    update: "solver",
-    options: [{ value: "native-cm12", label: "Native CM12 · previous surface" },
-      { value: "retained-cm12", label: "Retained density · experimental" },
-      { value: "current-map", label: "Current spatial field · experimental" }],
-    hint: "Native CM12 uses the previous native-density surface reconstruction. Retained density and current spatial field are experimental alternatives. Changing this mode rebuilds the simulation.",
-  },
 
   {
     kind: "select",
@@ -221,8 +206,6 @@ export function adaptiveMassSolverOptions(
   resolveMethodComposition(values);
   const fineResolution = brickFineResolution(values.brickFineResolution);
   return {
-    densityTransport: values.densityTransport === "current-map" ? "current-map"
-      : values.densityTransport === "retained-cm12" ? "retained-cm12" : "native-cm12",
     brickFineResolution: fineResolution,
     surfaceMeshRefinement: Number(values.surfaceMeshRefinement) === 1 ? 1
       : Number(values.surfaceMeshRefinement) === 4 ? 4 : 2,
@@ -305,8 +288,6 @@ export const adaptiveMassMethod: SimulationMethod = {
     const fineResolution: SparseBrickFineResolution = parsedFineResolution;
     return {
       ...values,
-      densityTransport: values.densityTransport === "current-map" ? "current-map"
-        : values.densityTransport === "retained-cm12" ? "retained-cm12" : "native-cm12",
       brickFineResolution: String(fineResolution),
       presentationPageResolution: String(fineResolution),
       maximumMacroSpanBricks:
@@ -331,7 +312,6 @@ export const adaptiveMassMethod: SimulationMethod = {
     const { activitySignals: _activitySignals, ...activityDefaults } =
       SPARSE_CM12_ACTIVITY_POLICY;
     return {
-      densityTransport: "native-cm12",
       brickFineResolution: "8",
       presentationPageResolution: "8",
       maximumMacroSpanBricks: "auto",

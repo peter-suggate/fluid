@@ -20,7 +20,6 @@
  * until it has a registry entry, and an entry cannot outlive its stage.
  */
 import type {
-  FluidPipelineContext,
   FluidPipelineGraph,
   FluidPipelineStage,
 } from "../../core/fluid-pipeline";
@@ -286,7 +285,6 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] =
       band: entry.band,
       side: entry.side,
       label: entry.label,
-      ...(entry.presentation ? { presentation: entry.presentation } : {}),
       phaseLabels: [
         ...substages.map((substage) => sparseCM12SubstagePhase(id, substage as never).label),
         entry.phase.label,
@@ -306,11 +304,7 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] =
 /** Bands in the order the advance first enters each, so the diagram reads down the encode. */
 const ADAPTIVE_MASS_FLUID_BANDS = [...new Set(
   ADAPTIVE_MASS_FLUID_STAGES.map((stage) => stage.band as SparseCM12StageBand),
-)].map((band) => ({ id: band, label: SPARSE_CM12_STAGE_BANDS[band],
-  ...(band === "transport" ? { labelForContext: (context: FluidPipelineContext) =>
-    context.values.densityTransport === "current-map"
-      ? "Transport velocity + current spatial field" : SPARSE_CM12_STAGE_BANDS[band] } : {}),
-}));
+)].map((band) => ({ id: band, label: SPARSE_CM12_STAGE_BANDS[band] }));
 
 /** Method-owned diagram; no core or UI module imports adaptive implementation. */
 export const ADAPTIVE_MASS_FLUID_PIPELINE: FluidPipelineGraph = Object.freeze({

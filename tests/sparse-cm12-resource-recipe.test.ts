@@ -5,11 +5,8 @@ import { createSolidWorld, SolidWorldDirectory } from "../lib/core/solid-world";
 import { createSparseAdaptiveMassAtlas } from "../lib/methods/adaptive-mass/sparse-brick-atlas";
 import { WebGPUSparseCM12Resident } from "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
 import { buildSparseAtlasCompositeGrid } from "../lib/methods/adaptive-mass/sparse-atlas-composite-projection";
-import { PreparedSparseCM12GenerationTransfer } from "../lib/methods/adaptive-mass/sparse-cm12-generation-transfer";
+import { PreparedSparseCM12GenerationTransfer, sparseCM12TransferFaceGeometry } from "../lib/methods/adaptive-mass/sparse-cm12-generation-transfer";
 import { WebGPUSparseCM12RigidCoupling } from "../lib/methods/adaptive-mass/webgpu-sparse-cm12-rigid-coupling";
-import { retainedSceneDensity } from "../lib/methods/adaptive-mass/sparse-cm12-retained-scene-density";
-import { SPARSE_CM12_RETAINED_RIGID_DISPLACEMENT_HOPS } from
- "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl";
 
 async function withWebGPUConstants(run: () => Promise<void>) {
  const constants = {
@@ -117,12 +114,9 @@ test("rigid and transfer recipes hydrate prototypes and retain live external bin
    atlas,active:new Set([0]),finestCellSize_m:0.05,solidWorld:createSolidWorld(),
    maximumBytes:64*1024*1024,topologyPageCapacityMaximum:0,
    symmetry:{scalar:false,face:false},limits:{maxComputeWorkgroupsPerDimension:65535} as GPUSupportedLimits,
-   rigid:{bodies:descriptor,exchange:descriptor,worldDimensions_m:[0.4,0.4,0.4],initialBodyCount:2},
-   retainedDensity:retainedSceneDensity({generation:1,transitionWidth:0.05,
-    domain:{lower:[-0.2,0,-0.2],upper:[0.2,0.4,0.2]},
-    primitives:[{kind:"quadratic-height",center:[0,0.2,0],curvature:[0,0,0]}]}),
-   source:{geometryRecipe:{atlas,active:new Set([0]),sourceFirst:new Map([[0,0]]),
-    sourcePageCoordinates:new Map(),dynamicKeys:new Set(),rows:Uint32Array.from(grid.gradientRows,row=>row.id)},
+   rigid:{bodies:descriptor,exchange:descriptor,worldDimensions_m:[0.4,0.4,0.4]},
+   source:{geometry:{dimensions:[8,8,8],cells:[{id:0,lower:[0,0,0],widths:[8,8,8],span:8}],
+    faces:grid.gradientRows.map(row=>sparseCM12TransferFaceGeometry(row.id,row.axis,row.centerFine,row.area,8))},
     cellIds:new Uint32Array([0]),rowIds:Uint32Array.from(grid.gradientRows,row=>row.id),
     densityOffset:0,gammaOffset:2,velocityOffset:4,pressureOffset:48,faceOffset:16,
     stateDescriptor:descriptor,controlDescriptor:descriptor,
@@ -130,19 +124,6 @@ test("rigid and transfer recipes hydrate prototypes and retain live external bin
      velocityOffsets:[4,8],faceOffsets:[16,32]}},
   };
   const recipe=structuredClone(await WebGPUSparseCM12Resident.recordPreparedGeneration(input));
-  const recorded = recipe.state as { resident: { state: unknown; topologyArena: unknown };
-   transfer: { bindings: { cm12Resource: number }; pipelines: { cm12Resource: number }[] } };
-  const bindingDescriptor = recipe.operations.find(operation => operation.method === "createBindGroup"
-   && operation.result === recorded.transfer.bindings.cm12Resource)!.args[0] as {
-    entries: { binding: number; resource: { buffer: unknown } }[] };
-  const bufferAt = (binding: number) => bindingDescriptor.entries.find(entry => entry.binding === binding)!.resource.buffer;
-  assert.deepEqual(bufferAt(0), { cm12Resource: 2 }, "source fields remain a live external binding");
-  assert.deepEqual(bufferAt(5), { cm12Resource: 3 }, "source geometry and parity remain in the leased live arena");
-  assert.deepEqual(bufferAt(1), recorded.resident.state);
-  assert.deepEqual(bufferAt(6), recorded.resident.topologyArena);
-  assert.deepEqual(recorded.transfer.pipelines.map(reference =>
-   (recipe.operations.find(operation => operation.result === reference.cm12Resource)!.args[0] as GPUComputePipelineDescriptor).compute.entryPoint),
-   ["indexCells", "indexFaces", "cells", "faces"], "worker recipe computes native intersections on the GPU");
   const replay=createCM12ResourceRecorder(input.limits);
   const external=Array.from({length:4},()=>replay.device.createBuffer(descriptor));
   const realized=await realizeCM12ResourceRecipe(replay.device,recipe,external);
@@ -158,56 +139,10 @@ test("rigid and transfer recipes hydrate prototypes and retain live external bin
   const configuration=data.resident.replacementConfiguration as {rigid:{bodies:GPUBuffer;exchange:GPUBuffer}};
   assert.equal(configuration.rigid.bodies,external[0]);
   assert.equal(configuration.rigid.exchange,external[1]);
-  const rigidParameters=() => Array.from((data.resident.parameterF32 as Float32Array).slice(88,92));
-  const initialRigid=[Math.fround(0.4),Math.fround(0.4),Math.fround(0.4),2];
-  assert.deepEqual(rigidParameters(),initialRigid,
-   "worker construction must clip the bodies present before the first physics step");
   const encoder=replay.device.createCommandEncoder();
-  resident.encodeInitialPresentation(encoder,0.05);
-  resident.encodeRefinementRegionEdit(encoder,0.05);
-  assert.deepEqual(rigidParameters(),initialRigid,
-   "paused publication and topology edits retain body metadata");
   transfer.encode(encoder);
-  const frameOperationStart=replay.finish({}).operations.length;
   resident.encode(encoder,0.01,0.05,1,[0,-9.81,0],undefined,undefined,undefined,
    undefined,1,[0.4,0.4,0.4]);
-  const frameRecipe=replay.finish({});
-  const pipelineNames=new Map(frameRecipe.operations.filter(op=>op.method==="createComputePipelineAsync")
-   .map(op=>[op.result,(op.args[0] as GPUComputePipelineDescriptor).compute.entryPoint!]));
-  const frameKernels=frameRecipe.operations.slice(frameOperationStart).filter(op=>op.method==="setPipeline")
-   .map(op=>pipelineNames.get((op.args[0] as {cm12Resource:number}).cm12Resource));
-  const at=(name:string) => frameKernels.indexOf(name);
-  assert.ok(at("finalizeSharpening")<at("initializeRetainedRigidDisplacement"));
-  assert.equal(frameKernels.filter(name=>name?.startsWith("propagateRetainedRigidDisplacement")).length,
-   SPARSE_CM12_RETAINED_RIGID_DISPLACEMENT_HOPS);
-  assert.ok(at("initializeRetainedRigidDisplacement")<at("validateRetainedRigidDisplacement"));
-  assert.equal(frameKernels.filter(name=>name?.startsWith("gatherRetainedRigidDisplacement")).length,
-   SPARSE_CM12_RETAINED_RIGID_DISPLACEMENT_HOPS);
-  assert.ok(at("validateRetainedRigidDisplacement")<at("gatherRetainedRigidDisplacementAtoB"));
-  assert.ok(at("gatherRetainedRigidDisplacementBtoA")<at("validateRetainedRigidDisplacementPackets"));
-  assert.ok(at("validateRetainedRigidDisplacementPackets")<at("finalizeRetainedRigidDisplacement"));
-  assert.ok(at("finalizeRetainedRigidDisplacement")<at("initializeDensityCapacityRepair"),
-   "complete-amount displacement precedes the existing capacity redistribution");
-  resident.encodeInitialPresentation(encoder,0.05);
-  assert.equal(rigidParameters()[3],1,"nonphysics writes retain a changed live body count");
-  const noBodyFrameStart=replay.finish({}).operations.length;
-  resident.encode(encoder,0.01,0.05,1,[0,-9.81,0],undefined,undefined,undefined,
-   undefined,0,[0.4,0.4,0.4]);
-  const noBodyKernels=replay.finish({}).operations.slice(noBodyFrameStart)
-   .filter(op=>op.method==="setPipeline")
-   .map(op=>pipelineNames.get((op.args[0] as {cm12Resource:number}).cm12Resource));
-  assert.ok(noBodyKernels.every(name=>!name?.includes("RetainedRigidDisplacement")),
-   "a zero-body frame has no displacement graph or packet dispatches");
-  resident.encodeInitialPresentation(encoder,0.05);
-  assert.equal(rigidParameters()[3],0,"an explicit physics zero removes all bodies");
-  const operationCount=replay.finish({}).operations.length;
-  (coupling as WebGPUSparseCM12RigidCoupling).encodeVoxelization(encoder);
-  const clipped=replay.finish({accepted:data.resident.acceptedIndirectArguments});
-  const clipDispatches=clipped.operations.slice(operationCount).filter(op=>op.method==="dispatchWorkgroupsIndirect");
-  assert.deepEqual(clipDispatches.map(op=>op.args),[
-   [(clipped.state as {accepted:unknown}).accepted,0],
-   [(clipped.state as {accepted:unknown}).accepted,12],
-  ],"last-body removal must clear accepted native cell and row geometry before transport");
   replay.device.queue.submit([encoder.finish()]);
   assert.doesNotThrow(()=>structuredClone(replay.finish({resident,transfer})));
   transfer.destroy(); resident.destroy(); realized.destroy();

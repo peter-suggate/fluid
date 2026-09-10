@@ -393,25 +393,44 @@ fn filteredNormalAt(lattice:vec3f,fallback:vec3f,filterEnabled:bool)->vec3f{
   // Removing that adapter recovers their integer SDF lattice. Legacy optical
   // samples retain the established one-cell reconstruction frame.
   let x=lattice-select(vec3f(1.0),vec3f(0.5),p.table.y==6u);
-  let center=vec3i(round(x));
-  var weightSum=0.0;var phiSum=0.0;
-  var derivativeWeightSum=vec3f(0.0);var phiDerivativeSum=vec3f(0.0);
+  var center=vec3i(round(x));
+  // Near a sparse publication boundary, a missing neighbour is an air
+  // sentinel rather than a sample of the represented field. Move the
+  // three-point stencil onto published support instead of differentiating
+  // that sentinel. This is local support selection, not a domain clamp:
+  // valid signed pages beyond the original tank keep their own coordinates.
+  if(signedSparseAddressing()){
+    for(var axis=0u;axis<3u;axis+=1u){
+      var step=vec3i(0);step[axis]=1;
+      let lower=compactSampleAddress(center-step);let upper=compactSampleAddress(center+step);
+      var lowerValid=false;var upperValid=false;
+      if(lower.x!=INVALID){let index=lower.x*p.bricks.w+lower.y;
+        if(index<arrayLength(&fineSamples)){lowerValid=(finePackedFlags(index)&1u)!=0u&&finitePhi(finePackedPhi(index));}}
+      if(upper.x!=INVALID){let index=upper.x*p.bricks.w+upper.y;
+        if(index<arrayLength(&fineSamples)){upperValid=(finePackedFlags(index)&1u)!=0u&&finitePhi(finePackedPhi(index));}}
+      if(!upperValid&&lowerValid){center-=step;}else if(!lowerValid&&upperValid){center+=step;}
+    }
+  }
+  let t=x-vec3f(center);
+  let bx=vec3f(.5*t.x*(t.x-1.),1.-t.x*t.x,.5*t.x*(t.x+1.));
+  let by=vec3f(.5*t.y*(t.y-1.),1.-t.y*t.y,.5*t.y*(t.y+1.));
+  let bz=vec3f(.5*t.z*(t.z-1.),1.-t.z*t.z,.5*t.z*(t.z+1.));
+  let dx=vec3f(t.x-.5,-2.*t.x,t.x+.5);
+  let dy=vec3f(t.y-.5,-2.*t.y,t.y+.5);
+  let dz=vec3f(t.z-.5,-2.*t.z,t.z+.5);
+  var derivative=vec3f(0.0);
   var valid=true;
-  // Gradient of a normalized 3x3x3 Gaussian reconstruction evaluated at the
-  // emitted vertex. Subtracting the normalization derivative makes constants
-  // reproduce exactly even when the vertex is off-centre in the sample stencil.
+  // Differentiate a local tensor quadratic through the published samples.
+  // This reproduces affine/quadratic gradients at every subcell point, so
+  // plane and sphere normals remain analytic. It uses the same 27 reads as
+  // the former Gaussian kernel, which biased curved normals off grid.
   for(var oz=0;oz<3;oz+=1){for(var oy=0;oy<3;oy+=1){for(var ox=0;ox<3;ox+=1){
     let q=center+vec3i(ox-1,oy-1,oz-1);
-    let delta=vec3f(q)-x;
-    let weight=exp(-.5*dot(delta,delta)/(.85*.85));
     let value=signedPhi(q);
     if(!finitePhi(value)){valid=false;}
-    weightSum+=weight;phiSum+=weight*value;
-    derivativeWeightSum+=weight*delta;
-    phiDerivativeSum+=weight*value*delta;
+    derivative+=value*vec3f(dx[ox]*by[oy]*bz[oz],bx[ox]*dy[oy]*bz[oz],bx[ox]*by[oy]*dz[oz]);
   }}}
-  if(!valid||weightSum<=1e-8){return fallback;}
-  let derivative=phiDerivativeSum*weightSum-phiSum*derivativeWeightSum;
+  if(!valid){return fallback;}
   let size=vec3f(p.sample.xyz);
   let cell=select(u.container.xyz/size,p.sizing.xyz,all(p.sizing.xyz>vec3f(0.0)));
   let gradient=derivative/cell;
@@ -424,12 +443,16 @@ export const globalFineDirectSharpPatchWGSL = /* wgsl */ `
 fn directPatch(cursor:ptr<function,u32>,base:vec3f,scale:f32,descriptor:u32,n:vec3f){let mask=(descriptor>>8u)&7u;let axis=(descriptor>>14u)&3u;let code=descriptor&255u;let nativeFace=code==2u||code==3u;let plane=select(.5,select(0.,1.,code==3u),nativeFace);var lx=0.0;var ly=0.0;var lz=0.0;var hx=1.0;var hy=1.0;var hz=1.0;if((mask&1u)!=0u&&!nativeFace){let high=((descriptor>>11u)&1u)!=0u;lx=select(0.0,0.5,high);hx=select(0.5,1.0,high);}if((mask&2u)!=0u&&!nativeFace){let high=((descriptor>>12u)&1u)!=0u;ly=select(0.0,0.5,high);hy=select(0.5,1.0,high);}if((mask&4u)!=0u&&!nativeFace){let high=((descriptor>>13u)&1u)!=0u;lz=select(0.0,0.5,high);hz=select(0.5,1.0,high);}var a=vec3f(0);var b=vec3f(0);var c=vec3f(0);var d=vec3f(0);if(axis==0u){a=vec3f(plane,ly,lz);b=vec3f(plane,hy,lz);c=vec3f(plane,hy,hz);d=vec3f(plane,ly,hz);}else if(axis==1u){a=vec3f(lx,plane,lz);b=vec3f(lx,plane,hz);c=vec3f(hx,plane,hz);d=vec3f(hx,plane,lz);}else{a=vec3f(lx,ly,plane);b=vec3f(hx,ly,plane);c=vec3f(hx,hy,plane);d=vec3f(lx,hy,plane);}let shift=select(vec3f(0),vec3f(.5),nativeFace);a=base+scale*a+shift;b=base+scale*b+shift;c=base+scale*c+shift;d=base+scale*d+shift;tri(cursor,a,b,c,n,false);tri(cursor,a,c,d,n,false);}
 fn wallPoint3(q:vec2f,axis:u32,plane:f32)->vec3f{if(axis==0u){return vec3f(plane,q.x,q.y);}if(axis==1u){return vec3f(q.x,plane,q.y);}return vec3f(q.x,q.y,plane);}
 fn emitWallLane(cursor:ptr<function,u32>,base:vec3f,descriptor:u32,values:array<f32,8>,lane:u32){
-  let face=wallFaceValues(values,descriptor);let mask=wallMask(face);let axis=(descriptor>>14u)&3u;let side=wallSide(descriptor);let edgeMask=wallTransitionEdges(descriptor);let plane=f32(side);let scaleCode=max(1u,(descriptor>>8u)&63u);let wallScale=f32(1u<<(scaleCode-1u));let ambiguous=mask==5u||mask==10u;let connected=wallAmbiguousConnected(face);let count=wallBoundaryCount(face,edgeMask);let triangles=wallTriangleCount(values,descriptor);if(${GLOBAL_FINE_SURFACE_TRIANGLES_PER_LANE}u*lane>=triangles){return;}
+  let face=wallFaceValues(values,descriptor);let mask=wallMask(face);let axis=(descriptor>>14u)&3u;let side=wallSide(descriptor);let edgeMask=wallTransitionEdges(descriptor);let plane=f32(side);let scaleCode=(descriptor>>8u)&63u;let wallScale=f32(1u<<(max(1u,scaleCode)-1u));let ambiguous=mask==5u||mask==10u;let connected=wallAmbiguousConnected(face);let count=wallBoundaryCount(face,edgeMask);let triangles=wallTriangleCount(values,descriptor);if(${GLOBAL_FINE_SURFACE_TRIANGLES_PER_LANE}u*lane>=triangles){return;}
   for(var local=0u;local<${GLOBAL_FINE_SURFACE_TRIANGLES_PER_LANE}u;local+=1u){let triangle=${GLOBAL_FINE_SURFACE_TRIANGLES_PER_LANE}u*lane+local;if(triangle>=triangles){return;}var a=vec2f(0);var b=vec2f(0);var c=vec2f(0);
     if(ambiguous&&!connected){let corner=select(select(0u,2u,triangle!=0u),select(1u,3u,triangle!=0u),mask==10u);a=wallCorner(corner);b=wallEdgePoint(face,corner);c=wallEdgePoint(face,(corner+3u)&3u);}
     else if(ambiguous){var centre=vec2f(0);for(var i=0u;i<count;i+=1u){centre+=wallBoundaryPoint(face,edgeMask,i);}centre=vec2f(contourSnap(centre.x/f32(count)),contourSnap(centre.y/f32(count)));a=centre;b=wallBoundaryPoint(face,edgeMask,triangle);c=wallBoundaryPoint(face,edgeMask,(triangle+1u)%count);}
     else{a=wallBoundaryPoint(face,edgeMask,0u);b=wallBoundaryPoint(face,edgeMask,triangle+1u);c=wallBoundaryPoint(face,edgeMask,triangle+2u);}
-    var normal=vec3f(0);normal[axis]=select(-1.,1.,side!=0u);let wallShift=vec3f(.5);tri(cursor,base+wallPoint3(wallScale*a,axis,plane)+wallShift,base+wallPoint3(wallScale*b,axis,plane)+wallShift,base+wallPoint3(wallScale*c,axis,plane)+wallShift,normal,false);
+    var normal=vec3f(0);normal[axis]=select(-1.,1.,side!=0u);
+    // Only the normal needs the half-cell adapter for cell-centred samples.
+    // Tangential coordinates must match clipped() on the adjoining contour.
+    // Scale code zero denotes nodal samples, which need it on every axis.
+    var wallShift=select(vec3f(0),vec3f(.5),scaleCode==0u);wallShift[axis]=.5;tri(cursor,base+wallPoint3(wallScale*a,axis,plane)+wallShift,base+wallPoint3(wallScale*b,axis,plane)+wallShift,base+wallPoint3(wallScale*c,axis,plane)+wallShift,normal,false);
   }
 }
 `;

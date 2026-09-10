@@ -1,78 +1,5 @@
 # Retained density production acceptance
 
-**Current status: evolved surface acceptance fails.** The first actual quarter
-scene A/B at 0, 0.2, 0.5 and 1 second confirms stepped, noncircular pre-impact
-geometry in both the original min/max-8 arm and a verified all-fine arm. The
-coarse arm additionally develops asymmetric block-shaped fragments and a much
-weaker, asymmetric splash. These observations are from unmodified shipping
-GPU triangles, with matched offline QA shading and independent physical-plane
-sections; they are not artifacts of different app lighting. See
-`artifacts/retained-visual-ab/quarter/{mesh-comparison,section-comparison}.png`
-and the per-checkpoint receipts. Passing initial geometry and mass checks is
-not sufficient acceptance for the production cutover.
-
-The subsequent [full-fine imposed-flow diagnosis](retained-imposed-flow-diagnosis-2026-09-08.md)
-isolates three failures before meshing: native mean interpolation diffuses the
-translated sphere; the retained lift creates face jumps of 0.361 and 0.415
-after one and two steps; and its implicit companion publishes 144 false zero
-samples after the first step, including points with density zero. The actual
-native transport matches the prescribed half-cell translation stencil to
-`4.47e-8`, so the diagnosis does not rely on assumed force or velocity behavior.
-See the [motion authority design and negative controls](retained-density-motion-authority-design-2026-09-08.md).
-The next work validates transport of the current spatial field and its measure
-together. It does not repair the mesh or fit a surface to the old mean targets.
-
-The isolated current-generation quadratic GPU probe now passes all seventeen
-subcases (`21c503b0`, `/tmp/fluid-quadratic-pullback-gpu-9.log`, 2.869 seconds).
-Eight translations move a sphere by 0.1 m through fixed supports: maximum
-implicit-value error is `5.01e-7 m`, face derivative/Hessian jumps are zero,
-and maximum global amount error is `3.06e-9 m³` (relative `7.24e-7`). Rotation,
-unit-determinant shear, individual support integrals, and rejected unsupported
-or incoherent donors also pass. This is prescribed affine transport of a
-globally coherent quadric, not general evolution or shipping physics. The new
-`advanceConservative` transaction checks complete wet destination coverage and
-integrates candidate amounts before accepting either coefficients or amounts.
-Coverage and integration failures retain the accepted bank. A host race test
-also prevents overlapping operations from publishing the wrong generation.
-The original geometry-only and diagnostic integration APIs remain distinct.
-
-The [matched full-fine comparison](current-quadratic-matched-flow-2026-09-08.md)
-uses the same sphere, half-cell displacement, physical width and sample sites
-as the failing production experiment. After two steps the new GPU density
-error is below `7.1e-7`, face density jumps below `3.7e-7`, and relative global
-amount error below `2e-7`. The density plots compare captured coefficients
-against independent analytic values; no mesh correction is involved.
-
-The next connection now has an actual-native velocity receipt. The corrected
-uniform-VEX compiler passed 21 isolated GPU cases and two real native steps
-(`/tmp/fluid-uniform-vex-map-gpu-2.log` and
-`/tmp/fluid-native-uniform-vex-capture-2.log`). Immutable snapshots are encoded
-after velocity extension and before gather. Both steps produce the GPU map
-`B=I, t=(-0.02500000037252903,0,0) m`; all native-center donors needed by the
-whole swept wet sphere are covered. The first run exposed a test-adapter phase
-error: this hook has sealed FCA authority, not collecting authority. The
-corrected compiler requires that sealed generation and rejects stale or
-unsealed inputs. This receipt establishes the actual motion source; it does
-not yet drive the new field or replace production density transfer.
-
-The [production dependency audit](retained-density-production-cutover-audit-2026-09-08.md)
-records velocity freshness, momentum, gamma, solids and injection requirements.
-Independent nonlinear shear/sphere/sharp-box fixtures and the RK2 saddle
-Jacobian negative control pass three CPU tests (`47792554`). General smooth
-field work is validating a dimensionally consistent tensor Hermite/integral
-representation; the smaller volume-bubble shortcut can invent transverse
-variation and is not the selected carrier. Saturated density and sharp branch
-admission remain separate requirements.
-
-The latest unchanged canonical suite (`/tmp/fluid-current-field-canonical-1.log`)
-ended at 180.043 seconds: five lanes passed, six timed out and six were not
-run. There was no reported numerical assertion failure, which does not imply
-the timed-out lanes passed. The seven unused compile-entry removals did not
-resolve this failure. An earlier instrumented mini32 run timed out
-during simulation pipeline compilation at its unchanged 20-second deadline.
-See the [startup audit](sparse-cm12-retained-startup-audit-2026-09-08.md) for the
-measured parser improvement and diagnostic timing limits.
-
 This is an implementation record, not a claim that arbitrary curvature transport
 or every boundary interaction is complete. The authored plane, quadratic height,
 box and sphere sources now compile to a physical density field used by both the
@@ -195,18 +122,10 @@ and the cycle count are unchanged. In the subsequent exclusive run
 analytic reset and twelve paused edits. Flat and quadratic height also passed
 physical evolution and the four resumed partition changes. Sphere/pool and
 sharp box failed the first physical step's retained-integral guard, each by
-exactly one CM12 amount quantum (`1/65536`). The cause was free dynamic support
-pages whose zero descriptors aliased host leaf zero. The retained integration
-now checks allocation and page ownership before using a dynamic support.
-An extracted-production GPU counterexample verifies that poisoned free and
-retired pages are excluded while a real allocated mismatch still halts.
-
-The subsequent `/tmp/fluid-retained-integrated-ladder-rigid-1.log` passed all
-four complete reset/evolution/repartition fixtures and the moving-rigid lane:
-five tests in 153.57 seconds. The paused native-integral threshold is now
+exactly one CM12 amount quantum (`1/65536`). These are still failed lanes.
+The paused native-integral threshold has since been tightened from `2e-5` to
 `2e-6`, matching the production guard so one whole quantum cannot hide in the
-paused receipt. These evolution checks establish conservation and partition
-invariance, not agreement with an advected analytic shape.
+paused acceptance receipt.
 
 The clipped-domain transfer lane in that same run passed with zero mass error,
 eight leaves and final resolution eight. The retained hard support now uses
@@ -260,58 +179,21 @@ the fourth catalog build. The saved destination contains 1,836 mutable leaves,
 1,074,060 catalog cells and 3,457,000 rows. These are failing performance
 measurements, not acceptable frame timings.
 
-A separate GPU implementation now replaces repeated native records with
+A separate GPU implementation is replacing repeated native records with
 interned relative operators and compact placement recipes. The device expands
-cell, row and term planes from those recipes. Reusable local geometry blocks
-reduce the exact previously failing 1,836-leaf catalog to 166 reference builds,
-30,924 reference cells and 104,108 reference rows. The complete CPU preparation
-of the unchanged destination took 6.255 seconds with 403.5 MB peak JavaScript
-heap and 1.140 GB peak RSS, under the default heap. This is a substantial
-reduction, not yet an acceptable end-to-end frame-time result. Synchronous CPU
-certification consumers still need a typed numeric shadow.
+cell, row and term planes from those recipes. The first CPU word-exact stage
+completed the previously failing catalog under the default heap, using 4,553
+row archetypes and 7,344 cell ranges, but still took 66.14 seconds; this is not
+the finished performance result. Synchronous CPU certification consumers still
+need a typed numeric shadow. GPU word equivalence, integrated generation
+transfer and the unchanged canonical timing gates remain required before this
+replacement is accepted. Increasing the Node heap is not the proposed remedy.
 
-Twenty-four CPU/GPU expansion cases compare every native catalog word for
-both builders over full, mixed, clipped, signed, immutable-macro and accepted
-rung fixtures. The production switch is commit `e78daf19`. Generation transfer
-also uses GPU intersection and accumulation in both Node and worker paths
-(`cfde4126`), removing CPU per-cell/per-face overlap objects and the source
-topology clone. Nine independent GPU transfer cases, actual resident
-replacement, and both worker hydration fixtures passed; the worker maximum
-error was `5.97e-8`. Full-pool progression through step 30 and the unchanged
-canonical timing gates still need to pass. Increasing the Node heap is not
-the remedy.
-
-The broader mesh regressions, evolved visual acceptance and canonical
-`npm run test:dawn:sparse-cm12` suite remain required
+The generic resumed partition ladder, broader mesh regressions, browser visual
+acceptance and canonical `npm run test:dawn:sparse-cm12` suite remain required
 before declaring the implementation milestone complete. Their latest results
 must be recorded separately from the passed quarter/half geometry tests. No
 acceptance threshold or performance ceiling is to be relaxed to obtain a pass.
-
-## Current editor contract replay
-
-The historical 450-frame replay was adapted to the public asynchronous
-`prepareLiveSolidEdit` contract and passed in 46.02 s on Metal
-(`/tmp/fluid-retained-live-replay-current-1.log`). It attempts the original
-whole recorded batches at frames 116, 176 and 432, without moving, splitting,
-or retrying them. All three now correctly reject moving-water overlap.
-Accepted-bank density, solid open fractions, clock, world identity and accepted
-generation remain unchanged on rejection; the simulation continues to frame
-450, t=15 s. Later attempts start from the last accepted scene, so rejected
-strokes cannot be silently reintroduced. This proves rejection and continued
-simulation, not accepted insertion into wet fluid. The editor task separately
-validates dry insertion with moving water elsewhere.
-
-The replay includes runtime leaves through `readDiagnosticFields(true)`.
-`readWorldGrowthReceiptQA().dynamicLiquidMassFineCells` is a diagnostic envelope
-formed from `max(densityA,densityB)`, not the accepted mass. Summing that envelope
-can report growth during ordinary conservative motion; it must not be used as
-a conservation oracle. The current replay reads the GPU-selected accepted bank.
-
-The latest unchanged canonical gate still reports five passes, six timeouts
-and six unrun lanes under its 180 s budget. It is not a passing regression
-receipt. The isolated current-field comparisons in
-[the matched-flow report](current-quadratic-matched-flow-2026-09-08.md) do not
-change that status or establish evolved shipping surface acceptance.
 
 ## Evolution and remaining validation
 
@@ -331,15 +213,7 @@ zero geometry is preserved to coefficient precision. As fluid enters an
 initially empty support, its new shape is represented by this conservative
 support basis, not by transporting a high-order curvature model into it.
 Conservation and a moving half-density surface therefore do not establish
-accurate spherical or other curvature transport, even before impact. A direct
-counterexample translates a radius-0.1 m sphere by 0.1 m entirely within a
-0.4 m native cell: its exact native mean is unchanged, so the current update
-leaves `(a,b)=(1,0)` and the retained surface does not translate at all. Within
-each support, its normal can only follow `a * gradient(q_seed)`. An initially
-dry support remains spatially constant as it fills. Neither defect can be
-detected or repaired by matching the native zeroth moment alone. The next
-representation must physically transport spatial shape information and retain
-the existing zero-time restriction contract.
+accurate long-time spherical or other curvature transport.
 
 The initial support arena retains a dense bounded-domain prefix followed by
 sparse growth slots; it is not the final sparse curvature representation.
