@@ -32,6 +32,7 @@ export const liveSvoSceneResourcePlugin: ResourcePluginDefinition = Object.freez
 });
 
 export interface LiveSvoSceneOptions {
+  surfaceContours?: boolean;
   /** CPU oracle for allocation censuses and paired startup benchmarks. */
   cpuBrickSelection?: boolean;
   /**
@@ -192,6 +193,7 @@ export class WebGPULiveSvoScene implements GPUSolverInstance {
       brickSize: liveSvoRenderBrickSize(scene, options),
       rendererOnly: true,
       environmentBrickRefinementLevels: options.environmentBrickRefinementLevels,
+      surfaceContours: options.surfaceContours,
       environmentRefinementDepth: options.environmentRefinementDepth,
       environmentPlanarRefinementExemption: options.environmentPlanarRefinementExemption,
       radianceFeedback: options.radianceFeedback,

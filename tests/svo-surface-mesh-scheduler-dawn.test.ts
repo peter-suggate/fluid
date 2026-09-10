@@ -28,12 +28,12 @@ import { SPARSE_SCENE_MAINTENANCE_STATE_WORDS } from "../lib/core/webgpu-sparse-
     const initialized = await createDawnRenderDevice(); device = initialized.device;
     const W = SVO_SURFACE_MESH_STATE;
     const M = SPARSE_SCENE_MAINTENANCE_STATE_WORDS;
-    const source = svoSurfaceMeshWGSL(1, 1);
+    const source = svoSurfaceMeshWGSL(1, 1, true, true);
     const kernels = source.slice(0, source.indexOf("// Which of a brick's levels this camera draws"));
     const module = device.createShaderModule({ code: `
-      struct Mapping { worldOrigin:vec3f, brickSize:u32, cellSize:f32, maximumDepth:u32 }
-      struct Dry { materialPublication:vec4u, mapping:Mapping, lod:vec4f, meshFilter:vec4f }
-      const dry=Dry(vec4u(0u,0u,0u,1u),Mapping(vec3f(0.0),2u,1.0,1u),vec4f(0.0),vec4f(0.0));
+      struct Mapping { worldOrigin:vec3f, brickSize:u32, cellSize:vec3f, maximumDepth:u32 }
+      struct Dry { materialPublication:vec4u, mapping:Mapping, lod:vec4f, meshFilter:vec4f, meshFilterNormals:vec4f }
+      const dry=Dry(vec4u(0u,0u,0u,1u),Mapping(vec3f(0.0),2u,vec3f(1.0),1u),vec4f(0.0),vec4f(0.0),vec4f(0.0));
       struct View { cameraPosition:vec4f, viewport:vec2f }
       const uniforms=View(vec4f(-5.0,0.5,0.5,0.0),vec2f(800.0,460.0));
       const REQUIRED_FIELDS:u32=1u;
@@ -59,9 +59,10 @@ import { SPARSE_SCENE_MAINTENANCE_STATE_WORDS } from "../lib/core/webgpu-sparse-
       fn sceneIdentitySolid(i:u32)->bool{return (i&0xffffu)!=0u;}
       fn sceneIdentityMaterial(i:u32)->u32{return i&0xffffu;}
       fn sceneIdentityHasNormal(i:u32)->bool{return false;}
-      fn sceneIdentityNormal(i:u32)->vec3f{return vec3f(0.0);}
+      fn sceneIdentityNormal(i:u32)->vec3f{return vec3f(0.0,1.0,0.0);}
+      fn drySceneContourOfVoxel(v:u32)->u32{return select(0u,128u,(voxels[v]&0x80000000u)!=0u);}
       fn svoGBufferPackNormalOct8(n:vec3f)->u32{return 0u;}
-      ${kernels}
+      ${kernels.replaceAll("dry.meshFilterNormals.w", "bitcast<f32>(publication[6u])")}
     ` });
     const sceneLayout = device.createBindGroupLayout({ entries: [1, 2, 3, 4].map((binding) => ({ binding, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" as const } })) });
     const meshLayout = device.createBindGroupLayout({ entries: [
@@ -151,7 +152,7 @@ import { SPARSE_SCENE_MAINTENANCE_STATE_WORDS } from "../lib/core/webgpu-sparse-
           const extent = [quads[i * 8 + 4]!, quads[i * 8 + 5]!, quads[i * 8 + 6]!];
           (extent.every((value) => value === 0) ? dead : alive).push(i);
         }
-        return { alive, dead };
+        return { alive, dead, quads };
       };
       const receipt = interpretSurfaceMeshState(words, { arenaBytes: [arenas[0].size, arenas[1]?.size ?? empty.size], maximumBytes: 1 << 20 });
       return { words, arena, receipt };
@@ -249,6 +250,56 @@ import { SPARSE_SCENE_MAINTENANCE_STATE_WORDS } from "../lib/core/webgpu-sparse-
     assert.equal(result.words[W.builds], 4);
     result = await frame();
     assert.equal(result.words[W.frontCursor], 22, "the flipped mesh is reused");
+
+    // Change geometry representation and a cell clip together. The cached front
+    // stays drawable until a complete replacement is ready; it cannot reuse
+    // the earlier coarse quads or lose the neighbour's newly exposed face.
+    device.queue.writeBuffer(publication, 6 * 4, new Float32Array([1]));
+    setVoxel(1, 0x80000003);
+    result = await frame();
+    assert.equal(result.words[W.mode], SVO_SURFACE_MESH_MODE.replacement);
+    device.queue.writeBuffer(state, W.hostBackGeneration * 4, new Uint32Array([2]));
+    result = await frame();
+    assert.equal(result.receipt.status.state, "ready");
+    const clipped = result.arena(0, result.words[W.frontCursor]);
+    const triangles = clipped.alive.filter(i => (clipped.quads[i*8+7]&0x80000000)!==0);
+    assert.equal(triangles.length, 10, "the covered face against the solid neighbour is omitted");
+    assert.ok(clipped.alive.every(i => ((clipped.quads[i*8+7]>>3)&7)===0), "contours draw native detail only");
+    const maxY = Math.max(...triangles.flatMap(i => [4,5,6].map(k => ((clipped.quads[i*8+k]>>10)&1023)/1023)));
+    assert.ok(Math.abs(maxY-128/255)<1/1023, `cap depth is sub-voxel: ${maxY}`);
+    assert.ok(clipped.alive.some(i => (clipped.quads[i*8+7]&7)===0 && clipped.quads[i*8]===2),
+      "the unchanged neighbour exposes its face beside a clipped cell");
+    result=await frame();
+    assert.equal(result.words[W.builds],5,"the completed contour mesh is reused");
+
+    // Inflation changes the clipping domain, not the world-space support plane.
+    // It must replace cached geometry even though the scene revision is stable.
+    device.queue.writeBuffer(publication,6*4,new Float32Array([1.25]));
+    result=await frame();
+    assert.equal(result.words[W.mode],SVO_SURFACE_MESH_MODE.replacement);
+    device.queue.writeBuffer(state,W.hostBackGeneration*4,new Uint32Array([3]));
+    result=await frame();
+    assert.equal(result.receipt.status.state,"ready");
+    const inflated=result.arena(result.receipt.front,result.words[W.frontCursor]);
+    const enlarged=inflated.alive.filter(i=>(inflated.quads[i*8+7]&0x80000000)!==0);
+    assert.equal(enlarged.length,12,"inflated faces cannot use native neighbour face rejection");
+    const points=enlarged.flatMap(i=>[4,5,6].map(k=>{
+      const amount=((inflated.quads[i*8+7]>>>11)&63)/100;
+      assert.equal(amount,.25,"inflation is baked into the triangle record");
+      const word=inflated.quads[i*8+k];
+      return [0,10,20].map(shift=>.5+(((word>>>shift)&1023)/1023-.5)*(1+2*amount));
+    }));
+    assert.ok(Math.abs(Math.min(...points.map(p=>p[0]))+.25)<.002);
+    assert.ok(Math.abs(Math.max(...points.map(p=>p[0]))-1.25)<.002);
+    assert.ok(Math.abs(Math.max(...points.map(p=>p[1]))-128/255)<.002,"inflation leaves the slice plane fixed");
+    result=await frame();assert.equal(result.words[W.builds],6,"inflated mesh is reused");
+    // Return exactly to the original zero-inflation geometry.
+    device.queue.writeBuffer(publication,6*4,new Float32Array([1]));
+    result=await frame();
+    device.queue.writeBuffer(state,W.hostBackGeneration*4,new Uint32Array([4]));
+    result=await frame();assert.equal(result.receipt.status.state,"ready");
+    const restored=result.arena(result.receipt.front,result.words[W.frontCursor]);
+    assert.equal(restored.alive.filter(i=>(restored.quads[i*8+7]&0x80000000)!==0).length,10);
 
     assert.deepEqual(initialized.validationErrors, []);
     for (const buffer of [publication, nodes, leaves, voxels, state, dispatch, work, visible, maintenance, empty, arenas[0], arenas[1]!, readback]) buffer.destroy();

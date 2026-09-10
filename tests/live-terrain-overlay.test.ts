@@ -66,7 +66,7 @@ test("terrain overlays use renderer uniform publication without replacing the li
   const source = { stageSceneUpdate(next: typeof scene) { staged.push(next); }, info: {} };
   const renderer = new FluidLabRenderer({} as HTMLCanvasElement, () => {});
   Object.assign(renderer, { device: {}, gpuFluid: source,
-    gpuFluidKey: `${gpuSceneSolverKey(scene, config)}:presentation-full-scene:scenery-${sceneryConstructionKey(scene)}`,
+    gpuFluidKey: `${gpuSceneSolverKey(scene, config)}:presentation-full-scene:scenery-${sceneryConstructionKey(scene)}:contours-false`,
     appliedSceneUniformKey: "before", beginGPUFluidInitialization() { assert.fail("Terrain overlay rebuilt the live scene"); } });
   const access = renderer as unknown as { currentGPUFluid(next: typeof scene, runConfig: typeof config, mode: string): unknown };
   const filled = sceneWithSolidStroke(scene, [{ operation: "fill", minimum: [8, 4, 8], maximumExclusive: [9, 5, 9] }]);

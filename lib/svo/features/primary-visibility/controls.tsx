@@ -17,16 +17,25 @@ export function renderPrimaryTraversalControls({ resolvedPrimary, partitioned, d
           value={duration === undefined ? "—" : formatPipelineDuration(duration)} />;
       })}
       {effectiveRendererStatus.surfaceMesh?.allocatedBytes !== undefined && <>
-        <PipeReadout label="Required quads" value={`${effectiveRendererStatus.surfaceMesh.requirementComplete === false ? "≥ " : ""}${effectiveRendererStatus.surfaceMesh.requiredQuads?.toLocaleString() ?? "—"}`} />
-        <PipeReadout label="Capacity" value={`${effectiveRendererStatus.surfaceMesh.capacityQuads?.toLocaleString() ?? "—"} quads`} />
+        <PipeReadout label="Required mesh records" value={`${effectiveRendererStatus.surfaceMesh.requirementComplete === false ? "≥ " : ""}${effectiveRendererStatus.surfaceMesh.requiredQuads?.toLocaleString() ?? "—"}`} />
+        <PipeReadout label="Capacity" value={`${effectiveRendererStatus.surfaceMesh.capacityQuads?.toLocaleString() ?? "—"} records`} />
         <PipeReadout label="Mesh memory" value={`${(effectiveRendererStatus.surfaceMesh.allocatedBytes / (1024 * 1024)).toFixed(1)} / ${((effectiveRendererStatus.surfaceMesh.maximumBytes ?? 0) / (1024 * 1024)).toFixed(1)} MiB`} />
         <PipeReadout label="Mesh builds" value={effectiveRendererStatus.surfaceMesh.builds ?? "—"} />
       </>}
+      <PipeToggle field label="Contour geometry" checked={tuning.surfaceMeshContours}
+        disabled={smoothSurfaceEnabled} onChange={(value) => updateTuning("surfaceMeshContours", value)}
+        hint="Rebuild native raster geometry with conservative surface clips. Unsupported cells keep their voxel shape; coarse filtering is suspended." />
+      <PipeRange label="Contour inflation" unit="cells" value={tuning.surfaceMeshContourInflation}
+        min={0} max={0.5} step={0.01} digits={2} editable
+        disabled={smoothSurfaceEnabled || !tuning.surfaceMeshContours}
+        onChange={(value) => updateTuning("surfaceMeshContourInflation", value)}
+        modified={modified("surfaceMeshContourInflation")} onReset={resetTuning("surfaceMeshContourInflation")}
+        hint="Expand each contoured voxel on every side before slicing with its original plane. Overlapping patches can cover indents. 0.10 adds 10% of a cell on each side; raster geometry only." />
       <WorkProgress progress={smoothSurfaceEnabled
         ? { label: "Smooth surface unavailable", state: "waiting", detail: "Geometry is withheld. Voxel mesh rendering resumes when smooth reconstruction is disabled." }
         : surfaceMeshProgress(effectiveRendererStatus.surfaceMesh)} />
       {effectiveRendererStatus.surfaceMesh?.state === "ready"
-        && <PipeReadout label="Drawn quads" value={effectiveRendererStatus.surfaceMesh.quads?.toLocaleString() ?? "—"} />}
+        && <PipeReadout label="Drawn mesh records" value={effectiveRendererStatus.surfaceMesh.quads?.toLocaleString() ?? "—"} />}
     </div> : <details className="rp-tune"><summary>Traversal budgets</summary>
       <div className="pipe-fields">
       <PipeRange label="Maximum traversal depth" unit="levels" value={svoMaximumTraversalDepth}
@@ -56,11 +65,9 @@ export function renderFilteredDetailControls({ resolvedPrimary, smoothSurfaceEna
     <PipeChoice label="Maximum coarsening" value={String(tuning.surfaceMeshMaxCoarsening)} disabled={disabled}
       options={[{ value: "0", label: "Native" }, { value: "1", label: "2×" }, { value: "2", label: "4×" }, { value: "3", label: "Full brick" }]}
       onChange={(value) => updateTuning("surfaceMeshMaxCoarsening", Number(value))} />
-    <div className="pipe-row" role="group" aria-label="Shading normals">
-      <PipeToggle label="Normal smoothing" checked={tuning.surfaceMeshNormalSmoothing} disabled={disabled}
-        onChange={(value) => updateTuning("surfaceMeshNormalSmoothing", value)}
-        hint="Use baked shading normals. Choose Native geometry above to smooth lighting without coarsening voxels." />
-    </div>
+    <PipeToggle field label="Normal smoothing" checked={tuning.surfaceMeshNormalSmoothing} disabled={disabled}
+      onChange={(value) => updateTuning("surfaceMeshNormalSmoothing", value)}
+      hint="Use baked shading normals. Choose Native geometry above to smooth lighting without coarsening voxels." />
     <PipeRange label="Smoothing strength" unit="%" value={tuning.surfaceMeshNormalStrength * 100}
       min={0} max={100} step={5} disabled={normalsDisabled}
       onChange={(value) => updateTuning("surfaceMeshNormalStrength", value / 100)}
@@ -75,28 +82,30 @@ export function renderFilteredDetailControls({ resolvedPrimary, smoothSurfaceEna
         onChange={(value) => updateTuning("surfaceMeshNormalAgreement", value)}
         modified={tuning.surfaceMeshNormalAgreement !== 0.5} onReset={() => updateTuning("surfaceMeshNormalAgreement", 0.5)}
         hint="Minimum agreement of contributing coarse-face normals. Higher values preserve more flat faces. Stored agreement has 8-bit precision." />
-      <div className="pipe-row" role="group" aria-label="Close-up normals">
-        <PipeToggle label="Preserve close-up face normals" checked={tuning.surfaceMeshPreserveCloseNormals} disabled={normalsDisabled}
-          onChange={(value) => updateTuning("surfaceMeshPreserveCloseNormals", value)}
-          hint="Fade native geometry back to face normals between one and two detail thresholds on screen." />
-      </div>
+      <PipeToggle field label="Preserve close-up face normals" checked={tuning.surfaceMeshPreserveCloseNormals} disabled={normalsDisabled}
+        onChange={(value) => updateTuning("surfaceMeshPreserveCloseNormals", value)}
+        hint="Fade native geometry back to face normals between one and two detail thresholds on screen." />
     </div></details>
-    <div className="pipe-row" role="group" aria-label="Filtered detail inspection">
-      <PipeToggle label="LOD colours" checked={svoStageView === "mesh-lod"} disabled={disabled && svoStageView !== "mesh-lod"}
+    {/* What the card is set to sits above; what it is showing you, what that
+        selects, and the verb that undoes it sit below the rule. */}
+    <div className="pipe-fields pipe-section">
+      <PipeToggle field label="LOD colours" checked={svoStageView === "mesh-lod"} disabled={disabled}
         onChange={(enabled) => setSvoStageView(enabled ? "mesh-lod" : "off")}
         hint="Inspect the detail level actually rasterized. Cyan: native; green: 2×; amber: 4×; pink: 8×." />
-      <PipeButton label="Reset filtering" disabled={disabled}
-        hint="Return every filtered-detail setting on this card to its balanced value."
-        onClick={() => {
-          updateTuning("surfaceMeshLodPixels", 1); updateTuning("surfaceMeshNormalSmoothing", true);
-          updateTuning("surfaceMeshNormalStrength", 1); updateTuning("surfaceMeshMaxCoarsening", 3);
-          updateTuning("surfaceMeshLodHysteresis", 0.15); updateTuning("surfaceMeshNormalAgreement", 0.5);
-          updateTuning("surfaceMeshPreserveCloseNormals", true);
-        }} />
+      {effectiveRendererStatus.surfaceMesh?.lodBricks && <PipeReadout label="Selected bricks"
+        hint="Resident surface bricks by selected LOD, before frustum and occlusion rejection. Counts update asynchronously."
+        value={effectiveRendererStatus.surfaceMesh.lodBricks.map((count, level) => `${level === 0 ? "Native" : `${2 ** level}×`} ${count.toLocaleString()}`).join(" · ")} />}
+      <div className="pipe-actions">
+        <PipeButton label="Reset filtering" disabled={disabled}
+          hint="Return every filtered-detail setting on this card to its balanced value."
+          onClick={() => {
+            updateTuning("surfaceMeshLodPixels", 1); updateTuning("surfaceMeshNormalSmoothing", true);
+            updateTuning("surfaceMeshNormalStrength", 1); updateTuning("surfaceMeshMaxCoarsening", 3);
+            updateTuning("surfaceMeshLodHysteresis", 0.15); updateTuning("surfaceMeshNormalAgreement", 0.5);
+            updateTuning("surfaceMeshPreserveCloseNormals", true);
+          }} />
+      </div>
     </div>
-    {effectiveRendererStatus.surfaceMesh?.lodBricks && <PipeReadout label="Selected bricks"
-      hint="Resident surface bricks by selected LOD, before frustum and occlusion rejection. Counts update asynchronously."
-      value={effectiveRendererStatus.surfaceMesh.lodBricks.map((count, level) => `${level === 0 ? "Native" : `${2 ** level}×`} ${count.toLocaleString()}`).join(" · ")} />}
   </div>;
 }
 

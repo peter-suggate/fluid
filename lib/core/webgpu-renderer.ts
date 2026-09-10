@@ -468,7 +468,9 @@ export interface SimulationRunConfig {
 
 export function structuralMethodValues(config: SimulationRunConfig): MethodParamValues {
   const runtime = new Set(getMethod(config.methodId).runtimeParamKeys ?? []);
-  return Object.fromEntries(Object.entries(config.values).filter(([key]) => !runtime.has(key)));
+  // Contour geometry rebuilds only the render source, keyed by solverKey below.
+  // Keeping it out of the physical key lets a wet scene retain its solver.
+  return Object.fromEntries(Object.entries(config.values).filter(([key]) => !runtime.has(key) && key !== "svoMeshContours"));
 }
 
 /** Renderer-only worlds are method-independent; fluid worlds require a GPU solver factory. */
@@ -1984,7 +1986,7 @@ export class FluidLabRenderer {
 
   private solverKey(scene:SceneDescription,config:SimulationRunConfig,presentationMode:ScenePresentationMode){
     return `${gpuSceneSolverKey(scene,config)}:presentation-${presentationMode}`
-      + (presentationMode === "full-scene" ? `:scenery-${sceneryConstructionKey(scene)}` : "");
+      + (presentationMode === "full-scene" ? `:scenery-${sceneryConstructionKey(scene)}:contours-${config.values.svoMeshContours === true}` : "");
   }
   private attachedSolverDocumentKey = "";
   /** Presentation policy used to construct the attached solver/sidecar pair. */
@@ -2373,6 +2375,7 @@ export class FluidLabRenderer {
         const depth = config.values.svoEnvironmentRefinementDepth;
         solver=await WebGPULiveSvoScene.create(device, scene, config.quality, report, abort.signal, {
           environmentBrickRefinementLevels: typeof refinement === "number" ? refinement : undefined,
+          surfaceContours: config.values.svoMeshContours === true,
           environmentRefinementDepth: typeof depth === "number" ? depth : undefined,
           environmentPlanarRefinementExemption: config.values.svoEnvironmentPlanarRefinementExemption === true,
         });
@@ -2387,6 +2390,7 @@ export class FluidLabRenderer {
         const depth=config.values.svoEnvironmentRefinementDepth;
         const sidecar=await WebGPULiveSvoScene.create(device,scene,config.quality,report,abort.signal,{
           environmentBrickRefinementLevels:typeof refinement==="number"?refinement:undefined,
+          surfaceContours:config.values.svoMeshContours===true,
           environmentRefinementDepth:typeof depth==="number"?depth:undefined,
           environmentPlanarRefinementExemption:config.values.svoEnvironmentPlanarRefinementExemption===true,
         });
@@ -3033,6 +3037,7 @@ export class FluidLabRenderer {
       values: {
         ...config.values,
         svoEnvironmentBrickRefinementLevels: activeSvoTuning.environmentBrickRefinementLevels,
+        svoMeshContours: activeSvoTuning.surfaceMeshContours,
         svoEnvironmentRefinementDepth: environmentRefinementDepth,
         // Topology, so it belongs in the structural key alongside the depth:
         // toggling the exemption changes which nodes are leaves, and only a

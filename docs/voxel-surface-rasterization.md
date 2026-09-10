@@ -284,3 +284,9 @@ and the any-solid dilation covering more pixels. The knob for this lane is
 and a zero screen-space threshold; the smoke tool's `FLUID_SVO_MESH_LOD_PIXELS`
 is inert because that lane never enables the surface mesh. The balanced default
 stays off until the lighting delta is attributed.
+
+## Contour geometry
+
+The opt-in **Contour geometry** control builds conservative clipped-cell triangles
+while retaining hardware raster primary visibility. It has separate source
+publication and native-detail rules; see [Raster cell contours](svo-cell-contours.md).

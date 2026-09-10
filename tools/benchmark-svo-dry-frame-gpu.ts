@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { censusSvoCellContours } from "../lib/harness/svo-cell-contour-census";
 /**
  * Headless end-to-end GPU benchmark for the production SVO dry-scene render
  * pass (SparseVoxelDrySceneRenderer.encode) bound to the shipped garden
@@ -932,6 +933,7 @@ const camera: CameraState = { ...defaultCamera, ...presetCamera, target_m: { ...
 let activeCamera: CameraState = camera;
 const environmentId: EnvironmentId = (scene.environment ?? "default") as EnvironmentId;
 
+const worldBuildStarted_ms = performance.now();
 const solver = await WebGPULiveSvoScene.create(
   device,
   scene,
@@ -940,6 +942,7 @@ const solver = await WebGPULiveSvoScene.create(
   undefined,
   {
     ...(renderBrickSize === undefined ? {} : { renderBrickSize }),
+    surfaceContours: process.env.FLUID_SVO_DRY_FRAME_MESH_CONTOURS === "1",
     environmentRefinementDepth,
     radianceFeedback: radianceFeedbackEnabled,
     derivedTraversalStructures,
@@ -987,11 +990,18 @@ if (radianceFeedbackEnabled && radianceFeedbackFrames >= LIVE_SVO_RADIANCE_FEEDB
   assert.equal(staticFeedbackIdle, true,
     "a static live scene must stop encoding feedback after its convergence window");
 }
+const worldBuild_ms = performance.now() - worldBuildStarted_ms;
 const publishedSource = solver.sparseVoxelSceneSource;
 const source = globalIlluminationEnabled || !publishedSource
   ? publishedSource
   : { ...publishedSource, tetrahedralRadiance: undefined };
 assert.ok(source?.structural, "live SVO scene did not publish a structural scene source");
+const contourLanes = source.structural.scenePayloadLanes;
+const cellContourCensus = process.env.FLUID_SVO_DRY_FRAME_MESH_CONTOURS === "1" && contourLanes.geometryPacked
+  ? await censusSvoCellContours(device, source.structural.scenePayload.buffer, contourLanes.geometryWords,
+    contourLanes.geometryStrideWords, source.structural.capacities.voxels) : undefined;
+if (cellContourCensus) log(`Cell contours: ${JSON.stringify(cellContourCensus)}`);
+
 
 // Exact mirror of FluidLabRenderer solver-attachment dry-scene data assembly,
 // shared with tools/run-svo-dry-render-smoke.ts through the harness.
@@ -1027,7 +1037,9 @@ renderer.setRigidBodyCount(rasterRigidForced ? 12 : bodies.count);
 // surface mesh, so it is the only one that can price the toggle.
 const meshLodPixelsRaw = Number(process.env.FLUID_SVO_DRY_FRAME_MESH_LOD_PIXELS ?? DEFAULT_SVO_RENDER_TUNING.surfaceMeshLodPixels);
 const meshLodPixels = Number.isFinite(meshLodPixelsRaw) ? Math.min(Math.max(meshLodPixelsRaw, 0), 8) : DEFAULT_SVO_RENDER_TUNING.surfaceMeshLodPixels;
-const configuredRenderTuning = { ...DEFAULT_SVO_RENDER_TUNING, coneLightingScale: coneScale,
+const configuredRenderTuning = { ...DEFAULT_SVO_RENDER_TUNING,
+  surfaceMeshContours: process.env.FLUID_SVO_DRY_FRAME_MESH_CONTOURS === "1",
+  surfaceMeshContourInflation: Number(process.env.FLUID_SVO_DRY_FRAME_CONTOUR_INFLATION ?? 0), coneLightingScale: coneScale,
   coneRadianceReconstruction: radianceReconstruction, maximumShadedLights, surfaceMeshLodPixels: meshLodPixels, surfaceMeshFilteringEnabled: process.env.FLUID_SVO_DRY_FRAME_MESH_LOD_PIXELS !== undefined ? meshLodPixels > 0 : DEFAULT_SVO_RENDER_TUNING.surfaceMeshFilteringEnabled,
   ...(globalIlluminationEnabled ? {} : {
     giBounceStrength: 0,
@@ -2210,6 +2222,10 @@ const result = {
   movingTier,
   rigidMotionTransition_ms,
   scene: {
+    worldBuild_ms,
+    cellContourCensus,
+    surfaceMeshContours: configuredRenderTuning.surfaceMeshContours,
+    surfaceMeshContourInflation: configuredRenderTuning.surfaceMeshContourInflation,
     presetId: scenePresetId,
     sceneId: scene.sceneId,
     environment: environmentId,

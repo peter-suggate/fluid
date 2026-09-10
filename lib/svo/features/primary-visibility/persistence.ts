@@ -6,7 +6,9 @@ export const primaryQuery = queryRecord<PrimaryQueryState>({
   svoPrimaryTraversal: choiceQuery("svoPrimary", DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal, ["mesh", "traced", "raster"]),
   silhouetteRefinementEnabled: booleanQuery("svoPrimarySeamClosure", DEFAULT_SVO_LIGHTING_OPTIONS.silhouetteRefinementEnabled),
 });
-const primaryTuningFields = queryRecord<Pick<SvoRenderTuning, "surfaceMeshLodPixels" | "surfaceMeshFilteringEnabled" | "surfaceMeshNormalSmoothing" | "surfaceMeshNormalStrength" | "surfaceMeshMaxCoarsening" | "surfaceMeshLodHysteresis" | "surfaceMeshNormalAgreement" | "surfaceMeshPreserveCloseNormals">>({
+const primaryTuningFields = queryRecord<Pick<SvoRenderTuning, "surfaceMeshContourInflation" | "surfaceMeshContours" | "surfaceMeshLodPixels" | "surfaceMeshFilteringEnabled" | "surfaceMeshNormalSmoothing" | "surfaceMeshNormalStrength" | "surfaceMeshMaxCoarsening" | "surfaceMeshLodHysteresis" | "surfaceMeshNormalAgreement" | "surfaceMeshPreserveCloseNormals">>({
+  surfaceMeshContourInflation: numberQuery("svoMeshContourInflation", 0, 0, 0.5),
+  surfaceMeshContours: booleanQuery("svoMeshContours", false),
   surfaceMeshFilteringEnabled: booleanQuery("svoMeshFilter", false),
   surfaceMeshNormalSmoothing: booleanQuery("svoMeshNormals", true),
   surfaceMeshNormalStrength: numberQuery("svoMeshNormalStrength", 1, 0, 1),

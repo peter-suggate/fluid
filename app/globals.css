@@ -1227,13 +1227,13 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
    page of fields; this panel is a hundred of them. It rescopes the three tokens
    the floor reads, one level up, the way the toolstrip does — left alone the
    floor swelled the typed readout to 38px and clipped "1.00" to "1.0". */
-.pipe-fields { --control-height: 22px; --control-inline-padding: 5px; --control-font-size: var(--size-2); }
-.pipe-fields { display: grid; grid-template-columns: repeat(auto-fit,minmax(178px,1fr)); gap: 1px 12px; }
-/* One row height for every kind of row: a track, a pill and a readout are the
+.pipe-fields { --pipe-height: 22px; --control-height: var(--pipe-height); --control-inline-padding: 5px; --control-font-size: var(--size-2);
+  display: grid; grid-template-columns: repeat(auto-fit,minmax(178px,1fr)); gap: 1px 12px; }
+/* One row height for every kind of row: a track, a switch and a readout are the
    same 22px, so the card reads as one column instead of three rhythms. */
-.pipe-fields input[type="range"], .lab-shell .pipe-fields input[type="range"] { min-height: var(--control-height); height: var(--control-height); }
+.pipe-fields input[type="range"], .lab-shell .pipe-fields input[type="range"] { min-height: var(--pipe-height); height: var(--pipe-height); }
 .lab-shell .pipe-fields input[type="range"]::-webkit-slider-thumb { width: 11px; height: 11px; }
-.pipe-field { min-height: 20px; display: grid; grid-template-columns: minmax(0,1fr) minmax(44px,72px) auto; align-items: center; gap: 8px; }
+.pipe-field { min-height: var(--pipe-height,20px); display: grid; grid-template-columns: minmax(0,1fr) minmax(44px,72px) auto; align-items: center; gap: 8px; }
 /* Wrapping, not clipped. These labels run to forty characters — "Environment
    refinement depth · RE-AUTHORS" — and a card in a 420px pane gives about a
    hundred pixels to the name, so an ellipsis turned every second control into
@@ -1246,7 +1246,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .pipe-field.is-disabled input { cursor: not-allowed; }
 .pipe-reset { padding: 0 2px; border: 0; background: transparent; color: var(--accent); font: var(--text-readout); cursor: pointer; }
 .pipe-row { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; }
-.pipe-toggle { min-height: 20px; padding: 0 8px 0 6px; display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--instrument-hair); background: transparent; color: var(--micro); font: 500 var(--size-2)/1.3 var(--sans); cursor: pointer; transition: border-color .14s ease, color .14s ease; }
+.pipe-toggle { min-height: var(--pipe-height,20px); padding: 0 8px 0 6px; display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--instrument-hair); background: transparent; color: var(--micro); font: 500 var(--size-2)/1.3 var(--sans); cursor: pointer; transition: border-color .14s ease, color .14s ease; }
 .pipe-toggle:hover:not(:disabled) { border-color: var(--line-strong); color: var(--ink); }
 .pipe-toggle i, .pipe-switch i { position: relative; width: 16px; height: 9px; flex: none; border: 1px solid var(--line-strong); border-radius: 5px; background: transparent; }
 .pipe-toggle i::after, .pipe-switch i::after { content: ""; position: absolute; top: 1.5px; left: 1.5px; width: 4px; height: 4px; border-radius: 50%; background: var(--dim); transition: transform .12s ease, background .12s ease; }
@@ -1254,7 +1254,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .pipe-toggle[aria-checked="true"] i, .pipe-switch[aria-checked="true"] i { border-color: var(--accent-line); background: var(--accent-wash); }
 .pipe-toggle[aria-checked="true"] i::after, .pipe-switch[aria-checked="true"] i::after { transform: translateX(7px); background: var(--accent); }
 .pipe-toggle:disabled { opacity: .45; cursor: not-allowed; }
-.pipe-choice { min-height: 20px; display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 8px; }
+.pipe-choice { min-height: var(--pipe-height,20px); display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 8px; }
 .pipe-choice > span { overflow: hidden; color: var(--micro); font: 400 var(--size-2)/1.35 var(--sans); text-overflow: ellipsis; white-space: nowrap; }
 .pipe-choice > div { display: flex; flex-wrap: wrap; gap: 3px; }
 .pipe-choice button { min-height: 18px; padding: 0 7px; border: 1px solid var(--instrument-hair); background: transparent; color: var(--micro); font: 500 var(--size-2)/1.3 var(--sans); cursor: pointer; transition: border-color .14s ease, color .14s ease, background .14s ease; }
@@ -1263,7 +1263,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .pipe-choice button:disabled { opacity: .45; cursor: not-allowed; }
 /* A typed readout, for a value the 0.25px steps of a track cannot land on. It
    keeps the readout's own width and alignment so the column stays a column. */
-.pipe-number { width: 48px; min-width: 0; min-height: var(--control-height); padding: 0 5px; border: 1px solid var(--instrument-hair); background: transparent; color: var(--ink); font: var(--text-micro); font-variant-numeric: tabular-nums; text-align: right; -moz-appearance: textfield; appearance: textfield; }
+.pipe-number { width: 48px; min-width: 0; min-height: var(--pipe-height,22px); padding: 0 5px; border: 1px solid var(--instrument-hair); background: transparent; color: var(--ink); font: var(--text-micro); font-variant-numeric: tabular-nums; text-align: right; -moz-appearance: textfield; appearance: textfield; }
 .pipe-number::-webkit-inner-spin-button, .pipe-number::-webkit-outer-spin-button { margin: 0; -webkit-appearance: none; appearance: none; }
 .pipe-number:hover:not(:disabled) { border-color: var(--line-strong); }
 .pipe-number:focus-visible { outline: none; border-color: var(--accent-line); color: var(--accent-strong); }
@@ -1272,21 +1272,21 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
    column with the rest, and the switch lands on the same right rail as the
    readouts above it. The pill form stays for `.pipe-row` groups of verbs. */
 .pipe-field-switch { grid-template-columns: minmax(0,1fr) auto; }
-.pipe-switch { min-height: var(--control-height); padding: 0; display: inline-flex; align-items: center; justify-content: flex-end; border: 0; background: transparent; cursor: pointer; }
+.pipe-switch { min-height: var(--pipe-height,22px); padding: 0; display: inline-flex; align-items: center; justify-content: flex-end; border: 0; background: transparent; cursor: pointer; }
 .pipe-switch:disabled { cursor: not-allowed; }
 /* A verb on the same rail as the switches beside it, minus the switch. */
-.pipe-button { min-height: 20px; padding: 0 8px; display: inline-flex; align-items: center; border: 1px solid var(--instrument-hair); background: transparent; color: var(--micro); font: 500 var(--size-2)/1.3 var(--sans); cursor: pointer; transition: border-color .14s ease, color .14s ease; }
+.pipe-button { min-height: var(--pipe-height,20px); padding: 0 8px; display: inline-flex; align-items: center; border: 1px solid var(--instrument-hair); background: transparent; color: var(--micro); font: 500 var(--size-2)/1.3 var(--sans); cursor: pointer; transition: border-color .14s ease, color .14s ease; }
 .pipe-button:hover:not(:disabled) { border-color: var(--line-strong); color: var(--ink); }
 .pipe-button:disabled { opacity: .45; cursor: not-allowed; }
-/* A measured line in the control rhythm: name left, value right, one 20px row. */
-.pipe-readout { min-height: 20px; display: grid; grid-template-columns: minmax(0,auto) minmax(0,1fr); align-items: baseline; gap: 8px; }
+/* A measured line in the control rhythm: name left, value right, one row tall. */
+.pipe-readout { min-height: var(--pipe-height,20px); display: grid; grid-template-columns: minmax(0,auto) minmax(0,1fr); align-items: baseline; gap: 8px; }
 .pipe-readout > span { color: var(--micro); font: 400 var(--size-2)/1.35 var(--sans); }
 .pipe-readout > output { justify-self: end; color: var(--ink); font: var(--text-micro); font-variant-numeric: tabular-nums; text-align: right; }
 /* A block of the card that is about the card rather than in it — inspection,
    measurement, the verb that undoes the rest — set off by a hairline instead
    of a heading, and spanning whatever column count the pane resolved to. */
 .pipe-fields .pipe-section { grid-column: 1 / -1; margin-top: 5px; padding-top: 5px; border-top: 1px solid var(--instrument-hair); }
-.pipe-actions { display: flex; justify-content: flex-end; }
+.pipe-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; padding-top: 2px; }
 .svo-control-grid .control-lead { border-color: var(--accent-line); background: linear-gradient(180deg,var(--accent-wash),var(--render-control-bg)); }
 .svo-control-grid .control-lead .control-heading > span { color: var(--ink); font-size: var(--size-4); }
 .svo-control-grid .control-lead .control-heading output { font-size: var(--size-4); }

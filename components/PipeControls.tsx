@@ -67,9 +67,19 @@ export function PipeRange({ label, value, min, max, step, digits = 0, unit, onCh
   </label>;
 }
 
-export function PipeToggle({ label, checked, onChange, disabled = false, hint }: {
-  label: string; checked: boolean; onChange: (checked: boolean) => void; disabled?: boolean; hint?: string;
+/**
+ * `field` puts the name in the label column and the switch on the same right
+ * rail as the readouts, so a card of ranges and switches reads as one column.
+ * The pill form is for a `.pipe-row` group, where the switches are the row.
+ */
+export function PipeToggle({ label, checked, onChange, disabled = false, hint, field = false }: {
+  label: string; checked: boolean; onChange: (checked: boolean) => void; disabled?: boolean; hint?: string; field?: boolean;
 }) {
+  if (field) return <div className={`pipe-field pipe-field-switch${disabled ? " is-disabled" : ""}`} title={hint}>
+    <span>{label}</span>
+    <button type="button" className="pipe-switch" role="switch" aria-checked={checked} aria-label={label}
+      disabled={disabled} onClick={() => onChange(!checked)}><i aria-hidden="true" /></button>
+  </div>;
   return <button type="button" className="pipe-toggle" role="switch" aria-checked={checked}
     disabled={disabled} title={hint} onClick={() => onChange(!checked)}>
     <i aria-hidden="true" /><span>{label}</span>

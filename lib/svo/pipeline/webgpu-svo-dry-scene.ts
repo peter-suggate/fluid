@@ -5055,7 +5055,7 @@ export class SparseVoxelDrySceneRenderer {
     floats.set([Number(t.surfaceMeshFilteringEnabled), t.surfaceMeshNormalStrength,
       t.surfaceMeshMaxCoarsening, t.surfaceMeshLodHysteresis,
       Number(t.surfaceMeshNormalSmoothing), t.surfaceMeshNormalAgreement,
-      Number(t.surfaceMeshPreserveCloseNormals), 0], offset);
+      Number(t.surfaceMeshPreserveCloseNormals), t.surfaceMeshContours ? 1 + t.surfaceMeshContourInflation : 0], offset);
   }
 
   private writeLodParams(): void {

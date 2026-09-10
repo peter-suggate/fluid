@@ -257,6 +257,10 @@ export interface SvoRenderTuning {
    * All filtering options are uniforms over cached mesh levels and normals.
    */
   readonly surfaceMeshLodPixels: number;
+  /** Native-resolution conservative contour geometry; rebuilds the render source. */
+  readonly surfaceMeshContours: boolean;
+  /** Expansion per face in cell widths, before clipping; raster mesh only. */
+  readonly surfaceMeshContourInflation: number;
   readonly surfaceMeshFilteringEnabled: boolean;
   readonly surfaceMeshNormalSmoothing: boolean;
   readonly surfaceMeshNormalStrength: number;
@@ -381,6 +385,8 @@ const balancedTuning: SvoRenderTuning = Object.freeze({
   surfaceMeshMaxCoarsening: 3,
   surfaceMeshLodHysteresis: 0.15,
   surfaceMeshNormalAgreement: 0.5,
+  surfaceMeshContours: false,
+  surfaceMeshContourInflation: 0,
   surfaceMeshPreserveCloseNormals: true,
   primaryLeafVisits: 48,
   coneStepBudget: 48,
@@ -588,6 +594,8 @@ export function normalizeSvoRenderTuning(value: SvoRenderTuning): SvoRenderTunin
     surfaceMeshMaxCoarsening: integer(value.surfaceMeshMaxCoarsening ?? 3, 0, 3),
     surfaceMeshLodHysteresis: bounded(value.surfaceMeshLodHysteresis ?? 0.15, 0, 0.3),
     surfaceMeshNormalAgreement: bounded(value.surfaceMeshNormalAgreement ?? 0.5, 0, 1),
+    surfaceMeshContours: value.surfaceMeshContours ?? false,
+    surfaceMeshContourInflation: Math.round(bounded(value.surfaceMeshContourInflation ?? 0, 0, 0.5) * 100) / 100,
     surfaceMeshPreserveCloseNormals: value.surfaceMeshPreserveCloseNormals ?? true,
     primaryLeafVisits: integer(value.primaryLeafVisits, 1, SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT),
     coneStepBudget: integer(value.coneStepBudget, 1, 48),

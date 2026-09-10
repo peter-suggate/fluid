@@ -97,13 +97,19 @@ export function createSvoRenderTerrainRefinement(options: {
   for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) {
     const worldX = field.origin_m[0] + (x + 0.5) * field.cellSize_m[0];
     const worldZ = field.origin_m[1] + (z + 0.5) * field.cellSize_m[1];
-    const bx = Math.floor((worldX - worldOrigin_m[0]) / (renderCellSize_m[0] * brickSize));
-    const bz = Math.floor((worldZ - worldOrigin_m[2]) / (renderCellSize_m[2] * brickSize));
-    if (bx < 0 || bz < 0 || bx >= width || bz >= depth) continue;
-    const index = bx + width * bz;
+    // A centre sample influences one terrain cell on either side of its
+    // column. Include that halo in neighbouring brick ranges as well.
+    const bx0 = Math.floor((worldX - field.cellSize_m[0] - worldOrigin_m[0]) / (renderCellSize_m[0] * brickSize));
+    const bx1 = Math.floor((worldX + field.cellSize_m[0] - worldOrigin_m[0]) / (renderCellSize_m[0] * brickSize));
+    const bz0 = Math.floor((worldZ - field.cellSize_m[1] - worldOrigin_m[2]) / (renderCellSize_m[2] * brickSize));
+    const bz1 = Math.floor((worldZ + field.cellSize_m[1] - worldOrigin_m[2]) / (renderCellSize_m[2] * brickSize));
     const height = field.heights_m[x + nx * z]!;
-    minimum[index] = Math.min(minimum[index]!, height);
-    maximum[index] = Math.max(maximum[index]!, height);
+    for(let bz=bz0;bz<=bz1;bz++)for(let bx=bx0;bx<=bx1;bx++){
+      if(bx<0||bz<0||bx>=width||bz>=depth)continue;
+      const index=bx+width*bz;
+      minimum[index]=Math.min(minimum[index]!,height);
+      maximum[index]=Math.max(maximum[index]!,height);
+    }
   }
   const levels: TerrainRangeLevel[] = [{ width, depth, minimum, maximum }];
   while (levels.at(-1)!.width > 1 || levels.at(-1)!.depth > 1) {

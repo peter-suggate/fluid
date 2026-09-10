@@ -156,6 +156,7 @@ import {
 } from "../scene-publication/svo-planar-boundary";
 
 export interface OctreeSparseBrickWorldOptions {
+  surfaceContours?: boolean;
   buildRenderTerrainGpu?: (cellSize: readonly [number,number,number], materialId: number) => Promise<import("../scene-publication/svo-render-solid-field").SvoRenderTerrainField | undefined>;
   classifyEnvironmentNodesGpu?: (input: import("./webgpu-svo-node-classification").SvoNodeClassificationInput) => Promise<import("../../../core/adaptive-sparse-brick-plan").SparseBrickEnvironmentClassification[]>;
   /** Async renderer startup selection; the synchronous constructor retains the CPU oracle. */
@@ -1483,7 +1484,7 @@ export class OctreeSparseBrickWorld {
       nodeEdge_m.push(refinedBrickEdge.map((value) => value * scale));
     }
     let renderTerrain: import("../scene-publication/svo-render-solid-field").SvoRenderTerrainField | undefined;
-    if (dryWorld && refinementDepth > 0) {
+    if (dryWorld && (refinementDepth > 0 || options.surfaceContours === true)) {
       if (options.buildRenderTerrainGpu) yield options.buildRenderTerrainGpu(renderCellSize, SOLID_WORLD_TERRAIN_MATERIAL_ID)
         .then(field => { renderTerrain = field; });
       renderTerrain ??= yield* buildSvoRenderTerrainFieldSteps(scene, renderCellSize, SOLID_WORLD_TERRAIN_MATERIAL_ID);
@@ -1809,7 +1810,7 @@ export class OctreeSparseBrickWorld {
       !dryWorld, rendererOnly,
     );
     const sceneGeometryFormat: SparseBrickSceneGeometryFormat =
-      payloadProfile === "dry" ? octreeLiveSceneSceneGeometryFormat() : "f32x2";
+      payloadProfile === "dry" ? (options.surfaceContours ? "f16-unorm8" : octreeLiveSceneSceneGeometryFormat()) : "f32x2";
     const leafPayloadMode: SparseBrickLeafPayloadMode =
       payloadProfile === "dry" ? octreeLiveSceneLeafPayloadMode() : "dense";
     this.tree = new SparseBrickOctreeGPU(device, {
@@ -1979,6 +1980,7 @@ export class OctreeSparseBrickWorld {
     // it always did. The residency above deliberately keeps the solver's own.
     this.cellSize = renderCellSize;
     this.proxyVoxelizer = new SparseSceneProxyVoxelizer(device, this.tree, {
+      surfaceContours: options.surfaceContours,
       cellSize: this.cellSize,
       worldOrigin: [sceneDomain.worldOrigin_m.x, sceneDomain.worldOrigin_m.y, sceneDomain.worldOrigin_m.z],
       finestLevel: plan.maximumDepth,

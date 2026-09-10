@@ -602,7 +602,9 @@ const SCENE_GEOMETRY_LANES: Readonly<Record<SparseBrickSceneGeometryFormat, Spar
 export function sparseBrickSceneGeometryCodecWGSL(format: SparseBrickSceneGeometryFormat): string {
   if (format === "f32x2") return "";
   return /* wgsl */ `
-// scene geometry lane, f16-unorm8: one word a voxel, 8 bits spare.
+// scene geometry lane, f16-unorm8: low 24 bits distance/coverage;
+// high byte optionally holds a conservative cell-contour support offset.
+// Generic writers clear it; the authored dry-scene producer fits it explicitly.
 ${SCENE_FRACTION_WGSL}
 fn sceneGeometryWord(base:u32,voxel:u32)->u32{return base+voxel;}
 // A voxel owns its whole word here, so the shift is zero and the mask is total.

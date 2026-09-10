@@ -1154,6 +1154,28 @@ fn dryVoxelCapacity()->u32{return dry.payloadLanes1.z;}`;
   // reconstruction acquire seams at exactly those boundaries.
   const sceneSurfaceGeometryWGSL = /* wgsl */ `
 ${sparseBrickSceneGeometryCodecWGSL("f16-unorm8")}
+fn drySceneContourOfVoxel(voxel:u32)->u32{
+  let descriptor=dry.payloadLanes1.w;
+  if((descriptor&(1u<<24u))==0u||voxel>=dryVoxelCapacity()){return 0u;}
+  let word=dry.payloadLanes1.x+voxel*((descriptor>>8u)&0xffu)+((descriptor>>16u)&0xffu);
+  if(word>=arrayLength(&scenePayload)){return 0u;}
+  let code=scenePayload[word]>>24u;
+  return select(code,0u,code==255u);
+}
+// The same slab bounds temporary primary rays and exact secondary rays.
+// Uniform-off returns before reading the attachment lane.
+fn dryCellContourInterval(identity:u32,voxel:u32,bounds:mat2x3f,ro:vec3f,rd:vec3f,entry:f32,exit:f32)->vec2f{
+  if(dry.meshFilterNormals.w<=0.5||!sceneIdentityHasNormal(identity)){return vec2f(entry,exit);}
+  let code=drySceneContourOfVoxel(voxel);if(code==0u){return vec2f(entry,exit);}
+  let normal=sceneIdentityNormal(identity);let size=bounds[1]-bounds[0];
+  let high=0.5*dot(abs(normal),size)*(f32(code)*(2.0/255.0)-1.0);
+  let offset=dot(normal,ro-0.5*(bounds[0]+bounds[1]))-high;
+  let slope=dot(normal,rd);
+  if(abs(slope)<1e-12){return select(vec2f(1.0,-1.0),vec2f(entry,exit),offset<=0.0);}
+  let t=-offset/slope;
+  if(slope<0.0){return vec2f(max(entry,t),exit);}
+  return vec2f(entry,min(exit,t));
+}
 fn drySceneFractionOfVoxel(voxel:u32)->f32{
   let descriptor=dry.payloadLanes1.w;
   let stride=(descriptor>>8u)&0xffu;
@@ -1286,12 +1308,18 @@ fn drySceneFractionOfVoxel(voxel:u32)->f32{
   // carry their own owner and still suppress.
   const primaryVoxelSurfaceWGSL = /* wgsl */ `if(cellSolid){
       let cellBounds=mat2x3f(bounds[0]+vec3f(cell)*extent,bounds[0]+(vec3f(cell)+vec3f(1.0))*extent);
-      let faceNormal=dryVoxelFaceNormal(cellBounds,ro+rd*entry);
-      let shaded=dryShadingNormal(cellIdentity,faceNormal);
+      var faceNormal=dryVoxelFaceNormal(cellBounds,ro+rd*entry);
       let cellExit=min(nextT.x,min(nextT.y,nextT.z));
-      let surfaceT=drySmoothVoxelSurfaceT(cellIdentity,payloadIndex,cellBounds,ro,rd,entry,cellExit,shaded.normal);
-      return DryHit(surfaceT,shaded.normal,sceneIdentityMaterial(cellIdentity),DRY_OWNER_NONE,
-        shaded.featureId,DRY_GBUFFER_FIELD_VOXEL,DRY_GBUFFER_MOTION_STATIC,0u,0.0,vec3u(0u));
+      let span=dryCellContourInterval(cellIdentity,payloadIndex,cellBounds,ro,rd,entry,cellExit);
+      let enter=span.x;let exit=span.y;
+      if(enter>entry){faceNormal=sceneIdentityNormal(cellIdentity);}
+      let contoured=dry.meshFilterNormals.w>0.5;
+      if(!contoured||enter<=exit){
+        let shaded=dryShadingNormal(cellIdentity,faceNormal);
+        let surfaceT=select(drySmoothVoxelSurfaceT(cellIdentity,payloadIndex,cellBounds,ro,rd,enter,exit,shaded.normal),enter,contoured);
+        return DryHit(surfaceT,shaded.normal,sceneIdentityMaterial(cellIdentity),DRY_OWNER_NONE,
+          shaded.featureId,DRY_GBUFFER_FIELD_VOXEL,DRY_GBUFFER_MOTION_STATIC,0u,0.0,vec3u(0u));
+      }
     }`;
   // The exact hit is unchanged either way — this only decides how much empty
   // interval the sphere trace is asked to walk before it reaches the solid.
@@ -2096,7 +2124,7 @@ fn traceLeafPayloadFineInterval(ro:vec3f,rd:vec3f,hit:SvoTraversalHit,bounds:mat
   for(var iteration=0u;iteration<32u;iteration+=1u){
     if(any(cell<vec3i(cellMinimum))||any(cell>=vec3i(cellMaximum))||entry>intervalExit){break;}
     let payloadIndex=svoBrickVoxelIndex(hit.voxelOffset,vec3u(cell),dry.mapping.brickSize);
-    if(payloadIndex<dryVoxelCapacity()){${cellSolidGateWGSL("payloadIndex", "let cellBounds=mat2x3f(bounds[0]+vec3f(cell)*extent,bounds[0]+(vec3f(cell)+vec3f(1.0))*extent);let faceNormal=dryVoxelFaceNormal(cellBounds,ro+rd*entry);let shaded=dryShadingNormal(identity,faceNormal);let cellExit=min(min(nextT.x,nextT.y),min(nextT.z,intervalExit));let surfaceT=drySmoothVoxelSurfaceT(identity,payloadIndex,cellBounds,ro,rd,entry,cellExit,shaded.normal);return DryHit(surfaceT,shaded.normal,sceneIdentityMaterial(identity),DRY_OWNER_NONE,shaded.featureId,DRY_GBUFFER_FIELD_VOXEL,DRY_GBUFFER_MOTION_STATIC,0u,0.0,vec3u(0u));")}}
+    if(payloadIndex<dryVoxelCapacity()){${cellSolidGateWGSL("payloadIndex", primaryVoxelSurfaceWGSL.replaceAll("cellIdentity", "identity").replace("if(cellSolid)", "if(true)").replace("min(nextT.x,min(nextT.y,nextT.z))", "min(min(nextT.x,nextT.y),min(nextT.z,intervalExit))"))}}
     let advance=min(nextT.x,min(nextT.y,nextT.z));if(nextT.x<=advance+1e-6){cell.x+=step.x;nextT.x+=deltaT.x;}if(nextT.y<=advance+1e-6){cell.y+=step.y;nextT.y+=deltaT.y;}if(nextT.z<=advance+1e-6){cell.z+=step.z;nextT.z+=deltaT.z;}entry=advance;
   }
   return missHit();
@@ -2126,7 +2154,7 @@ fn traceLeafPayloadVisibilityFineInterval(ray:SvoVisibilityRay,tMin_m:f32,hit:Sv
   for(var iteration=0u;iteration<32u;iteration+=1u){
     if(any(cell<vec3i(cellMinimum))||any(cell>=vec3i(cellMaximum))||entry>intervalExit||entry>ray.tMax_m){return dryVisibilityStep(SVO_VIS_STEP_MISS,0u,0u,workItems,DRY_MISS);}if(workItems>=workLimit){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,0u,0u,workItems,DRY_MISS);}workItems+=1u;
     let payloadIndex=svoBrickVoxelIndex(hit.voxelOffset,vec3u(cell),dry.mapping.brickSize);if(payloadIndex>=dryVoxelCapacity()){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}
-    ${cellSolidGateWGSL("payloadIndex", "let materialId=sceneIdentityMaterial(identity);if(materialId>=dry.materialPublication.x){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}let material=dryMaterial(materialId);if(!dryMaterialPublished(material,materialId)){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}if(dryMaterialThinDielectric(material,materialId)){let cellBounds=mat2x3f(bounds[0]+vec3f(cell)*extent,bounds[0]+(vec3f(cell)+vec3f(1.0))*extent);let normal=dryVoxelFaceNormal(cellBounds,ray.origin_m+ray.direction*entry);let cellExit=min(nextT.x,min(nextT.y,nextT.z));return dryVisibilityTransmissionStep(0u,0u,workItems,min(max(cellExit,entry),ray.tMax_m),dryThinDielectricTransmittance(material,normal,ray.direction));}return dryVisibilityStep(SVO_VIS_STEP_HIT,0u,0u,workItems,entry);")}
+    ${cellSolidGateWGSL("payloadIndex", "let clipBounds=mat2x3f(bounds[0]+vec3f(cell)*extent,bounds[0]+(vec3f(cell)+vec3f(1.0))*extent);let span=dryCellContourInterval(identity,payloadIndex,clipBounds,ray.origin_m,ray.direction,entry,min(nextT.x,min(nextT.y,nextT.z)));if(span.x<=span.y){let materialId=sceneIdentityMaterial(identity);if(materialId>=dry.materialPublication.x){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}let material=dryMaterial(materialId);if(!dryMaterialPublished(material,materialId)){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}if(dryMaterialThinDielectric(material,materialId)){let cellBounds=mat2x3f(bounds[0]+vec3f(cell)*extent,bounds[0]+(vec3f(cell)+vec3f(1.0))*extent);let normal=dryVoxelFaceNormal(cellBounds,ray.origin_m+ray.direction*entry);let cellExit=min(nextT.x,min(nextT.y,nextT.z));return dryVisibilityTransmissionStep(0u,0u,workItems,min(max(span.y,span.x),ray.tMax_m),dryThinDielectricTransmittance(material,normal,ray.direction));}return dryVisibilityStep(SVO_VIS_STEP_HIT,0u,0u,workItems,span.x);}")}
     let advance=min(nextT.x,min(nextT.y,nextT.z));if(nextT.x<=advance+1e-6){cell.x+=step.x;nextT.x+=deltaT.x;}if(nextT.y<=advance+1e-6){cell.y+=step.y;nextT.y+=deltaT.y;}if(nextT.z<=advance+1e-6){cell.z+=step.z;nextT.z+=deltaT.z;}entry=advance;
   }
   return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,0u,0u,workItems,DRY_MISS);
@@ -4679,7 +4707,7 @@ fn traceLeafPayloadVisibility(ray:SvoVisibilityRay,tMin_m:f32,hit:SvoTraversalHi
     ${shadowMacroSkipWGSL}if(workItems>=workLimit){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,0u,0u,workItems,DRY_MISS);}workItems+=1u;
     let payloadIndex=svoBrickVoxelIndex(hit.voxelOffset,vec3u(cell),dry.mapping.brickSize);
     if(payloadIndex>=dryVoxelCapacity()){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}
-    ${cellSolidGateWGSL("payloadIndex", "let materialId=sceneIdentityMaterial(identity);if(materialId>=dry.materialPublication.x){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}let material=dryMaterial(materialId);if(!dryMaterialPublished(material,materialId)){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}if(dryMaterialThinDielectric(material,materialId)){let cellBounds=mat2x3f(bounds[0]+vec3f(cell)*extent,bounds[0]+(vec3f(cell)+vec3f(1.0))*extent);let normal=dryVoxelFaceNormal(cellBounds,ray.origin_m+ray.direction*entry);let cellExit=min(nextT.x,min(nextT.y,nextT.z));return dryVisibilityTransmissionStep(0u,0u,workItems,min(max(cellExit,entry),ray.tMax_m),dryThinDielectricTransmittance(material,normal,ray.direction));}return dryVisibilityStep(SVO_VIS_STEP_HIT,0u,0u,workItems,entry);")}
+    ${cellSolidGateWGSL("payloadIndex", "let clipBounds=mat2x3f(bounds[0]+vec3f(cell)*extent,bounds[0]+(vec3f(cell)+vec3f(1.0))*extent);let span=dryCellContourInterval(identity,payloadIndex,clipBounds,ray.origin_m,ray.direction,entry,min(nextT.x,min(nextT.y,nextT.z)));if(span.x<=span.y){let materialId=sceneIdentityMaterial(identity);if(materialId>=dry.materialPublication.x){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}let material=dryMaterial(materialId);if(!dryMaterialPublished(material,materialId)){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}if(dryMaterialThinDielectric(material,materialId)){let cellBounds=mat2x3f(bounds[0]+vec3f(cell)*extent,bounds[0]+(vec3f(cell)+vec3f(1.0))*extent);let normal=dryVoxelFaceNormal(cellBounds,ray.origin_m+ray.direction*entry);let cellExit=min(nextT.x,min(nextT.y,nextT.z));return dryVisibilityTransmissionStep(0u,0u,workItems,min(max(span.y,span.x),ray.tMax_m),dryThinDielectricTransmittance(material,normal,ray.direction));}return dryVisibilityStep(SVO_VIS_STEP_HIT,0u,0u,workItems,span.x);}")}
     let advance=min(nextT.x,min(nextT.y,nextT.z));if(nextT.x<=advance+1e-6){cell.x+=step.x;nextT.x+=deltaT.x;}if(nextT.y<=advance+1e-6){cell.y+=step.y;nextT.y+=deltaT.y;}if(nextT.z<=advance+1e-6){cell.z+=step.z;nextT.z+=deltaT.z;}entry=advance;
   }
   return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,0u,0u,workItems,DRY_MISS);
@@ -5169,7 +5197,7 @@ fn dryFragmentOut(targets:SvoGBufferTargets,hardwareDepth:f32)->DryFragmentOut{
   }
   return dryFragmentOut(svoGBufferMiss(radiance,0u,generation,DRY_GBUFFER_NO_INTERSECTION,svoGBufferProducerFlags(SVO_GBUFFER_PRODUCER_TRACED)),0.0);
 }
-${splitEntryWGSL}${rasterPrimaryEntryWGSL}${rasterPrimary && experiments.surfaceMesh ? svoSurfaceMeshWGSL(splitGroup, SVO_DRY_VISIBILITY_FLAGS.flatVoxelNormals, experiments.surfaceMeshCulling !== false) : ""}${prepassEntryWGSL}${prepassFromPrimaryEntryWGSL}${pixelProbe ? createSvoPixelTraceProbeWGSL(svoDryScenePixelProbeOptions(
+${splitEntryWGSL}${rasterPrimaryEntryWGSL}${rasterPrimary && experiments.surfaceMesh ? svoSurfaceMeshWGSL(splitGroup, SVO_DRY_VISIBILITY_FLAGS.flatVoxelNormals, experiments.surfaceMeshCulling !== false, true) : ""}${prepassEntryWGSL}${prepassFromPrimaryEntryWGSL}${pixelProbe ? createSvoPixelTraceProbeWGSL(svoDryScenePixelProbeOptions(
     traversalMode === "raster-primary" ? "raster" : "traced",
     {
       brickOccupancyMode,

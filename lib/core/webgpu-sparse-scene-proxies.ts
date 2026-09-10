@@ -1,3 +1,5 @@
+import { svoRenderTerrainSamplingWGSL } from "../svo/features/construction/svo-render-terrain-sampling";
+import { svoCellContourFitWGSL } from "../svo/features/construction/svo-cell-contour-fit";
 import { LIVE_TERRAIN_PATCH_RESERVE, packTerrainOverlay, terrainOverlayPatches } from "./live-terrain-overlay";
 import {
   SPARSE_BRICK_INVALID_INDEX,
@@ -474,6 +476,8 @@ export interface SparseSceneCellSample {
 }
 
 export interface SparseSceneProxyVoxelizerOptions {
+  /** Bake conservative native-cell raster contours in packed dry payloads. */
+  surfaceContours?: boolean;
   cellSize: SparseSceneVector3;
   /** World-space position of cell-coordinate (0, 0, 0)'s minimum corner. */
   worldOrigin?: SparseSceneVector3;
@@ -1462,7 +1466,7 @@ interface RenderTerrainShaderLayout {
   readonly patchCapacity: number;
 }
 
-function renderTerrainProxyWGSL(layout?: RenderTerrainShaderLayout): string {
+export function renderTerrainProxyWGSL(layout?: RenderTerrainShaderLayout): string {
   if (!layout) return /* wgsl */ `
 fn sampleRenderTerrain(_world:vec3f,_cellExtent:vec3f)->SolidWorldSample{
   return SolidWorldSample(0.0,1e20,0u,vec3f(0.0));}`;
@@ -1478,6 +1482,7 @@ fn rtHeight(q:vec2i)->f32{
   let at=clamp(q,vec2i(0),vec2i(RT_WIDTH-1,RT_DEPTH-1));
   return rtFloat(RT_HEIGHTS+u32(at.x+RT_WIDTH*at.y));
 }
+${svoRenderTerrainSamplingWGSL}
 fn sampleRenderTerrain(world:vec3f,cellExtent:vec3f)->SolidWorldSample{
   let origin=vec2f(rtFloat(RT_BASE),rtFloat(RT_BASE+1u));
   let cell=max(vec2f(rtFloat(RT_BASE+2u),rtFloat(RT_BASE+3u)),vec2f(1e-8));
@@ -1485,11 +1490,14 @@ fn sampleRenderTerrain(world:vec3f,cellExtent:vec3f)->SolidWorldSample{
   let q=vec2i(floor(point));
   var distance=1e20;var normal=vec3f(0.0);var fraction=0.0;var material=0u;
   if(all(q>=vec2i(0))&&q.x<RT_WIDTH&&q.y<RT_DEPTH){
-    let height=rtHeight(q);distance=world.y-height;
-    let gradient=vec2f((rtHeight(q+vec2i(1,0))-rtHeight(q-vec2i(1,0)))/(2.0*cell.x),
-      (rtHeight(q+vec2i(0,1))-rtHeight(q-vec2i(0,1)))/(2.0*cell.y));
-    normal=normalize(vec3f(-gradient.x,1.0,-gradient.y));
-    fraction=clamp(0.5-distance/max(cellExtent.y,1e-8),0.0,1.0);
+    let surface=rtSurface(world.xz);distance=world.y-surface.x;
+    normal=normalize(vec3f(-surface.y,1.0,-surface.z));
+    let range=rtSurfaceRange(world.xz-0.5*cellExtent.xz,world.xz+0.5*cellExtent.xz);
+    // Surface-crossing cells remain partial even on steep slopes. A vertical
+    // centre-only coverage test incorrectly labelled some of them full/empty.
+    fraction=clamp(0.5-distance/max(cellExtent.y+range.y-range.x,1e-8),1.0/255.0,254.0/255.0);
+    if(world.y+0.5*cellExtent.y<=range.x){fraction=1.0;}
+    if(world.y-0.5*cellExtent.y>=range.y){fraction=0.0;}
     material=atomicLoad(&maintenance[RT_BASE+6u]);
   }
   // Authored overlay bounds may extend past the terrain heightfield's XZ domain.
@@ -1597,10 +1605,12 @@ export function sparseSceneProxyVoxelizationShaderFor(
   leafPayloadMode: SparseBrickLeafPayloadMode = "dense",
   solidWorldLayout?: WebgpuSolidWorldPageLayout,
   renderTerrainLayout?: RenderTerrainShaderLayout,
+  surfaceContours = false,
 ): string {
   const dry = profile === "dry";
   const format = dry ? sceneGeometryFormat : "f32x2";
   const mode = dry ? leafPayloadMode : "dense";
+  const contours = surfaceContours && dry && format === "f16-unorm8";
   // A payload word shared by more than one invocation of this dispatch needs an
   // atomic binding. Atomicity used to be keyed on the geometry format as well,
   // which was sound only while a two-voxels-a-word geometry lane existed; the
@@ -1625,7 +1635,7 @@ export function sparseSceneProxyVoxelizationShaderFor(
   ${writePayload(sceneFraction, "bitcast<u32>(primitiveFraction)")}`
     : format === "f16-unorm8"
       ? /* wgsl */ `  ${writePayload("sceneGeometryWord(sceneGeometryOffset(),output)",
-        "packSceneGeometry(bestDistance,primitiveFraction,cellRadius)")}`
+        "packSceneGeometry(bestDistance,primitiveFraction,cellRadius)" + (contours ? "|(contourCode<<24u)" : ""))}`
       : /* wgsl */ `  // Two voxels share this word. The neighbour is another invocation of this
   // dispatch, so the half is cleared and set with bit-disjoint atomics: a plain
   // read-modify-write would drop one of the two.
@@ -2096,6 +2106,7 @@ fn primitiveSurfaceNormal(primitive: ScenePrimitive, world: vec3f) -> vec3f {
   if (!(magnitude > 1e-8)) { return vec3f(0.0); }
   return svoQuaternionRotate(record.orientation, local.xyz / magnitude);
 }
+${contours ? svoCellContourFitWGSL(Boolean(renderTerrainLayout), Boolean(solidWorldLayout)) : ""}
 fn linearIndex64(gid:vec3u,groups:vec3u)->u32{
   return gid.x+gid.y*groups.x*64u+gid.z*groups.x*groups.y*64u;
 }
@@ -2393,7 +2404,11 @@ fn rebuildDirtyBrickPayload(@builtin(global_invocation_id) gid:vec3u,@builtin(nu
 
   let output = voxelOffset + localIndex;
   let materialOffset = sceneMaterialOffset() + output;
-  let primitiveFraction = clamp(0.5 - bestCoverage / (2.0 * cellRadius), 0.0, 1.0);
+  var primitiveFraction = clamp(0.5 - bestCoverage / (2.0 * cellRadius), 0.0, 1.0);
+${contours ? `  var contourCode=fitSceneContour(world,cellExtent,bestNormal,primitiveFraction,dirtyIndex,candidateCount);
+  // Distinguish a proved-empty cell from an unsupported/full-cube contour.
+  // Clear all occupancy consumers together, including identity and band masks.
+  if(contourCode==255u){primitiveFraction=0.0;contourCode=0u;}` : ""}
   // The scene lane is exclusively owned by this transaction. Fluid and
   // velocity live in disjoint payload lanes, so every material ID—including
   // terrain and rigid-body IDs below the scenery range—can update atomically.
@@ -2772,7 +2787,7 @@ fn encodeBandedLeaves(
     let word=ldsGeometry[local];
     let voxel=voxelOffset+local;
     atomicStore(&payload[sceneGeometryWord(params.bandedCapacities.w,recordBase+ldsRecordRank(local))],
-      packSceneGeometry(sceneDistanceOf(word,voxel),sceneFractionOf(word,voxel),cellRadius));
+      word); // Preserve the contour attachment as well as distance and coverage.
   }
 }
 `;
@@ -3081,7 +3096,7 @@ export class SparseSceneProxyVoxelizer {
       code: sparseSceneProxyVoxelizationShaderFor(
         this.tree.payloadProfile, this.tree.sceneGeometryFormat,
         this.tree.leafPayloadMode, this.solidWorldLayout,
-        this.renderTerrainLayout),
+        this.renderTerrainLayout, this.options.surfaceContours === true),
     });
     const pipeline = (entryPoint: string, stage: string) => this.device.createComputePipelineAsync({
       label: `${this.label} ${stage} pipeline`, layout: this.pipelineLayout,
