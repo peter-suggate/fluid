@@ -150,7 +150,7 @@ fn faceVelocitySupportAt(q:vec3i)->FaceVelocitySupport{
 ${relativeStencil}
 ${["clampRelativeTransportPosition", "clipRelativeTransportSegment",
   "orderedScalarPair", "orderedVectorPair", "transportScalarSum", "transportVectorSum",
-  "sampleRelativeFaceVelocity", "traceRelativeFaceDisplacement", "sampleRelativeNativeTransportFace",
+  "sampleRelativeFaceVelocity", "sampleRelativeFaceComponent", "traceRelativeFaceDisplacement", "sampleRelativeNativeTransportFace",
   "transferLocalCoordinate", "nativeTransportFaceValue", "nativeTransportFaceAt",
   "finishTransportFaceRow", "transportFaceSupport", "transportFaceSamplingSpans", "prepareTransportFaceRow"].map(production).join("\n")}
 @compute @workgroup_size(12)

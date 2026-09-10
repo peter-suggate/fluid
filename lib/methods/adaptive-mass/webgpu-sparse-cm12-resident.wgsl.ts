@@ -3661,6 +3661,16 @@ fn sampleRelativeFaceVelocity(origin:vec3f,position:vec3f,spans:vec3f)->vec3f{
       values[corner]=weight*vec3f(state[at],state[at+1u],state[at+2u]);weights[corner]=weight;}}
   return transportVectorSum(values)/max(transportScalarSum(weights),1e-9);
 }
+// Terminal samples consume one staggered component. Keep the same geometric
+// weights and ordered reduction without loading the other two components.
+fn sampleRelativeFaceComponent(origin:vec3f,position:vec3f,spans:vec3f,axis:u32)->f32{
+  let stencil=relativeTransportStencilAtSpansMode(position,spans,true,origin);
+  var values:array<f32,8>;var weights:array<f32,8>;
+  for(var corner=0u;corner<8u;corner+=1u){let cell=stencil.cells[corner];
+    if(cell!=INVALID){let weight=stencil.weights[corner];
+      values[corner]=weight*state[FACE_VELOCITY_SUPPORT+4u*cell+axis];weights[corner]=weight;}}
+  return transportScalarSum(values)/max(transportScalarSum(weights),1e-9);
+}
 fn traceRelativeFaceDisplacement(origin:vec3f,spans:vec3f)->vec3f{
   let initial=sampleRelativeFaceVelocity(origin,vec3f(0.0),spans);
   let substeps=clamp(i32(ceil(length(initial/spans)*p.frame.x)),1,16);
@@ -3687,7 +3697,7 @@ fn sampleRelativeNativeTransportFace(origin:vec3f,displacement:vec3f,axis:u32,wi
     let basis=max(vec3f(0.0),vec3f(1.0)-abs((point-origin)-bounded)/width);
     let weight=basis.x*basis.y*basis.z;if(weight<=0.0){continue;}
     let donor=nativeTransportFaceAt(point,axis,width);var value=donor.x;
-    if(donor.y==0.0){value=sampleRelativeFaceVelocity(point,vec3f(0.0),vec3f(1.0))[axis];}
+    if(donor.y==0.0){value=sampleRelativeFaceComponent(point,vec3f(0.0),vec3f(1.0),axis);}
     terms[corner]=weight*value;
   }
   return transportScalarSum(terms);
@@ -3768,7 +3778,7 @@ fn prepareTransportFaceRow(row:u32){
   if(retainFaceDetail){
     characteristic=sampleRelativeNativeTransportFace(origin,displacement,axis,regionWidth);
   }else{
-    characteristic=sampleRelativeFaceVelocity(origin,displacement,spans)[axis];
+    characteristic=sampleRelativeFaceComponent(origin,displacement,spans,axis);
   }
   finishTransportFaceRow(row,characteristic,touchesLiquid);
 }
