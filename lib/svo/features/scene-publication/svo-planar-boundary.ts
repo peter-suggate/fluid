@@ -190,6 +190,7 @@ export function buildSvoSolidWorldPlanarBoundaryCatalog(
   scene: SceneDescription,
   patches: readonly SolidWorldVoxelPatch[],
   firstSourceIndex = 0,
+  options: { promoteEditablePatches?: boolean } = {},
 ): SvoSolidWorldPlanarBoundaryCatalog {
   if (!Number.isSafeInteger(firstSourceIndex) || firstSourceIndex < 0) {
     throw new RangeError("Planar boundary source base must be a non-negative integer");
@@ -249,6 +250,7 @@ export function buildSvoSolidWorldPlanarBoundaryCatalog(
     // remain visible as ordinary voxel geometry. Neither case may promote it to an
     // opaque embedded-plane hit, which caused the black tank floor.
     if (canonicalTankShellSources.has(patchIndex)) return;
+    if (options.promoteEditablePatches === false) return;
     const patch = planarBoundaryForSolidWorldVoxelPatch(scene, voxelPatch);
     if (!patch) return;
     const sourceIndex = firstSourceIndex + sources.length;

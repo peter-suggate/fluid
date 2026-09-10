@@ -1246,6 +1246,7 @@ export class OctreeSparseBrickWorld {
   /** The scene's one word about what its surfaces are made of; see the ABI. */
   private surfaceModel!: SvoTerrainSurfaceModel;
   private solidWorld!: SolidWorld;
+  private renderSolidWorld!: SolidWorld;
   private solidWorldStamp = "";
   private terrainFieldStamp = "";
   /** Catalog expansion input, retained exactly for subsequent live publications. */
@@ -1512,15 +1513,15 @@ export class OctreeSparseBrickWorld {
       }));
     // Never promote editable voxel patches into immutable planar terminals.
     // Static environment surfaces retain their compact planar representation.
-    const solidPlanarCatalog: ReturnType<typeof buildSvoSolidWorldPlanarBoundaryCatalog> | undefined = undefined;
+    const solidPlanarCatalog = scene.terrain ? undefined : buildSvoSolidWorldPlanarBoundaryCatalog(scene,
+      initialSolidWorld.patches, planarCatalog.sources.length,
+      { promoteEditablePatches: false });
     const planarSources = [...planarCatalog.sources];
     const residualSolidWorld = svoPlanarResidualSolidWorld(initialSolidWorld,
       solidPlanarCatalog);
-    // Terrain is page-native and may share pages with authored edits, so its
-    // exact geometry cannot be separated into an immutable slab record here.
-    // A terrain-free SolidWorld can use its authored boxes directly: accepted
-    // thin fills become exact terminals while clear, thick and intersecting
-    // boxes remain ordinary voxel residuals.
+    this.renderSolidWorld = residualSolidWorld;
+    // Shell exclusion is independent of planar promotion: canonical tank walls
+    // stay physical-only, while editable fills remain mutable voxel geometry.
     const planarLeafOptions = {
       sources: planarSources,
       blockers: [
@@ -2572,9 +2573,17 @@ export class OctreeSparseBrickWorld {
       ownerId: SCENE_ENVIRONMENT_OWNER_BASE + primitive.ownerIndex,
     }));
     const residualAuthored = svoPlanarResidualEnvironmentPrimitives(authored, planarCatalog);
-    const solidPlanarCatalog: ReturnType<typeof buildSvoSolidWorldPlanarBoundaryCatalog> | undefined = undefined;
-    const nextResidualSolidWorld = svoPlanarResidualSolidWorld(nextSolidWorld,
-      solidPlanarCatalog);
+    const solidPlanarCatalog = !solidWorldChanged || scene.terrain ? undefined : buildSvoSolidWorldPlanarBoundaryCatalog(scene,
+      nextSolidWorld.patches, planarCatalog.sources.length,
+      { promoteEditablePatches: false });
+    const nextResidualSolidWorld = solidWorldChanged
+      ? svoPlanarResidualSolidWorld(nextSolidWorld, solidPlanarCatalog)
+      : this.renderSolidWorld;
+    // A cut reveals the rest of that shell slab; Undo hides the whole slab
+    // again. Invalidate the presentation delta, not just the edited cells.
+    const renderChanges = solidWorldChanged && !initialPublication
+      ? solidWorldChangeBounds(scene, this.renderSolidWorld, nextResidualSolidWorld)
+      : { dirtyBounds: [], addedBounds: [] };
     if (!initialPublication && this.planarTopologyStamp
       && planarBoundaryTopologyStamp(scene, authored) !== this.planarTopologyStamp) {
       throw new Error("Authored geometry affecting planar terminals requires a sparse-world rebuild");
@@ -2624,8 +2633,10 @@ export class OctreeSparseBrickWorld {
           primitive.aabb_m.max.z] as const,
       })) : []),
       ...dirtySolidBounds,
+      ...renderChanges.dirtyBounds,
     ];
-    const newBounds: SparseSceneAxisAlignedBounds[] = [...nextSolidBounds];
+    const newBounds: SparseSceneAxisAlignedBounds[] = [...nextSolidBounds,
+      ...renderChanges.addedBounds];
     for (const entry of liveEntries) {
       const live = entry.primitive;
       nextPrimitives.set(entry.key, entry);
@@ -2646,6 +2657,7 @@ export class OctreeSparseBrickWorld {
       this.proxyVoxelizer.setSolidWorld(nextResidualSolidWorld);
     }
     this.solidWorld = nextSolidWorld;
+    this.renderSolidWorld = nextResidualSolidWorld;
     this.solidWorldStamp = nextSolidWorldStamp;
     this.liveScenePrimitiveStates = nextStates;
     this.liveScenePrimitives = nextPrimitives;
