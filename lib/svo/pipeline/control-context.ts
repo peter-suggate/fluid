@@ -14,7 +14,7 @@ export type SvoFeatureControlContext = Pick<UIState,
   | "svoConeTracingMode" | "setSvoConeTracingMode"
   | "svoShadowsEnabled" | "setSvoShadowsEnabled"
   | "svoAmbientOcclusionEnabled" | "setSvoAmbientOcclusionEnabled"
-  | "svoStageView" | "svoStageLightSlot" | "setSvoStageLightSlot"
+  | "svoStageView" | "setSvoStageView" | "svoStageLightSlot" | "setSvoStageLightSlot"
   | "svoGlobalIlluminationEnabled"
 > & {
   readonly tuning: SvoRenderTuning;

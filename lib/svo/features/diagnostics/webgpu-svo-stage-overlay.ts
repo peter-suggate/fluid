@@ -5,6 +5,7 @@ import {
 } from "../../contracts/svo-gbuffer";
 import {
   SVO_RENDER_STAGE_CLAIMANT_LEGEND,
+  SVO_MESH_LOD_LEGEND,
   SVO_PRIMARY_WORK_REFERENCE,
   SVO_RENDER_STAGE_SEQUENTIAL_LEGEND,
   svoRenderStageCode,
@@ -338,6 +339,10 @@ fn svoStageMedia(coordinate:vec2i)->vec3f{
     color=svoStagePrimaryClaimant(coordinate);
   }else if(mode==${view("primary-depth")}){
     color=svoStageDistanceRamp(textureLoad(stageSplitGeometry,coordinate,0).w);
+  }else if(mode==${view("mesh-lod")}){
+    let code=(textureLoad(stageSplitIdentity,coordinate,0).x>>27u)&15u;
+    let palette=array<vec3f,4>(${SVO_MESH_LOD_LEGEND.map(wgslColor).join(",")});
+    if(code>=1u&&code<=4u){color=palette[code-1u];}
   }else if(mode==${view("surface-normal")}){
     let metadata=svoStageMetadata(coordinate);
     color=select(SVO_STAGE_ABSENT,

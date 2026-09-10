@@ -1076,6 +1076,8 @@ export class FluidLabRenderer {
       && previous.surfaceMesh?.builds === status.surfaceMesh?.builds
       && previous.surfaceMesh?.maximumBytes === status.surfaceMesh?.maximumBytes
       && previous.surfaceMesh?.requirementComplete === status.surfaceMesh?.requirementComplete
+      && previous.surfaceMesh?.drawn === status.surfaceMesh?.drawn
+      && previous.surfaceMesh?.liveQuads === status.surfaceMesh?.liveQuads
       && previous.terminalCounts?.voxel === status.terminalCounts?.voxel
       && previous.terminalCounts?.planarBoundary === status.terminalCounts?.planarBoundary) return;
     this.lastEffectiveRendererStatus = status;

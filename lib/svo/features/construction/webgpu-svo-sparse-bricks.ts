@@ -2329,6 +2329,7 @@ export class OctreeSparseBrickWorld {
         revision: publicationWord(SPARSE_VOXEL_PUBLICATION_STATE.coarseFluidRevision),
         owner: "GPUFluidBrickResidency",
       },
+      sceneMaintenance: this.proxyVoxelizer.maintenanceBinding,
       capacities: { nodes: this.tree.nodeCapacity, leaves: this.tree.leafCapacity, voxels: this.tree.voxelCapacity },
       terminalCounts,
       planarBoundaries: {

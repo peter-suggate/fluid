@@ -45,10 +45,12 @@ the original browser hang was not deliberately reproduced.
 non-allocating device facade. It never imports Dawn or submits GPU commands.
 The census covers buffers; it does not estimate texture storage.
 
-`tools/probe-svo-bounded-mesh-dawn.ts` runs the actual prepare/publish shaders
-with a cheap synthetic extraction kernel. It verifies multi-frame completion,
-cache reuse, revision restart, and invalidated-build restart with tiny buffers.
-It is a scheduler check, not a geometry comparison.
+`tests/svo-surface-mesh-scheduler-dawn.test.ts` runs the production mesh
+build kernels over a two-brick synthetic octree with tiny buffers. It verifies
+the first build, cache reuse, an incremental re-extraction from the
+maintenance dirty list, overflow rollback and growth, and a replacement build's
+flip to the second arena. It is a scheduler and range check, not an image
+comparison.
 
 `tools/probe-svo-depth3-dawn.ts` uses the full scene and renderer at 64×64. Its
 safety limits reject buffers above 1 GiB or cumulative buffer requests above

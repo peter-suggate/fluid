@@ -1,0 +1,18 @@
+[
+  {"id": "C1.2", "series": "mesh.sphere.rms_mm", "steps": [0], "max": 2.0},
+  {"id": "C1.2", "series": "mesh.sphere.max_mm", "steps": [0], "max": 3.0},
+  {"id": "C1.2", "series": "mesh.pool.rms_mm", "steps": [0], "max": 0.5},
+  {"id": "C2.4", "series": "band.sphere.rms_mm", "steps": [1, 2, 3, 4, 5], "max": 2.0},
+  {"id": "C2.4", "series": "band.sphere.max_mm", "steps": [1, 2, 3, 4, 5], "max": 6.0},
+  {"id": "C2.4", "series": "band.sphere.rms_mm", "steps": [6], "max": 2.0},
+  {"id": "C2.4", "series": "band.sphere.max_mm", "steps": [6], "max": 10.0},
+  {"id": "C2.4", "series": "band.pool.rms_mm", "steps": [1, 2, 3, 4, 5], "max": 0.5},
+  {"id": "C3.1", "series": "band.minusSolver_L", "steps": "all", "absMax": 1.1},
+  {"id": "C3.2", "series": "band.maxShift_mm", "steps": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20], "max": 2.5},
+  {"id": "C3.5", "series": "band.bodies", "steps": [1, 2, 3, 4, 5, 6], "equals": 2},
+  {"id": "C3.5", "series": "band.bodies", "steps": [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20], "equals": 1},
+  {"id": "C3.5", "series": "band.unshiftedBodies", "steps": "all", "equals": 0},
+  {"id": "C4.1", "series": "solver.massOutsideReference_ml", "steps": [5], "max": 200},
+  {"id": "C4.2", "series": "solver.fractionError_max", "steps": [5], "max": 0.1},
+  {"id": "C5.6", "series": "mesh.sphere.rms_mm", "steps": [0], "max": 1.0}
+]

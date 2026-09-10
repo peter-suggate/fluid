@@ -105,6 +105,7 @@ export type RenderPipelineNodeId =
   | "rigid-pose-mirror"
   | "fluid-coverage"
   | "primary-entry-prepass"
+  | "filtered-detail"
   | "primary-traversal"
   | "thin-glass"
   | "scene-primitive"

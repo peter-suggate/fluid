@@ -1022,8 +1022,13 @@ const renderer = new SparseVoxelDrySceneRenderer(device, uniformBuffer, bodyBuff
   optimizationExperiments);
 await renderer.initialize((label, completed, total) => log(`  [pipeline] ${label} (${completed}/${total})`));
 renderer.setRigidBodyCount(rasterRigidForced ? 12 : bodies.count);
+// FLUID_SVO_DRY_FRAME_MESH_LOD_PIXELS: the voxel-mesh "Filtered detail" threshold
+// (0 = off, the shipped default). This is the only lane that can enable the
+// surface mesh, so it is the only one that can price the toggle.
+const meshLodPixelsRaw = Number(process.env.FLUID_SVO_DRY_FRAME_MESH_LOD_PIXELS ?? DEFAULT_SVO_RENDER_TUNING.surfaceMeshLodPixels);
+const meshLodPixels = Number.isFinite(meshLodPixelsRaw) ? Math.min(Math.max(meshLodPixelsRaw, 0), 8) : DEFAULT_SVO_RENDER_TUNING.surfaceMeshLodPixels;
 const configuredRenderTuning = { ...DEFAULT_SVO_RENDER_TUNING, coneLightingScale: coneScale,
-  coneRadianceReconstruction: radianceReconstruction, maximumShadedLights,
+  coneRadianceReconstruction: radianceReconstruction, maximumShadedLights, surfaceMeshLodPixels: meshLodPixels, surfaceMeshFilteringEnabled: process.env.FLUID_SVO_DRY_FRAME_MESH_LOD_PIXELS !== undefined ? meshLodPixels > 0 : DEFAULT_SVO_RENDER_TUNING.surfaceMeshFilteringEnabled,
   ...(globalIlluminationEnabled ? {} : {
     giBounceStrength: 0,
     giOcclusionStrength: 0,

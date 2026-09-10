@@ -251,17 +251,20 @@ export interface SvoRenderTuning {
   /** Level descent stops at under `fixed-level`. Ignored by `screen-space`. */
   readonly lodFixedLevel: number;
   /**
-   * Filtered detail for the rasterized voxel mesh: the projected size, in
-   * reference pixels, under which a brick's cells are drawn from a coarser
-   * level of its own voxels and shaded with baked rather than face normals.
-   *
-   * Zero is the exact voxel boundary with six-axis face normals, the image
-   * the mesh path shipped with. The threshold follows the same angular
-   * contract as `lodScreenSpacePixels`, and a runtime uniform rather than a
-   * shader constant so the Frame panel's toggle never rebuilds a pipeline or
-   * the cached mesh: every level is extracted once and the cull pass picks.
+   * Projected cell threshold in reference pixels (460px viewport height).
+   * Stored independently of the master enable flag. Zero retains native
+   * geometry; normal smoothing has its own switch and strength.
+   * All filtering options are uniforms over cached mesh levels and normals.
    */
   readonly surfaceMeshLodPixels: number;
+  readonly surfaceMeshFilteringEnabled: boolean;
+  readonly surfaceMeshNormalSmoothing: boolean;
+  readonly surfaceMeshNormalStrength: number;
+  /** 0 keeps native geometry; 3 permits a full 8-voxel brick. */
+  readonly surfaceMeshMaxCoarsening: number;
+  readonly surfaceMeshLodHysteresis: number;
+  readonly surfaceMeshNormalAgreement: number;
+  readonly surfaceMeshPreserveCloseNormals: boolean;
   readonly primaryLeafVisits: number;
   readonly coneStepBudget: number;
   readonly maximumShadedLights: number;
@@ -371,7 +374,14 @@ const balancedTuning: SvoRenderTuning = Object.freeze({
   // image on its own would make the debugging tool the thing under suspicion.
   lodFixedLevel: SVO_LOD_FIXED_LEVEL_MAXIMUM,
   // Off: the shipped mesh image is the exact voxel boundary.
-  surfaceMeshLodPixels: 0,
+  surfaceMeshLodPixels: 1,
+  surfaceMeshFilteringEnabled: false,
+  surfaceMeshNormalSmoothing: true,
+  surfaceMeshNormalStrength: 1,
+  surfaceMeshMaxCoarsening: 3,
+  surfaceMeshLodHysteresis: 0.15,
+  surfaceMeshNormalAgreement: 0.5,
+  surfaceMeshPreserveCloseNormals: true,
   primaryLeafVisits: 48,
   coneStepBudget: 48,
   maximumShadedLights: 8,
@@ -572,6 +582,13 @@ export function normalizeSvoRenderTuning(value: SvoRenderTuning): SvoRenderTunin
       0,
       SVO_SURFACE_MESH_LOD_PIXELS_MAXIMUM,
     ),
+    surfaceMeshFilteringEnabled: value.surfaceMeshFilteringEnabled ?? ((value.surfaceMeshLodPixels ?? 0) > 0),
+    surfaceMeshNormalSmoothing: value.surfaceMeshNormalSmoothing ?? true,
+    surfaceMeshNormalStrength: bounded(value.surfaceMeshNormalStrength ?? 1, 0, 1),
+    surfaceMeshMaxCoarsening: integer(value.surfaceMeshMaxCoarsening ?? 3, 0, 3),
+    surfaceMeshLodHysteresis: bounded(value.surfaceMeshLodHysteresis ?? 0.15, 0, 0.3),
+    surfaceMeshNormalAgreement: bounded(value.surfaceMeshNormalAgreement ?? 0.5, 0, 1),
+    surfaceMeshPreserveCloseNormals: value.surfaceMeshPreserveCloseNormals ?? true,
     primaryLeafVisits: integer(value.primaryLeafVisits, 1, SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT),
     coneStepBudget: integer(value.coneStepBudget, 1, 48),
     maximumShadedLights: integer(value.maximumShadedLights, 1, 8),

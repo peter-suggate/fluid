@@ -356,6 +356,13 @@ export function sceneOverrideClearPlan(
       case "svoLodPixels":
         svoRenderTuning.lodScreenSpacePixels = initialUI.svoRenderTuning.lodScreenSpacePixels;
         break;
+      case "svoMeshFilter": svoRenderTuning.surfaceMeshFilteringEnabled = initialUI.svoRenderTuning.surfaceMeshFilteringEnabled; break;
+      case "svoMeshNormals": svoRenderTuning.surfaceMeshNormalSmoothing = initialUI.svoRenderTuning.surfaceMeshNormalSmoothing; break;
+      case "svoMeshNormalStrength": svoRenderTuning.surfaceMeshNormalStrength = initialUI.svoRenderTuning.surfaceMeshNormalStrength; break;
+      case "svoMeshMaxLevel": svoRenderTuning.surfaceMeshMaxCoarsening = initialUI.svoRenderTuning.surfaceMeshMaxCoarsening; break;
+      case "svoMeshHysteresis": svoRenderTuning.surfaceMeshLodHysteresis = initialUI.svoRenderTuning.surfaceMeshLodHysteresis; break;
+      case "svoMeshNormalAgreement": svoRenderTuning.surfaceMeshNormalAgreement = initialUI.svoRenderTuning.surfaceMeshNormalAgreement; break;
+      case "svoMeshCloseNormals": svoRenderTuning.surfaceMeshPreserveCloseNormals = initialUI.svoRenderTuning.surfaceMeshPreserveCloseNormals; break;
       case "svoMeshLodPixels":
         svoRenderTuning.surfaceMeshLodPixels = initialUI.svoRenderTuning.surfaceMeshLodPixels;
         break;

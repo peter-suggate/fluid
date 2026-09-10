@@ -3,12 +3,11 @@
 import { renderSparseWorldBuildControls } from "../features/construction/controls";
 import { renderConeVisibilityControls } from "../features/lighting-visibility/controls";
 import { renderPresentControls } from "../features/presentation/controls";
-import { renderPrimaryTraversalControls,renderSeamClosureControls } from "../features/primary-visibility/controls";
+import { renderFilteredDetailControls,renderPrimaryTraversalControls,renderSeamClosureControls } from "../features/primary-visibility/controls";
 import { renderGiCompositionControls,renderReducedShadeControls } from "../features/radiance/controls";
 
 import { useEffect,useMemo,useState,type ReactNode } from "react";
 import { PipeToggle } from "../../../components/PipeControls";
-import { SVO_SURFACE_MESH_LOD_PIXELS_DEFAULT } from "./svo-render-tuning";
 import {
 PipelineGraph,
 formatPipelineDuration,
@@ -262,6 +261,7 @@ export function RenderPipelineOverlay() {
     // looking at rather than hard-coding one.
     rasterPrimaryActive: resolvedPrimary !== "traced",
     surfaceMeshSelected: resolvedPrimary === "mesh",
+    smoothSurfaceEnabled,
     surfaceMeshActive: resolvedPrimary === "mesh" && !smoothSurfaceEnabled && effectiveRendererStatus.surfaceMesh?.state === "ready",
     surfaceMeshStatus: effectiveRendererStatus.surfaceMesh,
   };
@@ -278,7 +278,8 @@ export function RenderPipelineOverlay() {
       setRenderStageDisabled(node.stage, !disabledStages.has(node.stage));
       return;
     }
-    if (id === "seam-closure") setSilhouetteRefinementEnabled(!silhouetteRefinementEnabled);
+    if (id === "filtered-detail") updateTuning("surfaceMeshFilteringEnabled", !tuning.surfaceMeshFilteringEnabled);
+    else if (id === "seam-closure") setSilhouetteRefinementEnabled(!silhouetteRefinementEnabled);
     else if (id === "cone-visibility") setSvoConeTracingMode(svoConeTracingMode === "off" ? "cones" : "off");
     else if (id === "gi-composition") setSvoGlobalIlluminationEnabled(!svoGlobalIlluminationEnabled);
     else if (id === "world-gi-cache") setSvoWorldGiCacheEnabled(!svoWorldGiCacheEnabled);
@@ -294,6 +295,8 @@ export function RenderPipelineOverlay() {
   // shadow/AO switches — stay on the card where they were.
   const controls: Readonly<Record<string, ReactNode>> = {
     "sparse-world-build": renderSparseWorldBuildControls({ renderRefinementDepth, sceneIsDry, updateTuning, modified, resetTuning, leafVoxel_mm, finestCellSize_m, tuning }),
+
+    "filtered-detail": renderFilteredDetailControls({ resolvedPrimary, smoothSurfaceEnabled, tuning, updateTuning, effectiveRendererStatus, svoStageView, setSvoStageView }),
 
     "primary-traversal": renderPrimaryTraversalControls({ resolvedPrimary, partitioned, disabledStages, durations, effectiveRendererStatus, smoothSurfaceEnabled, svoMaximumTraversalDepth, setSvoMaximumTraversalDepth, svoMaximumNodeVisits, setSvoMaximumNodeVisits, tuning, updateTuning, modified, resetTuning }),
 
@@ -449,9 +452,6 @@ export function RenderPipelineOverlay() {
       <PipeToggle label="Smooth surface" checked={smoothSurfaceEnabled}
         onChange={(enabled) => patchScene({ surfaceStyle: enabled ? "smooth" : "voxel-flat" })}
         hint="Reconstruct a sub-voxel tangent surface from each cell's coverage and baked normal, changing both surface depth and orientation. Off draws the entered axis-aligned voxel face." />
-      {resolvedPrimary === "mesh" && <PipeToggle label="Filtered detail" checked={tuning.surfaceMeshLodPixels > 0}
-        onChange={(enabled) => updateTuning("surfaceMeshLodPixels", enabled ? SVO_SURFACE_MESH_LOD_PIXELS_DEFAULT : 0)}
-        hint="Draw each brick from the coarsest of its cached levels whose cells still project under the threshold, and shade baked voxel normals instead of six-axis faces. Off is the exact voxel boundary. Runtime only: no rebuild of the mesh or a pipeline. The threshold sits on the Primary rasterization row." />}
     </div>
 
     {svoPrimaryTraversal === "mesh" && smoothSurfaceEnabled && <p className="render-inline-status">

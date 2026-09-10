@@ -240,6 +240,20 @@ export interface SparseVoxelStructuralRenderSource {
   fluidLeafStates: GPUBufferBinding;
   /** Authoritative producer-owned brick residency; never inferred from payload values. */
   fluidResidency?: SparseVoxelFluidResidencySource;
+  /**
+   * The voxelizer's maintenance arena: the dirty brick list of the latest
+   * completed scene publication, so a consumer caching per-brick derived data
+   * (the raster surface mesh) refreshes only the bricks that publication
+   * rewrote. Absent when the source has no incremental voxelizer.
+   */
+  sceneMaintenance?: Readonly<{
+    buffer: GPUBuffer;
+    /** Byte offset of the state block: dirty count, overflow flags, requested and completed revisions. */
+    stateOffsetBytes: number;
+    /** Byte offset of the four-word dirty brick records; word zero is the leaf index. */
+    dirtyBrickOffsetBytes: number;
+    dirtyBrickCapacity: number;
+  }>;
   capacities: Readonly<{ nodes: number; leaves: number; voxels: number }>;
   /** Accepted initial topology census; runtime fluid growth adds voxel terminals. */
   terminalCounts: Readonly<{ voxel: number; planarBoundary: number }>;

@@ -11,6 +11,9 @@ validation and startup costs. The historical `raster` value still means brick pr
 ## Geometry and publication
 
 `lib/svo/features/primary-visibility/svo-surface-mesh.ts` compiles into the existing dry-scene shader bundle.
+`tests/svo-surface-mesh-scheduler-dawn.test.ts` runs its build kernels over a
+two-brick synthetic octree: first build, reuse, an incremental re-extraction
+from a dirty list, overflow rollback and growth, and a replacement flip.
 It reads accepted structural nodes, leaf lifecycle and the shared identity
 codec, including dense, occupancy and banded payloads. It does not modify the
 solver or use authored pre-voxelization geometry as a substitute for voxels.
@@ -23,39 +26,68 @@ children. Integer finest-cell lattice coordinates preserve shared positions;
 the vertex stage applies the current metre mapping.
 
 The GPU checks topology and scene-geometry revisions before extraction. Camera
-motion and lighting changes reuse geometry. A changed publication rebuilds the
-whole mesh across frames in bounded 128-brick GPU batches. Rays remain
-active until the complete mesh is published; this implementation does not yet
-provide per-chunk incremental remeshing.
+motion and lighting changes reuse geometry. Every brick owns one contiguous
+quad range in a bump-allocated arena, recorded in a per-leaf table with the
+brick's octree address as its key. A changed publication is answered one of
+three ways, decided on the GPU in `surfaceMeshPrepare`:
 
-Every presentation of an incomplete build also traces the current voxel scene
-at full resolution as its fallback, and on a large scene that trace, not the
-extraction, is most of a build's wall time (`hero-garden-hose-x10`: 8 ms of
+- **Incremental** (the common edit): the voxelizer's maintenance pass already
+  keeps a dirty-brick list for each completed scene revision
+  (`SparseVoxelStructuralRenderSource.sceneMaintenance`). When that list
+  describes exactly the revision being answered (requested and completed
+  revisions agree, it is the next one after the last consumed, and nothing
+  overflowed) the mesh re-extracts only the dirty bricks, every brick whose
+  slot key changed, and every brick touching a dirty brick's box (its faces
+  against the edit may have changed). Each re-extracted brick frees its old
+  range in place (the quads keep their slots with a zero extent until a
+  compaction) and takes a new range past the cursor. The cached mesh keeps
+  drawing throughout.
+- **Replacement**: an untrusted dirty list, or a compaction once freed holes
+  outnumber the live quads, rebuilds the whole mesh into a second arena the
+  host provides on request, while the first keeps drawing; the last batch
+  flips the arenas and the host retires the old one.
+- **Initial**: the first build, or a build after a structural reset, with
+  nothing to draw; the whole scene is traced until it completes.
+
+While any build is pending the dirty boxes of the publication being answered
+(up to 63 individually, else their union) mask the frame: the cull withholds
+quads lying wholly inside a box and the background pass traces the pixels
+whose rays cross one, so the edited region is exact from the first frame and
+everything else stays rasterized. A build with no trusted list masks nothing
+and, once drawn, keeps drawing.
+
+Extraction runs in two phases per brick, a count and an emit with identical
+traversal, so a brick's range is sized before it is written and no
+whole-arena overflow can withdraw the mesh. The host paces one batch per
+presentation: 512 bricks on a build's first presentation, doubling while it
+stays pending, to 2,048 while the mesh is drawn (the frame stays interactive)
+or 16,384 while nothing is drawn (every presentation of an initial build also
+traces the whole scene at full resolution, and on a large scene that trace,
+not the extraction, is most of the wall time: `hero-garden-hose-x10`, 8 ms of
 extraction beside 83 ms of fallback per 2,048-brick presentation, ~291
-presentations for 595,825 bricks). The host therefore paces batches per
-presentation: 16 on a build's first presentation, doubling while the build
-stays pending, to a ceiling of 128 batches (16,384 bricks). A small edit's
-rebuild still completes in one cheap presentation; a whole-world build reaches
-the ceiling within a few frames and finishes in tens of presentations. The
-GPU cursor remains authoritative, and batches past completion dispatch no
-workgroups. `surfaceMeshBuildBatches` in `svo-surface-mesh.ts` is the ramp. No CPU payload readback or
+presentations for 595,825 bricks at a fixed batch). A small edit's
+re-extraction of its few bricks completes in one presentation.
+`surfaceMeshBuildBricks` in `svo-surface-mesh.ts` is the ramp; the GPU worklist
+and cursor remain authoritative, and a stale host receipt can neither restart
+nor skip a build. The host reads a 224-byte state receipt every presentation
+(`interpretSurfaceMeshState`, pure and unit-tested) and acts only on flips,
+back-arena requests and overflow growth. No CPU payload readback or
 per-frame mesh upload is required. Physical source-buffer replacement resets
 the cache; current mapping uniforms also support world rescaling.
 
 The quad arena starts at 64 MiB (or the device's smaller limit), with 32 bytes
-per quad. Extraction counts the complete requirement even after storage fills.
-When that requirement fits the device's storage-binding and buffer limits, an
-asynchronous receipt grows the arena to the measured size plus up to 12.5%
-headroom. A new bounded build completes before publishing the replacement. Previously
-submitted commands retain the old allocation until GPU completion.
-
-Overflow withdraws the entire mesh and uses current-frame rays while sizing and
-rebuilding. It never draws a truncated mesh. If the requirement exceeds the
-allocation limit, fallback remains active; the panel reports the required quad
-count, available capacity, allocated MiB, limit, and build count. A subdivision
-stack failure reports an incomplete count and does not trigger allocation.
-`FLUID_SVO_DRY_FRAME_SURFACE_MESH_BYTES` can set a smaller hard ceiling in the
-Dawn harness. No geometry is dropped to satisfy the budget.
+per quad. An overflowing batch is rolled back whole to its checkpoint (its
+bricks keep their previous ranges) and the GPU pauses; the host grows the
+target arena by doubling, copies the retained prefix in queue order, and the
+GPU resumes on seeing the larger binding without restarting the build. A
+replacement build asks for a back arena sized for the live quads plus a
+quarter's headroom (never below 64 MiB); the two arenas coexist until the flip.
+If growth would exceed the allocation limit, fallback remains active; the
+panel reports the required quad count, available capacity, allocated MiB,
+limit, and build count. A subdivision stack failure reports an extraction
+fault and does not trigger allocation. `FLUID_SVO_DRY_FRAME_SURFACE_MESH_BYTES`
+can set a smaller hard ceiling in the Dawn harness. No geometry is dropped to
+satisfy the budget.
 
 The Frame panel calls this stage **Primary rasterization** and splits its timing
 into **Mesh update**, **Planes / ray fallback**, **Mesh culling**, and **Mesh draw**. The subtitle
@@ -145,47 +177,110 @@ Both scale-1 and scale-0.5 shader variants pass offline Naga validation.
 
 ## Filtered detail (2026-09-08)
 
-The Frame panel's **Frame surface options** strip, beside **Smooth surface**, carries a **Filtered detail**
-toggle (URL `svoMeshLodPixels`, `FLUID_SVO_MESH_LOD_PIXELS` in the Dawn smoke;
-`SvoRenderTuning.surfaceMeshLodPixels`, zero when off). It answers the far
-garden's moiré and speckle: at distance many voxel quads fall inside one pixel,
-and each carries one of six axis-aligned face normals, so a curved bowl becomes
-a three-shade pattern sampled once per pixel. Coarsening alone cannot fix that,
-which is why the ray path's proxy LOD was turned back to zero; this toggle
-changes both the geometry level and the normal.
+The Frame panel's **Primary visibility** band has a **Filtered detail** stage
+before **Primary rasterization**. Its master switch retains every setting when
+turned off. Filtering defaults off; its saved detail threshold defaults to 1 px.
 
-**Extraction** now emits every level of every brick into the same quad arena:
-level 0 is the exact voxel boundary as before, and level k bounds cells of
-2^k resident voxels, derived from the brick's own voxels in one invocation per
-level. A coarse cell is solid when any voxel in it is, so far detail dilates
-rather than disappears; its identity carries the first solid material and the
-normalised mean of the solid voxels' baked normals in the high half. Inside a
-brick both sides of a coarse face use the same dilated cells. Across a brick
-boundary a coarse face hides only when the neighbour's finest voxels cover it
-completely (`meshNeighbourCovered`), so a neighbour drawn at a finer level can
-never open a gap and a partial neighbour leaves the face to the depth test.
-Quads merge on material alone; a level-0 quad's normal half is left absent.
-The `face` word packs face, level and brick depth. Jobs per brick are
-`6 * brickSize + log2(brickSize)`; the arena requirement grows by the coarse
-levels' quads (roughly a third for surface bricks).
+| Control | Range / default | Effect |
+| --- | --- | --- |
+| Detail threshold | 0.25–8 reference px; 1 | Slider and numeric input. Larger values permit coarser cells. Reference height is 460 px. |
+| Maximum coarsening | Native, 2×, 4×, Full brick; Full brick | Caps geometry independently of smoothing; full brick clamps to the levels the brick actually has. |
+| Normal smoothing | On | Uses baked normals independently of geometry coarsening. |
+| Smoothing strength | 0–100%; 100% | Blends face and baked normals, then normalizes. |
+| Transition stability | 0–30%; 15% | Hysteresis around the threshold. Coarsens below the lower edge and refines above the upper edge. |
+| Normal agreement | 0–1; 0.5 | Minimum agreement for a coarse face's averaged normal. Higher values retain more flat faces. |
+| Preserve close-up face normals | On | Fades native-level shading back to face normals between one and two thresholds on screen. |
+| LOD colours | Off | Cyan: native, green: 2×, amber: 4×, pink: 8×. Other producers are absent. |
 
-**Selection** happens in the existing per-frame cull pass (`meshQuadSelected`):
-the brick's enclosing sphere is projected as the traversal contract projects a
-node, and the coarsest level whose cell still falls under the threshold is the
-one level of that brick that survives. With culling compiled out, the vertex
-stage collapses unselected levels to zero-area strips. The threshold is a
-runtime uniform in the `dry.lod.w` lane, written through the same 16-byte
-lod-only path as the ray LOD slider, so toggling never rebuilds a pipeline, the
-mesh, or a lighting cache. Zero selects level 0 everywhere and shades face
-normals, the shipped image.
+The advanced drawer holds transition stability, normal agreement and close-up
+preservation. Per-control resets and **Reset filtering settings** restore these
+values without enabling the stage. Selected-brick counts report resident surface
+bricks per LOD before frustum culling, from asynchronous GPU receipts. Timings
+are shared with Primary rasterization and are never added twice to frame totals.
 
-**Shading** with the toggle on uses baked normals without moving the surface:
-a coarse quad shades its cells' mean normal; an exact quad's fragment walks the
-tree once to the voxel just behind its face and reads that voxel's baked normal.
-A baked normal facing away from the quad's face keeps the face normal. Depth is
-still the quad, so the smooth-surface tangent-plane path remains ray-only.
+The URL stores the enable flag as `svoMeshFilter`, separately from
+`svoMeshLodPixels`. Other controls use `svoMeshNormals`, `svoMeshNormalStrength`,
+`svoMeshMaxLevel`, `svoMeshHysteresis`, `svoMeshNormalAgreement` and
+`svoMeshCloseNormals`. `svoStage=mesh-lod` selects the inspection view. Old URLs
+with a positive valid `svoMeshLodPixels` and no enable flag still enable filtering.
+The Dawn tools retain their explicit threshold environment switches.
+
+**Extraction** caches all geometry levels. A coarse cell is solid if any of its
+resident voxels is solid, and uses its first solid material. Each exposed coarse
+face stores the mean of baked normals pointing into its face hemisphere and an
+8-bit agreement value, `length(sum) / count`. Coarse rectangles merge only when
+material, packed normal and agreement match; exact rectangles still merge on
+material alone. Changing the agreement threshold only changes shading. Geometry,
+normal-strength and agreement sliders do not rebuild shaders or meshes.
+
+**Selection** runs once per resident brick in `surfaceMeshSelect`, before quad
+culling. An eight-word per-leaf table retains the chosen level and its history.
+The projected enclosing-sphere estimate follows the reference-height contract.
+Coarsening/refinement uses the hysteresis band; a threshold or cap change bypasses
+history, an edited/reallocated brick invalidates it, and a camera inside the
+brick sphere forces native geometry. A large camera jump may cross multiple
+levels in one frame. Every quad reads the same selected level, including the
+no-cull diagnostic variant. The 224-byte state receipt includes LOD counts.
+
+**Shading** samples native-level baked normals per fragment and uses cached
+means on coarse faces. It applies the smoothing switch, agreement threshold,
+strength and optional close-up fade without moving depth. Geometric normals
+remain the rasterized faces for shadow/contact bias. Native geometry plus normal
+smoothing is supported through the maximum-coarsening control.
+
+**Inspection** stores selected level + 1 in bits 27–30 of the raster mesh's
+split opaque material word. Production mesh shading masks these diagnostic bits
+at `drySplitIdentityAt`; material identity, generation, motion and normal fields
+remain intact. The normal overlay machinery decodes these bits into the LOD
+palette. This does not add a render target or select the traced primary path.
+
+**Two normals** now leave the fragment, which is what stops a baked normal from
+also deciding where a ray starts. The quad's face goes into the G-buffer's
+geometric slot and the baked normal into the shading slot — the contract has
+had both since it was written, and the mesh is the first producer with two
+different values to put in them. Shading is unchanged: the f32 geometry plane
+still carries the baked normal at full precision, and every closure, the N·L
+gate and the environment terms read it. Only the ray origins moved: the shadow
+rays and the contact hemisphere bias along the face
+(`dryGeometricNormal`), so a silhouette's side face fires outside its own cube
+instead of back through it and the black speckle goes with it.
+
+The face travels to the deferred lighting in the free high bits of the opaque
+identity plane's metadata word (`DRY_OPAQUE_FACE_VALID`, bits 27..30: a present
+bit and a six-axis code), because that plane and the f32 geometry plane are the
+only two the lighting entry binds — the packed oct8 plane is not bound to it.
+A producer with one normal leaves the bits clear and every reader falls back to
+the normal it already had, the same float rather than a requantised one, so no
+other pass in the frame moves by a bit. `dryRasterPrimarySurface` is now
+`dryRasterPrimaryFacedSurface` called with the surface's own normal for a face.
+
+Still open: global illumination gathers around the shading normal from an
+origin biased along it (a whole voxel out, so it does not self-occlude the same
+way), and the reduced cone prepass traces its own geometry rather than reading
+this plane, so neither consumes the face yet.
 
 Validation so far is offline: scale-1, scale-0.5 and no-cull shader variants
 pass Naga, and `tests/svo-surface-mesh-detail.test.ts` covers the tuning
-bounds, the URL round trip, and the shader's level machinery. No Dawn capture
-or in-app measurement of the far camera has been taken.
+bounds, the URL round trip, and the shader's level machinery.
+`tests/svo-gbuffer-normal-split.test.ts` pins the two-normal split — the packed
+contract's two slots, the mesh as the only producer passing a face of its own,
+the lighting's bias-versus-shade division — and validates the inline, split,
+raster and reduced compositions under Naga. The emitted WGSL of every
+composition without the mesh was diffed against the previous revision: the only
+changes are the new declarations, the `_padding`/`aux` rename, and
+substitutions that are the same value when the face bits are clear. No Dawn
+capture or in-app measurement of the far camera has been taken.
+
+**Cost (2026-09-09, `test:webgpu:hero-floor-far`, one run per arm, 800x460,
+GPU pass timestamps, 64 warmups so the paced build finished in both arms):**
+toggle off 1.442 ms median, toggle on 1.769 ms (+0.33 ms, +22.7%), 16-sample
+ranges disjoint, well outside the lane's ~±5% single-run noise. The mesh
+rasterization window is unchanged (0.131 ms both) and drawn quads fall
+64,756 → 53,107; the whole delta sits in the deferred dry lighting window
+(0.983 → 1.245 ms). Why lighting grows is unmeasured: candidates are more
+pixels passing the N·L gate under smoother normals and so tracing shadow rays,
+and the any-solid dilation covering more pixels. The knob for this lane is
+`FLUID_SVO_DRY_FRAME_MESH_LOD_PIXELS` with `FLUID_SVO_DRY_FRAME_SURFACE_MESH=1`
+and a zero screen-space threshold; the smoke tool's `FLUID_SVO_MESH_LOD_PIXELS`
+is inert because that lane never enables the surface mesh. The balanced default
+stays off until the lighting delta is attributed.

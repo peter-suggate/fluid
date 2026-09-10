@@ -1085,7 +1085,7 @@ const coneNormalEscapeCells = Number(process.env.FLUID_SVO_CONE_ESCAPE_CELLS
 log(`Secondary escape: shadow bias ${shadowBiasCells} cells, cone normal escape ${coneNormalEscapeCells} cells`);
 renderer.setRenderTuning({
   ...baseTuning, coneLightingScale: coneScale,
-  lodMode, lodScreenSpacePixels: lodPixels, lodFixedLevel: lodLevel, surfaceMeshLodPixels: meshLodPixels,
+  lodMode, lodScreenSpacePixels: lodPixels, lodFixedLevel: lodLevel, surfaceMeshLodPixels: meshLodPixels, surfaceMeshFilteringEnabled: process.env.FLUID_SVO_MESH_LOD_PIXELS !== undefined ? meshLodPixels > 0 : DEFAULT_SVO_RENDER_TUNING.surfaceMeshFilteringEnabled,
   shadowBiasCells, coneNormalEscapeCells, visibilityWorkItems, visibilityLeafVisits,
 });
 // Which secondary term is on. Both default on, exactly as production; they are
@@ -1173,7 +1173,7 @@ if (pairArm !== "none") {
   pairRenderer.setRigidBodyCount(bodies.count);
   pairRenderer.setRenderTuning({
     ...baseTuning, coneLightingScale: coneScale,
-    lodMode, lodScreenSpacePixels: lodPixels, lodFixedLevel: lodLevel, surfaceMeshLodPixels: meshLodPixels,
+    lodMode, lodScreenSpacePixels: lodPixels, lodFixedLevel: lodLevel, surfaceMeshLodPixels: meshLodPixels, surfaceMeshFilteringEnabled: process.env.FLUID_SVO_MESH_LOD_PIXELS !== undefined ? meshLodPixels > 0 : DEFAULT_SVO_RENDER_TUNING.surfaceMeshFilteringEnabled,
     shadowBiasCells, coneNormalEscapeCells, visibilityWorkItems, visibilityLeafVisits,
   });
   pairRenderer.setLightingOptions({

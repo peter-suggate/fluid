@@ -100,6 +100,7 @@ export interface RenderPipelineContext {
   readonly surfaceMeshActive?: boolean;
   readonly surfaceMeshStatus?: import("../features/primary-visibility/svo-surface-mesh").SvoSurfaceMeshStatus;
   readonly surfaceMeshSelected?: boolean;
+  readonly smoothSurfaceEnabled?: boolean;
 }
 
 export interface RenderPipelineTip {
@@ -329,6 +330,29 @@ const NODES: readonly RenderPipelineNodeDefinition[] = [
       : context.disabledStages.has("primary-entry-prepass")
         ? "off → megakernel descends from the root"
         : "leaf proxies · seeds tMin"),
+  },
+  {
+    id: "filtered-detail",
+    band: "primary",
+    side: "right",
+    label: "Filtered detail",
+    switchedBy: "surfaceMeshFilteringEnabled",
+    costInsideNode: "primary-traversal",
+    taps: ["mesh-lod"],
+    toggleable: true,
+    tip: {
+      summary: "Selects a cached detail level for each voxel brick and shades baked voxel normals. Higher thresholds allow coarser cells on screen. Off restores exact voxel faces and face normals. Its work runs inside mesh culling and drawing; the shared timing belongs to Primary rasterization.",
+      reads: "cached voxel mesh levels · camera · baked normals",
+      feeds: "primary rasterization",
+      gate: "rasterized primary with Smooth surface off",
+    },
+    state: (context) => !context.surfaceMeshSelected || context.smoothSurfaceEnabled ? "unavailable"
+      : !context.tuning.surfaceMeshFilteringEnabled ? "off"
+      : context.disabledStages.has("primary-traversal") || !context.surfaceMeshActive ? "armed" : "on",
+    chip: (context) => !context.surfaceMeshSelected ? "rasterized primary only"
+      : context.smoothSurfaceEnabled ? "requires Smooth surface off"
+      : !context.tuning.surfaceMeshFilteringEnabled ? "exact voxel faces"
+      : `${context.tuning.surfaceMeshMaxCoarsening === 0 ? "native" : `${context.tuning.surfaceMeshLodPixels} px`} · ${context.tuning.surfaceMeshNormalSmoothing && context.tuning.surfaceMeshNormalStrength > 0 ? "smoothed normals" : "face normals"}`,
   },
   {
     id: "primary-traversal",
@@ -703,9 +727,10 @@ export function renderPipelineNodeForContext(
     stages: node.stages.filter((stage) => meshStages.has(stage)),
     tip: {
       ...node.tip,
-      summary: "Primary rasterization fills the surface buffer using cached voxel faces. Its timing is the sum of mesh update, exact planes, mesh culling, and mesh drawing. Mesh update includes revision checks on cached frames and extraction on changed publications. During extraction, exact traversal shows the current published voxel scene. Off clears the surface buffer to sky.",
+      summary: "Primary rasterization fills the surface buffer using cached voxel faces. Its timing is the sum of mesh update, exact planes, mesh culling, and mesh drawing. Mesh update includes revision checks on cached frames and, on a changed publication, re-extraction of the bricks that publication rewrote into the cached mesh in place. While that runs the cached mesh stays drawn and only the pixels whose rays cross the edited bricks are traced; before the first build, exact traversal shows the whole current voxel scene. Off clears the surface buffer to sky.",
     },
     chip: (current) => current.disabledStages.has("primary-traversal") ? "withheld · clears only"
+      : current.surfaceMeshStatus?.state === "pending" && current.surfaceMeshStatus.drawn ? "mesh updating · edited bricks traced"
       : current.surfaceMeshStatus?.state === "pending" ? "mesh preparation · current SVO visible"
       : current.surfaceMeshStatus?.fallbackReason === "budget" ? "Current SVO · mesh budget exceeded"
       : current.surfaceMeshStatus?.state === "blocked" ? "Current SVO traversal"

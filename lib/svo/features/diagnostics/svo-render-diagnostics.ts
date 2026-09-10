@@ -33,6 +33,7 @@ export const SVO_RENDER_STAGE_VIEWS = [
   "dry-radiance",
   "water-depth",
   "lighting-partition",
+  "mesh-lod",
 ] as const;
 
 export type SvoRenderStageView = typeof SVO_RENDER_STAGE_VIEWS[number];
@@ -208,7 +209,19 @@ const radiance = Object.freeze([
   { at: 1, color: "#ffffff", label: "Clipped" },
 ] as const satisfies readonly SvoRenderStageLegendStop[]);
 
+export const SVO_MESH_LOD_LEGEND = [
+  { at: 0, color: "#00d9ff", label: "Native" },
+  { at: 1, color: "#00ff85", label: "2×" },
+  { at: 2, color: "#ffb000", label: "4×" },
+  { at: 3, color: "#ff2fd0", label: "8×" },
+] as const satisfies readonly SvoRenderStageLegendStop[];
+
 const definitions = [
+  {
+    view: "mesh-lod", label: "Mesh LOD", group: "Primary raster", plane: "splitOpaqueIdentity R bits 27–30",
+    description: "Actual rasterized mesh detail level: native, 2×, 4× or 8×. Other surface producers are absent. Lighting and publication metadata are unchanged.",
+    palette: "categorical", legend: SVO_MESH_LOD_LEGEND,
+  },
   {
     view: "off", label: "Off", group: "Presentation", plane: "canvas",
     description: "Show the composited frame exactly as it presents.",
