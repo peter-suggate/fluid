@@ -149,3 +149,30 @@ shortcut's alias: row13967 had one term (cell3072), while incidence row37472
 had two terms (cells11344 and3072). The shortcut selected the coincident
 one-sided row after neighboring sparse support appeared. Geometry equality
 and `rowAccepted` alone did not establish donor authority.
+
+## Evolved-frame interpolation census
+
+An isolated diagnostic branch (`codex/face-interpolation-census`, `ab991f1b`)
+counts actual work in frame15 of the same mini32 run. Its atomics are excluded
+from production and its timings are not performance measurements. Full density
+and gamma hashes still matched the uninstrumented control.
+
+- 65,778 supported faces were traced: 7,770 used one RK substep and58,008
+  needed multiple substeps; total145,504 substeps.
+- 291,008 RK vector interpolations and57,680 terminal scalar interpolations.
+- 336,096 regular dual-cell visits and17,523 mixed visits (visits include
+  locator retries); mixed solves performed82,703 Newton iterations.
+- 228,936 native face donor queries, with21,647 collocated fallback samples.
+- No traced face had an exactly zero initial velocity.
+
+Approximately95% of visited dual cells were regular, but the generic sampler
+still rediscovered ownership and geometry at each query. The one-substep-only
+midpoint optimization would cover at most7,770 /291,008 (2.7%) of RK samples
+before its containment checks. There is no stationary-face opportunity in this
+evolved frame. These counts redirect work toward repeated regular midpoints
+across all existing RK substeps; substep counts and physical timestep stay fixed.
+
+The post-cutover full gate again used its unchanged180-second budget: six
+passes, symmetry and mini32 timing failures (44.106 ms against40 ms), four
+lane timeouts, and five later lanes not reached. The symmetry error remained
+the pre-optimization0.014906; the new incidence-identity native regression passes.
