@@ -1,3 +1,4 @@
+import { correctionOptions } from "./correction-controls";
 import type { LiveFluidEdit, LiveFluidEditResult } from "../../core/live-fluid-edit";
 import { SimulationFailureError } from "../../core/simulation-failure";
 import { SparseCM12GenerationBudgetDeferred, SparseCM12GenerationStale } from "./sparse-cm12-generation-budget";
@@ -919,7 +920,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       freezeTopology: this.options.activityPolicy?.freezeTopology,
       legacyFaceTransportForQA: this.options.activityPolicy?.legacyFaceTransportForQA,
     });
-    this.options = { ...this.options, timeStep, sharpeningDistance, sharpeningTraceSteps,
+    this.options = { ...this.options, ...correctionOptions(values), timeStep, sharpeningDistance, sharpeningTraceSteps,
       surfaceMeshRefinement: Number(values.surfaceMeshRefinement) === 1 ? 1
       : Number(values.surfaceMeshRefinement) === 4 ? 4 : 2,
       sharpeningStrength,
@@ -1317,6 +1318,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         gravity.z / cellSize_m,
       ],
       sharpening: {
+        ...this.options,
         distanceCells: this.options.sharpeningDistance,
         traceSteps: this.options.sharpeningTraceSteps,
         strength: this.options.sharpeningStrength,

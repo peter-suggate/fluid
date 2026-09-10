@@ -1347,6 +1347,9 @@ struct Params {
   velocityThresholds:array<vec4f,2>, // indexed by log2(resolution), B1..B16
   coarseFirst:vec4f, // enabled, finest specific kinetic energy, κh, prediction seconds
   coarseFirstHistory:vec4f, // search radius, surface proof epochs, reserved
+  transportCorrections:vec4f, // conservation, gamma history, diffusion dose, sharpening tau
+  recoveryCorrections:vec4f, // capacity dose, volume lambda multiplier, eta cap, reserved
+  correctionReserved:vec4f,
   failure:vec4u, // GPU-owned sticky stage halt
 }
 
@@ -1598,6 +1601,25 @@ fn destinationGamma()->u32{return select(p.stateOffsets0.w,p.stateOffsets0.z,
 fn gammaDiffusionEnabled()->bool{return p.topologyScheduling.z!=0u;}
 fn surfaceSharpeningEnabled()->bool{return p.topologyScheduling.w!=0u;}
 fn surfaceSharpeningStrength()->f32{return bitcast<f32>(p.solidOffsets.w);}
+fn transportConservationStrength()->f32{return p.transportCorrections.x;}
+fn configuredTransportGamma(sampled:f32,visible:f32)->f32{
+  if(p.transportCorrections.y==1.0){return cm12ConditionedGamma(sampled,visible);}
+  if(p.transportCorrections.y==0.0){return 1.0;}
+  return cm12ConditionedGamma(max(0.0,1.0+p.transportCorrections.y*(sampled-1.0)),visible);
+}
+fn configuredTransportCoefficient(gamma:f32,weight:f32,beta:f32)->f32{
+  let coefficient=cm12ConditionedRowCoefficient(gamma,weight,beta);
+  if(transportConservationStrength()==1.0){return coefficient;}
+  return mix(weight,coefficient,transportConservationStrength());
+}
+fn configuredVolumeCorrection(normalizedDensity:f32,cellSize:f32,dt:f32)->f32{
+  if(p.recoveryCorrections.y==1.0&&p.recoveryCorrections.z==1.0){
+    return cm12VolumeCorrectionDivergence(normalizedDensity,cellSize,dt);
+  }
+  let excess=max(0.0,normalizedDensity-1.0);
+  return min(min(CM12_VOLUME_CORRECTION_LAMBDA*p.recoveryCorrections.y*excess,
+    p.recoveryCorrections.z)/cellSize,1.0/dt);
+}
 fn sourceCellVelocity()->u32{return select(p.stateOffsets1.x,p.stateOffsets1.y,
   cm12FCSourceFaceParity()!=0u);}
 fn destinationCellVelocity()->u32{return select(p.stateOffsets1.y,p.stateOffsets1.x,
@@ -3959,7 +3981,7 @@ fn traceGammaAndBeta(@builtin(workgroup_id)wid:vec3u,
       for(var corner=0u;corner<8u;corner+=1u){let cell=stencil.cells[corner];let weight=stencil.weights[corner];
         if(cell!=INVALID){gammaTerms[corner]=weight*state[sourceGamma()+cell];}}
       let visible=transportScalarSum(stencil.weights);let sampledGamma=transportScalarSum(gammaTerms);
-      let advectedGamma=cm12ConditionedGamma(sampledGamma,visible);
+      let advectedGamma=configuredTransportGamma(sampledGamma,visible);
       state[destinationGamma()+id]=advectedGamma;
       if(visible>1e-9){for(var corner=0u;corner<8u;corner+=1u){
         let cell=stencil.cells[corner];let weight=stencil.weights[corner];
@@ -3999,7 +4021,7 @@ fn scatterDensityDeficit(@builtin(workgroup_id)wid:vec3u,
   let donor=cm12MassExecutionCell(wid.x,lane,1u);
   ${phase1QABetaCapture}
   if(donor!=INVALID&&cellTransportActive(donor)){
-    let deficit=max(0.0,1.0-transportBeta(donor));
+    let deficit=max(0.0,1.0-transportBeta(donor))*transportConservationStrength();
     if(deficit>1.0/CM12_SPARSE_TRANSPORT_FIXED){
       var visible=0.0;var arrivalStencil:TransportStencil;
       arrivalStencil=traceMassStencil(donor,1.0,false).stencil;
@@ -4050,7 +4072,7 @@ fn gatherConservativeDensity(@builtin(workgroup_id)wid:vec3u,
   if(visible>1e-9){for(var corner=0u;corner<8u;corner+=1u){
     let cell=massDepartureStencilCell(id,corner);
     let weight=massDepartureStencilWeight(id,corner);if(cell==INVALID||weight<=0.0){continue;}
-    let coefficient=cm12ConditionedRowCoefficient(
+    let coefficient=configuredTransportCoefficient(
       advectedGamma,weight/visible,transportBeta(cell));
     let donorDensity=state[sourceDensity()+cell];
     let velocityAt=sourceCellVelocity()+4u*cell;
@@ -4144,7 +4166,7 @@ fn traceGammaAndBetaPackedCoarse(@builtin(global_invocation_id)gid:vec3u){
         let donor=stencil.cells[corner];let weight=stencil.weights[corner];
         visible+=weight;if(donor!=INVALID){sampledGamma+=weight*state[sourceGamma()+donor];}
       }
-      let advectedGamma=cm12ConditionedGamma(sampledGamma,visible);
+      let advectedGamma=configuredTransportGamma(sampledGamma,visible);
       state[destinationGamma()+id]=advectedGamma;
       if(visible>1e-9){for(var corner=0u;corner<8u;corner+=1u){
         let donor=stencil.cells[corner];let weight=stencil.weights[corner];
@@ -4168,7 +4190,7 @@ fn scatterDensityDeficitPackedCoarse(@builtin(global_invocation_id)gid:vec3u){
   let donor=cm12PackedCoarseCell(gid.x).cell;
   ${phase1QABetaCapture}
   if(donor!=INVALID&&cellTransportActive(donor)){
-    let deficit=max(0.0,1.0-transportBeta(donor));
+    let deficit=max(0.0,1.0-transportBeta(donor))*transportConservationStrength();
     if(deficit>1.0/CM12_SPARSE_TRANSPORT_FIXED){
       let stencil=traceMassStencil(donor,1.0,true).stencil;
       var visible=0.0;for(var corner=0u;corner<8u;corner+=1u){
@@ -4215,7 +4237,7 @@ fn gatherConservativeDensityPackedCoarse(@builtin(global_invocation_id)gid:vec3u
       let cell=massDepartureStencilCell(id,corner);
       let weight=massDepartureStencilWeight(id,corner);
       if(cell==INVALID||weight<=0.0){continue;}
-      let coefficient=cm12ConditionedRowCoefficient(
+      let coefficient=configuredTransportCoefficient(
         advectedGamma,weight/visible,transportBeta(cell));
       let donorDensity=state[sourceDensity()+cell];
       let velocityAt=sourceCellVelocity()+4u*cell;
@@ -4352,7 +4374,7 @@ fn scatterGammaRow(row:u32,inputRho:u32,inputGamma:u32){
   // A regular interior cell participates in six rows. The CM12 flux already
   // contains its one-half diffusion coefficient, so /3 gives a convex
   // simultaneous six-neighbour update at the paper's full 1/30 s step.
-  let scale=min(1.0,30.0*p.frame.x)/3.0;
+  let scale=(min(1.0,30.0*p.frame.x)/3.0)*p.transportCorrections.z;
   for(var negativeTerm=begin;negativeTerm<end;negativeTerm+=1u){
     if(termCoefficient(negativeTerm)>=0.0){continue;}
     let negative=termCell(negativeTerm);
@@ -4418,6 +4440,14 @@ fn finalizeGammaSnapshot(@builtin(global_invocation_id)gid:vec3u){
     cm12Phase1QACaptureGammaSnapshot(cell,state[p.stateOffsets2.x+cell],
       state[p.stateOffsets2.y+cell]);
   }
+}
+
+// Commit between optional extra diffusion rounds; final round remains in scratch.
+@compute @workgroup_size(64)
+fn commitGammaSnapshot(@builtin(global_invocation_id)gid:vec3u){
+  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
+  state[destinationDensity()+cell]=state[p.stateOffsets2.x+cell];
+  state[destinationGamma()+cell]=state[p.stateOffsets2.y+cell];
 }
 
 fn conditionedDensity(cell:u32)->f32{return state[select(destinationDensity(),
@@ -4508,10 +4538,15 @@ fn sharpeningDelta(cell:u32,stats:SharpeningStats)->f32{
     minusSquared+=max(min(backward,0.0)*min(backward,0.0),
       max(forward,0.0)*max(forward,0.0));
   }
-  let weight=cm12SharpeningWeight(rho,stats.maximumDifference);
+  var weight=cm12SharpeningWeight(rho,stats.maximumDifference);
+  if(p.transportCorrections.w!=CM12_SHARPENING_TAU){
+    let displacement=rho-CM12_LIQUID_ISOVALUE;
+    weight=displacement*displacement*displacement
+      *(1.0-min(1.0,stats.maximumDifference/p.transportCorrections.w));
+  }
   var delta=weight*sqrt(select(minusSquared,plusSquared,weight>=0.0));
   if(rho+delta<0.0||rho<CM12_DRY_CELL_THRESHOLD){delta=-rho;}else if(rho>0.5){delta=0.0;}
-  return min(0.0,delta*surfaceSharpeningStrength());
+  return max(-rho,min(0.0,delta*surfaceSharpeningStrength()));
 }
 
 // Freeze the per-cell sharpening dose once. The trace itself differentiates
@@ -4728,7 +4763,7 @@ fn cm12PhysicalSubfaceArea(row:u32,ownCoefficient:f32,otherCoefficient:f32)->f32
 }
 fn densityCapacityRepairMass(cell:u32)->i32{
   if(cell==INVALID||!cellTransportActive(cell)){return 0;}
-  let excess=max(0.0,state[destinationDensity()+cell]-cellOpenFraction(cell));
+  let excess=max(0.0,state[destinationDensity()+cell]-cellOpenFraction(cell))*p.recoveryCorrections.x;
   return i32(min(1073741823.0,round(excess*cellVolume(cell)*cm12PhysicalMassFixedScale())));
 }
 fn densityCapacityRepairArea(cell:u32)->f32{
@@ -5697,7 +5732,7 @@ fn preparePressure(@builtin(global_invocation_id)gid:vec3u){
   // membership is retained above to prevent interior p=0 holes, but an
   // under-density cell is not a pressure-volume sink: imposing the opposite
   // sign here contracted transport-smoothed bulk liquid every frame.
-  let targetDivergence=cm12VolumeCorrectionDivergence(
+  let targetDivergence=configuredVolumeCorrection(
     rho,p.frame.y*cellMinimumWidth(id),p.frame.x);
   let controlVolume=cellOpenVolume(id);
   state[p.stateOffsets2.y+id]=(rhsAxes.x+rhsAxes.y)+rhsAxes.z+controlVolume*targetDivergence;
@@ -6208,7 +6243,7 @@ fn collocateAndDiagnose(@builtin(global_invocation_id)gid:vec3u,
     cm12PublishCollocatedWetEffectiveVelocity(id,velocity,
       state[destinationDensity()+id]>CM12_LIQUID_ISOVALUE);
     let rawDensity=rawPressureDensity(id);
-    let targetDivergence=cm12VolumeCorrectionDivergence(rawDensity,
+    let targetDivergence=configuredVolumeCorrection(rawDensity,
       p.frame.y*cellMinimumWidth(id),p.frame.x);
     let controlVolume=cellOpenVolume(id);
     let divergence=select(0.0,-equation/max(controlVolume,1e-8)

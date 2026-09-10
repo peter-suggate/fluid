@@ -26,7 +26,7 @@ export const ALGORITHM_PARAMS: MethodParamSpec[] = [
       { value: "on", label: "On" },
       { value: "off", label: "Off" },
     ],
-    hint: "Enables CM12 Sec. 3.4's two conservative gamma-diffusion iterations. Turning it off keeps conservative transport and the sparse scalar-publication chain active.",
+    hint: "Enables CM12 Sec. 3.4's configured conservative gamma-diffusion passes. Turning it off keeps conservative transport and the sparse scalar-publication chain active.",
   },
   {
     kind: "select",

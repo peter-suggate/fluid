@@ -1,3 +1,4 @@
+import { normalizedCorrections, type SparseCM12CorrectionControls } from "./correction-controls";
 import { SPARSE_CM12_PRESSURE_JOURNAL_SNAPSHOTS, type SparseCM12PressureJournalCapacityRequest } from "./features/pressure-inspection/definition";
 import { packAdaptivitySurfaceParameters } from "./features/adaptivity/packing";
 import { sparseCM12ActivityPolicy, type SparseCM12ActivityPolicy } from "./features/adaptivity/policy";
@@ -239,7 +240,7 @@ import {
 } from "./sparse-cm12-pressure-execution-image";
 
 /** CM12 Sec. 3.5 Algorithm 2's live trace bounds, in finest cells and substeps. */
-export interface SharpeningTrace {
+export interface SharpeningTrace extends SparseCM12CorrectionControls {
   readonly distanceCells?: number;
   readonly traceSteps?: number;
   /** Multiplies Algorithm 2's removed-density dose. Defaults to the paper's full dose. */
@@ -303,7 +304,7 @@ export const sparseCM12SharpeningTraceSteps = (value: unknown): number =>
 
 export const sparseCM12SharpeningStrength = (value: unknown): number =>
   typeof value === "number" && Number.isFinite(value)
-    ? Math.min(1, Math.max(0, value))
+    ? Math.min(4, Math.max(0, value))
     : SPARSE_CM12_SHARPENING_STRENGTH;
 
 export interface SparseCM12InternedBoundaryMemoryPlan {
@@ -362,6 +363,7 @@ export const SPARSE_CM12_RESIDENT_STAGES = Object.freeze([
   "tracer-advection",
   "gamma-diffusion",
   "surface-sharpening",
+  "density-capacity-repair",
   "scalar-publication",
   "body-forces",
   "pressure-topology",
@@ -412,10 +414,9 @@ export const SPARSE_CM12_RESIDENT_STAGE_SUBSTAGES = Object.freeze({
     "sharpening-receipt-setup",
     "sharpening-transform",
     "sharpening-finalize",
-    "density-capacity-repair",
-    "final-scalar-mask-publication",
   ],
-  "scalar-publication": [],
+  "density-capacity-repair": ["density-capacity-repair"],
+  "scalar-publication": ["final-scalar-mask-publication"],
   "body-forces": [],
   "pressure-topology": [
     "ptr-setup-brick-plan",
@@ -928,7 +929,7 @@ export function sparseCM12WGSLForEntryPoints(source: string, roots: readonly str
 const SPARSE_CM12_PHASE1_TRANSPORT_PROFILE_WORDS = 64;
 /** Params in the resident WGSL, including the fixed authored-region tail. */
 const SPARSE_CM12_FAILURE_PARAMETER_OFFSET = SPARSE_CM12_REFINEMENT_REGION_PARAMETER_OFFSET
-  + SPARSE_CM12_REFINEMENT_REGION_BYTES + 80;
+  + SPARSE_CM12_REFINEMENT_REGION_BYTES + 80 + 48;
 const SPARSE_CM12_PARAMETER_BYTES = SPARSE_CM12_FAILURE_PARAMETER_OFFSET + 16;
 /** Twenty f32 convergence/diagnostic scalars; see the WGSL initialization. */
 const SPARSE_CM12_PRESSURE_SCALAR_BYTES = 80;
@@ -5480,7 +5481,7 @@ export class WebGPUSparseCM12Resident {
         "gatherConservativeDensityPackedCoarse",
       ] as const : []),
       "seedTracers", "advanceTracers",
-      "clearGammaReceipts", "finalizeGammaSnapshot",
+      "clearGammaReceipts", "finalizeGammaSnapshot", "commitGammaSnapshot",
       "prepareSharpeningField", "scatterSharpeningMass", "finalizeSharpening",
       "initializeDensityCapacityRepair", "scatterDensityCapacityRepair",
       "finalizeDensityCapacityRepair",
@@ -6031,6 +6032,7 @@ export class WebGPUSparseCM12Resident {
       worldDimensions_m, inflow);
     const topologyFrozen = activityPolicy?.freezeTopology === true;
     const pressureIterations = sparseCM12PressureIterations(pressureControl?.iterations);
+    const corrections = normalizedCorrections(sharpening);
     const gammaDiffusionEnabled = sharpening?.gammaDiffusionEnabled !== false;
     const surfaceSharpeningEnabled = sharpening?.surfaceSharpeningEnabled !== false;
     // The header carries the two device-side cursors, so it starts each
@@ -6402,17 +6404,16 @@ export class WebGPUSparseCM12Resident {
     });
     stage("gamma-diffusion", () => {
       if (!gammaDiffusionEnabled) return;
-      // Gamma shares the accepted physical row topology with pressure and
-      // SolidWorld. No host-only boundary image or packet mask is a second
-      // authority for which rows exist.
-      // The configured/paper default is one diffusion iteration: one immutable
-      // row snapshot followed by one Jacobi finalization. The former second
-      // all-axis pass was an unrequested extra iteration; near the dry cutoff
-      // it converted a harmless cumulative-gamma difference back into resolved
-      // density on the following pass.
-      dispatchAccepted("clearGammaReceipts", "cell");
-      dispatchAccepted("scatterGammaSnapshotRows", "row");
-      dispatchAccepted("finalizeGammaSnapshot", "cell");
+      // Every pass reads an immutable snapshot. Intermediate passes commit
+      // scratch back to destination; the last leaves scratch for sharpening.
+      for (let iteration = 0; iteration < corrections.gammaDiffusionIterations; iteration += 1) {
+        dispatchAccepted("clearGammaReceipts", "cell");
+        dispatchAccepted("scatterGammaSnapshotRows", "row");
+        dispatchAccepted("finalizeGammaSnapshot", "cell");
+        if (iteration + 1 < corrections.gammaDiffusionIterations) {
+          dispatchAccepted("commitGammaSnapshot", "cell");
+        }
+      }
     });
     stage("surface-sharpening", ({ closeSubstage }) => {
       // Start the stage with real, already-required GPU work. Besides resetting
@@ -6457,7 +6458,12 @@ export class WebGPUSparseCM12Resident {
       }
       closeSubstage("sharpening-finalize");
       if (sharpeningPhaseLimitForQA === "finalize") return;
-      // Relay over no more than one B8 page width (the accepted support reach).
+      closePass();
+    });
+    stage("density-capacity-repair", ({ closeSubstage }) => {
+      if (["setup", "transform", "finalize"].includes(sharpeningPhaseLimitForQA ?? "")) return;
+      if (!corrections.densityCapacityRepairEnabled || corrections.densityCapacityRepairStrength === 0) return;
+      // Relay over the configured number of neighbouring cells.
       // One pass only moved an over-capacity packet into an already-full
       // neighbour; after floor impact that concentrated conserved mass into a
       // shrinking set of cells (rho > 6) and looked like volume loss. Eight
@@ -6466,10 +6472,10 @@ export class WebGPUSparseCM12Resident {
       const capacityPassLimitForQA = sharpeningPhaseLimitForQA
         ?.match(/^capacity-([1-8])$/)?.[1];
       const capacityPassCount = capacityPassLimitForQA === undefined
-        ? 8 : Number(capacityPassLimitForQA);
+        ? corrections.densityCapacityRepairIterations : Number(capacityPassLimitForQA);
       if (this.gatherCapacityRepairForQA
         && capacityPassLimitForQA === undefined) {
-        for (let capacityPass = 0; capacityPass < 8; capacityPass += 1) {
+        for (let capacityPass = 0; capacityPass < capacityPassCount; capacityPass += 1) {
           dispatchAccepted(capacityPass === 0
             ? "prepareDensityCapacityRepairGather"
             : "publishDensityCapacityRepairShare", "cell");
@@ -6482,13 +6488,13 @@ export class WebGPUSparseCM12Resident {
         // thereafter consumes and clears its own destination plane before that
         // plane is reused two rounds later.
         dispatchAccepted("initializeDensityCapacityRepairAlternate", "cell");
-        for (let capacityPass = 0; capacityPass < 8; capacityPass += 1) {
+        for (let capacityPass = 0; capacityPass < capacityPassCount; capacityPass += 1) {
           const plane = capacityPass % 2 === 0 ? 5 : 6;
           dispatchAccepted(`scatterDensityCapacityRepairAlternate${plane}`, "cell");
           dispatchAccepted(`finalizeDensityCapacityRepairAlternate${plane}`, "cell");
         }
       } else if (this.densityCapacityEarlyExitLayout
-        && capacityPassLimitForQA === undefined) {
+        && capacityPassLimitForQA === undefined && capacityPassCount === 8) {
         dispatch("beginDensityCapacityRepairEarlyExit", 1);
         // The second ordinary round proves whether the first round reached a
         // destination-bit fixed point. It publishes gate zero for round three.
@@ -6514,6 +6520,14 @@ export class WebGPUSparseCM12Resident {
       closeSubstage("density-capacity-repair");
       if (sharpeningPhaseLimitForQA === "capacity"
         || capacityPassLimitForQA !== undefined) return;
+      closePass();
+    });
+    stage("scalar-publication", ({ closeSubstage }) => {
+      // Diagnostic phase stops retain their original pre-publication boundary.
+      if (sharpeningPhaseLimitForQA !== undefined) {
+        dispatch("publishSparseCM12FrameScalarOutput", 1);
+        return;
+      }
       // Final scalar facts are authored once in the accepted TEI packet space.
       // Every remaining dirty carrier below is a mask consumer; finalization no
       // longer walks incidence or appends a tile event per changed cell.
@@ -6524,8 +6538,6 @@ export class WebGPUSparseCM12Resident {
       closeSubstage("final-scalar-mask-publication");
       useBindGroup(this.pressureBindGroup);
       closePass();
-    });
-    stage("scalar-publication", () => {
       dispatch("publishSparseCM12FrameScalarOutput", 1);
     });
     stage("body-forces", () => {
@@ -7730,6 +7742,16 @@ export class WebGPUSparseCM12Resident {
       f, u, surfaceProofWord, policy, finestCellSize_m, dt_s,
       this.brickFineResolution, this.coarseFirstPolicySignature,
     );
+    const corrections = normalizedCorrections(sharpening);
+    f.set([
+      corrections.massConservationEnabled ? corrections.massConservationStrength : 0,
+      corrections.gammaConditioningEnabled ? corrections.gammaConditioningStrength : 0,
+      corrections.gammaDiffusionStrength, corrections.sharpeningTau,
+      corrections.densityCapacityRepairEnabled ? corrections.densityCapacityRepairStrength : 0,
+      corrections.volumeCorrectionEnabled ? corrections.volumeCorrectionStrength : 0,
+      corrections.volumeCorrectionCap, 0,
+      0, 0, 0, 0,
+    ], (SPARSE_CM12_FAILURE_PARAMETER_OFFSET - 48) / 4);
     this.device.queue.writeBuffer(this.parameters, 0, this.parameterWords, 0, SPARSE_CM12_FAILURE_PARAMETER_OFFSET);
   }
 

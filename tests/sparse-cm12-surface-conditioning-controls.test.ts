@@ -68,9 +68,12 @@ test("conditioning controls preserve the mandatory sparse scalar-publication suf
     resident.indexOf('stage("scalar-publication"'));
   assert.match(sharpeningStage,
     /if \(surfaceSharpeningEnabled \|\| gammaDiffusionEnabled\)[\s\S]*finalizeSharpening/);
-  assert.match(sharpeningStage, /beginSparseCM12FinalScalarMasks/);
-  assert.match(sharpeningStage, /publishSparseCM12FinalScalarMasks/);
-  assert.match(sharpeningStage, /sealSparseCM12FinalScalarMasks/);
+  const publicationStage = resident.slice(resident.indexOf('stage("scalar-publication"'),
+    resident.indexOf('stage("body-forces"'));
+  assert.match(publicationStage, /beginSparseCM12FinalScalarMasks/);
+  assert.match(publicationStage, /publishSparseCM12FinalScalarMasks/);
+  assert.match(publicationStage, /sealSparseCM12FinalScalarMasks/);
+  assert.doesNotMatch(publicationStage, /if \(!corrections\.densityCapacityRepairEnabled/);
 
   assert.match(wgsl, /fn conditionedDensity[\s\S]*gammaDiffusionEnabled\(\)/);
   assert.match(wgsl,
@@ -81,7 +84,7 @@ test("conditioning controls preserve the mandatory sparse scalar-publication suf
   assert.match(wgsl,
     /if\(!surfaceSharpeningEnabled\(\)\)[\s\S]*state\[destinationDensity\(\)\+cell\]=max\(0\.0,conditionedDensity\(cell\)\)/);
   assert.match(wgsl,
-    /return min\(0\.0,delta\*surfaceSharpeningStrength\(\)\)/);
+    /return max\(-rho,min\(0\.0,delta\*surfaceSharpeningStrength\(\)\)\)/);
 });
 
 test("the SIM pipeline exposes both transforms as live stage switches", () => {
@@ -112,4 +115,48 @@ test("capacity early exit is an isolated destination-bit fixed-point gate", () =
   assert.match(wgsl,
     /fn densityCapacityRepairGateOpen[\s\S]*atomicLoad\([\s\S]*DENSITY_CAPACITY_GATE_BASE/);
   assert.match(wgsl, /fn finalizeDensityCapacityRepairSeedGate/);
+});
+
+
+test("correction dials persist, normalize, and reach direct solver options", () => {
+  const values = resolveMethodValues(adaptiveMassMethod, "balanced", {
+    massConservation: "off", massConservationStrength: 0.35,
+    gammaConditioning: "off", gammaConditioningStrength: 1.5,
+    gammaDiffusionStrength: 0.25, gammaDiffusionIterations: 4,
+    sharpeningStrength: 3, sharpeningTau: 0.7,
+    densityCapacityRepair: "off", densityCapacityRepairStrength: 0.4,
+    densityCapacityRepairIterations: 12, volumeCorrection: "off",
+    volumeCorrectionStrength: 2, volumeCorrectionCap: 3,
+  });
+  const options = adaptiveMassSolverOptions(values);
+  assert.equal(options.massConservationEnabled, false);
+  assert.equal(options.massConservationStrength, 0.35);
+  assert.equal(options.gammaConditioningEnabled, false);
+  assert.equal(options.gammaConditioningStrength, 1.5);
+  assert.equal(options.gammaDiffusionIterations, 4);
+  assert.equal(options.gammaDiffusionStrength, 0.25);
+  assert.equal(options.sharpeningStrength, 3);
+  assert.equal(options.sharpeningTau, 0.7);
+  assert.equal(options.densityCapacityRepairEnabled, false);
+  assert.equal(options.densityCapacityRepairStrength, 0.4);
+  assert.equal(options.densityCapacityRepairIterations, 12);
+  assert.equal(options.volumeCorrectionEnabled, false);
+  assert.equal(options.volumeCorrectionStrength, 2);
+  assert.equal(options.volumeCorrectionCap, 3);
+  for (const stage of ADAPTIVE_MASS_FLUID_PIPELINE.stages) {
+    for (const control of stage.controls ?? []) {
+      if (control.kind !== "param-range" && control.kind !== "param-choice") continue;
+      const spec = adaptiveMassMethod.params.find(param => param.key === control.param);
+      assert.ok(spec, control.param);
+      if (spec.kind === "number" && control.kind === "param-range") {
+        assert.equal(control.min, spec.min, control.param);
+        assert.equal(control.max, spec.max, control.param);
+      }
+    }
+  }
+  const defaults = adaptiveMassSolverOptions(resolveMethodValues(adaptiveMassMethod, "balanced", {}));
+  assert.equal(defaults.gammaDiffusionIterations, 1);
+  assert.equal(defaults.densityCapacityRepairIterations, 8);
+  assert.equal(defaults.volumeCorrectionStrength, 1);
+  assert.equal(defaults.volumeCorrectionCap, 1);
 });

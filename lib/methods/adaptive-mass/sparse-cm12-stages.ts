@@ -1,3 +1,4 @@
+import { correctionStageControl } from "./correction-controls";
 import { adaptivityStageControl } from "./features/adaptivity/definition";
 /**
  * Every Sparse CM12 stage, described once.
@@ -368,7 +369,18 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       writes: "transported density, gamma and momentum; sharpening cell catalog",
       feeds: "gamma diffusion and surface sharpening",
     },
-    chip: () => "trace · scatter · gather",
+    toggle: {
+      param: "massConservation", on: "on", off: "off",
+      hint: "Enable the conservative column correction and forward return. Off uses backward transport and can lose or gain mass.",
+    },
+    controls: [
+      correctionStageControl("massConservationStrength", "massConservation"),
+      correctionStageControl("gammaConditioning"),
+      correctionStageControl("gammaConditioningStrength", "gammaConditioning"),
+    ],
+    chip: context => context.values.massConservation === "off"
+      ? "backward transport · conservation off"
+      : `${fixed(context.values.massConservationStrength ?? 1, 2)}× conservation · trace · scatter · gather`,
   },
   "tracer-advection": {
     label: "Marker advection", band: "transport", side: "right",
@@ -387,7 +399,7 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     phase: { id: "fine-sdf-advection", label: "Gamma diffusion row-owned snapshot iterations" },
     lens: null,
     tip: {
-      summary: "Sec. 3.4 step 8 as two stable immutable-snapshot iterations, each a transport-row-authority scatter followed by an accepted-cell finalize. Every composite subface contributes paired antisymmetric fixed-point rho/gamma receipts, so mass is conserved and no dimensional sweep order remains.",
+      summary: "Sec. 3.4 step 8 as configurable stable immutable-snapshot iterations, each a transport-row-authority scatter followed by an accepted-cell finalize. Every composite subface contributes paired antisymmetric fixed-point rho/gamma receipts, so mass is conserved and no dimensional sweep order remains.",
       reads: "transported density and gamma",
       writes: "conditioned density and gamma",
       feeds: "surface sharpening",
@@ -396,9 +408,13 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       param: "gammaDiffusion", on: "on", off: "off",
       hint: "Toggle CM12 Sec. 3.4 gamma diffusion. Conservative transport and the sparse scalar-publication chain remain active when it is off.",
     },
+    controls: [
+      correctionStageControl("gammaDiffusionStrength", "gammaDiffusion"),
+      correctionStageControl("gammaDiffusionIterations", "gammaDiffusion"),
+    ],
     chip: (context) => context.values.gammaDiffusion === "off"
       ? "disabled · transported scalars pass through"
-      : "2 × row scatter + cell resolve",
+      : `${context.values.gammaDiffusionIterations ?? 1} passes · ${fixed(context.values.gammaDiffusionStrength ?? 1, 2)}× dose`,
   },
   "surface-sharpening": {
     label: "Surface sharpening", band: "transport", side: "right",
@@ -413,32 +429,27 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       "sharpening-finalize": {
         id: "fine-sdf-redistance", label: "Sharpening scalar finalization + dependency publication",
       },
-      "density-capacity-repair": {
-        id: "fine-sdf-redistance", label: "Conservative density-capacity repair",
-      },
-      "final-scalar-mask-publication": {
-        id: "fine-sdf-redistance", label: "FSM1 final-scalar packet-mask publication",
-      },
     },
     lens: null,
     tip: {
-      summary: "Sec. 3.5's density correction and Algorithm 2's local mass return on the shared transport packet authority: receipt setup, a fused dose/TEI fixed-point mass transform, then scalar finalization. The stage then conservatively enforces per-cell open-volume capacity and publishes FSM1 final-scalar packet masks.",
+      summary: "Sec. 3.5's density correction and Algorithm 2's local mass return on the shared transport packet authority: receipt setup, a fused dose/TEI fixed-point mass transform, then scalar finalization. Excess-density capacity repair and final-scalar publication are separate following stages.",
       reads: "transported density and gamma, solid fractions",
-      writes: "conditioned density and gamma, final-scalar packet masks",
-      feeds: "scalar publication and activity measurement",
+      writes: "conditioned density and gamma",
+      feeds: "density capacity repair and scalar publication",
     },
     toggle: {
       param: "surfaceSharpening", on: "on", off: "off",
       hint: "Toggle CM12 Sec. 3.5 Algorithm 2 surface sharpening. Final sparse scalar publication remains active when it is off.",
     },
     controls: [
+      correctionStageControl("sharpeningTau", "surfaceSharpening"),
       {
         kind: "param-range",
         param: "sharpeningStrength",
         label: "Sharpening strength",
         unit: "dose",
-        min: 0, max: 1, step: 0.05, digits: 2,
-        hint: "Fraction of Algorithm 2's per-step removed-density dose. One is the paper dose; reducing it tempers sharpening without disabling gamma diffusion.",
+        min: 0, max: 4, step: 0.05, digits: 2,
+        hint: "Multiplier of Algorithm 2's per-step removed-density dose. One is the paper dose; values above one strengthen it. Removal is limited to available density.",
         enabled: (context) => context.values.surfaceSharpening !== "off",
       },
       {
@@ -466,14 +477,45 @@ export const SPARSE_CM12_STAGES = Object.freeze({
         fixed(context.values.sharpeningDistance, 1)} cells · ${
         fixed(context.values.sharpeningTraceSteps, 0)} substeps`,
   },
+  "density-capacity-repair": {
+    label: "Density capacity repair", band: "transport", side: "left",
+    phase: { id: "fine-sdf-redistance", label: "Density capacity repair stage remainder" },
+    substages: {
+      "density-capacity-repair": {
+        id: "fine-sdf-redistance", label: "Conservative density-capacity repair",
+      },
+    },
+    lens: null,
+    toggle: {
+      param: "densityCapacityRepair", on: "on", off: "off",
+      hint: "Redistribute excess density independently of sharpening. Off leaves the conserved excess for pressure recovery.",
+    },
+    controls: [
+      correctionStageControl("densityCapacityRepairStrength", "densityCapacityRepair"),
+      correctionStageControl("densityCapacityRepairIterations", "densityCapacityRepair"),
+    ],
+    tip: {
+      summary: "Relays excess mass through open neighbouring faces using paired conservative debits and credits. Strength sets the fraction moved per pass; pass count sets the available relay distance.",
+      reads: "final density and solid fractions",
+      writes: "redistributed density",
+      feeds: "scalar publication and pressure volume recovery",
+    },
+    chip: context => context.values.densityCapacityRepair === "off" ? "disabled · excess retained"
+      : `${context.values.densityCapacityRepairIterations ?? 8} passes · ${fixed(context.values.densityCapacityRepairStrength ?? 1, 2)}× dose`,
+  },
   "scalar-publication": {
     label: "Scalar publication", band: "transport", side: "left",
     phase: { id: "other", label: "Scalar output publication" },
+    substages: {
+      "final-scalar-mask-publication": {
+        id: "fine-sdf-redistance", label: "FSM1 final-scalar packet-mask publication",
+      },
+    },
     lens: null,
     tip: {
-      summary: "Publishes the completed scalar output without modifying density or gamma.",
+      summary: "Publishes final-scalar packet masks and the completed scalar output without modifying density or gamma. This publication runs even when every correction is disabled.",
       reads: "completed scalar stage coverage",
-      writes: "frame scalar output receipt",
+      writes: "final-scalar packet masks and frame scalar output receipt",
       feeds: "body-force prediction",
       gate: "accepted frame control",
     },
@@ -542,7 +584,14 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       writes: "compatible RHS, initial direction, pipelined solver image",
       feeds: "sparse MGPCG",
     },
-    chip: () => "D = −M⁻¹GᵀW · first preconditioner sweep",
+    controls: [
+      correctionStageControl("volumeCorrection"),
+      correctionStageControl("volumeCorrectionStrength", "volumeCorrection"),
+      correctionStageControl("volumeCorrectionCap", "volumeCorrection"),
+    ],
+    chip: context => context.values.volumeCorrection === "off"
+      ? "incompressibility only · volume recovery off"
+      : `${fixed(context.values.volumeCorrectionStrength ?? 1, 2)}× volume recovery · eta ${fixed(context.values.volumeCorrectionCap ?? 1, 2)}`,
   },
   "pressure-solve": {
     label: "Pressure solve", band: "pressure", side: "left",

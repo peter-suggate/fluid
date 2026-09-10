@@ -1,3 +1,4 @@
+import { CORRECTION_PARAMS, correctionOptions, correctionValues, type SparseCM12CorrectionControls } from "./correction-controls";
 import { pressureCaptureParam, pressureCaptureDescriptor, SPARSE_CM12_PRESSURE_JOURNAL_SNAPSHOTS } from "./features/pressure-inspection/definition";
 import { ALGORITHM_PARAMS } from "./features/algorithms/definition";
 import { resolveMethodComposition } from "./composition";
@@ -23,7 +24,7 @@ import type {
 /** Sparse-resolution controls consumed by the interactive solver factory. */
 export type AdaptiveMassResolutionMode = "adaptive";
 
-export interface AdaptiveMassSolverOptions {
+export interface AdaptiveMassSolverOptions extends SparseCM12CorrectionControls {
   /** Optional compatibility spelling; adaptive is the only production policy. */
   readonly resolutionMode?: AdaptiveMassResolutionMode;
   /** Test-only construction seam for manufacturing a fine-start transition. */
@@ -49,9 +50,9 @@ export interface AdaptiveMassSolverOptions {
   readonly sharpeningDistance?: number;
   /** Forward-Euler substeps TraceAlongField may spend reaching D. */
   readonly sharpeningTraceSteps?: number;
-  /** Fraction of CM12 Algorithm 2's per-step removed-density dose. */
+  /** Multiplier of CM12 Algorithm 2's per-step removed-density dose. */
   readonly sharpeningStrength?: number;
-  /** Whether Sec. 3.4's two gamma-diffusion iterations run. */
+  /** Whether Sec. 3.4 gamma diffusion runs. */
   readonly gammaDiffusionEnabled?: boolean;
   /** Whether Sec. 3.5's conservative surface-sharpening transform runs. */
   readonly surfaceSharpeningEnabled?: boolean;
@@ -72,6 +73,7 @@ export interface AdaptiveMassSolverOptions {
 
 const params: MethodParamSpec[] = [
   ...ALGORITHM_PARAMS,
+  ...CORRECTION_PARAMS,
   ...ADAPTIVITY_PARAMS,
 
   {
@@ -150,11 +152,11 @@ const params: MethodParamSpec[] = [
     tier: "fine",
     unit: "dose",
     min: 0,
-    max: 1,
+    max: 4,
     step: 0.05,
     digits: 2,
     update: "runtime",
-    hint: "Scales Algorithm 2's per-step removed-density dose before its conservative mass-return trace. One is the paper dose; zero leaves gamma diffusion active but suppresses sharpening.",
+    hint: "Scales Algorithm 2's per-step removed-density dose before its conservative mass-return trace. One is the paper dose; higher values strengthen sharpening. The removed dose is bounded by available density. Zero suppresses sharpening.",
   },
   pressureCaptureParam,
 ];
@@ -215,6 +217,7 @@ export function adaptiveMassSolverOptions(
     surfaceFineRings: boundedInteger(values.surfaceFineRings, 1, 1, 8),
     activityPolicy: activityPolicy(values),
     timeStep: values.timeStep === "scene" ? "scene" : "paper",
+    ...correctionOptions(values),
     gammaDiffusionEnabled: values.gammaDiffusion !== "off",
     surfaceSharpeningEnabled: values.surfaceSharpening !== "off",
     pressureIterations: sparseCM12PressureIterations(values.pressureIterations),
@@ -288,6 +291,7 @@ export const adaptiveMassMethod: SimulationMethod = {
     const fineResolution: SparseBrickFineResolution = parsedFineResolution;
     return {
       ...values,
+      ...correctionValues(values),
       brickFineResolution: String(fineResolution),
       presentationPageResolution: String(fineResolution),
       maximumMacroSpanBricks:
@@ -317,6 +321,7 @@ export const adaptiveMassMethod: SimulationMethod = {
       maximumMacroSpanBricks: "auto",
       selectorMode: "coarse-first",
       surfaceFineRings: 1,
+      ...correctionValues({}),
       timeStep: "paper",
       gammaDiffusion: "on",
       surfaceSharpening: "on",
