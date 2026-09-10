@@ -3594,29 +3594,9 @@ fn nativeTransportFaceAt(position:vec3f,axis:u32,width:f32)->vec2f{
   let query=clamp(position+normal,vec3f(0.5),vec3f(p.dimensions.xyz)-vec3f(0.5));
   let owner=ownerCellAt(vec3i(floor(query)));
   if(owner==INVALID||cellMinimumWidth(owner)>width){return vec2f(0.0);}
-  // The accepted IBO/ITR address image already maps a regular positive-side
-  // cell to its negative face. Reuse the same packet/lane mapping as BFA1
-  // preparation instead of searching every template incident on that cell.
-  // Mixed-width donors, dynamic pages and exterior positive faces retain the
-  // general incidence lookup whenever this exact address does not match.
-  if(owner<ta(2u)&&cellMinimumWidth(owner)==width){
-    let brick=cellBrick(owner);let slot=cm12IBOAcceptedSlot();
-    if(cm12IBOLeafActive(slot,brick)){
-      let first=cm12IBOLeafCellFirst(slot,brick);
-      let dimensions=cm12IBOLeafDimensions(slot,brick);
-      if(owner>=first&&owner-first<dimensions.x*dimensions.y*dimensions.z){
-        let local=transferLocalCoordinate(owner-first,dimensions);
-        let address=cm12IBOTRAPacketForLocal(brick,local,slot);
-        if(address.x!=INVALID){
-          let donor=itr1StableRowForOwner(address.x,axis,address.y);
-          if(donor!=INVALID&&rowAxis(donor)==axis
-            &&all(abs(rowCenter(donor)-position)<=vec3f(1e-4))&&rowAccepted(donor)){
-            return nativeTransportFaceValue(donor,width);
-          }
-        }
-      }
-    }
-  }
+  // Preserve the incidence-first donor identity. Accepted adaptive face
+  // addresses may coincide geometrically without identifying the same row;
+  // axis/center equality alone changed symmetric-expansion transport.
   let incidenceStart=incidenceBegin(owner);let incidenceStop=incidenceEnd(owner);
   for(var at=incidenceStart;at<incidenceStop;at+=1u){
     let donor=incidenceRow(at);

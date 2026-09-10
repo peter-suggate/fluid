@@ -178,8 +178,9 @@ dawnTest("symmetric expansion allocates and wets sparse corner tiles",
         `conserved mass collapsed into rho=${maximumDensity}, shrinking visible volume`);
       assert.ok(cornerMass > 1e-3,
         `allocated corner tiles must accept transported liquid; measured ${cornerMass}`);
-      assert.ok(scalarD4Error(fields.density, 32, 16, 32) <= DENSITY_D4_LIMIT,
-        "expanded density must retain horizontal D4 symmetry");
+      const densityError = scalarD4Error(fields.density, 32, 16, 32);
+      assert.ok(densityError <= DENSITY_D4_LIMIT,
+        `expanded density must retain horizontal D4 symmetry: ${densityError} > ${DENSITY_D4_LIMIT}`);
       assert.equal(scalarD4Error(topology, 32, 16, 32), 0,
         "expanded accepted topology must retain exact horizontal D4 symmetry");
       assert.ok(velocityD4Error(fields.velocity, 32, 16, 32)

@@ -34,8 +34,9 @@ inside each invocation, though their destination rows are independent.
 
 ## Landed changes
 
-- Reuse accepted face addresses, retaining incidence lookup for unsupported
-  geometry and the original wetness/width checks.
+- Retain the incidence-first native donor identity. The attempted IBO/ITR
+  shortcut passed mini32 hashes but failed the symmetric-expansion scene and
+  has been removed (details below).
 - Dispatch the three interior axes independently. An adjacent axis-off/on
   comparison measured **11.141 / 7.406 ms** for interiors, **2.097 / 2.163 ms**
   for seams, and **47.841 / 43.450 ms** for the complete advance.
@@ -65,6 +66,48 @@ derivatives and reflections at 2:1 boundaries. A separate native oracle compares
 the regular interior gradient against ordinary eight-corner interpolation in
 108 cases spanning widths 1/2/4/8, solid masks, and boundary/clipped fallbacks.
 
+## Matched historical measurement
+
+A fresh September 6 run of `d5cb3502`, with the same mini32 scene, B8/P8,
+1/30 s, three warm-ups and twelve measured frames, measured 39.387 ms for
+native advance. The current retained changes measured 42.533 ms. These are
+simulation/presentation-publication timings, not browser FPS. The older
+one-warm-up/three-frame result is not a mature-flow comparison.
+
+| Stage | September 6 (ms) | Current (ms) |
+| --- | ---: | ---: |
+| Face preparation | 4.522 | 9.830 |
+| Surface sharpening | 3.080, including capacity repair | 4.456 |
+| Density capacity repair | included above | 2.359 |
+| Pressure solve | 14.484 | 9.962 |
+
+The slower named paths remain measurable even though a cheaper pressure
+solve partly offsets them in the whole advance.
+
+Two further exact-field caches were rejected after adjacent controls:
+
+- Sharpening owner-only halo: trace 3.342 → 4.063 ms and dose
+  0.786 → 1.704 ms. Archived on `codex/sharpening-owner-cache-experiment`
+  (`99cc9db5`); excluded from the live fixes.
+- Native face wetness/width receipt: total 42.992 → 44.433 ms.
+  Archived on `codex/face-wet-width-receipt-experiment` (`13f62f82`);
+  excluded from the live fixes.
+
+## Symmetry bisection
+
+The full gate reached a numerical failure hidden by earlier timeouts. Its
+8-step symmetric expansion density D4 error was 0.349228 with the direct
+IBO/ITR donor shortcut, versus 0.014906 before all the hot-path changes.
+Removing only that shortcut restored exactly 0.014906 while retaining axis
+parallelism, scalar terminal sampling and the interior sharpening gradient.
+The accepted axis and center checks did not preserve incidence-first donor
+identity. This optimization is removed from live code; the original commits
+remain available for reference. The synthetic address test and mini32 hashes
+were insufficient acceptance coverage.
+
+The remaining 0.014906 exceeds the unchanged 0.006 limit in the pre-optimization
+control too. It is an existing symmetry defect, not a passing gate.
+
 ## Acceptance
 
 The measured 43.4 ms combined result still exceeds the unchanged 40 ms mini32
@@ -74,3 +117,9 @@ performance. Further regular-kernel specialization is being measured.
 The intermediate full canonical run exhausted its unchanged 180-second budget:
 4 lanes passed, 7 timed out, and 6 were not reached. No timing ceiling or lane
 was weakened. The build and focused native face/sharpening tests passed.
+
+The latest full gate completed six lanes successfully (including clipped
+transfer, mini32 four-second conservation and the coarse-region surface),
+failed symmetry and mini32 timing (43.647 ms against 40 ms), timed out three
+lanes and exhausted its 180-second budget before six remaining lanes. The
+symmetry bisection above was run afterward. No ceiling or tolerance changed.
