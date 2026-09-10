@@ -1148,9 +1148,8 @@ class SimulationController {
    * and the document changes once, here, when the pointer is released. That
    * keeps one undo entry per gesture and one solver invalidation per edit.
    *
-   * Committing currently takes the renderer's existing solver-key rebuild
-   * path; Phase 1 of docs/WYSIWYG_EDITOR_PLAN.md replaces it with a warm
-   * re-seed so the edit is simulating again in ~100 ms.
+   * Sparse CM12 commits fluid geometry through resident shape edits. Lattice
+   * and unsupported seed changes still use the renderer's solver-key path.
    */
   beginEdit(label: string, paneId: PaneId = PRIMARY_PANE_ID) {
     this.runtime(paneId).pendingEdit = { label, snapshot: this.documentSnapshot(label, paneId) };

@@ -7380,6 +7380,14 @@ export class WebGPUSparseCM12Resident {
       [0, 0, 0], 0, 0, 0.004, true, activityPolicy);
   }
 
+  encodeAuthoredFluidEdit(encoder: GPUCommandEncoder, finestCellSize_m: number,
+    packed: { center: readonly [number, number, number]; radius: readonly [number, number, number]; extra: number; mode: number },
+    activityPolicy?: SparseCM12ActivityPolicy,
+    phase: "complete" | "prepare" | "apply" = "complete"): void {
+    this.encodeTopologyEditTransaction(encoder, finestCellSize_m, packed.center,
+      packed.radius, packed.mode, packed.extra, 0.004, true, activityPolicy, phase);
+  }
+
   encodeLiquidInjection(
     encoder: GPUCommandEncoder,
     finestCellSize_m: number,
@@ -7417,7 +7425,7 @@ export class WebGPUSparseCM12Resident {
     finestCellSize_m: number,
     centerFine: readonly [number, number, number],
     radiusFine: readonly [number, number, number],
-    mode: 0 | 1 | 2,
+    mode: number,
     jetRadiusFine: number,
     injectionDt_s: number,
     publishPresentation: boolean,
@@ -7438,10 +7446,11 @@ export class WebGPUSparseCM12Resident {
     const bricks = Math.ceil(leafCapacity / WORKGROUP_SIZE);
     if (mode === 0) encoder.clearBuffer(this.activity, 4 * REGION_EDIT_BACKING_RECEIPT_WORD, 4);
     if (phase !== "apply") {
+      const boundsRadius = mode === 10 || mode === 11 ? [jetRadiusFine, jetRadiusFine, jetRadiusFine] : radiusFine;
       const interactionPageCount = [0, 1, 2].map((axis) => {
-        const lower = Math.floor((centerFine[axis]! - radiusFine[axis]!)
+        const lower = Math.floor((centerFine[axis]! - boundsRadius[axis]!)
           / this.brickFineResolution);
-        const upper = Math.floor((centerFine[axis]! + radiusFine[axis]!)
+        const upper = Math.floor((centerFine[axis]! + boundsRadius[axis]!)
           / this.brickFineResolution);
         return Math.max(1, upper - lower + 1);
       }) as [number, number, number];

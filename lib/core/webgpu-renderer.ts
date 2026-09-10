@@ -1,3 +1,4 @@
+import { authoredFluidGeometryKey } from "./authored-fluid-edit";
 import { publishOpaqueSurfaceCapability } from "../svo/features/shading/deferred-specialization";
 import { validateLiveFluidEdit, type LiveFluidEdit, type LiveFluidEditResult } from "./live-fluid-edit";
 import type { FluidSurfaceRenderMode } from "../features/surface-display/definition";
@@ -526,7 +527,9 @@ export function gpuSceneStructuralKey(scene: SceneDescription, config: Simulatio
 }
 
 /**
- * Scene-derived solver inputs. `scene.terrain` belongs here and was previously
+ * Scene-derived solver inputs. Sparse CM12 adopts authored fluid geometry
+ * through its resident edit seam; other methods still reseed for geometry.
+ * `scene.terrain` belongs here and was previously
  * absent from the key entirely, so a terrain edit never reached the solver —
  * the editor's terrain handles depend on this being fixed.
  *
@@ -542,9 +545,10 @@ export function gpuSceneStructuralKey(scene: SceneDescription, config: Simulatio
  * describe the same solver, and the size actually simulated is the extent over
  * that dimension — both already keyed.
  */
-export function gpuSceneSeedKey(scene: SceneDescription): string {
+export function gpuSceneSeedKey(scene: SceneDescription, methodId?: string): string {
   const c = scene.container;
-  return `${c.width_m}:${c.height_m}:${c.depth_m}:${c.shape ?? "box"}:${c.fillFraction}:${scene.fluid.initialCondition}:${JSON.stringify(scene.fluid.initialDamBreakDimensions_m ?? null)}:${JSON.stringify(scene.fluid.initialDamBreakOrigin_m ?? null)}:${JSON.stringify(scene.fluid.initialBrickSeeds_m ?? null)}:${scene.fluid.initialBrickSeedsAdditive ?? false}:${JSON.stringify(scene.fluid.initialLiquidVolumes ?? null)}:${JSON.stringify(scene.fluid.initialVelocity_m_s ?? null)}:${JSON.stringify(scene.fluid.initialHeightField ?? null)}:${JSON.stringify(scene.fluid.refinementKeyframes ?? null)}:${JSON.stringify(scene.terrain ?? null)}:${inflowBudgetKey(scene.fluid.inflow)}`;
+  const geometry = methodId === "adaptive-mass" ? "live-fluid" : authoredFluidGeometryKey(scene);
+  return `${c.width_m}:${c.height_m}:${c.depth_m}:${c.shape ?? "box"}:${geometry}:${JSON.stringify(scene.fluid.initialVelocity_m_s ?? null)}:${JSON.stringify(scene.fluid.initialHeightField ?? null)}:${JSON.stringify(scene.fluid.refinementKeyframes ?? null)}:${JSON.stringify(scene.terrain ?? null)}:${inflowBudgetKey(scene.fluid.inflow)}`;
 }
 
 /**
@@ -634,7 +638,7 @@ function inflowBudgetKey(inflow: SceneDescription["fluid"]["inflow"]): string {
  */
 export function sceneEditRequiresReset(before: SceneDescription, after: SceneDescription, methodId: string): boolean {
   return sceneStructuralKey(before) !== sceneStructuralKey(after)
-    || gpuSceneSeedKey(before) !== gpuSceneSeedKey(after)
+    || gpuSceneSeedKey(before, methodId) !== gpuSceneSeedKey(after, methodId)
     || rigidAllocationKey(before, methodId) !== rigidAllocationKey(after, methodId);
 }
 
@@ -652,7 +656,7 @@ function inflowAimKey(inflow: SceneDescription["fluid"]["inflow"]): string {
  * the GPU as params rather than as geometry.
  */
 export function gpuSceneUniformKey(scene: SceneDescription): string {
-  return `${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.x}:${scene.fluid.gravity_m_s2.y}:${scene.fluid.gravity_m_s2.z}:${scene.numerics.fixedDt_s}:${scene.numerics.maxDt_s}:${inflowAimKey(scene.fluid.inflow)}:${rigidBodyRosterKey(scene.rigidBodies)}:${refinementRegionKey(scene)}:${JSON.stringify(scene.solidVoxels)}`;
+  return `${authoredFluidGeometryKey(scene)}:${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.x}:${scene.fluid.gravity_m_s2.y}:${scene.fluid.gravity_m_s2.z}:${scene.numerics.fixedDt_s}:${scene.numerics.maxDt_s}:${inflowAimKey(scene.fluid.inflow)}:${rigidBodyRosterKey(scene.rigidBodies)}:${refinementRegionKey(scene)}:${JSON.stringify(scene.solidVoxels)}`;
 }
 
 /**
@@ -684,7 +688,7 @@ function refinementRegionKey(scene: SceneDescription): string {
  * ignoring the edit.
  */
 export function gpuSceneSolverKey(scene: SceneDescription, config: SimulationRunConfig): string {
-  return `${config.simulationEpoch ?? 0}:${gpuSceneStructuralKey(scene, config)}:${gpuSceneSeedKey(scene)}:${rigidAllocationKey(scene, config.methodId)}`;
+  return `${config.simulationEpoch ?? 0}:${gpuSceneStructuralKey(scene, config)}:${gpuSceneSeedKey(scene, config.methodId)}:${rigidAllocationKey(scene, config.methodId)}`;
 }
 
 

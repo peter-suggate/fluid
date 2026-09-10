@@ -3,7 +3,7 @@ import type {
   SparseAdaptiveGridConsumerSource,
   WebGPUFineLevelSetBrickSource,
 } from "../core/levelset-consumer-abi";
-import type { SceneDescription } from "../core/model";
+import type { InitialLiquidVolume, SceneDescription } from "../core/model";
 import type { RigidBodyState } from "../core/rigid-body";
 
 export type {
@@ -74,11 +74,19 @@ export interface SparseWorldSceneEdit {
   readonly scene: SceneDescription;
 }
 
+/** Current-field occupancy edit for an authored fluid primitive. */
+export interface SparseWorldLiquidVolumeEdit {
+  readonly kind: "liquid-volume";
+  readonly operation: "add" | "remove";
+  readonly volume: InitialLiquidVolume;
+}
+
 /** Every application-authored change enters the world through this union. */
 export type SparseWorldEdit =
   | SparseWorldLiquidEllipsoidEdit
   | SparseWorldLiquidJetEdit
-  | SparseWorldSceneEdit;
+  | SparseWorldSceneEdit
+  | SparseWorldLiquidVolumeEdit;
 
 export interface SparseWorldEditReceipt {
   readonly disposition: "applied" | "rebuild-required";

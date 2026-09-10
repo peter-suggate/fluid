@@ -3786,6 +3786,13 @@ fn publishSparseCM12MovingSolidActivity(@builtin(global_invocation_id)gid:vec3u)
 // Coverage of one accepted cell by either an editor drop or this frame's
 // nozzle-swept cylinder. injectionCenter.w is the mode (zero off, one
 // ellipsoid, two hose); downstream hose fluid is never painted here.
+fn injectionRemoving()->bool{
+  let mode=u32(max(0.0,round(p.injectionCenter.w)));
+  return mode==5u||mode==6u||mode==7u||mode==9u||mode==11u;
+}
+fn injectionBoundsRadius()->vec3f{
+  return select(p.injectionRadius.xyz,vec3f(p.injectionRadius.w),p.injectionCenter.w>=10.0);
+}
 fn injectionCoverageAt(point:vec3f,width:f32)->f32{
   if(p.injectionCenter.w==2.0){
     let halfLength=length(p.injectionRadius.xyz);
@@ -3801,6 +3808,15 @@ fn injectionCoverageAt(point:vec3f,width:f32)->f32{
   }
   let mode=u32(round(p.injectionCenter.w));
   let relative=point-p.injectionCenter.xyz;
+  if(mode==8u||mode==9u){
+    let q=vec2f(length(relative.xy)-p.injectionRadius.x,abs(relative.z)-p.injectionRadius.z);
+    let signed=length(max(q,vec2f(0.0)))+min(max(q.x,q.y),0.0);
+    return clamp(0.5-signed/max(width,1e-6),0.0,1.0);
+  }
+  if(mode==10u||mode==11u){
+    let signed=max(length(relative)-p.injectionRadius.w,dot(relative,p.injectionRadius.xyz));
+    return clamp(0.5-signed/max(width,1e-6),0.0,1.0);
+  }
   if(mode==3u||mode==6u){
     let q=abs(relative)-p.injectionRadius.xyz;
     let signed=length(max(q,vec3f(0.0)))+min(max(q.x,max(q.y,q.z)),0.0);
@@ -3847,8 +3863,8 @@ fn injectionReachesBrick(brick:u32)->bool{
   // sharing only a face/edge with the drop is promoted too. injectLiquid still
   // applies the exact smooth ellipsoid coverage and writes no false liquid
   // into leaves admitted by the conservative bounding-box test.
-  return all(p.injectionCenter.xyz+p.injectionRadius.xyz>=lower)
-    &&all(p.injectionCenter.xyz-p.injectionRadius.xyz<=upper);
+  return all(p.injectionCenter.xyz+injectionBoundsRadius()>=lower)
+    &&all(p.injectionCenter.xyz-injectionBoundsRadius()<=upper);
 }
 
 // Wetting walks each brick's accepted template range rather than the accepted
@@ -3875,7 +3891,7 @@ fn injectLiquid(@builtin(global_invocation_id)gid:vec3u){
     // swept-plug mass; the bounded conservative overflow passes below resolve
     // temporary source compression into downstream capacity before publish.
     let hose=p.injectionCenter.w==2.0;
-    let removing=p.injectionCenter.w>=5.0;
+    let removing=injectionRemoving();
     for(var bank=0u;bank<2u;bank+=1u){
       let at=select(p.stateOffsets0.x,p.stateOffsets0.y,bank!=0u)+id;
       let previous=state[at];
@@ -7877,10 +7893,10 @@ fn candidateTopologyPageBase(page:u32)->u32{
 // uniform voxel-solid field. No coordinate plane is an implicit boundary.
 @compute @workgroup_size(4,4,4)
 fn allocateSparseWorldInteractionPages(@builtin(global_invocation_id)gid:vec3u){
-  if(p.injectionCenter.w<0.5||p.injectionCenter.w==2.0||p.injectionCenter.w>=5.0){return;}
+  if(p.injectionCenter.w<0.5||p.injectionCenter.w==2.0||injectionRemoving()){return;}
   let width=f32(BRICK_FINE_RESOLUTION);
-  let lower=vec3i(floor((p.injectionCenter.xyz-p.injectionRadius.xyz)/width));
-  let upper=vec3i(floor((p.injectionCenter.xyz+p.injectionRadius.xyz)/width));
+  let lower=vec3i(floor((p.injectionCenter.xyz-injectionBoundsRadius())/width));
+  let upper=vec3i(floor((p.injectionCenter.xyz+injectionBoundsRadius())/width));
   let extent=vec3u(upper-lower+vec3i(1));
   if(any(gid>=extent)){return;}
   let targetCoordinate=lower+vec3i(gid);

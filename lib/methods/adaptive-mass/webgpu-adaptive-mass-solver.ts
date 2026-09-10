@@ -884,6 +884,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       throw new Error(receipt.reason ?? "Sparse world requires a rebuild for this scene edit");
     }
     this.scene = scene;
+    if (this.sparseRuntime.pendingLiquidInteractions) this.scheduleTopologyGeneration();
     this.topologyRegionStamp = regionStamp;
     this.topologyGenerationPolicyDirty ||= regionsChanged;
     this.resetPressureIterationFeedback();

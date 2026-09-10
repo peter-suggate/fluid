@@ -1,3 +1,4 @@
+import { authoredFluidEdits, packAuthoredFluidVolume } from "../../core/authored-fluid-edit";
 import type { SparseCM12PressureJournalCapacityRequest } from "../../methods/adaptive-mass/features/pressure-inspection/definition";
 import type { SparseAtlasCompositeGrid } from
   "../../methods/adaptive-mass/sparse-atlas-composite-projection";
@@ -354,6 +355,7 @@ class AdoptedCM12SparseWorld implements SparseWorld {
   private solidWorldStamp: string;
   private solidEnvironment: SceneDescription["environment"];
   private solidScenery: SceneDescription["scenery"];
+  private solidGraphStamp: string;
   private rigidBodies: SceneDescription["rigidBodies"];
   private readonly deferredLiquidInteractions: {
     interaction: SparseWorldFluidEdit; configuration: CM12SparseWorldStepConfiguration;
@@ -379,7 +381,12 @@ class AdoptedCM12SparseWorld implements SparseWorld {
     const encoder = this.options.gpuDevice.createCommandEncoder({
       label: `Sparse-world liquid interaction ${phase}`,
     });
-    if (interaction.kind === "liquid-ellipsoid") {
+    if (interaction.kind === "liquid-volume") {
+      const packed = packAuthoredFluidVolume(interaction.volume, interaction.operation,
+        configuration.finestCellSize_m, origin);
+      this.resident.encodeAuthoredFluidEdit(encoder, configuration.finestCellSize_m,
+        packed, configuration.activityPolicy, phase);
+    } else if (interaction.kind === "liquid-ellipsoid") {
       this.resident.encodeLiquidInjection(encoder, configuration.finestCellSize_m,
         interaction.center_m.map((value, axis) =>
           (value - origin[axis]!) * inverseCell) as [number, number, number],
@@ -402,9 +409,11 @@ class AdoptedCM12SparseWorld implements SparseWorld {
     private readonly device: SparseWorldDevice,
   ) {
     this.generation = this.resident.globalFineLevelSetSource.generation;
+    this.authoredScene = options.initialScene;
     this.solidWorldStamp = solidWorldContentStamp(options.initialScene);
     this.solidEnvironment = options.initialScene.environment;
     this.solidScenery = options.initialScene.scenery;
+    this.solidGraphStamp = JSON.stringify([this.solidEnvironment, this.solidScenery]);
     this.rigidBodies = options.initialScene.rigidBodies;
     options.trace?.record({
       kind: "world-created",
@@ -412,6 +421,8 @@ class AdoptedCM12SparseWorld implements SparseWorld {
       capacityTiles: options.capacityTiles,
     });
   }
+
+  private authoredScene: SceneDescription;
 
   validateSceneEdit(scene: SceneDescription): void {
     this.resident.validateSolidWorld(fluidSolidWorldForScene(scene));
@@ -437,21 +448,29 @@ class AdoptedCM12SparseWorld implements SparseWorld {
         // colliders depend on the SolidWorld stamp plus the environment graph;
         // only a change to that authority pays the voxel upload.
         const nextSolidWorldStamp = solidWorldContentStamp(edit.scene);
+        // Worker transport clones object identities even for a fluid-only edit.
+        const graphStamp = edit.scene.environment === this.solidEnvironment
+          && edit.scene.scenery === this.solidScenery ? this.solidGraphStamp
+          : JSON.stringify([edit.scene.environment, edit.scene.scenery]);
         const solidWorldChanged = nextSolidWorldStamp !== this.solidWorldStamp
-          || edit.scene.environment !== this.solidEnvironment
-          || edit.scene.scenery !== this.solidScenery;
+          || graphStamp !== this.solidGraphStamp;
         if (solidWorldChanged) {
           this.resident.setSolidWorld(fluidSolidWorldForScene(edit.scene));
           this.solidWorldStamp = nextSolidWorldStamp;
-          this.solidEnvironment = edit.scene.environment;
-          this.solidScenery = edit.scene.scenery;
         }
+        this.solidEnvironment = edit.scene.environment;
+        this.solidScenery = edit.scene.scenery;
+        this.solidGraphStamp = graphStamp;
         this.resident.setRefinementRegionParameters(packSparseCM12RefinementRegions(
           sceneRefinementRegions(edit.scene), refinementRegionLattice(edit.scene)));
         if (edit.scene.rigidBodies !== this.rigidBodies) {
           this.options.rigidSystem?.setScene(edit.scene);
           this.rigidBodies = edit.scene.rigidBodies;
         }
+        for (const change of authoredFluidEdits(this.authoredScene, edit.scene)) {
+          this.edit({ kind: "liquid-volume", ...change });
+        }
+        this.authoredScene = edit.scene;
         this.generation += 1;
         this.state = this.currentFault ? "fault" : "running";
         return Object.freeze({
@@ -598,6 +617,7 @@ class AdoptedCM12SparseWorld implements SparseWorld {
   private validInteraction(
     interaction: SparseWorldFluidEdit,
   ): SparseWorldFluidEdit {
+    if (interaction.kind === "liquid-volume") return structuredClone(interaction);
     if (interaction.kind === "liquid-ellipsoid") {
       if (interaction.center_m.some((value) => !Number.isFinite(value))
         || interaction.radii_m.some((value) => !(value > 0) || !Number.isFinite(value))) {

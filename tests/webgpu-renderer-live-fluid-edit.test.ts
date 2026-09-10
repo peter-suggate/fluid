@@ -129,3 +129,28 @@ test("horizontal gravity edits reach live uniforms without rebuilding the solver
     assert.equal(sceneEditRequiresReset(before, after, "adaptive-mass"), false);
   }
 });
+
+
+test("authored fluid body edits keep Sparse CM12 attached and notify its live scene seam", () => {
+  const before = createMinimalPowerDamBreak64Scene();
+  const config: SimulationRunConfig = { methodId: "adaptive-mass", quality: "balanced", values: {} };
+  const changes = [
+    (s: typeof before) => { s.container.fillFraction *= 0.5; },
+    (s: typeof before) => { s.fluid.initialDamBreakOrigin_m = { x: .2, y: .1, z: .2 }; },
+    (s: typeof before) => { s.fluid.initialDamBreakDimensions_m = { x: .4, y: .5, z: .4 }; },
+    (s: typeof before) => { s.fluid.initialBrickSeeds_m = [{ x: 0, y: .2, z: 0 }]; },
+    (s: typeof before) => { s.fluid.initialLiquidVolumes = [{ shape: "sphere", center_m: { x: 0, y: 1, z: 0 }, radius_m: .2 }]; },
+  ];
+  for (const change of changes) {
+    const after = structuredClone(before); change(after);
+    assert.equal(sceneEditRequiresReset(before, after, config.methodId), false);
+    assert.equal(gpuSceneSolverKey(before, config), gpuSceneSolverKey(after, config));
+    assert.notEqual(gpuSceneUniformKey(before), gpuSceneUniformKey(after));
+    assert.equal(sceneEditRequiresReset(before, after, "losasso"), true,
+      "methods without resident shape editing retain their seed reset");
+  }
+  const resetConfig = { ...config, simulationEpoch: 1 };
+  assert.notEqual(gpuSceneSolverKey(before, config), gpuSceneSolverKey(before, resetConfig));
+  const resized = structuredClone(before); resized.container.width_m *= 2;
+  assert.equal(sceneEditRequiresReset(before, resized, config.methodId), true);
+});
