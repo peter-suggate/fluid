@@ -1,7 +1,7 @@
 import type { SparseCM12BrickTileFaceAddressLayout } from
   "./sparse-cm12-brick-tile-face-address-program";
 
-/** Production split-face preparation/projection over the accepted ITR1 slot. */
+/** Production split-face pressure projection over the accepted ITR1 slot. */
 export function createSparseCM12BrickTileFaceAddressWGSL(options: Readonly<{
   layout: SparseCM12BrickTileFaceAddressLayout;
   arenaName?: string;
@@ -27,43 +27,14 @@ fn bfa1OwnerLocalCoordinate(stableTile:u32,axis:u32,lane:u32)->u32{
   if(axis==1u){return 4u*((localTile>>1u)&1u)+((lane>>2u)&3u);}
   return 4u*((localTile>>2u)&1u)+((lane>>4u)&3u);
 }
-fn bfa1Prepare(row:u32){if(row!=BFA1_INVALID&&rowAccepted(row)){
-  prepareTransportFaceRow(row);}}
 fn bfa1Project(row:u32){if(row!=BFA1_INVALID&&rowAccepted(row)&&pcmRowContains(row)){
   projectPressureRow(row);state[sourceFaceVelocity()+row]=state[destinationFaceVelocity()+row];}}
-@compute @workgroup_size(64)
-fn prepareSparseCM12InteriorFaceTiles(@builtin(workgroup_id)wid:vec3u,
- @builtin(local_invocation_index)lane:u32){
-  let ordinal=bfa1Ordinal(wid);if(ordinal>=BFA1_INTERIOR_COUNT){return;}
-  let stableTile=bfa1Load(BFA1_INTERIOR_BASE+ordinal);
-  let packet=bfa1StablePacket(stableTile);
-  // Oriented rows read frozen support and own distinct destination entries.
-  // Dispatch their axes independently instead of serializing three traces
-  // in each invocation of the expensive characteristic kernel.
-  let axis=wid.z;if(axis>=3u){return;}
-  let row=itr1StableRowForOwner(packet,axis,lane);
-  if(bfa1OwnerLocalCoordinate(stableTile,axis,lane)>0u
-    &&row!=BFA1_INVALID&&rowKind(row)==0u){bfa1Prepare(row);}
-}
 fn bfa1SeamAddress(wid:vec3u,lane:u32)->vec4u{
   let packetOrdinal=bfa1Ordinal(wid);if(packetOrdinal>=BFA1_SEAM_PACKET_COUNT){return vec4u(BFA1_INVALID);}
   let ordinal=64u*packetOrdinal+lane;if(ordinal>=BFA1_SEAM_COUNT){return vec4u(BFA1_INVALID);}
   let packed=bfa1Load(BFA1_SEAM_BASE+ordinal);let stableTile=packed>>9u;
   let address=packed&0x1ffu;let family=address/64u;let ownerLane=address&63u;
   return vec4u(bfa1StablePacket(stableTile),family,ownerLane,0u);
-}
-@compute @workgroup_size(64)
-fn prepareSparseCM12SeamFacePackets(@builtin(workgroup_id)wid:vec3u,
- @builtin(local_invocation_index)lane:u32){
-  let address=bfa1SeamAddress(wid,lane);if(address.x==BFA1_INVALID||address.y>=3u){return;}
-  bfa1Prepare(itr1StableNegativeBoundaryRowForOwner(address.x,address.y,address.z));
-}
-@compute @workgroup_size(64)
-fn prepareSparseCM12SparseAirFacePackets(@builtin(workgroup_id)wid:vec3u,
- @builtin(local_invocation_index)lane:u32){
-  let address=bfa1SeamAddress(wid,lane);if(address.x==BFA1_INVALID||address.y<3u){return;}
-  bfa1Prepare(itr1StablePositiveSparseAirRowAndBucketOwner(
-    address.x,address.y-3u,address.z).x);
 }
 @compute @workgroup_size(64)
 fn projectSparseCM12InteriorFaceTiles(@builtin(workgroup_id)wid:vec3u,

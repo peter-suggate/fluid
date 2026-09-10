@@ -123,3 +123,29 @@ transfer, mini32 four-second conservation and the coarse-region surface),
 failed symmetry and mini32 timing (43.647 ms against 40 ms), timed out three
 lanes and exhausted its 180-second budget before six remaining lanes. The
 symmetry bisection above was run afterward. No ceiling or tolerance changed.
+
+## Compact accepted-row execution
+
+Face preparation now consumes the existing compact accepted-row list, including
+frontier rows, instead of scanning immutable fine template tiles. The former
+interior, seam and sparse-air preparation entry points were removed; BFA remains
+for pressure projection. This retains one independent invocation per accepted
+face and does not change the characteristic or donor calculation.
+
+Adjacent native comparisons, with the unsafe donor shortcut already removed:
+
+| Scene | Fixed tile face stage → compact (ms) | Whole advance → compact (ms) |
+| --- | ---: | ---: |
+| mini32, warm-up3/measured12 | 10.158 → 9.699 | 42.926 → 42.992 |
+| deep hydrostatic, warm-up1/measured3 | 2.294 → 1.573 | 15.925 → 14.549 |
+
+Both scenes retained identical density and gamma hashes. The eight-step
+symmetric-expansion D4 error remained exactly0.014906167984008789, matching the
+pre-optimization control. Ten CPU topology/scheduling checks, the stage timing
+contract and the build passed. The full unchanged gate is rerun after cutover.
+
+A diagnostic in the real symmetric scene additionally identified the removed
+shortcut's alias: row13967 had one term (cell3072), while incidence row37472
+had two terms (cells11344 and3072). The shortcut selected the coincident
+one-sided row after neighboring sparse support appeared. Geometry equality
+and `rowAccepted` alone did not establish donor authority.

@@ -161,13 +161,13 @@ test("one sibling-octet owner preserves the exhaustive detail maximum", () => {
   }
 });
 
-test("BFA1 prepares and projects accepted rows without a transient DFRM plane", () => {
+test("Face preparation reuses accepted rows without a transient DFRM plane", () => {
   const resident = readFileSync(new URL(
     "../../../webgpu-sparse-cm12-resident.ts",
     import.meta.url,
   ), "utf8");
-  assert.match(resident, /dispatch\("prepareSparseCM12InteriorFaceTiles"/);
-  assert.match(resident, /dispatch\("prepareSparseCM12SeamFacePackets"/);
+  assert.match(resident, /dispatchAccepted\("prepareSparseCM12AcceptedFaceRows", "row"\)/);
+  assert.doesNotMatch(resident, /prepareSparseCM12InteriorFaceTiles|prepareSparseCM12SeamFacePackets/);
   assert.doesNotMatch(resident, /DirtyFaceRowMask|compileSparseCM12DirtyFaceRowMasks/);
   assert.doesNotMatch(resident, /dispatchAccepted\("measureDivergenceDiagnostics"/);
   assert.match(resident, /dispatchAccepted\("collocateAndDiagnose", "cell"\)/);

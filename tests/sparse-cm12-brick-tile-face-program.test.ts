@@ -124,8 +124,8 @@ test("BFA1 all-rung addresses cover the concrete accepted face program", () => {
   assert.ok(universal.layout.interiorTileCount >= accepted.layout.interiorTileCount);
   assert.ok(universal.layout.seamAddressCount >= accepted.layout.seamPortCount);
   const source = createSparseCM12BrickTileFaceAddressWGSL({ layout: universal.layout });
-  assert.match(source, /fn prepareSparseCM12InteriorFaceTiles/);
-  assert.match(source, /fn prepareSparseCM12SeamFacePackets/);
+  assert.match(source, /fn projectSparseCM12InteriorFaceTiles/);
+  assert.match(source, /fn projectSparseCM12SeamFacePackets/);
   assert.match(source, /fn bfa1Project\(row:u32\).*rowAccepted\(row\)/s);
   assert.doesNotMatch(source, /DFRM|dfrm1|bfa1Selected/);
 });

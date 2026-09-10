@@ -333,26 +333,14 @@ export const SPARSE_CM12_STAGES = Object.freeze({
         id: "power-topology",
         label: "Resident face-velocity support clear + publication",
       },
-      "dirty-face-row-preparation": {
+      "accepted-face-row-preparation": {
         id: "power-topology",
-        label: "Dynamic frontier face-row preparation",
-      },
-      "interior-face-row-preparation": {
-        id: "power-topology",
-        label: "Accepted leaf interior face preparation",
-      },
-      "seam-face-row-preparation": {
-        id: "power-topology",
-        label: "Accepted leaf seam face preparation",
-      },
-      "sparse-air-face-row-preparation": {
-        id: "power-topology",
-        label: "Sparse air boundary face preparation",
+        label: "Compact accepted face preparation",
       },
     },
     lens: null,
     tip: {
-      summary: "Clears retired face-velocity support, republishes accepted-cell support, and traces accepted regular and 2:1 face-port rows where extended velocity is available.",
+      summary: "Clears retired face-velocity support, republishes accepted-cell support, and traces the compact accepted row list where extended velocity is available. Coarse leaves dispatch only their accepted faces.",
       reads: "extended transport velocity, accepted cells and composite row topology",
       writes: "oriented face transport rows",
       feeds: "coupled conservative transport",

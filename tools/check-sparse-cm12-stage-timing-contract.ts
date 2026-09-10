@@ -55,7 +55,7 @@ for (const seamName of ["velocity-extension-mask-initialization",
   assert.match(resident, new RegExp(`closeSubstage\\("${seamName}"\\)`),
     `VEX2 timing seam ${seamName} is missing`);
 }
-for (const seamName of ["face-support-publication", "dirty-face-row-preparation"]) {
+for (const seamName of ["face-support-publication", "accepted-face-row-preparation"]) {
   assert.match(resident, new RegExp(`closeSubstage\\("${seamName}"\\)`),
     `face-preparation timing seam ${seamName} is missing`);
 }

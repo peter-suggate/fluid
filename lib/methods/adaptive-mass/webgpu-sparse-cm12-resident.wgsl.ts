@@ -3762,14 +3762,13 @@ fn prepareTransportFaceRow(row:u32){
   }
   finishTransportFaceRow(row,characteristic,touchesLiquid);
 }
-// BFA1 is the immutable host-template fast path. Signed frontier rows do not
-// exist when that address image is compiled, so replay only the dynamic suffix
-// of the compact accepted-row worklist through the identical face preparation
-// primitive. No host row is visited twice.
+// The accepted topology already publishes every physical row exactly once.
+// Reuse that compact domain, including sparse frontier rows, so coarse leaves
+// do not dispatch rejected lanes from every immutable fine template tile.
 @compute @workgroup_size(64)
-fn prepareSparseCM12DynamicFaceRows(@builtin(global_invocation_id)gid:vec3u){
+fn prepareSparseCM12AcceptedFaceRows(@builtin(global_invocation_id)gid:vec3u){
   let row=acceptedTemplateRowInvocation(gid.x);
-  if(row==INVALID||row<ta(3u)||!rowAccepted(row)){return;}
+  if(row==INVALID||!rowAccepted(row)){return;}
   prepareTransportFaceRow(row);
 }
 @compute @workgroup_size(64)

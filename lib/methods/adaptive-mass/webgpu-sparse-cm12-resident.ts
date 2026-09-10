@@ -401,10 +401,7 @@ export const SPARSE_CM12_RESIDENT_STAGE_SUBSTAGES = Object.freeze({
   ],
   "face-preparation": [
     "face-support-publication",
-    "interior-face-row-preparation",
-    "seam-face-row-preparation",
-    "sparse-air-face-row-preparation",
-    "dirty-face-row-preparation",
+    "accepted-face-row-preparation",
   ],
   "conservative-transport": [
     "transport-trace",
@@ -5511,7 +5508,7 @@ export class WebGPUSparseCM12Resident {
         ]).flat(),
       ] as const : []),
       "initializeVelocityExtensionPackets", "advanceVelocityExtensionPackets",
-      "prepareSparseCM12DynamicFaceRows", "projectSparseCM12DynamicFaceRows",
+      "prepareSparseCM12AcceptedFaceRows", "projectSparseCM12DynamicFaceRows",
       "forceFaces", "enforceSparseCM12InflowFaces",
       "classifyPressureCells", "compileCanonicalPressureRows",
       "beginCanonicalPressureCells", "beginCanonicalPressureRows",
@@ -5598,9 +5595,6 @@ export class WebGPUSparseCM12Resident {
       "publishFrozenPressureCoefficients",
       "clearSparseCM12RetiredFaceVelocitySupport",
       "publishSparseCM12FaceVelocitySupport",
-      "prepareSparseCM12InteriorFaceTiles",
-      "prepareSparseCM12SeamFacePackets",
-      "prepareSparseCM12SparseAirFacePackets",
       "projectSparseCM12InteriorFaceTiles",
       "projectSparseCM12SeamFacePackets",
       "projectSparseCM12SparseAirFacePackets",
@@ -6349,23 +6343,8 @@ export class WebGPUSparseCM12Resident {
         this.incrementalActivityLayout.brickCount);
       this.refinementPolicyDirty = false;
       closeSubstage("face-support-publication");
-      dispatch("prepareSparseCM12InteriorFaceTiles",
-        Math.min(this.faceAddressLayout.dispatchWidth,
-          this.faceAddressLayout.interiorTileCount),
-        this.faceAddressLayout.interiorDispatchRows, 3);
-      closeSubstage("interior-face-row-preparation");
-      dispatch("prepareSparseCM12SeamFacePackets",
-        Math.min(this.faceAddressLayout.dispatchWidth,
-          this.faceAddressLayout.seamPacketCount),
-        this.faceAddressLayout.seamDispatchRows);
-      closeSubstage("seam-face-row-preparation");
-      dispatch("prepareSparseCM12SparseAirFacePackets",
-        Math.min(this.faceAddressLayout.dispatchWidth,
-          this.faceAddressLayout.seamPacketCount),
-        this.faceAddressLayout.seamDispatchRows);
-      closeSubstage("sparse-air-face-row-preparation");
-      dispatchAccepted("prepareSparseCM12DynamicFaceRows", "row");
-      closeSubstage("dirty-face-row-preparation");
+      dispatchAccepted("prepareSparseCM12AcceptedFaceRows", "row");
+      closeSubstage("accepted-face-row-preparation");
     });
     stage("conservative-transport", ({ closeSubstage }) => {
       useBindGroup(this.transportBindGroup);
@@ -9571,7 +9550,7 @@ export class WebGPUSparseCM12Resident {
       transportPacketCompilerWorkgroups:
         this.transportPacketAuthorityLayout?.compilerWorkgroupCount ?? 0,
       facePreparationLeafCount: 0,
-      facePreparationMode: "brick-owned" as const,
+      facePreparationMode: "accepted-rows" as const,
       faceAddressProgramBytes: this.faceAddressLayout.totalBytes,
       faceAddressInteriorTileCount: this.faceAddressLayout.interiorTileCount,
       faceAddressSeamCount: this.faceAddressLayout.seamAddressCount,
