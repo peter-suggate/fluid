@@ -27,12 +27,18 @@ const ITR1_TEMPLATE_COUNT:u32=${l.templateCount}u;
 fn itr1Load(at:u32)->u32{return atomicLoad(&${arena}[at]);}
 fn itr1Directory(templateId:u32)->vec4u{
   if(templateId>=ITR1_TEMPLATE_COUNT){return vec4u(ITR1_INVALID);}
-  let at=ITR1_DIRECTORY+5u*templateId;
+  let at=ITR1_DIRECTORY+6u*templateId;
   return vec4u(itr1Load(at),itr1Load(at+1u),itr1Load(at+2u),itr1Load(at+3u));
 }
 fn itr1SparseAirOwnerBase(templateId:u32)->u32{
   if(templateId>=ITR1_TEMPLATE_COUNT){return ITR1_INVALID;}
-  return itr1Load(ITR1_DIRECTORY+5u*templateId+4u);
+  return itr1Load(ITR1_DIRECTORY+6u*templateId+4u);
+}
+fn itr1OwnerRange(templateId:u32,boundary:u32)->vec2u{
+ let directory=itr1Directory(templateId);
+ let entries=ITR1_BASE+itr1Load(ITR1_DIRECTORY+6u*templateId+5u);
+ return entries+vec2u(itr1Load(ITR1_BASE+directory.z+boundary),
+   itr1Load(ITR1_BASE+directory.z+boundary+1u));
 }
 fn itr1Boundary(local:vec3u,axis:u32,resolution:u32)->u32{
   let u=select(local.x,local.y,axis==0u);
@@ -50,38 +56,28 @@ fn itr1StableRowAndBucketOwner(packet:u32,axis:u32,lane:u32)->vec2u{
       +dims.x*((local.y-1u)+(dims.y-1u)*local.z),leaf);}
     return vec2u(${p}IBOCanonicalRowBase(descriptor,2u)+local.x
       +dims.x*(local.y+dims.y*(local.z-1u)),leaf);}
-  let dims=${p}IBOLeafDimensions(slot,leaf);
-  for(var side=0u;side<6u;side+=1u){if((side>>1u)!=axis
-      ||local[axis]!=select(0u,dims[axis]-1u,(side&1u)!=0u)){continue;}
-    let count=${p}IBOFaceRefCount(slot,leaf,side);
-    for(var refLocal=0u;refLocal<count;refLocal+=1u){let faceRef=${p}IBORef(slot,leaf,side,refLocal);
-      let directory=itr1Directory(faceRef.x);let boundary=itr1Boundary(local,axis,directory.w);
-      let localRow=itr1Load(ITR1_BASE+directory.z+boundary);if(localRow!=ITR1_INVALID){
-        return vec2u(faceRef.z+${p}IBOTemplateRowWord(faceRef.x,localRow,0u),min(leaf,faceRef.y));}}
-  }return vec2u(ITR1_INVALID);
+  // Boundary owners are one-to-many and must use the CSR interface below.
+  return vec2u(ITR1_INVALID);
 }
+
 fn itr1StableRowForOwner(packet:u32,axis:u32,lane:u32)->u32{
   return itr1StableRowAndBucketOwner(packet,axis,lane).x;
 }
-// BFA1's ordinary seam catalogue contains the positive row owner. For a
-// cross-leaf face that owner is necessarily on local coordinate zero, so the
-// relevant IBO reference is the negative side of the known axis. Keep this
-// direct path separate from the general owner query: asking a six-side search
-// to rediscover a topology address already encoded by BFA1 creates a large
-// Metal optimizer graph for every seam preparation/projection pipeline.
-fn itr1StableNegativeBoundaryRowForOwner(packet:u32,axis:u32,lane:u32)->u32{
-  let slot=${p}IBOAcceptedSlot();let address=${p}IBOTRAPacketLocal(packet,lane,slot);
-  if(address.w==ITR1_INVALID||axis>=3u||address[axis]!=0u){return ITR1_INVALID;}
-  let local=address.xyz;let leaf=address.w;let side=2u*axis;
-  let count=${p}IBOFaceRefCount(slot,leaf,side);
-  for(var refLocal=0u;refLocal<count;refLocal+=1u){
-    let faceRef=${p}IBORef(slot,leaf,side,refLocal);
-    let directory=itr1Directory(faceRef.x);let boundary=itr1Boundary(local,axis,directory.w);
-    let localRow=itr1Load(ITR1_BASE+directory.z+boundary);
-    if(localRow!=ITR1_INVALID){return faceRef.z+
-      ${p}IBOTemplateRowWord(faceRef.x,localRow,0u);}
-  }
-  return ITR1_INVALID;
+// One BFA address owns every fine patch attached to its coarse positive
+// cell. Expose a CSR range for each accepted negative-side reference; callers
+// must consume all entries rather than selecting a representative row.
+fn itr1NegativeBoundaryRefCount(packet:u32,axis:u32,lane:u32)->u32{
+ let slot=${p}IBOAcceptedSlot();let address=${p}IBOTRAPacketLocal(packet,lane,slot);
+ if(address.w==ITR1_INVALID||axis>=3u){return 0u;}
+ if(address[axis]!=0u){return 0u;}
+ return ${p}IBOFaceRefCount(slot,address.w,2u*axis);
+}
+fn itr1NegativeBoundaryOwnerRows(packet:u32,axis:u32,lane:u32,refLocal:u32)->vec3u{
+ let slot=${p}IBOAcceptedSlot();let address=${p}IBOTRAPacketLocal(packet,lane,slot);
+ let faceRef=${p}IBORef(slot,address.w,2u*axis,refLocal);
+ let directory=itr1Directory(faceRef.x);
+ let rows=itr1OwnerRange(faceRef.x,itr1Boundary(address.xyz,axis,directory.w));
+ return vec3u(rows,faceRef.z);
 }
 fn itr1StablePositiveSparseAirRowAndBucketOwner(
  packet:u32,axis:u32,lane:u32)->vec2u{

@@ -84,7 +84,8 @@ dawnTest("Sparse CM12 commits hydrostatic re-coarsening and walks 4 to 2 to 1",
       try {
         await tankSolver.waitForSimulationReady();
         for (let step = 1; step <= 20; step += 1) {
-          assert.equal(tankSolver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+          while (!tankSolver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+          await tankSolver.awaitFrameCompletion?.();
         }
         await device.queue.onSubmittedWorkDone();
 
@@ -150,7 +151,8 @@ dawnTest("Sparse CM12 commits hydrostatic re-coarsening and walks 4 to 2 to 1",
         const accepted: number[] = [];
         for (let step = 0; step <= 3; step += 1) {
           if (step > 0) {
-            assert.equal(ladderSolver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+            while (!ladderSolver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+            await ladderSolver.awaitFrameCompletion?.();
             await device.queue.onSubmittedWorkDone();
           }
           const snapshot = await ladderSolver.readGPUActivityPolicy();
@@ -190,7 +192,8 @@ dawnTest("Sparse CM12 commits hydrostatic re-coarsening and walks 4 to 2 to 1",
         const accepted = [8];
         let active = before.bricks.filter((brick) => brick.active);
         for (let step = 1; step <= 3; step += 1) {
-          assert.equal(surfaceOnlySolver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+          while (!surfaceOnlySolver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+          await surfaceOnlySolver.awaitFrameCompletion?.();
           await device.queue.onSubmittedWorkDone();
           const after = await surfaceOnlySolver.readGPUActivityPolicy();
           active = after.bricks.filter((brick) => brick.active);

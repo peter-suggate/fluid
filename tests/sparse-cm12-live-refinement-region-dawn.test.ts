@@ -111,6 +111,7 @@ dawnTest("Sparse CM12 pre-catalogues a hard minimum-cell-size region",
         while (!solver.advanceTo(2 * CM12_PAPER_DT_S, [])) {
           await new Promise(setImmediate);
         }
+        await solver.awaitFrameCompletion?.();
         await device.queue.onSubmittedWorkDone();
         const constrainedActivity = await solver.readGPUActivityPolicy();
         const constrainedActive = constrainedActivity.bricks.filter((brick) => brick.active);
@@ -184,6 +185,7 @@ dawnTest("a live RHS min8 floor and its grading halo commit atomically",
         }, () => {});
       try {
         while (!solver.advanceTo(CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+        await solver.awaitFrameCompletion?.();
         const edited = structuredClone(scene);
         edited.fluid.refinementRegions = [{
           id: "live-rhs-eight-cell-floor",
@@ -199,6 +201,7 @@ dawnTest("a live RHS min8 floor and its grading halo commit atomically",
           while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) {
             await new Promise(setImmediate);
           }
+          await solver.awaitFrameCompletion?.();
           await device.queue.onSubmittedWorkDone();
           const activity = await solver.readGPUActivityPolicy();
           assert.deepEqual(acceptedFaceGradingViolations(activity), [],

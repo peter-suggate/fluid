@@ -228,10 +228,10 @@ dawnTest("Sparse CM12 expands the 64-cubed mini-dam into demand-led frontier pag
         }> = [];
         for (let step = 1; step <= 5; step += 1) {
           const time_s = step * CM12_PAPER_DT_S;
-          assert.equal(adaptive.advanceTo(time_s, []), true,
-            `adaptive advance ${step}`);
-          assert.equal(allFine.advanceTo(time_s, []), true,
-            `all-fine advance ${step}`);
+          while (!adaptive.advanceTo(time_s, [])) await new Promise(setImmediate);
+          await adaptive.awaitFrameCompletion?.();
+          while (!allFine.advanceTo(time_s, [])) await new Promise(setImmediate);
+          await allFine.awaitFrameCompletion?.();
           await device.queue.onSubmittedWorkDone();
           const [adaptiveFields, allFineFields, adaptiveWorld, allFineWorld] = await Promise.all([
             adaptive.readDiagnosticFields(), allFine.readDiagnosticFields(),

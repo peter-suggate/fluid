@@ -1,4 +1,4 @@
-import { CORRECTION_PARAMS, correctionOptions, correctionValues, type SparseCM12CorrectionControls } from "./correction-controls";
+import { type SparseCM12CorrectionControls } from "./correction-controls";
 import { pressureCaptureParam, pressureCaptureDescriptor, SPARSE_CM12_PRESSURE_JOURNAL_SNAPSHOTS } from "./features/pressure-inspection/definition";
 import { ALGORITHM_PARAMS } from "./features/algorithms/definition";
 import { resolveMethodComposition } from "./composition";
@@ -42,6 +42,9 @@ export interface AdaptiveMassSolverOptions extends SparseCM12CorrectionControls 
   /** Physical world-growth page budget. Authored re-rung already owns complete
    * template topology and does not consume these page identities. */
   readonly topologyPageBudget?: number;
+  /** Optional aggregate byte cap for simultaneous accepted/candidate resident
+   * generations and transfer preparation. Omitted: derive from allowed growth. */
+  readonly topologyGenerationMaximumBytes?: number;
   readonly surfaceFineRings?: number;
   readonly activityPolicy?: SparseCM12ActivityPolicy;
   /** Omitted only by direct diagnostic constructors, which retain scene-step behavior. */
@@ -75,7 +78,6 @@ export interface AdaptiveMassSolverOptions extends SparseCM12CorrectionControls 
 
 const params: MethodParamSpec[] = [
   ...ALGORITHM_PARAMS,
-  ...CORRECTION_PARAMS,
   ...ADAPTIVITY_PARAMS,
 
   {
@@ -86,8 +88,8 @@ const params: MethodParamSpec[] = [
     tier: "coarse",
     update: "runtime",
     options: [{ value: "on", label: "On · validated column heights" },
-      { value: "off", label: "Off · density surface" }],
-    hint: "Use integrated column heights where valid, or contour density everywhere. Applies on the next simulation step; changes the published surface without resetting the scene.",
+      { value: "off", label: "Off · interface surface" }],
+    hint: "Use integrated column heights where valid, or reconstruct the interface from the current liquid field. Applies on the next simulation step; changes the published surface without resetting the scene.",
   },
   {
     kind: "select",
@@ -129,55 +131,13 @@ const params: MethodParamSpec[] = [
     update: "runtime",
     hint: "Tests a fresh relative residual after each eight-iteration block and skips arithmetic in later fixed dispatches once it is met. Zero preserves fixed-budget execution; values through 1 are available for experimentation.",
   },
-  {
-    kind: "number",
-    key: "sharpeningDistance",
-    label: "Mass-return distance",
-    default: SPARSE_CM12_SHARPENING_DISTANCE_CELLS,
-    tier: "fine",
-    unit: "cells",
-    min: 0.1,
-    max: 3.1,
-    step: 0.1,
-    digits: 1,
-    update: "runtime",
-    hint: "Algorithm 2's D: how far TraceAlongField may follow grad(rho) toward the 0.5 iso-contour before depositing. The paper uses 1.1 to 3.1 cells and says raising it visually resembles surface tension; below 1.1 the removed mass stays essentially where it was taken.",
-  },
-  {
-    kind: "number",
-    key: "sharpeningTraceSteps",
-    label: "Trace substeps",
-    default: SPARSE_CM12_SHARPENING_TRACE_STEPS,
-    tier: "fine",
-    unit: "substeps",
-    min: 1,
-    max: 16,
-    step: 1,
-    digits: 0,
-    update: "runtime",
-    hint: "How many forward-Euler substeps the trace may spend. Each is half a cell, so the reach is whichever of D and half the substep count is smaller — at the default 7 the substeps are not the binding constraint anywhere in the paper's D range, and lowering them deliberately shortens the trace along a curving gradient.",
-  },
-  {
-    kind: "number",
-    key: "sharpeningStrength",
-    label: "Sharpening strength",
-    default: SPARSE_CM12_SHARPENING_STRENGTH,
-    tier: "fine",
-    unit: "dose",
-    min: 0,
-    max: 4,
-    step: 0.05,
-    digits: 2,
-    update: "runtime",
-    hint: "Scales Algorithm 2's per-step removed-density dose before its conservative mass-return trace. One is the paper dose; higher values strengthen sharpening. The removed dose is bounded by available density. Zero suppresses sharpening.",
-  },
-  pressureCaptureParam,
+
 ];
 
 /**
- * The controls a live Sparse CM12 solver adopts.
+ * The controls a live Sparse Geometric solver adopts.
  *
- * Clock, Sec. 3.5 trace scalars, and GPU candidate-policy values enter the
+ * Clock and GPU candidate-policy values enter the
  * next advance through a small uniform. The per-frame preparation budget is a
  * GPU scheduler limit, not a host worklist: `advanceTo` still encodes the same
  * fixed/indirect dispatch sequence without reading queue state back.
@@ -230,9 +190,10 @@ export function adaptiveMassSolverOptions(
     surfaceFineRings: boundedInteger(values.surfaceFineRings, 1, 1, 8),
     activityPolicy: activityPolicy(values),
     timeStep: values.timeStep === "scene" ? "scene" : "paper",
-    ...correctionOptions(values),
-    gammaDiffusionEnabled: values.gammaDiffusion !== "off",
-    surfaceSharpeningEnabled: values.surfaceSharpening !== "off",
+    gammaDiffusionEnabled: false,
+    surfaceSharpeningEnabled: false,
+    densityCapacityRepairEnabled: false,
+    volumeCorrectionEnabled: false,
     presentationColumnHeightEnabled: values.presentationColumnHeight === "on",
     pressureIterations: sparseCM12PressureIterations(values.pressureIterations),
     pressureRelativeTolerance:
@@ -254,20 +215,20 @@ export const adaptiveMassMethod: SimulationMethod = {
   label: "Sparse Geometric",
   shortLabel: "Sparse Geometric",
   badge: "GEOMETRIC",
-  description: "Independent sparse adaptive fluid, currently running the copied CM12 mass-conserving algorithm.",
-  detail: "Sparse Geometric currently runs an independent copy of the CM12 algorithm. It maps any authored scene into a fixed-world-space GPU brick atlas and couples graded neighbours through shared conservative transport and a global composite pressure solve. Runtime activity requests and accepted-output surface proofs are measured, 2:1-closed and conservatively transferred into GPU-authored physical generations; urgent surface refinement bypasses the budgeted round-robin coarsening lane. Transport, pressure, projection and presentation all consume the accepted worklists.",
+  description: "Sparse adaptive fluid with conservative geometric volume transport and internal CFL substeps.",
+  detail: "Sparse Geometric transports liquid volume through shared geometric face fluxes, with conservative flux correction and synchronized internal substeps. It maps any authored scene into a fixed-world-space GPU brick atlas and couples graded neighbours through shared conservative transport and a global composite pressure solve. Runtime activity requests and accepted-output surface proofs are measured, 2:1-closed and conservatively transferred into GPU-authored physical generations; urgent surface refinement bypasses the budgeted round-robin coarsening lane. Transport, pressure, projection and presentation all consume the accepted worklists.",
   backend: "webgpu",
   resource: {
     id: "fluid.adaptive-volume",
     lane: "fluid",
-    label: "Sparse Geometric (CM12) fluid authority",
+    label: "Sparse Geometric fluid authority",
     provides: ["fluid-authority", "water-presentation"],
     blocks: "transport",
     phaseCopy: {
       planning: "Planning the scene's sparse 4³/8³ tile atlas.",
       "adaptive-topology": "Building resident tiles, neighbours, and conservative seam ports.",
       allocation: "Allocating compact fluid authority and water presentation resources.",
-      warmup: "Uploading and fencing the initial Sparse Geometric (CM12) state.",
+      warmup: "Uploading and fencing the initial Sparse Geometric state.",
       attach: "Attaching the warmed adaptive solver atomically.",
     },
   },
@@ -298,14 +259,13 @@ export const adaptiveMassMethod: SimulationMethod = {
   params,
   runtimeParamKeys: ADAPTIVE_MASS_RUNTIME_PARAM_KEYS,
   pipelineGraph: async () => ADAPTIVE_MASS_FLUID_PIPELINE,
-  pressureMapping: "Every live Sparse CM12 step solves one globally coupled composite pressure system over regular faces and conservative 2:1 seam ports using one-reduction sparse MGPCG.",
+  pressureMapping: "Every live Sparse Geometric step solves one globally coupled composite pressure system over regular faces and conservative 2:1 seam ports using one-reduction sparse MGPCG.",
   normalizeValues: (values) => {
     const { activitySignals: _activitySignals, ...normalizedActivity } = activityPolicy(values);
     const parsedFineResolution = brickFineResolution(values.brickFineResolution);
     const fineResolution: SparseBrickFineResolution = parsedFineResolution;
     return {
       ...values,
-      ...correctionValues(values),
       brickFineResolution: String(fineResolution),
       presentationPageResolution: String(fineResolution),
       maximumMacroSpanBricks:
@@ -313,8 +273,8 @@ export const adaptiveMassMethod: SimulationMethod = {
       selectorMode: selectorMode(values.selectorMode),
       surfaceFineRings: boundedInteger(values.surfaceFineRings, 1, 1, 8),
       timeStep: values.timeStep === "scene" ? "scene" : "paper",
-      gammaDiffusion: values.gammaDiffusion === "off" ? "off" : "on",
-      surfaceSharpening: values.surfaceSharpening === "off" ? "off" : "on",
+      gammaDiffusion: "off",
+      surfaceSharpening: "off",
       presentationColumnHeight: values.presentationColumnHeight === "on" ? "on" : "off",
       pressureIterations: sparseCM12PressureIterations(values.pressureIterations),
       pressureRelativeTolerance:
@@ -336,10 +296,9 @@ export const adaptiveMassMethod: SimulationMethod = {
       maximumMacroSpanBricks: "auto",
       selectorMode: "coarse-first",
       surfaceFineRings: 1,
-      ...correctionValues({}),
       timeStep: "paper",
-      gammaDiffusion: "on",
-      surfaceSharpening: "on",
+      gammaDiffusion: "off",
+      surfaceSharpening: "off",
       presentationColumnHeight: "off",
       pressureIterations: SPARSE_CM12_PRESSURE_ITERATIONS,
       pressureRelativeTolerance: SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE,

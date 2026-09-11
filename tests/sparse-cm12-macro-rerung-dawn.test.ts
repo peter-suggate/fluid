@@ -40,6 +40,7 @@ const dawnModule = process.env.WEBGPU_NODE_MODULE;
     solver.applySceneUniforms(edited);
     for (let step = 1; step <= 3; step++) {
       while (!solver.advanceTo(step / 30, [])) await new Promise(setImmediate);
+      await solver.awaitFrameCompletion?.();
       await solver.waitForTopologyReady();
     }
     const after = await solver.readGPUActivityPolicy();

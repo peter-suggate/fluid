@@ -20,6 +20,8 @@ import {
   acquireWebGPUExclusiveLock,
   releaseWebGPUExclusiveLock,
 } from "../lib/harness/webgpu-smoke-isolation";
+import { createProcessRetainedDawnGPU, type NodeDawnProvider } from
+  "../lib/harness/node-dawn-provider";
 import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 import { decodeSparseCM12SignedPresentationKey } from
   "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident";
@@ -242,12 +244,9 @@ dawnTest("public sparse world carries Long Dam's material front to the far wall"
     let solver: Awaited<ReturnType<NonNullable<
       typeof adaptiveMassMethod.createSolverAsync>>> | undefined;
     try {
-      const dawn = await import(pathToFileURL(dawnModule!).href) as {
-        create(options: string[]): GPU;
-        globals: Record<string, unknown>;
-      };
+      const dawn = await import(pathToFileURL(dawnModule!).href) as NodeDawnProvider;
       Object.assign(globalThis, dawn.globals);
-      const gpu = dawn.create([
+      const gpu = createProcessRetainedDawnGPU(dawn, [
         `backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`,
         "enable-dawn-features=disable_blob_cache",
       ]);
@@ -313,7 +312,8 @@ dawnTest("public sparse world carries Long Dam's material front to the far wall"
       const frontTrajectory = [{ step: 0, ...initialFront }];
       let finalResidentPages = initialFront.residentPages;
       for (let step = 1; step <= gateSteps; step += 1) {
-        assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+        while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+        await solver.awaitFrameCompletion?.();
         // Match the browser's two-deep presentation queue: encode and submit
         // the second step before fencing the pair. Serial per-step fences hide
         // overlapping-generation hazards present only in the UI-style path.

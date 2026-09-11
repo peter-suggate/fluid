@@ -60,11 +60,26 @@ npm run test:dawn:sparse-cm12 -- --kind=correctness
 These selections are diagnostic conveniences. A large Sparse CM12 change is
 accepted only by the unfiltered full command.
 
-Every simulation lane resolves the balanced adaptive-mass production defaults,
-including coarse-first selection, the paper timestep, gamma diffusion,
-sharpening, and the pressure policy. Scene method profiles do not override
+Every simulation lane resolves the balanced adaptive-volume (Sparse Geometric)
+production defaults, including coarse-first selection, the paper timestep,
+geometric volume transport, and the pressure policy. CM12 diffusion and
+sharpening are disabled in this method. Scene method profiles do not override
 these defaults. The performance probe uses those same defaults and the checked-in B8/P8
 references and timing ceilings.
+
+The separate geometric ladder correctness run advances all fifteen UI ladder
+scenes to three seconds, using their catalog geometry and method profile:
+
+```bash
+npm run test:dawn:sparse-cm12:ladder-3s
+npm run test:dawn:sparse-cm12:ladder-3s -- --scene=symmetric-2d
+```
+
+It waits for complete transport and generation admission, then checks actual
+completed time, finite fields, accepted volume bounds, and source/outflow
+balance. Each scene runs in an isolated Dawn process under the same exclusive
+GPU lease. This longer correctness run supplements the canonical gate; its
+scene timeout does not change any canonical timing ceiling.
 
 Authored geometry, refinement regions, live edits, and page-budget fixtures
 remain test inputs. Transfer lanes use authored rung edits instead of forcing

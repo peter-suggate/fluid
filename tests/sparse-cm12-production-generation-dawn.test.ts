@@ -31,7 +31,8 @@ const dawnModule = process.env.WEBGPU_NODE_MODULE;
   console.log(JSON.stringify({initialLeaves:initial.residentBrickCount,maxWidth, widths:solver.info.adaptivePhysicalWidthCensus}));
   for(let step=1;step<=129;step++) {
    await solver.waitForTopologyReady();
-   assert.equal(solver.advanceTo(step*CM12_PAPER_DT_S,[]),true);
+   while (!solver.advanceTo(step*CM12_PAPER_DT_S,[])) await new Promise(setImmediate);
+   await solver.awaitFrameCompletion?.();
    await device.queue.onSubmittedWorkDone();
    if(step%16===0) console.log(JSON.stringify({step,preparing:solver.info.topologyGenerationPending}));
   }
@@ -75,7 +76,8 @@ const dawnModule = process.env.WEBGPU_NODE_MODULE;
   solver = await WebGPUAdaptiveMassSolver.createAsync(device, scene, "balanced", undefined,
    adaptiveMassSolverOptions({}), () => {});
   await solver.waitForSimulationReady();
-  assert.equal(solver.advanceTo(CM12_PAPER_DT_S, []), true);
+  while (!solver.advanceTo(CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+  await solver.awaitFrameCompletion?.();
   await solver.waitForTopologyReady();
   const initial = await solver.readGPUActivityPolicy();
   assert.ok(initial.bricks.some(brick => brick.active
@@ -126,6 +128,7 @@ const dawnModule = process.env.WEBGPU_NODE_MODULE;
     step++;
     await solver!.waitForTopologyReady();
     while (!solver!.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+    await solver!.awaitFrameCompletion?.();
     await solver!.waitForTopologyReady();
     assert.equal(solver!.info.topologyGenerationError, undefined);
     if ((solver!.info.topologyGenerationCount ?? 0) > before) break;
@@ -144,6 +147,7 @@ const dawnModule = process.env.WEBGPU_NODE_MODULE;
    step++;
    await solver.waitForTopologyReady();
    while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+   await solver.awaitFrameCompletion?.();
    await solver.waitForTopologyReady();
    await verifyAcceptedRegion(step % 16 === 0 || step === 129);
   }
@@ -172,7 +176,7 @@ for (const minimum of [16,32]) (dawnModule ? test : test.skip)(`authored ocean m
   solver=await WebGPUAdaptiveMassSolver.createAsync(device,scene,"balanced",undefined,adaptiveMassSolverOptions({}),()=>{});
   await solver.waitForSimulationReady();
   for(let step=0;step<=4;step++) {
-   if(step>0){assert.ok(solver.advanceTo(step*CM12_PAPER_DT_S,[]));await solver.waitForTopologyReady();}
+   if(step>0){while (!solver.advanceTo(step*CM12_PAPER_DT_S,[])) await new Promise(setImmediate);await solver.awaitFrameCompletion?.();await solver.waitForTopologyReady();}
    const activity: Awaited<ReturnType<WebGPUAdaptiveMassSolver["readGPUActivityPolicy"]>> = await solver.readGPUActivityPolicy();
    assert.equal(activity.faultFlags,0);
    const inside=activity.bricks.filter(b=>b.active&&b.coordinate.every((q,a)=>q<[40,12,10][a]!&&q+b.spanBricks>0));

@@ -346,8 +346,8 @@ dawnTest("Sparse CM12 terrain boundary ladder is impermeable",
             { step: 0, metrics: initial },
           ];
           for (let step = 1; step <= steps; step += 1) {
-            assert.equal(solver.advanceTo(step * rung.dt_s, []), true,
-              `${rung.name}: advance ${step}`);
+            while (!solver.advanceTo(step * rung.dt_s, [])) await new Promise(setImmediate);
+            await solver.awaitFrameCompletion?.();
             if (step <= 4 || step === 8 || step === 16 || step === steps) {
               await device.queue.onSubmittedWorkDone();
               checkpoints.push({

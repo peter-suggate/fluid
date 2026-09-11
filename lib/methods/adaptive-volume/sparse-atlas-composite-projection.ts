@@ -799,14 +799,18 @@ export function buildSparseAtlasCompositeGrid(
   // is proportional to resident leaves and faces, never to domain volume.
   const negativeFaces = ([0, 1, 2] as const).map(() =>
     new Map<number, SparseAdaptiveMassBrick[]>());
+  // Match physical faces, not nominal page boundaries. A clipped B8 leaf
+  // ending at y=12 is not adjacent to a new page beginning at y=16. Such
+  // exposed faces remain sparse-air boundaries until real intervening cells
+  // exist; a pressure row must never bridge the unrepresented four-cell gap.
   const positiveFaces = ([0, 1, 2] as const).map(() =>
     new Map<number, SparseAdaptiveMassBrick[]>());
   for (const brick of bricks) for (const axis of [0, 1, 2] as const) {
-    const negativeFace = brick.coordinate[axis];
+    const negativeFace = brick.coordinate[axis] * brickFineWidth;
     let negativeBucket = negativeFaces[axis].get(negativeFace);
     if (!negativeBucket) negativeFaces[axis].set(negativeFace, negativeBucket = []);
     negativeBucket.push(brick);
-    const positiveFace = brick.coordinate[axis] + sparseBrickSpan(brick);
+    const positiveFace = sparseBrickMaximumFine(atlas, brick, axis);
     let positiveBucket = positiveFaces[axis].get(positiveFace);
     if (!positiveBucket) positiveFaces[axis].set(positiveFace, positiveBucket = []);
     positiveBucket.push(brick);
@@ -816,19 +820,19 @@ export function buildSparseAtlasCompositeGrid(
     right: SparseAdaptiveMassBrick,
     axis: SparseAtlasAxis,
   ): boolean => tangentialAxes(axis).every((tangent) =>
-    Math.min(left.coordinate[tangent] + sparseBrickSpan(left),
-      right.coordinate[tangent] + sparseBrickSpan(right))
-      > Math.max(left.coordinate[tangent], right.coordinate[tangent]));
+    Math.min(sparseBrickMaximumFine(atlas, left, tangent),
+      sparseBrickMaximumFine(atlas, right, tangent))
+      > brickFineWidth * Math.max(left.coordinate[tangent], right.coordinate[tangent]));
 
   for (const brick of bricks) for (const axis of [0, 1, 2] as const) {
-    const positiveFace = brick.coordinate[axis] + sparseBrickSpan(brick);
+    const positiveFace = sparseBrickMaximumFine(atlas, brick, axis);
     const positiveNeighbors = (negativeFaces[axis].get(positiveFace) ?? [])
       .filter((candidate) => tangentOverlap(brick, candidate, axis));
     if (positiveNeighbors.length > 0) {
       for (const neighbor of positiveNeighbors) appendBrickInterface(brick, neighbor, axis);
     }
     appendSparseAirFace(brick, axis, 1, positiveNeighbors);
-    const negativeNeighbors = (positiveFaces[axis].get(brick.coordinate[axis]) ?? [])
+    const negativeNeighbors = (positiveFaces[axis].get(brick.coordinate[axis] * brickFineWidth) ?? [])
       .filter((candidate) => tangentOverlap(candidate, brick, axis));
     appendSparseAirFace(brick, axis, -1, negativeNeighbors);
   }

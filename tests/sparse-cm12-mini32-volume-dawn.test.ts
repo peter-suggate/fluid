@@ -159,7 +159,8 @@ dawnTest("mini32 conserves liquid volume through four seconds",
       let previousActive = new Map<number, Awaited<ReturnType<
         WebGPUAdaptiveMassSolver["readGPUActivityPolicy"]>>["bricks"][number]>();
       for (let step = 1; step <= steps; step += 1) {
-        assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+        while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+        await solver.awaitFrameCompletion?.();
         await solver.assertSimulationHealthy();
         if (step === 1) {
           await device.queue.onSubmittedWorkDone();

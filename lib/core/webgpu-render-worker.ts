@@ -173,8 +173,11 @@ scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest
   }
   else if (message.type === "set-hover-highlight") runtime.setHoverHighlight(message.range);
   else if (message.type === "set-simulation-running") {
-    const submittedTime_s = runtime.setSimulationRunning(message.running);
-    post({ type: "simulation-running-set", requestId: message.requestId, submittedTime_s });
+    void runtime.setSimulationRunning(message.running)
+      .then((submittedTime_s) => post({
+        type: "simulation-running-set", requestId: message.requestId, submittedTime_s,
+      }))
+      .catch((error) => failure(message.requestId, error));
   }
   else if (message.type === "reset-simulation-timeline") runtime.resetSimulationTimeline();
   else if (message.type === "edit-fluid") {

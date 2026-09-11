@@ -147,6 +147,7 @@ export class AdaptiveMassFrameCapture {
   private encoder?: GPUCommandEncoder;
   private queueStartedAt_ms?: number;
   private closed = false;
+  private commandsClosed = false;
 
   constructor(
     readonly sampleId: number,
@@ -180,6 +181,18 @@ export class AdaptiveMassFrameCapture {
     return this.encoder;
   }
 
+  /** Continue the same timestamp chain on the next submitted command buffer. */
+  resumeEncoder(encoder: GPUCommandEncoder): GPUCommandEncoder {
+    if (!this.encoder || this.commandsClosed) throw new Error("Frame capture cannot resume");
+    this.encoder = this.gpu ? this.gpu.instrument(encoder) : encoder;
+    return this.encoder;
+  }
+
+  /** Include all continuation submissions in the queue-latency fallback. */
+  beginSubmission(): void {
+    this.queueStartedAt_ms ??= this.clock();
+  }
+
   /**
    * The encoder's stage seams: one stage closes on every lane at once, under
    * the phase the registry files it under.
@@ -206,11 +219,10 @@ export class AdaptiveMassFrameCapture {
 
   /** Stage the query readback and start the queue clock, just before submit. */
   closeCommands(): void {
-    if (this.queueStartedAt_ms !== undefined) {
-      throw new Error("Sparse Geometric (CM12) queue capture already started");
-    }
+    if (this.commandsClosed) throw new Error("Sparse Geometric (CM12) commands already closed");
+    this.commandsClosed = true;
     if (this.encoder) this.gpu?.resolve(this.encoder);
-    this.queueStartedAt_ms = this.clock();
+    this.beginSubmission();
   }
 
   /** Close after the command buffer has been submitted. */

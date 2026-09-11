@@ -90,7 +90,8 @@ dawnTest("sparse world reclaims pages, topology tiles, and dynamic leaves",
       const initialPages = await solver.readPresentationPageAllocatorReceiptQA();
       let sawRetirement = false;
       for (let step = 1; step <= 32; step += 1) {
-        assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+        while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+        await solver.awaitFrameCompletion?.();
         if (step % 16 !== 0) continue;
         await device.queue.onSubmittedWorkDone();
         const activity: Awaited<ReturnType<

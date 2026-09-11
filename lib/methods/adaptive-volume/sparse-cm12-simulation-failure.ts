@@ -14,6 +14,7 @@ export function cm12FailureKernelId(name: string): number {
 }
 
 const reasons: Readonly<Record<number, readonly [string, string]>> = {
+  6: ["GEOMETRIC_VOLUME_TRANSPORT", "Geometric volume topology, CFL, or bounded-state contract failed before publication"],
   1: ["INCIDENCE_RANGE", "Corrupt incidence range would have been replaced by an empty range"],
   2: ["EMPTY_DEFICIT_STENCIL", "Forward transport has no recipient support; donor self-return refused"],
   3: ["EMPTY_SHARPENING_STENCIL", "Sharpening has no recipient support; donor self-return refused"],
@@ -30,13 +31,14 @@ export function decodeCM12SimulationFailure(words: Uint32Array, kernelNames: rea
     kernel: kernels.get(words[2]) ?? `0x${words[2].toString(16)}`,
     frame: words[3], generation: words[4], ownerId: words[5],
     operandNames: ({
+      6: ["reason", "value", "capacity", "auxiliary"],
       1: ["begin", "end", "maximumCount", "reserved"],
       2: ["visibleWeight", "deficit", "donorDensity", "reserved"],
       3: ["recipientWeight", "removedFixed", "reserved", "reserved"],
       5: ["positionX", "positionY", "positionZ", "reserved"],
       4: ["rawDensity", "rawGamma", "reserved", "reserved"],
     } as Record<number, string[]>)[words[1]],
-    operands: words[1] >= 2 && words[1] <= 5
+    operands: words[1] >= 2 && words[1] <= 6
       ? [...new Float32Array(words.slice(6, 10).buffer)] : [...words.slice(6, 10)], rawWords: [...words],
   };
 }

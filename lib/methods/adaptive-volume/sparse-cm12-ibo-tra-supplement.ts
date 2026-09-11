@@ -3,7 +3,7 @@ import type { SparseCM12InternedBoundaryCompilation } from
 
 export const SPARSE_CM12_IBO_TRA_MAGIC = 0x4954_5231; // ITR1
 export const SPARSE_CM12_IBO_TRA_HEADER_WORDS = 16;
-export const SPARSE_CM12_IBO_TRA_DIRECTORY_WORDS = 5;
+export const SPARSE_CM12_IBO_TRA_DIRECTORY_WORDS = 6;
 export const SPARSE_CM12_IBO_TRA_INVALID = 0xffff_ffff;
 
 export interface SparseCM12IboTRASupplementLayout {
@@ -33,7 +33,7 @@ const f32 = (bits: number) => {
   return new Float32Array(buffer)[0]!;
 };
 
-/** Exact template-local source incidence and positive-owner lookup. */
+/** Exact template-local source incidence and positive-owner incidence. A coarse owner may own several fine patches. */
 export function createSparseCM12IboTRASupplement(options: Readonly<{
   ibo: Pick<SparseCM12InternedBoundaryCompilation, "templates">;
   baseWords?: number;
@@ -42,13 +42,13 @@ export function createSparseCM12IboTRASupplement(options: Readonly<{
   const directoryBaseWords = baseWords + SPARSE_CM12_IBO_TRA_HEADER_WORDS;
   let at = align64(directoryBaseWords
     + SPARSE_CM12_IBO_TRA_DIRECTORY_WORDS * templates.length);
-  const records: Array<{ offsets: number[]; entries: number[]; owners: number[];
+  const records: Array<{ offsets: number[]; entries: number[]; owners: number[]; ownerEntries: number[];
     sparseAirOwners: number[]; resolution: number; offsetsBase: number;
-    entriesBase: number; ownersBase: number; sparseAirOwnersBase: number }> = [];
+    entriesBase: number; ownersBase: number; ownerEntriesBase: number; sparseAirOwnersBase: number }> = [];
   for (const template of templates) {
     const resolution = template.sourceResolution, boundaryCount = resolution ** 2;
     const byBoundary: number[][] = Array.from({ length: boundaryCount }, () => []);
-    const owners = new Array<number>(boundaryCount).fill(SPARSE_CM12_IBO_TRA_INVALID);
+    const ownerRows: number[][] = Array.from({ length: boundaryCount }, () => []);
     const sparseAirOwners = new Array<number>(boundaryCount)
       .fill(SPARSE_CM12_IBO_TRA_INVALID);
     const termBase = 8 + 7 * template.rowCount;
@@ -60,8 +60,9 @@ export function createSparseCM12IboTRASupplement(options: Readonly<{
       for (let term = 0; term < count; term += 1) {
         const termAt = termBase + 2 * (first + term);
         const normalized = template.words[termAt]!;
-        if ((normalized & 0x8000_0000) === 0 && f32(template.words[termAt + 1]!) > 0
-          && ownerTerm < 0) ownerTerm = term;
+        // Match BFA's unique first-positive-term ownership, including when
+        // that term belongs to the opposite leaf.
+        if (f32(template.words[termAt + 1]!) > 0 && ownerTerm < 0) ownerTerm = term;
         if ((normalized & 0x8000_0000) !== 0) continue;
         const ordinal = normalized & 0x7fff_ffff;
         const z = Math.floor(ordinal / (dimensions[0] * dimensions[1]));
@@ -72,7 +73,7 @@ export function createSparseCM12IboTRASupplement(options: Readonly<{
         const boundary = u + resolution * v;
         if (!byBoundary[boundary]!.includes(row)) byBoundary[boundary]!.push(row);
       }
-      if (ownerTerm >= 0) {
+      if (ownerTerm >= 0 && (template.words[termBase + 2 * (first + ownerTerm)]! & 0x8000_0000) === 0) {
         const normalized = template.words[termBase + 2 * (first + ownerTerm)]!;
         const ordinal = normalized & 0x7fff_ffff;
         const z = Math.floor(ordinal / (dimensions[0] * dimensions[1]));
@@ -80,10 +81,7 @@ export function createSparseCM12IboTRASupplement(options: Readonly<{
         const y = Math.floor(remain / dimensions[0]), x = remain - y * dimensions[0];
         const axis = template.side >>> 1;
         const boundary = (axis === 0 ? y : x) + resolution * (axis === 2 ? y : z);
-        if (owners[boundary] !== SPARSE_CM12_IBO_TRA_INVALID && owners[boundary] !== row) {
-          throw new Error(`ITR1 template ${template.id} owner collision at ${boundary}`);
-        }
-        owners[boundary] = row;
+        ownerRows[boundary]!.push(template.words[rowAt]!);
       } else {
         const metadata = template.words[rowAt + 2]!;
         const normalized = template.words[termBase + 2 * first]!;
@@ -129,21 +127,29 @@ export function createSparseCM12IboTRASupplement(options: Readonly<{
     }
     const offsetsBase = at;at += offsets.length;
     const entriesBase = at;at += entries.length;
+    const owners = [0], ownerEntries: number[] = [];
+    for (const rows of ownerRows) {
+      ownerEntries.push(...rows); owners.push(ownerEntries.length);
+    }
     const ownersBase = at;at += owners.length;
+    const ownerEntriesBase = at;at += ownerEntries.length;
     const sparseAirOwnersBase = at;at += sparseAirOwners.length;
-    records.push({ offsets, entries, owners, sparseAirOwners, resolution,
-      offsetsBase, entriesBase, ownersBase, sparseAirOwnersBase });
+    records.push({ offsets, entries, owners, ownerEntries, sparseAirOwners, resolution,
+      offsetsBase, entriesBase, ownersBase, ownerEntriesBase, sparseAirOwnersBase });
   }
   const totalWords = align64(at), words = new Uint32Array(totalWords - baseWords);
   const put = (absolute: number, values: readonly number[]) =>
     words.set(values, absolute - baseWords);
-  put(baseWords, [SPARSE_CM12_IBO_TRA_MAGIC, 3, templates.length,
+  put(baseWords, [SPARSE_CM12_IBO_TRA_MAGIC, 4, templates.length,
     directoryBaseWords, totalWords, 0, 0, 0]);
   records.forEach((record, template) => {
     put(directoryBaseWords + SPARSE_CM12_IBO_TRA_DIRECTORY_WORDS * template,
       [record.offsetsBase, record.entriesBase, record.ownersBase, record.resolution]);
     put(record.offsetsBase, record.offsets);put(record.entriesBase, record.entries);
     put(record.ownersBase, record.owners);
+    put(record.ownerEntriesBase, record.ownerEntries);
+    put(directoryBaseWords + SPARSE_CM12_IBO_TRA_DIRECTORY_WORDS * template + 5,
+      [record.ownerEntriesBase]);
     put(directoryBaseWords + SPARSE_CM12_IBO_TRA_DIRECTORY_WORDS * template + 4,
       [record.sparseAirOwnersBase]);
     put(record.sparseAirOwnersBase, record.sparseAirOwners);

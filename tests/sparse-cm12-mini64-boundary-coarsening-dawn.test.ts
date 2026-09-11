@@ -81,8 +81,8 @@ dawnTest("MiniDam64 deep pool keeps the full wall/corner coarsening ladder", {
     const cornerHistory: string[] = [];
     const fineBottomHistory: string[] = [];
     for (let step = 1; step <= 72; step += 1) {
-      assert.equal(solver.advanceTo(step * scene.numerics.maxDt_s, []), true,
-        `MiniDam64 advance ${step}`);
+      while (!solver.advanceTo(step * scene.numerics.maxDt_s, [])) await new Promise(setImmediate);
+      await solver.awaitFrameCompletion?.();
       if (step % 4 !== 0) continue;
       const activity = await solver.readGPUActivityPolicy();
       const corner = activity.bricks.find((brick) => brick.active

@@ -92,7 +92,8 @@ dawnTest("Sparse CM12 mini64 remains bounded through the late wall-impact window
         : process.env.FLUID_MINI64_LATE_FINE_TRACE === "1" ? 1 : 45;
       const stepDt_s = paperTimeStep ? CM12_PAPER_DT_S : scene.numerics.maxDt_s;
       for (let step = 1; step <= steps; step += 1) {
-        assert.equal(solver.advanceTo(step * stepDt_s, []), true);
+        while (!solver.advanceTo(step * stepDt_s, [])) await new Promise(setImmediate);
+        await solver.awaitFrameCompletion?.();
         if (step % 2 === 0) await device.queue.onSubmittedWorkDone();
         if (step % sampleEvery !== 0 && step !== steps) continue;
         await device.queue.onSubmittedWorkDone();

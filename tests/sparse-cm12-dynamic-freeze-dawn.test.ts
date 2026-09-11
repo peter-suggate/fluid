@@ -58,6 +58,7 @@ dawnTest("frozen mini32 admits dry support, retains every accepted rung, and res
     let enteredDryCorner = false;
     for (let step = 1; step <= 12; step++) {
       while (!solver.advanceTo(step * dt, [])) await new Promise(setImmediate);
+      await solver.awaitFrameCompletion?.();
       await solver.waitForTopologyReady();
       await solver.assertSimulationHealthy();
       const activity: Activity = await solver.readGPUActivityPolicy();
@@ -92,6 +93,7 @@ dawnTest("frozen mini32 admits dry support, retains every accepted rung, and res
       min_m: { x: -1, y: -1, z: -1 }, max_m: { x: 1, y: 1, z: 1 } }];
     solver.applySceneUniforms(edited);
     while (!solver.advanceTo(13 * dt, [])) await new Promise(setImmediate);
+    await solver.awaitFrameCompletion?.();
     await solver.waitForTopologyReady();
     await solver.assertSimulationHealthy();
     const unfrozen = await solver.readGPUActivityPolicy();
@@ -275,6 +277,7 @@ dawnTest("a paused frozen coarse host accepts superseding signed-world drops thr
         assert.ok(performance.now() < deadline, `step ${step} never became ready: ${JSON.stringify(solver.info)}`);
         await new Promise(setImmediate);
       }
+      await solver.awaitFrameCompletion?.();
       if (process.env.FREEZE_DIAGNOSTICS) console.log("freeze step submitted", step, solver.info.topologyGenerationCount);
       await solver.waitForTopologyReady();
       if (process.env.FREEZE_DIAGNOSTICS) console.log("freeze step ready", step, solver.info.topologyGenerationCount);

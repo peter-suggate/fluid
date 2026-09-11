@@ -8,6 +8,8 @@ import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
 import { sparseCM12DawnDefaultOptions } from "../lib/harness/sparse-cm12-dawn-defaults";
+import { createProcessRetainedDawnGPU, type NodeDawnProvider } from
+  "../lib/harness/node-dawn-provider";
 import { WebGPUAdaptiveMassSolver } from
   "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
@@ -21,11 +23,10 @@ dawnTest("clipped boundary re-rung preserves mass through the resident transacti
     let device: GPUDevice | undefined;
     let solver: WebGPUAdaptiveMassSolver | undefined;
     try {
-      const dawn = await import(pathToFileURL(dawnModule!).href) as {
-        create(options: string[]): GPU; globals: Record<string, unknown>;
-      };
+      const dawn = await import(pathToFileURL(dawnModule!).href) as NodeDawnProvider;
       Object.assign(globalThis, dawn.globals);
-      const gpu = dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
+      const gpu = createProcessRetainedDawnGPU(dawn,
+        [`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
       const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
       assert.ok(adapter);
       device = await adapter.requestDevice({
@@ -65,7 +66,8 @@ dawnTest("clipped boundary re-rung preserves mass through the resident transacti
           min_m: { x: -1, y: -1, z: -1 }, max_m: { x: 1, y: 1, z: 1 } }];
           solver.applySceneUniforms(edited);
         }
-        assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+        while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+        await solver.awaitFrameCompletion?.();
         await device.queue.onSubmittedWorkDone();
         await solver.assertSimulationHealthy();
         const after = await solver.readGPUActivityPolicy();

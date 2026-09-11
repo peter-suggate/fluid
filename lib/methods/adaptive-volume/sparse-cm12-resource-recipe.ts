@@ -1,3 +1,5 @@
+import { GPU_WRITE_BUFFER_CHUNK_BYTES } from "../../core/webgpu-buffer-upload";
+
 /** Serializable GPU construction commands. A CPU-only preparation worker records
  * resource creation; the advancing worker realizes it cooperatively on its device.
  * No GPUDevice or live simulation resource crosses a worker boundary. */
@@ -184,7 +186,8 @@ export async function realizeCM12ResourceRecipe(device: GPUDevice, recipe: CM12R
       if (operation.target === "queue" && operation.method === "writeBuffer") {
         const data = args[2] as ArrayBuffer | Uint8Array;
         const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : data;
-        const chunk = options.uploadChunkBytes ?? 1024 * 1024;
+        const chunk = Math.min(options.uploadChunkBytes ?? 1024 * 1024,
+          GPU_WRITE_BUFFER_CHUNK_BYTES);
         for (let offset = 0; offset < bytes.byteLength; offset += chunk) {
           device.queue.writeBuffer(args[0] as GPUBuffer, Number(args[1]) + offset,
             bytes.buffer as ArrayBuffer, bytes.byteOffset + offset, Math.min(chunk, bytes.byteLength - offset));

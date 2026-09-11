@@ -1,3 +1,5 @@
+import { writeGPUBufferView } from "../../core/webgpu-buffer-upload";
+
 /**
  * The buffers, snapshots and counters behind Sparse CM12's stage lenses.
  *
@@ -151,7 +153,7 @@ export class SparseCM12StageLensSource implements StageLensSource {
     if (!this.addressingUploaded
       || this.addressingScratch.some((word, i) => word !== this.addressingWords[i])) {
       this.addressingWords.set(this.addressingScratch);
-      this.options.device.queue.writeBuffer(this.addressingBuffer, 0, this.addressingWords);
+      writeGPUBufferView(this.options.device.queue, this.addressingBuffer, 0, this.addressingWords);
       this.addressingUploaded = true;
     }
     return { buffer: this.addressingBuffer, offset: 0, size: SPARSE_CM12_ADDRESSING_BYTES };

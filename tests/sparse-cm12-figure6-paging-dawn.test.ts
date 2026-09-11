@@ -111,6 +111,7 @@ dawnTest("Figure 6 crosses its authored SparseWorld boundary",
         while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) {
           await new Promise(setImmediate);
         }
+        await solver.awaitFrameCompletion?.();
       }
       await device.queue.onSubmittedWorkDone();
       const [rows, growth, indirect, activity] = await Promise.all([

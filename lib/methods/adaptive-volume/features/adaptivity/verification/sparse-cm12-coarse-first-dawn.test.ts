@@ -57,6 +57,7 @@ for (const scenario of ["still", "impact", "settling"] as const) (dawnModule ? t
     const trace: unknown[] = [];
     for (let step = 1; step <= (settling ? 150 : impact ? 75 : 18); step++) {
       while (!solver.advanceTo(step / 60, [])) await new Promise(setImmediate);
+      await solver.awaitFrameCompletion?.();
       await solver.waitForTopologyReady();
       if (impact && step % 15 === 0) console.log(JSON.stringify({ step, generations: solver.info.topologyGenerationCount, preparationMs: solver.info.topologyPreparationDurationMs, error: solver.info.topologyGenerationError }));
       if (step % 3 === 0) {
@@ -81,7 +82,8 @@ for (const scenario of ["still", "impact", "settling"] as const) (dawnModule ? t
     if (!impact && !settling) {
       solver.applyRuntimeValues({ ...values, energyThreshold: 3, curvatureTolerance: 0.2 });
       assert.equal(solver.advanceTo(18 / 60, []), false, "live controls must preserve simulation time");
-      assert.equal(solver.advanceTo(19 / 60, []), true);
+      while (!solver.advanceTo(19 / 60, [])) await new Promise(setImmediate);
+      await solver.awaitFrameCompletion?.();
     }
     const fields = await solver.readDiagnosticFields();
     console.log(JSON.stringify({ scenario, initialFine, settledCoarse, initialCells: initial.bricks.filter(b => b.active).reduce((n, b) => n + b.acceptedResolution ** 3, 0), trace, relativeMassError: Math.abs(mass(fields.density) / initialMass - 1) }));

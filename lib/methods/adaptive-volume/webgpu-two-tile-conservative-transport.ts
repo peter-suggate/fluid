@@ -1,5 +1,6 @@
 import type { TwoTileConservativeOperator } from "./two-tile-conservative-transport";
 import { twoTileConservativeTransportWGSL } from "./two-tile-conservative-transport.wgsl";
+import { writeGPUBufferBytes, writeGPUBufferView } from "../../core/webgpu-buffer-upload";
 
 export interface PackedTwoTileConservativeTransport {
   readonly receiverCount: number;
@@ -126,10 +127,9 @@ export class WebGPUTwoTileConservativeTransport {
     ): GPUBuffer => {
       const buffer = device.createBuffer({ label, size: Math.max(4, source.byteLength), usage });
       if (source instanceof ArrayBuffer) {
-        device.queue.writeBuffer(buffer, 0, source);
+        writeGPUBufferBytes(device.queue, buffer, 0, source, 0, source.byteLength);
       } else {
-        device.queue.writeBuffer(buffer, 0, source.buffer as ArrayBuffer,
-          source.byteOffset, source.byteLength);
+        writeGPUBufferView(device.queue, buffer, 0, source);
       }
       return buffer;
     };

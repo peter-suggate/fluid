@@ -29,6 +29,7 @@ const dawnModule = process.env.WEBGPU_NODE_MODULE;
       await solver.waitForSimulationReady();
       for (let step = 1; step <= 4; step++) {
         while (!solver.advanceTo(step / 30, [])) await new Promise(setImmediate);
+        await solver.awaitFrameCompletion?.();
       }
       const [activity, fields, stats] = await Promise.all([
         solver.readGPUActivityPolicy(), solver.readDiagnosticFields(true), solver.readStats(),

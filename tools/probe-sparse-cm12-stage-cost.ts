@@ -750,8 +750,22 @@ try {
       solver.sparseWorldTrace.setStageLimitForQA("pressure-topology");
       solver.sparseWorldTrace.setPressureTopologyPhaseLimitForQA(pressureTopologyCutoff);
     }
-    while (!solver.advanceTo(frame * dt_s, [])) await new Promise(setImmediate);
+    let nextWaitingReport_ms = performance.now() + 1000;
+    while (!solver.advanceTo(frame * dt_s, [])) {
+      if (debugProgress && performance.now() >= nextWaitingReport_ms) {
+        debug(`advance ${frame} awaiting ${JSON.stringify({ framePending: solver.framePending,
+          submittedTime_s: solver.info.submittedTime_s,
+          topologyGenerationPending: solver.info.topologyGenerationPending,
+          topologyGenerationCount: solver.info.topologyGenerationCount,
+          topologyGenerationDeferred: solver.info.topologyGenerationDeferred,
+          topologyGenerationRequestedLeaves: solver.info.topologyGenerationRequestedLeaves,
+          topologyGenerationError: solver.info.topologyGenerationError })}`);
+        nextWaitingReport_ms = performance.now() + 1000;
+      }
+      await new Promise(setImmediate);
+    }
     debug(`advance ${frame} encoded`);
+    await solver.awaitFrameCompletion?.();
     await device.queue.onSubmittedWorkDone();
     if (frame === pressureTopologyCutoffFrame) {
       const expectedTraceContext = `adaptive-volume:sim-${(frame * dt_s).toFixed(6)}`;
@@ -867,7 +881,18 @@ try {
           velocityExtensionCaptureError: error instanceof Error ? error.message : String(error),
         };
       }
-      diagnosticFailure = `advance ${frame} FCA1/FSM1 successor fault or stall`;
+      let simulationFailure: string | undefined;
+      try { await solver.assertSimulationHealthy(); }
+      catch (error) { simulationFailure = error instanceof Error ? error.message : String(error); }
+      const transportFailure = await solver.readGeometricVolumeTransportReceiptQA();
+      const coverageCell = transportFailure.firstCoverageFailure?.cellId;
+      firstAuthorityFailure = { ...firstAuthorityFailure, simulationFailure,
+        volumeTransport: transportFailure,
+        ...(coverageCell === undefined ? {} : { cellRows:
+          await solver.readAcceptedGeometricCellRowsQA(coverageCell) }) };
+      // Keep the originating solver fault in the console receipt too; suite
+      // runners remove temporary JSON artifacts after a failed performance lane.
+      diagnosticFailure = simulationFailure ?? `advance ${frame} FCA1/FSM1 successor fault or stall`;
       break;
     }
     if (validationErrors.length > 0) {
@@ -1264,7 +1289,9 @@ try {
     : undefined;
   const finalPressureHashes = finalPressureHashEnabled
     ? await qaSolver.readPressureCanonicalMembershipQA() : undefined;
+  const volumeTransport = await solver.readGeometricVolumeTransportReceiptQA();
   const report = {
+    volumeTransport,
     finalPressureHashes,
     probe: "sparse-cm12-stage-cost", scene: sceneName, samples: seen,
     warmupSamples: warmup,
@@ -1419,7 +1446,7 @@ try {
     },
     frameAuthority: {
       abi: "FCA1",
-      scheduling: "GPU-owned fixed indirect work/no-work families",
+      scheduling: "GPU-owned indirect work counts; host continues transport from a bounded status receipt",
       // This remains the whole concrete resident-stage rollup. Its disjoint
       // FCA1, VEX2, FSM1 and packet-authority terms are in workChunks.
       transportVelocityExtensionUpperBound_ms: frameAuthorityStage?.median_ms,
@@ -1472,6 +1499,7 @@ try {
       terminalWork: report.terminalWork,
       validationErrors,
       diagnosticPassed: report.diagnostic.passed,
+      firstAuthorityFailure,
     }, null, 2));
   } else {
     console.log(JSON.stringify(report, null, 2));

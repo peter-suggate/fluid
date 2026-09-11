@@ -53,6 +53,7 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
     }
     for (let step = 1; step <= 48; step++) {
       while (!solver.advanceTo(step / 60, [])) await new Promise(setImmediate);
+      await solver.awaitFrameCompletion?.();
       await solver.waitForTopologyReady();
       if (step % 12 === 0) console.log(`torus step ${step}`);
     }

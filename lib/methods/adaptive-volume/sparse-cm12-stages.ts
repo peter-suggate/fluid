@@ -47,7 +47,7 @@ import type {
 
 /** The diagram's bands, in the order the advance first enters each. */
 export const SPARSE_CM12_STAGE_BANDS = Object.freeze({
-  transport: "Transport velocity + conservative CM12 transport",
+  transport: "Transport velocity + geometric volume transport",
   momentum: "Momentum prediction",
   pressure: "Composite pressure projection + receipts",
   adaptivity: "Activity census + candidate topology",
@@ -321,7 +321,7 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       summary: "FCA1 seals the frame's body and boundary authority. VEX2 caches accepted packet addresses by topology generation, selects compact or direct execution from occupancy, initializes packet validity and runs eight packet sweeps over the accepted topology image; sweep 8 publishes the effective transport velocity. Last, the AEI transport packet authority is compiled from the prior frame's final-scalar masks.",
       reads: "projected face velocity, accepted topology image, prior final-scalar packet masks",
       writes: "sealed frame control, extended transport velocity cache, transport packet families",
-      feeds: "face preparation and conservative transport",
+      feeds: "face preparation and geometric volume transport",
     },
     chip: () => "FCA1 · VEX2 8 cached-packet sweeps · AEI packets",
   },
@@ -340,54 +340,47 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     },
     lens: null,
     tip: {
-      summary: "Clears retired face-velocity support, republishes accepted-cell support, and traces the compact accepted row list with fixed-lattice RK2 interpolation of collocated velocity. Face sampling uses the finest incident physical width; explicit coarse regions can enlarge it.",
-      reads: "extended transport velocity, accepted cells and composite row topology",
+      summary: "Traces accepted faces with RK2 through extended velocity, then samples the source staggered face field on the finest incident lattice. Physical subface overlap selects mixed-resolution samples. Dry support, moving cut faces and uncertified exterior patches use the extended velocity field. Explicit coarse regions can enlarge trajectory sampling without coarsening the advected face field.",
+      reads: "source face velocity, extended trajectory velocity, accepted cells and composite row topology",
       writes: "oriented face transport rows",
-      feeds: "coupled conservative transport",
+      feeds: "geometric volume transport",
     },
     chip: (context) => context.info
       ? `${context.info.fluidBrickResidentCount ?? 0} resident bricks · supported rows`
       : "supported rows",
   },
   "conservative-transport": {
-    label: "Mass + gamma + momentum transport", band: "transport", side: "left",
+    label: "Geometric volume transport", band: "transport", side: "left",
     phase: {
       id: "fine-sdf-advection",
-      label: "Conservative transport",
+      label: "CFL-substepped geometric volume transport",
     },
     substages: {
       "transport-trace": {
-        id: "fine-sdf-advection", label: "CM12 transport trace + sharpening catalog publication",
+        id: "fine-sdf-advection", label: "Geometric subface and CFL-plan setup",
       },
-      "transport-scatter": { id: "fine-sdf-advection", label: "CM12 transport deficit scatter" },
-      "transport-gather": { id: "fine-sdf-advection", label: "CM12 transport conservative gather" },
+      "transport-scatter": {
+        id: "fine-sdf-advection", label: "PLIC flux and bounded low-flux iteration",
+      },
+      "transport-gather": {
+        id: "fine-sdf-advection", label: "Geometric FCT validation and volume commit",
+      },
     },
     lens: null,
     tip: {
-      summary: "Moves density, gamma and all three momentum components through the same oriented composite face fluxes in one conservative transaction — trace, deficit scatter, conservative gather — with exact donor/receiver cancellation across 2:1 seams; momentum's share cannot be separated without double counting.",
-      reads: "density, gamma, momentum, oriented face rows",
-      writes: "transported density, gamma and momentum; sharpening cell catalog",
-      feeds: "gamma diffusion and surface sharpening",
+      summary: "Chooses synchronized internal steps from the face-flux CFL, reconstructs accepted liquid interfaces, and computes shared PLIC swept-prism fluxes. Bounded shared fluxes and FCT correction keep each committed liquid volume within its moving solid capacity; every cell validates before publication, and sources and solid motion advance with the same internal step. Timing includes the waits between transport batches.",
+      reads: "liquid volume and capacity, projected face velocity, geometric interfaces and physical subfaces",
+      writes: "bounded liquid volume, volume-derived density and transport receipts",
+      feeds: "scalar and interface publication",
     },
-    toggle: {
-      param: "massConservation", on: "on", off: "off",
-      hint: "Enable the conservative column correction and forward return. Off uses backward transport and can lose or gain mass.",
-    },
-    controls: [
-      correctionStageControl("massConservationStrength", "massConservation"),
-      correctionStageControl("gammaConditioning"),
-      correctionStageControl("gammaConditioningStrength", "gammaConditioning"),
-    ],
-    chip: context => context.values.massConservation === "off"
-      ? "backward transport · conservation off"
-      : `${fixed(context.values.massConservationStrength ?? 1, 2)}× conservation · trace · scatter · gather`,
+    chip: () => "PLIC flux · bounded FCT · CFL substeps",
   },
   "tracer-advection": {
     label: "Marker advection", band: "transport", side: "right",
     phase: { id: "other", label: "Fluid marker advection along the transport characteristic" },
     lens: null,
     tip: {
-      summary: "Presentation-only markers integrated forward along the same characteristic, through the same extended transport velocity, that the conservative transport traces backward. Encoded only while the marker view is on, so this reads zero on an ordinary frame.",
+      summary: "Presentation-only markers integrated through the extended velocity that supplies the geometric face fluxes. Encoded only while the marker view is on, so this reads zero on an ordinary frame.",
       reads: "extended transport velocity, accepted density",
       writes: "marker positions and their live flags",
       feeds: "the marker overlay, and nothing in the physics",
@@ -582,19 +575,12 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     },
     lens: null,
     tip: {
-      summary: "Builds the finite-volume divergence RHS with enclosed components projected onto their compatible quotient space, applies the brick-aggregate + hierarchy preconditioner once for the initial direction, reduces the initial true residual and primes the pipelined image the solve iterates on.",
-      reads: "predicted face velocity, active pressure rows, pressure cache",
+      summary: "Builds the finite-volume divergence RHS from predicted face flux, geometric source volume and moving-solid capacity change, with enclosed components projected onto their compatible quotient space. It applies the brick-aggregate + hierarchy preconditioner once for the initial direction, reduces the initial true residual and primes the pipelined image the solve iterates on.",
+      reads: "predicted face velocity, active pressure rows, pressure cache, source and solid-capacity rates",
       writes: "compatible RHS, initial direction, pipelined solver image",
       feeds: "sparse MGPCG",
     },
-    controls: [
-      correctionStageControl("volumeCorrection"),
-      correctionStageControl("volumeCorrectionStrength", "volumeCorrection"),
-      correctionStageControl("volumeCorrectionCap", "volumeCorrection"),
-    ],
-    chip: context => context.values.volumeCorrection === "off"
-      ? "incompressibility only · volume recovery off"
-      : `${fixed(context.values.volumeCorrectionStrength ?? 1, 2)}× volume recovery · eta ${fixed(context.values.volumeCorrectionCap ?? 1, 2)}`,
+    chip: () => "compatible flux · sources + solid-volume change",
   },
   "pressure-solve": {
     label: "Pressure solve", band: "pressure", side: "left",

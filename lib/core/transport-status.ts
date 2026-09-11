@@ -86,6 +86,12 @@ export function transportWorkStatus(
     return { label: "Resolution update failed", state: "error", detail: gpuInfo.topologyGenerationError };
   }
   if (gpuInfo?.topologyGenerationDeferred) {
+    if (gpuInfo.topologyGenerationDeferred.reason === "volume-capacity") {
+      return {
+        label: "Resolution update cannot preserve liquid", state: "waiting",
+        detail: gpuInfo.topologyGenerationDeferred.detail,
+      };
+    }
     return {
       label: "Resolution budget reached", state: "waiting",
       detail: "The requested resolution exceeds the current topology budget",

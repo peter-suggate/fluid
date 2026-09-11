@@ -22,6 +22,6 @@ self.onmessage = async (event: MessageEvent<Parameters<typeof WebGPUSparseCM12Re
     visit(recipe);
     self.postMessage({ recipe }, { transfer: [...buffers] });
   } catch (error) {
-    self.postMessage({ error: error instanceof Error ? `${error.message}\n${error.stack ?? ""}` : String(error) });
+    self.postMessage({ error: error instanceof Error ? `${error.name}: ${error.message || "no error message"}\n${error.stack ?? ""}` : String(error) });
   }
 };

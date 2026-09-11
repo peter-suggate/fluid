@@ -78,7 +78,8 @@ dawnTest("mini32 settled bottom keeps stable coarse support",
         maximumDensity?: number;
       }>>>();
       for (let step = 1; step <= steps; step += 1) {
-        assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+        while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+        await solver.awaitFrameCompletion?.();
         if (step < stableWindowStart) {
           if (step % 20 === 0) await device.queue.onSubmittedWorkDone();
           continue;

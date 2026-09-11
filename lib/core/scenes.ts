@@ -14,6 +14,7 @@ import {
 } from "./hero-garden-stress-scene";
 import { studioStageCamera } from "./studio-stage-scene";
 import { createAnalyticMotionScene, createRerungFreeFallScene, createStandingWaveScene } from "./analytic-motion-scenes";
+import { createGeometricUniformTranslationScene } from "./geometric-translation-scene";
 import { createStationaryBowlScene } from "./stationary-bowl-scene";
 import { withHeroLayout } from "./voxel-scenery/hero-layout";
 import { terrainHeightAt, type TerrainDescription, type TerrainGrid } from "./terrain";
@@ -1010,6 +1011,27 @@ export function createSparseCM12LongDamBreakScene(): SceneDescription {
   delete scene.fluid.initialDamBreakOrigin_m;
   scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 30;
   scene.solidVoxels = [...solidVoxelShellForScene(scene), ...scene.solidVoxels];
+  return scene;
+}
+
+/** Shallow, initially resting dry-bed release for pre-impact Ritter metrics.
+ * The eight-cell transverse width keeps the production B8 path supported.
+ * See docs/geometric-dam-reference.md for coordinates and validity windows. */
+export function createSparseGeometricRitterDamBreakScene(): SceneDescription {
+  const scene = createMinimalPowerDamBreakScene();
+  scene.sceneId = "sparse-geometric-ritter-dam-break";
+  scene.duration_s = 2;
+  scene.container = { ...scene.container, width_m: 4, height_m: 0.2,
+    depth_m: 0.1, fillFraction: 0.3, top: "closed", fluidWallMode: "free-slip" };
+  scene.voxelDomain = { finestCellSize_m: 0.0125, brickSize_cells: 8 };
+  scene.fluid.initialDamBreakDimensions_m = { x: 2.4, y: 0.1, z: 0.1 };
+  delete scene.fluid.initialDamBreakOrigin_m;
+  scene.fluid.initialVelocity_m_s = { x: 0, y: 0, z: 0 };
+  scene.fluid.gravity_m_s2 = { x: 0, y: -9.81, z: 0 };
+  scene.fluid.dynamicViscosity_Pa_s = 0;
+  scene.fluid.surfaceTension_N_m = 0;
+  // Replace the inherited mini shell after changing the physical lattice.
+  scene.solidVoxels = [...solidVoxelShellForScene(scene)];
   return scene;
 }
 
@@ -2392,6 +2414,17 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     build: createGardenSvoLightingScene,
     camera: gardenCamera,
   }),
+  defineScene({
+    id: "geometric-uniform-translation",
+    name: "Geometric · uniform high-speed translation",
+    blurb: "Two all-fine bricks. A liquid plug moves at 6 m/s with zero gravity, viscosity or surface tension. It should translate two cells per step without changing shape or speed; the short run ends before wall contact.",
+    audience: "validation", shelf: "Analytic motion", environment: "stage",
+    build: () => createGeometricUniformTranslationScene(),
+    camera: { distance_m: 1.3, target_m: { x: 0, y: .2, z: 0 }, elevation_rad: .3, azimuth_rad: .45 },
+    methodProfile: { methodId: "adaptive-volume", quality: "balanced", overrides: {
+      ...SPARSE_CM12_COMPLEXITY_LADDER_METHOD_PROFILE.overrides, timeStep: "scene",
+    } },
+  }),
   ...(["translation", "free-fall"] as const).map(motion => defineScene({
     id: `coarse-surface-${motion}`,
     name: motion === "translation" ? "Coarse surface · translation" : "Coarse surface · free fall",
@@ -2403,7 +2436,6 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     camera: { distance_m: 2.6, target_m: { x: 0, y: .8, z: 0 }, elevation_rad: .3, azimuth_rad: .45 },
     methodProfile: { methodId: "adaptive-volume", quality: "balanced", overrides: {
       selectorMode: "coarse-first", maximumMacroSpanBricks: "1", timeStep: "scene",
-      gammaDiffusion: "on", surfaceSharpening: "on",
     } },
   })),
   defineScene({
@@ -2414,7 +2446,6 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     camera: { distance_m: 2.6, target_m: { x: 0, y: .8, z: 0 }, elevation_rad: .3, azimuth_rad: .45 },
     methodProfile: { methodId: "adaptive-volume", quality: "balanced", overrides: {
       selectorMode: "coarse-first", maximumMacroSpanBricks: "1", timeStep: "scene",
-      gammaDiffusion: "on", surfaceSharpening: "on",
     } },
   }),
   ...([false, true] as const).map(live => defineScene({
@@ -2428,7 +2459,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     camera: { distance_m: 2.6, target_m: { x: 0, y: .5, z: 0 }, elevation_rad: .3, azimuth_rad: .45 },
     methodProfile: { methodId: "adaptive-volume", quality: "balanced", overrides: {
       selectorMode: "coarse-first", maximumMacroSpanBricks: "1", timeStep: "scene",
-      curvatureTolerance: .05, gammaDiffusion: "on", surfaceSharpening: "on",
+      curvatureTolerance: .05,
     } },
   })),
   ...([1, 2] as const).map((curvatureMultiplier) => defineScene({
@@ -2444,7 +2475,6 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     camera: { distance_m: 4.6, target_m: { x: 0, y: .65, z: 0 }, elevation_rad: .58, azimuth_rad: .72 },
     methodProfile: { methodId: "adaptive-volume", quality: "balanced", overrides: {
       selectorMode: "coarse-first", maximumMacroSpanBricks: "1", timeStep: "scene",
-      gammaDiffusion: "on", surfaceSharpening: "on",
     } },
   })),
   defineScene({
@@ -2646,6 +2676,17 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     methodProfile: COARSE_ONLY_POWER_DAM_METHOD_PROFILE,
     build: createMinimalPowerDamBreak64Scene,
     camera: { distance_m: 1.9, target_m: { x: 0, y: 0.3, z: 0 } },
+  }),
+  defineScene({
+    id: "sparse-geometric-ritter-dam-break",
+    name: "Sparse Geometric Ritter dam break",
+    blurb: "A shallow 4 m free-slip flume with a 0.1 m head. Accepted-volume depth and pre-impact sensor arrivals can be compared with Ritter's dry-bed solution; the later wall impact is a separate physical observation.",
+    audience: "validation",
+    shelf: "Dam-break ladder",
+    environment: "stage",
+    methodProfile: SPARSE_CM12_COMPLEXITY_LADDER_METHOD_PROFILE,
+    build: createSparseGeometricRitterDamBreakScene,
+    camera: { distance_m: 5.2, target_m: { x: 0.4, y: 0.1, z: 0 } },
   }),
   defineScene({
     id: "sparse-cm12-long-dam-break",

@@ -48,7 +48,10 @@ export interface GPUEulerianInfo {
   topologyGenerationMaximumBytes?: number;
   topologyGenerationCount?: number;
   topologyGenerationRequestedLeaves?: number;
-  topologyGenerationDeferred?: { leaves: number; cells: number; requestedBytes?: number; availableBytes?: number };
+  topologyGenerationDeferred?: {
+    leaves: number; cells: number; requestedBytes?: number; availableBytes?: number;
+    reason?: "volume-capacity"; detail?: string;
+  };
   /** Public sparse device readiness projected across the renderer worker seam. */
   sparseWorldDeviceStatus?: SparseWorldDevice["status"];
   sparseWorldDeviceFault?: SparseWorldFault;

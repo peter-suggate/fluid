@@ -9,6 +9,8 @@ import { createSymmetricExpansionScene } from "../lib/core/scenes";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
+import { createProcessRetainedDawnGPU, type NodeDawnProvider } from
+  "../lib/harness/node-dawn-provider";
 import { WebGPUAdaptiveMassSolver } from
   "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
@@ -62,13 +64,12 @@ dawnTest("symmetric expansion allocates and wets sparse corner tiles",
       "tests/sparse-cm12-symmetric-corner-expansion-dawn.test.ts");
     let device: GPUDevice | undefined;
     let solver: WebGPUAdaptiveMassSolver | undefined;
+    const volumeHistory: unknown[] = [];
+    const validationErrors: string[] = [];
     try {
-      const dawn = await import(pathToFileURL(dawnModule!).href) as {
-        create(options: string[]): GPU;
-        globals: Record<string, unknown>;
-      };
+      const dawn = await import(pathToFileURL(dawnModule!).href) as NodeDawnProvider;
       Object.assign(globalThis, dawn.globals);
-      const gpu = dawn.create([
+      const gpu = createProcessRetainedDawnGPU(dawn, [
         `backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`,
         "enable-dawn-features=disable_blob_cache",
       ]);
@@ -77,7 +78,6 @@ dawnTest("symmetric expansion allocates and wets sparse corner tiles",
       device = await adapter.requestDevice({
         requiredLimits: requiredFluidDeviceLimits(adapter.limits),
       });
-      const validationErrors: string[] = [];
       device.addEventListener("uncapturederror", (event) => {
         event.preventDefault();
         validationErrors.push(event.error.message);
@@ -119,9 +119,26 @@ dawnTest("symmetric expansion allocates and wets sparse corner tiles",
       "diagonal corners must remain absent beyond the authored face-normal band");
 
       for (let step = 1; step <= SYMMETRY_STEPS; step += 1) {
-        assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+        while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+        await solver.awaitFrameCompletion?.();
         await device.queue.onSubmittedWorkDone();
         await solver.assertSimulationHealthy();
+        const transport = await solver.readGeometricVolumeTransportReceiptQA();
+        assert.equal(transport.algorithm, "geometric-volume-fct");
+        assert.equal(transport.fault, 0, "shared volume transport must complete without a bound fault");
+        assert.equal(transport.transportCompleted, true);
+        assert.equal(transport.executedSubsteps, transport.plannedSubsteps);
+        assert.ok(transport.maxRelativeBoundError <= 8 * 2 ** -23,
+          `volume exceeded capacity beyond f32 roundoff: ${transport.maxRelativeBoundError}`);
+        const stepFields = await solver.readDiagnosticFields(true);
+        const acceptedVolume = await solver.readAcceptedGeometricVolumeQA();
+        volumeHistory.push({ step,
+          volumeFine3: stepFields.density.reduce((sum, value) => sum + value, 0),
+          acceptedVolume,
+          outflowFine3: transport.outflowFineCells3,
+          ...(transport.outflowFineCells3 > 0 ? { transport } : {}),
+          substeps: transport.executedSubsteps,
+        });
         if (step !== 1 && step !== 3) continue;
         const activity = await solver.readGPUActivityPolicy();
         const corners = activity.bricks.filter((brick) =>
@@ -159,12 +176,14 @@ dawnTest("symmetric expansion allocates and wets sparse corner tiles",
       let cornerMass = 0;
       let totalMass = 0;
       let maximumDensity = 0;
+      let minimumDensity = 0;
       for (let z = 0; z < horizontalCells; z += 1)
         for (let y = 0; y < horizontalCells / 2; y += 1)
           for (let x = 0; x < horizontalCells; x += 1) {
             const rho = density[x + horizontalCells * (y + horizontalCells / 2 * z)]!;
             totalMass += rho;
             maximumDensity = Math.max(maximumDensity, rho);
+            minimumDensity = Math.min(minimumDensity, rho);
             if (!horizontalCorner([Math.floor(x / brickSize), Math.floor(y / brickSize),
               Math.floor(z / brickSize)])) continue;
             cornerMass += rho;
@@ -172,8 +191,8 @@ dawnTest("symmetric expansion allocates and wets sparse corner tiles",
       const initialMass = (scene.fluid.initialBrickSeeds_m?.length ?? 0) * brickSize ** 3;
       assert.ok(Math.abs(totalMass - initialMass) / initialMass <= 3e-3,
         `symmetric expansion lost fluid mass: ${totalMass}/${initialMass}`);
-      assert.ok(maximumDensity <= 2.5,
-        `conserved mass collapsed into rho=${maximumDensity}, shrinking visible volume`);
+      assert.ok(minimumDensity >= -8 * 2 ** -23 && maximumDensity <= 1 + 8 * 2 ** -23,
+        `geometric occupancy escaped [0,1] beyond f32 roundoff: ${minimumDensity}/${maximumDensity}`);
       assert.ok(cornerMass > 1e-3,
         `allocated corner tiles must accept transported liquid; measured ${cornerMass}`);
       const densityError = scalarD4Error(fields.density, 32, 16, 32);
@@ -182,6 +201,20 @@ dawnTest("symmetric expansion allocates and wets sparse corner tiles",
       assertSparseCM12Baseline("symmetry.velocityD4_m_s", velocityD4Error(fields.velocity, 32, 16, 32));
       assertSparseCM12Baseline("symmetry.pressureD4_Pa", scalarD4Error(fields.pressure, 32, 16, 32));
       assert.deepEqual(validationErrors, []);
+    } catch (error) {
+      console.error(JSON.stringify({ volumeHistory }));
+      if (validationErrors.length) console.error(JSON.stringify({ validationErrors }));
+      // Keep the actual volume/CFL receipt when a production advance halts;
+      // the first-fault owner alone cannot distinguish flux and topology issues.
+      if (solver) {
+        try {
+          console.error(JSON.stringify({ volumeTransportFailure:
+            await solver.readGeometricVolumeTransportReceiptQA() }));
+        } catch (receiptError) {
+          console.error("Volume receipt unavailable:", String(receiptError));
+        }
+      }
+      throw error;
     } finally {
       solver?.destroy();
       device?.destroy();

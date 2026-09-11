@@ -110,6 +110,7 @@ test("production editor plugins, worker acceptance and controller history preser
       const target = (solver!.info.submittedTime_s ?? 0) + 1 / 30;
       const deadline = performance.now() + 15000;
       while (!solver!.advanceTo(target, [])) { assert.ok(performance.now() < deadline, "simulation failed to advance"); await settle(); }
+      await solver!.awaitFrameCompletion?.();
       await device!.queue.onSubmittedWorkDone();
     };
     const solidFractions = () => readGpuSolidFractions(device!, world, [solver!.info.nx, solver!.info.ny, solver!.info.nz]);

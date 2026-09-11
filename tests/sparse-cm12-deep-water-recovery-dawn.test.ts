@@ -106,7 +106,8 @@ dawnTest("large hydrostatic stays still, refines on impact, and restores deep co
       const initialDensity = (await solver.readDiagnosticFields()).density;
       let oneSecondTopology = "";
       for (let step = 1; step <= 60; step += 1) {
-        assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+        while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+        await solver.awaitFrameCompletion?.();
         if (step % 15 !== 0) continue;
         await device.queue.onSubmittedWorkDone();
         const fields = await solver.readDiagnosticFields();
@@ -138,7 +139,8 @@ dawnTest("large hydrostatic stays still, refines on impact, and restores deep co
       let impactFine = false;
       let impactRefinedDeep = false;
       for (let step = 61; step <= 90; step += 1) {
-        assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+        while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+        await solver.awaitFrameCompletion?.();
         if (step % 5 !== 0) continue;
         await device.queue.onSubmittedWorkDone();
         const sample = await solver.readGPUActivityPolicy();
@@ -158,7 +160,8 @@ dawnTest("large hydrostatic stays still, refines on impact, and restores deep co
       let recoveredAt_s: number | undefined;
       let quietestRecoveredSpeed = Number.POSITIVE_INFINITY;
       for (let step = 91; step <= 450 && recoveredAt_s === undefined; step += 1) {
-        assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+        while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+        await solver.awaitFrameCompletion?.();
         if (step % 15 !== 0) continue;
         await device.queue.onSubmittedWorkDone();
         const recovered = await solver.readGPUActivityPolicy();

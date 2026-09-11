@@ -3,6 +3,8 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
+import { createProcessRetainedDawnGPU, type NodeDawnProvider } from
+  "../lib/harness/node-dawn-provider";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { createSparseAdaptiveMassAtlas, type SparseBrickResolution } from
   "../lib/methods/adaptive-volume/sparse-brick-atlas";
@@ -40,11 +42,10 @@ dawnTest("bounded GPU topology generations defer, cancel and reclaim only after 
     let store: SparseCM12TopologyGenerationStore | undefined;
     const leases: Array<{ releaseAfterSubmission(): Promise<void> }> = [];
     try {
-      const dawn = await import(pathToFileURL(dawnModule!).href) as {
-        create(options: string[]): GPU; globals: Record<string, unknown>;
-      };
+      const dawn = await import(pathToFileURL(dawnModule!).href) as NodeDawnProvider;
       Object.assign(globalThis, dawn.globals);
-      const gpu = dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
+      const gpu = createProcessRetainedDawnGPU(dawn,
+        [`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
       const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
       assert.ok(adapter);
       device = await adapter.requestDevice({ requiredLimits: requiredFluidDeviceLimits(adapter.limits) });

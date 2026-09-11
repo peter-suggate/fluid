@@ -16,6 +16,8 @@ import {
   acquireWebGPUExclusiveLock,
   releaseWebGPUExclusiveLock,
 } from "../lib/harness/webgpu-smoke-isolation";
+import { createProcessRetainedDawnGPU, type NodeDawnProvider } from
+  "../lib/harness/node-dawn-provider";
 import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 import type { WebGPUAdaptiveMassSolver } from
   "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
@@ -111,12 +113,9 @@ dawnTest("Sparse CM12 hydrostatic ladders stay within the accepted baseline", {
   let device: GPUDevice | undefined;
   let solver: WebGPUAdaptiveMassSolver | undefined;
   try {
-    const dawn = await import(pathToFileURL(dawnModule!).href) as {
-      create(options: string[]): GPU;
-      globals: Record<string, unknown>;
-    };
+    const dawn = await import(pathToFileURL(dawnModule!).href) as NodeDawnProvider;
     Object.assign(globalThis, dawn.globals);
-    const gpu = dawn.create([
+    const gpu = createProcessRetainedDawnGPU(dawn, [
       `backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`,
       "enable-dawn-features=disable_blob_cache",
     ]);
@@ -214,8 +213,8 @@ dawnTest("Sparse CM12 hydrostatic ladders stay within the accepted baseline", {
     // Two simulated seconds cover fifteen topology epochs and the dam impact,
     // long enough for the former B8/B4 ping-pong to complete several cycles.
     for (let step = 1; step <= 60; step += 1) {
-      assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true,
-        `advance ${step}`);
+      while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+      await solver.awaitFrameCompletion?.();
       await sample(step);
     }
 
@@ -294,7 +293,8 @@ dawnTest("Sparse CM12 hydrostatic ladders stay within the accepted baseline", {
       assertSparseCM12Baseline("hydrostatic.resetHeightError_cells", Math.abs(resetMean - 15.25));
       let settledGeneration: number | undefined;
       for (let step = 1; step <= 16; step += 1) {
-        assert.equal(offsetSolver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+        while (!offsetSolver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+        await offsetSolver.awaitFrameCompletion?.();
         await device.queue.onSubmittedWorkDone();
         await offsetSolver.assertSimulationHealthy();
         const snapshot = await offsetSolver.readGPUActivityPolicy();
@@ -341,6 +341,17 @@ dawnTest("Sparse CM12 hydrostatic ladders stay within the accepted baseline", {
       offsetSolver.destroy();
     }
     assert.deepEqual(validationErrors, []);
+  } catch (error) {
+    if (solver) {
+      try {
+        console.error(JSON.stringify({ volumeTransportFailure:
+          await solver.readGeometricVolumeTransportReceiptQA(),
+        cellRows: await solver.readAcceptedGeometricCellRowsQA(3136) }));
+      } catch (diagnosticError) {
+        console.error("Hydrostatic volume diagnostic failed", diagnosticError);
+      }
+    }
+    throw error;
   } finally {
     solver?.destroy();
     device?.destroy();

@@ -10,6 +10,8 @@ import { getSceneDefinition } from "../lib/core/scenes";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
+import { createProcessRetainedDawnGPU, type NodeDawnProvider } from
+  "../lib/harness/node-dawn-provider";
 import { WebGPUAdaptiveMassSolver } from
   "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
@@ -22,12 +24,10 @@ dawnTest("Sparse CM12 couples the settled-tank rigid bodies without losing water
       "tests/sparse-cm12-rigid-coupling-dawn.test.ts");
     let device: GPUDevice | undefined;
     try {
-      const dawn = await import(pathToFileURL(dawnModule!).href) as {
-        create(options: string[]): GPU;
-        globals: Record<string, unknown>;
-      };
+      const dawn = await import(pathToFileURL(dawnModule!).href) as NodeDawnProvider;
       Object.assign(globalThis, dawn.globals);
-      const gpu = dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
+      const gpu = createProcessRetainedDawnGPU(dawn,
+        [`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
       const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
       assert.ok(adapter);
       device = await adapter.requestDevice({
@@ -52,11 +52,49 @@ dawnTest("Sparse CM12 couples the settled-tank rigid bodies without losing water
       try {
         await solver.waitForSimulationReady();
         const initialMass = solver.info.volumeCellSum!;
+        const assertHealthyWithVolumeQA = async () => {
+          try {
+            await solver.assertSimulationHealthy();
+          } catch (error) {
+            const owner = /owner=(\d+)/.exec(String(error));
+            console.error("geometric-rigid-failure", JSON.stringify({
+              transport: await solver.readGeometricVolumeTransportReceiptQA(),
+              cell: owner ? await solver.readAcceptedGeometricCellRowsQA(Number(owner[1])) : undefined,
+            }, null, 2));
+            throw error;
+          }
+        };
         for (let step = 1; step <= 30; step += 1) {
-          assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, bodies), true);
+          let nextAdmissionDiagnostic = performance.now() + 15_000;
+          while (!solver.advanceTo(step * CM12_PAPER_DT_S, bodies)) {
+            const deferred = solver.info.topologyGenerationDeferred;
+            if (deferred?.reason === "volume-capacity") {
+              throw new Error(`Rigid step ${step} requires topology admission: ${deferred.detail ?? JSON.stringify(deferred)}`);
+            }
+            if (performance.now() >= nextAdmissionDiagnostic) {
+              console.error("geometric-rigid-admission-wait", JSON.stringify({
+                step, framePending: solver.framePending,
+                topologyGenerationPending: solver.info.topologyGenerationPending,
+                topologyGenerationDeferred: deferred,
+                topologyGenerationError: solver.info.topologyGenerationError,
+              }));
+              nextAdmissionDiagnostic = performance.now() + 15_000;
+            }
+            await new Promise(setImmediate);
+          }
+          try { await solver.awaitFrameCompletion(); }
+          catch (error) { await assertHealthyWithVolumeQA(); throw error; }
+          if (process.env.FLUID_GEOMETRIC_STEP_QA === "1") {
+            await device.queue.onSubmittedWorkDone();
+            const transport = await solver.readGeometricVolumeTransportReceiptQA();
+            console.error("geometric-rigid-step", JSON.stringify({ step, transport,
+              physical: await solver.readAcceptedGeometricVolumeQA(),
+            }));
+            await assertHealthyWithVolumeQA();
+          }
         }
         await device.queue.onSubmittedWorkDone();
-        await solver.assertSimulationHealthy();
+        await assertHealthyWithVolumeQA();
 
         const poses = await solver.readRigidBodyPoses();
         assert.equal(poses?.length, bodies.length);

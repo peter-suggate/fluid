@@ -70,7 +70,8 @@ dawnTest("mini32 presentation advances with the simulation through 0.467 s",
       const initialFrame = await solver.readFrameControlQA();
       const timeline: Array<Record<string, unknown>> = [];
       for (let step = 1; step <= 14; step += 1) {
-        assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+        while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+        await solver.awaitFrameCompletion?.();
         // Match the browser's two-deep submission queue. A per-step fence can
         // hide a presentation generation overwrite that occurs in production.
         if (step % 2 !== 0 && step !== 14) continue;

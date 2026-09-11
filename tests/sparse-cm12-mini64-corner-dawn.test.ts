@@ -32,6 +32,7 @@ const dawnModule = process.env.WEBGPU_NODE_MODULE;
     for (let step = 0; step <= 30; step++) {
       if (step) {
         while (!solver.advanceTo(step / 30, [])) await new Promise(setImmediate);
+        await solver.awaitFrameCompletion?.();
         if (step % 2 === 0) { await device.queue.onSubmittedWorkDone(); await solver.assertSimulationHealthy(); }
       }
       if (step % 2) continue;

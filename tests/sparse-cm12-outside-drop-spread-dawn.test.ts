@@ -10,6 +10,8 @@ import { findSceneDefinition } from "../lib/core/scenes";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
+import { createProcessRetainedDawnGPU, type NodeDawnProvider } from
+  "../lib/harness/node-dawn-provider";
 import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 import { WebGPUAdaptiveMassSolver } from
   "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
@@ -24,12 +26,10 @@ dawnTest("an outside-tank ball spreads across both horizontal sparse-world axes"
     let device: GPUDevice | undefined;
     let solver: WebGPUAdaptiveMassSolver | undefined;
     try {
-      const dawn = await import(pathToFileURL(dawnModule!).href) as {
-        create(options: string[]): GPU;
-        globals: Record<string, unknown>;
-      };
+      const dawn = await import(pathToFileURL(dawnModule!).href) as NodeDawnProvider;
       Object.assign(globalThis, dawn.globals);
-      const gpu = dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
+      const gpu = createProcessRetainedDawnGPU(dawn,
+        [`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
       const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
       assert.ok(adapter);
       device = await adapter.requestDevice({ requiredLimits: requiredFluidDeviceLimits(adapter.limits) });
@@ -46,7 +46,8 @@ dawnTest("an outside-tank ball spreads across both horizontal sparse-world axes"
         device, scene, "balanced", values, undefined, () => {},
       ) as WebGPUAdaptiveMassSolver;
       await solver.waitForSimulationReady();
-      assert.equal(solver.advanceTo(CM12_PAPER_DT_S, []), true);
+      while (!solver.advanceTo(CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+      await solver.awaitFrameCompletion?.();
       solver.injectLiquidBall({
         centre_m: {
           x: -scene.container.width_m / 2 - 3 * radius_m,
@@ -59,8 +60,8 @@ dawnTest("an outside-tank ball spreads across both horizontal sparse-world axes"
       await solver.assertSimulationHealthy();
 
       for (let step = 2; step <= 32; step += 1) {
-        assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true,
-          `outside drop failed at step ${step}`);
+        while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+        await solver.awaitFrameCompletion?.();
       }
       await device.queue.onSubmittedWorkDone();
       await solver.assertSimulationHealthy();

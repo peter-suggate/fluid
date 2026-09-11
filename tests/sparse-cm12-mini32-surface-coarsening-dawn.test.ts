@@ -98,8 +98,8 @@ dawnTest("mini32 keeps its moving front fine and later consumes settled proofs",
     }>>>();
     let movingFrontFineSurfaces = 0;
     for (let step = 1; step <= steps; step += 1) {
-      assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true,
-        `advance ${step}`);
+      while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+      await solver.awaitFrameCompletion?.();
       if (step % sampleSteps === 0) {
         await device.queue.onSubmittedWorkDone();
         const [fields, snapshot] = await Promise.all([

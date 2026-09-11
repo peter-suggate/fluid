@@ -37,6 +37,7 @@ const dawnModule = process.env.WEBGPU_NODE_MODULE;
         "refinement backing must not activate the dry corner at initialization");
       for (let step = 1; step <= 8; step++) {
         while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+        await solver.awaitFrameCompletion?.();
         if (step === 1) {
           const firstStep = await solver.readGPUActivityPolicy();
           // Regression: almost vertical shared motion used to count as a B8

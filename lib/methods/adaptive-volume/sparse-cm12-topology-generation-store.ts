@@ -1,5 +1,6 @@
 import type { SparseCM12TopologyPreparation } from "./webgpu-sparse-cm12-resident";
 import { SPARSE_CM12_PACKED_TEMPLATE_MAGIC } from "./sparse-cm12-factored-aei-packed-template";
+import { writeGPUBufferView } from "../../core/webgpu-buffer-upload";
 
 type Packet = Extract<SparseCM12TopologyPreparation, { status: "ready" }>;
 
@@ -142,8 +143,7 @@ export class SparseCM12TopologyGenerationStore {
           usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
         });
         buffers.push(buffer);
-        this.device.queue.writeBuffer(buffer, 0, words.buffer as ArrayBuffer,
-          words.byteOffset, words.byteLength);
+        writeGPUBufferView(this.device.queue, buffer, 0, words);
       }
     } catch (error) { thrown = error; }
     // Pop synchronously before awaiting: another device user must not inherit

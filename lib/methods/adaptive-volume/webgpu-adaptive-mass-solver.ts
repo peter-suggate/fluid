@@ -1,7 +1,8 @@
 import { correctionOptions } from "./correction-controls";
 import type { LiveFluidEdit, LiveFluidEditResult } from "../../core/live-fluid-edit";
 import { SimulationFailureError } from "../../core/simulation-failure";
-import { SparseCM12GenerationBudgetDeferred, SparseCM12GenerationStale } from "./sparse-cm12-generation-budget";
+import { SparseCM12GenerationBudgetDeferred, SparseCM12GenerationStale, sparseGeometricGenerationByteBudget } from "./sparse-cm12-generation-budget";
+import { SparseCM12GenerationCapacityDeferred } from "./sparse-cm12-generation-transfer";
 import { planSparseCM12ResidentGeneration } from "./sparse-cm12-generation-policy";
 import { GPUInitializationTaskRunner } from "../../core/gpu-initialization";
 import type { GPUQuality } from "../../core/gpu-quality";
@@ -169,8 +170,9 @@ interface SparseCM12TopologySchedulerDiagnostics {
 
 /**
  * GPU-resident Sparse CM12 authority. Construction may build compact topology
- * on the host, but every accepted frame is device-only simulation work: the
- * host writes one small uniform block and encodes a fixed dispatch schedule.
+ * on the host. Physics fields remain on the GPU; the host writes a small
+ * uniform block and reads bounded transport progress receipts between chunks
+ * before publishing the complete outer frame.
  */
 export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   readonly sparseWorld: SparseWorld;
@@ -201,10 +203,12 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     return { ...this.sparseWorld.presentation().fineLevelSet,
       surfaceMeshRefinement: this.options.surfaceMeshRefinement ?? 2 };
   }
-  readPresentationPageAllocatorReceiptQA() {
+  async readPresentationPageAllocatorReceiptQA() {
+    await this.awaitFrameSettlement();
     return this.sparseWorldTrace.readPresentationPageAllocatorReceiptQA();
   }
-  readWorldGrowthReceiptQA() {
+  async readWorldGrowthReceiptQA() {
+    await this.awaitFrameSettlement();
     return this.sparseWorldTrace.readWorldGrowthReceiptQA();
   }
   /** Test-only runtime seam for exercising an accepted surface rung cutover. */
@@ -219,6 +223,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   }
   /** Hold accepted cell sizes while allowing new fluid support to be allocated. */
   setTopologyFrozen(frozen: boolean): void {
+    if (this.framePending) { this.deferredFrameActions.push(() => this.setTopologyFrozen(frozen)); return; }
     if ((this.options.activityPolicy?.freezeTopology === true) === frozen) return;
     if (frozen) this.sparseRuntime.cancelTopologyPreparation();
     this.options = { ...this.options, activityPolicy: {
@@ -255,10 +260,53 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   private readonly topologyGenerationMaximumBytes: number;
   private disposed = false;
   private simulationFailureError?: Error;
+  private frameWork?: Promise<void>;
+  private completedFrame?: () => void;
+  private geometricBackingPending = false;
+  private geometricBackingRetryAt_ms = 0;
+  private generationCapacityRefusal?: {
+    step: number; interactionRevision: number; scene: SceneDescription;
+    options: AdaptiveMassSolverOptions;
+  };
+  private deferredFrameScene?: SceneDescription;
+  private deferredFrameValues?: MethodParamValues;
+  private readonly deferredFrameActions: (() => void)[] = [];
+
+  get framePending(): boolean { return this.frameWork !== undefined; }
+
+  /** Offline callers acknowledge completion here; rendering acknowledges it
+   * on the next advanceTo call so its submitted-time observation stays atomic. */
+  async awaitFrameCompletion(): Promise<void> {
+    await this.awaitFrameSettlement();
+    if (!this.disposed && this.simulationFailureError) throw this.simulationFailureError;
+  }
+
+  /** Diagnostics may inspect the rejected frame after its work has settled. */
+  private async awaitFrameSettlement(): Promise<void> {
+    await this.frameWork;
+    if (this.disposed) return;
+    if (!this.simulationFailureError) this.publishCompletedFrame();
+  }
+
+  private publishCompletedFrame(): boolean {
+    const publish = this.completedFrame;
+    if (!publish) return false;
+    this.completedFrame = undefined;
+    publish();
+    const scene = this.deferredFrameScene, values = this.deferredFrameValues;
+    this.deferredFrameScene = undefined;
+    this.deferredFrameValues = undefined;
+    if (scene) this.applySceneUniforms(scene);
+    if (values) this.applyRuntimeValues(values);
+    for (const action of this.deferredFrameActions.splice(0)) action();
+    this.scheduleTopologyGeneration();
+    return true;
+  }
   private readonly failureReceipts = new Set<Promise<void>>();
 
   async assertSimulationHealthy(): Promise<void> {
     if (this.disposed) return;
+    await this.awaitFrameCompletion();
     await Promise.all([...this.failureReceipts]);
     // Presentation completion can outlive a solver rebuild or GPU shutdown.
     // Disposal retires its receipts; it must not submit a new checkpoint.
@@ -356,7 +404,14 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       maximumCells: Math.max(262144, sparseRuntime.cellCount * 2),
       maximumSpanBricks: options.maximumMacroSpanBricks ?? Number.POSITIVE_INFINITY,
     };
-    this.topologyGenerationMaximumBytes = sparseRuntime.allocatedBytes * 3;
+    this.topologyGenerationMaximumBytes = sparseGeometricGenerationByteBudget({
+      residentBytes: sparseRuntime.allocatedBytes, residentCells: sparseRuntime.cellCount,
+      residentLeaves: atlas.bricks.length,
+      maximumCells: this.topologyGenerationLimits.maximumCells,
+      maximumLeaves: this.topologyGenerationLimits.maximumLeaves,
+      maximumBufferBytes: device.limits.maxBufferSize,
+      explicitMaximumBytes: options.topologyGenerationMaximumBytes,
+    });
     const tankCellSize_m = sceneCellSizes_m(scene);
     this.fluidDomain = {
       origin_m: [-0.5 * atlas.dimensions[0] * tankCellSize_m[0], 0,
@@ -419,7 +474,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       volumeControl: false,
       hostFluidAuthority: "gpu-resident",
       hostSimulationSizedWorkItems: 0,
-      hostSchedulingUsesReadback: false,
+      hostSchedulingUsesReadback: true,
     };
     this.publishPhysicalWidthCensus(atlas);
   }
@@ -840,12 +895,18 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   }
 
   async editFluid(edit: LiveFluidEdit): Promise<LiveFluidEditResult> {
+    await this.awaitFrameCompletion();
     if (this.disposed || !this.sparseWorld.editFluidVolume) return { accepted: false, reason: "Live fluid editing is unavailable." };
     return this.sparseWorld.editFluidVolume(edit);
   }
 
   /** Add a semantic liquid interaction through the public sparse-world API. */
   injectLiquidBall(ball: InjectedLiquidBall): void {
+    if (this.framePending) {
+      const snapshot = { ...ball, centre_m: { ...ball.centre_m } };
+      this.deferredFrameActions.push(() => this.injectLiquidBall(snapshot));
+      return;
+    }
     if (this.disposed || !(ball.radius_m > 0)) return;
     this.sparseWorld.edit({
       kind: "liquid-ellipsoid",
@@ -867,6 +928,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
    * and discard the timeline.
    */
   async prepareLiveSolidEdit(scene: SceneDescription): Promise<boolean> {
+    await this.awaitFrameCompletion();
+    if (this.disposed) return false;
     if (!this.sparseWorld.prepareSceneEdit) throw new Error("Live solid edit acceptance is unavailable.");
     return this.sparseWorld.prepareSceneEdit(scene);
   }
@@ -877,6 +940,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   }
 
   applySceneUniforms(scene: SceneDescription): void {
+    if (this.framePending) { this.deferredFrameScene = scene; return; }
     const regionStamp = JSON.stringify(sceneRefinementRegions(scene));
     const regionsChanged = regionStamp
       !== (this.topologyRegionStamp ?? JSON.stringify(sceneRefinementRegions(this.scene)));
@@ -901,6 +965,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
    * rebuild, while accepted resolution changes publish at topology epochs.
    */
   applyRuntimeValues(values: MethodParamValues): void {
+    if (this.framePending) { this.deferredFrameValues = { ...values }; return; }
     const timeStep = values.timeStep === "scene" ? "scene" : "paper";
     const sharpeningDistance = sparseCM12SharpeningDistance(values.sharpeningDistance);
     const sharpeningTraceSteps = sparseCM12SharpeningTraceSteps(values.sharpeningTraceSteps);
@@ -985,18 +1050,35 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   }
 
   private scheduleTopologyGeneration(): void {
-    if (this.simulationFailureError) return;
+    if (this.simulationFailureError || this.framePending) return;
     if (this.topologyGenerationWork || this.disposed) return;
+    const refusal = this.generationCapacityRefusal;
+    if (refusal) {
+      // An unchanged accepted state cannot make the same remap feasible.
+      // Retain it and expose the refusal instead of repeatedly rebuilding it.
+      if (refusal.step === (this.info.encodedSteps ?? 0)
+        && refusal.interactionRevision === this.sparseRuntime.pendingLiquidInteractionRevision
+        && refusal.scene === this.scene && refusal.options === this.options
+        && !this.topologyGenerationPolicyDirty && !this.liveRegionUpdateRequested) return;
+      this.generationCapacityRefusal = undefined;
+      this.info.topologyGenerationDeferred = undefined;
+    }
+    if (this.geometricBackingPending && performance.now() < this.geometricBackingRetryAt_ms
+      && !this.liveRegionUpdateRequested && !this.sparseRuntime.pendingLiquidInteractions) return;
+    const backingRequest = this.geometricBackingPending;
+    const preparationScene = this.scene;
+    const preparationOptions = this.options;
     const liveRegionUpdate = this.liveRegionUpdateRequested;
     this.liveRegionUpdatePending = liveRegionUpdate;
     this.liveRegionUpdateRequested = false;
     const frozen = this.options.activityPolicy?.freezeTopology === true;
-    const frontierCheck = frozen || this.frozenFrontierPending || this.sparseRuntime.pendingLiquidInteractions;
+    const frontierCheck = frozen || this.frozenFrontierPending || backingRequest
+      || this.sparseRuntime.pendingLiquidInteractions;
     const preparationStarted = performance.now();
     const cadence = this.options.activityPolicy?.coarseFirst && this.sparseRuntime.generationPlanningRequired
       ? Math.max(1, this.options.activityPolicy.topologyCadenceSteps)
       : Math.max(64, this.options.activityPolicy?.topologyCadenceSteps ?? 64);
-    if (!liveRegionUpdate && !frozen && !this.frozenFrontierPending && !this.sparseRuntime.pendingLiquidInteractions
+    if (!backingRequest && !liveRegionUpdate && !frozen && !this.frozenFrontierPending && !this.sparseRuntime.pendingLiquidInteractions
       && !this.topologyGenerationPolicyDirty && (this.info.encodedSteps ?? 0) % cadence !== 0) return;
     const policyDirty = this.topologyGenerationPolicyDirty;
     this.topologyGenerationPolicyDirty = false;
@@ -1136,9 +1218,29 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       if (!plan || plan.status === "deferred") return undefined;
       await this.assertSimulationHealthy();
       const transfer = await accepted.captureGenerationTransferSource(source);
-      return accepted.prepareGenerationReplacement(transfer, plan.atlas, plan.active,
+      const replacement = await accepted.prepareGenerationReplacement(transfer, plan.atlas, plan.active,
         finestCellSize(this.scene, plan.atlas),
         this.topologyGenerationMaximumBytes - this.sparseRuntime.allocatedBytes, signal, plan.newAirCoverage, liveRegionUpdate);
+      if (!this.rigidSystem) return replacement;
+      const occupancy = replacement.resident.solidWorldCollisionSource;
+      if (!occupancy) {
+        replacement.disposePreparation(); replacement.resident.destroy();
+        throw new Error("Adaptive rigid contact replacement requires resident SolidWorld occupancy");
+      }
+      try {
+        const rigidCollision = await this.rigidSystem.prepareSolidWorldCollisionSource({
+          ...occupancy, origin_m: this.fluidDomain.origin_m,
+          cellSize_m: this.fluidDomain.cellSize_m,
+        });
+        return { resident: replacement.resident,
+          disposePreparation: () => replacement.disposePreparation(),
+          commit: async () => {
+            await replacement.commit();
+            rigidCollision.commit();
+          } };
+      } catch (error) {
+        replacement.disposePreparation(); replacement.resident.destroy(); throw error;
+      }
       });
     };
     this.topologyGenerationWork = prepare().then(() => {
@@ -1149,12 +1251,9 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         this.resetPressureIterationFeedback();
       }
       this.atlas = this.sparseRuntime.acceptedAtlas;
-      if (this.rigidSystem && this.sparseRuntime.solidWorldCollisionSource) {
-        this.rigidSystem.setSolidWorldCollisionSource({ ...this.sparseRuntime.solidWorldCollisionSource,
-          origin_m: this.fluidDomain.origin_m, cellSize_m: this.fluidDomain.cellSize_m });
-      }
       this.info.allocatedBytes = this.presentation.allocatedBytes + this.sparseRuntime.allocatedBytes;
       this.info.topologyGenerationError = undefined;
+      if (supportVerified) this.geometricBackingPending = false;
       if (supportVerified && !this.frozenFrontierPending
         && interactionRevision === this.sparseRuntime.pendingLiquidInteractionRevision
         && frozen === (this.options.activityPolicy?.freezeTopology === true)
@@ -1175,7 +1274,21 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         this.info.topologyGenerationError = undefined;
         return;
       }
-      this.info.topologyGenerationError = error instanceof Error ? error.message : String(error);
+      if (error instanceof SparseCM12GenerationCapacityDeferred) {
+        this.generationCapacityRefusal = {
+          step: this.info.encodedSteps ?? 0, interactionRevision,
+          scene: preparationScene, options: preparationOptions,
+        };
+        this.info.topologyGenerationDeferred = {
+          leaves: this.atlas.bricks.length, cells: this.sparseRuntime.cellCount,
+          reason: "volume-capacity", detail: error.message,
+        };
+        this.info.topologyGenerationError = undefined;
+        return;
+      }
+      this.info.topologyGenerationError = error instanceof Error
+        ? error.message || error.name || "Topology preparation failed without a native error message"
+        : String(error);
       if (!this.simulationFailureError) {
         const failure = error instanceof SimulationFailureError ? error.failure : {
           method: "adaptive-volume", code: "TOPOLOGY_GENERATION_FAILURE",
@@ -1188,8 +1301,15 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         this.sparseRuntime.cancelTopologyPreparation();
       }
     }).finally(() => {
+      // Keep an unserved geometric request sticky. Capacity saturation or a
+      // deferred plan must not cause a new heavy attempt on every animation
+      // tick; the ordinary advance/edit path retries after this cooldown.
+      if (backingRequest && this.geometricBackingPending) {
+        this.geometricBackingRetryAt_ms = performance.now() + 1000;
+      }
       this.info.topologyPreparationDurationMs = performance.now() - preparationStarted;
-      this.info.topologyGenerationPending = this.frozenFrontierPending;
+      this.info.topologyGenerationPending = !this.generationCapacityRefusal
+        && (this.frozenFrontierPending || this.geometricBackingPending);
       this.topologyGenerationWork = undefined;
       this.liveRegionUpdatePending = false;
       if (liveRegionUpdate && retryInteractions) this.liveRegionUpdateRequested = true;
@@ -1202,10 +1322,13 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   }
 
   advanceTo(time_s: number, bodies: RigidBodyState[]): boolean {
+    if (this.simulationFailureError) throw this.simulationFailureError;
+    if (this.disposed || this.framePending) return false;
+    if (this.publishCompletedFrame()) return true;
     this.info.topologyPreparationMaximumSliceMs = this.sparseRuntime.generationPreparationMaximumSliceMs;
     this.info.topologyPreparationMaximumSliceOperation = this.sparseRuntime.generationPreparationMaximumSliceOperation;
     if (this.simulationFailureError) throw this.simulationFailureError;
-    if (this.frozenFrontierPending || this.sparseRuntime.pendingLiquidInteractions) {
+    if (this.geometricBackingPending || this.frozenFrontierPending || this.sparseRuntime.pendingLiquidInteractions) {
       this.scheduleTopologyGeneration();
       return false;
     }
@@ -1295,7 +1418,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       && GPUStageTimestampRecorder.markersReady(this.device)
       ? new GPUStageTimestampRecorder(this.device, traceSampleId, "physics", traceContext)
       : undefined;
-    const encoder = frameCapture
+    let encoder = frameCapture
       ? frameCapture.instrument(rawEncoder, hardwareTrace)
       : rawEncoder;
     if (this.pressureIterationReadbacks.length === 0) {
@@ -1336,6 +1459,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         relativeTolerance: pressureRelativeTolerance,
       },
       seams: diagnosticStageSeams,
+      transportPacketChunkSize: 8,
       worldDimensions_m: this.fluidDomain.dimensions.map((value, axis) =>
         value * this.fluidDomain.cellSize_m[axis]) as [number, number, number],
     };
@@ -1347,49 +1471,73 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       rigidBodies: activeBodies,
       liquidInflow,
     });
-    if (this.rigidSystem && activeBodies.length > 0) {
-      this.rigidSystem.encode(encoder, dt_s, cellSize_m ** 3, 1, cellSize_m);
-    }
-    if (pressureIterationReadback) {
-      this.sparseRuntime.encodePressureIterationReceipt(
-        encoder, pressureIterationReadback);
-    }
-    const failureReceipt = this.sparseRuntime.captureSimulationFailure(encoder);
-    frameCapture?.closeCommands();
-    this.device.queue.submit([encoder.finish()]);
-    this.observeSimulationFailure(failureReceipt, this.lastTime_s + dt_s);
-    if (liquidInflow) {
-      this.sparseWorld.edit({
-        kind: "liquid-jet",
-        ...liquidInflow,
-        dt: dt_s,
+    const completedTime_s = this.lastTime_s + dt_s;
+    const finishSubmission = () => {
+      if (this.rigidSystem && activeBodies.length > 0) {
+        this.rigidSystem.encode(encoder, dt_s, cellSize_m ** 3, 1, cellSize_m);
+      }
+      if (pressureIterationReadback) {
+        this.sparseRuntime.encodePressureIterationReceipt(encoder, pressureIterationReadback);
+      }
+      const failureReceipt = this.sparseRuntime.captureSimulationFailure(encoder, () => {
+        this.geometricBackingPending = true;
+        this.geometricBackingRetryAt_ms = 0;
       });
-      // Create only this step's nozzle-swept volume. The next CM12 step owns
-      // all downstream transport, projection, and gravitational curvature.
+      frameCapture?.closeCommands();
+      this.device.queue.submit([encoder.finish()]);
+      const failureWork = this.observeSimulationFailure(failureReceipt, completedTime_s);
+      if (pressureIterationReadback) {
+        this.readPressureIterationReceipt(pressureIterationReadback, pressureIterations,
+          pressureIterationReceiptSequence, pressureIterationControlGeneration);
+      }
+      this.completedFrame = () => {
+        this.lastTime_s = completedTime_s;
+        const nextTime_s = this.lastTime_s;
+        this.info.submittedTime_s = nextTime_s;
+        this.info.simulatedTime_s = nextTime_s;
+        this.info.simulationLag_s = Math.max(0, time_s - nextTime_s);
+        this.info.lastDt_s = dt_s;
+        this.info.encodedSteps = (this.info.encodedSteps ?? 0) + 1;
+        this.info.lastSubsteps = 1;
+        this.info.pressureIterations = pressureIterationMaximum;
+        this.info.pressureIterationsEncoded = pressureIterations;
+        this.info.hostSimulationSizedWorkItems = 0;
+      };
+      const captured = frameCapture?.finish(this.device.queue);
+      this.finishFrameCapture(captured, traceRequestedAt_ms);
+      return failureWork;
+    };
+    const continuation = this.sparseRuntime.pendingFrameContinuation;
+    if (!continuation) {
+      void finishSubmission();
+      this.publishCompletedFrame();
+      return true;
     }
-    if (pressureIterationReadback) {
-      this.readPressureIterationReceipt(
-        pressureIterationReadback,
-        pressureIterations,
-        pressureIterationReceiptSequence,
-        pressureIterationControlGeneration,
-      );
-    }
-
-    this.lastTime_s += dt_s;
-    const nextTime_s = this.lastTime_s;
-    this.info.submittedTime_s = nextTime_s;
-    this.info.simulatedTime_s = nextTime_s;
-    this.info.simulationLag_s = Math.max(0, time_s - nextTime_s);
-    this.info.lastDt_s = dt_s;
-    this.info.encodedSteps = (this.info.encodedSteps ?? 0) + 1;
-    this.info.lastSubsteps = 1;
-    this.info.pressureIterations = pressureIterationMaximum;
-    this.info.pressureIterationsEncoded = pressureIterations;
-    this.info.hostSimulationSizedWorkItems = 0;
-    const captured = frameCapture?.finish(this.device.queue);
-    this.finishFrameCapture(captured, traceRequestedAt_ms);
-    this.scheduleTopologyGeneration();
+    frameCapture?.beginSubmission();
+    this.device.queue.submit([encoder.finish()]);
+    const work = (async () => {
+      while (!this.disposed) {
+        const progress = await continuation.readProgress();
+        if (this.disposed) return;
+        const nextEncoder = this.device.createCommandEncoder({
+          label: `Sparse Geometric transport continuation ${completedTime_s.toFixed(6)}`,
+        });
+        encoder = frameCapture ? frameCapture.resumeEncoder(nextEncoder) : nextEncoder;
+        if (continuation.resume(encoder, progress)) {
+          await finishSubmission();
+          return;
+        }
+        this.device.queue.submit([encoder.finish()]);
+      }
+    })().catch((error: unknown) => {
+      continuation.cancel();
+      if (!this.disposed && !this.simulationFailureError) {
+        this.simulationFailureError = error instanceof Error ? error : new Error(String(error));
+      }
+    }).finally(() => {
+      if (this.frameWork === work) this.frameWork = undefined;
+    });
+    this.frameWork = work;
     return true;
   }
 
@@ -1574,59 +1722,106 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   }
 
   /** Explicit Dawn/QA materialization; production rendering stays sparse. */
-  readDiagnosticFields(includeWorldLeaves = false,
+  async readDiagnosticFields(includeWorldLeaves = false,
     frameBank: "accepted" | "candidate" = "accepted") {
+    await this.awaitFrameSettlement();
     return this.sparseWorldTrace.readDiagnosticFields(includeWorldLeaves, frameBank);
   }
-  readPhase1TransportReceiptQA(allowStageLimitedCandidate = false,
+  async readPhase1TransportReceiptQA(allowStageLimitedCandidate = false,
     probeCells: readonly number[] = []) {
+    await this.awaitFrameSettlement();
     return this.sparseWorldTrace.readPhase1TransportReceiptQA(
       allowStageLimitedCandidate, probeCells,
     );
   }
-  readPhase1TransportHashesQA() {
+  async readPhase1TransportHashesQA() {
+    await this.awaitFrameSettlement();
     return this.sparseWorldTrace.readPhase1TransportHashesQA();
   }
-  readPhase1TransportProfileQA() {
+  async readPhase1TransportProfileQA() {
+    await this.awaitFrameSettlement();
     return this.sparseWorldTrace.readPhase1TransportProfileQA();
   }
-  readCandidateEffectsTransactionQA() {
+  async readCandidateEffectsTransactionQA() {
+    await this.awaitFrameSettlement();
     return this.sparseWorldTrace.readCandidateEffectsTransactionQA();
   }
-  readFramePlanPresentationHeaderQA() {
+  async readAcceptedGeometricVolumeQA() {
+    await this.awaitFrameSettlement();
+    return this.sparseWorldTrace.readAcceptedGeometricVolumeQA();
+  }
+  async readGeometricVolumeTransportReceiptQA() {
+    await this.awaitFrameSettlement();
+    return this.sparseWorldTrace.readGeometricVolumeTransportReceiptQA();
+  }
+  async readAcceptedGeometricCellRowsQA(cellId: number) {
+    await this.awaitFrameSettlement();
+    return this.sparseWorldTrace.readAcceptedGeometricCellRowsQA(cellId);
+  }
+  async readAcceptedGeometricRowQA(rowId: number) {
+    await this.awaitFrameSettlement();
+    return this.sparseWorldTrace.readAcceptedGeometricRowQA(rowId);
+  }
+  async readGeometricProjectionComponentsQA() {
+    await this.awaitFrameSettlement();
+    return this.sparseWorldTrace.readGeometricProjectionComponentsQA();
+  }
+  async readFramePlanPresentationHeaderQA() {
+    await this.awaitFrameSettlement();
     return this.sparseWorldTrace.readFramePlanPresentationHeaderQA();
   }
-  readFramePlanPresentationFaultRecordQA() {
+  async readFramePlanPresentationFaultRecordQA() {
+    await this.awaitFrameSettlement();
     return this.sparseWorldTrace.readFramePlanPresentationFaultRecordQA();
   }
   /** Explicit FCA1 QA materialization; never consulted by frame scheduling. */
-  readFrameControlQA() { return this.sparseWorldTrace.readFrameControlQA(); }
-  readTransportPacketIndirectQA() {
+  async readFrameControlQA() {
+    await this.awaitFrameSettlement();
+    return this.sparseWorldTrace.readFrameControlQA();
+  }
+  async readTransportPacketIndirectQA() {
+    await this.awaitFrameSettlement();
     return this.sparseWorldTrace.readTransportPacketIndirectQA();
   }
-  readCoarseTransportScheduleQA() {
+  async readCoarseTransportScheduleQA() {
+    await this.awaitFrameSettlement();
     return this.sparseWorldTrace.readCoarseTransportScheduleQA();
   }
-  readDynamicTransportPacketsQA() {
+  async readDynamicTransportPacketsQA() {
+    await this.awaitFrameSettlement();
     return this.sparseWorldTrace.readDynamicTransportPacketsQA();
   }
   /** Header-only FSM1 receipt; never consulted by frame scheduling. */
-  readFinalScalarMaskHeaderQA() {
+  async readFinalScalarMaskHeaderQA() {
+    await this.awaitFrameSettlement();
     return this.sparseWorldTrace.readFinalScalarMaskHeaderQA();
   }
-  readSparseWorkShapeQA() { return this.sparseWorldTrace.readWorkShapeQA(); }
-  readAdaptiveRepresentationQA() {
+  async readSparseWorkShapeQA() {
+    await this.awaitFrameSettlement();
+    return this.sparseWorldTrace.readWorkShapeQA();
+  }
+  async readAdaptiveRepresentationQA() {
+    await this.awaitFrameSettlement();
     return this.sparseWorldTrace.readAdaptiveRepresentationQA();
   }
-  readAcceptedIndirectQA() { return this.sparseWorldTrace.readAcceptedIndirectQA(); }
-  readFrameControlIndirectQA() {
+  async readAcceptedIndirectQA() {
+    await this.awaitFrameSettlement();
+    return this.sparseWorldTrace.readAcceptedIndirectQA();
+  }
+  async readFrameControlIndirectQA() {
+    await this.awaitFrameSettlement();
     return this.sparseWorldTrace.readFrameControlIndirectQA();
   }
-  readVelocityExtensionHeaderQA() {
+  async readVelocityExtensionHeaderQA() {
+    await this.awaitFrameSettlement();
     return this.sparseWorldTrace.readVelocityExtensionHeaderQA();
   }
-  readVelocityExtensionQA() { return this.sparseWorldTrace.readVelocityExtensionQA(); }
-  readPressureCanonicalMembershipQA() {
+  async readVelocityExtensionQA() {
+    await this.awaitFrameSettlement();
+    return this.sparseWorldTrace.readVelocityExtensionQA();
+  }
+  async readPressureCanonicalMembershipQA() {
+    await this.awaitFrameSettlement();
     return this.sparseWorldTrace.readPressureCanonicalMembershipQA();
   }
 
@@ -1635,9 +1830,13 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   setSelectedRigidBody(index: number): void { this.rigidSystem?.setSelectedIndex(index); }
   async pickRigidBody(origin: RigidBodyState["position_m"],
     direction: RigidBodyState["position_m"]) {
+    await this.awaitFrameSettlement();
     return this.rigidSystem?.pick(origin, direction);
   }
-  async readRigidBodyPoses() { return this.rigidSystem?.readPoses(); }
+  async readRigidBodyPoses() {
+    await this.awaitFrameSettlement();
+    return this.rigidSystem?.readPoses();
+  }
 
   /** Explicit acceptance/debug readback; never consulted by advanceTo. */
   async readGPUActivityPolicy(): Promise<{
@@ -1656,6 +1855,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     };
     readonly bricks: readonly AdaptiveMassGPUActivityBrick[];
   }> {
+    await this.awaitFrameSettlement();
     const atlas = this.sparseRuntime.acceptedAtlas;
     const snapshot = await this.sparseWorldTrace.readActivitySnapshot(true);
     return {
@@ -1684,6 +1884,9 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   destroy(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.sparseRuntime.pendingFrameContinuation?.cancel();
+    this.completedFrame = undefined;
+    this.deferredFrameActions.length = 0;
     this.sparseWorld.destroy();
     this.presentation.destroy();
     this.rigidSystem?.destroy();

@@ -76,7 +76,8 @@ dawnTest("mini32 retires vacant bricks and refines every represented surface cro
 
       const steps = 14;
       for (let step = 1; step <= steps; step += 1) {
-        assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+        while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+        await solver.awaitFrameCompletion?.();
         await device.queue.onSubmittedWorkDone();
         const snapshot = await solver.readGPUActivityPolicy();
         if (snapshot.commitFailed) {

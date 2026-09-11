@@ -29,6 +29,7 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
     const dt = 1 / 30;
     const advance = async (time: number) => {
       while (!solver!.advanceTo(time, [])) await new Promise(setImmediate);
+      await solver!.awaitFrameCompletion?.();
       await device!.queue.onSubmittedWorkDone();
     };
     await advance(dt);

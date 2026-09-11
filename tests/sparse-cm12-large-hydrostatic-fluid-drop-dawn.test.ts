@@ -15,13 +15,14 @@ import {
   acquireWebGPUExclusiveLock,
   releaseWebGPUExclusiveLock,
 } from "../lib/harness/webgpu-smoke-isolation";
+import { createProcessRetainedDawnGPU, type NodeDawnProvider } from
+  "../lib/harness/node-dawn-provider";
 import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 import { WebGPUAdaptiveMassSolver } from
   "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 const dawnTest = dawnModule ? test : test.skip;
-const sum = (values: Float32Array) => values.reduce((total, value) => total + value, 0);
 
 dawnTest("Sparse CM12 accepts a UI-positioned drop in the larger hydrostatic scene",
   { timeout: 240_000 }, async () => {
@@ -30,12 +31,10 @@ dawnTest("Sparse CM12 accepts a UI-positioned drop in the larger hydrostatic sce
     let device: GPUDevice | undefined;
     let solver: WebGPUAdaptiveMassSolver | undefined;
     try {
-      const dawn = await import(pathToFileURL(dawnModule!).href) as {
-        create(options: string[]): GPU;
-        globals: Record<string, unknown>;
-      };
+      const dawn = await import(pathToFileURL(dawnModule!).href) as NodeDawnProvider;
       Object.assign(globalThis, dawn.globals);
-      const gpu = dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
+      const gpu = createProcessRetainedDawnGPU(dawn,
+        [`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
       const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
       assert.ok(adapter, "Dawn must expose a WebGPU adapter");
       device = await adapter.requestDevice({
@@ -71,12 +70,12 @@ dawnTest("Sparse CM12 accepts a UI-positioned drop in the larger hydrostatic sce
         device, scene, "balanced", values, undefined, () => {},
       ) as WebGPUAdaptiveMassSolver;
       await solver.waitForSimulationReady();
-      assert.equal(solver.advanceTo(CM12_PAPER_DT_S, []), true,
-        "the UI run must advance before taking the live-injection path");
+      while (!solver.advanceTo(CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+      await solver.awaitFrameCompletion?.();
       await device.queue.onSubmittedWorkDone();
       await solver.assertSimulationHealthy();
 
-      const beforeMass = sum((await solver.readDiagnosticFields()).density);
+      const beforeMass = (await solver.readAcceptedGeometricVolumeQA()).volumeFine3;
       const beforeGeneration = solver.sparseWorld.status().acceptedGeneration;
       solver.injectLiquidBall({ centre_m: drop.center_m, radius_m: drop.radius_m });
       assert.equal(solver.sparseWorld.status().acceptedGeneration, beforeGeneration + 1,
@@ -84,22 +83,24 @@ dawnTest("Sparse CM12 accepts a UI-positioned drop in the larger hydrostatic sce
       await device.queue.onSubmittedWorkDone();
       await solver.assertSimulationHealthy();
 
-      const afterMass = sum((await solver.readDiagnosticFields()).density);
+      const afterMass = (await solver.readAcceptedGeometricVolumeQA()).volumeFine3;
       const growth = await solver.readWorldGrowthReceiptQA();
       const activity = await solver.readGPUActivityPolicy();
-      const representedMass = afterMass + growth.dynamicLiquidMassFineCells;
+      // The accepted geometric reduction includes signed outside-world pages
+      // in the current scalar bank. A max of historical/current page banks
+      // could otherwise conceal a just-lost injected drop for one frame.
+      const representedMass = afterMass;
       assert.ok(representedMass > beforeMass + 1,
         `the UI-positioned drop added no visible liquid (${beforeMass} -> ${representedMass}); `
         + `drop=${JSON.stringify(drop)}, `
         + `active=${activity.residentBrickCount}, new=${activity.newlyActivatedBrickCount}, `
         + `faults=${activity.faultFlags}, growth=${JSON.stringify(growth)}`);
 
-      assert.equal(solver.advanceTo(2 * CM12_PAPER_DT_S, []), true,
-        "the injected pages must remain valid on the next physics step");
+      while (!solver.advanceTo(2 * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+      await solver.awaitFrameCompletion?.();
       await device.queue.onSubmittedWorkDone();
       await solver.assertSimulationHealthy();
-      const settledMass = sum((await solver.readDiagnosticFields()).density)
-        + (await solver.readWorldGrowthReceiptQA()).dynamicLiquidMassFineCells;
+      const settledMass = (await solver.readAcceptedGeometricVolumeQA()).volumeFine3;
       assert.ok(settledMass > beforeMass + 1,
         `the next step exposed gaps in the injected pages (${representedMass} -> ${settledMass})`);
 
@@ -113,19 +114,25 @@ dawnTest("Sparse CM12 accepts a UI-positioned drop in the larger hydrostatic sce
       await device.queue.onSubmittedWorkDone();
       await solver.assertSimulationHealthy();
       assert.equal(solver.sparseWorld.status().acceptedGeneration, outsideGeneration + 1);
-      const outsideMass = sum((await solver.readDiagnosticFields()).density)
-        + (await solver.readWorldGrowthReceiptQA()).dynamicLiquidMassFineCells;
+      const outsideMass = (await solver.readAcceptedGeometricVolumeQA()).volumeFine3;
+      if (!(outsideMass > settledMass + 1)) {
+        console.error("geometric-outside-injection-failure", JSON.stringify({
+          outside, settledMass, outsideMass,
+          physical: await solver.readAcceptedGeometricVolumeQA(),
+          growth: await solver.readWorldGrowthReceiptQA(),
+          activity: await solver.readGPUActivityPolicy(),
+        }, null, 2));
+      }
       assert.ok(outsideMass > settledMass + 1,
         `an open-world drop outside the tank added no liquid (${settledMass} -> ${outsideMass})`);
       assert.ok((await solver.readWorldGrowthReceiptQA()).minimum[0] < 0,
         "the outside drop must publish a signed page beyond the original tank");
 
-      assert.equal(solver.advanceTo(3 * CM12_PAPER_DT_S, []), true,
-        "the outside-tank drop must survive its following physics step");
+      while (!solver.advanceTo(3 * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+      await solver.awaitFrameCompletion?.();
       await device.queue.onSubmittedWorkDone();
       await solver.assertSimulationHealthy();
-      const outsideSettledMass = sum((await solver.readDiagnosticFields()).density)
-        + (await solver.readWorldGrowthReceiptQA()).dynamicLiquidMassFineCells;
+      const outsideSettledMass = (await solver.readAcceptedGeometricVolumeQA()).volumeFine3;
       assert.ok(outsideSettledMass > settledMass + 1,
         `the outside drop vanished on the next step (${outsideMass} -> ${outsideSettledMass})`);
       assert.deepEqual(validationErrors, []);

@@ -53,6 +53,7 @@ dawnTest("UI bowl initializes and publishes its curved surface directly at coars
       };
       assert.ok(crossing(8,20)-crossing(23,20)>.025,"reset publication is the bowl, not a flat tank");
       while(!solver.advanceTo(1/60,[]))await new Promise(setImmediate);
+      await solver.awaitFrameCompletion?.();
       await solver.waitForTopologyReady();
       const after=await solver.readDiagnosticFields(true);
       assert.deepEqual(after.density,initial.density,"pressing play must leave the source stationary");

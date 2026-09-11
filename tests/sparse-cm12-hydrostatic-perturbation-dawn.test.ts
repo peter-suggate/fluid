@@ -187,7 +187,8 @@ dawnTest("Sparse CM12 hydrostatic equilibrium damps a microscopic gravity pertur
         solver.applySceneUniforms(changed);
         perturbed = true;
       }
-      assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+      while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+      await solver.awaitFrameCompletion?.();
       if (step % sampleSteps !== 0 && step !== settleSteps
         && step !== settleSteps + 1) continue;
       await device.queue.onSubmittedWorkDone();

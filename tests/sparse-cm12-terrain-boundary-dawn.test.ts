@@ -148,7 +148,8 @@ dawnTest("Sparse CM12 couples terrain voxels through CM12 cut-cell capacities",
       const steps = Number.isSafeInteger(requestedSteps) && requestedSteps > 0
         ? requestedSteps : tallCells ? 90 : 8;
       for (let step = 1; step <= steps; step += 1) {
-        assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+        while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+        await solver.awaitFrameCompletion?.();
         if (step % 2 === 0) {
           await device.queue.onSubmittedWorkDone();
           await solver.assertSimulationHealthy();

@@ -20,6 +20,8 @@ import { solidVoxelShellForScene } from "../lib/core/scene-lattice";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
+import { createProcessRetainedDawnGPU, type NodeDawnProvider } from
+  "../lib/harness/node-dawn-provider";
 import { adaptiveMassMethod } from
   "../lib/methods/adaptive-volume/method";
 import { WebGPUAdaptiveMassSolver } from
@@ -563,11 +565,10 @@ await acquireWebGPUExclusiveLock("dawn-probe",
 let device: GPUDevice | undefined;
 let solver: WebGPUAdaptiveMassSolver | undefined;
 try {
-  const dawn = await import(pathToFileURL(dawnModule).href) as {
-    create(options: string[]): GPU;globals: Record<string, unknown>;
-  };
+  const dawn = await import(pathToFileURL(dawnModule).href) as NodeDawnProvider;
   Object.assign(globalThis, dawn.globals);
-  const gpu = dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
+  const gpu = createProcessRetainedDawnGPU(dawn,
+    [`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
   const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
   assert.ok(adapter);
   device = await adapter.requestDevice({
@@ -658,6 +659,7 @@ try {
     : undefined;
   for (let step = 1; step <= steps; step += 1) {
     while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+    await solver.awaitFrameCompletion?.();
     if (step % 2 === 0) await device.queue.onSubmittedWorkDone();
   }
   await device.queue.onSubmittedWorkDone();

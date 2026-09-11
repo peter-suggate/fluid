@@ -67,7 +67,8 @@ dawnTest("ceiling slab remains cubical through free fall and impact onset",
       const initial = receipt(await solver.readDiagnosticFields());
       let final = initial;
       for (let step = 1; step <= 9; step += 1) {
-        assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+        while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+        await solver.awaitFrameCompletion?.();
         await device.queue.onSubmittedWorkDone();
         const [state, activity] = await Promise.all([
           solver.readDiagnosticFields(true), solver.readGPUActivityPolicy(),

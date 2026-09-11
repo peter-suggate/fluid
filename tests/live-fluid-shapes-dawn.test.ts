@@ -129,6 +129,7 @@ const mass = (values: Float32Array) => values.reduce((sum, value) => sum + value
     }
     const advance = async (time: number) => {
       while (!solver!.advanceTo(time, [])) await new Promise(setImmediate);
+      await solver!.awaitFrameCompletion?.();
       await device!.queue.onSubmittedWorkDone();
     };
     await advance(1 / 30);
@@ -168,7 +169,8 @@ const mass = (values: Float32Array) => values.reduce((sum, value) => sum + value
     const pendingSolid = solver.prepareLiveSolidEdit(dry);
     // Submit the next ordinary step while the acceptance receipt is still
     // pending. GPU ordering must make it consume the atomic solid result.
-    solver.advanceTo(2 / 30, []);
+    while (!solver.advanceTo(2 / 30, [])) await new Promise(setImmediate);
+    await solver.awaitFrameCompletion?.();
     const timeBeforeReceipt = solver.info.submittedTime_s;
     assert.ok(timeBeforeReceipt! > movingTime!, "solid acceptance must not block ordinary physics admission");
     await pendingSolid;

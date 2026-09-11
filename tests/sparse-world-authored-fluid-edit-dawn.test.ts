@@ -57,7 +57,8 @@ dawnTest("authored fluid moves and shape changes retain the resident world witho
         }, () => {});
       await solver.waitForSimulationReady();
 
-      assert.equal(solver.advanceTo(1 / 30, []), true);
+      while (!solver.advanceTo(1 / 30, [])) await new Promise(setImmediate);
+      await solver.awaitFrameCompletion?.();
       await device.queue.onSubmittedWorkDone();
       const world = solver.sparseWorld;
       const time = solver.info.submittedTime_s;

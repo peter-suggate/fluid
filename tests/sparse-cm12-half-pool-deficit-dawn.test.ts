@@ -42,6 +42,7 @@ for (const [variant, fixture] of [
     assert.equal(steps, 120);
     for (let step = 1; step <= steps; step++) {
       while (!solver.advanceTo(step * scene.numerics.fixedDt_s, [])) await new Promise(setImmediate);
+      await solver.awaitFrameCompletion?.();
       await solver.waitForTopologyReady(); await solver.assertSimulationHealthy();
       assert.equal(solver.info.encodedSteps, step);
       const activity = await solver.readGPUActivityPolicy();

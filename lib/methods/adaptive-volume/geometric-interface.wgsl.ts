@@ -93,11 +93,11 @@ fn geometricPlaneBoxOffset(normal:vec3f,widths:vec3f,fill:f32)->f32{
   }
   if(dimensions==1u){return (fill-0.5)*spans.x*dominant;}
   // Solve only the lower half, enforcing complement symmetry in the inverse.
-  let complement=fill>0.5;let target=select(fill,1.0-fill,complement);
+  let complement=fill>0.5;let targetFill=select(fill,1.0-fill,complement);
   if(dimensions==2u){
     let a=min(spans.x,spans.y);let b=max(spans.x,spans.y);
-    var shifted=target*b+0.5*a;
-    if(target<0.5*a/b){shifted=sqrt(2.0*target*a*b);}
+    var shifted=targetFill*b+0.5*a;
+    if(targetFill<0.5*a/b){shifted=sqrt(2.0*targetFill*a*b);}
     let offset=(shifted-0.5*(a+b))*dominant;
     return select(offset,-offset,complement);
   }
@@ -105,7 +105,7 @@ fn geometricPlaneBoxOffset(normal:vec3f,widths:vec3f,fill:f32)->f32{
   for(var iteration=0u;iteration<28u;iteration+=1u){
     let middle=lo+0.5*(hi-lo);
     if(middle==lo||middle==hi){break;}
-    if(geometricPlaneBoxFraction(normal,middle,widths)<target){lo=middle;}
+    if(geometricPlaneBoxFraction(normal,middle,widths)<targetFill){lo=middle;}
     else{hi=middle;}
   }
   let offset=lo+0.5*(hi-lo);

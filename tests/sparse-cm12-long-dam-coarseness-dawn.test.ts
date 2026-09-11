@@ -253,7 +253,8 @@ dawnTest("long dam keeps deep work coarse and publishes new frontier pages",
       let firstStepActiveKeys = new Set<number>();
       let firstStepReceipt: unknown;
       for (let step = 1; step <= 2; step += 1) {
-        assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+        while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+        await solver.awaitFrameCompletion?.();
         await device.queue.onSubmittedWorkDone();
         assert.deepEqual(validationErrors, [],
           `first advances must encode valid dynamic velocity-extension bindings`);
@@ -340,7 +341,8 @@ dawnTest("long dam keeps deep work coarse and publishes new frontier pages",
       // protected destination must publish at B8 before transport targets it;
       // accepting its coarse construction rung changes the material flow.
       for (let step = 3; step <= 96; step += 1) {
-        assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+        while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+        await solver.awaitFrameCompletion?.();
         await device.queue.onSubmittedWorkDone();
         const snapshot = await solver.readGPUActivityPolicy();
         finalSnapshot = snapshot;

@@ -78,6 +78,7 @@ for (const shape of ["flat", "curved"] as const) (dawnModule ? test : test.skip)
     console.log(JSON.stringify({ shape, residentEditTimes_ms }));
     // Resume normally after changing topology at t=0.
     while (!solver.advanceTo(1 / 30, [])) await new Promise(setImmediate);
+    await solver.awaitFrameCompletion?.();
     await solver.waitForTopologyReady();
     assert.equal(solver.info.encodedSteps, beforeSteps + 1);
     await solver.assertSimulationHealthy();

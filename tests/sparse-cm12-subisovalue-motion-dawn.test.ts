@@ -1,9 +1,11 @@
-// Known-red physical regression: transport loses all velocity when no cell
-// exceeds the surface isovalue. Kept outside the short canonical gate until
-// the material-momentum/pressure-support repair passes mixed-resolution controls.
+// Known-red physical regression: isolated sub-isovalue liquid loses motion.
+// Broad positive-volume velocity seeding passes this fixture but regresses
+// gravity-driven dam flow by promoting unprojected air-side velocities.
+// Keep outside the short gate until material momentum support is coherent.
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
+import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
 import { createAnalyticMotionScene } from "../lib/core/analytic-motion-scenes";
 import { resolveMethodValues } from "../lib/core/method-contract";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
@@ -16,7 +18,7 @@ import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/we
   let device:GPUDevice|undefined,solver:WebGPUAdaptiveMassSolver|undefined;
   try{
     const dawn=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);Object.assign(globalThis,dawn.globals);
-    const gpu:GPU=dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND??"metal"}`]);
+    const gpu=createProcessRetainedDawnGPU(dawn,[`backend=${process.env.FLUID_WEBGPU_BACKEND??"metal"}`]);
     const adapter=await gpu.requestAdapter();assert.ok(adapter);
     device=await adapter.requestDevice({requiredLimits:requiredFluidDeviceLimits(adapter.limits)});
     const scene=createAnalyticMotionScene("translation");
@@ -27,7 +29,11 @@ import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/we
     solver=await adaptiveMassMethod.createSolverAsync!(device,scene,"balanced",values,undefined,()=>{}) as WebGPUAdaptiveMassSolver;
     await solver.waitForSimulationReady();
     for(let step=0;step<=3;step++){
-      if(step){while(!solver.advanceTo(step/60,[]))await new Promise(setImmediate);await solver.waitForTopologyReady();}
+      if (step) {
+        while (!solver.advanceTo(step / 60, [])) await new Promise(setImmediate);
+        await solver.awaitFrameCompletion?.();
+        await solver.waitForTopologyReady();
+      }
       const fields=await solver.readDiagnosticFields(true);
       let mass=0,momentum=0,maxDensity=0;
       for(let i=0;i<fields.density.length;i++){

@@ -249,6 +249,10 @@ export interface GPUSolverInstance {
    * consumers may instead observe `simulationReady` without blocking.
    */
   waitForSimulationReady?(): Promise<void>;
+  /** A split submission is still completing one physical frame; defer presentation and edits. */
+  readonly framePending?: boolean;
+  /** Await the complete physical frame, including any later transport submissions. */
+  awaitFrameCompletion?(): Promise<void>;
   /** Mandatory completed-frame invariant receipt; rejects on a latched failure. */
   assertSimulationHealthy?(): Promise<void>;
   /** Capture a health receipt in the caller's submission; read only after submitting it. */

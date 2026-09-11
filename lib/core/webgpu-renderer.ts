@@ -222,7 +222,8 @@ export function svoSwayDirtyBounds(
 /** Submit one solver advance toward the prepared simulation clock. */
 export function submitNextPreparedGPUAdvance(fluid: GPUSolverInstance, time_s: number, bodies: RigidBodyState[]) {
   const previousSubmittedTime = fluid.info.submittedTime_s ?? 0;
-  if (previousSubmittedTime + 1e-9 < time_s) fluid.advanceTo(time_s, bodies);
+  if (previousSubmittedTime + 1e-9 < time_s
+    || (fluid.awaitFrameCompletion && !fluid.framePending)) fluid.advanceTo(time_s, bodies);
   const submittedTime = fluid.info.submittedTime_s ?? previousSubmittedTime;
   return { previousSubmittedTime, submittedTime };
 }
@@ -985,6 +986,7 @@ export class FluidLabRenderer {
   private hoverHighlight?: { readonly first: number; readonly last: number };
   private svoRenderDiagnosticsKey = "";
   private gpuPendingBatches = 0;
+  private gpuAccountedSubmittedTime_s = 0;
   /** Advances retired by the single presentation fence that follows them. */
   private pendingGPUAdvanceCompletions: PendingGPUAdvanceCompletion[] = [];
   private presentationsInFlight = 0;
@@ -2051,6 +2053,7 @@ export class FluidLabRenderer {
 
   private resetGPUQueueTracking() {
     this.gpuPendingBatches = 0;
+    this.gpuAccountedSubmittedTime_s = 0;
     this.pendingGPUAdvanceCompletions.length = 0;
     this.reportedSimulationPipelineState = "";
     this.reportedSparseWorldStatus = "";
@@ -2170,17 +2173,19 @@ export class FluidLabRenderer {
   }
 
   /** Change simulation admission while preserving already-submitted queue work. */
-  setSimulationRunning(running: boolean): number | undefined {
+  async setSimulationRunning(running: boolean): Promise<number | undefined> {
     if (this.simulationFault) return this.gpuFluid?.info.submittedTime_s;
     if (this.runtimeFailure) return this.gpuFluid?.info.submittedTime_s;
     const changed = running !== this.simulationRunning;
     if (changed) this.resetPresentationTrace();
     this.simulationRunning = running;
+    const pauseOwner = !running ? this.gpuFluid : undefined;
+    const frameCompletion = pauseOwner?.awaitFrameCompletion?.() ?? Promise.resolve();
     // Live frames never map solver state. A pause is the explicit ownership
     // boundary where the UI may refresh its human-rate diagnostics.
     if (changed && !running && this.gpuFluid) {
       const fluid = this.gpuFluid;
-      void fluid.readStats().then((info) => {
+      void frameCompletion.then(() => fluid.readStats()).then((info) => {
         if (!this.disposed && !this.deviceLost && this.gpuFluid === fluid && !this.simulationRunning) {
           this.gpuInfoCallback?.({ ...info });
         }
@@ -2193,7 +2198,7 @@ export class FluidLabRenderer {
         ? () => fluid.sparseWorldUI!.diagnostics.readPressureFilm()
         : fluid.readPressureJournal?.bind(fluid);
       if (this.gpuPressureJournalCallback && readPressureFilm) {
-        void readPressureFilm().then((journal) => {
+        void frameCompletion.then(() => readPressureFilm()).then((journal) => {
           if (!this.disposed && !this.deviceLost && this.gpuFluid === fluid
             && !this.simulationRunning) {
             this.gpuPressureJournalCallback?.(journal);
@@ -2201,8 +2206,13 @@ export class FluidLabRenderer {
         }).catch(() => { /* Device loss is reported by device.lost. */ });
       }
     }
-    const submittedTime_s = this.gpuFluid?.info.submittedTime_s;
-    return submittedTime_s;
+    // The host uses this value as its pause floor. Wait for an admitted
+    // continuation to publish its exact completed step before acknowledging
+    // the pause, otherwise the host can rewind behind work it cannot reissue.
+    await frameCompletion.catch(() => { /* The renderer reports frame failure separately. */ });
+    return this.gpuFluid === pauseOwner
+      ? pauseOwner?.info.submittedTime_s
+      : this.gpuFluid?.info.submittedTime_s;
   }
 
   /**
@@ -2288,7 +2298,12 @@ export class FluidLabRenderer {
     // textures but before that frame submits. Defer the queue fence to the
     // next animation frame so it covers that final submission.
     requestAnimationFrame(() => {
-      void device.queue.onSubmittedWorkDone().catch(() => { /* Device loss invalidates the resources. */ }).finally(() => {
+      void (async () => {
+        // A transport receipt can enqueue another batch after the current
+        // queue drains. Keep its resources alive through the final batch.
+        try { await fluid.awaitFrameCompletion?.(); } catch { /* A halted frame still retires below. */ }
+        await device.queue.onSubmittedWorkDone().catch(() => { /* Device loss invalidates the resources. */ });
+      })().finally(() => {
         if (this.retiredGPUFluids.delete(fluid)) fluid.destroy();
       });
     });
@@ -2934,9 +2949,17 @@ export class FluidLabRenderer {
     for (let advance = 0; advance < GPU_ADVANCES_PER_PRESENTATION; advance += 1) {
       if (!canQueuePreparedGPUAdvance(this.gpuPendingBatches,
         maximumPendingAdvances * GPU_ADVANCES_PER_PRESENTATION)) break;
-      const { previousSubmittedTime, submittedTime } = submitNextPreparedGPUAdvance(fluid, time_s, bodies);
+      // A paused diagnostic or live edit can acknowledge an asynchronous
+      // frame outside this call. Account for that submission before asking
+      // the solver to begin another one.
+      const previousSubmittedTime = this.gpuAccountedSubmittedTime_s;
+      if ((fluid.info.submittedTime_s ?? 0) <= previousSubmittedTime) {
+        submitNextPreparedGPUAdvance(fluid, time_s, bodies);
+      }
+      const submittedTime = fluid.info.submittedTime_s ?? previousSubmittedTime;
       // The target clock owed no further whole step; stop rather than spin.
       if (submittedTime <= previousSubmittedTime) break;
+      this.gpuAccountedSubmittedTime_s = submittedTime;
       const generation = this.gpuFluidGeneration;
       this.gpuPendingBatches += 1;
       fluid.info.gpuPendingBatches = this.gpuPendingBatches;
@@ -3024,6 +3047,11 @@ export class FluidLabRenderer {
       this.resetPresentationTrace();
     }
     const basis = cameraBasis(camera), position = basis.position;
+    // Transport can resume after a small GPU receipt. Keep the last presented
+    // image while that frame owns mutable simulation and scene resources.
+    if (this.gpuFluid?.framePending) {
+      return this.currentFrameMetrics(config.methodId, presentationContext, false, cpuTrace?.finish());
+    }
     // The owner map is allocated lazily and materialized only once something
     // asks for it. The cell picker reads that same map, so gating the request
     // on a grid overlay left the picker resolving every pixel against a
@@ -3177,6 +3205,9 @@ export class FluidLabRenderer {
         this.simulationRunning ? config.inFlightDepth ?? BROWSER_GPU_THROUGHPUT_DEPTH : 1,
         getMethod(config.methodId).resource,
       );
+    }
+    if (readyGPUFluid?.framePending) {
+      return this.currentFrameMetrics(config.methodId, presentationContext, false, cpuTrace?.finish());
     }
     // The global fine narrow band double-buffers generations. Refresh its
     // tagged renderer binding after each admitted solver encode so extraction

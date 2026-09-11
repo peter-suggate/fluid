@@ -126,8 +126,8 @@ dawnTest("Sparse CM12 advances through every surface-conditioning toggle combina
         solver.applyRuntimeValues(resolveMethodValues(adaptiveMassMethod, "balanced", {
           ...baseline, ...controls,
         }));
-        assert.equal(solver.advanceTo((index + 1) * dt, []), true,
-          `${description} must encode an advance`);
+        while (!solver.advanceTo((index + 1) * dt, [])) await new Promise(setImmediate);
+        await solver.awaitFrameCompletion?.();
         await device.queue.onSubmittedWorkDone();
 
         const fields = await solver.readDiagnosticFields();

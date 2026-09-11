@@ -78,6 +78,7 @@ async function withSolver<T>(
 const advance = async (solver: WebGPUAdaptiveMassSolver, time_s: number) => {
   while (solver.simulationReady === false) await new Promise(setImmediate);
   while (!solver.advanceTo(time_s, [])) await new Promise(setImmediate);
+  await solver.awaitFrameCompletion?.();
 };
 
 dawnTest("an unarmed advance leaves no capture behind", async () => {

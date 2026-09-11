@@ -262,7 +262,11 @@ if (hasFlag("help") || process.argv.includes("-h")) {
     lanes: selected,
   }, null, 2));
 } else {
-  const existingHolder = await readWebGPUExclusiveLockHolder();
+  let existingHolder = await readWebGPUExclusiveLockHolder();
+  if (existingHolder && !existingHolder.alive) {
+    await releaseWebGPUExclusiveLock();
+    existingHolder = await readWebGPUExclusiveLockHolder();
+  }
   if (existingHolder) throw new Error(
     `Cannot start Sparse CM12 Dawn regression while ${existingHolder.description} holds `
       + "the repository-wide WebGPU lease.",

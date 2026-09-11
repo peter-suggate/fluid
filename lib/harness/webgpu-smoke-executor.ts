@@ -3170,11 +3170,12 @@ async function runGPU(
       await new Promise((resolve) => setTimeout(resolve, 0));
       continue;
     }
+    await solver.awaitFrameCompletion?.();
     consecutiveRejectedAdvances = 0;
     steps += 1;
-    // Physics was submitted synchronously by advanceTo.  Submit its matching
-    // presentation now, before smoke-only tripwire/audit copies can appear
-    // between the production physics and raster transactions.
+    // The complete physics frame has now been submitted. Submit its matching
+    // presentation before smoke-only tripwire/audit copies can appear between
+    // the production physics and raster transactions.
     uiPresentationCadence?.submitAdmittedFrame(previousSubmittedTime_s);
     // The reject carry is already decoded onto `solver.info` by the solver's own
     // readStats path; reading the published field costs nothing. It latches, so

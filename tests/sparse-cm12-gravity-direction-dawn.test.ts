@@ -55,6 +55,7 @@ dawnTest("adaptive mass follows all gravity axes and live reversals without losi
         const dt = scene.numerics.fixedDt_s;
         for (let step = 1; step <= 6; step++) {
           while (!solver.advanceTo(step * dt, [])) await new Promise(setImmediate);
+          await solver.awaitFrameCompletion?.();
           await solver.waitForTopologyReady(); await solver.assertSimulationHealthy();
         }
         const fallen = await measure();
@@ -72,6 +73,7 @@ dawnTest("adaptive mass follows all gravity axes and live reversals without losi
           gravity_m_s2: { x: -vector[0]!, y: -vector[1]!, z: -vector[2]! } } });
         for (let step = 7; step <= 12; step++) {
           while (!solver.advanceTo(step * dt, [])) await new Promise(setImmediate);
+          await solver.awaitFrameCompletion?.();
           await solver.waitForTopologyReady(); await solver.assertSimulationHealthy();
         }
         const reversed = await measure();

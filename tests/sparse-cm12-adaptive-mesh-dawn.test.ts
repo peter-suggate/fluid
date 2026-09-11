@@ -292,6 +292,7 @@ for(const fullPool of (process.env.FLUID_FULL_POOL ? [true] : [false,true])) daw
         while ((solver.info.encodedSteps ?? 0) < step) {
           const nextStep = (solver.info.encodedSteps ?? 0) + 1;
           while (!solver.advanceTo(nextStep / 60, [])) await new Promise(setImmediate);
+          await solver.awaitFrameCompletion?.();
           await solver.waitForTopologyReady();
         }
         assert.equal(solver.info.encodedSteps ?? 0, step, "capture the actual solver checkpoint");
@@ -413,6 +414,7 @@ dawnTest("mini64 moving native macro contours remain closed", {timeout:180000}, 
     await solver.waitForSimulationReady();
     for(let step=1;step<=10;step++){
       while(!solver.advanceTo(step/30,[]))await new Promise(setImmediate);
+      await solver.awaitFrameCompletion?.();
       if(step%2===0)await device.queue.onSubmittedWorkDone();
     }
     await solver.assertSimulationHealthy();

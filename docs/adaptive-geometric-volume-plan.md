@@ -1,6 +1,8 @@
 # Adaptive geometric volume: incremental production implementation plan
 
-Status: planned, 2026-09-11. No solver implementation has begun under this plan.
+Status: implementation in progress, 2026-09-11. See
+[implementation progress](adaptive-volume-implementation-progress.md) for measured
+results and remaining work.
 Updated with the user's production, default-selection, Dawn testing and agent
 requirements.
 
@@ -38,9 +40,10 @@ describe it accurately as running the copied CM12 algorithm.
 
 ## Implementation agents
 
-Implementation uses **Astra Medium sub-agents**: model gpt-6-astra, reasoning
-effort medium. Give each agent the plan, concrete ownership, shared contracts
-and acceptance conditions. The coordinator owns integration, production wiring
+Coupled numerical implementation uses **Astra Medium sub-agents**: model
+gpt-6-astra, reasoning effort medium. Routine work uses **GPT-5.6 Sol High**
+sub-agents, following the updated user preference. Give each agent the plan,
+concrete ownership, shared contracts and acceptance conditions. The coordinator owns integration, production wiring
 and end-to-end verification.
 
 Assign independent bounded work with disjoint file ownership. Milestone 0 can
@@ -264,7 +267,7 @@ Report regressions plainly. Total volume alone is not evidence of good dynamics.
 
 ## Immediate implementation scope
 
-Milestone 0 only, using Astra Medium sub-agents: literal copies, independent
-execution, new defaults everywhere including tests, production UI/harness wiring,
-Dawn parity/regression checks and a visible functioning fluid. Numerical work
-follows in small increments, each immediately integrated into production.
+The user has requested implementation of the full plan. Work proceeds through
+the milestones using Astra Medium sub-agents. The literal copy and default
+cutover precede numerical changes; each numerical increment must keep a
+functioning production simulation and satisfy its Dawn acceptance checks.

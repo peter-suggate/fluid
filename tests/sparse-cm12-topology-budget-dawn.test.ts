@@ -64,7 +64,8 @@ dawnTest("authored re-rung does not consume or overwrite world-growth pages",
           edited.fluid.refinementRegions![0] = { ...edited.fluid.refinementRegions![0]!,
             minimumCellSize_cells: width, maximumCellSize_cells: width };
           solver.applySceneUniforms(edited);
-          assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+          while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+          await solver.awaitFrameCompletion?.();
           await device.queue.onSubmittedWorkDone();
           await solver.assertSimulationHealthy();
           const after = await solver.readGPUActivityPolicy();

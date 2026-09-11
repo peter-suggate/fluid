@@ -51,7 +51,11 @@ fn projectSparseCM12InteriorFaceTiles(@builtin(workgroup_id)wid:vec3u,
 fn projectSparseCM12SeamFacePackets(@builtin(workgroup_id)wid:vec3u,
  @builtin(local_invocation_index)lane:u32){
   let address=bfa1SeamAddress(wid,lane);if(address.x==BFA1_INVALID||address.y>=3u){return;}
-  bfa1Project(itr1StableNegativeBoundaryRowForOwner(address.x,address.y,address.z));
+  let count=itr1NegativeBoundaryRefCount(address.x,address.y,address.z);
+  for(var refLocal=0u;refLocal<count;refLocal+=1u){
+    let rows=itr1NegativeBoundaryOwnerRows(address.x,address.y,address.z,refLocal);
+    for(var at=rows.x;at<rows.y;at+=1u){bfa1Project(rows.z+itr1Load(at));}
+  }
 }
 @compute @workgroup_size(64)
 fn projectSparseCM12SparseAirFacePackets(@builtin(workgroup_id)wid:vec3u,

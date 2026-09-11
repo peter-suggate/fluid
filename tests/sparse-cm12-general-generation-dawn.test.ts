@@ -42,7 +42,8 @@ dawnTest("ordinary policy merges quiet siblings in a non-ocean scene", { timeout
     console.log(JSON.stringify({initialLeaves:initial.bricks.length, spans:[...new Set(initial.bricks.map(b=>b.spanBricks))]}));
     for (let step = 1; step <= 129; step++) {
       await solver.waitForTopologyReady();
-      assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+      while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+      await solver.awaitFrameCompletion?.();
       await device.queue.onSubmittedWorkDone();
     }
     await solver.waitForTopologyReady();

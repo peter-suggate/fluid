@@ -170,7 +170,8 @@ dawnTest("surface presentation stays fixed across forced B8-B4-B8 cutovers", {
     );
     await solver.waitForSimulationReady();
 
-    assert.equal(solver.advanceTo(CM12_PAPER_DT_S, []), true);
+    while (!solver.advanceTo(CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+    await solver.awaitFrameCompletion?.();
     await device.queue.onSubmittedWorkDone();
     const atB8 = await readSurfaceCrossings(device, solver);
 
@@ -179,7 +180,8 @@ dawnTest("surface presentation stays fixed across forced B8-B4-B8 cutovers", {
       | undefined;
     let coarseStep = 0;
     for (let step = 2; step <= 4; step += 1) {
-      assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+      while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+      await solver.awaitFrameCompletion?.();
       await device.queue.onSubmittedWorkDone();
       const snapshot = await solver.readGPUActivityPolicy();
       const surface = snapshot.bricks.filter((brick) => brick.active
@@ -202,7 +204,8 @@ dawnTest("surface presentation stays fixed across forced B8-B4-B8 cutovers", {
     const atB4 = await readSurfaceCrossings(device, solver);
 
     solver.setForcedSurfaceResolutionForQA(8);
-    assert.equal(solver.advanceTo((coarseStep + 1) * CM12_PAPER_DT_S, []), true);
+    while (!solver.advanceTo((coarseStep + 1) * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+    await solver.awaitFrameCompletion?.();
     await device.queue.onSubmittedWorkDone();
     const fine = await solver.readGPUActivityPolicy();
     const fineSurface = fine.bricks.filter((brick) => brick.active

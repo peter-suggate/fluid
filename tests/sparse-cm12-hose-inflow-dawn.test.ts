@@ -128,9 +128,11 @@ dawnTest("Sparse CM12 hose-tank launches a continuous airborne jet",
       try {
         await solver.waitForSimulationReady();
         const before = await solver.readDiagnosticFields();
-        assert.equal(solver.advanceTo(CM12_PAPER_DT_S, []), true);
+        while (!solver.advanceTo(CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+        await solver.awaitFrameCompletion?.();
         await device.queue.onSubmittedWorkDone();
-        assert.equal(solver.advanceTo(2 * CM12_PAPER_DT_S, []), true);
+        while (!solver.advanceTo(2 * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+        await solver.awaitFrameCompletion?.();
         await device.queue.onSubmittedWorkDone();
         const after = await solver.readDiagnosticFields();
         const transportPacketQA = await solver.readTransportPacketIndirectQA();
@@ -194,7 +196,8 @@ dawnTest("Sparse CM12 hose-tank launches a continuous airborne jet",
           `the injected plug must retain forward momentum; measured ${meanForwardSpeed} m/s`);
 
         for (let step = 3; step <= 12; step += 1) {
-          assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+          while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+          await solver.awaitFrameCompletion?.();
         }
         await device.queue.onSubmittedWorkDone();
         const curved = await solver.readDiagnosticFields();
@@ -266,7 +269,8 @@ dawnTest("Sparse CM12 hose-tank launches a continuous airborne jet",
 
         const longRunSteps = Math.ceil(6.25 / CM12_PAPER_DT_S);
         for (let step = 13; step <= longRunSteps; step += 1) {
-          assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+          while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
+          await solver.awaitFrameCompletion?.();
         }
         await device.queue.onSubmittedWorkDone();
         const activity = await solver.readGPUActivityPolicy();

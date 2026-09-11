@@ -37,6 +37,7 @@ for (const uiCadence of [false, true]) {
     // unsupported forward deficit. Demand must be fulfilled in that epoch.
     for (let step = 1; step <= 12; step++) {
       while (!solver.advanceTo(step * scene.numerics.fixedDt_s, [])) await new Promise(setImmediate);
+      await solver.awaitFrameCompletion?.();
       if (!uiCadence) await solver.waitForTopologyReady();
       await solver.assertSimulationHealthy();
       assert.equal(solver.info.encodedSteps, step);

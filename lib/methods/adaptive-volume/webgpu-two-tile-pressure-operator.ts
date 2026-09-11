@@ -1,5 +1,6 @@
 import type { TwoTileCompositeGrid } from "./two-tile-composite-grid";
 import { twoTilePressureOperatorWGSL } from "./two-tile-pressure-operator.wgsl";
+import { writeGPUBufferBytes, writeGPUBufferView } from "../../core/webgpu-buffer-upload";
 
 export interface PackedTwoTilePressureOperator {
   readonly cellCount: number;
@@ -142,10 +143,9 @@ export class WebGPUTwoTilePressureOperator {
       const byteLength = source instanceof ArrayBuffer ? source.byteLength : source.byteLength;
       const buffer = device.createBuffer({ label, size: Math.max(4, byteLength), usage });
       if (source instanceof ArrayBuffer) {
-        device.queue.writeBuffer(buffer, 0, source);
+        writeGPUBufferBytes(device.queue, buffer, 0, source, 0, source.byteLength);
       } else {
-        device.queue.writeBuffer(buffer, 0, source.buffer as ArrayBuffer,
-          source.byteOffset, source.byteLength);
+        writeGPUBufferView(device.queue, buffer, 0, source);
       }
       return buffer;
     };

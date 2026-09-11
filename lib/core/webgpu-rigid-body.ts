@@ -625,7 +625,10 @@ export class WebGPURigidBodySystem {
       layout: "auto", compute: { module: this.shaderModule, entryPoint } };
   }
 
-  private createIntegrationBindings(): void {
+  private integrationBindings(
+    pipeline: GPUComputePipeline,
+    source = this.solidWorldCollisionSource,
+  ): GPUBindGroup {
     const entries: GPUBindGroupEntry[] = [
       { binding: 0, resource: { buffer: this.stateBuffer } },
       { binding: 1, resource: { buffer: this.exchangeBuffer } },
@@ -636,11 +639,12 @@ export class WebGPURigidBodySystem {
     ];
     if (this.terrainTexture) entries.push({ binding: 4,
       resource: this.terrainTexture.createView() });
-    if (this.solidWorldCollisionSource) entries.push({ binding: 9,
-      resource: { buffer: this.solidWorldCollisionSource.buffer } });
-    this.bindGroup = this.device.createBindGroup({
-      layout: this.pipeline.getBindGroupLayout(0), entries,
-    });
+    if (source) entries.push({ binding: 9, resource: { buffer: source.buffer } });
+    return this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries });
+  }
+
+  private createIntegrationBindings(): void {
+    this.bindGroup = this.integrationBindings(this.pipeline);
   }
 
   /**
@@ -665,6 +669,53 @@ export class WebGPURigidBodySystem {
       throw new RangeError("SolidWorld collision source is invalid");
     }
     this.solidWorldCollisionSource = source;
+  }
+
+  /** Prepare a replacement resident's contact pipeline and bindings without
+   * changing the source used by the currently accepted simulation. */
+  async prepareSolidWorldCollisionSource(source: GPURigidSolidWorldCollisionSource): Promise<{
+    commit(): void;
+  }> {
+    if (!this.pipeline || !this.solidWorldCollisionSource) {
+      throw new Error("SolidWorld collision replacement requires a compiled source");
+    }
+    // Reuse the shader when only the resident buffer changes. Origins and cell
+    // sizes are uniforms; the remaining values are compiled WGSL constants.
+    const layoutValues = (value: GPURigidSolidWorldCollisionSource) => [
+      value.baseWords, value.directoryCapacity, value.directoryBaseWords,
+      value.regionCapacity, value.regionBaseWords, value.regionWords,
+      value.entryWords, value.pageBaseWords, value.pageWords, value.fractionPageWords,
+    ];
+    // Apply the same validation as initial attachment without mutating the
+    // accepted source or its already compiled pipeline.
+    if (!layoutValues(source).every((value) => Number.isSafeInteger(value) && value >= 0)
+      || source.directoryCapacity < 1
+      || source.entryWords < 6
+      || source.regionWords < 8
+      || source.pageWords < source.fractionPageWords
+      || (source.directoryCapacity & (source.directoryCapacity - 1)) !== 0
+      || !source.origin_m.every(Number.isFinite)
+      || !source.cellSize_m.every((value) => Number.isFinite(value) && value > 0)) {
+      throw new RangeError("SolidWorld collision source is invalid");
+    }
+    const compatible = layoutValues(source).every((value, index) =>
+      value === layoutValues(this.solidWorldCollisionSource!)[index]);
+    const shaderModule = compatible ? this.shaderModule! : this.device.createShaderModule({
+      label: "GPU resident rigid-body solver replacement",
+      code: gpuRigidBodyShaderSource(this.terrainTexture !== undefined, source),
+    });
+    const pipeline = compatible ? this.pipeline : await this.device.createComputePipelineAsync({
+      label: "GPU resident rigid-body integrate/contact replacement",
+      layout: "auto",
+      compute: { module: shaderModule, entryPoint: "integrate" },
+    });
+    const bindGroup = this.integrationBindings(pipeline, source);
+    return { commit: () => {
+      this.solidWorldCollisionSource = source;
+      this.shaderModule = shaderModule;
+      this.pipeline = pipeline;
+      this.bindGroup = bindGroup;
+    } };
   }
 
   private createPickBindings(): void {

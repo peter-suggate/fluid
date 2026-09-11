@@ -1,3 +1,5 @@
+import { writeGPUBufferView } from "../../core/webgpu-buffer-upload";
+
 /** Conservative device preflight. False positives may request a detailed
  * snapshot; a negative receipt must rule out every ordinary generation cause. */
 export class SparseCM12GenerationPlanningGate {
@@ -51,8 +53,7 @@ fn main(@builtin(global_invocation_id)id:vec3u){
       size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const readback = device.createBuffer({ label: "CM12 planning request readback",
       size: 8, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-    if (metadata.byteLength) device.queue.writeBuffer(descriptors, 0,
-      metadata.buffer as ArrayBuffer, metadata.byteOffset, metadata.byteLength);
+    if (metadata.byteLength) writeGPUBufferView(device.queue, descriptors, 0, metadata);
     const group = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries:
       [activity, descriptors, receipt, parameters].map((buffer, binding) => ({ binding, resource: { buffer } })) });
     return new SparseCM12GenerationPlanningGate(device, pipeline, group,

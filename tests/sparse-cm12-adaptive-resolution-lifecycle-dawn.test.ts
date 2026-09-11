@@ -95,7 +95,8 @@ dawnTest("Dawn publishes coarse-to-fine and fine-to-coarse Sparse CM12 topology"
       const dt_s = scene.numerics.maxDt_s;
       assert.equal(dt_s, 0.004, "scene-step mode must exercise the authored 4 ms step");
       for (let step = 1; step <= 180 && (!promoted || !coarsened); step += 1) {
-        assert.equal(solver.advanceTo(step * dt_s, []), true);
+        while (!solver.advanceTo(step * dt_s, [])) await new Promise(setImmediate);
+        await solver.awaitFrameCompletion?.();
         assert.ok(Math.abs((solver.info.lastDt_s ?? 0) - dt_s) < 1e-12,
           `advance ${step} must remain a 4 ms scene step`);
         // These explicit QA snapshots occur after an accepted advance. They are
@@ -140,7 +141,8 @@ dawnTest("Dawn publishes coarse-to-fine and fine-to-coarse Sparse CM12 topology"
       const stats = await solver.readStats();
       assert.ok((stats.fluidBrickGeneration ?? 0) > initialGeneration,
         "accepted topology publication must advance the resident generation");
-      assert.equal(solver.info.hostSchedulingUsesReadback, false);
+      // Continuation reads a bounded status receipt; fields stay GPU-owned.
+      assert.equal(solver.info.hostSchedulingUsesReadback, true);
       assert.equal(solver.info.hostSimulationSizedWorkItems, 0);
       assert.deepEqual(uncaptured, []);
     } finally {

@@ -19,7 +19,7 @@ import {
 import type { WebGPURigidBodySystem } from "../../core/webgpu-rigid-body";
 import { packSparseCM12RefinementRegions } from
   "../../methods/adaptive-volume/sparse-cm12-refinement-regions";
-import { WebGPUSparseCM12Resident, type SharpeningTrace, type SparseCM12InflowControl, type SparseCM12PresentationPageResolution, type SparseCM12PressureControl, type SparseCM12ResidentInitializationReporter, type SparseCM12ResidentStageSeams } from "../../methods/adaptive-volume/webgpu-sparse-cm12-resident";
+import { WebGPUSparseCM12Resident, type SharpeningTrace, type SparseCM12FrameContinuation, type SparseCM12InflowControl, type SparseCM12PresentationPageResolution, type SparseCM12PressureControl, type SparseCM12ResidentInitializationReporter, type SparseCM12ResidentStageSeams } from "../../methods/adaptive-volume/webgpu-sparse-cm12-resident";
 import { type SparseCM12ActivityPolicy } from "../../methods/adaptive-volume/features/adaptivity/policy";
 import type {
   SparseWorld,
@@ -55,6 +55,7 @@ export interface CM12SparseWorldStepConfiguration {
   readonly activityPolicy?: SparseCM12ActivityPolicy;
   readonly pressureControl?: SparseCM12PressureControl;
   readonly seams?: SparseCM12ResidentStageSeams;
+  readonly transportPacketChunkSize?: number;
   readonly worldDimensions_m?: readonly [number, number, number];
 }
 
@@ -124,6 +125,7 @@ export interface CM12SparseWorldFactoryConfig {
  * pipeline map and no way to dispatch a named internal stage.
  */
 export interface CM12SparseWorldRuntime {
+  readonly pendingFrameContinuation: SparseCM12FrameContinuation | undefined;
   readonly topologyPreparationPending: boolean;
   /** Frozen interactions wait for complete support before applying their dose. */
   readonly pendingLiquidInteractions: boolean;
@@ -165,7 +167,7 @@ export interface CM12SparseWorldRuntime {
   readPressureJournal(): ReturnType<WebGPUSparseCM12Resident["readPressureJournal"]>;
   encodeInitialPresentation(encoder: GPUCommandEncoder, finestCellSize_m: number, columnHeightEnabled?: boolean): void;
   assertSimulationHealthy(): Promise<void>;
-  captureSimulationFailure(encoder: GPUCommandEncoder): ReturnType<WebGPUSparseCM12Resident["captureSimulationFailure"]>;
+  captureSimulationFailure(encoder: GPUCommandEncoder, onBackingRequest?: () => void): ReturnType<WebGPUSparseCM12Resident["captureSimulationFailure"]>;
   encodePressureIterationReceipt(
     encoder: GPUCommandEncoder,
     destination: GPUBuffer,
@@ -209,6 +211,13 @@ export interface CM12SparseWorldDeveloperTrace {
     WebGPUSparseCM12Resident["readPhase1TransportProfileQA"]>;
   readCandidateEffectsTransactionQA(): ReturnType<
     WebGPUSparseCM12Resident["readCandidateEffectsTransactionQA"]>;
+  readAcceptedGeometricVolumeQA(): ReturnType<
+    WebGPUSparseCM12Resident["readAcceptedGeometricVolumeQA"]>;
+  readGeometricVolumeTransportReceiptQA(): ReturnType<
+    WebGPUSparseCM12Resident["readGeometricVolumeTransportReceiptQA"]>;
+  readAcceptedGeometricCellRowsQA(cellId: number): ReturnType<WebGPUSparseCM12Resident["readAcceptedGeometricCellRowsQA"]>;
+  readAcceptedGeometricRowQA(rowId: number): ReturnType<WebGPUSparseCM12Resident["readAcceptedGeometricRowQA"]>;
+  readGeometricProjectionComponentsQA(): ReturnType<WebGPUSparseCM12Resident["readGeometricProjectionComponentsQA"]>;
   readFramePlanPresentationHeaderQA(): ReturnType<
     WebGPUSparseCM12Resident["readFramePlanPresentationHeaderQA"]>;
   readFramePlanPresentationFaultRecordQA(): ReturnType<
@@ -361,6 +370,7 @@ class AdoptedCM12SparseWorld implements SparseWorld {
     interaction: SparseWorldFluidEdit; configuration: CM12SparseWorldStepConfiguration;
   }[] = [];
   private liquidInteractionRevision = 0;
+  pendingFrameContinuation: SparseCM12FrameContinuation | undefined;
   get pendingLiquidInteractions(): boolean { return this.deferredLiquidInteractions.length > 0; }
   get pendingLiquidInteractionRevision(): number { return this.liquidInteractionRevision; }
 
@@ -509,6 +519,7 @@ class AdoptedCM12SparseWorld implements SparseWorld {
   }
 
   encodeStep(encoder: GPUCommandEncoder, input: SparseWorldStepInput): SparseWorldStep {
+    if (this.pendingFrameContinuation) throw new Error("CM12 frame continuation is still pending");
     if (this.generationState.pending) throw new Error("CM12 publication boundary suspends frame encoding");
     if (this.destroyed) {
       const error = new Error("Sparse world has been destroyed");
@@ -542,7 +553,7 @@ class AdoptedCM12SparseWorld implements SparseWorld {
         } : undefined;
       this.options.rigidSystem?.syncBodies(rigidBodies);
       if (this.options.rigidExchange) encoder.clearBuffer(this.options.rigidExchange);
-      this.resident.encode(
+      const continuation = this.resident.encode(
         encoder,
         input.dt,
         configuration.finestCellSize_m,
@@ -555,22 +566,34 @@ class AdoptedCM12SparseWorld implements SparseWorld {
         rigidBodies.length,
         configuration.worldDimensions_m,
         inflow,
+        configuration.transportPacketChunkSize,
       );
-      this.options.rigidSystem?.encode(
-        encoder,
-        input.dt,
-        configuration.finestCellSize_m ** 3,
-        1,
-        configuration.finestCellSize_m,
-      );
-      this.generation += 1;
-      this.lastAcceptedTime = input.time;
-      this.state = "running";
-      const step = Object.freeze({
-        generation: this.generation,
-        submittedTime: input.time,
-      });
-      this.options.trace?.record({ kind: "step-encoded", ...step });
+      const step = Object.freeze({ generation: this.generation + 1, submittedTime: input.time });
+      const finishStep = (finalEncoder: GPUCommandEncoder) => {
+        this.options.rigidSystem?.encode(finalEncoder, input.dt,
+          configuration.finestCellSize_m ** 3, 1, configuration.finestCellSize_m);
+        this.generation += 1;
+        this.lastAcceptedTime = input.time;
+        this.state = "running";
+        this.options.trace?.record({ kind: "step-encoded", ...step });
+      };
+      if (continuation) {
+        this.pendingFrameContinuation = {
+          readProgress: () => continuation.readProgress(),
+          resume: (nextEncoder, progress) => {
+            const complete = continuation.resume(nextEncoder, progress);
+            if (complete) {
+              finishStep(nextEncoder);
+              this.pendingFrameContinuation = undefined;
+            }
+            return complete;
+          },
+          cancel: () => {
+            continuation.cancel();
+            this.pendingFrameContinuation = undefined;
+          },
+        };
+      } else finishStep(encoder);
       return step;
     } catch (error) {
       this.publishFault("step-encoding", error);
@@ -658,6 +681,7 @@ class AdoptedCM12SparseWorld implements SparseWorld {
 }
 
 class AdoptedCM12SparseWorldRuntime implements CM12SparseWorldRuntime {
+  get pendingFrameContinuation() { return this.world.pendingFrameContinuation; }
   private get resident() { return this.generationState.current; }
   get acceptedAtlas() { return this.resident.acceptedAtlas; }
   get generationPlanningRequired() { return this.resident.needsGenerationPlanning; }
@@ -710,8 +734,8 @@ class AdoptedCM12SparseWorldRuntime implements CM12SparseWorldRuntime {
     return this.resident.assertSimulationHealthy();
   }
 
-  captureSimulationFailure(encoder: GPUCommandEncoder) {
-    return this.resident.captureSimulationFailure(encoder);
+  captureSimulationFailure(encoder: GPUCommandEncoder, onBackingRequest?: () => void) {
+    return this.resident.captureSimulationFailure(encoder, onBackingRequest);
   }
   encodePressureIterationReceipt(encoder: GPUCommandEncoder, destination: GPUBuffer) {
     this.resident.encodePressureIterationReceipt(encoder, destination);
@@ -770,6 +794,21 @@ class AdoptedCM12SparseWorldDeveloperTrace implements CM12SparseWorldDeveloperTr
   readPhase1TransportProfileQA() { return this.generationState.read((resident) => resident.readPhase1TransportProfileQA()); }
   readCandidateEffectsTransactionQA() {
     return this.generationState.read((resident) => resident.readCandidateEffectsTransactionQA());
+  }
+  readAcceptedGeometricVolumeQA() {
+    return this.generationState.read((resident) => resident.readAcceptedGeometricVolumeQA());
+  }
+  readGeometricVolumeTransportReceiptQA() {
+    return this.generationState.read((resident) => resident.readGeometricVolumeTransportReceiptQA());
+  }
+  readAcceptedGeometricCellRowsQA(cellId: number) {
+    return this.generationState.read((resident) => resident.readAcceptedGeometricCellRowsQA(cellId));
+  }
+  readAcceptedGeometricRowQA(rowId: number) {
+    return this.generationState.read((resident) => resident.readAcceptedGeometricRowQA(rowId));
+  }
+  readGeometricProjectionComponentsQA() {
+    return this.generationState.read((resident) => resident.readGeometricProjectionComponentsQA());
   }
   readFramePlanPresentationHeaderQA() {
     return this.generationState.read((resident) => resident.readFramePlanPresentationHeaderQA());

@@ -71,6 +71,7 @@ dawnTest("fixed-domain frozen mini32 retains initial cell sizes and supports the
     // previously inactive corner without any change to membership or rungs.
     for (let step = 1; step <= 12; step++) {
       while (!solver.advanceTo(step * dt, [])) await new Promise(setImmediate);
+      await solver.awaitFrameCompletion?.();
       await solver.waitForTopologyReady();
       await solver.assertSimulationHealthy();
       assert.equal(solver.info.encodedSteps, step);
