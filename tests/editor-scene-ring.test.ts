@@ -53,7 +53,7 @@ test("every registered sculpt tool has a wedge, disabled with its own reason whe
 
 test("the LOOK ring keeps the document verbs but withholds everything that edits", () => {
   const actions = sceneActionsAt(cloneScene(defaultScene), POINT, undefined,
-    { placement: false, methodId: "adaptive-mass" });
+    { placement: false, methodId: "adaptive-volume" });
   assert.ok(actions.find((action) => action.id === "scene"), "LOOK still reaches the document");
   const ids = actions.map((action) => action.id);
   assert.ok(!ids.some((id) => id.startsWith("sculpt-")), "LOOK must not offer sculpt tools");

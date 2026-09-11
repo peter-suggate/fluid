@@ -26,8 +26,8 @@ import {
   releaseWebGPUExclusiveLock,
 } from "../lib/harness/webgpu-smoke-isolation";
 import { ADAPTIVE_MASS_FLUID_PIPELINE } from
-  "../lib/methods/adaptive-mass/adaptive-mass-frame-pipeline";
-import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
+  "../lib/methods/adaptive-volume/adaptive-mass-frame-pipeline";
+import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 
 const SAMPLED_ADVANCES = 24;
 

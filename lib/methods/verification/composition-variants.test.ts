@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { resolveMethodComposition as uniform } from "../uniform/composition";
-import { resolveMethodComposition as adaptive } from "../adaptive-mass/composition";
+import { resolveMethodComposition as adaptive } from "../adaptive-volume/composition";
 import { resolveMethodComposition as losasso } from "../losasso/composition";
 import { resolveMethodComposition as power } from "../power/composition";
 import { ALGORITHM_PARAMS as uniformParams } from "../uniform/features/algorithms/definition";
-import { ALGORITHM_PARAMS as adaptiveParams } from "../adaptive-mass/features/algorithms/definition";
-import { ADAPTIVITY_PARAMS } from "../adaptive-mass/features/adaptivity/definition";
-import { SPARSE_CM12_ACTIVITY_POLICY } from "../adaptive-mass/features/adaptivity/policy";
+import { ALGORITHM_PARAMS as adaptiveParams } from "../adaptive-volume/features/algorithms/definition";
+import { ADAPTIVITY_PARAMS } from "../adaptive-volume/features/adaptivity/definition";
+import { SPARSE_CM12_ACTIVITY_POLICY } from "../adaptive-volume/features/adaptivity/policy";
 
 const selected = (composition: ReturnType<typeof uniform>, point: string) => composition.variants.find(v => v.point === point);
 
@@ -28,9 +28,9 @@ test("all adaptive criteria compose with live conditioning and timestep alternat
     if (param.kind !== "select") continue;
     for (const option of param.options) {
       const result=adaptive({selectorMode,[param.key]:option.value});
-      assert.equal(selected(result,"simulation.adaptive-mass.adaptivity")?.id,selectorMode);
-      assert.equal(selected(result,`simulation.adaptive-mass.algorithms.${param.key}`)?.id,option.value);
-      assert.equal(selected(result,`simulation.adaptive-mass.algorithms.${param.key}`)?.update,"live");
+      assert.equal(selected(result,"simulation.adaptive-volume.adaptivity")?.id,selectorMode);
+      assert.equal(selected(result,`simulation.adaptive-volume.algorithms.${param.key}`)?.id,option.value);
+      assert.equal(selected(result,`simulation.adaptive-volume.algorithms.${param.key}`)?.update,"live");
     }
   }
 });
@@ -46,7 +46,7 @@ test("Losasso extension alternatives compose with each supported surface represe
 
 test("fixed pressure providers cannot become unsupported method combinations", () => {
   assert.equal(selected(uniform(),"simulation.uniform.pressure")?.id,"cm11a-lcp-multigrid");
-  assert.equal(selected(adaptive(),"simulation.adaptive-mass.pressure")?.id,"sparse-jacobi-pcg");
+  assert.equal(selected(adaptive(),"simulation.adaptive-volume.pressure")?.id,"sparse-jacobi-pcg");
   assert.equal(selected(losasso(),"simulation.losasso.pressure")?.id,"vcycle-mgpcg");
   assert.equal(selected(power(),"simulation.power-liquids.pressure")?.id,"power2017-hybrid");
   assert.throws(() => uniform({velocityTransport:"causal-front"}),/supported variant/);
@@ -65,7 +65,7 @@ test("adaptivity UI defaults are the policy defaults", () => {
 test("boolean overrides preserve the existing explicit-string solver semantics", () => {
   for (const params of [uniformParams, adaptiveParams]) for (const param of params) {
     const resolve = params === uniformParams ? uniform : adaptive;
-    const method = params === uniformParams ? "uniform" : "adaptive-mass";
+    const method = params === uniformParams ? "uniform" : "adaptive-volume";
     for (const value of [true,false]) {
       assert.equal(selected(resolve({[param.key]:value}),`simulation.${method}.algorithms.${param.key}`)?.id,param.default);
     }

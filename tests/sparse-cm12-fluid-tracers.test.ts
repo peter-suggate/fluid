@@ -13,9 +13,9 @@ import {
   SPARSE_CM12_TRACER_BUDGET,
   SPARSE_CM12_TRACER_DENSITY,
   sparseCM12TracerLattice,
-} from "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
+} from "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident";
 import { WebGPUAdaptiveMassSolver } from
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+  "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 const dawnTest = dawnModule ? test : test.skip;

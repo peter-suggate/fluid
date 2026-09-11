@@ -15,19 +15,19 @@ import {
   SolidWorldDirectory,
 } from "../lib/core/solid-world";
 import { sparseCM12FinePresentationPlan } from
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident";
 import { FINE_LEVELSET_SIGNED_SPARSE_ADDRESS_FLAG } from
   "../lib/core/fine-levelset-brick-abi";
 import { findSceneDefinition, getScenePreset } from "../lib/core/scenes";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { initializeSparseBrickAtlasFromScene } from
-  "../lib/methods/adaptive-mass/sparse-brick-atlas";
+  "../lib/methods/adaptive-volume/sparse-brick-atlas";
 import { sceneLatticeDimensions } from "../lib/core/scene-lattice";
 import {
   createSparseCM12SolidOccupancyLayout,
   packSparseCM12SolidOccupancy,
   SPARSE_CM12_SOLID_OCCUPANCY_MAGIC,
-} from "../lib/methods/adaptive-mass/sparse-cm12-solid-occupancy";
+} from "../lib/methods/adaptive-volume/sparse-cm12-solid-occupancy";
 
 test("thin authored tank voxels compile to exact planar slabs", () => {
   const scene = getScenePreset("bounded-pool-transfer").create();

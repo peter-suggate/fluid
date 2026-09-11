@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
-import { createSparseAdaptiveMassAtlas } from "../lib/methods/adaptive-mass/sparse-brick-atlas";
+import { createSparseAdaptiveMassAtlas } from "../lib/methods/adaptive-volume/sparse-brick-atlas";
 import {
   createSparseCM12WorldDirectoryInitialWords, createSparseCM12WorldDirectoryLayout,
   createSparseCM12WorldDirectoryWGSL, sparseCM12WorldCoordinateHash,
   SPARSE_CM12_WORLD_DIRECTORY_HEADER as H,
   SPARSE_CM12_WORLD_DIRECTORY_ENTRY_WORDS as ENTRY_WORDS,
-} from "../lib/methods/adaptive-mass/sparse-cm12-world-directory";
+} from "../lib/methods/adaptive-volume/sparse-cm12-world-directory";
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 for (const uniqueRequest of [false, true]) (dawnModule ? test : test.skip)(uniqueRequest

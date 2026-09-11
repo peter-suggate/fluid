@@ -6,8 +6,8 @@ import { resolveMethodValues } from "../lib/core/method-contract";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { gridOverlayShader } from "../lib/core/webgpu-grid-overlay";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
-import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
-import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
+import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 (dawnModule ? test : test.skip)("structure overlay resolves dilute symmetric corners at four paper steps",

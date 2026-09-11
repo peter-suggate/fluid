@@ -7,6 +7,8 @@ import { resolvedMethodValues } from "../../core/stores/method-store";
 import { useSession } from "../../core/session/session-context";
 import { adaptiveMassAdaptivityFeature } from "../../methods/adaptive-mass/features/adaptivity/definition";
 import { AdaptiveMassControlRow, AdaptiveMassToolstripRow } from "../../methods/adaptive-mass/features/adaptivity/ui";
+import { adaptiveMassAdaptivityFeature as adaptiveVolumeAdaptivityFeature } from "../../methods/adaptive-volume/features/adaptivity/definition";
+import { AdaptiveMassControlRow as AdaptiveVolumeControlRow, AdaptiveMassToolstripRow as AdaptiveVolumeToolstripRow } from "../../methods/adaptive-volume/features/adaptivity/ui";
 import { SVO_FEATURE_VIEWS } from "../../svo/pipeline/ui-slots";
 import { GravityRow, GravityYRow } from "../gravity/ui";
 import { composeFeatureUI } from "./composition";
@@ -22,6 +24,9 @@ export const applicationViews: FeatureControlViews = {
   ...Object.fromEntries(adaptiveMassAdaptivityFeature.controls!.map(control =>
     [`${adaptiveMassAdaptivityFeature.id}/${control.id}`, AdaptiveMassControlRow])),
   "simulation.adaptive-mass.adaptivity/adaptivity": AdaptiveMassToolstripRow,
+  ...Object.fromEntries(adaptiveVolumeAdaptivityFeature.controls!.map(control =>
+    [`${adaptiveVolumeAdaptivityFeature.id}/${control.id}`, AdaptiveVolumeControlRow])),
+  "simulation.adaptive-volume.adaptivity/adaptivity": AdaptiveVolumeToolstripRow,
   ...SVO_FEATURE_VIEWS,
 };
 

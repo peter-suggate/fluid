@@ -12,7 +12,7 @@ import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
 import { createProcessRetainedDawnGPU, type NodeDawnProvider } from
   "../lib/harness/node-dawn-provider";
 import { WebGPUAdaptiveMassSolver } from
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+  "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
 const argument = (name: string, fallback: string): string => process.argv.slice(2)
   .find((value) => value.startsWith(`--${name}=`))?.slice(name.length + 3) ?? fallback;

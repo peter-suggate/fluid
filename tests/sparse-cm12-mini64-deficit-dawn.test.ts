@@ -6,8 +6,8 @@ import { pathToFileURL } from "node:url";
 import { createMinimalPowerDamBreak64Scene } from "../lib/core/scenes";
 import { resolveMethodValues } from "../lib/core/method-contract";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
-import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
+import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
@@ -26,7 +26,7 @@ for (const uiCadence of [false, true]) {
     const configuration = JSON.parse(readFileSync(new URL("./fixtures/sparse-cm12-mini64-ui-deficit.json", import.meta.url), "utf8"));
     const scene = uiCadence ? configuration.scene as SceneDescription : createMinimalPowerDamBreak64Scene();
     if (!uiCadence) scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 30;
-    const values = resolveMethodValues(adaptiveMassMethod, "balanced", uiCadence ? configuration.method.overrides["adaptive-mass"] : {});
+    const values = resolveMethodValues(adaptiveMassMethod, "balanced", uiCadence ? configuration.method.overrides["adaptive-volume"] : {});
     solver = await adaptiveMassMethod.createSolverAsync!(device, scene, "balanced", values, undefined, () => {}) as WebGPUAdaptiveMassSolver;
     await solver.waitForSimulationReady();
     const initial = await solver.readDiagnosticFields(true);

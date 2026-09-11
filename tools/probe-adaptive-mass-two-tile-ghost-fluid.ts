@@ -3,7 +3,7 @@
 import {
   probeTwoTileGhostFluidProjection,
   type GhostFluidProjectionProbeReceipt,
-} from "../lib/methods/adaptive-mass/two-tile-ghost-fluid-projection-probe";
+} from "../lib/methods/adaptive-volume/two-tile-ghost-fluid-projection-probe";
 
 function e(value: number): string {
   return value.toExponential(3);

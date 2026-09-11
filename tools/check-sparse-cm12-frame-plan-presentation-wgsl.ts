@@ -7,9 +7,9 @@ import { spawnSync } from "node:child_process";
 import { createSparseCM12FramePlanLayout } from "../lib/core/sparse-cm12-frame-plan";
 import { createSparseCM12FramePlanWGSL } from "../lib/core/sparse-cm12-frame-plan.wgsl";
 import { createSparseCM12FramePlanPresentationLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-frame-plan-presentation";
+  "../lib/methods/adaptive-volume/sparse-cm12-frame-plan-presentation";
 import { createSparseCM12FramePlanPresentationWGSL } from
-  "../lib/methods/adaptive-mass/sparse-cm12-frame-plan-presentation.wgsl";
+  "../lib/methods/adaptive-volume/sparse-cm12-frame-plan-presentation.wgsl";
 
 const directory = mkdtempSync(join(tmpdir(), "fluid-fpp1-wgsl-"));
 try {

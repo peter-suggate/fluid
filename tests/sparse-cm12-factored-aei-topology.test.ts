@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildSparseAtlasCompositeGrid, type SparseAtlasCompositeGrid } from
-  "../lib/methods/adaptive-mass/sparse-atlas-composite-projection";
+  "../lib/methods/adaptive-volume/sparse-atlas-composite-projection";
 import {
   createSparseAdaptiveMassAtlas,
   sparseBrickKey,
   type SparseAdaptiveMassBrick,
   type SparseBrickResolution,
-} from "../lib/methods/adaptive-mass/sparse-brick-atlas";
+} from "../lib/methods/adaptive-volume/sparse-brick-atlas";
 import {
   SPARSE_CM12_FACTORED_AEI_FAULT,
   SPARSE_CM12_FACTORED_AEI_PATCHES_PER_LEAF,
@@ -20,7 +20,7 @@ import {
   createSparseCM12FactoredAEIImage,
   prepareSparseCM12FactoredAEIShadow,
   validateSparseCM12FactoredAEIPreflip,
-} from "../lib/methods/adaptive-mass/sparse-cm12-factored-aei-topology";
+} from "../lib/methods/adaptive-volume/sparse-cm12-factored-aei-topology";
 
 function fixture(left: SparseBrickResolution, right: SparseBrickResolution,
   fine: 8 | 16, reverse = false): SparseAtlasCompositeGrid {

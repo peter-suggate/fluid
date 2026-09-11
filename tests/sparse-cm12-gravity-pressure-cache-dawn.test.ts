@@ -14,7 +14,7 @@ dawnTest("gravity changes reclassify cached pressure rows even with unchanged de
     const gpu: GPU = dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
     const adapter = await gpu.requestAdapter(); assert.ok(adapter);
     device = await adapter.requestDevice();
-    const source = readFileSync(new URL("../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url), "utf8");
+    const source = readFileSync(new URL("../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url), "utf8");
     const production = source.match(/fn publishCanonicalPressureRowTile\([\s\S]*?\n}/)?.[0];
     assert.ok(production);
     // Every cached row was active; reclassification now rejects it. Only the

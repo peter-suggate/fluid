@@ -37,6 +37,7 @@ type Zone =
   | "method-losasso"
   | "method-power"
   | "method-adaptive-mass"
+  | "method-adaptive-volume"
   | "octree-shared"
   | "sparse-world"
   | "svo"
@@ -56,6 +57,7 @@ function zoneOf(relPath: string): Zone {
   if (relPath.startsWith("lib/methods/losasso/")) return "method-losasso";
   if (relPath.startsWith("lib/methods/power/")) return "method-power";
   if (relPath.startsWith("lib/methods/adaptive-mass/")) return "method-adaptive-mass";
+  if (relPath.startsWith("lib/methods/adaptive-volume/")) return "method-adaptive-volume";
   if (relPath.startsWith("lib/methods/octree-shared/")) return "octree-shared";
   if (relPath.startsWith("lib/sparse-world/")) return "sparse-world";
   if (relPath.startsWith("lib/svo/")) return "svo";
@@ -70,7 +72,7 @@ function zoneOf(relPath: string): Zone {
 const ALLOWED: Record<Zone, ReadonlySet<Zone>> = {
   framework: new Set<Zone>(["framework"]),
   feature: new Set<Zone>(["framework", "core", "feature", "ui"]),
-  composition: new Set<Zone>(["framework", "core", "feature", "composition", "ui", "svo", "method-uniform", "method-losasso", "method-power", "method-adaptive-mass"]),
+  composition: new Set<Zone>(["framework", "core", "feature", "composition", "ui", "svo", "method-uniform", "method-losasso", "method-power", "method-adaptive-mass", "method-adaptive-volume"]),
   // Core composes the SVO layer: the production renderer draws through it.
   // The reverse direction is what carries the meaning — see "svo" below.
   core: new Set<Zone>(["core", "svo", "sparse-world", "framework", "feature"]),
@@ -80,10 +82,13 @@ const ALLOWED: Record<Zone, ReadonlySet<Zone>> = {
   "method-adaptive-mass": new Set<Zone>([
     "core", "method-adaptive-mass", "sparse-world",
   ]),
+  "method-adaptive-volume": new Set<Zone>([
+    "core", "method-adaptive-volume", "sparse-world",
+  ]),
   "octree-shared": new Set<Zone>(["core", "octree-shared"]),
   // The method edge exists only under sparse-world/internal during Phase A;
   // a dedicated public-index audit below keeps it out of the semantic API.
-  "sparse-world": new Set<Zone>(["core", "sparse-world", "method-adaptive-mass"]),
+  "sparse-world": new Set<Zone>(["core", "sparse-world", "method-adaptive-mass", "method-adaptive-volume"]),
   // The SVO stack encodes and traces voxels. Which solver filled them is not
   // its business, so no method zone appears here — that absence is the rule.
   svo: new Set<Zone>(["core", "svo"]),
@@ -95,6 +100,7 @@ const ALLOWED: Record<Zone, ReadonlySet<Zone>> = {
     "method-losasso",
     "method-power",
     "method-adaptive-mass",
+    "method-adaptive-volume",
     "octree-shared",
     "sparse-world",
   ]),
@@ -109,6 +115,7 @@ const ALLOWED: Record<Zone, ReadonlySet<Zone>> = {
     "method-losasso",
     "method-power",
     "method-adaptive-mass",
+    "method-adaptive-volume",
     "octree-shared",
     "sparse-world",
     "harness",
@@ -128,6 +135,7 @@ const ALLOWED: Record<Zone, ReadonlySet<Zone>> = {
     "method-losasso",
     "method-power",
     "method-adaptive-mass",
+    "method-adaptive-volume",
     "octree-shared",
     "sparse-world",
     "lib-other",
@@ -180,6 +188,15 @@ const COMPOSITION_ROOTS = new Set<string>([
 
 const METHOD_CATALOG = "lib/methods/index.ts";
 
+// These are the only sparse-world composition edges into either independent
+// method. Neither method may use the other's adapter/device-library pair.
+const SPARSE_METHOD_OWNERS = new Map<string, Zone>([
+  ["lib/sparse-world/internal/cm12-adapter.ts", "method-adaptive-mass"],
+  ["lib/sparse-world/internal/cm12-device-library.ts", "method-adaptive-mass"],
+  ["lib/sparse-world/internal/adaptive-volume-adapter.ts", "method-adaptive-volume"],
+  ["lib/sparse-world/internal/adaptive-volume-device-library.ts", "method-adaptive-volume"],
+]);
+
 function main() {
   const strict = process.argv.includes("--strict");
   const violations: string[] = [];
@@ -202,8 +219,11 @@ function main() {
           continue;
         }
         const to = zoneOf(targetRel);
-        if (from === "sparse-world" && to.startsWith("method-")
-          && !rel.startsWith("lib/sparse-world/internal/")) {
+        const adapterOwner = SPARSE_METHOD_OWNERS.get(targetRel);
+        const sourceAdapterOwner = SPARSE_METHOD_OWNERS.get(rel);
+        if ((from === "sparse-world" && to.startsWith("method-") && sourceAdapterOwner !== to)
+          || (adapterOwner && from.startsWith("method-") && adapterOwner !== from)
+          || (adapterOwner && sourceAdapterOwner && adapterOwner !== sourceAdapterOwner)) {
           violations.push(`${rel} [${from}] → ${targetRel} [${to}]`);
           continue;
         }

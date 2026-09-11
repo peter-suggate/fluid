@@ -7,7 +7,7 @@ import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { createEmptyScene } from "../lib/core/empty-scene";
 import { sceneWithSolidStroke } from "../lib/core/solid-world";
 import { FluidLabRenderer } from "../lib/core/webgpu-renderer";
-import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 import { WebGPULiveSvoScene } from "../lib/svo/features/scene-publication/webgpu-live-svo-scene";
 import { simulation } from "../lib/core/simulation/controller";
 import { voxelTools } from "../lib/core/voxel-editor/registry";
@@ -59,7 +59,7 @@ test("production editor plugins, worker acceptance and controller history preser
       accept: (next, current) => renderer.acceptLiveSolidEdit(next, current),
     });
     const session = simulation.session();
-    session.method.getState().setMethodId("adaptive-mass");
+    session.method.getState().setMethodId("adaptive-volume");
     session.scene.getState().setScene(initial, "production-native");
     session.history.getState().clear(); session.ui.setState({ voxelStrokePending: false });
     let advanceDuringAcceptance = false;

@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createSparseCM12LogicalOwnerDirectory } from
-  "../lib/methods/adaptive-mass/sparse-cm12-logical-owner-directory";
+  "../lib/methods/adaptive-volume/sparse-cm12-logical-owner-directory";
 import {
   createSparseAdaptiveMassAtlas,
   sparseBrickKey,
   type SparseBrickResolution,
   type SparseBrickVec3,
-} from "../lib/methods/adaptive-mass/sparse-brick-atlas";
+} from "../lib/methods/adaptive-volume/sparse-brick-atlas";
 import {
   createSparseCM12TransportExecutionImage,
   createSparseCM12TransportExecutionImageLayout,
@@ -22,16 +22,16 @@ import {
   SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_PACKET_WORDS,
   SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_SPATIAL_TILE,
   SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_SPATIAL_TILE_WORDS,
-} from "../lib/methods/adaptive-mass/sparse-cm12-transport-execution-image";
+} from "../lib/methods/adaptive-volume/sparse-cm12-transport-execution-image";
 import { createSparseCM12TransportExecutionImageWGSL } from
-  "../lib/methods/adaptive-mass/sparse-cm12-transport-execution-image.wgsl";
+  "../lib/methods/adaptive-volume/sparse-cm12-transport-execution-image.wgsl";
 
 const residentHostSource = readFileSync(new URL(
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.ts",
   import.meta.url,
 ), "utf8");
 const residentWGSLSource = readFileSync(new URL(
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts",
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts",
   import.meta.url,
 ), "utf8");
 

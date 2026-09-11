@@ -133,6 +133,6 @@ export function beginShapeGesture(context: ToolContext, operation: Patch["operat
 export function voxelToolUnavailable({ scene, methodId }: {
   scene: ToolContext["scene"]; methodId: string;
 }): string | undefined {
-  if (scene.systems?.fluid !== false && methodId !== "adaptive-mass") return "Choose Sparse CM12 to edit solids while water runs.";
+  if (scene.systems?.fluid !== false && (methodId !== "adaptive-mass" && methodId !== "adaptive-volume")) return "Choose Sparse Geometric to edit solids while water runs.";
   return undefined;
 }

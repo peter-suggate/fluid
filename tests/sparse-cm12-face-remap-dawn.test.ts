@@ -6,7 +6,7 @@ import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
 
 const source = readFileSync(process.env.CM12_FACE_SOURCE ?? new URL(
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url), "utf8");
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url), "utf8");
 function production(name: string): string {
   const start = source.indexOf(`fn ${name}(`);
   assert.ok(start >= 0, name);

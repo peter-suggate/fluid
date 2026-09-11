@@ -2,7 +2,7 @@ import {
   materializeAdaptiveMassPresentationAtlas,
   type AdaptiveMassAtlasCoordinate,
   type AdaptiveMassPresentationBrick,
-} from "../lib/methods/adaptive-mass/webgpu-adaptive-mass-atlas-presentation";
+} from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-atlas-presentation";
 
 type Axis = 0 | 1 | 2;
 

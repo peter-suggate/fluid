@@ -6,9 +6,9 @@ import {
   publishSparseCM12CollocatedWetVelocity,
   publishSparseCM12VexAcceptedVelocity,
   seedSparseCM12EffectiveTransportVelocity,
-} from "../lib/methods/adaptive-mass/sparse-cm12-effective-transport-velocity";
+} from "../lib/methods/adaptive-volume/sparse-cm12-effective-transport-velocity";
 import { createSparseCM12EffectiveTransportVelocityWGSL } from
-  "../lib/methods/adaptive-mass/sparse-cm12-effective-transport-velocity.wgsl";
+  "../lib/methods/adaptive-volume/sparse-cm12-effective-transport-velocity.wgsl";
 
 const bits = (values: Float32Array) => new Uint32Array(
   values.buffer, values.byteOffset, values.length,

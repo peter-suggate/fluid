@@ -5,7 +5,7 @@ import {
   resolveMethodValues,
   type SimulationMethod,
 } from "../lib/core/method-contract";
-import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
+import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 import { uniformMethod } from "../lib/methods/uniform/method";
 
 // Method defaults remain the paper step. Analytic study scenes deliberately
@@ -13,7 +13,7 @@ import { uniformMethod } from "../lib/methods/uniform/method";
 
 const CM12_METHODS: ReadonlyArray<readonly [string, SimulationMethod]> = [
   ["uniform", uniformMethod],
-  ["adaptive-mass", adaptiveMassMethod],
+  ["adaptive-volume", adaptiveMassMethod],
 ];
 
 test("both CM12 methods declare the paper step as their default", () => {

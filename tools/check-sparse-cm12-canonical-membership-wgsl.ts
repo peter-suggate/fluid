@@ -4,9 +4,9 @@ import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
 import {
   createSparseCM12CanonicalMembershipInitialWords,
   createSparseCM12CanonicalMembershipLayout,
-} from "../lib/methods/adaptive-mass/sparse-cm12-canonical-membership";
+} from "../lib/methods/adaptive-volume/sparse-cm12-canonical-membership";
 import { createSparseCM12CanonicalMembershipWGSL } from
-  "../lib/methods/adaptive-mass/sparse-cm12-canonical-membership.wgsl";
+  "../lib/methods/adaptive-volume/sparse-cm12-canonical-membership.wgsl";
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 if (!dawnModule) throw new Error("WEBGPU_NODE_MODULE is required");

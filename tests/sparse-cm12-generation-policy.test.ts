@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createSparseAdaptiveMassAtlas, sparseAtlasBrickKey, sparseBrickKey, sparseBrickSpan } from "../lib/methods/adaptive-mass/sparse-brick-atlas";
-import { planSparseCM12ResidentGeneration } from "../lib/methods/adaptive-mass/sparse-cm12-generation-policy";
-import { compileSparseCM12StableLeafFaceNeighbors } from "../lib/methods/adaptive-mass/sparse-cm12-factored-aei-topology";
+import { createSparseAdaptiveMassAtlas, sparseAtlasBrickKey, sparseBrickKey, sparseBrickSpan } from "../lib/methods/adaptive-volume/sparse-brick-atlas";
+import { planSparseCM12ResidentGeneration } from "../lib/methods/adaptive-volume/sparse-cm12-generation-policy";
+import { compileSparseCM12StableLeafFaceNeighbors } from "../lib/methods/adaptive-volume/sparse-cm12-factored-aei-topology";
 const limits = { maximumLeaves: 4096, maximumCells: 262144, maximumSpanBricks: 1024 };
 test("a new dry receiver expands to the face-patch span of a frozen macro host", () => {
  const dimensions=[32,32,32] as const;

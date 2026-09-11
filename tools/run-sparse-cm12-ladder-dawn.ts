@@ -16,11 +16,11 @@ import {
   acquireWebGPUExclusiveLock,
   releaseWebGPUExclusiveLock,
 } from "../lib/harness/webgpu-smoke-isolation";
-import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
+import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 import { SPARSE_CM12_RESIDENT_STAGES, type SparseCM12ResidentStageId } from
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident";
 import type { WebGPUAdaptiveMassSolver } from
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+  "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
 const isWorker = process.env.FLUID_CM12_LADDER_WORKER === "1";
 const sceneOverride = process.env.FLUID_CM12_LADDER_SCENE;

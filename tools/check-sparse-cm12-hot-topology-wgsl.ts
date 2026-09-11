@@ -2,13 +2,13 @@
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
 import { buildSparseAtlasCompositeGrid, type SparseAtlasCompositeGrid } from
-  "../lib/methods/adaptive-mass/sparse-atlas-composite-projection";
+  "../lib/methods/adaptive-volume/sparse-atlas-composite-projection";
 import {
   createSparseAdaptiveMassAtlas,
   sparseBrickKey,
   type SparseAdaptiveMassBrick,
   type SparseBrickResolution,
-} from "../lib/methods/adaptive-mass/sparse-brick-atlas";
+} from "../lib/methods/adaptive-volume/sparse-brick-atlas";
 import {
   SPARSE_CM12_HOT_TOPOLOGY_CELL,
   SPARSE_CM12_HOT_TOPOLOGY_CELL_WORDS,
@@ -23,9 +23,9 @@ import {
   sparseCM12HotTopologyHeaderValid,
   validateSparseCM12HotTopology,
   type SparseCM12HotTopology,
-} from "../lib/methods/adaptive-mass/sparse-cm12-hot-topology";
+} from "../lib/methods/adaptive-volume/sparse-cm12-hot-topology";
 import { createSparseCM12HotTopologyWGSL } from
-  "../lib/methods/adaptive-mass/sparse-cm12-hot-topology.wgsl";
+  "../lib/methods/adaptive-volume/sparse-cm12-hot-topology.wgsl";
 
 const OUTPUT_WORDS = 40;
 

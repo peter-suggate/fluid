@@ -10,6 +10,10 @@
  * Establish that the current build/device is repeatable before optimizing:
  *   npm run oracle:sparse-cm12:bit-exact -- --repeat=2
  *
+ * Compare the independent production copy with explicitly selected original CM12:
+ *   npm run oracle:sparse-cm12:bit-exact -- --method=adaptive-mass --repeat=2 --write=/tmp/original.json
+ *   npm run oracle:sparse-cm12:bit-exact -- --method=adaptive-volume --compare=/tmp/original.json
+ *
  * The tool takes the repository-wide Dawn lock before importing WebGPU. It
  * hashes raw Float32 bits; no tolerance, rounding, or summary statistic can
  * hide a changed value. Baselines are backend/adapter-specific and must be
@@ -31,6 +35,8 @@ const SCHEMA = "fluid.sparse-cm12.bit-exact.v2";
 // oracle and must not replace the default receipt.
 const DEFAULT_STEPS = 500;
 
+type OracleMethod = "adaptive-volume" | "adaptive-mass";
+
 interface HashReceipt {
   readonly elements: number;
   readonly bytes: number;
@@ -39,6 +45,13 @@ interface HashReceipt {
 
 interface OracleReceipt {
   readonly schema: typeof SCHEMA;
+  readonly implementation?: {
+    readonly methodId: OracleMethod;
+    readonly sourceRoot: string;
+    readonly solver: string;
+    readonly resident: string;
+    readonly shader: string;
+  };
   readonly scene: "symmetric-expansion";
   readonly dimensions: readonly [number, number, number];
   readonly brickFineResolution?: number;
@@ -69,20 +82,20 @@ interface OracleRuntime {
     "requiredFluidDeviceLimits"
   ];
   readonly Solver: typeof import(
-    "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver"
+    "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver"
   )["WebGPUAdaptiveMassSolver"];
   readonly activityPolicy: typeof import(
-    "../lib/methods/adaptive-mass/features/adaptivity/policy"
+    "../lib/methods/adaptive-volume/features/adaptivity/policy"
   )["SPARSE_CM12_ACTIVITY_POLICY"];
 }
 
-async function loadRuntime(sourceRoot: string): Promise<OracleRuntime> {
+async function loadRuntime(sourceRoot: string, method: OracleMethod): Promise<OracleRuntime> {
   const moduleUrl = (relative: string) => pathToFileURL(`${sourceRoot}/${relative}`).href;
   const [scenes, limits, solver, resident] = await Promise.all([
     import(moduleUrl("lib/core/scenes.ts")),
     import(moduleUrl("lib/core/webgpu-device-limits.ts")),
-    import(moduleUrl("lib/methods/adaptive-mass/webgpu-adaptive-mass-solver.ts")),
-    import(moduleUrl("lib/methods/adaptive-mass/features/adaptivity/policy.ts")),
+    import(moduleUrl(`lib/methods/${method}/webgpu-adaptive-mass-solver.ts`)),
+    import(moduleUrl(`lib/methods/${method}/features/adaptivity/policy.ts`)),
   ]);
   return {
     createScene: scenes.createSymmetricExpansionScene,
@@ -136,6 +149,11 @@ function compareReceipt(expected: OracleReceipt, actual: OracleReceipt): void {
     assert.deepEqual(actual.fields[field], expected.fields[field],
       `${field} raw-bit receipt changed`);
   }
+  assert.deepEqual(actual.acceptedResolutions, expected.acceptedResolutions,
+    "accepted topology raw-bit receipt changed");
+  assert.equal(actual.acceptedCellCount, expected.acceptedCellCount, "accepted cell count changed");
+  assert.equal(actual.acceptedRowCount, expected.acceptedRowCount, "accepted row count changed");
+  assert.equal(actual.generation, expected.generation, "accepted generation changed");
   assert.equal(actual.combinedSha256, expected.combinedSha256,
     "combined Sparse CM12 physical-state receipt changed");
 }
@@ -168,10 +186,15 @@ async function capture(
       },
       () => {},
     );
+    await solver.waitForSimulationReady();
     for (let step = 1; step <= steps; step += 1) {
+      await solver.waitForTopologyReady();
+      await solver.waitForSimulationReady();
       assert.equal(solver.advanceTo(step * dt_s, []), true,
         `step ${step} did not encode exactly once`);
+      await solver.assertSimulationHealthy();
     }
+    await solver.waitForTopologyReady();
     await device.queue.onSubmittedWorkDone();
     const fields = await solver.readDiagnosticFields();
     const activity = await solver.readGPUActivityPolicy();
@@ -208,6 +231,13 @@ async function capture(
     }
     return {
       schema: SCHEMA,
+      implementation: {
+        methodId: method,
+        sourceRoot,
+        solver: `lib/methods/${method}/webgpu-adaptive-mass-solver.ts`,
+        resident: `lib/methods/${method}/webgpu-sparse-cm12-resident.ts`,
+        shader: `lib/methods/${method}/webgpu-sparse-cm12-resident.wgsl.ts`,
+      },
       scene: "symmetric-expansion",
       dimensions: [solver.info.nx, solver.info.ny, solver.info.nz],
       brickFineResolution,
@@ -227,9 +257,17 @@ async function capture(
   }
 }
 
-const steps = positiveInteger("steps", DEFAULT_STEPS);
+const methodArgument = argument("method") ?? "adaptive-volume";
+if (methodArgument !== "adaptive-volume" && methodArgument !== "adaptive-mass") {
+  throw new RangeError("method must be adaptive-volume or adaptive-mass");
+}
+const method: OracleMethod = methodArgument;
+const steps = Number(argument("steps") ?? DEFAULT_STEPS);
+if (!Number.isSafeInteger(steps) || steps < 0) {
+  throw new RangeError("steps must be a nonnegative integer (0 captures initialization)");
+}
 const repeat = positiveInteger("repeat", 1);
-const brickFineResolution = positiveInteger("brick-fine", 16);
+const brickFineResolution = positiveInteger("brick-fine", 8);
 const presentationPageResolution = positiveInteger("presentation-page",
   brickFineResolution);
 if (![4, 8, 16].includes(brickFineResolution)
@@ -261,7 +299,7 @@ try {
   const gpu = dawn.create([`backend=${backend}`]);
   const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
   if (!adapter) throw new Error(`No Dawn adapter is available for backend ${backend}`);
-  const runtime = await loadRuntime(sourceRoot);
+  const runtime = await loadRuntime(sourceRoot, method);
   device = await adapter.requestDevice({
     requiredLimits: runtime.requiredLimits(adapter.limits),
   });

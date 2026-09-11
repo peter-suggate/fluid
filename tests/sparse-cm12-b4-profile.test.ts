@@ -4,13 +4,13 @@ import test from "node:test";
 import { resolveMethodValues } from "../lib/core/method-contract";
 import { scenePresets } from "../lib/core/scenes";
 import { adaptiveMassMethod, adaptiveMassSolverOptions } from
-  "../lib/methods/adaptive-mass/method";
+  "../lib/methods/adaptive-volume/method";
 import { createSparseCM12FrameControl } from
-  "../lib/methods/adaptive-mass/sparse-cm12-frame-control";
+  "../lib/methods/adaptive-volume/sparse-cm12-frame-control";
 import { createSparseCM12PressureTopologyRepairLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-pressure-topology-repair";
+  "../lib/methods/adaptive-volume/sparse-cm12-pressure-topology-repair";
 import { createSparseCM12FinalScalarPacketMaskLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-final-scalar-packet-masks";
+  "../lib/methods/adaptive-volume/sparse-cm12-final-scalar-packet-masks";
 
 test("Sparse CM12 exposes and normalizes the matched B4/P4 production profile", () => {
   const spec = adaptiveMassMethod.params.find((candidate) =>
@@ -42,7 +42,7 @@ test("Sparse CM12 defaults production scenes to matched B8/P8", () => {
   }, { brickFineResolution: 8, presentationPageResolution: 8 });
 
   const productionScenes = scenePresets.filter(
-    ({ methodProfile }) => methodProfile?.methodId === "adaptive-mass",
+    ({ methodProfile }) => methodProfile?.methodId === "adaptive-volume",
   );
   assert.ok(productionScenes.length > 0);
   for (const scene of productionScenes) {

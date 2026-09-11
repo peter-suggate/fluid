@@ -9,7 +9,7 @@ import { parseScene } from "../lib/core/model";
 import type { LiveFluidEdit } from "../lib/core/live-fluid-edit";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
-import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 const mass = (values: Float32Array) => values.reduce((sum, value) => sum + value, 0);

@@ -8,12 +8,12 @@ import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
 import { adaptiveMassMethod, adaptiveMassSolverOptions } from
-  "../lib/methods/adaptive-mass/method";
+  "../lib/methods/adaptive-volume/method";
 import { WebGPUAdaptiveMassSolver } from
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+  "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 import { cloneScene, defaultScene } from "../lib/core/model";
 import { SPARSE_CM12_RESIDENT_STAGES, SPARSE_CM12_RESIDENT_STAGE_SUBSTAGES, type SparseCM12ResidentStageId } from
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident";
 import { unpackFineLevelSetPackedPhi } from "../lib/core/fine-levelset-packed-sample";
 
 type Activity = Awaited<ReturnType<WebGPUAdaptiveMassSolver["readGPUActivityPolicy"]>>;

@@ -1,4 +1,4 @@
-import type { WebGPUAdaptiveMassSolver } from '../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver';
+import type { WebGPUAdaptiveMassSolver } from '../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver';
 import { readPublishedCM12Field } from './sparse-cm12-published-field';
 
 /** Integrate vertical intervals of the actual published zero contour. This is

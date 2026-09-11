@@ -6,21 +6,21 @@ import {
   applySparseAtlasPressureOperator,
   buildSparseAtlasCompositeGrid,
   type SparseAtlasCompositeGrid,
-} from "../lib/methods/adaptive-mass/sparse-atlas-composite-projection";
+} from "../lib/methods/adaptive-volume/sparse-atlas-composite-projection";
 import { transportSparseAtlasCM12 } from
-  "../lib/methods/adaptive-mass/sparse-atlas-cm12-transport";
+  "../lib/methods/adaptive-volume/sparse-atlas-cm12-transport";
 import { compileSparseCM12BrickTileFaceProgram,
   validateSparseCM12BrickTileFaceProgram } from
-  "../lib/methods/adaptive-mass/sparse-cm12-brick-tile-face-program";
+  "../lib/methods/adaptive-volume/sparse-cm12-brick-tile-face-program";
 import { compileSparseCM12BrickTileImage, validateSparseCM12BrickTileImage } from
-  "../lib/methods/adaptive-mass/sparse-cm12-brick-tile-image";
+  "../lib/methods/adaptive-volume/sparse-cm12-brick-tile-image";
 import {
   sparseBrickKey,
   sparseBrickLadder,
   type SparseAdaptiveMassAtlas,
   type SparseAdaptiveMassBrick,
   type SparseBrickResolution,
-} from "../lib/methods/adaptive-mass/sparse-brick-atlas";
+} from "../lib/methods/adaptive-volume/sparse-brick-atlas";
 
 /** Deliberately bypass strong grading only inside this adversarial topology fixture. */
 function ungradedAtlas(resolutions: readonly SparseBrickResolution[], generation = 1):

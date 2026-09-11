@@ -8,17 +8,17 @@ import {
   ADAPTIVE_MASS_GPU_WORK_CHUNKS,
   ADAPTIVE_MASS_RESIDENT_STAGE_PHASE,
   adaptiveMassPressureTopologyChip,
-} from "../lib/methods/adaptive-mass/adaptive-mass-frame-pipeline";
+} from "../lib/methods/adaptive-volume/adaptive-mass-frame-pipeline";
 import {
   SPARSE_CM12_LENSES,
   SPARSE_CM12_STAGE_LENSES,
-} from "../lib/methods/adaptive-mass/sparse-cm12-stage-lenses";
-import { SPARSE_CM12_STAGES } from "../lib/methods/adaptive-mass/sparse-cm12-stages";
+} from "../lib/methods/adaptive-volume/sparse-cm12-stage-lenses";
+import { SPARSE_CM12_STAGES } from "../lib/methods/adaptive-volume/sparse-cm12-stages";
 import {
   SPARSE_CM12_RESIDENT_STAGE_SUBSTAGES,
   SPARSE_CM12_RESIDENT_STAGES,
 } from
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident";
 
 /**
  * The SIM panel puts a figure on a stage only when that stage's declared seam
@@ -29,7 +29,7 @@ import {
  */
 
 const residentSource = readFileSync(new URL(
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.ts",
   import.meta.url,
 ), "utf8");
 

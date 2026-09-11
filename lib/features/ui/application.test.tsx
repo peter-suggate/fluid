@@ -7,7 +7,7 @@ import { applicationViews, FeatureSlot } from "./FeatureSlot";
 import { composeFeatureUI } from "./composition";
 
 test("every advertised application placement has a registered implementation", () => {
-  for (const method of ["adaptive-mass", "uniform"]) {
+  for (const method of ["adaptive-volume", "uniform"]) {
     for (const fluid of [true, false]) {
       for (const placement of composeFeatureUI(method, fluid).placements) {
         assert.equal(typeof applicationViews[`${placement.feature}/${placement.control}`], "function",

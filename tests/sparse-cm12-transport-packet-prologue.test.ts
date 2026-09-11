@@ -5,13 +5,13 @@ import {
   createSparseCM12TransportPacketAuthorityLayout,
   sparseCM12TransportPacketLaneCell,
   SPARSE_CM12_TRANSPORT_PACKET_INVALID,
-} from "../lib/methods/adaptive-mass/sparse-cm12-transport-packet-authority";
+} from "../lib/methods/adaptive-volume/sparse-cm12-transport-packet-authority";
 import { createSparseCM12TransportPacketAuthorityWGSL } from
-  "../lib/methods/adaptive-mass/sparse-cm12-transport-packet-authority.wgsl";
+  "../lib/methods/adaptive-volume/sparse-cm12-transport-packet-authority.wgsl";
 import { createSparseCM12VelocityExtensionLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-velocity-extension";
+  "../lib/methods/adaptive-volume/sparse-cm12-velocity-extension";
 import { createSparseCM12VelocityExtensionWGSL } from
-  "../lib/methods/adaptive-mass/sparse-cm12-velocity-extension.wgsl";
+  "../lib/methods/adaptive-volume/sparse-cm12-velocity-extension.wgsl";
 
 const wgsl = createSparseCM12TransportPacketAuthorityWGSL({
   layout: createSparseCM12TransportPacketAuthorityLayout({
@@ -58,7 +58,7 @@ test("TPA1 stages one sealed descriptor for packet-lane execution", () => {
 
 test("accepted conservative passes consume the staged packet prologue", () => {
   const source = readFileSync(new URL(
-    "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts",
+    "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts",
     import.meta.url,
   ), "utf8");
   const begin = source.indexOf("fn stageSparseCM12TransportExecutionImage");
@@ -127,7 +127,7 @@ test("coarse transport selection is GPU-authored from dirty packet work", () => 
 
 test("packed coarse transport preserves stable accepted-cell order and B8 locality", () => {
   const source = readFileSync(new URL(
-    "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts",
+    "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts",
     import.meta.url,
   ), "utf8");
   const begin = source.indexOf("fn cm12PackedCoarseCell");

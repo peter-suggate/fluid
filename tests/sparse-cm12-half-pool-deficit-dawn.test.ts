@@ -5,8 +5,8 @@ import { readFileSync } from "node:fs";
 import type { SceneDescription } from "../lib/core/model";
 import { resolveMethodValues } from "../lib/core/method-contract";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
-import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
+import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
@@ -29,7 +29,7 @@ for (const [variant, fixture] of [
       `./fixtures/${fixture}`, import.meta.url), "utf8"));
     const scene = configuration.scene as SceneDescription;
     const values = resolveMethodValues(adaptiveMassMethod, configuration.method.quality,
-      configuration.method.overrides["adaptive-mass"]);
+      configuration.method.overrides["adaptive-volume"]);
     solver = await adaptiveMassMethod.createSolverAsync!(device, scene, "balanced", values, undefined, () => {}) as WebGPUAdaptiveMassSolver;
     await solver.waitForSimulationReady();
     const initial = await solver.readDiagnosticFields(true);

@@ -2,9 +2,9 @@
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
 import type { SparseCM12InternedRefLookupLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-interned-ref-lookup";
+  "../lib/methods/adaptive-volume/sparse-cm12-interned-ref-lookup";
 import { createSparseCM12InternedRefLookupWGSL } from
-  "../lib/methods/adaptive-mass/sparse-cm12-interned-ref-lookup.wgsl";
+  "../lib/methods/adaptive-volume/sparse-cm12-interned-ref-lookup.wgsl";
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 if (!dawnModule) {

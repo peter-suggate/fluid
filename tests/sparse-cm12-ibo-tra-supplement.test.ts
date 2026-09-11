@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createSparseCM12IboTRASupplementWGSL } from
-  "../lib/methods/adaptive-mass/sparse-cm12-ibo-tra-supplement.wgsl";
+  "../lib/methods/adaptive-volume/sparse-cm12-ibo-tra-supplement.wgsl";
 
 const layout = { baseWords: 4096, templateCount: 3, directoryBaseWords: 4112,
   totalWords: 8192, totalBytes: 16384 } as const;
@@ -37,7 +37,7 @@ test("ITR1 relocates its image-relative CSR addresses under the shared arena bas
 
 test("ITR1 macro incidence preserves positive-owner indices beyond fifteen", async () => {
   const { createSparseCM12IboTRASupplement } = await import(
-    "../lib/methods/adaptive-mass/sparse-cm12-ibo-tra-supplement");
+    "../lib/methods/adaptive-volume/sparse-cm12-ibo-tra-supplement");
   const words = new Uint32Array(15 + 2 * 17);
   words[9] = 17 << 23;
   for (let term = 0; term < 17; term++) {

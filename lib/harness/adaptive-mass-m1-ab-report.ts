@@ -194,7 +194,7 @@ export function buildAdaptiveMassM1ABReport(receipt: AdaptiveMassM1ProbeReceipt,
     },
     sharedAlgorithm: {
       paperNumericsSource: "lib/core/cm12-numerics.ts",
-      pressureOracleSource: "lib/methods/adaptive-mass/two-tile-composite-grid.ts",
+      pressureOracleSource: "lib/methods/adaptive-volume/two-tile-composite-grid.ts",
       uniformArm: "The production uniform shaders and the new method consume the same core CM12 formulas. In this CPU pressure receipt, 4+4 and 8+8 configure the common row builder with equal widths, so every seam row algebraically becomes the ordinary two-cell uniform row.",
       adaptiveArm: "8+4 and 4+8 configure the same row builder with a 2:1 transition; only those 16 rows expand to one coarse plus four fine pressure terms.",
       onlyMixedDifference: "topology, center distance, dual weight, and the pressure terms supplied to the common operator",

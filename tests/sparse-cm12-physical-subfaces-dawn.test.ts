@@ -4,8 +4,8 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 
-const resident = readFileSync(new URL("../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url), "utf8");
-const extension = readFileSync(new URL("../lib/methods/adaptive-mass/sparse-cm12-velocity-extension.wgsl.ts", import.meta.url), "utf8");
+const resident = readFileSync(new URL("../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url), "utf8");
+const extension = readFileSync(new URL("../lib/methods/adaptive-volume/sparse-cm12-velocity-extension.wgsl.ts", import.meta.url), "utf8");
 function production(name: string, source = resident): string {
   const result = source.match(new RegExp(`fn ${name}\\([\\s\\S]*?\\n}`))?.[0];
   assert.ok(result, name); return result;

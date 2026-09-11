@@ -5,23 +5,23 @@ import { writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { buildSparseAtlasCompositeGrid } from
-  "../lib/methods/adaptive-mass/sparse-atlas-composite-projection";
+  "../lib/methods/adaptive-volume/sparse-atlas-composite-projection";
 import { compileSparseCM12BrickTileImage } from
-  "../lib/methods/adaptive-mass/sparse-cm12-brick-tile-image";
+  "../lib/methods/adaptive-volume/sparse-cm12-brick-tile-image";
 import { createSparseCM12BrickTileImageWGSL } from
-  "../lib/methods/adaptive-mass/sparse-cm12-brick-tile-image.wgsl";
+  "../lib/methods/adaptive-volume/sparse-cm12-brick-tile-image.wgsl";
 import { compileSparseCM12BrickTileFaceProgram } from
-  "../lib/methods/adaptive-mass/sparse-cm12-brick-tile-face-program";
+  "../lib/methods/adaptive-volume/sparse-cm12-brick-tile-face-program";
 import { createSparseCM12BrickTileFaceProgramWGSL } from
-  "../lib/methods/adaptive-mass/sparse-cm12-brick-tile-face-program.wgsl";
+  "../lib/methods/adaptive-volume/sparse-cm12-brick-tile-face-program.wgsl";
 import { createSparseCM12LogicalOwnerDirectory,
   type SparseCM12LogicalOwnerRuntime } from
-  "../lib/methods/adaptive-mass/sparse-cm12-logical-owner-directory";
+  "../lib/methods/adaptive-volume/sparse-cm12-logical-owner-directory";
 import { createSparseCM12TransportExecutionImage } from
-  "../lib/methods/adaptive-mass/sparse-cm12-transport-execution-image";
+  "../lib/methods/adaptive-volume/sparse-cm12-transport-execution-image";
 import { createSparseAdaptiveMassAtlas, sparseBrickKey,
   type SparseAdaptiveMassBrick, type SparseBrickResolution } from
-  "../lib/methods/adaptive-mass/sparse-brick-atlas";
+  "../lib/methods/adaptive-volume/sparse-brick-atlas";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
 

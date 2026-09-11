@@ -8,8 +8,8 @@ import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
 import { WebGPUAdaptiveMassSolver } from
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
-import { SPARSE_CM12_ACTIVITY_POLICY } from "../lib/methods/adaptive-mass/features/adaptivity/policy";
+  "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
+import { SPARSE_CM12_ACTIVITY_POLICY } from "../lib/methods/adaptive-volume/features/adaptivity/policy";
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 const dawnTest = dawnModule ? test : test.skip;
@@ -18,7 +18,7 @@ const brickId = (coordinate: readonly number[]) => coordinate.join(",");
 
 test("Sparse CM12 advance does not make topology decisions from host readback", () => {
   const source = readFileSync(new URL(
-    "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver.ts",
+    "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver.ts",
     import.meta.url,
   ), "utf8");
   const start = source.indexOf("  advanceTo(time_s:");

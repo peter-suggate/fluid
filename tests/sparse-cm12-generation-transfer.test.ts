@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createSparseAdaptiveMassAtlas, sparseBrickKey, type SparseBrickResolution } from
-  "../lib/methods/adaptive-mass/sparse-brick-atlas";
+  "../lib/methods/adaptive-volume/sparse-brick-atlas";
 import { buildSparseAtlasCompositeGrid } from
-  "../lib/methods/adaptive-mass/sparse-atlas-composite-projection";
+  "../lib/methods/adaptive-volume/sparse-atlas-composite-projection";
 import { compileSparseCM12GenerationTransfer } from
-  "../lib/methods/adaptive-mass/sparse-cm12-generation-transfer";
+  "../lib/methods/adaptive-volume/sparse-cm12-generation-transfer";
 
 function grid(dimensions: readonly [number, number, number], bricks:
   readonly { q: readonly [number, number, number]; span: number; r: SparseBrickResolution }[]) {
@@ -87,7 +87,7 @@ test("partially occupied macro faces retain every uncovered air patch", () => {
 });
 
 test("signed generation geometry preserves full pages beyond both authored boundaries", async () => {
-  const { sparseAtlasBrickKey, sparseBrickContainingCoordinate } = await import("../lib/methods/adaptive-mass/sparse-brick-atlas");
+  const { sparseAtlasBrickKey, sparseBrickContainingCoordinate } = await import("../lib/methods/adaptive-volume/sparse-brick-atlas");
   const bricks = [-1,0,1].map(x => {
     const coordinate = [x,0,0] as const;
     return { key:sparseAtlasBrickKey(coordinate,{brickDimensions:[1,1,1],signedCoordinates:true}),

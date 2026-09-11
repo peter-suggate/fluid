@@ -2,12 +2,12 @@
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
 import type { SparseCM12InternedBoundaryLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-interned-boundary-operators";
+  "../lib/methods/adaptive-volume/sparse-cm12-interned-boundary-operators";
 import { createSparseCM12InternedBoundaryImageWGSL } from
-  "../lib/methods/adaptive-mass/sparse-cm12-interned-boundary-image.wgsl";
+  "../lib/methods/adaptive-volume/sparse-cm12-interned-boundary-image.wgsl";
 import { createSparseCM12GeometryFaceNeighborsWGSL,
   createSparseCM12IBOSemanticAuthorityWGSL } from
-  "../lib/methods/adaptive-mass/sparse-cm12-ibo-semantic-authority.wgsl";
+  "../lib/methods/adaptive-volume/sparse-cm12-ibo-semantic-authority.wgsl";
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 if (!dawnModule) { console.error("WEBGPU_NODE_MODULE is required"); process.exit(2); }
 const layout: SparseCM12InternedBoundaryLayout = { leafCapacity: 8,

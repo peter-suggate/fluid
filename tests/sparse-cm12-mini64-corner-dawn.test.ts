@@ -5,11 +5,11 @@ import { getSceneDefinition } from "../lib/core/scenes";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { sparseCM12DawnDefaultValues } from "../lib/harness/sparse-cm12-dawn-defaults";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
-import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
-import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
+import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
 import { sceneDocument } from "../lib/core/scene-definition";
-import { decodeSparseCM12SignedPresentationKey } from "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
+import { decodeSparseCM12SignedPresentationKey } from "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident";
 
 const liveGPUs = new Set<GPU>();
 Object.assign(globalThis, { mini64CornerGPUs: liveGPUs });

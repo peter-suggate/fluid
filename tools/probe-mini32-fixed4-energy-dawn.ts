@@ -8,8 +8,8 @@ import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { resolveMethodValues } from "../lib/core/method-contract";
-import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
-import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
+import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock, readWebGPUExclusiveLockHolder } from "../lib/harness/webgpu-smoke-isolation";
 
 const arm = process.argv.find(a=>a.startsWith("--arm="))?.slice(6);
@@ -80,9 +80,9 @@ try {
   if(arm === "closed-wall-guard" || arm === "closed-wall-step85") assert.ok(shaderEdits>0);
   const output = process.env.ENERGY_OUTPUT ?? "artifacts/mini32-fixed4-energy/base";
   await mkdir(output, {recursive:true});
-  const sourcePaths=["lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts",
-    "lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
-    "lib/methods/adaptive-mass/sparse-cm12-velocity-extension.wgsl.ts"];
+  const sourcePaths=["lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts",
+    "lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.ts",
+    "lib/methods/adaptive-volume/sparse-cm12-velocity-extension.wgsl.ts"];
   const sourceHashes=Object.fromEntries(await Promise.all(sourcePaths.map(async path=>
     [path,createHash("sha256").update(await readFile(path)).digest("hex")])));
   await writeFile(`${output}/config.json`, JSON.stringify({scene,values,arm,shaderEdits,sourceHashes},null,2));

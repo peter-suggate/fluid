@@ -7,15 +7,15 @@ import {
   ADAPTIVE_MASS_RUNTIME_PARAM_KEYS,
   adaptiveMassMethod,
   adaptiveMassSolverOptions,
-} from "../lib/methods/adaptive-mass/method";
+} from "../lib/methods/adaptive-volume/method";
 import { ADAPTIVE_MASS_FLUID_PIPELINE } from
-  "../lib/methods/adaptive-mass/adaptive-mass-frame-pipeline";
+  "../lib/methods/adaptive-volume/adaptive-mass-frame-pipeline";
 
 const resident = readFileSync(new URL(
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts", import.meta.url,
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.ts", import.meta.url,
 ), "utf8");
 const wgsl = readFileSync(new URL(
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url,
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url,
 ), "utf8");
 
 test("Sparse CM12 exposes live gamma-diffusion and sharpening controls", () => {

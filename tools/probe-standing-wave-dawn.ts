@@ -8,8 +8,8 @@ import { standingWaveOmega,STANDING_WAVE } from "../lib/core/analytic-motion-sce
 import { resolveMethodValues } from "../lib/core/method-contract";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
-import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
-import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
+import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 const fine=process.argv.includes("--fine");
 const mode=process.argv.find(a=>a.startsWith("--mode="))?.split("=")[1];
 const stepsArg=process.argv.find(a=>a.startsWith("--steps="))?.split("=")[1];

@@ -34,9 +34,9 @@ import {
   acquireWebGPUExclusiveLock,
   releaseWebGPUExclusiveLock,
 } from "../lib/harness/webgpu-smoke-isolation";
-import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
+import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 import { WebGPUAdaptiveMassSolver } from
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+  "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 import {
   evaluateSparseCM12Performance,
   SPARSE_CM12_MINI_DAM_32_PERFORMANCE_ACCEPTANCE,
@@ -44,7 +44,7 @@ import {
   SPARSE_CM12_PERFORMANCE_ACCEPTANCE,
   type SparseCM12BenchmarkArm,
   type SparseCM12TopologySample,
-} from "../lib/methods/adaptive-mass/adaptive-mass-performance";
+} from "../lib/methods/adaptive-volume/adaptive-mass-performance";
 import { uniformMethod } from "../lib/methods/uniform/method";
 
 const positiveInteger = (name: string, fallback: number): number => {
@@ -352,7 +352,7 @@ async function advanceOne(arm: MutableArm, targetTime_s: number, timed: boolean)
       topologyDeferred: info.adaptiveTopologyDeferredBrickCount ?? 0,
       fineBricks: info.adaptiveFineBrickCount ?? 0,
     });
-    if (arm.method.id === "adaptive-mass") {
+    if (arm.method.id === "adaptive-volume") {
       arm.evolvedTopology.push(topologySample(info));
     }
   }
@@ -396,7 +396,7 @@ async function createArm(
     undefined,
     () => {},
   );
-  if (method.id === "adaptive-mass") {
+  if (method.id === "adaptive-volume") {
     const readiness = solver as typeof solver & {
       waitForSimulationReady?: () => Promise<void>;
       resident?: {
@@ -434,7 +434,7 @@ async function createArm(
     cpuTraces: [],
     gpuTraces: [],
     frameState: [],
-    initialTopology: method.id === "adaptive-mass"
+    initialTopology: method.id === "adaptive-volume"
       ? topologySample(initialInfo) : undefined,
     evolvedTopology: [],
     lastCPUTraceSampleId: 0,

@@ -6,7 +6,7 @@ import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
 
 const source = readFileSync(new URL(
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url), "utf8");
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url), "utf8");
 // Resolve the production owner's default (non-QA) interpolation branch.
 const functions = ["mirrorSharpeningSampleToWorld", "sampleSharpeningDensity", "sampleSharpeningField"].map(name => {
   const body = source.match(new RegExp(`fn ${name}\\([\\s\\S]*?\\n}`))?.[0];

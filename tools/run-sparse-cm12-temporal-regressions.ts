@@ -43,25 +43,25 @@ import {
   type NodeDawnProvider,
 } from "../lib/harness/node-dawn-provider";
 import { WebGPUAdaptiveMassSolver } from
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+  "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 import { ADAPTIVE_MASS_FLUID_PIPELINE } from
-  "../lib/methods/adaptive-mass/adaptive-mass-frame-pipeline";
+  "../lib/methods/adaptive-volume/adaptive-mass-frame-pipeline";
 import {
   SPARSE_CM12_FRAME_PLAN_PRESENTATION_FLAG as FPP_FLAG,
   SPARSE_CM12_FRAME_PLAN_PRESENTATION_HEADER as FPP_HEADER,
   SPARSE_CM12_FRAME_PLAN_PRESENTATION_HEADER_WORDS,
   SPARSE_CM12_FRAME_PLAN_PRESENTATION_MAGIC,
   SPARSE_CM12_FRAME_PLAN_PRESENTATION_VERSION,
-} from "../lib/methods/adaptive-mass/sparse-cm12-frame-plan-presentation";
+} from "../lib/methods/adaptive-volume/sparse-cm12-frame-plan-presentation";
 import {
   SPARSE_CM12_FRAME_CONTROL_COVERAGE,
   SPARSE_CM12_FRAME_CONTROL_INVALID,
   SPARSE_CM12_FRAME_CONTROL_PHASE,
-} from "../lib/methods/adaptive-mass/sparse-cm12-frame-control";
+} from "../lib/methods/adaptive-volume/sparse-cm12-frame-control";
 import { SPARSE_CM12_FINAL_SCALAR_MASK_PHASE } from
-  "../lib/methods/adaptive-mass/sparse-cm12-final-scalar-packet-masks";
+  "../lib/methods/adaptive-volume/sparse-cm12-final-scalar-packet-masks";
 import { SPARSE_CM12_VELOCITY_EXTENSION_HEADER as VEX_HEADER } from
-  "../lib/methods/adaptive-mass/sparse-cm12-velocity-extension";
+  "../lib/methods/adaptive-volume/sparse-cm12-velocity-extension";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SELF = fileURLToPath(import.meta.url);
@@ -1225,7 +1225,7 @@ async function waitForDamHardwareTrace(
 ): Promise<{ trace: PerformanceTrace; stats: Awaited<ReturnType<typeof solver.readStats>> }> {
   let stats = await solver.readStats();
   const identity = stats.physicsCaptureIdentity;
-  if (!identity || identity.context !== `adaptive-mass:sim-${expectedTime_s.toFixed(6)}`) {
+  if (!identity || identity.context !== `adaptive-volume:sim-${expectedTime_s.toFixed(6)}`) {
     throw new Error(`step ${expectedTime_s / CM12_PAPER_DT_S}: hardware capture was not authored`);
   }
   for (let attempt = 0; attempt < 40; attempt += 1) {

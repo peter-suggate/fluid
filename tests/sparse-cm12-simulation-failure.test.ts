@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { SimulationFailureError } from "../lib/core/simulation-failure";
-import { CM12_FAILURE_WORDS, cm12FailureKernelId, decodeCM12SimulationFailure } from "../lib/methods/adaptive-mass/sparse-cm12-simulation-failure";
+import { CM12_FAILURE_WORDS, cm12FailureKernelId, decodeCM12SimulationFailure } from "../lib/methods/adaptive-volume/sparse-cm12-simulation-failure";
 
 test("failure receipts preserve raw provenance through JSON and reject incomplete reads", () => {
   const words = new Uint32Array(CM12_FAILURE_WORDS);

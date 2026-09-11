@@ -4,9 +4,9 @@ import test from "node:test";
 import {
   createSparseCM12TransportHomeFrameHaloLayout,
   SPARSE_CM12_HOME_FRAME_HALO_WGSL_API,
-} from "../lib/methods/adaptive-mass/sparse-cm12-transport-home-frame-halo";
+} from "../lib/methods/adaptive-volume/sparse-cm12-transport-home-frame-halo";
 import { createSparseCM12TransportHomeFrameHaloWGSL } from
-  "../lib/methods/adaptive-mass/sparse-cm12-transport-home-frame-halo.wgsl";
+  "../lib/methods/adaptive-volume/sparse-cm12-transport-home-frame-halo.wgsl";
 
 const functionBody = (source: string, name: string, nextName: string) =>
   source.slice(source.indexOf(`fn ${name}`), source.indexOf(`fn ${nextName}`));

@@ -6,15 +6,15 @@ import { resolveMethodValues } from "../lib/core/method-contract";
 import {
   adaptiveMassMethod,
   adaptiveMassSolverOptions,
-} from "../lib/methods/adaptive-mass/method";
-import { SPARSE_CM12_ACTIVITY_POLICY, sparseCM12ActivityPolicy } from "../lib/methods/adaptive-mass/features/adaptivity/policy";
+} from "../lib/methods/adaptive-volume/method";
+import { SPARSE_CM12_ACTIVITY_POLICY, sparseCM12ActivityPolicy } from "../lib/methods/adaptive-volume/features/adaptivity/policy";
 
 const resident = readFileSync(new URL(
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.ts",
   import.meta.url,
 ), "utf8");
 const shader = readFileSync(new URL(
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts",
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts",
   import.meta.url,
 ), "utf8");
 

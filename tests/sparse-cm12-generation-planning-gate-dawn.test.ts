@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import { SparseCM12GenerationPlanningGate } from "../lib/methods/adaptive-mass/sparse-cm12-generation-planning-gate";
+import { SparseCM12GenerationPlanningGate } from "../lib/methods/adaptive-volume/sparse-cm12-generation-planning-gate";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 
 (process.env.WEBGPU_NODE_MODULE ? test : test.skip)("generation preflight preserves rerungs, activation, macro motion and quiet merges", async () => {

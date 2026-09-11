@@ -32,9 +32,9 @@ import {
   acquireWebGPUExclusiveLock,
   releaseWebGPUExclusiveLock,
 } from "../lib/harness/webgpu-smoke-isolation";
-import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
+import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 import type { AdaptiveMassStepTelemetry } from
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+  "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 import { uniformMethod } from "../lib/methods/uniform/method";
 
 type Dimensions = readonly [number, number, number];
@@ -415,7 +415,7 @@ async function runArm(
       const density = await readTexture(device, solver.volumeTexture, dimensions, 1);
       const velocity = await readTexture(device, solver.velocityTexture!, dimensions, 4);
       if (step === steps) onFinalFields?.(density, velocity);
-      const publicationScale = method.id === "adaptive-mass"
+      const publicationScale = method.id === "adaptive-volume"
         && sparseResolutionMode === "all-coarse" ? 2 : 1;
       const analyzedDensity = downsampleNearest(
         density, dimensions, publicationScale, 1,
@@ -485,7 +485,7 @@ async function runArm(
       evolution.maximumMixedSeamRows = Math.max(
         evolution.maximumMixedSeamRows, finiteOrZero(info.adaptiveMixedSeamFaceCount),
       );
-      if (method.id === "adaptive-mass") {
+      if (method.id === "adaptive-volume") {
         const mixedRows = finiteOrZero(info.adaptiveMixedSeamFaceCount);
         // The t=0 body begins in four fine bricks. The first force step has no
         // outward receiver request yet; measure persistence once the first
@@ -523,7 +523,7 @@ async function runArm(
         totalStepWallTime_ms,
         meanStepWallTime_ms: totalStepWallTime_ms / steps,
       },
-      sparseTopology: method.id === "adaptive-mass" ? {
+      sparseTopology: method.id === "adaptive-volume" ? {
         maximumFineBrickCount,
         maximumCoarseBrickCount,
         maximumActiveCellCount,

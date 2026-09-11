@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { unpackFineLevelSetPackedFlags, unpackFineLevelSetPackedPhi } from "../lib/core/fine-levelset-packed-sample";
-import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
 // Read the actual sparse presentation payload, independently of diagnostic density.
 async function readWords(device: GPUDevice, source: GPUBuffer,

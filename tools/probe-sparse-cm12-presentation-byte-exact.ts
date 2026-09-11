@@ -11,11 +11,11 @@ import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
 import { WebGPUAdaptiveMassSolver } from
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+  "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 import { SPARSE_CM12_FRAME_PLAN_PRESENTATION_HEADER as H,
   SPARSE_CM12_FRAME_PLAN_PRESENTATION_FLAG as F,
   SPARSE_CM12_FRAME_PLAN_PRESENTATION_HEADER_WORDS } from
-  "../lib/methods/adaptive-mass/sparse-cm12-frame-plan-presentation";
+  "../lib/methods/adaptive-volume/sparse-cm12-frame-plan-presentation";
 
 const argument = (name: string, fallback: number): number => {
   const prefix = `--${name}=`;

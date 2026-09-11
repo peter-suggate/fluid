@@ -1,18 +1,18 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
 import { buildSparseAtlasCompositeGrid } from
-  "../lib/methods/adaptive-mass/sparse-atlas-composite-projection";
+  "../lib/methods/adaptive-volume/sparse-atlas-composite-projection";
 import {
   createSparseAdaptiveMassAtlas,
   sparseBrickKey,
   type SparseAdaptiveMassBrick,
-} from "../lib/methods/adaptive-mass/sparse-brick-atlas";
+} from "../lib/methods/adaptive-volume/sparse-brick-atlas";
 import { createSparseCM12HotTopology } from
-  "../lib/methods/adaptive-mass/sparse-cm12-hot-topology";
+  "../lib/methods/adaptive-volume/sparse-cm12-hot-topology";
 import {
   createSparseCM12PhaseArenaPlan,
   type SparseCM12PhaseArenaOwner,
-} from "../lib/methods/adaptive-mass/sparse-cm12-phase-arenas";
+} from "../lib/methods/adaptive-volume/sparse-cm12-phase-arenas";
 
 type CutBoundary = "F0" | "P0" | "T0" | "C0" | "R0"
   | "existing-mathematical-boundaries" | "gamma-image-boundaries";

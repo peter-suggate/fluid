@@ -5,20 +5,20 @@ import {
   initializeSparseBrickAtlasFromScene,
   type SparseAdaptiveMassBrick,
   type SparseBrickResolution,
-} from "../lib/methods/adaptive-mass/sparse-brick-atlas";
+} from "../lib/methods/adaptive-volume/sparse-brick-atlas";
 import { createSymmetricExpansionScene } from "../lib/core/scenes";
 import {
   applySparseAtlasDivergence,
   applySparseAtlasGradient,
   buildSparseAtlasCompositeGrid,
 } from
-  "../lib/methods/adaptive-mass/sparse-atlas-composite-projection";
+  "../lib/methods/adaptive-volume/sparse-atlas-composite-projection";
 import { initializeSparseAtlasDynamics, stepSparseAtlasDynamics } from
-  "../lib/methods/adaptive-mass/sparse-atlas-dynamics";
+  "../lib/methods/adaptive-volume/sparse-atlas-dynamics";
 import { extrapolateSparseAtlasFaceVelocity, transportSparseAtlasCM12 } from
-  "../lib/methods/adaptive-mass/sparse-atlas-cm12-transport";
+  "../lib/methods/adaptive-volume/sparse-atlas-cm12-transport";
 import { conditionSparseAtlasSurface } from
-  "../lib/methods/adaptive-mass/sparse-atlas-surface-conditioning";
+  "../lib/methods/adaptive-volume/sparse-atlas-surface-conditioning";
 
 const brick = (
   key: number,

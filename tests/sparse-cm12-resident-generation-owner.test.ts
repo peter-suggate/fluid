@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CM12ResidentGeneration } from "../lib/sparse-world/internal/cm12-adapter";
-import type { WebGPUSparseCM12Resident } from "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
+import { CM12ResidentGeneration } from "../lib/sparse-world/internal/adaptive-volume-adapter";
+import type { WebGPUSparseCM12Resident } from "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident";
 
 function deferred<T = void>() {
  let resolve!: (value: T | PromiseLike<T>) => void;

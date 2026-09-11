@@ -15,14 +15,14 @@ import {
   buildTwoTileConservativeTransportOperator,
   integratedScalar,
   type TwoTileConservativeOperator,
-} from "../lib/methods/adaptive-mass/two-tile-conservative-transport";
+} from "../lib/methods/adaptive-volume/two-tile-conservative-transport";
 import {
   buildTwoTileCompositeGrid,
   type CompositeAxis,
   type TwoTileResolution,
-} from "../lib/methods/adaptive-mass/two-tile-composite-grid";
+} from "../lib/methods/adaptive-volume/two-tile-composite-grid";
 import { WebGPUTwoTileConservativeTransport } from
-  "../lib/methods/adaptive-mass/webgpu-two-tile-conservative-transport";
+  "../lib/methods/adaptive-volume/webgpu-two-tile-conservative-transport";
 import {
   acquireWebGPUExclusiveLock,
   releaseWebGPUExclusiveLock,

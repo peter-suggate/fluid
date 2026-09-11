@@ -42,9 +42,9 @@ import {
 import { rasterMeshSymmetryMetrics } from
   "../lib/harness/raster-mesh-symmetry";
 import { adaptiveMassMethod, adaptiveMassSolverOptions } from
-  "../lib/methods/adaptive-mass/method";
+  "../lib/methods/adaptive-volume/method";
 import { WebGPUAdaptiveMassSolver } from
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+  "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
 const CAPTURE_SCENARIO = process.env.FLUID_PRESENTATION_CAPTURE_SCENARIO ?? "dam";
 const LONG_DAM = CAPTURE_SCENARIO === "long-dam";

@@ -4,9 +4,9 @@ import test from "node:test";
 import {
   createSparseCM12PressureTopologyRepairLayout,
   sparseCM12PressureTopologyRepairEntryPoints,
-} from "../lib/methods/adaptive-mass/sparse-cm12-pressure-topology-repair";
+} from "../lib/methods/adaptive-volume/sparse-cm12-pressure-topology-repair";
 import { createSparseCM12PressureTopologyRepairWGSL } from
-  "../lib/methods/adaptive-mass/sparse-cm12-pressure-topology-repair.wgsl";
+  "../lib/methods/adaptive-volume/sparse-cm12-pressure-topology-repair.wgsl";
 
 test("PTR v3 stores only the compact changed-brick journal", () => {
   const layout = createSparseCM12PressureTopologyRepairLayout({

@@ -3,9 +3,9 @@ import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
 import { createSparseCM12TopologyEffectsAuthorityInitialWords,
   createSparseCM12TopologyEffectsAuthorityLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-topology-effects-authority";
+  "../lib/methods/adaptive-volume/sparse-cm12-topology-effects-authority";
 import { createSparseCM12TopologyEffectsAuthorityWGSL } from
-  "../lib/methods/adaptive-mass/sparse-cm12-topology-effects-authority.wgsl";
+  "../lib/methods/adaptive-volume/sparse-cm12-topology-effects-authority.wgsl";
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 if (!dawnModule) {

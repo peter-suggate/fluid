@@ -1,0 +1,384 @@
+/**
+ * The one place that knows where a CM12 row or cell record lives.
+ *
+ * The resident solver, the face-velocity overlay and every stage lens decode
+ * the authored packed arena: nine row planes at `arena[7]`, eight-word cell
+ * records at `arena[6]`, and terms at `arena[8]`. SparseWorld's uniform B8
+ * pages use the same semantic accessors but omit data derivable from the leaf
+ * and local index. Each consumer used to carry its own copy of the addressing,
+ * and a stale copy produced a subtly wrong picture rather than a build failure.
+ *
+ * Emitting the block gives one definition, so a plane that moves moves
+ * everywhere at once. What differs between consumers is only *how a word is
+ * read*: the resident binds the arena as `array<atomic<u32>>` and goes through
+ * `ta`/`taf`, while a lens binds it read-only and indexes it directly. Moving a
+ * float read on or off an atomic binding reassociates the surrounding math, so
+ * that difference is a parameter here rather than a second copy of the bodies.
+ */
+
+/**
+ * How a consumer turns an arena word index into a WGSL expression.
+ *
+ * Both take an *expression* rather than a number because every real call site
+ * indexes off another accessor — `rowWord(id,2u)`, `cellBase(id)+7u`.
+ */
+export interface SparseCM12ArenaReaders {
+  /** The u32 at `index`. */
+  readonly word: (index: string) => string;
+  /** The same word bitcast to f32. */
+  readonly float: (index: string) => string;
+}
+
+/**
+ * The resident's readers.
+ *
+ * `ta`/`taf` are its `atomicLoad` helpers over the arena binding. Emitting
+ * through them reproduces the resident's historical text exactly, which is what
+ * keeps adopting this module bit-exact.
+ */
+export const SPARSE_CM12_ATOMIC_ARENA_READERS: SparseCM12ArenaReaders = Object.freeze({
+  word: (index: string) => `ta(${index})`,
+  float: (index: string) => `taf(${index})`,
+});
+
+/** Readers for a plain `array<u32>` binding — every render-stage consumer. */
+export function sparseCM12PlainArenaReaders(name: string): SparseCM12ArenaReaders {
+  return Object.freeze({
+    word: (index: string) => `${name}[${index}]`,
+    float: (index: string) => `bitcast<f32>(${name}[${index}])`,
+  });
+}
+
+/**
+ * Cell-resolution packing constants.
+ *
+ * The resident declares these itself among its other template constants; a
+ * lens has to be handed them. Emitted separately so the resident keeps the copy
+ * it has always had rather than acquiring a second one.
+ */
+export const SPARSE_CM12_CELL_PACKING_WGSL = `const TEMPLATE_CELL_RESOLUTION_BITS:u32=5u;
+const TEMPLATE_CELL_RESOLUTION_MASK:u32=31u;`;
+
+/**
+ * Cell record addressing.
+ *
+ * Eight words per cell: `[0..2]` fine-lattice centre, `3` volume, `[4..6]`
+ * fine-lattice widths, `7` metadata carrying the brick index above the
+ * resolution bits.
+ */
+export function createSparseCM12CellAccessWGSL(
+  readers: SparseCM12ArenaReaders,
+  dynamicPages = false,
+): string {
+  const { word: w, float: f } = readers;
+  if (!dynamicPages) return `fn cellBase(id:u32)->u32{return ${w("6u")}+id*8u;}
+fn cellMetadata(id:u32)->u32{return ${w("cellBase(id)+7u")};}
+fn cellBrick(id:u32)->u32{return cellMetadata(id)>>TEMPLATE_CELL_RESOLUTION_BITS;}
+fn cellResolution(id:u32)->u32{return cellMetadata(id)&TEMPLATE_CELL_RESOLUTION_MASK;}
+fn cellVolume(id:u32)->f32{return ${f("cellBase(id)+3u")};}
+fn cellWidths(id:u32)->vec3f{let b=cellBase(id);
+  return vec3f(${f("b+4u")},${f("b+5u")},${f("b+6u")});}
+fn cellCenter(id:u32)->vec3f{let b=cellBase(id);
+  return vec3f(${f("b")},${f("b+1u")},${f("b+2u")});}
+fn cellMinimumWidth(id:u32)->f32{let widths=cellWidths(id);
+  return min(widths.x,min(widths.y,widths.z));}
+fn cellMinimum(id:u32)->vec3i{return vec3i(round(cellCenter(id)-0.5*cellWidths(id)));}`;
+
+  // SparseWorld frontier pages are uniform B8 bricks. Their eight-word cell
+  // records duplicated geometry already encoded by the leaf coordinate and
+  // local stable-cell index. Keep authored/template cells byte-for-byte, but
+  // derive dynamic geometry so page synthesis and every hot read avoid that
+  // redundant atomic traffic.
+  return `fn dynamicCellLocal(id:u32)->u32{return id-${w("2u")};}
+fn dynamicCellPage(local:u32)->u32{return local/(BRICK_FINE_RESOLUTION
+  *BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION);}
+fn dynamicCellWithin(local:u32)->u32{return local%(BRICK_FINE_RESOLUTION
+  *BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION);}
+fn dynamicCellLeaf(local:u32)->u32{return ${w("candidateTopologyPageBase(dynamicCellPage(local))")};}
+fn dynamicCellMinimum(local:u32)->vec3i{
+  let within=dynamicCellWithin(local);
+  let z=within/(BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION);
+  let remainder=within-z*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
+  let y=remainder/BRICK_FINE_RESOLUTION;let x=remainder-y*BRICK_FINE_RESOLUTION;
+  return cm12WorldLeafCoordinate(dynamicCellLeaf(local))*i32(BRICK_FINE_RESOLUTION)
+    +vec3i(i32(x),i32(y),i32(z));
+}
+fn cellMetadata(id:u32)->u32{let host=${w("2u")};if(id<host){
+    return ${w(`${w("6u")}+id*8u+7u`)};}
+  return (dynamicCellLeaf(dynamicCellLocal(id))<<TEMPLATE_CELL_RESOLUTION_BITS)
+    |BRICK_FINE_RESOLUTION;
+}
+fn cellBrick(id:u32)->u32{let host=${w("2u")};if(id<host){
+    return ${w(`${w("6u")}+id*8u+7u`)}>>TEMPLATE_CELL_RESOLUTION_BITS;}
+  return dynamicCellLeaf(dynamicCellLocal(id));
+}
+fn cellResolution(id:u32)->u32{let host=${w("2u")};if(id<host){
+    return ${w(`${w("6u")}+id*8u+7u`)}&TEMPLATE_CELL_RESOLUTION_MASK;}
+  return BRICK_FINE_RESOLUTION;
+}
+fn cellVolume(id:u32)->f32{let host=${w("2u")};if(id<host){
+    return ${f(`${w("6u")}+id*8u+3u`)};}return 1.0;
+}
+fn cellWidths(id:u32)->vec3f{let host=${w("2u")};if(id<host){
+    let b=${w("6u")}+id*8u;
+    return vec3f(${f("b+4u")},${f("b+5u")},${f("b+6u")});}
+  return vec3f(1.0);
+}
+fn cellCenter(id:u32)->vec3f{let host=${w("2u")};if(id<host){
+    let b=${w("6u")}+id*8u;return vec3f(${f("b")},${f("b+1u")},${f("b+2u")});}
+  return vec3f(dynamicCellMinimum(dynamicCellLocal(id)))+vec3f(0.5);
+}
+fn cellMinimumWidth(id:u32)->f32{let host=${w("2u")};if(id>=host){return 1.0;}
+  let widths=cellWidths(id);return min(widths.x,min(widths.y,widths.z));
+}
+fn cellMinimum(id:u32)->vec3i{let host=${w("2u")};if(id>=host){
+    return dynamicCellMinimum(dynamicCellLocal(id));}
+  return vec3i(round(cellCenter(id)-0.5*cellWidths(id)));
+}`;
+}
+
+/**
+ * Row record addressing, plus the term and incidence lists rows index into.
+ *
+ * Authored topology has nine planes, each `rowCapacity` long, based at
+ * `arena[7]` with the stride in `arena[3]`: packed terms, packed metadata,
+ * static dual weight, static area, distance, exterior phi, then three planes
+ * of fine-lattice centre. Uniform dynamic B8 pages omit only static area and
+ * exterior phi: centres remain packed because reconstructing them adds integer
+ * divisions to several hot row paths.
+ *
+ * Nothing here depends on rigid bodies. The open-fraction family that scales
+ * these by solid coverage stays with the solver, because a lens draws the
+ * static geometry a stage was authored against, not the coupled geometry one
+ * particular frame solved.
+ */
+export function createSparseCM12RowAccessWGSL(
+  readers: SparseCM12ArenaReaders,
+  dynamicPages = false,
+  incidenceFailure = "",
+): string {
+  const { word: w, float: f } = readers;
+  const rowWord = dynamicPages
+    ? `fn rowWord(id:u32,plane:u32)->u32{
+  let host=${w("3u")};if(id<host){return ${w("7u")}+plane*host+id;}
+  let rows=3u*(BRICK_FINE_RESOLUTION+1u)*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
+  let local=id-host;let page=local/rows;let within=local%rows;
+  let base=candidateTopologyPageBase(page);
+  // Dynamic pages store packed, metadata, distance, dual, then xyz center.
+  // Map from the authored nine-plane semantic ABI explicitly; area and
+  // exterior phi are derived by their dedicated accessors below.
+  var storedPlane=plane;
+  if(plane==2u){storedPlane=3u;}
+  if(plane==4u){storedPlane=2u;}
+  if(plane>=6u){storedPlane=plane-2u;}
+  return base+${w("base+7u")}+storedPlane*rows+within;
+}`
+    : `fn rowWord(id:u32,plane:u32)->u32{return ${w("7u")}+plane*${w("3u")}+id;}`;
+  const termCell = dynamicPages
+    ? `fn termRecord(index:u32)->vec2u{
+  let host=${w("4u")};if(index<host){let at=${w("8u")}+2u*index;
+    return vec2u(${w("at")},${w("at+1u")});}
+  let terms=6u*(BRICK_FINE_RESOLUTION+1u)*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
+  let local=index-host;let page=local/terms;let within=local%terms;
+  let base=candidateTopologyPageBase(page);let at=base+${w("base+8u")}+2u*within;
+  return vec2u(${w("at")},${w("at+1u")});
+}
+fn termCell(index:u32)->u32{
+  let host=${w("4u")};if(index<host){return ${w(`${w("8u")}+2u*index`)};}
+  let terms=6u*(BRICK_FINE_RESOLUTION+1u)*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
+  let local=index-host;let page=local/terms;let within=local%terms;
+  let base=candidateTopologyPageBase(page);return ${w("base+" + w("base+8u") + "+2u*within")};
+}
+fn termCoefficient(index:u32)->f32{
+  let host=${w("4u")};if(index<host){return ${f(`${w("8u")}+2u*index+1u`)};}
+  let terms=6u*(BRICK_FINE_RESOLUTION+1u)*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
+  let local=index-host;let page=local/terms;let within=local%terms;
+  let base=candidateTopologyPageBase(page);return ${f("base+" + w("base+8u") + "+2u*within+1u")};
+}`
+    : `fn termRecord(index:u32)->vec2u{let at=${w("8u")}+2u*index;
+  return vec2u(${w("at")},${w("at+1u")});}
+fn termCell(index:u32)->u32{return ${w(`${w("8u")}+2u*index`)};}
+fn termCoefficient(index:u32)->f32{return ${f(`${w("8u")}+2u*index+1u`)};}`;
+  const incidence = dynamicPages
+    ? `fn dynamicIncidenceOverrideAt(pageBase:u32,cellWithin:u32,side:u32)->u32{
+  let z=cellWithin/(BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION);
+  let remainder=cellWithin-z*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
+  let y=remainder/BRICK_FINE_RESOLUTION;let x=remainder-y*BRICK_FINE_RESOLUTION;
+  let q=vec3u(x,y,z);let axis=side/2u;let positive=(side&1u)!=0u;
+  if(q[axis]!=select(0u,BRICK_FINE_RESOLUTION-1u,positive)){return 0xffffffffu;}
+  let u=q[(axis+1u)%3u];let v=q[(axis+2u)%3u];
+  return pageBase+${w("pageBase+10u")}+2u*(side*BRICK_FINE_RESOLUTION
+    *BRICK_FINE_RESOLUTION+u+BRICK_FINE_RESOLUTION*v);
+}
+fn incidenceRange(cell:u32)->vec2u{
+  let host=${w("2u")};if(cell<host){let at=${w("9u")}+cell;
+    let begin=${w("at")};let end=${w("at+1u")};
+    return vec2u(begin,boundedIncidenceEnd(cell,begin,end));}
+  let cells=BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
+  let local=cell-host;let page=local/cells;let within=local%cells;
+  let begin=${w("5u")}+page*(6u*cells)+6u*within;
+  return vec2u(begin,begin+6u);
+}
+fn incidenceBegin(cell:u32)->u32{return incidenceRange(cell).x;}
+fn incidenceEnd(cell:u32)->u32{return incidenceRange(cell).y;}
+fn incidenceRecord(index:u32)->vec2u{
+  let host=${w("5u")};if(index<host){let at=${w("10u")}+2u*index;
+    return vec2u(${w("at")},${w("at+1u")});}
+  let records=6u*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
+  let local=index-host;let page=local/records;let within=local%records;
+  let pageBase=candidateTopologyPageBase(page);let cellWithin=within/6u;
+  let side=within%6u;let overrideAt=dynamicIncidenceOverrideAt(pageBase,cellWithin,side);
+  if(overrideAt!=0xffffffffu){return vec2u(${w("overrideAt")},${w("overrideAt+1u")});}
+  let z=cellWithin/(BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION);
+  let remainder=cellWithin-z*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
+  let y=remainder/BRICK_FINE_RESOLUTION;let x=remainder-y*BRICK_FINE_RESOLUTION;
+  let q=vec3u(x,y,z);let axis=side/2u;let positive=(side&1u)!=0u;
+  let faceAxis=q[axis]+select(0u,1u,positive);
+  let u=q[(axis+1u)%3u];let v=q[(axis+2u)%3u];
+  let perAxis=(BRICK_FINE_RESOLUTION+1u)*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
+  let row=axis*perAxis+faceAxis+(BRICK_FINE_RESOLUTION+1u)
+    *(u+BRICK_FINE_RESOLUTION*v);
+  return vec2u(${w("3u")}+page*(3u*perAxis)+row,
+    ${w("4u")}+page*(6u*perAxis)+2u*row+select(1u,0u,positive));
+}
+fn incidenceRow(index:u32)->u32{return incidenceRecord(index).x;}
+fn incidenceTerm(index:u32)->u32{return incidenceRecord(index).y;}`
+    : `fn incidenceRange(cell:u32)->vec2u{let at=${w("9u")}+cell;
+  let begin=${w("at")};let end=${w("at+1u")};
+  return vec2u(begin,boundedIncidenceEnd(cell,begin,end));}
+fn incidenceBegin(cell:u32)->u32{return ${w(`${w("9u")}+cell`)};}
+fn incidenceEnd(cell:u32)->u32{
+  let begin=incidenceBegin(cell);let end=${w(`${w("9u")}+cell+1u`)};
+  return boundedIncidenceEnd(cell,begin,end);
+}
+fn incidenceRecord(index:u32)->vec2u{let at=${w("10u")}+2u*index;
+  return vec2u(${w("at")},${w("at+1u")});}
+fn incidenceRow(index:u32)->u32{return ${w(`${w("10u")}+2u*index`)};}
+fn incidenceTerm(index:u32)->u32{return ${w(`${w("10u")}+2u*index+1u`)};}`;
+  const rowCenter = dynamicPages
+    ? `fn rowCenter(id:u32)->vec3f{
+  let host=${w("3u")};if(id<host){let base=${w("7u")}+id;
+    return vec3f(${f("base+6u*host")},${f("base+7u*host")},${f("base+8u*host")});}
+  let rows=3u*(BRICK_FINE_RESOLUTION+1u)*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
+  let local=id-host;let page=local/rows;let within=local%rows;
+  let pageBase=candidateTopologyPageBase(page);
+  let base=pageBase+${w("pageBase+7u")}+within;
+  return vec3f(${f("base+4u*rows")},${f("base+5u*rows")},${f("base+6u*rows")});
+}`
+    : `fn rowCenter(id:u32)->vec3f{return vec3f(${f("rowWord(id,6u)")},${f("rowWord(id,7u)")},${f("rowWord(id,8u)")});}`;
+  const rowAreaAndExterior = dynamicPages
+    ? `fn rowStaticArea(id:u32)->f32{let host=${w("3u")};if(id<host){
+    return ${f(`${w("7u")}+3u*host+id`)};}return 1.0;
+}
+fn rowExteriorPhi(id:u32)->f32{let host=${w("3u")};if(id<host){
+    return ${f(`${w("7u")}+5u*host+id`)};}
+  let rows=3u*(BRICK_FINE_RESOLUTION+1u)*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
+  let within=(id-host)%rows;let perAxis=(BRICK_FINE_RESOLUTION+1u)
+    *BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
+  let faceAxis=(within%perAxis)%(BRICK_FINE_RESOLUTION+1u);
+  return select(0.0,0.5,faceAxis==0u||faceAxis==BRICK_FINE_RESOLUTION);
+}`
+    : `fn rowStaticArea(id:u32)->f32{return ${f("rowWord(id,3u)")};}
+fn rowExteriorPhi(id:u32)->f32{return ${f("rowWord(id,5u)")};}`;
+  return `${rowWord}
+fn boundedIncidenceEnd(cell:u32,begin:u32,end:u32)->u32{
+  // One adaptive hexahedral cell can touch at most B^2 rows on each of its
+  // six faces. Treat a reversed or larger arena range as invalid instead of
+  // allowing unsigned corruption to become a multi-billion-iteration loop.
+  let maximum=6u*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
+  if(end<begin||end-begin>maximum){${incidenceFailure}return begin;}
+  return end;
+}
+fn rowPackedTerms(id:u32)->u32{return ${w("rowWord(id,0u)")};}
+fn rowPackedMetadata(id:u32)->u32{return ${w("rowWord(id,1u)")};}
+// The same atomic packed word contains both range fields. Traversals fetch it
+// once rather than separately loading offset and count through atomic readers.
+fn rowTermRange(id:u32)->vec2u{
+  let packed=rowPackedTerms(id);let first=packed&0x007fffffu;
+  return vec2u(first,first+(packed>>23u));
+}
+fn rowTermOffset(id:u32)->u32{return rowPackedTerms(id)&0x007fffffu;}
+fn rowAxis(id:u32)->u32{return rowPackedMetadata(id)>>30u;}
+fn rowKind(id:u32)->u32{return (rowPackedMetadata(id)>>28u)&3u;}
+fn rowRequirementOffset(id:u32)->u32{return rowPackedMetadata(id)&0x0fffffffu;}
+fn rowStaticDualWeight(id:u32)->f32{return ${f("rowWord(id,2u)")};}
+fn rowDistance(id:u32)->f32{return ${f("rowWord(id,4u)")};}
+${rowAreaAndExterior}
+${rowCenter}
+${termCell}
+${incidence}`;
+}
+
+/**
+ * CM12's answer to the placement contract the layer templates call.
+ *
+ * The templates in `stage-lens-layers.wgsl.ts` know that a row glyph sits at a
+ * fine-lattice centre and runs along an axis, and nothing about where that came
+ * from. This is the only CM12 code they ever reach.
+ *
+ * A row with zero static area is not drawn. Topology carries such rows — a face
+ * fully inside a solid, a face outside the band — but no stage solves one, so
+ * drawing it would put a glyph where the stage did nothing.
+ *
+ * `brick` is optional because a brick's fine-lattice origin is not in the
+ * arena: it is a key in the separate topology buffer, and a lens that wants
+ * brick frames has to bind that buffer and say where the key table sits. A lens
+ * that declares a `brick-frame` program without supplying this fails to compile
+ * its shader rather than drawing frames in the wrong places.
+ */
+export function createSparseCM12LensPlacementWGSL(options: {
+  readonly readers: SparseCM12ArenaReaders;
+  readonly brick?: {
+    /** WGSL expression for the brick key of brick index `brick`. */
+    readonly key: (brick: string) => string;
+    /** WGSL `vec3u` expression for the brick grid dimensions. */
+    readonly dimensions: string;
+    /** Fine cells along one brick edge. */
+    readonly fineResolution: number;
+  };
+}): string {
+  const f = options.readers.float;
+  const placement = `fn cellCentreFine(id:u32)->vec3f{
+  let b=cellBase(id);
+  return vec3f(${f("b")},${f("b+1u")},${f("b+2u")});
+}
+fn cellWidthsFine(id:u32)->vec3f{
+  let b=cellBase(id);
+  return vec3f(${f("b+4u")},${f("b+5u")},${f("b+6u")});
+}
+fn rowFaceCentreFine(id:u32)->vec3f{return rowCenter(id);}
+fn lensRowPlacement(row:u32)->LensRowPlacement{
+  var placement:LensRowPlacement;
+  placement.valid=rowStaticArea(row)>0.0;
+  placement.centreFine=rowFaceCentreFine(row);
+  placement.axis=rowAxis(row);
+  placement.spanFine=rowDistance(row);
+  return placement;
+}
+fn lensCellPlacement(cell:u32)->LensBoxPlacement{
+  var placement:LensBoxPlacement;
+  let centre=cellCentreFine(cell);
+  let widths=cellWidthsFine(cell);
+  placement.valid=cellVolume(cell)>0.0;
+  placement.lowerFine=centre-0.5*widths;
+  placement.upperFine=centre+0.5*widths;
+  return placement;
+}`;
+  if (!options.brick) return placement;
+  const { key, dimensions, fineResolution } = options.brick;
+  return `${placement}
+fn lensBrickPlacement(brick:u32)->LensBoxPlacement{
+  var placement:LensBoxPlacement;
+  let dims=${dimensions};
+  let plane=dims.x*dims.y;
+  let brickKey=${key("brick")};
+  let bz=brickKey/plane;
+  let remainder=brickKey-bz*plane;
+  let by=remainder/dims.x;
+  let edge=f32(${fineResolution}u);
+  placement.valid=bz<dims.z;
+  placement.lowerFine=vec3f(f32(remainder-by*dims.x),f32(by),f32(bz))*edge;
+  placement.upperFine=placement.lowerFine+vec3f(edge);
+  return placement;
+}`;
+}

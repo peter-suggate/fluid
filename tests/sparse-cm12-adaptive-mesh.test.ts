@@ -4,8 +4,8 @@ import { RasterWaterPipeline } from "../lib/core/webgpu-water-pipeline";
 import type { GlobalFineLevelSetConsumerSource } from "../lib/core/octree-consumer-sampling";
 import { resolveMethodValues } from "../lib/core/method-contract";
 import { adaptiveMassMethod, adaptiveMassSolverOptions,
-  ADAPTIVE_MASS_RUNTIME_PARAM_KEYS } from "../lib/methods/adaptive-mass/method";
-import { SPARSE_CM12_STAGES } from "../lib/methods/adaptive-mass/sparse-cm12-stages";
+  ADAPTIVE_MASS_RUNTIME_PARAM_KEYS } from "../lib/methods/adaptive-volume/method";
+import { SPARSE_CM12_STAGES } from "../lib/methods/adaptive-volume/sparse-cm12-stages";
 
 test("surface mesh ratio defaults to x2 and x1/x4 are available without resetting physics", () => {
   const defaults = resolveMethodValues(adaptiveMassMethod, "balanced", {});

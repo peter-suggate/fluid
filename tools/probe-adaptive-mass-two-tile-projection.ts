@@ -3,7 +3,7 @@
 import {
   probeTwoTilePressureProjection,
   type TwoTileProjectionProbeReceipt,
-} from "../lib/methods/adaptive-mass/two-tile-pressure-projection-probe";
+} from "../lib/methods/adaptive-volume/two-tile-pressure-projection-probe";
 
 function scientific(value: number): string {
   return value.toExponential(3);

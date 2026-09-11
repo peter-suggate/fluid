@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {pathToFileURL} from 'node:url';
 import {acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock} from '../lib/harness/webgpu-smoke-isolation';
-import {compileCM12InterpolationPatch, evaluateCM12InterpolationPatch, packCM12InterpolationPatches, CM12_INTERPOLATION_PATCH_WGSL, type PatchPoint} from '../lib/methods/adaptive-mass/sparse-cm12-interpolation-patch';
+import {compileCM12InterpolationPatch, evaluateCM12InterpolationPatch, packCM12InterpolationPatches, CM12_INTERPOLATION_PATCH_WGSL, type PatchPoint} from '../lib/methods/adaptive-volume/sparse-cm12-interpolation-patch';
 import {patchFixtures} from './sparse-cm12-interpolation-patch.test';
 
 (process.env.WEBGPU_NODE_MODULE ? test : test.skip)('compiled patch GPU weights retain affine moments, positivity and collapsed-node identity', async()=>{

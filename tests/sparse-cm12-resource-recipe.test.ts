@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createCM12ResourceRecorder, realizeCM12ResourceRecipe } from "../lib/methods/adaptive-mass/sparse-cm12-resource-recipe";
+import { createCM12ResourceRecorder, realizeCM12ResourceRecipe } from "../lib/methods/adaptive-volume/sparse-cm12-resource-recipe";
 import { createSolidWorld, SolidWorldDirectory } from "../lib/core/solid-world";
-import { createSparseAdaptiveMassAtlas } from "../lib/methods/adaptive-mass/sparse-brick-atlas";
-import { WebGPUSparseCM12Resident } from "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
-import { buildSparseAtlasCompositeGrid } from "../lib/methods/adaptive-mass/sparse-atlas-composite-projection";
-import { PreparedSparseCM12GenerationTransfer, sparseCM12TransferFaceGeometry } from "../lib/methods/adaptive-mass/sparse-cm12-generation-transfer";
-import { WebGPUSparseCM12RigidCoupling } from "../lib/methods/adaptive-mass/webgpu-sparse-cm12-rigid-coupling";
+import { createSparseAdaptiveMassAtlas } from "../lib/methods/adaptive-volume/sparse-brick-atlas";
+import { WebGPUSparseCM12Resident } from "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident";
+import { buildSparseAtlasCompositeGrid } from "../lib/methods/adaptive-volume/sparse-atlas-composite-projection";
+import { PreparedSparseCM12GenerationTransfer, sparseCM12TransferFaceGeometry } from "../lib/methods/adaptive-volume/sparse-cm12-generation-transfer";
+import { WebGPUSparseCM12RigidCoupling } from "../lib/methods/adaptive-volume/webgpu-sparse-cm12-rigid-coupling";
 
 async function withWebGPUConstants(run: () => Promise<void>) {
  const constants = {

@@ -18,7 +18,7 @@ test("hero-garden-hose-x10 offers all solid plugins and explains its intentional
   assert.ok(scene.terrain);
   assert.equal(scene.systems?.fluid, false);
   for (const plugin of voxelTools.tools) {
-    const unavailable = plugin.unavailable({ scene, methodId: "adaptive-mass" });
+    const unavailable = plugin.unavailable({ scene, methodId: "adaptive-volume" });
     if (plugin.execution === "release") assert.match(unavailable ?? "", /Enable water from Scene/);
     else assert.equal(unavailable, undefined, plugin.id);
   }
@@ -61,7 +61,7 @@ test("terrain overlays use renderer uniform publication without replacing the li
   const { FluidLabRenderer, gpuSceneSolverKey } = await import("../lib/core/webgpu-renderer");
   const { sceneryConstructionKey } = await import("../lib/core/scenery-construction-key");
   const scene = terrainScene();
-  const config = { methodId: "adaptive-mass", quality: "balanced", values: {} } as import("../lib/core/webgpu-renderer").SimulationRunConfig;
+  const config = { methodId: "adaptive-volume", quality: "balanced", values: {} } as import("../lib/core/webgpu-renderer").SimulationRunConfig;
   const staged: typeof scene[] = [];
   const source = { stageSceneUpdate(next: typeof scene) { staged.push(next); }, info: {} };
   const renderer = new FluidLabRenderer({} as HTMLCanvasElement, () => {});

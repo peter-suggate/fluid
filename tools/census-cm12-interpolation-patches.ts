@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {join} from 'node:path';
-import {compileCM12InterpolationPatch, type PatchPoint} from '../lib/methods/adaptive-mass/sparse-cm12-interpolation-patch';
+import {compileCM12InterpolationPatch, type PatchPoint} from '../lib/methods/adaptive-volume/sparse-cm12-interpolation-patch';
 const capture=process.argv[2];assert.ok(capture,'capture directory');
 const frame=process.argv[3]??'24';
 const config=JSON.parse(readFileSync(join(capture,'configuration.json'),'utf8'));

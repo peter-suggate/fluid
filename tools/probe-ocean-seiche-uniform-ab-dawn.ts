@@ -12,7 +12,7 @@ import { readFloatTexture3D, readRgbaTexture3D } from
   "../lib/harness/webgpu-smoke-readbacks";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
-import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
+import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 import { uniformMethod } from "../lib/methods/uniform/method";
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
@@ -93,7 +93,7 @@ try {
     const values = resolveMethodValues(method, "balanced", {
       timeStep: timeStepMode,
       ...(method.id === "uniform" ? { densityPostProcessing: "off" } : {}),
-      ...(method.id === "adaptive-mass" ? sparseOverrides : {}),
+      ...(method.id === "adaptive-volume" ? sparseOverrides : {}),
     });
     const solver = await method.createSolverAsync!(
       device!, scene, "balanced", values, undefined, () => {},

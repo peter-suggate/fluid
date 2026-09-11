@@ -1,13 +1,13 @@
-import { SparseCM12GenerationBudgetDeferred } from "../lib/methods/adaptive-mass/sparse-cm12-generation-budget";
+import { SparseCM12GenerationBudgetDeferred } from "../lib/methods/adaptive-volume/sparse-cm12-generation-budget";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
-import { createSparseAdaptiveMassAtlas } from "../lib/methods/adaptive-mass/sparse-brick-atlas";
-import { buildSparseAtlasCompositeGrid } from "../lib/methods/adaptive-mass/sparse-atlas-composite-projection";
+import { createSparseAdaptiveMassAtlas } from "../lib/methods/adaptive-volume/sparse-brick-atlas";
+import { buildSparseAtlasCompositeGrid } from "../lib/methods/adaptive-volume/sparse-atlas-composite-projection";
 import { transferSparseCM12GenerationFields, prepareSparseCM12GenerationTransfer,
- PreparedSparseCM12GenerationTransfer } from "../lib/methods/adaptive-mass/sparse-cm12-generation-transfer";
-import { createCM12ResourceRecorder, realizeCM12ResourceRecipe } from "../lib/methods/adaptive-mass/sparse-cm12-resource-recipe";
+ PreparedSparseCM12GenerationTransfer } from "../lib/methods/adaptive-volume/sparse-cm12-generation-transfer";
+import { createCM12ResourceRecorder, realizeCM12ResourceRecipe } from "../lib/methods/adaptive-volume/sparse-cm12-resource-recipe";
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 (dawnModule ? test : test.skip)("GPU generation transfer conserves clipped liquid mass, gamma, momentum and boundary flux", async () => {
  await acquireWebGPUExclusiveLock("dawn-test", "sparse-cm12-generation-transfer-dawn");

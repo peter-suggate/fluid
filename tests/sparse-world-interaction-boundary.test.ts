@@ -3,11 +3,11 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const solver = readFileSync(new URL(
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver.ts",
+  "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver.ts",
   import.meta.url,
 ), "utf8");
 const adapter = readFileSync(new URL(
-  "../lib/sparse-world/internal/cm12-adapter.ts",
+  "../lib/sparse-world/internal/adaptive-volume-adapter.ts",
   import.meta.url,
 ), "utf8");
 

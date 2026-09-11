@@ -3,14 +3,14 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { getScenePreset } from "../lib/core/scenes";
 import { initializeSparseBrickAtlasFromScene } from
-  "../lib/methods/adaptive-mass/sparse-brick-atlas";
+  "../lib/methods/adaptive-volume/sparse-brick-atlas";
 
 const residentSource = readFileSync(new URL(
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.ts",
   import.meta.url,
 ), "utf8");
 const shaderSource = readFileSync(new URL(
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts",
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts",
   import.meta.url,
 ), "utf8");
 

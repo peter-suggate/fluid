@@ -4,8 +4,8 @@ import { pathToFileURL } from "node:url";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { adaptiveMassSolverOptions } from "../lib/methods/adaptive-mass/method";
-import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+import { adaptiveMassSolverOptions } from "../lib/methods/adaptive-volume/method";
+import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { readPublishedCM12Field } from "../tools/sparse-cm12-published-field";
 

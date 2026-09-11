@@ -19,43 +19,43 @@ import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { createWebgpuSparseCM12ResidentWGSL } from
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl";
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl";
 import { sparseCM12PresentationPageAllocatorWGSL,
   sparseCM12WGSLForEntryPoints } from
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident";
 import { createSparseCM12IncrementalActivityLayout } from
-  "../lib/methods/adaptive-mass/features/adaptivity/sparse-cm12-incremental-activity";
+  "../lib/methods/adaptive-volume/features/adaptivity/sparse-cm12-incremental-activity";
 import { createSparseCM12CanonicalMembershipLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-canonical-membership";
+  "../lib/methods/adaptive-volume/sparse-cm12-canonical-membership";
 import { createSparseCM12FramePlanLayout } from "../lib/core/sparse-cm12-frame-plan";
 import { createSparseCM12FramePlanPresentationLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-frame-plan-presentation";
+  "../lib/methods/adaptive-volume/sparse-cm12-frame-plan-presentation";
 import { createSparseCM12FrameControl } from
-  "../lib/methods/adaptive-mass/sparse-cm12-frame-control";
+  "../lib/methods/adaptive-volume/sparse-cm12-frame-control";
 import { createSparseCM12PressureTopologyRepairLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-pressure-topology-repair";
+  "../lib/methods/adaptive-volume/sparse-cm12-pressure-topology-repair";
 import { createSparseCM12ResidentPersistentPressureCacheLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-persistent-pressure-cache";
+  "../lib/methods/adaptive-volume/sparse-cm12-persistent-pressure-cache";
 import { createSparseCM12PressureExecutionImageLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-pressure-execution-image";
+  "../lib/methods/adaptive-volume/sparse-cm12-pressure-execution-image";
 import { createSparseCM12TopologyEffectsAuthorityLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-topology-effects-authority";
+  "../lib/methods/adaptive-volume/sparse-cm12-topology-effects-authority";
 import { createSparseCM12VelocityExtensionResidentLayouts } from
-  "../lib/methods/adaptive-mass/sparse-cm12-velocity-extension";
+  "../lib/methods/adaptive-volume/sparse-cm12-velocity-extension";
 import type { SparseCM12InternedBoundaryLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-interned-boundary-operators";
+  "../lib/methods/adaptive-volume/sparse-cm12-interned-boundary-operators";
 import type { SparseCM12InternedRefLookupLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-interned-ref-lookup";
+  "../lib/methods/adaptive-volume/sparse-cm12-interned-ref-lookup";
 import { createSparseCM12TransportExecutionImageLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-transport-execution-image";
+  "../lib/methods/adaptive-volume/sparse-cm12-transport-execution-image";
 import { createSparseCM12TransportPacketAuthorityLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-transport-packet-authority";
+  "../lib/methods/adaptive-volume/sparse-cm12-transport-packet-authority";
 import { createSparseCM12WorldDirectoryLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-world-directory";
+  "../lib/methods/adaptive-volume/sparse-cm12-world-directory";
 import { createSparseCM12SolidOccupancyLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-solid-occupancy";
+  "../lib/methods/adaptive-volume/sparse-cm12-solid-occupancy";
 import { SPARSE_CM12_LENSES } from
-  "../lib/methods/adaptive-mass/sparse-cm12-stage-lenses";
+  "../lib/methods/adaptive-volume/sparse-cm12-stage-lenses";
 import { stageLensProgramWGSL } from "../lib/core/webgpu-stage-lens-overlay";
 
 const staticConcurrencyCheck = process.argv.includes("--static-concurrency-check");

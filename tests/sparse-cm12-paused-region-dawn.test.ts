@@ -5,8 +5,8 @@ import { readPublishedCM12Field } from "../tools/sparse-cm12-published-field";
 import { cloneScene, defaultScene } from "../lib/core/model";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
-import { adaptiveMassSolverOptions } from "../lib/methods/adaptive-mass/method";
-import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+import { adaptiveMassSolverOptions } from "../lib/methods/adaptive-volume/method";
+import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 for (const shape of ["flat", "curved"] as const) (dawnModule ? test : test.skip)(`${shape}: paused region edits publish latest bounds without a physics step`, { timeout: 180_000 }, async () => {

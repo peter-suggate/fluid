@@ -2,15 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createOceanSeicheScene } from "../lib/core/scenes";
 import { adaptiveMassPresentationDimensionsForScene } from
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+  "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 import { buildSparseAtlasCompositeGrid, type SparseAtlasCompositeGrid } from
-  "../lib/methods/adaptive-mass/sparse-atlas-composite-projection";
+  "../lib/methods/adaptive-volume/sparse-atlas-composite-projection";
 import { createSparseAdaptiveMassAtlas, initializeSparseBrickAtlasFromScene, sparseBrickSpan,
   sparseBrickKey, type SparseAdaptiveMassBrick,
-  type SparseBrickResolution } from "../lib/methods/adaptive-mass/sparse-brick-atlas";
+  type SparseBrickResolution } from "../lib/methods/adaptive-volume/sparse-brick-atlas";
 import { prepareSparseCM12TopologyWorkingSet, type SparseCM12TopologyPreparation,
   type SparseCM12TopologyPreparationBudget } from
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident";
 
 const budget: SparseCM12TopologyPreparationBudget = {
   maximumCells: 100_000, maximumRows: 500_000, maximumBytes: 64 * 1024 ** 2,

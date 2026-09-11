@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import "../lib/methods";
-import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
-import type { AdaptiveMassSolverOptions } from "../lib/methods/adaptive-mass/method";
+import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
+import type { AdaptiveMassSolverOptions } from "../lib/methods/adaptive-volume/method";
 import { createRuntimeStore } from "../lib/core/stores/runtime-store";
 import { createMinimalPowerDamBreak64Scene } from "../lib/core/scenes";
 import { FluidLabRenderer, gpuSceneSolverKey, gpuSceneUniformKey, type SimulationRunConfig } from "../lib/core/webgpu-renderer";
@@ -27,7 +27,7 @@ test("topology freeze is pane-local, reversible, and cleared on a new timeline",
 
 test("renderer applies freeze transitions to the retained solver without rebuilding", () => {
   const scene = createMinimalPowerDamBreak64Scene();
-  const config: SimulationRunConfig = { methodId: "adaptive-mass", quality: "balanced", values: {} };
+  const config: SimulationRunConfig = { methodId: "adaptive-volume", quality: "balanced", values: {} };
   const key = gpuSceneSolverKey(scene, config);
   assert.equal(gpuSceneSolverKey(scene, { ...config, topologyFrozen: true }), key);
   const calls: boolean[] = [];
@@ -53,7 +53,7 @@ test("renderer applies freeze transitions to the retained solver without rebuild
 
 test("live renderer parameter uploads retain a frozen topology until the toggle is released", () => {
   const scene = createMinimalPowerDamBreak64Scene();
-  const config: SimulationRunConfig = { methodId: "adaptive-mass", quality: "balanced", values: {} };
+  const config: SimulationRunConfig = { methodId: "adaptive-volume", quality: "balanced", values: {} };
   let cancelledPreparations = 0;
   // Exercise the production solver methods without constructing any GPU resources.
   // The browser uploads runtime values on every draw; offline probes do not.

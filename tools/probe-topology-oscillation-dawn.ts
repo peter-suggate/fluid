@@ -4,8 +4,8 @@ import { pathToFileURL } from "node:url";
 import { cloneScene, defaultScene } from "../lib/core/model";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
-import { adaptiveMassSolverOptions } from "../lib/methods/adaptive-mass/method";
-import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+import { adaptiveMassSolverOptions } from "../lib/methods/adaptive-volume/method";
+import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
 const mode = process.env.TOPOLOGY_ARM ?? "fixed";
 assert.ok(["fixed", "oscillate", "allow"].includes(mode));

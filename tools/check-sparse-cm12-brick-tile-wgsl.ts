@@ -6,26 +6,26 @@ import { writeSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
 import { buildSparseAtlasCompositeGrid } from
-  "../lib/methods/adaptive-mass/sparse-atlas-composite-projection";
+  "../lib/methods/adaptive-volume/sparse-atlas-composite-projection";
 import {
   compileSparseCM12BrickTileImage,
   sparseCM12BrickTileCell,
   sparseCM12BrickTileCellAtFine,
   sparseCM12BrickTileRows,
-} from "../lib/methods/adaptive-mass/sparse-cm12-brick-tile-image";
+} from "../lib/methods/adaptive-volume/sparse-cm12-brick-tile-image";
 import { createSparseCM12BrickTileImageWGSL } from
-  "../lib/methods/adaptive-mass/sparse-cm12-brick-tile-image.wgsl";
+  "../lib/methods/adaptive-volume/sparse-cm12-brick-tile-image.wgsl";
 import {
   compileSparseCM12BrickTileFaceProgram,
   validateSparseCM12BrickTileFaceProgram,
-} from "../lib/methods/adaptive-mass/sparse-cm12-brick-tile-face-program";
+} from "../lib/methods/adaptive-volume/sparse-cm12-brick-tile-face-program";
 import {
   sparseBrickKey,
   sparseBrickLadder,
   type SparseAdaptiveMassAtlas,
   type SparseAdaptiveMassBrick,
   type SparseBrickResolution,
-} from "../lib/methods/adaptive-mass/sparse-brick-atlas";
+} from "../lib/methods/adaptive-volume/sparse-brick-atlas";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock,
   releaseWebGPUExclusiveLockSync } from
   "../lib/harness/webgpu-smoke-isolation";

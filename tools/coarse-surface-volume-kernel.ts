@@ -6,7 +6,7 @@ import { readFile } from "node:fs/promises";
  */
 export async function sampleCoarseBowlVolumeKernel(device: GPUDevice, nx: number, ny: number,
   nz: number, h: number, width: number, phase: number): Promise<Float32Array> {
-  const source = await readFile(new URL("../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url), "utf8");
+  const source = await readFile(new URL("../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url), "utf8");
   const functions = ["interpolatedPresentationDensityAt", "presentationInterpolatedDensityPhi"].map(name => {
     const fn = source.match(new RegExp(`fn ${name}\\([\\s\\S]*?\\n}`))?.[0];
     assert.ok(fn, `production ${name}`); return fn;

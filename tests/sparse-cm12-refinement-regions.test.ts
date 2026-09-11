@@ -7,14 +7,14 @@ import { createDeepPowerHydrostaticScene } from "../lib/core/scenes";
 import {
   initializeSparseBrickAtlasFromScene,
   sparseBrickSpan,
-} from "../lib/methods/adaptive-mass/sparse-brick-atlas";
+} from "../lib/methods/adaptive-volume/sparse-brick-atlas";
 import {
   applySparseCM12RefinementRegionResolutionBounds,
   packSparseCM12RefinementRegions,
   sparseCM12RefinementRegionResolutionBoundsForBrick,
   SPARSE_CM12_REFINEMENT_REGION_BYTES,
   SPARSE_CM12_REFINEMENT_REGION_PARAMETER_OFFSET,
-} from "../lib/methods/adaptive-mass/sparse-cm12-refinement-regions";
+} from "../lib/methods/adaptive-volume/sparse-cm12-refinement-regions";
 
 const lattice: RefinementRegionLattice = {
   dimensions: [32, 32, 32],

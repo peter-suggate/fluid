@@ -6,7 +6,7 @@ import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
 
 const source = readFileSync(new URL(
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url), "utf8");
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url), "utf8");
 const unpack = source.match(/fn cm12UnpackActivityFlags\([\s\S]*?\n}/)?.[0];
 assert.ok(unpack);
 const packing = source.match(/activityMasks\[lane\]=(vec2u\([\s\S]*?);/)?.[1];

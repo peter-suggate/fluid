@@ -11,7 +11,7 @@ import { writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { buildSparseAtlasCompositeGrid } from
-  "../lib/methods/adaptive-mass/sparse-atlas-composite-projection";
+  "../lib/methods/adaptive-volume/sparse-atlas-composite-projection";
 import {
   SPARSE_CM12_BRICK_TILE_IMAGE_FLAG,
   SPARSE_CM12_BRICK_TILE_IMAGE_TILE,
@@ -21,23 +21,23 @@ import {
   sparseCM12BrickTileCellAtFine,
   sparseCM12BrickTileRows,
   validateSparseCM12BrickTileImage,
-} from "../lib/methods/adaptive-mass/sparse-cm12-brick-tile-image";
+} from "../lib/methods/adaptive-volume/sparse-cm12-brick-tile-image";
 import {
   createSparseCM12LogicalOwnerDirectory,
   sparseCM12LogicalOwnerCellAtFine,
   type SparseCM12LogicalOwnerRuntime,
-} from "../lib/methods/adaptive-mass/sparse-cm12-logical-owner-directory";
+} from "../lib/methods/adaptive-volume/sparse-cm12-logical-owner-directory";
 import {
   SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_INVALID,
   SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_PACKET_WORDS,
   createSparseCM12TransportExecutionImage,
-} from "../lib/methods/adaptive-mass/sparse-cm12-transport-execution-image";
+} from "../lib/methods/adaptive-volume/sparse-cm12-transport-execution-image";
 import {
   createSparseAdaptiveMassAtlas,
   sparseBrickKey,
   type SparseAdaptiveMassBrick,
   type SparseBrickResolution,
-} from "../lib/methods/adaptive-mass/sparse-brick-atlas";
+} from "../lib/methods/adaptive-volume/sparse-brick-atlas";
 
 const args = new Map(process.argv.slice(2).map((argument) => {
   const [key, value = "true"] = argument.replace(/^--/, "").split("=", 2);

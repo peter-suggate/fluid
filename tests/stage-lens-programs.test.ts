@@ -11,7 +11,7 @@ import { stageLensProgramWGSL } from "../lib/core/webgpu-stage-lens-overlay";
 import {
   SPARSE_CM12_LENSES,
   SPARSE_CM12_STAGE_LENSES,
-} from "../lib/methods/adaptive-mass/sparse-cm12-stage-lenses";
+} from "../lib/methods/adaptive-volume/sparse-cm12-stage-lenses";
 
 /**
  * A lens is a declaration plus a snippet, and neither half is executed until a
@@ -105,7 +105,7 @@ test("every lens program composes into a complete WGSL module", () => {
  */
 test("every declared tap is captured in its own stage's encode body", () => {
   const source = readFileSync(new URL(
-    "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts", import.meta.url), "utf8");
+    "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.ts", import.meta.url), "utf8");
   for (const lens of SPARSE_CM12_LENSES) {
     // Stages that tap a lens take it from the encode context: `({ lens }) =>`.
     const sentinel = `stage("${lens.stage}", (`;

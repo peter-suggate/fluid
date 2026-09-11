@@ -20,9 +20,9 @@ import {
   acquireWebGPUExclusiveLock,
   releaseWebGPUExclusiveLock,
 } from "../lib/harness/webgpu-smoke-isolation";
-import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
+import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 import { decodeSparseCM12SignedPresentationKey } from
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident";
 import type { SparseWorld, SparseWorldPresentation } from "../lib/sparse-world";
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;

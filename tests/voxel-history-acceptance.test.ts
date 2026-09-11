@@ -10,7 +10,7 @@ test("voxel history awaits atomic acceptance and wet rejection preserves documen
   const base = cloneScene(defaultScene);
   const edited = { ...base, solidVoxels: [...base.solidVoxels,
     { operation: "fill" as const, minimum: [1, 0, 1] as [number, number, number], maximumExclusive: [2, 1, 2] as [number, number, number] }] };
-  session.method.getState().setMethodId("adaptive-mass");
+  session.method.getState().setMethodId("adaptive-volume");
   session.ui.setState({ voxelStrokePending: false });
   session.scene.getState().setScene(edited, "test");
   session.history.getState().clear();
@@ -57,7 +57,7 @@ test("mirrored voxel publication restores the accepted document while the receiv
   const previous = cloneScene(defaultScene);
   const next = { ...previous, solidVoxels: [...previous.solidVoxels,
     { operation: "fill" as const, minimum: [1, 0, 1] as [number, number, number], maximumExclusive: [2, 1, 2] as [number, number, number] }] };
-  session.method.getState().setMethodId("adaptive-mass");
+  session.method.getState().setMethodId("adaptive-volume");
   session.ui.setState({ voxelStrokePending: false });
   let reject!: (error: Error) => void;
   const dispose = simulation.registerLiveSolidEditAcceptance(session.id, () => new Promise<void>((_yes, no) => { reject = no; }));

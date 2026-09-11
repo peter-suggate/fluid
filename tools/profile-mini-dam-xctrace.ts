@@ -433,7 +433,7 @@ const inheritedLaneEnvironment = uniformMini64 ? {
   FLUID_UNIFORM_DENSITY_POSTPROCESSING: "0",
 } : laneSteps === undefined
   ? POWER_DAM_LANE_ENVIRONMENT[lane] : powerDamLaneWithSteps(lane, laneSteps);
-const laneEnvironment = methodOverride === "adaptive-mass" ? {
+const laneEnvironment = methodOverride === "adaptive-volume" ? {
   ...inheritedLaneEnvironment,
   // Sparse CM12's shipping preset owns the CM12 paper cadence. The Power/Losasso
   // lane catalog uses 0.004 s; forwarding that value makes every Sparse CM12

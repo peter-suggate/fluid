@@ -1,7 +1,7 @@
 import {
   probeTwoTileSurfaceConditioning,
   type SurfaceConditioningVariantReceipt,
-} from "../lib/methods/adaptive-mass/two-tile-surface-conditioning";
+} from "../lib/methods/adaptive-volume/two-tile-surface-conditioning";
 
 const argument = (name: string): string | undefined => {
   const prefix = `--${name}=`;

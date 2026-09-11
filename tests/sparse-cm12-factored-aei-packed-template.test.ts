@@ -3,7 +3,7 @@ import test from "node:test";
 import {
   SPARSE_CM12_PACKED_TEMPLATE_MAGIC,
   compileSparseCM12FactoredAEIPackedTemplateCatalog,
-} from "../lib/methods/adaptive-mass/sparse-cm12-factored-aei-packed-template";
+} from "../lib/methods/adaptive-volume/sparse-cm12-factored-aei-packed-template";
 
 const bits = (value: number): number => {
   const buffer = new ArrayBuffer(4);

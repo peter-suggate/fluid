@@ -1,36 +1,36 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildSparseAtlasCompositeGrid } from
-  "../lib/methods/adaptive-mass/sparse-atlas-composite-projection";
+  "../lib/methods/adaptive-volume/sparse-atlas-composite-projection";
 import { compileSparseCM12BrickTileImage } from
-  "../lib/methods/adaptive-mass/sparse-cm12-brick-tile-image";
+  "../lib/methods/adaptive-volume/sparse-cm12-brick-tile-image";
 import {
   SPARSE_CM12_BRICK_TILE_FACE_PROGRAM_FLAG,
   SPARSE_CM12_BRICK_TILE_FACE_PROGRAM_HEADER,
   compileSparseCM12BrickTileFaceProgram,
   sparseCM12BrickTileFaceProgramSeamPort,
   validateSparseCM12BrickTileFaceProgram,
-} from "../lib/methods/adaptive-mass/sparse-cm12-brick-tile-face-program";
+} from "../lib/methods/adaptive-volume/sparse-cm12-brick-tile-face-program";
 import { createSparseCM12BrickTileFaceProgramWGSL } from
-  "../lib/methods/adaptive-mass/sparse-cm12-brick-tile-face-program.wgsl";
+  "../lib/methods/adaptive-volume/sparse-cm12-brick-tile-face-program.wgsl";
 import {
   compileSparseCM12BrickTileFaceAddressProgram,
   validateSparseCM12BrickTileFaceAddressCoverage,
-} from "../lib/methods/adaptive-mass/sparse-cm12-brick-tile-face-address-program";
+} from "../lib/methods/adaptive-volume/sparse-cm12-brick-tile-face-address-program";
 import { createSparseCM12BrickTileFaceAddressWGSL } from
-  "../lib/methods/adaptive-mass/sparse-cm12-brick-tile-face-address-program.wgsl";
+  "../lib/methods/adaptive-volume/sparse-cm12-brick-tile-face-address-program.wgsl";
 import { compileSparseCM12FactoredAEIPackedTemplateCatalog } from
-  "../lib/methods/adaptive-mass/sparse-cm12-factored-aei-packed-template";
+  "../lib/methods/adaptive-volume/sparse-cm12-factored-aei-packed-template";
 import { compileSparseCM12InternedBoundaryOperators } from
-  "../lib/methods/adaptive-mass/sparse-cm12-interned-boundary-operators";
+  "../lib/methods/adaptive-volume/sparse-cm12-interned-boundary-operators";
 import { packSparseCM12ResidentTopologyTemplatesForQA } from
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident";
 import {
   createSparseAdaptiveMassAtlas,
   sparseBrickKey,
   type SparseAdaptiveMassBrick,
   type SparseBrickResolution,
-} from "../lib/methods/adaptive-mass/sparse-brick-atlas";
+} from "../lib/methods/adaptive-volume/sparse-brick-atlas";
 
 const sourceBrick = (
   x: number,

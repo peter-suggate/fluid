@@ -94,7 +94,7 @@ export const POWER_VALIDATION_METHOD_PROFILE: MethodProfile = Object.freeze({
  * explicitly, which is what a matched-dt comparison lane is for.
  */
 export const SPARSE_CM12_LONG_DAM_METHOD_PROFILE: MethodProfile = Object.freeze({
-  methodId: "adaptive-mass",
+  methodId: "adaptive-volume",
   quality: "balanced",
   overrides: Object.freeze({
     // These thresholds remain the long-dam activity tuning when that optional
@@ -108,7 +108,7 @@ export const SPARSE_CM12_LONG_DAM_METHOD_PROFILE: MethodProfile = Object.freeze(
 
 /** The production UI tuple exercised by every Sparse CM12 complexity rung. */
 export const SPARSE_CM12_COMPLEXITY_LADDER_METHOD_PROFILE: MethodProfile = Object.freeze({
-  methodId: "adaptive-mass",
+  methodId: "adaptive-volume",
   quality: "balanced",
   overrides: Object.freeze({
     brickFineResolution: "8",
@@ -121,7 +121,7 @@ export const SPARSE_CM12_COMPLEXITY_LADDER_METHOD_PROFILE: MethodProfile = Objec
 
 /** Conservative profile for the small bounded transfer demonstration. */
 export const BOUNDED_POOL_TRANSFER_METHOD_PROFILE: MethodProfile = Object.freeze({
-  methodId: "adaptive-mass",
+  methodId: "adaptive-volume",
   quality: "balanced",
   overrides: Object.freeze({
     brickFineResolution: "8",
@@ -250,7 +250,7 @@ export const SYMMETRIC_EXPANSION_METHOD_PROFILE = ADAPTIVE_LOSASSO_UI_METHOD_PRO
  */
 export const SPARSE_CM12_SYMMETRIC_EXPANSION_METHOD_PROFILE:
 MethodProfile = Object.freeze({
-  methodId: "adaptive-mass",
+  methodId: "adaptive-volume",
   quality: "balanced",
   overrides: Object.freeze({
     brickFineResolution: "8",
@@ -2401,7 +2401,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     audience: "validation", shelf: "Analytic motion", environment: "stage",
     build: () => createAnalyticMotionScene(motion),
     camera: { distance_m: 2.6, target_m: { x: 0, y: .8, z: 0 }, elevation_rad: .3, azimuth_rad: .45 },
-    methodProfile: { methodId: "adaptive-mass", quality: "balanced", overrides: {
+    methodProfile: { methodId: "adaptive-volume", quality: "balanced", overrides: {
       selectorMode: "coarse-first", maximumMacroSpanBricks: "1", timeStep: "scene",
       gammaDiffusion: "on", surfaceSharpening: "on",
     } },
@@ -2412,7 +2412,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     audience: "validation", shelf: "Analytic motion", environment: "stage",
     build: createRerungFreeFallScene,
     camera: { distance_m: 2.6, target_m: { x: 0, y: .8, z: 0 }, elevation_rad: .3, azimuth_rad: .45 },
-    methodProfile: { methodId: "adaptive-mass", quality: "balanced", overrides: {
+    methodProfile: { methodId: "adaptive-volume", quality: "balanced", overrides: {
       selectorMode: "coarse-first", maximumMacroSpanBricks: "1", timeStep: "scene",
       gammaDiffusion: "on", surfaceSharpening: "on",
     } },
@@ -2426,7 +2426,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     audience: "validation", shelf: "Analytic motion", environment: "stage",
     build: () => createStandingWaveScene(live),
     camera: { distance_m: 2.6, target_m: { x: 0, y: .5, z: 0 }, elevation_rad: .3, azimuth_rad: .45 },
-    methodProfile: { methodId: "adaptive-mass", quality: "balanced", overrides: {
+    methodProfile: { methodId: "adaptive-volume", quality: "balanced", overrides: {
       selectorMode: "coarse-first", maximumMacroSpanBricks: "1", timeStep: "scene",
       curvatureTolerance: .05, gammaDiffusion: "on", surfaceSharpening: "on",
     } },
@@ -2442,7 +2442,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     environment: "stage",
     build: () => createStationaryBowlScene(curvatureMultiplier),
     camera: { distance_m: 4.6, target_m: { x: 0, y: .65, z: 0 }, elevation_rad: .58, azimuth_rad: .72 },
-    methodProfile: { methodId: "adaptive-mass", quality: "balanced", overrides: {
+    methodProfile: { methodId: "adaptive-volume", quality: "balanced", overrides: {
       selectorMode: "coarse-first", maximumMacroSpanBricks: "1", timeStep: "scene",
       gammaDiffusion: "on", surfaceSharpening: "on",
     } },
@@ -2561,10 +2561,10 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   }),
   ...SPARSE_CM12_COMPLEXITY_SCENES.map((rung) => defineScene({
     id: `sparse-cm12-ladder-${rung.id}`,
-    name: `Sparse CM12 ${String(rung.ordinal).padStart(2, "0")} · ${rung.title}`,
+    name: `Sparse Geometric ${String(rung.ordinal).padStart(2, "0")} · ${rung.title}`,
     blurb: `${rung.introducedFeature}. Dawn's default observation window is ${rung.defaultSteps} solver ${rung.defaultSteps === 1 ? "step" : "steps"}.`,
     audience: "validation",
-    shelf: "Sparse CM12 complexity ladder",
+    shelf: "Sparse Geometric complexity ladder",
     environment: "stage",
     methodProfile: SPARSE_CM12_COMPLEXITY_LADDER_METHOD_PROFILE,
     build: () => createSparseCM12ComplexityScene(rung.id),
@@ -2596,7 +2596,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     name: "Falling water torus",
     blurb: "A suspended ring of water drops onto a dry floor. Watch the hole deform as the ring flattens and spreads on impact.",
     audience: "explore", shelf: "Tanks", environment: "stage",
-    methodProfile: { methodId: "adaptive-mass", quality: "balanced", overrides: {
+    methodProfile: { methodId: "adaptive-volume", quality: "balanced", overrides: {
       selectorMode: "coarse-first", timeStep: "paper", brickFineResolution: "8",
       surfaceMeshRefinement: "2",
     } },
@@ -2608,7 +2608,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     name: "Coarse-first · ball into still pool",
     blurb: "A fine liquid ball falls into a broad hydrostatic pool. Coarse-first adaptation refines from curvature, energy and approaching liquid without authored refinement regions.",
     audience: "validation", shelf: "Dam-break ladder", environment: "stage",
-    methodProfile: { methodId: "adaptive-mass", quality: "balanced", overrides: {
+    methodProfile: { methodId: "adaptive-volume", quality: "balanced", overrides: {
       selectorMode: "coarse-first", timeStep: "paper", brickFineResolution: "8",
     } },
     build: createCoarseFirstPoolImpactScene,
@@ -2619,7 +2619,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     name: "Coarse-first · ball into still pool (half size)",
     blurb: "The same pool impact at half the physical dimensions: a 64×48×64 lattice with a proportionally smaller falling ball. Keeps 0.05 m finest cells, with one eighth of the original lattice volume.",
     audience: "validation", shelf: "Dam-break ladder", environment: "stage",
-    methodProfile: { methodId: "adaptive-mass", quality: "balanced", overrides: {
+    methodProfile: { methodId: "adaptive-volume", quality: "balanced", overrides: {
       selectorMode: "coarse-first", timeStep: "paper", brickFineResolution: "8",
     } },
     build: createCoarseFirstPoolImpactHalfScene,
@@ -2630,7 +2630,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     name: "Coarse-first · ball into still pool (quarter size)",
     blurb: "The same pool impact at one quarter the physical dimensions: a 32×24×32 lattice with a proportionally smaller falling ball. Keeps 0.05 m finest cells, with one sixty-fourth of the original lattice volume.",
     audience: "validation", shelf: "Dam-break ladder", environment: "stage",
-    methodProfile: { methodId: "adaptive-mass", quality: "balanced", overrides: {
+    methodProfile: { methodId: "adaptive-volume", quality: "balanced", overrides: {
       selectorMode: "coarse-first", timeStep: "paper", brickFineResolution: "8",
     } },
     build: createCoarseFirstPoolImpactQuarterScene,
@@ -2649,7 +2649,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   }),
   defineScene({
     id: "sparse-cm12-long-dam-break",
-    name: "Sparse CM12 · long-tank dam break",
+    name: "Sparse Geometric · long-tank dam break",
     blurb: "A 192x96x32 tall, narrow tank with a full-width reservoir at the negative end. Its doubled empty air column showcases sparse omission while the canonical gate follows the front across twenty initially dry brick columns and checks resident 2:1 transitions, conservation, and Uniform comparison checkpoints.",
     audience: "validation",
     shelf: "Dam-break ladder",
@@ -2690,8 +2690,8 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   }),
   defineScene({
     id: "sparse-cm12-symmetric-expansion",
-    name: "Sparse CM12 · symmetric expansion",
-    blurb: "The exact 32×16×32 D4 expansion oracle on the production Sparse CM12 B8/P8 resident. The card uses the real-time production pressure budget; a separate 108-iteration Dawn lane preserves the stricter accuracy oracle.",
+    name: "Sparse Geometric · symmetric expansion",
+    blurb: "The exact 32×16×32 D4 expansion oracle on the production Sparse Geometric B8/P8 resident (copied CM12 algorithm). The card uses the real-time production pressure budget; a separate 108-iteration Dawn lane preserves the stricter accuracy oracle.",
     audience: "validation",
     shelf: "Symmetry",
     environment: "stage",

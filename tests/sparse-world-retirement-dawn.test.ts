@@ -12,9 +12,9 @@ import {
   acquireWebGPUExclusiveLock,
   releaseWebGPUExclusiveLock,
 } from "../lib/harness/webgpu-smoke-isolation";
-import { SPARSE_CM12_ACTIVITY_POLICY } from "../lib/methods/adaptive-mass/features/adaptivity/policy";
+import { SPARSE_CM12_ACTIVITY_POLICY } from "../lib/methods/adaptive-volume/features/adaptivity/policy";
 import { WebGPUAdaptiveMassSolver } from
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+  "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 const dawnTest = dawnModule ? test : test.skip;

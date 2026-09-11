@@ -18,12 +18,12 @@ test("quarter pool and Uniform now agree by default; explicit incompatible steps
   const a = createPaneSession("a"), b = createPaneSession("b");
   a.scene.setState({ scene: createCoarseFirstPoolImpactQuarterScene() });
   b.scene.setState({ scene: createCoarseFirstPoolImpactQuarterScene() });
-  a.method.setState({ methodId: "adaptive-mass" });
+  a.method.setState({ methodId: "adaptive-volume" });
   b.method.setState({ methodId: "uniform" });
   assert.equal(effectiveSimulationStep_s(a.scene.getState().scene, a.method.getState()), 1 / 30);
   assert.equal(effectiveSimulationStep_s(b.scene.getState().scene, b.method.getState()), 1 / 30);
   assert.equal(hostTransportFailure([a, b]), undefined);
-  a.method.setState({ overrides: { "adaptive-mass": { timeStep: "scene" } } });
+  a.method.setState({ overrides: { "adaptive-volume": { timeStep: "scene" } } });
   a.scene.getState().patchNumerics({ fixedDt_s: 1 / 60, maxDt_s: 1 / 60 });
   assert.match(hostTransportFailure([a, b])!, /A = 16.67 ms, B = 33.33 ms/);
   assert.equal(a.scene.getState().scene.numerics.fixedDt_s, 1 / 60, "preflight must not silently repair user settings");

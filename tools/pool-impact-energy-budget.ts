@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
 /** Read-only stage copies on a fixed, authored topology; no tracer kernels. */
 export async function createPoolEnergyBudget(device: GPUDevice, solver: WebGPUAdaptiveMassSolver,

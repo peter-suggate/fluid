@@ -14,8 +14,8 @@ import { sceneDocument } from '../lib/core/scene-definition';
 import { getSceneDefinition } from '../lib/core/scenes';
 import { requiredFluidDeviceLimits } from '../lib/core/webgpu-device-limits';
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from '../lib/harness/webgpu-smoke-isolation';
-import { adaptiveMassMethod } from '../lib/methods/adaptive-mass/method';
-import type { WebGPUAdaptiveMassSolver } from '../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver';
+import { adaptiveMassMethod } from '../lib/methods/adaptive-volume/method';
+import type { WebGPUAdaptiveMassSolver } from '../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver';
 
 const steps=Number(process.env.OCEAN_STEPS ?? 10);
 assert.ok(Number.isSafeInteger(steps)&&steps>0);
@@ -30,7 +30,7 @@ try {
   device = await adapter.requestDevice({requiredFeatures:['timestamp-query'], requiredLimits:requiredFluidDeviceLimits(adapter.limits)});
   const errors: string[] = [];
   device!.addEventListener('uncapturederror', e => { e.preventDefault(); errors.push(e.error.message); console.error(e.error.message); });
-  const sourceHash=createHash('sha256').update(await readFile(new URL('../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts',import.meta.url))).digest('hex');
+  const sourceHash=createHash('sha256').update(await readFile(new URL('../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts',import.meta.url))).digest('hex');
   const scene = sceneDocument(getSceneDefinition('ocean-seiche'));
   const values = resolveMethodValues(adaptiveMassMethod, 'balanced', {selectorMode:'coarse-first',timeStep:'paper'});
   solver = await adaptiveMassMethod.createSolverAsync!(device!, scene, 'balanced', values, undefined, phase => console.error(phase)) as WebGPUAdaptiveMassSolver;

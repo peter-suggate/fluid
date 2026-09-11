@@ -6,9 +6,9 @@ import {
   SPARSE_CM12_PHASE1_TRANSPORT_QA_HEADER_WORDS,
   createSparseCM12Phase1TransportQALayout,
   sparseCM12Phase1Sha256,
-} from "../lib/methods/adaptive-mass/sparse-cm12-phase1-transport-receipt";
+} from "../lib/methods/adaptive-volume/sparse-cm12-phase1-transport-receipt";
 import { createSparseCM12Phase1TransportQAWGSL } from
-  "../lib/methods/adaptive-mass/sparse-cm12-phase1-transport-receipt.wgsl";
+  "../lib/methods/adaptive-volume/sparse-cm12-phase1-transport-receipt.wgsl";
 
 test("Phase-1 QA layout is an exact non-overlapping 50-word-per-cell receipt", () => {
   const layout = createSparseCM12Phase1TransportQALayout({
@@ -64,7 +64,7 @@ test("Phase-1 receipt hashes raw bytes", async () => {
 
 test("Sparse CM12 receipts retain mixed-resolution signed range", () => {
   const resident = readFileSync(new URL(
-    "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts",
+    "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts",
     import.meta.url,
   ), "utf8");
   assert.match(resident,

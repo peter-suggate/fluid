@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {pathToFileURL} from 'node:url';
 import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from '../lib/harness/webgpu-smoke-isolation';
-import {createSparseCM12VelocityExtensionLayout,createSparseCM12VelocityExtensionInitialWords} from '../lib/methods/adaptive-mass/sparse-cm12-velocity-extension';
-import {createSparseCM12VelocityExtensionWGSL} from '../lib/methods/adaptive-mass/sparse-cm12-velocity-extension.wgsl';
+import {createSparseCM12VelocityExtensionLayout,createSparseCM12VelocityExtensionInitialWords} from '../lib/methods/adaptive-volume/sparse-cm12-velocity-extension';
+import {createSparseCM12VelocityExtensionWGSL} from '../lib/methods/adaptive-volume/sparse-cm12-velocity-extension.wgsl';
 const dawnTest=process.env.WEBGPU_NODE_MODULE?test:test.skip;
 dawnTest('VEX rebuild initializes direct once, clears retired banks, and schedules only accepted sweeps',async()=>{
  await acquireWebGPUExclusiveLock('dawn-test','vex-rebuild');let device:GPUDevice|undefined;

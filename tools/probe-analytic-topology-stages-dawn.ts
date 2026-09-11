@@ -10,8 +10,8 @@ import { getSceneDefinition } from '../lib/core/scenes';
 import { resolveMethodValues } from '../lib/core/method-contract';
 import { requiredFluidDeviceLimits } from '../lib/core/webgpu-device-limits';
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from '../lib/harness/webgpu-smoke-isolation';
-import { adaptiveMassMethod } from '../lib/methods/adaptive-mass/method';
-import type { WebGPUAdaptiveMassSolver } from '../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver';
+import { adaptiveMassMethod } from '../lib/methods/adaptive-volume/method';
+import type { WebGPUAdaptiveMassSolver } from '../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver';
 const arg=(name:string,fallback:string)=>process.argv.find(a=>a.startsWith(`--${name}=`))?.split('=')[1]??fallback;
 const lane=arg('lane','mixed'), motion=arg('motion','translation'), steps=Number(arg('steps','6'));
 const seamWidth=Number(arg('seam-width','8'));
@@ -48,9 +48,9 @@ try {
     min_m:{x:-.8,y:0,z:-.2},max_m:{x:.8,y:scene.container.height_m,z:.2}}];
    delete scene.fluid.refinementKeyframes;
  }
- const files=['lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts',
-   'lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts','lib/methods/adaptive-mass/sparse-cm12-velocity-extension.wgsl.ts',
-   'lib/methods/adaptive-mass/sparse-cm12-transport-execution-image.wgsl.ts'];
+ const files=['lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts',
+   'lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.ts','lib/methods/adaptive-volume/sparse-cm12-velocity-extension.wgsl.ts',
+   'lib/methods/adaptive-volume/sparse-cm12-transport-execution-image.wgsl.ts'];
  writeFileSync(`${artifactDirectory}/configuration.json`,JSON.stringify({lane,motion,seamWidth,steps,scene,
    sourceSha256:Object.fromEntries(files.map(file=>[file,createHash('sha256').update(readFileSync(file)).digest('hex')]))},null,2));
  const values=resolveMethodValues(adaptiveMassMethod,'balanced',definition.methodProfile!.overrides);

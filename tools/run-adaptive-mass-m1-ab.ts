@@ -9,7 +9,7 @@ import {
 } from "../lib/harness/adaptive-mass-m1-ab-report";
 import {
   probeTwoTileCompositeGrid,
-} from "../lib/methods/adaptive-mass/two-tile-composite-grid";
+} from "../lib/methods/adaptive-volume/two-tile-composite-grid";
 
 const argument = (name: string): string | undefined => {
   const args = process.argv.slice(2);

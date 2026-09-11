@@ -10,7 +10,7 @@ import { WebGPULiveSvoScene } from "../lib/svo/features/scene-publication/webgpu
 
 const node = createSceneryNodeAt(defaultScene, "oak-v2", { x: 0, y: 0, z: 0 }, { x: 0, y: 1, z: 0 });
 const scene = { ...defaultScene, scenery: { palettes: {}, nodes: [node] } };
-const config: SimulationRunConfig = { methodId: "adaptive-mass", quality: "balanced", values: {} };
+const config: SimulationRunConfig = { methodId: "adaptive-volume", quality: "balanced", values: {} };
 // The tests exercise the existing source replacement seam, with GPU construction
 // mocked so ownership/retirement bugs can be caught without a native device.
 type RendererAccess = {

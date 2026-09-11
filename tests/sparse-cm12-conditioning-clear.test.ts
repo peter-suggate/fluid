@@ -3,11 +3,11 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const resident = readFileSync(new URL(
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.ts",
   import.meta.url,
 ), "utf8");
 const shader = readFileSync(new URL(
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts",
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts",
   import.meta.url,
 ), "utf8");
 

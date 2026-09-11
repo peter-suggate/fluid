@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
 /** Native accepted-cell/face measurements, captured after real production stages. */
 export async function createSparseWaveStageAudit(device: GPUDevice, solver: WebGPUAdaptiveMassSolver,

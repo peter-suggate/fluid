@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { sparseCM12HostTemplateVariantsEnabled, sparseCM12TopologyPagePoolPlan } from
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident";
 
 test("host rerung admission budgets expanded cells and rows, not only bricks", () => {
   assert.equal(sparseCM12HostTemplateVariantsEnabled(

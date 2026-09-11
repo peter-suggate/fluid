@@ -9,7 +9,7 @@ import {
   type SparseAdaptiveMassAtlas,
   type SparseAdaptiveMassBrick,
   type SparseBrickResolution,
-} from "../lib/methods/adaptive-mass/sparse-brick-atlas";
+} from "../lib/methods/adaptive-volume/sparse-brick-atlas";
 import {
   SPARSE_CM12_LOGICAL_OWNER_HEADER,
   SPARSE_CM12_LOGICAL_OWNER_HEADER_WORDS,
@@ -21,9 +21,9 @@ import {
   sparseCM12LogicalOwnerHeaderValid,
   type SparseCM12LogicalOwnerDirectory,
   type SparseCM12LogicalOwnerRuntime,
-} from "../lib/methods/adaptive-mass/sparse-cm12-logical-owner-directory";
+} from "../lib/methods/adaptive-volume/sparse-cm12-logical-owner-directory";
 import { createSparseCM12LogicalOwnerDirectoryWGSL } from
-  "../lib/methods/adaptive-mass/sparse-cm12-logical-owner-directory.wgsl";
+  "../lib/methods/adaptive-volume/sparse-cm12-logical-owner-directory.wgsl";
 
 const OUTPUT_WORDS = 10;
 const CELL_STRIDE = 4096;

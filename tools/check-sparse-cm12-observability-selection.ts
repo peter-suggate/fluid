@@ -7,11 +7,11 @@ import { parseQueryState, serializeQueryState } from "../lib/core/url-state";
 import {
   adaptiveMassMethod,
   adaptiveMassSolverOptions,
-} from "../lib/methods/adaptive-mass/method";
+} from "../lib/methods/adaptive-volume/method";
 
-const residentPath = "lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts";
-const shaderPath = "lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts";
-const methodPath = "lib/methods/adaptive-mass/method.ts";
+const residentPath = "lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.ts";
+const shaderPath = "lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts";
+const methodPath = "lib/methods/adaptive-volume/method.ts";
 const overlayPath = "lib/core/webgpu-grid-overlay.ts";
 const resident = readFileSync(residentPath, "utf8");
 const shader = readFileSync(shaderPath, "utf8");
@@ -97,22 +97,22 @@ for (const fixture of [
   assert.equal(options.presentationPageResolution, Number(expected));
 }
 for (const brick of ["4", "8"] as const) {
-  const state = parseQueryState(`?method=adaptive-mass&param.adaptive-mass.brickFineResolution=${brick}`
-    + "&param.adaptive-mass.presentationPageResolution=4");
-  assert.equal(state.overrides["adaptive-mass"]?.brickFineResolution, brick);
-  assert.equal(state.overrides["adaptive-mass"]?.presentationPageResolution, undefined);
+  const state = parseQueryState(`?method=adaptive-volume&param.adaptive-volume.brickFineResolution=${brick}`
+    + "&param.adaptive-volume.presentationPageResolution=4");
+  assert.equal(state.overrides["adaptive-volume"]?.brickFineResolution, brick);
+  assert.equal(state.overrides["adaptive-volume"]?.presentationPageResolution, undefined);
   const values = resolveMethodValues(adaptiveMassMethod, "balanced",
-    state.overrides["adaptive-mass"] ?? {});
+    state.overrides["adaptive-volume"] ?? {});
   const expected = brick;
   assert.equal(values.brickFineResolution, expected);
   assert.equal(values.presentationPageResolution, expected);
-  const canonical = serializeQueryState("?param.adaptive-mass.presentationPageResolution=4",
+  const canonical = serializeQueryState("?param.adaptive-volume.presentationPageResolution=4",
     { presetId: state.presetId, scene: state.scene },
     { methodId: state.methodId, quality: state.quality, overrides: state.overrides }, state.ui);
   assert.equal(new URLSearchParams(canonical)
-    .has("param.adaptive-mass.presentationPageResolution"), false);
+    .has("param.adaptive-volume.presentationPageResolution"), false);
   assert.equal(new URLSearchParams(canonical)
-    .has("param.adaptive-mass.brickFineResolution"), true);
+    .has("param.adaptive-volume.brickFineResolution"), true);
 }
 const defaultValues = resolveMethodValues(adaptiveMassMethod, "balanced", {});
 assert.equal(defaultValues.brickFineResolution, "8");

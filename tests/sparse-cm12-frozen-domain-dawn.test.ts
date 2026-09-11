@@ -8,9 +8,9 @@ import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
 import { adaptiveMassMethod, adaptiveMassSolverOptions } from
-  "../lib/methods/adaptive-mass/method";
+  "../lib/methods/adaptive-volume/method";
 import { WebGPUAdaptiveMassSolver } from
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+  "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 const dawnTest = modulePath ? test : test.skip;

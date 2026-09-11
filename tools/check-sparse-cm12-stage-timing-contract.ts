@@ -5,10 +5,10 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 const [capture, recorder, resident, probe, baseline] = await Promise.all([
-  readFile(new URL("../lib/methods/adaptive-mass/adaptive-mass-frame-pipeline.ts",
+  readFile(new URL("../lib/methods/adaptive-volume/adaptive-mass-frame-pipeline.ts",
     import.meta.url), "utf8"),
   readFile(new URL("../lib/core/performance-trace.ts", import.meta.url), "utf8"),
-  readFile(new URL("../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
+  readFile(new URL("../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.ts",
     import.meta.url), "utf8"),
   readFile(new URL("./probe-sparse-cm12-stage-cost.ts", import.meta.url), "utf8"),
   readFile(new URL("../artifacts/sparse-cm12-ocean-b16-p16-stage-cost-baseline.json",

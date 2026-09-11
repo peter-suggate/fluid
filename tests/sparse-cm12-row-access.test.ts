@@ -5,7 +5,7 @@ import {
   createSparseCM12CellAccessWGSL,
   createSparseCM12RowAccessWGSL,
   SPARSE_CM12_ATOMIC_ARENA_READERS,
-} from "../lib/methods/adaptive-mass/sparse-cm12-row-access.wgsl";
+} from "../lib/methods/adaptive-volume/sparse-cm12-row-access.wgsl";
 
 test("dynamic B8 cell geometry is derived instead of loaded from page records", () => {
   const wgsl = createSparseCM12CellAccessWGSL(

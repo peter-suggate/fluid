@@ -13,7 +13,7 @@ import type { EffectiveRendererStatus } from "../lib/core/renderer-status";
 
 test("a dry scene adopts voxel edits without alternating rebuild identities", () => {
   const scene = createEmptyScene();
-  const config = { methodId: "adaptive-mass", quality: "balanced", values: {} } as SimulationRunConfig;
+  const config = { methodId: "adaptive-volume", quality: "balanced", values: {} } as SimulationRunConfig;
   const staged: SceneDescription[] = [];
   const source = { stageSceneUpdate(next: SceneDescription) { staged.push(next); }, info: {} } as unknown as GPUSolverInstance;
   const renderer = new FluidLabRenderer({} as HTMLCanvasElement, () => {});
@@ -63,7 +63,7 @@ test("replacing a pending initializer retires the superseded resource's progress
     gpuFluidInitializationAbort: abort,
     gpuFluidInitializationResource: liveSvoSceneResourcePlugin,
   });
-  const config = { methodId: "adaptive-mass", quality: "balanced", values: {} } as SimulationRunConfig;
+  const config = { methodId: "adaptive-volume", quality: "balanced", values: {} } as SimulationRunConfig;
   const access = renderer as unknown as {
     beginGPUFluidInitialization(scene: SceneDescription, config: SimulationRunConfig, key: string, mode: "full-scene"): void;
   };

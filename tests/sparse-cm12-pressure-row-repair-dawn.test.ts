@@ -3,8 +3,8 @@ import {readFileSync} from 'node:fs';
 import test from 'node:test';
 import {pathToFileURL} from 'node:url';
 import {acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock} from '../lib/harness/webgpu-smoke-isolation';
-import {createSparseCM12CanonicalMembershipLayout, createSparseCM12CanonicalMembershipInitialWords} from '../lib/methods/adaptive-mass/sparse-cm12-canonical-membership';
-import {createSparseCM12CanonicalMembershipWGSL} from '../lib/methods/adaptive-mass/sparse-cm12-canonical-membership.wgsl';
+import {createSparseCM12CanonicalMembershipLayout, createSparseCM12CanonicalMembershipInitialWords} from '../lib/methods/adaptive-volume/sparse-cm12-canonical-membership';
+import {createSparseCM12CanonicalMembershipWGSL} from '../lib/methods/adaptive-volume/sparse-cm12-canonical-membership.wgsl';
 
 const dawnTest=process.env.WEBGPU_NODE_MODULE?test:test.skip;
 dawnTest('compact pressure row tiles match full publication through dirty, retired, recycled and empty epochs', async()=>{
@@ -18,7 +18,7 @@ dawnTest('compact pressure row tiles match full publication through dirty, retir
     const errors:string[]=[];device.addEventListener('uncapturederror',e=>errors.push(e.error.message));
     const capacity=131; // Final tile has one bitmap word, with only three valid bits.
     const layout=createSparseCM12CanonicalMembershipLayout({cellCapacity:1,rowCapacity:capacity});
-    const resident=readFileSync(new URL('../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts',import.meta.url),'utf8');
+    const resident=readFileSync(new URL('../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts',import.meta.url),'utf8');
     const extract=(name:string)=>{
       const source=resident.match(new RegExp(`fn ${name}\\([\\s\\S]*?\\n}`))?.[0];
       assert.ok(source,name);return source;

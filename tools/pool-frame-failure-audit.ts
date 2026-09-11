@@ -1,5 +1,5 @@
 import { appendFile, writeFile } from "node:fs/promises";
-import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
 /** Read-only receipts after every complete frame, including unsampled frames. */
 export function createPoolFrameFailureAudit(solver: WebGPUAdaptiveMassSolver, output: string) {

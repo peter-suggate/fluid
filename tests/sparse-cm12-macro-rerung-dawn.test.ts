@@ -4,8 +4,8 @@ import { pathToFileURL } from "node:url";
 import { cloneScene, defaultScene } from "../lib/core/model";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
-import { adaptiveMassSolverOptions } from "../lib/methods/adaptive-mass/method";
-import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+import { adaptiveMassSolverOptions } from "../lib/methods/adaptive-volume/method";
+import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 (dawnModule ? test : test.skip)("coarse bulk macros refine in place with conservative 2:1 faces", { timeout: 120_000 }, async () => {
   await acquireWebGPUExclusiveLock("dawn-test", "coarse-macro-rerung");

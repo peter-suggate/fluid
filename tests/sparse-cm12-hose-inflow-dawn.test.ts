@@ -13,9 +13,9 @@ import { readFineUpperSurfaceField } from
 import {
   SPARSE_CM12_FRAME_PLAN_PRESENTATION_FLAG as FPP_FLAG,
   SPARSE_CM12_FRAME_PLAN_PRESENTATION_HEADER as FPP_HEADER,
-} from "../lib/methods/adaptive-mass/sparse-cm12-frame-plan-presentation";
+} from "../lib/methods/adaptive-volume/sparse-cm12-frame-plan-presentation";
 import { WebGPUAdaptiveMassSolver } from
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+  "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 const dawnTest = dawnModule ? test : test.skip;

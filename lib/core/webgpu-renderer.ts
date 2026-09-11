@@ -547,7 +547,7 @@ export function gpuSceneStructuralKey(scene: SceneDescription, config: Simulatio
  */
 export function gpuSceneSeedKey(scene: SceneDescription, methodId?: string): string {
   const c = scene.container;
-  const geometry = methodId === "adaptive-mass" ? "live-fluid" : authoredFluidGeometryKey(scene);
+  const geometry = (methodId === "adaptive-mass" || methodId === "adaptive-volume") ? "live-fluid" : authoredFluidGeometryKey(scene);
   return `${c.width_m}:${c.height_m}:${c.depth_m}:${c.shape ?? "box"}:${geometry}:${JSON.stringify(scene.fluid.initialVelocity_m_s ?? null)}:${JSON.stringify(scene.fluid.initialHeightField ?? null)}:${JSON.stringify(scene.fluid.refinementKeyframes ?? null)}:${JSON.stringify(scene.terrain ?? null)}:${inflowBudgetKey(scene.fluid.inflow)}`;
 }
 
@@ -2479,7 +2479,7 @@ export class FluidLabRenderer {
     }
     if (planSceneRuntime(scene).fluidSolver) {
       if (!solver?.validateLiveSolidEdit || !solver.applySceneUniforms) {
-        throw new Error("Live voxel editing needs a ready Sparse CM12 scene.");
+        throw new Error("Live voxel editing needs a ready sparse fluid scene.");
       }
       solver.validateLiveSolidEdit(scene);
     }

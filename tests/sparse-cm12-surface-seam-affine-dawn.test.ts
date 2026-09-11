@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { createCm12NumericsWGSL } from '../lib/core/cm12-numerics';
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from '../lib/harness/webgpu-smoke-isolation';
-const source=readFileSync(new URL('../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts',import.meta.url),'utf8');
+const source=readFileSync(new URL('../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts',import.meta.url),'utf8');
 const gradient=source.match(/fn pressureRowGradient\([\s\S]*?\n}/)?.[0];assert.ok(gradient);
 const factor=source.match(/fn mixedSurfacePressureFactor\([\s\S]*?\n}/)?.[0];assert.ok(factor);
 const classify=source.match(/fn classifyPressureRow\([\s\S]*?\n}/)?.[0];assert.ok(classify);

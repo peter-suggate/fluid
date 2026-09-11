@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createSolidWorld } from "../lib/core/solid-world";
-import { retainedSceneDensity } from "../lib/methods/adaptive-mass/sparse-cm12-retained-scene-density";
-import { compileRetainedScenePreparationCache } from "../lib/methods/adaptive-mass/sparse-cm12-retained-preparation-cache";
-import { createSparseAdaptiveMassAtlas } from "../lib/methods/adaptive-mass/sparse-brick-atlas";
-import { WebGPUSparseCM12Resident } from "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
+import { retainedSceneDensity } from "../lib/methods/adaptive-volume/sparse-cm12-retained-scene-density";
+import { compileRetainedScenePreparationCache } from "../lib/methods/adaptive-volume/sparse-cm12-retained-preparation-cache";
+import { createSparseAdaptiveMassAtlas } from "../lib/methods/adaptive-volume/sparse-brick-atlas";
+import { WebGPUSparseCM12Resident } from "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident";
 
 test("the CPU preparation factory rejects a mismatched frozen cache before allocating resources", async () => {
   const h = .125, dimensions = [8, 8, 8] as const;

@@ -6,11 +6,11 @@ import {
   initializeSparseBrickAtlasFromScene,
   materializeSparseBrickAtlasDensity,
   sparseBrickAtlasStats,
-} from "../lib/methods/adaptive-mass/sparse-brick-atlas";
+} from "../lib/methods/adaptive-volume/sparse-brick-atlas";
 import {
   initializeSparseAtlasDynamics,
   stepSparseAtlasDynamics,
-} from "../lib/methods/adaptive-mass/sparse-atlas-dynamics";
+} from "../lib/methods/adaptive-volume/sparse-atlas-dynamics";
 
 const secondsArgument = process.argv.find((value) => value.startsWith("--seconds="));
 const seconds = Number(secondsArgument?.slice("--seconds=".length) ?? 16 / 3);

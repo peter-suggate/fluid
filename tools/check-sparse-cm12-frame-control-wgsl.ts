@@ -13,9 +13,9 @@ import {
   sparseCM12FrameControlByteMap,
   sparseCM12FrameControlHeaderValid,
   type SparseCM12FrameControl,
-} from "../lib/methods/adaptive-mass/sparse-cm12-frame-control";
+} from "../lib/methods/adaptive-volume/sparse-cm12-frame-control";
 import { createSparseCM12FrameControlWGSL } from
-  "../lib/methods/adaptive-mass/sparse-cm12-frame-control.wgsl";
+  "../lib/methods/adaptive-volume/sparse-cm12-frame-control.wgsl";
 
 const SNAPSHOT_WORDS = 20 + 3 * SPARSE_CM12_FRAME_CONTROL_FAMILY_COUNT;
 const MODE_NORMAL = 0;

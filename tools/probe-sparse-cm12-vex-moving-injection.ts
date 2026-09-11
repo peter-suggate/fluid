@@ -13,9 +13,9 @@ import {
   SPARSE_CM12_VELOCITY_EXTENSION_DEPTH,
   SPARSE_CM12_VELOCITY_EXTENSION_HEADER,
   sparseCM12VelocityExtensionMaskDensity,
-} from "../lib/methods/adaptive-mass/sparse-cm12-velocity-extension";
+} from "../lib/methods/adaptive-volume/sparse-cm12-velocity-extension";
 import { WebGPUAdaptiveMassSolver } from
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+  "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
 const INVALID = 0xffff_ffff;
 const argument = (name: string, fallback: string): string => process.argv.slice(2)

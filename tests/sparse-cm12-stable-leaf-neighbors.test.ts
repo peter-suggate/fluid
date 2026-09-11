@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { compileSparseCM12StableLeafFaceNeighbors } from
-  "../lib/methods/adaptive-mass/sparse-cm12-factored-aei-topology";
+  "../lib/methods/adaptive-volume/sparse-cm12-factored-aei-topology";
 
 type Cube = { q: readonly [number, number, number]; span: number };
 const compile = (cubes: readonly Cube[]) => compileSparseCM12StableLeafFaceNeighbors({

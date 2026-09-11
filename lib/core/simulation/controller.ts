@@ -1231,7 +1231,7 @@ class SimulationController {
     // and much cheaper than `canonicalScene` over a sculpted terrain grid.
     if (committed === previous) return false;
     const session = this.session(paneId);
-    if (session.method.getState().methodId === "adaptive-mass"
+    if ((session.method.getState().methodId === "adaptive-mass" || session.method.getState().methodId === "adaptive-volume")
       && JSON.stringify(previous.solidVoxels) !== JSON.stringify(committed.solidVoxels)
       && !sceneEditRequiresReset(previous, committed, session.method.getState().methodId)) {
       // Compare mirroring writes the store first. Restore the accepted document
@@ -1281,7 +1281,7 @@ class SimulationController {
     const next = cloneScene(entry.scene);
     const voxelOnly = sceneEqualExcept(current, next, ["solidVoxels"]);
     const sceneryOnly = sceneEqualExcept(current, next, ["scenery"]);
-    if (sceneryOnly || (voxelOnly && this.session(paneId).method.getState().methodId === "adaptive-mass")) {
+    if (sceneryOnly || (voxelOnly && (this.session(paneId).method.getState().methodId === "adaptive-mass" || this.session(paneId).method.getState().methodId === "adaptive-volume"))) {
       this.session(paneId).scene.getState().setScene(next, entry.presetId);
       const ui = this.session(paneId).ui.getState();
       if (ui.selection?.kind === "scenery") {
@@ -1312,7 +1312,7 @@ class SimulationController {
     const solidChanged = JSON.stringify(current.solidVoxels) !== JSON.stringify(next.solidVoxels);
     const verb = direction === "undo" ? "Undid" : "Redid";
     this.runtime(paneId).pendingEdit = undefined;
-    if (voxelOnly && solidChanged && session.method.getState().methodId === "adaptive-mass") {
+    if (voxelOnly && solidChanged && (session.method.getState().methodId === "adaptive-mass" || session.method.getState().methodId === "adaptive-volume")) {
       const accept = this.runtime(paneId).acceptLiveSolidEdit;
       if (!accept) { session.runtime.getState().setNotice("Wait for the scene to be ready before changing voxel history.", "warn"); return false; }
       session.ui.setState({ voxelStrokePending: true });

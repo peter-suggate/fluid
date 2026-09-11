@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   createSparseCM12FramePlanPresentationLayout,
-} from "../lib/methods/adaptive-mass/sparse-cm12-frame-plan-presentation";
+} from "../lib/methods/adaptive-volume/sparse-cm12-frame-plan-presentation";
 import {
   createSparseCM12FramePlanPresentationWGSL,
-} from "../lib/methods/adaptive-mass/sparse-cm12-frame-plan-presentation.wgsl";
+} from "../lib/methods/adaptive-volume/sparse-cm12-frame-plan-presentation.wgsl";
 
 for (const resolution of [4, 8, 16] as const) {
   test(`FPP1 P${resolution} distributes page samples across the workgroup`, () => {

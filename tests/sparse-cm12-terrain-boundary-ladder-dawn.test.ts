@@ -17,9 +17,9 @@ import {
   releaseWebGPUExclusiveLock,
 } from "../lib/harness/webgpu-smoke-isolation";
 import { WebGPUAdaptiveMassSolver } from
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+  "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 import { initializeSparseBrickAtlasFromScene } from
-  "../lib/methods/adaptive-mass/sparse-brick-atlas";
+  "../lib/methods/adaptive-volume/sparse-brick-atlas";
 
 const CELL_M = 0.05;
 const dawnModule = process.env.WEBGPU_NODE_MODULE;

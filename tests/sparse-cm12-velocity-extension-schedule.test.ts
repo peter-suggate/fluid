@@ -6,11 +6,11 @@ import {
   createSparseCM12VelocityExtensionLayout,
   sparseCM12VelocityExtensionDispatchShape,
   SPARSE_CM12_VELOCITY_EXTENSION_DISPATCH_WIDTH,
-} from "../lib/methods/adaptive-mass/sparse-cm12-velocity-extension";
+} from "../lib/methods/adaptive-volume/sparse-cm12-velocity-extension";
 import { createSparseCM12VelocityExtensionWGSL } from
-  "../lib/methods/adaptive-mass/sparse-cm12-velocity-extension.wgsl";
+  "../lib/methods/adaptive-volume/sparse-cm12-velocity-extension.wgsl";
 import { createSparseCM12TransportPacketAuthorityLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-transport-packet-authority";
+  "../lib/methods/adaptive-volume/sparse-cm12-transport-packet-authority";
 
 test("VEX cache is resident-bounded and disjoint from masks, depth, and transport scratch", () => {
   for (const brickFineResolution of [4, 8, 16] as const) {
@@ -75,7 +75,7 @@ test("cached VEX rebuilds at topology changes and preserves empty and retired-pa
   const sweep = source.slice(source.indexOf("fn advanceVelocityExtensionPackets"));
   assert.match(sweep, /if\(packet==cm12ExtensionInvalid\)\{\s*cm12ExtensionPublishFrameReceipt\(dispatchOrdinal,lane\);return;/);
   const resident = readFileSync(new URL(
-    "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts", import.meta.url), "utf8");
+    "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.ts", import.meta.url), "utf8");
   assert.match(resident, /scheduleBaseWords \+ 4\),\s*this.transportPacketIndirectArguments!, 0, 24/);
   assert.match(resident, /dispatchWorkgroupsIndirect\(this.transportPacketIndirectArguments!, offset\)/);
 });

@@ -20,7 +20,7 @@ test("replacing a pending initializer retires the superseded resource's progress
     gpuFluidInitializationAbort: abort,
     gpuFluidInitializationResource: liveSvoSceneResourcePlugin,
   });
-  const config = { methodId: "adaptive-mass", quality: "balanced", values: {} } as SimulationRunConfig;
+  const config = { methodId: "adaptive-volume", quality: "balanced", values: {} } as SimulationRunConfig;
   const access = renderer as unknown as {
     beginGPUFluidInitialization(scene: SceneDescription, config: SimulationRunConfig, key: string, mode: "full-scene"): void;
   };

@@ -9,7 +9,7 @@ import {
   type SparseAtlasCompositeGrid,
   type SparseAtlasProjectionResult,
   type SparseAtlasProjectionStageId,
-} from "../lib/methods/adaptive-mass/sparse-atlas-composite-projection";
+} from "../lib/methods/adaptive-volume/sparse-atlas-composite-projection";
 import {
   createSparseAdaptiveMassAtlas,
   sparseBrickKey,
@@ -17,7 +17,7 @@ import {
   type SparseAdaptiveMassBrick,
   type SparseBrickResolution,
   type SparseBrickVec3,
-} from "../lib/methods/adaptive-mass/sparse-brick-atlas";
+} from "../lib/methods/adaptive-volume/sparse-brick-atlas";
 import { CM12_LIQUID_ISOVALUE, cm12GhostFluidTheta } from
   "../lib/core/cm12-numerics";
 import {
@@ -25,7 +25,7 @@ import {
   assertSparseCM12PressureReceipt,
   sparseCM12PressureResidualDrift,
   type SparseCM12PressureReceipt,
-} from "../lib/methods/adaptive-mass/sparse-cm12-pressure-receipt";
+} from "../lib/methods/adaptive-volume/sparse-cm12-pressure-receipt";
 
 type Fixture = {
   readonly name: string;

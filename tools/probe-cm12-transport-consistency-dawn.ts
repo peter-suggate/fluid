@@ -5,7 +5,7 @@ import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/h
 
 // An affine field's mean on each cubic cell is its value at the centre.
 // Exercise the actual production stencil on a synthetic symmetric 2:1 grid.
-const source = readFileSync(new URL("../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url), "utf8");
+const source = readFileSync(new URL("../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url), "utf8");
 function production(name: string): string {
   const result = source.match(new RegExp(`fn ${name}\\([\\s\\S]*?\\n}`))?.[0];
   assert.ok(result, name); return result;

@@ -1,25 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildSparseAtlasCompositeGrid } from
-  "../lib/methods/adaptive-mass/sparse-atlas-composite-projection";
+  "../lib/methods/adaptive-volume/sparse-atlas-composite-projection";
 import { compileSparseCM12FactoredAEIPackedTemplateCatalog } from
-  "../lib/methods/adaptive-mass/sparse-cm12-factored-aei-packed-template";
+  "../lib/methods/adaptive-volume/sparse-cm12-factored-aei-packed-template";
 import { createSparseAdaptiveMassAtlas, sparseBrickKey,
   type SparseAdaptiveMassBrick } from
-  "../lib/methods/adaptive-mass/sparse-brick-atlas";
+  "../lib/methods/adaptive-volume/sparse-brick-atlas";
 import { compileSparseCM12InternedBoundaryOperators,
   SPARSE_CM12_INTERNED_BOUNDARY_SLOT_REF_WORDS } from
-  "../lib/methods/adaptive-mass/sparse-cm12-interned-boundary-operators";
+  "../lib/methods/adaptive-volume/sparse-cm12-interned-boundary-operators";
 import { createSparseCM12InternedBoundaryImage,
   prepareSparseCM12InternedBoundaryShadow } from
-  "../lib/methods/adaptive-mass/sparse-cm12-interned-boundary-image";
+  "../lib/methods/adaptive-volume/sparse-cm12-interned-boundary-image";
 import { compareSparseCM12IBOSemanticAuthority,
   compileSparseCM12GeometryDeltaClosure,
   compileSparseCM12GeometryFaceNeighbors } from
-  "../lib/methods/adaptive-mass/sparse-cm12-ibo-semantic-authority";
+  "../lib/methods/adaptive-volume/sparse-cm12-ibo-semantic-authority";
 import { packSparseCM12AcceptedTopologyTemplatesForQA,
   packSparseCM12ResidentTopologyTemplatesForQA } from
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident";
 
 const fixture = (allRungs = false) => {
   const logical = [2, 1, 1] as const;

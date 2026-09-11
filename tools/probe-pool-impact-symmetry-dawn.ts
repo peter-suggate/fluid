@@ -6,8 +6,8 @@ import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { resolveMethodValues } from "../lib/core/method-contract";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { adaptiveMassMethod, adaptiveMassSolverOptions } from "../lib/methods/adaptive-mass/method";
-import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+import { adaptiveMassMethod, adaptiveMassSolverOptions } from "../lib/methods/adaptive-volume/method";
+import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { readPublishedCM12Field } from "./sparse-cm12-published-field";
 
@@ -25,7 +25,7 @@ const output = process.env.POOL_SYMMETRY_OUTPUT ?? "artifacts/pool-impact-symmet
 const sceneId = process.env.POOL_SYMMETRY_SCENE ?? "coarse-first-pool-impact-quarter";
 assert.ok(["coarse-first-pool-impact-quarter", "minimal-power-dam-break-32"].includes(sceneId));
 const capturePresentation = process.env.POOL_SYMMETRY_CAPTURE_PRESENTATION === "1";
-const methodDirectory = new URL("../lib/methods/adaptive-mass/", import.meta.url);
+const methodDirectory = new URL("../lib/methods/adaptive-volume/", import.meta.url);
 const sourceNames = (await readdir(methodDirectory)).filter(name => name.endsWith(".ts")).sort();
 const sourceHashes = async () => Object.fromEntries(await Promise.all([
   ...sourceNames.map(name => [name, new URL(name, methodDirectory)] as const),
@@ -78,7 +78,7 @@ try {
       source.templateWords.byteOffset,source.templateWords.byteLength));
   }
   const residentWGSLHash = createHash("sha256").update(await readFile(new URL(
-    "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url))).digest("hex");
+    "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url))).digest("hex");
   await writeFile(`${output}/configuration.json`, JSON.stringify({ scene, values, grid: [nx, ny, nz],
     steps, dt, maxCell, freezeTopology, initialAtlasResident, capturePresentation, legacyFace: process.env.POOL_SYMMETRY_LEGACY_FACE === "1", residentWGSLHash,
     residentSourceHashes }, null, 2));

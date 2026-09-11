@@ -11,7 +11,7 @@ import {
   initializeSparseBrickAtlasFromScene,
   sparseCM12StaticSolidRestrictionError,
   sparseCM12StaticSolidResolutionFloor,
-} from "../lib/methods/adaptive-mass/sparse-brick-atlas";
+} from "../lib/methods/adaptive-volume/sparse-brick-atlas";
 
 test("planar SolidWorld walls and their intersections restrict exactly", () => {
   const scene = createSparseCM12LongDamBreakScene();

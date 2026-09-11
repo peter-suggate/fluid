@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { SparseCM12InternedBoundaryLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-interned-boundary-operators";
+  "../lib/methods/adaptive-volume/sparse-cm12-interned-boundary-operators";
 import { createSparseCM12InternedBoundaryImageWGSL } from
-  "../lib/methods/adaptive-mass/sparse-cm12-interned-boundary-image.wgsl";
+  "../lib/methods/adaptive-volume/sparse-cm12-interned-boundary-image.wgsl";
 
 const layout: SparseCM12InternedBoundaryLayout = {
   leafCapacity: 8, canonicalCapacity: 40, templateCount: 4,

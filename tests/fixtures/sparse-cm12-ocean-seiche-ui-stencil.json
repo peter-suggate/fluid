@@ -356,10 +356,10 @@
     }
   },
   "method": {
-    "methodId": "adaptive-mass",
+    "methodId": "adaptive-volume",
     "quality": "balanced",
     "overrides": {
-      "adaptive-mass": {}
+      "adaptive-volume": {}
     }
   }
 }

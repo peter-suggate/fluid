@@ -2292,7 +2292,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       if (containerContains(committed, centre)) { authored(); return; }
       simulation.cancelDraft(paneId);
       session.runtime.getState().setNotice(
-        "Open-world liquid placement requires a ready Sparse CM12 solve");
+        "Open-world liquid placement requires a ready sparse fluid solve");
       return;
     }
     // Nothing to record: the document did not change, and the water is now part

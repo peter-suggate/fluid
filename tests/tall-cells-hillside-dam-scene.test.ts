@@ -16,7 +16,7 @@ import { sampleSolidWorld, solidWorldForScene,
   SOLID_WORLD_TERRAIN_MATERIAL_ID } from "../lib/core/solid-world";
 import { terrainHeightAt } from "../lib/core/terrain";
 import { initializeSparseBrickAtlasFromScene } from
-  "../lib/methods/adaptive-mass/sparse-brick-atlas";
+  "../lib/methods/adaptive-volume/sparse-brick-atlas";
 import {
   buildSvoPrimitiveCandidates,
   packSvoPrimitiveCandidateArena,
@@ -72,7 +72,7 @@ test("Tall Cells hillside scene preserves the published Flood footprint and pape
 
   const definition = findSceneDefinition(scene.sceneId);
   assert.equal(definition?.audience, "study");
-  assert.equal(definition?.methodProfile?.methodId, "adaptive-mass");
+  assert.equal(definition?.methodProfile?.methodId, "adaptive-volume");
   assert.equal(definition?.presentationMode, "full-scene");
 });
 

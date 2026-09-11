@@ -250,10 +250,10 @@
     }
   },
   "method": {
-    "methodId": "adaptive-mass",
+    "methodId": "adaptive-volume",
     "quality": "balanced",
     "overrides": {
-      "adaptive-mass": {
+      "adaptive-volume": {
         "selectorMode": "coarse-first",
         "timeStep": "paper",
         "brickFineResolution": "8"

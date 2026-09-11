@@ -8,7 +8,7 @@ import { sceneLatticeDimensions, solidVoxelEditsForScene,
   solidVoxelShellForScene } from "../lib/core/scene-lattice";
 import { sampleSolidWorld, solidWorldForScene } from "../lib/core/solid-world";
 import { initializeSparseBrickAtlasFromScene } from
-  "../lib/methods/adaptive-mass/sparse-brick-atlas";
+  "../lib/methods/adaptive-volume/sparse-brick-atlas";
 
 test("resizing a finished tank moves its voxel shell instead of stranding it", () => {
   const original = sceneDocument(getSceneDefinition("water-box-tank-fill"));

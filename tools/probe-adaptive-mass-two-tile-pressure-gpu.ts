@@ -12,9 +12,9 @@ import {
   type CompositeAxis,
   type TwoTileCompositeGrid,
   type TwoTileResolution,
-} from "../lib/methods/adaptive-mass/two-tile-composite-grid";
+} from "../lib/methods/adaptive-volume/two-tile-composite-grid";
 import { WebGPUTwoTilePressureOperator } from
-  "../lib/methods/adaptive-mass/webgpu-two-tile-pressure-operator";
+  "../lib/methods/adaptive-volume/webgpu-two-tile-pressure-operator";
 import {
   acquireWebGPUExclusiveLock,
   releaseWebGPUExclusiveLock,

@@ -5,12 +5,12 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { SimulationFailureDetails } from "../components/SimulationFailureDetails";
 import { SimulationFailureError, type SimulationFailure } from "../lib/core/simulation-failure";
-import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 import { FluidLabRenderer } from "../lib/core/webgpu-renderer";
 import type { GPUStatus } from "../lib/core/gpu-status";
 
 const failure: SimulationFailure = {
-  method: "adaptive-mass", code: "INCIDENCE_RANGE", message: "Corrupt incidence range",
+  method: "adaptive-volume", code: "INCIDENCE_RANGE", message: "Corrupt incidence range",
   kernel: "forceFaces", frame: 42, generation: 17, ownerId: 123,
   operands: [900, 2, 384], rawWords: [1, 1, 0, 42, 17, 123, 900, 2, 384],
 };

@@ -5,13 +5,13 @@ import test from "node:test";
 import {
   createSparseCM12FramePlanPresentationInitialWords,
   createSparseCM12FramePlanPresentationLayout,
-} from "../lib/methods/adaptive-mass/sparse-cm12-frame-plan-presentation";
+} from "../lib/methods/adaptive-volume/sparse-cm12-frame-plan-presentation";
 import {
   createSparseCM12WorldDirectoryLayout,
   createSparseCM12WorldDirectoryWGSL,
-} from "../lib/methods/adaptive-mass/sparse-cm12-world-directory";
+} from "../lib/methods/adaptive-volume/sparse-cm12-world-directory";
 import { sparseCM12PresentationPageAllocatorWGSL } from
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident";
 
 const invalid = 0xffff_ffff;
 
@@ -86,7 +86,7 @@ test("retirement follows all-air publication and clears the recorded topology pa
   assert.doesNotMatch(shader, /topologyPage=brick-CM12_WDR_INITIAL_LEAVES/);
 
   const host = readFileSync(new URL(
-    "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
+    "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.ts",
     import.meta.url,
   ), "utf8");
   const stage = host.slice(host.indexOf('stage("presentation-publication"'),

@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { buildAdaptiveMassM1SurfaceAB } from
-  "../lib/methods/adaptive-mass/two-tile-surface-ab";
+  "../lib/methods/adaptive-volume/two-tile-surface-ab";
 
 function argument(name: string): string | undefined {
   const prefix = `--${name}=`;

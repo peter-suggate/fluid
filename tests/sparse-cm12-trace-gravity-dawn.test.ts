@@ -3,8 +3,8 @@ import test from "node:test";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
-import { createSparseCM12VelocityExtensionLayout } from "../lib/methods/adaptive-mass/sparse-cm12-velocity-extension";
-import { createSparseCM12VelocityExtensionWGSL } from "../lib/methods/adaptive-mass/sparse-cm12-velocity-extension.wgsl";
+import { createSparseCM12VelocityExtensionLayout } from "../lib/methods/adaptive-volume/sparse-cm12-velocity-extension";
+import { createSparseCM12VelocityExtensionWGSL } from "../lib/methods/adaptive-volume/sparse-cm12-velocity-extension.wgsl";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 
 (process.env.WEBGPU_NODE_MODULE ? test : test.skip)("air-side density remains an extension receiver rather than an independent velocity seed", async () => {

@@ -4,15 +4,15 @@ import assert from "node:assert/strict";
 import type { GPUAdaptivePressureLocalStageReceipt } from
   "../lib/core/webgpu-eulerian";
 import { adaptiveMassPressureTopologyChip } from
-  "../lib/methods/adaptive-mass/adaptive-mass-frame-pipeline";
+  "../lib/methods/adaptive-volume/adaptive-mass-frame-pipeline";
 import {
   assertSparseCM12PressureCutoverLocalSources,
   formatSparseCM12PressureCutoverAuthorities,
   inspectSparseCM12PressureCutoverAuthorities,
   type SparseCM12PressureCutoverAuthorities,
-} from "../lib/methods/adaptive-mass/sparse-cm12-pressure-cutover-observability";
+} from "../lib/methods/adaptive-volume/sparse-cm12-pressure-cutover-observability";
 import { sparseCM12PressureTopologyAttribution } from
-  "../lib/methods/adaptive-mass/sparse-cm12-pressure-topology-attribution";
+  "../lib/methods/adaptive-volume/sparse-cm12-pressure-topology-attribution";
 
 const stage = (overrides: Partial<GPUAdaptivePressureLocalStageReceipt> = {}):
 GPUAdaptivePressureLocalStageReceipt => Object.freeze({

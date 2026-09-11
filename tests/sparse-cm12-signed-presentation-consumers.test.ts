@@ -18,7 +18,7 @@ import {
   decodeSparseCM12SignedPresentationKey,
   encodeSparseCM12SignedPresentationKey,
   sparseCM12SignedPresentationInitialWorldFits,
-} from "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
+} from "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident";
 
 test("signed sparse presentation keys preserve negative vertical pages", () => {
   const coordinate = [-17, -23, 41] as const;

@@ -3,7 +3,7 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { sparseCM12HeightReconstructionWGSL, SPARSE_CM12_HEIGHT_ENTRY_POINTS,
-  SPARSE_CM12_HEIGHT_ITERATIONS } from "../lib/methods/adaptive-mass/sparse-cm12-height-reconstruction.wgsl";
+  SPARSE_CM12_HEIGHT_ITERATIONS } from "../lib/methods/adaptive-volume/sparse-cm12-height-reconstruction.wgsl";
 
 const live = new Set<GPU>();
 const dawnTest = process.env.WEBGPU_NODE_MODULE ? test : test.skip;

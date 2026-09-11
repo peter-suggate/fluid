@@ -11,9 +11,9 @@ import { sceneAtFinestCellSize } from "../lib/core/scene-scale";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
-import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
+import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 import { WebGPUAdaptiveMassSolver } from
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+  "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 import { uniformMethod } from "../lib/methods/uniform/method";
 
 type Dimensions = readonly [number, number, number];
@@ -139,7 +139,7 @@ async function readArmFields(
   dimensions: Dimensions,
   frameBank: "accepted" | "candidate" = "accepted",
 ): Promise<ArmFields> {
-  if (method.id === "adaptive-mass") {
+  if (method.id === "adaptive-volume") {
     const fields = await (solver as WebGPUAdaptiveMassSolver)
       .readDiagnosticFields(true, frameBank);
     return { density: fields.density, velocity: fields.velocity,
@@ -401,7 +401,7 @@ async function run(
     authoredScene,
     latticeScale * authoredScene.voxelDomain.finestCellSize_m,
   );
-  if (method.id === "adaptive-mass" && sparseResolutionMode === "region") {
+  if (method.id === "adaptive-volume" && sparseResolutionMode === "region") {
     scene.fluid.refinementRegions = [{
       id: "whole-tank-one-cell",
       rule: "minimum-cell-size",
@@ -460,7 +460,7 @@ async function run(
     let finalFields = initialFields;
     const advanceStartedAt_ms = performance.now();
     for (let step = 1; step <= steps; step += 1) {
-      if (method.id === "adaptive-mass" && stageLimit && step >= stageFromStep) {
+      if (method.id === "adaptive-volume" && stageLimit && step >= stageFromStep) {
         (solver as WebGPUAdaptiveMassSolver).sparseWorldTrace
           .setStageLimitForQA(stageLimit as never);
       }
@@ -468,7 +468,7 @@ async function run(
       if (step % sampleEvery === 0 || step === steps) {
         await device.queue.onSubmittedWorkDone();
         finalFields = await readArmFields(device, method, solver, dimensions,
-          method.id === "adaptive-mass" && stageLimit && step >= stageFromStep
+          method.id === "adaptive-volume" && stageLimit && step >= stageFromStep
             ? "candidate" : "accepted");
         trajectory.push({ step, time_s: step * dt_s,
           ...mechanicalReceipt(finalFields, dimensions, container_m, cellVolume_m3,
@@ -478,7 +478,7 @@ async function run(
     await device.queue.onSubmittedWorkDone();
     const advanceWall_ms = performance.now() - advanceStartedAt_ms;
     const density = finalFields.density;
-    const sparseSolver = method.id === "adaptive-mass"
+    const sparseSolver = method.id === "adaptive-volume"
       ? solver as WebGPUAdaptiveMassSolver : undefined;
     const activity = sparseSolver ? await sparseSolver.readGPUActivityPolicy() : undefined;
     const levelSet = method.id === "uniform"

@@ -176,15 +176,21 @@ Promise<LaneReceipt> {
   try {
     const report = JSON.parse(await readFile(outputPath, "utf8")) as {
       samples?: number;
+      implementation?: { methodId?: string; resident?: string };
       medianAdvance_ms?: number;
       diagnostic?: { passed?: boolean };
       validationErrors?: unknown[];
       configuration?: { methodValues?: unknown };
     };
+    assert.equal(report.implementation?.methodId, "adaptive-volume",
+      "performance probe must execute the production adaptive-volume method");
+    assert.equal(report.implementation?.resident,
+      "lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.ts",
+      "performance probe must execute the copied production resident");
     assert.equal(report.samples, lane.measuredFrames,
       "performance probe did not capture every requested frame");
     assert.deepEqual(report.configuration?.methodValues, sparseCM12DawnDefaultValues(),
-      "performance probe must use the balanced adaptive-mass production defaults");
+      "performance probe must use the balanced adaptive-volume production defaults");
     assert.equal(report.diagnostic?.passed, true,
       "performance probe diagnostics did not pass");
     assert.deepEqual(report.validationErrors, [],

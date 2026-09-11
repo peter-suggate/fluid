@@ -23,9 +23,9 @@ import {
 import {
   adaptiveMassMethod,
   adaptiveMassSolverOptions,
-} from "../lib/methods/adaptive-mass/method";
+} from "../lib/methods/adaptive-volume/method";
 import { WebGPUAdaptiveMassSolver } from
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+  "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
 const argument = (name: string, fallback: string): string =>
   process.argv.slice(2).find((value) => value.startsWith(`--${name}=`))

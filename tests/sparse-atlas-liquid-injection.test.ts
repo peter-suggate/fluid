@@ -5,12 +5,12 @@ import {
   initializeSparseBrickAtlasFromScene,
   sparseBrickAtlasStats,
   materializeSparseBrickAtlasDensity,
-} from "../lib/methods/adaptive-mass/sparse-brick-atlas";
+} from "../lib/methods/adaptive-volume/sparse-brick-atlas";
 import {
   initializeSparseAtlasDynamics,
   injectSparseAtlasLiquid,
   stepSparseAtlasDynamics,
-} from "../lib/methods/adaptive-mass/sparse-atlas-dynamics";
+} from "../lib/methods/adaptive-volume/sparse-atlas-dynamics";
 
 const DIMENSIONS = [32, 32, 32] as const;
 

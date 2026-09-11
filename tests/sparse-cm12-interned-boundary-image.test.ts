@@ -1,27 +1,27 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildSparseAtlasCompositeGrid } from
-  "../lib/methods/adaptive-mass/sparse-atlas-composite-projection";
+  "../lib/methods/adaptive-volume/sparse-atlas-composite-projection";
 import { compileSparseCM12FactoredAEIPackedTemplateCatalog } from
-  "../lib/methods/adaptive-mass/sparse-cm12-factored-aei-packed-template";
+  "../lib/methods/adaptive-volume/sparse-cm12-factored-aei-packed-template";
 import {
   createSparseAdaptiveMassAtlas,
   sparseBrickKey,
   type SparseAdaptiveMassBrick,
-} from "../lib/methods/adaptive-mass/sparse-brick-atlas";
+} from "../lib/methods/adaptive-volume/sparse-brick-atlas";
 import { compileSparseCM12InternedBoundaryOperators } from
-  "../lib/methods/adaptive-mass/sparse-cm12-interned-boundary-operators";
+  "../lib/methods/adaptive-volume/sparse-cm12-interned-boundary-operators";
 import {
   SPARSE_CM12_INTERNED_BOUNDARY_FAULT,
   commitSparseCM12InternedBoundaryShadow,
   createSparseCM12InternedBoundaryImage,
   prepareSparseCM12InternedBoundaryShadow,
   validateSparseCM12InternedBoundaryPreflip,
-} from "../lib/methods/adaptive-mass/sparse-cm12-interned-boundary-image";
+} from "../lib/methods/adaptive-volume/sparse-cm12-interned-boundary-image";
 import { packSparseCM12AcceptedTopologyTemplatesForQA,
   packSparseCM12ResidentTopologyTemplatesForQA,
   sparseCM12InternedBoundaryMemoryPlan } from
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident";
 
 test("IBO1 construction budgets cover B8/P8 and full-domain min8", () => {
   assert.deepEqual(sparseCM12InternedBoundaryMemoryPlan(8), {

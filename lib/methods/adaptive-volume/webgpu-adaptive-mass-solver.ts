@@ -1,0 +1,1704 @@
+import { correctionOptions } from "./correction-controls";
+import type { LiveFluidEdit, LiveFluidEditResult } from "../../core/live-fluid-edit";
+import { SimulationFailureError } from "../../core/simulation-failure";
+import { SparseCM12GenerationBudgetDeferred, SparseCM12GenerationStale } from "./sparse-cm12-generation-budget";
+import { planSparseCM12ResidentGeneration } from "./sparse-cm12-generation-policy";
+import { GPUInitializationTaskRunner } from "../../core/gpu-initialization";
+import type { GPUQuality } from "../../core/gpu-quality";
+import type {
+  GPUInitializationReporter,
+  GPUSolverInstance,
+  InjectedLiquidBall,
+  MethodParamValues,
+} from "../../core/method-contract";
+import type { SceneDescription } from "../../core/model";
+import { initializeRigidBodies, type RigidBodyState } from "../../core/rigid-body";
+import { sceneCellSizes_m, sceneLatticeDimensions } from "../../core/scene-lattice";
+import {
+  refinementRegionLattice,
+  refinementKeyframeAt,
+  refinementRegionCellBounds,
+  sceneRefinementRegions,
+} from "../../core/refinement-regions";
+import { GPUStageTimestampRecorder } from "../../core/performance-trace";
+import { passBrokerLabelIsolationRequested } from "../../core/webgpu-pass-broker";
+import { usePerformanceInstrumentationStore } from "../../core/stores/performance-instrumentation-store";
+import { CM12_PAPER_DT_S } from "../../core/cm12-numerics";
+import { averageInflowStrength, inflowOutletCenter } from "../../core/inflow-boundary";
+import {
+  GPU_RIGID_EXCHANGE_BYTES,
+  type GPUEulerianInfo,
+  type GPURigidLoad,
+} from "../../core/webgpu-eulerian";
+import { WebGPURigidBodySystem } from "../../core/webgpu-rigid-body";
+import { fluidSolidWorldForScene } from
+  "../../core/solid-world";
+import {
+  ADAPTIVE_MASS_FRAME_TRACE_CADENCE_MS,
+  AdaptiveMassFrameCapture,
+} from "./adaptive-mass-frame-pipeline";
+import type { AdaptiveMassSolverOptions } from "./method";
+import {
+  initializeSparseBrickAtlasFromScene,
+  materializeSparseBrickAtlasDensity,
+  sparseCM12InitialActiveBrickKeys,
+  sparseBrickFromDense,
+  sparseBrickAtlasStats,
+  sparseBrickMaximumFine,
+  type SparseAdaptiveMassAtlas,
+  type SparseBrickResolution,
+  type SparseBrickVec3,
+} from "./sparse-brick-atlas";
+import {
+  buildSparseAtlasCompositeGrid,
+  type SparseAtlasCompositeGrid,
+} from "./sparse-atlas-composite-projection";
+import { SparseCM12PressureTopologyAttributionTracker } from
+  "./sparse-cm12-pressure-topology-attribution";
+import { packSparseCM12RefinementRegions } from
+  "./sparse-cm12-refinement-regions";
+import { WebGPUAdaptiveMassSparsePresentation } from
+  "./webgpu-adaptive-mass-atlas-presentation";
+import type { SparseWorld, SparseWorldDevice, SparseWorldUI } from "../../sparse-world";
+import {
+  createCM12SparseWorld,
+  type CM12SparseWorldDeveloperTrace,
+  type CM12SparseWorldRuntime,
+  type CM12SparseWorldStepConfiguration,
+} from "../../sparse-world/internal/adaptive-volume-adapter";
+import { sparseCM12PressureIterations, sparseCM12PressureIterationsFromReceipt, sparseCM12PressureRelativeTolerance, sparseCM12SharpeningDistance, sparseCM12SharpeningStrength, sparseCM12SharpeningTraceSteps, type SparseCM12GPUActivityRecord, type SparseCM12ResidentStageSeams } from "./webgpu-sparse-cm12-resident";
+import { SPARSE_CM12_ACTIVITY_POLICY, sparseCM12ActivityPolicy } from "./features/adaptivity/policy";
+
+/**
+ * Diagnostic-only stage boundaries for external Metal/xctrace observation.
+ * The resident already owns the partition and labels; supplying no-op seams
+ * asks it to expose those boundaries without enabling timestamp queries,
+ * readbacks, performance-store sampling, or any additional shader work.
+ */
+const SPARSE_CM12_LABEL_ISOLATION_SEAMS: SparseCM12ResidentStageSeams = Object.freeze({
+  close: () => {},
+  closeSubstage: () => {},
+});
+
+const PRESENTATION_PUBLISHER_ORACLE_QA_TOKEN: unique symbol =
+  Symbol("Sparse CM12 presentation publisher oracle QA");
+const PHASE1_TRANSPORT_RECEIPT_QA_TOKEN: unique symbol =
+  Symbol("Sparse CM12 Phase-1 transport receipt QA");
+const VELOCITY_EXTENSION_PACKET_COMPACTION_QA_TOKEN: unique symbol =
+  Symbol("Sparse CM12 velocity-extension packet compaction QA");
+const COARSE_TRANSPORT_CELL_PACKING_QA_TOKEN: unique symbol =
+  Symbol("Sparse CM12 coarse transport cell packing QA");
+const REFINEMENT_POLICY_LEADER_COMPACTION_QA_TOKEN: unique symbol =
+  Symbol("Sparse CM12 refinement-policy leader compaction QA");
+const REFINEMENT_POLICY_FULL_LEAF_QA_TOKEN: unique symbol =
+  Symbol("Sparse CM12 refinement-policy full-leaf control QA");
+const PHASE1_COARSE_TRANSPORT_CELL_PACKING_QA_TOKEN: unique symbol =
+  Symbol("Sparse CM12 Phase-1 coarse transport cell packing QA");
+const DENSITY_CAPACITY_EARLY_EXIT_QA_TOKEN: unique symbol =
+  Symbol("Sparse CM12 density-capacity early exit QA");
+const IMPLICIT_TRANSPORT_OWNER_ARITHMETIC_QA_TOKEN: unique symbol =
+  Symbol("Sparse CM12 implicit transport owner arithmetic QA");
+const PHASE1_IMPLICIT_TRANSPORT_OWNER_ARITHMETIC_QA_TOKEN: unique symbol =
+  Symbol("Sparse CM12 Phase-1 implicit transport owner arithmetic QA");
+const IMPLICIT_SHARPENING_OWNER_ARITHMETIC_QA_TOKEN: unique symbol =
+  Symbol("Sparse CM12 implicit sharpening owner arithmetic QA");
+const PHASE1_IMPLICIT_SHARPENING_OWNER_ARITHMETIC_QA_TOKEN: unique symbol =
+  Symbol("Sparse CM12 Phase-1 implicit sharpening owner arithmetic QA");
+const ALTERNATING_CAPACITY_REPAIR_RECEIPTS_QA_TOKEN: unique symbol =
+  Symbol("Sparse CM12 alternating capacity repair receipts QA");
+const GATHER_CAPACITY_REPAIR_QA_TOKEN: unique symbol =
+  Symbol("Sparse CM12 gather capacity repair QA");
+
+export interface AdaptiveMassFluidDomain {
+  readonly dimensions: SparseBrickVec3;
+  readonly origin_m: readonly [number, number, number];
+  readonly cellSize_m: readonly [number, number, number];
+}
+
+/** The authored lattice is only the initial fluid world; growth is demand-led. */
+export function adaptiveMassFluidDomainForScene(
+  scene: SceneDescription,
+): AdaptiveMassFluidDomain {
+  const tankDimensions = sceneLatticeDimensions(scene) as SparseBrickVec3;
+  const cell = sceneCellSizes_m(scene);
+  return {
+    dimensions: tankDimensions,
+    origin_m: [-0.5 * tankDimensions[0] * cell[0], 0,
+      -0.5 * tankDimensions[2] * cell[2]],
+    cellSize_m: cell,
+  };
+}
+
+/** Method-local long-run physics receipt carried through the generic info bag. */
+export interface AdaptiveMassStepTelemetry {
+  adaptiveKineticEnergyBeforeFineUnits?: number;
+  adaptiveKineticEnergyAfterFineUnits?: number;
+  adaptiveProjectionKineticEnergyBeforeFineUnits?: number;
+  adaptiveProjectionKineticEnergyAfterFineUnits?: number;
+  adaptiveInactiveFaceCount?: number;
+  adaptiveMaximumInactiveFaceSpeedBefore_m_s?: number;
+  adaptiveMaximumInactiveFaceSpeedAfter_m_s?: number;
+  adaptiveMaximumMixedSeamDivergence_s?: number;
+  adaptiveMaximumDensityAfterTransport?: number;
+  adaptiveMaximumDensityAfterConditioning?: number;
+}
+
+export interface AdaptiveMassGPUActivityBrick extends SparseCM12GPUActivityRecord {
+  readonly key: number;
+  readonly coordinate: SparseBrickVec3;
+  /** Logical B8 pages covered along each axis by this accepted leaf. */
+  readonly spanBricks: number;
+  readonly resolution: SparseBrickResolution;
+}
+
+/**
+ * Read-only receipt from the device scheduler. `advanceTo` never consumes this
+ * shape: it exists only so explicit diagnostics can explain what the fixed GPU
+ * dispatch chain accepted and what remains queued.
+ */
+interface SparseCM12TopologySchedulerDiagnostics {
+  readonly acceptedTopologyGeneration?: number;
+  readonly topologyUrgentQueuedBrickCount?: number;
+  readonly topologyOrdinaryQueuedBrickCount?: number;
+  readonly topologyPreparedBrickCount?: number;
+  readonly topologyCommittedBrickCount?: number;
+  readonly topologyDeferredBrickCount?: number;
+  readonly acceptedFineBrickCount?: number;
+  readonly acceptedCoarseBrickCount?: number;
+}
+
+/**
+ * GPU-resident Sparse CM12 authority. Construction may build compact topology
+ * on the host, but every accepted frame is device-only simulation work: the
+ * host writes one small uniform block and encodes a fixed dispatch schedule.
+ */
+export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
+  readonly sparseWorld: SparseWorld;
+  readonly sparseWorldDevice: SparseWorldDevice;
+  readonly sparseWorldUI: SparseWorldUI;
+  readonly info: GPUEulerianInfo;
+  readonly fluidDomain: NonNullable<GPUSolverInstance["fluidDomain"]>;
+  get simulationReady(): boolean {
+    return this.sparseWorldDevice.status === "ready";
+  }
+  async waitForSimulationReady(): Promise<void> {
+    await this.sparseRuntime.waitForSimulationPipelines();
+    if (!this.simulationReady) {
+      throw new Error(`Sparse Geometric (CM12) physics pipelines resolved while device status is ${
+        this.sparseWorldDevice.status}`);
+    }
+  }
+  readonly volumeTexture: GPUTexture;
+  readonly surfaceFieldTexture: GPUTexture;
+  readonly gridCellTexture: GPUTexture;
+  readonly velocityTexture: GPUTexture;
+  readonly gridPressureTexture: GPUTexture;
+  readonly gridDivergenceTexture: GPUTexture;
+  readonly initialSparseAuthorityReady = true;
+  /** Compatibility getters backed exclusively by the public world view. */
+  get sparseAdaptiveGridSource() { return this.sparseWorld.presentation().adaptiveGrid; }
+  get globalFineLevelSetSource() {
+    return { ...this.sparseWorld.presentation().fineLevelSet,
+      surfaceMeshRefinement: this.options.surfaceMeshRefinement ?? 2 };
+  }
+  readPresentationPageAllocatorReceiptQA() {
+    return this.sparseWorldTrace.readPresentationPageAllocatorReceiptQA();
+  }
+  readWorldGrowthReceiptQA() {
+    return this.sparseWorldTrace.readWorldGrowthReceiptQA();
+  }
+  /** Test-only runtime seam for exercising an accepted surface rung cutover. */
+  setForcedSurfaceResolutionForQA(resolution: SparseBrickResolution | undefined): void {
+    const activityPolicy = {
+      ...SPARSE_CM12_ACTIVITY_POLICY,
+      ...this.options.activityPolicy,
+      ...(resolution === undefined ? {} : { forcedSurfaceResolutionForQA: resolution }),
+    };
+    if (resolution === undefined) delete activityPolicy.forcedSurfaceResolutionForQA;
+    this.options = { ...this.options, activityPolicy };
+  }
+  /** Hold accepted cell sizes while allowing new fluid support to be allocated. */
+  setTopologyFrozen(frozen: boolean): void {
+    if ((this.options.activityPolicy?.freezeTopology === true) === frozen) return;
+    if (frozen) this.sparseRuntime.cancelTopologyPreparation();
+    this.options = { ...this.options, activityPolicy: {
+      ...SPARSE_CM12_ACTIVITY_POLICY, ...this.options.activityPolicy,
+      freezeTopology: frozen,
+    } };
+    // Paused live edits read this configuration before the next numerical step.
+    this.sparseWorldNumerics.current = { ...this.sparseWorldNumerics.current,
+      activityPolicy: this.options.activityPolicy };
+  }
+  setLegacyFaceTransportForQA(legacy: boolean): void {
+    this.options = { ...this.options, activityPolicy: {
+      ...SPARSE_CM12_ACTIVITY_POLICY, ...this.options.activityPolicy,
+      legacyFaceTransportForQA: legacy,
+    } };
+  }
+  private stageCaptureForQA?: SparseCM12ResidentStageSeams["close"];
+  setStageCaptureForQA(capture: SparseCM12ResidentStageSeams["close"] | undefined): void {
+    this.stageCaptureForQA = capture;
+  }
+  get fieldSnapshotSourceForQA() { return this.sparseRuntime.fieldSnapshotSourceForQA; }
+  private atlas: SparseAdaptiveMassAtlas;
+  private lastTime_s = 0;
+  private topologyGenerationWork?: Promise<void>;
+  private liveRegionUpdateRequested = false;
+  private liveRegionUpdatePending = false;
+  private frozenFrontierPending = false;
+  private topologyGenerationPolicyDirty = false;
+  private topologyRegionStamp?: string;
+  private lastFluidRevision = "";
+  private readonly topologyGenerationLimits: {
+    maximumLeaves: number; maximumCells: number; maximumSpanBricks: number;
+  };
+  private readonly topologyGenerationMaximumBytes: number;
+  private disposed = false;
+  private simulationFailureError?: Error;
+  private readonly failureReceipts = new Set<Promise<void>>();
+
+  async assertSimulationHealthy(): Promise<void> {
+    if (this.disposed) return;
+    await Promise.all([...this.failureReceipts]);
+    // Presentation completion can outlive a solver rebuild or GPU shutdown.
+    // Disposal retires its receipts; it must not submit a new checkpoint.
+    if (this.disposed) return;
+    if (this.simulationFailureError) throw this.simulationFailureError;
+    // Live edits may submit independently of advanceTo, including while paused.
+    try {
+      await this.sparseRuntime.assertSimulationHealthy();
+    } catch (error) {
+      if (!this.simulationFailureError) {
+        if (error instanceof SimulationFailureError) {
+          const contextual = { ...error.failure, scene: this.scene.sceneId, time_s: this.lastTime_s };
+          this.info.simulationFailure = contextual;
+          this.simulationFailureError = new SimulationFailureError(contextual);
+        } else {
+          this.simulationFailureError = new Error(`Simulation HALTED: mandatory failure receipt unavailable: ${String(error)}`);
+        }
+        this.sparseRuntime.cancelTopologyPreparation();
+      }
+      throw this.simulationFailureError;
+    }
+  }
+
+  captureSimulationHealth(encoder: GPUCommandEncoder): () => Promise<void> {
+    const read = this.sparseRuntime.captureSimulationFailure(encoder);
+    const time_s = this.lastTime_s;
+    let receipt: Promise<void> | undefined;
+    return () => receipt ??= (async () => {
+      await this.observeSimulationFailure(read, time_s);
+      if (!this.disposed && this.simulationFailureError) throw this.simulationFailureError;
+    })();
+  }
+
+  private observeSimulationFailure(read: ReturnType<CM12SparseWorldRuntime["captureSimulationFailure"]>, time_s: number): Promise<void> {
+    const receipt = read().then((failure) => {
+      if (!failure || this.disposed || this.simulationFailureError) return;
+      const contextual = { ...failure, scene: this.scene.sceneId, time_s };
+      this.info.simulationFailure = contextual;
+      this.simulationFailureError = new SimulationFailureError(contextual);
+      this.sparseRuntime.cancelTopologyPreparation();
+    }).catch((error: unknown) => {
+      if (!this.disposed && !this.simulationFailureError) {
+        this.simulationFailureError = new Error(`Simulation HALTED: mandatory failure receipt unavailable: ${String(error)}`);
+      }
+    }).finally(() => { this.failureReceipts.delete(receipt); });
+    this.failureReceipts.add(receipt);
+    return receipt;
+  }
+
+  private physicsTraceSampleId = 0;
+  private physicsTracePending = false;
+  private lastPhysicsTraceAt_ms = -Infinity;
+  /** Small staging ring carrying completed-frame pressure demand to the host. */
+  private readonly pressureIterationReadbacks: GPUBuffer[] = [];
+  private pressureIterationReceipt?: Readonly<{ executed: number; encoded: number }>;
+  private pressureIterationReceiptSequence = 0;
+  private pressureIterationReceiptAppliedSequence = 0;
+  private pressureIterationControlGeneration = 0;
+  /** One undecodable hardware sample retires the chain for this solver. */
+  private hardwarePhysicsTraceInvalid = false;
+  /** Diagnostics-only prior terminal tuple. Pressure topology precedes the
+   * current frame's topology commit, so UI attribution must lag that commit. */
+  private readonly pressureTopologyAttribution =
+    new SparseCM12PressureTopologyAttributionTracker();
+
+  private constructor(
+    private readonly device: GPUDevice,
+    // Not readonly: `applySceneUniforms` swaps in live scene-policy revisions,
+    // and `applyRuntimeValues` swaps the clock lane. Both are read fresh on
+    // every advance rather than baked into an allocation, which is the whole
+    // reason they can be adopted instead of rebuilt for.
+    private scene: SceneDescription,
+    private options: AdaptiveMassSolverOptions,
+    private readonly presentation: WebGPUAdaptiveMassSparsePresentation,
+    sparseWorldDevice: SparseWorldDevice,
+    sparseWorld: SparseWorld,
+    sparseWorldUI: SparseWorldUI,
+    private readonly sparseRuntime: CM12SparseWorldRuntime,
+    readonly sparseWorldTrace: CM12SparseWorldDeveloperTrace,
+    private readonly sparseWorldNumerics: { current: CM12SparseWorldStepConfiguration },
+    private readonly rigidSystem: WebGPURigidBodySystem | undefined,
+    private readonly rigidExchange: GPUBuffer | undefined,
+    private readonly rigidCouplingEnabled: boolean,
+    adaptiveMixedSeamFaceCount: number,
+    atlas: SparseAdaptiveMassAtlas,
+    quality: GPUQuality,
+  ) {
+    this.topologyRegionStamp = JSON.stringify(sceneRefinementRegions(scene));
+    this.sparseWorldDevice = sparseWorldDevice;
+    this.sparseWorld = sparseWorld;
+    this.sparseWorldUI = sparseWorldUI;
+    this.atlas = atlas;
+    this.topologyGenerationLimits = {
+      maximumLeaves: Math.max(4096, atlas.bricks.length * 2),
+      maximumCells: Math.max(262144, sparseRuntime.cellCount * 2),
+      maximumSpanBricks: options.maximumMacroSpanBricks ?? Number.POSITIVE_INFINITY,
+    };
+    this.topologyGenerationMaximumBytes = sparseRuntime.allocatedBytes * 3;
+    const tankCellSize_m = sceneCellSizes_m(scene);
+    this.fluidDomain = {
+      origin_m: [-0.5 * atlas.dimensions[0] * tankCellSize_m[0], 0,
+        -0.5 * atlas.dimensions[2] * tankCellSize_m[2]],
+      cellSize_m: tankCellSize_m,
+      dimensions: atlas.dimensions,
+    };
+    this.volumeTexture = presentation.densityTexture;
+    this.surfaceFieldTexture = presentation.levelSetTexture;
+    this.gridCellTexture = presentation.gridCellTexture;
+    this.velocityTexture = presentation.velocityTexture;
+    this.gridPressureTexture = presentation.pressureTexture;
+    this.gridDivergenceTexture = presentation.divergenceTexture;
+    const stats = sparseBrickAtlasStats(atlas);
+    const [nx, ny, nz] = atlas.dimensions;
+    const representedFraction = stats.leafCount / Math.max(1, stats.equivalentFinestCellCount);
+    const cellSize_m = Math.min(...tankCellSize_m);
+    this.info = {
+      nx,
+      ny,
+      nz,
+      storedNy: ny,
+      cellCount: stats.leafCount,
+      equivalentUniformCells: stats.equivalentFinestCellCount,
+      compressionRatio: representedFraction,
+      activeCompressionRatio: representedFraction,
+      activeSampleCount: stats.leafCount,
+      regularLayers: ny,
+      maximumNeighborDelta: 1,
+      gridKind: "octree",
+      cellSize_m,
+      pressureIterations: 0,
+      pressureSolver: "GPU-resident one-reduction composite GᵀWG sparse MGPCG",
+      allocatedBytes: presentation.allocatedBytes + sparseRuntime.allocatedBytes,
+      quality,
+      volumeCellSum: stats.integratedMassFineCells,
+      representedVolumeCellSum: stats.integratedMassFineCells,
+      representedVolumeDrift: 0,
+      volumeTelemetrySource: "adaptive-conservative-mass",
+      fluidBrickCapacity: stats.residentBrickCount,
+      fluidBrickResidentCount: stats.residentBrickCount,
+      fluidBrickCoreCount: stats.residentBrickCount,
+      fluidBrickHaloCount: 0,
+      fluidBrickGeneration: stats.generation,
+      adaptiveFineBrickCount: stats.fineBrickCount,
+      adaptiveCoarseBrickCount: stats.coarseBrickCount,
+      adaptiveFineCoarseFaceConnectedPairCount:
+        stats.fineCoarseFaceConnectedPairCount,
+      adaptiveMixedSeamFaceCount,
+      quadtreeMaximumFluidScale: 2,
+      quadtreeMaximumNeighborRatio: 2,
+      submittedTime_s: 0,
+      simulatedTime_s: 0,
+      completedTime_s: 0,
+      simulationLag_s: 0,
+      encodedSteps: 0,
+      lastSubsteps: 1,
+      maximumTallCellHeight: 2,
+      surfaceField: "levelset",
+      volumeControl: false,
+      hostFluidAuthority: "gpu-resident",
+      hostSimulationSizedWorkItems: 0,
+      hostSchedulingUsesReadback: false,
+    };
+    this.publishPhysicalWidthCensus(atlas);
+  }
+
+  /** QA-only immutable HEAD presentation publisher construction. */
+  static createPresentationPublisherOracleForQA(
+    device: GPUDevice,
+    scene: SceneDescription,
+    quality: GPUQuality,
+    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
+    options: AdaptiveMassSolverOptions,
+    onProgress: GPUInitializationReporter,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<WebGPUAdaptiveMassSolver> {
+    return this.createAsync(device, scene, quality, onRigidLoads, options,
+      onProgress, signal, PRESENTATION_PUBLISHER_ORACLE_QA_TOKEN);
+  }
+
+  /** QA-only construction that reserves the raw Phase-1 transport receipt
+   * arena. Ordinary solver options cannot enable this instrumentation. */
+  static createPhase1TransportReceiptOracleForQA(
+    device: GPUDevice, scene: SceneDescription, quality: GPUQuality,
+    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
+    options: AdaptiveMassSolverOptions, onProgress: GPUInitializationReporter,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<WebGPUAdaptiveMassSolver> {
+    return this.createAsync(device, scene, quality, onRigidLoads, options,
+      onProgress, signal, PHASE1_TRANSPORT_RECEIPT_QA_TOKEN);
+  }
+
+  /** Explicit construction surface for production compiled topology transport. */
+  static createCompiledTopologyTransport(
+    device: GPUDevice, scene: SceneDescription, quality: GPUQuality,
+    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
+    options: AdaptiveMassSolverOptions, onProgress: GPUInitializationReporter,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<WebGPUAdaptiveMassSolver> {
+    return this.createAsync(device, scene, quality, onRigidLoads, options,
+      onProgress, signal);
+  }
+
+  /** QA-only accepted-packet velocity-extension dispatch experiment. */
+  static createVelocityExtensionPacketCompactionOracleForQA(
+    device: GPUDevice, scene: SceneDescription, quality: GPUQuality,
+    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
+    options: AdaptiveMassSolverOptions, onProgress: GPUInitializationReporter,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<WebGPUAdaptiveMassSolver> {
+    return this.createAsync(device, scene, quality, onRigidLoads, options,
+      onProgress, signal, VELOCITY_EXTENSION_PACKET_COMPACTION_QA_TOKEN);
+  }
+
+  /** QA-only hybrid coarse-cell/fine-packet conservative transport. */
+  static createCoarseTransportCellPackingOracleForQA(
+    device: GPUDevice, scene: SceneDescription, quality: GPUQuality,
+    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
+    options: AdaptiveMassSolverOptions, onProgress: GPUInitializationReporter,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<WebGPUAdaptiveMassSolver> {
+    return this.createAsync(device, scene, quality, onRigidLoads, options,
+      onProgress, signal, COARSE_TRANSPORT_CELL_PACKING_QA_TOKEN);
+  }
+
+  /** QA-only compact dispatch for authored refinement-policy tile leaders. */
+  static createRefinementPolicyLeaderCompactionOracleForQA(
+    device: GPUDevice, scene: SceneDescription, quality: GPUQuality,
+    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
+    options: AdaptiveMassSolverOptions, onProgress: GPUInitializationReporter,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<WebGPUAdaptiveMassSolver> {
+    return this.createAsync(device, scene, quality, onRigidLoads, options,
+      onProgress, signal, REFINEMENT_POLICY_LEADER_COMPACTION_QA_TOKEN);
+  }
+
+  /** QA-only full-leaf control for the compact policy-planning path. */
+  static createRefinementPolicyFullLeafOracleForQA(
+    device: GPUDevice, scene: SceneDescription, quality: GPUQuality,
+    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
+    options: AdaptiveMassSolverOptions, onProgress: GPUInitializationReporter,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<WebGPUAdaptiveMassSolver> {
+    return this.createAsync(device, scene, quality, onRigidLoads, options,
+      onProgress, signal, REFINEMENT_POLICY_FULL_LEAF_QA_TOKEN);
+  }
+
+  /** QA-only packed coarse transport with raw Phase-1 receipts enabled. */
+  static createPhase1CoarseTransportCellPackingOracleForQA(
+    device: GPUDevice, scene: SceneDescription, quality: GPUQuality,
+    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
+    options: AdaptiveMassSolverOptions, onProgress: GPUInitializationReporter,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<WebGPUAdaptiveMassSolver> {
+    return this.createAsync(device, scene, quality, onRigidLoads, options,
+      onProgress, signal, PHASE1_COARSE_TRANSPORT_CELL_PACKING_QA_TOKEN);
+  }
+
+  /** QA-only destination-bit fixed-point gate for capacity-repair suffixes. */
+  static createDensityCapacityEarlyExitOracleForQA(
+    device: GPUDevice, scene: SceneDescription, quality: GPUQuality,
+    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
+    options: AdaptiveMassSolverOptions, onProgress: GPUInitializationReporter,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<WebGPUAdaptiveMassSolver> {
+    return this.createAsync(device, scene, quality, onRigidLoads, options,
+      onProgress, signal, DENSITY_CAPACITY_EARLY_EXIT_QA_TOKEN);
+  }
+
+  /** QA-only immutable authored-owner arithmetic in conservative transport. */
+  static createImplicitTransportOwnerArithmeticOracleForQA(
+    device: GPUDevice, scene: SceneDescription, quality: GPUQuality,
+    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
+    options: AdaptiveMassSolverOptions, onProgress: GPUInitializationReporter,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<WebGPUAdaptiveMassSolver> {
+    return this.createAsync(device, scene, quality, onRigidLoads, options,
+      onProgress, signal, IMPLICIT_TRANSPORT_OWNER_ARITHMETIC_QA_TOKEN);
+  }
+
+  /** Receipt-enabled immutable authored-owner arithmetic in transport. */
+  static createPhase1ImplicitTransportOwnerArithmeticOracleForQA(
+    device: GPUDevice, scene: SceneDescription, quality: GPUQuality,
+    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
+    options: AdaptiveMassSolverOptions, onProgress: GPUInitializationReporter,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<WebGPUAdaptiveMassSolver> {
+    return this.createAsync(device, scene, quality, onRigidLoads, options,
+      onProgress, signal, PHASE1_IMPLICIT_TRANSPORT_OWNER_ARITHMETIC_QA_TOKEN);
+  }
+
+  /** QA-only immutable authored-owner arithmetic in surface sharpening. */
+  static createImplicitSharpeningOwnerArithmeticOracleForQA(
+    device: GPUDevice, scene: SceneDescription, quality: GPUQuality,
+    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
+    options: AdaptiveMassSolverOptions, onProgress: GPUInitializationReporter,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<WebGPUAdaptiveMassSolver> {
+    return this.createAsync(device, scene, quality, onRigidLoads, options,
+      onProgress, signal, IMPLICIT_SHARPENING_OWNER_ARITHMETIC_QA_TOKEN);
+  }
+
+  /** Receipt-enabled immutable authored-owner arithmetic in sharpening. */
+  static createPhase1ImplicitSharpeningOwnerArithmeticOracleForQA(
+    device: GPUDevice, scene: SceneDescription, quality: GPUQuality,
+    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
+    options: AdaptiveMassSolverOptions, onProgress: GPUInitializationReporter,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<WebGPUAdaptiveMassSolver> {
+    return this.createAsync(device, scene, quality, onRigidLoads, options,
+      onProgress, signal, PHASE1_IMPLICIT_SHARPENING_OWNER_ARITHMETIC_QA_TOKEN);
+  }
+
+  /** QA-only alternating scratch ownership for sharpening capacity repair. */
+  static createAlternatingCapacityRepairReceiptsOracleForQA(
+    device: GPUDevice, scene: SceneDescription, quality: GPUQuality,
+    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
+    options: AdaptiveMassSolverOptions, onProgress: GPUInitializationReporter,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<WebGPUAdaptiveMassSolver> {
+    return this.createAsync(device, scene, quality, onRigidLoads, options,
+      onProgress, signal, ALTERNATING_CAPACITY_REPAIR_RECEIPTS_QA_TOKEN);
+  }
+
+  /** QA-only deterministic gather form of sharpening capacity repair. */
+  static createGatherCapacityRepairOracleForQA(
+    device: GPUDevice, scene: SceneDescription, quality: GPUQuality,
+    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
+    options: AdaptiveMassSolverOptions, onProgress: GPUInitializationReporter,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<WebGPUAdaptiveMassSolver> {
+    return this.createAsync(device, scene, quality, onRigidLoads, options,
+      onProgress, signal, GATHER_CAPACITY_REPAIR_QA_TOKEN);
+  }
+
+  static async createAsync(
+    device: GPUDevice,
+    scene: SceneDescription,
+    quality: GPUQuality,
+    _onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
+    options: AdaptiveMassSolverOptions,
+    onProgress: GPUInitializationReporter,
+    signal: AbortSignal = new AbortController().signal,
+    qaToken?: typeof PRESENTATION_PUBLISHER_ORACLE_QA_TOKEN
+      | typeof PHASE1_TRANSPORT_RECEIPT_QA_TOKEN
+      | typeof VELOCITY_EXTENSION_PACKET_COMPACTION_QA_TOKEN
+      | typeof COARSE_TRANSPORT_CELL_PACKING_QA_TOKEN
+      | typeof REFINEMENT_POLICY_LEADER_COMPACTION_QA_TOKEN
+      | typeof REFINEMENT_POLICY_FULL_LEAF_QA_TOKEN
+      | typeof PHASE1_COARSE_TRANSPORT_CELL_PACKING_QA_TOKEN
+      | typeof DENSITY_CAPACITY_EARLY_EXIT_QA_TOKEN
+      | typeof IMPLICIT_TRANSPORT_OWNER_ARITHMETIC_QA_TOKEN
+      | typeof PHASE1_IMPLICIT_TRANSPORT_OWNER_ARITHMETIC_QA_TOKEN
+      | typeof IMPLICIT_SHARPENING_OWNER_ARITHMETIC_QA_TOKEN
+      | typeof PHASE1_IMPLICIT_SHARPENING_OWNER_ARITHMETIC_QA_TOKEN
+      | typeof ALTERNATING_CAPACITY_REPAIR_RECEIPTS_QA_TOKEN
+      | typeof GATHER_CAPACITY_REPAIR_QA_TOKEN,
+  ): Promise<WebGPUAdaptiveMassSolver> {
+    options = { ...options, activityPolicy: sparseCM12ActivityPolicy(options.activityPolicy ?? {}) };
+    const runner = new GPUInitializationTaskRunner(onProgress, signal);
+    const fluidDomainPlan = adaptiveMassFluidDomainForScene(scene);
+    const initialSolidWorld = fluidSolidWorldForScene(scene);
+    // Compile the boundary chain's closing marker while the scene builds. A
+    // recorder constructed before it exists closes on an empty pass, which
+    // Metal never samples, and that one bad sample would retire hardware
+    // timing for the whole run.
+    void GPUStageTimestampRecorder.prepare(device);
+    let dimensions: SparseBrickVec3 | undefined;
+    let atlas: SparseAdaptiveMassAtlas | undefined;
+    let presentation: WebGPUAdaptiveMassSparsePresentation | undefined;
+    let grid: SparseAtlasCompositeGrid | undefined;
+    let sparseRuntime: Awaited<ReturnType<
+      typeof createCM12SparseWorld>> | undefined;
+    const sparseWorldNumerics: { current: CM12SparseWorldStepConfiguration } = {
+      current: { finestCellSize_m: 1, pressureScale: 1 },
+    };
+    // Static terrain is compiled into SolidWorld before resident construction.
+    // This sidecar owns only moving-body voxelization and bilateral reaction.
+    const rigidCouplingEnabled = scene.rigidBodies.length > 0;
+    let rigidExchange: GPUBuffer | undefined;
+    let rigidSystem: WebGPURigidBodySystem | undefined;
+    if (rigidCouplingEnabled) {
+      rigidExchange = device.createBuffer({
+        label: "Sparse Geometric (CM12) rigid exchange",
+        size: GPU_RIGID_EXCHANGE_BYTES,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+      });
+      rigidSystem = new WebGPURigidBodySystem(device, scene, rigidExchange);
+      rigidSystem.syncBodies(initializeRigidBodies(scene.rigidBodies));
+    }
+    const rigidInitializationTasks = (rigidSystem?.initializationTasks() ?? []).map(
+      (task) => ({ ...task, dependencies: [...(task.dependencies ?? []),
+        "adaptive-volume.resident"] }),
+    );
+    const curvedInitialLiquidNeedsFineFrontier =
+      scene.fluid.initialLiquidVolumes?.some((volume) =>
+        volume.shape !== "box") ?? false;
+    let initiallyActiveBrickKeys: ReadonlySet<number> | undefined;
+    try {
+      await runner.run([{
+        id: "adaptive-volume.plan",
+        phase: "planning",
+        label: "Bound the arbitrary-scene presentation lattice",
+        run: () => { dimensions = fluidDomainPlan.dimensions; },
+      }, {
+        id: "adaptive-volume.atlas",
+        phase: "adaptive-topology",
+        label: "Build resident dyadic sparse bricks",
+        dependencies: ["adaptive-volume.plan"],
+        run: () => {
+          const fineResolution = options.brickFineResolution ?? 8;
+          const resolutionForBrick = options.initialResolutionForQA === undefined
+            ? undefined : () => options.initialResolutionForQA!;
+          atlas = initializeSparseBrickAtlasFromScene(scene, {
+            finestDimensions: dimensions!,
+            brickFineResolution: fineResolution,
+            solidWorld: initialSolidWorld,
+            maximumMacroSpanBricks: options.maximumMacroSpanBricks,
+            surfaceFineRings: options.surfaceFineRings,
+            coarseFirstCurvatureTolerance: options.activityPolicy?.coarseFirst
+              ? options.activityPolicy.curvatureTolerance : undefined,
+            // A broad planar reset surface can start from its ordinary B4
+            // proof and let activity promote it. A compact curved volume must
+            // retain a B8 frontier root: once its B4 support reaches the edge
+            // of the generation-zero catalogue, no finer accepted leaf exists
+            // from which SparseWorld can discover the next dry page.
+            initialSurfaceCoarseningBiasRings:
+              options.activityPolicy?.activitySignals
+                && !curvedInitialLiquidNeedsFineFrontier ? 1 : 0,
+            ...(resolutionForBrick ? { resolutionForBrick } : {}),
+          });
+          // Generation zero contains only authored fluid. Dry face neighbours
+          // are admitted by the GPU frontier if and when a swept fluid course
+          // demands them; logical extent never becomes a topology allocation.
+          initiallyActiveBrickKeys = options.initialAtlasResidentForQA
+            ? new Set(atlas.bricks.map(brick => brick.key))
+            : sparseCM12InitialActiveBrickKeys(scene, atlas,
+              options.activityPolicy?.coarseFirst && sceneRefinementRegions(scene).length === 0 ? 2 : 1);
+          // The runtime is GPU-resident from generation zero. Construct only
+          // the topology oracle needed by the packer; the CPU dynamics state
+          // used to allocate duplicate velocity, pressure, policy and
+          // workspace graphs that were never stepped or returned.
+          grid = buildSparseAtlasCompositeGrid(atlas);
+        },
+      }, {
+        id: "adaptive-volume.presentation",
+        phase: "allocation",
+        label: "Allocate adaptive water and ownership textures",
+        dependencies: ["adaptive-volume.atlas"],
+        run: () => {
+          presentation = new WebGPUAdaptiveMassSparsePresentation(device);
+        },
+      }, {
+        id: "adaptive-volume.resident",
+        phase: "allocation",
+        label: "Pack compact GPU topology and allocate resident frame state",
+        dependencies: ["adaptive-volume.atlas", "adaptive-volume.presentation"],
+        run: async () => {
+          const cellSize_m = finestCellSize(scene, atlas!);
+          sparseWorldNumerics.current = {
+            finestCellSize_m: cellSize_m,
+            pressureScale: 1,
+            sharpening: { presentationColumnHeightEnabled: options.presentationColumnHeightEnabled },
+            origin_m: fluidDomainPlan.origin_m,
+          };
+          sparseRuntime = await createCM12SparseWorld({
+            device,
+            scene,
+            atlas: atlas!,
+            grid: grid!,
+            numerics: () => sparseWorldNumerics.current,
+            initiallyActiveBrickKeys,
+            rigid: rigidCouplingEnabled ? {
+              bodies: rigidSystem!.stateBuffer,
+              exchange: rigidExchange!,
+              worldDimensions_m: fluidDomainPlan.dimensions.map((value, axis) =>
+                value * fluidDomainPlan.cellSize_m[axis]) as [number, number, number],
+            } : undefined,
+            rigidSystem,
+            // Sized from the iteration ceiling this solver was built with, so
+            // the journal can hold the longest solve it will ever encode.
+            journal: options.pressureJournal
+              ? { iterationCapacity: sparseCM12PressureIterations(
+                options.pressureIterations) }
+              : undefined,
+            presentationPageResolution:
+              options.presentationPageResolution ?? options.brickFineResolution ?? 8,
+            report: (label: string) => onProgress({
+              phase: "allocation",
+              taskId: "adaptive-volume.resident",
+              label,
+              completed: 3,
+              total: 6,
+            }),
+            topologyPageCapacityMaximum:
+              options.topologyPageBudget
+                ?? (curvedInitialLiquidNeedsFineFrontier ? 1024 : undefined),
+            solidWorld: initialSolidWorld,
+            refinementRegionParameters: packSparseCM12RefinementRegions(
+              sceneRefinementRegions(scene), refinementRegionLattice(scene)),
+            mode: qaToken === PRESENTATION_PUBLISHER_ORACLE_QA_TOKEN
+              ? "presentation-publisher-qa"
+              : qaToken === PHASE1_TRANSPORT_RECEIPT_QA_TOKEN
+                ? "phase1-transport-receipt-qa"
+                : qaToken === VELOCITY_EXTENSION_PACKET_COMPACTION_QA_TOKEN
+                  ? "velocity-extension-packet-compaction-qa"
+                  : qaToken === COARSE_TRANSPORT_CELL_PACKING_QA_TOKEN
+                    ? "coarse-transport-cell-packing-qa"
+                    : qaToken === REFINEMENT_POLICY_LEADER_COMPACTION_QA_TOKEN
+                      ? "refinement-policy-leader-compaction-qa"
+                    : qaToken === REFINEMENT_POLICY_FULL_LEAF_QA_TOKEN
+                      ? "refinement-policy-full-leaf-qa"
+                    : qaToken === PHASE1_COARSE_TRANSPORT_CELL_PACKING_QA_TOKEN
+                      ? "phase1-coarse-transport-cell-packing-qa"
+                    : qaToken === DENSITY_CAPACITY_EARLY_EXIT_QA_TOKEN
+                      ? "density-capacity-early-exit-qa"
+                    : qaToken === IMPLICIT_TRANSPORT_OWNER_ARITHMETIC_QA_TOKEN
+                      ? "implicit-transport-owner-arithmetic-qa"
+                    : qaToken === PHASE1_IMPLICIT_TRANSPORT_OWNER_ARITHMETIC_QA_TOKEN
+                      ? "phase1-implicit-transport-owner-arithmetic-qa"
+                    : qaToken === IMPLICIT_SHARPENING_OWNER_ARITHMETIC_QA_TOKEN
+                      ? "implicit-sharpening-owner-arithmetic-qa"
+                    : qaToken === PHASE1_IMPLICIT_SHARPENING_OWNER_ARITHMETIC_QA_TOKEN
+                      ? "phase1-implicit-sharpening-owner-arithmetic-qa"
+                    : qaToken === ALTERNATING_CAPACITY_REPAIR_RECEIPTS_QA_TOKEN
+                      ? "alternating-capacity-repair-receipts-qa"
+                    : qaToken === GATHER_CAPACITY_REPAIR_QA_TOKEN
+                      ? "gather-capacity-repair-qa"
+                    : "production",
+          });
+          if (rigidSystem) {
+            const occupancy = sparseRuntime.runtime.solidWorldCollisionSource;
+            if (!occupancy) {
+              throw new Error("Adaptive rigid contact requires resident SolidWorld occupancy");
+            }
+            rigidSystem.setSolidWorldCollisionSource({
+              ...occupancy,
+              origin_m: fluidDomainPlan.origin_m,
+              cellSize_m: fluidDomainPlan.cellSize_m,
+            });
+          }
+        },
+      }, ...rigidInitializationTasks, {
+        id: "adaptive-volume.upload",
+        phase: "upload",
+        label: "Publish sparse atlas generation zero",
+        dependencies: ["adaptive-volume.resident"],
+        run: () => {
+          const encoder = device.createCommandEncoder({
+            label: "Sparse Geometric (CM12) initial GPU publication",
+          });
+          sparseRuntime!.runtime.encodeInitialPresentation(
+            encoder, finestCellSize(scene, atlas!), options.presentationColumnHeightEnabled);
+          device.queue.submit([encoder.finish()]);
+        },
+      }, {
+        id: "adaptive-volume.warmup",
+        phase: "warmup",
+        label: "Fence adaptive presentation generation zero",
+        dependencies: ["adaptive-volume.upload"],
+        run: async () => {
+          await device.queue.onSubmittedWorkDone();
+          await sparseRuntime!.runtime.assertSimulationHealthy();
+        },
+      }]);
+      return new WebGPUAdaptiveMassSolver(
+        device, scene, options, presentation!, sparseRuntime!.device, sparseRuntime!.world,
+        sparseRuntime!.ui,
+        sparseRuntime!.runtime, sparseRuntime!.developerTrace, sparseWorldNumerics,
+        rigidSystem, rigidExchange, rigidCouplingEnabled,
+        grid!.mixedSeamRowCount, atlas!, quality,
+      );
+    } catch (error) {
+      sparseRuntime?.world.destroy();
+      presentation?.destroy();
+      rigidSystem?.destroy();
+      rigidExchange?.destroy();
+      throw error;
+    }
+  }
+
+  async editFluid(edit: LiveFluidEdit): Promise<LiveFluidEditResult> {
+    if (this.disposed || !this.sparseWorld.editFluidVolume) return { accepted: false, reason: "Live fluid editing is unavailable." };
+    return this.sparseWorld.editFluidVolume(edit);
+  }
+
+  /** Add a semantic liquid interaction through the public sparse-world API. */
+  injectLiquidBall(ball: InjectedLiquidBall): void {
+    if (this.disposed || !(ball.radius_m > 0)) return;
+    this.sparseWorld.edit({
+      kind: "liquid-ellipsoid",
+      center_m: [ball.centre_m.x, ball.centre_m.y, ball.centre_m.z],
+      radii_m: [ball.radius_m, ball.radius_m,
+        ball.halfHeight_m ?? ball.radius_m],
+    });
+    if (this.sparseRuntime.pendingLiquidInteractions) this.scheduleTopologyGeneration();
+  }
+
+  /**
+   * Adopt scene scalars and refinement policy on the running solver.
+   *
+   * Everything this method reads out of the document below — `numerics.maxDt_s`,
+   * `fluid.gravity_m_s2`, `fluid.density_kg_m3` — is read per advance, never
+   * baked into a pipeline or atlas. Refinement regions travel through the
+   * sparse world's small policy buffer and are consumed by the next ordinary
+   * topology plan. Without this seam either edit would construct a new world
+   * and discard the timeline.
+   */
+  async prepareLiveSolidEdit(scene: SceneDescription): Promise<boolean> {
+    if (!this.sparseWorld.prepareSceneEdit) throw new Error("Live solid edit acceptance is unavailable.");
+    return this.sparseWorld.prepareSceneEdit(scene);
+  }
+
+  validateLiveSolidEdit(scene: SceneDescription): void {
+    if (!this.sparseWorld.validateSceneEdit) throw new Error("Live voxel editing is unavailable");
+    this.sparseWorld.validateSceneEdit(scene);
+  }
+
+  applySceneUniforms(scene: SceneDescription): void {
+    const regionStamp = JSON.stringify(sceneRefinementRegions(scene));
+    const regionsChanged = regionStamp
+      !== (this.topologyRegionStamp ?? JSON.stringify(sceneRefinementRegions(this.scene)));
+    const receipt = this.sparseWorld.edit({ kind: "set-scene", scene });
+    if (receipt.disposition !== "applied") {
+      throw new Error(receipt.reason ?? "Sparse world requires a rebuild for this scene edit");
+    }
+    this.scene = scene;
+    if (this.sparseRuntime.pendingLiquidInteractions) this.scheduleTopologyGeneration();
+    this.topologyRegionStamp = regionStamp;
+    this.topologyGenerationPolicyDirty ||= regionsChanged;
+    this.resetPressureIterationFeedback();
+  }
+
+  /**
+   * Adopt the controls that only change what the next advance asks for.
+   *
+   * `timeStep` picks between the paper 1/30 s operating step and the scene's
+   * authored `maxDt_s`; both are consulted at the top of `advanceTo`, so the
+   * switch is a live one. Activity thresholds are likewise copied into the
+   * next frame's small policy uniform. Structural capacity controls still
+   * rebuild, while accepted resolution changes publish at topology epochs.
+   */
+  applyRuntimeValues(values: MethodParamValues): void {
+    const timeStep = values.timeStep === "scene" ? "scene" : "paper";
+    const sharpeningDistance = sparseCM12SharpeningDistance(values.sharpeningDistance);
+    const sharpeningTraceSteps = sparseCM12SharpeningTraceSteps(values.sharpeningTraceSteps);
+    const sharpeningStrength = sparseCM12SharpeningStrength(values.sharpeningStrength);
+    const gammaDiffusionEnabled = values.gammaDiffusion !== "off";
+    const surfaceSharpeningEnabled = values.surfaceSharpening !== "off";
+    const pressureIterations = sparseCM12PressureIterations(values.pressureIterations);
+    const pressureRelativeTolerance =
+      sparseCM12PressureRelativeTolerance(values.pressureRelativeTolerance);
+    if (pressureIterations !== this.options.pressureIterations
+      || pressureRelativeTolerance !== this.options.pressureRelativeTolerance) {
+      this.resetPressureIterationFeedback();
+    }
+    const activityPolicy = sparseCM12ActivityPolicy({
+      ...values,
+      activitySignals: values.selectorMode !== "surface",
+      coarseFirst: values.selectorMode !== "surface" && values.selectorMode !== "activity",
+      // These controls belong to the running solver, not the method panel.
+      freezeTopology: this.options.activityPolicy?.freezeTopology,
+      legacyFaceTransportForQA: this.options.activityPolicy?.legacyFaceTransportForQA,
+    });
+    this.options = { ...this.options, ...correctionOptions(values), timeStep, sharpeningDistance, sharpeningTraceSteps,
+      surfaceMeshRefinement: Number(values.surfaceMeshRefinement) === 1 ? 1
+      : Number(values.surfaceMeshRefinement) === 4 ? 4 : 2,
+      sharpeningStrength,
+      gammaDiffusionEnabled, surfaceSharpeningEnabled,
+      presentationColumnHeightEnabled: values.presentationColumnHeight === "on",
+      pressureIterations, pressureRelativeTolerance, activityPolicy };
+    // Live liquid edits can arrive while paused, before advanceTo publishes
+    // the next step configuration. New support must use the current controls.
+    this.sparseWorldNumerics.current = { ...this.sparseWorldNumerics.current, activityPolicy,
+      sharpening: { ...this.sparseWorldNumerics.current.sharpening,
+        presentationColumnHeightEnabled: this.options.presentationColumnHeightEnabled } };
+  }
+
+  private resetPressureIterationFeedback(): void {
+    this.pressureIterationReceipt = undefined;
+    this.pressureIterationControlGeneration += 1;
+    delete this.info.pressureIterationsExecuted;
+    delete this.info.pressureIterationsEncoded;
+  }
+
+  /** Await an already requested topology boundary; useful to deterministic
+   * drivers as well as the UI's asynchronous frame loop. */
+  async waitForTopologyReady(): Promise<void> {
+    // A live edit can supersede a preparation while it is awaiting the GPU.
+    // Its replacement check belongs to the same requested topology boundary.
+    while (this.topologyGenerationWork) await this.topologyGenerationWork;
+  }
+
+  /** Apply edited bounds to the accepted state without advancing its clock.
+   * Normal simulation drivers can retain the in-place, step-cadenced path;
+   * the editor explicitly requests this asynchronous publication boundary. */
+  async refreshSceneTopology(): Promise<void> {
+    if (this.topologyGenerationPolicyDirty) {
+      this.liveRegionUpdateRequested = true;
+      this.scheduleTopologyGeneration();
+    }
+    await this.waitForTopologyReady();
+    if (this.simulationFailureError) throw this.simulationFailureError;
+  }
+
+  private publishPhysicalWidthCensus(atlas: SparseAdaptiveMassAtlas,
+    records?: ReadonlyMap<number, SparseCM12GPUActivityRecord>, step = 0): void {
+    const bins = new Map<number, { width: number; leaves: number; liquidVolumeFineCells: number }>();
+    for (const brick of atlas.bricks) {
+      const record = records?.get(brick.key);
+      if (records && !record?.active) continue;
+      const resolution = record?.acceptedResolution ?? brick.resolution;
+      const width = atlas.brickFineResolution * (brick.spanBricks ?? 1) / resolution;
+      let volume = 1;
+      for (let axis = 0; axis < 3; axis++) volume *= sparseBrickMaximumFine(atlas, brick, axis)
+        - brick.coordinate[axis]! * atlas.brickFineResolution;
+      const density = record?.meanDensity ?? brick.density.reduce((sum, rho) => sum + rho, 0) / brick.density.length;
+      const bin = bins.get(width) ?? { width, leaves: 0, liquidVolumeFineCells: 0 };
+      bin.leaves++;
+      bin.liquidVolumeFineCells += Math.max(0, density) * volume;
+      bins.set(width, bin);
+    }
+    this.info.adaptivePhysicalWidthCensus = [...bins.values()].sort((a, b) => a.width - b.width);
+    this.info.adaptivePhysicalWidthCensusStep = step;
+  }
+
+  private scheduleTopologyGeneration(): void {
+    if (this.simulationFailureError) return;
+    if (this.topologyGenerationWork || this.disposed) return;
+    const liveRegionUpdate = this.liveRegionUpdateRequested;
+    this.liveRegionUpdatePending = liveRegionUpdate;
+    this.liveRegionUpdateRequested = false;
+    const frozen = this.options.activityPolicy?.freezeTopology === true;
+    const frontierCheck = frozen || this.frozenFrontierPending || this.sparseRuntime.pendingLiquidInteractions;
+    const preparationStarted = performance.now();
+    const cadence = this.options.activityPolicy?.coarseFirst && this.sparseRuntime.generationPlanningRequired
+      ? Math.max(1, this.options.activityPolicy.topologyCadenceSteps)
+      : Math.max(64, this.options.activityPolicy?.topologyCadenceSteps ?? 64);
+    if (!liveRegionUpdate && !frozen && !this.frozenFrontierPending && !this.sparseRuntime.pendingLiquidInteractions
+      && !this.topologyGenerationPolicyDirty && (this.info.encodedSteps ?? 0) % cadence !== 0) return;
+    const policyDirty = this.topologyGenerationPolicyDirty;
+    this.topologyGenerationPolicyDirty = false;
+    const interactionRevision = this.sparseRuntime.pendingLiquidInteractionRevision;
+    let supportVerified = false;
+    let retryInteractions = false;
+    const mergeable = (record: SparseCM12GPUActivityRecord) => record.active && record.acceptedResolution === 1
+      && record.quietEpochs >= Math.max(64, this.options.activityPolicy?.demoteEpochs ?? 64)
+      && record.meanDensity >= 0.9999 && (record.reasons & (1 | 16 | 256 | 512)) === 0
+      && record.maximumVelocityTravelFineCells < 0.125;
+    const prepare = async () => {
+      await this.assertSimulationHealthy();
+      if (liveRegionUpdate) {
+        const supported = await this.sparseRuntime.refreshRefinementRegions(
+          finestCellSize(this.scene, this.atlas), this.options.activityPolicy);
+        if (supported) return;
+      }
+      // Live region edits and explicit spatial bounds take the detailed path.
+      // Otherwise an eight-byte conservative GPU receipt rules out ordinary
+      // rerungs, macro motion demands and quiet sibling merges before mapping
+      // capacity-sized activity or constructing CPU transfer geometry.
+      if ((frontierCheck || (!policyDirty && sceneRefinementRegions(this.scene).length === 0))
+        && !await this.sparseRuntime.needsDetailedGenerationPlanning(
+          this.topologyGenerationLimits.maximumSpanBricks,
+          this.options.activityPolicy?.demoteEpochs ?? 64,
+          this.options.activityPolicy?.finestTravelCells ?? 1, frontierCheck)) {
+        this.frozenFrontierPending = false;
+        supportVerified = true;
+        return;
+      }
+      if (this.disposed || frozen !== (this.options.activityPolicy?.freezeTopology === true)) return;
+      // Fully backed small scenes retain the in-place path. Probe quietly for
+      // sibling merges; the frozen capture below rechecks fresh evidence.
+      const requiresMacroFloor = sceneRefinementRegions(this.scene).some(region =>
+        region.minimumCellSize_cells > this.sparseRuntime.acceptedAtlas.brickFineResolution);
+      if (!liveRegionUpdate && !frontierCheck && !this.sparseRuntime.generationPlanningRequired && !requiresMacroFloor) {
+        if (this.topologyGenerationLimits.maximumSpanBricks <= 1) return;
+        const atlas = this.sparseRuntime.acceptedAtlas;
+        const snapshot = await this.sparseWorldTrace.readActivitySnapshot();
+        const siblings = new Map<string, number>();
+        for (const record of snapshot.records) {
+          const brick = atlas.bricks[record.leafId];
+          if (!brick || !mergeable(record)) continue;
+          const origin = brick.coordinate.map(q => Math.floor(q / 2) * 2);
+          if (origin.some((q, axis) => (q + 2) * atlas.brickFineResolution > atlas.dimensions[axis]!)) continue;
+          const key = origin.join("/");
+          siblings.set(key, (siblings.get(key) ?? 0) + 1);
+        }
+        if (![...siblings.values()].some(count => count === 8)) return;
+      }
+      if (this.disposed || frozen !== (this.options.activityPolicy?.freezeTopology === true)) return;
+      this.info.topologyGenerationPending = true;
+      this.info.topologyGenerationMaximumBytes = this.topologyGenerationMaximumBytes;
+      return this.sparseRuntime.prepareResidentGeneration(async (accepted, signal) => {
+      const source = await accepted.captureGenerationPlanningSource();
+      if (frozen !== (this.options.activityPolicy?.freezeTopology === true) || signal.aborted) return undefined;
+      this.frozenFrontierPending = source.frozenFrontier.size > 0;
+      this.publishPhysicalWidthCensus(source.atlas, source.recordsByKey, source.activity.acceptedSteps);
+      const requestBudget = this.options.activityPolicy?.prepareBricksPerFrame ?? 64;
+      const physicalDemands = new Map<number, number>();
+      const physicalFloors = new Map<number, number>();
+      const regionBounds = sceneRefinementRegions(this.scene).map(region => ({ region,
+        ...refinementRegionCellBounds(region, refinementRegionLattice(this.scene)) }));
+      for (const brick of source.atlas.bricks) {
+        const record = source.recordsByKey.get(brick.key)!;
+        if (frozen && record.active) continue;
+        const intersecting = regionBounds.filter(bounds => brick.coordinate.every((q, axis) =>
+          q * source.atlas.brickFineResolution < bounds.max[axis]!
+          && sparseBrickMaximumFine(source.atlas, brick, axis) > bounds.min[axis]!));
+        physicalFloors.set(brick.key, Math.max(1, ...intersecting.map(({region}) => region.minimumCellSize_cells)));
+        if (!record.active) continue;
+        const containedRegions = regionBounds.filter(bounds => brick.coordinate.every((q, axis) =>
+          q * source.atlas.brickFineResolution >= bounds.min[axis]! - 1e-6
+          && sparseBrickMaximumFine(source.atlas, brick, axis) <= bounds.max[axis]! + 1e-6));
+        for (const {region} of containedRegions) if (region.maximumCellSize_cells !== undefined) {
+          physicalDemands.set(brick.key, Math.min(physicalDemands.get(brick.key) ?? Infinity,
+            region.maximumCellSize_cells));
+        }
+        if ((brick.spanBricks ?? 1) > 1 && (record.thinFluid
+          || record.maximumVelocityTravelFineCells >= (this.options.activityPolicy?.finestTravelCells ?? 1))) {
+          const minimum = Math.max(1, ...containedRegions.map(({region}) => region.minimumCellSize_cells));
+          physicalDemands.set(brick.key, Math.min(physicalDemands.get(brick.key) ?? Infinity, minimum));
+        }
+      }
+      const requested = new Set([...source.planned.keys(), ...physicalDemands.keys(),
+        ...(liveRegionUpdate ? physicalFloors.keys() : [])].filter(key => {
+        if (source.frozenFrontier.has(key)) return true;
+        if (frozen) return false;
+        const brick = source.atlas.directory.get(key)!;
+        const edge = source.atlas.brickFineResolution * (brick.spanBricks ?? 1);
+        const floor = physicalFloors.get(key) ?? 1;
+        const targetWidth = Math.max(floor, edge / (source.planned.get(key) ?? brick.resolution));
+        return targetWidth !== edge / brick.resolution
+          || edge / brick.resolution > Math.max(floor, physicalDemands.get(key) ?? Infinity);
+      }));
+      if (requested.size === 0) {
+        if (frozen) return undefined;
+        const groups = new Map<string, number>();
+        for (const brick of source.atlas.bricks) {
+          const span = brick.spanBricks ?? 1;
+          if (!mergeable(source.recordsByKey.get(brick.key)!) || brick.unclipped
+            || span * 2 > this.topologyGenerationLimits.maximumSpanBricks) continue;
+          const origin = brick.coordinate.map(q => Math.floor(q / (2 * span)) * 2 * span);
+          if (origin.some((q, axis) => (q + 2 * span) * source.atlas.brickFineResolution > source.atlas.dimensions[axis]!)) continue;
+          const key = `${span}/${origin.join("/")}`;
+          groups.set(key, (groups.get(key) ?? 0) + 1);
+        }
+        // Retired backing alone is not a reason to discard the in-place
+        // catalogue. Reclaim it when an actual refinement or merge is needed.
+        if (![...groups.values()].some(count => count === 8)) return undefined;
+      }
+      const admitted = new Set([...requested].sort((left, right) => {
+        const a = source.recordsByKey.get(left)!, b = source.recordsByKey.get(right)!;
+        const priority = (record: typeof a) => Number((record.planReasons & 2) !== 0) * 2048 + Number(record.thinFluid) * 1024
+          + Number((record.reasons & 1) !== 0) * 512 + record.scoreByte;
+        return priority(b) - priority(a) || left - right;
+      }).slice(0, frozen || liveRegionUpdate ? requested.size : requestBudget));
+      // Missing receiver connectivity is required support, not optional
+      // adaptation. Never discard the unadmitted half of an interaction.
+      for (const key of source.frozenFrontier) admitted.add(key);
+      const intents = new Map(source.atlas.bricks.map(brick => {
+        const record = source.recordsByKey.get(brick.key)!;
+        return [brick.key, { resolution: admitted.has(brick.key) ? source.planned.get(brick.key) ?? brick.resolution : brick.resolution,
+          frozen: frozen && record.active,
+          activate: admitted.has(brick.key) && source.frozenFrontier.has(brick.key),
+          minimumCellWidth: physicalFloors.get(brick.key),
+          maximumCellWidth: admitted.has(brick.key) ? physicalDemands.get(brick.key) : undefined,
+          // A satisfied ceiling is still a constraint, even though it no longer
+          // consumes an admission slot. Do not undo it with a quiet merge.
+          mergeable: !frozen && mergeable(record) && !physicalDemands.has(brick.key) }];
+      }));
+      const plan = planSparseCM12ResidentGeneration(source.atlas, source.active, intents,
+        this.topologyGenerationLimits);
+      this.info.topologyGenerationRequestedLeaves = requested.size;
+      this.info.topologyGenerationDeferred = plan?.status === "deferred"
+        ? { leaves: plan.leaves, cells: plan.cells } : undefined;
+      if (!plan || plan.status === "deferred") return undefined;
+      await this.assertSimulationHealthy();
+      const transfer = await accepted.captureGenerationTransferSource(source);
+      return accepted.prepareGenerationReplacement(transfer, plan.atlas, plan.active,
+        finestCellSize(this.scene, plan.atlas),
+        this.topologyGenerationMaximumBytes - this.sparseRuntime.allocatedBytes, signal, plan.newAirCoverage, liveRegionUpdate);
+      });
+    };
+    this.topologyGenerationWork = prepare().then(() => {
+      if (this.atlas !== this.sparseRuntime.acceptedAtlas) {
+        this.frozenFrontierPending = false;
+        supportVerified = true;
+        this.info.topologyGenerationCount = (this.info.topologyGenerationCount ?? 0) + 1;
+        this.resetPressureIterationFeedback();
+      }
+      this.atlas = this.sparseRuntime.acceptedAtlas;
+      if (this.rigidSystem && this.sparseRuntime.solidWorldCollisionSource) {
+        this.rigidSystem.setSolidWorldCollisionSource({ ...this.sparseRuntime.solidWorldCollisionSource,
+          origin_m: this.fluidDomain.origin_m, cellSize_m: this.fluidDomain.cellSize_m });
+      }
+      this.info.allocatedBytes = this.presentation.allocatedBytes + this.sparseRuntime.allocatedBytes;
+      this.info.topologyGenerationError = undefined;
+      if (supportVerified && !this.frozenFrontierPending
+        && interactionRevision === this.sparseRuntime.pendingLiquidInteractionRevision
+        && frozen === (this.options.activityPolicy?.freezeTopology === true)
+        && this.sparseRuntime.pendingLiquidInteractions) {
+        this.sparseRuntime.completePendingLiquidInteractions();
+      }
+    }).catch(error => {
+      if (error instanceof Error && error.name === "AbortError") { retryInteractions = true; return; }
+      if (error instanceof SparseCM12GenerationStale) {
+        this.info.topologyGenerationStaleCount = (this.info.topologyGenerationStaleCount ?? 0) + 1;
+        retryInteractions = true;
+        return;
+      }
+      if (error instanceof SparseCM12GenerationBudgetDeferred) {
+        this.info.topologyGenerationDeferred = { leaves: this.atlas.bricks.length,
+          cells: this.sparseRuntime.cellCount, requestedBytes: error.requestedBytes,
+          availableBytes: error.availableBytes };
+        this.info.topologyGenerationError = undefined;
+        return;
+      }
+      this.info.topologyGenerationError = error instanceof Error ? error.message : String(error);
+      if (!this.simulationFailureError) {
+        const failure = error instanceof SimulationFailureError ? error.failure : {
+          method: "adaptive-volume", code: "TOPOLOGY_GENERATION_FAILURE",
+          message: this.info.topologyGenerationError, kernel: "host:prepareTopologyGeneration",
+          frame: this.info.encodedSteps ?? -1, generation: -1, ownerId: -1,
+          operands: [], rawWords: [], scene: this.scene.sceneId, time_s: this.lastTime_s,
+        };
+        this.info.simulationFailure = failure;
+        this.simulationFailureError = new SimulationFailureError(failure);
+        this.sparseRuntime.cancelTopologyPreparation();
+      }
+    }).finally(() => {
+      this.info.topologyPreparationDurationMs = performance.now() - preparationStarted;
+      this.info.topologyGenerationPending = this.frozenFrontierPending;
+      this.topologyGenerationWork = undefined;
+      this.liveRegionUpdatePending = false;
+      if (liveRegionUpdate && retryInteractions) this.liveRegionUpdateRequested = true;
+      if (this.liveRegionUpdateRequested || (this.sparseRuntime.pendingLiquidInteractions && (retryInteractions
+        || interactionRevision !== this.sparseRuntime.pendingLiquidInteractionRevision
+        || frozen !== (this.options.activityPolicy?.freezeTopology === true)))) {
+        this.scheduleTopologyGeneration();
+      }
+    });
+  }
+
+  advanceTo(time_s: number, bodies: RigidBodyState[]): boolean {
+    this.info.topologyPreparationMaximumSliceMs = this.sparseRuntime.generationPreparationMaximumSliceMs;
+    this.info.topologyPreparationMaximumSliceOperation = this.sparseRuntime.generationPreparationMaximumSliceOperation;
+    if (this.simulationFailureError) throw this.simulationFailureError;
+    if (this.frozenFrontierPending || this.sparseRuntime.pendingLiquidInteractions) {
+      this.scheduleTopologyGeneration();
+      return false;
+    }
+    this.info.topologyPublicationMaximumDurationMs = this.sparseRuntime.generationPublicationMaximumMs;
+    if (this.disposed || this.liveRegionUpdateRequested || this.liveRegionUpdatePending || this.sparseRuntime.topologyPreparationPending
+      // Required support planning starts with asynchronous readbacks, before
+      // topologyPreparationPending becomes true. Do not let transport outrun
+      // that preflight and consume a frontier whose backing is still pending.
+      || ((this.options.activityPolicy?.freezeTopology || this.sparseRuntime.generationPlanningRequired)
+        && this.topologyGenerationWork)
+      || this.sparseWorldDevice.status !== "ready" || !Number.isFinite(time_s)
+      || time_s <= this.lastTime_s + 1e-9) return false;
+    const paperTimeStep = this.options.timeStep === "paper";
+    if (paperTimeStep
+      && time_s - this.lastTime_s < CM12_PAPER_DT_S - 1e-9) return false;
+    const dt_s = paperTimeStep
+      ? CM12_PAPER_DT_S
+      : Math.min(this.scene.numerics.maxDt_s, time_s - this.lastTime_s);
+    if (!(dt_s > 0)) return false;
+    const keyframe = refinementKeyframeAt(this.scene, this.lastTime_s);
+    if (keyframe && JSON.stringify(keyframe.regions) !== JSON.stringify(sceneRefinementRegions(this.scene))) {
+      this.applySceneUniforms({ ...this.scene, fluid: { ...this.scene.fluid, refinementRegions: keyframe.regions } });
+    }
+    const pressureIterationMaximum = sparseCM12PressureIterations(
+      this.options.pressureIterations);
+    const pressureRelativeTolerance = sparseCM12PressureRelativeTolerance(
+      this.options.pressureRelativeTolerance);
+    const pressureIterations = this.sparseWorldUI.control.pressureFilm?.captureEnabled
+      ? pressureIterationMaximum
+      : sparseCM12PressureIterationsFromReceipt(
+        pressureIterationMaximum,
+        pressureRelativeTolerance,
+        this.pressureIterationReceipt,
+      );
+    const cellSize_m = finestCellSize(this.scene, this.atlas);
+    const inflow = this.scene.fluid.inflow;
+    const inflowStrength = inflow
+      ? averageInflowStrength(inflow, this.lastTime_s, this.lastTime_s + dt_s) : 0;
+    const liquidInflow = inflow && inflowStrength > 0 ? (() => {
+      const outlet = inflowOutletCenter(inflow);
+      return {
+        outlet_m: [
+          outlet.x,
+          outlet.y,
+          outlet.z,
+        ] as const,
+        radius_m: inflow.radius_m,
+        velocity_m_s: [
+          inflow.velocity_m_s.x * inflowStrength,
+          inflow.velocity_m_s.y * inflowStrength,
+          inflow.velocity_m_s.z * inflowStrength,
+        ] as const,
+      };
+    })() : undefined;
+    const activeBodies = bodies.slice(0, 12);
+    this.rigidSystem?.syncBodies(activeBodies);
+    const gravity = this.scene.fluid.gravity_m_s2;
+    const instrumentation = usePerformanceInstrumentationStore.getState();
+    const traceRequestedAt_ms = instrumentation.enabled ? performance.now() : 0;
+    const shouldTracePhysics = instrumentation.enabled && !this.physicsTracePending
+      && traceRequestedAt_ms - this.lastPhysicsTraceAt_ms
+        >= ADAPTIVE_MASS_FRAME_TRACE_CADENCE_MS;
+    const traceSampleId = shouldTracePhysics ? ++this.physicsTraceSampleId : 0;
+    const traceContext = `adaptive-volume:sim-${(this.lastTime_s + dt_s).toFixed(6)}`;
+    const frameCapture = shouldTracePhysics
+      ? new AdaptiveMassFrameCapture(traceSampleId, traceContext)
+      : undefined;
+    const baseStageSeams = frameCapture?.residentStageSeams
+      ?? (passBrokerLabelIsolationRequested()
+        ? SPARSE_CM12_LABEL_ISOLATION_SEAMS : undefined);
+    const captureStage = this.stageCaptureForQA;
+    const diagnosticStageSeams: SparseCM12ResidentStageSeams | undefined = captureStage
+      ? { ...baseStageSeams, close: (stage, encoder) => {
+        baseStageSeams?.close(stage, encoder); captureStage(stage, encoder);
+      } } : baseStageSeams;
+    const rawEncoder = this.device.createCommandEncoder({
+      label: `Sparse Geometric (CM12) resident frame ${(this.lastTime_s + dt_s).toFixed(6)}`,
+    });
+    // The stage partition is the encoder's own: boundaries ride the passes the
+    // advance already encodes, so a sampled advance dispatches exactly the
+    // physics an unsampled one does. `markersReady` gates the recorder's
+    // fallback closing marker, which an advance whose final stage encoded
+    // nothing would fall back to; an unsampled boundary there would retire
+    // hardware timing for the whole run.
+    const hardwareTrace = frameCapture && !this.hardwarePhysicsTraceInvalid
+      && GPUStageTimestampRecorder.supported(this.device)
+      && GPUStageTimestampRecorder.markersReady(this.device)
+      ? new GPUStageTimestampRecorder(this.device, traceSampleId, "physics", traceContext)
+      : undefined;
+    const encoder = frameCapture
+      ? frameCapture.instrument(rawEncoder, hardwareTrace)
+      : rawEncoder;
+    if (this.pressureIterationReadbacks.length === 0) {
+      for (let index = 0; index < 3; index += 1) {
+        this.pressureIterationReadbacks.push(this.device.createBuffer({
+          label: `Sparse Geometric (CM12) pressure-iteration receipt ${index}`,
+          size: 4,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+        }));
+      }
+    }
+    const pressureIterationReadback = this.pressureIterationReadbacks.find(
+      (candidate) => candidate.mapState === "unmapped",
+    );
+    const pressureIterationReceiptSequence = pressureIterationReadback
+      ? ++this.pressureIterationReceiptSequence : 0;
+    const pressureIterationControlGeneration = this.pressureIterationControlGeneration;
+    this.sparseWorldNumerics.current = {
+      finestCellSize_m: cellSize_m,
+      pressureScale: this.scene.fluid.density_kg_m3 * cellSize_m * cellSize_m / dt_s,
+      origin_m: this.fluidDomain.origin_m,
+      accelerationFinePerSecond2: [
+        gravity.x / cellSize_m,
+        gravity.y / cellSize_m,
+        gravity.z / cellSize_m,
+      ],
+      sharpening: {
+        ...this.options,
+        distanceCells: this.options.sharpeningDistance,
+        traceSteps: this.options.sharpeningTraceSteps,
+        strength: this.options.sharpeningStrength,
+        gammaDiffusionEnabled: this.options.gammaDiffusionEnabled,
+        surfaceSharpeningEnabled: this.options.surfaceSharpeningEnabled,
+      },
+      activityPolicy: this.options.activityPolicy,
+      pressureControl: {
+        iterations: pressureIterations,
+        relativeTolerance: pressureRelativeTolerance,
+      },
+      seams: diagnosticStageSeams,
+      worldDimensions_m: this.fluidDomain.dimensions.map((value, axis) =>
+        value * this.fluidDomain.cellSize_m[axis]) as [number, number, number],
+    };
+    if (this.rigidExchange) encoder.clearBuffer(this.rigidExchange);
+    this.sparseWorld.encodeStep(encoder, {
+      time: this.lastTime_s + dt_s,
+      dt: dt_s,
+      gravity: [gravity.x, gravity.y, gravity.z],
+      rigidBodies: activeBodies,
+      liquidInflow,
+    });
+    if (this.rigidSystem && activeBodies.length > 0) {
+      this.rigidSystem.encode(encoder, dt_s, cellSize_m ** 3, 1, cellSize_m);
+    }
+    if (pressureIterationReadback) {
+      this.sparseRuntime.encodePressureIterationReceipt(
+        encoder, pressureIterationReadback);
+    }
+    const failureReceipt = this.sparseRuntime.captureSimulationFailure(encoder);
+    frameCapture?.closeCommands();
+    this.device.queue.submit([encoder.finish()]);
+    this.observeSimulationFailure(failureReceipt, this.lastTime_s + dt_s);
+    if (liquidInflow) {
+      this.sparseWorld.edit({
+        kind: "liquid-jet",
+        ...liquidInflow,
+        dt: dt_s,
+      });
+      // Create only this step's nozzle-swept volume. The next CM12 step owns
+      // all downstream transport, projection, and gravitational curvature.
+    }
+    if (pressureIterationReadback) {
+      this.readPressureIterationReceipt(
+        pressureIterationReadback,
+        pressureIterations,
+        pressureIterationReceiptSequence,
+        pressureIterationControlGeneration,
+      );
+    }
+
+    this.lastTime_s += dt_s;
+    const nextTime_s = this.lastTime_s;
+    this.info.submittedTime_s = nextTime_s;
+    this.info.simulatedTime_s = nextTime_s;
+    this.info.simulationLag_s = Math.max(0, time_s - nextTime_s);
+    this.info.lastDt_s = dt_s;
+    this.info.encodedSteps = (this.info.encodedSteps ?? 0) + 1;
+    this.info.lastSubsteps = 1;
+    this.info.pressureIterations = pressureIterationMaximum;
+    this.info.pressureIterationsEncoded = pressureIterations;
+    this.info.hostSimulationSizedWorkItems = 0;
+    const captured = frameCapture?.finish(this.device.queue);
+    this.finishFrameCapture(captured, traceRequestedAt_ms);
+    this.scheduleTopologyGeneration();
+    return true;
+  }
+
+  /** Publish the receipt and use it only as the next frame's encoded ceiling hint. */
+  private readPressureIterationReceipt(
+    readback: GPUBuffer,
+    encoded: number,
+    sequence: number,
+    controlGeneration: number,
+  ): void {
+    void readback.mapAsync(GPUMapMode.READ).then(() => {
+      const executed = Math.max(0, Math.round(
+        new Float32Array(readback.getMappedRange(), 0, 1)[0]!,
+      ));
+      readback.unmap();
+      if (this.disposed || !this.pressureIterationReadbacks.includes(readback)
+        || controlGeneration !== this.pressureIterationControlGeneration
+        || sequence <= this.pressureIterationReceiptAppliedSequence) return;
+      const boundedExecuted = Math.min(encoded, executed);
+      this.pressureIterationReceiptAppliedSequence = sequence;
+      this.pressureIterationReceipt = { executed: boundedExecuted, encoded };
+      this.info.pressureIterationsExecuted = boundedExecuted;
+      this.info.pressureIterationsEncoded = encoded;
+    }).catch(() => {
+      if (readback.mapState === "mapped") readback.unmap();
+    });
+  }
+
+  private finishFrameCapture(
+    captured: ReturnType<AdaptiveMassFrameCapture["finish"]> | undefined,
+    traceRequestedAt_ms: number,
+  ): void {
+    if (captured) {
+      this.lastPhysicsTraceAt_ms = traceRequestedAt_ms;
+      this.physicsTracePending = true;
+      this.info.physicsCPUTrace = captured.cpuTrace;
+      this.info.physicsCaptureIdentity = captured.identity;
+      // Prefer the hardware partition: it is the only lane that can put a
+      // figure on an individual stage. One unusable sample retires it for this
+      // solver and the queue-wall observation carries the advance from then on.
+      const resolved = captured.hardwareTrace
+        ? captured.hardwareTrace.then((trace) => {
+          this.hardwarePhysicsTraceInvalid = !trace;
+          return trace ?? captured.queueTrace;
+        }).catch(() => {
+          this.hardwarePhysicsTraceInvalid = true;
+          return captured.queueTrace;
+        })
+        : captured.queueTrace;
+      void Promise.resolve(resolved).then((trace) => {
+        const current = usePerformanceInstrumentationStore.getState();
+        if (trace && !this.disposed && current.enabled
+          && current.enabledAt_ms <= traceRequestedAt_ms) {
+          this.info.physicsTrace = trace;
+        }
+      }).catch(() => {}).finally(() => {
+        this.physicsTracePending = false;
+      });
+    }
+  }
+
+  /**
+   * Host-only view of asynchronously published timing. Unlike `readStats`,
+   * this never fences the queue or maps the resident diagnostics buffer, so a
+   * timestamp poll cannot accidentally submit dozens of full readbacks.
+   */
+  readPerformanceTraceSnapshot(): Pick<GPUEulerianInfo,
+    "physicsTrace" | "physicsCPUTrace" | "physicsCaptureIdentity"> {
+    return {
+      physicsTrace: this.info.physicsTrace,
+      physicsCPUTrace: this.info.physicsCPUTrace,
+      physicsCaptureIdentity: this.info.physicsCaptureIdentity,
+    };
+  }
+
+  async readStats(): Promise<GPUEulerianInfo> {
+    await this.assertSimulationHealthy();
+    await this.device.queue.onSubmittedWorkDone();
+    const generation = this.sparseRuntime.acceptedAtlas;
+    const diagnostics = await this.sparseWorldTrace.readDiagnostics();
+    if (generation !== this.sparseRuntime.acceptedAtlas) return this.info;
+    this.info.allocatedBytes = this.presentation.allocatedBytes + this.sparseRuntime.allocatedBytes;
+    // This full diagnostics readback remains downstream of simulation and only
+    // updates panels. Adaptive encoding consumes the separate four-byte
+    // completed-frame receipt, never this topology/physics diagnostics packet.
+    const topology = diagnostics as typeof diagnostics
+      & SparseCM12TopologySchedulerDiagnostics;
+    this.info.adaptivePressureTopologyAttribution =
+      this.pressureTopologyAttribution.observe({
+        current: {
+          encodedStep: this.info.encodedSteps ?? 0,
+          topologyGeneration: topology.acceptedTopologyGeneration ?? 0,
+          committedBrickCount: topology.topologyCommittedBrickCount ?? 0,
+        },
+        work: {
+          acceptedCellCount: diagnostics.acceptedCellCount,
+          acceptedRowCount: diagnostics.acceptedRowCount,
+          pressureCellCount: diagnostics.pressureCellCount,
+          pressureActiveRowCount: diagnostics.pressureActiveRowCount,
+          pcm: diagnostics.pressureCanonicalMembership,
+          authorities: diagnostics.pressureCutoverAuthorities,
+        },
+      });
+    this.info.pressureRelativeResidual = diagnostics.pressureRelativeResidual;
+    this.info.pressureRecursiveRelativeResidual =
+      diagnostics.pressureRecursiveRelativeResidual;
+    this.info.pressureTrueResidualMaximum = diagnostics.pressureTrueResidualMaximum;
+    this.info.pressureInitialTrueRelativeResidual =
+      diagnostics.pressureInitialTrueRelativeResidual;
+    this.info.pressureIterationsExecuted = diagnostics.pressureIterationsExecuted;
+    this.info.pressureIterationsEncoded = diagnostics.pressureIterationsEncoded;
+    this.info.pressureFirstToleranceCrossingIteration =
+      diagnostics.pressureFirstToleranceCrossingIteration;
+    this.info.pressureSolveConverged = diagnostics.pressureSolveConverged;
+    this.info.pressureIterationCapReached = diagnostics.pressureIterationCapReached;
+    this.info.pressureConvergenceReason = diagnostics.pressureConvergenceReason;
+    this.info.pressureCurvatureBreakdown = diagnostics.pressureCurvatureBreakdown;
+    this.info.pressureCurvatureRecoveryCount =
+      diagnostics.pressureCurvatureRecoveryCount;
+    this.info.pressureRecursiveToTrueResidualRatio =
+      diagnostics.pressureRecursiveToTrueResidualRatio;
+    this.info.pressureResidualDrift = diagnostics.pressureResidualDrift;
+    this.info.maxDivergenceAfter_s = diagnostics.maximumDivergence_s;
+    this.info.maxDivergence_s = diagnostics.maximumDivergence_s;
+    const adaptiveInfo = this.info as typeof this.info & AdaptiveMassStepTelemetry;
+    adaptiveInfo.adaptiveMaximumMixedSeamDivergence_s =
+      diagnostics.maximumMixedSeamDivergence_s;
+    adaptiveInfo.adaptiveMaximumInactiveFaceSpeedAfter_m_s = 0;
+    this.info.adaptiveActivityMaximumScore = diagnostics.activityMaximumScore;
+    this.info.adaptiveActivityMeasuredBrickCount = diagnostics.activityMeasuredBrickCount;
+    this.info.adaptiveActivitySurfaceBrickCount = diagnostics.activitySurfaceBrickCount;
+    this.info.adaptiveActivityHotBrickCount = diagnostics.activityHotBrickCount;
+    this.info.adaptiveActivityQuietBrickCount = diagnostics.activityQuietBrickCount;
+    this.info.adaptiveResolutionTopologyEpoch = diagnostics.activityTopologyEpoch;
+    this.info.activeSampleCount = diagnostics.acceptedCellCount;
+    this.info.activeCompressionRatio = diagnostics.acceptedCellCount
+      / Math.max(1, this.info.equivalentUniformCells ?? diagnostics.acceptedCellCount);
+    this.info.fluidBrickResidentCount = diagnostics.activeBrickCount;
+    this.info.fluidBrickCoreCount = diagnostics.activeBrickCount;
+    // Local GPU counters restart with a resident replacement. Publish a
+    // monotonic revision across both local commits and whole generations.
+    const fluidRevision = `${this.info.topologyGenerationCount ?? 0}/${this.atlas.generation}/${diagnostics.residencyGeneration}/${topology.acceptedTopologyGeneration ?? 0}`;
+    if (fluidRevision !== this.lastFluidRevision) {
+      this.info.fluidBrickGeneration = (this.info.fluidBrickGeneration ?? 0) + 1;
+      this.lastFluidRevision = fluidRevision;
+    }
+    this.info.adaptiveTopologyShadowGeneration =
+      topology.acceptedTopologyGeneration ?? 0;
+    this.info.adaptiveTopologyUrgentQueuedBrickCount =
+      topology.topologyUrgentQueuedBrickCount ?? 0;
+    this.info.adaptiveTopologyOrdinaryQueuedBrickCount =
+      topology.topologyOrdinaryQueuedBrickCount ?? 0;
+    this.info.adaptiveTopologyPreparedBrickCount = topology.topologyPreparedBrickCount ?? 0;
+    this.info.adaptiveTopologyCommittedBrickCount = topology.topologyCommittedBrickCount ?? 0;
+    this.info.adaptiveTopologyDeferredBrickCount = topology.topologyDeferredBrickCount ?? 0;
+    this.info.adaptiveTopologyPageAllocator = diagnostics.topologyPageAllocator;
+    this.info.adaptiveTopologyShadowFineBrickCount = topology.acceptedFineBrickCount;
+    this.info.adaptiveTopologyShadowCoarseBrickCount = topology.acceptedCoarseBrickCount;
+    this.info.adaptiveAcceptedCellCount = diagnostics.acceptedCellCount;
+    this.info.adaptiveAcceptedRowCount = diagnostics.acceptedRowCount;
+    this.info.adaptiveAcceptedSameLevelCoarseRowCount =
+      diagnostics.acceptedSameLevelCoarseRowCount;
+    this.info.adaptiveAcceptedMixedSeamRowCount = diagnostics.acceptedMixedSeamRowCount;
+    this.info.adaptivePressureActiveRowCount = diagnostics.pressureActiveRowCount;
+    this.info.adaptivePressureCellCount = diagnostics.pressureCellCount;
+    this.info.adaptivePressureCanonicalMembership =
+      diagnostics.pressureCanonicalMembership;
+    this.info.adaptivePressureTopologyRepair = diagnostics.pressureTopologyRepair;
+    // Keep the established diagnostics/benchmark field live while callers
+    // migrate to the pressure-specific name above.
+    this.info.adaptiveMixedSeamFaceCount = diagnostics.acceptedMixedSeamRowCount;
+    this.info.adaptiveFineBrickCount = topology.acceptedFineBrickCount;
+    this.info.adaptiveCoarseBrickCount = topology.acceptedCoarseBrickCount;
+    this.info.adaptiveResolutionPromotedBrickCount = 0;
+    this.info.adaptiveResolutionDemotedBrickCount = 0;
+    this.info.adaptiveResolutionDeferredPromotionCount = 0;
+    this.info.completedTime_s = Math.max(
+      this.info.completedTime_s ?? 0,
+      this.info.submittedTime_s ?? 0,
+    );
+    return { ...this.info };
+  }
+
+  /** Explicit Dawn/QA materialization; production rendering stays sparse. */
+  readDiagnosticFields(includeWorldLeaves = false,
+    frameBank: "accepted" | "candidate" = "accepted") {
+    return this.sparseWorldTrace.readDiagnosticFields(includeWorldLeaves, frameBank);
+  }
+  readPhase1TransportReceiptQA(allowStageLimitedCandidate = false,
+    probeCells: readonly number[] = []) {
+    return this.sparseWorldTrace.readPhase1TransportReceiptQA(
+      allowStageLimitedCandidate, probeCells,
+    );
+  }
+  readPhase1TransportHashesQA() {
+    return this.sparseWorldTrace.readPhase1TransportHashesQA();
+  }
+  readPhase1TransportProfileQA() {
+    return this.sparseWorldTrace.readPhase1TransportProfileQA();
+  }
+  readCandidateEffectsTransactionQA() {
+    return this.sparseWorldTrace.readCandidateEffectsTransactionQA();
+  }
+  readFramePlanPresentationHeaderQA() {
+    return this.sparseWorldTrace.readFramePlanPresentationHeaderQA();
+  }
+  readFramePlanPresentationFaultRecordQA() {
+    return this.sparseWorldTrace.readFramePlanPresentationFaultRecordQA();
+  }
+  /** Explicit FCA1 QA materialization; never consulted by frame scheduling. */
+  readFrameControlQA() { return this.sparseWorldTrace.readFrameControlQA(); }
+  readTransportPacketIndirectQA() {
+    return this.sparseWorldTrace.readTransportPacketIndirectQA();
+  }
+  readCoarseTransportScheduleQA() {
+    return this.sparseWorldTrace.readCoarseTransportScheduleQA();
+  }
+  readDynamicTransportPacketsQA() {
+    return this.sparseWorldTrace.readDynamicTransportPacketsQA();
+  }
+  /** Header-only FSM1 receipt; never consulted by frame scheduling. */
+  readFinalScalarMaskHeaderQA() {
+    return this.sparseWorldTrace.readFinalScalarMaskHeaderQA();
+  }
+  readSparseWorkShapeQA() { return this.sparseWorldTrace.readWorkShapeQA(); }
+  readAdaptiveRepresentationQA() {
+    return this.sparseWorldTrace.readAdaptiveRepresentationQA();
+  }
+  readAcceptedIndirectQA() { return this.sparseWorldTrace.readAcceptedIndirectQA(); }
+  readFrameControlIndirectQA() {
+    return this.sparseWorldTrace.readFrameControlIndirectQA();
+  }
+  readVelocityExtensionHeaderQA() {
+    return this.sparseWorldTrace.readVelocityExtensionHeaderQA();
+  }
+  readVelocityExtensionQA() { return this.sparseWorldTrace.readVelocityExtensionQA(); }
+  readPressureCanonicalMembershipQA() {
+    return this.sparseWorldTrace.readPressureCanonicalMembershipQA();
+  }
+
+  get rigidRenderBuffer(): GPUBuffer | undefined { return this.rigidSystem?.renderBuffer; }
+  get rigidMotionBuffer(): GPUBuffer | undefined { return this.rigidSystem?.motionBuffer; }
+  setSelectedRigidBody(index: number): void { this.rigidSystem?.setSelectedIndex(index); }
+  async pickRigidBody(origin: RigidBodyState["position_m"],
+    direction: RigidBodyState["position_m"]) {
+    return this.rigidSystem?.pick(origin, direction);
+  }
+  async readRigidBodyPoses() { return this.rigidSystem?.readPoses(); }
+
+  /** Explicit acceptance/debug readback; never consulted by advanceTo. */
+  async readGPUActivityPolicy(): Promise<{
+    readonly acceptedSteps: number;
+    readonly acceptedTopologyGeneration: number;
+    readonly residentBrickCount: number;
+    readonly faultFlags: number;
+    readonly newlyActivatedBrickCount: number;
+    readonly preparedBrickCount: number;
+    readonly committedBrickCount: number;
+    readonly commitFailed: boolean;
+    readonly topologyPageAllocator: {
+      readonly freePages: number;
+      readonly capacity: number;
+      readonly allocationCancellations: number;
+    };
+    readonly bricks: readonly AdaptiveMassGPUActivityBrick[];
+  }> {
+    const atlas = this.sparseRuntime.acceptedAtlas;
+    const snapshot = await this.sparseWorldTrace.readActivitySnapshot(true);
+    return {
+      acceptedSteps: snapshot.acceptedSteps,
+      acceptedTopologyGeneration: snapshot.acceptedTopologyGeneration,
+      residentBrickCount: snapshot.residentBrickCount,
+      faultFlags: snapshot.faultFlags,
+      newlyActivatedBrickCount: snapshot.newlyActivatedBrickCount,
+      preparedBrickCount: snapshot.preparedBrickCount,
+      committedBrickCount: snapshot.committedBrickCount,
+      commitFailed: snapshot.commitFailed,
+      topologyPageAllocator: snapshot.topologyPageAllocator,
+      bricks: snapshot.records.map((record) => {
+        const brick = atlas.bricks[record.leafId];
+        if (brick) return { ...record, key: brick.key, coordinate: brick.coordinate,
+          spanBricks: brick.spanBricks ?? 1, resolution: brick.resolution };
+        if (!record.coordinate) {
+          throw new Error(`Sparse Geometric (CM12) dynamic leaf ${record.leafId} has no WDR coordinate`);
+        }
+        return { ...record, key: record.leafId, coordinate: record.coordinate,
+          spanBricks: 1, resolution: record.acceptedResolution };
+      }),
+    };
+  }
+
+  destroy(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.sparseWorld.destroy();
+    this.presentation.destroy();
+    this.rigidSystem?.destroy();
+    this.rigidExchange?.destroy();
+    for (const readback of this.pressureIterationReadbacks) readback.destroy();
+    this.pressureIterationReadbacks.length = 0;
+  }
+}
+
+export function adaptiveMassPresentationDimensionsForScene(
+  scene: SceneDescription,
+): SparseBrickVec3 {
+  return adaptiveMassFluidDomainForScene(scene).dimensions;
+}
+
+function finestCellSize(scene: SceneDescription, _atlas: SparseAdaptiveMassAtlas): number {
+  return Math.min(...sceneCellSizes_m(scene));
+}

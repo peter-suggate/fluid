@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 import { buildSparseAtlasCompositeGrid } from
-  "../lib/methods/adaptive-mass/sparse-atlas-composite-projection";
+  "../lib/methods/adaptive-volume/sparse-atlas-composite-projection";
 import {
   createSparseAdaptiveMassAtlas,
   sparseBrickKey,
   type SparseAdaptiveMassBrick,
   type SparseBrickResolution,
-} from "../lib/methods/adaptive-mass/sparse-brick-atlas";
+} from "../lib/methods/adaptive-volume/sparse-brick-atlas";
 import { createSparseCM12HotTopology } from
-  "../lib/methods/adaptive-mass/sparse-cm12-hot-topology";
+  "../lib/methods/adaptive-volume/sparse-cm12-hot-topology";
 import {
   SPARSE_CM12_PHASE_ARENA_DIAGNOSTIC_READBACK_BYTES,
   SPARSE_CM12_PHASE_ARENA_PRESSURE_SCALAR_BYTES,
@@ -17,7 +17,7 @@ import {
   sparseCM12PhaseArenaByteMap,
   type SparseCM12PhaseArenaPlan,
   type SparseCM12PhaseArenaPlannerInput,
-} from "../lib/methods/adaptive-mass/sparse-cm12-phase-arenas";
+} from "../lib/methods/adaptive-volume/sparse-cm12-phase-arenas";
 
 const align4 = (value: number): number => (value + 3) & ~3;
 

@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
-import { sparseCM12PresentationPageAllocatorWGSL } from "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
-import { createSparseCM12FramePlanPresentationLayout, createSparseCM12FramePlanPresentationInitialWords } from "../lib/methods/adaptive-mass/sparse-cm12-frame-plan-presentation";
-import { createSparseCM12WorldDirectoryLayout } from "../lib/methods/adaptive-mass/sparse-cm12-world-directory";
+import { sparseCM12PresentationPageAllocatorWGSL } from "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident";
+import { createSparseCM12FramePlanPresentationLayout, createSparseCM12FramePlanPresentationInitialWords } from "../lib/methods/adaptive-volume/sparse-cm12-frame-plan-presentation";
+import { createSparseCM12WorldDirectoryLayout } from "../lib/methods/adaptive-volume/sparse-cm12-world-directory";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 const nativeInstances = new Set<GPU>();
@@ -67,13 +67,13 @@ const nativeInstances = new Set<GPU>();
 (modulePath ? test : test.skip)("a drop into an empty scene publishes a signed wet surface before time advances", { timeout: 180_000 }, async () => {
   await acquireWebGPUExclusiveLock("dawn-test", "empty fluid surface publication");
   let device: GPUDevice | undefined;
-  let solver: import("../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver").WebGPUAdaptiveMassSolver | undefined;
+  let solver: import("../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver").WebGPUAdaptiveMassSolver | undefined;
   let drawProbe: Awaited<ReturnType<typeof import("./helpers/global-fine-draw-probe").createGlobalFineDrawProbe>> | undefined;
   let gpu: GPU | undefined;
   try {
     const { createEmptyScene } = await import("../lib/core/empty-scene");
     const { requiredFluidDeviceLimits } = await import("../lib/core/webgpu-device-limits");
-    const { WebGPUAdaptiveMassSolver } = await import("../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver");
+    const { WebGPUAdaptiveMassSolver } = await import("../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver");
     const { unpackFineLevelSetPackedPhi } = await import("../lib/core/fine-levelset-packed-sample");
     const dawn = await import(pathToFileURL(modulePath!).href) as { create(options: string[]): GPU; globals: Record<string, unknown> };
     Object.assign(globalThis, dawn.globals); gpu = dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]); nativeInstances.add(gpu);

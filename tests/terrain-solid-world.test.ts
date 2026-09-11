@@ -12,7 +12,7 @@ import {
   packSparseCM12SolidOccupancy,
   SPARSE_CM12_SOLID_FRACTION_PAGE_WORDS,
   SPARSE_CM12_SOLID_OCCUPANCY_PAGE_WORDS,
-} from "../lib/methods/adaptive-mass/sparse-cm12-solid-occupancy";
+} from "../lib/methods/adaptive-volume/sparse-cm12-solid-occupancy";
 import {
   createWebgpuSolidWorldPageLayout,
   packWebgpuSolidWorldPages,

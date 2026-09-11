@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
-const source = readFileSync(new URL("../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url), "utf8");
+const source = readFileSync(new URL("../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url), "utf8");
 const election = source.match(/fn sparseWorldFrontierAllocationOwner\([\s\S]*?\n}/)?.[0];
 assert.ok(election);
 const sweptMask = source.match(/fn cm12SweptPageSupportMask\([\s\S]*?\n}/)?.[0]; assert.ok(sweptMask);

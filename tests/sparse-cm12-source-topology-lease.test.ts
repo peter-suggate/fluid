@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { WebGPUSparseCM12Resident } from "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
+import { WebGPUSparseCM12Resident } from "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident";
 
 test("source topology lease brackets capture only and releases on success or failure", async () => {
  for(const failure of [false,true]) {
@@ -30,7 +30,7 @@ test("source topology lease brackets capture only and releases on success or fai
 
 test("source lease gates optional scheduling while urgent physical work revokes it", () => {
  const wgsl=readFileSync(new URL(
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts",import.meta.url),"utf8");
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts",import.meta.url),"utf8");
  const allocator=wgsl.slice(wgsl.indexOf("fn allocateSparseWorldFrontier("),
   wgsl.indexOf("fn clearSparseWorldFrontierResolutionCache("));
  assert.match(allocator,/revokeCM12SourceTopologyLease\(\);\s*let leaf=cm12WorldAllocateUniqueExact/);
@@ -42,7 +42,7 @@ test("source lease gates optional scheduling while urgent physical work revokes 
  assert.match(schedule,/setTopologyPreparationScheduled\(activityRecord\(brick\),false\)/);
  assert.match(schedule,/atomicStore\(&activity\[16\],0u\)/);
  const resident=readFileSync(new URL(
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",import.meta.url),"utf8");
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.ts",import.meta.url),"utf8");
  assert.match(resident,/observed\[0\] !== 1 \|\| observed\[1\] !== 0 \|\| observed\[2\] !== activity.acceptedTopologyGeneration/);
  assert.match(resident,/latest.acceptedTopologyGeneration !== source.activity.acceptedTopologyGeneration/,
   "coherent capture does not authorize publishing after later topology changes");

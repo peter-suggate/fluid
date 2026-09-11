@@ -12,14 +12,14 @@ import { summarizeScalarField } from "../lib/harness/webgpu-smoke-scenarios";
 import {
   createSparseAdaptiveMassAtlas,
   type SparseAdaptiveMassBrick,
-} from "../lib/methods/adaptive-mass/sparse-brick-atlas";
+} from "../lib/methods/adaptive-volume/sparse-brick-atlas";
 import { buildSparseAtlasCompositeGrid } from
-  "../lib/methods/adaptive-mass/sparse-atlas-composite-projection";
+  "../lib/methods/adaptive-volume/sparse-atlas-composite-projection";
 import { conditionSparseAtlasSurface } from
-  "../lib/methods/adaptive-mass/sparse-atlas-surface-conditioning";
+  "../lib/methods/adaptive-volume/sparse-atlas-surface-conditioning";
 import { adaptiveMassPresentationDimensionsForScene } from
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
-import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
+  "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
+import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 
 function brick(
   key: number,

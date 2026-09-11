@@ -64,20 +64,20 @@ import {
   ADAPTIVE_MASS_FLUID_PIPELINE,
   ADAPTIVE_MASS_GPU_WORK_CHUNKS,
 } from
-  "../lib/methods/adaptive-mass/adaptive-mass-frame-pipeline";
+  "../lib/methods/adaptive-volume/adaptive-mass-frame-pipeline";
 import {
   adaptiveMassMethod,
   adaptiveMassSolverOptions,
-} from "../lib/methods/adaptive-mass/method";
+} from "../lib/methods/adaptive-volume/method";
 import { WebGPUAdaptiveMassSolver } from
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+  "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 import { inspectSparseCM12PressureCutoverAuthorities } from
-  "../lib/methods/adaptive-mass/sparse-cm12-pressure-cutover-observability";
+  "../lib/methods/adaptive-volume/sparse-cm12-pressure-cutover-observability";
 import {
   SPARSE_CM12_FRAME_CONTROL_PHASE,
-} from "../lib/methods/adaptive-mass/sparse-cm12-frame-control";
+} from "../lib/methods/adaptive-volume/sparse-cm12-frame-control";
 import { SPARSE_CM12_FINAL_SCALAR_MASK_PHASE } from
-  "../lib/methods/adaptive-mass/sparse-cm12-final-scalar-packet-masks";
+  "../lib/methods/adaptive-volume/sparse-cm12-final-scalar-packet-masks";
 import {
   SPARSE_CM12_FRAME_PLAN_BRICK,
   SPARSE_CM12_FRAME_PLAN_BRICK_FLAG,
@@ -109,7 +109,7 @@ Options:
                                      Also cm12-figure-7 (use B8/P8)
   --sphere-radius=N                 Figure 7 sphere radius in metres
   --pressure-relative-tolerance=N   Override the pressure stopping tolerance
-  --production-defaults=0|1         Use balanced adaptive-mass defaults (suite mode)
+  --production-defaults=0|1         Use balanced adaptive-volume defaults (suite mode)
   --brick-fine=4|8|16                Sparse brick ladder (default 16)
   --presentation-page=4|8|16         Presentation page size (default 16)
   --warmup=N                         Warmup hardware samples (default 8)
@@ -754,7 +754,7 @@ try {
     debug(`advance ${frame} encoded`);
     await device.queue.onSubmittedWorkDone();
     if (frame === pressureTopologyCutoffFrame) {
-      const expectedTraceContext = `adaptive-mass:sim-${(frame * dt_s).toFixed(6)}`;
+      const expectedTraceContext = `adaptive-volume:sim-${(frame * dt_s).toFixed(6)}`;
       const deadline_ms = performance.now() + Math.max(250, captureGap_ms);
       let cutoffTrace: PerformanceTrace | undefined;
       do {
@@ -875,7 +875,7 @@ try {
       break;
     }
     const pollStarted_ms = performance.now();
-    const expectedTraceContext = `adaptive-mass:sim-${(frame * dt_s).toFixed(6)}`;
+    const expectedTraceContext = `adaptive-volume:sim-${(frame * dt_s).toFixed(6)}`;
     let trace: PerformanceTrace | undefined;
     do {
       const candidate = solver.readPerformanceTraceSnapshot!().physicsTrace;
@@ -1278,6 +1278,12 @@ try {
       },
       authoritySamples,
       firstAuthorityFailure,
+    },
+    implementation: {
+      methodId: adaptiveMassMethod.id,
+      solver: "lib/methods/adaptive-volume/webgpu-adaptive-mass-solver.ts",
+      resident: "lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.ts",
+      shader: "lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts",
     },
     configuration: {
       ...(sphereRadius === "" ? {} : { sphereRadius_m: Number(sphereRadius) }),

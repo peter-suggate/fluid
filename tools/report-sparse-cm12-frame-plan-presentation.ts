@@ -7,7 +7,7 @@ import {
   SPARSE_CM12_FRAME_PLAN_PRESENTATION_SAMPLES_PER_TILE,
   createSparseCM12FramePlanPresentationInitialWords,
   createSparseCM12FramePlanPresentationLayout,
-} from "../lib/methods/adaptive-mass/sparse-cm12-frame-plan-presentation";
+} from "../lib/methods/adaptive-volume/sparse-cm12-frame-plan-presentation";
 
 const assert = (condition: boolean, message: string): void => {
   if (!condition) throw new Error(message);

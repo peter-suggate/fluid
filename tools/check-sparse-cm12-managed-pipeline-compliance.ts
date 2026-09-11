@@ -16,7 +16,7 @@ import ts from "typescript";
 
 const PROJECT_ROOT = path.resolve(fileURLToPath(new URL("../", import.meta.url)));
 const RUNTIME_ROOTS = [
-  "lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
+  "lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.ts",
 ] as const;
 const COMPILATION_MANAGER = "lib/core/gpu-compilation-manager.ts";
 const DIRECT_COMPUTE_PIPELINE_METHODS = new Set([
@@ -175,7 +175,7 @@ const vexDescriptorRegression = `
 `;
 assert.deepEqual(
   inspectDirectComputePipelineCalls(
-    "lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
+    "lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.ts",
     vexDescriptorRegression,
   ).map(({ method }) => method),
   ["createComputePipelineAsync"],
@@ -225,7 +225,7 @@ for (const retiredEntryPoint of [
 // therefore be bounded and fail closed instead of leaving a command buffer
 // permanently resident on the GPU.
 for (const [file, required] of [
-  ["lib/methods/adaptive-mass/sparse-cm12-canonical-membership.wgsl.ts",
+  ["lib/methods/adaptive-volume/sparse-cm12-canonical-membership.wgsl.ts",
     ["PCM_FAULT_ATOMIC_CONTENTION", "attempt<64u"]],
 ] as const) {
   const source = readFileSync(path.resolve(PROJECT_ROOT, file), "utf8");

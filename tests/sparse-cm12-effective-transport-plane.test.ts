@@ -3,27 +3,27 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const wgsl = readFileSync(new URL(
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url,
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url,
 ), "utf8");
 const resident = readFileSync(new URL(
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts", import.meta.url,
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.ts", import.meta.url,
 ), "utf8");
 const solver = readFileSync(new URL(
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver.ts", import.meta.url,
+  "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver.ts", import.meta.url,
 ), "utf8");
 const effectivePlane = readFileSync(new URL(
-  "../lib/methods/adaptive-mass/sparse-cm12-effective-transport-velocity.wgsl.ts",
+  "../lib/methods/adaptive-volume/sparse-cm12-effective-transport-velocity.wgsl.ts",
   import.meta.url,
 ), "utf8");
 const image = readFileSync(new URL(
-  "../lib/methods/adaptive-mass/sparse-cm12-transport-execution-image.ts", import.meta.url,
+  "../lib/methods/adaptive-volume/sparse-cm12-transport-execution-image.ts", import.meta.url,
 ), "utf8");
 const imageWGSL = readFileSync(new URL(
-  "../lib/methods/adaptive-mass/sparse-cm12-transport-execution-image.wgsl.ts",
+  "../lib/methods/adaptive-volume/sparse-cm12-transport-execution-image.wgsl.ts",
   import.meta.url,
 ), "utf8");
 const packetAuthorityWGSL = readFileSync(new URL(
-  "../lib/methods/adaptive-mass/sparse-cm12-transport-packet-authority.wgsl.ts",
+  "../lib/methods/adaptive-volume/sparse-cm12-transport-packet-authority.wgsl.ts",
   import.meta.url,
 ), "utf8");
 const conservativeStage = resident.slice(resident.indexOf('stage("conservative-transport"'),

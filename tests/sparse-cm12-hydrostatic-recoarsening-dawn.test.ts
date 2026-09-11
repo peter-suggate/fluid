@@ -13,10 +13,10 @@ import {
   releaseWebGPUExclusiveLock,
 } from "../lib/harness/webgpu-smoke-isolation";
 import { WebGPUAdaptiveMassSolver } from
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
-import { SPARSE_CM12_SHARPENING_DISTANCE_CELLS, SPARSE_CM12_SHARPENING_TRACE_STEPS } from "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
-import { SPARSE_CM12_ACTIVITY_POLICY } from "../lib/methods/adaptive-mass/features/adaptivity/policy";
-import type { AdaptiveMassSolverOptions } from "../lib/methods/adaptive-mass/method";
+  "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
+import { SPARSE_CM12_SHARPENING_DISTANCE_CELLS, SPARSE_CM12_SHARPENING_TRACE_STEPS } from "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident";
+import { SPARSE_CM12_ACTIVITY_POLICY } from "../lib/methods/adaptive-volume/features/adaptivity/policy";
+import type { AdaptiveMassSolverOptions } from "../lib/methods/adaptive-volume/method";
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 const dawnTest = dawnModule ? test : test.skip;

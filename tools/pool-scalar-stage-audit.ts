@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
 /** Observe scalar stage budgets without changing a dispatch or accepted field. */
 export async function createPoolScalarStageAudit(device: GPUDevice, solver: WebGPUAdaptiveMassSolver,

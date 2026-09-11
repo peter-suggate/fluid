@@ -93,7 +93,7 @@ import {
 } from "../lib/methods/losasso/webgpu-octree-losasso-adaptive-velocity.wgsl";
 import { octreeLosassoAdaptiveMassWGSL } from "../lib/methods/losasso/webgpu-octree-losasso-adaptive-mass.wgsl";
 import { makeOctreeLosassoAdaptiveDynamicsWGSL } from "../lib/methods/losasso/webgpu-octree-losasso-dynamics.wgsl";
-import { SPARSE_CM12_LENSES } from "../lib/methods/adaptive-mass/sparse-cm12-stage-lenses";
+import { SPARSE_CM12_LENSES } from "../lib/methods/adaptive-volume/sparse-cm12-stage-lenses";
 import { stageLensProgramWGSL } from "../lib/core/webgpu-stage-lens-overlay";
 
 const naga = process.env.NAGA ?? "naga";

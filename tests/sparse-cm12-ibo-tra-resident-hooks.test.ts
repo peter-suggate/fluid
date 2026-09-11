@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createSparseCM12IboTRAResidentHooksWGSL } from
-  "../lib/methods/adaptive-mass/sparse-cm12-ibo-tra-resident-hooks.wgsl";
+  "../lib/methods/adaptive-volume/sparse-cm12-ibo-tra-resident-hooks.wgsl";
 
 test("IBO TRA resident hooks preserve stable packet addresses", () => {
   const source = createSparseCM12IboTRAResidentHooksWGSL();

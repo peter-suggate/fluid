@@ -56,7 +56,7 @@ function GravityDirectionControl() {
   const session = useSession();
   const fluid = session.scene(state => state.scene.fluid);
   const methodId = session.method(state => state.methodId);
-  if (methodId !== "adaptive-mass") return null;
+  if (methodId !== "adaptive-mass" && methodId !== "adaptive-volume") return null;
   const direction = gravityDirection(fluid);
   return <select className="toolstrip-gravity-direction" aria-label="Gravity direction" title="World direction; keeps gravity strength and remembers the choice while off" value={direction}
       data-testid="scene-gravity-direction" onChange={event => {

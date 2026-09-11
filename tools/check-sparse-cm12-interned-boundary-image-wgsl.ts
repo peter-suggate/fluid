@@ -2,9 +2,9 @@
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
 import type { SparseCM12InternedBoundaryLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-interned-boundary-operators";
+  "../lib/methods/adaptive-volume/sparse-cm12-interned-boundary-operators";
 import { createSparseCM12InternedBoundaryImageWGSL } from
-  "../lib/methods/adaptive-mass/sparse-cm12-interned-boundary-image.wgsl";
+  "../lib/methods/adaptive-volume/sparse-cm12-interned-boundary-image.wgsl";
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 if (!dawnModule) {

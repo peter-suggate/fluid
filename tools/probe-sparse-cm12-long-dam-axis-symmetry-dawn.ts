@@ -16,14 +16,14 @@ import {
 import {
   adaptiveMassMethod,
   adaptiveMassSolverOptions,
-} from "../lib/methods/adaptive-mass/method";
+} from "../lib/methods/adaptive-volume/method";
 import {
   SPARSE_CM12_RESIDENT_STAGES,
   type SparseCM12DiagnosticFields,
   type SparseCM12ResidentStageId,
-} from "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
+} from "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident";
 import { WebGPUAdaptiveMassSolver } from
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+  "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 if (!modulePath) throw new Error("set WEBGPU_NODE_MODULE to Dawn's webgpu module");

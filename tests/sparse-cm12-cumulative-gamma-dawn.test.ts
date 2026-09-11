@@ -9,7 +9,7 @@ import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/h
 // operator is identity, so it must also leave non-unit historical gamma alone.
 // The old backward A*1 / forward A*gamma hybrid fails on both sides of one.
 const source = readFileSync(new URL(
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url), "utf8");
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url), "utf8");
 const entryPoints = ["gatherConservativeDensity", "gatherConservativeDensityPackedCoarse"];
 const production = (name: string) => {
   const body = source.match(new RegExp(`fn ${name}\\([\\s\\S]*?\\n}`))?.[0];

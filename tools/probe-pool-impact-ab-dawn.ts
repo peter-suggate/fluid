@@ -10,8 +10,8 @@ import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { resolveMethodValues } from "../lib/core/method-contract";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
-import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
+import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 
 async function read(device: GPUDevice, source: GPUBuffer, bytes = source.size, offset = 0) {
@@ -78,7 +78,7 @@ try {
   const [nx, ny, nz] = [solver.info.nx, solver.info.ny, solver.info.nz];
   await mkdir(output, { recursive: true });
   const residentWGSLHash = createHash("sha256").update(await readFile(new URL(
-    "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url))).digest("hex");
+    "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url))).digest("hex");
   await writeFile(`${output}/configuration.json`, JSON.stringify({ scene, values, grid: [nx, ny, nz],
     steps, dt, maxCell, freezeStep, legacyFace, legacyWarmup, residentWGSLHash }, null, 2));
   const trace = [];

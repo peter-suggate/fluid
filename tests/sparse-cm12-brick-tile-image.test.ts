@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildSparseAtlasCompositeGrid } from
-  "../lib/methods/adaptive-mass/sparse-atlas-composite-projection";
+  "../lib/methods/adaptive-volume/sparse-atlas-composite-projection";
 import {
   SPARSE_CM12_BRICK_TILE_IMAGE_FLAG,
   SPARSE_CM12_BRICK_TILE_IMAGE_HEADER,
@@ -10,15 +10,15 @@ import {
   sparseCM12BrickTileCellAtFine,
   sparseCM12BrickTileRows,
   validateSparseCM12BrickTileImage,
-} from "../lib/methods/adaptive-mass/sparse-cm12-brick-tile-image";
+} from "../lib/methods/adaptive-volume/sparse-cm12-brick-tile-image";
 import { createSparseCM12BrickTileImageWGSL } from
-  "../lib/methods/adaptive-mass/sparse-cm12-brick-tile-image.wgsl";
+  "../lib/methods/adaptive-volume/sparse-cm12-brick-tile-image.wgsl";
 import {
   createSparseAdaptiveMassAtlas,
   sparseBrickKey,
   type SparseAdaptiveMassBrick,
   type SparseBrickResolution,
-} from "../lib/methods/adaptive-mass/sparse-brick-atlas";
+} from "../lib/methods/adaptive-volume/sparse-brick-atlas";
 
 const brick = (
   coordinate: readonly [number, number, number],

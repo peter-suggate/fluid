@@ -26,12 +26,12 @@ test("Sparse CM12 refinement regions are a live policy edit", () => {
       z: 0.5 * after.container.depth_m },
   }];
   const config: SimulationRunConfig = {
-    methodId: "adaptive-mass",
+    methodId: "adaptive-volume",
     quality: "balanced",
     values: {},
   };
 
-  assert.equal(sceneEditRequiresReset(before, after, "adaptive-mass"), false,
+  assert.equal(sceneEditRequiresReset(before, after, "adaptive-volume"), false,
     "drawing a refinement box must not reset the simulation timeline");
   assert.equal(gpuSceneSolverKey(before, config), gpuSceneSolverKey(after, config),
     "a region edit must retain the attached Sparse CM12 solver");
@@ -52,7 +52,7 @@ test("dropping the first moving body keeps a refined renderer-only world attache
     position_m: { x: 0, y: before.container.height_m + 0.2, z: 0 },
   });
   const config: SimulationRunConfig = {
-    methodId: "adaptive-mass",
+    methodId: "adaptive-volume",
     quality: "balanced",
     values: { svoEnvironmentRefinementDepth: 3 },
   };
@@ -124,16 +124,16 @@ test("horizontal gravity edits reach live uniforms without rebuilding the solver
     const after = cloneScene(before);
     after.fluid.gravity_m_s2[axis] = 9.81;
     assert.notEqual(gpuSceneUniformKey(before), gpuSceneUniformKey(after));
-    const config: SimulationRunConfig = { methodId: "adaptive-mass", quality: "balanced", values: {} };
+    const config: SimulationRunConfig = { methodId: "adaptive-volume", quality: "balanced", values: {} };
     assert.equal(gpuSceneSolverKey(before, config), gpuSceneSolverKey(after, config));
-    assert.equal(sceneEditRequiresReset(before, after, "adaptive-mass"), false);
+    assert.equal(sceneEditRequiresReset(before, after, "adaptive-volume"), false);
   }
 });
 
 
 test("authored fluid body edits keep Sparse CM12 attached and notify its live scene seam", () => {
   const before = createMinimalPowerDamBreak64Scene();
-  const config: SimulationRunConfig = { methodId: "adaptive-mass", quality: "balanced", values: {} };
+  const config: SimulationRunConfig = { methodId: "adaptive-volume", quality: "balanced", values: {} };
   const changes = [
     (s: typeof before) => { s.container.fillFraction *= 0.5; },
     (s: typeof before) => { s.fluid.initialDamBreakOrigin_m = { x: .2, y: .1, z: .2 }; },

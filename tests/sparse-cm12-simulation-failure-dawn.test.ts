@@ -3,9 +3,9 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
-import { CM12_FAILURE_WORDS, decodeCM12SimulationFailure } from "../lib/methods/adaptive-mass/sparse-cm12-simulation-failure";
-import { cm12SimulationFailureWGSL, guardCM12SimulationDispatches } from "../lib/methods/adaptive-mass/sparse-cm12-simulation-failure.wgsl";
-import { createSparseCM12RowAccessWGSL, SPARSE_CM12_ATOMIC_ARENA_READERS } from "../lib/methods/adaptive-mass/sparse-cm12-row-access.wgsl";
+import { CM12_FAILURE_WORDS, decodeCM12SimulationFailure } from "../lib/methods/adaptive-volume/sparse-cm12-simulation-failure";
+import { cm12SimulationFailureWGSL, guardCM12SimulationDispatches } from "../lib/methods/adaptive-volume/sparse-cm12-simulation-failure.wgsl";
+import { createSparseCM12RowAccessWGSL, SPARSE_CM12_ATOMIC_ARENA_READERS } from "../lib/methods/adaptive-volume/sparse-cm12-row-access.wgsl";
 
 const live = new Set<GPU>();
 (process.env.WEBGPU_NODE_MODULE ? test : test.skip)("corrupt incidence latches provenance and halts later dispatches and frames", async () => {
@@ -22,7 +22,7 @@ const live = new Set<GPU>();
       "cm12RecordFailure(1u,cell,vec4u(begin,end,maximum,0u));");
     const bounded = accessor.match(/fn boundedIncidenceEnd\([\s\S]*?\n}/)![0];
     const deficitSupport = readFileSync(new URL(
-      "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url), "utf8")
+      "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url), "utf8")
       .match(/fn validateDensityDeficitSupport\([\s\S]*?\n}/)![0];
     const code = guardCM12SimulationDispatches(`
 @group(0)@binding(0)var<storage,read_write>topologyArena:array<atomic<u32>>;

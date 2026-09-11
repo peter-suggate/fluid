@@ -7,7 +7,7 @@ import { parseScene, serializeScene, validateScene } from "../lib/core/model";
 import { initialHeightFieldFractionAtCell } from "../lib/core/initial-height-field";
 import { initialLiquidFractionAtCell } from "../lib/core/initial-fluid";
 import { parseQueryState } from "../lib/core/url-state";
-import { initializeSparseBrickAtlasFromScene } from "../lib/methods/adaptive-mass/sparse-brick-atlas";
+import { initializeSparseBrickAtlasFromScene } from "../lib/methods/adaptive-volume/sparse-brick-atlas";
 
 const dims = [48, 32, 40] as const;
 test("stationary bowl is a selectable scene with its own still-water profile", () => {
@@ -16,7 +16,7 @@ test("stationary bowl is a selectable scene with its own still-water profile", (
   assert.deepEqual(validateScene(scene), []);
   assert.deepEqual(parseScene(serializeScene(scene)).fluid.initialHeightField, scene.fluid.initialHeightField);
   const query = parseQueryState("?scene=stationary-bowl");
-  assert.equal(query.methodId, "adaptive-mass");
+  assert.equal(query.methodId, "adaptive-volume");
   assert.deepEqual(query.scene.fluid.initialHeightField, scene.fluid.initialHeightField);
   assert.deepEqual(scene.fluid.gravity_m_s2, { x: 0, y: 0, z: 0 });
   assert.equal(definition.methodProfile?.overrides?.gammaDiffusion, "on");

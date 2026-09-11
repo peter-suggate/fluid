@@ -2,9 +2,9 @@
 /** Static gate for prior-frame pressure-topology performance attribution. */
 import assert from "node:assert/strict";
 import { adaptiveMassPressureTopologyChip } from
-  "../lib/methods/adaptive-mass/adaptive-mass-frame-pipeline";
+  "../lib/methods/adaptive-volume/adaptive-mass-frame-pipeline";
 import { sparseCM12PressureTopologyAttribution } from
-  "../lib/methods/adaptive-mass/sparse-cm12-pressure-topology-attribution";
+  "../lib/methods/adaptive-volume/sparse-cm12-pressure-topology-attribution";
 
 const pcm = (generation = 12, fault = 0) => ({
   cell: { phase: 1, fault, firstFault: 0xffff_ffff, dirtyCount: 3,

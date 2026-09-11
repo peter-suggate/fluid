@@ -16,9 +16,9 @@ import {
   acquireWebGPUExclusiveLock,
   releaseWebGPUExclusiveLock,
 } from "../lib/harness/webgpu-smoke-isolation";
-import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
+import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 import type { WebGPUAdaptiveMassSolver } from
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+  "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 const dawnTest = dawnModule ? test : test.skip;
@@ -259,9 +259,9 @@ dawnTest("Sparse CM12 hydrostatic ladders stay within the accepted baseline", {
     // the running policy; a hand-built solver-options approximation previously
     // missed the product thresholds and did not catch the unchanged reset view.
     const offsetUI = parseQueryState(
-      "?scene=hydrostatic-power-large-offset&method=adaptive-mass&grid=volume",
+      "?scene=hydrostatic-power-large-offset&method=adaptive-volume&grid=volume",
     );
-    assert.equal(offsetUI.methodId, "adaptive-mass");
+    assert.equal(offsetUI.methodId, "adaptive-volume");
     assert.equal(offsetUI.ui.gridOverlayAxis, "volume");
     assert.equal(offsetUI.ui.gridOverlayMode, "structure");
     const offsetValues = resolveMethodValues(adaptiveMassMethod,

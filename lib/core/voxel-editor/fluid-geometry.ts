@@ -24,7 +24,7 @@ export function fluidToolDefaults(scene: SceneDescription, values: ToolValues, s
 
 export function fluidToolUnavailable({ scene, methodId }: { scene: SceneDescription; methodId: string }): string | undefined {
   if (scene.systems?.fluid === false) return "Enable water from Scene to use fluid tools.";
-  if (methodId !== "adaptive-mass") return "Choose Sparse CM12 to edit moving water.";
+  if (methodId !== "adaptive-mass" && methodId !== "adaptive-volume") return "Choose Sparse Geometric to edit moving water.";
   return undefined;
 }
 

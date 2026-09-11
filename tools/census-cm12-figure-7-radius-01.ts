@@ -3,10 +3,10 @@ import {writeFileSync} from 'node:fs';
 import {createCm12Figure7} from '../lib/core/cm12-paper-scenes';
 import {initialLiquidFractionAtCell} from '../lib/core/initial-fluid';
 import {resolveMethodValues} from '../lib/core/method-contract';
-import {adaptiveMassMethod, adaptiveMassSolverOptions} from '../lib/methods/adaptive-mass/method';
-import {initializeSparseBrickAtlasFromScene, sparseCM12InitialActiveBrickKeys, sparseBrickSpan} from '../lib/methods/adaptive-mass/sparse-brick-atlas';
-import {buildSparseAtlasCompositeGrid} from '../lib/methods/adaptive-mass/sparse-atlas-composite-projection';
-import {packSparseCM12ResidentTopologyTemplatesForQA, sparseCM12TopologyPagePoolPlan} from '../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident';
+import {adaptiveMassMethod, adaptiveMassSolverOptions} from '../lib/methods/adaptive-volume/method';
+import {initializeSparseBrickAtlasFromScene, sparseCM12InitialActiveBrickKeys, sparseBrickSpan} from '../lib/methods/adaptive-volume/sparse-brick-atlas';
+import {buildSparseAtlasCompositeGrid} from '../lib/methods/adaptive-volume/sparse-atlas-composite-projection';
+import {packSparseCM12ResidentTopologyTemplatesForQA, sparseCM12TopologyPagePoolPlan} from '../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident';
 
 const scene = createCm12Figure7();
 scene.fluid.initialLiquidVolumes = [{shape:'sphere', center_m:{x:0,y:4.5,z:0},radius_m:0.1}];

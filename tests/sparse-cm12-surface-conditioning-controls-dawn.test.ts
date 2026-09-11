@@ -9,15 +9,15 @@ import { createMinimalPowerDamBreak32Scene } from "../lib/core/scenes";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
-import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
+import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 import { WebGPUAdaptiveMassSolver } from
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+  "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
 // Exercise the production expressions against independently chosen endpoint
 // and cap cases, not only the host's parameter values or shader text.
 async function checkCorrectionResponse(device: GPUDevice) {
   const source = readFileSync(new URL(
-    "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url), "utf8");
+    "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url), "utf8");
   const names = ["transportConservationStrength", "configuredTransportGamma",
     "configuredTransportCoefficient", "configuredVolumeCorrection"];
   const functions = names.map(name => {

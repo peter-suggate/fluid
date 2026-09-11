@@ -1,5 +1,5 @@
 import { resolveMethodValues } from "../core/method-contract";
-import { adaptiveMassMethod, adaptiveMassSolverOptions } from "../methods/adaptive-mass/method";
+import { adaptiveMassMethod, adaptiveMassSolverOptions } from "../methods/adaptive-volume/method";
 
 /** The same balanced defaults used by the product, without scene-profile overrides. */
 export function sparseCM12DawnDefaultValues() {

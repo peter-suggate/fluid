@@ -9,7 +9,7 @@ import { INITIAL_COMPARE_STATE, type CompareState } from "../lib/core/compare/co
 
 function setup() {
   const a = createPaneSession("a"), b = createPaneSession("b");
-  a.method.getState().setParam("adaptive-mass", "timeStep", "scene");
+  a.method.getState().setParam("adaptive-volume", "timeStep", "scene");
   a.scene.getState().patchNumerics({ fixedDt_s: 1 / 60, maxDt_s: 1 / 60 });
   b.method.getState().setMethodId("uniform");
   const shared = sharePaneStep([a, b]);

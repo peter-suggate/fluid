@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {compileCM12InterpolationPatch, evaluateCM12InterpolationPatch, type PatchPoint} from '../lib/methods/adaptive-mass/sparse-cm12-interpolation-patch';
+import {compileCM12InterpolationPatch, evaluateCM12InterpolationPatch, type PatchPoint} from '../lib/methods/adaptive-volume/sparse-cm12-interpolation-patch';
 
 export const patchFixtures: PatchPoint[][] = [];
 for (const width of [1,2,4,8]) for (const kind of ['box','wedge','pyramid','frustum']) {

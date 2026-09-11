@@ -2,8 +2,8 @@
 import {sceneDocument} from "../../lib/core/scene-definition";
 import {getSceneDefinition} from "../../lib/core/scenes";
 import {resolveMethodValues} from "../../lib/core/method-contract";
-import {adaptiveMassMethod} from "../../lib/methods/adaptive-mass/method";
-import type {WebGPUAdaptiveMassSolver} from "../../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+import {adaptiveMassMethod as adaptiveVolumeMethod} from "../../lib/methods/adaptive-volume/method";
+import type {WebGPUAdaptiveMassSolver} from "../../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 import {unpackFineLevelSetPackedPhi} from "../../lib/core/fine-levelset-packed-sample";
 import {useState} from "react";
 import {requiredFluidDeviceLimits} from "../../lib/core/webgpu-device-limits";
@@ -223,8 +223,8 @@ export default function Probe(){
    const adapter=await navigator.gpu.requestAdapter();if(!adapter)throw new Error("No adapter");
    device=await adapter.requestDevice({requiredLimits:requiredFluidDeviceLimits(adapter.limits)});
    const scene=sceneDocument(getSceneDefinition("minimal-power-dam-break-32"));
-   const values=resolveMethodValues(adaptiveMassMethod,"balanced",{selectorMode:"coarse-first",timeStep:"paper"});
-   solver=await adaptiveMassMethod.createSolverAsync!(device,scene,"balanced",values,undefined,()=>{}) as WebGPUAdaptiveMassSolver;
+   const values=resolveMethodValues(adaptiveVolumeMethod,"balanced",{selectorMode:"coarse-first",timeStep:"paper"});
+   solver=await adaptiveVolumeMethod.createSolverAsync!(device,scene,"balanced",values,undefined,()=>{}) as WebGPUAdaptiveMassSolver;
    await solver.waitForSimulationReady();
    for(let step=1;step<=180;step++){
     while(!solver.advanceTo(step/30,[]))await new Promise(resolve=>setTimeout(resolve,0));

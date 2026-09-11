@@ -5,7 +5,7 @@ import {
   sparseBrickAtlasStats,
   sparseBrickSpan,
   type SparseBrickFineResolution,
-} from "../lib/methods/adaptive-mass/sparse-brick-atlas";
+} from "../lib/methods/adaptive-volume/sparse-brick-atlas";
 
 const scene = createOceanSeicheScene();
 const dimensions = sceneLatticeDimensions(scene);

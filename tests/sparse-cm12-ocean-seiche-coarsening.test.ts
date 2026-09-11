@@ -23,21 +23,21 @@ import {
   sparseBrickSpan,
   sparseCM12InitialActiveBrickKeys,
   sparseAtlasLeaves,
-} from "../lib/methods/adaptive-mass/sparse-brick-atlas";
+} from "../lib/methods/adaptive-volume/sparse-brick-atlas";
 import {
   adaptiveMassPresentationDimensionsForScene,
   WebGPUAdaptiveMassSolver,
 } from
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
-import { adaptiveMassSolverOptions } from "../lib/methods/adaptive-mass/method";
+  "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
+import { adaptiveMassSolverOptions } from "../lib/methods/adaptive-volume/method";
 import { SPARSE_CM12_VELOCITY_EXTENSION_DEPTH } from
-  "../lib/methods/adaptive-mass/sparse-cm12-velocity-extension";
+  "../lib/methods/adaptive-volume/sparse-cm12-velocity-extension";
 import {
   decodeSparseCM12SignedPresentationKey,
   decodeSparseCM12FinePresentationSource,
   sparseCM12FinePresentationPlan,
   sparseCM12OwnershipTablePlan,
-} from "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
+} from "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident";
 import { packFineLevelSetSample } from "../lib/core/fine-levelset-packed-sample";
 import { FINE_LEVELSET_SAMPLE_FLAGS } from "../lib/core/fine-levelset-brick-abi";
 import {

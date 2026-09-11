@@ -15,7 +15,7 @@ test("inactive method settings survive switching while only supported configurat
   const store = createMethodStore();
   store.getState().setParam("power-liquids", "globalFineLevelSetFactor", "8");
   store.getState().setMethodId("power-liquids");
-  store.getState().setMethodId("adaptive-mass");
+  store.getState().setMethodId("adaptive-volume");
   assert.equal(store.getState().overrides["power-liquids"]?.globalFineLevelSetFactor, "8");
 });
 
@@ -36,14 +36,14 @@ test("restoring an explicit default removes the override without resetting the a
   const savedRuntime = session.runtime.getState();
   const savedDiagnostics = session.diagnostics.getState();
   try {
-    session.method.setState({ methodId: "adaptive-mass", overrides: { "adaptive-mass": { pressureJournal: "off" } } });
+    session.method.setState({ methodId: "adaptive-volume", overrides: { "adaptive-volume": { pressureJournal: "off" } } });
     session.runtime.setState({ simulationTime: 2, topologyFrozen: true });
-    simulation.resetMethodParam("adaptive-mass", "pressureJournal");
-    assert.equal(session.method.getState().overrides["adaptive-mass"]?.pressureJournal, undefined);
+    simulation.resetMethodParam("adaptive-volume", "pressureJournal");
+    assert.equal(session.method.getState().overrides["adaptive-volume"]?.pressureJournal, undefined);
     assert.equal(session.runtime.getState().simulationTime, 2);
     assert.equal(session.runtime.getState().topologyFrozen, true);
     assert.equal(session.diagnostics.getState().gpuStatus, savedDiagnostics.gpuStatus);
-    simulation.setMethodParam("adaptive-mass", "pressureJournal", "off");
+    simulation.setMethodParam("adaptive-volume", "pressureJournal", "off");
     assert.equal(session.runtime.getState().simulationTime, 2);
   } finally {
     session.method.setState(savedMethod, true);

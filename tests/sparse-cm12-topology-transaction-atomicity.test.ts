@@ -3,15 +3,15 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const wgsl = readFileSync(new URL(
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts",
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts",
   import.meta.url,
 ), "utf8");
 const host = readFileSync(new URL(
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.ts",
   import.meta.url,
 ), "utf8");
 const pressureRepairWgsl = readFileSync(new URL(
-  "../lib/methods/adaptive-mass/sparse-cm12-pressure-topology-repair.wgsl.ts",
+  "../lib/methods/adaptive-volume/sparse-cm12-pressure-topology-repair.wgsl.ts",
   import.meta.url,
 ), "utf8");
 

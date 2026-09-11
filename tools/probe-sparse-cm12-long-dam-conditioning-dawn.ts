@@ -15,12 +15,12 @@ import {
   acquireWebGPUExclusiveLock,
   releaseWebGPUExclusiveLock,
 } from "../lib/harness/webgpu-smoke-isolation";
-import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
+import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 import type {
   SparseCM12DiagnosticFields,
-} from "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
+} from "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident";
 import { WebGPUAdaptiveMassSolver } from
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+  "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
 type ResolutionMode = "adaptive" | "all-fine" | "all-coarse";
 type TimeStepMode = "paper" | "scene";

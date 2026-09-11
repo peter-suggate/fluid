@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import {
   probeTwoTileConservativeTransport,
   type TwoTileTransportVariantReceipt,
-} from "../lib/methods/adaptive-mass/two-tile-conservative-transport";
+} from "../lib/methods/adaptive-volume/two-tile-conservative-transport";
 
 const argument = (name: string): string | undefined => {
   const prefix = `--${name}=`;

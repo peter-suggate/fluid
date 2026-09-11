@@ -5,7 +5,7 @@ import {
   assertSparseCM12PressureReceipt,
   sparseCM12PressureResidualDrift,
   type SparseCM12PressureReceipt,
-} from "../lib/methods/adaptive-mass/sparse-cm12-pressure-receipt";
+} from "../lib/methods/adaptive-volume/sparse-cm12-pressure-receipt";
 
 function receipt(): SparseCM12PressureReceipt {
   return {

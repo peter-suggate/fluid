@@ -2,18 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { adaptiveMassMethod } from
-  "../lib/methods/adaptive-mass/method";
+  "../lib/methods/adaptive-volume/method";
 import {
   adaptiveMassPressureIterationReadout,
   sparseCM12Stage,
-} from "../lib/methods/adaptive-mass/sparse-cm12-stages";
+} from "../lib/methods/adaptive-volume/sparse-cm12-stages";
 import {
   SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE,
   SPARSE_CM12_PRESSURE_TRUE_RESIDUAL_CADENCE,
   sparseCM12PressureIterations,
   sparseCM12PressureIterationsFromReceipt,
   sparseCM12PressureRelativeTolerance,
-} from "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
+} from "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident";
 
 test("Sparse CM12 exposes fixed eight-iteration residual blocks", () => {
   assert.equal(SPARSE_CM12_PRESSURE_TRUE_RESIDUAL_CADENCE, 8);

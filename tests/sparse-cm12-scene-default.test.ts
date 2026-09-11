@@ -7,9 +7,9 @@ import { scenePresets } from "../lib/core/scenes";
 import { parseQueryState } from "../lib/core/url-state";
 
 test("every scene opens with Sparse CM12 unless the URL explicitly chooses a method", () => {
-  assert.equal(defaultMethodId(), "adaptive-mass");
+  assert.equal(defaultMethodId(), "adaptive-volume");
   for (const scene of scenePresets) {
     assert.equal(parseQueryState(`?scene=${encodeURIComponent(scene.id)}`).methodId,
-      "adaptive-mass", scene.id);
+      "adaptive-volume", scene.id);
   }
 });

@@ -5,8 +5,8 @@ import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { createMinimalPowerDamBreak32Scene } from "../lib/core/scenes";
 import { sceneWithSolidStroke } from "../lib/core/solid-world";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
-import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
-import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
+import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
+import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 (modulePath ? test : test.skip)("live voxel insertion and removal change fluid capacity without replacing the world or clock", { timeout: 240000 }, async () => {

@@ -9,6 +9,7 @@ import { structuredVelocityRowCapacityForBindingLimit } from "./power/webgpu-oct
 import { powerLiquidsMethod } from "./power/method";
 import { uniformMethod } from "./uniform/method";
 import { adaptiveMassMethod } from "./adaptive-mass/method";
+import { adaptiveMassMethod as adaptiveVolumeMethod } from "./adaptive-volume/method";
 import type { SimulationMethod } from "../core/method-contract";
 
 /**
@@ -25,6 +26,7 @@ const simulationMethods: ReadonlyArray<SimulationMethod> = [
   powerLiquidsMethod,
   uniformMethod,
   adaptiveMassMethod,
+  adaptiveVolumeMethod,
 ];
 
 /**
@@ -59,9 +61,9 @@ installSimulationMethods({
   // substitutes the default for a non-interactive id: a `method=power-liquids`
   // link would have hydrated as the default method and simulated something
   // else.
-  interactive: [losassoMethod, powerLiquidsMethod, uniformMethod, adaptiveMassMethod],
-  // Sparse CM12 is the application default for every scene. A scene profile
+  interactive: [losassoMethod, powerLiquidsMethod, uniformMethod, adaptiveMassMethod, adaptiveVolumeMethod],
+  // Sparse Geometric is the application default for every scene. A scene profile
   // seeds settings for an explicitly selected comparison method; opening the
   // scene does not switch to that method.
-  defaultId: adaptiveMassMethod.id,
+  defaultId: adaptiveVolumeMethod.id,
 });

@@ -2,7 +2,7 @@ import { pathToFileURL } from "node:url";
 import type { GPUSolverInstance, SimulationMethod } from "../core/method-contract";
 import { octreeDebugSources } from "../methods/octree-shared/octree-debug-sources";
 import { losassoMethod } from "../methods/losasso/method";
-import { adaptiveMassMethod } from "../methods/adaptive-mass/method";
+import { adaptiveMassMethod } from "../methods/adaptive-volume/method";
 import { decodeAdaptiveVelocityGPUFailureDiagnostics }
   from "../methods/losasso/harness-adaptive-audits";
 import { powerLiquidsMethod } from "../methods/power/method";

@@ -1,23 +1,23 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildSparseAtlasCompositeGrid } from
-  "../lib/methods/adaptive-mass/sparse-atlas-composite-projection";
+  "../lib/methods/adaptive-volume/sparse-atlas-composite-projection";
 import { compileSparseCM12FactoredAEIPackedTemplateCatalog } from
-  "../lib/methods/adaptive-mass/sparse-cm12-factored-aei-packed-template";
+  "../lib/methods/adaptive-volume/sparse-cm12-factored-aei-packed-template";
 import {
   createSparseAdaptiveMassAtlas,
   sparseBrickKey,
   type SparseAdaptiveMassBrick,
-} from "../lib/methods/adaptive-mass/sparse-brick-atlas";
+} from "../lib/methods/adaptive-volume/sparse-brick-atlas";
 import { compileSparseCM12InternedBoundaryOperators } from
-  "../lib/methods/adaptive-mass/sparse-cm12-interned-boundary-operators";
+  "../lib/methods/adaptive-volume/sparse-cm12-interned-boundary-operators";
 import { createSparseCM12InternedRefLookup,
   sparseCM12InternedRefLookup } from
-  "../lib/methods/adaptive-mass/sparse-cm12-interned-ref-lookup";
+  "../lib/methods/adaptive-volume/sparse-cm12-interned-ref-lookup";
 import { createSparseCM12InternedRefLookupWGSL } from
-  "../lib/methods/adaptive-mass/sparse-cm12-interned-ref-lookup.wgsl";
+  "../lib/methods/adaptive-volume/sparse-cm12-interned-ref-lookup.wgsl";
 import { packSparseCM12ResidentTopologyTemplatesForQA } from
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident";
 
 const fixture = () => {
   const logical = [2, 1, 1] as const;

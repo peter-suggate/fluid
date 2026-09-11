@@ -34,7 +34,7 @@ import {
   type AdaptiveMassStepTelemetry,
   WebGPUAdaptiveMassSolver,
 } from
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+  "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
 type Dimensions = readonly [number, number, number];
 type ScalarFieldName = "density" | "levelSet" | "topology" | "pressure" | "divergence";
@@ -1133,7 +1133,7 @@ try {
     const report = {
       passed: failures.length === 0,
       scenario: scene.sceneId,
-      method: "adaptive-mass",
+      method: "adaptive-volume",
       accuracyMode,
       pressureIterations: pressureIterationsOverride,
       resolutionMode,

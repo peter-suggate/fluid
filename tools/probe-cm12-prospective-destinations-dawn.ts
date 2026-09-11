@@ -10,9 +10,9 @@ import {createCm12Figure7} from '../lib/core/cm12-paper-scenes';
 import {resolveMethodValues} from '../lib/core/method-contract';
 import {requiredFluidDeviceLimits} from '../lib/core/webgpu-device-limits';
 import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from '../lib/harness/webgpu-smoke-isolation';
-import {adaptiveMassMethod,adaptiveMassSolverOptions} from '../lib/methods/adaptive-mass/method';
-import {WebGPUAdaptiveMassSolver} from '../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver';
-import type {SparseCM12Phase1TransportQALayout} from '../lib/methods/adaptive-mass/sparse-cm12-phase1-transport-receipt';
+import {adaptiveMassMethod,adaptiveMassSolverOptions} from '../lib/methods/adaptive-volume/method';
+import {WebGPUAdaptiveMassSolver} from '../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver';
+import type {SparseCM12Phase1TransportQALayout} from '../lib/methods/adaptive-volume/sparse-cm12-phase1-transport-receipt';
 
 const arg=(name:string,fallback:string)=>process.argv.find(v=>v.startsWith(`--${name}=`))?.slice(name.length+3)??fallback;
 const frames=arg('frames','1,8,24,32').split(',').map(Number);

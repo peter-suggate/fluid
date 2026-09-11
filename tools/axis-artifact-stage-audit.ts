@@ -1,5 +1,5 @@
 import { writeFile } from "node:fs/promises";
-import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
 /** Read-only scalar snapshots at existing production stage boundaries. */
 export async function axisArtifactStageAudit(device: GPUDevice, solver: WebGPUAdaptiveMassSolver,

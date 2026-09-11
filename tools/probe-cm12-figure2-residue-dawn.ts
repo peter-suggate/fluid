@@ -6,9 +6,9 @@ import { resolveMethodValues } from "../lib/core/method-contract";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
-import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
+import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 import type { WebGPUAdaptiveMassSolver } from
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+  "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
 type Dimensions = readonly [number, number, number];
 
@@ -168,7 +168,7 @@ try {
       }
       console.log(JSON.stringify({
         scene: "cm12-figure-2",
-        method: "adaptive-mass",
+        method: "adaptive-volume",
         resolutionMode: "all-fine",
         timeStep: "paper",
         steps,

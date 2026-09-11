@@ -5,7 +5,7 @@ import test from "node:test";
 import { gridOverlayShader } from "../lib/core/webgpu-grid-overlay";
 
 const resident = readFileSync(new URL(
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts", import.meta.url,
+  "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.ts", import.meta.url,
 ), "utf8");
 
 test("Sparse CM12 publishes the brick resolution consumed by visual overlays", () => {

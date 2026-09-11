@@ -27,7 +27,7 @@ import {
   createProcessRetainedDawnGPU,
   type NodeDawnProvider,
 } from "../lib/harness/node-dawn-provider";
-import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
+import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
 import { fingerprintSparseCM12RepositorySources } from
   "./sparse-cm12-source-content-fingerprint";
 
