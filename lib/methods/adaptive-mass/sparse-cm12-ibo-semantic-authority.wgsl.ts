@@ -44,8 +44,8 @@ fn ${p}ISASCMTStableRowHash(row:u32)->u32{
   var hash=0x811c9dc5u;hash=${p}ISAFNV(hash,row);
   hash=${p}ISAFNV(hash,${p}ISARowWord(row,1u)&0xf0000000u);
   for(var plane=2u;plane<=5u;plane+=1u){hash=${p}ISAFNV(hash,${p}ISARowWord(row,plane));}
-  let count=${p}ISARowTermCount(row);hash=${p}ISAFNV(hash,count);
-  let first=${p}ISARowTermFirst(row);
+  let range=${p}ISARowTermRange(row);let first=range.x;let count=range.y-first;
+  hash=${p}ISAFNV(hash,count);
   for(var local=0u;local<count;local+=1u){hash=${p}ISAFNV(
     ${p}ISAFNV(hash,${p}ISATermCell(first+local)),${p}ISATermBits(first+local));}
   return hash;}

@@ -71,6 +71,7 @@ fn rowStaticDualWeight(row:u32)->f32{_=row;return 1.0;}
 fn destinationFaceVelocity()->u32{return 0u;}
 fn rowTermOffset(row:u32)->u32{_=row;return 0u;}
 fn rowTermCount(row:u32)->u32{_=row;return 1u;}
+fn rowTermRange(row:u32)->vec2u{let first=rowTermOffset(row);return vec2u(first,first+rowTermCount(row));}
 fn termCell(term:u32)->u32{_=term;return 4096u;}
 ${production("candidateAcceptedFaceSample").replace("fn candidateAcceptedFaceSample", "fn sampleProduction")}
 fn candidateAcceptedFaceSample(point:vec3f,axis:u32)->vec4f{

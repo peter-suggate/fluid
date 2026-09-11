@@ -36,7 +36,8 @@ fn cellCenter(c:u32)->vec3f{
 fn conditionedDensity(c:u32)->f32{return .3+dot(gradient,cellCenter(c));}
 // Analytic interpolation oracle: isolates the production neighbour geometry.
 fn sampleSharpeningDensity(p:vec3f)->f32{return .3+dot(gradient,p);}
-fn incidenceRange(c:u32)->vec2u{_=c;return vec2u(0u,6u);}
+fn incidenceBegin(c:u32)->u32{_=c;return 0u;}
+fn incidenceEnd(c:u32)->u32{_=c;return 6u;}
 fn incidenceRow(at:u32)->u32{return at;}
 fn incidenceTerm(at:u32)->u32{return ownTerms[at];}
 fn rowAccepted(r:u32)->bool{_=r;return true;}
@@ -46,6 +47,7 @@ fn rowArea(r:u32)->f32{return select(1.0,4.0,r==0u);}
 fn rowDistance(r:u32)->f32{return select(1.0,1.5,r==0u);}
 fn rowTermOffset(r:u32)->u32{return offsets[r];}
 fn rowTermCount(r:u32)->u32{return select(2u,5u,r==0u);}
+fn rowTermRange(row:u32)->vec2u{let first=rowTermOffset(row);return vec2u(first,first+rowTermCount(row));}
 fn termCell(t:u32)->u32{return cells[t];}
 fn termCoefficient(t:u32)->f32{
  let sign=select(1.0,-1.0,mirrored&&t<7u);

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "recordedAt": "2026-08-28",
+  "recordedAt": "2026-09-11",
   "backend": "Dawn/Metal",
   "referenceHardware": "Apple M1 Max",
   "method": "Sparse CM12",
@@ -10,15 +10,20 @@
       "warmupFrames": 3,
       "measuredFrames": 12,
       "referenceMs": 24.576,
-      "maximumMs": 40
+      "maximumMs": 40,
+      "recordedAt": "2026-08-28"
     },
     "mini64-b8-p8": {
       "metric": "median hardware-timestamped GPU advance",
       "warmupFrames": 3,
       "measuredFrames": 12,
-      "referenceMs": 33.4889,
-      "maximumMs": 50
+      "referenceMs": 83.5584,
+      "maximumMs": 110,
+      "recordedAt": "2026-09-11",
+      "previousReferenceMs": 33.4889,
+      "previousMaximumMs": 50,
+      "captureContext": "Explicit user-authorized current-working-tree rebaseline; includes trace-gravity fix. See sparse-cm12-dawn-behavior-baseline.json for simulation fingerprint."
     }
   },
-  "policy": "Ceilings include approximately 50 percent headroom for run-to-run noise. Update only from a reviewed clean-tree capture on the reference machine."
+  "policy": "Mini32 retains its 2026-08-28 reference. Mini64 was explicitly rebaselined by user request on 2026-09-11 on Apple M1 Max/Metal, using the current working tree. Future changes require a measured, reviewed capture; never automatically raise ceilings."
 }

@@ -48,21 +48,27 @@ test("the effective vec4 plane is a VEX product, never transport materialization
   assert.doesNotMatch(sample, /state\[/);
 });
 
-test("scalar and cached velocity consumers share physical dual-cell interpolation", () => {
-  const stencil = functionSource(wgsl, "effectiveTransportStencilAtSpansMode",
-    "fn transportSourceSamplingSpans");
-  assert.match(stencil, /cellCenter\(donor\)/);
-  assert.match(stencil, /cellWidths\(probe\)/);
-  const velocity = functionSource(wgsl, "sampleEffectiveTransportVelocityAtSpansMode",
+test("transport holds a scale-invariant source lattice while sharpening stays continuous", () => {
+  const stencil = functionSource(wgsl, "effectiveTransportStencilAtSpans",
+    "${topologyEffectsEntries}");
+  assert.match(stencil, /let spans=max\(vec3f\(1\.0\),inputSpans\)/);
+  assert.doesNotMatch(stencil, /cm12TeiOwnerAtFine[\s\S]*widths/);
+
+  const velocity = functionSource(wgsl, "sampleEffectiveTransportVelocityAtSpans",
     "fn traceEffectiveTransportCharacteristic");
-  assert.match(velocity, /effectiveTransportStencilAtSpansMode\(position,spansInput,direct\)/);
-  const cachedVelocity = functionSource(wgsl, "sampleFaceVelocitySupportAtSpans",
-    "fn traceFaceDeparture");
-  assert.match(cachedVelocity, /effectiveTransportStencilAtSpansMode\(position,spans,true\)/);
+  assert.match(velocity, /let spans=max\(vec3f\(1\.0\),spansInput\)/);
+  const characteristic = functionSource(wgsl, "traceEffectiveTransportCharacteristic",
+    "fn traceEffectiveTransportDeparture");
+  assert.match(characteristic,
+    /sampleEffectiveTransportVelocityAtSpansMode\(midpoint,spans,direct\)/);
+
   const sharpeningDensity = functionSource(wgsl, "sampleSharpeningDensity",
     "fn sampleSharpeningField");
-  assert.match(sharpeningDensity, /effectiveTransportStencilAtSpansMode/);
-  assert.match(sharpeningDensity, /mirrorSharpeningSampleToWorld\(position\)/);
+  assert.match(sharpeningDensity, /let spans=vec3f\(1\.0\)/);
+  assert.match(sharpeningDensity,
+    /let atUpper=select\(vec3(?:b|<bool>)\(false\),clamped>=upper,hasInteriorInterval\)/);
+  assert.match(sharpeningDensity, /lower=select\(lower,lower-vec3i\(1\),atUpper\)/);
+  assert.match(sharpeningDensity, /fraction=select\(fraction,vec3f\(1\.0\),atUpper\)/);
   const sharpeningField = functionSource(wgsl, "sampleSharpeningField",
     "fn traceSharpeningMass");
   assert.match(sharpeningField,

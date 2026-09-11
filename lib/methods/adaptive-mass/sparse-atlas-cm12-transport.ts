@@ -1153,7 +1153,13 @@ export function transportSparseAtlasCM12(
   }
   const nextGamma = workspace.nextGamma = exactFloat64(workspace.nextGamma, count);
   for (let receiverId = 0; receiverId < count; receiverId += 1) {
-    nextGamma[receiverId] = sumRow(rows[receiverId]);
+    const row = rows[receiverId];
+    let transportedGamma = 0;
+    // Gamma is cumulative: apply A to the old gamma, just as for density.
+    for (let index = 0; index < row.count; index += 1) {
+      transportedGamma += row.coefficients[index] * fields.gamma[row.ids[index]];
+    }
+    nextGamma[receiverId] = transportedGamma;
   }
   const conditionedBeta = workspace.conditionedBeta = exactFloat64(
     workspace.conditionedBeta, count,

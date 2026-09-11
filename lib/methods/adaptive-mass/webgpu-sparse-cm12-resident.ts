@@ -2704,6 +2704,7 @@ export interface SparseCM12VelocityExtensionHeaderQA {
   readonly compactDispatch?: boolean;
   readonly scheduleRebuilt?: boolean;
   readonly scheduleGeneration?: number;
+  readonly initializationWorkgroups?: number;
   readonly scheduledWorkgroups?: number;
   readonly faultCount: number;
   readonly firstFault?: { readonly cell: number; readonly depth: number };
@@ -5115,7 +5116,7 @@ export class WebGPUSparseCM12Resident {
     const transportPacketIndirectArguments = transportPacketAuthorityLayout
       ? device.createBuffer({
         label: "Sparse CM12 transport and cached VEX indirect dispatches",
-        // Separate argument records: TPA at 0; topology-cached VEX at 12.
+        // VEX init/sweeps at 0/12; TPA reuses offset 0 after VEX completes.
         size: 24,
         usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST
           | GPUBufferUsage.COPY_SRC,
@@ -5511,7 +5512,9 @@ export class WebGPUSparseCM12Resident {
       "initializeVelocityExtensionPackets", "advanceVelocityExtensionPackets",
       "prepareSparseCM12AcceptedFaceRows", "projectSparseCM12DynamicFaceRows",
       "forceFaces", "enforceSparseCM12InflowFaces",
-      "classifyPressureCells", "compileCanonicalPressureRows",
+      "classifyPressureCells",
+      "markCanonicalPressureRowRepairTiles", "compileCanonicalPressureRowRepairTiles",
+      "sealCanonicalPressureRowRepairTiles", "compileDirtyCanonicalPressureRows",
       "beginCanonicalPressureCells", "beginCanonicalPressureRows",
       "planPressureMembershipEpoch",
       "finalizeCanonicalPressureCellFrontier",
@@ -6289,7 +6292,7 @@ export class WebGPUSparseCM12Resident {
         SPARSE_CM12_FRAME_CONTROL_FAMILY.bodyRowBypass);
       closeSubstage("frame-control-authority");
       // Cache only accepted packet addresses. Topology changes rebuild the
-      // image and retain one direct frame to invalidate retired packet masks.
+      // image; only initialization needs direct coverage to retire packet masks.
       useBindGroup(this.transportBindGroup);
       dispatch("beginSparseCM12VelocityExtensionSchedule", 1);
       dispatchAcceptedLeaves("compileSparseCM12VelocityExtensionSchedule");
@@ -6297,17 +6300,17 @@ export class WebGPUSparseCM12Resident {
       closePass();
       encoder.copyBufferToBuffer(this.activity,
         4 * (this.velocityExtensionLayout.scheduleBaseWords + 4),
-        this.transportPacketIndirectArguments!, 12, 12);
-      const dispatchVelocityExtension = (name: string) => {
+        this.transportPacketIndirectArguments!, 0, 24);
+      const dispatchVelocityExtension = (name: string, offset: number) => {
         const activePass = openPass();
         activePass.setPipeline(this.pipelines[name]!);
-        activePass.dispatchWorkgroupsIndirect(this.transportPacketIndirectArguments!, 12);
+        activePass.dispatchWorkgroupsIndirect(this.transportPacketIndirectArguments!, offset);
       };
-      dispatchVelocityExtension("initializeVelocityExtensionPackets");
+      dispatchVelocityExtension("initializeVelocityExtensionPackets", 0);
       closeSubstage("velocity-extension-mask-initialization");
       for (let depth = 1; depth <= 8; depth += 1) {
         useBindGroup(this.transportDepthBindGroups[depth - 1]!);
-        dispatchVelocityExtension("advanceVelocityExtensionPackets");
+        dispatchVelocityExtension("advanceVelocityExtensionPackets", 12);
       }
       closeSubstage("velocity-extension-sweeps");
       closePass();
@@ -6577,10 +6580,17 @@ export class WebGPUSparseCM12Resident {
       closePass();
       closeSubstage("pcm-cell-publication");
       if (pressureTopologyPhaseLimitForQA === "cells") return;
-      dispatch("compileCanonicalPressureRows", ...planSparseCM12LinearDispatch(
-        this.canonicalMembershipLayout.row.dispatchWorkgroupCount,
+      dispatchAccepted("markCanonicalPressureRowRepairTiles", "row");
+      dispatch("compileCanonicalPressureRowRepairTiles", ...planSparseCM12LinearDispatch(
+        Math.ceil(this.canonicalMembershipLayout.row.dispatchWorkgroupCount / WORKGROUP_SIZE),
         this.device.limits.maxComputeWorkgroupsPerDimension,
       ));
+      dispatch("sealCanonicalPressureRowRepairTiles", 1);
+      closePass();
+      encoder.copyBufferToBuffer(this.activity,
+        4 * (this.canonicalMembershipLayout.row.repairControlBaseWords + 1),
+        this.pressureMembershipIndirectArguments, 0, 12);
+      dispatchPressureBootstrap("compileDirtyCanonicalPressureRows");
       dispatch("finalizeCanonicalPressureRows", 1);
       closePass();
       closeSubstage("pcm-row-publication");
@@ -8221,7 +8231,11 @@ export class WebGPUSparseCM12Resident {
       const sha256ActiveCoefficients = () => {
         const authority: number[] = [];
         const edgeOffsets = this.templateWords[15]!;
-        for (let cellId = 0; cellId < cell.capacity; cellId += 1) {
+        // The immutable directed-edge catalogue only covers authored cells.
+        // Runtime cells use canonical incidence; indexing this table with a
+        // runtime ID reads unrelated metadata as an unbounded edge range.
+        const authoredCells = Math.min(cell.capacity, this.templateWords[2]!);
+        for (let cellId = 0; cellId < authoredCells; cellId += 1) {
           if (!contains(cellBitsAt, cellId)) continue;
           const first = this.templateWords[edgeOffsets + cellId]!;
           const end = this.templateWords[edgeOffsets + cellId + 1]!;
@@ -8288,6 +8302,7 @@ export class WebGPUSparseCM12Resident {
         row: rowReceipt,
         thetaSha256,
         coefficientSha256,
+        coefficientHashScope: "authored directed-edge cache; runtime operator uses canonical incidence",
         rhsSha256,
         aggregateEdgeSha256,
         brickDiagonalSha256,
@@ -10436,7 +10451,7 @@ export class WebGPUSparseCM12Resident {
     const layout = this.velocityExtensionLayout;
     const headerWords = SPARSE_CM12_VELOCITY_EXTENSION_HEADER_WORDS;
     const maskWords = 2 * layout.packetCapacity;
-    const bytes = 4 * (headerWords + maskWords + 8);
+    const bytes = 4 * (headerWords + maskWords + 11);
     const readback = this.device.createBuffer({
       label: "Sparse CM12 VEX2 header QA readback", size: bytes,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
@@ -10450,7 +10465,7 @@ export class WebGPUSparseCM12Resident {
       encoder.copyBufferToBuffer(this.activity, 4 * layout.validityABaseWords,
         readback, 4 * headerWords, 4 * maskWords);
       encoder.copyBufferToBuffer(this.activity, 4 * layout.scheduleBaseWords,
-        readback, 4 * (headerWords + maskWords), 32);
+        readback, 4 * (headerWords + maskWords), 44);
       this.device.queue.submit([encoder.finish()]);
       await readback.mapAsync(GPUMapMode.READ);
       const words = new Uint32Array(readback.getMappedRange());
@@ -10480,7 +10495,8 @@ export class WebGPUSparseCM12Resident {
         compactDispatch: schedule[3] !== 0,
         scheduleRebuilt: schedule[1] !== 0,
         scheduleGeneration: schedule[0]!,
-        scheduledWorkgroups: schedule[4]! * schedule[5]!,
+        initializationWorkgroups: schedule[4]! * schedule[5]!,
+        scheduledWorkgroups: schedule[7]! * schedule[8]!,
         validCellCount: density.validCellCount,
         emptyPacketCount: density.emptyPacketCount,
         faultCount: words[h.faultCount]!,

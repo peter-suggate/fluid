@@ -51,6 +51,7 @@ fn pressureHasPartialRefinementRegion()->bool{return false;}
 fn pressurePlanarColumnHeight(row:u32)->vec2f{_=row;return vec2f(0.0);}
 fn rowTermOffset(row:u32)->u32{return row*5u;}
 fn rowTermCount(row:u32)->u32{_=row;return 5u;}
+fn rowTermRange(row:u32)->vec2u{let first=rowTermOffset(row);return vec2u(first,first+rowTermCount(row));}
 fn termCell(term:u32)->u32{return term;}
 fn termCoefficient(term:u32)->f32{return select(1.0/6.0,-2.0/3.0,term%5u==0u);}
 fn peiPressureCellMember(cell:u32)->bool{return state[cell]>0.0;}

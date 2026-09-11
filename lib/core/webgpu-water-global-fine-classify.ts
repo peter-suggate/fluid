@@ -478,7 +478,36 @@ fn extractGlobalFineMain(@builtin(global_invocation_id)gid:vec3u){
       return;
     }
   }
-  classifyFineAnchor(q,sampleScale,local);
+  var contourWidth=1;var contourScale=sampleScale;
+  if(compactSignedSparseAddressing()&&sampleScale>1u){
+    // Native macro samples cover a wider lattice interval. Emit a conforming
+    // unit contour only for intervals containing a surface or a tank boundary;
+    // homogeneous interiors keep their sparse native representation. Both
+    // sides then sample the same published field at every shared-face vertex.
+    let width=i32(sampleScale);var wet=false;var dry=false;
+    // Fine neighbours can place a crossing between the macro face corners.
+    // Inspect the three high faces as well as the origin: native interpolation
+    // inside this interval is determined by these boundary samples.
+    let originValue=phi(q);wet=originValue<=0.;dry=originValue>0.;
+    for(var axis=0u;axis<3u;axis+=1u){
+      for(var v=0;v<=width;v+=1){for(var u=0;u<=width;u+=1){
+        var point=q;point[axis]+=width;point[(axis+1u)%3u]+=u;point[(axis+2u)%3u]+=v;
+        let value=phi(point);wet=wet||value<=0.;dry=dry||value>0.;
+      }}
+    }
+    let dims=vec3i(params.sampleDimensions);
+    let boundary=any(q==vec3i(0))||any(q+vec3i(width)>=dims)
+      ||!fineValidAt(q-vec3i(1,0,0))||!fineValidAt(q-vec3i(0,1,0))
+      ||!fineValidAt(q-vec3i(0,0,1));
+    if(!wet||(!dry&&!boundary)){return;}
+    contourWidth=width;contourScale=1u;
+  }
+  for(var z=0;z<contourWidth;z+=1){for(var y=0;y<contourWidth;y+=1){for(var x=0;x<contourWidth;x+=1){
+    let child=q+vec3i(x,y,z);
+    let childLocal=vec3u(child-compactFloorDiv(child,i32(r))*i32(r));
+    classifyFineAnchor(child,contourScale,childLocal);
+  }}}
+
 }
 @compute @workgroup_size(256)
 fn extractGlobalCoarseMain(@builtin(workgroup_id)group:vec3u,@builtin(local_invocation_index)local:u32){if(!validCurrentPublication()){return;}

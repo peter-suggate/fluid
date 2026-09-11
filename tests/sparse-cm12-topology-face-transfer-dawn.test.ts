@@ -39,6 +39,7 @@ fn termCoefficient(at:u32)->f32{_=at;return .5;}
 fn rowStaticDualWeight(row:u32)->f32{_=row;return 8.0;}
 fn rowTermOffset(row:u32)->u32{_=row;return 0u;}
 fn rowTermCount(row:u32)->u32{_=row;return 1u;}
+fn rowTermRange(row:u32)->vec2u{let first=rowTermOffset(row);return vec2u(first,first+rowTermCount(row));}
 fn termCell(term:u32)->u32{_=term;return TARGET;}
 fn destinationFaceVelocity()->u32{return 0u;}
 fn acceptedRowMember(row:u32)->bool{return row<TARGET;}

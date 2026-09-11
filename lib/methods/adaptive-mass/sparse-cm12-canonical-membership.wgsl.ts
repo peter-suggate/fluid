@@ -45,6 +45,10 @@ const PCM_ROW_HEADER:u32=${domain.headerBaseWords}u;
 const PCM_ROW_CAPACITY:u32=${domain.capacity}u;
 const PCM_ROW_ACTIVE_BITS:u32=${domain.activeBitsBaseWords}u;
 const PCM_ROW_ACTIVE_WORDS:u32=${domain.activeBitWordCount}u;
+const PCM_ROW_TILE_COUNT:u32=${domain.dispatchWorkgroupCount}u;
+const PCM_ROW_TILE_STAMPS:u32=${domain.dirtyTileStampBaseWords}u;
+const PCM_ROW_TILE_LIST:u32=${domain.dirtyTileListBaseWords}u;
+const PCM_ROW_REPAIR_CONTROL:u32=${domain.repairControlBaseWords}u;
 `;
 }
 
@@ -334,7 +338,13 @@ fn pcmRowBegin(topologyGeneration:u32)->bool{
   atomicStore(&${arena}[PCM_ROW_HEADER+PCM_D_CANDIDATE_GENERATION],accepted+1u);
   atomicStore(&${arena}[PCM_ROW_HEADER+PCM_D_FAULT],0u);
   atomicStore(&${arena}[PCM_ROW_HEADER+PCM_D_FIRST_FAULT],PCM_INVALID);
-  atomicStore(&${arena}[PCM_ROW_HEADER+PCM_D_TOTAL],0u);
+  // Unchanged words retain both their bits and their contribution to total.
+  atomicStore(&${arena}[PCM_ROW_REPAIR_CONTROL],0u);
+  atomicStore(&${arena}[PCM_ROW_REPAIR_CONTROL+1u],0u);
+  atomicStore(&${arena}[PCM_ROW_REPAIR_CONTROL+2u],1u);
+  atomicStore(&${arena}[PCM_ROW_REPAIR_CONTROL+3u],1u);
+  // Full-domain oracle uses the same publisher; compact sealing overrides this.
+  atomicStore(&${arena}[PCM_ROW_REPAIR_CONTROL+4u],PCM_ROW_ACTIVE_WORDS);
   atomicStore(&${arena}[PCM_ROW_HEADER+PCM_ROW_PUBLISHED_WORDS],0u);
   atomicStore(&${arena}[PCM_ROW_HEADER+PCM_ROW_CANDIDATE_TOPOLOGY],topologyGeneration);
   atomicStore(&${arena}[PCM_ROW_HEADER+PCM_D_PHASE],PCM_PHASE_COLLECTING);
@@ -348,12 +358,61 @@ fn pcmRowPriorTopologyGeneration()->u32{
   return select(PCM_INVALID,atomicLoad(&${arena}[
     PCM_ROW_HEADER+PCM_ROW_ACCEPTED_TOPOLOGY]),accepted!=0u);
 }
+fn pcmRowMarkDirtyTile(row:u32){
+  if(row>=PCM_ROW_CAPACITY||!pcmRowPublicationOpen()){return;}
+  let generation=atomicLoad(&${arena}[PCM_ROW_HEADER+PCM_D_CANDIDATE_GENERATION]);
+  atomicStore(&${arena}[PCM_ROW_TILE_STAMPS+row/64u],generation);
+}
+// One lane per tile, rather than one lane per capacity row. The prior bitmap
+// closes retirement even when an old row is absent from the accepted stream.
+@compute @workgroup_size(64)
+fn compileCanonicalPressureRowRepairTiles(@builtin(workgroup_id)wid:vec3u,
+ @builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)lane:u32){
+  let tile=64u*(wid.x+nwg.x*wid.y)+lane;
+  if(tile>=PCM_ROW_TILE_COUNT||!pcmRowPublicationOpen()){return;}
+  let generation=atomicLoad(&${arena}[PCM_ROW_HEADER+PCM_D_CANDIDATE_GENERATION]);
+  let topology=atomicLoad(&${arena}[PCM_ROW_HEADER+PCM_ROW_CANDIDATE_TOPOLOGY]);
+  var dirty=atomicLoad(&${arena}[PCM_ROW_TILE_STAMPS+tile])==generation;
+  if(pcmRowPriorTopologyGeneration()!=topology){
+    let first=2u*tile;var old=atomicLoad(&${arena}[PCM_ROW_ACTIVE_BITS+first]);
+    if(first+1u<PCM_ROW_ACTIVE_WORDS){old|=atomicLoad(&${arena}[PCM_ROW_ACTIVE_BITS+first+1u]);}
+    dirty=dirty||old!=0u;
+  }
+  if(!dirty){return;}
+  let rank=atomicAdd(&${arena}[PCM_ROW_REPAIR_CONTROL],1u);
+  if(rank>=PCM_ROW_TILE_COUNT){pcmFault(PCM_ROW_HEADER,PCM_FAULT_DIRTY_CAPACITY,tile);return;}
+  atomicStore(&${arena}[PCM_ROW_TILE_LIST+rank],tile);
+}
+@compute @workgroup_size(1)
+fn sealCanonicalPressureRowRepairTiles(){
+  let count=atomicLoad(&${arena}[PCM_ROW_REPAIR_CONTROL]);
+  if(!pcmRowPublicationOpen()||count>PCM_ROW_TILE_COUNT){return;}
+  atomicStore(&${arena}[PCM_ROW_HEADER+PCM_D_DIRTY_COUNT],count);
+  atomicStore(&${arena}[PCM_ROW_REPAIR_CONTROL+1u],min(count,65535u));
+  atomicStore(&${arena}[PCM_ROW_REPAIR_CONTROL+2u],max(1u,(count+65534u)/65535u));
+  var expected=2u*count;
+  // Only the final capacity tile can contain one rather than two bit words.
+  if((PCM_ROW_ACTIVE_WORDS&1u)!=0u){
+    let last=PCM_ROW_TILE_COUNT-1u;
+    let epoch=atomicLoad(&${arena}[PCM_ROW_HEADER+PCM_D_CANDIDATE_GENERATION]);
+    let topology=atomicLoad(&${arena}[PCM_ROW_HEADER+PCM_ROW_CANDIDATE_TOPOLOGY]);
+    let retired=pcmRowPriorTopologyGeneration()!=topology
+      &&atomicLoad(&${arena}[PCM_ROW_ACTIVE_BITS+2u*last])!=0u;
+    if(atomicLoad(&${arena}[PCM_ROW_TILE_STAMPS+last])==epoch||retired){expected-=1u;}
+  }
+  atomicStore(&${arena}[PCM_ROW_REPAIR_CONTROL+4u],expected);
+}
+fn pcmRowRepairTile(rank:u32)->u32{
+  if(rank>=atomicLoad(&${arena}[PCM_ROW_REPAIR_CONTROL])){return PCM_INVALID;}
+  return atomicLoad(&${arena}[PCM_ROW_TILE_LIST+rank]);
+}
 fn pcmRowPublishWord(word:u32,bits:u32)->bool{
   if(!pcmRowPublicationOpen()){return false;}
   if(word>=PCM_ROW_ACTIVE_WORDS){
     pcmFault(PCM_ROW_HEADER,PCM_FAULT_INVALID_ID,word);return false;}
-  atomicStore(&${arena}[PCM_ROW_ACTIVE_BITS+word],bits);
-  atomicAdd(&${arena}[PCM_ROW_HEADER+PCM_D_TOTAL],countOneBits(bits));
+  let previous=atomicExchange(&${arena}[PCM_ROW_ACTIVE_BITS+word],bits);
+  let delta=i32(countOneBits(bits))-i32(countOneBits(previous));
+  atomicAdd(&${arena}[PCM_ROW_HEADER+PCM_D_TOTAL],bitcast<u32>(delta));
   atomicAdd(&${arena}[PCM_ROW_HEADER+PCM_ROW_PUBLISHED_WORDS],1u);
   return true;
 }
@@ -362,7 +421,7 @@ fn pcmRowFinalize(topologyGeneration:u32)->bool{
   if(atomicLoad(&${arena}[PCM_ROW_HEADER+PCM_ROW_CANDIDATE_TOPOLOGY])
       !=topologyGeneration
     ||atomicLoad(&${arena}[PCM_ROW_HEADER+PCM_ROW_PUBLISHED_WORDS])
-      !=PCM_ROW_ACTIVE_WORDS){
+      !=atomicLoad(&${arena}[PCM_ROW_REPAIR_CONTROL+4u])){
     pcmFault(PCM_ROW_HEADER,PCM_FAULT_PUBLICATION_GAP,PCM_INVALID);return false;}
   let generation=atomicLoad(&${arena}[PCM_ROW_HEADER+PCM_D_CANDIDATE_GENERATION]);
   atomicStore(&${arena}[PCM_ROW_HEADER+PCM_ROW_ACCEPTED_TOPOLOGY],topologyGeneration);

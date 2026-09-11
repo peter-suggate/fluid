@@ -15,7 +15,7 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
-  statSync,
+  lstatSync,
 } from "node:fs";
 import { basename, dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -38,7 +38,8 @@ const manifestScratchPaths = (root: string): string[] => {
   const found: string[] = [];
   const visit = (directory: string): void => {
     for (const path of directoryEntries(directory)) {
-      const metadata = statSync(path);
+      const metadata = lstatSync(path);
+      if (metadata.isSymbolicLink()) continue;
       if (metadata.isDirectory()) visit(path);
       else if (basename(path) === "temp-info.json") {
         try {

@@ -16,11 +16,6 @@ export interface SparseCM12PersistentPressureCacheWGSLOptions {
   readonly layout: SparseCM12PersistentPressureCacheLayout;
   /** Existing `array<atomic<u32>>` bound to cm12.pressure-cache. */
   readonly arenaName?: string;
-  /** Existing PCM1 membership functions. */
-  readonly cellContainsFunction?: string;
-  readonly rowContainsFunction?: string;
-  /** Existing row-owned rigid coefficient scale. Omit for literal 1.0. */
-  readonly solidRowScaleFunction?: string;
   /** Unique-owner ordinary f32 edge image. */
   readonly ordinaryEdgeStorage: Readonly<{
     readonly arrayName: string;

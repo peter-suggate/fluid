@@ -324,7 +324,7 @@ fn pcfaSealFinePublication(){if(atomicLoad(&${arena}[PCF_BASE+PCF_H_PHASE])!=PCF
           let row=incidenceRow(incidence);let theta=state[p.stateOffsets3.x+row];
           if(!pcmRowContains(row)||theta<=0.0){continue;}
           let ownTerm=incidenceTerm(incidence);let ownCoefficient=termCoefficient(ownTerm);
-          let rowBegin=rowTermOffset(row);let rowEnd=rowBegin+rowTermCount(row);
+          let rowBeginRange=rowTermRange(row);let rowBegin=rowBeginRange.x;let rowEnd=rowBeginRange.y;
           for(var term=rowBegin;term<rowEnd;term+=1u){let other=termCell(term);
             if(other==cell||!peiPressureCellMember(other)||pcfCellBrick(other)!=brick){continue;}
             diagonal+=rowDualWeight(row)*ownCoefficient*termCoefficient(term)/theta;

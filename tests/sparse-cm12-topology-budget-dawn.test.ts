@@ -13,6 +13,8 @@ import { WebGPUAdaptiveMassSolver } from
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 const dawnTest = dawnModule ? test : test.skip;
+// Dawn's instance must outlive asynchronous device work in direct test runs.
+const liveDawnInstances = new Set<GPU>();
 
 dawnTest("authored re-rung does not consume or overwrite world-growth pages",
   { timeout: 120_000 }, async () => {
@@ -20,12 +22,14 @@ dawnTest("authored re-rung does not consume or overwrite world-growth pages",
       "tests/sparse-cm12-topology-budget-dawn.test.ts");
     let device: GPUDevice | undefined;
     let solver: WebGPUAdaptiveMassSolver | undefined;
+    let gpu: GPU | undefined;
     try {
       const dawn = await import(pathToFileURL(dawnModule!).href) as {
         create(options: string[]): GPU; globals: Record<string, unknown>;
       };
       Object.assign(globalThis, dawn.globals);
-      const gpu = dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
+      gpu = dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
+      liveDawnInstances.add(gpu);
       const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
       assert.ok(adapter);
       device = await adapter.requestDevice({
@@ -91,5 +95,6 @@ dawnTest("authored re-rung does not consume or overwrite world-growth pages",
       assert.deepEqual(errors, []);
     } finally {
       solver?.destroy(); device?.destroy(); await releaseWebGPUExclusiveLock();
+      if (gpu) liveDawnInstances.delete(gpu);
     }
   });

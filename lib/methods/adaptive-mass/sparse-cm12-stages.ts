@@ -340,7 +340,7 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     },
     lens: null,
     tip: {
-      summary: "Clears retired face-velocity support, republishes accepted-cell support, and traces the compact accepted row list where extended velocity is available. Coarse leaves dispatch only their accepted faces.",
+      summary: "Clears retired face-velocity support, republishes accepted-cell support, and traces the compact accepted row list with fixed-lattice RK2 interpolation of collocated velocity. Face sampling uses the finest incident physical width; explicit coarse regions can enlarge it.",
       reads: "extended transport velocity, accepted cells and composite row topology",
       writes: "oriented face transport rows",
       feeds: "coupled conservative transport",

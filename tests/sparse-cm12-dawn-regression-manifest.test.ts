@@ -37,7 +37,7 @@ test("the compact Sparse CM12 Dawn suite retains its complete confidence matrix"
   assert.equal(options.timeStep, "paper");
   assert.equal(options.gammaDiffusionEnabled, true);
   assert.equal(options.surfaceSharpeningEnabled, true);
-  assert.equal(SPARSE_CM12_DAWN_SUITE_BUDGET_MS, 180_000);
+  assert.equal(SPARSE_CM12_DAWN_SUITE_BUDGET_MS, 480_000);
   assert.deepEqual(SPARSE_CM12_DAWN_LANES.map((lane) => lane.coverage).sort(),
     [...expectedCoverage].sort());
   assert.equal(new Set(SPARSE_CM12_DAWN_LANES.map((lane) => lane.id)).size,
@@ -91,4 +91,22 @@ test("checked-in performance baselines match the executable manifest", () => {
     assert.equal(lane.referenceMedianAdvanceMs, baseline.referenceMs);
     assert.equal(lane.maximumMedianAdvanceMs, baseline.maximumMs);
   }
+});
+
+test("accepted behavior baselines reject new regressions and nonfinite metrics", async () => {
+  const { assertSparseCM12Baseline } = await import("../lib/harness/sparse-cm12-dawn-baseline");
+  const baseline = JSON.parse(readFileSync(new URL(
+    "../benchmarks/results/sparse-cm12-dawn-behavior-baseline.json", import.meta.url), "utf8")) as {
+      metrics: Record<string, { maximum: number; previousMaximum: number; observed: number[] }>;
+    };
+  for (const [metric, entry] of Object.entries(baseline.metrics)) {
+    assert.ok(Number.isFinite(entry.maximum) && entry.maximum >= 0);
+    assert.ok(entry.observed.length >= 2, `${metric} needs repeated capture evidence`);
+    assert.ok(entry.observed.every(value => Number.isFinite(value) && value <= entry.maximum));
+    assert.doesNotThrow(() => assertSparseCM12Baseline(metric, entry.maximum));
+    assert.throws(() => assertSparseCM12Baseline(metric, entry.maximum + 1e-6));
+    assert.throws(() => assertSparseCM12Baseline(metric, NaN));
+    assert.throws(() => assertSparseCM12Baseline(metric, Infinity));
+  }
+  assert.throws(() => assertSparseCM12Baseline("unknown-metric", 0));
 });

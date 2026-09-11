@@ -186,6 +186,55 @@ test("CM12 characteristic rows conserve mass across an arbitrary 2:1 tiling", ()
     Number.isFinite(value) && value >= -1e-12));
 });
 
+test("stationary CM12 transport retains non-unit gamma history", () => {
+  const grid = buildSparseAtlasCompositeGrid(createSparseAdaptiveMassAtlas([8, 8, 8], [
+    brick(0, [0, 0, 0], 8),
+  ]));
+  for (const value of [0.5, 0.75, 1.25, 2]) {
+    const density = new Float64Array(grid.cells.length).fill(1);
+    const gamma = new Float64Array(grid.cells.length).fill(value);
+    const velocity = new Float64Array(3 * grid.cells.length);
+    const result = transportSparseAtlasCM12(grid, { density, gamma, velocity }, 1 / 30);
+    assert.deepEqual(result.fields.density, density);
+    assert.deepEqual(result.fields.gamma, gamma,
+      `zero velocity must not erase gamma=${value}`);
+  }
+});
+
+test("CM12 transports cumulative gamma with density through repeated axial flow", () => {
+  // A passive constant concentration has rho / gamma = constant. This must
+  // survive arbitrary conservative transport, including the sign-changing
+  // characteristic stencils at the centre and unequal-volume brick seams.
+  for (const resolution of [8, 4] as const) {
+    const grid = buildSparseAtlasCompositeGrid(createSparseAdaptiveMassAtlas([16, 8, 8], [
+      brick(0, [0, 0, 0], 8), brick(1, [1, 0, 0], resolution),
+    ]));
+    let gamma: Float64Array = Float64Array.from(grid.cells, (cell) =>
+      1 + 0.2 * Math.cos(0.7 * cell.centerFine[0]) * Math.cos(0.4 * cell.centerFine[1]));
+    let density: Float64Array = Float64Array.from(gamma, value => 0.7 * value);
+    const velocity = Float64Array.from({ length: 3 * grid.cells.length }, (_, index) => {
+      const cell = grid.cells[Math.floor(index / 3)];
+      return index % 3 === 0 ? 3 * (cell.centerFine[0] - 8)
+        : index % 3 === 1 ? -3 * (cell.centerFine[1] - 4) : 0;
+    });
+    const integral = (values: ArrayLike<number>) => grid.cells.reduce(
+      (sum, cell) => sum + cell.volume * values[cell.id], 0);
+    const initialGamma = integral(gamma), initialMass = integral(density);
+    for (let step = 0; step < 6; step++) {
+      const result = transportSparseAtlasCM12(grid, { density, gamma, velocity }, 1 / 30);
+      density = result.fields.density;
+      gamma = result.fields.gamma;
+      assert.ok(Math.abs(integral(density) - initialMass) < 1e-9);
+      assert.ok(Math.abs(integral(gamma) - initialGamma) < 1e-9,
+        `cumulative gamma volume must survive step ${step}, B${resolution}`);
+      for (const cell of grid.cells) {
+        assert.ok(Math.abs(density[cell.id] - 0.7 * gamma[cell.id]) < 1e-11,
+          `transport must retain concentration at cell ${cell.id}, step ${step}, B${resolution}`);
+      }
+    }
+  }
+});
+
 test("coarse CM12 has no sub-cell transport dead zone", () => {
   const atlas = createSparseAdaptiveMassAtlas([24, 8, 8], [
     { ...brick(0, [0, 0, 0], 4), density: new Float64Array(64) },

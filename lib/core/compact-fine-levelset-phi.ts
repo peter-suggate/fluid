@@ -133,6 +133,9 @@ fn compactSampleAddress(q:vec3i)->vec2u{
   }
   return vec2u(INVALID);
 }
+// Native pages interpolate onto the shared fine contour lattice. Their
+// missing samples are authoritative air, so keep background-octree traversal
+// out of the interpolation loop (and its compiled Metal expansion).
 fn phi(qi:vec3i)->f32{
   if((!compactSignedSparseAddressing()
       &&(any(qi<vec3i(0))||any(qi>=vec3i(params.sampleDimensions))))
@@ -140,7 +143,26 @@ fn phi(qi:vec3i)->f32{
   let address=compactSampleAddress(qi);if(address.x==INVALID){return ${coarseFallback}(qi);}
   let index=address.x*params.samplesPerBrick+address.y;
   if(index>=arrayLength(&fineSamples)||(finePackedFlags(index)&1u)==0u||!finite(finePackedPhi(index))){return ${coarseFallback}(qi);}
-  return finePackedPhi(index);
+  let scale=max(1u,compactSampleSpanScale(address.x));
+  if(scale<=1u){return finePackedPhi(index);}
+  let width=i32(scale);let base=compactFloorDiv(qi,width)*width;
+  if(all(qi==base)){return finePackedPhi(index);}
+  let fraction=vec3f(qi-base)/f32(scale);var value=0.;
+  for(var corner=0u;corner<8u;corner+=1u){
+    let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
+    let point=base+offset*width;
+    let w=select(vec3f(1)-fraction,fraction,offset!=vec3i(0));
+    let weight=w.x*w.y*w.z;if(weight<=0.){continue;}
+    let sampleAddress=compactSampleAddress(point);
+    let sampleIndex=sampleAddress.x*params.samplesPerBrick+sampleAddress.y;
+    var sampleValue=4.0*params.settings.w;
+    let inBounds=compactSignedSparseAddressing()
+      ||(all(point>=vec3i(0))&&all(point<vec3i(params.sampleDimensions)));
+    if(inBounds&&sampleAddress.x!=INVALID&&sampleIndex<arrayLength(&fineSamples)
+      &&(finePackedFlags(sampleIndex)&1u)!=0u&&finite(finePackedPhi(sampleIndex))){sampleValue=finePackedPhi(sampleIndex);}
+    value+=weight*sampleValue;
+  }
+  return value;
 }
 fn fineValidAt(q:vec3i)->bool{
   if((!compactSignedSparseAddressing()

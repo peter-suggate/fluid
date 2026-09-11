@@ -30,6 +30,7 @@ import {
 } from "../lib/core/fluid-pipeline";
 import { resolveMethodValues } from "../lib/core/method-contract";
 import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
+import { createCm12Figure7 } from "../lib/core/cm12-paper-scenes";
 import { sceneDamBreakBox } from "../lib/core/initial-fluid";
 import {
   GPUStageTimestampRecorder,
@@ -105,6 +106,9 @@ Options:
   --help, -h                         Print this help and exit without acquiring WebGPU
   --scene=NAME                       mini16, mini32, mini64, long-dam, ocean-seiche,
                                      ocean, or symmetric-expansion (default long-dam)
+                                     Also cm12-figure-7 (use B8/P8)
+  --sphere-radius=N                 Figure 7 sphere radius in metres
+  --pressure-relative-tolerance=N   Override the pressure stopping tolerance
   --production-defaults=0|1         Use balanced adaptive-mass defaults (suite mode)
   --brick-fine=4|8|16                Sparse brick ladder (default 16)
   --presentation-page=4|8|16         Presentation page size (default 16)
@@ -134,6 +138,7 @@ Options:
                                      QA two-plane sharpening repair receipts
   --phase1-receipt=0|1               Capture raw Phase-1 transport hashes
   --final-scalar-hash=0|1            Hash accepted density/gamma after the run
+  --final-pressure-hash=0|1          Read final PCM membership/theta/coefficient/RHS hashes
   --max-non-pressure-ms=N            Eligible gate threshold (default 10)
   --enforce-non-pressure-gate=0|1    Exit nonzero when the eligible gate fails
   --enforce-pressure-receipts=0|1    Require fault-free PTR/PCA receipts
@@ -155,6 +160,16 @@ The non-pressure gate is eligible only for ocean-seiche B16/P16 with at least
 const productionDefaults = argument("production-defaults", "0") === "1"
   ? sparseCM12DawnDefaultValues() : undefined;
 const sceneName = argument("scene", "long-dam");
+const sphereRadius = argument("sphere-radius", "");
+const pressureRelativeTolerance = argument("pressure-relative-tolerance", "");
+if (sphereRadius !== "" && (sceneName !== "cm12-figure-7"
+  || !Number.isFinite(Number(sphereRadius)) || Number(sphereRadius) <= 0)) {
+  throw new RangeError("sphere-radius requires Figure 7 and a positive finite radius");
+}
+if (pressureRelativeTolerance !== "" && (!Number.isFinite(Number(pressureRelativeTolerance))
+  || Number(pressureRelativeTolerance) < 0 || Number(pressureRelativeTolerance) > 1)) {
+  throw new RangeError("pressure-relative-tolerance must be in [0, 1]");
+}
 const warmup = Number(argument("warmup", "8"));
 const sampled = Number(argument("frames", "40"));
 const brickFineResolution = Number(argument("brick-fine", String(productionDefaults?.brickFineResolution ?? "16")));
@@ -178,6 +193,7 @@ const alternatingCapacityReceipts = argument("alternating-capacity-receipts", "0
 const gatherCapacityRepair = argument("gather-capacity-repair", "0") === "1";
 const phase1Receipt = argument("phase1-receipt", "0") === "1";
 const finalScalarHashEnabled = argument("final-scalar-hash", "0") === "1";
+const finalPressureHashEnabled = argument("final-pressure-hash", "0") === "1";
 if ([vexPacketCompaction, coarseTransportPacking, policyLeaderCompaction,
   policyFullLeafControl, capacityEarlyExit, implicitTransportArithmetic,
   implicitSharpeningArithmetic, alternatingCapacityReceipts, gatherCapacityRepair]
@@ -261,6 +277,7 @@ if (![4, 8, 16].includes(brickFineResolution)
   throw new RangeError("brick-fine and presentation-page must be compatible values in 4, 8, 16");
 }
 const buildScene = sceneName === "mini16" ? createMinimalPowerDamBreakScene
+  : sceneName === "cm12-figure-7" ? createCm12Figure7
   : sceneName === "mini32" ? createMinimalPowerDamBreak32Scene
   : sceneName === "mini64" ? createMinimalPowerDamBreak64Scene
   : sceneName === "long-dam" ? createSparseCM12LongDamBreakScene
@@ -514,6 +531,10 @@ try {
   await GPUStageTimestampRecorder.prepare(device);
 
   const scene = buildScene();
+  if (sphereRadius !== "") {
+    scene.fluid.initialLiquidVolumes = [{ shape: "sphere",
+      center_m: { x: 0, y: 4.5, z: 0 }, radius_m: Number(sphereRadius) }];
+  }
   if (minimumCellSize > 0) {
     const containerMinimum = {
       x: -0.5 * scene.container.width_m,
@@ -550,6 +571,9 @@ try {
     presentationPageResolution: String(presentationPageResolution),
     gammaDiffusion,
     surfaceSharpening,
+    ...(pressureRelativeTolerance === "" ? {} : {
+      pressureRelativeTolerance: Number(pressureRelativeTolerance),
+    }),
   });
   const productionAdaptiveOptimizations = !vexPacketCompaction
     && !coarseTransportPacking && !phase1Receipt
@@ -651,6 +675,8 @@ try {
     readonly acceptedCells: number;
     readonly acceptedRows: number;
     readonly pcmCellDirtyLeaves: number;
+    readonly pcmRowMembers: number;
+    readonly pcmRowDirtyTiles: number;
     readonly pcmRowPublishedWords: number;
     readonly pressureCells: number;
     readonly pressureRows: number;
@@ -678,6 +704,7 @@ try {
   const authoritySamples: Array<{
     readonly advance: number; readonly expectedFrameControlGeneration: number;
     readonly expectedFinalScalarMaskGeneration: number;
+    readonly residentGenerationCount: number; readonly residentFrame: number;
     readonly frameControl: FrameControlHeader & { readonly stalled: boolean;
       readonly successorMatched: boolean; readonly valid: boolean };
     readonly finalScalarMasks: FinalScalarMaskHeader & { readonly stalled: boolean;
@@ -702,6 +729,10 @@ try {
   let previousActivity = await solver.readGPUActivityPolicy();
   let priorFrameControlGeneration = initialFrameControl.acceptedGeneration;
   let priorFinalScalarMaskGeneration = initialFinalScalarMasks.generation;
+  let residentGenerationCount = solver.info.topologyGenerationCount ?? 0;
+  let residentFirstFrame = 1;
+  let residentInitialFrameGeneration = initialFrameControl.acceptedGeneration;
+  let residentInitialCommittedFrames = initialFrameControl.committedFrames;
   lastFinalScalarMaskHeader = initialFinalScalarMasks;
   const maximumAdvances = warmup + sampled + 4;
   const debugProgress = process.env.FLUID_STAGE_PROBE_DEBUG === "1";
@@ -750,7 +781,23 @@ try {
     ]);
     previousActivity = currentActivity;
     debug(`advance ${frame} authority headers complete`);
-    const expectedFrameControlGeneration = initialFrameControl.acceptedGeneration + frame;
+    // Resident replacement restarts GPU-local FCA/FSM counters. The host
+    // simulation clock survives that replacement; compare successors within
+    // the current resident, and independently retain the global step check.
+    const currentResidentGenerationCount = solver.info.topologyGenerationCount ?? 0;
+    if (currentResidentGenerationCount !== residentGenerationCount) {
+      assert.ok(currentResidentGenerationCount > residentGenerationCount,
+        "resident generation must advance monotonically");
+      residentGenerationCount = currentResidentGenerationCount;
+      residentFirstFrame = frame;
+      residentInitialFrameGeneration = 1;
+      residentInitialCommittedFrames = 0;
+      priorFrameControlGeneration = 1;
+      priorFinalScalarMaskGeneration = 0;
+    }
+    assert.equal(solver.info.encodedSteps, frame, "global simulation steps must survive resident replacement");
+    const residentFrame = frame - residentFirstFrame + 1;
+    const expectedFrameControlGeneration = residentInitialFrameGeneration + residentFrame;
     // FSM1 has no construction scalar result. Its first publication is the
     // first physical frame and thereafter advances exactly once with FCA.
     const expectedFinalScalarMaskGeneration = expectedFrameControlGeneration;
@@ -761,11 +808,11 @@ try {
         === expectedFrameControlGeneration
       && frameControl.candidateGeneration === expectedFrameControlGeneration
       && frameControl.sealedGeneration === expectedFrameControlGeneration
-      && frameControl.committedFrames === initialFrameControl.committedFrames + frame;
+      && frameControl.committedFrames === residentInitialCommittedFrames + residentFrame;
     const finalScalarMasksSuccessorMatched = finalScalarMasks.generation
         === expectedFinalScalarMaskGeneration
       && (finalScalarMasks.generation === priorFinalScalarMaskGeneration + 1
-        || (frame === 1 && priorFinalScalarMaskGeneration === 0
+        || (residentFrame === 1 && priorFinalScalarMaskGeneration === 0
           && finalScalarMasks.generation === expectedFrameControlGeneration));
     const frameControlValid = frameControl.phase === SPARSE_CM12_FRAME_CONTROL_PHASE.accepted
       && frameControl.fault === 0
@@ -779,6 +826,7 @@ try {
     lastFinalScalarMaskHeader = finalScalarMasks;
     authoritySamples.push({
       advance: frame, expectedFrameControlGeneration, expectedFinalScalarMaskGeneration,
+      residentGenerationCount, residentFrame,
       frameControl: { ...frameControl, stalled: frameControlStalled,
         successorMatched: frameControlSuccessorMatched, valid: frameControlValid },
       finalScalarMasks: { ...finalScalarMasks, stalled: finalScalarMasksStalled,
@@ -1052,6 +1100,8 @@ try {
       acceptedCells: info.adaptiveAcceptedCellCount ?? 0,
       acceptedRows: info.adaptiveAcceptedRowCount ?? 0,
       pcmCellDirtyLeaves: pcm?.cell.dirtyCount ?? 0,
+      pcmRowMembers: pcm?.row.totalCount ?? 0,
+      pcmRowDirtyTiles: pcm?.row.dirtyCount ?? 0,
       pcmRowPublishedWords: pcm?.row.directWriteCount ?? 0,
       pressureCells: info.adaptivePressureCellCount ?? 0,
       pressureRows: info.adaptivePressureActiveRowCount ?? 0,
@@ -1155,7 +1205,7 @@ try {
     ? await qaSolver.readPhase1TransportHashesQA()
     : { skipped: true, reason: "--phase1-receipt=0" };
   const finalScalarHashes = finalScalarHashEnabled
-    ? await qaSolver.readDiagnosticFields().then((fields) => {
+    ? await qaSolver.readDiagnosticFields(true).then((fields) => {
       const summarize = (values: Float32Array) => {
         let sum = 0; let correction = 0; let nonzero = 0;
         let minimum = Number.POSITIVE_INFINITY;
@@ -1178,6 +1228,15 @@ try {
         gammaSha256: createHash("sha256").update(new Uint8Array(
           fields.gamma.buffer, fields.gamma.byteOffset, fields.gamma.byteLength,
         )).digest("hex"),
+        fieldScope: "complete accepted world mapped to finest-grid coordinates",
+        velocitySha256: createHash("sha256").update(new Uint8Array(fields.velocity.buffer,
+          fields.velocity.byteOffset, fields.velocity.byteLength)).digest("hex"),
+        pressureRhsSha256: createHash("sha256").update(new Uint8Array(fields.pressureRhs.buffer,
+          fields.pressureRhs.byteOffset, fields.pressureRhs.byteLength)).digest("hex"),
+        pressureDiagonalSha256: createHash("sha256").update(new Uint8Array(fields.pressureDiagonal.buffer,
+          fields.pressureDiagonal.byteOffset, fields.pressureDiagonal.byteLength)).digest("hex"),
+        pressureSha256: createHash("sha256").update(new Uint8Array(fields.pressure.buffer,
+          fields.pressure.byteOffset, fields.pressure.byteLength)).digest("hex"),
         density: summarize(fields.density),
         gamma: summarize(fields.gamma),
         finestCellCount: fields.density.length,
@@ -1203,7 +1262,10 @@ try {
   const phase1TransportReceipt = phase1Receipt
     ? await qaSolver.readPhase1TransportReceiptQA?.()
     : undefined;
+  const finalPressureHashes = finalPressureHashEnabled
+    ? await qaSolver.readPressureCanonicalMembershipQA() : undefined;
   const report = {
+    finalPressureHashes,
     probe: "sparse-cm12-stage-cost", scene: sceneName, samples: seen,
     warmupSamples: warmup,
     diagnostic: {
@@ -1218,6 +1280,7 @@ try {
       firstAuthorityFailure,
     },
     configuration: {
+      ...(sphereRadius === "" ? {} : { sphereRadius_m: Number(sphereRadius) }),
       methodValues: values,
       freezeTopology,
       brickFineResolution,

@@ -291,8 +291,13 @@ fn boundedIncidenceEnd(cell:u32,begin:u32,end:u32)->u32{
 }
 fn rowPackedTerms(id:u32)->u32{return ${w("rowWord(id,0u)")};}
 fn rowPackedMetadata(id:u32)->u32{return ${w("rowWord(id,1u)")};}
+// The same atomic packed word contains both range fields. Traversals fetch it
+// once rather than separately loading offset and count through atomic readers.
+fn rowTermRange(id:u32)->vec2u{
+  let packed=rowPackedTerms(id);let first=packed&0x007fffffu;
+  return vec2u(first,first+(packed>>23u));
+}
 fn rowTermOffset(id:u32)->u32{return rowPackedTerms(id)&0x007fffffu;}
-fn rowTermCount(id:u32)->u32{return rowPackedTerms(id)>>23u;}
 fn rowAxis(id:u32)->u32{return rowPackedMetadata(id)>>30u;}
 fn rowKind(id:u32)->u32{return (rowPackedMetadata(id)>>28u)&3u;}
 fn rowRequirementOffset(id:u32)->u32{return rowPackedMetadata(id)&0x0fffffffu;}

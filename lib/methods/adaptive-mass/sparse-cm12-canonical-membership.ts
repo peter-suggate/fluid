@@ -86,6 +86,11 @@ export interface SparseCM12CanonicalRowImageLayout {
   readonly activeBitsBaseWords: number;
   readonly activeBitWordCount: number;
   readonly dispatchWorkgroupCount: number;
+  /** Generation stamps and compact 64-row repair tiles, independent of fields. */
+  readonly dirtyTileStampBaseWords: number;
+  readonly dirtyTileListBaseWords: number;
+  /** Eight words: count, indirect xyz, expected words, reserved. */
+  readonly repairControlBaseWords: number;
 }
 
 export interface SparseCM12CanonicalMembershipLayout {
@@ -158,11 +163,16 @@ export function createSparseCM12CanonicalMembershipLayout(request: {
   const rowActiveBitWordCount = Math.ceil(rowCapacity / 32);
   const rowActiveBitsBaseWords = at;
   at = alignWords(at + rowActiveBitWordCount);
+  const dispatchWorkgroupCount = Math.ceil(rowCapacity / 64);
+  const dirtyTileStampBaseWords = at; at = alignWords(at + dispatchWorkgroupCount);
+  const dirtyTileListBaseWords = at; at = alignWords(at + dispatchWorkgroupCount);
+  const repairControlBaseWords = at; at = alignWords(at + 8);
   const row = Object.freeze({ capacity: rowCapacity,
     headerBaseWords: rowHeaderBaseWords,
     activeBitsBaseWords: rowActiveBitsBaseWords,
     activeBitWordCount: rowActiveBitWordCount,
-    dispatchWorkgroupCount: Math.ceil(rowCapacity / 64) });
+    dispatchWorkgroupCount, dirtyTileStampBaseWords, dirtyTileListBaseWords,
+    repairControlBaseWords });
   const totalWords = alignWords(at);
   return Object.freeze({ baseWords, cell, row, totalWords, totalBytes: 4 * totalWords });
 }

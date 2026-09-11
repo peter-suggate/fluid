@@ -175,7 +175,7 @@ export function createSparseCM12VelocityExtensionLayout(options: {
   const validityBBaseWords = validityABaseWords + 2 * packetCapacity;
   const acceptedDepthBaseWords = validityBBaseWords + 2 * packetCapacity;
   const scheduleBaseWords = acceptedDepthBaseWords + cellCapacity;
-  const packetListBaseWords = scheduleBaseWords + 8;
+  const packetListBaseWords = scheduleBaseWords + 11;
   return Object.freeze({ headerBaseWords, validityABaseWords, validityBBaseWords,
     acceptedDepthBaseWords, scheduleBaseWords, packetListBaseWords,
     cellCapacity, packetCapacity, dispatchPacketsPerLeaf, dispatchPacketCount,
@@ -196,11 +196,13 @@ export function createSparseCM12VelocityExtensionInitialWords(
   result[h.firstFaultDepth] = 0xffff_ffff;
   result.fill(0xffff_ffff, layout.acceptedDepthBaseWords - layout.headerBaseWords,
     layout.scheduleBaseWords - layout.headerBaseWords);
-  // schedule: cached generation, rebuild, count, compact, dispatch x/y/z, slot.
+  // schedule: generation, rebuild, count, compact, init x/y/z, sweep x/y/z, slot.
   result[layout.scheduleBaseWords - layout.headerBaseWords] = 0xffff_ffff;
-  result[layout.scheduleBaseWords - layout.headerBaseWords + 7] = 0xffff_ffff;
+  result[layout.scheduleBaseWords - layout.headerBaseWords + 10] = 0xffff_ffff;
   result.set(sparseCM12VelocityExtensionDispatchShape(layout.dispatchPacketCount),
     layout.scheduleBaseWords - layout.headerBaseWords + 4);
+  result.set(sparseCM12VelocityExtensionDispatchShape(layout.dispatchPacketCount),
+    layout.scheduleBaseWords - layout.headerBaseWords + 7);
   return result;
 }
 

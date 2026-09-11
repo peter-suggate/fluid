@@ -1,0 +1,397 @@
+{
+  "scope": "Radius 0.1 Figure 7, four sampled production GPU transport steps. Logical 4-cell bins are candidate coordinates, not native packet IDs. Logical 8-cell bricks are coordinate bins, not physical allocation counts. Local velocity bounds are empirical heuristics. All nonzero source density is retained, with no visual density cutoff.",
+  "limitations": [
+    "No virtual velocity sampling or transport into an unallocated destination is executed.",
+    "No GPU selector timing or net speedup is measured; CPU box construction excludes readback and matching.",
+    "Receiver coverage does not prove gamma evolution, pressure, boundary, or velocity-extension support can be removed.",
+    "Local velocity does not bound an RK2 characteristic in a general deforming field. Only captured receiver containment is established."
+  ],
+  "reports": [
+    {
+      "step": 1,
+      "time_s": 0.03333333333333333,
+      "topologyGeneration": 1,
+      "acceptedCells": 18432,
+      "residentLogicalBricks": 36,
+      "nonzeroSourceCells": 64,
+      "maxWidthFineCells": 1,
+      "maxSourceVelocityFineCells_s": [
+        0,
+        0,
+        0
+      ],
+      "maxObservedDepartureFineCells": [
+        0,
+        0,
+        0
+      ],
+      "tracedPacketCells": 18432,
+      "backwardPotentialReceivers": 64,
+      "forwardReturnReceivers": 0,
+      "forwardOnlyReceivers": 0,
+      "gatheredNonzeroReceivers": 64,
+      "requiredUnion": 64,
+      "requiredPackets": 4,
+      "requiredLogicalBricks": 4,
+      "variants": [
+        {
+          "haloWidths": 1,
+          "candidatePackets": 12,
+          "candidateLogicalBricks": 8,
+          "absentCandidateLogicalBricks": 0,
+          "selectedResidentCells": 768,
+          "missedRequired": 0,
+          "missedForward": 0,
+          "selectionCpuMs": 0.15816700000004857,
+          "firstMiss": null
+        },
+        {
+          "haloWidths": 2,
+          "candidatePackets": 27,
+          "candidateLogicalBricks": 8,
+          "absentCandidateLogicalBricks": 0,
+          "selectedResidentCells": 1728,
+          "missedRequired": 0,
+          "missedForward": 0,
+          "selectionCpuMs": 0.11637500000006185,
+          "firstMiss": null
+        }
+      ],
+      "localVariants": [
+        {
+          "haloWidths": 0.5,
+          "candidatePackets": 12,
+          "candidateLogicalBricks": 8,
+          "absentCandidateLogicalBricks": 0,
+          "selectedResidentCells": 768,
+          "selectionCpuMs": 0.18095800000000395,
+          "missedRequired": 0,
+          "missedBackward": 0,
+          "missedForward": 0,
+          "missedGathered": 0,
+          "firstMiss": null
+        },
+        {
+          "haloWidths": 1,
+          "candidatePackets": 12,
+          "candidateLogicalBricks": 8,
+          "absentCandidateLogicalBricks": 0,
+          "selectedResidentCells": 768,
+          "selectionCpuMs": 0.07912500000000477,
+          "missedRequired": 0,
+          "missedBackward": 0,
+          "missedForward": 0,
+          "missedGathered": 0,
+          "firstMiss": null
+        },
+        {
+          "haloWidths": 2,
+          "candidatePackets": 27,
+          "candidateLogicalBricks": 8,
+          "absentCandidateLogicalBricks": 0,
+          "selectedResidentCells": 1728,
+          "selectionCpuMs": 0.11899999999999977,
+          "missedRequired": 0,
+          "missedBackward": 0,
+          "missedForward": 0,
+          "missedGathered": 0,
+          "firstMiss": null
+        }
+      ]
+    },
+    {
+      "step": 8,
+      "time_s": 0.26666666666666666,
+      "topologyGeneration": 4,
+      "acceptedCells": 4352,
+      "residentLogicalBricks": 12,
+      "nonzeroSourceCells": 132,
+      "maxWidthFineCells": 2,
+      "maxSourceVelocityFineCells_s": [
+        0.000007769556759740226,
+        46.66667556762695,
+        0.000008281940608867444
+      ],
+      "maxObservedDepartureFineCells": [
+        0,
+        1.5555572509765625,
+        0
+      ],
+      "tracedPacketCells": 4352,
+      "backwardPotentialReceivers": 164,
+      "forwardReturnReceivers": 20,
+      "forwardOnlyReceivers": 0,
+      "gatheredNonzeroReceivers": 164,
+      "requiredUnion": 164,
+      "requiredPackets": 16,
+      "requiredLogicalBricks": 12,
+      "variants": [
+        {
+          "haloWidths": 1,
+          "candidatePackets": 80,
+          "candidateLogicalBricks": 12,
+          "absentCandidateLogicalBricks": 0,
+          "selectedResidentCells": 3328,
+          "missedRequired": 0,
+          "missedForward": 0,
+          "selectionCpuMs": 0.3582079999996495,
+          "firstMiss": null
+        },
+        {
+          "haloWidths": 2,
+          "candidatePackets": 96,
+          "candidateLogicalBricks": 12,
+          "absentCandidateLogicalBricks": 0,
+          "selectedResidentCells": 4352,
+          "missedRequired": 0,
+          "missedForward": 0,
+          "selectionCpuMs": 0.8190830000003189,
+          "firstMiss": null
+        }
+      ],
+      "localVariants": [
+        {
+          "haloWidths": 0.5,
+          "candidatePackets": 16,
+          "candidateLogicalBricks": 12,
+          "absentCandidateLogicalBricks": 0,
+          "selectedResidentCells": 800,
+          "selectionCpuMs": 0.16270800000000918,
+          "missedRequired": 0,
+          "missedBackward": 0,
+          "missedForward": 0,
+          "missedGathered": 0,
+          "firstMiss": null
+        },
+        {
+          "haloWidths": 1,
+          "candidatePackets": 35,
+          "candidateLogicalBricks": 12,
+          "absentCandidateLogicalBricks": 0,
+          "selectedResidentCells": 1232,
+          "selectionCpuMs": 0.21875,
+          "missedRequired": 0,
+          "missedBackward": 0,
+          "missedForward": 0,
+          "missedGathered": 0,
+          "firstMiss": null
+        },
+        {
+          "haloWidths": 2,
+          "candidatePackets": 73,
+          "candidateLogicalBricks": 12,
+          "absentCandidateLogicalBricks": 0,
+          "selectedResidentCells": 2880,
+          "selectionCpuMs": 0.3006249999999966,
+          "missedRequired": 0,
+          "missedBackward": 0,
+          "missedForward": 0,
+          "missedGathered": 0,
+          "firstMiss": null
+        }
+      ]
+    },
+    {
+      "step": 24,
+      "time_s": 0.8,
+      "topologyGeneration": 13,
+      "acceptedCells": 14624,
+      "residentLogicalBricks": 36,
+      "nonzeroSourceCells": 584,
+      "maxWidthFineCells": 4,
+      "maxSourceVelocityFineCells_s": [
+        0.0000034366673844488105,
+        153.3333282470703,
+        0.0000034278164093848318
+      ],
+      "maxObservedDepartureFineCells": [
+        0,
+        5.111114501953125,
+        0
+      ],
+      "tracedPacketCells": 14624,
+      "backwardPotentialReceivers": 584,
+      "forwardReturnReceivers": 124,
+      "forwardOnlyReceivers": 48,
+      "gatheredNonzeroReceivers": 632,
+      "requiredUnion": 632,
+      "requiredPackets": 66,
+      "requiredLogicalBricks": 36,
+      "variants": [
+        {
+          "haloWidths": 1,
+          "candidatePackets": 572,
+          "candidateLogicalBricks": 120,
+          "absentCandidateLogicalBricks": 84,
+          "selectedResidentCells": 14624,
+          "missedRequired": 0,
+          "missedForward": 0,
+          "selectionCpuMs": 5.521041999999852,
+          "firstMiss": null
+        },
+        {
+          "haloWidths": 2,
+          "candidatePackets": 1260,
+          "candidateLogicalBricks": 192,
+          "absentCandidateLogicalBricks": 156,
+          "selectedResidentCells": 14624,
+          "missedRequired": 0,
+          "missedForward": 0,
+          "selectionCpuMs": 17.20862500000021,
+          "firstMiss": null
+        }
+      ],
+      "localVariants": [
+        {
+          "haloWidths": 0.5,
+          "candidatePackets": 124,
+          "candidateLogicalBricks": 36,
+          "absentCandidateLogicalBricks": 0,
+          "selectedResidentCells": 4800,
+          "selectionCpuMs": 0.8549160000000029,
+          "missedRequired": 0,
+          "missedBackward": 0,
+          "missedForward": 0,
+          "missedGathered": 0,
+          "firstMiss": null
+        },
+        {
+          "haloWidths": 1,
+          "candidatePackets": 229,
+          "candidateLogicalBricks": 55,
+          "absentCandidateLogicalBricks": 19,
+          "selectedResidentCells": 6944,
+          "selectionCpuMs": 0.789999999999992,
+          "missedRequired": 0,
+          "missedBackward": 0,
+          "missedForward": 0,
+          "missedGathered": 0,
+          "firstMiss": null
+        },
+        {
+          "haloWidths": 2,
+          "candidatePackets": 507,
+          "candidateLogicalBricks": 88,
+          "absentCandidateLogicalBricks": 52,
+          "selectedResidentCells": 11808,
+          "selectionCpuMs": 1.3935840000000042,
+          "missedRequired": 0,
+          "missedBackward": 0,
+          "missedForward": 0,
+          "missedGathered": 0,
+          "firstMiss": null
+        }
+      ]
+    },
+    {
+      "step": 32,
+      "time_s": 1.0666666666666667,
+      "topologyGeneration": 20,
+      "acceptedCells": 14624,
+      "residentLogicalBricks": 36,
+      "nonzeroSourceCells": 700,
+      "maxWidthFineCells": 4,
+      "maxSourceVelocityFineCells_s": [
+        0.0002867725561372936,
+        100.74208068847656,
+        0.0002867824805434793
+      ],
+      "maxObservedDepartureFineCells": [
+        0.00000762939453125,
+        3.1328125,
+        0.00000762939453125
+      ],
+      "tracedPacketCells": 14624,
+      "backwardPotentialReceivers": 898,
+      "forwardReturnReceivers": 2,
+      "forwardOnlyReceivers": 0,
+      "gatheredNonzeroReceivers": 898,
+      "requiredUnion": 898,
+      "requiredPackets": 80,
+      "requiredLogicalBricks": 32,
+      "variants": [
+        {
+          "haloWidths": 1,
+          "candidatePackets": 604,
+          "candidateLogicalBricks": 124,
+          "absentCandidateLogicalBricks": 88,
+          "selectedResidentCells": 14624,
+          "missedRequired": 0,
+          "missedForward": 0,
+          "selectionCpuMs": 5.078958999999941,
+          "firstMiss": null
+        },
+        {
+          "haloWidths": 2,
+          "candidatePackets": 1428,
+          "candidateLogicalBricks": 240,
+          "absentCandidateLogicalBricks": 204,
+          "selectedResidentCells": 14624,
+          "missedRequired": 0,
+          "missedForward": 0,
+          "selectionCpuMs": 15.827458000000206,
+          "firstMiss": null
+        }
+      ],
+      "localVariants": [
+        {
+          "haloWidths": 0.5,
+          "candidatePackets": 128,
+          "candidateLogicalBricks": 36,
+          "absentCandidateLogicalBricks": 0,
+          "selectedResidentCells": 5056,
+          "selectionCpuMs": 0.2900410000000022,
+          "missedRequired": 4,
+          "missedBackward": 4,
+          "missedForward": 0,
+          "missedGathered": 4,
+          "firstMiss": {
+            "id": 33820,
+            "center": [
+              64.5,
+              -20.5,
+              63.5
+            ],
+            "width": [
+              1,
+              1,
+              1
+            ],
+            "rho": 0,
+            "velocity": [
+              0,
+              -6.6666669845581055,
+              0
+            ]
+          }
+        },
+        {
+          "haloWidths": 1,
+          "candidatePackets": 223,
+          "candidateLogicalBricks": 55,
+          "absentCandidateLogicalBricks": 19,
+          "selectedResidentCells": 6560,
+          "selectionCpuMs": 0.45216699999997445,
+          "missedRequired": 0,
+          "missedBackward": 0,
+          "missedForward": 0,
+          "missedGathered": 0,
+          "firstMiss": null
+        },
+        {
+          "haloWidths": 2,
+          "candidatePackets": 505,
+          "candidateLogicalBricks": 104,
+          "absentCandidateLogicalBricks": 68,
+          "selectedResidentCells": 10144,
+          "selectionCpuMs": 0.891541999999987,
+          "missedRequired": 0,
+          "missedBackward": 0,
+          "missedForward": 0,
+          "missedGathered": 0,
+          "firstMiss": null
+        }
+      ]
+    }
+  ]
+}

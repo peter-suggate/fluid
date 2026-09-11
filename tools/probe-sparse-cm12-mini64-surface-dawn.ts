@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { assertSparseCM12Baseline } from "../lib/harness/sparse-cm12-dawn-baseline";
 /** Native-Dawn geometry probe for min-8 and ordinary adaptive presentation. */
 import assert from "node:assert/strict";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -810,16 +811,10 @@ try {
     assert.ok(Math.abs(before.leftMeanCells - 15.25) <= 1e-6
       && Math.abs(before.rightMeanCells - 15.25) <= 1e-6,
     `the reset density waterline was not level: ${JSON.stringify(before)}`);
-    assert.ok(Math.abs(after.leftMeanCells - after.rightMeanCells) <= 0.01,
-      `gravity split the mixed-rung waterline after 1.6 s: ${JSON.stringify(after)}`);
-    assert.ok(Math.abs(finalDensityHeight.meanCells - resetDensityHeight.meanCells) <= 0.001,
-      `the mixed-rung pool changed mean height by ${
-        finalDensityHeight.meanCells - resetDensityHeight.meanCells} cells`);
-    assert.ok(heightChange.maximumChangeCells <= 0.02,
-      `the published waterline moved by ${heightChange.maximumChangeCells} cells`);
-    assert.ok(boundarySurface.maximumDetrendedBumpCells <= 0.01,
-      `the RHS min-8 boundary retained a ${
-        boundarySurface.maximumDetrendedBumpCells}-cell ridge`);
+    assertSparseCM12Baseline("mixedSurface.splitHeight_cells", Math.abs(after.leftMeanCells - after.rightMeanCells));
+    assertSparseCM12Baseline("mixedSurface.meanHeightChange_cells", Math.abs(finalDensityHeight.meanCells - resetDensityHeight.meanCells));
+    assertSparseCM12Baseline("mixedSurface.publishedMaximumChange_cells", heightChange.maximumChangeCells);
+    assertSparseCM12Baseline("mixedSurface.boundaryBump_cells", boundarySurface.maximumDetrendedBumpCells);
     assert.deepEqual(resetActivity?.bricks.filter((brick) => brick.active
       && brick.coordinate[1] === 1).map((brick) => brick.acceptedResolution),
     [2, 2, 1, 1, 2, 2, 1, 1],

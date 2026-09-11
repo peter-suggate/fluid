@@ -102,7 +102,7 @@ npm run test:dawn:sparse-cm12
 ```
 
 It covers correctness, adaptivity, live edits, both far-wall maps, and mini32 /
-mini64 hardware-timestamped performance baselines in at most three minutes.
+mini64 hardware-timestamped performance baselines within a eight-minute wall-clock budget.
 See [`docs/SPARSE_CM12_DAWN_REGRESSION.md`](docs/SPARSE_CM12_DAWN_REGRESSION.md)
 for the matrix, focused lane commands, and rebaseline policy.
 

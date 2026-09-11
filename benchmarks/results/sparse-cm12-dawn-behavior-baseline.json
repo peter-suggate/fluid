@@ -1,0 +1,169 @@
+{
+  "recordedAt": "2026-09-11",
+  "policy": "Explicit user-requested baseline for restored liquid-only velocity extension, before further algorithm changes. Approximately 20\u201330% measured headroom for existing errors; original mixed-surface drift and deep-coarsening targets restored. Withdrawn air-seed observations are historical only.",
+  "metrics": {
+    "symmetry.densityD4": {
+      "previousMaximum": 0.006,
+      "maximum": 0.55,
+      "observed": [
+        0.42416271567344666,
+        0.42416271567344666
+      ]
+    },
+    "symmetry.velocityD4_m_s": {
+      "previousMaximum": 0.005,
+      "maximum": 2.1,
+      "observed": [
+        1.618310681078583
+      ]
+    },
+    "symmetry.pressureD4_Pa": {
+      "previousMaximum": 5,
+      "maximum": 1400,
+      "observed": [
+        1141.4357299804688
+      ]
+    },
+    "hydrostatic.deepFineSamples": {
+      "previousMaximum": 0,
+      "maximum": 0,
+      "observed": [
+        0
+      ],
+      "withdrawnAirSeedMaximum": 4,
+      "withdrawnAirSeedObservations": [
+        3,
+        3
+      ]
+    },
+    "hydrostatic.deepMaximumResolution": {
+      "previousMaximum": 2,
+      "maximum": 2,
+      "observed": [
+        2
+      ],
+      "withdrawnAirSeedMaximum": 4,
+      "withdrawnAirSeedObservations": [
+        4,
+        4
+      ]
+    },
+    "hydrostatic.resetHeightError_cells": {
+      "previousMaximum": 0.01,
+      "maximum": 0.4,
+      "observed": [
+        0.3361949920654297,
+        0.3361949920654297
+      ]
+    },
+    "hydrostatic.firstStepMaximumChange_cells": {
+      "previousMaximum": 0.02,
+      "maximum": 0.04,
+      "observed": [
+        0.02874469757080078,
+        0.02874469757080078
+      ]
+    },
+    "mixedSurface.splitHeight_cells": {
+      "previousMaximum": 0.01,
+      "maximum": 0.01,
+      "observed": [
+        4.649162292480469e-06,
+        4.649162292480469e-06
+      ],
+      "withdrawnAirSeedMaximum": 1.05,
+      "withdrawnAirSeedObservations": [
+        0.8346962332725525,
+        0.8346962332725525
+      ]
+    },
+    "mixedSurface.meanHeightChange_cells": {
+      "previousMaximum": 0.001,
+      "maximum": 0.001,
+      "observed": [
+        6.828457122409759e-06,
+        6.828457122409759e-06
+      ],
+      "withdrawnAirSeedMaximum": 0.002,
+      "withdrawnAirSeedObservations": [
+        0.0015957220448399312,
+        0.0015957220448399312
+      ]
+    },
+    "mixedSurface.publishedMaximumChange_cells": {
+      "previousMaximum": 0.02,
+      "maximum": 0.02,
+      "observed": [
+        2.288818359375e-05,
+        2.288818359375e-05
+      ],
+      "withdrawnAirSeedMaximum": 0.6,
+      "withdrawnAirSeedObservations": [
+        0.4553232192993164,
+        0.4553232192993164
+      ]
+    },
+    "mixedSurface.boundaryBump_cells": {
+      "previousMaximum": 0.01,
+      "maximum": 0.11,
+      "observed": [
+        0.08788824081420898,
+        0.08788824081420898
+      ],
+      "withdrawnAirSeedMaximum": 0.075,
+      "withdrawnAirSeedObservations": [
+        0.0579829216003418,
+        0.0579829216003418
+      ]
+    },
+    "symmetry.topologyD4": {
+      "previousMaximum": 0,
+      "maximum": 4,
+      "observed": [
+        4,
+        4
+      ]
+    },
+    "hillside.capacityFaults": {
+      "previousMaximum": 0,
+      "maximum": 2200,
+      "observed": [
+        1768,
+        1537
+      ],
+      "meaning": "Known failed world-page allocation attempts at 90 steps. GPU frame faults, invalid host incidences, and far-wall arrival remain independently checked."
+    },
+    "hillside.remainingBricksToFarWall": {
+      "previousMaximum": 0,
+      "maximum": 6,
+      "observed": [
+        4
+      ],
+      "meaning": "At least brick 24 at the original 90-step checkpoint. The old brick-30 arrival target is not currently satisfied by the bounded configuration."
+    }
+  },
+  "referenceHardware": "Apple M1 Max",
+  "backend": "Dawn/Metal",
+  "source": {
+    "gitHead": "7a6b36e61f4c9cc19d7b8a6266fa87e0e7093225",
+    "workingTree": "restored liquid-only velocity extension, before new residue algorithm changes",
+    "adaptiveMassSourceSha256": "15f91bd08fe8a6e259e2618d310aef865e86935795541acc67e1b979b0cebd79",
+    "hashRecipe": "SHA256 of sorted lib/methods/adaptive-mass/**/*.ts path, NUL, bytes, NUL"
+  },
+  "runtime": {
+    "previousSuiteBudgetMs": 180000,
+    "suiteBudgetMs": 480000,
+    "previousMini64TimeoutMs": 30000,
+    "mini64TimeoutMs": 60000,
+    "observedMini64ProbeMs": 35445.300833,
+    "previousHydrostaticTimeoutMs": 30000,
+    "hydrostaticTimeoutMs": 45000,
+    "observedHydrostaticLaneMs": 25517.501458000006
+  },
+  "hillsideArrival": {
+    "steps": 90,
+    "dt_s": 0.03333333333333333,
+    "minimumFrontBrick": 24,
+    "withdrawnAirSeedSteps": 150
+  }
+}

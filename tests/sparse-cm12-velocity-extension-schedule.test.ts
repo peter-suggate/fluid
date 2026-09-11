@@ -21,13 +21,13 @@ test("VEX cache is resident-bounded and disjoint from masks, depth, and transpor
     const initial = createSparseCM12VelocityExtensionInitialWords(layout);
     const at = (address: number) => address - layout.headerBaseWords;
     assert.equal(layout.scheduleBaseWords, layout.acceptedDepthBaseWords + 513);
-    assert.equal(layout.packetListBaseWords, layout.scheduleBaseWords + 8);
+    assert.equal(layout.packetListBaseWords, layout.scheduleBaseWords + 11);
     assert.equal(layout.totalWords, layout.packetListBaseWords + layout.dispatchPacketCount);
     assert.ok(initial.subarray(at(layout.acceptedDepthBaseWords),
       at(layout.scheduleBaseWords)).every(value => value === 0xffff_ffff));
     assert.equal(initial[at(layout.scheduleBaseWords)], 0xffff_ffff);
     assert.equal(initial[at(layout.scheduleBaseWords) + 2], 0);
-    assert.equal(initial[at(layout.scheduleBaseWords) + 7], 0xffff_ffff);
+    assert.equal(initial[at(layout.scheduleBaseWords) + 10], 0xffff_ffff);
     const transport = createSparseCM12TransportPacketAuthorityLayout({
       baseWords: Math.ceil(layout.totalWords / 64) * 64,
       packetCapacity: layout.packetCapacity,
@@ -64,11 +64,11 @@ test("cached VEX rebuilds at topology changes and preserves empty and retired-pa
   const source = createSparseCM12VelocityExtensionWGSL({ layout, cacheAcceptedPackets: true });
   const cache = source.slice(source.indexOf("fn beginSparseCM12VelocityExtensionSchedule"),
     source.indexOf("fn cm12ExtensionExpectedMask"));
-  assert.match(cache, /CM12_VEX_SCHEDULE\+7u\)!=acceptedTopologySlot\(\)/);
+  assert.match(cache, /CM12_VEX_SCHEDULE\+10u\)!=acceptedTopologySlot\(\)/);
   assert.match(cache, /CM12_VEX_SCHEDULE\+1u\)==0u\)\{return;/);
   assert.match(cache, /acceptedLeafInvocation\(gid.x\)/);
-  assert.match(cache, /cm12ExtensionLoad\(CM12_VEX_SCHEDULE\+1u\)==0u\s*&&/,
-    "rebuild frames must execute the full direct domain to clear retired masks");
+  assert.match(cache, /initialCompact=compact&&cm12ExtensionLoad\(CM12_VEX_SCHEDULE\+1u\)==0u/);
+  assert.match(cache, /sweepGroups=max\(1u,select\(cm12ExtensionDispatchPacketCount,count,compact\)\)/);
   assert.match(cache, /cm12ExtensionDispatchPacketCount-cm12ExtensionDispatchPacketCount\/4u/);
   assert.doesNotMatch(cache, /CM12_TPA_|cm12TransportPacketOrdinal/);
   assert.match(source, /dispatchOrdinal=wid.x\+cm12ExtensionDispatchWidth\*wid.y/);
@@ -76,6 +76,6 @@ test("cached VEX rebuilds at topology changes and preserves empty and retired-pa
   assert.match(sweep, /if\(packet==cm12ExtensionInvalid\)\{\s*cm12ExtensionPublishFrameReceipt\(dispatchOrdinal,lane\);return;/);
   const resident = readFileSync(new URL(
     "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts", import.meta.url), "utf8");
-  assert.match(resident, /scheduleBaseWords \+ 4\),\s*this.transportPacketIndirectArguments!, 12, 12/);
-  assert.match(resident, /dispatchWorkgroupsIndirect\(this.transportPacketIndirectArguments!, 12\)/);
+  assert.match(resident, /scheduleBaseWords \+ 4\),\s*this.transportPacketIndirectArguments!, 0, 24/);
+  assert.match(resident, /dispatchWorkgroupsIndirect\(this.transportPacketIndirectArguments!, offset\)/);
 });

@@ -584,9 +584,6 @@ fn authorizeEmptySparseCM12CandidateEffectsNoFail(acceptedGeneration:u32)->bool{
   const persistentPressureCacheEntries = createSparseCM12PersistentPressureCacheWGSL({
       layout: persistentPressureCacheLayout,
       arenaName: "topologyArena",
-      cellContainsFunction: "pcmCellContains",
-      rowContainsFunction: "pcmRowContains",
-      solidRowScaleFunction: "pcfResidentSolidRowScale",
       ordinaryEdgeStorage: {
         arrayName: "candidateState",
         baseWords: pressureFineEdgeImageBaseWords!,
@@ -702,9 +699,8 @@ fn cm12ISAAppendClosureLeaf(leaf:u32){
   atomicXor(&topologyArena[ISA1_AUTHORITY_BASE+5u],mixed);
   atomicAdd(&topologyArena[ISA1_AUTHORITY_BASE+6u],mixed*0x85ebca6bu);
 }
+fn cm12ISARowTermRange(row:u32)->vec2u{return rowTermRange(row);}
 fn cm12ISARowWord(row:u32,plane:u32)->u32{return ta(rowWord(row,plane));}
-fn cm12ISARowTermFirst(row:u32)->u32{return rowTermOffset(row);}
-fn cm12ISARowTermCount(row:u32)->u32{return rowTermCount(row);}
 fn cm12ISATermCell(term:u32)->u32{return termCell(term);}
 fn cm12ISATermBits(term:u32)->u32{return bitcast<u32>(termCoefficient(term));}
 fn cm12ISACandidateFaceRange(descriptor:u32,side:u32,boundary:u32)->vec2u{
@@ -1034,176 +1030,6 @@ ${createSparseCM12IboTRASupplementWGSL({
   cm12IBOStore(IBO1_BASE+2u,slot);
   cm12IBOStore(IBO1_BASE+3u,atomicLoad(&topologyArena[base+1u]));
 ` : "";
-  // Both owner-query QA lanes exercise the production interpolation geometry.
-  // Only the lookup implementation changes in the sharpening arithmetic lane.
-  const geometricTransportStencil = /* wgsl */ `fn effectiveTransportStencilAtSpansMode(
- position:vec3f,inputSpans:vec3f,direct:bool)->TransportStencil{
-  // The dual cell of a primal vertex has the eight incident cell centres as
-  // its nodes. At a T-junction some nodes coincide: the same map becomes a
-  // wedge or pyramid. Invert that geometric trilinear map, then use its
-  // positive shape functions for the conservative donor coefficients.
-  // Interpolating on a fictitious regular lattice and substituting owners
-  // loses the first moment and creates a finite dead zone in coarse cells.
-  let bounded=cm12ClampToResidentWorld(position,vec3f(1e-4));
-  let probe=cm12TransportOwnerAtFine(vec3i(floor(bounded)),direct).cell;
-  var spans=max(vec3f(1.0),inputSpans);var center=vec3f(0.0);
-  if(probe!=INVALID){spans=cellWidths(probe);center=cellCenter(probe);}
-  let samplePosition=bounded;
-  var result:TransportStencil;
-  var vertex=spans*floor(samplePosition/spans+vec3f(0.5));
-  if(probe!=INVALID){vertex=center+select(-0.5*spans,0.5*spans,samplePosition>=center);}
-  // Accepted macro-cell junctions can border many finer vertices. Budget
-  // their traversal in finest-cell units, rather than assuming eight hops
-  // cover every physical width ratio. The ordinary path still returns early.
-  let initialVertex=vertex;
-  // Preserve every successful ordinary stencil, including its floating-point
-  // weights. Only an unlocated query needs the safeguarded wider search.
-  for(var search=0u;search<2u;search+=1u){
-  vertex=initialVertex;
-  let walkLimit=select(8u,8u+u32(spans.x+spans.y+spans.z),search!=0u);
-  let iterationLimit=select(8u,16u,search!=0u);
-  for(var walk=0u;walk<walkLimit;walk+=1u){
-    var nodes:array<vec3f,8>;var widths:array<vec3f,8>;var regular=true;
-    for(var corner=0u;corner<8u;corner+=1u){
-      let offset=vec3f(f32(corner&1u),f32((corner>>1u)&1u),f32((corner>>2u)&1u));
-      let regularNode=vertex+(offset-vec3f(0.5))*spans;
-      let rawQuery=vertex+offset-vec3f(0.5);
-      let q=cm12ClampToResidentWorld(rawQuery,vec3f(1e-4));
-      let donor=cm12TransportOwnerAtFine(vec3i(floor(q)),direct).cell;
-      var node=regularNode;var width=spans;
-      if(donor!=INVALID){node=cellCenter(donor);width=cellWidths(donor);
-        // Mirror geometric ghost centres across the physical world boundary,
-        // retaining the interior donor value (homogeneous Neumann extension).
-        // Clamping both geometry and ownership collapses the wall's dual
-        // cells and leaves a gap where coarse and fine wall centres differ.
-        let boundary=cm12ClampToResidentWorld(rawQuery,vec3f(0.0));
-        node=select(node,2.0*boundary-node,rawQuery!=boundary);
-      }
-      nodes[corner]=node-samplePosition;widths[corner]=width;
-      regular=regular&&all(node==regularNode);
-      result.cells[corner]=select(INVALID,donor,
-        donor!=INVALID&&cellTransportActive(donor));
-    }
-    // The basis is exactly cardinal at an actual cell centre. Preserve this
-    // identity algebraically, without tolerance-sized neighbour leakage at a
-    // wedge apex. Keep the surrounding cell IDs: zero-weight neighbours are
-    // still evidence for the existing characteristic-clearance certificate.
-    if(probe!=INVALID&&all(samplePosition==center)&&result.cells[0]==probe
-      &&all(nodes[0]==vec3f(0.0))){
-      for(var corner=0u;corner<8u;corner+=1u){result.weights[corner]=0.0;}
-      result.weights[0]=1.0;return result;
-    }
-    var t=(samplePosition-vertex)/spans+vec3f(0.5);var locationParameter=t;
-    if(!regular){
-      t=vec3f(0.5);
-      var bestResidual=1e30;var bestExit=t;var converged=false;
-      // Near a collapsed corner Newton converges linearly; eight steps
-      // can leave a valid near-nodal query above the first-moment tolerance.
-      for(var iteration=0u;iteration<iterationLimit;iteration+=1u){
-        var residual=vec3f(0.0);var dx=vec3f(0.0);
-        var dy=vec3f(0.0);var dz=vec3f(0.0);
-        for(var corner=0u;corner<8u;corner+=1u){
-          let upper=vec3<bool>((corner&1u)!=0u,(corner&2u)!=0u,(corner&4u)!=0u);
-          let f=select(vec3f(1.0)-t,t,upper);
-          residual+=f.x*f.y*f.z*nodes[corner];
-          // Form edge differences before weighting. At a narrow wedge most
-          // nodes repeat; summing their signed positions cancels a tiny but
-          // nonzero derivative and falsely makes the Jacobian singular.
-          if((corner&1u)==0u){dx+=f.y*f.z*(nodes[corner|1u]-nodes[corner]);}
-          if((corner&2u)==0u){dy+=f.x*f.z*(nodes[corner|2u]-nodes[corner]);}
-          if((corner&4u)==0u){dz+=f.x*f.y*(nodes[corner|4u]-nodes[corner]);}
-        }
-        if(max(abs(residual.x),max(abs(residual.y),abs(residual.z)))<2e-7){locationParameter=t;converged=true;break;}
-        let determinant=dot(dx,cross(dy,dz));
-        if(abs(determinant)<1e-12){break;}
-        locationParameter=t-vec3f(dot(residual,cross(dy,dz)),dot(dx,cross(residual,dz)),
-          dot(dx,cross(dy,residual)))/determinant;
-        let residualSquared=dot(residual,residual);
-        if(residualSquared<bestResidual){bestResidual=residualSquared;bestExit=locationParameter;}
-        // A trilinear map can fold outside its positive parameter cube. Keep
-        // Newton inside that cube and retain its attempted exit for the
-        // locator; extrapolated polynomial roots are not physical dual cells.
-        // Keep iterates off singular wedge/pyramid edges; the final shape
-        // functions below use the unrestricted solved parameter, with no
-        // positive weight floor or interpolation bias.
-        t=clamp(locationParameter,vec3f(1e-5),vec3f(1.0-1e-5));
-      }
-      // A projected Newton orbit can cycle at a wide rung junction. Its last
-      // proposal can be inside the cube despite a large geometric residual.
-      // Retain the exit from the closest iterate so the primal-vertex walk
-      // can continue instead of mistaking that final proposal for convergence.
-      // Solved roots and the final positive first-moment check are unchanged.
-      if(search!=0u&&!converged&&(any(bestExit<vec3f(-1e-6))||any(bestExit>vec3f(1.000001)))){
-        // The final Newton proposal may already satisfy the publication
-        // tolerance even when the stricter iteration stop was not reached.
-        // Preserve that valid root; use the alternate exit only on failure.
-        let candidate=clamp(locationParameter,vec3f(0.0),vec3f(1.0));
-        var residual=vec3f(0.0);
-        for(var corner=0u;corner<8u;corner+=1u){
-          let f=select(vec3f(1.0)-candidate,candidate,
-            vec3<bool>((corner&1u)!=0u,(corner&2u)!=0u,(corner&4u)!=0u));
-          residual+=f.x*f.y*f.z*nodes[corner];
-        }
-        if(any(abs(residual)>vec3f(2e-6)*max(vec3f(1.0),spans))){locationParameter=bestExit;}
-      }
-    }
-    let outside=select(vec3f(0.0),vec3f(-1.0),locationParameter<vec3f(-1e-6))
-      +select(vec3f(0.0),vec3f(1.0),locationParameter>vec3f(1.000001));
-    if(any(outside!=vec3f(0.0))){
-      // Cross actual primal cell boundaries on the side being exited. The
-      // finest width among all incident cells can belong to the opposite
-      // side; stepping by it creates a non-vertex and a degenerate dual cell.
-      var distance=vec3f(1e30);
-      for(var corner=0u;corner<8u;corner+=1u){
-        let sign=select(vec3f(-1.0),vec3f(1.0),
-          vec3<bool>((corner&1u)!=0u,(corner&2u)!=0u,(corner&4u)!=0u));
-        if(any(outside*sign<vec3f(0.0))){continue;}
-        let node=nodes[corner]+samplePosition;
-        let edge=node+0.5*outside*widths[corner];
-        let delta=outside*(edge-vertex);
-        distance=min(distance,select(vec3f(1e30),delta,delta>vec3f(1e-6)));
-      }
-      if(all(distance*abs(outside)<vec3f(1e20))){
-        vertex+=outside*select(distance,vec3f(0.0),outside==vec3f(0.0));continue;
-      }
-      break;
-    }
-    t=clamp(locationParameter,vec3f(0.0),vec3f(1.0));
-    var geometricResidual=vec3f(0.0);
-    for(var corner=0u;corner<8u;corner+=1u){
-      let f=select(vec3f(1.0)-t,t,
-        vec3<bool>((corner&1u)!=0u,(corner&2u)!=0u,(corner&4u)!=0u));
-      let weight=f.x*f.y*f.z;
-      geometricResidual+=weight*nodes[corner];
-      result.weights[corner]=select(0.0,weight,result.cells[corner]!=INVALID);
-    }
-    // An in-range parameter is insufficient if Newton stopped at a singular
-    // map or did not converge. Check the first moment before publishing it.
-    if(all(abs(geometricResidual)<=vec3f(2e-6)*max(vec3f(1.0),spans))){return result;}
-    break;
-  }
-  }
-  // Refuse an unlocatable dual cell instead of hiding it with extrapolation
-  // or donor self-return. This is a geometry failure, not lost sparse support.
-  cm12RecordFailure(5u,probe,vec4u(bitcast<vec3u>(position),0u));
-  for(var corner=0u;corner<8u;corner+=1u){result.cells[corner]=INVALID;result.weights[corner]=0.0;}
-  return result;
-}
-`;
-  const relativeTransportStencil = geometricTransportStencil
-    .replace("fn effectiveTransportStencilAtSpansMode(", "fn relativeTransportStencilAtSpansMode(")
-    .replace("position:vec3f,inputSpans:vec3f,direct:bool)", "position:vec3f,inputSpans:vec3f,direct:bool,origin:vec3f)")
-    .replaceAll("cm12ClampToResidentWorld(", "clampRelativeTransportPosition(origin,")
-    .replaceAll("vec3i(floor(bounded))", "vec3i(floor(bounded+origin))")
-    .replaceAll("vec3i(floor(q))", "vec3i(floor(q+origin))")
-    .replaceAll("center=cellCenter(probe)", "center=cellCenter(probe)-origin")
-    .replaceAll("node=cellCenter(donor)", "node=cellCenter(donor)-origin")
-    .replace("spans*floor(samplePosition/spans+vec3f(0.5))", "spans*floor((samplePosition+origin)/spans+vec3f(0.5))-origin")
-    .replace("let weight=f.x*f.y*f.z;", "let basis=select(f,max(vec3f(0.0),vec3f(1.0)-abs(nodes[corner])/spans),regular);let weight=basis.x*basis.y*basis.z;");
-  const implicitSharpeningGeometry = geometricTransportStencil
-    .replace("fn effectiveTransportStencilAtSpansMode(",
-      "fn effectiveImplicitSharpeningGeometryAtSpansMode(")
-    .replaceAll("cm12TransportOwnerAtFine(", "cm12ImplicitSharpeningGeometryOwnerAtFine(");
   return guardCM12SimulationDispatches(/* wgsl */ `
 ${createCm12NumericsWGSL()}
 ${cm12SimulationFailureWGSL}
@@ -1715,9 +1541,10 @@ fn rowArea(id:u32)->f32{
 // Scalar traces remain clipped at the solid; only the separating face is free.
 fn rowSeparatingFromClosedWorldState(row:u32,densityOffset:u32,
  velocityOffset:u32)->bool{
-  if(!hasSolidBoundaries()||rowKind(row)!=3u
-    ||rowTermCount(row)!=1u||rowOpenFraction(row)>1e-8){return false;}
-  let term=rowTermOffset(row);let cell=termCell(term);
+  if(!hasSolidBoundaries()||rowKind(row)!=3u){return false;}
+  let range=rowTermRange(row);
+  if(range.y-range.x!=1u||rowOpenFraction(row)>1e-8){return false;}
+  let term=range.x;let cell=termCell(term);
   if(!cellTransportActive(cell)
     ||max(state[sourceDensity()+cell],state[densityOffset+cell])
       <=CM12_LIQUID_ISOVALUE){return false;}
@@ -2308,19 +2135,37 @@ fn clearSparseCM12RetiredFaceVelocitySupport(@builtin(workgroup_id)wid:vec3u,
 }
 
 fn sampleFaceVelocitySupport(position:vec3f)->vec3f{
-  return sampleFaceVelocitySupportAtSpans(position,vec3f(1.0));
+  // FACE_VELOCITY_SUPPORT represents the finest lattice through cell owners.
+  // Choosing interpolation spacing from the point owner makes the field jump
+  // when an RK2 departure crosses a 2:1 seam: an infinitesimal move changes
+  // the complete stencil from scale one to scale two. Use the cache's actual
+  // unit lattice, matching sampleEffectiveTransportVelocity below.
+  let spans=vec3f(1.0);
+  let clamped=clamp(position,0.5*spans,vec3f(p.dimensions.xyz)-0.5*spans);
+  let shifted=clamped/spans-vec3f(0.5);let lower=vec3i(floor(shifted));
+  let fraction=fract(shifted);var result=vec3f(0.0);
+  for(var dz=0;dz<2;dz+=1){for(var dy=0;dy<2;dy+=1){for(var dx=0;dx<2;dx+=1){
+    let lattice=spans*(vec3f(lower+vec3i(dx,dy,dz))+vec3f(0.5));
+    let value=faceVelocitySupportAt(vec3i(floor(lattice)));if(!value.owner){continue;}
+    let wx=select(1.0-fraction.x,fraction.x,dx==1);
+    let wy=select(1.0-fraction.y,fraction.y,dy==1);
+    let wz=select(1.0-fraction.z,fraction.z,dz==1);
+    result+=wx*wy*wz*value.velocity;
+  }}}return result;
 }
 fn sampleFaceVelocitySupportAtSpans(position:vec3f,spans:vec3f)->vec3f{
-  // The cache is cell-indexed. Use the same physical cell-centre geometry as
-  // scalar characteristics, while reading the frozen face-stage velocity.
-  let stencil=effectiveTransportStencilAtSpansMode(position,spans,true);
-  var result=vec3f(0.0);var visible=0.0;
-  for(var corner=0u;corner<8u;corner+=1u){let cell=stencil.cells[corner];
-    if(cell==INVALID){continue;}
-    let at=FACE_VELOCITY_SUPPORT+4u*cell;let weight=stencil.weights[corner];
-    result+=weight*vec3f(state[at],state[at+1u],state[at+2u]);visible+=weight;
-  }
-  return result/max(visible,1e-9);
+  let clamped=clamp(position,0.5*spans,
+    vec3f(p.dimensions.xyz)-0.5*spans);
+  let shifted=clamped/spans-vec3f(0.5);let lower=vec3i(floor(shifted));
+  let fraction=fract(shifted);var result=vec3f(0.0);
+  for(var dz=0;dz<2;dz+=1){for(var dy=0;dy<2;dy+=1){for(var dx=0;dx<2;dx+=1){
+    let lattice=spans*(vec3f(lower+vec3i(dx,dy,dz))+vec3f(0.5));
+    let value=faceVelocitySupportAt(vec3i(floor(lattice)));if(!value.owner){continue;}
+    let wx=select(1.0-fraction.x,fraction.x,dx==1);
+    let wy=select(1.0-fraction.y,fraction.y,dy==1);
+    let wz=select(1.0-fraction.z,fraction.z,dz==1);
+    result+=wx*wy*wz*value.velocity;
+  }}}return result;
 }
 
 fn traceFaceDeparture(position:vec3f)->vec3f{
@@ -3159,14 +3004,24 @@ fn cm12TransportOwnerAtFine(q:vec3i,direct:bool)->CM12TransportOwner{
 }
 fn sampleEffectiveTransportVelocityAtSpansMode(
  position:vec3f,spansInput:vec3f,direct:bool)->vec3f{
-  let stencil=effectiveTransportStencilAtSpansMode(position,spansInput,direct);
-  var result=vec3f(0.0);var visible=0.0;
-  for(var corner=0u;corner<8u;corner+=1u){let cell=stencil.cells[corner];
+  // Hold the source control-volume lattice fixed for the complete RK2 trace.
+  // Re-selecting it from the point owner would jump at a 2:1 seam, while a
+  // hard-coded finest lattice creates a half-cell dead zone inside every
+  // coarse owner and changes the operator when the authored finest lattice is
+  // uniformly rescaled. Fixed source spans avoid both ambiguities.
+  let spans=max(vec3f(1.0),spansInput);
+  let clamped=cm12ClampToResidentWorld(position,0.5*spans);
+  let shifted=clamped/spans-vec3f(0.5);let lower=vec3i(floor(shifted));let fraction=fract(shifted);
+  var result=vec3f(0.0);
+  for(var dz=0;dz<2;dz+=1){for(var dy=0;dy<2;dy+=1){for(var dx=0;dx<2;dx+=1){
+    let lattice=spans*(vec3f(lower+vec3i(dx,dy,dz))+vec3f(0.5));
+    let owner=cm12TransportOwnerAtFine(vec3i(floor(lattice)),direct);let cell=owner.cell;
     if(cell==INVALID){continue;}
-    let weight=stencil.weights[corner];
-    result+=weight*cm12EffectiveTransportVelocity(cell).xyz;visible+=weight;
-  }
-  return result/max(visible,1e-9);
+    let wx=select(1.0-fraction.x,fraction.x,dx==1);
+    let wy=select(1.0-fraction.y,fraction.y,dy==1);
+    let wz=select(1.0-fraction.z,fraction.z,dz==1);
+    result+=wx*wy*wz*cm12EffectiveTransportVelocity(cell).xyz;
+  }}}return result;
 }
 
 fn sampleEffectiveTransportVelocityAtSpans(position:vec3f,spansInput:vec3f)->vec3f{
@@ -3179,7 +3034,7 @@ fn traceEffectiveTransportCharacteristicMode(
   // every subsequent segment uniformly, including spherical voxel shells.
   let initialPosition=position;
   let source=cm12TransportOwnerAtFine(vec3i(floor(initialPosition)),direct).cell;
-  let spans=transportSourceSamplingSpans(source,direct);
+  let spans=select(vec3f(1.0),cellWidths(source),source!=INVALID);
   let initial=sampleEffectiveTransportVelocityAtSpansMode(initialPosition,spans,direct);
   let substeps=clamp(i32(ceil(length(initial)*p.frame.x)),1,16);
   let subDt=p.frame.x/f32(substeps);var traced=initialPosition;
@@ -3193,57 +3048,6 @@ fn traceEffectiveTransportCharacteristicMode(
     traced=clipBoundarySegment(traced,cm12ClampToResidentWorld(candidate,vec3f(0.5)));
   }
   return traced;
-}
-// Keep displacement separate from the exact cell centre until donor weights
-// are evaluated. Forming a large absolute coordinate first discards different
-// low bits on opposite sides of the domain.
-fn clampRelativeTransportPosition(origin:vec3f,position:vec3f,padding:vec3f)->vec3f{
-  let lower=cm12WorldFineLower()-origin+padding;
-  let upper=cm12WorldFineUpper()-origin-padding;
-  return clamp(position,lower,max(lower,upper));
-}
-fn orderedScalarPair(a:f32,b:f32)->f32{return min(a,b)+max(a,b);}
-fn transportScalarSum(v:array<f32,8>)->f32{
- let a=orderedScalarPair(v[0],v[1]);let b=orderedScalarPair(v[2],v[3]);
- let c=orderedScalarPair(v[4],v[5]);let d=orderedScalarPair(v[6],v[7]);
- return orderedScalarPair(orderedScalarPair(a,b),orderedScalarPair(c,d));
-}
-fn orderedVectorPair(a:vec3f,b:vec3f)->vec3f{return min(a,b)+max(a,b);}
-fn transportVectorSum(v:array<vec3f,8>)->vec3f{
- let a=orderedVectorPair(v[0],v[1]);let b=orderedVectorPair(v[2],v[3]);
- let c=orderedVectorPair(v[4],v[5]);let d=orderedVectorPair(v[6],v[7]);
- return orderedVectorPair(orderedVectorPair(a,b),orderedVectorPair(c,d));
-}
-fn sampleRelativeTransportVelocity(origin:vec3f,position:vec3f,spans:vec3f,direct:bool)->vec3f{
-  let stencil=relativeTransportStencilAtSpansMode(position,spans,direct,origin);
-  var terms:array<vec3f,8>;var weights:array<f32,8>;
-  for(var corner=0u;corner<8u;corner+=1u){let cell=stencil.cells[corner];
-    if(cell!=INVALID){let weight=stencil.weights[corner];
-      terms[corner]=weight*cm12EffectiveTransportVelocity(cell).xyz;weights[corner]=weight;}}
-  return transportVectorSum(terms)/max(transportScalarSum(weights),1e-9);
-}
-struct TracedMassStencil{position:vec3f,stencil:TransportStencil}
-fn clipRelativeTransportSegment(origin:vec3f,start:vec3f,candidate:vec3f)->vec3f{
-  let absolute=origin+candidate;
-  let clipped=clipBoundarySegment(origin+start,absolute);
-  return select(clipped-origin,candidate,all(clipped==absolute));
-}
-fn traceMassStencil(cell:u32,direction:f32,direct:bool)->TracedMassStencil{
-  let origin=cellCenter(cell);let spans=transportSourceSamplingSpans(cell,direct);
-  var result:TracedMassStencil;
-  let initial=sampleRelativeTransportVelocity(origin,vec3f(0.0),spans,direct);
-  let substeps=clamp(i32(ceil(length(initial)*p.frame.x)),1,16);
-  let subDt=p.frame.x/f32(substeps);var displacement=vec3f(0.0);
-  for(var step=0;step<substeps;step+=1){
-    var first=initial;if(step>0){first=sampleRelativeTransportVelocity(origin,displacement,spans,direct);}
-    let midpoint=clipRelativeTransportSegment(origin,displacement,clampRelativeTransportPosition(origin,
-      displacement+direction*0.5*subDt*first,vec3f(0.5)));
-    displacement=clipRelativeTransportSegment(origin,displacement,clampRelativeTransportPosition(origin,displacement+direction*subDt
-      *sampleRelativeTransportVelocity(origin,midpoint,spans,direct),vec3f(0.5)));
-  }
-  result.position=origin+displacement;
-  result.stencil=relativeTransportStencilAtSpansMode(displacement,spans,direct,origin);
-  return result;
 }
 fn traceEffectiveTransportDeparture(position:vec3f)->vec3f{
   return traceEffectiveTransportCharacteristicMode(position,-1.0,false);}
@@ -3262,15 +3066,72 @@ ${phase1TransportQAEntries}
 // Compute its invariant probe and lattice coordinates once while retaining the
 // exact corner order and weight expression used by transport.
 fn transportStencil(position:vec3f)->TransportStencil{
-  return effectiveTransportStencilAtSpansMode(position,vec3f(1.0),true);
+  let bounded=cm12ClampToResidentWorld(position,vec3f(1e-4));
+  let probe=ownerCellAt(vec3i(floor(bounded)));
+  var spans=vec3f(1.0);if(probe!=INVALID){spans=cellWidths(probe);}
+  // Clamp to the local half-span and pull out-of-domain corners back inside,
+  // as the CPU sampleWeights does. Without the clamp a cell wider than one
+  // fine unit loses stencil weight at the wall (the outside corner resolves to
+  // INVALID); gatherConservativeDensity renormalizes that away but
+  // traceGammaAndBeta does not, so the sampled gamma collapses at coarse
+  // wall cells. Identical to the old behaviour on width-1 cells.
+  let clamped=cm12ClampToResidentWorld(position,0.5*spans);
+  let shifted=clamped/spans-vec3f(0.5);let lower=vec3i(floor(shifted));
+  let fraction=fract(shifted);var result:TransportStencil;
+  for(var corner=0u;corner<8u;corner+=1u){
+    let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
+    let lattice=vec3i(floor(spans*(vec3f(lower+offset)+vec3f(0.5))));
+    let cell=ownerCellAt(lattice);
+    let weight=select(1.0-fraction.x,fraction.x,offset.x==1)
+      *select(1.0-fraction.y,fraction.y,offset.y==1)
+      *select(1.0-fraction.z,fraction.z,offset.z==1);
+    result.cells[corner]=cell;
+    result.weights[corner]=select(0.0,weight,cell!=INVALID);
+  }
+  return result;
 }
 
 // Same stencil geometry/order, but routed through the Phase-1 name so the
 // packet transport kernels have a mechanically isolated access contract.
-${geometricTransportStencil}
-${relativeTransportStencil}
-// Physical source width is retained for native face sampling and the initial
-// dual-cell location. The interpolation itself uses actual donor centres.
+fn effectiveTransportStencilAtSpansMode(
+ position:vec3f,inputSpans:vec3f,direct:bool)->TransportStencil{
+  // A transport row is owned by its receiver (or by the forward donor during
+  // deficit return), so its interpolation lattice must remain that control
+  // volume's lattice throughout the trace. Selecting spans from the owner at
+  // the rounded departure point makes the basis discontinuous at a 2:1 seam:
+  // an arbitrarily small trajectory perturbation can switch the complete
+  // stencil from the coarse lattice to the fine lattice and change a beta
+  // column by O(1). Fixed row-owner spans retain the adaptive resolution while
+  // making the physical transport operator continuous across the seam.
+  // Keep the receiver's physical interpolation lattice. Using the authored
+  // finest lattice and collapsing coincident owners is not scale invariant:
+  // a width-two cell samples both finest points from itself until the trace
+  // crosses half a physical cell, while the identical width-one scene begins
+  // transferring mass immediately.
+  let spans=max(vec3f(1.0),inputSpans);
+  let clamped=cm12ClampToResidentWorld(position,0.5*spans);
+  let shifted=clamped/spans-vec3f(0.5);let lower=vec3i(floor(shifted));
+  let fraction=fract(shifted);var result:TransportStencil;
+  for(var corner=0u;corner<8u;corner+=1u){
+    let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
+    let lattice=vec3i(floor(cm12ClampToResidentWorld(
+      spans*(vec3f(lower+offset)+vec3f(0.5)),vec3f(1e-4))));
+    let candidate=cm12TransportOwnerAtFine(lattice,direct).cell;
+    // TEI2 publishes geometric ownership for closed cut cells as well as open
+    // transport cells. Counting them as visible zero-density donors dilutes
+    // mass along any solid. Apply the physical-open predicate before the
+    // stencil is normalized and cached.
+    let cell=select(INVALID,candidate,
+      candidate!=INVALID&&cellTransportActive(candidate));
+    let weight=select(1.0-fraction.x,fraction.x,offset.x==1)
+      *select(1.0-fraction.y,fraction.y,offset.y==1)
+      *select(1.0-fraction.z,fraction.z,offset.z==1);
+    result.cells[corner]=cell;
+    result.weights[corner]=select(0.0,weight,cell!=INVALID);
+  }
+  return result;
+}
+// Source-cell widths define the fixed interpolation lattice for each transport row.
 fn transportSourceSamplingSpans(source:u32,direct:bool)->vec3f{
   _=direct;
   if(source==INVALID){return vec3f(1.0);}
@@ -3284,16 +3145,26 @@ fn effectiveTransportStencilAtSpansDirect(
   return effectiveTransportStencilAtSpansMode(position,inputSpans,true);
 }
 ${implicitSharpeningOwnerArithmeticForQA ? /* wgsl */ `
-fn cm12ImplicitSharpeningGeometryOwnerAtFine(q:vec3i,direct:bool)->CM12TransportOwner{
-  _=direct;let cell=cm12ImplicitAuthoredOwnerAtFine(q);
-  if(cell==INVALID){return CM12TransportOwner(INVALID,vec3u(0u),0u);}
-  let widths=vec3u(cellWidths(cell));
-  return CM12TransportOwner(cell,widths,widths.x*widths.y*widths.z);
-}
-${implicitSharpeningGeometry}
 fn effectiveImplicitSharpeningStencilAtSpans(
  position:vec3f,inputSpans:vec3f)->TransportStencil{
-  return effectiveImplicitSharpeningGeometryAtSpansMode(position,inputSpans,true);
+  let spans=max(vec3f(1.0),inputSpans);
+  let clamped=cm12ClampToResidentWorld(position,0.5*spans);
+  let shifted=clamped/spans-vec3f(0.5);let lower=vec3i(floor(shifted));
+  let fraction=fract(shifted);var result:TransportStencil;
+  for(var corner=0u;corner<8u;corner+=1u){
+    let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
+    let lattice=vec3i(floor(cm12ClampToResidentWorld(
+      spans*(vec3f(lower+offset)+vec3f(0.5)),vec3f(1e-4))));
+    let candidate=cm12ImplicitAuthoredOwnerAtFine(lattice);
+    let cell=select(INVALID,candidate,
+      candidate!=INVALID&&cellTransportActive(candidate));
+    let weight=select(1.0-fraction.x,fraction.x,offset.x==1)
+      *select(1.0-fraction.y,fraction.y,offset.y==1)
+      *select(1.0-fraction.z,fraction.z,offset.z==1);
+    result.cells[corner]=cell;
+    result.weights[corner]=select(0.0,weight,cell!=INVALID);
+  }
+  return result;
 }
 ` : ""}
 
@@ -3575,114 +3446,6 @@ fn accumulateTransportDeficit(rank:u32,cell:u32,density:i32,gamma:i32,
   atomicAdd(&conditioning[5u*p.counts.x+cell],momentum.z);
 }
 
-// Read the accepted staggered component at a native face or mixed-width port.
-// Collocated values have already averaged opposite faces: interpolating them
-// back to a face applies a [1/4, 1/2, 1/4] filter even when dt is zero.
-// Dry donor faces have no pressure authority yet and retain velocity extension.
-fn nativeTransportFaceValue(donor:u32,width:f32)->vec2f{
-  var wet=false;
-  let begin=rowTermOffset(donor);let end=begin+rowTermCount(donor);
-  for(var term=begin;term<end;term+=1u){
-    let cell=termCell(term);
-    if(cellMinimumWidth(cell)>width){return vec2f(0.0);}
-    wet=wet||state[sourceDensity()+cell]>CM12_LIQUID_ISOVALUE;
-  }
-  return select(vec2f(0.0),vec2f(state[sourceFaceVelocity()+donor],1.0),wet);
-}
-fn nativeTransportFaceAt(position:vec3f,axis:u32,width:f32)->vec2f{
-  var normal=vec3f(0.0);normal[axis]=0.25*width;
-  let query=clamp(position+normal,vec3f(0.5),vec3f(p.dimensions.xyz)-vec3f(0.5));
-  let owner=ownerCellAt(vec3i(floor(query)));
-  if(owner==INVALID||cellMinimumWidth(owner)>width){return vec2f(0.0);}
-  // Preserve the incidence-first donor identity. Accepted adaptive face
-  // addresses may coincide geometrically without identifying the same row;
-  // axis/center equality alone changed symmetric-expansion transport.
-  let incidenceStart=incidenceBegin(owner);let incidenceStop=incidenceEnd(owner);
-  for(var at=incidenceStart;at<incidenceStop;at+=1u){
-    let donor=incidenceRow(at);
-    if(rowAxis(donor)!=axis
-      ||any(abs(rowCenter(donor)-position)>vec3f(1e-4))||!rowAccepted(donor)){continue;}
-    // Dry rows have no projected authority. Let the caller use its existing
-    // extension interpolant, which represents all children at this point.
-    return nativeTransportFaceValue(donor,width);
-  }
-  return vec2f(0.0);
-}
-
-fn sampleNativeTransportFace(position:vec3f,axis:u32,width:f32)->vec2f{
-  var offset=vec3f(0.5);offset[axis]=0.0;
-  let lowerLimit=width*offset;
-  let upperLimit=vec3f(p.dimensions.xyz)-width*offset;
-  let shifted=clamp(position,lowerLimit,upperLimit)/width-offset;
-  let lower=floor(shifted);let fraction=fract(shifted);
-  var value=0.0;
-  for(var z=0u;z<2u;z+=1u){for(var y=0u;y<2u;y+=1u){for(var x=0u;x<2u;x+=1u){
-    let weight=select(1.0-fraction.x,fraction.x,x==1u)
-      *select(1.0-fraction.y,fraction.y,y==1u)
-      *select(1.0-fraction.z,fraction.z,z==1u);
-    if(weight<=0.0){continue;}
-    let point=width*(lower+vec3f(f32(x),f32(y),f32(z))+offset);
-    let donor=nativeTransportFaceAt(point,axis,width);
-    // Only the unsupported corner falls back to the seam-safe interpolant.
-    // Falling back for the whole characteristic would restore the zero-time
-    // smoothing as soon as a corner acquired even an infinitesimal weight.
-    var component=donor.x;
-    if(donor.y==0.0){component=sampleFaceVelocitySupport(point)[axis];}
-    value+=weight*component;
-  }}}
-  return vec2f(value,1.0);
-}
-
-fn sampleRelativeFaceVelocity(origin:vec3f,position:vec3f,spans:vec3f)->vec3f{
-  let stencil=relativeTransportStencilAtSpansMode(position,spans,true,origin);
-  var values:array<vec3f,8>;var weights:array<f32,8>;
-  for(var corner=0u;corner<8u;corner+=1u){let cell=stencil.cells[corner];
-    if(cell!=INVALID){let at=FACE_VELOCITY_SUPPORT+4u*cell;let weight=stencil.weights[corner];
-      values[corner]=weight*vec3f(state[at],state[at+1u],state[at+2u]);weights[corner]=weight;}}
-  return transportVectorSum(values)/max(transportScalarSum(weights),1e-9);
-}
-// Terminal samples consume one staggered component. Keep the same geometric
-// weights and ordered reduction without loading the other two components.
-fn sampleRelativeFaceComponent(origin:vec3f,position:vec3f,spans:vec3f,axis:u32)->f32{
-  let stencil=relativeTransportStencilAtSpansMode(position,spans,true,origin);
-  var values:array<f32,8>;var weights:array<f32,8>;
-  for(var corner=0u;corner<8u;corner+=1u){let cell=stencil.cells[corner];
-    if(cell!=INVALID){let weight=stencil.weights[corner];
-      values[corner]=weight*state[FACE_VELOCITY_SUPPORT+4u*cell+axis];weights[corner]=weight;}}
-  return transportScalarSum(values)/max(transportScalarSum(weights),1e-9);
-}
-fn traceRelativeFaceDisplacement(origin:vec3f,spans:vec3f)->vec3f{
-  let initial=sampleRelativeFaceVelocity(origin,vec3f(0.0),spans);
-  let substeps=clamp(i32(ceil(length(initial/spans)*p.frame.x)),1,16);
-  let subDt=p.frame.x/f32(substeps);var displacement=vec3f(0.0);
-  for(var step=0;step<substeps;step+=1){
-    var first=initial;if(step>0){first=sampleRelativeFaceVelocity(origin,displacement,spans);}
-    let midpoint=clipRelativeTransportSegment(origin,displacement,clampRelativeTransportPosition(origin,
-      displacement-0.5*subDt*first,0.5*spans));
-    displacement=clipRelativeTransportSegment(origin,displacement,clampRelativeTransportPosition(origin,
-      displacement-subDt*sampleRelativeFaceVelocity(origin,midpoint,spans),0.5*spans));
-  }
-  return displacement;
-}
-fn sampleRelativeNativeTransportFace(origin:vec3f,displacement:vec3f,axis:u32,width:f32)->f32{
-  var offset=vec3f(0.5);offset[axis]=0.0;
-  let bounded=clamp(displacement,width*offset-origin,vec3f(p.dimensions.xyz)-width*offset-origin);
-  let base=floor(origin/width-offset);
-  let localOrigin=width*(base+offset)-origin;
-  let lower=floor((bounded-localOrigin)/width);
-  var terms:array<f32,8>;
-  for(var corner=0u;corner<8u;corner+=1u){
-    let index=vec3f(f32(corner&1u),f32((corner>>1u)&1u),f32((corner>>2u)&1u));
-    let point=width*(base+lower+index+offset);
-    let basis=max(vec3f(0.0),vec3f(1.0)-abs((point-origin)-bounded)/width);
-    let weight=basis.x*basis.y*basis.z;if(weight<=0.0){continue;}
-    let donor=nativeTransportFaceAt(point,axis,width);var value=donor.x;
-    if(donor.y==0.0){value=sampleRelativeFaceComponent(point,vec3f(0.0),vec3f(1.0),axis);}
-    terms[corner]=weight*value;
-  }
-  return transportScalarSum(terms);
-}
-
 fn finishTransportFaceRow(row:u32,characteristic:f32,touchesLiquid:bool){
   // The traced characteristic is the transported face authority. Blending it
   // back toward the old receiver value attenuates a newly wetted front every
@@ -3695,36 +3458,24 @@ fn finishTransportFaceRow(row:u32,characteristic:f32,touchesLiquid:bool){
   }
   _=touchesLiquid;
 }
-// A face's support is its incidence, including every fine child on a mixed
-// port. Sampling the patch centre can land on a child boundary and select
-// only the positive-side child for wetness and extension decisions.
-struct TransportFaceSupport { width:f32, extended:bool, liquid:bool }
-fn transportFaceSupport(row:u32)->TransportFaceSupport{
-  var support=TransportFaceSupport(1.0,false,false);
-  let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
-  for(var term=begin;term<end;term+=1u){
-    let cell=termCell(term);
-    support.extended=support.extended||cm12ExtendedCellSelected(cell);
-    support.liquid=support.liquid||state[sourceDensity()+cell]>CM12_LIQUID_ISOVALUE;
-    support.width=max(support.width,cellMinimumWidth(cell));
-  }
-  return support;
-}
-fn transportFaceSamplingSpans(row:u32,width:f32)->vec3f{
-  let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
-  var samplingWidth=width;
-  for(var term=begin;term<end;term+=1u){
-    samplingWidth=min(samplingWidth,transportSourceSamplingSpans(termCell(term),true).x);
-  }
-  return vec3f(samplingWidth);
-}
 fn prepareTransportFaceRow(row:u32){
   if(rowArea(row)<=1e-8){
     state[destinationFaceVelocity()+row]=select(0.0,rowSolidVelocity(row),hasSolidBoundaries());return;
   }
   let axis=rowAxis(row);
-  let support=transportFaceSupport(row);
-  let touchesExtendedVelocity=support.extended;let touchesLiquid=support.liquid;
+  // The accepted row already names its physical cells. Read their frozen
+  // support flags directly, once per face; a point probe can miss a wet fine
+  // child of a coarse port, and needs an unnecessary owner lookup.
+  var touchesExtendedVelocity=false;var touchesLiquid=false;
+  var samplingWidth=1e30;
+  let supportBeginRange=rowTermRange(row);let supportBegin=supportBeginRange.x;let supportEnd=supportBeginRange.y;
+  for(var term=supportBegin;term<supportEnd;term+=1u){
+    let packed=state[FACE_VELOCITY_SUPPORT+4u*termCell(term)+3u];
+    let flags=u32(round(8.0*fract(packed)));
+    samplingWidth=min(samplingWidth,max(1.0,floor(packed)));
+    touchesExtendedVelocity=touchesExtendedVelocity||(flags&2u)!=0u;
+    touchesLiquid=touchesLiquid||(flags&4u)!=0u;
+  }
   // Dry receiver rows still carry the extrapolated velocity band. The next
   // characteristic needs that velocity before any mass has reached the row;
   // treating rho==0 as inert pins and then releases a moving sparse front.
@@ -3733,17 +3484,12 @@ fn prepareTransportFaceRow(row:u32){
   if(!touchesExtendedVelocity){
     state[destinationFaceVelocity()+row]=select(0.0,rowSolidVelocity(row),hasSolidBoundaries());return;
   }
-  // Both intra-brick and equal-width brick-face rows are regular MAC faces.
-  // At B1 every face is a brick face; excluding kind 1 would leave the
-  // coarsest liquid entirely on the dissipative collocated remap.
-  // Mixed ports (kind 2) live at the coarser patch center and use its lattice.
-  // Only unavailable donor corners need the collocated seam interpolation.
-  let retainFaceDetail=(p.surfaceProof.w&0x40000000u)==0u
-    &&touchesLiquid&&rowKind(row)<=2u
-    &&(!hasSolidBoundaries()||rowOpenFraction(row)>=1.0-1e-6);
-  var regionWidth=select(1.0,support.width,retainFaceDetail);
+  // The support cache already carries physical width. Hold this face's
+  // finest incident width for its entire trace; a uniform coarse region
+  // must respond to sub-cell motion instead of repeating its centre value.
+  var regionWidth=max(1.0,samplingWidth);
   if(p.refinementRegionControl.x>0u){
-    let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+    let beginRange=rowTermRange(row);let begin=beginRange.x;let end=beginRange.y;
     for(var term=begin;term<end;term+=1u){
       let cell=termCell(term);
       if(cachedRefinementPolicyTileScale(cellBrick(cell))>1u){
@@ -3751,14 +3497,14 @@ fn prepareTransportFaceRow(row:u32){
       }
     }
   }
-  var spans=vec3f(1.0);
-  if(regionWidth>1.0){spans=transportFaceSamplingSpans(row,regionWidth);}
-  let origin=rowCenter(row);let displacement=traceRelativeFaceDisplacement(origin,spans);
   var characteristic=0.0;
-  if(retainFaceDetail){
-    characteristic=sampleRelativeNativeTransportFace(origin,displacement,axis,regionWidth);
+  if(regionWidth>1.0){
+    let spans=vec3f(regionWidth);
+    let departure=traceFaceDepartureAtSpans(rowCenter(row),spans);
+    characteristic=sampleFaceVelocitySupportAtSpans(departure,spans)[axis];
   }else{
-    characteristic=sampleRelativeFaceComponent(origin,displacement,spans,axis);
+    let departure=traceFaceDeparture(rowCenter(row));
+    characteristic=sampleFaceVelocitySupport(departure)[axis];
   }
   finishTransportFaceRow(row,characteristic,touchesLiquid);
 }
@@ -4007,15 +3753,15 @@ fn traceGammaAndBeta(@builtin(workgroup_id)wid:vec3u,
       state[TRANSPORT_CHARACTERISTIC_CLEARANCE+id]=0.0;}
     else{let center=cellCenter(id);
       var departure=vec3f(0.0);var stencil:TransportStencil;
-      let traced=traceMassStencil(id,-1.0,false);departure=traced.position;stencil=traced.stencil;
+      departure=traceEffectiveTransportDeparture(center);
+      stencil=effectiveTransportStencilAtSpans(departure,cellWidths(id));
       ${phase1QATraceCapture}
       state[TRANSPORT_CHARACTERISTIC_CLEARANCE+id]
         =transportDepartureCharacteristicClearance(stencil);
       storeMassDepartureStencil(id,stencil);
-      var gammaTerms:array<f32,8>;
+      var visible=0.0;var sampledGamma=0.0;
       for(var corner=0u;corner<8u;corner+=1u){let cell=stencil.cells[corner];let weight=stencil.weights[corner];
-        if(cell!=INVALID){gammaTerms[corner]=weight*state[sourceGamma()+cell];}}
-      let visible=transportScalarSum(stencil.weights);let sampledGamma=transportScalarSum(gammaTerms);
+        visible+=weight;if(cell!=INVALID){sampledGamma+=weight*state[sourceGamma()+cell];}}
       let advectedGamma=configuredTransportGamma(sampledGamma,visible);
       state[destinationGamma()+id]=advectedGamma;
       if(visible>1e-9){for(var corner=0u;corner<8u;corner+=1u){
@@ -4059,13 +3805,18 @@ fn scatterDensityDeficit(@builtin(workgroup_id)wid:vec3u,
     let deficit=max(0.0,1.0-transportBeta(donor))*transportConservationStrength();
     if(deficit>1.0/CM12_SPARSE_TRANSPORT_FIXED){
       var visible=0.0;var arrivalStencil:TransportStencil;
-      arrivalStencil=traceMassStencil(donor,1.0,false).stencil;
-      visible=transportScalarSum(arrivalStencil.weights);
+      let arrival=traceEffectiveTransportArrival(cellCenter(donor));
+      arrivalStencil=effectiveTransportStencilAtSpans(arrival,cellWidths(donor));
+      for(var corner=0u;corner<8u;corner+=1u){visible+=arrivalStencil.weights[corner];}
       let donorDensity=state[sourceDensity()+donor];
       let velocityAt=sourceCellVelocity()+4u*donor;
       let donorVelocity=vec3f(state[velocityAt],state[velocityAt+1u],
         state[velocityAt+2u]);
-      if(visible<=1e-9){validateDensityDeficitSupport(donor,visible,deficit,donorDensity);
+      if(visible<=1e-9){let densityTransfer=donorDensity*deficit;
+        accumulateTransportDeficit(wid.x,donor,
+          i32(round(densityTransfer*CM12_SPARSE_TRANSPORT_FIXED)),i32(round(
+          state[sourceGamma()+donor]*deficit*CM12_SPARSE_TRANSPORT_FIXED)),vec3i(round(
+          densityTransfer*donorVelocity*CM12_SPARSE_TRANSPORT_FIXED)));
       }else{for(var corner=0u;corner<8u;corner+=1u){
         var cell=INVALID;var weight=0.0;
         cell=arrivalStencil.cells[corner];weight=arrivalStencil.weights[corner];
@@ -4101,9 +3852,7 @@ fn gatherConservativeDensity(@builtin(workgroup_id)wid:vec3u,
   }else{
   let advectedGamma=state[destinationGamma()+id];var visible=0.0;
   var rhoNext=0.0;var gammaNext=0.0;var momentumNext=vec3f(0.0);
-  var weights:array<f32,8>;var densityTerms:array<f32,8>;var gammaTerms:array<f32,8>;var momentumTerms:array<vec3f,8>;
-  for(var corner=0u;corner<8u;corner+=1u){weights[corner]=massDepartureStencilWeight(id,corner);}
-  visible=transportScalarSum(weights);
+  for(var corner=0u;corner<8u;corner+=1u){visible+=massDepartureStencilWeight(id,corner);}
   if(visible>1e-9){for(var corner=0u;corner<8u;corner+=1u){
     let cell=massDepartureStencilCell(id,corner);
     let weight=massDepartureStencilWeight(id,corner);if(cell==INVALID||weight<=0.0){continue;}
@@ -4111,27 +3860,28 @@ fn gatherConservativeDensity(@builtin(workgroup_id)wid:vec3u,
       advectedGamma,weight/visible,transportBeta(cell));
     let donorDensity=state[sourceDensity()+cell];
     let velocityAt=sourceCellVelocity()+4u*cell;
-    densityTerms[corner]=coefficient*donorDensity;gammaTerms[corner]=coefficient;
-    momentumTerms[corner]=coefficient*donorDensity*vec3f(state[velocityAt],
+    // Sec. 3.4 step 4 transports cumulative gamma through the same operator
+    // as density. A fresh row sum forgets earlier dilution/concentration,
+    // leaving gamma diffusion unable to repair a repeatedly generated seam.
+    rhoNext+=coefficient*donorDensity;
+    gammaNext+=coefficient*state[sourceGamma()+cell];
+    momentumNext+=coefficient*donorDensity*vec3f(state[velocityAt],
       state[velocityAt+1u],state[velocityAt+2u]);
   }}
-  rhoNext=transportScalarSum(densityTerms);gammaNext=transportScalarSum(gammaTerms);momentumNext=transportVectorSum(momentumTerms);
   rhoNext+=f32(atomicLoad(&conditioning[p.counts.x+id]))/CM12_SPARSE_TRANSPORT_FIXED;
   gammaNext+=f32(atomicLoad(&conditioning[2u*p.counts.x+id]))/CM12_SPARSE_TRANSPORT_FIXED;
   momentumNext+=vec3f(f32(atomicLoad(&conditioning[3u*p.counts.x+id])),
     f32(atomicLoad(&conditioning[4u*p.counts.x+id])),
     f32(atomicLoad(&conditioning[5u*p.counts.x+id])))/CM12_SPARSE_TRANSPORT_FIXED;
   // Cumulative gamma is persistent transport-operator state. Below the
-  // numerical dry cutoff the newly gathered row sum is not observable as a
+  // numerical dry cutoff the newly transported gamma is not observable as a
   // liquid quantity, so retain that cell's prior operator state. Resetting it
   // to one made an arbitrarily small rho threshold crossing create an O(1)
   // gamma jump which the following diffusion stage converted back into mass.
   if(rhoNext<CM12_DRY_CELL_THRESHOLD){gammaNext=state[sourceGamma()+id];}
-  if(!cm12ConservedValueValid(rhoNext)||!cm12ConservedValueValid(gammaNext)){
-    cm12RecordFailure(4u,id,vec4u(bitcast<u32>(rhoNext),bitcast<u32>(gammaNext),0u,0u));}
-  let nextDensity=rhoNext;
+  let nextDensity=max(0.0,rhoNext);
   state[destinationDensity()+id]=nextDensity;
-  state[destinationGamma()+id]=gammaNext;
+  state[destinationGamma()+id]=max(0.0,gammaNext);
   let velocity=select(vec3f(0.0),momentumNext/nextDensity,
     nextDensity>=CM12_DRY_CELL_THRESHOLD);
   let velocityAt=destinationCellVelocity()+4u*id;
@@ -4191,7 +3941,8 @@ fn traceGammaAndBetaPackedCoarse(@builtin(global_invocation_id)gid:vec3u){
   if(id!=INVALID){if(!cellTransportActive(id)){state[destinationGamma()+id]=1.0;
       state[TRANSPORT_CHARACTERISTIC_CLEARANCE+id]=0.0;
     }else{let center=cellCenter(id);
-      let traced=traceMassStencil(id,-1.0,true);let departure=traced.position;let stencil=traced.stencil;
+      let departure=traceEffectiveTransportDepartureDirect(center);
+      let stencil=effectiveTransportStencilAtSpansDirect(departure,cellWidths(id));
       ${phase1QATraceCapture}
       state[TRANSPORT_CHARACTERISTIC_CLEARANCE+id]
         =transportDepartureCharacteristicClearance(stencil);
@@ -4227,14 +3978,19 @@ fn scatterDensityDeficitPackedCoarse(@builtin(global_invocation_id)gid:vec3u){
   if(donor!=INVALID&&cellTransportActive(donor)){
     let deficit=max(0.0,1.0-transportBeta(donor))*transportConservationStrength();
     if(deficit>1.0/CM12_SPARSE_TRANSPORT_FIXED){
-      let stencil=traceMassStencil(donor,1.0,true).stencil;
+      let arrival=traceEffectiveTransportArrivalDirect(cellCenter(donor));
+      let stencil=effectiveTransportStencilAtSpansDirect(arrival,cellWidths(donor));
       var visible=0.0;for(var corner=0u;corner<8u;corner+=1u){
         visible+=stencil.weights[corner];}
       let donorDensity=state[sourceDensity()+donor];
       let velocityAt=sourceCellVelocity()+4u*donor;
       let donorVelocity=vec3f(state[velocityAt],state[velocityAt+1u],
         state[velocityAt+2u]);
-      if(visible<=1e-9){validateDensityDeficitSupport(donor,visible,deficit,donorDensity);
+      if(visible<=1e-9){let densityTransfer=donorDensity*deficit;
+        accumulateTransportDeficit(gid.x,donor,
+          i32(round(densityTransfer*CM12_SPARSE_TRANSPORT_FIXED)),i32(round(
+          state[sourceGamma()+donor]*deficit*CM12_SPARSE_TRANSPORT_FIXED)),vec3i(round(
+          densityTransfer*donorVelocity*CM12_SPARSE_TRANSPORT_FIXED)));
       }else{for(var corner=0u;corner<8u;corner+=1u){
         let cell=stencil.cells[corner];let weight=stencil.weights[corner];
         if(cell==INVALID||weight<=0.0){continue;}let normalized=weight/visible;
@@ -4276,7 +4032,8 @@ fn gatherConservativeDensityPackedCoarse(@builtin(global_invocation_id)gid:vec3u
         advectedGamma,weight/visible,transportBeta(cell));
       let donorDensity=state[sourceDensity()+cell];
       let velocityAt=sourceCellVelocity()+4u*cell;
-      rhoNext+=coefficient*donorDensity;gammaNext+=coefficient;
+      rhoNext+=coefficient*donorDensity;
+      gammaNext+=coefficient*state[sourceGamma()+cell];
       momentumNext+=coefficient*donorDensity*vec3f(state[velocityAt],
         state[velocityAt+1u],state[velocityAt+2u]);
     }}
@@ -4286,11 +4043,9 @@ fn gatherConservativeDensityPackedCoarse(@builtin(global_invocation_id)gid:vec3u
       f32(atomicLoad(&conditioning[4u*p.counts.x+id])),
       f32(atomicLoad(&conditioning[5u*p.counts.x+id])))/CM12_SPARSE_TRANSPORT_FIXED;
     if(rhoNext<CM12_DRY_CELL_THRESHOLD){gammaNext=state[sourceGamma()+id];}
-    if(!cm12ConservedValueValid(rhoNext)||!cm12ConservedValueValid(gammaNext)){
-    cm12RecordFailure(4u,id,vec4u(bitcast<u32>(rhoNext),bitcast<u32>(gammaNext),0u,0u));}
-  let nextDensity=rhoNext;
+    let nextDensity=max(0.0,rhoNext);
     state[destinationDensity()+id]=nextDensity;
-    state[destinationGamma()+id]=gammaNext;
+    state[destinationGamma()+id]=max(0.0,gammaNext);
     let velocity=select(vec3f(0.0),momentumNext/nextDensity,
       nextDensity>=CM12_DRY_CELL_THRESHOLD);
     let velocityAt=destinationCellVelocity()+4u*id;
@@ -4397,7 +4152,7 @@ fn clearGammaReceipts(@builtin(global_invocation_id)gid:vec3u){
   atomicStore(&conditioning[cell],0);atomicStore(&conditioning[p.counts.x+cell],0);
 }
 fn scatterGammaRow(row:u32,inputRho:u32,inputGamma:u32){
-  let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+  let beginRange=rowTermRange(row);let begin=beginRange.x;let end=beginRange.y;
   var negativeCount=0u;var positiveCount=0u;
   for(var term=begin;term<end;term+=1u){let coefficient=termCoefficient(term);
     negativeCount+=select(0u,1u,coefficient<0.0);
@@ -4509,13 +4264,10 @@ fn sharpeningStats(cell:u32)->SharpeningStats{
   result.positiveArea=vec3f(0.0);result.negativeDensity=vec3f(0.0);
   result.positiveDensity=vec3f(0.0);result.negativeDistance=vec3f(0.0);
   result.positiveDistance=vec3f(0.0);
-  // Topology is immutable throughout this dispatch. Validate its incidence
-  // range once, rather than revalidating every term at each loop condition.
-  let incidence=incidenceRange(cell);
-  for(var at=incidence.x;at<incidence.y;at+=1u){
+  for(var at=incidenceBegin(cell);at<incidenceEnd(cell);at+=1u){
     let row=incidenceRow(at);if(!rowAccepted(row)){continue;}
     let own=termCoefficient(incidenceTerm(at));
-    let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+    let beginRange=rowTermRange(row);let begin=beginRange.x;let end=beginRange.y;
     var negativeCount=0.0;var positiveCount=0.0;
     for(var term=begin;term<end;term+=1u){let coefficient=termCoefficient(term);
       negativeCount+=select(0.0,1.0,coefficient<0.0);
@@ -4526,16 +4278,7 @@ fn sharpeningStats(cell:u32)->SharpeningStats{
     for(var term=begin;term<end;term+=1u){let coefficient=termCoefficient(term);
       if(own*coefficient>=0.0){continue;}let neighbor=termCell(term);
       if(!cellActive(neighbor)){continue;}
-      var neighborRho=conditionedDensity(neighbor);
-      if(rowKind(row)==2u){
-        // A 2:1 neighbour centre is also displaced along the face. Its raw
-        // value therefore mixes tangential variation into this normal
-        // derivative. Evaluate the existing affine-exact density interpolant
-        // at the neighbour's normal coordinate, aligned with this cell's
-        // tangential coordinates, before applying the CM12 upwind stencil.
-        var aligned=cellCenter(cell);aligned[axis]=cellCenter(neighbor)[axis];
-        neighborRho=sampleSharpeningDensity(aligned);
-      }
+      let neighborRho=conditionedDensity(neighbor);
       result.maximumDifference=max(result.maximumDifference,abs(rho-neighborRho));
       if(own<0.0){result.positiveArea[axis]+=area;
         result.positiveDensity[axis]+=area*neighborRho;
@@ -4606,35 +4349,45 @@ fn mirrorSharpeningSampleToWorld(position:vec3f)->vec3f{
   return clamp(mirrored,lower,max(lower,upper));
 }
 fn sampleSharpeningDensity(position:vec3f)->f32{
-  let stencil=effectiveTransportStencilAtSpansMode(
-    mirrorSharpeningSampleToWorld(position),vec3f(1.0),false);
-  var result=0.0;var visible=0.0;
-  for(var corner=0u;corner<8u;corner+=1u){let cell=stencil.cells[corner];
+  // Sharpening traces the same composite scalar field as transport. Sampling
+  // it on an owner-selected lattice reintroduces the 2:1 seam jump that the
+  // conservative transport stencil avoids, so restrict finest-lattice samples
+  // onto their accepted owners here as well.
+  let spans=vec3f(1.0);
+  // Central gradient probes mirror about the endpoint cell centres. This is
+  // the actual Neumann extension: reflected samples are equal and the normal
+  // derivative at either wall is zero.
+  let clamped=mirrorSharpeningSampleToWorld(position);
+  let shifted=clamped/spans-vec3f(0.5);
+  var lower=vec3i(floor(shifted));var fraction=fract(shifted);
+  // At the upper cell-centre plane shifted is an exact integer. floor() then
+  // selects [last, outside], while the reflected lower endpoint selects
+  // [first, second]. Values happen to survive because the outside weight is
+  // zero, but differentiated weights do not: the missing outside corner
+  // fabricates a gradient of -rho. Select the final interior interval with
+  // fraction one, the exact reflection of the lower interval at fraction zero.
+  let upper=cm12WorldFineUpper()-0.5*spans;
+  let hasInteriorInterval=cm12WorldFineUpper()-cm12WorldFineLower()>spans;
+  let atUpper=select(vec3<bool>(false),clamped>=upper,hasInteriorInterval);
+  lower=select(lower,lower-vec3i(1),atUpper);
+  fraction=select(fraction,vec3f(1.0),atUpper);
+  var result=0.0;
+  for(var corner=0u;corner<8u;corner+=1u){
+    let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
+    let lattice=vec3i(floor(spans*(vec3f(lower+offset)+vec3f(0.5))));
+    let cell=${implicitSharpeningOwnerArithmeticForQA
+      ? "cm12ImplicitAuthoredOwnerAtFine(lattice)"
+      : "cm12TeiOwnerAtFine(lattice).cell"};
     if(cell==INVALID){continue;}
-    let weight=stencil.weights[corner];
-    result+=weight*conditionedDensity(cell);visible+=weight;
+    let wx=select(1.0-fraction.x,fraction.x,offset.x==1);
+    let wy=select(1.0-fraction.y,fraction.y,offset.y==1);
+    let wz=select(1.0-fraction.z,fraction.z,offset.z==1);
+    result+=wx*wy*wz*conditionedDensity(cell);
   }
-  return result/max(visible,1e-9);
+  return result;
 }
 
-// The accepted TEI leaf already certifies contiguous regular cell storage.
-// Interior neighbours are offsets in that storage, just as in the implicit
-// pressure operator. Clipped cells and leaf boundaries use the incidence path.
-fn sharpeningInteriorStrides(cell:u32)->vec4u{
-  let brick=cellBrick(cell);
-  if(!brickHasUnclippedWorldGeometry(brick)){return vec4u(INVALID);}
-  let leaf=cm12TeiLoadLeaf(acceptedTopologySlot(),brick);
-  if((leaf.flags&0x80000000u)==0u||leaf.scale==0u
-    ||any(leaf.valid<vec3u(3u))||cell<leaf.first
-    ||cell-leaf.first>=leaf.count){return vec4u(INVALID);}
-  let index=cell-leaf.first;let plane=leaf.valid.x*leaf.valid.y;
-  let local=vec3u(index%leaf.valid.x,(index/leaf.valid.x)%leaf.valid.y,index/plane);
-  if(any(local==vec3u(0u))||any(local+vec3u(1u)>=leaf.valid)){
-    return vec4u(INVALID);}
-  return vec4u(1u,leaf.valid.x,plane,leaf.scale);
-}
-
-fn sampleSharpeningField(position:vec3f,density:f32)->vec4f{
+fn sampleSharpeningField(position:vec3f)->vec4f{
   // A cell centre is a knot of the piecewise-trilinear interpolant. Its
   // analytic derivative has two one-sided values; floor() chose the positive
   // side on both reflected cells, which is not a reflected gradient. CM12's
@@ -4649,34 +4402,13 @@ fn sampleSharpeningField(position:vec3f,density:f32)->vec4f{
   let dy=vec3f(0.0,halfDistance,0.0);
   let dz=vec3f(0.0,0.0,halfDistance);
   let inverseDistance=0.5/halfDistance;
-  return vec4f(density,
+  return vec4f(sampleSharpeningDensity(position),
     (sampleSharpeningDensity(position+dx)-sampleSharpeningDensity(position-dx))
       *inverseDistance,
     (sampleSharpeningDensity(position+dy)-sampleSharpeningDensity(position-dy))
       *inverseDistance,
     (sampleSharpeningDensity(position+dz)-sampleSharpeningDensity(position-dz))
       *inverseDistance);
-}
-
-// At the six half-cell offsets of a regular interior centre, only the
-// source and its normal neighbour have nonzero density weights. Reuse the
-// accepted leaf's cell strides; seam/clipped sources keep the general basis.
-fn initialSharpeningField(source:u32,density:f32)->vec4f{
-  let interior=sharpeningInteriorStrides(source);
-  if(interior.x==INVALID){return sampleSharpeningField(cellCenter(source),density);}
-  let inverseDistance=0.5/(0.5*f32(interior.w));var gradient=vec3f(0.0);
-  for(var axis=0u;axis<3u;axis+=1u){
-    let beforeCell=source-interior[axis];let afterCell=source+interior[axis];
-    var before=density;var after=density;
-    if(cellTransportActive(beforeCell)){
-      before=0.5*conditionedDensity(beforeCell)+0.5*density;
-    }
-    if(cellTransportActive(afterCell)){
-      after=0.5*density+0.5*conditionedDensity(afterCell);
-    }
-    gradient[axis]=(after-before)*inverseDistance;
-  }
-  return vec4f(density,gradient);
 }
 
 // CM12 Algorithm 2's TraceAlongField in composite-grid coordinates. As in the
@@ -4689,19 +4421,8 @@ fn traceSharpeningMass(source:u32)->vec3f{
   var travelled=0.0;
   for(var step=0u;step<40u;step+=1u){
     if(step>=u32(p.sharpening.y)){break;}
-    // A stopped trace needs no gradient: those six adaptive stencil samples
-    // cannot affect its destination. Keep the same density stop and centred
-    // differences for every step that actually advances.
-    if(travelled>=maximumDistance){break;}
-    // The interpolation basis is exactly cardinal at the source centre.
-    // Reuse its conditioned value on the first step instead of locating the
-    // eight surrounding owners only to assign seven zero weights.
-    var density=conditionedDensity(source);
-    if(step>0u){density=sampleSharpeningDensity(position);}
-    if(density>=CM12_LIQUID_ISOVALUE){break;}
-    var field:vec4f;
-    if(step==0u){field=initialSharpeningField(source,density);}
-    else{field=sampleSharpeningField(position,density);}
+    let field=sampleSharpeningField(position);
+    if(field.x>=CM12_LIQUID_ISOVALUE||travelled>=maximumDistance){break;}
     let owner=${implicitSharpeningOwnerArithmeticForQA
       ? "cm12ImplicitAuthoredOwnerAtFine(vec3i(floor(position)))"
       : "cm12TeiOwnerAtFine(vec3i(floor(position))).cell"};
@@ -4713,8 +4434,6 @@ fn traceSharpeningMass(source:u32)->vec3f{
     let candidateOwner=${implicitSharpeningOwnerArithmeticForQA
       ? "cm12ImplicitAuthoredOwnerAtFine(vec3i(floor(candidate)))"
       : "cm12TeiOwnerAtFine(vec3i(floor(candidate))).cell"};
-    // A solid cell retains topology ownership after a live voxel edit.
-    // Stop on its near side; ownership alone does not grant recipient capacity.
     if(candidateOwner==INVALID||!cellTransportActive(candidateOwner)){break;}
     position=candidate;travelled+=distance;
   }
@@ -4862,7 +4581,7 @@ fn densityCapacityRepairArea(cell:u32)->f32{
   for(var at=incidenceBegin(cell);at<incidenceEnd(cell);at+=1u){let row=incidenceRow(at);
     if(!rowAccepted(row)){continue;}
     let own=termCoefficient(incidenceTerm(at));
-    let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+    let beginRange=rowTermRange(row);let begin=beginRange.x;let end=beginRange.y;
     for(var term=begin;term<end;term+=1u){let neighbor=termCell(term);
       if(neighbor==cell||!cellTransportActive(neighbor)){continue;}
       area+=cm12PhysicalSubfaceArea(row,own,termCoefficient(term));
@@ -4889,7 +4608,7 @@ fn scatterDensityCapacityRepairCellAtPlane(cell:u32,plane:u32){
   for(var at=incidenceBegin(cell);at<incidenceEnd(cell);at+=1u){let row=incidenceRow(at);
     if(!rowAccepted(row)){continue;}
     let own=termCoefficient(incidenceTerm(at));
-    let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+    let beginRange=rowTermRange(row);let begin=beginRange.x;let end=beginRange.y;
     for(var term=begin;term<end;term+=1u){let neighbor=termCell(term);
       if(neighbor==cell||!cellTransportActive(neighbor)){continue;}
       let area=cm12PhysicalSubfaceArea(row,own,termCoefficient(term));
@@ -4992,7 +4711,7 @@ fn gatherDensityCapacityRepair(
   for(var at=incidenceBegin(cell);at<incidenceEnd(cell);at+=1u){let row=incidenceRow(at);
     if(!rowAccepted(row)){continue;}
     let own=termCoefficient(incidenceTerm(at));
-    let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+    let beginRange=rowTermRange(row);let begin=beginRange.x;let end=beginRange.y;
     for(var term=begin;term<end;term+=1u){let neighbor=termCell(term);
       if(neighbor==cell||!cellTransportActive(neighbor)){continue;}
       let area=cm12PhysicalSubfaceArea(row,own,termCoefficient(term));
@@ -5200,7 +4919,7 @@ fn pressureCellSubmerged(id:u32)->bool{
   var neighbours=0u;
   for(var at=incidenceBegin(id);at<incidenceEnd(id);at+=1u){
     let row=incidenceRow(at);if(!rowAccepted(row)){continue;}
-    let begin=rowTermOffset(row);let count=rowTermCount(row);
+    let range=rowTermRange(row);let begin=range.x;let count=range.y-range.x;
     if(count<2u){return false;}
     for(var term=begin;term<begin+count;term+=1u){let other=termCell(term);
       if(other==id){continue;}
@@ -5268,19 +4987,9 @@ fn ptrBrickCellRange(brick:u32,encoded:u32)->vec2u{
 // HTP1 accessors preserve the resident template's exact stable
 // IDs and packed arithmetic while PCF1 is migrated into the resident arena.
 fn cm12HotHeaderValid()->bool{return true;}
-fn cm12HotRowTermCount(row:u32)->u32{return rowTermCount(row);}
-fn cm12HotRowTermCell(row:u32,ordinal:u32)->u32{
-  return termCell(rowTermOffset(row)+ordinal);
-}
-fn cm12HotRowTermCoefficient(row:u32,ordinal:u32)->f32{
-  return termCoefficient(rowTermOffset(row)+ordinal);
-}
 fn cm12HotRowDualWeight(row:u32)->f32{return rowDualWeight(row);}
 fn cm12HotIncidenceRange(cell:u32)->vec2u{
   let first=incidenceBegin(cell);return vec2u(first,incidenceEnd(cell)-first);
-}
-fn cm12HotIncidence(at:u32)->vec2u{
-  let row=incidenceRow(at);return vec2u(row,incidenceTerm(at)-rowTermOffset(row));
 }
 fn cm12HotDirectedEdgeRange(cell:u32)->vec2u{
   let offsets=pressureTemplateWord(15u);let first=pressureTemplateWord(offsets+cell);
@@ -5525,11 +5234,11 @@ fn publishPressureCoefficientCell(cell:u32){
     let range=cm12HotIncidenceRange(cell);
     if(range.x==PCF_INVALID){pcfFault(PCF_FAULT_TOPOLOGY,cell);return;}
     for(var local=0u;local<range.y;local+=1u){
-      let incidence=cm12HotIncidence(range.x+local);let row=incidence.x;
+      let at=range.x+local;let row=incidenceRow(at);
       if(row==PCF_INVALID){pcfFault(PCF_FAULT_TOPOLOGY,cell);return;}
       let theta=state[p.stateOffsets3.x+row];
       if(!pcmRowContains(row)||theta<=0.0){continue;}
-      let coefficient=cm12HotRowTermCoefficient(row,incidence.y);
+      let coefficient=termCoefficient(incidenceTerm(at));
       diagonalAxes[rowAxis(row)]+=cm12HotRowDualWeight(row)*coefficient*coefficient/theta;
     }
   }
@@ -5642,7 +5351,7 @@ fn classifyPressureRow(row:u32)->bool{
   if(rowKind(row)==2u){atomicAdd(&activity[ACCEPTED_MIXED_ROW_COUNT],1u);}
   else if(sameLevel&&allCoarse){atomicAdd(&activity[ACCEPTED_COARSE_ROW_COUNT],1u);}
   if(rowDualWeight(row)<=1e-8){state[p.stateOffsets3.x+row]=0.0;return false;}
-  let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+  let beginRange=rowTermRange(row);let begin=beginRange.x;let end=beginRange.y;
   var liquidCount=0u;var airCount=0u;var liquidPhiSum=0.0;var liquidWeight=0.0;
   var airPhiSum=0.0;var airWeight=0.0;
   var liquidCenterYSum=0.0;var airCenterYSum=0.0;
@@ -5702,31 +5411,40 @@ fn classifyPressureRow(row:u32)->bool{
 }
 
 var<workgroup>pcmRowBallot:array<u32,64>;
+var<workgroup>pcmRowRepairWorkgroupTile:u32;
 
 @compute @workgroup_size(64)
-fn compileCanonicalPressureRows(@builtin(workgroup_id)wid:vec3u,
- @builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)lane:u32){
-  let group=wid.x+nwg.x*wid.y;
-  let row=64u*group+lane;let valid=row<p.counts.y;
-  let publicationOpen=pcmRowPublicationOpen();
-  var enabled=false;
-  if(valid&&publicationOpen){
-    let previous=pcmRowContains(row);
-    let accepted=rowAccepted(row);var scalarChanged=false;
-    if(accepted){
-      let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+fn markCanonicalPressureRowRepairTiles(@builtin(global_invocation_id)gid:vec3u){
+  let row=acceptedTemplateRowInvocation(gid.x);
+  if(row==INVALID||!pcmRowPublicationOpen()||!rowAccepted(row)){return;}
+  var dirty=pcmRowPriorTopologyGeneration()!=ptrTopologyGeneration()
+    ||p.acceleration.w>=0.5||hasStaticSolidVoxels();
+  if(!dirty){
+    let beginRange=rowTermRange(row);let begin=beginRange.x;let end=beginRange.y;
+    for(var term=begin;term<end;term+=1u){
+      dirty=dirty||fsm1ChangedOrFlipCell(termCell(term));
+    }
+  }
+  if(dirty){pcmRowMarkDirtyTile(row);}
+}
+
+fn publishCanonicalPressureRowTile(group:u32,lane:u32){
+  let row=64u*group+lane;var enabled=false;
+  if(row<p.counts.y&&pcmRowPublicationOpen()){
+    let accepted=rowAccepted(row);
+    let canReuse=accepted&&pcmRowPriorTopologyGeneration()==ptrTopologyGeneration()
+      &&p.acceleration.w<0.5&&!hasStaticSolidVoxels();
+    var scalarChanged=false;
+    // Global invalidation already requires classification; scalar-mask
+    // lookups cannot change that decision.
+    if(canReuse){
+      let beginRange=rowTermRange(row);let begin=beginRange.x;let end=beginRange.y;
       for(var term=begin;term<end;term+=1u){
         scalarChanged=scalarChanged||fsm1ChangedOrFlipCell(termCell(term));
       }
     }
-    let topologyStable=pcmRowPriorTopologyGeneration()==ptrTopologyGeneration();
-    // Gravity changes invalidate hydrostatic theta and wall-release membership,
-    // even when a resting liquid has unchanged density and topology.
-    if(accepted&&topologyStable&&!scalarChanged&&p.acceleration.w<0.5&&!hasStaticSolidVoxels()){
-      enabled=previous;
-    }else{
-      enabled=classifyPressureRow(row);
-    }
+    if(canReuse&&!scalarChanged){enabled=pcmRowContains(row);}
+    else{enabled=classifyPressureRow(row);}
   }
   pcmRowBallot[lane]=select(0u,1u,enabled);workgroupBarrier();
   if(lane<2u){
@@ -5738,6 +5456,22 @@ fn compileCanonicalPressureRows(@builtin(workgroup_id)wid:vec3u,
       _=pcmRowPublishWord(word,bits);
     }
   }
+}
+
+// Retained full-domain numerical oracle. Production dispatches the compact list.
+@compute @workgroup_size(64)
+fn compileCanonicalPressureRows(@builtin(workgroup_id)wid:vec3u,
+ @builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)lane:u32){
+  publishCanonicalPressureRowTile(wid.x+nwg.x*wid.y,lane);
+}
+@compute @workgroup_size(64)
+fn compileDirtyCanonicalPressureRows(@builtin(workgroup_id)wid:vec3u,
+ @builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)lane:u32){
+  if(lane==0u){pcmRowRepairWorkgroupTile=pcmRowRepairTile(wid.x+nwg.x*wid.y);}
+  let tile=workgroupUniformLoad(&pcmRowRepairWorkgroupTile);
+  // Rank/count are uniform across this workgroup, including padded 2D groups.
+  if(tile==INVALID){return;}
+  publishCanonicalPressureRowTile(tile,lane);
 }
 
 @compute @workgroup_size(1)
@@ -5777,7 +5511,7 @@ fn initializeJacobiDirection(@builtin(global_invocation_id)gid:vec3u,
 }
 
 fn pressureRowGradient(row:u32,inputOffset:u32)->f32{
-  let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+  let beginRange=rowTermRange(row);let begin=beginRange.x;let end=beginRange.y;
   if(end-begin==2u&&termCoefficient(begin)==-termCoefficient(begin+1u)){
     let a=termCell(begin);let b=termCell(begin+1u);
     let pa=select(0.0,state[inputOffset+a],peiPressureCellMember(a));
@@ -6269,9 +6003,9 @@ fn reduceCurvatureRecovery(@builtin(local_invocation_id)lid:vec3u){
 }
 
 fn projectPressureRow(row:u32){
-  let separating=rowSeparatingFromClosedWorld(row);
   let theta=state[p.stateOffsets3.x+row];
   if(theta<=0.0){return;}
+  let separating=rowSeparatingFromClosedWorld(row);
   if(!separating&&rowArea(row)<=1e-8){
     state[destinationFaceVelocity()+row]=select(0.0,rowSolidVelocity(row),hasSolidBoundaries());return;}
   let jump=pressureRowGradient(row,p.stateOffsets2.x);
@@ -8540,8 +8274,9 @@ fn dynamicNegativeRowSuperseded(row:u32)->bool{
     &&scheduledBrickActive(lower);
 }
 fn hostExteriorRowSuperseded(row:u32)->bool{
-  if(row>=ta(3u)||rowKind(row)!=3u||rowTermCount(row)!=1u){return false;}
-  let term=rowTermOffset(row);let coefficient=termCoefficient(term);
+  if(row>=ta(3u)||rowKind(row)!=3u){return false;}
+  let range=rowTermRange(row);if(range.y-range.x!=1u){return false;}
+  let term=range.x;let coefficient=termCoefficient(term);
   if(coefficient==0.0){return false;}
   // A fine dynamic face cannot replace one aggregate exterior incidence on a
   // coarse host cell: many fine seams would race for the same host slot and
@@ -9278,7 +9013,7 @@ fn candidateRemappedFaceVelocity(row:u32)->f32{
   let axis=rowAxis(row);let tangent0=select(0u,1u,axis==0u);
   let tangent1=select(2u,1u,axis==2u);let center=rowCenter(row);
   var widths=vec3f(0.0);
-  let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+  let beginRange=rowTermRange(row);let begin=beginRange.x;let end=beginRange.y;
   for(var term=begin;term<end;term+=1u){widths=max(widths,cellWidths(termCell(term)));}
   let lower=center-0.5*widths;let upper=center+0.5*widths;
   var integral=0.0;var area=0.0;var v=lower[tangent1];

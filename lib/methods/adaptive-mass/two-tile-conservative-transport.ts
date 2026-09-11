@@ -59,7 +59,7 @@ export interface TwoTileConservativeOperator {
   deficits: Float64Array;
   /** Gamma snapshot from which the conditioned density rows were built. */
   sourceGamma: Float64Array;
-  /** CM12 gamma-prime: conditioned row sum plus forward deficit return. */
+  /** CM12 gamma-prime: the complete operator applied to source gamma. */
   nextGamma: Float64Array;
 }
 
@@ -298,7 +298,9 @@ export function buildTwoTileConservativeTransportOperator(
     }
     return conditioned;
   });
-  const nextGamma = Float64Array.from(rows, (row) => compensatedSum(row.values()));
+  const nextGamma = Float64Array.from(rows, (row) => compensatedSum(
+    Array.from(row, ([donor, coefficient]) => coefficient * sourceGamma[donor]),
+  ));
   const conditionedBeta = betaForRows(grid, rows);
   const deficits = Float64Array.from(conditionedBeta, (value) => Math.max(0, 1 - value));
 

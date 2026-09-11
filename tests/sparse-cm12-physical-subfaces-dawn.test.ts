@@ -26,8 +26,8 @@ dawnTest("capacity receipts follow physical face area and extension excludes sam
     device.addEventListener("uncapturederror", e => { e.preventDefault(); errors.push(e.error.message); console.error(e.error.message); });
     const shader = device.createShaderModule({ code: `
 const INVALID=0xffffffffu;
-struct Params{counts:vec4u}
-const p=Params(vec4u(10,0,0,0));
+struct Params{counts:vec4u,recoveryCorrections:vec4f}
+const p=Params(vec4u(10,0,0,0),vec4f(1.0));
 @group(0)@binding(0)var<storage,read_write>state:array<f32>;
 @group(0)@binding(1)var<storage,read_write>conditioning:array<atomic<i32>>;
 @group(0)@binding(2)var<storage,read_write>output:array<vec4f>;
@@ -55,6 +55,7 @@ fn rowArea(r:u32)->f32{_=r;return 4.0;}
 fn rowDistance(r:u32)->f32{return select(2.0,1.5,r==5u);}
 fn rowTermOffset(r:u32)->u32{return 2u*r;}
 fn rowTermCount(r:u32)->u32{return select(2u,5u,r==5u);}
+fn rowTermRange(row:u32)->vec2u{let first=rowTermOffset(row);return vec2u(first,first+rowTermCount(row));}
 fn termCell(t:u32)->u32{
   if(t<10u){return select(0u,t/2u+1u,(t&1u)!=0u);}
   return select(t-5u,0u,t==10u);
@@ -63,7 +64,6 @@ fn termCoefficient(t:u32)->f32{
   if(t<10u){return select(-0.5,0.5,(t&1u)!=0u);}
   return select(1.0/6.0,-2.0/3.0,t==10u);
 }
-fn cm12HotRowTermCoefficient(r:u32,o:u32)->f32{return termCoefficient(rowTermOffset(r)+o);}
 fn cm12HotRowDistance(r:u32)->f32{return rowDistance(r);}
 ${production("cm12PhysicalSubfaceArea")}
 ${production("densityCapacityRepairMass")}
@@ -85,9 +85,9 @@ fn prepare(@builtin(global_invocation_id)id:vec3u){
 ${production("gatherDensityCapacityRepair")}
 @compute @workgroup_size(1)
 fn weights(){
-  output[0]=vec4f(cm12VelocityExtensionNeighborWeight(5u,1u,0u),
-    cm12VelocityExtensionNeighborWeight(5u,1u,2u),
-    cm12VelocityExtensionNeighborWeight(5u,0u,1u),
+  output[0]=vec4f(cm12VelocityExtensionNeighborWeight(5u,1.0/6.0,-2.0/3.0),
+    cm12VelocityExtensionNeighborWeight(5u,1.0/6.0,1.0/6.0),
+    cm12VelocityExtensionNeighborWeight(5u,-2.0/3.0,1.0/6.0),
     cm12PhysicalSubfaceArea(5u,-2.0/3.0,1.0/6.0));
   output[1]=vec4f(f32(densityCapacityRepairShare(100000000,1.0,6.0)));
 }

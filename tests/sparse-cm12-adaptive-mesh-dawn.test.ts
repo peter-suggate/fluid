@@ -393,3 +393,43 @@ for(const fullPool of (process.env.FLUID_FULL_POOL ? [true] : [false,true])) daw
     assert.deepEqual(errors,[]);
   }finally{device?.destroy();await releaseWebGPUExclusiveLock();if(gpu)liveDawnInstances.delete(gpu);}
 });
+
+// The early mini64 tower crosses native macro/fine pages. Counting a far-front
+// sample alone misses the open surface left behind at those shared faces.
+dawnTest("mini64 moving native macro contours remain closed", {timeout:180000}, async()=>{
+  await acquireWebGPUExclusiveLock("dawn-test","mini64-macro-mesh");
+  let device:GPUDevice|undefined, solver:WebGPUAdaptiveMassSolver|undefined, gpu:GPU|undefined;
+  try {
+    const dawn=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);
+    Object.assign(globalThis,dawn.globals); gpu=dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND??"metal"}`]);
+    liveDawnInstances.add(gpu!);
+    const adapter=await gpu!.requestAdapter(); assert.ok(adapter);
+    device=await adapter.requestDevice({requiredLimits:requiredFluidDeviceLimits(adapter.limits)});
+    const errors:string[]=[];
+    device.addEventListener("uncapturederror",event=>{event.preventDefault();errors.push(event.error.message);});
+    const scene=sceneDocument(getSceneDefinition("minimal-power-dam-break-64")); scene.duration_s=1;
+    const values=resolveMethodValues(adaptiveMassMethod,"balanced",{});
+    solver=await adaptiveMassMethod.createSolverAsync!(device,scene,"balanced",values,undefined,()=>{}) as WebGPUAdaptiveMassSolver;
+    await solver.waitForSimulationReady();
+    for(let step=1;step<=10;step++){
+      while(!solver.advanceTo(step/30,[]))await new Promise(setImmediate);
+      if(step%2===0)await device.queue.onSubmittedWorkDone();
+    }
+    await solver.assertSimulationHealthy();
+    const source=solver.globalFineLevelSetSource;
+    const floorY=source.plan.fineCellWidth*.5;
+    for(const ratio of [0,2,4] as const){
+      const result=await runField(device,"mini64",ratio,()=>0,false,source);
+      const surfaceEdges=result.metrics.interiorOpenEdges!.filter(edge=>
+        edge.endpoints.some(point=>Math.abs(point[1]-floorY)>1e-5));
+      console.log(JSON.stringify({scene:"mini64",step:10,ratio,
+        triangles:result.metrics.triangleCount,surfaceOpenEdges:surfaceEdges.length,
+        nonManifold:result.metrics.nonManifoldEdgeCount}));
+      assert.ok(result.metrics.triangleCount>0);
+      assert.equal(result.metrics.nonFiniteCount,0);
+      assert.equal(surfaceEdges.length,0,`macro/fine surface crack: ${JSON.stringify(surfaceEdges[0])}`);
+      assert.equal(result.metrics.nonManifoldEdgeCount,0);
+    }
+    assert.deepEqual(errors,[]);
+  }finally{solver?.destroy();device?.destroy();if(gpu)liveDawnInstances.delete(gpu);await releaseWebGPUExclusiveLock();}
+});

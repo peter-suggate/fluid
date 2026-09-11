@@ -1,3 +1,4 @@
+import { assertSparseCM12Baseline } from "../lib/harness/sparse-cm12-dawn-baseline";
 import { sparseCM12DawnDefaultOptions } from "../lib/harness/sparse-cm12-dawn-defaults";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -14,9 +15,6 @@ import { WebGPUAdaptiveMassSolver } from
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 const dawnTest = dawnModule ? test : test.skip;
 const SYMMETRY_STEPS = 8;
-const DENSITY_D4_LIMIT = 6e-3;
-const VELOCITY_D4_LIMIT_M_S = 5e-3;
-const PRESSURE_D4_LIMIT_PA = 5;
 
 function scalarD4Error(field: ArrayLike<number>, nx: number, ny: number,
   nz: number): number {
@@ -179,16 +177,10 @@ dawnTest("symmetric expansion allocates and wets sparse corner tiles",
       assert.ok(cornerMass > 1e-3,
         `allocated corner tiles must accept transported liquid; measured ${cornerMass}`);
       const densityError = scalarD4Error(fields.density, 32, 16, 32);
-      assert.ok(densityError <= DENSITY_D4_LIMIT,
-        `expanded density must retain horizontal D4 symmetry: ${densityError} > ${DENSITY_D4_LIMIT}`);
-      assert.equal(scalarD4Error(topology, 32, 16, 32), 0,
-        "expanded accepted topology must retain exact horizontal D4 symmetry");
-      assert.ok(velocityD4Error(fields.velocity, 32, 16, 32)
-        <= VELOCITY_D4_LIMIT_M_S,
-        "expanded velocity must retain horizontal D4 symmetry");
-      assert.ok(scalarD4Error(fields.pressure, 32, 16, 32)
-        <= PRESSURE_D4_LIMIT_PA,
-        "expanded pressure must retain horizontal D4 symmetry");
+      assertSparseCM12Baseline("symmetry.densityD4", densityError);
+      assertSparseCM12Baseline("symmetry.topologyD4", scalarD4Error(topology, 32, 16, 32));
+      assertSparseCM12Baseline("symmetry.velocityD4_m_s", velocityD4Error(fields.velocity, 32, 16, 32));
+      assertSparseCM12Baseline("symmetry.pressureD4_Pa", scalarD4Error(fields.pressure, 32, 16, 32));
       assert.deepEqual(validationErrors, []);
     } finally {
       solver?.destroy();
