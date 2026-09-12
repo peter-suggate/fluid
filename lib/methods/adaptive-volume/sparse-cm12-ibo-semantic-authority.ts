@@ -1,7 +1,6 @@
 import { SPARSE_CM12_FACTORED_AEI_INVALID } from
   "./sparse-cm12-factored-aei-topology";
 import {
-  SPARSE_CM12_PACKED_TEMPLATE_CELL_WORDS,
   SPARSE_CM12_PACKED_TEMPLATE_HEADER,
   SPARSE_CM12_PACKED_TEMPLATE_MAGIC,
 } from "./sparse-cm12-factored-aei-packed-template";
@@ -12,6 +11,8 @@ import {
   SPARSE_CM12_INTERNED_BOUNDARY_SLOT_REF_WORDS,
   SPARSE_CM12_INTERNED_BOUNDARY_TEMPLATE_HEADER_WORDS,
   SPARSE_CM12_INTERNED_BOUNDARY_TERM_WORDS,
+  selectSparseCM12InternedBoundaryPatches,
+  sparseCM12InternedBoundaryPatchRows,
   unpackSparseCM12InternedBoundaryRefIdentity,
 } from "./sparse-cm12-interned-boundary-operators";
 import type { SparseCM12InternedBoundaryImage } from
@@ -100,6 +101,18 @@ export function compileSparseCM12IBOSCMTLeafSemantics(options: Readonly<{
     if (!descriptor || descriptor.leafId !== leaf) throw new Error("ISA1 invalid descriptor");
     const rows = new Map<number, readonly number[]>(); let duplicateCandidateRows = 0;
     if (active.has(leaf)) for (let side = 0; side < 6; side += 1) {
+      const explicit = selectSparseCM12InternedBoundaryPatches({
+        catalog: image.compilation.catalog, sourceDescriptorId: descriptorId, side,
+        activeLeaves: active, descriptorIdByLeaf: options.descriptorIdByLeaf,
+      });
+      const explicitIds = new Set(explicit.map((patch) => patch.id));
+      const superseded = new Set(image.compilation.catalog
+        .patchIdsByCanonicalSide[descriptorId]![side]!
+        .map((id) => image.compilation.catalog.patches[id]!)
+        .filter((patch) => patch.targetLeaf === SPARSE_CM12_FACTORED_AEI_INVALID
+          && !explicitIds.has(patch.id))
+        .flatMap((patch) => sparseCM12InternedBoundaryPatchRows(
+          image.compilation.catalog, patch)));
       const offsets = r.words[r.configurationBase + descriptorId * 6 + side]!;
       for (let boundary = 0; boundary < descriptor.resolution ** 2; boundary += 1) {
         const begin = r.words[offsets + boundary]!, end = r.words[offsets + boundary + 1]!;
@@ -111,7 +124,7 @@ export function compileSparseCM12IBOSCMTLeafSemantics(options: Readonly<{
             accepted = selected(active, options.descriptorIdByLeaf, image,
               r.words[requirementAt + 1 + local]!);
           }
-          if (!accepted) continue;
+          if (!accepted || superseded.has(row)) continue;
           if (rows.has(row)) duplicateCandidateRows += 1;
           else rows.set(row, stableRowSemanticWords(r, row));
         }
@@ -125,7 +138,7 @@ export function compileSparseCM12IBOSCMTLeafSemantics(options: Readonly<{
   return Object.freeze(result);
 }
 
-/** Expand selected IBO slot refs into stable row/cell semantics; no IRL read. */
+/** Expand explicit IBO slot refs into stable row/cell semantics; no IRL read. */
 export function compileSparseCM12IBOSlotLeafSemantics(options: Readonly<{
   image: SparseCM12InternedBoundaryImage; slot: 0 | 1; leaves: Iterable<number>;
 }>): readonly SparseCM12IBOSemanticLeafReceipt[] {
@@ -138,14 +151,7 @@ export function compileSparseCM12IBOSlotLeafSemantics(options: Readonly<{
     const source = image.compilation.catalog.canonical[descriptorId]!;
     const rows = new Map<number, readonly number[]>();
     if (active) for (let side = 0; side < 6; side += 1) {
-      const count = image.words[leafAt + 5]! >>> (3 * side) & 7;
-      for (let local = 0; local < count; local += 1) {
-        const refAt = image.layout.slotRefBaseWords[slot]
-          + (leaf * SPARSE_CM12_INTERNED_BOUNDARY_REFS_PER_LEAF + side * 4 + local)
-            * SPARSE_CM12_INTERNED_BOUNDARY_SLOT_REF_WORDS;
-        const [templateId, targetLeaf] = unpackSparseCM12InternedBoundaryRefIdentity(
-          image.words[refAt]!);
-        const rowBase = image.words[refAt + 1]!;
+      const append = (templateId: number, targetLeaf: number, rowBase: number) => {
         const template = image.compilation.templates[templateId]!;
         const target = targetLeaf === SPARSE_CM12_FACTORED_AEI_INVALID ? undefined
           : image.compilation.catalog.canonical[image.words[
@@ -173,6 +179,16 @@ export function compileSparseCM12IBOSlotLeafSemantics(options: Readonly<{
           if (rows.has(row)) throw new Error(`ISA1 duplicate IBO stable row ${row}`);
           rows.set(row, words);
         }
+      };
+      const count = image.words[leafAt + 5]! >>> (3 * side) & 7;
+      for (let local = 0; local < count; local += 1) {
+        const refAt = image.layout.slotRefBaseWords[slot]
+          + (leaf * SPARSE_CM12_INTERNED_BOUNDARY_REFS_PER_LEAF + side * 4 + local)
+            * SPARSE_CM12_INTERNED_BOUNDARY_SLOT_REF_WORDS;
+        const [templateId, targetLeaf] = unpackSparseCM12InternedBoundaryRefIdentity(
+          image.words[refAt]!);
+        const rowBase = image.words[refAt + 1]!;
+        append(templateId, targetLeaf, rowBase);
       }
     }
     const [digest, digestSum] = semanticCommutativeDigest(rows);

@@ -975,11 +975,17 @@ function pressureRowGradient(row: SliceNumericalRow, fields: SliceNumericalField
     const pb = fields.pressureMember[b.cellId] ? input[b.cellId]! : 0;
     return mul(b.coefficient, f(pb - pa));
   }
-  let jump = 0;
+  // A mixed 2:1 seam has one term on one physical side and two on the other.
+  // Reflection swaps those sides, so a single stored-order reduction changes
+  // its f32 association. Reduce each side first, then combine the two side
+  // totals commutatively; this is the CPU form of the reflected seam graph.
+  let negative = 0, positive = 0;
   for (const term of row.terms) if (fields.pressureMember[term.cellId]) {
-    jump = add(jump, mul(term.coefficient, input[term.cellId]!));
+    const value = mul(term.coefficient, input[term.cellId]!);
+    if (term.coefficient < 0) negative = add(negative, value);
+    else positive = add(positive, value);
   }
-  return jump;
+  return add(negative, positive);
 }
 
 function applyPressureOperator(
@@ -1239,7 +1245,12 @@ export function reconstructSliceInterfaces(topology: SliceNumericalTopology,
             if (difference === 1) slope = mul(0.5, f(heights[2]! - heights[0]!));
             if (difference === 2) slope = f(heights[2]! - heights[1]!);
             const integration = direction === 1 ? 1 : 0;
-            const orientation = (integration === 0 ? best.nx : best.ny) >= 0 ? 1 : -1;
+            const orientationComponent = integration === 0 ? best.nx : best.ny;
+            // A zero LS component has no orientation authority on this axis.
+            // Treating signed zero as positive admits an arbitrary +axis
+            // candidate that cannot commute with reflection.
+            if (orientationComponent === 0) continue;
+            const orientation = orientationComponent > 0 ? 1 : -1;
             const candidate = integration === 0
               ? interfaceFromFill(fill, orientation, -slope, [1, 1])
               : interfaceFromFill(fill, -slope, orientation, [1, 1]);

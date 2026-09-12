@@ -152,6 +152,13 @@ export interface SliceResolutionPolicyDecision {
   readonly receipt: SliceResolutionPolicyReceipt;
 }
 
+export interface SliceProjectedTransportSupportDecision {
+  readonly candidateBricks: readonly SliceTopologyBrick[];
+  readonly demandedBrickKeys: ReadonlySet<number>;
+  readonly claimedLeafIds: Uint32Array;
+  readonly faultBits: number;
+}
+
 const resolution = (value: number): SliceTopologyResolution => {
   if (value === 1 || value === 2 || value === 4 || value === 8) return value;
   throw new RangeError(`invalid slice resolution ${value}`);
@@ -522,6 +529,99 @@ function directionallyDemandedBrickKeys(
     }
   }
   return demanded;
+}
+
+/**
+ * Plan the adjacent receiver generation required by the final projected face
+ * field. This is deliberately narrower than the ordinary activity planner:
+ * no history advances, page retires, source demand, region policy, or
+ * activity/curvature promotion participates.
+ *
+ * The current 3x3 swept mask reaches one neighbouring page. Longer
+ * characteristics need the separate exact swept-domain path.
+ */
+export function planSliceProjectedTransportSupport(input: {
+  readonly topology: SliceTopology;
+  readonly fields: SliceResolutionPolicyFields;
+  readonly dt: number;
+  readonly cellSize: number;
+  readonly policy?: SparseCM12ActivityPolicy;
+  readonly maximumLeaves?: number;
+  readonly maximumCells?: number;
+  readonly freeLeafIds?: readonly number[];
+}): SliceProjectedTransportSupportDecision {
+  const {topology,fields}=input;
+  if(fields.density.length!==topology.cells.length
+    ||fields.capacity.length!==topology.cells.length
+    ||fields.cellVelocity.length!==2*topology.cells.length)
+    throw new RangeError("slice projected support fields do not match accepted topology");
+  if(!(input.dt>0)||!(input.cellSize>0))
+    throw new RangeError("slice projected support dt/cellSize must be positive");
+  const policy=input.policy??SPARSE_CM12_ACTIVITY_POLICY;
+  const thresholds=policyThresholds(policy,input.dt,input.cellSize);
+  const measurements=new Map<number,Measurement>();
+  for(const brick of topology.bricks)measurements.set(brick.key,
+    measure(topology,fields,brick,undefined,policy,false,input.dt,thresholds));
+  const freeLeafIds=input.freeLeafIds??[],freeSet=new Set<number>();
+  for(const leaf of freeLeafIds){
+    if(!Number.isSafeInteger(leaf)||leaf<0||freeSet.has(leaf))
+      throw new RangeError(`invalid or duplicate slice WDR free leaf ${leaf}`);
+    const existing=topology.bricks.find(brick=>brick.id===leaf);
+    if(existing&&active(existing))throw new Error(`slice WDR free leaf ${leaf} is still active`);
+    freeSet.add(leaf);
+  }
+  const working=topology.bricks.filter(brick=>!freeSet.has(brick.id))
+    .map(brick=>({...brick}));
+  const demanded=new Set<number>(),required=new Map<number,SliceTopologyResolution>();
+  const claimed:number[]=[];
+  let nextId=topology.bricks.reduce((maximum,brick)=>Math.max(maximum,brick.id),-1)+1;
+  const freeStack=[...freeLeafIds];
+  let nextKey=working.reduce((maximum,brick)=>Math.max(maximum,brick.key),-1)+1;
+  const receiverRung=(source:SliceTopologyBrick,receiver:SliceTopologyBrick)=>{
+    const donorWidth=widthOf(source),receiverSpan=spanOf(receiver);
+    let rung:SliceTopologyResolution=1;
+    while(rung<8&&B*receiverSpan/rung>2*donorWidth)rung=resolution(rung*2);
+    return rung;
+  };
+  for(const source of [...topology.bricks].sort((a,b)=>a.key-b.key)){
+    if(!active(source))continue;
+    const mask=measurements.get(source.key)!.sweptSupportMask,span=spanOf(source);
+    for(let bit=0;bit<9;bit++){
+      if(bit===4||(mask&(1<<bit))===0)continue;
+      const dx=bit%3-1,dy=Math.floor(bit/3)-1;
+      const qx=source.coordinate[0]+(dx<0?-1:dx>0?span:0);
+      const qy=source.coordinate[1]+(dy<0?-1:dy>0?span:0);
+      const fineX=qx*B+.5,fineY=qy*B+.5;
+      if(fineX<0||fineY<0||fineX>=topology.dimensions[0]||fineY>=topology.dimensions[1])continue;
+      let receiver=ownerAt(working,fineX,fineY);
+      if(receiver?.key===source.key)continue;
+      if(!receiver){
+        const id=freeStack.length?freeStack.pop()!:nextId++;
+        receiver={id,key:nextKey++,coordinate:[qx,qy],resolution:1,active:true};
+        working.push(receiver);claimed.push(id);
+      }
+      demanded.add(receiver.key);
+      const rung=receiverRung(source,receiver);
+      required.set(receiver.key,resolution(Math.max(required.get(receiver.key)??1,rung)));
+    }
+  }
+  const targets=new Map(working.map(brick=>[brick.key,brick.resolution] as const));
+  const candidateActive=new Map(working.map(brick=>[brick.key,active(brick)] as const));
+  for(const brick of working)if(demanded.has(brick.key)){
+    targets.set(brick.key,resolution(Math.max(brick.resolution,required.get(brick.key)??1)));
+    candidateActive.set(brick.key,true);
+  }
+  closeTwoToOne(working,targets,[]);
+  let faultBits=SliceResolutionFault.None;
+  const candidate=working.map(brick=>({...brick,resolution:targets.get(brick.key)!,
+    active:candidateActive.get(brick.key)!}));
+  const leafCount=candidate.filter(active).length;
+  const cellCount=candidate.filter(active).reduce((sum,brick)=>sum+brick.resolution**2,0);
+  if(leafCount>(input.maximumLeaves??Infinity))faultBits|=SliceResolutionFault.LeafCapacity;
+  if(cellCount>(input.maximumCells??Infinity))faultBits|=SliceResolutionFault.CellCapacity;
+  return {candidateBricks:faultBits===SliceResolutionFault.None
+    ?candidate:topology.bricks.map(brick=>({...brick})),
+    demandedBrickKeys:demanded,claimedLeafIds:Uint32Array.from(claimed),faultBits};
 }
 
 function incomingFloor(topology: SliceTopology, brick: SliceTopologyBrick,

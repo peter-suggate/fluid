@@ -77,6 +77,7 @@ import { createSparseCM12TransportPacketAuthorityWGSL } from
   "./sparse-cm12-transport-packet-authority.wgsl";
 import type { SparseCM12FinalScalarPacketMaskLayout } from
   "./sparse-cm12-final-scalar-packet-masks";
+
 import { createSparseCM12FinalScalarPacketMaskWGSL } from
   "./sparse-cm12-final-scalar-packet-masks.wgsl";
 import type { SparseCM12Phase1TransportQALayout } from
@@ -289,6 +290,77 @@ fn cm12FluidNeighborReachable(sourcePage:vec3i,offset:vec3i)->bool{
 }
 `;
 }
+
+export const SPARSE_CM12_PRESSURE_ROW_GRADIENT_WGSL = /* wgsl */ `
+fn pressureFineQuadSum(values:array<f32,4>)->f32{
+  // Explicit fused adds retain the two canonical pair boundaries when the
+  // backend enables ordinary-expression reassociation; multiplication by one
+  // is exact, so each operation is the intended binary sum.
+  let low=fma(values[0u],1.0,values[1u]);
+  let high=fma(values[2u],1.0,values[3u]);
+  return low+high;
+}
+
+fn pressureFinePairSum(values:array<f32,4>)->f32{
+  return values[0u]+values[1u];
+}
+
+fn pressureRowGradient(row:u32,inputOffset:u32)->f32{
+  let beginRange=rowTermRange(row);let begin=beginRange.x;let end=beginRange.y;
+  if(end-begin==2u&&termCoefficient(begin)==-termCoefficient(begin+1u)){
+    let a=termCell(begin);let b=termCell(begin+1u);
+    let pa=select(0.0,state[inputOffset+a],peiPressureCellMember(a));
+    let pb=select(0.0,state[inputOffset+b],peiPressureCellMember(b));
+    return termCoefficient(begin+1u)*(pb-pa);
+  }
+  // Strong 2:1 grading gives a coarse term opposite one tangentially
+  // lexicographic 2x2 fine patch. Preserve all four slots when pressure
+  // membership is sparse, then use the reflection-invariant quad tree. This
+  // has the same three fine-side additions as the former serial reduction.
+  if(end-begin==3u||end-begin==5u){
+    var negative:array<f32,4>;var positive:array<f32,4>;
+    var negativeCoefficient:array<f32,4>;var positiveCoefficient:array<f32,4>;
+    var negativeCount=0u;var positiveCount=0u;var bounded=true;
+    for(var term=begin;term<end;term+=1u){
+      let cell=termCell(term);let value=select(0.0,
+        state[inputOffset+cell],peiPressureCellMember(cell));
+      let coefficient=termCoefficient(term);
+      if(coefficient<0.0){
+        if(negativeCount<4u){negative[negativeCount]=value;
+          negativeCoefficient[negativeCount]=coefficient;}else{bounded=false;}
+        negativeCount+=1u;
+      }else{
+        if(positiveCount<4u){positive[positiveCount]=value;
+          positiveCoefficient[positiveCount]=coefficient;}else{bounded=false;}
+        positiveCount+=1u;
+      }
+    }
+    let fineCount=(end-begin)-1u;
+    if(bounded&&negativeCount==1u&&positiveCount==fineCount){
+      var equal=true;for(var i=1u;i<fineCount;i+=1u){
+        equal=equal&&positiveCoefficient[i]==positiveCoefficient[0u];}
+      if(equal){let fineSum=select(pressureFinePairSum(positive),
+          pressureFineQuadSum(positive),fineCount==4u);
+        return negativeCoefficient[0u]*negative[0u]+positiveCoefficient[0u]*fineSum;}
+    }
+    if(bounded&&negativeCount==fineCount&&positiveCount==1u){
+      var equal=true;for(var i=1u;i<fineCount;i+=1u){
+        equal=equal&&negativeCoefficient[i]==negativeCoefficient[0u];}
+      if(equal){let fineSum=select(pressureFinePairSum(negative),
+          pressureFineQuadSum(negative),fineCount==4u);
+        return negativeCoefficient[0u]*fineSum+positiveCoefficient[0u]*positive[0u];}
+    }
+  }
+  // Deliberately ungraded QA topologies can contain 1+16 or 1+64 terms.
+  // They retain the established generic reduction; accepted production
+  // topology is strongly graded and takes the bounded path above.
+  var jump=0.0;
+  for(var term=begin;term<end;term+=1u){let cell=termCell(term);
+    if(peiPressureCellMember(cell)){jump+=termCoefficient(term)*state[inputOffset+cell];}
+  }
+  return jump;
+}
+`;
 
 export function createWebgpuSparseCM12ResidentWGSL(
   brickFineResolution: SparseCM12BrickFineResolution = 8,
@@ -782,8 +854,9 @@ fn cm12ISAValidateScheduledLeafPacket(leaf:u32,lane:u32){
       let range=cm12ISACandidateFaceRange(descriptor,side,boundary);
       for(var local=0u;local<range.y;local+=1u){
         let row=cm12ISACandidateFaceRow(range.x+local);
-        if(cm12ISAScheduledRow(row)){expected=cm12ISAFold(expected,
-          cm12ISASCMTStableRowHash(row),row);}}}
+        if(cm12ISAScheduledRow(row)
+          &&(rowKind(row)!=3u||!hostExteriorRowSupersededAt(row,true))){
+          expected=cm12ISAFold(expected,cm12ISASCMTStableRowHash(row),row);}}}
     for(var side=0u;side<6u;side+=1u){
       let refCount=cm12IBOFaceRefCount(slot,leaf,side);
       for(var localRef=0u;localRef<refCount;localRef+=1u){
@@ -791,7 +864,8 @@ fn cm12ISAValidateScheduledLeafPacket(leaf:u32,lane:u32){
         let rowCount=cm12IBOTemplateHeaderWord(reference.x,6u);
         for(var localRow=lane;localRow<rowCount;localRow+=64u){
           let semantic=cm12ISAIBOTemplateRowHash(slot,leaf,reference,localRow);
-          observed=cm12ISAFold(observed,semantic.y,semantic.x);}}}}
+          if(rowKind(semantic.x)!=3u||!hostExteriorRowSupersededAt(semantic.x,true)){
+            observed=cm12ISAFold(observed,semantic.y,semantic.x);}}}}}
   cm12ISAPacketExpectedCount[lane]=expected.x;
   cm12ISAPacketExpectedXor[lane]=expected.y;
   cm12ISAPacketExpectedSum[lane]=expected.z;
@@ -893,6 +967,25 @@ fn cm12IBOTryClaimLeaf(slot:u32,leaf:u32,generation:u32)->bool{
     if(claim.exchanged){return true;}}
   cm12IBORecordFault(vec2u(IBO1_FAULT_GENERATION,leaf));return false;
 }
+// A full-face exterior patch is redundant only when every one of its actual
+// sparse-air rows is replaced by a selected internal interface. Mixed-rung
+// patches can map several source samples through one row, so this proof uses
+// the stable exterior rows themselves rather than patch bounding metadata.
+fn cm12IBOFullExteriorSuperseded(entry:vec3u)->bool{
+  if(entry.x!=IRL1_INVALID||entry.y==IRL1_INVALID){return false;}
+  let packed=cm12IBOTemplateHeaderWord(entry.y,4u);
+  let dimensions=vec3u(packed&1023u,(packed>>10u)&1023u,
+    (packed>>20u)&1023u);
+  let axis=cm12IBOTemplateHeaderWord(entry.y,3u)/2u;
+  let tangent0=select(0u,1u,axis==0u);
+  let tangent1=select(2u,1u,axis==2u);
+  let rowCount=cm12IBOTemplateHeaderWord(entry.y,6u);
+  if(axis>=3u||rowCount!=dimensions[tangent0]*dimensions[tangent1]){return false;}
+  for(var local=0u;local<rowCount;local+=1u){
+    let row=entry.z+cm12IBOTemplateRowWord(entry.y,local,0u);
+    if(rowKind(row)!=3u||!hostExteriorRowSupersededAt(row,true)){return false;}}
+  return true;
+}
 fn cm12IBOCompileScheduledLeaf(leaf:u32){
   if(leaf>=IBO1_LEAF_CAPACITY){return;}let slot=cm12IBOShadowSlot();
   let generation=cm12IBOCandidateGeneration();
@@ -904,7 +997,9 @@ fn cm12IBOCompileScheduledLeaf(leaf:u32){
     let count=cm12IBOInstantiationCount(descriptor,side);
     for(var local=0u;local<count;local+=1u){
       let entry=cm12IBOInstantiationEntry(descriptor,side,local);
-      var selected=entry.x==IRL1_INVALID;var targetLeaf=IRL1_INVALID;
+      var selected=entry.x==IRL1_INVALID
+        &&!cm12IBOFullExteriorSuperseded(entry);
+      var targetLeaf=IRL1_INVALID;
       if(entry.x!=IRL1_INVALID){targetLeaf=cm12IBOCanonicalWord(entry.x,1u);
         selected=targetLeaf<IBO1_LEAF_CAPACITY&&scheduledBrickActive(targetLeaf)
           &&cm12IBOScheduledCanonical(targetLeaf)==entry.x;}
@@ -6040,21 +6135,7 @@ fn initializeJacobiDirection(@builtin(global_invocation_id)gid:vec3u,
   reducePair(lid.x,wid.x,gamma,rhs2);
 }
 
-fn pressureRowGradient(row:u32,inputOffset:u32)->f32{
-  let beginRange=rowTermRange(row);let begin=beginRange.x;let end=beginRange.y;
-  if(end-begin==2u&&termCoefficient(begin)==-termCoefficient(begin+1u)){
-    let a=termCell(begin);let b=termCell(begin+1u);
-    let pa=select(0.0,state[inputOffset+a],peiPressureCellMember(a));
-    let pb=select(0.0,state[inputOffset+b],peiPressureCellMember(b));
-    return termCoefficient(begin+1u)*(pb-pa);
-  }
-  var jump=0.0;
-  for(var term=begin;term<end;term+=1u){let cell=termCell(term);
-    if(peiPressureCellMember(cell)){jump+=termCoefficient(term)*state[inputOffset+cell];}
-  }
-  return jump;
-}
-
+${SPARSE_CM12_PRESSURE_ROW_GRADIENT_WGSL}
 fn applyOperator(cell:u32,inputOffset:u32)->f32{
   // Evaluate G^T W G as face pressure differences. Expanding it into a
   // large diagonal product plus negative neighbours cancels hydrostatic

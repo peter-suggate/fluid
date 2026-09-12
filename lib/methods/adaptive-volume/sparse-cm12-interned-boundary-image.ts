@@ -14,6 +14,7 @@ import {
   SPARSE_CM12_INTERNED_BOUNDARY_TEMPLATE_HEADER_WORDS,
   SPARSE_CM12_INTERNED_BOUNDARY_TERM_WORDS,
   packSparseCM12InternedBoundaryRefIdentity,
+  selectSparseCM12InternedBoundaryPatches,
   unpackSparseCM12InternedBoundaryRefIdentity,
   type SparseCM12InternedBoundaryCompilation,
   type SparseCM12InternedBoundaryLayout,
@@ -182,11 +183,9 @@ readonly (readonly SparseCM12FactoredAEIPatchDescriptor[])[] => {
   const { catalog } = image.compilation;
   const descriptorId = descriptors[leaf]!;
   return Array.from({ length: 6 }, (_, side) => !active.has(leaf) ? []
-    : catalog.patchIdsByCanonicalSide[descriptorId]![side]!
-      .map((id) => catalog.patches[id]!)
-      .filter((patch) => patch.targetLeaf === SPARSE_CM12_FACTORED_AEI_INVALID
-        || active.has(patch.targetLeaf)
-          && descriptors[patch.targetLeaf] === patch.targetCanonicalId));
+    : selectSparseCM12InternedBoundaryPatches({ catalog,
+      sourceDescriptorId: descriptorId, side, activeLeaves: active,
+      descriptorIdByLeaf: descriptors }));
 };
 
 const refWord = (image: SparseCM12InternedBoundaryImage, slot: 0 | 1,

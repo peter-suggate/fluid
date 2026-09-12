@@ -10,7 +10,8 @@ test("ITR1 WGSL maps face packets to stable IBO rows", () => {
   const source = createSparseCM12IboTRASupplementWGSL({ layout,
     arenaName: "fixtureArena", hookPrefix: "fixture" });
   assert.match(source, /fn itr1StableRowAndBucketOwner/);
-  assert.match(source, /fn itr1StableNegativeBoundaryRowForOwner/);
+  assert.match(source, /fn itr1NegativeBoundaryRefCount/);
+  assert.match(source, /fn itr1NegativeBoundaryOwnerRows/);
   assert.match(source, /fn itr1StablePositiveSparseAirRowAndBucketOwner/);
   assert.match(source, /fixtureIBORef/);
   assert.match(source, /fixtureIBOTemplateRowWord/);

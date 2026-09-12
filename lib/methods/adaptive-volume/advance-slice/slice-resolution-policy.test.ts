@@ -5,7 +5,7 @@ import test from "node:test";
 import { SPARSE_CM12_ACTIVITY_POLICY,
   type SparseCM12ActivityPolicy } from "../features/adaptivity/policy";
 import { compileSliceTopology, type SliceTopologyBrick } from "./slice-topology";
-import { initializeSliceResolutionPolicy, planSliceResolution,
+import { initializeSliceResolutionPolicy, planSliceProjectedTransportSupport, planSliceResolution,
   SliceActivityReason, SLICE_RESOLUTION_POLICY_SOURCE,
   type SliceResolutionPolicyState } from "./slice-resolution-policy";
 
@@ -101,6 +101,26 @@ test("swept material support activates an allocated dry frontier leaf", () => {
   assert.equal(receiver.acceptedActive, false);
   assert.equal(receiver.candidateActive, true);
   assert.equal(receiver.scheduledResolution, 8);
+});
+
+test("projected transport support changes only its receiver and required grading", () => {
+  const wet = new Float32Array(64);
+  for (let y = 0; y < 8; y++) wet[7 + 8 * y] = 1;
+  const {topology,fields}=setup([
+    {id:0,key:0,coordinate:[0,0],resolution:8,density:wet},
+    {id:1,key:1,coordinate:[1,0],resolution:4,active:false},
+    {id:3,key:3,coordinate:[3,0],resolution:1,density:new Float32Array([.5])},
+  ],[32,8]);
+  for(const cell of topology.cells)if(cell.brickKey===0)
+    fields.cellVelocity[2*cell.id]=1;
+  const decision=planSliceProjectedTransportSupport({topology,fields,
+    dt:1/60,cellSize:.05,policy:policy(),maximumLeaves:4,maximumCells:256});
+  assert.equal(decision.faultBits,0);
+  assert.deepEqual(decision.candidateBricks.map(brick=>
+    [brick.key,brick.resolution,brick.active!==false]),[
+    [0,8,true],[1,4,true],[3,1,true],
+  ]);
+  assert.deepEqual([...decision.demandedBrickKeys],[1]);
 });
 
 test("swept material support does not grow an unswept face halo", () => {

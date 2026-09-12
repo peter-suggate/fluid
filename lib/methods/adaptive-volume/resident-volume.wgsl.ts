@@ -143,6 +143,93 @@ fn markGeometricTransportFrontierActivity(@builtin(global_invocation_id)gid:vec3
   let cell=acceptedTemplateCellInvocation(gid.x);
   if(cell!=INVALID){incrementalActivityMarkCellClosure(cell);}
 }
+
+const GV_PROJECTED_TRANSPORT_DEMAND_COUNT:u32=26u;
+@compute @workgroup_size(64)
+fn beginProjectedGeometricTransportReceivers(@builtin(global_invocation_id)gid:vec3u){
+  if(gid.x==0u){atomicStore(&activity[GV_PROJECTED_TRANSPORT_DEMAND_COUNT],0u);}
+  let brick=gid.x;if(brick<p.dispatch.w){
+    atomicStore(&activity[activityRecord(brick)+3u],0u);
+  }
+}
+
+// Pressure can create an outward free-surface flux that was absent from the
+// prephysics velocity field. Publish that exact adjacent receiver request
+// after projection and before conservative transport. Physical world walls
+// may share the one-sided row representation, but SparseWorld allocation
+// rejects their unreachable direction.
+@compute @workgroup_size(64)
+fn markProjectedGeometricTransportReceivers(@builtin(global_invocation_id)gid:vec3u){
+  let row=acceptedTemplateRowInvocation(gid.x);
+  if(row==INVALID||!gvAcceptedPhysicalRow(row)||rowKind(row)!=3u){return;}
+  let range=rowTermRange(row);if(range.y-range.x!=1u){return;}
+  let term=range.x;let cell=termCell(term);
+  if(!cellActive(cell)||state[destinationDensity()+cell]<=0.0){return;}
+  let aperture=rowOpenFraction(row);let area=rowArea(row);
+  if(aperture<=0.0||area<=1e-8){return;}
+  var velocity=state[destinationFaceVelocity()+row];
+  if(hasSolidBoundaries()){
+    velocity-=(1.0-aperture)*rowSolidVelocity(row);
+  }
+  let coefficient=termCoefficient(term);
+  let outwardVolume=-coefficient*velocity*area*p.frame.x;
+  if(outwardVolume<=gvRoundoff(cellOpenVolume(cell))){return;}
+  let axis=rowAxis(row);var offset=vec3i(0);
+  offset[axis]=select(-1,1,coefficient<0.0);
+  let sourceBrick=cellBrick(cell);
+  let sourceCoordinate=cm12WorldLeafCoordinate(sourceBrick);
+  if(!cm12FluidNeighborReachable(sourceCoordinate,offset)){return;}
+  let receiver=cm12WorldOwnerAt(sourceCoordinate+offset);
+  if(receiver!=INVALID&&brickActive(receiver)){return;}
+  let bit=u32(offset.x+1)+3u*u32(offset.y+1)+9u*u32(offset.z+1);
+  let prior=atomicOr(&activity[activityRecord(sourceBrick)+3u],1u<<bit);
+  if((prior&(1u<<bit))==0u){
+    atomicAdd(&activity[GV_PROJECTED_TRANSPORT_DEMAND_COUNT],1u);
+  }
+}
+
+fn stageProjectedGeometricTransportReceiver(brick:u32){
+  revokeCM12SourceTopologyLease();
+  let output=activityRecord(brick);
+  // Authored inactive leaves keep their coarsest compiled rung; 2:1 closure
+  // may promote it if the donor requires that. Dynamically synthesized pages
+  // currently own only a fixed B8 graph and must use that graph until their
+  // mixed-rung construction path exists.
+  let compiled=select(acceptedBrickResolution(brick),BRICK_FINE_RESOLUTION,
+    brick>=CM12_WDR_INITIAL_LEAVES);
+  let requested=select(compiled,applySparseCM12RefinementRegionBounds(brick,compiled),
+    brickCandidatePlanningEnabled(brick));
+  atomicStore(&activity[output+8u],requested);
+  atomicStore(&activity[output+47u],requested);
+  atomicStore(&activity[output+9u],1u|ACTIVITY_LIFECYCLE_CHANGED);
+  if(frozenFrontierNeedsCompiledGraph(brick)){
+    atomicOr(&activity[output+9u],ACTIVITY_FROZEN_FRONTIER_GENERATION);
+    return;
+  }
+  setCandidateBrickActiveAt(output,true);
+}
+
+@compute @workgroup_size(64)
+fn activateProjectedGeometricTransportReceivers(@builtin(workgroup_id)wid:vec3u,
+ @builtin(local_invocation_index)lane:u32){
+  let brick=wid.x;if(brick>=p.dispatch.w){return;}
+  if(lane==0u){atomicStore(&frontierDemanded,0u);}workgroupBarrier();
+  if(!brickActive(brick)&&cm12WorldLeafAllocated(brick)&&lane<26u){
+    let neighborBit=select(lane,lane+1u,lane>=13u);
+    let offset=vec3i(i32(neighborBit%3u)-1,i32((neighborBit/3u)%3u)-1,
+      i32(neighborBit/9u)-1);
+    let neighbor=cm12WorldOwnerAt(cm12WorldLeafCoordinate(brick)+offset);
+    if(neighbor!=INVALID&&neighbor!=brick&&brickActive(neighbor)){
+      let demandBit=26u-neighborBit;
+      if((atomicLoad(&activity[activityRecord(neighbor)+3u])
+        &(1u<<demandBit))!=0u){atomicStore(&frontierDemanded,1u);}
+    }
+  }
+  workgroupBarrier();
+  if(lane==0u&&atomicLoad(&frontierDemanded)!=0u){
+    stageProjectedGeometricTransportReceiver(brick);
+  }
+}
 @compute @workgroup_size(64)
 fn publishGeometricTransportFrontierSource(@builtin(global_invocation_id)gid:vec3u){
   let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}

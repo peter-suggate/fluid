@@ -1,0 +1,339 @@
+{
+  "generatedAt": "2026-09-12T19:27:14.371Z",
+  "sourceFingerprint": {
+    "kind": "sparse-cm12-source-content",
+    "version": 1,
+    "algorithm": "sha256",
+    "scope": "git-listed-lib-tools-and-build-manifests",
+    "fileCount": 1276,
+    "sha256": "1c15404b3310450f9570dea6d730eba5319f7eb2ee50a6d6c78a108c3eedefc8"
+  },
+  "method": "WebGPUSparseCM12Resident.recordPreparedGeneration (CPU resource recorder; no GPU)",
+  "input": {
+    "sceneId": "minimal-power-dam-break-32",
+    "dimensions": [
+      32,
+      32,
+      32
+    ],
+    "finestCellSize_m": 0.025,
+    "brickFineResolution": 8,
+    "presentationPageResolution": 8,
+    "selectorMode": "coarse-first",
+    "surfaceFineRings": 1,
+    "initialSurfaceCoarseningBiasRings": 1,
+    "curvatureTolerance": 0.25,
+    "topologyPageCapacityMaximum": 512
+  },
+  "atlas": {
+    "generation": 1,
+    "leaves": 64,
+    "activeLeaves": 36,
+    "resolutionHistogram": {
+      "B1": 11,
+      "B2": 22,
+      "B4": 23,
+      "B8": 8
+    },
+    "activeResolutionHistogram": {
+      "B1": 7,
+      "B2": 10,
+      "B4": 11,
+      "B8": 8
+    },
+    "spanHistogram": {
+      "span1": 64
+    }
+  },
+  "acceptedGrid": {
+    "cells": 5755,
+    "rows": 16920,
+    "rowTerms": 34530,
+    "rowKinds": {
+      "intra-brick": 14328,
+      "brick-face": 806,
+      "sparse-air": 1167,
+      "mixed-seam": 619
+    },
+    "mixedSeamRows": 619,
+    "sparseAirRows": 1167
+  },
+  "resident": {
+    "allRungTemplateCells": 37440,
+    "allRungTemplateRows": 146928,
+    "templateWords": 4244382,
+    "templateBytes": 16977528,
+    "topologyPageCapacity": 404,
+    "worldLeafCapacity": 468,
+    "physicalCellCapacity": 244288,
+    "physicalRowCapacity": 845040,
+    "initialAcceptedCellWorklist": 4887,
+    "initialAcceptedRowWorklist": 15006,
+    "cellCapacityToAcceptedRatio": 49.98731328013096,
+    "rowCapacityToAcceptedRatio": 56.313474610155936,
+    "allocatedBytes": 276033788,
+    "allocatedMiB": 263.24633407592773,
+    "pressure": {
+      "fineEdges": 337440,
+      "coarseEdges": 288,
+      "hierarchyGroups": 9,
+      "hierarchyEdges": 24,
+      "scratchBytes": 2337664
+    },
+    "transportExecutionImageLayout": {
+      "brickFineResolution": 8,
+      "logicalBrickDimensions": [
+        4,
+        4,
+        4
+      ],
+      "leafCapacity": 468,
+      "packetsPerLeaf": 64,
+      "packetCapacity": 29952,
+      "packetEdge": 4,
+      "packetAxisCapacity": 4,
+      "spatialTilesPerLogicalBrickAxis": 2,
+      "spatialTilesPerLogicalBrick": 8,
+      "maximumSpanBricks": 1,
+      "logicalSlotsPerLeaf": 1,
+      "spatialTilesPerLeaf": 8,
+      "spatialTileCapacity": 3744,
+      "slotBaseWords": [
+        24,
+        138584
+      ],
+      "slotStrideWords": 138560,
+      "slotLeafBaseOffsets": [
+        32,
+        138592
+      ],
+      "slotPacketBaseOffsets": [
+        3776,
+        142336
+      ],
+      "slotSpatialTileBaseOffsets": [
+        123584,
+        262144
+      ],
+      "totalWords": 277144,
+      "totalBytes": 1108576
+    },
+    "faceAddressLayout": {
+      "baseWords": 14608448,
+      "leafCapacity": 64,
+      "interiorTileCount": 512,
+      "seamAddressCount": 28608,
+      "seamPacketCount": 447,
+      "interiorBaseWords": 14608464,
+      "seamBaseWords": 14609024,
+      "dispatchWidth": 65535,
+      "interiorDispatchRows": 1,
+      "seamDispatchRows": 1,
+      "totalWords": 14637632,
+      "totalBytes": 116736
+    }
+  },
+  "recipe": {
+    "operations": 602,
+    "operationsByMethod": {
+      "beginComputePass": 1,
+      "createBindGroup": 15,
+      "createBindGroupLayout": 3,
+      "createBuffer": 36,
+      "createCommandEncoder": 1,
+      "createComputePipelineAsync": 235,
+      "createPipelineLayout": 3,
+      "createShaderModule": 58,
+      "dispatchWorkgroups": 4,
+      "end": 1,
+      "finish": 1,
+      "getBindGroupLayout": 1,
+      "setBindGroup": 1,
+      "setPipeline": 4,
+      "submit": 1,
+      "writeBuffer": 237
+    }
+  },
+  "retainedBuffers": [
+    {
+      "id": 2,
+      "label": "Sparse Geometric (CM12) resident state",
+      "bytes": 171540400
+    },
+    {
+      "id": 9,
+      "label": "Sparse Geometric (CM12) physical topology templates and worklists",
+      "bytes": 61636416
+    },
+    {
+      "id": 8,
+      "label": "Sparse Geometric (CM12) isolated candidate cell fields",
+      "bytes": 15029888
+    },
+    {
+      "id": 6,
+      "label": "Sparse Geometric (CM12) conservative transport and conditioning accumulators",
+      "bytes": 10749052
+    },
+    {
+      "id": 10,
+      "label": "Sparse CM12 read-only pressure topology",
+      "bytes": 4516892
+    },
+    {
+      "id": 4,
+      "label": "Sparse Geometric (CM12) accepted effective transport velocity",
+      "bytes": 3908608
+    },
+    {
+      "id": 7,
+      "label": "Sparse CM12 resident activity history",
+      "bytes": 3187756
+    },
+    {
+      "id": 11,
+      "label": "Sparse CM12 pressure aggregate and execution arena",
+      "bytes": 2363136
+    },
+    {
+      "id": 30,
+      "label": "Sparse Geometric (CM12) accepted/candidate fine presentation samples",
+      "bytes": 1916928
+    },
+    {
+      "id": 12,
+      "label": "Sparse CM12 Phase-1 transport execution image",
+      "bytes": 1108576
+    },
+    {
+      "id": 3,
+      "label": "Sparse Geometric (CM12) resident reductions",
+      "bytes": 61072
+    },
+    {
+      "id": 28,
+      "label": "Sparse CM12 compact fine presentation metadata",
+      "bytes": 7488
+    },
+    {
+      "id": 40,
+      "label": "Sparse Geometric (CM12) velocity-extension depth records",
+      "bytes": 2048
+    },
+    {
+      "id": 29,
+      "label": "Sparse CM12 compact fine presentation worklist",
+      "bytes": 1900
+    },
+    {
+      "id": 1,
+      "label": "Sparse CM12 resident topology",
+      "bytes": 1032
+    },
+    {
+      "id": 0,
+      "label": "Sparse Geometric (CM12) resident parameters",
+      "bytes": 864
+    },
+    {
+      "id": 37,
+      "label": "Sparse Geometric (CM12) resident diagnostic readback",
+      "bytes": 856
+    },
+    {
+      "id": 26,
+      "label": "Sparse Geometric (CM12) FCA1 fixed authority indirect dispatches",
+      "bytes": 168
+    },
+    {
+      "id": 18,
+      "label": "Sparse Geometric (CM12) persistent pressure-cache indirect dispatches",
+      "bytes": 144
+    },
+    {
+      "id": 13,
+      "label": "Sparse CM12 accepted indirect dispatch snapshot",
+      "bytes": 132
+    },
+    {
+      "id": 14,
+      "label": "Sparse Geometric transport substep indirect dispatch",
+      "bytes": 108
+    },
+    {
+      "id": 5,
+      "label": "Sparse Geometric (CM12) resident scalar reductions",
+      "bytes": 80
+    },
+    {
+      "id": 20,
+      "label": "Sparse Geometric projected transport topology dispatch gate",
+      "bytes": 72
+    },
+    {
+      "id": 24,
+      "label": "Sparse Geometric (CM12) FPL1 fixed packet indirect dispatches",
+      "bytes": 72
+    },
+    {
+      "id": 17,
+      "label": "Sparse Geometric (CM12) PEI1 pressure execution dispatches",
+      "bytes": 48
+    },
+    {
+      "id": 19,
+      "label": "Sparse Geometric (CM12) transport and cached VEX indirect dispatches",
+      "bytes": 24
+    },
+    {
+      "id": 27,
+      "label": "Sparse Geometric (CM12) compact fine presentation parameters",
+      "bytes": 16
+    },
+    {
+      "id": 15,
+      "label": "Sparse Geometric (CM12) pressure-cell indirect dispatch",
+      "bytes": 12
+    },
+    {
+      "id": 16,
+      "label": "Sparse Geometric (CM12) pressure-membership bootstrap indirect dispatches",
+      "bytes": 12
+    },
+    {
+      "id": 21,
+      "label": "Sparse Geometric (CM12) sharpening packet indirect dispatch",
+      "bytes": 12
+    },
+    {
+      "id": 22,
+      "label": "Sparse Geometric (CM12) packed coarse transport indirect dispatch",
+      "bytes": 12
+    },
+    {
+      "id": 23,
+      "label": "Sparse Geometric (CM12) refinement-policy leader indirect dispatch",
+      "bytes": 12
+    },
+    {
+      "id": 25,
+      "label": "Sparse Geometric (CM12) FPP1 compact page indirect dispatch",
+      "bytes": 12
+    },
+    {
+      "id": 31,
+      "label": "Sparse Geometric (CM12) fine presentation work A",
+      "bytes": 4
+    },
+    {
+      "id": 32,
+      "label": "Sparse Geometric (CM12) fine presentation work B",
+      "bytes": 4
+    },
+    {
+      "id": 33,
+      "label": "Sparse Geometric (CM12) fine presentation rollback",
+      "bytes": 4
+    }
+  ]
+}

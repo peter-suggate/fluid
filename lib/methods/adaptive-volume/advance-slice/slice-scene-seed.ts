@@ -1,5 +1,5 @@
 import type { SparseAdaptiveMassAtlas } from "../sparse-brick-atlas";
-import type { SceneDescription } from "../../../core/model";
+import type { FluidRefinementRegion, SceneDescription } from "../../../core/model";
 import type { MethodParamValues } from "../../../core/method-contract";
 import type { SolidWorld } from "../../../core/solid-world";
 import type { AdaptiveMassSolverOptions } from "../method";
@@ -72,6 +72,17 @@ export interface SliceSceneSeed {
   /** Exact production sparse-atlas generation from which this plane was cut. */
   readonly sourceAtlas?: SparseAdaptiveMassAtlas;
   readonly production?: SliceProductionContext;
+  /**
+   * Enforcement regions this cut obeys, overriding the production document's
+   * own when present.
+   *
+   * Absent means "whatever the scene authored", which is how every seed is
+   * built; a lab that draws one writes the whole list here rather than into
+   * `production.scene`, because the production document is also the thing the
+   * seed was *sampled from* and editing it would make the run disagree with
+   * the world it came out of. Read through `sliceSceneRegions`, never off either field directly.
+   */
+  readonly refinementRegions?: readonly FluidRefinementRegion[];
   /** Acceleration in the 2-D x/canvas-down-y frame, m/s^2. */
   readonly gravity: readonly [number, number];
   readonly dt: number;

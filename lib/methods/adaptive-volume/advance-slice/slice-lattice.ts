@@ -8,15 +8,21 @@
 import { type AdvanceSlice, sliceCell } from "./slice-solver";
 
 /**
- * A reconstructed interface, ready to clip against the unit square.
+ * A reconstructed interface, in the two frames its two readers need.
  *
- * `nx, ny` point out of the liquid in the canvas frame (y down) and `offset` is
- * measured from the cell's low corner, not its centre — the conversion happens
- * once, in `buildSliceLattice`, so no consumer has to remember it.
+ * `nx, ny` are the unit normal out of the liquid in the canvas frame (y down):
+ * a direction, and the thing a probe or an arrow should read. `clipNx, clipNy`
+ * are that same plane rescaled onto the cell's *unit square*, which is the only
+ * form `clipUnitSquare` can take, and `offset` is the distance from the cell's
+ * low corner in finest cells — the units the clip pair is scaled into. Both
+ * conversions happen once, in `buildSliceLattice`, so no consumer has to
+ * remember either of them.
  */
 export interface LatticePlane {
   readonly nx: number;
   readonly ny: number;
+  readonly clipNx: number;
+  readonly clipNy: number;
   readonly offset: number;
 }
 
@@ -113,19 +119,34 @@ export function buildSliceLattice(lattice: SliceLattice, s: AdvanceSlice): void 
     const fill = capacity > 1e-8 ? Math.fround(volume / capacity) : 0;
     const px = fields.interfaceNormal[2 * cell.id]!;
     const py = fields.interfaceNormal[2 * cell.id + 1]!;
-    /* Into the drawing's frame, both axes at once.
+    /* Into the drawing's frame, all three conversions at once.
      *
-     * The published record is written about the cell *centre*, with y up; a
-     * drawn cell is the unit square with y down. Reflecting y is just negating
-     * ny — a reflection about the centre leaves a centre-based offset alone —
-     * and moving the origin from the centre to the corner is the half-normal
-     * shift the solver's own `sliceLiquidPolygon` applies for the same reason.
-     * Skipping it is not a small error: it misplaces the interface by up to
-     * half a cell, which reads as a surface drawn on the wrong side of its own
-     * row. `offset` below is therefore always ready for `clipUnitSquare`. */
+     * The published record is written about the cell *centre*, with y up, and
+     * measured in finest cells — `geometricPlaneBoxFraction` takes the offset
+     * in the same units as the cell's widths, which is what the resident writes
+     * and what this reads back. A drawn cell is the unit square with y down.
+     *
+     * Reflecting y is just negating ny; a reflection about the centre leaves a
+     * centre-based offset alone. Moving the origin from the centre to the
+     * corner is the half-normal shift the solver's own `sliceLiquidPolygon`
+     * applies for the same reason — but the half-normal is half of `n · widths`
+     * and not half of `n`, because the offset is in finest cells and a cell on
+     * a coarse rung is more than one of them across.
+     *
+     * That leaves the clip. `clipUnitSquare` cuts the unit square, so the plane
+     * has to arrive in `u = x / width` coordinates: `n·x <= d` becomes
+     * `(n · widths)·u <= d`, which is the axis-scaled pair below. Skipping
+     * either conversion is not a small error. Skipping the shift misplaces the
+     * interface by up to half a cell, which reads as a surface drawn on the
+     * wrong side of its own row. Skipping the scale misplaces it by a factor of
+     * the rung: an 8² cell holding 36% liquid drew as empty, because its plane
+     * landed eight cell-widths outside the box it was being clipped against,
+     * and every rung above the finest drew its surface somewhere it is not. */
     const ny = -py;
+    const clipNx = px * width, clipNy = ny * height;
     const plane = px === 0 && py === 0 ? null : {
-      nx: px, ny, offset: fields.interfaceOffset[cell.id]! + 0.5 * (px + ny),
+      nx: px, ny, clipNx, clipNy,
+      offset: fields.interfaceOffset[cell.id]! + 0.5 * (clipNx + clipNy),
     };
     return Object.freeze({
       x0: cell.minimumFine[0], y0, width, height, size: width,

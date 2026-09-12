@@ -141,6 +141,13 @@ fn geometricResidentProjectedInterfaceFromFill(fill:f32,gradient:vec3f,
   return GeometricInterfacePlane(normal,geometricPlaneBoxOffset(normal,widths,fill));
 }
 
+// An ELVIRA integration orientation must come from the LS fallback. Choosing
+// + for an exactly zero component invents a direction that reflection cannot
+// map. Skipping it also removes work from axis-aligned fits.
+fn geometricResidentIntegrationSupported(normal:vec3f,axis:u32)->bool{
+  return normal[axis]!=0.0;
+}
+
 // Uniform, open, extruded stencils admit a volume-consistent 2D fit.
 // Candidate slopes are differences of column-integrated liquid heights, not
 // differences of cell-average fill. Every candidate retains the central volume.
@@ -220,6 +227,7 @@ fn geometricResidentFitUniformExtrusion(cell:u32,densityOffset:u32,
     }
     let integration=select(axisU,axisV,direction==1u);
     let transverse=select(axisV,axisU,direction==1u);
+    if(!geometricResidentIntegrationSupported(normal,integration)){continue;}
     for(var difference=0u;difference<3u;difference+=1u){
       var slope=heights.y-heights.x;
       if(difference==1u){slope=0.5*(heights.z-heights.x);}
@@ -341,6 +349,7 @@ fn geometricResidentFitUniformPlane3D(cell:u32,densityOffset:u32,
   // Integrated heights on the +/- transverse columns therefore give exact
   // planar slopes. Three-cell sums can truncate a diagonal plane in 3D.
   for(var integration=0u;integration<3u;integration+=1u){
+    if(!geometricResidentIntegrationSupported(fallback.normal,integration)){continue;}
     let axisU=(integration+1u)%3u;let axisV=(integration+2u)%3u;
     var heights=vec4f(0.0);var supported=true;
     for(var column=0u;column<4u;column+=1u){

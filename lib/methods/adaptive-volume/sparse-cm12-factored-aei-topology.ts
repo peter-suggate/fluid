@@ -98,6 +98,16 @@ export interface SparseCM12FactoredAEIPatchDescriptor {
   readonly targetFaceOrigin: readonly [number, number];
   readonly faceDimensions: readonly [number, number];
   readonly mappingCertified: boolean;
+  /** Exact rectangular footprint of every source-side term in this patch.
+   * Unlike sourceFaceOrigin/faceDimensions, this includes every fine source
+   * cell represented by a mixed-seam row. */
+  readonly sourceTermFaceOrigin: readonly [number, number];
+  readonly sourceTermFaceDimensions: readonly [number, number];
+  readonly sourceTermFaceCount: number;
+  /** Per-site covered area divided by the source cell face area; omitted when
+   * every certified site has unit weight. */
+  readonly sourceTermFaceWeights?: readonly number[];
+  readonly sourceTermFaceCertified: boolean;
 }
 
 export interface SparseCM12FactoredAEICatalog {
@@ -652,6 +662,46 @@ export function compileSparseCM12FactoredAEICatalog(
       exceptionRows.push(...rows.map((row) => row.id));
     }
     const [rowHash, termHash] = hashRows(rows);
+    const sourceDescriptor = canonical[descriptorIdByLeaf[sourceLeaf]!]!;
+    const axis = sourceSide >> 1;
+    const tangents = ([0, 1, 2] as const).filter((value) => value !== axis);
+    const sourceTermSites = new Map<string, number>();
+    let sourceTermFaceCertified = true;
+    for (const row of rows) for (const term of row.terms) {
+      const cell = grid.cells[term.cellId]!;
+      if (cell.brickKey !== sourceKey) continue;
+      if (cell.local[axis] !== ((sourceSide & 1) !== 0
+        ? sourceDescriptor.validDimensions[axis]! - 1 : 0)) {
+        sourceTermFaceCertified = false;
+      }
+      const site = `${cell.local[tangents[0]!]}/${cell.local[tangents[1]!]}`;
+      const faceArea = cell.widthsFine[tangents[0]!] * cell.widthsFine[tangents[1]!]!;
+      const weight = Math.abs(term.coefficient) * row.dualWeight / faceArea;
+      if (!Number.isFinite(weight) || weight <= 0) sourceTermFaceCertified = false;
+      sourceTermSites.set(site, (sourceTermSites.get(site) ?? 0) + weight);
+    }
+    const sourceTermCoordinates = [...sourceTermSites.keys()].map((site) =>
+      site.split("/").map(Number) as [number, number]);
+    const sourceTermFaceOrigin = sourceTermCoordinates.length === 0
+      ? [0, 0] as const : [Math.min(...sourceTermCoordinates.map((site) => site[0])),
+        Math.min(...sourceTermCoordinates.map((site) => site[1]))] as const;
+    const sourceTermFaceDimensions = sourceTermCoordinates.length === 0
+      ? [0, 0] as const : [Math.max(...sourceTermCoordinates.map((site) => site[0]))
+          - sourceTermFaceOrigin[0] + 1,
+        Math.max(...sourceTermCoordinates.map((site) => site[1]))
+          - sourceTermFaceOrigin[1] + 1] as const;
+    sourceTermFaceCertified = sourceTermFaceCertified
+      && sourceTermSites.size > 0
+      && sourceTermSites.size === sourceTermFaceDimensions[0]
+        * sourceTermFaceDimensions[1];
+    const sourceTermFaceWeights = Array.from({
+      length: sourceTermFaceDimensions[0] * sourceTermFaceDimensions[1],
+    }, (_, ordinal) => sourceTermSites.get(`${sourceTermFaceOrigin[0]
+      + ordinal % sourceTermFaceDimensions[0]}/${sourceTermFaceOrigin[1]
+      + Math.floor(ordinal / sourceTermFaceDimensions[0])}`) ?? 0);
+    if (sourceTermFaceWeights.some((weight) => weight <= 0)) {
+      sourceTermFaceCertified = false;
+    }
     const id = patches.length;
     const patch = Object.freeze({ id, sourceLeaf, targetLeaf, sourceSide, relation,
       rowFirst: contiguous ? rows[0]!.id : SPARSE_CM12_FACTORED_AEI_INVALID,
@@ -665,6 +715,11 @@ export function compileSparseCM12FactoredAEICatalog(
       targetFaceOrigin: mapping.targetOrigin,
       faceDimensions: mapping.dimensions,
       mappingCertified: mapping.certified,
+      sourceTermFaceOrigin, sourceTermFaceDimensions,
+      sourceTermFaceCount: sourceTermSites.size,
+      ...(sourceTermFaceWeights.some((weight) => Math.abs(weight - 1) > 1e-6)
+        ? { sourceTermFaceWeights: Object.freeze(sourceTermFaceWeights) } : {}),
+      sourceTermFaceCertified,
     });
     patches.push(patch);
   }

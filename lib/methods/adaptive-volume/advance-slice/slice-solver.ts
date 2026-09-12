@@ -14,12 +14,13 @@ import { collocateSliceVelocity, extendSliceVelocity, forceSliceFaces,
   type SlicePressureReceipt, type SliceTransportMicrostepReceipt } from "./slice-stage-numerics";
 import { sliceCellOwnerLookup } from "./slice-cell-index";
 import { sliceDynamicGeometry } from "./slice-dynamic-geometry";
+import { sliceSceneRegions } from "./slice-enforcement-region";
 import { commitSliceSourceLedger, EMPTY_SLICE_SOURCE_LEDGER, planSliceDynamicRemap,
   type SliceSourceLedger } from "./slice-dynamic-remap";
 import { advanceSliceRigidAuthority, createSliceRigidAuthority, sliceRigidCouplingLoads,
   sliceRigidPoses, withSliceRigidLoads, type SliceRigidAuthority,
   type SliceRigidCouplingReceipt } from "./slice-rigid-dynamics";
-import { initializeSliceResolutionPolicy, planSliceResolution,
+import { initializeSliceResolutionPolicy, planSliceProjectedTransportSupport, planSliceResolution,
   type SliceResolutionPolicyReceipt, type SliceResolutionPolicyState,
   type SliceResolutionRegion } from "./slice-resolution-policy";
 import { sampleSolidWorld } from "../../../core/solid-world";
@@ -172,7 +173,7 @@ function numericalTopology(t:SliceTopology,seed:SliceSceneSeed):SliceNumericalTo
   const cells=t.cells.map(c=>{const brick=brickByKey.get(c.brickKey)!;
     const span=(brick.spanBricks??1)*8,lo=[brick.coordinate[0]*8,brick.coordinate[1]*8] as const;
     let regionScale=1;
-    for(const region of seed.production?.scene.fluid.refinementRegions??[]){
+    for(const region of sliceSceneRegions(seed)){
       if(seed.viewport.centerZ<region.min_m.z||seed.viewport.centerZ>=region.max_m.z)continue;
       const rlo=[(region.min_m.x-seed.viewport.originX)/h,(region.min_m.y-seed.viewport.originY)/h];
       const rhi=[(region.max_m.x-seed.viewport.originX)/h,(region.max_m.y-seed.viewport.originY)/h];
@@ -238,7 +239,13 @@ function newFields(t:SliceTopology,n:SliceNumericalTopology,seed:SliceSceneSeed)
 }
 function allocate(seed:SliceSceneSeed,t:SliceTopology,n:SliceNumericalTopology,fields:SliceNumericalFields):AdvanceSlice{
   const [nx,ny]=seed.dimensions,c=nx*ny,bx=Math.ceil(nx/8),by=Math.ceil(ny/8);
-  const pageBudget=seed.production?.options.topologyPageBudget??0;
+  const configuredPageBudget=seed.production?.options.topologyPageBudget;
+  // An omitted budget uses the bounded 2-D physical page arena. This reserves
+  // identities for later sparse growth without making any dry page active.
+  // Explicit zero remains the diagnostic no-growth contract used by parity
+  // and capacity tests.
+  const pageBudget=configuredPageBudget
+    ??Math.max(0,bx*by-t.bricks.length);
   // WDR/TEI addresses are stable physical leaf slots. A centre-Z slice may
   // retain slots 6..11 after omitting another Z slab, so arena capacity is
   // based on the accepted high-water mark rather than the compact slice count.
@@ -271,6 +278,38 @@ function allocate(seed:SliceSceneSeed,t:SliceTopology,n:SliceNumericalTopology,f
     pressureEmbedding:seed.boundary.z==="symmetry"?createSlicePressureEmbedding(seed,t,n,fields):undefined,
     iterations:0,residual:0,seededVolume:0,injections:0,fault:null};
   materialize(s);s.Vp.set(s.V);s.seededVolume=volume(s);return s;
+}
+
+/**
+ * Admit only support demanded by the final projected face field. The ordinary
+ * end-of-frame planner remains authoritative for retirement and demotion; this
+ * transaction can only add/activate/promote pages needed before microstep 0.
+ */
+function activateProjectedTransportSupport(s:AdvanceSlice):boolean{
+  const decision=planSliceProjectedTransportSupport({topology:s.topology.accepted,
+    fields:{density:s.fields.density,capacity:s.fields.capacity,
+      cellVelocity:s.fields.cellVelocity,faceVelocity:s.fields.faceVelocity,
+      interfaceNormal:s.fields.interfaceNormal},
+    dt:s.scene.dt,cellSize:s.scene.viewport.sourceCellSize,
+    policy:s.scene.production?.options.activityPolicy,maximumLeaves:s.maximumSliceLeaves,
+    freeLeafIds:Array.from(sliceRuntimeFreeLeaves(s.runtimeAuthority.accepted)),
+    maximumCells:s.runtimeAuthority.leafCapacity*64});
+  if(decision.faultBits!==0){
+    s.fields.fault={stage:"runtime-authority",index:0,
+      observed:decision.faultBits,expected:0};return false;
+  }
+  const changed=decision.candidateBricks.length!==s.topology.accepted.bricks.length
+    ||decision.candidateBricks.some(brick=>{
+    const accepted=s.topology.accepted.brickByKey.get(brick.key);
+    return !accepted||(brick.active!==false)!==(accepted.active!==false)
+      ||brick.resolution!==accepted.resolution;
+  });
+  if(!changed)return true;
+  if(!transitionAdvanceSliceTopology(s,decision.candidateBricks))return false;
+  // The transfer preserves projected row flux, while newly admitted dry cells
+  // need the same VEX field that transport interpolation reads.
+  extendSliceVelocity(s.numericalTopology,s.fields,8);
+  return true;
 }
 export function createAdvanceSlice(seed:SliceSceneSeed=createDefaultSliceSceneSeed()):AdvanceSlice{
   validateSliceSceneSeed(seed);const t=compileSliceTopology(topologyBricks(seed),seed.dimensions,
@@ -397,7 +436,7 @@ function sourceReductionGroups(topology:SliceTopology):readonly (readonly number
 }
 function resolutionRegions(seed:SliceSceneSeed):readonly SliceResolutionRegion[]{
   const h=seed.viewport.sourceCellSize,z=seed.viewport.centerZ;
-  return (seed.production?.scene.fluid.refinementRegions??[]).filter(region=>
+  return sliceSceneRegions(seed).filter(region=>
     z>=region.min_m.z&&z<region.max_m.z).map(region=>({
       minimumFine:[(region.min_m.x-seed.viewport.originX)/h,
         (region.min_m.y-seed.viewport.originY)/h] as const,
@@ -603,6 +642,10 @@ export function advanceSlice(s:AdvanceSlice,arg:number|AdvanceSliceOptions={}):v
   else projectSlicePressureVelocity(s.numericalTopology,s.fields,pressureRows);
   enforceSliceInflowFaces(s.numericalTopology,s.fields,inflowFine);collocateSliceVelocity(s.numericalTopology,s.fields);
   done("velocity-projection");
+  // Projection can create a receiver-facing velocity that did not exist in
+  // the pre-physics field. Commit that directional support before conservative
+  // transport; planning it after transport discards flux at sparse-air rows.
+  if(!activateProjectedTransportSupport(s)){s.fault=s.fields.fault;materialize(s);return;}
   if(!o.eagerDiagnostics&&!o.onStageComplete)materialize(s);
   s.Vp.set(s.V);
   const sourceDensity=s.fields.density.slice(),sourceGamma=s.fields.gamma.slice();

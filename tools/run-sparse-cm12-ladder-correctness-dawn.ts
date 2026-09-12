@@ -350,6 +350,16 @@ async function worker(): Promise<void> {
       errorFine3, relativeError, maximumRelativeError: BALANCE_RELATIVE_TOLERANCE,
       passed: relativeError < BALANCE_RELATIVE_TOLERANCE };
     balance = finalBalance;
+    if (definition.id === "symmetric-2d") {
+      requireCondition(cumulativeOutflowFine3 <= cumulativeOutflowQuantizationBoundFine3,
+        `closed symmetric tank reported ${cumulativeOutflowFine3} fine-cell volumes of outflow`);
+      if (duration_s >= DEFAULT_DURATION_S - timeTolerance) {
+        const activity = await solver.readGPUActivityPolicy();
+        requireCondition(activity.bricks.some(brick => brick.active
+          && brick.coordinate[0] === 3 && (brick.reasons & 64) !== 0),
+        "symmetric ladder liquid did not reach the rightmost x page by 3 s");
+      }
+    }
     requireCondition(finalBalance.passed,
       `source/outflow-adjusted relative balance error ${relativeError} exceeds ${
         BALANCE_RELATIVE_TOLERANCE}`);

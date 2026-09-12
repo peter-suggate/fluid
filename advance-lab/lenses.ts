@@ -320,7 +320,7 @@ export function drawSlice(c: LensContext, sharedRdf?: SliceSharedRdfIsocontour):
      * filling from the top edge down would draw every unresolved cell upside
      * down, and a row of them reads as a sheet of water floating over a gap. */
     if (!plane) { g.rect(x, y + h * (1 - cell.fill), w, h * cell.fill); continue; }
-    const polygon = clipUnitSquare(UNIT_SQUARE, plane.nx, plane.ny, plane.offset);
+    const polygon = clipUnitSquare(UNIT_SQUARE, plane.clipNx, plane.clipNy, plane.offset);
     if (polygon.length < 6) continue;
     g.moveTo(x + polygon[0] * w, y + polygon[1] * h);
     for (let i = 2; i < polygon.length; i += 2) {
@@ -397,7 +397,7 @@ const onCellEdge = (value: number): boolean => value < 1e-6 || value > 1 - 1e-6;
  * anchored by one rule to a line drawn by another is a picture of nothing.
  */
 export function interfaceSegments(plane: LatticePlane): readonly InterfaceSegment[] {
-  const polygon = clipUnitSquare(UNIT_SQUARE, plane.nx, plane.ny, plane.offset);
+  const polygon = clipUnitSquare(UNIT_SQUARE, plane.clipNx, plane.clipNy, plane.offset);
   const segments: InterfaceSegment[] = [];
   for (let i = 0; i < polygon.length; i += 2) {
     const j = (i + 2) % polygon.length;
@@ -473,7 +473,9 @@ export type SliceOverlayId = "fraction" | "normal";
 export interface SliceOverlay {
   /** The word on the toggle. */
   readonly label: string;
-  /** What it draws, for the control's tooltip and the sidebar caption. */
+  /** One line, for the toggle's own tooltip. */
+  readonly hint: string;
+  /** The whole of what it claims, for the sidebar, while it is on. */
   readonly caption: string;
   readonly keys: readonly LensKey[];
   readonly draw: (c: LensContext) => void;
@@ -532,7 +534,8 @@ const readoutPixels = (text: string): number => text.length * 6 + 5;
 export const SLICE_OVERLAYS: Readonly<Record<SliceOverlayId, SliceOverlay>> = {
   fraction: {
     label: "fraction",
-    caption: "V/K per accepted cell — the conserved quantity itself, read off the compact record rather than resampled. The water already draws the liquid half of the range geometrically, so the tint is spent where the geometry cannot help: the dilute decades below a half, which a cut line renders as a sliver too thin to see, and the overfull cells past V = K that the projection has to drain.",
+    hint: "Write V/K into every cell that has room for it, and tint the dilute decades the water's own outline cannot show",
+    caption: "V/K per accepted cell — the conserved quantity itself, read off the compact record rather than resampled. The water already draws the liquid half of the range geometrically, so the tint is spent where the geometry cannot help: the dilute decades below a half, which a cut line renders as a sliver too thin to see, and the overfull cells past V = K that the projection has to drain. The value is written into any cell with the pixels to hold it, so on a fine scene at a low zoom the tint is the whole reading and the numbers arrive as the cells grow.",
     keys: [["ink", "V/K"], ["transport", "dilute residue, by decade"],
       ["alarm", "overfull, V > K"]],
     draw(c) {
@@ -565,6 +568,7 @@ export const SLICE_OVERLAYS: Readonly<Record<SliceOverlayId, SliceOverlay>> = {
   },
   normal: {
     label: "normals",
+    hint: "Draw the PLIC normal each cut cell carries, from its own interface line and out of the liquid",
     caption: "The PLIC normal each cut cell carries, drawn from the middle of its own interface chord and pointing out of the liquid. This is the record transport and the pressure embedding both read, in the canvas frame the picture is drawn in — so a normal that disagrees with the line it sits on is a reconstruction fault, not a drawing one. A cut cell the reconstruction gave no normal at all is ringed rather than left blank.",
     keys: [["output", "interface normal, out of the liquid"],
       ["alarm", "cut cell with no reconstruction"]],

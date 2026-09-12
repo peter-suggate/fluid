@@ -27,3 +27,12 @@ test("uniform 2-D and 3-D reconstruction share the certified fill observation", 
   assert.match(geometricInterfaceResidentWGSL,
     /fn geometricResidentUniformSample[\s\S]*return geometricResidentCertifiedFill\(cell,densityOffset\)/);
 });
+
+test("ELVIRA candidates require orientation evidence on their integration axis", () => {
+  assert.match(geometricInterfaceResidentWGSL,
+    /fn geometricResidentIntegrationSupported[\s\S]*normal\[axis\]!=0\.0/);
+  assert.match(geometricInterfaceResidentWGSL,
+    /for\(var direction=0u;direction<2u[\s\S]*geometricResidentIntegrationSupported\(normal,integration\)/);
+  assert.match(geometricInterfaceResidentWGSL,
+    /for\(var integration=0u;integration<3u[\s\S]*geometricResidentIntegrationSupported\(fallback\.normal,integration\)/);
+});

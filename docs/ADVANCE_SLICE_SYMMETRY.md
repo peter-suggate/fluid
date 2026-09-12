@@ -41,15 +41,40 @@ The 3D uniform-extrusion and full-volume reconstruction paths use the same
 observation policy. Out-of-tolerance values, NaN and infinities still fail
 certification. The production WGSL helper has a direct Dawn boundary test.
 
+## Continuing the audit
+
+The ordinary 2D pressure operator and velocity projection now reduce mixed
+seam terms by physical side inside their existing row traversal. Previously,
+mirroring a three-term seam changed the addition association. A focused test
+with mirrored pressures produces jumps of `-0.00390625` versus zero under the
+old reduction and reflected velocities under the corrected reduction. This
+change adds no solver pass or field averaging.
+The 3D counterpart preserves the existing term traversal and uses the graded
+fine-side pairing order. Explicit `fma(value, 1, other)` pair sums prevent Metal
+from reassociating the intended reduction; no sorting or additional dispatch
+is used. The extracted production helper passed its isolated Dawn reflection
+test. Its exact saved version was restored after cleanup; a repeat run was
+blocked by another task's live GPU lease.
+
+ELVIRA also skips a candidate integration axis when its orientation component
+is exactly zero. The former positive-axis default could reconstruct an exactly
+X-invariant near-full 3×3 stencil with `nx = +1`. Skipping that unsupported
+candidate reduces work and restores `nx = 0` in the regression fixture.
+
 ## Remaining transport asymmetry
 
-At 64 pressure iterations, maximum density mirror error is `3.576e-7` after
-five frames, but reaches `0.0217323` during frame six, while the topology still
-has zero mirror mismatches. Microstep zero leaves one cell at `0.9999976158`
-versus its mirrored `1`; subsequent full/partial reconstruction and flux
-branches amplify the difference. These values exceed the existing roundoff
-margin, so this work does not discard them using a wider clamp. The following
-one-sided topology demand is downstream of the transport error.
+After the pressure and candidate-axis fixes, maximum density mirror error at
+frame five is `1.192e-7` with 28 pressure iterations and `8.941e-8` with 64.
+Frame six still reaches `0.0205731` and `0.00448412`, respectively, while the
+topology has zero mirror mismatches. The latter improves from the earlier
+`0.0217323`, but the default 28-iteration scene remains materially asymmetric.
+
+The residual passes through full/partial reconstruction and flux branches,
+but its root cause was not isolated reliably. Wider clamps, weak-gradient
+gates, phase-bracketing gates, reordered transport sums and removal of the
+corner fallback either failed correctness checks or worsened other checkpoints;
+they were reverted. No averaging, additional solve iterations or simulation
+passes were introduced. Investigation stopped at the user's request.
 
 ## Regression scope
 
@@ -63,10 +88,13 @@ and five failures: automatic water-box rerung, unresolved published partial
 planes, retained pressure generations, automatic pressure mappings and a
 policy source fingerprint. These failures are not relaxed by this work.
 
-The final focused CPU set has 114 passes and four existing failures. It adds
+The broad CPU set before the pressure follow-up had 114 passes and four
+existing failures. It adds
 the admission, reconstruction, display and contour regressions. The impact
 RDF fixture advances five frames to retain its original coverage of at least
 50 transported near-full cells; its phase and area assertions are unchanged.
+The final six focused stage tests pass, including the reflected mixed-seam
+pressure and exact-zero candidate-axis regressions.
 
 The final full Dawn gate has 3 passing and 14 failing/timed-out lanes, taking
 442.2 seconds within its unchanged 480-second suite budget. Before the certificate change,

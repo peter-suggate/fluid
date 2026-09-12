@@ -22,6 +22,7 @@ export interface SlicePresentationPage {
   readonly key: number;
   readonly sourceBrickId: number;
   readonly sourceBrickKey: number;
+  /** Generation-zero atlas index, or -1 for a runtime-created WDR page. */
   readonly sourceAtlasBrick: number;
   readonly coordinate: readonly [number, number];
   readonly spanBricks: number;
@@ -226,8 +227,7 @@ function columnAuthority(topology: SliceTopology, fields: SliceNumericalFields,
 function sourceAtlasIndex(atlas: SparseAdaptiveMassAtlas | undefined,
   brick: SliceTopologyBrick): number {
   if (!atlas) return brick.id;
-  const exact = atlas.bricks.findIndex(source => source.key === brick.key);
-  return exact >= 0 ? exact : brick.id;
+  return atlas.bricks.findIndex(source => source.key === brick.key);
 }
 
 function buildBank(topology: SliceTopology, fields: SliceNumericalFields,
@@ -251,7 +251,11 @@ function buildBank(topology: SliceTopology, fields: SliceNumericalFields,
       return { fault: { code: "duplicate-page", page: pages.length, sample: -1 } };
     }
     const source = sourceAtlasIndex(sourceAtlas, brick);
-    if (sourceAtlas && !sourceAtlas.bricks[source]) {
+    const authored = source >= 0 ? sourceAtlas?.bricks[source] : undefined;
+    if (authored && (authored.key !== brick.key
+      || authored.coordinate[0] !== brick.coordinate[0]
+      || authored.coordinate[1] !== brick.coordinate[1]
+      || (authored.spanBricks ?? 1) !== span(brick))) {
       return { fault: { code: "source-provenance", page: pages.length, sample: -1 } };
     }
     const scale = PAGE_RESOLUTION * span(brick) / brick.resolution;

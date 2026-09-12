@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   extendSliceVelocity,
+  reconstructSliceInterfaces,
+  projectSlicePressureVelocity,
   sliceInterfaceCertificateSample,
   transportSliceVolumeMicrostep,
   type SliceNumericalFields,
@@ -29,6 +31,28 @@ test("interface certificates clamp only the transport-admissible volume margin",
   assert.equal(sliceInterfaceCertificateSample(-2*margin),null);
   assert.equal(sliceInterfaceCertificateSample(1+2*margin),null);
   assert.equal(sliceInterfaceCertificateSample(Number.NaN),null);
+});
+
+test("zero-gradient ELVIRA axes do not invent a positive reflection orientation", () => {
+  const cells = Array.from({ length: 9 }, (_, id) => { const x = id % 3, y = Math.floor(id / 3);
+    return { id, minimum: [x, y] as const, maximum: [x + 1, y + 1] as const,
+      center: [x + .5, y + .5] as const, widths: [1, 1] as const, area: 1 }; });
+  const rows: SliceNumericalTopology["rows"][number][] = [], incidences = Array.from({ length: 9 }, () => [] as number[]);
+  const connect = (a: number, b: number, axis: 0 | 1, center: readonly [number, number]) => {
+    const id = rows.length; rows.push({ id, kind: "intra-brick", axis, center, area: 1,
+      distance: 1, dualWeight: 1, terms: [{ cellId: a, coefficient: -1 }, { cellId: b, coefficient: 1 }] });
+    incidences[a]!.push(id); incidences[b]!.push(id);
+  };
+  for (let y = 0; y < 3; y += 1) for (let x = 0; x < 2; x += 1)
+    connect(x + 3 * y, x + 1 + 3 * y, 0, [x + 1, y + .5]);
+  for (let y = 0; y < 2; y += 1) for (let x = 0; x < 3; x += 1)
+    connect(x + 3 * y, x + 3 * (y + 1), 1, [x + .5, y + 1]);
+  const state = fields(9, rows.length, 0);
+  state.density.set([1, 1, 1, 1, .9999998807907104, 1, 1, .9999999403953552, 1]);
+  reconstructSliceInterfaces({ dimensions: [3, 3], cells, rows, incidences, subfaces: [] }, state);
+  assert.equal(Math.abs(state.interfaceNormal[2 * 4]!), 0,
+    "an X-invariant stencil must not publish a +X-oriented plane");
+  assert.equal(Math.abs(state.interfaceNormal[2 * 4 + 1]!), 1);
 });
 
 test("VEX uses physical mixed-port pieces and the production axis reduction tree", () => {
@@ -60,6 +84,24 @@ test("VEX uses physical mixed-port pieces and the production axis reduction tree
     / f(f(mixedWeight + mixedWeight) + yWeight));
   assert.equal(state.cellVelocity[0], expected);
   assert.equal(state.extensionDepth[0], 1);
+});
+
+test("mixed-seam pressure gradients are equivariant when reflection swaps the fine side",()=>{
+  const cells=Array.from({length:6},(_,id)=>({id,minimum:[id,0] as [number,number],
+    maximum:[id+1,1] as [number,number],center:[id+.5,.5] as [number,number],
+    widths:[1,1] as [number,number],area:1}));
+  const topology:SliceNumericalTopology={cells,rows:[
+    {id:0,kind:"mixed-seam",axis:0,center:[1,.5],area:1,distance:1,dualWeight:1,
+      terms:[{cellId:0,coefficient:-2/3},{cellId:1,coefficient:1/3},{cellId:2,coefficient:1/3}]},
+    {id:1,kind:"mixed-seam",axis:0,center:[5,.5],area:1,distance:1,dualWeight:1,
+      terms:[{cellId:3,coefficient:-1/3},{cellId:4,coefficient:-1/3},{cellId:5,coefficient:2/3}]},
+  ],incidences:Array.from({length:6},()=>[]),subfaces:[]};
+  const state=fields(6,2,0);state.pressureMember.fill(1);
+  state.pressure.set([100000,100001,99999,99999,100001,100000]);
+  state.faceVelocity.set([.25,-.25]);
+  projectSlicePressureVelocity(topology,state,{active:new Uint8Array([1,1]),
+    theta:new Float32Array([1,1])});
+  assert.equal(state.faceVelocity[0],-state.faceVelocity[1]);
 });
 
 test("moving low-flux authority evacuates an exactly closed cell", () => {

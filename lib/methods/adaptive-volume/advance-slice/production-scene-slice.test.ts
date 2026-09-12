@@ -161,6 +161,87 @@ test("coarse-first pool support follows motion without bridging disconnected liq
     "only the next-step swept receiver corridor may expand the page domain");
 });
 
+test("omitted slice growth budget reserves the bounded physical page arena", () => {
+  const seed = productionSceneSliceSeedById("sparse-cm12-ladder-symmetric-2d");
+  const automatic = createAdvanceSlice(seed);
+  assert.equal(automatic.maximumSliceLeaves, 8,
+    "capacity covers the 4x2 tank without activating its dry pages");
+  assert.equal(automatic.topology.accepted.bricks.filter(brick => brick.active !== false).length, 1);
+
+  const noGrowth = createAdvanceSlice({ ...seed, production: { ...seed.production!,
+    options: { ...seed.production!.options, topologyPageBudget: 0 } } });
+  assert.equal(noGrowth.maximumSliceLeaves, 4,
+    "an explicit zero budget keeps the authored no-growth arena");
+});
+
+test("a 2.5-cell projected translation admits its receiver before microstep zero", () => {
+  const source = productionSceneSliceSeedById("sparse-cm12-ladder-symmetric-2d");
+  // The sparse-air face preparation averages the one-sided fixture row with
+  // vacuum. Prescribe five cells so the final projected field is exactly the
+  // 2.5-cell whole-frame oracle case.
+  const speed = 5 * source.viewport.sourceCellSize / source.dt;
+  const seed = { ...source, gravity: [0, 0] as const,
+    boundary: { ...source.boundary, xMin: "open" as const, xMax: "open" as const },
+    velocityX: new Float32Array(source.velocityX.length).fill(speed),
+    velocityY: new Float32Array(source.velocityY.length) };
+  const slice = createAdvanceSlice(seed);
+  let firstMicrostepPages: readonly string[] = [];
+  let projectedTravelFine = 0;
+  advanceSlice(slice, { pressureIterations: 0, onStageComplete: (stage, state) => {
+    if(stage === "velocity-projection")projectedTravelFine = state.fields.faceVelocity
+      .reduce((maximum, velocity) => Math.max(maximum, Math.abs(velocity)), 0) * state.scene.dt;
+  }, onTransportMicrostep: (_microstep, state) => {
+    if(firstMicrostepPages.length)return;
+    firstMicrostepPages = state.topology.accepted.bricks
+      .filter(brick => brick.active !== false).map(brick => brick.coordinate.join(","));
+  } });
+  assert.equal(slice.fault, null);
+  assert.ok(Math.abs(projectedTravelFine - 2.5) <= 1e-6,
+    `fixture projected travel changed to ${projectedTravelFine}`);
+  assert.ok(slice.microsteps >= 5);
+  assert.deepEqual(firstMicrostepPages, ["0,0", "1,0"],
+    "the exact +X page path must be ready without a transverse halo");
+});
+
+test("projected receivers are accepted before transport and the ladder reaches the RHS", () => {
+  const slice = createAdvanceSlice(
+    productionSceneSliceSeedById("sparse-cm12-ladder-symmetric-2d"));
+  const volumeFine2 = () => slice.topology.accepted.cells.reduce((sum, cell) =>
+    sum + slice.fields.density[cell.id]! * cell.volumeFineCells, 0);
+  const initialVolumeFine2 = volumeFine2();
+  assert.equal(initialVolumeFine2, 64);
+  let maximumAbsoluteDriftFine2 = 0;
+  let firstMicrostepPages: readonly string[] = [];
+  for (let step = 0; step < 90; step += 1) {
+    advanceSlice(slice, { pressureIterations: 64,
+      onTransportMicrostep: step === 0 ? (_microstep, state) => {
+        firstMicrostepPages = state.topology.accepted.bricks
+          .filter(brick => brick.active !== false)
+          .map(brick => brick.coordinate.join(","));
+      } : undefined });
+    assert.equal(slice.fault, null, `frame ${slice.frame} faulted`);
+    maximumAbsoluteDriftFine2 = Math.max(maximumAbsoluteDriftFine2,
+      Math.abs(volumeFine2() - initialVolumeFine2));
+  }
+  assert.deepEqual(firstMicrostepPages, ["0,0", "1,0"],
+    "the projected +X receiver, and no transverse halo, must exist before microstep 0");
+  assert.ok(maximumAbsoluteDriftFine2 <= 2e-5,
+    `closed-tank raw area drifted by ${maximumAbsoluteDriftFine2}`);
+  const rhsVolumeFine2 = slice.topology.accepted.cells.reduce((sum, cell) =>
+    sum + (cell.maximumFine[0] === slice.nx
+      ? slice.fields.density[cell.id]! * cell.volumeFineCells : 0), 0);
+  assert.ok(rhsVolumeFine2 > 1,
+    `the travelling body did not reach the tank RHS: ${rhsVolumeFine2}`);
+  const runtimePages = slice.presentation.accepted.pages
+    .filter(page => page.sourceAtlasBrick === -1);
+  assert.ok(runtimePages.length > 0, "the run must publish runtime-created pages");
+  for(const page of slice.presentation.accepted.pages){
+    if(page.sourceAtlasBrick<0)continue;
+    assert.equal(slice.scene.sourceAtlas!.bricks[page.sourceAtlasBrick]!.key,page.sourceBrickKey,
+      "an authored page must retain exact source-atlas provenance");
+  }
+});
+
 test("native staggered apertures preserve the production shell and face samples", () => {
   const seed = productionSceneSliceSeedById("water-box-dam-break");
   const [nx, ny] = seed.dimensions;

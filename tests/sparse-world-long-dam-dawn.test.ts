@@ -32,7 +32,9 @@ const dawnTest = dawnModule ? test : test.skip;
 
 const INITIAL_LONG_DAM_WET_TILE_COUNT = 80;
 // Coarse-first packs the authored reservoir and its immediate support shell
-// into 106 tiles; the wider logical travel domain remains unallocated.
+// into 106 resident tiles; the wider logical travel domain remains unallocated.
+// The independently measured active solve set is 66 source leaves, but this
+// assertion covers the resident catalogue rather than dispatch membership.
 const INITIAL_LONG_DAM_TILE_COUNT = 106;
 const LONG_DAM_FAR_WALL_PAGE_X = 23;
 // The Sparse CM12 profile advances at the paper's 1/30 s, so the authored

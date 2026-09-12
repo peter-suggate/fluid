@@ -15,14 +15,31 @@
  * one; if a reading ever moves the water it has been written in the wrong
  * place.
  *
- * Everything else that changes the run is reached by right-clicking the water:
- * the drop, which lands a ball of liquid *at the point that was clicked*, and
- * the two settings that shape the solve rather than run it — which surface the
- * picture reconstructs, and how many pressure iterations a step may spend. All
- * three are about a place or a picture rather than about the page, and the
- * product's own rule is that a capability is contextual before it is chrome:
- * a verb with a location is a right-click, not a button that arms a mode and
- * waits.
+ * Everything else is reached by right-clicking the water. Two are about the
+ * place that was clicked — the drop, which lands a ball of liquid there, and
+ * the enforcement region, whose menu is about the box under the pointer when
+ * there is one and about drawing a new one when there is not. The rest are
+ * about the picture: which lens is over the water, which surface it
+ * reconstructs, and how many pressure iterations a step may spend. None of them
+ * is about the page, and the product's own rule is that a capability is
+ * contextual before it is chrome: a verb with a location is a right-click, not
+ * a button that arms a mode and waits.
+ *
+ * The lens list in that menu and the strip along the bottom are one choice
+ * offered twice, on purpose: the strip lays the stages out as the loop, with
+ * what each costs, for a reader studying the anatomy of the advance; the menu
+ * puts the same set where the pointer already is, for a reader studying the
+ * water. Neither is a mode and neither moves anything — which is why the page
+ * no longer walks them on a timer. A visualization that changed on its own
+ * decided for the reader what they were looking at.
+ *
+ * An enforcement region is the scene document's own `FluidRefinementRegion`,
+ * and the slice already obeyed one before it could draw one — the resolution
+ * policy takes every region crossing this cut as a hard floor and ceiling on
+ * the bricks it fully contains. What the lab adds is the authoring, on the same
+ * dyadic ladder the 3-D editor snaps to, written to the run's copy of the
+ * document rather than to the scene: re-seeding the world would destroy the run
+ * the box was drawn on, so Reset is what takes one back.
  *
  * Everything that is not the water is either a control or folded away. The
  * reader arrives at a running simulation with a caption on it; the stage's
@@ -62,6 +79,14 @@ import {
   type SliceInjectionReceipt,
 } from "../lib/methods/adaptive-volume/advance-slice/slice-liquid-injection";
 import {
+  DEFAULT_SLICE_ENFORCEMENT_CELL_SIZE, SLICE_ENFORCEMENT_CELL_SIZES,
+  type SliceEnforcementCellSize, sliceEnforcementCapacityRemaining,
+  sliceEnforcementRegionAt, sliceEnforcementRegionCanvasBox,
+  sliceEnforcementRegionFromCanvasDrag, sliceEnforcementRegions,
+  withSliceEnforcementRegion,
+} from "../lib/methods/adaptive-volume/advance-slice/slice-enforcement-region";
+import type { FluidRefinementRegion } from "../lib/core/model";
+import {
   ADVANCE_PRODUCTION_SCENES, DEFAULT_ADVANCE_PRODUCTION_SCENE_ID,
   productionSceneSliceSeedById,
 } from "../lib/methods/adaptive-volume/advance-slice/production-scene-slice";
@@ -82,8 +107,6 @@ import { slicePresentationReady, slicePresentationRevision } from "./playback";
 
 /** Milliseconds between advances — slow enough to watch a rung change. */
 const FRAME_MS = 46;
-/** Milliseconds a walked stage is held before the strip steps on. */
-const WALK_MS = 1900;
 /** The bounded limiter runs twice per microstep, so a packet pair per step. */
 const LIMITER_PASSES = 2;
 /** The probe bubble, so it can be kept inside the viewport as the pointer moves. */
@@ -91,11 +114,22 @@ const PROBE_WIDTH = 180;
 const PROBE_HEIGHT = 132;
 /** The right-click menu, kept whole inside the picture the same way. */
 const MENU_WIDTH = 244;
-const MENU_HEIGHT = 320;
+const MENU_HEIGHT = 520;
 /** Which scene the page is reading, kept in the URL so a refresh returns to it. */
 const SCENE_PARAM = "scene";
 /** Arms the drop, the same key the studio's BALL gesture answers to. */
 const DROP_KEY = "b";
+/** Arms the enforcement box. */
+const REGION_KEY = "r";
+
+/**
+ * What a press on the water does.
+ *
+ * Null is the resting state and the only one in which a click reads a cell:
+ * both tools take the press, and neither is entered except from the menu on
+ * the water it applies to.
+ */
+type SliceTool = "drop" | "region" | null;
 /** One key per overlay, named for the quantity rather than its position. */
 const OVERLAY_KEYS: Readonly<Record<SliceOverlayId, string>> =
   { fraction: "f", normal: "n" };
@@ -394,19 +428,30 @@ export function AdvanceLab(): React.JSX.Element {
   /* Every scene opens still. A reader arrives at t=0 and starts it by hand;
    * water that is already moving has decided for them what to look at. */
   const [playing, setPlaying] = useState(false);
-  const [walking, setWalking] = useState(false);
   const [readings, setReadings] = useState<Readings>(AT_REST);
   const [openSeam, setOpenSeam] = useState<string | null>(null);
   const [folds, setFolds] = useState<ReadonlySet<string>>(() => new Set());
   const [pinned, setPinned] = useState<Probe | null>(null);
   const [hover, setHover] = useState<{ probe: Probe; x: number; y: number } | null>(null);
   const [runtimeFault, setRuntimeFault] = useState<string | null>(null);
-  /* The one control on this page that changes the water rather than the
-   * reading of it. Armed, a press-drag-release places and sizes a ball; the
-   * probe under the pointer keeps working, because reading a cell is never the
-   * wrong thing to be doing. */
-  const [arming, setArming] = useState(false);
+  /* The two gestures that change the run rather than read it, and the only
+   * modes this page has. Armed, a press-drag-release places and sizes a ball
+   * or draws an enforcement box; the probe under the pointer keeps working
+   * either way, because reading a cell is never the wrong thing to be doing.
+   * Both are entered from the right-click menu on the water they apply to. */
+  const [tool, setTool] = useState<SliceTool>(null);
   const [aim, setAim] = useState<Aim | null>(null);
+  /* The rubber band, in canvas finest cells: what the release will snap onto
+   * the ladder. Held here rather than painted into the slice for the same
+   * reason the ball is — a publication per mouse pixel is not a cursor. */
+  const [sketch, setSketch] = useState<{ readonly anchor: readonly [number, number];
+    readonly at: readonly [number, number] } | null>(null);
+  /* What a newly drawn box will enforce. One choice, carried between draws,
+   * because a reader comparing two placements of the same bound should not
+   * re-pick it every time. */
+  const [enforceCells, setEnforceCells] =
+    useState<SliceEnforcementCellSize>(DEFAULT_SLICE_ENFORCEMENT_CELL_SIZE);
+  const [holdAtOneTier, setHoldAtOneTier] = useState(false);
   const dragging = useRef<{ pointer: number; anchor: readonly [number, number];
     moved: boolean } | null>(null);
   const [room, setRoom] = useState({ width: 960, height: 560 });
@@ -415,7 +460,11 @@ export function AdvanceLab(): React.JSX.Element {
    * press in finest cells, which is what makes Drop a verb with a location
    * rather than a mode — null when the press missed the canvas. */
   const [menu, setMenu] = useState<{ x: number; y: number;
-    at: readonly [number, number] | null } | null>(null);
+    at: readonly [number, number] | null;
+    /* The box the press landed on, by id rather than by value: the menu stays
+     * open while its bounds are changed, and a captured copy would go on
+     * showing the region as it was when the pointer went down. */
+    regionId: string | undefined } | null>(null);
   const menuPanel = useRef<HTMLDivElement>(null);
   /* Wall-clock milliseconds one advance costs, which is not what the step is
    * worth in physics and not what the work model prices — it is what this
@@ -438,8 +487,8 @@ export function AdvanceLab(): React.JSX.Element {
   }, [menu]);
 
   /* The animation loop is started once; it reads the live controls from here. */
-  const live = useRef({ playing, walking, budget, dt });
-  useEffect(() => { live.current = { playing, walking, budget, dt }; });
+  const live = useRef({ playing, budget, dt });
+  useEffect(() => { live.current = { playing, budget, dt }; });
 
   useEffect(() => {
     const initialId = requestedSceneId();
@@ -448,7 +497,7 @@ export function AdvanceLab(): React.JSX.Element {
     slice.current = s;
     lattice.current = createSliceLattice(s);
 
-    let handle = 0, last = 0, walked = 0, opened = false;
+    let handle = 0, last = 0, opened = false;
     const loop = (time: number): void => {
       handle = requestAnimationFrame(loop);
       if (!opened) {
@@ -477,12 +526,6 @@ export function AdvanceLab(): React.JSX.Element {
         setRuntimeFault(message);
         setReadings(read(current));
         return;
-      }
-      if (live.current.walking && time - walked > WALK_MS) {
-        walked = time;
-        setStep(current => (current === 1 ? null : current));
-        setSelected(current => ADVANCE_STAGE_ORDER[
-          (ADVANCE_STAGE_ORDER.indexOf(current) + 1) % ADVANCE_STAGE_ORDER.length]);
       }
       setReadings(read(current));
     };
@@ -528,19 +571,19 @@ export function AdvanceLab(): React.JSX.Element {
     return () => { media.removeEventListener("change", bump); observer.disconnect(); };
   }, []);
 
-  /* One key for the drop, the same one the studio's BALL gesture answers to, so
-   * the hand that drops water in the app drops it here, and one per overlay,
-   * named for its quantity. Escape lets go of the mode without hunting for the
-   * button that armed it. */
+  /* One key per tool — the drop keeps the studio's BALL key, so the hand that
+   * drops water in the app drops it here — and one per overlay, named for its
+   * quantity. Escape lets go of the mode without hunting for the menu that
+   * armed it. */
   useEffect(() => {
     const key = (event: KeyboardEvent): void => {
       const target = event.target as HTMLElement | null;
       if (event.metaKey || event.ctrlKey || event.altKey || target?.closest("input, select, textarea")) return;
       if (event.key === "Escape") {
-        /* One Escape, one thing let go of: the menu if it is open, the drop
-         * mode if it is not. */
+        /* One Escape, one thing let go of: the menu if it is open, the armed
+         * tool if it is not. */
         setMenu(open => {
-          if (!open) { setArming(false); setAim(null); }
+          if (!open) { setTool(null); setAim(null); setSketch(null); }
           return null;
         });
         return;
@@ -548,8 +591,11 @@ export function AdvanceLab(): React.JSX.Element {
       const stroke = event.key.toLowerCase();
       const overlay = SLICE_OVERLAY_ORDER.find(id => OVERLAY_KEYS[id] === stroke);
       if (overlay) { toggleOverlay(overlay); return; }
-      if (stroke !== DROP_KEY) return;
-      setArming(value => { if (value) setAim(null); return !value; });
+      if (stroke !== DROP_KEY && stroke !== REGION_KEY) return;
+      const wanted: SliceTool = stroke === DROP_KEY ? "drop" : "region";
+      setAim(null);
+      setSketch(null);
+      setTool(current => current === wanted ? null : wanted);
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
@@ -610,6 +656,26 @@ export function AdvanceLab(): React.JSX.Element {
     ...SLICE_OVERLAY_ORDER.flatMap(id =>
       overlays.has(id) ? SLICE_OVERLAYS[id].keys : []),
   ], [lens, overlays]);
+
+  /* Taken off the seed rather than the solver: the seed is the run's copy of
+   * the document, so a box drawn a moment ago is in it before the advance that
+   * will obey it has run. */
+  const regions = useMemo(() => {
+    if (!seed) return [];
+    return sliceEnforcementRegions(seed).flatMap(region => {
+      const box = sliceEnforcementRegionCanvasBox(seed, region);
+      return box ? [{ region, box }] : [];
+    });
+  }, [seed]);
+
+  const capacityLeft = seed ? sliceEnforcementCapacityRemaining(seed) : 0;
+  const menuRegion: FluidRefinementRegion | undefined = menu?.regionId === undefined
+    ? undefined : regions.find(drawn => drawn.region.id === menu.regionId)?.region;
+  /* Sixteen lenses do not fit a menu, so the list scrolls — and a scrolled list
+   * that opens anywhere but on the lens you are looking at is a list you have
+   * to search. */
+  const scrollIntoMenu = (node: HTMLButtonElement | null): void =>
+    node?.scrollIntoView({ block: "nearest" });
 
   const displayNx = seed?.dimensions[0] ?? 1;
   const displayNy = seed?.dimensions[1] ?? 1;
@@ -710,7 +776,7 @@ export function AdvanceLab(): React.JSX.Element {
     ["K", p.cell.capacity.toFixed(4), "open capacity after solids"],
     ["V / K", p.cell.fill.toFixed(4), "fill fraction — ρ is republished from this"],
     ["n", p.plane ? `(${p.plane.nx.toFixed(2)}, ${p.plane.ny.toFixed(2)})` : "—", "PLIC normal"],
-    ["d", p.plane ? p.plane.offset.toFixed(3) : "—", "PLIC offset from the cell's low corner; blank where the interface is unresolved"],
+    ["d", p.plane ? p.plane.offset.toFixed(3) : "—", "PLIC offset from the cell's low corner, in finest cells; blank where the interface is unresolved"],
     ["u", `${p.u.toFixed(3)}, ${p.v.toFixed(3)}`, "staggered face velocity, aperture folded in"],
     ["a", p.aperture.toFixed(2), "open fraction of the row"],
     ["p", p.pressure.toFixed(3), "leaf pressure; 0 at the free surface"],
@@ -773,6 +839,41 @@ export function AdvanceLab(): React.JSX.Element {
     if (!receipt.accepted) setFolds(current => new Set(current).add("drop"));
   };
 
+  /**
+   * Land a drawn enforcement box, and hold the run to it.
+   *
+   * A live edit to the run's copy of the document, for the reason the drop is
+   * one: authoring it into the scene would re-seed the world and destroy the
+   * run it was drawn on. It bites at the next advance, because the resolution
+   * policy is a stage of the advance and nothing here reaches around it.
+   */
+  const drawRegion = (anchor: readonly [number, number],
+    at: readonly [number, number]): void => {
+    const s = slice.current;
+    if (!s || sliceEnforcementCapacityRemaining(s.scene) <= 0) return;
+    const region = sliceEnforcementRegionFromCanvasDrag(s.scene, anchor, at, {
+      minimumCellSize_cells: enforceCells,
+      ...(holdAtOneTier ? { maximumCellSize_cells: enforceCells } : {}),
+    });
+    reseat(withSliceEnforcementRegion(s.scene, region.id, region));
+  };
+
+  /** Replace the run's document copy in place, the way re-timing does. */
+  const reseat = (next: SliceSceneSeed): void => {
+    const s = slice.current;
+    if (!s) return;
+    s.scene = next;
+    setSeed(next);
+  };
+
+  /** Change one drawn box's bounds, or take it away. */
+  const amendRegion = (region: FluidRefinementRegion,
+    next: FluidRefinementRegion | undefined): void => {
+    const s = slice.current;
+    if (!s) return;
+    reseat(withSliceEnforcementRegion(s.scene, region.id, next));
+  };
+
   const dropRows = (drop: SliceInjectionReceipt):
   readonly (readonly [string, string, string])[] => [
     ["cells", String(drop.cellsWetted), "leaves whose volume the dose actually raised"],
@@ -793,32 +894,37 @@ export function AdvanceLab(): React.JSX.Element {
 
   return <main className={styles.lab}>
     <header className={styles.bar}>
-      <Link href="/" className={styles.mark} title="Fluid Lab">FL</Link>
+      {/* Three cells, not one row: the transport sits in the middle of the
+          *header*, which is only the middle of the row when both sides happen
+          to be the same width. The sides take what is left and give way first,
+          so Play never moves as the scene's name or the step's cost changes
+          length under it. */}
+      <div className={styles.side}>
+        <Link href="/" className={styles.mark} title="Fluid Lab">FL</Link>
 
-      <div className={styles.anchor}>
-        <button type="button" className={styles.sceneChip}
-          data-scene-selector-toggle=""
-          aria-haspopup="dialog" aria-expanded={picking}
-          onClick={() => setPicking(open => !open)}>
-          <b>{seed?.label ?? "Loading scene"}</b>
-          <em>{displayNx}×{displayNy} centre-Z slice</em>
-          <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2 3.6 5 6.6 8 3.6" /></svg>
-        </button>
-        {picking && <ScenePickerPopover
-          className={styles.scenePopover}
-          cards={sceneCatalogCards}
-          currentId={sceneId}
-          label="Choose the production scene this lab slices"
-          choose={card => { reseed(card.id); setPicking(false); }}
-          close={() => setPicking(false)} />}
+        <div className={styles.anchor}>
+          <button type="button" className={styles.sceneChip}
+            data-scene-selector-toggle=""
+            aria-haspopup="dialog" aria-expanded={picking}
+            onClick={() => setPicking(open => !open)}>
+            <b>{seed?.label ?? "Loading scene"}</b>
+            <em>{displayNx}×{displayNy} centre-Z slice</em>
+            <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2 3.6 5 6.6 8 3.6" /></svg>
+          </button>
+          {picking && <ScenePickerPopover
+            className={styles.scenePopover}
+            cards={sceneCatalogCards}
+            currentId={sceneId}
+            label="Choose the production scene this lab slices"
+            choose={card => { reseed(card.id); setPicking(false); }}
+            close={() => setPicking(false)} />}
+        </div>
+
+        {caveats > 0 && <button type="button" className={styles.caveat}
+          onClick={() => setFolds(current => new Set(current).add("scene"))}>
+          {caveats} caveat{caveats === 1 ? "" : "s"}
+        </button>}
       </div>
-
-      {caveats > 0 && <button type="button" className={styles.caveat}
-        onClick={() => setFolds(current => new Set(current).add("scene"))}>
-        {caveats} caveat{caveats === 1 ? "" : "s"}
-      </button>}
-
-      <span className={styles.spacer} />
 
       <div className={styles.transport}>
         <button type="button" aria-pressed={playing} onClick={() => setPlaying(v => !v)}>
@@ -838,33 +944,27 @@ export function AdvanceLab(): React.JSX.Element {
           }
           setReadings(read(s));
         }}>Step</button>
-        <button type="button" aria-pressed={walking}
-          onClick={() => setWalking(v => {
-            /* The strip only steps on while the water moves, so asking for the
-             * walk is asking for the clock — the one place a control here
-             * starts it without the reader pressing Play. */
-            if (!v) { setPlaying(true); live.current.playing = true; }
-            return !v;
-          })}
-          title="Play the stage strip through, one stage at a time">Walk</button>
         <button type="button" onClick={() => reseed(sceneId)}>Reset</button>
       </div>
-      <label className={styles.iters} htmlFor="advance-step">Δt
+
+      <div className={`${styles.side} ${styles.trailing}`}>
+        <label className={styles.iters} htmlFor="advance-step">Δt
         <select id="advance-step" value={String(dt)}
           title="Seconds of physics per advance. 1/30 s is CM12's paper regime; the lab holds every scene to it whatever its own document asks for."
           onChange={event => retime(Number(event.target.value))}>
           {STEP_SIZES.map(size =>
             <option key={size.label} value={size.dt}>{size.label}</option>)}
         </select>
-        <b>{(dt * 1000).toFixed(1)} ms</b></label>
-      {/* The clock's price, beside the clock: what this machine spends to move
-          the water Δt forward, median of the last few advances so a collection
-          pause does not read as a regression. */}
-      <span className={styles.iters}
-        title={`Wall-clock cost of one advance on this machine, the median of the last ${STEP_COST_SAMPLES}. It prices the whole step at the current solve budget — not the physics, and not the work model's counts.`}>
-        step<b className={styles.cost}>{stepMs === null ? "—" : `${stepMs.toFixed(1)} ms`}</b>
-      </span>
-      <span className={styles.themeSlot}><ThemeSwitch /></span>
+          <b>{(dt * 1000).toFixed(1)} ms</b></label>
+        {/* The clock's price, beside the clock: what this machine spends to
+            move the water Δt forward, median of the last few advances so a
+            collection pause does not read as a regression. */}
+        <span className={styles.iters}
+          title={`Wall-clock cost of one advance on this machine, the median of the last ${STEP_COST_SAMPLES}. It prices the whole step at the current solve budget — not the physics, and not the work model's counts.`}>
+          step<b className={styles.cost}>{stepMs === null ? "—" : `${stepMs.toFixed(1)} ms`}</b>
+        </span>
+        <span className={styles.themeSlot}><ThemeSwitch /></span>
+      </div>
     </header>
 
     <div className={styles.workspace}>
@@ -886,14 +986,19 @@ export function AdvanceLab(): React.JSX.Element {
             const inside = !!paper && event.clientX >= paper.left
               && event.clientX <= paper.right && event.clientY >= paper.top
               && event.clientY <= paper.bottom;
+            const at = inside && canvas.current
+              ? aimAt(canvas.current, event.clientX, event.clientY) : null;
             setHover(null);
             setMenu({
               x: Math.min(host.width - MENU_WIDTH - 8,
                 Math.max(8, event.clientX - host.left + 2)),
               y: Math.min(host.height - MENU_HEIGHT - 8,
                 Math.max(8, event.clientY - host.top + 2)),
-              at: inside && canvas.current
-                ? aimAt(canvas.current, event.clientX, event.clientY) : null,
+              at,
+              /* What the press was *on*, which is what makes the enforcement
+                 half of this menu about one box rather than about a list. */
+              regionId: at && slice.current
+                ? sliceEnforcementRegionAt(slice.current.scene, at)?.id : undefined,
             });
           }}>
           <canvas ref={canvas} className={styles.canvas} role="img"
@@ -902,16 +1007,18 @@ export function AdvanceLab(): React.JSX.Element {
             style={{ width: displayNx * scale, height: displayNy * scale }}
             aria-label={`${representing ? "The state entering the advance" : declaration.label} for ${seed?.label ?? "the selected production scene"} on its ${displayNx} by ${displayNy} centre-Z slice at frame ${readings.frame}`}
             onPointerDown={event => {
-              if (!arming || event.button !== 0) return;
+              if (!tool || event.button !== 0) return;
               const at = aimAt(event.currentTarget, event.clientX, event.clientY);
               if (!at) return;
               /* The ball is complete before the pointer moves, so a plain click
                * is a whole gesture and a drag is the same gesture continued —
                * the studio's contract, and the reason arming is not a two-click
-               * mode. */
+               * mode. A box has no meaning until it has two corners, so it is
+               * the one gesture here that the drag is required for. */
               event.currentTarget.setPointerCapture(event.pointerId);
               dragging.current = { pointer: event.pointerId, anchor: at, moved: false };
-              setAim(proposeAim(at, defaultDropRadius(displayNx, displayNy)));
+              if (tool === "region") setSketch({ anchor: at, at });
+              else setAim(proposeAim(at, defaultDropRadius(displayNx, displayNy)));
             }}
             onPointerMove={event => {
               const probe = probeAt(event.currentTarget, event.clientX, event.clientY);
@@ -921,10 +1028,14 @@ export function AdvanceLab(): React.JSX.Element {
                 x: Math.min(host.width - PROBE_WIDTH - 8, event.clientX - host.left + 14),
                 y: Math.min(host.height - PROBE_HEIGHT, event.clientY - host.top + 14),
               } : null);
-              if (!arming) return;
+              if (!tool) return;
               const at = aimAt(event.currentTarget, event.clientX, event.clientY);
               if (!at) return;
               const active = dragging.current;
+              if (tool === "region") {
+                if (active) setSketch({ anchor: active.anchor, at });
+                return;
+              }
               if (!active) { setAim(proposeAim(at, defaultDropRadius(displayNx, displayNy))); return; }
               /* Dragging sizes the ball; it does not aim it again. The anchor
                * stays where the press landed and the pointer rides the rim. */
@@ -939,6 +1050,15 @@ export function AdvanceLab(): React.JSX.Element {
               if (!active || active.pointer !== event.pointerId) return;
               dragging.current = null;
               const at = aimAt(event.currentTarget, event.clientX, event.clientY);
+              if (tool === "region") {
+                setSketch(null);
+                /* A press with no drag drew no box. Snapping a point outward
+                 * would still make a legal region, but not the one the reader
+                 * asked for. */
+                if (at && Math.max(Math.abs(at[0] - active.anchor[0]),
+                  Math.abs(at[1] - active.anchor[1])) > 0.5) drawRegion(active.anchor, at);
+                return;
+              }
               const reach = at
                 ? Math.hypot(at[0] - active.anchor[0], at[1] - active.anchor[1]) : 0;
               commitDrop(active.anchor, active.moved && reach > 0.5
@@ -949,15 +1069,15 @@ export function AdvanceLab(): React.JSX.Element {
                * should not charge. */
               setAim(at ? proposeAim(at, defaultDropRadius(displayNx, displayNy)) : null);
             }}
-            onPointerCancel={() => { dragging.current = null; setAim(null); }}
+            onPointerCancel={() => { dragging.current = null; setAim(null); setSketch(null); }}
             onPointerLeave={() => {
               setHover(null);
-              if (!dragging.current) setAim(null);
+              if (!dragging.current) { setAim(null); setSketch(null); }
             }}
             onClick={event => {
-              /* Armed, the click belongs to the ball. The probe under the
+              /* Armed, the click belongs to the tool. The probe under the
                * pointer keeps reading either way; only pinning steps aside. */
-              if (arming) return;
+              if (tool) return;
               const probe = probeAt(event.currentTarget, event.clientX, event.clientY);
               if (probe) pin(probe);
             }} />
@@ -978,21 +1098,66 @@ export function AdvanceLab(): React.JSX.Element {
               className={styles.aimBall} vectorEffect="non-scaling-stroke" />
           </svg>}
 
+          {/* The boxes this cut stands under, and the one being drawn.
+              Always on: an enforcement region is a standing instruction to the
+              topology, and a reader looking at a brick held at one rung has to
+              be able to see what is holding it. Drawn in the same lattice
+              units as the aim overlay, over every lens. */}
+          {(regions.length > 0 || sketch) && <svg className={styles.aim} aria-hidden="true"
+            viewBox={`0 0 ${displayNx} ${displayNy}`}
+            style={{ width: displayNx * scale, height: displayNy * scale }}>
+            {regions.map(({ region, box }) =>
+              <rect key={region.id} className={styles.regionBox}
+                x={box.minFine[0]} y={box.minFine[1]}
+                width={Math.max(0, box.maxFine[0] - box.minFine[0])}
+                height={Math.max(0, box.maxFine[1] - box.minFine[1])}
+                vectorEffect="non-scaling-stroke" />)}
+            {sketch && <rect className={styles.regionDraw}
+              x={Math.min(sketch.anchor[0], sketch.at[0])}
+              y={Math.min(sketch.anchor[1], sketch.at[1])}
+              width={Math.abs(sketch.at[0] - sketch.anchor[0])}
+              height={Math.abs(sketch.at[1] - sketch.anchor[1])}
+              vectorEffect="non-scaling-stroke" />}
+          </svg>}
+
+          {/* What each box enforces, in the lattice's own words, pinned to its
+              corner — a box that did not say what it holds would be a
+              rectangle with no meaning. The layer is placed exactly as the
+              canvas is, so a tag can be positioned in the same cells the box
+              is drawn in. */}
+          {regions.length > 0 && <div className={`${styles.aim} ${styles.tags}`}
+            aria-hidden="true"
+            style={{ width: displayNx * scale, height: displayNy * scale }}>
+            {regions.map(({ region, box }) =>
+              <span key={region.id} className={styles.regionTag} style={{
+                left: box.minFine[0] * scale, top: box.minFine[1] * scale,
+              }}>{region.maximumCellSize_cells === region.minimumCellSize_cells
+                  ? `held at ${region.minimumCellSize_cells}`
+                  : `≥ ${region.minimumCellSize_cells} cell${region.minimumCellSize_cells === 1 ? "" : "s"}`}
+              </span>)}
+          </div>}
+
           {/* Nothing names the stage over the water: the sidebar says which lens
               this is and what it draws, and a caption pinned to the corner of
               the picture sits on top of the one thing the page is for. Only a
               slice with no liquid in it earns an overlay, because then there is
               no picture for it to cover. */}
-          {(emptySlice || arming) && <div className={`${styles.hud} ${styles.hudTop}`}>
+          {(emptySlice || tool) && <div className={`${styles.hud} ${styles.hudTop}`}>
             {emptySlice && <div className={styles.alarm}>
               This authored centre slice contains no initial liquid.</div>}
-            {/* The drop is a mode, and its button is gone: without a pressed
-                control somewhere a reader has only the ball under the pointer
-                to tell them the next click adds water, and that disappears the
-                moment the pointer leaves the picture. */}
-            {arming && <div className={styles.caption}>
+            {/* Both tools are modes and neither has a button: without a
+                pressed control somewhere a reader has only the shape under the
+                pointer to tell them what the next press will do, and that
+                disappears the moment the pointer leaves the picture. */}
+            {tool === "drop" && <div className={styles.caption}>
               Dropping water — click to place a ball, drag out to size it.
               {" "}<b>Esc</b> or <b>{DROP_KEY}</b> to stop.</div>}
+            {tool === "region" && <div className={styles.caption}>
+              Drawing an enforcement region — drag a box over the water. It will
+              snap out to whole {enforceCells}-cell leaves and, from the next step,
+              hold the bricks it contains{holdAtOneTier
+                ? " at exactly that size" : " no coarser than that"}.
+              {" "}<b>Esc</b> or <b>{REGION_KEY}</b> to stop.</div>}
           </div>}
 
           <div className={`${styles.hud} ${styles.hudRight}`}>
@@ -1005,8 +1170,10 @@ export function AdvanceLab(): React.JSX.Element {
               {/* Which line the picture is drawing, and — since the choice is
                   now a right-click rather than a widget — where to change it.
                   The one readout that takes the pointer, so it can say so. */}
+              {regions.length > 0 && <span className={styles.read}>
+                enforced <b>{regions.length} region{regions.length === 1 ? "" : "s"}</b></span>}
               <span className={`${styles.read} ${styles.hint}`}
-                title="Right-click the water to drop a ball there, or to choose the surface reconstruction and the solve budget.">
+                title="Right-click the water to drop a ball there, draw an enforcement region, or choose the surface reconstruction and the solve budget.">
                 surface <b>{SURFACE_VIEWS.find(view => view.id === surfaceView)?.label}</b></span>
               {/* The drift denominator moved, so say so beside it — otherwise
                   the percentage above silently means something new. */}
@@ -1032,7 +1199,7 @@ export function AdvanceLab(): React.JSX.Element {
               const overlay = SLICE_OVERLAYS[id], on = overlays.has(id);
               return <button type="button" key={id} aria-pressed={on}
                 className={`${styles.key} ${styles.keyToggle}`}
-                title={`${overlay.caption} (${OVERLAY_KEYS[id]})`}
+                title={`${overlay.hint} (${OVERLAY_KEYS[id]})`}
                 onClick={() => toggleOverlay(id)}>
                 <i style={{
                   background: paletteVar(overlay.keys[0]![0]),
@@ -1074,21 +1241,118 @@ export function AdvanceLab(): React.JSX.Element {
                 the second and third ball cost one click each. */}
             <div className={styles.menuGroup}>
               <button type="button" className={styles.menuItem}
-                aria-pressed={arming && !menu.at}
+                aria-pressed={tool === "drop" && !menu.at}
                 onClick={() => {
                   if (menu.at) commitDrop(menu.at, defaultDropRadius(displayNx, displayNy));
                   /* Armed either way: with a point this is "and another one
                    * like it", and without one it is the mode by itself. */
-                  setArming(true);
+                  setTool("drop");
                   setMenu(null);
                 }}>
                 <b>{menu.at ? "Drop a ball here" : "Drop water"}</b>
                 <em>{menu.at
                   ? `lands now · click or drag out for more · ${DROP_KEY} · Esc`
                   : `click the water to place one, drag out to size it · ${DROP_KEY}`}</em></button>
-              {arming && <button type="button" className={styles.menuItem}
-                onClick={() => { setArming(false); setAim(null); setMenu(null); }}>
-                <b>Stop dropping</b><em>let go of the ball under the pointer</em></button>}
+              {tool && <button type="button" className={styles.menuItem}
+                onClick={() => { setTool(null); setAim(null); setSketch(null); setMenu(null); }}>
+                <b>{tool === "drop" ? "Stop dropping" : "Stop drawing"}</b>
+                <em>let the pointer go back to reading cells</em></button>}
+            </div>
+
+            {/* Which lens is over the water.
+                The strip along the bottom is the same choice laid out as the
+                loop, with its costs; this is that choice where the pointer
+                already is, for a reader who is looking at the picture rather
+                than at the anatomy of the advance. One list, in the order the
+                stages run, with the band each belongs to as its dot — the
+                strip's own colouring, so the two readings of the same set
+                cannot drift apart. */}
+            <div className={styles.menuGroup}>
+              <span className={styles.menuLabel}>Visualization
+                <b>{representing ? "t = 0" : index + 1}</b></span>
+              <div className={styles.menuList}>
+                <button type="button" className={styles.menuPick}
+                  aria-pressed={representing}
+                  ref={representing ? scrollIntoMenu : undefined}
+                  title={REPRESENT_LENS.caption}
+                  onClick={() => { setStep(1); setMenu(null); }}>
+                  <i style={{ background: paletteVar("muted") }} />
+                  The state entering the advance</button>
+                {ADVANCE_STAGE_ORDER.map((stage, i) => {
+                  const at = sparseCM12Stage(stage);
+                  const on = !representing && stage === selected;
+                  return <button type="button" key={stage} className={styles.menuPick}
+                    aria-pressed={on} ref={on ? scrollIntoMenu : undefined}
+                    title={ADVANCE_LENSES[stage].caption}
+                    onClick={() => { select(stage); setMenu(null); }}>
+                    <i style={{ background: paletteVar(BAND_TONE[at.band]) }} />
+                    <em>{i + 1}</em>{at.label}</button>;
+                })}
+              </div>
+            </div>
+
+            {/* The enforcement box. Contextual in the strongest sense the page
+                has: a press inside a box is about *that* box, and a press on
+                open water is about drawing a new one. Nothing here is a list
+                of every region in the scene — the picture already draws them,
+                and the one under the pointer is the one being asked about. */}
+            <div className={styles.menuGroup}>
+              <span className={styles.menuLabel}>Enforcement
+                <b>{regions.length || ""}</b></span>
+              {menuRegion ? <>
+                <div className={styles.menuLadder} role="group"
+                  aria-label="Smallest pressure cell allowed inside this region">
+                  {SLICE_ENFORCEMENT_CELL_SIZES.map(size =>
+                    <button type="button" key={size} className={styles.rung}
+                      aria-pressed={menuRegion.minimumCellSize_cells === size}
+                      title={`Hold fully contained bricks to cells of ${size} finest cell${size === 1 ? "" : "s"}`}
+                      onClick={() => amendRegion(menuRegion, {
+                        ...menuRegion, minimumCellSize_cells: size,
+                        /* A ceiling that was equal to the floor is a region
+                           held at one tier, and follows the floor. A wider
+                           authored ceiling is kept, only never left below the
+                           floor it now has to be above. */
+                        ...(menuRegion.maximumCellSize_cells === undefined ? {}
+                          : { maximumCellSize_cells:
+                            menuRegion.maximumCellSize_cells === menuRegion.minimumCellSize_cells
+                              ? size : Math.max(size, menuRegion.maximumCellSize_cells) }),
+                      })}>{size}</button>)}
+                </div>
+                <button type="button" className={styles.menuItem}
+                  aria-pressed={menuRegion.maximumCellSize_cells !== undefined}
+                  onClick={() => amendRegion(menuRegion,
+                    menuRegion.maximumCellSize_cells === undefined
+                      ? { ...menuRegion, maximumCellSize_cells: menuRegion.minimumCellSize_cells }
+                      : { ...menuRegion, maximumCellSize_cells: undefined })}>
+                  <b>Hold at one tier</b>
+                  <em>equal bounds stop contained bricks coarsening as well as refining</em></button>
+                <button type="button" className={styles.menuItem}
+                  onClick={() => { amendRegion(menuRegion, undefined); setMenu(null); }}>
+                  <b>Remove this region</b>
+                  <em>the bricks it held go back to being evidence-driven</em></button>
+              </> : <>
+                <div className={styles.menuLadder} role="group"
+                  aria-label="Smallest pressure cell a drawn region will allow">
+                  {SLICE_ENFORCEMENT_CELL_SIZES.map(size =>
+                    <button type="button" key={size} className={styles.rung}
+                      aria-pressed={enforceCells === size}
+                      title={`Draw boxes that hold contained bricks to cells of ${size} finest cell${size === 1 ? "" : "s"}`}
+                      onClick={() => setEnforceCells(size)}>{size}</button>)}
+                </div>
+                <button type="button" className={styles.menuItem}
+                  aria-pressed={holdAtOneTier}
+                  onClick={() => setHoldAtOneTier(value => !value)}>
+                  <b>Hold at one tier</b>
+                  <em>a drawn box bounds coarsening as well as refining</em></button>
+                <button type="button" className={styles.menuItem}
+                  aria-pressed={tool === "region"}
+                  disabled={capacityLeft <= 0}
+                  onClick={() => { setTool("region"); setMenu(null); }}>
+                  <b>Draw an enforcement region</b>
+                  <em>{capacityLeft > 0
+                    ? `drag a box over the water · ${REGION_KEY} · ${capacityLeft} left`
+                    : "the document's eight boxes are all drawn"}</em></button>
+              </>}
             </div>
             <div className={styles.menuGroup}>
               <span className={styles.menuLabel}>Surface</span>
@@ -1349,9 +1613,9 @@ export function AdvanceLab(): React.JSX.Element {
             open={folds.has("reading")} toggle={toggleFold}>
             <p className={styles.summary}>
               A live 2-D slice of the solver&rsquo;s own model. Every stage of the resident
-              encoder is a lens over this one picture — pick one from the strip to see what
-              it touches, hover the water to read a cell, click to pin it. Walk plays the
-              strip through, one stage at a time.
+              encoder is a lens over this one picture — pick one from the strip below or
+              from the right-click menu on the water to see what it touches, hover the
+              water to read a cell, click to pin it.
             </p>
             <p className={styles.hint}>
               {model.cells ? readings.work.provenance

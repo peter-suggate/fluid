@@ -1,5 +1,6 @@
 import {
   SPARSE_CM12_FACTORED_AEI_INVALID,
+  SPARSE_CM12_FACTORED_AEI_RELATION,
   type SparseCM12FactoredAEICanonicalDescriptor,
   type SparseCM12FactoredAEICatalog,
   type SparseCM12FactoredAEIPatchDescriptor,
@@ -118,10 +119,110 @@ export interface SparseCM12InternedBoundaryCompilation {
   readonly firstExtra: number | null;
 }
 
+const fullFaceExterior = (catalog: SparseCM12FactoredAEICatalog,
+  sourceDescriptorId: number, side: number,
+  patch: SparseCM12FactoredAEIPatchDescriptor): boolean => {
+  if (patch.targetLeaf !== SPARSE_CM12_FACTORED_AEI_INVALID
+    || patch.relation !== SPARSE_CM12_FACTORED_AEI_RELATION.explicitSparseAir
+    || patch.sourceCanonicalId !== sourceDescriptorId
+    || patch.sourceSide !== side) return false;
+  const source = catalog.canonical[sourceDescriptorId];
+  const axis = Math.floor(side / 2), tangents = [0, 1, 2].filter((value) =>
+    value !== axis);
+  return patch.sourceTermFaceCertified && source !== undefined
+    && patch.sourceTermFaceOrigin[0] === 0 && patch.sourceTermFaceOrigin[1] === 0
+    && patch.sourceTermFaceDimensions[0] === source.validDimensions[tangents[0]!]!
+    && patch.sourceTermFaceDimensions[1] === source.validDimensions[tangents[1]!]!;
+};
+
+/** The one certified full-face sparse-air fallback in a canonical face. */
+export function sparseCM12InternedBoundaryFullFaceExteriorPatch(options: Readonly<{
+  catalog: SparseCM12FactoredAEICatalog;
+  sourceDescriptorId: number;
+  side: number;
+}>): SparseCM12FactoredAEIPatchDescriptor | undefined {
+  const { catalog, sourceDescriptorId, side } = options;
+  const matches = catalog.patchIdsByCanonicalSide[sourceDescriptorId]?.[side]
+    ?.map((id) => catalog.patches[id]!).filter((patch) =>
+      fullFaceExterior(catalog, sourceDescriptorId, side, patch)) ?? [];
+  if (matches.length > 1) {
+    throw new Error(`IBO source canonical ${sourceDescriptorId} side ${side}`
+      + " has more than one full-face exterior patch");
+  }
+  return matches[0];
+}
+
+/** Exact source-term coverage proof used before removing a full-face fallback. */
+export function sparseCM12InternedBoundaryPatchesCoverExterior(options: Readonly<{
+  exterior: SparseCM12FactoredAEIPatchDescriptor;
+  patches: readonly SparseCM12FactoredAEIPatchDescriptor[];
+}>): boolean {
+  const { exterior, patches } = options;
+  if (!exterior.sourceTermFaceCertified
+    || exterior.targetLeaf !== SPARSE_CM12_FACTORED_AEI_INVALID
+    || patches.some((patch) => !patch.sourceTermFaceCertified
+      || patch.targetLeaf === SPARSE_CM12_FACTORED_AEI_INVALID
+      || patch.sourceCanonicalId !== exterior.sourceCanonicalId
+      || patch.sourceSide !== exterior.sourceSide)) return false;
+  const [originU, originV] = exterior.sourceTermFaceOrigin;
+  const [width, height] = exterior.sourceTermFaceDimensions;
+  if (width < 1 || height < 1) return false;
+  if (exterior.sourceTermFaceCount !== width * height
+    || exterior.sourceTermFaceWeights !== undefined
+      && exterior.sourceTermFaceWeights.length !== width * height) return false;
+  const covered = new Float64Array(width * height);
+  for (const patch of patches) {
+    const [patchU, patchV] = patch.sourceTermFaceOrigin;
+    const [patchWidth, patchHeight] = patch.sourceTermFaceDimensions;
+    if (patch.sourceTermFaceCount !== patchWidth * patchHeight
+      || patch.sourceTermFaceWeights !== undefined
+        && patch.sourceTermFaceWeights.length !== patchWidth * patchHeight) return false;
+    for (let v = patchV; v < patchV + patchHeight; v += 1) {
+      for (let u = patchU; u < patchU + patchWidth; u += 1) {
+        if (u < originU || u >= originU + width
+          || v < originV || v >= originV + height) return false;
+        const patchAt = (v - patchV) * patchWidth + u - patchU;
+        const weight = patch.sourceTermFaceWeights?.[patchAt] ?? 1;
+        if (!Number.isFinite(weight) || weight <= 0) return false;
+        covered[(v - originV) * width + u - originU] += weight;
+      }
+    }
+  }
+  return covered.every((value, at) => Math.abs(value
+    - (exterior.sourceTermFaceWeights?.[at] ?? 1)) <= 9.5367431640625e-7);
+}
+
+/** Select the four explicit IBO slot references for one accepted face.
+ * A certified full-face sparse-air fallback is omitted only when the selected
+ * internal patches' complete source-term footprints cover every fallback
+ * sample. Partial and inactive coverage keeps the fallback explicit. */
+export function selectSparseCM12InternedBoundaryPatches(options: Readonly<{
+  catalog: SparseCM12FactoredAEICatalog;
+  sourceDescriptorId: number;
+  side: number;
+  activeLeaves: ReadonlySet<number>;
+  descriptorIdByLeaf: readonly number[];
+}>): readonly SparseCM12FactoredAEIPatchDescriptor[] {
+  const { catalog, sourceDescriptorId, side, activeLeaves,
+    descriptorIdByLeaf } = options;
+  const compatible = catalog.patchIdsByCanonicalSide[sourceDescriptorId]?.[side]
+    ?.map((id) => catalog.patches[id]!).filter((patch) =>
+      patch.targetLeaf === SPARSE_CM12_FACTORED_AEI_INVALID
+      || activeLeaves.has(patch.targetLeaf)
+        && descriptorIdByLeaf[patch.targetLeaf] === patch.targetCanonicalId) ?? [];
+  const exterior = sparseCM12InternedBoundaryFullFaceExteriorPatch({ catalog,
+    sourceDescriptorId, side });
+  if (!exterior) return compatible;
+  const internal = compatible.filter((patch) =>
+    patch.targetLeaf !== SPARSE_CM12_FACTORED_AEI_INVALID);
+  return sparseCM12InternedBoundaryPatchesCoverExterior({ exterior, patches: internal })
+    ? compatible.filter((patch) => patch.id !== exterior.id) : compatible;
+}
+
 const align = (value: number, words = 64) => Math.ceil(value / words) * words;
 const packDimensions = (value: readonly [number, number, number]) =>
   (value[0] | (value[1] << 10) | (value[2] << 20)) >>> 0;
-const rowIds = (catalog: SparseCM12FactoredAEICatalog,
+export const sparseCM12InternedBoundaryPatchRows = (catalog: SparseCM12FactoredAEICatalog,
   facePatch: SparseCM12FactoredAEIPatchDescriptor): readonly number[] =>
   facePatch.exceptionCount === 0
     ? Array.from({ length: facePatch.rowCount }, (_, local) => facePatch.rowFirst + local)
@@ -186,7 +287,7 @@ const compileTemplateWords = (options: Readonly<{
   const sourceDescriptor = catalog.canonical[facePatch.sourceCanonicalId]!;
   const targetDescriptor = facePatch.targetCanonicalId === SPARSE_CM12_FACTORED_AEI_INVALID
     ? undefined : catalog.canonical[facePatch.targetCanonicalId];
-  const rows = rowIds(catalog, facePatch);
+  const rows = sparseCM12InternedBoundaryPatchRows(catalog, facePatch);
   if (rows.length === 0) throw new Error(`IBO patch ${facePatch.id} has no rows`);
   const authoritativeRowBase = Math.min(...rows);
   let termCount = 0;
@@ -285,6 +386,7 @@ export function compileSparseCM12InternedBoundaryOperators(options: Readonly<{
     * SPARSE_CM12_INTERNED_BOUNDARY_LOGICAL_REF_WORDS).fill(SPARSE_CM12_FACTORED_AEI_INVALID);
   const instances: SparseCM12InternedBoundaryInstance[] = [];
   const represented = new Set<number>();
+  const supersededExteriorRows = new Set<number>();
   for (let leaf = 0; leaf < catalog.layout.leafCapacity; leaf += 1) {
     if (!active.has(leaf)) continue;
     const selectedId = catalog.descriptorIdByLeaf[leaf]!;
@@ -294,14 +396,32 @@ export function compileSparseCM12InternedBoundaryOperators(options: Readonly<{
       represented.add(descriptor.rowBase[axis]! + local);
     }
     for (let side = 0; side < 6; side += 1) {
-      const compatible = catalog.patchIdsByCanonicalSide[selectedId]![side]!
+      const rawCompatible = catalog.patchIdsByCanonicalSide[selectedId]![side]!
         .map((id) => catalog.patches[id]!).filter((facePatch) =>
           facePatch.targetLeaf === SPARSE_CM12_FACTORED_AEI_INVALID
           || active.has(facePatch.targetLeaf)
             && catalog.descriptorIdByLeaf[facePatch.targetLeaf]
               === facePatch.targetCanonicalId);
+      const compatible = selectSparseCM12InternedBoundaryPatches({ catalog,
+        sourceDescriptorId: selectedId, side, activeLeaves: active,
+        descriptorIdByLeaf: catalog.descriptorIdByLeaf });
+      const selected = new Set(compatible.map((patch) => patch.id));
+      for (const patch of rawCompatible) {
+        if (!selected.has(patch.id)
+          && patch.targetLeaf === SPARSE_CM12_FACTORED_AEI_INVALID) {
+          for (const row of sparseCM12InternedBoundaryPatchRows(catalog, patch)) {
+            supersededExteriorRows.add(row);
+          }
+        }
+      }
       if (compatible.length > 4) {
-        throw new Error(`IBO selected leaf ${leaf} side ${side} exceeds four instances`);
+        const patches = compatible.map((patch) =>
+          `${patch.id}:${patch.targetLeaf}/${patch.targetCanonicalId}`
+          + `@${patch.sourceFaceOrigin.join(",")}+${patch.faceDimensions.join("x")}`
+          + `#${patch.rowCount}`).join(";");
+        throw new Error(`IBO selected leaf ${leaf}/${selectedId}`
+          + ` resolution ${descriptor.resolution} dimensions ${descriptor.validDimensions.join("x")}`
+          + ` side ${side} exceeds four instances: ${patches}`);
       }
       for (let localRef = 0; localRef < compatible.length; localRef += 1) {
         const facePatch = compatible[localRef]!, templateId = templateIdByPatch[facePatch.id]!;
@@ -323,9 +443,11 @@ export function compileSparseCM12InternedBoundaryOperators(options: Readonly<{
       }
     }
   }
-  const expected = acceptedRows({ packed, active,
+  const accepted = acceptedRows({ packed, active,
     selectedDescriptorIdByLeaf: catalog.descriptorIdByLeaf,
     canonical: catalog.canonical });
+  const expected = Uint32Array.from(accepted.filter((row) =>
+    !supersededExteriorRows.has(row)));
   const representedRows = Uint32Array.from([...represented].sort((a, b) => a - b));
   const expectedSet = new Set(expected), representedSet = new Set(representedRows);
   const missing = [...expectedSet].filter((row) => !representedSet.has(row));

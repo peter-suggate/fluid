@@ -70,7 +70,11 @@
 }
 
 /* ---- bar ------------------------------------------------------------ */
-.bar{display:flex;align-items:center;gap:9px;height:52px;padding:0 14px;border-bottom:1px solid var(--line);background:var(--panel)}
+.bar{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:9px;height:52px;padding:0 14px;border-bottom:1px solid var(--line);background:var(--panel)}
+/* The two cells the transport is centred between. They hold what they hold and
+   shrink before the middle does, which is what keeps Play still. */
+.side{display:flex;align-items:center;gap:9px;min-width:0}
+.trailing{justify-content:flex-end}
 .mark,.mark:visited{width:30px;height:30px;flex:none;display:grid;place-items:center;border:1.5px solid var(--accent-line);border-radius:var(--radius-s);color:var(--accent);text-decoration:none;font:800 12px/1 var(--display);letter-spacing:-.04em}
 .mark:hover{border-color:var(--accent);color:var(--accent-strong)}
 .anchor{position:relative;min-width:0}
@@ -85,8 +89,7 @@
 .scenePopover.scenePopover{left:0;top:calc(100% + 9px);width:min(376px,86vw);max-height:min(64vh,560px)}
 .caveat{flex:none;border:1px solid var(--amber-line);background:var(--amber-wash);color:var(--amber-ink);border-radius:999px;padding:4px 10px;font:var(--text-micro);letter-spacing:var(--track-wide);text-transform:uppercase;cursor:pointer}
 .caveat:hover{border-color:var(--amber)}
-.spacer{flex:1}
-.transport{display:flex;gap:5px;flex:none}
+.transport{display:flex;gap:5px;flex:none;justify-self:center}
 .bar button,.axis button,.mini{border:1px solid var(--line-strong);background:var(--panel-soft);color:var(--muted);cursor:pointer;border-radius:var(--radius-s);font:var(--text-label);padding:6px 11px}
 .bar button:hover,.axis button:hover,.mini:hover{border-color:var(--accent-line);color:var(--ink)}
 .bar button[aria-pressed=true]{background:var(--accent-wash);border-color:var(--accent-line);color:var(--accent-strong)}
@@ -139,7 +142,7 @@
 
 /* The right-click menu: what shapes the solve, opened on the water it shapes.
    Above the probe, because it is the thing the pointer just asked for. */
-.menu{position:absolute;z-index:6;width:244px;display:grid;gap:10px;padding:10px;background:var(--panel);border:1px solid var(--line-strong);border-radius:var(--radius-m);box-shadow:var(--shadow-lift);backdrop-filter:var(--frost)}
+.menu{position:absolute;z-index:6;width:244px;max-height:calc(100% - 16px);overflow:auto;display:grid;gap:10px;padding:10px;background:var(--panel);border:1px solid var(--line-strong);border-radius:var(--radius-m);box-shadow:var(--shadow-lift);backdrop-filter:var(--frost)}
 .menuGroup{display:grid;gap:5px}
 .menuGroup+.menuGroup{padding-top:10px;border-top:1px solid var(--line)}
 .menuLabel{display:flex;align-items:baseline;justify-content:space-between;gap:8px;font:var(--text-micro);letter-spacing:var(--track-wide);text-transform:uppercase;color:var(--dim)}
@@ -151,6 +154,23 @@
 .menuItem[aria-pressed=true]{background:var(--accent-wash);border-color:var(--accent-line);color:var(--accent-strong)}
 .menuItem[aria-pressed=true] em{color:var(--accent-strong);opacity:.8}
 .menuRange{width:100%;accent-color:var(--accent);height:5px}
+/* The dyadic ladder, as a row of the sizes themselves: four numbers a reader
+   picks from, not a slider over values the lattice does not have. */
+.menuLadder{display:flex;gap:4px}
+.rung{flex:1;border:1px solid var(--line-strong);background:var(--panel-soft);color:var(--muted);border-radius:var(--radius-s);padding:4px 0;cursor:pointer;font:var(--text-label);font-variant-numeric:tabular-nums}
+.rung:hover{border-color:var(--accent-line);color:var(--ink)}
+.rung[aria-pressed=true]{background:var(--accent-wash);border-color:var(--accent-line);color:var(--accent-strong)}
+/* The lens list: sixteen rows, so it scrolls inside the panel rather than
+   making the panel itself sixteen rows tall. */
+.menuList{display:grid;gap:1px;max-height:172px;overflow:auto;margin:0 -2px;padding:0 2px}
+.menuPick{display:flex;align-items:center;gap:7px;text-align:left;border:1px solid transparent;background:none;color:var(--ink);border-radius:var(--radius-s);padding:4px 7px;cursor:pointer;font:var(--text-label);line-height:1.25}
+.menuPick i{width:7px;height:7px;border-radius:2px;flex:none}
+.menuPick em{font-style:normal;color:var(--dim);font-variant-numeric:tabular-nums;min-width:1.6ch;text-align:right}
+.menuPick:hover{background:var(--panel-soft);border-color:var(--line-strong)}
+.menuPick[aria-pressed=true]{background:var(--accent-wash);border-color:var(--accent-line);color:var(--accent-strong)}
+.menuPick[aria-pressed=true] em{color:var(--accent-strong)}
+.menuItem:disabled{opacity:.5;cursor:default}
+.menuItem:disabled:hover{background:none;border-color:transparent}
 
 /* The proposed drop. Centred exactly as the canvas is, so its viewBox and the
    lattice are the same coordinates and nothing has to convert between them.
@@ -160,6 +180,14 @@
 /* The pages the drop would wake. Dashed, and in the adaptivity tone the rung
    lens already uses, so a reader reads them as topology and not as water. */
 .aimBrick{fill:none;stroke:var(--slice-adaptivity);stroke-width:1;stroke-dasharray:3 3;opacity:.6}
+
+/* An enforcement region: the adaptivity tone, because what it bounds is the
+   ladder. Standing instructions are drawn solid; the one under the hand is
+   dashed, because it is not one yet. */
+.regionBox{fill:var(--slice-adaptivity);fill-opacity:.07;stroke:var(--slice-adaptivity);stroke-width:1.5}
+.regionDraw{fill:var(--slice-adaptivity);fill-opacity:.1;stroke:var(--slice-adaptivity);stroke-width:1.5;stroke-dasharray:5 4}
+.tags{position:absolute}
+.regionTag{position:absolute;transform:translateY(-100%);white-space:nowrap;font:var(--text-micro);letter-spacing:var(--track-wide);text-transform:uppercase;color:var(--slice-adaptivity);background:var(--overlay);border:1px solid var(--line);border-radius:var(--radius-s);padding:1px 6px;backdrop-filter:var(--frost-chip)}
 
 /* ---- strip ---------------------------------------------------------- */
 .strip{padding:9px 12px 10px;border-top:1px solid var(--line);background:var(--panel-soft)}

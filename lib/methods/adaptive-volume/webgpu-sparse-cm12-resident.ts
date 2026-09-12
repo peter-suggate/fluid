@@ -2335,6 +2335,13 @@ interface GeometricVolumeIndirectPublisher {
   readonly bindGroup: GPUBindGroup;
 }
 
+interface ProjectedTransportIndirectPublisher {
+  readonly arguments: GPUBuffer;
+  readonly topologyPipeline: GPUComputePipeline;
+  readonly velocityExtensionPipeline?: GPUComputePipeline;
+  readonly bindGroup: GPUBindGroup;
+}
+
 interface GeometricVolumeResidentLayout {
   readonly interfaceHistoryA: number;
   readonly interfaceHistoryB: number;
@@ -3714,6 +3721,8 @@ export class WebGPUSparseCM12Resident {
     acceptedIndirectArguments: GPUBuffer,
     private readonly volumeIndirectArguments: GPUBuffer,
     private readonly volumeIndirectPublisher: GeometricVolumeIndirectPublisher,
+    private readonly projectedTransportIndirectPublisher:
+      ProjectedTransportIndirectPublisher,
     pressureCellIndirectArguments: GPUBuffer,
     pressureMembershipIndirectArguments: GPUBuffer,
     pressureExecutionIndirectArguments: GPUBuffer,
@@ -5342,9 +5351,15 @@ export class WebGPUSparseCM12Resident {
         // VEX init/sweeps at 0/12; TPA reuses offset 0 after VEX completes.
         size: 24,
         usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST
-          | GPUBufferUsage.COPY_SRC,
+          | GPUBufferUsage.COPY_SRC | GPUBufferUsage.STORAGE,
       })
       : undefined;
+    const projectedTransportIndirectArguments = device.createBuffer({
+      label: "Sparse Geometric projected transport topology dispatch gate",
+      // Singleton, brick, leaf, page, accepted-leaf-neighbour, and directory shapes.
+      size: 6 * 12,
+      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.STORAGE,
+    });
     const sharpeningPacketIndirectArguments = transportPacketAuthorityLayout
       ? device.createBuffer({
         label: "Sparse Geometric (CM12) sharpening packet indirect dispatch",
@@ -5631,6 +5646,97 @@ fn publish(){
         ],
       }),
     };
+    const projectedTransportGateModule = compiler.createShaderModule({
+      label: "Sparse Geometric projected transport dispatch gate shader",
+      code: /* wgsl */ `
+@group(0) @binding(0) var<storage,read_write> activity:array<atomic<u32>>;
+@group(0) @binding(1) var<storage,read_write> arguments:array<u32>;
+${transportPacketIndirectArguments
+    ? "@group(0) @binding(2) var<storage,read_write> velocityExtensionArguments:array<u32>;"
+    : ""}
+override BRICK_GROUPS:u32;
+override LEAF_GROUPS:u32;
+override PAGE_GROUPS:u32;
+override FRONTIER_GROUPS:u32;
+override DIRECTORY_GROUPS:u32;
+fn triplet(at:u32,count:u32){arguments[at]=count;arguments[at+1u]=1u;arguments[at+2u]=1u;}
+@compute @workgroup_size(1)
+fn publishTopology(){
+  ${transportPacketIndirectArguments
+    ? "velocityExtensionArguments[0u]=velocityExtensionArguments[0u];"
+    : ""}
+  let enabled=select(0u,1u,atomicLoad(&activity[26u])!=0u);
+  triplet(0u,enabled);
+  triplet(3u,enabled*BRICK_GROUPS);
+  triplet(6u,enabled*LEAF_GROUPS);
+  triplet(9u,enabled*PAGE_GROUPS);
+  triplet(12u,enabled*FRONTIER_GROUPS);
+  triplet(15u,enabled*DIRECTORY_GROUPS);
+}
+${transportPacketIndirectArguments ? /* wgsl */ `
+@compute @workgroup_size(1)
+fn gateVelocityExtension(){
+  if(atomicLoad(&activity[26u])==0u){
+    velocityExtensionArguments[0u]=0u;
+    velocityExtensionArguments[3u]=0u;
+  }
+}
+` : ""}
+`,
+    });
+    const projectedTransportBindGroupLayout = device.createBindGroupLayout({
+      label: "Sparse Geometric projected transport dispatch gate bindings layout",
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        ...(transportPacketIndirectArguments
+          ? [{ binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" as const } }]
+          : []),
+      ],
+    });
+    const projectedTransportPipelineLayout = device.createPipelineLayout({
+      label: "Sparse Geometric projected transport dispatch gate layout",
+      bindGroupLayouts: [projectedTransportBindGroupLayout],
+    });
+    const projectedTransportTopologyPipeline = await compileResidentPipeline({
+      label: "Sparse Geometric projected transport topology dispatch publication",
+      layout: projectedTransportPipelineLayout,
+      compute: {
+        module: projectedTransportGateModule,
+        entryPoint: "publishTopology",
+        constants: {
+          BRICK_GROUPS: Math.ceil(worldLeafCapacity / WORKGROUP_SIZE),
+          LEAF_GROUPS: worldLeafCapacity,
+          PAGE_GROUPS: topologyPagePool.pageCapacity,
+          FRONTIER_GROUPS: Math.ceil(26 * worldLeafCapacity / WORKGROUP_SIZE),
+          DIRECTORY_GROUPS: Math.ceil(worldDirectoryLayout.capacity / WORKGROUP_SIZE),
+        },
+      },
+    }, { priority: "critical" });
+    const projectedTransportVelocityExtensionPipeline = transportPacketIndirectArguments
+      ? await compileResidentPipeline({
+        label: "Sparse Geometric projected transport velocity-extension dispatch gate",
+        layout: projectedTransportPipelineLayout,
+        compute: { module: projectedTransportGateModule,
+          entryPoint: "gateVelocityExtension" },
+      }, { priority: "critical" })
+      : undefined;
+    const projectedTransportIndirectPublisher: ProjectedTransportIndirectPublisher = {
+      arguments: projectedTransportIndirectArguments,
+      topologyPipeline: projectedTransportTopologyPipeline,
+      velocityExtensionPipeline: projectedTransportVelocityExtensionPipeline,
+      bindGroup: device.createBindGroup({
+        label: "Sparse Geometric projected transport dispatch gate bindings",
+        layout: projectedTransportBindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: activity } },
+          { binding: 1, resource: { buffer: projectedTransportIndirectArguments } },
+          ...(transportPacketIndirectArguments
+            ? [{ binding: 2, resource: { buffer: transportPacketIndirectArguments } }]
+            : []),
+        ],
+      }),
+    };
     const createResidentShaderSource = (velocityExtensionFixedRecurrenceDepth?: number) =>
       createWebgpuSparseCM12ResidentWGSL(
         atlas.brickFineResolution, presentationPageResolution,
@@ -5770,7 +5876,10 @@ fn publish(){
       "beginGeometricSolidSnapshot", "snapshotGeometricSolidCells", "snapshotGeometricSolidRows",
       "captureGeometricSolidCells", "activateGeometricSolidMotion",
       "reexpressGeometricSolidRows", "finishGeometricSolidPublication",
-      "markGeometricTransportFrontierActivity", "planGeometricTransportFrontier",
+      "markGeometricTransportFrontierActivity", "beginProjectedGeometricTransportReceivers",
+      "markProjectedGeometricTransportReceivers",
+      "activateProjectedGeometricTransportReceivers",
+      "planGeometricTransportFrontier",
       "enforceGeometricDynamicSeamFloor",
       "activateGeometricSweptCellSupport",
       "reserveGeometricTransportFaceSupport",
@@ -6122,6 +6231,7 @@ fn publish(){
       acceptedIndirectArguments,
       volumeIndirectArguments,
       volumeIndirectPublisher,
+      projectedTransportIndirectPublisher,
       pressureCellIndirectArguments,
       pressureMembershipIndirectArguments,
       pressureExecutionIndirectArguments,
@@ -6876,6 +6986,49 @@ fn publish(){
       }
       useBindGroup(this.bindGroup);
       dispatch("publishSparseCM12FrameFaceOutput", 1);
+      closePass();
+      this.encodeTopologyEditTransaction(encoder, finestCellSize_m,
+        [0, 0, 0], [0, 0, 0], 0, 0, dt_s, false, activityPolicy, "prepare", true,
+        true);
+      if (this.transportPacketIndirectArguments
+        && this.projectedTransportIndirectPublisher.velocityExtensionPipeline) {
+        useBindGroup(this.transportBindGroup);
+        const dispatchProjected = (name: string, byteOffset: number) => {
+          const projectedPass = openPass();
+          projectedPass.setPipeline(this.pipelines[name]!);
+          projectedPass.dispatchWorkgroupsIndirect(
+            this.projectedTransportIndirectPublisher.arguments, byteOffset);
+        };
+        dispatchProjected("beginSparseCM12VelocityExtensionSchedule", 0);
+        dispatchProjected("compileSparseCM12VelocityExtensionSchedule", 12);
+        dispatchProjected("sealSparseCM12VelocityExtensionSchedule", 0);
+        closePass();
+        encoder.copyBufferToBuffer(this.activity,
+          4 * (this.velocityExtensionLayout.scheduleBaseWords + 4),
+          this.transportPacketIndirectArguments, 0, 24);
+        const gatePass = encoder.beginComputePass({
+          label: "Sparse Geometric projected transport velocity-extension gate",
+        });
+        gatePass.setPipeline(
+          this.projectedTransportIndirectPublisher.velocityExtensionPipeline);
+        gatePass.setBindGroup(0,
+          this.projectedTransportIndirectPublisher.bindGroup);
+        gatePass.dispatchWorkgroups(1);
+        gatePass.end();
+        const dispatchVelocityExtension = (name: string, byteOffset: number) => {
+          const extensionPass = openPass();
+          extensionPass.setPipeline(this.pipelines[name]!);
+          extensionPass.dispatchWorkgroupsIndirect(
+            this.transportPacketIndirectArguments!, byteOffset);
+        };
+        useBindGroup(this.transportDepthBindGroups[0]!);
+        dispatchVelocityExtension("initializeVelocityExtensionPackets", 0);
+        for (let depth = 1; depth <= 8; depth += 1) {
+          useBindGroup(this.transportDepthBindGroups[depth - 1]!);
+          dispatchVelocityExtension("advanceVelocityExtensionPackets", 12);
+        }
+      }
+      useBindGroup(this.bindGroup);
     });
     const encodeAfterTransport = () => {
       useBindGroup(this.pressureBindGroup);
@@ -7844,6 +7997,7 @@ fn publish(){
     activityPolicy?: SparseCM12ActivityPolicy,
     phase: "complete" | "prepare" | "apply" = "complete",
     transportFrontier = false,
+    projectedTransportFrontier = false,
   ): void {
     this.assertLive();
     if (!transportFrontier) {
@@ -7888,10 +8042,31 @@ fn publish(){
         topologyBindGroup = bindGroup;
         topologyPass?.setBindGroup(0, bindGroup);
       };
+      let projectedDispatchesGated = false;
       const dispatchTopology = (name: string, count: number, y = 1, z = 1) => {
         const pass = openTopologyPass();
         pass.setPipeline(this.pipelines[name]!);
-        pass.dispatchWorkgroups(count, y, z);
+        if (!projectedTransportFrontier || !projectedDispatchesGated) {
+          pass.dispatchWorkgroups(count, y, z);
+          return;
+        }
+        if (y !== 1 || z !== 1) {
+          throw new Error(`Projected transport dispatch ${name} requires a 1D gate`);
+        }
+        const frontierGroups = Math.ceil(26 * leafCapacity / WORKGROUP_SIZE);
+        const directoryGroups = Math.ceil(
+          this.worldDirectoryLayout.capacity / WORKGROUP_SIZE);
+        const byteOffset = count === 1 ? 0
+          : count === bricks ? 12
+            : count === leafCapacity ? 24
+              : count === this.topologyPageCapacity ? 36
+                : count === frontierGroups ? 48
+                  : count === directoryGroups ? 60 : -1;
+        if (byteOffset < 0) {
+          throw new Error(`Projected transport dispatch ${name} has unknown shape ${count}`);
+        }
+        pass.dispatchWorkgroupsIndirect(
+          this.projectedTransportIndirectPublisher.arguments, byteOffset);
       };
       const dispatchTopologyIndirect = (name: string, byteOffset: number) => {
         const pass = openTopologyPass();
@@ -7908,22 +8083,46 @@ fn publish(){
       // `beginSparseCM12PressureTopologyRepair` is deliberately idempotent while
       // a journal is collecting, so an injection between ordinary frames keeps
       // the frame's already-recorded topology effects intact.
-      dispatchTopology("beginSparseCM12PressureTopologyRepair", 1);
+      if (!projectedTransportFrontier) {
+        dispatchTopology("beginSparseCM12PressureTopologyRepair", 1);
+      }
       if (transportFrontier) {
-        dispatchTopology("beginGeometricTransportEnvelope", 1);
-        dispatchTopologyIndirect("gatherGeometricTransportMaterialBounds", 0);
-        dispatchTopologyIndirect("gatherGeometricPreflightVelocityBounds", 12);
-        dispatchTopology("includeGeometricPreflightSourceBounds", 1);
-        dispatchTopology("sealGeometricTransportEnvelope", 1);
-        dispatchTopology("advanceActivityClock", 1);
-        dispatchTopology("beginIncrementalActivity", 1);
-        dispatchTopologyIndirect("markGeometricTransportFrontierActivity", 0);
-        dispatchTopology("finalizeIncrementalActivityMasks", 1);
-        dispatchTopology("measureBrickActivity", this.incrementalActivityLayout.brickCount);
-        dispatchTopology("finalizeIncrementalActivityCensus", 1);
+        if (projectedTransportFrontier) {
+          dispatchTopology("beginProjectedGeometricTransportReceivers", bricks);
+          dispatchTopologyIndirect("markProjectedGeometricTransportReceivers", 12);
+          closeTopologyPass();
+          const gatePass = encoder.beginComputePass({
+            label: "Sparse Geometric projected transport dispatch gate",
+          });
+          gatePass.setPipeline(
+            this.projectedTransportIndirectPublisher.topologyPipeline);
+          gatePass.setBindGroup(0,
+            this.projectedTransportIndirectPublisher.bindGroup);
+          gatePass.dispatchWorkgroups(1);
+          gatePass.end();
+          projectedDispatchesGated = true;
+          dispatchTopology("beginSparseCM12PressureTopologyRepair", 1);
+        } else {
+          dispatchTopology("beginGeometricTransportEnvelope", 1);
+          dispatchTopologyIndirect("gatherGeometricTransportMaterialBounds", 0);
+          dispatchTopologyIndirect("gatherGeometricPreflightVelocityBounds", 12);
+          dispatchTopology("includeGeometricPreflightSourceBounds", 1);
+          dispatchTopology("sealGeometricTransportEnvelope", 1);
+          dispatchTopology("advanceActivityClock", 1);
+          dispatchTopology("beginIncrementalActivity", 1);
+          dispatchTopologyIndirect("markGeometricTransportFrontierActivity", 0);
+          dispatchTopology("finalizeIncrementalActivityMasks", 1);
+          dispatchTopology("measureBrickActivity", this.incrementalActivityLayout.brickCount);
+          dispatchTopology("finalizeIncrementalActivityCensus", 1);
+        }
         if (this.solidOccupancyLayout) {
-          dispatchTopologyIndirect("allocateSparseWorldFrontier", 120);
-          if (this.lastInflow) {
+          if (projectedTransportFrontier) {
+            dispatchTopology("allocateSparseWorldFrontier",
+              Math.ceil(26 * leafCapacity / WORKGROUP_SIZE));
+          } else {
+            dispatchTopologyIndirect("allocateSparseWorldFrontier", 120);
+          }
+          if (!projectedTransportFrontier && this.lastInflow) {
             const source = this.lastInflow;
             const sourceGroups = [0, 1, 2].map(axis => {
               const start = source.outletFine[axis]!;
@@ -7940,14 +8139,20 @@ fn publish(){
             Math.ceil(this.worldDirectoryLayout.capacity / WORKGROUP_SIZE));
           dispatchTopology("synthesizeSparseWorldFrontierPages", this.topologyPageCapacity);
         }
-        dispatchTopology("classifyAcceptedLiquidFrontier", leafCapacity);
+        if (!projectedTransportFrontier) {
+          dispatchTopology("classifyAcceptedLiquidFrontier", leafCapacity);
+        }
         dispatchTopology("planGeometricTransportFrontier", bricks);
-        dispatchTopology("activateSweptFrontierPages", leafCapacity);
-        dispatchTopologyIndirect("activateGeometricSweptCellSupport", 0);
-        if (this.lastInflow) dispatchTopology("activateContinuousGeometricSourcePages", bricks);
-        dispatchTopology("reserveGeometricTransportFaceSupport", bricks);
-        dispatchTopology("reserveGeometricPreflightEnvelopeSupport", bricks);
-        dispatchTopology("enforceGeometricDynamicSeamFloor", bricks);
+        dispatchTopology(projectedTransportFrontier
+          ? "activateProjectedGeometricTransportReceivers"
+          : "activateSweptFrontierPages", leafCapacity);
+        if (!projectedTransportFrontier) {
+          dispatchTopologyIndirect("activateGeometricSweptCellSupport", 0);
+          if (this.lastInflow) dispatchTopology("activateContinuousGeometricSourcePages", bricks);
+          dispatchTopology("reserveGeometricTransportFaceSupport", bricks);
+          dispatchTopology("reserveGeometricPreflightEnvelopeSupport", bricks);
+          dispatchTopology("enforceGeometricDynamicSeamFloor", bricks);
+        }
       } else if (mode !== 0) {
         dispatchTopology("allocateSparseWorldInteractionPages",
           Math.ceil(interactionPageCount[0] / 4),
@@ -11758,6 +11963,7 @@ fn publish(){
     this.transportExecutionImage?.destroy();
     this.effectiveTransportVelocity?.destroy();
     this.volumeIndirectArguments.destroy();
+    this.projectedTransportIndirectPublisher.arguments.destroy();
     this.transportPacketIndirectArguments?.destroy();
     this.sharpeningPacketIndirectArguments?.destroy();
     this.coarseTransportIndirectArguments?.destroy();

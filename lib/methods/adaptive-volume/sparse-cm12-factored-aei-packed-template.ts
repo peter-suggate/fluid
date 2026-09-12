@@ -298,6 +298,46 @@ const compilePatches = (options: Readonly<{
           : selectedRows.every((row) => rowKind(reader, row) === 3)
             ? SPARSE_CM12_FACTORED_AEI_RELATION.explicitSparseAir
             : SPARSE_CM12_FACTORED_AEI_RELATION.explicitOther;
+      const sourceTermSites = new Map<string, number>();
+      let sourceTermFaceCertified = true;
+      for (const row of selectedRows) for (const term of rowTerms(reader, row)) {
+        const cell = termCell(reader, term), descriptor = canonicalForCell(cell);
+        if (descriptor?.id !== source.id) continue;
+        const local = localFor(cell, source);
+        if (!local) { sourceTermFaceCertified = false; continue; }
+        if (local[axis] !== ((side & 1) !== 0
+          ? source.validDimensions[axis]! - 1 : 0)) sourceTermFaceCertified = false;
+        const site = `${local[tangents[0]!]}/${local[tangents[1]!]}`;
+        const cellAt = reader.cellBase + SPARSE_CM12_PACKED_TEMPLATE_CELL_WORDS * cell;
+        const faceArea = f32(reader.words[cellAt + 4 + tangents[0]!]!)
+          * f32(reader.words[cellAt + 4 + tangents[1]!]!);
+        const weight = Math.abs(f32(termBits(reader, term)))
+          * f32(rowWord(reader, 2, row)) / faceArea;
+        if (!Number.isFinite(weight) || weight <= 0) sourceTermFaceCertified = false;
+        sourceTermSites.set(site, (sourceTermSites.get(site) ?? 0) + weight);
+      }
+      const sourceTermCoordinates = [...sourceTermSites.keys()].map((site) =>
+        site.split("/").map(Number) as [number, number]);
+      const sourceTermFaceOrigin = sourceTermCoordinates.length === 0
+        ? [0, 0] as const : [Math.min(...sourceTermCoordinates.map((site) => site[0])),
+          Math.min(...sourceTermCoordinates.map((site) => site[1]))] as const;
+      const sourceTermFaceDimensions = sourceTermCoordinates.length === 0
+        ? [0, 0] as const : [Math.max(...sourceTermCoordinates.map((site) => site[0]))
+            - sourceTermFaceOrigin[0] + 1,
+          Math.max(...sourceTermCoordinates.map((site) => site[1]))
+            - sourceTermFaceOrigin[1] + 1] as const;
+      sourceTermFaceCertified = sourceTermFaceCertified
+        && sourceTermSites.size > 0
+        && sourceTermSites.size === sourceTermFaceDimensions[0]
+          * sourceTermFaceDimensions[1];
+      const sourceTermFaceWeights = Array.from({
+        length: sourceTermFaceDimensions[0] * sourceTermFaceDimensions[1],
+      }, (_, ordinal) => sourceTermSites.get(`${sourceTermFaceOrigin[0]
+        + ordinal % sourceTermFaceDimensions[0]}/${sourceTermFaceOrigin[1]
+        + Math.floor(ordinal / sourceTermFaceDimensions[0])}`) ?? 0);
+      if (sourceTermFaceWeights.some((weight) => weight <= 0)) {
+        sourceTermFaceCertified = false;
+      }
       let rowHash = 0x811c_9dc5, termHash = 0x811c_9dc5;
       for (const row of selectedRows) {
         rowHash = fnv(rowHash, row);
@@ -319,7 +359,12 @@ const compilePatches = (options: Readonly<{
         sourceCanonicalId: source.id,
         targetCanonicalId: target?.id ?? SPARSE_CM12_FACTORED_AEI_INVALID,
         sourceFaceOrigin: sourceOrigin, targetFaceOrigin: targetOrigin,
-        faceDimensions: dimensions, mappingCertified }));
+        faceDimensions: dimensions, mappingCertified,
+        sourceTermFaceOrigin, sourceTermFaceDimensions,
+        sourceTermFaceCount: sourceTermSites.size,
+        ...(sourceTermFaceWeights.some((weight) => Math.abs(weight - 1) > 1e-6)
+          ? { sourceTermFaceWeights: Object.freeze(sourceTermFaceWeights) } : {}),
+        sourceTermFaceCertified }));
     }
   }
   return { patches, exceptionRows };
