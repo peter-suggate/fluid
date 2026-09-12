@@ -31,6 +31,20 @@ const DT = 1;
 const VELOCITY_CEILING = 2.6;
 const MAX_MICROSTEPS = 16;
 const EXTENSION_SWEEPS = 8;
+/** Sweeps allowed to place the volume a closing cell can no longer hold. */
+const OVERFILL_PASSES = 96;
+/** Neighbours the relief relays through, weighted: displaced liquid rises. */
+const RELAY_STEPS: readonly (readonly [number, number, number])[] =
+  [[0, -1, 6], [-1, 0, 1], [1, 0, 1], [0, 1, 0.15]];
+/** Quadratic drag on a submerged body, so an impact is damped rather than rung. */
+const BODY_DRAG = 0.55;
+/** Frames a settled body is held before the scene releases it again. */
+const BODY_REST_FRAMES = 110;
+/** How far a body may close cells in one substep, and how many it may take. */
+const BODY_SUBSTEP_CELLS = 0.22;
+const BODY_MAX_SUBSTEPS = 12;
+/** Tracers the scene seeds. They carry no mass. */
+const SLICE_MARKERS = 220;
 
 /** Cell index. */
 export const sliceCell = (x: number, y: number): number => y * SLICE_NX + x;
@@ -42,12 +56,20 @@ export const sliceRowY = (x: number, y: number): number => y * SLICE_NX + x;
 export interface SliceMarker { x: number; y: number }
 
 export interface AdvanceSlice {
-  /** Liquid volume held per cell. The conserved quantity: 0 <= V <= K. */
-  readonly V: Float32Array;
+  /**
+   * Liquid volume held per cell. The conserved quantity: 0 <= V <= K.
+   *
+   * Double precision, unlike every other field here: a transfer is a debit and
+   * a credit that must cancel, and rounding each of them separately to f32
+   * biases the pair — the debit is taken in full while a large receiver
+   * absorbs slightly less than it was given. That bias is a systematic leak,
+   * and a slice whose whole claim is exact conservation may not carry one.
+   */
+  readonly V: Float64Array;
   /** Open capacity after solids, from clipped cut-cell geometry. */
-  readonly K: Float32Array;
+  readonly K: Float64Array;
   /** Volume as it stood when this advance's transport began. */
-  readonly Vp: Float32Array;
+  readonly Vp: Float64Array;
   readonly u: Float32Array;
   readonly v: Float32Array;
   readonly u0: Float32Array;
@@ -71,6 +93,12 @@ export interface AdvanceSlice {
   readonly rung: Int8Array;
   readonly rungWas: Int8Array;
   readonly activity: Float32Array;
+  /** The face velocity a moving wall imposes, on the rows it covers. */
+  readonly wallY: Float32Array;
+  scene: SliceSceneId;
+  body: SliceBody | null;
+  /** Volume a closing cell could not place. Expected: zero. */
+  displaced: number;
   markers: SliceMarker[];
   frame: number;
   /** Microsteps the CFL plan asked for on the last advance. */
@@ -85,10 +113,10 @@ export interface AdvanceSlice {
   seededVolume: number;
 }
 
-export function createAdvanceSlice(): AdvanceSlice {
+export function createAdvanceSlice(scene: SliceSceneId = "weir"): AdvanceSlice {
   const cells = SLICE_NX * SLICE_NY;
   const slice: AdvanceSlice = {
-    V: new Float32Array(cells), K: new Float32Array(cells), Vp: new Float32Array(cells),
+    V: new Float64Array(cells), K: new Float64Array(cells), Vp: new Float64Array(cells),
     u: new Float32Array((SLICE_NX + 1) * SLICE_NY),
     v: new Float32Array(SLICE_NX * (SLICE_NY + 1)),
     u0: new Float32Array((SLICE_NX + 1) * SLICE_NY),
@@ -106,10 +134,12 @@ export function createAdvanceSlice(): AdvanceSlice {
     rung: new Int8Array(SLICE_BX * SLICE_BY),
     rungWas: new Int8Array(SLICE_BX * SLICE_BY),
     activity: new Float32Array(SLICE_BX * SLICE_BY),
+    wallY: new Float32Array(SLICE_NX * (SLICE_NY + 1)),
+    scene: "weir", body: null, displaced: 0,
     markers: [], frame: 0, microsteps: 1, maxVelocity: 0, drift: 0, churn: 0,
     iterations: 0, residual: 0, seededVolume: 0,
   };
-  resetAdvanceSlice(slice);
+  resetAdvanceSlice(slice, scene);
   return slice;
 }
 
@@ -117,39 +147,314 @@ const wet = (s: AdvanceSlice, i: number): boolean => s.V[i] > 1e-5;
 const liquid = (s: AdvanceSlice, i: number): boolean =>
   s.K[i] > 0.02 && s.V[i] > 0.5 * s.K[i];
 
+/* ---- scenes -------------------------------------------------------- */
+
+/** The domain wall, in cells, and the floor it stands on. */
+export const SLICE_WALL = 1.5;
+export const SLICE_FLOOR = SLICE_NY - SLICE_WALL;
+
 /**
- * The scene's solids, as one signed test.
+ * A scene's solid geometry, declared once and read twice.
  *
- * Walls, a weir standing on the floor, and a floor that ramps up on the right.
- * The ramp is deliberately off-axis: it is what gives the slice cells with a
- * fractional open capacity, which is the case a level set cannot hold and this
- * method can.
+ * `sliceSolidAt` samples these shapes to build the capacity field, and the
+ * lab's lens strokes the same shapes as an outline. A solid the reader can see
+ * but the solver cannot is the one bug a teaching slice must not have, so
+ * neither side is allowed its own copy of the geometry.
  */
-export function sliceSolidAt(px: number, py: number): boolean {
-  if (px < 1.5 || px > SLICE_NX - 1.5 || py > SLICE_NY - 1.5) return true;
-  const floor = SLICE_NY - 1.5 - Math.max(0, Math.min(16, 0.52 * (px - 60)));
-  if (py > floor) return true;
-  return px > 31 && px < 36 && py > SLICE_NY - 15;
+export type SliceSolidShape =
+  /** Axis-aligned, in cells. */
+  | { readonly kind: "box"; readonly x0: number; readonly y0: number; readonly x1: number; readonly y1: number }
+  /** A floor that lifts by `slope` per cell from `x`, to at most `rise`. */
+  | { readonly kind: "ramp"; readonly x: number; readonly slope: number; readonly rise: number };
+
+/**
+ * A rigid body the scene drops into the tank.
+ *
+ * Coupling is one-way in force and two-way in kinematics: the body's own
+ * motion is integrated from gravity, buoyancy off the local surface height and
+ * a quadratic drag, while the liquid feels the body as a moving wall — a
+ * time-varying capacity plus a prescribed face velocity on the rows it covers.
+ * That is the case the method is built for and a level set is not: capacity
+ * changes *within* an advance, and the volume a closing cell can no longer
+ * hold has to go somewhere rather than be clamped away.
+ */
+export interface SliceBody {
+  /** Centre, in fine cells. */
+  x: number;
+  y: number;
+  readonly r: number;
+  vy: number;
+  /** Body density over liquid density. Below 1 it floats. */
+  readonly density: number;
+  /** The height the drop starts from, so the scene can run it again. */
+  readonly release: number;
+  /** Consecutive frames the body has been effectively at rest. */
+  rest: number;
+  /** Fraction of the disc below the local liquid surface. */
+  submerged: number;
 }
 
-/** Where the ramp reaches its cap, in fine cells — the renderer draws to it. */
-export const SLICE_RAMP_START = 60;
-export const SLICE_RAMP_RISE = 16;
-export const SLICE_RAMP_SLOPE = 0.52;
-export const SLICE_WEIR = Object.freeze({ x0: 31, x1: 36, top: SLICE_NY - 15 });
+export interface SliceScene {
+  readonly label: string;
+  /** What this scene puts under load, which is why it is worth switching to. */
+  readonly note: string;
+  readonly solids: readonly SliceSolidShape[];
+  /** The liquid the scene starts with, tested at a cell's own index. */
+  readonly liquid: (x: number, y: number) => boolean;
+  /** The body this scene drops, rebuilt on every reset. */
+  readonly body?: () => SliceBody;
+}
 
-export function resetAdvanceSlice(s: AdvanceSlice): void {
-  s.V.fill(0); s.u.fill(0); s.v.fill(0); s.p.fill(0);
-  for (let y = 0; y < SLICE_NY; y++) for (let x = 0; x < SLICE_NX; x++) {
+export const SLICE_SCENES = {
+  weir: {
+    label: "Weir and ramp",
+    note: "A released column piles up behind a weir, overtops it and runs up an off-axis ramp. The ramp is what gives the slice cells with a fractional open capacity — the case a level set cannot hold and this method can.",
+    solids: [
+      { kind: "ramp", x: 60, slope: 0.52, rise: 16 },
+      { kind: "box", x0: 31, y0: SLICE_NY - 15, x1: 36, y1: SLICE_NY },
+    ],
+    liquid: (x, y) => x > 1.5 && x < 21 && y > 8,
+  },
+  "dam-break": {
+    label: "Dam break",
+    note: "A full-height column collapses onto a flat floor. The front runs fast enough to drive the microstep plan up on its own, so this is the scene to watch the transport stage in: one packet pair per microstep, and the bounded limiter cutting back donors along the front.",
+    solids: [],
+    liquid: (x) => x > 1.5 && x < 24,
+  },
+  "sphere-drop": {
+    label: "Sphere drop",
+    note: "A buoyant disc falls into a still tank, displaces the liquid it lands in and bobs. The capacity field is rebuilt every advance, so this is the scene where K is time-varying and the volume a closing cell can no longer hold is pushed to its neighbours rather than clamped away. When the disc settles it is released again.",
+    solids: [],
+    liquid: (_x, y) => y > SLICE_NY - 17,
+    body: () => ({ x: 40, y: 7, r: 4.2, vy: 0, density: 0.55, release: 7, rest: 0, submerged: 0 }),
+  },
+} as const satisfies Record<string, SliceScene>;
+
+export type SliceSceneId = keyof typeof SLICE_SCENES;
+export const SLICE_SCENE_IDS =
+  Object.keys(SLICE_SCENES) as readonly SliceSceneId[];
+
+/** The scene's solids and its body, as one signed test. */
+export function sliceSolidAt(
+  px: number, py: number, scene: SliceScene, body: SliceBody | null,
+): boolean {
+  if (px < SLICE_WALL || px > SLICE_NX - SLICE_WALL || py > SLICE_FLOOR) return true;
+  for (const shape of scene.solids) {
+    if (shape.kind === "box") {
+      if (px > shape.x0 && px < shape.x1 && py > shape.y0 && py < shape.y1) return true;
+      continue;
+    }
+    const lift = Math.max(0, Math.min(shape.rise, shape.slope * (px - shape.x)));
+    if (py > SLICE_FLOOR - lift) return true;
+  }
+  if (body) {
+    const dx = px - body.x, dy = py - body.y;
+    if (dx * dx + dy * dy < body.r * body.r) return true;
+  }
+  return false;
+}
+
+/* ---- capacity, seeding and the moving wall ------------------------- */
+
+/**
+ * Exact cut-cell capacity by 4x4 subsampling, over a window of the domain.
+ *
+ * Only the body moves, so a substepping body rebuilds the box it swept rather
+ * than the whole slice. The static geometry outside that box is unchanged by
+ * construction, which is what makes the narrow rebuild exact and not merely
+ * cheap.
+ */
+function rebuildCapacityIn(
+  s: AdvanceSlice, x0: number, y0: number, x1: number, y1: number,
+): void {
+  const scene: SliceScene = SLICE_SCENES[s.scene];
+  const lowX = Math.max(0, Math.floor(x0)), highX = Math.min(SLICE_NX - 1, Math.ceil(x1));
+  const lowY = Math.max(0, Math.floor(y0)), highY = Math.min(SLICE_NY - 1, Math.ceil(y1));
+  for (let y = lowY; y <= highY; y++) for (let x = lowX; x <= highX; x++) {
     let open = 0;
     for (let j = 0; j < 4; j++) for (let i = 0; i < 4; i++) {
-      if (!sliceSolidAt(x + (i + 0.5) / 4, y + (j + 0.5) / 4)) open += 1;
+      if (!sliceSolidAt(x + (i + 0.5) / 4, y + (j + 0.5) / 4, scene, s.body)) open += 1;
     }
     s.K[sliceCell(x, y)] = open / 16;
   }
+}
+
+const rebuildCapacity = (s: AdvanceSlice): void =>
+  rebuildCapacityIn(s, 0, 0, SLICE_NX - 1, SLICE_NY - 1);
+
+/**
+ * The face velocity a moving wall imposes.
+ *
+ * A row the body covers is a Neumann boundary carrying the wall's own speed,
+ * not a no-flow row: the divergence of the cell beside it therefore sees the
+ * body arriving, and the projection pushes that flux out through the rows that
+ * are open. This is the whole of the coupling — no force is applied to the
+ * liquid directly.
+ */
+function rebuildWalls(s: AdvanceSlice): void {
+  s.wallY.fill(0);
+  const b = s.body;
+  if (!b) return;
+  const reach = (b.r + 0.5) * (b.r + 0.5);
+  for (let y = 0; y <= SLICE_NY; y++) for (let x = 0; x < SLICE_NX; x++) {
+    const dx = x + 0.5 - b.x, dy = y - b.y;
+    if (dx * dx + dy * dy < reach) s.wallY[sliceRowY(x, y)] = b.vy;
+  }
+}
+
+/**
+ * Volume a closing cell can no longer hold, pushed to its neighbours.
+ *
+ * Every move here is a paired debit and credit, so the pass is conservative by
+ * construction — which is the point. Clamping an over-full cell back to its
+ * capacity would be the easy repair and would silently destroy liquid; the
+ * residual is returned instead, and a scene that cannot place its displaced
+ * volume reports it rather than hiding it.
+ *
+ * The pass has to *relay*, not just deposit. A body landing in a full tank
+ * closes cells whose neighbours are themselves full, and the only room is at
+ * the free surface several cells away; a pass that moved volume solely into
+ * whatever room a neighbour already had would stall on the first full cell and
+ * strand the rest. So a cell that cannot place its excess forces the remainder
+ * outward, over-filling its neighbours, and they relay it on the following
+ * pass. The relay is weighted towards the free surface rather than spread
+ * evenly: displaced liquid rises, and an isotropic relay diffuses instead of
+ * travelling, taking hundreds of passes to drain what a directed one drains
+ * in a few.
+ */
+function relieveOverfill(s: AdvanceSlice): number {
+  for (let pass = 0; pass < OVERFILL_PASSES; pass++) {
+    let moved = 0;
+    for (let y = 0; y < SLICE_NY; y++) for (let x = 0; x < SLICE_NX; x++) {
+      const i = sliceCell(x, y);
+      const excess = s.V[i] - s.K[i];
+      if (excess <= 1e-9) continue;
+      let room = 0, weight = 0;
+      for (const [dx, dy, bias] of RELAY_STEPS) {
+        const xx = x + dx, yy = y + dy;
+        if (xx < 0 || xx >= SLICE_NX || yy < 0 || yy >= SLICE_NY) continue;
+        const j = sliceCell(xx, yy);
+        if (s.K[j] <= 0.02) continue;
+        room += Math.max(0, s.K[j] - s.V[j]);
+        weight += s.K[j] * bias;
+      }
+      if (weight <= 1e-12) continue;
+      /* what fits goes in as room; what does not is relayed on the next pass */
+      const fits = Math.min(excess, room);
+      const relay = excess - fits;
+      const share = room > 1e-12 ? fits / room : 0;
+      for (const [dx, dy, bias] of RELAY_STEPS) {
+        const xx = x + dx, yy = y + dy;
+        if (xx < 0 || xx >= SLICE_NX || yy < 0 || yy >= SLICE_NY) continue;
+        const j = sliceCell(xx, yy);
+        if (s.K[j] <= 0.02) continue;
+        const give = Math.max(0, s.K[j] - s.V[j]) * share
+          + relay * ((s.K[j] * bias) / weight);
+        if (give <= 0) continue;
+        s.V[j] += give; s.V[i] -= give; moved += give;
+      }
+    }
+    if (moved <= 1e-9) break;
+  }
+  let residual = 0;
+  for (let i = 0; i < s.V.length; i++) residual += Math.max(0, s.V[i] - s.K[i]);
+  return residual;
+}
+
+/**
+ * The liquid surface beside the body, as the columns either side of it read it.
+ *
+ * Columns through the body would find the liquid *under* it and report a
+ * surface far too low, so the probe stands clear of the disc on both sides.
+ */
+function surfaceBeside(s: AdvanceSlice, b: SliceBody): number | null {
+  let sum = 0, columns = 0;
+  const scan = (x: number): void => {
+    if (x < 0 || x >= SLICE_NX) return;
+    for (let y = 0; y < SLICE_NY; y++) {
+      const i = sliceCell(x, y);
+      if (s.K[i] > 0.02 && s.V[i] > 0.5 * s.K[i]) { sum += y; columns += 1; return; }
+    }
+  };
+  for (let d = 1; d <= 3; d++) {
+    scan(Math.floor(b.x - b.r - d));
+    scan(Math.ceil(b.x + b.r + d));
+  }
+  return columns ? sum / columns : null;
+}
+
+/** The fraction of a disc lying below a horizontal surface — exact, not sampled. */
+function submergedFraction(s: AdvanceSlice, b: SliceBody): number {
+  const surface = surfaceBeside(s, b);
+  if (surface === null) return 0;
+  const a = Math.max(-1, Math.min(1, (b.y - surface) / b.r));
+  return (Math.acos(-a) + a * Math.sqrt(Math.max(0, 1 - a * a))) / Math.PI;
+}
+
+/**
+ * The body's own advance, at the head of the frame.
+ *
+ * This is where the frame's moving-solid authority is sealed: the body takes
+ * its step, the capacity field is rebuilt against its new position, displaced
+ * volume is pushed out, and the rows it covers are given its speed. Everything
+ * downstream then runs against a wall that has already moved.
+ */
+function moveBody(s: AdvanceSlice): void {
+  const b = s.body;
+  if (!b) { s.displaced = 0; return; }
+  b.submerged = submergedFraction(s, b);
+  b.vy += GRAVITY * (1 - b.submerged / b.density) * DT;
+  b.vy -= BODY_DRAG * b.vy * Math.abs(b.vy) * b.submerged * DT;
+  b.vy = Math.max(-VELOCITY_CEILING, Math.min(VELOCITY_CEILING, b.vy));
+  /* a body that has come to rest is released again, so the drop recurs */
+  b.rest = Math.abs(b.vy) < 0.008 ? b.rest + 1 : 0;
+  if (b.rest > BODY_REST_FRAMES) {
+    b.y = b.release; b.vy = 0; b.rest = 0;
+    rebuildCapacity(s);
+    s.displaced = relieveOverfill(s);
+    rebuildWalls(s);
+    return;
+  }
+  /* Capacity is time-varying *within* the advance, exactly as it is for the
+   * method: a body that crossed a cell and a half in one jump would ask the
+   * relief pass to carry that much volume across a full tank in one go, and
+   * the displacement wave would not converge. Substepping keeps each closure
+   * small enough that the volume it sheds has somewhere adjacent to go. */
+  const floor = SLICE_FLOOR - b.r, lid = b.r + 0.6;
+  const travel = Math.abs(b.vy) * DT;
+  const steps = Math.min(BODY_MAX_SUBSTEPS,
+    Math.max(1, Math.ceil(travel / BODY_SUBSTEP_CELLS)));
+  s.displaced = 0;
+  for (let step = 0; step < steps; step++) {
+    const was = b.y;
+    b.y += (b.vy * DT) / steps;
+    if (b.y > floor) { b.y = floor; b.vy = Math.min(0, b.vy) * 0.2; }
+    if (b.y < lid) { b.y = lid; b.vy = Math.max(0, b.vy); }
+    const reach = b.r + 2;
+    rebuildCapacityIn(s, b.x - reach, Math.min(was, b.y) - reach,
+      b.x + reach, Math.max(was, b.y) + reach);
+    s.displaced += relieveOverfill(s);
+  }
+  rebuildWalls(s);
+  for (const marker of s.markers) {
+    const dx = marker.x - b.x, dy = marker.y - b.y;
+    const distance = Math.hypot(dx, dy);
+    if (distance >= b.r || distance < 1e-6) continue;
+    marker.x = b.x + (dx / distance) * b.r;
+    marker.y = b.y + (dy / distance) * b.r;
+  }
+}
+
+/** Seed the scene: capacity, liquid, markers, rungs and the conserved total. */
+export function resetAdvanceSlice(s: AdvanceSlice, scene: SliceSceneId = s.scene): void {
+  s.scene = scene;
+  const declaration: SliceScene = SLICE_SCENES[scene];
+  s.body = declaration.body ? declaration.body() : null;
+  s.V.fill(0); s.u.fill(0); s.v.fill(0); s.p.fill(0); s.wallY.fill(0);
+  rebuildCapacity(s);
   for (let y = 0; y < SLICE_NY; y++) for (let x = 0; x < SLICE_NX; x++) {
     const capacity = s.K[sliceCell(x, y)];
-    if (capacity > 0 && x > 1.5 && x < 21 && y > 8) s.V[sliceCell(x, y)] = capacity;
+    if (capacity > 0 && declaration.liquid(x, y)) s.V[sliceCell(x, y)] = capacity;
   }
   s.Vp.set(s.V);
   let total = 0;
@@ -157,11 +462,13 @@ export function resetAdvanceSlice(s: AdvanceSlice): void {
   s.seededVolume = total;
   s.rung.fill(2); s.rungWas.fill(2);
   s.markers = [];
-  for (let t = 0; t < 220; t++) {
-    const x = 2 + Math.random() * 19, y = 9 + Math.random() * (SLICE_NY - 11);
+  for (let t = 0; t < 2400 && s.markers.length < SLICE_MARKERS; t++) {
+    const x = SLICE_WALL + Math.random() * (SLICE_NX - 2 * SLICE_WALL);
+    const y = Math.random() * SLICE_FLOOR;
     if (s.V[sliceCell(x | 0, y | 0)] > 0.5) s.markers.push({ x, y });
   }
   s.frame = 0; s.drift = 0; s.churn = 0; s.microsteps = 1; s.maxVelocity = 0;
+  s.displaced = 0;
   reconstruct(s);
 }
 
@@ -359,8 +666,8 @@ function project(s: AdvanceSlice, iterations: number): void {
     const i = sliceCell(x, y);
     if (closedX(s, x, y)) s.u[sliceRowX(x, y)] = 0;
     if (closedX(s, x + 1, y)) s.u[sliceRowX(x + 1, y)] = 0;
-    if (closedY(s, x, y)) s.v[sliceRowY(x, y)] = 0;
-    if (closedY(s, x, y + 1)) s.v[sliceRowY(x, y + 1)] = 0;
+    if (closedY(s, x, y)) s.v[sliceRowY(x, y)] = s.wallY[sliceRowY(x, y)];
+    if (closedY(s, x, y + 1)) s.v[sliceRowY(x, y + 1)] = s.wallY[sliceRowY(x, y + 1)];
     if (!liquid(s, i)) { s.p[i] = 0; s.div[i] = 0; continue; }
     s.div[i] = s.u[sliceRowX(x + 1, y)] - s.u[sliceRowX(x, y)]
       + s.v[sliceRowY(x, y + 1)] - s.v[sliceRowY(x, y)];
@@ -405,7 +712,7 @@ function project(s: AdvanceSlice, iterations: number): void {
     }
   }
   for (let y = 0; y <= SLICE_NY; y++) for (let x = 0; x < SLICE_NX; x++) {
-    if (closedY(s, x, y)) { s.v[sliceRowY(x, y)] = 0; continue; }
+    if (closedY(s, x, y)) { s.v[sliceRowY(x, y)] = s.wallY[sliceRowY(x, y)]; continue; }
     const lo = y > 0 ? sliceCell(x, y - 1) : -1;
     const hi = y < SLICE_NY ? sliceCell(x, y) : -1;
     if ((lo >= 0 && liquid(s, lo)) || (hi >= 0 && liquid(s, hi))) {
@@ -621,11 +928,13 @@ function adapt(s: AdvanceSlice): void {
 /**
  * One advance, in the resident encoder's own order.
  *
- * Extension, forces, projection, velocity self-advection, projection again,
- * geometric transport, markers, then the activity census and the candidate
- * rungs — whose commit lands at the tail and is the *next* advance's input.
+ * The frame's moving-solid authority is sealed first, then extension, forces,
+ * projection, velocity self-advection, projection again, geometric transport,
+ * markers, and last the activity census and the candidate rungs — whose commit
+ * lands at the tail and is the *next* advance's input.
  */
 export function advanceSlice(s: AdvanceSlice, pressureIterations: number): void {
+  moveBody(s);
   extendVelocity(s);
   bodyForces(s);
   project(s, pressureIterations);

@@ -100,3 +100,6 @@
 @media(max-width:1000px){.workspace{grid-template-columns:1fr}.inspector{max-height:none}}
 @media(max-width:640px){.lab{padding:0 16px 24px}.steps{grid-template-columns:repeat(2,1fr)}.hudFoot{display:none}}
 @media(prefers-reduced-motion:reduce){.tick .bar{transition:none}}
+.scenePicker{display:flex;gap:6px;flex-wrap:wrap}
+.divider{width:1px;align-self:stretch;background:#243747;margin:0 3px}
+.note code{font:11px ui-monospace,monospace;background:#16293a;border:1px solid #253a4c;border-radius:3px;padding:0 4px}

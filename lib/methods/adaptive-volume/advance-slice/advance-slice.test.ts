@@ -11,7 +11,7 @@ import {
 } from "./advance-work";
 import {
   advanceSlice, createAdvanceSlice, planMicrosteps,
-  SLICE_BX, SLICE_BY, SLICE_NX, SLICE_NY, sliceCell,
+  SLICE_BX, SLICE_BY, SLICE_NX, SLICE_NY, SLICE_SCENE_IDS, sliceCell,
 } from "./slice-solver";
 
 const inputs = (over: Partial<Parameters<typeof advanceWorkModel>[0]> = {}) =>
@@ -90,25 +90,55 @@ test("transport is the frame's largest stage at mini32 scale", () => {
  * If it ever is not, the lab is drawing a lie, so this is the one number the
  * whole page rests on.
  */
-test("the slice conserves volume exactly across an advance", () => {
-  const slice = createAdvanceSlice();
-  const seeded = slice.seededVolume;
-  assert.ok(seeded > 100, "the scene must seed a dam worth reading");
-  for (let frame = 0; frame < 60; frame++) {
-    advanceSlice(slice, 24);
-    assert.ok(Math.abs(slice.drift) < 1e-6,
-      `volume drifted by ${(slice.drift * 100).toFixed(6)}% at frame ${frame}`);
+test("every scene conserves volume exactly across an advance", () => {
+  for (const scene of SLICE_SCENE_IDS) {
+    const slice = createAdvanceSlice(scene);
+    assert.ok(slice.seededVolume > 100, `${scene} must seed liquid worth reading`);
+    for (let frame = 0; frame < 80; frame++) {
+      advanceSlice(slice, 24);
+      assert.ok(Math.abs(slice.drift) < 1e-6,
+        `${scene} drifted by ${(slice.drift * 100).toFixed(8)}% at frame ${frame}`);
+    }
   }
 });
 
 test("no cell ever holds more liquid than it has capacity for", () => {
-  const slice = createAdvanceSlice();
-  for (let frame = 0; frame < 40; frame++) advanceSlice(slice, 24);
-  for (let y = 0; y < SLICE_NY; y++) for (let x = 0; x < SLICE_NX; x++) {
-    const i = sliceCell(x, y);
-    assert.ok(slice.V[i] >= -1e-9 && slice.V[i] <= slice.K[i] + 1e-9,
-      `cell ${x},${y} holds ${slice.V[i]} of ${slice.K[i]}`);
+  for (const scene of SLICE_SCENE_IDS) {
+    const slice = createAdvanceSlice(scene);
+    for (let frame = 0; frame < 80; frame++) {
+      advanceSlice(slice, 24);
+      for (let y = 0; y < SLICE_NY; y++) for (let x = 0; x < SLICE_NX; x++) {
+        const i = sliceCell(x, y);
+        assert.ok(slice.V[i] >= -1e-9 && slice.V[i] <= slice.K[i] + 1e-9,
+          `${scene} cell ${x},${y} holds ${slice.V[i]} of ${slice.K[i]} at frame ${frame}`);
+      }
+    }
   }
+});
+
+/**
+ * The one thing a moving solid can quietly get wrong.
+ *
+ * When the body closes a cell the liquid in it has to go somewhere, and the
+ * cheap repair — clamp the cell back to its capacity — looks identical on
+ * screen while destroying volume every frame. So the drop is run through its
+ * impact and the two numbers that would expose that are checked: the volume
+ * the relief could not place, and the drift it would have caused.
+ */
+test("a moving solid displaces liquid rather than destroying it", () => {
+  const slice = createAdvanceSlice("sphere-drop");
+  assert.ok(slice.body, "the sphere-drop scene must carry a body");
+  let plunged = false, worstDisplaced = 0;
+  for (let frame = 0; frame < 90; frame++) {
+    advanceSlice(slice, 24);
+    worstDisplaced = Math.max(worstDisplaced, slice.displaced);
+    if (slice.body && slice.body.submerged > 0.5) plunged = true;
+  }
+  assert.ok(plunged, "the body must reach the liquid within the run");
+  assert.ok(worstDisplaced < 1e-4,
+    `the relief stranded ${worstDisplaced} of displaced volume`);
+  assert.ok(Math.abs(slice.drift) < 1e-6,
+    `the drop drifted by ${(slice.drift * 100).toFixed(8)}%`);
 });
 
 test("the microstep plan is the shader's own rule", () => {
@@ -119,16 +149,18 @@ test("the microstep plan is the shader's own rule", () => {
 });
 
 test("bricks stay within one rung of every neighbour", () => {
-  const slice = createAdvanceSlice();
-  for (let frame = 0; frame < 40; frame++) {
-    advanceSlice(slice, 24);
-    for (let by = 0; by < SLICE_BY; by++) for (let bx = 0; bx < SLICE_BX; bx++) {
-      const here = slice.rung[by * SLICE_BX + bx];
-      if (bx + 1 < SLICE_BX) {
-        assert.ok(Math.abs(here - slice.rung[by * SLICE_BX + bx + 1]) <= 1);
-      }
-      if (by + 1 < SLICE_BY) {
-        assert.ok(Math.abs(here - slice.rung[(by + 1) * SLICE_BX + bx]) <= 1);
+  for (const scene of SLICE_SCENE_IDS) {
+    const slice = createAdvanceSlice(scene);
+    for (let frame = 0; frame < 40; frame++) {
+      advanceSlice(slice, 24);
+      for (let by = 0; by < SLICE_BY; by++) for (let bx = 0; bx < SLICE_BX; bx++) {
+        const here = slice.rung[by * SLICE_BX + bx];
+        if (bx + 1 < SLICE_BX) {
+          assert.ok(Math.abs(here - slice.rung[by * SLICE_BX + bx + 1]) <= 1);
+        }
+        if (by + 1 < SLICE_BY) {
+          assert.ok(Math.abs(here - slice.rung[(by + 1) * SLICE_BX + bx]) <= 1);
+        }
       }
     }
   }

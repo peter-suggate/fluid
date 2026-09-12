@@ -12,8 +12,8 @@ import {
 } from "../lib/methods/adaptive-volume/advance-slice/slice-lattice";
 import {
   type AdvanceSlice, clipUnitSquare, SLICE_BRICK, SLICE_BX, SLICE_BY,
-  SLICE_NX, SLICE_NY, SLICE_RAMP_RISE, SLICE_RAMP_SLOPE, SLICE_RAMP_START,
-  SLICE_RUNGS, SLICE_WEIR, sliceCell, sliceRowX, sliceRowY, UNIT_SQUARE,
+  SLICE_FLOOR, SLICE_NX, SLICE_NY, SLICE_RUNGS, SLICE_SCENES, SLICE_WALL,
+  sliceCell, sliceRowX, sliceRowY, UNIT_SQUARE,
 } from "../lib/methods/adaptive-volume/advance-slice/slice-solver";
 import type { AdvanceStageId } from "../lib/methods/adaptive-volume/advance-slice/advance-work";
 
@@ -103,23 +103,36 @@ function label(
   c.g.textBaseline = "alphabetic";
 }
 
-/** The solid silhouette, authored to match `sliceSolidAt` exactly. */
+/**
+ * The solid silhouette, stroked from the scene's own shapes.
+ *
+ * The same declaration `sliceSolidAt` samples for capacity, so the outline the
+ * reader sees and the solid the solver cuts against cannot drift apart.
+ */
 function solidPath(c: LensContext): void {
-  const { g, scale: S } = c;
+  const { g, s, scale: S } = c;
   const height = SLICE_NY * S;
   g.beginPath();
-  g.rect(0, 0, 1.5 * S, height);
-  g.rect((SLICE_NX - 1.5) * S, 0, 1.5 * S, height);
-  g.rect(SLICE_WEIR.x0 * S, SLICE_WEIR.top * S,
-    (SLICE_WEIR.x1 - SLICE_WEIR.x0) * S, (SLICE_NY - SLICE_WEIR.top) * S);
-  const rampEnd = SLICE_RAMP_START + SLICE_RAMP_RISE / SLICE_RAMP_SLOPE;
-  g.moveTo(0, height);
-  g.lineTo(0, (SLICE_NY - 1.5) * S);
-  g.lineTo(SLICE_RAMP_START * S, (SLICE_NY - 1.5) * S);
-  g.lineTo(rampEnd * S, (SLICE_NY - 1.5 - SLICE_RAMP_RISE) * S);
-  g.lineTo(SLICE_NX * S, (SLICE_NY - 1.5 - SLICE_RAMP_RISE) * S);
-  g.lineTo(SLICE_NX * S, height);
-  g.closePath();
+  g.rect(0, 0, SLICE_WALL * S, height);
+  g.rect((SLICE_NX - SLICE_WALL) * S, 0, SLICE_WALL * S, height);
+  g.rect(0, SLICE_FLOOR * S, SLICE_NX * S, height - SLICE_FLOOR * S);
+  for (const shape of SLICE_SCENES[s.scene].solids) {
+    if (shape.kind === "box") {
+      g.rect(shape.x0 * S, shape.y0 * S,
+        (shape.x1 - shape.x0) * S, (shape.y1 - shape.y0) * S);
+      continue;
+    }
+    const end = shape.x + shape.rise / shape.slope;
+    g.moveTo(shape.x * S, SLICE_FLOOR * S);
+    g.lineTo(end * S, (SLICE_FLOOR - shape.rise) * S);
+    g.lineTo(SLICE_NX * S, (SLICE_FLOOR - shape.rise) * S);
+    g.lineTo(SLICE_NX * S, SLICE_FLOOR * S);
+    g.closePath();
+  }
+  if (s.body) {
+    g.moveTo((s.body.x + s.body.r) * S, s.body.y * S);
+    g.arc(s.body.x * S, s.body.y * S, s.body.r * S, 0, Math.PI * 2);
+  }
 }
 
 /** Grid at each brick's rung, liquid cut by PLIC, bricks, then solids. */

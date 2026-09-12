@@ -27,8 +27,8 @@ import {
 } from "../lib/methods/adaptive-volume/advance-slice/slice-lattice";
 import {
   type AdvanceSlice, advanceSlice, createAdvanceSlice, resetAdvanceSlice,
-  SLICE_BX, SLICE_BY, SLICE_NX, SLICE_NY, SLICE_RUNGS, sliceCell, sliceRowX,
-  sliceRowY,
+  SLICE_BX, SLICE_BY, SLICE_NX, SLICE_NY, SLICE_RUNGS, SLICE_SCENE_IDS,
+  SLICE_SCENES, type SliceSceneId, sliceCell, sliceRowX, sliceRowY,
 } from "../lib/methods/adaptive-volume/advance-slice/slice-solver";
 import {
   SPARSE_CM12_STAGE_BANDS, sparseCM12Stage,
@@ -44,6 +44,8 @@ const WARM_FRAMES = 22;
 const FRAME_MS = 46;
 /** Milliseconds a walked stage is held before the strip steps on. */
 const WALK_MS = 1900;
+/** The scene the lab opens on. The weir is the one that shows cut cells best. */
+const INITIAL_SCENE: SliceSceneId = "weir";
 /** The bounded limiter runs twice per microstep, so a packet pair per step. */
 const LIMITER_PASSES = 2;
 /** The probe bubble, so it can be kept inside the viewport as the pointer moves. */
@@ -90,12 +92,17 @@ interface Readings {
   readonly drift: number;
   readonly churn: number;
   readonly markers: number;
+  /** Volume a closing cell could not place. Zero, or the scene has a fault. */
+  readonly displaced: number;
+  /** The dropped body's submerged fraction, or null where a scene has none. */
+  readonly submerged: number | null;
 }
-const AT_REST: Readings =
-  { frame: 0, microsteps: 1, maxVelocity: 0, drift: 0, churn: 0, markers: 0 };
+const AT_REST: Readings = { frame: 0, microsteps: 1, maxVelocity: 0, drift: 0,
+  churn: 0, markers: 0, displaced: 0, submerged: null };
 const read = (s: AdvanceSlice): Readings => ({
   frame: s.frame, microsteps: s.microsteps, maxVelocity: s.maxVelocity,
   drift: s.drift, churn: s.churn, markers: s.markers.length,
+  displaced: s.displaced, submerged: s.body ? s.body.submerged : null,
 });
 
 /** One cell, as the probe reads it: the drawn block plus the fine row state. */
@@ -149,6 +156,7 @@ export function AdvanceLab(): React.JSX.Element {
   const [step, setStep] = useState<number | null>(null);
   const [metric, setMetric] = useState<Metric>("workgroups");
   const [scene, setScene] = useState<AdvanceWorkSceneId>("mini32");
+  const [sliceScene, setSliceScene] = useState<SliceSceneId>(INITIAL_SCENE);
   const [budget, setBudget] = useState(28);
   const [playing, setPlaying] = useState(true);
   const [walking, setWalking] = useState(false);
@@ -162,8 +170,7 @@ export function AdvanceLab(): React.JSX.Element {
   useEffect(() => { live.current = { playing, walking, budget }; });
 
   useEffect(() => {
-    const s = createAdvanceSlice();
-    resetAdvanceSlice(s);
+    const s = createAdvanceSlice(INITIAL_SCENE);
     slice.current = s;
     lattice.current = createSliceLattice();
     for (let i = 0; i < WARM_FRAMES; i++) advanceSlice(s, live.current.budget);
@@ -194,6 +201,18 @@ export function AdvanceLab(): React.JSX.Element {
     handle = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(handle);
   }, []);
+
+  /** Reseed the slice and run it far enough in that water is already moving. */
+  const reseed = (id: SliceSceneId): void => {
+    const s = slice.current;
+    if (!s) return;
+    resetAdvanceSlice(s, id);
+    for (let i = 0; i < WARM_FRAMES; i++) advanceSlice(s, budget);
+    setSliceScene(id);
+    setPinned(null);
+    setHover(null);
+    setReadings(read(s));
+  };
 
   const representing = step === 1;
   const index = ADVANCE_STAGE_ORDER.indexOf(selected);
@@ -318,6 +337,10 @@ export function AdvanceLab(): React.JSX.Element {
               <span className={styles.read}>max |u| <b>{readings.maxVelocity.toFixed(2)}</b></span>
               <span className={styles.read}>volume drift <b>{(readings.drift * 100).toFixed(3)}%</b></span>
               <span className={styles.read}>bricks re-rung <b>{readings.churn} / {SLICE_BX * SLICE_BY}</b></span>
+              {readings.submerged !== null && <>
+                <span className={styles.read}>solid submerged <b>{Math.round(readings.submerged * 100)}%</b></span>
+                <span className={styles.read}>displaced, unplaced <b>{readings.displaced.toExponential(1)}</b></span>
+              </>}
             </div>
           </div>
 
@@ -345,6 +368,12 @@ export function AdvanceLab(): React.JSX.Element {
         </div>
 
         <div className={styles.deck}>
+          <div className={styles.scenePicker}>
+            {SLICE_SCENE_IDS.map(id => <button type="button" key={id}
+              aria-pressed={sliceScene === id} title={SLICE_SCENES[id].note}
+              onClick={() => reseed(id)}>{SLICE_SCENES[id].label}</button>)}
+          </div>
+          <span className={styles.divider} />
           <button type="button" aria-pressed={playing} onClick={() => setPlaying(v => !v)}>
             {playing ? "Pause" : "Play"}</button>
           <button type="button" onClick={() => {
@@ -355,14 +384,7 @@ export function AdvanceLab(): React.JSX.Element {
           }}>Step frame</button>
           <button type="button" aria-pressed={walking} onClick={() => setWalking(v => !v)}>
             Walk the advance</button>
-          <button type="button" onClick={() => {
-            const s = slice.current;
-            if (!s) return;
-            resetAdvanceSlice(s);
-            for (let i = 0; i < WARM_FRAMES; i++) advanceSlice(s, budget);
-            setPinned(null);
-            setReadings(read(s));
-          }}>Reset scene</button>
+          <button type="button" onClick={() => reseed(sliceScene)}>Reset scene</button>
           <span className={styles.spacer} />
           <label htmlFor="advance-budget">solve iters
             <input id="advance-budget" type="range" min={4} max={80} step={4} value={budget}
@@ -433,6 +455,16 @@ export function AdvanceLab(): React.JSX.Element {
             <span className={styles.stageChip}>sparse bricks · adaptive cells · volume, not distance</span>
           </div>
           <p>{REPRESENT_LENS.caption}</p>
+          <div>
+            <span className={styles.group}><span>the scene on the slice</span>
+              <span>{SLICE_SCENE_IDS.length} scenes</span></span>
+            <div className={styles.scales}>
+              {SLICE_SCENE_IDS.map(id => <button type="button" key={id}
+                aria-pressed={sliceScene === id}
+                onClick={() => reseed(id)}>{SLICE_SCENES[id].label}</button>)}
+            </div>
+            <p>{SLICE_SCENES[sliceScene].note}</p>
+          </div>
           <div className={styles.figures}>
             <div className={styles.figure}><b>{n(model.bricks)}</b><span>resident bricks</span></div>
             <div className={styles.figure}><b>{n(model.cells)}</b><span>accepted cells</span></div>
@@ -520,6 +552,13 @@ export function AdvanceLab(): React.JSX.Element {
               <button type="button" key={id} aria-pressed={scene === id}
                 onClick={() => setScene(id)}>{ADVANCE_WORK_SCENES[id].label}</button>)}
           </div>
+          {readings.submerged !== null && !ADVANCE_WORK_SCENES[scene].gates.solids
+            && <p className={styles.note} style={{ marginBottom: 8 }}>
+              <b>This scale was captured without a moving solid</b>
+              The slice is running one, so the solid-coupling kernels the encoder
+              gates on <code>rigidCoupling</code> are priced at zero here. The moving
+              dam scale is the capture whose gates were taken with it on.
+            </p>}
           <p className={styles.hint}>{ADVANCE_WORK_SCENES[scene].provenance}. {n(model.cells)} accepted
             cells · {n(model.rows)} rows · {n(model.bricks)} bricks, at {model.microsteps} microstep
             {model.microsteps === 1 ? "" : "s"}. The CFL and the {readings.churn}-brick churn driving
