@@ -604,6 +604,7 @@ export function SceneLibrary() {
           form the lab draws in a second.
         */}
         <a className="pill" href="/shape-lab">Shape lab</a>
+        <a className="pill" href="/advance-lab">Advance lab</a>
         <ThemeSwitch />
       </header>
 

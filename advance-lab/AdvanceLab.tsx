@@ -2,24 +2,36 @@
 /**
  * One frame of the adaptive-volume advance, as an instrument.
  *
- * The slice is the whole page: a live 2-D cut of the solver's own model —
- * sparse bricks on a dyadic ladder, liquid held as volume, an exact PLIC line
- * wherever a cell is cut — and every stage of the resident encoder is a lens
- * over that one picture rather than a diagram of its own. Picking a stage
- * changes what you can see about the water; it never changes the water.
+ * The slice is the page. A live 2-D cut of the solver's own model — sparse
+ * bricks on a dyadic ladder, liquid held as volume, an exact PLIC line wherever
+ * a cell is cut — fills the viewport, and every stage of the resident encoder
+ * is a lens over that one picture rather than a diagram of its own. Picking a
+ * stage changes what you can see about the water; it never changes the water.
  *
- * Nothing here restates the stage registry. Labels, tips and sub-seam names
- * are read from `SPARSE_CM12_STAGES`, the sizing comes from `ADVANCE_WORK`,
- * and the only prose this file owns is the four-step reading of the loop and
- * the table of what a cell carries — neither of which the encoder declares.
+ * Everything that is not the water is either a control or folded away. The
+ * reader arrives at a running simulation with a caption on it; the stage's
+ * sub-seams, the scene's provenance, the fidelity caveat and the table of what
+ * a cell carries are all one click down, in the sidebar, and none of them is
+ * open until asked for. That is the whole layout rule: the picture is the
+ * subject, and the prose is what you reach for when the picture raises a
+ * question.
+ *
+ * Nothing here restates the stage registry. Labels, tips and sub-seam names are
+ * read from `SPARSE_CM12_STAGES`, the sizing comes from `ADVANCE_WORK`, and the
+ * only prose this file owns is the four-step reading of the loop and the table
+ * of what a cell carries — neither of which the encoder declares.
  */
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ScenePickerPopover } from "../components/ScenePickerPopover";
+import { ThemeSwitch } from "../components/ThemeSwitch";
+import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
+import { sceneCatalogCards } from "../lib/core/scenes";
 import {
   advanceCosts, ADVANCE_NOTES, ADVANCE_STAGE_ORDER, advanceSeamCost,
-  advanceStageWork, advanceWorkModel, ADVANCE_DISPATCH_KINDS, ADVANCE_WORK_SCENES,
+  advanceStageWork, advanceWorkModel, ADVANCE_DISPATCH_KINDS,
   type AdvanceCost, type AdvanceKernel, type AdvanceStageId,
-  type AdvanceWorkSceneId,
+  type AdvanceWorkScene,
 } from "../lib/methods/adaptive-volume/advance-slice/advance-work";
 import {
   createSliceLattice, type LatticeCell, latticeCellAt, latticePlane,
@@ -27,39 +39,55 @@ import {
 } from "../lib/methods/adaptive-volume/advance-slice/slice-lattice";
 import {
   type AdvanceSlice, advanceSlice, createAdvanceSlice, resetAdvanceSlice,
-  SLICE_BX, SLICE_BY, SLICE_NX, SLICE_NY, SLICE_RUNGS, SLICE_SCENE_IDS,
-  SLICE_SCENES, type SliceSceneId, sliceCell, sliceRowX, sliceRowY,
+  SLICE_RUNGS, sliceCell, sliceRowX, sliceRowY,
 } from "../lib/methods/adaptive-volume/advance-slice/slice-solver";
+import {
+  ADVANCE_PRODUCTION_SCENES, DEFAULT_ADVANCE_PRODUCTION_SCENE_ID,
+  productionSceneSliceSeedById,
+} from "../lib/methods/adaptive-volume/advance-slice/production-scene-slice";
+import type { SliceSceneSeed } from
+  "../lib/methods/adaptive-volume/advance-slice/slice-scene-seed";
 import {
   SPARSE_CM12_STAGE_BANDS, sparseCM12Stage,
 } from "../lib/methods/adaptive-volume/sparse-cm12-stages";
 import styles from "./AdvanceLab.module.css";
-import { ADVANCE_LENSES, BAND_COLOR, type Lens, PALETTE, REPRESENT_LENS, drawSlice } from "./lenses";
+import {
+  ADVANCE_LENSES, BAND_TONE, type Lens, paletteVar, REPRESENT_LENS,
+  drawSlice, syncPalette,
+} from "./lenses";
 
-/** Pixels per fine cell. 96 x 40 cells at 15 px is a 1440 x 600 backing store. */
-const SCALE = 15;
-/** Frames the scene is run for before it is first shown, so water is in motion. */
-const WARM_FRAMES = 22;
 /** Milliseconds between advances — slow enough to watch a rung change. */
 const FRAME_MS = 46;
 /** Milliseconds a walked stage is held before the strip steps on. */
 const WALK_MS = 1900;
-/** The scene the lab opens on. The weir is the one that shows cut cells best. */
-const INITIAL_SCENE: SliceSceneId = "weir";
 /** The bounded limiter runs twice per microstep, so a packet pair per step. */
 const LIMITER_PASSES = 2;
 /** The probe bubble, so it can be kept inside the viewport as the pointer moves. */
 const PROBE_WIDTH = 180;
 const PROBE_HEIGHT = 132;
+/** Which scene the page is reading, kept in the URL so a refresh returns to it. */
+const SCENE_PARAM = "scene";
+
+/* Step sizes the lab will run. The scene documents do not agree on one — most
+ * resolve to CM12's paper regime, a handful of coarse fixtures to 1/60 s — so
+ * the lab states the step itself and holds every scene to the paper one until
+ * a reader says otherwise. Nothing else in the seed depends on it, which is
+ * why retiming is a change to the next advance rather than a new run. */
+const STEP_SIZES: readonly { readonly dt: number; readonly label: string }[] = [
+  { dt: 1 / 15, label: "1/15 s" },
+  { dt: CM12_PAPER_DT_S, label: "1/30 s" },
+  { dt: 1 / 60, label: "1/60 s" },
+  { dt: 1 / 120, label: "1/120 s" },
+];
 
 /**
  * The loop the whole method is: four readings, of which only three encode.
  * Step 1 is the state the advance starts from, so it has no stage range.
  */
 const LOOP_STEPS = [
-  { n: 1, name: "Represent the fluid", from: 0, to: 0 },
+  { n: 1, name: "Represent", from: 0, to: 0 },
   { n: 2, name: "Solve the motion", from: 1, to: 7 },
-  { n: 3, name: "Transport the liquid", from: 8, to: 8 },
+  { n: 3, name: "Transport", from: 8, to: 8 },
   { n: 4, name: "Adapt and publish", from: 9, to: 15 },
 ] as const;
 
@@ -92,17 +120,33 @@ interface Readings {
   readonly drift: number;
   readonly churn: number;
   readonly markers: number;
-  /** Volume a closing cell could not place. Zero, or the scene has a fault. */
-  readonly displaced: number;
-  /** The dropped body's submerged fraction, or null where a scene has none. */
-  readonly submerged: number | null;
+  readonly cells: number;
+  readonly rows: number;
+  readonly bricks: number;
+  readonly rungs: number;
+  readonly fault: string | null;
+  /** The scene as the work model prices it, captured with the counts it prices. */
+  readonly work: AdvanceWorkScene;
 }
+
+const NO_SCENE: AdvanceWorkScene = {
+  label: "loading", provenance: "constructing production slice",
+  cells: 0, rows: 0, bricks: 0, rungs: 0,
+  gates: { solids: false, inflow: false, tracers: false, world: false, unfrozen: false },
+};
 const AT_REST: Readings = { frame: 0, microsteps: 1, maxVelocity: 0, drift: 0,
-  churn: 0, markers: 0, displaced: 0, submerged: null };
+  churn: 0, markers: 0, cells: 0, rows: 0, bricks: 0, rungs: 0, fault: null,
+  work: NO_SCENE };
 const read = (s: AdvanceSlice): Readings => ({
   frame: s.frame, microsteps: s.microsteps, maxVelocity: s.maxVelocity,
   drift: s.drift, churn: s.churn, markers: s.markers.length,
-  displaced: s.displaced, submerged: s.body ? s.body.submerged : null,
+  cells: s.topology.accepted.cells.length,
+  rows: s.topology.accepted.rows.length,
+  bricks: s.topology.accepted.bricks.filter(brick => brick.active !== false).length,
+  rungs: new Set(s.topology.accepted.bricks
+    .filter(brick => brick.active !== false).map(brick => brick.resolution)).size,
+  fault: s.fault ? s.fault.stage : null,
+  work: workScene(s),
 });
 
 /** One cell, as the probe reads it: the drawn block plus the fine row state. */
@@ -114,6 +158,55 @@ interface Probe {
   readonly aperture: number;
   readonly pressure: number;
   readonly rung: number;
+  readonly material: number;
+}
+
+const SCENE_IDS: ReadonlySet<string> =
+  new Set(ADVANCE_PRODUCTION_SCENES.map(scene => scene.id));
+
+/** The scene asked for in the URL, if it is one this lab can actually seed. */
+function requestedSceneId(): string {
+  if (typeof window === "undefined") return DEFAULT_ADVANCE_PRODUCTION_SCENE_ID;
+  const asked = new URLSearchParams(window.location.search).get(SCENE_PARAM);
+  return asked && SCENE_IDS.has(asked) ? asked : DEFAULT_ADVANCE_PRODUCTION_SCENE_ID;
+}
+
+/**
+ * Mirror the reading into the address bar.
+ *
+ * `replaceState` rather than a push: choosing a scene is changing what this one
+ * page is showing, not navigating, so Back should still leave the lab. The URL
+ * exists so a refresh — or a link to a colleague — returns to the same water.
+ */
+function publishSceneId(id: string): void {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  if (id === DEFAULT_ADVANCE_PRODUCTION_SCENE_ID) url.searchParams.delete(SCENE_PARAM);
+  else url.searchParams.set(SCENE_PARAM, id);
+  window.history.replaceState(null, "", `${url.pathname}${url.search}`);
+}
+
+function workScene(s: AdvanceSlice): AdvanceWorkScene {
+  const scene = s.scene.production?.scene;
+  const topology = s.topology.accepted;
+  const bricks = topology.bricks.filter(brick => brick.active !== false);
+  const hasStaticWorld = Boolean(s.scene.production?.solidWorld.pages.length
+    || s.scene.production?.solidWorld.regions?.length);
+  return {
+    label: s.scene.label,
+    provenance: `${s.scene.id} · accepted generation ${topology.generation}`,
+    cells: topology.cells.length,
+    rows: topology.rows.length,
+    bricks: bricks.length,
+    rungs: new Set(bricks.map(brick => brick.resolution)).size,
+    gates: {
+      solids: hasStaticWorld || Boolean(scene?.rigidBodies.length),
+      inflow: Boolean(scene?.fluid.inflow),
+      tracers: s.markers.length > 0,
+      world: Boolean(s.scene.sourceAtlas),
+      unfrozen: scene?.systems?.fluid !== false,
+    },
+  };
 }
 
 const n = (value: number): string =>
@@ -147,103 +240,220 @@ function kernelFlags(entry: AdvanceKernel): string {
   return flags.join(" · ");
 }
 
+/**
+ * One folded section of the sidebar.
+ *
+ * Closed is the resting state for every one of them. The head is the whole
+ * summary a reader needs to decide whether to open it, which is why the count
+ * or the flag lives in the head rather than inside.
+ */
+function Fold({ id, title, meta, flag, open, toggle, children }: {
+  id: string;
+  title: string;
+  meta?: string;
+  /** Draws the head in alarm ink — something inside needs reading. */
+  flag?: boolean;
+  open: boolean;
+  toggle: (id: string) => void;
+  children: React.ReactNode;
+}): React.JSX.Element {
+  return <div className={styles.fold} data-flag={flag || undefined}>
+    <button type="button" className={styles.foldHead} aria-expanded={open}
+      onClick={() => toggle(id)}>
+      <svg viewBox="0 0 10 10" aria-hidden="true" className={styles.caret}>
+        <path d="M3.2 1.4 6.8 5 3.2 8.6" />
+      </svg>
+      <b>{title}</b>
+      {meta && <em>{meta}</em>}
+    </button>
+    {open && <div className={styles.foldBody}>{children}</div>}
+  </div>;
+}
+
 export function AdvanceLab(): React.JSX.Element {
   const canvas = useRef<HTMLCanvasElement>(null);
+  const viewport = useRef<HTMLDivElement>(null);
   const slice = useRef<AdvanceSlice | null>(null);
   const lattice = useRef<SliceLattice | null>(null);
 
   const [selected, setSelected] = useState<AdvanceStageId>("conservative-transport");
   const [step, setStep] = useState<number | null>(null);
   const [metric, setMetric] = useState<Metric>("workgroups");
-  const [scene, setScene] = useState<AdvanceWorkSceneId>("mini32");
-  const [sliceScene, setSliceScene] = useState<SliceSceneId>(INITIAL_SCENE);
+  const [sceneId, setSceneId] = useState(DEFAULT_ADVANCE_PRODUCTION_SCENE_ID);
+  const [picking, setPicking] = useState(false);
+  const [seed, setSeed] = useState<SliceSceneSeed | null>(null);
   const [budget, setBudget] = useState(28);
-  const [playing, setPlaying] = useState(true);
+  const [dt, setDt] = useState(CM12_PAPER_DT_S);
+  /* Every scene opens still. A reader arrives at t=0 and starts it by hand;
+   * water that is already moving has decided for them what to look at. */
+  const [playing, setPlaying] = useState(false);
   const [walking, setWalking] = useState(false);
   const [readings, setReadings] = useState<Readings>(AT_REST);
   const [openSeam, setOpenSeam] = useState<string | null>(null);
+  const [folds, setFolds] = useState<ReadonlySet<string>>(() => new Set());
   const [pinned, setPinned] = useState<Probe | null>(null);
   const [hover, setHover] = useState<{ probe: Probe; x: number; y: number } | null>(null);
+  const [runtimeFault, setRuntimeFault] = useState<string | null>(null);
+  const [room, setRoom] = useState({ width: 960, height: 560 });
+  const [themeTick, setThemeTick] = useState(0);
 
   /* The animation loop is started once; it reads the live controls from here. */
-  const live = useRef({ playing, walking, budget });
-  useEffect(() => { live.current = { playing, walking, budget }; });
+  const live = useRef({ playing, walking, budget, dt });
+  useEffect(() => { live.current = { playing, walking, budget, dt }; });
 
   useEffect(() => {
-    const s = createAdvanceSlice(INITIAL_SCENE);
+    const initialId = requestedSceneId();
+    const initialSeed = productionSceneSliceSeedById(initialId, { dt: live.current.dt });
+    const s = createAdvanceSlice(initialSeed);
     slice.current = s;
-    lattice.current = createSliceLattice();
-    for (let i = 0; i < WARM_FRAMES; i++) advanceSlice(s, live.current.budget);
+    lattice.current = createSliceLattice(s);
 
     let handle = 0, last = 0, walked = 0, opened = false;
     const loop = (time: number): void => {
       handle = requestAnimationFrame(loop);
       if (!opened) {
-        /* The first frame publishes the warmed scene. A reader who asked for
-         * stillness gets one they step by hand — but the loop still runs, or
-         * Play would have nothing to resume. */
+        /* The first frame publishes the seeded scene, paused at t=0. The loop
+         * keeps running on an empty tick, or Play would have nothing to
+         * resume. */
         opened = true;
-        if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) setPlaying(false);
-        setReadings(read(s));
+        setSceneId(initialId);
+        setSeed(initialSeed);
+        setReadings(read(slice.current ?? s));
         return;
       }
       if (!live.current.playing || time - last < FRAME_MS) return;
       last = time;
-      advanceSlice(s, live.current.budget);
+      const current = slice.current;
+      if (!current) return;
+      try {
+        advanceSlice(current, live.current.budget);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        live.current.playing = false;
+        setPlaying(false);
+        setRuntimeFault(message);
+        setReadings(read(current));
+        return;
+      }
       if (live.current.walking && time - walked > WALK_MS) {
         walked = time;
         setStep(current => (current === 1 ? null : current));
         setSelected(current => ADVANCE_STAGE_ORDER[
           (ADVANCE_STAGE_ORDER.indexOf(current) + 1) % ADVANCE_STAGE_ORDER.length]);
       }
-      setReadings(read(s));
+      setReadings(read(current));
     };
     handle = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(handle);
   }, []);
 
-  /** Reseed the slice and run it far enough in that water is already moving. */
-  const reseed = (id: SliceSceneId): void => {
+  /* The picture is sized to the room it is given, so the water is the page at
+   * any window rather than a fixed postage stamp in the middle of one. */
+  useEffect(() => {
+    const node = viewport.current;
+    if (!node || typeof ResizeObserver !== "function") return;
+    const observer = new ResizeObserver(entries => {
+      const box = entries[0]?.contentRect;
+      if (!box) return;
+      setRoom({ width: Math.max(120, box.width), height: Math.max(90, box.height) });
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+
+  /* The drawing is made of the page's own tokens, so a theme change is a
+   * repaint: paused water would otherwise keep the palette it was painted in. */
+  useEffect(() => {
+    const bump = (): void => setThemeTick(tick => tick + 1);
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    media.addEventListener("change", bump);
+    const observer = new MutationObserver(bump);
+    observer.observe(document.documentElement,
+      { attributes: true, attributeFilter: ["data-theme"] });
+    return () => { media.removeEventListener("change", bump); observer.disconnect(); };
+  }, []);
+
+  /** Rebuild from the selected production document's deterministic t=0 state. */
+  const reseed = useCallback((id: string): void => {
     const s = slice.current;
-    if (!s) return;
-    resetAdvanceSlice(s, id);
-    for (let i = 0; i < WARM_FRAMES; i++) advanceSlice(s, budget);
-    setSliceScene(id);
+    if (!s || !SCENE_IDS.has(id)) return;
+    const nextSeed = productionSceneSliceSeedById(id, { dt: live.current.dt });
+    const next = resetAdvanceSlice(s, nextSeed);
+    slice.current = next;
+    lattice.current = createSliceLattice(next);
+    setSceneId(id);
+    setSeed(nextSeed);
     setPinned(null);
     setHover(null);
-    setReadings(read(s));
-  };
+    setRuntimeFault(null);
+    /* A new scene is a new beginning, and a beginning is still. */
+    setPlaying(false);
+    live.current.playing = false;
+    setReadings(read(next));
+    publishSceneId(id);
+  }, []);
+
+  /** Re-time the next advance. The water keeps its state; only the clock moves. */
+  const retime = useCallback((next: number): void => {
+    setDt(next);
+    const s = slice.current;
+    if (!s) return;
+    const scene = { ...s.scene, dt: next };
+    s.scene = scene;
+    setSeed(scene);
+  }, []);
+
+  const toggleFold = useCallback((id: string): void => setFolds(current => {
+    const next = new Set(current);
+    if (!next.delete(id)) next.add(id);
+    return next;
+  }), []);
 
   const representing = step === 1;
   const index = ADVANCE_STAGE_ORDER.indexOf(selected);
   const declaration = sparseCM12Stage(selected);
   const work = advanceStageWork(selected);
-  const band = BAND_COLOR[declaration.band];
+  const band = paletteVar(BAND_TONE[declaration.band]);
   const lens: Lens = representing ? REPRESENT_LENS : ADVANCE_LENSES[selected];
 
-  /* The picture is redrawn when the water moves or the lens changes — never
-   * when the pointer does, so probing a cell costs nothing. */
+  const displayNx = seed?.dimensions[0] ?? 1;
+  const displayNy = seed?.dimensions[1] ?? 1;
+  /* Whole pixels per cell, so a grid line lands on one rather than across two. */
+  const scale = Math.max(2, Math.floor(Math.min(
+    room.width / displayNx, room.height / displayNy)));
+  const dpr = typeof window === "undefined" ? 1 : Math.min(2, window.devicePixelRatio || 1);
+
+  /* The picture is redrawn when the water moves, the lens changes or the room
+   * resizes — never when the pointer does, so probing a cell costs nothing. */
   useEffect(() => {
     const target = canvas.current, s = slice.current, l = lattice.current;
     if (!target || !s || !l) return;
     const g = target.getContext("2d");
     if (!g) return;
-    const context = { g, s, lattice: l, scale: SCALE };
+    syncPalette(target);
+    /* Cells are measured in CSS pixels and drawn at device resolution: one
+     * transform here keeps every hairline and label in the lenses honest. */
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const context = { g, s, lattice: l, scale };
     drawSlice(context);
     g.save();
     lens.draw(context);
     g.restore();
-  }, [readings, lens]);
+  }, [readings, lens, scale, dpr, themeTick]);
 
   const model = useMemo(() => advanceWorkModel({
-    scene: ADVANCE_WORK_SCENES[scene],
+    scene: readings.work,
     pressureIterations: budget,
     cfl: Math.max(0.1, readings.maxVelocity),
     limiterPasses: LIMITER_PASSES,
-    churn: Math.min(1, readings.churn / (SLICE_BX * SLICE_BY)),
+    churn: Math.min(1, readings.churn / Math.max(1, readings.bricks)),
     markers: readings.markers,
-  }), [scene, budget, readings.maxVelocity, readings.churn, readings.markers]);
+  }), [readings.work, readings.bricks, budget, readings.maxVelocity,
+    readings.churn, readings.markers]);
   const costs = useMemo(() => advanceCosts(model), [model]);
+  const emptySlice = Boolean(seed && !seed.density.some(value => value > 0));
+  const unsupported = seed?.dynamic?.filter(entry => !entry.supported) ?? [];
+  const caveats = unsupported.length + (emptySlice ? 1 : 0);
 
   const key: keyof AdvanceCost = metric === "workgroups" ? "workgroups" : "dispatches";
   const peak = Math.max(1, ...costs.map(c => c[key]));
@@ -262,16 +472,17 @@ export function AdvanceLab(): React.JSX.Element {
     const s = slice.current, l = lattice.current;
     if (!s || !l) return null;
     const box = target.getBoundingClientRect();
-    const fx = Math.floor(((clientX - box.left) / box.width) * SLICE_NX);
-    const fy = Math.floor(((clientY - box.top) / box.height) * SLICE_NY);
+    const fx = Math.floor(((clientX - box.left) / box.width) * s.nx);
+    const fy = Math.floor(((clientY - box.top) / box.height) * s.ny);
     const cell = latticeCellAt(l, s, fx, fy);
     if (!cell || !cell.open) return null;
-    const left = fx > 0 ? s.K[sliceCell(fx - 1, fy)] : 0;
+    const left = fx > 0 ? s.K[sliceCell(s, fx - 1, fy)]! : 0;
     return {
       cell, plane: latticePlane(l, cell),
-      u: s.u[sliceRowX(fx, fy)], v: s.v[sliceRowY(fx, fy)],
-      aperture: Math.min(left, s.K[sliceCell(fx, fy)]),
-      pressure: s.p[sliceCell(fx, fy)], rung: s.rung[cell.brick],
+      u: s.u[sliceRowX(s, fx, fy)]!, v: s.v[sliceRowY(s, fx, fy)]!,
+      aperture: Math.min(left, s.K[sliceCell(s, fx, fy)]!),
+      pressure: s.p[sliceCell(s, fx, fy)]!, rung: s.rung[cell.brick]!,
+      material: s.materialId[sliceCell(s, fx, fy)]!,
     };
   };
 
@@ -280,36 +491,101 @@ export function AdvanceLab(): React.JSX.Element {
     ["K", p.cell.capacity.toFixed(4), "open capacity after solids"],
     ["V / K", p.cell.fill.toFixed(4), "fill fraction — ρ is republished from this"],
     ["n", p.plane ? `(${p.plane.nx.toFixed(2)}, ${p.plane.ny.toFixed(2)})` : "—", "PLIC normal"],
-    ["d", p.plane ? p.plane.offset.toFixed(3) : "—", "PLIC offset; blank where unresolved"],
+    ["d", p.plane ? p.plane.offset.toFixed(3) : "—", "PLIC offset from the cell's low corner; blank where the interface is unresolved"],
     ["u", `${p.u.toFixed(3)}, ${p.v.toFixed(3)}`, "staggered face velocity, aperture folded in"],
     ["a", p.aperture.toFixed(2), "open fraction of the row"],
     ["p", p.pressure.toFixed(3), "leaf pressure; 0 at the free surface"],
-    ["rung", `${SLICE_RUNGS[p.rung]}³`, "cells per brick edge on the dyadic ladder"],
+    ["material", String(p.material), "production SolidWorld material id"],
+    ["rung", `${SLICE_RUNGS[p.rung]}²`, "cells per B8 brick in this 2D ladder"],
   ];
 
-  return <main className={styles.lab}>
-    <header className={styles.header}>
-      <Link href="/">FL <span>Fluid Lab</span></Link>
-      <span className={styles.badge}>15 STAGES · 40 SUB-SEAMS · RESIDENT ENCODER</span>
-    </header>
+  const pin = (probe: Probe): void => {
+    setPinned(probe);
+    setFolds(current => new Set(current).add("cell"));
+  };
 
-    <div className={styles.intro}>
-      <p className={styles.eyebrow}>ADAPTIVE VOLUME / SPARSE GEOMETRIC CM12</p>
-      <h1>How one advance is solved.</h1>
-      <p>A live 2-D slice of the solver&rsquo;s own model. Every stage of the resident
-        encoder is a lens over this one picture — pick one from the strip to see what it
-        touches, hover the water to read a cell, click to pin it.</p>
-    </div>
+  return <main className={styles.lab}>
+    <header className={styles.bar}>
+      <Link href="/" className={styles.mark} title="Fluid Lab">FL</Link>
+
+      <div className={styles.anchor}>
+        <button type="button" className={styles.sceneChip}
+          data-scene-selector-toggle=""
+          aria-haspopup="dialog" aria-expanded={picking}
+          onClick={() => setPicking(open => !open)}>
+          <b>{seed?.label ?? "Loading scene"}</b>
+          <em>{displayNx}×{displayNy} centre-Z slice</em>
+          <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2 3.6 5 6.6 8 3.6" /></svg>
+        </button>
+        {picking && <ScenePickerPopover
+          className={styles.scenePopover}
+          cards={sceneCatalogCards}
+          currentId={sceneId}
+          label="Choose the production scene this lab slices"
+          choose={card => { reseed(card.id); setPicking(false); }}
+          close={() => setPicking(false)} />}
+      </div>
+
+      {caveats > 0 && <button type="button" className={styles.caveat}
+        onClick={() => setFolds(current => new Set(current).add("scene"))}>
+        {caveats} caveat{caveats === 1 ? "" : "s"}
+      </button>}
+
+      <span className={styles.spacer} />
+
+      <div className={styles.transport}>
+        <button type="button" aria-pressed={playing} onClick={() => setPlaying(v => !v)}>
+          {playing ? "Pause" : "Play"}</button>
+        <button type="button" onClick={() => {
+          const s = slice.current;
+          if (!s) return;
+          try {
+            advanceSlice(s, budget);
+            setRuntimeFault(null);
+          } catch (error) {
+            setPlaying(false);
+            live.current.playing = false;
+            setRuntimeFault(error instanceof Error ? error.message : String(error));
+          }
+          setReadings(read(s));
+        }}>Step</button>
+        <button type="button" aria-pressed={walking}
+          onClick={() => setWalking(v => {
+            /* The strip only steps on while the water moves, so asking for the
+             * walk is asking for the clock — the one place a control here
+             * starts it without the reader pressing Play. */
+            if (!v) { setPlaying(true); live.current.playing = true; }
+            return !v;
+          })}
+          title="Play the stage strip through, one stage at a time">Walk</button>
+        <button type="button" onClick={() => reseed(sceneId)}>Reset</button>
+      </div>
+      <label className={styles.iters} htmlFor="advance-step">step
+        <select id="advance-step" value={String(dt)}
+          title="Seconds of physics per advance. 1/30 s is CM12's paper regime; the lab holds every scene to it whatever its own document asks for."
+          onChange={event => retime(Number(event.target.value))}>
+          {STEP_SIZES.map(size =>
+            <option key={size.label} value={size.dt}>{size.label}</option>)}
+        </select>
+        <b>{(dt * 1000).toFixed(1)} ms</b></label>
+      <label className={styles.iters} htmlFor="advance-budget">solve iters
+        <input id="advance-budget" type="range" min={4} max={80} step={4} value={budget}
+          onChange={event => setBudget(Number(event.target.value))} />
+        <b>{budget}</b></label>
+      <span className={styles.themeSlot}><ThemeSwitch /></span>
+    </header>
 
     <div className={styles.workspace}>
       <section className={styles.stage} aria-label="Advance viewer">
-        <div className={styles.viewport}>
+        <div className={styles.viewport} ref={viewport}>
           <canvas ref={canvas} className={styles.canvas} role="img"
-            width={SLICE_NX * SCALE} height={SLICE_NY * SCALE}
-            aria-label={`${representing ? "The state entering the advance" : declaration.label} on a 96 by 40 slice at frame ${readings.frame}`}
+            width={Math.round(displayNx * scale * dpr)}
+            height={Math.round(displayNy * scale * dpr)}
+            style={{ width: displayNx * scale, height: displayNy * scale }}
+            aria-label={`${representing ? "The state entering the advance" : declaration.label} for ${seed?.label ?? "the selected production scene"} on its ${displayNx} by ${displayNy} centre-Z slice at frame ${readings.frame}`}
             onPointerMove={event => {
               const probe = probeAt(event.currentTarget, event.clientX, event.clientY);
-              const host = event.currentTarget.parentElement?.getBoundingClientRect();
+              const host = viewport.current?.getBoundingClientRect();
               setHover(probe && host ? {
                 probe,
                 x: Math.min(host.width - PROBE_WIDTH - 8, event.clientX - host.left + 14),
@@ -319,41 +595,43 @@ export function AdvanceLab(): React.JSX.Element {
             onPointerLeave={() => setHover(null)}
             onClick={event => {
               const probe = probeAt(event.currentTarget, event.clientX, event.clientY);
-              if (probe) setPinned(probe);
+              if (probe) pin(probe);
             }} />
 
-          <div className={`${styles.hud} ${styles.hudTop}`}>
-            <span className={styles.chip}>
-              <i style={{ background: representing ? PALETTE.liquid : band }} />
-              <b>{representing ? "Represent the fluid" : declaration.label}</b>
-              <em>{representing ? "step 1 · before the advance" : `stage ${index + 1}/15`}</em>
-            </span>
-            <div className={styles.caption}>{lens.caption}</div>
-          </div>
+          {/* Nothing names the stage over the water: the sidebar says which lens
+              this is and what it draws, and a caption pinned to the corner of
+              the picture sits on top of the one thing the page is for. Only a
+              slice with no liquid in it earns an overlay, because then there is
+              no picture for it to cover. */}
+          {emptySlice && <div className={`${styles.hud} ${styles.hudTop}`}>
+            <div className={styles.alarm}>
+              This authored centre slice contains no initial liquid.</div>
+          </div>}
 
           <div className={`${styles.hud} ${styles.hudRight}`}>
             <div className={styles.stack}>
+              <span className={styles.read}>frame <b>{readings.frame}</b></span>
               <span className={styles.read}>microsteps <b>{readings.microsteps}</b></span>
               <span className={styles.read}>max |u| <b>{readings.maxVelocity.toFixed(2)}</b></span>
               <span className={styles.read}>volume drift <b>{(readings.drift * 100).toFixed(3)}%</b></span>
-              <span className={styles.read}>bricks re-rung <b>{readings.churn} / {SLICE_BX * SLICE_BY}</b></span>
-              {readings.submerged !== null && <>
-                <span className={styles.read}>solid submerged <b>{Math.round(readings.submerged * 100)}%</b></span>
-                <span className={styles.read}>displaced, unplaced <b>{readings.displaced.toExponential(1)}</b></span>
-              </>}
+              <span className={styles.read}>bricks re-rung <b>{readings.churn} / {readings.bricks}</b></span>
+              {readings.fault && <span className={`${styles.read} ${styles.faulted}`}>
+                fault <b>{readings.fault}</b></span>}
+              {runtimeFault && <span className={`${styles.read} ${styles.faulted}`}>
+                exception <b>{runtimeFault}</b></span>}
             </div>
           </div>
 
           <div className={`${styles.hud} ${styles.hudFoot}`}>
-            {([[PALETTE.liquid, "liquid"], [PALETTE.solid, "solid"], ...lens.keys] as const)
-              .map(([color, label]) => <span className={styles.key} key={label}>
-                <i style={{ background: color }} />{label}</span>)}
+            {([["liquid", "liquid"], ["solid", "solid"], ...lens.keys] as const)
+              .map(([tone, label]) => <span className={styles.key} key={label}>
+                <i style={{ background: paletteVar(tone) }} />{label}</span>)}
           </div>
 
           {hover && <div className={styles.probe} style={{ left: hover.x, top: hover.y }}>
             <div className={styles.probeHead}>
-              brick {hover.probe.cell.brick} · rung {SLICE_RUNGS[hover.probe.rung]}³ ·
-              {" "}{hover.probe.cell.size}×{hover.probe.cell.size} fine cells
+              brick {hover.probe.cell.brick} · rung {SLICE_RUNGS[hover.probe.rung]}² ·
+              {" "}{hover.probe.cell.width}×{hover.probe.cell.height} fine cells
             </div>
             {([["V", hover.probe.cell.volume.toFixed(3)],
               ["K", hover.probe.cell.capacity.toFixed(3)],
@@ -367,33 +645,14 @@ export function AdvanceLab(): React.JSX.Element {
           </div>}
         </div>
 
-        <div className={styles.deck}>
-          <div className={styles.scenePicker}>
-            {SLICE_SCENE_IDS.map(id => <button type="button" key={id}
-              aria-pressed={sliceScene === id} title={SLICE_SCENES[id].note}
-              onClick={() => reseed(id)}>{SLICE_SCENES[id].label}</button>)}
-          </div>
-          <span className={styles.divider} />
-          <button type="button" aria-pressed={playing} onClick={() => setPlaying(v => !v)}>
-            {playing ? "Pause" : "Play"}</button>
-          <button type="button" onClick={() => {
-            const s = slice.current;
-            if (!s) return;
-            advanceSlice(s, budget);
-            setReadings(read(s));
-          }}>Step frame</button>
-          <button type="button" aria-pressed={walking} onClick={() => setWalking(v => !v)}>
-            Walk the advance</button>
-          <button type="button" onClick={() => reseed(sliceScene)}>Reset scene</button>
-          <span className={styles.spacer} />
-          <label htmlFor="advance-budget">solve iters
-            <input id="advance-budget" type="range" min={4} max={80} step={4} value={budget}
-              onChange={event => setBudget(Number(event.target.value))} />
-            <b>{budget}</b></label>
-        </div>
-
-        <div className={styles.timeline}>
-          <div className={styles.steps}>
+        {/* The advance, end to end. The four readings sit over the stages they
+            cover, so the strip is the loop and the loop is the strip. */}
+        <div className={styles.strip}>
+          <div className={styles.steps} style={{
+            gridTemplateColumns: LOOP_STEPS
+              .map(loop => loop.from >= 1 ? `${loop.to - loop.from + 1}fr` : "auto")
+              .join(" "),
+          }}>
             {LOOP_STEPS.map(loop => <button type="button" key={loop.n} className={styles.step}
               aria-pressed={step === loop.n}
               onClick={() => {
@@ -404,20 +663,20 @@ export function AdvanceLab(): React.JSX.Element {
                   setOpenSeam(null);
                 }
               }}>
-              <i>STEP {loop.n}</i><b>{loop.name}</b></button>)}
+              <i>{loop.n}</i>{loop.name}</button>)}
           </div>
           <div className={styles.ticks}>
             {ADVANCE_STAGE_ORDER.map((stage, i) => {
               const active = LOOP_STEPS.find(loop => loop.n === step);
               const inStep = !active || (active.from >= 1 && i + 1 >= active.from && i + 1 <= active.to);
-              const color = BAND_COLOR[sparseCM12Stage(stage).band];
+              const color = paletteVar(BAND_TONE[sparseCM12Stage(stage).band]);
               return <button type="button" key={stage} aria-pressed={stage === selected}
                 className={`${styles.tick}${inStep ? "" : ` ${styles.dim}`}`}
                 title={`${i + 1}. ${sparseCM12Stage(stage).label}`}
                 onClick={() => select(stage)}>
                 <span className={styles.bar} style={{
                   background: color,
-                  height: `${Math.max(3, Math.round(Math.pow(costs[i][key] / peak, 0.55) * 40))}px`,
+                  height: `${Math.max(3, Math.round(Math.pow(costs[i][key] / peak, 0.55) * 34))}px`,
                 }} />
                 <span className={styles.foot} style={{ background: color }} />
                 <span className={styles.index}>{i + 1}</span>
@@ -436,50 +695,25 @@ export function AdvanceLab(): React.JSX.Element {
       </section>
 
       <aside className={styles.inspector} aria-label="Stage detail">
-        {pinned && <div className={styles.pinned}>
-          <span className={styles.group}>
-            <span>cell probe · brick {pinned.cell.brick}</span>
-            <button type="button" className={styles.mini}
-              onClick={() => setPinned(null)}>unpin</button>
-          </span>
-          <div className={styles.props}>{cellRows(pinned).map(([symbol, value, note]) =>
-            <div className={styles.prop} key={symbol}>
-              <b>{symbol}<em>{value}</em></b><span>{note}</span></div>)}</div>
-        </div>}
+        <p className={styles.eyebrow}>adaptive volume · sparse geometric CM12</p>
 
         {representing ? <>
-          <div>
+          <div className={styles.head}>
             <span className={styles.group}>
               <span>step 1 of the loop</span><span>no stage encoded</span></span>
             <h2>Represent the fluid</h2>
             <span className={styles.stageChip}>sparse bricks · adaptive cells · volume, not distance</span>
           </div>
-          <p>{REPRESENT_LENS.caption}</p>
-          <div>
-            <span className={styles.group}><span>the scene on the slice</span>
-              <span>{SLICE_SCENE_IDS.length} scenes</span></span>
-            <div className={styles.scales}>
-              {SLICE_SCENE_IDS.map(id => <button type="button" key={id}
-                aria-pressed={sliceScene === id}
-                onClick={() => reseed(id)}>{SLICE_SCENES[id].label}</button>)}
-            </div>
-            <p>{SLICE_SCENES[sliceScene].note}</p>
-          </div>
+          <p className={styles.lensNote}>
+            <i style={{ background: paletteVar("liquid") }} />{REPRESENT_LENS.caption}</p>
           <div className={styles.figures}>
             <div className={styles.figure}><b>{n(model.bricks)}</b><span>resident bricks</span></div>
             <div className={styles.figure}><b>{n(model.cells)}</b><span>accepted cells</span></div>
             <div className={styles.figure}><b>{n(model.rows)}</b><span>accepted rows</span></div>
-            <div className={styles.figure}><b>{SLICE_RUNGS.join(" · ")}</b><span>rungs on the ladder</span></div>
-          </div>
-          <div>
-            <span className={styles.group}>
-              <span>what a cell carries</span><span>hover the slice to read one</span></span>
-            <div className={styles.props}>{CELL_STATE.map(([symbol, where, note]) =>
-              <div className={styles.prop} key={symbol}>
-                <b>{symbol}<em>{where}</em></b><span>{note}</span></div>)}</div>
+            <div className={styles.figure}><b>1 · 2 · 4 · 8</b><span>2-D rungs on the ladder</span></div>
           </div>
         </> : <>
-          <div>
+          <div className={styles.head}>
             <span className={styles.group}>
               <span>stage {index + 1} of 15 · {declaration.band} band</span>
               <span>{seams.length ? `${seams.length} sub-seams` : "single interval"}</span>
@@ -487,7 +721,9 @@ export function AdvanceLab(): React.JSX.Element {
             <h2>{declaration.label}</h2>
             <span className={styles.stageChip}>{stageChip(selected)}</span>
           </div>
-          <p>{declaration.tip.summary}</p>
+          <p className={styles.lensNote}>
+            <i style={{ background: band }} />{lens.caption}</p>
+          <p className={styles.summary}>{declaration.tip.summary}</p>
           <div className={styles.figures}>
             <div className={styles.figure}><b>{n(cost.workgroups)}</b><span>workgroups executed</span></div>
             <div className={styles.figure}><b>{n(cost.dispatches)}</b><span>dispatches encoded</span></div>
@@ -499,20 +735,32 @@ export function AdvanceLab(): React.JSX.Element {
                 : work.loop === "transport" ? "packets encoded" : "not a loop"}</span>
             </div>
           </div>
-          <div>
-            <span className={styles.group}><span>reads · writes · feeds</span>
-              <span>{SPARSE_CM12_STAGE_BANDS[declaration.band].toLowerCase()}</span></span>
+        </>}
+
+        <div className={styles.folds}>
+          {pinned && <Fold id="cell" title="Pinned cell"
+            meta={`brick ${pinned.cell.brick}`}
+            open={folds.has("cell")} toggle={toggleFold}>
+            <div className={styles.props}>{cellRows(pinned).map(([symbol, value, note]) =>
+              <div className={styles.prop} key={symbol}>
+                <b>{symbol}<em>{value}</em></b><span>{note}</span></div>)}</div>
+            <button type="button" className={styles.mini}
+              onClick={() => setPinned(null)}>unpin</button>
+          </Fold>}
+
+          {!representing && <Fold id="io" title="Reads, writes and feeds"
+            meta={SPARSE_CM12_STAGE_BANDS[declaration.band].toLowerCase()}
+            open={folds.has("io")} toggle={toggleFold}>
             <dl className={styles.io}>
               <dt>reads</dt><dd>{declaration.tip.reads ?? "—"}</dd>
               <dt>writes</dt><dd>{declaration.tip.writes ?? "—"}</dd>
               <dt>feeds</dt><dd>{declaration.tip.feeds ?? "—"}</dd>
             </dl>
-          </div>
+          </Fold>}
 
-          <div className={styles.rule} />
-          <div>
-            <span className={styles.group}><span>sub-seams</span>
-              <span>{metric === "workgroups" ? "workgroups" : "dispatches"}</span></span>
+          {!representing && <Fold id="seams" title="Sub-seams"
+            meta={`${work.seams.length} · ${metric === "workgroups" ? "wg" : "disp"}`}
+            open={folds.has("seams")} toggle={toggleFold}>
             <div className={styles.seams}>{work.seams.map((seam, i) => {
               const id = seam.id ?? seam.label ?? `seam-${i}`;
               const seamCost = advanceSeamCost(work, seam, i, model);
@@ -528,41 +776,83 @@ export function AdvanceLab(): React.JSX.Element {
                   <em>{seamCost === null ? "in loop"
                     : `${n(seamCost[key])} ${metric === "workgroups" ? "wg" : "disp"}`}</em>
                 </button>
-                <p className={styles.seamNote}>{seam.note}</p>
-                {openSeam === id && <div className={styles.props}>
-                  {seam.kernels.map(entry => <div className={styles.prop} key={entry.name}>
-                    <b>{entry.name}<em>{ADVANCE_DISPATCH_KINDS[entry.kind].label}</em></b>
-                    <span>{entry.note ?? (kernelFlags(entry) || "one dispatch per encode")}</span>
-                  </div>)}
-                </div>}
+                {openSeam === id && <>
+                  <p className={styles.seamNote}>{seam.note}</p>
+                  <div className={styles.props}>
+                    {seam.kernels.map(entry => <div className={styles.prop} key={entry.name}>
+                      <b>{entry.name}<em>{ADVANCE_DISPATCH_KINDS[entry.kind].label}</em></b>
+                      <span>{entry.note ?? (kernelFlags(entry) || "one dispatch per encode")}</span>
+                    </div>)}
+                  </div>
+                </>}
               </div>;
             })}</div>
-          </div>
+          </Fold>}
 
-          {(work.notes ?? []).map(note => <div className={styles.note} key={note}>
-            <b>{ADVANCE_NOTES[note].heading}</b>{ADVANCE_NOTES[note].body}</div>)}
-        </>}
+          {!representing && (work.notes ?? []).length > 0 && <Fold id="notes" title="Notes"
+            meta={String((work.notes ?? []).length)}
+            open={folds.has("notes")} toggle={toggleFold}>
+            {(work.notes ?? []).map(note => <div className={styles.note} key={note}>
+              <b>{ADVANCE_NOTES[note].heading}</b>{ADVANCE_NOTES[note].body}</div>)}
+          </Fold>}
 
-        <div className={styles.rule} />
-        <div>
-          <span className={styles.group}><span>work scaled to</span>
-            <span>{ADVANCE_WORK_SCENES[scene].label}</span></span>
-          <div className={styles.scales}>
-            {(Object.keys(ADVANCE_WORK_SCENES) as AdvanceWorkSceneId[]).map(id =>
-              <button type="button" key={id} aria-pressed={scene === id}
-                onClick={() => setScene(id)}>{ADVANCE_WORK_SCENES[id].label}</button>)}
-          </div>
-          {readings.submerged !== null && !ADVANCE_WORK_SCENES[scene].gates.solids
-            && <p className={styles.note} style={{ marginBottom: 8 }}>
-              <b>This scale was captured without a moving solid</b>
-              The slice is running one, so the solid-coupling kernels the encoder
-              gates on <code>rigidCoupling</code> are priced at zero here. The moving
-              dam scale is the capture whose gates were taken with it on.
-            </p>}
-          <p className={styles.hint}>{ADVANCE_WORK_SCENES[scene].provenance}. {n(model.cells)} accepted
-            cells · {n(model.rows)} rows · {n(model.bricks)} bricks, at {model.microsteps} microstep
-            {model.microsteps === 1 ? "" : "s"}. The CFL and the {readings.churn}-brick churn driving
-            that plan are read live off the slice above.</p>
+          <Fold id="scene" title="This scene" flag={caveats > 0}
+            meta={caveats > 0 ? `${caveats} caveat${caveats === 1 ? "" : "s"}` : seed?.id}
+            open={folds.has("scene")} toggle={toggleFold}>
+            {seed && <>
+              <p className={styles.summary}>{seed.note}</p>
+              <dl className={styles.facts}>
+                <div><dt>catalogue id</dt><dd>{seed.id}</dd></div>
+                <div><dt>production grid</dt><dd>{displayNx} × {displayNy} ×
+                  {" "}{seed.sourceAtlas?.dimensions[2] ?? "—"}</dd></div>
+                <div><dt>physical plane</dt><dd>z = {seed.viewport.centerZ.toFixed(3)} m · source
+                  {" "}cell {seed.viewport.centerCellZ} centred at
+                  {" "}{seed.viewport.sourceCellCenterZ.toPrecision(3)} m</dd></div>
+                <div><dt>finest cell / step</dt><dd>{seed.viewport.sourceCellSize.toPrecision(4)} m ·
+                  {" "}{seed.dt.toPrecision(4)} s
+                  {seed.dt === CM12_PAPER_DT_S ? " (CM12 paper)" : " (lab override)"}</dd></div>
+                <div><dt>sparse authority</dt><dd>{n(readings.bricks)} bricks ·
+                  {" "}{n(readings.cells)} cells · {n(readings.rows)} rows</dd></div>
+              </dl>
+              <p className={styles.fidelity}>
+                The source atlas and scalar samples come from the selected production
+                document. Static material and liquid values are volume averages from the
+                voxel containing the geometric centre plane; analytic rigid geometry is
+                intersected at z = 0. After t = 0, a 2-D advance matches a production
+                centre slice only when the flow stays z-invariant: z-face flux, ∂w/∂z and
+                z pressure coupling do not exist here.
+              </p>
+              {(emptySlice || unsupported.length > 0) && <div className={styles.warnings}>
+                {emptySlice && <span>This authored centre slice contains no initial liquid.</span>}
+                {unsupported.map(entry => <span key={`${entry.kind}/${entry.label}`}>
+                  {entry.label}: {entry.detail}</span>)}
+              </div>}
+            </>}
+          </Fold>
+
+          <Fold id="state" title="What a cell carries" meta="11 fields"
+            open={folds.has("state")} toggle={toggleFold}>
+            <div className={styles.props}>{CELL_STATE.map(([symbol, where, note]) =>
+              <div className={styles.prop} key={symbol}>
+                <b>{symbol}<em>{where}</em></b><span>{note}</span></div>)}</div>
+          </Fold>
+
+          <Fold id="reading" title="How to read this page"
+            open={folds.has("reading")} toggle={toggleFold}>
+            <p className={styles.summary}>
+              A live 2-D slice of the solver&rsquo;s own model. Every stage of the resident
+              encoder is a lens over this one picture — pick one from the strip to see what
+              it touches, hover the water to read a cell, click to pin it. Walk plays the
+              strip through, one stage at a time.
+            </p>
+            <p className={styles.hint}>
+              {model.cells ? readings.work.provenance
+                : "Constructing sparse authority"}. {n(model.cells)} accepted cells ·
+              {" "}{n(model.rows)} rows · {n(model.bricks)} bricks, at {model.microsteps} microstep
+              {model.microsteps === 1 ? "" : "s"}. The CFL and the {readings.churn}-brick churn
+              driving that plan are read live from this production slice.
+            </p>
+          </Fold>
         </div>
       </aside>
     </div>
