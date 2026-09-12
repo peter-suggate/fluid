@@ -59,7 +59,11 @@ export interface AdaptiveMassSolverOptions extends SparseCM12CorrectionControls 
   readonly gammaDiffusionEnabled?: boolean;
   /** Whether Sec. 3.5's conservative surface-sharpening transform runs. */
   readonly surfaceSharpeningEnabled?: boolean;
-  /** Use validated column heights for presentation; defaults off. */
+  /** Validated column-height presentation policy; defaults to adaptive-coarse auto. */
+  readonly presentationColumnHeightMode?: "off" | "auto" | "on";
+  /** Shared reconstructed-distance presentation is the production default. */
+  readonly presentationSurfaceMode?: "rdf" | "plic";
+  /** @deprecated Use presentationColumnHeightMode; an explicit mode takes precedence. */
   readonly presentationColumnHeightEnabled?: boolean;
   /** Maximum one-reduction sparse MGPCG iterations encoded for each pressure solve. */
   readonly pressureIterations?: number;
@@ -82,14 +86,27 @@ const params: MethodParamSpec[] = [
 
   {
     kind: "select",
-    key: "presentationColumnHeight",
-    label: "Column height",
-    default: "off",
+    key: "presentationSurface",
+    label: "Surface reconstruction",
+    default: "rdf",
     tier: "coarse",
     update: "runtime",
-    options: [{ value: "on", label: "On · validated column heights" },
+    options: [{ value: "rdf", label: "Shared RDF" },
+      { value: "plic", label: "Legacy PLIC field" }],
+    hint: "Shared RDF reconstructs one watertight presentation field from accepted VOF fractions and PLIC normals. Legacy PLIC keeps the previous plane-support view. Both are presentation-only; transport remains volume-correct PLIC.",
+  },
+
+  {
+    kind: "select",
+    key: "presentationColumnHeight",
+    label: "Column height",
+    default: "auto",
+    tier: "coarse",
+    update: "runtime",
+    options: [{ value: "auto", label: "Auto · coarse columns" },
+      { value: "on", label: "On · local columns" },
       { value: "off", label: "Off · interface surface" }],
-    hint: "Use integrated column heights where valid, or reconstruct the interface from the current liquid field. Applies on the next simulation step; changes the published surface without resetting the scene.",
+    hint: "Auto uses liquid volume to set surface height only in coarse columns filled continuously from the physical floor to a single surface. On uses a broader local check, including fine columns and some floating liquid. Off uses the interface surface throughout. Applies on the next simulation step without resetting the scene.",
   },
   {
     kind: "select",
@@ -194,7 +211,9 @@ export function adaptiveMassSolverOptions(
     surfaceSharpeningEnabled: false,
     densityCapacityRepairEnabled: false,
     volumeCorrectionEnabled: false,
-    presentationColumnHeightEnabled: values.presentationColumnHeight === "on",
+    presentationColumnHeightMode: values.presentationColumnHeight === "off" ? "off"
+      : values.presentationColumnHeight === "on" ? "on" : "auto",
+    presentationSurfaceMode: values.presentationSurface === "plic" ? "plic" : "rdf",
     pressureIterations: sparseCM12PressureIterations(values.pressureIterations),
     pressureRelativeTolerance:
       sparseCM12PressureRelativeTolerance(values.pressureRelativeTolerance),
@@ -275,7 +294,8 @@ export const adaptiveMassMethod: SimulationMethod = {
       timeStep: values.timeStep === "scene" ? "scene" : "paper",
       gammaDiffusion: "off",
       surfaceSharpening: "off",
-      presentationColumnHeight: values.presentationColumnHeight === "on" ? "on" : "off",
+      presentationColumnHeight: values.presentationColumnHeight === "off" ? "off"
+        : values.presentationColumnHeight === "on" ? "on" : "auto",
       pressureIterations: sparseCM12PressureIterations(values.pressureIterations),
       pressureRelativeTolerance:
         sparseCM12PressureRelativeTolerance(values.pressureRelativeTolerance),
@@ -299,7 +319,7 @@ export const adaptiveMassMethod: SimulationMethod = {
       timeStep: "paper",
       gammaDiffusion: "off",
       surfaceSharpening: "off",
-      presentationColumnHeight: "off",
+      presentationColumnHeight: "auto",
       pressureIterations: SPARSE_CM12_PRESSURE_ITERATIONS,
       pressureRelativeTolerance: SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE,
       sharpeningDistance: SPARSE_CM12_SHARPENING_DISTANCE_CELLS,

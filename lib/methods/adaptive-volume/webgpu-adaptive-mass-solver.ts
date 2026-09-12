@@ -50,6 +50,7 @@ import {
   type SparseBrickResolution,
   type SparseBrickVec3,
 } from "./sparse-brick-atlas";
+
 import {
   buildSparseAtlasCompositeGrid,
   type SparseAtlasCompositeGrid,
@@ -69,6 +70,14 @@ import {
 } from "../../sparse-world/internal/adaptive-volume-adapter";
 import { sparseCM12PressureIterations, sparseCM12PressureIterationsFromReceipt, sparseCM12PressureRelativeTolerance, sparseCM12SharpeningDistance, sparseCM12SharpeningStrength, sparseCM12SharpeningTraceSteps, type SparseCM12GPUActivityRecord, type SparseCM12ResidentStageSeams } from "./webgpu-sparse-cm12-resident";
 import { SPARSE_CM12_ACTIVITY_POLICY, sparseCM12ActivityPolicy } from "./features/adaptivity/policy";
+import { advanceSparseReflectionAdmission } from
+  "./features/adaptivity/sparse-symmetric-admission";
+
+export const sparseCM12PresentationColumnHeightMode = (options: Pick<
+AdaptiveMassSolverOptions, "presentationColumnHeightMode" | "presentationColumnHeightEnabled"
+>): "off" | "auto" | "on" => options.presentationColumnHeightMode
+  ?? (options.presentationColumnHeightEnabled === undefined ? "auto"
+    : options.presentationColumnHeightEnabled ? "on" : "off");
 
 /**
  * Diagnostic-only stage boundaries for external Metal/xctrace observation.
@@ -203,6 +212,11 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     return { ...this.sparseWorld.presentation().fineLevelSet,
       surfaceMeshRefinement: this.options.surfaceMeshRefinement ?? 2 };
   }
+  /** Runtime publication choice, exposed so diagnostics can prove a fresh
+   * scene or paused toggle reached the actual solver rather than only the UI. */
+  get presentationSurfaceMode(): "rdf" | "plic" {
+    return this.options.presentationSurfaceMode ?? "rdf";
+  }
   async readPresentationPageAllocatorReceiptQA() {
     await this.awaitFrameSettlement();
     return this.sparseWorldTrace.readPresentationPageAllocatorReceiptQA();
@@ -251,6 +265,11 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   private liveRegionUpdateRequested = false;
   private liveRegionUpdatePending = false;
   private frozenFrontierPending = false;
+  /**
+   * Unspent selection tokens let one reflection orbit cross a frame boundary.
+   * Generation preparation retains its independently time-sliced work ceiling.
+   */
+  private topologyAdmissionCredit = 0;
   private topologyGenerationPolicyDirty = false;
   private topologyRegionStamp?: string;
   private lastFluidRevision = "";
@@ -303,6 +322,10 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     return true;
   }
   private readonly failureReceipts = new Set<Promise<void>>();
+  private presentationConfigurationWork: Promise<void> = Promise.resolve();
+  private presentationConfigurationRequestedRevision = 0;
+  private presentationConfigurationPublishedRevision = 0;
+  private presentationConfigurationDeferredForTopology = false;
 
   async assertSimulationHealthy(): Promise<void> {
     if (this.disposed) return;
@@ -775,7 +798,9 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
           sparseWorldNumerics.current = {
             finestCellSize_m: cellSize_m,
             pressureScale: 1,
-            sharpening: { presentationColumnHeightEnabled: options.presentationColumnHeightEnabled },
+            sharpening: { presentationColumnHeightMode:
+              sparseCM12PresentationColumnHeightMode(options),
+              presentationSurfaceMode: options.presentationSurfaceMode ?? "rdf" },
             origin_m: fluidDomainPlan.origin_m,
           };
           sparseRuntime = await createCM12SparseWorld({
@@ -865,7 +890,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
             label: "Sparse Geometric (CM12) initial GPU publication",
           });
           sparseRuntime!.runtime.encodeInitialPresentation(
-            encoder, finestCellSize(scene, atlas!), options.presentationColumnHeightEnabled);
+            encoder, finestCellSize(scene, atlas!),
+            sparseCM12PresentationColumnHeightMode(options));
           device.queue.submit([encoder.finish()]);
         },
       }, {
@@ -975,6 +1001,12 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     const pressureIterations = sparseCM12PressureIterations(values.pressureIterations);
     const pressureRelativeTolerance =
       sparseCM12PressureRelativeTolerance(values.pressureRelativeTolerance);
+    const nextPresentationColumnHeightMode = values.presentationColumnHeight === "off" ? "off"
+      : values.presentationColumnHeight === "on" ? "on" : "auto";
+    const nextPresentationSurfaceMode = values.presentationSurface === "plic" ? "plic" : "rdf";
+    const presentationConfigurationChanged =
+      nextPresentationColumnHeightMode !== this.options.presentationColumnHeightMode
+      || nextPresentationSurfaceMode !== this.options.presentationSurfaceMode;
     if (pressureIterations !== this.options.pressureIterations
       || pressureRelativeTolerance !== this.options.pressureRelativeTolerance) {
       this.resetPressureIterationFeedback();
@@ -992,13 +1024,61 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       : Number(values.surfaceMeshRefinement) === 4 ? 4 : 2,
       sharpeningStrength,
       gammaDiffusionEnabled, surfaceSharpeningEnabled,
-      presentationColumnHeightEnabled: values.presentationColumnHeight === "on",
+      presentationColumnHeightMode: nextPresentationColumnHeightMode,
+      presentationSurfaceMode: nextPresentationSurfaceMode,
       pressureIterations, pressureRelativeTolerance, activityPolicy };
     // Live liquid edits can arrive while paused, before advanceTo publishes
     // the next step configuration. New support must use the current controls.
     this.sparseWorldNumerics.current = { ...this.sparseWorldNumerics.current, activityPolicy,
       sharpening: { ...this.sparseWorldNumerics.current.sharpening,
-        presentationColumnHeightEnabled: this.options.presentationColumnHeightEnabled } };
+        presentationColumnHeightMode: this.options.presentationColumnHeightMode,
+        presentationSurfaceMode: this.options.presentationSurfaceMode } };
+    if (presentationConfigurationChanged) this.schedulePresentationConfigurationRefresh();
+  }
+
+  private schedulePresentationConfigurationRefresh(): void {
+    const revision = ++this.presentationConfigurationRequestedRevision;
+    // A generation already preparing owns the next accepted page topology.
+    // Let it finish without adding a receipt that its own health check would
+    // await, then collapse any rapid UI changes into one publication of the
+    // latest revision against the new accepted topology.
+    const topology = this.topologyGenerationWork;
+    if (topology) {
+      if (!this.presentationConfigurationDeferredForTopology) {
+        this.presentationConfigurationDeferredForTopology = true;
+        void topology.finally(() => {
+          this.presentationConfigurationDeferredForTopology = false;
+          if (!this.disposed && this.presentationConfigurationPublishedRevision
+            !== this.presentationConfigurationRequestedRevision) {
+            this.enqueuePresentationConfigurationRefresh(
+              this.presentationConfigurationRequestedRevision);
+          }
+        });
+      }
+      return;
+    }
+    this.enqueuePresentationConfigurationRefresh(revision);
+  }
+
+  private enqueuePresentationConfigurationRefresh(revision: number): void {
+    const configuration = this.sparseWorldNumerics.current;
+    const refresh = this.presentationConfigurationWork.then(async () => {
+      if (this.disposed) return;
+      if (this.disposed || revision !== this.presentationConfigurationRequestedRevision) return;
+      await this.sparseRuntime.refreshPresentationConfiguration(
+        configuration.finestCellSize_m, configuration.sharpening,
+        configuration.activityPolicy, configuration.pressureControl,
+        configuration.worldDimensions_m);
+      this.presentationConfigurationPublishedRevision = revision;
+    }).catch((error: unknown) => {
+      if (!this.disposed && !this.simulationFailureError) {
+        this.simulationFailureError = error instanceof Error ? error
+          : new Error(`Sparse Geometric surface-mode publication failed: ${String(error)}`);
+      }
+    });
+    this.presentationConfigurationWork = refresh;
+    this.failureReceipts.add(refresh);
+    void refresh.finally(() => this.failureReceipts.delete(refresh));
   }
 
   private resetPressureIterationFeedback(): void {
@@ -1190,12 +1270,26 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         // catalogue. Reclaim it when an actual refinement or merge is needed.
         if (![...groups.values()].some(count => count === 8)) return undefined;
       }
-      const admitted = new Set([...requested].sort((left, right) => {
-        const a = source.recordsByKey.get(left)!, b = source.recordsByKey.get(right)!;
-        const priority = (record: typeof a) => Number((record.planReasons & 2) !== 0) * 2048 + Number(record.thinFluid) * 1024
-          + Number((record.reasons & 1) !== 0) * 512 + record.scoreByte;
-        return priority(b) - priority(a) || left - right;
-      }).slice(0, frozen || liveRegionUpdate ? requested.size : requestBudget));
+      const priority = (record: SparseCM12GPUActivityRecord) =>
+        Number((record.planReasons & 2) !== 0) * 2048 + Number(record.thinFluid) * 1024
+        + Number((record.reasons & 1) !== 0) * 512 + record.scoreByte;
+      const requestedCandidates = [...requested].map(key => {
+        const brick = source.atlas.directory.get(key)!;
+        return { key, coordinate: brick.coordinate, spanBricks: brick.spanBricks,
+          priority: priority(source.recordsByKey.get(key)!),
+          transition: `${brick.resolution}/${source.planned.get(key) ?? brick.resolution}` };
+      });
+      const reflectionAdmission = !frozen && !liveRegionUpdate && !source.atlas.signedCoordinates
+        ? advanceSparseReflectionAdmission(requestedCandidates,
+          source.atlas.brickDimensions, this.topologyAdmissionCredit, requestBudget)
+        : undefined;
+      const admitted = new Set(frozen || liveRegionUpdate
+        ? requested
+        : source.atlas.signedCoordinates
+          ? requestedCandidates.sort((a, b) => b.priority - a.priority || a.key - b.key)
+            .slice(0, requestBudget).map(({ key }) => key)
+          : reflectionAdmission!.admitted);
+      if (reflectionAdmission) this.topologyAdmissionCredit = reflectionAdmission.remainingCredit;
       // Missing receiver connectivity is required support, not optional
       // adaptation. Never discard the unadmitted half of an interaction.
       for (const key of source.frozenFrontier) admitted.add(key);
@@ -1323,7 +1417,9 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
 
   advanceTo(time_s: number, bodies: RigidBodyState[]): boolean {
     if (this.simulationFailureError) throw this.simulationFailureError;
-    if (this.disposed || this.framePending) return false;
+    if (this.disposed || this.framePending
+      || this.presentationConfigurationPublishedRevision
+        !== this.presentationConfigurationRequestedRevision) return false;
     if (this.publishCompletedFrame()) return true;
     this.info.topologyPreparationMaximumSliceMs = this.sparseRuntime.generationPreparationMaximumSliceMs;
     this.info.topologyPreparationMaximumSliceOperation = this.sparseRuntime.generationPreparationMaximumSliceOperation;
@@ -1459,7 +1555,9 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         relativeTolerance: pressureRelativeTolerance,
       },
       seams: diagnosticStageSeams,
-      transportPacketChunkSize: 8,
+      // This controls host continuation frequency; device readiness still
+      // decides the exact packet that completes the numerical step.
+      transportPacketChunkSize: 32,
       worldDimensions_m: this.fluidDomain.dimensions.map((value, axis) =>
         value * this.fluidDomain.cellSize_m[axis]) as [number, number, number],
     };
@@ -1757,6 +1855,10 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   async readAcceptedGeometricCellRowsQA(cellId: number) {
     await this.awaitFrameSettlement();
     return this.sparseWorldTrace.readAcceptedGeometricCellRowsQA(cellId);
+  }
+  async readGeometricMovingDualSnapshotQA() {
+    await this.awaitFrameSettlement();
+    return this.sparseWorldTrace.readGeometricMovingDualSnapshotQA();
   }
   async readAcceptedGeometricRowQA(rowId: number) {
     await this.awaitFrameSettlement();

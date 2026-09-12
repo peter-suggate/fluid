@@ -14,6 +14,16 @@ fn geometricResidentFill(cell:u32,densityOffset:u32)->f32{
   return state[densityOffset+cell]/max(cellOpenFraction(cell),1e-8);
 }
 
+// Transport accepts extensive volume within this relative capacity roundoff.
+// Reconstruction must accept the same state: clamp only the local observation,
+// never the conserved density/volume authority.
+fn geometricResidentCertifiedFill(cell:u32,densityOffset:u32)->vec2f{
+  let fill=geometricResidentFill(cell,densityOffset);
+  let tolerance=9.5367431640625e-7;
+  if(!(fill >= -tolerance && fill <= 1.0+tolerance)){return vec2f(0.0);}
+  return vec2f(clamp(fill,0.0,1.0),1.0);
+}
+
 // Physical tangential overlap, independent of coarse-port row coefficients.
 // Only opposite-side terms are neighbours: fine cells on the same side of a
 // mixed row must not masquerade as normal-direction samples.
@@ -22,6 +32,113 @@ fn geometricResidentOverlap(cell:u32,other:u32,axis:u32)->f32{
   let b=cellCenter(other);let bw=0.5*cellWidths(other);
   let overlap=max(vec3f(0.0),min(a+aw,b+bw)-max(a-aw,b-bw));
   return overlap[(axis+1u)%3u]*overlap[(axis+2u)%3u];
+}
+
+fn geometricResidentSameProjection(a:u32,b:u32,extrusion:u32)->bool{
+  let ac=cellCenter(a);let aw=cellWidths(a);let bc=cellCenter(b);let bw=cellWidths(b);
+  for(var axis=0u;axis<3u;axis+=1u){
+    if(axis!=extrusion&&(ac[axis]!=bc[axis]||aw[axis]!=bw[axis])){return false;}
+  }
+  return true;
+}
+
+// Certify a locally extruded adaptive stencil from the accepted graph itself.
+// Across an in-plane mixed row, equal projected neighbours may be split into
+// several isotropic children along the extrusion axis. They must agree in fill
+// and collectively cover this cell's complete extrusion interval. A row along
+// the extrusion axis instead requires the ordinary opposite neighbour to agree
+// with the centre. This retains true 3-D gradients and only removes a tangent
+// attributed by skew fine/coarse centres from invariant scalar data.
+fn geometricResidentAdaptiveExtrusionCertified(cell:u32,densityOffset:u32,
+ extrusion:u32)->bool{
+  let centreFill=geometricResidentFill(cell,densityOffset);
+  let centre=cellCenter(cell);let widths=cellWidths(cell);
+  for(var incidence=incidenceBegin(cell);incidence<incidenceEnd(cell);incidence+=1u){
+    let row=incidenceRow(incidence);
+    if(!rowAccepted(row)||rowOpenFraction(row)<=1e-8){continue;}
+    let own=termCoefficient(incidenceTerm(incidence));let range=rowTermRange(row);
+    for(var term=range.x;term<range.y;term+=1u){
+      if(own*termCoefficient(term)>=0.0){continue;}
+      let other=termCell(term);
+      if(other==cell||!cellActive(other)||cellOpenFraction(other)<0.999999){return false;}
+      let observed=geometricResidentFill(other,densityOffset);
+      if(rowAxis(row)==extrusion){
+        if(abs(observed-centreFill)>9.5367431640625e-7){return false;}
+        continue;
+      }
+      var leader=true;
+      for(var prior=range.x;prior<term;prior+=1u){
+        if(own*termCoefficient(prior)<0.0
+          &&geometricResidentSameProjection(termCell(prior),other,extrusion)){leader=false;break;}
+      }
+      if(!leader){continue;}
+      var coverage=0.0;
+      let lower=centre[extrusion]-0.5*widths[extrusion];
+      let upper=centre[extrusion]+0.5*widths[extrusion];
+      for(var candidate=term;candidate<range.y;candidate+=1u){
+        if(own*termCoefficient(candidate)>=0.0){continue;}
+        let member=termCell(candidate);
+        if(!geometricResidentSameProjection(member,other,extrusion)){continue;}
+        if(!cellActive(member)||cellOpenFraction(member)<0.999999
+          ||abs(geometricResidentFill(member,densityOffset)-observed)>9.5367431640625e-7){return false;}
+        let mc=cellCenter(member)[extrusion];let mw=cellWidths(member)[extrusion];
+        coverage+=max(0.0,min(upper,mc+0.5*mw)-max(lower,mc-0.5*mw));
+      }
+      if(coverage<widths[extrusion]-9.5367431640625e-7){return false;}
+    }
+  }
+  return true;
+}
+
+fn geometricResidentProjectedGradient(cell:u32,densityOffset:u32,
+ extrusion:u32)->vec3f{
+  let centre=cellCenter(cell);let fill=geometricResidentFill(cell,densityOffset);
+  let axisU=(extrusion+1u)%3u;let axisV=(extrusion+2u)%3u;
+  var m00=0.0;var m01=0.0;var m11=0.0;var b0=0.0;var b1=0.0;
+  for(var incidence=incidenceBegin(cell);incidence<incidenceEnd(cell);incidence+=1u){
+    let row=incidenceRow(incidence);
+    if(!rowAccepted(row)||rowOpenFraction(row)<=1e-8||rowAxis(row)==extrusion){continue;}
+    let own=termCoefficient(incidenceTerm(incidence));let range=rowTermRange(row);
+    for(var term=range.x;term<range.y;term+=1u){
+      if(own*termCoefficient(term)>=0.0){continue;}
+      let other=termCell(term);
+      if(other==cell||!cellActive(other)||cellOpenFraction(other)<0.999999){continue;}
+      var leader=true;
+      for(var prior=range.x;prior<term;prior+=1u){
+        if(own*termCoefficient(prior)<0.0
+          &&geometricResidentSameProjection(termCell(prior),other,extrusion)){leader=false;break;}
+      }
+      if(!leader){continue;}
+      var delta=cellCenter(other)-centre;delta[extrusion]=0.0;
+      let remaining=3u-rowAxis(row)-extrusion;
+      let a=centre[remaining]-0.5*cellWidths(cell)[remaining];
+      let b=centre[remaining]+0.5*cellWidths(cell)[remaining];
+      let oc=cellCenter(other)[remaining];let ow=cellWidths(other)[remaining];
+      let overlap=max(0.0,min(b,oc+0.5*ow)-max(a,oc-0.5*ow));
+      let weight=overlap/max(dot(delta,delta),1e-12);
+      let difference=geometricResidentFill(other,densityOffset)-fill;
+      let du=delta[axisU];let dv=delta[axisV];
+      m00+=weight*du*du;m01+=weight*du*dv;m11+=weight*dv*dv;
+      b0+=weight*du*difference;b1+=weight*dv*difference;
+    }
+  }
+  let determinant=m00*m11-m01*m01;let scale=max(m00,m11);var result=vec3f(0.0);
+  if(scale>1e-12&&abs(determinant)>1e-7*scale*scale){
+    result[axisU]=(m11*b0-m01*b1)/determinant;
+    result[axisV]=(-m01*b0+m00*b1)/determinant;
+  }
+  return result;
+}
+
+fn geometricResidentProjectedInterfaceFromFill(fill:f32,gradient:vec3f,
+ widths:vec3f,extrusion:u32)->GeometricInterfacePlane{
+  let maximum=max(abs(gradient.x),max(abs(gradient.y),abs(gradient.z)));
+  if(!(maximum>1e-20)){return GeometricInterfacePlane(vec3f(0.0),0.0);}
+  let scaled=gradient/maximum;let axisU=(extrusion+1u)%3u;let axisV=(extrusion+2u)%3u;
+  let magnitude=sqrt(scaled[axisU]*scaled[axisU]+scaled[axisV]*scaled[axisV]);
+  var normal=vec3f(0.0);normal[axisU]=scaled[axisU]/magnitude;
+  normal[axisV]=scaled[axisV]/magnitude;
+  return GeometricInterfacePlane(normal,geometricPlaneBoxOffset(normal,widths,fill));
 }
 
 // Uniform, open, extruded stencils admit a volume-consistent 2D fit.
@@ -64,8 +181,9 @@ fn geometricResidentFitUniformExtrusion(cell:u32,densityOffset:u32,
     if(other==INVALID){return GeometricResidentVolumeFit(fallback,0u);}
     if(!cellActive(other)||any(cellWidths(other)!=vec3f(1.0))
       ||any(cellCenter(other)!=position)||cellOpenFraction(other)<0.999999){return GeometricResidentVolumeFit(fallback,0u);}
-    let fill=geometricResidentFill(other,densityOffset);
-    if(!(fill>=0.0&&fill<=1.0)){return GeometricResidentVolumeFit(fallback,0u);}
+    let certified=geometricResidentCertifiedFill(other,densityOffset);
+    if(certified.y==0.0){return GeometricResidentVolumeFit(fallback,0u);}
+    let fill=certified.x;
     samples[3u*j+i]=fill;
     // Certify extrusion through the entire stencil. A physical domain end
     // has no exterior sample; the available inward layer must still match.
@@ -134,9 +252,7 @@ fn geometricResidentUniformSample(position:vec3f,densityOffset:u32)->vec2f{
   if(cell==INVALID){return vec2f(0.0);}
   if(!cellActive(cell)||any(cellWidths(cell)!=vec3f(1.0))
     ||any(cellCenter(cell)!=position)||cellOpenFraction(cell)<0.999999){return vec2f(0.0);}
-  let fill=geometricResidentFill(cell,densityOffset);
-  if(!(fill>=0.0&&fill<=1.0)){return vec2f(0.0);}
-  return vec2f(fill,1.0);
+  return geometricResidentCertifiedFill(cell,densityOffset);
 }
 
 fn geometricResidentVolumeFitScore3D(plane:GeometricInterfacePlane,
@@ -293,9 +409,19 @@ fn geometricResidentReconstructInterface(cell:u32,densityOffset:u32)->GeometricR
     // Returning invalid is preferable to inventing a gravity-aligned plane.
     return result;
   }
+  let magnitude=abs(gradient);var extrusion=0u;var projectedExtrusion=INVALID;
+  if(magnitude.y<magnitude[extrusion]){extrusion=1u;}
+  if(magnitude.z<magnitude[extrusion]){extrusion=2u;}
+  if(geometricResidentAdaptiveExtrusionCertified(cell,densityOffset,extrusion)){
+    let projected=geometricResidentProjectedGradient(cell,densityOffset,extrusion);
+    if(dot(projected,projected)>0.0){gradient=projected;projectedExtrusion=extrusion;}
+  }
   if(dot(gradient,gradient)*dot(widths,widths)<=1e-12){return result;}
   // Density rises into liquid; the geometry kernel expects liquid-to-air.
   result.plane=geometricInterfaceFromFill(fill,-gradient,widths);
+  if(projectedExtrusion!=INVALID){
+    result.plane=geometricResidentProjectedInterfaceFromFill(fill,-gradient,widths,projectedExtrusion);
+  }
   let extruded=geometricResidentFitUniformExtrusion(cell,densityOffset,result.plane);
   result.plane=extruded.plane;
   if(extruded.supported==0u){
@@ -383,6 +509,520 @@ fn extendGeometricInterface(@builtin(global_invocation_id)gid:vec3u){
   let at=GEOMETRIC_INTERFACE_SUPPORT_CACHE_BASE+4u*cell;
   state[at]=geometry.plane.normal.x;state[at+1u]=geometry.plane.normal.y;
   state[at+2u]=geometry.plane.normal.z;state[at+3u]=geometry.plane.offset;
+}
+
+// Area centroid of the PLIC polygon cut through the accepted cell box. plicRDF
+// weights use the interface centre, rather than an arbitrary point on the same
+// plane: the signed distance is unchanged, but the orientation/distance weight
+// is not. The fixed 12-edge construction is bounded for every convex box.
+fn geometricResidentInterfaceCentroid(cell:u32,
+ plane:GeometricInterfacePlane)->vec3f{
+  let halfWidths=0.5*cellWidths(cell);var points:array<vec3f,12>;var count=0u;
+  for(var axis=0u;axis<3u;axis+=1u){
+    let u=(axis+1u)%3u;let v=(axis+2u)%3u;
+    for(var su=0u;su<2u;su+=1u){for(var sv=0u;sv<2u;sv+=1u){
+      var a=vec3f(0.0);var b=vec3f(0.0);
+      a[axis]=-halfWidths[axis];b[axis]=halfWidths[axis];
+      a[u]=select(-halfWidths[u],halfWidths[u],su!=0u);b[u]=a[u];
+      a[v]=select(-halfWidths[v],halfWidths[v],sv!=0u);b[v]=a[v];
+      let fa=geometricInterfaceSignedDistance(plane,a);
+      let fb=geometricInterfaceSignedDistance(plane,b);
+      if((fa<=0.0&&fb>=0.0)||(fa>=0.0&&fb<=0.0)){
+        let denominator=fa-fb;
+        if(abs(denominator)>1e-12){
+          let point=mix(a,b,clamp(fa/denominator,0.0,1.0));var unique=true;
+          for(var prior=0u;prior<count;prior+=1u){
+            unique=unique&&dot(points[prior]-point,points[prior]-point)>1e-10;
+          }
+          if(unique&&count<12u){points[count]=point;count+=1u;}
+        }
+      }
+    }}
+  }
+  if(count<3u){return cellCenter(cell)+plane.normal*plane.offset;}
+  var arithmetic=vec3f(0.0);
+  for(var i=0u;i<count;i+=1u){arithmetic+=points[i];}
+  arithmetic/=f32(count);
+  let absolute=abs(plane.normal);var reference=vec3f(1.0,0.0,0.0);
+  if(absolute.y<=absolute.x&&absolute.y<=absolute.z){reference=vec3f(0.0,1.0,0.0);}
+  else if(absolute.z<=absolute.x&&absolute.z<=absolute.y){reference=vec3f(0.0,0.0,1.0);}
+  let basisU=normalize(cross(plane.normal,reference));let basisV=cross(plane.normal,basisU);
+  var angles:array<f32,12>;
+  for(var i=0u;i<count;i+=1u){
+    let delta=points[i]-arithmetic;angles[i]=atan2(dot(delta,basisV),dot(delta,basisU));
+  }
+  for(var i=0u;i<count;i+=1u){
+    var first=i;
+    for(var j=i+1u;j<count;j+=1u){if(angles[j]<angles[first]){first=j;}}
+    if(first!=i){let point=points[i];points[i]=points[first];points[first]=point;
+      let angle=angles[i];angles[i]=angles[first];angles[first]=angle;}
+  }
+  var area2=0.0;var centroid2=vec2f(0.0);
+  for(var i=0u;i<count;i+=1u){
+    let a=points[i]-arithmetic;let b=points[(i+1u)%count]-arithmetic;
+    let ax=dot(a,basisU);let ay=dot(a,basisV);
+    let bx=dot(b,basisU);let by=dot(b,basisV);let cross2=ax*by-bx*ay;
+    area2+=cross2;centroid2+=cross2*vec2f(ax+bx,ay+by);
+  }
+  if(abs(area2)<=1e-10){return cellCenter(cell)+plane.normal*plane.offset;}
+  centroid2/=3.0*area2;
+  return cellCenter(cell)+arithmetic+basisU*centroid2.x+basisV*centroid2.y;
+}
+
+fn geometricResidentRdfPlaneContributionAt(targetCentre:vec3f,source:u32,
+ densityOffset:u32)->vec2f{
+  let geometry=geometricResidentInterface(source,densityOffset);
+  if(geometry.valid==0u){return vec2f(0.0);}
+  let interfaceCentre=geometricResidentInterfaceCentroid(source,geometry.plane);
+  let delta=targetCentre-interfaceCentre;
+  let distance=geometricInterfaceSignedDistance(geometry.plane,
+    targetCentre-cellCenter(source));
+  let squared=dot(delta,delta);
+  // Equation 14 applies the same A=2 orientation weight to every interface
+  // point neighbour, including the destination cell itself. For the singular
+  // coincident-centroid case both numerator and the guarded ratio are zero;
+  // other point-neighbour planes (or the explicit fill fallback) then carry
+  // the RDF instead of inventing a unit self weight.
+  let weight=distance*distance/max(squared,1e-12);
+  return vec2f(weight*distance,weight);
+}
+
+fn geometricResidentRdfPlaneContribution(destinationCell:u32,source:u32,
+ densityOffset:u32)->vec2f{
+  return geometricResidentRdfPlaneContributionAt(cellCenter(destinationCell),
+    source,densityOffset);
+}
+
+// Accepted phase at a point in one open owner. Pure cells certify their whole
+// box; mixed cells use their own accepted PLIC rather than an extrapolated RDF.
+// Zero is reserved for cells whose interface geometry is unresolved.
+fn geometricResidentRdfAcceptedPhase(cell:u32,positionFine:vec3f,
+ densityOffset:u32)->i32{
+  let fill=clamp(state[densityOffset+cell]
+    /max(cellOpenFraction(cell),1e-6),0.0,1.0);
+  if(fill>=1.0-1e-6){return -1;}
+  if(fill<=1e-6){return 1;}
+  let geometry=geometricResidentInterface(cell,densityOffset);
+  if(geometry.valid==0u){return 0;}
+  let distance=geometricInterfaceSignedDistance(geometry.plane,
+    positionFine-cellCenter(cell));
+  return select(1,-1,distance<=0.0);
+}
+
+fn geometricResidentRdfBoundToAccepted(value:f32,acceptedDistance:f32,
+ phase:i32)->f32{
+  if(phase<0&&value>=0.0){return min(0.0,acceptedDistance);}
+  if(phase>0&&value<=0.0){return max(0.0,acceptedDistance);}
+  return value;
+}
+
+// Repair only an RDF sign inversion. For a mixed owner the replacement is its
+// accepted PLIC distance. A pure owner's interface lies outside its box, so
+// distance to the nearest box face is a conservative strict interior margin.
+fn geometricResidentRdfBoundAtOwner(cell:u32,positionFine:vec3f,
+ densityOffset:u32,value:f32)->f32{
+  let phase=geometricResidentRdfAcceptedPhase(cell,positionFine,densityOffset);
+  if(phase==0){return value;}
+  let geometry=geometricResidentInterface(cell,densityOffset);
+  if(geometry.valid!=0u){
+    let accepted=geometricInterfaceSignedDistance(geometry.plane,
+      positionFine-cellCenter(cell));
+    return geometricResidentRdfBoundToAccepted(value,accepted,phase);
+  }
+  let widths=cellWidths(cell);let lower=cellCenter(cell)-0.5*widths;
+  let upper=lower+widths;let interior=min(positionFine-lower,upper-positionFine);
+  let margin=max(0.0,min(interior.x,min(interior.y,interior.z)));
+  return geometricResidentRdfBoundToAccepted(value,select(margin,-margin,phase<0),phase);
+}
+
+// One accepted owner incident to a corner of the destination cell. Sampling
+// the integer fine voxel immediately inside each of the corner's eight
+// octants enumerates the paper's point-neighbour stencil. It also includes
+// every fine owner along a nonconforming 2:1 face or edge, whereas walking
+// physical face rows alone degenerates to six neighbours on a uniform grid.
+fn geometricResidentRdfPointNeighborAt(vertex:vec3i,octant:u32)->u32{
+  let query=vertex+vec3i(select(-1,0,(octant&1u)!=0u),
+    select(-1,0,(octant&2u)!=0u),select(-1,0,(octant&4u)!=0u));
+  let owner=compactOwnerCellAt(query);
+  if(owner.x==INVALID||!brickActive(owner.y)||!cellActive(owner.x)){return INVALID;}
+  return owner.x;
+}
+
+// Point-neighbour record for the presentation fit.  An allocated but inactive
+// WDR leaf retains the accepted directory rung and template cell geometry, so
+// it can supply the surrounding air-centre sample assumed by plicRDF without
+// becoming simulation authority. x is the template cell and y is 1 for an
+// active accepted cell or 2 for an inactive air template. Static solid/cut
+// voxels and coordinates outside the physical domain provide no sample.
+fn geometricResidentRdfPointNeighborRecord(vertex:vec3i,octant:u32)->vec2u{
+  let query=vertex+vec3i(select(-1,0,(octant&1u)!=0u),
+    select(-1,0,(octant&2u)!=0u),select(-1,0,(octant&4u)!=0u));
+  if(any(query<vec3i(0))||any(query>=vec3i(p.dimensions.xyz))
+    ||cm12SolidVoxelFractionQ8(query)>0u){return vec2u(INVALID,0u);}
+  let owner=compactOwnerCellAt(query);
+  if(owner.x==INVALID){return vec2u(INVALID,0u);}
+  if(brickActive(owner.y)&&cellActive(owner.x)){
+    if(cellOpenFraction(owner.x)<0.999999){return vec2u(INVALID,0u);}
+    return vec2u(owner.x,1u);
+  }
+  return vec2u(owner.x,2u);
+}
+
+fn geometricResidentRdfCellCorner(cell:u32,corner:u32)->vec3i{
+  let widths=cellWidths(cell);
+  let lower=vec3i(round(cellCenter(cell)-0.5*widths));
+  return lower+vec3i(round(vec3f(
+    select(0.0,widths.x,(corner&1u)!=0u),
+    select(0.0,widths.y,(corner&2u)!=0u),
+    select(0.0,widths.z,(corner&4u)!=0u))));
+}
+
+// Return the open octants connected to the destination around one shared
+// vertex. Point contact alone is not fluid connectivity: this local graph
+// prevents RDF support from crossing a solid edge/corner whose intervening
+// face-adjacent octants are closed. Partial-capacity owners remain excluded
+// until their actual clipped polyhedra are available.
+fn geometricResidentRdfConnectedVertexOwners(cell:u32,vertex:vec3i)->array<u32,8>{
+  var owners:array<u32,8>;var reachable:array<u32,8>;
+  for(var octant=0u;octant<8u;octant+=1u){
+    let owner=geometricResidentRdfPointNeighborAt(vertex,octant);
+    owners[octant]=select(INVALID,owner,owner!=INVALID
+      &&cellOpenFraction(owner)>=0.999999);
+    reachable[octant]=select(0u,1u,owners[octant]==cell);
+  }
+  for(var closure=0u;closure<8u;closure+=1u){
+    for(var octant=0u;octant<8u;octant+=1u){
+      if(reachable[octant]==0u){continue;}
+      for(var axis=0u;axis<3u;axis+=1u){
+        let adjacent=octant^(1u<<axis);
+        if(owners[adjacent]!=INVALID){reachable[adjacent]=1u;}
+      }
+    }
+  }
+  for(var octant=0u;octant<8u;octant+=1u){
+    if(reachable[octant]==0u){owners[octant]=INVALID;}
+  }
+  return owners;
+}
+
+fn geometricResidentRdfConnectedCornerOwners(cell:u32,corner:u32)->array<u32,8>{
+  return geometricResidentRdfConnectedVertexOwners(cell,
+    geometricResidentRdfCellCorner(cell,corner));
+}
+
+// Scheufler/Roenby reconstructed distance at accepted cell centres. Sources
+// are the unique accepted cells sharing any vertex with the destination, as
+// required by the point-neighbour definition on both uniform and 2:1 grids.
+fn geometricResidentStoreRdfValue(cell:u32,densityOffset:u32){
+  let fill=clamp(state[densityOffset+cell]
+    /max(cellOpenFraction(cell),1e-6),0.0,1.0);
+  let widths=cellWidths(cell);
+  let fallback=(CM12_LIQUID_ISOVALUE-fill)*4.0*min(widths.x,min(widths.y,widths.z));
+  let at=GEOMETRIC_INTERFACE_RDF_CACHE_BASE+4u*cell;
+  state[at]=0.0;state[at+1u]=0.0;state[at+2u]=0.0;
+  // The stored capacity is only a scalar fraction; it does not locate the
+  // open polyhedron needed for a volume-correct interface point. Keep the
+  // explicit fill fallback used by legacy presentation instead of inferring
+  // a zero crossing from an adjacent open-cell plane.
+  if(cellOpenFraction(cell)<0.999999){state[at+3u]=fallback;return;}
+  var neighbors:array<u32,64>;var neighborCount=0u;
+  for(var corner=0u;corner<8u;corner+=1u){
+    let cornerOwners=geometricResidentRdfConnectedCornerOwners(cell,corner);
+    for(var octant=0u;octant<8u;octant+=1u){
+    let other=cornerOwners[octant];
+    if(other==INVALID){continue;}var unique=true;
+    for(var prior=0u;prior<neighborCount;prior+=1u){unique=unique&&neighbors[prior]!=other;}
+    if(unique){neighbors[neighborCount]=other;neighborCount+=1u;}
+  }}
+  var sum=vec2f(0.0);
+  for(var neighbor=0u;neighbor<neighborCount;neighbor+=1u){
+    let other=neighbors[neighbor];
+    if(cellOpenFraction(other)>=0.999999){
+      sum+=geometricResidentRdfPlaneContribution(cell,other,densityOffset);
+    }
+  }
+  var value=select(fallback,sum.x/sum.y,sum.y>1e-8);
+  let geometry=geometricResidentInterface(cell,densityOffset);
+  if(geometry.valid!=0u){
+    let accepted=geometricInterfaceSignedDistance(geometry.plane,vec3f(0.0));
+    let phase=select(1,-1,accepted<=0.0);
+    value=geometricResidentRdfBoundToAccepted(value,accepted,phase);
+  }else{
+    let centreMargin=0.5*min(widths.x,min(widths.y,widths.z));
+    if(fill>=1.0-1e-6){value=geometricResidentRdfBoundToAccepted(value,-centreMargin,-1);}
+    else if(fill<=1e-6){value=geometricResidentRdfBoundToAccepted(value,centreMargin,1);}
+  }
+  state[at+3u]=value;
+}
+
+@compute @workgroup_size(64)
+fn publishGeometricInterfaceRdfValues(@builtin(global_invocation_id)gid:vec3u){
+  if(!GEOMETRIC_INTERFACE_RDF_CACHE_ENABLED){return;}
+  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
+  geometricResidentStoreRdfValue(cell,destinationDensity());
+}
+
+@compute @workgroup_size(64)
+fn publishGeometricInterfaceRdfValuesPublished(@builtin(global_invocation_id)gid:vec3u){
+  if(!GEOMETRIC_INTERFACE_RDF_CACHE_ENABLED){return;}
+  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
+  let densityOffset=select(p.stateOffsets0.x,p.stateOffsets0.y,
+    cm12FramePlanAcceptedParity()!=0u);
+  geometricResidentStoreRdfValue(cell,densityOffset);
+}
+
+// Least-squares gradient of the immutable RDF-centre values. This is a second
+// dispatch: every .w operand is complete before any invocation publishes its
+// independent xyz fit, so no workgroup ordering can alter the shared field.
+@compute @workgroup_size(64)
+fn fitGeometricInterfaceRdfGradients(@builtin(global_invocation_id)gid:vec3u){
+  if(!GEOMETRIC_INTERFACE_RDF_CACHE_ENABLED){return;}
+  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
+  if(cellOpenFraction(cell)<0.999999){return;}
+  let centre=cellCenter(cell);let at=GEOMETRIC_INTERFACE_RDF_CACHE_BASE+4u*cell;
+  let value=state[at+3u];var mxx=0.0;var mxy=0.0;var mxz=0.0;
+  var myy=0.0;var myz=0.0;var mzz=0.0;var rhs=vec3f(0.0);
+  var neighbors:array<u32,64>;var neighborCount=0u;
+  for(var corner=0u;corner<8u;corner+=1u){
+    let cornerOwners=geometricResidentRdfConnectedCornerOwners(cell,corner);
+    for(var octant=0u;octant<8u;octant+=1u){
+    let other=cornerOwners[octant];
+    if(other==INVALID||other==cell){continue;}var unique=true;
+    for(var prior=0u;prior<neighborCount;prior+=1u){unique=unique&&neighbors[prior]!=other;}
+    if(unique){neighbors[neighborCount]=other;neighborCount+=1u;}
+  }}
+  for(var neighbor=0u;neighbor<neighborCount;neighbor+=1u){
+    let other=neighbors[neighbor];let delta=cellCenter(other)-centre;
+    let squared=max(dot(delta,delta),1e-12);let weight=1.0/squared;
+    let difference=state[GEOMETRIC_INTERFACE_RDF_CACHE_BASE+4u*other+3u]-value;
+    mxx+=weight*delta.x*delta.x;mxy+=weight*delta.x*delta.y;
+    mxz+=weight*delta.x*delta.z;myy+=weight*delta.y*delta.y;
+    myz+=weight*delta.y*delta.z;mzz+=weight*delta.z*delta.z;
+    rhs+=weight*difference*delta;
+  }
+  let determinant=mxx*(myy*mzz-myz*myz)-mxy*(mxy*mzz-myz*mxz)
+    +mxz*(mxy*myz-myy*mxz);var gradient=vec3f(0.0);
+  if(abs(determinant)>1e-10){
+    gradient=vec3f(
+      rhs.x*(myy*mzz-myz*myz)-mxy*(rhs.y*mzz-myz*rhs.z)
+        +mxz*(rhs.y*myz-myy*rhs.z),
+      mxx*(rhs.y*mzz-myz*rhs.z)-rhs.x*(mxy*mzz-myz*mxz)
+        +mxz*(mxy*rhs.z-rhs.y*mxz),
+      mxx*(myy*rhs.z-rhs.y*myz)-mxy*(mxy*rhs.z-rhs.y*mxz)
+        +rhs.x*(mxy*myz-myy*mxz))/determinant;
+  }else{
+    gradient=vec3f(select(0.0,rhs.x/mxx,mxx>1e-10),
+      select(0.0,rhs.y/myy,myy>1e-10),select(0.0,rhs.z/mzz,mzz>1e-10));
+  }
+  state[at]=gradient.x;state[at+1u]=gradient.y;state[at+2u]=gradient.z;
+}
+
+// Algorithm 2, step 5 of Scheufler/Roenby: interpolate the immutable
+// cell-centre RDF values to one geometric mesh vertex with a free affine
+// least-squares fit.  One canonical value is therefore shared by every cell
+// incident to that vertex.  The reference cell selects the locally connected
+// open octants, so a point contact across a solid edge cannot couple fields.
+fn geometricResidentRdfVertexValue(referenceCell:u32,vertex:vec3i,
+ densityOffset:u32)->vec2f{
+  if(cellOpenFraction(referenceCell)<0.999999){return vec2f(0.0);}
+  var records:array<vec2u,8>;var reachable:array<u32,8>;
+  for(var octant=0u;octant<8u;octant+=1u){
+    records[octant]=geometricResidentRdfPointNeighborRecord(vertex,octant);
+    reachable[octant]=select(0u,1u,records[octant].x==referenceCell
+      &&records[octant].y==1u);
+  }
+  // Connectivity is local to the eight incident octants. Inactive air may
+  // complete the paper stencil, while rejected solid/cut octants still block
+  // a diagonal plane from crossing a thin wall.
+  for(var closure=0u;closure<8u;closure+=1u){
+    for(var octant=0u;octant<8u;octant+=1u){
+      if(reachable[octant]==0u){continue;}
+      for(var axis=0u;axis<3u;axis+=1u){
+        let adjacent=octant^(1u<<axis);
+        if(records[adjacent].x!=INVALID){reachable[adjacent]=1u;}
+      }
+    }
+  }
+  var acceptedNeighbors:array<u32,8>;var activeCount=0u;
+  for(var octant=0u;octant<8u;octant+=1u){
+    if(reachable[octant]==0u||records[octant].y!=1u){continue;}
+    let other=records[octant].x;var unique=true;
+    for(var prior=0u;prior<activeCount;prior+=1u){
+      unique=unique&&acceptedNeighbors[prior]!=other;
+    }
+    if(unique){acceptedNeighbors[activeCount]=other;activeCount+=1u;}
+  }
+  if(activeCount==0u){return vec2f(0.0);}
+  var sampleCenters:array<vec3f,8>;var sampleValues:array<f32,8>;var count=0u;
+  for(var neighbor=0u;neighbor<activeCount;neighbor+=1u){
+    let other=acceptedNeighbors[neighbor];sampleCenters[count]=cellCenter(other);
+    sampleValues[count]=state[GEOMETRIC_INTERFACE_RDF_CACHE_BASE+4u*other+3u];count+=1u;
+  }
+  for(var octant=0u;octant<8u;octant+=1u){
+    if(reachable[octant]==0u||records[octant].y!=2u){continue;}
+    let ghost=records[octant].x;let centre=cellCenter(ghost);var unique=true;
+    for(var prior=0u;prior<count;prior+=1u){
+      unique=unique&&dot(sampleCenters[prior]-centre,sampleCenters[prior]-centre)>1e-10;
+    }
+    if(!unique){continue;}
+    var contribution=vec2f(0.0);
+    for(var neighbor=0u;neighbor<activeCount;neighbor+=1u){
+      contribution+=geometricResidentRdfPlaneContributionAt(centre,
+        acceptedNeighbors[neighbor],densityOffset);
+    }
+    let widths=cellWidths(ghost);let margin=0.5*min(widths.x,min(widths.y,widths.z));
+    let fallback=4.0*CM12_LIQUID_ISOVALUE*min(widths.x,min(widths.y,widths.z));
+    sampleCenters[count]=centre;
+    sampleValues[count]=max(margin,
+      select(fallback,contribution.x/contribution.y,contribution.y>1e-8));
+    count+=1u;
+  }
+  var meanCenter=vec3f(0.0);var meanValue=0.0;
+  for(var neighbor=0u;neighbor<count;neighbor+=1u){
+    meanCenter+=sampleCenters[neighbor];meanValue+=sampleValues[neighbor];
+  }
+  let inverseCount=1.0/f32(count);meanCenter*=inverseCount;meanValue*=inverseCount;
+  var mxx=0.0;var mxy=0.0;var mxz=0.0;var myy=0.0;var myz=0.0;var mzz=0.0;
+  var rhs=vec3f(0.0);var deltas:array<vec3f,8>;var differences:array<f32,8>;
+  var maximumDeltaSquared=0.0;var firstBasisIndex=0u;
+  for(var neighbor=0u;neighbor<count;neighbor+=1u){
+    let delta=sampleCenters[neighbor]-meanCenter;
+    let difference=sampleValues[neighbor]-meanValue;
+    deltas[neighbor]=delta;differences[neighbor]=difference;
+    let deltaSquared=dot(delta,delta);
+    if(deltaSquared>maximumDeltaSquared){
+      maximumDeltaSquared=deltaSquared;firstBasisIndex=neighbor;
+    }
+    mxx+=delta.x*delta.x;mxy+=delta.x*delta.y;mxz+=delta.x*delta.z;
+    myy+=delta.y*delta.y;myz+=delta.y*delta.z;mzz+=delta.z*delta.z;
+    rhs+=difference*delta;
+  }
+  let determinant=mxx*(myy*mzz-myz*myz)-mxy*(mxy*mzz-myz*mxz)
+    +mxz*(mxy*myz-myy*mxz);var gradient=vec3f(0.0);
+  let matrixScale=max(mxx,max(myy,mzz));
+  let determinantCutoff=64.0*1.1920928955078125e-7
+    *matrixScale*matrixScale*matrixScale;
+  if(abs(determinant)>determinantCutoff){
+    gradient=vec3f(
+      rhs.x*(myy*mzz-myz*myz)-mxy*(rhs.y*mzz-myz*rhs.z)
+        +mxz*(rhs.y*myz-myy*rhs.z),
+      mxx*(rhs.y*mzz-myz*rhs.z)-rhs.x*(mxy*mzz-myz*mxz)
+        +mxz*(mxy*rhs.z-rhs.y*mxz),
+      mxx*(myy*rhs.z-rhs.y*myz)-mxy*(mxy*rhs.z-rhs.y*mxz)
+        +rhs.x*(mxy*myz-myy*mxz))/determinant;
+  }else if(maximumDeltaSquared>1e-12){
+    // A domain face or edge legitimately gives Eq. 11 a rank-one or rank-two
+    // stencil.  Preserve every observable slope with a pivoted, reorthogonalized
+    // row-space basis; setting the whole gradient to zero displaces an otherwise
+    // exact planar interface by almost one coarse cell near the boundary.
+    let rankCutoff=64.0*1.1920928955078125e-7*maximumDeltaSquared;
+    let e0=normalize(deltas[firstBasisIndex]);var e1=vec3f(0.0);
+    var e2=vec3f(0.0);var secondResidualSquared=0.0;var secondBasisIndex=0u;
+    for(var sample=0u;sample<count;sample+=1u){
+      let residual=deltas[sample]-dot(deltas[sample],e0)*e0;
+      let squared=dot(residual,residual);
+      if(squared>secondResidualSquared){
+        secondResidualSquared=squared;secondBasisIndex=sample;
+      }
+    }
+    var rank=1u;
+    if(secondResidualSquared>rankCutoff){
+      e1=deltas[secondBasisIndex]-dot(deltas[secondBasisIndex],e0)*e0;
+      e1=normalize(e1-dot(e1,e0)*e0);rank=2u;
+      var thirdResidualSquared=0.0;var thirdBasisIndex=0u;
+      for(var sample=0u;sample<count;sample+=1u){
+        let residual=deltas[sample]-dot(deltas[sample],e0)*e0
+          -dot(deltas[sample],e1)*e1;
+        let squared=dot(residual,residual);
+        if(squared>thirdResidualSquared){
+          thirdResidualSquared=squared;thirdBasisIndex=sample;
+        }
+      }
+      if(thirdResidualSquared>rankCutoff){
+        e2=deltas[thirdBasisIndex]-dot(deltas[thirdBasisIndex],e0)*e0
+          -dot(deltas[thirdBasisIndex],e1)*e1;
+        e2=normalize(e2-dot(e2,e0)*e0-dot(e2,e1)*e1);rank=3u;
+      }
+    }
+    var b00=0.0;var b01=0.0;var b02=0.0;var b11=0.0;var b12=0.0;var b22=0.0;
+    var c=vec3f(0.0);
+    for(var sample=0u;sample<count;sample+=1u){
+      let projected=vec3f(dot(deltas[sample],e0),dot(deltas[sample],e1),
+        dot(deltas[sample],e2));
+      b00+=projected.x*projected.x;b01+=projected.x*projected.y;
+      b02+=projected.x*projected.z;b11+=projected.y*projected.y;
+      b12+=projected.y*projected.z;b22+=projected.z*projected.z;
+      c+=differences[sample]*projected;
+    }
+    var h=vec3f(c.x/max(b00,1e-12),0.0,0.0);
+    if(rank>=2u){
+      let determinant2=b00*b11-b01*b01;
+      if(determinant2>1e-10*max(b00*b11,1e-12)){
+        h=vec3f((c.x*b11-b01*c.y)/determinant2,
+          (b00*c.y-b01*c.x)/determinant2,0.0);
+      }
+    }
+    if(rank==3u){
+      let determinant3=b00*(b11*b22-b12*b12)-b01*(b01*b22-b12*b02)
+        +b02*(b01*b12-b11*b02);
+      if(abs(determinant3)>1e-10*max(b00*b11*b22,1e-12)){
+        h=vec3f(
+          c.x*(b11*b22-b12*b12)-b01*(c.y*b22-b12*c.z)
+            +b02*(c.y*b12-b11*c.z),
+          b00*(c.y*b22-b12*c.z)-c.x*(b01*b22-b12*b02)
+            +b02*(b01*c.z-c.y*b02),
+          b00*(b11*c.z-c.y*b12)-b01*(b01*c.z-c.y*b02)
+            +c.x*(b01*b12-b11*b02))/determinant3;
+      }
+    }
+    gradient=h.x*e0+h.y*e1+h.z*e2;
+  }
+  var value=meanValue+dot(gradient,vec3f(vertex)-meanCenter);
+  var hasLiquid=false;var hasAir=false;
+  for(var neighbor=0u;neighbor<activeCount;neighbor+=1u){
+    let phase=geometricResidentRdfAcceptedPhase(acceptedNeighbors[neighbor],
+      vec3f(vertex),densityOffset);
+    hasLiquid=hasLiquid||phase<0;hasAir=hasAir||phase>0;
+  }
+  hasAir=hasAir||count>activeCount;
+  if(hasLiquid&&!hasAir){value=min(value,0.0);}
+  else if(hasAir&&!hasLiquid){value=max(value,0.0);}
+  return vec2f(value,1.0);
+}
+
+// FPP stores a cell-centred nodal lattice: sample slot s represents the
+// physical point s+0.5 in finest-cell coordinates.  Reconstruct the paper's
+// values at the accepted cell's eight true topology vertices, then evaluate
+// their trilinear interpolant at that exact producer point.  This preserves
+// the established +0.5 render adapter while avoiding independent owner traces.
+fn geometricResidentRdfPublishedDistance(cell:u32,positionFine:vec3f,
+ densityOffset:u32)->vec2f{
+  if(!GEOMETRIC_INTERFACE_RDF_CACHE_ENABLED||cellOpenFraction(cell)<0.999999){
+    return vec2f(0.0);
+  }
+  let widths=cellWidths(cell);let lower=cellCenter(cell)-0.5*widths;
+  let fraction=clamp((positionFine-lower)/widths,vec3f(0.0),vec3f(1.0));
+  var sum=vec2f(0.0);
+  for(var corner=0u;corner<8u;corner+=1u){
+    let vertex=geometricResidentRdfCellCorner(cell,corner);
+    let value=geometricResidentRdfVertexValue(cell,vertex,densityOffset);
+    let wx=select(1.0-fraction.x,fraction.x,(corner&1u)!=0u);
+    let wy=select(1.0-fraction.y,fraction.y,(corner&2u)!=0u);
+    let wz=select(1.0-fraction.z,fraction.z,(corner&4u)!=0u);
+    sum+=wx*wy*wz*value;
+  }
+  if(sum.y<=1e-8){return vec2f(0.0);}
+  var value=sum.x/sum.y;
+  value=geometricResidentRdfBoundAtOwner(cell,positionFine,densityOffset,value);
+  return vec2f(value,1.0);
+}
+
+fn geometricResidentRdfDistance(cell:u32,positionFine:vec3f)->vec2f{
+  if(!GEOMETRIC_INTERFACE_RDF_CACHE_ENABLED){return vec2f(0.0);}
+  let at=GEOMETRIC_INTERFACE_RDF_CACHE_BASE+4u*cell;
+  let value=state[at+3u]+dot(vec3f(state[at],state[at+1u],state[at+2u]),
+    positionFine-cellCenter(cell));
+  return vec2f(value,1.0);
 }
 
 fn geometricResidentDistanceSupport(cell:u32,positionFine:vec3f,densityOffset:u32)->vec2f{

@@ -27,7 +27,7 @@ illustrates selecting resolution from reconstruction error with separate
 refinement/coarsening decisions. The
 [curvature adaptation experiment](https://basilisk.fr/sandbox/Antoonvh/rc.c)
 also illustrates why curvature alone needs temporal/feature protection. Here,
-thin-fluid guards, incoming motion, conservative transfer, and accepted-output
+thin-fluid guards, incoming-motion retention, conservative transfer, and accepted-output
 representability receipts supply that protection.
 
 The hypothesis is that a flat free surface carries no intrinsic finest-cell
@@ -62,12 +62,14 @@ excluded: a deep hydrostatic pool should not refine because it is deep.
 - **Prediction:** a surface or transport-support receiver searches a bounded
   neighbourhood of accepted liquid sources. Each source supplies its wet-mass
   weighted velocity. Test the swept source/receiver bounding boxes over the
-  configured horizon; require a graded rung proportional to predicted travel
+  configured horizon; derive a graded rung proportional to predicted travel
   divided by current gap plus one brick width. Search and decisions read an
-  immutable activity snapshot. Prediction adds reason bit 8192 to a promotion.
-- **Selection:** maximum of curvature, energy, incoming motion, solid geometry,
-  moving-body requirements and thin/injected-liquid guards. Surface membership
-  alone contributes no floor. Still-water air support uses B2: the nine-cell velocity extension needs
+  immutable activity snapshot. Remote approach can retain an already accepted
+  rung, but cannot promote a calm receiver without local evidence.
+- **Selection:** maximum of curvature, measured motion, solid geometry,
+  moving-body requirements and thin/injected-liquid guards. Incoming motion can
+  veto coarsening at the current rung. Surface membership alone contributes no
+  floor. Still-water air support uses B2: the nine-cell velocity extension needs
   fewer physical pages while remaining 2:1 with B1 liquid. It contributes no
   B8 floor, which would make the entire pool B4 again.
 - **Merging:** descend one rung after the configured number of valid epochs.
@@ -87,7 +89,7 @@ in coarse-first mode; the legacy mode retains its original meaning.
 | --- | ---: | --- |
 | Finest kinetic energy | 8 m²/s² | Energy required for the finest rung |
 | Curvature tolerance | 0.25 | Permitted normal variation per cell |
-| Impact lookahead | 0.5 s | Accepted-velocity prediction horizon; zero disables prediction |
+| Impact lookahead | 0.5 s | Accepted-velocity horizon used to retain existing receiver detail; zero disables prediction |
 | Impact search radius | 3 bricks | Spatial reach; bounded to 1–6, cost grows cubically |
 | Surface proof persistence | 2 epochs | Valid epochs before a merge |
 
@@ -102,9 +104,11 @@ The fixture is a 6.4 × 4.8 × 6.4 m tank on a 128 × 96 × 128 lattice, with wa
 1.6 m deep and a radius-0.25 m liquid ball centred at height 3.65 m. It has no
 refinement regions. The 1.8 m drop gap gives ballistic contact around 0.61 s.
 
-The full-size Dawn impact run starts with 39,852 active cells. All four central
-receivers reach B8 by 0.40 s; all 128 sampled far-side surface bricks remain B1
-before contact. Relative mass error after 1.25 s is 0.0686%. A separate GPU
+The original full-size Dawn impact run started with 39,852 active cells. Its
+four central receivers reached B8 by 0.40 s while all 128 sampled far-side
+surface bricks remained B1 before contact. Relative mass error after 1.25 s was
+0.0686%. The retention-only rule replaces that unsupported pre-contact
+promotion. A separate GPU
 test refines adjacent 0.8 m bulk cells in place, conserving mass and enforcing
 2:1 face transitions without a topology generation replacement.
 
@@ -123,7 +127,7 @@ with 864 accepted cells, all B1.
 
 Focused tests check exact initial mass agreement with an all-fine reference,
 B8 curved-liquid initialization, method/control normalization, hydrostatic B1
-retention, accepted receiver refinement before impact, distant B1 retention
+retention, remote-only B1 receiver retention, distant B1 retention
 before impact, finite fields, and mass after impact. The Dawn observations
 include all four symmetric central receivers.
 

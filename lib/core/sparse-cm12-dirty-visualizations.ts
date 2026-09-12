@@ -139,6 +139,8 @@ export const SPARSE_CM12_DIRTY_CAUSE_BIT = Object.freeze({
   capacityOrProvenance: 1 << 12,
   pageActivated: 1 << 13,
   pageRetired: 1 << 14,
+  /** Renderer representation changed while accepted scalar/topology did not. */
+  presentationConfiguration: 1 << 15,
 } as const);
 
 export const SPARSE_CM12_DIRTY_PUBLICATION_FLAG = Object.freeze({

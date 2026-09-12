@@ -214,17 +214,23 @@ function fieldReceipt(field: Float32Array) {
   return { finite, negative, positive, zero, minimum, maximum };
 }
 
-function heightChangeReceipt(before: Float32Array, after: Float32Array) {
+function heightChangeReceipt(before: Float32Array, after: Float32Array, width: number) {
   let samples = 0, beforeSum = 0, afterSum = 0, maximumChangeCells = 0;
+  let maximumChangeIndex = -1;
   for (let index = 0; index < before.length; index += 1) {
     const first = before[index]!, last = after[index]!;
     if (!Number.isFinite(first) || !Number.isFinite(last)) continue;
     samples += 1;beforeSum += first;afterSum += last;
-    maximumChangeCells = Math.max(maximumChangeCells, Math.abs(last - first));
+    const change = Math.abs(last - first);
+    if (change > maximumChangeCells) {
+      maximumChangeCells = change; maximumChangeIndex = index;
+    }
   }
   return { samples, beforeMeanCells: beforeSum / samples,
     afterMeanCells: afterSum / samples,
-    meanChangeCells: (afterSum - beforeSum) / samples, maximumChangeCells };
+    meanChangeCells: (afterSum - beforeSum) / samples, maximumChangeCells,
+    maximumChangeColumn: maximumChangeIndex < 0 ? undefined
+      : [maximumChangeIndex % width, Math.floor(maximumChangeIndex / width)] };
 }
 
 function densityHeightReceipt(density: Float32Array, open: Float32Array,
@@ -682,7 +688,8 @@ try {
     positiveY: surfaceReceipt(positiveY.values, positiveY.width, positiveY.height),
     positiveZ: surfaceReceipt(positiveZ.values, positiveZ.width, positiveZ.height),
   };
-  const heightChange = heightChangeReceipt(resetPositiveY.values, positiveY.values);
+  const heightChange = heightChangeReceipt(resetPositiveY.values, positiveY.values,
+    dimensions[0]);
   const filmVisibility = (longDam || cornerDrop) && finalDensityHeight
     ? filmVisibilityReceipt(finalDensityHeight.floorBrickHeights, positiveY.values,
       finalDensityHeight.heights, dimensions[0], dimensions[2])

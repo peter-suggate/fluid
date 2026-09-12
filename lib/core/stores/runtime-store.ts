@@ -33,7 +33,10 @@ interface RuntimeStore {
 }
 
 export const createRuntimeStore = () => create<RuntimeStore>((set) => ({
-  runState: "running",
+  // A scene opens still. Water that is already moving when the reader
+  // arrives has decided for them what they are looking at, and there is no
+  // way back to t=0 except a reset; starting the clock is theirs to do.
+  runState: "paused",
   simulationTime: 0,
   simulationEpoch: 0,
   ...initialRuntimeFeatures(),

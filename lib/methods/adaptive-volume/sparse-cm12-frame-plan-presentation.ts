@@ -53,6 +53,8 @@ export const SPARSE_CM12_FRAME_PLAN_PRESENTATION_CAUSE = Object.freeze({
   pageActivated: 1 << 13,
   /** Page becomes renderer-invisible while its physical owner remains stable. */
   pageRetired: 1 << 14,
+  /** Surface publication policy changed without a scalar/topology mutation. */
+  presentationConfiguration: 1 << 15,
 } as const);
 
 export interface SparseCM12FramePlanPresentationLayout {

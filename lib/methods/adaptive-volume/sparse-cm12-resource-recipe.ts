@@ -20,6 +20,7 @@ const resourceId = Symbol("cm12Resource");
 const creationMethods = new Set(["createBuffer", "createBindGroupLayout", "createPipelineLayout",
   "createBindGroup", "createShaderModule", "createComputePipelineAsync", "createCommandEncoder"]);
 const encoderResults = new Set(["beginComputePass", "finish"]);
+const resourceResults = new Set(["getBindGroupLayout"]);
 const encoderMethods = new Set(["setPipeline", "setBindGroup", "dispatchWorkgroups",
   "dispatchWorkgroupsIndirect", "end", "copyBufferToBuffer", "clearBuffer",
   "pushDebugGroup", "popDebugGroup", "insertDebugMarker"]);
@@ -70,6 +71,9 @@ export function createCM12ResourceRecorder(limits: GPUSupportedLimits,
         mapped = undefined;
       };
       if (property === "destroy") return () => record(id, "destroy", []);
+      if (typeof property === "string" && resourceResults.has(property)) return (...args: unknown[]) => {
+        const result = nextId++; record(id, property, args, result); return resource(result);
+      };
       if (typeof property === "string" && encoderResults.has(property)) return (...args: unknown[]) => {
         const result = nextId++; record(id, property, args, result); return resource(result);
       };

@@ -20,6 +20,7 @@ import {
   createSparseAtlasCompositeGridBuildWorkspace,
   type SparseAtlasCompositeGrid,
   type SparseAtlasCompositeCell,
+  type SparseAtlasAxis,
   type SparseAtlasGradientRow,
 } from "./sparse-atlas-composite-projection";
 import {
@@ -253,6 +254,8 @@ export interface SharpeningTrace extends SparseCM12CorrectionControls {
   /** Defaults on; the mandatory final-scalar publication is independent. */
   readonly surfaceSharpeningEnabled?: boolean;
   readonly presentationColumnHeightEnabled?: boolean;
+  readonly presentationColumnHeightMode?: "off" | "auto" | "on";
+  readonly presentationSurfaceMode?: "rdf" | "plic";
 }
 
 /** Shared CM12 Algorithm 2 return distance; longer traces remain an explicit setting. */
@@ -1303,6 +1306,11 @@ interface PackedResidentTopologyTemplates {
   readonly rowCount: number;
   readonly initialCellWorklist: Uint32Array;
   readonly initialRowWorklist: Uint32Array;
+  /** Internal sparse-air rows needed only while every covering neighbour is inactive. */
+  readonly initialInactiveNeighbourFallbacks?: readonly Readonly<{
+    rowId: number;
+    neighbourBricks: readonly number[];
+  }>[];
   readonly initialDensity: Float32Array;
   readonly initialGamma: Float32Array;
   /** Maximum rows in one [owner brick, accepted resolution] interval. */
@@ -1936,6 +1944,10 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
 
   let rows: SparseAtlasGradientRow[] = [];
   let rowRequirements: (readonly number[])[] = [];
+  const inactiveNeighbourFallbacks: Array<{
+    oldRowId: number;
+    neighbourBricks: readonly number[];
+  }> = [];
   const rowKeys = new Set<string>();
   const interiorRowKeys = new Set<number>();
   const appendRows = (grid: SparseAtlasCompositeGrid,
@@ -2057,6 +2069,79 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
         }
       }
     }
+  }
+
+  // The all-rung catalogue must retain a one-sided pressure/transport row
+  // when an authored neighbour is temporarily inactive. Composite-grid
+  // construction quite correctly omits sparse-air on an internal face, but
+  // that leaves no selected row after runtime retirement disables every
+  // two-sided variant. Publish a full-cell fallback only when one catalogue
+  // neighbour physically covers the complete face. The runtime
+  // hostExteriorRowSupersededAt proof removes it whenever that neighbour and
+  // its matching two-sided interface are selected.
+  const negativeFaces = ([0, 1, 2] as const).map(() =>
+    new Map<number, SparseAdaptiveMassBrick[]>());
+  const positiveFaces = ([0, 1, 2] as const).map(() =>
+    new Map<number, SparseAdaptiveMassBrick[]>());
+  for (const brick of atlas.bricks) for (const axis of [0, 1, 2] as const) {
+    const negative = brick.coordinate[axis] * atlas.brickFineResolution;
+    const positive = sparseBrickMaximumFine(atlas, brick, axis);
+    let negativeBucket = negativeFaces[axis].get(negative);
+    if (!negativeBucket) negativeFaces[axis].set(negative, negativeBucket = []);
+    negativeBucket.push(brick);
+    let positiveBucket = positiveFaces[axis].get(positive);
+    if (!positiveBucket) positiveFaces[axis].set(positive, positiveBucket = []);
+    positiveBucket.push(brick);
+  }
+  const appendInactiveNeighbourFallback = (cell: SparseAtlasCompositeCell,
+    axis: SparseAtlasAxis, side: -1 | 1): void => {
+    const owner = atlas.bricks[brickIndex.get(cell.brickKey)!]!;
+    const plane = side < 0 ? cell.minimumFine[axis] : cell.maximumFine[axis];
+    const ownerBoundary = side < 0
+      ? owner.coordinate[axis] * atlas.brickFineResolution
+      : sparseBrickMaximumFine(atlas, owner, axis);
+    if (plane !== ownerBoundary) return;
+    const tangent0 = ((axis + 1) % 3) as SparseAtlasAxis;
+    const tangent1 = ((axis + 2) % 3) as SparseAtlasAxis;
+    const candidates = (side < 0 ? positiveFaces : negativeFaces)[axis].get(plane) ?? [];
+    const coveringNeighbours = candidates.filter((candidate) => candidate.key !== owner.key
+      && candidate.coordinate[tangent0] * atlas.brickFineResolution
+        <= cell.minimumFine[tangent0]
+      && sparseBrickMaximumFine(atlas, candidate, tangent0)
+        >= cell.maximumFine[tangent0]
+      && candidate.coordinate[tangent1] * atlas.brickFineResolution
+        <= cell.minimumFine[tangent1]
+      && sparseBrickMaximumFine(atlas, candidate, tangent1)
+        >= cell.maximumFine[tangent1]);
+    if (coveringNeighbours.length === 0) return;
+    const distance = cell.widthsFine[axis];
+    const coefficient = side < 0 ? 1 / distance : -1 / distance;
+    const centerFine = [...cell.centerFine] as [number, number, number];
+    centerFine[axis] = plane;
+    const rowKey = `${axis}/${centerFine.join("/")}/${cell.id}:${coefficient}`;
+    if (rowKeys.has(rowKey)) return;
+    if (preparation && rows.length >= preparation.budget.maximumRows) {
+      throw new SparseCM12TopologyPreparationCapacity("rows", rows.length + 1,
+        preparation.budget.maximumRows);
+    }
+    rowKeys.add(rowKey);
+    const area = cell.widthsFine[tangent0] * cell.widthsFine[tangent1];
+    const oldRowId = rows.length;
+    rows.push({ id: oldRowId, kind: "sparse-air", axis, centerFine,
+      area, distance, areaFineCells2: area, centerDistanceFine: distance,
+      dualWeight: area * distance,
+      terms: [{ cellId: cell.id, coefficient }],
+      ...(side > 0 ? { negativeBrickKey: owner.key } : { positiveBrickKey: owner.key }),
+      exteriorPhi: 0.5 });
+    rowRequirements.push([
+      packedTemplateCellMetadata(brickIndex.get(owner.key)!, cell.brickResolution),
+    ]);
+    inactiveNeighbourFallbacks.push({ oldRowId,
+      neighbourBricks: coveringNeighbours.map((brick) => brickIndex.get(brick.key)!) });
+  };
+  for (const cell of cells) for (const axis of [0, 1, 2] as const) {
+    appendInactiveNeighbourFallback(cell, axis, -1);
+    appendInactiveNeighbourFallback(cell, axis, 1);
   }
 
   // Deduplication and resampling are finished. Release their large string
@@ -2190,6 +2275,10 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
     (_, id) => id);
   const initialRowWorklist = Uint32Array.from({ length: initialAcceptedRowCount },
     (_, oldId) => ownership.oldToNew[oldId]!);
+  const initialInactiveNeighbourFallbacks = inactiveNeighbourFallbacks.map((fallback) => ({
+    rowId: ownership.oldToNew[fallback.oldRowId]!,
+    neighbourBricks: fallback.neighbourBricks,
+  }));
   const selected = preparation ? atlas.bricks.map((brick) =>
     preparation.requested.get(brick.key) ?? brick.resolution) : undefined;
   const candidateCellWorklist = selected ? Uint32Array.from(cells.flatMap((cell) =>
@@ -2199,7 +2288,8 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
       (requirement & TEMPLATE_CELL_RESOLUTION_MASK)
         === selected[requirement >>> TEMPLATE_CELL_RESOLUTION_BITS]) ? [row.id] : [])) : undefined;
   return { words, cellCount: cells.length, rowCount: rows.length,
-    initialCellWorklist, initialRowWorklist, candidateCellWorklist, candidateRowWorklist,
+    initialCellWorklist, initialRowWorklist, initialInactiveNeighbourFallbacks,
+    candidateCellWorklist, candidateRowWorklist,
     initialDensity: Float32Array.from(cells, (cell) => cell.density),
     initialGamma: Float32Array.from(cells, (cell) => cell.gamma),
     maximumOwnedRowCount: ownership.maximumOwnedRowCount };
@@ -2246,6 +2336,8 @@ interface GeometricVolumeIndirectPublisher {
 }
 
 interface GeometricVolumeResidentLayout {
+  readonly interfaceHistoryA: number;
+  readonly interfaceHistoryB: number;
   readonly currentVolume: number;
   readonly lowVolume: number;
   readonly positiveLimiter: number;
@@ -2302,6 +2394,8 @@ interface ResidentStateLayout {
   readonly geometricInterfacePlanes: number;
   /** Read-only neighbor extension built after the raw interface plane dispatch. */
   readonly geometricInterfaceSupportPlanes: number;
+  /** Least-squares RDF gradient.xyz + centre value, rebuilt for presentation. */
+  readonly geometricInterfaceRdf: number;
 }
 
 export interface SparseCM12FinePresentationPlan {
@@ -2920,7 +3014,9 @@ function residentStateLayout(
     })(),
     geometricInterfacePlanes: cellVectors(),
     geometricInterfaceSupportPlanes: cellVectors(),
+    geometricInterfaceRdf: cellVectors(),
     volumeTransport: {
+      interfaceHistoryA: cellVectors(), interfaceHistoryB: cellVectors(),
       currentVolume: cells(), lowVolume: cells(), positiveLimiter: cells(), negativeLimiter: cells(),
       rowSubfaceRanges: words(2 * rowCount),
       cellSubfaceRanges: words(2 * cellCount),
@@ -4755,7 +4851,7 @@ export class WebGPUSparseCM12Resident {
       for (let local = 0; local < count; local += 1) initialCellIds.push(first + local);
     }
     const rowMetadataPlane = templates.words[7]! + templates.rowCount;
-    const initialRowIds = Array.from(templates.initialRowWorklist).filter((row) => {
+    const initialRowRequirementsSelected = (row: number) => {
       const requirements = templates.words[rowMetadataPlane + row]!
         & TEMPLATE_ROW_METADATA_OFFSET_MASK;
       const count = templates.words[requirements]!;
@@ -4769,7 +4865,16 @@ export class WebGPUSparseCM12Resident {
         if (!active || atlas.bricks[brick]?.resolution !== resolution) return false;
       }
       return true;
-    });
+    };
+    const initialRowIds = Array.from(templates.initialRowWorklist).filter(
+      initialRowRequirementsSelected,
+    );
+    for (const fallback of templates.initialInactiveNeighbourFallbacks ?? []) {
+      if (!initialRowRequirementsSelected(fallback.rowId)) continue;
+      const coveringNeighbourActive = fallback.neighbourBricks.some((brick) =>
+        initialActivity[ACTIVITY_HEADER_WORDS + ACTIVITY_RECORD_WORDS * brick + 10] !== 0);
+      if (!coveringNeighbourActive) initialRowIds.push(fallback.rowId);
+    }
     const initialWorklists = new Uint32Array(
       acceptedLeafManifestBase + acceptedLeafManifestWords,
     );
@@ -5587,6 +5692,7 @@ fn publish(){
         gatherCapacityRepairForQA,
         layout.geometricInterfacePlanes,
         layout.geometricInterfaceSupportPlanes,
+        layout.geometricInterfaceRdf,
         layout.volumeTransport,
         layout.sourceLedger,
         layout.movingSolid,
@@ -5609,12 +5715,16 @@ fn publish(){
     };
     const presentationShaderRoots = presentationPublisherOracleForQA
       ? ["refreshGeometricInterface", "refreshGeometricInterfacePublished", "extendGeometricInterface",
+        "publishGeometricInterfaceRdfValues", "publishGeometricInterfaceRdfValuesPublished",
+        "fitGeometricInterfaceRdfGradients",
         "refreshSparseCM12SolidWorldCells", "refreshSparseCM12SolidWorldRows",
         "refreshSparseCM12StaticSolidGeometryEvidence",
         "clearSparseWorldFrontierResolutionCache",
         "classifyPresentationBricks", "validateSparseCM12InternedBoundaryImmutable",
         "publishSparseLevelSet", ...(SPARSE_CM12_COMMON_HEIGHT_ENABLED ? SPARSE_CM12_HEIGHT_ENTRY_POINTS : [])]
       : ["refreshGeometricInterface", "refreshGeometricInterfacePublished", "extendGeometricInterface",
+        "publishGeometricInterfaceRdfValues", "publishGeometricInterfaceRdfValuesPublished",
+        "fitGeometricInterfaceRdfGradients",
         "refreshSparseCM12SolidWorldCells", "refreshSparseCM12SolidWorldRows",
         "refreshSparseCM12StaticSolidGeometryEvidence",
         "clearSparseWorldFrontierResolutionCache",
@@ -5641,6 +5751,8 @@ fn publish(){
     );
     const pipelineLayout = deviceCompilation.pipelineLayout;
     const names = ["refreshGeometricInterface", "refreshGeometricInterfacePublished", "extendGeometricInterface",
+      "publishGeometricInterfaceRdfValues", "publishGeometricInterfaceRdfValuesPublished",
+      "fitGeometricInterfaceRdfGradients",
       "seedGeometricVolumeDestination", "beginGeometricVolumeTransport",
       "compileGeometricVolumeSubfaces", "compileGeometricVolumeCellFaces", "initializeGeometricVolumeCells", "sealGeometricVolumePlan",
       "beginGeometricTransportEnvelope", "gatherGeometricTransportMaterialBounds",
@@ -5660,10 +5772,12 @@ fn publish(){
       "reexpressGeometricSolidRows", "finishGeometricSolidPublication",
       "markGeometricTransportFrontierActivity", "planGeometricTransportFrontier",
       "enforceGeometricDynamicSeamFloor",
+      "activateGeometricSweptCellSupport",
       "reserveGeometricTransportFaceSupport",
       "publishGeometricTransportFrontierSource",
       "gatherGeometricSourceCapacity", "prepareGeometricSourceBudget",
       "emitGeometricSourceVolume", "finalizeGeometricSourceLedger",
+      "completeGeometricSourceLedger",
       "allocateContinuousGeometricSourcePages", "activateContinuousGeometricSourcePages",
       "beginContinuousGeometricSource", "initializeContinuousGeometricSource",
       "connectContinuousGeometricSource", "compressContinuousGeometricSource",
@@ -5796,12 +5910,16 @@ fn publish(){
     ] as const;
     const presentationEntryNames = new Set<string>(presentationPublisherOracleForQA
       ? ["refreshGeometricInterface", "refreshGeometricInterfacePublished", "extendGeometricInterface",
+        "publishGeometricInterfaceRdfValues", "publishGeometricInterfaceRdfValuesPublished",
+        "fitGeometricInterfaceRdfGradients",
         "refreshSparseCM12SolidWorldCells", "refreshSparseCM12SolidWorldRows",
         "refreshSparseCM12StaticSolidGeometryEvidence",
         "clearSparseWorldFrontierResolutionCache",
         "classifyPresentationBricks", "validateSparseCM12InternedBoundaryImmutable",
         "publishSparseLevelSet", ...(SPARSE_CM12_COMMON_HEIGHT_ENABLED ? SPARSE_CM12_HEIGHT_ENTRY_POINTS : [])]
       : ["refreshGeometricInterface", "refreshGeometricInterfacePublished", "extendGeometricInterface",
+        "publishGeometricInterfaceRdfValues", "publishGeometricInterfaceRdfValuesPublished",
+        "fitGeometricInterfaceRdfGradients",
         "refreshSparseCM12SolidWorldCells", "refreshSparseCM12SolidWorldRows",
         "refreshSparseCM12StaticSolidGeometryEvidence",
         "clearSparseWorldFrontierResolutionCache",
@@ -7062,8 +7180,10 @@ fn publish(){
         dispatchVolume("advanceGeometricLowFluxLimits", "singleton");
         publishVolumeDispatches();
         dispatchVolume("applyGeometricLowFluxFactors", "commitFace");
-        dispatchVolume("initializeGeometricClosingComponents", "commitCell");
-        dispatchVolume("allocateGeometricClosingResidual", "commitCell");
+        if (this.rigidCoupling) {
+          dispatchVolume("initializeGeometricClosingComponents", "commitCell");
+          dispatchVolume("allocateGeometricClosingResidual", "commitCell");
+        }
         dispatchVolume("computeGeometricVolumeLimits", "commitCell");
         dispatchVolume("limitGeometricVolumeFluxes", "commitFace");
         dispatchVolume("validateGeometricVolumeCells", "commitCell");
@@ -7404,6 +7524,12 @@ fn publish(){
       oracle.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments, 0);
       oracle.setPipeline(this.pipelines.extendGeometricInterface!);
       oracle.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments, 0);
+      if (this.presentationSurfaceMode === "rdf") {
+        oracle.setPipeline(this.pipelines.publishGeometricInterfaceRdfValues!);
+        oracle.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments, 0);
+        oracle.setPipeline(this.pipelines.fitGeometricInterfaceRdfGradients!);
+        oracle.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments, 0);
+      }
       oracle.setPipeline(this.pipelines.publishSparseLevelSet!);
       oracle.dispatchWorkgroups(this.globalFineLevelSetSource.plan.maximumResidentBricks);
       oracle.end();
@@ -7434,6 +7560,12 @@ fn publish(){
     geometry.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments, 0);
     geometry.setPipeline(this.pipelines.extendGeometricInterface!);
     geometry.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments, 0);
+    if (this.presentationSurfaceMode === "rdf") {
+      geometry.setPipeline(this.pipelines.publishGeometricInterfaceRdfValuesPublished!);
+      geometry.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments, 0);
+      geometry.setPipeline(this.pipelines.fitGeometricInterfaceRdfGradients!);
+      geometry.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments, 0);
+    }
     geometry.end();
     encoder.copyBufferToBuffer(this.activity,
       this.framePlanLayout.fixedIndirectBinding.offset,
@@ -7582,8 +7714,11 @@ fn publish(){
 
   /** Publish generation zero without executing a physics step or mapping state. */
   encodeInitialPresentation(encoder: GPUCommandEncoder, finestCellSize_m: number,
-    columnHeightEnabled = this.presentationColumnHeightEnabled): void {
-    this.presentationColumnHeightEnabled = columnHeightEnabled;
+    columnHeightMode: boolean | "off" | "auto" | "on" = this.presentationColumnHeightMode,
+    surfaceMode: "rdf" | "plic" = this.presentationSurfaceMode): void {
+    this.presentationColumnHeightMode = typeof columnHeightMode === "boolean"
+      ? columnHeightMode ? "on" : "off" : columnHeightMode;
+    this.presentationSurfaceMode = surfaceMode;
     this.assertLive();
     this.writeParameters(this.lastPacked!, 0.004, finestCellSize_m, 1, [0, 0, 0]);
     this.encodeFailureGate(encoder);
@@ -7598,6 +7733,36 @@ fn publish(){
     pass.dispatchWorkgroups(1);
     pass.end();
     this.encodeFramePlanPresentation(encoder, "Sparse CM12 initial presentation");
+  }
+
+  /** Republish an unchanged accepted scalar field after a live presentation
+   * control changes. FPP scheduling is normally density/topology driven, so a
+   * paused RDF/PLIC switch needs this explicit publication transaction rather
+   * than waiting for an unrelated physics step to dirty its pages. */
+  async refreshPresentationConfiguration(
+    finestCellSize_m: number,
+    sharpening?: SharpeningTrace,
+    activityPolicy?: SparseCM12ActivityPolicy,
+    pressureControl?: SparseCM12PressureControl,
+    worldDimensions_m?: readonly [number, number, number],
+  ): Promise<void> {
+    await this.waitForSimulationPipelines();
+    this.assertLive();
+    this.writeParameters(this.lastPacked!, 0.004, finestCellSize_m, 1,
+      [0, 0, 0], sharpening, activityPolicy, pressureControl, 0,
+      worldDimensions_m, this.lastInflow, false, true);
+    const encoder = this.device.createCommandEncoder({
+      label: "Sparse Geometric (CM12) live surface-mode publication",
+    });
+    this.encodeFramePlanPresentation(encoder,
+      "Sparse CM12 live surface-mode presentation");
+    this.device.queue.submit([encoder.finish()]);
+    await this.assertSimulationHealthy();
+    // The submitted publication consumed the nonce. Clear only after its
+    // health boundary so a later ordinary encoder cannot erase it early.
+    this.device.queue.writeBuffer(this.parameters,
+      SPARSE_CM12_FAILURE_PARAMETER_OFFSET - 8,
+      new Float32Array([0]));
   }
 
   async refreshRefinementRegions(finestCellSize_m: number,
@@ -7778,6 +7943,7 @@ fn publish(){
         dispatchTopology("classifyAcceptedLiquidFrontier", leafCapacity);
         dispatchTopology("planGeometricTransportFrontier", bricks);
         dispatchTopology("activateSweptFrontierPages", leafCapacity);
+        dispatchTopologyIndirect("activateGeometricSweptCellSupport", 0);
         if (this.lastInflow) dispatchTopology("activateContinuousGeometricSourcePages", bricks);
         dispatchTopology("reserveGeometricTransportFaceSupport", bricks);
         dispatchTopology("reserveGeometricPreflightEnvelopeSupport", bricks);
@@ -7910,6 +8076,8 @@ fn publish(){
       injectionPass.dispatchWorkgroups(Math.ceil(this.layout.sourceLedger.brickCapacity / WORKGROUP_SIZE));
       injectionPass.setPipeline(this.pipelines.finalizeGeometricSourceLedger!);
       injectionPass.dispatchWorkgroups(1);
+      injectionPass.setPipeline(this.pipelines.completeGeometricSourceLedger!);
+      injectionPass.dispatchWorkgroups(1);
     } else {
       injectionPass.setPipeline(this.pipelines.injectLiquid!);
       injectionPass.dispatchWorkgroups(bricks);
@@ -7928,7 +8096,8 @@ fn publish(){
     }
   }
 
-  private presentationColumnHeightEnabled = false;
+  private presentationColumnHeightMode: "off" | "auto" | "on" = "auto";
+  private presentationSurfaceMode: "rdf" | "plic" = "rdf";
   private lastPacked?: PackedResidentTopology;
   private lastInflow?: SparseCM12InflowControl;
   /**
@@ -7954,6 +8123,7 @@ fn publish(){
     worldDimensions_m?: readonly [number, number, number],
     inflow?: SparseCM12InflowControl,
     accelerationChanged = false,
+    forcePresentationPublication = false,
   ): void {
     this.lastPacked = packed;
     const u = this.parameterU32, f = this.parameterF32, l = this.layout;
@@ -8044,7 +8214,13 @@ fn publish(){
       this.brickFineResolution, this.coarseFirstPolicySignature,
     );
     if (sharpening?.presentationColumnHeightEnabled !== undefined) {
-      this.presentationColumnHeightEnabled = sharpening.presentationColumnHeightEnabled;
+      this.presentationColumnHeightMode = sharpening.presentationColumnHeightEnabled ? "on" : "off";
+    }
+    if (sharpening?.presentationColumnHeightMode !== undefined) {
+      this.presentationColumnHeightMode = sharpening.presentationColumnHeightMode;
+    }
+    if (sharpening?.presentationSurfaceMode !== undefined) {
+      this.presentationSurfaceMode = sharpening.presentationSurfaceMode;
     }
     const corrections = normalizedCorrections(sharpening);
     f.set([
@@ -8054,7 +8230,10 @@ fn publish(){
       corrections.densityCapacityRepairEnabled ? corrections.densityCapacityRepairStrength : 0,
       corrections.volumeCorrectionEnabled ? corrections.volumeCorrectionStrength : 0,
       corrections.volumeCorrectionCap, 0,
-      this.presentationColumnHeightEnabled ? 0 : 1, 0, 0, 0,
+      this.presentationColumnHeightMode === "on" ? 0
+        : this.presentationColumnHeightMode === "off" ? 1 : 2,
+      this.presentationSurfaceMode === "plic" ? 1 : 0,
+      forcePresentationPublication ? 1 : 0, 0,
     ], (SPARSE_CM12_FAILURE_PARAMETER_OFFSET - 48) / 4);
     this.device.queue.writeBuffer(this.parameters, 0, this.parameterWords, 0, SPARSE_CM12_FAILURE_PARAMETER_OFFSET);
   }
@@ -8740,7 +8919,8 @@ fn publish(){
           next.state, 4 * next.layout.sourceLedger.ledgerBaseFloats, 4 * GEOMETRIC_SOURCE_LEDGER_FLOATS);
         if (this.tracerLattice.count) encoder.copyBufferToBuffer(this.state, 4 * this.layout.tracers,
           next.state, 4 * next.layout.tracers, 16 * this.tracerLattice.count);
-        next.encodeInitialPresentation(encoder, finestCellSize_m, this.presentationColumnHeightEnabled);
+        next.encodeInitialPresentation(encoder, finestCellSize_m,
+          this.presentationColumnHeightMode, this.presentationSurfaceMode);
         this.device.queue.submit([encoder.finish()]);
         await transfer.validate();
         await next.assertSimulationHealthy();
@@ -10551,6 +10731,84 @@ fn publish(){
       brickId: authored ? cell[7]! >>> TEMPLATE_CELL_RESOLUTION_BITS : null,
       resolution: authored ? cell[7]! & TEMPLATE_CELL_RESOLUTION_MASK : this.brickFineResolution,
       acceptedTopologySlot: slot, rows };
+  }
+
+  /** One consolidated readback for an offline moving-volume feasibility audit. */
+  async readGeometricMovingDualSnapshotQA() {
+    this.assertLive();
+    const volume = this.layout.volumeTransport;
+    const header = this.device.createBuffer({ label: "Geometric moving-dual header QA",
+      size: 260, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    let snapshot: GPUBuffer | undefined;
+    try {
+      const first = this.device.createCommandEncoder();
+      first.copyBufferToBuffer(this.topologyArena, this.topologyWorklistBaseBytes, header, 0, 128);
+      first.copyBufferToBuffer(this.conditioning, 4 * volume.controlBaseWords, header, 128, 128);
+      first.copyBufferToBuffer(this.topologyArena, 4 * (this.frameControlLayout.baseWords
+        + SPARSE_CM12_FRAME_CONTROL_HEADER.scalarParity), header, 256, 4);
+      this.device.queue.submit([first.finish()]); await header.mapAsync(GPUMapMode.READ);
+      const h = new Uint32Array(header.getMappedRange()).slice(); header.unmap();
+      const acceptedCount = h[4]!, acceptedSlot = h[2]! & 1, faceCount = h[32]!;
+      if (acceptedCount > this.cellCount || faceCount > volume.subfaceCapacity) {
+        throw new Error(`Invalid moving-dual QA sizes ${acceptedCount}/${faceCount}`);
+      }
+      const templateCellCount = this.templateWords[2]!;
+      const fields = [this.layout.movingSolid.oldCapacityFloats,
+        this.layout.movingSolid.newCapacityFloats, volume.currentVolume, volume.lowVolume,
+        volume.positiveLimiter, volume.negativeLimiter, this.layout.liquid, this.layout.rhs,
+        this.layout.diagonal, this.layout.residual,
+        this.layout.sourceLedger.sourceRateBaseFloats!, this.layout.densityA,
+        this.layout.densityB] as const;
+      const counts = [acceptedCount, ...fields.map(() => this.cellCount), 2 * this.cellCount,
+        2 * volume.subfaceCapacity, 4 * faceCount, 4 * faceCount, faceCount,
+        8 * templateCellCount];
+      const totalWords = counts.reduce((sum, count) => sum + count, 0);
+      snapshot = this.device.createBuffer({ label: "Geometric moving-dual snapshot QA",
+        size: Math.max(4, 4 * totalWords), usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      const encoder = this.device.createCommandEncoder(); let at = 0;
+      if (acceptedCount) encoder.copyBufferToBuffer(this.topologyArena,
+        this.topologyWorklistBaseBytes + 4 * h[14 + acceptedSlot]!, snapshot, 0, 4 * acceptedCount);
+      at += acceptedCount;
+      for (const base of fields) {
+        encoder.copyBufferToBuffer(this.state, 4 * base, snapshot, 4 * at, 4 * this.cellCount);
+        at += this.cellCount;
+      }
+      encoder.copyBufferToBuffer(this.state, 4 * volume.cellSubfaceRanges,
+        snapshot, 4 * at, 8 * this.cellCount); at += 2 * this.cellCount;
+      encoder.copyBufferToBuffer(this.state, 4 * volume.cellSubfaceEntries,
+        snapshot, 4 * at, 8 * volume.subfaceCapacity); at += 2 * volume.subfaceCapacity;
+      encoder.copyBufferToBuffer(this.state, 4 * volume.subfaceMetadata,
+        snapshot, 4 * at, 16 * faceCount); at += 4 * faceCount;
+      encoder.copyBufferToBuffer(this.state, 4 * volume.subfaceFluxes,
+        snapshot, 4 * at, 16 * faceCount); at += 4 * faceCount;
+      encoder.copyBufferToBuffer(this.state, 4 * volume.subfaceRoundoff,
+        snapshot, 4 * at, 4 * faceCount); at += faceCount;
+      encoder.copyBufferToBuffer(this.topologyArena, 4 * this.templateWords[6]!,
+        snapshot, 4 * at, 32 * templateCellCount);
+      this.device.queue.submit([encoder.finish()]); await snapshot.mapAsync(GPUMapMode.READ);
+      const words = new Uint32Array(snapshot.getMappedRange()).slice();
+      const floats = new Float32Array(words.buffer); at = 0;
+      const acceptedCells = Array.from(words.slice(at, at += acceptedCount));
+      const cellFields = fields.map(() => Array.from(floats.slice(at, at += this.cellCount)));
+      const cellFaceRanges = Array.from(words.slice(at, at += 2 * this.cellCount));
+      const cellFaceEntries = Array.from(words.slice(at, at += 2 * volume.subfaceCapacity));
+      const metadata = Array.from(words.slice(at, at += 4 * faceCount));
+      const faceState = Array.from(floats.slice(at, at += 4 * faceCount));
+      const roundoff = Array.from(floats.slice(at, at += faceCount));
+      const descriptors = Array.from(floats.slice(at, at + 8 * templateCellCount));
+      return { acceptedSlot, acceptedCells, cellCount: this.cellCount, templateCellCount,
+        controlWords: Array.from(h.slice(32, 64)), acceptedScalarParity: h[64]! & 1,
+        faceCount, fields: { oldCapacity: cellFields[0]!, newCapacity: cellFields[1]!,
+          currentVolume: cellFields[2]!, previousProximal: cellFields[3]!,
+          currentDual: cellFields[4]!, proposedProximal: cellFields[5]!,
+          pressureMembership: cellFields[6]!, rhs: cellFields[7]!, diagonal: cellFields[8]!,
+          residual: cellFields[9]!, sourceRate: cellFields[10]!,
+          densityA: cellFields[11]!, densityB: cellFields[12]! },
+        cellFaceRanges, cellFaceEntries, metadata, faceState, roundoff, descriptors };
+    } finally {
+      if (header.mapState === "mapped") header.unmap(); header.destroy();
+      if (snapshot?.mapState === "mapped") snapshot.unmap(); snapshot?.destroy();
+    }
   }
 
   private async readGeometricOutflowRowQA(rowId: number) {

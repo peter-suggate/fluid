@@ -15,6 +15,8 @@ import {
 } from "../../core/initial-fluid";
 import type { SceneDescription } from "../../core/model";
 import { initialHeightFieldRange } from "../../core/initial-height-field";
+import { inflowOutletCenter } from "../../core/inflow-boundary";
+import { CM12_PAPER_DT_S } from "../../core/cm12-numerics";
 import {
   clampRefinementRegionCellSize,
   refinementRegionCellBounds,
@@ -29,8 +31,6 @@ import {
   packSparseCM12RefinementRegions,
   sparseCM12RefinementRegionResolutionBoundsForBrick,
 } from "./sparse-cm12-refinement-regions";
-import { SPARSE_CM12_VELOCITY_EXTENSION_DEPTH } from
-  "./sparse-cm12-velocity-extension";
 
 /** Supported construction-time finest resolution of one fixed-world brick. */
 export type SparseBrickFineResolution = 4 | 8 | 16;
@@ -887,20 +887,75 @@ function matchedAirSupportResolution(
   return resolution;
 }
 
-function matchedAirSupportLayerCount(
+function* immediateExteriorBrickCoordinates(
   brick: SparseAdaptiveMassBrick,
+  brickDimensions: SparseBrickVec3,
+): Generator<SparseBrickVec3> {
+  const span = sparseBrickSpan(brick);
+  for (let z = -1; z <= span; z += 1) for (let y = -1; y <= span; y += 1) {
+    for (let x = -1; x <= span; x += 1) {
+      if (x >= 0 && x < span && y >= 0 && y < span
+        && z >= 0 && z < span) continue;
+      const coordinate = [brick.coordinate[0] + x, brick.coordinate[1] + y,
+        brick.coordinate[2] + z] as const;
+      if (coordinate.some((value, axis) => value < 0
+        || value >= brickDimensions[axis])) continue;
+      yield coordinate;
+    }
+  }
+}
+
+function initialInflowSupportBrickCoordinates(
+  scene: SceneDescription,
+  dimensions: SparseBrickVec3,
   brickFineResolution: SparseBrickFineResolution,
-): number {
-  return Math.ceil((SPARSE_CM12_VELOCITY_EXTENSION_DEPTH + 1)
-    / matchedAirSupportResolution(brick, brickFineResolution));
+): SparseBrickVec3[] {
+  const inflow = scene.fluid.inflow;
+  const dt = Math.max(CM12_PAPER_DT_S, scene.numerics.maxDt_s,
+    scene.numerics.fixedDt_s ?? 0);
+  const speed = inflow ? Math.hypot(inflow.velocity_m_s.x,
+    inflow.velocity_m_s.y, inflow.velocity_m_s.z) : 0;
+  if (!inflow || !(inflow.radius_m > 0) || !(speed > 0) || !(dt > 0)) return [];
+  const cellSize = Math.min(scene.container.width_m / dimensions[0],
+    scene.container.height_m / dimensions[1],
+    scene.container.depth_m / dimensions[2]);
+  const origin = [-0.5 * scene.container.width_m, 0,
+    -0.5 * scene.container.depth_m] as const;
+  const outlet = inflowOutletCenter(inflow);
+  const outletFine = [outlet.x, outlet.y, outlet.z].map((value, axis) =>
+    (value - origin[axis]!) / cellSize) as [number, number, number];
+  const velocityFine = [inflow.velocity_m_s.x, inflow.velocity_m_s.y,
+    inflow.velocity_m_s.z].map((value) => value / cellSize) as
+      [number, number, number];
+  // Match geometricTransportMaterialDemand and the continuous-source page
+  // allocator: the source owns a two-step swept plug plus one fine receiver
+  // cell around its circular aperture.
+  const radiusFine = inflow.radius_m / cellSize + 1;
+  const lower = outletFine.map((value, axis) => Math.floor(
+    (Math.min(value, value + 2 * velocityFine[axis]! * dt) - radiusFine)
+      / brickFineResolution)) as [number, number, number];
+  const upper = outletFine.map((value, axis) => Math.floor(
+    (Math.max(value, value + 2 * velocityFine[axis]! * dt) + radiusFine)
+      / brickFineResolution)) as [number, number, number];
+  const brickDimensions = dimensions.map((value) => Math.ceil(
+    value / brickFineResolution)) as [number, number, number];
+  const result: SparseBrickVec3[] = [];
+  for (let z = Math.max(0, lower[2]); z <= Math.min(brickDimensions[2] - 1, upper[2]); z += 1)
+    for (let y = Math.max(0, lower[1]); y <= Math.min(brickDimensions[1] - 1, upper[1]); y += 1)
+      for (let x = Math.max(0, lower[0]); x <= Math.min(brickDimensions[0] - 1, upper[0]); x += 1)
+        result.push([x, y, z]);
+  return result;
 }
 
 /**
- * Add the gas domain required by interface transport. The recurrence reaches
- * eight cells from its liquid seed and the transport stencil needs the next
- * receiver cell. Each face-normal column continues the neighboring surface
- * cell width and contains enough bricks for those nine cells. Omitted air is
- * a valid far-field boundary only beyond this band.
+ * Add the gas pages required by the first interface transport. Runtime
+ * activity publishes the complete 3x3x3 page neighbourhood of an interface
+ * or transported mass cell: faces carry velocity extension, while edges and
+ * corners carry trilinear characteristic support. Seed that same immediate
+ * neighbourhood at generation zero. The eight velocity-extension sweeps are
+ * bounded by the represented domain; counting eight adaptive-cell hops here
+ * used to turn a calm B1/B2 surface into a five-page, 40h air column even
+ * though no runtime consumer requests such a persistent band.
  */
 function atlasWithInitialAirSupport(
   scene: SceneDescription,
@@ -929,47 +984,76 @@ function atlasWithInitialAirSupport(
         }
     return false;
   };
-  const liquid = atlas.bricks.filter((brick) =>
-    brick.density.some((density) => density > 0));
-  // A B2 air column beside B1 liquid keeps 2:1 grading and represents the
-  // same nine-cell extension stencil with half as many support bricks.
-  const supportResolution = (brick: SparseAdaptiveMassBrick) => Math.max(minimumAirResolution,
-    matchedAirSupportResolution(brick, brickFineResolution)) as SparseBrickResolution;
-  const supportLayers = (brick: SparseAdaptiveMassBrick) => Math.ceil(
-    (SPARSE_CM12_VELOCITY_EXTENSION_DEPTH + 1) / supportResolution(brick));
-  const maximumLayerCount = liquid.reduce((maximum, brick) => Math.max(maximum,
-    supportLayers(brick)), 0);
-  for (let layer = 0; layer < maximumLayerCount; layer += 1) {
-    const supportCoordinates = new Map<number, {
-      readonly coordinate: SparseBrickVec3;
-      readonly resolution: SparseBrickResolution;
-    }>();
-    for (const brick of liquid) {
-      const resolution = supportResolution(brick);
-      if (layer >= supportLayers(brick)) continue;
-      const span = sparseBrickSpan(brick);
-      for (let axis = 0; axis < 3; axis += 1) for (const sign of [-1, 1]) {
-        const tangents = [0, 1, 2].filter((candidate) => candidate !== axis);
-        for (let v = 0; v < span; v += 1) for (let u = 0; u < span; u += 1) {
-          const coordinate = [...brick.coordinate] as [number, number, number];
-          coordinate[axis] += sign < 0 ? -(layer + 1) : span + layer;
-          coordinate[tangents[0]!] += u;
-          coordinate[tangents[1]!] += v;
-          if (coordinate.some((value, component) => value < 0
-            || value >= atlas.brickDimensions[component])) continue;
-          const owner = sparseBrickContainingCoordinate(atlas, coordinate);
-          if (owner) continue;
-          const key = sparseBrickKey(coordinate, atlas.brickDimensions);
-          const previous = supportCoordinates.get(key);
-          if ((!previous || previous.resolution < resolution)
-            && hasOpenVoxel(coordinate)) {
-            supportCoordinates.set(key, { coordinate, resolution });
-          }
-        }
+  const inflowCoordinates = initialInflowSupportBrickCoordinates(
+    scene, dimensions, brickFineResolution,
+  ).filter(hasOpenVoxel);
+  const inflowRoots = new Set(inflowCoordinates.map((coordinate) =>
+    sparseBrickKey(coordinate, atlas.brickDimensions)));
+  if (inflowRoots.size > 0) {
+    const combined = new Map(atlas.bricks.map((brick) => [brick.key, brick] as const));
+    for (const coordinate of inflowCoordinates) {
+      const key = sparseBrickKey(coordinate, atlas.brickDimensions);
+      const resolution = initialResolutionWithRefinementRegionBounds(
+        refinementRegionParameters, dimensions, coordinate, 1,
+        brickFineResolution, brickFineResolution,
+      );
+      const existing = combined.get(key);
+      // A narrow authored aperture can fall between every coarse face centre.
+      // Preserve the finest lattice across the source and its two-step swept
+      // receiver path instead of relying on a broad liquid band to refine it
+      // incidentally.
+      combined.set(key, existing && existing.resolution <= resolution
+        ? prolongSparseBrick(existing, resolution)
+        : existing
+          ? restrictSparseBrick(existing, resolution)
+          : initialBrick(scene, dimensions, coordinate, resolution,
+            brickFineResolution));
+    }
+    atlas = createSparseAdaptiveMassAtlas(
+      dimensions, [...combined.values()].sort((left, right) => left.key - right.key),
+      1, brickFineResolution,
+    );
+  }
+  const supportRoots = atlas.bricks.filter((brick) => inflowRoots.has(brick.key)
+    || brick.density.some((density) => density > 0));
+  // Static zero-density support has no feature of its own to resolve. Begin a
+  // face neighbour one rung below its liquid root and let ordinary face
+  // grading raise only the pages that need it. Runtime motion demand promotes
+  // a receiver before subsequent transport once fine interface data is headed
+  // into it.
+  const supportResolution = (brick: SparseAdaptiveMassBrick) => Math.max(
+    minimumAirResolution,
+    matchedAirSupportResolution(brick, brickFineResolution) / 2,
+  ) as SparseBrickResolution;
+  const supportCoordinates = new Map<number, {
+    readonly coordinate: SparseBrickVec3;
+    readonly resolution: SparseBrickResolution;
+  }>();
+  for (const brick of supportRoots) {
+    for (const coordinate of immediateExteriorBrickCoordinates(
+      brick, atlas.brickDimensions,
+    )) {
+      const exteriorAxes = coordinate.reduce((count, value, axis) => count
+        + Number(value < brick.coordinate[axis]!
+          || value >= brick.coordinate[axis]! + sparseBrickSpan(brick)), 0);
+      // Only a face neighbour continues the liquid cell lattice directly.
+      // Edge/corner pages carry interpolation closure and can start at the
+      // configured air floor; ordinary face grading promotes the exact rungs
+      // they need beside finer face pages.
+      const resolution = (exteriorAxes === 1
+        ? supportResolution(brick) : minimumAirResolution) as SparseBrickResolution;
+      const owner = sparseBrickContainingCoordinate(atlas, coordinate);
+      if (owner) continue;
+      const key = sparseBrickKey(coordinate, atlas.brickDimensions);
+      const previous = supportCoordinates.get(key);
+      if ((!previous || previous.resolution < resolution)
+        && hasOpenVoxel(coordinate)) {
+        supportCoordinates.set(key, { coordinate, resolution });
       }
     }
-    if (supportCoordinates.size > 0) {
-      const support = [...supportCoordinates.values()].map((request) => initialBrick(
+  }
+  if (supportCoordinates.size > 0) {
+    const support = [...supportCoordinates.values()].map((request) => initialBrick(
         scene, dimensions, request.coordinate,
         initialResolutionWithRefinementRegionBounds(
           refinementRegionParameters, dimensions, request.coordinate, 1,
@@ -978,13 +1062,13 @@ function atlasWithInitialAirSupport(
         ),
         brickFineResolution,
       ));
-      const combined = new Map<number, SparseAdaptiveMassBrick>(atlas.bricks.map((brick) =>
-        [brick.key, brick] as const));
-      for (const brick of support) combined.set(brick.key, brick);
-      const hasAuthoredMinimum = new Uint32Array(
-        refinementRegionParameters, 0, 4,
-      )[0]! > 0;
-      if (!hasAuthoredMinimum) {
+    const combined = new Map<number, SparseAdaptiveMassBrick>(atlas.bricks.map((brick) =>
+      [brick.key, brick] as const));
+    for (const brick of support) combined.set(brick.key, brick);
+    const hasAuthoredMinimum = new Uint32Array(
+      refinementRegionParameters, 0, 4,
+    )[0]! > 0;
+    if (!hasAuthoredMinimum) {
         const resolutionByKey = new Map([...combined].map(([key, brick]) =>
           [key, brick.resolution] as const));
         const queued = new Set(support.map((brick) => brick.key));
@@ -1033,14 +1117,13 @@ function atlasWithInitialAirSupport(
             }
           }
         }
-        atlas = createSparseAdaptiveMassAtlas(
-          dimensions, [...combined.values()].map((brick) => prolongSparseBrick(
-            brick, resolutionByKey.get(brick.key)!,
-          )).sort((left, right) => left.key - right.key),
-          1, brickFineResolution,
-        );
-        continue;
-      }
+      atlas = createSparseAdaptiveMassAtlas(
+        dimensions, [...combined.values()].map((brick) => prolongSparseBrick(
+          brick, resolutionByKey.get(brick.key)!,
+        )).sort((left, right) => left.key - right.key),
+        1, brickFineResolution,
+      );
+    } else {
       atlas = createSparseAdaptiveMassAtlas(
         dimensions, stronglyGradeSparseBricksByCoarsening(
           dimensions, [...combined.values()], brickFineResolution,
@@ -1227,6 +1310,16 @@ function hierarchicalTankFillBricks(
   // fine structural bands whenever the fill height was not brick-aligned.
   const fractionalSurfaceRing = fullFineY % brickFineResolution === 0 ? 0 : 1;
   const wetMaximum: SparseBrickVec3 = [brickDimensions[0], fullBrickY, brickDimensions[2]];
+  const inflowSupport = initialInflowSupportBrickCoordinates(
+    scene, dimensions, brickFineResolution,
+  );
+  const inflowDistance = (origin: SparseBrickVec3, span: number) =>
+    inflowSupport.reduce((minimum, coordinate) => Math.min(minimum,
+      coordinate.reduce((distance, value, axis) => distance
+        + (value < origin[axis]! ? origin[axis]! - value
+          : value >= origin[axis]! + span
+            ? value - (origin[axis]! + span - 1) : 0), 0)),
+    Number.POSITIVE_INFINITY);
   const hasFreeSurface = fullFineY < dimensions[1];
   let rootSpan = 1;
   while (rootSpan < Math.max(...brickDimensions)) rootSpan *= 2;
@@ -1245,10 +1338,16 @@ function hierarchicalTankFillBricks(
       // Beyond one ordinary brick, successive width bands occupy increasing
       // depth. Calm bulk can therefore retain 16h, 32h, 64h and larger cells
       // while the near-surface 1h/2h/4h bands keep their existing spacing.
-      const allowedCellWidth = hasFreeSurface
+      const surfaceAllowedCellWidth = hasFreeSurface
         ? Math.min(edgeFine, clearanceRings < Math.log2(brickFineResolution) ? 2 ** clearanceRings
           : 2 ** Math.floor(Math.log2(brickFineResolution * (clearanceRings - Math.log2(brickFineResolution) + 1))))
         : edgeFine;
+      // A source root needs finest face samples; each outward base-page step
+      // may double their width. Applying the nearest AABB distance to the
+      // whole octree node makes source grading local while retaining macro
+      // leaves once their complete span fits the 2:1 envelope.
+      const allowedCellWidth = Math.min(surfaceAllowedCellWidth,
+        2 ** inflowDistance(origin, span));
       // A cubic macro cannot express two vertical distance rungs. Split it
       // while its closest and deepest logical-brick layers require different
       // cell widths; once both admit the complete macro edge it can remain
@@ -1263,10 +1362,12 @@ function hierarchicalTankFillBricks(
         : edgeFine;
       const crossesResolutionBands = span > 1 && allowedCellWidth < brickFineResolution
         && deepestAllowedCellWidth !== allowedCellWidth;
-      const requiredResolution = initialResolutionWithRefinementRegionBounds(
-        refinementRegionParameters, dimensions, origin, span,
-        edgeFine / allowedCellWidth,
-        brickFineResolution);
+      const requestedResolution = edgeFine / allowedCellWidth;
+      const requiredResolution = requestedResolution <= brickFineResolution
+        ? initialResolutionWithRefinementRegionBounds(
+          refinementRegionParameters, dimensions, origin, span,
+          requestedResolution, brickFineResolution)
+        : requestedResolution;
       // A macro at B^3 would refine all tangential directions merely to grade
       // one normal face. Split that last rung into base bricks instead; this
       // keeps the page census surface-shaped and substantially smaller.
@@ -1893,24 +1994,22 @@ export function initializeSparseBrickAtlasFromScene(
   ));
   const supported = atlasWithInitialAirSupport(
     scene, options.finestDimensions, bricks, brickFineResolution,
-    refinementRegionParameters, options.coarseFirstCurvatureTolerance !== undefined
-      && refinementRegions.length === 0 ? 2 : 1,
+    refinementRegionParameters,
   );
   return options.coarseFirstCurvatureTolerance !== undefined && refinementRegions.length === 0
     ? coarseFirstBulkCover(supported, maximumMacroSpanBricks) : supported;
 }
 
 /**
- * Generation-zero membership includes an authored air support layer and is
- * closed over authored refinement-policy tiles.
+ * Generation-zero membership contains material/source pages and is closed
+ * over authored refinement-policy tiles.
  *
- * Uniform CM12 transports and extends face velocity through air cells beside
- * the liquid interface. Sparse CM12 needs the same represented domain: an
- * inactive authored leaf is absent from transport, characteristic tracing,
- * sharpening return, and velocity extension, rather than merely being a
- * zero-density pressure boundary. Keep the dry resident face band covering
- * velocity-extension depth plus its transport receiver active. Runtime
- * activity uses the same face-adjacent predicate to retain and advance it.
+ * A stationary interface uses the accepted leaf's one-sided sparse-air rows;
+ * it does not need represented zero-density cells. Before every transport,
+ * runtime activity projects each nonzero donor through the next physical step
+ * and activates only the pages intersected by that swept cell box. Keeping the
+ * dry catalogue here allows that transaction without paying generation-zero
+ * solve work for an unconditional page shell.
  *
  * A coarse brick also represents dry cells adjacent to its liquid inside the
  * same pressure stencil. When that physical brick is authored as a group of
@@ -1923,42 +2022,18 @@ export function sparseCM12InitialActiveBrickKeys(
   atlas: SparseAdaptiveMassAtlas,
   minimumAirResolution: SparseBrickResolution = 1,
 ): ReadonlySet<number> {
-  const layerCount = (brick: SparseAdaptiveMassBrick) => Math.ceil(
-    (SPARSE_CM12_VELOCITY_EXTENSION_DEPTH + 1) / Math.max(minimumAirResolution,
-      matchedAirSupportResolution(brick, atlas.brickFineResolution)));
+  // Atlas construction has already applied this rung floor. Retain the
+  // positional argument while callers migrate from the former depth formula.
+  void minimumAirResolution;
   const active = new Set(atlas.bricks.filter((brick) =>
     brick.density.some((density) => density > 0)).map((brick) => brick.key));
-  const addDrySupportLayer = (layer: number, sourceKeys: readonly number[]) => {
-    for (const key of sourceKeys) {
-      const brick = atlas.directory.get(key);
-      if (!brick) continue;
-      if (layer >= layerCount(brick)) continue;
-      const span = sparseBrickSpan(brick);
-      for (let axis = 0; axis < 3; axis += 1) for (const sign of [-1, 1]) {
-        const tangents = [0, 1, 2].filter((candidate) => candidate !== axis);
-        for (let v = 0; v < span; v += 1) for (let u = 0; u < span; u += 1) {
-          const coordinate = [...brick.coordinate] as [number, number, number];
-          coordinate[axis] += sign < 0 ? -(layer + 1) : span + layer;
-          coordinate[tangents[0]!] += u;
-          coordinate[tangents[1]!] += v;
-          const neighbor = sparseBrickContainingCoordinate(atlas, coordinate);
-          if (neighbor?.density.every((density) => density <= 0)) {
-            active.add(neighbor.key);
-          }
-        }
-      }
-    }
-  };
-  const supportLayerCountFor = (keys: readonly number[]) => keys.reduce(
-    (maximum, key) => {
-      const brick = atlas.directory.get(key);
-      return brick ? Math.max(maximum, layerCount(brick)) : maximum;
-    }, 0);
+  for (const coordinate of initialInflowSupportBrickCoordinates(
+    scene, atlas.dimensions, atlas.brickFineResolution,
+  )) {
+    const owner = sparseBrickContainingCoordinate(atlas, coordinate);
+    if (owner) active.add(owner.key);
+  }
   if (sceneRefinementRegions(scene).length === 0) {
-    const liquid = [...active];
-    for (let layer = 0; layer < supportLayerCountFor(liquid); layer += 1) {
-      addDrySupportLayer(layer, liquid);
-    }
     return active;
   }
   const container = scene.container;
@@ -2010,14 +2085,9 @@ export function sparseCM12InitialActiveBrickKeys(
       }
     }
   };
-  // Close the liquid's physical policy tiles before finding their exterior,
-  // then close the resulting support tiles as the same physical volumes.
+  // A coarse policy tile is one physical represented volume. If any child is
+  // material/source support, keep every authored child active together.
   closePolicyTiles();
-  const liquidTiles = [...active];
-  for (let layer = 0; layer < supportLayerCountFor(liquidTiles); layer += 1) {
-    addDrySupportLayer(layer, liquidTiles);
-    closePolicyTiles();
-  }
   return active;
 }
 

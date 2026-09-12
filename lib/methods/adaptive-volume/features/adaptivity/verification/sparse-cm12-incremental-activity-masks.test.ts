@@ -101,7 +101,10 @@ test("resident activity consumers use direct brick-domain dispatch", () => {
   assert.match(classify, /let sourceFace=2u\*axis\+sourceSide;/);
   assert.match(classify, /ACTIVITY_BRICK_BOUNDARY_LIQUID_FACES\+neighbor/);
   assert.match(classify, /let reciprocalSupportBit=26u-neighborBit;/);
-  assert.match(classify, /neighborOutput\+32u/);
+  assert.match(classify, /neighborOutput\+3u/,
+    "frontier membership must consume the swept-material mask");
+  assert.doesNotMatch(classify, /neighborOutput\+32u/,
+    "interface/presentation support must not stand in for swept transport");
   assert.match(classify, /acceptedLiquidDeeplyEnclosed/);
   assert.match(classify, /ACTIVITY_REFINEMENT_POLICY_DEEPLY_ENCLOSED/);
   assert.doesNotMatch(classify, /BRICK_FINE_RESOLUTION\*BRICK_FINE_RESOLUTION/,
@@ -112,9 +115,20 @@ test("resident activity consumers use direct brick-domain dispatch", () => {
   const transportDemand = shader.slice(shader.indexOf("fn brickHasTransportDemand"),
     shader.indexOf("fn refinementPolicyTileScale", shader.indexOf(
       "fn brickHasTransportDemand")));
-  assert.match(transportDemand, /brickTouchesAcceptedLiquid\(brick\)/);
+  assert.match(transportDemand, /activityRecord\(brick\)\+3u/,
+    "transport planning must consume swept-material demand directly");
+  assert.doesNotMatch(transportDemand, /brickTouchesAcceptedLiquid\(brick\)/,
+    "generic liquid proximity is not a swept-material membership receipt");
   assert.doesNotMatch(transportDemand, /cm12WorldOwnerAt|neighborOutput\+32u/,
     "planning must consume the shared frontier receipt without another neighbour walk");
+
+  const retirement = shader.slice(shader.indexOf("fn retireUnsupportedEmptyBricks"),
+    shader.indexOf("const PRESENTATION_FRAME_PLAN_STAGE", shader.indexOf(
+      "fn retireUnsupportedEmptyBricks")));
+  assert.match(retirement, /activityRecord\(neighbor\)\+3u/,
+    "retirement must preserve pages named by a neighbour's swept-material mask");
+  assert.doesNotMatch(retirement, /activityRecord\(neighbor\)\+32u/,
+    "retirement must not substitute interface/presentation support for transport");
 });
 
 test("one sibling-octet owner preserves the exhaustive detail maximum", () => {

@@ -359,6 +359,7 @@ export function createWebgpuSparseCM12ResidentWGSL(
   gatherCapacityRepairForQA = false,
   geometricInterfaceBaseFloats?: number,
   geometricInterfaceSupportBaseFloats?: number,
+  geometricInterfaceRdfBaseFloats?: number,
   geometricVolumeLayout?: SparseGeometricVolumeLayout,
   sourceLayout?: GeometricSourceLayout,
   movingSolidLayout?: GeometricSolidMotionLayout,
@@ -396,6 +397,11 @@ export function createWebgpuSparseCM12ResidentWGSL(
   const presentationPatchCapacity = (presentationPageResolution / 2) ** 3;
   const presentationHeightColumnAxis = presentationPageResolution + 2;
   const presentationHeightCacheCapacity = presentationHeightColumnAxis ** 2;
+  // One topology-vertex scalar for each corner of a P8 page's 8^3 nodal
+  // samples. FPP prepares these 9^3 values cooperatively once, then every
+  // sample reuses eight of them for the s+0.5 trilinear evaluation.
+  const presentationRdfVertexAxis = presentationPageResolution + 1;
+  const presentationRdfVertexCapacity = presentationRdfVertexAxis ** 3;
   const surfaceProofLatticeAxis = presentationPageResolution + 2;
   const surfaceProofLatticeCapacity = surfaceProofLatticeAxis ** 3;
   const surfaceProofDensityAxis = presentationPageResolution / 2 + 6;
@@ -1123,6 +1129,9 @@ const ACTIVITY_LIFECYCLE_CHANGED:u32=0x80000000u;
 // mixed-ratio graph before it can become active. This is construction demand,
 // not permission to refine the already accepted host.
 const ACTIVITY_FROZEN_FRONTIER_GENERATION:u32=0x00020000u;
+// Prephysics-only reason: this dry candidate lies in the swept AABB of a
+// nonzero donor. A later dispatch may add its six nonrecursive face supports.
+const ACTIVITY_GEOMETRIC_SWEEP_RECEIVER:u32=0x00080000u;
 const ACTIVITY_TOPOLOGY_PREPARATION_SCHEDULED:u32=1u;
 const ACTIVITY_CANDIDATE_ACTIVE:u32=0x80000000u;
 const ACCEPTED_COARSE_ROW_COUNT:u32=22u;
@@ -1137,6 +1146,8 @@ const PRESENTATION_PAGE_RESOLUTION:u32=${presentationPageResolution}u;
 const PRESENTATION_SAMPLES_PER_PAGE:u32=${presentationPageResolution ** 3}u;
 const EXP_PRESENTATION_UNIFORM_BULK:bool=true;
 const PRESENTATION_CACHE_CAPACITY:u32=${presentationCacheCapacity}u;
+const PRESENTATION_RDF_VERTEX_AXIS:u32=${presentationRdfVertexAxis}u;
+const PRESENTATION_RDF_VERTEX_CAPACITY:u32=${presentationRdfVertexCapacity}u;
 const PRESENTATION_HEIGHT_COLUMN_AXIS:u32=${presentationHeightColumnAxis}u;
 const SURFACE_PROOF_LATTICE_AXIS:u32=${surfaceProofLatticeAxis}u;
 const SURFACE_PROOF_LATTICE_CAPACITY:u32=${surfaceProofLatticeCapacity}u;
@@ -1150,6 +1161,8 @@ const GEOMETRIC_INTERFACE_CACHE_ENABLED:bool=${geometricInterfaceBaseFloats !== 
 const GEOMETRIC_INTERFACE_CACHE_BASE:u32=${geometricInterfaceBaseFloats ?? 0}u;
 const GEOMETRIC_INTERFACE_SUPPORT_CACHE_ENABLED:bool=${geometricInterfaceSupportBaseFloats !== undefined};
 const GEOMETRIC_INTERFACE_SUPPORT_CACHE_BASE:u32=${geometricInterfaceSupportBaseFloats ?? 0}u;
+const GEOMETRIC_INTERFACE_RDF_CACHE_ENABLED:bool=${geometricInterfaceRdfBaseFloats !== undefined};
+const GEOMETRIC_INTERFACE_RDF_CACHE_BASE:u32=${geometricInterfaceRdfBaseFloats ?? 0}u;
 
 ${PRESSURE_JOURNAL_CONSTANTS_WGSL}
 struct Params {
@@ -1189,7 +1202,7 @@ struct Params {
   coarseFirstHistory:vec4f, // search radius, surface proof epochs, reserved
   transportCorrections:vec4f, // conservation, gamma history, diffusion dose, sharpening tau
   recoveryCorrections:vec4f, // capacity dose, volume lambda multiplier, eta cap, reserved
-  correctionReserved:vec4f, // x: disable column-height presentation
+  correctionReserved:vec4f, // x: column-height mode; y: surface mode; z: force presentation publication
   failure:vec4u, // GPU-owned sticky stage halt
 }
 
@@ -1525,7 +1538,8 @@ ${createGeometricSolidMotionWGSL(movingSolidLayout)}
 ${geometricInterfaceResidentWGSL}
 ${createGeometricVolumeResidentWGSL(geometricVolumeLayout)}
 ${sourceLayout ? createGeometricSourceWGSL(sourceLayout) : `fn geometricSourceRate(cell:u32)->f32{return 0.0;}
-fn geometricSourceCommitMicrostep(dt:f32){}`}
+fn geometricSourceCommitMicrostep(dt:f32){}
+fn geometricSourceFinishStagedCompensation(){}`}
 
 fn physicalCellOpenFraction(id:u32)->f32{
   if(!hasSolidBoundaries()){return 1.0;}
@@ -2282,9 +2296,21 @@ fn presentationPhiAt(cell:u32,densityOffset:u32)->f32{
   let effective=clamp(state[densityOffset+cell]
     /max(cellOpenFraction(cell),1e-6),0.0,1.0);
   let fallback=(CM12_LIQUID_ISOVALUE-effective)*4.0;
+  if(p.correctionReserved.y<0.5&&GEOMETRIC_INTERFACE_RDF_CACHE_ENABLED){
+    let rdf=geometricResidentRdfPublishedDistance(cell,cellCenter(cell),densityOffset);
+    if(rdf.y>0.0){return rdf.x*p.frame.y;}
+  }
   return geometricResidentSignedDistance(cell,cellCenter(cell),densityOffset,fallback)*p.frame.y;
 }
 fn presentationPhi(cell:u32)->f32{return presentationPhiAt(cell,destinationDensity());}
+
+fn presentationGeometricDistanceSupport(cell:u32,positionFine:vec3f,
+ densityOffset:u32)->vec2f{
+  if(p.correctionReserved.y<0.5&&GEOMETRIC_INTERFACE_RDF_CACHE_ENABLED){
+    return geometricResidentRdfDistance(cell,positionFine);
+  }
+  return geometricResidentDistanceSupport(cell,positionFine,densityOffset);
+}
 
 // Restrict authoritative rho by finest-cell volume. A coarse presentation
 // stencil can therefore cross a 2:1 seam without choosing an arbitrary fine
@@ -2511,7 +2537,7 @@ fn geometricPresentationLeafPhi(leaf:CM12TransportLeaf,lower:vec3i,extent:vec3i,
         let offset=local.x+leaf.valid.x*(local.y+leaf.valid.y*local.z);
         if(all(local<leaf.valid)&&offset<leaf.count){
           let cell=leaf.first+offset;
-          mass+=f32(dx*dy*dz)*geometricResidentDistanceSupport(cell,positionFine,densityOffset);
+          mass+=f32(dx*dy*dz)*presentationGeometricDistanceSupport(cell,positionFine,densityOffset);
         }
         x+=dx;
       }y+=dy;
@@ -2527,7 +2553,7 @@ fn geometricPresentationCompiledPhi(lower:vec3i,cellScale:i32,densityOffset:u32,
     let offset=local.x+leaf.valid.x*(local.y+leaf.valid.y*local.z);
     if(all(local<leaf.valid)&&offset<leaf.count&&leaf.scale>=u32(cellScale)){
       let cell=leaf.first+offset;
-      return geometricResidentDistanceSupport(cell,positionFine,densityOffset);
+      return presentationGeometricDistanceSupport(cell,positionFine,densityOffset);
     }
     var upper=origin+vec3i(leaf.valid*leaf.scale);
     if(!brickHasUnclippedWorldGeometry(leaf.owner)){upper=min(upper,vec3i(p.dimensions.xyz));}
@@ -2724,11 +2750,19 @@ fn presentationIntegratedWorldColumnHeight(x:i32,z:i32,
 
 // General adaptive form of the same floor-film receipt. Walk the actual
 // accepted owner widths so a column may cross B8/B4/B2/B1 and sparse-air
-// intervals without treating a coarse value as a point sample. A completely
-// dry represented column is a valid zero-height neighbour; an elevated blob,
-// cavity, overhang, cut column, or film taller than one brick rejects itself.
+// intervals without treating a coarse value as a point sample. Auto requires
+// liquid in the accepted floor owner, so a completely dry or elevated column
+// rejects itself, as does a cavity, overhang, or cut column. A monotone
+// floor-connected column may cross any number of bricks because its summed
+// volume remains the authoritative height.
 fn presentationIntegratedAdaptiveFloorHeight(x:i32,z:i32,
  densityOffset:u32)->vec2f{
+  let floorOwner=compactOwnerCellAt(vec3i(x,0,z));
+  if(floorOwner.x==INVALID||!brickActive(floorOwner.y)
+    ||state[densityOffset+floorOwner.x]
+      /max(cellOpenFraction(floorOwner.x),1e-6)<=1e-6){
+    return vec2f(0.0,0.0);
+  }
   var y=0;var massHeight=0.0;var previous=1.0;var columnOpen=-1.0;
   var sawOpen=false;var sawAir=false;
   while(y<i32(p.dimensions.y)){
@@ -2755,9 +2789,6 @@ fn presentationIntegratedAdaptiveFloorHeight(x:i32,z:i32,
     previous=fill;
     sawAir=sawAir||fill<1.0-1e-3;
     massHeight+=fill*f32(width);
-    if(massHeight>f32(BRICK_FINE_RESOLUTION)+0.125){
-      return vec2f(0.0,0.0);
-    }
     y+=width;
   }
   if(!sawOpen){return vec2f(0.0,2.0);}
@@ -2814,7 +2845,8 @@ fn presentationContinuousColumnHeight(brick:u32,x:i32,z:i32,
   for(var dz=0;dz<2;dz+=1){for(var dx=0;dx<2;dx+=1){
     let center=vec2i((vec2f(lower+vec2i(dx,dz))+vec2f(0.5))*f32(scale));
     let y=cm12WorldLeafCoordinate(brick).y*i32(BRICK_FINE_RESOLUTION);
-    let sample=presentationCanonicalCoarseCoordinate(vec3i(center.x,y,center.y),1u,brick).xz;
+    let sample=presentationCanonicalCoarseCoordinate(
+      vec3i(center.x,y,center.y),1u,brick).xz;
     var receipt=vec2f(0.0);
     if(floorColumn){
       receipt=presentationIntegratedAdaptiveFloorHeight(sample.x,sample.y,densityOffset);
@@ -2845,11 +2877,14 @@ fn preparePresentationColumnHeights(lane:u32,brick:u32,pageOrigin:vec3i,
     &&brickSpan(brick)==1u&&range.y==1u
     &&cellOpenFraction(range.x)>=1.0-1e-3
     &&(activityReasons&512u)==0u;
-  // Ordinary adaptivity needs no authored-region permission. Only floor pages
-  // with accepted surface/thin evidence pay for the mixed-rung column walk;
-  // its monotonic receipt is what decides whether height geometry is valid.
-  let adaptiveFloorColumn=brickOrigin.y==0
-    &&(activityReasons&(1u|256u))!=0u&&(activityReasons&512u)==0u;
+  // Ordinary adaptivity needs no authored-region permission. A surface page
+  // may sit above the floor (the min-8 B2/B1 waterline is in brick y=1), so
+  // its accepted surface/thin evidence requests the world-column walk. The
+  // receipt itself starts at the physical floor and rejects a dry gap,
+  // overhang, cavity, or non-monotone column.
+  let adaptiveFloorColumn=((activityReasons&(1u|64u|256u))!=0u
+      ||brickHasPresentationSurfaceSupport(brick))
+    &&(activityReasons&512u)==0u;
   let worldColumnField=uniformWorldColumn||adaptiveFloorColumn;
   if(uniformWorldColumn){
     if(lane==0u){
@@ -2863,7 +2898,15 @@ fn preparePresentationColumnHeights(lane:u32,brick:u32,pageOrigin:vec3i,
         let dx=i32(neighbour-neighbour/3u*3u)-1;
         let coordinate=presentationCanonicalCoarseCoordinate(brickOrigin
           +vec3i(dx,0,dz)*i32(BRICK_FINE_RESOLUTION),1u,brick);
-        let receipt=presentationIntegratedWorldColumnHeight(coordinate.x,coordinate.z,densityOffset);
+        var receipt=presentationIntegratedWorldColumnHeight(
+          coordinate.x,coordinate.z,densityOffset);
+        if(p.correctionReserved.x>1.5){
+          // Auto uses the complete accepted-owner walk. Unlike the specialised
+          // B1 shortcut, it proves monotonicity from the physical floor through
+          // the whole authored column and therefore rejects floating sheets.
+          receipt=presentationIntegratedAdaptiveFloorHeight(
+            coordinate.x,coordinate.z,densityOffset);
+        }
         neighbours[neighbour]=select(-1.0,receipt.x,receipt.y>0.5);
       }
       let worldCenter=neighbours[4];
@@ -2888,7 +2931,11 @@ fn preparePresentationColumnHeights(lane:u32,brick:u32,pageOrigin:vec3i,
           presentationHeightCache[column]=select(-1.0,height,
             height>=pageLow&&height<=pageHigh);
         }
-      }else{
+      }else if(p.correctionReserved.x<0.5){
+        // Explicit On retains the local-column fallback. Auto must reject a
+        // world column whose floor-connected receipt failed: a local bracket
+        // can describe the top of a floating slab while missing the dry gap
+        // below it.
         let receipt=presentationIntegratedColumnHeight(brick,pageOrigin.x,
           pageOrigin.z,densityOffset);
         let pageLow=f32(pageOrigin.y)-1.0;
@@ -2897,6 +2944,10 @@ fn preparePresentationColumnHeights(lane:u32,brick:u32,pageOrigin:vec3i,
         let encoded=select(select(-1.0,-2.0,receipt.y>1.5),receipt.x,valid);
         for(var column=0u;column<count;column+=1u){
           presentationHeightCache[column]=encoded;
+        }
+      }else{
+        for(var column=0u;column<count;column+=1u){
+          presentationHeightCache[column]=-1.0;
         }
       }
     }
@@ -2914,7 +2965,7 @@ fn preparePresentationColumnHeights(lane:u32,brick:u32,pageOrigin:vec3i,
       presentationHeightCache[column]=select(select(-1.0,-2.0,receipt.y>1.5),
         height,valid);
     }
-  }else{
+  }else if(p.correctionReserved.x<0.5){
     for(var column=lane;column<count;column+=64u){
       let localZ=column/axis;
       let localX=column-localZ*axis;
@@ -2934,6 +2985,10 @@ fn preparePresentationColumnHeights(lane:u32,brick:u32,pageOrigin:vec3i,
       valid=valid&&height>=pageLow&&height<=pageHigh;
       presentationHeightCache[column]=select(select(-1.0,-2.0,receipt.y>1.5),
         height,valid);
+    }
+  }else{
+    for(var column=lane;column<count;column+=64u){
+      presentationHeightCache[column]=-1.0;
     }
   }
   workgroupBarrier();
@@ -2959,9 +3014,17 @@ fn preparePresentationColumnHeights(lane:u32,brick:u32,pageOrigin:vec3i,
 }
 
 fn presentationHeightPolicyEnabled(brick:u32)->bool{
+  // Surface reconstruction is an authority choice. Shared RDF must reach
+  // every published interface, including a calm coarse waterline; otherwise
+  // the nominal RDF mode silently becomes a height/RDF hybrid. The legacy
+  // PLIC mode retains its independent exact-column presentation option.
+  if(p.correctionReserved.y<0.5){return false;}
   // A validated monotone column retains subcell horizontal waterlines. The
   // same geometric receipt is used at reset and after an accepted advance.
-  return p.correctionReserved.x<0.5&&brick<p.dispatch.w&&p.injectionCenter.w<=0.5;
+  let requested=p.correctionReserved.x<0.5;
+  let automatic=p.correctionReserved.x>1.5&&brick<p.dispatch.w
+    &&acceptedBrickResolution(brick)<BRICK_FINE_RESOLUTION*brickSpan(brick);
+  return (requested||automatic)&&brick<p.dispatch.w&&p.injectionCenter.w<=0.5;
 }
 
 fn presentationColumnHeight(localX:i32,localZ:i32,halo:bool)->f32{
@@ -3069,9 +3132,33 @@ fn interpolatedPresentationDensityAt(q:vec3i,cellScale:u32,
 // Contour the accepted density lattice without a vertical-volume model.
 // The bounded trilinear stencil applies equally to horizontal and vertical
 // interfaces; a dam side must not depend on unrelated density above/below it.
+fn presentationExactOwnerScalarPhi(q:vec3i,densityOffset:u32,fallbackPhi:f32)->f32{
+  let owner=presentationCompiledOwnerCellAt(q);
+  if(owner.x==INVALID||!cellActive(owner.x)||cellOpenFraction(owner.x)<0.999999){return fallbackPhi;}
+  let fill=geometricResidentFill(owner.x,densityOffset);
+  if(fill>0.0&&fill<1.0){return fallbackPhi;}
+  let positionFine=vec3f(q)+vec3f(0.5);
+  let halfWidths=0.5*cellWidths(owner.x);
+  let interior=halfWidths-abs(positionFine-cellCenter(owner.x));
+  if(any(interior<=vec3f(0.0))){return fallbackPhi;}
+  let margin=min(interior.x,min(interior.y,interior.z))*p.frame.y;
+  return select(margin,-margin,fill>=1.0);
+}
 fn presentationInterpolatedDensityPhi(q:vec3i,cellScale:u32,
  cacheFirst:vec3i,cacheDimensions:vec3u,cacheFits:bool,densityOffset:u32)->f32{
   let positionFine=vec3f(q)+vec3f(0.5);
+  // The accepted RDF is defined first at geometric topology vertices by the
+  // paper's least-squares interpolation.  FPP's native scalar slots sit half
+  // a finest cell farther along each axis, so evaluate the containing
+  // accepted cell's trilinear vertex field at that exact producer point.
+  // Resolving one canonical owner avoids averaging independent AMR traces.
+  if(p.correctionReserved.y<0.5&&GEOMETRIC_INTERFACE_RDF_CACHE_ENABLED){
+    let owner=presentationCompiledOwnerCellAt(q);
+    if(owner.x!=INVALID&&cellActive(owner.x)){
+      let rdf=geometricResidentRdfPublishedDistance(owner.x,positionFine,densityOffset);
+      if(rdf.y>0.0){return rdf.x*p.frame.y;}
+    }
+  }
   let shifted=positionFine/f32(cellScale)-vec3f(0.5);
   let lower=vec3i(floor(shifted));let fraction=fract(shifted);var geometrySum=vec2f(0.0);
   for(var dz=0;dz<2;dz+=1){for(var dy=0;dy<2;dy+=1){for(var dx=0;dx<2;dx+=1){
@@ -3088,10 +3175,26 @@ fn presentationInterpolatedDensityPhi(q:vec3i,cellScale:u32,
   // Empty/full fallback scalars have unrelated distance scales; mixing them
   // with an actual plane moves its zero crossing. Normalize geometric support
   // alone and use the former implicit surface only if no plane is supported.
-  if(geometrySum.y>1e-8){return geometrySum.x/geometrySum.y*p.frame.y;}
+  if(geometrySum.y>1e-8){
+    var geometricPhi=geometrySum.x/geometrySum.y*p.frame.y;
+    // Cell means are discontinuous across adaptive faces. A neighboring PLIC
+    // may refine distance, but cannot reverse an exact target-cell phase.
+    let owner=presentationCompiledOwnerCellAt(q);
+    if(owner.x!=INVALID&&cellOpenFraction(owner.x)>=1.0){
+      let ownerDensity=state[densityOffset+owner.x];
+      let halfWidths=0.5*cellWidths(owner.x);
+      let local=abs(positionFine-cellCenter(owner.x));
+      let margin=max(0.0,min(halfWidths.x-local.x,
+        min(halfWidths.y-local.y,halfWidths.z-local.z)))*p.frame.y;
+      if(ownerDensity<=0.0){geometricPhi=max(margin,geometricPhi);}
+      if(ownerDensity>=1.0){geometricPhi=min(-margin,geometricPhi);}
+    }
+    return geometricPhi;
+  }
   let rho=interpolatedPresentationDensityAt(q,cellScale,cacheFirst,
     cacheDimensions,cacheFits,densityOffset);
-  return (CM12_LIQUID_ISOVALUE-rho)*4.0*p.frame.y;
+  let fallbackPhi=(CM12_LIQUID_ISOVALUE-rho)*4.0*p.frame.y;
+  return presentationExactOwnerScalarPhi(q,densityOffset,fallbackPhi);
 }
 
 // Cache-free mirror of the conservative limited-linear coarse patch. The
@@ -5264,9 +5367,45 @@ fn pressureCellSubmerged(id:u32)->bool{
   }
   return neighbours>0u;
 }
+fn movingPressurePredictedFill(id:u32)->bool{
+  if(!geometricSolidMotionActive()){return false;}
+  // Classification precedes this frame's pressure projection. Predict in
+  // extensive fine-cell volume with the same incidence weights and
+  // wall-relative stored velocity used by preparePressure. This anticipates a
+  // Dirichlet free-surface cell potentially filling during frozen-frame
+  // transport; the postprojection transport audit remains authoritative.
+  var equation=0.0;var correction=0.0;
+  for(var at=incidenceBegin(id);at<incidenceEnd(id);at+=1u){
+    let row=incidenceRow(at);if(!rowAccepted(row)){continue;}
+    var velocity=state[destinationFaceVelocity()+row];
+    if(hasSolidBoundaries()){
+      velocity-=(1.0-rowOpenFraction(row))*rowSolidVelocity(row);
+    }
+    let ownCoefficient=termCoefficient(incidenceTerm(at));
+    let weight=select(rowDualWeight(row),rowStaticDualWeight(row),hasSolidBoundaries());
+    var value=ownCoefficient*weight*velocity;
+    if(value>0.0){
+      var supported=false;let range=rowTermRange(row);
+      for(var term=range.x;term<range.y;term+=1u){
+        let other=termCell(term);if(other==id||termCoefficient(term)*ownCoefficient>=0.0){continue;}
+        let otherVolume=state[destinationDensity()+other]*cellVolume(other);
+        supported=supported||otherVolume>9.5367431640625e-7*cellOpenVolume(other)
+          ||geometricSourceRate(other)>0.0;
+      }
+      if(!supported){continue;}
+    }
+    let adjusted=value-correction;let next=equation+adjusted;
+    correction=(next-equation)-adjusted;equation=next;
+  }
+  let predictedVolume=state[destinationDensity()+id]*cellVolume(id)
+    +p.frame.x*equation;
+  let finalCapacity=geometricSolidCapacityAt(id,1.0);
+  return predictedVolume>=finalCapacity-9.5367431640625e-7*finalCapacity;
+}
 fn pressureCellMembershipFromDensity(id:u32,rho:f32)->bool{
   return cellActive(id)
-    &&(rho>=CM12_LIQUID_ISOVALUE||pressureCellSubmerged(id)||geometricSourceRate(id)>0.0)
+    &&(rho>=CM12_LIQUID_ISOVALUE||pressureCellSubmerged(id)
+      ||movingPressurePredictedFill(id)||geometricSourceRate(id)>0.0)
     &&cellOpenVolume(id)>1e-8;
 }
 fn pressureCellMembershipPredicate(id:u32)->bool{
@@ -6084,6 +6223,8 @@ var<workgroup>candidatePublicationActive:u32;
 // Coarse values are restricted once per page workgroup and reused by all 512
 // fine presentation samples.
 var<workgroup>presentationDensityCache:array<f32,${presentationCacheCapacity}>;
+var<workgroup>presentationRdfVertexCache:array<vec2f,${presentationRdfVertexCapacity}>;
+var<workgroup>presentationRdfVertexCacheReady:u32;
 // Height proof validity is column-local. Keeping it separate from the 3-D
 // interpolation cache lets a page mix proved floor columns with ordinary
 // contour columns without one invalid overhang discarding 63 valid heights.
@@ -6583,7 +6724,7 @@ fn classifyAcceptedLiquidFrontier(@builtin(workgroup_id)wid:vec3u,
       let neighborOutput=activityRecord(neighbor);
       let neighborReasons=atomicLoad(&activity[neighborOutput+1u]);
       let reciprocalSupportBit=26u-neighborBit;
-      if((atomicLoad(&activity[neighborOutput+32u])
+      if((atomicLoad(&activity[neighborOutput+3u])
           &(1u<<reciprocalSupportBit))!=0u){
         atomicStore(&frontierDemanded,1u);
       }
@@ -6707,8 +6848,6 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   var supportMask=0u;var sweptSupportMask=0u;
   var boundaryLiquidFaces=0u;
   let measuredCount=select(0u,count,resident);
-  let massSupportLower=cm12WorldFineLower();let massSupportUpper=cm12WorldFineUpper();
-  let massSupportOrigin=cm12WorldLeafCoordinate(brick);
   if(lane==0u){activityCoarseNormalSupport=vec4f(0.0);}
   // Test the local offset against the count before adding the potentially
   // sparse global base. This makes an empty range structurally incapable of
@@ -6763,6 +6902,8 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
     let featureDensity=max(residencyDensity,p.activityDensity.x);
     let center=cellCenter(cell);
     var exposedSides=0u;
+    var transportMinimumVelocity=vec3f(0.0);
+    var transportMaximumVelocity=vec3f(0.0);
     let incidenceRangeForCell=incidenceRange(cell);
     let firstIncidence=incidenceRangeForCell.x;let incidenceLimit=incidenceRangeForCell.y;
     for(var incidence=firstIncidence;incidence<incidenceLimit;incidence+=1u){
@@ -6771,6 +6912,28 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
       let own=termCoefficient(incidenceEntry.y);
       let packedMetadata=rowPackedMetadata(row);let axis=packedMetadata>>30u;
       let distance=rowDistance(row);
+      let aperture=rowOpenFraction(row);
+      let transportArea=rowArea(row);
+      if(aperture>0.0&&transportArea>1e-8){
+        var transportVelocity=state[destinationFaceVelocity()+row];
+        if(hasSolidBoundaries()){
+          transportVelocity-=(1.0-aperture)*rowSolidVelocity(row);
+        }
+        transportVelocity/=aperture;
+        let forcedTransportVelocity=transportVelocity+p.frame.x*p.acceleration[axis];
+        // Keep activity compilation independent of the optional geometric-
+        // volume module. This is the same eight-f32-ulp capacity tolerance
+        // used by gvRoundoff when that module is present.
+        let transportRoundoff=9.5367431640625e-7*cellOpenVolume(cell);
+        if(p.frame.x*transportArea*abs(transportVelocity)>transportRoundoff){
+          transportMinimumVelocity[axis]=min(transportMinimumVelocity[axis],transportVelocity);
+          transportMaximumVelocity[axis]=max(transportMaximumVelocity[axis],transportVelocity);
+        }
+        if(p.frame.x*transportArea*abs(forcedTransportVelocity)>transportRoundoff){
+          transportMinimumVelocity[axis]=min(transportMinimumVelocity[axis],forcedTransportVelocity);
+          transportMaximumVelocity[axis]=max(transportMaximumVelocity[axis],forcedTransportVelocity);
+        }
+      }
       // Separation against the world can create a free surface without an
       // in-domain density crossing. Keep that moving contact at B8 until the
       // ordinary phase-crossing activity signal takes over.
@@ -6918,15 +7081,6 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
             if(dx!=0||dy!=0||dz!=0){
               let bit=u32(dx+1)+3u*u32(dy+1)+9u*u32(dz+1);
               if(interfaceCell||cellIsThinFluid){supportMask|=1u<<bit;}
-              // Outside the resident world, the interpolation stencil uses
-              // boundary ghosts. A stationary mass halo must not turn that
-              // boundary into newly allocated air. Actual outward motion is
-              // handled independently by the swept request below.
-              let neighborOrigin=vec3f((massSupportOrigin+vec3i(dx,dy,dz))*i32(BRICK_FINE_RESOLUTION));
-              if(rho>0.0&&all(neighborOrigin>=massSupportLower)
-                &&all(neighborOrigin<massSupportUpper)){
-                sweptSupportMask|=1u<<bit;
-              }
             }
       }}}
     }
@@ -6938,16 +7092,36 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
       // consumers skip bit13, so dilute nonzero donors can author this without
       // turning quantized census density into a residency authority.
       sweptSupportMask|=1u<<13u;
-      let minimum=cellMinimum(cell);let brickWidth=i32(BRICK_FINE_RESOLUTION);
+      let minimum=cellMinimum(cell);let widths=cellWidths(cell);
+      let brickWidth=i32(BRICK_FINE_RESOLUTION);
       let sourceBrick=vec3i(cm12WorldFloorToSpan(minimum.x,brickWidth)/brickWidth,
         cm12WorldFloorToSpan(minimum.y,brickWidth)/brickWidth,
         cm12WorldFloorToSpan(minimum.z,brickWidth)/brickWidth);
-      var sweptBrick=vec3i(floor((center
+      // Membership follows the next physical transport, including the
+      // acceleration applied before its projection. A zero-displacement cell
+      // whose closed AABB merely touches a page boundary does not request that
+      // dry page; ceil(upper)-1 turns the upper bound into a half-open range.
+      let sweptLower=vec3f(minimum)+p.frame.x*transportMinimumVelocity;
+      let sweptUpper=vec3f(minimum)+widths+p.frame.x*transportMaximumVelocity;
+      let lowerBrick=vec3i(floor(sweptLower/f32(BRICK_FINE_RESOLUTION)));
+      let upperBrick=vec3i(ceil(sweptUpper/f32(BRICK_FINE_RESOLUTION)))-vec3i(1);
+      let lowerOffset=clamp(lowerBrick-sourceBrick,vec3i(-1),vec3i(1));
+      let upperOffset=clamp(upperBrick-sourceBrick,vec3i(-1),vec3i(1));
+      for(var dz=lowerOffset.z;dz<=upperOffset.z;dz+=1){
+        for(var dy=lowerOffset.y;dy<=upperOffset.y;dy+=1){
+          for(var dx=lowerOffset.x;dx<=upperOffset.x;dx+=1){
+            if(dx!=0||dy!=0||dz!=0){
+              let bit=u32(dx+1)+3u*u32(dy+1)+9u*u32(dz+1);
+              sweptSupportMask|=1u<<bit;
+            }
+      }}}
+      // Keep the configured longer lookahead as a resolution hint. It does
+      // not enlarge membership beyond the physical step above.
+      let lookaheadBrick=vec3i(floor((center
         +p.activityTiming.x*p.frame.x*ownVelocity)/f32(BRICK_FINE_RESOLUTION)));
-      let sweptOffset=clamp(sweptBrick-sourceBrick,vec3i(-1),vec3i(1));
-      if(any(sweptOffset!=vec3i(0))){
-        let sweptMask=cm12SweptPageSupportMask(sweptOffset);
-        supportMask|=sweptMask;sweptSupportMask|=sweptMask;
+      let lookaheadOffset=clamp(lookaheadBrick-sourceBrick,vec3i(-1),vec3i(1));
+      if(any(lookaheadOffset!=vec3i(0))){
+        supportMask|=cm12SweptPageSupportMask(lookaheadOffset);
       }
     }
     if(resolution>1u&&(x&1u)==0u&&(y&1u)==0u&&(z&1u)==0u){
@@ -7145,8 +7319,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   atomicStore(&activity[output+5u],bitcast<u32>(historyVector.x));
   atomicStore(&activity[output+6u],bitcast<u32>(historyVector.y));
   atomicStore(&activity[output+7u],bitcast<u32>(historyVector.z));
-  atomicStore(&activity[output+32u],
-    select(0u,reducedSupportMask,occupied)|reducedSweptSupportMask);
+  atomicStore(&activity[output+32u],select(0u,reducedSupportMask,occupied));
   atomicStore(&activity[output+3u],reducedSweptSupportMask);
   atomicStore(&activity[output+33u],bitcast<u32>(velocityActivity));
   atomicStore(&activity[output+34u],0u);
@@ -7164,7 +7337,8 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
 // and an under-resolved transport step.
 fn brickHasTransportDemand(brick:u32)->bool{
   return cm12WorldLeafAllocated(brick)
-    &&(injectionReachesBrick(brick)||brickTouchesAcceptedLiquid(brick));
+    &&(injectionReachesBrick(brick)
+      ||atomicLoad(&activity[activityRecord(brick)+3u])!=0u);
 }
 
 fn refinementPolicyTileScale(brick:u32)->u32{
@@ -7313,9 +7487,8 @@ fn classifyRefinementPolicyTiles(@builtin(workgroup_id)wid:vec3u,
       let output=activityRecord(sibling);
       let occupied=brickActive(sibling)
         &&(atomicLoad(&activity[output+1u])&64u)!=0u;
-      let swept=brickActive(sibling)&&atomicLoad(&activity[output+32u])!=0u;
-      demanded=occupied||swept||brickTouchesAcceptedLiquid(sibling)
-        ||injectionReachesBrick(sibling);
+      let swept=brickActive(sibling)&&atomicLoad(&activity[output+3u])!=0u;
+      demanded=occupied||swept||injectionReachesBrick(sibling);
       filled=filled&&occupied
         &&activityF32(output+4u)>=CM12_LIQUID_ISOVALUE;
       enclosed=filled;
@@ -7415,8 +7588,7 @@ fn brickTouchesDemandedMissingWorldPage(brick:u32)->bool{
   let directions=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),
     vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
   let supportBits=array<u32,6>(12u,14u,10u,16u,4u,22u);
-  let support=(atomicLoad(&activity[output+3u])
-    |atomicLoad(&activity[output+32u]))&0x07ffffffu;
+  let support=atomicLoad(&activity[output+3u])&0x07ffffffu;
   let source=cm12WorldLeafCoordinate(brick);
   for(var side=0u;side<6u;side+=1u){
     if((support&(1u<<supportBits[side]))==0u){continue;}
@@ -7725,29 +7897,35 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   if(coarseFirstEnabled()&&!validForcedSurfaceRung){
     let curvatureFloor=max(1u,(reasons>>16u)&31u);
     let geometryFloor=max(curvatureFloor,boundaryFloor);
-    var incomingFloor=1u;
+    var incomingRetentionFloor=1u;
     // Mass-support residency also reaches flooded bulk. Incoming interface
     // prediction belongs to a surface or an empty/dilute receiver; applying
     // it to every mass-supported brick refines deep liquid merely because a
     // distant surface is moving toward it.
     if(max(geometryFloor,measuredVelocityFloor)<BRICK_FINE_RESOLUTION
       &&!thinFluid&&!injectionDemand&&(policySurface||pageDemand)){
-      incomingFloor=coarseFirstIncomingFloor(brick);
+      // Remote motion predicts where existing detail will matter; it is not
+      // evidence that a calm receiver needs new detail. Retain at most the
+      // receiver's accepted rung. Curvature, measured motion, thinness,
+      // boundaries, injection and physical transport demand remain the
+      // promotion evidence.
+      incomingRetentionFloor=min(current,coarseFirstIncomingFloor(brick));
     }
-    let demandFloor=max(max(geometryFloor,measuredVelocityFloor),incomingFloor);
+    let demandFloor=max(max(geometryFloor,measuredVelocityFloor),incomingRetentionFloor);
     // Still-water air support is not motion. The legacy unconditional receiver
     // floor made every dry support page B8 and forced the entire pool to B4.
-    // Predicted incoming motion supplies the receiver floor in this variant.
+    // Predicted incoming motion can retain the receiver's established rung.
     let movingFrontier=(frontierBoundary||pageDemand)&&measuredVelocityFloor>1u;
-    // Nine B2 air stencil cells need fewer physical pages than nine B1
-    // cells, while preserving the B1 liquid surface and 2:1 interface.
-    let airFloor=select(1u,2u,(reasons&64u)==0u);
+    // Static air has no scalar feature to resolve. Face grading supplies the
+    // coarsest rung compatible with neighbouring material; moving receivers
+    // and injection retain their independent B8 floor below.
+    let airFloor=1u;
     let safetyFloor=select(airFloor,BRICK_FINE_RESOLUTION,thinFluid||injectionDemand||movingFrontier);
     let coarseRequired=max(demandFloor,safetyFloor);
     requested=current;planReasons=32u;
     if(coarseRequired>current){
       requested=coarseRequired;
-      planReasons=4u|select(0u,8192u,incomingFloor>current);
+      planReasons=4u;
       proofEpochs=0u;
     }
     else if(coarseRequired<current){
@@ -7939,7 +8117,10 @@ fn validateCandidateResolution(@builtin(global_invocation_id)gid:vec3u){
 // Validate physical faces against the exact scheduled image before preparing
 // candidate fields. A refusal requests backing and leaves the old image live.
 const ACTIVITY_GEOMETRIC_FACE_BACKING:u32=0x00040000u;
-const GEOMETRIC_TOPOLOGY_BACKING_MISSING:u32=GV_SUPPORT+34u;
+// This planner is also reachable from the presentation-only shader family,
+// where resident-volume's private GV_SUPPORT constant is intentionally pruned.
+const CM12_GEOMETRIC_SUPPORT_BASE:u32=${geometricVolumeLayout?.supportControlBaseWords ?? 0}u;
+const GEOMETRIC_TOPOLOGY_BACKING_MISSING:u32=CM12_GEOMETRIC_SUPPORT_BASE+34u;
 var<workgroup> geometricBrickBackingMissing:atomic<u32>;
 var<workgroup> geometricBrickCertificationEnabled:u32;
 fn geometricScheduledCellHasMaterial(cell:u32,brick:u32)->bool{
@@ -7989,7 +8170,7 @@ fn geometricScheduledCellMissingFace(cell:u32)->u32{
   return 0u;
 }
 fn requestGeometricTopologyFaceBacking(brick:u32){
-  atomicOr(&conditioning[GV_SUPPORT+33u],1);
+  atomicOr(&conditioning[CM12_GEOMETRIC_SUPPORT_BASE+33u],1);
   let output=activityRecord(brick);
   atomicStore(&activity[output+47u],scheduledBrickResolution(brick));
   atomicOr(&activity[output+9u],ACTIVITY_FROZEN_FRONTIER_GENERATION|ACTIVITY_GEOMETRIC_FACE_BACKING);
@@ -8177,7 +8358,7 @@ fn sparseWorldFrontierAllocationOwner(brick:u32,targetCoordinate:vec3i)->bool{
     // invocations are anchored at its actual origin, just like this caller.
     if(any(cm12WorldLeafCoordinate(source)!=sourceCoordinate)){continue;}
     let record=activityRecord(source);
-    let support=atomicLoad(&activity[record+3u])|atomicLoad(&activity[record+32u]);
+    let support=atomicLoad(&activity[record+3u]);
     if((support&(1u<<bit))==0u){continue;}
     if(cm12FluidNeighborReachable(sourceCoordinate,offset)){return false;}
   }
@@ -8200,9 +8381,8 @@ fn allocateSparseWorldFrontier(@builtin(global_invocation_id)gid:vec3u){
   // every one of those receivers; allocate the same 26 possible neighbours in
   // SparseWorld rather than silently dropping edge/corner demand.
   let sweptSupport=atomicLoad(&activity[output+3u])&0x07ffffffu;
-  let immediateSupport=atomicLoad(&activity[output+32u])&0x07ffffffu;
   let supportBit=select(localNeighbor,localNeighbor+1u,localNeighbor>=13u);
-  if(((sweptSupport|immediateSupport)&(1u<<supportBit))==0u){return;}
+  if((sweptSupport&(1u<<supportBit))==0u){return;}
   let resolvedBit=1u<<supportBit;
   if((atomicLoad(&activity[output+ACTIVITY_FRONTIER_RESOLVED_MASK_WORD])
     &resolvedBit)!=0u){return;}
@@ -9939,8 +10119,7 @@ fn activateSweptFrontierPages(@builtin(workgroup_id)wid:vec3u,
   let eligible=!brickActive(brick)&&cm12WorldLeafAllocated(brick);
   if(eligible){
     if(lane==0u&&(policyTileMembershipRequired(brick)
-      ||injectionReachesBrick(brick)
-      ||brickTouchesAcceptedLiquid(brick))){
+      ||injectionReachesBrick(brick))){
       atomicStore(&frontierDemanded,1u);
     }
     if(lane<26u){
@@ -9952,7 +10131,7 @@ fn activateSweptFrontierPages(@builtin(workgroup_id)wid:vec3u,
         cm12WorldLeafCoordinate(brick)+vec3i(dx,dy,dz));
       if(neighbor!=INVALID&&neighbor!=brick&&brickActive(neighbor)){
         let demandBit=26u-neighborBit;
-        if((atomicLoad(&activity[activityRecord(neighbor)+32u])
+        if((atomicLoad(&activity[activityRecord(neighbor)+3u])
           &(1u<<demandBit))!=0u){atomicStore(&frontierDemanded,1u);}
       }
     }
@@ -9963,8 +10142,8 @@ fn activateSweptFrontierPages(@builtin(workgroup_id)wid:vec3u,
 
 fn geometricTransportMaterialDemand(brick:u32)->bool{
   if(brick==INVALID||brick>=p.dispatch.w||!cm12WorldLeafAllocated(brick)){return false;}
-  if(brickActive(brick)&&(atomicLoad(&activity[activityRecord(brick)+32u])&(1u<<13u))!=0u){return true;}
-  if(brickTouchesAcceptedLiquid(brick)){return true;}
+  if((atomicLoad(&activity[activityRecord(brick)+9u])
+    &ACTIVITY_GEOMETRIC_SWEEP_RECEIVER)!=0u){return true;}
   if(p.inflowVelocity.w>0.5&&p.inflowOutlet.w>0.0){
     let endpoint=p.inflowOutlet.xyz+2.0*p.inflowVelocity.xyz*p.frame.x;
     let padding=vec3f(p.inflowOutlet.w+1.0);
@@ -9977,20 +10156,12 @@ fn geometricTransportMaterialDemand(brick:u32)->bool{
   return false;
 }
 
-// A newly wetted receiver needs its outward faces too. Read only immutable
-// material/sweep demand, never candidate-active bits: one support shell must
-// not recursively activate the entire dry authored catalogue.
+// A directional sweep already includes both its material donor and every page
+// intersected by the receiver volume. Transverse dry pages are not physical
+// transport receivers; sparse-air rows provide their boundary samples.
 @compute @workgroup_size(64)
 fn reserveGeometricTransportFaceSupport(@builtin(global_invocation_id)gid:vec3u){
-  let brick=gid.x;if(brick>=p.dispatch.w||brickActive(brick)
-    ||!cm12WorldLeafAllocated(brick)){return;}
-  var demanded=geometricTransportMaterialDemand(brick);
-  let span=brickSpan(brick);
-  for(var patchIndex=0u;patchIndex<6u*span*span&&!demanded;patchIndex+=1u){
-    let neighbor=cm12WorldOwnerAt(candidateFaceNeighborCoordinate(brick,patchIndex));
-    demanded=geometricTransportMaterialDemand(neighbor);
-  }
-  if(demanded){stageDemandedFrontierPage(brick);}
+  _=gid;
 }
 
 // An out-of-band liquid gesture populates only tiles intersecting that source.
@@ -10080,7 +10251,7 @@ fn retireUnsupportedEmptyBricks(@builtin(workgroup_id)wid:vec3u,
       }
     }
     if(lane==0u&&(policyTileMembershipRequired(brick)
-      ||brickTouchesAcceptedLiquid(brick))){
+      )){
       atomicStore(&frontierDemanded,1u);
     }
     if(lane<26u){
@@ -10092,7 +10263,7 @@ fn retireUnsupportedEmptyBricks(@builtin(workgroup_id)wid:vec3u,
         cm12WorldLeafCoordinate(brick)+vec3i(dx,dy,dz));
       if(neighbor!=INVALID){
         let demandBit=26u-neighborBit;
-        if((atomicLoad(&activity[activityRecord(neighbor)+32u])
+        if((atomicLoad(&activity[activityRecord(neighbor)+3u])
           &(1u<<demandBit))!=0u){atomicStore(&frontierDemanded,1u);}
       }
     }
@@ -10120,6 +10291,7 @@ const PRESENTATION_FRAME_PLAN_CAUSES:u32=${(
   | SPARSE_CM12_DIRTY_CAUSE_BIT.dependencyClosure
   | SPARSE_CM12_DIRTY_CAUSE_BIT.pageActivated
   | SPARSE_CM12_DIRTY_CAUSE_BIT.pageRetired
+  | SPARSE_CM12_DIRTY_CAUSE_BIT.presentationConfiguration
 ) >>> 0}u;
 const PRESENTATION_FRAME_PLAN_DIRECT_CAUSES:u32=${(
   SPARSE_CM12_DIRTY_CAUSE_BIT.topologyCreated
@@ -10129,6 +10301,7 @@ const PRESENTATION_FRAME_PLAN_DIRECT_CAUSES:u32=${(
   | SPARSE_CM12_DIRTY_CAUSE_BIT.boundarySource
   | SPARSE_CM12_DIRTY_CAUSE_BIT.pageActivated
   | SPARSE_CM12_DIRTY_CAUSE_BIT.pageRetired
+  | SPARSE_CM12_DIRTY_CAUSE_BIT.presentationConfiguration
 ) >>> 0}u;
 
 fn cm12PresentationLogicalKey(brick:u32)->u32{
@@ -10233,8 +10406,9 @@ fn populateSparseCM12PresentationFramePlan(
         &&height<=f32(brickOrigin.y+2*i32(BRICK_FINE_RESOLUTION)));
     }}
   }
+  let forcePresentation=p.correctionReserved.z>0.5;
   let scheduled=bootstrap||injected||pageNeedsActivation||scalarChanged
-    ||topologyChanged||dynamicBrick||heightChanged;
+    ||topologyChanged||dynamicBrick||heightChanged||forcePresentation;
   if(!scheduled){return;}
   var origin=select(0u,${SPARSE_CM12_DIRTY_CAUSE_BIT.densityChanged}u,scalarChanged);
   var inherited=select(0u,${SPARSE_CM12_DIRTY_CAUSE_BIT.dependencyClosure}u,
@@ -10246,6 +10420,7 @@ fn populateSparseCM12PresentationFramePlan(
   if(injected){origin|=${(SPARSE_CM12_DIRTY_CAUSE_BIT.phaseCrossing
     | SPARSE_CM12_DIRTY_CAUSE_BIT.densityChanged) >>> 0}u;}
   if(pageNeedsActivation){origin|=${SPARSE_CM12_DIRTY_CAUSE_BIT.pageActivated}u;}
+  if(forcePresentation){origin|=${SPARSE_CM12_DIRTY_CAUSE_BIT.presentationConfiguration}u;}
   let direct=(origin&PRESENTATION_FRAME_PLAN_DIRECT_CAUSES)!=0u;
   if(!direct){inherited|=${SPARSE_CM12_DIRTY_CAUSE_BIT.dependencyClosure}u;}
   let depth=select(2u,0u,direct);
@@ -10293,6 +10468,81 @@ var<workgroup>cm12PresentationWet:u32;
 var<workgroup>cm12PresentationResolvedFeature:u32;
 var<workgroup>cm12PresentationUniformPhi:f32;
 var<workgroup>cm12PresentationDensityOffset:u32;
+
+fn cm12PresentationPrepareRdfVertices(lane:u32){
+  if(lane==0u){presentationRdfVertexCacheReady=0u;}
+  workgroupBarrier();
+  let enabled=p.correctionReserved.y<0.5&&GEOMETRIC_INTERFACE_RDF_CACHE_ENABLED
+    &&workgroupUniformLoad(&cm12PresentationResolvedFeature)!=0u;
+  if(enabled){
+    for(var index=lane;index<PRESENTATION_RDF_VERTEX_CAPACITY;index+=64u){
+      let z=index/(PRESENTATION_RDF_VERTEX_AXIS*PRESENTATION_RDF_VERTEX_AXIS);
+      let remainder=index-z*PRESENTATION_RDF_VERTEX_AXIS*PRESENTATION_RDF_VERTEX_AXIS;
+      let y=remainder/PRESENTATION_RDF_VERTEX_AXIS;let x=remainder-y*PRESENTATION_RDF_VERTEX_AXIS;
+      let local=vec3u(x,y,z);
+      let vertex=cm12PresentationPageOrigin
+        +vec3i(local)*i32(cm12PresentationSampleScale);
+      // Pick the page-side octant as the reference component. At a lower page
+      // face that is the positive octant; otherwise it is the negative one.
+      // In connected fluid all incident cells still produce the same vertex
+      // value, while a solid point contact cannot blend across the boundary.
+      let query=vertex+vec3i(select(0,-1,local.x!=0u),
+        select(0,-1,local.y!=0u),select(0,-1,local.z!=0u));
+      let owner=compactOwnerCellAt(query);var value=vec2f(0.0);
+      if(owner.x!=INVALID&&brickActive(owner.y)&&cellActive(owner.x)
+        &&cellOpenFraction(owner.x)>=0.999999){
+        value=geometricResidentRdfVertexValue(owner.x,vertex,
+          cm12PresentationDensityOffset);
+      }
+      presentationRdfVertexCache[index]=value;
+    }
+    workgroupBarrier();
+    if(lane==0u){presentationRdfVertexCacheReady=1u;}
+  }
+  workgroupBarrier();
+}
+
+fn cm12PresentationCachedRdfSample(cell:u32,positionFine:vec3f)->vec2f{
+  if(presentationRdfVertexCacheReady==0u||cellOpenFraction(cell)<0.999999){
+    return vec2f(0.0);
+  }
+  let widths=cellWidths(cell);let lower=cellCenter(cell)-0.5*widths;
+  let sampleScale=i32(cm12PresentationSampleScale);
+  let localLower=vec3i(round(lower))-cm12PresentationPageOrigin;
+  let localUpper=localLower+vec3i(round(widths));
+  if(any(localLower<vec3i(0))||any(localUpper>vec3i(i32(PRESENTATION_PAGE_RESOLUTION)))
+    ||any(localLower%vec3i(sampleScale)!=vec3i(0))
+    ||any(localUpper%vec3i(sampleScale)!=vec3i(0))){return vec2f(0.0);}
+  let first=vec3u(localLower/sampleScale);let last=vec3u(localUpper/sampleScale);
+  let fraction=clamp((positionFine-lower)/widths,vec3f(0.0),vec3f(1.0));
+  var sum=vec2f(0.0);
+  for(var corner=0u;corner<8u;corner+=1u){
+    let vertex=vec3u(select(first.x,last.x,(corner&1u)!=0u),
+      select(first.y,last.y,(corner&2u)!=0u),
+      select(first.z,last.z,(corner&4u)!=0u));
+    let index=vertex.x+PRESENTATION_RDF_VERTEX_AXIS
+      *(vertex.y+PRESENTATION_RDF_VERTEX_AXIS*vertex.z);
+    let value=presentationRdfVertexCache[index];
+    let wx=select(1.0-fraction.x,fraction.x,(corner&1u)!=0u);
+    let wy=select(1.0-fraction.y,fraction.y,(corner&2u)!=0u);
+    let wz=select(1.0-fraction.z,fraction.z,(corner&4u)!=0u);
+    sum+=wx*wy*wz*value;
+  }
+  if(sum.y<=1e-8){return vec2f(0.0);}
+  let value=geometricResidentRdfBoundAtOwner(cell,positionFine,
+    cm12PresentationDensityOffset,sum.x/sum.y);
+  return vec2f(value,1.0);
+}
+
+fn cm12PresentationRdfCacheApplies()->bool{
+  if(cm12PresentationScale==1u){return cm12PresentationResolvedFeature!=0u;}
+  let cached=(cm12PresentationStencilCandidate&1u)!=0u
+    &&cm12PresentationSampleScale==1u&&cm12PresentationCacheFits!=0u;
+  let phases=atomicLoad(&presentationPhaseMask);
+  if(cached&&phases==3u){return true;}
+  if(cached&&phases==2u){return false;}
+  return cm12PresentationResolvedFeature!=0u&&cm12PresentationWet!=0u;
+}
 
 fn cm12PresentationSourceBrick(source:u32)->u32{
   if(PRESENTATION_PAGES_PER_AXIS==4u){
@@ -10404,6 +10654,7 @@ fn cm12PresentationPreparePage(brick:u32,page:u32,lane:u32,
     cm12PresentationUniformPhi=select(4.0*p.frame.y,-4.0*p.frame.y,bulkLiquid);
   }
   let presentationCandidates=workgroupUniformLoad(&cm12PresentationStencilCandidate);
+  cm12PresentationPrepareRdfVertices(lane);
   if((presentationCandidates&2u)!=0u){preparePresentationColumnHeights(lane,
     brick,cm12PresentationPageOrigin,cm12PresentationDensityOffset,false);}
   if((presentationCandidates&2u)!=0u){
@@ -10459,6 +10710,23 @@ fn cm12PresentationExactSample(brick:u32,page:u32,tile:u32,sample:u32,
   let dynamicPage=brickHasUnclippedWorldGeometry(cm12PresentationBrick);
   if(!dynamicPage&&(any(q<vec3i(0))||any(q>=vec3i(p.dimensions.xyz)))){
     phi=4.0*p.frame.y;
+  }
+  else if(p.correctionReserved.y<0.5&&presentationRdfVertexCacheReady!=0u
+    &&cm12PresentationRdfCacheApplies()
+    &&cm12SolidVoxelFractionQ8(q)<255u){
+    let owner=presentationCompiledOwnerCellAt(q);
+    if(owner.x!=INVALID&&cellActive(owner.x)){
+      let rdf=cm12PresentationCachedRdfSample(owner.x,vec3f(q)+vec3f(0.5));
+      if(rdf.y>0.0){phi=rdf.x*p.frame.y;
+      }else if(cm12PresentationScale==1u){
+        phi=presentationPhiAt(owner.x,cm12PresentationDensityOffset);
+      }else{
+        phi=presentationInterpolatedDensityPhi(q,cm12PresentationScale,
+          cm12PresentationCacheFirst,cm12PresentationCacheDimensions,
+          (cm12PresentationStencilCandidate&1u)!=0u&&cm12PresentationCacheFits!=0u,
+          cm12PresentationDensityOffset);
+      }
+    }
   }
   // The cache is meaningful only when PreparePage selected and filled the
   // height candidate. Otherwise a zeroed workgroup lane looks like a valid

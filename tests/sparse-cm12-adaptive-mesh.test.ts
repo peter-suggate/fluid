@@ -6,10 +6,25 @@ import { resolveMethodValues } from "../lib/core/method-contract";
 import { adaptiveMassMethod, adaptiveMassSolverOptions,
   ADAPTIVE_MASS_RUNTIME_PARAM_KEYS } from "../lib/methods/adaptive-volume/method";
 import { SPARSE_CM12_STAGES } from "../lib/methods/adaptive-volume/sparse-cm12-stages";
+import { SPARSE_CM12_DIRTY_CAUSE_BIT } from
+  "../lib/core/sparse-cm12-dirty-visualizations";
+import { SPARSE_CM12_FRAME_PLAN_PRESENTATION_CAUSE } from
+  "../lib/methods/adaptive-volume/sparse-cm12-frame-plan-presentation";
 
 test("surface mesh ratio defaults to x2 and x1/x4 are available without resetting physics", () => {
   const defaults = resolveMethodValues(adaptiveMassMethod, "balanced", {});
   assert.equal(adaptiveMassSolverOptions(defaults).surfaceMeshRefinement, 2);
+  assert.equal(defaults.presentationSurface, "rdf");
+  assert.equal(adaptiveMassSolverOptions(defaults).presentationSurfaceMode, "rdf");
+  const legacySurface = resolveMethodValues(adaptiveMassMethod, "balanced", {
+    presentationSurface: "plic",
+  });
+  assert.equal(adaptiveMassSolverOptions(legacySurface).presentationSurfaceMode, "plic");
+  assert.ok(ADAPTIVE_MASS_RUNTIME_PARAM_KEYS.includes("presentationSurface"));
+  assert.ok(SPARSE_CM12_STAGES["presentation-publication"].controls.some(control =>
+    control.kind === "param-choice" && control.param === "presentationSurface"));
+  assert.equal(SPARSE_CM12_DIRTY_CAUSE_BIT.presentationConfiguration,
+    SPARSE_CM12_FRAME_PLAN_PRESENTATION_CAUSE.presentationConfiguration);
   const coarse = resolveMethodValues(adaptiveMassMethod, "balanced", { surfaceMeshRefinement: "1" });
   assert.equal(adaptiveMassSolverOptions(coarse).surfaceMeshRefinement, 1);
   const fine = resolveMethodValues(adaptiveMassMethod, "balanced", { surfaceMeshRefinement: "4" });

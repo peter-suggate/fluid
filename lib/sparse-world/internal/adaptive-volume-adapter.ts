@@ -165,7 +165,14 @@ export interface CM12SparseWorldRuntime {
   readTracers(): ReturnType<WebGPUSparseCM12Resident["readTracers"]>;
   armPressureJournal(armed: boolean): boolean;
   readPressureJournal(): ReturnType<WebGPUSparseCM12Resident["readPressureJournal"]>;
-  encodeInitialPresentation(encoder: GPUCommandEncoder, finestCellSize_m: number, columnHeightEnabled?: boolean): void;
+  encodeInitialPresentation(encoder: GPUCommandEncoder, finestCellSize_m: number,
+    columnHeightMode?: boolean | "off" | "auto" | "on",
+    surfaceMode?: "rdf" | "plic"): void;
+  /** Republish unchanged accepted pages after a live presentation-only edit. */
+  refreshPresentationConfiguration(finestCellSize_m: number,
+    sharpening?: SharpeningTrace, activityPolicy?: SparseCM12ActivityPolicy,
+    pressureControl?: SparseCM12PressureControl,
+    worldDimensions_m?: readonly [number, number, number]): Promise<void>;
   assertSimulationHealthy(): Promise<void>;
   captureSimulationFailure(encoder: GPUCommandEncoder, onBackingRequest?: () => void): ReturnType<WebGPUSparseCM12Resident["captureSimulationFailure"]>;
   encodePressureIterationReceipt(
@@ -215,6 +222,8 @@ export interface CM12SparseWorldDeveloperTrace {
     WebGPUSparseCM12Resident["readAcceptedGeometricVolumeQA"]>;
   readGeometricVolumeTransportReceiptQA(): ReturnType<
     WebGPUSparseCM12Resident["readGeometricVolumeTransportReceiptQA"]>;
+  readGeometricMovingDualSnapshotQA(): ReturnType<
+    WebGPUSparseCM12Resident["readGeometricMovingDualSnapshotQA"]>;
   readAcceptedGeometricCellRowsQA(cellId: number): ReturnType<WebGPUSparseCM12Resident["readAcceptedGeometricCellRowsQA"]>;
   readAcceptedGeometricRowQA(rowId: number): ReturnType<WebGPUSparseCM12Resident["readAcceptedGeometricRowQA"]>;
   readGeometricProjectionComponentsQA(): ReturnType<WebGPUSparseCM12Resident["readGeometricProjectionComponentsQA"]>;
@@ -727,8 +736,18 @@ class AdoptedCM12SparseWorldRuntime implements CM12SparseWorldRuntime {
   armPressureJournal(armed: boolean) { return this.resident.armPressureJournal(armed); }
   readPressureJournal() { return this.generationState.read((resident) => resident.readPressureJournal()); }
   encodeInitialPresentation(encoder: GPUCommandEncoder, finestCellSize_m: number,
-    columnHeightEnabled?: boolean) {
-    this.resident.encodeInitialPresentation(encoder, finestCellSize_m, columnHeightEnabled);
+    columnHeightMode?: boolean | "off" | "auto" | "on",
+    surfaceMode?: "rdf" | "plic") {
+    this.resident.encodeInitialPresentation(encoder, finestCellSize_m, columnHeightMode,
+      surfaceMode);
+  }
+  refreshPresentationConfiguration(finestCellSize_m: number,
+    sharpening?: SharpeningTrace, activityPolicy?: SparseCM12ActivityPolicy,
+    pressureControl?: SparseCM12PressureControl,
+    worldDimensions_m?: readonly [number, number, number]) {
+    return this.generationState.read(resident => resident.refreshPresentationConfiguration(
+      finestCellSize_m, sharpening, activityPolicy, pressureControl,
+      worldDimensions_m));
   }
   assertSimulationHealthy(): Promise<void> {
     return this.resident.assertSimulationHealthy();
@@ -800,6 +819,9 @@ class AdoptedCM12SparseWorldDeveloperTrace implements CM12SparseWorldDeveloperTr
   }
   readGeometricVolumeTransportReceiptQA() {
     return this.generationState.read((resident) => resident.readGeometricVolumeTransportReceiptQA());
+  }
+  readGeometricMovingDualSnapshotQA() {
+    return this.generationState.read((resident) => resident.readGeometricMovingDualSnapshotQA());
   }
   readAcceptedGeometricCellRowsQA(cellId: number) {
     return this.generationState.read((resident) => resident.readAcceptedGeometricCellRowsQA(cellId));

@@ -17,7 +17,7 @@ export const ADAPTIVITY_PARAMS: MethodParamSpec[] = [
   { kind: "number", key: "anticipationSeconds", label: "Impact lookahead",
     default: SPARSE_CM12_ACTIVITY_POLICY.anticipationSeconds, tier: "fine", update: "runtime", unit: "s",
     min: 0, max: 2, step: 0.05, digits: 2,
-    hint: "Predict approaching liquid from its accepted velocity over this horizon, refining receivers before contact.",
+    hint: "Predict approaching liquid over this horizon and retain receiver detail already justified by local evidence.",
   },
   { kind: "number", key: "anticipationRadiusBricks", label: "Impact search radius",
     default: SPARSE_CM12_ACTIVITY_POLICY.anticipationRadiusBricks, tier: "fine", update: "runtime", unit: "bricks",
@@ -72,7 +72,7 @@ export const ADAPTIVITY_PARAMS: MethodParamSpec[] = [
       { value: "activity", label: "Causal activity + surface proof" },
       { value: "coarse-first", label: "Coarse first" },
     ],
-    hint: "Surface distance keeps interface/thin bricks at the ladder maximum. Causal activity promotes moving or unresolved liquid and lets accepted presentation output prove a one-rung surface merge. Coarse-first starts planar surfaces at B1 and refines for energy, curvature and approaching liquid.",
+    hint: "Surface distance keeps interface/thin bricks at the ladder maximum. Causal activity promotes moving or unresolved liquid and lets accepted presentation output prove a one-rung surface merge. Coarse-first starts planar surfaces at B1, promotes from local evidence, and uses approaching liquid only to retain established detail.",
   },
   {
     kind: "number", key: "surfaceFineRings", label: "Initial fine surface band",

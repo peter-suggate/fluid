@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
@@ -10,8 +11,8 @@ import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { sceneAtContainerExtents } from "../lib/core/scene-scale";
 import { resolveMethodValues } from "../lib/core/method-contract";
-import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
-import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
+import { adaptiveMassMethod, adaptiveMassSolverOptions } from "../lib/methods/adaptive-volume/method";
+import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 import type { WebGPUFineLevelSetBrickSource } from "../lib/core/levelset-consumer-abi";
 import { rasterMeshSymmetryMetrics } from "../lib/harness/raster-mesh-symmetry";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
@@ -36,11 +37,11 @@ function buffer(device: GPUDevice, label: string, size: number, usage: GPUBuffer
   return result;
 }
 
-async function read(device: GPUDevice, source: GPUBuffer, bytes: number) {
+async function read(device: GPUDevice, source: GPUBuffer, bytes: number, offset = 0) {
   const target = device.createBuffer({ label: "mixed raster readback", size: bytes,
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const encoder = device.createCommandEncoder();
-  encoder.copyBufferToBuffer(source, 0, target, 0, bytes);
+  encoder.copyBufferToBuffer(source, offset, target, 0, bytes);
   device.queue.submit([encoder.finish()]);
   await target.mapAsync(GPUMapMode.READ);
   const copy = target.getMappedRange().slice(0); target.unmap(); target.destroy();
@@ -100,9 +101,67 @@ function assertSphereWinding(mesh: Float32Array) {
   }
 }
 
+interface AnalyticShape {
+  readonly volume: number;
+  /** Absolute signed-distance surrogate in finest-cell units. */
+  readonly residual: (point: Point) => number;
+}
+
+const analyticShapes: Readonly<Record<"sphere" | "torus" | "ellipsoid", AnalyticShape>> = {
+  sphere: {
+    volume: 4 / 3 * Math.PI * 8.25 ** 3,
+    // Packed samples at integer q are published at fine-cell centers q+0.5.
+    residual: ([x, y, z]) => Math.abs(Math.hypot(x - 16, y - 12, z - 12) - 8.25),
+  },
+  torus: {
+    volume: 2 * Math.PI ** 2 * 6 * 2.25 ** 2,
+    residual: ([x, y, z]) => Math.abs(
+      Math.hypot(Math.hypot(x - 16, z - 12) - 6, y - 12) - 2.25),
+  },
+  ellipsoid: {
+    volume: 4 / 3 * Math.PI * 10 * 7 * 8,
+    // Scale the dimensionless ellipsoid residual by the shortest semi-axis.
+    // This is a conservative distance surrogate near the surface.
+    residual: ([x, y, z]) => 7 * Math.abs(
+      Math.hypot((x - 16) / 10, (y - 12) / 7, (z - 12) / 8) - 1),
+  },
+};
+
+function analyticShapeMetrics(mesh: Float32Array, vertexCount: number, shape: AnalyticShape) {
+  let signedVolume = 0, squaredError = 0, maximumError = 0;
+  for (let triangle = 0; triangle < vertexCount; triangle += 3) {
+    const points = Array.from({ length: 3 }, (_, corner) => {
+      const at = 8 * (triangle + corner);
+      return [mesh[at]!, mesh[at + 1]!, mesh[at + 2]!] as Point;
+    });
+    const [a, b, c] = points;
+    signedVolume += (a![0] * (b![1] * c![2] - b![2] * c![1])
+      - a![1] * (b![0] * c![2] - b![2] * c![0])
+      + a![2] * (b![0] * c![1] - b![1] * c![0])) / 6;
+    for (const point of points) {
+      const error = shape.residual(point);
+      squaredError += error * error;
+      maximumError = Math.max(maximumError, error);
+    }
+  }
+  const volume = Math.abs(signedVolume);
+  return { volume, relativeVolumeError: Math.abs(volume - shape.volume) / shape.volume,
+    rmsSurfaceErrorFine: Math.sqrt(squaredError / Math.max(1, vertexCount)),
+    maximumSurfaceErrorFine: maximumError };
+}
+
+function assertAnalyticShape(name: keyof typeof analyticShapes,
+  result: Awaited<ReturnType<typeof runField>>, context: string) {
+  const shape = analyticShapes[name];
+  const metrics = analyticShapeMetrics(result.mesh, result.metrics.vertexCount, shape);
+  assert.equal(result.metrics.openEdgeCount, 0,
+    `${context}: a contained curved mesh must weld every shared sample exactly`);
+  return metrics;
+}
+
 async function runField(device: GPUDevice, name: string, ratio: 0|1|2|4,
   analytic:(q:Point)=>number, mixed=false, source?:WebGPUFineLevelSetBrickSource,
-  widthAxis?: 0|1|2) {
+  widthAxis?: 0|1|2, sampleOverride?:Uint32Array) {
   const dimensions=source?.plan.sampleDimensions ?? [32,24,24];
   const pages: { key:number; q:Point }[]=[];
   for(let z=0;z<3;z++)for(let y=0;y<3;y++)for(let x=0;x<4;x++){
@@ -137,7 +196,8 @@ async function runField(device: GPUDevice, name: string, ratio: 0|1|2|4,
     paramsWords.set([...dimensions.map(n=>Math.ceil(n/8)),512],4);
     metadataWords=new Uint32Array(await read(device,source.metadata,source.metadata.size));
     worklistWords=new Uint32Array(await read(device,source.worklist,source.worklist.size));
-    sampleWords=new Uint32Array(await read(device,source.samples,source.plan.maximumResidentBricks*512*4));
+    sampleWords=sampleOverride ?? new Uint32Array(await read(device,source.samples,
+      source.plan.maximumResidentBricks*512*4));
     paramsWords.set([source.plan.maximumResidentBricks,7,source.plan.maximumResidentBricks,worklistWords[0]!],8);
     // Source distances are metres; geometry stays in the unit-cell test frame.
     pf[15]=source.plan.fineCellWidth;
@@ -242,11 +302,25 @@ for(const fullPool of (process.env.FLUID_FULL_POOL ? [true] : [false,true])) daw
       box:([x,y,z])=>Math.max(Math.abs(x-15.5)-10.25,Math.abs(y-11.5)-6.25,Math.abs(z-11.5)-8.25),
       disconnected:([x,y,z])=>Math.min(Math.hypot(x-10,y-10,z-10)-2.25,Math.hypot(x-14,y-12,z-12)-1.25),
     };
+    const curvedReceipts: Array<{ context:string;
+      metrics: ReturnType<typeof analyticShapeMetrics> }> = [];
     for(const [name,field] of Object.entries(fullPool ? {} : fields)){
       const fine=await runField(device!,name,0,field,true);
+      const fineShape = name in analyticShapes
+        ? assertAnalyticShape(name as keyof typeof analyticShapes, fine, `${name} full-resolution`)
+        : undefined;
+      if(fineShape)curvedReceipts.push({context:`${name} full-resolution`,metrics:fineShape});
       for(const ratio of [1,2,4] as const){
         const result=await runField(device!,name,ratio,field,true);
-        console.log(JSON.stringify({name,ratio,fine:fine.metrics.triangleCount,adaptive:result.adaptive,triangles:result.metrics.triangleCount,open:result.metrics.interiorOpenEdgeCount,degenerate:result.metrics.degenerateTriangleCount,fineDegenerate:fine.metrics.degenerateTriangleCount}));
+        const shape = name in analyticShapes
+          ? assertAnalyticShape(name as keyof typeof analyticShapes, result, `${name} x${ratio}`)
+          : undefined;
+        if(shape)curvedReceipts.push({context:`${name} x${ratio}`,metrics:shape});
+        console.log(JSON.stringify({name,ratio,fine:fine.metrics.triangleCount,
+          fineShape,adaptive:result.adaptive,triangles:result.metrics.triangleCount,
+          open:result.metrics.interiorOpenEdgeCount,
+          degenerate:result.metrics.degenerateTriangleCount,
+          fineDegenerate:fine.metrics.degenerateTriangleCount,shape}));
         assert.equal(components(result.mesh,result.metrics.vertexCount),
           components(fine.mesh,fine.metrics.vertexCount),"simplification must preserve disconnected components");
         assert.deepEqual(topology(result.mesh,result.metrics.vertexCount),
@@ -265,19 +339,34 @@ for(const fullPool of (process.env.FLUID_FULL_POOL ? [true] : [false,true])) daw
       }
     }
     if(!fullPool)for(const axis of [0,1,2] as const){
-      const field=fields.sphere!;
-      const fine=await runField(device!,`sphere-axis-${axis}`,0,field,true,undefined,axis);
-      for(const ratio of [1,2,4] as const){
-        const result=await runField(device!,`sphere-axis-${axis}`,ratio,field,true,undefined,axis);
-        assert.ok(result.adaptive>0,`axis ${axis}: adaptive mesh must execute`);
-        assertSphereWinding(result.mesh);
-        assert.equal(result.metrics.interiorOpenEdgeCount,0,`axis ${axis} x${ratio}: 2:1 seams must close`);
-        assert.equal(result.metrics.nonManifoldEdgeCount,0);
-        assert.equal(result.metrics.degenerateTriangleCount,0);
-        assert.equal(result.metrics.nonFiniteCount,0);
-        assert.deepEqual(topology(result.mesh,result.metrics.vertexCount),topology(fine.mesh,fine.metrics.vertexCount));
+      for (const name of ["sphere", "torus", "ellipsoid"] as const) {
+        const field=fields[name]!;
+        const fine=await runField(device!,`${name}-axis-${axis}`,0,field,true,undefined,axis);
+        const ratios = name === "sphere" ? [1,2,4] as const : [2] as const;
+        for(const ratio of ratios){
+          const result=await runField(device!,`${name}-axis-${axis}`,ratio,field,true,undefined,axis);
+          const shape=assertAnalyticShape(name,result,`${name} axis ${axis} x${ratio}`);
+          curvedReceipts.push({context:`${name} axis ${axis} x${ratio}`,metrics:shape});
+          console.log(JSON.stringify({name,axis,ratio,adaptive:result.adaptive,
+            triangles:result.metrics.triangleCount,shape}));
+          assert.ok(result.adaptive>0,`axis ${axis}: adaptive mesh must execute`);
+          if(name==="sphere")assertSphereWinding(result.mesh);
+          assert.equal(result.metrics.interiorOpenEdgeCount,0,`axis ${axis} x${ratio}: 2:1 seams must close`);
+          assert.equal(result.metrics.nonManifoldEdgeCount,0);
+          assert.equal(result.metrics.degenerateTriangleCount,0);
+          assert.equal(result.metrics.nonFiniteCount,0);
+          assert.deepEqual(topology(result.mesh,result.metrics.vertexCount),topology(fine.mesh,fine.metrics.vertexCount));
+        }
       }
     }
+    // These bounds are stated in finest-cell units and evaluated after every
+    // curved case so one failure cannot hide later shape or seam evidence.
+    const curvedFailures=curvedReceipts.flatMap(({context,metrics})=>[
+      ...(metrics.rmsSurfaceErrorFine<=.5?[]:[`${context}: RMS ${metrics.rmsSurfaceErrorFine}`]),
+      ...(metrics.maximumSurfaceErrorFine<=1.25?[]:[`${context}: maximum ${metrics.maximumSurfaceErrorFine}`]),
+      ...(metrics.relativeVolumeError<=.1?[]:[`${context}: volume ${metrics.relativeVolumeError}`]),
+    ]);
+    assert.deepEqual(curvedFailures,[],"curved mesh analytic bounds");
     let solver:WebGPUAdaptiveMassSolver|undefined;
     try {
       const scene=fullPool ? sceneDocument(getSceneDefinition("coarse-first-pool-impact")) : sceneAtContainerExtents(sceneDocument(getSceneDefinition("coarse-first-pool-impact")),
@@ -393,6 +482,218 @@ for(const fullPool of (process.env.FLUID_FULL_POOL ? [true] : [false,true])) daw
     }finally{solver?.destroy();}
     assert.deepEqual(errors,[]);
   }finally{device?.destroy();await releaseWebGPUExclusiveLock();if(gpu)liveDawnInstances.delete(gpu);}
+});
+
+type ShippingShapeName="sphere"|"torus";
+function shippingShape(name:ShippingShapeName){
+  const authoredCenter=[0,.6,0] as const;
+  // Global-fine mesh positions use the positive domain-local frame; authored
+  // liquid coordinates use the container-centred X/Z frame.
+  const meshCenter=[.8,.6,.6] as const;
+  if(name==="sphere")return {meshCenter,analyticVolume:4/3*Math.PI*.35**3,
+    residual:([x,y,z]:Point)=>Math.abs(Math.hypot(x-meshCenter[0],y-meshCenter[1],z-meshCenter[2])-.35),
+    volume:{shape:"sphere" as const,center_m:{x:authoredCenter[0],y:authoredCenter[1],z:authoredCenter[2]},radius_m:.35}};
+  return {meshCenter,analyticVolume:2*Math.PI**2*.3*.15**2,
+    residual:([x,y,z]:Point)=>Math.abs(Math.hypot(Math.hypot(x-meshCenter[0],z-meshCenter[2])-.3,y-meshCenter[1])-.15),
+    volume:{shape:"torus" as const,center_m:{x:authoredCenter[0],y:authoredCenter[1],z:authoredCenter[2]},radius_m:.3,tubeRadius_m:.15}};
+}
+
+function curvedPublishedMetrics(mesh:Float32Array,vertexCount:number,
+  residual:(point:Point)=>number){
+  let signedVolume=0,squared=0,maximum=0;
+  for(let triangle=0;triangle<vertexCount;triangle+=3){
+    const p=Array.from({length:3},(_,corner)=>{
+      const at=8*(triangle+corner);
+      return [mesh[at]!,mesh[at+1]!,mesh[at+2]!] as Point;
+    });
+    const [a,b,c]=p as [Point,Point,Point];
+    signedVolume+=(a[0]*(b[1]*c[2]-b[2]*c[1])-a[1]*(b[0]*c[2]-b[2]*c[0])
+      +a[2]*(b[0]*c[1]-b[1]*c[0]))/6;
+    for(const point of p){const error=residual(point);squared+=error*error;maximum=Math.max(maximum,error);}
+  }
+  return {volume_m3:Math.abs(signedVolume),rmsSurfaceError_m:Math.sqrt(squared/Math.max(1,vertexCount)),
+    maximumSurfaceError_m:maximum};
+}
+
+/** Actual resident path: production VOF seed -> interface planes -> RDF/PLIC
+ * FPP publication -> shipping global-fine mesh consumer. The two modes use
+ * one accepted resident and a paused configuration republish, so any shape or
+ * volume difference is presentation-only. */
+dawnTest("shipping RDF publishes closed curved VOF surfaces across a B8:B4 join",
+  {timeout:300000},async()=>{
+  await acquireWebGPUExclusiveLock("dawn-test","shipping-curved-rdf");
+  let device:GPUDevice|undefined,solver:WebGPUAdaptiveMassSolver|undefined,gpu:GPU|undefined;
+  try{
+    const dawn=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);
+    Object.assign(globalThis,dawn.globals);gpu=dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND??"metal"}`]);
+    liveDawnInstances.add(gpu!);const adapter=await gpu!.requestAdapter();assert.ok(adapter);
+    device=await adapter.requestDevice({requiredLimits:requiredFluidDeviceLimits(adapter.limits)});
+    const errors:string[]=[];device.addEventListener("uncapturederror",event=>{
+      event.preventDefault();errors.push(event.error.message);
+    });
+    const curvedArtifact:{probe:string;criteria:Record<string,number>;
+      shapes:Array<Record<string,unknown>>}={probe:"shipping-curved-rdf-metal",
+        criteria:{maximumAcceptedVolumeRelativeError:.15,maximumRmsSurfaceError_m:.075,
+          maximumSurfaceError_m:.15},shapes:[]};
+    for(const name of ["sphere","torus"] as const){
+      const shape=shippingShape(name);
+      const scene=sceneAtContainerExtents(sceneDocument(getSceneDefinition("water-box-tank-fill")),
+        {width_m:1.6,height_m:1.2,depth_m:1.2});
+      scene.sceneId=`shipping-rdf-${name}`;scene.rigidBodies=[];scene.solidVoxels=[];
+      scene.container.fillFraction=0;scene.fluid.initialCondition="tank-fill";
+      scene.fluid.initialLiquidVolumes=[shape.volume];
+      delete scene.fluid.initialDamBreakOrigin_m;delete scene.fluid.initialDamBreakDimensions_m;
+      delete scene.fluid.initialBrickSeeds_m;delete scene.fluid.initialBrickSeedsAdditive;
+      scene.fluid.gravity_m_s2={x:0,y:0,z:0};scene.voxelDomain.finestCellSize_m=.05;
+      scene.fluid.refinementRegions=[
+        {id:"fine-half",rule:"minimum-cell-size",minimumCellSize_cells:1,maximumCellSize_cells:1,
+          min_m:{x:-.8,y:0,z:-.6},max_m:{x:0,y:1.2,z:.6}},
+        {id:"coarse-half",rule:"minimum-cell-size",minimumCellSize_cells:2,maximumCellSize_cells:2,
+          min_m:{x:0,y:0,z:-.6},max_m:{x:.8,y:1.2,z:.6}},
+      ];
+      const values=resolveMethodValues(adaptiveMassMethod,"balanced",{selectorMode:"coarse-first",
+        maximumMacroSpanBricks:"1",timeStep:"scene",presentationColumnHeight:"auto",
+        surfaceMeshRefinement:"2"});
+      solver=await WebGPUAdaptiveMassSolver.createAsync(device,scene,"balanced",undefined,
+        {...adaptiveMassSolverOptions(values),initialResolutionForQA:4,
+          maximumMacroSpanBricks:1,topologyPageBudget:0},()=>{});
+      await solver.waitForSimulationReady();await solver.waitForTopologyReady();
+      assert.equal(solver.presentationSurfaceMode,"rdf","fresh default must select shipping RDF");
+      const activity=await solver.readGPUActivityPolicy();
+      const physicsClock={encodedSteps:solver.info.encodedSteps??0,
+        acceptedSteps:activity.acceptedSteps,
+        acceptedTopologyGeneration:activity.acceptedTopologyGeneration};
+      const snapshot=solver.fieldSnapshotSourceForQA,words=snapshot.templateWords;
+      const templateFloats=new Float32Array(words.buffer,words.byteOffset,words.length);
+      const density=new Float32Array(await read(device,snapshot.state,4*snapshot.cellCapacity,
+        4*snapshot.layout.densityA));
+      const acceptedCells:Array<{id:number;center:Point;width:Point}>=[];
+      for(const brick of activity.bricks){
+        if(!brick.active||brick.leafId>=words[13]!)continue;
+        const range=words[11]!+2*(4*brick.leafId+Math.log2(brick.acceptedResolution));
+        for(let id=words[range]!;id<words[range]!+words[range+1]!;id++){
+          const at=words[6]!+8*id;
+          acceptedCells.push({id,center:[templateFloats[at]!,templateFloats[at+1]!,templateFloats[at+2]!],
+            width:[templateFloats[at+4]!,templateFloats[at+5]!,templateFloats[at+6]!]});
+        }
+      }
+      assert.equal(new Set(acceptedCells.map(cell=>cell.id)).size,acceptedCells.length);
+      const fineWidth=.05;
+      const acceptedVolume=acceptedCells.reduce((sum,cell)=>sum+density[cell.id]!
+        *cell.width[0]*cell.width[1]*cell.width[2]*fineWidth**3,0);
+      const partialWidths=new Set(acceptedCells.filter(cell=>density[cell.id]!>1e-6&&density[cell.id]!<1-1e-6)
+        .map(cell=>cell.width[0]));
+      assert.ok(partialWidths.has(1)&&partialWidths.has(2),
+        `${name}: accepted curved interface must cross the authored B8:B4 join; widths=${
+          [...partialWidths].join(",")}; rungs=${[...new Set(activity.bricks.filter(b=>b.active)
+            .map(b=>b.acceptedResolution))].join(",")}; bricks=${activity.bricks.filter(b=>b.active)
+              .map(b=>`${b.coordinate.join("/")}:B${b.acceptedResolution}`).join(",")}`);
+      const densityBefore=new Uint32Array(density.buffer.slice(0));
+      const initialSamples=new Uint32Array(await read(device,solver.globalFineLevelSetSource.samples,
+        solver.globalFineLevelSetSource.plan.payloadCapacityBytes));
+      const planes=new Float32Array(await read(device,snapshot.state,16*snapshot.cellCapacity,
+        4*snapshot.layout.geometricInterfacePlanes));
+      const rdfCache=new Float32Array(await read(device,snapshot.state,16*snapshot.cellCapacity,
+        4*snapshot.layout.geometricInterfaceRdf));
+      const rdf=await runField(device,`${name}-shipping-rdf`,2,()=>0,false,solver.globalFineLevelSetSource);
+      const rdfShape=curvedPublishedMetrics(rdf.mesh,rdf.metrics.vertexCount,shape.residual);
+      solver.applyRuntimeValues({...values,presentationSurface:"plic"});
+      await solver.assertSimulationHealthy();assert.equal(solver.presentationSurfaceMode,"plic");
+      const plicSamples=new Uint32Array(await read(device,solver.globalFineLevelSetSource.samples,
+        solver.globalFineLevelSetSource.plan.payloadCapacityBytes));
+      const plic=await runField(device,`${name}-shipping-plic`,2,()=>0,false,solver.globalFineLevelSetSource);
+      const plicShape=curvedPublishedMetrics(plic.mesh,plic.metrics.vertexCount,shape.residual);
+      let vertexLs:Record<string,unknown>|undefined;
+      const lsDiagnostic=process.env.FLUID_RDF_VERTEX_LS_DIAGNOSTIC;
+      if(lsDiagnostic){
+        const variant=lsDiagnostic==="sample"?"sample"
+          :lsDiagnostic==="shifted"?"vertex-shifted"
+          :lsDiagnostic==="paper-eq10"?"paper-eq10-topology-vertex":"vertex";
+        const suffix=variant==="vertex-shifted"?"vertex-ls-shifted"
+          :variant==="paper-eq10-topology-vertex"?"paper-eq10-topology-vertex-ls"
+          :`${variant}-ls`;
+        const base=variant==="paper-eq10-topology-vertex"
+          ?"artifacts/advance-slice":"/tmp";
+        const bytes=await readFile(`${base}/rdf-shipping-curved-${name}-${suffix}-samples.bin`);
+        const samples=new Uint32Array(bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength));
+        const result=await runField(device,`${name}-shipping-vertex-ls`,2,()=>0,false,
+          solver.globalFineLevelSetSource,undefined,samples);
+        const metric=curvedPublishedMetrics(result.mesh,result.metrics.vertexCount,shape.residual);
+        vertexLs={variant,triangles:result.metrics.triangleCount,open:result.metrics.interiorOpenEdgeCount,
+          nonManifold:result.metrics.nonManifoldEdgeCount,...metric,
+          acceptedVolumeRelativeError:Math.abs(metric.volume_m3-acceptedVolume)/acceptedVolume};
+      }
+      solver.applyRuntimeValues({...values,presentationSurface:"rdf"});
+      await solver.assertSimulationHealthy();assert.equal(solver.presentationSurfaceMode,"rdf");
+      const republishedSamples=new Uint32Array(await read(device,solver.globalFineLevelSetSource.samples,
+        solver.globalFineLevelSetSource.plan.payloadCapacityBytes));
+      const densityAfter=new Uint32Array(await read(device,snapshot.state,4*snapshot.cellCapacity,
+        4*snapshot.layout.densityA));
+      assert.deepEqual(densityAfter,densityBefore,`${name}: presentation toggle mutated accepted VOF`);
+      assert.deepEqual(republishedSamples,initialSamples,`${name}: RDF republish is not deterministic`);
+      let changedPublishedSamples=0;
+      for(let i=0;i<initialSamples.length;i++)changedPublishedSamples+=Number(initialSamples[i]!==plicSamples[i]);
+      assert.ok(changedPublishedSamples>0,`${name}: RDF/PLIC toggle did not exercise distinct fields`);
+      const activityAfter=await solver.readGPUActivityPolicy();
+      assert.deepEqual({encodedSteps:solver.info.encodedSteps??0,
+        acceptedSteps:activityAfter.acceptedSteps,
+        acceptedTopologyGeneration:activityAfter.acceptedTopologyGeneration},physicsClock,
+      `${name}: paused presentation toggle advanced accepted physics`);
+      assert.equal(rdf.metrics.interiorOpenEdgeCount,0,`${name}: RDF has an interior crack`);
+      assert.equal(rdf.metrics.nonManifoldEdgeCount,0,`${name}: RDF is non-manifold`);
+      assert.equal(rdf.metrics.nonFiniteCount,0);assert.equal(rdf.metrics.degenerateTriangleCount,0);
+      const acceptedVolumeRelativeError=Math.abs(rdfShape.volume_m3-acceptedVolume)/acceptedVolume;
+      const receipt={shippingCurvedRdf:name,sourceMode:solver.presentationSurfaceMode,
+        columnPolicy:"auto (RDF bypass; PLIC evaluates legacy auto)",physicsClock,
+        coordinateConvention:{authoredOrigin_m:[-.8,0,-.6],meshOrigin_m:[0,0,0],
+          fineCellWidth_m:fineWidth,cellCenters:"centerFine is in finest-cell coordinates from authoredOrigin_m"},
+        acceptedVolume_m3:acceptedVolume,analyticVolume_m3:shape.analyticVolume,
+        acceptedAnalyticRelativeError:Math.abs(acceptedVolume-shape.analyticVolume)/shape.analyticVolume,
+        partialCellWidthsFine:[...partialWidths].sort((a,b)=>a-b),changedPublishedSamples,vertexLs,
+        rdf:{triangles:rdf.metrics.triangleCount,open:rdf.metrics.interiorOpenEdgeCount,
+          nonManifold:rdf.metrics.nonManifoldEdgeCount,...rdfShape,
+          acceptedVolumeRelativeError},
+        plic:{triangles:plic.metrics.triangleCount,open:plic.metrics.interiorOpenEdgeCount,
+          nonManifold:plic.metrics.nonManifoldEdgeCount,...plicShape,
+          acceptedVolumeRelativeError:Math.abs(plicShape.volume_m3-acceptedVolume)/acceptedVolume}};
+      console.log(JSON.stringify(receipt));
+      const binaryPrefix=`artifacts/advance-slice/rdf-shipping-curved-${name}`;
+      curvedArtifact.shapes.push({...receipt,publishedSampleFiles:{
+        rdf:`${binaryPrefix}-rdf-samples.bin`,plic:`${binaryPrefix}-plic-samples.bin`,
+        metadata:`${binaryPrefix}-metadata.bin`,worklist:`${binaryPrefix}-worklist.bin`},
+        presentationPlan:solver.globalFineLevelSetSource.plan,
+        acceptedCells:acceptedCells.map(cell=>({
+        id:cell.id,centerFine:cell.center,widthFine:cell.width,density:density[cell.id]!,capacity:1,
+        plic:[planes[4*cell.id]!,planes[4*cell.id+1]!,planes[4*cell.id+2]!,planes[4*cell.id+3]!],
+        rdf:[rdfCache[4*cell.id]!,rdfCache[4*cell.id+1]!,rdfCache[4*cell.id+2]!,
+          rdfCache[4*cell.id+3]!]}))});
+      await mkdir("artifacts/advance-slice",{recursive:true});
+      const metadata=new Uint32Array(await read(device,solver.globalFineLevelSetSource.metadata,
+        solver.globalFineLevelSetSource.metadata.size));
+      const worklist=new Uint32Array(await read(device,solver.globalFineLevelSetSource.worklist,
+        solver.globalFineLevelSetSource.worklist.size));
+      await Promise.all([
+        writeFile(`${binaryPrefix}-rdf-samples.bin`,new Uint8Array(initialSamples.buffer)),
+        writeFile(`${binaryPrefix}-plic-samples.bin`,new Uint8Array(plicSamples.buffer)),
+        writeFile(`${binaryPrefix}-metadata.bin`,new Uint8Array(metadata.buffer)),
+        writeFile(`${binaryPrefix}-worklist.bin`,new Uint8Array(worklist.buffer)),
+      ]);
+      await writeFile("artifacts/advance-slice/rdf-shipping-curved-metal.json",
+        `${JSON.stringify(curvedArtifact,null,2)}\n`);
+      // A B4 cell spans 0.1 m in this fixture. These predeclared curved-field
+      // bounds are tied to that coarsest interface width, independently of the
+      // analytic-SDF mesh control's separate ten-percent volume requirement.
+      assert.ok(acceptedVolumeRelativeError<=.15,
+        `${name}: RDF volume differs from accepted VOF by ${acceptedVolumeRelativeError}`);
+      assert.ok(rdfShape.rmsSurfaceError_m<=.075,
+        `${name}: RDF RMS error ${rdfShape.rmsSurfaceError_m} exceeds 0.75 B4 cell`);
+      assert.ok(rdfShape.maximumSurfaceError_m<=.15,
+        `${name}: RDF maximum error ${rdfShape.maximumSurfaceError_m} exceeds 1.5 B4 cells`);
+      solver.destroy();solver=undefined;
+    }
+    assert.deepEqual(errors,[]);
+  }finally{solver?.destroy();device?.destroy();if(gpu)liveDawnInstances.delete(gpu);
+    await releaseWebGPUExclusiveLock();}
 });
 
 // The early mini64 tower crosses native macro/fine pages. Counting a far-front

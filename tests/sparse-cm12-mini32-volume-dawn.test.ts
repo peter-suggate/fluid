@@ -270,6 +270,20 @@ dawnTest("mini32 conserves liquid volume through four seconds",
         `mini32 lost ${(100 * (1 - minimumRelativeMass)).toFixed(3)}% of its liquid: ${
           JSON.stringify(trajectory)}`);
       assert.deepEqual(validationErrors, []);
+    } catch (error) {
+      if (solver) {
+        try {
+          const transport = await solver.readGeometricVolumeTransportReceiptQA();
+          const cellId = transport.firstCoverageFailure?.cellId;
+          console.error(JSON.stringify({ transportFailure: transport,
+            ...(cellId === undefined ? {} : {
+              coverageCell: await solver.readAcceptedGeometricCellRowsQA(cellId),
+            }) }));
+        } catch (diagnosticError) {
+          console.error("Mini32 transport diagnostic unavailable:", String(diagnosticError));
+        }
+      }
+      throw error;
     } finally {
       solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();
       if (gpu) retainedDawnInstances.delete(gpu);

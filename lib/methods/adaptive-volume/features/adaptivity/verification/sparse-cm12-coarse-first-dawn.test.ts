@@ -13,7 +13,7 @@ const dawnModule = process.env.WEBGPU_NODE_MODULE;
 for (const scenario of ["still", "impact", "settling"] as const) (dawnModule ? test : test.skip)(scenario === "settling"
   ? "coarse-first mildly disturbed surface returns to coarse while moving"
   : scenario === "impact"
-  ? "coarse-first pool anticipates a falling liquid ball and preserves far still water"
+  ? "coarse-first pool requires local evidence while preserving far still water"
   : "coarse-first hydrostatic pool stays at B1", { timeout: 240_000 }, async () => {
   const impact = scenario === "impact", settling = scenario === "settling";
   await acquireWebGPUExclusiveLock("dawn-test", "coarse-first-pool-impact");
@@ -88,7 +88,8 @@ for (const scenario of ["still", "impact", "settling"] as const) (dawnModule ? t
     const fields = await solver.readDiagnosticFields();
     console.log(JSON.stringify({ scenario, initialFine, settledCoarse, initialCells: initial.bricks.filter(b => b.active).reduce((n, b) => n + b.acceptedResolution ** 3, 0), trace, relativeMassError: Math.abs(mass(fields.density) / initialMass - 1) }));
     assert.deepEqual(errors, []);
-    if (impact) assert.ok(refinedBeforeContact, "no accepted B8 pool receiver by 0.45 s: " + JSON.stringify(trace));
+    if (impact) assert.equal(refinedBeforeContact, false,
+      "remote impact prediction refined a calm pool without local evidence: " + JSON.stringify(trace));
     if (settling) {
       assert.ok(initialFine > 0, "curved disturbance must start fine");
       assert.ok(settledCoarse, "moving surface did not recover B1/B2 coverage");
@@ -100,3 +101,44 @@ for (const scenario of ["still", "impact", "settling"] as const) (dawnModule ? t
     solver?.destroy(); device?.destroy(); await releaseWebGPUExclusiveLock();
   }
 });
+
+(dawnModule ? test : test.skip)("half-pool impact lookahead retains B1 without local evidence on step three",
+  { timeout: 120_000 }, async () => {
+    await acquireWebGPUExclusiveLock("dawn-test", "coarse-first-half-pool-evidence");
+    let device: GPUDevice | undefined, solver: WebGPUAdaptiveMassSolver | undefined;
+    try {
+      const dawn = await import(pathToFileURL(dawnModule!).href);
+      Object.assign(globalThis, dawn.globals);
+      const gpu = dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
+      const adapter = await gpu.requestAdapter(); assert.ok(adapter);
+      device = await adapter.requestDevice({ requiredLimits: requiredFluidDeviceLimits(adapter.limits) });
+      const scene = sceneDocument(getSceneDefinition("coarse-first-pool-impact-half"));
+      const values = resolveMethodValues(adaptiveMassMethod, "balanced", {
+        selectorMode: "coarse-first", timeStep: "paper",
+      });
+      solver = await adaptiveMassMethod.createSolverAsync!(device, scene, "balanced", values,
+        undefined, () => {}) as WebGPUAdaptiveMassSolver;
+      await solver.waitForSimulationReady();
+      for (let step = 1; step <= 3; step++) {
+        while (!solver.advanceTo(step / 30, [])) await new Promise(setImmediate);
+        await solver.awaitFrameCompletion?.();
+        await solver.waitForTopologyReady();
+      }
+      const activity = await solver.readGPUActivityPolicy();
+      const centerSurface = activity.bricks.filter(brick => brick.active
+        && brick.coordinate[1] === 1
+        && Math.abs(brick.coordinate[0] - 3.5) < 1
+        && Math.abs(brick.coordinate[2] - 3.5) < 1);
+      assert.ok(centerSurface.length > 0);
+      assert.ok(centerSurface.every(brick => brick.acceptedResolution === 1),
+        "remote motion alone must not refine the calm pool surface: "
+          + JSON.stringify(centerSurface));
+      const approachingSurface = activity.bricks.filter(brick => brick.active
+        && brick.coordinate[1] >= 3 && (brick.reasons & 1) !== 0
+        && brick.densityMoments[1] < -16);
+      assert.ok(approachingSurface.length > 0,
+        "the fixture must carry a surface moving more than one brick over the lookahead horizon");
+    } finally {
+      solver?.destroy(); device?.destroy(); await releaseWebGPUExclusiveLock();
+    }
+  });

@@ -4,6 +4,9 @@ import { createGeometricLowFluxLimiterWGSL } from "./geometric-low-flux-limiter.
 
 /** All state offsets are f32 words; control is a distinct atomic conditioning tail. */
 export interface SparseGeometricVolumeLayout {
+  /** Accepted/candidate local interface-patch history, parity-matched to rho. */
+  readonly interfaceHistoryA: number;
+  readonly interfaceHistoryB: number;
   readonly currentVolume: number;
   readonly lowVolume: number;
   readonly positiveLimiter: number;
@@ -29,6 +32,8 @@ export function createGeometricVolumeResidentWGSL(layout?: SparseGeometricVolume
 ${createGeometricSubfacesWGSL()}
 ${geometricBoundedFluxWGSL}
 const GV_CURRENT:u32=${layout.currentVolume}u;
+const GV_HISTORY_A:u32=${layout.interfaceHistoryA}u;
+const GV_HISTORY_B:u32=${layout.interfaceHistoryB}u;
 const GV_LOW:u32=${layout.lowVolume}u;
 const GV_PLUS:u32=${layout.positiveLimiter}u;
 const GV_MINUS:u32=${layout.negativeLimiter}u;
@@ -48,6 +53,19 @@ ${createGeometricLowFluxLimiterWGSL(layout)}
 fn gvLoad(word:u32)->u32{return bitcast<u32>(atomicLoad(&conditioning[GV_CONTROL+word]));}
 fn gvStore(word:u32,value:u32){atomicStore(&conditioning[GV_CONTROL+word],bitcast<i32>(value));}
 fn gvFailed()->bool{return gvLoad(4u)!=0u;}
+fn gvSourceHistory()->u32{return select(GV_HISTORY_A,GV_HISTORY_B,
+  cm12FCSourceScalarParity()!=0u);}
+fn gvDestinationHistory()->u32{return select(GV_HISTORY_B,GV_HISTORY_A,
+  cm12FCDestinationScalarParity()==0u);}
+fn gvHistoryPlane(base:u32,cell:u32)->GeometricInterfacePlane{
+  let at=base+4u*cell;
+  return GeometricInterfacePlane(vec3f(state[at],state[at+1u],state[at+2u]),state[at+3u]);
+}
+fn gvStoreHistoryPlane(base:u32,cell:u32,plane:GeometricInterfacePlane){
+  let at=base+4u*cell;
+  state[at]=plane.normal.x;state[at+1u]=plane.normal.y;
+  state[at+2u]=plane.normal.z;state[at+3u]=plane.offset;
+}
 fn gvFault(reason:u32,owner:u32,value:f32,capacity:f32,aux:f32){
   atomicOr(&conditioning[GV_CONTROL+4u],i32(reason));
   cm12RecordFailure(6u,owner,bitcast<vec4u>(vec4f(f32(reason),value,capacity,aux)));
@@ -132,6 +150,7 @@ fn publishGeometricTransportFrontierSource(@builtin(global_invocation_id)gid:vec
   state[sourceGamma()+cell]=state[destinationGamma()+cell];
   for(var component=0u;component<4u;component+=1u){
     state[sourceCellVelocity()+4u*cell+component]=state[destinationCellVelocity()+4u*cell+component];
+    state[gvSourceHistory()+4u*cell+component]=state[gvDestinationHistory()+4u*cell+component];
   }
 }
 @compute @workgroup_size(64)
@@ -214,7 +233,10 @@ fn seedGeometricVolumeDestination(@builtin(global_invocation_id)gid:vec3u){
   state[destinationDensity()+cell]=state[sourceDensity()+cell];
   state[destinationGamma()+cell]=1.0;
   let src=sourceCellVelocity()+4u*cell;let dst=destinationCellVelocity()+4u*cell;
-  for(var axis=0u;axis<4u;axis+=1u){state[dst+axis]=state[src+axis];}
+  for(var axis=0u;axis<4u;axis+=1u){
+    state[dst+axis]=state[src+axis];
+    state[gvDestinationHistory()+4u*cell+axis]=state[gvSourceHistory()+4u*cell+axis];
+  }
 }
 
 @compute @workgroup_size(1)
@@ -473,6 +495,9 @@ fn gvHighFlux(face:u32,sweep:f32,low:f32)->f32{
 fn gvSupportLoad(index:u32)->f32{
   return bitcast<f32>(atomicLoad(&conditioning[GV_SUPPORT+index]));
 }
+fn gvSupportWord(index:u32)->u32{
+  return bitcast<u32>(atomicLoad(&conditioning[GV_SUPPORT+index]));
+}
 fn gvSupportReduce(index:u32,value:f32,maximum:bool){
   if(!(value>=-3.402823466e38&&value<=3.402823466e38)){
     gvFault(13u,index,value,0.0,0.0);return;
@@ -500,11 +525,17 @@ fn beginGeometricTransportEnvelope(){
   for(var axis=0u;axis<3u;axis+=1u){
     atomicStore(&conditioning[GV_SUPPORT+axis],bitcast<i32>(3.402823466e38));
     atomicStore(&conditioning[GV_SUPPORT+3u+axis],bitcast<i32>(-3.402823466e38));
+    atomicStore(&conditioning[GV_SUPPORT+27u+axis],bitcast<i32>(3.402823466e38));
+    atomicStore(&conditioning[GV_SUPPORT+30u+axis],bitcast<i32>(-3.402823466e38));
+    atomicStore(&conditioning[GV_SUPPORT+33u+axis],0);
   }
+  atomicStore(&conditioning[GV_SUPPORT+36u],0);
+  atomicStore(&conditioning[GV_SUPPORT+37u],0);
 }
 @compute @workgroup_size(64)
 fn gatherGeometricTransportMaterialBounds(@builtin(global_invocation_id)gid:vec3u){
   let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID||gvFailed()){return;}
+  if(geometricSourceRate(cell)!=0.0){atomicStore(&conditioning[GV_SUPPORT+37u],1);}
   if(state[destinationDensity()+cell]==0.0&&geometricSourceRate(cell)<=0.0){return;}
   let lower=cellCenter(cell)-0.5*cellWidths(cell);
   let upper=cellCenter(cell)+0.5*cellWidths(cell);
@@ -522,6 +553,16 @@ fn gatherGeometricTransportVelocityBounds(@builtin(global_invocation_id)gid:vec3
   velocity/=aperture;
   let axis=rowAxis(row);
   gvSupportReduce(6u+axis,velocity,false);gvSupportReduce(9u+axis,velocity,true);
+  var material=false;let range=rowTermRange(row);
+  for(var term=range.x;term<range.y;term+=1u){
+    let cell=termCell(term);if(!cellActive(cell)){continue;}
+    let capacity=gvDonorCapacity(cell);
+    material=material||state[GV_CURRENT+cell]>gvRoundoff(capacity);
+  }
+  if(material){
+    gvSupportReduce(27u+axis,velocity,false);gvSupportReduce(30u+axis,velocity,true);
+    atomicAdd(&conditioning[GV_SUPPORT+33u+axis],1);
+  }
 }
 @compute @workgroup_size(64)
 fn gatherGeometricPreflightVelocityBounds(@builtin(global_invocation_id)gid:vec3u){
@@ -546,6 +587,55 @@ fn includeGeometricPreflightSourceBounds(){
     gvSupportReduce(9u+axis,p.inflowVelocity[axis],true);
   }
 }
+
+// Project each nonzero donor independently. The previous global material AABB
+// discarded spatial correlation between disconnected bodies, so a ball above
+// a pool reserved every dry page in the gap. This exact per-cell box keeps the
+// Cartesian page octant needed by diagonal transport while zero motion keeps
+// only the already-active donor page.
+@compute @workgroup_size(64)
+fn activateGeometricSweptCellSupport(@builtin(global_invocation_id)gid:vec3u){
+  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
+  if(state[destinationDensity()+cell]==0.0&&geometricSourceRate(cell)<=0.0){return;}
+  var minimumVelocity=vec3f(0.0);var maximumVelocity=vec3f(0.0);
+  let incidence=incidenceRange(cell);
+  for(var at=incidence.x;at<incidence.y;at+=1u){
+    let row=incidenceRecord(at).x;
+    if(!gvAcceptedPhysicalRow(row)){continue;}
+    let aperture=rowOpenFraction(row);let area=rowArea(row);
+    if(aperture<=0.0||area<=1e-8){continue;}
+    let axis=rowAxis(row);var velocity=state[sourceFaceVelocity()+row];
+    if(hasSolidBoundaries()){
+      velocity-=(1.0-aperture)*rowSolidVelocity(row);
+    }
+    velocity/=aperture;
+    let forced=velocity+p.frame.x*p.acceleration[axis];
+    let roundoff=gvRoundoff(cellOpenVolume(cell));
+    if(p.frame.x*area*abs(velocity)>roundoff){
+      minimumVelocity[axis]=min(minimumVelocity[axis],velocity);
+      maximumVelocity[axis]=max(maximumVelocity[axis],velocity);
+    }
+    if(p.frame.x*area*abs(forced)>roundoff){
+      minimumVelocity[axis]=min(minimumVelocity[axis],forced);
+      maximumVelocity[axis]=max(maximumVelocity[axis],forced);
+    }
+  }
+  let lower=vec3f(cellMinimum(cell))+p.frame.x*minimumVelocity;
+  let upper=vec3f(cellMinimum(cell))+cellWidths(cell)+p.frame.x*maximumVelocity;
+  let pageWidth=f32(BRICK_FINE_RESOLUTION);
+  let first=vec3i(floor(lower/pageWidth));
+  // Treat the swept volume as half-open. An unmoving cell whose upper face
+  // lands exactly on a page boundary must not claim the page across that face.
+  let last=vec3i(ceil(upper/pageWidth))-vec3i(1);
+  for(var z=first.z;z<=last.z;z+=1){for(var y=first.y;y<=last.y;y+=1){
+    for(var x=first.x;x<=last.x;x+=1){
+      let brick=cm12WorldOwnerAt(vec3i(x,y,z));
+      if(brick==INVALID||brickActive(brick)){continue;}
+      stageDemandedFrontierPage(brick);
+      atomicOr(&activity[activityRecord(brick)+9u],ACTIVITY_GEOMETRIC_SWEEP_RECEIVER);
+    }
+  }}
+}
 // Reserve an explicit physical sweep plus a face-support shell. This is a
 // spatial query against immutable bounds, not recursive dry-air activation.
 // The subsequent projected envelope and material coverage audit still reject
@@ -554,6 +644,17 @@ fn includeGeometricPreflightSourceBounds(){
 fn reserveGeometricPreflightEnvelopeSupport(@builtin(global_invocation_id)gid:vec3u){
   let brick=gid.x;
   if(brick>=p.dispatch.w||!cm12WorldLeafAllocated(brick)||brickActive(brick)){return;}
+  // Per-donor swept boxes above are exact within the resident catalogue. Keep
+  // the former global envelope only as a conservative fallback when one
+  // physical step can cross an entire page and sparse-world growth cannot yet
+  // encode the farther offset in its 3x3x3 frontier mask.
+  var crossesPage=false;
+  for(var axis=0u;axis<3u;axis+=1u){
+    crossesPage=crossesPage
+      ||abs(gvSupportLoad(12u+axis)-gvSupportLoad(axis))>=f32(BRICK_FINE_RESOLUTION)
+      ||abs(gvSupportLoad(15u+axis)-gvSupportLoad(3u+axis))>=f32(BRICK_FINE_RESOLUTION);
+  }
+  if(!crossesPage){return;}
   let lower=vec3f(cm12WorldLeafCoordinate(brick))*f32(BRICK_FINE_RESOLUTION);
   let upper=lower+vec3f(f32(BRICK_FINE_RESOLUTION*brickSpan(brick)));
   var intersects=true;
@@ -567,6 +668,8 @@ fn reserveGeometricPreflightEnvelopeSupport(@builtin(global_invocation_id)gid:ve
 
 @compute @workgroup_size(1)
 fn sealGeometricTransportEnvelope(){
+  var uniform=!geometricSolidMotionActive()&&p.inflowVelocity.w<=0.5
+    &&atomicLoad(&conditioning[GV_SUPPORT+37u])==0;
   for(var axis=0u;axis<3u;axis+=1u){
     let displacementLow=p.frame.x*gvSupportLoad(6u+axis);
     let displacementHigh=p.frame.x*gvSupportLoad(9u+axis);
@@ -575,7 +678,13 @@ fn sealGeometricTransportEnvelope(){
     let upper=gvSupportLoad(3u+axis)+displacementHigh+margin;
     atomicStore(&conditioning[GV_SUPPORT+12u+axis],bitcast<i32>(lower));
     atomicStore(&conditioning[GV_SUPPORT+15u+axis],bitcast<i32>(upper));
+    uniform=uniform&&gvSupportWord(33u+axis)>0u
+      &&gvSupportWord(27u+axis)==gvSupportWord(30u+axis);
   }
+  atomicStore(&conditioning[GV_SUPPORT+36u],select(0,1,uniform));
+}
+fn gvUniformTransportField()->bool{
+  return atomicLoad(&conditioning[GV_SUPPORT+36u])!=0;
 }
 fn gvOutsideTransportEnvelope(cell:u32)->bool{
   let lower=cellCenter(cell)-0.5*cellWidths(cell);
@@ -746,6 +855,7 @@ fn advanceGeometricVolumeSubstep(){
 }
 @compute @workgroup_size(1)
 fn finishGeometricVolumeTransport(){
+  geometricSourceFinishStagedCompensation();
   if(!gvFailed()&&gvLoad(3u)!=gvLoad(2u)){
     gvFault(12u,gvLoad(3u),f32(gvLoad(3u)),f32(gvLoad(2u)),f32(glLoad(5u)));
   }

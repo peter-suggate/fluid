@@ -52,6 +52,8 @@
     "test:dawn:sparse-cm12:ladder-3s": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_WEBGPU_BACKEND=${WEBGPU_BACKEND:-metal} node --import tsx tools/run-sparse-cm12-ladder-correctness-dawn.ts",
     "probe:dawn:adaptive-volume:dam-front": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_WEBGPU_BACKEND=${WEBGPU_BACKEND:-metal} node --import tsx tools/probe-adaptive-volume-dam-front-dawn.ts",
     "probe:dawn:adaptive-volume:translation": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_WEBGPU_BACKEND=${WEBGPU_BACKEND:-metal} node --import tsx tools/probe-geometric-uniform-translation-dawn.ts",
+    "probe:dawn:adaptive-volume:large-remap": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_WEBGPU_BACKEND=${WEBGPU_BACKEND:-metal} node --import tsx tools/probe-geometric-large-remap-dawn.ts",
+    "probe:dawn:adaptive-volume:remap-session": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_WEBGPU_BACKEND=${WEBGPU_BACKEND:-metal} node --import tsx tools/probe-geometric-remap-session-dawn.ts",
     "probe:dawn:adaptive-volume:vortex": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_WEBGPU_BACKEND=${WEBGPU_BACKEND:-metal} node --import tsx tools/probe-geometric-steady-vortex-dawn.ts",
     "test:webgpu:adaptive-mass:symmetric-expansion": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_WEBGPU_BACKEND=${WEBGPU_BACKEND:-metal} node --import tsx tools/run-adaptive-mass-symmetric-expansion-dawn.ts --steps=${STEPS:-20}",
     "test:webgpu:adaptive-mass:long-dam": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_WEBGPU_BACKEND=${WEBGPU_BACKEND:-metal} node --import tsx --test --test-concurrency=1 tests/sparse-world-long-dam-dawn.test.ts",

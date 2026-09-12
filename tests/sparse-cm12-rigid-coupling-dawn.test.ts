@@ -1,6 +1,7 @@
 import { sparseCM12DawnDefaultOptions } from "../lib/harness/sparse-cm12-dawn-defaults";
 import assert from "node:assert/strict";
 import test from "node:test";
+import { writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
 import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
@@ -57,6 +58,10 @@ dawnTest("Sparse CM12 couples the settled-tank rigid bodies without losing water
             await solver.assertSimulationHealthy();
           } catch (error) {
             const owner = /owner=(\d+)/.exec(String(error));
+            if (process.env.FLUID_GEOMETRIC_COMPONENT_QA === "1") {
+              await writeFile("/tmp/sparse-cm12-rigid-moving-dual-snapshot.json",
+                JSON.stringify(await solver.readGeometricMovingDualSnapshotQA()));
+            }
             console.error("geometric-rigid-failure", JSON.stringify({
               transport: await solver.readGeometricVolumeTransportReceiptQA(),
               cell: owner ? await solver.readAcceptedGeometricCellRowsQA(Number(owner[1])) : undefined,
@@ -91,6 +96,10 @@ dawnTest("Sparse CM12 couples the settled-tank rigid bodies without losing water
               physical: await solver.readAcceptedGeometricVolumeQA(),
             }));
             await assertHealthyWithVolumeQA();
+          }
+          if (process.env.FLUID_GEOMETRIC_ENDPOINT_QA === "1" && step === 16) {
+            await writeFile("/tmp/sparse-cm12-rigid-endpoint-snapshot.json",
+              JSON.stringify(await solver.readGeometricMovingDualSnapshotQA()));
           }
         }
         await device.queue.onSubmittedWorkDone();

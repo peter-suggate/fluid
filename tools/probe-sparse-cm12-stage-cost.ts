@@ -90,6 +90,7 @@ import {
 } from "../lib/core/sparse-cm12-frame-plan";
 import { fingerprintSparseCM12RepositorySources } from
   "./sparse-cm12-source-content-fingerprint";
+import { installNodeWebWorkerShim } from "./node-web-worker-shim";
 
 const argument = (name: string, fallback: string): string =>
   process.argv.slice(2).find((value) => value.startsWith(`--${name}=`))
@@ -121,9 +122,11 @@ Options:
                                      cells (power of two; omitted by default)
   --maximum-cell-size=N              Upper cell-size bound for the same region
   --freeze-topology=0|1              Freeze the initial accepted topology
+  --preparation-worker=0|1           Exercise topology preparation in a real Node worker
   --region-scope=domain|initial-dam  Region bounds (default domain)
   --gamma-diffusion=on|off           Conditioning A/B (default on)
   --surface-sharpening=on|off        Conditioning A/B (default on)
+  --presentation-surface=rdf|plic   Shared RDF or legacy PLIC publication
   --vex-packet-compaction=0|1        QA accepted-packet VEX dispatch A/B
   --coarse-transport-packing=0|1     QA cross-leaf B1/B2/B4 transport A/B
   --policy-leader-compaction=0|1     QA compact policy-tile planning A/B
@@ -179,9 +182,14 @@ const timeStep = argument("time-step", String(productionDefaults?.timeStep ?? "s
 const minimumCellSize = Number(argument("minimum-cell-size", "0"));
 const maximumCellSize = Number(argument("maximum-cell-size", "0"));
 const freezeTopology = argument("freeze-topology", "0") === "1";
+const preparationWorker = argument("preparation-worker", "0") === "1";
 const regionScope = argument("region-scope", "domain");
 const gammaDiffusion = argument("gamma-diffusion", String(productionDefaults?.gammaDiffusion ?? "on"));
 const surfaceSharpening = argument("surface-sharpening", String(productionDefaults?.surfaceSharpening ?? "on"));
+const presentationSurface = argument("presentation-surface", "rdf");
+if (presentationSurface !== "rdf" && presentationSurface !== "plic") {
+  throw new RangeError("presentation-surface must be rdf or plic");
+}
 const vexPacketCompaction = argument("vex-packet-compaction", "0") === "1";
 const coarseTransportPacking = argument("coarse-transport-packing", "0") === "1";
 const policyLeaderCompaction = argument("policy-leader-compaction", "0") === "1";
@@ -290,6 +298,9 @@ if (!buildScene) throw new RangeError(
   `scene must be mini16, mini32, mini64, long-dam, large-hydrostatic, `
     + `deep-hydrostatic, ocean-seiche, ocean, or symmetric-expansion; received ${sceneName}`,
 );
+if (preparationWorker && sceneName !== "cm12-figure-7") {
+  throw new RangeError("preparation-worker is a focused cm12-figure-7 probe option");
+}
 
 const median = (values: number[]): number => {
   if (values.length === 0) return Number.NaN;
@@ -498,12 +509,14 @@ class PressureTopologyCutoffComplete extends Error {
 await acquireWebGPUExclusiveLock("dawn-probe", "tools/probe-sparse-cm12-stage-cost.ts");
 let device: GPUDevice | undefined;
 let teardownSolver: { destroy(): void } | undefined;
+let workerShim: ReturnType<typeof installNodeWebWorkerShim> | undefined;
 try {
   usePerformanceInstrumentationStore.getState().setMode("timeline");
   const modulePath = process.env.WEBGPU_NODE_MODULE
     ?? fileURLToPath(new URL("../node_modules/webgpu/index.js", import.meta.url));
   const dawn = await import(pathToFileURL(modulePath).href) as NodeDawnProvider;
   Object.assign(globalThis, dawn.globals);
+  if (preparationWorker) workerShim = installNodeWebWorkerShim();
   const requestedDawnFeatures = (process.env.FLUID_WEBGPU_DAWN_FEATURES ?? "")
     .split(",").map((feature) => feature.trim()).filter((feature) => feature.length > 0);
   if (xctraceGateEnabled
@@ -571,6 +584,7 @@ try {
     presentationPageResolution: String(presentationPageResolution),
     gammaDiffusion,
     surfaceSharpening,
+    presentationSurface,
     ...(pressureRelativeTolerance === "" ? {} : {
       pressureRelativeTolerance: Number(pressureRelativeTolerance),
     }),
@@ -730,6 +744,7 @@ try {
   let priorFrameControlGeneration = initialFrameControl.acceptedGeneration;
   let priorFinalScalarMaskGeneration = initialFinalScalarMasks.generation;
   let residentGenerationCount = solver.info.topologyGenerationCount ?? 0;
+  const initialTopologyGenerationCount = residentGenerationCount;
   let residentFirstFrame = 1;
   let residentInitialFrameGeneration = initialFrameControl.acceptedGeneration;
   let residentInitialCommittedFrames = initialFrameControl.committedFrames;
@@ -759,7 +774,8 @@ try {
           topologyGenerationCount: solver.info.topologyGenerationCount,
           topologyGenerationDeferred: solver.info.topologyGenerationDeferred,
           topologyGenerationRequestedLeaves: solver.info.topologyGenerationRequestedLeaves,
-          topologyGenerationError: solver.info.topologyGenerationError })}`);
+          topologyGenerationError: solver.info.topologyGenerationError,
+          preparationWorker: workerShim?.receipt })}`);
         nextWaitingReport_ms = performance.now() + 1000;
       }
       await new Promise(setImmediate);
@@ -799,7 +815,8 @@ try {
     // simulation clock survives that replacement; compare successors within
     // the current resident, and independently retain the global step check.
     const currentResidentGenerationCount = solver.info.topologyGenerationCount ?? 0;
-    if (currentResidentGenerationCount !== residentGenerationCount) {
+    const residentReplacedThisFrame = currentResidentGenerationCount !== residentGenerationCount;
+    if (residentReplacedThisFrame) {
       assert.ok(currentResidentGenerationCount > residentGenerationCount,
         "resident generation must advance monotonically");
       residentGenerationCount = currentResidentGenerationCount;
@@ -1104,6 +1121,15 @@ try {
     const pressureAuthorityInspection = inspectSparseCM12PressureCutoverAuthorities(
       pressureAuthorities, pressureTopologyAttribution?.inputTopologyGeneration,
     );
+    // Pressure generations are GPU-local. On the first frame of a replacement,
+    // the long-lived host tracker cannot compare the retired resident's prior
+    // generation with the new resident's first receipt. Validate every field
+    // and fault invariant locally, then require an ordinary matched receipt on
+    // a later frame of this resident.
+    const replacementPressureInspection = preparationWorker && residentReplacedThisFrame
+      && pressureAuthorities?.status === "unavailable"
+      ? inspectSparseCM12PressureCutoverAuthorities(
+        { ...pressureAuthorities, status: "matched" }, undefined) : undefined;
     const pressureReceiptIssues = [...pressureAuthorityInspection.issues];
     if (!ptr) pressureReceiptIssues.push("PTR receipt is unavailable");
     else if (ptr.fault !== 0) pressureReceiptIssues.push(
@@ -1111,6 +1137,16 @@ try {
     );
     const pressureReceiptComplete = pressureAuthorityInspection.complete
       && ptr !== undefined && ptr.fault === 0;
+    const expectedCrossResidentIssue = pressureAuthorities
+      && pressureTopologyAttribution?.inputTopologyGeneration !== undefined
+      ? `authority input topology generation ${pressureAuthorities.inputTopologyGeneration}`
+        + ` does not match prior-frame pressure input ${pressureTopologyAttribution.inputTopologyGeneration}`
+      : undefined;
+    const pressureAuthorityReceiptTransitional = replacementPressureInspection?.complete === true
+      && ptr !== undefined && ptr.fault === 0
+      && expectedCrossResidentIssue !== undefined
+      && pressureAuthorityInspection.issues.length === 1
+      && pressureAuthorityInspection.issues[0] === expectedCrossResidentIssue;
     pressureTopologyWorkSamples.push({
       inputAttributionStatus: pressureTopologyAttribution?.status ?? "unavailable",
       ...(pressureTopologyAttribution?.inputTopologyGeneration === undefined ? {} : {
@@ -1136,11 +1172,15 @@ try {
       ptrCellExecutions: ptr?.cellExecutionCount ?? 0,
       ptrBrickDirtyLeaves: ptr?.brickDirtyLeafCount ?? 0,
       pressureAuthorityReceiptComplete: pressureReceiptComplete,
+      pressureAuthorityReceiptTransitional,
+      crossResidentGenerationContinuity: pressureAuthorityReceiptTransitional
+        ? "not-comparable" : "comparable",
       pressureAuthorityReceiptIssues: Object.freeze(pressureReceiptIssues),
       ...(pressureAuthorities === undefined ? {} : { pressureAuthorities }),
     });
     seen += 1;
-    if (enforcePressureReceipts && !pressureReceiptComplete) {
+    if (enforcePressureReceipts && !pressureReceiptComplete
+      && !pressureAuthorityReceiptTransitional) {
       diagnosticFailure = `sample ${seen} pressure receipt fault: ${
         pressureReceiptIssues.join("; ")}`;
       break;
@@ -1293,6 +1333,10 @@ try {
   const report = {
     volumeTransport,
     finalPressureHashes,
+    preparationWorker: preparationWorker ? { ...workerShim!.receipt,
+      initialTopologyGenerationCount,
+      finalTopologyGenerationCount: solver.info.topologyGenerationCount ?? 0,
+    } : undefined,
     probe: "sparse-cm12-stage-cost", scene: sceneName, samples: seen,
     warmupSamples: warmup,
     diagnostic: {
@@ -1417,7 +1461,9 @@ try {
       requiredSamples: sampled,
       passed: pressureTopologyWorkSamples.length === sampled
         && pressureTopologyWorkSamples.every((sample) =>
-          sample.pressureAuthorityReceiptComplete),
+          sample.pressureAuthorityReceiptComplete
+            || sample.pressureAuthorityReceiptTransitional)
+        && pressureTopologyWorkSamples.at(-1)?.pressureAuthorityReceiptComplete === true,
       attribution: "prior accepted topology receipt; never current end-frame commit",
     },
     quiescentFrames: committedSamples.filter((value) => value === 0).length,
@@ -1516,9 +1562,25 @@ try {
   }
   if (enforcePressureReceipts) {
     const incomplete = pressureTopologyWorkSamples.filter(
-      (sample) => !sample.pressureAuthorityReceiptComplete);
+      (sample) => !sample.pressureAuthorityReceiptComplete
+        && !sample.pressureAuthorityReceiptTransitional);
     assert.equal(incomplete.length, 0,
       `pressure cutover receipts missing/faulted: ${JSON.stringify(incomplete)}`);
+    assert.equal(pressureTopologyWorkSamples.at(-1)?.pressureAuthorityReceiptComplete, true,
+      "the final sample must have a matched pressure receipt after any resident replacement");
+  }
+  if (preparationWorker) {
+    const receipt = workerShim!.receipt;
+    assert.ok(receipt.created > 0, "Figure 7 must request asynchronous topology preparation");
+    assert.equal(receipt.posted, receipt.created, "each preparation worker must receive one request");
+    assert.ok(receipt.received > 0, "at least one preparation worker must return a recipe");
+    assert.ok(receipt.received <= receipt.created, "worker responses cannot exceed requests");
+    assert.equal(receipt.terminated, receipt.received,
+      "each completed preparation worker must already be terminated");
+    assert.ok(receipt.pending === 0 || receipt.pending === 1,
+      "at most the next frame's preparation may remain pending before probe teardown");
+    assert.ok((solver.info.topologyGenerationCount ?? 0) > initialTopologyGenerationCount,
+      "Figure 7 must hydrate and commit a prepared topology generation");
   }
 } catch (error) {
   if (!(error instanceof PressureTopologyCutoffComplete)) throw error;
@@ -1533,37 +1595,41 @@ try {
     })),
   }));
 } finally {
-  if (device) {
-    const manager = gpuCompilationManagerFor(device);
-    let teardownFailure: unknown;
-    try {
+  try {
+    if (device) {
+      const manager = gpuCompilationManagerFor(device);
+      let teardownFailure: unknown;
       try {
-        await manager.whenIdle();
-        await device.queue.onSubmittedWorkDone();
-      } catch (error) {
-        teardownFailure = error;
-      }
-      try {
-        teardownSolver?.destroy();
-      } catch (error) {
-        teardownFailure ??= error;
+        try {
+          await manager.whenIdle();
+          await device.queue.onSubmittedWorkDone();
+        } catch (error) {
+          teardownFailure = error;
+        }
+        try {
+          teardownSolver?.destroy();
+        } catch (error) {
+          teardownFailure ??= error;
+        } finally {
+          teardownSolver = undefined;
+        }
+        invalidateGPUCompilationManager(device, "Sparse CM12 stage-cost probe complete");
+        try {
+          await manager.whenIdle();
+          await device.queue.onSubmittedWorkDone();
+        } catch (error) {
+          teardownFailure ??= error;
+        }
       } finally {
-        teardownSolver = undefined;
+        device.destroy();
+        // Let Dawn's retained ProcessEvents callbacks observe the drained native
+        // device before this isolated process exits.
+        await new Promise<void>((resolve) => setImmediate(resolve));
       }
-      invalidateGPUCompilationManager(device, "Sparse CM12 stage-cost probe complete");
-      try {
-        await manager.whenIdle();
-        await device.queue.onSubmittedWorkDone();
-      } catch (error) {
-        teardownFailure ??= error;
-      }
-    } finally {
-      device.destroy();
-      // Let Dawn's retained ProcessEvents callbacks observe the drained native
-      // device before this isolated process exits.
-      await new Promise<void>((resolve) => setImmediate(resolve));
+      if (teardownFailure) throw teardownFailure;
     }
-    if (teardownFailure) throw teardownFailure;
+  } finally {
+    workerShim?.restore();
+    await releaseWebGPUExclusiveLock();
   }
-  await releaseWebGPUExclusiveLock();
 }

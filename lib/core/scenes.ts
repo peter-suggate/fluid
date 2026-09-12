@@ -2636,7 +2636,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   defineScene({
     id: "coarse-first-pool-impact",
     name: "Coarse-first · ball into still pool",
-    blurb: "A fine liquid ball falls into a broad hydrostatic pool. Coarse-first adaptation refines from curvature, energy and approaching liquid without authored refinement regions.",
+    blurb: "A fine liquid ball falls into a broad hydrostatic pool. Coarse-first adaptation refines from local curvature and energy while approaching liquid retains detail already established at the receiver.",
     audience: "validation", shelf: "Dam-break ladder", environment: "stage",
     methodProfile: { methodId: "adaptive-volume", quality: "balanced", overrides: {
       selectorMode: "coarse-first", timeStep: "paper", brickFineResolution: "8",

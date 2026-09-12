@@ -823,10 +823,17 @@ export const SPARSE_CM12_STAGES = Object.freeze({
   "presentation-publication": {
     label: "Presentation pages", band: "output", side: "left",
     controls: [{
+      kind: "param-choice", param: "presentationSurface", label: "Surface reconstruction",
+      options: [
+        { value: "rdf", label: "Shared RDF", hint: "Publish one watertight shared distance field reconstructed from accepted VOF fractions and PLIC normals. Transport remains PLIC." },
+        { value: "plic", label: "Legacy PLIC field", hint: "Publish the previous independently extended PLIC distance field for comparison. Transport remains PLIC." },
+      ],
+    }, {
       kind: "param-choice", param: "presentationColumnHeight", label: "Column height",
       options: [
-        { value: "on", label: "On", hint: "Use validated integrated column heights. Applies on the next simulation step." },
-        { value: "off", label: "Off", hint: "Contour density instead. Applies on the next simulation step without resetting." },
+        { value: "auto", label: "Auto", hint: "Use liquid volume to set surface height only in coarse columns filled continuously from the physical floor to a single surface. Keep the interface surface elsewhere. Applies on the next simulation step." },
+        { value: "on", label: "On", hint: "Use a broader local column check, including fine columns and some floating liquid. Keep the interface surface elsewhere. Applies on the next simulation step." },
+        { value: "off", label: "Off", hint: "Use the interface surface throughout. Applies on the next simulation step without resetting." },
       ],
     }, {
       kind: "param-choice", param: "surfaceMeshRefinement", label: "Mesh refinement",

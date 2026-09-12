@@ -8,9 +8,10 @@ import {
   getScenePreset,
 } from "../lib/core/scenes";
 import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
+import { inflowOutletCenter } from "../lib/core/inflow-boundary";
 import { refinementRegionCellBounds, refinementRegionLattice } from
   "../lib/core/refinement-regions";
-import { sceneCardForDefinition } from "../lib/core/scene-definition";
+import { sceneCardForDefinition, sceneDocument } from "../lib/core/scene-definition";
 import { buildEnvironmentProxyCatalog } from "../lib/core/voxel-environments";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
@@ -30,8 +31,6 @@ import {
 } from
   "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 import { adaptiveMassSolverOptions } from "../lib/methods/adaptive-volume/method";
-import { SPARSE_CM12_VELOCITY_EXTENSION_DEPTH } from
-  "../lib/methods/adaptive-volume/sparse-cm12-velocity-extension";
 import {
   decodeSparseCM12SignedPresentationKey,
   decodeSparseCM12FinePresentationSource,
@@ -94,7 +93,7 @@ test("ocean seiche collapses deep water into graded macro-bricks", () => {
   }
 });
 
-test("generation zero retains the authored dry velocity-extension band", () => {
+test("generation zero leaves stationary dry support inactive", () => {
   const scene = createOceanSeicheScene();
   const atlas = initializeSparseBrickAtlasFromScene(scene, {
     finestDimensions: adaptiveMassPresentationDimensionsForScene(scene),
@@ -106,50 +105,91 @@ test("generation zero retains the authored dry velocity-extension band", () => {
   const drySupport = atlas.bricks.filter((brick) => active.has(brick.key)
     && brick.density.every((density) => density <= 0));
 
-  assert.ok(drySupport.length > 0,
-    "the active topology must include air cells, not only liquid cells");
-  for (const brick of wet) for (const neighbor of sparseBrickFaceNeighbors(atlas, brick)) {
-    if (neighbor.density.every((density) => density <= 0)) {
-      assert.ok(active.has(neighbor.key),
-        `dry face neighbor ${neighbor.key} of wet brick ${brick.key} is inactive`);
-    }
-  }
-  assert.ok(drySupport.some((brick) => sparseBrickFaceNeighbors(atlas, brick)
-    .every((neighbor) => neighbor.density.every((density) => density <= 0))),
-  "the band must extend beyond the immediate liquid face receiver");
+  assert.equal(drySupport.length, 0,
+    "stationary sparse-air rows must not become represented dry pages");
+  assert.ok(wet.length > 0);
+  assert.ok(wet.every((brick) => active.has(brick.key)),
+    "every nonzero material page must remain active");
+  assert.ok(atlas.bricks.some((brick) => !active.has(brick.key)
+    && brick.density.every((density) => density <= 0)),
+  "the dry receiver catalogue must remain available for runtime motion");
+});
 
-  let matchedCoarseColumnCount = 0;
-  for (let z = 0; z < atlas.brickDimensions[2]; z += 1) {
-    for (let x = 0; x < atlas.brickDimensions[0]; x += 1) {
-      let surfaceY = -1;
-      let surface: (typeof atlas.bricks)[number] | undefined;
-      for (let y = 0; y < atlas.brickDimensions[1]; y += 1) {
-        const brick = sparseBrickContainingCoordinate(atlas, [x, y, z]);
-        if (brick?.density.some((density) => density > 0)) {
-          surfaceY = y;
-          surface = brick;
-        }
-      }
-      if (!surface) continue;
-      const surfaceWidth = 8 * sparseBrickSpan(surface) / surface.resolution;
-      const airWidths: number[] = [];
-      for (let y = surfaceY + 1; y < atlas.brickDimensions[1]; y += 1) {
-        const air = sparseBrickContainingCoordinate(atlas, [x, y, z]);
-        if (!air || air.density.some((density) => density > 0)) break;
-        airWidths.push(8 * sparseBrickSpan(air) / air.resolution);
-      }
-      assert.ok(airWidths.reduce((cells, width) => cells + 8 / width, 0)
-        >= SPARSE_CM12_VELOCITY_EXTENSION_DEPTH + 1,
-      `air column ${x},${z} does not cover the extension receiver`);
-      assert.ok(airWidths.every((width) => width <= surfaceWidth),
-        `air column ${x},${z} is coarser than its surface`);
-      if (surfaceWidth === 2 && airWidths.every((width) => width === 2)) {
-        matchedCoarseColumnCount += 1;
+test("half-pool generation zero remains sparse in pages and accepted cells", () => {
+  const scene = sceneDocument(getSceneDefinition("coarse-first-pool-impact-half"));
+  const atlas = initializeSparseBrickAtlasFromScene(scene, {
+    finestDimensions: adaptiveMassPresentationDimensionsForScene(scene),
+    brickFineResolution: 8,
+    coarseFirstCurvatureTolerance: 0.25,
+  });
+  const active = sparseCM12InitialActiveBrickKeys(scene, atlas, 2);
+  const activeBricks = atlas.bricks.filter((brick) => active.has(brick.key));
+  const acceptedCells = activeBricks.reduce((count, brick) =>
+    count + (active.has(brick.key) ? brick.resolution ** 3 : 0), 0);
+  const logicalPages = atlas.brickDimensions.reduce((count, width) => count * width, 1);
+
+  assert.equal(logicalPages, 384);
+  assert.equal(atlas.bricks.length, 372,
+    "allocated host pages must not expand to the complete logical box");
+  assert.equal(active.size, 164,
+    "generation zero must contain only material pages");
+  assert.equal(acceptedCells, 18_644,
+    "inactive receiver backing must not contribute accepted cell work");
+  assert.ok(activeBricks.every((brick) =>
+    brick.density.some((density) => density > 0)),
+  "generation zero must contain no represented dry page");
+});
+
+test("an authored inflow refines a hierarchical tank without overlapping its macro bulk", () => {
+  const referenceScene = createOceanSeicheScene();
+  const dimensions = adaptiveMassPresentationDimensionsForScene(referenceScene);
+  const reference = initializeSparseBrickAtlasFromScene(referenceScene, {
+    finestDimensions: dimensions,
+  });
+  const sourceScene = sceneDocument(getSceneDefinition("garden-hose"));
+  assert.ok(sourceScene.fluid.inflow);
+  const scene = createOceanSeicheScene();
+  scene.fluid.inflow = { ...sourceScene.fluid.inflow,
+    center_m: { x: 0, y: 0.1, z: -0.8 } };
+  const atlas = initializeSparseBrickAtlasFromScene(scene, {
+    finestDimensions: dimensions,
+  });
+
+  const occupied = new Set<string>();
+  for (const brick of atlas.bricks) {
+    const span = sparseBrickSpan(brick);
+    for (let z = 0; z < span; z += 1) for (let y = 0; y < span; y += 1) {
+      for (let x = 0; x < span; x += 1) {
+        const coordinate = [brick.coordinate[0] + x, brick.coordinate[1] + y,
+          brick.coordinate[2] + z].join(",");
+        assert.equal(occupied.has(coordinate), false,
+          `fixed page ${coordinate} has more than one owner`);
+        occupied.add(coordinate);
       }
     }
   }
-  assert.ok(matchedCoarseColumnCount > 0,
-    "coarse surface columns must retain coarse matched-rung air support");
+  assert.equal(sparseBrickAtlasStats(atlas).integratedMassFineCells,
+    sparseBrickAtlasStats(reference).integratedMassFineCells,
+    "adding a source must not duplicate the tank's initial liquid mass");
+  assert.ok(atlas.bricks.some((brick) => sparseBrickSpan(brick) > 1),
+    "local source refinement must preserve macro compression elsewhere");
+  assert.ok(atlas.bricks.length < 1.2 * reference.bricks.length,
+    "source refinement must remain local to its swept support path");
+
+  const outlet = inflowOutletCenter(scene.fluid.inflow);
+  const cellSize = Math.min(scene.container.width_m / dimensions[0],
+    scene.container.height_m / dimensions[1],
+    scene.container.depth_m / dimensions[2]);
+  const origin = [-0.5 * scene.container.width_m, 0,
+    -0.5 * scene.container.depth_m] as const;
+  const outletBrick = outlet && sparseBrickContainingCoordinate(atlas,
+    [outlet.x, outlet.y, outlet.z].map((value, axis) => Math.floor(
+      (value - origin[axis]!) / cellSize / atlas.brickFineResolution,
+    )) as [number, number, number]);
+  assert.ok(outletBrick);
+  assert.equal(sparseBrickSpan(outletBrick), 1);
+  assert.equal(outletBrick.resolution, atlas.brickFineResolution,
+    "the narrow aperture must retain finest face samples at its outlet");
 });
 
 test("a global min8 ocean starts with physical widths at least eight", () => {

@@ -7,14 +7,18 @@
  * see about one scene, not fifteen separate diagrams.
  */
 import {
-  buildSliceLattice, buildSliceSums, type LatticeCell, latticePlane,
-  type SliceLattice,
+  buildSliceLattice, type LatticeCell, latticeCellAt, type LatticePlane,
+  latticePlane, type SliceLattice,
 } from "../lib/methods/adaptive-volume/advance-slice/slice-lattice";
 import {
   type AdvanceSlice, clipUnitSquare, SLICE_BRICK, SLICE_RUNGS,
   sliceCell, sliceRowX, sliceRowY, UNIT_SQUARE,
 } from "../lib/methods/adaptive-volume/advance-slice/slice-solver";
 import type { AdvanceStageId } from "../lib/methods/adaptive-volume/advance-slice/advance-work";
+import type { SliceSharedRdfIsocontour } from
+  "../lib/methods/adaptive-volume/advance-slice/slice-presentation-publication";
+import { sliceRdfTriangles, type SliceRdfVertex } from
+  "../lib/methods/adaptive-volume/advance-slice/slice-rdf-triangulation";
 
 /**
  * The drawn palette, resolved from the page's own theme.
@@ -171,10 +175,98 @@ function drawSolidRaster(c: LensContext): void {
   g.globalAlpha = 1;
 }
 
+function clippedScalarTriangle(points: readonly SliceRdfVertex[]): number[] {
+  const polygon: [number, number, number][] = [];
+  for (let i = 0; i < points.length; i += 1) {
+    const a = points[i]!, b = points[(i + 1) % points.length]!;
+    if (a[2] <= 0) polygon.push([...a]);
+    if ((a[2] < 0) !== (b[2] < 0)) {
+      const t = a[2] / (a[2] - b[2]);
+      polygon.push([a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]), 0]);
+    }
+  }
+  return polygon.flatMap(point => [point[0], point[1]]);
+}
+
+function appendPolygon(g: CanvasRenderingContext2D, polygon: readonly number[], scale: number): void {
+  if (polygon.length < 6) return;
+  g.moveTo(polygon[0]! * scale, polygon[1]! * scale);
+  for (let i = 2; i < polygon.length; i += 2) g.lineTo(polygon[i]! * scale, polygon[i + 1]! * scale);
+  g.closePath();
+}
+
+function polygonArea(polygon: readonly number[]): number {
+  let twice = 0;
+  for (let index = 0; index < polygon.length; index += 2) {
+    const next = (index + 2) % polygon.length;
+    twice += polygon[index]! * polygon[next + 1]! - polygon[next]! * polygon[index + 1]!;
+  }
+  return Math.abs(twice) / 2;
+}
+
+export function rdfMinorityAreaDistorted(acceptedLiquid: number,
+  representedLiquid: number, area: number): boolean {
+  const accepted = acceptedLiquid <= area / 2 ? acceptedLiquid : area - acceptedLiquid;
+  const represented = acceptedLiquid <= area / 2 ? representedLiquid : area - representedLiquid;
+  const absoluteError = Math.abs(represented - accepted);
+  if (!(absoluteError > 1e-3 * area)) return false;
+  const smaller = Math.min(accepted, represented), larger = Math.max(accepted, represented);
+  return smaller <= 0 ? larger > 0 : larger > 1.5 * smaller;
+}
+
+export function sliceRdfPlicFallbackCells(s: AdvanceSlice, lattice: SliceLattice,
+  sharedRdf: SliceSharedRdfIsocontour): ReadonlySet<number> {
+  const result = new Set<number>(), stride = s.nx + 1, phi = sharedRdf.vertexPhiFine;
+  for (const cell of lattice.cells) {
+    if (!cell.open || cell.capacity < 0.999999 * cell.width * cell.height
+      || cell.fill <= 1e-6 || cell.fill >= 1 - 1e-6) continue;
+    const topologyY0 = s.ny - cell.y0 - cell.height;
+    let valid = true;
+    for (let y = topologyY0; y < topologyY0 + cell.height; y += 1)
+      for (let x = cell.x0; x < cell.x0 + cell.width; x += 1) {
+        const values = [phi[x + stride * y], phi[x + 1 + stride * y],
+          phi[x + stride * (y + 1)], phi[x + 1 + stride * (y + 1)]];
+        if (!values.every(Number.isFinite)) valid = false;
+      }
+    if (!valid) result.add(cell.topologyCell);
+  }
+  return result;
+}
+
+export interface SliceRdfDisplayCell {
+  readonly topologyCell: number;
+  readonly mode: "rdf" | "plic";
+  readonly reason: "shared-rdf" | "cut-cell" | "nonfinite-rdf";
+  /** The canonical shared samples consumed by the canvas, in topology coordinates. */
+  readonly samples: readonly { readonly x: number; readonly y: number; readonly value: number }[];
+}
+
+/** Exact per-partial-cell branch and scalar samples consumed by `drawSlice`. */
+export function inspectSliceRdfDisplay(s: AdvanceSlice, lattice: SliceLattice,
+  sharedRdf: SliceSharedRdfIsocontour): readonly SliceRdfDisplayCell[] {
+  const fallback = sliceRdfPlicFallbackCells(s, lattice, sharedRdf);
+  const stride = s.nx + 1, phi = sharedRdf.vertexPhiFine;
+  return lattice.cells.filter(cell => cell.open && cell.fill > 1e-6 && cell.fill < 1 - 1e-6)
+    .map(cell => {
+      const cut = cell.capacity < 0.999999 * cell.width * cell.height;
+      const topologyY0 = s.ny - cell.y0 - cell.height;
+      const samples: { x: number; y: number; value: number }[] = [];
+      for (let y = topologyY0; y <= topologyY0 + cell.height; y += 1)
+        for (let x = cell.x0; x <= cell.x0 + cell.width; x += 1)
+          samples.push({ x, y, value: phi[x + stride * y]! });
+      return {
+        topologyCell: cell.topologyCell,
+        mode: cut || fallback.has(cell.topologyCell) ? "plic" as const : "rdf" as const,
+        reason: cut ? "cut-cell" as const : fallback.has(cell.topologyCell)
+          ? "nonfinite-rdf" as const : "shared-rdf" as const,
+        samples,
+      };
+    });
+}
+
 /** Grid at each brick's rung, liquid cut by PLIC, bricks, then solids. */
-export function drawSlice(c: LensContext): void {
+export function drawSlice(c: LensContext, sharedRdf?: SliceSharedRdfIsocontour): void {
   const { g, s, lattice, scale: S } = c;
-  buildSliceSums(lattice, s);
   buildSliceLattice(lattice, s);
   g.clearRect(0, 0, s.nx * S, s.ny * S);
   g.fillStyle = PALETTE.ground;
@@ -182,12 +274,46 @@ export function drawSlice(c: LensContext): void {
 
   g.fillStyle = PALETTE.liquid;
   g.beginPath();
+  let plicFallback: ReadonlySet<number> = new Set<number>();
+  if (sharedRdf) {
+    const stride = s.nx + 1, phi = sharedRdf.vertexPhiFine;
+    plicFallback = sliceRdfPlicFallbackCells(s, lattice, sharedRdf);
+    for (let y = 0; y < s.ny; y += 1) for (let x = 0; x < s.nx; x += 1) {
+      const canvasY = s.ny - 1 - y;
+      // Immersed/cut-cell geometry does not yet expose the open polygon needed
+      // by RDF. It is rendered by the explicit PLIC/fill fallback below and is
+      // counted in the preview receipt rather than silently crossed.
+      const dense = sliceCell(s, x, canvasY), capacity = s.K[dense]!;
+      if (capacity < 0.999999) continue;
+      const acceptedFill = s.V[dense]! / Math.max(capacity, 1e-8);
+      // A pure accepted owner is stronger evidence than a render-only RDF.
+      // Publishing it directly prevents a shared-vertex fit from carving an
+      // enclosed opposite-phase cell out of homogeneous bulk. Mixed owners
+      // retain the shared RDF, including genuine subcell sheets and droplets.
+      if (acceptedFill >= 1 - 1e-6) {
+        g.rect(x * S, canvasY * S, S, S);
+        continue;
+      }
+      if (acceptedFill <= 1e-6) continue;
+      const owner = latticeCellAt(lattice, s, x + 0.5, canvasY + 0.5);
+      if (owner && plicFallback.has(owner.topologyCell)) continue;
+      const a = phi[x + stride * y]!;
+      const b = phi[x + 1 + stride * y]!;
+      const d = phi[x + stride * (y + 1)]!;
+      const e = phi[x + 1 + stride * (y + 1)]!;
+      if (![a, b, d, e].every(Number.isFinite)) continue;
+      for (const triangle of sliceRdfTriangles(x, canvasY, d, e, b, a))
+        appendPolygon(g, clippedScalarTriangle(triangle), S);
+    }
+  }
   for (const cell of lattice.cells) {
     if (!cell.open || cell.fill <= 1e-3) continue;
+    if (sharedRdf && cell.capacity >= 0.999999 * cell.width * cell.height
+      && !plicFallback.has(cell.topologyCell)) continue;
     const x = cell.x0 * S, y = cell.y0 * S;
     const w = cell.width * S, h = cell.height * S;
-    if (cell.fill >= 1 - 1e-3) { g.rect(x, y, w, h); continue; }
-    const plane = latticePlane(lattice, cell);
+    if (cell.fill >= 1 - 1e-6) { g.rect(x, y, w, h); continue; }
+    const plane = plicFallback.has(cell.topologyCell) ? cell.plane : latticePlane(lattice, cell);
     /* No published plane means the solver could not resolve this interface, so
      * the picture falls back to the monotone reading the solver itself falls
      * back to: the liquid held at the bottom of the cell. Gravity is +y here —
@@ -255,6 +381,35 @@ function velocityField(
   g.globalAlpha = 1;
 }
 
+/** One interface chord inside a cell: `[ax, ay, bx, by]` in unit-cell terms. */
+export type InterfaceSegment = readonly [number, number, number, number];
+
+const onCellEdge = (value: number): boolean => value < 1e-6 || value > 1 - 1e-6;
+
+/**
+ * The interface inside one cell, in unit-cell coordinates.
+ *
+ * `clipUnitSquare` returns the *liquid polygon*, and most of that polygon's
+ * boundary is cell edge. Only the chords that cross the box are the surface;
+ * keeping the rest would outline every cut cell instead of drawing the water
+ * line through it. Shared rather than inlined because both the interface stroke
+ * and the normal overlay have to agree on where the surface is — an arrow
+ * anchored by one rule to a line drawn by another is a picture of nothing.
+ */
+export function interfaceSegments(plane: LatticePlane): readonly InterfaceSegment[] {
+  const polygon = clipUnitSquare(UNIT_SQUARE, plane.nx, plane.ny, plane.offset);
+  const segments: InterfaceSegment[] = [];
+  for (let i = 0; i < polygon.length; i += 2) {
+    const j = (i + 2) % polygon.length;
+    const ax = polygon[i]!, ay = polygon[i + 1]!;
+    const bx = polygon[j]!, by = polygon[j + 1]!;
+    if (onCellEdge(ax) && onCellEdge(bx) && Math.abs(ax - bx) < 1e-6) continue;
+    if (onCellEdge(ay) && onCellEdge(by) && Math.abs(ay - by) < 1e-6) continue;
+    segments.push([ax, ay, bx, by]);
+  }
+  return segments;
+}
+
 /** Every PLIC segment, which is what presentation actually publishes. */
 function drawInterface(c: LensContext, color: string, width: number): void {
   const { g, lattice, scale: S } = c;
@@ -263,20 +418,12 @@ function drawInterface(c: LensContext, color: string, width: number): void {
   g.lineCap = "round";
   g.beginPath();
   for (const cell of lattice.cells) {
-    if (!cell.open || cell.fill <= 1e-3 || cell.fill >= 1 - 1e-3) continue;
+    if (!cell.open) continue;
     const plane = latticePlane(lattice, cell);
     if (!plane) continue;
-    const polygon = clipUnitSquare(UNIT_SQUARE, plane.nx, plane.ny, plane.offset);
     const x = cell.x0 * S, y = cell.y0 * S;
     const w = cell.width * S, h = cell.height * S;
-    const onEdge = (value: number): boolean => value < 1e-6 || value > 1 - 1e-6;
-    for (let i = 0; i < polygon.length; i += 2) {
-      const j = (i + 2) % polygon.length;
-      const ax = polygon[i], ay = polygon[i + 1];
-      const bx = polygon[j], by = polygon[j + 1];
-      /* a segment lying along a cell edge is the box, not the interface */
-      if (onEdge(ax) && onEdge(bx) && Math.abs(ax - bx) < 1e-6) continue;
-      if (onEdge(ay) && onEdge(by) && Math.abs(ay - by) < 1e-6) continue;
+    for (const [ax, ay, bx, by] of interfaceSegments(plane)) {
       g.moveTo(x + ax * w, y + ay * h);
       g.lineTo(x + bx * w, y + by * h);
     }
@@ -303,6 +450,161 @@ const cellMean = (
     count += 1;
   }
   return count ? total / count : 0;
+};
+
+/* ---- optional overlays ---------------------------------------------- */
+
+/**
+ * Two readings the picture implies but never states, drawn over any lens.
+ *
+ * The lab's other views are *lenses*: one per stage, mutually exclusive,
+ * chosen by the strip, and each one replaces the reading. These are not that.
+ * Volume fraction and the interface normal are what a cell carries at every
+ * stage, so they compose over whichever lens is selected instead of being two
+ * more stages to choose between — the same split the 3-D catalog draws between
+ * a field view and a decoration, and for the same reason.
+ *
+ * Both are already in the probe bubble, for one cell, under the pointer. These
+ * are those two rows across the whole grid at once, which is the question the
+ * probe cannot answer: not "what is this cell" but "where does this change".
+ */
+export type SliceOverlayId = "fraction" | "normal";
+
+export interface SliceOverlay {
+  /** The word on the toggle. */
+  readonly label: string;
+  /** What it draws, for the control's tooltip and the sidebar caption. */
+  readonly caption: string;
+  readonly keys: readonly LensKey[];
+  readonly draw: (c: LensContext) => void;
+}
+
+/** Declaration order, which is also draw order: washes first, lines over them. */
+export const SLICE_OVERLAY_ORDER = ["fraction", "normal"] as const;
+
+/**
+ * Below this a cell is vacuum, not dilute.
+ *
+ * Six decades under a full cell — the bottom of the residue band transport
+ * actually produces, and the same floor `dense-grid/density` draws vacuum at.
+ * A cell under it keeps its grid lines and nothing else: "is there any liquid
+ * here at all" is the first question this overlay has to answer, and a floor of
+ * tinted haze over empty cells is how that answer gets lost.
+ */
+export const FRACTION_FLOOR = 1e-6;
+
+/**
+ * Where a sub-half fraction sits on the residue ramp, in [0, 1].
+ *
+ * Volume fraction is not a linear quantity down here. Transport leaves residue
+ * across every decade between the floor and about 10⁻², and a linear ramp over
+ * [0, ½] buries all of it in the bottom two percent: every residue cell then
+ * draws the same near-nothing at the same near-zero alpha, which is the one
+ * failure this overlay exists to prevent. A unit of the ramp is a fixed number
+ * of decades instead, so the low end separates from itself.
+ */
+export function fractionResidueRamp(fill: number): number {
+  return Math.min(1, Math.max(0,
+    Math.log2(Math.max(fill, FRACTION_FLOOR) / FRACTION_FLOOR)
+    / Math.log2(0.5 / FRACTION_FLOOR)));
+}
+
+/**
+ * The fraction as the fewest characters that keep it honest.
+ *
+ * A cell is a handful of pixels wide, so the readout is sized to the answer
+ * rather than formatted uniformly: `.42` for anything the two decimals can
+ * carry, a bare `1` for a full cell, and `1e-4` once two decimals would round
+ * a resolved residue cell to `.00` and make it indistinguishable from vacuum.
+ * Overfull keeps its whole value — `1.04` is a fault the lab reports, and the
+ * digit that says how far past capacity the cell is, is the point of it.
+ */
+export function fractionReadout(fill: number): string {
+  if (fill > 1 + 1e-4) return fill.toFixed(2);
+  if (fill >= 0.995) return "1";
+  if (fill >= 0.005) return fill.toFixed(2).slice(1);
+  return `1e${Math.round(Math.log10(Math.max(fill, FRACTION_FLOOR)))}`;
+}
+
+/** Roughly the pixels `label` needs for a readout, at its 10px monospace. */
+const readoutPixels = (text: string): number => text.length * 6 + 5;
+
+export const SLICE_OVERLAYS: Readonly<Record<SliceOverlayId, SliceOverlay>> = {
+  fraction: {
+    label: "fraction",
+    caption: "V/K per accepted cell — the conserved quantity itself, read off the compact record rather than resampled. The water already draws the liquid half of the range geometrically, so the tint is spent where the geometry cannot help: the dilute decades below a half, which a cut line renders as a sliver too thin to see, and the overfull cells past V = K that the projection has to drain.",
+    keys: [["ink", "V/K"], ["transport", "dilute residue, by decade"],
+      ["alarm", "overfull, V > K"]],
+    draw(c) {
+      const { g, lattice, scale: S } = c;
+      for (const cell of lattice.cells) {
+        if (!cell.open || cell.fill <= FRACTION_FLOOR) continue;
+        const x = cell.x0 * S, y = cell.y0 * S;
+        const w = cell.width * S, h = cell.height * S;
+        const overfull = cell.fill > 1 + 1e-4;
+        /* The liquid band gets no wash. Between a half and a full cell the
+         * picture underneath is already the answer — a PLIC polygon covering
+         * that share of the cell — and tinting it would only dim the one part
+         * of this field the reader can already measure by eye. */
+        if (overfull) {
+          g.fillStyle = PALETTE.alarm;
+          g.globalAlpha = 0.42;
+          g.fillRect(x, y, w, h);
+          g.globalAlpha = 1;
+        } else if (cell.fill < 0.5) {
+          g.fillStyle = PALETTE.transport;
+          g.globalAlpha = 0.14 + 0.40 * fractionResidueRamp(cell.fill);
+          g.fillRect(x, y, w, h);
+          g.globalAlpha = 1;
+        }
+        const text = fractionReadout(cell.fill);
+        if (Math.min(w, h) < readoutPixels(text)) continue;
+        label(c, x + w / 2, y + h / 2, text, overfull ? PALETTE.alarm : PALETTE.ink);
+      }
+    },
+  },
+  normal: {
+    label: "normals",
+    caption: "The PLIC normal each cut cell carries, drawn from the middle of its own interface chord and pointing out of the liquid. This is the record transport and the pressure embedding both read, in the canvas frame the picture is drawn in — so a normal that disagrees with the line it sits on is a reconstruction fault, not a drawing one. A cut cell the reconstruction gave no normal at all is ringed rather than left blank.",
+    keys: [["output", "interface normal, out of the liquid"],
+      ["alarm", "cut cell with no reconstruction"]],
+    draw(c) {
+      const { g, lattice, scale: S } = c;
+      /* The surface the arrows are normal to, drawn with them. An arrow with no
+       * line under it is a direction attached to nothing, and this overlay is
+       * about the relationship between the two. */
+      drawInterface(c, PALETTE.output, 1.6);
+      g.fillStyle = PALETTE.output;
+      for (const cell of lattice.cells) {
+        if (!cell.open || cell.fill <= 1e-3 || cell.fill >= 1 - 1e-3) continue;
+        const x = cell.x0 * S, y = cell.y0 * S;
+        const w = cell.width * S, h = cell.height * S;
+        const plane = latticePlane(lattice, cell);
+        if (!plane) {
+          /* Cut, and unreconstructed. `drawSlice` falls back to holding the
+           * liquid at the bottom of such a cell, which looks like an answer;
+           * this is the mark that says it was not one. */
+          g.strokeStyle = PALETTE.alarm;
+          g.lineWidth = 1.4;
+          g.beginPath();
+          g.arc(x + w / 2, y + h / 2, Math.max(2.5, Math.min(w, h) * 0.17), 0, Math.PI * 2);
+          g.stroke();
+          continue;
+        }
+        const magnitude = Math.hypot(plane.nx, plane.ny);
+        if (magnitude < 1e-6) continue;
+        const reach = Math.max(6, 0.40 * Math.min(w, h));
+        g.strokeStyle = PALETTE.output;
+        for (const [ax, ay, bx, by] of interfaceSegments(plane)) {
+          const mx = x + 0.5 * (ax + bx) * w, my = y + 0.5 * (ay + by) * h;
+          arrow(g, mx, my, plane.nx / magnitude * reach, plane.ny / magnitude * reach, 1.3);
+          g.beginPath();
+          g.arc(mx, my, 1.7, 0, Math.PI * 2);
+          g.fill();
+        }
+      }
+    },
+  },
 };
 
 /* ---- one lens per stage -------------------------------------------- */

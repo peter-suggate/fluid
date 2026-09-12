@@ -64,6 +64,26 @@ test("recipes release temporary shader modules after their final pipeline depend
  assert.ok(retained.releaseAfter!.every(ids => !ids.includes(moduleId)), "resident-owned handles must survive hydration");
 });
 
+test("recipes preserve auto pipeline bind-group layout queries through hydration", async () => {
+ const recorder=createCM12ResourceRecorder({} as GPUSupportedLimits);
+ const module=recorder.device.createShaderModule({code:"@compute @workgroup_size(1) fn main() {}"});
+ const pipeline=await recorder.device.createComputePipelineAsync({layout:"auto",compute:{module,entryPoint:"main"}});
+ const layout=pipeline.getBindGroupLayout(0);
+ const group=recorder.device.createBindGroup({layout,entries:[]});
+ const recipe=structuredClone(recorder.finish({group}));
+ const query=recipe.operations.find(operation=>operation.method==="getBindGroupLayout");
+ assert.ok(query?.result !== undefined);
+ const creation=recipe.operations.find(operation=>operation.method==="createBindGroup");
+ assert.deepEqual((creation?.args[0] as {layout:unknown}).layout,{cm12Resource:query.result});
+
+ const replay=createCM12ResourceRecorder({} as GPUSupportedLimits);
+ const realized=await realizeCM12ResourceRecipe(replay.device,recipe);
+ const replayed=replay.finish(realized.state);
+ assert.ok(replayed.operations.some(operation=>operation.method==="getBindGroupLayout"));
+ assert.ok(replayed.operations.some(operation=>operation.method==="createBindGroup"));
+ realized.destroy();
+});
+
 test("resource hydration preserves cyclic maps, sets, views, and external identities", async () => {
  const recorder=createCM12ResourceRecorder({} as GPUSupportedLimits,[{size:16,usage:128}]);
  const external=recorder.externalResources[0]!;
@@ -164,13 +184,18 @@ test("a tiny B8 resident records and clones its complete construction without a 
   const recipe = structuredClone(await WebGPUSparseCM12Resident.recordPreparedGeneration(input));
   assert.ok(recipe.operations.some(operation=>operation.method==="createBuffer"));
   assert.ok(recipe.operations.some(operation=>operation.method==="createComputePipelineAsync"));
+  assert.ok(recipe.operations.some(operation=>operation.method==="getBindGroupLayout"),
+    "auto-layout pipeline bindings must remain symbolic until hydration");
   assert.ok(recipe.operations.some(operation=>operation.method==="writeBuffer"));
   for(const method of ["createCommandEncoder","beginComputePass","setPipeline",
    "setBindGroup","dispatchWorkgroups","end","finish","submit"])
    assert.ok(recipe.operations.some(operation=>operation.method===method),
     `aperture initialization must record ${method}`);
   const state=(recipe.state as {resident:Record<string,unknown>}).resident;
-  assert.equal(state.cellCount,1);
+  const accepted=state.initialGenerationCellIds as Uint32Array;
+  assert.equal(accepted.length,1);
+  assert.ok(Number(state.cellCount)>=accepted.length);
+  assert.ok([...accepted].every(id=>id<Number(state.cellCount)));
   assert.equal(state.simulationPipelinesReady,true);
   assert.ok(state.templateWords instanceof Uint32Array);
   assert.ok(state.currentSolidWorld);

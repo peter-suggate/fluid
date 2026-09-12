@@ -1,6 +1,6 @@
 /** Persistent external hose reservoir, consumed by the production edit encoder.
- * Amounts use finest-cell cubed units. The host preserves the first 16 floats
- * across resident replacement with a GPU copy; scratch is transient.
+ * Amounts use finest-cell cubed units. The host preserves all ledger floats
+ * across resident replacement with a GPU copy; per-brick scratch is transient.
  *
  * Requested = emitted + pending (subject to recorded f32 arithmetic residual).
  * Requested dose is pi*r^2*speed*dt, independent of solid overlap/residency.
@@ -18,7 +18,10 @@ export interface GeometricSourceLayout {
   readonly sourceRateBaseFloats?: number;
   readonly componentBaseWords?: number;
 }
-export const GEOMETRIC_SOURCE_LEDGER_FLOATS = 16;
+// Lanes 13/14 and 16..18 are private staging operands. Metal contracts an
+// in-invocation Kahan residual to zero; retaining the independently rounded
+// operands until an existing later dispatch makes the correction observable.
+export const GEOMETRIC_SOURCE_LEDGER_FLOATS = 20;
 export const GEOMETRIC_SOURCE_LEDGER = Object.freeze({
   pending: 0, requested: 1, emitted: 2, available: 3,
   factor: 4, eventRequested: 5, eventEmitted: 6, fault: 7,
@@ -34,6 +37,48 @@ export function createGeometricSourceWGSL(layout: GeometricSourceLayout): string
 const GEOMETRIC_SOURCE_LEDGER:u32=${layout.ledgerBaseFloats}u;
 const GEOMETRIC_SOURCE_SCRATCH:u32=${layout.brickScratchBaseFloats}u;
 const GEOMETRIC_SOURCE_BRICKS:u32=${layout.brickCapacity}u;
+const GS_STAGE_KIND:u32=13u;
+const GS_STAGE_FIRST_BEFORE:u32=14u;
+const GS_STAGE_FIRST_INCREMENT:u32=16u;
+const GS_STAGE_SECOND_BEFORE:u32=17u;
+const GS_STAGE_SECOND_INCREMENT:u32=18u;
+
+// The rounded totals and their operands are written by one dispatch and the
+// correction is reconstructed by a later dispatch. This storage boundary is
+// intentional: Metal otherwise reassociates the ordinary in-invocation Kahan
+// residual to zero. FastTwoSum's magnitude branch yields the exact f32 addition
+// error from independently loaded operands, including signed increments.
+fn geometricSourceStagedCompensation(total:f32,before:f32,increment:f32)->f32{
+  var error=0.0;
+  if(abs(before)>=abs(increment)){
+    error=(before-total)+increment;
+  }else{
+    error=(increment-total)+before;
+  }
+  return -error;
+}
+fn geometricSourceFinishStagedCompensation(){
+  let kind=u32(state[GEOMETRIC_SOURCE_LEDGER+GS_STAGE_KIND]);
+  if(kind==0u){return;}
+  state[GEOMETRIC_SOURCE_LEDGER+12u]=geometricSourceStagedCompensation(
+    state[GEOMETRIC_SOURCE_LEDGER],state[GEOMETRIC_SOURCE_LEDGER+GS_STAGE_FIRST_BEFORE],
+    state[GEOMETRIC_SOURCE_LEDGER+GS_STAGE_FIRST_INCREMENT]);
+  let secondTotal=select(state[GEOMETRIC_SOURCE_LEDGER+2u],
+    state[GEOMETRIC_SOURCE_LEDGER+1u],kind==1u);
+  let secondCompensation=geometricSourceStagedCompensation(secondTotal,
+    state[GEOMETRIC_SOURCE_LEDGER+GS_STAGE_SECOND_BEFORE],
+    state[GEOMETRIC_SOURCE_LEDGER+GS_STAGE_SECOND_INCREMENT]);
+  state[GEOMETRIC_SOURCE_LEDGER+select(9u,8u,kind==1u)]=secondCompensation;
+  state[GEOMETRIC_SOURCE_LEDGER+GS_STAGE_KIND]=0.0;
+}
+fn geometricSourceStagePair(kind:u32,firstBefore:f32,firstIncrement:f32,
+  secondBefore:f32,secondIncrement:f32){
+  state[GEOMETRIC_SOURCE_LEDGER+GS_STAGE_FIRST_BEFORE]=firstBefore;
+  state[GEOMETRIC_SOURCE_LEDGER+GS_STAGE_FIRST_INCREMENT]=firstIncrement;
+  state[GEOMETRIC_SOURCE_LEDGER+GS_STAGE_SECOND_BEFORE]=secondBefore;
+  state[GEOMETRIC_SOURCE_LEDGER+GS_STAGE_SECOND_INCREMENT]=secondIncrement;
+  state[GEOMETRIC_SOURCE_LEDGER+GS_STAGE_KIND]=f32(kind);
+}
 
 fn geometricSourceAvailable(cell:u32)->f32{
   return injectionCoverage(cell)*max(0.0,
@@ -57,6 +102,7 @@ fn gatherGeometricSourceCapacity(@builtin(global_invocation_id)gid:vec3u){
 
 @compute @workgroup_size(1)
 fn prepareGeometricSourceBudget(){
+  geometricSourceFinishStagedCompensation();
   let accepted=sparseCM12TopologyLifecycleAccepted();
   atomicStore(&activity[REGION_EDIT_BACKING_RECEIPT_WORD],select(2u,1u,accepted));
   state[GEOMETRIC_SOURCE_LEDGER+4u]=0.0;
@@ -69,15 +115,14 @@ fn prepareGeometricSourceBudget(){
   let previousPending=state[GEOMETRIC_SOURCE_LEDGER];
   let pendingIncrement=requested-state[GEOMETRIC_SOURCE_LEDGER+12u];
   let pending=previousPending+pendingIncrement;
-  state[GEOMETRIC_SOURCE_LEDGER+12u]=(pending-previousPending)-pendingIncrement;
   state[GEOMETRIC_SOURCE_LEDGER+11u]=previousPending;
   state[GEOMETRIC_SOURCE_LEDGER]=pending;
   state[GEOMETRIC_SOURCE_LEDGER+5u]=requested;
-  let increment=requested-state[GEOMETRIC_SOURCE_LEDGER+8u];
   let previousRequested=state[GEOMETRIC_SOURCE_LEDGER+1u];
-  let nextRequested=previousRequested+increment;
-  state[GEOMETRIC_SOURCE_LEDGER+8u]=(nextRequested-previousRequested)-increment;
-  state[GEOMETRIC_SOURCE_LEDGER+1u]=nextRequested;
+  let requestedIncrement=requested-state[GEOMETRIC_SOURCE_LEDGER+8u];
+  state[GEOMETRIC_SOURCE_LEDGER+1u]=previousRequested+requestedIncrement;
+  geometricSourceStagePair(1u,previousPending,pendingIncrement,
+    previousRequested,requestedIncrement);
   var available=0.0;var correction=0.0;
   for(var brick=0u;brick<GEOMETRIC_SOURCE_BRICKS;brick+=1u){
     let value=state[GEOMETRIC_SOURCE_SCRATCH+2u*brick]-correction;
@@ -126,6 +171,7 @@ fn emitGeometricSourceVolume(@builtin(global_invocation_id)gid:vec3u){
 
 @compute @workgroup_size(1)
 fn finalizeGeometricSourceLedger(){
+  geometricSourceFinishStagedCompensation();
   if(!sparseCM12TopologyLifecycleAccepted()){return;}
   var emitted=0.0;var correction=0.0;
   for(var brick=0u;brick<GEOMETRIC_SOURCE_BRICKS;brick+=1u){
@@ -135,13 +181,12 @@ fn finalizeGeometricSourceLedger(){
   let before=state[GEOMETRIC_SOURCE_LEDGER];
   let pendingIncrement=-emitted-state[GEOMETRIC_SOURCE_LEDGER+12u];
   let pending=before+pendingIncrement;
-  state[GEOMETRIC_SOURCE_LEDGER+12u]=(pending-before)-pendingIncrement;
   state[GEOMETRIC_SOURCE_LEDGER]=pending;
   state[GEOMETRIC_SOURCE_LEDGER+6u]=emitted;
-  let increment=emitted-state[GEOMETRIC_SOURCE_LEDGER+9u];
-  let prior=state[GEOMETRIC_SOURCE_LEDGER+2u];let total=prior+increment;
-  state[GEOMETRIC_SOURCE_LEDGER+9u]=(total-prior)-increment;
-  state[GEOMETRIC_SOURCE_LEDGER+2u]=total;
+  let prior=state[GEOMETRIC_SOURCE_LEDGER+2u];
+  let emittedIncrement=emitted-state[GEOMETRIC_SOURCE_LEDGER+9u];
+  state[GEOMETRIC_SOURCE_LEDGER+2u]=prior+emittedIncrement;
+  geometricSourceStagePair(2u,before,pendingIncrement,prior,emittedIncrement);
   state[GEOMETRIC_SOURCE_LEDGER+10u]=(pending+emitted)-before;
   // Preserve the signed rounding residual explicitly, never erase it by a
   // hidden reservoir clamp. Significant overdraft is a source-ledger fault.
@@ -149,6 +194,8 @@ fn finalizeGeometricSourceLedger(){
     state[GEOMETRIC_SOURCE_LEDGER+7u]=2.0;
   }
 }
+@compute @workgroup_size(1)
+fn completeGeometricSourceLedger(){geometricSourceFinishStagedCompensation();}
 ${createContinuousGeometricSourceWGSL(layout)}
 `;
 }
@@ -161,7 +208,8 @@ export function createGeometricSourceResidentWGSL(layout?: SparseGeometricSource
 function createContinuousGeometricSourceWGSL(layout: GeometricSourceLayout): string {
   if (layout.sourceRateBaseFloats === undefined || layout.componentBaseWords === undefined) {
     return `fn geometricSourceRate(cell:u32)->f32{return 0.0;}
-fn geometricSourceCommitMicrostep(dt:f32){}`;
+fn geometricSourceCommitMicrostep(dt:f32){}
+fn geometricSourceFinishStagedCompensation(){}`;
   }
   return /* wgsl */ `
 const GS_RATE:u32=${layout.sourceRateBaseFloats}u;
@@ -197,6 +245,7 @@ fn gsRoot(cell:u32)->u32{
 }
 @compute @workgroup_size(1)
 fn beginContinuousGeometricSource(){
+ geometricSourceFinishStagedCompensation();
  state[GEOMETRIC_SOURCE_LEDGER+7u]=0.0;
  state[GEOMETRIC_SOURCE_LEDGER+15u]=0.0;
  atomicStore(&conditioning[GS_COMPONENT+3u],0);
@@ -209,13 +258,12 @@ fn beginContinuousGeometricSource(){
  }
  let pending=state[GEOMETRIC_SOURCE_LEDGER];
  state[GEOMETRIC_SOURCE_LEDGER+11u]=pending;
- let increment=requested-state[GEOMETRIC_SOURCE_LEDGER+12u];let next=pending+increment;
- state[GEOMETRIC_SOURCE_LEDGER+12u]=(next-pending)-increment;
- state[GEOMETRIC_SOURCE_LEDGER]=next;
+ let pendingIncrement=requested-state[GEOMETRIC_SOURCE_LEDGER+12u];
+ state[GEOMETRIC_SOURCE_LEDGER]=pending+pendingIncrement;
  let total=state[GEOMETRIC_SOURCE_LEDGER+1u];
- let add=requested-state[GEOMETRIC_SOURCE_LEDGER+8u];let sum=total+add;
- state[GEOMETRIC_SOURCE_LEDGER+8u]=(sum-total)-add;
- state[GEOMETRIC_SOURCE_LEDGER+1u]=sum;
+ let requestedIncrement=requested-state[GEOMETRIC_SOURCE_LEDGER+8u];
+ state[GEOMETRIC_SOURCE_LEDGER+1u]=total+requestedIncrement;
+ geometricSourceStagePair(1u,pending,pendingIncrement,total,requestedIncrement);
 }
 @compute @workgroup_size(64)
 fn initializeContinuousGeometricSource(@builtin(global_invocation_id)gid:vec3u){
@@ -277,6 +325,7 @@ fn gatherContinuousGeometricSourceWeights(@builtin(global_invocation_id)gid:vec3
 }
 @compute @workgroup_size(1)
 fn prepareContinuousGeometricSourceBudget(){
+ geometricSourceFinishStagedCompensation();
  var total=0.0;var correction=0.0;
  for(var brick=0u;brick<GEOMETRIC_SOURCE_BRICKS;brick+=1u){
   let value=state[GEOMETRIC_SOURCE_SCRATCH+2u*brick]-correction;
@@ -356,13 +405,15 @@ fn activateContinuousGeometricSourcePages(@builtin(global_invocation_id)gid:vec3
  stageDemandedFrontierPage(brick);
 }
 fn geometricSourceCommitMicrostep(dt:f32){
+ geometricSourceFinishStagedCompensation();
  let emitted=state[GEOMETRIC_SOURCE_LEDGER+15u]*dt;if(emitted<=0.0){return;}
  let pending=state[GEOMETRIC_SOURCE_LEDGER];
  let decrement=-emitted-state[GEOMETRIC_SOURCE_LEDGER+12u];let next=pending+decrement;
- state[GEOMETRIC_SOURCE_LEDGER+12u]=(next-pending)-decrement;state[GEOMETRIC_SOURCE_LEDGER]=next;
+ state[GEOMETRIC_SOURCE_LEDGER]=next;
  let previous=state[GEOMETRIC_SOURCE_LEDGER+2u];
- let increment=emitted-state[GEOMETRIC_SOURCE_LEDGER+9u];let total=previous+increment;
- state[GEOMETRIC_SOURCE_LEDGER+9u]=(total-previous)-increment;state[GEOMETRIC_SOURCE_LEDGER+2u]=total;
+ let increment=emitted-state[GEOMETRIC_SOURCE_LEDGER+9u];
+ state[GEOMETRIC_SOURCE_LEDGER+2u]=previous+increment;
+ geometricSourceStagePair(2u,pending,decrement,previous,increment);
  state[GEOMETRIC_SOURCE_LEDGER+6u]+=emitted;
  state[GEOMETRIC_SOURCE_LEDGER+10u]=(next+emitted)-pending;
  if(!(next>=-8.0*1.1920928955078125e-7*max(abs(pending),abs(emitted)))){

@@ -31,8 +31,9 @@ const dawnModule = process.env.WEBGPU_NODE_MODULE;
 const dawnTest = dawnModule ? test : test.skip;
 
 const INITIAL_LONG_DAM_WET_TILE_COUNT = 80;
-// Coarse-first packs the authored reservoir and its dry support into 222 tiles.
-const INITIAL_LONG_DAM_TILE_COUNT = 222;
+// Coarse-first packs the authored reservoir and its immediate support shell
+// into 106 tiles; the wider logical travel domain remains unallocated.
+const INITIAL_LONG_DAM_TILE_COUNT = 106;
 const LONG_DAM_FAR_WALL_PAGE_X = 23;
 // The Sparse CM12 profile advances at the paper's 1/30 s, so the authored
 // four-second scene is 120 steps. The previous 1,200 retained the old 4 ms
@@ -282,7 +283,7 @@ dawnTest("public sparse world carries Long Dam's material front to the far wall"
       const initialPresentation = world.presentation();
       assert.equal(initialStatus.state, "ready");
       assert.equal(initialStatus.residentTiles, INITIAL_LONG_DAM_TILE_COUNT,
-        "generation zero must contain the default coarse-first 222-tile support topology");
+        "generation zero must contain the bounded coarse-first support topology");
       assert.equal(initialStatus.acceptedGeneration,
         initialPresentation.acceptedGeneration,
         "status and presentation must share one accepted-generation boundary");

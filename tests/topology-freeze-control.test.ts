@@ -11,6 +11,9 @@ test("topology freeze is pane-local, reversible, and cleared on a new timeline",
   const a = createRuntimeStore();
   const b = createRuntimeStore();
   a.getState().setSimulationTime(0.15);
+  // A store opens paused, so the clock is started here to have something a
+  // freeze could stop.
+  a.getState().setRunState("running");
   a.getState().setTopologyFrozen(true);
   assert.equal(a.getState().topologyFrozen, true);
   assert.equal(a.getState().simulationTime, 0.15);

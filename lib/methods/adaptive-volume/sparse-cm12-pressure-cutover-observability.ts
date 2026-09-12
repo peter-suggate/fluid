@@ -105,8 +105,12 @@ export function formatSparseCM12PressureCutoverAuthorities(
     + ` · work ${value.workCount} · executed/skipped ${value.executedCount}/${value.skippedCount}`
     + ` · direct/closure ${value.directCount}/${value.closureCount}`
     + ` · ${value.fault === 0 ? "fault 0" : `FAULT ${value.fault}@${value.firstFaultId}`}`;
+  const unavailableOnly = receipt.status === "unavailable"
+    && inspection.issues.length === 1
+    && inspection.issues[0] === "authority status is unavailable";
   const status = inspection.complete ? "Pressure local authorities: MATCHED"
-    : `Pressure local authorities: UNAVAILABLE/FAULT — ${inspection.issues.join("; ")}`;
+    : `Pressure local authorities: ${unavailableOnly ? "UNAVAILABLE" : "UNAVAILABLE/FAULT"}`
+      + ` — ${inspection.issues.join("; ")}`;
   return [status,
     "Face project: direct compiled dirty/pressure row masks",
     `${stage("PCF", receipt.pca)} · retired-family dirty ${

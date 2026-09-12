@@ -37,6 +37,9 @@ assert.equal(inspectSparseCM12PressureCutoverAuthorities(authorities(), 17).comp
 assert.match(formatSparseCM12PressureCutoverAuthorities(undefined), /UNAVAILABLE/);
 assert.match(formatSparseCM12PressureCutoverAuthorities(authorities(), 17),
   /Face project: direct compiled dirty\/pressure row masks/);
+assert.match(formatSparseCM12PressureCutoverAuthorities(
+  authorities({ status: "unavailable" }), 17),
+/Pressure local authorities: UNAVAILABLE — authority status is unavailable/);
 
 const wrongInput = authorities({ inputTopologyGeneration: 18 });
 assert.equal(inspectSparseCM12PressureCutoverAuthorities(wrongInput, 17).complete, false);
@@ -47,6 +50,10 @@ const faulted = authorities({ pca: { ...stage({ dirtyCount: 5, executedCount: 5,
 familyExecutedCount: [1, 1, 2, 1] } });
 assert.equal(inspectSparseCM12PressureCutoverAuthorities(faulted, 17).complete, false);
 assert.match(formatSparseCM12PressureCutoverAuthorities(faulted, 17), /FAULT 8@41/);
+assert.match(formatSparseCM12PressureCutoverAuthorities(
+  { ...faulted, status: "unavailable" }, 17), /UNAVAILABLE\/FAULT/);
+assert.match(formatSparseCM12PressureCutoverAuthorities(
+  { ...wrongInput, status: "unavailable" }, 17), /UNAVAILABLE\/FAULT/);
 
 const localSource = "fn localInvocation(id:u32)->u32{return id;} dispatchWorkgroupsIndirect";
 assert.doesNotThrow(() => assertSparseCM12PressureCutoverLocalSources({

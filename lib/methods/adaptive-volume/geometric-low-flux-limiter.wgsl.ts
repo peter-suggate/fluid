@@ -6,6 +6,7 @@ export function createGeometricLowFluxLimiterWGSL(layout: SparseGeometricVolumeL
 // Reuse the retired pressure-extension control allocation. All counters are
 // u32 except words 7/8, which store positive f32 diagnostic maxima.
 const GL_CONTROL:u32=${layout.airControlBaseWords}u;
+const GL_MOVING_MAX_DUAL_PASSES:u32=1024u;
 fn glLoad(word:u32)->u32{return bitcast<u32>(atomicLoad(&conditioning[GL_CONTROL+word]));}
 fn glStore(word:u32,value:u32){atomicStore(&conditioning[GL_CONTROL+word],bitcast<i32>(value));}
 fn glRunning()->bool{return gvMicroActive()&&glLoad(23u)==1u&&glLoad(3u)!=0u;}
@@ -52,6 +53,7 @@ fn glMovingVolumeReady(cell:u32,volume:f32,capacity:f32)->bool{
 fn beginGeometricLowFluxLimits(){
   if(!gvMicroActive()||glLoad(23u)!=0u){return;}
   glStore(3u,1u);glStore(4u,0u);glStore(6u,0u);
+  glStore(13u,0x7fffffffu);
   glStore(22u,1u);glStore(23u,1u);
   glPublishIndirect();
 }
@@ -68,8 +70,9 @@ fn initializeGeometricLowFluxLimits(@builtin(global_invocation_id)gid:vec3u){
   }
   if(geometricSolidMotionActive()){
     // Diagonal dual step tau=1/(2*sum incident |Q|) is conservative for
-    // the weighted incidence Laplacian. Start from the unmodified proposal.
-    state[GV_LOW+cell]=2.0*sweepWeight;state[GV_PLUS+cell]=0.0;state[GV_MINUS+cell]=0.0;
+    // the weighted incidence Laplacian. LOW retains the preceding proximal
+    // point while PLUS is the common extrapolated FISTA point.
+    state[GV_LOW+cell]=0.0;state[GV_PLUS+cell]=0.0;state[GV_MINUS+cell]=0.0;
   }else{
     state[GV_LOW+cell]=incoming;state[GV_PLUS+cell]=1.0;state[GV_MINUS+cell]=1.0;
   }
@@ -78,18 +81,19 @@ fn initializeGeometricLowFluxLimits(@builtin(global_invocation_id)gid:vec3u){
 fn updateGeometricLowFluxLimits(@builtin(global_invocation_id)gid:vec3u){
   let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID||!glRunning()){return;}
   if(geometricSolidMotionActive()){
-    var delta=0.0;
+    var delta=0.0;var sweepWeight=0.0;
     let faces=gvCellFaceRange(cell);
     for(var adjacency=faces.x;adjacency<faces.y;adjacency+=1u){
       let entry=gvCellFace(adjacency);let face=entry>>1u;let isNegative=(entry&1u)!=0u;
       delta+=geometricFctCellDelta(glMovingFaceFlux(face),isNegative);
+      sweepWeight+=abs(state[GV_FLUX+4u*face+3u]);
     }
     let volume=gvMicroStartingVolume(cell)+delta;let capacity=gvReceiverCapacity(cell);
     if(!(abs(volume)<=3.402823466e38)){
       gvFault(5u,cell,volume,capacity,delta);return;
     }
     let ready=glMovingVolumeReady(cell,volume,capacity);
-    let denominator=state[GV_LOW+cell];let previous=state[GV_PLUS+cell];
+    let denominator=2.0*sweepWeight;let previous=state[GV_PLUS+cell];
     var next=previous;
     if(denominator>0.0){
       let tau=1.0/denominator;
@@ -109,7 +113,13 @@ fn updateGeometricLowFluxLimits(@builtin(global_invocation_id)gid:vec3u){
     // pass, commit leaves that generation unchanged and final face publication
     // evaluates exactly the fluxes just audited. A finite iteration ceiling
     // is only a failure boundary, not proof that a feasible solution exists.
-    if(!ready){atomicAdd(&conditioning[GL_CONTROL+6u],1);}
+    if(!ready){
+      atomicAdd(&conditioning[GL_CONTROL+6u],1);
+      atomicMin(&conditioning[GL_CONTROL+13u],i32(cell));
+      if(glLoad(4u)+1u>=GL_MOVING_MAX_DUAL_PASSES){
+        gvFault(5u,cell,volume,capacity,select(0.0,1.0,next==previous));return;
+      }
+    }
     return;
   }
   var outgoing=0.0;var signedDelta=0.0;
@@ -158,24 +168,30 @@ fn updateGeometricLowFluxLimits(@builtin(global_invocation_id)gid:vec3u){
   // an unchanged factor with an invalid gather never counts as converged.
   if(!gvVolumeValid(candidateVolume,capacity)){
     atomicAdd(&conditioning[GL_CONTROL+6u],1);
+    atomicMin(&conditioning[GL_CONTROL+13u],i32(cell));
   }
 }
 @compute @workgroup_size(64)
 fn commitGeometricLowFluxLimits(@builtin(global_invocation_id)gid:vec3u){
   let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID||!glRunning()){return;}
   if(glLoad(6u)==0u){return;}
-  state[GV_PLUS+cell]=state[GV_MINUS+cell];
+  if(geometricSolidMotionActive()){
+    let x=state[GV_MINUS+cell];let prior=state[GV_LOW+cell];let k=f32(glLoad(4u));
+    state[GV_LOW+cell]=x;state[GV_PLUS+cell]=x+(k/(k+3.0))*(x-prior);
+  }else{state[GV_PLUS+cell]=state[GV_MINUS+cell];}
 }
 @compute @workgroup_size(1)
 fn advanceGeometricLowFluxLimits(){
   if(glRunning()){
     let passes=glLoad(4u)+1u;glStore(4u,passes);glStore(5u,glLoad(5u)+1u);
     atomicMax(&conditioning[GL_CONTROL+14u],i32(passes));
-    // Static receiver constraints propagate across directed through-flow
-    // chains. The former 128-pass work ceiling interrupted valid relaxation
-    // before its actual volume audit passed; it was not a stability bound.
-    let maximumPasses=select(1024u,128u,geometricSolidMotionActive());
-    let continueIteration=glLoad(6u)!=0u&&passes<maximumPasses;
+    let maximumPasses=select(1024u,GL_MOVING_MAX_DUAL_PASSES,geometricSolidMotionActive());
+    let invalid=glLoad(6u);
+    let continueIteration=invalid!=0u&&passes<maximumPasses;
+    if(invalid!=0u&&!continueIteration){
+      gvFault(5u,glLoad(13u),f32(passes),f32(invalid),-4.0);
+    }
+    if(continueIteration){glStore(13u,0x7fffffffu);}
     glStore(3u,select(0u,1u,continueIteration));
     glStore(23u,select(2u,1u,continueIteration));
   }

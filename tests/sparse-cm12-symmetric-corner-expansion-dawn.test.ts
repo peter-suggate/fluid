@@ -112,12 +112,13 @@ dawnTest("symmetric expansion allocates and wets sparse corner tiles",
         (coordinate[0] === 0 || coordinate[0] === brickDimensions[0] - 1)
         && (coordinate[2] === 0 || coordinate[2] === brickDimensions[2] - 1);
       const initial = await solver.readGPUActivityPolicy();
-      assert.equal(initial.bricks.filter((brick) => brick.active).length, 16,
-        "generation zero must include the face-normal air support band");
+      assert.equal(initial.bricks.filter((brick) => brick.active).length, 4,
+        "generation zero must contain only the four material pages");
       assert.equal(initial.bricks.filter((brick) =>
         brick.active && horizontalCorner(brick.coordinate)).length, 0,
-      "diagonal corners must remain absent beyond the authored face-normal band");
+      "stationary generation zero must not activate dry corner pages");
 
+      const initialMass = (scene.fluid.initialBrickSeeds_m?.length ?? 0) * brickSize ** 3;
       for (let step = 1; step <= SYMMETRY_STEPS; step += 1) {
         while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
         await solver.awaitFrameCompletion?.();
@@ -131,7 +132,10 @@ dawnTest("symmetric expansion allocates and wets sparse corner tiles",
         assert.ok(transport.maxRelativeBoundError <= 8 * 2 ** -23,
           `volume exceeded capacity beyond f32 roundoff: ${transport.maxRelativeBoundError}`);
         const stepFields = await solver.readDiagnosticFields(true);
-        const acceptedVolume = await solver.readAcceptedGeometricVolumeQA();
+        const acceptedVolume = (await solver.readAcceptedGeometricVolumeQA()).volumeFine3;
+        assert.ok(Math.abs(acceptedVolume - initialMass) / initialMass <= 3e-3,
+          `moving support lost accepted volume on step ${step}: ${
+            acceptedVolume}/${initialMass}`);
         volumeHistory.push({ step,
           volumeFine3: stepFields.density.reduce((sum, value) => sum + value, 0),
           acceptedVolume,
@@ -145,9 +149,9 @@ dawnTest("symmetric expansion allocates and wets sparse corner tiles",
           brick.active && horizontalCorner(brick.coordinate));
         if (step === 1) {
           assert.equal(activity.bricks.filter((brick) => brick.active).length, 32,
-            "coarse-first prediction must publish the full symmetric support closure on step one");
+            "the full symmetric support closure must remain active on step one");
           assert.equal(corners.length, 8,
-            "coarse-first prediction must include the complete diagonal corner orbit");
+            "the complete diagonal corner orbit must remain active on step one");
         } else {
           assert.equal(corners.length, 8,
             "the complete horizontal corner orbit must publish by step 3");
@@ -188,7 +192,6 @@ dawnTest("symmetric expansion allocates and wets sparse corner tiles",
               Math.floor(z / brickSize)])) continue;
             cornerMass += rho;
           }
-      const initialMass = (scene.fluid.initialBrickSeeds_m?.length ?? 0) * brickSize ** 3;
       assert.ok(Math.abs(totalMass - initialMass) / initialMass <= 3e-3,
         `symmetric expansion lost fluid mass: ${totalMass}/${initialMass}`);
       assert.ok(minimumDensity >= -8 * 2 ** -23 && maximumDensity <= 1 + 8 * 2 ** -23,

@@ -806,10 +806,10 @@ class SimulationController {
     this.session(paneId).runtime.getState().setNotice(!runtimePlan.fluidSolver
       ? `${card.name} opened · no fluid solver, so nothing waits on one`
       : `${card.name} opened · dt ${effectiveStep_s.toFixed(4)} s`);
-    // The clock a scene opens on is the host's: with two panes attached,
-    // starting only the pane that was opened would leave the other holding the
-    // transport paused, and neither would move.
-    this.setRunState(runtimePlan.fluidSolver ? "running" : "paused");
+    // A scene opens paused, at the state it was authored in, and the reader
+    // starts it. The call is still the host's: with two panes attached the
+    // transport is one clock, so both arrive at t=0 together.
+    this.setRunState("paused");
     useShellStore.getState().enterStudio();
     return true;
   }

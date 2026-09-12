@@ -96,6 +96,7 @@
 .iters select{appearance:none;border:1px solid var(--line-strong);background:var(--panel-soft);color:var(--ink);border-radius:var(--radius-s);padding:5px 8px;font:var(--text-label);cursor:pointer}
 .iters select:hover{border-color:var(--accent-line)}
 .iters select:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.cost{min-width:6ch;text-align:right}
 .themeSlot{flex:none;display:flex;align-items:center}
 
 /* ---- workspace ------------------------------------------------------ */
@@ -117,14 +118,48 @@
 .read{display:block;color:var(--dim);letter-spacing:.03em}
 .read b{color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}
 .faulted b{color:var(--red)}
+/* The one readout that answers the pointer: it is also the signpost to the
+   menu that sets it. */
+.hint{pointer-events:auto;cursor:context-menu}
 .key{display:flex;align-items:center;gap:6px;color:var(--muted);font:var(--text-micro);letter-spacing:var(--track-wide);text-transform:uppercase;background:var(--overlay);border:1px solid var(--line);border-radius:999px;padding:2px 10px 2px 6px;backdrop-filter:var(--frost-chip)}
 .key i{width:10px;height:10px;border-radius:2px;display:inline-block}
+/* A legend entry that is also a switch. The row sits inside `.hud`, which is
+   inert by design so the pointer keeps reaching the canvas underneath — these
+   two chips are the only things in it that want the pointer back. */
+.keyToggle{pointer-events:auto;cursor:pointer}
+.keyToggle:hover{border-color:var(--accent-line);color:var(--ink)}
+.keyToggle[aria-pressed=true]{background:var(--accent-wash);border-color:var(--accent-line);color:var(--accent-strong)}
+.keyToggle:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 
 .probe{position:absolute;pointer-events:none;z-index:5;background:var(--panel);border:1px solid var(--line-strong);border-radius:var(--radius-s);padding:9px 11px;font:var(--text-readout);width:180px;box-shadow:var(--shadow-lift);backdrop-filter:var(--frost)}
 .probeHead{font:var(--text-micro);letter-spacing:var(--track-wide);text-transform:uppercase;color:var(--dim);margin-bottom:6px}
 .probeRow{display:flex;justify-content:space-between;gap:16px}
 .probeRow span:first-child{color:var(--dim)}
 .probeRow span:last-child{font-variant-numeric:tabular-nums;color:var(--ink)}
+
+/* The right-click menu: what shapes the solve, opened on the water it shapes.
+   Above the probe, because it is the thing the pointer just asked for. */
+.menu{position:absolute;z-index:6;width:244px;display:grid;gap:10px;padding:10px;background:var(--panel);border:1px solid var(--line-strong);border-radius:var(--radius-m);box-shadow:var(--shadow-lift);backdrop-filter:var(--frost)}
+.menuGroup{display:grid;gap:5px}
+.menuGroup+.menuGroup{padding-top:10px;border-top:1px solid var(--line)}
+.menuLabel{display:flex;align-items:baseline;justify-content:space-between;gap:8px;font:var(--text-micro);letter-spacing:var(--track-wide);text-transform:uppercase;color:var(--dim)}
+.menuLabel b{color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}
+.menuItem{display:grid;gap:2px;text-align:left;border:1px solid transparent;background:none;color:var(--ink);border-radius:var(--radius-s);padding:5px 8px;cursor:pointer;font:inherit}
+.menuItem b{font:var(--text-label)}
+.menuItem em{font:var(--text-micro);font-style:normal;color:var(--dim);line-height:1.35}
+.menuItem:hover{background:var(--panel-soft);border-color:var(--line-strong)}
+.menuItem[aria-pressed=true]{background:var(--accent-wash);border-color:var(--accent-line);color:var(--accent-strong)}
+.menuItem[aria-pressed=true] em{color:var(--accent-strong);opacity:.8}
+.menuRange{width:100%;accent-color:var(--accent);height:5px}
+
+/* The proposed drop. Centred exactly as the canvas is, so its viewBox and the
+   lattice are the same coordinates and nothing has to convert between them.
+   Drawn in the liquid tone, because that is what it is about to become. */
+.aim{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);pointer-events:none;z-index:4;overflow:visible}
+.aimBall{fill:var(--slice-liquid);fill-opacity:.26;stroke:var(--slice-liquid);stroke-width:1.5}
+/* The pages the drop would wake. Dashed, and in the adaptivity tone the rung
+   lens already uses, so a reader reads them as topology and not as water. */
+.aimBrick{fill:none;stroke:var(--slice-adaptivity);stroke-width:1;stroke-dasharray:3 3;opacity:.6}
 
 /* ---- strip ---------------------------------------------------------- */
 .strip{padding:9px 12px 10px;border-top:1px solid var(--line);background:var(--panel-soft)}

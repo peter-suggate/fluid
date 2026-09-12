@@ -1,151 +1,149 @@
 /**
- * The lattice the slice is *drawn* on.
+ * Readback view of the accepted two-dimensional sparse authority.
  *
- * The solver runs uniformly; the picture must not. A brick carries a rung, and
- * everything the lab draws inside that brick — the cell grid, the volume, the
- * PLIC line, a probed value — is aggregated to it. That is the honest picture
- * of an adaptive solver: coarse blocks where the water is still, single fine
- * cells along the interface, and the two meeting across a 2:1 port.
- *
- * Aggregation runs off a summed-area table so a brick at rung 1 costs the same
- * to read as one at rung 8, and so the Youngs stencil can sample a block-sized
- * neighbourhood without walking it.
+ * Every entry is one compact numerical cell. The lattice does not invent a
+ * display rung: coarse cells, partial edge cells and mixed-rung seams are the
+ * same records consumed by pressure and geometric transport.
  */
-import {
-  type AdvanceSlice, SLICE_BRICK, SLICE_BX, SLICE_BY, SLICE_NX, SLICE_NY,
-  SLICE_RUNGS, plicOffset, sliceCell, youngsNormal,
-} from "./slice-solver";
+import { type AdvanceSlice, sliceCell } from "./slice-solver";
 
-export interface LatticeCell {
-  /** Low corner in fine cells, and the edge length in fine cells. */
-  readonly x0: number;
-  readonly y0: number;
-  readonly size: number;
-  readonly brick: number;
-  readonly volume: number;
-  readonly capacity: number;
-  readonly fill: number;
-  readonly open: boolean;
-}
-
-export interface SliceLattice {
-  readonly volumeSum: Float64Array;
-  readonly capacitySum: Float64Array;
-  cells: LatticeCell[];
-}
-
-export function createSliceLattice(): SliceLattice {
-  const words = (SLICE_NX + 1) * (SLICE_NY + 1);
-  return {
-    volumeSum: new Float64Array(words),
-    capacitySum: new Float64Array(words),
-    cells: [],
-  };
-}
-
-/** Rebuild both summed-area tables. O(cells), once per drawn frame. */
-export function buildSliceSums(lattice: SliceLattice, s: AdvanceSlice): void {
-  const stride = SLICE_NX + 1;
-  const { volumeSum, capacitySum } = lattice;
-  for (let y = 1; y <= SLICE_NY; y++) for (let x = 1; x <= SLICE_NX; x++) {
-    const i = y * stride + x, cell = sliceCell(x - 1, y - 1);
-    volumeSum[i] = s.V[cell] + volumeSum[i - 1] + volumeSum[i - stride]
-      - volumeSum[i - stride - 1];
-    capacitySum[i] = s.K[cell] + capacitySum[i - 1] + capacitySum[i - stride]
-      - capacitySum[i - stride - 1];
-  }
-}
-
-function boxSum(table: Float64Array, x0: number, y0: number, size: number): number {
-  const stride = SLICE_NX + 1;
-  const x1 = Math.min(SLICE_NX, x0 + size), y1 = Math.min(SLICE_NY, y0 + size);
-  const lx = Math.max(0, x0), ly = Math.max(0, y0);
-  if (x1 <= lx || y1 <= ly) return 0;
-  return table[y1 * stride + x1] - table[ly * stride + x1]
-    - table[y1 * stride + lx] + table[ly * stride + lx];
-}
-
-export const latticeVolume = (l: SliceLattice, x: number, y: number, size: number): number =>
-  boxSum(l.volumeSum, x, y, size);
-export const latticeCapacity = (l: SliceLattice, x: number, y: number, size: number): number =>
-  boxSum(l.capacitySum, x, y, size);
-
-/** Fill fraction of one block, or -1 where the block is entirely solid. */
-export function latticeFill(
-  l: SliceLattice, x: number, y: number, size: number,
-): number {
-  const capacity = boxSum(l.capacitySum, x, y, size);
-  return capacity <= 1e-6 ? -1 : boxSum(l.volumeSum, x, y, size) / capacity;
-}
-
-/** Every drawn cell, in brick-major order, at each brick's own rung. */
-export function buildSliceLattice(lattice: SliceLattice, s: AdvanceSlice): void {
-  const cells: LatticeCell[] = [];
-  for (let by = 0; by < SLICE_BY; by++) for (let bx = 0; bx < SLICE_BX; bx++) {
-    const brick = by * SLICE_BX + bx;
-    const across = SLICE_RUNGS[Math.max(0, s.rung[brick])];
-    const size = SLICE_BRICK / across;
-    for (let j = 0; j < across; j++) for (let i = 0; i < across; i++) {
-      const x0 = bx * SLICE_BRICK + i * size, y0 = by * SLICE_BRICK + j * size;
-      const capacity = boxSum(lattice.capacitySum, x0, y0, size);
-      const volume = boxSum(lattice.volumeSum, x0, y0, size);
-      cells.push({
-        x0, y0, size, brick, volume, capacity,
-        fill: capacity <= 1e-6 ? 0 : volume / capacity,
-        open: capacity > 1e-6,
-      });
-    }
-  }
-  lattice.cells = cells;
-}
-
-/** The lattice cell containing a point, at whatever rung its brick carries. */
-export function latticeCellAt(
-  lattice: SliceLattice, s: AdvanceSlice, x: number, y: number,
-): LatticeCell | null {
-  if (x < 0 || y < 0 || x >= SLICE_NX || y >= SLICE_NY) return null;
-  const bx = Math.min(SLICE_BX - 1, (x / SLICE_BRICK) | 0);
-  const by = Math.min(SLICE_BY - 1, (y / SLICE_BRICK) | 0);
-  const brick = by * SLICE_BX + bx;
-  const size = SLICE_BRICK / SLICE_RUNGS[Math.max(0, s.rung[brick])];
-  const x0 = bx * SLICE_BRICK + Math.floor((x - bx * SLICE_BRICK) / size) * size;
-  const y0 = by * SLICE_BRICK + Math.floor((y - by * SLICE_BRICK) / size) * size;
-  const capacity = boxSum(lattice.capacitySum, x0, y0, size);
-  const volume = boxSum(lattice.volumeSum, x0, y0, size);
-  return {
-    x0, y0, size, brick, volume, capacity,
-    fill: capacity <= 1e-6 ? 0 : volume / capacity,
-    open: capacity > 1e-6,
-  };
-}
-
+/**
+ * A reconstructed interface, ready to clip against the unit square.
+ *
+ * `nx, ny` point out of the liquid in the canvas frame (y down) and `offset` is
+ * measured from the cell's low corner, not its centre — the conversion happens
+ * once, in `buildSliceLattice`, so no consumer has to remember it.
+ */
 export interface LatticePlane {
   readonly nx: number;
   readonly ny: number;
   readonly offset: number;
 }
 
-/**
- * The PLIC plane of a drawn cell.
- *
- * The Youngs stencil samples blocks of this cell's own size rather than the
- * fine field, so the reconstruction is continuous across a brick boundary
- * where the two sides carry different rungs — a line that changed slope at
- * every port would read as the artefact it is not.
- */
-export function latticePlane(
-  lattice: SliceLattice, cell: LatticeCell,
-): LatticePlane | null {
-  const fill = cell.fill;
-  if (fill <= 1e-3 || fill >= 1 - 1e-3) return null;
-  const normal = youngsNormal((dx, dy) => {
-    const value = latticeFill(
-      lattice, cell.x0 + dx * cell.size, cell.y0 + dy * cell.size, cell.size);
-    return value < 0 ? (fill > 0.5 ? 1 : 0) : value;
-  });
-  if (!normal) return null;
+export interface LatticeCell {
+  /** Bounds in the canvas convention: x right, y down, finest-cell units. */
+  readonly x0: number;
+  readonly y0: number;
+  readonly width: number;
+  readonly height: number;
+  /** Compatibility alias for square, non-edge cells. */
+  readonly size: number;
+  readonly brick: number;
+  readonly topologyCell: number;
+  /** Extensive unit-depth quantities, in finest-cell squared units. */
+  readonly volume: number;
+  readonly capacity: number;
+  readonly fill: number;
+  readonly open: boolean;
+  readonly plane: LatticePlane | null;
+}
+
+export interface SliceLattice {
+  nx: number;
+  ny: number;
+  volumeSum: Float64Array;
+  capacitySum: Float64Array;
+  cells: LatticeCell[];
+}
+
+export function createSliceLattice(s?: Pick<AdvanceSlice, "nx" | "ny">): SliceLattice {
+  const nx = s?.nx ?? 0, ny = s?.ny ?? 0;
   return {
-    nx: normal.nx, ny: normal.ny,
-    offset: plicOffset(fill, normal.nx, normal.ny),
+    nx, ny,
+    volumeSum: new Float64Array((nx + 1) * (ny + 1)),
+    capacitySum: new Float64Array((nx + 1) * (ny + 1)),
+    cells: [],
   };
+}
+
+function resize(lattice: SliceLattice, s: Pick<AdvanceSlice, "nx" | "ny">): void {
+  if (lattice.nx === s.nx && lattice.ny === s.ny) return;
+  lattice.nx = s.nx;
+  lattice.ny = s.ny;
+  lattice.volumeSum = new Float64Array((s.nx + 1) * (s.ny + 1));
+  lattice.capacitySum = new Float64Array((s.nx + 1) * (s.ny + 1));
+  lattice.cells = [];
+}
+
+/** Dense summed-area readback used by lenses which inspect finest pixels. */
+export function buildSliceSums(lattice: SliceLattice, s: AdvanceSlice): void {
+  resize(lattice, s);
+  const stride = s.nx + 1;
+  lattice.volumeSum.fill(0);
+  lattice.capacitySum.fill(0);
+  for (let y = 1; y <= s.ny; y += 1) for (let x = 1; x <= s.nx; x += 1) {
+    const at = y * stride + x, dense = sliceCell(s, x - 1, y - 1);
+    lattice.volumeSum[at] = s.V[dense]! + lattice.volumeSum[at - 1]!
+      + lattice.volumeSum[at - stride]! - lattice.volumeSum[at - stride - 1]!;
+    lattice.capacitySum[at] = s.K[dense]! + lattice.capacitySum[at - 1]!
+      + lattice.capacitySum[at - stride]! - lattice.capacitySum[at - stride - 1]!;
+  }
+}
+
+function boxSum(table: Float64Array, lattice: SliceLattice,
+  x0: number, y0: number, width: number, height = width): number {
+  const stride = lattice.nx + 1;
+  const x1 = Math.min(lattice.nx, x0 + width), y1 = Math.min(lattice.ny, y0 + height);
+  const lx = Math.max(0, x0), ly = Math.max(0, y0);
+  if (x1 <= lx || y1 <= ly) return 0;
+  return table[y1 * stride + x1]! - table[ly * stride + x1]!
+    - table[y1 * stride + lx]! + table[ly * stride + lx]!;
+}
+
+export const latticeVolume = (l: SliceLattice, x: number, y: number,
+  width: number, height = width): number => boxSum(l.volumeSum, l, x, y, width, height);
+export const latticeCapacity = (l: SliceLattice, x: number, y: number,
+  width: number, height = width): number => boxSum(l.capacitySum, l, x, y, width, height);
+export function latticeFill(l: SliceLattice, x: number, y: number,
+  width: number, height = width): number {
+  const capacity = latticeCapacity(l, x, y, width, height);
+  return capacity <= 1e-6 ? -1 : latticeVolume(l, x, y, width, height) / capacity;
+}
+
+/** Rebuild from compact accepted cells, in production brick/cell order. */
+export function buildSliceLattice(lattice: SliceLattice, s: AdvanceSlice): void {
+  resize(lattice, s);
+  const topology = s.topology.accepted, fields = s.fields;
+  lattice.cells = topology.cells.map(cell => {
+    const width = cell.widthsFine[0], height = cell.widthsFine[1];
+    const y0 = s.ny - cell.maximumFine[1];
+    const area = cell.volumeFineCells;
+    const capacity = Math.fround(fields.capacity[cell.id]! * area);
+    const volume = Math.fround(fields.density[cell.id]! * area);
+    const fill = capacity > 1e-8 ? Math.fround(volume / capacity) : 0;
+    const px = fields.interfaceNormal[2 * cell.id]!;
+    const py = fields.interfaceNormal[2 * cell.id + 1]!;
+    /* Into the drawing's frame, both axes at once.
+     *
+     * The published record is written about the cell *centre*, with y up; a
+     * drawn cell is the unit square with y down. Reflecting y is just negating
+     * ny — a reflection about the centre leaves a centre-based offset alone —
+     * and moving the origin from the centre to the corner is the half-normal
+     * shift the solver's own `sliceLiquidPolygon` applies for the same reason.
+     * Skipping it is not a small error: it misplaces the interface by up to
+     * half a cell, which reads as a surface drawn on the wrong side of its own
+     * row. `offset` below is therefore always ready for `clipUnitSquare`. */
+    const ny = -py;
+    const plane = px === 0 && py === 0 ? null : {
+      nx: px, ny, offset: fields.interfaceOffset[cell.id]! + 0.5 * (px + ny),
+    };
+    return Object.freeze({
+      x0: cell.minimumFine[0], y0, width, height, size: width,
+      brick: cell.brickKey, topologyCell: cell.id,
+      volume, capacity, fill, open: capacity > 1e-8, plane,
+    });
+  });
+}
+
+/** Accepted compact cell containing a canvas-space point. */
+export function latticeCellAt(lattice: SliceLattice, s: AdvanceSlice,
+  x: number, y: number): LatticeCell | null {
+  if (x < 0 || y < 0 || x >= s.nx || y >= s.ny) return null;
+  return lattice.cells.find(cell => x >= cell.x0 && x < cell.x0 + cell.width
+    && y >= cell.y0 && y < cell.y0 + cell.height) ?? null;
+}
+
+/** PLIC record produced by the numerical reconstruction stage. */
+export function latticePlane(_lattice: SliceLattice, cell: LatticeCell): LatticePlane | null {
+  return cell.fill > 1e-3 && cell.fill < 1 - 1e-3 ? cell.plane : null;
 }

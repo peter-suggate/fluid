@@ -8,6 +8,22 @@
  * is a lens over that one picture rather than a diagram of its own. Picking a
  * stage changes what you can see about the water; it never changes the water.
  *
+ * Three controls do change it, and they are the only ones in the bar: the
+ * transport — Play, Step, Reset. They run the clock, they belong to no place
+ * on the picture, and they sit beside the clock they run on and what a step of
+ * it actually costs. Nothing in the sidebar is an intervention, and no lens is
+ * one; if a reading ever moves the water it has been written in the wrong
+ * place.
+ *
+ * Everything else that changes the run is reached by right-clicking the water:
+ * the drop, which lands a ball of liquid *at the point that was clicked*, and
+ * the two settings that shape the solve rather than run it — which surface the
+ * picture reconstructs, and how many pressure iterations a step may spend. All
+ * three are about a place or a picture rather than about the page, and the
+ * product's own rule is that a capability is contextual before it is chrome:
+ * a verb with a location is a right-click, not a button that arms a mode and
+ * waits.
+ *
  * Everything that is not the water is either a control or folded away. The
  * reader arrives at a running simulation with a caption on it; the stage's
  * sub-seams, the scene's provenance, the fidelity caveat and the table of what
@@ -38,23 +54,31 @@ import {
   type LatticePlane, type SliceLattice,
 } from "../lib/methods/adaptive-volume/advance-slice/slice-lattice";
 import {
-  type AdvanceSlice, advanceSlice, createAdvanceSlice, resetAdvanceSlice,
-  SLICE_RUNGS, sliceCell, sliceRowX, sliceRowY,
+  type AdvanceSlice, advanceSlice, createAdvanceSlice, injectAdvanceSliceLiquid,
+  resetAdvanceSlice, SLICE_RUNGS, sliceCell, sliceRowX, sliceRowY,
 } from "../lib/methods/adaptive-volume/advance-slice/slice-solver";
+import {
+  sliceDropFromCanvas, sliceInjectionDemandedBrickKeys,
+  type SliceInjectionReceipt,
+} from "../lib/methods/adaptive-volume/advance-slice/slice-liquid-injection";
 import {
   ADVANCE_PRODUCTION_SCENES, DEFAULT_ADVANCE_PRODUCTION_SCENE_ID,
   productionSceneSliceSeedById,
 } from "../lib/methods/adaptive-volume/advance-slice/production-scene-slice";
 import type { SliceSceneSeed } from
   "../lib/methods/adaptive-volume/advance-slice/slice-scene-seed";
+import { reconstructSliceSharedRdf, type SliceSharedRdfIsocontour } from
+  "../lib/methods/adaptive-volume/advance-slice/slice-presentation-publication";
 import {
   SPARSE_CM12_STAGE_BANDS, sparseCM12Stage,
 } from "../lib/methods/adaptive-volume/sparse-cm12-stages";
 import styles from "./AdvanceLab.module.css";
 import {
-  ADVANCE_LENSES, BAND_TONE, type Lens, paletteVar, REPRESENT_LENS,
+  ADVANCE_LENSES, BAND_TONE, type Lens, type LensKey, paletteVar, REPRESENT_LENS,
+  SLICE_OVERLAY_ORDER, SLICE_OVERLAYS, type SliceOverlayId,
   drawSlice, syncPalette,
 } from "./lenses";
+import { slicePresentationReady, slicePresentationRevision } from "./playback";
 
 /** Milliseconds between advances — slow enough to watch a rung change. */
 const FRAME_MS = 46;
@@ -65,8 +89,31 @@ const LIMITER_PASSES = 2;
 /** The probe bubble, so it can be kept inside the viewport as the pointer moves. */
 const PROBE_WIDTH = 180;
 const PROBE_HEIGHT = 132;
+/** The right-click menu, kept whole inside the picture the same way. */
+const MENU_WIDTH = 244;
+const MENU_HEIGHT = 320;
 /** Which scene the page is reading, kept in the URL so a refresh returns to it. */
 const SCENE_PARAM = "scene";
+/** Arms the drop, the same key the studio's BALL gesture answers to. */
+const DROP_KEY = "b";
+/** One key per overlay, named for the quantity rather than its position. */
+const OVERLAY_KEYS: Readonly<Record<SliceOverlayId, string>> =
+  { fraction: "f", normal: "n" };
+/** Smallest ball the solver can resolve, and the floor a sizing drag stops at. */
+const DROP_MINIMUM_FINE = 1;
+/* What a step costs is read off the median of this many of them, not off the
+ * last one. A single advance carries whatever the garbage collector and the
+ * compositor were doing at the time, and a number that jumps a factor of two
+ * between frames is a number nobody can read while the water runs. */
+const STEP_COST_SAMPLES = 9;
+
+/**
+ * The ball a first click makes: a twelfth of the lattice's shorter side, and
+ * never under two finest cells. The reduction of `defaultFluidBallRadius_m`,
+ * measured in cells because the lab has no metres on its canvas.
+ */
+const defaultDropRadius = (nx: number, ny: number): number =>
+  Math.max(2, Math.min(nx, ny) / 12);
 
 /* Step sizes the lab will run. The scene documents do not agree on one — most
  * resolve to CM12's paper regime, a handful of coarse fixtures to 1/60 s — so
@@ -79,6 +126,20 @@ const STEP_SIZES: readonly { readonly dt: number; readonly label: string }[] = [
   { dt: 1 / 60, label: "1/60 s" },
   { dt: 1 / 120, label: "1/120 s" },
 ];
+
+/**
+ * Take one advance's wall cost, and publish the median of the recent ones.
+ *
+ * Outside the component because the animation loop is mounted once and reads
+ * nothing from a render — a recorder that belonged to one would pin the loop to
+ * the first render's copy of it and quietly stop being the current one.
+ */
+function noteStepCost(ring: number[], ms: number,
+  publish: (median: number) => void): void {
+  ring.push(ms);
+  if (ring.length > STEP_COST_SAMPLES) ring.shift();
+  publish([...ring].sort((a, b) => a - b)[ring.length >> 1]);
+}
 
 /**
  * The loop the whole method is: four readings, of which only three encode.
@@ -112,8 +173,22 @@ const CELL_STATE: readonly (readonly [string, string, string])[] = [
 ];
 
 type Metric = "workgroups" | "dispatches";
+type SurfaceView = "plic" | "shared-rdf";
+
+/* Which surface the picture reconstructs. Both are read off the same accepted
+ * fractions and normals, so this is a choice of reconstruction and never of
+ * state — the water is identical under either. */
+const SURFACE_VIEWS: readonly { readonly id: SurfaceView; readonly label: string;
+  readonly note: string }[] = [
+  { id: "shared-rdf", label: "Shared RDF",
+    note: "one isocontour, shared across rungs" },
+  { id: "plic", label: "Transport PLIC",
+    note: "the volume-correct line the transport itself cuts" },
+];
 
 interface Readings {
+  /** Mutable slice generation this reading and its derived surface describe. */
+  readonly presentationRevision: string;
   readonly frame: number;
   readonly microsteps: number;
   readonly maxVelocity: number;
@@ -125,6 +200,9 @@ interface Readings {
   readonly bricks: number;
   readonly rungs: number;
   readonly fault: string | null;
+  /** Drops taken this run, and what the last one did. */
+  readonly injections: number;
+  readonly drop: SliceInjectionReceipt | null;
   /** The scene as the work model prices it, captured with the counts it prices. */
   readonly work: AdvanceWorkScene;
 }
@@ -136,8 +214,9 @@ const NO_SCENE: AdvanceWorkScene = {
 };
 const AT_REST: Readings = { frame: 0, microsteps: 1, maxVelocity: 0, drift: 0,
   churn: 0, markers: 0, cells: 0, rows: 0, bricks: 0, rungs: 0, fault: null,
-  work: NO_SCENE };
+  presentationRevision: "unpublished", injections: 0, drop: null, work: NO_SCENE };
 const read = (s: AdvanceSlice): Readings => ({
+  presentationRevision: slicePresentationRevision(s),
   frame: s.frame, microsteps: s.microsteps, maxVelocity: s.maxVelocity,
   drift: s.drift, churn: s.churn, markers: s.markers.length,
   cells: s.topology.accepted.cells.length,
@@ -146,8 +225,25 @@ const read = (s: AdvanceSlice): Readings => ({
   rungs: new Set(s.topology.accepted.bricks
     .filter(brick => brick.active !== false).map(brick => brick.resolution)).size,
   fault: s.fault ? s.fault.stage : null,
+  injections: s.injections, drop: s.lastInjection ?? null,
   work: workScene(s),
 });
+
+/**
+ * A ball the pointer is placing, in canvas fine cells.
+ *
+ * Held in React rather than painted into the slice, because the picture is
+ * redrawn only when the water moves: a cursor that repainted the lattice on
+ * every pointer-move would cost a full publication per mouse pixel. The circle
+ * is an overlay over the canvas, exactly as the probe bubble is.
+ */
+interface Aim {
+  readonly x: number;
+  readonly y: number;
+  readonly radius: number;
+  /** Bricks the drop would wake, drawn so a reader sees the cost before release. */
+  readonly demanded: readonly (readonly [number, number, number])[];
+}
 
 /** One cell, as the probe reads it: the drawn block plus the fine row state. */
 interface Probe {
@@ -275,10 +371,21 @@ export function AdvanceLab(): React.JSX.Element {
   const viewport = useRef<HTMLDivElement>(null);
   const slice = useRef<AdvanceSlice | null>(null);
   const lattice = useRef<SliceLattice | null>(null);
+  /* The slice is mutable, while React rendering is interruptible. Play may
+   * advance only after the preceding revision has actually reached the canvas;
+   * otherwise an RDF derived during render can be painted over a later VOF
+   * field and look exactly like the owner-local PLIC fallback. */
+  const paintedPresentationRevision = useRef<string | null>(null);
+  const paintedSharedRdf = useRef<SliceSharedRdfIsocontour | undefined>(undefined);
 
   const [selected, setSelected] = useState<AdvanceStageId>("conservative-transport");
   const [step, setStep] = useState<number | null>(null);
   const [metric, setMetric] = useState<Metric>("workgroups");
+  const [surfaceView, setSurfaceView] = useState<SurfaceView>("shared-rdf");
+  /* Off until asked for, like every fold in the sidebar: the water is the
+   * subject, and an annotation nobody turned on is chrome over it. */
+  const [overlays, setOverlays] = useState<ReadonlySet<SliceOverlayId>>(
+    () => new Set<SliceOverlayId>());
   const [sceneId, setSceneId] = useState(DEFAULT_ADVANCE_PRODUCTION_SCENE_ID);
   const [picking, setPicking] = useState(false);
   const [seed, setSeed] = useState<SliceSceneSeed | null>(null);
@@ -294,8 +401,41 @@ export function AdvanceLab(): React.JSX.Element {
   const [pinned, setPinned] = useState<Probe | null>(null);
   const [hover, setHover] = useState<{ probe: Probe; x: number; y: number } | null>(null);
   const [runtimeFault, setRuntimeFault] = useState<string | null>(null);
+  /* The one control on this page that changes the water rather than the
+   * reading of it. Armed, a press-drag-release places and sizes a ball; the
+   * probe under the pointer keeps working, because reading a cell is never the
+   * wrong thing to be doing. */
+  const [arming, setArming] = useState(false);
+  const [aim, setAim] = useState<Aim | null>(null);
+  const dragging = useRef<{ pointer: number; anchor: readonly [number, number];
+    moved: boolean } | null>(null);
   const [room, setRoom] = useState({ width: 960, height: 560 });
+  /* Everything that changes the run, opened on the water it applies to. The
+   * panel is placed in viewport pixels like the probe bubble; `at` is the same
+   * press in finest cells, which is what makes Drop a verb with a location
+   * rather than a mode — null when the press missed the canvas. */
+  const [menu, setMenu] = useState<{ x: number; y: number;
+    at: readonly [number, number] | null } | null>(null);
+  const menuPanel = useRef<HTMLDivElement>(null);
+  /* Wall-clock milliseconds one advance costs, which is not what the step is
+   * worth in physics and not what the work model prices — it is what this
+   * machine takes to do it, and the only reading on the page that would change
+   * if nothing but the code did. */
+  const [stepMs, setStepMs] = useState<number | null>(null);
+  const stepCosts = useRef<number[]>([]);
   const [themeTick, setThemeTick] = useState(0);
+
+  /* A press outside the panel is a decision to stop using it — including a
+   * press on the water, which is what a reader does next. */
+  useEffect(() => {
+    if (!menu) return;
+    const away = (event: PointerEvent): void => {
+      if (menuPanel.current?.contains(event.target as Node)) return;
+      setMenu(null);
+    };
+    window.addEventListener("pointerdown", away);
+    return () => window.removeEventListener("pointerdown", away);
+  }, [menu]);
 
   /* The animation loop is started once; it reads the live controls from here. */
   const live = useRef({ playing, walking, budget, dt });
@@ -322,11 +462,14 @@ export function AdvanceLab(): React.JSX.Element {
         return;
       }
       if (!live.current.playing || time - last < FRAME_MS) return;
-      last = time;
       const current = slice.current;
       if (!current) return;
+      if (!slicePresentationReady(paintedPresentationRevision.current, current)) return;
+      last = time;
+      const began = performance.now();
       try {
         advanceSlice(current, live.current.budget);
+        noteStepCost(stepCosts.current, performance.now() - began, setStepMs);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         live.current.playing = false;
@@ -361,6 +504,18 @@ export function AdvanceLab(): React.JSX.Element {
     return () => observer.disconnect();
   }, []);
 
+  /* Independent of each other and of the lens, so this is a set and not a
+   * mode: a reader comparing the fraction a cell holds against the normal it
+   * was given wants both at once, and making them exclusive would be the page
+   * deciding that question for them. */
+  const toggleOverlay = useCallback((id: SliceOverlayId): void => {
+    setOverlays(current => {
+      const next = new Set(current);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+  }, []);
+
   /* The drawing is made of the page's own tokens, so a theme change is a
    * repaint: paused water would otherwise keep the palette it was painted in. */
   useEffect(() => {
@@ -372,6 +527,33 @@ export function AdvanceLab(): React.JSX.Element {
       { attributes: true, attributeFilter: ["data-theme"] });
     return () => { media.removeEventListener("change", bump); observer.disconnect(); };
   }, []);
+
+  /* One key for the drop, the same one the studio's BALL gesture answers to, so
+   * the hand that drops water in the app drops it here, and one per overlay,
+   * named for its quantity. Escape lets go of the mode without hunting for the
+   * button that armed it. */
+  useEffect(() => {
+    const key = (event: KeyboardEvent): void => {
+      const target = event.target as HTMLElement | null;
+      if (event.metaKey || event.ctrlKey || event.altKey || target?.closest("input, select, textarea")) return;
+      if (event.key === "Escape") {
+        /* One Escape, one thing let go of: the menu if it is open, the drop
+         * mode if it is not. */
+        setMenu(open => {
+          if (!open) { setArming(false); setAim(null); }
+          return null;
+        });
+        return;
+      }
+      const stroke = event.key.toLowerCase();
+      const overlay = SLICE_OVERLAY_ORDER.find(id => OVERLAY_KEYS[id] === stroke);
+      if (overlay) { toggleOverlay(overlay); return; }
+      if (stroke !== DROP_KEY) return;
+      setArming(value => { if (value) setAim(null); return !value; });
+    };
+    window.addEventListener("keydown", key);
+    return () => window.removeEventListener("keydown", key);
+  }, [toggleOverlay]);
 
   /** Rebuild from the selected production document's deterministic t=0 state. */
   const reseed = useCallback((id: string): void => {
@@ -385,10 +567,15 @@ export function AdvanceLab(): React.JSX.Element {
     setSeed(nextSeed);
     setPinned(null);
     setHover(null);
+    setAim(null);
     setRuntimeFault(null);
     /* A new scene is a new beginning, and a beginning is still. */
     setPlaying(false);
     live.current.playing = false;
+    setMenu(null);
+    /* A new scene is a new cost: the old median priced a different lattice. */
+    stepCosts.current = [];
+    setStepMs(null);
     setReadings(read(next));
     publishSceneId(id);
   }, []);
@@ -416,6 +603,14 @@ export function AdvanceLab(): React.JSX.Element {
   const band = paletteVar(BAND_TONE[declaration.band]);
   const lens: Lens = representing ? REPRESENT_LENS : ADVANCE_LENSES[selected];
 
+  /* What is drawn, named. An overlay contributes its own keys only while it is
+   * on, so the row under the picture is always the whole of what is on it. */
+  const legend: readonly LensKey[] = useMemo(() => [
+    ["liquid", "liquid"], ["solid", "solid"], ...lens.keys,
+    ...SLICE_OVERLAY_ORDER.flatMap(id =>
+      overlays.has(id) ? SLICE_OVERLAYS[id].keys : []),
+  ], [lens, overlays]);
+
   const displayNx = seed?.dimensions[0] ?? 1;
   const displayNy = seed?.dimensions[1] ?? 1;
   /* Whole pixels per cell, so a grid line lands on one rather than across two. */
@@ -428,6 +623,10 @@ export function AdvanceLab(): React.JSX.Element {
   useEffect(() => {
     const target = canvas.current, s = slice.current, l = lattice.current;
     if (!target || !s || !l) return;
+    /* Do not combine a React reading with a slice that the transport has
+     * already moved beyond it. The play gate above will leave the newer
+     * revision alone until React retries this effect with its matching read. */
+    if (readings.presentationRevision !== slicePresentationRevision(s)) return;
     const g = target.getContext("2d");
     if (!g) return;
     syncPalette(target);
@@ -435,11 +634,29 @@ export function AdvanceLab(): React.JSX.Element {
      * transform here keeps every hairline and label in the lenses honest. */
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     const context = { g, s, lattice: l, scale };
-    drawSlice(context);
+    /* Derive and consume RDF in one synchronous publication boundary. Keeping
+     * it in render-time memo state separated these two reads of the mutable
+     * slice, which is harmless for STEP and racy while Play is advancing. */
+    const sharedRdf: SliceSharedRdfIsocontour | undefined =
+      surfaceView === "shared-rdf"
+        ? reconstructSliceSharedRdf(s.topology.accepted, s.fields, s.numericalTopology)
+        : undefined;
+    drawSlice(context, sharedRdf);
     g.save();
     lens.draw(context);
     g.restore();
-  }, [readings, lens, scale, dpr, themeTick]);
+    /* Over the lens, in declaration order. An overlay is an annotation on the
+     * reading rather than part of it, so it is the last thing painted and the
+     * first thing a reader can take away again. */
+    for (const id of SLICE_OVERLAY_ORDER) {
+      if (!overlays.has(id)) continue;
+      g.save();
+      SLICE_OVERLAYS[id].draw(context);
+      g.restore();
+    }
+    paintedSharedRdf.current = sharedRdf;
+    paintedPresentationRevision.current = readings.presentationRevision;
+  }, [readings, lens, surfaceView, overlays, scale, dpr, themeTick]);
 
   const model = useMemo(() => advanceWorkModel({
     scene: readings.work,
@@ -454,6 +671,8 @@ export function AdvanceLab(): React.JSX.Element {
   const emptySlice = Boolean(seed && !seed.density.some(value => value > 0));
   const unsupported = seed?.dynamic?.filter(entry => !entry.supported) ?? [];
   const caveats = unsupported.length + (emptySlice ? 1 : 0);
+  const sharedRdfReceipt = surfaceView === "shared-rdf"
+    ? paintedSharedRdf.current?.receipt : undefined;
 
   const key: keyof AdvanceCost = metric === "workgroups" ? "workgroups" : "dispatches";
   const peak = Math.max(1, ...costs.map(c => c[key]));
@@ -499,6 +718,74 @@ export function AdvanceLab(): React.JSX.Element {
     ["rung", `${SLICE_RUNGS[p.rung]}²`, "cells per B8 brick in this 2D ladder"],
   ];
 
+  /** Where the pointer is, in canvas fine cells — continuous, not a cell index. */
+  const aimAt = (target: HTMLCanvasElement, clientX: number, clientY: number):
+  readonly [number, number] | null => {
+    const s = slice.current;
+    if (!s) return null;
+    const box = target.getBoundingClientRect();
+    return [((clientX - box.left) / box.width) * s.nx,
+      ((clientY - box.top) / box.height) * s.ny];
+  };
+
+  /**
+   * The ball the pointer is proposing, with the pages it would wake.
+   *
+   * Asked of the injection's own demand test rather than a second copy of that
+   * arithmetic, so the outline a reader sees before releasing is exactly the
+   * set the drop will activate. A preview that disagrees with the click is
+   * worse than no preview.
+   */
+  const proposeAim = (at: readonly [number, number], radius: number): Aim | null => {
+    const s = slice.current;
+    if (!s) return null;
+    const drop = sliceDropFromCanvas([s.nx, s.ny], at, radius);
+    const keys = sliceInjectionDemandedBrickKeys(s.topology.accepted.bricks, drop);
+    const demanded: (readonly [number, number, number])[] = [];
+    for (const brick of s.topology.accepted.bricks) {
+      if (!keys.has(brick.key)) continue;
+      const span = (brick.spanBricks ?? 1) * 8;
+      /* Bricks are addressed source-up and drawn canvas-down, the one
+       * reflection this page performs; the top edge is the far one. */
+      demanded.push([brick.coordinate[0] * 8,
+        s.ny - (brick.coordinate[1] * 8 + span), span]);
+    }
+    return { x: at[0], y: at[1], radius, demanded };
+  };
+
+  /**
+   * Land the ball, and say what happened to it.
+   *
+   * A drop is a live field edit even at t=0, which is production's own rule:
+   * authoring it into the scene document would change the seed and rebuild the
+   * world, so the run a reader is adding water to would be the thing the
+   * gesture destroyed. The consequence is that Reset takes the water back —
+   * a drop belongs to the run, not to the scene.
+   */
+  const commitDrop = (at: readonly [number, number], radius: number): void => {
+    const s = slice.current;
+    if (!s) return;
+    const receipt = injectAdvanceSliceLiquid(s,
+      sliceDropFromCanvas([s.nx, s.ny], at, radius));
+    setReadings(read(s));
+    /* A refused drop is the one outcome the picture cannot show, so it is the
+     * one that opens its own fold rather than waiting to be looked for. */
+    if (!receipt.accepted) setFolds(current => new Set(current).add("drop"));
+  };
+
+  const dropRows = (drop: SliceInjectionReceipt):
+  readonly (readonly [string, string, string])[] => [
+    ["cells", String(drop.cellsWetted), "leaves whose volume the dose actually raised"],
+    ["area", `${drop.areaAdmittedFine.toFixed(2)} / ${drop.areaRequestedFine.toFixed(2)}`,
+      "finest-cells² admitted against the disk asked for. Short means the ball met a wall or water already there; the smoothed rim can also carry it slightly over."],
+    ["bricks", `${drop.bricksActivated} woken · ${drop.bricksPromoted} refined`,
+      `of ${drop.bricksDemanded} the ball's bounding box demanded — the conservative test, so a page sharing only an edge is woken and then takes no liquid`],
+    ["generation", `${drop.acceptedGeneration} → ${drop.candidateGeneration}`,
+      "the drop costs one topology generation, and that generation also carries whatever ordinary adaptation the fields were already asking for"],
+    ...(drop.fault ? [["fault", drop.fault.stage,
+      "the transaction was refused, so the drop was refused whole — a half-landed ball is silently missing the half that needed a page"] as const] : []),
+  ];
+
   const pin = (probe: Probe): void => {
     setPinned(probe);
     setFolds(current => new Set(current).add("cell"));
@@ -539,8 +826,10 @@ export function AdvanceLab(): React.JSX.Element {
         <button type="button" onClick={() => {
           const s = slice.current;
           if (!s) return;
+          const began = performance.now();
           try {
             advanceSlice(s, budget);
+            noteStepCost(stepCosts.current, performance.now() - began, setStepMs);
             setRuntimeFault(null);
           } catch (error) {
             setPlaying(false);
@@ -560,7 +849,7 @@ export function AdvanceLab(): React.JSX.Element {
           title="Play the stage strip through, one stage at a time">Walk</button>
         <button type="button" onClick={() => reseed(sceneId)}>Reset</button>
       </div>
-      <label className={styles.iters} htmlFor="advance-step">step
+      <label className={styles.iters} htmlFor="advance-step">Δt
         <select id="advance-step" value={String(dt)}
           title="Seconds of physics per advance. 1/30 s is CM12's paper regime; the lab holds every scene to it whatever its own document asks for."
           onChange={event => retime(Number(event.target.value))}>
@@ -568,21 +857,62 @@ export function AdvanceLab(): React.JSX.Element {
             <option key={size.label} value={size.dt}>{size.label}</option>)}
         </select>
         <b>{(dt * 1000).toFixed(1)} ms</b></label>
-      <label className={styles.iters} htmlFor="advance-budget">solve iters
-        <input id="advance-budget" type="range" min={4} max={80} step={4} value={budget}
-          onChange={event => setBudget(Number(event.target.value))} />
-        <b>{budget}</b></label>
+      {/* The clock's price, beside the clock: what this machine spends to move
+          the water Δt forward, median of the last few advances so a collection
+          pause does not read as a regression. */}
+      <span className={styles.iters}
+        title={`Wall-clock cost of one advance on this machine, the median of the last ${STEP_COST_SAMPLES}. It prices the whole step at the current solve budget — not the physics, and not the work model's counts.`}>
+        step<b className={styles.cost}>{stepMs === null ? "—" : `${stepMs.toFixed(1)} ms`}</b>
+      </span>
       <span className={styles.themeSlot}><ThemeSwitch /></span>
     </header>
 
     <div className={styles.workspace}>
       <section className={styles.stage} aria-label="Advance viewer">
-        <div className={styles.viewport} ref={viewport}>
+        <div className={styles.viewport} ref={viewport}
+          onContextMenu={event => {
+            /* The settings belong to the picture, so the picture is where they
+               open. The browser's own menu has nothing to offer over a canvas
+               and would cover the water instead. */
+            event.preventDefault();
+            const host = viewport.current?.getBoundingClientRect();
+            if (!host) return;
+            /* Where the press landed on the water, taken now: the panel is
+               placed away from the pointer to stay on screen, so by the time
+               Drop is chosen the menu's own corner is no longer the point the
+               reader meant. A press on the letterbox has no point, and the
+               menu then offers the settings without the verb. */
+            const paper = canvas.current?.getBoundingClientRect();
+            const inside = !!paper && event.clientX >= paper.left
+              && event.clientX <= paper.right && event.clientY >= paper.top
+              && event.clientY <= paper.bottom;
+            setHover(null);
+            setMenu({
+              x: Math.min(host.width - MENU_WIDTH - 8,
+                Math.max(8, event.clientX - host.left + 2)),
+              y: Math.min(host.height - MENU_HEIGHT - 8,
+                Math.max(8, event.clientY - host.top + 2)),
+              at: inside && canvas.current
+                ? aimAt(canvas.current, event.clientX, event.clientY) : null,
+            });
+          }}>
           <canvas ref={canvas} className={styles.canvas} role="img"
             width={Math.round(displayNx * scale * dpr)}
             height={Math.round(displayNy * scale * dpr)}
             style={{ width: displayNx * scale, height: displayNy * scale }}
             aria-label={`${representing ? "The state entering the advance" : declaration.label} for ${seed?.label ?? "the selected production scene"} on its ${displayNx} by ${displayNy} centre-Z slice at frame ${readings.frame}`}
+            onPointerDown={event => {
+              if (!arming || event.button !== 0) return;
+              const at = aimAt(event.currentTarget, event.clientX, event.clientY);
+              if (!at) return;
+              /* The ball is complete before the pointer moves, so a plain click
+               * is a whole gesture and a drag is the same gesture continued —
+               * the studio's contract, and the reason arming is not a two-click
+               * mode. */
+              event.currentTarget.setPointerCapture(event.pointerId);
+              dragging.current = { pointer: event.pointerId, anchor: at, moved: false };
+              setAim(proposeAim(at, defaultDropRadius(displayNx, displayNy)));
+            }}
             onPointerMove={event => {
               const probe = probeAt(event.currentTarget, event.clientX, event.clientY);
               const host = viewport.current?.getBoundingClientRect();
@@ -591,21 +921,78 @@ export function AdvanceLab(): React.JSX.Element {
                 x: Math.min(host.width - PROBE_WIDTH - 8, event.clientX - host.left + 14),
                 y: Math.min(host.height - PROBE_HEIGHT, event.clientY - host.top + 14),
               } : null);
+              if (!arming) return;
+              const at = aimAt(event.currentTarget, event.clientX, event.clientY);
+              if (!at) return;
+              const active = dragging.current;
+              if (!active) { setAim(proposeAim(at, defaultDropRadius(displayNx, displayNy))); return; }
+              /* Dragging sizes the ball; it does not aim it again. The anchor
+               * stays where the press landed and the pointer rides the rim. */
+              const reach = Math.hypot(at[0] - active.anchor[0], at[1] - active.anchor[1]);
+              active.moved ||= reach > 0.5;
+              setAim(proposeAim(active.anchor, active.moved
+                ? Math.max(DROP_MINIMUM_FINE, reach)
+                : defaultDropRadius(displayNx, displayNy)));
             }}
-            onPointerLeave={() => setHover(null)}
+            onPointerUp={event => {
+              const active = dragging.current;
+              if (!active || active.pointer !== event.pointerId) return;
+              dragging.current = null;
+              const at = aimAt(event.currentTarget, event.clientX, event.clientY);
+              const reach = at
+                ? Math.hypot(at[0] - active.anchor[0], at[1] - active.anchor[1]) : 0;
+              commitDrop(active.anchor, active.moved && reach > 0.5
+                ? Math.max(DROP_MINIMUM_FINE, reach)
+                : defaultDropRadius(displayNx, displayNy));
+              /* Still armed: a reader dropping one ball is usually dropping
+               * three, and re-arming between them is the mode tax this page
+               * should not charge. */
+              setAim(at ? proposeAim(at, defaultDropRadius(displayNx, displayNy)) : null);
+            }}
+            onPointerCancel={() => { dragging.current = null; setAim(null); }}
+            onPointerLeave={() => {
+              setHover(null);
+              if (!dragging.current) setAim(null);
+            }}
             onClick={event => {
+              /* Armed, the click belongs to the ball. The probe under the
+               * pointer keeps reading either way; only pinning steps aside. */
+              if (arming) return;
               const probe = probeAt(event.currentTarget, event.clientX, event.clientY);
               if (probe) pin(probe);
             }} />
+
+          {/* The ball the pointer is proposing, and the pages it would wake.
+              An overlay rather than a lens: the canvas is repainted only when
+              the water moves, and a cursor painted into it would cost a full
+              lattice publication for every mouse pixel. The viewBox is the
+              lattice, so this is drawn in finest cells with no scale
+              arithmetic of its own to get wrong. */}
+          {aim && <svg className={styles.aim} aria-hidden="true"
+            viewBox={`0 0 ${displayNx} ${displayNy}`}
+            style={{ width: displayNx * scale, height: displayNy * scale }}>
+            {aim.demanded.map(([x, y, span]) =>
+              <rect key={`${x}:${y}`} x={x} y={y} width={span} height={span}
+                className={styles.aimBrick} vectorEffect="non-scaling-stroke" />)}
+            <circle cx={aim.x} cy={aim.y} r={aim.radius}
+              className={styles.aimBall} vectorEffect="non-scaling-stroke" />
+          </svg>}
 
           {/* Nothing names the stage over the water: the sidebar says which lens
               this is and what it draws, and a caption pinned to the corner of
               the picture sits on top of the one thing the page is for. Only a
               slice with no liquid in it earns an overlay, because then there is
               no picture for it to cover. */}
-          {emptySlice && <div className={`${styles.hud} ${styles.hudTop}`}>
-            <div className={styles.alarm}>
-              This authored centre slice contains no initial liquid.</div>
+          {(emptySlice || arming) && <div className={`${styles.hud} ${styles.hudTop}`}>
+            {emptySlice && <div className={styles.alarm}>
+              This authored centre slice contains no initial liquid.</div>}
+            {/* The drop is a mode, and its button is gone: without a pressed
+                control somewhere a reader has only the ball under the pointer
+                to tell them the next click adds water, and that disappears the
+                moment the pointer leaves the picture. */}
+            {arming && <div className={styles.caption}>
+              Dropping water — click to place a ball, drag out to size it.
+              {" "}<b>Esc</b> or <b>{DROP_KEY}</b> to stop.</div>}
           </div>}
 
           <div className={`${styles.hud} ${styles.hudRight}`}>
@@ -615,6 +1002,16 @@ export function AdvanceLab(): React.JSX.Element {
               <span className={styles.read}>max |u| <b>{readings.maxVelocity.toFixed(2)}</b></span>
               <span className={styles.read}>volume drift <b>{(readings.drift * 100).toFixed(3)}%</b></span>
               <span className={styles.read}>bricks re-rung <b>{readings.churn} / {readings.bricks}</b></span>
+              {/* Which line the picture is drawing, and — since the choice is
+                  now a right-click rather than a widget — where to change it.
+                  The one readout that takes the pointer, so it can say so. */}
+              <span className={`${styles.read} ${styles.hint}`}
+                title="Right-click the water to drop a ball there, or to choose the surface reconstruction and the solve budget.">
+                surface <b>{SURFACE_VIEWS.find(view => view.id === surfaceView)?.label}</b></span>
+              {/* The drift denominator moved, so say so beside it — otherwise
+                  the percentage above silently means something new. */}
+              {readings.injections > 0 && <span className={styles.read}>
+                drops added <b>{readings.injections}</b></span>}
               {readings.fault && <span className={`${styles.read} ${styles.faulted}`}>
                 fault <b>{readings.fault}</b></span>}
               {runtimeFault && <span className={`${styles.read} ${styles.faulted}`}>
@@ -622,9 +1019,28 @@ export function AdvanceLab(): React.JSX.Element {
             </div>
           </div>
 
+          {/* The legend is also the switch.
+              Volume fraction and the interface normal are not stages, so they
+              cannot be lenses; they are what every cell carries at every stage,
+              and they compose over whichever lens is up. That makes them
+              annotations on the picture, which is where their control belongs —
+              beside what is already named, not in a bar a reader passes once a
+              sitting. Turning one on adds its own keys to this same row, so the
+              strip stays the whole of what is drawn. */}
           <div className={`${styles.hud} ${styles.hudFoot}`}>
-            {([["liquid", "liquid"], ["solid", "solid"], ...lens.keys] as const)
-              .map(([tone, label]) => <span className={styles.key} key={label}>
+            {SLICE_OVERLAY_ORDER.map(id => {
+              const overlay = SLICE_OVERLAYS[id], on = overlays.has(id);
+              return <button type="button" key={id} aria-pressed={on}
+                className={`${styles.key} ${styles.keyToggle}`}
+                title={`${overlay.caption} (${OVERLAY_KEYS[id]})`}
+                onClick={() => toggleOverlay(id)}>
+                <i style={{
+                  background: paletteVar(overlay.keys[0]![0]),
+                  opacity: on ? 1 : 0.3,
+                }} />{overlay.label}</button>;
+            })}
+            {legend.map(([tone, label], i) =>
+              <span className={styles.key} key={`${i}:${label}`}>
                 <i style={{ background: paletteVar(tone) }} />{label}</span>)}
           </div>
 
@@ -642,6 +1058,56 @@ export function AdvanceLab(): React.JSX.Element {
                 ? `${hover.probe.plane.nx.toFixed(2)}, ${hover.probe.plane.ny.toFixed(2)}` : "—"],
             ] as const).map(([label, value]) =>
               <div className={styles.probeRow} key={label}><span>{label}</span><span>{value}</span></div>)}
+          </div>}
+
+          {/* What shapes the solve, on the thing it shapes. Neither of these is
+              touched more than once a sitting, and both are about the water
+              under the pointer rather than about the page, which is why they
+              are a right-click on the picture and not two more widgets in a
+              bar a reader reads every minute. */}
+          {menu && <div className={styles.menu} ref={menuPanel}
+            style={{ left: menu.x, top: menu.y }}
+            role="dialog" aria-label="Water, surface and solve settings">
+            {/* The verb comes first because it is the one thing here that
+                happens *at* the press: the ball lands where the reader
+                right-clicked, and the mode it leaves behind is only so that
+                the second and third ball cost one click each. */}
+            <div className={styles.menuGroup}>
+              <button type="button" className={styles.menuItem}
+                aria-pressed={arming && !menu.at}
+                onClick={() => {
+                  if (menu.at) commitDrop(menu.at, defaultDropRadius(displayNx, displayNy));
+                  /* Armed either way: with a point this is "and another one
+                   * like it", and without one it is the mode by itself. */
+                  setArming(true);
+                  setMenu(null);
+                }}>
+                <b>{menu.at ? "Drop a ball here" : "Drop water"}</b>
+                <em>{menu.at
+                  ? `lands now · click or drag out for more · ${DROP_KEY} · Esc`
+                  : `click the water to place one, drag out to size it · ${DROP_KEY}`}</em></button>
+              {arming && <button type="button" className={styles.menuItem}
+                onClick={() => { setArming(false); setAim(null); setMenu(null); }}>
+                <b>Stop dropping</b><em>let go of the ball under the pointer</em></button>}
+            </div>
+            <div className={styles.menuGroup}>
+              <span className={styles.menuLabel}>Surface</span>
+              {SURFACE_VIEWS.map(view =>
+                <button type="button" key={view.id} className={styles.menuItem}
+                  aria-pressed={surfaceView === view.id}
+                  onClick={() => { setSurfaceView(view.id); setMenu(null); }}>
+                  <b>{view.label}</b><em>{view.note}</em></button>)}
+            </div>
+            <div className={styles.menuGroup}>
+              {/* The slider stays open under the hand: a budget is found by
+                  watching the water answer, not chosen from a list. */}
+              <label className={styles.menuLabel} htmlFor="advance-budget">
+                Solve iterations<b>{budget}</b></label>
+              <input id="advance-budget" className={styles.menuRange} type="range"
+                min={4} max={80} step={4} value={budget}
+                title="Pressure iterations one advance may spend. Too few and the divergence the picture shows is the solver giving up, not the water."
+                onChange={event => setBudget(Number(event.target.value))} />
+            </div>
           </div>}
         </div>
 
@@ -737,6 +1203,13 @@ export function AdvanceLab(): React.JSX.Element {
           </div>
         </>}
 
+        {/* Said only while it is on: a caption for a reading nobody asked for is
+            prose standing in front of the picture. */}
+        {SLICE_OVERLAY_ORDER.filter(id => overlays.has(id)).map(id =>
+          <p className={styles.lensNote} key={id}>
+            <i style={{ background: paletteVar(SLICE_OVERLAYS[id].keys[0]![0]) }} />
+            {SLICE_OVERLAYS[id].caption}</p>)}
+
         <div className={styles.folds}>
           {pinned && <Fold id="cell" title="Pinned cell"
             meta={`brick ${pinned.cell.brick}`}
@@ -746,6 +1219,30 @@ export function AdvanceLab(): React.JSX.Element {
                 <b>{symbol}<em>{value}</em></b><span>{note}</span></div>)}</div>
             <button type="button" className={styles.mini}
               onClick={() => setPinned(null)}>unpin</button>
+          </Fold>}
+
+          {readings.drop && <Fold id="drop" title="Last drop"
+            meta={readings.drop.accepted
+              ? `${readings.drop.cellsWetted} cells wetted` : "refused"}
+            flag={!readings.drop.accepted}
+            open={folds.has("drop")} toggle={toggleFold}>
+            <div className={styles.props}>{dropRows(readings.drop).map(([symbol, value, note]) =>
+              <div className={styles.prop} key={symbol}>
+                <b>{symbol}<em>{value}</em></b><span>{note}</span></div>)}</div>
+            <p className={styles.fidelity}>
+              A drop is an intervention, not a stage: it runs the two-phase
+              transaction production runs between frames — one topology
+              generation whose activation demand is the ball, then the dose,
+              once, onto the graph that came back. It is a live field edit even
+              at t = 0, exactly as the app is, because authoring it into the
+              scene document would change the seed and rebuild the world the
+              water was being added to. Reset therefore takes it back.
+            </p>
+            <p className={styles.fidelity}>
+              {seed?.boundary.z === "symmetry"
+                ? "This scene's z boundary is symmetry, so the disk is the exact unit-depth reduction of the ball the app drops — the two runs stay comparable step for step."
+                : "This scene has bounded z, so the disk is the centre-plane sample of a dropped ball at the instant it lands and no later: a real ball's slice is not z-invariant, and the fall diverges from production immediately."}
+            </p>
           </Fold>}
 
           {!representing && <Fold id="io" title="Reads, writes and feeds"
@@ -822,6 +1319,17 @@ export function AdvanceLab(): React.JSX.Element {
                 centre slice only when the flow stays z-invariant: z-face flux, ∂w/∂z and
                 z pressure coupling do not exist here.
               </p>
+              {sharedRdfReceipt && <p className={styles.fidelity}>
+                Shared RDF is a derived, watertight C0 preview built from the accepted
+                volume fractions and PLIC normals. Transport still uses the displayed
+                generation&rsquo;s volume-correct PLIC planes. This preview implies
+                {" "}{sharedRdfReceipt.signedAreaErrorFine.toFixed(3)} finest-cell²
+                of area error ({(100 * sharedRdfReceipt.signedAreaErrorFine
+                  / Math.max(sharedRdfReceipt.exactAreaFine, 1)).toFixed(3)}% of the
+                scene total); {sharedRdfReceipt.unsupportedCutPartialCells} partial
+                cut cells and {sharedRdfReceipt.ambiguousFineCells} ambiguous cells
+                require explicit fallback.
+              </p>}
               {(emptySlice || unsupported.length > 0) && <div className={styles.warnings}>
                 {emptySlice && <span>This authored centre slice contains no initial liquid.</span>}
                 {unsupported.map(entry => <span key={`${entry.kind}/${entry.label}`}>
