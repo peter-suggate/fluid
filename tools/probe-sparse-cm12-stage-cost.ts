@@ -382,11 +382,6 @@ type StageCostQASolver = {
     readonly templateCellWorkgroups: number;
     readonly templateRowWorkgroups: number;
     readonly conditioningClearBytesPerFrame: number;
-    readonly pressureScratchClearBytesPerFrame: number;
-    readonly pressureHierarchyGroupCount: number;
-    readonly pressureHierarchyEdgeCount: number;
-    readonly pressureFineEdgeCount: number;
-    readonly pressureCoarseEdgeCount: number;
     readonly transportSpatialTileCapacity: number;
     readonly transportPacketCapacity: number;
     readonly transportDirectPacketCount: number;
@@ -623,7 +618,11 @@ try {
           : WebGPUAdaptiveMassSolver.createCompiledTopologyTransport;
   const constructionStarted_ms = performance.now();
   const solver = await createSolver.call(WebGPUAdaptiveMassSolver,
-    device, scene, "balanced", undefined, adaptiveMassSolverOptions(values), () => {});
+    device, scene, "balanced", undefined, adaptiveMassSolverOptions(values), (message) => {
+      if (process.env.FLUID_STAGE_PROBE_DEBUG === "1") {
+        process.stderr.write(`[stage-probe] construction: ${JSON.stringify(message)}\n`);
+      }
+    });
   teardownSolver = solver;
   await solver.waitForSimulationReady();
   if (freezeTopology) solver.setTopologyFrozen(true);
@@ -781,7 +780,24 @@ try {
       await new Promise(setImmediate);
     }
     debug(`advance ${frame} encoded`);
-    await solver.awaitFrameCompletion?.();
+    try {
+      await solver.awaitFrameCompletion?.();
+    } catch (error) {
+      // Retain successful frame timings when a later topology/physics receipt
+      // halts the run; a failed long-duration probe must still be attributable.
+      if (outputPath) await writeFile(outputPath, `${JSON.stringify({
+        scene: sceneName, construction_ms, completedSamples: totals.length,
+        failedFrame: frame, requestedTime_s: (warmup + sampled) * dt_s,
+        completedTime_s: (frame - 1) * dt_s,
+        diagnostic: { passed: false, failure: error instanceof Error
+          ? error.message : String(error) },
+        simulationFailure: solver.info.simulationFailure,
+        advanceSamples_ms: totals,
+        stages: [...stageSamples].map(([stage, samples_ms]) => ({ stage, samples_ms })),
+        validationErrors,
+      }, null, 2)}\n`, "utf8");
+      throw error;
+    }
     await device.queue.onSubmittedWorkDone();
     if (frame === pressureTopologyCutoffFrame) {
       const expectedTraceContext = `adaptive-volume:sim-${(frame * dt_s).toFixed(6)}`;
@@ -1113,6 +1129,10 @@ try {
       }
     }
     totals.push(trace.total_ms);
+    debug(`advance ${frame} time ${(frame * dt_s).toFixed(3)} s GPU ${trace.total_ms.toFixed(2)} ms; `
+      + [...stageDurations].filter(([id]) => !id.includes("|"))
+        .sort((left, right) => right[1] - left[1]).slice(0, 3)
+        .map(([id, duration]) => `${id} ${duration.toFixed(2)} ms`).join(", "));
     committedSamples.push(committed);
     pressureTopologyInputChangedSamples.push(pressureTopologyInputChanged);
     const pcm = info.adaptivePressureCanonicalMembership;

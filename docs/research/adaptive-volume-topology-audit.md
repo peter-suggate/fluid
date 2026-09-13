@@ -48,6 +48,8 @@ The CPU path built the actual composite grid, ran `createConfigured` through the
 | CPU resource-recipe operations | 602 |
 | Total resident allocations | 276,033,788 bytes (263.25 MiB) |
 
+The distinction between the input grid and runtime membership matters. `createConfigured` filters the initial leaf set, derives cell ranges for only those accepted leaves, filters rows by active rung requirements, and adds valid inactive-neighbour fallbacks at `lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.ts:4846-4885`. It writes the authoritative accepted cell/row counts into the uploaded worklist header at `:4887-4897`. The census script parses that upload rather than treating the broader grid arrays as accepted work.
+
 Largest allocations:
 
 | Buffer | Bytes | MiB |
@@ -73,7 +75,7 @@ An exact-sized design does not imply that every byte falls by 50-56x: fixed head
 
 `SparseAtlasCompositeGrid` is documented as the topology epoch identity and contains arrays of rich cell and row objects plus maps (`lib/methods/adaptive-volume/sparse-atlas-composite-projection.ts:83-92`). `buildSparseAtlasCompositeGrid` is the sole authoritative G-row builder (`lib/methods/adaptive-volume/sparse-atlas-composite-projection.ts:366-371`). It sorts bricks if required, materializes every cell and its geometric arrays in nested loops (`:375-454`), then materializes row objects and per-row term objects (`:456-522`). Intra-brick rows are enumerated cell-by-cell (`:524-586`); boundary and mixed-seam construction continue through the rest of the builder. A reusable object pool exists (`:99-124`), but the result is still a pointer-rich JavaScript graph that later compilers repeatedly traverse.
 
-The grid correctly excludes solid geometry from static topology (`lib/methods/adaptive-volume/sparse-atlas-composite-projection.ts:13-15`). That distinction must remain in the new ABI: solid open fractions and moving-boundary state are dynamic overlays, while cell/face incidence and static geometric measures belong to the generation.
+The grid correctly excludes solid geometry from its G-row topology (`lib/methods/adaptive-volume/sparse-atlas-composite-projection.ts:13-15`). That distinction must remain in the new ABI: cell/face incidence and static geometric measures belong to the generation. Static SolidWorld apertures can be a compiled view keyed by a SolidWorld version; moving apertures stay dynamic, and an edited static SolidWorld requires a complete rebuilt generation before publication.
 
 ### All-rung SCMT template catalogue
 
@@ -88,7 +90,7 @@ Building this catalogue performs several full derivations:
 - It later builds incidence records again (`:2239-2245`), then walks row ownership and terms again for pressure edges (`:2263-2273`).
 - Candidate cell and row worklists are produced with full-catalogue `flatMap` scans (`:2282-2289`).
 
-For mini32 this turns 5,755 accepted cells and 16,920 accepted rows into 37,440 template cells and 146,928 template rows before page capacity is added.
+For mini32 this turns an input graph of 5,755 cells and 16,920 rows, whose runtime accepted worklists contain 4,887 cells and 15,006 rows, into 37,440 template cells and 146,928 template rows before page capacity is added.
 
 ### AEI, IBO, TEI, face address, pressure, and host-incidence views
 
@@ -238,4 +240,4 @@ The new owner directory needs signed sparse-world coordinates and exact failure 
 
 Field transfer must remain conservative and must validate incomplete/overlapping coverage. The existing transfer compiler rejects target cells with overlapping source coverage and admits missing coverage only inside explicit new-air regions (`lib/methods/adaptive-volume/sparse-cm12-generation-transfer.ts:130-170`). Keep that behavior and the compensated volume audit (`:474-499`, `:575-610`).
 
-Because a browser is currently using WebGPU, this research did not run the repository's canonical Dawn regression. Once an implementation exists and no browser/other Dawn process is active, the required post-refactor gate is `npm run test:dawn:sparse-cm12` per `AGENTS.md`. Before that gate, add CPU compiler equivalence tests that compare every generated row/term/incidence/edge/program view against the authoritative grid for accepted, 2:1 mixed-seam, sparse-air, dynamic-world, and live-edit topologies. Those tests validate whole generations; they must not introduce a partial update mode.
+Because Chrome was already running, this research did not start the repository's exclusive Dawn regression. Once an implementation exists and no browser/other Dawn process is active, the required post-refactor gate is `npm run test:dawn:sparse-cm12` per `AGENTS.md`. Before that gate, add CPU compiler equivalence tests that compare every generated row/term/incidence/edge/program view against the authoritative grid for accepted, 2:1 mixed-seam, sparse-air, dynamic-world, and live-edit topologies. Those tests validate whole generations; they must not introduce a partial update mode.

@@ -55,7 +55,9 @@ const recipe = await WebGPUSparseCM12Resident.recordPreparedGeneration({
   maximumBytes: Number.POSITIVE_INFINITY,
   topologyPageCapacityMaximum: 512,
   symmetry: { scalar: false, face: false },
-  limits: { maxComputeWorkgroupsPerDimension: 65_535 } as GPUSupportedLimits,
+  limits: { maxComputeWorkgroupsPerDimension: 65_535,
+    maxStorageBufferBindingSize: 268_435_456,
+    maxBufferSize: 268_435_456 } as GPUSupportedLimits,
 });
 
 type RecordedResident = Record<string, unknown> & {
@@ -68,13 +70,10 @@ type RecordedResident = Record<string, unknown> & {
   initialGenerationCellIds: Uint32Array;
   initialGenerationRowIds: Uint32Array;
   templateWords: Uint32Array;
-  pressureFineEdgeCount: number;
-  pressureCoarseEdgeCount: number;
-  pressureHierarchyGroupCount: number;
-  pressureHierarchyEdgeCount: number;
-  pressureScratchBytes: number;
   transportExecutionImageLayout?: Record<string, number>;
   faceAddressLayout: Record<string, number>;
+  compiledTopologyLayout: Record<string, number>;
+  pressureExecutionImageLayout: Record<string, number>;
 };
 const resident = (recipe.state as { resident: RecordedResident }).resident;
 
@@ -167,7 +166,7 @@ const receipt = {
       .sort((a, b) => a - b)
       .map(span => [`span${span}`, atlas.bricks.filter(brick => sparseBrickSpan(brick) === span).length])),
   },
-  acceptedGrid: {
+  inputCompositeGrid: {
     cells: grid.cells.length,
     rows: grid.gradientRows.length,
     rowTerms,
@@ -193,13 +192,8 @@ const receipt = {
     rowCapacityToAcceptedRatio: resident.rowCount / acceptedRowCount,
     allocatedBytes: resident.residentAllocatedBytes,
     allocatedMiB: resident.residentAllocatedBytes / 2 ** 20,
-    pressure: {
-      fineEdges: resident.pressureFineEdgeCount,
-      coarseEdges: resident.pressureCoarseEdgeCount,
-      hierarchyGroups: resident.pressureHierarchyGroupCount,
-      hierarchyEdges: resident.pressureHierarchyEdgeCount,
-      scratchBytes: resident.pressureScratchBytes,
-    },
+    pressureExecutionImageLayout: resident.pressureExecutionImageLayout,
+    compiledTopologyLayout: resident.compiledTopologyLayout,
     transportExecutionImageLayout: resident.transportExecutionImageLayout,
     faceAddressLayout: resident.faceAddressLayout,
   },

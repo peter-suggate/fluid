@@ -25,8 +25,6 @@ import { sparseCM12PresentationPageAllocatorWGSL,
   "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident";
 import { createSparseCM12IncrementalActivityLayout } from
   "../lib/methods/adaptive-volume/features/adaptivity/sparse-cm12-incremental-activity";
-import { createSparseCM12CanonicalMembershipLayout } from
-  "../lib/methods/adaptive-volume/sparse-cm12-canonical-membership";
 import { createSparseCM12FramePlanLayout } from "../lib/core/sparse-cm12-frame-plan";
 import { createSparseCM12FramePlanPresentationLayout } from
   "../lib/methods/adaptive-volume/sparse-cm12-frame-plan-presentation";
@@ -34,8 +32,8 @@ import { createSparseCM12FrameControl } from
   "../lib/methods/adaptive-volume/sparse-cm12-frame-control";
 import { createSparseCM12PressureTopologyRepairLayout } from
   "../lib/methods/adaptive-volume/sparse-cm12-pressure-topology-repair";
-import { createSparseCM12ResidentPersistentPressureCacheLayout } from
-  "../lib/methods/adaptive-volume/sparse-cm12-persistent-pressure-cache";
+import { createSparseCM12CompiledTopologyLayout } from
+  "../lib/methods/adaptive-volume/sparse-cm12-compiled-topology";
 import { createSparseCM12PressureExecutionImageLayout } from
   "../lib/methods/adaptive-volume/sparse-cm12-pressure-execution-image";
 import { createSparseCM12TopologyEffectsAuthorityLayout } from
@@ -145,21 +143,12 @@ async function main(): Promise<void> {
     const variants: readonly (readonly [8, 8])[] = [[8, 8]];
     for (const [brickFineResolution, presentationPageResolution] of variants) {
       const variant = `B${brickFineResolution}/P${presentationPageResolution}`;
-      const pressure = { aggregateEdgeForFineEdgeBaseWords: 13376,
-        aggregateEdgeSourceBaseWords: 14400,
-        hierarchyEdgeForAggregateBaseWords: [14464],
-        aggregateEdgeMaximumContributionCount: 64,
-        hierarchyEdgeMaximumContributionCount: 64,
-        headerBaseWords: 15488, totalWords: 15497 };
       const activity = createSparseCM12IncrementalActivityLayout({
         baseWords: 4168, brickCount: 8,
       });
-      const canonicalMembership = createSparseCM12CanonicalMembershipLayout({
-        baseWords: activity.totalWords, cellCapacity: 1024, rowCapacity: 2048,
-      });
       const framePlan = brickFineResolution === presentationPageResolution
         ? createSparseCM12FramePlanLayout({
-          baseWords: Math.ceil(canonicalMembership.totalWords / 64) * 64,
+          baseWords: Math.ceil(activity.totalWords / 64) * 64,
           brickCapacity: 8, brickFineResolution, packetCount: 6,
         }) : undefined;
       const presentation = framePlan
@@ -181,20 +170,13 @@ async function main(): Promise<void> {
           brickFineResolution,
           presentationPageResolution,
         }) : undefined;
-      const persistentPressureCache = pressureTopologyRepair
-        ? createSparseCM12ResidentPersistentPressureCacheLayout({
-          baseWords: pressureTopologyRepair.totalWords,
-          cellCount: 1024, rowCount: 2048, directedEdgeCount: 1024,
-          brickCount: 8, aggregateEdgeCount: 32,
-          hierarchyLevelCounts: [8], hierarchyEdgeLevelCounts: [32],
-        }) : undefined;
       const pressureExecutionImage = createSparseCM12PressureExecutionImageLayout({
-        baseWords: 200000, cellCapacity: 1024, brickCapacity: 8,
-        hierarchyCapacity: 8, brickFineResolution: 8,
+        baseWords: 0, cellCapacity: 1024, rowCapacity: 2048, brickCapacity: 0,
+        hierarchyCapacity: 0, brickFineResolution: 8,
         presentationPageResolution: 8,
       });
       const topologyEffects = createSparseCM12TopologyEffectsAuthorityLayout({
-        baseWords: persistentPressureCache!.controlEndWords,
+        baseWords: pressureTopologyRepair!.totalWords,
         ptrCapacity: 8, ptrLeafCapacity: 1,
       });
       const velocityExtension = productionMatchedProfile && presentation
@@ -270,19 +252,36 @@ async function main(): Promise<void> {
       const solidOccupancy = createSparseCM12SolidOccupancyLayout({
         baseWords: worldDirectory.totalWords, authoredPageCount: 8,
       });
+      const geometricVolume = {
+        currentVolume: 10_000, lowVolume: 11_024,
+        positiveLimiter: 12_048, negativeLimiter: 13_072,
+        rowSubfaceRanges: 14_096, cellSubfaceRanges: 18_192,
+        cellSubfaceEntries: 20_240, subfaceMetadata: 24_336,
+        subfaceFluxes: 28_432, subfaceRoundoff: 32_528,
+        supportControlBaseWords: 36_624, controlBaseWords: 36_688,
+        subfaceCapacity: 1_024, airDiagonal: 36_752,
+        airControlBaseWords: 37_776, airComponentBaseWords: 37_840,
+      };
+      const compiledTopology = createSparseCM12CompiledTopologyLayout({
+        baseWords: solidOccupancy.totalWords, cellCapacity: 1024,
+        rowCapacity: 2048, termCapacity: 4096, incidenceCapacity: 4096,
+        physicalFaceCapacity: 1024,
+      });
       const source = createWebgpuSparseCM12ResidentWGSL(
         brickFineResolution,
         presentationPageResolution,
-        pressure, activity, canonicalMembership,
+        activity,
         framePlan, presentation, frameControl?.layout, pressureTopologyRepair,
-        persistentPressureCache,
         velocityExtension,
         pressureExecutionImage,
         logicalOwnerDirectory, 0, undefined,
         transportExecutionImage, transportPacketAuthority,
         undefined, undefined, internedBoundaryImage,
         topologyEffects, undefined, faceAddresses,
-        250000, undefined, worldDirectory, true, solidOccupancy, 260000,
+        undefined, worldDirectory, true, solidOccupancy, 260000,
+        true, false, false, undefined, undefined, false, false, false, false,
+        undefined, undefined, undefined, geometricVolume, undefined, undefined,
+        compiledTopology,
       );
       if (emitSourceOnly) {
         process.stdout.write(source);

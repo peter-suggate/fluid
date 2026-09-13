@@ -79,3 +79,20 @@ test("cached VEX rebuilds at topology changes and preserves empty and retired-pa
   assert.match(resident, /scheduleBaseWords \+ 4\),\s*this.transportPacketIndirectArguments!, 0, 24/);
   assert.match(resident, /dispatchWorkgroupsIndirect\(this.transportPacketIndirectArguments!, offset\)/);
 });
+
+test("VEX compiled fallback fences once per packet and traverses ordered CNX adjacency", () => {
+  const layout = createSparseCM12VelocityExtensionLayout({
+    cellCapacity: 1024, packetCapacity: 192, brickFineResolution: 8,
+  });
+  const source = createSparseCM12VelocityExtensionWGSL({
+    layout, cacheAcceptedPackets: true, compiledTopology: true,
+  });
+  const sweep = source.slice(source.indexOf("fn advanceVelocityExtensionPackets"));
+  assert.equal([...sweep.matchAll(/cnxAccepted\(\)/g)].length, 1);
+  assert.match(sweep, /workgroupUniformLoad\(&cm12ExtensionCompiledTopologyValid\)/);
+  assert.match(sweep, /cnxCellIncidenceRangeUnchecked\(cell\)/);
+  assert.match(sweep, /cnxIncidenceRowOrdinalUnchecked\(at\)/);
+  assert.match(sweep, /cnxRowTermRangeByOrdinalUnchecked\(rowOrdinal\)/);
+  assert.match(sweep, /cnxRowTermCellUnchecked\(range.x\+ordinal\)/);
+  assert.doesNotMatch(sweep, /cm12HotIncidenceRange\(cell\)/);
+});

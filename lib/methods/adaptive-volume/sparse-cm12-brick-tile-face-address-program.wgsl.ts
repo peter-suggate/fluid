@@ -27,7 +27,7 @@ fn bfa1OwnerLocalCoordinate(stableTile:u32,axis:u32,lane:u32)->u32{
   if(axis==1u){return 4u*((localTile>>1u)&1u)+((lane>>2u)&3u);}
   return 4u*((localTile>>2u)&1u)+((lane>>4u)&3u);
 }
-fn bfa1Project(row:u32){if(row!=BFA1_INVALID&&rowAccepted(row)&&pcmRowContains(row)){
+fn bfa1Project(row:u32){if(row!=BFA1_INVALID&&rowAccepted(row)&&pressureAcceptedRowMember(row)){
   projectPressureRow(row);state[sourceFaceVelocity()+row]=state[destinationFaceVelocity()+row];}}
 fn bfa1SeamAddress(wid:vec3u,lane:u32)->vec4u{
   let packetOrdinal=bfa1Ordinal(wid);if(packetOrdinal>=BFA1_SEAM_PACKET_COUNT){return vec4u(BFA1_INVALID);}

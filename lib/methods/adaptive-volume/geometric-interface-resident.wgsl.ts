@@ -24,16 +24,6 @@ fn geometricResidentCertifiedFill(cell:u32,densityOffset:u32)->vec2f{
   return vec2f(clamp(fill,0.0,1.0),1.0);
 }
 
-// Physical tangential overlap, independent of coarse-port row coefficients.
-// Only opposite-side terms are neighbours: fine cells on the same side of a
-// mixed row must not masquerade as normal-direction samples.
-fn geometricResidentOverlap(cell:u32,other:u32,axis:u32)->f32{
-  let a=cellCenter(cell);let aw=0.5*cellWidths(cell);
-  let b=cellCenter(other);let bw=0.5*cellWidths(other);
-  let overlap=max(vec3f(0.0),min(a+aw,b+bw)-max(a-aw,b-bw));
-  return overlap[(axis+1u)%3u]*overlap[(axis+2u)%3u];
-}
-
 fn geometricResidentSameProjection(a:u32,b:u32,extrusion:u32)->bool{
   let ac=cellCenter(a);let aw=cellWidths(a);let bc=cellCenter(b);let bw=cellWidths(b);
   for(var axis=0u;axis<3u;axis+=1u){
@@ -53,39 +43,54 @@ fn geometricResidentAdaptiveExtrusionCertified(cell:u32,densityOffset:u32,
  extrusion:u32)->bool{
   let centreFill=geometricResidentFill(cell,densityOffset);
   let centre=cellCenter(cell);let widths=cellWidths(cell);
-  for(var incidence=incidenceBegin(cell);incidence<incidenceEnd(cell);incidence+=1u){
-    let row=incidenceRow(incidence);
-    if(!rowAccepted(row)||rowOpenFraction(row)<=1e-8){continue;}
-    let own=termCoefficient(incidenceTerm(incidence));let range=rowTermRange(row);
-    for(var term=range.x;term<range.y;term+=1u){
-      if(own*termCoefficient(term)>=0.0){continue;}
-      let other=termCell(term);
-      if(other==cell||!cellActive(other)||cellOpenFraction(other)<0.999999){return false;}
-      let observed=geometricResidentFill(other,densityOffset);
-      if(rowAxis(row)==extrusion){
-        if(abs(observed-centreFill)>9.5367431640625e-7){return false;}
-        continue;
-      }
-      var leader=true;
-      for(var prior=range.x;prior<term;prior+=1u){
-        if(own*termCoefficient(prior)<0.0
-          &&geometricResidentSameProjection(termCell(prior),other,extrusion)){leader=false;break;}
-      }
-      if(!leader){continue;}
-      var coverage=0.0;
-      let lower=centre[extrusion]-0.5*widths[extrusion];
-      let upper=centre[extrusion]+0.5*widths[extrusion];
-      for(var candidate=term;candidate<range.y;candidate+=1u){
-        if(own*termCoefficient(candidate)>=0.0){continue;}
-        let member=termCell(candidate);
-        if(!geometricResidentSameProjection(member,other,extrusion)){continue;}
-        if(!cellActive(member)||cellOpenFraction(member)<0.999999
-          ||abs(geometricResidentFill(member,densityOffset)-observed)>9.5367431640625e-7){return false;}
-        let mc=cellCenter(member)[extrusion];let mw=cellWidths(member)[extrusion];
-        coverage+=max(0.0,min(upper,mc+0.5*mw)-max(lower,mc-0.5*mw));
-      }
-      if(coverage<widths[extrusion]-9.5367431640625e-7){return false;}
+  let faces=cnxCellFaceRangeUnchecked(cell);var rowFirst=faces.x;
+  var previousRow=INVALID;var previousFace=INVALID;
+  for(var adjacency=faces.x;adjacency<faces.y;adjacency+=1u){
+    let entry=cnxCellFaceEntryUnchecked(adjacency);let face=entry>>1u;
+    let row=cnxPhysicalFaceRowUnchecked(face);
+    // A repeated incidence replays the row's ascending face sequence. Retain
+    // that boundary so projection grouping remains incidence local.
+    if(row!=previousRow||(previousFace!=INVALID&&face<=previousFace)){rowFirst=adjacency;}
+    previousRow=row;previousFace=face;
+    if(rowOpenFraction(row)<=1e-8){continue;}
+    let faceCells=cnxPhysicalFaceCellsUnchecked(face);let isNegative=(entry&1u)!=0u;
+    let other=select(faceCells.x,faceCells.y,isNegative);
+    if(other==INVALID){continue;}
+    if(other==cell||!cellActive(other)||cellOpenFraction(other)<0.999999){return false;}
+    let observed=geometricResidentFill(other,densityOffset);
+    if(rowAxis(row)==extrusion){
+      if(abs(observed-centreFill)>9.5367431640625e-7){return false;}
+      continue;
     }
+    var leader=true;
+    for(var prior=rowFirst;prior<adjacency;prior+=1u){
+      let priorEntry=cnxCellFaceEntryUnchecked(prior);let priorFace=priorEntry>>1u;
+      if(cnxPhysicalFaceRowUnchecked(priorFace)!=row){continue;}
+      let priorCells=cnxPhysicalFaceCellsUnchecked(priorFace);
+      let priorOther=select(priorCells.x,priorCells.y,(priorEntry&1u)!=0u);
+      if(priorOther!=INVALID
+        &&geometricResidentSameProjection(priorOther,other,extrusion)){leader=false;break;}
+    }
+    if(!leader){continue;}
+    var coverage=0.0;
+    let lower=centre[extrusion]-0.5*widths[extrusion];
+    let upper=centre[extrusion]+0.5*widths[extrusion];
+    var priorCandidateFace=INVALID;
+    for(var candidate=adjacency;candidate<faces.y;candidate+=1u){
+      let candidateEntry=cnxCellFaceEntryUnchecked(candidate);
+      let candidateFace=candidateEntry>>1u;
+      if(cnxPhysicalFaceRowUnchecked(candidateFace)!=row
+        ||(priorCandidateFace!=INVALID&&candidateFace<=priorCandidateFace)){break;}
+      priorCandidateFace=candidateFace;
+      let candidateCells=cnxPhysicalFaceCellsUnchecked(candidateFace);
+      let member=select(candidateCells.x,candidateCells.y,(candidateEntry&1u)!=0u);
+      if(member==INVALID||!geometricResidentSameProjection(member,other,extrusion)){continue;}
+      if(!cellActive(member)||cellOpenFraction(member)<0.999999
+        ||abs(geometricResidentFill(member,densityOffset)-observed)>9.5367431640625e-7){return false;}
+      let mc=cellCenter(member)[extrusion];let mw=cellWidths(member)[extrusion];
+      coverage+=max(0.0,min(upper,mc+0.5*mw)-max(lower,mc-0.5*mw));
+    }
+    if(coverage<widths[extrusion]-9.5367431640625e-7){return false;}
   }
   return true;
 }
@@ -95,32 +100,39 @@ fn geometricResidentProjectedGradient(cell:u32,densityOffset:u32,
   let centre=cellCenter(cell);let fill=geometricResidentFill(cell,densityOffset);
   let axisU=(extrusion+1u)%3u;let axisV=(extrusion+2u)%3u;
   var m00=0.0;var m01=0.0;var m11=0.0;var b0=0.0;var b1=0.0;
-  for(var incidence=incidenceBegin(cell);incidence<incidenceEnd(cell);incidence+=1u){
-    let row=incidenceRow(incidence);
-    if(!rowAccepted(row)||rowOpenFraction(row)<=1e-8||rowAxis(row)==extrusion){continue;}
-    let own=termCoefficient(incidenceTerm(incidence));let range=rowTermRange(row);
-    for(var term=range.x;term<range.y;term+=1u){
-      if(own*termCoefficient(term)>=0.0){continue;}
-      let other=termCell(term);
-      if(other==cell||!cellActive(other)||cellOpenFraction(other)<0.999999){continue;}
-      var leader=true;
-      for(var prior=range.x;prior<term;prior+=1u){
-        if(own*termCoefficient(prior)<0.0
-          &&geometricResidentSameProjection(termCell(prior),other,extrusion)){leader=false;break;}
-      }
-      if(!leader){continue;}
-      var delta=cellCenter(other)-centre;delta[extrusion]=0.0;
-      let remaining=3u-rowAxis(row)-extrusion;
-      let a=centre[remaining]-0.5*cellWidths(cell)[remaining];
-      let b=centre[remaining]+0.5*cellWidths(cell)[remaining];
-      let oc=cellCenter(other)[remaining];let ow=cellWidths(other)[remaining];
-      let overlap=max(0.0,min(b,oc+0.5*ow)-max(a,oc-0.5*ow));
-      let weight=overlap/max(dot(delta,delta),1e-12);
-      let difference=geometricResidentFill(other,densityOffset)-fill;
-      let du=delta[axisU];let dv=delta[axisV];
-      m00+=weight*du*du;m01+=weight*du*dv;m11+=weight*dv*dv;
-      b0+=weight*du*difference;b1+=weight*dv*difference;
+  let faces=cnxCellFaceRangeUnchecked(cell);var rowFirst=faces.x;
+  var previousRow=INVALID;var previousFace=INVALID;
+  for(var adjacency=faces.x;adjacency<faces.y;adjacency+=1u){
+    let entry=cnxCellFaceEntryUnchecked(adjacency);let face=entry>>1u;
+    let row=cnxPhysicalFaceRowUnchecked(face);
+    if(row!=previousRow||(previousFace!=INVALID&&face<=previousFace)){rowFirst=adjacency;}
+    previousRow=row;previousFace=face;
+    if(rowOpenFraction(row)<=1e-8||rowAxis(row)==extrusion){continue;}
+    let faceCells=cnxPhysicalFaceCellsUnchecked(face);
+    let other=select(faceCells.x,faceCells.y,(entry&1u)!=0u);
+    if(other==INVALID||other==cell||!cellActive(other)
+      ||cellOpenFraction(other)<0.999999){continue;}
+    var leader=true;
+    for(var prior=rowFirst;prior<adjacency;prior+=1u){
+      let priorEntry=cnxCellFaceEntryUnchecked(prior);let priorFace=priorEntry>>1u;
+      if(cnxPhysicalFaceRowUnchecked(priorFace)!=row){continue;}
+      let priorCells=cnxPhysicalFaceCellsUnchecked(priorFace);
+      let priorOther=select(priorCells.x,priorCells.y,(priorEntry&1u)!=0u);
+      if(priorOther!=INVALID
+        &&geometricResidentSameProjection(priorOther,other,extrusion)){leader=false;break;}
     }
+    if(!leader){continue;}
+    var delta=cellCenter(other)-centre;delta[extrusion]=0.0;
+    let remaining=3u-rowAxis(row)-extrusion;
+    let a=centre[remaining]-0.5*cellWidths(cell)[remaining];
+    let b=centre[remaining]+0.5*cellWidths(cell)[remaining];
+    let oc=cellCenter(other)[remaining];let ow=cellWidths(other)[remaining];
+    let overlap=max(0.0,min(b,oc+0.5*ow)-max(a,oc-0.5*ow));
+    let weight=overlap/max(dot(delta,delta),1e-12);
+    let difference=geometricResidentFill(other,densityOffset)-fill;
+    let du=delta[axisU];let dv=delta[axisV];
+    m00+=weight*du*du;m01+=weight*du*dv;m11+=weight*dv*dv;
+    b0+=weight*du*difference;b1+=weight*dv*difference;
   }
   let determinant=m00*m11-m01*m01;let scale=max(m00,m11);var result=vec3f(0.0);
   if(scale>1e-12&&abs(determinant)>1e-7*scale*scale){
@@ -382,6 +394,10 @@ fn geometricResidentReconstructInterface(cell:u32,densityOffset:u32)->GeometricR
   var result:GeometricResidentInterface;
   result.plane=GeometricInterfacePlane(vec3f(0.0,1.0,0.0),0.0);
   result.valid=0u;
+  // Interface reconstruction is a production consumer of the sealed accepted
+  // topology. A missing or stale transport view fails closed; no second graph
+  // is rebuilt from row terms in a scalar stage.
+  if(!cnxTransportViewValidForAcceptedTopology()){return result;}
   // Scalar aperture is not a cut-solid polyhedron. Preserve the established
   // solid treatment until clipped open geometry is available. CM12 excess
   // density likewise remains CM12 state, never an alleged bounded volume.
@@ -389,23 +405,25 @@ fn geometricResidentReconstructInterface(cell:u32,densityOffset:u32)->GeometricR
   let centre=cellCenter(cell);
   var m0=vec3f(0.0);var m1=vec3f(0.0);var m2=vec3f(0.0);
   var rhs=vec3f(0.0);
-  for(var incidence=incidenceBegin(cell);incidence<incidenceEnd(cell);incidence+=1u){
-    let row=incidenceRow(incidence);
-    if(!rowAccepted(row)||rowOpenFraction(row)<=1e-8){continue;}
-    let own=termCoefficient(incidenceTerm(incidence));
-    let range=rowTermRange(row);
-    for(var term=range.x;term<range.y;term+=1u){
-      if(own*termCoefficient(term)>=0.0){continue;}
-      let other=termCell(term);
-      if(other==cell||!cellActive(other)||cellOpenFraction(other)<0.999999){continue;}
-      let delta=cellCenter(other)-centre;
-      let area=geometricResidentOverlap(cell,other,rowAxis(row));
-      let weight=area/max(dot(delta,delta),1e-12);
-      // The least-squares fit uses the actual 3D displacement at mixed seams,
-      // rather than pretending that skew fine/coarse centres are axis aligned.
-      m0+=weight*delta.x*delta;m1+=weight*delta.y*delta;m2+=weight*delta.z*delta;
-      rhs+=weight*delta*(geometricResidentFill(other,densityOffset)-fill);
-    }
+  // CNX's signed cell-face CSR is the accepted physical neighbour graph. Its
+  // entry order is the former incidence -> row -> opposite-term order, so this
+  // removes repeated term discovery and overlap geometry without changing the
+  // f32 least-squares accumulation sequence.
+  let faces=cnxCellFaceRangeUnchecked(cell);
+  for(var adjacency=faces.x;adjacency<faces.y;adjacency+=1u){
+    let entry=cnxCellFaceEntryUnchecked(adjacency);let face=entry>>1u;
+    let isNegative=(entry&1u)!=0u;let cells=cnxPhysicalFaceCellsUnchecked(face);
+    let other=select(cells.x,cells.y,isNegative);
+    if(other==INVALID||other==cell||!cellActive(other)
+      ||cellOpenFraction(other)<0.999999){continue;}
+    let row=cnxPhysicalFaceRowUnchecked(face);
+    if(rowOpenFraction(row)<=1e-8){continue;}
+    let delta=cellCenter(other)-centre;
+    let weight=cnxPhysicalFaceAreaUnchecked(face)/max(dot(delta,delta),1e-12);
+    // The least-squares fit uses the actual 3D displacement at mixed seams,
+    // rather than pretending that skew fine/coarse centres are axis aligned.
+    m0+=weight*delta.x*delta;m1+=weight*delta.y*delta;m2+=weight*delta.z*delta;
+    rhs+=weight*delta*(geometricResidentFill(other,densityOffset)-fill);
   }
   let determinant=dot(m0,cross(m1,m2));
   let scale=max(max(m0.x,m1.y),m2.z);
@@ -480,27 +498,27 @@ fn refreshGeometricInterfacePublished(@builtin(global_invocation_id)gid:vec3u){
 // raw cache is immutable during this dispatch, so neighboring invocation order
 // cannot change which interfaces provide support.
 fn geometricResidentSupportedInterface(cell:u32,densityOffset:u32)->GeometricResidentInterface{
+  var result=GeometricResidentInterface(GeometricInterfacePlane(vec3f(0.0),0.0),0u);
+  if(!cnxTransportViewValidForAcceptedTopology()){return result;}
   let geometry=geometricResidentInterface(cell,densityOffset);
   if(geometry.valid!=0u){return geometry;}
-  var result=GeometricResidentInterface(GeometricInterfacePlane(vec3f(0.0),0.0),0u);
   if(cellOpenFraction(cell)<0.999999){return result;}
   var normal=vec3f(0.0);var phi=0.0;var totalWeight=0.0;
   let centre=cellCenter(cell);
-  for(var incidence=incidenceBegin(cell);incidence<incidenceEnd(cell);incidence+=1u){
-    let row=incidenceRow(incidence);
-    if(!rowAccepted(row)||rowOpenFraction(row)<=1e-8){continue;}
-    let own=termCoefficient(incidenceTerm(incidence));let range=rowTermRange(row);
-    for(var term=range.x;term<range.y;term+=1u){
-      if(own*termCoefficient(term)>=0.0){continue;}
-      let other=termCell(term);if(!cellActive(other)){continue;}
-      let candidate=geometricResidentInterface(other,densityOffset);
-      if(candidate.valid==0u){continue;}
-      let delta=cellCenter(other)-centre;
-      let weight=geometricResidentOverlap(cell,other,rowAxis(row))/max(dot(delta,delta),1e-12);
-      normal+=weight*candidate.plane.normal;
-      phi+=weight*geometricInterfaceSignedDistance(candidate.plane,centre-cellCenter(other));
-      totalWeight+=weight;
-    }
+  let faces=cnxCellFaceRangeUnchecked(cell);
+  for(var adjacency=faces.x;adjacency<faces.y;adjacency+=1u){
+    let entry=cnxCellFaceEntryUnchecked(adjacency);let face=entry>>1u;
+    let isNegative=(entry&1u)!=0u;let cells=cnxPhysicalFaceCellsUnchecked(face);
+    let other=select(cells.x,cells.y,isNegative);
+    if(other==INVALID||!cellActive(other)){continue;}
+    let row=cnxPhysicalFaceRowUnchecked(face);if(rowOpenFraction(row)<=1e-8){continue;}
+    let candidate=geometricResidentInterface(other,densityOffset);
+    if(candidate.valid==0u){continue;}
+    let delta=cellCenter(other)-centre;
+    let weight=cnxPhysicalFaceAreaUnchecked(face)/max(dot(delta,delta),1e-12);
+    normal+=weight*candidate.plane.normal;
+    phi+=weight*geometricInterfaceSignedDistance(candidate.plane,centre-cellCenter(other));
+    totalWeight+=weight;
   }
   let normalLength=length(normal);
   if(!(totalWeight>1e-8&&normalLength>1e-6*totalWeight)){return result;}

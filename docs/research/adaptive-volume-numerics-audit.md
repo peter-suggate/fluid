@@ -94,7 +94,7 @@ Retain the dense support cache. The compiled row record should supply term IDs, 
 
 `forceFaces` immediately rereads every accepted row after face preparation, rechecks acceptance, evaluates static/dynamic boundary openness, adds acceleration, evaluates inflow coverage, and writes both face parity banks (`lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts:5289-5329`). For mini32 there is no inflow, and the encoder executes only force plus the source begin/cell initialization; the 32 connect/compress rounds and source publication are conditional on inflow (`lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.ts:6785-6801`).
 
-Fuse ordinary body acceleration and the final face write into face preparation. Both operate on the accepted-row domain, and face prep's characteristic is available at the point of the final store. Keep the prescribed-inflow override as a separate, conditionally encoded pass. This removes one full row dispatch and a destination-face read/write round trip. Closed-world separation remains dynamic because it reads density, velocity, gravity, and the prior row membership (`lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts:1698-1734`); the compiled record can still provide row kind, orientation, endpoint, and distance.
+The force arithmetic can share face preparation's row metadata and predicted value, but it cannot publish both parity banks in that same dispatch. Face prediction samples neighbouring `sourceFaceVelocity` values, while `publishForcedFace` writes `sourceFaceVelocity`; combining them creates a cross-workgroup read/write race. A safe experiment is one prediction-plus-force pass that writes destination only, followed by a simple accepted-row destination-to-source publication pass after the global dispatch boundary. This retains two dispatches but turns the second into a contiguous copy and removes its topology, boundary, and inflow work. Keep the prescribed-inflow semantics in the first pass. Closed-world separation remains dynamic because it reads density, velocity, gravity, and the prior row membership (`lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.wgsl.ts:1698-1734`); the compiled record can still provide row kind, orientation, endpoint, and distance.
 
 ### 4. Pressure-cell membership
 
@@ -203,7 +203,7 @@ The runtime binds immutable pressure templates at binding 14, PEI/worklists at b
 
 | Change | Decision | Reason |
 | --- | --- | --- |
-| Face preparation + ordinary body force | Do | Same accepted-row domain; force consumes the face value just produced; removes a row pass and face round trip. Keep inflow override conditional. |
+| Face preparation + ordinary body-force arithmetic | Split publication | Compute prediction and force together into destination, then copy destination to source in a second row pass. Writing source while neighbouring workgroups still sample it is a race. |
 | Pressure membership + row classification | Do not fuse | Row theta requires completed cell membership for every endpoint. Use two full passes with a global boundary. |
 | Row classification's three term walks | Coalesce locally | Bounded production term count permits one load into local arrays while retaining the exact arithmetic trees. |
 | Pressure diagonal + RHS | Do | Same pressure-cell incidence after theta; independent accumulators fit one pass. |
@@ -220,10 +220,10 @@ The runtime binds immutable pressure templates at binding 14, PEI/worklists at b
 1. **Add counters before changing layout.** Record accepted cells/rows, average and maximum row terms, average cell incidence, row-access path counts, SpMV count, VEX generic/interior lane counts, PCM dirty/accepted ratio, recovery-fired blocks, and bytes allocated to PCM/PCF/PEI. Attribute by the existing stages.
 2. **Add CNX1 numerical planes to the one shared compiled-topology ABI.** Use the existing shared compiler transaction to emit double-buffered full views with one generation tuple, validated counts/offsets, and a selector published only after full validation. Compile accepted cell/row/term/incidence/VEX/projection/packet planes in deterministic stable order. Give the interface cache the same topology/static-solid generation receipt plus its scalar epoch.
 3. **Cut VEX and projection over first.** These changes remove mini32's global static-solid fallback and per-frame VEX schedule transaction while using comparatively isolated consumers. Keep the eight sweep barriers.
-4. **Replace PCM/PTR/PCF/PEI incremental machinery with a full frame compiler.** Full classify cells, count/scan/emit membership/list, full classify rows, compute dynamic row scales, and fuse diagonal with RHS. Delete retired aggregate/hierarchy storage only after receipts prove it has no live numerical consumer.
+4. **Replace PCM/PCF incremental machinery with a full PEI frame compiler.** Full classify cells, count/scan/emit membership/list, full classify rows, compute dynamic row scales, and rebuild the Jacobi diagonal. Keep PTR only while it remains the shared topology-effects journal. Delete retired aggregate/hierarchy storage once receipts prove it has no live numerical consumer.
 5. **Cut the iterative operator and projection gradient to CNX1.** Preserve the current 2/3/5-term sum trees, axis-separated accumulation, stable pressure-cell order, and final true residual.
 6. **Benchmark shared row-gradient SpMV.** Compare direct compiled cell-major application with row-major gradient plus cell-major transpose gather on mini32 and mixed-ratio scenes.
-7. **Coalesce dispatches.** Fuse face force, PCG initialization, and recovery restart/Jacobi; add a dedicated recovery indirect gate.
+7. **Coalesce proven work.** Keep the fused PCG initialization, split face-force arithmetic from its source-bank publication, fuse recovery restart/Jacobi, and add a dedicated recovery indirect gate.
 8. **Remove old access paths from production compilation.** Keep generic topology access only for compiler validation and deliberately ungraded QA topology. Mark alternate CPU slice and old adaptive-mass paths explicitly so their data structures do not constrain CNX1.
 
 ## Alternate paths excluded from the design authority
@@ -232,7 +232,7 @@ The files under `lib/methods/adaptive-volume/advance-slice/` are CPU/reference a
 
 ## Validation and acceptance
 
-For each cutover, compare old and new generation images in a debug dual-publish mode before switching consumers. Validate exact stable IDs, term order, coefficients, incidence reciprocity, row kinds, static geometry factors, VEX neighbour weights, and accepted projection coverage. Because the proposal intentionally changes dispatch grouping but should not change arithmetic order inside rows/cells, require:
+For each cutover, compare the production result against a preserved baseline capture. Validate exact stable IDs, term order, coefficients, incidence reciprocity, row kinds, static geometry factors, VEX neighbour weights, and accepted projection coverage. Do not retain duplicate production authorities for comparison. Because the proposal intentionally changes dispatch grouping but should not change arithmetic order inside rows/cells, require:
 
 - pressure operator symmetry and finite diagonal receipts;
 - hydrostatic first-step stability;
@@ -252,7 +252,17 @@ The most likely wins, in order, are:
 3. removal of full-dirty PCM/row/PCF transactions in favour of one full frame build;
 4. deletion of the duplicate seed SpMV and precondition;
 5. zero-work recovery dispatches on ordinary eight-iteration guards;
-6. face-preparation/body-force fusion;
+6. face-preparation/body-force arithmetic with a separate source publication barrier;
 7. accepted-generation BFA lists without `rowAccepted` rechecks.
 
 The historical receipt suggests transport still dominates overall, so numerical-topology work should be measured beside the geometric transport work rather than treated as the only bottleneck. Within this audit's scope, pressure and face preparation are large enough to justify the structural cutover, while the shared compiler benefits both them and VEX.
+
+## Production cutover completed in this change
+
+The first numerical cutover now uses CNX as the pressure and projection connectivity authority. PEI2 rebuilds the complete pressure-cell membership, stable ascending cell list, pressure-row membership, theta field, and Jacobi diagonal after scalar conditioning. Cell and row membership use inactive/active slots; seal changes the selector only after CNX generation, stage order, capacity, and sticky failure checks succeed. Theta and diagonal remain shared numerical planes, so a failed build is terminal for the frame rather than a rollback to the old numerical image.
+
+The old adaptive-volume PCM, PCF, PCA, frozen-pressure publication, immutable pressure-template upload, directed-edge cache, coarse pressure cache, hierarchy cache, and their production WGSL entrypoints have been removed. PTR remains only as the topology-effects journal and can accept its generation only after `peiFullImageAccepted()` proves the full pressure image and CNX generation agree. BFA projection, geometric air projection, transport diagnostics, pressure SpMV, projection, and collocation now read PEI membership.
+
+PCG initialization now evaluates the seed `b-Ap` once and publishes the Jacobi direction, gamma, RHS norm, true-residual norm, maximum residual, and initial convergence gate through the same reduction tree. The final true-residual pass remains authoritative. The authored uniform-interior Jacobi diagonal retains the prior source incidence order and two-term off-diagonal recurrence through CNX, while mixed and dynamic cells retain the axis-grouped generic order.
+
+Source-only validation constructs the mandatory compiled topology rather than substituting legacy accessors. CPU/source contract tests cover disjoint PEI slots, stable compaction, full-image journal gating, CNX generation fencing, and exact seed reduction behavior. GPU differential hashes and the canonical Dawn regression remain the acceptance gate owned by the serialized test run.

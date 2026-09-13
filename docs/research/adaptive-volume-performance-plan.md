@@ -167,7 +167,7 @@ FLUID_WEBGPU_BACKEND=metal \
 node --import tsx tools/probe-sparse-cm12-stage-cost.ts \
   --scene=mini32 --production-defaults=1 --brick-fine=8 \
   --presentation-page=8 --warmup=8 --frames=24 \
-  --preparation-worker=1 --final-qa=1 \
+  --final-qa=1 \
   --out=artifacts/adaptive-volume-performance-research/mini32-baseline.json
 ```
 

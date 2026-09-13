@@ -1,4 +1,11 @@
 import { geometricVolumeQAWGSL } from "./geometric-volume-qa.wgsl";
+import {
+  createSparseCM12CompiledTopologyLayout,
+  createSparseCM12CompiledTopologyInitialWords,
+  SPARSE_CM12_COMPILED_TOPOLOGY_HEADER as CNX_HEADER,
+  SPARSE_CM12_COMPILED_TOPOLOGY_VIEW as CNX_VIEW,
+  type SparseCM12CompiledTopologyLayout,
+} from "./sparse-cm12-compiled-topology";
 import { GEOMETRIC_SOURCE_LEDGER, GEOMETRIC_SOURCE_LEDGER_FLOATS, type GeometricSourceLayout } from "./geometric-source.wgsl";
 import { normalizedCorrections, type SparseCM12CorrectionControls } from "./correction-controls";
 import { SPARSE_CM12_PRESSURE_JOURNAL_SNAPSHOTS, type SparseCM12PressureJournalCapacityRequest } from "./features/pressure-inspection/definition";
@@ -86,7 +93,6 @@ import {
 } from "./features/pressure-inspection/decoder";
 import {
   createWebgpuSparseCM12ResidentWGSL,
-  type SparseCM12PressureRepairLayout,
 } from "./webgpu-sparse-cm12-resident.wgsl";
 import {
   createSparseCM12LogicalOwnerDirectory,
@@ -157,19 +163,6 @@ import {
   type SparseCM12IncrementalActivityLayout,
 } from "./features/adaptivity/sparse-cm12-incremental-activity";
 import {
-  SPARSE_CM12_PRESSURE_MEMBERSHIP_INDIRECT_BYTES,
-  SPARSE_CM12_PRESSURE_REPAIR_HEADER,
-  SPARSE_CM12_PRESSURE_REPAIR_HEADER_WORDS,
-} from "./sparse-cm12-pressure-membership";
-import {
-  SPARSE_CM12_CANONICAL_MEMBERSHIP_DOMAIN_HEADER,
-  SPARSE_CM12_CANONICAL_MEMBERSHIP_DOMAIN_HEADER_WORDS,
-  createSparseCM12CanonicalMembershipLayout,
-  initializeSparseCM12CanonicalMembershipWords,
-  sparseCM12CanonicalMembershipRepairIndirectByteOffset,
-  type SparseCM12CanonicalMembershipLayout,
-} from "./sparse-cm12-canonical-membership";
-import {
   WebGPUSparseCM12RigidCoupling,
   type SparseCM12RigidResources,
 } from "./webgpu-sparse-cm12-rigid-coupling";
@@ -220,26 +213,16 @@ import {
   SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_HEADER_WORDS,
   createSparseCM12PressureTopologyRepairInitialWords,
   createSparseCM12PressureTopologyRepairLayout,
-  sparseCM12PressureTopologyRepairEntryPoints,
   type SparseCM12PressureTopologyRepairLayout,
 } from "./sparse-cm12-pressure-topology-repair";
 import {
-  SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_FAMILY_HEADER,
-  SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_FAMILY_HEADER_WORDS,
-  SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_HEADER,
-  SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_HEADER_WORDS,
-  SPARSE_CM12_PRESSURE_CACHE_HEADER,
-  SPARSE_CM12_PRESSURE_CACHE_HEADER_WORDS,
-  createSparseCM12ResidentPersistentPressureCacheLayout,
-  initializeSparseCM12PersistentPressureCacheWords,
-  type SparseCM12PersistentPressureCacheLayout,
-} from "./sparse-cm12-persistent-pressure-cache";
-import {
-  SPARSE_CM12_PRESSURE_EXECUTION_IMAGE_ENTRY_POINTS,
+  SPARSE_CM12_FULL_PRESSURE_IMAGE_ENTRY_POINTS,
+  SPARSE_CM12_PRESSURE_EXECUTION_IMAGE_HEADER,
+  SPARSE_CM12_PRESSURE_EXECUTION_IMAGE_HEADER_WORDS,
+  SPARSE_CM12_PRESSURE_EXECUTION_IMAGE_PHASE,
   createSparseCM12PressureExecutionImageInitialWords,
   createSparseCM12PressureExecutionImageLayout,
   sparseCM12PressureExecutionImageCellIndirectByteOffset,
-  sparseCM12PressureExecutionImageIndirectByteOffset,
   type SparseCM12PressureExecutionImageLayout,
 } from "./sparse-cm12-pressure-execution-image";
 
@@ -971,15 +954,6 @@ const SPARSE_CM12_FAILURE_PARAMETER_OFFSET = SPARSE_CM12_REFINEMENT_REGION_PARAM
 const SPARSE_CM12_PARAMETER_BYTES = SPARSE_CM12_FAILURE_PARAMETER_OFFSET + 16;
 /** Twenty f32 convergence/diagnostic scalars; see the WGSL initialization. */
 const SPARSE_CM12_PRESSURE_SCALAR_BYTES = 80;
-const SPARSE_CM12_PCM_DIAGNOSTIC_DOMAIN_WORDS =
-  SPARSE_CM12_CANONICAL_MEMBERSHIP_DOMAIN_HEADER_WORDS;
-const SPARSE_CM12_PCM_DIAGNOSTIC_BYTES =
-  2 * 4 * SPARSE_CM12_PCM_DIAGNOSTIC_DOMAIN_WORDS;
-const SPARSE_CM12_PRESSURE_CUTOVER_DIAGNOSTIC_WORDS =
-  SPARSE_CM12_PRESSURE_CACHE_HEADER_WORDS
-  + SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_HEADER_WORDS
-  + 4 * SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_FAMILY_HEADER_WORDS;
-
 export const SPARSE_CM12_PRESSURE_ITERATIONS = 128;
 /** A conservative interactive default; zero still requests fixed-budget work. */
 export const SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE = 1e-6;
@@ -1634,15 +1608,6 @@ function packAcceptedTopologyTemplates(
     incidenceOffsets[cell + 1] = incidenceOffsets[cell]! + incidenceCounts[cell]!;
   }
   const incidenceCount = incidenceOffsets[cells.length]!;
-  const pressureEdgeCounts = new Uint32Array(cells.length);
-  for (const row of rows) for (const own of row.terms) {
-    pressureEdgeCounts[own.cellId] += row.terms.length - 1;
-  }
-  const pressureEdgeOffsets = new Uint32Array(cells.length + 1);
-  for (let cell = 0; cell < cells.length; cell += 1) {
-    pressureEdgeOffsets[cell + 1] = pressureEdgeOffsets[cell]! + pressureEdgeCounts[cell]!;
-  }
-  const pressureEdgeCount = pressureEdgeOffsets[cells.length]!;
   let at = TEMPLATE_HEADER_WORDS;
   const cellOffset = at; at += TEMPLATE_CELL_RECORD_WORDS * cells.length;
   const rowOffset = at; at += TEMPLATE_ROW_PLANE_COUNT * rows.length;
@@ -1655,13 +1620,11 @@ function packAcceptedTopologyTemplates(
   const candidateFaceConfigurationOffset = at; at += candidateFaces.configurations.length;
   const candidateFacePatchOffset = at; at += candidateFaces.patchOffsets.length;
   const candidateFaceRowOffset = at; at += candidateFaces.rows.length;
-  const pressureEdgeOffset = at; at += cells.length + 1;
-  const pressureEdgeRecordOffset = at; at += 3 * pressureEdgeCount;
   const words = new Uint32Array(at);
   words.set([TEMPLATE_MAGIC, 1, cells.length, rows.length, termCount, incidenceCount,
     cellOffset, rowOffset, termOffset, incidenceOffset, incidenceRecordOffset,
     cellRangeOffset, rowRequirementOffset, atlas.bricks.length], 0);
-  words[15] = pressureEdgeOffset;
+  words[15] = at; // End of the physical construction catalog; no directed-edge tail.
   words[16] = rowOwnerRangeOffset;
   words[17] = 0;
   words[18] = rows.length;
@@ -1688,9 +1651,7 @@ function packAcceptedTopologyTemplates(
     }
   }
   words.set(incidenceOffsets, incidenceOffset);
-  words.set(pressureEdgeOffsets, pressureEdgeOffset);
   const incidenceCursor = incidenceOffsets.slice(0, cells.length);
-  const pressureEdgeCursor = pressureEdgeOffsets.slice(0, cells.length);
   let nextTerm = 0, requirementAt = rowRequirementOffset;
   for (const row of rows) {
     words[templateRowWord(rowOffset, rows.length, 0, row.id)]
@@ -1712,15 +1673,6 @@ function packAcceptedTopologyTemplates(
       words[incidenceRecordOffset + 2 * incidence] = row.id;
       words[incidenceRecordOffset + 2 * incidence + 1] = nextTerm;
       nextTerm += 1;
-    }
-    for (const own of row.terms) for (const other of row.terms) {
-      if (other.cellId === own.cellId) continue;
-      const edge = pressureEdgeCursor[own.cellId]++;
-      const record = pressureEdgeRecordOffset + 3 * edge;
-      words[record] = row.id;
-      words[record + 1] = other.cellId;
-      setF32(words, record + 2,
-        own.coefficient * row.dualWeight * other.coefficient);
     }
     const requirements = rowRequirements[row.id]!;
     words[requirementAt++] = requirements.length;
@@ -2164,15 +2116,6 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
     incidenceStarts[cell + 1] = incidenceStarts[cell]! + incidenceCounts[cell]!;
   }
   const incidenceCount = termCount;
-  const pressureEdgeCounts = new Uint32Array(cells.length);
-  for (const row of rows) for (const own of row.terms) {
-    pressureEdgeCounts[own.cellId] += row.terms.length - 1;
-  }
-  const pressureEdgeOffsets = new Uint32Array(cells.length + 1);
-  for (let cell = 0; cell < cells.length; cell += 1) {
-    pressureEdgeOffsets[cell + 1] = pressureEdgeOffsets[cell]! + pressureEdgeCounts[cell]!;
-  }
-  const pressureEdgeCount = pressureEdgeOffsets[cells.length]!;
   const structure = sparseCM12AdaptiveStructureCatalog(
     atlas, templateLevels, cells, rows, rowRequirements, brickIndex);
   const candidateFaces = structure.candidateFaces;
@@ -2191,8 +2134,6 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
   const candidateFaceConfigurationOffset = at; at += candidateFaces.configurations.length;
   const candidateFacePatchOffset = at; at += candidateFaces.patchOffsets.length;
   const candidateFaceRowOffset = at; at += candidateFaces.rows.length;
-  const pressureEdgeOffset = at; at += cells.length + 1;
-  const pressureEdgeRecordOffset = at; at += 3 * pressureEdgeCount;
   if (preparation && 4 * at > preparation.budget.maximumBytes) {
     throw new SparseCM12TopologyPreparationCapacity("bytes", 4 * at,
       preparation.budget.maximumBytes);
@@ -2201,7 +2142,7 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
   words.set([TEMPLATE_MAGIC, 1, cells.length, rows.length, termCount, incidenceCount,
     cellOffset, rowOffset, termOffset, incidenceOffset, incidenceRecordOffset,
     cellRangeOffset, rowRequirementOffset, atlas.bricks.length], 0);
-  words[15] = pressureEdgeOffset;
+  words[15] = at; // End of the physical construction catalog; no directed-edge tail.
   words[16] = rowOwnerRangeOffset;
   words[17] = 0;
   words[18] = rows.length;
@@ -2260,17 +2201,6 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
       = candidateFaceRowOffset + candidateFaces.patchOffsets[patch]!;
   }
   words.set(candidateFaces.rows, candidateFaceRowOffset);
-  words.set(pressureEdgeOffsets, pressureEdgeOffset);
-  const pressureEdgeCursor = pressureEdgeOffsets.slice(0, cells.length);
-  for (const row of rows) for (const own of row.terms) for (const other of row.terms) {
-    if (other.cellId === own.cellId) continue;
-    const edge = pressureEdgeCursor[own.cellId]++;
-    const record = pressureEdgeRecordOffset + 3 * edge;
-    words[record] = row.id;
-    words[record + 1] = other.cellId;
-    setF32(words, record + 2,
-      own.coefficient * row.dualWeight * other.coefficient);
-  }
   const initialCellWorklist = Uint32Array.from({ length: acceptedGrid.cells.length },
     (_, id) => id);
   const initialRowWorklist = Uint32Array.from({ length: initialAcceptedRowCount },
@@ -2335,6 +2265,21 @@ interface GeometricVolumeIndirectPublisher {
   readonly bindGroup: GPUBindGroup;
 }
 
+interface CompiledTopologyIndirectPublisher {
+  readonly arguments: GPUBuffer;
+  readonly pipeline: GPUComputePipeline;
+  readonly bindGroup: GPUBindGroup;
+}
+
+const COMPILED_TOPOLOGY_ENTRY_POINTS = [
+  "beginCompiledTopologyGeneration", "clearCompiledTopologyGeneration",
+  "compileCompiledTopologyCells", "compileCompiledTopologyRows",
+  "compileCompiledTopologyCellIncidences",
+  "beginGeometricVolumeTopologyCompilation", "compileGeometricVolumeSubfaces",
+  "compileGeometricVolumeCellFaces", "publishGeometricVolumeTopology",
+  "sealCompiledTopologyGeneration",
+] as const;
+
 interface ProjectedTransportIndirectPublisher {
   readonly arguments: GPUBuffer;
   readonly topologyPipeline: GPUComputePipeline;
@@ -2343,8 +2288,6 @@ interface ProjectedTransportIndirectPublisher {
 }
 
 interface GeometricVolumeResidentLayout {
-  readonly interfaceHistoryA: number;
-  readonly interfaceHistoryB: number;
   readonly currentVolume: number;
   readonly lowVolume: number;
   readonly positiveLimiter: number;
@@ -3023,7 +2966,6 @@ function residentStateLayout(
     geometricInterfaceSupportPlanes: cellVectors(),
     geometricInterfaceRdf: cellVectors(),
     volumeTransport: {
-      interfaceHistoryA: cellVectors(), interfaceHistoryB: cellVectors(),
       currentVolume: cells(), lowVolume: cells(), positiveLimiter: cells(), negativeLimiter: cells(),
       rowSubfaceRanges: words(2 * rowCount),
       cellSubfaceRanges: words(2 * cellCount),
@@ -3138,328 +3080,6 @@ function uploadBuffer(
 /** Pressure SpMV reads only the CSR edge tail of the physical template ABI.
  * Keep its alias-breaking read-only binding compact instead of cloning every
  * cell, row, term and incidence record a second time. */
-function compactPressureTopology(
-  templates: PackedResidentTopologyTemplates,
-  atlas: SparseAdaptiveMassAtlas,
-): Uint32Array {
-  const brickCount = atlas.bricks.length;
-  const sourceOffset = templates.words[15]!;
-  if (sourceOffset < TEMPLATE_HEADER_WORDS || sourceOffset >= templates.words.length) {
-    throw new Error(`Sparse Geometric (CM12) pressure edge offset ${sourceOffset} is invalid`);
-  }
-  const cellOffset = templates.words[6]!;
-  const edgeCount = templates.words[sourceOffset + templates.cellCount]!;
-  const edgeRecords = sourceOffset + templates.cellCount + 1;
-  const contributions = new Map<number, number[]>();
-  for (let cell = 0; cell < templates.cellCount; cell += 1) {
-    const brick = templateCellBrick(
-      templates.words, cellOffset + TEMPLATE_CELL_RECORD_WORDS * cell,
-    );
-    const begin = templates.words[sourceOffset + cell]!;
-    const end = templates.words[sourceOffset + cell + 1]!;
-    for (let edge = begin; edge < end; edge += 1) {
-      const other = templates.words[edgeRecords + 3 * edge + 1]!;
-      const otherBrick = templateCellBrick(
-        templates.words, cellOffset + TEMPLATE_CELL_RECORD_WORDS * other,
-      );
-      if (otherBrick === brick) continue;
-      const key = brick * brickCount + otherBrick;
-      const list = contributions.get(key);
-      if (list) list.push(edge); else contributions.set(key, [edge]);
-    }
-  }
-  const ordered = [...contributions.entries()].sort(([left], [right]) => left - right);
-  const coarseOffsets = new Uint32Array(brickCount + 1);
-  for (const [key] of ordered) coarseOffsets[Math.floor(key / brickCount) + 1] += 1;
-  for (let brick = 0; brick < brickCount; brick += 1) {
-    coarseOffsets[brick + 1] += coarseOffsets[brick]!;
-  }
-  const contributionCount = ordered.reduce((sum, [, list]) => sum + list.length, 0);
-  // Keep the immutable directed-edge record together. A packed nibble per cell
-  // certifies the exact canonical interior pattern once; recurring SpMVs read
-  // this ordinary pressure image and never interpret the atomic topology arena.
-  const compactEdgeWords = templates.cellCount + 1 + 3 * edgeCount;
-  const strictInteriorBase = TEMPLATE_HEADER_WORDS + compactEdgeWords;
-  const strictInteriorWords = Math.ceil(templates.cellCount / 8);
-  const coarseBase = strictInteriorBase + strictInteriorWords;
-  const coarseRecordBase = coarseBase + 4 + coarseOffsets.length;
-  const contributionBase = coarseRecordBase + 3 * ordered.length;
-  const hierarchyBase = contributionBase + contributionCount;
-  const brickDimensions = atlas.dimensions.map((value) =>
-    Math.ceil(value / atlas.brickFineResolution));
-  const hierarchyScales: number[] = [];
-  for (let scale = 2; ; scale *= 2) {
-    hierarchyScales.push(scale);
-    if (brickDimensions.every((value) => value <= scale)) break;
-    if (!Number.isSafeInteger(scale * 2)) {
-      throw new RangeError("Sparse Geometric (CM12) pressure hierarchy scale overflow");
-    }
-  }
-  const hierarchy = hierarchyScales.map((scale) => {
-    const dimensions = brickDimensions.map((value) => Math.ceil(value / scale));
-    const signedGroups = new Map<string, number>();
-    const parents = Uint32Array.from(atlas.bricks, (brick) => {
-      const coordinate = brick.coordinate.map((value) => Math.floor(value / scale));
-      if (atlas.signedCoordinates) {
-        const key = scale === hierarchyScales[hierarchyScales.length - 1] ? "root" : coordinate.join("/");
-        let id = signedGroups.get(key);
-        if (id === undefined) { id = signedGroups.size; signedGroups.set(key, id); }
-        return id;
-      }
-      return coordinate[0]! + dimensions[0]!
-        * (coordinate[1]! + dimensions[1]! * coordinate[2]!);
-    });
-    const groupCount = atlas.signedCoordinates ? signedGroups.size
-      : dimensions[0]! * dimensions[1]! * dimensions[2]!;
-    const childCounts = new Uint32Array(groupCount);
-    for (const parent of parents) childCounts[parent] += 1;
-    const childOffsets = new Uint32Array(groupCount + 1);
-    for (let group = 0; group < groupCount; group += 1) {
-      childOffsets[group + 1] = childOffsets[group]! + childCounts[group]!;
-    }
-    const childCursor = childOffsets.slice(0, groupCount);
-    const children = new Uint32Array(brickCount);
-    parents.forEach((parent, brick) => { children[childCursor[parent]++] = brick; });
-    const internalCounts = new Uint32Array(groupCount);
-    ordered.forEach(([key]) => {
-      const source = Math.floor(key / brickCount), target = key % brickCount;
-      if (parents[source] === parents[target]) internalCounts[parents[source]!] += 1;
-    });
-    const internalOffsets = new Uint32Array(groupCount + 1);
-    for (let group = 0; group < groupCount; group += 1) {
-      internalOffsets[group + 1] = internalOffsets[group]! + internalCounts[group]!;
-    }
-    const internalCursor = internalOffsets.slice(0, groupCount);
-    const internalEdges = new Uint32Array(internalOffsets[groupCount]!);
-    ordered.forEach(([key], edge) => {
-      const source = Math.floor(key / brickCount), target = key % brickCount;
-      if (parents[source] === parents[target]) {
-        internalEdges[internalCursor[parents[source]!]++] = edge;
-      }
-    });
-    const crossContributionsByPair = new Map<number, number[]>();
-    ordered.forEach(([key], edge) => {
-      const source = Math.floor(key / brickCount), target = key % brickCount;
-      const sourceGroup = parents[source]!, targetGroup = parents[target]!;
-      if (sourceGroup === targetGroup) return;
-      const pair = sourceGroup * groupCount + targetGroup;
-      const list = crossContributionsByPair.get(pair);
-      if (list) list.push(edge); else crossContributionsByPair.set(pair, [edge]);
-    });
-    const cross = [...crossContributionsByPair.entries()]
-      .sort(([left], [right]) => left - right);
-    const crossOffsets = new Uint32Array(groupCount + 1);
-    for (const [pair] of cross) crossOffsets[Math.floor(pair / groupCount) + 1] += 1;
-    for (let group = 0; group < groupCount; group += 1) {
-      crossOffsets[group + 1] += crossOffsets[group]!;
-    }
-    const crossContributionCount = cross.reduce((sum, [, list]) => sum + list.length, 0);
-    return { groupCount, parents, childOffsets, children, internalOffsets, internalEdges,
-      cross, crossOffsets, crossContributionCount };
-  });
-  const hierarchyDescriptorWords = 10;
-  let hierarchyWords = 1 + hierarchyDescriptorWords * hierarchy.length;
-  for (const level of hierarchy) hierarchyWords += level.parents.length
-    + level.childOffsets.length + level.children.length
-    + level.internalOffsets.length + level.internalEdges.length
-    + level.crossOffsets.length + 3 * level.cross.length
-    + level.crossContributionCount;
-  const result = new Uint32Array(hierarchyBase + hierarchyWords);
-  result.set(templates.words.subarray(0, TEMPLATE_HEADER_WORDS));
-  result[15] = TEMPLATE_HEADER_WORDS;
-  const compactEdgeRows = TEMPLATE_HEADER_WORDS + templates.cellCount + 1;
-  const compactEdgeNeighbors = compactEdgeRows + edgeCount;
-  const compactEdgeWeights = compactEdgeNeighbors + edgeCount;
-  result.set(templates.words.subarray(sourceOffset,
-    sourceOffset + templates.cellCount + 1), TEMPLATE_HEADER_WORDS);
-  for (let edge = 0; edge < edgeCount; edge += 1) {
-    result[compactEdgeRows + edge] = templates.words[edgeRecords + 3 * edge]!;
-    result[compactEdgeNeighbors + edge] = templates.words[edgeRecords + 3 * edge + 1]!;
-    result[compactEdgeWeights + edge] = templates.words[edgeRecords + 3 * edge + 2]!;
-  }
-  const strictWeightBits = new Uint32Array(1);
-  const strictWeight = new Float32Array(strictWeightBits.buffer);
-  for (let cell = 0; cell < templates.cellCount; cell += 1) {
-    const begin = templates.words[sourceOffset + cell]!;
-    const end = templates.words[sourceOffset + cell + 1]!;
-    if (end - begin !== 6) continue;
-    const brick = templateCellBrick(
-      templates.words, cellOffset + TEMPLATE_CELL_RECORD_WORDS * cell,
-    );
-    for (let code = 1; code <= 4; code += 1) {
-      const resolution = 1 << (code - 1);
-      const square = resolution * resolution;
-      const expected = [cell - 1, cell + 1, cell - resolution, cell + resolution,
-        cell - square, cell + square];
-      strictWeight[0] = -resolution;
-      const canonical = expected.every((other, local) =>
-        templates.words[edgeRecords + 3 * (begin + local) + 1] === other
-        && templates.words[edgeRecords + 3 * (begin + local) + 2]
-          === strictWeightBits[0]
-        && templateCellBrick(
-          templates.words, cellOffset + TEMPLATE_CELL_RECORD_WORDS * other,
-        ) === brick);
-      if (!canonical) continue;
-      result[strictInteriorBase + (cell >>> 3)]! |= code << (4 * (cell & 7));
-      break;
-    }
-  }
-  // Header words 13-15 are pressure hierarchy/coarse/edge descriptors. Word
-  // 12 is deliberately private to this compact pressure image.
-  result[12] = strictInteriorBase;
-  result[13] = hierarchyBase;
-  result[14] = coarseBase;
-  result.set([brickCount, ordered.length, contributionCount, edgeCount], coarseBase);
-  result.set(coarseOffsets, coarseBase + 4);
-  let contributionAt = contributionBase;
-  ordered.forEach(([key, list], coarseEdge) => {
-    const record = coarseRecordBase + 3 * coarseEdge;
-    result[record] = key % brickCount;
-    result[record + 1] = contributionAt;
-    result[record + 2] = list.length;
-    result.set(list, contributionAt);
-    contributionAt += list.length;
-  });
-  result[hierarchyBase] = hierarchy.length;
-  let hierarchyAt = hierarchyBase + 1 + hierarchyDescriptorWords * hierarchy.length;
-  let hierarchyDynamicAt = 0;
-  hierarchy.forEach((level, index) => {
-    const descriptor = hierarchyBase + 1 + hierarchyDescriptorWords * index;
-    result[descriptor] = level.groupCount;
-    result[descriptor + 9] = hierarchyDynamicAt;
-    const append = (slot: number, values: Uint32Array): void => {
-      result[descriptor + slot] = hierarchyAt;
-      result.set(values, hierarchyAt);
-      hierarchyAt += values.length;
-    };
-    append(1, level.parents);
-    append(2, level.childOffsets);
-    append(3, level.children);
-    append(4, level.internalOffsets);
-    append(5, level.internalEdges);
-    append(6, level.crossOffsets);
-    const crossRecordBase = hierarchyAt;
-    result[descriptor + 7] = crossRecordBase;
-    hierarchyAt += 3 * level.cross.length;
-    const crossContributionBase = hierarchyAt;
-    result[descriptor + 8] = crossContributionBase;
-    let crossContributionAt = crossContributionBase;
-    level.cross.forEach(([pair, list], edge) => {
-      const record = crossRecordBase + 3 * edge;
-      result[record] = pair % level.groupCount;
-      result[record + 1] = crossContributionAt;
-      result[record + 2] = list.length;
-      result.set(list, crossContributionAt);
-      crossContributionAt += list.length;
-    });
-    hierarchyAt += level.crossContributionCount;
-    hierarchyDynamicAt += level.cross.length + 4 * level.groupCount;
-  });
-  return result;
-}
-
-/** Aggregate ownership maps followed by the compact pressure bootstrap/fault
- * receipt. Immutable directed-edge topology lives exclusively in binding 14;
- * canonical PCM owns cell/row order. */
-function pressureAuxiliaryArena(
-  templates: PackedResidentTopologyTemplates,
-  pressureTopology: Uint32Array,
-  brickCount: number,
-): { readonly words: Uint32Array; readonly layout: SparseCM12PressureRepairLayout } {
-  const edgeOffsets = templates.words[15]!;
-  const edgeCount = templates.words[edgeOffsets + templates.cellCount]!;
-  const aggregateEdgeForFineEdgeBaseWords = 0;
-  const coarseBase = pressureTopology[14]!;
-  const coarseEdgeCount = pressureTopology[coarseBase + 1]!;
-  const aggregateEdgeSourceBaseWords = aggregateEdgeForFineEdgeBaseWords + edgeCount;
-  const hierarchyBase = pressureTopology[13]!;
-  const hierarchyLevelCount = pressureTopology[hierarchyBase]!;
-  const hierarchyEdgeForAggregateBaseWords = Array.from(
-    { length: hierarchyLevelCount },
-    (_, level) => aggregateEdgeSourceBaseWords + coarseEdgeCount * (level + 1),
-  );
-  let aggregateEdgeMaximumContributionCount = 0;
-  const coarseRecordBase = coarseBase + 4 + brickCount + 1;
-  for (let edge = 0; edge < coarseEdgeCount; edge += 1) {
-    aggregateEdgeMaximumContributionCount = Math.max(
-      aggregateEdgeMaximumContributionCount,
-      pressureTopology[coarseRecordBase + 3 * edge + 2]!,
-    );
-  }
-  let hierarchyEdgeMaximumContributionCount = 0;
-  for (let level = 0; level < hierarchyLevelCount; level += 1) {
-    const descriptor = hierarchyBase + 1 + 10 * level;
-    const groupCount = pressureTopology[descriptor]!;
-    const edgeOffsetsAt = pressureTopology[descriptor + 6]!;
-    const records = pressureTopology[descriptor + 7]!;
-    const edgeCountAtLevel = pressureTopology[edgeOffsetsAt + groupCount]!;
-    for (let edge = 0; edge < edgeCountAtLevel; edge += 1) {
-      hierarchyEdgeMaximumContributionCount = Math.max(
-        hierarchyEdgeMaximumContributionCount,
-        pressureTopology[records + 3 * edge + 2]!,
-      );
-    }
-  }
-  const headerBaseWords = aggregateEdgeSourceBaseWords
-    + coarseEdgeCount * (hierarchyLevelCount + 1);
-  const layout: SparseCM12PressureRepairLayout = Object.freeze({
-    aggregateEdgeForFineEdgeBaseWords,
-    aggregateEdgeSourceBaseWords,
-    hierarchyEdgeForAggregateBaseWords: Object.freeze(hierarchyEdgeForAggregateBaseWords),
-    aggregateEdgeMaximumContributionCount,
-    hierarchyEdgeMaximumContributionCount,
-    headerBaseWords,
-    totalWords: headerBaseWords + SPARSE_CM12_PRESSURE_REPAIR_HEADER_WORDS,
-  });
-  const result = new Uint32Array(layout.totalWords);
-  result.fill(INVALID, aggregateEdgeForFineEdgeBaseWords,
-    aggregateEdgeForFineEdgeBaseWords + edgeCount);
-  const coarseOffsets = coarseBase + 4;
-  for (let brick = 0; brick < brickCount; brick += 1) {
-    for (let edge = pressureTopology[coarseOffsets + brick]!;
-      edge < pressureTopology[coarseOffsets + brick + 1]!; edge += 1) {
-      result[aggregateEdgeSourceBaseWords + edge] = brick;
-    }
-  }
-  for (let level = 0; level < hierarchyLevelCount; level += 1) {
-    const destination = hierarchyEdgeForAggregateBaseWords[level]!;
-    result.fill(INVALID, destination, destination + coarseEdgeCount);
-    const descriptor = hierarchyBase + 1 + 10 * level;
-    const groupCount = pressureTopology[descriptor]!;
-    const edgeOffsets = pressureTopology[descriptor + 6]!;
-    const records = pressureTopology[descriptor + 7]!;
-    const hierarchyEdgeCount = pressureTopology[edgeOffsets + groupCount]!;
-    for (let edge = 0; edge < hierarchyEdgeCount; edge += 1) {
-      const record = records + 3 * edge;
-      const first = pressureTopology[record + 1]!;
-      const count = pressureTopology[record + 2]!;
-      for (let local = 0; local < count; local += 1) {
-        const aggregateEdge = pressureTopology[first + local]!;
-        if (aggregateEdge >= coarseEdgeCount
-          || result[destination + aggregateEdge] !== INVALID) {
-          throw new Error(`Sparse Geometric (CM12) aggregate edge ${aggregateEdge} has ambiguous hierarchy owner`);
-        }
-        result[destination + aggregateEdge] = edge;
-      }
-    }
-  }
-  for (let coarseEdge = 0; coarseEdge < coarseEdgeCount; coarseEdge += 1) {
-    const record = coarseRecordBase + 3 * coarseEdge;
-    const first = pressureTopology[record + 1]!;
-    const count = pressureTopology[record + 2]!;
-    for (let local = 0; local < count; local += 1) {
-      const fineEdge = pressureTopology[first + local]!;
-      if (fineEdge >= edgeCount
-        || result[aggregateEdgeForFineEdgeBaseWords + fineEdge] !== INVALID) {
-        throw new Error(`Sparse Geometric (CM12) fine edge ${fineEdge} has ambiguous aggregate owner`);
-      }
-      result[aggregateEdgeForFineEdgeBaseWords + fineEdge] = coarseEdge;
-    }
-  }
-  return { words: result, layout };
-}
-
-/** Static compact topology plus fully device-resident evolving frame state. */
 export class WebGPUSparseCM12Resident {
   readonly cellCount: number;
   readonly rowCount: number;
@@ -3473,11 +3093,9 @@ export class WebGPUSparseCM12Resident {
   private readonly scalars: GPUBuffer;
   private readonly conditioning: GPUBuffer;
   private readonly activity: GPUBuffer;
-  private readonly pressureRepairLayout: SparseCM12PressureRepairLayout;
   /** Persistent compact activity census and per-physical-brick 4^3 tile mask. */
   readonly incrementalActivityLayout: SparseCM12IncrementalActivityLayout;
   /** Deterministic GPU pressure membership and rank-select arena. */
-  private readonly canonicalMembershipLayout: SparseCM12CanonicalMembershipLayout;
   private readonly framePlanLayout: SparseCM12FramePlanLayout;
   private readonly framePlanPresentationLayout: SparseCM12FramePlanPresentationLayout;
   /** FCA1 GPU-owned frame generation, parity, predicates, and indirect ABI. */
@@ -3498,13 +3116,6 @@ export class WebGPUSparseCM12Resident {
   private readonly acceptedIndirectArguments: GPUBuffer;
   /** Copy-isolated indirect dispatch for the frame's compact liquid cells. */
   private readonly pressureCellIndirectArguments: GPUBuffer;
-  /** GPU-authored bootstrap cell/row dispatches. The inactive epoch branch
-   * publishes x=0, so the host encodes one fixed pressure schedule. */
-  private readonly pressureMembershipIndirectArguments: GPUBuffer;
-  /** Copy-isolated PEI1 wet-brick and hierarchy lane/reduction dispatches. */
-  private readonly pressureExecutionIndirectArguments: GPUBuffer;
-  /** Copy-isolated PCA1 seed, repair, and work dispatches. */
-  private readonly persistentPressureCacheIndirectArguments: GPUBuffer;
   private readonly transportPacketIndirectArguments?: GPUBuffer;
   private readonly sharpeningPacketIndirectArguments?: GPUBuffer;
   private readonly coarseTransportIndirectArguments?: GPUBuffer;
@@ -3520,7 +3131,6 @@ export class WebGPUSparseCM12Resident {
   private readonly fineRollback: GPUBuffer;
   /** Immutable topology duplicate used by pressure SpMVs through a
    * read-only binding instead of the mutable atomic arena. */
-  private readonly pressureTemplates: GPUBuffer;
   readonly globalFineLevelSetSource: WebGPUFineLevelSetBrickSource;
   readonly sparseAdaptiveGridSource: SparseAdaptiveGridConsumerSource;
   private readonly diagnosticsReadback: GPUBuffer;
@@ -3724,9 +3334,6 @@ export class WebGPUSparseCM12Resident {
     private readonly projectedTransportIndirectPublisher:
       ProjectedTransportIndirectPublisher,
     pressureCellIndirectArguments: GPUBuffer,
-    pressureMembershipIndirectArguments: GPUBuffer,
-    pressureExecutionIndirectArguments: GPUBuffer,
-    persistentPressureCacheIndirectArguments: GPUBuffer,
     transportPacketIndirectArguments: GPUBuffer | undefined,
     sharpeningPacketIndirectArguments: GPUBuffer | undefined,
     coarseTransportIndirectArguments: GPUBuffer | undefined,
@@ -3754,12 +3361,9 @@ export class WebGPUSparseCM12Resident {
     private readonly iboSlotBaseWords: readonly [number, number] | undefined,
     effectiveTransportVelocity: GPUBuffer | undefined,
     private readonly velocityExtensionDepths: GPUBuffer,
-    pressureTemplates: GPUBuffer,
-    pressureRepairLayout: SparseCM12PressureRepairLayout,
     private readonly pressureExecutionImageLayout:
       SparseCM12PressureExecutionImageLayout,
     incrementalActivityLayout: SparseCM12IncrementalActivityLayout,
-    canonicalMembershipLayout: SparseCM12CanonicalMembershipLayout,
     framePlanLayout: SparseCM12FramePlanLayout,
     framePlanPresentationLayout: SparseCM12FramePlanPresentationLayout,
     frameControlLayout: SparseCM12FrameControlLayout,
@@ -3783,8 +3387,6 @@ export class WebGPUSparseCM12Resident {
     private readonly gatherCapacityRepairForQA: boolean,
     private readonly pressureTopologyRepairLayout:
       SparseCM12PressureTopologyRepairLayout,
-    private readonly persistentPressureCacheLayout:
-      SparseCM12PersistentPressureCacheLayout,
     presentationPublisherOracleForQA: boolean,
     pipelines: Readonly<Record<string, GPUComputePipeline>>,
     startSimulationPipelineCompilation: () =>
@@ -3795,12 +3397,6 @@ export class WebGPUSparseCM12Resident {
     private readonly templateCellCount: number,
     private readonly templateRowCount: number,
     private readonly maximumOwnedRowCount: number,
-    private readonly pressureCoarseEdgeCount: number,
-    private readonly pressureFineEdgeCount: number,
-    private readonly pressureHierarchyGroupCount: number,
-    private readonly pressureHierarchyEdgeCount: number,
-    private readonly pressureScratchBytes: number,
-    private readonly pressureFineEdgeImageBaseWords: number,
     private readonly topologyWorklistBaseBytes: number,
     private readonly acceptedLeafManifestBaseBytes: number,
     private readonly topologyPageCapacity: number,
@@ -3814,13 +3410,13 @@ export class WebGPUSparseCM12Resident {
     private readonly initialBrickCoordinates:
       readonly (readonly [number, number, number])[],
     private readonly templateWords: Uint32Array,
+    private readonly compiledTopologyLayout: SparseCM12CompiledTopologyLayout,
+    private readonly compiledTopologyIndirectPublisher: CompiledTopologyIndirectPublisher,
     private readonly rigidCoupling?: WebGPUSparseCM12RigidCoupling,
   ) {
     [this.parameters, this.topology, this.state, this.partials, this.scalars,
       this.conditioning, this.activity, this.candidateState, this.topologyArena] = buffers;
-    this.pressureRepairLayout = pressureRepairLayout;
     this.incrementalActivityLayout = incrementalActivityLayout;
-    this.canonicalMembershipLayout = canonicalMembershipLayout;
     this.framePlanLayout = framePlanLayout;
     this.framePlanPresentationLayout = framePlanPresentationLayout;
     this.frameControlLayout = frameControlLayout;
@@ -3838,10 +3434,6 @@ export class WebGPUSparseCM12Resident {
     };
     this.acceptedIndirectArguments = acceptedIndirectArguments;
     this.pressureCellIndirectArguments = pressureCellIndirectArguments;
-    this.pressureMembershipIndirectArguments = pressureMembershipIndirectArguments;
-    this.pressureExecutionIndirectArguments = pressureExecutionIndirectArguments;
-    this.persistentPressureCacheIndirectArguments =
-      persistentPressureCacheIndirectArguments;
     this.transportPacketIndirectArguments = transportPacketIndirectArguments;
     this.sharpeningPacketIndirectArguments = sharpeningPacketIndirectArguments;
     this.coarseTransportIndirectArguments = coarseTransportIndirectArguments;
@@ -3895,18 +3487,15 @@ export class WebGPUSparseCM12Resident {
     this.transportExecutionImage = transportExecutionImage;
     this.transportExecutionImageLayout = transportExecutionImageLayout;
     this.effectiveTransportVelocity = effectiveTransportVelocity;
-    this.pressureTemplates = pressureTemplates;
     this.pipelines = { ...pipelines };
     this.startSimulationPipelineCompilation = startSimulationPipelineCompilation;
     this.cellCount = cellCount;
     this.rowCount = rowCount;
     this.residentAllocatedBytes = [acceptedIndirectArguments, volumeIndirectArguments, pressureCellIndirectArguments,
-      pressureMembershipIndirectArguments,
-      pressureExecutionIndirectArguments,
-      persistentPressureCacheIndirectArguments,
+      compiledTopologyIndirectPublisher.arguments,
       framePlanIndirectArguments, presentationIndirectArguments,
       frameControlIndirectArguments,
-      pressureTemplates, pressureWorklists, velocityExtensionDepths,
+      pressureWorklists, velocityExtensionDepths,
       ...buffers, ...fineBuffers].reduce(
       (sum, buffer) => sum + buffer.size, 0,
     )
@@ -4569,13 +4158,8 @@ export class WebGPUSparseCM12Resident {
       brickCount: worldLeafCapacity,
       alignmentWords: activityAlignmentWords,
     });
-    const canonicalMembershipLayout = createSparseCM12CanonicalMembershipLayout({
-      baseWords: incrementalActivityLayout.totalWords,
-      cellCapacity: physicsCellCapacity,
-      rowCapacity: physicsRowCapacity,
-    });
     const framePlanLayout = createSparseCM12FramePlanLayout({
-      baseWords: Math.ceil(canonicalMembershipLayout.totalWords
+      baseWords: Math.ceil(incrementalActivityLayout.totalWords
         / activityAlignmentWords)
         * activityAlignmentWords,
       brickCapacity: worldLeafCapacity,
@@ -4663,8 +4247,6 @@ export class WebGPUSparseCM12Resident {
     initialActivity.set(createSparseCM12IncrementalActivityInitialWords(
       incrementalActivityLayout,
     ), incrementalActivityLayout.headerBaseWords);
-    initializeSparseCM12CanonicalMembershipWords(initialActivity,
-      canonicalMembershipLayout);
     initialActivity.set(createSparseCM12FramePlanInitialWords(framePlanLayout),
       framePlanLayout.baseWords);
     initialActivity.set(createSparseCM12FramePlanPresentationInitialWords(
@@ -4752,74 +4334,34 @@ export class WebGPUSparseCM12Resident {
       }, { generation: 1, layout: transportExecutionImageLayout });
     const activity = uploadBuffer(device, "Sparse CM12 resident activity history",
       initialActivity, storage);
-    const pressureEdgeOffset = templates.words[15]!;
-    const pressureEdgeCount = templates.words[pressureEdgeOffset + templates.cellCount]!;
-    const pressureTopology = compactPressureTopology(templates, atlas);
-    const pressureWorklistBase = pressureAuxiliaryArena(
-      templates, pressureTopology, packed.brickCount,
-    );
-    const pressureCoarseBase = pressureTopology[14]!;
-    const pressureCoarseEdgeCount = pressureTopology[pressureCoarseBase + 1]!;
-    const pressureHierarchyBase = pressureTopology[13]!;
-    const pressureHierarchyGroupCounts = Array.from(
-      { length: pressureTopology[pressureHierarchyBase]! },
-      (_, level) => pressureTopology[pressureHierarchyBase + 1 + 10 * level]!,
-    );
-    const pressureHierarchyEdgeCounts = pressureHierarchyGroupCounts.map((groupCount, level) => {
-      const descriptor = pressureHierarchyBase + 1 + 10 * level;
-      const crossOffsets = pressureTopology[descriptor + 6]!;
-      return pressureTopology[crossOffsets + groupCount]!;
+    const pressureExecutionImageLayout = createSparseCM12PressureExecutionImageLayout({
+      baseWords: 0,
+      cellCapacity: physicsCellCapacity,
+      rowCapacity: physicsRowCapacity,
+      brickCapacity: 0,
+      hierarchyCapacity: 0,
+      brickFineResolution: 8,
+      presentationPageResolution: 8,
     });
-    const pressureExecutionImageLayout =
-      createSparseCM12PressureExecutionImageLayout({
-        baseWords: pressureWorklistBase.words.length,
-        // Mutable PAB/PCM publish once into PEI's ordinary cell-address and
-        // B8 membership planes; iterative kernels never revisit their atomics.
-        cellCapacity: physicsCellCapacity,
-        brickCapacity: worldLeafCapacity,
-        hierarchyCapacity: Math.max(1,
-          pressureHierarchyGroupCounts.reduce((sum, count) => sum + count, 0)),
-        brickFineResolution: 8,
-        presentationPageResolution: 8,
-      });
-    const pressureExecutionImageWords =
-      createSparseCM12PressureExecutionImageInitialWords(
-        pressureExecutionImageLayout,
-      );
-    const pressureWorklistWords = new Uint32Array(
-      pressureExecutionImageLayout.totalWords,
-    );
-    pressureWorklistWords.set(pressureWorklistBase.words);
-    pressureWorklistWords.set(pressureExecutionImageWords,
-      pressureExecutionImageLayout.baseWords);
-    const pressureWorklistData = Object.freeze({
-      words: pressureWorklistWords,
-      layout: pressureWorklistBase.layout,
-    });
+    const pressureWorklistWords = createSparseCM12PressureExecutionImageInitialWords(
+      pressureExecutionImageLayout);
     if (templates.cellCount >= 0x1fff_ffff) {
       throw new Error("Sparse Geometric (CM12) pressure brick range cache exhausts its 29-bit cell base");
     }
     if (templates.cellCount >= 0x00ff_ffff) {
       throw new Error("Sparse Geometric (CM12) mass stencil cache exhausts its packed 24-bit cell IDs");
     }
-    // Preserve the established transient pressure scratch ABI. Fine-edge
-    // coefficients need frame-to-frame persistence, so their sole authority
-    // follows every transient candidate/scratch use in the same ordinary buffer.
-    const pressureScratchBytes = 4 * (pressureEdgeCount + pressureCoarseEdgeCount
-      + 5 * worldLeafCapacity
-      + pressureHierarchyGroupCounts.reduce((sum, count, level) =>
-        sum + 4 * count + pressureHierarchyEdgeCounts[level]!, 0)
-      + physicsCellCapacity);
+    // Candidate cells and faces are transient topology-transfer state. The
+    // retired pressure hierarchy and persistent directed-edge tail have no
+    // allocation here; pressure consumes the full accepted PEI/CNX images.
     const candidateTransientWords = Math.max(
-      pressureScratchBytes / 4,
       14 * physicsCellCapacity,
       candidateFloatsPerBrick(atlas.brickFineResolution)
         * Math.max(packed.candidateBrickCount, worldLeafCapacity) + physicsRowCapacity,
     );
-    const pressureFineEdgeImageBaseWords = Math.ceil(candidateTransientWords / 64) * 64;
     const candidateState = device.createBuffer({
       label: "Sparse Geometric (CM12) isolated candidate cell fields",
-      size: 4 * Math.max(1, pressureFineEdgeImageBaseWords + pressureEdgeCount),
+      size: 4 * Math.max(1, candidateTransientWords),
       usage: storage,
     });
     const worklistHeaderWords = 32;
@@ -4930,10 +4472,9 @@ export class WebGPUSparseCM12Resident {
     // storage-buffer limit. Upload its immutable head and mutable tail
     // separately: materializing their concatenation briefly doubled the
     // largest host allocation during scene loading.
-    // The pressure CSR tail has already been transformed into the two compact
-    // pressure buffers above. No ordinary/topology pass reads it, so do not
-    // upload that construction-only duplicate into the mutable template arena.
-    const physicalTemplateWordCount = pressureEdgeOffset;
+    // Pressure traverses CNX incidence directly; the catalog ends after its
+    // physical construction records and has no duplicate pressure CSR tail.
+    const physicalTemplateWordCount = templates.words.length;
     const physicalTemplateBytes = 4 * physicalTemplateWordCount;
     templates.words[14] = physicalTemplateWordCount;
     const frameControlBaseWords = Math.ceil(
@@ -4969,58 +4510,8 @@ export class WebGPUSparseCM12Resident {
       createSparseCM12PressureTopologyRepairInitialWords(
         pressureTopologyRepairLayout,
       );
-    const persistentPressureCacheLayout =
-      createSparseCM12ResidentPersistentPressureCacheLayout({
-        baseWords: pressureTopologyRepairLayout.totalWords,
-        cellCount: physicsCellCapacity,
-        rowCount: physicsRowCapacity,
-        directedEdgeCount: pressureEdgeCount,
-        brickCount: worldLeafCapacity,
-        aggregateEdgeCount: pressureCoarseEdgeCount,
-        hierarchyLevelCounts: pressureHierarchyGroupCounts,
-        hierarchyEdgeLevelCounts: pressureHierarchyEdgeCounts,
-      });
-    const persistentPressureCacheWords = new Uint32Array(
-      persistentPressureCacheLayout.bufferSizeWords,
-    );
-    initializeSparseCM12PersistentPressureCacheWords(
-      persistentPressureCacheWords, persistentPressureCacheLayout,
-    );
-    // Reproduce the construction hierarchy bootstrap exactly for groups that
-    // remain outside the first local repair. The full bake sums the
-    // max(0, 1e-12) diagonal of every child brick with the shader's 64-lane
-    // reduction order; a flat 1e-12 node initializer loses (childCount-1)
-    // floors and perturbs active coarse solves that reference an inactive
-    // neighboring group. Internal aggregate edges are construction-zero.
-    const pressureDiagonalFloor = Math.fround(1e-12);
-    const pressureDiagonalBits = (value: number) =>
-      new Uint32Array(new Float32Array([value]).buffer)[0]!;
-    pressureHierarchyGroupCounts.forEach((groupCount, level) => {
-      const descriptor = pressureHierarchyBase + 1 + 10 * level;
-      const childOffsets = pressureTopology[descriptor + 2]!;
-      for (let group = 0; group < groupCount; group += 1) {
-        const begin = pressureTopology[childOffsets + group]!;
-        const end = pressureTopology[childOffsets + group + 1]!;
-        const lanes = new Float32Array(WORKGROUP_SIZE);
-        for (let lane = 0; lane < WORKGROUP_SIZE; lane += 1) {
-          let sum = Math.fround(0);
-          for (let at = begin + lane; at < end; at += WORKGROUP_SIZE) {
-            sum = Math.fround(sum + pressureDiagonalFloor);
-          }
-          lanes[lane] = sum;
-        }
-        for (let width = WORKGROUP_SIZE >>> 1; width >= 1; width >>>= 1) {
-          for (let lane = 0; lane < width; lane += 1) {
-            lanes[lane] = Math.fround(lanes[lane]! + lanes[lane + width]!);
-          }
-        }
-        persistentPressureCacheWords[
-          persistentPressureCacheLayout.hierarchyDiagonalBaseWords[level]! + group
-        ] = pressureDiagonalBits(Math.max(lanes[0]!, pressureDiagonalFloor));
-      }
-    });
     const internedBoundaryBaseWords = transportExecutionImageLayout ? Math.ceil(
-      persistentPressureCacheLayout.bufferSizeWords / 64,
+      pressureTopologyRepairLayout.totalWords / 64,
     ) * 64 : undefined;
     // The accepted arm owns one composed, relocatable IBO1 image. Mini64 and
     // symmetric-expansion use the already-selected all-rung template packing;
@@ -5166,7 +4657,7 @@ export class WebGPUSparseCM12Resident {
     }
     const transportAuthorityTotalWords = iboSemanticAuthorityBaseWords !== undefined
       ? iboSemanticAuthorityBaseWords + iboSemanticAuthorityWords
-      : internedBoundaryBaseWords ?? persistentPressureCacheLayout.bufferSizeWords;
+      : internedBoundaryBaseWords ?? pressureTopologyRepairLayout.totalWords;
     const topologyEffectsAuthorityLayout = transportExecutionImageLayout
       ? createSparseCM12TopologyEffectsAuthorityLayout({
         baseWords: transportAuthorityTotalWords,
@@ -5218,8 +4709,19 @@ export class WebGPUSparseCM12Resident {
     const hostIncidenceCount = templates.words[5]!;
     const immutableHostIncidenceWords = templates.words.subarray(
       templates.words[10]!, templates.words[10]! + 2 * hostIncidenceCount);
-    const topologyArenaWords = immutableHostIncidenceBaseWords
-      + immutableHostIncidenceWords.length + CM12_FAILURE_WORDS;
+    const compiledTopologyLayout = createSparseCM12CompiledTopologyLayout({
+      baseWords: Math.ceil((immutableHostIncidenceBaseWords
+        + immutableHostIncidenceWords.length) / 64) * 64,
+      cellCapacity: physicsCellCapacity,
+      rowCapacity: physicsRowCapacity,
+      termCapacity: layout.volumeTransport.subfaceCapacity,
+      incidenceCapacity: layout.volumeTransport.subfaceCapacity,
+      physicalFaceCapacity: layout.volumeTransport.subfaceCapacity,
+      requiredViews: CNX_VIEW.connectivity | CNX_VIEW.transport,
+      maximumArenaWords: Math.floor(device.limits.maxStorageBufferBindingSize / 4)
+        - CM12_FAILURE_WORDS,
+    });
+    const topologyArenaWords = compiledTopologyLayout.totalWords + CM12_FAILURE_WORDS;
     const topologyArena = device.createBuffer({
       label: "Sparse Geometric (CM12) physical topology templates and worklists",
       size: Math.max(4, 4 * topologyArenaWords),
@@ -5230,6 +4732,12 @@ export class WebGPUSparseCM12Resident {
     writeGPUBufferBytes(device.queue, topologyArena, 4 * immutableHostIncidenceBaseWords,
       immutableHostIncidenceWords.buffer as ArrayBuffer,
       immutableHostIncidenceWords.byteOffset, immutableHostIncidenceWords.byteLength);
+    const compiledTopologyInitialWords = createSparseCM12CompiledTopologyInitialWords(
+      compiledTopologyLayout);
+    writeGPUBufferBytes(device.queue, topologyArena,
+      4 * compiledTopologyLayout.headerBaseWords,
+      compiledTopologyInitialWords.buffer as ArrayBuffer,
+      compiledTopologyInitialWords.byteOffset, compiledTopologyInitialWords.byteLength);
     writeGPUBufferBytes(device.queue, topologyArena, physicalTemplateBytes,
       initialWorklists.buffer as ArrayBuffer, initialWorklists.byteOffset,
       initialWorklists.byteLength);
@@ -5245,14 +4753,6 @@ export class WebGPUSparseCM12Resident {
       pressureTopologyRepairRegion.buffer as ArrayBuffer,
       pressureTopologyRepairRegion.byteOffset,
       pressureTopologyRepairRegion.byteLength);
-    const persistentPressureCacheRegion = persistentPressureCacheWords.subarray(
-      persistentPressureCacheLayout.baseWords,
-    );
-    writeGPUBufferBytes(device.queue, topologyArena,
-      4 * persistentPressureCacheLayout.baseWords,
-      persistentPressureCacheRegion.buffer as ArrayBuffer,
-      persistentPressureCacheRegion.byteOffset,
-      persistentPressureCacheRegion.byteLength);
     if (internedBoundaryImage && internedBoundaryBaseWords !== undefined) {
       writeGPUBufferBytes(device.queue, topologyArena, 4 * internedBoundaryBaseWords,
         internedBoundaryImage.words.buffer as ArrayBuffer,
@@ -5288,12 +4788,9 @@ export class WebGPUSparseCM12Resident {
       writeSparseCM12SolidOccupancy(device.queue, topologyArena,
         solidOccupancyLayout, initialSolidWorld, [0, 0, 0]);
     }
-    const pressureTemplates = uploadBuffer(device,
-      "Sparse CM12 read-only pressure topology", pressureTopology,
-      GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
     const pressureWorklists = uploadBuffer(device,
       "Sparse CM12 pressure aggregate and execution arena",
-      pressureWorklistData.words,
+      pressureWorklistWords,
       GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC
         | GPUBufferUsage.INDIRECT);
     const transportExecutionImageBuffer = transportExecutionImage
@@ -5327,23 +4824,6 @@ export class WebGPUSparseCM12Resident {
       label: "Sparse Geometric (CM12) pressure-cell indirect dispatch",
       size: 12,
       usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
-    });
-    const pressureMembershipIndirectArguments = device.createBuffer({
-      label: "Sparse Geometric (CM12) pressure-membership bootstrap indirect dispatches",
-      size: SPARSE_CM12_PRESSURE_MEMBERSHIP_INDIRECT_BYTES,
-      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
-    });
-    const pressureExecutionIndirectArguments = device.createBuffer({
-      label: "Sparse Geometric (CM12) PEI1 pressure execution dispatches",
-      size: 48,
-      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
-    });
-    const persistentPressureCacheIndirectArguments = device.createBuffer({
-      label: "Sparse Geometric (CM12) persistent pressure-cache indirect dispatches",
-      // Seed/repair/work for four aggregate families.
-      size: 12 * 12,
-      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST
-        | GPUBufferUsage.COPY_SRC,
     });
     const transportPacketIndirectArguments = transportPacketAuthorityLayout
       ? device.createBuffer({
@@ -5460,9 +4940,8 @@ export class WebGPUSparseCM12Resident {
       // cell/row worklist counts and compact pressure-cell count. These are QA
       // receipts, never schedule input.
       size: SPARSE_CM12_PRESSURE_SCALAR_BYTES + 4 * ACTIVITY_HEADER_WORDS + 12
-        + SPARSE_CM12_PCM_DIAGNOSTIC_BYTES
-        + 4 * SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_HEADER_WORDS
-        + 4 * SPARSE_CM12_PRESSURE_CUTOVER_DIAGNOSTIC_WORDS + 16,
+        + 4 * SPARSE_CM12_PRESSURE_EXECUTION_IMAGE_HEADER_WORDS
+        + 4 * SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_HEADER_WORDS + 16,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
 
@@ -5525,7 +5004,7 @@ export class WebGPUSparseCM12Resident {
         { binding: 11, resource: { buffer: conditioning } },
         { binding: 12, resource: { buffer: activity } },
         { binding: 13, resource: { buffer: candidateState } },
-        { binding: 14, resource: { buffer: pressureTemplates } },
+        { binding: 14, resource: { buffer: fineMetadata } },
         { binding: 15, resource: { buffer: pressureWorklists } },
         { binding: 16, resource: { buffer: topologyArena } },
       ],
@@ -5548,7 +5027,7 @@ export class WebGPUSparseCM12Resident {
           { binding: 12, resource: { buffer: activity } },
           { binding: 13, resource: { buffer: candidateState } },
           { binding: 14, resource: { buffer: transportExecutionImageBuffer
-            ?? pressureTemplates } },
+            ?? fineMetadata } },
           { binding: 15, resource: { buffer: pressureWorklists } },
           { binding: 16, resource: { buffer: topologyArena } },
           ],
@@ -5569,7 +5048,7 @@ export class WebGPUSparseCM12Resident {
           { binding: 11, resource: { buffer: conditioning } },
           { binding: 12, resource: { buffer: activity } },
           { binding: 13, resource: { buffer: candidateState } },
-          { binding: 14, resource: { buffer: pressureTemplates } },
+          { binding: 14, resource: { buffer: fineMetadata } },
           { binding: 15, resource: { buffer: pressureWorklists } },
           { binding: 16, resource: { buffer: topologyArena } },
         ],
@@ -5595,6 +5074,54 @@ export class WebGPUSparseCM12Resident {
           + ` (${descriptor.compute.entryPoint || "default entry"}) failed: ${describeCompilationFailure(error)}`,
           { cause: error });
       }
+    };
+    // Bind only the generation header so this shader is identical across
+    // allocation sizes. Its argument buffer is absent from every consumer.
+    const compiledTopologyArguments = device.createBuffer({
+      label: "Sparse CM12 complete topology compilation dispatches",
+      size: 4 * 12, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT,
+    });
+    const compiledTopologyPipeline = await compileResidentPipeline({
+      label: "Sparse CM12 complete topology compilation dispatch publication",
+      layout: "auto",
+      compute: {
+        module: compiler.createShaderModule({
+          label: "Sparse CM12 complete topology compilation dispatch shader",
+          code: /* wgsl */ `
+@group(0) @binding(0) var<storage,read> header:array<u32>;
+@group(0) @binding(1) var<storage,read_write> arguments:array<u32>;
+fn triplet(at:u32,groups:u32){
+  arguments[at]=min(groups,65535u);
+  arguments[at+1u]=max(1u,(groups+65534u)/65535u);
+  arguments[at+2u]=1u;
+}
+@compute @workgroup_size(1)
+fn publish(){
+  let sealEnabled=select(0u,1u,header[${CNX_HEADER.rebuildRequired}u]!=0u);
+  let enabled=select(0u,sealEnabled,header[${CNX_HEADER.fault}u]==0u);
+  triplet(0u,enabled*max(1u,(max(header[${CNX_HEADER.cellCapacity}u],
+    header[${CNX_HEADER.rowCapacity}u])+63u)/64u));
+  triplet(3u,enabled*max(1u,(header[${CNX_HEADER.acceptedCellCount}u]+63u)/64u));
+  triplet(6u,enabled*max(1u,(header[${CNX_HEADER.acceptedRowWorklistCount}u]+63u)/64u));
+  // Seal must run even when begin refused the source, so it publishes the
+  // sticky failure receipt instead of leaving a silent building generation.
+  triplet(9u,sealEnabled);
+}`,
+        }), entryPoint: "publish",
+      },
+    }, { priority: "critical" });
+    const compiledTopologyIndirectPublisher: CompiledTopologyIndirectPublisher = {
+      arguments: compiledTopologyArguments,
+      pipeline: compiledTopologyPipeline,
+      bindGroup: device.createBindGroup({
+        label: "Sparse CM12 complete topology compilation dispatch bindings",
+        layout: compiledTopologyPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: topologyArena,
+            offset: 4 * compiledTopologyLayout.headerBaseWords, size: 256 } },
+          { binding: 1, resource: { buffer: compiledTopologyArguments } },
+        ],
+      }),
     };
     // A separate dispatch may publish a buffer which the next dispatch reads
     // indirectly. Keep the writable argument binding out of the resident
@@ -5740,11 +5267,9 @@ fn gateVelocityExtension(){
     const createResidentShaderSource = (velocityExtensionFixedRecurrenceDepth?: number) =>
       createWebgpuSparseCM12ResidentWGSL(
         atlas.brickFineResolution, presentationPageResolution,
-        pressureWorklistData.layout,
-        incrementalActivityLayout, canonicalMembershipLayout,
+        incrementalActivityLayout,
         framePlanLayout, framePlanPresentationLayout,
         frameControl.layout, pressureTopologyRepairLayout,
-        persistentPressureCacheLayout,
         velocityExtensionLayouts,
         pressureExecutionImageLayout,
         logicalOwnerDirectory
@@ -5781,7 +5306,6 @@ fn gateVelocityExtension(){
         topologyEffectsAuthorityLayout,
         finalScalarPacketMaskLayout,
         faceAddressProgram.layout,
-        pressureFineEdgeImageBaseWords,
         velocityExtensionFixedRecurrenceDepth,
         worldDirectoryLayout,
         dynamicWorldGrowth,
@@ -5802,6 +5326,7 @@ fn gateVelocityExtension(){
         layout.volumeTransport,
         layout.sourceLedger,
         layout.movingSolid,
+        compiledTopologyLayout,
       );
     const shaderSource = createResidentShaderSource();
     const sourceByShaderModule = new WeakMap<GPUShaderModule, string>();
@@ -5856,11 +5381,12 @@ fn gateVelocityExtension(){
       presentationShaderSource, "Sparse CM12 presentation shader",
     );
     const pipelineLayout = deviceCompilation.pipelineLayout;
-    const names = ["refreshGeometricInterface", "refreshGeometricInterfacePublished", "extendGeometricInterface",
+    const names = [...COMPILED_TOPOLOGY_ENTRY_POINTS,
+      "refreshGeometricInterface", "refreshGeometricInterfacePublished", "extendGeometricInterface",
       "publishGeometricInterfaceRdfValues", "publishGeometricInterfaceRdfValuesPublished",
       "fitGeometricInterfaceRdfGradients",
       "seedGeometricVolumeDestination", "beginGeometricVolumeTransport",
-      "compileGeometricVolumeSubfaces", "compileGeometricVolumeCellFaces", "initializeGeometricVolumeCells", "sealGeometricVolumePlan",
+      "initializeGeometricVolumeCells", "sealGeometricVolumePlan",
       "beginGeometricTransportEnvelope", "gatherGeometricTransportMaterialBounds",
       "gatherGeometricTransportVelocityBounds", "sealGeometricTransportEnvelope",
       "gatherGeometricPreflightVelocityBounds", "includeGeometricPreflightSourceBounds",
@@ -5920,21 +5446,13 @@ fn gateVelocityExtension(){
       "initializeVelocityExtensionPackets", "advanceVelocityExtensionPackets",
       "prepareSparseCM12AcceptedFaceRows", "projectSparseCM12DynamicFaceRows",
       "forceFaces", "enforceSparseCM12InflowFaces",
-      "classifyPressureCells",
-      "markCanonicalPressureRowRepairTiles", "compileCanonicalPressureRowRepairTiles",
-      "sealCanonicalPressureRowRepairTiles", "compileDirtyCanonicalPressureRows",
-      "beginCanonicalPressureCells", "beginCanonicalPressureRows",
-      "planPressureMembershipEpoch",
-      "finalizeCanonicalPressureCellFrontier",
-      "repairCanonicalPressureCellLeaves", "finalizeCanonicalPressureCells",
-      "finalizeCanonicalPressureRows",
-      "classifyDirtyPressureCells",
+      ...SPARSE_CM12_FULL_PRESSURE_IMAGE_ENTRY_POINTS,
+      "finalizeFullPressureTopologyJournal",
       "preparePressure",
       "beginPressureSolve",
       "publishPressureSolveDispatchGate", "restorePressureSolveDispatches",
-      "initializeJacobiDirection",
       "initializePCG", "measureTrueResidual", "measureGuardedTrueResidual",
-      "reduceInitialTrueResidual", "reduceGuardedTrueResidual",
+      "reduceGuardedTrueResidual",
       "restartPCGAfterCurvatureLoss", "initializeJacobiRecoveryDirection",
       "reduceCurvatureRecovery",
       "reduceFinalTrueResidual",
@@ -6001,19 +5519,12 @@ fn gateVelocityExtension(){
       "publishSparseCM12SurfaceRepresentabilityReceipts",
       "rejectSparseCM12FramePlanPresentationFaults",
       ...(SPARSE_CM12_COMMON_HEIGHT_ENABLED ? SPARSE_CM12_HEIGHT_ENTRY_POINTS : []),
-      "beginPersistentPressureCache", "finalizePersistentPressureFineCache",
-      ...SPARSE_CM12_PRESSURE_EXECUTION_IMAGE_ENTRY_POINTS,
-      "publishFrozenPressureCellIds",
-      "publishFrozenPressureMembership",
-      "publishFrozenPressureCoefficients",
       "clearSparseCM12RetiredFaceVelocitySupport",
       "publishSparseCM12FaceVelocitySupport",
       "projectSparseCM12InteriorFaceTiles",
       "projectSparseCM12SeamFacePackets",
       "projectSparseCM12SparseAirFacePackets",
-      ...sparseCM12PressureTopologyRepairEntryPoints(
-        pressureTopologyRepairLayout,
-      ),
+      "beginSparseCM12PressureTopologyRepair",
       ...(layout.journal !== 0
         ? ["journalIteration", "journalSnapshot"] as const : []),
     ] as const;
@@ -6045,7 +5556,10 @@ fn gateVelocityExtension(){
         "finalizeSparseCM12FramePlanPresentationExecution",
         "publishSparseCM12SurfaceRepresentabilityReceipts",
         "rejectSparseCM12FramePlanPresentationFaults", ...(SPARSE_CM12_COMMON_HEIGHT_ENABLED ? SPARSE_CM12_HEIGHT_ENTRY_POINTS : [])]);
-    const presentationNames = names.filter((name) => presentationEntryNames.has(name));
+    for (const name of COMPILED_TOPOLOGY_ENTRY_POINTS) presentationEntryNames.add(name);
+    const compiledTopologyEntryNames = new Set<string>(COMPILED_TOPOLOGY_ENTRY_POINTS);
+    const presentationNames = names.filter((name) => presentationEntryNames.has(name)
+      && !compiledTopologyEntryNames.has(name));
     const simulationNames = names.filter((name) => !presentationEntryNames.has(name));
     const compileNamedEntries = async (
       selectedNames: readonly string[],
@@ -6093,10 +5607,23 @@ fn gateVelocityExtension(){
     if (presentationPipelinePromise) touchSparseCM12PipelineFamily(
       deviceCompilation.completedPresentationFamilies, compilationKey);
     if (!presentationPipelinePromise) {
-      presentationPipelinePromise = (async () => Object.freeze(Object.fromEntries([
-        ...await compileNamedEntries(presentationNames, "critical"),
-        ...(presentationPublisherOracleForQA ? [] : [await compileFramePlanVerify()]),
-      ])))();
+      presentationPipelinePromise = (async () => {
+        // Compilation kernels have their own bounded dependency slice. Adding
+        // them to the presentation module makes every surface pipeline parse
+        // and compile unrelated topology construction code.
+        const topologySource = sparseCM12WGSLForEntryPoints(
+          shaderSource, COMPILED_TOPOLOGY_ENTRY_POINTS);
+        const topologyModule = await shaderModuleFor(topologySource,
+          "Sparse CM12 complete topology compiler shader");
+        const entries = [
+          ...await compileNamedEntries(presentationNames, "critical"),
+          ...await compileNamedEntries(COMPILED_TOPOLOGY_ENTRY_POINTS,
+            "critical", topologyModule),
+          ...(presentationPublisherOracleForQA ? [] : [await compileFramePlanVerify()]),
+        ];
+        deviceCompilation.shaderModules.delete(topologySource);
+        return Object.freeze(Object.fromEntries(entries));
+      })();
       deviceCompilation.presentationPipelines.set(compilationKey,
         presentationPipelinePromise);
       retainSparseCM12PipelineFamily(deviceCompilation.presentationPipelines,
@@ -6184,7 +5711,7 @@ fn gateVelocityExtension(){
             "retireSparseCM12PresentationPages",
             "compactSparseCM12PresentationPageDirectory",
           ].map(async (entryPoint) => {
-            const module = await shaderModuleFor(
+            const allocatorModule = await shaderModuleFor(
               sparseCM12WGSLForEntryPoints(presentationAllocatorShaderSource, [entryPoint]),
               `Sparse CM12 ${entryPoint} shader`,
             );
@@ -6194,7 +5721,7 @@ fn gateVelocityExtension(){
               return [entryPoint, await compileResidentPipeline({
                 label: `Sparse Geometric (CM12) ${entryPoint}`,
                 layout: presentationAllocatorPipelineLayout,
-                compute: { module, entryPoint },
+                compute: { module: allocatorModule, entryPoint },
               }, { priority: "background" })] as const;
             } finally {
               deviceCompilation.shaderModules.delete(allocatorSource);
@@ -6233,9 +5760,6 @@ fn gateVelocityExtension(){
       volumeIndirectPublisher,
       projectedTransportIndirectPublisher,
       pressureCellIndirectArguments,
-      pressureMembershipIndirectArguments,
-      pressureExecutionIndirectArguments,
-      persistentPressureCacheIndirectArguments,
       transportPacketIndirectArguments,
       sharpeningPacketIndirectArguments,
       coarseTransportIndirectArguments,
@@ -6265,11 +5789,8 @@ fn gateVelocityExtension(){
         : undefined,
       effectiveTransportVelocity,
       velocityExtensionDepths,
-      pressureTemplates,
-      pressureWorklistData.layout,
       pressureExecutionImageLayout,
       incrementalActivityLayout,
-      canonicalMembershipLayout,
       framePlanLayout,
       framePlanPresentationLayout,
       frameControl.layout,
@@ -6287,7 +5808,6 @@ fn gateVelocityExtension(){
       alternatingCapacityRepairReceiptsForQA,
       gatherCapacityRepairForQA,
       pressureTopologyRepairLayout,
-      persistentPressureCacheLayout,
       presentationPublisherOracleForQA,
       presentationPipelines,
       startSimulationPipelineCompilation,
@@ -6295,12 +5815,6 @@ fn gateVelocityExtension(){
       physicsCellCapacity, physicsRowCapacity,
       physicsCellCapacity, physicsRowCapacity,
       Math.max(templates.maximumOwnedRowCount, dynamicRowsPerPage),
-      pressureCoarseEdgeCount,
-      pressureEdgeCount,
-      pressureHierarchyGroupCounts.reduce((sum, count) => sum + count, 0),
-      pressureHierarchyEdgeCounts.reduce((sum, count) => sum + count, 0),
-      pressureScratchBytes,
-      pressureFineEdgeImageBaseWords,
       physicalTemplateBytes,
       physicalTemplateBytes + 4 * acceptedLeafManifestBase,
       topologyPagePool.pageCapacity,
@@ -6312,6 +5826,8 @@ fn gateVelocityExtension(){
       packed.brickCount,
       atlas.bricks.map((brick) => brick.coordinate),
       templates.words,
+      compiledTopologyLayout,
+      compiledTopologyIndirectPublisher,
       rigidCoupling);
     result.writeParameters(packed, 0.004, 1, 1, [0, 0, 0], undefined, undefined,
       undefined, 0, undefined);
@@ -6503,9 +6019,8 @@ fn gateVelocityExtension(){
       encoder.clearBuffer(this.activity, 4 * this.phase1TransportProfileBaseWords,
         4 * SPARSE_CM12_PHASE1_TRANSPORT_PROFILE_WORDS);
     }
-    // Liquid membership and ghost-fluid theta are PCM-owned persistent caches.
-    // Bootstrap initializes the complete accepted domain; later epochs repair
-    // only dirty/topology closure and explicitly zero retired entries.
+    // The full pressure image refreshes membership, ghost-fluid theta, and
+    // diagonals from the accepted compiled topology before each solve.
     // Live pressure-row census. classifyRows increments these counters from
     // the accepted row worklist after topology publication and liquid/ghost-
     // fluid classification; they are diagnostics only and never schedule work.
@@ -6601,11 +6116,6 @@ fn gateVelocityExtension(){
       activePass.setPipeline(this.pipelines[name]!);
       activePass.dispatchWorkgroupsIndirect(this.pressureCellIndirectArguments, 0);
     };
-    const dispatchPressureBootstrap = (name: string) => {
-      const activePass = openPass();
-      activePass.setPipeline(this.pipelines[name]!);
-      activePass.dispatchWorkgroupsIndirect(this.pressureMembershipIndirectArguments, 0);
-    };
     const copyPressureSolveDispatchGate = () => {
       closePass();
       encoder.copyBufferToBuffer(this.pressureWorklists,
@@ -6613,11 +6123,6 @@ fn gateVelocityExtension(){
           this.pressureExecutionImageLayout,
         ),
         this.pressureCellIndirectArguments, 0, 12);
-      encoder.copyBufferToBuffer(this.pressureWorklists,
-        sparseCM12PressureExecutionImageIndirectByteOffset(
-          this.pressureExecutionImageLayout,
-        ),
-        this.pressureExecutionIndirectArguments, 0, 48);
     };
     const dispatchFrameControl = (
       name: string,
@@ -6638,7 +6143,7 @@ fn gateVelocityExtension(){
     // happen on the frames nobody is looking, which would change the advance's
     // pass structure for every scene.
     let lensTaps = sparseCM12StageTaps(this.stageLenses, encoder, closePass);
-    const useBindGroup = (bindGroup: GPUBindGroup) => {
+    const selectBindGroup = (bindGroup: GPUBindGroup) => {
       activeBindGroup = bindGroup;
       pass?.setBindGroup(0, bindGroup);
     };
@@ -6715,20 +6220,23 @@ fn gateVelocityExtension(){
         4 * this.frameControlLayout.indirectBaseWords,
         this.frameControlIndirectArguments, 0,
         12 * SPARSE_CM12_FRAME_CONTROL_FAMILY_COUNT);
-      useBindGroup(this.bindGroup);
+      selectBindGroup(this.bindGroup);
       dispatchFrameControl("publishSparseCM12MovingSolidActivity",
         SPARSE_CM12_FRAME_CONTROL_FAMILY.solidCellWork);
       dispatchFrameControl("sparseCM12FrameControlNoop",
         SPARSE_CM12_FRAME_CONTROL_FAMILY.bodyBypass);
       dispatchFrameControl("sparseCM12FrameControlNoop",
         SPARSE_CM12_FRAME_CONTROL_FAMILY.bodyRowBypass);
+      closePass();
+      this.encodeCompiledTopologyGeneration(encoder);
+      selectBindGroup(this.bindGroup);
       dispatchAccepted("seedGeometricVolumeDestination", "cell");
       dispatchAccepted("refreshGeometricInterface", "cell");
       dispatchAccepted("extendGeometricInterface", "cell");
       closePass();
       this.encodeTopologyEditTransaction(encoder, finestCellSize_m,
         [0, 0, 0], [0, 0, 0], 0, 0, dt_s, false, activityPolicy, "prepare", true);
-      useBindGroup(this.bindGroup);
+      selectBindGroup(this.bindGroup);
       dispatchAccepted("publishGeometricTransportFrontierSource", "cell");
       if (this.rigidCoupling) {
         closePass();
@@ -6745,7 +6253,7 @@ fn gateVelocityExtension(){
       closeSubstage("frame-control-authority");
       // Cache only accepted packet addresses. Topology changes rebuild the
       // image; only initialization needs direct coverage to retire packet masks.
-      useBindGroup(this.transportBindGroup);
+      selectBindGroup(this.transportBindGroup);
       dispatch("beginSparseCM12VelocityExtensionSchedule", 1);
       dispatchAcceptedLeaves("compileSparseCM12VelocityExtensionSchedule");
       dispatch("sealSparseCM12VelocityExtensionSchedule", 1);
@@ -6761,18 +6269,18 @@ fn gateVelocityExtension(){
       dispatchVelocityExtension("initializeVelocityExtensionPackets", 0);
       closeSubstage("velocity-extension-mask-initialization");
       for (let depth = 1; depth <= 8; depth += 1) {
-        useBindGroup(this.transportDepthBindGroups[depth - 1]!);
+        selectBindGroup(this.transportDepthBindGroups[depth - 1]!);
         dispatchVelocityExtension("advanceVelocityExtensionPackets", 12);
       }
       closeSubstage("velocity-extension-sweeps");
       // Scalar TPA/sharpening packets belonged to retired CM12 transport.
       // Face prediction uses the VEX support cache; volume owns its subface list.
       closeSubstage("transport-packet-authority");
-      useBindGroup(this.pressureBindGroup);
+      selectBindGroup(this.pressureBindGroup);
     });
     stage("face-preparation", ({ closeSubstage }) => {
       dispatchAccepted("seedGeometricVolumeDestination", "cell");
-      useBindGroup(this.transportBindGroup);
+      selectBindGroup(this.transportBindGroup);
       dispatch("clearSparseCM12RetiredFaceVelocitySupport",
         this.incrementalActivityLayout.brickCount);
       dispatch("publishSparseCM12FaceVelocitySupport",
@@ -6784,10 +6292,11 @@ fn gateVelocityExtension(){
     });
     stage("body-forces", () => {
       dispatchAccepted("forceFaces", "row");
-      useBindGroup(this.bindGroup);
+      selectBindGroup(this.bindGroup);
       dispatch("beginContinuousGeometricSource", 1);
-      dispatchAccepted("initializeContinuousGeometricSource", "cell");
       if (inflow) {
+        // A disabled source reads as zero; resume rebuilds all accepted rates.
+        dispatchAccepted("initializeContinuousGeometricSource", "cell");
         for (let closure = 0; closure < 32; closure += 1) {
           dispatchAccepted("connectContinuousGeometricSource", "row");
           dispatchAccepted("compressContinuousGeometricSource", "cell");
@@ -6805,72 +6314,27 @@ fn gateVelocityExtension(){
       // adaptivity consumers share one plane per accepted cell at this bank.
       dispatchAccepted("refreshGeometricInterface", "cell");
       dispatchAccepted("extendGeometricInterface", "cell");
-      // Conservative conditioning is dead after sharpening. Reuse its large
-      // cell-scaled arena for stable-ID liquid compaction, then copy only the
-      // three indirect words outside the pass to satisfy WebGPU usage scopes.
-      // Every header and per-workgroup count read by the finalizers is written
-      // by this epoch, so clearing the complete template-sized arena here only
-      // spends bandwidth and adds a pass boundary.
+      // Classify a complete next pressure image. Its previous membership
+      // remains immutable until seal, and word-prefix emission retains stable
+      // ascending cell IDs for the solver's floating-point reduction order.
       closePass();
-      useBindGroup(this.pressureBindGroup);
-      dispatch("beginCanonicalPressureCells", 1);
-      dispatch("beginCanonicalPressureRows", 1);
-      dispatch("beginPersistentPressureCache", 1);
-      dispatch("planPressureMembershipEpoch", 1);
+      selectBindGroup(this.pressureBindGroup);
       dispatch("beginSparseCM12PressureTopologyRepair", 1);
-      closePass();
-      dispatch("finalizeSparseCM12PressureTopologyBrickFrontier", 1);
-      // Indirect arguments are copied out of GPU-authored headers. WebGPU
-      // forbids transfer commands while the shared compute pass is open.
-      closePass();
-      encoder.copyBufferToBuffer(this.pressureWorklists,
-        4 * (this.pressureRepairLayout.headerBaseWords
-          + SPARSE_CM12_PRESSURE_REPAIR_HEADER.bootstrapCellIndirect),
-        this.pressureMembershipIndirectArguments, 0,
-        SPARSE_CM12_PRESSURE_MEMBERSHIP_INDIRECT_BYTES);
+      dispatch("beginFullPressureImage", 1);
       closeSubstage("ptr-setup-brick-plan");
       if (pressureTopologyPhaseLimitForQA === "setup") return;
-      dispatchPressureBootstrap("classifyPressureCells");
-      dispatchAccepted("classifyDirtyPressureCells", "cell");
-      dispatch("finalizeCanonicalPressureCellFrontier", 1);
-      closePass();
-      encoder.copyBufferToBuffer(this.activity,
-        sparseCM12CanonicalMembershipRepairIndirectByteOffset(
-          this.canonicalMembershipLayout),
-        this.pressureMembershipIndirectArguments, 0, 12);
-      dispatchPressureBootstrap("repairCanonicalPressureCellLeaves");
-      dispatch("finalizeCanonicalPressureCells", 1);
-      closePass();
+      dispatch("classifyFullPressureCellWords", pressureMembershipWorkgroups);
+      dispatch("scanFullPressureCellWords", 1);
+      dispatch("publishFullPressureCellIds", pressureMembershipWorkgroups);
       closeSubstage("pcm-cell-publication");
       if (pressureTopologyPhaseLimitForQA === "cells") return;
-      dispatchAccepted("markCanonicalPressureRowRepairTiles", "row");
-      dispatch("compileCanonicalPressureRowRepairTiles", ...planSparseCM12LinearDispatch(
-        Math.ceil(this.canonicalMembershipLayout.row.dispatchWorkgroupCount / WORKGROUP_SIZE),
-        this.device.limits.maxComputeWorkgroupsPerDimension,
-      ));
-      dispatch("sealCanonicalPressureRowRepairTiles", 1);
-      closePass();
-      encoder.copyBufferToBuffer(this.activity,
-        4 * (this.canonicalMembershipLayout.row.repairControlBaseWords + 1),
-        this.pressureMembershipIndirectArguments, 0, 12);
-      dispatchPressureBootstrap("compileDirtyCanonicalPressureRows");
-      dispatch("finalizeCanonicalPressureRows", 1);
-      closePass();
+      dispatch("classifyFullPressureRowWords", Math.ceil(
+        this.pressureExecutionImageLayout.pressureRowMembershipWordCount
+          / WORKGROUP_SIZE));
+      dispatch("scanFullPressureRowWords", 1);
       closeSubstage("pcm-row-publication");
       if (pressureTopologyPhaseLimitForQA === "rows") return;
-      // Fine coefficients are the complete production pressure-cache
-      // publication. PEI snapshots that generation directly; the retired
-      // aggregate/hierarchy substages intentionally publish no numerical work.
-      encoder.copyBufferToBuffer(this.pressureWorklists,
-        sparseCM12PressureExecutionImageCellIndirectByteOffset(
-          this.pressureExecutionImageLayout,
-        ),
-        this.pressureCellIndirectArguments, 0, 12);
-      dispatchPressureCell("publishFrozenPressureCellIds");
-      dispatch("publishFrozenPressureMembership", pressureMembershipWorkgroups);
-      dispatchPressureCell("publishFrozenPressureCoefficients");
-      dispatch("finalizePersistentPressureFineCache", 1);
-      closePass();
+      dispatchAccepted("publishFullPressureCoefficients", "cell");
       closeSubstage("pca-fine-publication");
       if (pressureTopologyPhaseLimitForQA === "fine") return;
       closeSubstage("pca-coarse-repair");
@@ -6881,38 +6345,30 @@ fn gateVelocityExtension(){
         || pressureTopologyPhaseLimitForQA === "coarse") return;
       closeSubstage("pca-hierarchy-and-freeze");
       if (pressureTopologyPhaseLimitForQA === "hierarchy") return;
-      dispatch("finalizeSparseCM12PressureExecutionImage", 1);
-      // Republish after finalize so a generation/count fault overwrites the
-      // temporary publication triplet and fail-closes every solve consumer.
+      dispatch("sealFullPressureImage", 1);
       closePass();
       closeSubstage("pei-publication");
+      // Topology producers still share this journal. Close its coverage
+      // receipt against the complete pressure image without scheduling dirty
+      // membership repair, then open the next topology publication epoch.
+      dispatch("finalizeFullPressureTopologyJournal", 1);
+      dispatch("beginSparseCM12PressureTopologyRepair", 1);
+      closePass();
       encoder.copyBufferToBuffer(this.pressureWorklists,
         sparseCM12PressureExecutionImageCellIndirectByteOffset(
           this.pressureExecutionImageLayout,
         ),
         this.pressureCellIndirectArguments, 0, 12);
-      encoder.copyBufferToBuffer(this.pressureWorklists,
-        sparseCM12PressureExecutionImageIndirectByteOffset(
-          this.pressureExecutionImageLayout,
-        ),
-        this.pressureExecutionIndirectArguments, 0, 48);
-      // PTR and PCF form one GPU-authored transaction. Once PCF accepts the
-      // captured fine-coefficient generation, one scalar receipt closes PTR.
-      dispatch("finalizeSparseCM12BoundedPressureTopologyRepair", 1);
-      // Open the next topology journal immediately. Resolution/activation/
-      // retirement producers later in this frame append without host state.
-      dispatch("beginSparseCM12PressureTopologyRepair", 1);
       dispatchPressureCell("preparePressure");
       closePass();
       closeSubstage("ptr-commit-and-prepare-pressure");
     });
     stage("pressure-rhs", () => {
       dispatch("beginPressureSolve", 1);
+      // The seed computes b-Ap once and publishes its Jacobi direction plus
+      // the exact initial residual receipt in the same ordered reductions.
       dispatchPressureCell("initializePCG");
-      dispatchPressureCell("initializeJacobiDirection");
       dispatch("reduceInitialize", 1);
-      dispatchPressureCell("measureTrueResidual");
-      dispatch("reduceInitialTrueResidual", 1);
       dispatchPressureCell("initializePipelinedImage");
       dispatch("reducePipelinedInitialize", 1);
       // The seed can already satisfy the tolerance. Publish the device gate
@@ -6959,9 +6415,9 @@ fn gateVelocityExtension(){
     });
     stage("velocity-projection", () => {
       // The brick-scalar arm opens this generation before scalar comparison.
-      useBindGroup(this.bindGroup);
+      selectBindGroup(this.bindGroup);
       dispatch("beginIncrementalActivity", 1);
-      useBindGroup(this.pressureBindGroup);
+      selectBindGroup(this.pressureBindGroup);
       dispatch("projectSparseCM12InteriorFaceTiles",
         Math.min(this.faceAddressLayout.dispatchWidth,
           this.faceAddressLayout.interiorTileCount),
@@ -6975,16 +6431,16 @@ fn gateVelocityExtension(){
           this.faceAddressLayout.seamPacketCount),
         this.faceAddressLayout.seamDispatchRows);
       dispatchAccepted("projectSparseCM12DynamicFaceRows", "row");
-      useBindGroup(this.effectiveVelocityPressureBindGroup);
+      selectBindGroup(this.effectiveVelocityPressureBindGroup);
       dispatchAccepted("collocateAndDiagnose", "cell");
       dispatch("reduceDivergenceDiagnostics", 1);
-      useBindGroup(this.bindGroup);
+      selectBindGroup(this.bindGroup);
       if (this.rigidCoupling) {
         pass?.end();
         pass = undefined;
         this.rigidCoupling.encodeReaction(encoder);
       }
-      useBindGroup(this.bindGroup);
+      selectBindGroup(this.bindGroup);
       dispatch("publishSparseCM12FrameFaceOutput", 1);
       closePass();
       this.encodeTopologyEditTransaction(encoder, finestCellSize_m,
@@ -6992,7 +6448,7 @@ fn gateVelocityExtension(){
         true);
       if (this.transportPacketIndirectArguments
         && this.projectedTransportIndirectPublisher.velocityExtensionPipeline) {
-        useBindGroup(this.transportBindGroup);
+        selectBindGroup(this.transportBindGroup);
         const dispatchProjected = (name: string, byteOffset: number) => {
           const projectedPass = openPass();
           projectedPass.setPipeline(this.pipelines[name]!);
@@ -7021,28 +6477,28 @@ fn gateVelocityExtension(){
           extensionPass.dispatchWorkgroupsIndirect(
             this.transportPacketIndirectArguments!, byteOffset);
         };
-        useBindGroup(this.transportDepthBindGroups[0]!);
+        selectBindGroup(this.transportDepthBindGroups[0]!);
         dispatchVelocityExtension("initializeVelocityExtensionPackets", 0);
         for (let depth = 1; depth <= 8; depth += 1) {
-          useBindGroup(this.transportDepthBindGroups[depth - 1]!);
+          selectBindGroup(this.transportDepthBindGroups[depth - 1]!);
           dispatchVelocityExtension("advanceVelocityExtensionPackets", 12);
         }
       }
-      useBindGroup(this.bindGroup);
+      selectBindGroup(this.bindGroup);
     });
     const encodeAfterTransport = () => {
-      useBindGroup(this.pressureBindGroup);
+      selectBindGroup(this.pressureBindGroup);
       closePass();
       stage("tracer-advection", () => {
         if (!this.tracersEnabled || this.tracerLattice.count === 0) return;
-        useBindGroup(this.transportBindGroup);
+        selectBindGroup(this.transportBindGroup);
         const groups = Math.ceil(this.tracerLattice.count / WORKGROUP_SIZE);
         if (this.tracerSeedPending) {
           dispatch("seedTracers", groups);
           this.tracerSeedPending = false;
         }
         dispatch("advanceTracers", groups);
-        useBindGroup(this.pressureBindGroup);
+        selectBindGroup(this.pressureBindGroup);
       });
       stage("scalar-publication", ({ closeSubstage }) => {
         // Diagnostic phase stops retain their original pre-publication boundary.
@@ -7053,19 +6509,19 @@ fn gateVelocityExtension(){
         // Final scalar facts are authored once in the accepted TEI packet space.
         // Every remaining dirty carrier below is a mask consumer; finalization no
         // longer walks incidence or appends a tile event per changed cell.
-        useBindGroup(this.transportBindGroup);
+        selectBindGroup(this.transportBindGroup);
         dispatch("beginSparseCM12FinalScalarMasks", 1);
         dispatch("publishSparseCM12FinalScalarMasks", leafCapacity);
         dispatch("sealSparseCM12FinalScalarMasks", 1);
         closeSubstage("final-scalar-mask-publication");
-        useBindGroup(this.pressureBindGroup);
+        selectBindGroup(this.pressureBindGroup);
         closePass();
         dispatch("publishSparseCM12FrameScalarOutput", 1);
         dispatchAccepted("refreshGeometricInterface", "cell");
         dispatchAccepted("extendGeometricInterface", "cell");
       });
       stage("activity-measurement", ({ closeSubstage }) => {
-        useBindGroup(this.bindGroup);
+        selectBindGroup(this.bindGroup);
         dispatch("markIncrementalActivityScalarBricks", leafCapacity);
         if (activityPhaseLimitForQA === "scalar") return;
         dispatch("markIncrementalActivityTopology",
@@ -7171,7 +6627,7 @@ fn gateVelocityExtension(){
         dispatch("finalizeSparseCM12TopologyEffectsPreflight", 1);
         closeSubstage("candidate-effects-preflight");
         if (candidatePhaseLimitForQA === "candidate-effects-preflight") return;
-        useBindGroup(this.transportBindGroup);
+        selectBindGroup(this.transportBindGroup);
           dispatch("beginSparseCM12InternedBoundaryDelta", 1);
           dispatchTopologyDelta("compileSparseCM12InternedBoundaryDelta");
           closeSubstage("candidate-ibo-construction");
@@ -7184,7 +6640,7 @@ fn gateVelocityExtension(){
         dispatchTopologyDelta("compileSparseCM12TransportExecutionImageShadow");
         closeSubstage("candidate-tei-compilation");
         if (candidatePhaseLimitForQA === "candidate-tei-compilation") return;
-        useBindGroup(this.bindGroup);
+        selectBindGroup(this.bindGroup);
         dispatch("validateAndAuthorizeShadowTopology", 1);
         closeSubstage("candidate-authorization");
         if (candidatePhaseLimitForQA === "candidate-authorization") return;
@@ -7202,9 +6658,9 @@ fn gateVelocityExtension(){
         dispatch("finishSparseCM12TopologyEffectsPublication", 1);
         closeSubstage("candidate-effects-seal");
         if (candidatePhaseLimitForQA === "candidate-effects-seal") return;
-        useBindGroup(this.transportBindGroup);
+        selectBindGroup(this.transportBindGroup);
         dispatchTopologyDelta("publishCandidateTopologyDeltaFromWorklist");
-        useBindGroup(this.bindGroup);
+        selectBindGroup(this.bindGroup);
         if (this.solidOccupancyLayout) {
           // The authorized host fields/rungs are now stable while the accepted
           // selector still names the old worklists. Reconcile the canonical
@@ -7217,18 +6673,18 @@ fn gateVelocityExtension(){
         if (this.solidOccupancyLayout) {
           dispatch("publishSparseWorldFrontierAcceptance",
             this.topologyPageCapacity);
-          useBindGroup(this.transportBindGroup);
+          selectBindGroup(this.transportBindGroup);
           dispatch("compileSparseWorldFrontierExecutionImage",
             this.topologyPageCapacity);
-          useBindGroup(this.bindGroup);
+          selectBindGroup(this.bindGroup);
         }
         closeSubstage("candidate-state-publication");
         if (candidatePhaseLimitForQA === "candidate-state-publication") return;
-        useBindGroup(this.transportBindGroup);
+        selectBindGroup(this.transportBindGroup);
         dispatchTopologyDelta("replaySparseCM12TransportExecutionImageRetired");
         dispatchTopologyDelta("replaySparseCM12InternedBoundaryDelta");
         closeSubstage("candidate-image-replay");
-        useBindGroup(this.bindGroup);
+        selectBindGroup(this.bindGroup);
       });
       stage("brick-retirement", () => {
         if (this.rigidCoupling) {
@@ -7249,11 +6705,11 @@ fn gateVelocityExtension(){
         // from the same working-set-shaped slab used at generation zero.
         // Inactive leaves retain INVALID and consume neither metadata nor payload.
         // FPP1 sees the mapping only after this dispatch completes.
-        useBindGroup(this.presentationAllocatorBindGroup);
+        selectBindGroup(this.presentationAllocatorBindGroup);
         dispatch("allocateSparseCM12PresentationPages",
           Math.ceil(leafCapacity / WORKGROUP_SIZE));
         dispatch("sortSparseCM12PresentationPageDirectory", 1);
-        useBindGroup(this.bindGroup);
+        selectBindGroup(this.bindGroup);
         // The plan and compact page count are GPU publications. Split at the
         // storage-to-indirect copy seam; no host parity/count controls this path.
         closePass();
@@ -7261,11 +6717,11 @@ fn gateVelocityExtension(){
         // FPP1 has now published the retiring generation's complete all-air
         // pages. Remove those pages from renderer lookup and return their slots
         // before accepting the next frame-plan generation.
-        useBindGroup(this.presentationAllocatorBindGroup);
+        selectBindGroup(this.presentationAllocatorBindGroup);
         dispatch("retireSparseCM12PresentationPages",
           Math.ceil(leafCapacity / WORKGROUP_SIZE));
         dispatch("compactSparseCM12PresentationPageDirectory", 1);
-        useBindGroup(this.bindGroup);
+        selectBindGroup(this.bindGroup);
         dispatch("commitSparseCM12FrameControl", 1);
         if (this.rigidCoupling) {
           closePass();
@@ -7293,10 +6749,8 @@ fn gateVelocityExtension(){
       seams?.anchorFinalBoundary?.(this.acceptedIndirectArguments, 0);
     };
     stage("conservative-transport", ({ closeSubstage }) => {
-      useBindGroup(this.transportBindGroup);
+      selectBindGroup(this.transportBindGroup);
       dispatch("beginGeometricVolumeTransport", 1);
-      dispatchAccepted("compileGeometricVolumeSubfaces", "row");
-      dispatchAccepted("compileGeometricVolumeCellFaces", "cell");
       dispatchAccepted("initializeGeometricVolumeCells", "cell");
       dispatch("beginGeometricTransportEnvelope", 1);
       dispatchAccepted("gatherGeometricTransportMaterialBounds", "cell");
@@ -7327,9 +6781,16 @@ fn gateVelocityExtension(){
         dispatchVolume("reconstructGeometricVolumeInterface", "setupCell");
         dispatchVolume("computeGeometricVolumeFluxes", "setupFace");
         dispatchVolume("beginGeometricLowFluxLimits", "singleton");
-        dispatchVolume("initializeGeometricLowFluxLimits", "initialCell");
+        // Fixed geometry uses an implicit all-one first factor generation and
+        // alternates complete factor banks. Moving-solid FISTA retains its
+        // separate initialization and commit dependencies.
+        if (this.rigidCoupling) {
+          dispatchVolume("initializeGeometricLowFluxLimits", "initialCell");
+        }
         dispatchVolume("updateGeometricLowFluxLimits", "limiterCell");
-        dispatchVolume("commitGeometricLowFluxLimits", "limiterCell");
+        if (this.rigidCoupling) {
+          dispatchVolume("commitGeometricLowFluxLimits", "limiterCell");
+        }
         dispatchVolume("advanceGeometricLowFluxLimits", "singleton");
         publishVolumeDispatches();
         dispatchVolume("applyGeometricLowFluxFactors", "commitFace");
@@ -7659,11 +7120,45 @@ fn gateVelocityExtension(){
       this.parameters, SPARSE_CM12_FAILURE_PARAMETER_OFFSET, 4);
   }
 
+  /** Rebuild every connectivity plane together, only for a changed generation. */
+  private encodeCompiledTopologyGeneration(encoder: GPUCommandEncoder): void {
+    // A topology commit may have occurred earlier in this command buffer.
+    encoder.copyBufferToBuffer(this.topologyArena,
+      this.topologyWorklistBaseBytes + 4 * 8,
+      this.acceptedIndirectArguments, 0, 24);
+    const pass = encoder.beginComputePass({
+      label: "Sparse CM12 complete accepted topology compilation",
+    });
+    pass.setBindGroup(0, this.transportBindGroup);
+    pass.setPipeline(this.pipelines.beginCompiledTopologyGeneration!);
+    pass.dispatchWorkgroups(1);
+    const publisher = this.compiledTopologyIndirectPublisher;
+    pass.setPipeline(publisher.pipeline);
+    pass.setBindGroup(0, publisher.bindGroup);
+    pass.dispatchWorkgroups(1);
+    pass.setBindGroup(0, this.transportBindGroup);
+    const dispatch = (name: string, byteOffset: number) => {
+      pass.setPipeline(this.pipelines[name]!);
+      pass.dispatchWorkgroupsIndirect(publisher.arguments, byteOffset);
+    };
+    dispatch("clearCompiledTopologyGeneration", 0);
+    dispatch("compileCompiledTopologyCells", 12);
+    dispatch("compileCompiledTopologyRows", 24);
+    dispatch("compileCompiledTopologyCellIncidences", 12);
+    dispatch("beginGeometricVolumeTopologyCompilation", 36);
+    dispatch("compileGeometricVolumeSubfaces", 24);
+    dispatch("compileGeometricVolumeCellFaces", 12);
+    dispatch("publishGeometricVolumeTopology", 36);
+    dispatch("sealCompiledTopologyGeneration", 36);
+    pass.end();
+  }
+
   private encodeFramePlanPresentation(
     encoder: GPUCommandEncoder,
     label: string,
   ): void {
     this.encodeFailureGate(encoder);
+    this.encodeCompiledTopologyGeneration(encoder);
     // Re-rung publication may have changed the accepted cell worklist earlier
     // in this command buffer; both geometry-cache publishers use its new count.
     encoder.copyBufferToBuffer(this.topologyArena,
@@ -8038,7 +7533,7 @@ fn gateVelocityExtension(){
         topologyPass?.end();
         topologyPass = undefined;
       };
-      const useTopologyBindGroup = (bindGroup: GPUBindGroup) => {
+      const selectTopologyBindGroup = (bindGroup: GPUBindGroup) => {
         topologyBindGroup = bindGroup;
         topologyPass?.setBindGroup(0, bindGroup);
       };
@@ -8209,14 +7704,14 @@ fn gateVelocityExtension(){
       dispatchTopology("beginSparseCM12TopologyEffectsPreflight", 1);
       dispatchTopologyDelta("recordCandidateTopologyEffectsFromTopologyDelta");
       dispatchTopology("finalizeSparseCM12TopologyEffectsPreflight", 1);
-      useTopologyBindGroup(this.transportBindGroup);
+      selectTopologyBindGroup(this.transportBindGroup);
         dispatchTopology("beginSparseCM12InternedBoundaryDelta", 1);
         dispatchTopologyDelta("compileSparseCM12InternedBoundaryDelta");
         dispatchTopology("finalizeSparseCM12ISAChangedSetReceipt", 1);
         dispatchTopologyDelta("validateSparseCM12InternedBoundaryDeltaPackets");
         dispatchTopology("finalizeSparseCM12InternedBoundaryDelta", 1);
         dispatchTopologyDelta("compileSparseCM12TransportExecutionImageShadow");
-      useTopologyBindGroup(this.bindGroup);
+      selectTopologyBindGroup(this.bindGroup);
       dispatchTopology("validateAndAuthorizeShadowTopology", 1);
         closeTopologyPass();
         encoder.copyBufferToBuffer(this.topologyArena,
@@ -8228,18 +7723,18 @@ fn gateVelocityExtension(){
         ptrPass.dispatchWorkgroupsIndirect(this.frameControlIndirectArguments, 0);
         dispatchTopology("sealSparseCM12AuthorizedTopologyEffects", 1);
       dispatchTopology("finishSparseCM12TopologyEffectsPublication", 1);
-      useTopologyBindGroup(this.transportBindGroup);
+      selectTopologyBindGroup(this.transportBindGroup);
       dispatchTopologyDelta("publishCandidateTopologyDeltaFromWorklist");
-      useTopologyBindGroup(this.bindGroup);
+      selectTopologyBindGroup(this.bindGroup);
       dispatchTopology("connectSparseWorldFrontierPages", this.topologyPageCapacity);
       dispatchTopologyIndirect("publishCandidateShadowFaces", 36);
       dispatchTopology("finalizeAuthorizedShadowTopology", 1);
       dispatchTopology("publishSparseWorldFrontierAcceptance", this.topologyPageCapacity);
-      useTopologyBindGroup(this.transportBindGroup);
+      selectTopologyBindGroup(this.transportBindGroup);
       dispatchTopology("compileSparseWorldFrontierExecutionImage", this.topologyPageCapacity);
       dispatchTopologyDelta("replaySparseCM12TransportExecutionImageRetired");
       dispatchTopologyDelta("replaySparseCM12InternedBoundaryDelta");
-      useTopologyBindGroup(this.bindGroup);
+      selectTopologyBindGroup(this.bindGroup);
       dispatchTopology("refreshSparseCM12FrontierSolidWorld",
         this.worldDirectoryLayout.leafCapacity);
       closeTopologyPass();
@@ -8252,6 +7747,7 @@ fn gateVelocityExtension(){
       encoder.copyBufferToBuffer(this.topologyArena,
         this.acceptedLeafManifestBaseBytes + 4 * 20,
         this.acceptedIndirectArguments, 120, 12);
+      this.encodeCompiledTopologyGeneration(encoder);
     }
     // Frozen mixed seams can require a replacement generation. Prepare the
     // entire interaction's support first, then apply its density/impulse once
@@ -8568,45 +8064,18 @@ fn gateVelocityExtension(){
       this.topologyWorklistBaseBytes + 4 * 4,
       this.diagnosticsReadback,
       SPARSE_CM12_PRESSURE_SCALAR_BYTES + 4 * ACTIVITY_HEADER_WORDS, 8);
-    const pcmDiagnosticOffset = SPARSE_CM12_PRESSURE_SCALAR_BYTES
+    const peiDiagnosticOffset = SPARSE_CM12_PRESSURE_SCALAR_BYTES
       + 4 * ACTIVITY_HEADER_WORDS + 12;
-    encoder.copyBufferToBuffer(this.activity,
-      4 * this.canonicalMembershipLayout.cell.headerBaseWords,
-      this.diagnosticsReadback, pcmDiagnosticOffset,
-      4 * SPARSE_CM12_PCM_DIAGNOSTIC_DOMAIN_WORDS);
-    encoder.copyBufferToBuffer(this.activity,
-      4 * this.canonicalMembershipLayout.row.headerBaseWords,
-      this.diagnosticsReadback,
-      pcmDiagnosticOffset + 4 * SPARSE_CM12_PCM_DIAGNOSTIC_DOMAIN_WORDS,
-      4 * SPARSE_CM12_PCM_DIAGNOSTIC_DOMAIN_WORDS);
-    const ptrDiagnosticOffset = pcmDiagnosticOffset
-      + SPARSE_CM12_PCM_DIAGNOSTIC_BYTES;
+    encoder.copyBufferToBuffer(this.pressureWorklists,
+      4 * this.pressureExecutionImageLayout.baseWords,
+      this.diagnosticsReadback, peiDiagnosticOffset,
+      4 * SPARSE_CM12_PRESSURE_EXECUTION_IMAGE_HEADER_WORDS);
+    const ptrDiagnosticOffset = peiDiagnosticOffset
+      + 4 * SPARSE_CM12_PRESSURE_EXECUTION_IMAGE_HEADER_WORDS;
     encoder.copyBufferToBuffer(this.topologyArena,
       4 * this.pressureTopologyRepairLayout.baseWords,
       this.diagnosticsReadback, ptrDiagnosticOffset,
       4 * SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_HEADER_WORDS);
-    const pcfDiagnosticOffset = ptrDiagnosticOffset
-      + 4 * SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_HEADER_WORDS;
-    encoder.copyBufferToBuffer(this.topologyArena,
-      4 * this.persistentPressureCacheLayout.headerBaseWords,
-      this.diagnosticsReadback, pcfDiagnosticOffset,
-      4 * SPARSE_CM12_PRESSURE_CACHE_HEADER_WORDS);
-    const pcaDiagnosticOffset = pcfDiagnosticOffset
-      + 4 * SPARSE_CM12_PRESSURE_CACHE_HEADER_WORDS;
-    encoder.copyBufferToBuffer(this.topologyArena,
-      4 * this.persistentPressureCacheLayout.aggregateHeaderBaseWords,
-      this.diagnosticsReadback, pcaDiagnosticOffset,
-      4 * SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_HEADER_WORDS);
-    const persistentFamilies = ["brick", "aggregateEdge", "hierarchyNode",
-      "hierarchyEdge"] as const;
-    persistentFamilies.forEach((family, index) => {
-      encoder.copyBufferToBuffer(this.topologyArena,
-        4 * this.persistentPressureCacheLayout.aggregateFamilies[family].headerBaseWords,
-        this.diagnosticsReadback,
-        pcaDiagnosticOffset + 4 * (SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_HEADER_WORDS
-          + index * SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_FAMILY_HEADER_WORDS),
-        4 * SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_FAMILY_HEADER_WORDS);
-    });
     this.device.queue.submit([encoder.finish()]);
     await this.diagnosticsReadback.mapAsync(GPUMapMode.READ);
     const mapped = this.diagnosticsReadback.getMappedRange();
@@ -8617,62 +8086,49 @@ fn gateVelocityExtension(){
       SPARSE_CM12_PRESSURE_SCALAR_BYTES, ACTIVITY_HEADER_WORDS);
     const acceptedCounts = new Uint32Array(mapped,
       SPARSE_CM12_PRESSURE_SCALAR_BYTES + 4 * ACTIVITY_HEADER_WORDS, 2);
-    const pcmCell = new Uint32Array(mapped, pcmDiagnosticOffset,
-      SPARSE_CM12_PCM_DIAGNOSTIC_DOMAIN_WORDS);
-    const pcmRow = new Uint32Array(mapped,
-      pcmDiagnosticOffset + 4 * SPARSE_CM12_PCM_DIAGNOSTIC_DOMAIN_WORDS,
-      SPARSE_CM12_PCM_DIAGNOSTIC_DOMAIN_WORDS);
+    const peiHeader = new Uint32Array(mapped, peiDiagnosticOffset,
+      SPARSE_CM12_PRESSURE_EXECUTION_IMAGE_HEADER_WORDS);
     const ptrHeader = new Uint32Array(mapped, ptrDiagnosticOffset,
       SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_HEADER_WORDS);
-    const pcfHeader = new Uint32Array(mapped, pcfDiagnosticOffset,
-      SPARSE_CM12_PRESSURE_CACHE_HEADER_WORDS);
-    const pcaHeader = new Uint32Array(mapped, pcaDiagnosticOffset,
-      SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_HEADER_WORDS);
-    const pcaFamilies = persistentFamilies.map((_, index) => new Uint32Array(mapped,
-      pcaDiagnosticOffset + 4 * (SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_HEADER_WORDS
-        + index * SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_FAMILY_HEADER_WORDS),
-      SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_FAMILY_HEADER_WORDS));
-    const pcmDomainReceipt = (words: Uint32Array) => {
-      const h = SPARSE_CM12_CANONICAL_MEMBERSHIP_DOMAIN_HEADER;
+    const pei = SPARSE_CM12_PRESSURE_EXECUTION_IMAGE_HEADER;
+    const peiGeneration = peiHeader[pei.generation]!;
+    const peiPhase = peiHeader[pei.phase]!;
+    const peiFault = peiHeader[pei.fault]!;
+    const peiCellCount = peiHeader[pei.pressureCellCount]!;
+    const peiRowCount = peiHeader[pei.pressureRowCount]!;
+    // Preserve the public diagnostic phase values while sourcing their content
+    // entirely from PEI: accepted=1, collecting=2, fault=4.
+    const legacyMembershipPhase = peiPhase === SPARSE_CM12_PRESSURE_EXECUTION_IMAGE_PHASE.accepted
+      ? 1 : peiPhase === SPARSE_CM12_PRESSURE_EXECUTION_IMAGE_PHASE.compiling
+        ? 2 : peiPhase === SPARSE_CM12_PRESSURE_EXECUTION_IMAGE_PHASE.fault ? 4 : 0;
+    // These legacy-named public fields now describe the one full PEI image.
+    // A complete rebuild has no dirty range or closure publication.
+    const peiDomainReceipt = (totalCount: number) => {
       return {
-        phase: words[h.phase]!, fault: words[h.fault]!,
-        firstFault: words[h.firstFaultId]!, dirtyCount: words[h.dirtyCount]!,
-        directWriteCount: words[h.directWriteCount]!,
-        totalCount: words[h.totalCount]!,
-        candidateGeneration: words[h.candidateGeneration]!,
-        acceptedGeneration: words[h.acceptedGeneration]!,
+        phase: legacyMembershipPhase, fault: peiFault,
+        firstFault: peiHeader[pei.firstFaultId]!, dirtyCount: 0,
+        directWriteCount: totalCount, totalCount,
+        candidateGeneration: peiGeneration, acceptedGeneration: peiGeneration,
       };
     };
-    const cache = SPARSE_CM12_PRESSURE_CACHE_HEADER;
-    const aggregate = SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_HEADER;
-    const aggregateFamily = SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_FAMILY_HEADER;
-    const pcaDirty = pcaFamilies.map((words) => words[aggregateFamily.dirtyLeafCount]!);
-    const pcaWork = pcaFamilies.map((words) => words[aggregateFamily.workCount]!);
-    const pcaExecuted = pcaFamilies.map((words) => words[aggregateFamily.executedCount]!);
-    const pcaCauses = pcaFamilies.reduce((mask, words) =>
-      mask | words[aggregateFamily.causeMask]!, 0);
-    const sum = (values: readonly number[]) => values.reduce((total, value) => total + value, 0);
-    const pressureCacheTopologyGeneration = pcaHeader[aggregate.topologyGeneration]!;
-    const pressureCacheFault = pcfHeader[cache.fault]!;
+    const pressureImageTopologyGeneration = peiHeader[pei.topologyGeneration]!;
+    const pressureImageAccepted = peiPhase === SPARSE_CM12_PRESSURE_EXECUTION_IMAGE_PHASE.accepted
+      && peiFault === 0;
     const pressureAggregateReceipt = {
-      acceptedGeneration: pcfHeader[cache.acceptedGeneration]!,
-      candidateGeneration: pcfHeader[cache.candidateGeneration]!,
-      topologyGeneration: pressureCacheTopologyGeneration,
-      directCount: 0, closureCount: 0,
-      dirtyCount: sum(pcaDirty), workCount: sum(pcaWork),
-      executedCount: sum(pcaExecuted),
-      skippedCount: Math.max(0, sum(pcaWork) - sum(pcaExecuted)),
+      acceptedGeneration: peiGeneration, candidateGeneration: peiGeneration,
+      topologyGeneration: pressureImageTopologyGeneration,
+      directCount: peiCellCount, closureCount: 0,
+      dirtyCount: 0, workCount: peiCellCount,
+      executedCount: peiCellCount, skippedCount: 0,
       expectedProducerReceipts: 0, coveredProducerReceipts: 0,
-      causeMask: pcaCauses, fault: pressureCacheFault,
-      firstFaultId: pressureCacheFault === 0
-        ? 0xffff_ffff : pcfHeader[cache.firstFaultId]!,
-      familyDirtyCount: pcaDirty as [number, number, number, number],
-      familyExecutedCount: pcaExecuted as [number, number, number, number],
+      causeMask: 0, fault: peiFault,
+      firstFaultId: peiHeader[pei.firstFaultId]!,
+      familyDirtyCount: [0, 0, 0, 0] as [number, number, number, number],
+      familyExecutedCount: [peiCellCount, 0, 0, 0] as [number, number, number, number],
     };
-    const pressureCutoverFault = pressureCacheFault !== 0;
     const pressureCutoverAuthorities = {
-      status: pressureCutoverFault ? "fault" as const : "matched" as const,
-      inputTopologyGeneration: pressureCacheTopologyGeneration,
+      status: pressureImageAccepted ? "matched" as const : "fault" as const,
+      inputTopologyGeneration: pressureImageTopologyGeneration,
       pca: pressureAggregateReceipt,
     };
     const rhsSquared = values[1]!;
@@ -8734,11 +8190,10 @@ fn gateVelocityExtension(){
       acceptedRowCount: acceptedCounts[1]!,
       acceptedSameLevelCoarseRowCount: activity[ACCEPTED_COARSE_ROW_COUNT_WORD]!,
       acceptedMixedSeamRowCount: activity[ACCEPTED_MIXED_ROW_COUNT_WORD]!,
-      pressureActiveRowCount: activity[PRESSURE_ACTIVE_ROW_COUNT_WORD]!,
-      pressureCellCount: pcmCell[
-        SPARSE_CM12_CANONICAL_MEMBERSHIP_DOMAIN_HEADER.totalCount]!,
+      pressureActiveRowCount: peiRowCount,
+      pressureCellCount: peiCellCount,
       pressureCanonicalMembership: {
-        cell: pcmDomainReceipt(pcmCell), row: pcmDomainReceipt(pcmRow),
+        cell: peiDomainReceipt(peiCellCount), row: peiDomainReceipt(peiRowCount),
       },
       pressureTopologyRepair: {
         phase: ptrHeader[SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_HEADER.phase]!,
@@ -8786,94 +8241,71 @@ fn gateVelocityExtension(){
     encoder.copyBufferToBuffer(this.scalars, 12 * 4, destination, 0, 4);
   }
 
-  /** QA-only PCM1 header and active-bitset receipt. This readback is never
+  /** QA-only PEI2 header, membership, and pressure-state receipt. This readback is never
    * consulted by frame encoding or any physics/worklist decision. */
   async readPressureCanonicalMembershipQA() {
     this.assertLive();
-    const headerWords = SPARSE_CM12_PCM_DIAGNOSTIC_DOMAIN_WORDS;
-    const cell = this.canonicalMembershipLayout.cell;
-    const row = this.canonicalMembershipLayout.row;
-    const cellHeaderAt = 0;
-    const cellBitsAt = cellHeaderAt + headerWords;
-    const rowHeaderAt = cellBitsAt + cell.activeBitWordCount;
-    const rowBitsAt = rowHeaderAt + headerWords;
-    const cellClassificationAt = rowBitsAt + row.activeBitWordCount;
-    const rowClassificationAt = cellClassificationAt + cell.capacity;
-    const coefficientAt = rowClassificationAt + row.capacity;
-    const rhsAt = coefficientAt + this.pressureFineEdgeCount;
-    const faceAAt = rhsAt + cell.capacity;
-    const faceBAt = faceAAt + row.capacity;
-    const aggregateEdgeAt = faceBAt + row.capacity;
-    const brickDiagonalAt = aggregateEdgeAt
-      + this.persistentPressureCacheLayout.aggregateEdgeCount;
-    const hierarchyEdgeAt = brickDiagonalAt
-      + this.persistentPressureCacheLayout.brickCount;
-    const hierarchyDiagonalAt = hierarchyEdgeAt
-      + this.persistentPressureCacheLayout.hierarchyEdgeCount;
-    const wordCount = hierarchyDiagonalAt
-      + this.persistentPressureCacheLayout.hierarchyNodeCount;
+    const layout = this.pressureExecutionImageLayout;
+    const h = SPARSE_CM12_PRESSURE_EXECUTION_IMAGE_HEADER;
+    const headerAt = 0;
+    const cellSlot0At = SPARSE_CM12_PRESSURE_EXECUTION_IMAGE_HEADER_WORDS;
+    const cellSlot1At = cellSlot0At + layout.pressureMembershipWordCount;
+    const rowSlot0At = cellSlot1At + layout.pressureMembershipWordCount;
+    const rowSlot1At = rowSlot0At + layout.pressureRowMembershipWordCount;
+    const cellClassificationAt = rowSlot1At + layout.pressureRowMembershipWordCount;
+    const rowClassificationAt = cellClassificationAt + layout.cellCapacity;
+    const diagonalAt = rowClassificationAt + layout.rowCapacity;
+    const rhsAt = diagonalAt + layout.cellCapacity;
+    const faceAAt = rhsAt + layout.cellCapacity;
+    const faceBAt = faceAAt + layout.rowCapacity;
+    const wordCount = faceBAt + layout.rowCapacity;
     const readback = this.device.createBuffer({
-      label: "Sparse Geometric (CM12) PCM1 QA receipt",
+      label: "Sparse Geometric (CM12) PEI2 QA receipt",
       size: Math.max(4, 4 * wordCount),
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
     const encoder = this.device.createCommandEncoder({
-      label: "Sparse Geometric (CM12) PCM1 QA copy",
+      label: "Sparse Geometric (CM12) PEI2 QA copy",
     });
-    const copy = (sourceWords: number, targetWords: number, words: number) => {
-      encoder.copyBufferToBuffer(this.activity, 4 * sourceWords, readback,
+    const copyPressureWords = (sourceWords: number, targetWords: number, words: number) => {
+      encoder.copyBufferToBuffer(this.pressureWorklists, 4 * sourceWords, readback,
         4 * targetWords, 4 * words);
     };
-    copy(cell.headerBaseWords, cellHeaderAt, headerWords);
-    copy(cell.activeBitsBaseWords, cellBitsAt, cell.activeBitWordCount);
-    copy(row.headerBaseWords, rowHeaderAt, headerWords);
-    copy(row.activeBitsBaseWords, rowBitsAt, row.activeBitWordCount);
+    copyPressureWords(layout.baseWords, headerAt,
+      SPARSE_CM12_PRESSURE_EXECUTION_IMAGE_HEADER_WORDS);
+    copyPressureWords(layout.pressureMembershipSlotBaseWords[0], cellSlot0At,
+      layout.pressureMembershipWordCount);
+    copyPressureWords(layout.pressureMembershipSlotBaseWords[1], cellSlot1At,
+      layout.pressureMembershipWordCount);
+    copyPressureWords(layout.pressureRowMembershipSlotBaseWords[0], rowSlot0At,
+      layout.pressureRowMembershipWordCount);
+    copyPressureWords(layout.pressureRowMembershipSlotBaseWords[1], rowSlot1At,
+      layout.pressureRowMembershipWordCount);
     encoder.copyBufferToBuffer(this.state, 4 * this.layout.liquid, readback,
-      4 * cellClassificationAt, 4 * cell.capacity);
+      4 * cellClassificationAt, 4 * layout.cellCapacity);
     encoder.copyBufferToBuffer(this.state, 4 * this.layout.theta, readback,
-      4 * rowClassificationAt, 4 * row.capacity);
-    // Hash the same ordinary coefficient image consumed by production SpMV.
-    encoder.copyBufferToBuffer(this.candidateState,
-      4 * this.pressureFineEdgeImageBaseWords, readback,
-      4 * coefficientAt, 4 * this.pressureFineEdgeCount);
+      4 * rowClassificationAt, 4 * layout.rowCapacity);
+    encoder.copyBufferToBuffer(this.state, 4 * this.layout.diagonal, readback,
+      4 * diagonalAt, 4 * layout.cellCapacity);
     encoder.copyBufferToBuffer(this.state, 4 * this.layout.rhs, readback,
-      4 * rhsAt, 4 * cell.capacity);
+      4 * rhsAt, 4 * layout.cellCapacity);
     encoder.copyBufferToBuffer(this.state, 4 * this.layout.faceA, readback,
-      4 * faceAAt, 4 * row.capacity);
+      4 * faceAAt, 4 * layout.rowCapacity);
     encoder.copyBufferToBuffer(this.state, 4 * this.layout.faceB, readback,
-      4 * faceBAt, 4 * row.capacity);
-    encoder.copyBufferToBuffer(this.topologyArena,
-      4 * this.persistentPressureCacheLayout.brickAggregateEdgeBaseWords, readback,
-      4 * aggregateEdgeAt,
-      4 * this.persistentPressureCacheLayout.aggregateEdgeCount);
-    encoder.copyBufferToBuffer(this.topologyArena,
-      4 * this.persistentPressureCacheLayout.brickAggregateDiagonalBaseWords, readback,
-      4 * brickDiagonalAt, 4 * this.persistentPressureCacheLayout.brickCount);
-    let hierarchyTarget = hierarchyEdgeAt;
-    for (let level = 0;
-      level < this.persistentPressureCacheLayout.hierarchyEdgeLevelCounts.length;
-      level += 1) {
-      const count = this.persistentPressureCacheLayout.hierarchyEdgeLevelCounts[level]!;
-      encoder.copyBufferToBuffer(this.topologyArena,
-        4 * this.persistentPressureCacheLayout.hierarchyEdgeBaseWords[level]!, readback,
-        4 * hierarchyTarget, 4 * count);
-      hierarchyTarget += count;
-    }
-    hierarchyTarget = hierarchyDiagonalAt;
-    for (let level = 0;
-      level < this.persistentPressureCacheLayout.hierarchyLevelCounts.length;
-      level += 1) {
-      const count = this.persistentPressureCacheLayout.hierarchyLevelCounts[level]!;
-      encoder.copyBufferToBuffer(this.topologyArena,
-        4 * this.persistentPressureCacheLayout.hierarchyDiagonalBaseWords[level]!, readback,
-        4 * hierarchyTarget, 4 * count);
-      hierarchyTarget += count;
-    }
+      4 * faceBAt, 4 * layout.rowCapacity);
     this.device.queue.submit([encoder.finish()]);
     try {
       await readback.mapAsync(GPUMapMode.READ);
       const mapped = new Uint32Array(readback.getMappedRange());
-      const h = SPARSE_CM12_CANONICAL_MEMBERSHIP_DOMAIN_HEADER;
+      const header = mapped.slice(headerAt,
+        headerAt + SPARSE_CM12_PRESSURE_EXECUTION_IMAGE_HEADER_WORDS);
+      const activeSlot = header[h.activeSlot]! & 1;
+      const legacyMembershipPhase = header[h.phase]!
+        === SPARSE_CM12_PRESSURE_EXECUTION_IMAGE_PHASE.accepted ? 1
+        : header[h.phase]! === SPARSE_CM12_PRESSURE_EXECUTION_IMAGE_PHASE.compiling ? 2
+          : header[h.phase]! === SPARSE_CM12_PRESSURE_EXECUTION_IMAGE_PHASE.fault ? 4 : 0;
+      const cellBitsAt = activeSlot === 0 ? cellSlot0At : cellSlot1At;
+      const rowBitsAt = activeSlot === 0 ? rowSlot0At : rowSlot1At;
       const popcount = (value: number) => {
         let x = value >>> 0;
         x -= (x >>> 1) & 0x5555_5555;
@@ -8891,12 +8323,6 @@ fn gateVelocityExtension(){
       };
       const contains = (bitsAt: number, id: number) =>
         (mapped[bitsAt + (id >>> 5)]! & (1 << (id & 31))) !== 0;
-      // Authority receipts deliberately exclude inactive stable slots. Those
-      // slots retain scratch from older pressure epochs and are outside the
-      // PCM domain; hashing them would turn harmless storage history into a
-      // false local-vs-oracle physics failure. Stable ids are interleaved with
-      // values so the digest still commits to both membership position and
-      // exact f32 bits.
       const sha256ActiveValues = (valuesAt: number, capacity: number,
         bitsAt: number) => {
         const authority: number[] = [];
@@ -8905,26 +8331,8 @@ fn gateVelocityExtension(){
         }
         return sha256(Uint32Array.from(authority));
       };
-      const sha256ActiveCoefficients = () => {
-        const authority: number[] = [];
-        const edgeOffsets = this.templateWords[15]!;
-        // The immutable directed-edge catalogue only covers authored cells.
-        // Runtime cells use canonical incidence; indexing this table with a
-        // runtime ID reads unrelated metadata as an unbounded edge range.
-        const authoredCells = Math.min(cell.capacity, this.templateWords[2]!);
-        for (let cellId = 0; cellId < authoredCells; cellId += 1) {
-          if (!contains(cellBitsAt, cellId)) continue;
-          const first = this.templateWords[edgeOffsets + cellId]!;
-          const end = this.templateWords[edgeOffsets + cellId + 1]!;
-          for (let edge = first; edge < end; edge += 1) {
-            authority.push(edge, mapped[coefficientAt + edge]!);
-          }
-        }
-        return sha256(Uint32Array.from(authority));
-      };
-      const receipt = async (headerAt: number, bitsAt: number, bitsWords: number,
-        classificationAt: number, capacity: number, threshold: number) => {
-        const header = mapped.slice(headerAt, headerAt + headerWords);
+      const receipt = async (bitsAt: number, bitsWords: number,
+        classificationAt: number, capacity: number, threshold: number, totalCount: number) => {
         const bits = mapped.slice(bitsAt, bitsAt + bitsWords);
         const classifications = new Float32Array(mapped.buffer,
           mapped.byteOffset + 4 * classificationAt, capacity);
@@ -8937,14 +8345,11 @@ fn gateVelocityExtension(){
         const activeBitsSha256 = await sha256(bits);
         const classificationBitsSha256 = await sha256(classificationBits);
         return {
-          phase: header[h.phase]!, fault: header[h.fault]!,
-          firstFault: header[h.firstFaultId]!, dirtyCount: header[h.dirtyCount]!,
-          directWriteCount: header[h.directWriteCount]!,
-          directCauseMask: header[h.directCauseMask]!,
-          conflictPacket: header[h.flags]!,
-          totalCount: header[h.totalCount]!,
-          candidateGeneration: header[h.candidateGeneration]!,
-          acceptedGeneration: header[h.acceptedGeneration]!,
+          phase: legacyMembershipPhase, fault: header[h.fault]!,
+          firstFault: header[h.firstFaultId]!, dirtyCount: 0,
+          directWriteCount: totalCount, directCauseMask: 0, conflictPacket: 0,
+          totalCount, candidateGeneration: header[h.generation]!,
+          acceptedGeneration: header[h.generation]!,
           activeBitCount: bits.reduce((sum, word) => sum + popcount(word), 0),
           activeBitsSha256,
           classificationBitCount: classificationBits.reduce(
@@ -8953,60 +8358,41 @@ fn gateVelocityExtension(){
           matchesClassification: activeBitsSha256 === classificationBitsSha256,
         };
       };
-      const [cellReceipt, rowReceipt, thetaSha256, coefficientSha256, rhsSha256,
-        aggregateEdgeSha256, brickDiagonalSha256,
-        hierarchyEdgeSha256, hierarchyDiagonalSha256,
-        rawThetaSha256, rawCoefficientSha256, rawRhsSha256] =
-        await Promise.all([
-          receipt(cellHeaderAt, cellBitsAt, cell.activeBitWordCount,
-          cellClassificationAt, cell.capacity, 0.5),
-          receipt(rowHeaderAt, rowBitsAt, row.activeBitWordCount,
-          rowClassificationAt, row.capacity, 0),
-          sha256ActiveValues(rowClassificationAt, row.capacity, rowBitsAt),
-          sha256ActiveCoefficients(),
-          sha256ActiveValues(rhsAt, cell.capacity, cellBitsAt),
-          sha256(mapped.slice(aggregateEdgeAt, brickDiagonalAt)),
-          sha256(mapped.slice(brickDiagonalAt, hierarchyEdgeAt)),
-          sha256(mapped.slice(hierarchyEdgeAt, hierarchyDiagonalAt)),
-          sha256(mapped.slice(hierarchyDiagonalAt, wordCount)),
-          sha256(mapped.slice(rowClassificationAt, rowClassificationAt + row.capacity)),
-          sha256(mapped.slice(coefficientAt, coefficientAt + this.pressureFineEdgeCount)),
-          sha256(mapped.slice(rhsAt, rhsAt + cell.capacity)),
-        ]);
+      const [cellReceipt, rowReceipt, thetaSha256, diagonalSha256, rhsSha256,
+        rawThetaSha256, rawDiagonalSha256, rawRhsSha256] = await Promise.all([
+        receipt(cellBitsAt, layout.pressureMembershipWordCount,
+          cellClassificationAt, layout.cellCapacity, 0.5, header[h.pressureCellCount]!),
+        receipt(rowBitsAt, layout.pressureRowMembershipWordCount,
+          rowClassificationAt, layout.rowCapacity, 0, header[h.pressureRowCount]!),
+        sha256ActiveValues(rowClassificationAt, layout.rowCapacity, rowBitsAt),
+        sha256ActiveValues(diagonalAt, layout.cellCapacity, cellBitsAt),
+        sha256ActiveValues(rhsAt, layout.cellCapacity, cellBitsAt),
+        sha256(mapped.slice(rowClassificationAt, rowClassificationAt + layout.rowCapacity)),
+        sha256(mapped.slice(diagonalAt, diagonalAt + layout.cellCapacity)),
+        sha256(mapped.slice(rhsAt, rhsAt + layout.cellCapacity)),
+      ]);
       const result = {
         mode: "local" as const,
         cell: cellReceipt,
         row: rowReceipt,
         thetaSha256,
-        coefficientSha256,
-        coefficientHashScope: "authored directed-edge cache; runtime operator uses canonical incidence",
+        diagonalSha256,
         rhsSha256,
-        aggregateEdgeSha256,
-        brickDiagonalSha256,
-        hierarchyEdgeSha256,
-        hierarchyDiagonalSha256,
         rawThetaSha256,
-        rawCoefficientSha256,
+        rawDiagonalSha256,
         rawRhsSha256,
       };
       Object.defineProperty(result, "qaRaw", { enumerable: false, value: {
-        coefficientBits: mapped.slice(coefficientAt,
-          coefficientAt + this.pressureFineEdgeCount),
-        faceABits: mapped.slice(faceAAt, faceAAt + row.capacity),
-        faceBBits: mapped.slice(faceBAt, faceBAt + row.capacity),
-        aggregateEdgeBits: mapped.slice(aggregateEdgeAt, brickDiagonalAt),
-        brickDiagonalBits: mapped.slice(brickDiagonalAt, hierarchyEdgeAt),
-        hierarchyEdgeBits: mapped.slice(hierarchyEdgeAt, hierarchyDiagonalAt),
-        hierarchyDiagonalBits: mapped.slice(hierarchyDiagonalAt, wordCount),
+        diagonalBits: mapped.slice(diagonalAt, diagonalAt + layout.cellCapacity),
+        faceABits: mapped.slice(faceAAt, faceAAt + layout.rowCapacity),
+        faceBBits: mapped.slice(faceBAt, faceBAt + layout.rowCapacity),
       } });
       return result as typeof result & { readonly qaRaw: {
-        readonly coefficientBits: Uint32Array;
+        readonly diagonalBits: Uint32Array;
         readonly faceABits: Uint32Array; readonly faceBBits: Uint32Array;
-        readonly aggregateEdgeBits: Uint32Array; readonly brickDiagonalBits: Uint32Array;
-        readonly hierarchyEdgeBits: Uint32Array; readonly hierarchyDiagonalBits: Uint32Array;
       } };
     } finally {
-      readback.unmap();
+      if (readback.mapState === "mapped") readback.unmap();
       readback.destroy();
     }
   }
@@ -9393,7 +8779,7 @@ fn gateVelocityExtension(){
               velocity[4 * at + 2] = vz;
               pressureRhs[at] = state[this.layout.rhs + cell]!;
               pressureDiagonal[at] = state[this.layout.diagonal + cell]!;
-              // Publish pressure over the accepted liquid phase. PCM is an
+              // Publish pressure over the accepted liquid phase. Pressure membership is an
               // iteration-local solve worklist and may differ for one frame
               // across an otherwise identical topology transition; using it
               // as a display/QA mask exposed a false asymmetric zero. Dry
@@ -10257,17 +9643,15 @@ fn gateVelocityExtension(){
       templateRowWorkgroups: Math.ceil(this.templateRowCount / WORKGROUP_SIZE),
       conditioningClearBytesPerFrame: 0,
       conditioningClearBytesPerAcceptedCell: 24,
-      pressureScratchClearBytesPerFrame: 0,
       rowOwnershipCatalogBytes: 4 * (this.templateWords[24]! - this.templateWords[16]!),
       gammaPairCatalogBytes: 0,
       candidateFaceCatalogBytes: 4 * (this.templateWords[15]! - this.templateWords[24]!),
       acceptedRowMembershipBytes:
-        4 * this.canonicalMembershipLayout.row.activeBitWordCount,
+        8 * this.pressureExecutionImageLayout.pressureRowMembershipWordCount,
+      pressureImageBytes: 4 * this.pressureExecutionImageLayout.totalWords,
+      compiledTopologyBytes: 4 * (this.compiledTopologyLayout.totalWords
+        - this.compiledTopologyLayout.baseWords),
       massDepartureCacheCapacityBytes: 56 * this.templateCellCount,
-      pressureHierarchyGroupCount: this.pressureHierarchyGroupCount,
-      pressureHierarchyEdgeCount: this.pressureHierarchyEdgeCount,
-      pressureFineEdgeCount: this.pressureFineEdgeCount,
-      pressureCoarseEdgeCount: this.pressureCoarseEdgeCount,
       transportSpatialTileCapacity: this.transportExecutionImageLayout?.spatialTileCapacity ?? 0,
       transportPacketCapacity: this.transportPacketAuthorityLayout?.packetCapacity ?? 0,
       transportDirectPacketCount:
@@ -11384,28 +10768,6 @@ fn gateVelocityExtension(){
     }
   }
 
-  async readPersistentPressureCacheIndirectQA(): Promise<readonly number[]> {
-    this.assertLive();
-    const bytes = 12 * 12;
-    const readback = this.device.createBuffer({
-      label: "Sparse Geometric (CM12) persistent pressure-cache indirect QA readback", size: bytes,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-    });
-    try {
-      const encoder = this.device.createCommandEncoder({
-        label: "Sparse Geometric (CM12) persistent pressure-cache indirect QA copy",
-      });
-      encoder.copyBufferToBuffer(this.persistentPressureCacheIndirectArguments,
-        0, readback, 0, bytes);
-      this.device.queue.submit([encoder.finish()]);
-      await readback.mapAsync(GPUMapMode.READ);
-      return Object.freeze(Array.from(new Uint32Array(readback.getMappedRange())));
-    } finally {
-      if (readback.mapState === "mapped") readback.unmap();
-      readback.destroy();
-    }
-  }
-
   /** Working-set presentation allocation census; no simulation decision reads it. */
   async readPresentationPageAllocatorReceiptQA():
   Promise<SparseCM12PresentationPageAllocatorReceipt> {
@@ -11948,13 +11310,10 @@ fn gateVelocityExtension(){
       this.scalars, this.conditioning, this.activity, this.candidateState,
       this.topologyArena, this.acceptedIndirectArguments,
       this.pressureCellIndirectArguments,
-      this.pressureMembershipIndirectArguments,
-      this.pressureExecutionIndirectArguments,
       this.frameControlIndirectArguments,
-      this.persistentPressureCacheIndirectArguments,
       this.framePlanIndirectArguments,
       this.presentationIndirectArguments,
-      this.pressureTemplates, this.pressureWorklists,
+      this.pressureWorklists,
       this.velocityExtensionDepths,
       this.fineParams, this.fineMetadata, this.fineWorklist, this.fineSamples,
       this.fineWorkA, this.fineWorkB, this.fineRollback]) {
@@ -11963,6 +11322,7 @@ fn gateVelocityExtension(){
     this.transportExecutionImage?.destroy();
     this.effectiveTransportVelocity?.destroy();
     this.volumeIndirectArguments.destroy();
+    this.compiledTopologyIndirectPublisher.arguments.destroy();
     this.projectedTransportIndirectPublisher.arguments.destroy();
     this.transportPacketIndirectArguments?.destroy();
     this.sharpeningPacketIndirectArguments?.destroy();

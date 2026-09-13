@@ -214,9 +214,14 @@ fn geometricSourceFinishStagedCompensation(){}`;
   return /* wgsl */ `
 const GS_RATE:u32=${layout.sourceRateBaseFloats}u;
 const GS_COMPONENT:u32=${layout.componentBaseWords}u;
-fn geometricSourceRate(cell:u32)->f32{return state[GS_RATE+cell];}
 fn gsEnabled()->bool{return p.inflowVelocity.w>0.5&&p.inflowOutlet.w>0.0
  &&length(p.inflowVelocity.xyz)>0.0&&p.frame.x>0.0;}
+// Stopped hose rates are logically zero. Keeping that fact at the reader means
+// ordinary no-inflow frames do not have to clear every accepted cell merely to
+// overwrite a rate array that no consumer may observe.
+fn geometricSourceRate(cell:u32)->f32{
+ if(!gsEnabled()){return 0.0;}return state[GS_RATE+cell];
+}
 fn gsWeight(cell:u32)->f32{
  if(!gsEnabled()||!cellActive(cell)){return 0.0;}
  let speed=length(p.inflowVelocity.xyz);let direction=p.inflowVelocity.xyz/speed;
@@ -229,9 +234,9 @@ fn gsWeight(cell:u32)->f32{
  let weight=coverage*cellOpenVolume(cell);
  return select(0.0,weight,weight>=0.0&&weight<=3.402823466e38);
 }
-fn gsCell(cell:u32)->bool{
+fn gsCellWithWeight(cell:u32,weight:f32)->bool{
  return gsEnabled()&&cell!=INVALID&&cellActive(cell)&&cellOpenVolume(cell)>1e-8
-  &&(rawPressureDensity(cell)>=CM12_LIQUID_ISOVALUE||pressureCellSubmerged(cell)||gsWeight(cell)>0.0);
+  &&(rawPressureDensity(cell)>=CM12_LIQUID_ISOVALUE||pressureCellSubmerged(cell)||weight>0.0);
 }
 fn gsRow(row:u32)->bool{return gsEnabled()&&row!=INVALID&&acceptedRowMember(row)
  &&rowAccepted(row)&&rowOpenFraction(row)>0.0;}
@@ -242,6 +247,10 @@ fn gsRoot(cell:u32)->u32{
   if(parent==root||parent==INVALID){return parent;}root=parent;
  }
  return INVALID;
+}
+fn gsMember(cell:u32)->bool{
+ if(cell==INVALID){return false;}
+ return bitcast<u32>(atomicLoad(&conditioning[GS_COMPONENT+4u*cell]))!=INVALID;
 }
 @compute @workgroup_size(1)
 fn beginContinuousGeometricSource(){
@@ -268,25 +277,29 @@ fn beginContinuousGeometricSource(){
 @compute @workgroup_size(64)
 fn initializeContinuousGeometricSource(@builtin(global_invocation_id)gid:vec3u){
  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
- state[GS_RATE+cell]=0.0;
+ // The rate plane is construction scratch until publication. Retaining the
+ // geometric weight here removes repeated outlet geometry from every union
+ // round and from the later gather/publish pair.
+ let weight=gsWeight(cell);state[GS_RATE+cell]=weight;
  let at=GS_COMPONENT+4u*cell;
- atomicStore(&conditioning[at],bitcast<i32>(select(INVALID,cell,gsCell(cell))));
+ atomicStore(&conditioning[at],bitcast<i32>(select(INVALID,cell,
+   gsCellWithWeight(cell,weight))));
  atomicStore(&conditioning[at+1u],0);
 }
 @compute @workgroup_size(64)
 fn connectContinuousGeometricSource(@builtin(global_invocation_id)gid:vec3u){
  let row=acceptedTemplateRowInvocation(gid.x);if(!gsRow(row)){return;}
  let terms=rowTermRange(row);var root=INVALID;
- for(var at=terms.x;at<terms.y;at+=1u){let cell=termCell(at);if(gsCell(cell)){root=min(root,gsRoot(cell));}}
+ for(var at=terms.x;at<terms.y;at+=1u){let cell=termCell(at);if(gsMember(cell)){root=min(root,gsRoot(cell));}}
  if(root==INVALID){return;}
- for(var at=terms.x;at<terms.y;at+=1u){let cell=termCell(at);if(!gsCell(cell)){continue;}
+ for(var at=terms.x;at<terms.y;at+=1u){let cell=termCell(at);if(!gsMember(cell)){continue;}
   let previous=gsRoot(cell);if(previous!=INVALID){atomicMin(&conditioning[GS_COMPONENT+4u*previous],i32(root));}
   atomicMin(&conditioning[GS_COMPONENT+4u*cell],i32(root));
  }
 }
 @compute @workgroup_size(64)
 fn compressContinuousGeometricSource(@builtin(global_invocation_id)gid:vec3u){
- let cell=acceptedTemplateCellInvocation(gid.x);if(!gsCell(cell)){return;}
+ let cell=acceptedTemplateCellInvocation(gid.x);if(!gsMember(cell)){return;}
  let root=gsRoot(cell);
  if(root==INVALID){atomicStore(&conditioning[GS_COMPONENT+3u],1);return;}
  atomicMin(&conditioning[GS_COMPONENT+4u*cell],i32(root));
@@ -295,7 +308,7 @@ fn compressContinuousGeometricSource(@builtin(global_invocation_id)gid:vec3u){
 fn sealContinuousGeometricSource(@builtin(global_invocation_id)gid:vec3u){
  let row=acceptedTemplateRowInvocation(gid.x);if(!gsRow(row)){return;}
  let terms=rowTermRange(row);var root=INVALID;var sum=0.0;var scale=0.0;var headroom=false;
- for(var at=terms.x;at<terms.y;at+=1u){let cell=termCell(at);if(!gsCell(cell)){continue;}
+ for(var at=terms.x;at<terms.y;at+=1u){let cell=termCell(at);if(!gsMember(cell)){continue;}
   let other=gsRoot(cell);
   if(other==INVALID||(root!=INVALID&&root!=other)){
    atomicStore(&conditioning[GS_COMPONENT+3u],1);return;
@@ -313,7 +326,7 @@ fn gatherContinuousGeometricSourceWeights(@builtin(global_invocation_id)gid:vec3
  let scratch=GEOMETRIC_SOURCE_SCRATCH+2u*brick;state[scratch]=0.0;state[scratch+1u]=0.0;
  if(!brickActive(brick)){return;}
  let range=templateBrickCellRange(brick,acceptedBrickResolution(brick));var total=0.0;var correction=0.0;
- for(var local=0u;local<range.y;local+=1u){let cell=range.x+local;let weight=gsWeight(cell);
+ for(var local=0u;local<range.y;local+=1u){let cell=range.x+local;let weight=state[GS_RATE+cell];
   if(weight<=0.0){continue;}let root=gsRoot(cell);
   // Headroom in an unanchored all-pressure component cannot make a positive
   // integrated-divergence RHS solvable. Keep its dose in the external hose.
@@ -349,7 +362,7 @@ fn publishContinuousGeometricSourceRates(@builtin(global_invocation_id)gid:vec3u
  let brick=gid.x;if(brick>=GEOMETRIC_SOURCE_BRICKS||!brickActive(brick)){return;}
  let range=templateBrickCellRange(brick,acceptedBrickResolution(brick));var sum=0.0;var correction=0.0;
  for(var local=0u;local<range.y;local+=1u){let cell=range.x+local;var rate=0.0;
-  let weight=gsWeight(cell);
+  let weight=state[GS_RATE+cell];
   if(weight>0.0){let root=gsRoot(cell);
    if(root!=INVALID&&(atomicLoad(&conditioning[GS_COMPONENT+4u*root+1u])&1)!=0){
     rate=weight*state[GEOMETRIC_SOURCE_LEDGER+4u];

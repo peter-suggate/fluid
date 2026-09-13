@@ -4,9 +4,6 @@ import { createGeometricLowFluxLimiterWGSL } from "./geometric-low-flux-limiter.
 
 /** All state offsets are f32 words; control is a distinct atomic conditioning tail. */
 export interface SparseGeometricVolumeLayout {
-  /** Accepted/candidate local interface-patch history, parity-matched to rho. */
-  readonly interfaceHistoryA: number;
-  readonly interfaceHistoryB: number;
   readonly currentVolume: number;
   readonly lowVolume: number;
   readonly positiveLimiter: number;
@@ -32,8 +29,6 @@ export function createGeometricVolumeResidentWGSL(layout?: SparseGeometricVolume
 ${createGeometricSubfacesWGSL()}
 ${geometricBoundedFluxWGSL}
 const GV_CURRENT:u32=${layout.currentVolume}u;
-const GV_HISTORY_A:u32=${layout.interfaceHistoryA}u;
-const GV_HISTORY_B:u32=${layout.interfaceHistoryB}u;
 const GV_LOW:u32=${layout.lowVolume}u;
 const GV_PLUS:u32=${layout.positiveLimiter}u;
 const GV_MINUS:u32=${layout.negativeLimiter}u;
@@ -53,41 +48,36 @@ ${createGeometricLowFluxLimiterWGSL(layout)}
 fn gvLoad(word:u32)->u32{return bitcast<u32>(atomicLoad(&conditioning[GV_CONTROL+word]));}
 fn gvStore(word:u32,value:u32){atomicStore(&conditioning[GV_CONTROL+word],bitcast<i32>(value));}
 fn gvFailed()->bool{return gvLoad(4u)!=0u;}
-fn gvSourceHistory()->u32{return select(GV_HISTORY_A,GV_HISTORY_B,
-  cm12FCSourceScalarParity()!=0u);}
-fn gvDestinationHistory()->u32{return select(GV_HISTORY_B,GV_HISTORY_A,
-  cm12FCDestinationScalarParity()==0u);}
-fn gvHistoryPlane(base:u32,cell:u32)->GeometricInterfacePlane{
-  let at=base+4u*cell;
-  return GeometricInterfacePlane(vec3f(state[at],state[at+1u],state[at+2u]),state[at+3u]);
-}
-fn gvStoreHistoryPlane(base:u32,cell:u32,plane:GeometricInterfacePlane){
-  let at=base+4u*cell;
-  state[at]=plane.normal.x;state[at+1u]=plane.normal.y;
-  state[at+2u]=plane.normal.z;state[at+3u]=plane.offset;
-}
 fn gvFault(reason:u32,owner:u32,value:f32,capacity:f32,aux:f32){
   atomicOr(&conditioning[GV_CONTROL+4u],i32(reason));
   cm12RecordFailure(6u,owner,bitcast<vec4u>(vec4f(f32(reason),value,capacity,aux)));
 }
-fn gvRange(row:u32)->vec2u{
+fn gvRecordTopologyBuildFailure(reason:u32,owner:u32,value:f32,capacity:f32,aux:f32){
+  cm12RecordFailure(6u,owner,bitcast<vec4u>(vec4f(f32(reason),value,capacity,aux)));
+}
+fn gvTopologyBuildMalformed(reason:u32,owner:u32,value:f32,capacity:f32,aux:f32){
+  cnxPhysicalBuildMalformed(owner);
+  gvRecordTopologyBuildFailure(reason,owner,value,capacity,aux);
+}
+// Raw construction readers are valid while CNX is still building and its
+// fail-closed manifest is not yet published.
+fn gvBuildRange(row:u32)->vec2u{
   return vec2u(bitcast<u32>(state[GV_ROWS+2u*row]),bitcast<u32>(state[GV_ROWS+2u*row+1u]));
 }
-// Entries retain the original incidence/subface order. The low bit encodes
-// the negative endpoint, so a gather never rechecks unrelated row endpoints.
-fn gvCellFaceRange(cell:u32)->vec2u{
-  return vec2u(bitcast<u32>(state[GV_CELL_FACES+2u*cell]),
-    bitcast<u32>(state[GV_CELL_FACES+2u*cell+1u]));
-}
-fn gvCellFace(adjacency:u32)->u32{return bitcast<u32>(state[GV_CELL_FACE_ENTRIES+adjacency]);}
-fn gvOtherCell(face:u32,negative:bool)->u32{
-  return bitcast<u32>(state[GV_META+4u*face+select(0u,1u,negative)]);
-}
-fn gvCells(face:u32)->vec2u{
+fn gvBuildCells(face:u32)->vec2u{
   return vec2u(bitcast<u32>(state[GV_META+4u*face]),bitcast<u32>(state[GV_META+4u*face+1u]));
 }
-fn gvRow(face:u32)->u32{return bitcast<u32>(state[GV_META+4u*face+2u]);}
-fn gvArea(face:u32)->f32{return state[GV_META+4u*face+3u];}
+fn gvBuildArea(face:u32)->f32{return state[GV_META+4u*face+3u];}
+// Entries retain the original incidence/subface order. The low bit encodes
+// the negative endpoint, so a gather never rechecks unrelated row endpoints.
+fn gvCellFaceRange(cell:u32)->vec2u{return cnxCellFaceRangeUnchecked(cell);}
+fn gvCellFace(adjacency:u32)->u32{return cnxCellFaceEntryUnchecked(adjacency);}
+fn gvOtherCell(face:u32,negative:bool)->u32{
+  let cells=cnxPhysicalFaceCellsUnchecked(face);return select(cells.x,cells.y,negative);
+}
+fn gvCells(face:u32)->vec2u{return cnxPhysicalFaceCellsUnchecked(face);}
+fn gvRow(face:u32)->u32{return cnxPhysicalFaceRowUnchecked(face);}
+fn gvArea(face:u32)->f32{return cnxPhysicalFaceAreaUnchecked(face);}
 fn gvRate(face:u32)->f32{
   let row=gvRow(face);var velocity=state[destinationFaceVelocity()+row];
   // The existing stored face velocity already includes the aperture and solid
@@ -161,21 +151,23 @@ fn beginProjectedGeometricTransportReceivers(@builtin(global_invocation_id)gid:v
 @compute @workgroup_size(64)
 fn markProjectedGeometricTransportReceivers(@builtin(global_invocation_id)gid:vec3u){
   let row=acceptedTemplateRowInvocation(gid.x);
-  if(row==INVALID||!gvAcceptedPhysicalRow(row)||rowKind(row)!=3u){return;}
-  let range=rowTermRange(row);if(range.y-range.x!=1u){return;}
-  let term=range.x;let cell=termCell(term);
-  if(!cellActive(cell)||state[destinationDensity()+cell]<=0.0){return;}
+  if(row==INVALID||!cnxTransportViewValidForAcceptedTopology()
+    ||!gvAcceptedPhysicalRow(row)||rowKind(row)!=3u){return;}
+  let range=cnxPhysicalFaceRangeUnchecked(row);if(range.y-range.x!=1u){return;}
+  let face=range.x;let cells=cnxPhysicalFaceCellsUnchecked(face);
+  let isNegative=cells.x!=INVALID;let cell=select(cells.y,cells.x,isNegative);
+  if(cell==INVALID||!cellActive(cell)||state[destinationDensity()+cell]<=0.0){return;}
   let aperture=rowOpenFraction(row);let area=rowArea(row);
   if(aperture<=0.0||area<=1e-8){return;}
   var velocity=state[destinationFaceVelocity()+row];
   if(hasSolidBoundaries()){
     velocity-=(1.0-aperture)*rowSolidVelocity(row);
   }
-  let coefficient=termCoefficient(term);
+  let coefficient=select(1.0,-1.0,isNegative)/rowDistance(row);
   let outwardVolume=-coefficient*velocity*area*p.frame.x;
   if(outwardVolume<=gvRoundoff(cellOpenVolume(cell))){return;}
   let axis=rowAxis(row);var offset=vec3i(0);
-  offset[axis]=select(-1,1,coefficient<0.0);
+  offset[axis]=select(-1,1,isNegative);
   let sourceBrick=cellBrick(cell);
   let sourceCoordinate=cm12WorldLeafCoordinate(sourceBrick);
   if(!cm12FluidNeighborReachable(sourceCoordinate,offset)){return;}
@@ -237,7 +229,6 @@ fn publishGeometricTransportFrontierSource(@builtin(global_invocation_id)gid:vec
   state[sourceGamma()+cell]=state[destinationGamma()+cell];
   for(var component=0u;component<4u;component+=1u){
     state[sourceCellVelocity()+4u*cell+component]=state[destinationCellVelocity()+4u*cell+component];
-    state[gvSourceHistory()+4u*cell+component]=state[gvDestinationHistory()+4u*cell+component];
   }
 }
 @compute @workgroup_size(64)
@@ -322,15 +313,32 @@ fn seedGeometricVolumeDestination(@builtin(global_invocation_id)gid:vec3u){
   let src=sourceCellVelocity()+4u*cell;let dst=destinationCellVelocity()+4u*cell;
   for(var axis=0u;axis<4u;axis+=1u){
     state[dst+axis]=state[src+axis];
-    state[gvDestinationHistory()+4u*cell+axis]=state[gvSourceHistory()+4u*cell+axis];
+  }
+}
+
+@compute @workgroup_size(1)
+fn beginGeometricVolumeTopologyCompilation(){
+  // Physical faces and their signed cell CSR belong to the full CNX topology
+  // generation. CNX begin owns both allocators; this barrier checks that the
+  // physical compiler has not been entered against partially authored counts.
+  if(!cnxBuilding()){return;}
+  if(cnxPhysicalFaceCountBuildingUnchecked()!=0u
+    ||cnxPhysicalFaceEntryCountBuildingUnchecked()!=0u){
+    cnxPhysicalBuildMalformed(cnxSourceGeneration());
   }
 }
 
 @compute @workgroup_size(1)
 fn beginGeometricVolumeTransport(){
+  // A transport frame consumes the immutable physical view sealed for the
+  // accepted topology generation. Clear only frame receipts; retain both
+  // topology-lifetime allocators and restore the sealed face-count snapshot.
   for(var word=0u;word<32u;word+=1u){gvStore(word,0u);}
   for(var word=0u;word<24u;word+=1u){glStore(word,0u);}
-  atomicStore(&conditioning[GV_SUPPORT+32u],0);
+  if(!cnxTransportViewValidForAcceptedTopology()){
+    gvFault(1u,cnxSourceGeneration(),0.0,0.0,0.0);return;
+  }
+  gvStore(0u,cnxPhysicalFaceCount());
 }
 
 fn gvWriteFace(face:u32,negative:u32,positive:u32,row:u32,area:f32){
@@ -342,7 +350,9 @@ fn gvWriteFace(face:u32,negative:u32,positive:u32,row:u32,area:f32){
 
 @compute @workgroup_size(64)
 fn compileGeometricVolumeSubfaces(@builtin(global_invocation_id)gid:vec3u){
-  let row=acceptedTemplateRowInvocation(gid.x);if(row==INVALID||!gvAcceptedPhysicalRow(row)){return;}
+  if(cnxPhysicalBuildFailed()){return;}
+  let row=acceptedTemplateRowInvocation(cnxLinearInvocation(gid));
+  if(row==INVALID||!gvAcceptedPhysicalRow(row)){return;}
   state[GV_ROWS+2u*row]=bitcast<f32>(0u);state[GV_ROWS+2u*row+1u]=bitcast<f32>(0u);
   let range=rowTermRange(row);let terms=range.y-range.x;var count=0u;
   if(terms==1u){count=1u;}
@@ -352,15 +362,19 @@ fn compileGeometricVolumeSubfaces(@builtin(global_invocation_id)gid:vec3u){
       for(var positive=range.x;positive<range.y;positive+=1u){
         if(termCoefficient(positive)<=0.0){continue;}
         let face=geometricSubface(row,negative,positive);
-        if(face.status==2u){gvFault(1u,row,f32(negative),f32(positive),f32(terms));return;}
+        if(face.status==2u){
+          gvTopologyBuildMalformed(1u,row,f32(negative),f32(positive),f32(terms));return;
+        }
         if(face.status==1u){count+=1u;}
       }
     }
   }
-  if(count==0u||count>terms){gvFault(1u,row,f32(count),f32(terms),0.0);return;}
-  let first=bitcast<u32>(atomicAdd(&conditioning[GV_CONTROL],i32(count)));
-  if(first>GV_CAPACITY||count>GV_CAPACITY-min(first,GV_CAPACITY)){
-    gvFault(2u,row,f32(first+count),f32(GV_CAPACITY),0.0);return;
+  if(count==0u||count>terms){
+    gvTopologyBuildMalformed(1u,row,f32(count),f32(terms),0.0);return;
+  }
+  let first=cnxAllocatePhysicalFaces(count,row);
+  if(first==INVALID){
+    gvRecordTopologyBuildFailure(2u,row,f32(count),f32(GV_CAPACITY),0.0);return;
   }
   state[GV_ROWS+2u*row]=bitcast<f32>(first);
   state[GV_ROWS+2u*row+1u]=bitcast<f32>(count);
@@ -381,7 +395,7 @@ fn compileGeometricVolumeSubfaces(@builtin(global_invocation_id)gid:vec3u){
     }
   }
   if(abs(totalArea-rowStaticArea(row))>1e-5*max(1.0,rowStaticArea(row))){
-    gvFault(1u,row,totalArea,rowStaticArea(row),f32(count));
+    gvTopologyBuildMalformed(1u,row,totalArea,rowStaticArea(row),f32(count));
   }
   // Total area alone does not establish pressure/transport compatibility at
   // a mixed row. Every cell's signed geometric marginal must equal the
@@ -390,7 +404,7 @@ fn compileGeometricVolumeSubfaces(@builtin(global_invocation_id)gid:vec3u){
   for(var term=range.x;term<range.y;term+=1u){
     let cell=termCell(term);var marginal=0.0;
     for(var offset=0u;offset<count;offset+=1u){
-      let face=first+offset;let cells=gvCells(face);let area=gvArea(face);
+      let face=first+offset;let cells=gvBuildCells(face);let area=gvBuildArea(face);
       if(cells.x==cell){marginal-=area;}
       if(cells.y==cell){marginal+=area;}
     }
@@ -398,45 +412,71 @@ fn compileGeometricVolumeSubfaces(@builtin(global_invocation_id)gid:vec3u){
     let scale=max(rowStaticArea(row),abs(expected));
     let tolerance=8.0*1.1920928955078125e-7*scale;
     if(!(abs(marginal-expected)<=tolerance)){
-      gvFault(1u,row,marginal,expected,f32(cell));
+      gvTopologyBuildMalformed(1u,row,marginal,expected,f32(cell));
     }
   }
 }
 
-// Compile once per outer transport, after the row subfaces are frozen.
+// rowAccepted is the legacy PLIC neighbour predicate. The compact accepted
+// row worklist intentionally omits superseded one-sided exterior rows, which
+// have no opposite-sign neighbour. Refuse the whole compiled generation if it
+// ever omits an accepted incidence that does have a geometric neighbour; this
+// turns equality of the PLIC and transport graphs into a sealed invariant.
+fn gvExcludedRowHasGeometricNeighbor(row:u32,ownTerm:u32)->bool{
+  let range=rowTermRange(row);let own=termCoefficient(ownTerm);
+  for(var term=range.x;term<range.y;term+=1u){
+    let other=termCoefficient(term);if(own*other>=0.0){continue;}
+    let negative=select(term,ownTerm,own<0.0);
+    let positive=select(ownTerm,term,own<0.0);
+    if(geometricSubface(row,negative,positive).status!=0u){return true;}
+  }
+  return false;
+}
+
+// Compile once per full CNX topology generation, after row subfaces are frozen.
 // Two traversals avoid a fixed per-cell degree ceiling and preserve the exact
 // accumulation order of the former incidence -> row -> subface gathers.
 @compute @workgroup_size(64)
 fn compileGeometricVolumeCellFaces(@builtin(global_invocation_id)gid:vec3u){
-  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID||gvFailed()){return;}
+  if(cnxPhysicalBuildFailed()){return;}
+  let cell=acceptedTemplateCellInvocation(cnxLinearInvocation(gid));if(cell==INVALID){return;}
   var count=0u;
   for(var incidence=incidenceBegin(cell);incidence<incidenceEnd(cell);incidence+=1u){
-    let row=incidenceRow(incidence);if(!gvAcceptedPhysicalRow(row)){continue;}
-    let range=gvRange(row);
+    let row=incidenceRow(incidence);if(!gvAcceptedPhysicalRow(row)){
+      if(rowAccepted(row)&&gvExcludedRowHasGeometricNeighbor(
+        row,incidenceTerm(incidence))){
+        gvTopologyBuildMalformed(1u,row,f32(cell),f32(incidence),-1.0);return;
+      }
+      continue;
+    }
+    let range=gvBuildRange(row);
     for(var offset=0u;offset<range.y;offset+=1u){
-      let cells=gvCells(range.x+offset);
+      let cells=gvBuildCells(range.x+offset);
       if(cells.x==cell||cells.y==cell){count+=1u;}
     }
   }
-  let first=bitcast<u32>(atomicAdd(&conditioning[GV_SUPPORT+32u],i32(count)));
+  let first=cnxAllocatePhysicalFaceEntries(count,cell);
   let capacity=2u*GV_CAPACITY;
-  if(first>capacity||count>capacity-min(first,capacity)){
-    gvFault(2u,cell,f32(first)+f32(count),f32(capacity),1.0);return;
+  if(first==INVALID){
+    gvRecordTopologyBuildFailure(2u,cell,f32(count),f32(capacity),1.0);return;
   }
   state[GV_CELL_FACES+2u*cell]=bitcast<f32>(first);
   state[GV_CELL_FACES+2u*cell+1u]=bitcast<f32>(first+count);
   var at=first;
   for(var incidence=incidenceBegin(cell);incidence<incidenceEnd(cell);incidence+=1u){
     let row=incidenceRow(incidence);if(!gvAcceptedPhysicalRow(row)){continue;}
-    let range=gvRange(row);
+    let range=gvBuildRange(row);
     for(var offset=0u;offset<range.y;offset+=1u){
-      let face=range.x+offset;let cells=gvCells(face);
+      let face=range.x+offset;let cells=gvBuildCells(face);
       if(cells.x!=cell&&cells.y!=cell){continue;}
       state[GV_CELL_FACE_ENTRIES+at]=bitcast<f32>((face<<1u)|select(0u,1u,cells.x==cell));
       at+=1u;
     }
   }
 }
+
+@compute @workgroup_size(1)
+fn publishGeometricVolumeTopology(){cnxPublishTransportView();}
 
 // Unused dry backing is not part of the material transport domain. Keep a
 // structural witness for every cell, and reject any nonzero material entering
@@ -640,11 +680,14 @@ fn gatherGeometricTransportVelocityBounds(@builtin(global_invocation_id)gid:vec3
   velocity/=aperture;
   let axis=rowAxis(row);
   gvSupportReduce(6u+axis,velocity,false);gvSupportReduce(9u+axis,velocity,true);
-  var material=false;let range=rowTermRange(row);
-  for(var term=range.x;term<range.y;term+=1u){
-    let cell=termCell(term);if(!cellActive(cell)){continue;}
-    let capacity=gvDonorCapacity(cell);
-    material=material||state[GV_CURRENT+cell]>gvRoundoff(capacity);
+  var material=false;let range=cnxPhysicalFaceRangeUnchecked(row);
+  for(var face=range.x;face<range.y&&!material;face+=1u){
+    let cells=cnxPhysicalFaceCellsUnchecked(face);
+    for(var endpoint=0u;endpoint<2u;endpoint+=1u){
+      let cell=cells[endpoint];if(cell==INVALID||!cellActive(cell)){continue;}
+      let capacity=gvDonorCapacity(cell);
+      material=state[GV_CURRENT+cell]>gvRoundoff(capacity);if(material){break;}
+    }
   }
   if(material){
     gvSupportReduce(27u+axis,velocity,false);gvSupportReduce(30u+axis,velocity,true);
@@ -859,7 +902,7 @@ fn computeGeometricVolumeLimits(@builtin(global_invocation_id)gid:vec3u){
     if(atomicAdd(&conditioning[GV_CONTROL+31u],1)==0){
       gvStore(22u,bitcast<u32>(state[GV_CURRENT+cell]));
       gvStore(23u,bitcast<u32>(state[sourceDensity()+cell]*cellVolume(cell)));
-      gvStore(24u,select(0u,1u,pcmCellContains(cell)));
+      gvStore(24u,select(0u,1u,pressureAcceptedCellMember(cell)));
       gvStore(25u,gvLoad(3u));gvStore(26u,gvLoad(2u));
     }
     gvFault(5u,cell,low,capacity,bulkDelta);return;

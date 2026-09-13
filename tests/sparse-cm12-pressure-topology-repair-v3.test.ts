@@ -38,3 +38,20 @@ test("PTR v3 exposes no rank-tree repair or generation-capture shaders", () => {
   assert.match(wgsl,
     /ptrPressureCoefficientCandidateGeneration\(\)!=ptrPressureCoefficientAcceptedGeneration\(\)/);
 });
+
+test("production PTR commits only an accepted full pressure image", () => {
+  const layout = createSparseCM12PressureTopologyRepairLayout({
+    brickCapacity: 1_152, brickFineResolution: 8, presentationPageResolution: 8,
+  });
+  const wgsl = createSparseCM12PressureTopologyRepairWGSL({
+    layout, fullImageAccepted: "peiFullImageAccepted()",
+    publishFailure: (fault, owner) => `recordFailure(${fault},${owner});`,
+  });
+  assert.match(wgsl, /fn finalizeFullPressureTopologyJournal\(\)/);
+  assert.match(wgsl, /if\(!\(peiFullImageAccepted\(\)\)\)/);
+  assert.match(wgsl, /coefficientGenerationGap|17u/);
+  assert.doesNotMatch(wgsl, /finalizeSparseCM12PressureTopologyBrickFrontier/);
+  assert.doesNotMatch(wgsl, /finalizeSparseCM12BoundedPressureTopologyRepair/);
+  assert.doesNotMatch(wgsl, /pcmCellQueueTopologyRetiredRange/);
+  assert.match(wgsl, /recordFailure\(code,id\)/);
+});

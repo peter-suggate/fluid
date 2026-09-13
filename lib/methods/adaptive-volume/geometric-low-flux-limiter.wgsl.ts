@@ -19,9 +19,38 @@ fn glPublishIndirect(){
   glStore(19u,select(0u,acceptedTemplateCellWorkgroups(),commitReady));
   glStore(20u,1u);glStore(21u,1u);
 }
+// Static transport uses dense ping-pong factors without copying the proposal
+// over the current bank. Pass zero has the same implicit all-one generation
+// that the former initialization dispatch wrote. Each continued pass advances
+// to the preceding proposal by parity. After convergence, advance has already
+// incremented the counter, so apply reads the generation that was audited,
+// never the unused proposal from that final pass.
+fn glStaticFactorAtPass(cell:u32,iteration:u32)->f32{
+  if(iteration==0u){return 1.0;}
+  return select(state[GV_PLUS+cell],state[GV_MINUS+cell],(iteration&1u)!=0u);
+}
+fn glStaticAuditedPass()->u32{
+  let completed=glLoad(4u);
+  if(glLoad(23u)==2u){
+    if(completed==0u){return 0u;}
+    return completed-1u;
+  }
+  return completed;
+}
+fn glStoreStaticProposal(cell:u32,value:f32,iteration:u32){
+  if((iteration&1u)==0u){state[GV_MINUS+cell]=value;}
+  else{state[GV_PLUS+cell]=value;}
+}
+fn glReceiverFactorAtPass(face:u32,flux:f32,iteration:u32)->f32{
+  let cells=gvCells(face);let receiver=select(cells.x,cells.y,flux>=0.0);
+  if(receiver==INVALID){return 1.0;}
+  return glStaticFactorAtPass(receiver,iteration);
+}
 fn glReceiverFactor(face:u32,flux:f32)->f32{
   let cells=gvCells(face);let receiver=select(cells.x,cells.y,flux>=0.0);
-  if(receiver==INVALID){return 1.0;}return state[GV_PLUS+receiver];
+  if(receiver==INVALID){return 1.0;}
+  if(geometricSolidMotionActive()){return state[GV_PLUS+receiver];}
+  return glStaticFactorAtPass(receiver,glStaticAuditedPass());
 }
 // Capacity-constrained provisional face flux. A dual potential per cell
 // modifies only a physical directed sweep, never the stored liquid amount.
@@ -59,23 +88,16 @@ fn beginGeometricLowFluxLimits(){
 }
 @compute @workgroup_size(64)
 fn initializeGeometricLowFluxLimits(@builtin(global_invocation_id)gid:vec3u){
+  // Static pass zero observes an implicit all-one factor generation and gathers
+  // its invariant incoming amount in update. Only moving-solid FISTA needs an
+  // explicit initialized vector before its first global update.
+  if(!geometricSolidMotionActive()){return;}
   let cell=acceptedTemplateCellInvocation(gid.x);
   if(cell==INVALID||!glRunning()||glLoad(22u)==0u){return;}
-  var incoming=0.0;var sweepWeight=0.0;
-  let faces=gvCellFaceRange(cell);
-  for(var adjacency=faces.x;adjacency<faces.y;adjacency+=1u){
-    let entry=gvCellFace(adjacency);let face=entry>>1u;let isNegative=(entry&1u)!=0u;
-    incoming+=max(0.0,geometricFctCellDelta(state[GV_FLUX+4u*face],isNegative));
-    sweepWeight+=abs(state[GV_FLUX+4u*face+3u]);
-  }
-  if(geometricSolidMotionActive()){
-    // Diagonal dual step tau=1/(2*sum incident |Q|) is conservative for
-    // the weighted incidence Laplacian. LOW retains the preceding proximal
-    // point while PLUS is the common extrapolated FISTA point.
-    state[GV_LOW+cell]=0.0;state[GV_PLUS+cell]=0.0;state[GV_MINUS+cell]=0.0;
-  }else{
-    state[GV_LOW+cell]=incoming;state[GV_PLUS+cell]=1.0;state[GV_MINUS+cell]=1.0;
-  }
+  // Diagonal dual step tau=1/(2*sum incident |Q|) is conservative for
+  // the weighted incidence Laplacian. LOW retains the preceding proximal
+  // point while PLUS is the common extrapolated FISTA point.
+  state[GV_LOW+cell]=0.0;state[GV_PLUS+cell]=0.0;state[GV_MINUS+cell]=0.0;
 }
 @compute @workgroup_size(64)
 fn updateGeometricLowFluxLimits(@builtin(global_invocation_id)gid:vec3u){
@@ -122,20 +144,25 @@ fn updateGeometricLowFluxLimits(@builtin(global_invocation_id)gid:vec3u){
     }
     return;
   }
+  let limiterPass=glLoad(4u);let firstPass=limiterPass==0u;
+  var incoming=select(state[GV_LOW+cell],0.0,firstPass);
   var outgoing=0.0;var signedDelta=0.0;
   let faces=gvCellFaceRange(cell);
   for(var adjacency=faces.x;adjacency<faces.y;adjacency+=1u){
     let entry=gvCellFace(adjacency);let face=entry>>1u;let isNegative=(entry&1u)!=0u;
     let flux=state[GV_FLUX+4u*face];
     let delta=geometricFctCellDelta(flux,isNegative);
-    let factor=glReceiverFactor(face,flux);
+    var factor=1.0;
+    if(!firstPass){factor=glReceiverFactorAtPass(face,flux,limiterPass);}
+    if(firstPass){incoming+=max(0.0,delta);}
     // Match the later low-state audit's per-face multiply, signed incidence
     // and accumulation order; regrouping incoming-minus-outgoing can differ
     // by an ulp exactly where physical capacity is exhausted.
     signedDelta+=geometricFctCellDelta(flux*factor,isNegative);
     if(delta<0.0){outgoing-=delta*factor;}
   }
-  let incoming=state[GV_LOW+cell];let previous=state[GV_PLUS+cell];
+  if(firstPass){state[GV_LOW+cell]=incoming;}
+  let previous=glStaticFactorAtPass(cell,limiterPass);
   let volume=gvMicroStartingVolume(cell);let capacity=gvReceiverCapacity(cell);
   // Preserve, but never grow, an already accepted upper roundoff excursion.
   // Requiring every full cell to remove its existing roundoff simultaneously
@@ -161,7 +188,7 @@ fn updateGeometricLowFluxLimits(@builtin(global_invocation_id)gid:vec3u){
       next=bitcast<f32>(bitcast<u32>(previous)-1u);
     }
   }
-  state[GV_MINUS+cell]=next;
+  glStoreStaticProposal(cell,next,limiterPass);
   // Readiness certifies the CURRENT shared factor generation. When all cells
   // pass, commit preserves it, so face publication uses exactly this audit.
   // Proposed changes within the existing roundoff interval are unnecessary;
@@ -173,12 +200,14 @@ fn updateGeometricLowFluxLimits(@builtin(global_invocation_id)gid:vec3u){
 }
 @compute @workgroup_size(64)
 fn commitGeometricLowFluxLimits(@builtin(global_invocation_id)gid:vec3u){
+  // Static factors advance by dense bank parity in the singleton control pass;
+  // no accepted-cell copy is required. Moving-solid FISTA retains its explicit
+  // proximal/extrapolated generation commit.
+  if(!geometricSolidMotionActive()){return;}
   let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID||!glRunning()){return;}
   if(glLoad(6u)==0u){return;}
-  if(geometricSolidMotionActive()){
-    let x=state[GV_MINUS+cell];let prior=state[GV_LOW+cell];let k=f32(glLoad(4u));
-    state[GV_LOW+cell]=x;state[GV_PLUS+cell]=x+(k/(k+3.0))*(x-prior);
-  }else{state[GV_PLUS+cell]=state[GV_MINUS+cell];}
+  let x=state[GV_MINUS+cell];let prior=state[GV_LOW+cell];let k=f32(glLoad(4u));
+  state[GV_LOW+cell]=x;state[GV_PLUS+cell]=x+(k/(k+3.0))*(x-prior);
 }
 @compute @workgroup_size(1)
 fn advanceGeometricLowFluxLimits(){

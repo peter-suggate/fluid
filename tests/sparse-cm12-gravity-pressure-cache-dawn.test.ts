@@ -25,7 +25,7 @@ struct Params {counts:vec4u,acceleration:vec4f}
 var<private>p:Params;
 var<workgroup>pcmRowBallot:array<u32,64>;
 @group(0)@binding(0)var<storage,read_write>result:array<u32>;
-fn pcmRowContains(row:u32)->bool{_=row;return true;}
+fn pressureAcceptedRowMember(row:u32)->bool{_=row;return true;}
 fn pcmRowPublicationOpen()->bool{return true;}
 fn rowAccepted(row:u32)->bool{_=row;return true;}
 fn rowTermOffset(row:u32)->u32{_=row;return 0u;}

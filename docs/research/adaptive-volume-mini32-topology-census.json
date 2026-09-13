@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-12T19:27:14.371Z",
+  "generatedAt": "2026-09-12T19:29:00.785Z",
   "sourceFingerprint": {
     "kind": "sparse-cm12-source-content",
     "version": 1,
@@ -45,7 +45,7 @@
       "span1": 64
     }
   },
-  "acceptedGrid": {
+  "inputCompositeGrid": {
     "cells": 5755,
     "rows": 16920,
     "rowTerms": 34530,

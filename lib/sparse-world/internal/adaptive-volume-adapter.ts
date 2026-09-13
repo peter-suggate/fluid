@@ -246,8 +246,6 @@ export interface CM12SparseWorldDeveloperTrace {
   readAcceptedIndirectQA(): ReturnType<WebGPUSparseCM12Resident["readAcceptedIndirectQA"]>;
   readFrameControlIndirectQA(): ReturnType<
     WebGPUSparseCM12Resident["readFrameControlIndirectQA"]>;
-  readPersistentPressureCacheIndirectQA(): ReturnType<
-    WebGPUSparseCM12Resident["readPersistentPressureCacheIndirectQA"]>;
   readVelocityExtensionHeaderQA(): ReturnType<
     WebGPUSparseCM12Resident["readVelocityExtensionHeaderQA"]>;
   readVelocityExtensionQA(): ReturnType<
@@ -847,9 +845,6 @@ class AdoptedCM12SparseWorldDeveloperTrace implements CM12SparseWorldDeveloperTr
   readAdaptiveRepresentationQA() { return this.generationState.read((resident) => resident.readAdaptiveRepresentationQA()); }
   readAcceptedIndirectQA() { return this.generationState.read((resident) => resident.readAcceptedIndirectQA()); }
   readFrameControlIndirectQA() { return this.generationState.read((resident) => resident.readFrameControlIndirectQA()); }
-  readPersistentPressureCacheIndirectQA() {
-    return this.generationState.read((resident) => resident.readPersistentPressureCacheIndirectQA());
-  }
   readVelocityExtensionHeaderQA() { return this.generationState.read((resident) => resident.readVelocityExtensionHeaderQA()); }
   readVelocityExtensionQA() { return this.generationState.read((resident) => resident.readVelocityExtensionQA()); }
   readPressureCanonicalMembershipQA() {

@@ -12,7 +12,7 @@ fn gaRunning()->bool{return gaGet(0u)>0.5&&gaGet(6u)==0.0;}
 fn gaPrimary()->bool{return gaGet(11u)>0.5;}
 fn gaCell(cell:u32)->bool{
   return cell!=INVALID&&cellActive(cell)&&cellOpenVolume(cell)>0.0
-    &&select(!pcmCellContains(cell),pcmCellContains(cell),gaPrimary());
+    &&select(!pressureAcceptedCellMember(cell),pressureAcceptedCellMember(cell),gaPrimary());
 }
 fn gaComponentRoot(cell:u32)->u32{
   var root=cell;
@@ -32,9 +32,10 @@ fn gaUnknown(cell:u32)->bool{
 }
 fn gaFreeRow(row:u32)->bool{
   if(!gvAcceptedPhysicalRow(row)||rowOpenFraction(row)<=0.0){return false;}
-  if(gaPrimary()){return pcmRowContains(row)&&state[p.stateOffsets3.x+row]>0.0;}
+  if(gaPrimary()){return pressureAcceptedRowMember(row)&&state[p.stateOffsets3.x+row]>0.0;}
   let terms=rowTermRange(row);
-  for(var at=terms.x;at<terms.y;at+=1u){if(pcmCellContains(termCell(at))){return false;}}
+  for(var at=terms.x;at<terms.y;at+=1u){
+    if(pressureAcceptedCellMember(termCell(at))){return false;}}
   return terms.y>terms.x;
 }
 fn gaCorrectionScale(row:u32)->f32{

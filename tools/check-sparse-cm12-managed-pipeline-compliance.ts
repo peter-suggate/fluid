@@ -14,7 +14,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 
-const PROJECT_ROOT = path.resolve(fileURLToPath(new URL("../", import.meta.url)));
+const PROJECT_ROOT = path.resolve(
+  fileURLToPath(new URL("../", import.meta.url)),
+);
 const RUNTIME_ROOTS = [
   "lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.ts",
 ] as const;
@@ -46,10 +48,12 @@ function sourceKind(file: string): ts.ScriptKind {
 
 function unwrapExpression(expression: ts.Expression): ts.Expression {
   let current = expression;
-  while (ts.isParenthesizedExpression(current)
-    || ts.isAsExpression(current)
-    || ts.isTypeAssertionExpression(current)
-    || ts.isNonNullExpression(current)) {
+  while (
+    ts.isParenthesizedExpression(current) ||
+    ts.isAsExpression(current) ||
+    ts.isTypeAssertionExpression(current) ||
+    ts.isNonNullExpression(current)
+  ) {
     current = current.expression;
   }
   return current;
@@ -58,9 +62,11 @@ function unwrapExpression(expression: ts.Expression): ts.Expression {
 function calledMethod(expression: ts.Expression): string | undefined {
   const target = unwrapExpression(expression);
   if (ts.isPropertyAccessExpression(target)) return target.name.text;
-  if (ts.isElementAccessExpression(target)
-    && target.argumentExpression
-    && ts.isStringLiteralLike(target.argumentExpression)) {
+  if (
+    ts.isElementAccessExpression(target) &&
+    target.argumentExpression &&
+    ts.isStringLiteralLike(target.argumentExpression)
+  ) {
     return target.argumentExpression.text;
   }
   return undefined;
@@ -71,14 +77,21 @@ export function inspectDirectComputePipelineCalls(
   file: string,
   source: string,
 ): readonly DirectPipelineCall[] {
-  const parsed = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true,
-    sourceKind(file));
+  const parsed = ts.createSourceFile(
+    file,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    sourceKind(file),
+  );
   const calls: DirectPipelineCall[] = [];
   const visit = (node: ts.Node): void => {
     if (ts.isCallExpression(node)) {
       const method = calledMethod(node.expression);
       if (method && DIRECT_COMPUTE_PIPELINE_METHODS.has(method)) {
-        const position = parsed.getLineAndCharacterOfPosition(node.getStart(parsed));
+        const position = parsed.getLineAndCharacterOfPosition(
+          node.getStart(parsed),
+        );
         calls.push({
           file,
           line: position.line + 1,
@@ -93,7 +106,9 @@ export function inspectDirectComputePipelineCalls(
   return calls;
 }
 
-function importClauseHasRuntimeBinding(clause: ts.ImportClause | undefined): boolean {
+function importClauseHasRuntimeBinding(
+  clause: ts.ImportClause | undefined,
+): boolean {
   if (!clause) return true; // Side-effect import.
   if (clause.isTypeOnly) return false;
   if (clause.name) return true;
@@ -102,34 +117,52 @@ function importClauseHasRuntimeBinding(clause: ts.ImportClause | undefined): boo
   return clause.namedBindings.elements.some((element) => !element.isTypeOnly);
 }
 
-function exportDeclarationHasRuntimeBinding(declaration: ts.ExportDeclaration): boolean {
+function exportDeclarationHasRuntimeBinding(
+  declaration: ts.ExportDeclaration,
+): boolean {
   if (declaration.isTypeOnly) return false;
   if (!declaration.exportClause) return true;
   if (ts.isNamespaceExport(declaration.exportClause)) return true;
-  return declaration.exportClause.elements.some((element) => !element.isTypeOnly);
+  return declaration.exportClause.elements.some(
+    (element) => !element.isTypeOnly,
+  );
 }
 
-function runtimeRelativeSpecifiers(file: string, source: string): readonly string[] {
-  const parsed = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true,
-    sourceKind(file));
+function runtimeRelativeSpecifiers(
+  file: string,
+  source: string,
+): readonly string[] {
+  const parsed = ts.createSourceFile(
+    file,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    sourceKind(file),
+  );
   const specifiers: string[] = [];
   const visit = (node: ts.Node): void => {
-    if (ts.isImportDeclaration(node)
-      && ts.isStringLiteralLike(node.moduleSpecifier)
-      && node.moduleSpecifier.text.startsWith(".")
-      && importClauseHasRuntimeBinding(node.importClause)) {
+    if (
+      ts.isImportDeclaration(node) &&
+      ts.isStringLiteralLike(node.moduleSpecifier) &&
+      node.moduleSpecifier.text.startsWith(".") &&
+      importClauseHasRuntimeBinding(node.importClause)
+    ) {
       specifiers.push(node.moduleSpecifier.text);
-    } else if (ts.isExportDeclaration(node)
-      && node.moduleSpecifier
-      && ts.isStringLiteralLike(node.moduleSpecifier)
-      && node.moduleSpecifier.text.startsWith(".")
-      && exportDeclarationHasRuntimeBinding(node)) {
+    } else if (
+      ts.isExportDeclaration(node) &&
+      node.moduleSpecifier &&
+      ts.isStringLiteralLike(node.moduleSpecifier) &&
+      node.moduleSpecifier.text.startsWith(".") &&
+      exportDeclarationHasRuntimeBinding(node)
+    ) {
       specifiers.push(node.moduleSpecifier.text);
-    } else if (ts.isCallExpression(node)
-      && node.expression.kind === ts.SyntaxKind.ImportKeyword
-      && node.arguments.length === 1
-      && ts.isStringLiteralLike(node.arguments[0]!)
-      && node.arguments[0]!.text.startsWith(".")) {
+    } else if (
+      ts.isCallExpression(node) &&
+      node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+      node.arguments.length === 1 &&
+      ts.isStringLiteralLike(node.arguments[0]!) &&
+      node.arguments[0]!.text.startsWith(".")
+    ) {
       specifiers.push(node.arguments[0]!.text);
     }
     ts.forEachChild(node, visit);
@@ -138,7 +171,10 @@ function runtimeRelativeSpecifiers(file: string, source: string): readonly strin
   return specifiers;
 }
 
-function resolveRuntimeModule(importer: string, specifier: string): string | undefined {
+function resolveRuntimeModule(
+  importer: string,
+  specifier: string,
+): string | undefined {
   const unresolved = path.resolve(path.dirname(importer), specifier);
   const extension = path.extname(unresolved);
   const extensionless = [".js", ".mjs", ".cjs"].includes(extension)
@@ -154,7 +190,9 @@ function resolveRuntimeModule(importer: string, specifier: string): string | und
     path.join(extensionless, "index.ts"),
     path.join(extensionless, "index.tsx"),
   ];
-  return candidates.find((candidate) => existsSync(candidate) && statSync(candidate).isFile());
+  return candidates.find(
+    (candidate) => existsSync(candidate) && statSync(candidate).isFile(),
+  );
 }
 
 function isCompilationAuthority(file: string): boolean {
@@ -182,55 +220,70 @@ assert.deepEqual(
   "the managed-pipeline gate must catch the VEX descriptor regression",
 );
 assert.deepEqual(
-  inspectDirectComputePipelineCalls("fixture.ts", `
+  inspectDirectComputePipelineCalls(
+    "fixture.ts",
+    `
     await gpuCompilationManagerFor(device).compileComputePipeline(descriptor);
     const documentation = "device.createComputePipelineAsync(descriptor)";
-  `),
+  `,
+  ),
   [],
   "manager acquisition and documentation must not be mistaken for direct compilation",
 );
 
 const compilationManagerSource = readFileSync(
-  path.resolve(PROJECT_ROOT, COMPILATION_MANAGER), "utf8");
-assert.match(compilationManagerSource,
+  path.resolve(PROJECT_ROOT, COMPILATION_MANAGER),
+  "utf8",
+);
+assert.match(
+  compilationManagerSource,
   /process\.env\?\.FLUID_GPU_COMPILATION_CONCURRENCY \?\? 3\) : 3/,
-  "interactive and native production compilation must default to bounded width three");
-assert.match(compilationManagerSource,
+  "interactive and native production compilation must default to bounded width three",
+);
+assert.match(
+  compilationManagerSource,
   /maximumConcurrentBundles > 4/,
-  "the compilation manager must retain a hard upper concurrency bound");
-assert.doesNotMatch(compilationManagerSource,
+  "the compilation manager must retain a hard upper concurrency bound",
+);
+assert.doesNotMatch(
+  compilationManagerSource,
   /Promise\.(?:all|allSettled)\([^;]*create(?:Compute|Render)PipelineAsync/s,
-  "the compilation authority must not regain unbounded native pipeline fan-out");
+  "the compilation authority must not regain unbounded native pipeline fan-out",
+);
 
-const residentSource = readFileSync(path.resolve(PROJECT_ROOT, RUNTIME_ROOTS[0]), "utf8");
+const residentSource = readFileSync(
+  path.resolve(PROJECT_ROOT, RUNTIME_ROOTS[0]),
+  "utf8",
+);
 for (const retiredEntryPoint of [
   "classifyTemporalScalarCells",
-  "countPressureCells", "finalizePressureCellWorklist", "compactPressureCells",
-  "countPressureRows", "finalizePressureRowWorklist", "compactPressureRows",
+  "countPressureCells",
+  "finalizePressureCellWorklist",
+  "compactPressureCells",
+  "countPressureRows",
+  "finalizePressureRowWorklist",
+  "compactPressureRows",
   "resetPressureMembershipRepair",
-  "classifyPersistentPressureCells", "classifyPressureTopologyCells",
-  "repairPressureCellMembership", "classifyPersistentPressureRows",
-  "classifyPressureTopologyRows", "repairPressureRowMembership",
-  "finalizePressureMembershipBootstrap", "finalizePressureTopologyRepair",
-  "bakeDirtyEffectivePressureEdges", "bakePressureTopologyEdges",
+  "classifyPersistentPressureCells",
+  "classifyPressureTopologyCells",
+  "repairPressureCellMembership",
+  "classifyPersistentPressureRows",
+  "classifyPressureTopologyRows",
+  "repairPressureRowMembership",
+  "finalizePressureMembershipBootstrap",
+  "finalizePressureTopologyRepair",
+  "bakeDirtyEffectivePressureEdges",
+  "bakePressureTopologyEdges",
   "bakeEffectivePressureEdges",
-  "prepareSharpeningFieldSparse", "scatterSharpeningMassSparse",
+  "prepareSharpeningFieldSparse",
+  "scatterSharpeningMassSparse",
   "finalizeSharpeningSparse",
 ] as const) {
-  assert.doesNotMatch(residentSource, new RegExp(`\\b${retiredEntryPoint}\\b`),
-    `retired production pipeline ${retiredEntryPoint} must not return to eager compilation`);
-}
-
-// A weak compare-exchange may fail spuriously. Production retry sites must
-// therefore be bounded and fail closed instead of leaving a command buffer
-// permanently resident on the GPU.
-for (const [file, required] of [
-  ["lib/methods/adaptive-volume/sparse-cm12-canonical-membership.wgsl.ts",
-    ["PCM_FAULT_ATOMIC_CONTENTION", "attempt<64u"]],
-] as const) {
-  const source = readFileSync(path.resolve(PROJECT_ROOT, file), "utf8");
-  for (const token of required) assert.ok(source.includes(token),
-    `${file} must retain bounded, fail-closed weak-CAS retries (${token})`);
+  assert.doesNotMatch(
+    residentSource,
+    new RegExp(`\\b${retiredEntryPoint}\\b`),
+    `retired production pipeline ${retiredEntryPoint} must not return to eager compilation`,
+  );
 }
 
 const pending = RUNTIME_ROOTS.map((root) => path.resolve(PROJECT_ROOT, root));
@@ -255,10 +308,14 @@ while (pending.length > 0) {
       continue;
     }
     const relativeDependency = path.relative(PROJECT_ROOT, dependency);
-    if (relativeDependency.startsWith(`..${path.sep}`) || path.isAbsolute(relativeDependency)) {
+    if (
+      relativeDependency.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(relativeDependency)
+    ) {
       continue;
     }
-    if (!importedBy.has(dependency)) importedBy.set(dependency, { importer: relativeFile, specifier });
+    if (!importedBy.has(dependency))
+      importedBy.set(dependency, { importer: relativeFile, specifier });
     pending.push(dependency);
   }
 }
@@ -267,7 +324,11 @@ function reachabilityTrace(file: string): string {
   const trace = [file];
   let current = path.resolve(PROJECT_ROOT, file);
   const seen = new Set<string>();
-  while (!RUNTIME_ROOTS.includes(projectPath(current) as typeof RUNTIME_ROOTS[number])) {
+  while (
+    !RUNTIME_ROOTS.includes(
+      projectPath(current) as (typeof RUNTIME_ROOTS)[number],
+    )
+  ) {
     if (seen.has(current)) break;
     seen.add(current);
     const edge = importedBy.get(current);
@@ -281,14 +342,22 @@ function reachabilityTrace(file: string): string {
 if (unresolvedImports.length > 0 || violations.length > 0) {
   console.error("Sparse CM12 managed pipeline compliance: FAIL");
   for (const edge of unresolvedImports) {
-    console.error(`- unresolved runtime import ${edge.importer} -> ${edge.specifier}`);
+    console.error(
+      `- unresolved runtime import ${edge.importer} -> ${edge.specifier}`,
+    );
   }
   for (const violation of violations) {
-    console.error(`- ${violation.file}:${violation.line}:${violation.column} calls ${violation.method} directly`);
+    console.error(
+      `- ${violation.file}:${violation.line}:${violation.column} calls ${violation.method} directly`,
+    );
     console.error(`  reachable via ${reachabilityTrace(violation.file)}`);
   }
-  console.error("All reachable production compute pipelines must be acquired through GPUCompilationManager.");
+  console.error(
+    "All reachable production compute pipelines must be acquired through GPUCompilationManager.",
+  );
   process.exitCode = 1;
 } else {
-  console.log(`Sparse CM12 managed pipeline compliance: PASS (${visited.size} reachable modules)`);
+  console.log(
+    `Sparse CM12 managed pipeline compliance: PASS (${visited.size} reachable modules)`,
+  );
 }

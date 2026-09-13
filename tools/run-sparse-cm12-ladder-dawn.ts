@@ -239,8 +239,6 @@ async function worker(): Promise<void> {
         nonfiniteDensityCellCount }));
       const transportIndirect = await (solver as WebGPUAdaptiveMassSolver)
         .sparseWorldTrace.readTransportPacketIndirectQA();
-      const persistentPressureCacheIndirect = await (solver as WebGPUAdaptiveMassSolver)
-        .sparseWorldTrace.readPersistentPressureCacheIndirectQA();
       const candidateEffectsTransaction = await (solver as WebGPUAdaptiveMassSolver)
         .sparseWorldTrace.readCandidateEffectsTransactionQA();
       const pressureDiagnostics = await (solver as WebGPUAdaptiveMassSolver)
@@ -270,7 +268,7 @@ async function worker(): Promise<void> {
         );
       }
       console.log(JSON.stringify({ phase: "frontier-transport-authority", rung,
-        transportIndirect, persistentPressureCacheIndirect, candidateEffectsTransaction,
+        transportIndirect, candidateEffectsTransaction,
         pressureTopologyRepair: pressureDiagnostics.pressureTopologyRepair,
         pressureCutoverAuthorities: pressureDiagnostics.pressureCutoverAuthorities,
         pressureSolve: {

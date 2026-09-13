@@ -18,6 +18,8 @@ export interface SparseCM12VelocityExtensionWGSLOptions {
   readonly cacheAcceptedPackets?: boolean;
   /** Bake one recurrence depth into a bounded pipeline slice when requested. */
   readonly fixedRecurrenceDepth?: number;
+  /** Consume the generation-sealed CNX connectivity image in the fallback path. */
+  readonly compiledTopology?: boolean;
 }
 
 const identifier = (value: string, label: string): string => {
@@ -86,6 +88,68 @@ fn cm12ExtensionDepth()->u32{return clamp(cm12ExtensionDispatch.depth,1u,
     : /* wgsl */ `fn cm12ExtensionDepth()->u32{return ${fixedRecurrenceDepth}u;}`;
   const finalValidityBaseWords = (SPARSE_CM12_VELOCITY_EXTENSION_DEPTH & 1) === 0
     ? layout.validityABaseWords : layout.validityBBaseWords;
+  const compiledTopologyFence = options.compiledTopology ? /* wgsl */ `
+  if(lane==0u){cm12ExtensionCompiledTopologyValid=u32(cnxAccepted());}
+  if(workgroupUniformLoad(&cm12ExtensionCompiledTopologyValid)==0u){
+    cm12ExtensionPublishFrameReceipt(dispatchOrdinal,lane);return;
+  }` : "";
+  const connectivityTraversal = options.compiledTopology ? /* wgsl */ `
+        let incidences=cnxCellIncidenceRangeUnchecked(cell);
+        for(var at=incidences.x;at<incidences.y;at+=1u){
+          let rowOrdinal=cnxIncidenceRowOrdinalUnchecked(at);
+          let row=cnxStableRowUnchecked(rowOrdinal);
+          if(row==cm12ExtensionInvalid||!cm12VelocityExtensionRowOpen(row)){continue;}
+          let range=cnxRowTermRangeByOrdinalUnchecked(rowOrdinal);
+          let termCount=range.y-range.x;
+          let ownTerm=cnxIncidenceOwnTermUnchecked(at);
+          let own=cnxRowTermCoefficientUnchecked(ownTerm);
+          let axis=cnxRowPackedMetadataByOrdinal(rowOrdinal)&3u;
+          let side=2u*axis+select(0u,1u,own<0.0);
+          if(termCount==2u){
+            let ordinal=(ownTerm-range.x)^1u;
+            let neighbor=cnxRowTermCellUnchecked(range.x+ordinal);
+            if(neighbor==cm12ExtensionInvalid){continue;}
+            if(cm12ExtensionLoad(cm12ExtensionAcceptedDepth+neighbor)
+              >=cm12ExtensionDepth()){continue;}
+            let w=cm12VelocityExtensionNeighborWeight(row,own,
+              cnxRowTermCoefficientUnchecked(range.x+ordinal));
+            terms[side]+=w*vec4f(cm12EffectiveTransportVelocity(neighbor).xyz,1.0);continue;
+          }
+          for(var ordinal=0u;ordinal<termCount;ordinal+=1u){
+            let neighbor=cnxRowTermCellUnchecked(range.x+ordinal);
+            if(neighbor==cell||neighbor==cm12ExtensionInvalid){continue;}
+            if(cm12ExtensionLoad(cm12ExtensionAcceptedDepth+neighbor)
+              >=cm12ExtensionDepth()){continue;}
+            let w=cm12VelocityExtensionNeighborWeight(row,own,
+              cnxRowTermCoefficientUnchecked(range.x+ordinal));
+            terms[side]+=w*vec4f(cm12EffectiveTransportVelocity(neighbor).xyz,1.0);
+          }
+        }` : /* wgsl */ `
+        let incidences=cm12HotIncidenceRange(cell);
+        for(var local=0u;local<incidences.y;local+=1u){
+          let at=incidences.x+local;let row=incidenceRow(at);
+          if(row==cm12ExtensionInvalid||!cm12VelocityExtensionRowOpen(row)){continue;}
+          let range=rowTermRange(row);let termCount=range.y-range.x;
+          let ownTerm=incidenceTerm(at);let own=termCoefficient(ownTerm);
+          let side=2u*rowAxis(row)+select(0u,1u,own<0.0);
+          if(termCount==2u){
+            let ordinal=(ownTerm-range.x)^1u;
+            let neighbor=termCell(range.x+ordinal);
+            if(neighbor==cm12ExtensionInvalid){continue;}
+            if(cm12ExtensionLoad(cm12ExtensionAcceptedDepth+neighbor)
+              >=cm12ExtensionDepth()){continue;}
+            let w=cm12VelocityExtensionNeighborWeight(row,own,termCoefficient(range.x+ordinal));
+            terms[side]+=w*vec4f(cm12EffectiveTransportVelocity(neighbor).xyz,1.0);continue;
+          }
+          for(var ordinal=0u;ordinal<termCount;ordinal+=1u){
+            let neighbor=termCell(range.x+ordinal);
+            if(neighbor==cell||neighbor==cm12ExtensionInvalid){continue;}
+            if(cm12ExtensionLoad(cm12ExtensionAcceptedDepth+neighbor)
+              >=cm12ExtensionDepth()){continue;}
+            let w=cm12VelocityExtensionNeighborWeight(row,own,termCoefficient(range.x+ordinal));
+            terms[side]+=w*vec4f(cm12EffectiveTransportVelocity(neighbor).xyz,1.0);
+          }
+        }`;
   const h = (word: number) => `${layout.headerBaseWords + word}u`;
   return /* wgsl */ `
 const cm12ExtensionInvalid:u32=0xffffffffu;
@@ -111,6 +175,8 @@ var<workgroup> cm12ExtensionInputMaskLow:u32;
 var<workgroup> cm12ExtensionInputMaskHigh:u32;
 var<workgroup> cm12ExtensionPacketComplete:u32;
 var<workgroup> cm12ExtensionDispatchPacket:u32;
+${options.compiledTopology
+    ? "var<workgroup> cm12ExtensionCompiledTopologyValid:u32;" : ""}
 
 fn cm12ExtensionLoad(at:u32)->u32{return atomicLoad(&${arena}[at]);}
 fn cm12ExtensionStore(at:u32,value:u32){atomicStore(&${arena}[at],value);}
@@ -318,6 +384,7 @@ fn advanceVelocityExtensionPackets(@builtin(workgroup_id)wid:vec3u,
   let packetFirst=cm12ExtensionBeginPacket(packet,lane);
   if(packetFirst==cm12ExtensionInvalid){
     cm12ExtensionPublishFrameReceipt(dispatchOrdinal,lane);return;}
+  ${compiledTopologyFence}
   let packetComplete=workgroupUniformLoad(&cm12ExtensionPacketComplete);
   if(packetComplete!=0u){
     if(lane==0u){let output=cm12ExtensionOutputMask(cm12ExtensionDepth());
@@ -348,31 +415,7 @@ fn advanceVelocityExtensionPackets(@builtin(workgroup_id)wid:vec3u,
           terms[ordinal]=w*vec4f(cm12EffectiveTransportVelocity(neighbor).xyz,1.0);
         }
       }else{
-        let incidences=cm12HotIncidenceRange(cell);
-        for(var local=0u;local<incidences.y;local+=1u){
-          let at=incidences.x+local;let row=incidenceRow(at);
-          if(row==cm12ExtensionInvalid||!cm12VelocityExtensionRowOpen(row)){continue;}
-          let range=rowTermRange(row);let termCount=range.y-range.x;
-          let ownTerm=incidenceTerm(at);let own=termCoefficient(ownTerm);
-          let side=2u*rowAxis(row)+select(0u,1u,own<0.0);
-          if(termCount==2u){
-            let ordinal=(ownTerm-range.x)^1u;
-            let neighbor=termCell(range.x+ordinal);
-            if(neighbor==cm12ExtensionInvalid){continue;}
-            if(cm12ExtensionLoad(cm12ExtensionAcceptedDepth+neighbor)
-              >=cm12ExtensionDepth()){continue;}
-            let w=cm12VelocityExtensionNeighborWeight(row,own,termCoefficient(range.x+ordinal));
-            terms[side]+=w*vec4f(cm12EffectiveTransportVelocity(neighbor).xyz,1.0);continue;
-          }
-          for(var ordinal=0u;ordinal<termCount;ordinal+=1u){
-            let neighbor=termCell(range.x+ordinal);
-            if(neighbor==cell||neighbor==cm12ExtensionInvalid){continue;}
-            if(cm12ExtensionLoad(cm12ExtensionAcceptedDepth+neighbor)
-              >=cm12ExtensionDepth()){continue;}
-            let w=cm12VelocityExtensionNeighborWeight(row,own,termCoefficient(range.x+ordinal));
-            terms[side]+=w*vec4f(cm12EffectiveTransportVelocity(neighbor).xyz,1.0);
-          }
-        }
+        ${connectivityTraversal}
       }
       let x=min(terms[0],terms[1])+max(terms[0],terms[1]);
       let y=min(terms[2],terms[3])+max(terms[2],terms[3]);
