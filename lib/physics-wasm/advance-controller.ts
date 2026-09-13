@@ -19,6 +19,14 @@ export interface AdvanceRefinementRegion {
   readonly maximumCellWidth?: number;
 }
 
+/** Explicit opt-in selector understood by the Rust 2-D world boundary. */
+export type AdvanceTransportExperiment = "baseline" | "cellwise-remap";
+export type AdvanceTransportExperimentOption = AdvanceTransportExperiment | {
+  readonly mode: "cellwise-remap";
+  readonly traceSegments: number;
+  readonly edgeSamples: 1 | 2 | 4;
+};
+
 /** Owns ordering and turns transferable Wasm snapshots into immutable UI views. */
 export class AdvanceLabController {
   private graph?: AdvanceGraph;
@@ -38,6 +46,7 @@ export class AdvanceLabController {
 
   async load(scene: AdvanceAuthoredScene, options: { pressureIterations: number;
     pressureRelativeTolerance?: number; tracerBudget?: number; topologyPageBudget?: number;
+    transportExperiment?: AdvanceTransportExperimentOption;
     production?: Readonly<Record<string, unknown>> }): Promise<AdvanceView> {
     await this.client.load(scene.document, options);
     this.authored = scene;

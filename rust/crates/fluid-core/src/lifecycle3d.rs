@@ -448,7 +448,7 @@ mod tests {
         let mut accepted = state(1, true, vec![0.25]);
         accepted.fields.subface_compatibility_rate =
             vec![0.125; accepted.topology.graph.subfaces.len()];
-            vec![f32::EPSILON; accepted.topology.graph.subfaces.len()];
+        vec![f32::EPSILON; accepted.topology.graph.subfaces.len()];
         let arena = LeafArena::new_3d(&accepted.topology, Some(0)).unwrap();
         let mut candidate = state(2, true, vec![0.0; 8]);
         candidate.topology.graph.topology_generation = 2;

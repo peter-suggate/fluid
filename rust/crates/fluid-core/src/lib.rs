@@ -1,6 +1,8 @@
+pub mod adaptive_remap;
 pub mod atlas;
-pub mod compatibility3d;
+pub mod band_projection;
 pub mod closed_air_pressure;
+pub mod compatibility3d;
 pub mod dynamic;
 pub mod dynamic3d;
 pub mod embedding;

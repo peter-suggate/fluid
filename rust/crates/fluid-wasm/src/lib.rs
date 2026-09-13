@@ -142,6 +142,7 @@ struct StageOptions {
     dt: f32,
     acceleration: [f32; 3],
     inflow_velocity: [f32; 3],
+    transport_experiment: fluid_core::world::TransportExperiment,
 }
 impl Default for StageOptions {
     fn default() -> Self {
@@ -152,6 +153,7 @@ impl Default for StageOptions {
             dt: 1.0 / 30.0,
             acceleration: [0.0; 3],
             inflow_velocity: [0.0; 3],
+            transport_experiment: fluid_core::world::TransportExperiment::Baseline,
         }
     }
 }
@@ -214,10 +216,51 @@ pub fn run_stage(
             .map_err(error)?;
             serde_json::Value::Null
         }
-        "transport" => serde_json::to_value(
-            fluid_core::transport_volume(&graph, &mut fields, options.dt).map_err(error)?,
-        )
-        .map_err(error)?,
+        "transport" => match options.transport_experiment.cellwise_mode() {
+            None => serde_json::to_value(
+                fluid_core::transport_volume(&graph, &mut fields, options.dt).map_err(error)?,
+            )
+            .map_err(error)?,
+            Some(fluid_core::world::CellwiseTransportMode::Probe) => {
+                let remap_options = fluid_core::adaptive_remap::CellwiseRemapOptions {
+                    closure: options.transport_experiment.closure(),
+                    commit_material: false,
+                    trace_segments: options.transport_experiment.trace_segments(),
+                    edge_samples: options.transport_experiment.edge_samples(),
+                    ..Default::default()
+                };
+                serde_json::to_value(
+                    fluid_core::adaptive_remap::transport_volume_cellwise_with_commit(
+                        &graph,
+                        &mut fields,
+                        options.dt,
+                        remap_options,
+                        |_, _| Ok(()),
+                    )
+                    .map_err(error)?,
+                )
+                .map_err(error)?
+            }
+            Some(fluid_core::world::CellwiseTransportMode::Remap) => {
+                let remap_options = fluid_core::adaptive_remap::CellwiseRemapOptions {
+                    closure: options.transport_experiment.closure(),
+                    trace_segments: options.transport_experiment.trace_segments(),
+                    edge_samples: options.transport_experiment.edge_samples(),
+                    ..Default::default()
+                };
+                serde_json::to_value(
+                    fluid_core::adaptive_remap::transport_volume_cellwise_with_commit(
+                        &graph,
+                        &mut fields,
+                        options.dt,
+                        remap_options,
+                        |_, _| Ok(()),
+                    )
+                    .map_err(error)?,
+                )
+                .map_err(error)?
+            }
+        },
         _ => return Err(error(format!("unknown numerical stage {stage}"))),
     };
     encode(&serde_json::json!({ "fields": fields, "receipt": receipt, "graph":graph }))

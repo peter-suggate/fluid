@@ -68,7 +68,8 @@ import {
   type AdvanceWorkScene,
 } from "./advance-work";
 import { AdvanceLabController, type AdvanceAuthoredScene,
-  type AdvanceRefinementRegion } from "../lib/physics-wasm/advance-controller";
+  type AdvanceRefinementRegion, type AdvanceTransportExperiment,
+} from "../lib/physics-wasm/advance-controller";
 import {
   ADVANCE_BRICK_FINE, ADVANCE_RUNGS, advanceCell, advanceCellAt, advanceCellPlane,
   advanceRowX, advanceRowY, type AdvanceCellView, type AdvancePlane,
@@ -97,7 +98,14 @@ const MENU_WIDTH = 244;
 const MENU_HEIGHT = 520;
 /** Which scene the page is reading, kept in the URL so a refresh returns to it. */
 const SCENE_PARAM = "scene";
+const TRANSPORT_PARAM = "transport";
 const DEFAULT_SCENE_ID = "water-box-dam-break";
+const DEFAULT_TRANSPORT_EXPERIMENT: AdvanceTransportExperiment = "cellwise-remap";
+const DEFAULT_PRESSURE_BUDGET = 28;
+const CELLWISE_PRESSURE_BUDGET = 256;
+const CELLWISE_REMAP_OPTION = Object.freeze({
+  mode: "cellwise-remap" as const, traceSegments: 1, edgeSamples: 1 as const,
+});
 /** Arms the drop, the same key the studio's BALL gesture answers to. */
 const DROP_KEY = "b";
 /** Arms the enforcement box. */
@@ -222,6 +230,21 @@ const SURFACE_VIEWS: readonly { readonly id: SurfaceView; readonly label: string
     note: "the volume-correct line the transport itself cuts" },
 ];
 
+interface NumericalFailure {
+  readonly stage: string;
+  readonly index: number;
+  readonly observed: number;
+  readonly expected: number;
+}
+
+interface CellwiseReading {
+  readonly traces: number;
+  readonly receivers: number;
+  readonly correctedFolds: number;
+  readonly closureResidual: number;
+  readonly areaBalanceError: number;
+}
+
 interface Readings {
   /** Mutable slice generation this reading and its derived surface describe. */
   readonly presentationRevision: string;
@@ -235,12 +258,13 @@ interface Readings {
   readonly rows: number;
   readonly bricks: number;
   readonly rungs: number;
-  readonly fault: string | null;
+  readonly fault: NumericalFailure | null;
   /** Drops taken this run, and what the last one did. */
   readonly injections: number;
   readonly drop: InjectionReceipt | null;
   /** The scene as the work model prices it, captured with the counts it prices. */
   readonly work: AdvanceWorkScene;
+  readonly cellwise: CellwiseReading | null;
 }
 
 const NO_SCENE: AdvanceWorkScene = {
@@ -250,13 +274,28 @@ const NO_SCENE: AdvanceWorkScene = {
 };
 const AT_REST: Readings = { frame: 0, microsteps: 1, maxVelocity: 0, drift: 0,
   churn: 0, markers: 0, cells: 0, rows: 0, bricks: 0, rungs: 0, fault: null,
-  presentationRevision: "unpublished", injections: 0, drop: null, work: NO_SCENE };
+  presentationRevision: "unpublished", injections: 0, drop: null, work: NO_SCENE,
+  cellwise: null };
 const read = (view: AdvanceView): Readings => {
   const receipt = view.receipt;
   const resolution = view.metadata.resolution as Record<string, unknown> | null | undefined;
   const churn = ["activatedBrickCount", "retiredBrickCount", "promotedBrickCount", "demotedBrickCount"]
     .reduce((sum, key) => sum + Number(resolution?.[key] ?? 0), 0);
-  const fault = receipt.fault as { stage?: string } | null | undefined;
+  const faultValue = receipt.fault as Partial<NumericalFailure> | null | undefined;
+  const fault = faultValue ? {
+    stage: String(faultValue.stage ?? "unknown"),
+    index: Number(faultValue.index ?? 0),
+    observed: Number(faultValue.observed ?? 0),
+    expected: Number(faultValue.expected ?? 0),
+  } : null;
+  const cellwiseValue = receipt.cellwiseRemap as Record<string, unknown> | null | undefined;
+  const cellwise = cellwiseValue ? {
+    traces: Number(cellwiseValue.traces ?? 0),
+    receivers: Number(cellwiseValue.receivers ?? 0),
+    correctedFolds: Number(cellwiseValue.correctedLiquidReceiverFolds ?? 0),
+    closureResidual: Number(cellwiseValue.closureMeasuredNormalizedResidual ?? 0),
+    areaBalanceError: Number(cellwiseValue.areaBalanceRelativeError ?? 0),
+  } : null;
   return {
   presentationRevision: advancePresentationRevision(view),
   frame: view.revision.frame, microsteps: Number(receipt.microsteps ?? 1),
@@ -266,10 +305,10 @@ const read = (view: AdvanceView): Readings => {
   bricks: view.graph.bricks.filter(brick => brick.active !== false).length,
   rungs: new Set(view.graph.bricks.filter(brick => brick.active !== false)
     .map(brick => brick.resolution)).size,
-  fault: fault?.stage ?? null,
+  fault,
   injections: view.revision.injections,
   drop: (receipt.lastInjection as InjectionReceipt | null | undefined) ?? null,
-  work: workScene(view),
+  work: workScene(view), cellwise,
   };
 };
 
@@ -335,6 +374,28 @@ function requestedSceneId(): string {
   return asked && SCENE_IDS.has(asked) ? asked : DEFAULT_SCENE_ID;
 }
 
+function defaultTransportExperiment(sceneId: string): AdvanceTransportExperiment {
+  void sceneId;
+  return DEFAULT_TRANSPORT_EXPERIMENT;
+}
+
+function defaultPressureBudget(sceneId: string,
+  transport: AdvanceTransportExperiment): number {
+  void sceneId;
+  return transport === "cellwise-remap" ? CELLWISE_PRESSURE_BUDGET : DEFAULT_PRESSURE_BUDGET;
+}
+
+function pressureTolerance(_transport: AdvanceTransportExperiment): number {
+  return 1e-6;
+}
+
+function requestedTransportExperiment(sceneId: string): AdvanceTransportExperiment {
+  if (typeof window === "undefined") return defaultTransportExperiment(sceneId);
+  const asked = new URLSearchParams(window.location.search).get(TRANSPORT_PARAM);
+  return asked === "cellwise-remap" || asked === "baseline"
+    ? asked : defaultTransportExperiment(sceneId);
+}
+
 /**
  * Mirror the reading into the address bar.
  *
@@ -342,11 +403,13 @@ function requestedSceneId(): string {
  * page is showing, not navigating, so Back should still leave the lab. The URL
  * exists so a refresh — or a link to a colleague — returns to the same water.
  */
-function publishSceneId(id: string): void {
+function publishRunSelection(id: string, transport: AdvanceTransportExperiment): void {
   if (typeof window === "undefined") return;
   const url = new URL(window.location.href);
   if (id === DEFAULT_SCENE_ID) url.searchParams.delete(SCENE_PARAM);
   else url.searchParams.set(SCENE_PARAM, id);
+  if (transport === defaultTransportExperiment(id)) url.searchParams.delete(TRANSPORT_PARAM);
+  else url.searchParams.set(TRANSPORT_PARAM, transport);
   window.history.replaceState(null, "", `${url.pathname}${url.search}`);
 }
 
@@ -453,10 +516,13 @@ export function AdvanceLab(): React.JSX.Element {
   const [overlays, setOverlays] = useState<ReadonlySet<SliceOverlayId>>(
     () => new Set<SliceOverlayId>());
   const [sceneId, setSceneId] = useState(DEFAULT_SCENE_ID);
+  const [transportExperiment, setTransportExperiment] =
+    useState<AdvanceTransportExperiment>(DEFAULT_TRANSPORT_EXPERIMENT);
   const [picking, setPicking] = useState(false);
   const [authored, setAuthored] = useState<AdvanceAuthoredScene | null>(null);
   const [regionState, setRegionState] = useState<readonly LabRegion[]>([]);
-  const [budget, setBudget] = useState(28);
+  const [budget, setBudget] = useState(DEFAULT_PRESSURE_BUDGET);
+  const pressureBudgetTouched = useRef(false);
   const [dt, setDt] = useState(CM12_PAPER_DT_S);
   /* Every scene opens still. A reader arrives at t=0 and starts it by hand;
    * water that is already moving has decided for them what to look at. */
@@ -526,12 +592,20 @@ export function AdvanceLab(): React.JSX.Element {
 
   useEffect(() => {
     const initialId = requestedSceneId();
+    const initialTransport = requestedTransportExperiment(initialId);
+    const initialBudget = defaultPressureBudget(initialId, initialTransport);
     let handle = 0, last = 0, cancelled = false;
     const publish = (next: AdvanceView): void => {
       if (cancelled) return;
       view.current = next;
       setPublishedView(next);
-      setReadings(read(next));
+      const nextReadings = read(next);
+      setReadings(nextReadings);
+      if (nextReadings.fault) {
+        live.current.playing = false;
+        setPlaying(false);
+        setFolds(current => new Set(current).add("failure"));
+      }
     };
     void AdvanceLabController.create().then(async nextController => {
       if (cancelled) { await nextController.destroy(); return; }
@@ -539,8 +613,13 @@ export function AdvanceLab(): React.JSX.Element {
       const scene = authoredScene(initialId);
       if (!scene) throw new Error(`Unknown Advance Lab scene ${initialId}`);
       setSceneId(initialId);
+      setTransportExperiment(initialTransport);
+      setBudget(initialBudget);
       setAuthored(scene);
-      const initialView = await nextController.load(scene, { pressureIterations: live.current.budget,
+      const initialView = await nextController.load(scene, { pressureIterations: initialBudget,
+        pressureRelativeTolerance: pressureTolerance(initialTransport),
+        transportExperiment: initialTransport === "cellwise-remap"
+          ? CELLWISE_REMAP_OPTION : "baseline",
         production: { dtS: live.current.dt, timeStep: "paper" } });
       setRegionState(authoredRegions(scene, initialView));
       publish(initialView);
@@ -641,7 +720,8 @@ export function AdvanceLab(): React.JSX.Element {
   }, [toggleOverlay]);
 
   /** Rebuild from the selected production document's deterministic t=0 state. */
-  const reseed = useCallback((id: string): void => {
+  const reseed = useCallback((id: string,
+    nextTransport: AdvanceTransportExperiment = transportExperiment): void => {
     const active = controller.current, scene = authoredScene(id);
     if (!active || !scene || !SCENE_IDS.has(id)) return;
     setSceneId(id);
@@ -651,6 +731,9 @@ export function AdvanceLab(): React.JSX.Element {
     setHover(null);
     setAim(null);
     setRuntimeFault(null);
+    const nextBudget = pressureBudgetTouched.current
+      ? live.current.budget : defaultPressureBudget(id, nextTransport);
+    setBudget(nextBudget);
     /* A new scene is a new beginning, and a beginning is still. */
     setPlaying(false);
     live.current.playing = false;
@@ -658,13 +741,16 @@ export function AdvanceLab(): React.JSX.Element {
     /* A new scene is a new cost: the old median priced a different lattice. */
     stepCosts.current = [];
     setStepMs(null);
-    publishSceneId(id);
-    void active.load(scene, { pressureIterations: live.current.budget,
+    publishRunSelection(id, nextTransport);
+    void active.load(scene, { pressureIterations: nextBudget,
+      pressureRelativeTolerance: pressureTolerance(nextTransport),
+      transportExperiment: nextTransport === "cellwise-remap"
+        ? CELLWISE_REMAP_OPTION : "baseline",
       production: { dtS: live.current.dt, timeStep: "paper" } }).then(next => {
       view.current = next; setPublishedView(next); setAuthored(scene);
       setRegionState(authoredRegions(scene, next)); setReadings(read(next));
     }).catch(error => setRuntimeFault(error instanceof Error ? error.message : String(error)));
-  }, []);
+  }, [transportExperiment]);
 
   /** Re-time the next advance. The water keeps its state; only the clock moves. */
   const retime = useCallback((next: number): void => {
@@ -686,6 +772,8 @@ export function AdvanceLab(): React.JSX.Element {
   const index = ADVANCE_STAGE_ORDER.indexOf(selected);
   const declaration = sparseCM12Stage(selected);
   const work = advanceStageWork(selected);
+  const readingCellwiseTransport = transportExperiment === "cellwise-remap"
+    && selected === "conservative-transport";
   const band = paletteVar(BAND_TONE[declaration.band]);
   const lens: Lens = representing ? REPRESENT_LENS : ADVANCE_LENSES[selected];
 
@@ -921,6 +1009,18 @@ export function AdvanceLab(): React.JSX.Element {
     setFolds(current => new Set(current).add("cell"));
   };
 
+  const failureRows: readonly (readonly [string, string, string])[] = readings.fault ? [
+    ["stage", readings.fault.stage, "the numerical gate that refused the frame"],
+    ["cell", String(readings.fault.index), "reported solver cell or receipt index"],
+    ["observed", readings.fault.observed.toExponential(4), "value at rejection"],
+    ["limit", readings.fault.expected.toExponential(4), "required bound"],
+    ...(readings.cellwise ? [
+      ["folds", String(readings.cellwise.correctedFolds), "corrected liquid receiver folds"] as const,
+      ["closure", readings.cellwise.closureResidual.toExponential(4), "measured normalized residual"] as const,
+      ["area", readings.cellwise.areaBalanceError.toExponential(4), "relative area-balance error"] as const,
+    ] : []),
+  ] : [];
+
   return <main className={styles.lab}>
     <header className={styles.bar}>
       {/* Three cells, not one row: the transport sits in the middle of the
@@ -945,7 +1045,10 @@ export function AdvanceLab(): React.JSX.Element {
             cards={sceneCatalogCards}
             currentId={sceneId}
             label="Choose the production scene this lab slices"
-            choose={card => { reseed(card.id); setPicking(false); }}
+            choose={card => {
+              reseed(card.id, transportExperiment);
+              setPicking(false);
+            }}
             close={() => setPicking(false)} />}
         </div>
 
@@ -956,9 +1059,10 @@ export function AdvanceLab(): React.JSX.Element {
       </div>
 
       <div className={styles.transport}>
-        <button type="button" aria-pressed={playing} onClick={() => setPlaying(v => !v)}>
+        <button type="button" aria-pressed={playing} disabled={Boolean(readings.fault)}
+          onClick={() => setPlaying(v => !v)}>
           {playing ? "Pause" : "Play"}</button>
-        <button type="button" onClick={() => {
+        <button type="button" disabled={Boolean(readings.fault)} onClick={() => {
           const active = controller.current;
           if (!active || advanceBusy.current) return;
           const began = performance.now();
@@ -968,7 +1072,13 @@ export function AdvanceLab(): React.JSX.Element {
             setPublishedView(next);
             noteStepCost(stepCosts.current, performance.now() - began, setStepMs);
             setRuntimeFault(null);
-            setReadings(read(next));
+            const nextReadings = read(next);
+            setReadings(nextReadings);
+            if (nextReadings.fault) {
+              live.current.playing = false;
+              setPlaying(false);
+              setFolds(current => new Set(current).add("failure"));
+            }
           }).catch(error => {
             setPlaying(false);
             live.current.playing = false;
@@ -979,6 +1089,19 @@ export function AdvanceLab(): React.JSX.Element {
       </div>
 
       <div className={`${styles.side} ${styles.trailing}`}>
+        <label className={`${styles.iters} ${styles.experiment}`} htmlFor="advance-transport">Transport
+          <select id="advance-transport" data-testid="advance-transport"
+            value={transportExperiment}
+            title="Select the volume transport used by the next run. Changing it resets the scene."
+            onChange={event => {
+              const next = event.target.value as AdvanceTransportExperiment;
+              setTransportExperiment(next);
+              reseed(sceneId, next);
+            }}>
+            <option value="baseline">Baseline</option>
+            <option value="cellwise-remap">Geometric remap</option>
+          </select>
+        </label>
         <label className={styles.iters} htmlFor="advance-step">Δt
         <select id="advance-step" value={String(dt)}
           title="Seconds of physics per advance. 1/30 s is CM12's paper regime; the lab holds every scene to it whatever its own document asks for."
@@ -1174,9 +1297,17 @@ export function AdvanceLab(): React.JSX.Element {
               the picture sits on top of the one thing the page is for. Only a
               slice with no liquid in it earns an overlay, because then there is
               no picture for it to cover. */}
-          {(emptySlice || tool) && <div className={`${styles.hud} ${styles.hudTop}`}>
+          {(emptySlice || tool || readings.fault) && <div className={`${styles.hud} ${styles.hudTop}`}>
             {emptySlice && <div className={styles.alarm}>
               This authored centre slice contains no initial liquid.</div>}
+            {readings.fault && <div className={`${styles.alarm} ${styles.rejected}`}>
+              {readings.fault.stage.startsWith("cellwise-remap")
+                ? "Geometric remap rejected" : "Solver rejected"} frame {readings.frame}
+              {" "}at <b>{readings.fault.stage}</b>: {readings.fault.observed.toPrecision(4)}
+              {" "}(limit {readings.fault.expected.toPrecision(4)}). Playback paused;
+              {readings.fault.stage.startsWith("cellwise-remap")
+                ? " no baseline fallback ran." : " reset before continuing."}
+            </div>}
             {/* Both tools are modes and neither has a button: without a
                 pressed control somewhere a reader has only the shape under the
                 pointer to tell them what the next press will do, and that
@@ -1199,6 +1330,14 @@ export function AdvanceLab(): React.JSX.Element {
               <span className={styles.read}>max |u| <b>{readings.maxVelocity.toFixed(2)}</b></span>
               <span className={styles.read}>volume drift <b>{(readings.drift * 100).toFixed(3)}%</b></span>
               <span className={styles.read}>bricks re-rung <b>{readings.churn} / {readings.bricks}</b></span>
+              <span className={styles.read}>transport <b>{transportExperiment === "cellwise-remap"
+                ? "geometric remap" : "baseline"}</b></span>
+              {readings.cellwise && <span className={styles.read} title={`Closure residual ${readings.cellwise.closureResidual.toExponential(2)} · area balance ${readings.cellwise.areaBalanceError.toExponential(2)}`}>
+                remap work <b>{readings.cellwise.traces} traces · {readings.cellwise.receivers} receivers</b>
+              </span>}
+              {readings.cellwise && readings.cellwise.correctedFolds > 0 &&
+                <span className={`${styles.read} ${styles.faulted}`}>
+                  folded receivers <b>{readings.cellwise.correctedFolds}</b></span>}
               {/* Which line the picture is drawing, and — since the choice is
                   now a right-click rather than a widget — where to change it.
                   The one readout that takes the pointer, so it can say so. */}
@@ -1212,7 +1351,7 @@ export function AdvanceLab(): React.JSX.Element {
               {readings.injections > 0 && <span className={styles.read}>
                 drops added <b>{readings.injections}</b></span>}
               {readings.fault && <span className={`${styles.read} ${styles.faulted}`}>
-                fault <b>{readings.fault}</b></span>}
+                fault <b>{readings.fault.stage}</b></span>}
               {runtimeFault && <span className={`${styles.read} ${styles.faulted}`}>
                 exception <b>{runtimeFault}</b></span>}
             </div>
@@ -1400,14 +1539,16 @@ export function AdvanceLab(): React.JSX.Element {
               <label className={styles.menuLabel} htmlFor="advance-budget">
                 Solve iterations<b>{budget}</b></label>
               <input id="advance-budget" className={styles.menuRange} type="range"
-                min={4} max={80} step={4} value={budget}
+                min={4} max={256} step={4} value={budget}
                 title="Pressure iterations one advance may spend. Too few and the divergence the picture shows is the solver giving up, not the water."
                 onChange={event => {
                   const iterations = Number(event.target.value);
+                  pressureBudgetTouched.current = true;
                   setBudget(iterations);
                   const active = controller.current;
                   if (!active) return;
-                  void active.setPressureBudget(iterations).then(next => {
+                  void active.setPressureBudget(iterations,
+                    pressureTolerance(transportExperiment)).then(next => {
                     view.current = next; setPublishedView(next); setReadings(read(next)); setRuntimeFault(null);
                   }).catch(error => setRuntimeFault(error instanceof Error ? error.message : String(error)));
                 }} />
@@ -1489,12 +1630,27 @@ export function AdvanceLab(): React.JSX.Element {
               <span>{seams.length ? `${seams.length} sub-seams` : "single interval"}</span>
             </span>
             <h2>{declaration.label}</h2>
-            <span className={styles.stageChip}>{stageChip(selected)}</span>
+            <span className={styles.stageChip}>{readingCellwiseTransport
+              ? readings.cellwise
+                ? `whole frame · ${readings.cellwise.traces} shared traces · ${readings.cellwise.receivers} receivers`
+                : "whole-frame cellwise remap · awaiting first receipt"
+              : stageChip(selected)}</span>
           </div>
           <p className={styles.lensNote}>
-            <i style={{ background: band }} />{lens.caption}</p>
-          <p className={styles.summary}>{declaration.tip.summary}</p>
-          <div className={styles.figures}>
+            <i style={{ background: band }} />{readingCellwiseTransport
+              ? "The accepted volume after one conservative gather over shared, backward-traced cell geometry."
+              : lens.caption}</p>
+          <p className={styles.summary}>{readingCellwiseTransport
+            ? "One full sparse adaptive advance: pressure projection, natural 2:1 topology changes, receiver-band continuity closure, shared-chain correction, then one material gather and commit. It does not run baseline transport substeps."
+            : declaration.tip.summary}</p>
+          {readingCellwiseTransport ? <div className={styles.figures}>
+            <div className={styles.figure}><b>{readings.cellwise ? n(readings.cellwise.traces) : "—"}</b><span>shared traces</span></div>
+            <div className={styles.figure}><b>{readings.cellwise ? n(readings.cellwise.receivers) : "—"}</b><span>receivers</span></div>
+            <div className={styles.figure}><b>{readings.cellwise
+              ? readings.cellwise.closureResidual.toExponential(2) : "—"}</b><span>closure residual</span></div>
+            <div className={styles.figure}><b>{readings.cellwise
+              ? readings.cellwise.areaBalanceError.toExponential(2) : "—"}</b><span>area balance</span></div>
+          </div> : <div className={styles.figures}>
             <div className={styles.figure}><b>{n(cost.workgroups)}</b><span>workgroups executed</span></div>
             <div className={styles.figure}><b>{n(cost.dispatches)}</b><span>dispatches encoded</span></div>
             <div className={styles.figure}><b>{share.toFixed(1)}%</b><span>of the advance</span></div>
@@ -1504,7 +1660,7 @@ export function AdvanceLab(): React.JSX.Element {
               <span>{work.loop === "pressure" ? "solver iterations"
                 : work.loop === "transport" ? "packets encoded" : "not a loop"}</span>
             </div>
-          </div>
+          </div>}
         </>}
 
         {/* Said only while it is on: a caption for a reading nobody asked for is
@@ -1515,6 +1671,18 @@ export function AdvanceLab(): React.JSX.Element {
             {SLICE_OVERLAYS[id].caption}</p>)}
 
         <div className={styles.folds}>
+          {readings.fault && <Fold id="failure" title="Rejected frame"
+            meta={readings.fault.stage} flag
+            open={folds.has("failure")} toggle={toggleFold}>
+            <div className={styles.props}>
+              {failureRows.map(([symbol, value, note]) =>
+                <div className={styles.prop} key={symbol}>
+                  <b>{symbol}<em>{value}</em></b><span>{note}</span></div>)}</div>
+            <p className={styles.fidelity}>Playback stopped on this receipt. Reset or choose
+              another transport to start a new run{readings.fault.stage.startsWith("cellwise-remap")
+                ? "; the solver did not continue through a baseline fallback." : "."}</p>
+          </Fold>}
+
           {pinned && <Fold id="cell" title="Pinned cell"
             meta={`brick ${pinned.cell.brick}`}
             open={folds.has("cell")} toggle={toggleFold}>

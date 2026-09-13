@@ -189,6 +189,10 @@ pub struct ResolutionPolicyState {
 #[serde(default)]
 pub struct ResolutionPolicyOptions {
     pub policy: ActivityPolicy,
+    /// Size coarse-first geometric cells from resolved velocity variation.
+    /// Absolute translation still drives swept support and page activation.
+    #[serde(skip)]
+    pub translation_invariant_motion_sizing: bool,
     pub refinement_regions: Vec<ResolutionRegion>,
     pub static_boundary_floor_by_brick: BTreeMap<u32, u8>,
     pub moving_rigid_bodies: bool,
@@ -204,6 +208,7 @@ impl Default for ResolutionPolicyOptions {
     fn default() -> Self {
         Self {
             policy: ActivityPolicy::default(),
+            translation_invariant_motion_sizing: false,
             refinement_regions: vec![],
             static_boundary_floor_by_brick: BTreeMap::new(),
             moving_rigid_bodies: false,
@@ -433,6 +438,7 @@ fn measure(
     topology_epoch: bool,
     dt: f64,
     ts: [f32; 4],
+    translation_invariant_motion_sizing: bool,
 ) -> Measurement {
     let brick = &topology.bricks[bi];
     if !brick.seed.active {
@@ -463,6 +469,8 @@ fn measure(
     let mut predicted = 0.0_f32;
     let mut detail = 0.0_f32;
     let mut travel = 0.0_f32;
+    let mut relative_travel = 0.0_f32;
+    let mut motion_samples = Vec::new();
     let mut axes = 0_u8;
     let mut occupied_cell = false;
     let mut substantial = false;
@@ -572,6 +580,11 @@ fn measure(
                         .max((vy as f64 - nvy as f64).abs());
                     deformation =
                         deformation.max(f(dt * dv / (0.15 * row.distance as f64).max(1e-12)));
+                    if translation_invariant_motion_sizing {
+                        relative_travel = relative_travel.max(f(
+                            dt * (vx as f64 - nvx as f64).hypot(vy as f64 - nvy as f64),
+                        ));
+                    }
                 }
             }
             if row.kind == RowKind::SparseAir && others.is_empty() && wet {
@@ -606,23 +619,53 @@ fn measure(
                 }
             }
         }
-        if (interface_cell && wet) || cell_thin || (policy.coarse_first && wet) {
+        // Uniform translation of submerged liquid does not create material
+        // detail.  Use velocity as a resolution floor only where a represented
+        // interface (or a thin feature) is moving; swept-support planning below
+        // still follows every nonzero donor into its receiver pages.  Including
+        // every wet cell here makes a falling, otherwise rigid liquid body
+        // refine its entire interior solely because its absolute speed grows.
+        if (interface_cell && wet)
+            || cell_thin
+            || (policy.coarse_first && wet && !translation_invariant_motion_sizing)
+        {
             travel = travel.max(f(dt * (vx as f64).hypot(vy as f64)));
+            if translation_invariant_motion_sizing {
+                motion_samples.push([vx, vy]);
+            }
         }
         if interface_cell || cell_thin || rho != 0.0 {
             let (blo, bhi) = bounds(&brick.seed);
             let cx = cell.center[0] as f64;
             let cy = cell.center[1] as f64;
-            let dxs: &[i32] = if cx - 0.5 * cell.widths[0] as f64 <= blo[0] as f64 {
+            let touches_low_x = cx - 0.5 * cell.widths[0] as f64 <= blo[0] as f64;
+            let touches_high_x = cx + 0.5 * cell.widths[0] as f64 >= bhi[0] as f64;
+            let dxs: &[i32] = if translation_invariant_motion_sizing {
+                match (touches_low_x, touches_high_x) {
+                    (true, true) => &[-1, 0, 1],
+                    (true, false) => &[-1, 0],
+                    (false, true) => &[0, 1],
+                    (false, false) => &[0],
+                }
+            } else if touches_low_x {
                 &[-1, 0]
-            } else if cx + 0.5 * cell.widths[0] as f64 >= bhi[0] as f64 {
+            } else if touches_high_x {
                 &[0, 1]
             } else {
                 &[0]
             };
-            let dys: &[i32] = if cy - 0.5 * cell.widths[1] as f64 <= blo[1] as f64 {
+            let touches_low_y = cy - 0.5 * cell.widths[1] as f64 <= blo[1] as f64;
+            let touches_high_y = cy + 0.5 * cell.widths[1] as f64 >= bhi[1] as f64;
+            let dys: &[i32] = if translation_invariant_motion_sizing {
+                match (touches_low_y, touches_high_y) {
+                    (true, true) => &[-1, 0, 1],
+                    (true, false) => &[-1, 0],
+                    (false, true) => &[0, 1],
+                    (false, false) => &[0],
+                }
+            } else if touches_low_y {
                 &[-1, 0]
-            } else if cy + 0.5 * cell.widths[1] as f64 >= bhi[1] as f64 {
+            } else if touches_high_y {
                 &[0, 1]
             } else {
                 &[0]
@@ -698,6 +741,23 @@ fn measure(
     ];
     let mass_fine =
         f(density_sum / ACTIVITY_FIXED * cells.first().map_or(0.0, |c| c.measure as f64));
+    let mean_velocity = if momentum_mass > 1e-8 {
+        [
+            f(momentum[0] as f64 / momentum_mass as f64),
+            f(momentum[1] as f64 / momentum_mass as f64),
+        ]
+    } else {
+        [0.0; 2]
+    };
+    if policy.coarse_first && translation_invariant_motion_sizing {
+        travel = relative_travel;
+        for velocity in motion_samples {
+            travel = travel.max(f(
+                dt * (velocity[0] as f64 - mean_velocity[0] as f64)
+                    .hypot(velocity[1] as f64 - mean_velocity[1] as f64),
+            ));
+        }
+    }
     let represented = substantial || thin;
     let occupied =
         occupied_cell && represented && mass_fine as f64 >= policy.residency_mass_fine_cells;
@@ -849,14 +909,6 @@ fn measure(
                         >= 0.5
                 })
         });
-    let mean_velocity = if momentum_mass > 1e-8 {
-        [
-            f(momentum[0] as f64 / momentum_mass as f64),
-            f(momentum[1] as f64 / momentum_mass as f64),
-        ]
-    } else {
-        [0.0; 2]
-    };
     Measurement {
         history: BrickActivityHistory {
             score_byte,
@@ -885,12 +937,18 @@ fn measure(
 fn directional_demand(
     bricks: &[BrickSeed],
     measurements: &BTreeMap<u32, Measurement>,
+    include_interface_support: bool,
 ) -> BTreeSet<u32> {
     let mut demanded = BTreeSet::new();
     for source in bricks.iter().filter(|b| b.active) {
-        let mask = measurements
-            .get(&source.key)
-            .map_or(0, |m| m.history.swept_support_mask);
+        let mask = measurements.get(&source.key).map_or(0, |m| {
+            m.history.swept_support_mask
+                | if include_interface_support {
+                    m.history.support_mask
+                } else {
+                    0
+                }
+        });
         for bit in 0..9_i32 {
             if bit == 4 || mask & (1 << bit) == 0 {
                 continue;
@@ -1119,6 +1177,7 @@ pub fn plan_projected_transport_support(
     maximum_leaves: Option<usize>,
     maximum_cells: Option<usize>,
     free_leaf_ids: &[u32],
+    include_interface_support: bool,
 ) -> Result<ProjectedTransportSupportDecision, ResolutionError> {
     validate_inputs(topology, fields, dt, cell_size)?;
     let ts = thresholds(policy, dt, cell_size);
@@ -1126,7 +1185,17 @@ pub fn plan_projected_transport_support(
     for i in 0..topology.bricks.len() {
         measurements.insert(
             topology.bricks[i].seed.key,
-            measure(topology, fields, i, None, policy, false, dt, ts),
+            measure(
+                topology,
+                fields,
+                i,
+                None,
+                policy,
+                false,
+                dt,
+                ts,
+                include_interface_support,
+            ),
         );
     }
     let accepted: Vec<_> = topology.bricks.iter().map(|r| r.seed.clone()).collect();
@@ -1145,7 +1214,13 @@ pub fn plan_projected_transport_support(
     let mut sources = accepted.clone();
     sources.sort_by_key(|b| b.key);
     for source in sources.iter().filter(|b| b.active) {
-        let mask = measurements[&source.key].history.swept_support_mask;
+        let history = &measurements[&source.key].history;
+        let mask = history.swept_support_mask
+            | if include_interface_support {
+                history.support_mask
+            } else {
+                0
+            };
         for bit in 0..9_i32 {
             if bit == 4 || mask & (1 << bit) == 0 {
                 continue;
@@ -1281,10 +1356,15 @@ pub fn plan_resolution(
                 topology_epoch,
                 dt,
                 ts,
+                options.translation_invariant_motion_sizing,
             ),
         );
     }
-    let mut material_demand = directional_demand(&accepted, &measurements);
+    let mut material_demand = directional_demand(
+        &accepted,
+        &measurements,
+        options.translation_invariant_motion_sizing,
+    );
     material_demand.extend(options.injection_demanded_brick_keys.iter().copied());
     let free_set = validate_free(&accepted, &options.free_leaf_ids)?;
     let mut working: Vec<_> = accepted
@@ -1302,7 +1382,13 @@ pub fn plan_resolution(
         let mut sources = accepted.clone();
         sources.sort_by_key(|b| b.key);
         for source in sources.iter().filter(|b| b.active) {
-            let mask = measurements[&source.key].history.swept_support_mask;
+            let history = &measurements[&source.key].history;
+            let mask = history.swept_support_mask
+                | if options.translation_invariant_motion_sizing {
+                    history.support_mask
+                } else {
+                    0
+                };
             for bit in 0..9_i32 {
                 if bit == 4 || mask & (1 << bit) == 0 {
                     continue;
@@ -1982,6 +2068,7 @@ mod tests {
             Some(4),
             Some(256),
             &[],
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -1992,6 +2079,46 @@ mod tests {
             vec![(0, 8, true), (1, 4, true), (3, 1, true)]
         );
         assert_eq!(d.demanded_brick_keys, BTreeSet::from([1]));
+    }
+
+    #[test]
+    fn projected_support_keeps_a_coarse_interface_halo_against_inward_mean_flow() {
+        let (topology, mut fields) = setup(vec![brick(0, [0, 0], 1, true)], [8, 16]);
+        fields.density[0] = 0.99;
+        fields.cell_velocity[1] = -2.0;
+        let mut geometric = options();
+        geometric.translation_invariant_motion_sizing = true;
+        let planned = plan_resolution(
+            &topology,
+            &fields,
+            &initialize_resolution_policy(&topology),
+            1.0 / 30.0,
+            0.05,
+            &geometric,
+        )
+        .unwrap();
+        let source = planned
+            .receipt
+            .bricks
+            .iter()
+            .find(|brick| brick.brick_key == 0)
+            .unwrap();
+        assert_eq!(source.support_mask & 0x1ef, 0x1ef);
+        let d = plan_projected_transport_support(
+            &topology,
+            &fields,
+            1.0 / 30.0,
+            0.05,
+            &ActivityPolicy::default(),
+            Some(4),
+            Some(256),
+            &[],
+            true,
+        )
+        .unwrap();
+        assert!(d.candidate_bricks.iter().any(|brick| {
+            brick.active && brick.coordinate[..2] == [0, 1] && brick.resolution == 1
+        }), "{:?}", d.candidate_bricks);
     }
 
     #[test]
@@ -2133,10 +2260,12 @@ mod tests {
             d.receipt
                 .bricks
                 .iter()
+                .filter(|r| r.brick_key <= 1)
                 .map(|r| r.scheduled_resolution)
                 .collect::<Vec<_>>(),
             vec![1, 1]
         );
+        assert_eq!(d.receipt.allocated_brick_count, 0);
         assert_eq!(d.receipt.fault_bits, 0);
     }
 
@@ -2157,5 +2286,156 @@ mod tests {
         let d = plan_resolution(&topology, &fields, &state, 1.0 / 60.0, 0.05, &options()).unwrap();
         assert_eq!(d.receipt.bricks[0].scheduled_resolution, 4);
         assert_eq!(d.receipt.bricks[0].plan_reasons, 16);
+    }
+
+    #[test]
+    fn deep_liquid_topology_is_invariant_to_uniform_translation() {
+        let mut bricks = Vec::new();
+        for y in 0..3 {
+            for x in 0..3 {
+                bricks.push(brick((x + 3 * y) as u32, [x, y], 8, true));
+            }
+        }
+        let (topology, mut fields) = setup(bricks, [24, 24]);
+        // Conservative transfers can leave nominally full cells a few ulps
+        // below one.  They remain bulk because occupancy is classified against
+        // capacity and neighbouring liquid, independently of stored normals.
+        fields.density.fill(1.0 - 4.0 * f32::EPSILON);
+        fields.interface_normal.fill(1.0);
+        let stationary = fields.clone();
+        for velocity in fields.cell_velocity.chunks_exact_mut(2) {
+            // Cell velocities use finest-cell coordinates: 200 cells/s is
+            // 10 m/s for this 5 cm grid, representative of fast free fall.
+            velocity.copy_from_slice(&[0.0, -200.0]);
+        }
+        let mut state = initialize_resolution_policy(&topology);
+        state.history.get_mut(&4).unwrap().proof_epochs = 1;
+        let plan = |sample: &Fields| {
+            let mut geometric = options();
+            geometric.translation_invariant_motion_sizing = true;
+            plan_resolution(&topology, sample, &state, 1.0 / 30.0, 0.05, &geometric).unwrap()
+        };
+        let still = plan(&stationary);
+        let falling = plan(&fields);
+        let centre = |decision: &ResolutionPolicyDecision| {
+            decision
+                .receipt
+                .bricks
+                .iter()
+                .find(|record| record.brick_key == 4)
+                .cloned()
+                .unwrap()
+        };
+        let still = centre(&still);
+        let falling = centre(&falling);
+        assert_eq!(falling.requested_resolution, still.requested_resolution);
+        assert_eq!(falling.scheduled_resolution, still.scheduled_resolution);
+        assert_eq!(falling.score_byte, still.score_byte);
+        assert_eq!(falling.reasons, still.reasons);
+        assert_eq!(falling.plan_reasons, still.plan_reasons);
+        assert_eq!(falling.reasons & activity_reason::SURFACE, 0);
+        assert_eq!(falling.reasons & activity_reason::VELOCITY_FLOOR, 0);
+        // The neighbours remain B8 surface bricks, so 2:1 closure raises the
+        // bulk request to B4.  Uniform translation must not raise it further.
+        assert_eq!(falling.scheduled_resolution, 4);
+        assert_eq!(falling.plan_reasons, 16);
+    }
+
+    #[test]
+    fn geometric_surface_sizing_uses_velocity_variation_while_baseline_keeps_speed_floor() {
+        let (topology, mut moving) = setup(vec![brick(0, [0, 0], 4, true)], [8, 8]);
+        for cell in &topology.graph.cells {
+            if cell.center[0] < 4.0 {
+                let id = cell.id as usize;
+                moving.density[id] = 1.0;
+                moving.cell_velocity[2 * id + 1] = -200.0;
+                moving.interface_normal[2 * id] = 1.0;
+            }
+        }
+        let still = {
+            let mut fields = moving.clone();
+            fields.cell_velocity.fill(0.0);
+            fields
+        };
+        let mut state = initialize_resolution_policy(&topology);
+        let history = state.history.get_mut(&0).unwrap();
+        history.proof_epochs = 1;
+        history.surface_proof = Some(SurfaceProofState {
+            generation_by_target_resolution: BTreeMap::from([(2, 1)]),
+        });
+        let mut geometric = options();
+        geometric.translation_invariant_motion_sizing = true;
+        let plan = |fields: &Fields, options: &ResolutionPolicyOptions| {
+            plan_resolution(&topology, fields, &state, 1.0 / 30.0, 0.05, options)
+                .unwrap()
+                .receipt
+                .bricks[0]
+                .clone()
+        };
+        let stationary = plan(&still, &geometric);
+        let translated = plan(&moving, &geometric);
+        assert_eq!(translated.requested_resolution, stationary.requested_resolution);
+        assert_eq!(translated.scheduled_resolution, stationary.scheduled_resolution);
+        assert_eq!(translated.reasons & activity_reason::VELOCITY_FLOOR, 0);
+
+        let baseline = plan(&moving, &options());
+        assert_eq!(baseline.requested_resolution, 8);
+        assert_ne!(baseline.reasons & activity_reason::VELOCITY_FLOOR, 0);
+
+        let mut sheared = moving.clone();
+        for cell in &topology.graph.cells {
+            if cell.center[0] < 4.0 {
+                let id = cell.id as usize;
+                sheared.cell_velocity[2 * id + 1] = if cell.center[1] < 4.0 {
+                    -200.0
+                } else {
+                    200.0
+                };
+            }
+        }
+        let impact = plan(&sheared, &geometric);
+        assert_eq!(impact.requested_resolution, 8);
+        assert_ne!(impact.reasons & activity_reason::VELOCITY_FLOOR, 0);
+    }
+
+    #[test]
+    fn geometric_translation_still_activates_swept_receiver_pages() {
+        let (topology, mut fields) = setup(
+            vec![brick(0, [0, 1], 4, true), brick(1, [0, 0], 4, false)],
+            [8, 16],
+        );
+        for cell in &topology.graph.cells {
+            if cell.brick_key == Some(0) {
+                let id = cell.id as usize;
+                fields.density[id] = 1.0;
+                fields.cell_velocity[2 * id + 1] = -200.0;
+            }
+        }
+        let mut geometric = options();
+        geometric.translation_invariant_motion_sizing = true;
+        let decision = plan_resolution(
+            &topology,
+            &fields,
+            &initialize_resolution_policy(&topology),
+            1.0 / 30.0,
+            0.05,
+            &geometric,
+        )
+        .unwrap();
+        let donor = decision
+            .receipt
+            .bricks
+            .iter()
+            .find(|record| record.brick_key == 0)
+            .unwrap();
+        let receiver = decision
+            .receipt
+            .bricks
+            .iter()
+            .find(|record| record.brick_key == 1)
+            .unwrap();
+        assert_eq!(donor.reasons & activity_reason::VELOCITY_FLOOR, 0);
+        assert_ne!(donor.swept_support_mask, 0);
+        assert!(receiver.candidate_active);
     }
 }

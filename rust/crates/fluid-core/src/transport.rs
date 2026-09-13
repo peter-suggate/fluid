@@ -3,9 +3,9 @@
 use crate::kernels::{add, div, mul};
 use crate::numerics::{plic_box_fraction_rect, reconstruct_interfaces};
 use crate::types::{Fields, Graph, NumericalFault, SubfaceIncidence, ValidationError};
-use serde::{Deserialize, Serialize};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 
 const VOLUME_ROUNDOFF_RATIO: f32 = 9.536_743e-7;
 
@@ -760,15 +760,7 @@ fn allocate_closing(
         }
         let (mut component_budget, mut total, mut any) = (0.0, 0.0, false);
         for &m in &members {
-            let residual = other_amount(
-                incidences,
-                fields,
-                volumes,
-                &fields.low_flux,
-                m,
-                -1,
-                dt,
-            );
+            let residual = other_amount(incidences, fields, volumes, &fields.low_flux, m, -1, dt);
             let tolerance = roundoff(capacity_at(graph, fields, m, 0, denominator));
             if residual.abs() > tolerance {
                 fault(fields, "transport-closing", m, residual, tolerance);
@@ -1070,18 +1062,16 @@ pub fn transport_volume_with_commit(
         ) {
             return Ok((steps, receipts));
         }
-        let Some(parents) =
-            allocate_closing(
-                graph,
-                &incidences,
-                fields,
-                &volumes,
-                &sweeps,
-                dtm,
-                step + 1,
-                steps,
-            )
-        else {
+        let Some(parents) = allocate_closing(
+            graph,
+            &incidences,
+            fields,
+            &volumes,
+            &sweeps,
+            dtm,
+            step + 1,
+            steps,
+        ) else {
             return Ok((steps, receipts));
         };
         let mut low_volume = vec![0.0; n];

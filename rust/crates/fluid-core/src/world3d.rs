@@ -24,7 +24,7 @@ use crate::scene_model::{Quaternion, RigidBodyDescription, Vec3};
 use crate::sources::SourceLedger;
 use crate::topology::BrickSeed;
 use crate::tracers::{TracerReceipt, Tracers};
-use crate::world::{Revision, WorldOptions};
+use crate::world::{Revision, TransportExperiment, WorldOptions};
 use crate::*;
 use serde::{Deserialize, Serialize};
 
@@ -138,6 +138,11 @@ impl World3d {
     ) -> Result<Self, ValidationError> {
         if options.run_epoch == 0 {
             return Err(ValidationError("runEpoch must be positive".into()));
+        }
+        if options.transport_experiment != TransportExperiment::Baseline {
+            return Err(ValidationError(
+                "cellwise transport experiment is available only in 2D".into(),
+            ));
         }
         validate_pressure(
             options.pressure_iterations,

@@ -15,6 +15,7 @@ import {
 import { studioStageCamera } from "./studio-stage-scene";
 import { createAnalyticMotionScene, createRerungFreeFallScene, createStandingWaveScene } from "./analytic-motion-scenes";
 import { createGeometricUniformTranslationScene } from "./geometric-translation-scene";
+import { createGentleMovingBlobScene } from "./gentle-moving-blob-scene";
 import { createStationaryBowlScene } from "./stationary-bowl-scene";
 import { withHeroLayout } from "./voxel-scenery/hero-layout";
 import { terrainHeightAt, type TerrainDescription, type TerrainGrid } from "./terrain";
@@ -2046,6 +2047,17 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
       return scene;
     },
     camera: studioStageCamera,
+  }),
+  defineScene({
+    id: "gentle-moving-blob",
+    name: "Gentle moving blob",
+    blurb: "A small curved body starts with a gentle sideways velocity and then evolves through the full sparse adaptive geometric pipeline. Zero forcing and no sources or moving solids keep the first remap run easy to read.",
+    audience: "validation",
+    shelf: "Transport lab",
+    environment: "stage",
+    methodProfile: SPARSE_CM12_COMPLEXITY_LADDER_METHOD_PROFILE,
+    build: createGentleMovingBlobScene,
+    camera: { distance_m: 2.5, target_m: { x: -0.05, y: 0.6, z: 0 } },
   }),
   defineScene({
     id: "water-box-tank-fill",

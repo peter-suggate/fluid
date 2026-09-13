@@ -20,9 +20,32 @@ const frames = Number(argument("frames", "20"));
 const warmup = Number(argument("warmup", "5"));
 const dimension = Number(argument("dimension", "2"));
 const dt = Number(argument("dt", String(1 / 30)));
+const transportExperiment = argument("transport-experiment", "baseline");
+const traceSegments = Number(argument("trace-segments", "1"));
+const edgeSamples = Number(argument("edge-samples", "1"));
+const cellwiseClosure = argument("cellwise-closure", "band-projection");
 assert.ok(Number.isSafeInteger(frames) && frames > 0 && Number.isSafeInteger(warmup) && warmup >= 0);
 assert.ok(dimension === 2 || dimension === 3, "--dimension must be 2 or 3");
 assert.ok(Number.isFinite(dt) && dt > 0, "--dt must be positive and finite");
+assert.ok(["baseline", "cellwise-probe", "cellwise-remap"].includes(transportExperiment),
+  "--transport-experiment must be baseline, cellwise-probe, or cellwise-remap");
+assert.ok(dimension === 2 || transportExperiment === "baseline",
+  "cellwise transport experiments are available only in 2D");
+assert.ok(Number.isSafeInteger(traceSegments) && traceSegments >= 1 && traceSegments <= 128,
+  "--trace-segments must be an integer in 1..=128");
+assert.ok(transportExperiment !== "baseline" || traceSegments === 1,
+  "--trace-segments applies only to a cellwise transport experiment");
+assert.ok([1, 2, 4].includes(edgeSamples), "--edge-samples must be 1, 2, or 4");
+assert.ok(transportExperiment !== "baseline" || edgeSamples === 1,
+  "--edge-samples applies only to a cellwise transport experiment");
+assert.ok(["none", "local", "band-projection"].includes(cellwiseClosure),
+  "--cellwise-closure must be none, local, or band-projection");
+assert.ok(transportExperiment !== "baseline" || cellwiseClosure === "band-projection",
+  "--cellwise-closure applies only to a cellwise transport experiment");
+const transportExperimentOption = traceSegments === 1 && edgeSamples === 1 &&
+    cellwiseClosure === "band-projection"
+  ? transportExperiment
+  : { mode: transportExperiment, traceSegments, edgeSamples, closure: cellwiseClosure };
 const methodValues = Object.freeze({
   timeStep: "paper",
   pressureIterations: 28,
@@ -83,7 +106,7 @@ async function lane(name: string) {
     const start = performance.now();
     const world = wasm.FluidWorld.from_scene(JSON.stringify(sceneDocument(definition)),
       JSON.stringify({ dimension, pressureIterations: 28, pressureRelativeTolerance: 1e-5,
-        tracerBudget: 1000, methodValues,
+        tracerBudget: 1000, transportExperiment: transportExperimentOption, methodValues,
         production: { dtS: dt, timeStep: "paper" } }));
     const initializationMs = performance.now() - start;
     try {
@@ -112,7 +135,8 @@ async function lane(name: string) {
         finalReceipt, finalPlanes });
     } finally { world.free(); }
   }
-  return { lane: name, workers, dimension, dt, methodValues,
+  return { lane: name, workers, dimension, dt, transportExperiment, traceSegments, edgeSamples,
+    cellwiseClosure, methodValues,
     sourceSha256: buildInfo.sourceSha256,
     artifactSha256: buildInfo.wasmSha256, cases };
 }
@@ -125,7 +149,9 @@ if (selected) {
   const results = lanes.map(name => JSON.parse(execFileSync(process.execPath,
     ["--import", "tsx", process.argv[1], `--lane=${name}`, `--frames=${frames}`,
       `--warmup=${warmup}`, `--scenes=${scenes.join(",")}`,
-      `--dimension=${dimension}`, `--dt=${dt}`],
+      `--dimension=${dimension}`, `--dt=${dt}`,
+      `--transport-experiment=${transportExperiment}`, `--trace-segments=${traceSegments}`,
+      `--edge-samples=${edgeSamples}`, `--cellwise-closure=${cellwiseClosure}`],
     { cwd: root, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 })) as Awaited<ReturnType<typeof lane>>);
   for (const result of results.slice(1)) {
     assert.equal(result.sourceSha256, results[0].sourceSha256, "Wasm artifacts came from different source states");
@@ -140,5 +166,6 @@ if (selected) {
   process.stdout.write(`${JSON.stringify({ timestamp: new Date().toISOString(),
     platform: process.platform, arch: process.arch, cpu: cpus()[0]?.model,
     logicalCpus: cpus().length, memoryBytes: totalmem(), node: process.version,
-    dimension, dt, methodValues, frames, warmup, exactPublicationParity: true, results }, null, 2)}\n`);
+    dimension, dt, transportExperiment, traceSegments, edgeSamples, cellwiseClosure, methodValues,
+    frames, warmup, exactPublicationParity: true, results }, null, 2)}\n`);
 }

@@ -17,6 +17,7 @@ fn minimal_power_options() -> (ProductionSceneOptions, WorldOptions) {
         pressure_relative_tolerance: 1e-6,
         tracer_budget: 96,
         topology_page_budget: None,
+        transport_experiment: Default::default(),
     };
     (production, options)
 }
@@ -79,6 +80,7 @@ fn body_free_water_box_pressure12_has_certified_compatibility() {
         pressure_relative_tolerance: 1e-6,
         tracer_budget: 0,
         topology_page_budget: None,
+        transport_experiment: Default::default(),
     };
     let mut world = World3d::from_document(scene, production, options).unwrap();
     world.advance(1, 1.0 / 30.0).unwrap();

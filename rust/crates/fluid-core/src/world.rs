@@ -3,7 +3,8 @@ use crate::embedding::PressureEmbedding;
 use crate::lifecycle::{prepare_candidate, LeafArena};
 use crate::numerics::{
     assemble_pressure_rhs, enforce_inflow_faces, prepare_pressure_topology,
-    project_pressure_velocity, solve_pressure,
+    prepare_pressure_topology_with_swept_static_wall_support, project_pressure_velocity,
+    solve_pressure,
 };
 use crate::physical::{publish_final_apertures, PhysicalContext};
 use crate::presentation::{
@@ -24,10 +25,208 @@ use crate::topology::BrickSeed;
 use crate::tracers::{TracerReceipt, Tracers, TRACER_BUDGET};
 use crate::{
     collocate_velocity, extend_velocity, force_faces, prepare_faces,
-    publish_transport_characteristic_clearance, reconstruct_interfaces,
+    prepare_faces_for_cellwise_remap, publish_transport_characteristic_clearance,
+    reconstruct_interfaces, reconstruct_interfaces_for_cellwise_remap,
     transport_volume_with_commit, Fields, PressureReceipt, ValidationError,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+/// Selects the experimental 2D volume-transport path. The baseline remains
+/// the production transport unless a lab caller opts in explicitly.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TransportExperiment {
+    #[default]
+    Baseline,
+    /// Measure the cellwise construction, then advance material with the
+    /// baseline transport so multi-frame diagnostics follow the current path.
+    CellwiseProbe,
+    /// Commit material with one cellwise whole-step remap.
+    CellwiseRemap,
+    /// Configured cellwise run used to sweep fixed RK4 segment counts after
+    /// the M2 trajectory-crossing stop. This remains one WorldOptions field.
+    Configured {
+        mode: CellwiseTransportMode,
+        trace_segments: usize,
+        edge_samples: usize,
+        closure: crate::adaptive_remap::CellwiseClosure,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CellwiseTransportMode {
+    Probe,
+    Remap,
+}
+
+impl TransportExperiment {
+    pub fn configured(mode: CellwiseTransportMode, trace_segments: usize) -> Self {
+        Self::configured_with_samples(mode, trace_segments, 1)
+    }
+
+    pub fn configured_with_samples(
+        mode: CellwiseTransportMode,
+        trace_segments: usize,
+        edge_samples: usize,
+    ) -> Self {
+        Self::configured_with_closure(
+            mode,
+            trace_segments,
+            edge_samples,
+            crate::adaptive_remap::CellwiseClosure::BandProjection,
+        )
+    }
+
+    pub fn configured_with_closure(
+        mode: CellwiseTransportMode,
+        trace_segments: usize,
+        edge_samples: usize,
+        closure: crate::adaptive_remap::CellwiseClosure,
+    ) -> Self {
+        Self::Configured {
+            mode,
+            trace_segments,
+            edge_samples,
+            closure,
+        }
+    }
+
+    pub fn cellwise_mode(self) -> Option<CellwiseTransportMode> {
+        match self {
+            Self::Baseline => None,
+            Self::CellwiseProbe => Some(CellwiseTransportMode::Probe),
+            Self::CellwiseRemap => Some(CellwiseTransportMode::Remap),
+            Self::Configured { mode, .. } => Some(mode),
+        }
+    }
+
+    pub fn trace_segments(self) -> usize {
+        match self {
+            Self::Configured { trace_segments, .. } => trace_segments,
+            _ => 1,
+        }
+    }
+
+    pub fn edge_samples(self) -> usize {
+        match self {
+            Self::Configured { edge_samples, .. } => edge_samples,
+            _ => 1,
+        }
+    }
+
+    pub fn closure(self) -> crate::adaptive_remap::CellwiseClosure {
+        match self {
+            Self::Configured { closure, .. } => closure,
+            _ => crate::adaptive_remap::CellwiseClosure::BandProjection,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum TransportExperimentName {
+    Baseline,
+    CellwiseProbe,
+    CellwiseRemap,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ConfiguredTransportExperiment {
+    mode: TransportExperimentName,
+    trace_segments: usize,
+    #[serde(default = "one_usize", skip_serializing_if = "usize_is_one")]
+    edge_samples: usize,
+    #[serde(default, skip_serializing_if = "band_projection_closure")]
+    closure: crate::adaptive_remap::CellwiseClosure,
+}
+
+fn one_usize() -> usize {
+    1
+}
+
+fn usize_is_one(value: &usize) -> bool {
+    *value == 1
+}
+
+fn band_projection_closure(value: &crate::adaptive_remap::CellwiseClosure) -> bool {
+    *value == crate::adaptive_remap::CellwiseClosure::BandProjection
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum TransportExperimentRepresentation {
+    Name(TransportExperimentName),
+    Configured(ConfiguredTransportExperiment),
+}
+
+impl Serialize for TransportExperiment {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let name = match self.cellwise_mode() {
+            None => TransportExperimentName::Baseline,
+            Some(CellwiseTransportMode::Probe) => TransportExperimentName::CellwiseProbe,
+            Some(CellwiseTransportMode::Remap) => TransportExperimentName::CellwiseRemap,
+        };
+        if matches!(self, Self::Configured { .. }) {
+            ConfiguredTransportExperiment {
+                mode: name,
+                trace_segments: self.trace_segments(),
+                edge_samples: self.edge_samples(),
+                closure: self.closure(),
+            }
+            .serialize(serializer)
+        } else {
+            name.serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TransportExperiment {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let representation = TransportExperimentRepresentation::deserialize(deserializer)?;
+        match representation {
+            TransportExperimentRepresentation::Name(TransportExperimentName::Baseline) => {
+                Ok(Self::Baseline)
+            }
+            TransportExperimentRepresentation::Name(TransportExperimentName::CellwiseProbe) => {
+                Ok(Self::CellwiseProbe)
+            }
+            TransportExperimentRepresentation::Name(TransportExperimentName::CellwiseRemap) => {
+                Ok(Self::CellwiseRemap)
+            }
+            TransportExperimentRepresentation::Configured(config) => {
+                let mode = match config.mode {
+                    TransportExperimentName::Baseline => {
+                        return Err(serde::de::Error::custom(
+                            "baseline transport does not accept traceSegments",
+                        ))
+                    }
+                    TransportExperimentName::CellwiseProbe => CellwiseTransportMode::Probe,
+                    TransportExperimentName::CellwiseRemap => CellwiseTransportMode::Remap,
+                };
+                if !(1..=128).contains(&config.trace_segments) {
+                    return Err(serde::de::Error::custom(
+                        "cellwise traceSegments must be between 1 and 128",
+                    ));
+                }
+                if !matches!(config.edge_samples, 1 | 2 | 4) {
+                    return Err(serde::de::Error::custom(
+                        "cellwise edgeSamples must be 1, 2, or 4",
+                    ));
+                }
+                Ok(Self::configured_with_closure(
+                    mode,
+                    config.trace_segments,
+                    config.edge_samples,
+                    config.closure,
+                ))
+            }
+        }
+    }
+}
+
+fn baseline_transport_experiment(value: &TransportExperiment) -> bool {
+    *value == TransportExperiment::Baseline
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -38,6 +237,8 @@ pub struct WorldOptions {
     pub pressure_relative_tolerance: f32,
     pub tracer_budget: usize,
     pub topology_page_budget: Option<u32>,
+    #[serde(skip_serializing_if = "baseline_transport_experiment")]
+    pub transport_experiment: TransportExperiment,
 }
 impl Default for WorldOptions {
     fn default() -> Self {
@@ -48,6 +249,7 @@ impl Default for WorldOptions {
             pressure_relative_tolerance: 1e-6,
             tracer_budget: TRACER_BUDGET,
             topology_page_budget: None,
+            transport_experiment: TransportExperiment::Baseline,
         }
     }
 }
@@ -73,6 +275,8 @@ pub struct WorldReceipt<'a> {
     pub revision: &'a Revision,
     pub pressure: &'a PressureReceipt,
     pub microsteps: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cellwise_remap: Option<&'a crate::adaptive_remap::CellwiseRemapReceipt>,
     pub source_ledger: &'a SourceLedger,
     pub tracers: TracerReceipt,
     pub liquid_measure: f64,
@@ -116,6 +320,25 @@ pub type EmbeddingBuilder = Box<
     ) -> Result<Option<PressureEmbedding>, ValidationError>,
 >;
 
+fn commit_source_ledger(
+    ledger: &mut SourceLedger,
+    dt: f32,
+    fields: &mut Fields,
+) -> Result<(), ValidationError> {
+    let receipt = ledger
+        .commit_microstep(dt as f64)
+        .map_err(|e| ValidationError(e.into()))?;
+    if !receipt.accepted {
+        fields.fault = Some(crate::NumericalFault {
+            stage: "source-commit".into(),
+            index: 0,
+            observed: ledger.pending,
+            expected: 0.0,
+        });
+    }
+    Ok(())
+}
+
 pub struct World {
     pub state: SceneState<2>,
     pub revision: Revision,
@@ -123,6 +346,7 @@ pub struct World {
     pub pressure: PressureReceipt,
     pub source_ledger: SourceLedger,
     pub microsteps: usize,
+    pub cellwise_remap_receipt: Option<crate::adaptive_remap::CellwiseRemapReceipt>,
     pub tracers: Tracers,
     pub tracer_receipt: TracerReceipt,
     pub physical: Option<PhysicalContext>,
@@ -207,6 +431,18 @@ impl World {
             options.pressure_iterations,
             options.pressure_relative_tolerance,
         )?;
+        if options.transport_experiment.cellwise_mode().is_some() {
+            if !(1..=128).contains(&options.transport_experiment.trace_segments()) {
+                return Err(ValidationError(
+                    "cellwise traceSegments must be between 1 and 128".into(),
+                ));
+            }
+            if !matches!(options.transport_experiment.edge_samples(), 1 | 2 | 4) {
+                return Err(ValidationError(
+                    "cellwise edgeSamples must be 1, 2, or 4".into(),
+                ));
+            }
+        }
         let arena = LeafArena::new(&state.topology, options.topology_page_budget)?;
         let resolution_policy = initialize_resolution_policy(&state.topology);
         let pressure_authority = PressureAuthority::new(
@@ -276,6 +512,7 @@ impl World {
             pressure: PressureReceipt::default(),
             source_ledger: SourceLedger::default(),
             microsteps: 1,
+            cellwise_remap_receipt: None,
             tracers,
             tracer_receipt: TracerReceipt::default(),
             physical: None,
@@ -324,6 +561,7 @@ impl World {
             revision: &self.revision,
             pressure: &self.pressure,
             microsteps: self.microsteps,
+            cellwise_remap: self.cellwise_remap_receipt.as_ref(),
             source_ledger: &self.source_ledger,
             tracers: self.tracer_receipt,
             liquid_measure: self
@@ -444,23 +682,36 @@ impl World {
                 .clone_from(&self.state.fields.capacity);
             [0.0; 3]
         };
+        let cellwise_remap = matches!(
+            self.options.transport_experiment.cellwise_mode(),
+            Some(CellwiseTransportMode::Remap)
+        );
         {
             let graph = &mut self.state.topology.graph;
             let fields = &mut self.state.fields;
             observe("dynamic-geometry", graph, fields);
             extend_velocity(graph, fields, 8)?;
             observe("transport-velocity-extension", graph, fields);
-            prepare_faces(graph, fields, dt)?;
+            if cellwise_remap {
+                prepare_faces_for_cellwise_remap(graph, fields, dt)?;
+            } else {
+                prepare_faces(graph, fields, dt)?;
+            }
             observe("face-preparation", graph, fields);
         }
         self.view_history
             .capture_faces(&self.state, self.cell_size());
+        let swept_static_wall_pressure = cellwise_remap;
         {
             let graph = &mut self.state.topology.graph;
             let fields = &mut self.state.fields;
             force_faces(graph, fields, dt, fields.acceleration_fine, inflow);
             observe("body-forces", graph, fields);
-            reconstruct_interfaces(graph, fields)?;
+            if cellwise_remap {
+                reconstruct_interfaces_for_cellwise_remap(graph, fields)?;
+            } else {
+                reconstruct_interfaces(graph, fields)?;
+            }
             observe("interface-reconstruction", graph, fields);
             if let Some(embedding) = &mut self.embedding {
                 let prepared = embedding.prepare(graph, fields);
@@ -483,7 +734,19 @@ impl World {
                 observe("pressure-solve", graph, fields);
                 embedding.project(graph, fields, &solved.prepared);
             } else {
-                let rows = prepare_pressure_topology(graph, fields);
+                // Swept wall-contact support is a single transient pressure
+                // solve.  Restore the physical membership before support
+                // planning so promoted dry cells cannot survive a topology
+                // transfer or apply the contact impulse a second time.
+                let physical_rows = prepare_pressure_topology(graph, fields);
+                let physical_pressure_member = fields.pressure_member.clone();
+                let physical_pressure_row_member = fields.pressure_row_member.clone();
+                let physical_pressure_diagonal = fields.pressure_diagonal.clone();
+                let rows = if swept_static_wall_pressure {
+                    prepare_pressure_topology_with_swept_static_wall_support(graph, fields)
+                } else {
+                    physical_rows
+                };
                 self.pressure_authority.publish(
                     graph,
                     fields,
@@ -507,6 +770,17 @@ impl World {
                 )?;
                 observe("pressure-solve", graph, fields);
                 project_pressure_velocity(graph, fields, &rows);
+                if swept_static_wall_pressure {
+                    fields
+                        .pressure_member
+                        .clone_from(&physical_pressure_member);
+                    fields
+                        .pressure_row_member
+                        .clone_from(&physical_pressure_row_member);
+                    fields
+                        .pressure_diagonal
+                        .clone_from(&physical_pressure_diagonal);
+                }
             }
             enforce_inflow_faces(graph, fields, inflow);
             collocate_velocity(graph, fields);
@@ -521,6 +795,7 @@ impl World {
             Some(self.arena.maximum_slice_leaves),
             Some(self.arena.capacity as usize * 64),
             &self.arena.free_leaf_ids,
+            cellwise_remap,
         )
         .map_err(|e| ValidationError(format!("projected support: {e:?}")))?;
         if support.fault_bits != 0 {
@@ -532,11 +807,76 @@ impl World {
         if self.bricks_changed(&support.candidate_bricks) {
             self.transition(support.candidate_bricks, dt_s)?;
             extend_velocity(&self.state.topology.graph, &mut self.state.fields, 8)?;
+            if cellwise_remap {
+                reconstruct_interfaces_for_cellwise_remap(
+                    &self.state.topology.graph,
+                    &mut self.state.fields,
+                )?;
+            }
+            if cellwise_remap {
+                // Projected-support transfer conserves material and momentum, but
+                // the interpolated candidate face field is not discretely
+                // divergence-free on its new rows. Geometric whole-step transport
+                // consumes this generation immediately, so close the candidate
+                // field with the same pressure operator before tracing it. Body
+                // forces and face advection are already present in the transferred
+                // field and must not be applied a second time.
+                let graph = &mut self.state.topology.graph;
+                let fields = &mut self.state.fields;
+                if let Some(embedding) = &mut self.embedding {
+                    let prepared = embedding.prepare(graph, fields);
+                    fields.pressure_diagonal.clone_from(&prepared.diagonal);
+                    fields.pressure_rhs.clone_from(&prepared.rhs);
+                    let solved = embedding.solve(
+                        graph,
+                        fields,
+                        self.options.pressure_iterations,
+                        self.options.pressure_relative_tolerance,
+                        Some(prepared),
+                    )?;
+                    self.pressure = PressureReceipt {
+                        iterations: solved.solve.iterations,
+                        initial_residual: solved
+                            .solve
+                            .initial_true_residual_squared
+                            .max(0.0)
+                            .sqrt(),
+                        residual: solved.solve.final_true_residual_squared.max(0.0).sqrt(),
+                        converged: solved.solve.converged,
+                    };
+                    embedding.project(graph, fields, &solved.prepared);
+                } else {
+                    let rows = prepare_pressure_topology(graph, fields);
+                    self.pressure_authority.publish(
+                        graph,
+                        fields,
+                        &rows.active,
+                        &rows.theta,
+                        graph.topology_generation,
+                        self.physical
+                            .as_ref()
+                            .is_some_and(|p| p.solid_world.is_some()),
+                    );
+                    assemble_pressure_rhs(graph, fields, &rows);
+                    self.pressure = solve_pressure(
+                        graph,
+                        fields,
+                        &rows,
+                        self.options.pressure_iterations,
+                        self.options.pressure_relative_tolerance,
+                        Some(&self.pressure_authority.execution_order),
+                    )?;
+                    project_pressure_velocity(graph, fields, &rows);
+                }
+                enforce_inflow_faces(graph, fields, inflow);
+                collocate_velocity(graph, fields);
+                observe("projected-support-velocity-projection", graph, fields);
+            }
         }
         self.view_history.capture_density(&self.state);
         let source_density = self.state.fields.density.clone();
         let source_gamma = self.state.fields.gamma.clone();
-        {
+        let transport_fault = {
             let graph = &mut self.state.topology.graph;
             let fields = &mut self.state.fields;
             publish_transport_characteristic_clearance(
@@ -547,26 +887,69 @@ impl World {
                 Some(&source_gamma),
             )?;
             let ledger = &mut self.source_ledger;
-            let (steps, _) =
-                transport_volume_with_commit(graph, fields, dt, false, |_, dtm, fields| {
-                    let receipt = ledger
-                        .commit_microstep(dtm as f64)
-                        .map_err(|e| ValidationError(e.into()))?;
-                    if !receipt.accepted {
-                        fields.fault = Some(crate::NumericalFault {
-                            stage: "source-commit".into(),
-                            index: 0,
-                            observed: ledger.pending,
-                            expected: 0.0,
-                        });
-                    }
-                    Ok(())
-                })?;
-            self.microsteps = steps;
+            self.cellwise_remap_receipt = None;
+            let experiment = self.options.transport_experiment;
+            match experiment.cellwise_mode() {
+                None => {
+                    let (steps, _) = transport_volume_with_commit(
+                        graph,
+                        fields,
+                        dt,
+                        false,
+                        |_, dtm, fields| commit_source_ledger(ledger, dtm, fields),
+                    )?;
+                    self.microsteps = steps;
+                }
+                Some(CellwiseTransportMode::Probe) => {
+                    let options = crate::adaptive_remap::CellwiseRemapOptions {
+                        closure: experiment.closure(),
+                        commit_material: false,
+                        trace_segments: experiment.trace_segments(),
+                        edge_samples: experiment.edge_samples(),
+                        ..Default::default()
+                    };
+                    self.cellwise_remap_receipt = Some(
+                        crate::adaptive_remap::transport_volume_cellwise_with_commit(
+                            graph,
+                            fields,
+                            dt,
+                            options,
+                            |_, _| Ok(()),
+                        )?,
+                    );
+                    let (steps, _) = transport_volume_with_commit(
+                        graph,
+                        fields,
+                        dt,
+                        false,
+                        |_, dtm, fields| commit_source_ledger(ledger, dtm, fields),
+                    )?;
+                    self.microsteps = steps;
+                }
+                Some(CellwiseTransportMode::Remap) => {
+                    let options = crate::adaptive_remap::CellwiseRemapOptions {
+                        closure: experiment.closure(),
+                        trace_segments: experiment.trace_segments(),
+                        edge_samples: experiment.edge_samples(),
+                        ..Default::default()
+                    };
+                    self.cellwise_remap_receipt = Some(
+                        crate::adaptive_remap::transport_volume_cellwise_with_commit(
+                            graph,
+                            fields,
+                            dt,
+                            options,
+                            |dtm, fields| commit_source_ledger(ledger, dtm, fields),
+                        )?,
+                    );
+                    self.microsteps = 0;
+                }
+            }
             publish_final_apertures(graph, fields);
             observe("conservative-transport", graph, fields);
             self.tracer_receipt = self.tracers.advance(graph, fields, dt)?;
-        }
+            fields.fault.clone()
+        };
         publish_scalar_interface_state_from_geometric_density(
             &mut self.scalar_authority,
             &self.state.topology,
@@ -579,6 +962,12 @@ impl World {
                 .as_ref()
                 .is_some_and(|p| !p.scene.rigid_bodies.is_empty()),
         )?;
+        if cellwise_remap {
+            reconstruct_interfaces_for_cellwise_remap(
+                &self.state.topology.graph,
+                &mut self.state.fields,
+            )?;
+        }
         observe(
             "scalar-publication",
             &self.state.topology.graph,
@@ -588,6 +977,7 @@ impl World {
             physical.finish_frame(&self.state)?;
         }
         let mut policy = self.resolution_options.clone();
+        policy.translation_invariant_motion_sizing = cellwise_remap;
         policy.maximum_leaves = Some(self.arena.maximum_slice_leaves);
         policy.maximum_cells = Some(self.arena.capacity as usize * 64);
         policy.free_leaf_ids.clone_from(&self.arena.free_leaf_ids);
@@ -624,6 +1014,13 @@ impl World {
         }
         self.refresh_surface()?;
         self.arena.release_after_publication()?;
+        // Candidate topology construction initializes its fault plane. Keep a
+        // rejected transport visible through the completed World advance even
+        // when the resolution policy accepts a later generation in the same
+        // frame.
+        if transport_fault.is_some() {
+            self.state.fields.fault = transport_fault;
+        }
         self.revision.frame += 1;
         self.revision.time += dt_s;
         self.revision.command_sequence = sequence;
