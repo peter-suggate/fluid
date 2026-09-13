@@ -1,0 +1,2310 @@
+{
+  "schemaVersion": 1,
+  "sourceSha256": {
+    "lib/methods/adaptive-volume/advance-slice/production-scene-slice.ts": "4b3a01bbd9589ec844f321eb1a72c7fd458643c970d9e1f5a02424e78a7f5963",
+    "lib/methods/adaptive-volume/advance-slice/slice-solver.ts": "0835b4d4fb2db92b925f4d3af7513e69d9e011c6d095481044d0e6fd197f5b51",
+    "lib/methods/adaptive-volume/advance-slice/slice-stage-numerics.ts": "3e406ca00480e5e62fd2ba199873f4eaa81947275d97f654d9d228149696296e",
+    "lib/methods/adaptive-volume/advance-slice/slice-pressure-embedding.ts": "7d6b09278579ec2ddc37a658d7118040c5fcfbf10181e4b3d70c5ffb26d658d9"
+  },
+  "cases": [
+    {
+      "id": "water-box-dam-break",
+      "scene": {
+        "schemaVersion": "2.0.0",
+        "sceneId": "interactive-water-box",
+        "randomSeed": 20260712,
+        "duration_s": 20,
+        "container": {
+          "width_m": 1.2,
+          "height_m": 0.8,
+          "depth_m": 0.8,
+          "fillFraction": 0.2734375,
+          "top": "closed",
+          "fluidWallMode": "no-slip"
+        },
+        "solidVoxels": [
+          {
+            "operation": "fill",
+            "minimum": [
+              0,
+              -1,
+              0
+            ],
+            "maximumExclusive": [
+              24,
+              0,
+              16
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              -1,
+              0,
+              0
+            ],
+            "maximumExclusive": [
+              0,
+              16,
+              16
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              24,
+              0,
+              0
+            ],
+            "maximumExclusive": [
+              25,
+              16,
+              16
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              0,
+              0,
+              -1
+            ],
+            "maximumExclusive": [
+              24,
+              16,
+              0
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              0,
+              0,
+              16
+            ],
+            "maximumExclusive": [
+              24,
+              16,
+              17
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              0,
+              16,
+              0
+            ],
+            "maximumExclusive": [
+              24,
+              17,
+              16
+            ],
+            "materialId": 1
+          }
+        ],
+        "voxelDomain": {
+          "finestCellSize_m": 0.05,
+          "brickSize_cells": 8
+        },
+        "fluid": {
+          "density_kg_m3": 998.2,
+          "dynamicViscosity_Pa_s": 0.001002,
+          "surfaceTension_N_m": 0.072,
+          "gravity_m_s2": {
+            "x": 0,
+            "y": -9.80665,
+            "z": 0
+          },
+          "initialCondition": "dam-break",
+          "initialDamBreakDimensions_m": {
+            "x": 0.6,
+            "y": 0.7,
+            "z": 0.5
+          }
+        },
+        "nominalResolution": {
+          "length_m": 0.025
+        },
+        "numerics": {
+          "fixedDt_s": 0.03333333333333333,
+          "maxDt_s": 0.03333333333333333,
+          "pressureRelativeTolerance": 1e-8,
+          "pressureMaxIterations": 1000
+        },
+        "rigidBodies": [],
+        "environment": "stage",
+        "scenery": {
+          "palettes": {
+            "stage": {
+              "tint": [
+                1,
+                0.995,
+                0.985
+              ]
+            },
+            "fixture": {
+              "tint": [
+                0.94,
+                0.95,
+                1
+              ]
+            },
+            "lamp": {
+              "tint": [
+                1,
+                0.955,
+                0.88
+              ]
+            }
+          },
+          "nodes": [
+            {
+              "kind": "room-shell",
+              "id": "shell",
+              "materialModel": "room",
+              "faces": [],
+              "floor": {
+                "palette": "stage",
+                "value": 0.62
+              },
+              "wall": {
+                "palette": "stage",
+                "value": 0.62
+              },
+              "ceiling": {
+                "palette": "stage",
+                "value": 0.62
+              }
+            },
+            {
+              "kind": "box",
+              "id": "stage/floor",
+              "group": "stage",
+              "tags": [
+                "stage",
+                "floor",
+                "fluid-collider"
+              ],
+              "place": {
+                "position": {
+                  "x": 0,
+                  "y": -0.07142857142857142,
+                  "z": 0
+                },
+                "units": "metres"
+              },
+              "halfSize": {
+                "x": 2.261904761904762,
+                "y": 0.07142857142857142,
+                "z": 2.261904761904762
+              },
+              "material": {
+                "palette": "stage",
+                "value": 0.12,
+                "surface": "plaster"
+              }
+            },
+            {
+              "kind": "cylinder",
+              "id": "lamp/stem",
+              "group": "lamp",
+              "tags": [
+                "lamp",
+                "fixture"
+              ],
+              "place": {
+                "position": {
+                  "x": 0,
+                  "y": 3.924603174603175,
+                  "z": 0
+                },
+                "units": "metres"
+              },
+              "radius": 0.021428571428571425,
+              "halfHeight": 0.5357142857142857,
+              "material": {
+                "palette": "fixture",
+                "value": 0.16,
+                "surface": "brushed-metal"
+              }
+            },
+            {
+              "kind": "cone",
+              "id": "lamp/reflector",
+              "group": "lamp",
+              "tags": [
+                "lamp",
+                "fixture",
+                "light",
+                "spot-light"
+              ],
+              "place": {
+                "position": {
+                  "x": 0,
+                  "y": 3.152777777777778,
+                  "z": 0
+                },
+                "units": "metres"
+              },
+              "baseRadius": 0.2619047619047619,
+              "topRadius": 0.05952380952380952,
+              "halfHeight": 0.2361111111111111,
+              "material": {
+                "colorLinear": [
+                  1,
+                  0.955,
+                  0.88
+                ],
+                "emission": 106.29251700680271
+              }
+            }
+          ]
+        }
+      },
+      "productionOptions": {
+        "dtS": 0.03333333333333333,
+        "timeStep": "paper",
+        "atlas": {
+          "finestDimensions": [
+            24,
+            16,
+            16
+          ],
+          "brickFineResolution": 8,
+          "maximumMacroSpanBricks": null,
+          "surfaceFineRings": 1
+        },
+        "resolution": {
+          "policy": {
+            "activitySignals": true,
+            "coarseFirst": true,
+            "energyThreshold": 8,
+            "curvatureTolerance": 0.25,
+            "anticipationSeconds": 0.5,
+            "anticipationRadiusBricks": 3,
+            "surfaceQuietEpochs": 2,
+            "surfaceDisplacementToleranceCells": 1,
+            "surfaceNormalToleranceDegrees": 30,
+            "surfaceCoarseningEnabled": true,
+            "finestTravelCells": 1,
+            "fourTravelCells": 0.5,
+            "twoTravelCells": 0.25,
+            "thinFeatureCells": 2,
+            "thinFeatureDensity": 0,
+            "residencyDensity": 0.005,
+            "residencyMassFineCells": 1,
+            "surfaceDensityMinimum": 0.05,
+            "surfaceDensityMaximum": 0.95,
+            "detailTolerance": 0.08,
+            "frontLookaheadSteps": 4,
+            "topologyCadenceSteps": 1,
+            "prepareBricksPerFrame": 64,
+            "promoteEpochs": 2,
+            "demoteEpochs": 1,
+            "promoteScore": 0.6274509803921569,
+            "demoteScore": 0.3764705882352941,
+            "emergencyScore": 0.8784313725490196
+          }
+        }
+      },
+      "worldOptions": {
+        "pressureIterations": 28,
+        "pressureRelativeTolerance": 0.000001,
+        "tracerBudget": 65536
+      },
+      "frames": [
+        {
+          "frame": 0,
+          "topologyGeneration": 1,
+          "cells": 208,
+          "rows": 440,
+          "subfaces": 448,
+          "floatHash": "63771ecc67dcf135",
+          "wordHash": "d898db4e138960f9",
+          "fieldHashes": {
+            "density": "9eaeefe7de152165",
+            "gamma": "d1306dbf72770fa5",
+            "capacity": "d1306dbf72770fa5",
+            "capacityRate": "ebc4e38d4d85c425",
+            "sourceRate": "ebc4e38d4d85c425",
+            "inflowCoverage": "994f9a28082f9ca5",
+            "cellVelocity": "9f1940f151d66525",
+            "faceVelocity": "994f9a28082f9ca5",
+            "pressure": "ebc4e38d4d85c425",
+            "pressureRhs": "ebc4e38d4d85c425",
+            "pressureDiagonal": "ebc4e38d4d85c425",
+            "interfaceNormal": "9f1940f151d66525",
+            "interfaceOffset": "ebc4e38d4d85c425",
+            "lowFlux": "26b62556f7b52f25",
+            "highFlux": "26b62556f7b52f25",
+            "limitedFlux": "26b62556f7b52f25",
+            "pressureMember": "b1e9f32be9d2d365",
+            "pressureRowMember": "08fd0a89c6878385",
+            "extensionDepth": "b1e9f32be9d2d365"
+          },
+          "microsteps": 1,
+          "sourcePending": 0,
+          "pressureIterations": 0,
+          "pressureConverged": false,
+          "tracer": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "pressureAuthority": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            4294967295
+          ],
+          "scalarAuthority": [
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            4294967295
+          ]
+        },
+        {
+          "frame": 1,
+          "topologyGeneration": 1,
+          "cells": 208,
+          "rows": 440,
+          "subfaces": 448,
+          "floatHash": "63771ecc67dcf135",
+          "wordHash": "d898db4e138960f9",
+          "fieldHashes": {
+            "density": "708daff1903afc9d",
+            "gamma": "d1306dbf72770fa5",
+            "capacity": "d1306dbf72770fa5",
+            "capacityBefore": "d1306dbf72770fa5",
+            "capacityAfter": "d1306dbf72770fa5",
+            "capacityRate": "ebc4e38d4d85c425",
+            "sourceRate": "ebc4e38d4d85c425",
+            "inflowCoverage": "994f9a28082f9ca5",
+            "cellVelocity": "261f298bb4248ffe",
+            "faceVelocity": "b38d1e23ee2d239e",
+            "pressure": "46a7771fe399489b",
+            "pressureRhs": "70ade77f13fb58fd",
+            "pressureDiagonal": "291d4f6628b1fb79",
+            "interfaceNormal": "256d643dcbaef344",
+            "interfaceOffset": "88146208db418cfe",
+            "lowFlux": "2c9e54e7df2f5e14",
+            "highFlux": "8370a07b6a0cb94f",
+            "limitedFlux": "b0b944be9e259b03",
+            "characteristicClearance": "ebc4e38d4d85c425",
+            "pressureMember": "01f43d1e5363e79d",
+            "pressureRowMember": "e6f95714897a969d",
+            "extensionDepth": "6a7d686929b5953d"
+          },
+          "microsteps": 1,
+          "sourcePending": 0,
+          "pressureIterations": 28,
+          "pressureConverged": false,
+          "tracer": [
+            0,
+            0,
+            950,
+            0,
+            0
+          ],
+          "pressureAuthority": [
+            1,
+            1,
+            1,
+            1,
+            1,
+            120,
+            120,
+            240,
+            0,
+            4294967295
+          ],
+          "scalarAuthority": [
+            1,
+            1,
+            0,
+            57,
+            57,
+            0,
+            0,
+            0,
+            4294967295
+          ]
+        },
+        {
+          "frame": 2,
+          "topologyGeneration": 1,
+          "cells": 208,
+          "rows": 440,
+          "subfaces": 448,
+          "floatHash": "63771ecc67dcf135",
+          "wordHash": "d898db4e138960f9",
+          "fieldHashes": {
+            "density": "2a8403d94d204cfc",
+            "gamma": "d1306dbf72770fa5",
+            "capacity": "d1306dbf72770fa5",
+            "capacityBefore": "d1306dbf72770fa5",
+            "capacityAfter": "d1306dbf72770fa5",
+            "capacityRate": "ebc4e38d4d85c425",
+            "sourceRate": "ebc4e38d4d85c425",
+            "inflowCoverage": "994f9a28082f9ca5",
+            "cellVelocity": "7b87ab11a62ea800",
+            "faceVelocity": "63ccc3d5e159a04d",
+            "pressure": "4df332fc7bba89ca",
+            "pressureRhs": "186c8979c8dcb78e",
+            "pressureDiagonal": "68044e184ed03ae6",
+            "interfaceNormal": "1f1081ab76c0fe29",
+            "interfaceOffset": "27fc99433577979f",
+            "lowFlux": "85119495a8356e70",
+            "highFlux": "2350d954d02ea92c",
+            "limitedFlux": "a12ee47a48a5f061",
+            "characteristicClearance": "ebc4e38d4d85c425",
+            "pressureMember": "01f43d1e5363e79d",
+            "pressureRowMember": "e6f95714897a969d",
+            "extensionDepth": "6a7d686929b5953d"
+          },
+          "microsteps": 2,
+          "sourcePending": 0,
+          "pressureIterations": 28,
+          "pressureConverged": false,
+          "tracer": [
+            0,
+            0,
+            950,
+            0,
+            0
+          ],
+          "pressureAuthority": [
+            1,
+            2,
+            2,
+            2,
+            2,
+            25,
+            120,
+            240,
+            0,
+            4294967295
+          ],
+          "scalarAuthority": [
+            2,
+            1,
+            0,
+            72,
+            72,
+            0,
+            8,
+            0,
+            4294967295
+          ]
+        },
+        {
+          "frame": 3,
+          "topologyGeneration": 1,
+          "cells": 208,
+          "rows": 440,
+          "subfaces": 448,
+          "floatHash": "63771ecc67dcf135",
+          "wordHash": "d898db4e138960f9",
+          "fieldHashes": {
+            "density": "b2b2f0b5765275c0",
+            "gamma": "d1306dbf72770fa5",
+            "capacity": "d1306dbf72770fa5",
+            "capacityBefore": "d1306dbf72770fa5",
+            "capacityAfter": "d1306dbf72770fa5",
+            "capacityRate": "ebc4e38d4d85c425",
+            "sourceRate": "ebc4e38d4d85c425",
+            "inflowCoverage": "994f9a28082f9ca5",
+            "cellVelocity": "e2a499f747b3937e",
+            "faceVelocity": "fbbafe9174604cca",
+            "pressure": "f3b02e0689e4ad65",
+            "pressureRhs": "bb2d2b6ea2cd9100",
+            "pressureDiagonal": "abba1495c925fee5",
+            "interfaceNormal": "555670f835a5fc26",
+            "interfaceOffset": "8396de0054e73af2",
+            "lowFlux": "6837eaede1846e57",
+            "highFlux": "d2c9b21e13e9dc45",
+            "limitedFlux": "f1defd0f7b579826",
+            "characteristicClearance": "ebc4e38d4d85c425",
+            "pressureMember": "3b852f0af8bdb3e9",
+            "pressureRowMember": "3596854ba1587581",
+            "extensionDepth": "b80048bff2810245"
+          },
+          "microsteps": 3,
+          "sourcePending": 0,
+          "pressureIterations": 28,
+          "pressureConverged": false,
+          "tracer": [
+            0,
+            0,
+            950,
+            0,
+            0
+          ],
+          "pressureAuthority": [
+            1,
+            3,
+            3,
+            3,
+            3,
+            32,
+            120,
+            240,
+            0,
+            4294967295
+          ],
+          "scalarAuthority": [
+            3,
+            1,
+            0,
+            69,
+            74,
+            0,
+            14,
+            0,
+            4294967295
+          ]
+        }
+      ]
+    },
+    {
+      "id": "coarse-first-pool-impact-quarter",
+      "scene": {
+        "schemaVersion": "2.0.0",
+        "sceneId": "coarse-first-pool-impact-quarter",
+        "randomSeed": 20260712,
+        "duration_s": 4,
+        "container": {
+          "width_m": 1.6,
+          "height_m": 1.2,
+          "depth_m": 1.6,
+          "fillFraction": 0.3333333333333333,
+          "top": "open",
+          "fluidWallMode": "free-slip"
+        },
+        "solidVoxels": [
+          {
+            "operation": "fill",
+            "minimum": [
+              0,
+              -1,
+              0
+            ],
+            "maximumExclusive": [
+              32,
+              0,
+              32
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              -1,
+              0,
+              0
+            ],
+            "maximumExclusive": [
+              0,
+              24,
+              32
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              32,
+              0,
+              0
+            ],
+            "maximumExclusive": [
+              33,
+              24,
+              32
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              0,
+              0,
+              -1
+            ],
+            "maximumExclusive": [
+              32,
+              24,
+              0
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              0,
+              0,
+              32
+            ],
+            "maximumExclusive": [
+              32,
+              24,
+              33
+            ],
+            "materialId": 1
+          }
+        ],
+        "voxelDomain": {
+          "finestCellSize_m": 0.05,
+          "brickSize_cells": 8
+        },
+        "fluid": {
+          "density_kg_m3": 998.2,
+          "dynamicViscosity_Pa_s": 0,
+          "surfaceTension_N_m": 0,
+          "gravity_m_s2": {
+            "x": 0,
+            "y": -9.80665,
+            "z": 0
+          },
+          "initialCondition": "tank-fill",
+          "initialLiquidVolumes": [
+            {
+              "shape": "sphere",
+              "center_m": {
+                "x": 0,
+                "y": 0.9125,
+                "z": 0
+              },
+              "radius_m": 0.25
+            }
+          ]
+        },
+        "nominalResolution": {
+          "length_m": 0.025
+        },
+        "numerics": {
+          "fixedDt_s": 0.03333333333333333,
+          "maxDt_s": 0.03333333333333333,
+          "pressureRelativeTolerance": 1e-8,
+          "pressureMaxIterations": 1000
+        },
+        "rigidBodies": [],
+        "environment": "stage",
+        "scenery": {
+          "palettes": {
+            "stage": {
+              "tint": [
+                1,
+                0.995,
+                0.985
+              ]
+            },
+            "fixture": {
+              "tint": [
+                0.94,
+                0.95,
+                1
+              ]
+            },
+            "lamp": {
+              "tint": [
+                1,
+                0.955,
+                0.88
+              ]
+            }
+          },
+          "nodes": [
+            {
+              "kind": "room-shell",
+              "id": "shell",
+              "materialModel": "room",
+              "faces": [],
+              "floor": {
+                "palette": "stage",
+                "value": 0.62
+              },
+              "wall": {
+                "palette": "stage",
+                "value": 0.62
+              },
+              "ceiling": {
+                "palette": "stage",
+                "value": 0.62
+              }
+            },
+            {
+              "kind": "box",
+              "id": "stage/floor",
+              "group": "stage",
+              "tags": [
+                "stage",
+                "floor",
+                "fluid-collider"
+              ],
+              "place": {
+                "position": {
+                  "x": 0,
+                  "y": -0.1120663629361052,
+                  "z": 0
+                },
+                "units": "metres"
+              },
+              "halfSize": {
+                "x": 3.548768159643331,
+                "y": 0.1120663629361052,
+                "z": 3.548768159643331
+              },
+              "material": {
+                "palette": "stage",
+                "value": 0.12,
+                "surface": "plaster"
+              }
+            },
+            {
+              "kind": "cylinder",
+              "id": "lamp/stem",
+              "group": "lamp",
+              "tags": [
+                "lamp",
+                "fixture"
+              ],
+              "place": {
+                "position": {
+                  "x": 0,
+                  "y": 6.157424052433781,
+                  "z": 0
+                },
+                "units": "metres"
+              },
+              "radius": 0.03361990888083155,
+              "halfHeight": 0.8404977220207889,
+              "material": {
+                "palette": "fixture",
+                "value": 0.16,
+                "surface": "brushed-metal"
+              }
+            },
+            {
+              "kind": "cone",
+              "id": "lamp/reflector",
+              "group": "lamp",
+              "tags": [
+                "lamp",
+                "fixture",
+                "light",
+                "spot-light"
+              ],
+              "place": {
+                "position": {
+                  "x": 0,
+                  "y": 4.946484741818644,
+                  "z": 0
+                },
+                "units": "metres"
+              },
+              "baseRadius": 0.4109099974323857,
+              "topRadius": 0.09338863578008766,
+              "halfHeight": 0.3704415885943478,
+              "material": {
+                "colorLinear": [
+                  1,
+                  0.955,
+                  0.88
+                ],
+                "emission": 261.64311878597607
+              }
+            }
+          ]
+        }
+      },
+      "productionOptions": {
+        "dtS": 0.03333333333333333,
+        "timeStep": "paper",
+        "atlas": {
+          "finestDimensions": [
+            32,
+            24,
+            32
+          ],
+          "brickFineResolution": 8,
+          "maximumMacroSpanBricks": null,
+          "surfaceFineRings": 1
+        },
+        "resolution": {
+          "policy": {
+            "activitySignals": true,
+            "coarseFirst": true,
+            "energyThreshold": 8,
+            "curvatureTolerance": 0.25,
+            "anticipationSeconds": 0.5,
+            "anticipationRadiusBricks": 3,
+            "surfaceQuietEpochs": 2,
+            "surfaceDisplacementToleranceCells": 1,
+            "surfaceNormalToleranceDegrees": 30,
+            "surfaceCoarseningEnabled": true,
+            "finestTravelCells": 1,
+            "fourTravelCells": 0.5,
+            "twoTravelCells": 0.25,
+            "thinFeatureCells": 2,
+            "thinFeatureDensity": 0,
+            "residencyDensity": 0.005,
+            "residencyMassFineCells": 1,
+            "surfaceDensityMinimum": 0.05,
+            "surfaceDensityMaximum": 0.95,
+            "detailTolerance": 0.08,
+            "frontLookaheadSteps": 4,
+            "topologyCadenceSteps": 1,
+            "prepareBricksPerFrame": 64,
+            "promoteEpochs": 2,
+            "demoteEpochs": 1,
+            "promoteScore": 0.6274509803921569,
+            "demoteScore": 0.3764705882352941,
+            "emergencyScore": 0.8784313725490196
+          }
+        }
+      },
+      "worldOptions": {
+        "pressureIterations": 28,
+        "pressureRelativeTolerance": 0.000001,
+        "tracerBudget": 65536
+      },
+      "frames": [
+        {
+          "frame": 0,
+          "topologyGeneration": 1,
+          "cells": 296,
+          "rows": 620,
+          "subfaces": 632,
+          "floatHash": "5f9a53233dacfae5",
+          "wordHash": "c10ad11a2fee6dbc",
+          "fieldHashes": {
+            "density": "dea72fa50cd8af15",
+            "gamma": "92e72602feea2765",
+            "capacity": "92e72602feea2765",
+            "capacityRate": "f9ccb3a228990fa5",
+            "sourceRate": "f9ccb3a228990fa5",
+            "inflowCoverage": "01d663224c4054e5",
+            "cellVelocity": "53f4706cd1073c25",
+            "faceVelocity": "01d663224c4054e5",
+            "pressure": "f9ccb3a228990fa5",
+            "pressureRhs": "f9ccb3a228990fa5",
+            "pressureDiagonal": "f9ccb3a228990fa5",
+            "interfaceNormal": "59cc1a55172ae58d",
+            "interfaceOffset": "368d0c5912b58615",
+            "lowFlux": "1a6802e8b72e58a5",
+            "highFlux": "1a6802e8b72e58a5",
+            "limitedFlux": "1a6802e8b72e58a5",
+            "pressureMember": "5350442c19447045",
+            "pressureRowMember": "d4988912043b6c15",
+            "extensionDepth": "5350442c19447045"
+          },
+          "microsteps": 1,
+          "sourcePending": 0,
+          "pressureIterations": 0,
+          "pressureConverged": false,
+          "tracer": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "pressureAuthority": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            4294967295
+          ],
+          "scalarAuthority": [
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            4294967295
+          ]
+        },
+        {
+          "frame": 1,
+          "topologyGeneration": 1,
+          "cells": 296,
+          "rows": 620,
+          "subfaces": 632,
+          "floatHash": "027359331ed4e425",
+          "wordHash": "c10ad11a2fee6dbc",
+          "fieldHashes": {
+            "density": "f3011b0e9e7d0815",
+            "gamma": "92e72602feea2765",
+            "capacity": "92e72602feea2765",
+            "capacityBefore": "92e72602feea2765",
+            "capacityAfter": "92e72602feea2765",
+            "capacityRate": "f9ccb3a228990fa5",
+            "sourceRate": "f9ccb3a228990fa5",
+            "inflowCoverage": "01d663224c4054e5",
+            "cellVelocity": "0962d1d342da89ed",
+            "faceVelocity": "e12cca008bceab05",
+            "pressure": "56cf8bdea4c208e5",
+            "pressureRhs": "461a79a772be33d5",
+            "pressureDiagonal": "c554b9d001c900b5",
+            "interfaceNormal": "b81ce78b8c104587",
+            "interfaceOffset": "bed7a134c76beccd",
+            "lowFlux": "c29d647b54c55245",
+            "highFlux": "5e480734e67f5785",
+            "limitedFlux": "ab868f1cc695c52d",
+            "characteristicClearance": "d8f9ba99b319c16a",
+            "pressureMember": "2457b79be73416ff",
+            "pressureRowMember": "b19d44e48c8172bf",
+            "extensionDepth": "8ea0044f8005882b"
+          },
+          "microsteps": 1,
+          "sourcePending": 0,
+          "pressureIterations": 28,
+          "pressureConverged": true,
+          "tracer": [
+            0,
+            0,
+            1900,
+            0,
+            0
+          ],
+          "pressureAuthority": [
+            1,
+            1,
+            1,
+            1,
+            1,
+            122,
+            122,
+            260,
+            0,
+            4294967295
+          ],
+          "scalarAuthority": [
+            1,
+            1,
+            0,
+            50,
+            50,
+            69,
+            4,
+            0,
+            4294967295
+          ]
+        },
+        {
+          "frame": 2,
+          "topologyGeneration": 2,
+          "cells": 416,
+          "rows": 872,
+          "subfaces": 880,
+          "floatHash": "932a2f4dc0dc5815",
+          "wordHash": "fe8e19992e619114",
+          "fieldHashes": {
+            "density": "d27302af03f1ca84",
+            "gamma": "18f0a6c7e4578425",
+            "capacity": "18f0a6c7e4578425",
+            "capacityBefore": "18f0a6c7e4578425",
+            "capacityAfter": "18f0a6c7e4578425",
+            "capacityRate": "9f1940f151d66525",
+            "sourceRate": "9f1940f151d66525",
+            "inflowCoverage": "445eb979cb3143a5",
+            "cellVelocity": "bf9b6a46abe94631",
+            "faceVelocity": "5fe93f507dc97185",
+            "pressure": "0b0f6b0fd916a825",
+            "pressureRhs": "9f1940f151d66525",
+            "pressureDiagonal": "9f1940f151d66525",
+            "interfaceNormal": "45afdb1da09db617",
+            "interfaceOffset": "3cf9a81ab9a3aebc",
+            "lowFlux": "b8bbd78f1f4a5625",
+            "highFlux": "b8bbd78f1f4a5625",
+            "limitedFlux": "b8bbd78f1f4a5625",
+            "pressureMember": "958a0e9d0c1cf4fb",
+            "pressureRowMember": "045f32c599789d45",
+            "extensionDepth": "e1113a22b13ca605"
+          },
+          "microsteps": 1,
+          "sourcePending": 0,
+          "pressureIterations": 0,
+          "pressureConverged": true,
+          "tracer": [
+            0,
+            0,
+            1900,
+            0,
+            0
+          ],
+          "pressureAuthority": [
+            1,
+            2,
+            2,
+            2,
+            2,
+            30,
+            118,
+            252,
+            0,
+            4294967295
+          ],
+          "scalarAuthority": [
+            2,
+            1,
+            0,
+            76,
+            76,
+            69,
+            8,
+            0,
+            4294967295
+          ]
+        },
+        {
+          "frame": 3,
+          "topologyGeneration": 4,
+          "cells": 544,
+          "rows": 1128,
+          "subfaces": 1144,
+          "floatHash": "5c643898a0dadee8",
+          "wordHash": "fc6e2b47c91396d5",
+          "fieldHashes": {
+            "density": "316fa80d00c5516e",
+            "gamma": "262a2cb3e7b21825",
+            "capacity": "262a2cb3e7b21825",
+            "capacityBefore": "262a2cb3e7b21825",
+            "capacityAfter": "262a2cb3e7b21825",
+            "capacityRate": "92c509c370c98d25",
+            "sourceRate": "92c509c370c98d25",
+            "inflowCoverage": "a0a7db463a3f93a5",
+            "cellVelocity": "56a9643999c7a214",
+            "faceVelocity": "535eede7b7f85906",
+            "pressure": "46125fee00b145cc",
+            "pressureRhs": "92c509c370c98d25",
+            "pressureDiagonal": "92c509c370c98d25",
+            "interfaceNormal": "c1f7830d0441b2c2",
+            "interfaceOffset": "5bdb546f16e81bff",
+            "lowFlux": "3b31e9dd84eaf8a5",
+            "highFlux": "3b31e9dd84eaf8a5",
+            "limitedFlux": "3b31e9dd84eaf8a5",
+            "pressureMember": "eaad3c79dfc7d737",
+            "pressureRowMember": "65a31f94c3cab145",
+            "extensionDepth": "ef09a095f20af985"
+          },
+          "microsteps": 2,
+          "sourcePending": 0,
+          "pressureIterations": 28,
+          "pressureConverged": false,
+          "tracer": [
+            0,
+            0,
+            1900,
+            0,
+            0
+          ],
+          "pressureAuthority": [
+            2,
+            3,
+            3,
+            3,
+            3,
+            176,
+            238,
+            488,
+            0,
+            4294967295
+          ],
+          "scalarAuthority": [
+            3,
+            3,
+            0,
+            144,
+            168,
+            188,
+            12,
+            0,
+            4294967295
+          ]
+        }
+      ]
+    },
+    {
+      "id": "twin-dam-collision",
+      "scene": {
+        "schemaVersion": "2.0.0",
+        "sceneId": "twin-dam-collision",
+        "randomSeed": 20260712,
+        "duration_s": 20,
+        "container": {
+          "width_m": 2.8,
+          "height_m": 0.8,
+          "depth_m": 0.8,
+          "fillFraction": 0.14285714285714285,
+          "top": "closed",
+          "fluidWallMode": "no-slip"
+        },
+        "solidVoxels": [
+          {
+            "operation": "fill",
+            "minimum": [
+              0,
+              -1,
+              0
+            ],
+            "maximumExclusive": [
+              56,
+              0,
+              16
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              -1,
+              0,
+              0
+            ],
+            "maximumExclusive": [
+              0,
+              16,
+              16
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              56,
+              0,
+              0
+            ],
+            "maximumExclusive": [
+              57,
+              16,
+              16
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              0,
+              0,
+              -1
+            ],
+            "maximumExclusive": [
+              56,
+              16,
+              0
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              0,
+              0,
+              16
+            ],
+            "maximumExclusive": [
+              56,
+              16,
+              17
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              0,
+              16,
+              0
+            ],
+            "maximumExclusive": [
+              56,
+              17,
+              16
+            ],
+            "materialId": 1
+          }
+        ],
+        "voxelDomain": {
+          "finestCellSize_m": 0.05,
+          "brickSize_cells": 8
+        },
+        "fluid": {
+          "density_kg_m3": 998.2,
+          "dynamicViscosity_Pa_s": 0.001002,
+          "surfaceTension_N_m": 0.072,
+          "gravity_m_s2": {
+            "x": 0,
+            "y": -9.80665,
+            "z": 0
+          },
+          "initialCondition": "dam-break",
+          "initialBrickSeeds_m": [
+            {
+              "x": -1.2,
+              "y": 0.2,
+              "z": -0.2
+            },
+            {
+              "x": -0.7999999999999998,
+              "y": 0.2,
+              "z": -0.2
+            },
+            {
+              "x": 0.8000000000000003,
+              "y": 0.2,
+              "z": 0.20000000000000007
+            },
+            {
+              "x": 1.2000000000000002,
+              "y": 0.2,
+              "z": 0.20000000000000007
+            }
+          ]
+        },
+        "nominalResolution": {
+          "length_m": 0.025
+        },
+        "numerics": {
+          "fixedDt_s": 0.03333333333333333,
+          "maxDt_s": 0.03333333333333333,
+          "pressureRelativeTolerance": 1e-8,
+          "pressureMaxIterations": 1000
+        },
+        "rigidBodies": [],
+        "environment": "stage",
+        "scenery": {
+          "palettes": {
+            "stage": {
+              "tint": [
+                1,
+                0.995,
+                0.985
+              ]
+            },
+            "fixture": {
+              "tint": [
+                0.94,
+                0.95,
+                1
+              ]
+            },
+            "lamp": {
+              "tint": [
+                1,
+                0.955,
+                0.88
+              ]
+            }
+          },
+          "nodes": [
+            {
+              "kind": "room-shell",
+              "id": "shell",
+              "materialModel": "room",
+              "faces": [],
+              "floor": {
+                "palette": "stage",
+                "value": 0.62
+              },
+              "wall": {
+                "palette": "stage",
+                "value": 0.62
+              },
+              "ceiling": {
+                "palette": "stage",
+                "value": 0.62
+              }
+            },
+            {
+              "kind": "box",
+              "id": "stage/floor",
+              "group": "stage",
+              "tags": [
+                "stage",
+                "floor",
+                "fluid-collider"
+              ],
+              "place": {
+                "position": {
+                  "x": 0,
+                  "y": -0.1442242280044691,
+                  "z": 0
+                },
+                "units": "metres"
+              },
+              "halfSize": {
+                "x": 4.567100553474855,
+                "y": 0.1442242280044691,
+                "z": 4.567100553474855
+              },
+              "material": {
+                "palette": "stage",
+                "value": 0.12,
+                "surface": "plaster"
+              }
+            },
+            {
+              "kind": "cylinder",
+              "id": "lamp/stem",
+              "group": "lamp",
+              "tags": [
+                "lamp",
+                "fixture"
+              ],
+              "place": {
+                "position": {
+                  "x": 0,
+                  "y": 7.924320083134443,
+                  "z": 0
+                },
+                "units": "metres"
+              },
+              "radius": 0.04326726840134073,
+              "halfHeight": 1.0816817100335183,
+              "material": {
+                "palette": "fixture",
+                "value": 0.16,
+                "surface": "brushed-metal"
+              }
+            },
+            {
+              "kind": "cone",
+              "id": "lamp/reflector",
+              "group": "lamp",
+              "tags": [
+                "lamp",
+                "fixture",
+                "light",
+                "spot-light"
+              ],
+              "place": {
+                "position": {
+                  "x": 0,
+                  "y": 6.36589717497504,
+                  "z": 0
+                },
+                "units": "metres"
+              },
+              "baseRadius": 0.5288221693497202,
+              "topRadius": 0.12018685667039092,
+              "halfHeight": 0.4767411981258841,
+              "material": {
+                "colorLinear": [
+                  1,
+                  0.955,
+                  0.88
+                ],
+                "emission": 433.3464154892728
+              }
+            }
+          ]
+        }
+      },
+      "productionOptions": {
+        "dtS": 0.03333333333333333,
+        "timeStep": "paper",
+        "atlas": {
+          "finestDimensions": [
+            56,
+            16,
+            16
+          ],
+          "brickFineResolution": 8,
+          "maximumMacroSpanBricks": null,
+          "surfaceFineRings": 1
+        },
+        "resolution": {
+          "policy": {
+            "activitySignals": true,
+            "coarseFirst": true,
+            "energyThreshold": 8,
+            "curvatureTolerance": 0.25,
+            "anticipationSeconds": 0.5,
+            "anticipationRadiusBricks": 3,
+            "surfaceQuietEpochs": 2,
+            "surfaceDisplacementToleranceCells": 1,
+            "surfaceNormalToleranceDegrees": 30,
+            "surfaceCoarseningEnabled": true,
+            "finestTravelCells": 1,
+            "fourTravelCells": 0.5,
+            "twoTravelCells": 0.25,
+            "thinFeatureCells": 2,
+            "thinFeatureDensity": 0,
+            "residencyDensity": 0.005,
+            "residencyMassFineCells": 1,
+            "surfaceDensityMinimum": 0.05,
+            "surfaceDensityMaximum": 0.95,
+            "detailTolerance": 0.08,
+            "frontLookaheadSteps": 4,
+            "topologyCadenceSteps": 1,
+            "prepareBricksPerFrame": 64,
+            "promoteEpochs": 2,
+            "demoteEpochs": 1,
+            "promoteScore": 0.6274509803921569,
+            "demoteScore": 0.3764705882352941,
+            "emergencyScore": 0.8784313725490196
+          }
+        }
+      },
+      "worldOptions": {
+        "pressureIterations": 28,
+        "pressureRelativeTolerance": 0.000001,
+        "tracerBudget": 65536
+      },
+      "frames": [
+        {
+          "frame": 0,
+          "topologyGeneration": 1,
+          "cells": 128,
+          "rows": 280,
+          "subfaces": 280,
+          "floatHash": "cf1126e9541343c5",
+          "wordHash": "b06aa577c32d5c33",
+          "fieldHashes": {
+            "density": "889c90709a74b725",
+            "gamma": "889c90709a74b725",
+            "capacity": "889c90709a74b725",
+            "capacityRate": "7da144b97d054b25",
+            "sourceRate": "7da144b97d054b25",
+            "inflowCoverage": "1873f8b64196aaa5",
+            "cellVelocity": "51d88627df287325",
+            "faceVelocity": "1873f8b64196aaa5",
+            "pressure": "7da144b97d054b25",
+            "pressureRhs": "7da144b97d054b25",
+            "pressureDiagonal": "7da144b97d054b25",
+            "interfaceNormal": "51d88627df287325",
+            "interfaceOffset": "7da144b97d054b25",
+            "lowFlux": "1873f8b64196aaa5",
+            "highFlux": "1873f8b64196aaa5",
+            "limitedFlux": "1873f8b64196aaa5",
+            "pressureMember": "8421ae126c7ced25",
+            "pressureRowMember": "09bd80efa0653705",
+            "extensionDepth": "8421ae126c7ced25"
+          },
+          "microsteps": 1,
+          "sourcePending": 0,
+          "pressureIterations": 0,
+          "pressureConverged": false,
+          "tracer": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "pressureAuthority": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            4294967295
+          ],
+          "scalarAuthority": [
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            4294967295
+          ]
+        },
+        {
+          "frame": 1,
+          "topologyGeneration": 2,
+          "cells": 144,
+          "rows": 312,
+          "subfaces": 316,
+          "floatHash": "4937f43521d23ff8",
+          "wordHash": "3d51a444977c450b",
+          "fieldHashes": {
+            "density": "84b221efe5a8d18f",
+            "gamma": "04b11679fbc7c5a5",
+            "capacity": "04b11679fbc7c5a5",
+            "capacityBefore": "04b11679fbc7c5a5",
+            "capacityAfter": "04b11679fbc7c5a5",
+            "capacityRate": "b9d0059d61083025",
+            "sourceRate": "b9d0059d61083025",
+            "inflowCoverage": "7718dd1c39c074a5",
+            "cellVelocity": "d923c84e6914a8f7",
+            "faceVelocity": "b9c8a392173a2a73",
+            "pressure": "083c8c2433a91b9d",
+            "pressureRhs": "b9d0059d61083025",
+            "pressureDiagonal": "b9d0059d61083025",
+            "interfaceNormal": "6eceeb0193d55003",
+            "interfaceOffset": "842435640fe8c6f3",
+            "lowFlux": "4aec4606c912be1c",
+            "highFlux": "fcf9446252e2602a",
+            "limitedFlux": "37381d3b39036eaa",
+            "characteristicClearance": "b9d0059d61083025",
+            "pressureMember": "04c9f25de393fee5",
+            "pressureRowMember": "5066f76b298ff985",
+            "extensionDepth": "fe670af3a85dfd65"
+          },
+          "microsteps": 1,
+          "sourcePending": 0,
+          "pressureIterations": 28,
+          "pressureConverged": false,
+          "tracer": [
+            0,
+            0,
+            2200,
+            0,
+            0
+          ],
+          "pressureAuthority": [
+            1,
+            1,
+            1,
+            1,
+            1,
+            128,
+            128,
+            256,
+            0,
+            4294967295
+          ],
+          "scalarAuthority": [
+            1,
+            2,
+            1,
+            44,
+            44,
+            0,
+            0,
+            0,
+            4294967295
+          ]
+        },
+        {
+          "frame": 2,
+          "topologyGeneration": 2,
+          "cells": 144,
+          "rows": 312,
+          "subfaces": 316,
+          "floatHash": "4937f43521d23ff8",
+          "wordHash": "3d51a444977c450b",
+          "fieldHashes": {
+            "density": "ecf460f21fba7cbd",
+            "gamma": "04b11679fbc7c5a5",
+            "capacity": "04b11679fbc7c5a5",
+            "capacityBefore": "04b11679fbc7c5a5",
+            "capacityAfter": "04b11679fbc7c5a5",
+            "capacityRate": "b9d0059d61083025",
+            "sourceRate": "b9d0059d61083025",
+            "inflowCoverage": "7718dd1c39c074a5",
+            "cellVelocity": "a43d68d6d39a2e55",
+            "faceVelocity": "2e0066415c12c99a",
+            "pressure": "632bd75a6bf315da",
+            "pressureRhs": "620f968edfce75cc",
+            "pressureDiagonal": "cce4e99709ae209f",
+            "interfaceNormal": "fd016e8e4390e3a4",
+            "interfaceOffset": "3c8786791b9499ca",
+            "lowFlux": "723e96377e8651a6",
+            "highFlux": "75b480999bccc362",
+            "limitedFlux": "21988517ba628ddf",
+            "characteristicClearance": "b9d0059d61083025",
+            "pressureMember": "04c9f25de393fee5",
+            "pressureRowMember": "369459a687979d61",
+            "extensionDepth": "fe670af3a85dfd65"
+          },
+          "microsteps": 2,
+          "sourcePending": 0,
+          "pressureIterations": 28,
+          "pressureConverged": false,
+          "tracer": [
+            0,
+            0,
+            2200,
+            0,
+            0
+          ],
+          "pressureAuthority": [
+            2,
+            2,
+            2,
+            2,
+            2,
+            23,
+            128,
+            252,
+            0,
+            4294967295
+          ],
+          "scalarAuthority": [
+            2,
+            2,
+            1,
+            80,
+            83,
+            0,
+            3,
+            0,
+            4294967295
+          ]
+        },
+        {
+          "frame": 3,
+          "topologyGeneration": 3,
+          "cells": 192,
+          "rows": 416,
+          "subfaces": 416,
+          "floatHash": "4d886820e851d065",
+          "wordHash": "64d0e1a8d4fc3207",
+          "fieldHashes": {
+            "density": "3dc4bc692c1f59a8",
+            "gamma": "9a7a6c077c5a0125",
+            "capacity": "9a7a6c077c5a0125",
+            "capacityBefore": "9a7a6c077c5a0125",
+            "capacityAfter": "9a7a6c077c5a0125",
+            "capacityRate": "9fa9e040e0eedf25",
+            "sourceRate": "9fa9e040e0eedf25",
+            "inflowCoverage": "9f1940f151d66525",
+            "cellVelocity": "d0cd32563fae35a9",
+            "faceVelocity": "f50769896cdd610b",
+            "pressure": "99f0dbaab5ce010f",
+            "pressureRhs": "9fa9e040e0eedf25",
+            "pressureDiagonal": "9fa9e040e0eedf25",
+            "interfaceNormal": "446cab45ac6e3ed9",
+            "interfaceOffset": "07a19216ac8780b1",
+            "lowFlux": "9f1940f151d66525",
+            "highFlux": "9f1940f151d66525",
+            "limitedFlux": "9f1940f151d66525",
+            "pressureMember": "663723afb3b36f5c",
+            "pressureRowMember": "c38bea895c0653a5",
+            "extensionDepth": "faf02f7ca7dbd965"
+          },
+          "microsteps": 3,
+          "sourcePending": 0,
+          "pressureIterations": 28,
+          "pressureConverged": false,
+          "tracer": [
+            0,
+            0,
+            2200,
+            0,
+            0
+          ],
+          "pressureAuthority": [
+            2,
+            3,
+            3,
+            3,
+            3,
+            25,
+            127,
+            251,
+            0,
+            4294967295
+          ],
+          "scalarAuthority": [
+            3,
+            2,
+            1,
+            88,
+            91,
+            0,
+            5,
+            0,
+            4294967295
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cm12-figure-3",
+      "scene": {
+        "schemaVersion": "2.0.0",
+        "sceneId": "cm12-figure-3",
+        "randomSeed": 2012,
+        "duration_s": 6,
+        "container": {
+          "width_m": 6.4,
+          "height_m": 6.4,
+          "depth_m": 0.4,
+          "fillFraction": 0.12,
+          "top": "closed",
+          "fluidWallMode": "free-slip",
+          "depthBoundary": "symmetry"
+        },
+        "solidVoxels": [
+          {
+            "operation": "fill",
+            "minimum": [
+              0,
+              -1,
+              0
+            ],
+            "maximumExclusive": [
+              128,
+              0,
+              8
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              -1,
+              0,
+              0
+            ],
+            "maximumExclusive": [
+              0,
+              128,
+              8
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              128,
+              0,
+              0
+            ],
+            "maximumExclusive": [
+              129,
+              128,
+              8
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              0,
+              0,
+              -1
+            ],
+            "maximumExclusive": [
+              128,
+              128,
+              0
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              0,
+              0,
+              8
+            ],
+            "maximumExclusive": [
+              128,
+              128,
+              9
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              0,
+              128,
+              0
+            ],
+            "maximumExclusive": [
+              128,
+              129,
+              8
+            ],
+            "materialId": 1
+          }
+        ],
+        "voxelDomain": {
+          "finestCellSize_m": 0.05,
+          "brickSize_cells": 8
+        },
+        "fluid": {
+          "density_kg_m3": 998.2,
+          "dynamicViscosity_Pa_s": 0.001002,
+          "surfaceTension_N_m": 0,
+          "gravity_m_s2": {
+            "x": 0,
+            "y": -10,
+            "z": 0
+          },
+          "initialCondition": "tank-fill",
+          "initialLiquidVolumes": [
+            {
+              "shape": "cylinder",
+              "center_m": {
+                "x": -2,
+                "y": 5,
+                "z": 0
+              },
+              "radius_m": 0.30000000000000004,
+              "halfHeight_m": 0.2
+            },
+            {
+              "shape": "cylinder",
+              "center_m": {
+                "x": -0.4,
+                "y": 5.6000000000000005,
+                "z": 0
+              },
+              "radius_m": 0.35000000000000003,
+              "halfHeight_m": 0.2
+            },
+            {
+              "shape": "cylinder",
+              "center_m": {
+                "x": 1.4000000000000001,
+                "y": 4.800000000000001,
+                "z": 0
+              },
+              "radius_m": 0.30000000000000004,
+              "halfHeight_m": 0.2
+            },
+            {
+              "shape": "cylinder",
+              "center_m": {
+                "x": 2.4000000000000004,
+                "y": 5.4,
+                "z": 0
+              },
+              "radius_m": 0.2,
+              "halfHeight_m": 0.2
+            }
+          ]
+        },
+        "nominalResolution": {
+          "length_m": 0.05
+        },
+        "numerics": {
+          "fixedDt_s": 0.03333333333333333,
+          "maxDt_s": 0.03333333333333333,
+          "pressureRelativeTolerance": 1e-8,
+          "pressureMaxIterations": 1000
+        },
+        "rigidBodies": [],
+        "scenery": {
+          "palettes": {
+            "white": {
+              "tint": [
+                1,
+                1,
+                1
+              ]
+            },
+            "daylight": {
+              "tint": [
+                1,
+                1,
+                1
+              ]
+            }
+          },
+          "nodes": [
+            {
+              "kind": "room-shell",
+              "id": "shell",
+              "materialModel": "room",
+              "floor": {
+                "palette": "white",
+                "value": 0.9
+              },
+              "wall": {
+                "colorLinear": [
+                  1,
+                  1,
+                  1
+                ]
+              },
+              "ceiling": {
+                "palette": "white",
+                "value": 0.9
+              }
+            },
+            {
+              "kind": "box",
+              "id": "light/softbox",
+              "group": "softbox",
+              "tags": [
+                "softbox",
+                "light",
+                "emits-negative-y"
+              ],
+              "place": {
+                "position": {
+                  "x": 0,
+                  "y": 7.359999999999999,
+                  "z": -0.04000000000000001
+                },
+                "anchor": "floor"
+              },
+              "halfSize": {
+                "x": 1.7920000000000003,
+                "y": 0.028000000000000004,
+                "z": 0.11200000000000002
+              },
+              "material": {
+                "palette": "daylight",
+                "value": 1,
+                "emission": 1
+              }
+            }
+          ]
+        },
+        "environment": "stage"
+      },
+      "productionOptions": {
+        "dtS": 0.03333333333333333,
+        "timeStep": "paper",
+        "atlas": {
+          "finestDimensions": [
+            128,
+            128,
+            8
+          ],
+          "brickFineResolution": 8,
+          "maximumMacroSpanBricks": null,
+          "surfaceFineRings": 1
+        },
+        "resolution": {
+          "policy": {
+            "activitySignals": true,
+            "coarseFirst": true,
+            "energyThreshold": 8,
+            "curvatureTolerance": 0.25,
+            "anticipationSeconds": 0.5,
+            "anticipationRadiusBricks": 3,
+            "surfaceQuietEpochs": 2,
+            "surfaceDisplacementToleranceCells": 1,
+            "surfaceNormalToleranceDegrees": 30,
+            "surfaceCoarseningEnabled": true,
+            "finestTravelCells": 1,
+            "fourTravelCells": 0.5,
+            "twoTravelCells": 0.25,
+            "thinFeatureCells": 2,
+            "thinFeatureDensity": 0,
+            "residencyDensity": 0.005,
+            "residencyMassFineCells": 1,
+            "surfaceDensityMinimum": 0.05,
+            "surfaceDensityMaximum": 0.95,
+            "detailTolerance": 0.08,
+            "frontLookaheadSteps": 4,
+            "topologyCadenceSteps": 1,
+            "prepareBricksPerFrame": 64,
+            "promoteEpochs": 2,
+            "demoteEpochs": 1,
+            "promoteScore": 0.6274509803921569,
+            "demoteScore": 0.3764705882352941,
+            "emergencyScore": 0.8784313725490196
+          }
+        }
+      },
+      "worldOptions": {
+        "pressureIterations": 28,
+        "pressureRelativeTolerance": 0.000001,
+        "tracerBudget": 65536
+      },
+      "frames": [
+        {
+          "frame": 0,
+          "topologyGeneration": 1,
+          "cells": 1184,
+          "rows": 2522,
+          "subfaces": 2522,
+          "floatHash": "486372e9422604d5",
+          "wordHash": "e30703687d073d12",
+          "fieldHashes": {
+            "density": "ce7020b049025b25",
+            "gamma": "f460c83dc5d6fc25",
+            "capacity": "f460c83dc5d6fc25",
+            "capacityRate": "3937315ab6495525",
+            "sourceRate": "3937315ab6495525",
+            "inflowCoverage": "1d135631f9e36d45",
+            "cellVelocity": "4442361d0de48725",
+            "faceVelocity": "1d135631f9e36d45",
+            "pressure": "3937315ab6495525",
+            "pressureRhs": "3937315ab6495525",
+            "pressureDiagonal": "3937315ab6495525",
+            "interfaceNormal": "71315a421ae04155",
+            "interfaceOffset": "ef59ee207b59d83d",
+            "lowFlux": "1d135631f9e36d45",
+            "highFlux": "1d135631f9e36d45",
+            "limitedFlux": "1d135631f9e36d45",
+            "pressureMember": "f9ccb3a228990fa5",
+            "pressureRowMember": "9a473e788d4f85cd",
+            "extensionDepth": "f9ccb3a228990fa5"
+          },
+          "microsteps": 1,
+          "sourcePending": 0,
+          "pressureIterations": 0,
+          "pressureConverged": false,
+          "tracer": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "pressureAuthority": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            4294967295
+          ],
+          "scalarAuthority": [
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            4294967295
+          ]
+        },
+        {
+          "frame": 1,
+          "topologyGeneration": 3,
+          "cells": 1344,
+          "rows": 2838,
+          "subfaces": 2850,
+          "floatHash": "5163cd28c564bdf5",
+          "wordHash": "65c57ebc9438d217",
+          "fieldHashes": {
+            "density": "367446d139db8715",
+            "gamma": "584df4631e313525",
+            "capacity": "584df4631e313525",
+            "capacityBefore": "584df4631e313525",
+            "capacityAfter": "584df4631e313525",
+            "capacityRate": "437aec553acb4725",
+            "sourceRate": "437aec553acb4725",
+            "inflowCoverage": "2b000bbcb99e5805",
+            "cellVelocity": "06c8c200487bbf05",
+            "faceVelocity": "c47a2c3ba8f9e555",
+            "pressure": "a8aede98480ffc59",
+            "pressureRhs": "437aec553acb4725",
+            "pressureDiagonal": "437aec553acb4725",
+            "interfaceNormal": "fc8767bf5abfda80",
+            "interfaceOffset": "4f6b060110622796",
+            "lowFlux": "b56129523665b3c5",
+            "highFlux": "b56129523665b3c5",
+            "limitedFlux": "b56129523665b3c5",
+            "pressureMember": "9ae4c272f7666bbd",
+            "pressureRowMember": "70a6349ddba4f47d",
+            "extensionDepth": "ee05ad041bff9ee5"
+          },
+          "microsteps": 1,
+          "sourcePending": 0,
+          "pressureIterations": 16,
+          "pressureConverged": true,
+          "tracer": [
+            0,
+            0,
+            41209,
+            0,
+            0
+          ],
+          "pressureAuthority": [
+            1,
+            1,
+            1,
+            1,
+            1,
+            3616,
+            3616,
+            11102,
+            0,
+            4294967295
+          ],
+          "scalarAuthority": [
+            1,
+            2,
+            1,
+            170,
+            194,
+            272,
+            16,
+            0,
+            4294967295
+          ]
+        },
+        {
+          "frame": 2,
+          "topologyGeneration": 3,
+          "cells": 1344,
+          "rows": 2838,
+          "subfaces": 2850,
+          "floatHash": "5163cd28c564bdf5",
+          "wordHash": "65c57ebc9438d217",
+          "fieldHashes": {
+            "density": "1097219f89ee0ea3",
+            "gamma": "584df4631e313525",
+            "capacity": "584df4631e313525",
+            "capacityBefore": "584df4631e313525",
+            "capacityAfter": "584df4631e313525",
+            "capacityRate": "437aec553acb4725",
+            "sourceRate": "437aec553acb4725",
+            "inflowCoverage": "2b000bbcb99e5805",
+            "cellVelocity": "454f8cc485d4b870",
+            "faceVelocity": "cda4767b4548dc33",
+            "pressure": "172e47ee1e6cf97f",
+            "pressureRhs": "d893a7b038546e15",
+            "pressureDiagonal": "6c4e9cde643cba98",
+            "interfaceNormal": "03cbf7c38a4f99da",
+            "interfaceOffset": "a77fc356b9a41757",
+            "lowFlux": "a598c2dd99b17dc5",
+            "highFlux": "5c4691812aeb2057",
+            "limitedFlux": "bb5930a4ed2cbd76",
+            "characteristicClearance": "a40f282690ecba81",
+            "pressureMember": "fcb0ed4f395a7dc1",
+            "pressureRowMember": "50835b6c56a83ceb",
+            "extensionDepth": "b50e01b2f0b3fa3e"
+          },
+          "microsteps": 1,
+          "sourcePending": 0,
+          "pressureIterations": 28,
+          "pressureConverged": false,
+          "tracer": [
+            0,
+            0,
+            41209,
+            0,
+            0
+          ],
+          "pressureAuthority": [
+            3,
+            2,
+            2,
+            2,
+            2,
+            3488,
+            3488,
+            10710,
+            0,
+            4294967295
+          ],
+          "scalarAuthority": [
+            2,
+            3,
+            0,
+            294,
+            310,
+            237,
+            50,
+            0,
+            4294967295
+          ]
+        },
+        {
+          "frame": 3,
+          "topologyGeneration": 4,
+          "cells": 1408,
+          "rows": 2974,
+          "subfaces": 2986,
+          "floatHash": "b4518ffeaf83e015",
+          "wordHash": "243e15cad7988d9f",
+          "fieldHashes": {
+            "density": "8f634ec198bbab91",
+            "gamma": "1c4ffe66000e7f25",
+            "capacity": "1c4ffe66000e7f25",
+            "capacityBefore": "1c4ffe66000e7f25",
+            "capacityAfter": "1c4ffe66000e7f25",
+            "capacityRate": "8a3e8632d2a4db25",
+            "sourceRate": "8a3e8632d2a4db25",
+            "inflowCoverage": "bfc4257850f7c285",
+            "cellVelocity": "cd430f272353e688",
+            "faceVelocity": "957e0cb60260a1cc",
+            "pressure": "0578dee7718c049e",
+            "pressureRhs": "8a3e8632d2a4db25",
+            "pressureDiagonal": "8a3e8632d2a4db25",
+            "interfaceNormal": "83f9b859dbb9a2ed",
+            "interfaceOffset": "20b8e08ff69f2858",
+            "lowFlux": "dce25fc2743afe45",
+            "highFlux": "dce25fc2743afe45",
+            "limitedFlux": "dce25fc2743afe45",
+            "pressureMember": "3c4ca5b0d06b12bf",
+            "pressureRowMember": "b2a16b18cbaf601d",
+            "extensionDepth": "8c428a3944380ba5"
+          },
+          "microsteps": 2,
+          "sourcePending": 0,
+          "pressureIterations": 28,
+          "pressureConverged": false,
+          "tracer": [
+            0,
+            0,
+            41209,
+            0,
+            0
+          ],
+          "pressureAuthority": [
+            3,
+            3,
+            3,
+            3,
+            3,
+            1312,
+            3440,
+            10556,
+            0,
+            4294967295
+          ],
+          "scalarAuthority": [
+            3,
+            3,
+            0,
+            337,
+            361,
+            222,
+            48,
+            0,
+            4294967295
+          ]
+        }
+      ]
+    }
+  ]
+}

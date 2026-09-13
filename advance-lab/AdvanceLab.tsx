@@ -59,41 +59,21 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ScenePickerPopover } from "../components/ScenePickerPopover";
 import { ThemeSwitch } from "../components/ThemeSwitch";
 import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
-import { sceneCatalogCards } from "../lib/core/scenes";
+import { sceneDocument } from "../lib/core/scene-definition";
+import { findSceneDefinition, SCENE_CATALOG, sceneCatalogCards } from "../lib/core/scenes";
 import {
   advanceCosts, ADVANCE_NOTES, ADVANCE_STAGE_ORDER, advanceSeamCost,
   advanceStageWork, advanceWorkModel, ADVANCE_DISPATCH_KINDS,
   type AdvanceCost, type AdvanceKernel, type AdvanceStageId,
   type AdvanceWorkScene,
-} from "../lib/methods/adaptive-volume/advance-slice/advance-work";
+} from "./advance-work";
+import { AdvanceLabController, type AdvanceAuthoredScene,
+  type AdvanceRefinementRegion } from "../lib/physics-wasm/advance-controller";
 import {
-  createSliceLattice, type LatticeCell, latticeCellAt, latticePlane,
-  type LatticePlane, type SliceLattice,
-} from "../lib/methods/adaptive-volume/advance-slice/slice-lattice";
-import {
-  type AdvanceSlice, advanceSlice, createAdvanceSlice, injectAdvanceSliceLiquid,
-  resetAdvanceSlice, SLICE_RUNGS, sliceCell, sliceRowX, sliceRowY,
-} from "../lib/methods/adaptive-volume/advance-slice/slice-solver";
-import {
-  sliceDropFromCanvas, sliceInjectionDemandedBrickKeys,
-  type SliceInjectionReceipt,
-} from "../lib/methods/adaptive-volume/advance-slice/slice-liquid-injection";
-import {
-  DEFAULT_SLICE_ENFORCEMENT_CELL_SIZE, SLICE_ENFORCEMENT_CELL_SIZES,
-  type SliceEnforcementCellSize, sliceEnforcementCapacityRemaining,
-  sliceEnforcementRegionAt, sliceEnforcementRegionCanvasBox,
-  sliceEnforcementRegionFromCanvasDrag, sliceEnforcementRegions,
-  withSliceEnforcementRegion,
-} from "../lib/methods/adaptive-volume/advance-slice/slice-enforcement-region";
-import type { FluidRefinementRegion } from "../lib/core/model";
-import {
-  ADVANCE_PRODUCTION_SCENES, DEFAULT_ADVANCE_PRODUCTION_SCENE_ID,
-  productionSceneSliceSeedById,
-} from "../lib/methods/adaptive-volume/advance-slice/production-scene-slice";
-import type { SliceSceneSeed } from
-  "../lib/methods/adaptive-volume/advance-slice/slice-scene-seed";
-import { reconstructSliceSharedRdf, type SliceSharedRdfIsocontour } from
-  "../lib/methods/adaptive-volume/advance-slice/slice-presentation-publication";
+  ADVANCE_BRICK_FINE, ADVANCE_RUNGS, advanceCell, advanceCellAt, advanceCellPlane,
+  advanceRowX, advanceRowY, type AdvanceCellView, type AdvancePlane,
+  type AdvanceRdfView, type AdvanceView,
+} from "../lib/physics-wasm/advance-view";
 import {
   SPARSE_CM12_STAGE_BANDS, sparseCM12Stage,
 } from "../lib/methods/adaptive-volume/sparse-cm12-stages";
@@ -103,7 +83,7 @@ import {
   SLICE_OVERLAY_ORDER, SLICE_OVERLAYS, type SliceOverlayId,
   drawSlice, syncPalette,
 } from "./lenses";
-import { slicePresentationReady, slicePresentationRevision } from "./playback";
+import { advancePresentationReady, advancePresentationRevision } from "./playback";
 
 /** Milliseconds between advances — slow enough to watch a rung change. */
 const FRAME_MS = 46;
@@ -117,6 +97,7 @@ const MENU_WIDTH = 244;
 const MENU_HEIGHT = 520;
 /** Which scene the page is reading, kept in the URL so a refresh returns to it. */
 const SCENE_PARAM = "scene";
+const DEFAULT_SCENE_ID = "water-box-dam-break";
 /** Arms the drop, the same key the studio's BALL gesture answers to. */
 const DROP_KEY = "b";
 /** Arms the enforcement box. */
@@ -209,6 +190,27 @@ const CELL_STATE: readonly (readonly [string, string, string])[] = [
 type Metric = "workgroups" | "dispatches";
 type SurfaceView = "plic" | "shared-rdf";
 
+interface InjectionReceipt {
+  readonly accepted: boolean;
+  readonly bricksDemanded: number;
+  readonly bricksActivated: number;
+  readonly bricksPromoted: number;
+  readonly cellsWetted: number;
+  readonly areaRequestedFine: number;
+  readonly areaAdmittedFine: number;
+  readonly acceptedGeneration: number;
+  readonly candidateGeneration: number;
+  readonly fault?: { readonly stage?: string } | null;
+}
+
+interface LabRegion extends AdvanceRefinementRegion {
+  readonly id: string;
+}
+
+const ENFORCEMENT_CELL_SIZES = ADVANCE_RUNGS;
+const ENFORCEMENT_CAPACITY = 8;
+const DEFAULT_ENFORCEMENT_CELL_SIZE: (typeof ADVANCE_RUNGS)[number] = 2;
+
 /* Which surface the picture reconstructs. Both are read off the same accepted
  * fractions and normals, so this is a choice of reconstruction and never of
  * state — the water is identical under either. */
@@ -236,7 +238,7 @@ interface Readings {
   readonly fault: string | null;
   /** Drops taken this run, and what the last one did. */
   readonly injections: number;
-  readonly drop: SliceInjectionReceipt | null;
+  readonly drop: InjectionReceipt | null;
   /** The scene as the work model prices it, captured with the counts it prices. */
   readonly work: AdvanceWorkScene;
 }
@@ -249,19 +251,27 @@ const NO_SCENE: AdvanceWorkScene = {
 const AT_REST: Readings = { frame: 0, microsteps: 1, maxVelocity: 0, drift: 0,
   churn: 0, markers: 0, cells: 0, rows: 0, bricks: 0, rungs: 0, fault: null,
   presentationRevision: "unpublished", injections: 0, drop: null, work: NO_SCENE };
-const read = (s: AdvanceSlice): Readings => ({
-  presentationRevision: slicePresentationRevision(s),
-  frame: s.frame, microsteps: s.microsteps, maxVelocity: s.maxVelocity,
-  drift: s.drift, churn: s.churn, markers: s.markers.length,
-  cells: s.topology.accepted.cells.length,
-  rows: s.topology.accepted.rows.length,
-  bricks: s.topology.accepted.bricks.filter(brick => brick.active !== false).length,
-  rungs: new Set(s.topology.accepted.bricks
-    .filter(brick => brick.active !== false).map(brick => brick.resolution)).size,
-  fault: s.fault ? s.fault.stage : null,
-  injections: s.injections, drop: s.lastInjection ?? null,
-  work: workScene(s),
-});
+const read = (view: AdvanceView): Readings => {
+  const receipt = view.receipt;
+  const resolution = view.metadata.resolution as Record<string, unknown> | null | undefined;
+  const churn = ["activatedBrickCount", "retiredBrickCount", "promotedBrickCount", "demotedBrickCount"]
+    .reduce((sum, key) => sum + Number(resolution?.[key] ?? 0), 0);
+  const fault = receipt.fault as { stage?: string } | null | undefined;
+  return {
+  presentationRevision: advancePresentationRevision(view),
+  frame: view.revision.frame, microsteps: Number(receipt.microsteps ?? 1),
+  maxVelocity: Number(receipt.maxVelocity ?? 0), drift: Number(receipt.drift ?? 0),
+  churn, markers: view.markers.filter(marker => marker.alive).length,
+  cells: view.graph.cells.length, rows: view.graph.rows.length,
+  bricks: view.graph.bricks.filter(brick => brick.active !== false).length,
+  rungs: new Set(view.graph.bricks.filter(brick => brick.active !== false)
+    .map(brick => brick.resolution)).size,
+  fault: fault?.stage ?? null,
+  injections: view.revision.injections,
+  drop: (receipt.lastInjection as InjectionReceipt | null | undefined) ?? null,
+  work: workScene(view),
+  };
+};
 
 /**
  * A ball the pointer is placing, in canvas fine cells.
@@ -281,8 +291,8 @@ interface Aim {
 
 /** One cell, as the probe reads it: the drawn block plus the fine row state. */
 interface Probe {
-  readonly cell: LatticeCell;
-  readonly plane: LatticePlane | null;
+  readonly cell: AdvanceCellView;
+  readonly plane: AdvancePlane | null;
   readonly u: number;
   readonly v: number;
   readonly aperture: number;
@@ -292,13 +302,37 @@ interface Probe {
 }
 
 const SCENE_IDS: ReadonlySet<string> =
-  new Set(ADVANCE_PRODUCTION_SCENES.map(scene => scene.id));
+  new Set(SCENE_CATALOG.map(scene => scene.id));
+
+function authoredScene(id: string): AdvanceAuthoredScene | null {
+  const definition = findSceneDefinition(id);
+  return definition ? Object.freeze({ id, label: definition.name,
+    document: sceneDocument(definition) }) : null;
+}
+
+function authoredRegions(scene: AdvanceAuthoredScene, next: AdvanceView): readonly LabRegion[] {
+  const document = scene.document as { fluid?: { refinementRegions?: readonly {
+    id: string; min_m: { x: number; y: number; z: number }; max_m: { x: number; y: number; z: number };
+    minimumCellSize_cells: number; maximumCellSize_cells?: number }[] } };
+  const metadata = next.metadata.scene as { cellSizeM?: number; frame?: {
+    centerZ?: number; originX?: number; originY?: number } } | undefined;
+  const frame = metadata?.frame, cell = metadata?.cellSizeM;
+  if (!frame || !(cell && cell > 0)) return [];
+  const z = frame.centerZ ?? 0, ox = frame.originX ?? 0, oy = frame.originY ?? 0;
+  return (document.fluid?.refinementRegions ?? []).filter(region => z >= region.min_m.z && z <= region.max_m.z)
+    .map(region => ({ id: region.id,
+      minimumFine: [(region.min_m.x - ox) / cell, (region.min_m.y - oy) / cell],
+      maximumFine: [(region.max_m.x - ox) / cell, (region.max_m.y - oy) / cell],
+      minimumCellWidth: region.minimumCellSize_cells,
+      ...(region.maximumCellSize_cells === undefined ? {}
+        : { maximumCellWidth: region.maximumCellSize_cells }) }));
+}
 
 /** The scene asked for in the URL, if it is one this lab can actually seed. */
 function requestedSceneId(): string {
-  if (typeof window === "undefined") return DEFAULT_ADVANCE_PRODUCTION_SCENE_ID;
+  if (typeof window === "undefined") return DEFAULT_SCENE_ID;
   const asked = new URLSearchParams(window.location.search).get(SCENE_PARAM);
-  return asked && SCENE_IDS.has(asked) ? asked : DEFAULT_ADVANCE_PRODUCTION_SCENE_ID;
+  return asked && SCENE_IDS.has(asked) ? asked : DEFAULT_SCENE_ID;
 }
 
 /**
@@ -311,30 +345,26 @@ function requestedSceneId(): string {
 function publishSceneId(id: string): void {
   if (typeof window === "undefined") return;
   const url = new URL(window.location.href);
-  if (id === DEFAULT_ADVANCE_PRODUCTION_SCENE_ID) url.searchParams.delete(SCENE_PARAM);
+  if (id === DEFAULT_SCENE_ID) url.searchParams.delete(SCENE_PARAM);
   else url.searchParams.set(SCENE_PARAM, id);
   window.history.replaceState(null, "", `${url.pathname}${url.search}`);
 }
 
-function workScene(s: AdvanceSlice): AdvanceWorkScene {
-  const scene = s.scene.production?.scene;
-  const topology = s.topology.accepted;
-  const bricks = topology.bricks.filter(brick => brick.active !== false);
-  const hasStaticWorld = Boolean(s.scene.production?.solidWorld.pages.length
-    || s.scene.production?.solidWorld.regions?.length);
+function workScene(view: AdvanceView): AdvanceWorkScene {
+  const bricks = view.graph.bricks.filter(brick => brick.active !== false);
   return {
-    label: s.scene.label,
-    provenance: `${s.scene.id} · accepted generation ${topology.generation}`,
-    cells: topology.cells.length,
-    rows: topology.rows.length,
+    label: view.scene.label,
+    provenance: `${view.scene.id} · accepted generation ${view.graph.topologyGeneration}`,
+    cells: view.graph.cells.length,
+    rows: view.graph.rows.length,
     bricks: bricks.length,
     rungs: new Set(bricks.map(brick => brick.resolution)).size,
     gates: {
-      solids: hasStaticWorld || Boolean(scene?.rigidBodies.length),
-      inflow: Boolean(scene?.fluid.inflow),
-      tracers: s.markers.length > 0,
-      world: Boolean(s.scene.sourceAtlas),
-      unfrozen: scene?.systems?.fluid !== false,
+      solids: view.scene.hasStaticWorld || view.scene.hasRigidBodies,
+      inflow: view.scene.hasInflow,
+      tracers: Boolean(view.metadata.tracersEnabled),
+      world: true,
+      unfrozen: view.scene.unfrozen,
     },
   };
 }
@@ -403,14 +433,16 @@ function Fold({ id, title, meta, flag, open, toggle, children }: {
 export function AdvanceLab(): React.JSX.Element {
   const canvas = useRef<HTMLCanvasElement>(null);
   const viewport = useRef<HTMLDivElement>(null);
-  const slice = useRef<AdvanceSlice | null>(null);
-  const lattice = useRef<SliceLattice | null>(null);
+  const controller = useRef<AdvanceLabController | null>(null);
+  const view = useRef<AdvanceView | null>(null);
+  const advanceBusy = useRef(false);
+  const nextRegionId = useRef(0);
   /* The slice is mutable, while React rendering is interruptible. Play may
    * advance only after the preceding revision has actually reached the canvas;
    * otherwise an RDF derived during render can be painted over a later VOF
    * field and look exactly like the owner-local PLIC fallback. */
   const paintedPresentationRevision = useRef<string | null>(null);
-  const paintedSharedRdf = useRef<SliceSharedRdfIsocontour | undefined>(undefined);
+  const paintedSharedRdf = useRef<AdvanceRdfView | undefined>(undefined);
 
   const [selected, setSelected] = useState<AdvanceStageId>("conservative-transport");
   const [step, setStep] = useState<number | null>(null);
@@ -420,15 +452,17 @@ export function AdvanceLab(): React.JSX.Element {
    * subject, and an annotation nobody turned on is chrome over it. */
   const [overlays, setOverlays] = useState<ReadonlySet<SliceOverlayId>>(
     () => new Set<SliceOverlayId>());
-  const [sceneId, setSceneId] = useState(DEFAULT_ADVANCE_PRODUCTION_SCENE_ID);
+  const [sceneId, setSceneId] = useState(DEFAULT_SCENE_ID);
   const [picking, setPicking] = useState(false);
-  const [seed, setSeed] = useState<SliceSceneSeed | null>(null);
+  const [authored, setAuthored] = useState<AdvanceAuthoredScene | null>(null);
+  const [regionState, setRegionState] = useState<readonly LabRegion[]>([]);
   const [budget, setBudget] = useState(28);
   const [dt, setDt] = useState(CM12_PAPER_DT_S);
   /* Every scene opens still. A reader arrives at t=0 and starts it by hand;
    * water that is already moving has decided for them what to look at. */
   const [playing, setPlaying] = useState(false);
   const [readings, setReadings] = useState<Readings>(AT_REST);
+  const [publishedView, setPublishedView] = useState<AdvanceView | null>(null);
   const [openSeam, setOpenSeam] = useState<string | null>(null);
   const [folds, setFolds] = useState<ReadonlySet<string>>(() => new Set());
   const [pinned, setPinned] = useState<Probe | null>(null);
@@ -450,7 +484,7 @@ export function AdvanceLab(): React.JSX.Element {
    * because a reader comparing two placements of the same bound should not
    * re-pick it every time. */
   const [enforceCells, setEnforceCells] =
-    useState<SliceEnforcementCellSize>(DEFAULT_SLICE_ENFORCEMENT_CELL_SIZE);
+    useState<(typeof ADVANCE_RUNGS)[number]>(DEFAULT_ENFORCEMENT_CELL_SIZE);
   const [holdAtOneTier, setHoldAtOneTier] = useState(false);
   const dragging = useRef<{ pointer: number; anchor: readonly [number, number];
     moved: boolean } | null>(null);
@@ -492,45 +526,50 @@ export function AdvanceLab(): React.JSX.Element {
 
   useEffect(() => {
     const initialId = requestedSceneId();
-    const initialSeed = productionSceneSliceSeedById(initialId, { dt: live.current.dt });
-    const s = createAdvanceSlice(initialSeed);
-    slice.current = s;
-    lattice.current = createSliceLattice(s);
+    let handle = 0, last = 0, cancelled = false;
+    const publish = (next: AdvanceView): void => {
+      if (cancelled) return;
+      view.current = next;
+      setPublishedView(next);
+      setReadings(read(next));
+    };
+    void AdvanceLabController.create().then(async nextController => {
+      if (cancelled) { await nextController.destroy(); return; }
+      controller.current = nextController;
+      const scene = authoredScene(initialId);
+      if (!scene) throw new Error(`Unknown Advance Lab scene ${initialId}`);
+      setSceneId(initialId);
+      setAuthored(scene);
+      const initialView = await nextController.load(scene, { pressureIterations: live.current.budget,
+        production: { dtS: live.current.dt, timeStep: "paper" } });
+      setRegionState(authoredRegions(scene, initialView));
+      publish(initialView);
+    }).catch(error => setRuntimeFault(error instanceof Error ? error.message : String(error)));
 
-    let handle = 0, last = 0, opened = false;
     const loop = (time: number): void => {
       handle = requestAnimationFrame(loop);
-      if (!opened) {
-        /* The first frame publishes the seeded scene, paused at t=0. The loop
-         * keeps running on an empty tick, or Play would have nothing to
-         * resume. */
-        opened = true;
-        setSceneId(initialId);
-        setSeed(initialSeed);
-        setReadings(read(slice.current ?? s));
-        return;
-      }
       if (!live.current.playing || time - last < FRAME_MS) return;
-      const current = slice.current;
-      if (!current) return;
-      if (!slicePresentationReady(paintedPresentationRevision.current, current)) return;
+      const current = view.current, active = controller.current;
+      if (!current || !active || advanceBusy.current) return;
+      if (!advancePresentationReady(paintedPresentationRevision.current, current)) return;
       last = time;
       const began = performance.now();
-      try {
-        advanceSlice(current, live.current.budget);
+      advanceBusy.current = true;
+      void active.advance(live.current.dt).then(next => {
+        publish(next);
         noteStepCost(stepCosts.current, performance.now() - began, setStepMs);
-      } catch (error) {
+        setRuntimeFault(null);
+      }).catch(error => {
         const message = error instanceof Error ? error.message : String(error);
         live.current.playing = false;
         setPlaying(false);
         setRuntimeFault(message);
-        setReadings(read(current));
-        return;
-      }
-      setReadings(read(current));
+      }).finally(() => { advanceBusy.current = false; });
     };
     handle = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(handle);
+    return () => { cancelled = true; cancelAnimationFrame(handle);
+      const active = controller.current; controller.current = null; view.current = null;
+      if (active) void active.destroy(); };
   }, []);
 
   /* The picture is sized to the room it is given, so the water is the page at
@@ -603,14 +642,11 @@ export function AdvanceLab(): React.JSX.Element {
 
   /** Rebuild from the selected production document's deterministic t=0 state. */
   const reseed = useCallback((id: string): void => {
-    const s = slice.current;
-    if (!s || !SCENE_IDS.has(id)) return;
-    const nextSeed = productionSceneSliceSeedById(id, { dt: live.current.dt });
-    const next = resetAdvanceSlice(s, nextSeed);
-    slice.current = next;
-    lattice.current = createSliceLattice(next);
+    const active = controller.current, scene = authoredScene(id);
+    if (!active || !scene || !SCENE_IDS.has(id)) return;
     setSceneId(id);
-    setSeed(nextSeed);
+    setAuthored(null);
+    setRegionState([]);
     setPinned(null);
     setHover(null);
     setAim(null);
@@ -622,18 +658,22 @@ export function AdvanceLab(): React.JSX.Element {
     /* A new scene is a new cost: the old median priced a different lattice. */
     stepCosts.current = [];
     setStepMs(null);
-    setReadings(read(next));
     publishSceneId(id);
+    void active.load(scene, { pressureIterations: live.current.budget,
+      production: { dtS: live.current.dt, timeStep: "paper" } }).then(next => {
+      view.current = next; setPublishedView(next); setAuthored(scene);
+      setRegionState(authoredRegions(scene, next)); setReadings(read(next));
+    }).catch(error => setRuntimeFault(error instanceof Error ? error.message : String(error)));
   }, []);
 
   /** Re-time the next advance. The water keeps its state; only the clock moves. */
   const retime = useCallback((next: number): void => {
     setDt(next);
-    const s = slice.current;
-    if (!s) return;
-    const scene = { ...s.scene, dt: next };
-    s.scene = scene;
-    setSeed(scene);
+    const active = controller.current;
+    if (!active) return;
+    void active.setTimeStep(next).then(nextView => {
+      view.current = nextView; setPublishedView(nextView); setReadings(read(nextView)); setRuntimeFault(null);
+    }).catch(error => setRuntimeFault(error instanceof Error ? error.message : String(error)));
   }, []);
 
   const toggleFold = useCallback((id: string): void => setFolds(current => {
@@ -657,19 +697,19 @@ export function AdvanceLab(): React.JSX.Element {
       overlays.has(id) ? SLICE_OVERLAYS[id].keys : []),
   ], [lens, overlays]);
 
+  const displayNx = publishedView?.nx ?? 1;
+  const displayNy = publishedView?.ny ?? 1;
+
   /* Taken off the seed rather than the solver: the seed is the run's copy of
    * the document, so a box drawn a moment ago is in it before the advance that
    * will obey it has run. */
-  const regions = useMemo(() => {
-    if (!seed) return [];
-    return sliceEnforcementRegions(seed).flatMap(region => {
-      const box = sliceEnforcementRegionCanvasBox(seed, region);
-      return box ? [{ region, box }] : [];
-    });
-  }, [seed]);
+  const regions = useMemo(() => regionState.map(region => ({ region, box: {
+    minFine: [region.minimumFine[0], displayNy - region.maximumFine[1]] as const,
+    maxFine: [region.maximumFine[0], displayNy - region.minimumFine[1]] as const,
+  } })), [regionState, displayNy]);
 
-  const capacityLeft = seed ? sliceEnforcementCapacityRemaining(seed) : 0;
-  const menuRegion: FluidRefinementRegion | undefined = menu?.regionId === undefined
+  const capacityLeft = ENFORCEMENT_CAPACITY - regionState.length;
+  const menuRegion: LabRegion | undefined = menu?.regionId === undefined
     ? undefined : regions.find(drawn => drawn.region.id === menu.regionId)?.region;
   /* Sixteen lenses do not fit a menu, so the list scrolls — and a scrolled list
    * that opens anywhere but on the lens you are looking at is a list you have
@@ -677,8 +717,6 @@ export function AdvanceLab(): React.JSX.Element {
   const scrollIntoMenu = (node: HTMLButtonElement | null): void =>
     node?.scrollIntoView({ block: "nearest" });
 
-  const displayNx = seed?.dimensions[0] ?? 1;
-  const displayNy = seed?.dimensions[1] ?? 1;
   /* Whole pixels per cell, so a grid line lands on one rather than across two. */
   const scale = Math.max(2, Math.floor(Math.min(
     room.width / displayNx, room.height / displayNy)));
@@ -687,26 +725,23 @@ export function AdvanceLab(): React.JSX.Element {
   /* The picture is redrawn when the water moves, the lens changes or the room
    * resizes — never when the pointer does, so probing a cell costs nothing. */
   useEffect(() => {
-    const target = canvas.current, s = slice.current, l = lattice.current;
-    if (!target || !s || !l) return;
+    const target = canvas.current, s = publishedView;
+    if (!target || !s) return;
     /* Do not combine a React reading with a slice that the transport has
      * already moved beyond it. The play gate above will leave the newer
      * revision alone until React retries this effect with its matching read. */
-    if (readings.presentationRevision !== slicePresentationRevision(s)) return;
+    if (readings.presentationRevision !== advancePresentationRevision(s)) return;
     const g = target.getContext("2d");
     if (!g) return;
     syncPalette(target);
     /* Cells are measured in CSS pixels and drawn at device resolution: one
      * transform here keeps every hairline and label in the lenses honest. */
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const context = { g, s, lattice: l, scale };
+    const context = { g, s, lattice: s.lattice, scale };
     /* Derive and consume RDF in one synchronous publication boundary. Keeping
      * it in render-time memo state separated these two reads of the mutable
      * slice, which is harmless for STEP and racy while Play is advancing. */
-    const sharedRdf: SliceSharedRdfIsocontour | undefined =
-      surfaceView === "shared-rdf"
-        ? reconstructSliceSharedRdf(s.topology.accepted, s.fields, s.numericalTopology)
-        : undefined;
+    const sharedRdf: AdvanceRdfView | undefined = surfaceView === "shared-rdf" ? s.rdf : undefined;
     drawSlice(context, sharedRdf);
     g.save();
     lens.draw(context);
@@ -722,7 +757,7 @@ export function AdvanceLab(): React.JSX.Element {
     }
     paintedSharedRdf.current = sharedRdf;
     paintedPresentationRevision.current = readings.presentationRevision;
-  }, [readings, lens, surfaceView, overlays, scale, dpr, themeTick]);
+  }, [publishedView, readings, lens, surfaceView, overlays, scale, dpr, themeTick]);
 
   const model = useMemo(() => advanceWorkModel({
     scene: readings.work,
@@ -734,11 +769,14 @@ export function AdvanceLab(): React.JSX.Element {
   }), [readings.work, readings.bricks, budget, readings.maxVelocity,
     readings.churn, readings.markers]);
   const costs = useMemo(() => advanceCosts(model), [model]);
-  const emptySlice = Boolean(seed && !seed.density.some(value => value > 0));
-  const unsupported = seed?.dynamic?.filter(entry => !entry.supported) ?? [];
+  const emptySlice = Boolean(publishedView && !publishedView.liquidVolumeFine.some(value => value > 0));
+  const unsupported = publishedView?.scene.limitations ?? [];
   const caveats = unsupported.length + (emptySlice ? 1 : 0);
-  const sharedRdfReceipt = surfaceView === "shared-rdf"
-    ? paintedSharedRdf.current?.receipt : undefined;
+  const sharedRdfReceipt = surfaceView === "shared-rdf" ? publishedView?.rdf.receipt : undefined;
+  const sceneInfo = (publishedView?.metadata.scene ?? {}) as Record<string, unknown>;
+  const sceneFrame = (sceneInfo.frame ?? {}) as Record<string, unknown>;
+  const sourceDimensions = Array.isArray(sceneFrame.sourceDimensions)
+    ? sceneFrame.sourceDimensions as readonly number[] : [];
 
   const key: keyof AdvanceCost = metric === "workgroups" ? "workgroups" : "dispatches";
   const peak = Math.max(1, ...costs.map(c => c[key]));
@@ -754,20 +792,23 @@ export function AdvanceLab(): React.JSX.Element {
   };
 
   const probeAt = (target: HTMLCanvasElement, clientX: number, clientY: number): Probe | null => {
-    const s = slice.current, l = lattice.current;
-    if (!s || !l) return null;
+    const s = view.current;
+    if (!s) return null;
     const box = target.getBoundingClientRect();
     const fx = Math.floor(((clientX - box.left) / box.width) * s.nx);
     const fy = Math.floor(((clientY - box.top) / box.height) * s.ny);
-    const cell = latticeCellAt(l, s, fx, fy);
+    const cell = advanceCellAt(s.lattice, s, fx, fy);
     if (!cell || !cell.open) return null;
-    const left = fx > 0 ? s.K[sliceCell(s, fx - 1, fy)]! : 0;
+    const left = fx > 0 ? s.capacityFine[advanceCell(s, fx - 1, fy)]! : 0;
     return {
-      cell, plane: latticePlane(l, cell),
-      u: s.u[sliceRowX(s, fx, fy)]!, v: s.v[sliceRowY(s, fx, fy)]!,
-      aperture: Math.min(left, s.K[sliceCell(s, fx, fy)]!),
-      pressure: s.p[sliceCell(s, fx, fy)]!, rung: s.rung[cell.brick]!,
-      material: s.materialId[sliceCell(s, fx, fy)]!,
+      cell, plane: advanceCellPlane(s.lattice, cell),
+      u: s.faceVelocityXFine[advanceRowX(s, fx, fy)]!,
+      v: s.faceVelocityYFine[advanceRowY(s, fx, fy)]!,
+      aperture: Math.min(left, s.capacityFine[advanceCell(s, fx, fy)]!),
+      pressure: s.pressureFine[advanceCell(s, fx, fy)]!,
+      rung: s.brickRung[Math.floor(fy / ADVANCE_BRICK_FINE) * s.bx
+        + Math.floor(fx / ADVANCE_BRICK_FINE)]!,
+      material: s.materialFine[advanceCell(s, fx, fy)]!,
     };
   };
 
@@ -781,13 +822,13 @@ export function AdvanceLab(): React.JSX.Element {
     ["a", p.aperture.toFixed(2), "open fraction of the row"],
     ["p", p.pressure.toFixed(3), "leaf pressure; 0 at the free surface"],
     ["material", String(p.material), "production SolidWorld material id"],
-    ["rung", `${SLICE_RUNGS[p.rung]}²`, "cells per B8 brick in this 2D ladder"],
+    ["rung", `${ADVANCE_RUNGS[p.rung]}²`, "cells per B8 brick in this 2D ladder"],
   ];
 
   /** Where the pointer is, in canvas fine cells — continuous, not a cell index. */
   const aimAt = (target: HTMLCanvasElement, clientX: number, clientY: number):
   readonly [number, number] | null => {
-    const s = slice.current;
+    const s = view.current;
     if (!s) return null;
     const box = target.getBoundingClientRect();
     return [((clientX - box.left) / box.width) * s.nx,
@@ -803,78 +844,66 @@ export function AdvanceLab(): React.JSX.Element {
    * worse than no preview.
    */
   const proposeAim = (at: readonly [number, number], radius: number): Aim | null => {
-    const s = slice.current;
+    const s = view.current;
     if (!s) return null;
-    const drop = sliceDropFromCanvas([s.nx, s.ny], at, radius);
-    const keys = sliceInjectionDemandedBrickKeys(s.topology.accepted.bricks, drop);
     const demanded: (readonly [number, number, number])[] = [];
-    for (const brick of s.topology.accepted.bricks) {
-      if (!keys.has(brick.key)) continue;
-      const span = (brick.spanBricks ?? 1) * 8;
-      /* Bricks are addressed source-up and drawn canvas-down, the one
-       * reflection this page performs; the top edge is the far one. */
-      demanded.push([brick.coordinate[0] * 8,
-        s.ny - (brick.coordinate[1] * 8 + span), span]);
+    for (const brick of s.graph.bricks) {
+      const span = brick.spanBricks * ADVANCE_BRICK_FINE;
+      const x = brick.coordinate[0]! * ADVANCE_BRICK_FINE;
+      const y = s.ny - (brick.coordinate[1]! * ADVANCE_BRICK_FINE + span);
+      const closestX = Math.max(x, Math.min(at[0], x + span));
+      const closestY = Math.max(y, Math.min(at[1], y + span));
+      if (Math.hypot(at[0] - closestX, at[1] - closestY) <= radius) demanded.push([x, y, span]);
     }
     return { x: at[0], y: at[1], radius, demanded };
   };
 
-  /**
-   * Land the ball, and say what happened to it.
-   *
-   * A drop is a live field edit even at t=0, which is production's own rule:
-   * authoring it into the scene document would change the seed and rebuild the
-   * world, so the run a reader is adding water to would be the thing the
-   * gesture destroyed. The consequence is that Reset takes the water back —
-   * a drop belongs to the run, not to the scene.
-   */
   const commitDrop = (at: readonly [number, number], radius: number): void => {
-    const s = slice.current;
-    if (!s) return;
-    const receipt = injectAdvanceSliceLiquid(s,
-      sliceDropFromCanvas([s.nx, s.ny], at, radius));
-    setReadings(read(s));
-    /* A refused drop is the one outcome the picture cannot show, so it is the
-     * one that opens its own fold rather than waiting to be looked for. */
-    if (!receipt.accepted) setFolds(current => new Set(current).add("drop"));
+    const active = controller.current, s = view.current;
+    if (!active || !s) return;
+    void active.injectLiquid([at[0], s.ny - at[1]], radius).then(next => {
+      view.current = next;
+      setPublishedView(next);
+      const nextReadings = read(next);
+      setReadings(nextReadings);
+      if (nextReadings.drop && !nextReadings.drop.accepted) {
+        setFolds(current => new Set(current).add("drop"));
+      }
+      setRuntimeFault(null);
+    }).catch(error => setRuntimeFault(error instanceof Error ? error.message : String(error)));
   };
 
-  /**
-   * Land a drawn enforcement box, and hold the run to it.
-   *
-   * A live edit to the run's copy of the document, for the reason the drop is
-   * one: authoring it into the scene would re-seed the world and destroy the
-   * run it was drawn on. It bites at the next advance, because the resolution
-   * policy is a stage of the advance and nothing here reaches around it.
-   */
-  const drawRegion = (anchor: readonly [number, number],
-    at: readonly [number, number]): void => {
-    const s = slice.current;
-    if (!s || sliceEnforcementCapacityRemaining(s.scene) <= 0) return;
-    const region = sliceEnforcementRegionFromCanvasDrag(s.scene, anchor, at, {
-      minimumCellSize_cells: enforceCells,
-      ...(holdAtOneTier ? { maximumCellSize_cells: enforceCells } : {}),
-    });
-    reseat(withSliceEnforcementRegion(s.scene, region.id, region));
+  const updateRegions = (next: readonly LabRegion[]): void => {
+    const active = controller.current;
+    if (!active) return;
+    setRegionState(next);
+    void active.setRefinementRegions(next).then(nextView => {
+      view.current = nextView;
+      setPublishedView(nextView);
+      setReadings(read(nextView));
+      setRuntimeFault(null);
+    }).catch(error => setRuntimeFault(error instanceof Error ? error.message : String(error)));
   };
 
-  /** Replace the run's document copy in place, the way re-timing does. */
-  const reseat = (next: SliceSceneSeed): void => {
-    const s = slice.current;
-    if (!s) return;
-    s.scene = next;
-    setSeed(next);
+  const drawRegion = (anchor: readonly [number, number], at: readonly [number, number]): void => {
+    const s = view.current;
+    if (!s || capacityLeft <= 0) return;
+    const lowX = Math.max(0, Math.floor(Math.min(anchor[0], at[0]) / enforceCells) * enforceCells);
+    const highX = Math.min(s.nx, Math.ceil(Math.max(anchor[0], at[0]) / enforceCells) * enforceCells);
+    const canvasLowY = Math.max(0, Math.floor(Math.min(anchor[1], at[1]) / enforceCells) * enforceCells);
+    const canvasHighY = Math.min(s.ny, Math.ceil(Math.max(anchor[1], at[1]) / enforceCells) * enforceCells);
+    updateRegions([...regionState, { id: `advance-region-${++nextRegionId.current}`,
+      minimumFine: [lowX, s.ny - canvasHighY], maximumFine: [highX, s.ny - canvasLowY],
+      minimumCellWidth: enforceCells,
+      ...(holdAtOneTier ? { maximumCellWidth: enforceCells } : {}) }]);
   };
 
-  /** Change one drawn box's bounds, or take it away. */
-  const amendRegion = (region: FluidRefinementRegion,
-    next: FluidRefinementRegion | undefined): void => {
-    const s = slice.current;
-    if (!s) return;
-    reseat(withSliceEnforcementRegion(s.scene, region.id, next));
+  const amendRegion = (region: LabRegion, next: LabRegion | undefined): void => {
+    updateRegions(next ? regionState.map(value => value.id === region.id ? next : value)
+      : regionState.filter(value => value.id !== region.id));
   };
 
-  const dropRows = (drop: SliceInjectionReceipt):
+  const dropRows = (drop: InjectionReceipt):
   readonly (readonly [string, string, string])[] => [
     ["cells", String(drop.cellsWetted), "leaves whose volume the dose actually raised"],
     ["area", `${drop.areaAdmittedFine.toFixed(2)} / ${drop.areaRequestedFine.toFixed(2)}`,
@@ -883,7 +912,7 @@ export function AdvanceLab(): React.JSX.Element {
       `of ${drop.bricksDemanded} the ball's bounding box demanded — the conservative test, so a page sharing only an edge is woken and then takes no liquid`],
     ["generation", `${drop.acceptedGeneration} → ${drop.candidateGeneration}`,
       "the drop costs one topology generation, and that generation also carries whatever ordinary adaptation the fields were already asking for"],
-    ...(drop.fault ? [["fault", drop.fault.stage,
+    ...(drop.fault ? [["fault", drop.fault.stage ?? "injection",
       "the transaction was refused, so the drop was refused whole — a half-landed ball is silently missing the half that needed a page"] as const] : []),
   ];
 
@@ -907,7 +936,7 @@ export function AdvanceLab(): React.JSX.Element {
             data-scene-selector-toggle=""
             aria-haspopup="dialog" aria-expanded={picking}
             onClick={() => setPicking(open => !open)}>
-            <b>{seed?.label ?? "Loading scene"}</b>
+            <b>{authored?.label ?? "Loading scene"}</b>
             <em>{displayNx}×{displayNy} centre-Z slice</em>
             <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2 3.6 5 6.6 8 3.6" /></svg>
           </button>
@@ -930,19 +959,21 @@ export function AdvanceLab(): React.JSX.Element {
         <button type="button" aria-pressed={playing} onClick={() => setPlaying(v => !v)}>
           {playing ? "Pause" : "Play"}</button>
         <button type="button" onClick={() => {
-          const s = slice.current;
-          if (!s) return;
+          const active = controller.current;
+          if (!active || advanceBusy.current) return;
           const began = performance.now();
-          try {
-            advanceSlice(s, budget);
+          advanceBusy.current = true;
+          void active.advance(dt).then(next => {
+            view.current = next;
+            setPublishedView(next);
             noteStepCost(stepCosts.current, performance.now() - began, setStepMs);
             setRuntimeFault(null);
-          } catch (error) {
+            setReadings(read(next));
+          }).catch(error => {
             setPlaying(false);
             live.current.playing = false;
             setRuntimeFault(error instanceof Error ? error.message : String(error));
-          }
-          setReadings(read(s));
+          }).finally(() => { advanceBusy.current = false; });
         }}>Step</button>
         <button type="button" onClick={() => reseed(sceneId)}>Reset</button>
       </div>
@@ -997,15 +1028,16 @@ export function AdvanceLab(): React.JSX.Element {
               at,
               /* What the press was *on*, which is what makes the enforcement
                  half of this menu about one box rather than about a list. */
-              regionId: at && slice.current
-                ? sliceEnforcementRegionAt(slice.current.scene, at)?.id : undefined,
+              regionId: at ? regions.find(({ box }) => at[0] >= box.minFine[0]
+                && at[0] <= box.maxFine[0] && at[1] >= box.minFine[1]
+                && at[1] <= box.maxFine[1])?.region.id : undefined,
             });
           }}>
           <canvas ref={canvas} className={styles.canvas} role="img"
             width={Math.round(displayNx * scale * dpr)}
             height={Math.round(displayNy * scale * dpr)}
             style={{ width: displayNx * scale, height: displayNy * scale }}
-            aria-label={`${representing ? "The state entering the advance" : declaration.label} for ${seed?.label ?? "the selected production scene"} on its ${displayNx} by ${displayNy} centre-Z slice at frame ${readings.frame}`}
+            aria-label={`${representing ? "The state entering the advance" : declaration.label} for ${authored?.label ?? "the selected production scene"} on its ${displayNx} by ${displayNy} centre-Z slice at frame ${readings.frame}`}
             onPointerDown={event => {
               if (!tool || event.button !== 0) return;
               const at = aimAt(event.currentTarget, event.clientX, event.clientY);
@@ -1131,9 +1163,9 @@ export function AdvanceLab(): React.JSX.Element {
             {regions.map(({ region, box }) =>
               <span key={region.id} className={styles.regionTag} style={{
                 left: box.minFine[0] * scale, top: box.minFine[1] * scale,
-              }}>{region.maximumCellSize_cells === region.minimumCellSize_cells
-                  ? `held at ${region.minimumCellSize_cells}`
-                  : `≥ ${region.minimumCellSize_cells} cell${region.minimumCellSize_cells === 1 ? "" : "s"}`}
+              }}>{region.maximumCellWidth === region.minimumCellWidth
+                  ? `held at ${region.minimumCellWidth}`
+                  : `≥ ${region.minimumCellWidth} cell${region.minimumCellWidth === 1 ? "" : "s"}`}
               </span>)}
           </div>}
 
@@ -1213,7 +1245,7 @@ export function AdvanceLab(): React.JSX.Element {
 
           {hover && <div className={styles.probe} style={{ left: hover.x, top: hover.y }}>
             <div className={styles.probeHead}>
-              brick {hover.probe.cell.brick} · rung {SLICE_RUNGS[hover.probe.rung]}² ·
+              brick {hover.probe.cell.brick} · rung {ADVANCE_RUNGS[hover.probe.rung]}² ·
               {" "}{hover.probe.cell.width}×{hover.probe.cell.height} fine cells
             </div>
             {([["V", hover.probe.cell.volume.toFixed(3)],
@@ -1302,28 +1334,28 @@ export function AdvanceLab(): React.JSX.Element {
               {menuRegion ? <>
                 <div className={styles.menuLadder} role="group"
                   aria-label="Smallest pressure cell allowed inside this region">
-                  {SLICE_ENFORCEMENT_CELL_SIZES.map(size =>
+                  {ENFORCEMENT_CELL_SIZES.map(size =>
                     <button type="button" key={size} className={styles.rung}
-                      aria-pressed={menuRegion.minimumCellSize_cells === size}
+                      aria-pressed={menuRegion.minimumCellWidth === size}
                       title={`Hold fully contained bricks to cells of ${size} finest cell${size === 1 ? "" : "s"}`}
                       onClick={() => amendRegion(menuRegion, {
-                        ...menuRegion, minimumCellSize_cells: size,
+                        ...menuRegion, minimumCellWidth: size,
                         /* A ceiling that was equal to the floor is a region
                            held at one tier, and follows the floor. A wider
                            authored ceiling is kept, only never left below the
                            floor it now has to be above. */
-                        ...(menuRegion.maximumCellSize_cells === undefined ? {}
-                          : { maximumCellSize_cells:
-                            menuRegion.maximumCellSize_cells === menuRegion.minimumCellSize_cells
-                              ? size : Math.max(size, menuRegion.maximumCellSize_cells) }),
+                        ...(menuRegion.maximumCellWidth === undefined ? {}
+                          : { maximumCellWidth:
+                            menuRegion.maximumCellWidth === menuRegion.minimumCellWidth
+                              ? size : Math.max(size, menuRegion.maximumCellWidth) }),
                       })}>{size}</button>)}
                 </div>
                 <button type="button" className={styles.menuItem}
-                  aria-pressed={menuRegion.maximumCellSize_cells !== undefined}
+                  aria-pressed={menuRegion.maximumCellWidth !== undefined}
                   onClick={() => amendRegion(menuRegion,
-                    menuRegion.maximumCellSize_cells === undefined
-                      ? { ...menuRegion, maximumCellSize_cells: menuRegion.minimumCellSize_cells }
-                      : { ...menuRegion, maximumCellSize_cells: undefined })}>
+                    menuRegion.maximumCellWidth === undefined
+                      ? { ...menuRegion, maximumCellWidth: menuRegion.minimumCellWidth }
+                      : { ...menuRegion, maximumCellWidth: undefined })}>
                   <b>Hold at one tier</b>
                   <em>equal bounds stop contained bricks coarsening as well as refining</em></button>
                 <button type="button" className={styles.menuItem}
@@ -1333,7 +1365,7 @@ export function AdvanceLab(): React.JSX.Element {
               </> : <>
                 <div className={styles.menuLadder} role="group"
                   aria-label="Smallest pressure cell a drawn region will allow">
-                  {SLICE_ENFORCEMENT_CELL_SIZES.map(size =>
+                  {ENFORCEMENT_CELL_SIZES.map(size =>
                     <button type="button" key={size} className={styles.rung}
                       aria-pressed={enforceCells === size}
                       title={`Draw boxes that hold contained bricks to cells of ${size} finest cell${size === 1 ? "" : "s"}`}
@@ -1370,7 +1402,15 @@ export function AdvanceLab(): React.JSX.Element {
               <input id="advance-budget" className={styles.menuRange} type="range"
                 min={4} max={80} step={4} value={budget}
                 title="Pressure iterations one advance may spend. Too few and the divergence the picture shows is the solver giving up, not the water."
-                onChange={event => setBudget(Number(event.target.value))} />
+                onChange={event => {
+                  const iterations = Number(event.target.value);
+                  setBudget(iterations);
+                  const active = controller.current;
+                  if (!active) return;
+                  void active.setPressureBudget(iterations).then(next => {
+                    view.current = next; setPublishedView(next); setReadings(read(next)); setRuntimeFault(null);
+                  }).catch(error => setRuntimeFault(error instanceof Error ? error.message : String(error)));
+                }} />
             </div>
           </div>}
         </div>
@@ -1503,9 +1543,7 @@ export function AdvanceLab(): React.JSX.Element {
               water was being added to. Reset therefore takes it back.
             </p>
             <p className={styles.fidelity}>
-              {seed?.boundary.z === "symmetry"
-                ? "This scene's z boundary is symmetry, so the disk is the exact unit-depth reduction of the ball the app drops — the two runs stay comparable step for step."
-                : "This scene has bounded z, so the disk is the centre-plane sample of a dropped ball at the instant it lands and no later: a real ball's slice is not z-invariant, and the fall diverges from production immediately."}
+              The disk is the centre-plane sample of the production ball at the instant it lands.
             </p>
           </Fold>}
 
@@ -1558,20 +1596,19 @@ export function AdvanceLab(): React.JSX.Element {
           </Fold>}
 
           <Fold id="scene" title="This scene" flag={caveats > 0}
-            meta={caveats > 0 ? `${caveats} caveat${caveats === 1 ? "" : "s"}` : seed?.id}
+            meta={caveats > 0 ? `${caveats} caveat${caveats === 1 ? "" : "s"}` : authored?.id}
             open={folds.has("scene")} toggle={toggleFold}>
-            {seed && <>
-              <p className={styles.summary}>{seed.note}</p>
+            {authored && <>
+              <p className={styles.summary}>{authored.label}</p>
               <dl className={styles.facts}>
-                <div><dt>catalogue id</dt><dd>{seed.id}</dd></div>
+                <div><dt>catalogue id</dt><dd>{authored.id}</dd></div>
                 <div><dt>production grid</dt><dd>{displayNx} × {displayNy} ×
-                  {" "}{seed.sourceAtlas?.dimensions[2] ?? "—"}</dd></div>
-                <div><dt>physical plane</dt><dd>z = {seed.viewport.centerZ.toFixed(3)} m · source
-                  {" "}cell {seed.viewport.centerCellZ} centred at
-                  {" "}{seed.viewport.sourceCellCenterZ.toPrecision(3)} m</dd></div>
-                <div><dt>finest cell / step</dt><dd>{seed.viewport.sourceCellSize.toPrecision(4)} m ·
-                  {" "}{seed.dt.toPrecision(4)} s
-                  {seed.dt === CM12_PAPER_DT_S ? " (CM12 paper)" : " (lab override)"}</dd></div>
+                  {" "}{sourceDimensions[2] ?? "—"}</dd></div>
+                <div><dt>physical plane</dt><dd>z = {Number(sceneFrame.centerZ ?? 0).toFixed(3)} m · source
+                  {" "}cell {String(sceneFrame.centerCellZ ?? "—")}</dd></div>
+                <div><dt>finest cell / step</dt><dd>{Number(sceneInfo.cellSizeM ?? 0).toPrecision(4)} m ·
+                  {" "}{dt.toPrecision(4)} s
+                  {dt === CM12_PAPER_DT_S ? " (CM12 paper)" : " (lab override)"}</dd></div>
                 <div><dt>sparse authority</dt><dd>{n(readings.bricks)} bricks ·
                   {" "}{n(readings.cells)} cells · {n(readings.rows)} rows</dd></div>
               </dl>
@@ -1596,8 +1633,7 @@ export function AdvanceLab(): React.JSX.Element {
               </p>}
               {(emptySlice || unsupported.length > 0) && <div className={styles.warnings}>
                 {emptySlice && <span>This authored centre slice contains no initial liquid.</span>}
-                {unsupported.map(entry => <span key={`${entry.kind}/${entry.label}`}>
-                  {entry.label}: {entry.detail}</span>)}
+                {unsupported.map(entry => <span key={entry}>{entry}</span>)}
               </div>}
             </>}
           </Fold>

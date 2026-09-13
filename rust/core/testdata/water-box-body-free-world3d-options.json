@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "options": {
+    "dimension": 3,
+    "runEpoch": 39,
+    "commandSequence": 0,
+    "tracerBudget": 0,
+    "methodValues": {
+      "timeStep": "scene",
+      "pressureIterations": 12,
+      "pressureRelativeTolerance": 0.000001,
+      "brickFineResolution": "8",
+      "surfaceFineRings": 1,
+      "selectorMode": "coarse-first"
+    }
+  },
+  "advance": {
+    "commandSequence": 1,
+    "dt_s": 0.03333333333333333
+  }
+}

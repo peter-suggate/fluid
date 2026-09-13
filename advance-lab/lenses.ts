@@ -7,18 +7,12 @@
  * see about one scene, not fifteen separate diagrams.
  */
 import {
-  buildSliceLattice, type LatticeCell, latticeCellAt, type LatticePlane,
-  latticePlane, type SliceLattice,
-} from "../lib/methods/adaptive-volume/advance-slice/slice-lattice";
-import {
-  type AdvanceSlice, clipUnitSquare, SLICE_BRICK, SLICE_RUNGS,
-  sliceCell, sliceRowX, sliceRowY, UNIT_SQUARE,
-} from "../lib/methods/adaptive-volume/advance-slice/slice-solver";
-import type { AdvanceStageId } from "../lib/methods/adaptive-volume/advance-slice/advance-work";
-import type { SliceSharedRdfIsocontour } from
-  "../lib/methods/adaptive-volume/advance-slice/slice-presentation-publication";
-import { sliceRdfTriangles, type SliceRdfVertex } from
-  "../lib/methods/adaptive-volume/advance-slice/slice-rdf-triangulation";
+  ADVANCE_BRICK_FINE, ADVANCE_RUNGS, advanceCell, advanceCellAt, advanceCellPlane,
+  advanceRdfTriangles, advanceRowX, advanceRowY, clipUnitSquare, UNIT_SQUARE,
+  type AdvanceCellView, type AdvanceLattice, type AdvancePlane, type AdvanceRdfVertex,
+  type AdvanceRdfView, type AdvanceView,
+} from "../lib/physics-wasm/advance-view";
+import type { AdvanceStageId } from "./advance-work";
 
 /**
  * The drawn palette, resolved from the page's own theme.
@@ -115,8 +109,8 @@ export interface Lens {
 
 export interface LensContext {
   readonly g: CanvasRenderingContext2D;
-  readonly s: AdvanceSlice;
-  readonly lattice: SliceLattice;
+  readonly s: AdvanceView;
+  readonly lattice: AdvanceLattice;
   /** Pixels per fine cell. */
   readonly scale: number;
 }
@@ -166,7 +160,7 @@ function label(
 function drawSolidRaster(c: LensContext): void {
   const { g, s, scale: S } = c;
   for (let y = 0; y < s.ny; y += 1) for (let x = 0; x < s.nx; x += 1) {
-    const closed = 1 - s.K[sliceCell(s, x, y)]!;
+    const closed = 1 - s.capacityFine[advanceCell(s, x, y)]!;
     if (closed <= 1e-4) continue;
     g.globalAlpha = Math.max(0.18, closed);
     g.fillStyle = PALETTE.solid;
@@ -175,7 +169,7 @@ function drawSolidRaster(c: LensContext): void {
   g.globalAlpha = 1;
 }
 
-function clippedScalarTriangle(points: readonly SliceRdfVertex[]): number[] {
+function clippedScalarTriangle(points: readonly AdvanceRdfVertex[]): number[] {
   const polygon: [number, number, number][] = [];
   for (let i = 0; i < points.length; i += 1) {
     const a = points[i]!, b = points[(i + 1) % points.length]!;
@@ -195,15 +189,6 @@ function appendPolygon(g: CanvasRenderingContext2D, polygon: readonly number[], 
   g.closePath();
 }
 
-function polygonArea(polygon: readonly number[]): number {
-  let twice = 0;
-  for (let index = 0; index < polygon.length; index += 2) {
-    const next = (index + 2) % polygon.length;
-    twice += polygon[index]! * polygon[next + 1]! - polygon[next]! * polygon[index + 1]!;
-  }
-  return Math.abs(twice) / 2;
-}
-
 export function rdfMinorityAreaDistorted(acceptedLiquid: number,
   representedLiquid: number, area: number): boolean {
   const accepted = acceptedLiquid <= area / 2 ? acceptedLiquid : area - acceptedLiquid;
@@ -214,8 +199,11 @@ export function rdfMinorityAreaDistorted(acceptedLiquid: number,
   return smaller <= 0 ? larger > 0 : larger > 1.5 * smaller;
 }
 
-export function sliceRdfPlicFallbackCells(s: AdvanceSlice, lattice: SliceLattice,
-  sharedRdf: SliceSharedRdfIsocontour): ReadonlySet<number> {
+interface RdfDisplaySource { readonly nx: number; readonly ny: number }
+interface RdfDisplaySurface { readonly vertexPhiFine: Float32Array }
+
+export function sliceRdfPlicFallbackCells(s: RdfDisplaySource, lattice: AdvanceLattice,
+  sharedRdf: RdfDisplaySurface): ReadonlySet<number> {
   const result = new Set<number>(), stride = s.nx + 1, phi = sharedRdf.vertexPhiFine;
   for (const cell of lattice.cells) {
     if (!cell.open || cell.capacity < 0.999999 * cell.width * cell.height
@@ -242,8 +230,8 @@ export interface SliceRdfDisplayCell {
 }
 
 /** Exact per-partial-cell branch and scalar samples consumed by `drawSlice`. */
-export function inspectSliceRdfDisplay(s: AdvanceSlice, lattice: SliceLattice,
-  sharedRdf: SliceSharedRdfIsocontour): readonly SliceRdfDisplayCell[] {
+export function inspectSliceRdfDisplay(s: RdfDisplaySource, lattice: AdvanceLattice,
+  sharedRdf: RdfDisplaySurface): readonly SliceRdfDisplayCell[] {
   const fallback = sliceRdfPlicFallbackCells(s, lattice, sharedRdf);
   const stride = s.nx + 1, phi = sharedRdf.vertexPhiFine;
   return lattice.cells.filter(cell => cell.open && cell.fill > 1e-6 && cell.fill < 1 - 1e-6)
@@ -265,9 +253,8 @@ export function inspectSliceRdfDisplay(s: AdvanceSlice, lattice: SliceLattice,
 }
 
 /** Grid at each brick's rung, liquid cut by PLIC, bricks, then solids. */
-export function drawSlice(c: LensContext, sharedRdf?: SliceSharedRdfIsocontour): void {
+export function drawSlice(c: LensContext, sharedRdf?: AdvanceRdfView): void {
   const { g, s, lattice, scale: S } = c;
-  buildSliceLattice(lattice, s);
   g.clearRect(0, 0, s.nx * S, s.ny * S);
   g.fillStyle = PALETTE.ground;
   g.fillRect(0, 0, s.nx * S, s.ny * S);
@@ -283,9 +270,9 @@ export function drawSlice(c: LensContext, sharedRdf?: SliceSharedRdfIsocontour):
       // Immersed/cut-cell geometry does not yet expose the open polygon needed
       // by RDF. It is rendered by the explicit PLIC/fill fallback below and is
       // counted in the preview receipt rather than silently crossed.
-      const dense = sliceCell(s, x, canvasY), capacity = s.K[dense]!;
+      const dense = advanceCell(s, x, canvasY), capacity = s.capacityFine[dense]!;
       if (capacity < 0.999999) continue;
-      const acceptedFill = s.V[dense]! / Math.max(capacity, 1e-8);
+      const acceptedFill = s.liquidVolumeFine[dense]! / Math.max(capacity, 1e-8);
       // A pure accepted owner is stronger evidence than a render-only RDF.
       // Publishing it directly prevents a shared-vertex fit from carving an
       // enclosed opposite-phase cell out of homogeneous bulk. Mixed owners
@@ -295,14 +282,14 @@ export function drawSlice(c: LensContext, sharedRdf?: SliceSharedRdfIsocontour):
         continue;
       }
       if (acceptedFill <= 1e-6) continue;
-      const owner = latticeCellAt(lattice, s, x + 0.5, canvasY + 0.5);
+      const owner = advanceCellAt(lattice, s, x + 0.5, canvasY + 0.5);
       if (owner && plicFallback.has(owner.topologyCell)) continue;
       const a = phi[x + stride * y]!;
       const b = phi[x + 1 + stride * y]!;
       const d = phi[x + stride * (y + 1)]!;
       const e = phi[x + 1 + stride * (y + 1)]!;
       if (![a, b, d, e].every(Number.isFinite)) continue;
-      for (const triangle of sliceRdfTriangles(x, canvasY, d, e, b, a))
+      for (const triangle of advanceRdfTriangles(x, canvasY, d, e, b, a))
         appendPolygon(g, clippedScalarTriangle(triangle), S);
     }
   }
@@ -313,7 +300,7 @@ export function drawSlice(c: LensContext, sharedRdf?: SliceSharedRdfIsocontour):
     const x = cell.x0 * S, y = cell.y0 * S;
     const w = cell.width * S, h = cell.height * S;
     if (cell.fill >= 1 - 1e-6) { g.rect(x, y, w, h); continue; }
-    const plane = plicFallback.has(cell.topologyCell) ? cell.plane : latticePlane(lattice, cell);
+    const plane = plicFallback.has(cell.topologyCell) ? cell.plane : advanceCellPlane(lattice, cell);
     /* No published plane means the solver could not resolve this interface, so
      * the picture falls back to the monotone reading the solver itself falls
      * back to: the liquid held at the bottom of the cell. Gravity is +y here —
@@ -352,10 +339,10 @@ export function drawSlice(c: LensContext, sharedRdf?: SliceSharedRdfIsocontour):
   g.lineWidth = 1.4;
   g.strokeStyle = PALETTE.brick;
   for (let by = 0; by < s.by; by++) for (let bx = 0; bx < s.bx; bx++) {
-    g.globalAlpha = 0.3 + 0.17 * s.rung[by * s.bx + bx]!;
-    g.strokeRect(bx * SLICE_BRICK * S, by * SLICE_BRICK * S,
-      Math.min(SLICE_BRICK, s.nx - bx * SLICE_BRICK) * S,
-      Math.min(SLICE_BRICK, s.ny - by * SLICE_BRICK) * S);
+    g.globalAlpha = 0.3 + 0.17 * s.brickRung[by * s.bx + bx]!;
+    g.strokeRect(bx * ADVANCE_BRICK_FINE * S, by * ADVANCE_BRICK_FINE * S,
+      Math.min(ADVANCE_BRICK_FINE, s.nx - bx * ADVANCE_BRICK_FINE) * S,
+      Math.min(ADVANCE_BRICK_FINE, s.ny - by * ADVANCE_BRICK_FINE) * S);
   }
   g.globalAlpha = 1;
   drawSolidRaster(c);
@@ -367,14 +354,14 @@ function velocityField(
   const { g, s, scale: S } = c;
   g.strokeStyle = color;
   g.globalAlpha = alpha;
-  const u = before ? s.uPre : s.u;
-  const v = before ? s.vPre : s.v;
+  const u = before ? s.faceVelocityXBeforePressure : s.faceVelocityXFine;
+  const v = before ? s.faceVelocityYBeforePressure : s.faceVelocityYFine;
   for (let y = 1; y < s.ny - 1; y += stride) {
     for (let x = 1; x < s.nx - 1; x += stride) {
-      const i = sliceCell(s, x, y);
-      if (s.K[i] <= 0.05 || s.V[i] <= 1e-5) continue;
-      const ux = 0.5 * (u[sliceRowX(s, x, y)]! + u[sliceRowX(s, x + 1, y)]!);
-      const uy = 0.5 * (v[sliceRowY(s, x, y)]! + v[sliceRowY(s, x, y + 1)]!);
+      const i = advanceCell(s, x, y);
+      if (s.capacityFine[i] <= 0.05 || s.liquidVolumeFine[i] <= 1e-5) continue;
+      const ux = 0.5 * (u[advanceRowX(s, x, y)]! + u[advanceRowX(s, x + 1, y)]!);
+      const uy = 0.5 * (v[advanceRowY(s, x, y)]! + v[advanceRowY(s, x, y + 1)]!);
       arrow(g, (x + 0.5) * S, (y + 0.5) * S, ux * S * 1.5, uy * S * 1.5, 1.1);
     }
   }
@@ -396,7 +383,7 @@ const onCellEdge = (value: number): boolean => value < 1e-6 || value > 1 - 1e-6;
  * and the normal overlay have to agree on where the surface is — an arrow
  * anchored by one rule to a line drawn by another is a picture of nothing.
  */
-export function interfaceSegments(plane: LatticePlane): readonly InterfaceSegment[] {
+export function interfaceSegments(plane: AdvancePlane): readonly InterfaceSegment[] {
   const polygon = clipUnitSquare(UNIT_SQUARE, plane.clipNx, plane.clipNy, plane.offset);
   const segments: InterfaceSegment[] = [];
   for (let i = 0; i < polygon.length; i += 2) {
@@ -419,7 +406,7 @@ function drawInterface(c: LensContext, color: string, width: number): void {
   g.beginPath();
   for (const cell of lattice.cells) {
     if (!cell.open) continue;
-    const plane = latticePlane(lattice, cell);
+    const plane = advanceCellPlane(lattice, cell);
     if (!plane) continue;
     const x = cell.x0 * S, y = cell.y0 * S;
     const w = cell.width * S, h = cell.height * S;
@@ -432,21 +419,21 @@ function drawInterface(c: LensContext, color: string, width: number): void {
   g.lineCap = "butt";
 }
 
-const brickVolume = (s: AdvanceSlice, bx: number, by: number): number => {
+const brickVolume = (s: AdvanceView, bx: number, by: number): number => {
   let total = 0;
-  for (let j = 0; j < SLICE_BRICK; j++) for (let i = 0; i < SLICE_BRICK; i++) {
-    const x = bx * SLICE_BRICK + i, y = by * SLICE_BRICK + j;
-    if (x < s.nx && y < s.ny) total += s.V[sliceCell(s, x, y)]!;
+  for (let j = 0; j < ADVANCE_BRICK_FINE; j++) for (let i = 0; i < ADVANCE_BRICK_FINE; i++) {
+    const x = bx * ADVANCE_BRICK_FINE + i, y = by * ADVANCE_BRICK_FINE + j;
+    if (x < s.nx && y < s.ny) total += s.liquidVolumeFine[advanceCell(s, x, y)]!;
   }
   return total;
 };
 
 const cellMean = (
-  s: AdvanceSlice, cell: LatticeCell, read: (index: number) => number,
+  s: AdvanceView, cell: AdvanceCellView, read: (index: number) => number,
 ): number => {
   let total = 0, count = 0;
   for (let j = 0; j < cell.height; j++) for (let i = 0; i < cell.width; i++) {
-    total += read(sliceCell(s, cell.x0 + i, cell.y0 + j));
+    total += read(advanceCell(s, cell.x0 + i, cell.y0 + j));
     count += 1;
   }
   return count ? total / count : 0;
@@ -583,7 +570,7 @@ export const SLICE_OVERLAYS: Readonly<Record<SliceOverlayId, SliceOverlay>> = {
         if (!cell.open || cell.fill <= 1e-3 || cell.fill >= 1 - 1e-3) continue;
         const x = cell.x0 * S, y = cell.y0 * S;
         const w = cell.width * S, h = cell.height * S;
-        const plane = latticePlane(lattice, cell);
+        const plane = advanceCellPlane(lattice, cell);
         if (!plane) {
           /* Cut, and unreconstructed. `drawSlice` falls back to holding the
            * liquid at the bottom of such a cell, which looks like an answer;
@@ -624,7 +611,7 @@ export const ADVANCE_LENSES: Readonly<Record<AdvanceStageId, Lens>> = {
       g.lineWidth = 2.4;
       g.beginPath();
       for (let y = 0; y < s.ny; y++) for (let x = 0; x <= s.nx; x++) {
-        if (!s.ext[sliceRowX(s, x, y)]) continue;
+        if (!s.extensionFine[advanceCell(s, Math.min(x, s.nx - 1), y)]) continue;
         g.moveTo(x * S, y * S + 1.5);
         g.lineTo(x * S, (y + 1) * S - 1.5);
       }
@@ -641,8 +628,8 @@ export const ADVANCE_LENSES: Readonly<Record<AdvanceStageId, Lens>> = {
       g.lineWidth = 2.6;
       for (let y = 0; y < s.ny; y++) for (let x = 0; x <= s.nx; x++) {
         const aperture = Math.min(
-          x > 0 ? s.K[sliceCell(s, x - 1, y)] : 0,
-          x < s.nx ? s.K[sliceCell(s, x, y)] : 0);
+          x > 0 ? s.capacityFine[advanceCell(s, x - 1, y)] : 0,
+          x < s.nx ? s.capacityFine[advanceCell(s, x, y)] : 0);
         if (aperture > 0.98) continue;
         g.strokeStyle = aperture <= 0.05 ? PALETTE.solidEdge : PALETTE.momentum;
         g.globalAlpha = aperture <= 0.05 ? 0.8 : 0.95;
@@ -662,8 +649,8 @@ export const ADVANCE_LENSES: Readonly<Record<AdvanceStageId, Lens>> = {
       g.strokeStyle = PALETTE.momentum;
       g.globalAlpha = 0.9;
       for (let y = 0; y < s.ny; y += 2) for (let x = 1; x < s.nx - 1; x += 2) {
-        const above = sliceCell(s, x, Math.max(0, y - 1)), here = sliceCell(s, x, y);
-        if (s.V[above] <= 1e-5 && s.V[here] <= 1e-5) continue;
+        const above = advanceCell(s, x, Math.max(0, y - 1)), here = advanceCell(s, x, y);
+        if (s.liquidVolumeFine[above] <= 1e-5 && s.liquidVolumeFine[here] <= 1e-5) continue;
         arrow(g, (x + 0.5) * S, y * S - 5, 0, 11, 1.3);
       }
       g.globalAlpha = 1;
@@ -682,10 +669,10 @@ export const ADVANCE_LENSES: Readonly<Record<AdvanceStageId, Lens>> = {
       g.lineWidth = 2.2;
       g.globalAlpha = 0.9;
       for (let by = 0; by < s.by; by++) for (let bx = 0; bx < s.bx - 1; bx++) {
-        if (s.rung[by * s.bx + bx] === s.rung[by * s.bx + bx + 1]) continue;
+        if (s.brickRung[by * s.bx + bx] === s.brickRung[by * s.bx + bx + 1]) continue;
         g.beginPath();
-        g.moveTo((bx + 1) * SLICE_BRICK * S, by * SLICE_BRICK * S);
-        g.lineTo((bx + 1) * SLICE_BRICK * S, (by + 1) * SLICE_BRICK * S);
+        g.moveTo((bx + 1) * ADVANCE_BRICK_FINE * S, by * ADVANCE_BRICK_FINE * S);
+        g.lineTo((bx + 1) * ADVANCE_BRICK_FINE * S, (by + 1) * ADVANCE_BRICK_FINE * S);
         g.stroke();
       }
       g.globalAlpha = 1;
@@ -697,10 +684,10 @@ export const ADVANCE_LENSES: Readonly<Record<AdvanceStageId, Lens>> = {
     draw(c) {
       const { s, lattice } = c;
       let peak = 1e-6;
-      for (let i = 0; i < s.div.length; i++) peak = Math.max(peak, Math.abs(s.div[i]));
+      for (let i = 0; i < s.divergenceFine.length; i++) peak = Math.max(peak, Math.abs(s.divergenceFine[i]));
       for (const cell of lattice.cells) {
         if (!cell.open || cell.fill <= 0.5) continue;
-        const mean = cellMean(s, cell, i => s.div[i]);
+        const mean = cellMean(s, cell, i => s.divergenceFine[i]);
         tint(c, cell.x0, cell.y0, cell.width,
           mean < 0 ? PALETTE.pressure : PALETTE.alarm,
           Math.min(0.85, (Math.abs(mean) / peak) * 1.6), cell.height);
@@ -713,10 +700,10 @@ export const ADVANCE_LENSES: Readonly<Record<AdvanceStageId, Lens>> = {
     draw(c) {
       const { s, lattice } = c;
       let peak = 1e-6;
-      for (let i = 0; i < s.p.length; i++) peak = Math.max(peak, s.p[i]);
+      for (let i = 0; i < s.pressureFine.length; i++) peak = Math.max(peak, s.pressureFine[i]);
       for (const cell of lattice.cells) {
         if (!cell.open || cell.fill <= 0.5) continue;
-        const mean = cellMean(s, cell, i => s.p[i]);
+        const mean = cellMean(s, cell, i => s.pressureFine[i]);
         tint(c, cell.x0, cell.y0, cell.width, PALETTE.pressure,
           Math.min(0.9, (Math.max(0, mean) / peak) * 0.95), cell.height);
       }
@@ -736,12 +723,12 @@ export const ADVANCE_LENSES: Readonly<Record<AdvanceStageId, Lens>> = {
     draw(c) {
       const { g, s, scale: S } = c;
       let peak = 1e-6;
-      for (let i = 0; i < s.fx.length; i++) peak = Math.max(peak, Math.abs(s.fx[i]));
-      for (let i = 0; i < s.fy.length; i++) peak = Math.max(peak, Math.abs(s.fy[i]));
+      for (let i = 0; i < s.limitedFluxXFine.length; i++) peak = Math.max(peak, Math.abs(s.limitedFluxXFine[i]));
+      for (let i = 0; i < s.limitedFluxYFine.length; i++) peak = Math.max(peak, Math.abs(s.limitedFluxYFine[i]));
       g.strokeStyle = PALETTE.transport;
       g.fillStyle = PALETTE.transport;
       for (let y = 0; y < s.ny; y++) for (let x = 0; x <= s.nx; x++) {
-        const flux = s.fx[sliceRowX(s, x, y)];
+        const flux = s.limitedFluxXFine[advanceRowX(s, x, y)];
         if (Math.abs(flux) < peak * 0.05) continue;
         g.globalAlpha = Math.min(1, 0.3 + Math.abs(flux) / peak);
         const width = Math.max(2, Math.abs(flux) * S * 2.2);
@@ -749,7 +736,7 @@ export const ADVANCE_LENSES: Readonly<Record<AdvanceStageId, Lens>> = {
         arrow(g, x * S - (flux > 0 ? 4 : -4), (y + 0.5) * S, Math.sign(flux) * 9, 0);
       }
       for (let y = 0; y <= s.ny; y++) for (let x = 0; x < s.nx; x++) {
-        const flux = s.fy[sliceRowY(s, x, y)];
+        const flux = s.limitedFluxYFine[advanceRowY(s, x, y)];
         if (Math.abs(flux) < peak * 0.05) continue;
         g.globalAlpha = Math.min(1, 0.3 + Math.abs(flux) / peak);
         arrow(g, (x + 0.5) * S, y * S - (flux > 0 ? 4 : -4), 0, Math.sign(flux) * 9);
@@ -759,7 +746,7 @@ export const ADVANCE_LENSES: Readonly<Record<AdvanceStageId, Lens>> = {
       g.lineWidth = 2.4;
       g.beginPath();
       for (let y = 0; y < s.ny; y++) for (let x = 0; x <= s.nx; x++) {
-        if (!s.cx[sliceRowX(s, x, y)]) continue;
+        if (!s.fluxLimitedXFine[advanceRowX(s, x, y)]) continue;
         g.moveTo(x * S, y * S + 1);
         g.lineTo(x * S, (y + 1) * S - 1);
       }
@@ -790,8 +777,8 @@ export const ADVANCE_LENSES: Readonly<Record<AdvanceStageId, Lens>> = {
         if (!cell.open) continue;
         let changed = 0;
         for (let j = 0; j < cell.height; j++) for (let i = 0; i < cell.width; i++) {
-          const index = sliceCell(s, cell.x0 + i, cell.y0 + j);
-          changed += Math.abs(s.V[index] - s.Vp[index]);
+          const index = advanceCell(s, cell.x0 + i, cell.y0 + j);
+          changed += Math.abs(s.liquidVolumeFine[index] - s.previousLiquidVolumeFine[index]);
         }
         if (changed < 1e-4) continue;
         tint(c, cell.x0, cell.y0, cell.width, PALETTE.output,
@@ -805,11 +792,11 @@ export const ADVANCE_LENSES: Readonly<Record<AdvanceStageId, Lens>> = {
     draw(c) {
       const { s, scale: S } = c;
       for (let by = 0; by < s.by; by++) for (let bx = 0; bx < s.bx; bx++) {
-        const score = s.activity[by * s.bx + bx];
+        const score = s.brickActivity[by * s.bx + bx];
         if (score <= 0.001) continue;
-        tint(c, bx * SLICE_BRICK, by * SLICE_BRICK, SLICE_BRICK,
+        tint(c, bx * ADVANCE_BRICK_FINE, by * ADVANCE_BRICK_FINE, ADVANCE_BRICK_FINE,
           PALETTE.adaptivity, Math.min(0.7, score * 0.8));
-        label(c, (bx + 0.5) * SLICE_BRICK * S, (by + 0.5) * SLICE_BRICK * S,
+        label(c, (bx + 0.5) * ADVANCE_BRICK_FINE * S, (by + 0.5) * ADVANCE_BRICK_FINE * S,
           score.toFixed(2));
       }
     },
@@ -820,11 +807,11 @@ export const ADVANCE_LENSES: Readonly<Record<AdvanceStageId, Lens>> = {
     draw(c) {
       const { s, scale: S } = c;
       for (let by = 0; by < s.by; by++) for (let bx = 0; bx < s.bx; bx++) {
-        const rung = s.rung[by * s.bx + bx];
-        tint(c, bx * SLICE_BRICK, by * SLICE_BRICK, SLICE_BRICK,
+        const rung = s.brickRung[by * s.bx + bx];
+        tint(c, bx * ADVANCE_BRICK_FINE, by * ADVANCE_BRICK_FINE, ADVANCE_BRICK_FINE,
           PALETTE.adaptivity, 0.08 + 0.13 * rung);
-        label(c, (bx + 0.5) * SLICE_BRICK * S, (by + 0.5) * SLICE_BRICK * S,
-          `${SLICE_RUNGS[rung]}²`);
+        label(c, (bx + 0.5) * ADVANCE_BRICK_FINE * S, (by + 0.5) * ADVANCE_BRICK_FINE * S,
+          `${ADVANCE_RUNGS[rung]}²`);
       }
     },
   },
@@ -837,12 +824,12 @@ export const ADVANCE_LENSES: Readonly<Record<AdvanceStageId, Lens>> = {
       g.strokeStyle = PALETTE.output;
       for (let by = 0; by < s.by; by++) for (let bx = 0; bx < s.bx; bx++) {
         const brick = by * s.bx + bx;
-        if (s.rung[brick] === s.rungWas[brick]) continue;
-        tint(c, bx * SLICE_BRICK, by * SLICE_BRICK, SLICE_BRICK, PALETTE.output, 0.3);
-        g.strokeRect(bx * SLICE_BRICK * S + 2, by * SLICE_BRICK * S + 2,
-          SLICE_BRICK * S - 4, SLICE_BRICK * S - 4);
-        label(c, (bx + 0.5) * SLICE_BRICK * S, (by + 0.5) * SLICE_BRICK * S,
-          `${SLICE_RUNGS[s.rungWas[brick]!]} → ${SLICE_RUNGS[s.rung[brick]!]}`);
+        if (s.brickRung[brick] === s.previousBrickRung[brick]) continue;
+        tint(c, bx * ADVANCE_BRICK_FINE, by * ADVANCE_BRICK_FINE, ADVANCE_BRICK_FINE, PALETTE.output, 0.3);
+        g.strokeRect(bx * ADVANCE_BRICK_FINE * S + 2, by * ADVANCE_BRICK_FINE * S + 2,
+          ADVANCE_BRICK_FINE * S - 4, ADVANCE_BRICK_FINE * S - 4);
+        label(c, (bx + 0.5) * ADVANCE_BRICK_FINE * S, (by + 0.5) * ADVANCE_BRICK_FINE * S,
+          `${ADVANCE_RUNGS[s.previousBrickRung[brick]!]} → ${ADVANCE_RUNGS[s.brickRung[brick]!]}`);
       }
     },
   },
@@ -858,13 +845,13 @@ export const ADVANCE_LENSES: Readonly<Record<AdvanceStageId, Lens>> = {
         if (brickVolume(s, bx, by) > 1e-3) continue;
         g.save();
         g.beginPath();
-        g.rect(bx * SLICE_BRICK * S, by * SLICE_BRICK * S,
-          SLICE_BRICK * S, SLICE_BRICK * S);
+        g.rect(bx * ADVANCE_BRICK_FINE * S, by * ADVANCE_BRICK_FINE * S,
+          ADVANCE_BRICK_FINE * S, ADVANCE_BRICK_FINE * S);
         g.clip();
         g.beginPath();
-        for (let d = -SLICE_BRICK; d < SLICE_BRICK; d += 1.6) {
-          g.moveTo((bx * SLICE_BRICK + d) * S, by * SLICE_BRICK * S);
-          g.lineTo((bx * SLICE_BRICK + d + SLICE_BRICK) * S, (by + 1) * SLICE_BRICK * S);
+        for (let d = -ADVANCE_BRICK_FINE; d < ADVANCE_BRICK_FINE; d += 1.6) {
+          g.moveTo((bx * ADVANCE_BRICK_FINE + d) * S, by * ADVANCE_BRICK_FINE * S);
+          g.lineTo((bx * ADVANCE_BRICK_FINE + d + ADVANCE_BRICK_FINE) * S, (by + 1) * ADVANCE_BRICK_FINE * S);
         }
         g.stroke();
         g.restore();
@@ -890,8 +877,8 @@ export const REPRESENT_LENS: Lens = {
     const { s, scale: S } = c;
     for (let by = 0; by < s.by; by++) for (let bx = 0; bx < s.bx; bx++) {
       if (brickVolume(s, bx, by) <= 1e-3) continue;
-      label(c, (bx + 0.5) * SLICE_BRICK * S, by * SLICE_BRICK * S + 9,
-        `${SLICE_RUNGS[s.rung[by * s.bx + bx]!]}²`, PALETTE.muted);
+      label(c, (bx + 0.5) * ADVANCE_BRICK_FINE * S, by * ADVANCE_BRICK_FINE * S + 9,
+        `${ADVANCE_RUNGS[s.brickRung[by * s.bx + bx]!]}²`, PALETTE.muted);
     }
     drawInterface(c, PALETTE.output, 2.6);
   },

@@ -1,9 +1,9 @@
 /**
  * CPU-only proof harness for sparsifying the static geometric low-flux limiter.
  *
- * This deliberately mirrors the f32 arithmetic and frozen proposal/commit banks
- * in advance-slice/slice-stage-numerics.ts. It is not production code and it
- * does not implement the moving-solid FISTA branch.
+ * This retains the frozen f32 proposal/commit-bank experiment documented by
+ * the Rust cutover source manifest. It is a GPU optimization proof harness,
+ * not production physics, and does not implement the moving-solid FISTA branch.
  */
 
 export interface StaticLowFluxFace2D {

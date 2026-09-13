@@ -12,6 +12,20 @@ export default defineConfig(async () => {
 
   const { cloudflare } = await import("@cloudflare/vite-plugin");
   return {
+    server: {
+      headers: {
+        "Cross-Origin-Opener-Policy": "same-origin",
+        "Cross-Origin-Embedder-Policy": "require-corp",
+        "Cross-Origin-Resource-Policy": "same-origin",
+      },
+    },
+    preview: {
+      headers: {
+        "Cross-Origin-Opener-Policy": "same-origin",
+        "Cross-Origin-Embedder-Policy": "require-corp",
+        "Cross-Origin-Resource-Policy": "same-origin",
+      },
+    },
     plugins: [
       vinext(),
       sites(),

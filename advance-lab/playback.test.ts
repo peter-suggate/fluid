@@ -1,23 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { productionSceneSliceSeedById } from
-  "../lib/methods/adaptive-volume/advance-slice/production-scene-slice";
-import { advanceSlice, createAdvanceSlice } from
-  "../lib/methods/adaptive-volume/advance-slice/slice-solver";
-import { slicePresentationReady, slicePresentationRevision } from "./playback";
+import type { AdvanceView } from "../lib/physics-wasm/advance-view";
+import { advancePresentationReady, advancePresentationRevision } from "./playback";
 
-test("play waits for each mutable slice revision to reach the canvas", () => {
-  const slice = createAdvanceSlice(
-    productionSceneSliceSeedById("coarse-first-pool-impact-half"));
-  let painted = slicePresentationRevision(slice);
-  assert.equal(slicePresentationReady(painted, slice), true);
+const view = (commandSequence: number, frame: number): AdvanceView => ({
+  revision: { schemaVersion: 1, dimension: 2, runEpoch: 7, commandSequence, frame,
+    time: frame / 30, injections: 0, topologyGeneration: 2, fieldRevision: frame,
+    surfaceRevision: frame, memoryEpoch: 0 },
+} as AdvanceView);
 
-  advanceSlice(slice, { pressureIterations: 4 });
-  assert.equal(slicePresentationReady(painted, slice), false,
-    "the next play tick must not overwrite a frame React has not painted");
-
-  painted = slicePresentationRevision(slice);
-  assert.equal(slicePresentationReady(painted, slice), true,
-    "painting the accepted RDF/VOF revision reopens play admission");
+test("play waits for each immutable Wasm publication to reach the canvas", () => {
+  const first = view(1, 0);
+  const painted = advancePresentationRevision(first);
+  assert.equal(advancePresentationReady(painted, first), true);
+  assert.equal(advancePresentationReady(painted, view(2, 1)), false,
+    "the next play tick must not outrun the publication React painted");
 });

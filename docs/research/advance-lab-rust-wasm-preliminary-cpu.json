@@ -1,0 +1,206 @@
+{
+  "format": "advance-slice-performance-v1",
+  "runtime": {
+    "node": "v22.22.1",
+    "platform": "darwin",
+    "arch": "arm64"
+  },
+  "configuration": {
+    "scenes": [
+      "coarse-first-pool-impact-half",
+      "twin-dam-collision",
+      "cm12-figure-3"
+    ],
+    "warmup": 2,
+    "frames": 4,
+    "repetitions": 5,
+    "pressureIterations": 16,
+    "checkpoints": [
+      1,
+      3,
+      6
+    ],
+    "output": "/tmp/advance-slice-performance-audit.json",
+    "eagerDiagnostics": false,
+    "pairedDiagnostics": false
+  },
+  "performance": [
+    {
+      "scene": "coarse-first-pool-impact-half",
+      "dimensions": [
+        64,
+        48
+      ],
+      "warmupFrames": 2,
+      "measuredFrames": 4,
+      "repetitions": 5,
+      "pressureIterations": 16,
+      "cells": 1042,
+      "generation": 6,
+      "elapsedMs": [
+        413.727834,
+        517.119,
+        407.427542,
+        397.66475,
+        412.517917
+      ],
+      "medianElapsedMs": 412.517917,
+      "medianFrameMs": 103.12947925,
+      "minFrameMs": 99.4161875,
+      "maxFrameMs": 129.27975,
+      "endingStateSha256": "d09ae4862e2b340a6169f1477ce01643239d442c7d50fec49409c84fb2e013a4"
+    },
+    {
+      "scene": "twin-dam-collision",
+      "dimensions": [
+        56,
+        16
+      ],
+      "warmupFrames": 2,
+      "measuredFrames": 4,
+      "repetitions": 5,
+      "pressureIterations": 16,
+      "cells": 256,
+      "generation": 4,
+      "elapsedMs": [
+        67.8025,
+        64.060292,
+        63.54825,
+        65.67075,
+        61.076416
+      ],
+      "medianElapsedMs": 64.060292,
+      "medianFrameMs": 16.015073,
+      "minFrameMs": 15.269104,
+      "maxFrameMs": 16.950625,
+      "endingStateSha256": "9da5812c52189bdcb3cfd2fe5270b6c62b8508f9efd27fed00621b322dfba0cf"
+    },
+    {
+      "scene": "cm12-figure-3",
+      "dimensions": [
+        128,
+        128
+      ],
+      "warmupFrames": 2,
+      "measuredFrames": 4,
+      "repetitions": 5,
+      "pressureIterations": 16,
+      "cells": 1632,
+      "generation": 7,
+      "elapsedMs": [
+        2639.0695,
+        2695.265083,
+        2686.936958,
+        2814.834167,
+        2769.1775
+      ],
+      "medianElapsedMs": 2695.265083,
+      "medianFrameMs": 673.81627075,
+      "minFrameMs": 659.767375,
+      "maxFrameMs": 703.70854175,
+      "endingStateSha256": "0d6104b231964eeb06942de65a022aeb2ab516f71498ae568b870717695ec8e5"
+    }
+  ],
+  "researchStatus": "Preliminary diagnostic only: existing dirty checkout, and a second CPU benchmark briefly overlapped. Not a formal baseline, clean performance comparison, or Rust speedup result.",
+  "originalReportSha256": "f166d5a34838b3e2406ba79a4fc9a36b306a7f2dce9c519028bc7658dfc240a8",
+  "originalReportPath": "/tmp/advance-slice-performance-audit.json",
+  "sourceManifestSha256": "204395ab545d16b8eafe49cbb9d9db45ae59b928a3fc66a892d20613bf3f599b",
+  "stateCheckpointSummary": {
+    "coarse-first-pool-impact-half": {
+      "1": {
+        "frame": 1,
+        "time_s": 0.03333333333333333,
+        "microsteps": 1,
+        "iterations": 16,
+        "residual": 8.166036464160021e-05,
+        "fault": null,
+        "topologyGeneration": 1,
+        "drift": -1.0030699382545169e-10
+      },
+      "3": {
+        "frame": 3,
+        "time_s": 0.1,
+        "microsteps": 2,
+        "iterations": 0,
+        "residual": 9.404818750013385e-05,
+        "fault": null,
+        "topologyGeneration": 2,
+        "drift": 1.9543823492995384e-09
+      },
+      "6": {
+        "frame": 6,
+        "time_s": 0.19999999999999998,
+        "microsteps": 3,
+        "iterations": 16,
+        "residual": 0.03421985445896537,
+        "fault": null,
+        "topologyGeneration": 6,
+        "drift": -3.241115215920325e-08
+      }
+    },
+    "twin-dam-collision": {
+      "1": {
+        "frame": 1,
+        "time_s": 0.03333333333333333,
+        "microsteps": 2,
+        "iterations": 16,
+        "residual": 2.9830427941153372,
+        "fault": null,
+        "topologyGeneration": 2,
+        "drift": -1.8335413187742233e-09
+      },
+      "3": {
+        "frame": 3,
+        "time_s": 0.1,
+        "microsteps": 2,
+        "iterations": 16,
+        "residual": 0.5825542941596471,
+        "fault": null,
+        "topologyGeneration": 3,
+        "drift": 2.764863893389702e-09
+      },
+      "6": {
+        "frame": 6,
+        "time_s": 0.19999999999999998,
+        "microsteps": 4,
+        "iterations": 16,
+        "residual": 0.3238425657690023,
+        "fault": null,
+        "topologyGeneration": 4,
+        "drift": 2.0940129630275806e-09
+      }
+    },
+    "cm12-figure-3": {
+      "1": {
+        "frame": 1,
+        "time_s": 0.03333333333333333,
+        "microsteps": 1,
+        "iterations": 16,
+        "residual": 0.0011811524951393815,
+        "fault": null,
+        "topologyGeneration": 3,
+        "drift": -1.2463958618987322e-11
+      },
+      "3": {
+        "frame": 3,
+        "time_s": 0.1,
+        "microsteps": 2,
+        "iterations": 16,
+        "residual": 0.022328251781430695,
+        "fault": null,
+        "topologyGeneration": 4,
+        "drift": 1.572936324885981e-09
+      },
+      "6": {
+        "frame": 6,
+        "time_s": 0.19999999999999998,
+        "microsteps": 4,
+        "iterations": 16,
+        "residual": 0.3241172424804794,
+        "fault": null,
+        "topologyGeneration": 7,
+        "drift": -2.0731657103865913e-08
+      }
+    }
+  }
+}

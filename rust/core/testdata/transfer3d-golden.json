@@ -1,0 +1,435 @@
+{
+  "schemaVersion": 1,
+  "source": "lib/methods/adaptive-volume/sparse-cm12-generation-transfer.ts#compileSparseCM12GenerationTransfer",
+  "cases": [
+    {
+      "id": "split-eight",
+      "source": {
+        "dimensions": [
+          2,
+          2,
+          2
+        ],
+        "cells": [
+          {
+            "id": 0,
+            "lower": [
+              0,
+              0,
+              0
+            ],
+            "widths": [
+              2,
+              2,
+              2
+            ],
+            "span": 2
+          }
+        ],
+        "faces": []
+      },
+      "target": [
+        {
+          "id": 0,
+          "lower": [
+            0,
+            0,
+            0
+          ],
+          "widths": [
+            1,
+            1,
+            1
+          ],
+          "span": 1
+        },
+        {
+          "id": 1,
+          "lower": [
+            1,
+            0,
+            0
+          ],
+          "widths": [
+            1,
+            1,
+            1
+          ],
+          "span": 1
+        },
+        {
+          "id": 2,
+          "lower": [
+            0,
+            1,
+            0
+          ],
+          "widths": [
+            1,
+            1,
+            1
+          ],
+          "span": 1
+        },
+        {
+          "id": 3,
+          "lower": [
+            1,
+            1,
+            0
+          ],
+          "widths": [
+            1,
+            1,
+            1
+          ],
+          "span": 1
+        },
+        {
+          "id": 4,
+          "lower": [
+            0,
+            0,
+            1
+          ],
+          "widths": [
+            1,
+            1,
+            1
+          ],
+          "span": 1
+        },
+        {
+          "id": 5,
+          "lower": [
+            1,
+            0,
+            1
+          ],
+          "widths": [
+            1,
+            1,
+            1
+          ],
+          "span": 1
+        },
+        {
+          "id": 6,
+          "lower": [
+            0,
+            1,
+            1
+          ],
+          "widths": [
+            1,
+            1,
+            1
+          ],
+          "span": 1
+        },
+        {
+          "id": 7,
+          "lower": [
+            1,
+            1,
+            1
+          ],
+          "widths": [
+            1,
+            1,
+            1
+          ],
+          "span": 1
+        }
+      ],
+      "newAir": [],
+      "expected": {
+        "cellOffsets": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8
+        ],
+        "cellSources": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "cellVolumes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "faceOffsets": [
+          0
+        ],
+        "faceSources": [],
+        "faceAreas": []
+      }
+    },
+    {
+      "id": "merge-eight",
+      "source": {
+        "dimensions": [
+          2,
+          2,
+          2
+        ],
+        "cells": [
+          {
+            "id": 0,
+            "lower": [
+              0,
+              0,
+              0
+            ],
+            "widths": [
+              1,
+              1,
+              1
+            ],
+            "span": 1
+          },
+          {
+            "id": 1,
+            "lower": [
+              1,
+              0,
+              0
+            ],
+            "widths": [
+              1,
+              1,
+              1
+            ],
+            "span": 1
+          },
+          {
+            "id": 2,
+            "lower": [
+              0,
+              1,
+              0
+            ],
+            "widths": [
+              1,
+              1,
+              1
+            ],
+            "span": 1
+          },
+          {
+            "id": 3,
+            "lower": [
+              1,
+              1,
+              0
+            ],
+            "widths": [
+              1,
+              1,
+              1
+            ],
+            "span": 1
+          },
+          {
+            "id": 4,
+            "lower": [
+              0,
+              0,
+              1
+            ],
+            "widths": [
+              1,
+              1,
+              1
+            ],
+            "span": 1
+          },
+          {
+            "id": 5,
+            "lower": [
+              1,
+              0,
+              1
+            ],
+            "widths": [
+              1,
+              1,
+              1
+            ],
+            "span": 1
+          },
+          {
+            "id": 6,
+            "lower": [
+              0,
+              1,
+              1
+            ],
+            "widths": [
+              1,
+              1,
+              1
+            ],
+            "span": 1
+          },
+          {
+            "id": 7,
+            "lower": [
+              1,
+              1,
+              1
+            ],
+            "widths": [
+              1,
+              1,
+              1
+            ],
+            "span": 1
+          }
+        ],
+        "faces": []
+      },
+      "target": [
+        {
+          "id": 0,
+          "lower": [
+            0,
+            0,
+            0
+          ],
+          "widths": [
+            2,
+            2,
+            2
+          ],
+          "span": 2
+        }
+      ],
+      "newAir": [],
+      "expected": {
+        "cellOffsets": [
+          0,
+          8
+        ],
+        "cellSources": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7
+        ],
+        "cellVolumes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "faceOffsets": [
+          0
+        ],
+        "faceSources": [],
+        "faceAreas": []
+      }
+    },
+    {
+      "id": "explicit-new-air",
+      "source": {
+        "dimensions": [
+          2,
+          2,
+          2
+        ],
+        "cells": [
+          {
+            "id": 0,
+            "lower": [
+              0,
+              0,
+              0
+            ],
+            "widths": [
+              1,
+              2,
+              2
+            ],
+            "span": 2
+          }
+        ],
+        "faces": []
+      },
+      "target": [
+        {
+          "id": 0,
+          "lower": [
+            0,
+            0,
+            0
+          ],
+          "widths": [
+            2,
+            2,
+            2
+          ],
+          "span": 2
+        }
+      ],
+      "newAir": [
+        {
+          "minimumFine": [
+            0,
+            0,
+            0
+          ],
+          "maximumExclusiveFine": [
+            2,
+            2,
+            2
+          ]
+        }
+      ],
+      "expected": {
+        "cellOffsets": [
+          0,
+          2
+        ],
+        "cellSources": [
+          0,
+          4294967295
+        ],
+        "cellVolumes": [
+          4,
+          4
+        ],
+        "faceOffsets": [
+          0
+        ],
+        "faceSources": [],
+        "faceAreas": []
+      }
+    }
+  ]
+}

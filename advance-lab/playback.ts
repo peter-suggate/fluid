@@ -1,15 +1,15 @@
-import type { AdvanceSlice } from
-  "../lib/methods/adaptive-volume/advance-slice/slice-solver";
+import type { AdvanceView } from "../lib/physics-wasm/advance-view";
 
 /** Identity of the mutable solver state consumed by one canvas publication. */
-export function slicePresentationRevision(slice: AdvanceSlice): string {
-  return `${slice.frame}:${slice.injections}:${slice.topology.accepted.generation}`;
+export function advancePresentationRevision(view: AdvanceView): string {
+  const revision = view.revision;
+  return `${revision.runEpoch}:${revision.commandSequence}:${revision.frame}:${revision.injections}:${revision.topologyGeneration}:${revision.surfaceRevision}`;
 }
 
 /** Play must not mutate a slice whose preceding revision has not been painted. */
-export function slicePresentationReady(
+export function advancePresentationReady(
   paintedRevision: string | null,
-  slice: AdvanceSlice,
+  view: AdvanceView,
 ): boolean {
-  return paintedRevision === slicePresentationRevision(slice);
+  return paintedRevision === advancePresentationRevision(view);
 }

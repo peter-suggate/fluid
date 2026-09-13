@@ -1,0 +1,889 @@
+TAP version 13
+# Subtest: minority-area guard ignores roundoff and rejects amplified corner cuts
+ok 1 - minority-area guard ignores roundoff and rejects amplified corner cuts
+  ---
+  duration_ms: 0.460084
+  type: 'test'
+  ...
+# Subtest: frame-four impact keeps supported cells on one shared RDF field
+ok 2 - frame-four impact keeps supported cells on one shared RDF field
+  ---
+  duration_ms: 1405.478959
+  type: 'test'
+  ...
+# Subtest: the fraction readout sizes itself to the answer it has to keep
+ok 3 - the fraction readout sizes itself to the answer it has to keep
+  ---
+  duration_ms: 0.157791
+  type: 'test'
+  ...
+# Subtest: the residue ramp spends a fixed share on each decade
+ok 4 - the residue ramp spends a fixed share on each decade
+  ---
+  duration_ms: 0.117084
+  type: 'test'
+  ...
+# Subtest: an interface chord is the part of the plane that is not the cell's own edge
+ok 5 - an interface chord is the part of the plane that is not the cell's own edge
+  ---
+  duration_ms: 0.510417
+  type: 'test'
+  ...
+# Subtest: a coarse cell's PLIC line is drawn where its own fraction puts it
+ok 6 - a coarse cell's PLIC line is drawn where its own fraction puts it
+  ---
+  duration_ms: 24449.388583
+  type: 'test'
+  ...
+# Subtest: every drawn normal points from the liquid towards the air
+ok 7 - every drawn normal points from the liquid towards the air
+  ---
+  duration_ms: 1303.119167
+  type: 'test'
+  ...
+# Subtest: play waits for each mutable slice revision to reach the canvas
+ok 8 - play waits for each mutable slice revision to reach the canvas
+  ---
+  duration_ms: 1271.611084
+  type: 'test'
+  ...
+# Subtest: the work table covers the resident stage ABI, in encode order
+ok 9 - the work table covers the resident stage ABI, in encode order
+  ---
+  duration_ms: 0.913
+  type: 'test'
+  ...
+# Subtest: every kernel the work table prices is one the encoder dispatches
+not ok 10 - every kernel the work table prices is one the encoder dispatches
+  ---
+  duration_ms: 12.87925
+  type: 'test'
+  location: '/Users/petersuggate/code/me/fluid/lib/methods/adaptive-volume/advance-slice/advance-slice.test.ts:1:1214'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly deep-equal:
+    + actual - expected
+    
+    + [
+    +   'pressure-rhs/initializeJacobiDirection',
+    +   'pressure-rhs/reduceInitialTrueResidual'
+    + ]
+    - []
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+  actual:
+    0: 'pressure-rhs/initializeJacobiDirection'
+    1: 'pressure-rhs/reduceInitialTrueResidual'
+  operator: 'deepStrictEqual'
+  stack: |-
+    TestContext.<anonymous> (/Users/petersuggate/code/me/fluid/lib/methods/adaptive-volume/advance-slice/advance-slice.test.ts:45:10)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+# Subtest: a capability a scene lacks encodes no dispatches for it
+ok 11 - a capability a scene lacks encodes no dispatches for it
+  ---
+  duration_ms: 0.446959
+  type: 'test'
+  ...
+# Subtest: the pressure solve keeps its tail encoded past the residual guard
+ok 12 - the pressure solve keeps its tail encoded past the residual guard
+  ---
+  duration_ms: 0.096375
+  type: 'test'
+  ...
+# Subtest: transport is the frame's largest stage at mini32 scale
+ok 13 - transport is the frame's largest stage at mini32 scale
+  ---
+  duration_ms: 0.325875
+  type: 'test'
+  ...
+# Subtest: the production coarse translation fixture advances on its native mixed-rung graph
+ok 14 - the production coarse translation fixture advances on its native mixed-rung graph
+  ---
+  duration_ms: 110.495166
+  type: 'test'
+  ...
+# Subtest: the production sub-isovalue VEX failure is retained
+ok 15 - the production sub-isovalue VEX failure is retained
+  ---
+  duration_ms: 50.740875
+  type: 'test'
+  ...
+# Subtest: a production mixed-rung fixture rerungs through candidate field authority
+ok 16 - a production mixed-rung fixture rerungs through candidate field authority
+  ---
+  duration_ms: 50.144375
+  type: 'test'
+  ...
+# Subtest: water-box automatic rerung replaces stale rung payload through candidate transfer
+not ok 17 - water-box automatic rerung replaces stale rung payload through candidate transfer
+  ---
+  duration_ms: 99.965958
+  type: 'test'
+  location: '/Users/petersuggate/code/me/fluid/lib/methods/adaptive-volume/advance-slice/advance-slice.test.ts:1:5183'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+    
+    1 !== 2
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 2
+  actual: 1
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (/Users/petersuggate/code/me/fluid/lib/methods/adaptive-volume/advance-slice/advance-slice.test.ts:136:10)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: the selector is the complete production scene catalogue
+ok 18 - the selector is the complete production scene catalogue
+  ---
+  duration_ms: 0.829625
+  type: 'test'
+  ...
+# Subtest: the native centre plane uses production solid and liquid samples
+ok 19 - the native centre plane uses production solid and liquid samples
+  ---
+  duration_ms: 46.088542
+  type: 'test'
+  ...
+# Subtest: the y-down boundary reflects production velocity and gravity once
+ok 20 - the y-down boundary reflects production velocity and gravity once
+  ---
+  duration_ms: 70.667375
+  type: 'test'
+  ...
+# Subtest: frame-zero curved liquid publishes reconstructed PLIC planes
+ok 21 - frame-zero curved liquid publishes reconstructed PLIC planes
+  ---
+  duration_ms: 982.121
+  type: 'test'
+  ...
+# Subtest: adaptive steps publish reconstructed planes for each accepted generation
+ok 22 - adaptive steps publish reconstructed planes for each accepted generation
+  ---
+  duration_ms: 1780.19075
+  type: 'test'
+  ...
+# Subtest: coarse-first pool support follows motion without bridging disconnected liquid
+ok 23 - coarse-first pool support follows motion without bridging disconnected liquid
+  ---
+  duration_ms: 1117.133417
+  type: 'test'
+  ...
+# Subtest: omitted slice growth budget reserves the bounded physical page arena
+ok 24 - omitted slice growth budget reserves the bounded physical page arena
+  ---
+  duration_ms: 40.919458
+  type: 'test'
+  ...
+# Subtest: a 2.5-cell projected translation admits its receiver before microstep zero
+ok 25 - a 2.5-cell projected translation admits its receiver before microstep zero
+  ---
+  duration_ms: 108.633583
+  type: 'test'
+  ...
+# Subtest: projected receivers are accepted before transport and the ladder reaches the RHS
+ok 26 - projected receivers are accepted before transport and the ladder reaches the RHS
+  ---
+  duration_ms: 5223.921042
+  type: 'test'
+  ...
+# Subtest: native staggered apertures preserve the production shell and face samples
+ok 27 - native staggered apertures preserve the production shell and face samples
+  ---
+  duration_ms: 49.707792
+  type: 'test'
+  ...
+# Subtest: empty and dimensionally reduced production slices stay explicit
+ok 28 - empty and dimensionally reduced production slices stay explicit
+  ---
+  duration_ms: 1469.060292
+  type: 'test'
+  ...
+# Subtest: dynamic rigid and inflow reductions stay aligned to accepted topology
+ok 29 - dynamic rigid and inflow reductions stay aligned to accepted topology
+  ---
+  duration_ms: 294.389
+  type: 'test'
+  ...
+# Subtest: production rigid descriptors advance and feed old/new slice geometry
+ok 30 - production rigid descriptors advance and feed old/new slice geometry
+  ---
+  duration_ms: 30.505334
+  type: 'test'
+  ...
+# Subtest: the owner image answers a production topology exactly as the scan did
+ok 31 - the owner image answers a production topology exactly as the scan did
+  ---
+  duration_ms: 269.757333
+  type: 'test'
+  ...
+# Subtest: mixed-rung cells own every fine coordinate under them
+ok 32 - mixed-rung cells own every fine coordinate under them
+  ---
+  duration_ms: 0.352958
+  type: 'test'
+  ...
+# Subtest: overlapping support resolves to the first cell, as the scan did
+ok 33 - overlapping support resolves to the first cell, as the scan did
+  ---
+  duration_ms: 0.134791
+  type: 'test'
+  ...
+# Subtest: a topology the image cannot represent falls back to the scan
+ok 34 - a topology the image cannot represent falls back to the scan
+  ---
+  duration_ms: 0.146333
+  type: 'test'
+  ...
+# Subtest: source ledger retains small signed increments across outer-frame carries
+ok 35 - source ledger retains small signed increments across outer-frame carries
+  ---
+  duration_ms: 0.438583
+  type: 'test'
+  ...
+# Subtest: source ledger preserves a signed residual when a rounded total is published
+ok 36 - source ledger preserves a signed residual when a rounded total is published
+  ---
+  duration_ms: 0.103
+  type: 'test'
+  ...
+# Subtest: a drag snaps outward onto the ladder of its own minimum cell
+ok 37 - a drag snaps outward onto the ladder of its own minimum cell
+  ---
+  duration_ms: 1.418333
+  type: 'test'
+  ...
+# Subtest: the box is never thinner than one cell it asks for, and stays on the lattice
+ok 38 - the box is never thinner than one cell it asks for, and stays on the lattice
+  ---
+  duration_ms: 0.646375
+  type: 'test'
+  ...
+# Subtest: snapping is idempotent through the metres round trip
+ok 39 - snapping is idempotent through the metres round trip
+  ---
+  duration_ms: 1.417667
+  type: 'test'
+  ...
+# Subtest: a drawn region covers this cut and only this cut
+ok 40 - a drawn region covers this cut and only this cut
+  ---
+  duration_ms: 0.4025
+  type: 'test'
+  ...
+# Subtest: a region is added, replaced and removed by id
+ok 41 - a region is added, replaced and removed by id
+  ---
+  duration_ms: 0.416125
+  type: 'test'
+  ...
+# Subtest: the ladder stops where the slice's rungs do
+ok 42 - the ladder stops where the slice's rungs do
+  ---
+  duration_ms: 0.04775
+  type: 'test'
+  ...
+# Subtest: the policy holds bricks the region contains at the size it names
+ok 43 - the policy holds bricks the region contains at the size it names
+  ---
+  duration_ms: 730.252166
+  type: 'test'
+  ...
+# Subtest: the resident kernels this port mirrors still carry the terms it copies
+ok 44 - the resident kernels this port mirrors still carry the terms it copies
+  ---
+  duration_ms: 2.300333
+  type: 'test'
+  ...
+# Subtest: coverage is the kernel's smoothed indicator, not an exact area
+ok 45 - coverage is the kernel's smoothed indicator, not an exact area
+  ---
+  duration_ms: 0.104666
+  type: 'test'
+  ...
+# Subtest: a dose is clipped by the open fraction and never accumulates
+ok 46 - a dose is clipped by the open fraction and never accumulates
+  ---
+  duration_ms: 0.520292
+  type: 'test'
+  ...
+# Subtest: a fully blocked cell takes nothing at all
+ok 47 - a fully blocked cell takes nothing at all
+  ---
+  duration_ms: 0.058875
+  type: 'test'
+  ...
+# Subtest: brick demand is the conservative bounding box, not the disk
+ok 48 - brick demand is the conservative bounding box, not the disk
+  ---
+  duration_ms: 0.096875
+  type: 'test'
+  ...
+# Subtest: a macro brick is demanded across its whole span
+ok 49 - a macro brick is demanded across its whole span
+  ---
+  duration_ms: 0.049708
+  type: 'test'
+  ...
+# Subtest: a canvas aim is reflected into the solver's own frame once
+ok 50 - a canvas aim is reflected into the solver's own frame once
+  ---
+  duration_ms: 0.105166
+  type: 'test'
+  ...
+# Subtest: an unaddressable drop is refused before the authority is touched
+ok 51 - an unaddressable drop is refused before the authority is touched
+  ---
+  duration_ms: 69.63175
+  type: 'test'
+  ...
+# Subtest: a drop into air activates its bricks and refines them
+ok 52 - a drop into air activates its bricks and refines them
+  ---
+  duration_ms: 127.665833
+  type: 'test'
+  ...
+# Subtest: dropped water joins the conserved total rather than reading as drift
+ok 53 - dropped water joins the conserved total rather than reading as drift
+  ---
+  duration_ms: 506.037
+  type: 'test'
+  ...
+# Subtest: the admitted area tracks the disk the reader asked for
+ok 54 - the admitted area tracks the disk the reader asked for
+  ---
+  duration_ms: 42.87325
+  type: 'test'
+  ...
+# Subtest: a drop onto the reservoir displaces nothing it cannot
+ok 55 - a drop onto the reservoir displaces nothing it cannot
+  ---
+  duration_ms: 52.938417
+  type: 'test'
+  ...
+# Subtest: 2D boundary interpolation preserves its observable oblique slope
+ok 56 - 2D boundary interpolation preserves its observable oblique slope
+  ---
+  duration_ms: 0.507916
+  type: 'test'
+  ...
+# Subtest: native sparse-air support preserves several global oblique planes
+ok 57 - native sparse-air support preserves several global oblique planes
+  ---
+  duration_ms: 1044.502334
+  type: 'test'
+  ...
+# Subtest: presentation publication preserves scene policy and accepted frame metrics
+ok 58 - presentation publication preserves scene policy and accepted frame metrics
+  ---
+  duration_ms: 267.383458
+  type: 'test'
+  ...
+# Subtest: shared RDF removes sphere seams without replacing VOF authority
+ok 59 - shared RDF removes sphere seams without replacing VOF authority
+  ---
+  duration_ms: 1706.276166
+  type: 'test'
+  ...
+# Subtest: shared RDF publication commutes with reflection after nonlinear transport
+ok 60 - shared RDF publication commutes with reflection after nonlinear transport
+  ---
+  duration_ms: 1375.1935
+  type: 'test'
+  ...
+# Subtest: impact RDF cannot turn accepted bulk liquid into an air cell
+not ok 61 - impact RDF cannot turn accepted bulk liquid into an air cell
+  ---
+  duration_ms: 2063.928125
+  type: 'test'
+  location: '/Users/petersuggate/code/me/fluid/lib/methods/adaptive-volume/advance-slice/slice-presentation-publication.test.ts:1:8788'
+  failureType: 'testCodeFailure'
+  error: 'phase consistency must not trade the hole for a global area shift'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: '=='
+  stack: |-
+    TestContext.<anonymous> (/Users/petersuggate/code/me/fluid/lib/methods/adaptive-volume/advance-slice/slice-presentation-publication.test.ts:250:10)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: shared RDF handles disconnected AMR interfaces and reports cut-cell limits
+ok 62 - shared RDF handles disconnected AMR interfaces and reports cut-cell limits
+  ---
+  duration_ms: 1888.180959
+  type: 'test'
+  ...
+# Subtest: PCM1/PCF1/PEI1 publish the slice pressure epoch in stable-cell order
+ok 63 - PCM1/PCF1/PEI1 publish the slice pressure epoch in stable-cell order
+  ---
+  duration_ms: 85.83325
+  type: 'test'
+  ...
+# Subtest: unchanged pressure authority publishes a new generation with empty repair worklists
+ok 64 - unchanged pressure authority publishes a new generation with empty repair worklists
+  ---
+  duration_ms: 51.966333
+  type: 'test'
+  ...
+# Subtest: a capacity overflow fail-closes without replacing accepted pressure authority
+ok 65 - a capacity overflow fail-closes without replacing accepted pressure authority
+  ---
+  duration_ms: 43.809958
+  type: 'test'
+  ...
+# Subtest: retained pressure cache reuses an unchanged virtual-extrusion row image
+ok 66 - retained pressure cache reuses an unchanged virtual-extrusion row image
+  ---
+  duration_ms: 92.121292
+  type: 'test'
+  ...
+# Subtest: automatic rerung preserves retained PCM PCF PEI generations
+not ok 67 - automatic rerung preserves retained PCM PCF PEI generations
+  ---
+  duration_ms: 409.157125
+  type: 'test'
+  location: '/Users/petersuggate/code/me/fluid/lib/methods/adaptive-volume/advance-slice/slice-pressure-embedding-authority.test.ts:1:1452'
+  failureType: 'testCodeFailure'
+  error: |-
+    The expression evaluated to a falsy value:
+    
+      assert.ok(slice.topology.accepted.generation > beforeTopology)
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: '=='
+  stack: |-
+    TestContext.<anonymous> (/Users/petersuggate/code/me/fluid/lib/methods/adaptive-volume/advance-slice/slice-pressure-embedding-authority.test.ts:46:10)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+# Subtest: coarse-surface-translation retains one source cell and row for every centre-Z pressure unknown
+ok 68 - coarse-surface-translation retains one source cell and row for every centre-Z pressure unknown
+  ---
+  duration_ms: 88.265667
+  type: 'test'
+  ...
+# Subtest: water-box-dam-break retains one source cell and row for every centre-Z pressure unknown
+ok 69 - water-box-dam-break retains one source cell and row for every centre-Z pressure unknown
+  ---
+  duration_ms: 100.358041
+  type: 'test'
+  ...
+# Subtest: an automatic water-box rerung rebuilds complete centre-Z pressure mappings
+not ok 70 - an automatic water-box rerung rebuilds complete centre-Z pressure mappings
+  ---
+  duration_ms: 333.257542
+  type: 'test'
+  location: '/Users/petersuggate/code/me/fluid/lib/methods/adaptive-volume/advance-slice/slice-pressure-embedding.test.ts:1:2371'
+  failureType: 'testCodeFailure'
+  error: 'fixture must publish an automatic candidate generation'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: '=='
+  stack: |-
+    TestContext.<anonymous> (/Users/petersuggate/code/me/fluid/lib/methods/adaptive-volume/advance-slice/slice-pressure-embedding.test.ts:65:10)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: Chronopoulos-Gear fixture preserves production recurrence and delayed gate
+ok 71 - Chronopoulos-Gear fixture preserves production recurrence and delayed gate
+  ---
+  duration_ms: 1.689541
+  type: 'test'
+  ...
+# Subtest: an exact solution waits for the eight-iteration true-residual gate
+ok 72 - an exact solution waits for the eight-iteration true-residual gate
+  ---
+  duration_ms: 0.254291
+  type: 'test'
+  ...
+# Subtest: curvature recovery re-applies the operator and can close the device gate
+ok 73 - curvature recovery re-applies the operator and can close the device gate
+  ---
+  duration_ms: 0.131667
+  type: 'test'
+  ...
+# Subtest: compact execution order controls the production f32 reduction tree
+ok 74 - compact execution order controls the production f32 reduction tree
+  ---
+  duration_ms: 0.522334
+  type: 'test'
+  ...
+# Subtest: RDF tessellation reflects with its field across either centre axis
+ok 75 - RDF tessellation reflects with its field across either centre axis
+  ---
+  duration_ms: 0.944
+  type: 'test'
+  ...
+# Subtest: RDF centre fan preserves affine scalar fields and covers one cell
+ok 76 - RDF centre fan preserves affine scalar fields and covers one cell
+  ---
+  duration_ms: 0.171042
+  type: 'test'
+  ...
+# Subtest: policy source fingerprints pin the resident activity ABI
+ok 77 - policy source fingerprints pin the resident activity ABI
+  ---
+  duration_ms: 5.045333
+  type: 'test'
+  ...
+# Subtest: represented planar interface preserves surface and density reason bits
+ok 78 - represented planar interface preserves surface and density reason bits
+  ---
+  duration_ms: 4.640875
+  type: 'test'
+  ...
+# Subtest: remote impact prediction cannot refine a calm coarse receiver
+ok 79 - remote impact prediction cannot refine a calm coarse receiver
+  ---
+  duration_ms: 1.770208
+  type: 'test'
+  ...
+# Subtest: swept material support activates an allocated dry frontier leaf
+ok 80 - swept material support activates an allocated dry frontier leaf
+  ---
+  duration_ms: 1.470792
+  type: 'test'
+  ...
+# Subtest: projected transport support changes only its receiver and required grading
+ok 81 - projected transport support changes only its receiver and required grading
+  ---
+  duration_ms: 1.811
+  type: 'test'
+  ...
+# Subtest: swept material support does not grow an unswept face halo
+ok 82 - swept material support does not grow an unswept face halo
+  ---
+  duration_ms: 2.30725
+  type: 'test'
+  ...
+# Subtest: accepted diagonal material support does not retire and reactivate every frame
+ok 83 - accepted diagonal material support does not retire and reactivate every frame
+  ---
+  duration_ms: 1.318125
+  type: 'test'
+  ...
+# Subtest: swept support allocates a missing in-domain WDR page deterministically
+ok 84 - swept support allocates a missing in-domain WDR page deterministically
+  ---
+  duration_ms: 1.246917
+  type: 'test'
+  ...
+# Subtest: missing support claims the production WDR free stack before high-water growth
+ok 85 - missing support claims the production WDR free stack before high-water growth
+  ---
+  duration_ms: 1.290167
+  type: 'test'
+  ...
+# Subtest: stationary boundary liquid does not activate a dry page
+ok 86 - stationary boundary liquid does not activate a dry page
+  ---
+  duration_ms: 1.8555
+  type: 'test'
+  ...
+# Subtest: sub-roundoff boundary flux does not allocate a page
+ok 87 - sub-roundoff boundary flux does not allocate a page
+  ---
+  duration_ms: 0.920625
+  type: 'test'
+  ...
+# Subtest: boundary flux above transport roundoff still activates its receiver
+ok 88 - boundary flux above transport roundoff still activates its receiver
+  ---
+  duration_ms: 0.860375
+  type: 'test'
+  ...
+# Subtest: a body travelling multiple cells in one step reserves the crossed page
+ok 89 - a body travelling multiple cells in one step reserves the crossed page
+  ---
+  duration_ms: 1.056292
+  type: 'test'
+  ...
+# Subtest: diagonal motion activates only its swept page corridor
+ok 90 - diagonal motion activates only its swept page corridor
+  ---
+  duration_ms: 1.194042
+  type: 'test'
+  ...
+# Subtest: retirement requires exact zero while a sub-residency amount remains resident
+ok 91 - retirement requires exact zero while a sub-residency amount remains resident
+  ---
+  duration_ms: 1.848458
+  type: 'test'
+  ...
+# Subtest: refine-only closure raises the coarse side to physical 2:1
+ok 92 - refine-only closure raises the coarse side to physical 2:1
+  ---
+  duration_ms: 0.307667
+  type: 'test'
+  ...
+# Subtest: ordinary demotion admission skips an over-budget pair and keeps rotating
+ok 93 - ordinary demotion admission skips an over-budget pair and keeps rotating
+  ---
+  duration_ms: 3.134458
+  type: 'test'
+  ...
+# Subtest: a symmetric demotion request spends its budget on a complete reflection pair
+ok 94 - a symmetric demotion request spends its budget on a complete reflection pair
+  ---
+  duration_ms: 5.013416
+  type: 'test'
+  ...
+# Subtest: an over-budget reflection pair accumulates credit and is eventually admitted
+ok 95 - an over-budget reflection pair accumulates credit and is eventually admitted
+  ---
+  duration_ms: 2.846167
+  type: 'test'
+  ...
+# Subtest: hard minimum-cell region coarsens its outward grading halo
+ok 96 - hard minimum-cell region coarsens its outward grading halo
+  ---
+  duration_ms: 1.785416
+  type: 'test'
+  ...
+# Subtest: admission capacity fault leaves accepted topology authoritative
+ok 97 - admission capacity fault leaves accepted topology authoritative
+  ---
+  duration_ms: 0.976167
+  type: 'test'
+  ...
+# Subtest: an allocated retiring neighbour still constrains planned-rung closure
+ok 98 - an allocated retiring neighbour still constrains planned-rung closure
+  ---
+  duration_ms: 1.553417
+  type: 'test'
+  ...
+# Subtest: post-topology retirement marks exact changed and retired leaf slots
+ok 99 - post-topology retirement marks exact changed and retired leaf slots
+  ---
+  duration_ms: 1.547417
+  type: 'test'
+  ...
+# Subtest: the slice authority uses literal production WDR1, TEI2 and HTP1 banks
+ok 100 - the slice authority uses literal production WDR1, TEI2 and HTP1 banks
+  ---
+  duration_ms: 86.794916
+  type: 'test'
+  ...
+# Subtest: TEI retains leaf-times-64 packet ids while only the z=0 lane plane is live
+ok 101 - TEI retains leaf-times-64 packet ids while only the z=0 lane plane is live
+  ---
+  duration_ms: 53.161667
+  type: 'test'
+  ...
+# Subtest: production physical leaf gaps survive projected WDR, TEI and HTP banks
+ok 102 - production physical leaf gaps survive projected WDR, TEI and HTP banks
+  ---
+  duration_ms: 47.5455
+  type: 'test'
+  ...
+# Subtest: candidate banks commit atomically and cancellation preserves the accepted slot
+ok 103 - candidate banks commit atomically and cancellation preserves the accepted slot
+  ---
+  duration_ms: 49.818167
+  type: 'test'
+  ...
+# Subtest: a candidate beyond fixed WDR capacity fail-closes without replacing accepted banks
+ok 104 - a candidate beyond fixed WDR capacity fail-closes without replacing accepted banks
+  ---
+  duration_ms: 43.719
+  type: 'test'
+  ...
+# Subtest: a dynamic WDR leaf retires after publication and reuses its stable slot
+ok 105 - a dynamic WDR leaf retires after publication and reuses its stable slot
+  ---
+  duration_ms: 1.627791
+  type: 'test'
+  ...
+# Subtest: FSM1 publishes stable TEI packet bits and exact source-bank facts
+ok 106 - FSM1 publishes stable TEI packet bits and exact source-bank facts
+  ---
+  duration_ms: 189.482541
+  type: 'test'
+  ...
+# Subtest: FSM1 bulk certificate mirrors current values into the dead scalar bank
+ok 107 - FSM1 bulk certificate mirrors current values into the dead scalar bank
+  ---
+  duration_ms: 150.118958
+  type: 'test'
+  ...
+# Subtest: interface certificates clamp only the transport-admissible volume margin
+ok 108 - interface certificates clamp only the transport-admissible volume margin
+  ---
+  duration_ms: 0.41875
+  type: 'test'
+  ...
+# Subtest: zero-gradient ELVIRA axes do not invent a positive reflection orientation
+ok 109 - zero-gradient ELVIRA axes do not invent a positive reflection orientation
+  ---
+  duration_ms: 0.975083
+  type: 'test'
+  ...
+# Subtest: VEX uses physical mixed-port pieces and the production axis reduction tree
+ok 110 - VEX uses physical mixed-port pieces and the production axis reduction tree
+  ---
+  duration_ms: 0.234833
+  type: 'test'
+  ...
+# Subtest: mixed-seam pressure gradients are equivariant when reflection swaps the fine side
+ok 111 - mixed-seam pressure gradients are equivariant when reflection swaps the fine side
+  ---
+  duration_ms: 0.196416
+  type: 'test'
+  ...
+# Subtest: moving low-flux authority evacuates an exactly closed cell
+ok 112 - moving low-flux authority evacuates an exactly closed cell
+  ---
+  duration_ms: 1.108209
+  type: 'test'
+  ...
+# Subtest: transport-roundoff samples keep reflected ELVIRA certificates through impact
+ok 113 - transport-roundoff samples keep reflected ELVIRA certificates through impact
+  ---
+  duration_ms: 1454.535583
+  type: 'test'
+  ...
+# Subtest: B8/B4 pressure ports and physical subfaces use production coefficients
+ok 114 - B8/B4 pressure ports and physical subfaces use production coefficients
+  ---
+  duration_ms: 4.750708
+  type: 'test'
+  ...
+# Subtest: the 2-D mixed port is the unit-depth reduction of production HTP geometry
+ok 115 - the 2-D mixed port is the unit-depth reduction of production HTP geometry
+  ---
+  duration_ms: 7.352958
+  type: 'test'
+  ...
+# Subtest: the complete X/Y row stream keeps production order and unit-depth algebra
+ok 116 - the complete X/Y row stream keeps production order and unit-depth algebra
+  ---
+  duration_ms: 14.811
+  type: 'test'
+  ...
+# Subtest: cell incidence follows production template owner buckets before row id
+ok 117 - cell incidence follows production template owner buckets before row id
+  ---
+  duration_ms: 1.074459
+  type: 'test'
+  ...
+# Subtest: the same adaptive rows make gradient and divergence negative transposes
+ok 118 - the same adaptive rows make gradient and divergence negative transposes
+  ---
+  duration_ms: 2.162792
+  type: 'test'
+  ...
+# Subtest: candidate lifecycle is contiguous and transfer covers split and merge
+ok 119 - candidate lifecycle is contiguous and transfer covers split and merge
+  ---
+  duration_ms: 4.263625
+  type: 'test'
+  ...
+# Subtest: partial edge cells, inactive leaves and physical boundary modes stay explicit
+ok 120 - partial edge cells, inactive leaves and physical boundary modes stay explicit
+  ---
+  duration_ms: 0.609709
+  type: 'test'
+  ...
+# Subtest: source-owned PLIC split uses accepted plane and invalidates its candidate cache
+ok 121 - source-owned PLIC split uses accepted plane and invalidates its candidate cache
+  ---
+  duration_ms: 0.83175
+  type: 'test'
+  ...
+# Subtest: cut-cell split deliberately uses production capacity fallback instead of PLIC
+ok 122 - cut-cell split deliberately uses production capacity fallback instead of PLIC
+  ---
+  duration_ms: 0.828583
+  type: 'test'
+  ...
+# Subtest: coarsening transports mass/momentum but volume-weights gamma and pressure
+ok 123 - coarsening transports mass/momentum but volume-weights gamma and pressure
+  ---
+  duration_ms: 0.448667
+  type: 'test'
+  ...
+# Subtest: new-air coverage is explicit and initializes production gamma-one air
+ok 124 - new-air coverage is explicit and initializes production gamma-one air
+  ---
+  duration_ms: 0.223
+  type: 'test'
+  ...
+# Subtest: generation transfer preserves accepted f32 endpoint tolerance and defers overflow
+ok 125 - generation transfer preserves accepted f32 endpoint tolerance and defers overflow
+  ---
+  duration_ms: 0.176042
+  type: 'test'
+  ...
+# Subtest: tracers retain fixed lanes, seed only rho > 0.5, and advance on enable
+ok 126 - tracers retain fixed lanes, seed only rho > 0.5, and advance on enable
+  ---
+  duration_ms: 178.879625
+  type: 'test'
+  ...
+# Subtest: a live tracer retires at the resident dry cutoff without compaction
+ok 127 - a live tracer retires at the resident dry cutoff without compaction
+  ---
+  duration_ms: 141.604125
+  type: 'test'
+  ...
+# Subtest: the displayed frame-zero sphere uses one smooth shared RDF contour
+ok 128 - the displayed frame-zero sphere uses one smooth shared RDF contour
+  ---
+  duration_ms: 892.622708
+  type: 'test'
+  ...
+# Subtest: one accepted step and reset preserve the shared contour contract
+ok 129 - one accepted step and reset preserve the shared contour contract
+  ---
+  duration_ms: 1284.561792
+  type: 'test'
+  ...
+# Subtest: PLIC fallback is reserved for unsupported cut or nonfinite RDF cells
+ok 130 - PLIC fallback is reserved for unsupported cut or nonfinite RDF cells
+  ---
+  duration_ms: 1029.549625
+  type: 'test'
+  ...
+1..130
+# tests 130
+# suites 0
+# pass 125
+# fail 5
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 63908.357834

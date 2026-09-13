@@ -375,6 +375,9 @@ export interface GPUEulerianInfo {
   simulationLag_s?: number;
   maximumTallCellHeight?: number;
   encodedSteps?: number;
+  /** Monotonic generation of the contoured surface publication. A source may
+   * advance this for paused edits without claiming another physics step. */
+  surfaceRevision?: number;
   /** Presentation-sized physics batches submitted but not yet queue-confirmed. */
   gpuPendingBatches?: number;
   /** Simulation time represented by submitted, unconfirmed GPU work. */

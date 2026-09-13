@@ -1,0 +1,630 @@
+{
+  "timestamp": "2026-09-13T00:05:42.141Z",
+  "platform": "darwin",
+  "arch": "arm64",
+  "cpu": "Apple M1 Max",
+  "logicalCpus": 10,
+  "memoryBytes": 34359738368,
+  "node": "v22.22.1",
+  "dimension": 3,
+  "dt": 0.03333333333333333,
+  "methodValues": {
+    "timeStep": "paper",
+    "pressureIterations": 28,
+    "pressureRelativeTolerance": 1e-05,
+    "brickFineResolution": "8",
+    "maximumMacroSpanBricks": "1",
+    "selectorMode": "coarse-first",
+    "surfaceFineRings": 1
+  },
+  "frames": 4,
+  "warmup": 1,
+  "exactPublicationParity": true,
+  "results": [
+    {
+      "lane": "scalar",
+      "workers": 0,
+      "dimension": 3,
+      "dt": 0.03333333333333333,
+      "methodValues": {
+        "timeStep": "paper",
+        "pressureIterations": 28,
+        "pressureRelativeTolerance": 1e-05,
+        "brickFineResolution": "8",
+        "maximumMacroSpanBricks": "1",
+        "selectorMode": "coarse-first",
+        "surfaceFineRings": 1
+      },
+      "sourceSha256": "8005935d301f874b6c25e5dbf27f732f9651cb9d69041d94afed0c4598c47443",
+      "artifactSha256": "1f71daaea610668b52d0632521d0f6193c9e296f2ac62391ab09845fa62bcbab",
+      "cases": [
+        {
+          "id": "water-box-dam-break",
+          "initializationMs": 76.41400000000002,
+          "advanceMedianMs": 504.2371659999999,
+          "advanceP95Ms": 578.2987089999999,
+          "publicationMedianMs": 0.7327909999999065,
+          "completeMedianMs": 504.9036249999999,
+          "finalReceipt": {
+            "schemaVersion": 1,
+            "dimension": 3,
+            "runEpoch": 1,
+            "commandSequence": 5,
+            "frame": 5,
+            "time": 0.16666666666666666,
+            "injections": 0,
+            "topologyGeneration": 6,
+            "fieldRevision": 6,
+            "surfaceRevision": 6,
+            "memoryEpoch": 1,
+            "pressure": {
+              "iterations": 28,
+              "initialResidual": 167.32225,
+              "residual": 2.3396747,
+              "converged": false
+            },
+            "primaryRefinement": {
+              "iterations": 64,
+              "initialResidual": 167.56949,
+              "residual": 0.0005916333,
+              "converged": false
+            },
+            "pressureTotalIterations": 92,
+            "microsteps": 6,
+            "compatibility": {
+              "accepted": true,
+              "skippedForSolidMotion": false,
+              "iterations": 159,
+              "initialNormalizedResidual": 2.2756689,
+              "recursiveNormalizedResidual": 4.2597453e-06,
+              "measuredNormalizedResidual": 1.9073488e-07,
+              "maximumProjectedVolumeError": 1.9073488e-07,
+              "prePostconditioningMaximum": 3.8146976e-07,
+              "prePostconditioningBoundMaximum": 0.00018932375,
+              "residualCorrectionMaximum": 0.00017547607,
+              "postconditioningRounds": 3
+            },
+            "sourceLedger": {
+              "pending": 0,
+              "requested": 0,
+              "emitted": 0,
+              "available": 0,
+              "factor": 0,
+              "eventRequested": 0,
+              "eventEmitted": 0,
+              "fault": 0,
+              "requestedCompensation": 0,
+              "emittedCompensation": 0,
+              "eventBalanceResidual": 0,
+              "eventPendingBefore": 0,
+              "pendingCompensation": 0,
+              "continuousPlannedRate": 0
+            },
+            "tracers": {
+              "generation": 0,
+              "seeded": false,
+              "count": 832,
+              "liveCount": 0,
+              "retiredCount": 0
+            },
+            "liquidMeasure": 1679.9999697392584,
+            "seededVolume": 1680,
+            "drift": -1.8012346188134826e-08,
+            "fault": null,
+            "lastInjection": null
+          },
+          "finalPlanes": {
+            "60": "fd34ead2fe3dd0e9890ad9b619e54201720dfc55344e95b5bb8735e1af12be86",
+            "61": "24744ad492cfddf34aa3905d97d5f34f1d7f8f83ff0ff66cb716a21605a1546d",
+            "62": "998f1eb45334be33742e39a8bc732681d94944d2dad39b5f42c46bf656b98b92"
+          }
+        }
+      ]
+    },
+    {
+      "lane": "simd",
+      "workers": 0,
+      "dimension": 3,
+      "dt": 0.03333333333333333,
+      "methodValues": {
+        "timeStep": "paper",
+        "pressureIterations": 28,
+        "pressureRelativeTolerance": 1e-05,
+        "brickFineResolution": "8",
+        "maximumMacroSpanBricks": "1",
+        "selectorMode": "coarse-first",
+        "surfaceFineRings": 1
+      },
+      "sourceSha256": "8005935d301f874b6c25e5dbf27f732f9651cb9d69041d94afed0c4598c47443",
+      "artifactSha256": "bf20eabfb84f4d526dfab64fd15119dbbf43d9820c95b3e95e992bb81c81a4c4",
+      "cases": [
+        {
+          "id": "water-box-dam-break",
+          "initializationMs": 75.11675000000002,
+          "advanceMedianMs": 501.2364170000001,
+          "advanceP95Ms": 571.344625,
+          "publicationMedianMs": 0.6937080000000151,
+          "completeMedianMs": 501.81937500000004,
+          "finalReceipt": {
+            "schemaVersion": 1,
+            "dimension": 3,
+            "runEpoch": 1,
+            "commandSequence": 5,
+            "frame": 5,
+            "time": 0.16666666666666666,
+            "injections": 0,
+            "topologyGeneration": 6,
+            "fieldRevision": 6,
+            "surfaceRevision": 6,
+            "memoryEpoch": 1,
+            "pressure": {
+              "iterations": 28,
+              "initialResidual": 167.32225,
+              "residual": 2.3396747,
+              "converged": false
+            },
+            "primaryRefinement": {
+              "iterations": 64,
+              "initialResidual": 167.56949,
+              "residual": 0.0005916333,
+              "converged": false
+            },
+            "pressureTotalIterations": 92,
+            "microsteps": 6,
+            "compatibility": {
+              "accepted": true,
+              "skippedForSolidMotion": false,
+              "iterations": 159,
+              "initialNormalizedResidual": 2.2756689,
+              "recursiveNormalizedResidual": 4.2597453e-06,
+              "measuredNormalizedResidual": 1.9073488e-07,
+              "maximumProjectedVolumeError": 1.9073488e-07,
+              "prePostconditioningMaximum": 3.8146976e-07,
+              "prePostconditioningBoundMaximum": 0.00018932375,
+              "residualCorrectionMaximum": 0.00017547607,
+              "postconditioningRounds": 3
+            },
+            "sourceLedger": {
+              "pending": 0,
+              "requested": 0,
+              "emitted": 0,
+              "available": 0,
+              "factor": 0,
+              "eventRequested": 0,
+              "eventEmitted": 0,
+              "fault": 0,
+              "requestedCompensation": 0,
+              "emittedCompensation": 0,
+              "eventBalanceResidual": 0,
+              "eventPendingBefore": 0,
+              "pendingCompensation": 0,
+              "continuousPlannedRate": 0
+            },
+            "tracers": {
+              "generation": 0,
+              "seeded": false,
+              "count": 832,
+              "liveCount": 0,
+              "retiredCount": 0
+            },
+            "liquidMeasure": 1679.9999697392584,
+            "seededVolume": 1680,
+            "drift": -1.8012346188134826e-08,
+            "fault": null,
+            "lastInjection": null
+          },
+          "finalPlanes": {
+            "60": "fd34ead2fe3dd0e9890ad9b619e54201720dfc55344e95b5bb8735e1af12be86",
+            "61": "24744ad492cfddf34aa3905d97d5f34f1d7f8f83ff0ff66cb716a21605a1546d",
+            "62": "998f1eb45334be33742e39a8bc732681d94944d2dad39b5f42c46bf656b98b92"
+          }
+        }
+      ]
+    },
+    {
+      "lane": "threaded-1",
+      "workers": 1,
+      "dimension": 3,
+      "dt": 0.03333333333333333,
+      "methodValues": {
+        "timeStep": "paper",
+        "pressureIterations": 28,
+        "pressureRelativeTolerance": 1e-05,
+        "brickFineResolution": "8",
+        "maximumMacroSpanBricks": "1",
+        "selectorMode": "coarse-first",
+        "surfaceFineRings": 1
+      },
+      "sourceSha256": "8005935d301f874b6c25e5dbf27f732f9651cb9d69041d94afed0c4598c47443",
+      "artifactSha256": "df5419d01cee26aea7bf383b36d4556141ce1392dc5c254f07f7721358b253ad",
+      "cases": [
+        {
+          "id": "water-box-dam-break",
+          "initializationMs": 77.24879099999998,
+          "advanceMedianMs": 558.53775,
+          "advanceP95Ms": 640.6486669999999,
+          "publicationMedianMs": 0.8548329999998714,
+          "completeMedianMs": 559.1985410000002,
+          "finalReceipt": {
+            "schemaVersion": 1,
+            "dimension": 3,
+            "runEpoch": 1,
+            "commandSequence": 5,
+            "frame": 5,
+            "time": 0.16666666666666666,
+            "injections": 0,
+            "topologyGeneration": 6,
+            "fieldRevision": 6,
+            "surfaceRevision": 6,
+            "memoryEpoch": 1,
+            "pressure": {
+              "iterations": 28,
+              "initialResidual": 167.32225,
+              "residual": 2.3396747,
+              "converged": false
+            },
+            "primaryRefinement": {
+              "iterations": 64,
+              "initialResidual": 167.56949,
+              "residual": 0.0005916333,
+              "converged": false
+            },
+            "pressureTotalIterations": 92,
+            "microsteps": 6,
+            "compatibility": {
+              "accepted": true,
+              "skippedForSolidMotion": false,
+              "iterations": 159,
+              "initialNormalizedResidual": 2.2756689,
+              "recursiveNormalizedResidual": 4.2597453e-06,
+              "measuredNormalizedResidual": 1.9073488e-07,
+              "maximumProjectedVolumeError": 1.9073488e-07,
+              "prePostconditioningMaximum": 3.8146976e-07,
+              "prePostconditioningBoundMaximum": 0.00018932375,
+              "residualCorrectionMaximum": 0.00017547607,
+              "postconditioningRounds": 3
+            },
+            "sourceLedger": {
+              "pending": 0,
+              "requested": 0,
+              "emitted": 0,
+              "available": 0,
+              "factor": 0,
+              "eventRequested": 0,
+              "eventEmitted": 0,
+              "fault": 0,
+              "requestedCompensation": 0,
+              "emittedCompensation": 0,
+              "eventBalanceResidual": 0,
+              "eventPendingBefore": 0,
+              "pendingCompensation": 0,
+              "continuousPlannedRate": 0
+            },
+            "tracers": {
+              "generation": 0,
+              "seeded": false,
+              "count": 832,
+              "liveCount": 0,
+              "retiredCount": 0
+            },
+            "liquidMeasure": 1679.9999697392584,
+            "seededVolume": 1680,
+            "drift": -1.8012346188134826e-08,
+            "fault": null,
+            "lastInjection": null
+          },
+          "finalPlanes": {
+            "60": "fd34ead2fe3dd0e9890ad9b619e54201720dfc55344e95b5bb8735e1af12be86",
+            "61": "24744ad492cfddf34aa3905d97d5f34f1d7f8f83ff0ff66cb716a21605a1546d",
+            "62": "998f1eb45334be33742e39a8bc732681d94944d2dad39b5f42c46bf656b98b92"
+          }
+        }
+      ]
+    },
+    {
+      "lane": "threaded-2",
+      "workers": 2,
+      "dimension": 3,
+      "dt": 0.03333333333333333,
+      "methodValues": {
+        "timeStep": "paper",
+        "pressureIterations": 28,
+        "pressureRelativeTolerance": 1e-05,
+        "brickFineResolution": "8",
+        "maximumMacroSpanBricks": "1",
+        "selectorMode": "coarse-first",
+        "surfaceFineRings": 1
+      },
+      "sourceSha256": "8005935d301f874b6c25e5dbf27f732f9651cb9d69041d94afed0c4598c47443",
+      "artifactSha256": "df5419d01cee26aea7bf383b36d4556141ce1392dc5c254f07f7721358b253ad",
+      "cases": [
+        {
+          "id": "water-box-dam-break",
+          "initializationMs": 77.28216700000002,
+          "advanceMedianMs": 383.3001670000001,
+          "advanceP95Ms": 503.88970900000004,
+          "publicationMedianMs": 0.7925420000001395,
+          "completeMedianMs": 383.98858300000006,
+          "finalReceipt": {
+            "schemaVersion": 1,
+            "dimension": 3,
+            "runEpoch": 1,
+            "commandSequence": 5,
+            "frame": 5,
+            "time": 0.16666666666666666,
+            "injections": 0,
+            "topologyGeneration": 6,
+            "fieldRevision": 6,
+            "surfaceRevision": 6,
+            "memoryEpoch": 1,
+            "pressure": {
+              "iterations": 28,
+              "initialResidual": 167.32225,
+              "residual": 2.3396747,
+              "converged": false
+            },
+            "primaryRefinement": {
+              "iterations": 64,
+              "initialResidual": 167.56949,
+              "residual": 0.0005916333,
+              "converged": false
+            },
+            "pressureTotalIterations": 92,
+            "microsteps": 6,
+            "compatibility": {
+              "accepted": true,
+              "skippedForSolidMotion": false,
+              "iterations": 159,
+              "initialNormalizedResidual": 2.2756689,
+              "recursiveNormalizedResidual": 4.2597453e-06,
+              "measuredNormalizedResidual": 1.9073488e-07,
+              "maximumProjectedVolumeError": 1.9073488e-07,
+              "prePostconditioningMaximum": 3.8146976e-07,
+              "prePostconditioningBoundMaximum": 0.00018932375,
+              "residualCorrectionMaximum": 0.00017547607,
+              "postconditioningRounds": 3
+            },
+            "sourceLedger": {
+              "pending": 0,
+              "requested": 0,
+              "emitted": 0,
+              "available": 0,
+              "factor": 0,
+              "eventRequested": 0,
+              "eventEmitted": 0,
+              "fault": 0,
+              "requestedCompensation": 0,
+              "emittedCompensation": 0,
+              "eventBalanceResidual": 0,
+              "eventPendingBefore": 0,
+              "pendingCompensation": 0,
+              "continuousPlannedRate": 0
+            },
+            "tracers": {
+              "generation": 0,
+              "seeded": false,
+              "count": 832,
+              "liveCount": 0,
+              "retiredCount": 0
+            },
+            "liquidMeasure": 1679.9999697392584,
+            "seededVolume": 1680,
+            "drift": -1.8012346188134826e-08,
+            "fault": null,
+            "lastInjection": null
+          },
+          "finalPlanes": {
+            "60": "fd34ead2fe3dd0e9890ad9b619e54201720dfc55344e95b5bb8735e1af12be86",
+            "61": "24744ad492cfddf34aa3905d97d5f34f1d7f8f83ff0ff66cb716a21605a1546d",
+            "62": "998f1eb45334be33742e39a8bc732681d94944d2dad39b5f42c46bf656b98b92"
+          }
+        }
+      ]
+    },
+    {
+      "lane": "threaded-4",
+      "workers": 4,
+      "dimension": 3,
+      "dt": 0.03333333333333333,
+      "methodValues": {
+        "timeStep": "paper",
+        "pressureIterations": 28,
+        "pressureRelativeTolerance": 1e-05,
+        "brickFineResolution": "8",
+        "maximumMacroSpanBricks": "1",
+        "selectorMode": "coarse-first",
+        "surfaceFineRings": 1
+      },
+      "sourceSha256": "8005935d301f874b6c25e5dbf27f732f9651cb9d69041d94afed0c4598c47443",
+      "artifactSha256": "df5419d01cee26aea7bf383b36d4556141ce1392dc5c254f07f7721358b253ad",
+      "cases": [
+        {
+          "id": "water-box-dam-break",
+          "initializationMs": 76.62058300000001,
+          "advanceMedianMs": 282.4328330000001,
+          "advanceP95Ms": 410.868375,
+          "publicationMedianMs": 0.8026250000000346,
+          "completeMedianMs": 283.2354580000001,
+          "finalReceipt": {
+            "schemaVersion": 1,
+            "dimension": 3,
+            "runEpoch": 1,
+            "commandSequence": 5,
+            "frame": 5,
+            "time": 0.16666666666666666,
+            "injections": 0,
+            "topologyGeneration": 6,
+            "fieldRevision": 6,
+            "surfaceRevision": 6,
+            "memoryEpoch": 1,
+            "pressure": {
+              "iterations": 28,
+              "initialResidual": 167.32225,
+              "residual": 2.3396747,
+              "converged": false
+            },
+            "primaryRefinement": {
+              "iterations": 64,
+              "initialResidual": 167.56949,
+              "residual": 0.0005916333,
+              "converged": false
+            },
+            "pressureTotalIterations": 92,
+            "microsteps": 6,
+            "compatibility": {
+              "accepted": true,
+              "skippedForSolidMotion": false,
+              "iterations": 159,
+              "initialNormalizedResidual": 2.2756689,
+              "recursiveNormalizedResidual": 4.2597453e-06,
+              "measuredNormalizedResidual": 1.9073488e-07,
+              "maximumProjectedVolumeError": 1.9073488e-07,
+              "prePostconditioningMaximum": 3.8146976e-07,
+              "prePostconditioningBoundMaximum": 0.00018932375,
+              "residualCorrectionMaximum": 0.00017547607,
+              "postconditioningRounds": 3
+            },
+            "sourceLedger": {
+              "pending": 0,
+              "requested": 0,
+              "emitted": 0,
+              "available": 0,
+              "factor": 0,
+              "eventRequested": 0,
+              "eventEmitted": 0,
+              "fault": 0,
+              "requestedCompensation": 0,
+              "emittedCompensation": 0,
+              "eventBalanceResidual": 0,
+              "eventPendingBefore": 0,
+              "pendingCompensation": 0,
+              "continuousPlannedRate": 0
+            },
+            "tracers": {
+              "generation": 0,
+              "seeded": false,
+              "count": 832,
+              "liveCount": 0,
+              "retiredCount": 0
+            },
+            "liquidMeasure": 1679.9999697392584,
+            "seededVolume": 1680,
+            "drift": -1.8012346188134826e-08,
+            "fault": null,
+            "lastInjection": null
+          },
+          "finalPlanes": {
+            "60": "fd34ead2fe3dd0e9890ad9b619e54201720dfc55344e95b5bb8735e1af12be86",
+            "61": "24744ad492cfddf34aa3905d97d5f34f1d7f8f83ff0ff66cb716a21605a1546d",
+            "62": "998f1eb45334be33742e39a8bc732681d94944d2dad39b5f42c46bf656b98b92"
+          }
+        }
+      ]
+    },
+    {
+      "lane": "threaded-8",
+      "workers": 8,
+      "dimension": 3,
+      "dt": 0.03333333333333333,
+      "methodValues": {
+        "timeStep": "paper",
+        "pressureIterations": 28,
+        "pressureRelativeTolerance": 1e-05,
+        "brickFineResolution": "8",
+        "maximumMacroSpanBricks": "1",
+        "selectorMode": "coarse-first",
+        "surfaceFineRings": 1
+      },
+      "sourceSha256": "8005935d301f874b6c25e5dbf27f732f9651cb9d69041d94afed0c4598c47443",
+      "artifactSha256": "df5419d01cee26aea7bf383b36d4556141ce1392dc5c254f07f7721358b253ad",
+      "cases": [
+        {
+          "id": "water-box-dam-break",
+          "initializationMs": 76.48620800000003,
+          "advanceMedianMs": 237.2282080000001,
+          "advanceP95Ms": 374.39424999999983,
+          "publicationMedianMs": 0.8114579999999023,
+          "completeMedianMs": 238.039666,
+          "finalReceipt": {
+            "schemaVersion": 1,
+            "dimension": 3,
+            "runEpoch": 1,
+            "commandSequence": 5,
+            "frame": 5,
+            "time": 0.16666666666666666,
+            "injections": 0,
+            "topologyGeneration": 6,
+            "fieldRevision": 6,
+            "surfaceRevision": 6,
+            "memoryEpoch": 1,
+            "pressure": {
+              "iterations": 28,
+              "initialResidual": 167.32225,
+              "residual": 2.3396747,
+              "converged": false
+            },
+            "primaryRefinement": {
+              "iterations": 64,
+              "initialResidual": 167.56949,
+              "residual": 0.0005916333,
+              "converged": false
+            },
+            "pressureTotalIterations": 92,
+            "microsteps": 6,
+            "compatibility": {
+              "accepted": true,
+              "skippedForSolidMotion": false,
+              "iterations": 159,
+              "initialNormalizedResidual": 2.2756689,
+              "recursiveNormalizedResidual": 4.2597453e-06,
+              "measuredNormalizedResidual": 1.9073488e-07,
+              "maximumProjectedVolumeError": 1.9073488e-07,
+              "prePostconditioningMaximum": 3.8146976e-07,
+              "prePostconditioningBoundMaximum": 0.00018932375,
+              "residualCorrectionMaximum": 0.00017547607,
+              "postconditioningRounds": 3
+            },
+            "sourceLedger": {
+              "pending": 0,
+              "requested": 0,
+              "emitted": 0,
+              "available": 0,
+              "factor": 0,
+              "eventRequested": 0,
+              "eventEmitted": 0,
+              "fault": 0,
+              "requestedCompensation": 0,
+              "emittedCompensation": 0,
+              "eventBalanceResidual": 0,
+              "eventPendingBefore": 0,
+              "pendingCompensation": 0,
+              "continuousPlannedRate": 0
+            },
+            "tracers": {
+              "generation": 0,
+              "seeded": false,
+              "count": 832,
+              "liveCount": 0,
+              "retiredCount": 0
+            },
+            "liquidMeasure": 1679.9999697392584,
+            "seededVolume": 1680,
+            "drift": -1.8012346188134826e-08,
+            "fault": null,
+            "lastInjection": null
+          },
+          "finalPlanes": {
+            "60": "fd34ead2fe3dd0e9890ad9b619e54201720dfc55344e95b5bb8735e1af12be86",
+            "61": "24744ad492cfddf34aa3905d97d5f34f1d7f8f83ff0ff66cb716a21605a1546d",
+            "62": "998f1eb45334be33742e39a8bc732681d94944d2dad39b5f42c46bf656b98b92"
+          }
+        }
+      ]
+    }
+  ],
+  "measurementNotes": [
+    "Sequential lanes without concurrent project tests/builds or browser automation; ordinary desktop applications remained running.",
+    "All final numerical planes and receipts match the pre-optimization run exactly, excluding allocation accounting.",
+    "Actual instruction validation proves scalar has no SIMD/atomics and all artifacts reject relaxed SIMD."
+  ]
+}

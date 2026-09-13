@@ -20,6 +20,11 @@ import type {
   SparseBrickResolution,
   SparseBrickFineResolution,
 } from "./sparse-brick-atlas";
+import {
+  physicsExecutionBackendParams,
+  resolvePhysicsExecutionBackend,
+} from "../../core/physics-execution-backend";
+import { RustFluid3DGPUSolverAdapter } from "../../physics-wasm/fluid3d-gpu-adapter";
 
 /** Sparse-resolution controls consumed by the interactive solver factory. */
 export type AdaptiveMassResolutionMode = "adaptive";
@@ -81,6 +86,7 @@ export interface AdaptiveMassSolverOptions extends SparseCM12CorrectionControls 
 }
 
 const params: MethodParamSpec[] = [
+  ...physicsExecutionBackendParams(true),
   ...ALGORITHM_PARAMS,
   ...ADAPTIVITY_PARAMS,
 
@@ -196,7 +202,8 @@ export function adaptiveMassSolverOptions(
   values: MethodParamValues,
 ): AdaptiveMassSolverOptions {
   resolveMethodComposition(values);
-  const fineResolution = brickFineResolution(values.brickFineResolution);
+  const fineResolution = resolvePhysicsExecutionBackend(values) === "cpu"
+    ? 8 : brickFineResolution(values.brickFineResolution);
   return {
     brickFineResolution: fineResolution,
     surfaceMeshRefinement: Number(values.surfaceMeshRefinement) === 1 ? 1
@@ -281,10 +288,13 @@ export const adaptiveMassMethod: SimulationMethod = {
   pressureMapping: "Every live Sparse Geometric step solves one globally coupled composite pressure system over regular faces and conservative 2:1 seam ports using one-reduction sparse MGPCG.",
   normalizeValues: (values) => {
     const { activitySignals: _activitySignals, ...normalizedActivity } = activityPolicy(values);
-    const parsedFineResolution = brickFineResolution(values.brickFineResolution);
+    const executionBackend = resolvePhysicsExecutionBackend(values);
+    const parsedFineResolution = executionBackend === "cpu"
+      ? 8 : brickFineResolution(values.brickFineResolution);
     const fineResolution: SparseBrickFineResolution = parsedFineResolution;
     return {
       ...values,
+      physicsExecutionBackend: executionBackend,
       brickFineResolution: String(fineResolution),
       presentationPageResolution: String(fineResolution),
       maximumMacroSpanBricks:
@@ -346,6 +356,12 @@ export const adaptiveMassMethod: SimulationMethod = {
       return Promise.reject(new RangeError(
         "Sparse CM12 production requires a matched B4/P4, B8/P8, or B16/P16 profile",
       ));
+    }
+    if (resolvePhysicsExecutionBackend(values) === "cpu") {
+      return RustFluid3DGPUSolverAdapter.create(device, scene, {
+        quality,
+        methodValues: values,
+      });
     }
     return WebGPUAdaptiveMassSolver.createAsync(
       device,

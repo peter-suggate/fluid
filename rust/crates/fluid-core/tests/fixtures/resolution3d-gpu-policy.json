@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "activityMask": {
+    "source": "tests/sparse-cm12-activity-mask-dawn.test.ts",
+    "activityFlagValues": 256,
+    "directionValues": 32,
+    "directionBits": 27,
+    "fullSupportMask": 134217727
+  },
+  "coarseFirstCurvature": {
+    "source": "lib/methods/adaptive-volume/features/adaptivity/verification/sparse-cm12-coarse-first-curvature-dawn.test.ts",
+    "cellWidths": [8, 4, 2, 1],
+    "axes": 3,
+    "cutVariants": 2,
+    "maximumNormalError": 1.1920928955078125e-7,
+    "maximumRestrictionError": 0.0
+  }
+}

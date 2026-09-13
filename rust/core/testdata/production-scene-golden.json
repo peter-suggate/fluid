@@ -1,0 +1,3273 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "id": "water-box-dam-break",
+      "scene": {
+        "schemaVersion": "2.0.0",
+        "sceneId": "interactive-water-box",
+        "randomSeed": 20260712,
+        "duration_s": 20,
+        "container": {
+          "width_m": 1.2,
+          "height_m": 0.8,
+          "depth_m": 0.8,
+          "fillFraction": 0.2734375,
+          "top": "closed",
+          "fluidWallMode": "no-slip"
+        },
+        "solidVoxels": [
+          {
+            "operation": "fill",
+            "minimum": [
+              0,
+              -1,
+              0
+            ],
+            "maximumExclusive": [
+              24,
+              0,
+              16
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              -1,
+              0,
+              0
+            ],
+            "maximumExclusive": [
+              0,
+              16,
+              16
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              24,
+              0,
+              0
+            ],
+            "maximumExclusive": [
+              25,
+              16,
+              16
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              0,
+              0,
+              -1
+            ],
+            "maximumExclusive": [
+              24,
+              16,
+              0
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              0,
+              0,
+              16
+            ],
+            "maximumExclusive": [
+              24,
+              16,
+              17
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              0,
+              16,
+              0
+            ],
+            "maximumExclusive": [
+              24,
+              17,
+              16
+            ],
+            "materialId": 1
+          }
+        ],
+        "voxelDomain": {
+          "finestCellSize_m": 0.05,
+          "brickSize_cells": 8
+        },
+        "fluid": {
+          "density_kg_m3": 998.2,
+          "dynamicViscosity_Pa_s": 0.001002,
+          "surfaceTension_N_m": 0.072,
+          "gravity_m_s2": {
+            "x": 0,
+            "y": -9.80665,
+            "z": 0
+          },
+          "initialCondition": "dam-break",
+          "initialDamBreakDimensions_m": {
+            "x": 0.6,
+            "y": 0.7,
+            "z": 0.5
+          }
+        },
+        "nominalResolution": {
+          "length_m": 0.025
+        },
+        "numerics": {
+          "fixedDt_s": 0.03333333333333333,
+          "maxDt_s": 0.03333333333333333,
+          "pressureRelativeTolerance": 1e-8,
+          "pressureMaxIterations": 1000
+        },
+        "rigidBodies": [],
+        "environment": "stage",
+        "scenery": {
+          "palettes": {
+            "stage": {
+              "tint": [
+                1,
+                0.995,
+                0.985
+              ]
+            },
+            "fixture": {
+              "tint": [
+                0.94,
+                0.95,
+                1
+              ]
+            },
+            "lamp": {
+              "tint": [
+                1,
+                0.955,
+                0.88
+              ]
+            }
+          },
+          "nodes": [
+            {
+              "kind": "room-shell",
+              "id": "shell",
+              "materialModel": "room",
+              "faces": [],
+              "floor": {
+                "palette": "stage",
+                "value": 0.62
+              },
+              "wall": {
+                "palette": "stage",
+                "value": 0.62
+              },
+              "ceiling": {
+                "palette": "stage",
+                "value": 0.62
+              }
+            },
+            {
+              "kind": "box",
+              "id": "stage/floor",
+              "group": "stage",
+              "tags": [
+                "stage",
+                "floor",
+                "fluid-collider"
+              ],
+              "place": {
+                "position": {
+                  "x": 0,
+                  "y": -0.07142857142857142,
+                  "z": 0
+                },
+                "units": "metres"
+              },
+              "halfSize": {
+                "x": 2.261904761904762,
+                "y": 0.07142857142857142,
+                "z": 2.261904761904762
+              },
+              "material": {
+                "palette": "stage",
+                "value": 0.12,
+                "surface": "plaster"
+              }
+            },
+            {
+              "kind": "cylinder",
+              "id": "lamp/stem",
+              "group": "lamp",
+              "tags": [
+                "lamp",
+                "fixture"
+              ],
+              "place": {
+                "position": {
+                  "x": 0,
+                  "y": 3.924603174603175,
+                  "z": 0
+                },
+                "units": "metres"
+              },
+              "radius": 0.021428571428571425,
+              "halfHeight": 0.5357142857142857,
+              "material": {
+                "palette": "fixture",
+                "value": 0.16,
+                "surface": "brushed-metal"
+              }
+            },
+            {
+              "kind": "cone",
+              "id": "lamp/reflector",
+              "group": "lamp",
+              "tags": [
+                "lamp",
+                "fixture",
+                "light",
+                "spot-light"
+              ],
+              "place": {
+                "position": {
+                  "x": 0,
+                  "y": 3.152777777777778,
+                  "z": 0
+                },
+                "units": "metres"
+              },
+              "baseRadius": 0.2619047619047619,
+              "topRadius": 0.05952380952380952,
+              "halfHeight": 0.2361111111111111,
+              "material": {
+                "colorLinear": [
+                  1,
+                  0.955,
+                  0.88
+                ],
+                "emission": 106.29251700680271
+              }
+            }
+          ]
+        }
+      },
+      "initialization": {
+        "dt": 0.03333333333333333,
+        "brickFineResolution": 8,
+        "maximumMacroSpanBricks": null,
+        "surfaceFineRings": 1,
+        "activitySignals": true,
+        "coarseFirst": true,
+        "curvatureTolerance": 0.25
+      },
+      "expected": {
+        "dimensions": [
+          24,
+          16
+        ],
+        "sourceDimensions": [
+          24,
+          16,
+          16
+        ],
+        "centerCellZ": 8,
+        "sourceCellSize": 0.05,
+        "bricks": [
+          {
+            "id": 6,
+            "key": 6,
+            "coordinate": [
+              0,
+              0
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": true
+          },
+          {
+            "id": 7,
+            "key": 7,
+            "coordinate": [
+              1,
+              0
+            ],
+            "spanBricks": 1,
+            "resolution": 8,
+            "active": true
+          },
+          {
+            "id": 8,
+            "key": 8,
+            "coordinate": [
+              2,
+              0
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 9,
+            "key": 9,
+            "coordinate": [
+              0,
+              1
+            ],
+            "spanBricks": 1,
+            "resolution": 8,
+            "active": true
+          },
+          {
+            "id": 10,
+            "key": 10,
+            "coordinate": [
+              1,
+              1
+            ],
+            "spanBricks": 1,
+            "resolution": 8,
+            "active": true
+          },
+          {
+            "id": 11,
+            "key": 11,
+            "coordinate": [
+              2,
+              1
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          }
+        ],
+        "cells": 208,
+        "rows": 440,
+        "subfaces": 448,
+        "densityHash": "9eaeefe7de152165",
+        "capacityHash": "d1306dbf72770fa5",
+        "faceVelocityHash": "994f9a28082f9ca5",
+        "normalHash": "9f1940f151d66525",
+        "offsetHash": "ebc4e38d4d85c425",
+        "materialHash": "9fa9e040e0eedf25",
+        "solidHash": "6ab05ef9aa8b9b25",
+        "cellGraphHash": "8cab0c14ca58679c",
+        "rowFloatHash": "2c11cc1392d4af55",
+        "rowWordHash": "2bbb674d46f435ed",
+        "subfaceFloatHash": "4c3d41f67cb2e915",
+        "subfaceWordHash": "ddbc353522d636e5",
+        "incidenceHash": "e98a1fa4bc20ac9d",
+        "subfaceIncidenceHash": "eae644161a34305b"
+      }
+    },
+    {
+      "id": "coarse-first-pool-impact-quarter",
+      "scene": {
+        "schemaVersion": "2.0.0",
+        "sceneId": "coarse-first-pool-impact-quarter",
+        "randomSeed": 20260712,
+        "duration_s": 4,
+        "container": {
+          "width_m": 1.6,
+          "height_m": 1.2,
+          "depth_m": 1.6,
+          "fillFraction": 0.3333333333333333,
+          "top": "open",
+          "fluidWallMode": "free-slip"
+        },
+        "solidVoxels": [
+          {
+            "operation": "fill",
+            "minimum": [
+              0,
+              -1,
+              0
+            ],
+            "maximumExclusive": [
+              32,
+              0,
+              32
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              -1,
+              0,
+              0
+            ],
+            "maximumExclusive": [
+              0,
+              24,
+              32
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              32,
+              0,
+              0
+            ],
+            "maximumExclusive": [
+              33,
+              24,
+              32
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              0,
+              0,
+              -1
+            ],
+            "maximumExclusive": [
+              32,
+              24,
+              0
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              0,
+              0,
+              32
+            ],
+            "maximumExclusive": [
+              32,
+              24,
+              33
+            ],
+            "materialId": 1
+          }
+        ],
+        "voxelDomain": {
+          "finestCellSize_m": 0.05,
+          "brickSize_cells": 8
+        },
+        "fluid": {
+          "density_kg_m3": 998.2,
+          "dynamicViscosity_Pa_s": 0,
+          "surfaceTension_N_m": 0,
+          "gravity_m_s2": {
+            "x": 0,
+            "y": -9.80665,
+            "z": 0
+          },
+          "initialCondition": "tank-fill",
+          "initialLiquidVolumes": [
+            {
+              "shape": "sphere",
+              "center_m": {
+                "x": 0,
+                "y": 0.9125,
+                "z": 0
+              },
+              "radius_m": 0.25
+            }
+          ]
+        },
+        "nominalResolution": {
+          "length_m": 0.025
+        },
+        "numerics": {
+          "fixedDt_s": 0.03333333333333333,
+          "maxDt_s": 0.03333333333333333,
+          "pressureRelativeTolerance": 1e-8,
+          "pressureMaxIterations": 1000
+        },
+        "rigidBodies": [],
+        "environment": "stage",
+        "scenery": {
+          "palettes": {
+            "stage": {
+              "tint": [
+                1,
+                0.995,
+                0.985
+              ]
+            },
+            "fixture": {
+              "tint": [
+                0.94,
+                0.95,
+                1
+              ]
+            },
+            "lamp": {
+              "tint": [
+                1,
+                0.955,
+                0.88
+              ]
+            }
+          },
+          "nodes": [
+            {
+              "kind": "room-shell",
+              "id": "shell",
+              "materialModel": "room",
+              "faces": [],
+              "floor": {
+                "palette": "stage",
+                "value": 0.62
+              },
+              "wall": {
+                "palette": "stage",
+                "value": 0.62
+              },
+              "ceiling": {
+                "palette": "stage",
+                "value": 0.62
+              }
+            },
+            {
+              "kind": "box",
+              "id": "stage/floor",
+              "group": "stage",
+              "tags": [
+                "stage",
+                "floor",
+                "fluid-collider"
+              ],
+              "place": {
+                "position": {
+                  "x": 0,
+                  "y": -0.1120663629361052,
+                  "z": 0
+                },
+                "units": "metres"
+              },
+              "halfSize": {
+                "x": 3.548768159643331,
+                "y": 0.1120663629361052,
+                "z": 3.548768159643331
+              },
+              "material": {
+                "palette": "stage",
+                "value": 0.12,
+                "surface": "plaster"
+              }
+            },
+            {
+              "kind": "cylinder",
+              "id": "lamp/stem",
+              "group": "lamp",
+              "tags": [
+                "lamp",
+                "fixture"
+              ],
+              "place": {
+                "position": {
+                  "x": 0,
+                  "y": 6.157424052433781,
+                  "z": 0
+                },
+                "units": "metres"
+              },
+              "radius": 0.03361990888083155,
+              "halfHeight": 0.8404977220207889,
+              "material": {
+                "palette": "fixture",
+                "value": 0.16,
+                "surface": "brushed-metal"
+              }
+            },
+            {
+              "kind": "cone",
+              "id": "lamp/reflector",
+              "group": "lamp",
+              "tags": [
+                "lamp",
+                "fixture",
+                "light",
+                "spot-light"
+              ],
+              "place": {
+                "position": {
+                  "x": 0,
+                  "y": 4.946484741818644,
+                  "z": 0
+                },
+                "units": "metres"
+              },
+              "baseRadius": 0.4109099974323857,
+              "topRadius": 0.09338863578008766,
+              "halfHeight": 0.3704415885943478,
+              "material": {
+                "colorLinear": [
+                  1,
+                  0.955,
+                  0.88
+                ],
+                "emission": 261.64311878597607
+              }
+            }
+          ]
+        }
+      },
+      "initialization": {
+        "dt": 0.03333333333333333,
+        "brickFineResolution": 8,
+        "maximumMacroSpanBricks": null,
+        "surfaceFineRings": 1,
+        "activitySignals": true,
+        "coarseFirst": true,
+        "curvatureTolerance": 0.25
+      },
+      "expected": {
+        "dimensions": [
+          32,
+          24
+        ],
+        "sourceDimensions": [
+          32,
+          24,
+          32
+        ],
+        "centerCellZ": 16,
+        "sourceCellSize": 0.05,
+        "bricks": [
+          {
+            "id": 24,
+            "key": 24,
+            "coordinate": [
+              0,
+              0
+            ],
+            "spanBricks": 1,
+            "resolution": 2,
+            "active": true
+          },
+          {
+            "id": 25,
+            "key": 25,
+            "coordinate": [
+              1,
+              0
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": true
+          },
+          {
+            "id": 26,
+            "key": 26,
+            "coordinate": [
+              2,
+              0
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": true
+          },
+          {
+            "id": 27,
+            "key": 27,
+            "coordinate": [
+              3,
+              0
+            ],
+            "spanBricks": 1,
+            "resolution": 2,
+            "active": true
+          },
+          {
+            "id": 28,
+            "key": 28,
+            "coordinate": [
+              0,
+              1
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 29,
+            "key": 29,
+            "coordinate": [
+              1,
+              1
+            ],
+            "spanBricks": 1,
+            "resolution": 8,
+            "active": true
+          },
+          {
+            "id": 30,
+            "key": 30,
+            "coordinate": [
+              2,
+              1
+            ],
+            "spanBricks": 1,
+            "resolution": 8,
+            "active": true
+          },
+          {
+            "id": 31,
+            "key": 31,
+            "coordinate": [
+              3,
+              1
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 32,
+            "key": 32,
+            "coordinate": [
+              0,
+              2
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 33,
+            "key": 33,
+            "coordinate": [
+              1,
+              2
+            ],
+            "spanBricks": 1,
+            "resolution": 8,
+            "active": true
+          },
+          {
+            "id": 34,
+            "key": 34,
+            "coordinate": [
+              2,
+              2
+            ],
+            "spanBricks": 1,
+            "resolution": 8,
+            "active": true
+          },
+          {
+            "id": 35,
+            "key": 35,
+            "coordinate": [
+              3,
+              2
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          }
+        ],
+        "cells": 296,
+        "rows": 620,
+        "subfaces": 632,
+        "densityHash": "dea72fa50cd8af15",
+        "capacityHash": "92e72602feea2765",
+        "faceVelocityHash": "01d663224c4054e5",
+        "normalHash": "59cc1a55172ae58d",
+        "offsetHash": "368d0c5912b58615",
+        "materialHash": "6ab05ef9aa8b9b25",
+        "solidHash": "7e8e0fa784351325",
+        "cellGraphHash": "a7098e6031101210",
+        "rowFloatHash": "152d48496cc807e8",
+        "rowWordHash": "7773bdcb45286ce5",
+        "subfaceFloatHash": "4917b93fbdbd3248",
+        "subfaceWordHash": "ce152a88d0b3fc09",
+        "incidenceHash": "2e593b75556e089d",
+        "subfaceIncidenceHash": "0f3eb17cfbdbda65"
+      }
+    },
+    {
+      "id": "twin-dam-collision",
+      "scene": {
+        "schemaVersion": "2.0.0",
+        "sceneId": "twin-dam-collision",
+        "randomSeed": 20260712,
+        "duration_s": 20,
+        "container": {
+          "width_m": 2.8,
+          "height_m": 0.8,
+          "depth_m": 0.8,
+          "fillFraction": 0.14285714285714285,
+          "top": "closed",
+          "fluidWallMode": "no-slip"
+        },
+        "solidVoxels": [
+          {
+            "operation": "fill",
+            "minimum": [
+              0,
+              -1,
+              0
+            ],
+            "maximumExclusive": [
+              56,
+              0,
+              16
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              -1,
+              0,
+              0
+            ],
+            "maximumExclusive": [
+              0,
+              16,
+              16
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              56,
+              0,
+              0
+            ],
+            "maximumExclusive": [
+              57,
+              16,
+              16
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              0,
+              0,
+              -1
+            ],
+            "maximumExclusive": [
+              56,
+              16,
+              0
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              0,
+              0,
+              16
+            ],
+            "maximumExclusive": [
+              56,
+              16,
+              17
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              0,
+              16,
+              0
+            ],
+            "maximumExclusive": [
+              56,
+              17,
+              16
+            ],
+            "materialId": 1
+          }
+        ],
+        "voxelDomain": {
+          "finestCellSize_m": 0.05,
+          "brickSize_cells": 8
+        },
+        "fluid": {
+          "density_kg_m3": 998.2,
+          "dynamicViscosity_Pa_s": 0.001002,
+          "surfaceTension_N_m": 0.072,
+          "gravity_m_s2": {
+            "x": 0,
+            "y": -9.80665,
+            "z": 0
+          },
+          "initialCondition": "dam-break",
+          "initialBrickSeeds_m": [
+            {
+              "x": -1.2,
+              "y": 0.2,
+              "z": -0.2
+            },
+            {
+              "x": -0.7999999999999998,
+              "y": 0.2,
+              "z": -0.2
+            },
+            {
+              "x": 0.8000000000000003,
+              "y": 0.2,
+              "z": 0.20000000000000007
+            },
+            {
+              "x": 1.2000000000000002,
+              "y": 0.2,
+              "z": 0.20000000000000007
+            }
+          ]
+        },
+        "nominalResolution": {
+          "length_m": 0.025
+        },
+        "numerics": {
+          "fixedDt_s": 0.03333333333333333,
+          "maxDt_s": 0.03333333333333333,
+          "pressureRelativeTolerance": 1e-8,
+          "pressureMaxIterations": 1000
+        },
+        "rigidBodies": [],
+        "environment": "stage",
+        "scenery": {
+          "palettes": {
+            "stage": {
+              "tint": [
+                1,
+                0.995,
+                0.985
+              ]
+            },
+            "fixture": {
+              "tint": [
+                0.94,
+                0.95,
+                1
+              ]
+            },
+            "lamp": {
+              "tint": [
+                1,
+                0.955,
+                0.88
+              ]
+            }
+          },
+          "nodes": [
+            {
+              "kind": "room-shell",
+              "id": "shell",
+              "materialModel": "room",
+              "faces": [],
+              "floor": {
+                "palette": "stage",
+                "value": 0.62
+              },
+              "wall": {
+                "palette": "stage",
+                "value": 0.62
+              },
+              "ceiling": {
+                "palette": "stage",
+                "value": 0.62
+              }
+            },
+            {
+              "kind": "box",
+              "id": "stage/floor",
+              "group": "stage",
+              "tags": [
+                "stage",
+                "floor",
+                "fluid-collider"
+              ],
+              "place": {
+                "position": {
+                  "x": 0,
+                  "y": -0.1442242280044691,
+                  "z": 0
+                },
+                "units": "metres"
+              },
+              "halfSize": {
+                "x": 4.567100553474855,
+                "y": 0.1442242280044691,
+                "z": 4.567100553474855
+              },
+              "material": {
+                "palette": "stage",
+                "value": 0.12,
+                "surface": "plaster"
+              }
+            },
+            {
+              "kind": "cylinder",
+              "id": "lamp/stem",
+              "group": "lamp",
+              "tags": [
+                "lamp",
+                "fixture"
+              ],
+              "place": {
+                "position": {
+                  "x": 0,
+                  "y": 7.924320083134443,
+                  "z": 0
+                },
+                "units": "metres"
+              },
+              "radius": 0.04326726840134073,
+              "halfHeight": 1.0816817100335183,
+              "material": {
+                "palette": "fixture",
+                "value": 0.16,
+                "surface": "brushed-metal"
+              }
+            },
+            {
+              "kind": "cone",
+              "id": "lamp/reflector",
+              "group": "lamp",
+              "tags": [
+                "lamp",
+                "fixture",
+                "light",
+                "spot-light"
+              ],
+              "place": {
+                "position": {
+                  "x": 0,
+                  "y": 6.36589717497504,
+                  "z": 0
+                },
+                "units": "metres"
+              },
+              "baseRadius": 0.5288221693497202,
+              "topRadius": 0.12018685667039092,
+              "halfHeight": 0.4767411981258841,
+              "material": {
+                "colorLinear": [
+                  1,
+                  0.955,
+                  0.88
+                ],
+                "emission": 433.3464154892728
+              }
+            }
+          ]
+        }
+      },
+      "initialization": {
+        "dt": 0.03333333333333333,
+        "brickFineResolution": 8,
+        "maximumMacroSpanBricks": null,
+        "surfaceFineRings": 1,
+        "activitySignals": true,
+        "coarseFirst": true,
+        "curvatureTolerance": 0.25
+      },
+      "expected": {
+        "dimensions": [
+          56,
+          16
+        ],
+        "sourceDimensions": [
+          56,
+          16,
+          16
+        ],
+        "centerCellZ": 8,
+        "sourceCellSize": 0.05,
+        "bricks": [
+          {
+            "id": 14,
+            "key": 14,
+            "coordinate": [
+              0,
+              0
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 15,
+            "key": 15,
+            "coordinate": [
+              1,
+              0
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 16,
+            "key": 16,
+            "coordinate": [
+              2,
+              0
+            ],
+            "spanBricks": 1,
+            "resolution": 2,
+            "active": false
+          },
+          {
+            "id": 18,
+            "key": 18,
+            "coordinate": [
+              4,
+              0
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 19,
+            "key": 19,
+            "coordinate": [
+              5,
+              0
+            ],
+            "spanBricks": 1,
+            "resolution": 8,
+            "active": true
+          },
+          {
+            "id": 20,
+            "key": 20,
+            "coordinate": [
+              6,
+              0
+            ],
+            "spanBricks": 1,
+            "resolution": 8,
+            "active": true
+          },
+          {
+            "id": 21,
+            "key": 21,
+            "coordinate": [
+              0,
+              1
+            ],
+            "spanBricks": 1,
+            "resolution": 2,
+            "active": false
+          },
+          {
+            "id": 22,
+            "key": 22,
+            "coordinate": [
+              1,
+              1
+            ],
+            "spanBricks": 1,
+            "resolution": 2,
+            "active": false
+          },
+          {
+            "id": 23,
+            "key": 23,
+            "coordinate": [
+              2,
+              1
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": false
+          },
+          {
+            "id": 25,
+            "key": 25,
+            "coordinate": [
+              4,
+              1
+            ],
+            "spanBricks": 1,
+            "resolution": 2,
+            "active": false
+          },
+          {
+            "id": 26,
+            "key": 26,
+            "coordinate": [
+              5,
+              1
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 27,
+            "key": 27,
+            "coordinate": [
+              6,
+              1
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          }
+        ],
+        "cells": 128,
+        "rows": 280,
+        "subfaces": 280,
+        "densityHash": "889c90709a74b725",
+        "capacityHash": "889c90709a74b725",
+        "faceVelocityHash": "1873f8b64196aaa5",
+        "normalHash": "51d88627df287325",
+        "offsetHash": "7da144b97d054b25",
+        "materialHash": "26b62556f7b52f25",
+        "solidHash": "56866feaf4983b25",
+        "cellGraphHash": "8b83411c2182c454",
+        "rowFloatHash": "31012f6528301e05",
+        "rowWordHash": "6912b9629e3903fd",
+        "subfaceFloatHash": "a0d88033c6c62555",
+        "subfaceWordHash": "fde3cc91081a73f5",
+        "incidenceHash": "cca2554373702655",
+        "subfaceIncidenceHash": "6ce0d4df94a8e8a1"
+      }
+    },
+    {
+      "id": "cm12-figure-3",
+      "scene": {
+        "schemaVersion": "2.0.0",
+        "sceneId": "cm12-figure-3",
+        "randomSeed": 2012,
+        "duration_s": 6,
+        "container": {
+          "width_m": 6.4,
+          "height_m": 6.4,
+          "depth_m": 0.4,
+          "fillFraction": 0.12,
+          "top": "closed",
+          "fluidWallMode": "free-slip",
+          "depthBoundary": "symmetry"
+        },
+        "solidVoxels": [
+          {
+            "operation": "fill",
+            "minimum": [
+              0,
+              -1,
+              0
+            ],
+            "maximumExclusive": [
+              128,
+              0,
+              8
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              -1,
+              0,
+              0
+            ],
+            "maximumExclusive": [
+              0,
+              128,
+              8
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              128,
+              0,
+              0
+            ],
+            "maximumExclusive": [
+              129,
+              128,
+              8
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              0,
+              0,
+              -1
+            ],
+            "maximumExclusive": [
+              128,
+              128,
+              0
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              0,
+              0,
+              8
+            ],
+            "maximumExclusive": [
+              128,
+              128,
+              9
+            ],
+            "materialId": 1
+          },
+          {
+            "operation": "fill",
+            "minimum": [
+              0,
+              128,
+              0
+            ],
+            "maximumExclusive": [
+              128,
+              129,
+              8
+            ],
+            "materialId": 1
+          }
+        ],
+        "voxelDomain": {
+          "finestCellSize_m": 0.05,
+          "brickSize_cells": 8
+        },
+        "fluid": {
+          "density_kg_m3": 998.2,
+          "dynamicViscosity_Pa_s": 0.001002,
+          "surfaceTension_N_m": 0,
+          "gravity_m_s2": {
+            "x": 0,
+            "y": -10,
+            "z": 0
+          },
+          "initialCondition": "tank-fill",
+          "initialLiquidVolumes": [
+            {
+              "shape": "cylinder",
+              "center_m": {
+                "x": -2,
+                "y": 5,
+                "z": 0
+              },
+              "radius_m": 0.30000000000000004,
+              "halfHeight_m": 0.2
+            },
+            {
+              "shape": "cylinder",
+              "center_m": {
+                "x": -0.4,
+                "y": 5.6000000000000005,
+                "z": 0
+              },
+              "radius_m": 0.35000000000000003,
+              "halfHeight_m": 0.2
+            },
+            {
+              "shape": "cylinder",
+              "center_m": {
+                "x": 1.4000000000000001,
+                "y": 4.800000000000001,
+                "z": 0
+              },
+              "radius_m": 0.30000000000000004,
+              "halfHeight_m": 0.2
+            },
+            {
+              "shape": "cylinder",
+              "center_m": {
+                "x": 2.4000000000000004,
+                "y": 5.4,
+                "z": 0
+              },
+              "radius_m": 0.2,
+              "halfHeight_m": 0.2
+            }
+          ]
+        },
+        "nominalResolution": {
+          "length_m": 0.05
+        },
+        "numerics": {
+          "fixedDt_s": 0.03333333333333333,
+          "maxDt_s": 0.03333333333333333,
+          "pressureRelativeTolerance": 1e-8,
+          "pressureMaxIterations": 1000
+        },
+        "rigidBodies": [],
+        "scenery": {
+          "palettes": {
+            "white": {
+              "tint": [
+                1,
+                1,
+                1
+              ]
+            },
+            "daylight": {
+              "tint": [
+                1,
+                1,
+                1
+              ]
+            }
+          },
+          "nodes": [
+            {
+              "kind": "room-shell",
+              "id": "shell",
+              "materialModel": "room",
+              "floor": {
+                "palette": "white",
+                "value": 0.9
+              },
+              "wall": {
+                "colorLinear": [
+                  1,
+                  1,
+                  1
+                ]
+              },
+              "ceiling": {
+                "palette": "white",
+                "value": 0.9
+              }
+            },
+            {
+              "kind": "box",
+              "id": "light/softbox",
+              "group": "softbox",
+              "tags": [
+                "softbox",
+                "light",
+                "emits-negative-y"
+              ],
+              "place": {
+                "position": {
+                  "x": 0,
+                  "y": 7.359999999999999,
+                  "z": -0.04000000000000001
+                },
+                "anchor": "floor"
+              },
+              "halfSize": {
+                "x": 1.7920000000000003,
+                "y": 0.028000000000000004,
+                "z": 0.11200000000000002
+              },
+              "material": {
+                "palette": "daylight",
+                "value": 1,
+                "emission": 1
+              }
+            }
+          ]
+        },
+        "environment": "stage"
+      },
+      "initialization": {
+        "dt": 0.03333333333333333,
+        "brickFineResolution": 8,
+        "maximumMacroSpanBricks": null,
+        "surfaceFineRings": 1,
+        "activitySignals": true,
+        "coarseFirst": true,
+        "curvatureTolerance": 0.25
+      },
+      "expected": {
+        "dimensions": [
+          128,
+          128
+        ],
+        "sourceDimensions": [
+          128,
+          128,
+          8
+        ],
+        "centerCellZ": 4,
+        "sourceCellSize": 0.05,
+        "bricks": [
+          {
+            "id": 0,
+            "key": 0,
+            "coordinate": [
+              0,
+              0
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": true
+          },
+          {
+            "id": 1,
+            "key": 1,
+            "coordinate": [
+              1,
+              0
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": true
+          },
+          {
+            "id": 2,
+            "key": 2,
+            "coordinate": [
+              2,
+              0
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": true
+          },
+          {
+            "id": 3,
+            "key": 3,
+            "coordinate": [
+              3,
+              0
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": true
+          },
+          {
+            "id": 4,
+            "key": 4,
+            "coordinate": [
+              4,
+              0
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": true
+          },
+          {
+            "id": 5,
+            "key": 5,
+            "coordinate": [
+              5,
+              0
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": true
+          },
+          {
+            "id": 6,
+            "key": 6,
+            "coordinate": [
+              6,
+              0
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": true
+          },
+          {
+            "id": 7,
+            "key": 7,
+            "coordinate": [
+              7,
+              0
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": true
+          },
+          {
+            "id": 8,
+            "key": 8,
+            "coordinate": [
+              8,
+              0
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": true
+          },
+          {
+            "id": 9,
+            "key": 9,
+            "coordinate": [
+              9,
+              0
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": true
+          },
+          {
+            "id": 10,
+            "key": 10,
+            "coordinate": [
+              10,
+              0
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": true
+          },
+          {
+            "id": 11,
+            "key": 11,
+            "coordinate": [
+              11,
+              0
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": true
+          },
+          {
+            "id": 12,
+            "key": 12,
+            "coordinate": [
+              12,
+              0
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": true
+          },
+          {
+            "id": 13,
+            "key": 13,
+            "coordinate": [
+              13,
+              0
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": true
+          },
+          {
+            "id": 14,
+            "key": 14,
+            "coordinate": [
+              14,
+              0
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": true
+          },
+          {
+            "id": 15,
+            "key": 15,
+            "coordinate": [
+              15,
+              0
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": true
+          },
+          {
+            "id": 16,
+            "key": 16,
+            "coordinate": [
+              0,
+              1
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": true
+          },
+          {
+            "id": 17,
+            "key": 17,
+            "coordinate": [
+              1,
+              1
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": true
+          },
+          {
+            "id": 18,
+            "key": 18,
+            "coordinate": [
+              2,
+              1
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": true
+          },
+          {
+            "id": 19,
+            "key": 19,
+            "coordinate": [
+              3,
+              1
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": true
+          },
+          {
+            "id": 20,
+            "key": 20,
+            "coordinate": [
+              4,
+              1
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": true
+          },
+          {
+            "id": 21,
+            "key": 21,
+            "coordinate": [
+              5,
+              1
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": true
+          },
+          {
+            "id": 22,
+            "key": 22,
+            "coordinate": [
+              6,
+              1
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": true
+          },
+          {
+            "id": 23,
+            "key": 23,
+            "coordinate": [
+              7,
+              1
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": true
+          },
+          {
+            "id": 24,
+            "key": 24,
+            "coordinate": [
+              8,
+              1
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": true
+          },
+          {
+            "id": 25,
+            "key": 25,
+            "coordinate": [
+              9,
+              1
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": true
+          },
+          {
+            "id": 26,
+            "key": 26,
+            "coordinate": [
+              10,
+              1
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": true
+          },
+          {
+            "id": 27,
+            "key": 27,
+            "coordinate": [
+              11,
+              1
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": true
+          },
+          {
+            "id": 28,
+            "key": 28,
+            "coordinate": [
+              12,
+              1
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": true
+          },
+          {
+            "id": 29,
+            "key": 29,
+            "coordinate": [
+              13,
+              1
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": true
+          },
+          {
+            "id": 30,
+            "key": 30,
+            "coordinate": [
+              14,
+              1
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": true
+          },
+          {
+            "id": 31,
+            "key": 31,
+            "coordinate": [
+              15,
+              1
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": true
+          },
+          {
+            "id": 32,
+            "key": 32,
+            "coordinate": [
+              0,
+              2
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": false
+          },
+          {
+            "id": 33,
+            "key": 33,
+            "coordinate": [
+              1,
+              2
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": false
+          },
+          {
+            "id": 34,
+            "key": 34,
+            "coordinate": [
+              2,
+              2
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": false
+          },
+          {
+            "id": 35,
+            "key": 35,
+            "coordinate": [
+              3,
+              2
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": false
+          },
+          {
+            "id": 36,
+            "key": 36,
+            "coordinate": [
+              4,
+              2
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": false
+          },
+          {
+            "id": 37,
+            "key": 37,
+            "coordinate": [
+              5,
+              2
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": false
+          },
+          {
+            "id": 38,
+            "key": 38,
+            "coordinate": [
+              6,
+              2
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": false
+          },
+          {
+            "id": 39,
+            "key": 39,
+            "coordinate": [
+              7,
+              2
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": false
+          },
+          {
+            "id": 40,
+            "key": 40,
+            "coordinate": [
+              8,
+              2
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": false
+          },
+          {
+            "id": 41,
+            "key": 41,
+            "coordinate": [
+              9,
+              2
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": false
+          },
+          {
+            "id": 42,
+            "key": 42,
+            "coordinate": [
+              10,
+              2
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": false
+          },
+          {
+            "id": 43,
+            "key": 43,
+            "coordinate": [
+              11,
+              2
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": false
+          },
+          {
+            "id": 44,
+            "key": 44,
+            "coordinate": [
+              12,
+              2
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": false
+          },
+          {
+            "id": 45,
+            "key": 45,
+            "coordinate": [
+              13,
+              2
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": false
+          },
+          {
+            "id": 46,
+            "key": 46,
+            "coordinate": [
+              14,
+              2
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": false
+          },
+          {
+            "id": 47,
+            "key": 47,
+            "coordinate": [
+              15,
+              2
+            ],
+            "spanBricks": 1,
+            "resolution": 1,
+            "active": false
+          },
+          {
+            "id": 161,
+            "key": 161,
+            "coordinate": [
+              1,
+              10
+            ],
+            "spanBricks": 1,
+            "resolution": 2,
+            "active": false
+          },
+          {
+            "id": 162,
+            "key": 162,
+            "coordinate": [
+              2,
+              10
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 163,
+            "key": 163,
+            "coordinate": [
+              3,
+              10
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 164,
+            "key": 164,
+            "coordinate": [
+              4,
+              10
+            ],
+            "spanBricks": 1,
+            "resolution": 2,
+            "active": false
+          },
+          {
+            "id": 169,
+            "key": 169,
+            "coordinate": [
+              9,
+              10
+            ],
+            "spanBricks": 1,
+            "resolution": 2,
+            "active": false
+          },
+          {
+            "id": 170,
+            "key": 170,
+            "coordinate": [
+              10,
+              10
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 171,
+            "key": 171,
+            "coordinate": [
+              11,
+              10
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 172,
+            "key": 172,
+            "coordinate": [
+              12,
+              10
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 173,
+            "key": 173,
+            "coordinate": [
+              13,
+              10
+            ],
+            "spanBricks": 1,
+            "resolution": 2,
+            "active": false
+          },
+          {
+            "id": 177,
+            "key": 177,
+            "coordinate": [
+              1,
+              11
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 178,
+            "key": 178,
+            "coordinate": [
+              2,
+              11
+            ],
+            "spanBricks": 1,
+            "resolution": 8,
+            "active": true
+          },
+          {
+            "id": 179,
+            "key": 179,
+            "coordinate": [
+              3,
+              11
+            ],
+            "spanBricks": 1,
+            "resolution": 8,
+            "active": true
+          },
+          {
+            "id": 180,
+            "key": 180,
+            "coordinate": [
+              4,
+              11
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 185,
+            "key": 185,
+            "coordinate": [
+              9,
+              11
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 186,
+            "key": 186,
+            "coordinate": [
+              10,
+              11
+            ],
+            "spanBricks": 1,
+            "resolution": 8,
+            "active": true
+          },
+          {
+            "id": 187,
+            "key": 187,
+            "coordinate": [
+              11,
+              11
+            ],
+            "spanBricks": 1,
+            "resolution": 8,
+            "active": true
+          },
+          {
+            "id": 188,
+            "key": 188,
+            "coordinate": [
+              12,
+              11
+            ],
+            "spanBricks": 1,
+            "resolution": 8,
+            "active": true
+          },
+          {
+            "id": 189,
+            "key": 189,
+            "coordinate": [
+              13,
+              11
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 193,
+            "key": 193,
+            "coordinate": [
+              1,
+              12
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 194,
+            "key": 194,
+            "coordinate": [
+              2,
+              12
+            ],
+            "spanBricks": 1,
+            "resolution": 8,
+            "active": true
+          },
+          {
+            "id": 195,
+            "key": 195,
+            "coordinate": [
+              3,
+              12
+            ],
+            "spanBricks": 1,
+            "resolution": 8,
+            "active": true
+          },
+          {
+            "id": 196,
+            "key": 196,
+            "coordinate": [
+              4,
+              12
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 197,
+            "key": 197,
+            "coordinate": [
+              5,
+              12
+            ],
+            "spanBricks": 1,
+            "resolution": 2,
+            "active": false
+          },
+          {
+            "id": 198,
+            "key": 198,
+            "coordinate": [
+              6,
+              12
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 199,
+            "key": 199,
+            "coordinate": [
+              7,
+              12
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 200,
+            "key": 200,
+            "coordinate": [
+              8,
+              12
+            ],
+            "spanBricks": 1,
+            "resolution": 2,
+            "active": false
+          },
+          {
+            "id": 201,
+            "key": 201,
+            "coordinate": [
+              9,
+              12
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 202,
+            "key": 202,
+            "coordinate": [
+              10,
+              12
+            ],
+            "spanBricks": 1,
+            "resolution": 8,
+            "active": true
+          },
+          {
+            "id": 203,
+            "key": 203,
+            "coordinate": [
+              11,
+              12
+            ],
+            "spanBricks": 1,
+            "resolution": 8,
+            "active": true
+          },
+          {
+            "id": 204,
+            "key": 204,
+            "coordinate": [
+              12,
+              12
+            ],
+            "spanBricks": 1,
+            "resolution": 8,
+            "active": true
+          },
+          {
+            "id": 205,
+            "key": 205,
+            "coordinate": [
+              13,
+              12
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 206,
+            "key": 206,
+            "coordinate": [
+              14,
+              12
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 207,
+            "key": 207,
+            "coordinate": [
+              15,
+              12
+            ],
+            "spanBricks": 1,
+            "resolution": 2,
+            "active": false
+          },
+          {
+            "id": 209,
+            "key": 209,
+            "coordinate": [
+              1,
+              13
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 210,
+            "key": 210,
+            "coordinate": [
+              2,
+              13
+            ],
+            "spanBricks": 1,
+            "resolution": 8,
+            "active": true
+          },
+          {
+            "id": 211,
+            "key": 211,
+            "coordinate": [
+              3,
+              13
+            ],
+            "spanBricks": 1,
+            "resolution": 8,
+            "active": true
+          },
+          {
+            "id": 212,
+            "key": 212,
+            "coordinate": [
+              4,
+              13
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 213,
+            "key": 213,
+            "coordinate": [
+              5,
+              13
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 214,
+            "key": 214,
+            "coordinate": [
+              6,
+              13
+            ],
+            "spanBricks": 1,
+            "resolution": 8,
+            "active": true
+          },
+          {
+            "id": 215,
+            "key": 215,
+            "coordinate": [
+              7,
+              13
+            ],
+            "spanBricks": 1,
+            "resolution": 8,
+            "active": true
+          },
+          {
+            "id": 216,
+            "key": 216,
+            "coordinate": [
+              8,
+              13
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 217,
+            "key": 217,
+            "coordinate": [
+              9,
+              13
+            ],
+            "spanBricks": 1,
+            "resolution": 2,
+            "active": false
+          },
+          {
+            "id": 218,
+            "key": 218,
+            "coordinate": [
+              10,
+              13
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 219,
+            "key": 219,
+            "coordinate": [
+              11,
+              13
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 220,
+            "key": 220,
+            "coordinate": [
+              12,
+              13
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 221,
+            "key": 221,
+            "coordinate": [
+              13,
+              13
+            ],
+            "spanBricks": 1,
+            "resolution": 8,
+            "active": true
+          },
+          {
+            "id": 222,
+            "key": 222,
+            "coordinate": [
+              14,
+              13
+            ],
+            "spanBricks": 1,
+            "resolution": 8,
+            "active": true
+          },
+          {
+            "id": 223,
+            "key": 223,
+            "coordinate": [
+              15,
+              13
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 225,
+            "key": 225,
+            "coordinate": [
+              1,
+              14
+            ],
+            "spanBricks": 1,
+            "resolution": 2,
+            "active": false
+          },
+          {
+            "id": 226,
+            "key": 226,
+            "coordinate": [
+              2,
+              14
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 227,
+            "key": 227,
+            "coordinate": [
+              3,
+              14
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 228,
+            "key": 228,
+            "coordinate": [
+              4,
+              14
+            ],
+            "spanBricks": 1,
+            "resolution": 2,
+            "active": false
+          },
+          {
+            "id": 229,
+            "key": 229,
+            "coordinate": [
+              5,
+              14
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 230,
+            "key": 230,
+            "coordinate": [
+              6,
+              14
+            ],
+            "spanBricks": 1,
+            "resolution": 8,
+            "active": true
+          },
+          {
+            "id": 231,
+            "key": 231,
+            "coordinate": [
+              7,
+              14
+            ],
+            "spanBricks": 1,
+            "resolution": 8,
+            "active": true
+          },
+          {
+            "id": 232,
+            "key": 232,
+            "coordinate": [
+              8,
+              14
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 236,
+            "key": 236,
+            "coordinate": [
+              12,
+              14
+            ],
+            "spanBricks": 1,
+            "resolution": 2,
+            "active": false
+          },
+          {
+            "id": 237,
+            "key": 237,
+            "coordinate": [
+              13,
+              14
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 238,
+            "key": 238,
+            "coordinate": [
+              14,
+              14
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 239,
+            "key": 239,
+            "coordinate": [
+              15,
+              14
+            ],
+            "spanBricks": 1,
+            "resolution": 2,
+            "active": false
+          },
+          {
+            "id": 245,
+            "key": 245,
+            "coordinate": [
+              5,
+              15
+            ],
+            "spanBricks": 1,
+            "resolution": 2,
+            "active": false
+          },
+          {
+            "id": 246,
+            "key": 246,
+            "coordinate": [
+              6,
+              15
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 247,
+            "key": 247,
+            "coordinate": [
+              7,
+              15
+            ],
+            "spanBricks": 1,
+            "resolution": 4,
+            "active": false
+          },
+          {
+            "id": 248,
+            "key": 248,
+            "coordinate": [
+              8,
+              15
+            ],
+            "spanBricks": 1,
+            "resolution": 2,
+            "active": false
+          }
+        ],
+        "cells": 1184,
+        "rows": 2522,
+        "subfaces": 2522,
+        "densityHash": "ce7020b049025b25",
+        "capacityHash": "f460c83dc5d6fc25",
+        "faceVelocityHash": "1d135631f9e36d45",
+        "normalHash": "71315a421ae04155",
+        "offsetHash": "ef59ee207b59d83d",
+        "materialHash": "8f6955bf94ec2325",
+        "solidHash": "eb05052ea5b62325",
+        "cellGraphHash": "61cb4ffac70585bf",
+        "rowFloatHash": "044288ca4dee6055",
+        "rowWordHash": "1e1ec85c3b3ddd88",
+        "subfaceFloatHash": "698aa381fb4112c5",
+        "subfaceWordHash": "2bbb5bb4f1f13e19",
+        "incidenceHash": "16561d769fc2e765",
+        "subfaceIncidenceHash": "d96607992c875f81"
+      }
+    }
+  ],
+  "transition": {
+    "sceneId": "cm12-figure-3",
+    "targetKey": 178,
+    "targetResolution": 4,
+    "generation": 2,
+    "cells": 8800,
+    "rows": 28546,
+    "bricks": [
+      {
+        "key": 0,
+        "coordinate": [
+          0,
+          0,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 1
+      },
+      {
+        "key": 1,
+        "coordinate": [
+          1,
+          0,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 1
+      },
+      {
+        "key": 2,
+        "coordinate": [
+          2,
+          0,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 1
+      },
+      {
+        "key": 3,
+        "coordinate": [
+          3,
+          0,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 1
+      },
+      {
+        "key": 4,
+        "coordinate": [
+          4,
+          0,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 1
+      },
+      {
+        "key": 5,
+        "coordinate": [
+          5,
+          0,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 1
+      },
+      {
+        "key": 6,
+        "coordinate": [
+          6,
+          0,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 1
+      },
+      {
+        "key": 7,
+        "coordinate": [
+          7,
+          0,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 1
+      },
+      {
+        "key": 8,
+        "coordinate": [
+          8,
+          0,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 1
+      },
+      {
+        "key": 9,
+        "coordinate": [
+          9,
+          0,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 1
+      },
+      {
+        "key": 10,
+        "coordinate": [
+          10,
+          0,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 1
+      },
+      {
+        "key": 11,
+        "coordinate": [
+          11,
+          0,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 1
+      },
+      {
+        "key": 12,
+        "coordinate": [
+          12,
+          0,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 1
+      },
+      {
+        "key": 13,
+        "coordinate": [
+          13,
+          0,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 1
+      },
+      {
+        "key": 14,
+        "coordinate": [
+          14,
+          0,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 1
+      },
+      {
+        "key": 15,
+        "coordinate": [
+          15,
+          0,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 1
+      },
+      {
+        "key": 16,
+        "coordinate": [
+          0,
+          1,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 1
+      },
+      {
+        "key": 17,
+        "coordinate": [
+          1,
+          1,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 1
+      },
+      {
+        "key": 18,
+        "coordinate": [
+          2,
+          1,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 1
+      },
+      {
+        "key": 19,
+        "coordinate": [
+          3,
+          1,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 1
+      },
+      {
+        "key": 20,
+        "coordinate": [
+          4,
+          1,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 1
+      },
+      {
+        "key": 21,
+        "coordinate": [
+          5,
+          1,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 1
+      },
+      {
+        "key": 22,
+        "coordinate": [
+          6,
+          1,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 1
+      },
+      {
+        "key": 23,
+        "coordinate": [
+          7,
+          1,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 1
+      },
+      {
+        "key": 24,
+        "coordinate": [
+          8,
+          1,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 1
+      },
+      {
+        "key": 25,
+        "coordinate": [
+          9,
+          1,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 1
+      },
+      {
+        "key": 26,
+        "coordinate": [
+          10,
+          1,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 1
+      },
+      {
+        "key": 27,
+        "coordinate": [
+          11,
+          1,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 1
+      },
+      {
+        "key": 28,
+        "coordinate": [
+          12,
+          1,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 1
+      },
+      {
+        "key": 29,
+        "coordinate": [
+          13,
+          1,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 1
+      },
+      {
+        "key": 30,
+        "coordinate": [
+          14,
+          1,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 1
+      },
+      {
+        "key": 31,
+        "coordinate": [
+          15,
+          1,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 1
+      },
+      {
+        "key": 178,
+        "coordinate": [
+          2,
+          11,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 4
+      },
+      {
+        "key": 179,
+        "coordinate": [
+          3,
+          11,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 8
+      },
+      {
+        "key": 186,
+        "coordinate": [
+          10,
+          11,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 8
+      },
+      {
+        "key": 187,
+        "coordinate": [
+          11,
+          11,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 8
+      },
+      {
+        "key": 188,
+        "coordinate": [
+          12,
+          11,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 8
+      },
+      {
+        "key": 194,
+        "coordinate": [
+          2,
+          12,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 8
+      },
+      {
+        "key": 195,
+        "coordinate": [
+          3,
+          12,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 8
+      },
+      {
+        "key": 202,
+        "coordinate": [
+          10,
+          12,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 8
+      },
+      {
+        "key": 203,
+        "coordinate": [
+          11,
+          12,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 8
+      },
+      {
+        "key": 204,
+        "coordinate": [
+          12,
+          12,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 8
+      },
+      {
+        "key": 210,
+        "coordinate": [
+          2,
+          13,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 8
+      },
+      {
+        "key": 211,
+        "coordinate": [
+          3,
+          13,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 8
+      },
+      {
+        "key": 214,
+        "coordinate": [
+          6,
+          13,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 8
+      },
+      {
+        "key": 215,
+        "coordinate": [
+          7,
+          13,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 8
+      },
+      {
+        "key": 221,
+        "coordinate": [
+          13,
+          13,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 8
+      },
+      {
+        "key": 222,
+        "coordinate": [
+          14,
+          13,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 8
+      },
+      {
+        "key": 230,
+        "coordinate": [
+          6,
+          14,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 8
+      },
+      {
+        "key": 231,
+        "coordinate": [
+          7,
+          14,
+          0
+        ],
+        "spanBricks": 1,
+        "resolution": 8
+      }
+    ]
+  }
+}

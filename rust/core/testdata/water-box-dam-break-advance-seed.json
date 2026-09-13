@@ -1,0 +1,515 @@
+{
+  "schemaVersion": 1,
+  "id": "water-box-dam-break",
+  "scene": {
+    "schemaVersion": "2.0.0",
+    "sceneId": "interactive-water-box",
+    "randomSeed": 20260712,
+    "duration_s": 20,
+    "container": {
+      "width_m": 1.2,
+      "height_m": 0.8,
+      "depth_m": 0.8,
+      "fillFraction": 0.2734375,
+      "top": "closed",
+      "fluidWallMode": "no-slip"
+    },
+    "solidVoxels": [
+      {
+        "operation": "fill",
+        "minimum": [
+          0,
+          -1,
+          0
+        ],
+        "maximumExclusive": [
+          24,
+          0,
+          16
+        ],
+        "materialId": 1
+      },
+      {
+        "operation": "fill",
+        "minimum": [
+          -1,
+          0,
+          0
+        ],
+        "maximumExclusive": [
+          0,
+          16,
+          16
+        ],
+        "materialId": 1
+      },
+      {
+        "operation": "fill",
+        "minimum": [
+          24,
+          0,
+          0
+        ],
+        "maximumExclusive": [
+          25,
+          16,
+          16
+        ],
+        "materialId": 1
+      },
+      {
+        "operation": "fill",
+        "minimum": [
+          0,
+          0,
+          -1
+        ],
+        "maximumExclusive": [
+          24,
+          16,
+          0
+        ],
+        "materialId": 1
+      },
+      {
+        "operation": "fill",
+        "minimum": [
+          0,
+          0,
+          16
+        ],
+        "maximumExclusive": [
+          24,
+          16,
+          17
+        ],
+        "materialId": 1
+      },
+      {
+        "operation": "fill",
+        "minimum": [
+          0,
+          16,
+          0
+        ],
+        "maximumExclusive": [
+          24,
+          17,
+          16
+        ],
+        "materialId": 1
+      }
+    ],
+    "voxelDomain": {
+      "finestCellSize_m": 0.05,
+      "brickSize_cells": 8
+    },
+    "fluid": {
+      "density_kg_m3": 998.2,
+      "dynamicViscosity_Pa_s": 0.001002,
+      "surfaceTension_N_m": 0.072,
+      "gravity_m_s2": {
+        "x": 0,
+        "y": -9.80665,
+        "z": 0
+      },
+      "initialCondition": "dam-break",
+      "initialDamBreakDimensions_m": {
+        "x": 0.6,
+        "y": 0.7,
+        "z": 0.5
+      }
+    },
+    "nominalResolution": {
+      "length_m": 0.025
+    },
+    "numerics": {
+      "fixedDt_s": 0.03333333333333333,
+      "maxDt_s": 0.03333333333333333,
+      "pressureRelativeTolerance": 1e-8,
+      "pressureMaxIterations": 1000
+    },
+    "rigidBodies": [],
+    "environment": "stage",
+    "scenery": {
+      "palettes": {
+        "stage": {
+          "tint": [
+            1,
+            0.995,
+            0.985
+          ]
+        },
+        "fixture": {
+          "tint": [
+            0.94,
+            0.95,
+            1
+          ]
+        },
+        "lamp": {
+          "tint": [
+            1,
+            0.955,
+            0.88
+          ]
+        }
+      },
+      "nodes": [
+        {
+          "kind": "room-shell",
+          "id": "shell",
+          "materialModel": "room",
+          "faces": [],
+          "floor": {
+            "palette": "stage",
+            "value": 0.62
+          },
+          "wall": {
+            "palette": "stage",
+            "value": 0.62
+          },
+          "ceiling": {
+            "palette": "stage",
+            "value": 0.62
+          }
+        },
+        {
+          "kind": "box",
+          "id": "stage/floor",
+          "group": "stage",
+          "tags": [
+            "stage",
+            "floor",
+            "fluid-collider"
+          ],
+          "place": {
+            "position": {
+              "x": 0,
+              "y": -0.07142857142857142,
+              "z": 0
+            },
+            "units": "metres"
+          },
+          "halfSize": {
+            "x": 2.261904761904762,
+            "y": 0.07142857142857142,
+            "z": 2.261904761904762
+          },
+          "material": {
+            "palette": "stage",
+            "value": 0.12,
+            "surface": "plaster"
+          }
+        },
+        {
+          "kind": "cylinder",
+          "id": "lamp/stem",
+          "group": "lamp",
+          "tags": [
+            "lamp",
+            "fixture"
+          ],
+          "place": {
+            "position": {
+              "x": 0,
+              "y": 3.924603174603175,
+              "z": 0
+            },
+            "units": "metres"
+          },
+          "radius": 0.021428571428571425,
+          "halfHeight": 0.5357142857142857,
+          "material": {
+            "palette": "fixture",
+            "value": 0.16,
+            "surface": "brushed-metal"
+          }
+        },
+        {
+          "kind": "cone",
+          "id": "lamp/reflector",
+          "group": "lamp",
+          "tags": [
+            "lamp",
+            "fixture",
+            "light",
+            "spot-light"
+          ],
+          "place": {
+            "position": {
+              "x": 0,
+              "y": 3.152777777777778,
+              "z": 0
+            },
+            "units": "metres"
+          },
+          "baseRadius": 0.2619047619047619,
+          "topRadius": 0.05952380952380952,
+          "halfHeight": 0.2361111111111111,
+          "material": {
+            "colorLinear": [
+              1,
+              0.955,
+              0.88
+            ],
+            "emission": 106.29251700680271
+          }
+        }
+      ]
+    }
+  },
+  "methodValues": {
+    "timeStep": "paper",
+    "energyThreshold": 8,
+    "curvatureTolerance": 0.25,
+    "anticipationSeconds": 0.5,
+    "anticipationRadiusBricks": 3,
+    "surfaceQuietEpochs": 2,
+    "brickFineResolution": "8",
+    "maximumMacroSpanBricks": "auto",
+    "selectorMode": "coarse-first",
+    "surfaceFineRings": 1,
+    "finestTravelCells": 1,
+    "fourTravelCells": 0.5,
+    "twoTravelCells": 0.25,
+    "frontLookaheadSteps": 4,
+    "thinFeatureCells": 2,
+    "thinFeatureDensity": 0,
+    "residencyDensity": 0.005,
+    "residencyMassFineCells": 1,
+    "surfaceDensityMinimum": 0.05,
+    "surfaceDensityMaximum": 0.95,
+    "detailTolerance": 0.08,
+    "surfaceDisplacementToleranceCells": 1,
+    "surfaceNormalToleranceDegrees": 30,
+    "topologyCadenceSteps": 1,
+    "prepareBricksPerFrame": 64,
+    "promoteEpochs": 2,
+    "demoteEpochs": 1,
+    "promoteScore": 0.6274509803921569,
+    "demoteScore": 0.3764705882352941,
+    "emergencyScore": 0.8784313725490196,
+    "presentationSurface": "rdf",
+    "presentationColumnHeight": "auto",
+    "surfaceMeshRefinement": "2",
+    "pressureIterations": 128,
+    "pressureRelativeTolerance": 0.000001,
+    "presentationPageResolution": "8",
+    "gammaDiffusion": "off",
+    "surfaceSharpening": "off",
+    "sharpeningDistance": 2.1,
+    "sharpeningTraceSteps": 7,
+    "sharpeningStrength": 1,
+    "coarseFirst": true,
+    "surfaceCoarseningEnabled": true
+  },
+  "productionOptions": {
+    "brickFineResolution": 8,
+    "surfaceMeshRefinement": 2,
+    "presentationPageResolution": 8,
+    "surfaceFineRings": 1,
+    "activityPolicy": {
+      "activitySignals": true,
+      "coarseFirst": true,
+      "energyThreshold": 8,
+      "curvatureTolerance": 0.25,
+      "anticipationSeconds": 0.5,
+      "anticipationRadiusBricks": 3,
+      "surfaceQuietEpochs": 2,
+      "surfaceDisplacementToleranceCells": 1,
+      "surfaceNormalToleranceDegrees": 30,
+      "surfaceCoarseningEnabled": true,
+      "finestTravelCells": 1,
+      "fourTravelCells": 0.5,
+      "twoTravelCells": 0.25,
+      "thinFeatureCells": 2,
+      "thinFeatureDensity": 0,
+      "residencyDensity": 0.005,
+      "residencyMassFineCells": 1,
+      "surfaceDensityMinimum": 0.05,
+      "surfaceDensityMaximum": 0.95,
+      "detailTolerance": 0.08,
+      "frontLookaheadSteps": 4,
+      "topologyCadenceSteps": 1,
+      "prepareBricksPerFrame": 64,
+      "promoteEpochs": 2,
+      "demoteEpochs": 1,
+      "promoteScore": 0.6274509803921569,
+      "demoteScore": 0.3764705882352941,
+      "emergencyScore": 0.8784313725490196
+    },
+    "timeStep": "paper",
+    "gammaDiffusionEnabled": false,
+    "surfaceSharpeningEnabled": false,
+    "densityCapacityRepairEnabled": false,
+    "volumeCorrectionEnabled": false,
+    "presentationColumnHeightMode": "auto",
+    "presentationSurfaceMode": "rdf",
+    "pressureIterations": 128,
+    "pressureRelativeTolerance": 0.000001,
+    "sharpeningDistance": 2.1,
+    "sharpeningTraceSteps": 7,
+    "sharpeningStrength": 1,
+    "pressureJournal": false
+  },
+  "dt": 0.03333333333333333,
+  "dimensions": [
+    24,
+    16
+  ],
+  "viewport": {
+    "originX": -0.6,
+    "originY": 0,
+    "cellSizeX": 0.049999999999999996,
+    "cellSizeY": 0.05,
+    "sourceCellSize": 0.05,
+    "centerCellZ": 8,
+    "sourceCellCenterZ": 0.025000000000000022,
+    "centerZ": 0
+  },
+  "initiallyActiveBrickKeys": [
+    0,
+    1,
+    3,
+    4,
+    6,
+    7,
+    9,
+    10
+  ],
+  "initialBricks": [
+    {
+      "key": 0,
+      "coordinate": [
+        0,
+        0,
+        0
+      ],
+      "spanBricks": 1,
+      "resolution": 2,
+      "active": true
+    },
+    {
+      "key": 1,
+      "coordinate": [
+        1,
+        0,
+        0
+      ],
+      "spanBricks": 1,
+      "resolution": 4,
+      "active": true
+    },
+    {
+      "key": 2,
+      "coordinate": [
+        2,
+        0,
+        0
+      ],
+      "spanBricks": 1,
+      "resolution": 2,
+      "active": true
+    },
+    {
+      "key": 3,
+      "coordinate": [
+        0,
+        1,
+        0
+      ],
+      "spanBricks": 1,
+      "resolution": 4,
+      "active": true
+    },
+    {
+      "key": 4,
+      "coordinate": [
+        1,
+        1,
+        0
+      ],
+      "spanBricks": 1,
+      "resolution": 8,
+      "active": true
+    },
+    {
+      "key": 5,
+      "coordinate": [
+        2,
+        1,
+        0
+      ],
+      "spanBricks": 1,
+      "resolution": 4,
+      "active": true
+    },
+    {
+      "key": 6,
+      "coordinate": [
+        0,
+        0,
+        1
+      ],
+      "spanBricks": 1,
+      "resolution": 4,
+      "active": true
+    },
+    {
+      "key": 7,
+      "coordinate": [
+        1,
+        0,
+        1
+      ],
+      "spanBricks": 1,
+      "resolution": 8,
+      "active": true
+    },
+    {
+      "key": 8,
+      "coordinate": [
+        2,
+        0,
+        1
+      ],
+      "spanBricks": 1,
+      "resolution": 4,
+      "active": true
+    },
+    {
+      "key": 9,
+      "coordinate": [
+        0,
+        1,
+        1
+      ],
+      "spanBricks": 1,
+      "resolution": 8,
+      "active": true
+    },
+    {
+      "key": 10,
+      "coordinate": [
+        1,
+        1,
+        1
+      ],
+      "spanBricks": 1,
+      "resolution": 8,
+      "active": true
+    },
+    {
+      "key": 11,
+      "coordinate": [
+        2,
+        1,
+        1
+      ],
+      "spanBricks": 1,
+      "resolution": 4,
+      "active": true
+    }
+  ]
+}

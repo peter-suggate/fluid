@@ -3515,7 +3515,7 @@ export class FluidLabRenderer {
       encoder, this.presentationTexture,
       gpuInfo?.nx ?? 1, gpuInfo?.ny ?? 1, gpuInfo?.nz ?? 1,
       false, gpuInfo?.maximumNeighborDelta ?? 0,
-      gpuInfo?.encodedSteps ?? 0,
+      gpuInfo?.surfaceRevision ?? gpuInfo?.encodedSteps ?? 0,
       sparsePresentationRequired ? drySceneReplacement : undefined,
       closeStage,
       surfaceDiagnosticsRequired && initialRasterSourceReady,

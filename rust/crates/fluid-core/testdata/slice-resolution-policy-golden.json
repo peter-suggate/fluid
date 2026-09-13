@@ -1,0 +1,14 @@
+{
+  "source": "lib/methods/adaptive-volume/advance-slice/slice-resolution-policy.test.ts",
+  "sweptFrontier": {
+    "summary": [2, 1, 1, 1, 3, 0],
+    "donor": [0, 8, 8, 8, true, true, 3, 82249, 32, 422, 48, 0],
+    "receiver": [1, 8, 8, 8, false, true, 0, 0, 2147483649, 0, 0, 0]
+  },
+  "projectedReceiver": [[0, 8, true], [1, 4, true], [3, 1, true]],
+  "retirementCandidateActive": [false, true],
+  "reflectionCredits": [[0, 1], [2, 0]],
+  "zeroBudget": [0, 2, 0],
+  "regionCapRungs": [1, 2],
+  "capacityRollback": [4, 1, 1]
+}

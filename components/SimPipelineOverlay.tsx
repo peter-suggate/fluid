@@ -22,6 +22,8 @@ import {
   type FluidStageControl,
 } from "../lib/core/fluid-pipeline";
 import { getMethod } from "@/lib/core/method-registry";
+import { PHYSICS_EXECUTION_BACKEND_KEY } from "@/lib/core/physics-execution-backend";
+import type { MethodParamSpec, SelectParamSpec } from "@/lib/core/method-contract";
 import { simulation } from "../lib/core/simulation/controller";
 import { sceneHasTerrain } from "../lib/core/terrain";
 import { NumberField } from "./controls";
@@ -123,7 +125,7 @@ function costExplanation(
  * the solve costs. Changing one and watching the trunk move is the whole point
  * of them being in the same panel.
  */
-function NumericsSection() {
+function NumericsSection({ cpuPhysics }: { readonly cpuPhysics: boolean }) {
   const session = useSession();
   const scene = session.scene((state) => state.scene);
   const patchScene = session.scene((state) => state.patchScene);
@@ -141,12 +143,53 @@ function NumericsSection() {
       <NumberField label="Oracle cell" unit="m"
         value={scene.nominalResolution.length_m} step={0.0025} min={0.0125} max={0.08}
         onChange={(value) => patchScene({ nominalResolution: { length_m: value } })} />
-      <NumberField label="PCG budget" unit="iterations"
+      {!cpuPhysics && <NumberField label="PCG budget" unit="iterations"
         value={scene.numerics.pressureMaxIterations} step={20} min={8} max={1000}
-        onChange={(value) => patchNumerics({ pressureMaxIterations: Math.round(value) })} />
+        onChange={(value) => patchNumerics({ pressureMaxIterations: Math.round(value) })} />}
     </div>
     <small className="control-hint">Rigid bodies and fluid advance on the same fixed step. Changes apply to the live simulation without resetting its clock.</small>
   </details>;
+}
+
+const CPU_METHOD_PARAM_KEYS = new Set([
+  "pressureIterations",
+  "pressureRelativeTolerance",
+  "selectorMode",
+  "energyThreshold",
+  "curvatureTolerance",
+]);
+
+const CPU_PARAM_COPY: Readonly<Record<string, {
+  readonly label: string;
+  readonly hint: string;
+}>> = {
+  pressureIterations: {
+    label: "Pressure iteration cap",
+    hint: "Maximum Rust PCG iterations for each pressure solve. Lower caps trade incompressibility for CPU time. The solver stops further PCG arithmetic when its true-residual target is met.",
+  },
+  pressureRelativeTolerance: {
+    label: "Pressure relative tolerance",
+    hint: "Rust recomputes the true relative L2 residual every eight iterations. Once the target is met, remaining budgeted iterations perform no PCG arithmetic. Zero runs the complete iteration cap.",
+  },
+};
+
+/** One live method value consumed by the Rust 3D runtime. */
+function CPUPhysicsParam({ spec, methodId, value }: {
+  readonly spec: MethodParamSpec;
+  readonly methodId: string;
+  readonly value: string | number | boolean;
+}) {
+  const session = useSession();
+  const copy = CPU_PARAM_COPY[spec.key];
+  if (spec.kind === "select") {
+    return <PipeChoice label={copy?.label ?? spec.label} value={String(value)}
+      options={spec.options.map((option) => ({ ...option }))}
+      onChange={(next) => simulation.setMethodParam(methodId, spec.key, next, session.id)} />;
+  }
+  return <PipeRange label={copy?.label ?? spec.label} unit={spec.unit}
+    value={Number(value)} min={spec.min} max={spec.max} step={spec.step}
+    digits={spec.digits ?? 0} hint={copy?.hint ?? spec.hint} editable
+    onChange={(next) => simulation.setMethodParam(methodId, spec.key, next, session.id)} />;
 }
 
 /**
@@ -172,6 +215,8 @@ export function SimPipelineOverlay({ lenses: override }: {
   const bodyCount = session.diagnostics((state) => state.bodies.length);
   const scene = session.scene((state) => state.scene);
   const running = session.runtime((state) => state.runState === "running");
+  const topologyFrozen = session.runtime((state) => state.topologyFrozen);
+  const setTopologyFrozen = session.runtime((state) => state.setTopologyFrozen);
   const overlayMode = session.ui((state) => state.gridOverlayMode);
   const overlayAxis = session.ui((state) => state.gridOverlayAxis);
   const setOverlayMode = session.ui((state) => state.setGridOverlayMode);
@@ -181,9 +226,11 @@ export function SimPipelineOverlay({ lenses: override }: {
   // An override roster (tests and previews) is matched to rows by stage id;
   // otherwise each graph node carries its own lens.
   const lensByStage = new Map((override ?? []).map((lens) => [lens.stage, lens]));
-  const values = useMemo(
-    () => resolvedMethodValues({ methodId, quality, overrides }),
-    [methodId, quality, overrides]);
+  const values = resolvedMethodValues({ methodId, quality, overrides });
+  const backend = method.params.find((spec): spec is SelectParamSpec =>
+    spec.key === PHYSICS_EXECUTION_BACKEND_KEY && spec.kind === "select");
+  const cpuPhysics = backend !== undefined && values[backend.key] === "cpu";
+  const cpuParams = method.params.filter((spec) => CPU_METHOD_PARAM_KEYS.has(spec.key));
 
   // Graphs are declared beside their encoders, so loading one loads the solver
   // module; async keeps an unsupported method from paying for that.
@@ -228,7 +275,7 @@ export function SimPipelineOverlay({ lenses: override }: {
   const measured = stageTrace !== undefined;
   const measurementDomain = stageTrace?.domain;
 
-  const context: FluidPipelineContext = useMemo(() => ({
+  const context: FluidPipelineContext = {
     values,
     info,
     sceneId: scene.sceneId,
@@ -236,13 +283,13 @@ export function SimPipelineOverlay({ lenses: override }: {
     hasTerrain: sceneHasTerrain(scene),
     hasInflow: Boolean(scene.fluid.inflow),
     running,
-  }), [values, info, scene, bodyCount, running]);
+  };
 
   // Declarative stage controls, materialized here so the graph module stays
   // free of React. `param-*` route through the method store exactly as the
   // method panel would. Runtime-safe parameters reach the attached solver on
   // the next frame; structural controls take the controller's rebuild path.
-  const controls = useMemo(() => {
+  const controls = (() => {
     if (!graph) return {};
     const rendered: Record<string, ReactNode> = {};
     const renderControl = (control: FluidStageControl, key: number): ReactNode => {
@@ -273,7 +320,7 @@ export function SimPipelineOverlay({ lenses: override }: {
       </div>;
     }
     return rendered;
-  }, [graph, values, context, methodId]);
+  })();
 
   const toggleStage = (stageId: string, checked: boolean) => {
     const stage = graph?.stages.find((candidate) => candidate.id === stageId);
@@ -374,6 +421,11 @@ export function SimPipelineOverlay({ lenses: override }: {
   // they belong beside the pipeline the lattice dispatches over rather than in a
   // configuration surface that cannot show what either one costs.
   const configurationReadouts = method.configurationReadouts?.(info ?? undefined, values) ?? [];
+  const gridTitle = cpuPhysics
+    ? "The finest presentation dimensions and accepted sparse-cell census owned by the Rust world.\n\nRuntime pressure and adaptivity controls apply to the next CPU advance without resetting simulation time. Structural grid changes rebuild the world."
+    : `The grid the selected quality and parameters actually allocated.\n\n${liveTuning
+      ? "Stage gates and tuning controls apply to the attached solver without resetting time. Pressure schedule controls are marked separately and rebuild their precomputed dispatch plan."
+      : "The solver's lattice; every pass in this diagram dispatches over it."}`;
 
   return <>
     {/* One band, not three. What is running, whether the figures under it are
@@ -389,26 +441,48 @@ export function SimPipelineOverlay({ lenses: override }: {
       <code data-testid="fluid-advance-cost" title={sourceLabel}>{advanceLabel}</code>
     </div>
 
+    {backend && <div className="scene-instrument-section" data-testid="physics-backend-control">
+      <PipeChoice label={backend.label}
+        value={String(values[backend.key])}
+        options={backend.options.map((option) => ({ ...option }))}
+        onChange={(value) => simulation.setMethodParam(methodId, backend.key, value, session.id)} />
+    </div>}
+
     {/* What the configuration actually allocated: the lattice, how many samples
         that is, and what it cost to hold. */}
-    {info && <div className="grid-readout" title={`The grid the selected quality and parameters actually allocated.\n\n${liveTuning
-      ? "Stage gates and tuning controls apply to the attached solver without resetting time. Pressure schedule controls are marked separately and rebuild their precomputed dispatch plan."
-      : "The solver's lattice; every pass in this diagram dispatches over it."}`} data-testid="grid-readout">
+    {info && <div className="grid-readout" title={gridTitle} data-testid="grid-readout">
       <strong>{grid}</strong>
       <span>{info.cellCount.toLocaleString()} samples · {(info.allocatedBytes / 1048576).toFixed(1)} MiB{liveTuning ? " · tuning live" : ""}</span>
     </div>}
-    {configurationReadouts.map((readout) => <div key={readout.id} className="grid-readout" title={readout.title}>
+    {!cpuPhysics && configurationReadouts.map((readout) => <div key={readout.id} className="grid-readout" title={readout.title}>
       <strong>{readout.value}</strong>
       <span>{readout.detail}</span>
     </div>)}
 
-    {graph
+    {cpuPhysics
+      ? <div className="scene-instrument-section" data-testid="cpu-physics-summary">
+        <div className="grid-readout">
+          <strong>Rust/Wasm CPU physics</strong>
+          <span>{info
+            ? `${info.cellCount.toLocaleString()} active sparse cells · ${info.pressureIterations.toLocaleString()} PCG iterations used`
+            : "Loading the sparse CPU world"}</span>
+        </div>
+        <small className="control-hint">Rust owns fluid and rigid-body evolution. Completed immutable density, surface, velocity and pose publications are uploaded for GPU rendering.</small>
+        <div className="pipe-fields pipe-fields--cpu" data-testid="cpu-physics-controls">
+          {cpuParams.map((spec) => <CPUPhysicsParam key={spec.key} spec={spec}
+            methodId={methodId} value={values[spec.key]} />)}
+          <PipeToggle label="Freeze topology" checked={topologyFrozen} field
+            hint="Holds the accepted sparse topology while fluid and rigid bodies continue to advance."
+            onChange={setTopologyFrozen} />
+        </div>
+      </div>
+      : graph
       ? <PipelineGraph bands={bands} testId="fluid-pipeline" />
       : <p className="render-inline-warning">
         The {method.label} method has not declared an advance pipeline yet. Select the uniform
         reference method to see its stage graph.
       </p>}
 
-    <NumericsSection />
+    <NumericsSection cpuPhysics={cpuPhysics} />
   </>;
 }

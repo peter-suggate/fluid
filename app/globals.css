@@ -1229,6 +1229,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
    floor swelled the typed readout to 38px and clipped "1.00" to "1.0". */
 .pipe-fields { --pipe-height: 22px; --control-height: var(--pipe-height); --control-inline-padding: 5px; --control-font-size: var(--size-2);
   display: grid; grid-template-columns: repeat(auto-fit,minmax(178px,1fr)); gap: 1px 12px; }
+.pipe-fields--cpu { grid-template-columns: minmax(0,1fr); gap: 8px; margin-top: 12px; }
 /* One row height for every kind of row: a track, a switch and a readout are the
    same 22px, so the card reads as one column instead of three rhythms. */
 .pipe-fields input[type="range"], .lab-shell .pipe-fields input[type="range"] { min-height: var(--pipe-height); height: var(--pipe-height); }
