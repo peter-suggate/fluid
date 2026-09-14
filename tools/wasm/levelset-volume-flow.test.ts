@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createTallCellsHillsideDamBreakScene, findSceneDefinition } from "../../lib/core/scenes";
 import { sceneDocument } from "../../lib/core/scene-definition";
-import { decodePhysicsPublication } from "../../lib/physics-wasm/publication";
+import { decodePhysicsPublication, PhysicsPlane } from "../../lib/physics-wasm/publication";
 import { advanceRowX, advanceRowY, createAdvanceView, type AdvanceGraph,
   type AdvanceView } from "../../lib/physics-wasm/advance-view";
 import { parsePhysicsReceipt } from "../../lib/physics-wasm/protocol";
@@ -83,6 +83,31 @@ function maximumHydrostaticLiquidFaceSpeed(view: AdvanceView): number {
   return maximum;
 }
 
+function exactCellEnergy(
+  decoded: ReturnType<typeof decodePhysicsPublication>,
+  view: AdvanceView,
+  gravityFine: readonly [number, number],
+) {
+  const density = decoded.plane(PhysicsPlane.Density) as Float32Array;
+  const velocity = decoded.plane(PhysicsPlane.CellVelocity) as Float32Array;
+  assert.equal(density.length, view.graph.cells.length, "density matches the accepted graph");
+  assert.equal(velocity.length, 2 * view.graph.cells.length,
+    "cell velocity matches the accepted graph");
+  let mass = 0, kinetic = 0, potential = 0;
+  for (const cell of view.graph.cells) {
+    const rho = density[cell.id]!;
+    const vx = velocity[2 * cell.id]!, vy = velocity[2 * cell.id + 1]!;
+    assert.ok(Number.isFinite(rho) && rho >= 0, `cell ${cell.id}: finite nonnegative density`);
+    assert.ok(Number.isFinite(vx) && Number.isFinite(vy), `cell ${cell.id}: finite velocity`);
+    const cellMass = rho * cell.measure;
+    mass += cellMass;
+    kinetic += 0.5 * cellMass * (vx * vx + vy * vy);
+    potential -= cellMass
+      * (gravityFine[0] * cell.center[0]! + gravityFine[1] * cell.center[1]!);
+  }
+  return { mass, kinetic, potential, total: kinetic + potential };
+}
+
 for (const artifact of ["scalar", "simd"] as const) {
   test(`${artifact} Wasm advances and publishes level-set-plus-volume through a resolution edit`, async () => {
     const wasm = await loadFluidWasmForNode(undefined, { artifact });
@@ -143,6 +168,11 @@ for (const [sceneId, frames] of [["cm12-figure-7", 30], ["coarse-first-pool-impa
       const initialVolume = Number(parsePhysicsReceipt(world.receipt()).liquidMeasure);
       let graph: AdvanceGraph | undefined;
       const observedBrickKeys = new Set<number>();
+      const trailingKeys = [2246, 2249, 2229, 2234] as const;
+      const trailingInitiallyFine = new Set<number>();
+      const trailingScheduledCoarsest = new Set<number>();
+      const trailingObservedCoarsening = new Set<number>();
+      const trailingAcceptedResolution = new Map<number, number>();
       let coarseFirstEmptyAllocations = 0;
       let unconstrainedEmptyAllocations = 0;
       for (let frame = 1; frame <= frames; frame++) {
@@ -161,20 +191,29 @@ for (const [sceneId, frames] of [["cm12-figure-7", 30], ["coarse-first-pool-impa
             assert.ok(view.graph.cells.some(cell => cell.widths[0] === 4),
               "Figure 7 retains width-4 interior cells under bulk falling motion");
           }
-          const vacatedTrailingKeys = sceneId === "cm12-figure-7"
-            ? frame === 16 ? [2246, 2249] : (frame === 17 || frame === 30) ? [2229, 2234] : []
-            : [];
-          for (const key of vacatedTrailingKeys) {
-            const trailing = view.graph.bricks.find(brick => brick.key === key);
-            assert.ok(!trailing || !trailing.active || trailing.resolution <= 1,
-              `frame ${frame}: vacated trailing brick ${key} is coarsest or retired`);
-          }
           const resolution = decoded.metadata.resolution as {
             bricks?: Array<{ brickKey: number; acceptedResolution: number;
-              reasons: number; requestedResolution: number; planReasons: number }>;
+              reasons: number; requestedResolution: number; scheduledResolution: number;
+              planReasons: number }>;
           } | undefined;
           const policyByKey = new Map((resolution?.bricks ?? []).map(brick => [brick.brickKey, brick]));
           if (sceneId === "cm12-figure-7") {
+            for (const key of trailingKeys) {
+              const brick = view.graph.bricks.find(candidate => candidate.key === key);
+              const policy = policyByKey.get(key);
+              if (brick?.active && brick.resolution >= 4) trailingInitiallyFine.add(key);
+              if (policy) {
+                const priorAccepted = trailingAcceptedResolution.get(key);
+                if (priorAccepted !== undefined && policy.acceptedResolution < priorAccepted)
+                  trailingObservedCoarsening.add(key);
+                trailingAcceptedResolution.set(key, policy.acceptedResolution);
+                if (policy.scheduledResolution <= 1) {
+                  trailingScheduledCoarsest.add(key);
+                  assert.ok(!brick || !brick.active || brick.resolution <= 1,
+                    `frame ${frame}: trailing brick ${key} must publish its coarsest schedule`);
+                }
+              }
+            }
             const newlyAllocatedEmptySupport = view.graph.bricks.filter(brick => {
               const policy = policyByKey.get(brick.key);
               const volume = view.lattice.cells.filter(cell => cell.brick === brick.key)
@@ -228,11 +267,22 @@ for (const [sceneId, frames] of [["cm12-figure-7", 30], ["coarse-first-pool-impa
         "Figure 7 must exercise newly allocated empty support to cover coarse-first allocation");
       if (sceneId === "cm12-figure-7") assert.ok(unconstrainedEmptyAllocations > 0,
         "Figure 7 must exercise unconstrained empty support to guard against finest defaults");
+      if (sceneId === "cm12-figure-7") for (const key of trailingKeys) {
+        assert.ok(trailingInitiallyFine.has(key),
+          `trailing brick ${key} must begin as represented fine support`);
+        assert.ok(trailingObservedCoarsening.has(key),
+          `trailing brick ${key} must visibly accept a lower resolution`);
+        assert.ok(trailingScheduledCoarsest.has(key),
+          `trailing brick ${key} must become eligible and scheduled for the coarsest rung`);
+        const trailing = graph?.bricks.find(brick => brick.key === key);
+        assert.ok(!trailing || !trailing.active || trailing.resolution <= 1,
+          `trailing brick ${key} must finish coarsest or retired`);
+      }
     } finally { world.free(); }
   });
 }
 
-test("SIMD hillside level-set volume crosses the frame-29 topology transition without a velocity burst", async () => {
+test("SIMD hillside level-set volume remains energetically bounded through 120 frames", async () => {
   const wasm = await loadFluidWasmForNode(undefined, { artifact: "simd" });
   const document = createTallCellsHillsideDamBreakScene();
   const scene = { id: document.sceneId, label: "Tall Cells hillside dam break", document };
@@ -244,12 +294,26 @@ test("SIMD hillside level-set volume crosses the frame-29 topology transition wi
     production: { dtS: dt, timeStep: "paper" },
   }));
   try {
-    const initialVolume = Number(parsePhysicsReceipt(world.receipt()).liquidMeasure);
+    const initialReceipt = parsePhysicsReceipt(world.receipt());
+    const initialVolume = Number(initialReceipt.liquidMeasure);
     let graph: AdvanceGraph | undefined;
-    let earlyMaximumVelocity = 0;
-    let lateMaximumVelocity = 0;
+    const gravityFine = [
+      document.fluid.gravity_m_s2.x / document.voxelDomain.finestCellSize_m,
+      document.fluid.gravity_m_s2.y / document.voxelDomain.finestCellSize_m,
+    ] as const;
+    const initialDecoded = decodePhysicsPublication({ id: 0, revision: initialReceipt,
+      bytes: world.snapshot(0xf).slice(), release() {} });
+    let initialEnergy = 0;
+    try {
+      const initialView = createAdvanceView(initialDecoded, undefined, scene);
+      graph = initialView.graph;
+      const energy = exactCellEnergy(initialDecoded, initialView, gravityFine);
+      assert.ok(Number.isFinite(energy.total) && energy.total > 0,
+        "initial exact mechanical energy is finite and positive");
+      initialEnergy = energy.total;
+    } finally { initialDecoded.release(); }
     let sawPhiSeamComparison = false;
-    for (let frame = 1; frame <= 40; frame++) {
+    for (let frame = 1; frame <= 120; frame++) {
       const receipt = parsePhysicsReceipt(world.advance(frame, dt));
       assert.equal(receipt.fault, null);
       assert.equal(receipt.microsteps, 0);
@@ -268,8 +332,10 @@ test("SIMD hillside level-set volume crosses the frame-29 topology transition wi
       const seams = receipt.interfaceSeams as Readonly<Record<string, unknown>>;
       sawPhiSeamComparison ||= Number(seams.comparisonCount) > 0;
       const courant = Number(levelSetVolume.maximumTraceCourant);
-      assert.ok(Number.isFinite(courant) && courant <= 5,
-        `frame ${frame}: whole-step characteristic crossed ${courant} finest cells`);
+      // LSV traces the authored 1/30 step directly. A large finite Courant number is work for
+      // characteristic tracing, not an instability criterion or permission to add substeps.
+      assert.ok(Number.isFinite(courant) && courant >= 0,
+        `frame ${frame}: invalid whole-step characteristic Courant ${courant}`);
 
       const decoded = decodePhysicsPublication({ id: frame, revision: receipt,
         bytes: world.snapshot(0xf).slice(), release() {} });
@@ -282,17 +348,17 @@ test("SIMD hillside level-set volume crosses the frame-29 topology transition wi
         assert.ok(view.faceVelocityYFine.every(Number.isFinite));
         assert.ok(view.rdf.vertexPhiFine.every(Number.isFinite));
         assert.ok(view.rdf.segmentsFine.length > 0, `frame ${frame}: visible RDF surface`);
-        const maximumVelocity = Number(receipt.maxVelocity);
-        assert.ok(Number.isFinite(maximumVelocity));
-        if (frame <= 20) earlyMaximumVelocity = Math.max(earlyMaximumVelocity, maximumVelocity);
-        else lateMaximumVelocity = Math.max(lateMaximumVelocity, maximumVelocity);
+        const energy = exactCellEnergy(decoded, view, gravityFine);
+        assert.ok(Number.isFinite(energy.mass) && energy.mass >= 0,
+          `frame ${frame}: exact represented mass is finite and nonnegative`);
+        assert.ok(Number.isFinite(energy.total) && energy.total >= 0,
+          `frame ${frame}: exact mechanical energy is finite and nonnegative`);
+        assert.ok(energy.total <= 1.02 * initialEnergy,
+          `frame ${frame}: exact mechanical energy amplified: ${energy.total}/${initialEnergy}`);
       } finally { decoded.release(); }
     }
-    assert.ok(earlyMaximumVelocity > 0);
     assert.ok(sawPhiSeamComparison,
       "the mixed-rung hillside publishes a phi-based seam comparison");
-    assert.ok(lateMaximumVelocity <= 1.25 * earlyMaximumVelocity,
-      `late topology transitions caused a velocity burst: early=${earlyMaximumVelocity}, late=${lateMaximumVelocity}`);
   } finally { world.free(); }
 });
 

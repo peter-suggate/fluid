@@ -2425,10 +2425,17 @@ fn prepare_faces_impl(
             "3-D face preparation requires 3-D staggered sampling".into(),
         ));
     }
+    // LSV sampling reads accepted face velocities while this loop publishes their advected
+    // successors. Keep those banks separate so row order cannot mix old and new samples.
+    let mut next_face_velocity = use_extension_phase.then(|| fields.face_velocity.clone());
     for row in &graph.rows {
         let i = row.id as usize;
         if physical_row_measure(row) <= 1e-8 {
-            fields.face_velocity[i] = row.solid_velocity;
+            if let Some(next) = &mut next_face_velocity {
+                next[i] = row.solid_velocity;
+            } else {
+                fields.face_velocity[i] = row.solid_velocity;
+            }
             continue;
         }
         let (mut touches_extended, mut sampling_width) = (false, f32::INFINITY);
@@ -2442,7 +2449,11 @@ fn prepare_faces_impl(
             )
         }
         if !touches_extended {
-            fields.face_velocity[i] = row.solid_velocity;
+            if let Some(next) = &mut next_face_velocity {
+                next[i] = row.solid_velocity;
+            } else {
+                fields.face_velocity[i] = row.solid_velocity;
+            }
             continue;
         }
         let span = sampling_width.max(1.0);
@@ -2471,10 +2482,18 @@ fn prepare_faces_impl(
             renormalize_sparse_support,
             use_extension_phase,
         );
-        fields.face_velocity[i] = add(
+        let prepared = add(
             mul(row.open_fraction, characteristic),
             mul(1.0 - row.open_fraction, row.solid_velocity),
-        )
+        );
+        if let Some(next) = &mut next_face_velocity {
+            next[i] = prepared;
+        } else {
+            fields.face_velocity[i] = prepared;
+        }
+    }
+    if let Some(next) = next_face_velocity {
+        fields.face_velocity = next;
     }
     Ok(())
 }
@@ -3532,11 +3551,13 @@ pub fn assemble_pressure_rhs(graph: &Graph, fields: &mut Fields, rows: &Pressure
 
 /// Fraction of cell-volume excess released by the next pressure projection.
 ///
-/// CM12 bounds the normalized expansion correction at one cell's integrated
-/// open capacity per step. This matters for small terrain cut cells: an
-/// unbounded correction can ask their small apertures to carry several local
-/// capacities in one frame, producing a pressure impulse instead of a gradual
-/// excess release.
+/// This lab adaptation uses CM12's `lambda = 0.5` as a per-step relaxation and
+/// caps the requested release at one cell's integrated open capacity. CM12's
+/// published correction is instead a spatial divergence
+/// `min(lambda * (rho / V - 1), eta) / dx`; matching that dimensional form
+/// requires converting the paper's physical velocity scale into this solver's
+/// lattice units. The existing per-step behavior is retained until that scale
+/// is calibrated independently.
 ///
 /// The resulting rate is an integrated fine-area rate, matching `source_rate`
 /// and the flux terms assembled into `pressure_rhs`. A positive rate therefore
