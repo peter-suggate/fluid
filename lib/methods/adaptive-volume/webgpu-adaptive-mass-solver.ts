@@ -1557,7 +1557,6 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       seams: diagnosticStageSeams,
       // This controls host continuation frequency; device readiness still
       // decides the exact packet that completes the numerical step.
-      transportPacketChunkSize: 32,
       worldDimensions_m: this.fluidDomain.dimensions.map((value, axis) =>
         value * this.fluidDomain.cellSize_m[axis]) as [number, number, number],
     };
@@ -1605,37 +1604,11 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       this.finishFrameCapture(captured, traceRequestedAt_ms);
       return failureWork;
     };
-    const continuation = this.sparseRuntime.pendingFrameContinuation;
-    if (!continuation) {
-      void finishSubmission();
-      this.publishCompletedFrame();
-      return true;
-    }
-    frameCapture?.beginSubmission();
-    this.device.queue.submit([encoder.finish()]);
-    const work = (async () => {
-      while (!this.disposed) {
-        const progress = await continuation.readProgress();
-        if (this.disposed) return;
-        const nextEncoder = this.device.createCommandEncoder({
-          label: `Sparse Geometric transport continuation ${completedTime_s.toFixed(6)}`,
-        });
-        encoder = frameCapture ? frameCapture.resumeEncoder(nextEncoder) : nextEncoder;
-        if (continuation.resume(encoder, progress)) {
-          await finishSubmission();
-          return;
-        }
-        this.device.queue.submit([encoder.finish()]);
-      }
-    })().catch((error: unknown) => {
-      continuation.cancel();
-      if (!this.disposed && !this.simulationFailureError) {
-        this.simulationFailureError = error instanceof Error ? error : new Error(String(error));
-      }
-    }).finally(() => {
+    const work = finishSubmission().finally(() => {
       if (this.frameWork === work) this.frameWork = undefined;
     });
     this.frameWork = work;
+    this.publishCompletedFrame();
     return true;
   }
 
@@ -1844,6 +1817,10 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     await this.awaitFrameSettlement();
     return this.sparseWorldTrace.readCandidateEffectsTransactionQA();
   }
+  async readAdaptiveLevelSetQA(includeVertices = false) {
+    await this.awaitFrameSettlement();
+    return this.sparseWorldTrace.readAdaptiveLevelSetQA(includeVertices);
+  }
   async readAcceptedGeometricVolumeQA() {
     await this.awaitFrameSettlement();
     return this.sparseWorldTrace.readAcceptedGeometricVolumeQA();
@@ -1986,7 +1963,6 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   destroy(): void {
     if (this.disposed) return;
     this.disposed = true;
-    this.sparseRuntime.pendingFrameContinuation?.cancel();
     this.completedFrame = undefined;
     this.deferredFrameActions.length = 0;
     this.sparseWorld.destroy();

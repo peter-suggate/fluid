@@ -14,7 +14,8 @@ export function cm12FailureKernelId(name: string): number {
 }
 
 const reasons: Readonly<Record<number, readonly [string, string]>> = {
-  6: ["GEOMETRIC_VOLUME_TRANSPORT", "Geometric volume topology, CFL, or bounded-state contract failed before publication"],
+  6: ["GEOMETRIC_VOLUME_TRANSPORT", "Conservative volume topology, support, or nonnegative-state contract failed before publication"],
+  7: ["ADAPTIVE_LEVEL_SET", "Adaptive level-set topology, capacity, sampling, or constraint contract failed before publication"],
   1: ["INCIDENCE_RANGE", "Corrupt incidence range would have been replaced by an empty range"],
   2: ["EMPTY_DEFICIT_STENCIL", "Forward transport has no recipient support; donor self-return refused"],
   3: ["EMPTY_SHARPENING_STENCIL", "Sharpening has no recipient support; donor self-return refused"],
@@ -32,6 +33,7 @@ export function decodeCM12SimulationFailure(words: Uint32Array, kernelNames: rea
     frame: words[3], generation: words[4], ownerId: words[5],
     operandNames: ({
       6: ["reason", "value", "capacity", "auxiliary"],
+      7: ["faultMask", "reserved0", "reserved1", "reserved2"],
       1: ["begin", "end", "maximumCount", "reserved"],
       2: ["visibleWeight", "deficit", "donorDensity", "reserved"],
       3: ["recipientWeight", "removedFixed", "reserved", "reserved"],

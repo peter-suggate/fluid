@@ -101,30 +101,11 @@ fn coarseFirstDensity(position:vec3f,h:f32)->f32{
   return sum/max(count,1.0);
 }
 fn coarseFirstNormal(position:vec3f,h:f32)->vec3f{
-  // Adjacent cell averages at different widths are not samples at a common
-  // point. Use one virtual control-volume width for the entire gradient,
-  // including its centre alignment, so a planar surface stays planar at 2:1.
-  var width=h;
-  for(var sample=0u;sample<7u;sample++){
-    var q=position;
-    if(sample>0u){q[(sample-1u)/2u]+=select(-h,h,(sample&1u)==0u);}
-    let cell=ownerCellAt(vec3i(floor(mirrorSharpeningSampleToWorld(q))));
-    if(cell!=INVALID){
-      let leaf=cellBrick(cell);
-      width=max(width,f32(BRICK_FINE_RESOLUTION*brickSpan(leaf))/f32(acceptedBrickResolution(leaf)));
-    }
-  }
-  let center=(floor(position/width)+vec3f(0.5))*width;
-  var gradient=vec3f(0.0);
-  for(var axis=0u;axis<3u;axis++){
-    var offset=vec3f(0.0);offset[axis]=width;
-    let forward=coarseFirstDensity(center+offset,width);
-    let back=coarseFirstDensity(center-offset,width);
-    if(forward<0.0||back<0.0){return vec3f(0.0);}
-    gradient[axis]=forward-back;
-  }
+  _=h;
+  if(!lsvPhiMetricAt(position)){return vec3f(0.0);}
+  let gradient=lsvGradientAt(position);
   let magnitude=length(gradient);
-  return select(vec3f(0.0),gradient/max(magnitude,1e-8),magnitude>0.05);
+  return select(vec3f(0.0),gradient/max(magnitude,1e-8),magnitude>1e-6);
 }
 // Receiver-side, immutable accepted-state query. No scatter race, authored
 // volume identity, or scene name enters the causal neighbourhood. Swept boxes

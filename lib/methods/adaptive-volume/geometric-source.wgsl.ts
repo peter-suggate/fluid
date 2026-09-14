@@ -236,7 +236,7 @@ fn gsWeight(cell:u32)->f32{
 }
 fn gsCellWithWeight(cell:u32,weight:f32)->bool{
  return gsEnabled()&&cell!=INVALID&&cellActive(cell)&&cellOpenVolume(cell)>1e-8
-  &&(rawPressureDensity(cell)>=CM12_LIQUID_ISOVALUE||pressureCellSubmerged(cell)||weight>0.0);
+  &&(lsvCellLiquid(cell)||weight>0.0);
 }
 fn gsRow(row:u32)->bool{return gsEnabled()&&row!=INVALID&&acceptedRowMember(row)
  &&rowAccepted(row)&&rowOpenFraction(row)>0.0;}

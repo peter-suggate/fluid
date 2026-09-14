@@ -19,7 +19,7 @@ import {
 import type { WebGPURigidBodySystem } from "../../core/webgpu-rigid-body";
 import { packSparseCM12RefinementRegions } from
   "../../methods/adaptive-volume/sparse-cm12-refinement-regions";
-import { WebGPUSparseCM12Resident, type SharpeningTrace, type SparseCM12FrameContinuation, type SparseCM12InflowControl, type SparseCM12PresentationPageResolution, type SparseCM12PressureControl, type SparseCM12ResidentInitializationReporter, type SparseCM12ResidentStageSeams } from "../../methods/adaptive-volume/webgpu-sparse-cm12-resident";
+import { WebGPUSparseCM12Resident, type SharpeningTrace, type SparseCM12InflowControl, type SparseCM12PresentationPageResolution, type SparseCM12PressureControl, type SparseCM12ResidentInitializationReporter, type SparseCM12ResidentStageSeams } from "../../methods/adaptive-volume/webgpu-sparse-cm12-resident";
 import { type SparseCM12ActivityPolicy } from "../../methods/adaptive-volume/features/adaptivity/policy";
 import type {
   SparseWorld,
@@ -55,7 +55,6 @@ export interface CM12SparseWorldStepConfiguration {
   readonly activityPolicy?: SparseCM12ActivityPolicy;
   readonly pressureControl?: SparseCM12PressureControl;
   readonly seams?: SparseCM12ResidentStageSeams;
-  readonly transportPacketChunkSize?: number;
   readonly worldDimensions_m?: readonly [number, number, number];
 }
 
@@ -125,7 +124,6 @@ export interface CM12SparseWorldFactoryConfig {
  * pipeline map and no way to dispatch a named internal stage.
  */
 export interface CM12SparseWorldRuntime {
-  readonly pendingFrameContinuation: SparseCM12FrameContinuation | undefined;
   readonly topologyPreparationPending: boolean;
   /** Frozen interactions wait for complete support before applying their dose. */
   readonly pendingLiquidInteractions: boolean;
@@ -218,6 +216,7 @@ export interface CM12SparseWorldDeveloperTrace {
     WebGPUSparseCM12Resident["readPhase1TransportProfileQA"]>;
   readCandidateEffectsTransactionQA(): ReturnType<
     WebGPUSparseCM12Resident["readCandidateEffectsTransactionQA"]>;
+  readAdaptiveLevelSetQA(includeVertices?: boolean): ReturnType<WebGPUSparseCM12Resident["readAdaptiveLevelSetQA"]>;
   readAcceptedGeometricVolumeQA(): ReturnType<
     WebGPUSparseCM12Resident["readAcceptedGeometricVolumeQA"]>;
   readGeometricVolumeTransportReceiptQA(): ReturnType<
@@ -377,7 +376,6 @@ class AdoptedCM12SparseWorld implements SparseWorld {
     interaction: SparseWorldFluidEdit; configuration: CM12SparseWorldStepConfiguration;
   }[] = [];
   private liquidInteractionRevision = 0;
-  pendingFrameContinuation: SparseCM12FrameContinuation | undefined;
   get pendingLiquidInteractions(): boolean { return this.deferredLiquidInteractions.length > 0; }
   get pendingLiquidInteractionRevision(): number { return this.liquidInteractionRevision; }
 
@@ -526,7 +524,6 @@ class AdoptedCM12SparseWorld implements SparseWorld {
   }
 
   encodeStep(encoder: GPUCommandEncoder, input: SparseWorldStepInput): SparseWorldStep {
-    if (this.pendingFrameContinuation) throw new Error("CM12 frame continuation is still pending");
     if (this.generationState.pending) throw new Error("CM12 publication boundary suspends frame encoding");
     if (this.destroyed) {
       const error = new Error("Sparse world has been destroyed");
@@ -560,7 +557,7 @@ class AdoptedCM12SparseWorld implements SparseWorld {
         } : undefined;
       this.options.rigidSystem?.syncBodies(rigidBodies);
       if (this.options.rigidExchange) encoder.clearBuffer(this.options.rigidExchange);
-      const continuation = this.resident.encode(
+      this.resident.encode(
         encoder,
         input.dt,
         configuration.finestCellSize_m,
@@ -573,7 +570,6 @@ class AdoptedCM12SparseWorld implements SparseWorld {
         rigidBodies.length,
         configuration.worldDimensions_m,
         inflow,
-        configuration.transportPacketChunkSize,
       );
       const step = Object.freeze({ generation: this.generation + 1, submittedTime: input.time });
       const finishStep = (finalEncoder: GPUCommandEncoder) => {
@@ -584,23 +580,7 @@ class AdoptedCM12SparseWorld implements SparseWorld {
         this.state = "running";
         this.options.trace?.record({ kind: "step-encoded", ...step });
       };
-      if (continuation) {
-        this.pendingFrameContinuation = {
-          readProgress: () => continuation.readProgress(),
-          resume: (nextEncoder, progress) => {
-            const complete = continuation.resume(nextEncoder, progress);
-            if (complete) {
-              finishStep(nextEncoder);
-              this.pendingFrameContinuation = undefined;
-            }
-            return complete;
-          },
-          cancel: () => {
-            continuation.cancel();
-            this.pendingFrameContinuation = undefined;
-          },
-        };
-      } else finishStep(encoder);
+      finishStep(encoder);
       return step;
     } catch (error) {
       this.publishFault("step-encoding", error);
@@ -688,7 +668,6 @@ class AdoptedCM12SparseWorld implements SparseWorld {
 }
 
 class AdoptedCM12SparseWorldRuntime implements CM12SparseWorldRuntime {
-  get pendingFrameContinuation() { return this.world.pendingFrameContinuation; }
   private get resident() { return this.generationState.current; }
   get acceptedAtlas() { return this.resident.acceptedAtlas; }
   get generationPlanningRequired() { return this.resident.needsGenerationPlanning; }
@@ -811,6 +790,9 @@ class AdoptedCM12SparseWorldDeveloperTrace implements CM12SparseWorldDeveloperTr
   readPhase1TransportProfileQA() { return this.generationState.read((resident) => resident.readPhase1TransportProfileQA()); }
   readCandidateEffectsTransactionQA() {
     return this.generationState.read((resident) => resident.readCandidateEffectsTransactionQA());
+  }
+  readAdaptiveLevelSetQA(includeVertices = false) {
+    return this.generationState.read((resident) => resident.readAdaptiveLevelSetQA(includeVertices));
   }
   readAcceptedGeometricVolumeQA() {
     return this.generationState.read((resident) => resident.readAcceptedGeometricVolumeQA());
@@ -973,6 +955,7 @@ export async function createCM12SparseWorld(
                 config.scene.fluid.initialVelocity_m_s.y,
                 config.scene.fluid.initialVelocity_m_s.z,
               ] : undefined,
+              config.scene,
             );
     resident.setRefinementRegionParameters(config.refinementRegionParameters);
   } catch (error) {

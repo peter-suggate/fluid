@@ -1,4 +1,14 @@
 import { geometricVolumeQAWGSL } from "./geometric-volume-qa.wgsl";
+import { WHOLE_FRAME_VOLUME_ENTRY_POINTS, type SparseGeometricVolumeLayout } from "./resident-volume.wgsl";
+import { createInitialLevelSetGeometryWGSL } from "./levelset-initial-geometry";
+import {
+  LEVELSET_VOLUME_GLOBAL_HEADER as LSV_GLOBAL_HEADER,
+  LEVELSET_VOLUME_SLOT_HEADER as LSV_SLOT_HEADER,
+  createLevelSetVolumeInitialWords,
+  createLevelSetVolumeLayout,
+  type LevelSetVolumeLayout,
+} from "./levelset-volume-layout";
+import type { SceneDescription } from "../../core/model";
 import {
   createSparseCM12CompiledTopologyLayout,
   createSparseCM12CompiledTopologyInitialWords,
@@ -395,8 +405,6 @@ export const SPARSE_CM12_RESIDENT_STAGE_SUBSTAGES = Object.freeze({
     "accepted-face-row-preparation",
   ],
   "conservative-transport": [
-    "transport-trace",
-    "transport-scatter",
     "transport-gather",
   ],
   "tracer-advection": [],
@@ -2245,26 +2253,6 @@ export function packSparseCM12AcceptedTopologyTemplatesForQA(
     cellCount: packed.cellCount, rowCount: packed.rowCount });
 }
 
-export interface SparseCM12FrameProgress {
-  readonly planned: number;
-  readonly executed: number;
-  readonly fault: number;
-  readonly complete: boolean;
-}
-
-/** Explicit ownership of a partially encoded outer frame. */
-export interface SparseCM12FrameContinuation {
-  readProgress(): Promise<SparseCM12FrameProgress>;
-  /** Returns true once the complete frame suffix has been encoded. */
-  resume(encoder: GPUCommandEncoder, progress: SparseCM12FrameProgress): boolean;
-  cancel(): void;
-}
-
-interface GeometricVolumeIndirectPublisher {
-  readonly pipeline: GPUComputePipeline;
-  readonly bindGroup: GPUBindGroup;
-}
-
 interface CompiledTopologyIndirectPublisher {
   readonly arguments: GPUBuffer;
   readonly pipeline: GPUComputePipeline;
@@ -2280,6 +2268,18 @@ const COMPILED_TOPOLOGY_ENTRY_POINTS = [
   "sealCompiledTopologyGeneration",
 ] as const;
 
+const LEVELSET_VOLUME_ENTRY_POINTS = [
+  "lsvBeginTopology", "lsvClearTopology", "lsvCatalogCellCorners",
+  "lsvInsertVertexHash", "lsvResolveCellCorners", "lsvCompileConstraints",
+  "lsvInitializeAuthoredPhi", "lsvTransferPhi", "lsvBeginBuildConstraintProjection",
+  "lsvApplyBuildConstraints", "lsvAdvanceBuildConstraintProjection",
+  "lsvValidateTopology", "lsvSealTopology", "lsvPublishTopology",
+  "lsvPrepareVertexDispatch", "lsvAdvectPhi", "lsvBeginConstraintProjection", "lsvApplyConstraints",
+  "lsvAdvanceConstraintProjection", "lsvCommitPhi",
+  "lsvUnionPhi", "lsvrBegin", "lsvrCaptureOriginal", "lsvrSeedClosestPoints",
+  "lsvrRelaxClosestPoints", "lsvrAdvance", "lsvrResolve", "lsvrAuditContour",
+] as const;
+
 interface ProjectedTransportIndirectPublisher {
   readonly arguments: GPUBuffer;
   readonly topologyPipeline: GPUComputePipeline;
@@ -2287,24 +2287,7 @@ interface ProjectedTransportIndirectPublisher {
   readonly bindGroup: GPUBindGroup;
 }
 
-interface GeometricVolumeResidentLayout {
-  readonly currentVolume: number;
-  readonly lowVolume: number;
-  readonly positiveLimiter: number;
-  readonly negativeLimiter: number;
-  readonly rowSubfaceRanges: number;
-  readonly cellSubfaceRanges: number;
-  readonly cellSubfaceEntries: number;
-  readonly subfaceMetadata: number;
-  readonly subfaceFluxes: number;
-  readonly subfaceRoundoff: number;
-  readonly supportControlBaseWords: number;
-  readonly controlBaseWords: number;
-  readonly subfaceCapacity: number;
-  readonly airDiagonal: number;
-  readonly airControlBaseWords: number;
-  readonly airComponentBaseWords: number;
-}
+type GeometricVolumeResidentLayout = SparseGeometricVolumeLayout;
 
 interface ResidentStateLayout {
   readonly floatCount: number;
@@ -2340,12 +2323,6 @@ interface ResidentStateLayout {
   readonly transportCharacteristicSupport: number;
   /** Active-cell-bounded cache derived from TEI/effective velocity for face tracing. */
   readonly faceVelocitySupport: number;
-  /** Accepted-cell interface normal.xyz + offset; rebuilt at scalar/topology publication. */
-  readonly geometricInterfacePlanes: number;
-  /** Read-only neighbor extension built after the raw interface plane dispatch. */
-  readonly geometricInterfaceSupportPlanes: number;
-  /** Least-squares RDF gradient.xyz + centre value, rebuilt for presentation. */
-  readonly geometricInterfaceRdf: number;
 }
 
 export interface SparseCM12FinePresentationPlan {
@@ -2923,6 +2900,7 @@ function residentStateLayout(
   staticSolidVoxels: boolean,
   tracerCount: number,
   journal: SparseCM12PressureJournalCapacityRequest = {},
+  transportEdgeCapacity = 0,
 ): ResidentStateLayout {
   if (!Number.isSafeInteger(subfaceCapacity) || subfaceCapacity < 0 || subfaceCapacity > 0x7fffffff) {
     throw new RangeError("Geometric subface capacity exceeds the packed adjacency index range");
@@ -2962,9 +2940,6 @@ function residentStateLayout(
     faceVelocitySupport: (() => {
       const result = at; at += align4(4 * cellCount); return result;
     })(),
-    geometricInterfacePlanes: cellVectors(),
-    geometricInterfaceSupportPlanes: cellVectors(),
-    geometricInterfaceRdf: cellVectors(),
     volumeTransport: {
       currentVolume: cells(), lowVolume: cells(), positiveLimiter: cells(), negativeLimiter: cells(),
       rowSubfaceRanges: words(2 * rowCount),
@@ -2979,6 +2954,13 @@ function residentStateLayout(
       airDiagonal: cells(),
       airControlBaseWords: Math.max(7 * cellCount, cellCount + rowCount + 8) + 32,
       airComponentBaseWords: Math.max(7 * cellCount, cellCount + rowCount + 8) + 56,
+      transportEdgeCapacity,
+      transportEdgeMetadata: words(4 * transportEdgeCapacity),
+      transportEdgeWeightsA: words(transportEdgeCapacity),
+      transportEdgeWeightsB: words(transportEdgeCapacity),
+      wholeFrameControlBaseWords: Math.max(7 * cellCount, cellCount + rowCount + 8) + 100 + 4 * cellCount,
+      transportReceiverHeadsBaseWords: Math.max(7 * cellCount, cellCount + rowCount + 8) + 164 + 4 * cellCount,
+      transportDonorHeadsBaseWords: Math.max(7 * cellCount, cellCount + rowCount + 8) + 164 + 5 * cellCount,
     },
     sourceLedger: {
       ledgerBaseFloats: words(GEOMETRIC_SOURCE_LEDGER_FLOATS),
@@ -3184,7 +3166,8 @@ export class WebGPUSparseCM12Resident {
     }
     const gate = await this.generationPlanningGate;
     this.assertLive();
-    return gate.needed(maximumSpan, demoteEpochs, finestTravel, frozenFrontierOnly);
+    return gate.needed(maximumSpan, demoteEpochs, finestTravel, frozenFrontierOnly,
+      Math.floor(0.8 * this.levelSetVolumeLayout.activeCellCapacity));
   }
   private initialGenerationCellIds!: Uint32Array;
   private initialGenerationRowIds!: Uint32Array;
@@ -3244,12 +3227,17 @@ export class WebGPUSparseCM12Resident {
                 "Geometric topology preparation worker response could not be deserialized"));
               worker.postMessage({ atlas: nextAtlas, active, finestCellSize_m, newAirCoverage, candidateKeys,
                 solidWorld: this.currentSolidWorld, maximumBytes, topologyPageCapacityMaximum,
-                symmetry: { scalar, face }, limits: { maxComputeWorkgroupsPerDimension: device.limits.maxComputeWorkgroupsPerDimension },
+                symmetry: { scalar, face }, limits: {
+                  maxComputeWorkgroupsPerDimension: device.limits.maxComputeWorkgroupsPerDimension,
+                  maxStorageBufferBindingSize: device.limits.maxStorageBufferBindingSize,
+                  maxBufferSize: device.limits.maxBufferSize,
+                },
                 source: source ? { geometry: source.geometry, geometryRecipe:source.geometryRecipe, cellIds: source.cellIds, rowIds: source.rowIds,
                   densityOffset: source.densityOffset, gammaOffset: source.gammaOffset,
                   velocityOffset: source.velocityOffset, pressureOffset: source.pressureOffset, faceOffset: source.faceOffset,
                   capacityFractionOffsets: source.capacityFractionOffsets,
-                  interfacePlaneOffset: source.interfacePlaneOffset,
+                  levelSetVolume: source.levelSetVolume
+                    ? { layout: source.levelSetVolume.layout } : undefined,
                   stateDescriptor: {size:this.state.size,usage:this.state.usage},
                   controlDescriptor: {size:this.topologyArena.size,usage:this.topologyArena.usage},
                   liveControl: this.generationTransferControlDescription() } : undefined,
@@ -3329,8 +3317,6 @@ export class WebGPUSparseCM12Resident {
     buffers: readonly [GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer,
       GPUBuffer, GPUBuffer, GPUBuffer],
     acceptedIndirectArguments: GPUBuffer,
-    private readonly volumeIndirectArguments: GPUBuffer,
-    private readonly volumeIndirectPublisher: GeometricVolumeIndirectPublisher,
     private readonly projectedTransportIndirectPublisher:
       ProjectedTransportIndirectPublisher,
     pressureCellIndirectArguments: GPUBuffer,
@@ -3410,6 +3396,7 @@ export class WebGPUSparseCM12Resident {
     private readonly initialBrickCoordinates:
       readonly (readonly [number, number, number])[],
     private readonly templateWords: Uint32Array,
+    private readonly levelSetVolumeLayout: LevelSetVolumeLayout,
     private readonly compiledTopologyLayout: SparseCM12CompiledTopologyLayout,
     private readonly compiledTopologyIndirectPublisher: CompiledTopologyIndirectPublisher,
     private readonly rigidCoupling?: WebGPUSparseCM12RigidCoupling,
@@ -3491,7 +3478,7 @@ export class WebGPUSparseCM12Resident {
     this.startSimulationPipelineCompilation = startSimulationPipelineCompilation;
     this.cellCount = cellCount;
     this.rowCount = rowCount;
-    this.residentAllocatedBytes = [acceptedIndirectArguments, volumeIndirectArguments, pressureCellIndirectArguments,
+    this.residentAllocatedBytes = [acceptedIndirectArguments, pressureCellIndirectArguments,
       compiledTopologyIndirectPublisher.arguments,
       framePlanIndirectArguments, presentationIndirectArguments,
       frameControlIndirectArguments,
@@ -3582,11 +3569,12 @@ export class WebGPUSparseCM12Resident {
     report?: SparseCM12ResidentInitializationReporter,
     topologyPageCapacityMaximum?: number,
     initialVelocity_m_s?: readonly [number, number, number],
+    initialScene?: SceneDescription,
   ): Promise<WebGPUSparseCM12Resident> {
     return this.createConfigured(device, atlas, grid, finestCellSize_m,
       solidWorld, initiallyActiveBrickKeys, rigid, journal, presentationPageResolution,
       false, false, false, true, true, report, false, true, false, false, false,
-      topologyPageCapacityMaximum, false, undefined, initialVelocity_m_s);
+      topologyPageCapacityMaximum, false, undefined, initialVelocity_m_s, undefined, initialScene);
   }
 
   /** Retained rejected QA experiment: density-capacity relay with an exact
@@ -3895,6 +3883,7 @@ export class WebGPUSparseCM12Resident {
     transferredSymmetry?: { scalar: boolean; face: boolean },
     initialVelocity_m_s?: readonly [number, number, number],
     candidateKeys?: ReadonlySet<number>,
+    initialScene?: SceneDescription,
   ): Promise<WebGPUSparseCM12Resident> {
     if (atlas.brickFineResolution !== 8 || presentationPageResolution !== 8) {
       throw new Error("Sparse Geometric (CM12) PEI1 production is an aggressive B8/P8 cutover");
@@ -4042,7 +4031,7 @@ export class WebGPUSparseCM12Resident {
       fine.plan.domainOrigin.map((value) => value * finestCellSize_m) as
         [number, number, number];
     const tracerLattice = sparseCM12TracerLattice(atlas.dimensions);
-    const layout = residentStateLayout(
+    const baseLayout = residentStateLayout(
       physicsCellCapacity, physicsRowCapacity,
       templates.words[4]! + 2 * topologyPagePool.pageCapacity * dynamicRowsPerPage,
       worldLeafCapacity,
@@ -4059,6 +4048,22 @@ export class WebGPUSparseCM12Resident {
         }
         : {},
     );
+    const maximumStateWords = Math.floor(Math.min(device.limits.maxStorageBufferBindingSize,
+      device.limits.maxBufferSize) / 4);
+    // Coupling storage follows admitted active work, not all dormant B8 templates.
+    // Reserve half of the remaining binding budget for adaptive phi and growth.
+    const transportEdgeCapacity = Math.min(Math.max(4096, 32 * grid.cells.length),
+      Math.max(0, Math.floor((maximumStateWords - baseLayout.floatCount) / 12)));
+    if (transportEdgeCapacity < grid.cells.length) {
+      throw new RangeError("Adaptive level-set volume coupling cannot fit one edge per initial cell");
+    }
+    const layout = residentStateLayout(physicsCellCapacity, physicsRowCapacity,
+      baseLayout.volumeTransport.subfaceCapacity, worldLeafCapacity,
+      Boolean(rigid) || Boolean(initialSolidWorld), Boolean(initialSolidWorld),
+      tracerLattice.count, journal?.iterationCapacity ? {
+        iterationCapacity: journal.iterationCapacity + 1,
+        snapshotCapacity: journal.snapshotCapacity ?? SPARSE_CM12_PRESSURE_JOURNAL_SNAPSHOTS,
+      } : {}, transportEdgeCapacity);
     const cellWorkgroups = Math.ceil(physicsCellCapacity / WORKGROUP_SIZE);
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     const parameters = device.createBuffer({ label: "Sparse Geometric (CM12) resident parameters",
@@ -4134,7 +4139,7 @@ export class WebGPUSparseCM12Resident {
       // Transport needs beta, rho/gamma deficit, three momentum-deficit, and
       // one sharpening plane. Pressure reuses the dead arena for
       // cell and row headers plus their stable-ID compact worklists.
-      size: 4 * (layout.volumeTransport.supportControlBaseWords + 35),
+      size: 4 * (layout.volumeTransport.transportDonorHeadsBaseWords + physicsCellCapacity),
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
     const activityHistoryWords = ACTIVITY_HEADER_WORDS
@@ -4721,7 +4726,31 @@ export class WebGPUSparseCM12Resident {
       maximumArenaWords: Math.floor(device.limits.maxStorageBufferBindingSize / 4)
         - CM12_FAILURE_WORDS,
     });
-    const topologyArenaWords = compiledTopologyLayout.totalWords + CM12_FAILURE_WORDS;
+    // Reserve the accepted coverage, one complete rung promotion, and eight
+    // same-rung frontier pages. This remains proportional to live adaptive
+    // resolution rather than the dormant/full-fine template catalogue.
+    const activePhiBricks = atlas.bricks.filter(brick =>
+      initiallyActiveBrickKeys.has(brick.key));
+    const maximumActiveResolution = Math.max(1,
+      ...activePhiBricks.map(brick => brick.resolution));
+    const onePromotionCellCount = activePhiBricks.reduce((sum, brick) => {
+      const resolution = Math.min(atlas.brickFineResolution, 2 * brick.resolution);
+      return sum + resolution ** 3;
+    }, 0);
+    const frontierCellHeadroom = grid.cells.length
+      + 8 * maximumActiveResolution ** 3;
+    const levelSetCellCapacity = Math.min(physicsCellCapacity,
+      Math.max(4 * grid.cells.length, onePromotionCellCount, frontierCellHeadroom));
+    const levelSetVertexCapacity = Math.min(8 * levelSetCellCapacity,
+      Math.max(64, 3 * levelSetCellCapacity));
+    const levelSetVolumeLayout = createLevelSetVolumeLayout({
+      baseWords: compiledTopologyLayout.totalWords,
+      activeCellCapacity: levelSetCellCapacity,
+      vertexCapacity: levelSetVertexCapacity,
+      maximumArenaWords: Math.floor(device.limits.maxStorageBufferBindingSize / 4)
+        - CM12_FAILURE_WORDS,
+    });
+    const topologyArenaWords = levelSetVolumeLayout.totalWords + CM12_FAILURE_WORDS;
     const topologyArena = device.createBuffer({
       label: "Sparse Geometric (CM12) physical topology templates and worklists",
       size: Math.max(4, 4 * topologyArenaWords),
@@ -4738,6 +4767,11 @@ export class WebGPUSparseCM12Resident {
       4 * compiledTopologyLayout.headerBaseWords,
       compiledTopologyInitialWords.buffer as ArrayBuffer,
       compiledTopologyInitialWords.byteOffset, compiledTopologyInitialWords.byteLength);
+    const levelSetVolumeInitialWords = createLevelSetVolumeInitialWords(levelSetVolumeLayout);
+    writeGPUBufferBytes(device.queue, topologyArena,
+      4 * levelSetVolumeLayout.headerBaseWords,
+      levelSetVolumeInitialWords.buffer as ArrayBuffer,
+      levelSetVolumeInitialWords.byteOffset, levelSetVolumeInitialWords.byteLength);
     writeGPUBufferBytes(device.queue, topologyArena, physicalTemplateBytes,
       initialWorklists.buffer as ArrayBuffer, initialWorklists.byteOffset,
       initialWorklists.byteLength);
@@ -4800,7 +4834,8 @@ export class WebGPUSparseCM12Resident {
     // Candidate TFX1 appends two exact delta-sized publication triplets at
     // words 24 and 27. Baseline construction keeps them zero and never
     // dispatches them.
-    const acceptedAndShadowIndirect = new Uint32Array(33);
+    // Last triplet is the active adaptive-phi vertex dispatch snapshot.
+    const acceptedAndShadowIndirect = new Uint32Array(36);
     acceptedAndShadowIndirect.set(initialWorklists.subarray(8, 14), 0);
     acceptedAndShadowIndirect.set(initialWorklists.subarray(20, 26), 6);
     acceptedAndShadowIndirect.set(initialWorklists.subarray(
@@ -4816,10 +4851,6 @@ export class WebGPUSparseCM12Resident {
       "Sparse CM12 accepted indirect dispatch snapshot",
       acceptedAndShadowIndirect,
       GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC);
-    const volumeIndirectArguments = device.createBuffer({
-      label: "Sparse Geometric transport substep indirect dispatch",
-      size: 9 * 12, usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.STORAGE,
-    });
     const pressureCellIndirectArguments = device.createBuffer({
       label: "Sparse Geometric (CM12) pressure-cell indirect dispatch",
       size: 12,
@@ -5018,8 +5049,7 @@ export class WebGPUSparseCM12Resident {
           { binding: 0, resource: { buffer: parameters } },
           { binding: 1, resource: { buffer: topology } },
           { binding: 2, resource: { buffer: state } },
-          { binding: 3, resource: { buffer: transportExecutionImageBuffer
-            ? effectiveTransportVelocity! : partials } },
+          { binding: 3, resource: { buffer: effectiveTransportVelocity! } },
           { binding: 4, resource: { buffer: scalars } },
           { binding: 5, resource: { buffer: velocityExtensionDepths,
             offset: 256 * index, size: 4 } },
@@ -5126,53 +5156,6 @@ fn publish(){
     // A separate dispatch may publish a buffer which the next dispatch reads
     // indirectly. Keep the writable argument binding out of the resident
     // transport pipeline so no individual dispatch combines those usages.
-    const volumeIndirectPublisherPipeline = await compileResidentPipeline({
-      label: "Sparse Geometric transport indirect publication",
-      layout: "auto",
-      compute: {
-        module: compiler.createShaderModule({
-          label: "Sparse Geometric transport indirect publication shader",
-          code: /* wgsl */ `
-@group(0) @binding(0) var<storage,read_write> control:array<atomic<i32>>;
-@group(0) @binding(1) var<storage,read_write> arguments:array<u32>;
-override CONTROL_BASE:u32;
-override LIMITER_BASE:u32;
-fn triplet(at:u32,count:u32){arguments[at]=count;arguments[at+1u]=1u;arguments[at+2u]=1u;}
-@compute @workgroup_size(1)
-fn publish(){
-  for(var word=0u;word<9u;word+=1u){
-    arguments[word]=bitcast<u32>(atomicLoad(&control[CONTROL_BASE+7u+word]));
-  }
-  let phase=bitcast<u32>(atomicLoad(&control[LIMITER_BASE+23u]));
-  let running=atomicLoad(&control[LIMITER_BASE+3u])!=0;
-  let initial=atomicLoad(&control[LIMITER_BASE+22u])!=0;
-  // Phase zero enters the limiter in beginGeometricLowFluxLimits before its
-  // cell dispatches. Phase two is republished after the limiter advances.
-  triplet(9u,select(0u,arguments[0u],phase==0u));
-  triplet(12u,select(0u,arguments[3u],phase==0u));
-  triplet(15u,select(0u,arguments[3u],phase==0u||(phase==1u&&running)));
-  triplet(18u,select(0u,arguments[3u],phase==0u||(phase==1u&&running&&initial)));
-  triplet(21u,select(0u,arguments[0u],phase==2u));
-  triplet(24u,select(0u,arguments[3u],phase==2u));
-}
-`,
-        }),
-        entryPoint: "publish",
-        constants: { CONTROL_BASE: layout.volumeTransport.controlBaseWords,
-          LIMITER_BASE: layout.volumeTransport.airControlBaseWords },
-      },
-    }, { priority: "critical" });
-    const volumeIndirectPublisher: GeometricVolumeIndirectPublisher = {
-      pipeline: volumeIndirectPublisherPipeline,
-      bindGroup: device.createBindGroup({
-        label: "Sparse Geometric transport indirect publication bindings",
-        layout: volumeIndirectPublisherPipeline.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: conditioning } },
-          { binding: 1, resource: { buffer: volumeIndirectArguments } },
-        ],
-      }),
-    };
     const projectedTransportGateModule = compiler.createShaderModule({
       label: "Sparse Geometric projected transport dispatch gate shader",
       code: /* wgsl */ `
@@ -5320,13 +5303,20 @@ fn gateVelocityExtension(){
         implicitSharpeningOwnerArithmeticForQA,
         alternatingCapacityRepairReceiptsForQA,
         gatherCapacityRepairForQA,
-        layout.geometricInterfacePlanes,
-        layout.geometricInterfaceSupportPlanes,
-        layout.geometricInterfaceRdf,
         layout.volumeTransport,
         layout.sourceLedger,
         layout.movingSolid,
         compiledTopologyLayout,
+        levelSetVolumeLayout,
+        initialScene
+          ? createInitialLevelSetGeometryWGSL(initialScene, atlas.dimensions, finestCellSize_m)
+          : /* wgsl */ `
+fn lsvAuthoredPhi(positionFine:vec3f)->f32{
+  let owner=compactOwnerCellAt(vec3i(floor(positionFine)));
+  if(owner.x==INVALID){return 1e6;}
+  let fill=state[sourceDensity()+owner.x]/max(cellOpenFraction(owner.x),1e-6);
+  return select(0.5,-0.5,fill>=0.5)*cellMinimumWidth(owner.x);
+}`,
       );
     const shaderSource = createResidentShaderSource();
     const sourceByShaderModule = new WeakMap<GPUShaderModule, string>();
@@ -5345,18 +5335,14 @@ fn gateVelocityExtension(){
       return promise;
     };
     const presentationShaderRoots = presentationPublisherOracleForQA
-      ? ["refreshGeometricInterface", "refreshGeometricInterfacePublished", "extendGeometricInterface",
-        "publishGeometricInterfaceRdfValues", "publishGeometricInterfaceRdfValuesPublished",
-        "fitGeometricInterfaceRdfGradients",
-        "refreshSparseCM12SolidWorldCells", "refreshSparseCM12SolidWorldRows",
+      ? [...LEVELSET_VOLUME_ENTRY_POINTS,
+                                "refreshSparseCM12SolidWorldCells", "refreshSparseCM12SolidWorldRows",
         "refreshSparseCM12StaticSolidGeometryEvidence",
         "clearSparseWorldFrontierResolutionCache",
         "classifyPresentationBricks", "validateSparseCM12InternedBoundaryImmutable",
         "publishSparseLevelSet", ...(SPARSE_CM12_COMMON_HEIGHT_ENABLED ? SPARSE_CM12_HEIGHT_ENTRY_POINTS : [])]
-      : ["refreshGeometricInterface", "refreshGeometricInterfacePublished", "extendGeometricInterface",
-        "publishGeometricInterfaceRdfValues", "publishGeometricInterfaceRdfValuesPublished",
-        "fitGeometricInterfaceRdfGradients",
-        "refreshSparseCM12SolidWorldCells", "refreshSparseCM12SolidWorldRows",
+      : [...LEVELSET_VOLUME_ENTRY_POINTS,
+                                "refreshSparseCM12SolidWorldCells", "refreshSparseCM12SolidWorldRows",
         "refreshSparseCM12StaticSolidGeometryEvidence",
         "clearSparseWorldFrontierResolutionCache",
         "classifyPresentationBricks", "validateSparseCM12InternedBoundaryImmutable",
@@ -5381,24 +5367,12 @@ fn gateVelocityExtension(){
       presentationShaderSource, "Sparse CM12 presentation shader",
     );
     const pipelineLayout = deviceCompilation.pipelineLayout;
-    const names = [...COMPILED_TOPOLOGY_ENTRY_POINTS,
-      "refreshGeometricInterface", "refreshGeometricInterfacePublished", "extendGeometricInterface",
-      "publishGeometricInterfaceRdfValues", "publishGeometricInterfaceRdfValuesPublished",
-      "fitGeometricInterfaceRdfGradients",
-      "seedGeometricVolumeDestination", "beginGeometricVolumeTransport",
-      "initializeGeometricVolumeCells", "sealGeometricVolumePlan",
+    const names = [...COMPILED_TOPOLOGY_ENTRY_POINTS, ...LEVELSET_VOLUME_ENTRY_POINTS,
+                        "seedGeometricVolumeDestination", ...WHOLE_FRAME_VOLUME_ENTRY_POINTS,
       "beginGeometricTransportEnvelope", "gatherGeometricTransportMaterialBounds",
       "gatherGeometricTransportVelocityBounds", "sealGeometricTransportEnvelope",
       "gatherGeometricPreflightVelocityBounds", "includeGeometricPreflightSourceBounds",
       "reserveGeometricPreflightEnvelopeSupport",
-      "reconstructGeometricVolumeInterface", "computeGeometricVolumeFluxes", "computeGeometricVolumeLimits",
-      "limitGeometricVolumeFluxes", "validateGeometricVolumeCells",
-      "commitGeometricVolumeCells", "advanceGeometricVolumeSubstep",
-      "beginGeometricLowFluxLimits", "initializeGeometricLowFluxLimits",
-      "updateGeometricLowFluxLimits", "commitGeometricLowFluxLimits",
-      "advanceGeometricLowFluxLimits", "applyGeometricLowFluxFactors",
-      "initializeGeometricClosingComponents", "allocateGeometricClosingResidual",
-      "finishGeometricVolumeTransport",
       "beginGeometricSolidSnapshot", "snapshotGeometricSolidCells", "snapshotGeometricSolidRows",
       "captureGeometricSolidCells", "activateGeometricSolidMotion",
       "reexpressGeometricSolidRows", "finishGeometricSolidPublication",
@@ -5529,18 +5503,12 @@ fn gateVelocityExtension(){
         ? ["journalIteration", "journalSnapshot"] as const : []),
     ] as const;
     const presentationEntryNames = new Set<string>(presentationPublisherOracleForQA
-      ? ["refreshGeometricInterface", "refreshGeometricInterfacePublished", "extendGeometricInterface",
-        "publishGeometricInterfaceRdfValues", "publishGeometricInterfaceRdfValuesPublished",
-        "fitGeometricInterfaceRdfGradients",
-        "refreshSparseCM12SolidWorldCells", "refreshSparseCM12SolidWorldRows",
+      ? [                        "refreshSparseCM12SolidWorldCells", "refreshSparseCM12SolidWorldRows",
         "refreshSparseCM12StaticSolidGeometryEvidence",
         "clearSparseWorldFrontierResolutionCache",
         "classifyPresentationBricks", "validateSparseCM12InternedBoundaryImmutable",
         "publishSparseLevelSet", ...(SPARSE_CM12_COMMON_HEIGHT_ENABLED ? SPARSE_CM12_HEIGHT_ENTRY_POINTS : [])]
-      : ["refreshGeometricInterface", "refreshGeometricInterfacePublished", "extendGeometricInterface",
-        "publishGeometricInterfaceRdfValues", "publishGeometricInterfaceRdfValuesPublished",
-        "fitGeometricInterfaceRdfGradients",
-        "refreshSparseCM12SolidWorldCells", "refreshSparseCM12SolidWorldRows",
+      : [                        "refreshSparseCM12SolidWorldCells", "refreshSparseCM12SolidWorldRows",
         "refreshSparseCM12StaticSolidGeometryEvidence",
         "clearSparseWorldFrontierResolutionCache",
         "classifyPresentationBricks", "validateSparseCM12InternedBoundaryImmutable",
@@ -5557,6 +5525,7 @@ fn gateVelocityExtension(){
         "publishSparseCM12SurfaceRepresentabilityReceipts",
         "rejectSparseCM12FramePlanPresentationFaults", ...(SPARSE_CM12_COMMON_HEIGHT_ENABLED ? SPARSE_CM12_HEIGHT_ENTRY_POINTS : [])]);
     for (const name of COMPILED_TOPOLOGY_ENTRY_POINTS) presentationEntryNames.add(name);
+    for (const name of LEVELSET_VOLUME_ENTRY_POINTS) presentationEntryNames.add(name);
     const compiledTopologyEntryNames = new Set<string>(COMPILED_TOPOLOGY_ENTRY_POINTS);
     const presentationNames = names.filter((name) => presentationEntryNames.has(name)
       && !compiledTopologyEntryNames.has(name));
@@ -5756,8 +5725,6 @@ fn gateVelocityExtension(){
       [parameters, topology, state, partials, scalars, conditioning, activity,
         candidateState, topologyArena],
       acceptedIndirectArguments,
-      volumeIndirectArguments,
-      volumeIndirectPublisher,
       projectedTransportIndirectPublisher,
       pressureCellIndirectArguments,
       transportPacketIndirectArguments,
@@ -5826,6 +5793,7 @@ fn gateVelocityExtension(){
       packed.brickCount,
       atlas.bricks.map((brick) => brick.coordinate),
       templates.words,
+      levelSetVolumeLayout,
       compiledTopologyLayout,
       compiledTopologyIndirectPublisher,
       rigidCoupling);
@@ -5852,7 +5820,11 @@ fn gateVelocityExtension(){
     result.acceptedVolumeQASource = sparseCM12WGSLForEntryPoints(
       shaderSource + geometricVolumeQAWGSL, ["reduceAcceptedGeometricVolumeQA"]);
     result.constructionAtlas = atlas;
-    result.generationPlanningRequired = mutableBrickKeys.size < atlas.bricks.length;
+    // Adaptive phi has a generation-local bounded arena. Even a fully backed
+    // CM12 topology can outgrow it through ordinary GPU rerungs, so retain the
+    // cheap planning receipt cadence and grow by resident replacement before
+    // an oversized shadow topology is admitted.
+    result.generationPlanningRequired = true;
     result.initialGenerationCellIds = templates.initialCellWorklist;
     result.initialGenerationRowIds = templates.initialRowWorklist;
     result.currentSolidWorld = solidWorld;
@@ -5871,9 +5843,10 @@ fn gateVelocityExtension(){
     newAirCoverage?: readonly SparseCM12NewAirCoverage[];
     candidateKeys?: ReadonlySet<number>;
     journal?: SparseCM12PressureJournalCapacityRequest;
-    source?: Omit<SparseCM12GenerationFields, "state" | "liveControl"> & {
+    source?: Omit<SparseCM12GenerationFields, "state" | "liveControl" | "levelSetVolume"> & {
       geometry?: SparseCM12GenerationGeometry; geometryRecipe?: CM12CapturedGeometryRecipe; stateDescriptor: {size:number;usage:number};
       controlDescriptor: {size:number;usage:number};
+      levelSetVolume?: Readonly<{ layout: LevelSetVolumeLayout }>;
       liveControl: Omit<NonNullable<SparseCM12GenerationFields["liveControl"]>, "buffer"> };
     rigid?: { bodies: {size:number;usage:number}; exchange: {size:number;usage:number};
       worldDimensions_m: readonly [number, number, number] };
@@ -5896,6 +5869,10 @@ fn gateVelocityExtension(){
     const transfer = input.source ? await prepareSparseCM12GenerationTransfer(recorder.device,
       input.source.geometry!, grid, { ...input.source,
         state: recorder.externalResources[firstSource] as GPUBuffer,
+        levelSetVolume: input.source.levelSetVolume ? {
+          arena: recorder.externalResources[firstSource + 1] as GPUBuffer,
+          layout: input.source.levelSetVolume.layout,
+        } : undefined,
         liveControl: { ...input.source.liveControl, buffer: recorder.externalResources[firstSource+1] as GPUBuffer } },
       resident.generationTransferTarget(), input.maximumBytes - resident.allocatedBytes,
       input.newAirCoverage) : undefined;
@@ -5951,10 +5928,6 @@ fn gateVelocityExtension(){
   }
 
   private lastEncodedAcceleration?: readonly [number, number, number];
-  private pendingTransportContinuation?: SparseCM12FrameContinuation;
-  private lastTransportPacketBudget = 512;
-  private lastTransportPacketChunkSize = 0;
-  private lastTransportPacketsEncoded = 0;
 
   encode(
     encoder: GPUCommandEncoder,
@@ -5969,17 +5942,8 @@ fn gateVelocityExtension(){
     bodyCount = 0,
     worldDimensions_m?: readonly [number, number, number],
     inflow?: SparseCM12InflowControl,
-    transportPacketChunkSize = 0,
-  ): SparseCM12FrameContinuation | undefined {
+  ): void {
     this.assertLive();
-    if (this.pendingTransportContinuation) throw new Error("Geometric frame continuation is still pending");
-    if (!Number.isInteger(transportPacketChunkSize) || transportPacketChunkSize < 0) {
-      throw new RangeError("Transport packet chunk size must be a nonnegative integer");
-    }
-    let pendingFrame: SparseCM12FrameContinuation | undefined;
-    this.lastTransportPacketBudget = transportPacketChunkSize > 0 ? 128 * 1024 : 512;
-    this.lastTransportPacketChunkSize = transportPacketChunkSize;
-    this.lastTransportPacketsEncoded = 0;
     this.lastInflow = inflow;
     const packed = this.lastPacked!;
     this.writeParameters(packed, dt_s, finestCellSize_m, pressureScale,
@@ -6231,8 +6195,6 @@ fn gateVelocityExtension(){
       this.encodeCompiledTopologyGeneration(encoder);
       selectBindGroup(this.bindGroup);
       dispatchAccepted("seedGeometricVolumeDestination", "cell");
-      dispatchAccepted("refreshGeometricInterface", "cell");
-      dispatchAccepted("extendGeometricInterface", "cell");
       closePass();
       this.encodeTopologyEditTransaction(encoder, finestCellSize_m,
         [0, 0, 0], [0, 0, 0], 0, 0, dt_s, false, activityPolicy, "prepare", true);
@@ -6307,13 +6269,24 @@ fn gateVelocityExtension(){
         dispatch("prepareContinuousGeometricSourceBudget", 1);
         dispatch("publishContinuousGeometricSourceRates", sourceGroups);
         dispatch("finalizeContinuousGeometricSourceRates", 1);
+        // The finalized rate is the admission authority for this frame's
+        // source event. Publish the same swept plug into phi before pressure;
+        // conservative transport credits dt*rate to V once later in the frame.
+        dispatch("lsvUnionPhi", Math.ceil(
+          this.levelSetVolumeLayout.vertexCapacity / WORKGROUP_SIZE));
+        dispatch("lsvBeginConstraintProjection", 1);
+        const phiConstraintLevels = Math.ceil(Math.log2(
+          this.constructionAtlas.maximumSpanBricks * this.brickFineResolution)) + 1;
+        for (let level = 0; level < phiConstraintLevels; level += 1) {
+          dispatch("lsvApplyConstraints", Math.ceil(
+            this.levelSetVolumeLayout.vertexCapacity / WORKGROUP_SIZE));
+          dispatch("lsvAdvanceConstraintProjection", 1);
+        }
       }
     });
     stage("pressure-topology", ({ closeSubstage }) => {
-      // Final scalar conditioning is complete. Pressure geometry and the later
-      // adaptivity consumers share one plane per accepted cell at this bank.
-      dispatchAccepted("refreshGeometricInterface", "cell");
-      dispatchAccepted("extendGeometricInterface", "cell");
+      // Final scalar conditioning is complete. Pressure and adaptivity now
+      // read the accepted adaptive phi field directly.
       // Classify a complete next pressure image. Its previous membership
       // remains immutable until seal, and word-prefix emission retains stable
       // ascending cell IDs for the solver's floating-point reduction order.
@@ -6517,8 +6490,6 @@ fn gateVelocityExtension(){
         selectBindGroup(this.pressureBindGroup);
         closePass();
         dispatch("publishSparseCM12FrameScalarOutput", 1);
-        dispatchAccepted("refreshGeometricInterface", "cell");
-        dispatchAccepted("extendGeometricInterface", "cell");
       });
       stage("activity-measurement", ({ closeSubstage }) => {
         selectBindGroup(this.bindGroup);
@@ -6750,141 +6721,71 @@ fn gateVelocityExtension(){
     };
     stage("conservative-transport", ({ closeSubstage }) => {
       selectBindGroup(this.transportBindGroup);
-      dispatch("beginGeometricVolumeTransport", 1);
-      dispatchAccepted("initializeGeometricVolumeCells", "cell");
-      dispatch("beginGeometricTransportEnvelope", 1);
-      dispatchAccepted("gatherGeometricTransportMaterialBounds", "cell");
-      dispatchAccepted("gatherGeometricTransportVelocityBounds", "row");
-      dispatch("sealGeometricTransportEnvelope", 1);
-      dispatch("sealGeometricVolumePlan", 1);
-      const publishVolumeDispatches = () => {
-        const activePass = openPass();
-        activePass.setPipeline(this.volumeIndirectPublisher.pipeline);
-        activePass.setBindGroup(0, this.volumeIndirectPublisher.bindGroup);
-        activePass.dispatchWorkgroups(1);
-        // Each compute dispatch has its own resource-usage scope. Restore the
-        // resident bindings before any following indirect transport dispatch.
-        activePass.setBindGroup(0, activeBindGroup);
-      };
-      const dispatchVolume = (name: string,
-        kind: "cell" | "face" | "singleton" | "setupFace" | "setupCell"
-          | "limiterCell" | "initialCell" | "commitFace" | "commitCell") => {
+      dispatch("lsvPrepareVertexDispatch", 1);
+      closePass();
+      encoder.copyBufferToBuffer(this.topologyArena,
+        4 * (this.levelSetVolumeLayout.headerBaseWords
+          + LSV_GLOBAL_HEADER.vertexDispatch),
+        this.acceptedIndirectArguments, 132, 12);
+      const dispatchPhi = (name: string) => {
         const activePass = openPass();
         activePass.setPipeline(this.pipelines[name]!);
-        activePass.dispatchWorkgroupsIndirect(this.volumeIndirectArguments,
-          ({ face: 0, cell: 12, singleton: 24, setupFace: 36, setupCell: 48,
-            limiterCell: 60, initialCell: 72, commitFace: 84, commitCell: 96 })[kind]);
+        activePass.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments, 132);
       };
-      publishVolumeDispatches();
-      const encodePacket = () => {
-        this.lastTransportPacketsEncoded += 1;
-        dispatchVolume("reconstructGeometricVolumeInterface", "setupCell");
-        dispatchVolume("computeGeometricVolumeFluxes", "setupFace");
-        dispatchVolume("beginGeometricLowFluxLimits", "singleton");
-        // Fixed geometry uses an implicit all-one first factor generation and
-        // alternates complete factor banks. Moving-solid FISTA retains its
-        // separate initialization and commit dependencies.
-        if (this.rigidCoupling) {
-          dispatchVolume("initializeGeometricLowFluxLimits", "initialCell");
-        }
-        dispatchVolume("updateGeometricLowFluxLimits", "limiterCell");
-        if (this.rigidCoupling) {
-          dispatchVolume("commitGeometricLowFluxLimits", "limiterCell");
-        }
-        dispatchVolume("advanceGeometricLowFluxLimits", "singleton");
-        publishVolumeDispatches();
-        dispatchVolume("applyGeometricLowFluxFactors", "commitFace");
-        if (this.rigidCoupling) {
-          dispatchVolume("initializeGeometricClosingComponents", "commitCell");
-          dispatchVolume("allocateGeometricClosingResidual", "commitCell");
-        }
-        dispatchVolume("computeGeometricVolumeLimits", "commitCell");
-        dispatchVolume("limitGeometricVolumeFluxes", "commitFace");
-        dispatchVolume("validateGeometricVolumeCells", "commitCell");
-        dispatchVolume("commitGeometricVolumeCells", "commitCell");
-        dispatchVolume("advanceGeometricVolumeSubstep", "singleton");
-        publishVolumeDispatches();
-      };
-      const finishTransport = () => {
-        dispatch("finishGeometricVolumeTransport", 1);
-        if (this.rigidCoupling) {
-          dispatchAccepted("reexpressGeometricSolidRows", "row");
-          dispatch("finishGeometricSolidPublication", 1);
-        }
-        closeSubstage("transport-gather");
-      };
-      if (transportPacketChunkSize === 0) {
-        // Direct command-encoder callers retain their complete fixed schedule.
-        for (let packet = 0; packet < 512; packet += 1) encodePacket();
-        finishTransport();
-        return;
+      dispatchPhi("lsvAdvectPhi");
+      // Constraints can depend on constrained masters at the next coarser
+      // rung. Descending widths put a dispatch boundary between dependencies.
+      dispatch("lsvBeginConstraintProjection", 1);
+      const phiConstraintLevels = Math.ceil(Math.log2(
+        this.constructionAtlas.maximumSpanBricks * this.brickFineResolution)) + 1;
+      for (let level = 0; level < phiConstraintLevels; level += 1) {
+        dispatchPhi("lsvApplyConstraints");
+        dispatch("lsvAdvanceConstraintProjection", 1);
       }
-      const statusReadback = this.device.createBuffer({
-        label: "Geometric transport continuation status",
-        size: 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-      });
-      const maximumPackets = 128 * 1024;
-      let encodedPackets = 0;
-      let cancelled = false;
-      const encodeChunk = () => {
-        const end = Math.min(maximumPackets, encodedPackets + transportPacketChunkSize);
-        while (encodedPackets < end) { encodePacket(); encodedPackets += 1; }
-        closePass();
-        encoder.copyBufferToBuffer(this.conditioning,
-          4 * (this.layout.volumeTransport.controlBaseWords + 2), statusReadback, 0, 16);
-      };
-      const continuation: SparseCM12FrameContinuation = {
-        readProgress: async () => {
-          if (cancelled) throw new Error("Geometric frame continuation was cancelled");
-          await statusReadback.mapAsync(GPUMapMode.READ);
-          try {
-            const words = new Uint32Array(statusReadback.getMappedRange());
-            const planned = words[0]!, executed = words[1]!, fault = words[2]!;
-            if (fault === 0 && (planned > 128 || executed > planned)) {
-              throw new Error(`Invalid geometric continuation progress ${executed}/${planned}`);
-            }
-            // A healthy seal always plans at least one microstep. An earlier
-            // global failure may skip the seal entirely; reach its mandatory
-            // failure receipt instead of scheduling an empty transport tail.
-            return { planned, executed, fault, complete: planned === 0 || executed === planned };
-          } finally {
-            if (statusReadback.mapState === "mapped") statusReadback.unmap();
-          }
-        },
-        resume: (nextEncoder, progress) => {
-          this.assertLive();
-          if (cancelled) throw new Error("Geometric frame continuation was cancelled");
-          encoder = nextEncoder;
-          lensTaps = sparseCM12StageTaps(this.stageLenses, encoder, closePass);
-          if (progress.complete || progress.fault !== 0 || encodedPackets >= maximumPackets) {
-            // The final shader still faults incomplete time. The host never
-            // treats an iteration ceiling as successful physical advancement.
-            finishTransport();
-            finishStage("conservative-transport");
-            encodeAfterTransport();
-            this.pendingTransportContinuation = undefined;
-            cancelled = true;
-            statusReadback.destroy();
-            return true;
-          }
-          encodeChunk();
-          return false;
-        },
-        cancel: () => {
-          if (cancelled) return;
-          cancelled = true;
-          this.pendingTransportContinuation = undefined;
-          statusReadback.destroy();
-        },
-      };
-      pendingFrame = continuation;
-      this.pendingTransportContinuation = continuation;
-      encodeChunk();
-      return false;
+      dispatch("lsvCommitPhi", 1);
+      dispatch("lsvrBegin", 1);
+      dispatchPhi("lsvrCaptureOriginal");
+      dispatchPhi("lsvrSeedClosestPoints");
+      dispatch("lsvrAdvance", 1);
+      // A four-fine-cell metric band crosses at most sixteen adaptive graph
+      // edges under the supported 2:1 balance. Unreached vertices retain an
+      // honest deep-phase classification in lsvrResolve.
+      for (let pass = 0; pass < 16; pass += 1) {
+        dispatchPhi("lsvrRelaxClosestPoints");
+        dispatch("lsvrAdvance", 1);
+      }
+      dispatchPhi("lsvrResolve");
+      dispatch("lsvBeginConstraintProjection", 1);
+      for (let level = 0; level < phiConstraintLevels; level += 1) {
+        dispatchPhi("lsvApplyConstraints");
+        dispatch("lsvAdvanceConstraintProjection", 1);
+      }
+      dispatchPhi("lsvrAuditContour");
+      dispatch("beginWholeFrameVolumeTransport", 1);
+      dispatchAccepted("initializeWholeFrameVolumeCells", "cell");
+      dispatchAccepted("buildWholeFrameVolumeCoupling", "cell");
+      dispatchAccepted("addWholeFrameUncoveredDonorFallbacks", "cell");
+      for (let round = 0; round < 3; round += 1) {
+        dispatchAccepted("normalizeWholeFrameVolumeRowsAtoB", "cell");
+        dispatchAccepted("normalizeWholeFrameVolumeDonorsBtoA", "cell");
+      }
+      dispatchAccepted("auditWholeFrameVolumeMarginals", "cell");
+      dispatchAccepted("gatherWholeFrameVolumeOutflow", "cell");
+      dispatchAccepted("gatherWholeFrameVolume", "cell");
+      dispatchAccepted("validateWholeFrameVolume", "cell");
+      dispatchAccepted("commitWholeFrameVolume", "cell");
+      dispatch("finishWholeFrameVolumeTransport", 1);
+      dispatchAccepted("prepareWholeFrameVolumeSharpening", "cell");
+      dispatchAccepted("proposeWholeFrameVolumeSharpening", "row");
+      dispatchAccepted("gatherWholeFrameVolumeSharpening", "cell");
+      dispatchAccepted("commitWholeFrameVolumeSharpening", "cell");
+      if (this.rigidCoupling) {
+        dispatchAccepted("reexpressGeometricSolidRows", "row");
+        dispatch("finishGeometricSolidPublication", 1);
+      }
+      closeSubstage("transport-gather");
     });
-    if (pendingFrame) return pendingFrame;
     encodeAfterTransport();
-    return undefined;
   }
 
   /**
@@ -7151,6 +7052,45 @@ fn gateVelocityExtension(){
     dispatch("publishGeometricVolumeTopology", 36);
     dispatch("sealCompiledTopologyGeneration", 36);
     pass.end();
+    const phi = encoder.beginComputePass({
+      label: "Sparse CM12 adaptive level-set topology and transfer",
+    });
+    phi.setBindGroup(0, this.transportBindGroup);
+    const direct = (name: string, groups: number) => {
+      phi.setPipeline(this.pipelines[name]!); phi.dispatchWorkgroups(Math.max(1, groups));
+    };
+    direct("lsvBeginTopology", 1);
+    direct("lsvClearTopology", Math.ceil(Math.max(
+      this.levelSetVolumeLayout.hashCapacity,
+      this.levelSetVolumeLayout.cellHashCapacity,
+      8 * this.levelSetVolumeLayout.activeCellCapacity,
+      this.levelSetVolumeLayout.vertexCapacity) / WORKGROUP_SIZE));
+    direct("lsvCatalogCellCorners", Math.ceil(
+      this.levelSetVolumeLayout.activeCellCapacity / WORKGROUP_SIZE));
+    direct("lsvInsertVertexHash", Math.ceil(
+      this.levelSetVolumeLayout.vertexCapacity / WORKGROUP_SIZE));
+    direct("lsvResolveCellCorners", Math.ceil(
+      this.levelSetVolumeLayout.activeCellCapacity / WORKGROUP_SIZE));
+    direct("lsvCompileConstraints", Math.ceil(
+      this.levelSetVolumeLayout.vertexCapacity / WORKGROUP_SIZE));
+    // The transfer kernel falls back to the immutable authored geometry only
+    // when no accepted phi slot exists (generation zero or genuinely new support).
+    direct("lsvTransferPhi", Math.ceil(
+      this.levelSetVolumeLayout.vertexCapacity / WORKGROUP_SIZE));
+    direct("lsvBeginBuildConstraintProjection", 1);
+    const phiConstraintLevels = Math.ceil(Math.log2(
+      this.constructionAtlas.maximumSpanBricks * this.brickFineResolution)) + 1;
+    for (let level = 0; level < phiConstraintLevels; level += 1) {
+      direct("lsvApplyBuildConstraints", Math.ceil(
+        this.levelSetVolumeLayout.vertexCapacity / WORKGROUP_SIZE));
+      direct("lsvAdvanceBuildConstraintProjection", 1);
+    }
+    direct("lsvValidateTopology", Math.ceil(Math.max(
+      this.levelSetVolumeLayout.activeCellCapacity,
+      this.levelSetVolumeLayout.vertexCapacity) / WORKGROUP_SIZE));
+    direct("lsvSealTopology", 1);
+    direct("lsvPublishTopology", 1);
+    phi.end();
   }
 
   private encodeFramePlanPresentation(
@@ -7168,16 +7108,6 @@ fn gateVelocityExtension(){
     if (this.presentationPublisherOracleForQA) {
       const oracle = encoder.beginComputePass({ label: `${label} QA publisher oracle` });
       oracle.setBindGroup(0, this.presentationBindGroup);
-      oracle.setPipeline(this.pipelines.refreshGeometricInterface!);
-      oracle.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments, 0);
-      oracle.setPipeline(this.pipelines.extendGeometricInterface!);
-      oracle.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments, 0);
-      if (this.presentationSurfaceMode === "rdf") {
-        oracle.setPipeline(this.pipelines.publishGeometricInterfaceRdfValues!);
-        oracle.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments, 0);
-        oracle.setPipeline(this.pipelines.fitGeometricInterfaceRdfGradients!);
-        oracle.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments, 0);
-      }
       oracle.setPipeline(this.pipelines.publishSparseLevelSet!);
       oracle.dispatchWorkgroups(this.globalFineLevelSetSource.plan.maximumResidentBricks);
       oracle.end();
@@ -7200,21 +7130,6 @@ fn gateVelocityExtension(){
     dispatch("buildSparseCM12FramePlanPresentationPacket", bricks);
     dispatch("finalizeSparseCM12FramePlanPresentationPacket", 1);
     plan.end();
-    // FPL1 has selected the published scalar parity, including after paused
-    // edits. Rebuild geometry against that bank before any page/proof consumer.
-    const geometry = encoder.beginComputePass({ label: `${label} interface cache` });
-    geometry.setBindGroup(0, this.presentationBindGroup);
-    geometry.setPipeline(this.pipelines.refreshGeometricInterfacePublished!);
-    geometry.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments, 0);
-    geometry.setPipeline(this.pipelines.extendGeometricInterface!);
-    geometry.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments, 0);
-    if (this.presentationSurfaceMode === "rdf") {
-      geometry.setPipeline(this.pipelines.publishGeometricInterfaceRdfValuesPublished!);
-      geometry.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments, 0);
-      geometry.setPipeline(this.pipelines.fitGeometricInterfaceRdfGradients!);
-      geometry.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments, 0);
-    }
-    geometry.end();
     encoder.copyBufferToBuffer(this.activity,
       this.framePlanLayout.fixedIndirectBinding.offset,
       this.framePlanIndirectArguments, 0,
@@ -7785,6 +7700,23 @@ fn gateVelocityExtension(){
     }
     injectionPass.setPipeline(this.pipelines.injectLiquidFaces!);
     injectionPass.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments, 12);
+    // The accepted adaptive phi field is the surface authority. Apply the
+    // exact live insertion geometry to both banks in the same transaction as
+    // its conservative volume dose, then propagate dependent seam vertices.
+    injectionPass.setPipeline(this.pipelines.lsvUnionPhi!);
+    injectionPass.dispatchWorkgroups(Math.ceil(
+      this.levelSetVolumeLayout.vertexCapacity / WORKGROUP_SIZE));
+    injectionPass.setPipeline(this.pipelines.lsvBeginConstraintProjection!);
+    injectionPass.dispatchWorkgroups(1);
+    const phiConstraintLevels = Math.ceil(Math.log2(
+      this.constructionAtlas.maximumSpanBricks * this.brickFineResolution)) + 1;
+    for (let level = 0; level < phiConstraintLevels; level += 1) {
+      injectionPass.setPipeline(this.pipelines.lsvApplyConstraints!);
+      injectionPass.dispatchWorkgroups(Math.ceil(
+        this.levelSetVolumeLayout.vertexCapacity / WORKGROUP_SIZE));
+      injectionPass.setPipeline(this.pipelines.lsvAdvanceConstraintProjection!);
+      injectionPass.dispatchWorkgroups(1);
+    }
     // This is accepted-state occupancy, not merely renderer bookkeeping. A
     // post-step hose plug must publish its wet reason before the next frame's
     // topology planner runs, otherwise that planner can retire the just-wet
@@ -7875,8 +7807,9 @@ fn gateVelocityExtension(){
       policy.emergencyScore, policy.demoteScore], 72);
     u.set([policy.topologyCadenceSteps, policy.promoteEpochs,
       policy.demoteEpochs, policy.activitySignals ? 1 : 0], 76);
-    // The geometric volume path has no CM12 diffusion or sharpening phases.
-    u.set([policy.prepareBricksPerFrame, 0, 0, 0], 80);
+    // Volume-only sharpening follows the advected adaptive level set.
+    u.set([policy.prepareBricksPerFrame, 0, 0,
+      sharpening?.surfaceSharpeningEnabled === false ? 0 : 1], 80);
     f[81] = sparseCM12PressureRelativeTolerance(pressureControl?.relativeTolerance);
     // bit 0: a static or dynamic cut-cell source is live; bit 2: SolidWorld
     // row openness is live. Authored vessel shells, terrain and edits all use
@@ -8458,6 +8391,7 @@ fn gateVelocityExtension(){
       gammaOffset:this.layout.gammaA, gammaOtherOffset:this.layout.gammaB,
       velocityOffset:this.layout.cellVelocityA, velocityOtherOffset:this.layout.cellVelocityB,
       pressureOffset:this.layout.pressure, faceOffset:this.layout.faceA, faceOtherOffset:this.layout.faceB,
+      levelSetVolume: { arena: this.topologyArena, layout: this.levelSetVolumeLayout },
       capacityFractionOffsets: [this.layout.solidCellOpen, this.layout.solidVoxelCellOpen]
         .filter(offset => offset !== 0) };
   }
@@ -8544,6 +8478,8 @@ fn gateVelocityExtension(){
     const sourceFirst = new Map<number, number>();
     const sourcePageCoordinates = new Map<number, readonly [number, number, number]>();
     const planned = new Map<number, SparseBrickResolution>();
+    const backedPlanned = new Map<number, SparseBrickResolution>();
+    let predictedLevelSetCells = 0;
     const frozenFrontier = new Set<number>();
     const recordsByKey = new Map<number, SparseCM12GPUActivityRecord>();
     const dynamicKeys = new Set<number>();
@@ -8570,12 +8506,20 @@ fn gateVelocityExtension(){
       // A demanded inactive construction leaf may need a finer rung before
       // its first activation can satisfy physical 2:1 grading with wet donors.
       const demandedActivation = (record.planReasons & 0x80000000) !== 0;
+      const requestedResolution = record.generationRequestedResolution;
+      if (record.active || demandedActivation) {
+        predictedLevelSetCells += requestedResolution ** 3;
+      }
       if ((record.planReasons & 0x00020000) !== 0) {
         frozenFrontier.add(key);
         planned.set(key, record.generationRequestedResolution);
       }
       if ((record.active || demandedActivation) && !hasCandidateSlot && record.generationRequestedResolution !== resolution)
         planned.set(key, record.generationRequestedResolution);
+      if ((record.active || demandedActivation) && hasCandidateSlot
+        && record.generationRequestedResolution !== resolution) {
+        backedPlanned.set(key, record.generationRequestedResolution);
+      }
       bricks.push({ key, coordinate, resolution, spanBricks: authored ? sparseBrickSpan(authored) : 1,
         unclipped: authored ? authored.unclipped : true,
         density: new Float64Array(resolution ** 3).fill(record.active ? record.meanDensity : 0),
@@ -8588,6 +8532,13 @@ fn gateVelocityExtension(){
         sourceFirst.set(key, this.templateWords[2]! + record.topologyPage * 512);
         sourcePageCoordinates.set(record.topologyPage, coordinate);
       }
+    }
+    // Normally backed rerungs remain GPU-local. When their already-published
+    // requests would consume the phi arena's safety margin, route those exact
+    // intents through resident replacement before the candidate can overflow.
+    if (predictedLevelSetCells
+      > Math.floor(0.8 * this.levelSetVolumeLayout.activeCellCapacity)) {
+      for (const [key, resolution] of backedPlanned) planned.set(key, resolution);
     }
     const atlas = createSparseAdaptiveMassAtlas(original.dimensions, bricks,
       activity.acceptedTopologyGeneration, original.brickFineResolution, true, false);
@@ -8656,7 +8607,7 @@ fn gateVelocityExtension(){
       faceOffset: faceParity ? this.layout.faceB : this.layout.faceA,
       capacityFractionOffsets: [this.layout.solidCellOpen, this.layout.solidVoxelCellOpen]
         .filter(offset => offset !== 0),
-      interfacePlaneOffset: this.layout.geometricInterfacePlanes,
+      levelSetVolume: { arena: this.topologyArena, layout: this.levelSetVolumeLayout },
       scalarD4: words[32 + SPARSE_CM12_FRAME_CONTROL_HEADER.scalarD4Authority] !== 0,
       faceD4: words[32 + SPARSE_CM12_FRAME_CONTROL_HEADER.faceD4Authority] !== 0 };
   }
@@ -9961,6 +9912,69 @@ fn gateVelocityExtension(){
 
   /** Explicit QA only. Float GPU partials are aggregated in CPU f64 over
    * every accepted sparse leaf, including pages outside the authored domain. */
+  async readAdaptiveLevelSetQA(includeVertices = false) {
+    this.assertLive();
+    const layout = this.levelSetVolumeLayout;
+    const readback = this.device.createBuffer({ label: "Adaptive phi header QA", size: 384,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    try {
+      const encoder = this.device.createCommandEncoder();
+      encoder.copyBufferToBuffer(this.topologyArena, 4 * layout.headerBaseWords, readback, 0, 128);
+      for (let slot = 0; slot < 2; slot++) encoder.copyBufferToBuffer(this.topologyArena,
+        4 * layout.slots[slot]!.headerBaseWords, readback, 128 * (slot + 1), 128);
+      this.device.queue.submit([encoder.finish()]); await readback.mapAsync(GPUMapMode.READ);
+      const words = new Uint32Array(readback.getMappedRange());
+      const slot = words[LSV_GLOBAL_HEADER.acceptedSlot]!;
+      const accepted = slot < 2 ? words.subarray(32 * (slot + 1), 32 * (slot + 2)) : undefined;
+      const named = accepted ? Object.fromEntries(Object.entries(LSV_SLOT_HEADER)
+        .map(([name, offset]) => [name, accepted[offset]!])) : undefined;
+      const vertices: Array<{ positionFine: readonly [number, number, number];
+        phiFine: number; support: number; constrained: boolean }> = [];
+      const count = Math.min(layout.vertexCapacity,
+        accepted?.[LSV_SLOT_HEADER.vertexCount] ?? 0);
+      if (includeVertices && count > 0 && slot < 2) {
+        const slotLayout = layout.slots[slot]!;
+        const bank = accepted![LSV_SLOT_HEADER.sourceBank]!;
+        const samples = this.device.createBuffer({ label: "Adaptive phi vertex QA",
+          size: count * 24, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+        try {
+          const sampleEncoder = this.device.createCommandEncoder();
+          for (const [source, destination, size] of [
+            [slotLayout.vertexRecordsBaseWords, 0, count * 16],
+            [bank ? slotLayout.phi1BaseWords : slotLayout.phi0BaseWords, count * 16, count * 4],
+            [bank ? slotLayout.support1BaseWords : slotLayout.support0BaseWords, count * 20, count * 4],
+          ]) sampleEncoder.copyBufferToBuffer(this.topologyArena, 4 * source!,
+            samples, destination!, size!);
+          this.device.queue.submit([sampleEncoder.finish()]);
+          await samples.mapAsync(GPUMapMode.READ);
+          const raw = samples.getMappedRange();
+          const coordinates = new Int32Array(raw);
+          const scalars = new Float32Array(raw);
+          const metadata = new Uint32Array(raw);
+          for (let vertex = 0; vertex < count; vertex++) vertices.push({
+            positionFine: [coordinates[4 * vertex]!, coordinates[4 * vertex + 1]!,
+              coordinates[4 * vertex + 2]!],
+            phiFine: scalars[4 * count + vertex]!,
+            support: metadata[5 * count + vertex]!,
+            constrained: (metadata[4 * vertex + 3]! & 7) !== 0,
+          });
+        } finally { if (samples.mapState === "mapped") samples.unmap(); samples.destroy(); }
+      }
+      return {
+        storage: "adaptive shared vertices with constrained hanging vertices" as const,
+        allocatedBytes: 4 * (layout.totalWords - layout.baseWords),
+        vertexCapacity: layout.vertexCapacity, cellCapacity: layout.activeCellCapacity,
+        acceptedSlot: slot, acceptedGeneration: words[LSV_GLOBAL_HEADER.acceptedGeneration]!,
+        activeVertices: accepted?.[LSV_SLOT_HEADER.vertexCount] ?? 0,
+        activeCells: accepted?.[LSV_SLOT_HEADER.activeCellCount] ?? 0,
+        constrainedVertices: accepted?.[LSV_SLOT_HEADER.constraintCount] ?? 0,
+        fault: accepted?.[LSV_SLOT_HEADER.fault] ?? words[LSV_GLOBAL_HEADER.fault]!,
+        header: named,
+        ...(includeVertices ? { vertices } : {}),
+      };
+    } finally { if (readback.mapState === "mapped") readback.unmap(); readback.destroy(); }
+  }
+
   async readAcceptedGeometricVolumeQA() {
     this.assertLive();
     if (!this.acceptedVolumeQASource) throw new Error("Accepted volume QA source unavailable");
@@ -9992,7 +10006,7 @@ fn gateVelocityExtension(){
     }
     const pipeline = await this.acceptedVolumeQAPipeline;
     const count = this.worldDirectoryLayout.leafCapacity;
-    const size = Math.max(64, count * 64);
+    const size = Math.max(80, count * 80);
     const output = this.device.createBuffer({ label: "Accepted volume QA partials", size,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
     const readback = this.device.createBuffer({ label: "Accepted volume QA readback", size,
@@ -10012,14 +10026,16 @@ fn gateVelocityExtension(){
       this.device.queue.submit([encoder.finish()]);
       await readback.mapAsync(GPUMapMode.READ);
       const values = new Float32Array(readback.getMappedRange());
-      const sums = new Float64Array(16);
+      const sums = new Float64Array(20);
       let minimumFill = Infinity, maximumFill = -Infinity;
+      let maximumExcessFine3 = 0;
       let maximumBoundErrorFine3 = 0, maximumBoundErrorPerFineCell = 0;
       for (let brick = 0; brick < count; brick++) {
-        const at = 16 * brick;
-        for (const slot of [0, 1, 2, 3, 4, 5, 6, 7, 12, 13, 14, 15]) sums[slot] += values[at + slot]!;
+        const at = 20 * brick;
+        for (const slot of [0, 1, 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 17]) sums[slot] += values[at + slot]!;
         if (values[at + 8]! < 3.4e38) minimumFill = Math.min(minimumFill, values[at + 8]!);
         if (values[at + 9]! > -3.4e38) maximumFill = Math.max(maximumFill, values[at + 9]!);
+        maximumExcessFine3 = Math.max(maximumExcessFine3, values[at + 18]!);
         maximumBoundErrorFine3 = Math.max(maximumBoundErrorFine3, values[at + 10]!);
         maximumBoundErrorPerFineCell = Math.max(maximumBoundErrorPerFineCell, values[at + 11]!);
       }
@@ -10034,6 +10050,8 @@ fn gateVelocityExtension(){
         invalidCells: sums[7]!, minimumFill: Number.isFinite(minimumFill) ? minimumFill : null,
         maximumFill: Number.isFinite(maximumFill) ? maximumFill : null,
         maximumBoundErrorFine3, maximumBoundErrorPerFineCell,
+        boundContract: "finite nonnegative V; positive V requires positive open capacity; excess is measured separately" as const,
+        excessVolumeFine3: sums[16]!, excessCells: sums[17]!, maximumExcessFine3,
         outsideAuthoredVolumeFine3: sums[12]!, straddlingAuthoredVolumeFine3: sums[13]!,
         outsideAuthoredCells: sums[14]!, straddlingAuthoredCells: sums[15]!,
         outsideScope: "exact wholly outside cells; straddling cell amounts reported separately" as const,
@@ -10048,7 +10066,7 @@ fn gateVelocityExtension(){
   async readGeometricVolumeTransportReceiptQA() {
     this.assertLive();
     const readback = this.device.createBuffer({
-      label: "Sparse Geometric volume control QA readback", size: (92 + GEOMETRIC_SOURCE_LEDGER_FLOATS) * 4,
+      label: "Sparse Geometric volume control QA readback", size: (122 + GEOMETRIC_SOURCE_LEDGER_FLOATS) * 4,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
     try {
@@ -10062,12 +10080,20 @@ fn gateVelocityExtension(){
       encoder.copyBufferToBuffer(this.conditioning, 4 * this.layout.movingSolid.controlBaseWords,
         readback, (56 + GEOMETRIC_SOURCE_LEDGER_FLOATS) * 4, 16);
       encoder.copyBufferToBuffer(this.conditioning, 4 * this.layout.volumeTransport.supportControlBaseWords,
-        readback, (60 + GEOMETRIC_SOURCE_LEDGER_FLOATS) * 4, 128);
+        readback, (60 + GEOMETRIC_SOURCE_LEDGER_FLOATS) * 4, 152);
+      encoder.copyBufferToBuffer(this.conditioning, 4 * this.layout.volumeTransport.wholeFrameControlBaseWords,
+        readback, (98 + GEOMETRIC_SOURCE_LEDGER_FLOATS) * 4, 96);
       this.device.queue.submit([encoder.finish()]);
       await readback.mapAsync(GPUMapMode.READ);
       const words = new Uint32Array(readback.getMappedRange());
       const floats = new Float32Array(words.buffer, words.byteOffset, words.length);
       const substepDt_s = floats[6]!;
+      const solidWords = words.subarray(56 + GEOMETRIC_SOURCE_LEDGER_FLOATS);
+      const solidFloats = floats.subarray(56 + GEOMETRIC_SOURCE_LEDGER_FLOATS);
+      const supportWords = words.subarray(60 + GEOMETRIC_SOURCE_LEDGER_FLOATS);
+      const supportFloats = floats.subarray(60 + GEOMETRIC_SOURCE_LEDGER_FLOATS);
+      const couplingWords = words.subarray(98 + GEOMETRIC_SOURCE_LEDGER_FLOATS);
+      const couplingFloats = floats.subarray(98 + GEOMETRIC_SOURCE_LEDGER_FLOATS);
       const sourceLedger = Object.fromEntries(Object.entries(GEOMETRIC_SOURCE_LEDGER).map(
         ([name, offset]) => [name, floats[56 + offset]!],
       ));
@@ -10077,41 +10103,47 @@ fn gateVelocityExtension(){
         row: await this.readGeometricOutflowRowQA(words[28]!),
       } : null;
       return Object.freeze({
-        algorithm: "geometric-volume-fct" as const,
+        algorithm: "adaptive-levelset-volume" as const,
         scope: "current-resident-latest-transport" as const,
         hoseSourceLedger: sourceLedger,
-        movingSolid: { active: words[72] !== 0, transportFraction: floats[73]!,
-          rowReexpressionPending: words[74] !== 0 },
+        movingSolid: { active: solidWords[0] !== 0, transportFraction: solidFloats[1]!,
+          rowReexpressionPending: solidWords[2] !== 0 },
         supportedTransportBoundary: {
-          originalMaterialLowerFine: Array.from(floats.slice(76, 79)),
-          originalMaterialUpperFine: Array.from(floats.slice(79, 82)),
-          minimumVelocityFinePerSecond: Array.from(floats.slice(82, 85)),
-          maximumVelocityFinePerSecond: Array.from(floats.slice(85, 88)),
-          envelopeLowerFine: Array.from(floats.slice(88, 91)),
-          envelopeUpperFine: Array.from(floats.slice(91, 94)),
-          closedSweepEvents: words[94]!, maximumPreventedEstimateFine3: floats[98]!,
-          totalPreventedEstimateFine3: floats[99]!,
-          firstClosure: words[94]! > 0 ? { rowId: words[95]!, donorCell: words[96]!,
-            receiverCell: words[97]!, originalSweepFine3: floats[100]!,
-            originalLowFine3: floats[101]!, originalHighFine3: floats[102]! } : null,
+          originalMaterialLowerFine: Array.from(supportFloats.slice(0, 3)),
+          originalMaterialUpperFine: Array.from(supportFloats.slice(3, 6)),
+          minimumVelocityFinePerSecond: Array.from(supportFloats.slice(6, 9)),
+          maximumVelocityFinePerSecond: Array.from(supportFloats.slice(9, 12)),
+          envelopeLowerFine: Array.from(supportFloats.slice(12, 15)),
+          envelopeUpperFine: Array.from(supportFloats.slice(15, 18)),
+          closedSweepEvents: supportWords[18]!, maximumPreventedEstimateFine3: supportFloats[22]!,
+          totalPreventedEstimateFine3: supportFloats[23]!,
+          firstClosure: supportWords[18]! > 0 ? { rowId: supportWords[19]!, donorCell: supportWords[20]!,
+            receiverCell: supportWords[21]!, originalSweepFine3: supportFloats[24]!,
+            originalLowFine3: supportFloats[25]!, originalHighFine3: supportFloats[26]! } : null,
           scope: "outside original-material projected-velocity envelope only; estimates are not outflow credits",
         },
         firstOutflow,
         outflowQuantizationBoundFine3: words[27]! / 65536,
-        lowFluxLimiterControlWords: Array.from(words.slice(32, 56)),
-        lowFluxLimiter: Object.freeze({ active: words[35] !== 0,
-          microstepPasses: words[36]!, totalPasses: words[37]!, changedCount: words[38]!,
-          maximumFluxReductionFraction: floats[39]!, maximumIntermediateBoundDefectFine3: floats[40]!,
-          closingCellCount: words[41]!, maximumRelativeCapacityChange: floats[42]!,
-          closingResidualAllocations: words[43]!, maximumClosingResidualFine3: floats[44]!,
-          unresolvedClosingResiduals: words[45]!,
-          maximumPassesPerMicrostep: words[46]!, limitedFaceCount: words[47]!,
-          phase: words[55]!, packetBudget: this.lastTransportPacketBudget,
-          packetChunkSize: this.lastTransportPacketChunkSize,
-          packetsEncoded: this.lastTransportPacketsEncoded,
-          timingScope: this.lastTransportPacketChunkSize > 0
-            ? "transport latency including asynchronous continuation waits"
-            : "single-submission transport",
+        coupling: Object.freeze({
+          footprint: "rk2-translated-box" as const,
+          balancingRounds: 3,
+          edgeCount: couplingWords[0]!, edgeCapacity: this.layout.volumeTransport.transportEdgeCapacity,
+          edgeOverflowCount: couplingWords[1]!, emptyReceiverCount: couplingWords[2]!,
+          fallbackDonorCount: couplingWords[3]!, invalidSupportCount: couplingWords[4]!,
+          translatedBoxCount: couplingWords[5]!,
+          maximumBalancingRowResidual: couplingFloats[6]!,
+          maximumBalancingDonorResidual: couplingFloats[7]!,
+          excessCellCount: couplingWords[8]!, maximumExcessFine3: couplingFloats[9]!,
+          finalRowResidual: couplingFloats[10]!, finalDonorResidual: couplingFloats[11]!,
+          missingSupportReceiverCount: couplingWords[12]!, clampedTraceCount: couplingWords[13]!,
+          sharpeningMissingPhiCount: couplingWords[14]!, sharpeningMovedCellCount: couplingWords[15]!,
+          // Estimator disagreement is not a bound on error against exact H.
+          sharpeningQuadratureDisagreementFine3: couplingFloats[16]!,
+          sharpeningIntegrationSamples: couplingWords[17]!,
+          maximumTraceDisplacementFine: couplingFloats[18]!,
+          sharpeningCutCellSkipCount: couplingWords[19]!,
+          sharpeningBlockedFaceSkipCount: couplingWords[20]!,
+          sharpeningDisconnectedFaceSkipCount: couplingWords[21]!,
         }),
         subfaceCount: words[0]!, subfaceCapacity: this.layout.volumeTransport.subfaceCapacity,
         maxCourant: floats[1]!, plannedSubsteps: words[2]!, executedSubsteps: words[3]!,
@@ -11301,7 +11333,6 @@ fn gateVelocityExtension(){
   }
 
   destroy(): void {
-    this.pendingTransportContinuation?.cancel();
     if (this.destroyed) return;
     this.destroyed = true;
     void this.generationPlanningGate?.then(gate => gate.destroy()).catch(() => {});
@@ -11321,7 +11352,6 @@ fn gateVelocityExtension(){
     }
     this.transportExecutionImage?.destroy();
     this.effectiveTransportVelocity?.destroy();
-    this.volumeIndirectArguments.destroy();
     this.compiledTopologyIndirectPublisher.arguments.destroy();
     this.projectedTransportIndirectPublisher.arguments.destroy();
     this.transportPacketIndirectArguments?.destroy();

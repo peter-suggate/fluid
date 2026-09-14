@@ -13,6 +13,7 @@
  * no default, a binding the layout does not carry — and that failure would
  * otherwise only appear on the frame that first dispatches it.
  */
+import { createLevelSetVolumeLayout } from "../lib/methods/adaptive-volume/levelset-volume-layout";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
@@ -261,6 +262,10 @@ async function main(): Promise<void> {
         supportControlBaseWords: 36_624, controlBaseWords: 36_688,
         subfaceCapacity: 1_024, airDiagonal: 36_752,
         airControlBaseWords: 37_776, airComponentBaseWords: 37_840,
+        transportEdgeCapacity: 8192, transportEdgeMetadata: 42_000,
+        transportEdgeWeightsA: 75_000, transportEdgeWeightsB: 84_000,
+        wholeFrameControlBaseWords: 96_000,
+        transportReceiverHeadsBaseWords: 96_064, transportDonorHeadsBaseWords: 97_088,
       };
       const compiledTopology = createSparseCM12CompiledTopologyLayout({
         baseWords: solidOccupancy.totalWords, cellCapacity: 1024,
@@ -280,8 +285,16 @@ async function main(): Promise<void> {
         topologyEffects, undefined, faceAddresses,
         undefined, worldDirectory, true, solidOccupancy, 260000,
         true, false, false, undefined, undefined, false, false, false, false,
-        undefined, undefined, undefined, geometricVolume, undefined, undefined,
+        geometricVolume,
+        { ledgerBaseFloats: 100_000, brickScratchBaseFloats: 100_020,
+          brickCapacity: 40, sourceRateBaseFloats: 101_000, componentBaseWords: 102_000 },
+        { oldCapacityFloats: 110_000, newCapacityFloats: 112_000,
+          oldRowOpenFloats: 114_000, oldRowPressureOpenFloats: 116_000,
+          controlBaseWords: 120_000 },
         compiledTopology,
+        createLevelSetVolumeLayout({ baseWords: compiledTopology.totalWords,
+          activeCellCapacity: 1024, vertexCapacity: 4096 }),
+        "fn lsvAuthoredPhi(positionFine:vec3f)->f32{return positionFine.y-8.0;}",
       );
       if (emitSourceOnly) {
         process.stdout.write(source);

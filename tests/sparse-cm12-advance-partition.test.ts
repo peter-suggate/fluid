@@ -6,6 +6,7 @@ import {
   ADAPTIVE_MASS_ADVANCE_PHASE,
   ADAPTIVE_MASS_FLUID_PIPELINE,
   ADAPTIVE_MASS_GPU_WORK_CHUNKS,
+  ADAPTIVE_MASS_RESIDENT_STAGE_REGISTRY,
   ADAPTIVE_MASS_RESIDENT_STAGE_PHASE,
   adaptiveMassPressureTopologyChip,
 } from "../lib/methods/adaptive-volume/adaptive-mass-frame-pipeline";
@@ -35,15 +36,15 @@ const residentSource = readFileSync(new URL(
 
 const residentStageSource = (): string => {
   const begin = residentSource.indexOf("  encode(\n    encoder: GPUCommandEncoder,");
-  const end = residentSource.indexOf("    this.stageLenses?.endFrame(encoder);", begin);
+  const end = residentSource.indexOf("\n  setTracersEnabled(enabled: boolean): void {", begin);
   assert.ok(begin >= 0 && end > begin, "the resident advance must be inspectable");
   return residentSource.slice(begin, end);
 };
 
-/** Each stage callback's body, keyed by stage id, in encode order. */
-const residentStageBodies = (): Map<string, string> => {
-  const body = residentStageSource();
-  const heads = [...body.matchAll(/\n {4}stage\("([a-z0-9-]+)"/g)];
+const stageBodiesAtIndent = (body: string, spaces: number): Map<string, string> => {
+  const heads = [...body.matchAll(new RegExp(
+    `\\n {${spaces}}stage\\(\"([a-z0-9-]+)\"`, "g",
+  ))];
   const bodies = new Map<string, string>();
   heads.forEach((head, index) => {
     const start = head.index ?? 0;
@@ -53,14 +54,34 @@ const residentStageBodies = (): Map<string, string> => {
   return bodies;
 };
 
+/** Each stage callback's body, keyed by stage id, in execution order. */
+const residentStageBodies = (): Map<string, string> => {
+  const body = residentStageSource();
+  const deferredHead = "\n    const encodeAfterTransport = () => {";
+  const deferredStart = body.indexOf(deferredHead);
+  const deferredTail = "\n    };\n    stage(\"conservative-transport\"";
+  const deferredEnd = body.indexOf(deferredTail, deferredStart);
+  assert.ok(deferredStart >= 0 && deferredEnd > deferredStart,
+    "the conservative transport post callback must remain inspectable");
+
+  const beforeDeferred = stageBodiesAtIndent(body.slice(0, deferredStart), 4);
+  const conservativeAndInvocation = stageBodiesAtIndent(
+    body.slice(deferredEnd + "\n    };".length), 4,
+  );
+  const deferred = stageBodiesAtIndent(
+    body.slice(deferredStart + deferredHead.length, deferredEnd), 6,
+  );
+  return new Map([...beforeDeferred, ...conservativeAndInvocation, ...deferred]);
+};
+
 test("the resident encoder closes every declared stage exactly once, in order", () => {
   assert.deepEqual([...residentStageBodies().keys()], [...SPARSE_CM12_RESIDENT_STAGES],
     "encode order and the stage ABI must be the same list");
 });
 
 test("the stage registry lists the stages in encode order", () => {
-  // `satisfies` pins the key set; insertion order is what the diagram reads down.
-  assert.deepEqual(Object.keys(SPARSE_CM12_STAGES), [...SPARSE_CM12_RESIDENT_STAGES]);
+  assert.deepEqual(Object.keys(ADAPTIVE_MASS_RESIDENT_STAGE_REGISTRY),
+    [...SPARSE_CM12_RESIDENT_STAGES]);
 });
 
 test("no dispatch escapes the stage partition", () => {
@@ -120,10 +141,10 @@ test("the SIM diagram has one node per resident stage, in encode order", () => {
 test("adaptivity timing labels describe the complete bracketed work", () => {
   const stages = new Map(ADAPTIVE_MASS_FLUID_PIPELINE.stages.map((stage) => [stage.id, stage]));
   assert.equal(stages.get("activity-measurement")?.label, "Activity census + frontier");
-  assert.match(stages.get("activity-measurement")?.tip.timing ?? "", /11 shader entry points/);
+  assert.match(stages.get("activity-measurement")?.tip.timing ?? "", /9 shader entry points/);
   assert.equal(stages.get("resolution-planning")?.label, "Candidate topology build");
   assert.match(stages.get("resolution-planning")?.tip.timing ?? "",
-    /15 shader entry points \+ 5 command-buffer copies/);
+    /19 shader entry points \+ 5 command-buffer copies/);
   assert.equal(stages.get("brick-retirement")?.label, "Post-commit activity mask");
 });
 

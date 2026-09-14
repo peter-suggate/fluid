@@ -20,6 +20,10 @@ export interface SparseCM12VelocityExtensionWGSLOptions {
   readonly fixedRecurrenceDepth?: number;
   /** Consume the generation-sealed CNX connectivity image in the fallback path. */
   readonly compiledTopology?: boolean;
+  /** WGSL predicate selecting authoritative liquid seeds. Production passes
+   * the accepted adaptive level-set phase; standalone fixtures may retain the
+   * legacy scalar predicate until they compose the level-set module. */
+  readonly liquidCellPredicate?: (cellExpression: string) => string;
 }
 
 const identifier = (value: string, label: string): string => {
@@ -93,6 +97,8 @@ fn cm12ExtensionDepth()->u32{return clamp(cm12ExtensionDispatch.depth,1u,
   if(workgroupUniformLoad(&cm12ExtensionCompiledTopologyValid)==0u){
     cm12ExtensionPublishFrameReceipt(dispatchOrdinal,lane);return;
   }` : "";
+  const liquidCellPredicate = options.liquidCellPredicate?.("cell")
+    ?? `${state}[sourceDensity()+cell]>CM12_LIQUID_ISOVALUE`;
   const connectivityTraversal = options.compiledTopology ? /* wgsl */ `
         let incidences=cnxCellIncidenceRangeUnchecked(cell);
         for(var at=incidences.x;at<incidences.y;at+=1u){
@@ -358,7 +364,7 @@ fn initializeVelocityExtensionPackets(@builtin(workgroup_id)wid:vec3u,
   let selected=cell!=cm12ExtensionInvalid&&cell<cm12ExtensionCapacity;
   // Air-side fractions receive the liquid's extrapolated velocity. Making
   // them independent seeds changes the free-surface transport boundary.
-  let wet=selected&&${state}[sourceDensity()+cell]>CM12_LIQUID_ISOVALUE;
+  let wet=selected&&(${liquidCellPredicate});
   if(selected){let input=sourceCellVelocity()+4u*cell;
     let value=vec4f(select(0.0,${state}[input],wet),
       select(0.0,${state}[input+1u],wet),select(0.0,${state}[input+2u],wet),

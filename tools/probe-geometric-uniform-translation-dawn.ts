@@ -35,6 +35,7 @@ const argument = (name: string, fallback = "") => process.argv.slice(2)
   .find(value => value.startsWith(`--${name}=`))?.slice(name.length + 3) ?? fallback;
 const detached = process.argv.includes("--detached");
 const transportDetail = process.argv.includes("--transport-detail");
+const phiDetail = process.argv.includes("--phi-detail");
 if (process.argv.includes("--help")) {
   console.log(`Sparse Geometric exact uniform-translation probe
 node --import tsx tools/probe-geometric-uniform-translation-dawn.ts [options]
@@ -178,10 +179,6 @@ type DiagnosticFields = Awaited<ReturnType<WebGPUAdaptiveMassSolver["readDiagnos
 type ActivityPolicy = Awaited<ReturnType<WebGPUAdaptiveMassSolver["readGPUActivityPolicy"]>>;
 type SelectedCell = Readonly<{ x: number; y: number; z: number; cellId: number;
   centerFine: readonly [number, number, number]; widthsFine: readonly [number, number, number] }>;
-type InterfaceSnapshot = Readonly<{ acceptedDensity: number; reconstructionFill: number;
-  acceptedAmountFine3: number; plane: Readonly<{ normal: readonly [number, number, number];
-    offsetFine: number; valid: boolean }> }>;
-
 function selectedAuthoredTransportCells(solver: WebGPUAdaptiveMassSolver,
   activity: ActivityPolicy): SelectedCell[] {
   const source = solver.fieldSnapshotSourceForQA;
@@ -209,37 +206,6 @@ function selectedAuthoredTransportCells(solver: WebGPUAdaptiveMassSolver,
     result.push(found);
   }
   return result;
-}
-
-async function readInterfaceSnapshots(device: GPUDevice, solver: WebGPUAdaptiveMassSolver,
-  fields: DiagnosticFields, cells: readonly SelectedCell[]): Promise<Map<number, InterfaceSnapshot>> {
-  const source = solver.fieldSnapshotSourceForQA;
-  const readback = device.createBuffer({ label: "Uniform translation interface-plane QA",
-    size: 16 * cells.length, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-  try {
-    const encoder = device.createCommandEncoder();
-    cells.forEach((cell, index) => encoder.copyBufferToBuffer(source.state,
-      4 * (source.layout.geometricInterfacePlanes + 4 * cell.cellId), readback, 16 * index, 16));
-    device.queue.submit([encoder.finish()]);
-    await readback.mapAsync(GPUMapMode.READ);
-    const values = new Float32Array(readback.getMappedRange());
-    return new Map(cells.map((cell, index) => {
-      const at = 4 * index;
-      const normal = [values[at]!, values[at + 1]!, values[at + 2]!] as const;
-      const dense = cell.x + DIMENSIONS[0] * (cell.y + DIMENSIONS[1] * cell.z);
-      const acceptedDensity = fields.density[dense]!;
-      const open = fields.solidOpenFraction[dense]!;
-      return [cell.cellId, { acceptedDensity,
-        reconstructionFill: acceptedDensity / Math.max(open, 1e-8),
-        acceptedAmountFine3: acceptedDensity
-          * cell.widthsFine[0] * cell.widthsFine[1] * cell.widthsFine[2],
-        plane: { normal, offsetFine: values[at + 3]!,
-          valid: normal[0] ** 2 + normal[1] ** 2 + normal[2] ** 2 > 0.5 } }] as const;
-    }));
-  } finally {
-    if (readback.mapState === "mapped") readback.unmap();
-    readback.destroy();
-  }
 }
 
 function densitySliceZ4(fields: DiagnosticFields, origin_m: readonly number[]) {
@@ -301,7 +267,6 @@ let device: GPUDevice | undefined;
 let solver: WebGPUAdaptiveMassSolver | undefined;
 let stageObserver: Awaited<ReturnType<typeof createGeometricDamStageEnergy>> | undefined;
 let selectedTransportCells: SelectedCell[] | undefined;
-let previousInterfaceSnapshots: Map<number, InterfaceSnapshot> | undefined;
 let analyticalFailure = false, runtimeFailure = false;
 const validationErrors: string[] = [];
 await checkpoint();
@@ -335,6 +300,7 @@ try {
     activeResolutionCounts: { "8": initialActivity.bricks.filter(brick => brick.active).length } };
   const initialFields = await solver.readDiagnosticFields(true);
   const initialPhysical = await solver.readAcceptedGeometricVolumeQA();
+  report.initialAdaptivePhi = await solver.readAdaptiveLevelSetQA();
   const initialExpectedDensity = expectedDensityAt(0);
   const initialObserved = summarizeField(initialFields, scene.fluid.density_kg_m3);
   const initialExpected = summarizeField({ density: initialExpectedDensity,
@@ -378,12 +344,11 @@ try {
       && initialPhysical.outsideAuthoredVolumeFine3 === 0 }, passed: initialPassed };
   if (transportDetail) {
     selectedTransportCells = selectedAuthoredTransportCells(solver, initialActivity);
-    previousInterfaceSnapshots = await readInterfaceSnapshots(device, solver,
-      initialFields, selectedTransportCells);
     report.initialTransportDetail = {
-      scope: "published interface cache before the first completed transport frame",
+      scope: "accepted volume cells before the first completed transport frame",
       selectedCells: selectedTransportCells.map(cell => ({ ...cell,
-        interface: previousInterfaceSnapshots!.get(cell.cellId) })),
+        acceptedDensity: initialFields.density[cell.x + DIMENSIONS[0] *
+          (cell.y + DIMENSIONS[1] * cell.z)] })),
       densitySlice: densitySliceZ4(initialFields, solver.fluidDomain.origin_m),
     };
   }
@@ -409,6 +374,18 @@ try {
     const fields = await solver.readDiagnosticFields(true);
     const physical = await solver.readAcceptedGeometricVolumeQA();
     const transport = await solver.readGeometricVolumeTransportReceiptQA();
+    const adaptivePhi = await solver.readAdaptiveLevelSetQA(phiDetail);
+    const frameControl = await solver.readFrameControlQA();
+    const extension = await solver.readVelocityExtensionQA();
+    const extensionValues = new Float32Array(extension.velocityBits.buffer);
+    let validExtensionCells = 0, movingExtensionCells = 0, maximumExtendedSpeed = 0;
+    for (let i = 0; i < extensionValues.length; i += 4) {
+      if (extensionValues[i + 3]! > 0) validExtensionCells++;
+      const speed = Math.hypot(extensionValues[i]!, extensionValues[i + 1]!, extensionValues[i + 2]!);
+      if (speed > 0) movingExtensionCells++;
+      maximumExtendedSpeed = Math.max(maximumExtendedSpeed, speed);
+    }
+    const velocityExtension = { validExtensionCells, movingExtensionCells, maximumExtendedSpeed };
     const stats = await solver.readStats();
     const activity = await solver.readGPUActivityPolicy();
     assert.ok(stats.completedTime_s !== undefined, "solver omitted accepted clock");
@@ -454,22 +431,18 @@ try {
         .filter(brick => brick.active && brick.acceptedResolution === resolution).length]));
     let frameTransportDetail: Record<string, unknown> | undefined;
     if (transportDetail) {
-      assert.ok(selectedTransportCells && previousInterfaceSnapshots);
-      const currentInterfaceSnapshots = await readInterfaceSnapshots(device, solver,
-        fields, selectedTransportCells);
+      assert.ok(selectedTransportCells);
       const cells = [];
       for (const cell of selectedTransportCells) {
         const rowQA = await solver.readAcceptedGeometricCellRowsQA(cell.cellId);
-        const current = currentInterfaceSnapshots.get(cell.cellId)!;
-        const before = previousInterfaceSnapshots.get(cell.cellId)!;
+        const dense = cell.x + DIMENSIONS[0] * (cell.y + DIMENSIONS[1] * cell.z);
+        const acceptedDensity = fields.density[dense]!;
         cells.push({ ...cell,
-          acceptedStateAfterFrame: { density: current.acceptedDensity,
-            amountFine3: current.acceptedAmountFine3,
+          acceptedStateAfterFrame: { density: acceptedDensity,
+            amountFine3: acceptedDensity * cell.widthsFine[0] * cell.widthsFine[1] * cell.widthsFine[2],
             fullCellVolumeFine3: rowQA.volumeFine3,
             transportCurrentVolumeScratchFine3: rowQA.physicalState.currentVolumeFine3,
             transportLowVolumeScratchFine3: rowQA.physicalState.lowVolumeFine3 },
-          interfaceCacheBeforeFrame: before,
-          interfaceCacheAfterFrame: current,
           physicalSubfaceFluxesFromLastCompletedMicrostep: rowQA.physicalSubfaces.map(face => ({
             face: face.face, rowId: face.rowId, ownNegative: face.ownNegative,
             areaFine2: face.areaFine2, lowFluxFine3: face.lowFluxFine3,
@@ -482,13 +455,12 @@ try {
         });
       }
       frameTransportDetail = {
-        epochSemantics: "Fluxes are from the last completed volume microstep. interfaceCacheBeforeFrame is the previously published plane; for the requested one-microstep frame it is the plane available to these fluxes. interfaceCacheAfterFrame is reconstructed from the newly accepted scalar and is input to the next frame.",
+        epochSemantics: "Fluxes and volume scratch are from the last completed volume microstep; adaptive phi is reported separately by the production phi QA receipt.",
         completedTransportSubsteps: transport.executedSubsteps,
         selectedCellLine: { y: 2, z: 4, xInclusive: [2, 8] },
         cells,
         densitySlice: densitySliceZ4(fields, solver.fluidDomain.origin_m),
       };
-      previousInterfaceSnapshots = currentInterfaceSnapshots;
     }
     const checks = {
       exactCellIntegratedDensity: volumeFieldRelativeL1Error <= VOLUME_FIELD_RELATIVE_L1_LIMIT,
@@ -551,7 +523,7 @@ try {
           volumeWeightedVelocity_m_s: observed.volumeWeightedVelocity_m_s,
           kinetic_J: observed.kinetic_J,
         } },
-      physical, transport, activeResolutionCounts,
+      physical, transport, adaptivePhi, frameControl, velocityExtension, activeResolutionCounts,
       ...(frameTransportDetail ? { transportDetail: frameTransportDetail } : {}),
       stats: { completedTime_s: stats.completedTime_s, encodedSteps: stats.encodedSteps,
         topologyGenerationCount: stats.topologyGenerationCount }, checks, passed });

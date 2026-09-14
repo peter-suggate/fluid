@@ -302,7 +302,7 @@ async function worker(): Promise<void> {
       if ((encodedSteps ?? 0) % 10 === 0 || performance.now() - lastProgressAt >= 1_000) {
         lastProgressAt = performance.now();
         writeProgress("frame-complete", { completedTime_s, encodedSteps,
-          limiterPasses: frameTransport.lowFluxLimiter.totalPasses,
+          couplingEdges: frameTransport.coupling.edgeCount,
           transportSubsteps: frameTransport.executedSubsteps });
         await writeFile(output, `${JSON.stringify(
           makeReceipt(false, "worker has not completed"), null, 2)}\n`);

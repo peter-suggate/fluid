@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createGeometricVolumeResidentWGSL, type SparseGeometricVolumeLayout } from
+import { createGeometricVolumeResidentWGSL, WHOLE_FRAME_VOLUME_CONTROL,
+  type SparseGeometricVolumeLayout } from
   "../lib/methods/adaptive-volume/resident-volume.wgsl";
 
 const layout = Object.fromEntries([
@@ -10,6 +11,9 @@ const layout = Object.fromEntries([
   "subfaceMetadata", "subfaceFluxes", "subfaceRoundoff",
   "supportControlBaseWords", "controlBaseWords", "subfaceCapacity",
   "airDiagonal", "airControlBaseWords", "airComponentBaseWords",
+  "transportEdgeCapacity", "transportEdgeMetadata", "transportEdgeWeightsA",
+  "transportEdgeWeightsB", "wholeFrameControlBaseWords",
+  "transportReceiverHeadsBaseWords", "transportDonorHeadsBaseWords",
 ].map((key, value) => [key, value])) as unknown as SparseGeometricVolumeLayout;
 
 const shader = createGeometricVolumeResidentWGSL(layout);
@@ -29,14 +33,38 @@ test("physical faces and cell CSR are compiled only for a full CNX generation", 
   assert.doesNotMatch(build, /atomicAdd\(&conditioning\[GV_SUPPORT\+32u\]/);
 });
 
-test("each transport frame retains the sealed physical graph", () => {
-  const begin = shader.slice(shader.indexOf("fn beginGeometricVolumeTransport"),
+test("each whole-frame transport retains the sealed physical graph", () => {
+  const begin = shader.slice(shader.indexOf("fn beginWholeFrameVolumeTransport"),
     shader.indexOf("fn gvWriteFace"));
   assert.match(begin, /cnxTransportViewValidForAcceptedTopology\(\)/);
   assert.match(begin, /gvStore\(0u,cnxPhysicalFaceCount\(\)\)/);
   assert.doesNotMatch(begin, /GV_SUPPORT\+32u/);
   assert.match(shader, /fn gvCellFaceRange\(cell:u32\)->vec2u\{return cnxCellFaceRangeUnchecked\(cell\);\}/);
   assert.match(shader, /fn gvArea\(face:u32\)->f32\{return cnxPhysicalFaceAreaUnchecked\(face\);\}/);
+});
+
+test("whole-frame transport uses sparse receiver/donor edges and no FCT microsteps", () => {
+  assert.match(shader, /fn buildWholeFrameVolumeCoupling[\s\S]*ownerCellAt\(vec3i\(x,y,z\)\)/);
+  assert.match(shader, /fn gvAppendCouplingEdge[\s\S]*GV_RECEIVER_HEADS[\s\S]*GV_DONOR_HEADS/);
+  assert.match(shader, /fn normalizeWholeFrameVolumeRowsAtoB/);
+  assert.match(shader, /fn normalizeWholeFrameVolumeDonorsBtoA/);
+  assert.match(shader, /fn auditWholeFrameVolumeMarginals/);
+  assert.equal(WHOLE_FRAME_VOLUME_CONTROL.maximumTraceDisplacement, 18);
+  assert.equal(WHOLE_FRAME_VOLUME_CONTROL.sharpeningCutCellSkipCount, 19);
+  assert.equal(WHOLE_FRAME_VOLUME_CONTROL.sharpeningBlockedFaceSkipCount, 20);
+  assert.equal(WHOLE_FRAME_VOLUME_CONTROL.sharpeningDisconnectedFaceSkipCount, 21);
+  assert.match(shader,
+    /GV_WHOLE_FRAME_CONTROL\+18u\][\s\S]*length\(traced-centre\)/);
+  assert.doesNotMatch(shader, /gvMicroActive|advanceGeometricVolumeSubstep|GeometricFCT/);
+});
+
+test("whole-frame sharpening stays inside open metric phi connectivity", () => {
+  assert.match(shader, /capacity<cellVolume\(cell\)-gvRoundoff/,
+    "cut cells retain transported V without a spatial solid/liquid intersection");
+  assert.match(shader, /rowOpenFraction\(row\)<1\.0-9\.5367431640625e-7/,
+    "blocked or spatially unresolved cut rows cannot carry sharpening volume");
+  assert.match(shader, /lsvSampleAt\(gvSharpeningFaceCentre\(face,cells\)\)/,
+    "a metric face-band sample gates every sharpening transfer");
 });
 
 test("transport frontier reads compiled row endpoints without term discovery", () => {

@@ -215,7 +215,7 @@ export function adaptiveMassSolverOptions(
     activityPolicy: activityPolicy(values),
     timeStep: values.timeStep === "scene" ? "scene" : "paper",
     gammaDiffusionEnabled: false,
-    surfaceSharpeningEnabled: false,
+    surfaceSharpeningEnabled: values.surfaceSharpening !== "off",
     densityCapacityRepairEnabled: false,
     volumeCorrectionEnabled: false,
     presentationColumnHeightMode: values.presentationColumnHeight === "off" ? "off"
@@ -241,8 +241,8 @@ export const adaptiveMassMethod: SimulationMethod = {
   label: "Sparse Geometric",
   shortLabel: "Sparse Geometric",
   badge: "GEOMETRIC",
-  description: "Sparse adaptive fluid with conservative geometric volume transport and internal CFL substeps.",
-  detail: "Sparse Geometric transports liquid volume through shared geometric face fluxes, with conservative flux correction and synchronized internal substeps. It maps any authored scene into a fixed-world-space GPU brick atlas and couples graded neighbours through shared conservative transport and a global composite pressure solve. Runtime activity requests and accepted-output surface proofs are measured, 2:1-closed and conservatively transferred into GPU-authored physical generations; urgent surface refinement bypasses the budgeted round-robin coarsening lane. Transport, pressure, projection and presentation all consume the accepted worklists.",
+  description: "Sparse adaptive fluid with a shared level-set surface and conservative volume transport.",
+  detail: "Sparse Geometric stores the liquid surface at adaptive resolution and transports liquid volume conservatively over each frame. Pressure, surface detail and rendering share the accepted level set. Volume sharpening redistributes liquid toward that surface, and pressure releases temporary excess. The sparse grid refines and coarsens with the flow while supporting live scene edits and rigid bodies.",
   backend: "webgpu",
   resource: {
     id: "fluid.adaptive-volume",
@@ -303,7 +303,7 @@ export const adaptiveMassMethod: SimulationMethod = {
       surfaceFineRings: boundedInteger(values.surfaceFineRings, 1, 1, 8),
       timeStep: values.timeStep === "scene" ? "scene" : "paper",
       gammaDiffusion: "off",
-      surfaceSharpening: "off",
+      surfaceSharpening: values.surfaceSharpening === "off" ? "off" : "on",
       presentationColumnHeight: values.presentationColumnHeight === "off" ? "off"
         : values.presentationColumnHeight === "on" ? "on" : "auto",
       pressureIterations: sparseCM12PressureIterations(values.pressureIterations),
@@ -328,7 +328,7 @@ export const adaptiveMassMethod: SimulationMethod = {
       surfaceFineRings: 1,
       timeStep: "paper",
       gammaDiffusion: "off",
-      surfaceSharpening: "off",
+      surfaceSharpening: "on",
       presentationColumnHeight: "auto",
       pressureIterations: SPARSE_CM12_PRESSURE_ITERATIONS,
       pressureRelativeTolerance: SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE,

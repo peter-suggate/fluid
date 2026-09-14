@@ -4,6 +4,14 @@ import { SparseCM12GenerationBudgetDeferred } from "./sparse-cm12-generation-bud
 import type { SparseAtlasCompositeGrid } from "./sparse-atlas-composite-projection";
 import { sparseBrickSpan } from "./sparse-brick-atlas";
 import { writeGPUBufferView } from "../../core/webgpu-buffer-upload";
+import {
+  LEVELSET_VOLUME_GLOBAL_HEADER,
+  LEVELSET_VOLUME_HASH_EMPTY,
+  LEVELSET_VOLUME_HASH_LOCK,
+  LEVELSET_VOLUME_SLOT_HEADER,
+  LEVELSET_VOLUME_SUPPORT,
+  type LevelSetVolumeLayout,
+} from "./levelset-volume-layout";
 
 export interface SparseCM12TransferBox {
   readonly id: number;
@@ -193,9 +201,15 @@ export interface SparseCM12GenerationFields {
   readonly capacityFractionOffsets?: readonly number[];
   /** Accepted raw PLIC normal.xyz/offset cache; zero normals select the
    * conservative capacity-weighted fallback, never an invented orientation. */
-  readonly interfacePlaneOffset?: number;
   readonly cellIds: Uint32Array;
   readonly rowIds: Uint32Array;
+  /** Persistent adaptive phi authority. When present on both endpoints the
+   * generation remap samples old phi at every new adaptive vertex, then
+   * reapplies target hanging constraints independently of V. */
+  readonly levelSetVolume?: Readonly<{
+    arena: GPUBuffer;
+    layout: LevelSetVolumeLayout;
+  }>;
   readonly liveControl?: {
     readonly buffer: GPUBuffer;
     readonly scalarParityWord: number; readonly faceParityWord: number;
@@ -282,6 +296,45 @@ export async function prepareSparseCM12GenerationTransfer(
   const contributionTargetIds = append(contributionTargets);
   const overlapBoxes = append(bits(overlapGeometry));
   const groupOffsets = append(groupOffsetsList), groupEntries = append(groupEntriesList);
+  const phiTransferEnabled = source.levelSetVolume !== undefined
+    && target.levelSetVolume !== undefined;
+  const phiVertexEntries: number[] = [];
+  let maximumPhiSpan = 1;
+  for (const box of sourceBoxes) maximumPhiSpan = Math.max(maximumPhiSpan, box.span);
+  const sourceByOrigin = new Map<string, SparseCM12TransferBox>();
+  for (const box of sourceBoxes) sourceByOrigin.set(`${box.span}/${box.lower.join("/")}`, box);
+  const sourceAtVertex = (q: readonly number[]) => {
+    let selected: SparseCM12TransferBox | undefined;
+    for (let span = 1; span <= maximumPhiSpan; span *= 2) {
+      const base = q.map(value => Math.floor(value / span) * span);
+      for (let mask = 0; mask < 8; mask++) {
+        const lower = base.map((value, axis) => value
+          - (((mask >>> axis) & 1) !== 0 && q[axis] === value ? span : 0));
+        const candidate = sourceByOrigin.get(`${span}/${lower.join("/")}`);
+        if (!candidate || !q.every((value, axis) => value >= candidate.lower[axis]!
+          && value <= candidate.lower[axis]! + candidate.widths[axis]!)) continue;
+        if (!selected || candidate.id < selected.id) selected = candidate;
+      }
+    }
+    return selected;
+  };
+  if (phiTransferEnabled) {
+    const vertices = new Map<string, readonly number[]>();
+    for (const box of targetBoxes) for (let corner = 0; corner < 8; corner++) {
+      const q = box.lower.map((value, axis) => value
+        + (((corner >>> axis) & 1) !== 0 ? box.widths[axis]! : 0));
+      vertices.set(q.join("/"), q);
+    }
+    for (const q of vertices.values()) {
+      const before = sourceAtVertex(q);
+      // Every target vertex is overwritten. Explicitly new coverage extends
+      // accepted air; it must never retain the replacement resident's freshly
+      // evaluated authored scene geometry after generation zero.
+      phiVertexEntries.push(q[0]!, q[1]!, q[2]!, before?.id ?? 0xffff_ffff);
+    }
+  }
+  const phiVertices = append(phiVertexEntries);
+  const phiVertexCount = phiVertexEntries.length / 4;
   const sourceReceiptBase = plan.cellSources.length;
   const targetReceiptBase = sourceReceiptBase + 2 * sourceCount;
   const auditBase = targetReceiptBase + 2 * targetGrid.cells.length;
@@ -289,8 +342,7 @@ export async function prepareSparseCM12GenerationTransfer(
   const scratchFloats = auditBase + 4 * auditGroups;
   const targetCapacityOffsets = target.capacityFractionOffsets ?? [];
   const capacityFractionOffsets = source.capacityFractionOffsets ?? [];
-  for (const offset of [...capacityFractionOffsets, ...targetCapacityOffsets,
-    ...(source.interfacePlaneOffset === undefined ? [] : [source.interfacePlaneOffset])]) {
+  for (const offset of [...capacityFractionOffsets, ...targetCapacityOffsets]) {
     if (!Number.isSafeInteger(offset) || offset < 0)
       throw new RangeError(`Invalid CM12 generation source capacity fraction offset ${offset}`);
   }
@@ -298,12 +350,22 @@ export async function prepareSparseCM12GenerationTransfer(
   const offsetFunction = (name: string, fallback: number, pair?: readonly [number, number], parityWord?: number) =>
     `fn ${name}()->u32{return ${control && pair ? `select(${pair[0]}u,${pair[1]}u,(control[${parityWord}u]&1u)!=0u)` : `${fallback}u`};}`;
   const compiler = gpuCompilationManagerFor(device);
+  const sourceLsv = source.levelSetVolume?.layout;
+  const targetLsv = target.levelSetVolume?.layout;
+  const maximumTargetPhiSpan = Math.max(1, ...targetBoxes.map(box => box.span));
+  const phiConstraintWidths = Array.from({ length: Math.floor(Math.log2(
+    Math.max(1, ...targetBoxes.map(box => box.span)))) + 1 }, (_, level) => 2 ** level);
+  const lsvOffset = (layout: LevelSetVolumeLayout | undefined,
+    key: keyof LevelSetVolumeLayout["slots"][0]) => layout
+      ? (layout.slots[0][key] as number) - layout.slots[0].baseWords : 0;
   const shaderModule = compiler.createShaderModule({ label: "CM12 conservative generation transfer", code: `
 @group(0) @binding(0) var<storage, read> old: array<f32>;
 @group(0) @binding(1) var<storage, read_write> next: array<f32>;
 @group(0) @binding(2) var<storage, read> m: array<u32>;
 @group(0) @binding(3) var<storage, read_write> fault: array<atomic<u32>>;
 @group(0) @binding(5) var<storage, read_write> scratch: array<f32>;
+${phiTransferEnabled ? `@group(0) @binding(6) var<storage, read> oldLsv: array<u32>;
+@group(0) @binding(7) var<storage, read_write> nextLsv: array<atomic<u32>>;` : ""}
 ${control ? "@group(0) @binding(4) var<storage, read> control: array<u32>;" : ""}
 ${offsetFunction("oldDensity",source.densityOffset,control?.densityOffsets,control?.scalarParityWord)}
 ${offsetFunction("oldGamma",source.gammaOffset,control?.gammaOffsets,control?.scalarParityWord)}
@@ -355,9 +417,7 @@ fn oldCapacityFraction(cell: u32) -> f32 {
  // Only the target gather may decide whether its combined capacity fits.
  if(end==begin+1u){scratch[m[${groupEntries}u+begin]]=amount;return;}
  let available=capacities.x+capacities.y;
- if(!(abs(amount)<=available+transferAmountTolerance(available))){transferFault(64u,cell,amount,available);return;}
- var normal=vec3f(0.0);
- ${source.interfacePlaneOffset === undefined ? "" : `let planeAt=${source.interfacePlaneOffset}u+4u*cell;normal=vec3f(old[planeAt],old[planeAt+1u],old[planeAt+2u]);`}
+ let normal=${phiTransferEnabled ? "generationSourcePhiGradient(id)" : "vec3f(0.0)"};
  let widths=vec3f(f(${sourceGeometry}u+6u*id+3u),f(${sourceGeometry}u+6u*id+4u),f(${sourceGeometry}u+6u*id+5u));
  let center=vec3f(f(${sourceGeometry}u+6u*id),f(${sourceGeometry}u+6u*id+1u),f(${sourceGeometry}u+6u*id+2u));
  let plane=geometricInterfaceFromFill(clamp(amount/volume,0.0,1.0),normal,widths);
@@ -380,7 +440,7 @@ fn oldCapacityFraction(cell: u32) -> f32 {
    // interval; a zero-capacity child still receives exactly zero.
    let excess=max(0.0,amount-available);
    if(excess>0.0&&available>0.0){proposed=childCapacity+excess*(childCapacity/available);}
-   proposed=clamp(proposed,0.0,childCapacity+transferAmountTolerance(childCapacity));
+   proposed=max(0.0,proposed);
   }
   scratch[entry]=proposed;remaining=transferAmountAdd(remaining,-proposed);
  }
@@ -388,7 +448,7 @@ fn oldCapacityFraction(cell: u32) -> f32 {
   for(var at=begin;at<end;at+=1u){let entry=m[${groupEntries}u+at];let c=overlapCapacity(entry);
    let previous=scratch[entry];let residual=remaining.x+remaining.y;
    let lower=select(0.0,-transferAmountTolerance(c),amount<0.0);
-   let upper=select(c+transferAmountTolerance(c),0.0,amount<0.0);
+   let upper=select(3.402823e38,0.0,amount<0.0);
    let proposed=clamp(previous+residual,lower,upper);
    scratch[entry]=proposed;remaining=transferAmountAdd(remaining,previous);
    remaining=transferAmountAdd(remaining,-proposed);
@@ -469,6 +529,77 @@ fn oldCapacityFraction(cell: u32) -> f32 {
  let dst = m[${rowIds}u + id];
  next[${target.faceOffset}u + dst] = value; next[${target.faceOtherOffset}u + dst] = value;
 }
+${phiTransferEnabled && sourceLsv && targetLsv ? `
+const GENERATION_PHI_VERTEX_COUNT:u32=${phiVertexCount}u;
+fn generationPhiHash(q:vec3i)->u32{var h=0x811c9dc5u;
+ for(var axis=0u;axis<3u;axis+=1u){var v=bitcast<u32>(q[axis]);h=(h^v)*0x9e3779b1u;
+  h^=h>>16u;h*=0x85ebca6bu;h^=h>>13u;}return h;}
+fn oldLsvSlot()->u32{return oldLsv[${sourceLsv.headerBaseWords + LEVELSET_VOLUME_GLOBAL_HEADER.acceptedSlot}u];}
+fn nextLsvSlot()->u32{return atomicLoad(&nextLsv[${targetLsv.headerBaseWords + LEVELSET_VOLUME_GLOBAL_HEADER.acceptedSlot}u]);}
+fn oldLsvBase()->u32{return ${sourceLsv.slots[0].baseWords}u+oldLsvSlot()*${sourceLsv.slotStrideWords}u;}
+fn nextLsvBase()->u32{return ${targetLsv.slots[0].baseWords}u+nextLsvSlot()*${targetLsv.slotStrideWords}u;}
+fn oldLsvLookup(q:vec3i)->u32{let base=oldLsvBase();let start=generationPhiHash(q)&${sourceLsv.hashCapacity - 1}u;
+ for(var probe=0u;probe<${sourceLsv.hashProbeLimit}u;probe+=1u){let value=oldLsv[base+${lsvOffset(sourceLsv,"hashBaseWords")}u+((start+probe)&${sourceLsv.hashCapacity - 1}u)];
+  if(value==${LEVELSET_VOLUME_HASH_EMPTY}u){return 0xffffffffu;}
+  if(value==${LEVELSET_VOLUME_HASH_LOCK}u||value==0u){continue;}let vertex=value-1u;
+  let at=base+${lsvOffset(sourceLsv,"vertexRecordsBaseWords")}u+4u*vertex;
+  if(all(vec3i(bitcast<i32>(oldLsv[at]),bitcast<i32>(oldLsv[at+1u]),bitcast<i32>(oldLsv[at+2u]))==q)){return vertex;}}
+ return 0xffffffffu;}
+fn generationSourcePhiGradient(id:u32)->vec3f{let geometry=${sourceGeometry}u+6u*id;
+ let center=vec3f(f(geometry),f(geometry+1u),f(geometry+2u));
+ let widths=vec3f(f(geometry+3u),f(geometry+4u),f(geometry+5u));let lower=center-0.5*widths;
+ let base=oldLsvBase();let bank=oldLsv[base+${lsvOffset(sourceLsv,"headerBaseWords") + LEVELSET_VOLUME_SLOT_HEADER.sourceBank}u];
+ let phiBase=base+select(${lsvOffset(sourceLsv,"phi0BaseWords")}u,${lsvOffset(sourceLsv,"phi1BaseWords")}u,bank!=0u);
+ let supportBase=base+select(${lsvOffset(sourceLsv,"support0BaseWords")}u,${lsvOffset(sourceLsv,"support1BaseWords")}u,bank!=0u);
+ var gradient=vec3f(0.0);for(var corner=0u;corner<8u;corner+=1u){
+  let q=vec3i(round(lower+widths*vec3f(f32(corner&1u),f32((corner>>1u)&1u),f32((corner>>2u)&1u))));
+  let vertex=oldLsvLookup(q);if(vertex==0xffffffffu||oldLsv[supportBase+vertex]!=${LEVELSET_VOLUME_SUPPORT.metric}u){return vec3f(0.0);}
+  let sx=select(-1.0,1.0,(corner&1u)!=0u);let sy=select(-1.0,1.0,(corner&2u)!=0u);let sz=select(-1.0,1.0,(corner&4u)!=0u);
+  gradient+=bitcast<f32>(oldLsv[phiBase+vertex])*vec3f(0.25*sx/widths.x,0.25*sy/widths.y,0.25*sz/widths.z);}
+ return gradient;}
+fn nextLsvLookup(q:vec3i)->u32{let base=nextLsvBase();let start=generationPhiHash(q)&${targetLsv.hashCapacity - 1}u;
+ for(var probe=0u;probe<${targetLsv.hashProbeLimit}u;probe+=1u){let value=atomicLoad(&nextLsv[base+${lsvOffset(targetLsv,"hashBaseWords")}u+((start+probe)&${targetLsv.hashCapacity - 1}u)]);
+  if(value==${LEVELSET_VOLUME_HASH_EMPTY}u){return 0xffffffffu;}
+  if(value==${LEVELSET_VOLUME_HASH_LOCK}u||value==0u){continue;}let vertex=value-1u;
+  let at=base+${lsvOffset(targetLsv,"vertexRecordsBaseWords")}u+4u*vertex;
+  if(all(vec3i(bitcast<i32>(atomicLoad(&nextLsv[at])),bitcast<i32>(atomicLoad(&nextLsv[at+1u])),bitcast<i32>(atomicLoad(&nextLsv[at+2u])))==q)){return vertex;}}
+ return 0xffffffffu;}
+fn transferPhiStore(vertex:u32,phi:f32,support:u32){let base=nextLsvBase();
+ atomicStore(&nextLsv[base+${lsvOffset(targetLsv,"phi0BaseWords")}u+vertex],bitcast<u32>(phi));
+ atomicStore(&nextLsv[base+${lsvOffset(targetLsv,"phi1BaseWords")}u+vertex],bitcast<u32>(phi));
+ atomicStore(&nextLsv[base+${lsvOffset(targetLsv,"support0BaseWords")}u+vertex],support);
+ atomicStore(&nextLsv[base+${lsvOffset(targetLsv,"support1BaseWords")}u+vertex],support);}
+@compute @workgroup_size(64) fn transferAdaptivePhi(@builtin(global_invocation_id) invocation:vec3u){
+ let id=invocation.x;if(id>=GENERATION_PHI_VERTEX_COUNT){return;}let entry=${phiVertices}u+4u*id;
+ let q=vec3i(bitcast<i32>(m[entry]),bitcast<i32>(m[entry+1u]),bitcast<i32>(m[entry+2u]));
+ let targetVertex=nextLsvLookup(q);if(targetVertex==0xffffffffu){atomicOr(&fault[0],512u);return;}
+ let sourceId=m[entry+3u];let geometry=${sourceGeometry}u+6u*sourceId;
+ if(sourceId==0xffffffffu){transferPhiStore(targetVertex,${4 * maximumTargetPhiSpan}.0,${LEVELSET_VOLUME_SUPPORT.deepAir}u);return;}
+ let center=vec3f(f(geometry),f(geometry+1u),f(geometry+2u));
+ let widths=vec3f(f(geometry+3u),f(geometry+4u),f(geometry+5u));let lower=center-0.5*widths;
+ let t=clamp((vec3f(q)-lower)/widths,vec3f(0.0),vec3f(1.0));let oldSlot=oldLsvSlot();
+ let oldBase=oldLsvBase();let bank=oldLsv[oldBase+${lsvOffset(sourceLsv,"headerBaseWords") + LEVELSET_VOLUME_SLOT_HEADER.sourceBank}u];
+ let phiBase=oldBase+select(${lsvOffset(sourceLsv,"phi0BaseWords")}u,${lsvOffset(sourceLsv,"phi1BaseWords")}u,bank!=0u);
+ let supportBase=oldBase+select(${lsvOffset(sourceLsv,"support0BaseWords")}u,${lsvOffset(sourceLsv,"support1BaseWords")}u,bank!=0u);
+ var phi=0.0;var support=${LEVELSET_VOLUME_SUPPORT.metric}u;
+ for(var corner=0u;corner<8u;corner+=1u){let cornerQ=vec3i(round(lower+widths*vec3f(f32(corner&1u),f32((corner>>1u)&1u),f32((corner>>2u)&1u))));
+  let vertex=oldLsvLookup(cornerQ);if(vertex==0xffffffffu){atomicOr(&fault[0],512u);return;}
+  let weight=select(1.0-t.x,t.x,(corner&1u)!=0u)*select(1.0-t.y,t.y,(corner&2u)!=0u)*select(1.0-t.z,t.z,(corner&4u)!=0u);
+  phi+=weight*bitcast<f32>(oldLsv[phiBase+vertex]);support=min(support,oldLsv[supportBase+vertex]&3u);}
+ if(!isFinite(phi)||support==${LEVELSET_VOLUME_SUPPORT.absent}u){atomicOr(&fault[0],512u);return;}
+ transferPhiStore(targetVertex,phi,support);}
+fn projectTransferredPhi(vertex:u32,width:u32){let base=nextLsvBase();
+ let meta=atomicLoad(&nextLsv[base+${lsvOffset(targetLsv,"vertexRecordsBaseWords")}u+4u*vertex+3u]);
+ let count=meta&7u;if(count==0u||meta>>8u!=width){return;}var phi=0.0;var support=${LEVELSET_VOLUME_SUPPORT.metric}u;
+ for(var i=0u;i<count;i+=1u){let source=atomicLoad(&nextLsv[base+${lsvOffset(targetLsv,"constraintSourcesBaseWords")}u+4u*vertex+i]);
+  let weight=bitcast<f32>(atomicLoad(&nextLsv[base+${lsvOffset(targetLsv,"constraintWeightsBaseWords")}u+4u*vertex+i]));
+  phi+=weight*bitcast<f32>(atomicLoad(&nextLsv[base+${lsvOffset(targetLsv,"phi0BaseWords")}u+source]));
+  support=min(support,atomicLoad(&nextLsv[base+${lsvOffset(targetLsv,"support0BaseWords")}u+source])&3u);}
+ transferPhiStore(vertex,phi,support);}
+${phiConstraintWidths.map((width) => {
+  return `@compute @workgroup_size(64) fn projectTransferredPhi${width}(@builtin(global_invocation_id) invocation:vec3u){if(invocation.x<${targetLsv.vertexCapacity}u){projectTransferredPhi(invocation.x,${width}u);}}`;
+}).join("\n")}
+` : ""}
 var<workgroup> auditValues:array<vec4f,64>;
 var<workgroup> auditErrors:array<vec4f,64>;
 @compute @workgroup_size(64) fn auditAmounts(@builtin(local_invocation_id)lid:vec3u,
@@ -515,12 +646,18 @@ var<workgroup> auditErrors:array<vec4f,64>;
     buffers.push(readback);
     const scratch=device.createBuffer({label:"Geometric source-owned remap contributions",
       size:4*scratchFloats,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});buffers.push(scratch);
-    const layout = device.createBindGroupLayout({ entries: (control ? [0, 1, 2, 3, 4, 5] : [0, 1, 2, 3, 5]).map((binding) => ({
+    const bindingIds = control ? [0, 1, 2, 3, 4, 5] : [0, 1, 2, 3, 5];
+    if (phiTransferEnabled) bindingIds.push(6, 7);
+    const layout = device.createBindGroupLayout({ entries: bindingIds.map((binding) => ({
       binding, visibility: GPUShaderStage.COMPUTE,
-      buffer: { type: binding === 0 || binding === 2 || binding === 4 ? "read-only-storage" as const : "storage" as const },
+      buffer: { type: binding === 0 || binding === 2 || binding === 4 || binding === 6
+        ? "read-only-storage" as const : "storage" as const },
     })) });
     const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
-    const pipelines = await Promise.all(["allocateSources", "cells", "faces", "auditAmounts"].map(async (entryPoint) => {
+    const entryPoints = ["allocateSources", "cells", "faces", "auditAmounts",
+      ...(phiTransferEnabled ? ["transferAdaptivePhi",
+        ...phiConstraintWidths.map(width => `projectTransferredPhi${width}`)] : [])];
+    const pipelines = await Promise.all(entryPoints.map(async (entryPoint) => {
       try {
         return await compiler.compileComputePipeline({ label: `CM12 generation transfer ${entryPoint}`,
           layout: pipelineLayout, compute: { module: shaderModule, entryPoint } }, { priority: "critical" });
@@ -540,10 +677,15 @@ var<workgroup> auditErrors:array<vec4f,64>;
     const bindings = device.createBindGroup({ layout, entries: [source.state, target.state, data, fault]
       .map((buffer,binding)=>({binding,resource:{buffer}}))
       .concat(control?[{binding:4,resource:{buffer:control.buffer}}]:[])
-      .concat([{binding:5,resource:{buffer:scratch}}]) });
+      .concat([{binding:5,resource:{buffer:scratch}}])
+      .concat(phiTransferEnabled ? [
+        {binding:6,resource:{buffer:source.levelSetVolume!.arena}},
+        {binding:7,resource:{buffer:target.levelSetVolume!.arena}},
+      ] : []) });
     return new PreparedSparseCM12GenerationTransfer(device, pipelines, bindings, buffers,
       fault, readback, sourceCount, targetGrid.cells.length, targetGrid.gradientRows.length,
-      scratch,auditBase,auditGroups);
+      scratch,auditBase,auditGroups,phiVertexCount,targetLsv?.vertexCapacity ?? 0,
+      phiConstraintWidths.length);
   } catch (error) { for (const buffer of buffers) buffer.destroy(); throw error; }
 }
 
@@ -553,7 +695,9 @@ export class PreparedSparseCM12GenerationTransfer {
     private readonly bindings: GPUBindGroup, private readonly buffers: GPUBuffer[],
     private readonly fault: GPUBuffer, private readonly readback: GPUBuffer,
     private readonly sourceCount:number,private readonly cellCount: number, private readonly rowCount: number,
-    private readonly scratch:GPUBuffer,private readonly auditBase:number,private readonly auditGroups:number) {}
+    private readonly scratch:GPUBuffer,private readonly auditBase:number,private readonly auditGroups:number,
+    private readonly phiVertexCount:number,private readonly phiVertexCapacity:number,
+    private readonly phiConstraintPassCount:number) {}
   lastVolumeReceipt: {sourceVolume:number;targetVolume:number;sourceAbsoluteVolume:number;
     targetAbsoluteVolume:number;difference:number;tolerance:number}|undefined;
   encode(encoder: GPUCommandEncoder): void {
@@ -569,6 +713,18 @@ export class PreparedSparseCM12GenerationTransfer {
       pass.setPipeline(this.pipelines[index]!); pass.setBindGroup(0, this.bindings);
       pass.dispatchWorkgroups(Math.ceil(count / 64)); pass.end();
     }
+    if (this.phiVertexCount > 0) {
+      let pass = encoder.beginComputePass();
+      pass.setPipeline(this.pipelines[4]!); pass.setBindGroup(0, this.bindings);
+      pass.dispatchWorkgroups(Math.ceil(this.phiVertexCount / 64)); pass.end();
+      // Hanging dependencies are projected from the widest controller to the
+      // narrowest, with a dispatch boundary providing storage visibility.
+      for (let passIndex = this.phiConstraintPassCount - 1; passIndex >= 0; passIndex--) {
+        pass = encoder.beginComputePass();
+        pass.setPipeline(this.pipelines[5 + passIndex]!); pass.setBindGroup(0, this.bindings);
+        pass.dispatchWorkgroups(Math.ceil(this.phiVertexCapacity / 64)); pass.end();
+      }
+    }
     encoder.copyBufferToBuffer(this.fault, 0, this.readback, 0, 16);
     encoder.copyBufferToBuffer(this.scratch,4*this.auditBase,this.readback,16,16*this.auditGroups);
   }
@@ -579,6 +735,9 @@ export class PreparedSparseCM12GenerationTransfer {
       const words=new Uint32Array(mapped);
       const values=new Float32Array(mapped);
       const failure = words[0]!;
+      if (failure !== 0xffff_ffff && (failure & 512) !== 0) {
+        throw new Error("CM12 generation transfer could not preserve adaptive phi across replacement buffers");
+      }
       if(failure!==0xffffffff&&(failure&63)===0&&failure!==0){
         throw new SparseCM12GenerationCapacityDeferred(failure,words[1]!,values[2]!,values[3]!);
       }

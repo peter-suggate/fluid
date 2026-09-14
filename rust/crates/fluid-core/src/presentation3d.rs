@@ -1,5 +1,5 @@
 //! Shared reconstructed-distance publication in source XYZ coordinates.
-//! Follows geometric-interface-resident.wgsl.ts: polygon centroids, connected
+//! Implements polygon centroids and connected
 //! point-neighbour RDF values, rank-revealing affine vertex fits and accepted
 //! phase bounds. Topology vertices are cached per connected fluid component.
 use crate::numerics::{owner_at, LIQUID_ISOVALUE};

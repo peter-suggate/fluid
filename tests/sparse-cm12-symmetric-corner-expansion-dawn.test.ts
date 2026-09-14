@@ -125,7 +125,7 @@ dawnTest("symmetric expansion allocates and wets sparse corner tiles",
         await device.queue.onSubmittedWorkDone();
         await solver.assertSimulationHealthy();
         const transport = await solver.readGeometricVolumeTransportReceiptQA();
-        assert.equal(transport.algorithm, "geometric-volume-fct");
+        assert.equal(transport.algorithm, "adaptive-levelset-volume");
         assert.equal(transport.fault, 0, "shared volume transport must complete without a bound fault");
         assert.equal(transport.transportCompleted, true);
         assert.equal(transport.executedSubsteps, transport.plannedSubsteps);

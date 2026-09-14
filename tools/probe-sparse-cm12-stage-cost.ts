@@ -1603,6 +1603,16 @@ try {
       "Figure 7 must hydrate and commit a prepared topology generation");
   }
 } catch (error) {
+  if (process.env.FLUID_LSV_FAILURE_QA === "1" && teardownSolver && outputPath) {
+    const rejected = teardownSolver as WebGPUAdaptiveMassSolver;
+    const [phi, transport, frameControl] = await Promise.all([
+      rejected.readAdaptiveLevelSetQA(true),
+      rejected.readGeometricVolumeTransportReceiptQA(), rejected.readFrameControlQA(),
+    ]);
+    await writeFile(`${outputPath}.failure.json`, JSON.stringify({
+      error: String(error), phi, transport, frameControl,
+    }, null, 2));
+  }
   if (!(error instanceof PressureTopologyCutoffComplete)) throw error;
   console.log(JSON.stringify({
     probe: "sparse-cm12-pressure-topology-cutoff",

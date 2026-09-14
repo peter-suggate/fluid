@@ -1,6 +1,4 @@
 import { createGeometricSubfacesWGSL } from "./geometric-subfaces.wgsl";
-import { geometricBoundedFluxWGSL } from "./geometric-bounded-flux.wgsl";
-import { createGeometricLowFluxLimiterWGSL } from "./geometric-low-flux-limiter.wgsl";
 
 /** All state offsets are f32 words; control is a distinct atomic conditioning tail. */
 export interface SparseGeometricVolumeLayout {
@@ -20,14 +18,56 @@ export interface SparseGeometricVolumeLayout {
   readonly airDiagonal: number;
   readonly airControlBaseWords: number;
   readonly airComponentBaseWords: number;
+  /** Whole-frame translated-box receiver/donor coupling graph. */
+  readonly transportEdgeCapacity: number;
+  readonly transportEdgeMetadata: number;
+  readonly transportEdgeWeightsA: number;
+  readonly transportEdgeWeightsB: number;
+  /** Dedicated atomic receipt/control tail; at least 24 words. */
+  readonly wholeFrameControlBaseWords: number;
+  /** Atomic i32 heads in the conditioning arena, one word per cell. */
+  readonly transportReceiverHeadsBaseWords: number;
+  readonly transportDonorHeadsBaseWords: number;
 }
 
-/** Production conservative geometric FCT; cut-solid apertures remain provisional. */
+export const WHOLE_FRAME_VOLUME_ENTRY_POINTS = Object.freeze([
+  "beginWholeFrameVolumeTransport",
+  "initializeWholeFrameVolumeCells",
+  "buildWholeFrameVolumeCoupling",
+  "addWholeFrameUncoveredDonorFallbacks",
+  "normalizeWholeFrameVolumeRowsAtoB",
+  "normalizeWholeFrameVolumeDonorsBtoA",
+  "auditWholeFrameVolumeMarginals",
+  "gatherWholeFrameVolumeOutflow",
+  "gatherWholeFrameVolume",
+  "validateWholeFrameVolume",
+  "commitWholeFrameVolume",
+  "finishWholeFrameVolumeTransport",
+  "prepareWholeFrameVolumeSharpening",
+  "proposeWholeFrameVolumeSharpening",
+  "gatherWholeFrameVolumeSharpening",
+  "commitWholeFrameVolumeSharpening",
+] as const);
+
+export const WHOLE_FRAME_VOLUME_CONTROL = Object.freeze({
+  edgeCount: 0, edgeOverflowCount: 1, emptyReceiverCount: 2,
+  fallbackDonorCount: 3, invalidSupportCount: 4, translatedBoxCount: 5,
+  balancingRowResidual: 6, balancingDonorResidual: 7,
+  excessCellCount: 8, maximumExcess: 9,
+  finalRowResidual: 10, finalDonorResidual: 11,
+  missingSupportReceiverCount: 12, clampedTraceCount: 13,
+  sharpeningMissingPhiCount: 14, sharpeningMovedCellCount: 15,
+  sharpeningQuadratureDisagreement: 16, sharpeningIntegrationSamples: 17,
+  maximumTraceDisplacement: 18,
+  sharpeningCutCellSkipCount: 19, sharpeningBlockedFaceSkipCount: 20,
+  sharpeningDisconnectedFaceSkipCount: 21,
+});
+
+/** Production whole-frame conservative translated-box volume coupling. */
 export function createGeometricVolumeResidentWGSL(layout?: SparseGeometricVolumeLayout): string {
   if (!layout) return "";
   return /* wgsl */ `
 ${createGeometricSubfacesWGSL()}
-${geometricBoundedFluxWGSL}
 const GV_CURRENT:u32=${layout.currentVolume}u;
 const GV_LOW:u32=${layout.lowVolume}u;
 const GV_PLUS:u32=${layout.positiveLimiter}u;
@@ -40,10 +80,14 @@ const GV_FLUX:u32=${layout.subfaceFluxes}u;
 const GV_FLUX_ROUNDOFF:u32=${layout.subfaceRoundoff}u;
 const GV_CONTROL:u32=${layout.controlBaseWords}u;
 const GV_CAPACITY:u32=${layout.subfaceCapacity}u;
-// Reuse the retired air diagonal for a per-cell structural coverage witness.
-const GV_COVERAGE:u32=${layout.airDiagonal}u;
 const GV_SUPPORT:u32=${layout.supportControlBaseWords}u;
-${createGeometricLowFluxLimiterWGSL(layout)}
+const GV_EDGE_CAPACITY:u32=${layout.transportEdgeCapacity}u;
+const GV_EDGE_META:u32=${layout.transportEdgeMetadata}u;
+const GV_EDGE_A:u32=${layout.transportEdgeWeightsA}u;
+const GV_EDGE_B:u32=${layout.transportEdgeWeightsB}u;
+const GV_RECEIVER_HEADS:u32=${layout.transportReceiverHeadsBaseWords}u;
+const GV_DONOR_HEADS:u32=${layout.transportDonorHeadsBaseWords}u;
+const GV_WHOLE_FRAME_CONTROL:u32=${layout.wholeFrameControlBaseWords}u;
 
 fn gvLoad(word:u32)->u32{return bitcast<u32>(atomicLoad(&conditioning[GV_CONTROL+word]));}
 fn gvStore(word:u32,value:u32){atomicStore(&conditioning[GV_CONTROL+word],bitcast<i32>(value));}
@@ -85,29 +129,11 @@ fn gvRate(face:u32)->f32{
   if(hasSolidBoundaries()){velocity-=(1.0-rowOpenFraction(row))*rowSolidVelocity(row);}
   return gvArea(face)*velocity;
 }
-fn gvFaceState(face:u32)->GeometricFCTFaceFlux{
-  return GeometricFCTFaceFlux(state[GV_FLUX+4u*face],state[GV_FLUX+4u*face+1u]);
-}
-fn gvEndpointLimits(cell:u32)->GeometricFCTCellLimits{
-  if(cell==INVALID){return GeometricFCTCellLimits(1.0,1.0,1u);}
-  // Exact closure retains parent-face metadata in the dead dual proposal
-  // word; no antidiffusive transfer may alter that cell's ordered low sum.
-  if(geometricSolidMotionActive()&&gvReceiverCapacity(cell)==0.0){
-    return GeometricFCTCellLimits(0.0,0.0,1u);
-  }
-  return GeometricFCTCellLimits(state[GV_PLUS+cell],state[GV_MINUS+cell],1u);
-}
-fn gvMicroActive()->bool{return !gvFailed()&&gvLoad(3u)<gvLoad(2u);}
-fn gvMicroCommitReady()->bool{return gvMicroActive()&&glLoad(23u)==2u;}
-fn gvMicroSourceAmount(cell:u32)->f32{
-  return bitcast<f32>(gvLoad(6u))*geometricSourceRate(cell);
-}
-fn gvMicroStartingVolume(cell:u32)->f32{return state[GV_CURRENT+cell]+gvMicroSourceAmount(cell);}
 fn gvDonorCapacity(cell:u32)->f32{
-  return geometricSolidCapacityAt(cell,f32(gvLoad(3u))/f32(max(1u,gvLoad(2u))));
+  return geometricSolidCapacityAt(cell,0.0);
 }
 fn gvReceiverCapacity(cell:u32)->f32{
-  return geometricSolidCapacityAt(cell,f32(gvLoad(3u)+1u)/f32(max(1u,gvLoad(2u))));
+  return geometricSolidCapacityAt(cell,1.0);
 }
 fn gvAcceptedPhysicalRow(row:u32)->bool{return acceptedRowMember(row)&&rowAccepted(row);}
 
@@ -270,7 +296,7 @@ fn gvRoundoff(capacity:f32)->f32{return 9.5367431640625e-7*capacity;}
 fn gvVolumeValid(volume:f32,capacity:f32)->bool{
   let margin=gvRoundoff(capacity);
   return capacity>=0.0&&capacity<=3.402823466e38
-    &&volume>=-margin&&volume<=capacity+margin;
+    &&volume>=-margin&&volume<=3.402823466e38;
 }
 fn gvRecordBoundError(volume:f32,capacity:f32){
   let error=max(0.0,max(-volume,volume-capacity));
@@ -294,17 +320,6 @@ fn gvRecordOutflow(volume:f32){
   let carry=select(0u,1u,prior>0xffffffffu-low);
   atomicAdd(&conditioning[GV_CONTROL+21u],bitcast<i32>(high+carry));
 }
-fn gvRecordOutflowFace(face:u32,volume:f32){
-  if(!(volume>0.0)){return;}
-  if(atomicAdd(&conditioning[GV_CONTROL+27u],1)==0){
-    let row=gvRow(face);gvStore(28u,row);
-    gvStore(29u,bitcast<u32>(rowOpenFraction(row)));
-    gvStore(30u,bitcast<u32>(state[destinationFaceVelocity()+row]));
-  }
-  gvRecordOutflow(volume);
-}
-
-
 @compute @workgroup_size(64)
 fn seedGeometricVolumeDestination(@builtin(global_invocation_id)gid:vec3u){
   let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
@@ -329,16 +344,21 @@ fn beginGeometricVolumeTopologyCompilation(){
 }
 
 @compute @workgroup_size(1)
-fn beginGeometricVolumeTransport(){
-  // A transport frame consumes the immutable physical view sealed for the
-  // accepted topology generation. Clear only frame receipts; retain both
-  // topology-lifetime allocators and restore the sealed face-count snapshot.
+fn beginWholeFrameVolumeTransport(){
+  // Retain the historic receipt words. Whole-frame counters have a dedicated
+  // conditioning tail; the edge allocator starts at zero and overflow faults.
   for(var word=0u;word<32u;word+=1u){gvStore(word,0u);}
-  for(var word=0u;word<24u;word+=1u){glStore(word,0u);}
   if(!cnxTransportViewValidForAcceptedTopology()){
     gvFault(1u,cnxSourceGeneration(),0.0,0.0,0.0);return;
   }
   gvStore(0u,cnxPhysicalFaceCount());
+  // The compatibility receipt now describes the single fixed whole-frame
+  // stage: one planned step whose duration is the complete outer-frame dt.
+  gvStore(2u,1u);gvStore(6u,bitcast<u32>(p.frame.x));
+  for(var word=0u;word<24u;word+=1u){
+    atomicStore(&conditioning[GV_WHOLE_FRAME_CONTROL+word],0);
+  }
+  geometricSolidSetTransportFraction(0.0);
 }
 
 fn gvWriteFace(face:u32,negative:u32,positive:u32,row:u32,area:f32){
@@ -478,142 +498,26 @@ fn compileGeometricVolumeCellFaces(@builtin(global_invocation_id)gid:vec3u){
 @compute @workgroup_size(1)
 fn publishGeometricVolumeTopology(){cnxPublishTransportView();}
 
-// Unused dry backing is not part of the material transport domain. Keep a
-// structural witness for every cell, and reject any nonzero material entering
-// an incomplete cell before commit. This avoids activating the entire authored
-// air catalogue merely to give unused air six faces; swept material support
-// still has to be reserved by the prephysics sparse transaction.
-fn gvAuditMaterialCoverage(cell:u32){
-  let encoded=u32(state[GV_COVERAGE+cell]);if(encoded==0u){return;}
-  let axis=encoded-1u;var negative=0.0;var positive=0.0;
-  let faces=gvCellFaceRange(cell);
-  for(var adjacency=faces.x;adjacency<faces.y;adjacency+=1u){
-    let entry=gvCellFace(adjacency);let face=entry>>1u;let isNegative=(entry&1u)!=0u;
-    let row=gvRow(face);
-    if(rowAxis(row)!=axis){continue;}
-    if(isNegative){positive+=gvArea(face);}
-    if(!isNegative){negative+=gvArea(face);}
-  }
-  if(atomicAdd(&conditioning[GV_CONTROL+31u],1)==0){gvStore(22u,axis);gvStore(23u,cell);}
-  gvFault(9u,cell,negative,positive,cellVolume(cell)/cellWidths(cell)[axis]);
-}
-
 @compute @workgroup_size(64)
-fn initializeGeometricVolumeCells(@builtin(global_invocation_id)gid:vec3u){
+fn initializeWholeFrameVolumeCells(@builtin(global_invocation_id)gid:vec3u){
   let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID||gvFailed()){return;}
   let capacity=geometricSolidCapacityAt(cell,0.0);
   let finalCapacity=geometricSolidCapacityAt(cell,1.0);
-  let volume=state[destinationDensity()+cell]*cellVolume(cell);
+  let sourceRate=geometricSourceRate(cell);
+  let volume=state[destinationDensity()+cell]*cellVolume(cell)+p.frame.x*sourceRate;
   if(!gvVolumeValid(volume,capacity)){
     gvFault(3u,cell,volume,capacity,state[destinationDensity()+cell]);return;
   }
+  if(capacity==0.0&&volume>gvRoundoff(cellVolume(cell))){
+    gvFault(18u,cell,volume,capacity,sourceRate);return;
+  }
   gvRecordBoundError(volume,capacity);
-  state[GV_CURRENT+cell]=volume;state[GV_LOW+cell]=volume;
-  state[GV_PLUS+cell]=1.0;state[GV_MINUS+cell]=1.0;
-  var rate=0.0;var totalRate=0.0;var prismRate=0.0;
-  var negativeArea=vec3f(0.0);var positiveArea=vec3f(0.0);
-  let faces=gvCellFaceRange(cell);
-  for(var adjacency=faces.x;adjacency<faces.y;adjacency+=1u){
-    let entry=gvCellFace(adjacency);let face=entry>>1u;let isNegative=(entry&1u)!=0u;
-    let row=gvRow(face);
-    if(isNegative){positiveArea[rowAxis(row)]+=gvArea(face);}
-    else{negativeArea[rowAxis(row)]+=gvArea(face);}
-    let signedRate=gvRate(face);let flow=abs(signedRate);totalRate+=flow;
-    // Donor positivity needs the outgoing sweep only. Receiver compression
-    // is handled by the shared capacity limiter, so incoming bulk flow must
-    // not double the synchronized substep count of through-flow cells.
-    rate+=max(0.0,select(-signedRate,signedRate,isNegative));
-    let aperture=rowOpenFraction(row);
-    if(aperture>1e-8){prismRate=max(prismRate,
-      flow/(gvArea(face)*aperture*cellWidths(cell)[rowAxis(row)]));}
-  }
-  let expectedArea=vec3f(cellVolume(cell))/cellWidths(cell);
-  state[GV_COVERAGE+cell]=0.0;
-  for(var axis=0u;axis<3u;axis+=1u){
-    let tolerance=9.5367431640625e-7*expectedArea[axis];
-    if(abs(negativeArea[axis]-expectedArea[axis])>tolerance
-      ||abs(positiveArea[axis]-expectedArea[axis])>tolerance){
-      state[GV_COVERAGE+cell]=f32(axis+1u);break;
-    }
-  }
-  let sourceRate=geometricSourceRate(cell);
-  if(volume!=0.0||sourceRate>0.0){
-    gvAuditMaterialCoverage(cell);if(gvFailed()){return;}
-  }
+  state[GV_CURRENT+cell]=max(0.0,volume);state[GV_LOW+cell]=0.0;
+  atomicStore(&conditioning[GV_RECEIVER_HEADS+cell],bitcast<i32>(INVALID));
+  atomicStore(&conditioning[GV_DONOR_HEADS+cell],bitcast<i32>(INVALID));
   if(!(sourceRate>=0.0&&sourceRate<=3.402823466e38)){
     gvFault(4u,cell,sourceRate,capacity,0.0);return;
   }
-  // Closing cells retain their old donor capacity; newly opening cells use
-  // their new positive endpoint. Exact zero final capacity is audited at the
-  // last microstep, never replaced by an epsilon capacity.
-  var cflCapacity=max(capacity,finalCapacity);
-  if(capacity>0.0&&finalCapacity>0.0){cflCapacity=min(capacity,finalCapacity);}
-  if(capacity>0.0&&finalCapacity==0.0){atomicAdd(&conditioning[GL_CONTROL+9u],1);}
-  if(cflCapacity>0.0){
-    atomicMax(&conditioning[GL_CONTROL+10u],bitcast<i32>(abs(finalCapacity-capacity)/cflCapacity));
-  }
-  if(cflCapacity==0.0){if(totalRate+sourceRate>0.0){gvFault(4u,cell,totalRate+sourceRate,cflCapacity,0.0);}return;}
-  let cfl=p.frame.x*max((rate+sourceRate)/cflCapacity,prismRate);
-  if(!(cfl>=0.0&&cfl<3.402823466e38)){gvFault(4u,cell,cfl,capacity,rate);return;}
-  atomicMax(&conditioning[GV_CONTROL+1u],bitcast<i32>(cfl));
-}
-
-fn gvPublishIndirect(){
-  let dispatchEnabled=gvMicroActive();
-  gvStore(7u,select(0u,(gvLoad(0u)+63u)/64u,dispatchEnabled));gvStore(8u,1u);gvStore(9u,1u);
-  gvStore(10u,select(0u,acceptedTemplateCellWorkgroups(),dispatchEnabled));gvStore(11u,1u);gvStore(12u,1u);
-  gvStore(13u,select(0u,1u,dispatchEnabled));gvStore(14u,1u);gvStore(15u,1u);
-}
-@compute @workgroup_size(1)
-fn sealGeometricVolumePlan(){
-  let cfl=bitcast<f32>(gvLoad(1u));let count=max(1u,u32(ceil(2.0*cfl)));
-  if(count>128u){gvFault(4u,0u,f32(count),128.0,cfl);}
-  gvStore(2u,count);gvStore(3u,0u);gvStore(6u,bitcast<u32>(p.frame.x/f32(count)));
-  geometricSolidSetTransportFraction(0.0);
-  gvPublishIndirect();
-}
-
-@compute @workgroup_size(64)
-fn reconstructGeometricVolumeInterface(@builtin(global_invocation_id)gid:vec3u){
-  if(!gvMicroActive()||glLoad(23u)!=0u){return;}
-  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
-  // Every microstep commit updates destination rho=V/fullCellVolume. The PLIC
-  // observer then sees current V/C, never extensive V mistaken for a density.
-  geometricResidentStoreInterface(cell,destinationDensity());
-}
-
-fn gvHighFlux(face:u32,sweep:f32,low:f32)->f32{
-  if(sweep==0.0){return 0.0;}
-  let cells=gvCells(face);let donor=select(cells.y,cells.x,sweep>0.0);
-  if(donor==INVALID){return 0.0;}
-  let capacity=gvDonorCapacity(donor);let volume=state[GV_CURRENT+donor];
-  // Only the geometric observation uses exact endpoints within the accepted
-  // f32 interval. The conserved volume and the low flux retain their values.
-  let observedVolume=clamp(volume,0.0,capacity);
-  if(capacity<=0.0||observedVolume==0.0){return 0.0;}
-  if(observedVolume==capacity){return sweep;}
-  let geometry=geometricResidentInterface(donor,destinationDensity());
-  // An unresolved interface, including provisional scalar cut cells, uses the
-  // monotone volume flux within the same FCT scheme; no CM12 transport executes.
-  if(geometry.valid==0u){return low;}
-  let row=gvRow(face);let axis=rowAxis(row);let aperture=rowOpenFraction(row);
-  if(aperture<=1e-8){return low;}
-  let widths=cellWidths(donor);let centre=cellCenter(donor);
-  var minimum=-0.5*widths;var maximum=0.5*widths;
-  if(cells.x!=INVALID&&cells.y!=INVALID){
-    let other=select(cells.x,cells.y,donor==cells.x);
-    minimum=max(minimum,cellCenter(other)-0.5*cellWidths(other)-centre);
-    maximum=min(maximum,cellCenter(other)+0.5*cellWidths(other)-centre);
-  }
-  let travel=abs(sweep)/(gvArea(face)*aperture);
-  if(!(travel<=widths[axis])){gvFault(4u,donor,travel,widths[axis],f32(face));return low;}
-  let boundary=rowCenter(row)[axis]-centre[axis];
-  minimum[axis]=select(boundary,boundary-travel,sweep>0.0);
-  maximum[axis]=select(boundary+travel,boundary,sweep>0.0);
-  let prismWidths=maximum-minimum;let prismCentre=0.5*(minimum+maximum);
-  if(!all(prismWidths>=vec3f(0.0))){gvFault(1u,donor,travel,capacity,f32(face));return low;}
-  let offset=geometry.plane.offset-dot(geometry.plane.normal,prismCentre);
-  return sweep*geometricPlaneBoxFraction(geometry.plane.normal,offset,prismWidths);
 }
 
 // Frozen original-material envelope. Coordinates and velocities use finest
@@ -637,14 +541,6 @@ fn gvSupportReduce(index:u32,value:f32,maximum:bool){
     if(atomicCompareExchangeWeak(&conditioning[GV_SUPPORT+index],old,bitcast<i32>(next)).exchanged){return;}
   }
   gvFault(13u,index,value,0.0,1.0);
-}
-fn gvSupportAdd(index:u32,value:f32){
-  for(var attempt=0u;attempt<4096u;attempt+=1u){
-    let old=atomicLoad(&conditioning[GV_SUPPORT+index]);
-    let next=bitcast<f32>(old)+value;
-    if(atomicCompareExchangeWeak(&conditioning[GV_SUPPORT+index],old,bitcast<i32>(next)).exchanged){return;}
-  }
-  gvFault(13u,index,value,0.0,2.0);
 }
 @compute @workgroup_size(1)
 fn beginGeometricTransportEnvelope(){
@@ -813,182 +709,383 @@ fn sealGeometricTransportEnvelope(){
   }
   atomicStore(&conditioning[GV_SUPPORT+36u],select(0,1,uniform));
 }
-fn gvUniformTransportField()->bool{
-  return atomicLoad(&conditioning[GV_SUPPORT+36u])!=0;
-}
-fn gvOutsideTransportEnvelope(cell:u32)->bool{
-  let lower=cellCenter(cell)-0.5*cellWidths(cell);
-  let upper=cellCenter(cell)+0.5*cellWidths(cell);
-  for(var axis=0u;axis<3u;axis+=1u){
-    // Strict separation keeps touching cells inside the physical reservation.
-    if(upper[axis]<gvSupportLoad(12u+axis)||lower[axis]>gvSupportLoad(15u+axis)){return true;}
+fn gvEdgeReceiver(edge:u32)->u32{return bitcast<u32>(state[GV_EDGE_META+4u*edge]);}
+fn gvEdgeDonor(edge:u32)->u32{return bitcast<u32>(state[GV_EDGE_META+4u*edge+1u]);}
+fn gvEdgeReceiverNext(edge:u32)->u32{return bitcast<u32>(state[GV_EDGE_META+4u*edge+2u]);}
+fn gvEdgeDonorNext(edge:u32)->u32{return bitcast<u32>(state[GV_EDGE_META+4u*edge+3u]);}
+
+fn gvAppendCouplingEdge(receiver:u32,donor:u32,weight:f32)->bool{
+  if(!(weight>0.0&&weight<=3.402823466e38)){return false;}
+  let edge=bitcast<u32>(atomicAdd(&conditioning[GV_WHOLE_FRAME_CONTROL],1));
+  if(edge>=GV_EDGE_CAPACITY){
+    if(atomicAdd(&conditioning[GV_WHOLE_FRAME_CONTROL+1u],1)==0){
+      gvFault(14u,receiver,f32(edge),f32(GV_EDGE_CAPACITY),f32(donor));
+    }
+    return false;
   }
-  return false;
-}
-fn gvRecordSupportedBoundary(face:u32,donor:u32,receiver:u32,sweep:f32,low:f32,high:f32){
-  let amount=max(abs(low),abs(high));if(sweep==0.0){return;}
-  if(atomicAdd(&conditioning[GV_SUPPORT+18u],1)==0){
-    atomicStore(&conditioning[GV_SUPPORT+19u],bitcast<i32>(gvRow(face)));
-    atomicStore(&conditioning[GV_SUPPORT+20u],bitcast<i32>(donor));
-    atomicStore(&conditioning[GV_SUPPORT+21u],bitcast<i32>(receiver));
-    atomicStore(&conditioning[GV_SUPPORT+24u],bitcast<i32>(sweep));
-    atomicStore(&conditioning[GV_SUPPORT+25u],bitcast<i32>(low));
-    atomicStore(&conditioning[GV_SUPPORT+26u],bitcast<i32>(high));
+  var receiverNext=INVALID;
+  if(receiver!=INVALID){
+    receiverNext=bitcast<u32>(atomicExchange(&conditioning[GV_RECEIVER_HEADS+receiver],bitcast<i32>(edge)));
   }
-  gvSupportReduce(22u,amount,true);gvSupportAdd(23u,amount);
+  let donorNext=bitcast<u32>(atomicExchange(&conditioning[GV_DONOR_HEADS+donor],bitcast<i32>(edge)));
+  state[GV_EDGE_META+4u*edge]=bitcast<f32>(receiver);
+  state[GV_EDGE_META+4u*edge+1u]=bitcast<f32>(donor);
+  state[GV_EDGE_META+4u*edge+2u]=bitcast<f32>(receiverNext);
+  state[GV_EDGE_META+4u*edge+3u]=bitcast<f32>(donorNext);
+  state[GV_EDGE_A+edge]=weight;state[GV_EDGE_B+edge]=0.0;
+  return true;
+}
+
+fn gvTranslatedDepartureBox(receiver:u32)->array<vec3f,2>{
+  let centre=cellCenter(receiver);let widths=cellWidths(receiver);
+  let first=sampleEffectiveTransportVelocityAtSpans(centre,widths);
+  let midpoint=centre-0.5*p.frame.x*first;
+  let velocity=sampleEffectiveTransportVelocityAtSpans(midpoint,widths);
+  var traced=centre-p.frame.x*velocity;
+  if(!(all(traced>=vec3f(-3.402823466e38))&&all(traced<=vec3f(3.402823466e38)))){
+    atomicAdd(&conditioning[GV_WHOLE_FRAME_CONTROL+4u],1);
+    gvFault(19u,receiver,traced.x,traced.y,traced.z);traced=centre;
+  }
+  atomicMax(&conditioning[GV_WHOLE_FRAME_CONTROL+18u],
+    bitcast<i32>(length(traced-centre)));
+  // This first implementation deliberately translates the control-volume
+  // box. It does not deform the eight corners; word 37 is its accuracy receipt.
+  atomicAdd(&conditioning[GV_WHOLE_FRAME_CONTROL+5u],1);
+  let clamped=cm12ClampToResidentWorld(traced,0.5*widths);
+  if(any(clamped!=traced)){atomicAdd(&conditioning[GV_WHOLE_FRAME_CONTROL+13u],1);}
+  traced=clamped;
+  return array<vec3f,2>(traced-0.5*widths,traced+0.5*widths);
 }
 
 @compute @workgroup_size(64)
-fn computeGeometricVolumeFluxes(@builtin(global_invocation_id)gid:vec3u){
-  let face=gid.x;if(!gvMicroActive()||glLoad(23u)!=0u||face>=gvLoad(0u)){return;}
-  let cells=gvCells(face);var vn=0.0;var cn=0.0;var vp=0.0;var cp=0.0;
-  if(cells.x!=INVALID){vn=state[GV_CURRENT+cells.x];cn=gvDonorCapacity(cells.x);}
-  if(cells.y!=INVALID){vp=state[GV_CURRENT+cells.y];cp=gvDonorCapacity(cells.y);}
-  var sweep=gvRate(face)*bitcast<f32>(gvLoad(6u));
-  // Reconstruct a bounded donor fill from the accepted amount. A tiny
-  // negative roundoff amount cannot author a liquid flux against the bulk
-  // sweep, and an upper excursion cannot make liquid exceed its swept volume.
-  // This is a face-flux observation; GV_CURRENT remains the conserved amount.
-  var low=geometricFctUpwindFlux(sweep,clamp(vn,0.0,max(0.0,cn)),cn,
-    clamp(vp,0.0,max(0.0,cp)),cp);
-  var high=gvHighFlux(face,sweep,low);
-  let receiver=select(cells.x,cells.y,sweep>=0.0);
-  let donor=select(cells.y,cells.x,sweep>=0.0);
-  if(receiver!=INVALID&&state[GV_COVERAGE+receiver]!=0.0){
-    if(gvOutsideTransportEnvelope(receiver)){
-      // Shared flux selection confines numerical diffusion to certified
-      // support. The bulk sweep is also zero so implicit low reconstruction
-      // cannot restore this deliberately closed numerical boundary.
-      gvRecordSupportedBoundary(face,donor,receiver,sweep,low,high);
-      sweep=0.0;low=0.0;high=0.0;
-    }else if(low!=0.0||high!=0.0){
-      // Missing support inside the physical sweep is a topology fault.
-      gvAuditMaterialCoverage(receiver);
+fn buildWholeFrameVolumeCoupling(@builtin(global_invocation_id)gid:vec3u){
+  let receiver=acceptedTemplateCellInvocation(gid.x);
+  if(receiver==INVALID||gvFailed()||gvReceiverCapacity(receiver)<=0.0){return;}
+  let box=gvTranslatedDepartureBox(receiver);let begin=vec3i(floor(box[0]));
+  let end=vec3i(ceil(box[1]));var z=begin.z;var edges=0u;var missingSupport=false;
+  // Walk adaptive slabs. Each visited donor advances x to its upper face and
+  // contributes the next y/z boundary. Unknown support advances one finest
+  // cell and is diagnosed by the receiver/final marginal receipts.
+  for(;z<end.z;){var nextZ=end.z;var y=begin.y;for(;y<end.y;){var nextY=end.y;var x=begin.x;
+    for(;x<end.x;){
+      let donor=ownerCellAt(vec3i(x,y,z));if(donor==INVALID){
+        missingSupport=true;
+        nextY=min(nextY,y+1);nextZ=min(nextZ,z+1);x+=1;continue;
+      }
+      let donorMinimum=vec3f(cellMinimum(donor));let donorMaximum=donorMinimum+cellWidths(donor);
+      let anchor=max(begin,vec3i(donorMinimum));
+      if(x==anchor.x&&y==anchor.y&&z==anchor.z&&gvDonorCapacity(donor)>0.0){
+        let overlap=max(vec3f(0.0),min(box[1],donorMaximum)-max(box[0],donorMinimum));
+        let raw=overlap.x*overlap.y*overlap.z;
+        if(gvAppendCouplingEdge(receiver,donor,raw)){edges+=1u;}
+      }
+      nextY=min(nextY,max(y+1,i32(donorMaximum.y)));
+      nextZ=min(nextZ,max(z+1,i32(donorMaximum.z)));
+      x=max(x+1,i32(donorMaximum.x));
+    }
+    y=nextY;}
+  z=nextZ;}
+  if(missingSupport){atomicAdd(&conditioning[GV_WHOLE_FRAME_CONTROL+12u],1);}
+  if(edges==0u){atomicAdd(&conditioning[GV_WHOLE_FRAME_CONTROL+2u],1);}
+}
+
+@compute @workgroup_size(64)
+fn addWholeFrameUncoveredDonorFallbacks(@builtin(global_invocation_id)gid:vec3u){
+  let donor=acceptedTemplateCellInvocation(gid.x);if(donor==INVALID||gvFailed()){return;}
+  let capacity=gvDonorCapacity(donor);if(capacity<=0.0){return;}
+  // Physical open-boundary outflow is a donor-only sink edge. Its raw swept
+  // measure participates in every donor normalization and is accounted after
+  // the final round; it is never invented as a receiver cell.
+  let faces=gvCellFaceRange(donor);
+  for(var adjacency=faces.x;adjacency<faces.y;adjacency+=1u){
+    let entry=gvCellFace(adjacency);let face=entry>>1u;let cells=gvCells(face);
+    let isNegative=(entry&1u)!=0u;let other=gvOtherCell(face,isNegative);
+    if(other!=INVALID){continue;}
+    let signedSweep=gvRate(face)*p.frame.x;
+    let outward=select(-signedSweep,signedSweep,isNegative);
+    if(outward>0.0){_=gvAppendCouplingEdge(INVALID,donor,outward);}
+  }
+  let head=bitcast<u32>(atomicLoad(&conditioning[GV_DONOR_HEADS+donor]));
+  if(head!=INVALID){return;}
+  if(gvReceiverCapacity(donor)>0.0){
+    if(gvAppendCouplingEdge(donor,donor,cellVolume(donor))){
+      atomicAdd(&conditioning[GV_WHOLE_FRAME_CONTROL+3u],1);
+    }
+  }else{
+    // A closing donor receives a local conservative evacuation stencil before
+    // failure. Face area is a geometric raw weight; final donor normalization
+    // exports the donor's exact extensive amount among open neighbours.
+    for(var adjacency=faces.x;adjacency<faces.y;adjacency+=1u){
+      let entry=gvCellFace(adjacency);let face=entry>>1u;
+      let receiver=gvOtherCell(face,(entry&1u)!=0u);
+      if(receiver!=INVALID&&gvReceiverCapacity(receiver)>0.0){
+        _=gvAppendCouplingEdge(receiver,donor,gvArea(face));
+      }
+    }
+    let evacuation=bitcast<u32>(atomicLoad(&conditioning[GV_DONOR_HEADS+donor]));
+    if(evacuation==INVALID){
+      atomicAdd(&conditioning[GV_WHOLE_FRAME_CONTROL+4u],1);
+      gvFault(15u,donor,state[GV_CURRENT+donor],capacity,0.0);
     }
   }
-  state[GV_FLUX_ROUNDOFF+face]=0.0;
-  state[GV_FLUX+4u*face]=low;state[GV_FLUX+4u*face+1u]=high;
-  state[GV_FLUX+4u*face+2u]=low;state[GV_FLUX+4u*face+3u]=sweep;
+}
+
+fn gvNormalizeReceiver(receiver:u32,input:u32,output:u32){
+  var edge=bitcast<u32>(atomicLoad(&conditioning[GV_RECEIVER_HEADS+receiver]));
+  var sum=0.0;var count=0u;
+  for(;edge!=INVALID&&count<=GV_EDGE_CAPACITY;count+=1u){sum+=state[input+edge];edge=gvEdgeReceiverNext(edge);}
+  if(count>GV_EDGE_CAPACITY){gvFault(16u,receiver,sum,0.0,0.0);return;}
+  let marginalTarget=gvReceiverCapacity(receiver);
+  let factor=select(0.0,marginalTarget/sum,sum>0.0&&marginalTarget>0.0);
+  edge=bitcast<u32>(atomicLoad(&conditioning[GV_RECEIVER_HEADS+receiver]));count=0u;
+  for(;edge!=INVALID&&count<=GV_EDGE_CAPACITY;count+=1u){state[output+edge]=state[input+edge]*factor;edge=gvEdgeReceiverNext(edge);}
+  let residual=select(abs(sum),abs(sum-marginalTarget)/marginalTarget,marginalTarget>0.0);
+  atomicMax(&conditioning[GV_WHOLE_FRAME_CONTROL+6u],bitcast<i32>(residual));
+}
+fn gvNormalizeDonor(donor:u32,input:u32,output:u32){
+  var edge=bitcast<u32>(atomicLoad(&conditioning[GV_DONOR_HEADS+donor]));
+  var sum=0.0;var count=0u;
+  for(;edge!=INVALID&&count<=GV_EDGE_CAPACITY;count+=1u){
+    // Sink edges have no receiver pass, so carry their current A weight into
+    // B before each column normalization.
+    if(input==GV_EDGE_B&&gvEdgeReceiver(edge)==INVALID){state[GV_EDGE_B+edge]=state[GV_EDGE_A+edge];}
+    sum+=state[input+edge];edge=gvEdgeDonorNext(edge);
+  }
+  if(count>GV_EDGE_CAPACITY){gvFault(16u,donor,sum,1.0,0.0);return;}
+  let marginalTarget=gvDonorCapacity(donor);
+  if(marginalTarget>0.0&&sum<=0.0){atomicAdd(&conditioning[GV_WHOLE_FRAME_CONTROL+3u],1);gvFault(15u,donor,sum,marginalTarget,1.0);return;}
+  let factor=select(0.0,marginalTarget/sum,sum>0.0&&marginalTarget>0.0);
+  edge=bitcast<u32>(atomicLoad(&conditioning[GV_DONOR_HEADS+donor]));count=0u;
+  for(;edge!=INVALID&&count<=GV_EDGE_CAPACITY;count+=1u){state[output+edge]=state[input+edge]*factor;edge=gvEdgeDonorNext(edge);}
+  let residual=select(abs(sum),abs(sum-marginalTarget)/marginalTarget,marginalTarget>0.0);
+  atomicMax(&conditioning[GV_WHOLE_FRAME_CONTROL+7u],bitcast<i32>(residual));
 }
 
 @compute @workgroup_size(64)
-fn computeGeometricVolumeLimits(@builtin(global_invocation_id)gid:vec3u){
-  if(!gvMicroCommitReady()){return;}
-  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
-  var lowDelta=0.0;var roundingDelta=0.0;var budget=vec2f(0.0);var bulkDelta=0.0;
-  let faces=gvCellFaceRange(cell);
-  for(var adjacency=faces.x;adjacency<faces.y;adjacency+=1u){
-    let entry=gvCellFace(adjacency);let face=entry>>1u;let isNegative=(entry&1u)!=0u;
-    let negative=isNegative;let flux=gvFaceState(face);
-    lowDelta+=geometricFctCellDelta(flux.low,negative);
-    roundingDelta+=geometricFctCellDelta(state[GV_FLUX_ROUNDOFF+face],negative);
-    bulkDelta+=geometricFctCellDelta(state[GV_FLUX+4u*face+3u],negative);
-    let anti=(flux.high-flux.low)-state[GV_FLUX_ROUNDOFF+face];
-    let antiDelta=geometricFctCellDelta(anti,negative);
-    budget+=vec2f(max(antiDelta,0.0),max(-antiDelta,0.0));
-  }
-  let capacity=gvReceiverCapacity(cell);
-  var low=(gvMicroStartingVolume(cell)+lowDelta)+roundingDelta;
-  if(geometricSolidMotionActive()&&capacity==0.0){low=glClosingOrderedAmount(cell,false);}
-  // Roundoff tolerance is an audit interval, never additional transport
-  // headroom. Evaluate budgets at the physical interval so a low state just
-  // outside it cannot receive an outward antidiffusive correction. This
-  // observation does not alter low, the shared flux, or volume authority.
-  let budgetVolume=clamp(low,0.0,max(0.0,capacity));
-  let limits=geometricFctCellLimits(budgetVolume,capacity,budget.x,budget.y);
-  if(!gvVolumeValid(low,capacity)||limits.valid==0u){
-    // First failing low state distinguishes a stale outer membership from a
-    // cell that becomes wet inside a frozen-velocity microstep sequence.
-    if(atomicAdd(&conditioning[GV_CONTROL+31u],1)==0){
-      gvStore(22u,bitcast<u32>(state[GV_CURRENT+cell]));
-      gvStore(23u,bitcast<u32>(state[sourceDensity()+cell]*cellVolume(cell)));
-      gvStore(24u,select(0u,1u,pressureAcceptedCellMember(cell)));
-      gvStore(25u,gvLoad(3u));gvStore(26u,gvLoad(2u));
+fn normalizeWholeFrameVolumeRowsAtoB(@builtin(global_invocation_id)gid:vec3u){
+  let cell=acceptedTemplateCellInvocation(gid.x);if(cell!=INVALID&&!gvFailed()){gvNormalizeReceiver(cell,GV_EDGE_A,GV_EDGE_B);}
+}
+@compute @workgroup_size(64)
+fn normalizeWholeFrameVolumeDonorsBtoA(@builtin(global_invocation_id)gid:vec3u){
+  let cell=acceptedTemplateCellInvocation(gid.x);if(cell!=INVALID&&!gvFailed()){gvNormalizeDonor(cell,GV_EDGE_B,GV_EDGE_A);}
+}
+
+@compute @workgroup_size(64)
+fn auditWholeFrameVolumeMarginals(@builtin(global_invocation_id)gid:vec3u){
+  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID||gvFailed()){return;}
+  var edge=bitcast<u32>(atomicLoad(&conditioning[GV_RECEIVER_HEADS+cell]));
+  var rowSum=0.0;var count=0u;
+  for(;edge!=INVALID&&count<=GV_EDGE_CAPACITY;count+=1u){rowSum+=state[GV_EDGE_A+edge];edge=gvEdgeReceiverNext(edge);}
+  let rowTarget=gvReceiverCapacity(cell);
+  let rowResidual=select(abs(rowSum),abs(rowSum-rowTarget)/rowTarget,rowTarget>0.0);
+  atomicMax(&conditioning[GV_WHOLE_FRAME_CONTROL+10u],bitcast<i32>(rowResidual));
+  edge=bitcast<u32>(atomicLoad(&conditioning[GV_DONOR_HEADS+cell]));
+  var donorSum=0.0;count=0u;
+  for(;edge!=INVALID&&count<=GV_EDGE_CAPACITY;count+=1u){donorSum+=state[GV_EDGE_A+edge];edge=gvEdgeDonorNext(edge);}
+  let donorTarget=gvDonorCapacity(cell);
+  let donorResidual=select(abs(donorSum),abs(donorSum-donorTarget)/donorTarget,donorTarget>0.0);
+  atomicMax(&conditioning[GV_WHOLE_FRAME_CONTROL+11u],bitcast<i32>(donorResidual));
+}
+
+@compute @workgroup_size(64)
+fn gatherWholeFrameVolumeOutflow(@builtin(global_invocation_id)gid:vec3u){
+  let donor=acceptedTemplateCellInvocation(gid.x);if(donor==INVALID||gvFailed()){return;}
+  let capacity=gvDonorCapacity(donor);if(capacity<=0.0){return;}
+  var edge=bitcast<u32>(atomicLoad(&conditioning[GV_DONOR_HEADS+donor]));
+  var outflow=0.0;var count=0u;
+  for(;edge!=INVALID&&count<=GV_EDGE_CAPACITY;count+=1u){
+    if(gvEdgeReceiver(edge)==INVALID){
+      outflow+=state[GV_CURRENT+donor]*(state[GV_EDGE_A+edge]/capacity);
     }
-    gvFault(5u,cell,low,capacity,bulkDelta);return;
+    edge=gvEdgeDonorNext(edge);
   }
-  gvRecordBoundError(low,capacity);
-  state[GV_LOW+cell]=low;state[GV_PLUS+cell]=limits.increase;
-  if(!geometricSolidMotionActive()||capacity!=0.0){state[GV_MINUS+cell]=limits.decrease;}
+  gvRecordOutflow(outflow);
 }
 
 @compute @workgroup_size(64)
-fn limitGeometricVolumeFluxes(@builtin(global_invocation_id)gid:vec3u){
-  let face=gid.x;if(!gvMicroCommitReady()||face>=gvLoad(0u)){return;}
-  let cells=gvCells(face);
-  let flux=gvFaceState(face);let rounding=state[GV_FLUX_ROUNDOFF+face];
-  let anti=(flux.high-flux.low)-rounding;
-  let result=geometricFctLimitFace(GeometricFCTFaceFlux(0.0,anti),
-    gvEndpointLimits(cells.x),gvEndpointLimits(cells.y));
-  if(result.valid==0u){gvFault(6u,face,result.flux,0.0,result.factor);return;}
-  var factor=result.factor;
-  // Exact closure retains the SAME two-component representation. Even zero
-  // anti must not repack the pair and change its cancellation in the gather.
-  if(cells.x!=INVALID&&gvReceiverCapacity(cells.x)==0.0){factor=0.0;}
-  if(cells.y!=INVALID&&gvReceiverCapacity(cells.y)==0.0){factor=0.0;}
-  let main=flux.low+factor*(flux.high-flux.low);
-  let residual=(1.0-factor)*rounding;
-  state[GV_FLUX+4u*face+2u]=main;state[GV_FLUX_ROUNDOFF+face]=residual;
-  // Outflow remains a fixed16 telemetry receipt, not transport authority.
-  if(cells.y==INVALID){gvRecordOutflowFace(face,main+residual);}
-  else if(cells.x==INVALID){gvRecordOutflowFace(face,-main-residual);}
+fn gatherWholeFrameVolume(@builtin(global_invocation_id)gid:vec3u){
+  let receiver=acceptedTemplateCellInvocation(gid.x);if(receiver==INVALID||gvFailed()){return;}
+  var edge=bitcast<u32>(atomicLoad(&conditioning[GV_RECEIVER_HEADS+receiver]));
+  var amount=0.0;var count=0u;
+  for(;edge!=INVALID&&count<=GV_EDGE_CAPACITY;count+=1u){
+    let donor=gvEdgeDonor(edge);let capacity=gvDonorCapacity(donor);
+    if(capacity>0.0){amount+=state[GV_CURRENT+donor]*(state[GV_EDGE_A+edge]/capacity);}
+    edge=gvEdgeReceiverNext(edge);
+  }
+  if(count>GV_EDGE_CAPACITY){gvFault(16u,receiver,amount,2.0,0.0);return;}
+  state[GV_LOW+receiver]=amount;
 }
 
 @compute @workgroup_size(64)
-fn validateGeometricVolumeCells(@builtin(global_invocation_id)gid:vec3u){
-  if(!gvMicroCommitReady()){return;}
-  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
-  var delta=0.0;var roundingDelta=0.0;
-  let faces=gvCellFaceRange(cell);
-  for(var adjacency=faces.x;adjacency<faces.y;adjacency+=1u){
-    let entry=gvCellFace(adjacency);let face=entry>>1u;let isNegative=(entry&1u)!=0u;
-    delta+=geometricFctCellDelta(state[GV_FLUX+4u*face+2u],isNegative);
-    roundingDelta+=geometricFctCellDelta(state[GV_FLUX_ROUNDOFF+face],isNegative);
+fn validateWholeFrameVolume(@builtin(global_invocation_id)gid:vec3u){
+  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID||gvFailed()){return;}
+  let volume=state[GV_LOW+cell];let capacity=gvReceiverCapacity(cell);
+  if(!gvVolumeValid(volume,capacity)){gvFault(17u,cell,volume,capacity,0.0);return;}
+  if(capacity==0.0&&volume>gvRoundoff(cellVolume(cell))){gvFault(18u,cell,volume,capacity,0.0);return;}
+  let excess=max(0.0,volume-capacity);if(excess>gvRoundoff(capacity)){
+    atomicAdd(&conditioning[GV_WHOLE_FRAME_CONTROL+8u],1);
+    atomicMax(&conditioning[GV_WHOLE_FRAME_CONTROL+9u],bitcast<i32>(excess));
   }
-  let capacity=gvReceiverCapacity(cell);
-  var volume=(gvMicroStartingVolume(cell)+delta)+roundingDelta;
-  if(geometricSolidMotionActive()&&capacity==0.0){volume=glClosingOrderedAmount(cell,true);}
-  if(volume!=0.0){gvAuditMaterialCoverage(cell);if(gvFailed()){return;}}
   gvRecordBoundError(volume,capacity);
-  if(!gvVolumeValid(volume,capacity)){gvFault(7u,cell,volume,capacity,delta);return;}
-  // GV_LOW is dead after the face-limit dispatch. Stage the complete next
-  // authority here; a separate dispatch commits only if every cell validates.
-  state[GV_LOW+cell]=volume;
 }
 
 @compute @workgroup_size(64)
-fn commitGeometricVolumeCells(@builtin(global_invocation_id)gid:vec3u){
-  if(!gvMicroCommitReady()){return;}
-  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
-  let volume=state[GV_LOW+cell];
-  let rho=volume/cellVolume(cell);let changed=bitcast<u32>(rho)!=bitcast<u32>(state[destinationDensity()+cell]);
+fn commitWholeFrameVolume(@builtin(global_invocation_id)gid:vec3u){
+  if(gvFailed()){return;}let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
+  let volume=max(0.0,state[GV_LOW+cell]);let rho=volume/cellVolume(cell);
+  let changed=bitcast<u32>(rho)!=bitcast<u32>(state[destinationDensity()+cell]);
   state[GV_CURRENT+cell]=volume;state[destinationDensity()+cell]=rho;
-  state[destinationGamma()+cell]=1.0;
-  if(changed){incrementalActivityMarkCellClosure(cell);}
+  state[destinationGamma()+cell]=1.0;if(changed){incrementalActivityMarkCellClosure(cell);}
 }
 
 @compute @workgroup_size(1)
-fn advanceGeometricVolumeSubstep(){
-  if(gvMicroCommitReady()){
-    geometricSourceCommitMicrostep(bitcast<f32>(gvLoad(6u)));
-    let prior=gvLoad(16u);let pending=gvLoad(20u);
-    let carry=select(0u,1u,prior>0xffffffffu-pending);
-    gvStore(16u,prior+pending);gvStore(17u,gvLoad(17u)+gvLoad(21u)+carry);
-    gvStore(3u,gvLoad(3u)+1u);
-    geometricSolidSetTransportFraction(f32(gvLoad(3u))/f32(max(1u,gvLoad(2u))));
-    if(gvLoad(3u)==gvLoad(2u)){geometricSolidCommitFinal();}
-    glStore(23u,select(3u,0u,gvLoad(3u)<gvLoad(2u)));
-    glStore(3u,0u);
-  }
-  gvStore(20u,0u);gvStore(21u,0u);
-  gvPublishIndirect();glPublishIndirect();
+fn finishWholeFrameVolumeTransport(){
+  if(gvFailed()){return;}
+  let prior=gvLoad(16u);let pending=gvLoad(20u);
+  let carry=select(0u,1u,prior>0xffffffffu-pending);
+  gvStore(16u,prior+pending);gvStore(17u,gvLoad(17u)+gvLoad(21u)+carry);
+  geometricSourceCommitMicrostep(p.frame.x);geometricSourceFinishStagedCompensation();
+  geometricSolidSetTransportFraction(1.0);geometricSolidCommitFinal();
+  gvStore(3u,1u);
 }
-@compute @workgroup_size(1)
-fn finishGeometricVolumeTransport(){
-  geometricSourceFinishStagedCompensation();
-  if(!gvFailed()&&gvLoad(3u)!=gvLoad(2u)){
-    gvFault(12u,gvLoad(3u),f32(gvLoad(3u)),f32(gvLoad(2u)),f32(glLoad(5u)));
+
+// Eight bounded leaf-local midpoint samples are the first production H(phi)
+// approximation. Phi stays immutable. The explicit missing-metric receipt
+// prevents silently sharpening against a saturated phase tag.
+fn gvPhiTargetVolume(cell:u32)->vec2f{
+  let widths=cellWidths(cell);let centre=cellCenter(cell);
+  var samples:array<f32,8>;var fill=0.0;var minimumAbsPhi=3.402823466e38;
+  var centrePhi=0.0;var maximumAbsPhi=0.0;
+  for(var corner=0u;corner<8u;corner+=1u){
+    let signs=vec3f(select(-1.0,1.0,(corner&1u)!=0u),
+      select(-1.0,1.0,(corner&2u)!=0u),select(-1.0,1.0,(corner&4u)!=0u));
+    let sample=lsvSampleAt(centre+0.25*widths*signs);
+    if(!sample.metric){atomicAdd(&conditioning[GV_WHOLE_FRAME_CONTROL+14u],1);return vec2f(0.0,0.0);}
+    samples[corner]=sample.phi;centrePhi+=0.125*sample.phi;
+    maximumAbsPhi=max(maximumAbsPhi,abs(sample.phi));
+    fill+=select(select(0.0,1.0,sample.phi<0.0),0.5,sample.phi==0.0);
+    minimumAbsPhi=min(minimumAbsPhi,abs(sample.phi));
   }
+  if(minimumAbsPhi>2.0*cellMinimumWidth(cell)){return vec2f(0.0,0.0);}
+  var gradient=vec3f(0.0);
+  for(var corner=0u;corner<8u;corner+=1u){
+    let signs=vec3f(select(-1.0,1.0,(corner&1u)!=0u),
+      select(-1.0,1.0,(corner&2u)!=0u),select(-1.0,1.0,(corner&4u)!=0u));
+    gradient+=signs*samples[corner]/(2.0*widths);
+  }
+  var affineResidual=0.0;
+  for(var corner=0u;corner<8u;corner+=1u){
+    let signs=vec3f(select(-1.0,1.0,(corner&1u)!=0u),
+      select(-1.0,1.0,(corner&2u)!=0u),select(-1.0,1.0,(corner&4u)!=0u));
+    let predicted=centrePhi+dot(gradient,0.25*widths*signs);
+    affineResidual=max(affineResidual,abs(samples[corner]-predicted));
+  }
+  let sampledFraction=fill/8.0;
+  let affine=affineResidual<=1e-4*(1.0+maximumAbsPhi);
+  let integrated=select(sampledFraction,
+    geometricPlaneBoxFraction(gradient,-centrePhi,widths),affine);
+  let capacity=gvReceiverCapacity(cell);
+  atomicMax(&conditioning[GV_WHOLE_FRAME_CONTROL+16u],
+    bitcast<i32>(capacity*abs(integrated-sampledFraction)));
+  atomicAdd(&conditioning[GV_WHOLE_FRAME_CONTROL+17u],8);
+  return vec2f(capacity*integrated,1.0);
+}
+
+@compute @workgroup_size(64)
+fn prepareWholeFrameVolumeSharpening(@builtin(global_invocation_id)gid:vec3u){
+  let cell=acceptedTemplateCellInvocation(gid.x);
+  if(cell==INVALID||gvFailed()||!surfaceSharpeningEnabled()
+      ||surfaceSharpeningStrength()<=0.0){return;}
+  let volume=state[GV_CURRENT+cell];let capacity=gvReceiverCapacity(cell);
+  // Open capacity alone does not locate the solid/liquid intersection inside
+  // a cut cell. Preserve transported V until that spatial measure is certified.
+  if(capacity<cellVolume(cell)-gvRoundoff(cellVolume(cell))){
+    state[GV_LOW+cell]=volume;state[GV_PLUS+cell]=0.0;state[GV_MINUS+cell]=0.0;
+    atomicAdd(&conditioning[GV_WHOLE_FRAME_CONTROL+19u],1);return;
+  }
+  let phiTarget=gvPhiTargetVolume(cell);
+  let strength=clamp(surfaceSharpeningStrength(),0.0,1.0);
+  state[GV_LOW+cell]=volume;
+  state[GV_PLUS+cell]=strength*select(0.0,max(0.0,volume-phiTarget.x),phiTarget.y>0.5);
+  state[GV_MINUS+cell]=strength*select(0.0,
+    max(0.0,min(phiTarget.x,capacity)-volume),phiTarget.y>0.5);
+}
+
+fn gvSharpeningFaceCentre(face:u32,cells:vec2u)->vec3f{
+  let axis=rowAxis(gvRow(face));
+  let negativeMinimum=cellCenter(cells.x)-0.5*cellWidths(cells.x);
+  let negativeMaximum=negativeMinimum+cellWidths(cells.x);
+  let positiveMinimum=cellCenter(cells.y)-0.5*cellWidths(cells.y);
+  let positiveMaximum=positiveMinimum+cellWidths(cells.y);
+  var centre=0.5*(max(negativeMinimum,positiveMinimum)
+    +min(negativeMaximum,positiveMaximum));
+  centre[axis]=negativeMaximum[axis];return centre;
+}
+
+@compute @workgroup_size(64)
+fn proposeWholeFrameVolumeSharpening(@builtin(global_invocation_id)gid:vec3u){
+  let row=acceptedTemplateRowInvocation(gid.x);
+  if(row==INVALID||gvFailed()||!surfaceSharpeningEnabled()
+      ||surfaceSharpeningStrength()<=0.0||!gvAcceptedPhysicalRow(row)){return;}
+  let faces=cnxPhysicalFaceRangeUnchecked(row);
+  for(var face=faces.x;face<faces.y;face+=1u){let cells=gvCells(face);var transfer=0.0;
+    if(cells.y!=INVALID){
+      if(cells.x==INVALID){state[GV_FLUX+4u*face]=0.0;continue;}
+      // A fractional aperture does not identify which part of this physical
+      // rectangle is open, so it is subject to the same safe skip as cut cells.
+      if(gvArea(face)<=1e-8||rowOpenFraction(row)<1.0-9.5367431640625e-7){
+        atomicAdd(&conditioning[GV_WHOLE_FRAME_CONTROL+20u],1);
+        state[GV_FLUX+4u*face]=0.0;continue;
+      }
+      let faceSample=lsvSampleAt(gvSharpeningFaceCentre(face,cells));
+      let faceBand=2.0*min(cellMinimumWidth(cells.x),cellMinimumWidth(cells.y));
+      // A broad |phi| band alone can bridge two drops separated by a thin air
+      // sheet. The metric midpoint must provide an actual liquid path across
+      // this physical subface; ambiguous oblique crossings are safely skipped.
+      let faceRoundoff=9.5367431640625e-7*(1.0+faceBand);
+      if(!faceSample.metric||faceSample.phi>faceRoundoff){
+        atomicAdd(&conditioning[GV_WHOLE_FRAME_CONTROL+21u],1);
+        state[GV_FLUX+4u*face]=0.0;continue;
+      }
+      let negativeDegree=max(1u,gvCellFaceRange(cells.x).y-gvCellFaceRange(cells.x).x);
+      let positiveDegree=max(1u,gvCellFaceRange(cells.y).y-gvCellFaceRange(cells.y).x);
+      let negativeToPositive=min(state[GV_PLUS+cells.x]/f32(negativeDegree),
+        state[GV_MINUS+cells.y]/f32(positiveDegree));
+      let positiveToNegative=min(state[GV_PLUS+cells.y]/f32(positiveDegree),
+        state[GV_MINUS+cells.x]/f32(negativeDegree));
+      transfer=negativeToPositive-positiveToNegative;
+    }
+    state[GV_FLUX+4u*face]=transfer;
+  }
+}
+
+@compute @workgroup_size(64)
+fn gatherWholeFrameVolumeSharpening(@builtin(global_invocation_id)gid:vec3u){
+  let cell=acceptedTemplateCellInvocation(gid.x);
+  if(cell==INVALID||gvFailed()||!surfaceSharpeningEnabled()
+      ||surfaceSharpeningStrength()<=0.0){return;}
+  var delta=0.0;let faces=gvCellFaceRange(cell);
+  for(var adjacency=faces.x;adjacency<faces.y;adjacency+=1u){
+    let entry=gvCellFace(adjacency);let flux=state[GV_FLUX+4u*(entry>>1u)];
+    delta+=select(flux,-flux,(entry&1u)!=0u);
+  }
+  let next=state[GV_CURRENT+cell]+delta;let capacity=gvReceiverCapacity(cell);
+  let priorExcess=max(0.0,state[GV_CURRENT+cell]-capacity);
+  if(next < -gvRoundoff(capacity)||next>capacity+priorExcess+gvRoundoff(capacity)){
+    gvFault(20u,cell,next,capacity,delta);return;
+  }
+  state[GV_LOW+cell]=max(0.0,next);
+  if(delta!=0.0){atomicAdd(&conditioning[GV_WHOLE_FRAME_CONTROL+15u],1);}
+}
+
+@compute @workgroup_size(64)
+fn commitWholeFrameVolumeSharpening(@builtin(global_invocation_id)gid:vec3u){
+  if(gvFailed()||!surfaceSharpeningEnabled()||surfaceSharpeningStrength()<=0.0){return;}
+  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
+  let volume=state[GV_LOW+cell];let rho=volume/cellVolume(cell);
+  let changed=bitcast<u32>(rho)!=bitcast<u32>(state[destinationDensity()+cell]);
+  state[GV_CURRENT+cell]=volume;state[destinationDensity()+cell]=rho;
+  state[destinationGamma()+cell]=1.0;if(changed){incrementalActivityMarkCellClosure(cell);}
 }
 `;
 }

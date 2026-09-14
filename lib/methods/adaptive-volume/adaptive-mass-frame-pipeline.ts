@@ -35,8 +35,8 @@ import type { GPUEulerianInfo } from "../../core/webgpu-eulerian";
 import {
   SPARSE_CM12_STAGE_BANDS,
   SPARSE_CM12_STAGES,
-  sparseCM12Stage,
   sparseCM12SubstagePhase,
+  type SparseCM12AnyStageDeclaration,
   type SparseCM12StageBand,
 } from "./sparse-cm12-stages";
 import {
@@ -50,6 +50,16 @@ export { adaptiveMassPressureTopologyChip } from "./sparse-cm12-stages";
 
 /** The capture cadence matches the uniform reference's observatory lane. */
 export const ADAPTIVE_MASS_FRAME_TRACE_CADENCE_MS = 100;
+
+/** Active declarations in the resident's execution order. */
+export const ADAPTIVE_MASS_RESIDENT_STAGE_REGISTRY = Object.freeze(
+  Object.fromEntries(SPARSE_CM12_RESIDENT_STAGES.map(
+    (stage) => [stage, SPARSE_CM12_STAGES[stage]],
+  )) as Readonly<Record<
+    (typeof SPARSE_CM12_RESIDENT_STAGES)[number],
+    SparseCM12AnyStageDeclaration
+  >>,
+);
 
 /**
  * The CPU lane's brackets around the stage chain: planning before the first
@@ -78,7 +88,7 @@ export const ADAPTIVE_MASS_RESIDENT_STAGE_PHASE: Readonly<Record<
   SparseCM12ResidentStageId,
   GPUTimestampPhase
 >> = Object.freeze(Object.fromEntries(SPARSE_CM12_RESIDENT_STAGES.map(
-  (stage) => [stage, SPARSE_CM12_STAGES[stage].phase],
+  (stage) => [stage, ADAPTIVE_MASS_RESIDENT_STAGE_REGISTRY[stage].phase],
 )) as Record<SparseCM12ResidentStageId, GPUTimestampPhase>);
 
 export interface AdaptiveMassGPUWorkChunk {
@@ -113,7 +123,7 @@ export const ADAPTIVE_MASS_GPU_WORK_CHUNKS: readonly AdaptiveMassGPUWorkChunk[] 
         id: substages.length > 0 ? `${stage}/remainder` : stage,
         residentStage: stage,
         rollupStage: stage,
-        phase: SPARSE_CM12_STAGES[stage].phase,
+        phase: ADAPTIVE_MASS_RESIDENT_STAGE_REGISTRY[stage].phase,
         kind: "stage",
       },
     ];
@@ -282,7 +292,7 @@ const alwaysOn = () => "on" as const;
  */
 const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] =
   SPARSE_CM12_RESIDENT_STAGES.map((id): FluidPipelineStage => {
-    const entry = sparseCM12Stage(id);
+    const entry = ADAPTIVE_MASS_RESIDENT_STAGE_REGISTRY[id];
     const substages: readonly string[] = SPARSE_CM12_RESIDENT_STAGE_SUBSTAGES[id];
     const timedEntryPoints = entry.timedWork?.groups.reduce(
       (count, group) => count + group.entryPoints.length, 0) ?? 0;

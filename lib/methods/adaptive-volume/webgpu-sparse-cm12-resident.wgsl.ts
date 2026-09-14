@@ -3,6 +3,9 @@ import {
   type GeometricSolidMotionLayout,
 } from "./geometric-solid-motion.wgsl";
 import type { SparseCM12CompiledTopologyLayout } from "./sparse-cm12-compiled-topology";
+import type { LevelSetVolumeLayout } from "./levelset-volume-layout";
+import { createLevelSetVolumeWGSL } from "./levelset-volume-core.wgsl";
+import { createLevelSetVolumeRedistanceWGSL } from "./levelset-volume-redistance.wgsl";
 import {
   createSparseCM12CompiledTopologyTransportAccessWGSL,
   createSparseCM12CompiledTopologyWGSL,
@@ -16,7 +19,6 @@ import {
   type SparseGeometricVolumeLayout,
 } from "./resident-volume.wgsl";
 import { geometricInterfaceWGSL } from "./geometric-interface.wgsl";
-import { geometricInterfaceResidentWGSL } from "./geometric-interface-resident.wgsl";
 import {
   PRESSURE_JOURNAL_CONSTANTS_WGSL,
   PRESSURE_JOURNAL_ACCESS_WGSL,
@@ -416,13 +418,12 @@ export function createWebgpuSparseCM12ResidentWGSL(
   implicitSharpeningOwnerArithmeticForQA = false,
   alternatingCapacityRepairReceiptsForQA = false,
   gatherCapacityRepairForQA = false,
-  geometricInterfaceBaseFloats?: number,
-  geometricInterfaceSupportBaseFloats?: number,
-  geometricInterfaceRdfBaseFloats?: number,
   geometricVolumeLayout?: SparseGeometricVolumeLayout,
   sourceLayout?: GeometricSourceLayout,
   movingSolidLayout?: GeometricSolidMotionLayout,
   compiledTopologyLayout?: SparseCM12CompiledTopologyLayout,
+  levelSetVolumeLayout?: LevelSetVolumeLayout,
+  initialLevelSetGeometryWGSL = "",
 ): string {
   if (
     presentationPageResolution > brickFineResolution ||
@@ -478,8 +479,6 @@ export function createWebgpuSparseCM12ResidentWGSL(
   // One topology-vertex scalar for each corner of a P8 page's 8^3 nodal
   // samples. FPP prepares these 9^3 values cooperatively once, then every
   // sample reuses eight of them for the s+0.5 trilinear evaluation.
-  const presentationRdfVertexAxis = presentationPageResolution + 1;
-  const presentationRdfVertexCapacity = presentationRdfVertexAxis ** 3;
   const surfaceProofLatticeAxis = presentationPageResolution + 2;
   const surfaceProofLatticeCapacity = surfaceProofLatticeAxis ** 3;
   const surfaceProofDensityAxis = presentationPageResolution / 2 + 6;
@@ -552,6 +551,7 @@ fn incrementalActivityReplaceCensus(brick:u32,score:u32,reasons:u32){
           velocityExtensionCompactAcceptedPacketsForQA,
         cacheAcceptedPackets: true,
         compiledTopology: compiledTopologyLayout !== undefined,
+        liquidCellPredicate: (cell) => `lsvCellLiquid(${cell})`,
       })
     : /* wgsl */ `
 fn cm12ExtendedPacketMask(_packet:u32)->vec2u{return vec2u(0u);}
@@ -1192,6 +1192,67 @@ ${createSparseCM12IboTRASupplementWGSL({
   cm12IBOStore(IBO1_BASE+3u,atomicLoad(&topologyArena[base+1u]));
 `
     : "";
+  const levelSetVolumeEntries = levelSetVolumeLayout
+    ? initialLevelSetGeometryWGSL + /* wgsl */ `
+fn lsvAcceptedVelocitySample(positionFine:vec3f)->vec4f{
+  let continued=cm12ClampToResidentWorld(positionFine,vec3f(0.0));
+  let owner=lsvSlotOwner(lsvAcceptedSlot(),continued);if(owner.x==LSV_INVALID){return vec4f(0.0,0.0,0.0,1.0);}
+  let spans=cellWidths(owner.y);
+  return vec4f(sampleEffectiveTransportVelocityAtSpans(continued,spans),1.0);}
+fn lsvClipCharacteristic(origin:vec3f,candidate:vec3f)->vec3f{
+  let bounded=cm12ClampToResidentWorld(candidate,vec3f(0.0));
+  if(!hasSolidBoundaries()||!acceptedPointInsideSolid(origin)){
+    return clipBoundarySegment(origin,bounded);}
+  // A shared vertex on a closed voxel face belongs to the fluid trace, even
+  // when floor-based solid lookup chooses the solid side of that face. Test
+  // the chord infinitesimally inside its accepted fluid cell, then restore
+  // its original coordinates. This preserves tangential wall advection.
+  let owner=lsvSlotOwner(lsvAcceptedSlot(),origin);
+  if(owner.x==LSV_INVALID){return origin;}
+  let epsilon=max(1e-4,8.0*1.1920928955078125e-7
+    *max(1.0,max(abs(origin.x),max(abs(origin.y),abs(origin.z)))));
+  let offset=clamp(cellCenter(owner.y)-origin,vec3f(-epsilon),vec3f(epsilon));
+  if(acceptedPointInsideSolid(origin+offset)){return origin;}
+  return clipBoundarySegment(origin+offset,bounded+offset)-offset;
+}
+` + createLevelSetVolumeWGSL({
+      layout: levelSetVolumeLayout,
+      acceptedGenerationExpression: "cnxSourceGeneration()",
+      buildGenerationExpression: "cnxSourceGeneration()",
+      buildSlotExpression: "select(0u,1u-lsvAcceptedSlot(),lsvAcceptedSlot()<2u)",
+      buildCellCountExpression: "cnxAcceptedCellCount()",
+      buildCellAtOrdinal: ordinal => `cnxAcceptedCellInvocationUnchecked(${ordinal})`,
+      acceptedCellOrdinal: cell => `cnxCellOrdinalUnchecked(${cell})`,
+      acceptedOwnerCellAt: lattice => `ownerCellAt(${lattice})`,
+      buildOwnerCellAt: lattice => `compactOwnerCellAt(${lattice}).x`,
+      authoredSample: position => `vec2f(lsvAuthoredPhi(${position}),3.0)`,
+      velocitySample: position => `lsvAcceptedVelocitySample(${position})`,
+      boundCharacteristic: (origin, candidate) =>
+        `lsvClipCharacteristic(${origin},${candidate})`,
+      liveUnionSample: position =>
+        `levelSetSourceUnionSampleAt(${position})`,
+      dtExpression: "p.frame.x",
+      constraintWidthExpression: "0.0",
+      publishFailure: (fault, owner) =>
+        `cm12RecordFailure(7u,${owner},vec4u(${fault},0u,0u,0u));`,
+    }) + createLevelSetVolumeRedistanceWGSL({
+      layout: levelSetVolumeLayout,
+      bandWidthExpression: "4.0",
+    })
+    : /* wgsl */ `
+// Standalone shader fixtures without an LSV arena cannot impose its budget.
+const LSV_CELL_CAPACITY:u32=0xffffffffu;
+struct LsvPhiSample{phi:f32,valid:bool,metric:bool,support:u32}
+fn lsvInvalidPhi()->f32{var bits=0x7fc00000u;return bitcast<f32>(bits);}
+fn lsvSampleAt(_positionFine:vec3f)->LsvPhiSample{return LsvPhiSample(lsvInvalidPhi(),false,false,0u);}
+fn lsvPhiAt(positionFine:vec3f)->f32{return lsvSampleAt(positionFine).phi;}
+fn lsvCellPhi(cell:u32)->f32{return lsvPhiAt(cellCenter(cell));}
+fn lsvCellLiquid(_cell:u32)->bool{return false;}
+fn lsvPhiValidAt(_positionFine:vec3f)->bool{return false;}
+fn lsvPhiMetricAt(_positionFine:vec3f)->bool{return false;}
+fn lsvPhiSupportAt(_positionFine:vec3f)->u32{return 0u;}
+fn lsvGradientAt(_positionFine:vec3f)->vec3f{return vec3f(lsvInvalidPhi());}
+`;
   return guardCM12SimulationDispatches(/* wgsl */ `
 ${createCm12NumericsWGSL()}
 ${cm12SimulationFailureWGSL}
@@ -1299,8 +1360,6 @@ const PRESENTATION_PAGE_RESOLUTION:u32=${presentationPageResolution}u;
 const PRESENTATION_SAMPLES_PER_PAGE:u32=${presentationPageResolution ** 3}u;
 const EXP_PRESENTATION_UNIFORM_BULK:bool=true;
 const PRESENTATION_CACHE_CAPACITY:u32=${presentationCacheCapacity}u;
-const PRESENTATION_RDF_VERTEX_AXIS:u32=${presentationRdfVertexAxis}u;
-const PRESENTATION_RDF_VERTEX_CAPACITY:u32=${presentationRdfVertexCapacity}u;
 const PRESENTATION_HEIGHT_COLUMN_AXIS:u32=${presentationHeightColumnAxis}u;
 const SURFACE_PROOF_LATTICE_AXIS:u32=${surfaceProofLatticeAxis}u;
 const SURFACE_PROOF_LATTICE_CAPACITY:u32=${surfaceProofLatticeCapacity}u;
@@ -1310,12 +1369,6 @@ const TEMPLATE_CELL_RESOLUTION_BITS:u32=5u;
 const TEMPLATE_CELL_RESOLUTION_MASK:u32=31u;
 const ACTIVITY_FIXED:f32=65536.0;
 const FACE_VELOCITY_SUPPORT:u32=${faceVelocitySupportBaseFloats}u;
-const GEOMETRIC_INTERFACE_CACHE_ENABLED:bool=${geometricInterfaceBaseFloats !== undefined};
-const GEOMETRIC_INTERFACE_CACHE_BASE:u32=${geometricInterfaceBaseFloats ?? 0}u;
-const GEOMETRIC_INTERFACE_SUPPORT_CACHE_ENABLED:bool=${geometricInterfaceSupportBaseFloats !== undefined};
-const GEOMETRIC_INTERFACE_SUPPORT_CACHE_BASE:u32=${geometricInterfaceSupportBaseFloats ?? 0}u;
-const GEOMETRIC_INTERFACE_RDF_CACHE_ENABLED:bool=${geometricInterfaceRdfBaseFloats !== undefined};
-const GEOMETRIC_INTERFACE_RDF_CACHE_BASE:u32=${geometricInterfaceRdfBaseFloats ?? 0}u;
 
 ${PRESSURE_JOURNAL_CONSTANTS_WGSL}
 struct Params {
@@ -1431,6 +1484,7 @@ ${velocityExtensionEntries}
 ${pressureExecutionImageEntries}
 ${compiledTopologyEntries}
 ${compiledTopologyTransportAccessEntries}
+${levelSetVolumeEntries}
 
 fn topologyWorklistBase()->u32{return atomicLoad(&topologyArena[14u]);}
 fn sparseCM12TopologyLifecycleAccepted()->bool{
@@ -1636,7 +1690,6 @@ ${createSparseCM12CellAccessWGSL(SPARSE_CM12_ATOMIC_ARENA_READERS, true)}
 ${createSparseCM12RowAccessWGSL(SPARSE_CM12_ATOMIC_ARENA_READERS, true, "cm12RecordFailure(1u,cell,vec4u(begin,end,maximum,0u));")}
 ${geometricInterfaceWGSL}
 ${createGeometricSolidMotionWGSL(movingSolidLayout)}
-${geometricInterfaceResidentWGSL}
 ${createGeometricVolumeResidentWGSL(geometricVolumeLayout)}
 ${
   sourceLayout
@@ -2285,7 +2338,7 @@ fn publishSparseCM12FaceVelocitySupport(@builtin(workgroup_id)wid:vec3u,
     let y=localRemainder/leaf.valid.x;let x=localRemainder-y*leaf.valid.x;
     let cellCoordinate=vec3u(x,y,z);let cell=leaf.first+local;
     let value=cm12EffectiveTransportVelocity(cell);
-    let wet=state[sourceDensity()+cell]>CM12_LIQUID_ISOVALUE;
+    let wet=lsvCellLiquid(cell);
     let cellLower=origin+vec3i(leaf.scale*cellCoordinate);
     let widths=vec3u(min(vec3i(i32(leaf.scale)),vec3i(p.dimensions.xyz)-cellLower));
     let span=f32(max(1u,min(widths.x,min(widths.y,widths.z))));
@@ -2394,26 +2447,6 @@ fn presentationCanonicalCoarseCoordinate(coarse:vec3i,cellScale:u32,brick:u32)->
   let owner=cm12WorldOwnerAt(coordinate);
   if(owner!=INVALID&&brickHasUnclippedWorldGeometry(owner)){return coarse;}
   return clamp(coarse,vec3i(0),dimensions-vec3i(1));
-}
-
-fn presentationPhiAt(cell:u32,densityOffset:u32)->f32{
-  let effective=clamp(state[densityOffset+cell]
-    /max(cellOpenFraction(cell),1e-6),0.0,1.0);
-  let fallback=(CM12_LIQUID_ISOVALUE-effective)*4.0;
-  if(p.correctionReserved.y<0.5&&GEOMETRIC_INTERFACE_RDF_CACHE_ENABLED){
-    let rdf=geometricResidentRdfPublishedDistance(cell,cellCenter(cell),densityOffset);
-    if(rdf.y>0.0){return rdf.x*p.frame.y;}
-  }
-  return geometricResidentSignedDistance(cell,cellCenter(cell),densityOffset,fallback)*p.frame.y;
-}
-fn presentationPhi(cell:u32)->f32{return presentationPhiAt(cell,destinationDensity());}
-
-fn presentationGeometricDistanceSupport(cell:u32,positionFine:vec3f,
- densityOffset:u32)->vec2f{
-  if(p.correctionReserved.y<0.5&&GEOMETRIC_INTERFACE_RDF_CACHE_ENABLED){
-    return geometricResidentRdfDistance(cell,positionFine);
-  }
-  return geometricResidentDistanceSupport(cell,positionFine,densityOffset);
 }
 
 // Restrict authoritative rho by finest-cell volume. A coarse presentation
@@ -2620,68 +2653,6 @@ fn presentationCompiledDensityAt(lower:vec3i,cellScale:i32,densityOffset:u32)->f
   }
   return mass/f32(cellScale*cellScale*cellScale);
 }
-
-// Restrict reconstructed donor-plane evaluations with the same actual overlap
-// volumes as density restriction, then blend on the shared centre lattice.
-// Virtual samples never invent a coarse plane from an averaged fine density.
-fn geometricPresentationLeafPhi(leaf:CM12TransportLeaf,lower:vec3i,extent:vec3i,
- densityOffset:u32,positionFine:vec3f)->vec2f{
-  if((leaf.flags&0x80000000u)==0u||leaf.scale==0u){return vec2f(0.0);}
-  
-  let origin=cm12WorldLeafCoordinate(leaf.owner)*i32(BRICK_FINE_RESOLUTION);
-  let relative=lower-origin;let scale=i32(leaf.scale);
-  var mass=vec2f(0.0);var z=0;
-  loop{if(z>=extent.z){break;}
-    let dz=min(extent.z-z,scale-(relative.z+z)%scale);var y=0;
-    loop{if(y>=extent.y){break;}
-      let dy=min(extent.y-y,scale-(relative.y+y)%scale);var x=0;
-      loop{if(x>=extent.x){break;}
-        let dx=min(extent.x-x,scale-(relative.x+x)%scale);
-        let local=vec3u((relative+vec3i(x,y,z))/scale);
-        let offset=local.x+leaf.valid.x*(local.y+leaf.valid.y*local.z);
-        if(all(local<leaf.valid)&&offset<leaf.count){
-          let cell=leaf.first+offset;
-          mass+=f32(dx*dy*dz)*presentationGeometricDistanceSupport(cell,positionFine,densityOffset);
-        }
-        x+=dx;
-      }y+=dy;
-    }z+=dz;
-  }
-  return mass;
-}
-fn geometricPresentationCompiledPhi(lower:vec3i,cellScale:i32,densityOffset:u32,positionFine:vec3f)->vec2f{
-  let leaf=presentationLeafAt(lower);let edge=i32(BRICK_FINE_RESOLUTION);
-  if((leaf.flags&0x80000000u)!=0u&&leaf.scale!=0u){
-    let origin=cm12WorldLeafCoordinate(leaf.owner)*edge;
-    let local=vec3u(lower-origin)>>vec3u(leaf.scaleLog2);
-    let offset=local.x+leaf.valid.x*(local.y+leaf.valid.y*local.z);
-    if(all(local<leaf.valid)&&offset<leaf.count&&leaf.scale>=u32(cellScale)){
-      let cell=leaf.first+offset;
-      return presentationGeometricDistanceSupport(cell,positionFine,densityOffset);
-    }
-    var upper=origin+vec3i(leaf.valid*leaf.scale);
-    if(!brickHasUnclippedWorldGeometry(leaf.owner)){upper=min(upper,vec3i(p.dimensions.xyz));}
-    if(all(lower>=origin)&&all(lower+vec3i(cellScale)<=upper)){
-      return geometricPresentationLeafPhi(leaf,lower,vec3i(cellScale),densityOffset,positionFine)
-        /f32(cellScale*cellScale*cellScale);
-    }
-  }
-  var mass=vec2f(0.0);var z=0;
-  loop{if(z>=cellScale){break;}
-    let dz=min(cellScale-z,edge-((lower.z+z)%edge+edge)%edge);var y=0;
-    loop{if(y>=cellScale){break;}
-      let dy=min(cellScale-y,edge-((lower.y+y)%edge+edge)%edge);var x=0;
-      loop{if(x>=cellScale){break;}
-        let dx=min(cellScale-x,edge-((lower.x+x)%edge+edge)%edge);
-        let q=lower+vec3i(x,y,z);
-        mass+=geometricPresentationLeafPhi(presentationLeafAt(q),q,vec3i(dx,dy,dz),densityOffset,positionFine);
-        x+=dx;
-      }y+=dy;
-    }z+=dz;
-  }
-  return mass/f32(cellScale*cellScale*cellScale);
-}
-
 
 fn restrictedPresentationDensity(lower:vec3i,cellScale:i32)->f32{
   return presentationCompiledDensityAt(lower,cellScale,destinationDensity());
@@ -3233,74 +3204,6 @@ fn interpolatedPresentationDensityAt(q:vec3i,cellScale:u32,
   return rho;
 }
 
-// Contour the accepted density lattice without a vertical-volume model.
-// The bounded trilinear stencil applies equally to horizontal and vertical
-// interfaces; a dam side must not depend on unrelated density above/below it.
-fn presentationExactOwnerScalarPhi(q:vec3i,densityOffset:u32,fallbackPhi:f32)->f32{
-  let owner=presentationCompiledOwnerCellAt(q);
-  if(owner.x==INVALID||!cellActive(owner.x)||cellOpenFraction(owner.x)<0.999999){return fallbackPhi;}
-  let fill=geometricResidentFill(owner.x,densityOffset);
-  if(fill>0.0&&fill<1.0){return fallbackPhi;}
-  let positionFine=vec3f(q)+vec3f(0.5);
-  let halfWidths=0.5*cellWidths(owner.x);
-  let interior=halfWidths-abs(positionFine-cellCenter(owner.x));
-  if(any(interior<=vec3f(0.0))){return fallbackPhi;}
-  let margin=min(interior.x,min(interior.y,interior.z))*p.frame.y;
-  return select(margin,-margin,fill>=1.0);
-}
-fn presentationInterpolatedDensityPhi(q:vec3i,cellScale:u32,
- cacheFirst:vec3i,cacheDimensions:vec3u,cacheFits:bool,densityOffset:u32)->f32{
-  let positionFine=vec3f(q)+vec3f(0.5);
-  // The accepted RDF is defined first at geometric topology vertices by the
-  // paper's least-squares interpolation.  FPP's native scalar slots sit half
-  // a finest cell farther along each axis, so evaluate the containing
-  // accepted cell's trilinear vertex field at that exact producer point.
-  // Resolving one canonical owner avoids averaging independent AMR traces.
-  if(p.correctionReserved.y<0.5&&GEOMETRIC_INTERFACE_RDF_CACHE_ENABLED){
-    let owner=presentationCompiledOwnerCellAt(q);
-    if(owner.x!=INVALID&&cellActive(owner.x)){
-      let rdf=geometricResidentRdfPublishedDistance(owner.x,positionFine,densityOffset);
-      if(rdf.y>0.0){return rdf.x*p.frame.y;}
-    }
-  }
-  let shifted=positionFine/f32(cellScale)-vec3f(0.5);
-  let lower=vec3i(floor(shifted));let fraction=fract(shifted);var geometrySum=vec2f(0.0);
-  for(var dz=0;dz<2;dz+=1){for(var dy=0;dy<2;dy+=1){for(var dx=0;dx<2;dx+=1){
-    let offset=vec3i(dx,dy,dz);
-    let canonical=presentationCanonicalCoarseCoordinate(lower+offset,cellScale,
-      cm12PresentationBrick);
-    let value=geometricPresentationCompiledPhi(canonical*i32(cellScale),
-      i32(cellScale),densityOffset,positionFine);
-    let wx=select(1.0-fraction.x,fraction.x,dx==1);
-    let wy=select(1.0-fraction.y,fraction.y,dy==1);
-    let wz=select(1.0-fraction.z,fraction.z,dz==1);
-    geometrySum+=wx*wy*wz*value;
-  }}}
-  // Empty/full fallback scalars have unrelated distance scales; mixing them
-  // with an actual plane moves its zero crossing. Normalize geometric support
-  // alone and use the former implicit surface only if no plane is supported.
-  if(geometrySum.y>1e-8){
-    var geometricPhi=geometrySum.x/geometrySum.y*p.frame.y;
-    // Cell means are discontinuous across adaptive faces. A neighboring PLIC
-    // may refine distance, but cannot reverse an exact target-cell phase.
-    let owner=presentationCompiledOwnerCellAt(q);
-    if(owner.x!=INVALID&&cellOpenFraction(owner.x)>=1.0){
-      let ownerDensity=state[densityOffset+owner.x];
-      let halfWidths=0.5*cellWidths(owner.x);
-      let local=abs(positionFine-cellCenter(owner.x));
-      let margin=max(0.0,min(halfWidths.x-local.x,
-        min(halfWidths.y-local.y,halfWidths.z-local.z)))*p.frame.y;
-      if(ownerDensity<=0.0){geometricPhi=max(margin,geometricPhi);}
-      if(ownerDensity>=1.0){geometricPhi=min(-margin,geometricPhi);}
-    }
-    return geometricPhi;
-  }
-  let rho=interpolatedPresentationDensityAt(q,cellScale,cacheFirst,
-    cacheDimensions,cacheFits,densityOffset);
-  let fallbackPhi=(CM12_LIQUID_ISOVALUE-rho)*4.0*p.frame.y;
-  return presentationExactOwnerScalarPhi(q,densityOffset,fallbackPhi);
-}
-
 // Cache-free mirror of the conservative limited-linear coarse patch. The
 // topology transfer and representability proof use this exact definition.
 fn directSmoothedPresentationDensityAt(q:vec3i,cellScale:u32,
@@ -3378,7 +3281,10 @@ fn sampleEffectiveTransportVelocityAtSpansMode(
 }
 
 fn sampleEffectiveTransportVelocityAtSpans(position:vec3f,spansInput:vec3f)->vec3f{
-  return sampleEffectiveTransportVelocityAtSpansMode(position,spansInput,false);
+  // Arbitrary characteristic dispatches do not stage the TEI workgroup
+  // directory. Resolve these eight samples through the accepted owner map;
+  // using cm12TeiOwnerAtFine here reads uninitialized workgroup cache state.
+  return sampleEffectiveTransportVelocityAtSpansMode(position,spansInput,true);
 }
 
 fn traceEffectiveTransportCharacteristicMode(
@@ -4080,43 +3986,62 @@ fn injectionRemoving()->bool{
 fn injectionBoundsRadius()->vec3f{
   return select(p.injectionRadius.xyz,vec3f(p.injectionRadius.w),p.injectionCenter.w>=10.0);
 }
-fn injectionCoverageAt(point:vec3f,width:f32)->f32{
+fn injectionSignedDistanceAt(point:vec3f)->f32{
   if(p.injectionCenter.w==2.0){
     let halfLength=length(p.injectionRadius.xyz);
-    if(p.injectionRadius.w<=0.0||halfLength<=1e-8){return 0.0;}
+    if(p.injectionRadius.w<=0.0||halfLength<=1e-8){return 1e6;}
     let direction=p.injectionRadius.xyz/halfLength;
     let relative=point-p.injectionCenter.xyz;
     let along=dot(relative,direction);
     let radial=length(relative-direction*along)-p.injectionRadius.w;
     let axial=abs(along)-halfLength;
     let outside=length(max(vec2f(radial,axial),vec2f(0.0)));
-    let signed=outside+min(max(radial,axial),0.0);
-    return clamp(0.5-signed/max(width,1e-6),0.0,1.0);
+    return outside+min(max(radial,axial),0.0);
   }
   let mode=u32(round(p.injectionCenter.w));
   let relative=point-p.injectionCenter.xyz;
   if(mode==8u||mode==9u){
     let q=vec2f(length(relative.xy)-p.injectionRadius.x,abs(relative.z)-p.injectionRadius.z);
-    let signed=length(max(q,vec2f(0.0)))+min(max(q.x,q.y),0.0);
-    return clamp(0.5-signed/max(width,1e-6),0.0,1.0);
+    return length(max(q,vec2f(0.0)))+min(max(q.x,q.y),0.0);
   }
   if(mode==10u||mode==11u){
-    let signed=max(length(relative)-p.injectionRadius.w,dot(relative,p.injectionRadius.xyz));
-    return clamp(0.5-signed/max(width,1e-6),0.0,1.0);
+    return max(length(relative)-p.injectionRadius.w,dot(relative,p.injectionRadius.xyz));
   }
   if(mode==3u||mode==6u){
     let q=abs(relative)-p.injectionRadius.xyz;
-    let signed=length(max(q,vec3f(0.0)))+min(max(q.x,max(q.y,q.z)),0.0);
-    return clamp(0.5-signed/max(width,1e-6),0.0,1.0);
+    return length(max(q,vec3f(0.0)))+min(max(q.x,max(q.y,q.z)),0.0);
   }
   if(mode==4u||mode==7u){
-    let signed=length(vec2f(length(relative.xz)-(p.injectionRadius.x-p.injectionRadius.w),relative.y))-p.injectionRadius.w;
-    return clamp(0.5-signed/max(width,1e-6),0.0,1.0);
+    return length(vec2f(length(relative.xz)-(p.injectionRadius.x-p.injectionRadius.w),relative.y))-p.injectionRadius.w;
   }
   let q=(point-p.injectionCenter.xyz)/max(p.injectionRadius.xyz,vec3f(1e-6));
-  let signed=length(q)-1.0;
-  return clamp(0.5-signed*min(p.injectionRadius.x,
-    min(p.injectionRadius.y,p.injectionRadius.z))/max(width,1e-6),0.0,1.0);
+  return (length(q)-1.0)*min(p.injectionRadius.x,min(p.injectionRadius.y,p.injectionRadius.z));
+}
+fn continuousInflowSignedDistanceAt(point:vec3f)->f32{
+  let displacement=p.inflowVelocity.xyz*p.frame.x;
+  let plugLength=length(displacement);
+  if(plugLength<=1e-8||p.inflowOutlet.w<=0.0){return 1e6;}
+  let direction=displacement/plugLength;
+  let relative=point-(p.inflowOutlet.xyz+0.5*displacement);
+  let along=dot(relative,direction);
+  let radial=length(relative-direction*along)-p.inflowOutlet.w;
+  let axial=abs(along)-0.5*plugLength;
+  return length(max(vec2f(radial,axial),vec2f(0.0)))+min(max(radial,axial),0.0);
+}
+fn levelSetSourceUnionSampleAt(point:vec3f)->vec2f{
+  let editActive=p.injectionCenter.w>0.5;
+  if(editActive&&injectionRemoving()){
+    return vec2f(injectionSignedDistanceAt(point),-1.0);
+  }
+  var phi=1e6;var sourceActive=false;
+  if(editActive){phi=injectionSignedDistanceAt(point);sourceActive=true;}
+  ${sourceLayout ? `let continuous=gsEnabled()
+    &&state[GEOMETRIC_SOURCE_LEDGER+15u]>0.0;
+  if(continuous){phi=min(phi,continuousInflowSignedDistanceAt(point));sourceActive=true;}` : ""}
+  return vec2f(phi,select(0.0,1.0,sourceActive));
+}
+fn injectionCoverageAt(point:vec3f,width:f32)->f32{
+  return clamp(0.5-injectionSignedDistanceAt(point)/max(width,1e-6),0.0,1.0);
 }
 fn injectedJetVelocity()->vec3f{
   if(p.injectionCenter.w!=2.0){return vec3f(0.0);}
@@ -4657,7 +4582,7 @@ fn seedTracers(@builtin(workgroup_id)wid:vec3u,
   // dead lane costs one predicated early-out here and one collapsed quad in the
   // draw, which is cheaper than maintaining a compaction the topology would
   // invalidate every epoch anyway.
-  let live=cell!=INVALID&&state[sourceDensity()+cell]>CM12_LIQUID_ISOVALUE;
+  let live=cell!=INVALID&&lsvPhiValidAt(position)&&lsvPhiAt(position)<0.0;
   let at=tracerBase(index);
   state[at]=position.x;state[at+1u]=position.y;state[at+2u]=position.z;
   state[at+3u]=select(0.0,1.0,live);
@@ -5395,126 +5320,11 @@ fn enforceSparseCM12InflowFaces(@builtin(global_invocation_id)gid:vec3u){
 fn rawPressureDensity(cell:u32)->f32{
   return state[destinationDensity()+cell]/max(cellOpenFraction(cell),1e-6);
 }
-
-fn pressureDensity(cell:u32)->f32{
-  let density=rawPressureDensity(cell);let source=geometricSourceRate(cell);
-  if(geometricSolidClosingWetCell(cell)){
-    // A retreating fluid boundary must expel even a sub-isovalue amount.
-    // This pressure-only centre classification retains the old capacity;
-    // it never paints additional liquid into the volume authority.
-    return max(density,CM12_LIQUID_ISOVALUE+min(0.5,
-      -geometricSolidCapacityRate(cell)*p.frame.x/max(cellOpenVolume(cell),1e-8)));
-  }
-  if(source<=0.0){return density;}
-  // Planned nozzle cells are pressure unknowns before their first committed
-  // volume arrives. This pressure-only interface observation does not write
-  // fluid density or replace the geometric transport amount.
-  return max(density,CM12_LIQUID_ISOVALUE
-    +min(0.5,source*p.frame.x/max(cellOpenVolume(cell),1e-8)));
-}
-
-// This experiment addresses refinement seams introduced by a local authored
-// minimum-cell-size region. A whole-domain min-8 dam has no cross-rung surface
-// to reconcile and must retain its established moving-interface behaviour.
-fn pressureHasPartialRefinementRegion()->bool{
-  let count=min(p.refinementRegionControl.x,8u);
-  for(var index=0u;index<count;index+=1u){
-    let lo=p.refinementRegions[2u*index];let hi=p.refinementRegions[2u*index+1u];
-    let minimumCellSize=lo.w;
-    let coversDomain=all(lo.xyz<=vec3f(0.01))
-      &&all(hi.xyz>=vec3f(p.dimensions.xyz)-vec3f(0.01));
-    if(minimumCellSize>1.0&&!coversDomain){return true;}
-  }
-  return false;
-}
-
-// A volume fraction is not a signed distance: rho=.90625 in an eight-cell
-// pressure cell and rho=.625 in a two-cell pressure cell can describe the
-// same planar waterline, but 0.5-rho gives them different ghost distances.
-// Recover the one-dimensional geometric invariant directly from accepted
-// finite-volume mass when the column proves that it is a floor-connected,
-// monotone height field. The general CM12 density-derived theta remains the
-// fallback for overturning, cut, disconnected, or non-planar interfaces.
-fn pressureIntegratedColumnHeight(x:i32,z:i32)->vec2f{
-  var y=0;var massHeight=0.0;var previous=1.0;var columnOpen=-1.0;
-  var sawOpen=false;var sawLiquid=false;var sawAir=false;
-  while(y<i32(p.dimensions.y)){
-    let q=vec3i(x,y,z);
-    if(cm12SolidVoxelFractionQ8(q)>=255u){return vec2f(0.0);}
-    let owner=compactOwnerCellAt(q);var fill=0.0;var width=1;
-    if(owner.x==INVALID||!brickActive(owner.y)){
-      let brickWidth=i32(BRICK_FINE_RESOLUTION);
-      width=max(1,min(brickWidth-y%brickWidth,i32(p.dimensions.y)-y));
-    }else{
-      let open=cellOpenFraction(owner.x);
-      if(open<=1e-6){return vec2f(0.0);}
-      sawOpen=true;
-      if(columnOpen<0.0){columnOpen=open;}
-      if(abs(open-columnOpen)>1e-3){return vec2f(0.0);}
-      fill=clamp(pressureDensity(owner.x),0.0,1.0);
-      let scale=max(1u,BRICK_FINE_RESOLUTION*brickSpan(owner.y)/owner.z);
-      width=max(1,min(i32(scale)-y%i32(scale),i32(p.dimensions.y)-y));
-    }
-    if(fill>previous+0.01){return vec2f(0.0);}
-    previous=fill;sawLiquid=sawLiquid||fill>1e-3;sawAir=sawAir||fill<1.0-1e-3;
-    massHeight+=fill*f32(width);y+=width;
-  }
-  let valid=sawOpen&&sawLiquid&&sawAir;
-  return vec2f(massHeight,select(0.0,1.0,valid));
-}
-
-// Five neighbouring columns are a cheap local planar proof. It keeps this
-// hydrostatic correction out of waves and sloped/curved interfaces while
-// admitting a flat surface across a B4/B2/B1 seam. Sampling a shared physical
-// height makes the ensuing row fraction independent of its pressure-cell rung.
-fn pressurePlanarColumnHeight(row:u32)->vec2f{
-  let center=rowCenter(row);
-  let x=clamp(i32(floor(center.x)),0,i32(p.dimensions.x)-1);
-  let z=clamp(i32(floor(center.z)),0,i32(p.dimensions.z)-1);
-  let offsets=array<vec2i,5>(vec2i(0,0),vec2i(-1,0),vec2i(1,0),
-    vec2i(0,-1),vec2i(0,1));
-  var centreHeight=0.0;var minimumHeight=1e30;var maximumHeight=-1e30;
-  var valid=true;
-  for(var sample=0u;sample<5u;sample+=1u){
-    let sx=clamp(x+offsets[sample].x,0,i32(p.dimensions.x)-1);
-    let sz=clamp(z+offsets[sample].y,0,i32(p.dimensions.z)-1);
-    let receipt=pressureIntegratedColumnHeight(sx,sz);
-    if(sample==0u){centreHeight=receipt.x;}
-    valid=valid&&receipt.y>0.5;
-    minimumHeight=min(minimumHeight,receipt.x);
-    maximumHeight=max(maximumHeight,receipt.x);
-  }
-  valid=valid&&maximumHeight-minimumHeight<=0.01;
-  return vec2f(centreHeight,select(0.0,1.0,valid));
-}
-
-// A cell beneath the surface cannot be air. With V==1 everywhere, the paper's
-// Sec. 3.7 guard against false-air classification (rho' = rho/V, Eq. 20,
-// "a cell with V < 0.5 will likely have rho < 0.5 causing the solver to treat
-// it erroneously as air") is inert, yet conservative transport can still carry
-// an interior cell's rho below the isovalue. Excluding such a cell opens a
-// p = 0 Dirichlet hole underneath standing water; the repair jets through the
-// surviving cut rows are the observed bottom-edge/corner velocity bursts. So
-// a previous member whose every accepted-row neighbour was also a member --
-// and that faces no sparse-air row (a one-term row is an open air port) --
-// is submerged and stays in the solve regardless of its instantaneous rho.
-fn pressureCellSubmerged(id:u32)->bool{
-  if(!pressureAcceptedCellMember(id)){return false;}
-  var neighbours=0u;
-  let incidenceRangeForCell=cnxCellIncidenceRangeUnchecked(id);
-  for(var at=incidenceRangeForCell.x;at<incidenceRangeForCell.y;at+=1u){
-    let rowOrdinal=cnxIncidenceRowOrdinalUnchecked(at);
-    let range=cnxRowTermRangeByOrdinalUnchecked(rowOrdinal);
-    let begin=range.x;let count=range.y-range.x;
-    if(count<2u){return false;}
-    for(var term=begin;term<begin+count;term+=1u){
-      let other=cnxRowTermCellUnchecked(term);
-      if(other==id){continue;}
-      neighbours+=1u;
-      if(!pressureAcceptedCellMember(other)){return false;}
-    }
-  }
-  return neighbours>0u;
+fn levelSetVolumeExcessPressureSource(cell:u32)->f32{
+  let capacity=max(0.0,cellOpenVolume(cell));
+  let volume=max(0.0,state[destinationDensity()+cell]*cellVolume(cell));
+  let released=min(0.5*max(0.0,volume-capacity),capacity);
+  return released/max(p.frame.x,1e-12);
 }
 fn movingPressurePredictedFill(id:u32)->bool{
   if(!geometricSolidMotionActive()){return false;}
@@ -5554,19 +5364,21 @@ fn movingPressurePredictedFill(id:u32)->bool{
   let finalCapacity=geometricSolidCapacityAt(id,1.0);
   return predictedVolume>=finalCapacity-9.5367431640625e-7*finalCapacity;
 }
-fn pressureCellMembershipFromDensity(id:u32,rho:f32)->bool{
-  return cellActive(id)
-    &&(rho>=CM12_LIQUID_ISOVALUE||pressureCellSubmerged(id)
-      ||movingPressurePredictedFill(id)||geometricSourceRate(id)>0.0)
-    &&cellOpenVolume(id)>1e-8;
+fn pressureCellMembershipFromPhi(id:u32)->bool{
+  let metricOrPhase=lsvCellLiquid(id);
+  // Sources and closing rigid boundaries are pressure members before their
+  // volume/level-set edits commit. They are lifecycle exceptions, not an
+  // alternate numerical surface authority.
+  let lifecycleWet=geometricSolidClosingWetCell(id)
+    ||movingPressurePredictedFill(id)||geometricSourceRate(id)>0.0;
+  return cellActive(id)&&(metricOrPhase||lifecycleWet)&&cellOpenVolume(id)>1e-8;
 }
 fn pressureCellMembershipPredicate(id:u32)->bool{
-  return cnxAccepted()&&pressureCellMembershipFromDensity(id,pressureDensity(id));
+  return cnxAccepted()&&pressureCellMembershipFromPhi(id);
 }
 
 fn classifyPressureCell(id:u32)->bool{
-  let rho=pressureDensity(id);
-  let liquid=pressureCellMembershipFromDensity(id,rho);
+  let liquid=pressureCellMembershipFromPhi(id);
   state[p.stateOffsets2.w+id]=select(0.0,1.0,liquid);
   if(!liquid){
     state[p.stateOffsets2.y+id]=0.0;state[p.stateOffsets2.z+id]=0.0;
@@ -5693,48 +5505,19 @@ fn classifyPressureRow(row:u32)->bool{
   else if(sameLevel&&allCoarse){atomicAdd(&activity[ACCEPTED_COARSE_ROW_COUNT],1u);}
   if(rowDualWeight(row)<=1e-8){state[p.stateOffsets3.x+row]=0.0;return false;}
   let beginRange=rowTermRange(row);let begin=beginRange.x;let end=beginRange.y;
-  // A supported interface plane extends to both pressure centres. Using its
-  // liquid-side distance with an unrelated full/dry density pseudo-distance
-  // on the other side would move p=0 away from the published geometric plane.
-  var geometricNormal=vec3f(0.0);var geometricOffset=0.0;var geometricWeight=0.0;
-  if(rowKind(row)!=3u){
-    for(var term=begin;term<end;term+=1u){
-      let cell=termCell(term);let geometry=geometricResidentInterface(cell,destinationDensity());
-      if(geometry.valid!=0u){
-        let weight=abs(termCoefficient(term));
-        geometricNormal+=weight*geometry.plane.normal;
-        geometricOffset+=weight*(geometry.plane.offset+dot(geometry.plane.normal,cellCenter(cell)-rowCenter(row)));
-        geometricWeight+=weight;
-      }
-    }
-  }
-  let geometricNormalLength=length(geometricNormal);
-  var rowGeometryValid=geometricWeight>1e-8&&geometricNormalLength>1e-6*geometricWeight;
-  if(rowGeometryValid){
-    for(var term=begin;term<end;term+=1u){
-      let cell=termCell(term);
-      let phi=(dot(geometricNormal,cellCenter(cell)-rowCenter(row))-geometricOffset)/geometricNormalLength;
-      rowGeometryValid=rowGeometryValid&&cellOpenFraction(cell)>=0.999999
-        &&select(phi>=0.0,phi<=0.0,pressureCandidateCellMember(cell));
-    }
-  }
   var liquidCount=0u;var airCount=0u;var liquidPhiSum=0.0;var liquidWeight=0.0;
   var airPhiSum=0.0;var airWeight=0.0;
   var liquidCenterYSum=0.0;var airCenterYSum=0.0;
   var fullPhiGradient=0.0;var liquidPhiGradient=0.0;
   for(var at=begin;at<end;at+=1u){let cell=termCell(at);let w=abs(termCoefficient(at));
-    // Density-derived phi uses each cell's own width as its distance unit. Convert
-    // both sides to the same units before interpolating the pressure boundary.
-    // Full 8h liquid next to empty 4h air needs theta=2/3, not 1/2; otherwise
-    // changing rungs moves p=0 below a stationary surface and drives false flow.
-    // Exterior rows retain the dimensionless convention of rowExteriorPhi.
-    let oldPhi=(CM12_LIQUID_ISOVALUE-pressureDensity(cell))
-      *select(cellWidths(cell)[rowAxis(row)],1.0,rowKind(row)==3u);
-    var phi=oldPhi;
     let liquid=pressureCandidateCellMember(cell);
-    if(rowGeometryValid){
-      phi=(dot(geometricNormal,cellCenter(cell)-rowCenter(row))-geometricOffset)/geometricNormalLength;
-    }
+    let sample=lsvSampleAt(cellCenter(cell));
+    // Metric φ owns every interior free-surface crossing. A source or moving
+    // wall can create a pressure member one stage before its φ edit commits;
+    // give only that lifecycle exception a bounded liquid-side distance.
+    var phi=select(0.5*cellWidths(cell)[rowAxis(row)],
+      -0.5*cellWidths(cell)[rowAxis(row)],liquid);
+    if(sample.valid&&sample.metric){phi=sample.phi;}
     let signedPhi=termCoefficient(at)*phi;
     fullPhiGradient+=signedPhi;if(liquid){liquidPhiGradient+=signedPhi;}
     if(liquid){liquidCount+=1u;liquidPhiSum+=w*phi;liquidWeight+=w;
@@ -5749,25 +5532,6 @@ fn classifyPressureRow(row:u32)->bool{
   let cut=airCount>0u||rowKind(row)==3u;
   var theta=select(1.0,cm12GhostFluidTheta(liquidPhiSum/max(liquidWeight,1e-9),
     airPhiSum/max(airWeight,1e-9),1e-12),cut);
-  // Hydrostatic pressure is an affine field along gravity. On a locally flat,
-  // floor-connected surface, place its p=0 boundary at the density-integrated
-  // physical waterline rather than at a rung-dependent interpolation of rho.
-  // This Y-column proof is valid only for downward gravity. Tilted and reversed
-  // gravity use the general ghost-fluid boundary above.
-  let gravityLength=length(p.acceleration.xyz);
-  if(cut&&rowAxis(row)==1u&&gravityLength>1e-6
-    &&pressureHasPartialRefinementRegion()
-    &&p.acceleration.y<0.0&&length(p.acceleration.xz)<=1e-6*gravityLength){
-    let heightReceipt=pressurePlanarColumnHeight(row);
-    let liquidCenterY=liquidCenterYSum/max(liquidWeight,1e-9);
-    let airCenterY=airCenterYSum/max(airWeight,1e-9);
-    let height=heightReceipt.x;
-    if(heightReceipt.y>0.5&&airCenterY>liquidCenterY+1e-6
-      &&height>liquidCenterY&&height<airCenterY){
-      theta=clamp((height-liquidCenterY)/(airCenterY-liquidCenterY),
-        CM12_GHOST_FLUID_THETA_MIN,1.0);
-    }
-  }
   if(cut&&rowKind(row)==2u){
     let factor=mixedSurfacePressureFactor(fullPhiGradient,liquidPhiGradient);
     // A zero response is still an incident pressure face: its current flux
@@ -5835,14 +5599,15 @@ fn preparePressure(@builtin(global_invocation_id)gid:vec3u){
     if(coefficient>0.0){negative[axis]+=value;}else{positive[axis]+=value;}
   }
   let rhsAxes=min(negative,positive)+max(negative,positive);
-  // Geometric volume has no CM12 excess-density pressure source. Pressure
-  // supplies the compatible face flux that the bounded upwind baseline needs.
-  // G^T W u is negative physical outward flux. Positive source volume
-  // therefore adds to the RHS so projected outward flux equals source rate.
+  // Capped excess release matches the 2-D level-set-volume source semantics:
+  // release half the extensive excess per step, capped at one open capacity.
+  // The existing pressure compatibility projection subsequently removes the
+  // null-space mean on closed components.
   // With outward fluid flux positive, geometric conservation requires
   // outward = source - dC/dt. G^T W q has the opposite sign.
   state[p.stateOffsets2.y+id]=(rhsAxes.x+rhsAxes.y)+rhsAxes.z
-    -geometricSolidCapacityRate(id)+geometricSourceRate(id);
+    -geometricSolidCapacityRate(id)+geometricSourceRate(id)
+    +levelSetVolumeExcessPressureSource(id);
   state[p.stateOffsets2.z+id]=diagonal;
 }
 
@@ -5968,8 +5733,6 @@ var<workgroup>candidatePublicationActive:u32;
 // Coarse values are restricted once per page workgroup and reused by all 512
 // fine presentation samples.
 var<workgroup>presentationDensityCache:array<f32,${presentationCacheCapacity}>;
-var<workgroup>presentationRdfVertexCache:array<vec2f,${presentationRdfVertexCapacity}>;
-var<workgroup>presentationRdfVertexCacheReady:u32;
 // Height proof validity is column-local. Keeping it separate from the 3-D
 // interpolation cache lets a page mix proved floor columns with ordinary
 // contour columns without one invalid overhang discarding 63 valid heights.
@@ -6450,6 +6213,15 @@ fn brickHasPresentationSurfaceSupport(brick:u32)->bool{
     &&(atomicLoad(&activity[activityRecord(brick)+38u])
       &ACTIVITY_PRESENTATION_SURFACE_SUPPORT)!=0u;
 }
+fn brickPhiDeepLiquid(brick:u32)->bool{
+  if(brick==INVALID||!brickActive(brick)){return false;}
+  let width=f32(BRICK_FINE_RESOLUTION*brickSpan(brick));
+  let center=(vec3f(cm12WorldLeafCoordinate(brick))+vec3f(0.5*f32(brickSpan(brick))))
+    *f32(BRICK_FINE_RESOLUTION);
+  let sample=lsvSampleAt(center);
+  return sample.valid&&sample.phi<0.0
+    &&(!sample.metric||-sample.phi>=0.8660254*width);
+}
 
 var<workgroup> frontierDemanded:atomic<u32>;
 var<workgroup> presentationSurfaceSupportDemanded:atomic<u32>;
@@ -6482,8 +6254,7 @@ fn classifyAcceptedLiquidFrontier(@builtin(workgroup_id)wid:vec3u,
       if(neighbor==INVALID){
         enclosed=!cm12FluidFaceHasEmptyVoxelPair(coordinate,direction);
       }else{
-        enclosed=brickActive(neighbor)
-          &&activityF32(activityRecord(neighbor)+4u)>=CM12_LIQUID_ISOVALUE;
+        enclosed=brickPhiDeepLiquid(neighbor);
       }
       if(!enclosed){atomicStore(&acceptedLiquidDeeplyEnclosed,0u);}
     }
@@ -6661,13 +6432,14 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
     let ownVelocityAt=destinationCellVelocity()+4u*cell;
     let ownVelocity=vec3f(state[ownVelocityAt],state[ownVelocityAt+1u],
       state[ownVelocityAt+2u]);
-    let ownWet=fill>=CM12_LIQUID_ISOVALUE;
+    let center=cellCenter(cell);
+    let ownPhiSample=lsvSampleAt(center);
+    let ownWet=ownPhiSample.valid&&ownPhiSample.phi<0.0;
     if(coarseFirstEnabled()&&ownWet){
       liquidMomentum+=vec4f(ownVelocity*rho,rho);
       velocityTravel=max(velocityTravel,p.frame.x*length(ownVelocity));
     }
     let featureDensity=max(residencyDensity,p.activityDensity.x);
-    let center=cellCenter(cell);
     var exposedSides=0u;
     var transportMinimumVelocity=vec3f(0.0);
     var transportMaximumVelocity=vec3f(0.0);
@@ -6738,7 +6510,10 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
           let side=select(0u,1u,rowPosition[axis]>center[axis]);
           boundaryLiquidFaces|=1u<<(2u*axis+side);
         }
-        let crossesIsovalue=(neighborDensity>=CM12_LIQUID_ISOVALUE)!=ownWet;
+        let neighborPhiSample=lsvSampleAt(cellCenter(neighbor));
+        let neighborWet=neighborPhiSample.valid&&neighborPhiSample.phi<0.0;
+        let crossesIsovalue=ownPhiSample.metric&&neighborPhiSample.metric
+          &&neighborWet!=ownWet;
         let neighborVelocityAt=destinationCellVelocity()+4u*neighbor;
         let neighborVelocity=vec3f(state[neighborVelocityAt],
           state[neighborVelocityAt+1u],state[neighborVelocityAt+2u]);
@@ -6764,7 +6539,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
         }
         // Velocity extension is allowed to differ in air; only a liquid-liquid
         // gradient is physical deformation that can demand more resolution.
-        if(ownWet&&neighborDensity>=CM12_LIQUID_ISOVALUE){
+        if(ownWet&&neighborWet){
           deformation=max(deformation,p.frame.x*max(abs(ownVelocity.x-neighborVelocity.x),
             max(abs(ownVelocity.y-neighborVelocity.y),abs(ownVelocity.z-neighborVelocity.z)))
             *inverseDeformationDistance);
@@ -6794,14 +6569,8 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
     // the rho=.5 contour. Preserve any represented liquid slab thinner than
     // the configured finest-cell width: it must have exposed support on both
     // sides of an axis and remain above the feature-density floor.
-    let representedThickness=clamp(rho,0.0,1.0)*cellMinimumWidth(cell);
-    var cellIsThinFluid=false;
-    for(var axis=0u;axis<3u;axis+=1u){
-      let oppositeSides=3u<<(2u*axis);
-      cellIsThinFluid=cellIsThinFluid||(fill>featureDensity
-        &&representedThickness<p.activityThresholds.w
-        &&(exposedSides&oppositeSides)==oppositeSides);
-    }
+    let cellIsThinFluid=ownPhiSample.metric
+      &&abs(ownPhiSample.phi)<=0.5*cellMinimumWidth(cell);
     thinFluidCell=thinFluidCell||cellIsThinFluid;
     // Weak wall-separation velocity is not liquid curvature. Static and
     // moving solids already have independent geometric/coupling floors.
@@ -6897,20 +6666,22 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
       // reads per group) even though the stage ultimately reduces only the
       // maximum residual. Load the octet once, retain it in invocation-local
       // storage, and publish that exact group maximum into the existing WG max.
-      let group=vec3u(x,y,z);var childSum=0;var childCount=0u;
-      var childFixed:array<i32,8>;
+      let group=vec3u(x,y,z);var childSum=0.0;var childCount=0u;
+      var childPhi:array<f32,8>;
       for(var dz=0u;dz<2u;dz+=1u){for(var dy=0u;dy<2u;dy+=1u){
         for(var dx=0u;dx<2u;dx+=1u){
           let q=group+vec3u(dx,dy,dz);
           let child=first+q.x+resolution*(q.y+resolution*q.z);
           if(child<first+count){
-            let fixed=i32(round(state[destinationDensity()+child]*ACTIVITY_FIXED));
-            childFixed[childCount]=fixed;childCount+=1u;childSum+=fixed;
+            let sample=lsvSampleAt(cellCenter(child));
+            if(sample.metric){
+              childPhi[childCount]=sample.phi;childCount+=1u;childSum+=sample.phi;
+            }
           }
       }}}
       for(var child=0u;child<childCount;child+=1u){
-        detailError=max(detailError,
-          f32(abs(8*childFixed[child]-childSum))/(8.0*ACTIVITY_FIXED));
+        detailError=max(detailError,abs(childPhi[child]-childSum/max(1.0,f32(childCount)))
+          /max(cellMinimumWidth(cell),1e-6));
       }
     }
   }
@@ -7256,8 +7027,7 @@ fn classifyRefinementPolicyTiles(@builtin(workgroup_id)wid:vec3u,
         &&(atomicLoad(&activity[output+1u])&64u)!=0u;
       let swept=brickActive(sibling)&&atomicLoad(&activity[output+3u])!=0u;
       demanded=occupied||swept||injectionReachesBrick(sibling);
-      filled=filled&&occupied
-        &&activityF32(output+4u)>=CM12_LIQUID_ISOVALUE;
+      filled=filled&&occupied&&brickPhiDeepLiquid(sibling);
       enclosed=filled;
     }
     if(demanded){atomicOr(&refinementPolicyAggregate,1u);}
@@ -7282,8 +7052,7 @@ fn classifyRefinementPolicyTiles(@builtin(workgroup_id)wid:vec3u,
       let neighbor=cm12WorldOwnerAt(siblingCoordinate+directions[side]);
       if(neighbor==INVALID){
         enclosed=!cm12FluidFaceHasEmptyVoxelPair(siblingCoordinate,directions[side]);
-      }else{enclosed=brickActive(neighbor)
-        &&activityF32(activityRecord(neighbor)+4u)>=CM12_LIQUID_ISOVALUE;}
+      }else{enclosed=brickPhiDeepLiquid(neighbor);}
     }
     if(!enclosed){atomicAnd(&refinementPolicyAggregate,~4u);}
   }
@@ -8914,12 +8683,25 @@ fn finalizeShadowWorklists(){
   let leaves=acceptedLeafManifestBase();let slot=shadowTopologySlot();
   let leafCount=atomicLoad(&topologyArena[leaves+slot]);
   let deltaCount=atomicLoad(&topologyArena[leaves+10u]);
+  let residentCapacityReady=cells<=atomicLoad(&topologyArena[base+6u])
+    &&rows<=atomicLoad(&topologyArena[base+7u]);
+  let levelSetCapacityReady=${levelSetVolumeLayout ? "cells<=LSV_CELL_CAPACITY" : "true"};
   let valid=atomicLoad(&topologyArena[base+3u])==1u
-    &&cells<=atomicLoad(&topologyArena[base+6u])
-    &&rows<=atomicLoad(&topologyArena[base+7u])
+    &&residentCapacityReady&&levelSetCapacityReady
     &&leafCount<=p.dispatch.w&&deltaCount<=p.dispatch.w;
   if(!valid){
-    atomicStore(&activity[21],1u);atomicStore(&topologyArena[base+3u],3u);
+    // A shadow image that fits the resident topology but not the adaptive phi
+    // arena is a generation-growth request, not corrupt simulation state. Keep
+    // the accepted image and the per-leaf requested rungs intact so the host's
+    // bounded planning receipt can prepare a larger replacement generation.
+    // Other capacity/provenance failures remain hard transaction failures.
+    if(atomicLoad(&topologyArena[base+3u])==1u
+      &&!levelSetCapacityReady&&residentCapacityReady
+      &&leafCount<=p.dispatch.w&&deltaCount<=p.dispatch.w){
+      atomicStore(&topologyArena[base+3u],3u);
+    }else{
+      atomicStore(&activity[21],1u);atomicStore(&topologyArena[base+3u],3u);
+    }
     atomicStore(&topologyArena[base+20u],0u);
     atomicStore(&topologyArena[base+21u],1u);atomicStore(&topologyArena[base+22u],1u);
     atomicStore(&topologyArena[base+23u],0u);
@@ -9051,10 +8833,15 @@ fn transferCandidateCellsWork(lid:vec3u,brick:u32,validBrick:bool){
       }
       let totalCapacity=capacitySum.x+capacitySum.y;
       var remaining=vec2f(parentVolume,0.0);
-      let geometry=geometricResidentInterface(parent,destinationDensity());
-      let geometric=cellOpenFraction(parent)==1.0&&geometry.valid!=0u;
+      let transferGradient=lsvGradientAt(cellCenter(parent));
+      let transferPlane=geometricInterfaceFromFill(
+        clamp(parentVolume/max(cellVolume(parent),1e-8),0.0,1.0),
+        transferGradient,cellWidths(parent));
+      let geometric=cellOpenFraction(parent)==1.0
+        &&lsvPhiMetricAt(cellCenter(parent))
+        &&geometricInterfacePlaneValid(transferPlane);
       let parentValid=finiteTransferValue(parentVolume)&&parentVolume>=0.0
-        &&parentVolume<=totalCapacity;
+        &&(totalCapacity>0.0||parentVolume==0.0);
       if(!parentValid){atomicStore(&activity[output+23u],2u);}
       for(var child=0u;child<factor*factor*factor;child+=1u){
         let q=parentBase+vec3u(child%factor,(child/factor)%factor,child/(factor*factor));
@@ -9065,15 +8852,19 @@ fn transferCandidateCellsWork(lid:vec3u,brick:u32,validBrick:bool){
         // the existing static Q8/rigid capacities. This is not cut-solid PLIC.
         // Unresolved open planes use the same uniform conservative fallback.
         var fraction=0.0;
-        if(parentValid&&totalCapacity>0.0){fraction=parentVolume/totalCapacity*open;}
+        if(parentValid&&totalCapacity>0.0){
+          let represented=min(parentVolume,totalCapacity);
+          let excess=max(0.0,parentVolume-totalCapacity);
+          fraction=(represented+excess)/totalCapacity*open;
+        }
         if(parentValid&&geometric&&parentVolume>0.0&&parentVolume<totalCapacity){
-          let offset=geometry.plane.offset-dot(geometry.plane.normal,
+          let offset=transferPlane.offset-dot(transferPlane.normal,
             cellCenter(cell)-cellCenter(parent));
-          fraction=geometricPlaneBoxFraction(geometry.plane.normal,offset,cellWidths(cell));
+          fraction=geometricPlaneBoxFraction(transferPlane.normal,offset,cellWidths(cell));
         }
         // Bounds constrain allocation into a fresh candidate, not accepted
         // density repair. Any omitted guess remains in the shared budget.
-        fraction=clamp(fraction,0.0,open);
+        fraction=max(0.0,fraction);
         candidateState[candidateFieldIndex(0u,brick,local)]=fraction;
         remaining=transferAccumulateAmount(remaining,-fraction*volume);
       }
@@ -9089,8 +8880,8 @@ fn transferCandidateCellsWork(lid:vec3u,brick:u32,validBrick:bool){
           let at=candidateFieldIndex(0u,brick,local);let previous=candidateState[at];
           let oldAmount=previous*volume;let capacity=cellOpenVolume(cell);
           let residual=remaining.x+remaining.y;
-          let delta=clamp(residual,-oldAmount,max(0.0,capacity-oldAmount));
-          let next=clamp((oldAmount+delta)/volume,0.0,cellOpenFraction(cell));
+          let delta=max(-oldAmount,residual);
+          let next=max(0.0,(oldAmount+delta)/volume);
           candidateState[at]=next;
           remaining=transferAccumulateAmount(remaining,oldAmount);
           remaining=transferAccumulateAmount(remaining,-next*volume);
@@ -9192,14 +8983,14 @@ fn transferCandidateCellsWork(lid:vec3u,brick:u32,validBrick:bool){
       let velocityAt=destinationCellVelocity()+4u*cell;
       velocity=vec3f(state[velocityAt],state[velocityAt+1u],state[velocityAt+2u]);
     }
-    // Reject out-of-capacity refinement/coarsening before publication. The
-    // accepted parent remains authoritative; never clamp a candidate amount.
+    // Excess is a transported extensive amount. Reject only invalid/negative
+    // state, plus positive amount in a exactly closed candidate cell.
     let candidateCapacity=cellOpenFraction(candidateRange.x+local);
     // Match the volume transport's audited f32 interval. Capacity zero stays
     // exact; this accepts representational roundoff without changing amounts.
     let candidateRoundoff=8.0*1.1920928955078125e-7*candidateCapacity;
     if(!finiteTransferValue(rho)||rho< -candidateRoundoff
-      ||rho>candidateCapacity+candidateRoundoff){
+      ||(candidateCapacity==0.0&&rho>candidateRoundoff)){
       atomicStore(&activity[output+23u],2u);
     }
     candidateState[candidateFieldIndex(0u,brick,local)]=rho;
@@ -10251,81 +10042,6 @@ var<workgroup>cm12PresentationResolvedFeature:u32;
 var<workgroup>cm12PresentationUniformPhi:f32;
 var<workgroup>cm12PresentationDensityOffset:u32;
 
-fn cm12PresentationPrepareRdfVertices(lane:u32){
-  if(lane==0u){presentationRdfVertexCacheReady=0u;}
-  workgroupBarrier();
-  let enabled=p.correctionReserved.y<0.5&&GEOMETRIC_INTERFACE_RDF_CACHE_ENABLED
-    &&workgroupUniformLoad(&cm12PresentationResolvedFeature)!=0u;
-  if(enabled){
-    for(var index=lane;index<PRESENTATION_RDF_VERTEX_CAPACITY;index+=64u){
-      let z=index/(PRESENTATION_RDF_VERTEX_AXIS*PRESENTATION_RDF_VERTEX_AXIS);
-      let remainder=index-z*PRESENTATION_RDF_VERTEX_AXIS*PRESENTATION_RDF_VERTEX_AXIS;
-      let y=remainder/PRESENTATION_RDF_VERTEX_AXIS;let x=remainder-y*PRESENTATION_RDF_VERTEX_AXIS;
-      let local=vec3u(x,y,z);
-      let vertex=cm12PresentationPageOrigin
-        +vec3i(local)*i32(cm12PresentationSampleScale);
-      // Pick the page-side octant as the reference component. At a lower page
-      // face that is the positive octant; otherwise it is the negative one.
-      // In connected fluid all incident cells still produce the same vertex
-      // value, while a solid point contact cannot blend across the boundary.
-      let query=vertex+vec3i(select(0,-1,local.x!=0u),
-        select(0,-1,local.y!=0u),select(0,-1,local.z!=0u));
-      let owner=compactOwnerCellAt(query);var value=vec2f(0.0);
-      if(owner.x!=INVALID&&brickActive(owner.y)&&cellActive(owner.x)
-        &&cellOpenFraction(owner.x)>=0.999999){
-        value=geometricResidentRdfVertexValue(owner.x,vertex,
-          cm12PresentationDensityOffset);
-      }
-      presentationRdfVertexCache[index]=value;
-    }
-    workgroupBarrier();
-    if(lane==0u){presentationRdfVertexCacheReady=1u;}
-  }
-  workgroupBarrier();
-}
-
-fn cm12PresentationCachedRdfSample(cell:u32,positionFine:vec3f)->vec2f{
-  if(presentationRdfVertexCacheReady==0u||cellOpenFraction(cell)<0.999999){
-    return vec2f(0.0);
-  }
-  let widths=cellWidths(cell);let lower=cellCenter(cell)-0.5*widths;
-  let sampleScale=i32(cm12PresentationSampleScale);
-  let localLower=vec3i(round(lower))-cm12PresentationPageOrigin;
-  let localUpper=localLower+vec3i(round(widths));
-  if(any(localLower<vec3i(0))||any(localUpper>vec3i(i32(PRESENTATION_PAGE_RESOLUTION)))
-    ||any(localLower%vec3i(sampleScale)!=vec3i(0))
-    ||any(localUpper%vec3i(sampleScale)!=vec3i(0))){return vec2f(0.0);}
-  let first=vec3u(localLower/sampleScale);let last=vec3u(localUpper/sampleScale);
-  let fraction=clamp((positionFine-lower)/widths,vec3f(0.0),vec3f(1.0));
-  var sum=vec2f(0.0);
-  for(var corner=0u;corner<8u;corner+=1u){
-    let vertex=vec3u(select(first.x,last.x,(corner&1u)!=0u),
-      select(first.y,last.y,(corner&2u)!=0u),
-      select(first.z,last.z,(corner&4u)!=0u));
-    let index=vertex.x+PRESENTATION_RDF_VERTEX_AXIS
-      *(vertex.y+PRESENTATION_RDF_VERTEX_AXIS*vertex.z);
-    let value=presentationRdfVertexCache[index];
-    let wx=select(1.0-fraction.x,fraction.x,(corner&1u)!=0u);
-    let wy=select(1.0-fraction.y,fraction.y,(corner&2u)!=0u);
-    let wz=select(1.0-fraction.z,fraction.z,(corner&4u)!=0u);
-    sum+=wx*wy*wz*value;
-  }
-  if(sum.y<=1e-8){return vec2f(0.0);}
-  let value=geometricResidentRdfBoundAtOwner(cell,positionFine,
-    cm12PresentationDensityOffset,sum.x/sum.y);
-  return vec2f(value,1.0);
-}
-
-fn cm12PresentationRdfCacheApplies()->bool{
-  if(cm12PresentationScale==1u){return cm12PresentationResolvedFeature!=0u;}
-  let cached=(cm12PresentationStencilCandidate&1u)!=0u
-    &&cm12PresentationSampleScale==1u&&cm12PresentationCacheFits!=0u;
-  let phases=atomicLoad(&presentationPhaseMask);
-  if(cached&&phases==3u){return true;}
-  if(cached&&phases==2u){return false;}
-  return cm12PresentationResolvedFeature!=0u&&cm12PresentationWet!=0u;
-}
-
 fn cm12PresentationSourceBrick(source:u32)->u32{
   if(PRESENTATION_PAGES_PER_AXIS==4u){
     let macroPage=(source&0x80000000u)!=0u;
@@ -10404,20 +10120,10 @@ fn cm12PresentationPreparePage(brick:u32,page:u32,lane:u32,
     // Generation zero has no feature census, so classify every ordinary coarse
     // page once. Evolved frames reuse the compiled 26-neighbour surface apron
     // instead of reconstructing feature-free bulk pages.
-    cm12PresentationStencilCandidate=select(0u,1u,
-      scale>1u&&cacheCount<=PRESENTATION_CACHE_CAPACITY
-      &&(!uniformBulkReady||(activityReasons&(1u|256u|512u))!=0u
-        ||(cm12PresentationWet!=0u&&activityF32(activityOutput+4u)<1.0-1e-3)
-        ||brickHasPresentationSurfaceSupport(brick)));
+    cm12PresentationStencilCandidate=0u;
     cm12PresentationDensityOffset=select(p.stateOffsets0.x,p.stateOffsets0.y,
       cm12FramePlanAcceptedParity()!=0u);
     presentationHeightFieldValid=0u;
-    cm12PresentationStencilCandidate|=select(0u,2u,
-      sampleScale==1u&&presentationHeightPolicyEnabled(brick)
-        &&(!uniformBulkReady||(activityReasons&(1u|256u|512u))!=0u
-          ||(cm12PresentationWet!=0u
-            &&activityF32(activityOutput+4u)<1.0-1e-3)
-          ||brickHasPresentationSurfaceSupport(brick)));
     // Surface, thin-fluid and cut-boundary bricks retain exact samples. A
     // resolved feature-free brick has one represented phase, so its interior
     // sign is completely described by the already-reduced brick mean.
@@ -10435,52 +10141,12 @@ fn cm12PresentationPreparePage(brick:u32,page:u32,lane:u32,
       &&activityF32(activityOutput+4u)>=CM12_LIQUID_ISOVALUE;
     cm12PresentationUniformPhi=select(4.0*p.frame.y,-4.0*p.frame.y,bulkLiquid);
   }
-  let presentationCandidates=workgroupUniformLoad(&cm12PresentationStencilCandidate);
-  cm12PresentationPrepareRdfVertices(lane);
-  if((presentationCandidates&2u)!=0u){preparePresentationColumnHeights(lane,
-    brick,cm12PresentationPageOrigin,cm12PresentationDensityOffset,false);}
-  if((presentationCandidates&2u)!=0u){
-    let heightReady=workgroupUniformLoad(&presentationHeightFieldValid);
-    if(heightReady!=0u){return 0u;}
-  }
-  // Fine pages, uniform coarse bulk and macro fallback pages must not inherit
-  // the patch path's barriers or scratch traffic. This predicate is written by
-  // lane zero; workgroupUniformLoad supplies both synchronization and a value
-  // the validator can prove is uniform around the candidate-only barriers.
-  if((presentationCandidates&1u)==0u){return 0u;}
-  if(lane==0u){atomicStore(&presentationPhaseMask,0u);}
-  let cacheCount=cm12PresentationCacheDimensions.x*cm12PresentationCacheDimensions.y
-    *cm12PresentationCacheDimensions.z;
-  // Boundary cubes can be owned by the wet or dry page beside a feature. Fill
-  // the whole feature apron so every primal patch sees its canonical nodes.
-  for(var cacheIndex=lane;cacheIndex<cacheCount;cacheIndex+=64u){
-    let cacheZ=cacheIndex/(cm12PresentationCacheDimensions.x
-      *cm12PresentationCacheDimensions.y);
-    let cacheRemainder=cacheIndex-cacheZ*cm12PresentationCacheDimensions.x
-      *cm12PresentationCacheDimensions.y;
-    let cacheY=cacheRemainder/cm12PresentationCacheDimensions.x;
-    let cacheX=cacheRemainder-cacheY*cm12PresentationCacheDimensions.x;
-    let coarse=presentationCanonicalCoarseCoordinate(cm12PresentationCacheFirst
-      +vec3i(i32(cacheX),i32(cacheY),i32(cacheZ)),cm12PresentationScale,brick);
-    presentationDensityCache[cacheIndex]=presentationCompiledDensityAt(
-      coarse*i32(cm12PresentationScale),i32(cm12PresentationScale),
-      cm12PresentationDensityOffset);
-  }
-  workgroupBarrier();
-  for(var cacheIndex=lane;cacheIndex<cacheCount;cacheIndex+=64u){
-    atomicOr(&presentationPhaseMask,select(1u,2u,
-      presentationDensityCache[cacheIndex]>=CM12_LIQUID_ISOVALUE));
-  }
-  workgroupBarrier();
-  if(lane==0u&&cm12PresentationPageOrigin.y==0&&cm12PresentationWet!=0u){
-    atomicOr(&presentationPhaseMask,2u);
-  }
-  workgroupBarrier();
+  _=lane;
   return 0u;
 }
 fn cm12PresentationExactSample(brick:u32,page:u32,tile:u32,sample:u32,
  generation:u32,causeMask:u32)->vec2u{
-  _=generation;_=causeMask;_=brick;
+  _=generation;_=causeMask;_=brick;_=page;
   let localIndex=cm12FppLocalIndex(tile,sample);
   let localZ=localIndex/(PRESENTATION_PAGE_RESOLUTION*PRESENTATION_PAGE_RESOLUTION);
   let localRemainder=localIndex-localZ*PRESENTATION_PAGE_RESOLUTION*PRESENTATION_PAGE_RESOLUTION;
@@ -10488,80 +10154,16 @@ fn cm12PresentationExactSample(brick:u32,page:u32,tile:u32,sample:u32,
   let localX=localRemainder-localY*PRESENTATION_PAGE_RESOLUTION;
   let local=vec3u(localX,localY,localZ);
   let q=cm12PresentationPageOrigin+vec3i(local)*i32(cm12PresentationSampleScale);
-  var phi=cm12PresentationUniformPhi;
+  let positionFine=vec3f(q)+vec3f(0.5);
+  var phi=4.0*p.frame.y;
   let dynamicPage=brickHasUnclippedWorldGeometry(cm12PresentationBrick);
-  if(!dynamicPage&&(any(q<vec3i(0))||any(q>=vec3i(p.dimensions.xyz)))){
-    phi=4.0*p.frame.y;
-  }
-  else if(p.correctionReserved.y<0.5&&presentationRdfVertexCacheReady!=0u
-    &&cm12PresentationRdfCacheApplies()
-    &&cm12SolidVoxelFractionQ8(q)<255u){
-    let owner=presentationCompiledOwnerCellAt(q);
-    if(owner.x!=INVALID&&cellActive(owner.x)){
-      let rdf=cm12PresentationCachedRdfSample(owner.x,vec3f(q)+vec3f(0.5));
-      if(rdf.y>0.0){phi=rdf.x*p.frame.y;
-      }else if(cm12PresentationScale==1u){
-        phi=presentationPhiAt(owner.x,cm12PresentationDensityOffset);
-      }else{
-        phi=presentationInterpolatedDensityPhi(q,cm12PresentationScale,
-          cm12PresentationCacheFirst,cm12PresentationCacheDimensions,
-          (cm12PresentationStencilCandidate&1u)!=0u&&cm12PresentationCacheFits!=0u,
-          cm12PresentationDensityOffset);
-      }
-    }
-  }
-  // The cache is meaningful only when PreparePage selected and filled the
-  // height candidate. Otherwise a zeroed workgroup lane looks like a valid
-  // height and turns a fully wet bulk page into phi=+y.
-  else if(cm12PresentationSampleScale==1u
-    &&(cm12PresentationStencilCandidate&2u)!=0u
-    &&presentationColumnHeightValid(i32(localX),i32(localZ),false)
-    &&cm12SolidVoxelFractionQ8(q)==0u){
-    phi=presentationHeightPhi(q,i32(localX),i32(localZ),false);
-  }
-  else if(cm12PresentationScale==1u){
-    if(cm12PresentationResolvedFeature!=0u&&cm12SolidVoxelFractionQ8(q)<255u){
-        let range=templateBrickCellRange(cm12PresentationBrick,cm12PresentationResolution);
-        var valid=vec3u(BRICK_FINE_RESOLUTION);
-        if(!dynamicPage){valid=min(p.dimensions.xyz-vec3u(cm12PresentationBrickOrigin),
-          vec3u(BRICK_FINE_RESOLUTION));}
-        let localCell=vec3u(q-cm12PresentationBrickOrigin);
-        let localIndex=localCell.x+valid.x*(localCell.y+valid.y*localCell.z);
-        if(localIndex<range.y){let cell=range.x+localIndex;
-          phi=presentationPhiAt(cell,cm12PresentationDensityOffset);
-        }
-    }
-  }else if(cm12SolidVoxelFractionQ8(q)<255u){
-    if((cm12PresentationStencilCandidate&1u)!=0u
-      &&cm12PresentationSampleScale==1u
-      &&cm12PresentationCacheFits!=0u
-      &&atomicLoad(&presentationPhaseMask)==3u){
-      phi=presentationInterpolatedDensityPhi(q,cm12PresentationScale,
-        cm12PresentationCacheFirst,cm12PresentationCacheDimensions,true,
-        cm12PresentationDensityOffset);
-    }else if((cm12PresentationStencilCandidate&1u)!=0u
-      &&cm12PresentationSampleScale==1u
-      &&cm12PresentationCacheFits!=0u
-      &&atomicLoad(&presentationPhaseMask)==2u){
-      phi=-4.0*p.frame.y;
-    }else if(cm12PresentationResolvedFeature!=0u&&cm12PresentationWet!=0u){
-      phi=presentationInterpolatedDensityPhi(q,cm12PresentationScale,
-        cm12PresentationCacheFirst,cm12PresentationCacheDimensions,
-        (cm12PresentationStencilCandidate&1u)!=0u&&cm12PresentationCacheFits!=0u,
-        cm12PresentationDensityOffset);
-    }
-  }
-  var floorContinuation=0u;
-  if(q.y==0&&cm12PresentationSampleScale==1u
-    &&(cm12PresentationStencilCandidate&2u)!=0u
-    &&presentationColumnHeightValid(i32(localX),i32(localZ),false)
-    &&cm12SolidVoxelFractionQ8(q)==0u){
-    floorContinuation=presentationFloorContinuationFlag(
-      q,i32(localX),i32(localZ),false);
+  if((dynamicPage||(all(q>=vec3i(0))&&all(q<vec3i(p.dimensions.xyz))))
+    &&cm12SolidVoxelFractionQ8(q)<255u&&lsvPhiValidAt(positionFine)){
+    phi=lsvPhiAt(positionFine)*p.frame.y;
   }
   // Compact CM12 has no cached closest-point payload. Bits 24..27 of
   // the packed word carry log2(accepted cell width), atomically with phi.
-  let flags=1u|floorContinuation|select(0u,16u,phi<0.0)
+  let flags=1u|select(0u,16u,phi<0.0)
     |((31u-countLeadingZeros(max(1u,cm12PresentationScale)))<<8u);
   return vec2u((pack2x16float(vec2f(phi,0.0))&0xffffu)|(flags<<16u),0u);
 }
@@ -10592,51 +10194,27 @@ fn cm12PresentationRejectAccepted(page:u32){
 ${
   framePlanLayout && framePlanPresentationLayout
     ? /* wgsl */ `
-fn surfaceProofDensityAt(restrictedLocal:vec3i)->f32{
-  let index=vec3u(restrictedLocal+vec3i(3));
-  return surfaceProofDensity[index.x+SURFACE_PROOF_DENSITY_AXIS
-    *(index.y+SURFACE_PROOF_DENSITY_AXIS*index.z)];
-}
-fn surfaceProofVirtualDensityPhi(local:vec3i,factor:u32)->f32{
-  let position=(vec3f(local)+vec3f(0.5))/f32(factor)-vec3f(0.5);
-  let lower=vec3i(floor(position));let t=fract(position);var rho=0.0;
+fn surfaceProofRestrictedPhi(positionFine:vec3f,factor:u32)->f32{
+  let width=f32(factor);
+  let lower=floor(positionFine/width)*width;
+  let t=clamp((positionFine-lower)/width,vec3f(0.0),vec3f(1.0));
+  var phi=0.0;var valid=true;
   for(var z=0;z<2;z+=1){for(var y=0;y<2;y+=1){for(var x=0;x<2;x+=1){
     let weight=select(1.0-t.x,t.x,x==1)*select(1.0-t.y,t.y,y==1)
       *select(1.0-t.z,t.z,z==1);
-    rho+=weight*surfaceProofDensityAt(lower+vec3i(x,y,z));
+    let q=lower+width*vec3f(f32(x),f32(y),f32(z));
+    valid=valid&&lsvPhiMetricAt(q);
+    if(valid){phi+=weight*lsvPhiAt(q);}
   }}}
-  return (CM12_LIQUID_ISOVALUE-rho)*4.0*p.frame.y;
+  return select(4.0*p.frame.y,phi*p.frame.y,valid);
 }
 fn surfaceProofAcceptedPhi(local:vec3i,densityOffset:u32)->f32{
+  _=densityOffset;
   let q=cm12PresentationBrickOrigin+local;
   if(cm12SolidVoxelFractionQ8(q)>=255u){return 4.0*p.frame.y;}
-  let owner=presentationCompiledOwnerCellAt(q);
-  if(owner.x==INVALID||!brickActive(owner.y)){return 4.0*p.frame.y;}
-  // The committed packet is the accepted geometry being certified. Reuse its
-  // quantized scalar instead of reconstructing up to forty native densities
-  // for each proof node. The fallback handles other presentation page shapes.
-  if(PRESENTATION_PAGE_RESOLUTION==BRICK_FINE_RESOLUTION&&brickSpan(owner.y)==1u){
-    let page=cm12FppLoad(cm12FppBrickPages+owner.y);
-    if(page<arrayLength(&fineMetadata)/4u&&fineMetadata[4u*page]==page
-      &&fineMetadata[4u*page+1u]==cm12PresentationLogicalKey(owner.y)
-      &&fineMetadata[4u*page+2u]==1u){
-      let offset=vec3u(q-cm12WorldLeafCoordinate(owner.y)*i32(BRICK_FINE_RESOLUTION));
-      let index=offset.x+PRESENTATION_PAGE_RESOLUTION
-        *(offset.y+PRESENTATION_PAGE_RESOLUTION*offset.z);
-      let packed=fineSamples[page*PRESENTATION_SAMPLES_PER_PAGE+index];
-      if((packed&0x10000u)!=0u){return unpack2x16float(packed).x;}
-    }
-  }
-  let scale=BRICK_FINE_RESOLUTION*brickSpan(owner.y)/owner.z;
-  if(scale==1u){
-    if((atomicLoad(&surfaceProofValid)&2u)!=0u
-      &&presentationColumnHeightValid(local.x,local.z,true)
-      &&cm12SolidVoxelFractionQ8(q)==0u){
-      return presentationHeightPhi(q,local.x,local.z,true);
-    }
-    return presentationPhiAt(owner.x,densityOffset);
-  }
-  return presentationInterpolatedDensityPhi(q,scale,vec3i(0),vec3u(0),false,densityOffset);
+  let positionFine=vec3f(q)+vec3f(0.5);
+  if(!lsvPhiMetricAt(positionFine)){return 4.0*p.frame.y;}
+  return lsvPhiAt(positionFine)*p.frame.y;
 }
 fn surfaceProofPhiAt(local:vec3i,coarse:bool)->f32{
   let q=vec3u(local+vec3i(1));
@@ -10796,24 +10374,6 @@ fn publishSparseCM12SurfaceRepresentabilityReceipts(
     brick,cm12PresentationBrickOrigin,cm12PresentationDensityOffset,true);}
   let targetResolution=surfaceProofTarget;
   let restrictionFactor=surfaceProofRestrictionFactor;
-  let restrictedBase=cm12PresentationBrickOrigin/i32(restrictionFactor);
-  let restrictedAxis=targetResolution+6u;
-  let restrictedCapacity=restrictedAxis*restrictedAxis*restrictedAxis;
-  for(var logicalIndex=lane;logicalIndex<restrictedCapacity;logicalIndex+=64u){
-    let z=logicalIndex/(restrictedAxis*restrictedAxis);
-    let remainder=logicalIndex-z*restrictedAxis*restrictedAxis;
-    let y=remainder/restrictedAxis;
-    let x=remainder-y*restrictedAxis;
-    let restrictedLocal=vec3i(i32(x)-3,i32(y)-3,i32(z)-3);
-    let cacheIndex=x+SURFACE_PROOF_DENSITY_AXIS
-      *(y+SURFACE_PROOF_DENSITY_AXIS*z);
-    let canonical=presentationCanonicalCoarseCoordinate(restrictedBase+restrictedLocal,
-      restrictionFactor,brick);
-    surfaceProofDensity[cacheIndex]=presentationCompiledDensityAt(
-      i32(restrictionFactor)*canonical,i32(restrictionFactor),
-      cm12PresentationDensityOffset);
-  }
-  workgroupBarrier();
   for(var index=lane;index<SURFACE_PROOF_LATTICE_CAPACITY;index+=64u){
     let z=index/(SURFACE_PROOF_LATTICE_AXIS*SURFACE_PROOF_LATTICE_AXIS);
     let remainder=index-z*SURFACE_PROOF_LATTICE_AXIS*SURFACE_PROOF_LATTICE_AXIS;
@@ -10822,20 +10382,16 @@ fn publishSparseCM12SurfaceRepresentabilityReceipts(
     let local=vec3i(i32(x)-1,i32(y)-1,i32(z)-1);
     let fine=surfaceProofAcceptedPhi(local,cm12PresentationDensityOffset);
     let world=cm12PresentationBrickOrigin+local;
-    var coarse=surfaceProofVirtualDensityPhi(local,restrictionFactor);
-    if(cm12SolidVoxelFractionQ8(world)>=255u){coarse=4.0*p.frame.y;
-    }else if((proofMode&2u)!=0u
-      &&presentationColumnHeightValid(local.x,local.z,true)
-      &&cm12SolidVoxelFractionQ8(world)==0u){
-      coarse=presentationHeightPhi(world,local.x,local.z,true);
-    }
+    var coarse=surfaceProofRestrictedPhi(vec3f(world)+vec3f(0.5),restrictionFactor);
+    if(cm12SolidVoxelFractionQ8(world)>=255u){coarse=4.0*p.frame.y;}
     surfaceProofPhi[index]=vec2f(fine,coarse);
   }
   workgroupBarrier();
   // A demotion must satisfy the curvature criterion at the proposed rung,
   // not only resemble the currently published contour. Otherwise restriction
   // can immediately request its inverse refinement, repeatedly remapping a
-  // stationary interface. Reuse the virtual restricted-density cache.
+  // stationary interface. Evaluate the candidate-rung interpolation of the
+  // accepted metric phi field directly.
   var normalMin=vec3f(1e30);var normalMax=vec3f(-1e30);
   if(coarseFirstEnabled()){
     let n=targetResolution;
@@ -10843,16 +10399,20 @@ fn publishSparseCM12SurfaceRepresentabilityReceipts(
     for(var index=lane;index<samples;index+=64u){
       var q=vec3i(i32(index%n),i32((index/n)%n),i32(index/(n*n)));
       if(n==1u){q=vec3i(0);if(index>0u){q[(index-1u)/2u]=select(-1,1,(index&1u)==0u);}}
-      let rho=surfaceProofDensityAt(q);var hasInterface=rho>0.0&&rho<1.0;
+      let step=f32(restrictionFactor);
+      let position=vec3f(cm12PresentationBrickOrigin)+(vec3f(q)+vec3f(0.5))*step;
+      let phi=surfaceProofRestrictedPhi(position,restrictionFactor);
+      var hasInterface=abs(phi)<=0.75*step*p.frame.y;
       var gradient=vec3f(0.0);
       for(var axis=0u;axis<3u;axis+=1u){
-        var d=vec3i(0);d[axis]=1;
-        let lo=surfaceProofDensityAt(q-d);let hi=surfaceProofDensityAt(q+d);
-        hasInterface=hasInterface||((lo>=0.5)!=(rho>=0.5))||((hi>=0.5)!=(rho>=0.5));
+        var d=vec3f(0.0);d[axis]=step;
+        let lo=surfaceProofRestrictedPhi(position-d,restrictionFactor);
+        let hi=surfaceProofRestrictedPhi(position+d,restrictionFactor);
+        hasInterface=hasInterface||((lo<0.0)!=(phi<0.0))||((hi<0.0)!=(phi<0.0));
         gradient[axis]=hi-lo;
       }
       let magnitude=length(gradient);
-      if(hasInterface&&magnitude>0.05){let normal=gradient/magnitude;
+      if(hasInterface&&magnitude>1e-6){let normal=gradient/magnitude;
         normalMin=min(normalMin,normal);normalMax=max(normalMax,normal);}
     }
   }
@@ -10978,43 +10538,10 @@ fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
     &&!brickHasPresentationSurfaceSupport(brick));
   if(lane==0u){
     cm12PresentationBrick=brick;
-    cm12PresentationStencilCandidate=select(0u,1u,wantsStencil);
+    cm12PresentationStencilCandidate=0u;
     presentationHeightFieldValid=0u;
-    cm12PresentationStencilCandidate|=select(0u,2u,
-      sampleScale==1u&&presentationHeightPolicyEnabled(brick)
-        &&(!uniformBulkReady||(activityReasons&(1u|256u|512u))!=0u
-          ||(wet&&activityF32(activityRecord(brick)+4u)<1.0-1e-3)
-          ||brickHasPresentationSurfaceSupport(brick)));
   }
-  let presentationCandidates=workgroupUniformLoad(&cm12PresentationStencilCandidate);
-  let heightCandidate=(presentationCandidates&2u)!=0u;
-  if(heightCandidate){preparePresentationColumnHeights(lane,brick,pageOrigin,
-    destinationDensity(),false);}
-  var heightReady=false;
-  if(heightCandidate){heightReady=
-    workgroupUniformLoad(&presentationHeightFieldValid)!=0u;}
-  let stencilCandidate=(presentationCandidates&1u)!=0u&&!heightReady;
-  if(stencilCandidate){
-    if(lane==0u){atomicStore(&presentationPhaseMask,0u);}
-    for(var cacheIndex=lane;cacheIndex<cacheCount;cacheIndex+=64u){
-      let cacheZ=cacheIndex/(cacheDimensions.x*cacheDimensions.y);
-      let cacheRemainder=cacheIndex-cacheZ*cacheDimensions.x*cacheDimensions.y;
-      let cacheY=cacheRemainder/cacheDimensions.x;
-      let cacheX=cacheRemainder-cacheY*cacheDimensions.x;
-      let coarse=presentationCanonicalCoarseCoordinate(cacheFirst
-        +vec3i(i32(cacheX),i32(cacheY),i32(cacheZ)),scale,brick);
-      presentationDensityCache[cacheIndex]=restrictedPresentationDensity(
-        coarse*i32(scale),i32(scale));
-    }
-    workgroupBarrier();
-    for(var cacheIndex=lane;cacheIndex<cacheCount;cacheIndex+=64u){
-      atomicOr(&presentationPhaseMask,select(1u,2u,
-        presentationDensityCache[cacheIndex]>=CM12_LIQUID_ISOVALUE));
-    }
-    workgroupBarrier();
-    if(lane==0u&&pageOrigin.y==0&&wet){atomicOr(&presentationPhaseMask,2u);}
-    workgroupBarrier();
-  }
+  workgroupBarrier();
   for(var localIndex=lane;localIndex<PRESENTATION_SAMPLES_PER_PAGE;localIndex+=64u){
     let localZ=localIndex/(PRESENTATION_PAGE_RESOLUTION*PRESENTATION_PAGE_RESOLUTION);
     let localRemainder=localIndex-localZ*PRESENTATION_PAGE_RESOLUTION*PRESENTATION_PAGE_RESOLUTION;
@@ -11022,56 +10549,14 @@ fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
     let localX=localRemainder-localY*PRESENTATION_PAGE_RESOLUTION;
     let local=vec3u(localX,localY,localZ);
     let q=pageOrigin+vec3i(local)*i32(sampleScale);
-    let bulkLiquid=wet&&activityF32(activityRecord(brick)+4u)>=CM12_LIQUID_ISOVALUE;
-    var phi=select(4.0*p.frame.y,-4.0*p.frame.y,bulkLiquid);
+    var phi=4.0*p.frame.y;
     let dynamicPage=brickHasUnclippedWorldGeometry(brick);
-    var coarsePhase=0u;
-    if(stencilCandidate){coarsePhase=atomicLoad(&presentationPhaseMask);}
-    let coarseSurfaceSupport=scale>1u&&sampleScale==1u&&cacheFits
-      &&stencilCandidate&&coarsePhase==3u;
-    let coarseUniformLiquid=scale>1u&&sampleScale==1u&&cacheFits
-      &&stencilCandidate&&coarsePhase==2u;
-    if(dynamicPage||(all(q>=vec3i(0))&&all(q<vec3i(p.dimensions.xyz)))){
-      if(sampleScale==1u&&heightCandidate
-        &&presentationColumnHeightValid(i32(localX),i32(localZ),false)
-        &&cm12SolidVoxelFractionQ8(q)==0u){
-        phi=presentationHeightPhi(q,i32(localX),i32(localZ),false);
-      }else if(scale==1u){
-        if(resolvedFeature&&cm12SolidVoxelFractionQ8(q)<255u){
-          // Metadata already names the source brick and subpage. Fine pages can
-          // address their packed source cell directly; resolving q through the
-          // sparse directory here would redo a hash lookup for every output sample.
-          let range=templateBrickCellRange(brick,resolution);
-          var valid=vec3u(BRICK_FINE_RESOLUTION);
-          if(!dynamicPage){valid=min(p.dimensions.xyz-vec3u(brickOrigin),
-            vec3u(BRICK_FINE_RESOLUTION));}
-          let localCell=vec3u(q-brickOrigin);
-          let localCellIndex=localCell.x+valid.x*(localCell.y+valid.y*localCell.z);
-          if(localCellIndex<range.y){let cell=range.x+localCellIndex;
-            phi=presentationPhi(cell);
-          }
-        }
-      }else if((wet||coarseSurfaceSupport||coarseUniformLiquid)
-        &&cm12SolidVoxelFractionQ8(q)<255u){
-        if(coarseSurfaceSupport){
-          phi=presentationInterpolatedDensityPhi(q,scale,cacheFirst,
-            cacheDimensions,true,destinationDensity());
-        }else if(coarseUniformLiquid){
-          phi=-4.0*p.frame.y;
-        }else if(resolvedFeature&&wet){
-          phi=presentationInterpolatedDensityPhi(q,scale,cacheFirst,
-            cacheDimensions,stencilCandidate&&cacheFits,destinationDensity());
-        }
-      }
+    let positionFine=vec3f(q)+vec3f(0.5);
+    if((dynamicPage||(all(q>=vec3i(0))&&all(q<vec3i(p.dimensions.xyz))))
+      &&cm12SolidVoxelFractionQ8(q)<255u&&lsvPhiValidAt(positionFine)){
+      phi=lsvPhiAt(positionFine)*p.frame.y;
     }
-    var floorContinuation=0u;
-    if(q.y==0&&sampleScale==1u&&heightCandidate
-      &&presentationColumnHeightValid(i32(localX),i32(localZ),false)
-      &&cm12SolidVoxelFractionQ8(q)==0u){
-      floorContinuation=presentationFloorContinuationFlag(
-        q,i32(localX),i32(localZ),false);
-    }
-    let flags=1u|floorContinuation|select(0u,16u,phi<0.0)
+    let flags=1u|select(0u,16u,phi<0.0)
       |((31u-countLeadingZeros(max(1u,scale)))<<8u);
     fineSamples[page*PRESENTATION_SAMPLES_PER_PAGE+localIndex]
       =(pack2x16float(vec2f(phi,0.0))&0xffffu)|(flags<<16u);

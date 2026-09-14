@@ -44,6 +44,7 @@ fn transferAmountTolerance(capacity:f32)->f32{return 9.5367431640625e-7*capacity
 fn transferAmountValid(amount:f32,capacity:f32)->bool{
  let tolerance=transferAmountTolerance(capacity);
  return capacity>=0.0&&capacity<=3.402823466e38
-   &&amount>=-tolerance&&amount<=capacity+tolerance;
+   &&amount>=-tolerance&&amount<=3.402823466e38
+   &&(capacity>0.0||amount<=tolerance);
 }
 `;

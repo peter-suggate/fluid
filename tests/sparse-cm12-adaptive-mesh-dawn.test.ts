@@ -519,7 +519,7 @@ function curvedPublishedMetrics(mesh:Float32Array,vertexCount:number,
  * FPP publication -> shipping global-fine mesh consumer. The two modes use
  * one accepted resident and a paused configuration republish, so any shape or
  * volume difference is presentation-only. */
-dawnTest("shipping RDF publishes closed curved VOF surfaces across a B8:B4 join",
+dawnTest("adaptive phi publishes closed curved surfaces across a B8:B4 join",
   {timeout:300000},async()=>{
   await acquireWebGPUExclusiveLock("dawn-test","shipping-curved-rdf");
   let device:GPUDevice|undefined,solver:WebGPUAdaptiveMassSolver|undefined,gpu:GPU|undefined;
@@ -558,7 +558,8 @@ dawnTest("shipping RDF publishes closed curved VOF surfaces across a B8:B4 join"
         {...adaptiveMassSolverOptions(values),initialResolutionForQA:4,
           maximumMacroSpanBricks:1,topologyPageBudget:0},()=>{});
       await solver.waitForSimulationReady();await solver.waitForTopologyReady();
-      assert.equal(solver.presentationSurfaceMode,"rdf","fresh default must select shipping RDF");
+      assert.equal(solver.presentationSurfaceMode,"rdf",
+        "legacy presentation control default must remain stable during phi cutover");
       const activity=await solver.readGPUActivityPolicy();
       const physicsClock={encodedSteps:solver.info.encodedSteps??0,
         acceptedSteps:activity.acceptedSteps,
@@ -591,10 +592,6 @@ dawnTest("shipping RDF publishes closed curved VOF surfaces across a B8:B4 join"
       const densityBefore=new Uint32Array(density.buffer.slice(0));
       const initialSamples=new Uint32Array(await read(device,solver.globalFineLevelSetSource.samples,
         solver.globalFineLevelSetSource.plan.payloadCapacityBytes));
-      const planes=new Float32Array(await read(device,snapshot.state,16*snapshot.cellCapacity,
-        4*snapshot.layout.geometricInterfacePlanes));
-      const rdfCache=new Float32Array(await read(device,snapshot.state,16*snapshot.cellCapacity,
-        4*snapshot.layout.geometricInterfaceRdf));
       const rdf=await runField(device,`${name}-shipping-rdf`,2,()=>0,false,solver.globalFineLevelSetSource);
       const rdfShape=curvedPublishedMetrics(rdf.mesh,rdf.metrics.vertexCount,shape.residual);
       solver.applyRuntimeValues({...values,presentationSurface:"plic"});
@@ -633,7 +630,8 @@ dawnTest("shipping RDF publishes closed curved VOF surfaces across a B8:B4 join"
       assert.deepEqual(republishedSamples,initialSamples,`${name}: RDF republish is not deterministic`);
       let changedPublishedSamples=0;
       for(let i=0;i<initialSamples.length;i++)changedPublishedSamples+=Number(initialSamples[i]!==plicSamples[i]);
-      assert.ok(changedPublishedSamples>0,`${name}: RDF/PLIC toggle did not exercise distinct fields`);
+      assert.equal(changedPublishedSamples,0,
+        `${name}: legacy RDF/PLIC control changed the adaptive-phi publication`);
       const activityAfter=await solver.readGPUActivityPolicy();
       assert.deepEqual({encodedSteps:solver.info.encodedSteps??0,
         acceptedSteps:activityAfter.acceptedSteps,
@@ -643,8 +641,8 @@ dawnTest("shipping RDF publishes closed curved VOF surfaces across a B8:B4 join"
       assert.equal(rdf.metrics.nonManifoldEdgeCount,0,`${name}: RDF is non-manifold`);
       assert.equal(rdf.metrics.nonFiniteCount,0);assert.equal(rdf.metrics.degenerateTriangleCount,0);
       const acceptedVolumeRelativeError=Math.abs(rdfShape.volume_m3-acceptedVolume)/acceptedVolume;
-      const receipt={shippingCurvedRdf:name,sourceMode:solver.presentationSurfaceMode,
-        columnPolicy:"auto (RDF bypass; PLIC evaluates legacy auto)",physicsClock,
+      const receipt={shippingAdaptivePhi:name,sourceMode:"adaptive-phi",
+        columnPolicy:"adaptive phi authority",physicsClock,
         coordinateConvention:{authoredOrigin_m:[-.8,0,-.6],meshOrigin_m:[0,0,0],
           fineCellWidth_m:fineWidth,cellCenters:"centerFine is in finest-cell coordinates from authoredOrigin_m"},
         acceptedVolume_m3:acceptedVolume,analyticVolume_m3:shape.analyticVolume,
@@ -663,10 +661,8 @@ dawnTest("shipping RDF publishes closed curved VOF surfaces across a B8:B4 join"
         metadata:`${binaryPrefix}-metadata.bin`,worklist:`${binaryPrefix}-worklist.bin`},
         presentationPlan:solver.globalFineLevelSetSource.plan,
         acceptedCells:acceptedCells.map(cell=>({
-        id:cell.id,centerFine:cell.center,widthFine:cell.width,density:density[cell.id]!,capacity:1,
-        plic:[planes[4*cell.id]!,planes[4*cell.id+1]!,planes[4*cell.id+2]!,planes[4*cell.id+3]!],
-        rdf:[rdfCache[4*cell.id]!,rdfCache[4*cell.id+1]!,rdfCache[4*cell.id+2]!,
-          rdfCache[4*cell.id+3]!]}))});
+        id:cell.id,centerFine:cell.center,widthFine:cell.width,
+        density:density[cell.id]!,capacity:1}))});
       await mkdir("artifacts/advance-slice",{recursive:true});
       const metadata=new Uint32Array(await read(device,solver.globalFineLevelSetSource.metadata,
         solver.globalFineLevelSetSource.metadata.size));

@@ -162,6 +162,8 @@ const candidatePlanTimedWork = Object.freeze({
       label: "frontier activation and retirement",
       entryPoints: Object.freeze([
         "activateSweptFrontierPages",
+        "reserveGeometricTransportFaceSupport",
+        "enforceGeometricDynamicSeamFloor",
         "retireUnsupportedEmptyBricks",
       ]),
     },
@@ -177,6 +179,8 @@ const candidatePlanTimedWork = Object.freeze({
       label: "budget scheduling of backed candidate topology",
       entryPoints: Object.freeze([
         "scheduleTopologyPreparation",
+        "certifyGeometricTopologyFaces",
+        "sealGeometricTopologyFaces",
       ]),
     },
     {
@@ -350,30 +354,24 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       : "supported rows",
   },
   "conservative-transport": {
-    label: "Geometric volume transport", band: "transport", side: "left",
+    label: "Adaptive level set and volume transport", band: "transport", side: "left",
     phase: {
       id: "fine-sdf-advection",
-      label: "CFL-substepped geometric volume transport",
+      label: "Adaptive phi and whole-frame volume transport",
     },
     substages: {
-      "transport-trace": {
-        id: "fine-sdf-advection", label: "Geometric subface and CFL-plan setup",
-      },
-      "transport-scatter": {
-        id: "fine-sdf-advection", label: "PLIC flux and bounded low-flux iteration",
-      },
       "transport-gather": {
-        id: "fine-sdf-advection", label: "Geometric FCT validation and volume commit",
+        id: "fine-sdf-advection", label: "Conservative volume gather and commit",
       },
     },
     lens: null,
     tip: {
-      summary: "Chooses synchronized internal steps from the face-flux CFL, reconstructs accepted liquid interfaces, and computes shared PLIC swept-prism fluxes. Bounded shared fluxes and FCT correction keep each committed liquid volume within its moving solid capacity; every cell validates before publication, and sources and solid motion advance with the same internal step. Timing includes the waits between transport batches.",
-      reads: "liquid volume and capacity, projected face velocity, geometric interfaces and physical subfaces",
-      writes: "bounded liquid volume, volume-derived density and transport receipts",
-      feeds: "scalar and interface publication",
+      summary: "Advects the accepted adaptive phi field, builds a sparse whole-frame donor/receiver coupling, normalizes its marginals, and gathers extensive liquid volume once. Excess volume remains explicit for the pressure source instead of being clipped to cell capacity.",
+      reads: "adaptive phi, extensive liquid volume, cell capacity, projected face velocity and compiled topology",
+      writes: "advected adaptive phi, conservative liquid volume and transport receipts",
+      feeds: "pressure, adaptivity and presentation publication",
     },
-    chip: () => "PLIC flux · bounded FCT · CFL substeps",
+    chip: () => "adaptive phi · whole-frame volume",
   },
   "tracer-advection": {
     label: "Marker advection", band: "transport", side: "right",

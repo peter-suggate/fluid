@@ -29,6 +29,7 @@ fn main(@builtin(global_invocation_id)id:vec3u){
   let requested=select(current,a[at+47u],a[at+47u]!=0u);
   let activation=(a[at+9u]&0x80000000u)!=0u;
   let frozenFrontier=(a[at+9u]&0x00020000u)!=0u;
+  if(isActive||activation){atomicAdd(&receipt[2],requested*requested*requested);}
   if(frozenFrontier){atomicOr(&receipt[0],1u);}
   if(p.limits.w!=0u){return;}
   let reasons=a[at+1u];let travel=bitcast<f32>(a[at+33u]);
@@ -48,11 +49,11 @@ fn main(@builtin(global_invocation_id)id:vec3u){
     const descriptors = device.createBuffer({ label: "CM12 planning leaf metadata",
       size: Math.max(4, metadata.byteLength), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     const receipt = device.createBuffer({ label: "CM12 planning request receipt",
-      size: 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+      size: 12, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     const parameters = device.createBuffer({ label: "CM12 planning gate parameters",
       size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const readback = device.createBuffer({ label: "CM12 planning request readback",
-      size: 8, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      size: 12, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
     if (metadata.byteLength) writeGPUBufferView(device.queue, descriptors, 0, metadata);
     const group = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries:
       [activity, descriptors, receipt, parameters].map((buffer, binding) => ({ binding, resource: { buffer } })) });
@@ -61,7 +62,7 @@ fn main(@builtin(global_invocation_id)id:vec3u){
   }
 
   async needed(maximumSpan: number, demoteEpochs: number, finestTravel: number,
-    frozenFrontierOnly = false): Promise<boolean> {
+    frozenFrontierOnly = false, maximumCells = Number.POSITIVE_INFINITY): Promise<boolean> {
     const [, receipt, parameters, readback] = this.buffers;
     const data = new ArrayBuffer(32);
     new Uint32Array(data).set([this.count, maximumSpan, demoteEpochs, Number(frozenFrontierOnly)]);
@@ -72,12 +73,12 @@ fn main(@builtin(global_invocation_id)id:vec3u){
     const pass = encoder.beginComputePass();
     pass.setPipeline(this.pipeline); pass.setBindGroup(0, this.group);
     pass.dispatchWorkgroups(Math.ceil(this.count / 64)); pass.end();
-    encoder.copyBufferToBuffer(receipt!, 0, readback!, 0, 8);
+    encoder.copyBufferToBuffer(receipt!, 0, readback!, 0, 12);
     this.device.queue.submit([encoder.finish()]);
     await readback!.mapAsync(GPUMapMode.READ);
     try {
       const words = new Uint32Array(readback!.getMappedRange());
-      return words[0] !== 0 || words[1]! >= 8;
+      return words[0] !== 0 || words[1]! >= 8 || words[2]! > maximumCells;
     } finally { readback!.unmap(); }
   }
 
