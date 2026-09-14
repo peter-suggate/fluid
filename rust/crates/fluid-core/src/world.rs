@@ -17,7 +17,8 @@ use crate::resolution::{
     ResolutionPolicyOptions, ResolutionPolicyReceipt, ResolutionPolicyState,
 };
 use crate::scalar_authority::{
-    publish_scalar_interface_state_from_geometric_density, ScalarAuthority,
+    publish_scalar_interface_state_from_geometric_density,
+    publish_scalar_state_preserving_interface, ScalarAuthority,
 };
 use crate::scene::{compile_scene_2d, SceneDescription, SceneState};
 use crate::sources::SourceLedger;
@@ -31,6 +32,64 @@ use crate::{
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+#[derive(Clone, Copy, Debug)]
+struct NativeStageClock {
+    #[cfg(not(target_arch = "wasm32"))]
+    started: std::time::Instant,
+}
+
+impl NativeStageClock {
+    fn start() -> Self {
+        Self {
+            #[cfg(not(target_arch = "wasm32"))]
+            started: std::time::Instant::now(),
+        }
+    }
+
+    fn elapsed_nanoseconds(self) -> u64 {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            return self.started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            0
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorldStageTimings {
+    /// Timings use the native monotonic clock. Wasm receipts explicitly mark
+    /// them unavailable rather than presenting zeros as measured work.
+    pub available: bool,
+    pub field_build: u64,
+    pub primary_pressure: u64,
+    pub support_planning_transfer: u64,
+    pub post_support_pressure: u64,
+    pub transport: u64,
+    pub post_transport: u64,
+    pub resolution_publication: u64,
+    pub other: u64,
+    pub total_advance: u64,
+}
+
+impl WorldStageTimings {
+    fn finish(&mut self, total_clock: NativeStageClock) {
+        self.total_advance = total_clock.elapsed_nanoseconds();
+        let attributed = self
+            .field_build
+            .saturating_add(self.primary_pressure)
+            .saturating_add(self.support_planning_transfer)
+            .saturating_add(self.post_support_pressure)
+            .saturating_add(self.transport)
+            .saturating_add(self.post_transport)
+            .saturating_add(self.resolution_publication);
+        self.other = self.total_advance.saturating_sub(attributed);
+    }
+}
+
 /// Selects the experimental 2D volume-transport path. The baseline remains
 /// the production transport unless a lab caller opts in explicitly.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -42,6 +101,8 @@ pub enum TransportExperiment {
     CellwiseProbe,
     /// Commit material with one cellwise whole-step remap.
     CellwiseRemap,
+    /// Conservative volume coupled to an advected signed-distance surface.
+    LevelSetVolume,
     /// Configured cellwise run used to sweep fixed RK4 segment counts after
     /// the M2 trajectory-crossing stop. This remains one WorldOptions field.
     Configured {
@@ -92,11 +153,14 @@ impl TransportExperiment {
 
     pub fn cellwise_mode(self) -> Option<CellwiseTransportMode> {
         match self {
-            Self::Baseline => None,
+            Self::Baseline | Self::LevelSetVolume => None,
             Self::CellwiseProbe => Some(CellwiseTransportMode::Probe),
             Self::CellwiseRemap => Some(CellwiseTransportMode::Remap),
             Self::Configured { mode, .. } => Some(mode),
         }
+    }
+    pub fn is_levelset_volume(self) -> bool {
+        matches!(self, Self::LevelSetVolume)
     }
 
     pub fn trace_segments(self) -> usize {
@@ -127,6 +191,7 @@ enum TransportExperimentName {
     Baseline,
     CellwiseProbe,
     CellwiseRemap,
+    LevelSetVolume,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -161,10 +226,13 @@ enum TransportExperimentRepresentation {
 
 impl Serialize for TransportExperiment {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let name = match self.cellwise_mode() {
-            None => TransportExperimentName::Baseline,
-            Some(CellwiseTransportMode::Probe) => TransportExperimentName::CellwiseProbe,
-            Some(CellwiseTransportMode::Remap) => TransportExperimentName::CellwiseRemap,
+        let name = match self {
+            Self::Baseline => TransportExperimentName::Baseline,
+            Self::LevelSetVolume => TransportExperimentName::LevelSetVolume,
+            Self::CellwiseProbe => TransportExperimentName::CellwiseProbe,
+            Self::CellwiseRemap => TransportExperimentName::CellwiseRemap,
+            Self::Configured { mode: CellwiseTransportMode::Probe, .. } => TransportExperimentName::CellwiseProbe,
+            Self::Configured { mode: CellwiseTransportMode::Remap, .. } => TransportExperimentName::CellwiseRemap,
         };
         if matches!(self, Self::Configured { .. }) {
             ConfiguredTransportExperiment {
@@ -193,6 +261,7 @@ impl<'de> Deserialize<'de> for TransportExperiment {
             TransportExperimentRepresentation::Name(TransportExperimentName::CellwiseRemap) => {
                 Ok(Self::CellwiseRemap)
             }
+            TransportExperimentRepresentation::Name(TransportExperimentName::LevelSetVolume) => Ok(Self::LevelSetVolume),
             TransportExperimentRepresentation::Configured(config) => {
                 let mode = match config.mode {
                     TransportExperimentName::Baseline => {
@@ -200,6 +269,9 @@ impl<'de> Deserialize<'de> for TransportExperiment {
                             "baseline transport does not accept traceSegments",
                         ))
                     }
+                    TransportExperimentName::LevelSetVolume => return Err(serde::de::Error::custom(
+                        "level-set-volume transport does not accept cellwise options",
+                    )),
                     TransportExperimentName::CellwiseProbe => CellwiseTransportMode::Probe,
                     TransportExperimentName::CellwiseRemap => CellwiseTransportMode::Remap,
                 };
@@ -274,9 +346,13 @@ pub struct WorldReceipt<'a> {
     #[serde(flatten)]
     pub revision: &'a Revision,
     pub pressure: &'a PressureReceipt,
+    pub stage_timings: &'a WorldStageTimings,
     pub microsteps: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cellwise_remap: Option<&'a crate::adaptive_remap::CellwiseRemapReceipt>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level_set_volume: Option<&'a crate::levelset_volume::LevelSetVolumeReceipt>,
+    pub interface_seams: crate::levelset_volume::InterfaceSeamReceipt,
     pub source_ledger: &'a SourceLedger,
     pub tracers: TracerReceipt,
     pub liquid_measure: f64,
@@ -344,9 +420,12 @@ pub struct World {
     pub revision: Revision,
     pub options: WorldOptions,
     pub pressure: PressureReceipt,
+    pub stage_timings: WorldStageTimings,
     pub source_ledger: SourceLedger,
     pub microsteps: usize,
     pub cellwise_remap_receipt: Option<crate::adaptive_remap::CellwiseRemapReceipt>,
+    pub level_set_volume_receipt: Option<crate::levelset_volume::LevelSetVolumeReceipt>,
+    pub level_set_phi: Vec<f32>,
     pub tracers: Tracers,
     pub tracer_receipt: TracerReceipt,
     pub physical: Option<PhysicalContext>,
@@ -456,15 +535,32 @@ impl World {
             state.topology.graph.topology_generation,
             0,
         );
-        reconstruct_interfaces(&state.topology.graph, &mut state.fields)?;
+        if options.transport_experiment.is_levelset_volume() {
+            state.fields.interface_normal.fill(0.0);
+            state.fields.interface_offset.fill(0.0);
+        } else {
+            reconstruct_interfaces(&state.topology.graph, &mut state.fields)?;
+        }
         let rdf_topology = RdfTopology::compile(&state.topology.graph)?;
         let rdf_support = Self::support_for(&state);
-        let surface = reconstruct_shared_rdf(
-            &state.topology.graph,
-            &state.fields,
-            &rdf_topology,
-            &rdf_support,
-        )?;
+        let surface = if options.transport_experiment.is_levelset_volume() {
+            crate::levelset_surface::initialize_from_volume(
+                &state.topology.graph,
+                &state.fields,
+            )?
+        } else {
+            reconstruct_shared_rdf(
+                &state.topology.graph,
+                &state.fields,
+                &rdf_topology,
+                &rdf_support,
+            )?
+        };
+        let level_set_phi = if options.transport_experiment.is_levelset_volume() {
+            crate::levelset_surface::cell_phi(&state.topology.graph, &surface)?
+        } else {
+            Vec::new()
+        };
         let revision = Revision {
             schema_version: 1,
             dimension: 2,
@@ -510,9 +606,15 @@ impl World {
             revision,
             options,
             pressure: PressureReceipt::default(),
+            stage_timings: WorldStageTimings {
+                available: !cfg!(target_arch = "wasm32"),
+                ..Default::default()
+            },
             source_ledger: SourceLedger::default(),
             microsteps: 1,
             cellwise_remap_receipt: None,
+            level_set_volume_receipt: None,
+            level_set_phi,
             tracers,
             tracer_receipt: TracerReceipt::default(),
             physical: None,
@@ -560,8 +662,18 @@ impl World {
         WorldReceipt {
             revision: &self.revision,
             pressure: &self.pressure,
+            stage_timings: &self.stage_timings,
             microsteps: self.microsteps,
             cellwise_remap: self.cellwise_remap_receipt.as_ref(),
+            level_set_volume: self.level_set_volume_receipt.as_ref(),
+            interface_seams: if self.options.transport_experiment.is_levelset_volume() {
+                crate::levelset_volume::InterfaceSeamReceipt::default()
+            } else {
+                crate::levelset_volume::interface_seam_receipt(
+                    &self.state.topology.graph,
+                    &self.state.fields,
+                )
+            },
             source_ledger: &self.source_ledger,
             tracers: self.tracer_receipt,
             liquid_measure: self
@@ -649,6 +761,11 @@ impl World {
         dt_s: f64,
         mut observe: impl FnMut(&str, &crate::Graph, &Fields),
     ) -> Result<(), ValidationError> {
+        let total_clock = NativeStageClock::start();
+        self.stage_timings = WorldStageTimings {
+            available: !cfg!(target_arch = "wasm32"),
+            ..Default::default()
+        };
         self.check_sequence(sequence)?;
         let dt = dt_s as f32;
         if !dt_s.is_finite() || !dt.is_finite() || dt <= 0.0 {
@@ -661,6 +778,15 @@ impl World {
                 "moving geometry requires a physical scene context".into(),
             ));
         }
+        let level_set_volume = self.options.transport_experiment.is_levelset_volume();
+        if level_set_volume && self.physical.as_ref().is_some_and(|physical| {
+            !physical.scene.rigid_bodies.is_empty() || physical.scene.fluid.inflow.is_some()
+        }) {
+            return Err(ValidationError(
+                "level-set-volume does not support rigid bodies or inflow sources".into(),
+            ));
+        }
+        let field_build_clock = NativeStageClock::start();
         self.view_history.capture_bricks(&self.state);
         self.state.fields.fault = None;
         self.state.fields.frame_dt = dt;
@@ -707,12 +833,20 @@ impl World {
             let fields = &mut self.state.fields;
             force_faces(graph, fields, dt, fields.acceleration_fine, inflow);
             observe("body-forces", graph, fields);
-            if cellwise_remap {
+            if level_set_volume {
+                crate::levelset_volume::publish_pressure_geometry_from_phi(
+                    graph,
+                    fields,
+                    &self.level_set_phi,
+                )?;
+            } else if cellwise_remap {
                 reconstruct_interfaces_for_cellwise_remap(graph, fields)?;
             } else {
                 reconstruct_interfaces(graph, fields)?;
             }
             observe("interface-reconstruction", graph, fields);
+            self.stage_timings.field_build = field_build_clock.elapsed_nanoseconds();
+            let primary_pressure_clock = NativeStageClock::start();
             if let Some(embedding) = &mut self.embedding {
                 let prepared = embedding.prepare(graph, fields);
                 fields.pressure_diagonal.clone_from(&prepared.diagonal);
@@ -785,7 +919,9 @@ impl World {
             enforce_inflow_faces(graph, fields, inflow);
             collocate_velocity(graph, fields);
             observe("velocity-projection", graph, fields);
+            self.stage_timings.primary_pressure = primary_pressure_clock.elapsed_nanoseconds();
         }
+        let support_clock = NativeStageClock::start();
         let support = plan_projected_transport_support(
             &self.state.topology,
             &self.state.fields,
@@ -795,7 +931,7 @@ impl World {
             Some(self.arena.maximum_slice_leaves),
             Some(self.arena.capacity as usize * 64),
             &self.arena.free_leaf_ids,
-            cellwise_remap,
+            cellwise_remap || level_set_volume,
         )
         .map_err(|e| ValidationError(format!("projected support: {e:?}")))?;
         if support.fault_bits != 0 {
@@ -813,7 +949,15 @@ impl World {
                     &mut self.state.fields,
                 )?;
             }
-            if cellwise_remap {
+            if level_set_volume {
+                crate::levelset_volume::publish_pressure_geometry_from_phi(
+                    &self.state.topology.graph,
+                    &mut self.state.fields,
+                    &self.level_set_phi,
+                )?;
+            }
+            if cellwise_remap || level_set_volume {
+                let post_support_pressure_clock = NativeStageClock::start();
                 // Projected-support transfer conserves material and momentum, but
                 // the interpolated candidate face field is not discretely
                 // divergence-free on its new rows. Geometric whole-step transport
@@ -871,7 +1015,21 @@ impl World {
                 enforce_inflow_faces(graph, fields, inflow);
                 collocate_velocity(graph, fields);
                 observe("projected-support-velocity-projection", graph, fields);
+                self.stage_timings.post_support_pressure =
+                    post_support_pressure_clock.elapsed_nanoseconds();
             }
+        }
+        self.stage_timings.support_planning_transfer = support_clock
+            .elapsed_nanoseconds()
+            .saturating_sub(self.stage_timings.post_support_pressure);
+        let transport_clock = NativeStageClock::start();
+        if level_set_volume {
+            extend_velocity(&self.state.topology.graph, &mut self.state.fields, 8)?;
+            observe(
+                "level-set-volume-velocity-extension",
+                &self.state.topology.graph,
+                &self.state.fields,
+            );
         }
         self.view_history.capture_density(&self.state);
         let source_density = self.state.fields.density.clone();
@@ -888,8 +1046,22 @@ impl World {
             )?;
             let ledger = &mut self.source_ledger;
             self.cellwise_remap_receipt = None;
+            self.level_set_volume_receipt = None;
             let experiment = self.options.transport_experiment;
-            match experiment.cellwise_mode() {
+            if experiment.is_levelset_volume() {
+                let (surface, receipt) = crate::levelset_volume::advance(
+                    graph,
+                    fields,
+                    &self.surface,
+                    &self.rdf_topology,
+                    &self.rdf_support,
+                    &mut self.level_set_phi,
+                    dt,
+                )?;
+                self.surface = surface;
+                self.level_set_volume_receipt = Some(receipt);
+                self.microsteps = 0;
+            } else { match experiment.cellwise_mode() {
                 None => {
                     let (steps, _) = transport_volume_with_commit(
                         graph,
@@ -944,24 +1116,45 @@ impl World {
                     );
                     self.microsteps = 0;
                 }
-            }
+            }}
             publish_final_apertures(graph, fields);
             observe("conservative-transport", graph, fields);
             self.tracer_receipt = self.tracers.advance(graph, fields, dt)?;
             fields.fault.clone()
         };
-        publish_scalar_interface_state_from_geometric_density(
-            &mut self.scalar_authority,
-            &self.state.topology,
-            &mut self.state.fields,
-            &source_density,
-            &source_gamma,
-            self.revision.frame + 1,
-            self.topology_slot,
-            self.physical
-                .as_ref()
-                .is_some_and(|p| !p.scene.rigid_bodies.is_empty()),
-        )?;
+        self.stage_timings.transport = transport_clock.elapsed_nanoseconds();
+        let post_transport_clock = NativeStageClock::start();
+        let has_rigid_bodies = self.physical
+            .as_ref()
+            .is_some_and(|p| !p.scene.rigid_bodies.is_empty());
+        if level_set_volume {
+            publish_scalar_state_preserving_interface(
+                &mut self.scalar_authority,
+                &self.state.topology,
+                &mut self.state.fields,
+                &source_density,
+                &source_gamma,
+                self.revision.frame + 1,
+                self.topology_slot,
+                has_rigid_bodies,
+            )?;
+            crate::levelset_volume::publish_pressure_geometry_from_phi(
+                &self.state.topology.graph,
+                &mut self.state.fields,
+                &self.level_set_phi,
+            )?;
+        } else {
+            publish_scalar_interface_state_from_geometric_density(
+                &mut self.scalar_authority,
+                &self.state.topology,
+                &mut self.state.fields,
+                &source_density,
+                &source_gamma,
+                self.revision.frame + 1,
+                self.topology_slot,
+                has_rigid_bodies,
+            )?;
+        }
         if cellwise_remap {
             reconstruct_interfaces_for_cellwise_remap(
                 &self.state.topology.graph,
@@ -976,8 +1169,12 @@ impl World {
         if let Some(physical) = &mut self.physical {
             physical.finish_frame(&self.state)?;
         }
+        self.stage_timings.post_transport = post_transport_clock.elapsed_nanoseconds();
+        let resolution_clock = NativeStageClock::start();
         let mut policy = self.resolution_options.clone();
-        policy.translation_invariant_motion_sizing = cellwise_remap;
+        // Both geometric transports distinguish shape change from uniform
+        // translation. Absolute speed alone must not refine bulk liquid.
+        policy.translation_invariant_motion_sizing = cellwise_remap || level_set_volume;
         policy.maximum_leaves = Some(self.arena.maximum_slice_leaves);
         policy.maximum_cells = Some(self.arena.capacity as usize * 64);
         policy.free_leaf_ids.clone_from(&self.arena.free_leaf_ids);
@@ -1014,6 +1211,7 @@ impl World {
         }
         self.refresh_surface()?;
         self.arena.release_after_publication()?;
+        self.stage_timings.resolution_publication = resolution_clock.elapsed_nanoseconds();
         // Candidate topology construction initializes its fault plane. Keep a
         // rejected transport visible through the completed World advance even
         // when the resolution policy accepts a later generation in the same
@@ -1026,12 +1224,18 @@ impl World {
         self.revision.command_sequence = sequence;
         self.revision.field_revision += 1;
         self.revision.surface_revision = self.revision.field_revision;
+        self.stage_timings.finish(total_clock);
         Ok(())
     }
     pub fn inject_liquid(
         &mut self,
         drop: crate::injection::LiquidDrop,
     ) -> Result<(), ValidationError> {
+        if self.options.transport_experiment.is_levelset_volume() {
+            return Err(ValidationError(
+                "level-set-volume does not support liquid injection".into(),
+            ));
+        }
         use crate::injection::{
             addressable, apply_dose, demanded_bricks, requested_area, InjectionReceipt,
         };
@@ -1189,8 +1393,12 @@ impl World {
             physical.candidate_geometry(&mut candidate, self.revision.time, dt)?;
         }
         // Stage all candidate-dependent authorities before swapping accepted state.
-        let (staged, arena) = prepare_candidate(&self.state, candidate, &self.arena)
-            .map_err(|e| ValidationError(e.to_string()))?;
+        let (staged, arena) = if self.options.transport_experiment.is_levelset_volume() {
+            crate::lifecycle::prepare_candidate_allow_overcapacity(&self.state, candidate, &self.arena)
+        } else {
+            prepare_candidate(&self.state, candidate, &self.arena)
+        }
+        .map_err(|e| ValidationError(e.to_string()))?;
         let embedding = if let Some(build) = &self.embedding_builder {
             build(&staged, self.embedding.as_ref())?
         } else if self.embedding.is_some() {
@@ -1215,6 +1423,12 @@ impl World {
             Some((self.arena.capacity as usize * 144).max(self.state.topology.graph.rows.len())),
         );
         self.rdf_support = Self::support_for(&self.state);
+        if self.options.transport_experiment.is_levelset_volume() {
+            self.level_set_phi = crate::levelset_surface::cell_phi(
+                &self.state.topology.graph,
+                &self.surface,
+            )?;
+        }
         Ok(())
     }
     fn encode_graph(state: &SceneState<2>) -> Result<Vec<u8>, ValidationError> {
@@ -1266,12 +1480,19 @@ impl World {
         }
     }
     fn refresh_surface(&mut self) -> Result<(), ValidationError> {
-        self.surface = reconstruct_shared_rdf(
-            &self.state.topology.graph,
-            &self.state.fields,
-            &self.rdf_topology,
-            &self.rdf_support,
-        )?;
+        if self.options.transport_experiment.is_levelset_volume() {
+            let diagnostic_volume = self.state.topology.graph.cells.iter().map(|cell| {
+                self.state.fields.density[cell.id as usize] as f64 * cell.measure as f64
+            }).sum();
+            self.surface = crate::levelset_surface::refresh(&self.surface, diagnostic_volume)?;
+        } else {
+            self.surface = reconstruct_shared_rdf(
+                &self.state.topology.graph,
+                &self.state.fields,
+                &self.rdf_topology,
+                &self.rdf_support,
+            )?;
+        }
         Ok(())
     }
     /// Bits 0/1/2 select fields/surface/tracers. Bit 3 requests the cold graph;
@@ -1401,6 +1622,50 @@ mod tests {
         )
         .unwrap()
     }
+    fn level_set_world() -> World {
+        let scene: SceneDescription = serde_json::from_value(serde_json::json!({
+            "schemaVersion":1,"dimension":2,"dimensions":[8,8,1],"cellSizeM":0.05,
+            "dtS":1.0/60.0,"densityKgM3":998.2,"gravityMS2":[0.0,0.0,0.0],
+            "boundaries":["closed","closed","closed","closed","closed","closed"],
+            "bricks":[{"id":0,"key":0,"coordinate":[0,0,0],"spanBricks":1,"resolution":8,"active":true}],
+            "rasterDensity":(0..64).map(|i|if i%8<4{1.0}else{0.0}).collect::<Vec<_>>()
+        })).unwrap();
+        World::from_scene(
+            scene,
+            WorldOptions {
+                transport_experiment: TransportExperiment::LevelSetVolume,
+                tracer_budget: 0,
+                ..WorldOptions::default()
+            },
+        )
+        .unwrap()
+    }
+    fn level_set_uniform_bulk_world(speed_y: f32) -> World {
+        let bricks: Vec<_> = (0..3).flat_map(|y| (0..3).map(move |x| {
+            let key = (x + 3 * y) as u32;
+            serde_json::json!({
+                "id":key,"key":key,"coordinate":[x,y,0],"spanBricks":1,
+                "resolution":if key == 4 { 2 } else { 4 },"active":true
+            })
+        })).collect();
+        let raster_velocity: Vec<_> = (0..24 * 24)
+            .flat_map(|_| [0.0, speed_y]).collect();
+        let scene: SceneDescription = serde_json::from_value(serde_json::json!({
+            "schemaVersion":1,"dimension":2,"dimensions":[24,24,1],"cellSizeM":0.05,
+            "dtS":1.0/30.0,"densityKgM3":998.2,"gravityMS2":[0.0,0.0,0.0],
+            "boundaries":["open","open","open","open","open","open"],
+            "bricks":bricks,"rasterDensity":vec![1.0;24*24],
+            "rasterVelocity":raster_velocity
+        })).unwrap();
+        World::from_scene(
+            scene,
+            WorldOptions {
+                transport_experiment: TransportExperiment::LevelSetVolume,
+                tracer_budget: 0,
+                ..WorldOptions::default()
+            },
+        ).unwrap()
+    }
     #[test]
     fn invalid_commands_do_not_mutate_owned_state() {
         let mut world = world();
@@ -1456,6 +1721,55 @@ mod tests {
         assert_eq!(
             world.revision.field_revision,
             world.revision.surface_revision
+        );
+    }
+    #[test]
+    fn level_set_zero_motion_preserves_direct_surface_exactly() {
+        let mut world = level_set_world();
+        let vertices = world.surface.vertex_phi_fine.clone();
+        let segments = world.surface.segments_fine.clone();
+        world.advance(1, 1.0 / 60.0).unwrap();
+        assert_eq!(world.surface.vertex_phi_fine, vertices);
+        assert_eq!(world.surface.segments_fine, segments);
+    }
+    #[test]
+    fn level_set_topology_transition_preserves_direct_surface_exactly() {
+        let mut world = level_set_world();
+        let vertices = world.surface.vertex_phi_fine.clone();
+        let segments = world.surface.segments_fine.clone();
+        let mut bricks: Vec<_> = world.state.topology.bricks.iter().map(|brick| brick.seed.clone()).collect();
+        bricks[0].resolution = 4;
+        world.transition(bricks, 1.0 / 60.0).unwrap();
+        assert_eq!(world.state.topology.graph.topology_generation, 2);
+        assert_eq!(world.surface.vertex_phi_fine, vertices);
+        assert_eq!(world.surface.segments_fine, segments);
+        assert_eq!(world.level_set_phi.len(), world.state.topology.graph.cells.len());
+    }
+    #[test]
+    fn level_set_uniform_translation_preserves_coarse_bulk_resolution() {
+        let mut stationary = level_set_uniform_bulk_world(0.0);
+        let mut falling = level_set_uniform_bulk_world(-200.0);
+        stationary.advance(1, 1.0 / 30.0).unwrap();
+        falling.advance(1, 1.0 / 30.0).unwrap();
+
+        let centre = |world: &World| {
+            world.resolution_receipt.as_ref().unwrap().bricks.iter()
+                .find(|record| record.brick_key == 4).cloned().unwrap()
+        };
+        let still = centre(&stationary);
+        let moving = centre(&falling);
+        let moving_history = falling.resolution_policy.history.get(&4).unwrap();
+        assert!(
+            moving_history.velocity_travel.abs() <= 1.0e-5,
+            "uniform bulk translation recorded travel {}",
+            moving_history.velocity_travel,
+        );
+        assert_eq!(moving.requested_resolution, still.requested_resolution);
+        assert_eq!(moving.scheduled_resolution, still.scheduled_resolution);
+        assert_eq!(moving.scheduled_resolution, 2);
+        assert_eq!(
+            moving.reasons & crate::resolution::activity_reason::VELOCITY_FLOOR,
+            0,
         );
     }
     #[test]

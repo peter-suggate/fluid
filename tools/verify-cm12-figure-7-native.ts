@@ -1,11 +1,23 @@
 /** No-UI regression for the exact Advance Lab CM12 Figure 7 selection. */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { findSceneDefinition } from "../lib/core/scenes";
 import { sceneDocument } from "../lib/core/scene-definition";
+import {
+  type CellwiseStageTimings,
+  requireNativeCellwiseStageTimings,
+  requireNativeWorldStageTimings,
+  summarizeNativeStageTimings,
+  type WorldStageTimings,
+} from "./native-cellwise-stage-timings";
+import {
+  type ResearchTransport,
+  summarizeResearchTransport,
+} from "./native-level-set-volume-report";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const argument = (name: string, fallback: string): string => {
@@ -14,6 +26,10 @@ const argument = (name: string, fallback: string): string => {
 };
 const frames = Number(argument("frames", "90"));
 assert.ok(Number.isSafeInteger(frames) && frames >= 1, "--frames must be a positive integer");
+const transport = argument("transport", "cellwise-remap");
+assert.ok(["cellwise-remap", "level-set-volume", "baseline"].includes(transport),
+  "--transport must be cellwise-remap, level-set-volume, or baseline");
+const outputPath = argument("output", "");
 const diagnostic = argument("diagnostic", "false") === "true";
 const binary = resolve(root, argument("binary", "rust/target/release/examples/verify_world"));
 
@@ -26,16 +42,16 @@ const input = {
   worldOptions: {
     pressureIterations: 256,
     pressureRelativeTolerance: 1e-6,
-    transportExperiment: {
+    transportExperiment: transport === "cellwise-remap" ? {
       mode: "cellwise-remap",
       traceSegments: 1,
       edgeSamples: 1,
       closure: "band-projection",
-    },
+    } : transport,
   },
   frames,
   receiptsOnly: true,
-  requireCellwiseCommit: true,
+  requireCellwiseCommit: transport === "cellwise-remap",
   observeStageMetrics: diagnostic,
 };
 
@@ -48,12 +64,22 @@ if (run.status !== 0) {
 const output = JSON.parse(run.stdout) as {
   frames: Array<Record<string, any>>;
   stages: Array<Array<Record<string, any>>>;
+  failure: unknown;
 };
 assert.equal(output.frames.length, frames + 1);
 
 const initial = output.frames[0]!;
 assert.equal(initial.receipt.seededVolume, 1252, "live catalog centre slice changed");
 assert.deepEqual(initial.liquidBounds, { minimum: [44, 70], maximum: [84, 110] });
+if (transport !== "cellwise-remap") {
+  const report = `${JSON.stringify({
+    scene: definition.id,
+    ...summarizeResearchTransport(output, transport as ResearchTransport),
+  }, null, 2)}\n`;
+  if (outputPath) writeFileSync(resolve(root, outputPath), report);
+  process.stdout.write(report);
+  process.exit(0);
+}
 const initialSpanX = initial.liquidBounds.maximum[0] - initial.liquidBounds.minimum[0];
 let sawImpact = false;
 let sawPostImpactSpread = false;
@@ -78,6 +104,8 @@ let minimumWidth4WetCells = Number.POSITIVE_INFINITY;
 let minimumWidth4LiquidMeasure = Number.POSITIVE_INFINITY;
 let previousLiquidMeasure = initial.receipt.liquidMeasure as number;
 let maximumStepRelativeLiquidDrift = 0;
+const stageTimingFrames: CellwiseStageTimings[] = [];
+const worldStageTimingFrames: WorldStageTimings[] = [];
 
 const topologyMetric = (frame: Record<string, any>) => {
   const widths = Object.entries(frame.cellsByWidth ?? {}) as Array<[string, Record<string, number>]>;
@@ -149,6 +177,9 @@ const freefallEnvelope = (frame: Record<string, any>) => {
 for (const frame of output.frames.slice(1)) {
   const receipt = frame.receipt;
   const remap = receipt.cellwiseRemap;
+  worldStageTimingFrames.push(requireNativeWorldStageTimings(receipt, receipt.frame));
+  const remapTiming = requireNativeCellwiseStageTimings(remap, receipt.frame);
+  stageTimingFrames.push(remapTiming);
   assert.equal(receipt.fault, null, `frame ${receipt.frame}: numerical fault`);
   assert.equal(receipt.microsteps, 0, `frame ${receipt.frame}: baseline transport ran`);
   assert.equal(remap.materialCommitted, true, `frame ${receipt.frame}: material commit rejected`);
@@ -326,4 +357,5 @@ process.stdout.write(`${JSON.stringify({
   sawAdaptiveWidths,
   sawWetMixedSeam,
   preImpactTopology,
+  stageTimings: summarizeNativeStageTimings(worldStageTimingFrames, stageTimingFrames),
 }, null, 2)}\n`);

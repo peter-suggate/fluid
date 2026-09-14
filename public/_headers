@@ -5,3 +5,6 @@
 
 /wasm/fluid-wasm/*
   Cache-Control: no-cache
+
+/wasm/fluid-wasm/*/fluid_wasm_bg.wasm
+  Content-Type: application/wasm

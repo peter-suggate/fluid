@@ -224,6 +224,36 @@ pub fn publish_scalar_interface_state_from_geometric_density<const D: usize>(
     topology_slot: u8,
     has_rigid_bodies: bool,
 ) -> Result<ScalarPublicationReceipt, ValidationError> {
+    publish_scalar_state(authority, topology, fields, source_density, source_gamma,
+        generation, topology_slot, has_rigid_bodies, true)
+}
+
+/// Publish scalar authority without replacing a separately transported surface.
+pub fn publish_scalar_state_preserving_interface<const D: usize>(
+    authority: &mut ScalarAuthority,
+    topology: &CompiledTopology<D>,
+    fields: &mut Fields,
+    source_density: &[f32],
+    source_gamma: &[f32],
+    generation: u32,
+    topology_slot: u8,
+    has_rigid_bodies: bool,
+) -> Result<ScalarPublicationReceipt, ValidationError> {
+    publish_scalar_state(authority, topology, fields, source_density, source_gamma,
+        generation, topology_slot, has_rigid_bodies, false)
+}
+
+fn publish_scalar_state<const D: usize>(
+    authority: &mut ScalarAuthority,
+    topology: &CompiledTopology<D>,
+    fields: &mut Fields,
+    source_density: &[f32],
+    source_gamma: &[f32],
+    generation: u32,
+    topology_slot: u8,
+    has_rigid_bodies: bool,
+    reconstruct_volume_interface: bool,
+) -> Result<ScalarPublicationReceipt, ValidationError> {
     let addresses = scalar_cell_addresses(topology)?;
     let receipt = authority
         .publish(
@@ -246,7 +276,9 @@ pub fn publish_scalar_interface_state_from_geometric_density<const D: usize>(
             expected: 0.0,
         });
     }
-    reconstruct_interfaces(&topology.graph, fields)?;
+    if reconstruct_volume_interface {
+        reconstruct_interfaces(&topology.graph, fields)?;
+    }
     Ok(receipt)
 }
 

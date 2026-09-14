@@ -80,9 +80,11 @@ import {
 } from "../lib/methods/adaptive-volume/sparse-cm12-stages";
 import styles from "./AdvanceLab.module.css";
 import {
-  ADVANCE_LENSES, BAND_TONE, type Lens, type LensKey, paletteVar, REPRESENT_LENS,
-  SLICE_OVERLAY_ORDER, SLICE_OVERLAYS, type SliceOverlayId,
-  drawSlice, syncPalette,
+  ADVANCE_LENSES, BAND_TONE, CELL_FILL_KEYS, DIRECT_LEVEL_SET_CONTOUR_KEY,
+  DIRECT_LEVEL_SET_KEY, type Lens, type LensKey, LIQUID_KEY, markQuery,
+  paletteVar, REPRESENT_LENS, SLICE_OVERLAY_ORDER, SLICE_OVERLAYS, type SliceOverlayId,
+  SOLID_KEY, drawCellFillSlice, drawDirectLevelSetSlice, drawSlice, syncPalette,
+  usesCellFillSlice,
 } from "./lenses";
 import { advancePresentationReady, advancePresentationRevision } from "./playback";
 
@@ -91,8 +93,13 @@ const FRAME_MS = 46;
 /** The bounded limiter runs twice per microstep, so a packet pair per step. */
 const LIMITER_PASSES = 2;
 /** The probe bubble, so it can be kept inside the viewport as the pointer moves. */
-const PROBE_WIDTH = 180;
-const PROBE_HEIGHT = 132;
+const PROBE_WIDTH = 232;
+/** Everything in the bubble but the marks: the head and the six value rows. */
+const PROBE_BASE_HEIGHT = 138;
+/** One named mark and its wrapped line of explanation, at this width. Held a
+ *  little generous: overestimating lifts the bubble, underestimating runs it
+ *  off the bottom of the picture, and only one of those is recoverable. */
+const PROBE_MARK_HEIGHT = 54;
 /** The right-click menu, kept whole inside the picture the same way. */
 const MENU_WIDTH = 244;
 const MENU_HEIGHT = 520;
@@ -184,8 +191,8 @@ const LOOP_STEPS = [
 const CELL_STATE: readonly (readonly [string, string, string])[] = [
   ["V", "cell", "Liquid volume, physical and extensive. The conserved quantity: every transfer is a paired debit and credit on one shared subface."],
   ["K", "cell", "Open capacity after solids, from exact clipped cut-cell geometry. Moving solids make it time-varying within a single advance."],
-  ["0 ≤ V ≤ K", "invariant", "Checked exactly, not clamped. An invalid state raises a fault receipt rather than being quietly repaired — limiting anti-flux cannot fix an already overfilled cell."],
-  ["ρ = V / cellVolume", "cell", "Volume-derived density, republished at every microstep commit so the PLIC observer never mistakes an extensive volume for a density."],
+  ["V / K", "state", "Baseline and geometric remap keep volume within open capacity. Level set + volume may carry transient excess conservatively. Pressure draining is disabled in this first pass, so excess is measured but is not expected to decay."],
+  ["ρ = V / cellVolume", "cell", "Volume-derived density, republished at every microstep commit."],
   ["n, d", "cell", "The PLIC plane — four floats per cell, cached and refreshed whenever density is republished. Zeroed where the interface is unresolved; such a cell falls back to the monotone volume flux."],
   ["γ", "cell", "Retained and double-buffered, read by the residency and saturation tests. Gamma diffusion is no longer encoded — the stage is retired from the production graph."],
   ["u", "row (face)", "Staggered face velocity. The stored value already folds in the aperture and solid motion as u = a·u_fluid + (1−a)·u_wall, so flux code must not multiply by the aperture twice."],
@@ -245,6 +252,15 @@ interface CellwiseReading {
   readonly areaBalanceError: number;
 }
 
+interface LevelSetVolumeReading {
+  readonly overCapacityCells: number;
+  readonly maximumOverCapacityRatio: number;
+  readonly invalidPhiSamples: number;
+  readonly redistancedSamples: number;
+  readonly redistanceFallbackSamples: number;
+  readonly redistanceSegmentCount: number;
+}
+
 interface Readings {
   /** Mutable slice generation this reading and its derived surface describe. */
   readonly presentationRevision: string;
@@ -265,6 +281,7 @@ interface Readings {
   /** The scene as the work model prices it, captured with the counts it prices. */
   readonly work: AdvanceWorkScene;
   readonly cellwise: CellwiseReading | null;
+  readonly levelSetVolume: LevelSetVolumeReading | null;
 }
 
 const NO_SCENE: AdvanceWorkScene = {
@@ -275,7 +292,7 @@ const NO_SCENE: AdvanceWorkScene = {
 const AT_REST: Readings = { frame: 0, microsteps: 1, maxVelocity: 0, drift: 0,
   churn: 0, markers: 0, cells: 0, rows: 0, bricks: 0, rungs: 0, fault: null,
   presentationRevision: "unpublished", injections: 0, drop: null, work: NO_SCENE,
-  cellwise: null };
+  cellwise: null, levelSetVolume: null };
 const read = (view: AdvanceView): Readings => {
   const receipt = view.receipt;
   const resolution = view.metadata.resolution as Record<string, unknown> | null | undefined;
@@ -296,6 +313,15 @@ const read = (view: AdvanceView): Readings => {
     closureResidual: Number(cellwiseValue.closureMeasuredNormalizedResidual ?? 0),
     areaBalanceError: Number(cellwiseValue.areaBalanceRelativeError ?? 0),
   } : null;
+  const levelSetValue = receipt.levelSetVolume as Record<string, unknown> | null | undefined;
+  const levelSetVolume = levelSetValue ? {
+    overCapacityCells: Number(levelSetValue.overCapacityCellCount ?? 0),
+    maximumOverCapacityRatio: Number(levelSetValue.maximumOverCapacityRatio ?? 0),
+    invalidPhiSamples: Number(levelSetValue.invalidPhiSamples ?? 0),
+    redistancedSamples: Number(levelSetValue.redistancedSamples ?? 0),
+    redistanceFallbackSamples: Number(levelSetValue.redistanceFallbackSamples ?? 0),
+    redistanceSegmentCount: Number(levelSetValue.redistanceSegmentCount ?? 0),
+  } : null;
   return {
   presentationRevision: advancePresentationRevision(view),
   frame: view.revision.frame, microsteps: Number(receipt.microsteps ?? 1),
@@ -308,7 +334,7 @@ const read = (view: AdvanceView): Readings => {
   fault,
   injections: view.revision.injections,
   drop: (receipt.lastInjection as InjectionReceipt | null | undefined) ?? null,
-  work: workScene(view), cellwise,
+  work: workScene(view), cellwise, levelSetVolume,
   };
 };
 
@@ -331,6 +357,9 @@ interface Aim {
 /** One cell, as the probe reads it: the drawn block plus the fine row state. */
 interface Probe {
   readonly cell: AdvanceCellView;
+  /** The finest cell the pointer is actually over, inside the drawn block. */
+  readonly fx: number;
+  readonly fy: number;
   readonly plane: AdvancePlane | null;
   readonly u: number;
   readonly v: number;
@@ -382,7 +411,7 @@ function defaultTransportExperiment(sceneId: string): AdvanceTransportExperiment
 function defaultPressureBudget(sceneId: string,
   transport: AdvanceTransportExperiment): number {
   void sceneId;
-  return transport === "cellwise-remap" ? CELLWISE_PRESSURE_BUDGET : DEFAULT_PRESSURE_BUDGET;
+  return transport === "baseline" ? DEFAULT_PRESSURE_BUDGET : CELLWISE_PRESSURE_BUDGET;
 }
 
 function pressureTolerance(_transport: AdvanceTransportExperiment): number {
@@ -392,7 +421,7 @@ function pressureTolerance(_transport: AdvanceTransportExperiment): number {
 function requestedTransportExperiment(sceneId: string): AdvanceTransportExperiment {
   if (typeof window === "undefined") return defaultTransportExperiment(sceneId);
   const asked = new URLSearchParams(window.location.search).get(TRANSPORT_PARAM);
-  return asked === "cellwise-remap" || asked === "baseline"
+  return asked === "cellwise-remap" || asked === "baseline" || asked === "level-set-volume"
     ? asked : defaultTransportExperiment(sceneId);
 }
 
@@ -532,7 +561,11 @@ export function AdvanceLab(): React.JSX.Element {
   const [openSeam, setOpenSeam] = useState<string | null>(null);
   const [folds, setFolds] = useState<ReadonlySet<string>>(() => new Set());
   const [pinned, setPinned] = useState<Probe | null>(null);
-  const [hover, setHover] = useState<{ probe: Probe; x: number; y: number } | null>(null);
+  /* Where the pointer is rather than where the bubble goes: the bubble is as
+   * tall as the marks it turns out to be carrying, and that is not known until
+   * the render that lists them. */
+  const [hover, setHover] = useState<{ probe: Probe; px: number; py: number;
+    width: number; height: number } | null>(null);
   const [runtimeFault, setRuntimeFault] = useState<string | null>(null);
   /* The two gestures that change the run rather than read it, and the only
    * modes this page has. Armed, a press-drag-release places and sizes a ball
@@ -619,7 +652,7 @@ export function AdvanceLab(): React.JSX.Element {
       const initialView = await nextController.load(scene, { pressureIterations: initialBudget,
         pressureRelativeTolerance: pressureTolerance(initialTransport),
         transportExperiment: initialTransport === "cellwise-remap"
-          ? CELLWISE_REMAP_OPTION : "baseline",
+          ? CELLWISE_REMAP_OPTION : initialTransport,
         production: { dtS: live.current.dt, timeStep: "paper" } });
       setRegionState(authoredRegions(scene, initialView));
       publish(initialView);
@@ -708,8 +741,13 @@ export function AdvanceLab(): React.JSX.Element {
       }
       const stroke = event.key.toLowerCase();
       const overlay = SLICE_OVERLAY_ORDER.find(id => OVERLAY_KEYS[id] === stroke);
-      if (overlay) { toggleOverlay(overlay); return; }
+      if (overlay) {
+        if (!(transportExperiment === "level-set-volume" && overlay === "normal"))
+          toggleOverlay(overlay);
+        return;
+      }
       if (stroke !== DROP_KEY && stroke !== REGION_KEY) return;
+      if (stroke === DROP_KEY && transportExperiment === "level-set-volume") return;
       const wanted: SliceTool = stroke === DROP_KEY ? "drop" : "region";
       setAim(null);
       setSketch(null);
@@ -717,7 +755,7 @@ export function AdvanceLab(): React.JSX.Element {
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
-  }, [toggleOverlay]);
+  }, [toggleOverlay, transportExperiment]);
 
   /** Rebuild from the selected production document's deterministic t=0 state. */
   const reseed = useCallback((id: string,
@@ -730,6 +768,7 @@ export function AdvanceLab(): React.JSX.Element {
     setPinned(null);
     setHover(null);
     setAim(null);
+    setTool(null);
     setRuntimeFault(null);
     const nextBudget = pressureBudgetTouched.current
       ? live.current.budget : defaultPressureBudget(id, nextTransport);
@@ -745,7 +784,7 @@ export function AdvanceLab(): React.JSX.Element {
     void active.load(scene, { pressureIterations: nextBudget,
       pressureRelativeTolerance: pressureTolerance(nextTransport),
       transportExperiment: nextTransport === "cellwise-remap"
-        ? CELLWISE_REMAP_OPTION : "baseline",
+        ? CELLWISE_REMAP_OPTION : nextTransport,
       production: { dtS: live.current.dt, timeStep: "paper" } }).then(next => {
       view.current = next; setPublishedView(next); setAuthored(scene);
       setRegionState(authoredRegions(scene, next)); setReadings(read(next));
@@ -774,16 +813,31 @@ export function AdvanceLab(): React.JSX.Element {
   const work = advanceStageWork(selected);
   const readingCellwiseTransport = transportExperiment === "cellwise-remap"
     && selected === "conservative-transport";
+  const readingLevelSetTransport = transportExperiment === "level-set-volume"
+    && selected === "conservative-transport";
+  const readingDirectLevelSet = transportExperiment === "level-set-volume";
+  const readingDirectSurfacePublication = readingDirectLevelSet
+    && selected === "presentation-publication";
+  const readingCellFill = usesCellFillSlice(selected, representing);
   const band = paletteVar(BAND_TONE[declaration.band]);
   const lens: Lens = representing ? REPRESENT_LENS : ADVANCE_LENSES[selected];
 
-  /* What is drawn, named. An overlay contributes its own keys only while it is
-   * on, so the row under the picture is always the whole of what is on it. */
-  const legend: readonly LensKey[] = useMemo(() => [
-    ["liquid", "liquid"], ["solid", "solid"], ...lens.keys,
+  /* Every mark the picture can make right now. An overlay contributes its own
+   * only while it is on, so this set is exactly what the canvas is drawing —
+   * which is what lets the probe answer "what is this cell" from it. */
+  const activeKeys: readonly LensKey[] = useMemo(() => [
+    ...(readingCellFill
+      ? readingDirectLevelSet
+        ? [CELL_FILL_KEYS[0]!, DIRECT_LEVEL_SET_CONTOUR_KEY, CELL_FILL_KEYS[2]!]
+        : CELL_FILL_KEYS
+      : readingDirectLevelSet ? [DIRECT_LEVEL_SET_KEY] : [LIQUID_KEY]),
+    SOLID_KEY,
+    ...(readingDirectLevelSet && (representing || selected === "presentation-publication")
+      ? [] : lens.keys),
     ...SLICE_OVERLAY_ORDER.flatMap(id =>
-      overlays.has(id) ? SLICE_OVERLAYS[id].keys : []),
-  ], [lens, overlays]);
+      overlays.has(id) && !(readingDirectLevelSet && id === "normal")
+        ? SLICE_OVERLAYS[id].keys : []),
+  ], [lens, overlays, readingCellFill, readingDirectLevelSet, representing, selected]);
 
   const displayNx = publishedView?.nx ?? 1;
   const displayNy = publishedView?.ny ?? 1;
@@ -829,23 +883,29 @@ export function AdvanceLab(): React.JSX.Element {
     /* Derive and consume RDF in one synchronous publication boundary. Keeping
      * it in render-time memo state separated these two reads of the mutable
      * slice, which is harmless for STEP and racy while Play is advancing. */
-    const sharedRdf: AdvanceRdfView | undefined = surfaceView === "shared-rdf" ? s.rdf : undefined;
-    drawSlice(context, sharedRdf);
+    const sharedRdf: AdvanceRdfView | undefined = readingDirectLevelSet
+      || surfaceView === "shared-rdf" ? s.rdf : undefined;
+    if (readingCellFill) drawCellFillSlice(context, sharedRdf);
+    else if (readingDirectLevelSet) drawDirectLevelSetSlice(context, s.rdf);
+    else drawSlice(context, sharedRdf);
     g.save();
-    lens.draw(context);
+    if (!(readingDirectLevelSet && (representing || selected === "presentation-publication"))) {
+      lens.draw(context);
+    }
     g.restore();
     /* Over the lens, in declaration order. An overlay is an annotation on the
      * reading rather than part of it, so it is the last thing painted and the
      * first thing a reader can take away again. */
     for (const id of SLICE_OVERLAY_ORDER) {
-      if (!overlays.has(id)) continue;
+      if (!overlays.has(id) || (readingDirectLevelSet && id === "normal")) continue;
       g.save();
       SLICE_OVERLAYS[id].draw(context);
       g.restore();
     }
     paintedSharedRdf.current = sharedRdf;
     paintedPresentationRevision.current = readings.presentationRevision;
-  }, [publishedView, readings, lens, surfaceView, overlays, scale, dpr, themeTick]);
+  }, [publishedView, readings, lens, surfaceView, overlays, scale, dpr, themeTick,
+    readingCellFill, readingDirectLevelSet, representing, selected]);
 
   const model = useMemo(() => advanceWorkModel({
     scene: readings.work,
@@ -858,9 +918,17 @@ export function AdvanceLab(): React.JSX.Element {
     readings.churn, readings.markers]);
   const costs = useMemo(() => advanceCosts(model), [model]);
   const emptySlice = Boolean(publishedView && !publishedView.liquidVolumeFine.some(value => value > 0));
-  const unsupported = publishedView?.scene.limitations ?? [];
+  const levelSetCapability = transportExperiment === "level-set-volume" && publishedView
+    && (publishedView.scene.hasRigidBodies || publishedView.scene.hasInflow)
+    ? "Level set + volume does not support rigid bodies or inflow sources in this lab."
+    : null;
+  const unsupported = [
+    ...(publishedView?.scene.limitations ?? []),
+    ...(levelSetCapability ? [levelSetCapability] : []),
+  ];
   const caveats = unsupported.length + (emptySlice ? 1 : 0);
-  const sharedRdfReceipt = surfaceView === "shared-rdf" ? publishedView?.rdf.receipt : undefined;
+  const sharedRdfReceipt = readingDirectLevelSet || surfaceView === "shared-rdf"
+    ? publishedView?.rdf.receipt : undefined;
   const sceneInfo = (publishedView?.metadata.scene ?? {}) as Record<string, unknown>;
   const sceneFrame = (sceneInfo.frame ?? {}) as Record<string, unknown>;
   const sourceDimensions = Array.isArray(sceneFrame.sourceDimensions)
@@ -871,7 +939,7 @@ export function AdvanceLab(): React.JSX.Element {
   const total = costs.reduce((sum, c) => sum + c[key], 0);
   const cost = costs[index];
   const share = total ? (cost[key] / total) * 100 : 0;
-  const seams = work.seams.filter(seam => seam.id !== null);
+  const seams = readingDirectLevelSet ? [] : work.seams.filter(seam => seam.id !== null);
 
   const select = (stage: AdvanceStageId): void => {
     setSelected(stage);
@@ -889,7 +957,7 @@ export function AdvanceLab(): React.JSX.Element {
     if (!cell || !cell.open) return null;
     const left = fx > 0 ? s.capacityFine[advanceCell(s, fx - 1, fy)]! : 0;
     return {
-      cell, plane: advanceCellPlane(s.lattice, cell),
+      cell, fx, fy, plane: advanceCellPlane(s.lattice, cell),
       u: s.faceVelocityXFine[advanceRowX(s, fx, fy)]!,
       v: s.faceVelocityYFine[advanceRowY(s, fx, fy)]!,
       aperture: Math.min(left, s.capacityFine[advanceCell(s, fx, fy)]!),
@@ -904,14 +972,43 @@ export function AdvanceLab(): React.JSX.Element {
     ["V", p.cell.volume.toFixed(4), "liquid volume held"],
     ["K", p.cell.capacity.toFixed(4), "open capacity after solids"],
     ["V / K", p.cell.fill.toFixed(4), "fill fraction — ρ is republished from this"],
-    ["n", p.plane ? `(${p.plane.nx.toFixed(2)}, ${p.plane.ny.toFixed(2)})` : "—", "PLIC normal"],
-    ["d", p.plane ? p.plane.offset.toFixed(3) : "—", "PLIC offset from the cell's low corner, in finest cells; blank where the interface is unresolved"],
+    ...(!readingDirectLevelSet ? [
+      ["n", p.plane ? `(${p.plane.nx.toFixed(2)}, ${p.plane.ny.toFixed(2)})` : "—", "PLIC normal"],
+      ["d", p.plane ? p.plane.offset.toFixed(3) : "—", "PLIC offset from the cell's low corner, in finest cells; blank where the interface is unresolved"],
+    ] as const : []),
     ["u", `${p.u.toFixed(3)}, ${p.v.toFixed(3)}`, "staggered face velocity, aperture folded in"],
     ["a", p.aperture.toFixed(2), "open fraction of the row"],
     ["p", p.pressure.toFixed(3), "leaf pressure; 0 at the free surface"],
     ["material", String(p.material), "production SolidWorld material id"],
     ["rung", `${ADVANCE_RUNGS[p.rung]}²`, "cells per B8 brick in this 2D ladder"],
   ];
+
+  /**
+   * What the picture is saying about one cell, in the picture's own words.
+   *
+   * The strip this replaces named every mark the lens could make and left the
+   * reader to match a colour by eye against a cell four pixels wide. Asking
+   * each mark whether it holds here turns the same declaration into the answer
+   * the reader wanted: not "amber means over capacity" but "this cell is over
+   * capacity, and here is what that costs."
+   */
+  const marksAt = (s: AdvanceView, fx: number, fy: number): readonly LensKey[] => {
+    /* The block is re-found in the published lattice rather than carried over
+     * from the pointer's own read: the marks are a statement about the picture
+     * on screen, and the picture was painted from this publication. Taking the
+     * cell from one advance and the planes from another would describe a frame
+     * that was never drawn. */
+    const cell = advanceCellAt(s.lattice, s, fx, fy);
+    if (!cell) return [];
+    const query = markQuery(s, cell, fx, fy);
+    return activeKeys.filter(mark => mark.holds(query));
+  };
+
+  /* Resolved in render rather than stored beside the pointer, so a lens change
+   * or an overlay toggled from the keyboard re-reads the cell the pointer is
+   * already resting on instead of leaving last move's answer up. */
+  const hoverMarks = hover && publishedView
+    ? marksAt(publishedView, hover.probe.fx, hover.probe.fy) : [];
 
   /** Where the pointer is, in canvas fine cells — continuous, not a cell index. */
   const aimAt = (target: HTMLCanvasElement, clientX: number, clientY: number):
@@ -948,7 +1045,7 @@ export function AdvanceLab(): React.JSX.Element {
 
   const commitDrop = (at: readonly [number, number], radius: number): void => {
     const active = controller.current, s = view.current;
-    if (!active || !s) return;
+    if (!active || !s || transportExperiment === "level-set-volume") return;
     void active.injectLiquid([at[0], s.ny - at[1]], radius).then(next => {
       view.current = next;
       setPublishedView(next);
@@ -1059,10 +1156,11 @@ export function AdvanceLab(): React.JSX.Element {
       </div>
 
       <div className={styles.transport}>
-        <button type="button" aria-pressed={playing} disabled={Boolean(readings.fault)}
+        <button type="button" aria-pressed={playing}
+          disabled={Boolean(readings.fault || levelSetCapability)}
           onClick={() => setPlaying(v => !v)}>
           {playing ? "Pause" : "Play"}</button>
-        <button type="button" disabled={Boolean(readings.fault)} onClick={() => {
+        <button type="button" disabled={Boolean(readings.fault || levelSetCapability)} onClick={() => {
           const active = controller.current;
           if (!active || advanceBusy.current) return;
           const began = performance.now();
@@ -1100,6 +1198,7 @@ export function AdvanceLab(): React.JSX.Element {
             }}>
             <option value="baseline">Baseline</option>
             <option value="cellwise-remap">Geometric remap</option>
+            <option value="level-set-volume">Level set + volume</option>
           </select>
         </label>
         <label className={styles.iters} htmlFor="advance-step">Δt
@@ -1179,9 +1278,8 @@ export function AdvanceLab(): React.JSX.Element {
               const probe = probeAt(event.currentTarget, event.clientX, event.clientY);
               const host = viewport.current?.getBoundingClientRect();
               setHover(probe && host ? {
-                probe,
-                x: Math.min(host.width - PROBE_WIDTH - 8, event.clientX - host.left + 14),
-                y: Math.min(host.height - PROBE_HEIGHT, event.clientY - host.top + 14),
+                probe, px: event.clientX - host.left, py: event.clientY - host.top,
+                width: host.width, height: host.height,
               } : null);
               if (!tool) return;
               const at = aimAt(event.currentTarget, event.clientX, event.clientY);
@@ -1297,7 +1395,8 @@ export function AdvanceLab(): React.JSX.Element {
               the picture sits on top of the one thing the page is for. Only a
               slice with no liquid in it earns an overlay, because then there is
               no picture for it to cover. */}
-          {(emptySlice || tool || readings.fault) && <div className={`${styles.hud} ${styles.hudTop}`}>
+          {(emptySlice || tool || readings.fault || levelSetCapability) &&
+            <div className={`${styles.hud} ${styles.hudTop}`}>
             {emptySlice && <div className={styles.alarm}>
               This authored centre slice contains no initial liquid.</div>}
             {readings.fault && <div className={`${styles.alarm} ${styles.rejected}`}>
@@ -1308,6 +1407,8 @@ export function AdvanceLab(): React.JSX.Element {
               {readings.fault.stage.startsWith("cellwise-remap")
                 ? " no baseline fallback ran." : " reset before continuing."}
             </div>}
+            {levelSetCapability && <div className={`${styles.alarm} ${styles.rejected}`}>
+              {levelSetCapability} Choose another transport or scene to advance.</div>}
             {/* Both tools are modes and neither has a button: without a
                 pressed control somewhere a reader has only the shape under the
                 pointer to tell them what the next press will do, and that
@@ -1331,21 +1432,33 @@ export function AdvanceLab(): React.JSX.Element {
               <span className={styles.read}>volume drift <b>{(readings.drift * 100).toFixed(3)}%</b></span>
               <span className={styles.read}>bricks re-rung <b>{readings.churn} / {readings.bricks}</b></span>
               <span className={styles.read}>transport <b>{transportExperiment === "cellwise-remap"
-                ? "geometric remap" : "baseline"}</b></span>
+                ? "geometric remap" : transportExperiment === "level-set-volume"
+                  ? "level set + volume" : "baseline"}</b></span>
               {readings.cellwise && <span className={styles.read} title={`Closure residual ${readings.cellwise.closureResidual.toExponential(2)} · area balance ${readings.cellwise.areaBalanceError.toExponential(2)}`}>
                 remap work <b>{readings.cellwise.traces} traces · {readings.cellwise.receivers} receivers</b>
               </span>}
               {readings.cellwise && readings.cellwise.correctedFolds > 0 &&
                 <span className={`${styles.read} ${styles.faulted}`}>
                   folded receivers <b>{readings.cellwise.correctedFolds}</b></span>}
+              {readings.levelSetVolume && <span className={styles.read}>
+                over capacity <b>{readings.levelSetVolume.overCapacityCells} cells ·
+                  {" "}+{readings.levelSetVolume.maximumOverCapacityRatio.toFixed(2)} K max</b>
+              </span>}
+              {readings.levelSetVolume && <span className={styles.read}>
+                redistancing <b>active · {n(readings.levelSetVolume.redistancedSamples)} samples ·
+                  {" "}{n(readings.levelSetVolume.redistanceFallbackSamples)} fallbacks</b>
+              </span>}
               {/* Which line the picture is drawing, and — since the choice is
                   now a right-click rather than a widget — where to change it.
                   The one readout that takes the pointer, so it can say so. */}
               {regions.length > 0 && <span className={styles.read}>
                 enforced <b>{regions.length} region{regions.length === 1 ? "" : "s"}</b></span>}
               <span className={`${styles.read} ${styles.hint}`}
-                title="Right-click the water to drop a ball there, draw an enforcement region, or choose the surface reconstruction and the solve budget.">
-                surface <b>{SURFACE_VIEWS.find(view => view.id === surfaceView)?.label}</b></span>
+                title={readingDirectLevelSet
+                  ? "Right-click the water to draw an enforcement region or change the solve budget. The direct level-set surface is fixed for this method."
+                  : "Right-click the water to drop a ball there, draw an enforcement region, or choose the surface reconstruction and the solve budget."}>
+                surface <b>{readingDirectLevelSet ? "Direct level set"
+                  : SURFACE_VIEWS.find(view => view.id === surfaceView)?.label}</b></span>
               {/* The drift denominator moved, so say so beside it — otherwise
                   the percentage above silently means something new. */}
               {readings.injections > 0 && <span className={styles.read}>
@@ -1357,32 +1470,35 @@ export function AdvanceLab(): React.JSX.Element {
             </div>
           </div>
 
-          {/* The legend is also the switch.
+          {/* Two switches, and no legend beside them.
               Volume fraction and the interface normal are not stages, so they
               cannot be lenses; they are what every cell carries at every stage,
               and they compose over whichever lens is up. That makes them
-              annotations on the picture, which is where their control belongs —
-              beside what is already named, not in a bar a reader passes once a
-              sitting. Turning one on adds its own keys to this same row, so the
-              strip stays the whole of what is drawn. */}
+              annotations on the picture, which is where their control belongs.
+              What used to sit beside them was a standing list of every mark the
+              lens could make — a reading nobody can use without matching a
+              colour by eye against a cell a few pixels wide. The probe answers
+              that per cell now, so the list is gone and only the switches,
+              which are not a reading at all, stay on the picture. */}
           <div className={`${styles.hud} ${styles.hudFoot}`}>
-            {SLICE_OVERLAY_ORDER.map(id => {
+            {SLICE_OVERLAY_ORDER.filter(id => !(readingDirectLevelSet && id === "normal")).map(id => {
               const overlay = SLICE_OVERLAYS[id], on = overlays.has(id);
               return <button type="button" key={id} aria-pressed={on}
                 className={`${styles.key} ${styles.keyToggle}`}
                 title={`${overlay.hint} (${OVERLAY_KEYS[id]})`}
                 onClick={() => toggleOverlay(id)}>
                 <i style={{
-                  background: paletteVar(overlay.keys[0]![0]),
+                  background: paletteVar(overlay.keys[0]!.tone),
                   opacity: on ? 1 : 0.3,
                 }} />{overlay.label}</button>;
             })}
-            {legend.map(([tone, label], i) =>
-              <span className={styles.key} key={`${i}:${label}`}>
-                <i style={{ background: paletteVar(tone) }} />{label}</span>)}
           </div>
 
-          {hover && <div className={styles.probe} style={{ left: hover.x, top: hover.y }}>
+          {hover && <div className={styles.probe} style={{
+            left: Math.max(8, Math.min(hover.width - PROBE_WIDTH - 8, hover.px + 14)),
+            top: Math.max(8, Math.min(hover.height - PROBE_BASE_HEIGHT
+              - hoverMarks.length * PROBE_MARK_HEIGHT, hover.py + 14)),
+          }}>
             <div className={styles.probeHead}>
               brick {hover.probe.cell.brick} · rung {ADVANCE_RUNGS[hover.probe.rung]}² ·
               {" "}{hover.probe.cell.width}×{hover.probe.cell.height} fine cells
@@ -1392,10 +1508,21 @@ export function AdvanceLab(): React.JSX.Element {
               ["V/K", hover.probe.cell.fill.toFixed(3)],
               ["u", hover.probe.u.toFixed(3)],
               ["p", hover.probe.pressure.toFixed(3)],
-              ["n", hover.probe.plane
-                ? `${hover.probe.plane.nx.toFixed(2)}, ${hover.probe.plane.ny.toFixed(2)}` : "—"],
+              ...(!readingDirectLevelSet ? [["n", hover.probe.plane
+                ? `${hover.probe.plane.nx.toFixed(2)}, ${hover.probe.plane.ny.toFixed(2)}` : "—"]] as const : []),
             ] as const).map(([label, value]) =>
               <div className={styles.probeRow} key={label}><span>{label}</span><span>{value}</span></div>)}
+            {/* What the ink on this cell means. Every mark the lens and the
+                overlays are drawing, filtered to the ones this cell carries —
+                so a colour is read where it was applied rather than looked up
+                in a strip at the other end of the picture. */}
+            {hoverMarks.length > 0 && <div className={styles.probeMarks}>
+              {hoverMarks.map(mark =>
+                <div className={styles.probeMark} key={`${mark.tone}:${mark.label}`}>
+                  <i style={{ background: paletteVar(mark.tone) }} />
+                  <b>{mark.label}</b><em>{mark.note}</em>
+                </div>)}
+            </div>}
           </div>}
 
           {/* What shapes the solve, on the thing it shapes. Neither of these is
@@ -1412,18 +1539,23 @@ export function AdvanceLab(): React.JSX.Element {
                 the second and third ball cost one click each. */}
             <div className={styles.menuGroup}>
               <button type="button" className={styles.menuItem}
+                disabled={transportExperiment === "level-set-volume"}
                 aria-pressed={tool === "drop" && !menu.at}
                 onClick={() => {
+                  if (transportExperiment === "level-set-volume") return;
                   if (menu.at) commitDrop(menu.at, defaultDropRadius(displayNx, displayNy));
                   /* Armed either way: with a point this is "and another one
                    * like it", and without one it is the mode by itself. */
                   setTool("drop");
                   setMenu(null);
                 }}>
-                <b>{menu.at ? "Drop a ball here" : "Drop water"}</b>
-                <em>{menu.at
-                  ? `lands now · click or drag out for more · ${DROP_KEY} · Esc`
-                  : `click the water to place one, drag out to size it · ${DROP_KEY}`}</em></button>
+                <b>{transportExperiment === "level-set-volume"
+                  ? "Drop unavailable" : menu.at ? "Drop a ball here" : "Drop water"}</b>
+                <em>{transportExperiment === "level-set-volume"
+                  ? "liquid injection is outside this transport experiment"
+                  : menu.at
+                    ? `lands now · click or drag out for more · ${DROP_KEY} · Esc`
+                    : `click the water to place one, drag out to size it · ${DROP_KEY}`}</em></button>
               {tool && <button type="button" className={styles.menuItem}
                 onClick={() => { setTool(null); setAim(null); setSketch(null); setMenu(null); }}>
                 <b>{tool === "drop" ? "Stop dropping" : "Stop drawing"}</b>
@@ -1527,7 +1659,10 @@ export function AdvanceLab(): React.JSX.Element {
             </div>
             <div className={styles.menuGroup}>
               <span className={styles.menuLabel}>Surface</span>
-              {SURFACE_VIEWS.map(view =>
+              {readingDirectLevelSet ? <button type="button" className={styles.menuItem}
+                aria-pressed disabled>
+                <b>Direct level set</b><em>the advected phi zero set is the published surface</em>
+              </button> : SURFACE_VIEWS.map(view =>
                 <button type="button" key={view.id} className={styles.menuItem}
                   aria-pressed={surfaceView === view.id}
                   onClick={() => { setSurfaceView(view.id); setMenu(null); }}>
@@ -1613,10 +1748,14 @@ export function AdvanceLab(): React.JSX.Element {
             <span className={styles.group}>
               <span>step 1 of the loop</span><span>no stage encoded</span></span>
             <h2>Represent the fluid</h2>
-            <span className={styles.stageChip}>sparse bricks · adaptive cells · volume, not distance</span>
+            <span className={styles.stageChip}>{readingDirectLevelSet
+              ? "sparse bricks · conservative V · direct signed-distance surface"
+              : "sparse bricks · adaptive cells · volume, not distance"}</span>
           </div>
           <p className={styles.lensNote}>
-            <i style={{ background: paletteVar("liquid") }} />{REPRESENT_LENS.caption}</p>
+            <i style={{ background: paletteVar("liquid") }} />{readingDirectLevelSet
+              ? "Before motion, one occupancy-derived phi seed establishes the surface. From then on the signed-distance zero set is transported and published directly; V remains the separate mass authority."
+              : REPRESENT_LENS.caption}</p>
           <div className={styles.figures}>
             <div className={styles.figure}><b>{n(model.bricks)}</b><span>resident bricks</span></div>
             <div className={styles.figure}><b>{n(model.cells)}</b><span>accepted cells</span></div>
@@ -1634,15 +1773,28 @@ export function AdvanceLab(): React.JSX.Element {
               ? readings.cellwise
                 ? `whole frame · ${readings.cellwise.traces} shared traces · ${readings.cellwise.receivers} receivers`
                 : "whole-frame cellwise remap · awaiting first receipt"
+              : readingLevelSetTransport
+                ? "one RK2 trace per cell · conservative volume gather · direct phi zero set"
+              : readingDirectSurfacePublication
+                ? "advected phi · exact redistance · direct zero-set publication"
               : stageChip(selected)}</span>
           </div>
           <p className={styles.lensNote}>
             <i style={{ background: band }} />{readingCellwiseTransport
               ? "The accepted volume after one conservative gather over shared, backward-traced cell geometry."
+              : readingLevelSetTransport
+                ? "Conservative cell volume and the independently advected signed-distance surface after one trace."
+              : readingDirectSurfacePublication
+                ? "The renderer receives the zero set of the accepted signed-distance field directly."
               : lens.caption}</p>
           <p className={styles.summary}>{readingCellwiseTransport
             ? "One full sparse adaptive advance: pressure projection, natural 2:1 topology changes, receiver-band continuity closure, shared-chain correction, then one material gather and commit. It does not run baseline transport substeps."
-            : declaration.tip.summary}</p>
+            : readingLevelSetTransport
+              ? "One RK2 backward trace drives both fields. V uses the conservative translated-footprint gather. Phi is sampled from the previous accepted surface, redistanced around the same zero set, and published directly; V does not fit, mask, or reposition that surface."
+            : readingDirectSurfacePublication
+              ? "The accepted fine-vertex phi field is contoured directly with the shared centre-fan triangulation. No PLIC plane, V/K intercept, or phi eligibility mask participates in this surface."
+            : declaration.tip.summary}
+            {readingCellFill && " Cell fill is authoritative V/K drawn over each whole cell: zero is clear, opacity is linear through one, and amber marks excess above capacity. A fractional boundary cell can be a legitimate interface; disagreement with the thin contour reveals where volume and surface differ."}</p>
           {readingCellwiseTransport ? <div className={styles.figures}>
             <div className={styles.figure}><b>{readings.cellwise ? n(readings.cellwise.traces) : "—"}</b><span>shared traces</span></div>
             <div className={styles.figure}><b>{readings.cellwise ? n(readings.cellwise.receivers) : "—"}</b><span>receivers</span></div>
@@ -1650,6 +1802,21 @@ export function AdvanceLab(): React.JSX.Element {
               ? readings.cellwise.closureResidual.toExponential(2) : "—"}</b><span>closure residual</span></div>
             <div className={styles.figure}><b>{readings.cellwise
               ? readings.cellwise.areaBalanceError.toExponential(2) : "—"}</b><span>area balance</span></div>
+          </div> : readingLevelSetTransport ? <div className={styles.figures}>
+            <div className={styles.figure}><b>{readings.levelSetVolume
+              ? "active" : "—"}</b><span>exact redistancing</span></div>
+            <div className={styles.figure}><b>{readings.levelSetVolume
+              ? n(readings.levelSetVolume.redistancedSamples) : "—"}</b><span>distance samples</span></div>
+            <div className={styles.figure}><b>{readings.levelSetVolume
+              ? n(readings.levelSetVolume.redistanceFallbackSamples) : "—"}</b><span>fallback samples</span></div>
+            <div className={styles.figure}><b>{readings.levelSetVolume
+              ? n(readings.levelSetVolume.redistanceSegmentCount) : "—"}</b><span>accepted contour segments</span></div>
+            <div className={styles.figure}><b>{readings.levelSetVolume
+              ? n(readings.levelSetVolume.overCapacityCells) : "—"}</b><span>over-capacity cells</span></div>
+            <div className={styles.figure}><b>{readings.levelSetVolume
+              ? `+${readings.levelSetVolume.maximumOverCapacityRatio.toFixed(2)} K` : "—"}</b><span>maximum excess</span></div>
+            <div className={styles.figure}><b>{readings.levelSetVolume
+              ? n(readings.levelSetVolume.invalidPhiSamples) : "—"}</b><span>invalid phi samples</span></div>
           </div> : <div className={styles.figures}>
             <div className={styles.figure}><b>{n(cost.workgroups)}</b><span>workgroups executed</span></div>
             <div className={styles.figure}><b>{n(cost.dispatches)}</b><span>dispatches encoded</span></div>
@@ -1665,9 +1832,10 @@ export function AdvanceLab(): React.JSX.Element {
 
         {/* Said only while it is on: a caption for a reading nobody asked for is
             prose standing in front of the picture. */}
-        {SLICE_OVERLAY_ORDER.filter(id => overlays.has(id)).map(id =>
+        {SLICE_OVERLAY_ORDER.filter(id => overlays.has(id)
+          && !(readingDirectLevelSet && id === "normal")).map(id =>
           <p className={styles.lensNote} key={id}>
-            <i style={{ background: paletteVar(SLICE_OVERLAYS[id].keys[0]![0]) }} />
+            <i style={{ background: paletteVar(SLICE_OVERLAYS[id].keys[0]!.tone) }} />
             {SLICE_OVERLAYS[id].caption}</p>)}
 
         <div className={styles.folds}>
@@ -1715,7 +1883,7 @@ export function AdvanceLab(): React.JSX.Element {
             </p>
           </Fold>}
 
-          {!representing && <Fold id="io" title="Reads, writes and feeds"
+          {!representing && !readingDirectLevelSet && <Fold id="io" title="Reads, writes and feeds"
             meta={SPARSE_CM12_STAGE_BANDS[declaration.band].toLowerCase()}
             open={folds.has("io")} toggle={toggleFold}>
             <dl className={styles.io}>
@@ -1725,7 +1893,7 @@ export function AdvanceLab(): React.JSX.Element {
             </dl>
           </Fold>}
 
-          {!representing && <Fold id="seams" title="Sub-seams"
+          {!representing && !readingDirectLevelSet && <Fold id="seams" title="Sub-seams"
             meta={`${work.seams.length} · ${metric === "workgroups" ? "wg" : "disp"}`}
             open={folds.has("seams")} toggle={toggleFold}>
             <div className={styles.seams}>{work.seams.map((seam, i) => {
@@ -1756,7 +1924,7 @@ export function AdvanceLab(): React.JSX.Element {
             })}</div>
           </Fold>}
 
-          {!representing && (work.notes ?? []).length > 0 && <Fold id="notes" title="Notes"
+          {!representing && !readingDirectLevelSet && (work.notes ?? []).length > 0 && <Fold id="notes" title="Notes"
             meta={String((work.notes ?? []).length)}
             open={folds.has("notes")} toggle={toggleFold}>
             {(work.notes ?? []).map(note => <div className={styles.note} key={note}>
@@ -1789,15 +1957,21 @@ export function AdvanceLab(): React.JSX.Element {
                 z pressure coupling do not exist here.
               </p>
               {sharedRdfReceipt && <p className={styles.fidelity}>
-                Shared RDF is a derived, watertight C0 preview built from the accepted
-                volume fractions and PLIC normals. Transport still uses the displayed
-                generation&rsquo;s volume-correct PLIC planes. This preview implies
-                {" "}{sharedRdfReceipt.signedAreaErrorFine.toFixed(3)} finest-cell²
-                of area error ({(100 * sharedRdfReceipt.signedAreaErrorFine
-                  / Math.max(sharedRdfReceipt.exactAreaFine, 1)).toFixed(3)}% of the
-                scene total); {sharedRdfReceipt.unsupportedCutPartialCells} partial
-                cut cells and {sharedRdfReceipt.ambiguousFineCells} ambiguous cells
-                require explicit fallback.
+                {transportExperiment === "level-set-volume"
+                  ? <>The direct phi zero set represents {sharedRdfReceipt.representedAreaFine.toFixed(3)}
+                    {" "}finest-cell². Conserved V is {sharedRdfReceipt.exactAreaFine.toFixed(3)}
+                    {" "}finest-cell², a diagnostic reference rather than a surface-fitting target;
+                    the signed level-set-minus-volume difference is
+                    {" "}{sharedRdfReceipt.signedAreaErrorFine.toFixed(3)} finest-cell².</>
+                  : <>Shared RDF is a derived, watertight C0 preview built from the accepted
+                    volume fractions and PLIC normals. Transport still uses the displayed
+                    generation’s volume-correct PLIC planes. This preview implies
+                    {" "}{sharedRdfReceipt.signedAreaErrorFine.toFixed(3)} finest-cell²
+                    of area error ({(100 * sharedRdfReceipt.signedAreaErrorFine
+                      / Math.max(sharedRdfReceipt.exactAreaFine, 1)).toFixed(3)}% of the
+                    scene total); {sharedRdfReceipt.unsupportedCutPartialCells} partial
+                    cut cells and {sharedRdfReceipt.ambiguousFineCells} ambiguous cells
+                    require explicit fallback.</>}
               </p>}
               {(emptySlice || unsupported.length > 0) && <div className={styles.warnings}>
                 {emptySlice && <span>This authored centre slice contains no initial liquid.</span>}
@@ -1806,9 +1980,11 @@ export function AdvanceLab(): React.JSX.Element {
             </>}
           </Fold>
 
-          <Fold id="state" title="What a cell carries" meta="11 fields"
+          <Fold id="state" title="What a cell carries" meta={readingDirectLevelSet ? "10 fields" : "11 fields"}
             open={folds.has("state")} toggle={toggleFold}>
-            <div className={styles.props}>{CELL_STATE.map(([symbol, where, note]) =>
+            <div className={styles.props}>{CELL_STATE
+              .filter(([symbol]) => !(readingDirectLevelSet && symbol === "n, d"))
+              .map(([symbol, where, note]) =>
               <div className={styles.prop} key={symbol}>
                 <b>{symbol}<em>{where}</em></b><span>{note}</span></div>)}</div>
           </Fold>

@@ -19,7 +19,7 @@ export function createGentleMovingBlobScene(): SceneDescription {
     ...scene.container,
     width_m: 1.6,
     height_m: 1.2,
-    depth_m: 0.4,
+    depth_m: 0.8,
     fillFraction: 0,
     top: "closed",
     fluidWallMode: "free-slip",

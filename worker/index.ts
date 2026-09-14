@@ -7,10 +7,14 @@ const worker = {
     headers.set("Cross-Origin-Opener-Policy", "same-origin");
     headers.set("Cross-Origin-Embedder-Policy", "require-corp");
     headers.set("Cross-Origin-Resource-Policy", "same-origin");
-    if (new URL(request.url).pathname.startsWith("/wasm/fluid-wasm/")) {
+    const pathname = new URL(request.url).pathname;
+    if (pathname.startsWith("/wasm/fluid-wasm/")) {
       // Artifact names are stable across builds. Revalidate glue, binaries and
       // Rayon helpers so a release cannot combine generations for an hour.
       headers.set("Cache-Control", "no-cache");
+      if (response.ok && pathname.endsWith(".wasm")) {
+        headers.set("Content-Type", "application/wasm");
+      }
     }
     return new Response(response.body, {
       status: response.status,

@@ -276,6 +276,29 @@ pub fn transfer_fields(
     target_capacity: &[f32],
     new_air: &[NewAirCoverage],
 ) -> Result<TransferResult, TransferError> {
+    transfer_fields_impl(source, target, fields, target_capacity, new_air, false)
+}
+
+/// Level-set-volume generation transfer. It preserves finite non-negative
+/// excess volume instead of treating cell capacity as a hard storage limit.
+pub fn transfer_fields_allow_overcapacity(
+    source: &Graph,
+    target: &Graph,
+    fields: &Fields,
+    target_capacity: &[f32],
+    new_air: &[NewAirCoverage],
+) -> Result<TransferResult, TransferError> {
+    transfer_fields_impl(source, target, fields, target_capacity, new_air, true)
+}
+
+fn transfer_fields_impl(
+    source: &Graph,
+    target: &Graph,
+    fields: &Fields,
+    target_capacity: &[f32],
+    new_air: &[NewAirCoverage],
+    allow_overcapacity: bool,
+) -> Result<TransferResult, TransferError> {
     fields.validate_for(source)?;
     if target_capacity.len() != target.cells.len() {
         return Err(ValidationError("target capacity length differs".into()).into());
@@ -324,7 +347,12 @@ pub fn transfer_fields(
         let capacity = fields.capacity[id] * before.measure;
         source_amounts[id] = amount;
         source_capacities[id] = capacity;
-        if !valid(amount, capacity) {
+        if if allow_overcapacity {
+            !(capacity.is_finite() && capacity >= 0.0 && amount.is_finite() && amount >= -tolerance(capacity)
+                && !(amount > 0.0 && capacity <= 0.0))
+        } else {
+            !valid(amount, capacity)
+        } {
             return Err(deferred(1, id, amount, capacity));
         }
         let group = &groups[id];
@@ -349,10 +377,11 @@ pub fn transfer_fields(
             continue;
         }
         let available = capacities[0] + capacities[1];
-        if amount.abs() > available + tolerance(available) {
+        if !allow_overcapacity && amount.abs() > available + tolerance(available) {
             return Err(deferred(64, id, amount, available));
         }
-        let fill = (amount / before.measure).clamp(0.0, 1.0);
+        let base_amount = if allow_overcapacity { amount.min(capacity) } else { amount };
+        let fill = (base_amount / before.measure).clamp(0.0, 1.0);
         let (normal, offset, plane_valid) = interface_plane(
             fill,
             [
@@ -367,7 +396,7 @@ pub fn transfer_fields(
             let area = plan.cell_areas[entry];
             let child = target_capacity[entry_target[entry]] * area;
             let mut proposed = if available > 0.0 {
-                amount * (child / available)
+                base_amount * (child / available)
             } else {
                 0.0
             };
@@ -386,11 +415,23 @@ pub fn transfer_fields(
                     );
             }
             if amount >= 0.0 {
-                let excess = (amount - available).max(0.0);
+                let excess = if allow_overcapacity {
+                    (amount - base_amount).max(0.0)
+                } else {
+                    (amount - available).max(0.0)
+                };
                 if excess > 0.0 && available > 0.0 {
-                    proposed = child + excess * (child / available)
+                    if allow_overcapacity {
+                        proposed += excess * (child / available)
+                    } else {
+                        proposed = child + excess * (child / available)
+                    }
                 }
-                proposed = proposed.clamp(0.0, child + tolerance(child))
+                proposed = if allow_overcapacity {
+                    proposed.max(0.0)
+                } else {
+                    proposed.clamp(0.0, child + tolerance(child))
+                }
             }
             contributions[entry] = proposed;
             remaining = add(remaining, -proposed);
@@ -403,6 +444,8 @@ pub fn transfer_fields(
                 let lower = if amount < 0.0 { -tolerance(child) } else { 0.0 };
                 let upper = if amount < 0.0 {
                     0.0
+                } else if allow_overcapacity {
+                    f32::INFINITY
                 } else {
                     child + tolerance(child)
                 };
@@ -465,7 +508,12 @@ pub fn transfer_fields(
         let cap = target_capacity[id] * area;
         result.target_amounts[id] = amount;
         result.target_capacities[id] = cap;
-        if !valid(amount, cap) {
+        if if allow_overcapacity {
+            !(cap.is_finite() && cap >= 0.0 && amount.is_finite() && amount >= -tolerance(cap)
+                && !(amount > 0.0 && cap <= 0.0))
+        } else {
+            !valid(amount, cap)
+        } {
             return Err(deferred(64, id, amount, cap));
         }
         let weight = observed[0] + observed[1];

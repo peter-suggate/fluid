@@ -27,20 +27,21 @@ const cellwiseClosure = argument("cellwise-closure", "band-projection");
 assert.ok(Number.isSafeInteger(frames) && frames > 0 && Number.isSafeInteger(warmup) && warmup >= 0);
 assert.ok(dimension === 2 || dimension === 3, "--dimension must be 2 or 3");
 assert.ok(Number.isFinite(dt) && dt > 0, "--dt must be positive and finite");
-assert.ok(["baseline", "cellwise-probe", "cellwise-remap"].includes(transportExperiment),
-  "--transport-experiment must be baseline, cellwise-probe, or cellwise-remap");
+assert.ok(["baseline", "cellwise-probe", "cellwise-remap", "level-set-volume"].includes(transportExperiment),
+  "--transport-experiment must be baseline, cellwise-probe, cellwise-remap, or level-set-volume");
 assert.ok(dimension === 2 || transportExperiment === "baseline",
-  "cellwise transport experiments are available only in 2D");
+  "transport experiments are available only in 2D");
+const cellwiseTransport = transportExperiment === "cellwise-probe" || transportExperiment === "cellwise-remap";
 assert.ok(Number.isSafeInteger(traceSegments) && traceSegments >= 1 && traceSegments <= 128,
   "--trace-segments must be an integer in 1..=128");
-assert.ok(transportExperiment !== "baseline" || traceSegments === 1,
+assert.ok(cellwiseTransport || traceSegments === 1,
   "--trace-segments applies only to a cellwise transport experiment");
 assert.ok([1, 2, 4].includes(edgeSamples), "--edge-samples must be 1, 2, or 4");
-assert.ok(transportExperiment !== "baseline" || edgeSamples === 1,
+assert.ok(cellwiseTransport || edgeSamples === 1,
   "--edge-samples applies only to a cellwise transport experiment");
 assert.ok(["none", "local", "band-projection"].includes(cellwiseClosure),
   "--cellwise-closure must be none, local, or band-projection");
-assert.ok(transportExperiment !== "baseline" || cellwiseClosure === "band-projection",
+assert.ok(cellwiseTransport || cellwiseClosure === "band-projection",
   "--cellwise-closure applies only to a cellwise transport experiment");
 const transportExperimentOption = traceSegments === 1 && edgeSamples === 1 &&
     cellwiseClosure === "band-projection"

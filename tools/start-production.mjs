@@ -25,8 +25,24 @@ const { server } = await startProdServer({
 // headers. Set the isolation policy at the Node response boundary so render,
 // simulation and Rayon worker entry scripts receive the same policy as HTML
 // and public Wasm artifacts. `_headers` remains the deployed static-host rule.
-server.prependListener("request", (_request, response) => {
+server.prependListener("request", (request, response) => {
   response.setHeader("Cross-Origin-Opener-Policy", "same-origin");
   response.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
   response.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+  // Vinext's static MIME table currently omits Wasm. Its writeHead headers
+  // override earlier setHeader calls, so correct the type at that boundary.
+  const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
+  if (/^\/wasm\/fluid-wasm\/[^/]+\/fluid_wasm_bg\.wasm$/.test(pathname)) {
+    const writeHead = response.writeHead;
+    response.writeHead = function (statusCode, ...args) {
+      if (statusCode === 200 || statusCode === 206) {
+        const headersIndex = typeof args[0] === "string" ? 1 : 0;
+        const headers = new Headers(args[headersIndex] ?? {});
+        headers.set("Content-Type", "application/wasm");
+        headers.set("Cache-Control", "no-cache");
+        args[headersIndex] = Object.fromEntries(headers);
+      }
+      return writeHead.call(this, statusCode, ...args);
+    };
+  }
 });

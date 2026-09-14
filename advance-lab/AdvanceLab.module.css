@@ -136,10 +136,19 @@
 .keyToggle[aria-pressed=true]{background:var(--accent-wash);border-color:var(--accent-line);color:var(--accent-strong)}
 .keyToggle:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 
-.probe{position:absolute;pointer-events:none;z-index:5;background:var(--panel);border:1px solid var(--line-strong);border-radius:var(--radius-s);padding:9px 11px;font:var(--text-readout);width:180px;box-shadow:var(--shadow-lift);backdrop-filter:var(--frost)}
+.probe{position:absolute;pointer-events:none;z-index:5;background:var(--panel);border:1px solid var(--line-strong);border-radius:var(--radius-s);padding:9px 11px;font:var(--text-readout);width:232px;box-shadow:var(--shadow-lift);backdrop-filter:var(--frost)}
 .probeHead{font:var(--text-micro);letter-spacing:var(--track-wide);text-transform:uppercase;color:var(--dim);margin-bottom:6px}
 .probeRow{display:flex;justify-content:space-between;gap:16px}
 .probeRow span:first-child{color:var(--dim)}
+/* What the ink on this cell means — the reading the standing legend used to
+   ask the reader to assemble by eye, given here for the one cell they asked
+   about. Its own band, because it answers a different question from the values
+   above it: not how much, but what kind. */
+.probeMarks{margin-top:8px;padding-top:7px;border-top:1px solid var(--line);display:grid;gap:7px}
+.probeMark{display:grid;grid-template-columns:9px 1fr;gap:2px 8px;align-items:start}
+.probeMark i{width:9px;height:9px;border-radius:2px;margin-top:3px}
+.probeMark b{font:var(--text-micro);letter-spacing:var(--track-wide);text-transform:uppercase;font-weight:600;color:var(--ink)}
+.probeMark em{grid-column:2;font-style:normal;color:var(--dim);line-height:1.4}
 .probeRow span:last-child{font-variant-numeric:tabular-nums;color:var(--ink)}
 
 /* The right-click menu: what shapes the solve, opened on the water it shapes.

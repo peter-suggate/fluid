@@ -30,6 +30,69 @@ pub const CORRECTION_DELTA_OVER_H_HISTOGRAM_BOUNDS: [f64; 10] = [
 
 type Point = [f64; 2];
 
+#[derive(Clone, Copy, Debug)]
+struct NativeStageClock {
+    #[cfg(not(target_arch = "wasm32"))]
+    started: std::time::Instant,
+}
+
+impl NativeStageClock {
+    fn start() -> Self {
+        Self {
+            #[cfg(not(target_arch = "wasm32"))]
+            started: std::time::Instant::now(),
+        }
+    }
+
+    fn elapsed_nanoseconds(self) -> u64 {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            return self.started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            0
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CellwiseStageTimings {
+    /// Timings use the native monotonic clock. Wasm receipts explicitly mark
+    /// them unavailable rather than presenting zeros as measured work.
+    pub available: bool,
+    pub base_field_build: u64,
+    pub receiver_band_closure: u64,
+    /// Receiver extension solves plus final streamfunction assembly, excluding
+    /// both harmonic-continuation calls reported in `harmonic_fill`.
+    pub streamfunction_extension: u64,
+    pub harmonic_fill: u64,
+    pub diagnostics: u64,
+    pub trace: u64,
+    pub geometry_refinement: u64,
+    pub gather: u64,
+    pub commit: u64,
+    pub other: u64,
+    pub total_remap: u64,
+}
+
+fn finish_cellwise_timings(receipt: &mut CellwiseRemapReceipt, total_clock: NativeStageClock) {
+    receipt.timings.total_remap = total_clock.elapsed_nanoseconds();
+    let attributed = receipt
+        .timings
+        .base_field_build
+        .saturating_add(receipt.timings.receiver_band_closure)
+        .saturating_add(receipt.timings.streamfunction_extension)
+        .saturating_add(receipt.timings.harmonic_fill)
+        .saturating_add(receipt.timings.diagnostics)
+        .saturating_add(receipt.timings.trace)
+        .saturating_add(receipt.timings.geometry_refinement)
+        .saturating_add(receipt.timings.gather)
+        .saturating_add(receipt.timings.commit);
+    receipt.timings.other = receipt.timings.total_remap.saturating_sub(attributed);
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CellwiseClosure {
@@ -71,6 +134,7 @@ impl Default for CellwiseRemapOptions {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CellwiseRemapReceipt {
+    pub timings: CellwiseStageTimings,
     pub material_committed: bool,
     pub closure: CellwiseClosure,
     /// User-configured spatial edge resolution.  A committing remap may raise
@@ -360,6 +424,7 @@ pub fn transport_volume_cellwise_with_commit(
     options: CellwiseRemapOptions,
     mut commit: impl FnMut(f32, &mut Fields) -> Result<(), ValidationError>,
 ) -> Result<CellwiseRemapReceipt, ValidationError> {
+    let total_clock = NativeStageClock::start();
     validate_inputs(graph, fields, dt, options)?;
     if options.commit_material {
         if fields.solid_motion_active {
@@ -375,6 +440,10 @@ pub fn transport_volume_cellwise_with_commit(
     }
 
     let mut receipt = CellwiseRemapReceipt {
+        timings: CellwiseStageTimings {
+            available: !cfg!(target_arch = "wasm32"),
+            ..Default::default()
+        },
         closure: options.closure,
         requested_edge_samples: options.edge_samples,
         edge_samples: options.edge_samples,
@@ -383,7 +452,9 @@ pub fn transport_volume_cellwise_with_commit(
         correction_delta_over_h_histogram_bounds: CORRECTION_DELTA_OVER_H_HISTOGRAM_BOUNDS,
         ..Default::default()
     };
+    let base_field_clock = NativeStageClock::start();
     let base_tracer = FaceConsistentVelocity2d::new(graph, fields, dt)?;
+    receipt.timings.base_field_build = base_field_clock.elapsed_nanoseconds();
     receipt.trace_extension_generations = base_tracer.extension_generations();
     receipt.extension_cell_visits = base_tracer.extension_cell_visits();
     receipt.support_lattice_entries = base_tracer.support_lattice_entries();
@@ -392,6 +463,7 @@ pub fn transport_volume_cellwise_with_commit(
     receipt.extension_subface_rates_republished = base_tracer.extension_subface_rates_republished();
     let rates_before_closure = base_tracer.subface_rates().to_vec();
     let mut rates = rates_before_closure.clone();
+    let closure_clock = NativeStageClock::start();
     let mut receiver_band = conservative_pretrace_receiver_band(graph, fields, &rates, dt as f64)?;
     for pass in 1..=graph.cells.len() + 1 {
         receipt.receiver_band_stabilization_passes = pass;
@@ -416,6 +488,7 @@ pub fn transport_volume_cellwise_with_commit(
                             expected: CONTINUITY_TARGET as f32,
                         });
                     }
+                    finish_cellwise_timings(&mut receipt, total_clock);
                     return Ok(receipt);
                 }
             };
@@ -454,13 +527,25 @@ pub fn transport_volume_cellwise_with_commit(
                 receipt.closure_accepted = true;
             }
             CellwiseClosure::BandProjection => {
-                streamfunction_extension_rates_2d(
+                let timings = streamfunction_extension_rates_2d(
                     graph,
                     fields,
                     &mut rates,
                     &receiver_band,
                     false,
                 )?;
+                receipt.timings.harmonic_fill = receipt
+                    .timings
+                    .harmonic_fill
+                    .saturating_add(timings.harmonic_fill_nanoseconds);
+                receipt.timings.streamfunction_extension = receipt
+                    .timings
+                    .streamfunction_extension
+                    .saturating_add(
+                        timings
+                            .total_nanoseconds
+                            .saturating_sub(timings.harmonic_fill_nanoseconds),
+                    );
                 receipt.closure_accepted = true;
                 receipt.closure_unknowns = receiver_band
                     .iter()
@@ -517,7 +602,20 @@ pub fn transport_volume_cellwise_with_commit(
         })
         .count();
     if options.closure == CellwiseClosure::BandProjection {
-        streamfunction_extension_rates_2d(graph, fields, &mut rates, &receiver_band, true)?;
+        let timings =
+            streamfunction_extension_rates_2d(graph, fields, &mut rates, &receiver_band, true)?;
+        receipt.timings.harmonic_fill = receipt
+            .timings
+            .harmonic_fill
+            .saturating_add(timings.harmonic_fill_nanoseconds);
+        receipt.timings.streamfunction_extension = receipt
+            .timings
+            .streamfunction_extension
+            .saturating_add(
+                timings
+                    .total_nanoseconds
+                    .saturating_sub(timings.harmonic_fill_nanoseconds),
+            );
     }
     publish_rate_change_metrics(
         graph,
@@ -533,11 +631,29 @@ pub fn transport_volume_cellwise_with_commit(
     } else {
         base_tracer.with_piecewise_subface_rates(graph, &rates)?
     };
+    receipt.timings.harmonic_fill = receipt
+        .timings
+        .harmonic_fill
+        .saturating_add(tracer.harmonic_fill_nanoseconds());
+    receipt.timings.streamfunction_extension = receipt
+        .timings
+        .streamfunction_extension
+        .saturating_add(
+            tracer
+                .streamfunction_build_nanoseconds()
+                .saturating_sub(tracer.harmonic_fill_nanoseconds()),
+        );
+    receipt.timings.receiver_band_closure = closure_clock
+        .elapsed_nanoseconds()
+        .saturating_sub(receipt.timings.streamfunction_extension)
+        .saturating_sub(receipt.timings.harmonic_fill);
     receipt.streamfunction_max_integrated_flux_residual =
         tracer.streamfunction_max_integrated_flux_residual();
     receipt.streamfunction_range = tracer.streamfunction_range();
+    let diagnostics_clock = NativeStageClock::start();
     publish_liquid_velocity_diagnostics(graph, fields, &tracer, &mut receipt)?;
     publish_tracer_differential_diagnostics(graph, &tracer, &receiver_band, &mut receipt)?;
+    receipt.timings.diagnostics = diagnostics_clock.elapsed_nanoseconds();
     // One whole-step gather remains Courant-unlimited, but its RK pathlines
     // must resolve travel across piecewise-RT0 regions. Treat the configured
     // value as a floor and keep each segment at or below Courant 0.25;
@@ -595,6 +711,7 @@ pub fn transport_volume_cellwise_with_commit(
                 expected: CONTINUITY_TARGET as f32,
             });
         }
+        finish_cellwise_timings(&mut receipt, total_clock);
         return Ok(receipt);
     }
     let mut fixed_edges: Vec<Vec<Point>> = graph
@@ -629,7 +746,9 @@ pub fn transport_volume_cellwise_with_commit(
     }
     let mut traced = BTreeMap::new();
     let mut refinement_passes = receipt.adaptive_edge_refinement_passes;
+    let refinement_clock = NativeStageClock::start();
     let (geometry, raw_receivers, receivers) = loop {
+        let trace_clock = NativeStageClock::start();
         trace_lattice_points(
             graph,
             fields,
@@ -640,6 +759,10 @@ pub fn transport_volume_cellwise_with_commit(
             &mut traced,
             &mut receipt,
         )?;
+        receipt.timings.trace = receipt
+            .timings
+            .trace
+            .saturating_add(trace_clock.elapsed_nanoseconds());
         let geometry = build_geometry(
             graph,
             fields,
@@ -710,6 +833,10 @@ pub fn transport_volume_cellwise_with_commit(
         receipt.adaptive_edge_refinement_passes = refinement_passes;
         receipt.adaptive_edge_points_inserted += inserted;
     };
+    receipt.timings.geometry_refinement = refinement_clock
+        .elapsed_nanoseconds()
+        .saturating_sub(receipt.timings.trace);
+    let geometry_metrics_clock = NativeStageClock::start();
     receipt.edge_samples = fixed_edges
         .iter()
         .map(|points| {
@@ -834,11 +961,17 @@ pub fn transport_volume_cellwise_with_commit(
     if !receipt.min_preimage_area.is_finite() {
         receipt.min_preimage_area = 0.0;
     }
+    receipt.timings.geometry_refinement = receipt
+        .timings
+        .geometry_refinement
+        .saturating_add(geometry_metrics_clock.elapsed_nanoseconds());
 
     if !options.commit_material {
+        finish_cellwise_timings(&mut receipt, total_clock);
         return Ok(receipt);
     }
     if reject_incomplete_receiver_band(fields, &receipt) {
+        finish_cellwise_timings(&mut receipt, total_clock);
         return Ok(receipt);
     }
     if receipt.negative_liquid_receiver_preimages != 0 {
@@ -859,6 +992,7 @@ pub fn transport_volume_cellwise_with_commit(
             observed: observed as f32,
             expected: 0.0,
         });
+        finish_cellwise_timings(&mut receipt, total_clock);
         return Ok(receipt);
     }
     if receipt.pre_correction_convex_hull_liquid_folds != 0
@@ -876,6 +1010,7 @@ pub fn transport_volume_cellwise_with_commit(
                 .max(receipt.corrected_convex_hull_liquid_folds) as f32,
             expected: 0.0,
         });
+        finish_cellwise_timings(&mut receipt, total_clock);
         return Ok(receipt);
     }
     if receipt.area_balance_relative_error > AREA_BALANCE_TOLERANCE {
@@ -885,6 +1020,7 @@ pub fn transport_volume_cellwise_with_commit(
             observed: receipt.area_balance_relative_error as f32,
             expected: AREA_BALANCE_TOLERANCE as f32,
         });
+        finish_cellwise_timings(&mut receipt, total_clock);
         return Ok(receipt);
     }
     if receipt.max_area_identity_error > AREA_IDENTITY_TOLERANCE {
@@ -894,6 +1030,7 @@ pub fn transport_volume_cellwise_with_commit(
             observed: receipt.max_area_identity_error as f32,
             expected: AREA_IDENTITY_TOLERANCE as f32,
         });
+        finish_cellwise_timings(&mut receipt, total_clock);
         return Ok(receipt);
     }
     if receipt.closure_unresolved != 0 || receipt.max_compression_ratio > VOLUME_MARGIN {
@@ -903,10 +1040,13 @@ pub fn transport_volume_cellwise_with_commit(
             observed: receipt.max_compression_ratio as f32,
             expected: 0.0,
         });
+        finish_cellwise_timings(&mut receipt, total_clock);
         return Ok(receipt);
     }
 
+    let gather_clock = NativeStageClock::start();
     let next = gather_material(graph, fields, &geometry.polygons, &mut receipt)?;
+    receipt.timings.gather = gather_clock.elapsed_nanoseconds();
     let global_gather_failed =
         receipt.gather_absolute_volume_error > receipt.gather_volume_roundoff_bound;
     let donor_gather_failed =
@@ -931,6 +1071,7 @@ pub fn transport_volume_cellwise_with_commit(
             observed: observed as f32,
             expected: expected as f32,
         });
+        finish_cellwise_timings(&mut receipt, total_clock);
         return Ok(receipt);
     }
     for (i, &volume) in next.iter().enumerate() {
@@ -943,15 +1084,19 @@ pub fn transport_volume_cellwise_with_commit(
                 observed: volume as f32,
                 expected: capacity as f32,
             });
+            finish_cellwise_timings(&mut receipt, total_clock);
             return Ok(receipt);
         }
     }
+    let commit_clock = NativeStageClock::start();
     for (i, &volume) in next.iter().enumerate() {
         fields.density[i] = (volume / graph.cells[i].measure as f64) as f32;
         fields.gamma[i] = 1.0;
     }
     commit(dt, fields)?;
     receipt.material_committed = true;
+    receipt.timings.commit = commit_clock.elapsed_nanoseconds();
+    finish_cellwise_timings(&mut receipt, total_clock);
     Ok(receipt)
 }
 

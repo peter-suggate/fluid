@@ -101,8 +101,26 @@ pub fn commit_candidate(
 
 pub fn prepare_candidate(
     state: &SceneState<2>,
+    candidate: SceneState<2>,
+    arena: &LeafArena,
+) -> Result<(SceneState<2>, LeafArena), TransferError> {
+    prepare_candidate_impl(state, candidate, arena, false, true)
+}
+
+pub fn prepare_candidate_allow_overcapacity(
+    state: &SceneState<2>,
+    candidate: SceneState<2>,
+    arena: &LeafArena,
+) -> Result<(SceneState<2>, LeafArena), TransferError> {
+    prepare_candidate_impl(state, candidate, arena, true, false)
+}
+
+fn prepare_candidate_impl(
+    state: &SceneState<2>,
     mut candidate: SceneState<2>,
     arena: &LeafArena,
+    allow_overcapacity: bool,
+    reconstruct_volume_interface: bool,
 ) -> Result<(SceneState<2>, LeafArena), TransferError> {
     if candidate.topology.graph.topology_generation != state.topology.graph.topology_generation + 1
     {
@@ -141,13 +159,23 @@ pub fn prepare_candidate(
             }
         })
         .collect();
-    let moved = transfer_fields(
-        &state.topology.graph,
-        &candidate.topology.graph,
-        &state.fields,
-        &candidate.fields.capacity,
-        &new_air,
-    )?;
+    let moved = if allow_overcapacity {
+        crate::transfer::transfer_fields_allow_overcapacity(
+            &state.topology.graph,
+            &candidate.topology.graph,
+            &state.fields,
+            &candidate.fields.capacity,
+            &new_air,
+        )?
+    } else {
+        transfer_fields(
+            &state.topology.graph,
+            &candidate.topology.graph,
+            &state.fields,
+            &candidate.fields.capacity,
+            &new_air,
+        )?
+    };
     let prior_member: HashMap<_, _> = state
         .topology
         .graph
@@ -185,7 +213,12 @@ pub fn prepare_candidate(
     f.frame_dt = state.fields.frame_dt;
     f.acceleration_fine = state.fields.acceleration_fine;
     f.fault = None;
-    reconstruct_interfaces(&candidate.topology.graph, f)?;
+    if reconstruct_volume_interface {
+        reconstruct_interfaces(&candidate.topology.graph, f)?;
+    } else {
+        f.interface_normal.fill(0.0);
+        f.interface_offset.fill(0.0);
+    }
     collocate_velocity(&candidate.topology.graph, f);
     let next_by_key: HashMap<_, _> = candidate
         .topology

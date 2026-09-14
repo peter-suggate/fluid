@@ -216,6 +216,29 @@ pub fn run_stage(
             .map_err(error)?;
             serde_json::Value::Null
         }
+        "transport"
+            if options.transport_experiment
+                == fluid_core::world::TransportExperiment::LevelSetVolume =>
+        {
+            fluid_core::extend_velocity(&graph, &mut fields, 8).map_err(error)?;
+            let topology = fluid_core::presentation::RdfTopology::compile(&graph).map_err(error)?;
+            let support = fluid_core::presentation::RdfSupport {
+                solid_fraction: (!graph.solid_voxel_fraction.is_empty())
+                    .then(|| graph.solid_voxel_fraction.clone()),
+                ..Default::default()
+            };
+            // The stage protocol carries fields but no persistent surface, so this
+            // one-shot entry point bootstraps a shared fine-grid level set directly
+            // from occupancy. It must not introduce a volume-fitted PLIC surface.
+            let surface = fluid_core::levelset_surface::initialize_from_volume(&graph, &fields)
+                .map_err(error)?;
+            let mut phi = fluid_core::levelset_surface::cell_phi(&graph, &surface)
+                .map_err(error)?;
+            let (_, receipt) = fluid_core::levelset_volume::advance(
+                &graph, &mut fields, &surface, &topology, &support, &mut phi, options.dt,
+            ).map_err(error)?;
+            serde_json::to_value(receipt).map_err(error)?
+        }
         "transport" => match options.transport_experiment.cellwise_mode() {
             None => serde_json::to_value(
                 fluid_core::transport_volume(&graph, &mut fields, options.dt).map_err(error)?,

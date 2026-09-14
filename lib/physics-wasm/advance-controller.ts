@@ -20,7 +20,7 @@ export interface AdvanceRefinementRegion {
 }
 
 /** Explicit opt-in selector understood by the Rust 2-D world boundary. */
-export type AdvanceTransportExperiment = "baseline" | "cellwise-remap";
+export type AdvanceTransportExperiment = "baseline" | "cellwise-remap" | "level-set-volume";
 export type AdvanceTransportExperimentOption = AdvanceTransportExperiment | {
   readonly mode: "cellwise-remap";
   readonly traceSegments: number;

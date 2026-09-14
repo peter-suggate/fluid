@@ -2051,7 +2051,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   defineScene({
     id: "gentle-moving-blob",
     name: "Gentle moving blob",
-    blurb: "A small curved body starts with a gentle sideways velocity and then evolves through the full sparse adaptive geometric pipeline. Zero forcing and no sources or moving solids keep the first remap run easy to read.",
+    blurb: "A fully contained 0.3 m sphere drifts gently sideways through air while the sparse grid adapts around it. Zero gravity, viscosity, surface tension, sources and moving solids isolate transport shape loss.",
     audience: "validation",
     shelf: "Transport lab",
     environment: "stage",

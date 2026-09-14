@@ -8,6 +8,38 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct StreamfunctionBuildTimings {
+    pub total_nanoseconds: u64,
+    pub harmonic_fill_nanoseconds: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct NativeStageClock {
+    #[cfg(not(target_arch = "wasm32"))]
+    started: std::time::Instant,
+}
+
+impl NativeStageClock {
+    fn start() -> Self {
+        Self {
+            #[cfg(not(target_arch = "wasm32"))]
+            started: std::time::Instant::now(),
+        }
+    }
+
+    fn elapsed_nanoseconds(self) -> u64 {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            return self.started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            0
+        }
+    }
+}
+
 pub use crate::band_projection::{
     project_receiver_band_rates_2d, BandProjectionReceipt2d, BAND_PROJECTION_NORMALIZED_TARGET,
 };
@@ -407,6 +439,8 @@ pub struct FaceConsistentVelocity2d {
     lattice_dimensions: [usize; 2],
     nearest_owner: Vec<usize>,
     represented: Vec<bool>,
+    streamfunction_build_nanoseconds: u64,
+    harmonic_fill_nanoseconds: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -737,6 +771,8 @@ impl FaceConsistentVelocity2d {
             lattice_dimensions,
             nearest_owner,
             represented,
+            streamfunction_build_nanoseconds: 0,
+            harmonic_fill_nanoseconds: 0,
         })
     }
 
@@ -763,11 +799,14 @@ impl FaceConsistentVelocity2d {
         }
         let mut projected = self.clone();
         projected.cells = compile_face_velocity_cells(graph, rates)?;
-        projected.streamfunction = Some(compile_streamfunction_velocity(
+        let (streamfunction, timings) = compile_streamfunction_velocity(
             graph,
             rates,
             receiver_band,
-        )?);
+        )?;
+        projected.streamfunction = Some(streamfunction);
+        projected.streamfunction_build_nanoseconds = timings.total_nanoseconds;
+        projected.harmonic_fill_nanoseconds = timings.harmonic_fill_nanoseconds;
         projected.subface_rates = rates.to_vec();
         Ok(projected)
     }
@@ -789,6 +828,8 @@ impl FaceConsistentVelocity2d {
         let mut projected = self.clone();
         projected.cells = compile_face_velocity_cells(graph, rates)?;
         projected.streamfunction = None;
+        projected.streamfunction_build_nanoseconds = 0;
+        projected.harmonic_fill_nanoseconds = 0;
         projected.subface_rates = rates.to_vec();
         Ok(projected)
     }
@@ -884,6 +925,14 @@ impl FaceConsistentVelocity2d {
         self.nearest_owner.len()
     }
 
+    pub(crate) fn streamfunction_build_nanoseconds(&self) -> u64 {
+        self.streamfunction_build_nanoseconds
+    }
+
+    pub(crate) fn harmonic_fill_nanoseconds(&self) -> u64 {
+        self.harmonic_fill_nanoseconds
+    }
+
     pub fn streamfunction_max_integrated_flux_residual(&self) -> f64 {
         self.streamfunction
             .as_ref()
@@ -919,7 +968,8 @@ fn compile_streamfunction_velocity(
     graph: &Graph,
     rates: &[f64],
     receiver_band: &[bool],
-) -> Result<StreamfunctionVelocity2d, ValidationError> {
+) -> Result<(StreamfunctionVelocity2d, StreamfunctionBuildTimings), ValidationError> {
+    let total_clock = NativeStageClock::start();
     let nx = graph.dimensions[0] as usize;
     let ny = graph.dimensions[1] as usize;
     let stride = nx + 1;
@@ -1058,7 +1108,9 @@ fn compile_streamfunction_velocity(
             }
         }
     }
+    let harmonic_clock = NativeStageClock::start();
     fill_streamfunction_holes_harmonic(&mut psi, nx, ny)?;
+    let harmonic_fill_nanoseconds = harmonic_clock.elapsed_nanoseconds();
     active_lattice.fill(true);
     let mut max_integrated_flux_residual = 0.0_f64;
     for face in &graph.subfaces {
@@ -1182,14 +1234,21 @@ fn compile_streamfunction_velocity(
             }
         }
     }
-    Ok(StreamfunctionVelocity2d {
+    let streamfunction = StreamfunctionVelocity2d {
         psi,
         dx,
         dy,
         active_lattice,
         dimensions: [nx, ny],
         max_integrated_flux_residual,
-    })
+    };
+    Ok((
+        streamfunction,
+        StreamfunctionBuildTimings {
+            total_nanoseconds: total_clock.elapsed_nanoseconds(),
+            harmonic_fill_nanoseconds,
+        },
+    ))
 }
 
 fn hermite(t: f64) -> ([f64; 2], [f64; 2], [f64; 2], [f64; 2]) {
@@ -1305,7 +1364,9 @@ pub(crate) fn streamfunction_extension_rates_2d(
     rates: &mut [f64],
     receiver_band: &[bool],
     globalize: bool,
-) -> Result<(), ValidationError> {
+) -> Result<StreamfunctionBuildTimings, ValidationError> {
+    let total_clock = NativeStageClock::start();
+    let mut harmonic_fill_nanoseconds = 0;
     #[derive(Clone, Copy)]
     struct Edge {
         a: usize,
@@ -1622,7 +1683,9 @@ pub(crate) fn streamfunction_extension_rates_2d(
         // dry-air targets to its variational problem. This happens only after
         // the conservative receiver band has stabilized, so the private
         // continuation cannot feed back into band construction.
+        let harmonic_clock = NativeStageClock::start();
         fill_streamfunction_holes_harmonic(&mut psi, nx, ny)?;
+        harmonic_fill_nanoseconds = harmonic_clock.elapsed_nanoseconds();
     }
     for face in &graph.subfaces {
         let fixed = (face_is_pressure_owned(fields, face)
@@ -1725,7 +1788,10 @@ pub(crate) fn streamfunction_extension_rates_2d(
             )));
         }
     }
-    Ok(())
+    Ok(StreamfunctionBuildTimings {
+        total_nanoseconds: total_clock.elapsed_nanoseconds(),
+        harmonic_fill_nanoseconds,
+    })
 }
 
 fn compile_face_velocity_cells(

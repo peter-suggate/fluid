@@ -18,6 +18,7 @@ const paths = ["/", ...assets,
 const results = await Promise.allSettled(paths.map(async path => {
   const response = await fetch(new URL(path, origin), { method: "HEAD", signal: AbortSignal.timeout(5000) });
   assert.equal(response.status, 200, `${path} status`);
+  if (path.endsWith(".wasm")) assert.equal(response.headers.get("content-type"), "application/wasm", `${path}: streaming Wasm MIME type`);
   if (path.startsWith("/wasm/")) assert.equal(response.headers.get("cache-control"), "no-cache", `${path}: stable artifacts must revalidate`);
   for (const [name, value] of Object.entries({
     "cross-origin-opener-policy": "same-origin",
