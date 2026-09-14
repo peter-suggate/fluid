@@ -1175,6 +1175,7 @@ impl World {
         // Both geometric transports distinguish shape change from uniform
         // translation. Absolute speed alone must not refine bulk liquid.
         policy.translation_invariant_motion_sizing = cellwise_remap || level_set_volume;
+        policy.coarsen_inactive_pages = level_set_volume;
         policy.maximum_leaves = Some(self.arena.maximum_slice_leaves);
         policy.maximum_cells = Some(self.arena.capacity as usize * 64);
         policy.free_leaf_ids.clone_from(&self.arena.free_leaf_ids);

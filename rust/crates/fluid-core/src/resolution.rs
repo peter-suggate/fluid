@@ -193,6 +193,9 @@ pub struct ResolutionPolicyOptions {
     /// Absolute translation still drives swept support and page activation.
     #[serde(skip)]
     pub translation_invariant_motion_sizing: bool,
+    /// Let inactive metadata shed stale fine rungs before 2:1 closure.
+    #[serde(skip)]
+    pub coarsen_inactive_pages: bool,
     pub refinement_regions: Vec<ResolutionRegion>,
     pub static_boundary_floor_by_brick: BTreeMap<u32, u8>,
     pub moving_rigid_bodies: bool,
@@ -209,6 +212,7 @@ impl Default for ResolutionPolicyOptions {
         Self {
             policy: ActivityPolicy::default(),
             translation_invariant_motion_sizing: false,
+            coarsen_inactive_pages: false,
             refinement_regions: vec![],
             static_boundary_floor_by_brick: BTreeMap::new(),
             moving_rigid_bodies: false,
@@ -1475,10 +1479,27 @@ pub fn plan_resolution(
         let mut requested = current;
         let mut reason = 32_u32;
         let frozen = policy.freeze_topology || options.frozen_brick_keys.contains(&brick.key);
-        if !brick.active || frozen {
+        if frozen {
             targets.insert(brick.key, current);
             candidate_active.insert(brick.key, brick.active);
-            plan_reasons.insert(brick.key, if frozen { 32 } else { 128 });
+            plan_reasons.insert(brick.key, 32);
+            continue;
+        }
+        if !brick.active {
+            // Inactive pages have no represented cells, so retaining their old
+            // rung can only impose a stale 2:1 floor on nearby active pages.
+            // Region constraints and the existing closure still grade their
+            // metadata, and material demand overrides reactivation to B8.
+            targets.insert(
+                brick.key,
+                if options.coarsen_inactive_pages {
+                    apply_regions(1, brick, &options.refinement_regions)
+                } else {
+                    current
+                },
+            );
+            candidate_active.insert(brick.key, false);
+            plan_reasons.insert(brick.key, 128);
             continue;
         }
         let measured_floor = velocity_floor(m.history.velocity_travel, ts, policy.activity_signals);
@@ -2041,6 +2062,50 @@ mod tests {
             .unwrap();
             assert_eq!(d.receipt.bricks[0].candidate_active, value != 0.0);
         }
+    }
+
+    #[test]
+    fn inactive_fine_metadata_does_not_pin_adjacent_residual_page() {
+        let (topology, mut fields) = setup(
+            vec![brick(0, [0, 0], 2, true), brick(1, [1, 0], 4, false)],
+            [16, 8],
+        );
+        // A conservative tail keeps the active page resident, but is below
+        // occupancy and thin-feature thresholds and should not keep it fine.
+        fields.density[0] = 3.4e-8;
+        let mut state = initialize_resolution_policy(&topology);
+        state.history.get_mut(&0).unwrap().proof_epochs = 1;
+
+        let mut policy = options();
+        policy.coarsen_inactive_pages = true;
+        let decision = plan_resolution(
+            &topology,
+            &fields,
+            &state,
+            1.0 / 30.0,
+            0.05,
+            &policy,
+        )
+        .unwrap();
+        let active = decision.receipt.bricks.iter()
+            .find(|record| record.brick_key == 0).unwrap();
+        let inactive = decision.receipt.bricks.iter()
+            .find(|record| record.brick_key == 1).unwrap();
+        assert_eq!((active.requested_resolution, active.scheduled_resolution), (1, 1));
+        assert!(active.candidate_active);
+        assert_eq!((inactive.requested_resolution, inactive.scheduled_resolution), (1, 1));
+        assert!(!inactive.candidate_active);
+
+        let candidate = compile_topology::<2>(TopologySeed {
+            dimensions: [16, 8, 1],
+            generation: 2,
+            sparse_air_phi: 0.5,
+            boundaries: [BoundaryMode::Closed; 6],
+            bricks: decision.candidate_bricks,
+        }).unwrap();
+        let inactive = candidate.bricks.iter()
+            .find(|page| page.seed.key == 1).unwrap();
+        assert_eq!(inactive.cell_range.start, inactive.cell_range.end);
     }
 
     #[test]

@@ -97,6 +97,14 @@ for (const [sceneId, frames] of [["cm12-figure-7", 30], ["coarse-first-pool-impa
             assert.ok(view.graph.cells.some(cell => cell.widths[0] === 4),
               "Figure 7 retains width-4 interior cells under bulk falling motion");
           }
+          const vacatedTrailingKeys = sceneId === "cm12-figure-7"
+            ? frame === 15 ? [2246, 2249] : (frame === 17 || frame === 30) ? [2229, 2234] : []
+            : [];
+          for (const key of vacatedTrailingKeys) {
+            const trailing = view.graph.bricks.find(brick => brick.key === key);
+            assert.ok(!trailing || !trailing.active || trailing.resolution <= 1,
+              `frame ${frame}: vacated trailing brick ${key} is coarsest or retired`);
+          }
           assert.ok(view.rdf.vertexPhiFine.some(Number.isFinite));
           assert.ok(view.rdf.segmentsFine.length > 0, `frame ${frame}: visible RDF surface`);
         } finally { decoded.release(); }
