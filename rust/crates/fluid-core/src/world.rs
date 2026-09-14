@@ -13,8 +13,10 @@ use crate::presentation::{
 use crate::pressure_authority::PressureAuthority;
 use crate::publication::{encode_publication, Plane, PlaneId};
 use crate::resolution::{
-    initialize_resolution_policy, plan_projected_transport_support, plan_resolution,
-    ResolutionPolicyOptions, ResolutionPolicyReceipt, ResolutionPolicyState,
+    initialize_resolution_policy, plan_projected_transport_support,
+    plan_projected_transport_support_with_surface, plan_resolution,
+    plan_resolution_with_surface, ResolutionPolicyOptions, ResolutionPolicyReceipt,
+    ResolutionPolicyState,
 };
 use crate::scalar_authority::{
     publish_scalar_interface_state_from_geometric_density,
@@ -31,6 +33,30 @@ use crate::{
     transport_volume_with_commit, Fields, PressureReceipt, ValidationError,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+/// Use the existing source term only while enforcing the pressure constraint.
+/// Restoring it even on failure prevents expansion from becoming injected mass
+/// or a refinement demand. Every existing projection must enforce this target;
+/// the post-support projection would otherwise erase the primary expansion.
+fn with_level_set_volume_pressure_source<T>(
+    graph: &crate::Graph,
+    fields: &mut Fields,
+    dt: f32,
+    enabled: bool,
+    project: impl FnOnce(&mut Fields) -> Result<T, ValidationError>,
+) -> Result<T, ValidationError> {
+    if !enabled {
+        return project(fields);
+    }
+    let mut source = crate::numerics::level_set_volume_excess_pressure_source(graph, fields, dt)?;
+    for (id, rate) in source.iter_mut().enumerate() {
+        *rate += Fields::optional_cell(&fields.source_rate, id, 0.0);
+    }
+    let physical_source = std::mem::replace(&mut fields.source_rate, source);
+    let result = project(fields);
+    fields.source_rate = physical_source;
+    result
+}
 
 #[derive(Clone, Copy, Debug)]
 struct NativeStageClock {
@@ -847,92 +873,113 @@ impl World {
             observe("interface-reconstruction", graph, fields);
             self.stage_timings.field_build = field_build_clock.elapsed_nanoseconds();
             let primary_pressure_clock = NativeStageClock::start();
-            if let Some(embedding) = &mut self.embedding {
-                let prepared = embedding.prepare(graph, fields);
-                fields.pressure_diagonal.clone_from(&prepared.diagonal);
-                fields.pressure_rhs.clone_from(&prepared.rhs);
-                observe("pressure-rhs", graph, fields);
-                let solved = embedding.solve(
-                    graph,
-                    fields,
-                    self.options.pressure_iterations,
-                    self.options.pressure_relative_tolerance,
-                    Some(prepared),
-                )?;
-                self.pressure = PressureReceipt {
-                    iterations: solved.solve.iterations,
-                    initial_residual: solved.solve.initial_true_residual_squared.max(0.0).sqrt(),
-                    residual: solved.solve.final_true_residual_squared.max(0.0).sqrt(),
-                    converged: solved.solve.converged,
-                };
-                observe("pressure-solve", graph, fields);
-                embedding.project(graph, fields, &solved.prepared);
-            } else {
-                // Swept wall-contact support is a single transient pressure
-                // solve.  Restore the physical membership before support
-                // planning so promoted dry cells cannot survive a topology
-                // transfer or apply the contact impulse a second time.
-                let physical_rows = prepare_pressure_topology(graph, fields);
-                let physical_pressure_member = fields.pressure_member.clone();
-                let physical_pressure_row_member = fields.pressure_row_member.clone();
-                let physical_pressure_diagonal = fields.pressure_diagonal.clone();
-                let rows = if swept_static_wall_pressure {
-                    prepare_pressure_topology_with_swept_static_wall_support(graph, fields)
+            with_level_set_volume_pressure_source(graph, fields, dt, level_set_volume, |fields| {
+                if let Some(embedding) = &mut self.embedding {
+                    let prepared = embedding.prepare(graph, fields);
+                    fields.pressure_diagonal.clone_from(&prepared.diagonal);
+                    fields.pressure_rhs.clone_from(&prepared.rhs);
+                    observe("pressure-rhs", graph, fields);
+                    let solved = embedding.solve(
+                        graph,
+                        fields,
+                        self.options.pressure_iterations,
+                        self.options.pressure_relative_tolerance,
+                        Some(prepared),
+                    )?;
+                    self.pressure = PressureReceipt {
+                        iterations: solved.solve.iterations,
+                        initial_residual: solved.solve.initial_true_residual_squared.max(0.0).sqrt(),
+                        residual: solved.solve.final_true_residual_squared.max(0.0).sqrt(),
+                        converged: solved.solve.converged,
+                    };
+                    observe("pressure-solve", graph, fields);
+                    embedding.project(graph, fields, &solved.prepared);
                 } else {
-                    physical_rows
-                };
-                self.pressure_authority.publish(
-                    graph,
-                    fields,
-                    &rows.active,
-                    &rows.theta,
-                    graph.topology_generation,
-                    self.physical
-                        .as_ref()
-                        .is_some_and(|p| p.solid_world.is_some()),
-                );
-                observe("pressure-topology", graph, fields);
-                assemble_pressure_rhs(graph, fields, &rows);
-                observe("pressure-rhs", graph, fields);
-                self.pressure = solve_pressure(
-                    graph,
-                    fields,
-                    &rows,
-                    self.options.pressure_iterations,
-                    self.options.pressure_relative_tolerance,
-                    Some(&self.pressure_authority.execution_order),
-                )?;
-                observe("pressure-solve", graph, fields);
-                project_pressure_velocity(graph, fields, &rows);
-                if swept_static_wall_pressure {
-                    fields
-                        .pressure_member
-                        .clone_from(&physical_pressure_member);
-                    fields
-                        .pressure_row_member
-                        .clone_from(&physical_pressure_row_member);
-                    fields
-                        .pressure_diagonal
-                        .clone_from(&physical_pressure_diagonal);
+                    // Swept wall-contact support is a single transient pressure
+                    // solve.  Restore the physical membership before support
+                    // planning so promoted dry cells cannot survive a topology
+                    // transfer or apply the contact impulse a second time.
+                    let physical_rows = prepare_pressure_topology(graph, fields);
+                    let physical_pressure_member = fields.pressure_member.clone();
+                    let physical_pressure_row_member = fields.pressure_row_member.clone();
+                    let physical_pressure_diagonal = fields.pressure_diagonal.clone();
+                    let rows = if swept_static_wall_pressure {
+                        prepare_pressure_topology_with_swept_static_wall_support(graph, fields)
+                    } else {
+                        physical_rows
+                    };
+                    self.pressure_authority.publish(
+                        graph,
+                        fields,
+                        &rows.active,
+                        &rows.theta,
+                        graph.topology_generation,
+                        self.physical
+                            .as_ref()
+                            .is_some_and(|p| p.solid_world.is_some()),
+                    );
+                    observe("pressure-topology", graph, fields);
+                    assemble_pressure_rhs(graph, fields, &rows);
+                    observe("pressure-rhs", graph, fields);
+                    self.pressure = solve_pressure(
+                        graph,
+                        fields,
+                        &rows,
+                        self.options.pressure_iterations,
+                        self.options.pressure_relative_tolerance,
+                        Some(&self.pressure_authority.execution_order),
+                    )?;
+                    observe("pressure-solve", graph, fields);
+                    project_pressure_velocity(graph, fields, &rows);
+                    if swept_static_wall_pressure {
+                        fields
+                            .pressure_member
+                            .clone_from(&physical_pressure_member);
+                        fields
+                            .pressure_row_member
+                            .clone_from(&physical_pressure_row_member);
+                        fields
+                            .pressure_diagonal
+                            .clone_from(&physical_pressure_diagonal);
+                    }
                 }
-            }
+                Ok(())
+            })?;
             enforce_inflow_faces(graph, fields, inflow);
             collocate_velocity(graph, fields);
             observe("velocity-projection", graph, fields);
             self.stage_timings.primary_pressure = primary_pressure_clock.elapsed_nanoseconds();
         }
         let support_clock = NativeStageClock::start();
-        let support = plan_projected_transport_support(
-            &self.state.topology,
-            &self.state.fields,
-            dt_s,
-            self.cell_size(),
-            &self.resolution_options.policy,
-            Some(self.arena.maximum_slice_leaves),
-            Some(self.arena.capacity as usize * 64),
-            &self.arena.free_leaf_ids,
-            cellwise_remap || level_set_volume,
-        )
+        let support = if level_set_volume {
+            let mut options = self.resolution_options.clone();
+            options.coarsest_demanded_pages = true;
+            options.coarsen_inactive_pages = true;
+            options.maximum_leaves = Some(self.arena.maximum_slice_leaves);
+            options.maximum_cells = Some(self.arena.capacity as usize * 64);
+            options.free_leaf_ids.clone_from(&self.arena.free_leaf_ids);
+            plan_projected_transport_support_with_surface(
+                &self.state.topology,
+                &self.state.fields,
+                dt_s,
+                self.cell_size(),
+                &options,
+                true,
+                &self.surface,
+            )
+        } else {
+            plan_projected_transport_support(
+                &self.state.topology,
+                &self.state.fields,
+                dt_s,
+                self.cell_size(),
+                &self.resolution_options.policy,
+                Some(self.arena.maximum_slice_leaves),
+                Some(self.arena.capacity as usize * 64),
+                &self.arena.free_leaf_ids,
+                cellwise_remap,
+            )
+        }
         .map_err(|e| ValidationError(format!("projected support: {e:?}")))?;
         if support.fault_bits != 0 {
             return Err(ValidationError(format!(
@@ -967,51 +1014,54 @@ impl World {
                 // field and must not be applied a second time.
                 let graph = &mut self.state.topology.graph;
                 let fields = &mut self.state.fields;
-                if let Some(embedding) = &mut self.embedding {
-                    let prepared = embedding.prepare(graph, fields);
-                    fields.pressure_diagonal.clone_from(&prepared.diagonal);
-                    fields.pressure_rhs.clone_from(&prepared.rhs);
-                    let solved = embedding.solve(
-                        graph,
-                        fields,
-                        self.options.pressure_iterations,
-                        self.options.pressure_relative_tolerance,
-                        Some(prepared),
-                    )?;
-                    self.pressure = PressureReceipt {
-                        iterations: solved.solve.iterations,
-                        initial_residual: solved
-                            .solve
-                            .initial_true_residual_squared
-                            .max(0.0)
-                            .sqrt(),
-                        residual: solved.solve.final_true_residual_squared.max(0.0).sqrt(),
-                        converged: solved.solve.converged,
-                    };
-                    embedding.project(graph, fields, &solved.prepared);
-                } else {
-                    let rows = prepare_pressure_topology(graph, fields);
-                    self.pressure_authority.publish(
-                        graph,
-                        fields,
-                        &rows.active,
-                        &rows.theta,
-                        graph.topology_generation,
-                        self.physical
-                            .as_ref()
-                            .is_some_and(|p| p.solid_world.is_some()),
-                    );
-                    assemble_pressure_rhs(graph, fields, &rows);
-                    self.pressure = solve_pressure(
-                        graph,
-                        fields,
-                        &rows,
-                        self.options.pressure_iterations,
-                        self.options.pressure_relative_tolerance,
-                        Some(&self.pressure_authority.execution_order),
-                    )?;
-                    project_pressure_velocity(graph, fields, &rows);
-                }
+                with_level_set_volume_pressure_source(graph, fields, dt, level_set_volume, |fields| {
+                    if let Some(embedding) = &mut self.embedding {
+                        let prepared = embedding.prepare(graph, fields);
+                        fields.pressure_diagonal.clone_from(&prepared.diagonal);
+                        fields.pressure_rhs.clone_from(&prepared.rhs);
+                        let solved = embedding.solve(
+                            graph,
+                            fields,
+                            self.options.pressure_iterations,
+                            self.options.pressure_relative_tolerance,
+                            Some(prepared),
+                        )?;
+                        self.pressure = PressureReceipt {
+                            iterations: solved.solve.iterations,
+                            initial_residual: solved
+                                .solve
+                                .initial_true_residual_squared
+                                .max(0.0)
+                                .sqrt(),
+                            residual: solved.solve.final_true_residual_squared.max(0.0).sqrt(),
+                            converged: solved.solve.converged,
+                        };
+                        embedding.project(graph, fields, &solved.prepared);
+                    } else {
+                        let rows = prepare_pressure_topology(graph, fields);
+                        self.pressure_authority.publish(
+                            graph,
+                            fields,
+                            &rows.active,
+                            &rows.theta,
+                            graph.topology_generation,
+                            self.physical
+                                .as_ref()
+                                .is_some_and(|p| p.solid_world.is_some()),
+                        );
+                        assemble_pressure_rhs(graph, fields, &rows);
+                        self.pressure = solve_pressure(
+                            graph,
+                            fields,
+                            &rows,
+                            self.options.pressure_iterations,
+                            self.options.pressure_relative_tolerance,
+                            Some(&self.pressure_authority.execution_order),
+                        )?;
+                        project_pressure_velocity(graph, fields, &rows);
+                    }
+                    Ok(())
+                })?;
                 enforce_inflow_faces(graph, fields, inflow);
                 collocate_velocity(graph, fields);
                 observe("projected-support-velocity-projection", graph, fields);
@@ -1176,6 +1226,7 @@ impl World {
         // translation. Absolute speed alone must not refine bulk liquid.
         policy.translation_invariant_motion_sizing = cellwise_remap || level_set_volume;
         policy.coarsen_inactive_pages = level_set_volume;
+        policy.coarsest_demanded_pages = level_set_volume;
         policy.maximum_leaves = Some(self.arena.maximum_slice_leaves);
         policy.maximum_cells = Some(self.arena.capacity as usize * 64);
         policy.free_leaf_ids.clone_from(&self.arena.free_leaf_ids);
@@ -1192,14 +1243,26 @@ impl World {
             .filter(|c| self.state.fields.source_rate[c.id as usize] > 0.0)
             .filter_map(|c| c.brick_key)
             .collect();
-        let decision = plan_resolution(
-            &self.state.topology,
-            &self.state.fields,
-            &self.resolution_policy,
-            dt_s,
-            self.cell_size(),
-            &policy,
-        )
+        let decision = if level_set_volume {
+            plan_resolution_with_surface(
+                &self.state.topology,
+                &self.state.fields,
+                &self.resolution_policy,
+                dt_s,
+                self.cell_size(),
+                &policy,
+                &self.surface,
+            )
+        } else {
+            plan_resolution(
+                &self.state.topology,
+                &self.state.fields,
+                &self.resolution_policy,
+                dt_s,
+                self.cell_size(),
+                &policy,
+            )
+        }
         .map_err(|e| ValidationError(format!("resolution: {e:?}")))?;
         self.view_history
             .capture_activity(&self.state, &decision.receipt);

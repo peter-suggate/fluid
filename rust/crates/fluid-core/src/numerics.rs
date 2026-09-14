@@ -3362,6 +3362,44 @@ pub fn assemble_pressure_rhs(graph: &Graph, fields: &mut Fields, rows: &Pressure
     }
 }
 
+/// Fraction of cell-volume excess released by the next pressure projection.
+///
+/// The resulting rate is an integrated fine-area rate, matching `source_rate`
+/// and the flux terms assembled into `pressure_rhs`. A positive rate therefore
+/// asks the projection for net outward flux from an over-capacity liquid cell.
+pub const LEVEL_SET_VOLUME_EXCESS_PRESSURE_RELAXATION: f32 = 0.5;
+
+pub fn level_set_volume_excess_pressure_source(
+    graph: &Graph,
+    fields: &Fields,
+    dt: f32,
+) -> Result<Vec<f32>, ValidationError> {
+    fields.validate_for(graph)?;
+    if !dt.is_finite() || dt <= 0.0 {
+        return Err(ValidationError(
+            "level-set-volume excess pressure source requires positive finite dt".into(),
+        ));
+    }
+    graph
+        .cells
+        .iter()
+        .map(|cell| {
+            let id = cell.id as usize;
+            let excess = ((fields.density[id] as f64 - fields.capacity[id] as f64)
+                * cell.measure as f64)
+                .max(0.0);
+            let rate = LEVEL_SET_VOLUME_EXCESS_PRESSURE_RELAXATION as f64 * excess / dt as f64;
+            if rate.is_finite() && rate <= f32::MAX as f64 {
+                Ok(rate as f32)
+            } else {
+                Err(ValidationError(format!(
+                    "level-set-volume excess pressure source is invalid at cell {id}"
+                )))
+            }
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PressureReceipt {
@@ -3942,6 +3980,102 @@ mod tests {
             }
         }
         divergence.into_iter().map(f64::abs).fold(0.0, f64::max)
+    }
+
+    #[test]
+    fn level_set_volume_excess_source_has_integrated_rate_units() {
+        let graph = uniform_test_graph();
+        let mut fields = streamfunction_test_fields(&graph);
+        let cell = graph
+            .cells
+            .iter()
+            .find(|cell| cell.center[0] == 4.5 && cell.center[1] == 4.5)
+            .unwrap();
+        fields.density[cell.id as usize] = 1.5;
+        let dt = 0.1;
+        let source = level_set_volume_excess_pressure_source(&graph, &fields, dt).unwrap();
+        let excess = 0.5 * cell.measure;
+        assert_eq!(source[cell.id as usize], (0.5 * excess / dt) as f32);
+        assert!(source
+            .iter()
+            .enumerate()
+            .all(|(id, &rate)| id == cell.id as usize || rate == 0.0));
+    }
+
+    #[test]
+    fn level_set_volume_excess_source_projects_outward_flux() {
+        let graph = uniform_test_graph();
+        let mut fields = streamfunction_test_fields(&graph);
+        fields.density.fill(0.0);
+        fields.gamma.fill(0.0);
+        fields.pressure_member.fill(0);
+        fields.pressure_row_member.fill(0);
+        let cell = graph
+            .cells
+            .iter()
+            .find(|cell| cell.center[0] == 4.5 && cell.center[1] == 4.5)
+            .unwrap();
+        let id = cell.id as usize;
+        fields.density[id] = 1.5;
+        fields.gamma[id] = 1.0;
+        let dt = 0.1;
+        let source = level_set_volume_excess_pressure_source(&graph, &fields, dt).unwrap();
+        fields.source_rate.clone_from(&source);
+        let rows = prepare_pressure_topology(&graph, &mut fields);
+        assemble_pressure_rhs(&graph, &mut fields, &rows);
+        let requested = fields.pressure_rhs[id];
+        assert!(requested > 0.0);
+        let solved = solve_pressure(&graph, &mut fields, &rows, 256, 1.0e-7, None).unwrap();
+        assert!(solved.converged, "{solved:?}");
+        project_pressure_velocity(&graph, &mut fields, &rows);
+
+        let projected_volume_change_rate: f32 = graph.incidences[id]
+            .iter()
+            .filter_map(|&row_id| {
+                let row = &graph.rows[row_id as usize];
+                (rows.active[row.id as usize] != 0).then(|| {
+                    let own = own_term(row, id).unwrap();
+                    own.coefficient
+                        * row.static_dual_weight.unwrap_or(row.dual_weight)
+                        * fields.face_velocity[row.id as usize]
+                })
+            })
+            .sum();
+        assert!(projected_volume_change_rate < 0.0, "{projected_volume_change_rate}");
+        assert!((projected_volume_change_rate + requested).abs() <= 2.0e-5,
+            "projected {projected_volume_change_rate}, requested {requested}");
+        let excess_before = (fields.density[id] - fields.capacity[id]) * cell.measure;
+        let implied_excess_after = excess_before + dt * projected_volume_change_rate;
+        assert!((implied_excess_after - 0.5 * excess_before).abs() <= 2.0e-5,
+            "before {excess_before}, implied after {implied_excess_after}");
+
+        let once = fields.face_velocity.clone();
+        let rows = prepare_pressure_topology(&graph, &mut fields);
+        assemble_pressure_rhs(&graph, &mut fields, &rows);
+        solve_pressure(&graph, &mut fields, &rows, 256, 1.0e-7, None).unwrap();
+        project_pressure_velocity(&graph, &mut fields, &rows);
+        assert!(fields.face_velocity.iter().zip(&once)
+            .all(|(&reprojected, &prior)| (reprojected - prior).abs() <= 2.0e-5),
+            "reapplying the same divergence target accumulated a second expansion");
+
+        fields.source_rate.fill(0.0);
+        let rows = prepare_pressure_topology(&graph, &mut fields);
+        assemble_pressure_rhs(&graph, &mut fields, &rows);
+        solve_pressure(&graph, &mut fields, &rows, 256, 1.0e-7, None).unwrap();
+        project_pressure_velocity(&graph, &mut fields, &rows);
+        let closed_outward: f32 = graph.incidences[id]
+            .iter()
+            .filter_map(|&row_id| {
+                let row = &graph.rows[row_id as usize];
+                (rows.active[row.id as usize] != 0).then(|| {
+                    let own = own_term(row, id).unwrap();
+                    own.coefficient
+                        * row.static_dual_weight.unwrap_or(row.dual_weight)
+                        * fields.face_velocity[row.id as usize]
+                })
+            })
+            .sum();
+        assert!(closed_outward.abs() <= 2.0e-5, "{closed_outward}");
     }
 
     #[test]

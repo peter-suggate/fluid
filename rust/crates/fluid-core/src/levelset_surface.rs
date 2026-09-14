@@ -5,9 +5,9 @@ use crate::numerics::owner_at;
 use crate::presentation::{RdfReceipt, RdfSurface};
 use crate::types::{Fields, Graph, ValidationError};
 
-type Vertex = [f64; 3];
+pub(crate) type Vertex = [f64; 3];
 
-fn triangles(x: f64, y: f64, phi: [f64; 4]) -> [[Vertex; 3]; 4] {
+pub(crate) fn triangles(x: f64, y: f64, phi: [f64; 4]) -> [[Vertex; 3]; 4] {
     let corners = [
         [x, y, phi[0]], [x + 1.0, y, phi[1]],
         [x + 1.0, y + 1.0, phi[2]], [x, y + 1.0, phi[3]],

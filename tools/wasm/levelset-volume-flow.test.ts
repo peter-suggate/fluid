@@ -98,12 +98,60 @@ for (const [sceneId, frames] of [["cm12-figure-7", 30], ["coarse-first-pool-impa
               "Figure 7 retains width-4 interior cells under bulk falling motion");
           }
           const vacatedTrailingKeys = sceneId === "cm12-figure-7"
-            ? frame === 15 ? [2246, 2249] : (frame === 17 || frame === 30) ? [2229, 2234] : []
+            ? frame === 16 ? [2246, 2249] : (frame === 17 || frame === 30) ? [2229, 2234] : []
             : [];
           for (const key of vacatedTrailingKeys) {
             const trailing = view.graph.bricks.find(brick => brick.key === key);
             assert.ok(!trailing || !trailing.active || trailing.resolution <= 1,
               `frame ${frame}: vacated trailing brick ${key} is coarsest or retired`);
+          }
+          if (sceneId === "cm12-figure-7" && frame === 23) {
+            const segments = view.rdf.segmentsFine;
+            const directions: Array<readonly [number, number]> = [];
+            for (let at = 0; at + 3 < segments.length; at += 4) {
+              const dx = segments[at + 2]! - segments[at]!;
+              const dy = segments[at + 3]! - segments[at + 1]!;
+              const length = Math.hypot(dx, dy);
+              if (length > 1e-6) directions.push([dx / length, dy / length]);
+            }
+            assert.ok(directions.some((a, index) => directions.slice(index + 1)
+              .some(b => Math.abs(a[0] * b[1] - a[1] * b[0]) > 0.25)),
+              "Figure 7 frame 23 has a curved shared zero contour");
+            const resolution = decoded.metadata.resolution as {
+              bricks?: Array<{ brickKey: number; reasons: number }>;
+            } | undefined;
+            const policyByKey = new Map((resolution?.bricks ?? []).map(brick => [brick.brickKey, brick]));
+            const curvedFine = view.graph.bricks.some(brick => {
+              const curvatureFloor = Number(policyByKey.get(brick.key)?.reasons ?? 0) >>> 16;
+              if (!brick.active || curvatureFloor <= 1 || brick.resolution < curvatureFloor) return false;
+              const x0 = brick.coordinate[0]! * 8, y0 = brick.coordinate[1]! * 8;
+              const x1 = x0 + brick.spanBricks * 8, y1 = y0 + brick.spanBricks * 8;
+              for (let at = 0; at + 3 < segments.length; at += 4) {
+                const x = 0.5 * (segments[at]! + segments[at + 2]!);
+                const y = 0.5 * (segments[at + 1]! + segments[at + 3]!);
+                if (x >= x0 && x <= x1 && y >= y0 && y <= y1) return true;
+              }
+              return false;
+            });
+            assert.ok(curvedFine,
+              "a curved shared-contour brick satisfies its published curvature floor");
+          }
+          if (sceneId === "cm12-figure-7" && frame === 25) {
+            const resolution = decoded.metadata.resolution as {
+              bricks?: Array<{ brickKey: number; reasons: number; planReasons: number }>;
+            } | undefined;
+            const policyByKey = new Map((resolution?.bricks ?? []).map(brick => [brick.brickKey, brick]));
+            const unconstrainedNewSupport = view.graph.bricks.filter(brick => {
+              if (!brick.active || brick.coordinate[1]! < 5) return false;
+              const policy = policyByKey.get(brick.key);
+              const volume = view.lattice.cells.filter(cell => cell.brick === brick.key)
+                .reduce((sum, cell) => sum + cell.volume, 0);
+              return volume === 0 && policy?.reasons === 0 && policy.planReasons === 0x8000_0001;
+            });
+            assert.ok(unconstrainedNewSupport.length > 0,
+              "Figure 7 allocates empty look-ahead support above the falling liquid");
+            assert.ok(unconstrainedNewSupport.every(brick => brick.resolution < 8),
+              "unconstrained empty support pages do not default to the finest rung");
           }
           assert.ok(view.rdf.vertexPhiFine.some(Number.isFinite));
           assert.ok(view.rdf.segmentsFine.length > 0, `frame ${frame}: visible RDF surface`);

@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::topology::{BrickSeed, CompiledTopology, BRICK_FINE_RESOLUTION};
 use crate::types::{Fields, RowKind};
+use crate::{levelset_surface, presentation::RdfSurface};
 
 const ACTIVITY_FIXED: f64 = 65_536.0;
 const B: i32 = BRICK_FINE_RESOLUTION;
@@ -196,6 +197,9 @@ pub struct ResolutionPolicyOptions {
     /// Let inactive metadata shed stale fine rungs before 2:1 closure.
     #[serde(skip)]
     pub coarsen_inactive_pages: bool,
+    /// Allocate demanded pages at the coarsest donor-compatible rung.
+    #[serde(skip)]
+    pub coarsest_demanded_pages: bool,
     pub refinement_regions: Vec<ResolutionRegion>,
     pub static_boundary_floor_by_brick: BTreeMap<u32, u8>,
     pub moving_rigid_bodies: bool,
@@ -213,6 +217,7 @@ impl Default for ResolutionPolicyOptions {
             policy: ActivityPolicy::default(),
             translation_invariant_motion_sizing: false,
             coarsen_inactive_pages: false,
+            coarsest_demanded_pages: false,
             refinement_regions: vec![],
             static_boundary_floor_by_brick: BTreeMap::new(),
             moving_rigid_bodies: false,
@@ -433,6 +438,116 @@ fn apply_regions(requested: u8, brick: &BrickSeed, regions: &[ResolutionRegion])
     requested.min(max).max(min)
 }
 
+fn record_donor_compatible_rung(
+    required: &mut BTreeMap<u32, u8>,
+    receiver: &BrickSeed,
+    donor: &BrickSeed,
+    donor_required_rung: Option<u8>,
+) {
+    let donor_width = width(donor, donor.resolution);
+    let maximum_receiver_width = donor_required_rung.map_or(2.0 * donor_width, |rung| {
+        (2.0 * donor_width).min(width(donor, rung))
+    });
+    let mut rung = 1;
+    while rung < 8 && width(receiver, rung) > maximum_receiver_width {
+        rung *= 2;
+    }
+    required
+        .entry(receiver.key)
+        .and_modify(|current| *current = (*current).max(rung))
+        .or_insert(rung);
+}
+
+fn donor_transport_rung(measurement: &Measurement, policy: &ActivityPolicy, ts: [f32; 4]) -> u8 {
+    let motion = velocity_floor(
+        measurement.history.velocity_travel,
+        ts,
+        policy.activity_signals,
+    );
+    measurement
+        .curvature_floor
+        .max(motion)
+        .max(if measurement.thin { 8 } else { 1 })
+}
+
+fn accumulate_direct_surface_normals(
+    brick: &BrickSeed,
+    surface: &RdfSurface,
+    normal_min: &mut [f64; 2],
+    normal_max: &mut [f64; 2],
+) -> bool {
+    let nx = surface.dimensions[0] as usize;
+    let ny = surface.dimensions[1] as usize;
+    let stride = nx + 1;
+    let (lo, hi) = bounds(brick);
+    let x0 = lo[0].max(0) as usize;
+    let y0 = lo[1].max(0) as usize;
+    let x1 = hi[0].max(0).min(nx as i32) as usize;
+    let y1 = hi[1].max(0).min(ny as i32) as usize;
+    let mut crossed = false;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let phi = [
+                surface.vertex_phi_fine[x + stride * y] as f64,
+                surface.vertex_phi_fine[x + 1 + stride * y] as f64,
+                surface.vertex_phi_fine[x + 1 + stride * (y + 1)] as f64,
+                surface.vertex_phi_fine[x + stride * (y + 1)] as f64,
+            ];
+            for triangle in levelset_surface::triangles(x as f64, y as f64, phi) {
+                if !triangle.iter().any(|vertex| vertex[2] < 0.0)
+                    || !triangle.iter().any(|vertex| vertex[2] >= 0.0)
+                {
+                    continue;
+                }
+                crossed = true;
+                let [a, b, c] = triangle;
+                let ab = [b[0] - a[0], b[1] - a[1]];
+                let ac = [c[0] - a[0], c[1] - a[1]];
+                let det = ab[0] * ac[1] - ab[1] * ac[0];
+                if det.abs() <= f64::EPSILON {
+                    continue;
+                }
+                let bp = b[2] - a[2];
+                let cp = c[2] - a[2];
+                let gradient = [
+                    (bp * ac[1] - cp * ab[1]) / det,
+                    (ab[0] * cp - ac[0] * bp) / det,
+                ];
+                let length = gradient[0].hypot(gradient[1]);
+                if !length.is_finite() || length <= 1.0e-12 {
+                    continue;
+                }
+                for axis in 0..2 {
+                    let normal = gradient[axis] / length;
+                    normal_min[axis] = normal_min[axis].min(normal);
+                    normal_max[axis] = normal_max[axis].max(normal);
+                }
+            }
+        }
+    }
+    crossed
+}
+
+fn constrained_demanded_rung(
+    brick: &BrickSeed,
+    donor_rung: u8,
+    options: &ResolutionPolicyOptions,
+    retain_current: bool,
+) -> u8 {
+    if options.policy.freeze_topology || options.frozen_brick_keys.contains(&brick.key) {
+        return brick.resolution;
+    }
+    let static_floor = options
+        .static_boundary_floor_by_brick
+        .get(&brick.key)
+        .copied()
+        .unwrap_or(1);
+    let requested = donor_rung
+        .max(static_floor)
+        .max(if retain_current { brick.resolution } else { 1 });
+    apply_regions(requested, brick, &options.refinement_regions)
+}
+
 fn measure(
     topology: &CompiledTopology<2>,
     fields: &Fields,
@@ -443,6 +558,7 @@ fn measure(
     dt: f64,
     ts: [f32; 4],
     translation_invariant_motion_sizing: bool,
+    direct_surface: Option<&RdfSurface>,
 ) -> Measurement {
     let brick = &topology.bricks[bi];
     if !brick.seed.active {
@@ -608,7 +724,8 @@ fn measure(
             && thickness < policy.thin_feature_cells
             && ((exposed & 3) == 3 || (exposed & 12) == 12);
         thin |= cell_thin;
-        if policy.coarse_first
+        if direct_surface.is_none()
+            && policy.coarse_first
             && (interface_cell || cell_thin)
             && fields.interface_normal.len() >= 2 * id + 2
         {
@@ -722,6 +839,14 @@ fn measure(
             }
         }
     }
+    let direct_surface_crossing = direct_surface.is_some_and(|surface| {
+        accumulate_direct_surface_normals(
+            &brick.seed,
+            surface,
+            &mut normal_min,
+            &mut normal_max,
+        )
+    });
     if brick.seed.resolution > 1 {
         let base = brick.cell_range.start as usize;
         let r = brick.seed.resolution as usize;
@@ -765,7 +890,7 @@ fn measure(
     let represented = substantial || thin;
     let occupied =
         occupied_cell && represented && mass_fine as f64 >= policy.residency_mass_fine_cells;
-    let surface = occupied && axes != 0;
+    let surface = direct_surface.map_or(occupied && axes != 0, |_| direct_surface_crossing);
     let shape = if axes.count_ones() >= 2 { 1.0_f32 } else { 0.0 };
     let temporal = if !policy.coarse_first {
         old.map_or(0.0, |o| {
@@ -902,6 +1027,7 @@ fn measure(
         }
     }
     let deeply_enclosed = occupied
+        && !direct_surface_crossing
         && enclosed_sides.iter().all(|&v| v)
         && neighbors.iter().all(|&ni| {
             let nb = &topology.bricks[ni];
@@ -1159,6 +1285,27 @@ fn validate_inputs(
     Ok(())
 }
 
+fn validate_direct_surface(
+    topology: &CompiledTopology<2>,
+    surface: Option<&RdfSurface>,
+) -> Result<(), ResolutionError> {
+    let Some(surface) = surface else {
+        return Ok(());
+    };
+    let dimensions = [
+        topology.graph.dimensions[0] as u32,
+        topology.graph.dimensions[1] as u32,
+    ];
+    let expected = (dimensions[0] as usize + 1).saturating_mul(dimensions[1] as usize + 1);
+    if surface.dimensions != dimensions
+        || surface.vertex_phi_fine.len() != expected
+        || surface.vertex_phi_fine.iter().any(|value| !value.is_finite())
+    {
+        return Err(ResolutionError::FieldShape);
+    }
+    Ok(())
+}
+
 fn validate_free(bricks: &[BrickSeed], free: &[u32]) -> Result<BTreeSet<u32>, ResolutionError> {
     let mut set = BTreeSet::new();
     for &id in free {
@@ -1183,7 +1330,83 @@ pub fn plan_projected_transport_support(
     free_leaf_ids: &[u32],
     include_interface_support: bool,
 ) -> Result<ProjectedTransportSupportDecision, ResolutionError> {
+    plan_projected_transport_support_impl(
+        topology,
+        fields,
+        dt,
+        cell_size,
+        policy,
+        maximum_leaves,
+        maximum_cells,
+        free_leaf_ids,
+        include_interface_support,
+        None,
+        None,
+    )
+}
+
+pub fn plan_projected_transport_support_with_options(
+    topology: &CompiledTopology<2>,
+    fields: &Fields,
+    dt: f64,
+    cell_size: f64,
+    options: &ResolutionPolicyOptions,
+    include_interface_support: bool,
+) -> Result<ProjectedTransportSupportDecision, ResolutionError> {
+    plan_projected_transport_support_impl(
+        topology,
+        fields,
+        dt,
+        cell_size,
+        &options.policy,
+        options.maximum_leaves,
+        options.maximum_cells,
+        &options.free_leaf_ids,
+        include_interface_support,
+        Some(options),
+        None,
+    )
+}
+
+pub fn plan_projected_transport_support_with_surface(
+    topology: &CompiledTopology<2>,
+    fields: &Fields,
+    dt: f64,
+    cell_size: f64,
+    options: &ResolutionPolicyOptions,
+    include_interface_support: bool,
+    surface: &RdfSurface,
+) -> Result<ProjectedTransportSupportDecision, ResolutionError> {
+    plan_projected_transport_support_impl(
+        topology,
+        fields,
+        dt,
+        cell_size,
+        &options.policy,
+        options.maximum_leaves,
+        options.maximum_cells,
+        &options.free_leaf_ids,
+        include_interface_support,
+        Some(options),
+        Some(surface),
+    )
+}
+
+fn plan_projected_transport_support_impl(
+    topology: &CompiledTopology<2>,
+    fields: &Fields,
+    dt: f64,
+    cell_size: f64,
+    policy: &ActivityPolicy,
+    maximum_leaves: Option<usize>,
+    maximum_cells: Option<usize>,
+    free_leaf_ids: &[u32],
+    include_interface_support: bool,
+    allocation_options: Option<&ResolutionPolicyOptions>,
+    direct_surface: Option<&RdfSurface>,
+) -> Result<ProjectedTransportSupportDecision, ResolutionError> {
     validate_inputs(topology, fields, dt, cell_size)?;
+    validate_direct_surface(topology, direct_surface)?;
     let ts = thresholds(policy, dt, cell_size);
     let mut measurements = BTreeMap::new();
     for i in 0..topology.bricks.len() {
@@ -1199,6 +1422,7 @@ pub fn plan_projected_transport_support(
                 dt,
                 ts,
                 include_interface_support,
+                direct_surface,
             ),
         );
     }
@@ -1212,7 +1436,15 @@ pub fn plan_projected_transport_support(
     let mut demanded = BTreeSet::new();
     let mut required = BTreeMap::new();
     let mut claimed = Vec::new();
-    let mut next_id = accepted.iter().map(|b| b.id).max().map_or(0, |v| v + 1);
+    // Free IDs are removed from `working` before reuse. Keep the monotonic
+    // fallback above them too, or exhausting the free stack can claim its
+    // highest ID a second time in the same candidate.
+    let mut next_id = accepted
+        .iter()
+        .map(|b| b.id)
+        .chain(free_leaf_ids.iter().copied())
+        .max()
+        .map_or(0, |v| v + 1);
     let mut free_stack = free_leaf_ids.to_vec();
     let mut next_key = working.iter().map(|b| b.key).max().map_or(0, |v| v + 1);
     let mut sources = accepted.clone();
@@ -1283,26 +1515,51 @@ pub fn plan_projected_transport_support(
                 continue;
             }
             demanded.insert(working[ri].key);
-            let donor_width = width(source, source.resolution);
-            let mut rung = 1;
-            while rung < 8 && width(&working[ri], rung) > 2.0 * donor_width {
-                rung *= 2;
-            }
-            required
-                .entry(working[ri].key)
-                .and_modify(|r: &mut u8| *r = (*r).max(rung))
-                .or_insert(rung);
+            let source_rung = allocation_options
+                .filter(|options| options.coarsest_demanded_pages)
+                .map(|_| donor_transport_rung(&measurements[&source.key], policy, ts))
+                .filter(|&rung| rung > 1);
+            record_donor_compatible_rung(&mut required, &working[ri], source, source_rung);
         }
     }
-    let mut targets: BTreeMap<_, _> = working.iter().map(|b| (b.key, b.resolution)).collect();
+    let mut targets: BTreeMap<_, _> = working.iter().map(|b| {
+        let target = if let Some(options) = allocation_options
+            .filter(|options| options.coarsest_demanded_pages && options.coarsen_inactive_pages)
+        {
+            if !b.active
+                && !options.policy.freeze_topology
+                && !options.frozen_brick_keys.contains(&b.key)
+            {
+                apply_regions(1, b, &options.refinement_regions)
+            } else {
+                b.resolution
+            }
+        } else {
+            b.resolution
+        };
+        (b.key, target)
+    }).collect();
     let mut active: BTreeMap<_, _> = working.iter().map(|b| (b.key, b.active)).collect();
     for b in &working {
         if demanded.contains(&b.key) {
-            targets.insert(b.key, b.resolution.max(*required.get(&b.key).unwrap_or(&1)));
+            let donor_rung = *required.get(&b.key).unwrap_or(&1);
+            let target = if let Some(options) = allocation_options
+                .filter(|options| options.coarsest_demanded_pages)
+            {
+                constrained_demanded_rung(b, donor_rung, options, b.active)
+            } else {
+                b.resolution.max(donor_rung)
+            };
+            targets.insert(b.key, target);
             active.insert(b.key, true);
         }
     }
-    close_two_to_one(&working, &mut targets, &[]);
+    if let Some(options) = allocation_options.filter(|options| options.coarsest_demanded_pages) {
+        close_region_caps(&working, &mut targets, &options.refinement_regions);
+        close_two_to_one(&working, &mut targets, &options.refinement_regions);
+    } else {
+        close_two_to_one(&working, &mut targets, &[]);
+    }
     let mut candidate = working.clone();
     for b in &mut candidate {
         b.resolution = targets[&b.key];
@@ -1337,7 +1594,40 @@ pub fn plan_resolution(
     cell_size: f64,
     options: &ResolutionPolicyOptions,
 ) -> Result<ResolutionPolicyDecision, ResolutionError> {
+    plan_resolution_impl(topology, fields, previous, dt, cell_size, options, None)
+}
+
+pub fn plan_resolution_with_surface(
+    topology: &CompiledTopology<2>,
+    fields: &Fields,
+    previous: &ResolutionPolicyState,
+    dt: f64,
+    cell_size: f64,
+    options: &ResolutionPolicyOptions,
+    surface: &RdfSurface,
+) -> Result<ResolutionPolicyDecision, ResolutionError> {
+    plan_resolution_impl(
+        topology,
+        fields,
+        previous,
+        dt,
+        cell_size,
+        options,
+        Some(surface),
+    )
+}
+
+fn plan_resolution_impl(
+    topology: &CompiledTopology<2>,
+    fields: &Fields,
+    previous: &ResolutionPolicyState,
+    dt: f64,
+    cell_size: f64,
+    options: &ResolutionPolicyOptions,
+    direct_surface: Option<&RdfSurface>,
+) -> Result<ResolutionPolicyDecision, ResolutionError> {
     validate_inputs(topology, fields, dt, cell_size)?;
+    validate_direct_surface(topology, direct_surface)?;
     let policy = &options.policy;
     let accepted_steps = previous.accepted_steps + 1;
     let topology_epoch =
@@ -1361,6 +1651,7 @@ pub fn plan_resolution(
                 dt,
                 ts,
                 options.translation_invariant_motion_sizing,
+                direct_surface,
             ),
         );
     }
@@ -1379,8 +1670,15 @@ pub fn plan_resolution(
     let mut allocated = BTreeSet::new();
     let mut claimed = Vec::new();
     let mut allocated_resolution = BTreeMap::new();
+    let mut demanded_resolution = BTreeMap::new();
     if options.allocate_missing_pages {
-        let mut next_id = accepted.iter().map(|b| b.id).max().map_or(0, |v| v + 1);
+        // The fallback range must not overlap IDs claimed from the free stack.
+        let mut next_id = accepted
+            .iter()
+            .map(|b| b.id)
+            .chain(options.free_leaf_ids.iter().copied())
+            .max()
+            .map_or(0, |v| v + 1);
         let mut next_key = working.iter().map(|b| b.key).max().map_or(0, |v| v + 1);
         let mut free_stack = options.free_leaf_ids.clone();
         let mut sources = accepted.clone();
@@ -1440,14 +1738,17 @@ pub fn plan_resolution(
                         key,
                         coordinate: [qx, qy, 0],
                         span_bricks: 1,
-                        resolution: 8,
+                        resolution: if options.coarsest_demanded_pages { 1 } else { 8 },
                         active: true,
                         density: vec![],
                         gamma: vec![],
                         refinement_region_scale: None,
                     });
                     allocated.insert(key);
-                    allocated_resolution.insert(key, 8);
+                    allocated_resolution.insert(
+                        key,
+                        if options.coarsest_demanded_pages { 1 } else { 8 },
+                    );
                     measurements.insert(
                         key,
                         Measurement {
@@ -1467,6 +1768,16 @@ pub fn plan_resolution(
                     working.len() - 1
                 };
                 material_demand.insert(working[ri].key);
+                let source_rung = options
+                    .coarsest_demanded_pages
+                    .then(|| donor_transport_rung(&measurements[&source.key], policy, ts))
+                    .filter(|&rung| rung > 1);
+                record_donor_compatible_rung(
+                    &mut demanded_resolution,
+                    &working[ri],
+                    source,
+                    source_rung,
+                );
             }
         }
     }
@@ -1682,16 +1993,38 @@ pub fn plan_resolution(
         plan_reasons.insert(brick.key, reason);
     }
     for brick in working.iter().filter(|b| allocated.contains(&b.key)) {
-        targets.insert(brick.key, allocated_resolution[&brick.key]);
+        let target = if options.coarsest_demanded_pages {
+            constrained_demanded_rung(
+                brick,
+                *demanded_resolution.get(&brick.key).unwrap_or(&1),
+                options,
+                false,
+            )
+        } else {
+            allocated_resolution[&brick.key]
+        };
+        targets.insert(brick.key, target);
         candidate_active.insert(brick.key, true);
         plan_reasons.insert(brick.key, 0x8000_0001);
     }
     for brick in accepted.iter().filter(|b| !b.active) {
         if material_demand.contains(&brick.key) {
             candidate_active.insert(brick.key, true);
+            let target = if options.injection_demanded_brick_keys.contains(&brick.key) {
+                apply_regions(8, brick, &options.refinement_regions)
+            } else if options.coarsest_demanded_pages {
+                constrained_demanded_rung(
+                    brick,
+                    *demanded_resolution.get(&brick.key).unwrap_or(&1),
+                    options,
+                    false,
+                )
+            } else {
+                apply_regions(8, brick, &options.refinement_regions)
+            };
             targets.insert(
                 brick.key,
-                apply_regions(8, brick, &options.refinement_regions),
+                target,
             );
             plan_reasons.insert(brick.key, 0x8000_0001);
         }
@@ -1957,6 +2290,31 @@ mod tests {
     fn options() -> ResolutionPolicyOptions {
         ResolutionPolicyOptions::default()
     }
+    fn coarsest_support_options() -> ResolutionPolicyOptions {
+        let mut options = options();
+        options.translation_invariant_motion_sizing = true;
+        options.coarsen_inactive_pages = true;
+        options.coarsest_demanded_pages = true;
+        options
+    }
+
+    fn circle_surface(dimensions: [u32; 2], centre: [f32; 2], radius: f32) -> RdfSurface {
+        let vertices = (0..=dimensions[1])
+            .flat_map(|y| {
+                (0..=dimensions[0]).map(move |x| {
+                    (x as f32 - centre[0]).hypot(y as f32 - centre[1]) - radius
+                })
+            })
+            .collect();
+        levelset_surface::publish(dimensions, vertices, 0.0).unwrap()
+    }
+
+    fn plane_surface(dimensions: [u32; 2], x_intercept: f32) -> RdfSurface {
+        let vertices = (0..=dimensions[1])
+            .flat_map(|_| (0..=dimensions[0]).map(move |x| x as f32 - x_intercept))
+            .collect();
+        levelset_surface::publish(dimensions, vertices, 0.0).unwrap()
+    }
 
     fn golden() -> serde_json::Value {
         serde_json::from_str(include_str!(
@@ -2106,6 +2464,281 @@ mod tests {
         let inactive = candidate.bricks.iter()
             .find(|page| page.seed.key == 1).unwrap();
         assert_eq!(inactive.cell_range.start, inactive.cell_range.end);
+    }
+
+    #[test]
+    fn donor_compatible_rung_uses_physical_width_and_combines_donors() {
+        let mut receiver = brick(10, [2, 0], 1, false);
+        receiver.span_bricks = 2;
+        let coarse = brick(1, [0, 0], 2, true);
+        let fine = brick(2, [1, 0], 8, true);
+        let mut required = BTreeMap::new();
+        record_donor_compatible_rung(&mut required, &receiver, &coarse, None);
+        assert_eq!(required[&receiver.key], 2);
+        record_donor_compatible_rung(&mut required, &receiver, &fine, None);
+        assert_eq!(required[&receiver.key], 8);
+
+        let coarsest = brick(3, [0, 0], 1, true);
+        let mut baseline = BTreeMap::new();
+        record_donor_compatible_rung(&mut baseline, &receiver, &coarsest, None);
+        assert_eq!(baseline[&receiver.key], 1);
+    }
+
+    #[test]
+    fn direct_phi_curvature_measure_is_independent_of_adaptive_rung() {
+        let surface = circle_surface([8, 8], [4.0, 4.0], 3.0);
+        let policy = ActivityPolicy::default();
+        let collect = |resolution| {
+            let (topology, fields) = setup(vec![brick(0, [0, 0], resolution, true)], [8, 8]);
+            let ts = thresholds(&policy, 1.0 / 30.0, 1.0);
+            measure(
+                &topology,
+                &fields,
+                0,
+                None,
+                &policy,
+                false,
+                1.0 / 30.0,
+                ts,
+                true,
+                Some(&surface),
+            )
+        };
+        let fine = collect(8);
+        let coarse = collect(1);
+        assert!(fine.surface && coarse.surface);
+        assert_eq!(fine.curvature_floor, coarse.curvature_floor);
+        assert!(fine.curvature_floor > 1);
+    }
+
+    #[test]
+    fn direct_phi_crossing_is_not_hidden_by_density_enclosure() {
+        let bricks = (0..3)
+            .flat_map(|y| (0..3).map(move |x| brick((x + 3 * y) as u32, [x, y], 1, true)))
+            .collect();
+        let (topology, mut fields) = setup(bricks, [24, 24]);
+        fields.density.fill(1.0);
+        let surface = circle_surface([24, 24], [12.0, 12.0], 2.0);
+        let policy = ActivityPolicy::default();
+        let measured = measure(
+            &topology,
+            &fields,
+            4,
+            None,
+            &policy,
+            false,
+            1.0 / 30.0,
+            thresholds(&policy, 1.0 / 30.0, 1.0),
+            true,
+            Some(&surface),
+        );
+        assert!(measured.surface);
+        assert!(!measured.deeply_enclosed);
+        assert!(measured.curvature_floor > 1);
+    }
+
+    #[test]
+    fn direct_phi_requirement_stops_receiver_rung_ratchet_in_both_planners() {
+        let (topology, mut fields) = setup(vec![brick(0, [0, 0], 8, true)], [16, 8]);
+        for cell in &topology.graph.cells {
+            let id = cell.id as usize;
+            fields.density[id] = 1.0;
+            fields.cell_velocity[2 * id] = 20.0;
+        }
+        let options = coarsest_support_options();
+        let curved = circle_surface([16, 8], [7.0, 4.0], 3.0);
+        let planar = plane_surface([16, 8], 7.0);
+
+        let projected_curved = plan_projected_transport_support_with_surface(
+            &topology, &fields, 1.0, 1.0, &options, true, &curved,
+        ).unwrap();
+        let projected_planar = plan_projected_transport_support_with_surface(
+            &topology, &fields, 1.0, 1.0, &options, true, &planar,
+        ).unwrap();
+        let resolution_at = |decision: &ProjectedTransportSupportDecision| {
+            decision.candidate_bricks.iter()
+                .find(|brick| brick.coordinate == [1, 0, 0]).unwrap().resolution
+        };
+        assert!(resolution_at(&projected_curved) > resolution_at(&projected_planar));
+        assert_eq!(resolution_at(&projected_planar), 4);
+
+        let previous = initialize_resolution_policy(&topology);
+        let post_curved = plan_resolution_with_surface(
+            &topology, &fields, &previous, 1.0, 1.0, &options, &curved,
+        ).unwrap();
+        let post_planar = plan_resolution_with_surface(
+            &topology, &fields, &previous, 1.0, 1.0, &options, &planar,
+        ).unwrap();
+        let post_resolution = |decision: &ResolutionPolicyDecision| {
+            decision.candidate_bricks.iter()
+                .find(|brick| brick.coordinate == [1, 0, 0]).unwrap().resolution
+        };
+        assert!(post_resolution(&post_curved) > post_resolution(&post_planar));
+        assert_eq!(post_resolution(&post_planar), 4);
+    }
+
+    #[test]
+    fn coarsest_support_sizes_new_page_in_both_planners() {
+        let (topology, mut fields) = setup(vec![brick(0, [0, 0], 8, true)], [16, 8]);
+        for cell in &topology.graph.cells {
+            let id = cell.id as usize;
+            fields.density[id] = 1.0;
+            fields.cell_velocity[2 * id] = 20.0;
+        }
+        let options = coarsest_support_options();
+        let projected = plan_projected_transport_support_with_options(
+            &topology, &fields, 1.0, 1.0, &options, true,
+        ).unwrap();
+        let projected_receiver = projected.candidate_bricks.iter()
+            .find(|brick| brick.coordinate == [1, 0, 0]).unwrap();
+        assert!(projected_receiver.active);
+        assert_eq!(projected_receiver.resolution, 4);
+
+        let post = plan_resolution(
+            &topology,
+            &fields,
+            &initialize_resolution_policy(&topology),
+            1.0,
+            1.0,
+            &options,
+        ).unwrap();
+        let post_receiver = post.candidate_bricks.iter()
+            .find(|brick| brick.coordinate == [1, 0, 0]).unwrap();
+        assert!(post_receiver.active);
+        assert_eq!(post_receiver.resolution, 4);
+    }
+
+    #[test]
+    fn coarsest_support_reactivation_combines_donors_and_honors_constraints() {
+        let (topology, mut fields) = setup(
+            vec![
+                brick(0, [0, 0], 4, true),
+                brick(1, [1, 0], 8, false),
+                brick(2, [2, 0], 8, true),
+            ],
+            [24, 8],
+        );
+        for cell in &topology.graph.cells {
+            let id = cell.id as usize;
+            fields.density[id] = 1.0;
+            fields.cell_velocity[2 * id] = if cell.brick_key == Some(0) { 20.0 } else { -20.0 };
+        }
+        let options = coarsest_support_options();
+        let projected = plan_projected_transport_support_with_options(
+            &topology, &fields, 1.0, 1.0, &options, true,
+        ).unwrap();
+        let receiver = projected.candidate_bricks.iter()
+            .find(|brick| brick.key == 1).unwrap();
+        assert!(receiver.active);
+        assert_eq!(receiver.resolution, 4);
+        let post = plan_resolution(
+            &topology,
+            &fields,
+            &initialize_resolution_policy(&topology),
+            1.0,
+            1.0,
+            &options,
+        ).unwrap();
+        let receiver = post.candidate_bricks.iter()
+            .find(|brick| brick.key == 1).unwrap();
+        assert!(receiver.active);
+        assert_eq!(receiver.resolution, 4);
+
+        let mut constrained = options.clone();
+        constrained.static_boundary_floor_by_brick.insert(1, 4);
+        constrained.refinement_regions.push(ResolutionRegion {
+            minimum_fine: [8.0, 0.0],
+            maximum_fine: [16.0, 8.0],
+            minimum_cell_width: 1,
+            maximum_cell_width: Some(2),
+        });
+        let projected = plan_projected_transport_support_with_options(
+            &topology, &fields, 1.0, 1.0, &constrained, true,
+        ).unwrap();
+        assert_eq!(projected.candidate_bricks.iter()
+            .find(|brick| brick.key == 1).unwrap().resolution, 4);
+
+        constrained.frozen_brick_keys.insert(1);
+        let projected = plan_projected_transport_support_with_options(
+            &topology, &fields, 1.0, 1.0, &constrained, true,
+        ).unwrap();
+        assert_eq!(projected.candidate_bricks.iter()
+            .find(|brick| brick.key == 1).unwrap().resolution, 8);
+    }
+
+    #[test]
+    fn projected_support_does_not_coarsen_an_active_receiver() {
+        let (topology, mut fields) = setup(
+            vec![brick(0, [0, 0], 4, true), brick(1, [1, 0], 8, true)],
+            [16, 8],
+        );
+        for cell in &topology.graph.cells {
+            if cell.brick_key == Some(0) {
+                let id = cell.id as usize;
+                fields.density[id] = 1.0;
+                fields.cell_velocity[2 * id] = 20.0;
+            }
+        }
+        let projected = plan_projected_transport_support_with_options(
+            &topology,
+            &fields,
+            1.0,
+            1.0,
+            &coarsest_support_options(),
+            true,
+        ).unwrap();
+        assert_eq!(projected.candidate_bricks.iter()
+            .find(|brick| brick.key == 1).unwrap().resolution, 8);
+    }
+
+    #[test]
+    fn free_leaf_claims_do_not_overlap_monotonic_fallback_ids() {
+        let (topology, mut fields) = setup(vec![brick(0, [1, 1], 8, true)], [24, 24]);
+        fields.density.fill(0.99);
+        let mut options = coarsest_support_options();
+        options.free_leaf_ids = vec![1];
+
+        let projected = plan_projected_transport_support_with_options(
+            &topology,
+            &fields,
+            1.0 / 30.0,
+            0.05,
+            &options,
+            true,
+        ).unwrap();
+        assert!(projected.claimed_leaf_ids.len() > options.free_leaf_ids.len());
+        assert_eq!(
+            projected.claimed_leaf_ids.iter().copied().collect::<BTreeSet<_>>().len(),
+            projected.claimed_leaf_ids.len(),
+        );
+        compile_topology::<2>(TopologySeed {
+            dimensions: [24, 24, 1],
+            generation: 2,
+            sparse_air_phi: 0.5,
+            boundaries: [BoundaryMode::Closed; 6],
+            bricks: projected.candidate_bricks,
+        }).unwrap();
+
+        let post = plan_resolution(
+            &topology,
+            &fields,
+            &initialize_resolution_policy(&topology),
+            1.0 / 30.0,
+            0.05,
+            &options,
+        ).unwrap();
+        assert!(post.receipt.claimed_leaf_ids.len() > options.free_leaf_ids.len());
+        assert_eq!(
+            post.receipt.claimed_leaf_ids.iter().copied().collect::<BTreeSet<_>>().len(),
+            post.receipt.claimed_leaf_ids.len(),
+        );
+        compile_topology::<2>(TopologySeed {
+            dimensions: [24, 24, 1],
+            generation: 2,
+            sparse_air_phi: 0.5,
+            boundaries: [BoundaryMode::Closed; 6],
+            bricks: post.candidate_bricks,
+        }).unwrap();
     }
 
     #[test]

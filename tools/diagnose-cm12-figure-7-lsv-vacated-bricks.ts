@@ -128,6 +128,17 @@ try {
         velocity, extension, view.rdf.vertexPhiFine, view.rdf.segmentsFine, receiptByKey));
       for (const datum of data) histories.set(datum.brickKey, [...histories.get(datum.brickKey) ?? [], datum]);
       frameSummaries.push({ frame, timeS: receipt.time, topologyGeneration: receipt.topologyGeneration,
+        activeCells: view.graph.cells.length,
+        liquidMeasure: receipt.liquidMeasure,
+        levelSetVolume: receipt.levelSetVolume,
+        pressure: receipt.pressure,
+        surface: view.rdf.receipt,
+        excessVolumeFine: view.graph.cells.reduce((sum, cell) => sum
+          + Math.max(0, density[cell.id]! - capacity[cell.id]!) * cell.measure, 0),
+        contourLengthFine: Array.from({ length: view.rdf.segmentsFine.length / 4 }, (_, i) => {
+          const at = 4 * i, segments = view.rdf.segmentsFine;
+          return Math.hypot(segments[at + 2]! - segments[at]!, segments[at + 3]! - segments[at + 1]!);
+        }).reduce((sum, length) => sum + length, 0),
         activeBricks: data.filter(value => value.active).length,
         activeFineBricks: data.filter(value => value.active && value.resolution === 8).length,
         activeFineNoContour: data.filter(value => value.active && value.resolution === 8

@@ -2,6 +2,11 @@
 
 Date: 2026-09-14. Third transport option beside `Baseline` and `CellwiseRemap`; both stay untouched.
 
+The original surface proposal below was superseded by the
+[direct shared level-set surface](level-set-volume-direct-surface.md): PLIC no
+longer constructs the surface. Step 5 now records the implemented pressure
+release; direct phi/volume reconciliation remains deferred.
+
 ## Intention
 
 Carry two fields and one trace per frame, no substeps, no transport geometry:
@@ -26,7 +31,7 @@ Rust, in `fluid-core`, because the advance lab already runs the Rust world throu
 2. **V gather.** Build receiver-by-donor weights from the landing point (bilinear on the fine lattice mapped to owner cells), then three normalisation passes so rows and columns both sum correctly. Apply. Conservation to f32 roundoff is the first checkpoint: total V before and after must match. Report the count and maximum of V > C. About a day.
 3. **φ gather.** Sample the previous frame's RDF fine-vertex lattice at the landing point. Resample onto cell centres. Half a day.
 4. **Plane fit and RDF rebuild.** A variant of `reconstruct_interfaces` that takes the normal from ∇φ instead of from the density stencil, with the fraction from min(V, C)/C. Feed the planes to `reconstruct_shared_rdf`, then read φ back at cell centres. Rule for inconsistent cells: if V > 0 but φ places the cell more than half a width into air, the cell is sub-cell material, carried in V and not drawn. About a day.
-5. **Over-capacity drain.** Add CM12's divergence term, min(λ(V/C − 1), η)/Δx with λ = 0.5, η = 1, to the pressure right-hand side for cells over capacity. Half a day. Skip on the first pass; measure how far over capacity cells go without it.
+5. **Over-capacity drain.** Implemented on 2026-09-14 with the approved uncapped variant: add the integrated expansion target `q = 0.5 max(V − C, 0) / Δt` to the existing pressure RHS. Both primary and existing post-support projections enforce that target; the latter recomputes it on transferred V/C. This is a pressure constraint, not injected mass. See [allocation and pressure release findings](level-set-volume-allocation-pressure-release.md) for response measurements and remaining limitations.
 
 ## Test
 
