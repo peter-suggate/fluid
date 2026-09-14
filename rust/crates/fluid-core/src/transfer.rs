@@ -381,16 +381,33 @@ fn transfer_fields_impl(
             return Err(deferred(64, id, amount, available));
         }
         let base_amount = if allow_overcapacity { amount.min(capacity) } else { amount };
-        let fill = (base_amount / before.measure).clamp(0.0, 1.0);
-        let (normal, offset, plane_valid) = interface_plane(
-            fill,
-            [
-                fields.interface_normal[2 * id],
-                fields.interface_normal[2 * id + 1],
-            ],
-            [before.widths[0], before.widths[1]],
-        );
-        let use_plane = capacity == before.measure && plane_valid && amount >= 0.0;
+        let supplied_normal = [
+            fields.interface_normal[2 * id],
+            fields.interface_normal[2 * id + 1],
+        ];
+        let (normal, offset, plane_valid) = if allow_overcapacity {
+            let length = supplied_normal[0].hypot(supplied_normal[1]);
+            (
+                if length > 1e-20 {
+                    [supplied_normal[0] / length, supplied_normal[1] / length]
+                } else {
+                    [0.0; 2]
+                },
+                fields.interface_offset[id],
+                length.is_finite() && length > 1e-20 && fields.interface_offset[id].is_finite(),
+            )
+        } else {
+            interface_plane(
+                (base_amount / before.measure).clamp(0.0, 1.0),
+                supplied_normal,
+                [before.widths[0], before.widths[1]],
+            )
+        };
+        let use_plane = if allow_overcapacity {
+            capacity > 0.0 && plane_valid && amount >= 0.0
+        } else {
+            capacity == before.measure && plane_valid && amount >= 0.0
+        };
         let mut remaining = [amount, 0.0];
         for &entry in group {
             let area = plan.cell_areas[entry];
@@ -442,7 +459,7 @@ fn transfer_fields_impl(
                 let previous = contributions[entry];
                 let residual = remaining[0] + remaining[1];
                 let lower = if amount < 0.0 { -tolerance(child) } else { 0.0 };
-                let upper = if amount < 0.0 {
+                let upper = if amount < 0.0 || child <= 0.0 {
                     0.0
                 } else if allow_overcapacity {
                     f32::INFINITY

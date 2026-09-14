@@ -251,6 +251,85 @@ fn topology_transfer_preserves_overcapacity_only_for_level_set_mode() {
 }
 
 #[test]
+fn overcapacity_topology_transfer_keeps_solid_children_empty() {
+    let source = compile_topology::<2>(TopologySeed {
+        dimensions: [8, 8, 1],
+        generation: 1,
+        sparse_air_phi: 0.5,
+        boundaries: [BoundaryMode::Closed; 6],
+        bricks: vec![brick(0, [0, 0, 0], 4)],
+    })
+    .unwrap()
+    .graph;
+    let target = compile_topology::<2>(TopologySeed {
+        dimensions: [8, 8, 1],
+        generation: 2,
+        sparse_air_phi: 0.5,
+        boundaries: [BoundaryMode::Closed; 6],
+        bricks: vec![brick(0, [0, 0, 0], 8)],
+    })
+    .unwrap()
+    .graph;
+    let mut source_fields = fields(&source, |_| 0.0);
+    source_fields.density[0] = 0.25;
+    source_fields.interface_normal[0] = 1.0;
+    let before = physical_volume(&source, &source_fields);
+    let mut target_capacity = vec![1.0; target.cells.len()];
+    target_capacity[0] = 0.0;
+
+    let moved = transfer_fields_allow_overcapacity(
+        &source,
+        &target,
+        &source_fields,
+        &target_capacity,
+        &[],
+    )
+    .unwrap();
+    let after: f64 = target
+        .cells
+        .iter()
+        .map(|cell| moved.density[cell.id as usize] as f64 * cell.measure as f64)
+        .sum();
+
+    assert_eq!(moved.density[0], 0.0);
+    assert!((after - before).abs() <= 2.0 * f32::EPSILON as f64 * before.max(1.0));
+}
+
+#[test]
+fn level_set_topology_transfer_uses_phi_plane_for_cut_donor_split() {
+    let source = compile_topology::<2>(TopologySeed {
+        dimensions: [8, 8, 1], generation: 1, sparse_air_phi: 0.5,
+        boundaries: [BoundaryMode::Closed; 6],
+        bricks: vec![brick(0, [0, 0, 0], 4)],
+    }).unwrap().graph;
+    let target = compile_topology::<2>(TopologySeed {
+        dimensions: [8, 8, 1], generation: 2, sparse_air_phi: 0.5,
+        boundaries: [BoundaryMode::Closed; 6],
+        bricks: vec![brick(0, [0, 0, 0], 8)],
+    }).unwrap().graph;
+    let mut source_fields = fields(&source, |_| 0.0);
+    source_fields.capacity[0] = 0.5;
+    source_fields.density[0] = 0.5;
+    source_fields.interface_normal[0] = 1.0;
+    source_fields.interface_offset[0] = 0.0;
+    let before = physical_volume(&source, &source_fields);
+
+    let moved = transfer_fields_allow_overcapacity(
+        &source, &target, &source_fields, &vec![1.0; target.cells.len()], &[],
+    ).unwrap();
+    let children: Vec<_> = target.cells.iter().filter(|cell| {
+        cell.minimum[0] < 2.0 && cell.minimum[1] < 2.0
+    }).map(|cell| moved.density[cell.id as usize]).collect();
+    let after: f64 = target.cells.iter().map(|cell| {
+        moved.density[cell.id as usize] as f64 * cell.measure as f64
+    }).sum();
+
+    assert_eq!(children.iter().filter(|&&density| density == 0.0).count(), 2);
+    assert_eq!(children.iter().filter(|&&density| density == 1.0).count(), 2);
+    assert!((after - before).abs() <= 2.0 * f32::EPSILON as f64 * before.max(1.0));
+}
+
+#[test]
 fn redistance_uses_one_fine_coordinate_metric_across_mixed_widths() {
     let graph = seam_topology();
     let surface = RdfSurface {

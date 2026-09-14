@@ -147,6 +147,11 @@ async function wasmRun(arm: Arm, document: ReturnType<typeof sceneDocument>, nat
   const rows: Array<Record<string, unknown>> = [];
   let initialContourFine: number[] = [];
   let lastContourFine: number[] = [];
+  let initialCapacityFine: number[] = [];
+  let lastCapacityFine: number[] = [];
+  let initialLiquidVolumeFine: number[] = [];
+  let lastLiquidVolumeFine: number[] = [];
+  let dimensionsFine: [number, number] | null = null;
   let failure: { frame: number; error: string } | null = null;
   try {
     for (let frame = 0; frame <= frames; frame++) {
@@ -161,8 +166,15 @@ async function wasmRun(arm: Arm, document: ReturnType<typeof sceneDocument>, nat
         finally { decoded.release(); }
         graph = view.graph;
         const contour = Array.from(view.rdf.segmentsFine);
-        if (frame === 0) initialContourFine = contour;
+        if (frame === 0) {
+          initialContourFine = contour;
+          initialCapacityFine = Array.from(view.capacityFine, Number);
+          initialLiquidVolumeFine = Array.from(view.liquidVolumeFine, Number);
+        }
         lastContourFine = contour;
+        lastCapacityFine = Array.from(view.capacityFine, Number);
+        lastLiquidVolumeFine = Array.from(view.liquidVolumeFine, Number);
+        dimensionsFine = [view.nx, view.ny];
         const moving = arm !== "lsv-stationary";
         const expectedM: [number, number] = [-0.25 + (moving ? speed * dt * frame : 0), 0.6];
         const expectedFine: [number, number] = [view.nx / 2 + expectedM[0] / h, expectedM[1] / h];
@@ -205,7 +217,10 @@ async function wasmRun(arm: Arm, document: ReturnType<typeof sceneDocument>, nat
       }
     }
   } finally { world.free(); }
-  return { rows, failure, contours: { initialFine: initialContourFine, finalFine: lastContourFine } };
+  return { rows, failure,
+    contours: { initialFine: initialContourFine, finalFine: lastContourFine },
+    grids: { dimensionsFine, initialCapacityFine, finalCapacityFine: lastCapacityFine,
+      initialLiquidVolumeFine, finalLiquidVolumeFine: lastLiquidVolumeFine } };
 }
 
 function correlation(rows: Array<Record<string, unknown>>, x: (row: Record<string, unknown>) => number,
@@ -255,6 +270,7 @@ for (const arm of arms) {
         row => Number((row.surface as Record<string, unknown>).radialRmsErrorM)),
     },
     contours: wasm.contours,
+    grids: wasm.grids,
     rows,
   });
 }

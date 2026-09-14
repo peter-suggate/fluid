@@ -3,6 +3,7 @@
 
 use crate::initial_scene::{InitialLiquidHeightField, InitialLiquidVolume, SceneDocument};
 use crate::scene_model::Vec3;
+use std::collections::BTreeSet;
 
 pub const INITIAL_FLUID_BRICK_SIZE: i32 = 8;
 
@@ -405,6 +406,129 @@ pub fn initial_liquid_volumes_signed_distance(scene: &SceneDocument, point: Vec3
                 .fold(f64::INFINITY, f64::min),
         )
     }
+}
+
+/// Initial liquid geometry before adaptive averaging. Container faces are not
+/// free surfaces; extend a box through any container face that it touches.
+fn liquid_box_distance(scene: &SceneDocument, point: Vec3, min: Vec3, max: Vec3) -> f64 {
+    let domain_min = [-0.5 * scene.container.width_m, 0.0, -0.5 * scene.container.depth_m];
+    let domain_max = [0.5 * scene.container.width_m, scene.container.height_m, 0.5 * scene.container.depth_m];
+    let p = [point.x, point.y, point.z];
+    let lo = [min.x, min.y, min.z];
+    let hi = [max.x, max.y, max.z];
+    let far = scene.container.width_m + scene.container.height_m + scene.container.depth_m;
+    let q: [f64; 3] = std::array::from_fn(|axis| {
+        let low = if lo[axis] <= domain_min[axis] { -far } else { lo[axis] - p[axis] };
+        let high = if hi[axis] >= domain_max[axis] { -far } else { p[axis] - hi[axis] };
+        low.max(high)
+    });
+    q[0].max(0.0).hypot(q[1].max(0.0)).hypot(q[2].max(0.0))
+        + q[0].max(q[1]).max(q[2]).min(0.0)
+}
+
+fn painted_brick_union_distance(
+    scene: &SceneDocument,
+    point: Vec3,
+    seeds: &[Vec3],
+    dims: [u32; 3],
+) -> f64 {
+    let c = &scene.container;
+    let domain_min = [-0.5 * c.width_m, 0.0, -0.5 * c.depth_m];
+    let domain_max = [0.5 * c.width_m, c.height_m, 0.5 * c.depth_m];
+    let h = [c.width_m / dims[0] as f64, c.height_m / dims[1] as f64,
+        c.depth_m / dims[2] as f64];
+    let unique: BTreeSet<_> = seeds.iter().map(|&seed| {
+        seed_cell(scene, seed, dims)
+            .map(|value| value.div_euclid(INITIAL_FLUID_BRICK_SIZE) * INITIAL_FLUID_BRICK_SIZE)
+    }).collect();
+    let boxes: Vec<_> = unique.into_iter().map(|lo| {
+        let minimum = [-0.5 * c.width_m + lo[0] as f64 * h[0], lo[1] as f64 * h[1],
+            -0.5 * c.depth_m + lo[2] as f64 * h[2]];
+        let maximum = [-0.5 * c.width_m + (lo[0] + 8) as f64 * h[0],
+            (lo[1] + 8) as f64 * h[1], -0.5 * c.depth_m + (lo[2] + 8) as f64 * h[2]];
+        (minimum, maximum)
+    }).collect();
+    let p = [point.x, point.y, point.z];
+    let contains = |minimum: [f64; 3], maximum: [f64; 3]| {
+        (0..3).all(|axis| p[axis] >= minimum[axis] && p[axis] <= maximum[axis])
+    };
+    if !boxes.iter().any(|&(minimum, maximum)| contains(minimum, maximum)) {
+        return boxes.iter().map(|&(minimum, maximum)| liquid_box_distance(
+            scene,
+            point,
+            Vec3 { x: minimum[0], y: minimum[1], z: minimum[2] },
+            Vec3 { x: maximum[0], y: maximum[1], z: maximum[2] },
+        )).fold(f64::INFINITY, f64::min);
+    }
+
+    // Inside the union, min(box SDF) is zero on a shared brick face.  Merge
+    // the intervals cut by each coordinate ray instead, then measure to the
+    // connected union's exterior.  Container faces extend beyond the domain
+    // because they are walls, not liquid surfaces.
+    let far = c.width_m + c.height_m + c.depth_m;
+    let mut distance = f64::INFINITY;
+    for axis in 0..3 {
+        let mut intervals: Vec<_> = boxes.iter().filter_map(|&(minimum, maximum)| {
+            (0..3).filter(|&other| other != axis)
+                .all(|other| p[other] >= minimum[other] && p[other] <= maximum[other])
+                .then(|| {
+                    let lo = if minimum[axis] <= domain_min[axis] { -far } else { minimum[axis] };
+                    let hi = if maximum[axis] >= domain_max[axis] { far } else { maximum[axis] };
+                    [lo, hi]
+                })
+        }).collect();
+        intervals.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
+        let mut merged: Vec<[f64; 2]> = Vec::new();
+        for interval in intervals {
+            if let Some(last) = merged.last_mut().filter(|last| interval[0] <= last[1]) {
+                last[1] = last[1].max(interval[1]);
+            } else {
+                merged.push(interval);
+            }
+        }
+        if let Some(&[lo, hi]) = merged.iter()
+            .find(|interval| p[axis] >= interval[0] && p[axis] <= interval[1]) {
+            distance = distance.min((p[axis] - lo).min(hi - p[axis]));
+        }
+    }
+    -distance
+}
+
+/// A continuous implicit surface in metres for the authored liquid union.
+/// Its zero set is independent of the sparse atlas. Height fields and unions
+/// need not be exact distances; geometric redistancing is derived from their
+/// published zero contour, rather than mixed into the transported scalar.
+pub fn initial_liquid_surface_scalar(scene: &SceneDocument, point: Vec3, dims: [u32; 3]) -> f64 {
+    let c = &scene.container;
+    let empty = c.width_m + c.height_m + c.depth_m;
+    if !scene.systems.fluid { return empty; }
+    let mut scalar = if let Some(field) = &scene.fluid.initial_height_field {
+        point.y - initial_height_field_height(field, point.x, point.z)
+    } else if scene.fluid.initial_condition == "tank-fill" {
+        if c.fill_fraction > 0.0 { point.y - c.height_m * c.fill_fraction.clamp(0.0, 1.0) }
+        else { empty }
+    } else {
+        let bounds = scene_dam_break_box(scene);
+        if bounds.max.x <= bounds.min.x || bounds.max.y <= bounds.min.y || bounds.max.z <= bounds.min.z {
+            empty
+        } else {
+            liquid_box_distance(scene, point,
+                Vec3 { x: (bounds.min.x - 0.5) * c.width_m, y: bounds.min.y * c.height_m, z: (bounds.min.z - 0.5) * c.depth_m },
+                Vec3 { x: (bounds.max.x - 0.5) * c.width_m, y: bounds.max.y * c.height_m, z: (bounds.max.z - 0.5) * c.depth_m })
+        }
+    };
+    if let Some(seeds) = &scene.fluid.initial_brick_seeds_m {
+        if !scene.fluid.initial_brick_seeds_additive { scalar = empty; }
+        scalar = scalar.min(painted_brick_union_distance(scene, point, seeds, dims));
+    }
+    for volume in &scene.fluid.initial_liquid_volumes {
+        let distance = match *volume {
+            InitialLiquidVolume::Box { min_m, max_m } => liquid_box_distance(scene, point, min_m, max_m),
+            _ => initial_liquid_volume_signed_distance(volume, point),
+        };
+        scalar = scalar.min(distance);
+    }
+    scalar
 }
 
 pub fn initial_liquid_volume_contains_cell(

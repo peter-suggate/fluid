@@ -747,7 +747,6 @@ export function AdvanceLab(): React.JSX.Element {
         return;
       }
       if (stroke !== DROP_KEY && stroke !== REGION_KEY) return;
-      if (stroke === DROP_KEY && transportExperiment === "level-set-volume") return;
       const wanted: SliceTool = stroke === DROP_KEY ? "drop" : "region";
       setAim(null);
       setSketch(null);
@@ -1045,7 +1044,7 @@ export function AdvanceLab(): React.JSX.Element {
 
   const commitDrop = (at: readonly [number, number], radius: number): void => {
     const active = controller.current, s = view.current;
-    if (!active || !s || transportExperiment === "level-set-volume") return;
+    if (!active || !s) return;
     void active.injectLiquid([at[0], s.ny - at[1]], radius).then(next => {
       view.current = next;
       setPublishedView(next);
@@ -1455,7 +1454,7 @@ export function AdvanceLab(): React.JSX.Element {
                 enforced <b>{regions.length} region{regions.length === 1 ? "" : "s"}</b></span>}
               <span className={`${styles.read} ${styles.hint}`}
                 title={readingDirectLevelSet
-                  ? "Right-click the water to draw an enforcement region or change the solve budget. The direct level-set surface is fixed for this method."
+                  ? "Right-click the water to drop a ball there, draw an enforcement region or change the solve budget. The direct level-set surface is fixed for this method."
                   : "Right-click the water to drop a ball there, draw an enforcement region, or choose the surface reconstruction and the solve budget."}>
                 surface <b>{readingDirectLevelSet ? "Direct level set"
                   : SURFACE_VIEWS.find(view => view.id === surfaceView)?.label}</b></span>
@@ -1539,23 +1538,18 @@ export function AdvanceLab(): React.JSX.Element {
                 the second and third ball cost one click each. */}
             <div className={styles.menuGroup}>
               <button type="button" className={styles.menuItem}
-                disabled={transportExperiment === "level-set-volume"}
                 aria-pressed={tool === "drop" && !menu.at}
                 onClick={() => {
-                  if (transportExperiment === "level-set-volume") return;
                   if (menu.at) commitDrop(menu.at, defaultDropRadius(displayNx, displayNy));
                   /* Armed either way: with a point this is "and another one
                    * like it", and without one it is the mode by itself. */
                   setTool("drop");
                   setMenu(null);
                 }}>
-                <b>{transportExperiment === "level-set-volume"
-                  ? "Drop unavailable" : menu.at ? "Drop a ball here" : "Drop water"}</b>
-                <em>{transportExperiment === "level-set-volume"
-                  ? "liquid injection is outside this transport experiment"
-                  : menu.at
-                    ? `lands now · click or drag out for more · ${DROP_KEY} · Esc`
-                    : `click the water to place one, drag out to size it · ${DROP_KEY}`}</em></button>
+                <b>{menu.at ? "Drop a ball here" : "Drop water"}</b>
+                <em>{menu.at
+                  ? `lands now · click or drag out for more · ${DROP_KEY} · Esc`
+                  : `click the water to place one, drag out to size it · ${DROP_KEY}`}</em></button>
               {tool && <button type="button" className={styles.menuItem}
                 onClick={() => { setTool(null); setAim(null); setSketch(null); setMenu(null); }}>
                 <b>{tool === "drop" ? "Stop dropping" : "Stop drawing"}</b>

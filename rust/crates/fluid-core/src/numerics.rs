@@ -164,6 +164,32 @@ pub fn extend_velocity(
     fields: &mut Fields,
     depth_count: u8,
 ) -> Result<(), ValidationError> {
+    extend_velocity_impl(graph, fields, depth_count, None)
+}
+
+/// Extend the velocity used by direct level-set transport from phi-liquid
+/// cells. Conservative V may deliberately disagree with phi and must not turn
+/// an overfull phi-air cell into a velocity source.
+pub fn extend_velocity_with_level_set(
+    graph: &Graph,
+    fields: &mut Fields,
+    phi: &[f32],
+    depth_count: u8,
+) -> Result<(), ValidationError> {
+    if phi.len() != graph.cells.len() || phi.iter().any(|value| !value.is_finite()) {
+        return Err(ValidationError(
+            "level-set velocity extension requires one finite phi per cell".into(),
+        ));
+    }
+    extend_velocity_impl(graph, fields, depth_count, Some(phi))
+}
+
+fn extend_velocity_impl(
+    graph: &Graph,
+    fields: &mut Fields,
+    depth_count: u8,
+    level_set_phi: Option<&[f32]>,
+) -> Result<(), ValidationError> {
     fields.validate_for(graph)?;
     let n = graph.cells.len();
     let d = graph.dimension as usize;
@@ -171,7 +197,10 @@ pub fn extend_velocity(
     let mut velocity = fields.cell_velocity.clone();
     let mut known = vec![0u8; n];
     for cell in 0..n {
-        if fields.density[cell] > LIQUID_ISOVALUE {
+        let liquid = level_set_phi.map_or(fields.density[cell] > LIQUID_ISOVALUE, |phi| {
+            phi[cell] <= 0.0 && fields.capacity[cell] > 0.0
+        });
+        if liquid {
             known[cell] = 1;
             fields.extension_depth[cell] = 0;
         } else {
@@ -1987,10 +2016,17 @@ fn trace_characteristic(
     traced
 }
 
-fn row_touches_liquid(row: &Row, fields: &Fields) -> bool {
+fn row_touches_liquid(row: &Row, fields: &Fields, use_extension_phase: bool) -> bool {
     row.terms
         .iter()
-        .any(|t| fields.density[t.cell_id as usize] > LIQUID_ISOVALUE)
+        .any(|t| {
+            let cell = t.cell_id as usize;
+            if use_extension_phase {
+                fields.extension_depth[cell] == 0
+            } else {
+                fields.density[cell] > LIQUID_ISOVALUE
+            }
+        })
 }
 fn row_source_fluid_velocity(row: &Row, fields: &Fields) -> f32 {
     let velocity = fields.face_velocity[row.id as usize];
@@ -2011,6 +2047,7 @@ fn source_staggered_cell_sample(
     fields: &Fields,
     point: [f32; 2],
     axis: usize,
+    use_extension_phase: bool,
 ) -> (f32, bool) {
     let mut query = [point[0].floor() + 0.5, point[1].floor() + 0.5, 0.0];
     let mut cell = owner_at(graph, query);
@@ -2031,7 +2068,7 @@ fn source_staggered_cell_sample(
     for &row_id in &graph.incidences[cell] {
         let row = &graph.rows[row_id as usize];
         if row.axis as usize != axis
-            || !row_touches_liquid(row, fields)
+            || !row_touches_liquid(row, fields, use_extension_phase)
             || fields.solid_motion_active && row.open_fraction < 1.0
         {
             continue;
@@ -2124,6 +2161,7 @@ fn sample_source_linear(
     axis: usize,
     span: f32,
     renormalize_sparse_support: bool,
+    use_extension_phase: bool,
 ) -> f32 {
     let (offset, lower, fraction) = staggered_coordinates(graph, position, axis, span);
     let mut velocity = 0.0;
@@ -2149,7 +2187,9 @@ fn sample_source_linear(
                 span * (lower[0] + dx as f32 + offset[0]),
                 span * (lower[1] + dy as f32 + offset[1]),
             ];
-            let (value, valid) = source_staggered_cell_sample(graph, fields, point, axis);
+            let (value, valid) = source_staggered_cell_sample(
+                graph, fields, point, axis, use_extension_phase,
+            );
             if !renormalize_sparse_support {
                 let fallback = sample_support(graph, fields, point[0], point[1], span)[axis];
                 velocity = add(velocity, mul(weight, if valid { value } else { fallback }));
@@ -2182,6 +2222,7 @@ fn uniform_staggered_node(
     point: [f32; 2],
     axis: usize,
     span: f32,
+    use_extension_phase: bool,
 ) -> (f32, bool) {
     let Some(cell) = owner_at(graph, [point[0].floor() + 0.5, point[1].floor() + 0.5, 0.0]) else {
         return (0.0, false);
@@ -2200,7 +2241,7 @@ fn uniform_staggered_node(
             || row.open_fraction != 1.0
             || row.static_measure.unwrap_or(row.measure) != span
             || row.distance != span
-            || !row_touches_liquid(row, fields)
+            || !row_touches_liquid(row, fields, use_extension_phase)
         {
             return (0.0, false);
         }
@@ -2255,6 +2296,7 @@ fn sample_source(
     axis: usize,
     span: f32,
     renormalize_sparse_support: bool,
+    use_extension_phase: bool,
 ) -> f32 {
     let (offset, lower, fraction) = staggered_coordinates(graph, position, axis, span);
     let interpolated = [fraction[0] != 0.0, fraction[1] != 0.0];
@@ -2283,6 +2325,7 @@ fn sample_source(
             axis,
             span,
             renormalize_sparse_support,
+            use_extension_phase,
         );
     }
     let mut values = [[0.0; 4]; 4];
@@ -2297,7 +2340,9 @@ fn sample_source(
                 span * (lower[0] + x as f32 - 1.0 + offset[0]),
                 span * (lower[1] + y as f32 - 1.0 + offset[1]),
             ];
-            let (node, valid) = uniform_staggered_node(graph, fields, point, axis, span);
+            let (node, valid) = uniform_staggered_node(
+                graph, fields, point, axis, span, use_extension_phase,
+            );
             if !valid {
                 return sample_source_linear(
                     graph,
@@ -2306,6 +2351,7 @@ fn sample_source(
                     axis,
                     span,
                     renormalize_sparse_support,
+                    use_extension_phase,
                 );
             }
             values[y][x] = node;
@@ -2340,7 +2386,7 @@ fn sample_source(
 
 /// Exact 2-D accepted-face semi-Lagrangian preparation.
 pub fn prepare_faces(graph: &Graph, fields: &mut Fields, dt: f32) -> Result<(), ValidationError> {
-    prepare_faces_impl(graph, fields, dt, false)
+    prepare_faces_impl(graph, fields, dt, false, false)
 }
 
 /// Face preparation for geometric cellwise transport. Sparse interpolation
@@ -2351,7 +2397,17 @@ pub fn prepare_faces_for_cellwise_remap(
     fields: &mut Fields,
     dt: f32,
 ) -> Result<(), ValidationError> {
-    prepare_faces_impl(graph, fields, dt, true)
+    prepare_faces_impl(graph, fields, dt, true, false)
+}
+
+/// Face preparation whose staggered source mask is the phi-liquid seed set
+/// published by `extend_velocity_with_level_set`.
+pub fn prepare_faces_for_level_set_volume(
+    graph: &Graph,
+    fields: &mut Fields,
+    dt: f32,
+) -> Result<(), ValidationError> {
+    prepare_faces_impl(graph, fields, dt, false, true)
 }
 
 fn prepare_faces_impl(
@@ -2359,6 +2415,7 @@ fn prepare_faces_impl(
     fields: &mut Fields,
     dt: f32,
     renormalize_sparse_support: bool,
+    use_extension_phase: bool,
 ) -> Result<(), ValidationError> {
     if graph.dimension == 3 {
         return crate::numerics3d::prepare_faces_3d(graph, fields, dt);
@@ -2412,6 +2469,7 @@ fn prepare_faces_impl(
             row.axis as usize,
             span,
             renormalize_sparse_support,
+            use_extension_phase,
         );
         fields.face_velocity[i] = add(
             mul(row.open_fraction, characteristic),
@@ -2849,7 +2907,36 @@ fn ghost_theta(liquid_phi: f32, air_phi: f32) -> f32 {
 
 /// Builds PCM/PCF row membership and the Jacobi diagonal in canonical row order.
 pub fn prepare_pressure_topology(graph: &Graph, fields: &mut Fields) -> PressureRows {
-    prepare_pressure_topology_impl(graph, fields, false, true)
+    prepare_pressure_topology_impl(graph, fields, false, true, None)
+}
+
+/// Builds pressure membership and ghost-fluid fractions from the accepted
+/// level-set scalar. Density remains the transported volume authority, but it
+/// does not participate in pressure phase classification on this path.
+pub fn prepare_pressure_topology_with_level_set(
+    graph: &Graph,
+    fields: &mut Fields,
+    phi: &[f32],
+) -> Result<PressureRows, ValidationError> {
+    if phi.len() != graph.cells.len() {
+        return Err(ValidationError(format!(
+            "level-set pressure scalar length {} does not match cell count {}",
+            phi.len(),
+            graph.cells.len()
+        )));
+    }
+    if let Some((index, value)) = phi.iter().copied().enumerate().find(|(_, value)| !value.is_finite()) {
+        return Err(ValidationError(format!(
+            "level-set pressure scalar is not finite at cell {index}: {value}"
+        )));
+    }
+    Ok(prepare_pressure_topology_impl(
+        graph,
+        fields,
+        false,
+        false,
+        Some(phi),
+    ))
 }
 
 /// Reconstruct the row coefficients used by the completed pressure projection
@@ -2859,7 +2946,7 @@ pub(crate) fn pressure_projection_velocity_roundoff_scale(
     fields: &Fields,
 ) -> Vec<f64> {
     let mut snapshot = fields.clone();
-    let rows = prepare_pressure_topology_impl(graph, &mut snapshot, false, false);
+    let rows = prepare_pressure_topology_impl(graph, &mut snapshot, false, false, None);
     graph
         .rows
         .iter()
@@ -2893,7 +2980,7 @@ pub fn prepare_pressure_topology_with_swept_static_wall_support(
     // The caller first prepares and snapshots the physical topology. Avoid a
     // second membership refresh here: retained submerged membership has
     // history and is intentionally not an idempotent operation.
-    prepare_pressure_topology_impl(graph, fields, true, false)
+    prepare_pressure_topology_impl(graph, fields, true, false, None)
 }
 
 fn prepare_pressure_topology_impl(
@@ -2901,11 +2988,19 @@ fn prepare_pressure_topology_impl(
     fields: &mut Fields,
     swept_static_wall_support: bool,
     refresh_membership: bool,
+    level_set_phi: Option<&[f32]>,
 ) -> PressureRows {
-    if refresh_membership {
+    if let Some(phi) = level_set_phi {
+        for (cell, member) in fields.pressure_member.iter_mut().enumerate() {
+            *member = u8::from(
+                mul(fields.capacity[cell], graph.cells[cell].measure) > 1e-8
+                    && phi[cell] <= 0.0,
+            );
+        }
+    } else if refresh_membership {
         prepare_pressure_membership(graph, fields);
     }
-    if swept_static_wall_support {
+    if swept_static_wall_support && level_set_phi.is_none() {
         promote_swept_static_wall_pressure_support(graph, fields, fields.frame_dt);
     }
     let mut state = PressureRows {
@@ -2970,7 +3065,7 @@ fn prepare_pressure_topology_impl(
             .sqrt();
         let mut geometry_valid =
             geometric_weight > 1e-8 && geometric_length > mul(1e-6, geometric_weight);
-        if geometry_valid {
+        if geometry_valid && level_set_phi.is_none() {
             for term in &row.terms {
                 let i = term.cell_id as usize;
                 let numerator = if d == 2 {
@@ -3002,26 +3097,31 @@ fn prepare_pressure_topology_impl(
         let mut liquid_gradient = 0.0;
         for term in &row.terms {
             let i = term.cell_id as usize;
-            let width = if row.kind == RowKind::SparseAir {
-                1.0
+            let phi = if let Some(level_set_phi) = level_set_phi {
+                level_set_phi[i]
             } else {
-                graph.cells[i].widths[row.axis as usize]
-            };
-            let old_phi = mul(LIQUID_ISOVALUE - pressure_density(graph, fields, i), width);
-            let phi = if geometry_valid {
-                let numerator = if d == 2 {
-                    add(
-                        mul(geometric[0], graph.cells[i].center[0] - row.center[0]),
-                        mul(geometric[1], graph.cells[i].center[1] - row.center[1]),
-                    ) - geometric_offset
+                let width = if row.kind == RowKind::SparseAir {
+                    1.0
                 } else {
-                    (0..d)
-                        .map(|a| mul(geometric[a], graph.cells[i].center[a] - row.center[a]))
-                        .fold(-geometric_offset, add)
+                    graph.cells[i].widths[row.axis as usize]
                 };
-                div(numerator, geometric_length)
-            } else {
-                old_phi
+                if geometry_valid {
+                    let numerator = if d == 2 {
+                        add(
+                            mul(geometric[0], graph.cells[i].center[0] - row.center[0]),
+                            mul(geometric[1], graph.cells[i].center[1] - row.center[1]),
+                        ) - geometric_offset
+                    } else {
+                        (0..d)
+                            .map(|a| {
+                                mul(geometric[a], graph.cells[i].center[a] - row.center[a])
+                            })
+                            .fold(-geometric_offset, add)
+                    };
+                    div(numerator, geometric_length)
+                } else {
+                    mul(LIQUID_ISOVALUE - pressure_density(graph, fields, i), width)
+                }
             };
             let weight = term.coefficient.abs();
             full_gradient = add(full_gradient, mul(term.coefficient, phi));
@@ -3039,8 +3139,57 @@ fn prepare_pressure_topology_impl(
         if liquid_count == 0 || pressure_dual_weight(row) <= 1e-8 {
             continue;
         }
-        if row.kind == RowKind::SparseAir {
-            air_phi = add(air_phi, mul(liquid_weight, 0.5));
+        let physical_open_boundary = level_set_phi.is_some()
+            && row.kind == RowKind::SparseAir
+            && (row.center[row.axis as usize] == 0.0
+                || row.center[row.axis as usize] == graph.dimensions[row.axis as usize]);
+        if row.kind == RowKind::SparseAir && !physical_open_boundary {
+            let exterior_phi = if level_set_phi.is_some() {
+                let centre_phi = div(liquid_phi, liquid_weight.max(1e-9));
+                let atmospheric_fallback = || {
+                    (-centre_phi).max(mul(0.5, row.distance)).max(1e-6)
+                };
+                if geometry_valid {
+                    let mut liquid_center = [0.0; 3];
+                    for term in &row.terms {
+                        let i = term.cell_id as usize;
+                        if fields.pressure_member[i] == 0 {
+                            continue;
+                        }
+                        let weight = term.coefficient.abs();
+                        for a in 0..d {
+                            liquid_center[a] = add(
+                                liquid_center[a],
+                                mul(weight, graph.cells[i].center[a]),
+                            );
+                        }
+                    }
+                    for value in liquid_center.iter_mut().take(d) {
+                        *value = div(*value, liquid_weight.max(1e-9));
+                    }
+                    let axis = row.axis as usize;
+                    let direction = if row.center[axis] >= liquid_center[axis] {
+                        1.0
+                    } else {
+                        -1.0
+                    };
+                    liquid_center[axis] = add(liquid_center[axis], mul(direction, row.distance));
+                    let numerator = (0..d)
+                        .map(|a| mul(geometric[a], liquid_center[a] - row.center[a]))
+                        .fold(-geometric_offset, add);
+                    let exterior_phi = div(numerator, geometric_length);
+                    if exterior_phi.is_finite() && exterior_phi > 0.0 {
+                        exterior_phi
+                    } else {
+                        atmospheric_fallback()
+                    }
+                } else {
+                    atmospheric_fallback()
+                }
+            } else {
+                0.5
+            };
+            air_phi = add(air_phi, mul(liquid_weight, exterior_phi));
             air_weight = add(air_weight, liquid_weight);
         }
         let cut = air_count > 0 || row.kind == RowKind::SparseAir;
@@ -3052,11 +3201,29 @@ fn prepare_pressure_topology_impl(
         } else {
             1.0
         };
+        if level_set_phi.is_some() && physical_open_boundary {
+            // A one-sided domain row spans one cell width while the physical
+            // pressure boundary is half that distance from its cell centre.
+            // This is an authored p=0 boundary, not a reconstructed surface.
+            theta = 0.5;
+            if geometry_valid {
+                let boundary_phi = div(-geometric_offset, geometric_length);
+                let centre_phi = div(liquid_phi, liquid_weight.max(1e-9));
+                if boundary_phi.is_finite() && boundary_phi > 0.0 && centre_phi <= 0.0 {
+                    // A phi zero before the authored boundary is the nearer
+                    // free surface. Convert its centre-to-face fraction to
+                    // the row's full-cell-distance theta convention.
+                    theta = mul(0.5, ghost_theta(centre_phi, boundary_phi))
+                        .clamp(GHOST_FLUID_THETA_MIN, 0.5);
+                }
+            }
+        }
         let gravity_length = (0..d)
             .map(|a| mul(fields.acceleration_fine[a], fields.acceleration_fine[a]))
             .fold(0.0, add)
             .sqrt();
-        let partial_region = graph
+        let partial_region = level_set_phi.is_none()
+            && graph
             .cells
             .iter()
             .any(|c| c.refinement_region_scale.unwrap_or(1.0) > 1.0)
@@ -3064,7 +3231,8 @@ fn prepare_pressure_topology_impl(
                 .cells
                 .iter()
                 .any(|c| c.refinement_region_scale.unwrap_or(1.0) == 1.0);
-        if cut
+        if level_set_phi.is_none()
+            && cut
             && graph.dimension == 2
             && row.axis == 1
             && gravity_length > 1e-6
@@ -3364,6 +3532,12 @@ pub fn assemble_pressure_rhs(graph: &Graph, fields: &mut Fields, rows: &Pressure
 
 /// Fraction of cell-volume excess released by the next pressure projection.
 ///
+/// CM12 bounds the normalized expansion correction at one cell's integrated
+/// open capacity per step. This matters for small terrain cut cells: an
+/// unbounded correction can ask their small apertures to carry several local
+/// capacities in one frame, producing a pressure impulse instead of a gradual
+/// excess release.
+///
 /// The resulting rate is an integrated fine-area rate, matching `source_rate`
 /// and the flux terms assembled into `pressure_rhs`. A positive rate therefore
 /// asks the projection for net outward flux from an over-capacity liquid cell.
@@ -3385,10 +3559,13 @@ pub fn level_set_volume_excess_pressure_source(
         .iter()
         .map(|cell| {
             let id = cell.id as usize;
+            let capacity = (fields.capacity[id] as f64 * cell.measure as f64).max(0.0);
             let excess = ((fields.density[id] as f64 - fields.capacity[id] as f64)
                 * cell.measure as f64)
                 .max(0.0);
-            let rate = LEVEL_SET_VOLUME_EXCESS_PRESSURE_RELAXATION as f64 * excess / dt as f64;
+            let released = (LEVEL_SET_VOLUME_EXCESS_PRESSURE_RELAXATION as f64 * excess)
+                .min(capacity);
+            let rate = released / dt as f64;
             if rate.is_finite() && rate <= f32::MAX as f64 {
                 Ok(rate as f32)
             } else {
@@ -3877,7 +4054,7 @@ mod tests {
     use super::*;
     use crate::geometry::BoundaryMode;
     use crate::topology::{compile_topology, BrickSeed, TopologySeed};
-    use crate::types::Cell;
+    use crate::types::{Cell, RowTerm};
 
     fn test_brick(key: u32, coordinate: [i32; 3], resolution: u8) -> BrickSeed {
         BrickSeed {
@@ -4003,6 +4180,92 @@ mod tests {
     }
 
     #[test]
+    fn level_set_volume_excess_source_limits_small_cell_expansion_to_its_capacity() {
+        let graph = uniform_test_graph();
+        let mut fields = streamfunction_test_fields(&graph);
+        let cell = graph
+            .cells
+            .iter()
+            .find(|cell| cell.center[0] == 4.5 && cell.center[1] == 4.5)
+            .unwrap();
+        let id = cell.id as usize;
+        fields.capacity[id] = 0.001;
+        fields.density[id] = 0.007426;
+        let dt = 1.0 / 30.0;
+        let source = level_set_volume_excess_pressure_source(&graph, &fields, dt).unwrap();
+        let integrated_capacity = fields.capacity[id] * cell.measure;
+        assert_eq!(source[id], integrated_capacity / dt);
+        assert!(source[id] * dt <= integrated_capacity);
+    }
+
+    #[test]
+    fn level_set_volume_excess_source_has_resolution_independent_normalized_rate() {
+        let graph = seam_test_graph();
+        let mut fields = streamfunction_test_fields(&graph);
+        let coarse = graph
+            .cells
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.measure.total_cmp(&b.measure))
+            .map(|(id, _)| id)
+            .unwrap();
+        let fine = graph
+            .cells
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| a.measure.total_cmp(&b.measure))
+            .map(|(id, _)| id)
+            .unwrap();
+        fields.capacity[coarse] = 0.25;
+        fields.density[coarse] = 0.5;
+        fields.capacity[fine] = 0.75;
+        fields.density[fine] = 1.5;
+        let dt = 0.1;
+        let source = level_set_volume_excess_pressure_source(&graph, &fields, dt).unwrap();
+        let normalized = |id: usize| {
+            source[id]
+                / (fields.capacity[id] * graph.cells[id].measure)
+        };
+        assert!((normalized(coarse) - 0.5 / dt).abs() < 1e-5);
+        assert!((normalized(fine) - normalized(coarse)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn level_set_velocity_extension_uses_phi_instead_of_conservative_volume() {
+        let graph = uniform_test_graph();
+        let mut fields = streamfunction_test_fields(&graph);
+        fields.density.fill(0.0);
+        fields.cell_velocity.fill(0.0);
+        let high_volume = graph
+            .cells
+            .iter()
+            .find(|cell| cell.center[0] == 4.5 && cell.center[1] == 4.5)
+            .unwrap()
+            .id as usize;
+        fields.density[high_volume] = 8.0;
+        fields.cell_velocity[2 * high_volume] = 19.0;
+        let mut phi = vec![1.0; graph.cells.len()];
+
+        extend_velocity_with_level_set(&graph, &mut fields, &phi, 1).unwrap();
+        assert!(fields.extension_depth.iter().all(|&depth| depth == 255));
+        assert!(fields.cell_velocity.iter().all(|&velocity| velocity == 0.0));
+
+        let phi_liquid = graph
+            .cells
+            .iter()
+            .find(|cell| cell.center[0] == 2.5 && cell.center[1] == 2.5)
+            .unwrap()
+            .id as usize;
+        fields.cell_velocity[2 * phi_liquid] = 7.0;
+        fields.capacity[phi_liquid] = 1.0e-12;
+        phi[phi_liquid] = -1.0;
+        extend_velocity_with_level_set(&graph, &mut fields, &phi, 1).unwrap();
+        assert_eq!(fields.extension_depth[phi_liquid], 0);
+        assert_eq!(fields.cell_velocity[2 * phi_liquid], 7.0);
+        assert_eq!(fields.extension_depth[high_volume], 255);
+    }
+
+    #[test]
     fn level_set_volume_excess_source_projects_outward_flux() {
         let graph = uniform_test_graph();
         let mut fields = streamfunction_test_fields(&graph);
@@ -4076,6 +4339,164 @@ mod tests {
             })
             .sum();
         assert!(closed_outward.abs() <= 2.0e-5, "{closed_outward}");
+    }
+
+    #[test]
+    fn level_set_pressure_membership_and_mixed_seam_ignore_volume() {
+        let graph = seam_test_graph();
+        let mut fields = streamfunction_test_fields(&graph);
+        let seam = graph
+            .rows
+            .iter()
+            .find(|row| {
+                row.kind == RowKind::MixedSeam
+                    && row.terms.iter().any(|term| {
+                        graph.cells[term.cell_id as usize].center[0] < row.center[0]
+                    })
+                    && row.terms.iter().any(|term| {
+                        graph.cells[term.cell_id as usize].center[0] > row.center[0]
+                    })
+            })
+            .expect("mixed-resolution seam row");
+        let interface_x = seam.center[0] + 0.25;
+        let phi: Vec<f32> = graph
+            .cells
+            .iter()
+            .map(|cell| cell.center[0] - interface_x)
+            .collect();
+
+        // Deliberately make V claim the opposite phase and give the legacy
+        // plane path contradictory geometry.
+        for (cell, value) in phi.iter().copied().enumerate() {
+            fields.density[cell] = if value <= 0.0 { 0.0 } else { 2.0 };
+            fields.interface_normal[2 * cell] = -1.0;
+            fields.interface_offset[cell] = 100.0;
+        }
+        let first = prepare_pressure_topology_with_level_set(&graph, &mut fields, &phi).unwrap();
+        assert!(fields
+            .pressure_member
+            .iter()
+            .zip(&phi)
+            .all(|(&member, &value)| (member != 0) == (value <= 0.0)));
+        assert!(first.active[seam.id as usize] != 0);
+        assert!(first.theta[seam.id as usize] > 0.0);
+
+        fields.density.fill(37.0);
+        fields.interface_normal.fill(0.0);
+        fields.interface_offset.fill(-500.0);
+        let second = prepare_pressure_topology_with_level_set(&graph, &mut fields, &phi).unwrap();
+        assert_eq!(second.active, first.active);
+        assert_eq!(second.theta, first.theta);
+    }
+
+    #[test]
+    fn level_set_pressure_rejects_invalid_scalar_before_mutation() {
+        let graph = uniform_test_graph();
+        let mut fields = streamfunction_test_fields(&graph);
+        let before = fields.pressure_member.clone();
+        let mut phi = vec![-1.0; graph.cells.len()];
+        phi[3] = f32::NAN;
+        assert!(prepare_pressure_topology_with_level_set(&graph, &mut fields, &phi).is_err());
+        assert_eq!(fields.pressure_member, before);
+    }
+
+    #[test]
+    fn level_set_sparse_air_retains_atmosphere_when_phi_gradient_is_unresolved() {
+        let cell = Cell {
+            id: 0,
+            stable_id: Some(0),
+            minimum: [0.0, 0.0, 0.0],
+            maximum: [1.0, 1.0, 1.0],
+            center: [0.5, 0.5, 0.0],
+            widths: [1.0, 1.0, 1.0],
+            measure: 1.0,
+            brick_key: Some(0),
+            refinement_region_scale: None,
+        };
+        let row = Row {
+            id: 0,
+            kind: RowKind::SparseAir,
+            axis: 0,
+            center: [1.0, 0.5, 0.0],
+            measure: 1.0,
+            static_measure: None,
+            distance: 1.0,
+            dual_weight: 1.0,
+            static_dual_weight: None,
+            static_open_fraction: None,
+            terms: vec![RowTerm {
+                cell_id: 0,
+                coefficient: 1.0,
+            }],
+            open_fraction: 1.0,
+            open_fraction_before: None,
+            open_fraction_after: None,
+            solid_velocity: 0.0,
+            separating: false,
+        };
+        let graph = Graph {
+            dimension: 2,
+            dimensions: [2.0, 1.0, 1.0],
+            cells: vec![cell],
+            rows: vec![row],
+            incidences: vec![vec![0]],
+            ..Graph::default()
+        };
+        let mut fields = streamfunction_test_fields(&graph);
+        fields.density[0] = 100.0;
+        let phi = [-0.5];
+
+        // Missing sparse support is atmospheric even when the local phi
+        // gradient is tangential or underdetermined.
+        fields.interface_normal.copy_from_slice(&[0.0, 1.0]);
+        fields.interface_offset[0] = 0.5;
+        let tangential =
+            prepare_pressure_topology_with_level_set(&graph, &mut fields, &phi).unwrap();
+        assert_eq!(tangential.active, vec![1]);
+        assert_eq!(tangential.theta, vec![0.5]);
+
+        // The same accepted cell scalar with a normal crossing proves an
+        // atmospheric boundary half way to the synthetic neighbor.
+        fields.interface_normal.copy_from_slice(&[1.0, 0.0]);
+        fields.interface_offset[0] = 0.5;
+        let crossing =
+            prepare_pressure_topology_with_level_set(&graph, &mut fields, &phi).unwrap();
+        assert_eq!(crossing.active, vec![1]);
+        assert!((crossing.theta[0] - 0.5).abs() <= 1.0e-6);
+
+        fields.interface_normal.fill(0.0);
+        let unresolved =
+            prepare_pressure_topology_with_level_set(&graph, &mut fields, &phi).unwrap();
+        assert_eq!(unresolved.active, vec![1]);
+        assert_eq!(unresolved.theta, vec![0.5]);
+        fields.source_rate[0] = 0.25;
+        assemble_pressure_rhs(&graph, &mut fields, &unresolved);
+        let solved = solve_pressure(&graph, &mut fields, &unresolved, 32, 1e-7, None).unwrap();
+        assert!(solved.converged);
+        project_pressure_velocity(&graph, &mut fields, &unresolved);
+        assert!(fields.face_velocity[0].is_finite() && fields.face_velocity[0].abs() > 0.0);
+        fields.source_rate[0] = 0.0;
+
+        let mut physical_domain = graph.clone();
+        physical_domain.dimensions[0] = 1.0;
+        let boundary = prepare_pressure_topology_with_level_set(
+            &physical_domain,
+            &mut fields,
+            &phi,
+        )
+        .unwrap();
+        assert_eq!(boundary.active, vec![1]);
+        assert_eq!(boundary.theta, vec![0.5]);
+
+        fields.interface_normal.copy_from_slice(&[1.0, 0.0]);
+        fields.interface_offset[0] = 0.25;
+        let nearer_surface = prepare_pressure_topology_with_level_set(
+            &physical_domain,
+            &mut fields,
+            &[-0.25],
+        )
+        .unwrap();
+        assert_eq!(nearer_surface.theta, vec![0.25]);
     }
 
     #[test]

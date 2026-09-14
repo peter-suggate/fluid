@@ -35,6 +35,36 @@ fn clipped_area(triangle: &[Vertex; 3]) -> f64 {
     twice.abs() * 0.5
 }
 
+/// Liquid fraction enclosed by the authoritative vertex scalar in each finest cell.
+/// The order is x-fastest and matches the production slice's finest raster.
+pub fn implied_fill_fine_cells(surface: &RdfSurface) -> Result<Vec<f32>, ValidationError> {
+    let [nx, ny] = surface.dimensions.map(|value| value as usize);
+    let stride = nx + 1;
+    if nx == 0 || ny == 0
+        || surface.vertex_phi_fine.len() != stride.saturating_mul(ny + 1)
+        || surface.vertex_phi_fine.iter().any(|value| !value.is_finite())
+    {
+        return Err(ValidationError(
+            "direct level-set surface cannot publish implied cell fill".into(),
+        ));
+    }
+    let mut result = Vec::with_capacity(nx * ny);
+    for y in 0..ny {
+        for x in 0..nx {
+            let phi = [
+                surface.vertex_phi_fine[x + stride * y] as f64,
+                surface.vertex_phi_fine[x + 1 + stride * y] as f64,
+                surface.vertex_phi_fine[x + 1 + stride * (y + 1)] as f64,
+                surface.vertex_phi_fine[x + stride * (y + 1)] as f64,
+            ];
+            let fill = triangles(x as f64, y as f64, phi)
+                .iter().map(clipped_area).sum::<f64>();
+            result.push(fill.clamp(0.0, 1.0) as f32);
+        }
+    }
+    Ok(result)
+}
+
 /// Publish a surface directly from its authoritative fine-vertex scalar.
 /// `diagnostic_volume` is used only for the receipt's comparison fields.
 pub fn publish(
@@ -89,7 +119,32 @@ pub fn publish(
     Ok(RdfSurface { dimensions, vertex_phi_fine, segments_fine: segments, receipt })
 }
 
-/// Generic non-analytic seed derived from accepted cell occupancy, without PLIC.
+/// Seed the shared field from retained authored geometry, before any adaptive
+/// volume averaging can discard the initial subcell surface location.
+pub fn initialize_from_document(
+    scene: &crate::initial_scene::SceneDocument,
+    diagnostic_volume: f64,
+) -> Result<RdfSurface, ValidationError> {
+    let dims = crate::initial_scene::lattice_dimensions(scene);
+    let c = &scene.container;
+    let h = scene.voxel_domain.finest_cell_size_m;
+    let mut vertices = Vec::with_capacity((dims[0] as usize + 1) * (dims[1] as usize + 1));
+    for y in 0..=dims[1] {
+        for x in 0..=dims[0] {
+            let point = crate::scene_model::Vec3 {
+                x: -0.5 * c.width_m + x as f64 * c.width_m / dims[0] as f64,
+                y: y as f64 * c.height_m / dims[1] as f64,
+                z: -0.5 * c.depth_m + (dims[2] / 2) as f64 * c.depth_m / dims[2] as f64
+                    + 0.5 * c.depth_m / dims[2] as f64,
+            };
+            let scalar = crate::initial_liquid::initial_liquid_surface_scalar(scene, point, dims);
+            vertices.push((scalar / h) as f32);
+        }
+    }
+    publish([dims[0], dims[1]], vertices, diagnostic_volume)
+}
+
+/// Fallback for raw state callers with no retained scene geometry.
 pub fn initialize_from_volume(graph: &Graph, fields: &Fields) -> Result<RdfSurface, ValidationError> {
     let dimensions = [graph.dimensions[0] as u32, graph.dimensions[1] as u32];
     let mut vertices = Vec::with_capacity((dimensions[0] as usize + 1) * (dimensions[1] as usize + 1));
@@ -117,6 +172,42 @@ pub fn initialize_from_volume(graph: &Graph, fields: &Fields) -> Result<RdfSurfa
     let volume = graph.cells.iter().enumerate()
         .map(|(i, cell)| fields.density[i] as f64 * cell.measure as f64).sum();
     publish(dimensions, vertices, volume)
+}
+
+/// Union a dropped ball into the authoritative vertex scalar.
+///
+/// The shared field is a signed distance in finest cells and the drop is a
+/// disk in that same frame, so the ball carries its own exact scalar and the
+/// union is the pointwise minimum — the set operation the dose performs on
+/// volume, performed on the surface that positions it. Republished rather
+/// than patched: segments and represented area are derived from the vertices,
+/// and a surface whose contour disagreed with its own field would be read by
+/// redistancing, pressure geometry and the resolution plan alike.
+pub fn union_drop(
+    surface: &RdfSurface,
+    drop: crate::injection::LiquidDrop,
+    diagnostic_volume: f64,
+) -> Result<RdfSurface, ValidationError> {
+    let [centre_x, centre_y] = drop.centre_fine;
+    if !(centre_x.is_finite() && centre_y.is_finite() && drop.radius_fine.is_finite()) {
+        return Err(ValidationError("dropped ball is not addressable in the shared field".into()));
+    }
+    let [nx, ny] = surface.dimensions.map(|value| value as usize);
+    let stride = nx + 1;
+    let mut vertices = surface.vertex_phi_fine.clone();
+    if vertices.len() != stride.saturating_mul(ny + 1) {
+        return Err(ValidationError("direct level-set vertex count does not match dimensions".into()));
+    }
+    for y in 0..=ny {
+        for x in 0..=nx {
+            let ball = ((x as f64 - centre_x).hypot(y as f64 - centre_y) - drop.radius_fine) as f32;
+            let at = x + stride * y;
+            if ball < vertices[at] {
+                vertices[at] = ball;
+            }
+        }
+    }
+    publish(surface.dimensions, vertices, diagnostic_volume)
 }
 
 pub fn refresh(surface: &RdfSurface, diagnostic_volume: f64) -> Result<RdfSurface, ValidationError> {
@@ -153,6 +244,17 @@ mod tests {
         assert_eq!(a.receipt.represented_area_fine, b.receipt.represented_area_fine);
         assert_eq!(b.receipt.exact_area_fine, 99.0);
         assert_eq!(b.receipt.unresolved_fine_cells, 0);
+    }
+
+    #[test]
+    fn implied_fill_is_retained_per_fine_cell() {
+        let surface = publish([2, 1], vec![-0.5, -0.5, -0.5, 0.5, 0.5, 0.5], 1.0)
+            .unwrap();
+        let fill = implied_fill_fine_cells(&surface).unwrap();
+        assert_eq!(fill.len(), 2);
+        assert!(fill.iter().all(|value| (*value - 0.5).abs() < 1e-6));
+        assert!((fill.iter().map(|&value| value as f64).sum::<f64>()
+            - surface.receipt.represented_area_fine).abs() < 1e-6);
     }
 
     #[test]

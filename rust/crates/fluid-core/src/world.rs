@@ -3,6 +3,7 @@ use crate::embedding::PressureEmbedding;
 use crate::lifecycle::{prepare_candidate, LeafArena};
 use crate::numerics::{
     assemble_pressure_rhs, enforce_inflow_faces, prepare_pressure_topology,
+    prepare_pressure_topology_with_level_set,
     prepare_pressure_topology_with_swept_static_wall_support, project_pressure_velocity,
     solve_pressure,
 };
@@ -27,7 +28,8 @@ use crate::sources::SourceLedger;
 use crate::topology::BrickSeed;
 use crate::tracers::{TracerReceipt, Tracers, TRACER_BUDGET};
 use crate::{
-    collocate_velocity, extend_velocity, force_faces, prepare_faces,
+    collocate_velocity, extend_velocity, extend_velocity_with_level_set, force_faces, prepare_faces,
+    prepare_faces_for_level_set_volume,
     prepare_faces_for_cellwise_remap, publish_transport_characteristic_clearance,
     reconstruct_interfaces, reconstruct_interfaces_for_cellwise_remap,
     transport_volume_with_commit, Fields, PressureReceipt, ValidationError,
@@ -492,7 +494,19 @@ impl World {
             .map_err(|e| ValidationError(e.to_string()))?;
         let scene_document =
             serde_json::to_value(&bundle.document).map_err(|e| ValidationError(e.to_string()))?;
-        let mut world = Self::from_state(bundle.state, options)?;
+        let initial_surface = if options.transport_experiment.is_levelset_volume() {
+            let volume = bundle.state.topology.graph.cells.iter()
+                .map(|cell| {
+                    bundle.state.fields.density[cell.id as usize] as f64 * cell.measure as f64
+                })
+                .sum();
+            Some(crate::levelset_surface::initialize_from_document(
+                &bundle.document, volume,
+            )?)
+        } else {
+            None
+        };
+        let mut world = Self::from_state_with_surface(bundle.state, options, initial_surface)?;
         world.material_id = bundle.material_id;
         world.material_values = world.material_id.iter().map(|&v| v as f32).collect();
         world.scene_document = Some(scene_document);
@@ -526,8 +540,15 @@ impl World {
         Self::from_state(state, options)
     }
     pub fn from_state(
+        state: SceneState<2>,
+        options: WorldOptions,
+    ) -> Result<Self, ValidationError> {
+        Self::from_state_with_surface(state, options, None)
+    }
+    fn from_state_with_surface(
         mut state: SceneState<2>,
         options: WorldOptions,
+        initial_surface: Option<RdfSurface>,
     ) -> Result<Self, ValidationError> {
         if options.run_epoch == 0 {
             return Err(ValidationError("runEpoch must be positive".into()));
@@ -570,10 +591,13 @@ impl World {
         let rdf_topology = RdfTopology::compile(&state.topology.graph)?;
         let rdf_support = Self::support_for(&state);
         let surface = if options.transport_experiment.is_levelset_volume() {
-            crate::levelset_surface::initialize_from_volume(
-                &state.topology.graph,
-                &state.fields,
-            )?
+            match initial_surface {
+                Some(surface) => surface,
+                None => crate::levelset_surface::initialize_from_volume(
+                    &state.topology.graph,
+                    &state.fields,
+                )?,
+            }
         } else {
             reconstruct_shared_rdf(
                 &state.topology.graph,
@@ -693,7 +717,11 @@ impl World {
             cellwise_remap: self.cellwise_remap_receipt.as_ref(),
             level_set_volume: self.level_set_volume_receipt.as_ref(),
             interface_seams: if self.options.transport_experiment.is_levelset_volume() {
-                crate::levelset_volume::InterfaceSeamReceipt::default()
+                crate::levelset_volume::interface_seam_receipt_from_phi(
+                    &self.state.topology.graph,
+                    &self.state.fields,
+                    &self.level_set_phi,
+                )
             } else {
                 crate::levelset_volume::interface_seam_receipt(
                     &self.state.topology.graph,
@@ -842,9 +870,15 @@ impl World {
             let graph = &mut self.state.topology.graph;
             let fields = &mut self.state.fields;
             observe("dynamic-geometry", graph, fields);
-            extend_velocity(graph, fields, 8)?;
+            if level_set_volume {
+                extend_velocity_with_level_set(graph, fields, &self.level_set_phi, 8)?;
+            } else {
+                extend_velocity(graph, fields, 8)?;
+            }
             observe("transport-velocity-extension", graph, fields);
-            if cellwise_remap {
+            if level_set_volume {
+                prepare_faces_for_level_set_volume(graph, fields, dt)?;
+            } else if cellwise_remap {
                 prepare_faces_for_cellwise_remap(graph, fields, dt)?;
             } else {
                 prepare_faces(graph, fields, dt)?;
@@ -875,7 +909,11 @@ impl World {
             let primary_pressure_clock = NativeStageClock::start();
             with_level_set_volume_pressure_source(graph, fields, dt, level_set_volume, |fields| {
                 if let Some(embedding) = &mut self.embedding {
-                    let prepared = embedding.prepare(graph, fields);
+                    let prepared = if level_set_volume {
+                        embedding.prepare_with_level_set(graph, fields, &self.level_set_phi)?
+                    } else {
+                        embedding.prepare(graph, fields)
+                    };
                     fields.pressure_diagonal.clone_from(&prepared.diagonal);
                     fields.pressure_rhs.clone_from(&prepared.rhs);
                     observe("pressure-rhs", graph, fields);
@@ -899,7 +937,11 @@ impl World {
                     // solve.  Restore the physical membership before support
                     // planning so promoted dry cells cannot survive a topology
                     // transfer or apply the contact impulse a second time.
-                    let physical_rows = prepare_pressure_topology(graph, fields);
+                    let physical_rows = if level_set_volume {
+                        prepare_pressure_topology_with_level_set(graph, fields, &self.level_set_phi)?
+                    } else {
+                        prepare_pressure_topology(graph, fields)
+                    };
                     let physical_pressure_member = fields.pressure_member.clone();
                     let physical_pressure_row_member = fields.pressure_row_member.clone();
                     let physical_pressure_diagonal = fields.pressure_diagonal.clone();
@@ -989,7 +1031,16 @@ impl World {
         }
         if self.bricks_changed(&support.candidate_bricks) {
             self.transition(support.candidate_bricks, dt_s)?;
-            extend_velocity(&self.state.topology.graph, &mut self.state.fields, 8)?;
+            if level_set_volume {
+                extend_velocity_with_level_set(
+                    &self.state.topology.graph,
+                    &mut self.state.fields,
+                    &self.level_set_phi,
+                    8,
+                )?;
+            } else {
+                extend_velocity(&self.state.topology.graph, &mut self.state.fields, 8)?;
+            }
             if cellwise_remap {
                 reconstruct_interfaces_for_cellwise_remap(
                     &self.state.topology.graph,
@@ -1016,7 +1067,11 @@ impl World {
                 let fields = &mut self.state.fields;
                 with_level_set_volume_pressure_source(graph, fields, dt, level_set_volume, |fields| {
                     if let Some(embedding) = &mut self.embedding {
-                        let prepared = embedding.prepare(graph, fields);
+                        let prepared = if level_set_volume {
+                            embedding.prepare_with_level_set(graph, fields, &self.level_set_phi)?
+                        } else {
+                            embedding.prepare(graph, fields)
+                        };
                         fields.pressure_diagonal.clone_from(&prepared.diagonal);
                         fields.pressure_rhs.clone_from(&prepared.rhs);
                         let solved = embedding.solve(
@@ -1038,7 +1093,11 @@ impl World {
                         };
                         embedding.project(graph, fields, &solved.prepared);
                     } else {
-                        let rows = prepare_pressure_topology(graph, fields);
+                        let rows = if level_set_volume {
+                            prepare_pressure_topology_with_level_set(graph, fields, &self.level_set_phi)?
+                        } else {
+                            prepare_pressure_topology(graph, fields)
+                        };
                         self.pressure_authority.publish(
                             graph,
                             fields,
@@ -1074,7 +1133,12 @@ impl World {
             .saturating_sub(self.stage_timings.post_support_pressure);
         let transport_clock = NativeStageClock::start();
         if level_set_volume {
-            extend_velocity(&self.state.topology.graph, &mut self.state.fields, 8)?;
+            extend_velocity_with_level_set(
+                &self.state.topology.graph,
+                &mut self.state.fields,
+                &self.level_set_phi,
+                8,
+            )?;
             observe(
                 "level-set-volume-velocity-extension",
                 &self.state.topology.graph,
@@ -1099,13 +1163,14 @@ impl World {
             self.level_set_volume_receipt = None;
             let experiment = self.options.transport_experiment;
             if experiment.is_levelset_volume() {
-                let (surface, receipt) = crate::levelset_volume::advance(
+                let (surface, receipt) = crate::levelset_volume::advance_with_fine_capacity(
                     graph,
                     fields,
                     &self.surface,
                     &self.rdf_topology,
                     &self.rdf_support,
                     &mut self.level_set_phi,
+                    &self.capacity_fine,
                     dt,
                 )?;
                 self.surface = surface;
@@ -1295,14 +1360,10 @@ impl World {
         &mut self,
         drop: crate::injection::LiquidDrop,
     ) -> Result<(), ValidationError> {
-        if self.options.transport_experiment.is_levelset_volume() {
-            return Err(ValidationError(
-                "level-set-volume does not support liquid injection".into(),
-            ));
-        }
         use crate::injection::{
             addressable, apply_dose, demanded_bricks, requested_area, InjectionReceipt,
         };
+        let level_set_volume = self.options.transport_experiment.is_levelset_volume();
         let dimensions = [
             self.state.description.dimensions[0],
             self.state.description.dimensions[1],
@@ -1331,6 +1392,20 @@ impl World {
         }
         receipt.bricks_demanded = demand.len();
         receipt.area_requested_fine = requested_area(drop, dimensions);
+        // The level-set experiment positions its interface with a shared vertex
+        // scalar rather than with per-cell volume, so the ball belongs in that
+        // scalar before the plan measures which pages the new interface crosses.
+        // Published here and committed only once the transfer has been accepted:
+        // a refused drop must not leave behind an interface the volume never saw.
+        let injected_surface = if level_set_volume {
+            Some(crate::levelset_surface::union_drop(
+                &self.surface,
+                drop,
+                self.surface.receipt.exact_area_fine,
+            )?)
+        } else {
+            None
+        };
         let mut options = self.resolution_options.clone();
         options.injection_demanded_brick_keys = demand;
         options.maximum_leaves = Some(self.arena.maximum_slice_leaves);
@@ -1340,19 +1415,37 @@ impl World {
             .physical
             .as_ref()
             .is_some_and(|p| !p.scene.rigid_bodies.is_empty());
+        if level_set_volume {
+            // The page policy the level-set advance plans under, so the drop's
+            // generation is not one the next step immediately undoes.
+            options.translation_invariant_motion_sizing = true;
+            options.coarsen_inactive_pages = true;
+            options.coarsest_demanded_pages = true;
+        }
         // The intervention planner observes collocated motion; projected face
         // demand belongs to the advance's pre-transport transaction.
         let mut planning = self.state.fields.clone();
         planning.face_velocity.clear();
         planning.acceleration_fine = [0.0; 3];
-        let decision = plan_resolution(
-            &self.state.topology,
-            &planning,
-            &self.resolution_policy,
-            self.timestep_s,
-            self.cell_size(),
-            &options,
-        )
+        let decision = match injected_surface.as_ref() {
+            Some(surface) => plan_resolution_with_surface(
+                &self.state.topology,
+                &planning,
+                &self.resolution_policy,
+                self.timestep_s,
+                self.cell_size(),
+                &options,
+                surface,
+            ),
+            None => plan_resolution(
+                &self.state.topology,
+                &planning,
+                &self.resolution_policy,
+                self.timestep_s,
+                self.cell_size(),
+                &options,
+            ),
+        }
         .map_err(|e| ValidationError(format!("injection resolution: {e:?}")))?;
         receipt.bricks_activated = decision.receipt.activated_brick_count;
         receipt.bricks_promoted = decision.receipt.promoted_brick_count;
@@ -1373,7 +1466,24 @@ impl World {
             }
         }
         let dose = apply_dose(&self.state.topology.graph, &mut self.state.fields, drop)?;
-        reconstruct_interfaces(&self.state.topology.graph, &mut self.state.fields)?;
+        if let Some(surface) = injected_surface {
+            // Accepted, so the ball now stands in both authorities. The derived
+            // cell scalar and the pressure planes are rebuilt from the surface
+            // for the same reason the advance rebuilds them: nothing downstream
+            // may read a phi the published contour no longer agrees with.
+            self.surface = surface;
+            self.level_set_phi = crate::levelset_surface::cell_phi(
+                &self.state.topology.graph,
+                &self.surface,
+            )?;
+            crate::levelset_volume::publish_pressure_geometry_from_phi(
+                &self.state.topology.graph,
+                &mut self.state.fields,
+                &self.level_set_phi,
+            )?;
+        } else {
+            reconstruct_interfaces(&self.state.topology.graph, &mut self.state.fields)?;
+        }
         self.refresh_surface()?;
         self.seeded_volume += dose.area_admitted_fine;
         self.revision.injections += 1;
@@ -1788,13 +1898,25 @@ mod tests {
         );
     }
     #[test]
-    fn level_set_zero_motion_preserves_direct_surface_exactly() {
+    fn level_set_zero_motion_preserves_contour_and_reinitializes_narrow_band() {
         let mut world = level_set_world();
-        let vertices = world.surface.vertex_phi_fine.clone();
+        let zero_vertices: Vec<_> = world
+            .surface
+            .vertex_phi_fine
+            .iter()
+            .enumerate()
+            .filter_map(|(index, value)| (*value == 0.0).then_some(index))
+            .collect();
         let segments = world.surface.segments_fine.clone();
         world.advance(1, 1.0 / 60.0).unwrap();
-        assert_eq!(world.surface.vertex_phi_fine, vertices);
         assert_eq!(world.surface.segments_fine, segments);
+        for index in zero_vertices {
+            assert_eq!(world.surface.vertex_phi_fine[index], 0.0);
+            assert_eq!(world.surface.vertex_phi_fine[index - 1], -1.0);
+            assert_eq!(world.surface.vertex_phi_fine[index - 2], -2.0);
+            assert_eq!(world.surface.vertex_phi_fine[index + 1], 1.0);
+            assert_eq!(world.surface.vertex_phi_fine[index + 2], 2.0);
+        }
     }
     #[test]
     fn level_set_topology_transition_preserves_direct_surface_exactly() {
@@ -1881,6 +2003,84 @@ mod tests {
         assert!(!world.last_injection.as_ref().unwrap().accepted);
         assert_eq!(world.state.fields.density, accepted);
         assert_eq!(world.revision.injections, 1);
+    }
+    #[test]
+    fn level_set_drop_lands_in_both_the_volume_and_the_shared_surface() {
+        let mut world = level_set_world();
+        let drop = crate::injection::LiquidDrop {
+            centre_fine: [6.0, 4.0],
+            radius_fine: 1.5,
+        };
+        let inside = |world: &World| {
+            world
+                .state
+                .topology
+                .graph
+                .cells
+                .iter()
+                .position(|cell| {
+                    (cell.center[0] as f64 - drop.centre_fine[0]).hypot(
+                        cell.center[1] as f64 - drop.centre_fine[1],
+                    ) < 0.75
+                })
+                .unwrap()
+        };
+        // The ball is dropped into dry air the seeded column never reached, so
+        // both authorities have to change for it to exist at all.
+        let at = inside(&world);
+        assert_eq!(world.state.fields.density[at], 0.0);
+        assert!(world.level_set_phi[at] > 0.0);
+        let before = world.receipt().liquid_measure;
+        world
+            .apply_command(1, 1, Command::InjectLiquid { drop })
+            .unwrap();
+        let receipt = world.last_injection.as_ref().unwrap().clone();
+        assert!(receipt.accepted && receipt.fault.is_none());
+        assert!(receipt.area_admitted_fine > 0.0);
+        assert!(receipt.cells_wetted > 0);
+        assert_eq!(world.revision.injections, 1);
+        let at = inside(&world);
+        assert!(world.state.fields.density[at] > 0.0);
+        assert!(
+            world.level_set_phi[at] < 0.0,
+            "the shared level set still calls the ball's interior air: {}",
+            world.level_set_phi[at],
+        );
+        assert!(
+            (world.receipt().liquid_measure - before - receipt.area_admitted_fine).abs() < 1e-5
+        );
+        // Every cell carries a scalar the accepted contour agrees with, which
+        // is what the next advance's redistancing and pressure geometry read.
+        assert_eq!(
+            world.level_set_phi.len(),
+            world.state.topology.graph.cells.len()
+        );
+        assert!(world.level_set_phi.iter().all(|value| value.is_finite()));
+        world.advance(2, 1.0 / 60.0).unwrap();
+        assert!(world.state.fields.fault.is_none());
+        assert!(world.level_set_volume_receipt.is_some());
+    }
+    #[test]
+    fn level_set_drop_outside_the_lattice_is_refused_whole() {
+        let mut world = level_set_world();
+        let density = world.state.fields.density.clone();
+        let phi = world.level_set_phi.clone();
+        world
+            .apply_command(
+                1,
+                1,
+                Command::InjectLiquid {
+                    drop: crate::injection::LiquidDrop {
+                        centre_fine: [-8.0, -8.0],
+                        radius_fine: 1.0,
+                    },
+                },
+            )
+            .unwrap();
+        assert!(!world.last_injection.as_ref().unwrap().accepted);
+        assert_eq!(world.state.fields.density, density);
+        assert_eq!(world.level_set_phi, phi);
+        assert_eq!(world.revision.injections, 0);
     }
     #[test]
     fn production_transport_commits_without_copying_diagnostic_planes() {

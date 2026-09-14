@@ -153,3 +153,77 @@ The 30-frame SIMD capture retains total mass at 487.9999969, but its surface
 height spans errors of roughly 0.0884 to 2.5939 fine cells relative to the
 authored flat plane. This is late evidence of the same run, rather than the
 argument identifying the first cause.
+
+## Implemented correction and validation
+
+The three representation invariants above are now implemented together:
+
+- `levelset_surface::initialize_from_document` samples the authored initial
+  scene geometry on the fine vertex lattice. The initial zero set is therefore
+  y=15.25 for both the coarse adaptive atlas and a uniformly fine atlas.
+- `levelset_volume::advect_shared_phi` samples the same stored centre-fan scalar
+  for every departure, including exact zero motion. Exact contour distance is
+  still evaluated at accepted cell centres for derived pressure geometry; it
+  is no longer substituted selectively into moving vertex traces.
+- The direct and embedded pressure preparations use phi for pressure membership
+  and cut-boundary geometry at both projection sites. Conservative V remains
+  independent and continues to provide the excess expansion source. Internal
+  sparse boundaries require a phi-proven crossing. Physical open container
+  faces retain their authored pressure boundary and flux; a nearer phi zero
+  takes precedence. This distinction preserves uniform through-flow without
+  inventing a surface at missing interior support.
+
+The focused native integration file
+`rust/crates/fluid-core/tests/levelset_volume_hydrostatic.rs` covers the initial
+plane on coarse and fine atlases, independent phi pressure membership and V
+excess sourcing, and 30 frames with a forced asymmetric fine-resolution region.
+At the UI pressure settings (256 iterations and relative tolerance `1e-6`), all
+three tests pass. The forced mixed-rung run measured these maxima:
+
+| Quantity | Maximum over 30 frames |
+| --- | ---: |
+| Liquid-touching face speed | 0.000107288361 fine cells/s (5.3644e-6 m/s) |
+| Cell-centre-derived surface-height error | 0.000016212463 fine cells (8.1062e-7 m) |
+| Absolute conservative-volume drift | 0.000003903034 fine-area units |
+
+The speed excludes dry support faces, which can carry extension or gravity
+velocity without representing fluid motion. The regression selects rows that
+touch the phi-derived pressure phase, so it tests the hydrostatic liquid rather
+than the maximum over the entire support atlas.
+
+The unedited production scene also completed 30 native frames without a fault.
+Its maximum reported face speed was `3.815e-6` fine cells/s, conservative-volume
+drift and excess were zero, and no false curvature refinement occurred: the
+topology remained at 12 cells.
+
+The corresponding rebuilt SIMD Wasm regression passes with the same UI
+settings and asymmetric refinement, checking liquid-touching velocities,
+the published flat contour, and conservative volume.
+
+A separate 300-frame SIMD capture (10 seconds of simulated time) of the unedited
+scene preserves every stored phi value exactly. All contour endpoints stay at
+y=15.25, all segment slopes remain zero, and both volume drift and excess remain
+zero. Maximum published face speed is `4.768371582e-6` fine cells/s. The initial
+eight cells acquire four coarse support cells and remain at 12 cells.
+
+Evidence:
+- `artifacts/level-set-volume/hydrostatic-power-large-offset-lsv-surface-fixed-300.json`
+- `artifacts/level-set-volume/hydrostatic-power-large-offset-lsv-native-fixed-30.json`
+
+Native release and scalar/SIMD/threaded Wasm plus the site build completed.
+The served artifacts match source fingerprint
+`f8b98a69b53573dbc69fbc1dbe0944436b160346fbeee766d288bac78c938ecf`;
+the UI route and isolation headers passed the serving checks. Frozen native
+baseline regressions remain unchanged.
+
+The native integration gate passes 23 tests, and the level-set pressure/World
+unit gate passes 10. All five Wasm flow tests pass, including the Figure 7
+and pool-impact regressions. Figure 7 exercises 79 newly allocated empty
+support bricks over frames 8–30; each starts at accepted resolution 1, before
+applying geometric and 2:1 requirements. Its regression checks allocations
+throughout the run rather than requiring one at a particular frame.
+New receivers' own activity reasons start at zero and do not encode incoming
+donor constraints. For example, at frame 11 receivers 2288 and 2289 need rung 8
+because donors 2165 and 2170 carry thin liquid features, not because of speed.
+Unconstrained allocation coverage therefore uses requested resolution 1, with
+nonzero coverage, rather than interpreting zero local activity as no constraint.

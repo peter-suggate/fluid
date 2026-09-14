@@ -41,6 +41,17 @@ pub struct LevelSetVolumeReceipt {
     pub maximum_volume_over_capacity: f64,
     pub total_volume_over_capacity: f64,
     pub maximum_over_capacity_ratio: f64,
+    /// Area enclosed by phi after transport, weighted by accepted open capacity.
+    pub phi_implied_liquid_volume: f64,
+    /// Conservative V minus the capacity-weighted volume implied by phi.
+    pub signed_phi_volume_mismatch: f64,
+    pub absolute_phi_volume_mismatch: f64,
+    pub inside_band_absolute_phi_volume_mismatch: f64,
+    pub outside_band_absolute_phi_volume_mismatch: f64,
+    pub maximum_absolute_phi_volume_mismatch: f64,
+    /// Maximum |V - C H(phi)| / C over cells with positive integrated capacity.
+    pub maximum_normalized_phi_volume_mismatch: f64,
+    pub sharpening: crate::levelset_sharpening::SharpeningReceipt,
     pub maximum_normalized_row_residual: f64,
     pub maximum_donor_residual: f64,
     pub zero_weight_donors: usize,
@@ -68,6 +79,24 @@ pub struct InterfaceSeamReceipt {
     pub maximum_absolute_offset_difference: f64,
 }
 
+/// Per-cell S0 diagnostic for the disagreement between conservative volume and phi.
+///
+/// `phi_implied_fill` is the average linear-cut fill over the adaptive cell's
+/// finest children. `phi_implied_volume` follows the sharpening formulation's
+/// C H(phi) product; it is deliberately not an exact terrain/liquid intersection.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhiVolumeMismatchCell {
+    pub cell_id: u32,
+    pub phi_implied_fill: f64,
+    pub accepted_volume: f64,
+    pub integrated_open_capacity: f64,
+    pub phi_implied_volume: f64,
+    pub signed_volume_mismatch: f64,
+    pub normalized_volume_mismatch: f64,
+    pub inside_interface_band: bool,
+}
+
 /// Publish phi-only planes for pressure embedding. These planes never feed the
 /// direct level-set surface; density and volume do not position their zero set.
 pub fn publish_pressure_geometry_from_phi(
@@ -83,6 +112,7 @@ pub fn publish_pressure_geometry_from_phi(
     for i in 0..graph.cells.len() {
         let c = &graph.cells[i];
         let (mut mxx, mut mxy, mut myy, mut bx, mut by) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
+        let mut directional_fallback = ([0.0_f64; 2], 0.0_f64);
         for &row_id in &graph.incidences[i] {
             let row = &graph.rows[row_id as usize];
             let Some(own) = row.terms.iter().find(|term| term.cell_id as usize == i) else { continue };
@@ -98,20 +128,28 @@ pub fn publish_pressure_geometry_from_phi(
                 let delta = (phi[j] - phi[i]) as f64;
                 mxx += weight * dx * dx; mxy += weight * dx * dy; myy += weight * dy * dy;
                 bx += weight * dx * delta; by += weight * dy * delta;
+                let support = weight * (dx * dx + dy * dy);
+                if support > directional_fallback.1 {
+                    let inverse_length_squared = 1.0 / (dx * dx + dy * dy).max(1e-20);
+                    directional_fallback = ([
+                        delta * dx * inverse_length_squared,
+                        delta * dy * inverse_length_squared,
+                    ], support);
+                }
             }
         }
         let determinant = mxx * myy - mxy * mxy;
         let scale = mxx.max(myy);
         let mut gradient = if scale > 1e-20 && determinant.abs() > 1e-7 * scale * scale {
             [(myy * bx - mxy * by) / determinant, (-mxy * bx + mxx * by) / determinant]
-        } else { [0.0, 0.0] };
+        } else {
+            directional_fallback.0
+        };
         let length = gradient[0].hypot(gradient[1]);
         if !(length > 1e-20 && length.is_finite()) { continue; }
         gradient[0] /= length; gradient[1] /= length;
-        let extent = 0.5 * (gradient[0].abs() * c.widths[0] as f64
-            + gradient[1].abs() * c.widths[1] as f64);
         let offset = -(phi[i] as f64) / length;
-        if !offset.is_finite() || offset.abs() > extent { continue; }
+        if !offset.is_finite() { continue; }
         fields.interface_normal[2 * i] = gradient[0] as f32;
         fields.interface_normal[2 * i + 1] = gradient[1] as f32;
         fields.interface_offset[i] = offset as f32;
@@ -119,25 +157,46 @@ pub fn publish_pressure_geometry_from_phi(
     Ok(())
 }
 
-fn trace_rk2(graph: &Graph, fields: &Fields, dt: f32) -> (Vec<[f32; 2]>, f64, f64) {
-    let mut landings = Vec::with_capacity(graph.cells.len());
+fn trace_point(graph: &Graph, fields: &Fields, start: [f32; 2], span: f32, dt: f32) -> [f32; 2] {
+    let first = sample_support(graph, fields, start[0], start[1], span);
+    let midpoint = [
+        (start[0] - 0.5 * dt * first[0]).clamp(0.0, graph.dimensions[0]),
+        (start[1] - 0.5 * dt * first[1]).clamp(0.0, graph.dimensions[1]),
+    ];
+    let velocity = sample_support(graph, fields, midpoint[0], midpoint[1], span);
+    [
+        (start[0] - dt * velocity[0]).clamp(0.0, graph.dimensions[0]),
+        (start[1] - dt * velocity[1]).clamp(0.0, graph.dimensions[1]),
+    ]
+}
+
+fn trace_rk2(
+    graph: &Graph,
+    fields: &Fields,
+    dt: f32,
+) -> (Vec<[[f64; 2]; 5]>, f64, f64) {
+    let mut footprints = Vec::with_capacity(graph.cells.len());
     let (mut max_distance, mut max_courant) = (0.0_f64, 0.0_f64);
     for cell in &graph.cells {
         let start = [cell.center[0], cell.center[1]];
         let span = cell.widths[0].min(cell.widths[1]).max(1.0);
-        let first = sample_support(graph, fields, start[0], start[1], span);
-        let midpoint = [start[0] - 0.5 * dt * first[0], start[1] - 0.5 * dt * first[1]];
-        let velocity = sample_support(graph, fields, midpoint[0], midpoint[1], span);
-        let landing = [
-            (start[0] - dt * velocity[0]).clamp(0.5, graph.dimensions[0] - 0.5),
-            (start[1] - dt * velocity[1]).clamp(0.5, graph.dimensions[1] - 0.5),
+        let starts = [
+            [cell.minimum[0], cell.minimum[1]],
+            [cell.maximum[0], cell.minimum[1]],
+            [cell.maximum[0], cell.maximum[1]],
+            [cell.minimum[0], cell.maximum[1]],
+            start,
         ];
-        let distance = ((landing[0] - start[0]).powi(2) + (landing[1] - start[1]).powi(2)).sqrt() as f64;
-        max_distance = max_distance.max(distance);
-        max_courant = max_courant.max(distance / span as f64);
-        landings.push(landing);
+        let traced = starts.map(|point| trace_point(graph, fields, point, span, dt));
+        for (before, after) in starts.iter().zip(traced) {
+            let distance = ((after[0] - before[0]).powi(2)
+                + (after[1] - before[1]).powi(2)).sqrt() as f64;
+            max_distance = max_distance.max(distance);
+            max_courant = max_courant.max(distance / span as f64);
+        }
+        footprints.push(traced.map(|point| point.map(|value| value as f64)));
     }
-    (landings, max_distance, max_courant)
+    (footprints, max_distance, max_courant)
 }
 
 fn advect_shared_phi(
@@ -145,13 +204,12 @@ fn advect_shared_phi(
     fields: &Fields,
     previous: &RdfSurface,
     dt: f32,
-    receipt: &mut LevelSetVolumeReceipt,
+    _receipt: &mut LevelSetVolumeReceipt,
 ) -> Result<Vec<f32>, ValidationError> {
     let [nx, ny] = previous.dimensions.map(|value| value as usize);
     if previous.vertex_phi_fine.len() != (nx + 1) * (ny + 1) {
         return Err(ValidationError("direct level-set vertex count does not match dimensions".into()));
     }
-    let redistance = RedistanceField::new(previous)?;
     let mut result = Vec::with_capacity(previous.vertex_phi_fine.len());
     for y in 0..=ny {
         for x in 0..=nx {
@@ -173,26 +231,53 @@ fn advect_shared_phi(
                 (start[0] - dt * velocity[0]).clamp(0.0, graph.dimensions[0]),
                 (start[1] - dt * velocity[1]).clamp(0.0, graph.dimensions[1]),
             ];
+            result.push(sample_scalar(previous, departure)
+                .ok_or_else(|| ValidationError("direct level-set departure has no finite scalar".into()))?);
+        }
+    }
+    Ok(result)
+}
+
+fn redistance_vertices(
+    dimensions: [u32; 2],
+    vertices: Vec<f32>,
+    diagnostic_volume: f64,
+    receipt: &mut LevelSetVolumeReceipt,
+) -> Result<Vec<f32>, ValidationError> {
+    let raw = levelset_surface::publish(dimensions, vertices, diagnostic_volume)?;
+    if raw.segments_fine.is_empty() {
+        receipt.redistance_fallback_samples += raw.vertex_phi_fine.len();
+        return Ok(raw.vertex_phi_fine);
+    }
+    let distance = RedistanceField::new(&raw)?;
+    let [nx, ny] = dimensions.map(|value| value as usize);
+    let mut result = Vec::with_capacity(raw.vertex_phi_fine.len());
+    for y in 0..=ny {
+        for x in 0..=nx {
             let index = x + (nx + 1) * y;
-            if departure == start {
-                result.push(previous.vertex_phi_fine[index]);
-            } else if let Some(value) = redistance.sample(departure) {
-                receipt.redistanced_samples += 1;
-                result.push(value);
-            } else if let Some(value) = sample_scalar(previous, departure) {
-                receipt.redistance_fallback_samples += 1;
-                result.push(value);
+            if let Some(value) = distance.sample([x as f32, y as f32]) {
+                let prior = raw.vertex_phi_fine[index];
+                // Reinitialization is a narrow-band operation. Preserve the
+                // authored far field, and keep already-metric samples bitwise
+                // stable so a resting interface remains an exact fixed point.
+                if value.abs() <= 2.0 && (value - prior).abs() > 1.0e-6 {
+                    receipt.redistanced_samples += 1;
+                    result.push(value);
+                } else {
+                    result.push(prior);
+                }
             } else {
-                return Err(ValidationError("direct level-set departure has no finite scalar".into()));
+                receipt.redistance_fallback_samples += 1;
+                result.push(raw.vertex_phi_fine[index]);
             }
         }
     }
     Ok(result)
 }
 
-fn raw_weights(
+fn raw_weights_from_footprints(
     graph: &Graph,
-    landings: &[[f32; 2]],
+    footprints: &[[[f64; 2]; 5]],
     capacity: &[f64],
 ) -> (Vec<Vec<(usize, f64)>>, usize) {
     // A bin is at least as wide as the largest leaf, so each leaf occupies at
@@ -211,25 +296,18 @@ fn raw_weights(
             }
         }
     }
-    let mut rows = Vec::with_capacity(landings.len());
-    for (receiver, &landing) in landings.iter().enumerate() {
+    let mut rows = Vec::with_capacity(footprints.len());
+    for (receiver, footprint) in footprints.iter().enumerate() {
         let cell = &graph.cells[receiver];
         if capacity.get(receiver).copied().unwrap_or(0.0) <= 1e-30 {
             rows.push(Vec::new());
             continue;
         }
-        let displacement = [
-            landing[0] as f64 - cell.center[0] as f64,
-            landing[1] as f64 - cell.center[1] as f64,
-        ];
-        let minimum = [
-            (cell.minimum[0] as f64 + displacement[0]).max(0.0),
-            (cell.minimum[1] as f64 + displacement[1]).max(0.0),
-        ];
-        let maximum = [
-            (cell.maximum[0] as f64 + displacement[0]).min(graph.dimensions[0] as f64),
-            (cell.maximum[1] as f64 + displacement[1]).min(graph.dimensions[1] as f64),
-        ];
+        let triangles = footprint_triangles(*footprint, cell);
+        let minimum = [0, 1].map(|axis| triangles.iter().flatten()
+            .map(|point| point[axis]).fold(f64::INFINITY, f64::min));
+        let maximum = [0, 1].map(|axis| triangles.iter().flatten()
+            .map(|point| point[axis]).fold(f64::NEG_INFINITY, f64::max));
         let mut candidates = Vec::new();
         if maximum[0] > minimum[0] && maximum[1] > minimum[1] {
             for by in bin(minimum[1])..=bin(maximum[1]) {
@@ -243,11 +321,13 @@ fn raw_weights(
         let mut row = Vec::with_capacity(candidates.len());
         for donor in candidates {
             let source = &graph.cells[donor];
-            let width = maximum[0].min(source.maximum[0] as f64)
-                - minimum[0].max(source.minimum[0] as f64);
-            let height = maximum[1].min(source.maximum[1] as f64)
-                - minimum[1].max(source.minimum[1] as f64);
-            let overlap = width.max(0.0) * height.max(0.0);
+            let overlap: f64 = triangles.iter().map(|triangle| {
+                polygon_area(&clip_rectangle(
+                    triangle,
+                    [source.minimum[0] as f64, source.minimum[1] as f64],
+                    [source.maximum[0] as f64, source.maximum[1] as f64],
+                ))
+            }).sum();
             if overlap > 0.0 { row.push((donor, overlap)); }
         }
         if row.is_empty() && capacity.get(receiver).copied().unwrap_or(0.0) > 1e-30 {
@@ -268,6 +348,101 @@ fn raw_weights(
         }
     }
     (rows, missing)
+}
+
+#[cfg(test)]
+fn raw_weights(
+    graph: &Graph,
+    landings: &[[f32; 2]],
+    capacity: &[f64],
+) -> (Vec<Vec<(usize, f64)>>, usize) {
+    let footprints: Vec<_> = graph.cells.iter().zip(landings).map(|(cell, landing)| {
+        let displacement = [
+            landing[0] as f64 - cell.center[0] as f64,
+            landing[1] as f64 - cell.center[1] as f64,
+        ];
+        [
+            [cell.minimum[0] as f64 + displacement[0], cell.minimum[1] as f64 + displacement[1]],
+            [cell.maximum[0] as f64 + displacement[0], cell.minimum[1] as f64 + displacement[1]],
+            [cell.maximum[0] as f64 + displacement[0], cell.maximum[1] as f64 + displacement[1]],
+            [cell.minimum[0] as f64 + displacement[0], cell.maximum[1] as f64 + displacement[1]],
+            [landing[0] as f64, landing[1] as f64],
+        ]
+    }).collect();
+    raw_weights_from_footprints(graph, &footprints, capacity)
+}
+
+fn signed_polygon_area(polygon: &[[f64; 2]]) -> f64 {
+    if polygon.len() < 3 { return 0.0; }
+    0.5 * (0..polygon.len()).map(|i| {
+        let a = polygon[i];
+        let b = polygon[(i + 1) % polygon.len()];
+        a[0] * b[1] - b[0] * a[1]
+    }).sum::<f64>()
+}
+
+fn polygon_area(polygon: &[[f64; 2]]) -> f64 {
+    signed_polygon_area(polygon).abs()
+}
+
+fn clip_axis(
+    polygon: &[[f64; 2]],
+    axis: usize,
+    bound: f64,
+    keep_greater: bool,
+) -> Vec<[f64; 2]> {
+    let mut result = Vec::new();
+    if polygon.is_empty() { return result; }
+    let signed = |point: [f64; 2]| if keep_greater {
+        point[axis] - bound
+    } else {
+        bound - point[axis]
+    };
+    for i in 0..polygon.len() {
+        let a = polygon[i];
+        let b = polygon[(i + 1) % polygon.len()];
+        let da = signed(a);
+        let db = signed(b);
+        if da >= 0.0 { result.push(a); }
+        if (da >= 0.0) != (db >= 0.0) {
+            let t = da / (da - db);
+            result.push([a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])]);
+        }
+    }
+    result
+}
+
+fn clip_rectangle(
+    polygon: &[[f64; 2]],
+    minimum: [f64; 2],
+    maximum: [f64; 2],
+) -> Vec<[f64; 2]> {
+    let mut result = polygon.to_vec();
+    result = clip_axis(&result, 0, minimum[0], true);
+    result = clip_axis(&result, 0, maximum[0], false);
+    result = clip_axis(&result, 1, minimum[1], true);
+    clip_axis(&result, 1, maximum[1], false)
+}
+
+fn footprint_triangles(footprint: [[f64; 2]; 5], cell: &crate::Cell) -> [Vec<[f64; 2]>; 4] {
+    let triangles = std::array::from_fn::<_, 4, _>(|i| vec![
+        footprint[i], footprint[(i + 1) % 4], footprint[4],
+    ]);
+    let signs: Vec<_> = triangles.iter().map(|triangle| signed_polygon_area(triangle)).collect();
+    let valid = signs.iter().all(|area| area.is_finite() && area.abs() > 1e-12)
+        && signs.iter().all(|area| area.signum() == signs[0].signum());
+    if valid { return triangles; }
+    let displacement = [
+        footprint[4][0] - cell.center[0] as f64,
+        footprint[4][1] - cell.center[1] as f64,
+    ];
+    let corners = [
+        [cell.minimum[0] as f64 + displacement[0], cell.minimum[1] as f64 + displacement[1]],
+        [cell.maximum[0] as f64 + displacement[0], cell.minimum[1] as f64 + displacement[1]],
+        [cell.maximum[0] as f64 + displacement[0], cell.maximum[1] as f64 + displacement[1]],
+        [cell.minimum[0] as f64 + displacement[0], cell.maximum[1] as f64 + displacement[1]],
+    ];
+    std::array::from_fn(|i| vec![corners[i], corners[(i + 1) % 4], footprint[4]])
 }
 
 fn balance_capacity_marginals(
@@ -303,6 +478,39 @@ fn balance_capacity_marginals(
         if *q > EPS { ((sum - q) / q).abs() } else { sum.abs() }
     }).fold(0.0_f64, f64::max);
     (max_row, max_column, zero_weight_donors)
+}
+
+fn maximum_excess_ratio(density: f32, capacity: f32) -> Option<f64> {
+    (capacity > 0.0).then(|| density as f64 / capacity as f64 - 1.0)
+}
+
+fn commit_volume_amounts(graph: &Graph, fields: &mut Fields, amounts: &[f64]) -> f64 {
+    let target: f64 = amounts.iter().sum();
+    let mut cast_error_bound = 0.0;
+    for (i, cell) in graph.cells.iter().enumerate() {
+        fields.density[i] = (amounts[i] / cell.measure as f64) as f32;
+        cast_error_bound +=
+            (amounts[i] - fields.density[i] as f64 * cell.measure as f64).abs();
+    }
+    for _ in 0..4 {
+        let committed: f64 = graph.cells.iter().enumerate()
+            .map(|(i, cell)| fields.density[i] as f64 * cell.measure as f64).sum();
+        let residual = target - committed;
+        if residual.abs() > cast_error_bound + f64::EPSILON * target.abs().max(1.0) { break; }
+        let best = graph.cells.iter().enumerate()
+            .filter(|(i, _)| fields.capacity[*i] > 0.0 && fields.density[*i] > 0.0)
+            .filter_map(|(id, cell)| {
+                let previous = fields.density[id];
+                let candidate = (previous as f64 + residual / cell.measure as f64).max(0.0) as f32;
+                let changed = (candidate as f64 - previous as f64) * cell.measure as f64;
+                let remaining = (residual - changed).abs();
+                (changed != 0.0 && remaining < residual.abs()).then_some((remaining, id, candidate))
+            }).min_by(|a, b| a.0.total_cmp(&b.0));
+        let Some((_, id, candidate)) = best else { break };
+        fields.density[id] = candidate;
+    }
+    graph.cells.iter().enumerate()
+        .map(|(i, cell)| fields.density[i] as f64 * cell.measure as f64).sum()
 }
 
 pub fn interface_seam_receipt(graph: &Graph, fields: &Fields) -> InterfaceSeamReceipt {
@@ -345,13 +553,172 @@ pub fn interface_seam_receipt(graph: &Graph, fields: &Fields) -> InterfaceSeamRe
     result
 }
 
+/// Compare the signed-distance reconstruction seen from both sides of every
+/// mixed-resolution seam. Unlike the legacy PLIC metric, eligibility follows
+/// phi and its fitted gradient rather than conservative volume fraction.
+pub fn interface_seam_receipt_from_phi(
+    graph: &Graph,
+    fields: &Fields,
+    phi: &[f32],
+) -> InterfaceSeamReceipt {
+    let mut result = InterfaceSeamReceipt::default();
+    if phi.len() != graph.cells.len() || fields.interface_normal.len() != 2 * graph.cells.len() {
+        return result;
+    }
+    let mut sum = 0.0;
+    let mut sum_squares = 0.0;
+    for subface in &graph.subfaces {
+        if subface.negative_cell < 0 || subface.positive_cell < 0 { continue; }
+        let a = subface.negative_cell as usize;
+        let b = subface.positive_cell as usize;
+        if graph.cells[a].widths[..2] == graph.cells[b].widths[..2] { continue; }
+        let touches_interface = |i: usize| {
+            let cell = &graph.cells[i];
+            let nx = fields.interface_normal[2 * i].abs();
+            let ny = fields.interface_normal[2 * i + 1].abs();
+            let half_span = 0.5 * (nx * cell.widths[0] + ny * cell.widths[1]);
+            phi[i].abs() <= half_span
+        };
+        let valid = |i: usize| {
+            let nx = fields.interface_normal[2 * i];
+            let ny = fields.interface_normal[2 * i + 1];
+            let length = nx.hypot(ny);
+            phi[i].is_finite() && length.is_finite() && (length - 1.0).abs() < 1e-3
+        };
+        if !valid(a) || !valid(b) {
+            result.skipped_invalid_plane_count += 1;
+            continue;
+        }
+        if !touches_interface(a) && !touches_interface(b) { continue; }
+        let evaluation = |i: usize| {
+            let cell = &graph.cells[i];
+            phi[i] as f64
+                + fields.interface_normal[2 * i] as f64
+                    * (subface.center[0] - cell.center[0]) as f64
+                + fields.interface_normal[2 * i + 1] as f64
+                    * (subface.center[1] - cell.center[1]) as f64
+        };
+        let difference = (evaluation(a) - evaluation(b)).abs();
+        sum += difference;
+        sum_squares += difference * difference;
+        result.maximum_absolute_offset_difference =
+            result.maximum_absolute_offset_difference.max(difference);
+        result.comparison_count += 1;
+    }
+    if result.comparison_count > 0 {
+        result.mean_absolute_offset_difference = sum / result.comparison_count as f64;
+        result.rms_offset_difference = (sum_squares / result.comparison_count as f64).sqrt();
+    }
+    result
+}
+
+pub fn phi_volume_mismatch_cells(
+    graph: &Graph,
+    fields: &Fields,
+    phi: &[f32],
+    surface: &RdfSurface,
+) -> Result<Vec<PhiVolumeMismatchCell>, ValidationError> {
+    if graph.dimension != 2
+        || phi.len() != graph.cells.len()
+        || fields.capacity.len() != graph.cells.len()
+        || fields.density.len() != graph.cells.len()
+    {
+        return Err(ValidationError(
+            "phi volume mismatch requires one scalar per 2-D cell".into(),
+        ));
+    }
+    let fill = levelset_surface::implied_fill_fine_cells(surface)?;
+    let nx = surface.dimensions[0] as usize;
+    let mut cells = Vec::with_capacity(graph.cells.len());
+    for cell in &graph.cells {
+        let id = cell.id as usize;
+        let mut implied_area = 0.0_f64;
+        for y in cell.minimum[1] as usize..cell.maximum[1] as usize {
+            for x in cell.minimum[0] as usize..cell.maximum[0] as usize {
+                implied_area += fill[x + nx * y] as f64;
+            }
+        }
+        let average_fill = implied_area / cell.measure as f64;
+        let integrated_capacity = fields.capacity[id] as f64 * cell.measure as f64;
+        let implied = integrated_capacity * average_fill;
+        let volume = fields.density[id] as f64 * cell.measure as f64;
+        let mismatch = volume - implied;
+        cells.push(PhiVolumeMismatchCell {
+            cell_id: cell.id,
+            phi_implied_fill: average_fill,
+            accepted_volume: volume,
+            integrated_open_capacity: integrated_capacity,
+            phi_implied_volume: implied,
+            signed_volume_mismatch: mismatch,
+            normalized_volume_mismatch: if integrated_capacity > 0.0 {
+                mismatch.abs() / integrated_capacity
+            } else {
+                0.0
+            },
+            inside_interface_band: phi[id].abs()
+                <= 2.0 * cell.widths[0].max(cell.widths[1]),
+        });
+    }
+    Ok(cells)
+}
+
+fn publish_phi_volume_mismatch(
+    graph: &Graph,
+    fields: &Fields,
+    phi: &[f32],
+    surface: &RdfSurface,
+    receipt: &mut LevelSetVolumeReceipt,
+) -> Result<(), ValidationError> {
+    for cell in phi_volume_mismatch_cells(graph, fields, phi, surface)? {
+        let implied = cell.phi_implied_volume;
+        let mismatch = cell.signed_volume_mismatch;
+        let absolute = mismatch.abs();
+        receipt.phi_implied_liquid_volume += implied;
+        receipt.signed_phi_volume_mismatch += mismatch;
+        receipt.absolute_phi_volume_mismatch += absolute;
+        receipt.maximum_absolute_phi_volume_mismatch =
+            receipt.maximum_absolute_phi_volume_mismatch.max(absolute);
+        receipt.maximum_normalized_phi_volume_mismatch = receipt
+            .maximum_normalized_phi_volume_mismatch
+            .max(cell.normalized_volume_mismatch);
+        if cell.inside_interface_band {
+            receipt.inside_band_absolute_phi_volume_mismatch += absolute;
+        } else {
+            receipt.outside_band_absolute_phi_volume_mismatch += absolute;
+        }
+    }
+    Ok(())
+}
+
 pub fn advance(
+    graph: &Graph,
+    fields: &mut Fields,
+    previous_surface: &RdfSurface,
+    rdf_topology: &RdfTopology,
+    rdf_support: &RdfSupport,
+    phi: &mut Vec<f32>,
+    dt: f32,
+) -> Result<(RdfSurface, LevelSetVolumeReceipt), ValidationError> {
+    let [nx, ny] = previous_surface.dimensions.map(|v| v as usize);
+    let mut fine_capacity = vec![0.0; nx * ny];
+    for y in 0..ny { for x in 0..nx {
+        fine_capacity[x + nx * y] = crate::numerics::owner_at(
+            graph, [x as f32 + 0.5, y as f32 + 0.5, 0.0],
+        ).map_or(0.0, |i| fields.capacity[i]);
+    }}
+    advance_with_fine_capacity(
+        graph, fields, previous_surface, rdf_topology, rdf_support, phi, &fine_capacity, dt,
+    )
+}
+
+pub fn advance_with_fine_capacity(
     graph: &Graph,
     fields: &mut Fields,
     previous_surface: &RdfSurface,
     _rdf_topology: &RdfTopology,
     _rdf_support: &RdfSupport,
     phi: &mut Vec<f32>,
+    fine_capacity: &[f32],
     dt: f32,
 ) -> Result<(RdfSurface, LevelSetVolumeReceipt), ValidationError> {
     let expected_dimensions = [graph.dimensions[0] as u32, graph.dimensions[1] as u32];
@@ -364,7 +731,7 @@ pub fn advance(
     let _ = RedistanceField::new(previous_surface)?;
     let mut receipt = LevelSetVolumeReceipt::default();
     let clock = StageClock::start();
-    let (landings, distance, courant) = trace_rk2(graph, fields, dt);
+    let (footprints, distance, courant) = trace_rk2(graph, fields, dt);
     receipt.trace_nanoseconds = clock.elapsed();
     receipt.maximum_trace_distance = distance;
     receipt.maximum_trace_courant = courant;
@@ -383,7 +750,8 @@ pub fn advance(
         }
     }
     receipt.initial_liquid_volume = volume.iter().sum();
-    let (mut weights, zero_support_donors) = raw_weights(graph, &landings, &capacity);
+    let (mut weights, zero_support_donors) =
+        raw_weights_from_footprints(graph, &footprints, &capacity);
     let (row_residual, donor_residual, zero_weight) = balance_capacity_marginals(&mut weights, &capacity);
     receipt.maximum_normalized_row_residual = row_residual;
     receipt.maximum_donor_residual = donor_residual;
@@ -396,8 +764,38 @@ pub fn advance(
             }
         }
     }
+    let conservative_target: f64 = next_volume.iter().sum();
+    let mut cast_error_bound = 0.0;
     for (i, cell) in graph.cells.iter().enumerate() {
         fields.density[i] = (next_volume[i] / cell.measure as f64) as f32;
+        cast_error_bound +=
+            (next_volume[i] - fields.density[i] as f64 * cell.measure as f64).abs();
+    }
+    // Project the f64 conservative target onto the nearest reachable f32 mass.
+    // Only pre-existing liquid in positive-capacity cells may carry a change,
+    // and the total correction cannot exceed the measured error introduced by
+    // the casts above. A transport residual therefore cannot be hidden here.
+    for _ in 0..4 {
+        let committed: f64 = graph.cells.iter().enumerate()
+            .map(|(i, cell)| fields.density[i] as f64 * cell.measure as f64)
+            .sum();
+        let residual = conservative_target - committed;
+        if residual.abs() > cast_error_bound + f64::EPSILON * conservative_target.abs().max(1.0) {
+            break;
+        }
+        let best = graph.cells.iter().enumerate()
+            .filter(|(i, _)| fields.capacity[*i] > 0.0 && fields.density[*i] > 0.0)
+            .filter_map(|(id, cell)| {
+                let previous = fields.density[id];
+                let candidate = (previous as f64 + residual / cell.measure as f64).max(0.0) as f32;
+                let changed = (candidate as f64 - previous as f64) * cell.measure as f64;
+                let remaining = (residual - changed).abs();
+                (changed != 0.0 && remaining < residual.abs())
+                    .then_some((remaining, id, candidate))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        let Some((_, id, candidate)) = best else { break };
+        fields.density[id] = candidate;
     }
     receipt.final_liquid_volume = graph.cells.iter().enumerate()
         .map(|(i, c)| fields.density[i] as f64 * c.measure as f64).sum();
@@ -411,9 +809,8 @@ pub fn advance(
             receipt.over_capacity_cell_count += 1;
             receipt.maximum_volume_over_capacity = receipt.maximum_volume_over_capacity.max(excess);
             receipt.total_volume_over_capacity += excess;
-            if fields.capacity[i] > 1e-8 {
-                receipt.maximum_over_capacity_ratio = receipt.maximum_over_capacity_ratio
-                    .max(fields.density[i] as f64 / fields.capacity[i] as f64 - 1.0);
+            if let Some(ratio) = maximum_excess_ratio(fields.density[i], fields.capacity[i]) {
+                receipt.maximum_over_capacity_ratio = receipt.maximum_over_capacity_ratio.max(ratio);
             }
         }
     }
@@ -424,6 +821,12 @@ pub fn advance(
     receipt.phi_gather_nanoseconds = clock.elapsed();
 
     let clock = StageClock::start();
+    let vertices = redistance_vertices(
+        previous_surface.dimensions,
+        vertices,
+        receipt.final_liquid_volume,
+        &mut receipt,
+    )?;
     let surface = levelset_surface::publish(
         previous_surface.dimensions,
         vertices,
@@ -446,6 +849,31 @@ pub fn advance(
     if phi.iter().any(|value| !value.is_finite()) {
         return Err(ValidationError("direct level-set has no finite cell-centre scalar".into()));
     }
+    let mut sharpened_volume: Vec<f64> = graph.cells.iter().enumerate()
+        .map(|(i, cell)| fields.density[i] as f64 * cell.measure as f64).collect();
+    receipt.sharpening = crate::levelset_sharpening::sharpen_volume(
+        graph, fields, fine_capacity, &surface, phi, &mut sharpened_volume,
+    )?;
+    receipt.final_liquid_volume = commit_volume_amounts(graph, fields, &sharpened_volume);
+    receipt.signed_volume_drift = receipt.final_liquid_volume - receipt.initial_liquid_volume;
+    receipt.absolute_volume_drift = receipt.signed_volume_drift.abs();
+    receipt.over_capacity_cell_count = 0;
+    receipt.maximum_volume_over_capacity = 0.0;
+    receipt.total_volume_over_capacity = 0.0;
+    receipt.maximum_over_capacity_ratio = 0.0;
+    for i in 0..graph.cells.len() {
+        let excess = (fields.density[i] as f64 - fields.capacity[i] as f64).max(0.0)
+            * graph.cells[i].measure as f64;
+        if excess > 0.0 {
+            receipt.over_capacity_cell_count += 1;
+            receipt.maximum_volume_over_capacity = receipt.maximum_volume_over_capacity.max(excess);
+            receipt.total_volume_over_capacity += excess;
+            if let Some(ratio) = maximum_excess_ratio(fields.density[i], fields.capacity[i]) {
+                receipt.maximum_over_capacity_ratio = receipt.maximum_over_capacity_ratio.max(ratio);
+            }
+        }
+    }
+    publish_phi_volume_mismatch(graph, fields, phi, &surface, &mut receipt)?;
     receipt.redistance_nanoseconds += clock.elapsed();
     Ok((surface, receipt))
 }
@@ -500,6 +928,51 @@ mod tests {
         levelset_surface::publish(dimensions, vertices, std::f64::consts::PI * (radius as f64).powi(2)).unwrap()
     }
 
+    fn flat_non_distance_surface(dimensions: [u32; 2]) -> RdfSurface {
+        let vertices = (0..=dimensions[1]).flat_map(|y| (0..=dimensions[0]).map(move |_| {
+            if y < 8 { -6.5 } else if y == 8 { -2.75 } else { 1.0 }
+        })).collect();
+        levelset_surface::publish(dimensions, vertices, 8.25 * dimensions[0] as f64).unwrap()
+    }
+
+    #[test]
+    fn pressure_geometry_keeps_phi_gradient_when_zero_is_outside_cell() {
+        let graph = graph([8, 8, 1], vec![brick(0, [0, 0, 0], 8)]);
+        let phi: Vec<_> = graph.cells.iter().map(|cell| cell.center[1] - 20.0).collect();
+        let mut fields = Fields::default();
+        fields.interface_normal = vec![0.0; 2 * graph.cells.len()];
+        fields.interface_offset = vec![0.0; graph.cells.len()];
+        publish_pressure_geometry_from_phi(&graph, &mut fields, &phi).unwrap();
+        let interior = cell_at(&graph, [3.0, 3.0]);
+        assert!(fields.interface_normal[2 * interior].abs() < 1e-6);
+        assert!((fields.interface_normal[2 * interior + 1] - 1.0).abs() < 1e-6);
+        assert!(fields.interface_offset[interior] > graph.cells[interior].widths[1]);
+    }
+
+    #[test]
+    fn pressure_geometry_uses_directional_gradient_in_one_cell_high_support() {
+        let graph = graph([8, 1, 1], vec![brick(0, [0, 0, 0], 8)]);
+        let phi: Vec<_> = graph.cells.iter().map(|cell| cell.center[0] - 4.0).collect();
+        let mut fields = Fields::default();
+        fields.interface_normal = vec![0.0; 2 * graph.cells.len()];
+        fields.interface_offset = vec![0.0; graph.cells.len()];
+        publish_pressure_geometry_from_phi(&graph, &mut fields, &phi).unwrap();
+        assert!(graph.cells.iter().all(|cell| {
+            let id = cell.id as usize;
+            (fields.interface_normal[2 * id] - 1.0).abs() < 1e-6
+                && fields.interface_normal[2 * id + 1].abs() < 1e-6
+        }));
+    }
+
+    #[test]
+    fn excess_ratio_reports_positive_near_solid_capacity() {
+        let capacity = 1.0e-12;
+        let density = 7.0e-12;
+        let ratio = maximum_excess_ratio(density, capacity).unwrap();
+        assert!((ratio - 6.0).abs() < 1.0e-5, "{ratio}");
+        assert_eq!(maximum_excess_ratio(1.0, 0.0), None);
+    }
+
     #[test]
     fn capacity_balancing_ends_with_exact_donor_marginals() {
         let mut rows = vec![vec![(0, 0.8), (1, 0.2)], vec![(0, 0.1), (1, 0.9)]];
@@ -513,6 +986,64 @@ mod tests {
         ];
         assert!((columns[0] - capacity[0]).abs() < 1e-14);
         assert!((columns[1] - capacity[1]).abs() < 1e-14);
+    }
+
+    #[test]
+    fn phi_volume_mismatch_receipt_splits_interface_band_from_bulk() {
+        let graph = graph([8, 8, 1], vec![brick(0, [0, 0, 0], 8)]);
+        let surface = levelset_surface::publish(
+            [8, 8],
+            (0..=8).flat_map(|y| (0..=8).map(move |_| y as f32 - 4.0)).collect(),
+            32.0,
+        ).unwrap();
+        let phi = levelset_surface::cell_phi(&graph, &surface).unwrap();
+        let mut fields = Fields::default();
+        fields.capacity = vec![1.0; graph.cells.len()];
+        fields.density = graph.cells.iter()
+            .map(|cell| if cell.center[1] < 4.0 { 1.0 } else { 0.0 }).collect();
+        let mut receipt = LevelSetVolumeReceipt::default();
+        publish_phi_volume_mismatch(&graph, &fields, &phi, &surface, &mut receipt).unwrap();
+        assert!(receipt.absolute_phi_volume_mismatch < 1e-6);
+        assert!((receipt.phi_implied_liquid_volume - 32.0).abs() < 1e-6);
+
+        let deep = cell_at(&graph, [0.0, 0.0]);
+        fields.density[deep] += 0.25;
+        let cells = phi_volume_mismatch_cells(&graph, &fields, &phi, &surface).unwrap();
+        assert_eq!(cells.len(), graph.cells.len());
+        assert_eq!(cells[deep].cell_id as usize, deep);
+        assert!((cells[deep].phi_implied_fill - 1.0).abs() < 1e-6);
+        assert!((cells[deep].accepted_volume - 1.25).abs() < 1e-6);
+        assert!((cells[deep].normalized_volume_mismatch - 0.25).abs() < 1e-6);
+        let mut changed = LevelSetVolumeReceipt::default();
+        publish_phi_volume_mismatch(&graph, &fields, &phi, &surface, &mut changed).unwrap();
+        assert!((changed.signed_phi_volume_mismatch - 0.25).abs() < 1e-6);
+        assert!((changed.absolute_phi_volume_mismatch - 0.25).abs() < 1e-6);
+        assert!((changed.outside_band_absolute_phi_volume_mismatch - 0.25).abs() < 1e-6);
+        assert!((changed.maximum_normalized_phi_volume_mismatch - 0.25).abs() < 1e-6);
+        assert_eq!(changed.inside_band_absolute_phi_volume_mismatch, 0.0);
+
+        fields.capacity[deep] = 1.0e-12;
+        fields.density[deep] = 1.25e-12;
+        let near_solid = phi_volume_mismatch_cells(&graph, &fields, &phi, &surface).unwrap();
+        assert!((near_solid[deep].normalized_volume_mismatch - 0.25).abs() < 1e-5,
+            "{}", near_solid[deep].normalized_volume_mismatch);
+    }
+
+    #[test]
+    fn phi_seam_metric_compares_signed_distance_on_both_rungs() {
+        let graph = graph([16, 16, 1], vec![
+            brick(0, [0, 0, 0], 4), brick(1, [1, 0, 0], 8),
+            brick(2, [0, 1, 0], 4), brick(3, [1, 1, 0], 8),
+        ]);
+        let phi: Vec<_> = graph.cells.iter().map(|cell| cell.center[0] - 8.25).collect();
+        let mut fields = Fields::default();
+        fields.interface_normal = vec![0.0; 2 * graph.cells.len()];
+        fields.interface_offset = vec![0.0; graph.cells.len()];
+        publish_pressure_geometry_from_phi(&graph, &mut fields, &phi).unwrap();
+        let seam = interface_seam_receipt_from_phi(&graph, &fields, &phi);
+        assert!(seam.comparison_count > 0);
+        assert!(seam.maximum_absolute_offset_difference < 1e-5,
+            "{}", seam.maximum_absolute_offset_difference);
     }
 
     #[test]
@@ -657,6 +1188,50 @@ mod tests {
     }
 
     #[test]
+    fn zero_dt_with_nonzero_velocity_preserves_authoritative_scalar_exactly() {
+        let graph = graph([16, 16, 1], vec![
+            brick(0, [0, 0, 0], 8), brick(1, [1, 0, 0], 8),
+            brick(2, [0, 1, 0], 8), brick(3, [1, 1, 0], 8),
+        ]);
+        let fields = velocity_fields(&graph, [2.0, -3.0]);
+        let source = circle_surface([16, 16], [7.0, 8.0], 3.0);
+        let mut receipt = LevelSetVolumeReceipt::default();
+        let vertices = advect_shared_phi(&graph, &fields, &source, 0.0, &mut receipt).unwrap();
+        assert_eq!(vertices, source.vertex_phi_fine);
+    }
+
+    #[test]
+    fn microscopic_tangential_motion_does_not_mix_metrics_in_a_flat_field() {
+        let graph = graph([16, 16, 1], vec![
+            brick(0, [0, 0, 0], 8), brick(1, [1, 0, 0], 8),
+            brick(2, [0, 1, 0], 8), brick(3, [1, 1, 0], 8),
+        ]);
+        let fields = velocity_fields(&graph, [3.0e-6, 0.0]);
+        let source = flat_non_distance_surface([16, 16]);
+        let mut receipt = LevelSetVolumeReceipt::default();
+        let vertices = advect_shared_phi(&graph, &fields, &source, 1.0 / 30.0, &mut receipt).unwrap();
+        assert_eq!(vertices, source.vertex_phi_fine);
+        let accepted = levelset_surface::publish(source.dimensions, vertices,
+            source.receipt.exact_area_fine).unwrap();
+        assert_eq!(accepted.segments_fine, source.segments_fine);
+    }
+
+    #[test]
+    fn normal_motion_changes_the_stored_scalar_continuously_from_zero_dt() {
+        let graph = graph([16, 16, 1], vec![
+            brick(0, [0, 0, 0], 8), brick(1, [1, 0, 0], 8),
+            brick(2, [0, 1, 0], 8), brick(3, [1, 1, 0], 8),
+        ]);
+        let fields = velocity_fields(&graph, [0.0, 0.25]);
+        let source = flat_non_distance_surface([16, 16]);
+        let mut receipt = LevelSetVolumeReceipt::default();
+        let vertices = advect_shared_phi(&graph, &fields, &source, 1.0e-4, &mut receipt).unwrap();
+        let maximum = vertices.iter().zip(&source.vertex_phi_fine)
+            .map(|(next, prior)| (next - prior).abs()).fold(0.0_f32, f32::max);
+        assert!(maximum > 0.0 && maximum < 1.0e-3, "{maximum}");
+    }
+
+    #[test]
     fn uniformly_translated_circle_stays_single_signed_region() {
         let graph = graph([16, 16, 1], vec![
             brick(0, [0, 0, 0], 8), brick(1, [1, 0, 0], 8),
@@ -666,6 +1241,9 @@ mod tests {
         let source = circle_surface([16, 16], [7.0, 8.0], 3.0);
         let mut receipt = LevelSetVolumeReceipt::default();
         let vertices = advect_shared_phi(&graph, &fields, &source, 1.0, &mut receipt).unwrap();
+        let centre_index = 8 + 8 * 17;
+        let expected = sample_scalar(&source, [7.8, 8.0]).unwrap();
+        assert!((vertices[centre_index] - expected).abs() < 1e-6);
         let accepted = levelset_surface::publish(source.dimensions, vertices, source.receipt.exact_area_fine).unwrap();
         assert!(sample_scalar(&accepted, [7.2, 8.0]).unwrap() < 0.0);
         assert!(sample_scalar(&accepted, [7.2, 5.5]).unwrap() < 0.0);
@@ -675,7 +1253,7 @@ mod tests {
     }
 
     #[test]
-    fn contourless_phase_uses_only_finite_scalar_fallback_at_boundaries() {
+    fn contourless_phase_advects_its_finite_scalar_without_redistance() {
         let graph = graph([8, 8, 1], vec![brick(0, [0, 0, 0], 8)]);
         let fields = velocity_fields(&graph, [0.25, 0.0]);
         let source = levelset_surface::publish([8, 8], vec![-2.0; 81], 64.0).unwrap();
@@ -683,6 +1261,62 @@ mod tests {
         let vertices = advect_shared_phi(&graph, &fields, &source, 1.0, &mut receipt).unwrap();
         assert!(vertices.iter().all(|value| *value == -2.0));
         assert_eq!(receipt.redistanced_samples, 0);
-        assert!(receipt.redistance_fallback_samples > 0);
+        assert_eq!(receipt.redistance_fallback_samples, 0);
+    }
+
+    #[test]
+    fn corner_traces_measure_affine_expansion_instead_of_rigid_translation() {
+        let graph = graph([8, 8, 1], vec![brick(0, [0, 0, 0], 8)]);
+        let mut fields = velocity_fields(&graph, [0.0, 0.0]);
+        fields.cell_velocity = graph.cells.iter().flat_map(|cell| [
+            0.5 * (cell.center[0] - 4.0),
+            0.5 * (cell.center[1] - 4.0),
+        ]).collect();
+        fields.face_velocity = graph.rows.iter().map(|row| {
+            0.5 * (row.center[row.axis as usize] - 4.0)
+        }).collect();
+        let (footprints, _, _) = trace_rk2(&graph, &fields, 0.1);
+        let id = cell_at(&graph, [3.0, 3.0]);
+        let triangles = footprint_triangles(footprints[id], &graph.cells[id]);
+        let area: f64 = triangles.iter().map(|triangle| polygon_area(triangle)).sum();
+        assert!(area < graph.cells[id].measure as f64, "{area}");
+        assert!(area > 0.8 * graph.cells[id].measure as f64, "{area}");
+    }
+
+    #[test]
+    fn folded_corner_footprint_falls_back_to_finite_rigid_box() {
+        let graph = graph([8, 8, 1], vec![brick(0, [0, 0, 0], 8)]);
+        let id = cell_at(&graph, [3.0, 3.0]);
+        let folded = [
+            [3.0, 3.0], [4.0, 4.0], [4.0, 3.0], [3.0, 4.0], [3.5, 3.5],
+        ];
+        let triangles = footprint_triangles(folded, &graph.cells[id]);
+        let area: f64 = triangles.iter().map(|triangle| polygon_area(triangle)).sum();
+        assert!(area.is_finite());
+        assert!((area - graph.cells[id].measure as f64).abs() < 1e-12, "{area}");
+    }
+
+    #[test]
+    fn vertex_redistance_preserves_the_raw_zero_contour() {
+        let source = flat_non_distance_surface([16, 16]);
+        let mut receipt = LevelSetVolumeReceipt::default();
+        let vertices = redistance_vertices(
+            source.dimensions,
+            source.vertex_phi_fine.clone(),
+            source.receipt.exact_area_fine,
+            &mut receipt,
+        ).unwrap();
+        let accepted = levelset_surface::publish(
+            source.dimensions,
+            vertices,
+            source.receipt.exact_area_fine,
+        ).unwrap();
+        let source_y = source.segments_fine.chunks_exact(4)
+            .map(|segment| segment[1]).sum::<f32>() / (source.segments_fine.len() / 4) as f32;
+        assert!(accepted.segments_fine.chunks_exact(4).all(|segment| {
+            (segment[1] - source_y).abs() < 1.0e-5
+                && (segment[3] - source_y).abs() < 1.0e-5
+        }));
+        assert!(receipt.redistanced_samples > 0);
     }
 }

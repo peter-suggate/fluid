@@ -137,9 +137,10 @@ fn production_embedding_releases_excess_without_persisting_pressure_source() {
     for sequence in 2..=4 {
         world.advance(sequence, dt).unwrap();
         assert!(world.state.fields.source_rate.iter().all(|&rate| rate == 0.0));
+        let volume = physical_volume(&world);
         assert!(
-            (physical_volume(&world) - initial_volume).abs() <= 2.0e-5,
-            "frame {sequence} changed conservative volume"
+            (volume - initial_volume).abs() <= 2.0e-5,
+            "frame {sequence} changed conservative volume: {volume} vs {initial_volume}"
         );
     }
     let final_excess = total_excess(&world);

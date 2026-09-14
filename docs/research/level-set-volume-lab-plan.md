@@ -5,7 +5,16 @@ Date: 2026-09-14. Third transport option beside `Baseline` and `CellwiseRemap`; 
 The original surface proposal below was superseded by the
 [direct shared level-set surface](level-set-volume-direct-surface.md): PLIC no
 longer constructs the surface. Step 5 now records the implemented pressure
-release; direct phi/volume reconciliation remains deferred.
+release; direct phi/volume reconciliation remains deferred. The subsequent
+[hydrostatic correction](level-set-volume-hydrostatic-root-cause.md) seeds the
+shared vertex scalar from authored geometry, transports that same scalar
+continuously, and uses its derived distances as the sole pressure surface.
+The intention and steps 1--4 retain the original design record. The current
+frame seeds velocity and face preparation from phi, traces each receiver's four
+corners and centre for the conservative V gather, advects the shared vertex
+scalar directly, redistances its narrow band, and then resamples cell-centre phi.
+The [sharpening plan](level-set-volume-sharpening-plan.md) records these S0, S1,
+and S4 corrections and their measured status.
 
 ## Intention
 
@@ -31,7 +40,13 @@ Rust, in `fluid-core`, because the advance lab already runs the Rust world throu
 2. **V gather.** Build receiver-by-donor weights from the landing point (bilinear on the fine lattice mapped to owner cells), then three normalisation passes so rows and columns both sum correctly. Apply. Conservation to f32 roundoff is the first checkpoint: total V before and after must match. Report the count and maximum of V > C. About a day.
 3. **φ gather.** Sample the previous frame's RDF fine-vertex lattice at the landing point. Resample onto cell centres. Half a day.
 4. **Plane fit and RDF rebuild.** A variant of `reconstruct_interfaces` that takes the normal from ∇φ instead of from the density stencil, with the fraction from min(V, C)/C. Feed the planes to `reconstruct_shared_rdf`, then read φ back at cell centres. Rule for inconsistent cells: if V > 0 but φ places the cell more than half a width into air, the cell is sub-cell material, carried in V and not drawn. About a day.
-5. **Over-capacity drain.** Implemented on 2026-09-14 with the approved uncapped variant: add the integrated expansion target `q = 0.5 max(V − C, 0) / Δt` to the existing pressure RHS. Both primary and existing post-support projections enforce that target; the latter recomputes it on transferred V/C. This is a pressure constraint, not injected mass. See [allocation and pressure release findings](level-set-volume-allocation-pressure-release.md) for response measurements and remaining limitations.
+5. **Over-capacity drain.** Add the CM12-bounded integrated expansion target
+   `q = min(0.5 max(V − C, 0), C) / Δt` to the existing pressure RHS. Both
+   primary and existing post-support projections enforce that target; the
+   latter recomputes it on transferred V/C. This is a pressure constraint, not
+   injected mass. The initial uncapped experiment was superseded after the Tall
+   Cells terrain exposed its fast-liquid-at-solid instability. See
+   [allocation and pressure release findings](level-set-volume-allocation-pressure-release.md).
 
 ## Test
 
@@ -43,6 +58,22 @@ Same two lanes as the remap, same native harness, one arm each, dt = 1/30, zero 
 - Peter checks Figure 7's sheet and the half-pool surface in the advance-lab app himself. No browser gates.
 
 Go/no-go after 30 frames of Figure 7: drift at roundoff, over-capacity bounded and decaying, seam offsets below baseline, wall per frame under baseline's. If the sheet dies of semi-Lagrangian smoothing at Courant 10, the answer is a sharper φ sample (cubic) before anything else.
+
+## Reader interventions
+
+The lab's drop lands in this lane on the same gesture as the baseline's, and
+means the same thing: one topology generation whose activation demand is the
+ball, then the dose. The difference is that this method keeps its interface in
+the shared vertex scalar rather than in the volume fractions, so the ball has
+to enter both authorities in the same command — `levelset_surface::union_drop`
+takes the pointwise minimum of the field and the ball's own exact distance and
+republishes, and `injection::apply_dose` raises the conservative volume exactly
+as before. The union happens before the resolution plan, so the pages the new
+interface crosses are measured against the surface the drop is about to commit;
+the commit itself waits on the transfer, because a refused drop must not leave
+an interface the volume never saw. Measured over a dropped ball of radius 3
+finest cells: admitted volume 28.28 against a disk of 28.27, and 12 frames of
+fall cost 8.9e-6 finest-cells² of drift out of 516.
 
 ## Not in scope
 

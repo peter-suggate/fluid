@@ -47,7 +47,7 @@ ID sets. A focused regression exercises stack exhaustion in both planners.
 
 The volume gather conserves donor mass but can leave receivers over capacity.
 Previously the next projection requested zero divergence for that excess, so
-pressure had no expansion target. The new term is
+pressure had no expansion target. The initial experiment used
 
 ```
 q_i = 0.5 * max(V_i - C_i, 0) / dt
@@ -67,14 +67,36 @@ support changes topology, the existing second projection recomputes `q` from
 the transferred V/C. Enforcing zero divergence there would erase the first
 projection's expansion. Enforcing the same target does not double the impulse.
 
-There is no cap. Half of the current excess per frame corresponds to 87.5%
+The measurements below used no cap. Half of the current excess per frame corresponds to 87.5%
 release over three frames under an ideal realization of the requested flux.
 It is not a guarantee that the conservative gather removes exactly that amount:
 transport can create new excess, and the discrete transport field differs from
 the projected face flux. No additional projection, transport pass, volume clamp,
 redistribution, sharpening or direct phi/volume correction was added.
 
-## Native Figure 7 comparison
+### Tall Cells correction
+
+The Tall Cells hillside run subsequently demonstrated the instability CM12's
+published cap is meant to prevent. Its maximum excess ratio reached roughly
+`6.426` times open capacity; the uncapped formula therefore requested about
+3.213 local open-cell capacities of expansion in one 1/30 s frame. Topology
+changes that introduced terrain cut cells made their small open apertures
+realize that request as a sharp pressure impulse.
+
+The production target is now
+
+```
+q_i = min(0.5 * max(V_i - C_i, 0), C_i) / dt
+```
+
+Dividing by the integrated open capacity shows the resolution-independent
+bound directly: `q_i dt / C_i <= 1`. Thus a coarse cell and a terrain cut cell
+receive the same maximum normalized expansion, while the cut cell's absolute
+flux scales with the open volume it can represent. The cap changes only the
+temporary pressure constraint; conservative `V` is neither clamped nor
+deleted, and unreleased excess remains for later frames.
+
+## Native Figure 7 comparison (pre-cap evidence)
 
 Both runs below use the final allocation and direct-phi curvature fixes, the
 same scene, `dt = 1/30 s`, and 256 pressure iterations with relative tolerance
@@ -103,7 +125,7 @@ The first positive excess in these runs appears at frame 14 (`5.77e-5` fine-area
 units). The significant impact excess grows during frames 23–25. The release source
 acts on the following frame's pressure solve, using the accepted excess.
 
-Artifacts:
+These artifacts record the historical uncapped run:
 
 - `artifacts/level-set-volume/cm12-figure-7-geometry-bound-without-pressure-release-native.json`
 - `artifacts/level-set-volume/cm12-figure-7-geometry-bound-pressure-release-native.json`

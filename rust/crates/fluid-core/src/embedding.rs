@@ -6,7 +6,7 @@ use crate::kernels::{add, div, mul};
 use crate::numerics::{GHOST_FLUID_THETA_MIN, LIQUID_ISOVALUE};
 use crate::pressure::{solve_pressure_pcg, PressureError, PressurePcgReceipt};
 use crate::pressure_authority::PressureAuthority;
-use crate::types::{Fields, Graph, NumericalFault, Row, RowKind};
+use crate::types::{Fields, Graph, NumericalFault, Row, RowKind, ValidationError};
 
 const VIRTUAL_ROUNDOFF_RATIO: f32 = 9.536_743_164_062_5e-7;
 
@@ -501,6 +501,43 @@ impl PressureEmbedding {
     }
 
     pub fn prepare(&mut self, reduced: &Graph, fields: &mut Fields) -> PreparedEmbedding {
+        self.prepare_impl(reduced, fields, None)
+    }
+
+    /// Prepares the retained-3D pressure operator with phase and cut geometry
+    /// supplied exclusively by the accepted two-dimensional level set.
+    pub fn prepare_with_level_set(
+        &mut self,
+        reduced: &Graph,
+        fields: &mut Fields,
+        phi: &[f32],
+    ) -> Result<PreparedEmbedding, ValidationError> {
+        if phi.len() != reduced.cells.len() {
+            return Err(ValidationError(format!(
+                "embedded level-set pressure scalar length {} does not match reduced cell count {}",
+                phi.len(),
+                reduced.cells.len()
+            )));
+        }
+        if let Some((index, value)) = phi
+            .iter()
+            .copied()
+            .enumerate()
+            .find(|(_, value)| !value.is_finite())
+        {
+            return Err(ValidationError(format!(
+                "embedded level-set pressure scalar is not finite at cell {index}: {value}"
+            )));
+        }
+        Ok(self.prepare_impl(reduced, fields, Some(phi)))
+    }
+
+    fn prepare_impl(
+        &mut self,
+        reduced: &Graph,
+        fields: &mut Fields,
+        level_set_phi: Option<&[f32]>,
+    ) -> PreparedEmbedding {
         let nc = self.source.cells.len();
         let nr = self.source.rows.len();
         let mut result = PreparedEmbedding {
@@ -587,13 +624,17 @@ impl PressureEmbedding {
                 }
                 submerged &= neighbors > 0;
             }
-            result.virtual_member[s] = u8::from(
-                (self.pressure_density(reduced, fields, s) >= LIQUID_ISOVALUE
-                    || submerged
-                    || self.moving_predicted_fill(reduced, fields, s)
-                    || self.source_rate(reduced, fields, s) > 0.0)
-                    && self.capacity(fields, s, false) > 1e-8,
-            );
+            result.virtual_member[s] = if let Some(phi) = level_set_phi {
+                u8::from(self.capacity(fields, s, false) > 1e-8 && phi[r as usize] <= 0.0)
+            } else {
+                u8::from(
+                    (self.pressure_density(reduced, fields, s) >= LIQUID_ISOVALUE
+                        || submerged
+                        || self.moving_predicted_fill(reduced, fields, s)
+                        || self.source_rate(reduced, fields, s) > 0.0)
+                        && self.capacity(fields, s, false) > 1e-8,
+                )
+            };
             if result.virtual_member[s] != prior[s] {
                 direct_dirty[s] = 1
             }
@@ -627,8 +668,10 @@ impl PressureEmbedding {
                 }
             }
         }
-        let global =
-            !self.cache_initialized || self.options.solid_world || fields.solid_motion_active;
+        let global = !self.cache_initialized
+            || self.options.solid_world
+            || fields.solid_motion_active
+            || level_set_phi.is_some();
         let mut dirty_tiles = vec![0u8; nr.div_ceil(64)];
         if global {
             dirty_tiles.fill(1)
@@ -645,7 +688,8 @@ impl PressureEmbedding {
                 }
             }
         }
-        let partial = reduced
+        let partial = level_set_phi.is_none()
+            && reduced
             .cells
             .iter()
             .any(|c| c.refinement_region_scale.unwrap_or(1.0) > 1.0)
@@ -670,6 +714,12 @@ impl PressureEmbedding {
             let row2 = self.row2(reduced, row);
             let closed = row2.is_some_and(|r| r.kind == RowKind::ClosedWorld);
             let exterior = closed || row.kind == RowKind::SparseAir;
+            let physical_open_boundary = level_set_phi.is_some()
+                && !closed
+                && row.kind == RowKind::SparseAir
+                && (row.center[row.axis as usize] == 0.0
+                    || row.center[row.axis as usize]
+                        == self.source.dimensions[row.axis as usize]);
             let (mut gx, mut gy, mut go, mut gw) = (0.0, 0.0, 0.0, 0.0);
             if !closed {
                 for term in &row.terms {
@@ -705,7 +755,7 @@ impl PressureEmbedding {
             }
             let gl = add(mul(gx, gx), mul(gy, gy)).sqrt();
             let mut valid = gw > 1e-8 && gl > mul(1e-6, gw);
-            if valid {
+            if valid && level_set_phi.is_none() {
                 for term in &row.terms {
                     let r = self.reduced_cell[term.cell_id as usize];
                     if r < 0 {
@@ -738,24 +788,27 @@ impl PressureEmbedding {
                     continue;
                 }
                 let cell = &self.source.cells[s];
-                let old = mul(
-                    LIQUID_ISOVALUE - self.pressure_density(reduced, fields, s),
-                    if exterior {
-                        1.0
-                    } else {
-                        cell.widths[row.axis as usize]
-                    },
-                );
-                let phi = if valid {
-                    div(
-                        add(
-                            mul(gx, cell.center[0] - row.center[0]),
-                            mul(gy, cell.center[1] - row.center[1]),
-                        ) - go,
-                        gl,
-                    )
+                let phi = if let Some(level_set_phi) = level_set_phi {
+                    level_set_phi[r as usize]
                 } else {
-                    old
+                    if valid {
+                        div(
+                            add(
+                                mul(gx, cell.center[0] - row.center[0]),
+                                mul(gy, cell.center[1] - row.center[1]),
+                            ) - go,
+                            gl,
+                        )
+                    } else {
+                        mul(
+                            LIQUID_ISOVALUE - self.pressure_density(reduced, fields, s),
+                            if exterior {
+                                1.0
+                            } else {
+                                cell.widths[row.axis as usize]
+                            },
+                        )
+                    }
                 };
                 let w = term.coefficient.abs();
                 let signed = mul(term.coefficient, phi);
@@ -776,22 +829,86 @@ impl PressureEmbedding {
             if liquid == 0 {
                 continue;
             }
-            if exterior {
+            let mut sparse_crossing = false;
+            if exterior && level_set_phi.is_none() {
                 ap = add(ap, mul(lw, self.options.sparse_air_phi));
                 let ly = div(ly_sum, lw.max(1e-9));
                 let direction = if row.center[1] >= ly { 1.0 } else { -1.0 };
                 ay_sum = add(ay_sum, mul(lw, add(ly, mul(direction, row.distance))));
                 aw = add(aw, lw)
+            } else if !closed && row.kind == RowKind::SparseAir && !physical_open_boundary {
+                if row.axis >= 2 {
+                    continue;
+                }
+                let centre_phi = div(lp, lw.max(1e-9));
+                let atmospheric = (-centre_phi).max(mul(0.5, row.distance)).max(1e-6);
+                let exterior_phi = if valid {
+                    let lx = row
+                        .terms
+                        .iter()
+                        .filter(|term| result.virtual_member[term.cell_id as usize] != 0)
+                        .map(|term| {
+                            mul(
+                                term.coefficient.abs(),
+                                self.source.cells[term.cell_id as usize].center[0],
+                            )
+                        })
+                        .fold(0.0, add)
+                        / lw.max(1e-9);
+                    let ly = div(ly_sum, lw.max(1e-9));
+                    let mut ghost = [lx, ly];
+                    let axis = row.axis as usize;
+                    let direction = if row.center[axis] >= ghost[axis] {
+                        1.0
+                    } else {
+                        -1.0
+                    };
+                    ghost[axis] = add(ghost[axis], mul(direction, row.distance));
+                    let geometric = div(
+                        add(
+                            mul(gx, ghost[0] - row.center[0]),
+                            mul(gy, ghost[1] - row.center[1]),
+                        ) - go,
+                        gl,
+                    );
+                    if geometric.is_finite() && geometric > 0.0 {
+                        geometric
+                    } else {
+                        atmospheric
+                    }
+                } else {
+                    atmospheric
+                };
+                ap = add(ap, mul(lw, exterior_phi));
+                aw = add(aw, lw);
+                sparse_crossing = true;
             }
-            let cut = air > 0 || exterior;
+            let cut = air > 0
+                || if level_set_phi.is_some() {
+                    sparse_crossing || physical_open_boundary
+                } else {
+                    exterior
+                };
             let mut value = if cut {
                 ghost_theta(div(lp, lw.max(1e-9)), div(ap, aw.max(1e-9)))
             } else {
                 1.0
             };
+            if level_set_phi.is_some() && physical_open_boundary {
+                value = 0.5;
+                if valid {
+                    let boundary_phi = div(-go, gl);
+                    let centre_phi = div(lp, lw.max(1e-9));
+                    if boundary_phi.is_finite() && boundary_phi > 0.0 && centre_phi <= 0.0 {
+                        value = mul(0.5, ghost_theta(centre_phi, boundary_phi))
+                            .clamp(GHOST_FLUID_THETA_MIN, 0.5);
+                    }
+                }
+            }
             let acceleration = fields.acceleration_fine;
             let gravity = add(add_sq(acceleration[0]), add_sq(acceleration[1])).sqrt();
-            if cut
+            if level_set_phi.is_none()
+                && cut
                 && row.axis == 1
                 && gravity > 1e-6
                 && partial
@@ -1280,6 +1397,176 @@ mod tests {
         assert_eq!(p.diagonal[0].to_bits(), 2.0f32.to_bits());
         assert_eq!(e.pressure_authority.execution_order, vec![0, 1]);
     }
+
+    #[test]
+    fn embedded_level_set_pressure_uses_phi_across_mixed_widths() {
+        let cells2 = vec![
+            cell(0, 0, [0.0, 0.0, 0.0], [2.0, 1.0, 1.0]),
+            cell(1, 1, [2.0, 0.0, 0.0], [3.0, 1.0, 1.0]),
+        ];
+        let mut seam2 = row(
+            0,
+            0,
+            [2.0, 0.5, 0.0],
+            vec![
+                RowTerm {
+                    cell_id: 0,
+                    coefficient: 1.0,
+                },
+                RowTerm {
+                    cell_id: 1,
+                    coefficient: -1.0,
+                },
+            ],
+        );
+        seam2.kind = RowKind::MixedSeam;
+        seam2.distance = 1.5;
+        let reduced = Graph {
+            dimension: 2,
+            dimensions: [3.0, 1.0, 1.0],
+            cells: cells2.clone(),
+            rows: vec![seam2.clone()],
+            incidences: vec![vec![0], vec![0]],
+            ..Default::default()
+        };
+        let cells3 = vec![
+            cell(0, 10, [0.0, 0.0, 0.0], [2.0, 1.0, 1.0]),
+            cell(1, 11, [2.0, 0.0, 0.0], [3.0, 1.0, 1.0]),
+        ];
+        let mut seam3 = seam2;
+        seam3.center[2] = 0.5;
+        let source = Graph {
+            dimension: 3,
+            dimensions: [3.0, 1.0, 1.0],
+            cells: cells3,
+            rows: vec![seam3],
+            incidences: vec![vec![0], vec![0]],
+            ..Default::default()
+        };
+        let mut fields = Fields {
+            density: vec![0.0, 20.0],
+            capacity: vec![1.0; 2],
+            pressure: vec![0.0; 2],
+            pressure_rhs: vec![0.0; 2],
+            pressure_diagonal: vec![0.0; 2],
+            pressure_member: vec![0; 2],
+            face_velocity: vec![0.0],
+            interface_normal: vec![-1.0, 0.0, -1.0, 0.0],
+            interface_offset: vec![100.0; 2],
+            ..Default::default()
+        };
+        let phi = [-0.5, 1.0];
+        let mut embedding = PressureEmbedding::new(
+            source.clone(),
+            &reduced,
+            EmbeddingOptions::default(),
+            Some(&fields),
+            None,
+        );
+        let first = embedding
+            .prepare_with_level_set(&reduced, &mut fields, &phi)
+            .unwrap();
+        assert_eq!(first.virtual_member, vec![1, 0]);
+        assert!((first.theta[0] - 1.0 / 3.0).abs() <= 1.0e-6);
+
+        fields.density.copy_from_slice(&[50.0, 0.0]);
+        fields.interface_normal.fill(0.0);
+        fields.interface_offset.fill(-500.0);
+        let second = embedding
+            .prepare_with_level_set(&reduced, &mut fields, &phi)
+            .unwrap();
+        assert_eq!(second.virtual_member, first.virtual_member);
+        assert_eq!(second.theta, first.theta);
+    }
+
+    #[test]
+    fn embedded_sparse_air_retains_atmosphere_when_phi_gradient_is_unresolved() {
+        let reduced_cell = cell(0, 0, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+        let mut reduced_row = row(
+            0,
+            0,
+            [1.0, 0.5, 0.0],
+            vec![RowTerm {
+                cell_id: 0,
+                coefficient: 1.0,
+            }],
+        );
+        reduced_row.kind = RowKind::SparseAir;
+        let reduced = Graph {
+            dimension: 2,
+            dimensions: [2.0, 1.0, 1.0],
+            cells: vec![reduced_cell],
+            rows: vec![reduced_row.clone()],
+            incidences: vec![vec![0]],
+            ..Default::default()
+        };
+        let source_cell = cell(0, 10, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+        reduced_row.center[2] = 0.5;
+        let source = Graph {
+            dimension: 3,
+            dimensions: [2.0, 1.0, 1.0],
+            cells: vec![source_cell],
+            rows: vec![reduced_row],
+            incidences: vec![vec![0]],
+            ..Default::default()
+        };
+        let mut fields = Fields {
+            density: vec![100.0],
+            capacity: vec![1.0],
+            pressure: vec![0.0],
+            pressure_rhs: vec![0.0],
+            pressure_diagonal: vec![0.0],
+            pressure_member: vec![0],
+            face_velocity: vec![0.0],
+            interface_normal: vec![0.0, 1.0],
+            interface_offset: vec![0.5],
+            ..Default::default()
+        };
+        let mut embedding = PressureEmbedding::new(
+            source.clone(),
+            &reduced,
+            EmbeddingOptions::default(),
+            Some(&fields),
+            None,
+        );
+        let tangential = embedding
+            .prepare_with_level_set(&reduced, &mut fields, &[-0.5])
+            .unwrap();
+        assert_eq!(tangential.active_rows, vec![1]);
+        assert_eq!(tangential.theta, vec![0.5]);
+
+        fields.interface_normal.copy_from_slice(&[1.0, 0.0]);
+        let crossing = embedding
+            .prepare_with_level_set(&reduced, &mut fields, &[-0.5])
+            .unwrap();
+        assert_eq!(crossing.active_rows, vec![1]);
+        assert!((crossing.theta[0] - 0.5).abs() <= 1.0e-6);
+
+        fields.interface_normal.fill(0.0);
+        let unresolved = embedding
+            .prepare_with_level_set(&reduced, &mut fields, &[-0.5])
+            .unwrap();
+        assert_eq!(unresolved.active_rows, vec![1]);
+        assert_eq!(unresolved.theta, vec![0.5]);
+
+        let mut physical_reduced = reduced.clone();
+        physical_reduced.dimensions[0] = 1.0;
+        let mut physical_source = source;
+        physical_source.dimensions[0] = 1.0;
+        let mut physical_embedding = PressureEmbedding::new(
+            physical_source,
+            &physical_reduced,
+            EmbeddingOptions::default(),
+            Some(&fields),
+            None,
+        );
+        let boundary = physical_embedding
+            .prepare_with_level_set(&physical_reduced, &mut fields, &[-0.5])
+            .unwrap();
+        assert_eq!(boundary.active_rows, vec![1]);
+        assert_eq!(boundary.theta, vec![0.5]);
+    }
+
     #[test]
     fn ambiguous_projected_row_faults() {
         let c = cell(0, 0, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);

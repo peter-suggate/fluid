@@ -32,7 +32,27 @@ export type LevelSetVolumeReceipt = {
   maximumVolumeOverCapacity: number;
   totalVolumeOverCapacity: number;
   maximumOverCapacityRatio: number;
+  phiImpliedLiquidVolume: number;
+  signedPhiVolumeMismatch: number;
+  absolutePhiVolumeMismatch: number;
+  insideBandAbsolutePhiVolumeMismatch: number;
+  outsideBandAbsolutePhiVolumeMismatch: number;
+  maximumAbsolutePhiVolumeMismatch: number;
+  maximumNormalizedPhiVolumeMismatch: number;
+  sharpening: SharpeningReceipt;
 } & Record<typeof timingKeys[number], number>;
+
+export type SharpeningReceipt = {
+  componentCount: number; ambiguousCellCount: number; orphanVolume: number;
+  initialBandAbsoluteMismatch: number; finalBandAbsoluteMismatch: number;
+  initialDistanceWeightedMismatch: number; finalDistanceWeightedMismatch: number;
+  initialOverCapacityVolume: number; finalOverCapacityVolume: number;
+  initialOverCapacityCount: number; finalOverCapacityCount: number;
+  relocatedVolume: number; donorCount: number; receiverCount: number;
+  unresolvedEligibleResidual: number; maximumRelocationDistance: number;
+  crossComponentPairCount: number; boundViolationCount: number;
+  globalConservationResidual: number; maximumComponentConservationResidual: number;
+};
 
 function finiteNumber(value: unknown, label: string): asserts value is number {
   assert.equal(typeof value, "number", `missing ${label}`);
@@ -58,10 +78,19 @@ export function requireLevelSetVolumeReceipt(
     "maximumVolumeOverCapacity",
     "totalVolumeOverCapacity",
     "maximumOverCapacityRatio",
+    "phiImpliedLiquidVolume",
+    "signedPhiVolumeMismatch",
+    "absolutePhiVolumeMismatch",
+    "insideBandAbsolutePhiVolumeMismatch",
+    "outsideBandAbsolutePhiVolumeMismatch",
+    "maximumAbsolutePhiVolumeMismatch",
+    "maximumNormalizedPhiVolumeMismatch",
     ...timingKeys,
   ] as const) {
     finiteNumber(receipt[key], `levelSetVolume.${key}`);
-    assert.ok(receipt[key] >= 0 || key === "signedVolumeDrift",
+    assert.ok(receipt[key] >= 0
+      || key === "signedVolumeDrift"
+      || key === "signedPhiVolumeMismatch",
       `frame ${frame}: negative levelSetVolume.${key}`);
   }
   assert.ok(Number.isSafeInteger(receipt.overCapacityCellCount)
@@ -71,6 +100,27 @@ export function requireLevelSetVolumeReceipt(
     assert.ok(Number.isSafeInteger(receipt[key]) && (receipt[key] as number) >= 0,
       `frame ${frame}: invalid levelSetVolume.${key}`);
   }
+  assert.ok(receipt.sharpening && typeof receipt.sharpening === "object",
+    `frame ${frame}: missing levelSetVolume.sharpening receipt`);
+  const sharpening = receipt.sharpening as SharpeningReceipt;
+  for (const key of ["componentCount", "ambiguousCellCount", "initialOverCapacityCount",
+    "finalOverCapacityCount", "donorCount", "receiverCount", "crossComponentPairCount",
+    "boundViolationCount"] as const) {
+    finiteNumber(sharpening[key], `levelSetVolume.sharpening.${key}`);
+    assert.ok(Number.isSafeInteger(sharpening[key]) && sharpening[key] >= 0,
+      `frame ${frame}: invalid levelSetVolume.sharpening.${key}`);
+  }
+  for (const key of ["orphanVolume", "initialBandAbsoluteMismatch", "finalBandAbsoluteMismatch",
+    "initialDistanceWeightedMismatch", "finalDistanceWeightedMismatch",
+    "initialOverCapacityVolume", "finalOverCapacityVolume", "relocatedVolume",
+    "unresolvedEligibleResidual", "maximumRelocationDistance",
+    "maximumComponentConservationResidual"] as const) {
+    finiteNumber(sharpening[key], `levelSetVolume.sharpening.${key}`);
+    assert.ok(sharpening[key] >= 0,
+      `frame ${frame}: negative levelSetVolume.sharpening.${key}`);
+  }
+  finiteNumber(sharpening.globalConservationResidual,
+    "levelSetVolume.sharpening.globalConservationResidual");
   return receipt as LevelSetVolumeReceipt;
 }
 
@@ -153,6 +203,16 @@ export function summarizeResearchTransport(
       maximumVolumeOverCapacity: levelSetVolume?.maximumVolumeOverCapacity ?? 0,
       totalVolumeOverCapacity: levelSetVolume?.totalVolumeOverCapacity ?? 0,
       maximumOverCapacityRatio: levelSetVolume?.maximumOverCapacityRatio ?? 0,
+      phiVolumeMismatch: levelSetVolume ? {
+        phiImpliedLiquidVolume: levelSetVolume.phiImpliedLiquidVolume,
+        signed: levelSetVolume.signedPhiVolumeMismatch,
+        l1: levelSetVolume.absolutePhiVolumeMismatch,
+        insideBandL1: levelSetVolume.insideBandAbsolutePhiVolumeMismatch,
+        outsideBandL1: levelSetVolume.outsideBandAbsolutePhiVolumeMismatch,
+        maximumAbsolute: levelSetVolume.maximumAbsolutePhiVolumeMismatch,
+        maximumNormalized: levelSetVolume.maximumNormalizedPhiVolumeMismatch,
+      } : null,
+      sharpening: levelSetVolume?.sharpening ?? null,
       maximumNormalizedRowResidual: levelSetVolume?.maximumNormalizedRowResidual ?? null,
       maximumDonorResidual: levelSetVolume?.maximumDonorResidual ?? null,
       zeroWeightDonors: levelSetVolume?.zeroWeightDonors ?? null,
@@ -215,6 +275,23 @@ export function summarizeResearchTransport(
       ),
       final: perFrame.at(-1)!.interfaceSeams,
     },
+    phiVolumeMismatch: transport === "level-set-volume" ? {
+      maximumL1: Math.max(...perFrame.map(frame => frame.phiVolumeMismatch!.l1)),
+      final: perFrame.at(-1)!.phiVolumeMismatch,
+    } : null,
+    sharpening: transport === "level-set-volume" ? {
+      totalRelocatedVolume: perFrame.reduce((sum, frame) =>
+        sum + frame.sharpening!.relocatedVolume, 0),
+      maximumAbsoluteGlobalConservationResidual: Math.max(...perFrame.map(frame =>
+        Math.abs(frame.sharpening!.globalConservationResidual))),
+      maximumComponentConservationResidual: Math.max(...perFrame.map(frame =>
+        frame.sharpening!.maximumComponentConservationResidual)),
+      crossComponentPairCount: perFrame.reduce((sum, frame) =>
+        sum + frame.sharpening!.crossComponentPairCount, 0),
+      boundViolationCount: perFrame.reduce((sum, frame) =>
+        sum + frame.sharpening!.boundViolationCount, 0),
+      final: perFrame.at(-1)!.sharpening,
+    } : null,
     stageTimings: {
       ...summarizeNativeStageTimings(worldTimings),
       levelSetVolume: transport === "level-set-volume" ? Object.fromEntries(
