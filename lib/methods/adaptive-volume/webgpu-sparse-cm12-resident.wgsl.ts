@@ -6790,6 +6790,12 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
             if(dx!=0||dy!=0||dz!=0){
               let bit=u32(dx+1)+3u*u32(dy+1)+9u*u32(dz+1);
               if(interfaceCell||cellIsThinFluid){supportMask|=1u<<bit;}
+              // The next frame's face preparation extends velocity into air.
+              // Its outward face velocity can differ from this census even
+              // when the projected sweep is zero. Preserve interpolation
+              // support for every retained donor, including sub-residency
+              // mass: word 32 is occupancy-gated, but word 3 is exact demand.
+              if(rho>0.0){sweptSupportMask|=1u<<bit;}
             }
       }}}
     }
