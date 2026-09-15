@@ -162,7 +162,6 @@ const candidatePlanTimedWork = Object.freeze({
       label: "frontier activation and retirement",
       entryPoints: Object.freeze([
         "activateSweptFrontierPages",
-        "enforceGeometricDynamicSeamFloor",
         "retireUnsupportedEmptyBricks",
       ]),
     },

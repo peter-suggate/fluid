@@ -48,6 +48,7 @@ export const WHOLE_FRAME_VOLUME_ENTRY_POINTS = Object.freeze([
   "gatherWholeFrameVolumeSharpening",
   "commitWholeFrameVolumeSharpening",
   "correctWholeFrameVolumePhi",
+  "deleteTinyVolumeResidues",
 ] as const);
 
 export const WHOLE_FRAME_VOLUME_CONTROL = Object.freeze({
@@ -191,8 +192,7 @@ fn markProjectedGeometricTransportReceivers(@builtin(global_invocation_id)gid:ve
   if(hasSolidBoundaries()){
     velocity-=(1.0-aperture)*rowSolidVelocity(row);
   }
-  let coefficient=select(1.0,-1.0,isNegative)/rowDistance(row);
-  let outwardVolume=-coefficient*velocity*area*p.frame.x;
+  let outwardVolume=select(-velocity,velocity,isNegative)*area*p.frame.x;
   if(outwardVolume<=gvRoundoff(cellOpenVolume(cell))){return;}
   let axis=rowAxis(row);var offset=vec3i(0);
   offset[axis]=select(-1,1,isNegative);
@@ -211,22 +211,7 @@ fn markProjectedGeometricTransportReceivers(@builtin(global_invocation_id)gid:ve
 fn stageProjectedGeometricTransportReceiver(brick:u32){
   revokeCM12SourceTopologyLease();
   let output=activityRecord(brick);
-  // Authored inactive leaves keep their coarsest compiled rung; 2:1 closure
-  // may promote it if the donor requires that. Dynamically synthesized pages
-  // currently own only a fixed B8 graph and must use that graph until their
-  // mixed-rung construction path exists.
-  let compiled=select(acceptedBrickResolution(brick),BRICK_FINE_RESOLUTION,
-    brick>=CM12_WDR_INITIAL_LEAVES);
-  let requested=select(compiled,applySparseCM12RefinementRegionBounds(brick,compiled),
-    brickCandidatePlanningEnabled(brick));
-  atomicStore(&activity[output+8u],requested);
-  atomicStore(&activity[output+47u],requested);
-  atomicStore(&activity[output+9u],1u|ACTIVITY_LIFECYCLE_CHANGED);
-  if(frozenFrontierNeedsCompiledGraph(brick)){
-    atomicOr(&activity[output+9u],ACTIVITY_FROZEN_FRONTIER_GENERATION);
-    return;
-  }
-  setCandidateBrickActiveAt(output,true);
+  stageFrontierPageAtRung(brick,cm12DemandedFrontierGradingRung(brick));
 }
 
 @compute @workgroup_size(64)
@@ -259,38 +244,6 @@ fn publishGeometricTransportFrontierSource(@builtin(global_invocation_id)gid:vec
     state[sourceCellVelocity()+4u*cell+component]=state[destinationCellVelocity()+4u*cell+component];
   }
 }
-@compute @workgroup_size(64)
-fn enforceGeometricDynamicSeamFloor(@builtin(global_invocation_id)gid:vec3u){
-  let brick=gid.x;if(brick>=CM12_WDR_INITIAL_LEAVES||!brickActive(brick)){return;}
-  let span=brickSpan(brick);let patches=span*span;
-  let current=acceptedBrickResolution(brick);let output=activityRecord(brick);
-  let bounds=cachedRefinementPolicyResolutionBounds(brick);
-  let canUseFine=span==1u&&bounds.y>=BRICK_FINE_RESOLUTION
-    &&(!brickResolutionFrozen(brick)||current==BRICK_FINE_RESOLUTION)
-    &&(current==BRICK_FINE_RESOLUTION||brickCandidatePlanningEnabled(brick));
-  var demanded=false;
-  for(var patchIndex=0u;patchIndex<6u*patches;patchIndex+=1u){
-    let neighbor=cm12WorldOwnerAt(candidateFaceNeighborCoordinate(brick,patchIndex));
-    if(neighbor==INVALID||neighbor<CM12_WDR_INITIAL_LEAVES
-      ||!(brickActive(neighbor)||candidateBrickActive(neighbor))){continue;}
-    if(canUseFine){demanded=true;continue;}
-    // A region/frozen/macro host cannot use the page-local fine/fine seam.
-    // Keep new capacity unpublished and request the existing compiled mixed
-    // graph. Never override the authored hard cap to satisfy a storage format.
-    let neighborOutput=activityRecord(neighbor);
-    atomicStore(&activity[neighborOutput+47u],acceptedBrickResolution(neighbor));
-    atomicOr(&activity[neighborOutput+9u],ACTIVITY_FROZEN_FRONTIER_GENERATION);
-    if(!brickActive(neighbor)){setCandidateBrickActiveAt(neighborOutput,false);}
-    revokeCM12SourceTopologyLease();
-  }
-  if(demanded){
-    atomicStore(&activity[output+8u],BRICK_FINE_RESOLUTION);
-    atomicStore(&activity[output+47u],BRICK_FINE_RESOLUTION);
-    atomicOr(&activity[output+9u],4u);
-    if(current!=BRICK_FINE_RESOLUTION){revokeCM12SourceTopologyLease();}
-  }
-}
-
 // Eight f32 ulps of relative capacity describe arithmetic uncertainty, not a
 // mass repair. Authoritative V and shared face fluxes are never clamped.
 // Zero-capacity cells retain the exact zero requirement.
@@ -360,6 +313,9 @@ fn beginWholeFrameVolumeTransport(){
   for(var word=0u;word<24u;word+=1u){
     atomicStore(&conditioning[GV_WHOLE_FRAME_CONTROL+word],0);
   }
+  atomicStore(&conditioning[GV_WHOLE_FRAME_CONTROL+24u],0);
+  atomicStore(&conditioning[GV_WHOLE_FRAME_CONTROL+26u],0);
+  // Words 25 and 27 are lifetime loss/page counters; never clear per frame.
   geometricSolidSetTransportFraction(0.0);
 }
 
@@ -822,7 +778,18 @@ fn addWholeFrameUncoveredDonorFallbacks(@builtin(global_invocation_id)gid:vec3u)
       cm12WorldLeafCoordinate(cellBrick(donor)),outwardOffset)){continue;}
     let signedSweep=gvRate(face)*p.frame.x;
     let outward=select(-signedSweep,signedSweep,isNegative);
-    if(outward>0.0){_=gvAppendCouplingEdge(INVALID,donor,outward);}
+    if(outward>0.0){
+      let receiverPage=cm12WorldLeafCoordinate(cellBrick(donor))+outwardOffset;
+      let inside=all(receiverPage>=vec3i(0))
+        &&all(receiverPage*8<vec3i(p.dimensions.xyz));
+      if(inside){
+        // Allocation failure is not a physical drain. Roundoff-sized face
+        // sweeps retain their donor; a material sweep requires the receiver
+        // that projected-demand admission was obliged to publish.
+        if(state[GV_CURRENT+donor]>0.0&&outward>gvRoundoff(capacity)){
+          gvFault(21u,donor,f32(rowAxis(gvRow(face))),outward,capacity);return;}
+      }else{_=gvAppendCouplingEdge(INVALID,donor,outward);}
+    }
   }
   let head=bitcast<u32>(atomicLoad(&conditioning[GV_DONOR_HEADS+donor]));
   if(head!=INVALID){return;}
@@ -1227,6 +1194,65 @@ fn commitWholeFrameVolumeSharpening(@builtin(global_invocation_id)gid:vec3u){
   state[GV_LOW+cell]=volume; // Restore the volume QA view after centre-phi scratch is dead.
   state[GV_CURRENT+cell]=volume;state[destinationDensity()+cell]=rho;
   state[destinationGamma()+cell]=1.0;if(changed){incrementalActivityMarkCellClosure(cell);}
+}
+
+// Delete only whole dilute pages with exclusively deep-air phi samples. Never
+// infer emptiness from a missing phi sample. Support retirement remains separate.
+var<workgroup> gvResidueReject:atomic<u32>;
+var<workgroup> gvResidueVolume:array<f32,64>;
+@compute @workgroup_size(64)
+fn deleteTinyVolumeResidues(@builtin(workgroup_id)wid:vec3u,
+    @builtin(local_invocation_index)lane:u32){
+  let brick=wid.x;
+  if(lane==0u){atomicStore(&gvResidueReject,0u);}
+  gvResidueVolume[lane]=0.0;workgroupBarrier();
+  var cells=vec2u(0u);
+  if(brick<p.dispatch.w&&brickActive(brick)&&!gvFailed()&&lsvAccepted()){
+    cells=templateBrickCellRange(brick,acceptedBrickResolution(brick));
+  }
+  for(var local=lane;local<cells.y;local+=64u){
+    let cell=cells.x+local;let rho=state[destinationDensity()+cell];
+    // Written this way to reject NaN, negative values and infinities too.
+    if(!(rho>=0.0&&rho<=1e-4)){atomicStore(&gvResidueReject,1u);}
+    gvResidueVolume[lane]+=rho*cellVolume(cell);
+  }
+  workgroupBarrier();
+  for(var stride=32u;stride>0u;stride/=2u){
+    if(lane<stride){gvResidueVolume[lane]+=gvResidueVolume[lane+stride];}
+    workgroupBarrier();
+  }
+  if(lane==0u&&gvResidueVolume[0]==0.0){atomicStore(&gvResidueReject,1u);}
+  workgroupBarrier();
+  if(atomicLoad(&gvResidueReject)==0u){
+    let slot=lsvAcceptedSlot();let resolution=lsvBrickPhiResolution(slot,brick);
+    let base=lsvBrickPhiBase(slot,brick);
+    if(resolution==0u||base==LSV_INVALID){atomicStore(&gvResidueReject,1u);}
+    for(var local=lane;local<templateBrickCellRange(brick,resolution).y;local+=64u){
+      let stencil=lsvStencilAtOrdinal(slot,base+local);
+      if(!stencil.resolved){atomicStore(&gvResidueReject,1u);}
+      for(var corner=0u;corner<8u;corner+=1u){
+        if(stencil.support[corner]!=LSV_SUPPORT_DEEP_AIR
+          ||!lsvFinite(stencil.phi[corner])||!(stencil.phi[corner]>0.0)){
+          atomicStore(&gvResidueReject,1u);
+        }
+      }
+    }
+  }
+  workgroupBarrier();
+  if(atomicLoad(&gvResidueReject)==0u){
+    for(var local=lane;local<cells.y;local+=64u){
+      let cell=cells.x+local;
+      if(state[destinationDensity()+cell]!=0.0){
+        state[destinationDensity()+cell]=0.0;state[GV_CURRENT+cell]=0.0;
+        state[GV_LOW+cell]=0.0;incrementalActivityMarkCellClosure(cell);
+      }
+    }
+  }
+  if(lane==0u&&atomicLoad(&gvResidueReject)==0u&&gvResidueVolume[0]>0.0){
+    gvAddPhiReduction(24u,gvResidueVolume[0]);gvAddPhiReduction(25u,gvResidueVolume[0]);
+    atomicAdd(&conditioning[GV_WHOLE_FRAME_CONTROL+26u],1);
+    atomicAdd(&conditioning[GV_WHOLE_FRAME_CONTROL+27u],1);
+  }
 }
 
 // One bounded global volume feedback step. It moves the existing interface;

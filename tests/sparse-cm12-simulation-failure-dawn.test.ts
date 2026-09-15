@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import "./sparse-cm12-topology-fail-closed-dawn.test";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { pathToFileURL } from "node:url";

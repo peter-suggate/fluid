@@ -63,7 +63,7 @@ struct SparseParams {
 @group(0) @binding(15) var<storage,read> sparseFineWorklist: array<u32>;
 @group(0) @binding(16) var<storage,read> sparseFineSamples: array<u32>;
 @group(0) @binding(17) var<storage,read> sparseTopologyArena: array<u32>;
-struct SparseOverlayParams { worldDirectory:vec4u }
+struct SparseOverlayParams { worldDirectory:vec4u, dynamicCells:vec4u, rungOffsets:vec4u }
 @group(0) @binding(18) var<uniform> sparseOverlayP: SparseOverlayParams;
 @group(0) @binding(19) var<storage,read> sparseFramePlan: array<u32>;
 ${gridOverlayLevelSetVolumeWGSL}
@@ -311,13 +311,16 @@ fn sparseTemplateLevelIndex(resolution:u32)->u32{
 }
 fn sparseTemplateCellRange(brick:u32,resolution:u32)->vec2u{
   if(sparseWorldDirectoryEnabled()&&brick>=sparseOverlayP.worldDirectory.z){
-    // Frontier leaves are synthesized directly at B rather than interned in
-    // the immutable 1/2/4/8 atlas catalogue. Their physical cells occupy the
-    // resident's fixed page-local tail beginning at topologyArena[2].
-    let brickFine=sparseBrickFineResolution();let count=brickFine*brickFine*brickFine;
-    if(resolution!=brickFine){return vec2u(0u);}
+    let brickFine=sparseBrickFineResolution();
+    let count=resolution*resolution*resolution;
+    var stride=brickFine*brickFine*brickFine;var offset=0u;
+    if(sparseOverlayP.dynamicCells.x!=0u){
+      if(resolution==0u||resolution>8u||(resolution&(resolution-1u))!=0u){return vec2u(0u);}
+      stride=sparseOverlayP.dynamicCells.x;
+      offset=sparseOverlayP.rungOffsets[sparseTemplateLevelIndex(resolution)];
+    }else if(resolution!=brickFine){return vec2u(0u);}
     let page=brick-sparseOverlayP.worldDirectory.z;
-    let first=sparseTopologyArena[2u]+page*count;
+    let first=sparseTopologyArena[2u]+page*stride+offset;
     if(first>sparseP.counts.x||count>sparseP.counts.x-first){return vec2u(0u);}
     return vec2u(first,count);
   }
@@ -1560,7 +1563,9 @@ export class GridOverlayPipeline {
         Number.isSafeInteger(initialLeaves) && initialLeaves! >= 0
           ? initialLeaves! : 0,
         Number.isSafeInteger(activityRecordWords) && activityRecordWords! > 0
-          ? activityRecordWords! : 0]));
+          ? activityRecordWords! : 0,
+        source?.dynamicPageCellStride ?? 0, 0, 0, 0,
+        ...(source?.dynamicPageRungOffsets ?? [0, 0, 0, 0])]));
     this.rebuildBindGroup();
   }
 

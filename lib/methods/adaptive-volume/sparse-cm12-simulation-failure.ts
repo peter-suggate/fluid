@@ -14,6 +14,7 @@ export function cm12FailureKernelId(name: string): number {
 }
 
 const reasons: Readonly<Record<number, readonly [string, string]>> = {
+  8: ["MISSING_COMPILED_TOPOLOGY_FACE", "Candidate face has no complete compiled connectivity; runtime topology repair refused"],
   6: ["GEOMETRIC_VOLUME_TRANSPORT", "Conservative volume topology, support, or nonnegative-state contract failed before publication"],
   7: ["ADAPTIVE_LEVEL_SET", "Adaptive level-set topology, capacity, sampling, or constraint contract failed before publication"],
   1: ["INCIDENCE_RANGE", "Corrupt incidence range would have been replaced by an empty range"],
@@ -32,6 +33,7 @@ export function decodeCM12SimulationFailure(words: Uint32Array, kernelNames: rea
     kernel: kernels.get(words[2]) ?? `0x${words[2].toString(16)}`,
     frame: words[3], generation: words[4], ownerId: words[5],
     operandNames: ({
+      8: ["brick", "axis", "acceptedResolution", "scheduledResolution"],
       6: ["reason", "value", "capacity", "auxiliary"],
       7: words[2] === cm12FailureKernelId("lsvAdvectPhi")
         ? ["faultMask", "samplePositionFineX", "samplePositionFineY", "samplePositionFineZ"]

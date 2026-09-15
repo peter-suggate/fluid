@@ -172,7 +172,7 @@ export interface CM12SparseWorldRuntime {
     pressureControl?: SparseCM12PressureControl,
     worldDimensions_m?: readonly [number, number, number]): Promise<void>;
   assertSimulationHealthy(): Promise<void>;
-  captureSimulationFailure(encoder: GPUCommandEncoder, onBackingRequest?: () => void): ReturnType<WebGPUSparseCM12Resident["captureSimulationFailure"]>;
+  captureSimulationFailure(encoder: GPUCommandEncoder): ReturnType<WebGPUSparseCM12Resident["captureSimulationFailure"]>;
   encodePressureIterationReceipt(
     encoder: GPUCommandEncoder,
     destination: GPUBuffer,
@@ -730,8 +730,8 @@ class AdoptedCM12SparseWorldRuntime implements CM12SparseWorldRuntime {
     return this.resident.assertSimulationHealthy();
   }
 
-  captureSimulationFailure(encoder: GPUCommandEncoder, onBackingRequest?: () => void) {
-    return this.resident.captureSimulationFailure(encoder, onBackingRequest);
+  captureSimulationFailure(encoder: GPUCommandEncoder) {
+    return this.resident.captureSimulationFailure(encoder);
   }
   encodePressureIterationReceipt(encoder: GPUCommandEncoder, destination: GPUBuffer) {
     this.resident.encodePressureIterationReceipt(encoder, destination);

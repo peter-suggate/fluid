@@ -1,3 +1,4 @@
+import { DYNAMIC_PAGE_CELL_COUNT, DYNAMIC_PAGE_ROW_COUNT, DYNAMIC_PAGE_TERM_COUNT, DYNAMIC_PAGE_WORDS, prepareDynamicPageImage, packDynamicSeamCatalogue, dynamicRungLayout } from "./sparse-cm12-dynamic-rung-catalog";
 import { geometricVolumeQAWGSL } from "./geometric-volume-qa.wgsl";
 import { WHOLE_FRAME_VOLUME_ENTRY_POINTS, type SparseGeometricVolumeLayout } from "./resident-volume.wgsl";
 import { createInitialLevelSetGeometryWGSL } from "./levelset-initial-geometry";
@@ -1070,14 +1071,10 @@ const GPU_TOPOLOGY_PAGE_POOL_MINIMUM = 32;
  * longer wet course; WDR reports requests that cannot acquire a leaf. */
 const GPU_TOPOLOGY_PAGE_BUDGET_DEFAULT = 512;
 const GPU_TOPOLOGY_CELL_PAGE_HEADER_WORDS = 16;
-const gpuTopologyCellPageWords = (brickFineResolution: number) =>
-  GPU_TOPOLOGY_CELL_PAGE_HEADER_WORDS
-  // Seven structure-of-array row planes (two uniform values are implicit),
-  // with two words per term and one two-word incidence override per boundary
-  // cell face. Uniform geometry and interior incidences are arithmetic.
-  + 7 * (3 * (brickFineResolution + 1) * brickFineResolution ** 2)
-  + 4 * (3 * (brickFineResolution + 1) * brickFineResolution ** 2)
-  + 12 * brickFineResolution ** 2;
+const gpuTopologyCellPageWords = (brickFineResolution: number) => {
+  if (brickFineResolution !== 8) throw new RangeError("dynamic catalogue requires eight-spacing pages");
+  return DYNAMIC_PAGE_WORDS;
+};
 
 export interface SparseCM12TopologyPagePoolPlan {
   readonly requestedPageCapacity: number;
@@ -2378,7 +2375,6 @@ const LEVELSET_VOLUME_ENTRY_POINTS = [
 interface ProjectedTransportIndirectPublisher {
   readonly arguments: GPUBuffer;
   readonly topologyPipeline: GPUComputePipeline;
-  readonly velocityExtensionPipeline?: GPUComputePipeline;
   /**
    * Zeroes the commit-tail's accepted/shadow/delta dispatch triples whenever
    * the measured projected receiver count is zero.
@@ -3670,6 +3666,8 @@ export class WebGPUSparseCM12Resident {
       },
       worldDirectoryBaseWords: this.worldDirectoryLayout.baseWords,
       worldDirectoryInitialLeaves: this.worldDirectoryLayout.initialLeaves,
+      dynamicPageCellStride: DYNAMIC_PAGE_CELL_COUNT,
+      dynamicPageRungOffsets: [1, 2, 4, 8].map(r => dynamicRungLayout(r).cellOffset) as [number, number, number, number],
     };
     this.diagnosticsReadback = diagnosticsReadback;
     this.bindGroup = bindGroup;
@@ -4160,6 +4158,7 @@ export class WebGPUSparseCM12Resident {
       Math.max(0, topologyPageCapacityMaximum - atlas.bricks.filter(brick => brick.unclipped).length),
     );
     const worldLeafCapacity = packed.brickCount + topologyPagePool.pageCapacity;
+    packed.words[packed.backgroundOwnerOffset] = worldLeafCapacity;
     // Production ownership is WDR1. Build the legacy dense authored-owner
     // directory only for the two explicit arithmetic comparison oracles.
     const uploadLogicalOwnerDirectory = implicitTransportOwnerArithmeticForQA
@@ -4203,12 +4202,16 @@ export class WebGPUSparseCM12Resident {
     report(hostTemplateVariants
       ? "Build four-rung and 2:1 seam topology templates"
       : "Pack accepted topology templates");
-    const templates = hostTemplateVariants
+    const originalTemplates = hostTemplateVariants
       ? packResidentTopologyTemplates(atlas, grid, undefined, mutableBrickKeys)
       : packAcceptedTopologyTemplates(atlas, grid);
-    const dynamicCellsPerPage = atlas.brickFineResolution ** 3;
-    const dynamicRowsPerPage = 3 * (atlas.brickFineResolution + 1)
-      * atlas.brickFineResolution ** 2;
+    const dynamicSeamCatalogueBaseWords = originalTemplates.words.length;
+    const dynamicSeamCatalogue = packDynamicSeamCatalogue();
+    const templateWords = new Uint32Array(originalTemplates.words.length + dynamicSeamCatalogue.length);
+    templateWords.set(originalTemplates.words); templateWords.set(dynamicSeamCatalogue, dynamicSeamCatalogueBaseWords);
+    const templates = { ...originalTemplates, words: templateWords };
+    const dynamicCellsPerPage = DYNAMIC_PAGE_CELL_COUNT;
+    const dynamicRowsPerPage = DYNAMIC_PAGE_ROW_COUNT;
     const physicsCellCapacity = templates.cellCount
       + topologyPagePool.pageCapacity * dynamicCellsPerPage;
     const physicsRowCapacity = templates.rowCount
@@ -4241,7 +4244,7 @@ export class WebGPUSparseCM12Resident {
     const tracerLattice = sparseCM12TracerLattice(atlas.dimensions);
     const baseLayout = residentStateLayout(
       physicsCellCapacity, physicsRowCapacity,
-      templates.words[4]! + 2 * topologyPagePool.pageCapacity * dynamicRowsPerPage,
+      templates.words[4]! + topologyPagePool.pageCapacity * DYNAMIC_PAGE_TERM_COUNT,
       worldLeafCapacity,
       Boolean(rigid) || Boolean(initialSolidWorld),
       Boolean(initialSolidWorld),
@@ -4691,6 +4694,11 @@ export class WebGPUSparseCM12Resident {
     initialWorklists.set(initialRowIds, rowList1);
     for (let page = 0; page < topologyPagePool.pageCapacity; page += 1) {
       initialWorklists[pageFreeList + page] = page;
+      initialWorklists.set(prepareDynamicPageImage(
+        templates.words[2]! + page * DYNAMIC_PAGE_CELL_COUNT,
+        templates.words[3]! + page * DYNAMIC_PAGE_ROW_COUNT,
+        templates.words[4]! + page * DYNAMIC_PAGE_TERM_COUNT),
+      pageDescriptors + page * topologyPagePool.pageWords);
     }
     // One binding keeps the resident shader within WebGPU's portable ten
     // storage-buffer limit. Upload its immutable head and mutable tail
@@ -5496,15 +5504,6 @@ fn gateAcceptedCommitTail(){
   for(var word=6u;word<12u;word=word+1u){acceptedArguments[word]=0u;}
   for(var word=15u;word<24u;word=word+1u){acceptedArguments[word]=0u;}
 }
-${transportPacketIndirectArguments ? /* wgsl */ `
-@compute @workgroup_size(1)
-fn gateVelocityExtension(){
-  if(atomicLoad(&activity[26u])==0u){
-    velocityExtensionArguments[0u]=0u;
-    velocityExtensionArguments[3u]=0u;
-  }
-}
-` : ""}
 `,
     });
     const projectedTransportBindGroupLayout = device.createBindGroupLayout({
@@ -5537,14 +5536,6 @@ fn gateVelocityExtension(){
         },
       },
     }, { priority: "critical" });
-    const projectedTransportVelocityExtensionPipeline = transportPacketIndirectArguments
-      ? await compileResidentPipeline({
-        label: "Sparse Geometric projected transport velocity-extension dispatch gate",
-        layout: projectedTransportPipelineLayout,
-        compute: { module: projectedTransportGateModule,
-          entryPoint: "gateVelocityExtension" },
-      }, { priority: "critical" })
-      : undefined;
     const projectedTransportAcceptedCommitTailPipeline = await compileResidentPipeline({
       label: "Sparse Geometric projected transport commit-tail dispatch gate",
       layout: projectedTransportPipelineLayout,
@@ -5554,7 +5545,6 @@ fn gateVelocityExtension(){
     const projectedTransportIndirectPublisher: ProjectedTransportIndirectPublisher = {
       arguments: projectedTransportIndirectArguments,
       topologyPipeline: projectedTransportTopologyPipeline,
-      velocityExtensionPipeline: projectedTransportVelocityExtensionPipeline,
       acceptedCommitTailPipeline: projectedTransportAcceptedCommitTailPipeline,
       bindGroup: device.createBindGroup({
         label: "Sparse Geometric projected transport dispatch gate bindings",
@@ -5639,6 +5629,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
   let fill=state[sourceDensity()+owner.x]/max(cellOpenFraction(owner.x),1e-6);
   return select(0.5,-0.5,fill>=0.5)*cellMinimumWidth(owner.x);
 }`,
+        dynamicSeamCatalogueBaseWords,
       );
     const shaderSource = createResidentShaderSource();
     const sourceByShaderModule = new WeakMap<GPUShaderModule, string>();
@@ -5702,7 +5693,6 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
       "markProjectedGeometricTransportReceivers",
       "activateProjectedGeometricTransportReceivers",
       "planGeometricTransportFrontier",
-      "enforceGeometricDynamicSeamFloor",
       "activateGeometricSweptCellSupport",
       "publishGeometricTransportFrontierSource",
       "gatherGeometricSourceCapacity", "prepareGeometricSourceBudget",
@@ -5774,7 +5764,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
       "finalizeSparseWorldDirectoryAllocations",
       "synthesizeSparseWorldFrontierPages",
       "clearSparseWorldFrontierResolutionCache",
-      "connectSparseWorldFrontierPages",
+      "resetSparseWorldFrontierBindings", "connectSparseWorldFrontierPages",
       "publishSparseWorldFrontierAcceptance",
       "compileSparseWorldFrontierExecutionImage",
       "clearShadowRowMembership", "beginShadowTopology", "buildShadowLeafWorklist",
@@ -6754,8 +6744,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
       // receiver count: with no receivers it publishes no candidate at all.
       this.encodeCompiledTopologyGeneration(encoder);
       closeSubstage("projected-topology-rebuild");
-      if (this.transportPacketIndirectArguments
-        && this.projectedTransportIndirectPublisher.velocityExtensionPipeline) {
+      if (this.transportPacketIndirectArguments) {
         selectBindGroup(this.transportBindGroup);
         const dispatchProjected = (name: string, byteOffset: number) => {
           const projectedPass = openPass();
@@ -6770,15 +6759,9 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
         encoder.copyBufferToBuffer(this.activity,
           4 * (this.velocityExtensionLayout.scheduleBaseWords + 4),
           this.transportPacketIndirectArguments, 0, 24);
-        const gatePass = encoder.beginComputePass({
-          label: "Sparse Geometric projected transport velocity-extension gate",
-        });
-        gatePass.setPipeline(
-          this.projectedTransportIndirectPublisher.velocityExtensionPipeline);
-        gatePass.setBindGroup(0,
-          this.projectedTransportIndirectPublisher.bindGroup);
-        gatePass.dispatchWorkgroups(1);
-        gatePass.end();
+        // Projection changes liquid velocity even when no topology was admitted.
+        // Re-extend that current field into air before tracing receiver boxes;
+        // retaining last frame's air velocity compresses the falling front.
         const dispatchVelocityExtension = (name: string, byteOffset: number) => {
           const extensionPass = openPass();
           extensionPass.setPipeline(this.pipelines[name]!);
@@ -6873,7 +6856,6 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
         dispatch("planBrickResolution", bricks);
         closeSubstage("initial-resolution-plan");
         dispatch("activateSweptFrontierPages", leafCapacity);
-        dispatch("enforceGeometricDynamicSeamFloor", bricks);
         // Lifecycle membership is a topology candidate, not a post-publication
         // mutation.  Retirement marks same-rung delta work consumed by the
         // shadow worklists and the single selector flip below.
@@ -6889,6 +6871,9 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
         dispatch("scheduleTopologyPreparation", 1);
         dispatch("certifyGeometricTopologyFaces", leafCapacity);
         dispatch("sealGeometricTopologyFaces", bricks);
+        // Certification must gate the publication tail in this same stage.
+        closePass();
+        this.encodeFailureGate(encoder);
         // Authored candidates already own complete template cells, rows and
         // incidence. The former allocation/synthesis dispatches could not add a
         // publishable rung to an unbacked leaf and did no work for backed ones.
@@ -6974,6 +6959,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
           // selector still names the old worklists. Reconcile the canonical
           // voxel seam graph in that protected publication interval so face
           // publication below consumes the exact graph that will be accepted.
+          dispatch("resetSparseWorldFrontierBindings", this.topologyPageCapacity);
           dispatch("connectSparseWorldFrontierPages", this.topologyPageCapacity);
         }
         dispatchShadow("publishCandidateShadowFaces", "row");
@@ -7122,6 +7108,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
         dispatchPhi("lsvApplyConstraints");
         dispatch("lsvAdvanceConstraintProjection", 1);
       }
+      dispatch("deleteTinyVolumeResidues", this.incrementalActivityLayout.brickCount);
       if (this.rigidCoupling) {
         dispatchAccepted("reexpressGeometricSolidRows", "row");
         dispatch("finishGeometricSolidPublication", 1);
@@ -7947,7 +7934,6 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
           dispatchTopologyIndirect("activateGeometricSweptCellSupport", 0);
           if (this.lastInflow) dispatchTopology("activateContinuousGeometricSourcePages", bricks);
           dispatchTopology("reserveGeometricPreflightEnvelopeSupport", bricks);
-          dispatchTopology("enforceGeometricDynamicSeamFloor", bricks);
         }
         // Prephysics residency is a *staging* pass: it seals the transport
         // envelope, advances the activity clock and stages every page the
@@ -7988,6 +7974,8 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
       dispatchTopology("scheduleTopologyPreparation", 1);
       dispatchTopology("certifyGeometricTopologyFaces", leafCapacity);
       dispatchTopology("sealGeometricTopologyFaces", bricks);
+      closeTopologyPass();
+      this.encodeFailureGate(encoder);
       gateProjectedCommitTail();
       dispatchTopologyIndirect("clearShadowRowMembership", 36);
       dispatchTopology("beginShadowTopology", 1);
@@ -8042,6 +8030,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
       selectTopologyBindGroup(this.transportBindGroup);
       dispatchTopologyDelta("publishCandidateTopologyDeltaFromWorklist");
       selectTopologyBindGroup(this.bindGroup);
+      dispatchTopology("resetSparseWorldFrontierBindings", this.topologyPageCapacity);
       dispatchTopology("connectSparseWorldFrontierPages", this.topologyPageCapacity);
       dispatchTopologyIndirect("publishCandidateShadowFaces", 36);
       dispatchTopology("finalizeAuthorizedShadowTopology", 1);
@@ -8277,25 +8266,17 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
   }
 
   /** The copy is ordered after the submitted frame and survives later dispatches. */
-  captureSimulationFailure(encoder: GPUCommandEncoder, onBackingRequest?: () => void) {
+  captureSimulationFailure(encoder: GPUCommandEncoder) {
     const readback = this.device.createBuffer({ label: "CM12 mandatory failure receipt",
-      size: CM12_FAILURE_BYTES + (onBackingRequest ? 4 : 0),
+      size: CM12_FAILURE_BYTES,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     encoder.copyBufferToBuffer(this.topologyArena, this.topologyArena.size - CM12_FAILURE_BYTES,
       readback, 0, CM12_FAILURE_BYTES);
-    if (onBackingRequest) {
-      const offset = 4 * (this.layout.volumeTransport.supportControlBaseWords + 33);
-      // Transfer the sticky device request into this frame's already mapped
-      // receipt. Ordinary health/diagnostic captures never consume requests.
-      encoder.copyBufferToBuffer(this.conditioning, offset, readback, CM12_FAILURE_BYTES, 4);
-      encoder.clearBuffer(this.conditioning, offset, 4);
-    }
     return async () => {
       try {
         await readback.mapAsync(GPUMapMode.READ);
-        const words = new Uint32Array(readback.getMappedRange());
-        if (onBackingRequest && words[CM12_FAILURE_WORDS] !== 0) onBackingRequest();
-        return decodeCM12SimulationFailure(words.slice(0, CM12_FAILURE_WORDS), Object.keys(this.pipelines));
+        const words = new Uint32Array(readback.getMappedRange()).slice();
+        return decodeCM12SimulationFailure(words, Object.keys(this.pipelines));
       } finally {
         if (readback.mapState === "mapped") readback.unmap();
         readback.destroy();
@@ -8919,7 +8900,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
       // whenever the same scene also contained an immutable bulk macro.
       const packedOwner = authored && this.lastPacked
         ? this.lastPacked.words[this.lastPacked.brickOffset + 2 * record.leafId]! : 0;
-      const hasCandidateSlot = ((packedOwner & 0x7fff_ffff) >>> 5) !== 0;
+      const hasCandidateSlot = !authored || ((packedOwner & 0x7fff_ffff) >>> 5) !== 0;
       // A demanded inactive construction leaf may need a finer rung before
       // its first activation can satisfy physical 2:1 grading with wet donors.
       const demandedActivation = (record.planReasons & 0x80000000) !== 0;
@@ -8946,7 +8927,8 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
         sourceFirst.set(key, this.templateWords[range]!);
       } else {
         if (record.topologyPage === undefined) throw new Error("CM12 active world leaf has no topology page");
-        sourceFirst.set(key, this.templateWords[2]! + record.topologyPage * 512);
+        sourceFirst.set(key, this.templateWords[2]! + record.topologyPage * DYNAMIC_PAGE_CELL_COUNT
+          + dynamicRungLayout(resolution).cellOffset);
         sourcePageCoordinates.set(record.topologyPage, coordinate);
       }
     }
@@ -9158,27 +9140,31 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
             }
         }
       }
-      // GPU-grown leaves live in the fixed B8 suffix of the same state planes,
+      // GPU-grown leaves live in the prepared multi-rung suffix of the same state planes,
       // not in the immutable host-template catalog above. Materialize them by
       // their signed WDR coordinates so diagnostic fields and correctness
       // oracles observe the complete accepted world rather than silently
       // clipping back to the authored seed atlas.
       if (includeWorldLeaves) {
-        const cellsPerPage = this.brickFineResolution ** 3;
+        const cellsPerPage = DYNAMIC_PAGE_CELL_COUNT;
         const dynamicCellOffset = this.templateCellCount
           - cellsPerPage * this.topologyPageCapacity;
         for (const record of activitySnapshot.records) {
           if (record.leafId < this.initialWorldLeafCount || !record.active
             || record.topologyPage === undefined || !record.coordinate) continue;
-          const first = dynamicCellOffset + record.topologyPage * cellsPerPage;
+          const rung = dynamicRungLayout(record.acceptedResolution);
+          const first = dynamicCellOffset + record.topologyPage * cellsPerPage + rung.cellOffset;
           const origin = record.coordinate.map((value) =>
             value * this.brickFineResolution) as [number, number, number];
-          for (let local = 0; local < cellsPerPage; local += 1) {
-            const z = Math.floor(local / (this.brickFineResolution ** 2));
-            const yz = local - z * this.brickFineResolution ** 2;
-            const y = Math.floor(yz / this.brickFineResolution);
-            const x = yz - y * this.brickFineResolution;
-            const q = [origin[0] + x, origin[1] + y, origin[2] + z] as const;
+          for (let local = 0; local < rung.cellCount; local += 1) {
+            const z = Math.floor(local / (rung.resolution ** 2));
+            const yz = local - z * rung.resolution ** 2;
+            const y = Math.floor(yz / rung.resolution);
+            const x = yz - y * rung.resolution;
+            for (let dz = 0; dz < rung.width; dz++) for (let dy = 0; dy < rung.width; dy++)
+              for (let dx = 0; dx < rung.width; dx++) {
+            const q = [origin[0] + x * rung.width + dx, origin[1] + y * rung.width + dy,
+              origin[2] + z * rung.width + dz] as const;
             if (q[0] < 0 || q[0] >= nx || q[1] < 0 || q[1] >= ny
               || q[2] < 0 || q[2] >= nz) continue;
             const cell = first + local;
@@ -9204,6 +9190,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
             pressure[at] = rho >= 0.5
               ? state[this.layout.pressure + cell]! * pressureScale : 0;
             divergence[at] = state[this.layout.divergence + cell]!;
+            }
           }
         }
       }
@@ -10489,7 +10476,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
   async readGeometricVolumeTransportReceiptQA() {
     this.assertLive();
     const readback = this.device.createBuffer({
-      label: "Sparse Geometric volume control QA readback", size: (122 + GEOMETRIC_SOURCE_LEDGER_FLOATS) * 4,
+      label: "Sparse Geometric volume control QA readback", size: (126 + GEOMETRIC_SOURCE_LEDGER_FLOATS) * 4,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
     try {
@@ -10505,7 +10492,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
       encoder.copyBufferToBuffer(this.conditioning, 4 * this.layout.volumeTransport.supportControlBaseWords,
         readback, (60 + GEOMETRIC_SOURCE_LEDGER_FLOATS) * 4, 152);
       encoder.copyBufferToBuffer(this.conditioning, 4 * this.layout.volumeTransport.wholeFrameControlBaseWords,
-        readback, (98 + GEOMETRIC_SOURCE_LEDGER_FLOATS) * 4, 96);
+        readback, (98 + GEOMETRIC_SOURCE_LEDGER_FLOATS) * 4, 112);
       this.device.queue.submit([encoder.finish()]);
       await readback.mapAsync(GPUMapMode.READ);
       const words = new Uint32Array(readback.getMappedRange());
@@ -10569,6 +10556,10 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
           sharpeningDisconnectedFaceSkipCount: couplingWords[21]!,
           phiVolumeResidualFine3: couplingFloats[22]!,
           phiInterfaceAreaFine2: couplingFloats[23]!,
+          residueDeletedVolumeFine3: couplingFloats[24]!,
+          cumulativeResidueDeletedVolumeFine3: couplingFloats[25]!,
+          residueClearedPageCount: couplingWords[26]!,
+          cumulativeResidueClearedPageCount: couplingWords[27]!,
         }),
         subfaceCount: words[0]!, subfaceCapacity: this.layout.volumeTransport.subfaceCapacity,
         maxCourant: floats[1]!, plannedSubsteps: words[2]!, executedSubsteps: words[3]!,
@@ -11122,7 +11113,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
       const slot = words[0]! & 1;
       const slotBase = 1 + slot * slotWords;
       const packetBase = slotBase + leafWords * this.topologyPageCapacity;
-      const cellsPerPage = this.brickFineResolution ** 3;
+      const cellsPerPage = DYNAMIC_PAGE_CELL_COUNT;
       const dynamicCellBase = this.templateCellCount
         - cellsPerPage * this.topologyPageCapacity;
       let activePages = 0, packets = 0, cells = 0;
@@ -11131,16 +11122,19 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
         const flags = words[leaf + 1]!;
         if ((flags & 0x8000_0000) === 0) continue;
         activePages += 1;
-        const first = dynamicCellBase + page * cellsPerPage;
-        const expectedValid = this.brickFineResolution
-          | (this.brickFineResolution << 5) | (this.brickFineResolution << 10);
-        if ((flags & 31) !== this.brickFineResolution || words[leaf + 2] !== first
-          || words[leaf + 3] !== cellsPerPage || words[leaf + 5] !== expectedValid
-          || words[leaf + 6] !== 1) {
+        const resolution = flags & 31;
+        const rung = dynamicRungLayout(resolution);
+        const first = dynamicCellBase + page * cellsPerPage + rung.cellOffset;
+        const expectedValid = resolution
+          | (resolution << 5) | (resolution << 10);
+        if (words[leaf + 2] !== first
+          || words[leaf + 3] !== rung.cellCount || words[leaf + 5] !== expectedValid
+          || words[leaf + 6] !== rung.width) {
           throw new Error(`Dynamic TEI leaf ${page} has an invalid B${
-            this.brickFineResolution} descriptor`);
+            resolution} descriptor`);
         }
-        const packetAxis = this.brickFineResolution / 4;
+        const packetAxis = Math.ceil(resolution / 4);
+        const packetWidth = Math.min(4, resolution);
         const activePacketCount = packetAxis ** 3;
         for (let local = 0; local < 64; local += 1) {
           const at = packetBase + packetWordsPerPage * page
@@ -11158,19 +11152,18 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
           const remainder = local - pz * packetAxis * packetAxis;
           const py = Math.floor(remainder / packetAxis);
           const px = remainder - py * packetAxis;
-          const expectedFirst = first + 4 * px + this.brickFineResolution
-            * (4 * py + this.brickFineResolution * 4 * pz);
-          const expectedCounts = (0x8000_0000 | 4 | (4 << 5) | (4 << 10)) >>> 0;
-          const expectedStrides = (this.brickFineResolution
-            | ((this.brickFineResolution ** 2) << 16)) >>> 0;
+          const expectedFirst = first + 4 * px + resolution
+            * (4 * py + resolution * 4 * pz);
+          const expectedCounts = (0x8000_0000 | packetWidth | (packetWidth << 5) | (packetWidth << 10)) >>> 0;
+          const expectedStrides = (resolution
+            | ((resolution ** 2) << 16)) >>> 0;
           if (packetFirst !== expectedFirst || counts !== expectedCounts
-            || strides !== expectedStrides || packetFirst + 3
-              + 3 * this.brickFineResolution + 3 * this.brickFineResolution ** 2
-              >= first + cellsPerPage) {
+            || strides !== expectedStrides || packetFirst + (packetWidth - 1) * (1 + resolution + resolution ** 2)
+              >= first + rung.cellCount) {
             throw new Error(`Dynamic TEI leaf ${page} packet ${local} is malformed`);
           }
           packets += 1;
-          cells += 64;
+          cells += packetWidth ** 3;
         }
       }
       return Object.freeze({ activePages, packets, cells });
@@ -11263,9 +11256,8 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
     const pageHeaderWords = 16;
     const pageHeaderBytes = 4 * pageHeaderWords * this.topologyPageCapacity;
     const activityRecordBytes = 4 * ACTIVITY_RECORD_WORDS * this.topologyPageCapacity;
-    const cellsPerPage = this.brickFineResolution ** 3;
-    const rowsPerPage = 3 * (this.brickFineResolution + 1)
-      * this.brickFineResolution * this.brickFineResolution;
+    const cellsPerPage = DYNAMIC_PAGE_CELL_COUNT;
+    const rowsPerPage = DYNAMIC_PAGE_ROW_COUNT;
     const dynamicFieldBytes = 4 * cellsPerPage * this.topologyPageCapacity;
     const dynamicFaceBytes = 4 * rowsPerPage * this.topologyPageCapacity;
     const transportLeafWords = 8 * this.topologyPageCapacity;
@@ -11371,7 +11363,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
         const pageFailedHostIncidences = words[
           pageBase + pageHeaderWords * page + 13]!;
         failedHostIncidences += pageFailedHostIncidences;
-        if (words[pageBase + pageHeaderWords * page + 2] === cellsPerPage) {
+        if (words[pageBase + pageHeaderWords * page + 2] === this.brickFineResolution ** 3) {
           claimedTopologyPages += 1;
         }
         const pageReceipt = words[pageBase + pageHeaderWords * page + 3]!;
@@ -11393,7 +11385,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
               words[leafAt]! | 0, words[leafAt + 1]! | 0, words[leafAt + 2]! | 0,
             ]) as readonly [number, number, number]);
           }
-        } else if (words[pageBase + pageHeaderWords * page + 2] === cellsPerPage) {
+        } else if (words[pageBase + pageHeaderWords * page + 2] === this.brickFineResolution ** 3) {
           // Claimed but never accepted. Report the exact lifecycle words the
           // publication gate reads so a silent non-publication names its cause.
           const record = activityBase + ACTIVITY_RECORD_WORDS * page;
@@ -11410,33 +11402,36 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
             generationStamp: words[record + 36]!,
           }));
         }
+        if (words[activityBase + ACTIVITY_RECORD_WORDS * page + 10] === 0) continue;
+        const resolution = words[activityBase + ACTIVITY_RECORD_WORDS * page + 12]!;
+        const rung = dynamicRungLayout(resolution);
         let pageMass = 0;
-        for (let local = 0; local < cellsPerPage; local += 1) {
-          const density = Math.max(0, floats[densityABase + page * cellsPerPage + local]!,
-            floats[densityBBase + page * cellsPerPage + local]!);
-          pageMass += density;
+        for (let local = 0; local < rung.cellCount; local += 1) {
+          const density = Math.max(0, floats[densityABase + page * cellsPerPage + rung.cellOffset + local]!,
+            floats[densityBBase + page * cellsPerPage + rung.cellOffset + local]!);
+          pageMass += density * rung.width ** 3;
           if (density <= 0.05) continue;
           const leaf = words[pageBase + pageHeaderWords * page]!;
           if (leaf >= this.worldDirectoryLayout.leafCapacity) continue;
           const leafAt = this.worldDirectoryLayout.leafBaseWords + 5 * leaf;
           const coordinate = [words[leafAt]! | 0, words[leafAt + 1]! | 0,
             words[leafAt + 2]! | 0] as const;
-          const z = Math.floor(local / (this.brickFineResolution ** 2));
-          const yz = local - z * this.brickFineResolution ** 2;
-          const y = Math.floor(yz / this.brickFineResolution);
-          const x = yz - y * this.brickFineResolution;
-          const fine = [coordinate[0] * this.brickFineResolution + x,
-            coordinate[1] * this.brickFineResolution + y,
-            coordinate[2] * this.brickFineResolution + z] as const;
+          const z = Math.floor(local / (resolution ** 2));
+          const yz = local - z * resolution ** 2;
+          const y = Math.floor(yz / resolution);
+          const x = yz - y * resolution;
+          const fine = [coordinate[0] * this.brickFineResolution + x * rung.width,
+            coordinate[1] * this.brickFineResolution + y * rung.width,
+            coordinate[2] * this.brickFineResolution + z * rung.width] as const;
           if (!dynamicLiquidMinimumFine) {
             dynamicLiquidMinimumFine = [...fine];
-            dynamicLiquidMaximumExclusiveFine = fine.map((value) => value + 1) as
+            dynamicLiquidMaximumExclusiveFine = fine.map((value) => value + rung.width) as
               [number, number, number];
           } else {
             for (let axis = 0; axis < 3; axis += 1) {
               dynamicLiquidMinimumFine[axis] = Math.min(dynamicLiquidMinimumFine[axis]!, fine[axis]!);
               dynamicLiquidMaximumExclusiveFine![axis] = Math.max(
-                dynamicLiquidMaximumExclusiveFine![axis]!, fine[axis]! + 1);
+                dynamicLiquidMaximumExclusiveFine![axis]!, fine[axis]! + rung.width);
             }
           }
         }

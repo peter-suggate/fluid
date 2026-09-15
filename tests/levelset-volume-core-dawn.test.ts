@@ -60,8 +60,8 @@ fn authored(p:vec3f)->vec2f{if(boxMode()){
       buildCellAtOrdinal: n => n, acceptedCellOrdinal: c => c,
       acceptedOwnerCellAt: q => `ownerCellAt(${q})`, buildOwnerCellAt: q => `ownerCellAt(${q})`,
       authoredSample: p => `authored(${p})`, velocitySample: p =>
-        `select(vec4f(0.0,0.0,0.0,1.0),vec4f(1.0,0.0,1.0,1.0),params.pad==3u&&${p}.x<=0.0&&${p}.y==0.0&&${p}.z<=0.0)`,
-      dtExpression: "select(0.0,1.0,params.pad==3u)", constraintWidthExpression: "0.0",
+        `select(select(vec4f(0.0,0.0,0.0,1.0),vec4f(1.0,0.0,1.0,1.0),params.pad==3u&&${p}.x<=0.0&&${p}.y==0.0&&${p}.z<=0.0),vec4f(-0.25,-0.25,0.0,1.0),params.pad==4u)`,
+      dtExpression: "select(0.0,1.0,params.pad>=3u)", constraintWidthExpression: "0.0",
     }) + createLevelSetVolumeRedistanceWGSL({ layout, bandWidthExpression: "4.0" }) + `
 @compute @workgroup_size(64) fn shiftPlane(@builtin(global_invocation_id) gid:vec3u){
  let vertex=gid.x;let slot=lsvAcceptedSlot();if(vertex>=lsvLoad(lsvHeader(slot,3u))){return;}
@@ -97,6 +97,29 @@ fn authored(p:vec3f)->vec2f{if(boxMode()){
  atomicStore(&topologyArena[${sampleBase + 106}u],bitcast<u32>(lsvVertexPhi(slot,destination,vertex)));
  atomicStore(&topologyArena[${sampleBase + 107}u],lsvVertexSupport(slot,destination,vertex));
 }
+@compute @workgroup_size(64) fn setBoundaryClearance(@builtin(global_invocation_id)gid:vec3u){
+ let slot=lsvAcceptedSlot();let vertex=gid.x;if(vertex>=lsvLoad(lsvHeader(slot,3u))){return;}
+ let bank=lsvLoad(lsvHeader(slot,4u));
+ lsvStoreFloat(lsvPhiBase(slot,bank)+vertex,select(0.5,-0.5,params.coarse==1u));
+ lsvStore(lsvSupportBase(slot,bank)+vertex,select(select(1u,2u,params.coarse==1u),0u,params.coarse==2u));
+ if(params.pad==4u&&all(lsvVertexPosition(slot,vertex)==vec3f(0.0,1.0,0.0))){
+  lsvStore(lsvSupportBase(slot,bank)+vertex,LSV_SUPPORT_METRIC);}
+}
+@compute @workgroup_size(1) fn sampleBoundaryAdvection(){
+ let slot=lsvAcceptedSlot();let vertex=lsvLookupVertex(slot,vec3i(0,1,0));
+ let bank=1u-lsvLoad(lsvHeader(slot,4u));
+ lsvStore(${sampleBase+116}u,bitcast<u32>(lsvVertexPhi(slot,bank,vertex)));
+ lsvStore(${sampleBase+117}u,lsvVertexSupport(slot,bank,vertex));
+}
+@compute @workgroup_size(1) fn sampleBoundaryClearance(){
+ let slot=lsvAcceptedSlot();let owner=lsvSlotOwner(slot,vec3f(0.5,1.0,0.5));
+ for(var i=0u;i<2u;i+=1u){
+  let sample=lsvExtendFromOwner(slot,vec3f(0.5,1.25+0.5*f32(i),0.5),1u,0u,owner.x).sample;
+  let at=${sampleBase + 108}u+4u*i;
+  lsvStore(at,bitcast<u32>(sample.phi));lsvStore(at+1u,select(0u,1u,sample.valid));
+  lsvStore(at+2u,select(0u,1u,sample.metric));lsvStore(at+3u,sample.support);
+ }
+}
 @compute @workgroup_size(256) fn sampleTransferredBox(@builtin(global_invocation_id) gid:vec3u){
  let i=gid.x;if(i>=162u){return;}let x=i%9u;let z=(i/9u)%9u;let y=i/81u;
  atomicStore(&topologyArena[${sampleBase + 128}u+i],bitcast<u32>(lsvPhiAt(vec3f(f32(x),f32(y),f32(z)))));
@@ -118,7 +141,7 @@ fn authored(p:vec3f)->vec2f{if(boxMode()){
     ] });
     const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [bindLayout] });
     const bindings = device.createBindGroup({ layout: bindLayout, entries: [{ binding: 0, resource: { buffer: params } }, { binding: 1, resource: { buffer: arena } }] });
-    const names = ["lsvBeginTopology", "lsvClearTopology", "lsvCatalogCellCorners", "lsvInsertVertexHash", "lsvResolveCellCorners", "lsvCompileConstraints", "lsvInitializeAuthoredPhi", "lsvTransferPhi", "lsvBeginBuildConstraintProjection", "lsvApplyBuildConstraints", "lsvAdvanceBuildConstraintProjection", "lsvValidateTopology", "lsvSealTopology", "lsvPublishTopology", "lsvAdvectPhi", "lsvBeginConstraintProjection", "lsvApplyConstraints", "lsvAdvanceConstraintProjection", "lsvCommitPhi", ...LEVELSET_VOLUME_REDISTANCE_ENTRY_POINTS, "shiftPlane", "scaleCurrentPhi", "samplePlane", "samplePlaneUnder", "auditMacroMetric", "sampleFractionalExtension", "sampleCertifiedAdvection", "sampleTransferredBox", "sampleBox"];
+    const names = ["lsvBeginTopology", "lsvClearTopology", "lsvCatalogCellCorners", "lsvInsertVertexHash", "lsvResolveCellCorners", "lsvCompileConstraints", "lsvInitializeAuthoredPhi", "lsvTransferPhi", "lsvBeginBuildConstraintProjection", "lsvApplyBuildConstraints", "lsvAdvanceBuildConstraintProjection", "lsvValidateTopology", "lsvSealTopology", "lsvPublishTopology", "lsvAdvectPhi", "lsvBeginConstraintProjection", "lsvApplyConstraints", "lsvAdvanceConstraintProjection", "lsvCommitPhi", ...LEVELSET_VOLUME_REDISTANCE_ENTRY_POINTS, "shiftPlane", "scaleCurrentPhi", "samplePlane", "samplePlaneUnder", "auditMacroMetric", "sampleFractionalExtension", "sampleCertifiedAdvection", "sampleTransferredBox", "sampleBox", "setBoundaryClearance", "sampleBoundaryClearance", "sampleBoundaryAdvection"];
     const pipelines = new Map<string, GPUComputePipeline>();
     for (const entryPoint of names) pipelines.set(entryPoint, await device.createComputePipelineAsync({ layout: pipelineLayout, compute: { module: shaderModule, entryPoint } }));
     for (let generation = 1; generation <= 9; generation++) {
@@ -237,6 +260,35 @@ fn authored(p:vec3f)->vec2f{if(boxMode()){
       }
       readback.unmap();
     }
+    for (let phase = 0; phase < 3; phase++) {
+      device.queue.writeBuffer(params, 0, new Uint32Array([9, 0, phase, 3]));
+      const encoder = device.createCommandEncoder();const pass = encoder.beginComputePass();
+      pass.setBindGroup(0, bindings);pass.setPipeline(pipelines.get("setBoundaryClearance")!);pass.dispatchWorkgroups(4);
+      pass.setPipeline(pipelines.get("sampleBoundaryClearance")!);pass.dispatchWorkgroups(1);pass.end();
+      encoder.copyBufferToBuffer(arena, 0, readback, 0, arena.size);device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      const words = new Uint32Array(readback.getMappedRange());const values = new Float32Array(words.buffer);
+      assert.equal(words[sampleBase + 109], phase < 2 ? 1 : 0, "only supported short departures are certified");
+      if (phase < 2) {
+        assert.equal(values[sampleBase + 108], phase === 0 ? 0.25 : -0.25);
+        assert.equal(words[sampleBase + 110], 0, "clearance never becomes metric distance");
+        assert.equal(words[sampleBase + 111], phase + 1);
+      }
+      assert.equal(words[sampleBase + 113], 0, "departure beyond clearance remains invalid");
+      readback.unmap();
+    }
+    device.queue.writeBuffer(params, 0, new Uint32Array([9, 0, 0, 4]));
+    const boundaryEncoder = device.createCommandEncoder();const boundaryPass = boundaryEncoder.beginComputePass();
+    boundaryPass.setBindGroup(0, bindings);
+    for (const name of ["setBoundaryClearance", "lsvAdvectPhi", "sampleBoundaryAdvection"]) {
+      boundaryPass.setPipeline(pipelines.get(name)!);boundaryPass.dispatchWorkgroups(name === "sampleBoundaryAdvection" ? 1 : 4);
+    }
+    boundaryPass.end();boundaryEncoder.copyBufferToBuffer(arena, 0, readback, 0, arena.size);
+    device.queue.submit([boundaryEncoder.finish()]);await readback.mapAsync(GPUMapMode.READ);
+    const boundaryWords = new Uint32Array(readback.getMappedRange());
+    assert.equal(new Float32Array(boundaryWords.buffer)[sampleBase + 116], 0.25);
+    assert.equal(boundaryWords[sampleBase + 117], 1, "advection keeps extrapolated clearance phase-only even from a metric vertex");
+    readback.unmap();
     arena.destroy(); params.destroy(); readback.destroy();
   } finally {
     device?.destroy(); await new Promise<void>(resolve => setImmediate(resolve)); gpu = undefined;

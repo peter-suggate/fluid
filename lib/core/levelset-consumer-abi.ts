@@ -88,6 +88,10 @@ export interface SparseAdaptiveGridConsumerSource {
   readonly worldDirectoryBaseWords?: number;
   /** Number of immutable atlas leaves preceding WDR1's dynamic frontier leaves. */
   readonly worldDirectoryInitialLeaves?: number;
+  /** Prepared dynamic cell slab. Omitted for legacy single-rung pages. */
+  readonly dynamicPageCellStride?: number;
+  /** B1, B2, B4, B8 offsets within that slab. */
+  readonly dynamicPageRungOffsets?: readonly [number, number, number, number];
   /** Optional versioned 4³ temporal-dirty publication. Missing is UNKNOWN. */
   /** Optional GPU-authored FPL1 schedule/receipt publication. Missing falls back to CMD1. */
   readonly framePlan?: SparseCM12FramePlanSource;

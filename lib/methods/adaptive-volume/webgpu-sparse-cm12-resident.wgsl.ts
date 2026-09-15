@@ -1,3 +1,4 @@
+import { SPARSE_CM12_DYNAMIC_SEAM_BINDING_WGSL, SPARSE_CM12_DYNAMIC_SEAM_PUBLICATION_WGSL } from "./sparse-cm12-dynamic-seam-binding.wgsl";
 import {
   createGeometricSolidMotionWGSL,
   type GeometricSolidMotionLayout,
@@ -432,6 +433,7 @@ export function createWebgpuSparseCM12ResidentWGSL(
   compiledTopologyLayout?: SparseCM12CompiledTopologyLayout,
   levelSetVolumeLayout?: LevelSetVolumeLayout,
   initialLevelSetGeometryWGSL = "",
+  dynamicSeamCatalogueBaseWords = 0,
 ): string {
   if (
     presentationPageResolution > brickFineResolution ||
@@ -1112,8 +1114,11 @@ fn cm12IBODeltaClosureLeaf(root:u32,index:u32)->u32{
   if(lid.x==0u){let listed=topologyDeltaLeafInvocation(wid.x);
     cm12IBODeltaRootLeaf=listed;cm12IBODeltaTaskCount=0u;
     if(listed!=INVALID){cm12ISARecordChangedLeaf(listed);
-      cm12ISAAppendGeometryClosure(listed,cm12IBOCandidateGeneration());
-      cm12IBODeltaTaskCount=1u+cm12ISAGeometryNeighborCount(listed);}}
+      // Dynamic roots remain in the exact changed-set receipt. Their faces
+      // are certified against the prepared dynamic catalogue, not SCMT/IBO.
+      if(listed<CM12_WDR_INITIAL_LEAVES){
+        cm12ISAAppendGeometryClosure(listed,cm12IBOCandidateGeneration());
+        cm12IBODeltaTaskCount=1u+cm12ISAGeometryNeighborCount(listed);}}}
   let root=workgroupUniformLoad(&cm12IBODeltaRootLeaf);
   let taskCount=workgroupUniformLoad(&cm12IBODeltaTaskCount);
   let slot=cm12IBOShadowSlot();
@@ -1155,7 +1160,7 @@ fn cm12IBODeltaClosureLeaf(root:u32,index:u32)->u32{
   if(lid.x==0u){let listed=topologyDeltaLeafInvocation(wid.x);
     cm12ISAPacketRootLeaf=listed;
     cm12ISAPacketNeighborCount=0u;
-    if(listed!=INVALID){
+    if(listed!=INVALID&&listed<CM12_WDR_INITIAL_LEAVES){
       cm12ISAPacketNeighborCount=cm12ISAGeometryNeighborCount(listed);}}
   let leaf=workgroupUniformLoad(&cm12ISAPacketRootLeaf);
   cm12ISAValidateScheduledLeafPacket(leaf,lid.x);
@@ -1179,11 +1184,10 @@ fn cm12IBODeltaClosureLeaf(root:u32,index:u32)->u32{
  @builtin(local_invocation_id)lid:vec3u,@builtin(workgroup_id)wid:vec3u){
   if(lid.x==0u){let listed=topologyDeltaLeafInvocation(wid.x);
     cm12IBODeltaRootLeaf=listed;cm12IBODeltaTaskCount=0u;
-    if(listed!=INVALID){
+    if(listed!=INVALID&&listed<CM12_WDR_INITIAL_LEAVES){
       cm12IBODeltaTaskCount=1u+cm12ISAGeometryNeighborCount(listed);}}
   let root=workgroupUniformLoad(&cm12IBODeltaRootLeaf);
   let taskCount=workgroupUniformLoad(&cm12IBODeltaTaskCount);
-  if(taskCount==0u){return;}
   let source=acceptedTopologySlot();let retiredSlot=1u-source;
   for(var index=lid.x;index<taskCount;index+=CM12_IBO_DELTA_LANES){
     cm12IBOReplayDeltaLeaf(source,retiredSlot,
@@ -1330,6 +1334,26 @@ fn cm12PhiOwnerCellAtSlot(slot:u32,q:vec3i)->u32{
   if(localOffset>=count){return INVALID;}
   return first+localOffset;
 }
+// The source phi plan covers every represented solver page. An absent page
+// is air by sparse-world residency, rather than a failed phi hash lookup.
+// Eight finest-cube queries certify the half-spacing ball at a departure;
+// existing pages (including broken/missing cell backing) refuse this proof.
+// This is reached only when ordinary sampling and phase continuation fail.
+fn cm12UnrepresentedAirClearance(position:vec3f)->f32{
+  let lower=vec3i(floor(position-vec3f(0.5)));
+  let upper=vec3i(floor(position+vec3f(0.5)));
+  let slot=lsvAcceptedSlot();var clearance=0.5;
+  for(var corner=0u;corner<8u;corner+=1u){
+    let q=select(lower,upper,vec3<bool>((corner&1u)!=0u,(corner&2u)!=0u,(corner&4u)!=0u));
+    let coordinate=vec3i(floor(vec3f(q)/f32(BRICK_FINE_RESOLUTION)));
+    let brick=brickDirectoryLookupAtSignedCoordinate(coordinate);
+    if(brick!=INVALID&&lsvBrickPhiResolution(slot,brick)!=0u){
+      let nearest=clamp(position,vec3f(q),vec3f(q)+vec3f(1.0));
+      clearance=min(clearance,length(position-nearest));
+    }
+  }
+  return clearance;
+}
 // O(1) inverse of the plan: template cells are contiguous per (brick, rung),
 // so the per-brick prefix base is the only state an ordinal lookup needs.
 fn cm12PhiCellOrdinalInSlot(slot:u32,cell:u32)->u32{
@@ -1462,6 +1486,7 @@ fn cm12ReleasedWallPhi(positionFine:vec3f)->vec2f{
       },
       authoredSample: position => `vec2f(lsvAuthoredPhi(${position}),3.0)`,
       velocitySample: position => `lsvAcceptedVelocitySample(${position})`,
+      unrepresentedAirClearance: position => `cm12UnrepresentedAirClearance(${position})`,
       boundCharacteristic: (origin, candidate) =>
         `lsvClipCharacteristic(${origin},${candidate})`,
       releasedWallPhi: position => `cm12ReleasedWallPhi(${position})`,
@@ -1720,6 +1745,7 @@ fn applySparseCM12SolidEditScatter(@builtin(global_invocation_id)gid:vec3u){
   else{atomicStore(&topologyArena[address],value);}
 }
 
+const CM12_DYNAMIC_SEAM_CATALOGUE:u32=${dynamicSeamCatalogueBaseWords}u;
 const IMMUTABLE_HOST_INCIDENCE_BASE:u32=${immutableHostIncidenceBaseWords}u;
 
 ${frameControlEntries}
@@ -2117,11 +2143,32 @@ fn refreshSparseCM12SolidWorldRows(@builtin(workgroup_id)wid:vec3u,
 }
 fn candidateFaceBoundaryRowRange(brick:u32,accepted:u32,
  side:u32,boundary:u32)->vec2u{
+  if(brick>=CM12_WDR_INITIAL_LEAVES){
+    let axis=side/2u;let qU=boundary%accepted;let qV=boundary/accepted;
+    var q=vec3u(0u);q[axis]=select(0u,accepted-1u,(side&1u)!=0u);
+    q[(axis+1u)%3u]=qU;q[(axis+2u)%3u]=qV;
+    let within=cm12DynamicCellOffset(accepted)+q.x+accepted*(q.y+accepted*q.z);
+    let page=brick-CM12_WDR_INITIAL_LEAVES;
+    let at=dynamicIncidenceOverrideAt(candidateTopologyPageBase(page),within,side);
+    let row=ta(at);let center=rowCenter(row)-8.0*vec3f(cm12WorldLeafCoordinate(brick));
+    let width=8.0/f32(accepted);
+    let owns=u32(floor(center[(axis+1u)%3u]/width))==qU
+      &&u32(floor(center[(axis+2u)%3u]/width))==qV;
+    return vec2u(row|0x80000000u,select(0u,1u,owns));
+  }
   let configuration=(brick*TEMPLATE_LEVEL_COUNT+templateLevelIndex(accepted))*6u+side;
   let offsets=ta(ta(24u)+configuration);
   let begin=ta(offsets+boundary);return vec2u(begin,ta(offsets+boundary+1u)-begin);
 }
-fn candidateFaceRow(index:u32)->u32{return ta(index);}
+fn candidateFaceRow(index:u32)->u32{if((index&0x80000000u)!=0u){return index&0x7fffffffu;}return ta(index);}
+fn candidatePhysicalFaceRow(index:u32)->u32{
+  let row=candidateFaceRow(index);
+  if(row>=ta(3u)||rowKind(row)!=3u){return row;}
+  let cell=termCell(rowTermRange(row).x);
+  for(var incidence=incidenceBegin(cell);incidence<incidenceEnd(cell);incidence+=1u){
+    if(ta(IMMUTABLE_HOST_INCIDENCE_BASE+2u*incidence)==row){return incidenceRow(incidence);}}
+  return row;
+}
 fn activityRecord(brick:u32)->u32{
   return ACTIVITY_HEADER_WORDS+ACTIVITY_RECORD_WORDS*brick;
 }
@@ -2222,7 +2269,7 @@ fn brickHasUnclippedWorldGeometry(brick:u32)->bool{
   return (topology[p.topologyOffsets2.z+2u*brick]&0x80000000u)!=0u;
 }
 fn brickPackedCandidateSlot(brick:u32)->u32{
-  if(brick>=CM12_WDR_INITIAL_LEAVES){return INVALID;}
+  if(brick>=CM12_WDR_INITIAL_LEAVES){return select(INVALID,brick,cm12PreparedPageReady(brick));}
   let encoded=(topology[p.topologyOffsets2.z+2u*brick]&0x7fffffffu)>>5u;
   return select(INVALID,encoded-1u,encoded!=0u);
 }
@@ -2299,9 +2346,9 @@ fn applySparseCM12RefinementRegionBounds(brick:u32,requested:u32)->u32{
 
 fn templateBrickCellRange(brick:u32,resolution:u32)->vec2u{
   if(brick>=CM12_WDR_INITIAL_LEAVES){
-    let count=BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
-    return select(vec2u(0u),vec2u(ta(2u)
-      +(brick-CM12_WDR_INITIAL_LEAVES)*count,count),resolution==BRICK_FINE_RESOLUTION);
+    let count=resolution*resolution*resolution;
+    return vec2u(ta(2u)+(brick-CM12_WDR_INITIAL_LEAVES)*CM12_DYNAMIC_CELLS
+      +cm12DynamicCellOffset(resolution),count);
   }
   let at=ta(11u)+2u*(TEMPLATE_LEVEL_COUNT*brick+templateLevelIndex(resolution));
   let range=vec2u(ta(at),ta(at+1u));
@@ -2312,9 +2359,9 @@ fn templateBrickCellRange(brick:u32,resolution:u32)->vec2u{
 }
 fn templateRowOwnerRange(brick:u32,resolution:u32)->vec2u{
   if(brick>=CM12_WDR_INITIAL_LEAVES){
-    let count=3u*(BRICK_FINE_RESOLUTION+1u)*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
-    return select(vec2u(0u),vec2u(ta(3u)
-      +(brick-CM12_WDR_INITIAL_LEAVES)*count,count),resolution==BRICK_FINE_RESOLUTION);
+    let count=3u*(resolution+1u)*resolution*resolution;
+    return vec2u(ta(3u)+(brick-CM12_WDR_INITIAL_LEAVES)*CM12_DYNAMIC_ROWS
+      +cm12DynamicRowOffset(resolution),count);
   }
   let index=TEMPLATE_LEVEL_COUNT*brick+templateLevelIndex(resolution);
   let offsets=ta(16u);let first=ta(offsets+index);
@@ -2377,8 +2424,19 @@ fn cellActive(cell:u32)->bool{
 }
 fn rowAccepted(row:u32)->bool{
   if(row>=ta(3u)){
-    let rows=3u*(BRICK_FINE_RESOLUTION+1u)*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
-    return brickActive(CM12_WDR_INITIAL_LEAVES+(row-ta(3u))/rows);
+    let page=(row-ta(3u))/CM12_DYNAMIC_ROWS;let within=(row-ta(3u))%CM12_DYNAMIC_ROWS;
+    let leaf=CM12_WDR_INITIAL_LEAVES+page;let resolution=cm12DynamicRowRung(within);
+    if(!brickActive(leaf)||acceptedBrickResolution(leaf)!=resolution){return false;}
+    let local=within-cm12DynamicRowOffset(resolution);
+    let perAxis=(resolution+1u)*resolution*resolution;let axis=local/perAxis;
+    let face=local%(resolution+1u);if(face!=0u&&face!=resolution){return true;}
+    let uv=(local%perAxis)/(resolution+1u);var q=vec3u(0u);
+    q[axis]=select(0u,resolution-1u,face==resolution);
+    q[(axis+1u)%3u]=uv%resolution;q[(axis+2u)%3u]=uv/resolution;
+    let cell=cm12DynamicCellOffset(resolution)+q.x+resolution*(q.y+resolution*q.z);
+    let at=dynamicIncidenceOverrideAt(candidateTopologyPageBase(page),cell,
+      2u*axis+select(0u,1u,face==resolution));
+    return ta(at)==row;
   }
   if(hostExteriorRowSupersededAt(row,false)){return false;}
   let requirements=rowRequirementOffset(row);let count=ta(requirements);
@@ -6875,7 +6933,11 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   let surface=occupied&&axes!=0u;
   let thinFluid=occupied&&(reducedSurfaceAxes&32u)!=0u;
   let shape=select(0.0,1.0,countOneBits(axes)>=2u);
-  let velocityActivity=reducedMetrics.w;
+  // A certified flooded brick has no moving interface to size. Uniform fall
+  // speed is transport demand, not missing bulk detail (the 2D selector uses
+  // the same enclosure rule). Keep interface and thin-feature motion floors.
+  let certifiedBulk=measuredCount>0u&&(reducedSurfaceAxes&256u)==0u&&!surface;
+  let velocityActivity=select(reducedMetrics.w,0.0,certifiedBulk);
   // Restriction error is useful in flooded bulk and genuinely complex/thin
   // interface geometry. A calm one-axis free surface is different: CM12 is
   // supposed to keep that interface sharp, so its fine children can retain a
@@ -7280,12 +7342,7 @@ fn brickTouchesDemandedMissingWorldPage(brick:u32)->bool{
     let direction=directions[side];
     let neighbor=cm12WorldOwnerAt(source+direction);
     if(neighbor==INVALID&&cm12FluidFaceHasEmptyVoxelPair(source,direction)){return true;}
-    // Allocation precedes planning. Preserve the frontier floor after a
-    // demanded page has acquired a WDR identity but before it becomes active,
-    // so a coarse authored source is promoted to the page-local B8 seam rung
-    // in this same candidate transaction.
-    if(neighbor!=INVALID&&neighbor>=CM12_WDR_INITIAL_LEAVES
-      &&!brickActive(neighbor)){return true;}
+
   }
   return false;
 }
@@ -7350,24 +7407,15 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   // planners below edit only this intent; word 10 remains accepted authority.
   setCandidateBrickActiveAt(output,brickActive(brick));
   let current=atomicLoad(&activity[output+12u]);
-  // World-growth pages retain their complete B8 graph. Authored leaves may
-  // request an isolated generation even when no in-place candidate is packed.
+  // Record the request independently of accepted state; both host templates
+  // and prepared dynamic rungs participate in the in-place transaction.
   atomicStore(&activity[output+47u],current);
   if(brickResolutionFrozen(brick)){
     atomicStore(&activity[output+8u],current);
     atomicStore(&activity[output+9u],32u);
     return;
   }
-  if(brick>=CM12_WDR_INITIAL_LEAVES){
-    atomicStore(&activity[output+8u],current);
-    // Several paused interactions may prepare before the host completes a
-    // replacement. A later interaction must not erase the first dry page's
-    // construction request merely because its own source does not touch it.
-    let pending=atomicLoad(&activity[output+9u])&ACTIVITY_FROZEN_FRONTIER_GENERATION;
-    atomicStore(&activity[output+9u],select(1024u,
-      ACTIVITY_LIFECYCLE_CHANGED|pending,pending!=0u));
-    return;
-  }
+
   let injectionDemand=injectionReachesBrick(brick);
   // Injection is a topology transaction of its own. Preserve every brick the
   // drop does not touch so that a wetting gesture can refine its demanded pages and
@@ -7381,7 +7429,7 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   var planReasons=atomicLoad(&activity[output+9u]);
   // Inactive capacity contributes no accepted worklist cells, so changing its
   // metadata cannot save simulation work. Retain the accepted rung until
-  // physical transport demand activates the page directly at B8; this removes
+  // physical transport demand admits a graded candidate; this removes
   // background topology transactions without weakening the front floor.
   if(!brickActive(brick)){
     atomicStore(&activity[output+8u],current);
@@ -7613,6 +7661,13 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
       planReasons=4u;
       proofEpochs=0u;
     }
+    else if(coarseRequired<current&&(reasons&32768u)!=0u&&!policySurface){
+      // The accepted-cell submerged-ball receipt certifies bulk now. Waiting a
+      // surface-settle epoch here makes a rapidly translating core traverse
+      // the page before it can recover its coarse rung. Transfer and 2:1
+      // closure still certify the requested bulk level in this transaction.
+      requested=coarseRequired;planReasons=2048u;proofEpochs=0u;
+    }
     else if(coarseRequired<current){
       let geometricProof=(!policySurface||receiptFresh)&&p.coarseFirstHistory.z==0.0;
       proofEpochs=(history>>16u)&255u;
@@ -7689,7 +7744,7 @@ fn closePlannedResolution(@builtin(global_invocation_id)gid:vec3u){
     let neighborOutput=activityRecord(neighbor);
     let neighborResolution=atomicLoad(&activity[neighborOutput+8u]);
     let neighborAccepted=atomicLoad(&activity[neighborOutput+12u]);
-    required=max(required,max(1u,max(neighborResolution,neighborAccepted)
+    required=max(required,max(1u,select(max(neighborResolution,neighborAccepted),neighborResolution,coarseFirstEnabled())
       *brickSpan(brick)/(2u*brickSpan(neighbor))));
   }
   // Policy-tile sibling requests were cooperatively closed by
@@ -7717,12 +7772,11 @@ fn validateCandidateResolution(@builtin(global_invocation_id)gid:vec3u){
   let candidate=atomicLoad(&activity[output+8u]);
   let constructionActivation=
     constructionActivationIntentWithoutSlot(brick,candidate);
-  // GPU-grown leaves own a complete page-local B8 topology rather than a host
-  // template slot. They cannot rerung, but their same-rung active->inactive
-  // lifecycle delta must enter the ordinary shadow transaction.
+  // Prepared dynamic pages use the same candidate and lifecycle transaction
+  // as host templates, with separate stable storage for every rung.
   // Retirement has no candidate field to store. Fixed-resolution authored
   // leaves can therefore retire their existing geometry without a rerung slot,
-  // just like dynamic B8 pages. They must still enter the shared transaction.
+  // just like prepared dynamic pages. They must enter the shared transaction.
   let lifecycleRetirement=brickActive(brick)&&!candidateBrickActive(brick)
     &&candidate==accepted&&(brick<CM12_WDR_INITIAL_LEAVES
       ||atomicLoad(&activity[output+37u])!=INVALID);
@@ -7780,6 +7834,8 @@ fn validateCandidateResolution(@builtin(global_invocation_id)gid:vec3u){
   }
 }
 
+// Coarse-first publishes the complete graded plan atomically, including bulk
+// demotions. Legacy budgeted planning retains its accepted-neighbour floor.
 // All refinement is urgent because the refine-only 2:1 closure may have
 // introduced support rungs around a surface brick. A hard minimum-size region
 // and every outward grading-cap rung are urgent too: their globally closed
@@ -7800,8 +7856,7 @@ fn validateCandidateResolution(@builtin(global_invocation_id)gid:vec3u){
 // A backed cell rung does not by itself prove that every simultaneously
 // scheduled neighbour combination has a mortar in the immutable catalogue.
 // Validate physical faces against the exact scheduled image before preparing
-// candidate fields. A refusal requests backing and leaves the old image live.
-const ACTIVITY_GEOMETRIC_FACE_BACKING:u32=0x00040000u;
+// candidate fields. A refusal halts execution and leaves the old image live.
 // This planner is also reachable from the presentation-only shader family,
 // where resident-volume's private GV_SUPPORT constant is intentionally pruned.
 const CM12_GEOMETRIC_SUPPORT_BASE:u32=${geometricVolumeLayout?.supportControlBaseWords ?? 0}u;
@@ -7824,13 +7879,40 @@ fn geometricScheduledCellHasMaterial(cell:u32,brick:u32)->bool{
   }}}
   return false;
 }
+${SPARSE_CM12_DYNAMIC_SEAM_BINDING_WGSL}
+
 fn geometricScheduledCellMissingFace(cell:u32)->u32{
   var negative=vec3f(0.0);var positive=vec3f(0.0);
   let ownLower=cellCenter(cell)-0.5*cellWidths(cell);
   let ownUpper=cellCenter(cell)+0.5*cellWidths(cell);
   for(var incidence=incidenceBegin(cell);incidence<incidenceEnd(cell);incidence+=1u){
-    let row=incidenceRow(incidence);if(!shadowRowScheduled(row)){continue;}
-    let own=termCoefficient(incidenceTerm(incidence));let axis=rowAxis(row);
+    let dynamicFace=compiledDynamicBoundaryFace(cell,incidence);
+    if(dynamicFace!=0u){
+      if(dynamicFace==1u){let side=(incidence-ta(5u))%6u;
+        let area=cellVolume(cell)/cellWidths(cell)[side/2u];
+        if((side&1u)!=0u){positive[side/2u]+=area;}else{negative[side/2u]+=area;}}
+      continue;
+    }
+    let seam=compiledHostDynamicSeam(cell,incidence);
+    if(seam.x!=INVALID){
+      let axis=rowAxis(seam.x);let own=termCoefficient(seam.w);
+      let area=cellVolume(cell)/cellWidths(cell)[axis];
+      if(own<0.0){positive[axis]+=area;}else{negative[axis]+=area;}
+      continue;
+    }
+    var row=incidenceRow(incidence);var term=incidenceTerm(incidence);
+    if(cell<ta(2u)&&row>=ta(3u)){
+      // Retirement selects the immutable exterior slot again. Canonical
+      // incidence still points at the accepted dynamic seam until publication.
+      // Use the compiled exterior only if the scheduled image selects it;
+      // an active but unprepared neighbour must still fail certification.
+      let exterior=atomicLoad(&topologyArena[IMMUTABLE_HOST_INCIDENCE_BASE+2u*incidence]);
+      if(rowKind(exterior)==3u&&shadowRowScheduled(exterior)){
+        row=exterior;term=atomicLoad(&topologyArena[IMMUTABLE_HOST_INCIDENCE_BASE+2u*incidence+1u]);
+      }
+    }
+    if(!shadowRowScheduled(row)){continue;}
+    let own=termCoefficient(term);let axis=rowAxis(row);
     let terms=rowTermRange(row);var area=0.0;
     // Match the production subface compiler's structural measure. Aperture
     // belongs to flux, so a fully closed tank face still closes this cell.
@@ -7853,13 +7935,6 @@ fn geometricScheduledCellMissingFace(cell:u32)->u32{
       ||abs(positive[axis]-expected[axis])>9.5367431640625e-7*expected[axis]){return axis+1u;}
   }
   return 0u;
-}
-fn requestGeometricTopologyFaceBacking(brick:u32){
-  atomicOr(&conditioning[CM12_GEOMETRIC_SUPPORT_BASE+33u],1);
-  let output=activityRecord(brick);
-  atomicStore(&activity[output+47u],scheduledBrickResolution(brick));
-  atomicOr(&activity[output+9u],ACTIVITY_FROZEN_FRONTIER_GENERATION|ACTIVITY_GEOMETRIC_FACE_BACKING);
-  revokeCM12SourceTopologyLease();
 }
 
 var<workgroup>topologyScheduleTotals:array<vec2u,64>;
@@ -7892,7 +7967,7 @@ fn scheduleTopologyPreparation(@builtin(local_invocation_id)lid:vec3u){
     let hardRegionSupport=candidate<accepted
       &&p.refinementRegionControl.x>0u
       &&cachedRefinementGradingCap(brick)<BRICK_FINE_RESOLUTION;
-    if(candidate>accepted||lifecycle||hardRegionSupport){
+    if(candidate>accepted||lifecycle||hardRegionSupport||coarseFirstEnabled()){
       setTopologyPreparationScheduled(output,true);
       atomicStore(&activity[output+36u],generation);urgent+=1u;
     }else{ordinary+=1u;}
@@ -7944,7 +8019,8 @@ fn scheduleTopologyPreparation(@builtin(local_invocation_id)lid:vec3u){
 }
 
 // The scheduler's candidate image is frozen between dispatches. Each brick
-// uses a full workgroup to certify its cells; requests do not change that image.
+// uses a full workgroup to certify its cells. Missing compiled connectivity is
+// terminal: never turn a structural failure into a resident-generation request.
 @compute @workgroup_size(64)
 fn certifyGeometricTopologyFaces(@builtin(workgroup_id)wid:vec3u,
   @builtin(local_invocation_id)lid:vec3u){
@@ -7952,29 +8028,36 @@ fn certifyGeometricTopologyFaces(@builtin(workgroup_id)wid:vec3u,
   if(lane==0u){
     geometricBrickCertificationEnabled=0u;
     if(brick<p.dispatch.w&&atomicLoad(&activity[16])!=0u){
-      geometricBrickCertificationEnabled=select(0u,1u,scheduledBrickActive(brick)&&brickActive(brick));
+      geometricBrickCertificationEnabled=select(0u,1u,scheduledBrickActive(brick)
+        &&(brickActive(brick)||brick>=CM12_WDR_INITIAL_LEAVES));
     }
     atomicStore(&geometricBrickBackingMissing,0u);
   }
   if(workgroupUniformLoad(&geometricBrickCertificationEnabled)==0u){return;}
+  // A new dry page has no material cells yet, but its seams must be certified
+  // before it can be published as a receiver. Do not defer this to binding.
+  if(brick>=CM12_WDR_INITIAL_LEAVES&&lane<6u){
+    let side=lane;let axis=side/2u;
+    var point=8.0*vec3f(cm12WorldLeafCoordinate(brick))+vec3f(4.0);
+    point[axis]+=select(-4.0,4.0,(side&1u)!=0u);
+    if(cm12PreparedDynamicFace(brick,scheduledBrickResolution(brick),side,point).x==INVALID){
+      cm12RecordFailure(8u,brick,vec4u(side,scheduledBrickResolution(brick),0u,0u));
+      atomicStore(&geometricBrickBackingMissing,1u);
+    }
+  }
   let range=templateBrickCellRange(brick,scheduledBrickResolution(brick));
   for(var local=lane;local<range.y;local+=64u){
     let cell=range.x+local;
     if(!geometricScheduledCellHasMaterial(cell,brick)){continue;}
-    if(geometricScheduledCellMissingFace(cell)!=0u){
+    let missingAxis=geometricScheduledCellMissingFace(cell);
+    if(missingAxis!=0u){
+      cm12RecordFailure(8u,cell,vec4u(brick,missingAxis-1u,
+        acceptedBrickResolution(brick),scheduledBrickResolution(brick)));
       atomicStore(&geometricBrickBackingMissing,1u);
     }
   }
   workgroupBarrier();
   if(lane!=0u||atomicLoad(&geometricBrickBackingMissing)==0u){return;}
-  requestGeometricTopologyFaceBacking(brick);
-  let span=brickSpan(brick);
-  for(var facePatch=0u;facePatch<6u*span*span;facePatch+=1u){
-    let neighbor=cm12WorldOwnerAt(candidateFaceNeighborCoordinate(brick,facePatch));
-    if(neighbor!=INVALID&&scheduledBrickActive(neighbor)){
-      requestGeometricTopologyFaceBacking(neighbor);
-    }
-  }
   atomicStore(&conditioning[GEOMETRIC_TOPOLOGY_BACKING_MISSING],1);
 }
 
@@ -8053,9 +8136,8 @@ fn sparseWorldFrontierAllocationOwner(brick:u32,targetCoordinate:vec3i)->bool{
 fn allocateSparseWorldFrontier(@builtin(global_invocation_id)gid:vec3u){
   let brick=acceptedLeafInvocation(gid.x/26u);let localNeighbor=gid.x%26u;
   if(brick==INVALID||!brickActive(brick)){return;}
-  // The demanded page is always synthesized at B8. Planning later in this
-  // frame observes its inactive WDR identity and promotes a coarse authored
-  // source to the matching seam rung before either side can be published.
+  // Allocation binds an inactive identity to prepared multi-rung backing.
+  // Admission selects its coarsest graded rung before publication.
   let output=activityRecord(brick);
   // The directional mask also carries every nonzero dilute mass donor.
   // The coarser occupied/surface classifier is not transport residency proof.
@@ -8123,144 +8205,44 @@ fn clearSparseWorldFrontierResolutionCache(@builtin(global_invocation_id)gid:vec
     +ACTIVITY_FRONTIER_RESOLVED_MASK_WORD],0u);
 }
 
-// Publish a complete page-local B8 finite-volume graph. IDs deliberately stay
-// page-local until the accepted topology transaction assigns stable global
-// field addresses; the receipt cannot be mistaken for the older cell-only
-// prototype because flag 31 is set only after cells, rows, terms and incidence
-// have all crossed the workgroup barrier.
+// Connectivity and rung storage were prepared at construction. Allocation
+// binds a fresh directory identity and clears its physical fields only.
 @compute @workgroup_size(64)
 fn synthesizeSparseWorldFrontierPages(@builtin(local_invocation_index)lane:u32,
  @builtin(workgroup_id)wid:vec3u){
   let page=wid.x;let base=topologyWorklistBase();
   let validPage=page<atomicLoad(&topologyArena[base+27u]);
   let pageBase=candidateTopologyPageBase(select(0u,page,validPage));
-  let resolution=BRICK_FINE_RESOLUTION;
-  let cellCount=resolution*resolution*resolution;
+  let resolution=1u;
   let receipt=atomicLoad(&topologyArena[pageBase+3u]);
-  let complete=(receipt&0x8000001fu)==0x8000001fu;
-  let synthesize=validPage
-    &&atomicLoad(&topologyArena[pageBase+2u])==cellCount
-    &&!complete;
+  let synthesize=validPage&&atomicLoad(&topologyArena[pageBase+2u])==512u
+    &&(receipt&0x8000001fu)!=0x8000001fu;
   let leaf=atomicLoad(&topologyArena[pageBase]);
-  let faceCount=3u*(resolution+1u)*resolution*resolution;
-  let rowBase=16u;
-  let termBase=rowBase+7u*faceCount;
-  let incidenceRecords=termBase+4u*faceCount;
-  let globalCellBase=ta(2u)+page*cellCount;
-  let globalRowBase=ta(3u)+page*faceCount;
-  let globalTermBase=ta(4u)+page*(2u*faceCount);
-  if(synthesize&&lane==0u){
-    atomicStore(&topologyArena[pageBase+4u],faceCount);
-    atomicStore(&topologyArena[pageBase+5u],6u*cellCount);
-    // Dynamic B8 cell geometry is implicit in leaf + stable local index.
-    atomicStore(&topologyArena[pageBase+6u],0u);
-    atomicStore(&topologyArena[pageBase+7u],rowBase);
-    atomicStore(&topologyArena[pageBase+8u],termBase);
-    atomicStore(&topologyArena[pageBase+9u],0u);
-    atomicStore(&topologyArena[pageBase+10u],incidenceRecords);
-    atomicStore(&topologyArena[pageBase+12u],0u);
-    atomicStore(&topologyArena[pageBase+13u],0u);
+  let first=ta(2u)+page*CM12_DYNAMIC_CELLS;
+  for(var local=lane;local<select(0u,CM12_DYNAMIC_CELLS,synthesize);local+=64u){
+    let cell=first+local;
+    state[p.stateOffsets0.x+cell]=0.0;state[p.stateOffsets0.y+cell]=0.0;
+    state[p.stateOffsets0.z+cell]=1.0;state[p.stateOffsets0.w+cell]=1.0;
+    for(var bank=0u;bank<2u;bank+=1u){let at=select(p.stateOffsets1.x,p.stateOffsets1.y,bank==1u)+4u*cell;
+      state[at]=0.0;state[at+1u]=0.0;state[at+2u]=0.0;state[at+3u]=0.0;}
+    state[p.stateOffsets2.x+cell]=0.0;state[p.stateOffsets2.y+cell]=0.0;
+    state[p.stateOffsets2.z+cell]=0.0;state[p.stateOffsets2.w+cell]=0.0;
+    if(hasSolidBoundaries()){state[p.solidOffsets.x+cell]=1.0;}
+    if(hasStaticSolidVoxels()){refreshSparseCM12SolidWorldCell(cell);}
   }
-  let origin=cm12WorldLeafCoordinate(leaf)*i32(BRICK_FINE_RESOLUTION);
-  for(var local=lane;local<select(0u,cellCount,synthesize);local+=64u){
-    let z=local/(resolution*resolution);let rem=local-z*resolution*resolution;
-    let y=rem/resolution;let x=rem-y*resolution;
-    let lower=origin+vec3i(i32(x),i32(y),i32(z));
-    let stableCell=globalCellBase+local;
-    state[p.stateOffsets0.x+stableCell]=0.0;
-    state[p.stateOffsets0.y+stableCell]=0.0;
-    state[p.stateOffsets0.z+stableCell]=1.0;
-    state[p.stateOffsets0.w+stableCell]=1.0;
-    for(var bank=0u;bank<2u;bank+=1u){let velocity=select(
-      p.stateOffsets1.x,p.stateOffsets1.y,bank==1u)+4u*stableCell;
-      state[velocity]=0.0;state[velocity+1u]=0.0;
-      state[velocity+2u]=0.0;state[velocity+3u]=0.0;
-    }
-    state[p.stateOffsets2.x+stableCell]=0.0;
-    state[p.stateOffsets2.y+stableCell]=0.0;
-    state[p.stateOffsets2.z+stableCell]=0.0;
-    state[p.stateOffsets2.w+stableCell]=0.0;
-    if(hasSolidBoundaries()){state[p.solidOffsets.x+stableCell]=1.0;}
-    if(hasStaticSolidVoxels()){
-      state[solidVoxelCellOpenOffset()+stableCell]=geometricVoxelOpenFraction(
-        cm12SolidVoxelFractionQ8(lower));
-    }
-    for(var side=0u;side<6u;side+=1u){
-      let axis=side/2u;let positive=(side&1u)!=0u;
-      let q=vec3u(x,y,z);let faceAxis=q[axis]+select(0u,1u,positive);
-      let u=q[(axis+1u)%3u];let v=q[(axis+2u)%3u];
-      let row=axis*(resolution+1u)*resolution*resolution
-        +faceAxis+(resolution+1u)*(u+resolution*v);
-      let boundary=faceAxis==0u||faceAxis==resolution;
-      let term=2u*row+select(1u,0u,positive||boundary);
-      let incidence=dynamicIncidenceOverrideAt(pageBase,local,side);
-      if(incidence!=INVALID){
-        atomicStore(&topologyArena[incidence],globalRowBase+row);
-        atomicStore(&topologyArena[incidence+1u],globalTermBase+term);
-      }
-    }
-  }
-  for(var row=lane;row<select(0u,faceCount,synthesize);row+=64u){
-    let perAxis=(resolution+1u)*resolution*resolution;
-    let axis=row/perAxis;let local=row-axis*perAxis;
-    let faceAxis=local%(resolution+1u);let uv=local/(resolution+1u);
-    let u=uv%resolution;let v=uv/resolution;
-    let boundary=faceAxis==0u||faceAxis==resolution;
-    let terms=select(2u,1u,boundary);
-    let packed=(globalTermBase+2u*row)|(terms<<23u);
-    let kind=select(0u,3u,boundary);let metadata=(axis<<30u)|(kind<<28u);
-    var center=vec3f(0.0);center[axis]=f32(origin[axis])+f32(faceAxis);
-    center[(axis+1u)%3u]=f32(origin[(axis+1u)%3u])+f32(u)+0.5;
-    center[(axis+2u)%3u]=f32(origin[(axis+2u)%3u])+f32(v)+0.5;
-    let face=vec3i(floor(center));
-    var negative=face;negative[axis]-=1;
-    let open=geometricVoxelOpenFraction(max(cm12SolidVoxelFractionQ8(negative),
-      cm12SolidVoxelFractionQ8(face)));
-    let solidRow=globalRowBase+row;
+  for(var local=lane;local<select(0u,CM12_DYNAMIC_ROWS,synthesize);local+=64u){
+    let row=ta(3u)+page*CM12_DYNAMIC_ROWS+local;
+    state[p.stateOffsets1.z+row]=0.0;state[p.stateOffsets1.w+row]=0.0;
     if(hasSolidBoundaries()){
-      state[p.solidOffsets.y+3u*solidRow]=1.0;
-      state[p.solidOffsets.y+3u*solidRow+1u]=0.0;
-      state[p.solidOffsets.y+3u*solidRow+2u]=1.0;
-    }
-    if(hasStaticSolidVoxels()){
-      state[solidVoxelRowOpenOffset()+solidRow]=open;
-    }
-    atomicStore(&topologyArena[pageBase+rowBase+row],packed);
-    atomicStore(&topologyArena[pageBase+rowBase+faceCount+row],metadata);
-    // Match CPU exterior rows: width-one distance and dual area*distance are
-    // both one with coefficient +/-1. The old 2/.5 pair gave half a physical
-    // face in G^T W despite reporting unit row area.
-    atomicStore(&topologyArena[pageBase+rowBase+2u*faceCount+row],
-      bitcast<u32>(1.0));
-    atomicStore(&topologyArena[pageBase+rowBase+3u*faceCount+row],
-      bitcast<u32>(1.0));
-    atomicStore(&topologyArena[pageBase+rowBase+4u*faceCount+row],bitcast<u32>(center.x));
-    atomicStore(&topologyArena[pageBase+rowBase+5u*faceCount+row],bitcast<u32>(center.y));
-    atomicStore(&topologyArena[pageBase+rowBase+6u*faceCount+row],bitcast<u32>(center.z));
-    let stableRow=globalRowBase+row;
-    state[p.stateOffsets1.z+stableRow]=0.0;
-    state[p.stateOffsets1.w+stableRow]=0.0;
-    let term=pageBase+termBase+4u*row;
-    if(faceAxis==0u){
-      var q=vec3u(0u);q[axis]=0u;q[(axis+1u)%3u]=u;q[(axis+2u)%3u]=v;
-      atomicStore(&topologyArena[term],globalCellBase
-        +q.x+resolution*(q.y+resolution*q.z));
-      atomicStore(&topologyArena[term+1u],bitcast<u32>(1.0));
-    }else{
-      var q=vec3u(0u);q[axis]=faceAxis-1u;q[(axis+1u)%3u]=u;q[(axis+2u)%3u]=v;
-      atomicStore(&topologyArena[term],globalCellBase
-        +q.x+resolution*(q.y+resolution*q.z));
-      atomicStore(&topologyArena[term+1u],bitcast<u32>(-1.0));
-      if(!boundary){q[axis]=faceAxis;
-        atomicStore(&topologyArena[term+2u],globalCellBase
-          +q.x+resolution*(q.y+resolution*q.z));
-        atomicStore(&topologyArena[term+3u],bitcast<u32>(1.0));}
-    }
+      state[p.solidOffsets.y+3u*row]=1.0;state[p.solidOffsets.y+3u*row+1u]=0.0;
+      state[p.solidOffsets.y+3u*row+2u]=1.0;}
+    if(hasStaticSolidVoxels()){refreshSparseCM12SolidWorldRow(row);}
   }
   workgroupBarrier();
   if(synthesize&&lane==0u){
     atomicStore(&topologyArena[pageBase+3u],0x8000001fu);
-    // Publish the complete page as inactive B8 frontier capacity. The
+    atomicStore(&topologyArena[pageBase+1u],resolution);
+    // Publish the complete page as inactive coarse frontier capacity. The
     // ordinary candidate transaction below owns field initialization,
     // worklist membership, pressure classification, and the accepted
     // generation flip; geometry alone never becomes visible to physics.
@@ -8308,239 +8290,7 @@ fn restoreHostExteriorIncidence(cell:u32,seamRow:u32,seamTerm:u32){
   }
 }
 
-// Reconcile a complete B8 page against the candidate lifecycle image. The
-// positive page owns a dynamic/dynamic seam; a dynamic page adjacent to the
-// authored graph owns its negative seam. Retiring either side restores the
-// surviving exterior incidence before the shadow selector can publish it.
-@compute @workgroup_size(64)
-fn connectSparseWorldFrontierPages(@builtin(local_invocation_index)lane:u32,
- @builtin(workgroup_id)wid:vec3u){
-  let page=wid.x;let base=topologyWorklistBase();
-  // Canonical incidence is single-buffered. Mutate it only in the no-fail
-  // authorized publication tail, after candidate host fields/rungs have been
-  // installed and before the shadow selector becomes accepted. Rejection
-  // therefore leaves the live graph byte-identical.
-  if(atomicLoad(&topologyArena[base+3u])!=2u){return;}
-  if(page>=atomicLoad(&topologyArena[base+27u])){return;}
-  let pageBase=candidateTopologyPageBase(page);let receipt=atomicLoad(
-    &topologyArena[pageBase+3u]);
-  if(receipt!=0x8000001fu&&receipt!=0x8000003fu){return;}
-  let resolution=BRICK_FINE_RESOLUTION;let cellCount=resolution*resolution*resolution;
-  let faceCount=3u*(resolution+1u)*resolution*resolution;
-  let rowBase=atomicLoad(&topologyArena[pageBase+7u]);
-  let termBase=atomicLoad(&topologyArena[pageBase+8u]);
-  let globalCellBase=ta(2u)+page*cellCount;
-  let globalRowBase=ta(3u)+page*faceCount;
-  let globalTermBase=ta(4u)+page*(2u*faceCount);
-  let leaf=atomicLoad(&topologyArena[pageBase]);
-  let coordinate=cm12WorldLeafCoordinate(leaf);
-  let pageEnabled=candidateBrickActive(leaf);
-  for(var item=lane;item<3u*resolution*resolution;item+=64u){
-    let axis=item/(resolution*resolution);let uv=item%(resolution*resolution);
-    let u=uv%resolution;let v=uv/resolution;
-    let perAxis=(resolution+1u)*resolution*resolution;
-    let positiveRow=axis*perAxis+resolution+(resolution+1u)*(u+resolution*v);
-    var direction=vec3i(0);direction[axis]=1;
-    let upperLeaf=cm12WorldLookupExact(coordinate+direction,0u);
-    if(upperLeaf!=CM12_WDR_INVALID&&upperLeaf>=CM12_WDR_INITIAL_LEAVES){
-      let upperPage=upperLeaf-CM12_WDR_INITIAL_LEAVES;
-      if(upperPage<atomicLoad(&topologyArena[base+27u])){
-        let upperBase=candidateTopologyPageBase(upperPage);
-        let upperReceipt=atomicLoad(&topologyArena[upperBase+3u]);
-        if(upperReceipt==0x8000001fu||upperReceipt==0x8000003fu){
-          var upperQ=vec3u(0u);upperQ[axis]=0u;
-          upperQ[(axis+1u)%3u]=u;upperQ[(axis+2u)%3u]=v;
-          let upperLocal=upperQ.x+resolution*(upperQ.y+resolution*upperQ.z);
-          let upperCell=ta(2u)+upperPage*cellCount+upperLocal;
-          let term=pageBase+termBase+4u*positiveRow;
-          let incidence=dynamicIncidenceOverrideAt(upperBase,upperLocal,2u*axis);
-          if(pageEnabled&&candidateBrickActive(upperLeaf)){
-            atomicStore(&topologyArena[term+2u],upperCell);
-            atomicStore(&topologyArena[term+3u],bitcast<u32>(1.0));
-            atomicStore(&topologyArena[pageBase+rowBase+positiveRow],
-              (globalTermBase+2u*positiveRow)|(2u<<23u));
-            atomicStore(&topologyArena[pageBase+rowBase+faceCount+positiveRow],axis<<30u);
-            atomicStore(&topologyArena[pageBase+rowBase+2u*faceCount+positiveRow],
-              bitcast<u32>(1.0));
-            atomicStore(&topologyArena[pageBase+rowBase+3u*faceCount+positiveRow],
-              bitcast<u32>(1.0));
-            atomicStore(&topologyArena[incidence],globalRowBase+positiveRow);
-            atomicStore(&topologyArena[incidence+1u],globalTermBase+2u*positiveRow+1u);
-          }else{
-            // Both page boundary rows return to their synthesized one-term
-            // exterior form; the upper cell owns its negative row again.
-            atomicStore(&topologyArena[pageBase+rowBase+positiveRow],
-              (globalTermBase+2u*positiveRow)|(1u<<23u));
-            atomicStore(&topologyArena[pageBase+rowBase+faceCount+positiveRow],
-              (axis<<30u)|(3u<<28u));
-            atomicStore(&topologyArena[pageBase+rowBase+2u*faceCount+positiveRow],
-              bitcast<u32>(1.0));
-            atomicStore(&topologyArena[pageBase+rowBase+3u*faceCount+positiveRow],
-              bitcast<u32>(1.0));
-            let upperRows=3u*(resolution+1u)*resolution*resolution;
-            let upperGlobalRow=ta(3u)+upperPage*upperRows
-              +axis*perAxis+(resolution+1u)*(u+resolution*v);
-            let upperGlobalTerm=ta(4u)+upperPage*(2u*upperRows)
-              +2u*(axis*perAxis+(resolution+1u)*(u+resolution*v));
-            atomicStore(&topologyArena[incidence],upperGlobalRow);
-            atomicStore(&topologyArena[incidence+1u],upperGlobalTerm);
-            state[p.stateOffsets1.z+upperGlobalRow]
-              =state[p.stateOffsets1.z+globalRowBase+positiveRow];
-            state[p.stateOffsets1.w+upperGlobalRow]
-              =state[p.stateOffsets1.w+globalRowBase+positiveRow];
-          }
-        }
-      }
-    }else{
-      // The authored neighbour may cover this coordinate at a coarser WDR
-      // span, so resolve the actual fine owner rather than assuming that a
-      // host can only occur on a dynamic page's negative side.
-      var upperFine=coordinate*i32(BRICK_FINE_RESOLUTION);
-      upperFine[axis]+=i32(BRICK_FINE_RESOLUTION);
-      upperFine[(axis+1u)%3u]+=i32(u);upperFine[(axis+2u)%3u]+=i32(v);
-      let upperOwner=scheduledCompactOwnerCellAt(upperFine);
-      if(upperOwner.x!=INVALID&&upperOwner.y<CM12_WDR_INITIAL_LEAVES
-        &&upperOwner.z==BRICK_FINE_RESOLUTION&&scheduledBrickActive(upperOwner.y)){
-        let seamRow=globalRowBase+positiveRow;
-        let seamTerm=globalTermBase+2u*positiveRow;
-        let term=pageBase+termBase+4u*positiveRow;
-        let hostSeamEnabled=pageEnabled;
-        if(hostSeamEnabled){
-          atomicStore(&topologyArena[term+2u],upperOwner.x);
-          atomicStore(&topologyArena[term+3u],bitcast<u32>(1.0));
-          atomicStore(&topologyArena[pageBase+rowBase+positiveRow],
-            seamTerm|(2u<<23u));
-          atomicStore(&topologyArena[pageBase+rowBase+faceCount+positiveRow],axis<<30u);
-          atomicStore(&topologyArena[pageBase+rowBase+2u*faceCount+positiveRow],
-            bitcast<u32>(1.0));
-          atomicStore(&topologyArena[pageBase+rowBase+3u*faceCount+positiveRow],
-            bitcast<u32>(1.0));
-          let hostIncidenceBase=ta(10u);
-          var hostIncidencePatched=false;
-          for(var hostIncidence=incidenceBegin(upperOwner.x);
-            hostIncidence<incidenceEnd(upperOwner.x);hostIncidence+=1u){
-            let hostRow=atomicLoad(&topologyArena[
-              IMMUTABLE_HOST_INCIDENCE_BASE+2u*hostIncidence]);
-            let hostTerm=atomicLoad(&topologyArena[
-              IMMUTABLE_HOST_INCIDENCE_BASE+2u*hostIncidence+1u]);
-            if(incidenceRow(hostIncidence)==seamRow
-              &&incidenceTerm(hostIncidence)==seamTerm+1u){
-              hostIncidencePatched=true;break;
-            }
-            // A fine B8 host cell has exactly one incidence for each oriented
-            // face. A recycled page leaves that slot pointing at the old
-            // page-coordinate seam, so its stale center cannot participate in
-            // matching; axis plus coefficient sign is the stable identity.
-            if(rowAxis(hostRow)!=axis||termCoefficient(hostTerm)<=0.0){continue;}
-            atomicStore(&topologyArena[hostIncidenceBase+2u*hostIncidence],seamRow);
-            atomicStore(&topologyArena[hostIncidenceBase+2u*hostIncidence+1u],seamTerm+1u);
-            atomicAdd(&topologyArena[pageBase+12u],1u);
-            hostIncidencePatched=true;
-            break;
-          }
-          if(!hostIncidencePatched){
-            atomicAdd(&topologyArena[pageBase+13u],1u);
-            atomicStore(&topologyArena[pageBase+rowBase+positiveRow],
-              seamTerm|(1u<<23u));
-            atomicStore(&topologyArena[pageBase+rowBase+faceCount+positiveRow],
-              (axis<<30u)|(3u<<28u));
-            atomicStore(&topologyArena[pageBase+rowBase+2u*faceCount+positiveRow],
-              bitcast<u32>(1.0));
-            atomicStore(&topologyArena[pageBase+rowBase+3u*faceCount+positiveRow],
-              bitcast<u32>(1.0));
-          }
-        }else{
-          restoreHostExteriorIncidence(upperOwner.x,seamRow,seamTerm+1u);
-          atomicStore(&topologyArena[pageBase+rowBase+positiveRow],
-            seamTerm|(1u<<23u));
-          atomicStore(&topologyArena[pageBase+rowBase+faceCount+positiveRow],
-            (axis<<30u)|(3u<<28u));
-          atomicStore(&topologyArena[pageBase+rowBase+2u*faceCount+positiveRow],
-              bitcast<u32>(1.0));
-          atomicStore(&topologyArena[pageBase+rowBase+3u*faceCount+positiveRow],
-              bitcast<u32>(1.0));
-        }
-      }
-    }
-
-    // Author a dynamic negative row with the resident host cell as its lower
-    // term. Replace that cell's exterior incidence with this canonical seam:
-    // pressure and transport must see the same two-sided topology. The old
-    // exterior row itself remains immutable and is omitted from the shadow
-    // membership once the dynamic neighbour is scheduled.
-    let negativeRow=axis*perAxis+(resolution+1u)*(u+resolution*v);
-    var fine=coordinate*i32(BRICK_FINE_RESOLUTION);fine[axis]-=1;
-    fine[(axis+1u)%3u]+=i32(u);fine[(axis+2u)%3u]+=i32(v);
-    let lowerOwner=scheduledCompactOwnerCellAt(fine);
-    if(lowerOwner.x!=INVALID&&lowerOwner.y<CM12_WDR_INITIAL_LEAVES
-      &&lowerOwner.z==BRICK_FINE_RESOLUTION&&scheduledBrickActive(lowerOwner.y)){
-      var ownQ=vec3u(0u);ownQ[axis]=0u;
-      ownQ[(axis+1u)%3u]=u;ownQ[(axis+2u)%3u]=v;
-      let ownLocal=ownQ.x+resolution*(ownQ.y+resolution*ownQ.z);
-      let term=pageBase+termBase+4u*negativeRow;
-      let seamRow=globalRowBase+negativeRow;
-      let seamTerm=globalTermBase+2u*negativeRow;
-      let hostIncidenceBase=ta(10u);
-      let begin=incidenceBegin(lowerOwner.x);let end=incidenceEnd(lowerOwner.x);
-      let hostSeamEnabled=pageEnabled;
-      var hostIncidencePatched=false;
-      if(hostSeamEnabled){
-        atomicStore(&topologyArena[term],lowerOwner.x);
-        atomicStore(&topologyArena[term+1u],bitcast<u32>(-1.0));
-        atomicStore(&topologyArena[term+2u],globalCellBase+ownLocal);
-        atomicStore(&topologyArena[term+3u],bitcast<u32>(1.0));
-        atomicStore(&topologyArena[pageBase+rowBase+negativeRow],
-          (globalTermBase+2u*negativeRow)|(2u<<23u));
-        atomicStore(&topologyArena[pageBase+rowBase+faceCount+negativeRow],axis<<30u);
-        atomicStore(&topologyArena[pageBase+rowBase+2u*faceCount+negativeRow],
-          bitcast<u32>(1.0));
-        atomicStore(&topologyArena[pageBase+rowBase+3u*faceCount+negativeRow],
-          bitcast<u32>(1.0));
-        for(var hostIncidence=begin;hostIncidence<end;hostIncidence+=1u){
-          let hostRow=atomicLoad(&topologyArena[
-            IMMUTABLE_HOST_INCIDENCE_BASE+2u*hostIncidence]);
-          let hostTerm=atomicLoad(&topologyArena[
-            IMMUTABLE_HOST_INCIDENCE_BASE+2u*hostIncidence+1u]);
-          if(incidenceRow(hostIncidence)==seamRow
-            &&incidenceTerm(hostIncidence)==seamTerm){
-            hostIncidencePatched=true;break;
-          }
-          // See the positive-side case above: use the oriented fine-cell face
-          // identity because the previous page slot's center is stale here.
-          if(rowAxis(hostRow)!=axis||termCoefficient(hostTerm)>=0.0){continue;}
-          atomicStore(&topologyArena[hostIncidenceBase+2u*hostIncidence],seamRow);
-          atomicStore(&topologyArena[hostIncidenceBase+2u*hostIncidence+1u],seamTerm);
-          atomicAdd(&topologyArena[pageBase+12u],1u);
-          hostIncidencePatched=true;
-          break;
-        }
-        if(!hostIncidencePatched){
-          atomicAdd(&topologyArena[pageBase+13u],1u);
-        }
-      }else{
-        restoreHostExteriorIncidence(lowerOwner.x,seamRow,seamTerm);
-      }
-      let incidence=dynamicIncidenceOverrideAt(pageBase,ownLocal,2u*axis);
-      if(hostSeamEnabled&&hostIncidencePatched){
-        atomicStore(&topologyArena[incidence],seamRow);
-        atomicStore(&topologyArena[incidence+1u],seamTerm+1u);
-      }else{
-        atomicStore(&topologyArena[term],globalCellBase+ownLocal);
-        atomicStore(&topologyArena[term+1u],bitcast<u32>(1.0));
-        atomicStore(&topologyArena[pageBase+rowBase+negativeRow],
-          seamTerm|(1u<<23u));
-        atomicStore(&topologyArena[pageBase+rowBase+faceCount+negativeRow],
-          (axis<<30u)|(3u<<28u));
-        atomicStore(&topologyArena[pageBase+rowBase+2u*faceCount+negativeRow],
-              bitcast<u32>(1.0));
-        atomicStore(&topologyArena[pageBase+rowBase+3u*faceCount+negativeRow],
-              bitcast<u32>(1.0));
-        atomicStore(&topologyArena[incidence],seamRow);
-        atomicStore(&topologyArena[incidence+1u],seamTerm);
-      }
-    }
-  }
-}
+${SPARSE_CM12_DYNAMIC_SEAM_PUBLICATION_WGSL}
 
 @compute @workgroup_size(1)
 fn beginShadowTopology(){
@@ -8587,8 +8337,7 @@ fn buildShadowLeafWorklist(@builtin(local_invocation_index)lane:u32){
     compacted+=chunkCount;
     var deltaSelected=0u;
     if(enabled&&brick<p.dispatch.w
-      &&topologyPreparationScheduledAt(activityRecord(brick))
-      &&brick<CM12_WDR_INITIAL_LEAVES){
+      &&topologyPreparationScheduledAt(activityRecord(brick))){
       deltaSelected=1u;
     }
     let deltaPrefix=stablePressurePrefix(lane,deltaSelected);
@@ -8637,21 +8386,21 @@ fn reserveShadowWorklistRange(counterWord:u32,count:u32,capacity:u32)->u32{
   return current;
 }
 fn sparseWorldDynamicRowOwner(row:u32)->u32{
-  let rows=3u*(BRICK_FINE_RESOLUTION+1u)*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
+  let rows=CM12_DYNAMIC_ROWS;
   return CM12_WDR_INITIAL_LEAVES+(row-ta(3u))/rows;
 }
 fn dynamicNegativeRowSuperseded(row:u32)->bool{
   if(row<ta(3u)){return false;}
-  let resolution=BRICK_FINE_RESOLUTION;
-  let perAxis=(resolution+1u)*resolution*resolution;
-  let rows=3u*perAxis;let local=(row-ta(3u))%rows;
-  let axis=local/perAxis;let within=local-axis*perAxis;
-  if(within%(resolution+1u)!=0u){return false;}
-  let owner=sparseWorldDynamicRowOwner(row);var direction=vec3i(0);direction[axis]=-1;
-  let lower=cm12WorldLookupExact(cm12WorldLeafCoordinate(owner)+direction,0u);
-  return lower!=CM12_WDR_INVALID&&lower>=CM12_WDR_INITIAL_LEAVES
-    &&scheduledBrickActive(lower);
+  let within=(row-ta(3u))%CM12_DYNAMIC_ROWS;let resolution=cm12DynamicRowRung(within);
+  let leaf=sparseWorldDynamicRowOwner(row);
+  if(scheduledBrickResolution(leaf)!=resolution){return true;}
+  let local=within-cm12DynamicRowOffset(resolution);
+  let axis=local/((resolution+1u)*resolution*resolution);let face=local%(resolution+1u);
+  if(face!=0u&&face!=resolution){return false;}
+  let side=2u*axis+select(0u,1u,face==resolution);
+  return cm12ScheduledDynamicRowBinding(row).x!=row;
 }
+
 fn hostExteriorRowSupersededAt(row:u32,candidateImage:bool)->bool{
   if(row>=ta(3u)||rowKind(row)!=3u){return false;}
   let range=rowTermRange(row);if(range.y-range.x!=1u){return false;}
@@ -8672,9 +8421,15 @@ fn hostExteriorRowSupersededAt(row:u32,candidateImage:bool)->bool{
   if(neighbour==INVALID||neighbour==hostBrick
     ||!select(brickActive(neighbour),scheduledBrickActive(neighbour),candidateImage)){return false;}
   if(neighbour>=CM12_WDR_INITIAL_LEAVES){
-    // Dynamic fine seams retain the existing full-fine host requirement.
-    return select(acceptedBrickResolution(hostBrick),scheduledBrickResolution(hostBrick),
-      candidateImage)==BRICK_FINE_RESOLUTION;
+    if(candidateImage){
+      let side=2u*axis+select(0u,1u,coefficient<0.0);
+      let binding=cm12PreparedDynamicFace(hostBrick,cellResolution(hostCell),side,rowCenter(row));
+      return cm12PreparedDynamicTermForCell(binding,hostCell)!=INVALID;
+    }
+    for(var incidence=incidenceBegin(hostCell);incidence<incidenceEnd(hostCell);incidence+=1u){
+      if(ta(IMMUTABLE_HOST_INCIDENCE_BASE+2u*incidence)==row
+        &&incidenceRow(incidence)!=row){return true;}}
+    return false;
   }
   // Generation-zero sparse-air rows remain in the catalogue. An authored
   // neighbour supersedes them only when its physical footprint covers the
@@ -9302,7 +9057,7 @@ fn transferCandidateFaceSide(lid:vec3u,brick:u32,side:u32,validBrick:bool){
       let boundary=sourceU+du+accepted*(sourceV+dv);
       let range=candidateFaceBoundaryRowRange(brick,accepted,side,boundary);
       for(var at=0u;at<range.y;at+=1u){
-        let row=candidateFaceRow(range.x+at);if(!acceptedRowMember(row)){continue;}
+        let row=candidatePhysicalFaceRow(range.x+at);if(!acceptedRowMember(row)){continue;}
         let center=rowCenter(row);
         let p0=min(candidate-1u,u32(max(0.0,floor(
           (center[tangent0]-origin[tangent0])/scale))));
@@ -9508,12 +9263,21 @@ fn candidateAcceptedFaceSample(point:vec3f,axis:u32)->vec4f{
 }
 
 fn candidateRemappedFaceVelocity(row:u32)->f32{
-  if(acceptedRowMember(row)){return state[destinationFaceVelocity()+row];}
   let axis=rowAxis(row);let tangent0=select(0u,1u,axis==0u);
-  let tangent1=select(2u,1u,axis==2u);let center=rowCenter(row);
-  var widths=vec3f(0.0);
-  let beginRange=rowTermRange(row);let begin=beginRange.x;let end=beginRange.y;
-  for(var term=begin;term<end;term+=1u){widths=max(widths,cellWidths(termCell(term)));}
+  let tangent1=select(2u,1u,axis==2u);var center=rowCenter(row);
+  var widths=vec3f(0.0);var unchanged=true;
+  let binding=cm12ScheduledDynamicRowBinding(row);
+  if(binding.x!=INVALID){
+    let leaf=CM12_WDR_INITIAL_LEAVES+(binding.x-ta(3u))/CM12_DYNAMIC_ROWS;
+    center=8.0*vec3f(cm12WorldLeafCoordinate(leaf))
+      +vec3f(taf(binding.z+1u),taf(binding.z+2u),taf(binding.z+3u));
+    let area=taf(binding.z+4u);widths=vec3f(sqrt(area));
+    unchanged=all(center==rowCenter(row))&&area==rowStaticArea(row);
+  }else{
+    let range=rowTermRange(row);
+    for(var term=range.x;term<range.y;term+=1u){widths=max(widths,cellWidths(termCell(term)));}
+  }
+  if(acceptedRowMember(row)&&unchanged){return state[destinationFaceVelocity()+row];}
   let lower=center-0.5*widths;let upper=center+0.5*widths;
   var integral=0.0;var area=0.0;var v=lower[tangent1];
   // Integrate whole accepted-cell rectangles, rather than finest voxels, so
@@ -9639,7 +9403,13 @@ fn validateAndAuthorizeShadowTopology(){
     valid=valid&&leafReady;
   }
   if(!valid){atomicStore(&activity[21],1u);
-    atomicStore(&topologyArena[base+3u],3u);return;}
+    atomicStore(&topologyArena[base+3u],3u);
+    for(var index=0u;index<deltaCount;index+=1u){let leaf=topologyDeltaLeafInvocation(index);
+      if(leaf>=CM12_WDR_INITIAL_LEAVES&&leaf!=INVALID){
+        cm12RecordFailure(8u,leaf,vec4u(atomicLoad(&topologyArena[base+1u]),
+          select(0u,1u,ptrReady),select(0u,1u,effectsReady),atomicLoad(&topologyArena[tfxReserved+11u])));break;}}
+    return;
+  }
   // Authorization is candidate-only. The selector and every accepted
   // worklist/generation header remain unchanged until bounded publication
   // completes in later dispatches.
@@ -9677,82 +9447,19 @@ fn finalizeAuthorizedShadowTopology(){
   atomicStore(&topologyArena[base+2u],slot);
 }
 
-// Dynamic pages bypass host-template transfer/IBO effects because their
-// complete topology and dry fields were authored page-locally. They still join
-// the same shadow cell/row/leaf worklists and become active only after that
-// accepted selector flips, preserving one-generation visibility.
+// Dynamic pages now use the same certified transfer and publication as host
+// leaves. This marker only maintains page recycling's lifecycle receipt.
 @compute @workgroup_size(64)
 fn publishSparseWorldFrontierAcceptance(@builtin(workgroup_id)wid:vec3u,
  @builtin(local_invocation_index)lane:u32){
-  let page=wid.x;let base=topologyWorklistBase();
-  if(lane==0u){
-    frontierPublishEligible=0u;frontierPublishWasActive=0u;
-    frontierPublishNextActive=0u;
-    if(page<atomicLoad(&topologyArena[base+27u])){
-      let candidateBase=candidateTopologyPageBase(page);
-      let receipt=atomicLoad(&topologyArena[candidateBase+3u]);
-      if(receipt==0x8000001fu||receipt==0x8000003fu){
-        let candidateLeaf=atomicLoad(&topologyArena[candidateBase]);
-        let candidateOutput=activityRecord(candidateLeaf);
-        frontierPublishEligible=select(0u,1u,
-          topologyPreparationScheduledAt(candidateOutput)
-          &&atomicLoad(&activity[candidateOutput+36u])
-            ==atomicLoad(&topologyArena[base]));
-        frontierPublishWasActive=select(0u,1u,brickActive(candidateLeaf));
-        frontierPublishNextActive=select(0u,1u,candidateBrickActive(candidateLeaf));
-      }
-    }
+  if(lane!=0u||wid.x>=ta(topologyWorklistBase()+27u)
+    ||ta(topologyWorklistBase()+3u)!=2u){return;}
+  let leaf=CM12_WDR_INITIAL_LEAVES+wid.x;
+  if(cm12PreparedPageReady(leaf)){
+    atomicStore(&topologyArena[candidateTopologyPageBase(wid.x)+3u],0x8000003fu);
   }
-  workgroupBarrier();
-  if(workgroupUniformLoad(&frontierPublishEligible)==0u){return;}
-  let pageBase=candidateTopologyPageBase(page);
-  let leaf=atomicLoad(&topologyArena[pageBase]);let output=activityRecord(leaf);
-  let wasActive=workgroupUniformLoad(&frontierPublishWasActive)!=0u;
-  let nextActive=workgroupUniformLoad(&frontierPublishNextActive)!=0u;
-  let cellCount=BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
-  let rowCount=3u*(BRICK_FINE_RESOLUTION+1u)*BRICK_FINE_RESOLUTION
-    *BRICK_FINE_RESOLUTION;
-  if(wasActive&&!nextActive){
-    let first=ta(2u)+page*cellCount;
-    for(var local=lane;local<cellCount;local+=64u){let cell=first+local;
-      state[p.stateOffsets0.x+cell]=0.0;state[p.stateOffsets0.y+cell]=0.0;
-      state[p.stateOffsets0.z+cell]=1.0;state[p.stateOffsets0.w+cell]=1.0;
-      for(var bank=0u;bank<2u;bank+=1u){let velocity=select(
-        p.stateOffsets1.x,p.stateOffsets1.y,bank==1u)+4u*cell;
-        state[velocity]=0.0;state[velocity+1u]=0.0;
-        state[velocity+2u]=0.0;state[velocity+3u]=0.0;
-      }
-      state[p.stateOffsets2.x+cell]=0.0;state[p.stateOffsets2.y+cell]=0.0;
-      state[p.stateOffsets2.z+cell]=0.0;state[p.stateOffsets2.w+cell]=0.0;
-      state[p.stateOffsets3.y+cell]=0.0;state[p.stateOffsets3.z+cell]=0.0;
-      state[p.stateOffsets3.w+cell]=0.0;state[p.stateOffsets4.x+cell]=0.0;
-      state[p.stateOffsets4.y+cell]=0.0;
-    }
-    let firstRow=ta(3u)+page*rowCount;
-    for(var local=lane;local<rowCount;local+=64u){let row=firstRow+local;
-      state[p.stateOffsets1.z+row]=0.0;state[p.stateOffsets1.w+row]=0.0;
-      state[p.stateOffsets3.x+row]=0.0;
-    }
-  }
-  workgroupBarrier();
-  if(lane!=0u){return;}
-  atomicStore(&activity[output+10u],select(0u,1u,nextActive));
-  if(wasActive!=nextActive){
-    if(nextActive){atomicAdd(&activity[8],1u);atomicAdd(&activity[9],1u);
-      atomicAdd(&activity[11],cellCount);atomicStore(&activity[output+34u],0u);
-    }else{atomicSub(&activity[8],1u);atomicSub(&activity[11],cellCount);}
-    atomicAdd(&activity[10],1u);
-  }
-  setTopologyPreparationScheduled(output,false);
-  atomicStore(&activity[output+14u],0u);
-  atomicStore(&activity[output+23u],1u);
-  atomicStore(&activity[output+31u],1u);
-  atomicStore(&topologyArena[pageBase+3u],0x8000003fu);
 }
 
-// Frontier leaves bypass the host topology-delta replay, so keep both TEI2
-// banks coherent. This also writes inactive records after retirement before a
-// recycled leaf ID can expose the old coordinate through the other bank.
 @compute @workgroup_size(64)
 fn compileSparseWorldFrontierExecutionImage(
  @builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u){
@@ -9778,32 +9485,6 @@ fn compileSparseWorldFrontierExecutionImage(
 // Stage one demanded frontier page for atomic topology publication.
 // Swept transport and semantic injection have distinct request producers but
 // share the same complete-tile activation contract below.
-fn frozenFrontierNeedsCompiledGraph(brick:u32)->bool{
-  if(!topologyFreezeEnabled()||brick<CM12_WDR_INITIAL_LEAVES){return false;}
-  let coordinate=cm12WorldLeafCoordinate(brick);
-  let levels=max(1u,atomicLoad(&topologyArena[CM12_WDR_BASE+8u]));
-  for(var level=0u;level<levels;level+=1u){
-    let span=i32(1u<<level);
-    let origin=vec3i(cm12WorldFloorToSpan(coordinate.x,span),
-      cm12WorldFloorToSpan(coordinate.y,span),cm12WorldFloorToSpan(coordinate.z,span));
-    for(var side=0u;side<6u;side+=1u){
-      let axis=side/2u;var q=coordinate;
-      q[axis]=origin[axis]+select(-1,span,(side&1u)!=0u);
-      let neighbor=cm12WorldOwnerAt(q);
-      if(neighbor==INVALID||neighbor>=CM12_WDR_INITIAL_LEAVES){continue;}
-      if(level==0u){
-        if(BRICK_FINE_RESOLUTION*brickSpan(neighbor)>acceptedBrickResolution(neighbor)){return true;}
-      }else if(brickSpan(neighbor)>=2u*u32(span)){
-        // All new children of the receiver's required macro patch must wait
-        // together. Publishing a far child at B8 first would freeze it and
-        // prevent the compiler from allocating the compatible larger patch.
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
 // One staging body for every request producer. Intent only: accepted
 // membership, stable fields, cache ownership, receipts, counters and journals
 // remain untouched until the shared flip.
@@ -9813,28 +9494,12 @@ fn stageFrontierPageAtRung(brick:u32,requested:u32){
     select(requested,applySparseCM12RefinementRegionBounds(brick,requested),
       brickCandidatePlanningEnabled(brick)));
   atomicStore(&activity[output+9u],1u|ACTIVITY_LIFECYCLE_CHANGED);
-  if(frozenFrontierNeedsCompiledGraph(brick)){
-    // Page-local world graphs contain fine/fine seams. A frozen coarse host
-    // cannot be promoted to satisfy that storage format: ask the existing
-    // generation compiler for its mixed-ratio connection before publication.
-    atomicStore(&activity[output+47u],requested);
-    atomicOr(&activity[output+9u],ACTIVITY_FROZEN_FRONTIER_GENERATION);
-    return;
-  }
   setCandidateBrickActiveAt(output,true);
 }
 
 fn stageDemandedFrontierPage(brick:u32){
   revokeCM12SourceTopologyLease();
-  // A demand-led activation uses the finest complete packed topology available
-  // for this leaf. A newly synthesized page already owns its fixed B8 graph;
-  // an authored leaf takes the corresponding packed candidate rung. Material
-  // is already crossing into every page staged through this entry: semantic
-  // injection, a continuous geometric source, a swept donor cell, and the
-  // conservative preflight envelope all carry real transport.
-  stageFrontierPageAtRung(brick,
-    select(acceptedBrickResolution(brick),BRICK_FINE_RESOLUTION,
-      brickCandidatePlanningEnabled(brick)));
+  stageFrontierPageAtRung(brick,cm12DemandedFrontierGradingRung(brick));
 }
 
 // Coarsest rung a geometry-demanded page can adopt without violating the 2:1
@@ -9849,7 +9514,7 @@ fn cm12DemandedFrontierGradingRung(brick:u32)->u32{
   var rung=1u;
   for(var side=0u;side<6u*brickSpan(brick)*brickSpan(brick);side+=1u){
     let neighbor=cm12WorldOwnerAt(candidateFaceNeighborCoordinate(brick,side));
-    if(neighbor==INVALID||neighbor==brick){continue;}
+    if(neighbor==INVALID||neighbor==brick||!brickActive(neighbor)){continue;}
     let neighborOutput=activityRecord(neighbor);
     let neighborResolution=max(atomicLoad(&activity[neighborOutput+8u]),
       atomicLoad(&activity[neighborOutput+12u]));
@@ -9884,15 +9549,7 @@ fn cm12DemandedFrontierNeedsFineRung(brick:u32)->bool{
 // distance-mode scene, and any page carrying real transport all skip them, and
 // no lane reaches either walk unless it is staging this exact page.
 fn stageGeometricDemandFrontierPage(brick:u32){
-  revokeCM12SourceTopologyLease();
-  var requested=acceptedBrickResolution(brick);
-  if(brickCandidatePlanningEnabled(brick)){
-    requested=BRICK_FINE_RESOLUTION;
-    if(coarseFirstEnabled()&&!cm12DemandedFrontierNeedsFineRung(brick)){
-      requested=cm12DemandedFrontierGradingRung(brick);
-    }
-  }
-  stageFrontierPageAtRung(brick,requested);
+  stageDemandedFrontierPage(brick);
 }
 
 // Activate a page when its own accepted-liquid receipt asks for it

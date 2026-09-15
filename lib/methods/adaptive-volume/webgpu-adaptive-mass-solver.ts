@@ -291,8 +291,6 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   private simulationFailureError?: Error;
   private frameWork?: Promise<void>;
   private completedFrame?: () => void;
-  private geometricBackingPending = false;
-  private geometricBackingRetryAt_ms = 0;
   private generationCapacityRefusal?: {
     step: number; interactionRevision: number; scene: SceneDescription;
     options: AdaptiveMassSolverOptions;
@@ -844,7 +842,9 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
             }),
             topologyPageCapacityMaximum:
               options.topologyPageBudget
-                ?? (curvedInitialLiquidNeedsFineFrontier ? 1024 : undefined),
+                ?? (curvedInitialLiquidNeedsFineFrontier
+                  ? 1024
+                  : undefined),
             solidWorld: initialSolidWorld,
             refinementRegionParameters: packSparseCM12RefinementRegions(
               sceneRefinementRegions(scene), refinementRegionLattice(scene)),
@@ -1153,22 +1153,19 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       this.generationCapacityRefusal = undefined;
       this.info.topologyGenerationDeferred = undefined;
     }
-    if (this.geometricBackingPending && performance.now() < this.geometricBackingRetryAt_ms
-      && !this.liveRegionUpdateRequested && !this.sparseRuntime.pendingLiquidInteractions) return;
-    const backingRequest = this.geometricBackingPending;
     const preparationScene = this.scene;
     const preparationOptions = this.options;
     const liveRegionUpdate = this.liveRegionUpdateRequested;
     this.liveRegionUpdatePending = liveRegionUpdate;
     this.liveRegionUpdateRequested = false;
     const frozen = this.options.activityPolicy?.freezeTopology === true;
-    const frontierCheck = frozen || this.frozenFrontierPending || backingRequest
+    const frontierCheck = frozen || this.frozenFrontierPending
       || this.sparseRuntime.pendingLiquidInteractions;
     const preparationStarted = performance.now();
     const cadence = this.options.activityPolicy?.coarseFirst && this.sparseRuntime.generationPlanningRequired
       ? Math.max(1, this.options.activityPolicy.topologyCadenceSteps)
       : Math.max(64, this.options.activityPolicy?.topologyCadenceSteps ?? 64);
-    if (!backingRequest && !liveRegionUpdate && !frozen && !this.frozenFrontierPending && !this.sparseRuntime.pendingLiquidInteractions
+    if (!liveRegionUpdate && !frozen && !this.frozenFrontierPending && !this.sparseRuntime.pendingLiquidInteractions
       && !this.topologyGenerationPolicyDirty && (this.info.encodedSteps ?? 0) % cadence !== 0) return;
     const policyDirty = this.topologyGenerationPolicyDirty;
     this.topologyGenerationPolicyDirty = false;
@@ -1357,7 +1354,6 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       this.atlas = this.sparseRuntime.acceptedAtlas;
       this.info.allocatedBytes = this.presentation.allocatedBytes + this.sparseRuntime.allocatedBytes;
       this.info.topologyGenerationError = undefined;
-      if (supportVerified) this.geometricBackingPending = false;
       if (supportVerified && !this.frozenFrontierPending
         && interactionRevision === this.sparseRuntime.pendingLiquidInteractionRevision
         && frozen === (this.options.activityPolicy?.freezeTopology === true)
@@ -1409,15 +1405,9 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         this.sparseRuntime.cancelTopologyPreparation();
       }
     }).finally(() => {
-      // Keep an unserved geometric request sticky. Capacity saturation or a
-      // deferred plan must not cause a new heavy attempt on every animation
-      // tick; the ordinary advance/edit path retries after this cooldown.
-      if (backingRequest && this.geometricBackingPending) {
-        this.geometricBackingRetryAt_ms = performance.now() + 1000;
-      }
       this.info.topologyPreparationDurationMs = performance.now() - preparationStarted;
       this.info.topologyGenerationPending = !this.generationCapacityRefusal
-        && (this.frozenFrontierPending || this.geometricBackingPending);
+        && this.frozenFrontierPending;
       this.topologyGenerationWork = undefined;
       this.liveRegionUpdatePending = false;
       if (liveRegionUpdate && retryInteractions) this.liveRegionUpdateRequested = true;
@@ -1438,7 +1428,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     this.info.topologyPreparationMaximumSliceMs = this.sparseRuntime.generationPreparationMaximumSliceMs;
     this.info.topologyPreparationMaximumSliceOperation = this.sparseRuntime.generationPreparationMaximumSliceOperation;
     if (this.simulationFailureError) throw this.simulationFailureError;
-    if (this.geometricBackingPending || this.frozenFrontierPending || this.sparseRuntime.pendingLiquidInteractions) {
+    if (this.frozenFrontierPending || this.sparseRuntime.pendingLiquidInteractions) {
       this.scheduleTopologyGeneration();
       return false;
     }
@@ -1590,10 +1580,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       if (pressureIterationReadback) {
         this.sparseRuntime.encodePressureIterationReceipt(encoder, pressureIterationReadback);
       }
-      const failureReceipt = this.sparseRuntime.captureSimulationFailure(encoder, () => {
-        this.geometricBackingPending = true;
-        this.geometricBackingRetryAt_ms = 0;
-      });
+      const failureReceipt = this.sparseRuntime.captureSimulationFailure(encoder);
       frameCapture?.closeCommands();
       this.device.queue.submit([encoder.finish()]);
       const failureWork = this.observeSimulationFailure(failureReceipt, completedTime_s);

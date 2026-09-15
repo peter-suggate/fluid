@@ -71,6 +71,9 @@ export interface LevelSetVolumeWGSLOptions {
    * The provider reads final projected MAC wall velocities; the core takes the
    * maximum with transported phi after characteristic sampling. */
   readonly releasedWallPhi?: (positionFine: string) => string;
+  /** Optional sparse-domain proof: positive radius of a ball containing only
+   * unrepresented air in the source image. Zero means no certificate. */
+  readonly unrepresentedAirClearance?: (positionFine: string) => string;
   readonly dtExpression: string;
   /** Controller width for one coarse-to-fine constraint projection dispatch. */
   readonly constraintWidthExpression: string;
@@ -356,7 +359,18 @@ fn lsvExtendFromOwner(slot:u32,position:vec3f,axis:u32,side:u32,owner:u32)->LsvE
   let widths=vec3f(lsvFloat(at+3u),lsvFloat(at+4u),lsvFloat(at+5u));
   let boundary=clamp(position,lower,lower+widths);let distance=abs(position[axis]-boundary[axis]);
   let source=lsvSampleCellOrdinal(slot,owner,clamp((boundary-lower)/widths,vec3f(0.0),vec3f(1.0)));
-  if(!source.metric){return LsvExtensionCandidate(lsvInvalidSample(),distance);}
+  if(!source.metric){
+    // Deep support is a signed clearance, not a distance slope. It can still
+    // certify a nearby departure without inventing an interface location.
+    // Use the boundary sample's shorter displacement, not the characteristic
+    // from the original vertex, which can cross several supported cells first.
+    let clearance=abs(source.phi)-length(position-boundary);
+    if(!source.valid||!lsvFinite(source.phi)||clearance<=1e-5){
+      return LsvExtensionCandidate(lsvInvalidSample(),distance);}
+    let phi=select(clearance,-clearance,source.phi<0.0);
+    return LsvExtensionCandidate(LsvPhiSample(phi,true,false,
+      select(LSV_SUPPORT_DEEP_AIR,LSV_SUPPORT_DEEP_LIQUID,phi<0.0)),distance);
+  }
   var phi=source.phi;
   if(distance>0.0){var inward=boundary;
     inward[axis]=select(lower[axis],lower[axis]+widths[axis],side!=0u);
@@ -776,6 +790,7 @@ fn lsvProjectConstraint(slot:u32,vertex:u32,width:u32){
     lsvStoreAdvectedPhi(slot,destination,vertex,deepCertified,
       select(LSV_SUPPORT_DEEP_AIR,LSV_SUPPORT_DEEP_LIQUID,deepCertified<0.0),releasedWall);return;}
   var sample=lsvSampleAtSlot(slot,samplePosition);
+  let sampledDeparture=sample.valid;
   if(!sample.valid){sample=lsvExtendFromSlot(slot,samplePosition);}
   // A trilinear sample takes the weakest corner support, so a metric vertex
   // whose departure lands in a coarse phi cell with one corner beyond the
@@ -784,7 +799,7 @@ fn lsvProjectConstraint(slot:u32,vertex:u32,width:u32){
   // keep the vertex metric when its own tag was metric and the sampled value
   // lies inside the public band. Redistance then still owns re-tagging, with
   // a seed available in the column instead of a vertex nothing can recover.
-  ${LEVELSET_VOLUME_SPAN_BAND_ENABLED ? `if(sample.valid&&!sample.metric&&deepSupport==LSV_SUPPORT_METRIC
+  ${LEVELSET_VOLUME_SPAN_BAND_ENABLED ? `if(sampledDeparture&&sample.valid&&!sample.metric&&deepSupport==LSV_SUPPORT_METRIC
     &&lsvFinite(sample.phi)&&abs(sample.phi)<=4.0){
     sample.metric=true;sample.support=LSV_SUPPORT_METRIC;}` : ""}
   if(velocity0.w<=0.0||velocity1.w<=0.0||!sample.valid){
@@ -801,6 +816,16 @@ fn lsvProjectConstraint(slot:u32,vertex:u32,width:u32){
       let certified=select(clearance,-clearance,sourcePhi<0.0);
       lsvStoreAdvectedPhi(slot,destination,vertex,certified,
         select(LSV_SUPPORT_DEEP_AIR,LSV_SUPPORT_DEEP_LIQUID,certified<0.0),releasedWall);return;}
+    // A positive metric vertex may backtrace into a retired air page too.
+    // The provider independently certifies the departure is outside every
+    // represented source page; its clearance, not the old distance tag,
+    // justifies a deep-air result. Represented holes still fail closed.
+    ${options.unrepresentedAirClearance ? `if(!sample.valid&&velocity0.w>0.0&&velocity1.w>0.0
+      &&sourceSupport!=LSV_SUPPORT_ABSENT&&lsvFinite(sourcePhi)&&sourcePhi>0.0){
+      let airClearance=${options.unrepresentedAirClearance("samplePosition")};
+      if(airClearance>0.0){
+        lsvStoreAdvectedPhi(slot,destination,vertex,airClearance,LSV_SUPPORT_DEEP_AIR,releasedWall);return;}
+    }` : ""}
     lsvAdvectionFault(slot,vertex,samplePosition);
     lsvStoreFloat(lsvPhiBase(slot,destination)+vertex,${qnan});lsvStore(lsvSupportBase(slot,destination)+vertex,LSV_SUPPORT_ABSENT);return;}
   lsvStoreAdvectedPhi(slot,destination,vertex,sample.phi,sample.support,releasedWall);}

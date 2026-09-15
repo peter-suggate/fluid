@@ -45,3 +45,17 @@ test("adaptive level-set advection receipt preserves its mixed mask and departur
   assert.deepEqual(failure.operands, [64, 0.75, 6.5, 21.25]);
   assert.equal(failure.rawWords[6], 64);
 });
+
+test("missing compiled topology reports the exact cell, axis and rung transition", () => {
+  const words = new Uint32Array(CM12_FAILURE_WORDS);
+  words.set([1, 8, cm12FailureKernelId("certifyGeometricTopologyFaces"),
+    6, 7, 165060, 214, 1, 4, 8]);
+  const failure = decodeCM12SimulationFailure(words)!;
+  assert.equal(failure.code, "MISSING_COMPILED_TOPOLOGY_FACE");
+  assert.equal(failure.kernel, "certifyGeometricTopologyFaces");
+  assert.equal(failure.ownerId, 165060);
+  assert.deepEqual(failure.operandNames,
+    ["brick", "axis", "acceptedResolution", "scheduledResolution"]);
+  assert.deepEqual(failure.operands, [214, 1, 4, 8]);
+  assert.match(new SimulationFailureError(failure).message, /runtime topology repair refused/);
+});
