@@ -749,10 +749,28 @@ fn buildWholeFrameVolumeCoupling(@builtin(global_invocation_id)gid:vec3u){
   if(edges==0u){atomicAdd(&conditioning[GV_WHOLE_FRAME_CONTROL+2u],1);}
 }
 
+fn gvDeleteAirRoundoffResidue(donor:u32,capacity:f32){
+  // Restriction can put arithmetic dust into one cell of an otherwise wet
+  // page, which cannot qualify for whole-page residue deletion. Clear only
+  // roundoff-sized, positively classified air here, before receiver demand.
+  // Coupling edges already exist but their final gather reads this zero V.
+  let residue=state[GV_CURRENT+donor];
+  if(residue>0.0&&residue<=gvRoundoff(capacity)){
+    let phase=lsvCellSample(donor);
+    if(phase.valid&&phase.phi>0.0){
+      state[GV_CURRENT+donor]=0.0;
+      state[destinationDensity()+donor]=0.0;
+      incrementalActivityMarkCellClosure(donor);
+      gvAddPhiReduction(24u,residue);gvAddPhiReduction(25u,residue);
+    }
+  }
+}
+
 @compute @workgroup_size(64)
 fn addWholeFrameUncoveredDonorFallbacks(@builtin(global_invocation_id)gid:vec3u){
   let donor=acceptedTemplateCellInvocation(gid.x);if(donor==INVALID||gvFailed()){return;}
   let capacity=gvDonorCapacity(donor);if(capacity<=0.0){return;}
+  gvDeleteAirRoundoffResidue(donor,capacity);
   // Physical open-boundary outflow is a donor-only sink edge. Its raw swept
   // measure participates in every donor normalization and is accounted after
   // the final round; it is never invented as a receiver cell.

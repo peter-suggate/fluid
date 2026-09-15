@@ -65,3 +65,47 @@ ${cleanup}`;
     readback.unmap();state.destroy();counters.destroy();readback.destroy();
   } finally {device?.destroy();live.clear();await releaseWebGPUExclusiveLock();}
 });
+
+(process.env.WEBGPU_NODE_MODULE ? test : test.skip)("air roundoff cleanup preserves meaningful, wet and unresolved donors and records loss once", async () => {
+  await acquireWebGPUExclusiveLock("dawn-test", "air-roundoff-residue");
+  let device: GPUDevice | undefined;
+  try {
+    const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href); Object.assign(globalThis, dawn.globals);
+    const gpu = dawn.create(["backend=metal"]); live.add(gpu);
+    const adapter = await gpu.requestAdapter(); assert.ok(adapter); device = await adapter.requestDevice(); assert.ok(device);
+    const source = readFileSync(new URL("../lib/methods/adaptive-volume/resident-volume.wgsl.ts", import.meta.url), "utf8");
+    const reduction = source.match(/fn gvAddPhiReduction\([\s\S]*?\n}/)![0];
+    const cleanup = source.match(/fn gvDeleteAirRoundoffResidue\([\s\S]*?\n}/)![0];
+    const roundoff = source.match(/fn gvRoundoff\([^\n]+/)![0];
+    const module = device.createShaderModule({ code: `
+@group(0)@binding(0)var<storage,read_write>state:array<f32>;
+@group(0)@binding(1)var<storage,read_write>conditioning:array<atomic<i32>>;
+const GV_CURRENT=8u; const GV_WHOLE_FRAME_CONTROL=0u;
+fn destinationDensity()->u32{return 0u;}
+struct Phase {valid:bool,phi:f32}
+fn lsvCellSample(c:u32)->Phase{return Phase(c!=3u,select(1.0,-1.0,c==2u));}
+fn incrementalActivityMarkCellClosure(c:u32){atomicAdd(&conditioning[28u],1);}
+${roundoff}
+${reduction}
+${cleanup}
+@compute @workgroup_size(1)fn run(@builtin(global_invocation_id)id:vec3u){gvDeleteAirRoundoffResidue(id.x,8.0);}` });
+    assert.deepEqual((await module.getCompilationInfo()).messages.filter(m => m.type === "error"), []);
+    const values = new Float32Array([3.1114633e-28,1e-6,1e-6,1e-6,1e-3,0,-1e-8,NaN]);
+    const initial = new Float32Array(16); initial.set(values); initial.set(values,8);
+    const state = device.createBuffer({size:64,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
+    const counters = device.createBuffer({size:128,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
+    const readback = device.createBuffer({size:192,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
+    device.queue.writeBuffer(state,0,initial);
+    const pipeline = device.createComputePipeline({layout:"auto",compute:{module,entryPoint:"run"}});
+    const group = device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:state}},{binding:1,resource:{buffer:counters}}]});
+    const encoder=device.createCommandEncoder(),pass=encoder.beginComputePass();pass.setPipeline(pipeline);pass.setBindGroup(0,group);
+    pass.dispatchWorkgroups(8);pass.dispatchWorkgroups(8);pass.end();
+    encoder.copyBufferToBuffer(state,0,readback,0,64);encoder.copyBufferToBuffer(counters,0,readback,64,128);
+    device.queue.submit([encoder.finish()]);await readback.mapAsync(GPUMapMode.READ);
+    const result=new Float32Array(readback.getMappedRange());
+    for(let i=0;i<16;i++) assert.ok(Object.is(result[i],i%8<2?0:initial[i]),`state ${i}`);
+    assert.equal(result[16+24],values[1]);assert.equal(result[16+25],values[1]);
+    assert.equal(new Uint32Array(result.buffer)[16+28],2);
+    readback.unmap();state.destroy();counters.destroy();readback.destroy();
+  } finally {device?.destroy();live.clear();await releaseWebGPUExclusiveLock();}
+});
