@@ -528,6 +528,116 @@ fn accumulate_direct_surface_normals(
     crossed
 }
 
+/// Publish the next-rung certificate after accepted direct-surface publication.
+/// Like the GPU fine-phi band, the 2D vertex field survives solver coarsening
+/// unchanged. Evidence is candidate-spacing curvature and accepted V/phi
+/// agreement, not a fictitious restriction of that independent phi lattice.
+pub fn publish_direct_surface_proofs(
+    topology: &CompiledTopology<2>,
+    fields: &Fields,
+    surface: &RdfSurface,
+    options: &ResolutionPolicyOptions,
+    state: &mut ResolutionPolicyState,
+    dt: f64,
+    cell_size: f64,
+) -> Result<(), ResolutionError> {
+    validate_inputs(topology, fields, dt, cell_size)?;
+    validate_direct_surface(topology, Some(surface))?;
+    let fill = levelset_surface::implied_fill_fine_cells(surface)
+        .map_err(|_| ResolutionError::FieldShape)?;
+    let nx = surface.dimensions[0] as usize;
+    let policy = &options.policy;
+    for brick in &topology.bricks {
+        let history = state.history.entry(brick.seed.key).or_default();
+        history.surface_proof = None;
+        // GPU surface-proof publication is gated by the accepted SURFACE
+        // reason. Empty/bulk quiet epochs belong to ordinary coarsening and
+        // must survive this publication even when no surface proof exists.
+        if history.reasons & activity_reason::SURFACE == 0 { continue; }
+        let target = (brick.seed.resolution / 2).max(1);
+        if !brick.seed.active || brick.seed.resolution <= 1 || brick.seed.span_bricks != 1
+            || !policy.activity_signals || !policy.surface_coarsening_enabled
+            || options.injection_demanded_brick_keys.contains(&brick.seed.key)
+            || policy.forced_surface_resolution_for_qa.is_some()
+            || history.reasons & activity_reason::THIN_FLUID != 0
+            || velocity_floor(history.velocity_travel, thresholds(policy, dt, cell_size),
+                policy.activity_signals) > target
+            || options.static_boundary_floor_by_brick.get(&brick.seed.key)
+                .is_some_and(|&floor| floor > target)
+            || apply_regions(target, &brick.seed, &options.refinement_regions) != target
+        {
+            history.proof_epochs = 0;
+            continue;
+        }
+        let step = width(&brick.seed, target);
+        let (lo, _) = bounds(&brick.seed);
+        let mut normal_min = [1.0_f64; 2];
+        let mut normal_max = [-1.0_f64; 2];
+        let sample = |p: [f64; 2]| crate::levelset_redistance::sample_scalar(
+            surface, p.map(|v| v as f32)).unwrap() as f64;
+        let samples = if target == 1 { 5 } else { usize::from(target).pow(2) };
+        for index in 0..samples {
+            let mut q = if target == 1 { [0.0; 2] } else {
+                [(index % target as usize) as f64, (index / target as usize) as f64]
+            };
+            if target == 1 && index > 0 {
+                q[(index - 1) / 2] = if index % 2 == 0 { 1.0 } else { -1.0 };
+            }
+            let p = [lo[0] as f64 + (q[0] + 0.5) * step,
+                lo[1] as f64 + (q[1] + 0.5) * step];
+            let phi = sample(p);
+            let mut crossing = phi.abs() <= 0.75 * step;
+            let mut gradient = [0.0_f64; 2];
+            for axis in 0..2 {
+                let mut a = p; let mut b = p;
+                a[axis] -= step; b[axis] += step;
+                let (a, b) = (sample(a), sample(b));
+                crossing |= (a < 0.0) != (phi < 0.0) || (b < 0.0) != (phi < 0.0);
+                gradient[axis] = b - a;
+            }
+            let length = gradient[0].hypot(gradient[1]);
+            if crossing && length > 1e-6 {
+                for axis in 0..2 {
+                    let n = gradient[axis] / length;
+                    normal_min[axis] = normal_min[axis].min(n);
+                    normal_max[axis] = normal_max[axis].max(n);
+                }
+            }
+        }
+        let diameter = (normal_max[0] - normal_min[0]).max(0.0)
+            .hypot((normal_max[1] - normal_min[1]).max(0.0));
+        let mut valid = diameter / target as f64 <= policy.curvature_tolerance;
+        for id in brick.cell_range.clone() {
+            let cell = &topology.graph.cells[id as usize];
+            let capacity = fields.capacity[id as usize] as f64 * cell.measure as f64;
+            if capacity <= 0.0 { continue; }
+            let h = cell.widths[0].min(cell.widths[1]) as f64;
+            let phi = sample([cell.center[0] as f64, cell.center[1] as f64]);
+            if phi.abs() > 2.0 * h { continue; }
+            let mut implied = 0.0;
+            for y in cell.minimum[1] as usize..cell.maximum[1] as usize {
+                for x in cell.minimum[0] as usize..cell.maximum[0] as usize {
+                    implied += fill[x + nx * y] as f64;
+                }
+            }
+            let expected = implied * fields.capacity[id as usize] as f64;
+            let volume = fields.density[id as usize] as f64 * cell.measure as f64;
+            let tolerance = (VOLUME_ROUNDOFF_RATIO * capacity).max(
+                policy.surface_displacement_tolerance_cells * cell.measure as f64 / h);
+            valid &= volume.is_finite() && (volume - expected).abs() <= tolerance;
+        }
+        if valid {
+            history.surface_proof = Some(SurfaceProofState {
+                generation_by_target_resolution: BTreeMap::from([
+                    (target, topology.graph.topology_generation)]),
+            });
+        } else {
+            history.proof_epochs = 0;
+        }
+    }
+    Ok(())
+}
+
 fn constrained_demanded_rung(
     brick: &BrickSeed,
     donor_rung: u8,
@@ -623,7 +733,9 @@ fn measure(
         cut |= fields.capacity[id] < 0.999;
         occupied_cell |= rho > policy.residency_density;
         substantial |= fill > policy.surface_density_minimum;
-        let wet = fill >= 0.5;
+        let own_phi = direct_surface.and_then(|surface|
+            crate::levelset_redistance::sample_scalar(surface, [cell.center[0], cell.center[1]]));
+        let wet = own_phi.map_or(fill >= 0.5, |phi| phi < 0.0);
         let vx = fields.cell_velocity[2 * id];
         let vy = fields.cell_velocity[2 * id + 1];
         if policy.coarse_first && wet {
@@ -679,7 +791,12 @@ fn measure(
                 let neighbor_fill =
                     fields.density[nid] as f64 / (fields.capacity[nid] as f64).max(1e-6);
                 side_has_fluid |= neighbor_fill > feature_density;
-                let crosses = (neighbor_fill >= 0.5) != wet;
+                let neighbor_wet = direct_surface.map_or(neighbor_fill >= 0.5, |surface| {
+                    let neighbor = &topology.graph.cells[nid];
+                    crate::levelset_redistance::sample_scalar(surface,
+                        [neighbor.center[0], neighbor.center[1]]).is_some_and(|phi| phi < 0.0)
+                });
+                let crosses = neighbor_wet != wet;
                 let same_brick = topology.graph.cells[nid].brick_key == Some(brick.seed.key);
                 if crosses && (!wet || same_brick || policy.coarse_first) {
                     interface_cell = true;
@@ -692,7 +809,7 @@ fn measure(
                     predicted =
                         predicted.max(f(dt * v.abs() / (0.25 * row.distance as f64).max(1e-12)));
                 }
-                if wet && neighbor_fill >= 0.5 {
+                if wet && neighbor_wet {
                     let nvx = fields.cell_velocity[2 * nid];
                     let nvy = fields.cell_velocity[2 * nid + 1];
                     let dv = (vx as f64 - nvx as f64)
@@ -720,8 +837,9 @@ fn measure(
             }
         }
         let thickness = rho.clamp(0.0, 1.0) * (cell.widths[0] as f64).min(cell.widths[1] as f64);
-        let cell_thin = fill > feature_density
-            && thickness < policy.thin_feature_cells
+        let cell_thin = own_phi.map_or(
+            fill > feature_density && thickness < policy.thin_feature_cells,
+            |phi| wet && -(phi as f64) <= 0.5 * policy.thin_feature_cells)
             && ((exposed & 3) == 3 || (exposed & 12) == 12);
         thin |= cell_thin;
         if direct_surface.is_none()
@@ -748,7 +866,8 @@ fn measure(
         // refine its entire interior solely because its absolute speed grows.
         if (interface_cell && wet)
             || cell_thin
-            || (policy.coarse_first && wet && !translation_invariant_motion_sizing)
+            || (policy.coarse_first && wet
+                && (!translation_invariant_motion_sizing || direct_surface.is_some()))
         {
             travel = travel.max(f(dt * (vx as f64).hypot(vy as f64)));
             if translation_invariant_motion_sizing {
@@ -878,7 +997,20 @@ fn measure(
     } else {
         [0.0; 2]
     };
-    if policy.coarse_first && translation_invariant_motion_sizing {
+    // A signed-distance ball containing every cell certifies flooded bulk,
+    // including bricks against a closed wall. Uniform submerged translation
+    // is support demand, not a liquid-air resolution feature.
+    let direct_deep_liquid = direct_surface.is_some_and(|surface| {
+        !cells.is_empty() && cells.iter().all(|cell| {
+            crate::levelset_redistance::sample_scalar(surface,
+                [cell.center[0], cell.center[1]]).is_some_and(|phi| {
+                phi < 0.0 && (surface.segments_fine.is_empty()
+                    || -phi >= 0.5 * cell.widths[0].hypot(cell.widths[1]))
+            })
+        })
+    });
+    if direct_deep_liquid && !direct_surface_crossing { travel = 0.0; }
+    if policy.coarse_first && translation_invariant_motion_sizing && direct_surface.is_none() {
         travel = relative_travel;
         for velocity in motion_samples {
             travel = travel.max(f(
@@ -1960,13 +2092,18 @@ fn plan_resolution_impl(
                 let next = (current / 2).max(1);
                 let m = &measurements[&brick.key];
                 let fresh = !surface
-                    || m.history
+                    || (policy.surface_coarsening_enabled && m.history
                         .surface_proof
                         .as_ref()
                         .and_then(|p| p.generation_by_target_resolution.get(&next))
                         .copied()
-                        == Some(topology.graph.topology_generation);
-                let mut epochs = if fresh { m.history.proof_epochs } else { 0 };
+                        == Some(topology.graph.topology_generation));
+                // The legacy branch above may have touched the measurement's
+                // epoch counter. GPU coarse-first reloads the accepted history
+                // here; count at most one proof epoch per accepted frame.
+                let mut epochs = if fresh {
+                    previous.history.get(&brick.key).map_or(0, |h| h.proof_epochs)
+                } else { 0 };
                 if fresh && topology_epoch {
                     epochs = epochs.saturating_add(1);
                 }
@@ -2316,6 +2453,107 @@ mod tests {
         levelset_surface::publish(dimensions, vertices, 0.0).unwrap()
     }
 
+    #[test]
+    fn published_direct_phi_proof_allows_demotion_without_moving_contour() {
+        let (topology, mut fields) = setup(vec![brick(0, [0, 0], 8, true)], [8, 8]);
+        let surface = plane_surface([8, 8], 4.25);
+        fields.density = levelset_surface::implied_fill_fine_cells(&surface).unwrap();
+        let original = surface.vertex_phi_fine.clone();
+        let options = coarsest_support_options();
+        let mut state = initialize_resolution_policy(&topology);
+        state.history.get_mut(&0).unwrap().reasons |= activity_reason::SURFACE;
+        for frame in 1..=2 {
+            publish_direct_surface_proofs(&topology, &fields, &surface, &options,
+                &mut state, 1.0 / 30.0, 0.05).unwrap();
+            assert_eq!(state.history[&0].surface_proof.as_ref().unwrap()
+                .generation_by_target_resolution[&4], 1);
+            let decision = plan_resolution_with_surface(&topology, &fields, &state,
+                1.0 / 30.0, 0.05, &options, &surface).unwrap();
+            state = decision.state;
+            assert_eq!(decision.receipt.bricks[0].scheduled_resolution,
+                if frame == 1 { 8 } else { 4 });
+            // A committed topology change retires the consumed epoch count.
+            assert_eq!(state.history[&0].proof_epochs, if frame == 1 { 1 } else { 0 });
+        }
+        assert_eq!(surface.vertex_phi_fine, original);
+        // A certificate belongs to one generation, never an arbitrary future one.
+        let mut changed = topology.clone();
+        changed.graph.topology_generation += 1;
+        let decision = plan_resolution_with_surface(&changed, &fields, &state,
+            1.0 / 30.0, 0.05, &options, &surface).unwrap();
+        assert_eq!(decision.receipt.bricks[0].scheduled_resolution, 8);
+        assert_eq!(decision.state.history[&0].proof_epochs, 0);
+    }
+
+    #[test]
+    fn direct_phi_proof_rejects_volume_error_curvature_and_disabled_coarsening() {
+        let (topology, mut fields) = setup(vec![brick(0, [0, 0], 4, true)], [8, 8]);
+        let surface = plane_surface([8, 8], 4.0);
+        for cell in &topology.graph.cells {
+            fields.density[cell.id as usize] = if cell.center[0] < 4.0 { 1.0 } else { 0.0 };
+        }
+        let mut options = coarsest_support_options();
+        let mut state = initialize_resolution_policy(&topology);
+        state.history.get_mut(&0).unwrap().reasons |= activity_reason::SURFACE;
+        let publish = |fields: &Fields, surface: &RdfSurface, options: &ResolutionPolicyOptions,
+                       state: &mut ResolutionPolicyState| {
+            publish_direct_surface_proofs(&topology, fields, surface, options,
+                state, 1.0 / 30.0, 0.05).unwrap();
+        };
+        publish(&fields, &surface, &options, &mut state);
+        assert!(state.history[&0].surface_proof.is_some());
+        // Volume exceeds the one-fine-cell displacement allowance in a 2x2 cell.
+        fields.density[1] = 3.0;
+        state.history.get_mut(&0).unwrap().proof_epochs = 1;
+        publish(&fields, &surface, &options, &mut state);
+        assert!(state.history[&0].surface_proof.is_none());
+        assert_eq!(state.history[&0].proof_epochs, 0);
+        fields.density[1] = 1.0;
+        let curved = circle_surface([8, 8], [4.0, 4.0], 2.0);
+        publish(&fields, &curved, &options, &mut state);
+        assert!(state.history[&0].surface_proof.is_none());
+        publish(&fields, &surface, &options, &mut state);
+        assert!(state.history[&0].surface_proof.is_some());
+        options.policy.surface_coarsening_enabled = false;
+        publish(&fields, &surface, &options, &mut state);
+        assert!(state.history[&0].surface_proof.is_none());
+    }
+
+    #[test]
+    fn surface_publication_preserves_non_surface_coarsening_epochs() {
+        let (topology, fields) = setup(vec![brick(0, [0, 0], 2, true)], [8, 8]);
+        let surface = plane_surface([8, 8], -4.0);
+        let mut state = initialize_resolution_policy(&topology);
+        state.history.get_mut(&0).unwrap().proof_epochs = 1;
+        let options = coarsest_support_options();
+        publish_direct_surface_proofs(&topology, &fields, &surface, &options,
+            &mut state, 1.0 / 30.0, 0.05).unwrap();
+        assert_eq!(state.history[&0].proof_epochs, 1);
+        assert!(state.history[&0].surface_proof.is_none());
+        let plan = plan_resolution_with_surface(&topology, &fields, &state,
+            1.0 / 30.0, 0.05, &options, &surface).unwrap();
+        assert!(plan.receipt.bricks[0].scheduled_resolution <= 1
+            || !plan.receipt.bricks[0].candidate_active);
+    }
+
+    #[test]
+    fn direct_phi_transport_keeps_absolute_speed_floor_in_both_planners() {
+        let (topology, mut fields) = setup(vec![brick(0, [0, 0], 8, true)], [16, 8]);
+        let surface = plane_surface([16, 8], 7.0);
+        fields.density.fill(1.0);
+        for velocity in fields.cell_velocity.chunks_exact_mut(2) {
+            velocity[0] = 20.0;
+        }
+        let options = coarsest_support_options();
+        let projected = plan_projected_transport_support_with_surface(
+            &topology, &fields, 1.0, 1.0, &options, true, &surface).unwrap();
+        let post = plan_resolution_with_surface(&topology, &fields,
+            &initialize_resolution_policy(&topology), 1.0, 1.0, &options, &surface).unwrap();
+        for bricks in [&projected.candidate_bricks, &post.candidate_bricks] {
+            assert_eq!(bricks.iter().find(|b| b.coordinate == [1, 0, 0]).unwrap().resolution, 8);
+        }
+    }
+
     fn golden() -> serde_json::Value {
         serde_json::from_str(include_str!(
             "../testdata/slice-resolution-policy-golden.json"
@@ -2539,11 +2777,13 @@ mod tests {
 
     #[test]
     fn direct_phi_requirement_stops_receiver_rung_ratchet_in_both_planners() {
+        // Isolate curvature below the absolute-speed transport floor. A fast
+        // translated interface requires fine support in the GPU policy too.
         let (topology, mut fields) = setup(vec![brick(0, [0, 0], 8, true)], [16, 8]);
         for cell in &topology.graph.cells {
             let id = cell.id as usize;
             fields.density[id] = 1.0;
-            fields.cell_velocity[2 * id] = 20.0;
+            fields.cell_velocity[2 * id] = 0.1;
         }
         let options = coarsest_support_options();
         let curved = circle_surface([16, 8], [7.0, 4.0], 3.0);

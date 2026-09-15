@@ -30,9 +30,37 @@ export function compileCM12CapturedGeometry(input: CM12CapturedGeometryRecipe) {
     const keyFor = (axis: number, center: readonly number[], area: number) =>
       `${axis}/${center.join("/")}/${area}`;
     const rowIdsByGeometry = new Map<string, number>();
-    const sourceFaces: ReturnType<typeof sparseCM12TransferFaceGeometry>[] = [];
     const f = new Float32Array(templateWords.buffer, templateWords.byteOffset, templateWords.length);
     const hostRows = templateWords[3]!, rowBase = templateWords[7]!;
+    const rowPlane = (row: number, plane: number) => rowBase + plane * hostRows + row;
+    const hostRowTerms = (row: number) => {
+      const packed = templateWords[rowPlane(row, 0)]!;
+      const first = packed & 0x007f_ffff, count = packed >>> 23;
+      return Array.from({ length: count }, (_, at) => ({
+        cell: templateWords[templateWords[8]! + 2 * (first + at)]!,
+        coefficient: f[templateWords[8]! + 2 * (first + at) + 1]!,
+      }));
+    };
+    const hostRowRequirements = (row: number) => {
+      const at = templateWords[rowPlane(row, 1)]! & 0x0fff_ffff;
+      return Array.from({ length: templateWords[at]! }, (_, index) => {
+        const metadata = templateWords[at + 1 + index]!;
+        return `${metadata >>> 5}@${metadata & 0x1f}`;
+      });
+    };
+    const describeRow = (row: number) => {
+      if (row < hostRows) {
+        return `host row ${row} (kind ${(templateWords[rowPlane(row, 1)]! >>> 28) & 3}`
+          + `, terms ${JSON.stringify(hostRowTerms(row))}`
+          + `, requires ${hostRowRequirements(row).join("+")}`
+          + `, dual ${f[rowPlane(row, 2)]}, distance ${f[rowPlane(row, 4)]})`;
+      }
+      const local = row - hostRows;
+      return `dynamic row ${row} (page ${Math.floor(local / 1728)}`
+        + ` at ${sourcePageCoordinates.get(Math.floor(local / 1728))?.join(",") ?? "?"}`
+        + `, normal ${(local % 1728) % 576 % 9})`;
+    };
+    const sourceFaces: ReturnType<typeof sparseCM12TransferFaceGeometry>[] = [];
     for (const row of rows) {
       let axis: number, area: number, center: number[];
       if (row < hostRows) {
@@ -51,7 +79,29 @@ export function compileCM12CapturedGeometry(input: CM12CapturedGeometryRecipe) {
         center[(axis + 2) % 3] += Math.floor(uv / 8) + 0.5;
       }
       const key = keyFor(axis, center, area);
-      if (rowIdsByGeometry.has(key)) throw new Error("CM12 accepted faces have overlapping flux authority");
+      if (rowIdsByGeometry.has(key)) {
+        const first = rowIdsByGeometry.get(key)!;
+        let replacements = "";
+        if (first < hostRows) {
+          const hostCell = hostRowTerms(first)[0]?.cell ?? 0;
+          const begin = templateWords[templateWords[9]! + hostCell]!;
+          const end = templateWords[templateWords[9]! + hostCell + 1]!;
+          const candidates: string[] = [];
+          for (let incidence = begin; incidence < end && incidence - begin < 4096; incidence += 1) {
+            const other = templateWords[templateWords[10]! + 2 * incidence]!;
+            if (other === first || other >= hostRows) continue;
+            if ((templateWords[rowPlane(other, 1)]! >>> 30) !== axis) continue;
+            if (f[rowPlane(other, 6 + axis)] !== center[axis]) continue;
+            candidates.push(`${describeRow(other)} own ${
+              f[templateWords[8]! + 2 * templateWords[templateWords[10]! + 2 * incidence + 1]! + 1]}`);
+          }
+          replacements = `; cell ${hostCell} coplanar incidences [${begin},${end}): ${
+            candidates.join(" | ") || "none"}`;
+        }
+        throw new Error("CM12 accepted faces have overlapping flux authority: "
+          + `${describeRow(first)} and ${describeRow(row)}`
+          + ` both claim axis ${axis} center ${center.join(",")} area ${area}${replacements}`);
+      }
       rowIdsByGeometry.set(key, row);
       sourceFaces.push(sparseCM12TransferFaceGeometry(sourceFaces.length,axis,center,area,maximumSpan));
     }

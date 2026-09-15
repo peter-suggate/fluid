@@ -111,7 +111,11 @@ export function createInitialLevelSetGeometryWGSL(
   }
   const bricks = initialFluidBrickComponentBounds(scene, dimensions, scene.voxelDomain.brickSize_cells);
   if (bricks !== undefined) {
-    const expression = bricks.map(b => `lsvInitialBox(point,${vector(b.minimum)},${vector(b.maximum)})`)
+    // Brick-authored liquid has the same solid-wall continuation as an
+    // explicit box. Including the floor as a zero surface can make every
+    // corner of a one-cell-high coarse water body zero and erase its phase.
+    const expression = bricks.map(b => volumeExpression({ shape: "box",
+      min_m: b.minimum, max_m: b.maximum }, c))
       .reduce((a,b) => `min(${a},${b})`, number(far));
     base = scene.fluid.initialBrickSeedsAdditive ? `min(${base},${expression})` : expression;
   }
@@ -120,17 +124,16 @@ export function createInitialLevelSetGeometryWGSL(
   }
   if (scene.systems?.fluid === false) base = number(far);
   return /* wgsl */ `
-fn lsvInitialBox(point:vec3f,minimum:vec3f,maximum:vec3f)->f32{
-  let q=max(minimum-point,point-maximum);
-  return length(max(q,vec3f(0.0)))+min(max(q.x,max(q.y,q.z)),0.0);
-}
 fn lsvInitialCylinder(delta:vec3f,radius:f32,halfHeight:f32)->f32{
   let q=vec2f(length(delta.xy)-radius,abs(delta.z)-halfHeight);
   return length(max(q,vec2f(0.0)))+min(max(q.x,q.y),0.0);
 }
 fn lsvAuthoredPhi(positionFine:vec3f)->f32{
-  let point=vec3f(${number(-c.width_m / 2)},0.0,${number(-c.depth_m / 2)})
-    +positionFine*vec3f(${number(c.width_m / dimensions[0])},${number(c.height_m / dimensions[1])},${number(c.depth_m / dimensions[2])});
+  // Centre the exact lattice coordinate before scaling. Adding a rounded
+  // world origin after scaling gives opposite box faces different roundoff
+  // signs, which can erase a grid-aligned zero crossing during redistance.
+  let point=(positionFine-vec3f(${number(dimensions[0] / 2)},0.0,${number(dimensions[2] / 2)}))
+    *vec3f(${number(c.width_m / dimensions[0])},${number(c.height_m / dimensions[1])},${number(c.depth_m / dimensions[2])});
   return ${base}/${number(finestCellSize_m)};
 }
 `;

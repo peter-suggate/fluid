@@ -1,5 +1,8 @@
 use fluid_core::geometry::BoundaryMode;
-use fluid_core::numerics::{collocate_velocity, force_faces, prepare_faces_for_level_set_volume};
+use fluid_core::numerics::{
+    collocate_velocity, force_faces, force_faces_with_level_set, prepare_faces_for_level_set_volume,
+    refresh_level_set_separating_faces,
+};
 use fluid_core::topology::{compile_topology, BrickSeed, TopologySeed};
 use fluid_core::{Fields, Graph, RowKind};
 
@@ -230,4 +233,119 @@ fn approaching_normal_field_does_not_leak_onto_stationary_wall_faces() {
 #[test]
 fn rebounding_normal_field_does_not_leak_onto_stationary_wall_faces() {
     assert_closed_wall_rejects_normal_field(1.0);
+}
+
+#[test]
+fn phi_liquid_contact_can_separate_from_ceiling_after_volume_thins() {
+    let mut graph = graph();
+    let mut fields = fields(&graph);
+    fields.density.fill(0.0);
+    fields.cell_velocity.fill(0.0);
+
+    let ceiling = graph.dimensions[1];
+    let ceiling_cells: Vec<usize> = graph
+        .rows
+        .iter()
+        .filter(|row| row.kind == RowKind::ClosedWorld && row.axis == 1 && row.center[1] == ceiling)
+        .filter_map(|row| row.terms.first().map(|term| term.cell_id as usize))
+        .collect();
+    assert!(!ceiling_cells.is_empty());
+    for &cell in &ceiling_cells {
+        fields.density[cell] = 0.25;
+    }
+
+    let mut phi = vec![1.0; graph.cells.len()];
+    for &cell in &ceiling_cells {
+        phi[cell] = -0.25;
+    }
+    force_faces_with_level_set(
+        &mut graph,
+        &mut fields,
+        &phi,
+        DT,
+        [0.0, -9.80665, 0.0],
+        [0.0; 3],
+    );
+
+    let released = graph
+        .rows
+        .iter()
+        .filter(|row| row.kind == RowKind::ClosedWorld && row.axis == 1 && row.center[1] == ceiling)
+        .filter(|row| row.separating)
+        .count();
+    assert_eq!(released, ceiling_cells.len());
+}
+
+#[test]
+fn phi_liquid_contact_does_not_release_from_side_wall_under_vertical_gravity() {
+    let mut graph = graph();
+    let mut fields = fields(&graph);
+    fields.density.fill(0.0);
+    fields.cell_velocity.fill(0.0);
+
+    let left_cells: Vec<usize> = graph
+        .rows
+        .iter()
+        .filter(|row| row.kind == RowKind::ClosedWorld && row.axis == 0 && row.center[0] == 0.0)
+        .filter_map(|row| row.terms.first().map(|term| term.cell_id as usize))
+        .collect();
+    assert!(!left_cells.is_empty());
+    let mut phi = vec![1.0; graph.cells.len()];
+    for &cell in &left_cells {
+        fields.cell_velocity[2 * cell] = 1.0;
+        fields.density[cell] = 0.25;
+        phi[cell] = -0.25;
+    }
+
+    force_faces_with_level_set(
+        &mut graph,
+        &mut fields,
+        &phi,
+        DT,
+        [0.0, -9.80665, 0.0],
+        [0.0; 3],
+    );
+
+    assert!(graph
+        .rows
+        .iter()
+        .filter(|row| row.kind == RowKind::ClosedWorld && row.axis == 0 && row.center[0] == 0.0)
+        .all(|row| !row.separating));
+}
+
+#[test]
+fn post_transfer_refresh_releases_ceiling_without_applying_force_twice() {
+    let mut graph = graph();
+    let mut fields = fields(&graph);
+    fields.density.fill(0.0);
+    fields.cell_velocity.fill(0.0);
+    let mut phi = vec![1.0; graph.cells.len()];
+    let ceiling = graph.dimensions[1];
+    let transferred_velocity = -2.0;
+    for row in &graph.rows {
+        if row.kind == RowKind::ClosedWorld && row.axis == 1 && row.center[1] == ceiling {
+            let cell = row.terms[0].cell_id as usize;
+            phi[cell] = -0.25;
+            fields.cell_velocity[2 * cell + 1] = transferred_velocity;
+        } else if row.kind != RowKind::ClosedWorld {
+            fields.face_velocity[row.id as usize] = 3.0;
+        }
+    }
+
+    refresh_level_set_separating_faces(
+        &mut graph,
+        &mut fields,
+        &phi,
+        DT,
+        [0.0, -9.80665, 0.0],
+    );
+
+    for row in &graph.rows {
+        if row.kind == RowKind::ClosedWorld && row.axis == 1 && row.center[1] == ceiling {
+            assert!(row.separating);
+            assert_eq!(fields.face_velocity[row.id as usize], transferred_velocity);
+        } else if row.kind != RowKind::ClosedWorld {
+            assert_eq!(fields.face_velocity[row.id as usize], 3.0);
+        }
+    }
 }

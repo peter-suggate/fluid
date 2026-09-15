@@ -635,15 +635,19 @@ fn activateGeometricSweptCellSupport(@builtin(global_invocation_id)gid:vec3u){
       velocity-=(1.0-aperture)*rowSolidVelocity(row);
     }
     velocity/=aperture;
-    let forced=velocity+p.frame.x*p.acceleration[axis];
     let roundoff=gvRoundoff(cellOpenVolume(cell));
+    // Swept membership follows the represented face velocity only. Widening by
+    // v+dt*a used the PRE-projection field, where gravity alone is nonzero on
+    // every vertical face: a resting pool therefore claimed the page below
+    // itself every frame and retireUnsupportedEmptyBricks gave it back, paying
+    // the whole candidate-transfer tail for a no-op. Pressure is about to
+    // cancel that acceleration, and the flux transport will actually use is
+    // measured post-projection by markProjectedGeometricTransportReceivers,
+    // whose transaction runs before transport. The conservative envelope in
+    // gatherGeometricPreflightVelocityBounds still carries v+dt*a.
     if(p.frame.x*area*abs(velocity)>roundoff){
       minimumVelocity[axis]=min(minimumVelocity[axis],velocity);
       maximumVelocity[axis]=max(maximumVelocity[axis],velocity);
-    }
-    if(p.frame.x*area*abs(forced)>roundoff){
-      minimumVelocity[axis]=min(minimumVelocity[axis],forced);
-      maximumVelocity[axis]=max(maximumVelocity[axis],forced);
     }
   }
   let lower=vec3f(cellMinimum(cell))+p.frame.x*minimumVelocity;
@@ -801,6 +805,19 @@ fn addWholeFrameUncoveredDonorFallbacks(@builtin(global_invocation_id)gid:vec3u)
     let entry=gvCellFace(adjacency);let face=entry>>1u;let cells=gvCells(face);
     let isNegative=(entry&1u)!=0u;let other=gvOtherCell(face,isNegative);
     if(other!=INVALID){continue;}
+    // A one-sided row is either a sparse-air boundary, where
+    // markProjectedGeometricTransportReceivers above requests the neighbouring
+    // leaf, or a physical world wall sharing that representation. Only the
+    // first is an open boundary. Reject the wall with the same reachability
+    // test that pass already applies to the identical row set, or a closed
+    // tank exports liquid through its own walls: mini32's far top corner cell,
+    // holding several hundred fine cells of transported excess, drained 2.07%
+    // of the scene through its +x/+y/+z wall faces once the wave impact turned
+    // their stored velocity outward.
+    var outwardOffset=vec3i(0);
+    outwardOffset[rowAxis(gvRow(face))]=select(-1,1,isNegative);
+    if(!cm12FluidNeighborReachable(
+      cm12WorldLeafCoordinate(cellBrick(donor)),outwardOffset)){continue;}
     let signedSweep=gvRate(face)*p.frame.x;
     let outward=select(-signedSweep,signedSweep,isNegative);
     if(outward>0.0){_=gvAppendCouplingEdge(INVALID,donor,outward);}
@@ -949,24 +966,38 @@ fn finishWholeFrameVolumeTransport(){
   gvStore(3u,1u);
 }
 
-// Eight bounded leaf-local midpoint samples are the first production H(phi)
-// approximation. Phi stays immutable. The explicit missing-metric receipt
-// prevents silently sharpening against a saturated phase tag.
-fn gvPhiTargetVolume(cell:u32)->vec2f{
-  let widths=cellWidths(cell);let centre=cellCenter(cell);
+// Bounded midpoint quadrature of H(phi). Phi stays immutable. The explicit
+// missing-metric receipt prevents silently sharpening against a saturated
+// phase tag.
+//
+// The phi lattice is not the solver lattice: inside the fine-phi band one
+// solver cell spans several phi cells. Resolve the stencil per sample point
+// and cache it - consecutive quadrature points usually land in the same phi
+// cell, so this is still one span-doubling walk per phi cell touched, not one
+// per sample.
+var<private> gvPhiStencilCache:LsvCellStencil;
+fn gvPhiCachedSample(position:vec3f)->LsvPhiSample{
+  if(!lsvStencilContains(gvPhiStencilCache,position)){
+    gvPhiStencilCache=lsvStencilAtPosition(position);
+  }
+  if(!gvPhiStencilCache.resolved){return lsvSampleAt(position);}
+  return lsvStencilSampleAt(gvPhiStencilCache,position);
+}
+// vec4f(plane-integrated fraction, midpoint fraction, min |phi|, 1 = metric).
+fn gvPhiBoxEstimate(centre:vec3f,widths:vec3f)->vec4f{
   var samples:array<f32,8>;var fill=0.0;var minimumAbsPhi=3.402823466e38;
   var centrePhi=0.0;var maximumAbsPhi=0.0;
   for(var corner=0u;corner<8u;corner+=1u){
     let signs=vec3f(select(-1.0,1.0,(corner&1u)!=0u),
       select(-1.0,1.0,(corner&2u)!=0u),select(-1.0,1.0,(corner&4u)!=0u));
-    let sample=lsvSampleAt(centre+0.25*widths*signs);
-    if(!sample.metric){atomicAdd(&conditioning[GV_WHOLE_FRAME_CONTROL+14u],1);return vec2f(0.0,0.0);}
+    let position=centre+0.25*widths*signs;
+    let sample=gvPhiCachedSample(position);
+    if(!sample.metric){return vec4f(0.0,0.0,0.0,0.0);}
     samples[corner]=sample.phi;centrePhi+=0.125*sample.phi;
     maximumAbsPhi=max(maximumAbsPhi,abs(sample.phi));
     fill+=select(select(0.0,1.0,sample.phi<0.0),0.5,sample.phi==0.0);
     minimumAbsPhi=min(minimumAbsPhi,abs(sample.phi));
   }
-  if(minimumAbsPhi>2.0*cellMinimumWidth(cell)){return vec2f(0.0,0.0);}
   var gradient=vec3f(0.0);
   for(var corner=0u;corner<8u;corner+=1u){
     let signs=vec3f(select(-1.0,1.0,(corner&1u)!=0u),
@@ -984,10 +1015,47 @@ fn gvPhiTargetVolume(cell:u32)->vec2f{
   let affine=affineResidual<=1e-4*(1.0+maximumAbsPhi);
   let integrated=select(sampledFraction,
     geometricPlaneBoxFraction(gradient,-centrePhi,widths),affine);
+  return vec4f(integrated,sampledFraction,minimumAbsPhi,1.0);
+}
+fn gvPhiTargetVolume(cell:u32)->vec2f{
+  let widths=cellWidths(cell);let centre=cellCenter(cell);
+  let whole=gvPhiBoxEstimate(centre,widths);
+  if(whole.w==0.0){
+    atomicAdd(&conditioning[GV_WHOLE_FRAME_CONTROL+14u],1);return vec2f(0.0,0.0);}
+  // Deep cells keep the cheap eight-sample path: the interface cannot reach
+  // them, so no subdivision can change the answer.
+  if(whole.z>2.0*cellMinimumWidth(cell)){return vec2f(0.0,0.0);}
+  var integrated=whole.x;var sampledFraction=whole.y;var samples=8u;
+  // Eight midpoints under-integrate H(phi) once the solver cell is several
+  // phi cells wide - the interface can enter and leave between two of them.
+  // Refine toward the phi lattice, bounded at 4^3 sub-boxes. A cell whose phi
+  // cell is itself reproduces the eight-sample estimate exactly.
+  let phiWidth=cm12PhiWidthAt(centre);
+  let subdivision=select(1u,
+    clamp(u32(round(cellMinimumWidth(cell)/max(1e-6,phiWidth))),1u,4u),phiWidth>0.0);
+  if(subdivision>1u){
+    let boxes=subdivision*subdivision*subdivision;
+    let boxWidths=widths/f32(subdivision);
+    let lower=centre-0.5*widths;
+    var integratedSum=0.0;var sampledSum=0.0;var complete=true;
+    for(var box=0u;box<boxes;box+=1u){
+      let bz=box/(subdivision*subdivision);
+      let remainder=box-bz*subdivision*subdivision;
+      let by=remainder/subdivision;let bx=remainder-by*subdivision;
+      let boxCentre=lower+boxWidths*(vec3f(vec3u(bx,by,bz))+vec3f(0.5));
+      let estimate=gvPhiBoxEstimate(boxCentre,boxWidths);
+      if(estimate.w==0.0){complete=false;break;}
+      integratedSum+=estimate.x;sampledSum+=estimate.y;
+    }
+    if(complete){
+      integrated=integratedSum/f32(boxes);sampledFraction=sampledSum/f32(boxes);
+      samples=8u*boxes;
+    }
+  }
   let capacity=gvReceiverCapacity(cell);
   atomicMax(&conditioning[GV_WHOLE_FRAME_CONTROL+16u],
     bitcast<i32>(capacity*abs(integrated-sampledFraction)));
-  atomicAdd(&conditioning[GV_WHOLE_FRAME_CONTROL+17u],8);
+  atomicAdd(&conditioning[GV_WHOLE_FRAME_CONTROL+17u],i32(samples));
   return vec2f(capacity*integrated,1.0);
 }
 

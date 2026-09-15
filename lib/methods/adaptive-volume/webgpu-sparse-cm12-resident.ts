@@ -3,6 +3,7 @@ import { WHOLE_FRAME_VOLUME_ENTRY_POINTS, type SparseGeometricVolumeLayout } fro
 import { createInitialLevelSetGeometryWGSL } from "./levelset-initial-geometry";
 import {
   LEVELSET_VOLUME_GLOBAL_HEADER as LSV_GLOBAL_HEADER,
+  LEVELSET_VOLUME_GLOBAL_HEADER_WORDS,
   LEVELSET_VOLUME_SLOT_HEADER as LSV_SLOT_HEADER,
   createLevelSetVolumeInitialWords,
   createLevelSetVolumeLayout,
@@ -103,6 +104,7 @@ import {
 } from "./features/pressure-inspection/decoder";
 import {
   createWebgpuSparseCM12ResidentWGSL,
+  FINE_PHI_BAND_ENABLED,
 } from "./webgpu-sparse-cm12-resident.wgsl";
 import {
   createSparseCM12LogicalOwnerDirectory,
@@ -430,7 +432,11 @@ export const SPARSE_CM12_RESIDENT_STAGE_SUBSTAGES = Object.freeze({
   ],
   "pressure-rhs": [],
   "pressure-solve": [],
-  "velocity-projection": [],
+  "velocity-projection": [
+    "projection-faces",
+    "projected-frontier-commit",
+    "projected-topology-rebuild",
+  ],
   "activity-measurement": [
     "dirty-brick-mask-publication",
     "brick-activity-measurement",
@@ -2009,23 +2015,90 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
           coreKeys.has(grid.cells[term.cellId]!.brickKey)));
       }
     }
-    const rungPairs = templateLevels.slice(1).map((high, index) =>
-      [templateLevels[index]!, high] as const);
+    // Adjacent rungs span every legal seam only while all leaves share a span.
+    // A coarse leaf reaches a fine leaf's cell width two rungs away, so its
+    // 2:1 seams live two rungs further out again; the closure guard below
+    // discards whatever a wider pair proposes that no atlas may accept.
+    // Reduce, never spread: a frontier of tens of thousands of leaves passed
+    // as arguments overflows the host call stack.
+    let widestSpan = 1, narrowestSpan = Infinity;
+    for (const brick of mutableBricks) {
+      const span = sparseBrickSpan(brick);
+      widestSpan = Math.max(widestSpan, span);
+      narrowestSpan = Math.min(narrowestSpan, span);
+    }
+    const spanRatio = narrowestSpan === Infinity ? 1 : widestSpan / narrowestSpan;
+    const rungPairs = templateLevels.flatMap((low, index) =>
+      templateLevels.slice(index + 1).filter((high) => high <= 2 * spanRatio * low)
+        .map((high) => [low, high] as const));
+    // A coordinate-parity checkerboard separates two face-adjacent leaves only
+    // when the lower one spans an odd number of base bricks. A coarse leaf
+    // spans an even number, so its upper neighbour keeps its parity and no
+    // variant ever holds that pair at two rungs -- yet two rungs is exactly
+    // how leaves of unequal span reach equal cell widths. Colour the shared
+    // face plane instead: shifting by the smaller span's level, and biasing by
+    // the leaf's own span when the lower side is the coarser one, gives the
+    // pair opposite colours. Only the separations a real adjacency needs are
+    // built, so an atlas of span-one leaves keeps the single parity phase.
+    const spanByBrickKey = new Map(atlas.bricks.map((brick) =>
+      [brick.key, sparseBrickSpan(brick)]));
+    const separations = ([0, 1, 2] as const).map((axis) => {
+      const required = new Set<number>();
+      for (const brick of mutableBricks) {
+        const span = sparseBrickSpan(brick);
+        for (const neighbour of sparseBrickFaceNeighbors(atlas, brick)) {
+          if (!mutableBrickKeys.has(neighbour.key)) continue;
+          const neighbourSpan = sparseBrickSpan(neighbour);
+          if (brick.coordinate[axis]! + span !== neighbour.coordinate[axis]!) continue;
+          if (([1, 2] as const).some((step) => {
+            const tangent = (axis + step) % 3;
+            return brick.coordinate[tangent]! >= neighbour.coordinate[tangent]! + neighbourSpan
+              || neighbour.coordinate[tangent]! >= brick.coordinate[tangent]! + span;
+          })) continue;
+          const smaller = Math.min(span, neighbourSpan);
+          required.add(2 * Math.log2(smaller) + (span === smaller ? 0 : 1));
+        }
+      }
+      return required.size > 0 ? [...required].sort((a, b) => a - b) : [0];
+    });
     for (let axis = 0; axis < 3; axis += 1) for (const [low, high] of rungPairs) {
-      // Both parity phases are required: a physical face needs templates for
-      // low→high and high→low accepted generations.
-      for (let phase = 0; phase < 2; phase += 1) {
-        for (const { coreKeys, localBricks } of chunkContexts) {
-          const variant = variantAtlasAtLevels((brick) => mutableBrickKeys.has(brick.key)
-            ? ((brick.coordinate[axis]! & 1) ^ phase) === 0 ? low : high
-            : brick.resolution, localBricks);
-          const variantGrid = buildSparseAtlasCompositeGrid(
-            variant, 0.5, variantWorkspace,
-          );
-          appendRows(variantGrid, (row) =>
-            row.axis === axis && row.kind === "mixed-seam"
-              && row.terms.some((term) => coreKeys.has(
-                variantGrid.cells[term.cellId]!.brickKey)));
+      for (const separation of separations[axis]!) {
+        const shift = separation >> 1, bias = separation & 1;
+        // Both parity phases are required: a physical face needs templates for
+        // low→high and high→low accepted generations.
+        for (let phase = 0; phase < 2; phase += 1) {
+          for (const { coreKeys, localBricks } of chunkContexts) {
+            const variant = variantAtlasAtLevels((brick) => mutableBrickKeys.has(brick.key)
+              ? ((((brick.coordinate[axis]! + (bias === 1 ? sparseBrickSpan(brick) : 0))
+                >> shift) & 1) ^ phase) === 0 ? low : high
+              : brick.resolution, localBricks);
+            const variantGrid = buildSparseAtlasCompositeGrid(
+              variant, 0.5, variantWorkspace,
+            );
+            // Not only mixed-seam rows: unequal spans at two rungs meet at
+            // equal cell widths, a face the composite grid quite correctly
+            // calls a brick-face. Accept whatever this variant holds across a
+            // rung boundary; the uniform builds above carry every same-rung
+            // face already, and appendRows drops the duplicates.
+            appendRows(variantGrid, (row) => {
+              if (row.axis !== axis) return false;
+              let core = false, resolution = 0, crossing = false;
+              let narrowest = Infinity, widest = 0;
+              for (const term of row.terms) {
+                const cell = variantGrid.cells[term.cellId]!;
+                if (coreKeys.has(cell.brickKey)) core = true;
+                if (resolution === 0) resolution = cell.brickResolution;
+                else if (cell.brickResolution !== resolution) crossing = true;
+                const width = atlas.brickFineResolution
+                  * spanByBrickKey.get(cell.brickKey)! / cell.brickResolution;
+                narrowest = Math.min(narrowest, width);
+                widest = Math.max(widest, width);
+              }
+              // A checkerboard also holds rung combinations no accepted atlas
+              // may reach. Catalogue only what physical 2:1 closure permits.
+              return core && crossing && widest <= 2 * narrowest;
+            });
+          }
         }
       }
     }
@@ -2237,8 +2310,9 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
 export function packSparseCM12ResidentTopologyTemplatesForQA(
   atlas: SparseAdaptiveMassAtlas,
   acceptedGrid: SparseAtlasCompositeGrid,
+  mutableKeys?: ReadonlySet<number>,
 ): Readonly<{ words: Uint32Array; cellCount: number; rowCount: number }> {
-  const packed = packResidentTopologyTemplates(atlas, acceptedGrid);
+  const packed = packResidentTopologyTemplates(atlas, acceptedGrid, undefined, mutableKeys);
   return Object.freeze({ words: packed.words,
     cellCount: packed.cellCount, rowCount: packed.rowCount });
 }
@@ -2257,6 +2331,15 @@ interface CompiledTopologyIndirectPublisher {
   readonly arguments: GPUBuffer;
   readonly pipeline: GPUComputePipeline;
   readonly bindGroup: GPUBindGroup;
+  /**
+   * Mirrors the adaptive level-set build's own workgroup triples out of its
+   * global header and into `arguments`. The level-set gate is not CNX's
+   * `rebuildRequired` — lsvBeginTopology can start a build when CNX does not —
+   * so the build publishes its domains itself and this one thread only lifts
+   * them into a buffer an indirect dispatch may read.
+   */
+  readonly levelSetBuildPipeline: GPUComputePipeline;
+  readonly levelSetBuildBindGroup: GPUBindGroup;
 }
 
 const COMPILED_TOPOLOGY_ENTRY_POINTS = [
@@ -2268,8 +2351,20 @@ const COMPILED_TOPOLOGY_ENTRY_POINTS = [
   "sealCompiledTopologyGeneration",
 ] as const;
 
+/** Byte offsets of the four adaptive level-set build triples inside the
+ * compiled-topology dispatch buffer (words 12..23, after CNX's own four).
+ * The build publishes them into the level-set global header; a one-thread
+ * mirror pipeline lifts them into this INDIRECT buffer inside the same compute
+ * pass, so no storage-to-indirect blit splits the build. */
+const LSV_BUILD_CLEAR_DISPATCH_OFFSET = 48;
+const LSV_BUILD_CELL_DISPATCH_OFFSET = 60;
+const LSV_BUILD_VERTEX_DISPATCH_OFFSET = 72;
+const LSV_BUILD_VALIDATE_DISPATCH_OFFSET = 84;
+
 const LEVELSET_VOLUME_ENTRY_POINTS = [
+  "lsvPlanPhiCells",
   "lsvBeginTopology", "lsvClearTopology", "lsvCatalogCellCorners",
+  "lsvPublishBuildVertexDispatch",
   "lsvInsertVertexHash", "lsvResolveCellCorners", "lsvCompileConstraints",
   "lsvInitializeAuthoredPhi", "lsvTransferPhi", "lsvBeginBuildConstraintProjection",
   "lsvApplyBuildConstraints", "lsvAdvanceBuildConstraintProjection",
@@ -2284,6 +2379,18 @@ interface ProjectedTransportIndirectPublisher {
   readonly arguments: GPUBuffer;
   readonly topologyPipeline: GPUComputePipeline;
   readonly velocityExtensionPipeline?: GPUComputePipeline;
+  /**
+   * Zeroes the commit-tail's accepted/shadow/delta dispatch triples whenever
+   * the measured projected receiver count is zero.
+   *
+   * The tail's shape-known dispatches already route through `topologyPipeline`.
+   * Its remaining dispatches are indirect over counts the *shadow worklist*
+   * kernels publish into the arena — and those kernels are themselves gated,
+   * so with no receivers the host's unconditional arena copies hand the tail
+   * the previous generation's counts and it replays a commit it never staged.
+   * One thread zeroes those triples so the tail costs what it commits.
+   */
+  readonly acceptedCommitTailPipeline: GPUComputePipeline;
   readonly bindGroup: GPUBindGroup;
 }
 
@@ -2755,6 +2862,51 @@ export interface SparseCM12WorldGrowthReceipt {
   };
   readonly dynamicMaximumAbsFaceVelocityFineCells_s: number;
   readonly furthestLiquidLeafCoordinate?: readonly [number, number, number];
+  /**
+   * Why a claimed/synthesized page is still not accepted topology. A page that
+   * never reaches receipt 0x8000003f was either never scheduled by
+   * `scheduleTopologyPreparation` (candidateStatus != 1, or the whole
+   * transaction was soft-rejected) or carried a generation stamp that
+   * `publishSparseWorldFrontierAcceptance` could not match. QA only.
+   */
+  readonly unacceptedTopologyPages: readonly Readonly<{
+    page: number;
+    leaf: number;
+    pageReceipt: number;
+    /** activity word 8/12/13: requested, accepted and scheduled rungs. */
+    requestedResolution: number;
+    acceptedResolution: number;
+    scheduledResolution: number;
+    /** activity word 14: 0 no delta, 1 transition, 2 invalid candidate. */
+    candidateStatus: number;
+    accepted: boolean;
+    candidateActive: boolean;
+    preparationScheduled: boolean;
+    /** activity word 36 against the accepted topology generation. */
+    generationStamp: number;
+  }>[];
+  /** activity[12] accepted topology generation at readback. */
+  readonly acceptedTopologyGeneration: number;
+  /** activity[16]: leaves `scheduleTopologyPreparation` last admitted. */
+  readonly preparedTopologyLeaves: number;
+  /** activity[21] commit-failure latch, activity[7] candidate fault flags. */
+  readonly topologyCommitFailed: boolean;
+  readonly candidateFaultFlags: number;
+  /** WDR1 allocator cursors: a grown world has `nextLeaf` above `initialLeaves`. */
+  readonly nextLeaf: number;
+  readonly freeLeaves: number;
+  /** Authored (generation-zero) leaf-coordinate extent, from the CPU atlas. */
+  readonly initialBrickBounds?: Readonly<{
+    minimum: readonly [number, number, number];
+    maximumExclusive: readonly [number, number, number];
+  }>;
+  /** Every directory leaf record above the authored count, with its coordinate. */
+  readonly grownLeaves: readonly Readonly<{
+    leaf: number;
+    coordinate: readonly [number, number, number];
+    spanLog: number;
+    generation: number;
+  }>[];
 }
 
 /** Explicit QA materialization. Production rendering consumes sparse buffers
@@ -3059,6 +3211,17 @@ function uploadBuffer(
   return buffer;
 }
 
+/** Host lifetime: a resident outlives its own construction, so an accessor it
+ * keeps must be built OUTSIDE `createConfigured`. An arrow created in that body
+ * captures the whole construction context — composite grid, frame-control
+ * staging image, interned boundary image, WGSL sources — and pins it for the
+ * life of the generation. Close over the compiler alone. */
+function compilationSnapshotAccessor(
+  compiler: { snapshot(): GPUCompilationSnapshot },
+): () => GPUCompilationSnapshot {
+  return () => compiler.snapshot();
+}
+
 /** Pressure SpMV reads only the CSR edge tail of the physical template ABI.
  * Keep its alias-breaking read-only binding compact instead of cloning every
  * cell, row, term and incidence record a second time. */
@@ -3141,6 +3304,15 @@ export class WebGPUSparseCM12Resident {
     new Uint8Array(SPARSE_CM12_REFINEMENT_REGION_BYTES);
   /** Region intersection is cached per brick and rebuilt only after an edit. */
   private refinementPolicyDirty = false;
+  /**
+   * True whenever a topology commit has been encoded since the last compiled
+   * (CNX + level-set volume) generation rebuild. The device-side generation
+   * check makes a redundant rebuild a no-op, but its ~35 capacity-shaped
+   * level-set build dispatches are not free, so the host tracks the one fact
+   * it actually knows — did anything publish a candidate — and skips the
+   * encode entirely when nothing did.
+   */
+  private compiledTopologyDirty = true;
   private destroyed = false;
   private constructionAtlas!: SparseAdaptiveMassAtlas;
   get acceptedAtlas() { return this.constructionAtlas; }
@@ -3256,7 +3428,11 @@ export class WebGPUSparseCM12Resident {
           const data = realized.state as {resident: object; transfer?: object};
           const next = Object.assign(Object.create(WebGPUSparseCM12Resident.prototype), data.resident,
             { device: allocation.device, currentSolidWorld: this.currentSolidWorld,
-              simulationCompilationSnapshot: () => gpuCompilationManagerFor(device).snapshot() }) as WebGPUSparseCM12Resident;
+              // Built outside this body on purpose: an arrow created here would
+              // pin `source` (the captured per-cell/per-face transfer geometry)
+              // and `nextGrid` for the life of the replacement generation.
+              simulationCompilationSnapshot:
+                compilationSnapshotAccessor(gpuCompilationManagerFor(device)) }) as WebGPUSparseCM12Resident;
           next.generationPreparationMaximumSliceMs = this.generationPreparationMaximumSliceMs;
           next.generationPreparationMaximumSliceOperation = this.generationPreparationMaximumSliceOperation;
           if (next.rigidCoupling) Object.setPrototypeOf(next.rigidCoupling, WebGPUSparseCM12RigidCoupling.prototype);
@@ -3463,6 +3639,35 @@ export class WebGPUSparseCM12Resident {
       fineMetadata: { buffer: this.fineMetadata },
       fineWorklist: { buffer: this.fineWorklist },
       fineSamples: { buffer: this.fineSamples },
+      levelSetVolume: {
+        globalHeaderBaseWords: this.levelSetVolumeLayout.headerBaseWords,
+        slot0BaseWords: this.levelSetVolumeLayout.slots[0].baseWords,
+        slotStrideWords: this.levelSetVolumeLayout.slotStrideWords,
+        slotHeaderOffsetWords: this.levelSetVolumeLayout.slots[0].headerBaseWords
+          - this.levelSetVolumeLayout.slots[0].baseWords,
+        cornerRefsOffsetWords: this.levelSetVolumeLayout.slots[0].cornerRefsBaseWords
+          - this.levelSetVolumeLayout.slots[0].baseWords,
+        cellRecordsOffsetWords: this.levelSetVolumeLayout.slots[0].cellRecordsBaseWords
+          - this.levelSetVolumeLayout.slots[0].baseWords,
+        cellHashOffsetWords: this.levelSetVolumeLayout.slots[0].cellHashBaseWords
+          - this.levelSetVolumeLayout.slots[0].baseWords,
+        phi0OffsetWords: this.levelSetVolumeLayout.slots[0].phi0BaseWords
+          - this.levelSetVolumeLayout.slots[0].baseWords,
+        phi1OffsetWords: this.levelSetVolumeLayout.slots[0].phi1BaseWords
+          - this.levelSetVolumeLayout.slots[0].baseWords,
+        support0OffsetWords: this.levelSetVolumeLayout.slots[0].support0BaseWords
+          - this.levelSetVolumeLayout.slots[0].baseWords,
+        support1OffsetWords: this.levelSetVolumeLayout.slots[0].support1BaseWords
+          - this.levelSetVolumeLayout.slots[0].baseWords,
+        cellCapacity: this.levelSetVolumeLayout.activeCellCapacity,
+        vertexCapacity: this.levelSetVolumeLayout.vertexCapacity,
+        cellHashCapacity: this.levelSetVolumeLayout.cellHashCapacity,
+        hashProbeLimit: this.levelSetVolumeLayout.hashProbeLimit,
+        ...(this.layout.solidCellOpen > 0
+          ? { solidCellOpenOffsetFloats: this.layout.solidCellOpen } : {}),
+        ...(this.layout.solidVoxelCellOpen > 0
+          ? { solidVoxelCellOpenOffsetFloats: this.layout.solidVoxelCellOpen } : {}),
+      },
       worldDirectoryBaseWords: this.worldDirectoryLayout.baseWords,
       worldDirectoryInitialLeaves: this.worldDirectoryLayout.initialLeaves,
     };
@@ -3504,6 +3709,7 @@ export class WebGPUSparseCM12Resident {
       topologyWorklistBaseWords: this.topologyWorklistBaseBytes / 4,
       acceptedLeafManifestBaseWords: this.acceptedLeafManifestBaseBytes / 4,
       templateWords: this.templateWords, layout: this.layout,
+      levelSetVolumeLayout: this.levelSetVolumeLayout,
       cellCapacity: this.templateCellCount, rowCapacity: this.templateRowCount,
       frameControlBaseWords: this.frameControlLayout.baseWords,
       scalarParityWord: SPARSE_CM12_FRAME_CONTROL_HEADER.scalarParity,
@@ -3970,13 +4176,15 @@ export class WebGPUSparseCM12Resident {
         logicalBrickDimensions: atlas.brickDimensions,
         leafCapacity: worldLeafCapacity,
         maximumSpanBricks: atlas.maximumSpanBricks,
-        logicalSlotsPerLeaf: Math.max(1, ...atlas.bricks.map((brick) => {
+        // Reduce, never spread: a grown atlas passed as arguments overflows
+        // the host call stack.
+        logicalSlotsPerLeaf: atlas.bricks.reduce((slots, brick) => {
           const span = sparseBrickSpan(brick);
           const extent = brick.coordinate.map((origin, axis) => Math.max(0,
             Math.min(span, atlas.brickDimensions[axis]! - origin)));
-          return (extent[2]! - 1) * span * span
-            + (extent[1]! - 1) * span + extent[0]!;
-        })),
+          return Math.max(slots, (extent[2]! - 1) * span * span
+            + (extent[1]! - 1) * span + extent[0]!);
+        }, 1),
       });
     // Production ownership remains the signed-coordinate WDR1 hash. The two
     // implicit-arithmetic experiments upload the already-built immutable LOD1
@@ -4052,7 +4260,18 @@ export class WebGPUSparseCM12Resident {
       device.limits.maxBufferSize) / 4);
     // Coupling storage follows admitted active work, not all dormant B8 templates.
     // Reserve half of the remaining binding budget for adaptive phi and growth.
-    const transportEdgeCapacity = Math.min(Math.max(4096, 32 * grid.cells.length),
+    // Generation zero is NOT that admitted set: every cell of the ACCEPTED
+    // topology is both a receiver and a donor (gvReceiverCapacity/gvDonorCapacity
+    // are open volume, not liquid), and a coarse-first scene starts at one cell
+    // per brick - the large hydrostatic pool opens with 24 cells for 24 B8
+    // bricks. The first refinement, or one injected page, multiplies that by up
+    // to B^3, so sizing the arena from `grid.cells.length` hard-faulted
+    // `buildWholeFrameVolumeCoupling` (reason 14) at the 4096 floor on the very
+    // frame that accepted a UI drop. Size it against the refinable world - the
+    // authored template ladder plus the frontier pages the pool may stage.
+    const couplingCellCapacity = Math.max(grid.cells.length, templates.cellCount)
+      + Math.min(topologyPagePool.pageCapacity, 32) * dynamicCellsPerPage;
+    const transportEdgeCapacity = Math.min(Math.max(4096, 32 * couplingCellCapacity),
       Math.max(0, Math.floor((maximumStateWords - baseLayout.floatCount) / 12)));
     if (transportEdgeCapacity < grid.cells.length) {
       throw new RangeError("Adaptive level-set volume coupling cannot fit one edge per initial cell");
@@ -4726,30 +4945,74 @@ export class WebGPUSparseCM12Resident {
       maximumArenaWords: Math.floor(device.limits.maxStorageBufferBindingSize / 4)
         - CM12_FAILURE_WORDS,
     });
-    // Reserve the accepted coverage, one complete rung promotion, and eight
-    // same-rung frontier pages. This remains proportional to live adaptive
-    // resolution rather than the dormant/full-fine template catalogue.
+    // Reserve the accepted coverage, one complete rung promotion, and a
+    // bounded course of frontier pages. This remains proportional to live
+    // adaptive resolution rather than the dormant/full-fine template catalogue.
     const activePhiBricks = atlas.bricks.filter(brick =>
       initiallyActiveBrickKeys.has(brick.key));
-    const maximumActiveResolution = Math.max(1,
-      ...activePhiBricks.map(brick => brick.resolution));
     const onePromotionCellCount = activePhiBricks.reduce((sum, brick) => {
       const resolution = Math.min(atlas.brickFineResolution, 2 * brick.resolution);
       return sum + resolution ** 3;
     }, 0);
-    const frontierCellHeadroom = grid.cells.length
-      + 8 * maximumActiveResolution ** 3;
-    const levelSetCellCapacity = Math.min(physicsCellCapacity,
+    // A synthesized frontier page is always a complete B8 page, never the
+    // accepted rung. Reserving it at the live (coarse-first) resolution made
+    // the very first grown page overflow the phi arena, and
+    // `finalizeShadowWorklists` then soft-rejected the entire topology
+    // transaction that carried it - an injected drop outside the authored
+    // world could never claim a page at all. The authored half of that
+    // reservation has the same defect: `grid.cells.length` is generation zero,
+    // and a coarse-first pool opens at one cell per brick. A frontier page
+    // forces its neighbours through the 2:1 closure, so accepting it also
+    // refines authored leaves; charging the phi arena for the ladder those
+    // leaves can actually reach keeps the soft reject from returning one
+    // refinement later.
+    // Bounded to the ladder the live leaves can reach plus a course of pages:
+    // charging the whole coupling arena here inflated the phi arena ~8x on
+    // large scenes, and every capacity-shaped level-set dispatch with it.
+    const frontierCellHeadroom = Math.max(grid.cells.length, onePromotionCellCount)
+      + Math.min(topologyPagePool.pageCapacity, 32) * dynamicCellsPerPage;
+    const solverCellCapacity = Math.min(physicsCellCapacity,
       Math.max(4 * grid.cells.length, onePromotionCellCount, frontierCellHeadroom));
-    const levelSetVertexCapacity = Math.min(8 * levelSetCellCapacity,
-      Math.max(64, 3 * levelSetCellCapacity));
-    const levelSetVolumeLayout = createLevelSetVolumeLayout({
-      baseWords: compiledTopologyLayout.totalWords,
-      activeCellCapacity: levelSetCellCapacity,
-      vertexCapacity: levelSetVertexCapacity,
-      maximumArenaWords: Math.floor(device.limits.maxStorageBufferBindingSize / 4)
-        - CM12_FAILURE_WORDS,
-    });
+    // Phi cells are a free variable. Inside the fine-phi band a brick carries
+    // its finest template rung whatever its solver rung is, so the phi domain
+    // is no longer bounded by the solver cell count. But the band is a SHELL -
+    // surface, thin and cut bricks plus their 26-apron - not the live volume.
+    // Charging every live brick here inflated the arena by the brick count,
+    // and with it every capacity-shaped level-set dispatch that still sizes
+    // from vertexCapacity. Budget the shell (~n^{2/3} widened by the apron)
+    // and stay at or above the solver-sized arena, so this is monotone with
+    // the unbanded plan. lsvPlanPhiCells makes the same degradation on the GPU
+    // whenever a live plan overflows the budget, so a tight arena costs band
+    // accuracy instead of faulting the slot.
+    // The shell is measured, not assumed: one free surface per vertical
+    // column, three bricks thick for the 2:1 apron, plus a promotion allowance.
+    // A deep droplet domain gives ~n^{2/3}; a shallow pool gives ~n/depth.
+    // Either way it is bounded by the live brick count.
+    const phiBrickColumns = new Set(activePhiBricks.map(
+      brick => `${brick.coordinate[0]}/${brick.coordinate[2]}`)).size;
+    const bandBrickBudget = FINE_PHI_BAND_ENABLED
+      ? Math.min(activePhiBricks.length, 27 + 3 * phiBrickColumns)
+      : 0;
+    const bandedCellCapacity = Math.min(physicsCellCapacity,
+      Math.max(solverCellCapacity,
+        bandBrickBudget * dynamicCellsPerPage + frontierCellHeadroom));
+    const maximumArenaWords =
+      Math.floor(device.limits.maxStorageBufferBindingSize / 4) - CM12_FAILURE_WORDS;
+    const planLevelSetVolumeLayout = (cells: number): LevelSetVolumeLayout =>
+      createLevelSetVolumeLayout({
+        baseWords: compiledTopologyLayout.totalWords,
+        activeCellCapacity: cells,
+        vertexCapacity: Math.min(8 * cells, Math.max(64, 3 * cells)),
+        brickCapacity: worldLeafCapacity,
+        maximumArenaWords,
+      });
+    let levelSetVolumeLayout: LevelSetVolumeLayout;
+    try {
+      levelSetVolumeLayout = planLevelSetVolumeLayout(bandedCellCapacity);
+    } catch (error) {
+      if (bandedCellCapacity <= solverCellCapacity) throw error;
+      levelSetVolumeLayout = planLevelSetVolumeLayout(solverCellCapacity);
+    }
     const topologyArenaWords = levelSetVolumeLayout.totalWords + CM12_FAILURE_WORDS;
     const topologyArena = device.createBuffer({
       label: "Sparse Geometric (CM12) physical topology templates and worklists",
@@ -4850,7 +5113,11 @@ export class WebGPUSparseCM12Resident {
     const acceptedIndirectArguments = uploadBuffer(device,
       "Sparse CM12 accepted indirect dispatch snapshot",
       acceptedAndShadowIndirect,
-      GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC);
+      // STORAGE only so the projected-transport gate below may zero the
+      // commit-tail triples. No dispatch ever binds it and reads it
+      // indirectly at the same time.
+      GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC
+      | GPUBufferUsage.STORAGE);
     const pressureCellIndirectArguments = device.createBuffer({
       label: "Sparse Geometric (CM12) pressure-cell indirect dispatch",
       size: 12,
@@ -5109,7 +5376,9 @@ export class WebGPUSparseCM12Resident {
     // allocation sizes. Its argument buffer is absent from every consumer.
     const compiledTopologyArguments = device.createBuffer({
       label: "Sparse CM12 complete topology compilation dispatches",
-      size: 4 * 12, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT,
+      // Words 0..11 are CNX's four triples; 12..23 are the adaptive level-set
+      // build's clear/cell/vertex/validate triples.
+      size: 4 * 24, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT,
     });
     const compiledTopologyPipeline = await compileResidentPipeline({
       label: "Sparse CM12 complete topology compilation dispatch publication",
@@ -5140,6 +5409,29 @@ fn publish(){
         }), entryPoint: "publish",
       },
     }, { priority: "critical" });
+    // The adaptive level-set build gates itself: lsvBeginTopology can start a
+    // build when CNX's rebuildRequired is clear, so its domains cannot be
+    // derived from the CNX header. The build kernels publish their own triples
+    // into the level-set global header and this thread mirrors those twelve
+    // words into the indirect buffer, inside the build's own compute pass.
+    const levelSetBuildDispatchPipeline = await compileResidentPipeline({
+      label: "Sparse CM12 adaptive level-set build dispatch publication",
+      layout: "auto",
+      compute: {
+        module: compiler.createShaderModule({
+          label: "Sparse CM12 adaptive level-set build dispatch shader",
+          code: /* wgsl */ `
+@group(0) @binding(0) var<storage,read> header:array<u32>;
+@group(0) @binding(1) var<storage,read_write> arguments:array<u32>;
+@compute @workgroup_size(1)
+fn publishLevelSetBuild(){
+  for(var word=0u;word<12u;word+=1u){
+    arguments[12u+word]=header[${LSV_GLOBAL_HEADER.buildClearDispatch}u+word];
+  }
+}`,
+        }), entryPoint: "publishLevelSetBuild",
+      },
+    }, { priority: "critical" });
     const compiledTopologyIndirectPublisher: CompiledTopologyIndirectPublisher = {
       arguments: compiledTopologyArguments,
       pipeline: compiledTopologyPipeline,
@@ -5149,6 +5441,17 @@ fn publish(){
         entries: [
           { binding: 0, resource: { buffer: topologyArena,
             offset: 4 * compiledTopologyLayout.headerBaseWords, size: 256 } },
+          { binding: 1, resource: { buffer: compiledTopologyArguments } },
+        ],
+      }),
+      levelSetBuildPipeline: levelSetBuildDispatchPipeline,
+      levelSetBuildBindGroup: device.createBindGroup({
+        label: "Sparse CM12 adaptive level-set build dispatch bindings",
+        layout: levelSetBuildDispatchPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: topologyArena,
+            offset: 4 * levelSetVolumeLayout.headerBaseWords,
+            size: 4 * LEVELSET_VOLUME_GLOBAL_HEADER_WORDS } },
           { binding: 1, resource: { buffer: compiledTopologyArguments } },
         ],
       }),
@@ -5164,6 +5467,7 @@ fn publish(){
 ${transportPacketIndirectArguments
     ? "@group(0) @binding(2) var<storage,read_write> velocityExtensionArguments:array<u32>;"
     : ""}
+@group(0) @binding(3) var<storage,read_write> acceptedArguments:array<u32>;
 override BRICK_GROUPS:u32;
 override LEAF_GROUPS:u32;
 override PAGE_GROUPS:u32;
@@ -5182,6 +5486,15 @@ fn publishTopology(){
   triplet(9u,enabled*PAGE_GROUPS);
   triplet(12u,enabled*FRONTIER_GROUPS);
   triplet(15u,enabled*DIRECTORY_GROUPS);
+}
+// Shadow-row (byte 24..48), accepted-leaf (60..72), candidate-delta (72..84)
+// and shadow-structure (84..96) triples. With no receivers this transaction
+// stages nothing, so every one of them must dispatch nothing.
+@compute @workgroup_size(1)
+fn gateAcceptedCommitTail(){
+  if(atomicLoad(&activity[26u])!=0u){return;}
+  for(var word=6u;word<12u;word=word+1u){acceptedArguments[word]=0u;}
+  for(var word=15u;word<24u;word=word+1u){acceptedArguments[word]=0u;}
 }
 ${transportPacketIndirectArguments ? /* wgsl */ `
 @compute @workgroup_size(1)
@@ -5202,6 +5515,7 @@ fn gateVelocityExtension(){
         ...(transportPacketIndirectArguments
           ? [{ binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" as const } }]
           : []),
+        { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" as const } },
       ],
     });
     const projectedTransportPipelineLayout = device.createPipelineLayout({
@@ -5231,10 +5545,17 @@ fn gateVelocityExtension(){
           entryPoint: "gateVelocityExtension" },
       }, { priority: "critical" })
       : undefined;
+    const projectedTransportAcceptedCommitTailPipeline = await compileResidentPipeline({
+      label: "Sparse Geometric projected transport commit-tail dispatch gate",
+      layout: projectedTransportPipelineLayout,
+      compute: { module: projectedTransportGateModule,
+        entryPoint: "gateAcceptedCommitTail" },
+    }, { priority: "critical" });
     const projectedTransportIndirectPublisher: ProjectedTransportIndirectPublisher = {
       arguments: projectedTransportIndirectArguments,
       topologyPipeline: projectedTransportTopologyPipeline,
       velocityExtensionPipeline: projectedTransportVelocityExtensionPipeline,
+      acceptedCommitTailPipeline: projectedTransportAcceptedCommitTailPipeline,
       bindGroup: device.createBindGroup({
         label: "Sparse Geometric projected transport dispatch gate bindings",
         layout: projectedTransportBindGroupLayout,
@@ -5244,6 +5565,7 @@ fn gateVelocityExtension(){
           ...(transportPacketIndirectArguments
             ? [{ binding: 2, resource: { buffer: transportPacketIndirectArguments } }]
             : []),
+          { binding: 3, resource: { buffer: acceptedIndirectArguments } },
         ],
       }),
     };
@@ -5382,7 +5704,6 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
       "planGeometricTransportFrontier",
       "enforceGeometricDynamicSeamFloor",
       "activateGeometricSweptCellSupport",
-      "reserveGeometricTransportFaceSupport",
       "publishGeometricTransportFrontierSource",
       "gatherGeometricSourceCapacity", "prepareGeometricSourceBudget",
       "emitGeometricSourceVolume", "finalizeGeometricSourceLedger",
@@ -5778,7 +6099,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
       presentationPublisherOracleForQA,
       presentationPipelines,
       startSimulationPipelineCompilation,
-      () => compiler.snapshot(),
+      compilationSnapshotAccessor(compiler),
       physicsCellCapacity, physicsRowCapacity,
       physicsCellCapacity, physicsRowCapacity,
       Math.max(templates.maximumOwnedRowCount, dynamicRowsPerPage),
@@ -5874,7 +6195,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
           layout: input.source.levelSetVolume.layout,
         } : undefined,
         liveControl: { ...input.source.liveControl, buffer: recorder.externalResources[firstSource+1] as GPUBuffer } },
-      resident.generationTransferTarget(), input.maximumBytes - resident.allocatedBytes,
+      resident.generationTransferTarget(input.active), input.maximumBytes - resident.allocatedBytes,
       input.newAirCoverage) : undefined;
     allocation.finish();
     // Class methods stay in the advancing worker's module. Only initialized
@@ -6106,7 +6427,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
     // happen inside an open compute pass — and because that close must not
     // happen on the frames nobody is looking, which would change the advance's
     // pass structure for every scene.
-    let lensTaps = sparseCM12StageTaps(this.stageLenses, encoder, closePass);
+    const lensTaps = sparseCM12StageTaps(this.stageLenses, encoder, closePass);
     const selectBindGroup = (bindGroup: GPUBindGroup) => {
       activeBindGroup = bindGroup;
       pass?.setBindGroup(0, bindGroup);
@@ -6192,12 +6513,16 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
       dispatchFrameControl("sparseCM12FrameControlNoop",
         SPARSE_CM12_FRAME_CONTROL_FAMILY.bodyRowBypass);
       closePass();
-      this.encodeCompiledTopologyGeneration(encoder);
+      // The previous frame's presentation already compiled the accepted
+      // generation it published, and transport never commits topology, so a
+      // frame head with nothing committed since then needs no rebuild.
+      if (this.compiledTopologyDirty) this.encodeCompiledTopologyGeneration(encoder);
       selectBindGroup(this.bindGroup);
       dispatchAccepted("seedGeometricVolumeDestination", "cell");
       closePass();
       this.encodeTopologyEditTransaction(encoder, finestCellSize_m,
-        [0, 0, 0], [0, 0, 0], 0, 0, dt_s, false, activityPolicy, "prepare", true);
+        [0, 0, 0], [0, 0, 0], 0, 0, dt_s, false, activityPolicy, "prepare", true,
+        false, true);
       selectBindGroup(this.bindGroup);
       dispatchAccepted("publishGeometricTransportFrontierSource", "cell");
       if (this.rigidCoupling) {
@@ -6241,7 +6566,9 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
       selectBindGroup(this.pressureBindGroup);
     });
     stage("face-preparation", ({ closeSubstage }) => {
-      dispatchAccepted("seedGeometricVolumeDestination", "cell");
+      // The frame head already seeded the destination bank and published it
+      // back to source; nothing between writes either cell bank, so a second
+      // whole-accepted-cell seed here copied a bank onto itself.
       selectBindGroup(this.transportBindGroup);
       dispatch("clearSparseCM12RetiredFaceVelocitySupport",
         this.incrementalActivityLayout.brickCount);
@@ -6386,7 +6713,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
       dispatchPressureCell("measureTrueResidual");
       dispatch("reduceFinalTrueResidual", 1);
     });
-    stage("velocity-projection", () => {
+    stage("velocity-projection", ({ closeSubstage }) => {
       // The brick-scalar arm opens this generation before scalar comparison.
       selectBindGroup(this.bindGroup);
       dispatch("beginIncrementalActivity", 1);
@@ -6416,9 +6743,17 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
       selectBindGroup(this.bindGroup);
       dispatch("publishSparseCM12FrameFaceOutput", 1);
       closePass();
+      closeSubstage("projection-faces");
       this.encodeTopologyEditTransaction(encoder, finestCellSize_m,
         [0, 0, 0], [0, 0, 0], 0, 0, dt_s, false, activityPolicy, "prepare", true,
         true);
+      closeSubstage("projected-frontier-commit");
+      // Transport reads the compiled (CNX + level-set) planes of whatever the
+      // transaction above accepted, so a commit here must be recompiled before
+      // it. The transaction is entirely gated on the measured projected
+      // receiver count: with no receivers it publishes no candidate at all.
+      this.encodeCompiledTopologyGeneration(encoder);
+      closeSubstage("projected-topology-rebuild");
       if (this.transportPacketIndirectArguments
         && this.projectedTransportIndirectPublisher.velocityExtensionPipeline) {
         selectBindGroup(this.transportBindGroup);
@@ -6538,7 +6873,6 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
         dispatch("planBrickResolution", bricks);
         closeSubstage("initial-resolution-plan");
         dispatch("activateSweptFrontierPages", leafCapacity);
-        dispatch("reserveGeometricTransportFaceSupport", bricks);
         dispatch("enforceGeometricDynamicSeamFloor", bricks);
         // Lifecycle membership is a topology candidate, not a post-publication
         // mutation.  Retirement marks same-rung delta work consumed by the
@@ -6580,6 +6914,9 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
           this.acceptedIndirectArguments, 72, 12);
       });
       stage("candidate-transfer", ({ closeSubstage }) => {
+        // This stage publishes the frame's accepted generation; presentation
+        // below must recompile against it.
+        this.compiledTopologyDirty = true;
         if (this.rigidCoupling) {
           closePass();
           this.rigidCoupling.encodeShadowGeometry(encoder, false);
@@ -7023,6 +7360,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
 
   /** Rebuild every connectivity plane together, only for a changed generation. */
   private encodeCompiledTopologyGeneration(encoder: GPUCommandEncoder): void {
+    this.compiledTopologyDirty = false;
     // A topology commit may have occurred earlier in this command buffer.
     encoder.copyBufferToBuffer(this.topologyArena,
       this.topologyWorklistBaseBytes + 4 * 8,
@@ -7059,35 +7397,47 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
     const direct = (name: string, groups: number) => {
       phi.setPipeline(this.pipelines[name]!); phi.dispatchWorkgroups(Math.max(1, groups));
     };
+    const indirect = (name: string, byteOffset: number) => {
+      phi.setPipeline(this.pipelines[name]!);
+      phi.dispatchWorkgroupsIndirect(publisher.arguments, byteOffset);
+    };
+    // The level-set build gates itself, so it publishes its own domains and
+    // this thread lifts them into the indirect buffer. An unchanged generation
+    // then launches zero workgroups instead of ~2,500 that would all early-out
+    // in lsvBuilding(), and a changed one launches live-sized work.
+    const mirrorBuildDispatches = () => {
+      phi.setBindGroup(0, publisher.levelSetBuildBindGroup);
+      phi.setPipeline(publisher.levelSetBuildPipeline);
+      phi.dispatchWorkgroups(1);
+      phi.setBindGroup(0, this.transportBindGroup);
+    };
+    // The phi lattice is planned before the build is sized: one cooperative
+    // workgroup snapshots one dyadic phi resolution per brick into the slot
+    // about to be built, and every later ordinal lookup reads that snapshot
+    // instead of a live activity receipt.
+    direct("lsvPlanPhiCells", 1);
     direct("lsvBeginTopology", 1);
-    direct("lsvClearTopology", Math.ceil(Math.max(
-      this.levelSetVolumeLayout.hashCapacity,
-      this.levelSetVolumeLayout.cellHashCapacity,
-      8 * this.levelSetVolumeLayout.activeCellCapacity,
-      this.levelSetVolumeLayout.vertexCapacity) / WORKGROUP_SIZE));
-    direct("lsvCatalogCellCorners", Math.ceil(
-      this.levelSetVolumeLayout.activeCellCapacity / WORKGROUP_SIZE));
-    direct("lsvInsertVertexHash", Math.ceil(
-      this.levelSetVolumeLayout.vertexCapacity / WORKGROUP_SIZE));
-    direct("lsvResolveCellCorners", Math.ceil(
-      this.levelSetVolumeLayout.activeCellCapacity / WORKGROUP_SIZE));
-    direct("lsvCompileConstraints", Math.ceil(
-      this.levelSetVolumeLayout.vertexCapacity / WORKGROUP_SIZE));
+    mirrorBuildDispatches();
+    indirect("lsvClearTopology", LSV_BUILD_CLEAR_DISPATCH_OFFSET);
+    indirect("lsvCatalogCellCorners", LSV_BUILD_CELL_DISPATCH_OFFSET);
+    // Cataloguing is the only producer of vertices, so the remaining phases
+    // are sized only once it has counted them.
+    direct("lsvPublishBuildVertexDispatch", 1);
+    mirrorBuildDispatches();
+    indirect("lsvInsertVertexHash", LSV_BUILD_VERTEX_DISPATCH_OFFSET);
+    indirect("lsvResolveCellCorners", LSV_BUILD_CELL_DISPATCH_OFFSET);
+    indirect("lsvCompileConstraints", LSV_BUILD_VERTEX_DISPATCH_OFFSET);
     // The transfer kernel falls back to the immutable authored geometry only
     // when no accepted phi slot exists (generation zero or genuinely new support).
-    direct("lsvTransferPhi", Math.ceil(
-      this.levelSetVolumeLayout.vertexCapacity / WORKGROUP_SIZE));
+    indirect("lsvTransferPhi", LSV_BUILD_VERTEX_DISPATCH_OFFSET);
     direct("lsvBeginBuildConstraintProjection", 1);
     const phiConstraintLevels = Math.ceil(Math.log2(
       this.constructionAtlas.maximumSpanBricks * this.brickFineResolution)) + 1;
     for (let level = 0; level < phiConstraintLevels; level += 1) {
-      direct("lsvApplyBuildConstraints", Math.ceil(
-        this.levelSetVolumeLayout.vertexCapacity / WORKGROUP_SIZE));
+      indirect("lsvApplyBuildConstraints", LSV_BUILD_VERTEX_DISPATCH_OFFSET);
       direct("lsvAdvanceBuildConstraintProjection", 1);
     }
-    direct("lsvValidateTopology", Math.ceil(Math.max(
-      this.levelSetVolumeLayout.activeCellCapacity,
-      this.levelSetVolumeLayout.vertexCapacity) / WORKGROUP_SIZE));
+    indirect("lsvValidateTopology", LSV_BUILD_VALIDATE_DISPATCH_OFFSET);
     direct("lsvSealTopology", 1);
     direct("lsvPublishTopology", 1);
     phi.end();
@@ -7098,7 +7448,10 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
     label: string,
   ): void {
     this.encodeFailureGate(encoder);
-    this.encodeCompiledTopologyGeneration(encoder);
+    // Presentation must publish against the accepted generation. Nothing since
+    // the last compilation can have committed topology unless a commit path
+    // said so, so an unchanged generation skips the encode entirely.
+    if (this.compiledTopologyDirty) this.encodeCompiledTopologyGeneration(encoder);
     // Re-rung publication may have changed the accepted cell worklist earlier
     // in this command buffer; both geometry-cache publishers use its new count.
     encoder.copyBufferToBuffer(this.topologyArena,
@@ -7408,8 +7761,14 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
     phase: "complete" | "prepare" | "apply" = "complete",
     transportFrontier = false,
     projectedTransportFrontier = false,
+    frontierPrologueOnly = false,
   ): void {
     this.assertLive();
+    // Every edit, injection, region refresh and rigid-shadow transaction runs
+    // through here and can commit a new accepted generation, so the compiled
+    // topology and the adaptive level-set must recompile before the next
+    // publication regardless of which branch below commits.
+    this.compiledTopologyDirty = true;
     if (!transportFrontier) {
     this.writeParameters(this.lastPacked!, injectionDt_s, finestCellSize_m, 1,
       [0, 0, 0], undefined, activityPolicy, undefined, 0, undefined, this.lastInflow);
@@ -7453,6 +7812,28 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
         topologyPass?.setBindGroup(0, bindGroup);
       };
       let projectedDispatchesGated = false;
+      /**
+       * Zero the commit tail's accepted/shadow/delta triples when no projected
+       * receiver was measured.
+       *
+       * The host copies those counts out of the arena unconditionally, but the
+       * kernels that author them are gated, so without this the tail replays
+       * the previous generation's worklists at full size every frame. Called
+       * after each copy that refills one of the gated ranges.
+       */
+      const gateProjectedCommitTail = () => {
+        if (!projectedTransportFrontier || !projectedDispatchesGated) return;
+        closeTopologyPass();
+        const gatePass = encoder.beginComputePass({
+          label: "Sparse Geometric projected transport commit-tail gate",
+        });
+        gatePass.setPipeline(
+          this.projectedTransportIndirectPublisher.acceptedCommitTailPipeline);
+        gatePass.setBindGroup(0,
+          this.projectedTransportIndirectPublisher.bindGroup);
+        gatePass.dispatchWorkgroups(1);
+        gatePass.end();
+      };
       const dispatchTopology = (name: string, count: number, y = 1, z = 1) => {
         const pass = openTopologyPass();
         pass.setPipeline(this.pipelines[name]!);
@@ -7559,9 +7940,20 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
         if (!projectedTransportFrontier) {
           dispatchTopologyIndirect("activateGeometricSweptCellSupport", 0);
           if (this.lastInflow) dispatchTopology("activateContinuousGeometricSourcePages", bricks);
-          dispatchTopology("reserveGeometricTransportFaceSupport", bricks);
           dispatchTopology("reserveGeometricPreflightEnvelopeSupport", bricks);
           dispatchTopology("enforceGeometricDynamicSeamFloor", bricks);
+        }
+        // Prephysics residency is a *staging* pass: it seals the transport
+        // envelope, advances the activity clock and stages every page the
+        // swept/source demand will need. The ordinary postphysics planner
+        // (`resolution-planning`) and `candidate-transfer` publish exactly
+        // that staged candidate later in this same command buffer, and the
+        // projected transaction after pressure restages it against measured
+        // receivers. Committing a whole second generation here only to have
+        // the frame's own planner recompute and republish it was pure churn.
+        if (frontierPrologueOnly) {
+          closeTopologyPass();
+          return;
         }
       } else if (mode !== 0) {
         dispatchTopology("allocateSparseWorldInteractionPages",
@@ -7590,6 +7982,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
       dispatchTopology("scheduleTopologyPreparation", 1);
       dispatchTopology("certifyGeometricTopologyFaces", leafCapacity);
       dispatchTopology("sealGeometricTopologyFaces", bricks);
+      gateProjectedCommitTail();
       dispatchTopologyIndirect("clearShadowRowMembership", 36);
       dispatchTopology("beginShadowTopology", 1);
       dispatchTopology("buildShadowLeafWorklist", 1);
@@ -7597,6 +7990,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
       encoder.copyBufferToBuffer(this.topologyArena,
         this.acceptedLeafManifestBaseBytes + 4 * 15,
         this.acceptedIndirectArguments, 84, 12);
+      gateProjectedCommitTail();
       dispatchTopologyIndirect("buildShadowStructureWorklist", 84);
       dispatchTopology("finalizeShadowWorklists", 1);
       closeTopologyPass();
@@ -7609,6 +8003,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
       encoder.copyBufferToBuffer(this.topologyArena,
         this.acceptedLeafManifestBaseBytes + 4 * 12,
         this.acceptedIndirectArguments, 72, 12);
+      gateProjectedCommitTail();
       if (this.rigidCoupling) {
         closeTopologyPass();
         this.rigidCoupling.encodeShadowGeometry(encoder, transportFrontier);
@@ -7662,7 +8057,10 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
       encoder.copyBufferToBuffer(this.topologyArena,
         this.acceptedLeafManifestBaseBytes + 4 * 20,
         this.acceptedIndirectArguments, 120, 12);
-      this.encodeCompiledTopologyGeneration(encoder);
+      // The projected-frontier caller owns its own rebuild so the receipt can
+      // price the commit tail and the compiled generation as separate seams,
+      // and so the rebuild can be skipped on a frame that committed nothing.
+      if (!projectedTransportFrontier) this.encodeCompiledTopologyGeneration(encoder);
     }
     // Frozen mixed seams can require a replacement generation. Prepare the
     // entire interaction's support first, then apply its density/impulse once
@@ -8385,8 +8783,9 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
       faceOffsets: [this.layout.faceA, this.layout.faceB] as const,
     };
   }
-  private generationTransferTarget() {
-    return { state: this.state, cellIds: this.initialGenerationCellIds, rowIds: this.initialGenerationRowIds,
+  private generationTransferTarget(activeBrickKeys?: ReadonlySet<number>) {
+    return { state: this.state, activeBrickKeys,
+      cellIds: this.initialGenerationCellIds, rowIds: this.initialGenerationRowIds,
       densityOffset:this.layout.densityA, densityOtherOffset:this.layout.densityB,
       gammaOffset:this.layout.gammaA, gammaOtherOffset:this.layout.gammaB,
       velocityOffset:this.layout.cellVelocityA, velocityOtherOffset:this.layout.cellVelocityB,
@@ -8409,7 +8808,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
       const transfer = next.preparedGenerationTransfer ?? await prepareSparseCM12GenerationTransfer(
         this.device, source.geometry!, grid!, { ...source,
           liveControl: {buffer:this.topologyArena, ...this.generationTransferControlDescription()} },
-        next.generationTransferTarget(), maximumBytes - next.allocatedBytes, newAirCoverage);
+        next.generationTransferTarget(active), maximumBytes - next.allocatedBytes, newAirCoverage);
       next.preparedGenerationTransfer = undefined;
       return { resident: next, disposePreparation: () => transfer.destroy(), commit: async () => {
         // Only this short publication boundary suspends advances. The candidate
@@ -8436,6 +8835,14 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
           this.rigidCoupling.copyPreviousPosesTo(encoder, next.rigidCoupling);
         }
         next.rigidCoupling?.encodeAcceptedGeometry(encoder, true);
+        // The remap scatters adaptive phi into the replacement's accepted
+        // level-set slot by vertex hash and then reprojects its hanging
+        // constraints. Neither the hash, the vertex records, nor the
+        // constraint graph exist until the replacement has compiled its own
+        // topology generation, so build it here. Leaving it to the initial
+        // presentation below would make every lookup miss, and the build
+        // would afterwards overwrite the field with authored scene phi.
+        next.encodeCompiledTopologyGeneration(encoder);
         transfer.encode(encoder);
         encoder.copyBufferToBuffer(this.activity, 0, next.activity, 0, 4);
         // Pending hose volume belongs to the source, not to any topology tile.
@@ -8447,8 +8854,12 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
         next.encodeInitialPresentation(encoder, finestCellSize_m,
           this.presentationColumnHeightMode, this.presentationSurfaceMode);
         this.device.queue.submit([encoder.finish()]);
-        await transfer.validate();
+        // Health first: the remap scatters through the replacement's level-set
+        // hash, so a failed level-set build makes every lookup miss and the
+        // transfer reports a lost field for a vertex that was never catalogued.
+        // Reporting the replacement's own fault first names the cause instead.
         await next.assertSimulationHealthy();
+        await transfer.validate();
       } };
     } catch (error) { next.destroy(); throw error; }
   }
@@ -9970,6 +10381,12 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
         constrainedVertices: accepted?.[LSV_SLOT_HEADER.constraintCount] ?? 0,
         fault: accepted?.[LSV_SLOT_HEADER.fault] ?? words[LSV_GLOBAL_HEADER.fault]!,
         header: named,
+        // Redistance publishes its receipts into the slot header above the
+        // named words; the copy already carries them, so expose the raw
+        // block rather than issuing a second readback for it.
+        redistanceReceipts: accepted
+          ? Array.from(accepted.subarray(16, 28))
+          : undefined,
         ...(includeVertices ? { vertices } : {}),
       };
     } finally { if (readback.mapState === "mapped") readback.unmap(); readback.destroy(); }
@@ -10845,8 +11262,10 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
     const dynamicFaceBytes = 4 * rowsPerPage * this.topologyPageCapacity;
     const transportLeafWords = 8 * this.topologyPageCapacity;
     const transportLeafBytes = 4 * transportLeafWords;
+    const activityHeaderBytes = 4 * ACTIVITY_HEADER_WORDS;
     const bytes = directoryBytes + pageHeaderBytes + activityRecordBytes
-      + 2 * dynamicFieldBytes + 2 * dynamicFaceBytes + 2 * transportLeafBytes;
+      + 2 * dynamicFieldBytes + 2 * dynamicFaceBytes + 2 * transportLeafBytes
+      + activityHeaderBytes;
     const readback = this.device.createBuffer({
       label: "Sparse Geometric (CM12) world-growth QA readback", size: Math.max(4, bytes),
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
@@ -10904,9 +11323,17 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
             transportLeafBytes);
         }
       }
+      encoder.copyBufferToBuffer(this.activity, 0, readback,
+        directoryBytes + pageHeaderBytes + activityRecordBytes
+          + 2 * dynamicFieldBytes + 2 * dynamicFaceBytes + 2 * transportLeafBytes,
+        activityHeaderBytes);
       this.device.queue.submit([encoder.finish()]);
       await readback.mapAsync(GPUMapMode.READ);
       const words = new Uint32Array(readback.getMappedRange());
+      const activityHeaderBase = (directoryBytes + pageHeaderBytes + activityRecordBytes
+        + 2 * dynamicFieldBytes + 2 * dynamicFaceBytes + 2 * transportLeafBytes) / 4;
+      const unacceptedTopologyPages: SparseCM12WorldGrowthReceipt[
+        "unacceptedTopologyPages"][number][] = [];
       const h = SPARSE_CM12_WORLD_DIRECTORY_HEADER;
       const signed = (value: number) => ((value ^ 0x8000_0000) | 0);
       let synthesizedTopologyPages = 0;
@@ -10958,6 +11385,22 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
               words[leafAt]! | 0, words[leafAt + 1]! | 0, words[leafAt + 2]! | 0,
             ]) as readonly [number, number, number]);
           }
+        } else if (words[pageBase + pageHeaderWords * page + 2] === cellsPerPage) {
+          // Claimed but never accepted. Report the exact lifecycle words the
+          // publication gate reads so a silent non-publication names its cause.
+          const record = activityBase + ACTIVITY_RECORD_WORDS * page;
+          const lifecycle = words[record + 35]!;
+          unacceptedTopologyPages.push(Object.freeze({
+            page, leaf: words[pageBase + pageHeaderWords * page]!, pageReceipt,
+            requestedResolution: words[record + 8]!,
+            acceptedResolution: words[record + 12]!,
+            scheduledResolution: words[record + 13]!,
+            candidateStatus: words[record + 14]!,
+            accepted: words[record + 10] !== 0,
+            candidateActive: (lifecycle & 0x8000_0000) !== 0,
+            preparationScheduled: (lifecycle & 1) !== 0,
+            generationStamp: words[record + 36]!,
+          }));
         }
         let pageMass = 0;
         for (let local = 0; local < cellsPerPage; local += 1) {
@@ -11003,6 +11446,19 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
           }
         }
       }
+      const grownLeaves: SparseCM12WorldGrowthReceipt["grownLeaves"][number][] = [];
+      for (let leaf = this.initialWorldLeafCount;
+        leaf < Math.min(words[h.nextLeaf]!, this.worldDirectoryLayout.leafCapacity);
+        leaf += 1) {
+        const leafAt = this.worldDirectoryLayout.leafBaseWords + 5 * leaf;
+        grownLeaves.push(Object.freeze({
+          leaf,
+          coordinate: Object.freeze([words[leafAt]! | 0, words[leafAt + 1]! | 0,
+            words[leafAt + 2]! | 0]) as readonly [number, number, number],
+          spanLog: words[leafAt + 3]!,
+          generation: words[leafAt + 4]!,
+        }));
+      }
       for (let row = 0; row < rowsPerPage * this.topologyPageCapacity; row += 1) {
         dynamicMaximumAbsFaceVelocityFineCells_s = Math.max(
           dynamicMaximumAbsFaceVelocityFineCells_s,
@@ -11043,6 +11499,24 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
         ...(furthestLiquidLeafCoordinate
           ? { furthestLiquidLeafCoordinate: Object.freeze(furthestLiquidLeafCoordinate) }
           : {}),
+        unacceptedTopologyPages: Object.freeze(unacceptedTopologyPages),
+        acceptedTopologyGeneration: words[activityHeaderBase + 12]!,
+        preparedTopologyLeaves: words[activityHeaderBase + 16]!,
+        topologyCommitFailed: words[activityHeaderBase + 21] !== 0,
+        candidateFaultFlags: words[activityHeaderBase + 7]!,
+        nextLeaf: words[h.nextLeaf]!,
+        freeLeaves: words[h.freeCount]!,
+        ...(this.initialBrickCoordinates.length > 0 ? {
+          initialBrickBounds: Object.freeze({
+            minimum: Object.freeze([0, 1, 2].map((axis) => Math.min(
+              ...this.initialBrickCoordinates.map((c) => c[axis]!)))) as
+              readonly [number, number, number],
+            maximumExclusive: Object.freeze([0, 1, 2].map((axis) => 1 + Math.max(
+              ...this.initialBrickCoordinates.map((c) => c[axis]!)))) as
+              readonly [number, number, number],
+          }),
+        } : {}),
+        grownLeaves: Object.freeze(grownLeaves),
       });
     } finally {
       if (readback.mapState === "mapped") readback.unmap();

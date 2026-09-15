@@ -203,6 +203,9 @@ export interface SparseCM12GenerationFields {
    * conservative capacity-weighted fallback, never an invented orientation. */
   readonly cellIds: Uint32Array;
   readonly rowIds: Uint32Array;
+  /** Accepted leaf keys. Only these carry adaptive phi; a composite grid also
+   * enumerates inactive leaves, whose cells are air on both endpoints. */
+  readonly activeBrickKeys?: ReadonlySet<number>;
   /** Persistent adaptive phi authority. When present on both endpoints the
    * generation remap samples old phi at every new adaptive vertex, then
    * reapplies target hanging constraints independently of V. */
@@ -299,10 +302,21 @@ export async function prepareSparseCM12GenerationTransfer(
   const phiTransferEnabled = source.levelSetVolume !== undefined
     && target.levelSetVolume !== undefined;
   const phiVertexEntries: number[] = [];
+  // Entries below this count must land in the replacement hash. The optional
+  // suffix after it carries band-interior lattice vertices, which exist only
+  // where the replacement raised phi past its solver rung.
+  let phiRequiredVertexCount = 0;
   let maximumPhiSpan = 1;
   for (const box of sourceBoxes) maximumPhiSpan = Math.max(maximumPhiSpan, box.span);
+  // Only accepted (active) leaves reach the adaptive level-set: its cell and
+  // vertex catalogue is built from the accepted cell worklist. A composite
+  // grid also carries inactive leaves, whose cells the field transfer already
+  // treats as air, so they carry no phi authority either.
   const sourceByOrigin = new Map<string, SparseCM12TransferBox>();
-  for (const box of sourceBoxes) sourceByOrigin.set(`${box.span}/${box.lower.join("/")}`, box);
+  for (const box of sourceBoxes) {
+    if (source.cellIds[box.id] === 0xffff_ffff) continue;
+    sourceByOrigin.set(`${box.span}/${box.lower.join("/")}`, box);
+  }
   const sourceAtVertex = (q: readonly number[]) => {
     let selected: SparseCM12TransferBox | undefined;
     for (let span = 1; span <= maximumPhiSpan; span *= 2) {
@@ -320,10 +334,19 @@ export async function prepareSparseCM12GenerationTransfer(
   };
   if (phiTransferEnabled) {
     const vertices = new Map<string, readonly number[]>();
-    for (const box of targetBoxes) for (let corner = 0; corner < 8; corner++) {
-      const q = box.lower.map((value, axis) => value
-        + (((corner >>> axis) & 1) !== 0 ? box.widths[axis]! : 0));
-      vertices.set(q.join("/"), q);
+    const coarseTargets: SparseCM12TransferBox[] = [];
+    const targetActive = target.activeBrickKeys;
+    for (const box of targetBoxes) {
+      // A vertex of an inactive target leaf has no record in the replacement's
+      // level-set arena. Scattering to it would miss its hash and be reported
+      // as a lost field rather than as topology that never carried one.
+      if (targetActive && !targetActive.has(targetGrid.cells[box.id]!.brickKey)) continue;
+      for (let corner = 0; corner < 8; corner++) {
+        const q = box.lower.map((value, axis) => value
+          + (((corner >>> axis) & 1) !== 0 ? box.widths[axis]! : 0));
+        vertices.set(q.join("/"), q);
+      }
+      if (box.widths.some((width) => width > 1)) coarseTargets.push(box);
     }
     for (const q of vertices.values()) {
       const before = sourceAtVertex(q);
@@ -331,6 +354,63 @@ export async function prepareSparseCM12GenerationTransfer(
       // accepted air; it must never retain the replacement resident's freshly
       // evaluated authored scene geometry after generation zero.
       phiVertexEntries.push(q[0]!, q[1]!, q[2]!, before?.id ?? 0xffff_ffff);
+    }
+    phiRequiredVertexCount = phiVertexEntries.length / 4;
+    // A banded brick carries phi on a lattice finer than its solver cells, so
+    // its interior lattice points are corners of no target box. Omitted, they
+    // keep the replacement resident's freshly evaluated authored geometry for
+    // the life of the generation. They are optional because the band is a
+    // device decision: a brick the replacement left at its solver rung has no
+    // such vertex at all, and missing one there is not a lost field.
+    // The band is a device decision, so the host cannot name the bricks that
+    // hold a finer lattice and must enumerate every coarse box. On a mostly
+    // coarse world that is the whole volume at the finest rung - millions of
+    // points to fill a shell of thousands. Price it first from the spans
+    // alone and decline the suffix wholesale rather than filling arbitrary
+    // boxes until a budget runs out: declining costs exactly what HEAD costs.
+    let optionalVertexCount = 0;
+    for (const box of coarseTargets) {
+      optionalVertexCount += (box.widths[0]! + 1)
+        * (box.widths[1]! + 1) * (box.widths[2]! + 1);
+    }
+    const optionalVertexBudget = 8 * phiRequiredVertexCount + 1_000_000;
+    const emitted = new Set<string>();
+    for (const box of optionalVertexCount <= optionalVertexBudget ? coarseTargets : []) {
+      const lower = box.lower, widths = box.widths;
+      // The overlaps tile the target box, so the lowest-id contributor whose
+      // closed box holds an interior point is the source cell holding it.
+      const contributors: SparseCM12TransferBox[] = [];
+      for (let entry = plan.cellOffsets[box.id]!; entry < plan.cellOffsets[box.id + 1]!; entry++) {
+        const sourceId = plan.cellSources[entry]!;
+        if (sourceId === 0xffff_ffff || source.cellIds[sourceId] === 0xffff_ffff) continue;
+        contributors.push(sourceBoxes[sourceId]!);
+      }
+      contributors.sort((left, right) => left.id - right.id);
+      for (let z = 0; z <= widths[2]!; z++) {
+        for (let y = 0; y <= widths[1]!; y++) {
+          for (let x = 0; x <= widths[0]!; x++) {
+            const q = [lower[0]! + x, lower[1]! + y, lower[2]! + z];
+            if (x > 0 && x < widths[0]! && y > 0 && y < widths[1]!
+              && z > 0 && z < widths[2]!) {
+              let inside: SparseCM12TransferBox | undefined;
+              for (const candidate of contributors) {
+                if (!q.every((value, axis) => value >= candidate.lower[axis]!
+                  && value <= candidate.lower[axis]! + candidate.widths[axis]!)) continue;
+                inside = candidate; break;
+              }
+              phiVertexEntries.push(q[0]!, q[1]!, q[2]!, inside?.id ?? 0xffff_ffff);
+              continue;
+            }
+            // Shared with a neighbouring box: resolve it exactly the way a
+            // corner is resolved, and emit it once.
+            const key = q.join("/");
+            if (vertices.has(key) || emitted.has(key)) continue;
+            emitted.add(key);
+            const before = sourceAtVertex(q);
+            phiVertexEntries.push(q[0]!, q[1]!, q[2]!, before?.id ?? 0xffff_ffff);
+          }
+        }
+      }
     }
   }
   const phiVertices = append(phiVertexEntries);
@@ -352,9 +432,12 @@ export async function prepareSparseCM12GenerationTransfer(
   const compiler = gpuCompilationManagerFor(device);
   const sourceLsv = source.levelSetVolume?.layout;
   const targetLsv = target.levelSetVolume?.layout;
-  const maximumTargetPhiSpan = Math.max(1, ...targetBoxes.map(box => box.span));
+  // Reduce, never spread: a replacement generation carries hundreds of
+  // thousands of boxes, and passing them as arguments overflows the stack.
+  let maximumTargetPhiSpan = 1;
+  for (const box of targetBoxes) maximumTargetPhiSpan = Math.max(maximumTargetPhiSpan, box.span);
   const phiConstraintWidths = Array.from({ length: Math.floor(Math.log2(
-    Math.max(1, ...targetBoxes.map(box => box.span)))) + 1 }, (_, level) => 2 ** level);
+    maximumTargetPhiSpan)) + 1 }, (_, level) => 2 ** level);
   const lsvOffset = (layout: LevelSetVolumeLayout | undefined,
     key: keyof LevelSetVolumeLayout["slots"][0]) => layout
       ? (layout.slots[0][key] as number) - layout.slots[0].baseWords : 0;
@@ -531,6 +614,7 @@ fn oldCapacityFraction(cell: u32) -> f32 {
 }
 ${phiTransferEnabled && sourceLsv && targetLsv ? `
 const GENERATION_PHI_VERTEX_COUNT:u32=${phiVertexCount}u;
+const GENERATION_PHI_REQUIRED_VERTEX_COUNT:u32=${phiRequiredVertexCount}u;
 fn generationPhiHash(q:vec3i)->u32{var h=0x811c9dc5u;
  for(var axis=0u;axis<3u;axis+=1u){var v=bitcast<u32>(q[axis]);h=(h^v)*0x9e3779b1u;
   h^=h>>16u;h*=0x85ebca6bu;h^=h>>13u;}return h;}
@@ -569,10 +653,22 @@ fn transferPhiStore(vertex:u32,phi:f32,support:u32){let base=nextLsvBase();
  atomicStore(&nextLsv[base+${lsvOffset(targetLsv,"phi1BaseWords")}u+vertex],bitcast<u32>(phi));
  atomicStore(&nextLsv[base+${lsvOffset(targetLsv,"support0BaseWords")}u+vertex],support);
  atomicStore(&nextLsv[base+${lsvOffset(targetLsv,"support1BaseWords")}u+vertex],support);}
+// Distinct bits per cause; words 1..3 keep one offending vertex coordinate.
+fn transferPhiFault(bit:u32,q:vec3i){atomicOr(&fault[0],bit);atomicStore(&fault[1],bitcast<u32>(q.x));
+ atomicStore(&fault[2],bitcast<u32>(q.y));atomicStore(&fault[3],bitcast<u32>(q.z));}
 @compute @workgroup_size(64) fn transferAdaptivePhi(@builtin(global_invocation_id) invocation:vec3u){
  let id=invocation.x;if(id>=GENERATION_PHI_VERTEX_COUNT){return;}let entry=${phiVertices}u+4u*id;
  let q=vec3i(bitcast<i32>(m[entry]),bitcast<i32>(m[entry+1u]),bitcast<i32>(m[entry+2u]));
- let targetVertex=nextLsvLookup(q);if(targetVertex==0xffffffffu){atomicOr(&fault[0],512u);return;}
+ // A replacement whose level-set build faulted never publishes an accepted
+ // slot, so every lookup below would miss and blame an arbitrary vertex.
+ // Report the unpublished generation itself instead.
+ if(nextLsvSlot()>=2u){transferPhiFault(4096u,q);return;}
+ let targetVertex=nextLsvLookup(q);
+ if(targetVertex==0xffffffffu){
+  // The optional suffix addresses a lattice the replacement need not have
+  // raised. Only a required vertex missing its record is a lost field.
+  if(id>=GENERATION_PHI_REQUIRED_VERTEX_COUNT){return;}
+  transferPhiFault(512u,q);return;}
  let sourceId=m[entry+3u];let geometry=${sourceGeometry}u+6u*sourceId;
  if(sourceId==0xffffffffu){transferPhiStore(targetVertex,${4 * maximumTargetPhiSpan}.0,${LEVELSET_VOLUME_SUPPORT.deepAir}u);return;}
  let center=vec3f(f(geometry),f(geometry+1u),f(geometry+2u));
@@ -582,15 +678,17 @@ fn transferPhiStore(vertex:u32,phi:f32,support:u32){let base=nextLsvBase();
  let phiBase=oldBase+select(${lsvOffset(sourceLsv,"phi0BaseWords")}u,${lsvOffset(sourceLsv,"phi1BaseWords")}u,bank!=0u);
  let supportBase=oldBase+select(${lsvOffset(sourceLsv,"support0BaseWords")}u,${lsvOffset(sourceLsv,"support1BaseWords")}u,bank!=0u);
  var phi=0.0;var support=${LEVELSET_VOLUME_SUPPORT.metric}u;
- for(var corner=0u;corner<8u;corner+=1u){let cornerQ=vec3i(round(lower+widths*vec3f(f32(corner&1u),f32((corner>>1u)&1u),f32((corner>>2u)&1u))));
-  let vertex=oldLsvLookup(cornerQ);if(vertex==0xffffffffu){atomicOr(&fault[0],512u);return;}
+ for(var corner=0u;corner<8u;corner+=1u){
   let weight=select(1.0-t.x,t.x,(corner&1u)!=0u)*select(1.0-t.y,t.y,(corner&2u)!=0u)*select(1.0-t.z,t.z,(corner&4u)!=0u);
+  if(weight==0.0){continue;}
+  let cornerQ=vec3i(round(lower+widths*vec3f(f32(corner&1u),f32((corner>>1u)&1u),f32((corner>>2u)&1u))));
+  let vertex=oldLsvLookup(cornerQ);if(vertex==0xffffffffu){transferPhiFault(1024u,cornerQ);return;}
   phi+=weight*bitcast<f32>(oldLsv[phiBase+vertex]);support=min(support,oldLsv[supportBase+vertex]&3u);}
- if(!isFinite(phi)||support==${LEVELSET_VOLUME_SUPPORT.absent}u){atomicOr(&fault[0],512u);return;}
+ if(!(phi==phi&&abs(phi)<3.402823e38)||support==${LEVELSET_VOLUME_SUPPORT.absent}u){transferPhiFault(2048u,q);return;}
  transferPhiStore(targetVertex,phi,support);}
 fn projectTransferredPhi(vertex:u32,width:u32){let base=nextLsvBase();
- let meta=atomicLoad(&nextLsv[base+${lsvOffset(targetLsv,"vertexRecordsBaseWords")}u+4u*vertex+3u]);
- let count=meta&7u;if(count==0u||meta>>8u!=width){return;}var phi=0.0;var support=${LEVELSET_VOLUME_SUPPORT.metric}u;
+ let vertexMetadata=atomicLoad(&nextLsv[base+${lsvOffset(targetLsv,"vertexRecordsBaseWords")}u+4u*vertex+3u]);
+ let count=vertexMetadata&7u;if(count==0u||vertexMetadata>>8u!=width){return;}var phi=0.0;var support=${LEVELSET_VOLUME_SUPPORT.metric}u;
  for(var i=0u;i<count;i+=1u){let source=atomicLoad(&nextLsv[base+${lsvOffset(targetLsv,"constraintSourcesBaseWords")}u+4u*vertex+i]);
   let weight=bitcast<f32>(atomicLoad(&nextLsv[base+${lsvOffset(targetLsv,"constraintWeightsBaseWords")}u+4u*vertex+i]));
   phi+=weight*bitcast<f32>(atomicLoad(&nextLsv[base+${lsvOffset(targetLsv,"phi0BaseWords")}u+source]));
@@ -735,8 +833,16 @@ export class PreparedSparseCM12GenerationTransfer {
       const words=new Uint32Array(mapped);
       const values=new Float32Array(mapped);
       const failure = words[0]!;
-      if (failure !== 0xffff_ffff && (failure & 512) !== 0) {
-        throw new Error("CM12 generation transfer could not preserve adaptive phi across replacement buffers");
+      if (failure !== 0xffff_ffff && (failure & (512 | 1024 | 2048 | 4096)) !== 0) {
+        const cause = (failure & 4096) !== 0
+          ? "the replacement never published an accepted level-set generation; its own build faulted"
+            + " (read the replacement's simulation-failure receipt, not this vertex)"
+          : (failure & 512) !== 0 ? "target vertex missing from the replacement level-set hash"
+            : (failure & 1024) !== 0 ? "source cell corner missing from the accepted level-set hash"
+              : "source corner phi non-finite or support absent";
+        const q = [words[1]!, words[2]!, words[3]!].map((word) => new Int32Array([word])[0]);
+        throw new Error("CM12 generation transfer could not preserve adaptive phi across replacement buffers: "
+          + `${cause} at vertex [${q.join(",")}] (fault 0x${failure.toString(16)})`);
       }
       if(failure!==0xffffffff&&(failure&63)===0&&failure!==0){
         throw new SparseCM12GenerationCapacityDeferred(failure,words[1]!,values[2]!,values[3]!);

@@ -53,6 +53,10 @@ export function createSparseCM12VelocityExtensionWGSL(
     : undefined;
   const publish = effectiveHook
     ? `${effectiveHook}PublishVexAcceptedEffectiveVelocity(cell,value);` : "";
+  const acceptedVelocity = effectiveHook
+    ? `let accepted=${effectiveHook}EffectiveTransportVelocity(cell);`
+    : `let input=sourceCellVelocity()+4u*cell;
+    let accepted=vec4f(${state}[input],${state}[input+1u],${state}[input+2u],1.0);`;
   const fixedRecurrenceDepth = options.fixedRecurrenceDepth;
   const dispatchPacket = (initial: boolean) => options.cacheAcceptedPackets
     ? /* wgsl */ `let dispatchOrdinal=wid.x+cm12ExtensionDispatchWidth*wid.y;
@@ -365,10 +369,13 @@ fn initializeVelocityExtensionPackets(@builtin(workgroup_id)wid:vec3u,
   // Air-side fractions receive the liquid's extrapolated velocity. Making
   // them independent seeds changes the free-surface transport boundary.
   let wet=selected&&(${liquidCellPredicate});
-  if(selected){let input=sourceCellVelocity()+4u*cell;
-    let value=vec4f(select(0.0,${state}[input],wet),
-      select(0.0,${state}[input+1u],wet),select(0.0,${state}[input+2u],wet),
-      select(0.0,1.0,wet));${publish}
+  if(selected){
+    // A hooked resident already has the accepted velocity authority in its
+    // effective plane. In particular, the post-pressure rebuild must retain
+    // the projection just published there rather than reload the stale source
+    // frame bank. Standalone fixtures without a plane keep the legacy input.
+    ${acceptedVelocity}
+    let value=select(vec4f(0.0),vec4f(accepted.xyz,1.0),wet);${publish}
     cm12ExtensionStore(cm12ExtensionAcceptedDepth+cell,
       select(cm12ExtensionInvalid,0u,wet));}
   if(wet){_=atomicOr(&${arena}[cm12ExtensionValidityA+2u*packet+(lane>>5u)],

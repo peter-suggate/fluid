@@ -355,6 +355,14 @@ const SPARSE_CM12_COMPILED_PRESSURE_ROW_GRADIENT_WGSL =
     .replaceAll("termCell(", "cnxRowTermCellUnchecked(")
     .replaceAll("termCoefficient(", "cnxRowTermCoefficientUnchecked(");
 
+/** Diagnostic A/B toggle. `FLUID_CM12_PHI_BAND=0` makes the phi lattice follow
+ * the accepted solver rung in every brick, which is the pre-band phi domain
+ * exactly. Read once at shader generation and at arena planning: the off arm
+ * emits a constant `false`, so it costs no runtime branch and no extra pass. */
+export const FINE_PHI_BAND_ENABLED = (globalThis as {
+  process?: { env?: Record<string, string | undefined> };
+}).process?.env?.FLUID_CM12_PHI_BAND !== "0";
+
 export function createWebgpuSparseCM12ResidentWGSL(
   brickFineResolution: SparseCM12BrickFineResolution = 8,
   presentationPageResolution: SparseCM12BrickFineResolution = brickFineResolution,
@@ -1038,33 +1046,41 @@ fn cm12IBOFullExteriorSuperseded(entry:vec3u)->bool{
     if(rowKind(row)!=3u||!hostExteriorRowSupersededAt(row,true)){return false;}}
   return true;
 }
-fn cm12IBOCompileScheduledLeaf(leaf:u32){
-  if(leaf>=IBO1_LEAF_CAPACITY){return;}let slot=cm12IBOShadowSlot();
+// Phase one of a scheduled-leaf compile: claim, then reset the leaf header and
+// its whole ref block.  The claim is a compare-exchange on the leaf's delta
+// generation word, so across the entire dispatch exactly one invocation owns a
+// leaf even when several delta leaves list it as a geometry neighbour; every
+// other claimant returns without touching a byte.  Result .x is 0 for unowned
+// or faulted, 1 for owned-and-inactive (seal only) and 2 for owned-and-active
+// (compile the six sides, then seal); result .y is the scheduled descriptor.
+fn cm12IBOCompileClaimLeaf(leaf:u32)->vec2u{
+  if(leaf>=IBO1_LEAF_CAPACITY){return vec2u(0u,IBO1_INVALID);}
+  let slot=cm12IBOShadowSlot();
   let generation=cm12IBOCandidateGeneration();
-  if(!cm12IBOTryClaimLeaf(slot,leaf,generation)){return;}
+  if(!cm12IBOTryClaimLeaf(slot,leaf,generation)){return vec2u(0u,IBO1_INVALID);}
   let descriptor=cm12IBOScheduledCanonical(leaf);let scheduledActive=scheduledBrickActive(leaf);
   let begun=cm12IBOBeginDeltaLeaf(slot,leaf,generation,scheduledActive,descriptor);
-  if(begun.x!=0u){cm12IBORecordFault(begun);return;}
-  if(scheduledActive){for(var side=0u;side<6u;side+=1u){var output=0u;
-    let count=cm12IBOInstantiationCount(descriptor,side);
-    for(var local=0u;local<count;local+=1u){
-      let entry=cm12IBOInstantiationEntry(descriptor,side,local);
-      var selected=entry.x==IRL1_INVALID
-        &&!cm12IBOFullExteriorSuperseded(entry);
-      var targetLeaf=IRL1_INVALID;
-      if(entry.x!=IRL1_INVALID){targetLeaf=cm12IBOCanonicalWord(entry.x,1u);
-        selected=targetLeaf<IBO1_LEAF_CAPACITY&&scheduledBrickActive(targetLeaf)
-          &&cm12IBOScheduledCanonical(targetLeaf)==entry.x;}
-      if(selected){let fault=cm12IBOWriteDeltaRef(slot,leaf,side,output,
-          vec3u(entry.y,targetLeaf,entry.z));cm12IBORecordFault(fault);output+=1u;}
-    }}}
-  cm12IBORecordFault(cm12IBOSealDeltaLeaf(slot,leaf));
+  if(begun.x!=0u){cm12IBORecordFault(begun);return vec2u(0u,descriptor);}
+  return vec2u(select(1u,2u,scheduledActive),descriptor);
 }
-fn cm12IBOForEachGeometryCompile(leaf:u32){
-  cm12IBOCompileScheduledLeaf(leaf);
-  let count=cm12ISAGeometryNeighborCount(leaf);
+// Phase two: one side of one owned leaf.  The output ordinal is already local to
+// a side (record = leaf*24 + side*4 + output), so a lane owns its own compact
+// ref range and no counter is shared between lanes.  The per-side selection scan
+// stays serial because cm12IBOSealDeltaLeaf requires refs packed from local 0.
+fn cm12IBOCompileLeafSide(slot:u32,leaf:u32,descriptor:u32,side:u32){
+  var output=0u;
+  let count=cm12IBOInstantiationCount(descriptor,side);
   for(var local=0u;local<count;local+=1u){
-    cm12IBOCompileScheduledLeaf(cm12ISAGeometryNeighbor(leaf,local));}
+    let entry=cm12IBOInstantiationEntry(descriptor,side,local);
+    var selected=entry.x==IRL1_INVALID
+      &&!cm12IBOFullExteriorSuperseded(entry);
+    var targetLeaf=IRL1_INVALID;
+    if(entry.x!=IRL1_INVALID){targetLeaf=cm12IBOCanonicalWord(entry.x,1u);
+      selected=targetLeaf<IBO1_LEAF_CAPACITY&&scheduledBrickActive(targetLeaf)
+        &&cm12IBOScheduledCanonical(targetLeaf)==entry.x;}
+    if(selected){let fault=cm12IBOWriteDeltaRef(slot,leaf,side,output,
+        vec3u(entry.y,targetLeaf,entry.z));cm12IBORecordFault(fault);output+=1u;}
+  }
 }
 @compute @workgroup_size(1) fn beginSparseCM12InternedBoundaryDelta(){
   let header=cm12IBOSlotBase(cm12IBOShadowSlot());
@@ -1074,11 +1090,54 @@ fn cm12IBOForEachGeometryCompile(leaf:u32){
   cm12IBOStore(header+5u,0u);cm12IBOStore(header+6u,IBO1_INVALID);
   cm12ISABeginAuthority();
 }
-@compute @workgroup_size(1) fn compileSparseCM12InternedBoundaryDelta(
- @builtin(workgroup_id)wid:vec3u){let leaf=topologyDeltaLeafInvocation(wid.x);
-  if(leaf!=INVALID){cm12ISARecordChangedLeaf(leaf);
-    cm12ISAAppendGeometryClosure(leaf,cm12IBOCandidateGeneration());
-    cm12IBOForEachGeometryCompile(leaf);}}
+// One workgroup per topology-delta leaf.  The geometry closure of that leaf
+// (itself plus up to 26 immutable geometry neighbours) is the task set; lanes
+// fan out over it and, inside phase two, over the 6 sides of every owned leaf,
+// so a frame that commits a handful of bricks no longer walks tens of thousands
+// of dependent indirect loads on a single lane.  The changed-set receipt and the
+// geometry-closure append stay on lane 0, once per root leaf, exactly as before;
+// both are commutative folds (count/xor/sum) so the receipt is bit-identical.
+const CM12_IBO_DELTA_LANES:u32=64u;
+var<workgroup> cm12IBODeltaRootLeaf:u32;
+var<workgroup> cm12IBODeltaTaskCount:u32;
+var<workgroup> cm12IBODeltaLeaf:array<u32,64>;
+var<workgroup> cm12IBODeltaState:array<u32,64>;
+var<workgroup> cm12IBODeltaDescriptor:array<u32,64>;
+fn cm12IBODeltaClosureLeaf(root:u32,index:u32)->u32{
+  if(index==0u){return root;}
+  return cm12ISAGeometryNeighbor(root,index-1u);
+}
+@compute @workgroup_size(64) fn compileSparseCM12InternedBoundaryDelta(
+ @builtin(local_invocation_id)lid:vec3u,@builtin(workgroup_id)wid:vec3u){
+  if(lid.x==0u){let listed=topologyDeltaLeafInvocation(wid.x);
+    cm12IBODeltaRootLeaf=listed;cm12IBODeltaTaskCount=0u;
+    if(listed!=INVALID){cm12ISARecordChangedLeaf(listed);
+      cm12ISAAppendGeometryClosure(listed,cm12IBOCandidateGeneration());
+      cm12IBODeltaTaskCount=1u+cm12ISAGeometryNeighborCount(listed);}}
+  let root=workgroupUniformLoad(&cm12IBODeltaRootLeaf);
+  let taskCount=workgroupUniformLoad(&cm12IBODeltaTaskCount);
+  let slot=cm12IBOShadowSlot();
+  var base=0u;
+  loop{
+    if(base>=taskCount){break;}
+    let chunk=min(taskCount-base,CM12_IBO_DELTA_LANES);
+    if(lid.x<chunk){let leaf=cm12IBODeltaClosureLeaf(root,base+lid.x);
+      let claim=cm12IBOCompileClaimLeaf(leaf);
+      cm12IBODeltaLeaf[lid.x]=leaf;cm12IBODeltaState[lid.x]=claim.x;
+      cm12IBODeltaDescriptor[lid.x]=claim.y;}
+    // Publish the phase-one resets before any lane writes a ref into them.
+    workgroupBarrier();storageBarrier();
+    for(var task=lid.x;task<chunk*6u;task+=CM12_IBO_DELTA_LANES){
+      let local=task/6u;
+      if(cm12IBODeltaState[local]==2u){cm12IBOCompileLeafSide(slot,
+        cm12IBODeltaLeaf[local],cm12IBODeltaDescriptor[local],task-local*6u);}}
+    // Publish every ref of a leaf before its owner lane hashes and seals it.
+    workgroupBarrier();storageBarrier();
+    if(lid.x<chunk&&cm12IBODeltaState[lid.x]!=0u){
+      cm12IBORecordFault(cm12IBOSealDeltaLeaf(slot,cm12IBODeltaLeaf[lid.x]));}
+    workgroupBarrier();
+    base+=CM12_IBO_DELTA_LANES;
+  }}
 @compute @workgroup_size(1) fn finalizeSparseCM12ISAChangedSetReceipt(){
   let exact=atomicLoad(&topologyArena[ISA1_AUTHORITY_BASE+12u])
       ==atomicLoad(&topologyArena[ISA1_AUTHORITY_BASE+15u])
@@ -1112,14 +1171,24 @@ fn cm12IBOForEachGeometryCompile(leaf:u32){
     &&cm12ISAFinalizeAuthority();
   cm12IBOStore(header+1u,select(3u,2u,valid));
 }
-@compute @workgroup_size(1) fn replaySparseCM12InternedBoundaryDelta(
- @builtin(workgroup_id)wid:vec3u){let leaf=topologyDeltaLeafInvocation(wid.x);
-  if(leaf==INVALID){return;}let source=acceptedTopologySlot();let retiredSlot=1u-source;
-  cm12IBOReplayDeltaLeaf(source,retiredSlot,leaf,cm12IBOAcceptedGeneration());
-  let count=cm12ISAGeometryNeighborCount(leaf);
-  for(var local=0u;local<count;local+=1u){cm12IBOReplayDeltaLeaf(
-    source,retiredSlot,cm12ISAGeometryNeighbor(leaf,local),cm12IBOAcceptedGeneration());}
-  if(wid.x==0u){cm12IBOStore(IBO1_BASE+2u,source);
+// Same closure, one lane per leaf.  cm12IBOReplayDeltaLeaf is a verbatim
+// slot-to-slot copy, so two invocations replaying a leaf shared by two delta
+// leaves write identical words - it was already concurrent across workgroups
+// and stays idempotent across lanes, needing no claim and no barrier.
+@compute @workgroup_size(64) fn replaySparseCM12InternedBoundaryDelta(
+ @builtin(local_invocation_id)lid:vec3u,@builtin(workgroup_id)wid:vec3u){
+  if(lid.x==0u){let listed=topologyDeltaLeafInvocation(wid.x);
+    cm12IBODeltaRootLeaf=listed;cm12IBODeltaTaskCount=0u;
+    if(listed!=INVALID){
+      cm12IBODeltaTaskCount=1u+cm12ISAGeometryNeighborCount(listed);}}
+  let root=workgroupUniformLoad(&cm12IBODeltaRootLeaf);
+  let taskCount=workgroupUniformLoad(&cm12IBODeltaTaskCount);
+  if(taskCount==0u){return;}
+  let source=acceptedTopologySlot();let retiredSlot=1u-source;
+  for(var index=lid.x;index<taskCount;index+=CM12_IBO_DELTA_LANES){
+    cm12IBOReplayDeltaLeaf(source,retiredSlot,
+      cm12IBODeltaClosureLeaf(root,index),cm12IBOAcceptedGeneration());}
+  if(wid.x==0u&&lid.x==0u){cm12IBOStore(IBO1_BASE+2u,source);
     let generation=cm12IBOAcceptedGeneration();let header=cm12IBOSlotBase(retiredSlot);
     cm12IBOStore(IBO1_BASE+3u,generation);cm12IBOStore(header,generation);
     cm12IBOStore(header+1u,0u);cm12IBOStore(header+2u,generation);
@@ -1194,6 +1263,102 @@ ${createSparseCM12IboTRASupplementWGSL({
     : "";
   const levelSetVolumeEntries = levelSetVolumeLayout
     ? initialLevelSetGeometryWGSL + /* wgsl */ `
+fn lsvBuildSlot()->u32{return select(0u,1u-lsvAcceptedSlot(),lsvAcceptedSlot()<2u);}
+// --- Fine-phi band -------------------------------------------------------
+// Phi lives on a vertex lattice. On a rung seam the shared vertices are
+// hanging: they are slaved to the coarse cell's trilinear patch, and every
+// rung change re-samples them trilinearly. Both are information losses at
+// exactly the place the interface sits. Inside the band the phi lattice is the
+// brick's finest template rung whatever the accepted solver rung is, so an
+// interface-plane vertex is independent and a rung change carries it
+// bit-exactly. Outside the band phi cells still follow the accepted rung.
+// The band is the 26-neighbour presentation apron of surface/thin/cut bricks,
+// eight fine cells wide against a four-cell metric band, so any hanging
+// constraint that survives sits where |phi| is already saturated.
+fn cm12PhiBandBrick(brick:u32)->bool{
+${FINE_PHI_BAND_ENABLED ? `  let reasons=atomicLoad(&activity[activityRecord(brick)+1u]);
+  return (reasons&(1u|256u|512u))!=0u||brickHasPresentationSurfaceSupport(brick);`
+  : `  _=brick;
+  return false;`}
+}
+// vec2u(phi cell count, phi resolution). A zero count removes the brick from
+// the phi domain entirely, exactly as an inactive leaf contributes no cells to
+// the accepted solver worklist.
+fn cm12PhiBrickPlan(brick:u32,banded:bool)->vec2u{
+  if(brick>=p.dispatch.w||!brickActive(brick)){return vec2u(0u,0u);}
+  let accepted=acceptedBrickResolution(brick);
+  if(accepted==0u){return vec2u(0u,0u);}
+  var resolution=accepted;
+  if(banded&&cm12PhiBandBrick(brick)){
+    // Host template packing is per-rung and may be restricted to the mutable
+    // brick set, so the finest rung is not addressable everywhere. A brick
+    // without it keeps its accepted rung: the band is an accuracy gain, never
+    // a hole in the phi domain.
+    if(templateBrickCellRange(brick,BRICK_FINE_RESOLUTION).y!=0u){
+      resolution=BRICK_FINE_RESOLUTION;}
+  }
+  let range=templateBrickCellRange(brick,resolution);
+  if(range.y==0u){return vec2u(0u,0u);}
+  return vec2u(range.y,resolution);
+}
+// compactOwnerCellAt over the planned phi rung instead of the accepted solver
+// rung. The clipped-leaf aperture is reproduced exactly, so a phi ordinal and
+// the stable template cell it names stay in bijection.
+fn cm12PhiOwnerCellAtSlot(slot:u32,q:vec3i)->u32{
+  let queryCoordinate=vec3i(
+    cm12WorldFloorToSpan(q.x,i32(BRICK_FINE_RESOLUTION))/i32(BRICK_FINE_RESOLUTION),
+    cm12WorldFloorToSpan(q.y,i32(BRICK_FINE_RESOLUTION))/i32(BRICK_FINE_RESOLUTION),
+    cm12WorldFloorToSpan(q.z,i32(BRICK_FINE_RESOLUTION))/i32(BRICK_FINE_RESOLUTION));
+  let brick=brickDirectoryLookupAtSignedCoordinate(queryCoordinate);
+  if(brick==INVALID){return INVALID;}
+  let resolution=lsvBrickPhiResolution(slot,brick);
+  if(resolution==0u){return INVALID;}
+  let span=brickSpan(brick);
+  let brickCoordinate=cm12WorldLeafCoordinate(brick);
+  let range=templateBrickCellRange(brick,resolution);let first=range.x;let count=range.y;
+  let scale=BRICK_FINE_RESOLUTION*span/resolution;
+  let local=vec3u((q-brickCoordinate*i32(BRICK_FINE_RESOLUTION))/i32(scale));
+  let origin=brickCoordinate*i32(BRICK_FINE_RESOLUTION);
+  var valid=vec3u(resolution);
+  if(!brickHasUnclippedWorldGeometry(brick)){
+    if(any(q<vec3i(0))||any(q>=vec3i(p.dimensions.xyz))){return INVALID;}
+    valid=vec3u(min(vec3i(p.dimensions.xyz)-origin+vec3i(i32(scale)-1),
+      vec3i(i32(BRICK_FINE_RESOLUTION*span)))/i32(scale));
+  }
+  if(any(local>=valid)){return INVALID;}
+  let localOffset=local.x+valid.x*(local.y+valid.y*local.z);
+  if(localOffset>=count){return INVALID;}
+  return first+localOffset;
+}
+// O(1) inverse of the plan: template cells are contiguous per (brick, rung),
+// so the per-brick prefix base is the only state an ordinal lookup needs.
+fn cm12PhiCellOrdinalInSlot(slot:u32,cell:u32)->u32{
+  if(cell==INVALID||cell>=p.counts.x){return INVALID;}
+  let brick=cellBrick(cell);
+  let resolution=lsvBrickPhiResolution(slot,brick);
+  if(resolution==0u||cellResolution(cell)!=resolution){return INVALID;}
+  let range=templateBrickCellRange(brick,resolution);
+  if(range.y==0u||cell<range.x||cell-range.x>=range.y){return INVALID;}
+  let base=lsvBrickPhiBase(slot,brick);if(base==INVALID){return INVALID;}
+  return base+(cell-range.x);
+}
+// Cell-record word 7 stays the owning SOLVER cell: transport spans and wall
+// clipping must read the coarse cell even where phi is finer.
+fn cm12PhiOwnerSolverCell(phiCell:u32)->u32{
+  let owner=compactOwnerCellAt(vec3i(floor(cellCenter(phiCell))));
+  return select(phiCell,owner.x,owner.x!=INVALID);
+}
+// Published samples carry log2 of the width of the field that produced them.
+// In the band that is the phi width, not the accepted cell width.
+fn cm12PhiPresentationScale(brick:u32,span:u32,resolution:u32)->u32{
+  let phiResolution=max(resolution,lsvBrickPhiResolution(lsvAcceptedSlot(),brick));
+  return BRICK_FINE_RESOLUTION*span/max(1u,phiResolution);
+}
+fn cm12PhiWidthAt(positionFine:vec3f)->f32{
+  let stencil=lsvStencilAtPosition(positionFine);
+  if(!stencil.resolved){return 0.0;}
+  return min(stencil.widths.x,min(stencil.widths.y,stencil.widths.z));
+}
 fn lsvAcceptedVelocitySample(positionFine:vec3f)->vec4f{
   let continued=cm12ClampToResidentWorld(positionFine,vec3f(0.0));
   let owner=lsvSlotOwner(lsvAcceptedSlot(),continued);if(owner.x==LSV_INVALID){return vec4f(0.0,0.0,0.0,1.0);}
@@ -1215,26 +1380,100 @@ fn lsvClipCharacteristic(origin:vec3f,candidate:vec3f)->vec3f{
   if(acceptedPointInsideSolid(origin+offset)){return origin;}
   return clipBoundarySegment(origin+offset,bounded+offset)-offset;
 }
+// Sweep exterior air into the phi field by the actual final MAC displacement
+// of a released one-sided world face. Project the vertex onto each physical
+// domain plane instead of searching only its adjacent cells: a large-CFL gap
+// can cross more than one wall cell, while the applicable tangential patch is
+// still found in constant work through the accepted owner directory.
+fn cm12ReleasedWallPhi(positionFine:vec3f)->vec2f{
+  var carved=-3.402823466e38;var hasRelease=false;
+  let epsilon=max(1e-4,8.0*1.1920928955078125e-7
+    *max(1.0,max(abs(positionFine.x),max(abs(positionFine.y),abs(positionFine.z)))));
+  let gravityWeight=length(p.acceleration.xyz);
+  if(gravityWeight<=1e-6){return vec2f(carved,0.0);}
+  for(var face=0u;face<6u;face+=1u){
+    let axis=face/2u;let upper=(face&1u)!=0u;
+    let boundary=select(0.0,f32(p.dimensions[axis]),upper);
+    let expectedInward=select(1.0,-1.0,upper);
+    // Pressure uses the same gravity-normal predicate, so other planes cannot
+    // contain an applicable separating row for this frame.
+    if(expectedInward*p.acceleration[axis]<=0.5*gravityWeight){continue;}
+    // Four signs select every cell incident to a tangential edge or corner.
+    let tangent0=(axis+1u)%3u;let tangent1=(axis+2u)%3u;
+    for(var quadrant=0u;quadrant<4u;quadrant+=1u){
+      var probe=positionFine;
+      probe[tangent0]+=epsilon*select(-1.0,1.0,(quadrant&1u)!=0u);
+      probe[tangent1]+=epsilon*select(-1.0,1.0,(quadrant&2u)!=0u);
+      probe[axis]=boundary+epsilon*expectedInward;
+      let owner=compactOwnerCellAt(vec3i(floor(probe)));
+      if(owner.x==INVALID){continue;}let cell=owner.x;
+      let incidences=cnxCellIncidenceRangeUnchecked(cell);
+      for(var at=incidences.x;at<incidences.y;at+=1u){
+        let rowOrdinal=cnxIncidenceRowOrdinalUnchecked(at);
+        let row=cnxStableRowUnchecked(rowOrdinal);
+        if(rowKind(row)!=3u||rowAxis(row)!=axis
+          ||!rowSeparatingFromClosedWorld(row)){continue;}
+        let range=cnxRowTermRangeByOrdinalUnchecked(rowOrdinal);
+        if(range.y-range.x!=1u||cnxRowTermCellUnchecked(range.x)!=cell){continue;}
+        let coefficient=cnxRowTermCoefficientUnchecked(range.x);
+        let inward=select(-1.0,1.0,coefficient>=0.0);
+        let center=rowCenter(row);
+        if(inward!=expectedInward||abs(center[axis]-boundary)>epsilon){continue;}
+        let away=inward*(state[destinationFaceVelocity()+row]-rowSolidVelocity(row));
+        if(away<=1e-6){continue;}
+        let widths=cellWidths(cell);var footprint=true;
+        for(var tangent=0u;tangent<3u;tangent+=1u){if(tangent!=axis){
+          footprint=footprint
+            &&abs(positionFine[tangent]-center[tangent])<=0.5*widths[tangent]+epsilon;}}
+        if(!footprint){continue;}
+        let interiorDistance=inward*(positionFine[axis]-center[axis]);
+        carved=max(carved,p.frame.x*away-interiorDistance);hasRelease=true;
+      }
+    }
+  }
+  return vec2f(carved,select(0.0,1.0,hasRelease));
+}
 ` + createLevelSetVolumeWGSL({
       layout: levelSetVolumeLayout,
       acceptedGenerationExpression: "cnxSourceGeneration()",
       buildGenerationExpression: "cnxSourceGeneration()",
-      buildSlotExpression: "select(0u,1u-lsvAcceptedSlot(),lsvAcceptedSlot()<2u)",
-      buildCellCountExpression: "cnxAcceptedCellCount()",
-      buildCellAtOrdinal: ordinal => `cnxAcceptedCellInvocationUnchecked(${ordinal})`,
-      acceptedCellOrdinal: cell => `cnxCellOrdinalUnchecked(${cell})`,
-      acceptedOwnerCellAt: lattice => `ownerCellAt(${lattice})`,
-      buildOwnerCellAt: lattice => `compactOwnerCellAt(${lattice}).x`,
+      buildSlotExpression: "lsvBuildSlot()",
+      // The phi domain is the planned phi-cell space, not the solver cell
+      // space. Every one of these five hooks moves with it together; mixing
+      // the two would address a phi record by a solver ordinal.
+      buildCellCountExpression: "lsvPlannedCellCount()",
+      buildCellAtOrdinal: ordinal =>
+        `lsvPhiCellAtOrdinalInSlot(lsvBuildSlot(),${ordinal})`,
+      acceptedCellOrdinal: cell =>
+        `cm12PhiCellOrdinalInSlot(lsvAcceptedSlot(),${cell})`,
+      buildCellMemberOrdinal: cell =>
+        `cm12PhiCellOrdinalInSlot(lsvBuildSlot(),${cell})`,
+      buildOwnerSolverCell: cell => `cm12PhiOwnerSolverCell(${cell})`,
+      acceptedOwnerCellAt: lattice =>
+        `cm12PhiOwnerCellAtSlot(lsvAcceptedSlot(),${lattice})`,
+      buildOwnerCellAt: lattice =>
+        `cm12PhiOwnerCellAtSlot(lsvBuildSlot(),${lattice})`,
+      phiCellPlan: {
+        brickCountExpression: "p.dispatch.w",
+        bandedBrickPlan: brick => `cm12PhiBrickPlan(${brick},true)`,
+        acceptedBrickPlan: brick => `cm12PhiBrickPlan(${brick},false)`,
+        brickCellRange: (brick, resolution) =>
+          `templateBrickCellRange(${brick},${resolution})`,
+      },
       authoredSample: position => `vec2f(lsvAuthoredPhi(${position}),3.0)`,
       velocitySample: position => `lsvAcceptedVelocitySample(${position})`,
       boundCharacteristic: (origin, candidate) =>
         `lsvClipCharacteristic(${origin},${candidate})`,
+      releasedWallPhi: position => `cm12ReleasedWallPhi(${position})`,
       liveUnionSample: position =>
         `levelSetSourceUnionSampleAt(${position})`,
       dtExpression: "p.frame.x",
       constraintWidthExpression: "0.0",
       publishFailure: (fault, owner) =>
         `cm12RecordFailure(7u,${owner},vec4u(${fault},0u,0u,0u));`,
+      publishAdvectionFailure: (fault, owner, samplePosition) =>
+        `cm12RecordFailure(7u,${owner},vec4u(${fault},bitcast<u32>(${samplePosition}.x),` +
+        `bitcast<u32>(${samplePosition}.y),bitcast<u32>(${samplePosition}.z)));`,
     }) + createLevelSetVolumeRedistanceWGSL({
       layout: levelSetVolumeLayout,
       bandWidthExpression: "4.0",
@@ -1252,6 +1491,15 @@ fn lsvPhiValidAt(_positionFine:vec3f)->bool{return false;}
 fn lsvPhiMetricAt(_positionFine:vec3f)->bool{return false;}
 fn lsvPhiSupportAt(_positionFine:vec3f)->u32{return 0u;}
 fn lsvGradientAt(_positionFine:vec3f)->vec3f{return vec3f(lsvInvalidPhi());}
+struct LsvCellStencil{resolved:bool}
+fn lsvCellStencil(_cell:u32)->LsvCellStencil{return LsvCellStencil(false);}
+fn lsvStencilAtPosition(_position:vec3f)->LsvCellStencil{return LsvCellStencil(false);}
+fn lsvStencilContains(_stencil:LsvCellStencil,_position:vec3f)->bool{return false;}
+fn lsvStencilSampleAt(_stencil:LsvCellStencil,_position:vec3f)->LsvPhiSample{
+  return LsvPhiSample(lsvInvalidPhi(),false,false,0u);}
+fn cm12PhiPresentationScale(_brick:u32,span:u32,resolution:u32)->u32{
+  return BRICK_FINE_RESOLUTION*span/max(1u,resolution);}
+fn cm12PhiWidthAt(_positionFine:vec3f)->f32{return 0.0;}
 `;
   return guardCM12SimulationDispatches(/* wgsl */ `
 ${createCm12NumericsWGSL()}
@@ -1764,9 +2012,7 @@ fn rowSeparatingFromClosedWorldState(row:u32,densityOffset:u32,
   let range=rowTermRange(row);
   if(range.y-range.x!=1u||rowOpenFraction(row)>1e-8){return false;}
   let term=range.x;let cell=termCell(term);
-  if(!cellTransportActive(cell)
-    ||max(state[sourceDensity()+cell],state[densityOffset+cell])
-      <=CM12_LIQUID_ISOVALUE){return false;}
+  if(!cellTransportActive(cell)||!lsvCellLiquid(cell)){return false;}
   let axis=rowAxis(row);let velocityAt=velocityOffset+4u*cell;
   let predicted=state[velocityAt+axis]+p.frame.x*p.acceleration[axis];
   // Separating contact is a unilateral boundary condition, so admitting a
@@ -3722,186 +3968,6 @@ fn finishTransportFaceRow(row:u32,characteristic:f32,touchesLiquid:bool){
   }
   _=touchesLiquid;
 }
-// Accepted source face values remain the advected field. VEX supplies only
-// trajectory velocity and samples with no authoritative liquid face support.
-fn sourceStaggeredLiquidRow(row:u32)->bool{
-  let terms=rowTermRange(row);
-  for(var term=terms.x;term<terms.y;term+=1u){
-    let packed=state[FACE_VELOCITY_SUPPORT+4u*termCell(term)+3u];
-    if((u32(round(8.0*fract(packed)))&4u)!=0u){return true;}
-  }
-  return false;
-}
-fn sourceStaggeredFluidRow(row:u32)->f32{
-  var velocity=state[sourceFaceVelocity()+row];
-  if(hasSolidBoundaries()&&!rowSeparatingFromClosedWorld(row)){
-    let open=rowOpenFraction(row);
-    velocity=select(rowSolidVelocity(row),
-      (velocity-(1.0-open)*rowSolidVelocity(row))/max(open,1e-6),open>1e-6);
-  }
-  return velocity;
-}
-fn sourceStaggeredPatchContains(point:vec3f,lower:vec3f,upper:vec3f,axis:u32)->bool{
-  let u=(axis+1u)%3u;let v=(axis+2u)%3u;
-  return point[u]>=lower[u]&&point[u]<upper[u]
-    &&point[v]>=lower[v]&&point[v]<upper[v];
-}
-fn sourceStaggeredCellSample(point:vec3f,axis:u32)->vec2f{
-  let q=vec3i(floor(point));var cell=ownerCellAt(q);
-  if(cell==INVALID){var negative=q;negative[axis]-=1;cell=ownerCellAt(negative);}
-  if(cell==INVALID){return vec2f(0.0);}
-  let center=cellCenter(cell);let widths=cellWidths(cell);
-  let lower=center-0.5*widths;let upper=center+0.5*widths;
-  var values=vec2f(0.0);var weights=vec2f(0.0);
-  for(var at=incidenceBegin(cell);at<incidenceEnd(cell);at+=1u){
-    let row=incidenceRow(at);
-    if(!acceptedRowMember(row)||rowAxis(row)!=axis||!sourceStaggeredLiquidRow(row)){continue;}
-    // Moving apertures require an old-pose wall-velocity sample as well as
-    // old aperture to unmix correctly. Retain the established VEX path there.
-    if(geometricSolidMotionActive()&&rowOpenFraction(row)<1.0){continue;}
-    let own=termCoefficient(incidenceTerm(at));let side=select(0u,1u,own<0.0);
-    let terms=rowTermRange(row);var area=0.0;
-    if(terms.y-terms.x==1u){
-      let patchArea=abs(own)*rowStaticDualWeight(row);
-      let u=(axis+1u)%3u;let v=(axis+2u)%3u;let faceCenter=rowCenter(row);
-      // A one-term sparse-air row can cover only part of this cell face.
-      // Area alone cannot recover a rectangular patch's two side lengths.
-      // Until explicit patch bounds are available, accept only a certified
-      // whole face and use the established VEX interpolant for this sample
-      // otherwise. Never average spatially disjoint exterior patches.
-      if(patchArea!=widths[u]*widths[v]||faceCenter[u]!=center[u]
-        ||faceCenter[v]!=center[v]
-        ||faceCenter[axis]!=select(lower[axis],upper[axis],side==1u)){
-        return vec2f(0.0);
-      }
-      if(sourceStaggeredPatchContains(point,lower,upper,axis)){area=patchArea;}
-    }else{
-      for(var term=terms.x;term<terms.y;term+=1u){
-        if(own*termCoefficient(term)>=0.0){continue;}
-        let other=termCell(term);let otherCenter=cellCenter(other);let otherHalf=0.5*cellWidths(other);
-        let patchLower=max(lower,otherCenter-otherHalf);let patchUpper=min(upper,otherCenter+otherHalf);
-        if(sourceStaggeredPatchContains(point,patchLower,patchUpper,axis)){
-          area+=(patchUpper[(axis+1u)%3u]-patchLower[(axis+1u)%3u])
-            *(patchUpper[(axis+2u)%3u]-patchLower[(axis+2u)%3u]);
-        }
-      }
-    }
-    if(area>0.0){values[side]+=area*sourceStaggeredFluidRow(row);weights[side]+=area;}
-  }
-  let fraction=clamp((point[axis]-lower[axis])/widths[axis],0.0,1.0);
-  if(fraction==0.0&&weights.x>0.0){return vec2f(values.x/weights.x,1.0);}
-  if(fraction==1.0&&weights.y>0.0){return vec2f(values.y/weights.y,1.0);}
-  if(any(weights<=vec2f(0.0))){return vec2f(0.0);}
-  return vec2f(mix(values.x/weights.x,values.y/weights.y,fraction),1.0);
-}
-fn sampleSourceStaggeredVelocityLinear(position:vec3f,axis:u32,spans:vec3f)->f32{
-  var offset=vec3f(0.5);offset[axis]=0.0;
-  let lowerBound=offset*spans;var upperBound=vec3f(p.dimensions.xyz)-offset*spans;
-  let bounded=clamp(position,lowerBound,upperBound);
-  let shifted=bounded/spans-offset;let lower=vec3i(floor(shifted));let fraction=fract(shifted);
-  var velocity=0.0;
-  for(var corner=0u;corner<8u;corner+=1u){
-    let delta=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
-    let factors=select(vec3f(1.0)-fraction,fraction,delta==vec3i(1));
-    let weight=factors.x*factors.y*factors.z;if(weight==0.0){continue;}
-    let point=spans*(vec3f(lower+delta)+offset);
-    let source=sourceStaggeredCellSample(point,axis);
-    var value=source.x;
-    if(source.y==0.0){value=sampleFaceVelocitySupportAtSpans(point,spans)[axis];}
-    velocity+=weight*value;
-  }
-  return velocity;
-}
-
-// A higher-order sample is eligible only when every MAC node names one
-// complete, open, uniform interior face. Mixed ports, cut geometry, exterior
-// patches and missing liquid support retain the established linear sampler.
-fn sourceStaggeredUniformNode(point:vec3f,axis:u32,spans:vec3f)->vec2f{
-  let cell=ownerCellAt(vec3i(floor(point)));
-  if(cell==INVALID||any(cellWidths(cell)!=spans)||cellOpenFraction(cell)!=1.0){return vec2f(0.0);}
-  let u=(axis+1u)%3u;let v=(axis+2u)%3u;
-  var found=false;var value=0.0;
-  for(var at=incidenceBegin(cell);at<incidenceEnd(cell);at+=1u){
-    let row=incidenceRow(at);
-    if(!acceptedRowMember(row)||rowAxis(row)!=axis||any(rowCenter(row)!=point)){continue;}
-    let terms=rowTermRange(row);
-    if(terms.y-terms.x!=2u||rowOpenFraction(row)!=1.0
-      ||rowStaticArea(row)!=spans[u]*spans[v]||rowDistance(row)!=spans[axis]
-      ||!sourceStaggeredLiquidRow(row)){return vec2f(0.0);}
-    var negative=false;var positive=false;
-    for(var term=terms.x;term<terms.y;term+=1u){
-      let endpoint=termCell(term);let coefficient=termCoefficient(term);
-      if(any(cellWidths(endpoint)!=spans)||cellOpenFraction(endpoint)!=1.0){return vec2f(0.0);}
-      var expected=point;
-      if(coefficient<0.0){expected[axis]-=0.5*spans[axis];negative=true;}
-      else if(coefficient>0.0){expected[axis]+=0.5*spans[axis];positive=true;}
-      else{return vec2f(0.0);}
-      if(any(cellCenter(endpoint)!=expected)){return vec2f(0.0);}
-    }
-    if(!negative||!positive||found){return vec2f(0.0);}
-    found=true;value=state[sourceFaceVelocity()+row];
-  }
-  return vec2f(value,select(0.0,1.0,found));
-}
-fn sourceStaggeredCubicLine(a:f32,b:f32,c:f32,d:f32,t:f32)->f32{
-  if(t==0.0){return b;}if(t==1.0){return c;}
-  // Difference form gives exact constant preservation without cancellation
-  // between nonzero polynomial coefficients for a constant stencil.
-  return b+t*(0.5*(c-a)+t*((a-b)+2.0*(c-b)-0.5*(d-b)
-    +t*(1.5*(b-c)+0.5*(d-a))));
-}
-fn sampleSourceStaggeredVelocity(position:vec3f,axis:u32,spans:vec3f)->f32{
-  var offset=vec3f(0.5);offset[axis]=0.0;
-  let lowerBound=offset*spans;let upperBound=vec3f(p.dimensions.xyz)-offset*spans;
-  let bounded=clamp(position,lowerBound,upperBound);
-  let shifted=bounded/spans-offset;let lower=vec3i(floor(shifted));let fraction=fract(shifted);
-  // At an exact node the original interpolant is already interpolatory.
-  // A zero-fraction axis selects its central node exactly, so it neither needs
-  // the other three support planes nor their domain margin. Nonzero axes keep
-  // the complete four-node certification before any ownership traversal.
-  let first=spans*(vec3f(lower-vec3i(1))+offset);
-  let last=spans*(vec3f(lower+vec3i(2))+offset);
-  let interpolated=fraction!=vec3f(0.0);
-  if(all(fraction==vec3f(0.0))
-    ||(interpolated.x&&(first.x<lowerBound.x||last.x>upperBound.x))
-    ||(interpolated.y&&(first.y<lowerBound.y||last.y>upperBound.y))
-    ||(interpolated.z&&(first.z<lowerBound.z||last.z>upperBound.z))
-    ||(interpolated[axis]
-      &&(first[axis]<=0.0||last[axis]>=f32(p.dimensions[axis])))){
-    return sampleSourceStaggeredVelocityLinear(position,axis,spans);
-  }
-  var lines:array<f32,16>;
-  var coreMinimum=3.402823466e38;var coreMaximum=-3.402823466e38;
-  let zCount=select(1u,4u,interpolated.z);let yCount=select(1u,4u,interpolated.y);
-  let xCount=select(1u,4u,interpolated.x);
-  for(var zi=0u;zi<zCount;zi+=1u){let z=select(1u,zi,interpolated.z);
-   for(var yi=0u;yi<yCount;yi+=1u){let y=select(1u,yi,interpolated.y);
-    var values:array<f32,4>;
-    for(var xi=0u;xi<xCount;xi+=1u){let x=select(1u,xi,interpolated.x);
-      let point=spans*(vec3f(lower+vec3i(i32(x)-1,i32(y)-1,i32(z)-1))+offset);
-      let node=sourceStaggeredUniformNode(point,axis,spans);
-      if(node.y==0.0){return sampleSourceStaggeredVelocityLinear(position,axis,spans);}
-      values[x]=node.x;
-      let bracketX=x==1u||(interpolated.x&&x==2u);
-      let bracketY=y==1u||(interpolated.y&&y==2u);
-      let bracketZ=z==1u||(interpolated.z&&z==2u);
-      if(bracketX&&bracketY&&bracketZ){
-        coreMinimum=min(coreMinimum,node.x);coreMaximum=max(coreMaximum,node.x);
-      }
-    }
-    lines[4u*z+y]=sourceStaggeredCubicLine(values[0],values[1],values[2],values[3],fraction.x);
-  }}
-  var planes:array<f32,4>;
-  for(var zi=0u;zi<zCount;zi+=1u){let z=select(1u,zi,interpolated.z);let at=4u*z;
-    planes[z]=sourceStaggeredCubicLine(lines[at],lines[at+1u],lines[at+2u],lines[at+3u],fraction.y);
-  }
-  let cubic=sourceStaggeredCubicLine(planes[0],planes[1],planes[2],planes[3],fraction.z);
-  // Only the interpolated velocity observation is bounded. Stored face and
-  // liquid-volume authority are untouched. The eight bracketing MAC values
-  // supply the same local range as the positive-weight linear interpolant.
-  return clamp(cubic,coreMinimum,coreMaximum);
-}
-
 fn prepareTransportFaceRow(row:u32,rowOrdinal:u32){
   if(rowArea(row)<=1e-8){
     state[destinationFaceVelocity()+row]=select(0.0,rowSolidVelocity(row),hasSolidBoundaries());return;
@@ -3944,15 +4010,22 @@ fn prepareTransportFaceRow(row:u32,rowOrdinal:u32){
       }
     }
   }
-  let advectedSpans=vec3f(max(1.0,samplingWidth));
+  // The departure value is read from the same collocated support cache the
+  // RK2 trace already samples. The retired geometric-FCT design sampled the
+  // staggered source rows instead: an owner lookup plus an incidence walk per
+  // stencil node, whose strict uniformity certification never holds on mixed
+  // resolution, so every row paid 64 rejected probes and then 8 area-weighted
+  // cell samples. Under the phi/V design this face velocity feeds only the
+  // momentum path (body forces, pressure RHS, projection); the level set and
+  // the volume coupling both sample the extended velocity, never this field.
   var characteristic=0.0;
   if(regionWidth>1.0){
     let spans=vec3f(regionWidth);
     let departure=traceFaceDepartureAtSpans(rowCenter(row),spans);
-    characteristic=sampleSourceStaggeredVelocity(departure,axis,advectedSpans);
+    characteristic=sampleFaceVelocitySupportAtSpans(departure,spans)[axis];
   }else{
     let departure=traceFaceDeparture(rowCenter(row));
-    characteristic=sampleSourceStaggeredVelocity(departure,axis,advectedSpans);
+    characteristic=sampleFaceVelocitySupport(departure)[axis];
   }
   finishTransportFaceRow(row,characteristic,touchesLiquid);
 }
@@ -5637,11 +5710,6 @@ var<workgroup>transferMomentumZDelta:array<f32,64>;
 var<workgroup>transferMomentumXScale:array<f32,64>;
 var<workgroup>transferMomentumYScale:array<f32,64>;
 var<workgroup>transferMomentumZScale:array<f32,64>;
-// A fine-rung promotion has exactly one conservative open-volume correction
-// per parent cell.  Cache that parent result once instead of rebuilding the
-// same eight-child mass census independently for every child.
-var<workgroup>candidateRefinementDensityCorrection:
-  array<vec4f,CANDIDATE_CELLS_PER_BRICK/8u>;
 var<workgroup>candidateCellScheduled:u32;
 var<workgroup>candidateCellConstructionActivation:u32;
 var<workgroup>candidateFaceScheduled:u32;
@@ -6136,8 +6204,12 @@ fn collocateAndDiagnose(@builtin(global_invocation_id)gid:vec3u,
     state[destinationCellVelocity()+4u*id+1u]=velocity.y;
     state[destinationCellVelocity()+4u*id+2u]=velocity.z;
     state[destinationCellVelocity()+4u*id+3u]=0.0;
+    // Pressure, VEX and phi advection must share one frozen liquid set. A
+    // conservative cut-cell volume can be below the density isovalue while
+    // its level-set centre is liquid; retaining the pre-projection VEX value
+    // there advects phi with a different velocity from the pressure solve.
     cm12PublishCollocatedWetEffectiveVelocity(id,velocity,
-      state[destinationDensity()+id]>CM12_LIQUID_ISOVALUE);
+      pressureAcceptedCellMember(id));
     let targetDivergence=0.0;
     let controlVolume=cellOpenVolume(id);
     let divergence=select(0.0,-equation/max(controlVolume,1e-8)
@@ -6213,14 +6285,15 @@ fn brickHasPresentationSurfaceSupport(brick:u32)->bool{
     &&(atomicLoad(&activity[activityRecord(brick)+38u])
       &ACTIVITY_PRESENTATION_SURFACE_SUPPORT)!=0u;
 }
+// A brick is enclosed liquid when EVERY accepted cell in it is submerged,
+// where a cell of widths w is submerged if -phi(cell centre) >= |w|/2 (the
+// ball of radius -phi about the centre then contains the cell). The census
+// AND-reduces that per-cell test over the brick once and caches it as reason
+// bit 15; the six/26-neighbour lifecycle consumers here read the receipt, so
+// this stays one load rather than up to 64 phi walks per query.
 fn brickPhiDeepLiquid(brick:u32)->bool{
   if(brick==INVALID||!brickActive(brick)){return false;}
-  let width=f32(BRICK_FINE_RESOLUTION*brickSpan(brick));
-  let center=(vec3f(cm12WorldLeafCoordinate(brick))+vec3f(0.5*f32(brickSpan(brick))))
-    *f32(BRICK_FINE_RESOLUTION);
-  let sample=lsvSampleAt(center);
-  return sample.valid&&sample.phi<0.0
-    &&(!sample.metric||-sample.phi>=0.8660254*width);
+  return (atomicLoad(&activity[activityRecord(brick)+1u])&32768u)!=0u;
 }
 
 var<workgroup> frontierDemanded:atomic<u32>;
@@ -6382,6 +6455,10 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   var surfaceAxes=0u;var densityInterfaceCell=false;
   var occupiedCell=false;var substantialDensityCell=false;
   var thinFluidCell=false;
+  // AND-reduction carried as its OR-complement through the existing mask
+  // reduction: a brick is deeply enclosed liquid only when NO cell of it
+  // fails the submerged-ball test below.
+  var shallowLiquidCell=false;
   var cutBoundaryCell=false;
   var supportMask=0u;var sweptSupportMask=0u;
   var boundaryLiquidFaces=0u;
@@ -6435,6 +6512,18 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
     let center=cellCenter(cell);
     let ownPhiSample=lsvSampleAt(center);
     let ownWet=ownPhiSample.valid&&ownPhiSample.phi<0.0;
+    // Enclosure at accepted-cell granularity. phi is a signed distance near
+    // the interface, so the ball of radius -phi about the cell centre lies in
+    // liquid; it contains the cell once -phi reaches the cell half-diagonal
+    // (0.866*w for a cube). A non-metric sample carries no usable distance,
+    // so its sign is all the evidence there is. Testing this per accepted
+    // cell instead of once at the brick centre keeps the sufficient condition
+    // rigorous while letting a shallow pool actually qualify as enclosed: the
+    // single centre sample demanded half the BRICK diagonal (~6.9 fine cells
+    // at B8), which no mini32 brick ever reaches.
+    let cellDeepLiquid=ownWet&&(!ownPhiSample.metric
+      ||-ownPhiSample.phi>=0.5*length(cellWidths(cell)));
+    shallowLiquidCell=shallowLiquidCell||!cellDeepLiquid;
     if(coarseFirstEnabled()&&ownWet){
       liquidMomentum+=vec4f(ownVelocity*rho,rho);
       velocityTravel=max(velocityTravel,p.frame.x*length(ownVelocity));
@@ -6459,18 +6548,22 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
           transportVelocity-=(1.0-aperture)*rowSolidVelocity(row);
         }
         transportVelocity/=aperture;
-        let forcedTransportVelocity=transportVelocity+p.frame.x*p.acceleration[axis];
         // Keep activity compilation independent of the optional geometric-
         // volume module. This is the same eight-f32-ulp capacity tolerance
         // used by gvRoundoff when that module is present.
         let transportRoundoff=9.5367431640625e-7*cellOpenVolume(cell);
+        // Membership follows the represented face velocity only. The former
+        // v+dt*a widening pre-staged the page under EVERY resting liquid cell
+        // because gravity alone makes the forced value nonzero on every
+        // vertical face, so a settled pool activated and retired a dry page
+        // every frame. The acceleration this step is about to be cancelled by
+        // pressure; the flux transport will actually use is measured
+        // post-projection by markProjectedGeometricTransportReceivers, whose
+        // transaction runs before transport. The conservative envelope in
+        // gatherGeometricPreflightVelocityBounds still carries v+dt*a.
         if(p.frame.x*transportArea*abs(transportVelocity)>transportRoundoff){
           transportMinimumVelocity[axis]=min(transportMinimumVelocity[axis],transportVelocity);
           transportMaximumVelocity[axis]=max(transportMaximumVelocity[axis],transportVelocity);
-        }
-        if(p.frame.x*transportArea*abs(forcedTransportVelocity)>transportRoundoff){
-          transportMinimumVelocity[axis]=min(transportMinimumVelocity[axis],forcedTransportVelocity);
-          transportMaximumVelocity[axis]=max(transportMaximumVelocity[axis],forcedTransportVelocity);
         }
       }
       // Separation against the world can create a free surface without an
@@ -6567,10 +6660,25 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
     }
     // A surface test alone misses dilute sheets whose density never reaches
     // the rho=.5 contour. Preserve any represented liquid slab thinner than
-    // the configured finest-cell width: it must have exposed support on both
-    // sides of an axis and remain above the feature-density floor.
-    let cellIsThinFluid=ownPhiSample.metric
-      &&abs(ownPhiSample.phi)<=0.5*cellMinimumWidth(cell);
+    // the configured thin-feature width: it must carry liquid at its centre
+    // and have exposed support on both sides of an axis.
+    //
+    // Scaling that band by the CELL width instead made the predicate
+    // rung-dependent, and thinFluid is an unconditional finest-rung safety
+    // floor. At B8 the band is half a fine cell; at B4 it is a whole one, so a
+    // brick that had just proved it could demote re-flagged as thin on the
+    // very next census and jumped straight back to B8 with no proof epochs.
+    // Every ordinary pool surface also qualified, pinning most occupied mini32
+    // bricks at B8 forever. Measure the represented slab against the authored
+    // physical thin-feature width, exactly as the density form did.
+    let thinFeatureWidth=p.activityThresholds.w;
+    var cellIsThinFluid=false;
+    if(ownWet&&ownPhiSample.metric&&-ownPhiSample.phi<=0.5*thinFeatureWidth){
+      for(var axis=0u;axis<3u;axis+=1u){
+        let oppositeSides=3u<<(2u*axis);
+        cellIsThinFluid=cellIsThinFluid||(exposedSides&oppositeSides)==oppositeSides;
+      }
+    }
     thinFluidCell=thinFluidCell||cellIsThinFluid;
     // Weak wall-separation velocity is not liquid curvature. Static and
     // moving solids already have independent geometric/coupling floors.
@@ -6606,6 +6714,8 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
     // below the rendered contour. Keeping only its swept endpoint misses the
     // side pages of a diagonal stencil and newly advected dilute edge cells.
     // Reuse this census closure; no characteristic or transport pass is added.
+    // This geometric stencil is half of cm12BrickFrontierDemandMask: it is the
+    // velocity-free term that lets a resting surface hold its dry apron.
     if(interfaceCell||cellIsThinFluid||rho>0.0){
       var minimumOffset=vec3i(0);var maximumOffset=vec3i(0);
       if(x==0u){minimumOffset.x=-1;}if(x+1u==resolution){maximumOffset.x=1;}
@@ -6706,8 +6816,9 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   let activityFlags=surfaceAxes|select(0u,8u,substantialDensityCell)
     |select(0u,16u,occupiedCell)
     |select(0u,32u,thinFluidCell)|select(0u,64u,cutBoundaryCell)
-    |select(0u,128u,densityInterfaceCell);
-  // support and swept-support each occupy bits 0..26. Split the eight flag
+    |select(0u,128u,densityInterfaceCell)
+    |select(0u,256u,shallowLiquidCell);
+  // support and swept-support each occupy bits 0..26. Split the nine flag
   // bits across their unused high bits: 62 bits fit in two words.
   activityMasks[lane]=vec2u((supportMask&0x07ffffffu)|((activityFlags&31u)<<27u),
     (sweptSupportMask&0x07ffffffu)|((activityFlags>>5u)<<27u));
@@ -6830,6 +6941,9 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   // pages, but a physically coarse policy tile must not let tiny wall-normal
   // velocity differences promote one authored decomposition only.
   if((reducedSurfaceAxes&128u)!=0u){reasons|=16384u;}
+  // Cached whole-brick enclosure receipt (bit 15), read back by
+  // brickPhiDeepLiquid. A brick with no measured cells proves nothing.
+  if(measuredCount>0u&&(reducedSurfaceAxes&256u)==0u){reasons|=32768u;}
   let topologyEpoch=atomicLoad(&activity[5])!=0u;
   let history=atomicLoad(&activity[output+2u]);
   var hotEpochs=history&255u;var quietEpochs=(history>>8u)&255u;
@@ -6857,6 +6971,10 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   atomicStore(&activity[output+5u],bitcast<u32>(historyVector.x));
   atomicStore(&activity[output+6u],bitcast<u32>(historyVector.y));
   atomicStore(&activity[output+7u],bitcast<u32>(historyVector.z));
+  // Geometric frontier demand. Zero for any brick that is not occupied, and
+  // zero again as soon as an occupied brick stops holding an interface cell
+  // against a shared face, so cm12BrickFrontierDemandMask releases an apron the
+  // moment its supporting surface leaves.
   atomicStore(&activity[output+32u],select(0u,reducedSupportMask,occupied));
   atomicStore(&activity[output+3u],reducedSweptSupportMask);
   atomicStore(&activity[output+33u],bitcast<u32>(velocityActivity));
@@ -6865,6 +6983,37 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
     activityBoundaryLiquidFaces[0]&63u);
   incrementalActivityAddCensus(brick,score,reasons);
   incrementalActivityAcceptMeasuredTopology(brick);
+}
+
+// The one 3^3 neighbour-demand predicate shared by every frontier consumer:
+// SparseWorld allocation, swept activation and empty-brick retirement all read
+// this exact word so a claim and its retirement can never disagree.
+//
+// It is the union of two independently published masks on the immutable
+// activity snapshot:
+//   activity[record+3]  swept transport demand, from the represented face
+//                       velocity of every nonzero donor cell (word 3).
+//   activity[record+32] geometric interface support, the 26-neighbour stencil
+//                       of every interface/thin-fluid cell touching a brick
+//                       face, gated on the occupied classifier (word 32).
+// Velocity alone cannot hold a dry presentation-support page: a resting pool
+// sweeps nowhere, so a swept-only predicate could keep an apron only by
+// re-claiming it every frame, and the symmetric retirement handed it straight
+// back. Word 32 is published as zero for any brick that is not occupied and
+// for any occupied brick that no longer holds an interface cell against the
+// shared face, so an apron whose supporting surface leaves is released on the
+// next census.
+//
+// Note what this mask CANNOT do on its own: the interface stencil is measured
+// against RESIDENT opposing cells, so a surface page whose apron is already
+// gone reports no interface at all and can never ask for it back. Bootstrapping
+// and holding that apron is brickTouchesAcceptedLiquid, the boundary-liquid-face
+// receipt classifyAcceptedLiquidFrontier publishes into word 38 from a sparse-air
+// row - it needs no resident neighbour. Both activation and retirement test it.
+fn cm12BrickFrontierDemandMask(brick:u32)->u32{
+  let record=activityRecord(brick);
+  return (atomicLoad(&activity[record+3u])
+    |atomicLoad(&activity[record+32u]))&0x07ffffffu;
 }
 
 // Transport demand is an immutable activity-snapshot predicate, not merely an
@@ -7893,8 +8042,7 @@ fn sparseWorldFrontierAllocationOwner(brick:u32,targetCoordinate:vec3i)->bool{
     // A macro leaf can cover several queried coordinates, but its allocation
     // invocations are anchored at its actual origin, just like this caller.
     if(any(cm12WorldLeafCoordinate(source)!=sourceCoordinate)){continue;}
-    let record=activityRecord(source);
-    let support=atomicLoad(&activity[record+3u]);
+    let support=cm12BrickFrontierDemandMask(source);
     if((support&(1u<<bit))==0u){continue;}
     if(cm12FluidNeighborReachable(sourceCoordinate,offset)){return false;}
   }
@@ -7911,14 +8059,18 @@ fn allocateSparseWorldFrontier(@builtin(global_invocation_id)gid:vec3u){
   let output=activityRecord(brick);
   // The directional mask also carries every nonzero dilute mass donor.
   // The coarser occupied/surface classifier is not transport residency proof.
-  // Grow from either immediate occupied support or characteristic-swept
-  // support. Activity publishes the complete 3^3 receiver stencil, including
-  // diagonal characteristic travel. The old fixed leaf catalog could activate
-  // every one of those receivers; allocate the same 26 possible neighbours in
-  // SparseWorld rather than silently dropping edge/corner demand.
-  let sweptSupport=atomicLoad(&activity[output+3u])&0x07ffffffu;
+  // Grow from immediate occupied support, characteristic-swept support or the
+  // geometric interface stencil - cm12BrickFrontierDemandMask is the single
+  // predicate activation and retirement also read. Activity publishes the
+  // complete 3^3 receiver stencil, including diagonal characteristic travel.
+  // The old fixed leaf catalog could activate every one of those receivers;
+  // allocate the same 26 possible neighbours in SparseWorld rather than
+  // silently dropping edge/corner demand. Every allocation below, geometric or
+  // swept, passes the identical page-pool budget and unique-exact world claim,
+  // so a full pool simply stops growing the apron instead of faulting.
+  let demandMask=cm12BrickFrontierDemandMask(brick);
   let supportBit=select(localNeighbor,localNeighbor+1u,localNeighbor>=13u);
-  if((sweptSupport&(1u<<supportBit))==0u){return;}
+  if((demandMask&(1u<<supportBit))==0u){return;}
   let resolvedBit=1u<<supportBit;
   if((atomicLoad(&activity[output+ACTIVITY_FRONTIER_RESOLVED_MASK_WORD])
     &resolvedBit)!=0u){return;}
@@ -9289,7 +9441,15 @@ fn publishCandidateTopologyDeltaWork(lid:vec3u,brick:u32,validBrick:bool){
   }else if(!acceptedSurface){
     atomicStore(&activity[output+ACTIVITY_SURFACE_LEASE_MASK_WORD],0u);
   }
-  atomicStore(&activity[output+2u],0u);atomicStore(&activity[output+11u],
+  // A promotion restarts the whole history. A demotion keeps the quiet and
+  // proof epochs: the brick has already proven it is calm, and the next rung
+  // must re-prove representability through its own fresh receipt words
+  // (zeroed above), not wait another full settle ladder. Zeroing here made
+  // B8->B1 cost 2 epochs per rung, so a calm pool never returned to coarse.
+  let transitionHistory=atomicLoad(&activity[output+2u]);
+  atomicStore(&activity[output+2u],
+    select(0u,transitionHistory&0xffffff00u,candidate<accepted));
+  atomicStore(&activity[output+11u],
     atomicLoad(&activity[0]));atomicAdd(&activity[17],1u);
 }
 
@@ -9644,16 +9804,11 @@ fn frozenFrontierNeedsCompiledGraph(brick:u32)->bool{
   return false;
 }
 
-fn stageDemandedFrontierPage(brick:u32){
-  revokeCM12SourceTopologyLease();
+// One staging body for every request producer. Intent only: accepted
+// membership, stable fields, cache ownership, receipts, counters and journals
+// remain untouched until the shared flip.
+fn stageFrontierPageAtRung(brick:u32,requested:u32){
   let output=activityRecord(brick);
-  // A demand-led activation uses the finest complete packed topology available
-  // for this leaf. A newly synthesized page already owns its fixed B8 graph;
-  // an authored leaf takes the corresponding packed candidate rung.
-  let requested=select(acceptedBrickResolution(brick),BRICK_FINE_RESOLUTION,
-    brickCandidatePlanningEnabled(brick));
-  // Intent only. Accepted membership, stable fields, cache ownership,
-  // receipts, counters and journals remain untouched until the shared flip.
   atomicStore(&activity[output+8u],
     select(requested,applySparseCM12RefinementRegionBounds(brick,requested),
       brickCandidatePlanningEnabled(brick)));
@@ -9669,8 +9824,85 @@ fn stageDemandedFrontierPage(brick:u32){
   setCandidateBrickActiveAt(output,true);
 }
 
-// Activate only pages reached by the directional free-surface sweep from the
-// immutable activity snapshot. Compare-exchange makes publication single-writer.
+fn stageDemandedFrontierPage(brick:u32){
+  revokeCM12SourceTopologyLease();
+  // A demand-led activation uses the finest complete packed topology available
+  // for this leaf. A newly synthesized page already owns its fixed B8 graph;
+  // an authored leaf takes the corresponding packed candidate rung. Material
+  // is already crossing into every page staged through this entry: semantic
+  // injection, a continuous geometric source, a swept donor cell, and the
+  // conservative preflight envelope all carry real transport.
+  stageFrontierPageAtRung(brick,
+    select(acceptedBrickResolution(brick),BRICK_FINE_RESOLUTION,
+      brickCandidatePlanningEnabled(brick)));
+}
+
+// Coarsest rung a geometry-demanded page can adopt without violating the 2:1
+// face invariant that closePlannedResolution enforces one dispatch later. This
+// mirrors that closure's own face rule, so the page enters transport already
+// graded. Staging static air at BRICK_FINE_RESOLUTION instead made the
+// refine-only closure raise every liquid neighbour to half the page's rung: a
+// calm B1 pool acquired B4 on the step its dry presentation-support apron was
+// claimed. Air carries no scalar feature to resolve, so face grading is the
+// whole of its rung.
+fn cm12DemandedFrontierGradingRung(brick:u32)->u32{
+  var rung=1u;
+  for(var side=0u;side<6u*brickSpan(brick)*brickSpan(brick);side+=1u){
+    let neighbor=cm12WorldOwnerAt(candidateFaceNeighborCoordinate(brick,side));
+    if(neighbor==INVALID||neighbor==brick){continue;}
+    let neighborOutput=activityRecord(neighbor);
+    let neighborResolution=max(atomicLoad(&activity[neighborOutput+8u]),
+      atomicLoad(&activity[neighborOutput+12u]));
+    rung=max(rung,max(1u,neighborResolution*brickSpan(brick)
+      /(2u*brickSpan(neighbor))));
+  }
+  return clamp(rung,1u,BRICK_FINE_RESOLUTION);
+}
+
+// A physical signal still claims the fine frontier floor on the staging frame
+// itself: this page's own injection or swept/projected transport demand, or a
+// face neighbour whose thin classification or measured travel proves material
+// is about to cross the seam. Presentation support for a calm free surface is
+// none of those. brickHasTransportDemand already covers injection, and the
+// short-circuit keeps the mask read alone on the ordinary path.
+fn cm12DemandedFrontierNeedsFineRung(brick:u32)->bool{
+  if(brickHasTransportDemand(brick)){return true;}
+  for(var side=0u;side<6u*brickSpan(brick)*brickSpan(brick);side+=1u){
+    let neighbor=cm12WorldOwnerAt(candidateFaceNeighborCoordinate(brick,side));
+    if(neighbor==INVALID||neighbor==brick||!brickActive(neighbor)){continue;}
+    let neighborOutput=activityRecord(neighbor);
+    if((atomicLoad(&activity[neighborOutput+1u])&256u)!=0u){return true;}
+    if(velocityResolutionFloor(activityF32(neighborOutput+33u))>1u){return true;}
+  }
+  return false;
+}
+
+// Geometric demand claims a page for support, not for material. Under
+// coarse-first it therefore enters at the coarsest rung its own faces permit;
+// a page claimed by a B1 pool is created at B1 and cannot grade that pool up.
+// Both face walks sit behind this one branch: a dynamic page pool leaf, a
+// distance-mode scene, and any page carrying real transport all skip them, and
+// no lane reaches either walk unless it is staging this exact page.
+fn stageGeometricDemandFrontierPage(brick:u32){
+  revokeCM12SourceTopologyLease();
+  var requested=acceptedBrickResolution(brick);
+  if(brickCandidatePlanningEnabled(brick)){
+    requested=BRICK_FINE_RESOLUTION;
+    if(coarseFirstEnabled()&&!cm12DemandedFrontierNeedsFineRung(brick)){
+      requested=cm12DemandedFrontierGradingRung(brick);
+    }
+  }
+  stageFrontierPageAtRung(brick,requested);
+}
+
+// Activate a page when its own accepted-liquid receipt asks for it
+// (brickTouchesAcceptedLiquid: word 38, published by classifyAcceptedLiquidFrontier
+// from a neighbour's boundary-liquid-face bit, so a calm free surface keeps its
+// dry presentation-support page without any velocity) or when a resident
+// neighbour demands it through cm12BrickFrontierDemandMask, the union of the
+// directional free-surface sweep and the geometric interface-support stencil.
+// retireUnsupportedEmptyBricks tests the identical pair, so a claim is never
+// handed straight back. Compare-exchange makes publication single-writer.
 @compute @workgroup_size(64)
 fn activateSweptFrontierPages(@builtin(workgroup_id)wid:vec3u,
  @builtin(local_invocation_index)lane:u32){
@@ -9679,7 +9911,8 @@ fn activateSweptFrontierPages(@builtin(workgroup_id)wid:vec3u,
   let eligible=!brickActive(brick)&&cm12WorldLeafAllocated(brick);
   if(eligible){
     if(lane==0u&&(policyTileMembershipRequired(brick)
-      ||injectionReachesBrick(brick))){
+      ||injectionReachesBrick(brick)
+      ||brickTouchesAcceptedLiquid(brick))){
       atomicStore(&frontierDemanded,1u);
     }
     if(lane<26u){
@@ -9691,13 +9924,15 @@ fn activateSweptFrontierPages(@builtin(workgroup_id)wid:vec3u,
         cm12WorldLeafCoordinate(brick)+vec3i(dx,dy,dz));
       if(neighbor!=INVALID&&neighbor!=brick&&brickActive(neighbor)){
         let demandBit=26u-neighborBit;
-        if((atomicLoad(&activity[activityRecord(neighbor)+3u])
+        if((cm12BrickFrontierDemandMask(neighbor)
           &(1u<<demandBit))!=0u){atomicStore(&frontierDemanded,1u);}
       }
     }
   }
   workgroupBarrier();
-  if(lane==0u&&atomicLoad(&frontierDemanded)!=0u){stageDemandedFrontierPage(brick);}
+  if(lane==0u&&atomicLoad(&frontierDemanded)!=0u){
+    stageGeometricDemandFrontierPage(brick);
+  }
 }
 
 fn geometricTransportMaterialDemand(brick:u32)->bool{
@@ -9718,11 +9953,9 @@ fn geometricTransportMaterialDemand(brick:u32)->bool{
 
 // A directional sweep already includes both its material donor and every page
 // intersected by the receiver volume. Transverse dry pages are not physical
-// transport receivers; sparse-air rows provide their boundary samples.
-@compute @workgroup_size(64)
-fn reserveGeometricTransportFaceSupport(@builtin(global_invocation_id)gid:vec3u){
-  _=gid;
-}
+// transport receivers; sparse-air rows provide their boundary samples, so the
+// former reserveGeometricTransportFaceSupport reservation pass had an empty
+// body and has been removed along with its two per-frame dispatches.
 
 // An out-of-band liquid gesture populates only tiles intersecting that source.
 // In particular, its topology transaction must not also consume the ordinary
@@ -9784,10 +10017,14 @@ fn retirementRemovesAuthoredFaceSupport(cell:u32,brick:u32)->bool{
   return false;
 }
 
-// Retire only exactly empty non-feature bricks outside the directional
-// interface stencil and swept transport-demand mask. Activity thresholds are
-// scheduling hints, never permission to discard any signed liquid amount.
-// Dilute tails may therefore keep sparse storage resident indefinitely.
+// Retire only exactly empty non-feature bricks that nothing demands. Demand is
+// the same pair activateSweptFrontierPages claims with: this brick's own
+// brickTouchesAcceptedLiquid receipt, and a resident neighbour's
+// cm12BrickFrontierDemandMask. Claim and retirement are therefore exactly
+// symmetric, and the dry page above a calm free surface neither churns nor
+// disappears. Activity thresholds are scheduling hints, never permission to
+// discard any signed liquid amount. Dilute tails may therefore keep sparse
+// storage resident indefinitely.
 @compute @workgroup_size(64)
 fn retireUnsupportedEmptyBricks(@builtin(workgroup_id)wid:vec3u,
  @builtin(local_invocation_index)lane:u32){
@@ -9811,7 +10048,7 @@ fn retireUnsupportedEmptyBricks(@builtin(workgroup_id)wid:vec3u,
       }
     }
     if(lane==0u&&(policyTileMembershipRequired(brick)
-      )){
+      ||brickTouchesAcceptedLiquid(brick))){
       atomicStore(&frontierDemanded,1u);
     }
     if(lane<26u){
@@ -9823,7 +10060,7 @@ fn retireUnsupportedEmptyBricks(@builtin(workgroup_id)wid:vec3u,
         cm12WorldLeafCoordinate(brick)+vec3i(dx,dy,dz));
       if(neighbor!=INVALID){
         let demandBit=26u-neighborBit;
-        if((atomicLoad(&activity[activityRecord(neighbor)+3u])
+        if((cm12BrickFrontierDemandMask(neighbor)
           &(1u<<demandBit))!=0u){atomicStore(&frontierDemanded,1u);}
       }
     }
@@ -10107,7 +10344,10 @@ fn cm12PresentationPreparePage(brick:u32,page:u32,lane:u32,
     cm12PresentationBrick=brick;cm12PresentationPage=page;
     cm12PresentationPageOrigin=pageOrigin;cm12PresentationBrickOrigin=brickOrigin;
     cm12PresentationSampleScale=sampleScale;cm12PresentationResolution=resolution;
-    cm12PresentationScale=scale;cm12PresentationCacheFirst=cacheFirst;
+    // The published width tag prices the field, not the solver rung: a banded
+    // brick carries phi at the finest lattice under a coarse accepted cell.
+    cm12PresentationScale=cm12PhiPresentationScale(brick,span,resolution);
+    cm12PresentationCacheFirst=cacheFirst;
     cm12PresentationCacheDimensions=cacheDimensions;
     cm12PresentationPatchFirst=patchFirst;
     cm12PresentationPatchDimensions=patchDimensions;
@@ -10309,6 +10549,44 @@ fn surfaceProofOutputSampleFailure(local:vec3i)->u32{
   }
   return 0u;
 }
+${
+  geometricVolumeLayout
+    ? /* wgsl */ `
+// Band evidence. V and phi are two representations of one interface, and a
+// band brick keeps phi on the finest lattice at every solver rung: demoting
+// its solver cells changes only V's granularity, never the level set. So the
+// restricted-phi proof above measures a degradation that cannot occur here,
+// and the admissible evidence is instead that the transported volume still
+// agrees with the phi Heaviside integral over the same cell. Once the pair has
+// separated, coarsening would freeze that error into a larger cell.
+fn surfaceProofBandVolumeFailure(brick:u32,lane:u32)->u32{
+  let range=templateBrickCellRange(brick,acceptedBrickResolution(brick));
+  var failure=0u;
+  for(var local=lane;local<range.y;local+=64u){
+    let cell=range.x+local;
+    let capacity=gvReceiverCapacity(cell);
+    if(capacity<=0.0){continue;}
+    let estimate=gvPhiBoxEstimate(cellCenter(cell),cellWidths(cell));
+    // An unresolved stencil is not evidence against the pair, and saturated
+    // phi carries no interface for the volume to disagree with.
+    if(estimate.w==0.0||estimate.z>2.0*cellMinimumWidth(cell)){continue;}
+    // The same metres of surface displacement the restricted proof admits,
+    // converted to a volume at this cell's interface area.
+    let band=surfaceDisplacementToleranceMetres()/max(p.frame.y,1e-6);
+    let tolerance=max(gvRoundoff(capacity),
+      band*cellVolume(cell)/max(cellMinimumWidth(cell),1e-6));
+    if(abs(state[GV_CURRENT+cell]-capacity*clamp(estimate.x,0.0,1.0))
+        >tolerance){failure=512u;}
+  }
+  return failure;
+}
+`
+    : /* wgsl */ `
+fn surfaceProofBandVolumeFailure(brick:u32,lane:u32)->u32{
+  _=brick;_=lane;return 0u;
+}
+`
+}
 
 // Publish a camera-independent, generation-stamped receipt for the next
 // dyadic surface rung. The virtual restricted field uses the exact continuous
@@ -10374,6 +10652,13 @@ fn publishSparseCM12SurfaceRepresentabilityReceipts(
     brick,cm12PresentationBrickOrigin,cm12PresentationDensityOffset,true);}
   let targetResolution=surfaceProofTarget;
   let restrictionFactor=surfaceProofRestrictionFactor;
+  // Inside the fine-phi band the candidate rung's level set IS the accepted
+  // one: phi lives on the finest lattice whatever the solver cells do. The
+  // restricted field is therefore the identity here, and the curvature probe
+  // below reads the real phi at the candidate spacing rather than a
+  // reconstruction of it.
+  let bandBrick=cm12PhiBandBrick(brick);
+  let proofFactor=select(restrictionFactor,1u,bandBrick);
   for(var index=lane;index<SURFACE_PROOF_LATTICE_CAPACITY;index+=64u){
     let z=index/(SURFACE_PROOF_LATTICE_AXIS*SURFACE_PROOF_LATTICE_AXIS);
     let remainder=index-z*SURFACE_PROOF_LATTICE_AXIS*SURFACE_PROOF_LATTICE_AXIS;
@@ -10382,7 +10667,9 @@ fn publishSparseCM12SurfaceRepresentabilityReceipts(
     let local=vec3i(i32(x)-1,i32(y)-1,i32(z)-1);
     let fine=surfaceProofAcceptedPhi(local,cm12PresentationDensityOffset);
     let world=cm12PresentationBrickOrigin+local;
-    var coarse=surfaceProofRestrictedPhi(vec3f(world)+vec3f(0.5),restrictionFactor);
+    var coarse=select(
+      surfaceProofRestrictedPhi(vec3f(world)+vec3f(0.5),restrictionFactor),
+      fine,bandBrick);
     if(cm12SolidVoxelFractionQ8(world)>=255u){coarse=4.0*p.frame.y;}
     surfaceProofPhi[index]=vec2f(fine,coarse);
   }
@@ -10401,13 +10688,13 @@ fn publishSparseCM12SurfaceRepresentabilityReceipts(
       if(n==1u){q=vec3i(0);if(index>0u){q[(index-1u)/2u]=select(-1,1,(index&1u)==0u);}}
       let step=f32(restrictionFactor);
       let position=vec3f(cm12PresentationBrickOrigin)+(vec3f(q)+vec3f(0.5))*step;
-      let phi=surfaceProofRestrictedPhi(position,restrictionFactor);
+      let phi=surfaceProofRestrictedPhi(position,proofFactor);
       var hasInterface=abs(phi)<=0.75*step*p.frame.y;
       var gradient=vec3f(0.0);
       for(var axis=0u;axis<3u;axis+=1u){
         var d=vec3f(0.0);d[axis]=step;
-        let lo=surfaceProofRestrictedPhi(position-d,restrictionFactor);
-        let hi=surfaceProofRestrictedPhi(position+d,restrictionFactor);
+        let lo=surfaceProofRestrictedPhi(position-d,proofFactor);
+        let hi=surfaceProofRestrictedPhi(position+d,proofFactor);
         hasInterface=hasInterface||((lo<0.0)!=(phi<0.0))||((hi<0.0)!=(phi<0.0));
         gradient[axis]=hi-lo;
       }
@@ -10436,6 +10723,16 @@ fn publishSparseCM12SurfaceRepresentabilityReceipts(
     let failure=surfaceProofOutputSampleFailure(vec3i(i32(x),i32(y),i32(z)));
     if(failure!=0u){
       atomicOr(&surfaceProofFailure,failure);atomicStore(&surfaceProofValid,0u);
+    }
+  }
+  // The sample proof above compares two reconstructions of phi, which a band
+  // brick satisfies by construction. Its independent evidence is the
+  // volume/level-set agreement; no barrier may enter this branch.
+  if(bandBrick){
+    let volumeFailure=surfaceProofBandVolumeFailure(brick,lane);
+    if(volumeFailure!=0u){
+      atomicOr(&surfaceProofFailure,volumeFailure);
+      atomicStore(&surfaceProofValid,0u);
     }
   }
   workgroupBarrier();
@@ -10511,6 +10808,9 @@ fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
   let pageOrigin=brickOrigin+pageOffset;
   let resolution=acceptedBrickResolution(brick);
   let scale=BRICK_FINE_RESOLUTION*span/resolution;
+  // The stencil cache is still keyed by the accepted cell rung; only the
+  // published width tag follows the phi lattice.
+  let phiScale=cm12PhiPresentationScale(brick,span,resolution);
   var patchFirst=vec3i(0);var patchDimensions=vec3u(1u);
   var cacheFirst=vec3i(0);var cacheDimensions=vec3u(1u);var cacheCount=0u;
   if(scale>1u){
@@ -10557,7 +10857,7 @@ fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
       phi=lsvPhiAt(positionFine)*p.frame.y;
     }
     let flags=1u|select(0u,16u,phi<0.0)
-      |((31u-countLeadingZeros(max(1u,scale)))<<8u);
+      |((31u-countLeadingZeros(max(1u,phiScale)))<<8u);
     fineSamples[page*PRESENTATION_SAMPLES_PER_PAGE+localIndex]
       =(pack2x16float(vec2f(phi,0.0))&0xffffu)|(flags<<16u);
   }

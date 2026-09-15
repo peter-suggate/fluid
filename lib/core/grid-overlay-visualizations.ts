@@ -11,6 +11,13 @@
  */
 import { fieldVisualization, type Visualization } from "./visualization-registry";
 
+/** Sparse Geometric's combined conservative-volume and level-set slice. */
+export const VOLUME_LEVELSET_OVERLAY_MODE_CODE = 21;
+
+export function isSliceOnlyGridOverlayMode(mode: unknown): boolean {
+  return mode === "volume-levelset";
+}
+
 export const gridOverlayVisualizations: readonly Visualization[] = Object.freeze([
   fieldVisualization({
     kind: "field", id: "dense-grid/structure", pass: "Dense grid",
@@ -66,6 +73,20 @@ export const gridOverlayVisualizations: readonly Visualization[] = Object.freeze
     mode: "phi", axis: "z", icon: "surface",
     legend: [
       { swatch: "linear-gradient(90deg,#1a73eb,#f5f5e6,#ed7829)", label: "liquid (−) · zero · air (+)" },
+    ],
+  }),
+  fieldVisualization({
+    kind: "field", id: "dense-grid/volume-levelset", pass: "Dense grid",
+    label: "Volume + level set",
+    description: "Conservative liquid volume fills each cell in blue, with the level-set zero contour in amber, overcapacity hatching, and the accepted adaptive grid through the chosen plane.",
+    source: "Live conservative volume, published level set, and accepted adaptive-grid topology",
+    mode: "volume-levelset", axis: "z", sliceOnly: true, icon: "surface",
+    swatch: "#2f8fd6",
+    legend: [
+      { swatch: "#2f8fd6", label: "V/K — conservative cell fill" },
+      { swatch: "#ef9f35", label: "φ = 0 — level-set interface", mark: "line" },
+      { swatch: "repeating-linear-gradient(135deg,#d99532 0 2px,transparent 2px 5px)", label: "V/K > 1 — overcapacity" },
+      { swatch: "#a8c7d8", label: "accepted adaptive grid", mark: "line" },
     ],
   }),
 ]);

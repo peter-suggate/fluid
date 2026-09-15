@@ -73,6 +73,12 @@ fn termCell(term:u32)->u32{return term;}
 fn cellBrick(cell:u32)->u32{_=cell;return 0u;}
 fn cachedRefinementPolicyTileScale(brick:u32)->u32{_=brick;return u32(width);}
 fn cellMinimumWidth(cell:u32)->f32{_=cell;return width;}
+// The compact accepted dispatch indexes rows by invocation ordinal. This
+// fixture dispatches one lane per row, so ordinal and row identify the same
+// face and the unchecked accessors are the checked ones.
+fn cnxRowPackedMetadataByOrdinal(ordinal:u32)->u32{return rowAxis(ordinal);}
+fn cnxRowTermRangeByOrdinalUnchecked(ordinal:u32)->vec2u{return rowTermRange(ordinal);}
+fn cnxRowTermCellUnchecked(term:u32)->u32{return termCell(term);}
 fn faceVelocitySupportAt(q:vec3i)->FaceVelocitySupport{
   let x=(floor(f32(q.x)/width)+.5)*width;
   var v=vec3f(3,0,sin(6.28318530718*x/32.0));
@@ -88,7 +94,7 @@ fn main(@builtin(global_invocation_id)gid:vec3u){
   let flags=1u|select(0u,2u,mode!=3u)|select(0u,4u,mode!=2u);
   state[24u+8u*row+3u]=width+f32(flags)/8.0;
   state[24u+8u*row+7u]=width+f32(flags)/8.0;
-  prepareTransportFaceRow(row);
+  prepareTransportFaceRow(row,row);
 }`;
     const values = await execute(device, fixture, 24+8*24);
     for (let i = 0; i < 4; i++) {

@@ -25,7 +25,7 @@ const functionSource = (source: string, name: string, next: string): string => {
 const count = (source: string, pattern: RegExp): number => [...source.matchAll(pattern)].length;
 
 test("activation and retirement stage lifecycle intent without mutating accepted authority", () => {
-  const activation = functionSource(wgsl, "stageDemandedFrontierPage",
+  const activation = functionSource(wgsl, "stageFrontierPageAtRung",
     "fn activateSweptFrontierPages");
   const injectionActivation = functionSource(wgsl, "activateInjectionFrontierPages",
     "fn retireUnsupportedEmptyBricks");
@@ -36,7 +36,11 @@ test("activation and retirement stage lifecycle intent without mutating accepted
     "activation must author candidate membership only");
   assert.match(activation,
     /select\(acceptedBrickResolution\(brick\),BRICK_FINE_RESOLUTION,\s*brickCandidatePlanningEnabled\(brick\)\)/,
-    "a packed swept destination must enter transport at the fine frontier floor");
+    "a packed material destination must enter transport at the fine frontier floor");
+  assert.match(activation,
+    /if\(coarseFirstEnabled\(\)&&!cm12DemandedFrontierNeedsFineRung\(brick\)\)\{\s*requested=cm12DemandedFrontierGradingRung\(brick\);/,
+    "geometric demand alone must stage the coarsest 2:1-compatible rung, and"
+    + " only behind the branch that keeps both face walks off every other page");
   assert.match(activation,
     /select\(requested,applySparseCM12RefinementRegionBounds\(brick,requested\),\s*brickCandidatePlanningEnabled\(brick\)\)/,
     "an unpacked destination must remain allocatable at its complete construction rung");
@@ -69,28 +73,33 @@ test("dynamic and fixed-rung authored leaves may validate same-rung retirement",
     "membership-only retirement must bypass the template-slot early return");
 });
 
-test("fine-rung candidate transfer computes each parent mass correction once", () => {
+test("fine-rung candidate transfer allocates each parent once, before child reconstruction", () => {
   const transfer = functionSource(wgsl, "transferCandidateCellsWork",
     "@compute @workgroup_size(64)\nfn transferCandidateCells(");
-  const correction = transfer.indexOf(
-    "candidateRefinementDensityCorrection[parentLocal]");
+  // One invocation owns one parent and writes every child slot from that
+  // parent's single conservative budget; the child loop only reads it back.
+  const parentOwned = transfer.indexOf(
+    "for(var parentLocal=lane;parentLocal<sourceCount;parentLocal+=64u)");
+  const childWrite = transfer.indexOf(
+    "candidateState[candidateFieldIndex(0u,brick,local)]=fraction;", parentOwned);
+  const barrier = transfer.indexOf("workgroupBarrier();", childWrite);
   const childTransfer = transfer.indexOf(
-    "for(var local=lane;local<candidateCount;local+=64u)");
-  assert.ok(correction >= 0 && childTransfer > correction,
-    "the parent correction cache must be complete before child reconstruction");
-  assert.equal(count(transfer, /for\(var child=0u;child<8u;child\+=1u\)/g), 1,
-    "the eight-child mass census must not return to the per-child transfer loop");
-  assert.match(transfer,
-    /let correction=candidateRefinementDensityCorrection\[sourceLocal\]/,
-    "each child must consume its workgroup's generation-local parent correction");
-  assert.match(wgsl,
-    /array<vec4f,CANDIDATE_CELLS_PER_BRICK\/8u>/,
-    "the cache must scale with the B4/B8/B16 parent rung, not a fixed data size");
+    "for(var local=lane;local<candidateCount;local+=64u)", barrier);
+  const childRead = transfer.indexOf(
+    "if(candidate>accepted){rho=candidateState[candidateFieldIndex(0u,brick,local)];}",
+    childTransfer);
+  assert.ok(parentOwned >= 0 && childWrite > parentOwned && barrier > childWrite
+    && childTransfer > barrier && childRead > childTransfer,
+  "the parent-owned allocation must complete behind a barrier before child reconstruction");
+  assert.equal(count(transfer, /for\(var child=0u;child<8u;child\+=1u\)/g), 0,
+    "no per-child eight-sibling census may return to the transfer loop");
+  assert.doesNotMatch(wgsl, /candidateRefinementDensityCorrection/,
+    "the density-era parent correction cache is gone; do not reintroduce it");
 });
 
 test("liquid injection opens and composes its tile-population journal", () => {
-  const begin = host.indexOf("Sparse CM12 resident liquid injection topology");
-  const end = host.indexOf("Sparse CM12 resident liquid injection\"", begin + 1);
+  const begin = host.indexOf("Sparse Geometric (CM12) resident liquid injection topology");
+  const end = host.indexOf("Sparse Geometric (CM12) resident liquid injection\"", begin + 1);
   assert.ok(begin >= 0 && end > begin, "injection source range must remain identifiable");
   const injection = host.slice(begin, end);
   const openPressureTopology = injection.indexOf(
@@ -104,8 +113,8 @@ test("liquid injection opens and composes its tile-population journal", () => {
 });
 
 test("IBO compiles scheduled membership rather than eagerly-mutated accepted membership", () => {
-  const compile = functionSource(wgsl, "cm12IBOCompileScheduledLeaf",
-    "fn cm12IBOForEachGeometryCompile");
+  const compile = functionSource(wgsl, "cm12IBOCompileClaimLeaf",
+    "fn beginSparseCM12InternedBoundaryDelta");
   const validate = functionSource(wgsl, "cm12ISAValidateScheduledLeafPacket",
     "fn cm12ISABeginAuthority");
   assert.match(compile, /scheduledBrickActive\(leaf\)/);
@@ -391,8 +400,8 @@ test("a failed shadow build cannot authorize partial worklists", () => {
 });
 
 test("injection success publishes before flip while rejection leaves authority unopened", () => {
-  const begin = host.indexOf("Sparse CM12 resident liquid injection topology");
-  const end = host.indexOf("Sparse CM12 resident liquid injection\"", begin + 1);
+  const begin = host.indexOf("Sparse Geometric (CM12) resident liquid injection topology");
+  const end = host.indexOf("Sparse Geometric (CM12) resident liquid injection\"", begin + 1);
   assert.ok(begin >= 0 && end > begin, "injection source range must remain identifiable");
   const injection = host.slice(begin, end);
   const validation = injection.indexOf('dispatchTopology("validateAndAuthorizeShadowTopology", 1)');
@@ -429,8 +438,8 @@ test("injection success publishes before flip while rejection leaves authority u
 });
 
 test("injection copies the GPU delta triplet and never launches world-sized IBO work", () => {
-  const begin = host.indexOf("Sparse CM12 resident liquid injection topology");
-  const end = host.indexOf("Sparse CM12 resident liquid injection\"", begin + 1);
+  const begin = host.indexOf("Sparse Geometric (CM12) resident liquid injection topology");
+  const end = host.indexOf("Sparse Geometric (CM12) resident liquid injection\"", begin + 1);
   assert.ok(begin >= 0 && end > begin, "injection topology source range must remain identifiable");
   const injection = host.slice(begin, end);
   const finalize = injection.indexOf('dispatchTopology("finalizeShadowWorklists", 1)');

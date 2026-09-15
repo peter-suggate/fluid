@@ -28,6 +28,7 @@ import { sceneRimQuery, withSceneRimQuery } from "./vessel-rim-controls";
 import { sceneCanopyQuery, withSceneCanopyQuery } from "./tree-canopy-controls";
 import { isStageLensOverlayMode } from "./stage-lens";
 import type { GridOverlayConfig, GridOverlayMode } from "./webgpu-renderer";
+import { isSliceOnlyGridOverlayMode } from "./grid-overlay-visualizations";
 
 const qualities: ReadonlyArray<GPUQuality> = ["balanced", "high", "ultra"];
 const deletedValue = "~delete";
@@ -390,7 +391,8 @@ function parseSceneOverlay(raw: string | null): SceneOverlay | null {
 const DENSE_GRID_OVERLAY_MODES: Readonly<Record<string, true>> = {
   structure: true, resolution: true, optical: true, cfl: true, speed: true,
   phi: true, divergence: true, pressure: true, projection: true,
-  representation: true, density: true, tracers: true, "face-velocity": true,
+  representation: true, density: true, "volume-levelset": true,
+  tracers: true, "face-velocity": true,
 };
 
 /**
@@ -641,6 +643,10 @@ function uiQueryState(query: URLSearchParams, preset: ScenePreset): UIQueryState
   const presetCamera = cameraForPreset(preset);
   const grid = query.get("grid");
   const gridMode = query.get("gridMode");
+  const parsedGridMode = parseGridOverlayMode(gridMode, initialUI.gridOverlayMode);
+  const parsedGridAxis = grid === "off" || grid === "x" || grid === "y" || grid === "z" || grid === "volume"
+    ? grid : initialUI.gridOverlayAxis;
+  const sliceOnlyVolume = parsedGridAxis === "volume" && isSliceOnlyGridOverlayMode(parsedGridMode);
   return {
     camera: {
       azimuth_rad: numberParam(query, "camera.azimuth", presetCamera.azimuth_rad),
@@ -662,11 +668,11 @@ function uiQueryState(query: URLSearchParams, preset: ScenePreset): UIQueryState
       }
     },
     sceneOverlay: parseSceneOverlay(query.get(OVERLAY_QUERY_KEY)),
-    gridOverlayAxis: grid === "off" || grid === "x" || grid === "y" || grid === "z" || grid === "volume" ? grid : initialUI.gridOverlayAxis,
-    gridOverlaySlice: grid === "volume"
+    gridOverlayAxis: sliceOnlyVolume ? "z" : parsedGridAxis,
+    gridOverlaySlice: sliceOnlyVolume ? 0.5 : parsedGridAxis === "volume"
       ? Math.max(0.05, numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1))
       : numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1),
-    gridOverlayMode: parseGridOverlayMode(gridMode, initialUI.gridOverlayMode),
+    gridOverlayMode: parsedGridMode,
     // Only the lens knows how many phases it has, so the ceiling is the
     // overlay's to enforce; a link can only be stopped from naming a
     // fractional or negative one.
@@ -725,8 +731,12 @@ export function serializeQueryState(
   // Only when one is up: a closed instrument is the absence of the key, so an
   // ordinary scene link does not have to say which panels it is not showing.
   if (uiState.sceneOverlay) query.set(OVERLAY_QUERY_KEY, uiState.sceneOverlay);
-  if (uiState.gridOverlayAxis !== "off") query.set("grid", uiState.gridOverlayAxis);
-  if (uiState.gridOverlaySlice !== 0.5) query.set("gridSlice", String(uiState.gridOverlaySlice));
+  const sliceOnlyVolume = uiState.gridOverlayAxis === "volume"
+    && isSliceOnlyGridOverlayMode(uiState.gridOverlayMode);
+  const serializedGridAxis = sliceOnlyVolume ? "z" : uiState.gridOverlayAxis;
+  const serializedGridSlice = sliceOnlyVolume ? 0.5 : uiState.gridOverlaySlice;
+  if (serializedGridAxis !== "off") query.set("grid", serializedGridAxis);
+  if (serializedGridSlice !== 0.5) query.set("gridSlice", String(serializedGridSlice));
   if (uiState.gridOverlayMode !== "structure") query.set("gridMode", uiState.gridOverlayMode);
   // Gated on the mode as well as the value: a scrubber position outside a lens
   // addresses nothing, and a key that rode along on every other field view

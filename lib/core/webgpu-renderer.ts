@@ -55,6 +55,7 @@ import {
 import { StageLensOverlay, type StageLensLayerReport } from "./webgpu-stage-lens-overlay";
 import { TracerOverlay } from "./webgpu-tracer-overlay";
 import { VISUALIZATION_CATALOG } from "./visualization-catalog";
+import { VOLUME_LEVELSET_OVERLAY_MODE_CODE } from "./grid-overlay-visualizations";
 import {
   assembleDecorations,
   decorationAssemblyKey,
@@ -271,7 +272,7 @@ export function voxelViewProjectionMatrix(camera: CameraState, aspect: number, n
  * normalized by the last reported liquid maximum. Both sample live solver
  * textures in the overlay shader — no readback is involved.
  */
-export type GridOverlayMode = "structure" | "resolution" | "optical" | "cfl" | "speed" | "phi" | "divergence" | "pressure" | "projection" | "representation" | "density" | "tracers" | "face-velocity"
+export type GridOverlayMode = "structure" | "resolution" | "optical" | "cfl" | "speed" | "phi" | "divergence" | "pressure" | "projection" | "representation" | "density" | "volume-levelset" | "tracers" | "face-velocity"
   | PressureJournalOverlayMode | OctreeTechniqueOverlayMode | SparseCM12DirtyOverlayMode
   | StageLensOverlayMode;
 
@@ -3333,7 +3334,7 @@ export class FluidLabRenderer {
       // Field mode: 1 = raw occupancy, 3 = uniform-layout level set.
       gpuInfo?.nx ?? 1, gpuInfo?.ny ?? 1, gpuInfo?.nz ?? 1, gpuInfo ? (gpuInfo.gridKind === "octree" ? 3 : 1) : 0,
       gridOverlay?.axis === "z" ? 1 : gridOverlay?.axis === "x" ? 2 : gridOverlay?.axis === "y" ? 3 : gridOverlay?.axis === "volume" ? 4 : 0, gridOverlay?.position ?? 0.5, gpuInfo?.gridKind === "octree" ? 1 : 0,
-      techniqueModeCode || dirtyModeCode || (gridOverlay?.mode === "cfl" ? 1 : gridOverlay?.mode === "speed" ? 2 : gridOverlay?.mode === "phi" ? 3 : gridOverlay?.mode === "divergence" ? 4 : gridOverlay?.mode === "pressure" ? 5 : gridOverlay?.mode === "representation" ? 6 : gridOverlay?.mode === "optical" ? 7 : gridOverlay?.mode === "projection" && gpuInfo?.gridKind === "octree" ? 8 : gridOverlay?.mode === "resolution" && gpuInfo?.gridKind === "octree" ? 9 : gridOverlay?.mode === "density" ? 10 : 0),
+      techniqueModeCode || dirtyModeCode || (gridOverlay?.mode === "cfl" ? 1 : gridOverlay?.mode === "speed" ? 2 : gridOverlay?.mode === "phi" ? 3 : gridOverlay?.mode === "divergence" ? 4 : gridOverlay?.mode === "pressure" ? 5 : gridOverlay?.mode === "representation" ? 6 : gridOverlay?.mode === "optical" ? 7 : gridOverlay?.mode === "projection" && gpuInfo?.gridKind === "octree" ? 8 : gridOverlay?.mode === "resolution" && gpuInfo?.gridKind === "octree" ? 9 : gridOverlay?.mode === "density" ? 10 : gridOverlay?.mode === "volume-levelset" ? VOLUME_LEVELSET_OVERLAY_MODE_CODE : 0),
       environmentIndex(environmentId), gpuInfo?.lastDt_s ?? 0, gpuInfo?.maxSpeed_m_s ?? 0,
       0
     ]);

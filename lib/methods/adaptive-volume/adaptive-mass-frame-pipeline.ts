@@ -55,7 +55,7 @@ export const ADAPTIVE_MASS_FRAME_TRACE_CADENCE_MS = 100;
 export const ADAPTIVE_MASS_RESIDENT_STAGE_REGISTRY = Object.freeze(
   Object.fromEntries(SPARSE_CM12_RESIDENT_STAGES.map(
     (stage) => [stage, SPARSE_CM12_STAGES[stage]],
-  )) as Readonly<Record<
+  )) as unknown as Readonly<Record<
     (typeof SPARSE_CM12_RESIDENT_STAGES)[number],
     SparseCM12AnyStageDeclaration
   >>,

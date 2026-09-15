@@ -33,14 +33,18 @@ export function decodeCM12SimulationFailure(words: Uint32Array, kernelNames: rea
     frame: words[3], generation: words[4], ownerId: words[5],
     operandNames: ({
       6: ["reason", "value", "capacity", "auxiliary"],
-      7: ["faultMask", "reserved0", "reserved1", "reserved2"],
+      7: words[2] === cm12FailureKernelId("lsvAdvectPhi")
+        ? ["faultMask", "samplePositionFineX", "samplePositionFineY", "samplePositionFineZ"]
+        : ["faultMask", "reserved0", "reserved1", "reserved2"],
       1: ["begin", "end", "maximumCount", "reserved"],
       2: ["visibleWeight", "deficit", "donorDensity", "reserved"],
       3: ["recipientWeight", "removedFixed", "reserved", "reserved"],
       5: ["positionX", "positionY", "positionZ", "reserved"],
       4: ["rawDensity", "rawGamma", "reserved", "reserved"],
     } as Record<number, string[]>)[words[1]],
-    operands: words[1] >= 2 && words[1] <= 6
-      ? [...new Float32Array(words.slice(6, 10).buffer)] : [...words.slice(6, 10)], rawWords: [...words],
+    operands: words[1] === 7 && words[2] === cm12FailureKernelId("lsvAdvectPhi")
+      ? [words[6]!, ...new Float32Array(words.slice(7, 10).buffer)]
+      : words[1] === 2 || (words[1] >= 4 && words[1] <= 6)
+        ? [...new Float32Array(words.slice(6, 10).buffer)] : [...words.slice(6, 10)], rawWords: [...words],
   };
 }

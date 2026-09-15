@@ -119,6 +119,16 @@ const ALTERNATING_CAPACITY_REPAIR_RECEIPTS_QA_TOKEN: unique symbol =
 const GATHER_CAPACITY_REPAIR_QA_TOKEN: unique symbol =
   Symbol("Sparse CM12 gather capacity repair QA");
 
+/** Host lifetime: the sparse world keeps this accessor for its whole life, so
+ * it must be built OUTSIDE solver construction. An arrow created there captures
+ * the construction context and pins the generation-zero composite grid, atlas
+ * and SolidWorld forever. Close over the mutable numerics box alone. */
+function sparseWorldNumericsAccessor(
+  box: { current: CM12SparseWorldStepConfiguration },
+): () => CM12SparseWorldStepConfiguration {
+  return () => box.current;
+}
+
 export interface AdaptiveMassFluidDomain {
   readonly dimensions: SparseBrickVec3;
   readonly origin_m: readonly [number, number, number];
@@ -808,7 +818,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
             scene,
             atlas: atlas!,
             grid: grid!,
-            numerics: () => sparseWorldNumerics.current,
+            numerics: sparseWorldNumericsAccessor(sparseWorldNumerics),
             initiallyActiveBrickKeys,
             rigid: rigidCouplingEnabled ? {
               bodies: rigidSystem!.stateBuffer,
@@ -1383,6 +1393,10 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       this.info.topologyGenerationError = error instanceof Error
         ? error.message || error.name || "Topology preparation failed without a native error message"
         : String(error);
+      // A host-side native error (RangeError, TypeError) carries its only
+      // provenance in the stack; the failure record keeps just the message.
+      if (error instanceof Error && !(error instanceof SimulationFailureError)
+        && error.name !== "AbortError") console.error("[CM12 topology generation]", error.stack ?? error);
       if (!this.simulationFailureError) {
         const failure = error instanceof SimulationFailureError ? error.failure : {
           method: "adaptive-volume", code: "TOPOLOGY_GENERATION_FAILURE",

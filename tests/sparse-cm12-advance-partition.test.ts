@@ -144,7 +144,8 @@ test("adaptivity timing labels describe the complete bracketed work", () => {
   assert.match(stages.get("activity-measurement")?.tip.timing ?? "", /9 shader entry points/);
   assert.equal(stages.get("resolution-planning")?.label, "Candidate topology build");
   assert.match(stages.get("resolution-planning")?.tip.timing ?? "",
-    /19 shader entry points \+ 5 command-buffer copies/);
+    // 18 since the empty `reserveGeometricTransportFaceSupport` pass was removed.
+    /18 shader entry points \+ 5 command-buffer copies/);
   assert.equal(stages.get("brick-retirement")?.label, "Post-commit activity mask");
 });
 

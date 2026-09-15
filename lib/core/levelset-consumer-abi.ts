@@ -68,6 +68,15 @@ export interface SparseAdaptiveGridConsumerSource {
   readonly fineWorklist: GPUBufferBinding;
   readonly fineSamples: GPUBufferBinding;
   /**
+   * Accepted adaptive level set plus committed extensive liquid/capacity data.
+   *
+   * This is layout metadata only. The buffers are the `topologyArena` and
+   * `state` bindings above, so a slice renderer can read the accepted physics
+   * publication without allocating a mirror texture or scheduling a compute
+   * pass. All offsets are in four-byte words/floats.
+   */
+  readonly levelSetVolume?: SparseLevelSetVolumeConsumerLayout;
+  /**
    * Word offset of the WDR1 signed-coordinate directory in `topologyArena`.
    *
    * Older sparse publications used the dense logical-key hash embedded in
@@ -82,6 +91,28 @@ export interface SparseAdaptiveGridConsumerSource {
   /** Optional versioned 4³ temporal-dirty publication. Missing is UNKNOWN. */
   /** Optional GPU-authored FPL1 schedule/receipt publication. Missing falls back to CMD1. */
   readonly framePlan?: SparseCM12FramePlanSource;
+}
+
+export interface SparseLevelSetVolumeConsumerLayout {
+  readonly globalHeaderBaseWords: number;
+  readonly slot0BaseWords: number;
+  readonly slotStrideWords: number;
+  readonly slotHeaderOffsetWords: number;
+  readonly cornerRefsOffsetWords: number;
+  readonly cellRecordsOffsetWords: number;
+  readonly cellHashOffsetWords: number;
+  readonly phi0OffsetWords: number;
+  readonly phi1OffsetWords: number;
+  readonly support0OffsetWords: number;
+  readonly support1OffsetWords: number;
+  readonly cellCapacity: number;
+  readonly vertexCapacity: number;
+  readonly cellHashCapacity: number;
+  readonly hashProbeLimit: number;
+  /** Dynamic-solid open fraction; absent when the scene has no cut solids. */
+  readonly solidCellOpenOffsetFloats?: number;
+  /** Authored SolidWorld open fraction; absent when no voxel solids exist. */
+  readonly solidVoxelCellOpenOffsetFloats?: number;
 }
 
 /**

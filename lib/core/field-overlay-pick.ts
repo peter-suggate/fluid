@@ -24,6 +24,8 @@ export interface FieldOverlayView {
   readonly axis: FieldOverlayAxis;
   /** Draws its own geometry over the frame, so it has no plane to choose. */
   readonly planeless?: boolean;
+  /** Draws through one X/Y/Z plane and cannot use the volume raymarch. */
+  readonly sliceOnly?: boolean;
 }
 
 export interface FieldOverlayState {
@@ -41,7 +43,7 @@ export interface FieldOverlayChange {
   readonly mode?: GridOverlayMode;
   /** Absent when the overlay was already drawing: the plane is the reader's. */
   readonly axis?: FieldOverlayAxis;
-  /** Present only when a volume view opened and needs a starting opacity. */
+  /** Present when a view needs a fresh starting plane position or volume opacity. */
   readonly slice?: number;
 }
 
@@ -63,9 +65,12 @@ export function pickFieldOverlay(
   defaultAxis: Exclude<FieldOverlayAxis, "off">,
 ): FieldOverlayChange {
   if (current.mode === view.mode && current.axis !== "off") return { axis: "off" };
-  if (current.axis !== "off") return { mode: view.mode };
-  const axis = view.planeless || !(view.axis === "volume" && !volumeCapable)
-    ? view.axis : defaultAxis;
+  const authoredAxis = view.sliceOnly && view.axis === "volume" ? defaultAxis : view.axis;
+  if (current.axis !== "off") return current.axis === "volume" && view.sliceOnly
+    ? { mode: view.mode, axis: authoredAxis, slice: 0.5 }
+    : { mode: view.mode };
+  const axis = view.planeless || !(authoredAxis === "volume" && !volumeCapable)
+    ? authoredAxis : defaultAxis;
   return {
     mode: view.mode,
     axis,

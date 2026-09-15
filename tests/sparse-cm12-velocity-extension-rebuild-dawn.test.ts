@@ -47,6 +47,8 @@ fn cm12TeiPacket(packet:u32,slot:u32)->Packet{
 }
 fn sourceDensity()->u32{return 0u;}
 fn sourceCellVelocity()->u32{return 1024u;}
+fn fixtureEffectiveTransportVelocity(cell:u32)->vec4f{
+ return vec4f(state[5120u+4u*cell],state[5120u+4u*cell+1u],state[5120u+4u*cell+2u],state[5120u+4u*cell+3u]);}
 fn fixturePublishVexAcceptedEffectiveVelocity(cell:u32,value:vec4f){
  for(var i=0u;i<4u;i++){state[5120u+4u*cell+i]=value[i];}}
 ${extract('cm12ExtensionStablePacket')}
@@ -70,7 +72,11 @@ ${extract('initializeVelocityExtensionPackets')}
   const names=['beginSparseCM12VelocityExtensionSchedule','compileSparseCM12VelocityExtensionSchedule','sealSparseCM12VelocityExtensionSchedule','initializeVelocityExtensionPackets'];
   const pipelines=await Promise.all(names.map(entryPoint=>device!.createComputePipelineAsync({layout:pl,compute:{module:shader,entryPoint}})));
   device.queue.writeBuffer(arena,0,new Uint32Array(createSparseCM12VelocityExtensionInitialWords(layout)));
-  const data=new Float32Array(9216);for(let c=0;c<1024;c++){data[c]=c%3===0?1:0;data.set([c+.25,-c-.5,3.125,0],1024+4*c);}
+  const data=new Float32Array(9216);for(let c=0;c<1024;c++){
+   data[c]=c%3===0?1:0;
+   data.set([c+.25,-c-.5,3.125,0],1024+4*c);
+   data.set([1000+c,-2000-c,6.25,1],5120+4*c);
+  }
   device.queue.writeBuffer(state,0,data);
   const run=async(label:string,descriptors:number[],generation:number,slot:number,initialGroups:number,sweepGroups:number)=>{
    device!.queue.writeBuffer(leaves,0,new Uint32Array(descriptors));device!.queue.writeBuffer(params,0,new Uint32Array([generation,slot,0,0]));
@@ -93,7 +99,7 @@ ${extract('initializeVelocityExtensionPackets')}
      const cell=leaf*512+q[0]!+x+w*(q[1]!+y+h*(q[2]!+z)),wet=cell%3===0,lane=x+4*y+16*z;
      if(wet)expected[lane>>5]=(expected[lane>>5]!|1<<(lane&31))>>>0;
      assert.equal(a[layout.acceptedDepthBaseWords+cell],wet?0:0xffffffff,label+' depth');
-     assert.deepEqual([...v.slice(5120+4*cell,5120+4*cell+4)],wet?[cell+.25,-cell-.5,3.125,1]:[0,0,0,0],label+' velocity');
+     assert.deepEqual([...v.slice(5120+4*cell,5120+4*cell+4)],wet?[1000+cell,-2000-cell,6.25,1]:[0,0,0,0],label+' velocity');
     }
     assert.deepEqual([...a.slice(layout.validityABaseWords+2*packet,layout.validityABaseWords+2*packet+2)],expected,label+' clipped mask');
    }

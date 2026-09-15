@@ -162,7 +162,6 @@ const candidatePlanTimedWork = Object.freeze({
       label: "frontier activation and retirement",
       entryPoints: Object.freeze([
         "activateSweptFrontierPages",
-        "reserveGeometricTransportFaceSupport",
         "enforceGeometricDynamicSeamFloor",
         "retireUnsupportedEmptyBricks",
       ]),
@@ -629,7 +628,24 @@ export const SPARSE_CM12_STAGES = Object.freeze({
   },
   "velocity-projection": {
     label: "Velocity projection", band: "pressure", side: "right",
-    phase: { id: "velocity-projection", label: "Composite pressure-gradient projection" },
+    phase: {
+      id: "velocity-projection",
+      label: "Projected transport velocity extension",
+    },
+    substages: {
+      "projection-faces": {
+        id: "velocity-projection",
+        label: "Composite pressure-gradient face projection + divergence",
+      },
+      "projected-frontier-commit": {
+        id: "velocity-projection",
+        label: "Projected transport frontier commit",
+      },
+      "projected-topology-rebuild": {
+        id: "velocity-projection",
+        label: "Projected commit compiled-topology rebuild",
+      },
+    },
     lens: null,
     tip: {
       summary: "Advances the incremental-activity clock, then projects the compiled dirty/pressure row masks directly through the same composite rows that built the divergence, conservative 2:1 ports and sparse-air boundaries included. Collocation publishes divergence maxima during its existing incidence traversal; rigid-body reaction and frame face output follow.",

@@ -16,5 +16,8 @@ test("coarse crossing cells raise only incident vertex metric bands", () => {
   }]), 4, "an unrelated coarse air cell does not inflate the narrow band");
   assert.equal(incidentCrossingRedistanceBandReference(4, [{
     widths: [16, 16, 16], cornerPhi: planeAcrossH16, metric: false,
-  }]), 4, "unsupported corners cannot certify a coarse contour crossing");
+  }]), 28, "deep-tagged corners carry an exact sign and still certify the crossing");
+  assert.equal(incidentCrossingRedistanceBandReference(4, [{
+    widths: [16, 16, 16], cornerPhi: planeAcrossH16, absent: true,
+  }]), 4, "absent corners cannot certify a coarse contour crossing");
 });

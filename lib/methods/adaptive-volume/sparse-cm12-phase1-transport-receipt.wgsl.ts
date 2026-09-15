@@ -67,6 +67,9 @@ fn captureSparseCM12Phase1TransportPackets(
   ${validatePacket}
 }
 
+fn cm12Phase1QAEffectiveTransportVelocity(cell:u32)->vec4f{
+  return cm12EffectiveTransportVelocity(cell);
+}
 fn cm12Phase1QAPublishVexAcceptedEffectiveVelocity(cell:u32,value:vec4f){
   ${publish}
   atomicStore(&activity[CM12_P1TQ_HEADER+5u],cm12FCCandidateGeneration());

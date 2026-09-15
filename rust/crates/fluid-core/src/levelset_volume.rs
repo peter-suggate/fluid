@@ -170,6 +170,63 @@ fn trace_point(graph: &Graph, fields: &Fields, start: [f32; 2], span: f32, dt: f
     ]
 }
 
+#[derive(Clone, Copy)]
+struct ReleasedWall {
+    axis: usize,
+    boundary: f32,
+    tangent_minimum: f32,
+    tangent_maximum: f32,
+    inward: f32,
+    displacement: f32,
+}
+
+fn released_walls(graph: &Graph, fields: &Fields, dt: f32) -> Vec<ReleasedWall> {
+    let mut result = Vec::new();
+    for row in graph.rows.iter().filter(|row| {
+        row.kind == crate::types::RowKind::ClosedWorld && row.separating
+    }) {
+        for term in &row.terms {
+            let inward = if term.coefficient >= 0.0 { 1.0 } else { -1.0 };
+            let away_speed = inward
+                * (fields.face_velocity[row.id as usize] - row.solid_velocity);
+            if away_speed <= 1.0e-6 {
+                continue;
+            }
+            let cell = &graph.cells[term.cell_id as usize];
+            let axis = row.axis as usize;
+            let tangent = 1 - axis;
+            result.push(ReleasedWall {
+                axis,
+                boundary: row.center[axis],
+                tangent_minimum: cell.minimum[tangent],
+                tangent_maximum: cell.maximum[tangent],
+                inward,
+                displacement: dt * away_speed,
+            });
+        }
+    }
+    result
+}
+
+/// Signed distance to released solid faces, positive in the exterior solid.
+/// Taking the maximum with transported phi supplies the air continuation on
+/// both sides of the wall. The interior half is essential: it changes an old,
+/// deeply negative contact value into `-distance_to_wall`, so a wall-normal
+/// translation moves the zero set by the actual characteristic distance.
+fn released_wall_phi(walls: &[ReleasedWall], point: [f32; 2]) -> Option<f32> {
+    walls
+        .iter()
+        .filter(|wall| {
+            let tangent = 1 - wall.axis;
+            point[tangent] >= wall.tangent_minimum - 1.0e-6
+                && point[tangent] <= wall.tangent_maximum + 1.0e-6
+        })
+        .map(|wall| {
+            wall.displacement - wall.inward * (point[wall.axis] - wall.boundary)
+        })
+        .reduce(f32::max)
+}
+
 fn trace_rk2(
     graph: &Graph,
     fields: &Fields,
@@ -210,6 +267,11 @@ fn advect_shared_phi(
     if previous.vertex_phi_fine.len() != (nx + 1) * (ny + 1) {
         return Err(ValidationError("direct level-set vertex count does not match dimensions".into()));
     }
+    let released_walls = if dt > 0.0 {
+        released_walls(graph, fields, dt)
+    } else {
+        Vec::new()
+    };
     let mut result = Vec::with_capacity(previous.vertex_phi_fine.len());
     for y in 0..=ny {
         for x in 0..=nx {
@@ -227,12 +289,15 @@ fn advect_shared_phi(
                 (start[1] - 0.5 * dt * first[1]).clamp(0.0, graph.dimensions[1]),
             ];
             let velocity = sample_support(graph, fields, midpoint[0], midpoint[1], span);
+            let raw_departure = [start[0] - dt * velocity[0], start[1] - dt * velocity[1]];
             let departure = [
-                (start[0] - dt * velocity[0]).clamp(0.0, graph.dimensions[0]),
-                (start[1] - dt * velocity[1]).clamp(0.0, graph.dimensions[1]),
+                raw_departure[0].clamp(0.0, graph.dimensions[0]),
+                raw_departure[1].clamp(0.0, graph.dimensions[1]),
             ];
-            result.push(sample_scalar(previous, departure)
-                .ok_or_else(|| ValidationError("direct level-set departure has no finite scalar".into()))?);
+            let sampled = sample_scalar(previous, departure)
+                .ok_or_else(|| ValidationError("direct level-set departure has no finite scalar".into()))?;
+            result.push(released_wall_phi(&released_walls, start)
+                .map_or(sampled, |wall_phi| sampled.max(wall_phi)));
         }
     }
     Ok(result)
@@ -933,6 +998,52 @@ mod tests {
             if y < 8 { -6.5 } else if y == 8 { -2.75 } else { 1.0 }
         })).collect();
         levelset_surface::publish(dimensions, vertices, 8.25 * dimensions[0] as f64).unwrap()
+    }
+
+    #[test]
+    fn separating_ceiling_carves_the_exact_wall_normal_phi_gap() {
+        let mut graph = graph([8, 8, 1], vec![brick(0, [0, 0, 0], 8)]);
+        let previous = levelset_surface::publish([8, 8], vec![-4.0; 81], 64.0).unwrap();
+        // Deliberately disagree with the MAC wall face: the carve follows the
+        // authoritative boundary flux, not this collocated trace velocity.
+        let mut fields = velocity_fields(&graph, [0.0, -0.5]);
+        fields.face_velocity = vec![0.0; graph.rows.len()];
+        for row in &mut graph.rows {
+            if row.kind == crate::types::RowKind::ClosedWorld
+                && row.axis == 1
+                && row.center[1] == 8.0
+            {
+                row.separating = true;
+                fields.face_velocity[row.id as usize] = -2.0;
+            }
+        }
+
+        let mut receipt = LevelSetVolumeReceipt::default();
+        let full = advect_shared_phi(&graph, &fields, &previous, 0.25, &mut receipt).unwrap();
+        let half = advect_shared_phi(&graph, &fields, &previous, 0.125, &mut receipt).unwrap();
+        for x in 0..=8 {
+            assert!((full[x + 9 * 8] - 0.5).abs() <= 1.0e-6);
+            assert!((full[x + 9 * 7] + 0.5).abs() <= 1.0e-6);
+            assert!((half[x + 9 * 8] - 0.25).abs() <= 1.0e-6);
+            assert!((half[x + 9 * 7] + 0.75).abs() <= 1.0e-6);
+        }
+
+        for row in &mut graph.rows {
+            row.separating = false;
+        }
+        let unchanged = advect_shared_phi(&graph, &fields, &previous, 0.25, &mut receipt).unwrap();
+        assert!(unchanged.iter().all(|&phi| phi == -4.0));
+
+        for row in &mut graph.rows {
+            if row.kind == crate::types::RowKind::ClosedWorld
+                && row.axis == 1
+                && row.center[1] == 8.0
+            {
+                row.separating = true;
+            }
+        }
+        let zero_dt = advect_shared_phi(&graph, &fields, &previous, 0.0, &mut receipt).unwrap();
+        assert_eq!(zero_dt, previous.vertex_phi_fine);
     }
 
     #[test]

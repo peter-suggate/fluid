@@ -37,6 +37,18 @@ export const LEVELSET_VOLUME_GLOBAL_HEADER = Object.freeze({
   magic: 0, version: 1, totalWords: 2, acceptedSlot: 3,
   acceptedGeneration: 4, fault: 5, slot0Base: 6, slotStride: 7,
   vertexDispatch: 8,
+  // Build-phase workgroup triples. lsvBeginTopology publishes the clear and
+  // cell domains (and zeroes all four when the accepted generation needs no
+  // rebuild); lsvPublishBuildVertexDispatch publishes the vertex and
+  // validation domains once cataloguing has counted the live vertices. The
+  // resident snapshots words 12..17 and 18..23 into an indirect buffer, so
+  // each pair stays contiguous and 4-byte aligned.
+  buildClearDispatch: 12, buildCellDispatch: 15,
+  buildVertexDispatch: 18, buildValidateDispatch: 21,
+  // lsvPlanPhiCells publishes the phi-cell domain for the generation it is
+  // about to build, plus whether the fine-phi band survived the capacity
+  // budget. lsvBeginTopology reads these instead of the solver cell count.
+  plannedCellCount: 24, plannedGeneration: 25, plannedBandEnabled: 26,
 } as const);
 
 export const LEVELSET_VOLUME_SLOT_HEADER = Object.freeze({
@@ -51,6 +63,13 @@ export const LEVELSET_VOLUME_SLOT_HEADER = Object.freeze({
 export interface LevelSetVolumeSlotLayout {
   readonly baseWords: number;
   readonly headerBaseWords: number;
+  /**
+   * Two words per brick: phi-cell base ordinal, phi resolution (0 = absent).
+   * Bases are non-decreasing in brick index, so this plane is also the inverse
+   * map: an ordinal's owning brick is found by bisection, with no per-cell id
+   * plane and no scatter dispatch to fill one.
+   */
+  readonly brickPlaneBaseWords: number;
   readonly cornerRefsBaseWords: number;
   readonly cellRecordsBaseWords: number;
   readonly cellHashBaseWords: number;
@@ -76,6 +95,7 @@ export interface LevelSetVolumeLayout {
   readonly totalWords: number;
   readonly activeCellCapacity: number;
   readonly vertexCapacity: number;
+  readonly brickCapacity: number;
   readonly hashCapacity: number;
   readonly cellHashCapacity: number;
   readonly hashProbeLimit: number;
@@ -87,6 +107,12 @@ export interface LevelSetVolumeLayoutRequest {
   readonly activeCellCapacity: number;
   /** Explicit active-vertex budget, including generation-growth headroom. */
   readonly vertexCapacity: number;
+  /**
+   * Resident brick (world leaf) capacity. The phi-cell plan is one dyadic
+   * resolution per brick, so the per-generation plan is two words each. Zero
+   * keeps the plane absent for standalone fixtures without a brick roster.
+   */
+  readonly brickCapacity?: number;
   /** Power-of-two hash slots. Defaults to the next power of two >= 2V. */
   readonly hashCapacity?: number;
   readonly hashProbeLimit?: number;
@@ -113,6 +139,7 @@ export function createLevelSetVolumeLayout(
   const baseWords = integer(request.baseWords ?? 0, "baseWords");
   const activeCellCapacity = integer(request.activeCellCapacity, "activeCellCapacity");
   const vertexCapacity = integer(request.vertexCapacity, "vertexCapacity");
+  const brickCapacity = integer(request.brickCapacity ?? 0, "brickCapacity");
   if (activeCellCapacity === 0 || vertexCapacity === 0) {
     throw new RangeError("adaptive level set requires nonzero cell and vertex capacities");
   }
@@ -136,6 +163,10 @@ export function createLevelSetVolumeLayout(
     const header = cursor; cursor += LEVELSET_VOLUME_SLOT_HEADER_WORDS;
     const plane = (words: number) => { cursor = align(cursor); const result = cursor;
       cursor += words; return result; };
+    // Phi-cell base ordinal and phi resolution per brick. This plan is the
+    // generation snapshot of the fine-phi band: every later ordinal lookup
+    // reads it instead of re-evaluating live activity receipts.
+    const brickPlane = plane(2 * brickCapacity);
     const cornerRefs = plane(8 * activeCellCapacity);
     // lower.xyz, widths.xyz, nominal dyadic span, stable cell id.
     const cellRecords = plane(8 * activeCellCapacity);
@@ -152,6 +183,7 @@ export function createLevelSetVolumeLayout(
     const support0 = plane(vertexCapacity);
     const support1 = plane(vertexCapacity);
     return Object.freeze({ baseWords: base, headerBaseWords: header,
+      brickPlaneBaseWords: brickPlane,
       cornerRefsBaseWords: cornerRefs, cellRecordsBaseWords: cellRecords,
       cellHashBaseWords: cellHash, hashBaseWords: hash,
       vertexRecordsBaseWords: vertexRecords,
@@ -179,7 +211,7 @@ export function createLevelSetVolumeLayout(
   return Object.freeze({ baseWords, headerBaseWords, slots: [first, second] as const,
     slotStrideWords, redistanceOriginalPhiBaseWords,
     redistanceOriginalSupportBaseWords, redistanceSeedPointBaseWords,
-    totalWords: at, activeCellCapacity, vertexCapacity,
+    totalWords: at, activeCellCapacity, vertexCapacity, brickCapacity,
     hashCapacity, cellHashCapacity, hashProbeLimit });
 }
 
@@ -204,3 +236,12 @@ export function levelSetVolumeClearInvocationCount(layout: LevelSetVolumeLayout)
   return Math.max(layout.hashCapacity, 8 * layout.activeCellCapacity,
     layout.cellHashCapacity, layout.vertexCapacity);
 }
+
+/**
+ * Metric support follows the phi-cell span (straddle-by-sign band, seed
+ * admission of signed corners inside the local band, advect keeps a metric
+ * vertex metric when its sample lies inside the public band). FLUID_LSV_SPAN_BAND=0
+ * restores the fixed four-fine-cell band for A/B runs.
+ */
+export const LEVELSET_VOLUME_SPAN_BAND_ENABLED =
+  typeof process === "undefined" || process.env.FLUID_LSV_SPAN_BAND !== "0";

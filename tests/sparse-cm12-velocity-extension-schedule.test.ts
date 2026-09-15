@@ -80,6 +80,25 @@ test("cached VEX rebuilds at topology changes and preserves empty and retired-pa
   assert.match(resident, /dispatchWorkgroupsIndirect\(this.transportPacketIndirectArguments!, offset\)/);
 });
 
+test("hooked VEX initialization preserves the accepted effective velocity plane", () => {
+  const layout = createSparseCM12VelocityExtensionLayout({
+    cellCapacity: 64, packetCapacity: 64, brickFineResolution: 8,
+  });
+  const hooked = createSparseCM12VelocityExtensionWGSL({
+    layout, effectiveVelocityHookPrefix: "cm12",
+  });
+  const initializer = hooked.slice(hooked.indexOf("fn initializeVelocityExtensionPackets"),
+    hooked.indexOf("fn cm12VelocityExtensionNeighborWeight"));
+  assert.match(initializer, /let accepted=cm12EffectiveTransportVelocity\(cell\)/);
+  assert.doesNotMatch(initializer, /sourceCellVelocity\(\)/);
+
+  const standalone = createSparseCM12VelocityExtensionWGSL({ layout });
+  const standaloneInitializer = standalone.slice(
+    standalone.indexOf("fn initializeVelocityExtensionPackets"),
+    standalone.indexOf("fn cm12VelocityExtensionNeighborWeight"));
+  assert.match(standaloneInitializer, /let input=sourceCellVelocity\(\)\+4u\*cell/);
+});
+
 test("VEX compiled fallback fences once per packet and traverses ordered CNX adjacency", () => {
   const layout = createSparseCM12VelocityExtensionLayout({
     cellCapacity: 1024, packetCapacity: 192, brickFineResolution: 8,

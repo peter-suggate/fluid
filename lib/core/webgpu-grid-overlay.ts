@@ -9,6 +9,7 @@
 
 import { cameraApertureShaderLibrary } from "./webgpu-camera";
 import type { SparseAdaptiveGridConsumerSource } from "./levelset-consumer-abi";
+import { gridOverlayLevelSetVolumeWGSL, gridOverlayLevelSetVolumeUniform } from "./grid-overlay-levelset-volume.wgsl";
 
 export const gridOverlayShader = /* wgsl */ `
 struct Uniforms {
@@ -65,6 +66,7 @@ struct SparseParams {
 struct SparseOverlayParams { worldDirectory:vec4u }
 @group(0) @binding(18) var<uniform> sparseOverlayP: SparseOverlayParams;
 @group(0) @binding(19) var<storage,read> sparseFramePlan: array<u32>;
+${gridOverlayLevelSetVolumeWGSL}
 struct VertexOutput { @builtin(position) position: vec4f, @location(0) uv: vec2f }
 @vertex fn vertexMain(@builtin(vertex_index) index: u32) -> VertexOutput {
   var positions = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
@@ -1022,6 +1024,8 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
   var lineStrength = 1.0;
   var sampleDot = 0.0;
   var opticalBoundary = 0.0;
+  var liquidContour = 0.0;
+  var excessHatch = 0.0;
   if (adaptiveGrid) {
     // The simulation transports its fields on a dense cubic backing texture,
     // but pressure is represented by adaptive quadtree/tall cells. The id
@@ -1199,6 +1203,29 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
       let coarseColor = vec3f(0.08, 0.18, 0.48);
       fill = select(mix(middleColor, coarseColor, (level - 0.5) * 2.0), mix(fineColor, middleColor, level * 2.0), level < 0.5);
       alpha = 0.88;
+    } else if (fieldMode == 21) {
+      // The volume field fills complete represented cells; phi is a separate
+      // contour so disagreement remains visible, as in the 2-D advance lab.
+      let volume = sliceVolumeFill(cell);
+      let fraction = clamp(volume.x, 0.0, 1.0);
+      let ground = sceneColor(vec3f(0.075, 0.063, 0.046));
+      let water = sceneColor(vec3f(0.325, 0.604, 0.871));
+      fill = mix(ground, water, fraction);
+      alpha = select(0.0, 0.94, volume.y > 0.0);
+      sampleDot = 0.0;
+      lineStrength = 0.55;
+      let phi = sliceLevelSetPhi(vec3f(fineOrigin) + local3);
+      let pixelFine = max(derivative.x, derivative.y);
+      liquidContour = select(0.0,
+        1.0 - smoothstep(0.5 * pixelFine, 1.4 * pixelFine, abs(phi.x)),
+        phi.y > 0.0);
+      // Screen-sized diagonal stripes identify V > K without changing the
+      // liquid colour scale. No density threshold is used to classify phi.
+      let stripePosition = (samplePosition.x / derivative.x
+        + samplePosition.y / derivative.y) / 9.0;
+      let stripeDistance = min(fract(stripePosition), 1.0 - fract(stripePosition)) * 9.0;
+      excessHatch = select(0.0, 1.0 - smoothstep(0.6, 1.35, stripeDistance),
+        volume.y > 0.0 && volume.x > 1.000001);
     } else if (fieldMode == 10) {
       // Chentanez--Mueller surface density rho: the mass a cell holds, in cell
       // volumes. Its two thresholds are physical rather than cosmetic, so they
@@ -1283,13 +1310,19 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
   color = mix(color, vec3f(0.02, 0.05, 0.06), sampleDot);
   let opticalBoundaryColor = select(vec3f(0.93, 0.93, 0.98), vec3f(1.0, 0.08, 0.55), u.environment.w > 1.5);
   color = mix(color, opticalBoundaryColor, opticalBoundary);
+  if (!gridBody.occupied && fieldMode == 21) {
+    let amber = sceneColor(vec3f(1.0, 0.76, 0.32));
+    color = mix(color, amber, max(liquidContour, excessHatch));
+    alpha = max(alpha, max(liquidContour, excessHatch));
+  }
   alpha = max(alpha, max(opticalBoundary, max(line, sampleDot * 0.92)));
   // What the slice path refuses to thin. Only the structure view claims its
   // lines: there the lattice is the subject, and thinning it with the fill is
   // what dissolved the view at a distance. A field view's grid stays a thinned
   // reference frame beneath its own content, and sample dots stay with the
   // fill in either — they are read close up, where nothing is thin.
-  let lattice = max(select(0.0, line, structureView), opticalBoundary);
+  let lattice = max(max(select(0.0, line, structureView), opticalBoundary),
+    select(0.0, max(liquidContour, excessHatch), fieldMode == 21 && !gridBody.occupied));
   return GridSample(color, alpha, lattice, gridBody.occupied);
 }
 
@@ -1370,7 +1403,10 @@ fn volumeField(uv:vec2f)->vec4f {
 }
 
 @fragment fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
-  let axis = i32(round(u.debug.x));
+  // This diagnostic is a cross-section. Also guard stale/direct callers so
+  // they cannot accidentally repeat sparse phi lookups throughout a raymarch.
+  let requestedAxis = i32(round(u.debug.x));
+  let axis = select(requestedAxis, 1, requestedAxis == 4 && i32(round(u.debug.w)) == 21);
   if (axis <= 0 || u.gridInfo.w <= 0.5) { discard; }
   if (axis == 4) { return volumeField(input.uv); }
   let ndc = input.uv * 2.0 - 1.0;
@@ -1418,7 +1454,7 @@ fn volumeField(uv:vec2f)->vec4f {
   // structure view at a distance. The volume path keeps full authored alpha
   // because its opacity is already the user's slider.
   return vec4f(displayColor(overlay.color),
-    max(overlay.alpha * SLICE_OPACITY, overlay.lattice * 0.92));
+    max(overlay.alpha * select(SLICE_OPACITY, 0.94, i32(round(u.debug.w)) == 21), overlay.lattice * 0.92));
 }
 `;
 
@@ -1436,6 +1472,7 @@ export class GridOverlayPipeline {
   private sparseSource?: SparseAdaptiveGridConsumerSource;
   private readonly sparseDummyParams: GPUBuffer;
   private readonly sparseOverlayParams: GPUBuffer;
+  private readonly sparseLevelSetVolumeParams: GPUBuffer;
   private readonly sparseDummyStorage: GPUBuffer;
   private readonly sparseInvalidFramePlan: GPUBuffer;
 
@@ -1453,6 +1490,10 @@ export class GridOverlayPipeline {
     this.sparseOverlayParams = device.createBuffer({
       label: "Grid overlay sparse-world addressing parameters",
       size: 256,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.sparseLevelSetVolumeParams = device.createBuffer({
+      label: "Grid overlay volume and level-set addresses", size: 96,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     this.sparseDummyStorage = device.createBuffer({
@@ -1508,6 +1549,8 @@ export class GridOverlayPipeline {
   setSparseSource(source: SparseAdaptiveGridConsumerSource | undefined) {
     if (this.sparseSource === source) return;
     this.sparseSource = source;
+    this.device.queue.writeBuffer(this.sparseLevelSetVolumeParams, 0,
+      gridOverlayLevelSetVolumeUniform(source?.levelSetVolume));
     const base = source?.worldDirectoryBaseWords;
     const initialLeaves = source?.worldDirectoryInitialLeaves;
     const activityRecordWords = source?.activityRecordWords;
@@ -1574,6 +1617,7 @@ export class GridOverlayPipeline {
           ?? { buffer: this.sparseDummyStorage } },
         { binding: 18, resource: { buffer: this.sparseOverlayParams } },
         { binding: 19, resource: framePlanResource },
+        { binding: 20, resource: { buffer: this.sparseLevelSetVolumeParams } },
       ]
     });
   }
@@ -1594,6 +1638,7 @@ export class GridOverlayPipeline {
   destroy() {
     this.sparseDummyParams.destroy();
     this.sparseOverlayParams.destroy();
+    this.sparseLevelSetVolumeParams.destroy();
     this.sparseDummyStorage.destroy();
   }
 }

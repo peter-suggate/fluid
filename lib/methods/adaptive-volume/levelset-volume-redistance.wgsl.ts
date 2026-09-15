@@ -1,4 +1,4 @@
-import type { LevelSetVolumeLayout } from "./levelset-volume-layout";
+import { LEVELSET_VOLUME_SPAN_BAND_ENABLED, type LevelSetVolumeLayout } from "./levelset-volume-layout";
 
 export interface LevelSetVolumeRedistanceWGSLOptions {
   readonly layout: LevelSetVolumeLayout;
@@ -54,7 +54,12 @@ fn lsvrOriginalBand(slot:u32,vertex:u32)->f32{
 fn lsvrReceipt(slot:u32,word:u32)->u32{return lsvHeader(slot,LSVR_RECEIPT_BASE+word);}
 
 @compute @workgroup_size(1) fn lsvrBegin(){if(!lsvAccepted()){return;}let slot=lsvAcceptedSlot();
-  for(var word=0u;word<12u;word+=1u){lsvStore(lsvrReceipt(slot,word),0u);}}
+  for(var word=0u;word<12u;word+=1u){lsvStore(lsvrReceipt(slot,word),0u);}
+  // Word 5 counts vertices a Jacobi round actually moved, word 6 latches the
+  // fixed point, word 7 reports the rounds the frame needed. Seeding is the
+  // first productive round, so start word 5 above zero or the advance that
+  // follows it would declare convergence before any relaxation ran.
+  lsvStore(lsvrReceipt(slot,5u),1u);}
 
 @compute @workgroup_size(64) fn lsvrCaptureOriginal(@builtin(global_invocation_id) wid:vec3u){
   if(!lsvAccepted()){return;}let slot=lsvAcceptedSlot();let vertex=wid.x;
@@ -90,13 +95,23 @@ fn lsvrFixedPlanePoint(slot:u32,vertex:u32)->vec4f{let position=lsvVertexPositio
       return vec4f(position-lsvrOriginalPhi(vertex)*plane.xyz,1.0);}}
   return vec4f(0.0);}
 
-fn lsvrNearestEdgeSeed(slot:u32,vertex:u32)->vec4f{let position=lsvVertexPosition(slot,vertex);
+// The far end of a crossing edge qualifies when it is metric, or when it is a
+// signed corner within this vertex's local band: the corner of a coarse phi
+// cell that straddles the contour, whose tag the narrow band left deep. Its
+// clearance is a lower bound on its distance, so the interpolated crossing is
+// biased toward it by at most the clearance deficit for one frame; the
+// raised band makes that corner metric-exact at this same redistance.
+fn lsvrNearestEdgeSeed(slot:u32,vertex:u32,localBand:f32)->vec4f{let position=lsvVertexPosition(slot,vertex);
   let own=lsvrOriginalPhi(vertex);if(own==0.0){return vec4f(position,1.0);}
   var best=vec3f(0.0);var bestDistance=3.402823e38;let q=vec3i(position);
   for(var octant=0u;octant<8u;octant+=1u){let probe=q-vec3i(i32(octant&1u),i32((octant>>1u)&1u),i32((octant>>2u)&1u));
     let owner=lsvSlotOwnerAtQuery(slot,position,probe);if(owner.x==LSV_INVALID){continue;}
     for(var corner=0u;corner<8u;corner+=1u){let other=lsvCellCorner(slot,owner.x,corner);
-      if(other==LSV_INVALID||other==vertex||lsvrOriginalSupport(other)!=LSV_SUPPORT_METRIC){continue;}
+      if(other==LSV_INVALID||other==vertex){continue;}
+      let otherSupport=lsvrOriginalSupport(other);
+      if(otherSupport==LSV_SUPPORT_ABSENT||(otherSupport!=LSV_SUPPORT_METRIC
+        &&!(${LEVELSET_VOLUME_SPAN_BAND_ENABLED ? "true" : "false"}
+          &&lsvFinite(lsvrOriginalPhi(other))&&abs(lsvrOriginalPhi(other))<=localBand))){continue;}
       let otherPosition=lsvVertexPosition(slot,other);let delta=abs(otherPosition-position);
       let axes=select(0u,1u,delta.x>1e-6)+select(0u,1u,delta.y>1e-6)
         +select(0u,1u,delta.z>1e-6);if(axes!=1u){continue;}
@@ -110,19 +125,27 @@ fn lsvrNearestEdgeSeed(slot:u32,vertex:u32)->vec4f{let position=lsvVertexPositio
 // A coarse cell that contains the contour needs metric values at every corner
 // even when those corners lie beyond the ordinary four-fine-cell band. Cache
 // that requirement only on its incident vertices; unrelated macro regions keep
-// the narrow production band.
+// the narrow production band. The straddle test reads the sign of every
+// corner, not its support tag: a deep tag is a phase certificate whose sign is
+// exact, and a corner beyond the narrow band is precisely the corner this
+// radius exists to admit. Requiring it to be metric already made the radius
+// unreachable for any phi cell wider than the band, so a pool resting on a
+// brick plane under a coarse dry row lost its interface vertices at the first
+// redistance and never recovered them.
 fn lsvrIncidentCrossingBand(slot:u32,vertex:u32)->f32{
   let position=lsvVertexPosition(slot,vertex);let q=vec3i(position);
   var required=ceil(lsvrBand(slot));
   for(var octant=0u;octant<8u;octant+=1u){
     let probe=q-vec3i(i32(octant&1u),i32((octant>>1u)&1u),i32((octant>>2u)&1u));
     let owner=lsvSlotOwnerAtQuery(slot,position,probe);if(owner.x==LSV_INVALID){continue;}
-    var minimumPhi=3.402823e38;var maximumPhi=-3.402823e38;var metric=true;
+    var minimumPhi=3.402823e38;var maximumPhi=-3.402823e38;var signed=true;
     for(var corner=0u;corner<8u;corner+=1u){let other=lsvCellCorner(slot,owner.x,corner);
-      if(other==LSV_INVALID||lsvrOriginalSupport(other)!=LSV_SUPPORT_METRIC){metric=false;continue;}
-      let value=lsvrOriginalPhi(other);metric=metric&&lsvFinite(value);
+      if(other==LSV_INVALID||${LEVELSET_VOLUME_SPAN_BAND_ENABLED
+        ? "lsvrOriginalSupport(other)==LSV_SUPPORT_ABSENT"
+        : "lsvrOriginalSupport(other)!=LSV_SUPPORT_METRIC"}){signed=false;continue;}
+      let value=lsvrOriginalPhi(other);signed=signed&&lsvFinite(value);
       minimumPhi=min(minimumPhi,value);maximumPhi=max(maximumPhi,value);}
-    if(metric&&minimumPhi<=0.0&&maximumPhi>=0.0){
+    if(signed&&minimumPhi<=0.0&&maximumPhi>=0.0){
       let record=lsvSlotBase(slot)+LSV_CELL_RECORDS+8u*owner.x;
       let widths=vec3f(lsvFloat(record+3u),lsvFloat(record+4u),lsvFloat(record+5u));
       required=max(required,ceil(length(widths)));
@@ -141,7 +164,7 @@ fn lsvrIncidentCrossingBand(slot:u32,vertex:u32)->f32{
     if(seed.w>0.5){
       seedRef=LSVR_FIXED_PLANE;
       atomicOr(&${arena}[LSVR_ORIGINAL_SUPPORT+vertex],LSVR_FIXED_PLANE_BIT);
-    }else{seed=lsvrNearestEdgeSeed(slot,vertex);if(seed.w>0.5){seedRef=vertex;}}
+    }else{seed=lsvrNearestEdgeSeed(slot,vertex,localBand);if(seed.w>0.5){seedRef=vertex;}}
   }
   if(seedRef!=LSV_INVALID){lsvrStoreSeedPoint(vertex,seed.xyz);atomicAdd(&${arena}[lsvrReceipt(slot,0u)],1u);}
   let sign=select(1.0,-1.0,original<0.0);let distance=select(localBand+1.0,
@@ -149,24 +172,39 @@ fn lsvrIncidentCrossingBand(slot:u32,vertex:u32)->f32{
   lsvStoreFloat(lsvPhiBase(slot,destination)+vertex,sign*distance);
   lsvStore(lsvSupportBase(slot,destination)+vertex,select(seedRef,vertex,seedRef==LSVR_FIXED_PLANE));}
 
+// Publish one relaxed vertex and report whether the round moved it. A round
+// that reproduces its own source bank is a fixed point of the Jacobi operator:
+// the two banks are then equal, so every later round would rewrite the same
+// values and can be retired without changing the result.
+fn lsvrPublishRelaxed(slot:u32,source:u32,destination:u32,vertex:u32,phi:f32,seedRef:u32){
+  if(bitcast<u32>(phi)!=bitcast<u32>(lsvVertexPhi(slot,source,vertex))
+    ||seedRef!=lsvLoad(lsvSupportBase(slot,source)+vertex)){
+    atomicAdd(&${arena}[lsvrReceipt(slot,5u)],1u);}
+  lsvStoreFloat(lsvPhiBase(slot,destination)+vertex,phi);
+  lsvStore(lsvSupportBase(slot,destination)+vertex,seedRef);}
+
 @compute @workgroup_size(64) fn lsvrRelaxClosestPoints(@builtin(global_invocation_id) wid:vec3u){
-  if(!lsvAccepted()){return;}let slot=lsvAcceptedSlot();let vertex=wid.x;
+  if(!lsvAccepted()){return;}let slot=lsvAcceptedSlot();
+  if(lsvLoad(lsvrReceipt(slot,6u))!=0u){return;}
+  let vertex=wid.x;
   if(vertex>=lsvLoad(lsvHeader(slot,3u))){return;}let source=lsvLoad(lsvHeader(slot,4u));let destination=1u-source;
   let original=lsvrOriginalPhi(vertex);
   // Seed construction already certified and cached immutable affine-plane
   // vertices. Copy their exact distance and seed id without repeating the
   // incident-cell affine tests in every Jacobi round.
   if(lsvrOriginalFixedPlane(vertex)){
-    lsvStoreFloat(lsvPhiBase(slot,destination)+vertex,original);
-    lsvStore(lsvSupportBase(slot,destination)+vertex,vertex);return;
+    lsvrPublishRelaxed(slot,source,destination,vertex,original,vertex);return;
   }
   var bestRef=LSV_INVALID;var bestDistance=3.402823e38;
-  let q=vec3i(lsvVertexPosition(slot,vertex));
+  // The vertex record is immutable for the whole redistance phase, so the
+  // eight octant queries and the sixty-four candidate distances read one
+  // hoisted position instead of reloading three atomic words each time.
+  let position=lsvVertexPosition(slot,vertex);let q=vec3i(position);
   for(var octant=0u;octant<8u;octant+=1u){let probe=q-vec3i(i32(octant&1u),i32((octant>>1u)&1u),i32((octant>>2u)&1u));
-    let owner=lsvSlotOwnerAtQuery(slot,lsvVertexPosition(slot,vertex),probe);if(owner.x==LSV_INVALID){continue;}
+    let owner=lsvSlotOwnerAtQuery(slot,position,probe);if(owner.x==LSV_INVALID){continue;}
     for(var corner=0u;corner<8u;corner+=1u){let other=lsvCellCorner(slot,owner.x,corner);if(other==LSV_INVALID){continue;}
       let candidateRef=lsvLoad(lsvSupportBase(slot,source)+other);if(candidateRef==LSV_INVALID){continue;}
-      let candidate=lsvrSeedPoint(candidateRef);let distance=length(candidate-lsvVertexPosition(slot,vertex));
+      let candidate=lsvrSeedPoint(candidateRef);let distance=length(candidate-position);
       if(distance<bestDistance||(distance==bestDistance&&candidateRef<bestRef)){
         bestRef=candidateRef;bestDistance=distance;}
     }}
@@ -175,10 +213,16 @@ fn lsvrIncidentCrossingBand(slot:u32,vertex:u32)->f32{
     bestRef=LSV_INVALID;bestDistance=localBand+1.0;
   }
   let sign=select(1.0,-1.0,original<0.0);
-  lsvStoreFloat(lsvPhiBase(slot,destination)+vertex,sign*bestDistance);
-  lsvStore(lsvSupportBase(slot,destination)+vertex,bestRef);}
+  lsvrPublishRelaxed(slot,source,destination,vertex,sign*bestDistance,bestRef);}
 
 @compute @workgroup_size(1) fn lsvrAdvance(){if(!lsvAccepted()){return;}let slot=lsvAcceptedSlot();
+  // Latch the fixed point the preceding round reported. The host keeps the
+  // worst-case adaptive-graph reach as its ceiling; this retires the launches
+  // beyond the reach the frame actually needed. Both banks are equal once the
+  // flag is set, so the alternation below stays correct while relax is idle.
+  if(lsvLoad(lsvrReceipt(slot,5u))==0u){lsvStore(lsvrReceipt(slot,6u),1u);}
+  else{lsvStore(lsvrReceipt(slot,5u),0u);
+    lsvStore(lsvrReceipt(slot,7u),lsvLoad(lsvrReceipt(slot,7u))+1u);}
   if(lsvLoad(lsvHeader(slot,1u))==0u){let bank=lsvLoad(lsvHeader(slot,4u));lsvStore(lsvHeader(slot,4u),1u-bank);}}
 
 @compute @workgroup_size(64) fn lsvrResolve(@builtin(global_invocation_id) wid:vec3u){
@@ -206,11 +250,12 @@ fn lsvrIncidentCrossingBand(slot:u32,vertex:u32)->f32{
 @compute @workgroup_size(64) fn lsvrAuditContour(@builtin(global_invocation_id) wid:vec3u){
   if(!lsvAccepted()){return;}let slot=lsvAcceptedSlot();let vertex=wid.x;
   if(vertex>=lsvLoad(lsvHeader(slot,3u))){return;}let bank=lsvLoad(lsvHeader(slot,4u));
-  let q=vec3i(lsvVertexPosition(slot,vertex));let oldA=lsvrOriginalPhi(vertex);let newA=lsvVertexPhi(slot,bank,vertex);
+  let position=lsvVertexPosition(slot,vertex);
+  let q=vec3i(position);let oldA=lsvrOriginalPhi(vertex);let newA=lsvVertexPhi(slot,bank,vertex);
   for(var octant=0u;octant<8u;octant+=1u){let probe=q-vec3i(i32(octant&1u),i32((octant>>1u)&1u),i32((octant>>2u)&1u));
-    let owner=lsvSlotOwnerAtQuery(slot,lsvVertexPosition(slot,vertex),probe);if(owner.x==LSV_INVALID){continue;}
+    let owner=lsvSlotOwnerAtQuery(slot,position,probe);if(owner.x==LSV_INVALID){continue;}
     for(var corner=0u;corner<8u;corner+=1u){let other=lsvCellCorner(slot,owner.x,corner);if(other<=vertex||other==LSV_INVALID){continue;}
-      let delta=abs(lsvVertexPosition(slot,other)-lsvVertexPosition(slot,vertex));
+      let delta=abs(lsvVertexPosition(slot,other)-position);
       if(select(0u,1u,delta.x>1e-6)+select(0u,1u,delta.y>1e-6)
         +select(0u,1u,delta.z>1e-6)!=1u){continue;}
       let oldB=lsvrOriginalPhi(other);if(oldA*oldB>0.0){continue;}let oldDen=abs(oldA)+abs(oldB);if(oldDen<=1e-20){continue;}
@@ -232,7 +277,10 @@ export interface ClosestPointRedistanceReferenceResult {
 export interface IncidentRedistanceCellReference {
   readonly widths: readonly [number, number, number];
   readonly cornerPhi: readonly number[];
+  /** Deep-tagged corners; they keep certifying a straddle by sign. */
   readonly metric?: boolean;
+  /** A corner with no support at all cannot certify anything. */
+  readonly absent?: boolean;
 }
 
 /** CPU oracle for the cached per-vertex coarse-crossing metric radius. */
@@ -242,7 +290,9 @@ export function incidentCrossingRedistanceBandReference(
 ): number {
   let required = Math.ceil(baseBand);
   for (const cell of incidentCells) {
-    if (cell.metric === false || cell.cornerPhi.length !== 8
+    // `metric: false` models deep-tagged corners; their sign is exact, so they
+    // still certify the straddle. Only an absent or non-finite corner cannot.
+    if (cell.absent === true || cell.cornerPhi.length !== 8
       || cell.cornerPhi.some(value => !Number.isFinite(value))) continue;
     const minimum = Math.min(...cell.cornerPhi);
     const maximum = Math.max(...cell.cornerPhi);

@@ -1,7 +1,7 @@
 import { cloneScene, defaultCamera, defaultScene, type CameraState, type SceneDescription } from "./model";
 import { applyHeroGardenNodeOverrides } from "./hero-garden-overrides";
 import { createMassConservingFigure9DamBreak, createPaperScenario } from "./paper-scenarios";
-import { CM12_FIGURES, cm12Camera, cm12Grid, cm12MethodProfile, cm12Scene } from "./cm12-paper-scenes";
+import { CM12_FIGURES, CM12_SLAB_DEPTH_CELLS, cm12Camera, cm12Grid, cm12MethodProfile, cm12Scene } from "./cm12-paper-scenes";
 import { applyGardenPool, GARDEN_DAM_BRICK_SEED_M, GARDEN_WATERLINE_M, gardenPoolTerrain } from "./garden-scene";
 import {
   createHeroGardenHoseScene,
@@ -964,6 +964,62 @@ export function createHighResolutionDamBreakScene(): SceneDescription {
     finestCellSize_m: scene.voxelDomain.finestCellSize_m / 8,
   };
   scene.solidVoxels = [...solidVoxelShellForScene(scene), ...scene.solidVoxels];
+  return scene;
+}
+
+/**
+ * The depth-uniform extrusion of the 2D case the advance lab already runs.
+ *
+ * The lab seeds its Rust 2D world from `water-box-dam-break` by cutting one
+ * plane through the tank's depth, which leaves a 12x14-cell column standing in
+ * a 24x16-cell box. That 2D answer is only comparable with a 3D one if the
+ * third axis contributes nothing, and in the 0.8 m tank it contributes a great
+ * deal: the column is narrower than the tank in z, so the 3D run spreads
+ * sideways into air the 2D run has no room for. This scene is the same x-y
+ * geometry on the same 50 mm lattice, extruded through `CM12_SLAB_DEPTH_CELLS`
+ * with the reservoir spanning the whole slab, so every z plane holds exactly
+ * the plane the lab solves and the only remaining difference is the solver.
+ *
+ * Eight cells because that is the depth the CM12 figures reconstruct their own
+ * 2D cases at — one B8 brick, and the minimum the dense pressure hierarchy will
+ * construct at all.
+ *
+ * Two departures from the 3D tank are what make this an extrusion rather than
+ * merely a thin tank:
+ *
+ *  - Free-slip on all six walls. The 2D world has no tangential wall condition
+ *    to disagree with: its `BoundaryMode::Closed` pins the normal component and
+ *    leaves the tangent free. A no-slip slab would differ from the 2D run in
+ *    the boundary layer along the floor and end walls, which is a fact about
+ *    `fluidWallMode` rather than about dimensionality.
+ *  - `depthBoundary: "symmetry"`, the catalog's statement that a depth is the
+ *    thickness of the plane being looked at rather than an axis with water in
+ *    it. The uniform reference reads it for its z faces, and the editor reads
+ *    it to extrude a dropped ball into a disk spanning the slab instead of
+ *    scaling one by a depth this case does not have.
+ *
+ * Surface tension is zeroed for the reason the CM12 figures zero it: there is
+ * no capillary term on the 2D lane, so leaving it on would make the comparison
+ * partly a measurement of that term.
+ */
+export function createDamBreakSlabScene(): SceneDescription {
+  const scene = sceneBody();
+  scene.sceneId = "water-box-dam-break-slab";
+  scene.rigidBodies = [];
+  const depth_m = CM12_SLAB_DEPTH_CELLS * scene.voxelDomain.finestCellSize_m;
+  scene.container = {
+    ...scene.container,
+    depth_m,
+    top: "closed",
+    fluidWallMode: "free-slip",
+    depthBoundary: "symmetry",
+  };
+  // The 3D tank's reservoir face, carried through the full slab: 12x14 cells of
+  // liquid, which is the 168 fine-cell areas the 2D lane conserves.
+  scene.fluid.initialDamBreakDimensions_m = { x: 0.6, y: 0.7, z: depth_m };
+  scene.container.fillFraction = 0.6 * 0.7 * depth_m
+    / (scene.container.width_m * scene.container.height_m * scene.container.depth_m);
+  scene.fluid.surfaceTension_N_m = 0;
   return scene;
 }
 
@@ -2412,6 +2468,24 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
         "The equilibrium lane runs one paper step per outer step: the browser's 4x GPU "
         + "cap would let a 20 m column settle four times as far between observations.",
         (scene) => pinStep(scene, scene.numerics.fixedDt_s)),
+    },
+  }),
+  defineScene({
+    id: "water-box-dam-break-slab",
+    name: "Dam break · 2D slab",
+    blurb: "The water box dam break with its depth cut to one 8-cell brick and the reservoir spanning it, so every plane through the tank is the 2D case the advance lab solves. Free-slip walls and σ = 0 leave dimensionality as the only difference.",
+    audience: "study",
+    shelf: "Method comparisons",
+    environment: "stage",
+    build: createDamBreakSlabScene,
+    // Square on to the slab: the subject is one x-y plane, and an oblique
+    // framing of an 0.4 m depth reads as a tank seen from the corner rather
+    // than as the figure the 2D lane draws.
+    camera: {
+      azimuth_rad: 0,
+      elevation_rad: 0.06,
+      distance_m: 1.8,
+      target_m: { x: 0, y: 0.3, z: 0 },
     },
   }),
   defineScene({

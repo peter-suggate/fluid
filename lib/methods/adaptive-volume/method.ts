@@ -274,7 +274,7 @@ export const adaptiveMassMethod: SimulationMethod = {
   // than half this method's picker and every one of them answers a question
   // about the scheduler rather than about the water. Their overlay modes still
   // resolve — see `sparse-cm12-dirty-visualizations.ts`.
-  supportedFieldModes: ["structure", "resolution", "density", "cfl", "speed", "phi", "pressure",
+  supportedFieldModes: ["structure", "resolution", "density", "volume-levelset", "cfl", "speed", "phi", "pressure",
     "tracers", "face-velocity",
     // Listed unconditionally rather than gated on the reservation: a view that
     // vanished from the picker would be indistinguishable from one that does

@@ -334,8 +334,10 @@ export function FieldControlRows({ lenses: override }: {
     ...(shown && !shown.planeless ? [{
       value: "volume",
       label: "VOL",
-      disabled: !volumeCapable,
-      title: volumeCapable ? undefined : "Volume views need an adaptive octree method",
+      disabled: !volumeCapable || active?.sliceOnly,
+      title: active?.sliceOnly
+        ? "This diagnostic is drawn on an X, Y, or Z slice"
+        : volumeCapable ? undefined : "Volume views need an adaptive octree method",
     }] : []),
     { value: "off", label: "HIDE" },
   ];

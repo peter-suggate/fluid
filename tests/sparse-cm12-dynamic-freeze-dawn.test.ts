@@ -12,7 +12,7 @@ import { adaptiveMassMethod, adaptiveMassSolverOptions } from
 import { WebGPUAdaptiveMassSolver } from
   "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 import { cloneScene, defaultScene } from "../lib/core/model";
-import { SPARSE_CM12_RESIDENT_STAGES, SPARSE_CM12_RESIDENT_STAGE_SUBSTAGES, type SparseCM12ResidentStageId } from
+import { SPARSE_CM12_RESIDENT_STAGES, SPARSE_CM12_RESIDENT_STAGE_SUBSTAGES } from
   "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident";
 import { unpackFineLevelSetPackedPhi } from "../lib/core/fine-levelset-packed-sample";
 
@@ -262,7 +262,8 @@ dawnTest("a paused frozen coarse host accepts superseding signed-world drops thr
     const steps = process.env.FREEZE_DIAGNOSTICS ? Number(process.env.FREEZE_STEPS ?? 8) : 8;
     for (let step = 1; step <= steps; step++) {
       if (process.env.FREEZE_DIAGNOSTICS && step === steps && process.env.FREEZE_STAGE_LIMIT) {
-        const limit = process.env.FREEZE_STAGE_LIMIT as SparseCM12ResidentStageId;
+        const limit = process.env.FREEZE_STAGE_LIMIT as
+          (typeof SPARSE_CM12_RESIDENT_STAGES)[number];
         assert.ok(SPARSE_CM12_RESIDENT_STAGES.includes(limit));
         solver.sparseWorldTrace.setStageLimitForQA(limit);
         if (process.env.FREEZE_CANDIDATE_LIMIT) {

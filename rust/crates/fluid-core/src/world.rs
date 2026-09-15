@@ -28,9 +28,11 @@ use crate::sources::SourceLedger;
 use crate::topology::BrickSeed;
 use crate::tracers::{TracerReceipt, Tracers, TRACER_BUDGET};
 use crate::{
-    collocate_velocity, extend_velocity, extend_velocity_with_level_set, force_faces, prepare_faces,
+    collocate_velocity, extend_velocity, extend_velocity_with_level_set, force_faces,
+    force_faces_with_level_set, prepare_faces,
     prepare_faces_for_level_set_volume,
     prepare_faces_for_cellwise_remap, publish_transport_characteristic_clearance,
+    refresh_level_set_separating_faces,
     reconstruct_interfaces, reconstruct_interfaces_for_cellwise_remap,
     transport_volume_with_commit, Fields, PressureReceipt, ValidationError,
 };
@@ -41,23 +43,56 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// or a refinement demand. Every existing projection must enforce this target;
 /// the post-support projection would otherwise erase the primary expansion.
 fn with_level_set_volume_pressure_source<T>(
-    graph: &crate::Graph,
+    graph: &mut crate::Graph,
     fields: &mut Fields,
     dt: f32,
     enabled: bool,
-    project: impl FnOnce(&mut Fields) -> Result<T, ValidationError>,
+    project: impl FnOnce(&mut crate::Graph, &mut Fields) -> Result<T, ValidationError>,
 ) -> Result<T, ValidationError> {
     if !enabled {
-        return project(fields);
+        return project(graph, fields);
     }
     let mut source = crate::numerics::level_set_volume_excess_pressure_source(graph, fields, dt)?;
     for (id, rate) in source.iter_mut().enumerate() {
         *rate += Fields::optional_cell(&fields.source_rate, id, 0.0);
     }
     let physical_source = std::mem::replace(&mut fields.source_rate, source);
-    let result = project(fields);
+    let result = project(graph, fields);
     fields.source_rate = physical_source;
     result
+}
+
+fn rebind_violating_separating_walls(
+    graph: &mut crate::Graph,
+    fields: &mut Fields,
+    preprojection_velocity: &[f32],
+    rebound: &mut [bool],
+) -> usize {
+    let mut added = 0;
+    for row in &graph.rows {
+        if row.kind != crate::RowKind::ClosedWorld || !row.separating {
+            continue;
+        }
+        let Some(term) = row.terms.first() else { continue };
+        let inward = if term.coefficient >= 0.0 { 1.0 } else { -1.0 };
+        let relative = inward
+            * (fields.face_velocity[row.id as usize] - row.solid_velocity);
+        if relative < -1.0e-6 && !rebound[row.id as usize] {
+            rebound[row.id as usize] = true;
+            added += 1;
+        }
+    }
+    if added == 0 {
+        return 0;
+    }
+    fields.face_velocity.clone_from_slice(preprojection_velocity);
+    for row in &mut graph.rows {
+        if rebound[row.id as usize] {
+            row.separating = false;
+            fields.face_velocity[row.id as usize] = row.solid_velocity;
+        }
+    }
+    added
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -891,7 +926,18 @@ impl World {
         {
             let graph = &mut self.state.topology.graph;
             let fields = &mut self.state.fields;
-            force_faces(graph, fields, dt, fields.acceleration_fine, inflow);
+            if level_set_volume {
+                force_faces_with_level_set(
+                    graph,
+                    fields,
+                    &self.level_set_phi,
+                    dt,
+                    fields.acceleration_fine,
+                    inflow,
+                );
+            } else {
+                force_faces(graph, fields, dt, fields.acceleration_fine, inflow);
+            }
             observe("body-forces", graph, fields);
             if level_set_volume {
                 crate::levelset_volume::publish_pressure_geometry_from_phi(
@@ -907,7 +953,19 @@ impl World {
             observe("interface-reconstruction", graph, fields);
             self.stage_timings.field_build = field_build_clock.elapsed_nanoseconds();
             let primary_pressure_clock = NativeStageClock::start();
-            with_level_set_volume_pressure_source(graph, fields, dt, level_set_volume, |fields| {
+            with_level_set_volume_pressure_source(graph, fields, dt, level_set_volume, |graph, fields| {
+                let preprojection_velocity = if level_set_volume {
+                    fields.face_velocity.clone()
+                } else {
+                    Vec::new()
+                };
+                let mut rebound = if level_set_volume {
+                    vec![false; graph.rows.len()]
+                } else {
+                    Vec::new()
+                };
+                let mut accumulated_iterations = 0;
+                loop {
                 if let Some(embedding) = &mut self.embedding {
                     let prepared = if level_set_volume {
                         embedding.prepare_with_level_set(graph, fields, &self.level_set_phi)?
@@ -925,11 +983,12 @@ impl World {
                         Some(prepared),
                     )?;
                     self.pressure = PressureReceipt {
-                        iterations: solved.solve.iterations,
+                        iterations: accumulated_iterations + solved.solve.iterations,
                         initial_residual: solved.solve.initial_true_residual_squared.max(0.0).sqrt(),
                         residual: solved.solve.final_true_residual_squared.max(0.0).sqrt(),
                         converged: solved.solve.converged,
                     };
+                    accumulated_iterations = self.pressure.iterations;
                     observe("pressure-solve", graph, fields);
                     embedding.project(graph, fields, &solved.prepared);
                 } else {
@@ -963,7 +1022,7 @@ impl World {
                     observe("pressure-topology", graph, fields);
                     assemble_pressure_rhs(graph, fields, &rows);
                     observe("pressure-rhs", graph, fields);
-                    self.pressure = solve_pressure(
+                    let solved = solve_pressure(
                         graph,
                         fields,
                         &rows,
@@ -971,6 +1030,11 @@ impl World {
                         self.options.pressure_relative_tolerance,
                         Some(&self.pressure_authority.execution_order),
                     )?;
+                    self.pressure = PressureReceipt {
+                        iterations: accumulated_iterations + solved.iterations,
+                        ..solved
+                    };
+                    accumulated_iterations = self.pressure.iterations;
                     observe("pressure-solve", graph, fields);
                     project_pressure_velocity(graph, fields, &rows);
                     if swept_static_wall_pressure {
@@ -984,6 +1048,17 @@ impl World {
                             .pressure_diagonal
                             .clone_from(&physical_pressure_diagonal);
                     }
+                }
+                if !level_set_volume
+                    || rebind_violating_separating_walls(
+                        graph,
+                        fields,
+                        &preprojection_velocity,
+                        &mut rebound,
+                    ) == 0
+                {
+                    break;
+                }
                 }
                 Ok(())
             })?;
@@ -1065,7 +1140,30 @@ impl World {
                 // field and must not be applied a second time.
                 let graph = &mut self.state.topology.graph;
                 let fields = &mut self.state.fields;
-                with_level_set_volume_pressure_source(graph, fields, dt, level_set_volume, |fields| {
+                if level_set_volume {
+                    // Topology compilation clears this transient contact state.
+                    // Reclassify from transferred velocity without adding force.
+                    refresh_level_set_separating_faces(
+                        graph,
+                        fields,
+                        &self.level_set_phi,
+                        dt,
+                        fields.acceleration_fine,
+                    );
+                }
+                with_level_set_volume_pressure_source(graph, fields, dt, level_set_volume, |graph, fields| {
+                    let preprojection_velocity = if level_set_volume {
+                        fields.face_velocity.clone()
+                    } else {
+                        Vec::new()
+                    };
+                    let mut rebound = if level_set_volume {
+                        vec![false; graph.rows.len()]
+                    } else {
+                        Vec::new()
+                    };
+                    let mut accumulated_iterations = 0;
+                    loop {
                     if let Some(embedding) = &mut self.embedding {
                         let prepared = if level_set_volume {
                             embedding.prepare_with_level_set(graph, fields, &self.level_set_phi)?
@@ -1082,7 +1180,7 @@ impl World {
                             Some(prepared),
                         )?;
                         self.pressure = PressureReceipt {
-                            iterations: solved.solve.iterations,
+                            iterations: accumulated_iterations + solved.solve.iterations,
                             initial_residual: solved
                                 .solve
                                 .initial_true_residual_squared
@@ -1091,6 +1189,7 @@ impl World {
                             residual: solved.solve.final_true_residual_squared.max(0.0).sqrt(),
                             converged: solved.solve.converged,
                         };
+                        accumulated_iterations = self.pressure.iterations;
                         embedding.project(graph, fields, &solved.prepared);
                     } else {
                         let rows = if level_set_volume {
@@ -1109,7 +1208,7 @@ impl World {
                                 .is_some_and(|p| p.solid_world.is_some()),
                         );
                         assemble_pressure_rhs(graph, fields, &rows);
-                        self.pressure = solve_pressure(
+                        let solved = solve_pressure(
                             graph,
                             fields,
                             &rows,
@@ -1117,7 +1216,23 @@ impl World {
                             self.options.pressure_relative_tolerance,
                             Some(&self.pressure_authority.execution_order),
                         )?;
+                        self.pressure = PressureReceipt {
+                            iterations: accumulated_iterations + solved.iterations,
+                            ..solved
+                        };
+                        accumulated_iterations = self.pressure.iterations;
                         project_pressure_velocity(graph, fields, &rows);
+                    }
+                    if !level_set_volume
+                        || rebind_violating_separating_walls(
+                            graph,
+                            fields,
+                            &preprojection_velocity,
+                            &mut rebound,
+                        ) == 0
+                    {
+                        break;
+                    }
                     }
                     Ok(())
                 })?;
@@ -1287,8 +1402,9 @@ impl World {
         self.stage_timings.post_transport = post_transport_clock.elapsed_nanoseconds();
         let resolution_clock = NativeStageClock::start();
         let mut policy = self.resolution_options.clone();
-        // Both geometric transports distinguish shape change from uniform
-        // translation. Absolute speed alone must not refine bulk liquid.
+        // Geometric support closes both sides of a coarse cell. The remap
+        // experiment uses relative motion; direct phi uses the GPU policy's
+        // absolute liquid-speed floor inside the shared measurement routine.
         policy.translation_invariant_motion_sizing = cellwise_remap || level_set_volume;
         policy.coarsen_inactive_pages = level_set_volume;
         policy.coarsest_demanded_pages = level_set_volume;
@@ -1659,6 +1775,12 @@ impl World {
                 self.state.fields.density[cell.id as usize] as f64 * cell.measure as f64
             }).sum();
             self.surface = crate::levelset_surface::refresh(&self.surface, diagnostic_volume)?;
+            let cell_size = self.cell_size();
+            crate::resolution::publish_direct_surface_proofs(
+                &self.state.topology, &self.state.fields, &self.surface,
+                &self.resolution_options, &mut self.resolution_policy,
+                self.timestep_s, cell_size,
+            ).map_err(|error| ValidationError(format!("surface proof: {error:?}")))?;
         } else {
             self.surface = reconstruct_shared_rdf(
                 &self.state.topology.graph,
@@ -1918,6 +2040,21 @@ mod tests {
             assert_eq!(world.surface.vertex_phi_fine[index + 2], 2.0);
         }
     }
+    #[test]
+    fn resting_level_set_consumes_published_surface_proofs() {
+        let mut world = level_set_world();
+        let original_contour = world.surface.segments_fine.clone();
+        let original_cells = world.state.topology.graph.cells.len();
+        let mut demoted = false;
+        for frame in 1..=6 {
+            world.advance(frame, 1.0 / 60.0).unwrap();
+            demoted |= world.resolution_receipt.as_ref().unwrap().demoted_brick_count > 0;
+            assert_eq!(world.surface.segments_fine, original_contour);
+        }
+        assert!(demoted, "accepted surface certificates must reach the planner");
+        assert!(world.state.topology.graph.cells.len() < original_cells);
+    }
+
     #[test]
     fn level_set_topology_transition_preserves_direct_surface_exactly() {
         let mut world = level_set_world();

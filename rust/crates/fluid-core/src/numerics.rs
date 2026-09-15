@@ -276,12 +276,13 @@ fn extend_velocity_impl(
 }
 
 /// Production body-force update, including unilateral closed-world release.
-pub fn force_faces(
+fn force_faces_impl(
     graph: &mut Graph,
     fields: &mut Fields,
     dt: f32,
     acceleration: [f32; 3],
     inflow_velocity: [f32; 3],
+    level_set_phi: Option<&[f32]>,
 ) {
     let d = graph.dimension as usize;
     for row in &mut graph.rows {
@@ -290,7 +291,9 @@ pub fn force_faces(
         if row.kind == RowKind::ClosedWorld {
             if let Some(term) = row.terms.first() {
                 let cell = term.cell_id as usize;
-                if fields.capacity[cell] > 1e-8 && fields.density[cell] > LIQUID_ISOVALUE {
+                let liquid_contact = level_set_phi
+                    .map_or(fields.density[cell] > LIQUID_ISOVALUE, |phi| phi[cell] <= 0.0);
+                if fields.capacity[cell] > 1e-8 && liquid_contact {
                     let length = (0..d)
                         .map(|a| mul(acceleration[a], acceleration[a]))
                         .fold(0.0, add)
@@ -333,6 +336,89 @@ pub fn force_faces(
                 mul(inflow, inflow_velocity[row.axis as usize]),
             )
         }
+    }
+}
+
+pub fn force_faces(
+    graph: &mut Graph,
+    fields: &mut Fields,
+    dt: f32,
+    acceleration: [f32; 3],
+    inflow_velocity: [f32; 3],
+) {
+    force_faces_impl(graph, fields, dt, acceleration, inflow_velocity, None)
+}
+
+/// Apply body force while using the direct level set as the wall-contact phase
+/// authority. Conservative volume may be sub-isovalue in a thin contact cell;
+/// treating that cell as air would disable the separating-wall inequality and
+/// permit a closed wall to hold the surface with tensile pressure.
+pub fn force_faces_with_level_set(
+    graph: &mut Graph,
+    fields: &mut Fields,
+    level_set_phi: &[f32],
+    dt: f32,
+    acceleration: [f32; 3],
+    inflow_velocity: [f32; 3],
+) {
+    debug_assert_eq!(graph.dimension, 2);
+    debug_assert_eq!(level_set_phi.len(), graph.cells.len());
+    force_faces_impl(
+        graph,
+        fields,
+        dt,
+        acceleration,
+        inflow_velocity,
+        Some(level_set_phi),
+    )
+}
+
+/// Restore level-set separating-wall state after a topology transfer. The
+/// transferred cell velocity already contains this frame's body force, so the
+/// acceleration is used only to select gravity-away walls and is not added a
+/// second time. Interior faces are left untouched.
+pub fn refresh_level_set_separating_faces(
+    graph: &mut Graph,
+    fields: &mut Fields,
+    level_set_phi: &[f32],
+    dt: f32,
+    acceleration: [f32; 3],
+) {
+    debug_assert_eq!(graph.dimension, 2);
+    debug_assert_eq!(level_set_phi.len(), graph.cells.len());
+    let d = graph.dimension as usize;
+    let length = (0..d)
+        .map(|axis| mul(acceleration[axis], acceleration[axis]))
+        .fold(0.0, add)
+        .sqrt();
+    for row in &mut graph.rows {
+        if row.kind != RowKind::ClosedWorld {
+            continue;
+        }
+        let i = row.id as usize;
+        row.separating = false;
+        let Some(term) = row.terms.first() else { continue };
+        let cell = term.cell_id as usize;
+        let axis = row.axis as usize;
+        let orientation = if term.coefficient >= 0.0 { 1.0 } else { -1.0 };
+        let predicted = fields.cell_velocity[d * cell + axis];
+        if fields.capacity[cell] > 1.0e-8 && level_set_phi[cell] <= 0.0 {
+            let outward = mul(dt, mul(orientation, predicted - row.solid_velocity))
+                / row.distance.max(1.0e-6);
+            let deadband = if fields.pressure_row_member.get(i).copied().unwrap_or(0) != 0 {
+                5.0e-5
+            } else {
+                1.0e-4
+            };
+            row.separating = length > 1.0e-6
+                && mul(orientation, acceleration[axis]) > mul(0.5, length)
+                && outward > deadband;
+        }
+        fields.face_velocity[i] = if row.separating {
+            predicted
+        } else {
+            row.solid_velocity
+        };
     }
 }
 

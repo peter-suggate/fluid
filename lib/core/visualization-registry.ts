@@ -155,6 +155,8 @@ export interface FieldVisualization extends VisualizationCommon {
   readonly modeCode?: number;
   /** Slice axis the view is authored for; `volume` is the ray-integrated form. */
   readonly axis: "x" | "y" | "z" | "volume";
+  /** Restrict this diagnostic to an in-scene plane; volume raymarching is not meaningful. */
+  readonly sliceOnly?: boolean;
   /**
    * The view draws its own geometry over the finished frame instead of being
    * sampled inside a raymarch, so it has no slice plane to choose.

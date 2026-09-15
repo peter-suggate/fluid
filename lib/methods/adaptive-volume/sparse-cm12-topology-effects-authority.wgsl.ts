@@ -43,9 +43,17 @@ fn ${p}HeaderValid()->bool{return atomicLoad(&${arena}[${h(H.magic)}])
  &&atomicLoad(&${arena}[${h(H.version)}])==${SPARSE_CM12_TOPOLOGY_EFFECTS_VERSION}u
  &&atomicLoad(&${arena}[${h(H.totalWords)}])==${l.totalWords}u;}
 fn ${p}Hash(value:u32,hash:u32)->u32{return (hash^value)*0x01000193u;}
+// The host copies this triple into an indirect buffer unconditionally, so it
+// may never outlive the generation that authored it: a transaction that never
+// begins, faults, or has already published must copy a zero dispatch rather
+// than the previous generation's effect count.
+fn ${p}SilenceDispatch(){atomicStore(&${arena}[${h(H.ptrDispatchX)}],0u);
+ atomicStore(&${arena}[${h(H.ptrDispatchY)}],1u);atomicStore(&${arena}[${h(H.ptrDispatchZ)}],1u);}
 fn ${p}Fail(code:u32,id:u32){if(atomicCompareExchangeWeak(&${arena}[${h(H.fault)}],0u,code).exchanged){
- atomicStore(&${arena}[${h(H.firstFaultId)}],id);}atomicStore(&${arena}[${h(H.phase)}],${PHASE.fault}u);}
+ atomicStore(&${arena}[${h(H.firstFaultId)}],id);}atomicStore(&${arena}[${h(H.phase)}],${PHASE.fault}u);
+ ${p}SilenceDispatch();}
 @compute @workgroup_size(1) fn beginSparseCM12TopologyEffectsPreflight(){
+ ${p}SilenceDispatch();
  let generation=atomicLoad(&${arena}[${h(H.generation)}])+1u;
  if(!${p}HeaderValid()||generation==0u||generation>=${p}GenerationBusy){${p}Fail(1u,${p}Invalid);return;}
  atomicStore(&${arena}[${h(H.generation)}],generation);atomicStore(&${arena}[${h(H.fault)}],0u);
@@ -110,6 +118,7 @@ fn ${p}Authorize(){atomicStore(&${arena}[${h(H.phase)}],${PHASE.authorized}u);}
   atomicLoad(&${arena}[${l.ptrOwnsLeafBaseWords}u+brick])!=0u,generation);
  atomicAdd(&${arena}[${h(H.coveredEffects)}],1u);}
 @compute @workgroup_size(1) fn finishSparseCM12TopologyEffectsPublication(){
+ ${p}SilenceDispatch();
  if(atomicLoad(&${arena}[${h(H.phase)}])!=${PHASE.authorized}u){return;}
  atomicStore(&${arena}[${h(H.phase)}],${PHASE.published}u);}
 `;

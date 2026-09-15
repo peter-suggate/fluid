@@ -194,8 +194,10 @@ export function FieldViewRows() {
       {
         value: "volume",
         label: "VOL",
-        disabled: !volumeCapable,
-        title: volumeCapable ? undefined : "Volume views need an adaptive octree method",
+        disabled: !volumeCapable || drawing.sliceOnly,
+        title: drawing.sliceOnly
+          ? "This diagnostic is drawn on an X, Y, or Z slice"
+          : volumeCapable ? undefined : "Volume views need an adaptive octree method",
       },
     ]}
     onChange={(value) => setOverlayAxis(value as typeof overlayAxis)}

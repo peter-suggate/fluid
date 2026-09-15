@@ -34,3 +34,14 @@ test("sharpening failure decodes integer mass quanta without disguising them as 
   assert.equal(failure.rawWords[7], 2);
   assert.match(new SimulationFailureError(failure).message, /operands=0,2,0,0/);
 });
+
+test("adaptive level-set advection receipt preserves its mixed mask and departure", () => {
+  const words = new Uint32Array(CM12_FAILURE_WORDS);
+  words.set([1, 7, cm12FailureKernelId("lsvAdvectPhi"), 9, 10, 4895, 64]);
+  words.set(new Uint32Array(new Float32Array([0.75, 6.5, 21.25]).buffer), 7);
+  const failure = decodeCM12SimulationFailure(words)!;
+  assert.deepEqual(failure.operandNames,
+    ["faultMask", "samplePositionFineX", "samplePositionFineY", "samplePositionFineZ"]);
+  assert.deepEqual(failure.operands, [64, 0.75, 6.5, 21.25]);
+  assert.equal(failure.rawWords[6], 64);
+});

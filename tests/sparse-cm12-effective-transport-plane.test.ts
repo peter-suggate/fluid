@@ -48,6 +48,17 @@ test("the effective vec4 plane is a VEX product, never transport materialization
   assert.doesNotMatch(sample, /state\[/);
 });
 
+test("projected effective velocity follows frozen level-set pressure membership", () => {
+  const collocation = functionSource(wgsl, "collocateAndDiagnose",
+    "@compute @workgroup_size(64)\nfn reduceDivergenceDiagnostics");
+  assert.match(collocation,
+    /cm12PublishCollocatedWetEffectiveVelocity\(id,velocity,\s*pressureAcceptedCellMember\(id\)\)/,
+    "phi-liquid pressure cells must publish the projected velocity used to advect phi");
+  assert.doesNotMatch(collocation,
+    /cm12PublishCollocatedWetEffectiveVelocity[\s\S]*destinationDensity\(\)/,
+    "conservative volume must not define the level-set velocity publication wet set");
+});
+
 test("transport holds a scale-invariant source lattice while sharpening stays continuous", () => {
   const stencil = functionSource(wgsl, "effectiveTransportStencilAtSpans",
     "${topologyEffectsEntries}");
@@ -120,7 +131,7 @@ test("region-equivalent face transport scales the shared cache without taxing de
     "ordinary scenes must retain the original face-trace arithmetic");
   assert.doesNotMatch(trace, /sampleFaceVelocityComponentSupport/);
   const scaledTrace = functionSource(wgsl, "traceFaceDepartureAtSpans",
-    "fn presentationPhiAt");
+    "fn presentationCanonicalCoarseCoordinate");
   assert.match(scaledTrace, /length\(initial\/spans\)/,
     "face RK2 substeps must measure travel in accepted-cell spans");
   assert.match(wgsl,
