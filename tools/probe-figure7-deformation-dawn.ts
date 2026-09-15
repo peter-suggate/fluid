@@ -13,6 +13,7 @@ import { readPublishedCM12Field } from "./sparse-cm12-published-field";
 const arg = (key: string, fallback: string) => process.argv.find(v => v.startsWith(`--${key}=`))?.slice(key.length + 3) ?? fallback;
 const sceneId = arg("scene", "cm12-figure-7");
 const steps = Number(arg("steps", "30"));
+const verifyHealth = process.argv.includes("--verify-health");
 const verifyCoarseFloor = process.argv.includes("--verify-coarse-floor");
 const output = arg("output", "artifacts/level-set-volume/figure7-deformation.json");
 assert.ok(Number.isInteger(steps) && steps >= 0);
@@ -43,11 +44,13 @@ try {
       await solver.awaitFrameCompletion(); await device.queue.onSubmittedWorkDone();
       frameTimes.push(performance.now() - started);
     }
-    if (!verifyCoarseFloor && !process.argv.includes("--every-frame") && ![0, 1, 2, 3, 4, 6, 10, 15, 20, 25, 30, 35, 40, 45, 60, steps].includes(step)) continue;
-    const [fields, phi, volume, transport] = await Promise.all([
+    if (!verifyCoarseFloor && !verifyHealth && !process.argv.includes("--every-frame") && ![0, 1, 2, 3, 4, 6, 10, 15, 20, 25, 30, 35, 40, 45, 60, steps].includes(step)) continue;
+    const diagnostics = await Promise.all([
       solver.readDiagnosticFields(true), readPublishedCM12Field(device, solver),
       solver.readAcceptedGeometricVolumeQA(), solver.readGeometricVolumeTransportReceiptQA(),
     ]);
+    const [fields, phi, volume] = diagnostics;
+    const transport: Awaited<ReturnType<WebGPUAdaptiveMassSolver["readGeometricVolumeTransportReceiptQA"]>> = diagnostics[3];
     let phiNegativeFineCells = 0;
     let airSideVolume = 0, deepAirVolume = 0, fractionalFineCells = 0, densitySum = 0;
     for (let i = 0; i < fields.density.length; i++) {
@@ -67,11 +70,11 @@ try {
       velocityY.weighted+=v*fields.density[i]!;velocityY.weight+=fields.density[i]!;
     }
     velocityY.weighted/=velocityY.weight||1;
-    const n=Math.round(Math.cbrt(fields.density.length));
+    const nx=solver.info.nx, ny=solver.info.ny, nz=solver.info.nz;
     let lowestLiquidY = Infinity;
     let mass=0, excess=0;const centroid=[0,0,0],second=[0,0,0], excessCentroid=[0,0,0];
     for(let i=0;i<fields.density.length;i++){
-      const rho=fields.density[i]!;const q=[i%n+.5,Math.floor(i/n)%n+.5,Math.floor(i/(n*n))+.5];
+      const rho=fields.density[i]!;const q=[i%nx+.5,Math.floor(i/nx)%ny+.5,Math.floor(i/(nx*ny))+.5];
       if (rho > 0.5) lowestLiquidY = Math.min(lowestLiquidY, q[1]! - 0.5);
       mass+=rho;const e=Math.max(0,rho-1);excess+=e;
       for(let a=0;a<3;a++){centroid[a]!+=rho*q[a]!;second[a]!+=rho*q[a]!**2;excessCentroid[a]!+=e*q[a]!;}
@@ -79,7 +82,7 @@ try {
     for(let a=0;a<3;a++){centroid[a]!/=mass;second[a]=second[a]!/mass-centroid[a]!**2;excessCentroid[a]!/=excess||1;}
     const interior = { samples: 0, missingPhi: 0, airPhi: 0, lowDensity: 0, minimumDensity: Infinity, badPages: {} as Record<string, number> };
     for (let i = 0; i < fields.density.length; i++) {
-      const q = [i % n + .5, Math.floor(i / n) % n + .5, Math.floor(i / (n * n)) + .5];
+      const q = [i % nx + .5, Math.floor(i / nx) % ny + .5, Math.floor(i / (nx * ny)) + .5];
       if (q.reduce((sum, value, axis) => sum + (value - centroid[axis]!) ** 2, 0) >= 12 ** 2) continue;
       interior.samples++;
       const missing = !Number.isFinite(phi.values[i]);
@@ -95,16 +98,24 @@ try {
       let pageMass = 0, maximum = 0, nonzero = 0;
       for (let z=0;z<8;z++)for(let y=0;y<8;y++)for(let x=0;x<8;x++) {
         const q = [8*b.coordinate[0]+x,8*b.coordinate[1]+y,8*b.coordinate[2]+z];
-        if(q.some(v=>v<0||v>=n))continue;
-        const rho=fields.density[q[0]!+n*(q[1]!+n*q[2]!)]!;
+        if(q.some((v,axis)=>v<0||v>=[nx,ny,nz][axis]!))continue;
+        const rho=fields.density[q[0]!+nx*(q[1]!+ny*q[2]!)]!;
         pageMass+=rho;maximum=Math.max(maximum,rho);nonzero+=Number(rho!==0);
       }
       pageVolumes.push({leaf:b.leafId,q:b.coordinate,mass:pageMass,maximum,nonzero});
     }
     if (step === 0) { initialMass = mass; initialCentreY = centroid[1]!; }
     (report.checkpoints as unknown[]).push({ step, pageVolumes, growth: process.argv.includes("--growth") ? await solver.readWorldGrowthReceiptQA() : undefined, interior, lowestLiquidY, phiQA, velocityY, mass, centroid, variance:second,excess,excessCentroid,activity,volume, effects: activity.commitFailed ? await solver.readCandidateEffectsTransactionQA() : undefined, coupling: transport.coupling,
-      transportFault: transport.fault, phiNegativeFineCells, airSideVolume, deepAirVolume, fractionalFineCells, densitySum });
+      transportFault: transport.fault, outflowFineCells3: transport.outflowFineCells3, phiNegativeFineCells, airSideVolume, deepAirVolume, fractionalFineCells, densitySum });
     const accountedMass = mass + transport.coupling.cumulativeResidueDeletedVolumeFine3;
+    if (verifyHealth) {
+      assert.equal(activity.commitFailed, false, `frame ${step}: rejected topology`);
+      assert.equal(activity.faultFlags, 0, `frame ${step}: activity fault`);
+      assert.equal(transport.fault, 0, `frame ${step}: transport fault`);
+      assert.equal(transport.coupling.edgeOverflowCount, 0, `frame ${step}: coupling overflow`);
+      assert.ok(Number.isFinite(mass) && fields.density.every(value => Number.isFinite(value) && value >= 0),
+        `frame ${step}: invalid accepted density`);
+    }
     if (verifyCoarseFloor) {
       assert.equal(sceneId, "cm12-figure-7");
       assert.equal(activity.commitFailed, false, `frame ${step}: rejected topology`);
@@ -112,7 +123,7 @@ try {
       assert.equal(activity.faultFlags, 0, `frame ${step}: activity fault`);
       assert.ok(Math.abs(accountedMass / initialMass - 1) < 1e-5, `frame ${step}: unexplained mass drift after recorded residue deletion`);
       assert.ok(activity.bricks.some(b => b.active && b.acceptedResolution === 2
-        && fields.density[(8*b.coordinate[0]+4) + n*((8*b.coordinate[1]+4) + n*(8*b.coordinate[2]+4))]! > 0.9
+        && fields.density[(8*b.coordinate[0]+4) + nx*((8*b.coordinate[1]+4) + ny*(8*b.coordinate[2]+4))]! > 0.9
         && b.coordinate.every((v, axis) => Math.abs(8 * v + 4 - centroid[axis]!) < 7)),
         `frame ${step}: no four-spacing liquid cell near centre`);
       if (step === steps) {
@@ -141,9 +152,19 @@ try {
     }
   }
   report.frameTimesMs = frameTimes;
+  assert.deepEqual(errors, [], "GPU validation errors");
   report.completed = true;
 } catch (e) {
   report.completed = false; report.error = String(e); process.exitCode = 1;
+  if (solver && process.argv.includes("--failure-debug")) {
+    report.failureActivity = await solver.readGPUActivityPolicy();
+    report.failureTransport = await solver.readGeometricVolumeTransportReceiptQA();
+    report.failureGrowth = await solver.readWorldGrowthReceiptQA();
+    const owner = /owner=(\d+)/.exec(String(e));
+    if (owner && String(e).includes("GEOMETRIC_VOLUME_TRANSPORT")) {
+      report.failureCell = await solver.readAcceptedGeometricCellRowsQA(Number(owner[1]));
+    }
+  }
 } finally {
   report.validationErrors = errors;
   solver?.destroy(); device?.destroy();

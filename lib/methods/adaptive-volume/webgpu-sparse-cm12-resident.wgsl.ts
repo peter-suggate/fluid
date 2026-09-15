@@ -1298,7 +1298,10 @@ fn cm12PhiBrickPlan(brick:u32,banded:bool)->vec2u{
     // brick set, so the finest rung is not addressable everywhere. A brick
     // without it keeps its accepted rung: the band is an accuracy gain, never
     // a hole in the phi domain.
-    if(templateBrickCellRange(brick,BRICK_FINE_RESOLUTION).y!=0u){
+    // Fixed host pages can alias unavailable rung entries to their accepted
+    // cells. A nonempty range alone does not prove fine geometry exists.
+    let fineRange=templateBrickCellRange(brick,BRICK_FINE_RESOLUTION);
+    if(fineRange.y!=0u&&cellResolution(fineRange.x)==BRICK_FINE_RESOLUTION){
       resolution=BRICK_FINE_RESOLUTION;}
   }
   let range=templateBrickCellRange(brick,resolution);
@@ -2201,7 +2204,7 @@ fn refinementPolicyResolutionBits(bounds:vec2u)->u32{
       &ACTIVITY_REFINEMENT_POLICY_MAXIMUM_MASK);
 }
 fn cachedRefinementGradingCap(brick:u32)->u32{
-  if((p.refinementRegionControl.x==0u&&!topologyFreezeEnabled())||brick>=p.dispatch.w){
+  if(brick>=p.dispatch.w){
     return BRICK_FINE_RESOLUTION;
   }
   return clamp(atomicLoad(&activity[activityRecord(brick)
@@ -2212,7 +2215,9 @@ fn setRefinementGradingCap(brick:u32,resolution:u32){
   // The prior frame's presentation-proof diagnostic is free as a full-rung
   // transient after planning has consumed its level-indexed receipt.
   atomicStore(&activity[activityRecord(brick)+ACTIVITY_SURFACE_PROOF_FAILURE_WORD],
-    clamp(resolution,1u,BRICK_FINE_RESOLUTION));
+    clamp(select(resolution,min(resolution,acceptedBrickResolution(brick)),
+      brick<CM12_WDR_INITIAL_LEAVES&&!brickCandidatePlanningEnabled(brick)),
+      1u,BRICK_FINE_RESOLUTION));
 }
 // Optional rerung/retirement may wait for background construction. Any
 // reachable frontier demand or immediately executable promotion wins instead.
@@ -7398,11 +7403,9 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   let output=activityRecord(brick);
   // Every planning epoch starts from the authored hard cap. The ordered
   // closure dispatches below propagate this cap into surrounding topology.
-  if(p.refinementRegionControl.x>0u||topologyFreezeEnabled()){
-    setRefinementGradingCap(brick,select(
-      cachedRefinementPolicyResolutionBounds(brick).y,
-      acceptedBrickResolution(brick),brickResolutionFrozen(brick)));
-  }
+  setRefinementGradingCap(brick,select(
+    cachedRefinementPolicyResolutionBounds(brick).y,
+    acceptedBrickResolution(brick),brickResolutionFrozen(brick)));
   // Begin a candidate epoch by mirroring accepted membership. Lifecycle
   // planners below edit only this intent; word 10 remains accepted authority.
   setCandidateBrickActiveAt(output,brickActive(brick));
@@ -7410,7 +7413,7 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   // Record the request independently of accepted state; both host templates
   // and prepared dynamic rungs participate in the in-place transaction.
   atomicStore(&activity[output+47u],current);
-  if(brickResolutionFrozen(brick)){
+  if(brickResolutionFrozen(brick)||!brickCandidatePlanningEnabled(brick)){
     atomicStore(&activity[output+8u],current);
     atomicStore(&activity[output+9u],32u);
     return;
@@ -7722,7 +7725,8 @@ fn closePlannedResolution(@builtin(global_invocation_id)gid:vec3u){
   let coordinate=cm12WorldLeafCoordinate(brick);
   let directions=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),
     vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
-  let hardRegionCaps=p.refinementRegionControl.x>0u||topologyFreezeEnabled();
+  // Prepared fixed pages impose hard grading caps even without user regions.
+  let hardRegionCaps=true;
   var gradingCap=BRICK_FINE_RESOLUTION;
   if(hardRegionCaps){
     gradingCap=cachedRefinementGradingCap(brick);
@@ -9491,7 +9495,7 @@ fn compileSparseWorldFrontierExecutionImage(
 fn stageFrontierPageAtRung(brick:u32,requested:u32){
   let output=activityRecord(brick);
   atomicStore(&activity[output+8u],
-    select(requested,applySparseCM12RefinementRegionBounds(brick,requested),
+    select(acceptedBrickResolution(brick),applySparseCM12RefinementRegionBounds(brick,requested),
       brickCandidatePlanningEnabled(brick)));
   atomicStore(&activity[output+9u],1u|ACTIVITY_LIFECYCLE_CHANGED);
   setCandidateBrickActiveAt(output,true);

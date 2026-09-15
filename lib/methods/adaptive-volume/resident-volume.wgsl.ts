@@ -152,10 +152,8 @@ fn planGeometricTransportFrontier(@builtin(global_invocation_id)gid:vec3u){
   atomicStore(&activity[output+47u],current);
   let pending=atomicLoad(&activity[output+9u])&ACTIVITY_FROZEN_FRONTIER_GENERATION;
   atomicStore(&activity[output+9u],select(32u,ACTIVITY_LIFECYCLE_CHANGED|pending,pending!=0u));
-  if(p.refinementRegionControl.x>0u||topologyFreezeEnabled()){
-    setRefinementGradingCap(brick,select(cachedRefinementPolicyResolutionBounds(brick).y,
-      current,brickResolutionFrozen(brick)));
-  }
+  setRefinementGradingCap(brick,select(cachedRefinementPolicyResolutionBounds(brick).y,
+    current,brickResolutionFrozen(brick)));
 }
 @compute @workgroup_size(64)
 fn markGeometricTransportFrontierActivity(@builtin(global_invocation_id)gid:vec3u){
