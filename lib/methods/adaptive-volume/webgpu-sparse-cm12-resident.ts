@@ -7116,6 +7116,12 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
       dispatchAccepted("proposeWholeFrameVolumeSharpening", "row");
       dispatchAccepted("gatherWholeFrameVolumeSharpening", "cell");
       dispatchAccepted("commitWholeFrameVolumeSharpening", "cell");
+      dispatchPhi("correctWholeFrameVolumePhi");
+      dispatch("lsvBeginConstraintProjection", 1);
+      for (let level = 0; level < phiConstraintLevels; level += 1) {
+        dispatchPhi("lsvApplyConstraints");
+        dispatch("lsvAdvanceConstraintProjection", 1);
+      }
       if (this.rigidCoupling) {
         dispatchAccepted("reexpressGeometricSolidRows", "row");
         dispatch("finishGeometricSolidPublication", 1);
@@ -10561,6 +10567,8 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
           sharpeningCutCellSkipCount: couplingWords[19]!,
           sharpeningBlockedFaceSkipCount: couplingWords[20]!,
           sharpeningDisconnectedFaceSkipCount: couplingWords[21]!,
+          phiVolumeResidualFine3: couplingFloats[22]!,
+          phiInterfaceAreaFine2: couplingFloats[23]!,
         }),
         subfaceCount: words[0]!, subfaceCapacity: this.layout.volumeTransport.subfaceCapacity,
         maxCourant: floats[1]!, plannedSubsteps: words[2]!, executedSubsteps: words[3]!,

@@ -47,6 +47,7 @@ export const WHOLE_FRAME_VOLUME_ENTRY_POINTS = Object.freeze([
   "proposeWholeFrameVolumeSharpening",
   "gatherWholeFrameVolumeSharpening",
   "commitWholeFrameVolumeSharpening",
+  "correctWholeFrameVolumePhi",
 ] as const);
 
 export const WHOLE_FRAME_VOLUME_CONTROL = Object.freeze({
@@ -61,6 +62,7 @@ export const WHOLE_FRAME_VOLUME_CONTROL = Object.freeze({
   maximumTraceDisplacement: 18,
   sharpeningCutCellSkipCount: 19, sharpeningBlockedFaceSkipCount: 20,
   sharpeningDisconnectedFaceSkipCount: 21,
+  phiVolumeResidual: 22, phiInterfaceArea: 23,
 });
 
 /** Production whole-frame conservative translated-box volume coupling. */
@@ -983,20 +985,28 @@ fn gvPhiCachedSample(position:vec3f)->LsvPhiSample{
   if(!gvPhiStencilCache.resolved){return lsvSampleAt(position);}
   return lsvStencilSampleAt(gvPhiStencilCache,position);
 }
-// vec4f(plane-integrated fraction, midpoint fraction, min |phi|, 1 = metric).
+// vec4f(integrated fraction, midpoint fraction, min |phi|, 1 = metric / 2 = same phase).
 fn gvPhiBoxEstimate(centre:vec3f,widths:vec3f)->vec4f{
   var samples:array<f32,8>;var fill=0.0;var minimumAbsPhi=3.402823466e38;
-  var centrePhi=0.0;var maximumAbsPhi=0.0;
+  var centrePhi=0.0;var maximumAbsPhi=0.0;var metric=true;
   for(var corner=0u;corner<8u;corner+=1u){
     let signs=vec3f(select(-1.0,1.0,(corner&1u)!=0u),
       select(-1.0,1.0,(corner&2u)!=0u),select(-1.0,1.0,(corner&4u)!=0u));
     let position=centre+0.25*widths*signs;
     let sample=gvPhiCachedSample(position);
-    if(!sample.metric){return vec4f(0.0,0.0,0.0,0.0);}
+    if(!sample.valid){return vec4f(0.0,0.0,0.0,0.0);}
+    metric=metric&&sample.metric;
     samples[corner]=sample.phi;centrePhi+=0.125*sample.phi;
     maximumAbsPhi=max(maximumAbsPhi,abs(sample.phi));
     fill+=select(select(0.0,1.0,sample.phi<0.0),0.5,sample.phi==0.0);
     minimumAbsPhi=min(minimumAbsPhi,abs(sample.phi));
+  }
+  // Same-phase samples locate no crossing even when their distance is only
+  // a clearance. Include their empty/full target in volume feedback so mass
+  // stranded outside the metric band cannot silently disappear from the sum.
+  if(!metric){
+    if(fill==0.0||fill==8.0){return vec4f(fill/8.0,fill/8.0,minimumAbsPhi,2.0);}
+    return vec4f(0.0);
   }
   var gradient=vec3f(0.0);
   for(var corner=0u;corner<8u;corner+=1u){
@@ -1024,7 +1034,7 @@ fn gvPhiTargetVolume(cell:u32)->vec2f{
     atomicAdd(&conditioning[GV_WHOLE_FRAME_CONTROL+14u],1);return vec2f(0.0,0.0);}
   // Deep cells keep the cheap eight-sample path: the interface cannot reach
   // them, so no subdivision can change the answer.
-  if(whole.z>2.0*cellMinimumWidth(cell)){return vec2f(0.0,0.0);}
+  if(whole.w==2.0||whole.z>2.0*cellMinimumWidth(cell)){return vec2f(gvReceiverCapacity(cell)*whole.x,1.0);}
   var integrated=whole.x;var sampledFraction=whole.y;var samples=8u;
   // Eight midpoints under-integrate H(phi) once the solver cell is several
   // phi cells wide - the interface can enter and leave between two of them.
@@ -1059,24 +1069,56 @@ fn gvPhiTargetVolume(cell:u32)->vec2f{
   return vec2f(capacity*integrated,1.0);
 }
 
-@compute @workgroup_size(64)
-fn prepareWholeFrameVolumeSharpening(@builtin(global_invocation_id)gid:vec3u){
-  let cell=acceptedTemplateCellInvocation(gid.x);
-  if(cell==INVALID||gvFailed()||!surfaceSharpeningEnabled()
-      ||surfaceSharpeningStrength()<=0.0){return;}
+// Two floats in the existing receipt tail. One addition per workgroup avoids
+// per-cell contention; unlike fixed-point sums this does not quantize small V.
+fn gvAddPhiReduction(word:u32,value:f32){
+  if(value==0.0){return;}
+  var old=atomicLoad(&conditioning[GV_WHOLE_FRAME_CONTROL+word]);
+  loop{let result=atomicCompareExchangeWeak(&conditioning[GV_WHOLE_FRAME_CONTROL+word],
+    old,bitcast<i32>(bitcast<f32>(old)+value));
+    if(result.exchanged){break;}old=result.old_value;}
+}
+var<workgroup> gvPhiReduction:array<vec2f,64>;
+fn gvPrepareSharpeningCell(cell:u32)->vec2f{
   let volume=state[GV_CURRENT+cell];let capacity=gvReceiverCapacity(cell);
-  // Open capacity alone does not locate the solid/liquid intersection inside
-  // a cut cell. Preserve transported V until that spatial measure is certified.
+  state[GV_PLUS+cell]=0.0;state[GV_MINUS+cell]=0.0;
+  state[GV_LOW+cell]=3.402823466e38;
+  // Cut-cell phi integration needs the actual solid/liquid intersection.
   if(capacity<cellVolume(cell)-gvRoundoff(cellVolume(cell))){
-    state[GV_LOW+cell]=volume;state[GV_PLUS+cell]=0.0;state[GV_MINUS+cell]=0.0;
-    atomicAdd(&conditioning[GV_WHOLE_FRAME_CONTROL+19u],1);return;
-  }
-  let phiTarget=gvPhiTargetVolume(cell);
+    atomicAdd(&conditioning[GV_WHOLE_FRAME_CONTROL+19u],1);return vec2f(0.0);}
+  let centre=lsvSampleAt(cellCenter(cell));
+  if(!centre.valid){return vec2f(0.0);}
+  if(centre.metric){state[GV_LOW+cell]=centre.phi;}
+  var phiTarget=gvPhiTargetVolume(cell);
+  // A deep phase certificate is sufficient for full/empty volume, but never
+  // for a direction or interface area. Mixed unresolved cells remain excluded.
+  if(phiTarget.y<0.5&&!centre.metric&&abs(centre.phi)>0.5*length(cellWidths(cell))){
+    phiTarget=vec2f(select(0.0,capacity,centre.phi<0.0),1.0);}
+  if(phiTarget.y<0.5){return vec2f(0.0);}
   let strength=clamp(surfaceSharpeningStrength(),0.0,1.0);
-  state[GV_LOW+cell]=volume;
-  state[GV_PLUS+cell]=strength*select(0.0,max(0.0,volume-phiTarget.x),phiTarget.y>0.5);
-  state[GV_MINUS+cell]=strength*select(0.0,
-    max(0.0,min(phiTarget.x,capacity)-volume),phiTarget.y>0.5);
+  state[GV_PLUS+cell]=strength*max(0.0,volume-phiTarget.x);
+  // A pure-air receiver can relay volume inward on the next frame. Requiring
+  // an immediate phi deficit strands a multi-cell tail because every air cell
+  // has target zero. Directional face gating prevents outward relay.
+  let relay=centre.metric&&centre.phi>0.0&&phiTarget.x<=gvRoundoff(capacity);
+  let receiverTarget=select(min(phiTarget.x,capacity),capacity,relay);
+  state[GV_MINUS+cell]=strength*max(0.0,receiverTarget-volume);
+  let width=cellMinimumWidth(cell);
+  // Unit-integral triangular delta in phi. This is a cheap approximate
+  // dV/d(offset); damping and the 0.1-fine-cell cap bound Newton error.
+  let area=select(0.0,capacity/width*max(0.0,1.0-abs(centre.phi)/width),centre.metric);
+  return vec2f(volume-phiTarget.x,area);
+}
+@compute @workgroup_size(64)
+fn prepareWholeFrameVolumeSharpening(@builtin(global_invocation_id)gid:vec3u,
+    @builtin(local_invocation_index)local:u32){
+  let cell=acceptedTemplateCellInvocation(gid.x);var contribution=vec2f(0.0);
+  if(cell!=INVALID&&!gvFailed()&&surfaceSharpeningEnabled()&&surfaceSharpeningStrength()>0.0){
+    contribution=gvPrepareSharpeningCell(cell);}
+  gvPhiReduction[local]=contribution;workgroupBarrier();
+  for(var stride=32u;stride>0u;stride/=2u){
+    if(local<stride){gvPhiReduction[local]+=gvPhiReduction[local+stride];}workgroupBarrier();}
+  if(local==0u){gvAddPhiReduction(22u,gvPhiReduction[0].x);gvAddPhiReduction(23u,gvPhiReduction[0].y);}
 }
 
 fn gvSharpeningFaceCentre(face:u32,cells:vec2u)->vec3f{
@@ -1107,20 +1149,35 @@ fn proposeWholeFrameVolumeSharpening(@builtin(global_invocation_id)gid:vec3u){
       }
       let faceSample=lsvSampleAt(gvSharpeningFaceCentre(face,cells));
       let faceBand=2.0*min(cellMinimumWidth(cells.x),cellMinimumWidth(cells.y));
-      // A broad |phi| band alone can bridge two drops separated by a thin air
-      // sheet. The metric midpoint must provide an actual liquid path across
-      // this physical subface; ambiguous oblique crossings are safely skipped.
+      // Keep the liquid midpoint path, and also permit a sampled monotone
+      // inward return from air. A midpoint air crest still blocks transfer.
       let faceRoundoff=9.5367431640625e-7*(1.0+faceBand);
-      if(!faceSample.metric||faceSample.phi>faceRoundoff){
+      let phiA=state[GV_LOW+cells.x];let phiB=state[GV_LOW+cells.y];
+      // Air-side surplus may return through its immediate inward face. Require
+      // a monotone sampled path; an air crest between two drops still blocks it.
+      let inwardA=phiA>=0.0&&phiA<1e30&&phiB<phiA-faceRoundoff
+        &&faceSample.phi<=phiA+faceRoundoff&&faceSample.phi>=phiB-faceRoundoff;
+      let inwardB=phiB>=0.0&&phiB<1e30&&phiA<phiB-faceRoundoff
+        &&faceSample.phi<=phiB+faceRoundoff&&faceSample.phi>=phiA-faceRoundoff;
+      if(!faceSample.metric||(faceSample.phi>faceRoundoff&&!inwardA&&!inwardB)){
         atomicAdd(&conditioning[GV_WHOLE_FRAME_CONTROL+21u],1);
         state[GV_FLUX+4u*face]=0.0;continue;
       }
-      let negativeDegree=max(1u,gvCellFaceRange(cells.x).y-gvCellFaceRange(cells.x).x);
-      let positiveDegree=max(1u,gvCellFaceRange(cells.y).y-gvCellFaceRange(cells.y).x);
-      let negativeToPositive=min(state[GV_PLUS+cells.x]/f32(negativeDegree),
-        state[GV_MINUS+cells.y]/f32(positiveDegree));
-      let positiveToNegative=min(state[GV_PLUS+cells.y]/f32(positiveDegree),
-        state[GV_MINUS+cells.x]/f32(negativeDegree));
+      // Propose against actual opposing need. Dividing by every incident
+      // face wastes most of a cell's budget when only its inward face can
+      // remove a diffuse tail. The next two existing passes limit aggregate
+      // proposals and gather the same bounded transfer at both endpoints.
+      // Relay capacity must never draw liquid outward from the interior.
+      // Cut cells were excluded in prepare, so full cell volume is capacity.
+      let strength=clamp(surfaceSharpeningStrength(),0.0,1.0);
+      let relayA=phiA>0.0&&state[GV_MINUS+cells.x]>0.0
+        &&state[GV_MINUS+cells.x]>=strength*max(0.0,cellVolume(cells.x)-state[GV_CURRENT+cells.x])-gvRoundoff(cellVolume(cells.x));
+      let relayB=phiB>0.0&&state[GV_MINUS+cells.y]>0.0
+        &&state[GV_MINUS+cells.y]>=strength*max(0.0,cellVolume(cells.y)-state[GV_CURRENT+cells.y])-gvRoundoff(cellVolume(cells.y));
+      let negativeToPositive=select(0.0,min(state[GV_PLUS+cells.x],state[GV_MINUS+cells.y]),
+        (faceSample.phi<=faceRoundoff&&!relayB)||inwardA);
+      let positiveToNegative=select(0.0,min(state[GV_PLUS+cells.y],state[GV_MINUS+cells.x]),
+        (faceSample.phi<=faceRoundoff&&!relayA)||inwardB);
       transfer=negativeToPositive-positiveToNegative;
     }
     state[GV_FLUX+4u*face]=transfer;
@@ -1132,9 +1189,30 @@ fn gatherWholeFrameVolumeSharpening(@builtin(global_invocation_id)gid:vec3u){
   let cell=acceptedTemplateCellInvocation(gid.x);
   if(cell==INVALID||gvFailed()||!surfaceSharpeningEnabled()
       ||surfaceSharpeningStrength()<=0.0){return;}
+  var outgoing=0.0;var incoming=0.0;let faces=gvCellFaceRange(cell);
+  for(var adjacency=faces.x;adjacency<faces.y;adjacency+=1u){
+    let entry=gvCellFace(adjacency);let raw=state[GV_FLUX+4u*(entry>>1u)];
+    let signed=select(raw,-raw,(entry&1u)!=0u);
+    outgoing+=max(0.0,-signed);incoming+=max(0.0,signed);
+  }
+  // These two planes are dead donor/receiver budgets after proposal. Reuse
+  // them for common face limiters; no arena allocation or dispatch is added.
+  state[GV_PLUS+cell]=select(0.0,min(1.0,state[GV_PLUS+cell]/max(outgoing,1e-30)),outgoing>0.0);
+  state[GV_MINUS+cell]=select(0.0,min(1.0,state[GV_MINUS+cell]/max(incoming,1e-30)),incoming>0.0);
+}
+
+@compute @workgroup_size(64)
+fn commitWholeFrameVolumeSharpening(@builtin(global_invocation_id)gid:vec3u){
+  if(gvFailed()||!surfaceSharpeningEnabled()||surfaceSharpeningStrength()<=0.0){return;}
+  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
   var delta=0.0;let faces=gvCellFaceRange(cell);
   for(var adjacency=faces.x;adjacency<faces.y;adjacency+=1u){
-    let entry=gvCellFace(adjacency);let flux=state[GV_FLUX+4u*(entry>>1u)];
+    let entry=gvCellFace(adjacency);let face=entry>>1u;
+    let raw=state[GV_FLUX+4u*face];if(raw==0.0){continue;}
+    let cells=gvCells(face);
+    let factor=select(min(state[GV_PLUS+cells.y],state[GV_MINUS+cells.x]),
+      min(state[GV_PLUS+cells.x],state[GV_MINUS+cells.y]),raw>0.0);
+    let flux=raw*factor;
     delta+=select(flux,-flux,(entry&1u)!=0u);
   }
   let next=state[GV_CURRENT+cell]+delta;let capacity=gvReceiverCapacity(cell);
@@ -1142,18 +1220,34 @@ fn gatherWholeFrameVolumeSharpening(@builtin(global_invocation_id)gid:vec3u){
   if(next < -gvRoundoff(capacity)||next>capacity+priorExcess+gvRoundoff(capacity)){
     gvFault(20u,cell,next,capacity,delta);return;
   }
-  state[GV_LOW+cell]=max(0.0,next);
+  let volume=max(0.0,next);let rho=volume/cellVolume(cell);
   if(delta!=0.0){atomicAdd(&conditioning[GV_WHOLE_FRAME_CONTROL+15u],1);}
-}
 
-@compute @workgroup_size(64)
-fn commitWholeFrameVolumeSharpening(@builtin(global_invocation_id)gid:vec3u){
-  if(gvFailed()||!surfaceSharpeningEnabled()||surfaceSharpeningStrength()<=0.0){return;}
-  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
-  let volume=state[GV_LOW+cell];let rho=volume/cellVolume(cell);
   let changed=bitcast<u32>(rho)!=bitcast<u32>(state[destinationDensity()+cell]);
+  state[GV_LOW+cell]=volume; // Restore the volume QA view after centre-phi scratch is dead.
   state[GV_CURRENT+cell]=volume;state[destinationDensity()+cell]=rho;
   state[destinationGamma()+cell]=1.0;if(changed){incrementalActivityMarkCellClosure(cell);}
+}
+
+// One bounded global volume feedback step. It moves the existing interface;
+// it cannot create a new component in phase-only sparse backing. Constraint
+// projection follows this dispatch, before consumers see the corrected field.
+@compute @workgroup_size(64)
+fn correctWholeFrameVolumePhi(@builtin(global_invocation_id)gid:vec3u){
+  if(gvFailed()||!surfaceSharpeningEnabled()||!lsvAccepted()){return;}
+  let slot=lsvAcceptedSlot();let vertex=gid.x;
+  if(vertex>=lsvLoad(lsvHeader(slot,3u))||lsvConstraintCount(slot,vertex)>0u){return;}
+  let area=bitcast<f32>(atomicLoad(&conditioning[GV_WHOLE_FRAME_CONTROL+23u]));
+  let residual=bitcast<f32>(atomicLoad(&conditioning[GV_WHOLE_FRAME_CONTROL+22u]));
+  if(area<=1e-8){return;}
+  let offset=clamp(0.25*residual/area,-0.1,0.1)*clamp(surfaceSharpeningStrength(),0.0,1.0);
+  let source=lsvLoad(lsvHeader(slot,4u));
+  if(lsvVertexSupport(slot,source,vertex)!=LSV_SUPPORT_METRIC){return;}
+  let phi=lsvVertexPhi(slot,source,vertex);
+  // Uniform near the contour, fading before the metric-band edge. Consume
+  // no deep-phase clearance and leave distant disconnected backing intact.
+  let weight=clamp(2.0-abs(phi),0.0,1.0);
+  for(var bank=0u;bank<2u;bank+=1u){lsvStoreFloat(lsvPhiBase(slot,bank)+vertex,phi-offset*weight);}
 }
 `;
 }

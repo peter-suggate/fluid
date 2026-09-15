@@ -85,3 +85,24 @@ test("sharpening face proof rejects a thin air gap between drops", () => {
   assert.equal(sharpeningFaceHasLiquidConnection(-0.01, false, 2), false,
     "unsupported phi cannot certify component connectivity");
 });
+
+
+test("one eligible receiver uses the budget without dilution by unrelated faces", () => {
+  const before = [.6, 0, 0, 0, 0, 0, 0];
+  const targets = [0, .6, 0, 0, 0, 0, 0];
+  const faces = Array.from({ length: 6 }, (_, i) => [0, i + 1] as const);
+  assert.deepEqual(referenceSharpenVolume(before, targets, Array(7).fill(1), faces), targets);
+});
+
+test("competing donors and receivers share bounded conservative budgets", () => {
+  const faces = Array.from({ length: 6 }, (_, i) => [0, i + 1] as const);
+  const amounts = [1, 0, 0, 0, 0, 0, 0], targets = [0, 1, 1, 1, 1, 1, 1];
+  const out = referenceSharpenVolume(amounts, targets, Array(7).fill(1), faces);
+  for (const v of out.slice(1)) assert.ok(Math.abs(v - 1 / 6) < 1e-12);
+  const into = referenceSharpenVolume(targets, amounts, Array(7).fill(1), faces);
+  assert.ok(Math.abs(into[0]! - 1) < 1e-12);
+  for (const v of into.slice(1)) assert.ok(Math.abs(v - 5 / 6) < 1e-12);
+  const reverse = referenceSharpenVolume(amounts, targets, Array(7).fill(1),
+    faces.toReversed().map(([a, b]) => [b, a] as const));
+  out.forEach((v, i) => assert.ok(Math.abs(v - reverse[i]!) < 1e-12));
+});

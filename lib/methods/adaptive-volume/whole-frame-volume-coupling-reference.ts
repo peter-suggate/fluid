@@ -75,29 +75,34 @@ export function referenceWholeFrameVolumeCoupling(
   return { edges, amounts };
 }
 
-/** CPU oracle for one fixed, face-connected V-only sharpening pass. */
+/** Budget-only CPU oracle for supplied face connections; GPU relay/gating is tested separately. */
 export function referenceSharpenVolume(amounts: readonly number[], targets: readonly number[],
   capacities: readonly number[], faces: readonly (readonly [number, number])[]): readonly number[] {
   if (targets.length !== amounts.length || capacities.length !== amounts.length) {
     throw new RangeError("sharpening arrays must have equal length");
   }
-  const degree = amounts.map(() => 0);
-  for (const [a, b] of faces) { degree[a]! += 1; degree[b]! += 1; }
   const surplus = amounts.map((value, i) => Math.max(0, value - targets[i]!));
   const deficit = amounts.map((value, i) => Math.max(0, Math.min(targets[i]!, capacities[i]!) - value));
+  const proposals = faces.map(([a, b]) => Math.min(surplus[a]!, deficit[b]!)
+    - Math.min(surplus[b]!, deficit[a]!));
+  const outgoing = amounts.map(() => 0), incoming = amounts.map(() => 0);
+  faces.forEach(([a, b], face) => {
+    const transfer = proposals[face]!;
+    outgoing[a]! += Math.max(0, transfer); incoming[b]! += Math.max(0, transfer);
+    outgoing[b]! += Math.max(0, -transfer); incoming[a]! += Math.max(0, -transfer);
+  });
+  const give = outgoing.map((v, i) => v > 0 ? Math.min(1, surplus[i]! / v) : 0);
+  const take = incoming.map((v, i) => v > 0 ? Math.min(1, deficit[i]! / v) : 0);
   const delta = amounts.map(() => 0);
-  for (const [a, b] of faces) {
-    const forward = Math.min(surplus[a]! / Math.max(1, degree[a]!),
-      deficit[b]! / Math.max(1, degree[b]!));
-    const backward = Math.min(surplus[b]! / Math.max(1, degree[b]!),
-      deficit[a]! / Math.max(1, degree[a]!));
-    const transfer = forward - backward;
+  faces.forEach(([a, b], face) => {
+    const raw = proposals[face]!;
+    const transfer = raw * (raw >= 0 ? Math.min(give[a]!, take[b]!) : Math.min(give[b]!, take[a]!));
     delta[a]! -= transfer; delta[b]! += transfer;
-  }
+  });
   return amounts.map((value, i) => value + delta[i]!);
 }
 
-/** Mirrors the conservative GPU face gate: a positive-phi midpoint is an air gap. */
+/** Liquid-connected branch of the GPU gate; monotone air-side relay is a separate branch. */
 export function sharpeningFaceHasLiquidConnection(
   phiAtFaceCentre: number,
   metric: boolean,
