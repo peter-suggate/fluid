@@ -529,9 +529,9 @@ fn accumulate_direct_surface_normals(
 }
 
 /// Publish the next-rung certificate after accepted direct-surface publication.
-/// Like the GPU fine-phi band, the 2D vertex field survives solver coarsening
-/// unchanged. Evidence is candidate-spacing curvature and accepted V/phi
-/// agreement, not a fictitious restriction of that independent phi lattice.
+/// Certify the next-rung bilinear reconstruction against the accepted phi.
+/// Existing V/phi mismatch is not incremental restriction error. Thin features,
+/// deformation, region bounds and solid geometry remain independent guards.
 pub fn publish_direct_surface_proofs(
     topology: &CompiledTopology<2>,
     fields: &Fields,
@@ -543,9 +543,6 @@ pub fn publish_direct_surface_proofs(
 ) -> Result<(), ResolutionError> {
     validate_inputs(topology, fields, dt, cell_size)?;
     validate_direct_surface(topology, Some(surface))?;
-    let fill = levelset_surface::implied_fill_fine_cells(surface)
-        .map_err(|_| ResolutionError::FieldShape)?;
-    let nx = surface.dimensions[0] as usize;
     let policy = &options.policy;
     for brick in &topology.bricks {
         let history = state.history.entry(brick.seed.key).or_default();
@@ -571,61 +568,38 @@ pub fn publish_direct_surface_proofs(
         }
         let step = width(&brick.seed, target);
         let (lo, _) = bounds(&brick.seed);
-        let mut normal_min = [1.0_f64; 2];
-        let mut normal_max = [-1.0_f64; 2];
+        // Certify positional error of the candidate bilinear reconstruction.
+        // Existing V/phi disagreement and noisy normals are not damage caused
+        // by this restriction; conservative remapping retains extensive V.
         let sample = |p: [f64; 2]| crate::levelset_redistance::sample_scalar(
             surface, p.map(|v| v as f32)).unwrap() as f64;
-        let samples = if target == 1 { 5 } else { usize::from(target).pow(2) };
-        for index in 0..samples {
-            let mut q = if target == 1 { [0.0; 2] } else {
-                [(index % target as usize) as f64, (index / target as usize) as f64]
-            };
-            if target == 1 && index > 0 {
-                q[(index - 1) / 2] = if index % 2 == 0 { 1.0 } else { -1.0 };
+        let tolerance = policy.surface_displacement_tolerance_cells;
+        let mut valid = true;
+        for y in 0..8 { for x in 0..8 {
+            let p = [lo[0] as f64 + x as f64 + 0.5,
+                lo[1] as f64 + y as f64 + 0.5];
+            let lower = p.map(|v| (v / step).floor() * step);
+            let t = [(p[0]-lower[0])/step, (p[1]-lower[1])/step];
+            let fine = sample(p);
+            let mut coarse = 0.0;
+            let mut minimum = f64::INFINITY;
+            let mut maximum = f64::NEG_INFINITY;
+            for cy in 0..2 { for cx in 0..2 {
+                let weight = if cx == 0 {1.0-t[0]} else {t[0]}
+                    * if cy == 0 {1.0-t[1]} else {t[1]};
+                let corner = sample([lower[0]+cx as f64*step,
+                    lower[1]+cy as f64*step]);
+                minimum = minimum.min(corner); maximum = maximum.max(corner);
+                coarse += weight * corner;
+            }}
+            valid &= fine.is_finite() && coarse.is_finite();
+            // A same-sign candidate box cannot erase an enclosed feature.
+            valid &= !(fine < 0.0 && minimum >= 0.0)
+                && !(fine > 0.0 && maximum < 0.0);
+            if (fine < 0.0) != (coarse < 0.0) {
+                valid &= fine.abs().min(coarse.abs()) <= tolerance;
             }
-            let p = [lo[0] as f64 + (q[0] + 0.5) * step,
-                lo[1] as f64 + (q[1] + 0.5) * step];
-            let phi = sample(p);
-            let mut crossing = phi.abs() <= 0.75 * step;
-            let mut gradient = [0.0_f64; 2];
-            for axis in 0..2 {
-                let mut a = p; let mut b = p;
-                a[axis] -= step; b[axis] += step;
-                let (a, b) = (sample(a), sample(b));
-                crossing |= (a < 0.0) != (phi < 0.0) || (b < 0.0) != (phi < 0.0);
-                gradient[axis] = b - a;
-            }
-            let length = gradient[0].hypot(gradient[1]);
-            if crossing && length > 1e-6 {
-                for axis in 0..2 {
-                    let n = gradient[axis] / length;
-                    normal_min[axis] = normal_min[axis].min(n);
-                    normal_max[axis] = normal_max[axis].max(n);
-                }
-            }
-        }
-        let diameter = (normal_max[0] - normal_min[0]).max(0.0)
-            .hypot((normal_max[1] - normal_min[1]).max(0.0));
-        let mut valid = diameter / target as f64 <= policy.curvature_tolerance;
-        for id in brick.cell_range.clone() {
-            let cell = &topology.graph.cells[id as usize];
-            let capacity = fields.capacity[id as usize] as f64 * cell.measure as f64;
-            if capacity <= 0.0 { continue; }
-            let h = cell.widths[0].min(cell.widths[1]) as f64;
-            let phi = sample([cell.center[0] as f64, cell.center[1] as f64]);
-            if phi.abs() > 2.0 * h { continue; }
-            let mut implied = 0.0;
-            for y in cell.minimum[1] as usize..cell.maximum[1] as usize {
-                for x in cell.minimum[0] as usize..cell.maximum[0] as usize {
-                    implied += fill[x + nx * y] as f64;
-                }
-            }
-            let expected = implied * fields.capacity[id as usize] as f64;
-            let volume = fields.density[id as usize] as f64 * cell.measure as f64;
-            let tolerance = (VOLUME_ROUNDOFF_RATIO * capacity).max(
-                policy.surface_displacement_tolerance_cells * cell.measure as f64 / h);
-            valid &= volume.is_finite() && (volume - expected).abs() <= tolerance;
-        }
+        }}
         if valid {
             history.surface_proof = Some(SurfaceProofState {
                 generation_by_target_resolution: BTreeMap::from([
@@ -700,6 +674,11 @@ fn measure(
     let mut detail = 0.0_f32;
     let mut travel = 0.0_f32;
     let mut relative_travel = 0.0_f32;
+    let mut approach_low = [f64::NEG_INFINITY; 2];
+    let mut approach_high = [f64::INFINITY; 2];
+    let (page_lo, page_hi) = bounds(&brick.seed);
+    let page_centre = [(page_lo[0]+page_hi[0]) as f64*0.5,
+        (page_lo[1]+page_hi[1]) as f64*0.5];
     let mut motion_samples = Vec::new();
     let mut axes = 0_u8;
     let mut occupied_cell = false;
@@ -796,6 +775,16 @@ fn measure(
                     crate::levelset_redistance::sample_scalar(surface,
                         [neighbor.center[0], neighbor.center[1]]).is_some_and(|phi| phi < 0.0)
                 });
+                if policy.coarse_first && direct_surface.is_some()
+                    && neighbor_fill > feature_density {
+                    let position = topology.graph.cells[nid].center[axis] as f64;
+                    let velocity = fields.cell_velocity[2*nid+axis] as f64;
+                    if position < page_centre[axis] {
+                        approach_low[axis] = approach_low[axis].max(velocity);
+                    } else {
+                        approach_high[axis] = approach_high[axis].min(velocity);
+                    }
+                }
                 let crosses = neighbor_wet != wet;
                 let same_brick = topology.graph.cells[nid].brick_key == Some(brick.seed.key);
                 if crosses && (!wet || same_brick || policy.coarse_first) {
@@ -870,7 +859,7 @@ fn measure(
                 && (!translation_invariant_motion_sizing || direct_surface.is_some()))
         {
             travel = travel.max(f(dt * (vx as f64).hypot(vy as f64)));
-            if translation_invariant_motion_sizing {
+            if translation_invariant_motion_sizing || direct_surface.is_some() {
                 motion_samples.push([vx, vy]);
             }
         }
@@ -1010,14 +999,28 @@ fn measure(
         })
     });
     if direct_deep_liquid && !direct_surface_crossing { travel = 0.0; }
-    if policy.coarse_first && translation_invariant_motion_sizing && direct_surface.is_none() {
+    if policy.coarse_first && direct_surface.is_some() {
+        let mut minimum = [f64::INFINITY; 2];
+        let mut maximum = [f64::NEG_INFINITY; 2];
+        for velocity in motion_samples {
+            for axis in 0..2 {
+                minimum[axis] = minimum[axis].min(velocity[axis] as f64);
+                maximum[axis] = maximum[axis].max(velocity[axis] as f64);
+            }
+        }
+        travel = f(dt * (maximum[0]-minimum[0]).max(0.0)
+            .hypot((maximum[1]-minimum[1]).max(0.0)));
+        if direct_deep_liquid && !direct_surface_crossing { travel = 0.0; }
+    } else if policy.coarse_first && translation_invariant_motion_sizing {
         travel = relative_travel;
         for velocity in motion_samples {
-            travel = travel.max(f(
-                dt * (velocity[0] as f64 - mean_velocity[0] as f64)
-                    .hypot(velocity[1] as f64 - mean_velocity[1] as f64),
-            ));
+            travel = travel.max(f(dt * (velocity[0] as f64-mean_velocity[0] as f64)
+                .hypot(velocity[1] as f64-mean_velocity[1] as f64)));
         }
+    }
+    if policy.coarse_first && direct_surface.is_some() {
+        travel = travel.max(f(dt * (approach_low[0]-approach_high[0]).max(0.0)
+            .hypot((approach_low[1]-approach_high[1]).max(0.0))));
     }
     let represented = substantial || thin;
     let occupied =
@@ -1061,7 +1064,7 @@ fn measure(
         0.0
     };
     let mut curvature_floor = 1_u8;
-    while curvature_floor < 8
+    while direct_surface.is_none() && curvature_floor < 8
         && normal_diameter / curvature_floor as f64 > policy.curvature_tolerance
     {
         curvature_floor *= 2;
@@ -2054,7 +2057,7 @@ fn plan_resolution_impl(
             } else {
                 1
             };
-            let incoming_retention = current.min(incoming);
+            let incoming_retention = if direct_surface.is_some() { 1 } else { current.min(incoming) };
             let frontier = [3, 5, 1, 7].into_iter().any(|bit| {
                 if (m.history.support_mask | m.history.swept_support_mask) & (1 << bit) == 0 {
                     return false;
@@ -2068,13 +2071,14 @@ fn plan_resolution_impl(
                 )
                 .is_none_or(|j| !accepted[j].active)
             });
-            let moving_frontier = (frontier || page_demand) && measured_floor > 1;
+            let moving_frontier = direct_surface.is_none() && (frontier || page_demand) && measured_floor > 1;
             let safety = if m.thin || injection || moving_frontier {
                 8
             } else {
                 1
             };
-            let coarse_required = geometry_floor
+            let material_floor = if direct_surface.is_some() && m.history.mean_density > 0.0 { 2 } else { 1 };
+            let coarse_required = geometry_floor.max(material_floor)
                 .max(measured_floor)
                 .max(incoming_retention)
                 .max(safety);
@@ -2088,6 +2092,9 @@ fn plan_resolution_impl(
                     .unwrap()
                     .history
                     .proof_epochs = 0;
+            } else if coarse_required < current && enclosed {
+                requested = coarse_required;
+                reason = 2048;
             } else if coarse_required < current {
                 let next = (current / 2).max(1);
                 let m = &measurements[&brick.key];
@@ -2427,6 +2434,37 @@ mod tests {
     fn options() -> ResolutionPolicyOptions {
         ResolutionPolicyOptions::default()
     }
+    #[test]
+    fn dry_receiver_refines_for_closing_streams_not_translation_or_separation() {
+        let (topology, mut fields) = setup(vec![brick(0,[0,0],8,true),
+            brick(1,[1,0],4,true),brick(2,[2,0],8,true)], [24,8]);
+        let vertices = (0..=8).flat_map(|_| (0..=24).map(|x|
+            (x as f32-8.0).min(16.0-x as f32))).collect();
+        let surface = levelset_surface::publish([24,8],vertices,0.0).unwrap();
+        let options = coarsest_support_options();
+        let run = |fields: &mut Fields, left: f32, right: f32| {
+            for cell in &topology.graph.cells {
+                let id=cell.id as usize;
+                let x=cell.center[0];
+                fields.density[id]=if x<8.0||x>16.0 {1.0} else {0.0};
+                fields.cell_velocity[2*id]=if x<8.0 {left} else if x>16.0 {right} else {0.0};
+            }
+            let result=plan_resolution_with_surface(&topology, fields,
+                &initialize_resolution_policy(&topology), 1.0/30.0, 0.05,
+                &options,&surface).unwrap();
+            (result.state.history[&1].velocity_travel,
+                result.receipt.bricks.iter().find(|b| b.brick_key==1).unwrap().requested_resolution)
+        };
+        let collision=run(&mut fields,80.0,-80.0);
+        let translated_collision=run(&mut fields,200.0,40.0);
+        let translation=run(&mut fields,20.0,20.0);
+        let separating=run(&mut fields,-20.0,20.0);
+        assert!(collision.0>1.0&&collision.1==8, "collision={collision:?}");
+        assert_eq!(collision,translated_collision);
+        assert_eq!(translation.0,0.0);
+        assert_eq!(separating.0,0.0);
+    }
+
     fn coarsest_support_options() -> ResolutionPolicyOptions {
         let mut options = options();
         options.translation_invariant_motion_sizing = true;
@@ -2486,7 +2524,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_phi_proof_rejects_volume_error_curvature_and_disabled_coarsening() {
+    fn direct_phi_proof_bounds_added_error_and_preserves_thin_features() {
         let (topology, mut fields) = setup(vec![brick(0, [0, 0], 4, true)], [8, 8]);
         let surface = plane_surface([8, 8], 4.0);
         for cell in &topology.graph.cells {
@@ -2502,18 +2540,22 @@ mod tests {
         };
         publish(&fields, &surface, &options, &mut state);
         assert!(state.history[&0].surface_proof.is_some());
-        // Volume exceeds the one-fine-cell displacement allowance in a 2x2 cell.
+        // Existing volume disagreement must not permanently freeze topology.
         fields.density[1] = 3.0;
         state.history.get_mut(&0).unwrap().proof_epochs = 1;
         publish(&fields, &surface, &options, &mut state);
-        assert!(state.history[&0].surface_proof.is_none());
-        assert_eq!(state.history[&0].proof_epochs, 0);
+        assert!(state.history[&0].surface_proof.is_some());
         fields.density[1] = 1.0;
-        let curved = circle_surface([8, 8], [4.0, 4.0], 2.0);
+        // This droplet lies between candidate vertices and would disappear.
+        let curved = circle_surface([8, 8], [2.0, 2.0], 1.0);
         publish(&fields, &curved, &options, &mut state);
         assert!(state.history[&0].surface_proof.is_none());
         publish(&fields, &surface, &options, &mut state);
         assert!(state.history[&0].surface_proof.is_some());
+        state.history.get_mut(&0).unwrap().reasons |= activity_reason::THIN_FLUID;
+        publish(&fields, &surface, &options, &mut state);
+        assert!(state.history[&0].surface_proof.is_none());
+        state.history.get_mut(&0).unwrap().reasons &= !activity_reason::THIN_FLUID;
         options.policy.surface_coarsening_enabled = false;
         publish(&fields, &surface, &options, &mut state);
         assert!(state.history[&0].surface_proof.is_none());
@@ -2537,7 +2579,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_phi_transport_keeps_absolute_speed_floor_in_both_planners() {
+    fn direct_phi_uniform_translation_only_requires_graded_receiver_support() {
         let (topology, mut fields) = setup(vec![brick(0, [0, 0], 8, true)], [16, 8]);
         let surface = plane_surface([16, 8], 7.0);
         fields.density.fill(1.0);
@@ -2550,7 +2592,7 @@ mod tests {
         let post = plan_resolution_with_surface(&topology, &fields,
             &initialize_resolution_policy(&topology), 1.0, 1.0, &options, &surface).unwrap();
         for bricks in [&projected.candidate_bricks, &post.candidate_bricks] {
-            assert_eq!(bricks.iter().find(|b| b.coordinate == [1, 0, 0]).unwrap().resolution, 8);
+            assert_eq!(bricks.iter().find(|b| b.coordinate == [1, 0, 0]).unwrap().resolution, 4);
         }
     }
 
@@ -2746,7 +2788,7 @@ mod tests {
         let coarse = collect(1);
         assert!(fine.surface && coarse.surface);
         assert_eq!(fine.curvature_floor, coarse.curvature_floor);
-        assert!(fine.curvature_floor > 1);
+        assert_eq!(fine.curvature_floor, 1);
     }
 
     #[test]
@@ -2772,7 +2814,7 @@ mod tests {
         );
         assert!(measured.surface);
         assert!(!measured.deeply_enclosed);
-        assert!(measured.curvature_floor > 1);
+        assert_eq!(measured.curvature_floor, 1);
     }
 
     #[test]
@@ -2799,7 +2841,7 @@ mod tests {
             decision.candidate_bricks.iter()
                 .find(|brick| brick.coordinate == [1, 0, 0]).unwrap().resolution
         };
-        assert!(resolution_at(&projected_curved) > resolution_at(&projected_planar));
+        assert_eq!(resolution_at(&projected_curved), resolution_at(&projected_planar));
         assert_eq!(resolution_at(&projected_planar), 4);
 
         let previous = initialize_resolution_policy(&topology);
@@ -2813,7 +2855,7 @@ mod tests {
             decision.candidate_bricks.iter()
                 .find(|brick| brick.coordinate == [1, 0, 0]).unwrap().resolution
         };
-        assert!(post_resolution(&post_curved) > post_resolution(&post_planar));
+        assert_eq!(post_resolution(&post_curved), post_resolution(&post_planar));
         assert_eq!(post_resolution(&post_planar), 4);
     }
 
@@ -3276,7 +3318,7 @@ mod tests {
         // The neighbours remain B8 surface bricks, so 2:1 closure raises the
         // bulk request to B4.  Uniform translation must not raise it further.
         assert_eq!(falling.scheduled_resolution, 4);
-        assert_eq!(falling.plan_reasons, 16);
+        assert_eq!(falling.plan_reasons, 2048);
     }
 
     #[test]

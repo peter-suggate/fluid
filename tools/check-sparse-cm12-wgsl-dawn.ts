@@ -90,6 +90,30 @@ function entryPoints(source: string): readonly string[] {
     .map((match) => match[1]!);
 }
 
+/**
+ * Entry points whose body names a `@group(1)` binding. The check's explicit
+ * layout covers group 0 only, so these are validated with a reflected layout.
+ */
+function entryPointsUsingSecondGroup(
+  source: string, names: readonly string[],
+): ReadonlySet<string> {
+  const secondGroupBindings = [...source.matchAll(
+    /@group\(1\)\s*@binding\(\d+\)\s*var<[^>]*>\s*([A-Za-z0-9_]+)/g,
+  )].map((match) => match[1]!);
+  if (secondGroupBindings.length === 0) return new Set();
+  const result = new Set<string>();
+  for (const name of names) {
+    const start = source.search(new RegExp(`fn\\s+${name}\\b`));
+    if (start < 0) continue;
+    const next = source.slice(start + 1).search(/@compute\s+@workgroup_size/);
+    const body = source.slice(start, next < 0 ? undefined : start + 1 + next);
+    if (secondGroupBindings.some((binding) => new RegExp(`\\b${binding}\\b`).test(body))) {
+      result.add(name);
+    }
+  }
+  return result;
+}
+
 async function main(): Promise<void> {
   if (!emitSourceOnly) {
     await acquireWebGPUExclusiveLock("wgsl-check", "sparse-cm12-resident");
@@ -352,15 +376,21 @@ async function main(): Promise<void> {
 
       const names = entryPoints(source);
       if (names.length === 0) throw new Error("no compute entry points found");
+      const secondGroupEntryPoints = entryPointsUsingSecondGroup(source, names);
       // Keep Metal/Dawn native compilation strictly bounded. Launching every
       // entry point at once retains one native waiter per request; six resident
       // variants can otherwise accumulate hundreds of threads and enough
       // memory pressure to trip the WindowServer watchdog. Declaration order
       // also makes the first failing entry point deterministic.
       for (const entryPoint of names) {
+        // Entry points that bind a second group (the solid-edit inspector's
+        // proposal buffer) are not resident-layout kernels; validate them
+        // against their own reflected layout instead of the resident one.
+        const usesSecondGroup = secondGroupEntryPoints.has(entryPoint);
         await device.createComputePipelineAsync({
           label: `Sparse CM12 ${variant} WGSL check ${entryPoint}`,
-          layout, compute: { module: shaderModule, entryPoint },
+          layout: usesSecondGroup ? "auto" : layout,
+          compute: { module: shaderModule, entryPoint },
         });
       }
       // The journal's snapshot variant is the one specialisation the shipping

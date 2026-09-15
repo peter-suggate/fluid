@@ -1293,17 +1293,9 @@ fn cm12PhiBrickPlan(brick:u32,banded:bool)->vec2u{
   let accepted=acceptedBrickResolution(brick);
   if(accepted==0u){return vec2u(0u,0u);}
   var resolution=accepted;
-  if(banded&&cm12PhiBandBrick(brick)){
-    // Host template packing is per-rung and may be restricted to the mutable
-    // brick set, so the finest rung is not addressable everywhere. A brick
-    // without it keeps its accepted rung: the band is an accuracy gain, never
-    // a hole in the phi domain.
-    // Fixed host pages can alias unavailable rung entries to their accepted
-    // cells. A nonempty range alone does not prove fine geometry exists.
-    let fineRange=templateBrickCellRange(brick,BRICK_FINE_RESOLUTION);
-    if(fineRange.y!=0u&&cellResolution(fineRange.x)==BRICK_FINE_RESOLUTION){
-      resolution=BRICK_FINE_RESOLUTION;}
-  }
+  // Phi and volume execute at the same accepted effective resolution.
+  // Feature-preserving demotion is certified before the rung is published.
+  _=banded;
   let range=templateBrickCellRange(brick,resolution);
   if(range.y==0u){return vec2u(0u,0u);}
   return vec2u(range.y,resolution);
@@ -5534,6 +5526,17 @@ fn peiSourceFullCellOrdinal(cell:u32)->u32{return cnxCellOrdinalUnchecked(cell);
 fn peiSourceFullRowOrdinal(row:u32)->u32{return cnxRowOrdinalUnchecked(row);}
 fn peiSourceFullCellInvocation(gid:vec3u)->u32{
   return cnxAcceptedCellInvocationUnchecked(cnxLinearInvocation(gid));}
+// The coarse-first approach census below asks whether a neighbour holds real
+// liquid, which is neither the level-set sign alone nor the raw density alone:
+// a partial cell can be wet with a positive centre phi. Volume fill is density
+// over the open fraction, so the threshold compares like with like.
+fn cm12VolumeFill(cell:u32)->f32{
+  return max(0.0,state[destinationDensity()+cell])/max(cellOpenFraction(cell),1e-8);
+}
+fn cm12PhysicalLiquid(cell:u32)->bool{
+  return cellActive(cell)&&cellOpenVolume(cell)>1e-8
+    &&(lsvCellLiquid(cell)||cm12VolumeFill(cell)>residencyDensityThreshold());
+}
 fn peiSourceFullClassifyCell(cell:u32)->bool{return classifyPressureCell(cell);}
 fn peiSourceFullClassifyRow(row:u32)->bool{return classifyPressureRow(row);}
 fn peiSourceFullBeginBuild(){
@@ -5757,9 +5760,11 @@ var<workgroup>activityMoments:array<vec4i,64>;
 var<workgroup>activityRequestedBrick:u32;
 var<workgroup>activityCoarseNormalSupport:vec4f;
 var<workgroup>activityMetrics:array<vec4f,64>;
-var<workgroup>activityNormalMinimum:array<vec3f,64>;
-var<workgroup>activityNormalMaximum:array<vec3f,64>;
+var<workgroup>activityVelocityMinimum:array<vec3f,64>;
+var<workgroup>activityVelocityMaximum:array<vec3f,64>;
 var<workgroup>activityMomentum:array<vec4f,64>;
+var<workgroup>activityApproachLow:array<vec3f,64>;
+var<workgroup>activityApproachHigh:array<vec3f,64>;
 var<workgroup>activityMasks:array<vec2u,64>;
 var<workgroup>activityBoundaryLiquidFaces:array<u32,64>;
 var<workgroup>activitySolidGeometry:array<vec4f,64>;
@@ -6513,8 +6518,11 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   var densitySum=0;var momentX=0;var momentY=0;var momentZ=0;
   var deformation=0.0;var predictedMotion=0.0;var detailError=0.0;
   var velocityTravel=0.0;
-  var normalMinimum=vec3f(1.0);var normalMaximum=vec3f(-1.0);
+  var velocityMinimum=vec3f(1e30);var velocityMaximum=vec3f(-1e30);
   var liquidMomentum=vec4f(0.0);
+  var approachLow=vec3f(-1e30);var approachHigh=vec3f(1e30);
+  let pageCentre=(vec3f(cm12WorldLeafCoordinate(brick))
+    +vec3f(0.5*f32(brickSpan(brick))))*f32(BRICK_FINE_RESOLUTION);
   var surfaceAxes=0u;var densityInterfaceCell=false;
   var occupiedCell=false;var substantialDensityCell=false;
   var thinFluidCell=false;
@@ -6666,13 +6674,24 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
           let side=select(0u,1u,rowPosition[axis]>center[axis]);
           boundaryLiquidFaces|=1u<<(2u*axis+side);
         }
-        let neighborPhiSample=lsvSampleAt(cellCenter(neighbor));
+        let neighborPhiSample=lsvCellSample(neighbor);
         let neighborWet=neighborPhiSample.valid&&neighborPhiSample.phi<0.0;
         let crossesIsovalue=ownPhiSample.metric&&neighborPhiSample.metric
           &&neighborWet!=ownWet;
         let neighborVelocityAt=destinationCellVelocity()+4u*neighbor;
         let neighborVelocity=vec3f(state[neighborVelocityAt],
           state[neighborVelocityAt+1u],state[neighborVelocityAt+2u]);
+        // Keep the two incoming streams separate. Opposing velocities may
+        // average to zero in a dry receiver, and uniform translation must
+        // contribute zero compression. Reuse this physical face incidence.
+        if(coarseFirstEnabled()&&cm12PhysicalLiquid(neighbor)&&neighborDensity>featureDensity){
+          let position=cellCenter(neighbor);
+          if(position[axis]<pageCentre[axis]){
+            approachLow[axis]=max(approachLow[axis],neighborVelocity[axis]);
+          }else{
+            approachHigh[axis]=min(approachHigh[axis],neighborVelocity[axis]);
+          }
+        }
         // The renderer's represented surface is the rho=.5 isovalue, including
         // a transition broadened by restriction onto a coarse rung. Requiring
         // one endpoint to reach the configured air band made this predicate
@@ -6748,18 +6767,9 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
     // The lane-wide density flag is a brick census reduction, not a witness
     // for this cell. Reusing it here samples every later cell in the lane
     // after its first interface, making curvature depend on traversal order.
-    if(coarseFirstEnabled()&&(ownDensityInterface||cellIsThinFluid)){
-      let h=f32(BRICK_FINE_RESOLUTION*brickSpan(brick))/f32(resolution);
-      // A B1 leaf needs halo normals; finer leaves already span the feature
-      // with their own interface samples and central-difference neighbours.
-      if(resolution==1u){
-        activityCoarseNormalSupport=vec4f(center,h);
-      }else{
-        let normal=coarseFirstNormal(center,h);
-        if(dot(normal,normal)>0.5){
-          normalMinimum=min(normalMinimum,normal);normalMaximum=max(normalMaximum,normal);
-        }
-      }
+    if(coarseFirstEnabled()&&ownWet){
+      velocityMinimum=min(velocityMinimum,ownVelocity);
+      velocityMaximum=max(velocityMaximum,ownVelocity);
     }
     // Resolution follows motion of the represented feature, not the fastest
     // submerged parcel that happens to share its brick. The old whole-brick
@@ -6859,19 +6869,9 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
     }
   }
   if(coarseFirstEnabled()){
-    // B1 has only one cell. Share its seven independent halo normals instead
-    // of running all seven on lane zero while the other 63 lanes wait.
-    let support=workgroupUniformLoad(&activityCoarseNormalSupport);
-    if(support.w>0.0&&lane<7u){
-      var q=support.xyz;
-      if(lane>0u){q[(lane-1u)/2u]+=select(-support.w,support.w,(lane&1u)==0u);}
-      let normal=coarseFirstNormal(q,support.w);
-      if(dot(normal,normal)>0.5){
-        normalMinimum=min(normalMinimum,normal);normalMaximum=max(normalMaximum,normal);
-      }
-    }
-    activityNormalMinimum[lane]=normalMinimum;activityNormalMaximum[lane]=normalMaximum;
+    activityVelocityMinimum[lane]=velocityMinimum;activityVelocityMaximum[lane]=velocityMaximum;
     activityMomentum[lane]=liquidMomentum;
+    activityApproachLow[lane]=approachLow;activityApproachHigh[lane]=approachHigh;
   }
   activityMoments[lane]=vec4i(densitySum,momentX,momentY,momentZ);
   activityMetrics[lane]=vec4f(deformation,predictedMotion,detailError,velocityTravel);
@@ -6889,9 +6889,11 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   var width=32u;loop{
     if(lane<width){
       if(coarseFirstEnabled()){
-        activityNormalMinimum[lane]=min(activityNormalMinimum[lane],activityNormalMinimum[lane+width]);
-        activityNormalMaximum[lane]=max(activityNormalMaximum[lane],activityNormalMaximum[lane+width]);
+        activityVelocityMinimum[lane]=min(activityVelocityMinimum[lane],activityVelocityMinimum[lane+width]);
+        activityVelocityMaximum[lane]=max(activityVelocityMaximum[lane],activityVelocityMaximum[lane+width]);
         activityMomentum[lane]+=activityMomentum[lane+width];
+        activityApproachLow[lane]=max(activityApproachLow[lane],activityApproachLow[lane+width]);
+        activityApproachHigh[lane]=min(activityApproachHigh[lane],activityApproachHigh[lane+width]);
       }
       activityMoments[lane]+=activityMoments[lane+width];
       activityMetrics[lane]=max(activityMetrics[lane],activityMetrics[lane+width]);
@@ -6942,7 +6944,16 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   // speed is transport demand, not missing bulk detail (the 2D selector uses
   // the same enclosure rule). Keep interface and thin-feature motion floors.
   let certifiedBulk=measuredCount>0u&&(reducedSurfaceAxes&256u)==0u&&!surface;
-  let velocityActivity=select(reducedMetrics.w,0.0,certifiedBulk);
+  // Relative velocity spread measures deformation; uniform translation is
+  // handled by the independent swept-support census, not a refinement floor.
+  let relativeTravel=p.frame.x*length(max(vec3f(0.0),
+    activityVelocityMaximum[0]-activityVelocityMinimum[0]));
+  // Compression is receiver evidence, including empty pages. It survives
+  // the bulk/no-own-liquid gate that correctly suppresses translation sizing.
+  let closing= max(vec3f(0.0),activityApproachLow[0]-activityApproachHigh[0]);
+  let closingTravel=select(0.0,p.frame.x*length(closing),coarseFirstEnabled());
+  let velocityActivity=max(closingTravel,select(select(reducedMetrics.w,relativeTravel,
+    coarseFirstEnabled()),0.0,certifiedBulk));
   // Restriction error is useful in flooded bulk and genuinely complex/thin
   // interface geometry. A calm one-axis free surface is different: CM12 is
   // supposed to keep that interface sharp, so its fine children can retain a
@@ -6974,15 +6985,10 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   // characteristic lookahead; bulk refinement is driven by deformation,
   // temporal change and restriction error instead.
   let scoredVelocityActivity=select(0.0,normalizedVelocityActivity,surface||thinFluid);
-  let normalDiameter=length(max(vec3f(0.0),activityNormalMaximum[0]-activityNormalMinimum[0]));
-  var curvatureFloor=1u;
-  loop{
-    if(curvatureFloor>=BRICK_FINE_RESOLUTION
-      ||normalDiameter/f32(curvatureFloor)<=p.coarseFirst.z){break;}
-    curvatureFloor*=2u;
-  }
-  let coarseScore=max(normalDiameter/(f32(resolution)*max(p.coarseFirst.z,0.02)),
-    normalizedVelocityActivity);
+  // Candidate reconstruction error, not page-wide normal variation, owns
+  // surface coarsening. Thin features retain their independent hard floor.
+  let curvatureFloor=1u;
+  let coarseScore=normalizedVelocityActivity;
   let scoreValue=clamp(select(max(scoredVelocityActivity,featureActivity),coarseScore,
     coarseFirstEnabled()),0.0,1.0);
   let score=u32(round(255.0*scoreValue));
@@ -7633,31 +7639,20 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   if(coarseFirstEnabled()&&!validForcedSurfaceRung){
     let curvatureFloor=max(1u,(reasons>>16u)&31u);
     let geometryFloor=max(curvatureFloor,boundaryFloor);
-    var incomingRetentionFloor=1u;
-    // Mass-support residency also reaches flooded bulk. Incoming interface
-    // prediction belongs to a surface or an empty/dilute receiver; applying
-    // it to every mass-supported brick refines deep liquid merely because a
-    // distant surface is moving toward it.
-    if(max(geometryFloor,measuredVelocityFloor)<BRICK_FINE_RESOLUTION
-      &&!thinFluid&&!injectionDemand&&(policySurface||pageDemand)){
-      // Remote motion predicts where existing detail will matter; it is not
-      // evidence that a calm receiver needs new detail. Retain at most the
-      // receiver's accepted rung. Curvature, measured motion, thinness,
-      // boundaries, injection and physical transport demand remain the
-      // promotion evidence.
-      incomingRetentionFloor=min(current,coarseFirstIncomingFloor(brick));
-    }
-    let demandFloor=max(max(geometryFloor,measuredVelocityFloor),incomingRetentionFloor);
+    let demandFloor=max(geometryFloor,measuredVelocityFloor);
     // Still-water air support is not motion. The legacy unconditional receiver
     // floor made every dry support page B8 and forced the entire pool to B4.
     // Predicted incoming motion can retain the receiver's established rung.
-    let movingFrontier=(frontierBoundary||pageDemand)&&measuredVelocityFloor>1u;
     // Static air has no scalar feature to resolve. Face grading supplies the
     // coarsest rung compatible with neighbouring material; moving receivers
     // and injection retain their independent B8 floor below.
     let airFloor=1u;
-    let safetyFloor=select(airFloor,BRICK_FINE_RESOLUTION,thinFluid||injectionDemand||movingFrontier);
-    let coarseRequired=max(demandFloor,safetyFloor);
+    let safetyFloor=select(airFloor,BRICK_FINE_RESOLUTION,thinFluid||injectionDemand);
+    // Four-spacing is the bulk working scale. Larger material cells need
+    // a separate transport reconstruction certificate, not just phi shape.
+    let materialFloor=select(1u,max(1u,BRICK_FINE_RESOLUTION/4u),
+      (atomicLoad(&activity[output+3u])&(1u<<13u))!=0u);
+    let coarseRequired=max(materialFloor,max(demandFloor,safetyFloor));
     requested=current;planReasons=32u;
     if(coarseRequired>current){
       requested=coarseRequired;
@@ -10095,27 +10090,32 @@ fn cm12PresentationRejectAccepted(page:u32){
 ${
   framePlanLayout && framePlanPresentationLayout
     ? /* wgsl */ `
-fn surfaceProofRestrictedPhi(positionFine:vec3f,factor:u32)->f32{
+fn surfaceProofRestrictedPhi(positionFine:vec3f,factor:u32)->vec3f{
   let width=f32(factor);
   let lower=floor(positionFine/width)*width;
   let t=clamp((positionFine-lower)/width,vec3f(0.0),vec3f(1.0));
-  var phi=0.0;var valid=true;
+  var phi=0.0;var valid=true;var minimum=1e30;var maximum=-1e30;
   for(var z=0;z<2;z+=1){for(var y=0;y<2;y+=1){for(var x=0;x<2;x+=1){
     let weight=select(1.0-t.x,t.x,x==1)*select(1.0-t.y,t.y,y==1)
       *select(1.0-t.z,t.z,z==1);
     let q=lower+width*vec3f(f32(x),f32(y),f32(z));
-    valid=valid&&lsvPhiMetricAt(q);
-    if(valid){phi+=weight*lsvPhiAt(q);}
+    // Deep phase samples retain a valid sign even outside the metric band.
+    // Treating them as missing invents air pockets inside submerged liquid.
+    let sample=lsvSampleAt(q);valid=valid&&sample.valid;
+    if(valid){let value=sample.phi;phi+=weight*value;
+      minimum=min(minimum,value);maximum=max(maximum,value);}
   }}}
-  return select(4.0*p.frame.y,phi*p.frame.y,valid);
+  return select(vec3f(4.0*p.frame.y,1e30,-1e30),
+    vec3f(phi,minimum,maximum)*p.frame.y,valid);
 }
 fn surfaceProofAcceptedPhi(local:vec3i,densityOffset:u32)->f32{
   _=densityOffset;
   let q=cm12PresentationBrickOrigin+local;
   if(cm12SolidVoxelFractionQ8(q)>=255u){return 4.0*p.frame.y;}
   let positionFine=vec3f(q)+vec3f(0.5);
-  if(!lsvPhiMetricAt(positionFine)){return 4.0*p.frame.y;}
-  return lsvPhiAt(positionFine)*p.frame.y;
+  let sample=lsvSampleAt(positionFine);
+  if(!sample.valid){return 4.0*p.frame.y;}
+  return sample.phi*p.frame.y;
 }
 fn surfaceProofPhiAt(local:vec3i,coarse:bool)->f32{
   let q=vec3u(local+vec3i(1));
@@ -10156,20 +10156,12 @@ fn surfaceProofOutputSampleFailure(local:vec3i)->u32{
   let fineWet=fine<0.0;
   let tolerance=surfaceDisplacementToleranceMetres();
   if((coarse<0.0)!=fineWet&&min(abs(fine),abs(coarse))>tolerance){return 1u;}
-  var narrow=false;var solidInfluencesNormal=false;
   for(var axis=0u;axis<3u;axis+=1u){
-    var lowerBrickHalo=local;var upperBrickHalo=local;
-    lowerBrickHalo[axis]=-1;upperBrickHalo[axis]=i32(BRICK_FINE_RESOLUTION);
-    solidInfluencesNormal=solidInfluencesNormal
-      ||cm12SolidVoxelFractionQ8(cm12PresentationBrickOrigin+lowerBrickHalo)>=255u
-      ||cm12SolidVoxelFractionQ8(cm12PresentationBrickOrigin+upperBrickHalo)>=255u;
     for(var direction=-1;direction<=1;direction+=2){
       if(direction<0&&local[axis]!=0){continue;}
       var adjacent=local;adjacent[axis]+=direction;
       let adjacentWorld=cm12PresentationBrickOrigin+adjacent;
-      if(cm12SolidVoxelFractionQ8(adjacentWorld)>=255u){
-        solidInfluencesNormal=true;continue;
-      }
+      if(cm12SolidVoxelFractionQ8(adjacentWorld)>=255u){continue;}
       let fineOther=surfaceProofPhiAt(adjacent,false);
       let coarseOther=surfaceProofPhiAt(adjacent,true);
       let fineCross=(fineOther<0.0)!=fineWet;
@@ -10179,7 +10171,6 @@ fn surfaceProofOutputSampleFailure(local:vec3i)->u32{
       // accepted displacement band. Per-sample sign proximity above bounds
       // that move; compare exact edge parameters wherever both fields cross.
       if(fineCross&&coarseCross){
-        narrow=true;
         let fineT=-fine/(fineOther-fine);
         let coarseT=-coarse/(coarseOther-coarse);
         if(abs(fineT-coarseT)*p.frame.y>surfaceDisplacementToleranceMetres()){
@@ -10188,67 +10179,10 @@ fn surfaceProofOutputSampleFailure(local:vec3i)->u32{
       }
     }
   }
-  if(narrow&&!solidInfluencesNormal){
-    let fineNormal=surfaceProofGradient(local,false);
-    let coarseNormal=surfaceProofGradient(local,true);
-    var terms=array<vec3f,3>(fineNormal*coarseNormal,
-      fineNormal*fineNormal,coarseNormal*coarseNormal);
-    for(var row=0u;row<3u;row+=1u){
-      if(terms[row].x>terms[row].y){let swap=terms[row].x;
-        terms[row].x=terms[row].y;terms[row].y=swap;}
-      if(terms[row].y>terms[row].z){let swap=terms[row].y;
-        terms[row].y=terms[row].z;terms[row].z=swap;}
-      if(terms[row].x>terms[row].y){let swap=terms[row].x;
-        terms[row].x=terms[row].y;terms[row].y=swap;}
-    }
-    let fineLengthSquared=terms[1].x+terms[1].y+terms[1].z;
-    let coarseLengthSquared=terms[2].x+terms[2].y+terms[2].z;
-    let normalDot=terms[0].x+terms[0].y+terms[0].z;
-    if(fineLengthSquared<=1e-16||coarseLengthSquared<=1e-16){return 0u;}
-    if(normalDot/sqrt(fineLengthSquared*coarseLengthSquared)
-        <surfaceNormalMinimumDot()){return 8u;}
-  }
+  // Preserve the represented interface within the displacement budget.
+  // Normal noise alone does not imply positional error or a lost feature.
   return 0u;
 }
-${
-  geometricVolumeLayout
-    ? /* wgsl */ `
-// Band evidence. V and phi are two representations of one interface, and a
-// band brick keeps phi on the finest lattice at every solver rung: demoting
-// its solver cells changes only V's granularity, never the level set. So the
-// restricted-phi proof above measures a degradation that cannot occur here,
-// and the admissible evidence is instead that the transported volume still
-// agrees with the phi Heaviside integral over the same cell. Once the pair has
-// separated, coarsening would freeze that error into a larger cell.
-fn surfaceProofBandVolumeFailure(brick:u32,lane:u32)->u32{
-  let range=templateBrickCellRange(brick,acceptedBrickResolution(brick));
-  var failure=0u;
-  for(var local=lane;local<range.y;local+=64u){
-    let cell=range.x+local;
-    let capacity=gvReceiverCapacity(cell);
-    if(capacity<=0.0){continue;}
-    let estimate=gvPhiBoxEstimate(cellCenter(cell),cellWidths(cell));
-    // An unresolved stencil is not evidence against the pair, and saturated
-    // phi carries no interface for the volume to disagree with.
-    if(estimate.w==0.0||estimate.z>2.0*cellMinimumWidth(cell)){continue;}
-    // The same metres of surface displacement the restricted proof admits,
-    // converted to a volume at this cell's interface area.
-    let band=surfaceDisplacementToleranceMetres()/max(p.frame.y,1e-6);
-    let tolerance=max(gvRoundoff(capacity),
-      band*cellVolume(cell)/max(cellMinimumWidth(cell),1e-6));
-    if(abs(state[GV_CURRENT+cell]-capacity*clamp(estimate.x,0.0,1.0))
-        >tolerance){failure=512u;}
-  }
-  return failure;
-}
-`
-    : /* wgsl */ `
-fn surfaceProofBandVolumeFailure(brick:u32,lane:u32)->u32{
-  _=brick;_=lane;return 0u;
-}
-`
-}
-
 // Publish a camera-independent, generation-stamped receipt for the next
 // dyadic surface rung. The virtual restricted field uses the exact continuous
 // volume scalar consumed by coarse presentation pages, so the decision and
@@ -10313,13 +10247,7 @@ fn publishSparseCM12SurfaceRepresentabilityReceipts(
     brick,cm12PresentationBrickOrigin,cm12PresentationDensityOffset,true);}
   let targetResolution=surfaceProofTarget;
   let restrictionFactor=surfaceProofRestrictionFactor;
-  // Inside the fine-phi band the candidate rung's level set IS the accepted
-  // one: phi lives on the finest lattice whatever the solver cells do. The
-  // restricted field is therefore the identity here, and the curvature probe
-  // below reads the real phi at the candidate spacing rather than a
-  // reconstruction of it.
-  let bandBrick=cm12PhiBandBrick(brick);
-  let proofFactor=select(restrictionFactor,1u,bandBrick);
+  // Evaluate the actual candidate lattice; phi follows the solver rung.
   for(var index=lane;index<SURFACE_PROOF_LATTICE_CAPACITY;index+=64u){
     let z=index/(SURFACE_PROOF_LATTICE_AXIS*SURFACE_PROOF_LATTICE_AXIS);
     let remainder=index-z*SURFACE_PROOF_LATTICE_AXIS*SURFACE_PROOF_LATTICE_AXIS;
@@ -10328,56 +10256,16 @@ fn publishSparseCM12SurfaceRepresentabilityReceipts(
     let local=vec3i(i32(x)-1,i32(y)-1,i32(z)-1);
     let fine=surfaceProofAcceptedPhi(local,cm12PresentationDensityOffset);
     let world=cm12PresentationBrickOrigin+local;
-    var coarse=select(
-      surfaceProofRestrictedPhi(vec3f(world)+vec3f(0.5),restrictionFactor),
-      fine,bandBrick);
+    let restricted=surfaceProofRestrictedPhi(vec3f(world)+vec3f(0.5),restrictionFactor);
+    var coarse=restricted.x;
+    if(cm12SolidVoxelFractionQ8(world)<255u
+      &&((fine<0.0&&restricted.y>=0.0)||(fine>0.0&&restricted.z<0.0))){
+      atomicOr(&surfaceProofFailure,16u);atomicStore(&surfaceProofValid,0u);
+    }
     if(cm12SolidVoxelFractionQ8(world)>=255u){coarse=4.0*p.frame.y;}
     surfaceProofPhi[index]=vec2f(fine,coarse);
   }
   workgroupBarrier();
-  // A demotion must satisfy the curvature criterion at the proposed rung,
-  // not only resemble the currently published contour. Otherwise restriction
-  // can immediately request its inverse refinement, repeatedly remapping a
-  // stationary interface. Evaluate the candidate-rung interpolation of the
-  // accepted metric phi field directly.
-  var normalMin=vec3f(1e30);var normalMax=vec3f(-1e30);
-  if(coarseFirstEnabled()){
-    let n=targetResolution;
-    let samples=select(n*n*n,7u,n==1u);
-    for(var index=lane;index<samples;index+=64u){
-      var q=vec3i(i32(index%n),i32((index/n)%n),i32(index/(n*n)));
-      if(n==1u){q=vec3i(0);if(index>0u){q[(index-1u)/2u]=select(-1,1,(index&1u)==0u);}}
-      let step=f32(restrictionFactor);
-      let position=vec3f(cm12PresentationBrickOrigin)+(vec3f(q)+vec3f(0.5))*step;
-      let phi=surfaceProofRestrictedPhi(position,proofFactor);
-      var hasInterface=abs(phi)<=0.75*step*p.frame.y;
-      var gradient=vec3f(0.0);
-      for(var axis=0u;axis<3u;axis+=1u){
-        var d=vec3f(0.0);d[axis]=step;
-        let lo=surfaceProofRestrictedPhi(position-d,proofFactor);
-        let hi=surfaceProofRestrictedPhi(position+d,proofFactor);
-        hasInterface=hasInterface||((lo<0.0)!=(phi<0.0))||((hi<0.0)!=(phi<0.0));
-        gradient[axis]=hi-lo;
-      }
-      let magnitude=length(gradient);
-      if(hasInterface&&magnitude>1e-6){let normal=gradient/magnitude;
-        normalMin=min(normalMin,normal);normalMax=max(normalMax,normal);}
-    }
-  }
-  activityNormalMinimum[lane]=normalMin;activityNormalMaximum[lane]=normalMax;
-  workgroupBarrier();
-  for(var stride=32u;stride>0u;stride/=2u){
-    if(lane<stride){
-      activityNormalMinimum[lane]=min(activityNormalMinimum[lane],activityNormalMinimum[lane+stride]);
-      activityNormalMaximum[lane]=max(activityNormalMaximum[lane],activityNormalMaximum[lane+stride]);
-    }workgroupBarrier();
-  }
-  if(lane==0u&&coarseFirstEnabled()){
-    let diameter=length(max(vec3f(0.0),activityNormalMaximum[0]-activityNormalMinimum[0]));
-    if(diameter/f32(targetResolution)>p.coarseFirst.z){
-      atomicOr(&surfaceProofFailure,16u);atomicStore(&surfaceProofValid,0u);
-    }
-  }
   for(var index=lane;index<PRESENTATION_SAMPLES_PER_PAGE;index+=64u){
     let z=index/64u;let remainder=index-z*64u;
     let y=remainder/8u;let x=remainder-y*8u;
@@ -10386,16 +10274,8 @@ fn publishSparseCM12SurfaceRepresentabilityReceipts(
       atomicOr(&surfaceProofFailure,failure);atomicStore(&surfaceProofValid,0u);
     }
   }
-  // The sample proof above compares two reconstructions of phi, which a band
-  // brick satisfies by construction. Its independent evidence is the
-  // volume/level-set agreement; no barrier may enter this branch.
-  if(bandBrick){
-    let volumeFailure=surfaceProofBandVolumeFailure(brick,lane);
-    if(volumeFailure!=0u){
-      atomicOr(&surfaceProofFailure,volumeFailure);
-      atomicStore(&surfaceProofValid,0u);
-    }
-  }
+  // Existing V/phi mismatch is independent of the incremental restriction
+  // error certified above. Conservative transfer retains extensive volume.
   workgroupBarrier();
   if(lane==0u){
     let valid=atomicLoad(&surfaceProofValid)!=0u;

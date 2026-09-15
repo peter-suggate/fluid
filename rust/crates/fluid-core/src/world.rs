@@ -2053,6 +2053,9 @@ mod tests {
         }
         assert!(demoted, "accepted surface certificates must reach the planner");
         assert!(world.state.topology.graph.cells.len() < original_cells);
+        assert!(world.state.topology.bricks.iter().filter(|b| b.seed.active)
+            .all(|b| b.seed.resolution <= 2),
+            "a settled planar pool must reach at least four-spacing cells");
     }
 
     #[test]
