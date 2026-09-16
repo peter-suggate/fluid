@@ -110,7 +110,8 @@ try {
     id: "ab-whole-domain", rule: "minimum-cell-size", minimumCellSize_cells: 1,
     maximumCellSize_cells: maxCell,
     min_m: { x: -scene.container.width_m / 2, y: 0, z: -scene.container.depth_m / 2 },
-    max_m: { x: scene.container.width_m / 2, y: 2.4, z: scene.container.depth_m / 2 },
+    max_m: { x: scene.container.width_m / 2, y: scene.container.height_m,
+      z: scene.container.depth_m / 2 },
   }];
   const values = resolveMethodValues(adaptiveMassMethod, "balanced", {
     selectorMode: "surface", brickFineResolution: "8",

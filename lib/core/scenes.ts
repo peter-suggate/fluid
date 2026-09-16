@@ -767,25 +767,22 @@ export function createCoarseFirstPoolImpactScene(): SceneDescription {
   return scene;
 }
 
-/** Half the physical extent on each axis, retaining the 0.05 m finest cells. */
+/** Half the linear resolution: the identical 6.4 x 4.8 x 6.4 m tank and the
+ * identical falling ball, on 0.1 m finest cells (64x48x64). Physical dimensions
+ * are shared with the full scene so the family varies resolution alone. */
 export function createCoarseFirstPoolImpactHalfScene(): SceneDescription {
   const scene = createCoarseFirstPoolImpactScene();
   scene.sceneId = "coarse-first-pool-impact-half";
-  scene.container = { ...scene.container, width_m: 3.2, height_m: 2.4, depth_m: 3.2 };
-  scene.fluid.initialLiquidVolumes = [
-    { shape: "sphere", center_m: { x: 0, y: 1.825, z: 0 }, radius_m: 0.5 },
-  ];
+  scene.voxelDomain = { ...scene.voxelDomain, finestCellSize_m: 0.1 };
   return scene;
 }
 
-/** Quarter the physical extent on each axis, retaining the 0.05 m finest cells. */
+/** Quarter the linear resolution: the same tank and ball on 0.2 m finest cells
+ * (32x24x32). */
 export function createCoarseFirstPoolImpactQuarterScene(): SceneDescription {
   const scene = createCoarseFirstPoolImpactScene();
   scene.sceneId = "coarse-first-pool-impact-quarter";
-  scene.container = { ...scene.container, width_m: 1.6, height_m: 1.2, depth_m: 1.6 };
-  scene.fluid.initialLiquidVolumes = [
-    { shape: "sphere", center_m: { x: 0, y: 0.9125, z: 0 }, radius_m: 0.25 },
-  ];
+  scene.voxelDomain = { ...scene.voxelDomain, finestCellSize_m: 0.2 };
   return scene;
 }
 
@@ -2732,25 +2729,25 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   }),
   defineScene({
     id: "coarse-first-pool-impact-half",
-    name: "Coarse-first · ball into still pool (half size)",
-    blurb: "The same pool impact at half the physical dimensions: a 64×48×64 lattice with a proportionally smaller falling ball. Keeps 0.05 m finest cells, with one eighth of the original lattice volume.",
+    name: "Coarse-first · ball into still pool (half resolution)",
+    blurb: "The same 6.4 × 4.8 × 6.4 m pool impact at half the linear resolution: 0.1 m finest cells on a 64×48×64 lattice, one eighth of the cells. Identical physical dimensions and falling ball, so only resolution varies across the family.",
     audience: "validation", shelf: "Dam-break ladder", environment: "stage",
     methodProfile: { methodId: "adaptive-volume", quality: "balanced", overrides: {
       selectorMode: "coarse-first", timeStep: "paper", brickFineResolution: "8",
     } },
     build: createCoarseFirstPoolImpactHalfScene,
-    camera: { distance_m: 5.5, target_m: { x: 0, y: 0.9, z: 0 } },
+    camera: { distance_m: 11, target_m: { x: 0, y: 1.8, z: 0 } },
   }),
   defineScene({
     id: "coarse-first-pool-impact-quarter",
-    name: "Coarse-first · ball into still pool (quarter size)",
-    blurb: "The same pool impact at one quarter the physical dimensions: a 32×24×32 lattice with a proportionally smaller falling ball. Keeps 0.05 m finest cells, with one sixty-fourth of the original lattice volume.",
+    name: "Coarse-first · ball into still pool (quarter resolution)",
+    blurb: "The same 6.4 × 4.8 × 6.4 m pool impact at one quarter the linear resolution: 0.2 m finest cells on a 32×24×32 lattice, one sixty-fourth of the cells. Identical physical dimensions and falling ball.",
     audience: "validation", shelf: "Dam-break ladder", environment: "stage",
     methodProfile: { methodId: "adaptive-volume", quality: "balanced", overrides: {
       selectorMode: "coarse-first", timeStep: "paper", brickFineResolution: "8",
     } },
     build: createCoarseFirstPoolImpactQuarterScene,
-    camera: { distance_m: 2.75, target_m: { x: 0, y: 0.45, z: 0 } },
+    camera: { distance_m: 11, target_m: { x: 0, y: 1.8, z: 0 } },
   }),
   defineScene({
     id: "minimal-power-dam-break-64",
