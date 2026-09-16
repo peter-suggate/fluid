@@ -10,6 +10,5 @@ export const topologyFreezeFeature = {
   id: "simulation.topology-freeze", requires: ["simulation.sparse-atlas"],
   controls: [{ id: "enabled", label: "Freeze topology", kind: "toggle", setting: "topologyFrozen", update: "live",
     hint: "Hold existing brick coarseness. New fluid support can still grow as water moves." }],
-  placements: [{ slot: "scene.simulation", control: "enabled", presentation: "compact" },
-    { slot: "sim.topology", control: "enabled", presentation: "expanded" }],
+  placements: [{ slot: "sim.topology", control: "enabled", presentation: "expanded" }],
 } as const satisfies FeatureDefinition;

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { TopologyFreezeButton } from "../lib/features/topology-freeze/ui";
 import { performEditorAction } from "../lib/core/editor-action-runtime";
 import { getEditorGesture, type EditorGestureId } from "../lib/core/editor-gesture-catalog";
 import { placementFields } from "../lib/core/editor-placement";
@@ -80,6 +81,7 @@ function RegionRow() {
     active={armed}
     testId="scene-region-row"
     onClick={toggle}
+    after={<TopologyFreezeButton />}
   />;
 }
 
