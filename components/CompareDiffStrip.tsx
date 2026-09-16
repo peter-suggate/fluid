@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useId, useMemo, useState } from "react";
 import {
   compareDiffRows,
   compareOverlayModeDrawable,
@@ -40,9 +40,24 @@ import { useShellStore } from "../lib/core/stores/shell-store";
  * translucent, hairline, sentence case. It sits over the water for as long as
  * the mode is open, and a severe box on that seam would read as a dialog to be
  * dismissed rather than a caption on the scene.
+ *
+ * Closed is its resting state. The strip hangs over the seam the whole time the
+ * mode is open, and the seam is where the two images are actually compared —
+ * the readout was standing on the one part of the screen the mode exists to
+ * show. Closed it says the one thing that has to be legible without asking
+ * (how many keys differ, and any warning that the comparison is not lockstep);
+ * opening it is the reader saying they want the figures rather than the water.
  */
 
-const VALUE_LIMIT = 22;
+/**
+ * How much of a value a row shows before it elides.
+ *
+ * Read against `.compare-values` in `globals.css`: the open strip gives each
+ * value ~150px of micro type, which is a little more than this many characters,
+ * so the clamp here is the one that fires and it fires on the same glyph count
+ * whatever the pane width. The whole value is always on the row's `title`.
+ */
+const VALUE_LIMIT = 30;
 
 /**
  * The `scene` key, spelled the way the reader chose it.
@@ -90,6 +105,22 @@ function keyLabels(diff: Readonly<Record<string, string>>): ReadonlyMap<string, 
   // strip still has to name the row, and "scene" is the word for it.
   labels.set("scene", "Scene");
   return labels;
+}
+
+/** A chevron, drawn for the same reason the padlock is: glyphs on glass. */
+function Chevron({ open }: { open: boolean }) {
+  return (
+    <svg viewBox="0 0 12 12" width="11" height="11" aria-hidden="true" focusable="false">
+      <path
+        d={open ? "M2.5 7.5 L6 4 L9.5 7.5" : "M2.5 4.5 L6 8 L9.5 4.5"}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
 }
 
 /** A padlock, drawn rather than typed: an emoji lock is a colour glyph on glass. */
@@ -176,6 +207,12 @@ export interface CompareDiffStripProps {
 }
 
 export function CompareDiffStrip({ a, b }: CompareDiffStripProps) {
+  // Closed until asked. Component state rather than the compare record: this is
+  // whether *this reader* currently wants the figures, not a fact about the
+  // experiment, so it has no business in the link two people share. It lives as
+  // long as the mode does, which is the span over which the answer holds.
+  const [open, setOpen] = useState(false);
+  const bodyId = useId();
   const compare = useShellStore((state) => state.compare);
   const setCompareLink = useShellStore((state) => state.setCompareLink);
   // Every value on every row is derived from both panes, so the strip has to
@@ -207,10 +244,19 @@ export function CompareDiffStrip({ a, b }: CompareDiffStripProps) {
         : undefined;
 
   return (
-    <div className="compare-diff-strip" data-testid="compare-diff-strip" role="group" aria-label="What differs between the panes">
+    <div
+      className="compare-diff-strip"
+      data-testid="compare-diff-strip"
+      data-open={open ? "true" : "false"}
+      role="group"
+      aria-label="What differs between the panes"
+    >
       <header>
         <strong>A <i aria-hidden="true">→</i> B</strong>
-        <div className="compare-padlocks">
+        {/* The padlocks are edits to the experiment, so they belong with the
+            rows they change rather than on the closed handle, where a stray
+            click would unlink a group nobody was looking at. */}
+        {open && <div className="compare-padlocks">
           {COMPARE_LINK_GROUPS.map((group) => (
             <button
               key={group}
@@ -224,40 +270,68 @@ export function CompareDiffStrip({ a, b }: CompareDiffStripProps) {
               <span>{COMPARE_GROUP_LABELS[group]}</span>
             </button>
           ))}
-        </div>
+        </div>}
+        {/* The count rides inside the control while the strip is closed, so the
+            sentence a reader is deciding on is the thing they click rather than
+            a caption beside an 11px chevron. */}
+        <button
+          type="button"
+          className="compare-disclosure"
+          data-testid="compare-diff-disclosure"
+          aria-expanded={open}
+          aria-controls={open ? bodyId : undefined}
+          title={open
+            ? "Hide the diff — the seam is the part of the screen the mode is for"
+            : "Show what differs and the per-step figures for each pane"}
+          aria-label={open ? "Hide what differs between the panes" : "Show what differs between the panes"}
+          onClick={() => setOpen(!open)}
+        >
+          {!open && <span className="compare-summary" data-diverged={rows.length > 0}>
+            {rows.length === 0 ? "identical" : `${rows.length} differ${rows.length === 1 ? "s" : ""}`}
+          </span>}
+          <Chevron open={open} />
+        </button>
       </header>
-      {rows.length === 0
-        ? <p className="compare-identical">identical — edit B to diverge</p>
-        : <ul>
-          {rows.map((row) => (
-            <li key={row.key} data-group={row.group}>
-              <span className="compare-key" title={row.key}>{labels.get(row.key) ?? row.key}</span>
-              <span className="compare-values">
-                <em title={row.valueA}>{shortValue(row.valueA, row.key)}</em>
-                <i aria-hidden="true">→</i>
-                <strong title={row.valueB}>{shortValue(row.valueB, row.key)}</strong>
-              </span>
-              <button
-                type="button"
-                className="compare-op"
-                title="Drop this override — B falls back to A"
-                aria-label={`Drop the ${row.key} override`}
-                onClick={() => dropCompareOverride(store, row.key)}
-              >×</button>
-              <button
-                type="button"
-                className="compare-op"
-                title="Move this override to A — both panes adopt B's value"
-                aria-label={`Move the ${row.key} override to pane A`}
-                onClick={() => moveCompareOverrideToA(store, a, row.key, COMPARE_ADOPTIONS)}
-              >⇄</button>
-            </li>
-          ))}
-        </ul>}
-      <CompareDivergence a={a} b={b} identical={rows.length === 0} />
-      {modeMissingIn && <p className="compare-note" data-tone="info">
-        {sharedMode} — n/a in {modeMissingIn}
-      </p>}
+      {/* Unmounted rather than hidden while closed. `CompareDivergence` renders
+          on every completed step; a closed strip that kept it mounted would pay
+          the whole readout's cost to draw nothing. */}
+      {open && <div className="compare-diff-body" id={bodyId}>
+        {rows.length === 0
+          ? <p className="compare-identical">identical — edit B to diverge</p>
+          : <ul>
+            {rows.map((row) => (
+              <li key={row.key} data-group={row.group}>
+                <span className="compare-key" title={row.key}>{labels.get(row.key) ?? row.key}</span>
+                <span className="compare-values">
+                  <em title={row.valueA}>{shortValue(row.valueA, row.key)}</em>
+                  <i aria-hidden="true">→</i>
+                  <strong title={row.valueB}>{shortValue(row.valueB, row.key)}</strong>
+                </span>
+                <button
+                  type="button"
+                  className="compare-op"
+                  title="Drop this override — B falls back to A"
+                  aria-label={`Drop the ${row.key} override`}
+                  onClick={() => dropCompareOverride(store, row.key)}
+                >×</button>
+                <button
+                  type="button"
+                  className="compare-op"
+                  title="Move this override to A — both panes adopt B's value"
+                  aria-label={`Move the ${row.key} override to pane A`}
+                  onClick={() => moveCompareOverrideToA(store, a, row.key, COMPARE_ADOPTIONS)}
+                >⇄</button>
+              </li>
+            ))}
+          </ul>}
+        <CompareDivergence a={a} b={b} identical={rows.length === 0} />
+        {modeMissingIn && <p className="compare-note" data-tone="info">
+          {sharedMode} — n/a in {modeMissingIn}
+        </p>}
+      </div>}
+      {/* Outside the body on purpose: these two say the comparison is not the
+          one the reader thinks they are running. A warning that only appears
+          once you open the thing is not a warning. */}
       {unlinked.length > 0 && <p className="compare-note" data-tone="warn">
         {unlinked.map((group) => COMPARE_GROUP_LABELS[group]).join(" · ")} unlinked — edits apply to each pane separately
       </p>}

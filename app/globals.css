@@ -433,21 +433,48 @@ button.card[data-active] { border-color: var(--accent); }
   --instrument-hair: light-dark(rgba(66, 56, 38, .12), rgba(244, 214, 166, .1));
   --instrument-hair-soft: light-dark(rgba(66, 56, 38, .04), rgba(244, 214, 166, .05));
   position: absolute; z-index: 14; top: 62px; left: 50%;
-  width: min(340px, calc(100% - 40px));
+  /* Closed, the strip is a handle: it shrinks to whatever it has to say, so it
+     covers as little of the seam — the one part of the screen the mode exists
+     to show — as the sentence allows. Open, it is wider than the 340px it used
+     to be fixed at, which is what stops every value on every row from eliding
+     into a tooltip nobody hovers. */
+  width: max-content; max-width: min(340px, calc(100% - 40px));
   transform: translateX(-50%);
   display: grid; gap: 7px;
-  padding: 9px 10px 8px;
+  padding: 6px 8px;
   border: 1px solid var(--instrument-hair);
   border-radius: var(--radius-m);
   background: var(--instrument-pane);
   box-shadow: 0 1px 2px var(--shadow-soft), 0 26px 52px -30px var(--shadow-tint);
   backdrop-filter: blur(20px) saturate(140%);
-  max-height: min(50%, 460px); overflow: auto;
   overscroll-behavior: contain;
 }
-.compare-diff-strip > header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.compare-diff-strip[data-open="true"] {
+  width: min(480px, calc(100% - 40px)); max-width: calc(100% - 40px);
+  padding: 9px 10px 8px;
+  max-height: min(50%, 460px); overflow: auto;
+}
+.compare-diff-strip > header { display: flex; align-items: center; justify-content: flex-start; gap: 8px; }
 .compare-diff-strip > header > strong { color: var(--dim); font: var(--text-eyebrow); letter-spacing: var(--track-wider); text-transform: uppercase; }
 .compare-diff-strip > header > strong i { font-style: normal; font-weight: 400; }
+/* What the closed handle says: how many keys the two panes disagree on. Quiet
+   while they agree, accented the moment they do not — the count is the whole
+   reason to open it. */
+.compare-summary { color: inherit; font: var(--text-micro); letter-spacing: var(--track-wide); }
+.compare-summary[data-diverged="true"] { color: var(--accent); }
+/* The expand control. Last in the header and pushed to the far edge, so it is
+   in the same place whether the strip is a handle or a readout — and while the
+   strip is closed the count sits inside it, so the whole sentence is the
+   target rather than the chevron alone. */
+.compare-disclosure {
+  min-width: 20px; height: 20px; margin-left: auto; padding: 0 4px;
+  display: flex; align-items: center; gap: 5px;
+  border: 1px solid transparent; border-radius: var(--radius-s);
+  background: transparent; color: var(--dim);
+  cursor: pointer; transition: color .16s ease, border-color .16s ease;
+}
+.compare-disclosure:hover { border-color: var(--instrument-hair); color: var(--ink); }
+.compare-diff-body { display: grid; gap: 7px; }
 .compare-padlocks { display: flex; align-items: center; gap: 2px; }
 .compare-padlocks button {
   height: 20px; padding: 0 5px;
@@ -469,9 +496,13 @@ button.card[data-active] { border-color: var(--accent); }
 }
 .compare-key { min-width: 0; overflow: hidden; color: var(--muted); font-size: var(--size-2); text-overflow: ellipsis; white-space: nowrap; }
 .compare-values { display: flex; align-items: baseline; gap: 4px; font: var(--text-micro); font-variant-numeric: tabular-nums; }
-.compare-values em { max-width: 92px; overflow: hidden; color: var(--dim); font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
+/* 150px, not 92: the open strip is wide enough to spell a value out, and a row
+   that elides both halves reports that two things differ without saying what
+   either of them is. Read against `VALUE_LIMIT` in `CompareDiffStrip.tsx`,
+   which is the clamp that should fire first. */
+.compare-values em { max-width: 150px; overflow: hidden; color: var(--dim); font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
 .compare-values i { color: var(--dim); font-style: normal; }
-.compare-values strong { max-width: 92px; overflow: hidden; color: var(--accent); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.compare-values strong { max-width: 150px; overflow: hidden; color: var(--accent); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .compare-op {
   width: 18px; height: 18px; display: grid; place-items: center;
   border: 1px solid transparent; border-radius: var(--radius-s);
@@ -504,7 +535,7 @@ button.card[data-active] { border-color: var(--accent); }
    the divergence is between the two cells rather than in either of them. */
 .compare-stats tr[data-tone="warn"] th, .compare-stats tr[data-tone="warn"] td { color: var(--amber); }
 @media (prefers-reduced-motion: reduce) {
-  .pane-tag, .compare-padlocks button, .compare-op { transition: none; }
+  .pane-tag, .compare-padlocks button, .compare-op, .compare-disclosure { transition: none; }
 }
 
 /* ---------------------------------------------------------------------------
