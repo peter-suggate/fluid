@@ -1,5 +1,6 @@
 import { correctionStageControl } from "./correction-controls";
 import { adaptivityStageControl } from "./features/adaptivity/definition";
+import { algorithmStageControl } from "./features/algorithms/definition";
 /**
  * Every Sparse CM12 stage, described once.
  *
@@ -369,7 +370,15 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       writes: "advected adaptive phi, conservative liquid volume and transport receipts",
       feeds: "pressure, adaptivity and presentation publication",
     },
-    chip: () => "adaptive phi · whole-frame volume",
+    controls: [
+      algorithmStageControl("surfaceSharpening"),
+      algorithmStageControl("sharpeningStrength"),
+      algorithmStageControl("distanceSweeps"),
+      algorithmStageControl("returnPasses"),
+    ],
+    chip: (context) => `adaptive phi · whole-frame volume · ${
+      context.values.surfaceSharpening === "off" ? "no sharpening"
+        : `sharpen ${fixed(context.values.sharpeningStrength, 2)}x`}`,
   },
   "tracer-advection": {
     label: "Marker advection", band: "transport", side: "right",
@@ -739,8 +748,6 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       adaptivityStageControl("selectorMode"),
       adaptivityStageControl("energyThreshold"),
       adaptivityStageControl("curvatureTolerance"),
-      adaptivityStageControl("anticipationSeconds"),
-      adaptivityStageControl("anticipationRadiusBricks"),
       adaptivityStageControl("surfaceQuietEpochs"),
       adaptivityStageControl("surfaceFineRings"),
       adaptivityStageControl("finestTravelCells"),
@@ -752,10 +759,8 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       adaptivityStageControl("residencyDensity"),
       adaptivityStageControl("residencyMassFineCells"),
       adaptivityStageControl("surfaceDensityMinimum"),
-      adaptivityStageControl("surfaceDensityMaximum"),
       adaptivityStageControl("detailTolerance"),
       adaptivityStageControl("surfaceDisplacementToleranceCells"),
-      adaptivityStageControl("surfaceNormalToleranceDegrees"),
       adaptivityStageControl("topologyCadenceSteps"),
       adaptivityStageControl("prepareBricksPerFrame"),
       adaptivityStageControl("promoteEpochs"),
@@ -765,7 +770,7 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       adaptivityStageControl("emergencyScore"),
     ],
     chip: (context) => `${context.values.selectorMode === "coarse-first"
-      ? "coarse first · energy + curvature + prediction"
+      ? "coarse first · energy + deformation + representability"
       : activityOnly(context)
       ? `surface proof + activity · plan every ${fixed(context.values.topologyCadenceSteps, 0)} steps`
       : "surface distance · direct 1³ bulk"} · grade/allocate/shadow · ${

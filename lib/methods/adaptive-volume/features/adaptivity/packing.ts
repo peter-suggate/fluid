@@ -1,15 +1,22 @@
 import type { SparseCM12ActivityPolicy } from "./policy";
 
-/** The accepted-surface proof and prediction region of the resident uniform ABI. */
+/**
+ * The accepted-surface proof and prediction region of the resident uniform ABI.
+ *
+ * Feature-preserving coarsening sizes material by deformation and
+ * representability, so the page-wide normal proof, the curvature floor and the
+ * incoming-impact retention floor no longer exist in the shader. Their lanes
+ * stay in place — a vec4 is aligned whether or not every component is read —
+ * and publish zero, so the struct offsets every other consumer depends on do
+ * not move. Do not re-use a reserved lane without renaming it on both sides.
+ */
 export function packAdaptivitySurfaceParameters(
   f: Float32Array, u: Uint32Array, surfaceProofWord: number,
   policy: SparseCM12ActivityPolicy, finestCellSize_m: number, dt_s: number,
   brickFineResolution: number, previousSignature?: string,
 ): string {
     f[surfaceProofWord] = policy.surfaceDisplacementToleranceCells * finestCellSize_m;
-    f[surfaceProofWord + 1] = Math.cos(
-      policy.surfaceNormalToleranceDegrees * Math.PI / 180,
-    );
+    f[surfaceProofWord + 1] = 0; // reserved: retired normal-angle proof
     u[surfaceProofWord + 2] = policy.surfaceCoarseningEnabled ? 1 : 0;
     // Low bits retain the forced-rung QA ABI; high bits are independent controls.
     u[surfaceProofWord + 3] = (policy.forcedSurfaceResolutionForQA ?? 0)
@@ -30,15 +37,12 @@ export function packAdaptivitySurfaceParameters(
       }
     }
     f.set(velocityThresholds, surfaceProofWord + 4);
-    f.set([policy.coarseFirst ? 1 : 0, policy.energyThreshold,
-      policy.curvatureTolerance, policy.anticipationSeconds], surfaceProofWord + 12);
+    // enabled, finest specific kinetic energy, then two reserved lanes.
+    f.set([policy.coarseFirst ? 1 : 0, policy.energyThreshold, 0, 0], surfaceProofWord + 12);
     const policySignature = JSON.stringify([policy.coarseFirst, policy.energyThreshold,
-      policy.curvatureTolerance, policy.anticipationSeconds, policy.anticipationRadiusBricks,
-      policy.surfaceDisplacementToleranceCells, policy.surfaceNormalToleranceDegrees,
-      policy.surfaceQuietEpochs]);
+      policy.surfaceDisplacementToleranceCells, policy.surfaceQuietEpochs]);
     const changed = previousSignature !== undefined
       && previousSignature !== policySignature;
-    f.set([policy.anticipationRadiusBricks, policy.surfaceQuietEpochs, changed ? 1 : 0, 0],
-      surfaceProofWord + 16);
+    f.set([0, policy.surfaceQuietEpochs, changed ? 1 : 0, 0], surfaceProofWord + 16);
     return policySignature;
 }

@@ -1,3 +1,4 @@
+import { ADAPTIVE_VOLUME_RETURN_ENTRY_POINTS, createAdaptiveVolumeReturnWGSL } from "./adaptive-volume-return.wgsl";
 import { createGeometricSubfacesWGSL } from "./geometric-subfaces.wgsl";
 
 /** All state offsets are f32 words; control is a distinct atomic conditioning tail. */
@@ -43,6 +44,7 @@ export const WHOLE_FRAME_VOLUME_ENTRY_POINTS = Object.freeze([
   "validateWholeFrameVolume",
   "commitWholeFrameVolume",
   "finishWholeFrameVolumeTransport",
+  ...ADAPTIVE_VOLUME_RETURN_ENTRY_POINTS,
   "prepareWholeFrameVolumeSharpening",
   "proposeWholeFrameVolumeSharpening",
   "gatherWholeFrameVolumeSharpening",
@@ -64,6 +66,9 @@ export const WHOLE_FRAME_VOLUME_CONTROL = Object.freeze({
   sharpeningCutCellSkipCount: 19, sharpeningBlockedFaceSkipCount: 20,
   sharpeningDisconnectedFaceSkipCount: 21,
   phiVolumeResidual: 22, phiInterfaceArea: 23,
+  adaptiveReturnSeedCellCount: 28, adaptiveReturnProposedFaceCount: 29,
+  adaptiveReturnCellRoundCount: 30, adaptiveReturnFarDonorCount: 31,
+  adaptiveReturnMaximumDistance: 32, adaptiveReturnAmbiguousCellRoundCount: 33,
 });
 
 /** Production whole-frame conservative translated-box volume coupling. */
@@ -1291,5 +1296,6 @@ fn correctWholeFrameVolumePhi(@builtin(global_invocation_id)gid:vec3u){
   let weight=clamp(2.0-abs(phi),0.0,1.0);
   for(var bank=0u;bank<2u;bank+=1u){lsvStoreFloat(lsvPhiBase(slot,bank)+vertex,phi-offset*weight);}
 }
+${createAdaptiveVolumeReturnWGSL()}
 `;
 }

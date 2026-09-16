@@ -1,6 +1,7 @@
+import { sparseCM12DistanceSweeps, sparseCM12ReturnPasses } from "./sharpening-controls";
 import { type SparseCM12CorrectionControls } from "./correction-controls";
 import { pressureCaptureParam, pressureCaptureDescriptor, SPARSE_CM12_PRESSURE_JOURNAL_SNAPSHOTS } from "./features/pressure-inspection/definition";
-import { ALGORITHM_PARAMS } from "./features/algorithms/definition";
+import { ALGORITHM_PARAMS, ALGORITHM_TUNING_PARAMS } from "./features/algorithms/definition";
 import { resolveMethodComposition } from "./composition";
 import { SPARSE_CM12_ACTIVITY_POLICY } from "./features/adaptivity/policy";
 import { ADAPTIVITY_PARAMS } from "./features/adaptivity/definition";
@@ -60,6 +61,8 @@ export interface AdaptiveMassSolverOptions extends SparseCM12CorrectionControls 
   readonly sharpeningTraceSteps?: number;
   /** Multiplier of CM12 Algorithm 2's per-step removed-density dose. */
   readonly sharpeningStrength?: number;
+  readonly distanceSweeps?: number;
+  readonly returnPasses?: number;
   /** Whether Sec. 3.4 gamma diffusion runs. */
   readonly gammaDiffusionEnabled?: boolean;
   /** Whether Sec. 3.5's conservative surface-sharpening transform runs. */
@@ -88,6 +91,7 @@ export interface AdaptiveMassSolverOptions extends SparseCM12CorrectionControls 
 const params: MethodParamSpec[] = [
   ...physicsExecutionBackendParams(true),
   ...ALGORITHM_PARAMS,
+  ...ALGORITHM_TUNING_PARAMS,
   ...ADAPTIVITY_PARAMS,
 
   {
@@ -227,6 +231,8 @@ export function adaptiveMassSolverOptions(
     sharpeningDistance: sparseCM12SharpeningDistance(values.sharpeningDistance),
     sharpeningTraceSteps: sparseCM12SharpeningTraceSteps(values.sharpeningTraceSteps),
     sharpeningStrength: sparseCM12SharpeningStrength(values.sharpeningStrength),
+    distanceSweeps: sparseCM12DistanceSweeps(values.distanceSweeps),
+    returnPasses: sparseCM12ReturnPasses(values.returnPasses),
     // Capability, not a tuning knob: it only reserves the journal region so a
     // later frame can be armed. Off by default, so a solver that never asked
     // for the film pays nothing — not a float of state, not a dispatch.
@@ -312,6 +318,8 @@ export const adaptiveMassMethod: SimulationMethod = {
       sharpeningDistance: sparseCM12SharpeningDistance(values.sharpeningDistance),
       sharpeningTraceSteps: sparseCM12SharpeningTraceSteps(values.sharpeningTraceSteps),
       sharpeningStrength: sparseCM12SharpeningStrength(values.sharpeningStrength),
+      distanceSweeps: sparseCM12DistanceSweeps(values.distanceSweeps),
+      returnPasses: sparseCM12ReturnPasses(values.returnPasses),
       ...normalizedActivity,
     };
   },

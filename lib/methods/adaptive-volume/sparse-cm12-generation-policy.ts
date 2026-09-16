@@ -7,6 +7,8 @@ export interface SparseCM12GenerationIntent {
   readonly resolution: SparseBrickResolution;
   /** Fresh accepted bulk evidence, never an inference from placeholder fields. */
   readonly mergeable: boolean;
+  /** Accepted thin geometry may refine, but cannot lose physical resolution. */
+  readonly protectThinFeatures?: boolean;
   /** Physical demand can outgrow the local rung ladder and split macro coverage. */
   readonly maximumCellWidth?: number;
   /** Hard physical floor; grading must coarsen neighbors rather than cross it. */
@@ -26,6 +28,8 @@ export function planSparseCM12ResidentGeneration(atlas: SparseAdaptiveMassAtlas,
     newAirCoverage: readonly SparseCM12NewAirCoverage[] }
   | { status: "deferred"; leaves: number; cells: number } | undefined {
   const B = atlas.brickFineResolution;
+  const protectedLeaves = atlas.bricks.filter(brick =>
+    active.has(brick.key) && intents.get(brick.key)?.protectThinFeatures);
   const frozen = new Set([...intents].filter(([, intent]) => intent.frozen).map(([key]) => key));
   const newAirCoverage: SparseCM12NewAirCoverage[] = [];
   const minimumWidths = new Map<number, number>();
@@ -231,6 +235,20 @@ export function planSparseCM12ResidentGeneration(atlas: SparseAdaptiveMassAtlas,
     }
     if (toSplit.size) bricks = bricks.flatMap((brick, id) => toSplit.has(id) ? split(brick) : [brick]);
     if (!changed) break;
+  }
+  // The final physical-width check also catches forced region merges and
+  // grading-induced coarsening, including parents whose keys changed.
+  for (const old of protectedLeaves) {
+    const oldSpan = sparseBrickSpan(old);
+    const width = B * oldSpan / old.resolution;
+    const covering = bricks.filter(brick => brick.coordinate.every((q, axis) =>
+      q < old.coordinate[axis]! + oldSpan
+        && q + sparseBrickSpan(brick) > old.coordinate[axis]!));
+    if (covering.length === 0 || covering.some(brick => !nextActive.has(brick.key)
+      || B * sparseBrickSpan(brick) / brick.resolution > width)) {
+      return { status: "deferred", leaves: bricks.length,
+        cells: bricks.reduce((n, brick) => n + brick.resolution ** 3, 0) };
+    }
   }
   const unchanged = nextActive.size === active.size && [...nextActive].every(key => active.has(key))
     && bricks.length === atlas.bricks.length && bricks.every(b => {

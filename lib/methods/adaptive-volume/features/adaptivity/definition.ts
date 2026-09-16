@@ -9,20 +9,10 @@ export const ADAPTIVITY_PARAMS: MethodParamSpec[] = [
     min: 0.01, max: 100, step: 0.1, digits: 2,
     hint: "Specific kinetic energy ½|u|² requesting the finest rung. Lower rungs use dyadic speed thresholds.",
   },
-  { kind: "number", key: "curvatureTolerance", label: "Curvature tolerance",
-    default: SPARSE_CM12_ACTIVITY_POLICY.curvatureTolerance, tier: "fine", update: "runtime", unit: "κh",
+  { kind: "number", key: "curvatureTolerance", label: "Initial curvature tolerance",
+    default: SPARSE_CM12_ACTIVITY_POLICY.curvatureTolerance, tier: "fine", update: "solver", unit: "κh",
     min: 0.02, max: 2, step: 0.01, digits: 2,
-    hint: "Maximum surface normal variation per cell. Smaller values preserve finer curved liquid geometry. Static solid restriction floors remain active.",
-  },
-  { kind: "number", key: "anticipationSeconds", label: "Impact lookahead",
-    default: SPARSE_CM12_ACTIVITY_POLICY.anticipationSeconds, tier: "fine", update: "runtime", unit: "s",
-    min: 0, max: 2, step: 0.05, digits: 2,
-    hint: "Predict approaching liquid over this horizon and retain receiver detail already justified by local evidence.",
-  },
-  { kind: "number", key: "anticipationRadiusBricks", label: "Impact search radius",
-    default: SPARSE_CM12_ACTIVITY_POLICY.anticipationRadiusBricks, tier: "fine", update: "runtime", unit: "bricks",
-    min: 1, max: 6, step: 1, digits: 0,
-    hint: "Bounded spatial search around a surface receiver. Increase for fast objects or longer prediction horizons; cost grows with radius cubed.",
+    hint: "Normal variation per cell accepted when the brick atlas is first built. Smaller values start curved liquid on a finer rung. Per-frame planning sizes cells by deformation instead, so this only seeds the opening topology.",
   },
   { kind: "number", key: "surfaceQuietEpochs", label: "Surface proof persistence",
     default: SPARSE_CM12_ACTIVITY_POLICY.surfaceQuietEpochs, tier: "fine", update: "runtime", unit: "epochs",
@@ -135,12 +125,6 @@ export const ADAPTIVITY_PARAMS: MethodParamSpec[] = [
     hint: "Lower density bound for partial-cell surface evidence. Composite rows crossing rho=.5 remain surface evidence independently.",
   },
   {
-    kind: "number", key: "surfaceDensityMaximum", label: "Surface density high",
-    default: SPARSE_CM12_ACTIVITY_POLICY.surfaceDensityMaximum, tier: "fine", update: "runtime",
-    unit: "ρ", min: 0.51, max: 1, step: 0.01, digits: 2,
-    hint: "Upper density bound for partial-cell surface evidence.",
-  },
-  {
     kind: "number", key: "detailTolerance", label: "Detail tolerance",
     default: SPARSE_CM12_ACTIVITY_POLICY.detailTolerance, tier: "fine", update: "runtime",
     unit: "ρ", min: 0.005, max: 0.5, step: 0.005, digits: 3,
@@ -153,14 +137,6 @@ export const ADAPTIVITY_PARAMS: MethodParamSpec[] = [
     tier: "fine", update: "runtime", unit: "fine cells",
     min: 0, max: 8, step: 0.05, digits: 2,
     hint: "Maximum rho=.5 edge-crossing movement accepted by each dyadic presentation proof.",
-  },
-  {
-    kind: "number", key: "surfaceNormalToleranceDegrees",
-    label: "Surface normal tolerance",
-    default: SPARSE_CM12_ACTIVITY_POLICY.surfaceNormalToleranceDegrees,
-    tier: "fine", update: "runtime", unit: "°",
-    min: 0, max: 90, step: 1, digits: 0,
-    hint: "Maximum narrow-band normal-angle error accepted by each dyadic presentation proof.",
   },
   {
     kind: "number", key: "topologyCadenceSteps", label: "Topology cadence",
@@ -209,7 +185,8 @@ export const ADAPTIVITY_PARAMS: MethodParamSpec[] = [
 
 export const ADAPTIVITY_MODES = (ADAPTIVITY_PARAMS.find(p => p.key === "selectorMode") as Extract<MethodParamSpec, {kind: "select"}>).options;
 export const adaptivityPrimaryControls = (values: MethodParamValues) => values.selectorMode === "coarse-first"
-  ? [{key: "energyThreshold", tag: "E"}, {key: "curvatureTolerance", tag: "κ"}, {key: "anticipationSeconds", tag: "T"}]
+  ? [{key: "energyThreshold", tag: "E"}, {key: "surfaceDisplacementToleranceCells", tag: "Δ"},
+    {key: "detailTolerance", tag: "ε"}]
   : values.selectorMode === "activity"
     ? [{key: "finestTravelCells", tag: "U"}, {key: "surfaceDisplacementToleranceCells", tag: "Δ"}] : [];
 
@@ -229,10 +206,12 @@ export const adaptiveMassAdaptivityFeature: FeatureDefinition = {
 
 /** Availability belongs to the policy, regardless of which UI host presents it. */
 export function adaptivityControlEnabled(key: string, values: MethodParamValues): boolean {
-  if (["energyThreshold", "curvatureTolerance", "anticipationSeconds", "anticipationRadiusBricks", "surfaceQuietEpochs"].includes(key)) return values.selectorMode === "coarse-first";
+  if (["energyThreshold", "curvatureTolerance", "surfaceQuietEpochs"].includes(key)) return values.selectorMode === "coarse-first";
   if (key === "surfaceFineRings") return values.selectorMode !== "coarse-first";
-  if (["finestTravelCells", "fourTravelCells", "twoTravelCells", "detailTolerance", "promoteEpochs", "demoteEpochs", "promoteScore", "demoteScore", "emergencyScore"].includes(key)) return values.selectorMode === "activity";
-  if (["surfaceDisplacementToleranceCells", "surfaceNormalToleranceDegrees", "topologyCadenceSteps"].includes(key)) return values.selectorMode === "activity" || values.selectorMode === "coarse-first";
+  if (["finestTravelCells", "fourTravelCells", "twoTravelCells", "promoteEpochs", "demoteEpochs", "promoteScore", "demoteScore", "emergencyScore"].includes(key)) return values.selectorMode === "activity";
+  // Detail tolerance scores refinement in activity mode and gates quiet-epoch
+  // accumulation — hence every merge — in coarse-first mode.
+  if (["surfaceDisplacementToleranceCells", "detailTolerance", "topologyCadenceSteps"].includes(key)) return values.selectorMode === "activity" || values.selectorMode === "coarse-first";
   return true;
 }
 

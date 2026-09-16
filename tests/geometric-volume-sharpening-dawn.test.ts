@@ -16,7 +16,7 @@ const entries = ["proposeWholeFrameVolumeSharpening", "gatherWholeFrameVolumeSha
     const adapter = await gpu!.requestAdapter(); assert.ok(adapter);
     device = await adapter.requestDevice();
     const production = createGeometricVolumeResidentWGSL({} as SparseGeometricVolumeLayout);
-    const kernels = production.slice(production.indexOf("fn gvSharpeningFaceCentre"), production.indexOf("// One bounded global volume feedback step."));
+    const kernels = production.slice(production.indexOf("fn gvSharpeningFaceCentre"), production.indexOf("// Delete only whole dilute pages"));
     const code = `
 @group(0) @binding(0) var<storage,read_write> state:array<f32>;
 @group(0) @binding(1) var<storage,read> topology:array<u32>;

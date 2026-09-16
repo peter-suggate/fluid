@@ -89,7 +89,6 @@ const DAM_ACTIVITY_POLICY = Object.freeze({
   residencyDensity: 0.005,
   residencyMassFineCells: 1,
   surfaceDensityMinimum: 0.05,
-  surfaceDensityMaximum: 0.95,
   detailTolerance: 0.08,
   frontLookaheadSteps: 4,
   topologyCadenceSteps: 1,

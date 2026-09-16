@@ -196,3 +196,17 @@ test("requested dormant receiver refinement survives reclamation without activat
   [1,{resolution:4 as const,mergeable:false}],
  ]),{...limits,maximumCells:512})?.status,"deferred");
 });
+
+test("thin-feature veto survives forced macro merging and region grading", () => {
+ const bricks = Array.from({length:8},(_,key)=>({key,
+  coordinate:[key&1,(key>>1)&1,(key>>2)&1] as const,
+  resolution:1 as const,density:new Float64Array([1]),gamma:new Float64Array([1])}));
+ const atlas=createSparseAdaptiveMassAtlas([16,16,16],bricks,0,8,false,false);
+ const active=new Set(bricks.map(b=>b.key));
+ const intents=new Map(bricks.map(b=>[b.key,{resolution:1 as const,mergeable:true,
+  minimumCellWidth:16,protectThinFeatures:b.key===0}]));
+ assert.equal(planSparseCM12ResidentGeneration(atlas,active,intents,limits)?.status,"deferred");
+ const ordinary=new Map(bricks.map(b=>[b.key,{resolution:1 as const,mergeable:true,
+  protectThinFeatures:b.key===0}]));
+ assert.equal(planSparseCM12ResidentGeneration(atlas,active,ordinary,limits)?.status,"deferred");
+});

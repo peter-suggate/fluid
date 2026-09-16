@@ -21,19 +21,16 @@ const shader = readFileSync(new URL(
 test("surface coarsening policy is enabled, bounded, and keeps QA forcing private", () => {
   assert.equal(SPARSE_CM12_ACTIVITY_POLICY.surfaceCoarseningEnabled, true);
   assert.equal(SPARSE_CM12_ACTIVITY_POLICY.surfaceDisplacementToleranceCells, 1);
-  assert.equal(SPARSE_CM12_ACTIVITY_POLICY.surfaceNormalToleranceDegrees, 30);
 
   const sanitized = sparseCM12ActivityPolicy({
     activitySignals: true,
     surfaceCoarseningEnabled: false,
     surfaceDisplacementToleranceCells: -4,
-    surfaceNormalToleranceDegrees: 120,
     forcedSurfaceResolutionForQA: 4,
   });
   assert.equal(sanitized.activitySignals, true);
   assert.equal(sanitized.surfaceCoarseningEnabled, false);
   assert.equal(sanitized.surfaceDisplacementToleranceCells, 0);
-  assert.equal(sanitized.surfaceNormalToleranceDegrees, 90);
   assert.equal(sanitized.forcedSurfaceResolutionForQA, 4);
   assert.equal(sparseCM12ActivityPolicy({
     forcedSurfaceResolutionForQA: 2,
@@ -80,7 +77,10 @@ test("surface receipts are output-space, generation-stamped, and camera independ
   assert.match(proof, /generationReceipt[\s\S]*==acceptedGeneration/);
   assert.match(proof, /topologyGeneration[\s\S]*==atomicLoad\(&activity\[12\]\)/);
   assert.match(proof, /surfaceProofAcceptedPhi/);
-  assert.match(proof, /surfaceProofVirtualDensityPhi/);
+  // Feature-preserving coarsening replaced the virtual-density reconstruction
+  // with the restriction of the accepted field: representability is now the
+  // proof, so the middle term is the restricted phi rather than a density one.
+  assert.match(proof, /surfaceProofRestrictedPhi/);
   assert.match(proof, /surfaceProofRestrictionFactor/);
   assert.match(proof,
     /surfaceProofGenerationWord\(surfaceProofTarget\)[\s\S]*activity\[12\]/);

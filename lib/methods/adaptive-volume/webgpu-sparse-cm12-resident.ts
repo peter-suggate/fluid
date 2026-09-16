@@ -1,3 +1,4 @@
+import { sparseCM12DistanceSweeps, sparseCM12ReturnPasses } from "./sharpening-controls";
 import { DYNAMIC_PAGE_CELL_COUNT, DYNAMIC_PAGE_ROW_COUNT, DYNAMIC_PAGE_TERM_COUNT, DYNAMIC_PAGE_WORDS, prepareDynamicPageImage, packDynamicSeamCatalogue, dynamicRungLayout } from "./sparse-cm12-dynamic-rung-catalog";
 import { geometricVolumeQAWGSL } from "./geometric-volume-qa.wgsl";
 import { WHOLE_FRAME_VOLUME_ENTRY_POINTS, type SparseGeometricVolumeLayout } from "./resident-volume.wgsl";
@@ -243,6 +244,10 @@ import {
 export interface SharpeningTrace extends SparseCM12CorrectionControls {
   readonly distanceCells?: number;
   readonly traceSteps?: number;
+  /** Two Jacobi neighbour updates per sweep; zero disables auxiliary return. */
+  readonly distanceSweeps?: number;
+  /** Conservative one-neighbour volume transfers after local sharpening. */
+  readonly returnPasses?: number;
   /** Multiplies Algorithm 2's removed-density dose. Defaults to the paper's full dose. */
   readonly strength?: number;
   /** Defaults on for direct diagnostic constructors and existing callers. */
@@ -254,11 +259,17 @@ export interface SharpeningTrace extends SparseCM12CorrectionControls {
   readonly presentationSurfaceMode?: "rdf" | "plic";
 }
 
-/** Shared CM12 Algorithm 2 return distance; longer traces remain an explicit setting. */
-export const SPARSE_CM12_SHARPENING_DISTANCE_CELLS =
-  CM12_SHARPENING_DISTANCE_CELLS;
-export const SPARSE_CM12_SHARPENING_TRACE_STEPS = CM12_SHARPENING_TRACE_STEPS;
-export const SPARSE_CM12_SHARPENING_STRENGTH = 1;
+import {
+  sparseCM12SharpeningDistance, sparseCM12SharpeningTraceSteps,
+  sparseCM12SharpeningStrength,
+} from "./sharpening-controls";
+// Re-exported so every existing importer of the resident keeps working; the
+// definitions live in the leaf module to keep the panel spec out of this cycle.
+export {
+  SPARSE_CM12_SHARPENING_DISTANCE_CELLS, SPARSE_CM12_SHARPENING_TRACE_STEPS,
+  SPARSE_CM12_SHARPENING_STRENGTH, sparseCM12SharpeningDistance,
+  sparseCM12SharpeningTraceSteps, sparseCM12SharpeningStrength,
+} from "./sharpening-controls";
 const SPARSE_CM12_TRANSPORT_FIXED_SCALE = 65_536;
 const solidWorldHasClosedBoxShell = (
   world: SolidWorld,
@@ -293,22 +304,6 @@ const sparseCM12PhysicalMassFixedScale = (
   const ratio = closedSolidShell ? physicalRatio : Math.min(1, physicalRatio);
   return SPARSE_CM12_TRANSPORT_FIXED_SCALE * ratio ** 3;
 };
-
-/** Kept inside the paper's own D range; the panel spec declares the same bounds. */
-export const sparseCM12SharpeningDistance = (value: unknown): number =>
-  typeof value === "number" && Number.isFinite(value)
-    ? Math.min(3.1, Math.max(0.1, value))
-    : SPARSE_CM12_SHARPENING_DISTANCE_CELLS;
-
-export const sparseCM12SharpeningTraceSteps = (value: unknown): number =>
-  typeof value === "number" && Number.isFinite(value)
-    ? Math.min(16, Math.max(1, Math.round(value)))
-    : SPARSE_CM12_SHARPENING_TRACE_STEPS;
-
-export const sparseCM12SharpeningStrength = (value: unknown): number =>
-  typeof value === "number" && Number.isFinite(value)
-    ? Math.min(4, Math.max(0, value))
-    : SPARSE_CM12_SHARPENING_STRENGTH;
 
 export interface SparseCM12InternedBoundaryMemoryPlan {
   readonly immutableMaximumBytes: number;
@@ -7102,6 +7097,26 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
       dispatchAccepted("proposeWholeFrameVolumeSharpening", "row");
       dispatchAccepted("gatherWholeFrameVolumeSharpening", "cell");
       dispatchAccepted("commitWholeFrameVolumeSharpening", "cell");
+      // Local correction retains its existing geometry and budget. The dead
+      // transport edge arena now belongs to adaptive far-volume return.
+      dispatch("beginAdaptiveVolumeReturn", 1);
+      const distanceSweeps = sparseCM12DistanceSweeps(sharpening?.distanceSweeps);
+      const returnPasses = sparseCM12ReturnPasses(sharpening?.returnPasses);
+      if (sharpening?.surfaceSharpeningEnabled !== false
+          && sparseCM12SharpeningStrength(sharpening?.strength) > 0
+          && distanceSweeps > 0 && returnPasses > 0) {
+        dispatchAccepted("seedAdaptiveVolumeReturn", "cell");
+        for (let pair = 0; pair < distanceSweeps; pair++) {
+          dispatchAccepted("relaxAdaptiveVolumeReturnA", "cell");
+          dispatchAccepted("relaxAdaptiveVolumeReturnB", "cell");
+        }
+        for (let round = 0; round < returnPasses; round++) {
+          dispatchAccepted("prepareAdaptiveVolumeReturn", "cell");
+          dispatchAccepted("proposeAdaptiveVolumeReturn", "row");
+          dispatchAccepted("gatherWholeFrameVolumeSharpening", "cell");
+          dispatchAccepted("commitWholeFrameVolumeSharpening", "cell");
+        }
+      }
       dispatchPhi("correctWholeFrameVolumePhi");
       dispatch("lsvBeginConstraintProjection", 1);
       for (let level = 0; level < phiConstraintLevels; level += 1) {
@@ -8193,9 +8208,14 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
       sparseCM12SharpeningTraceSteps(sharpening?.traceSteps),
       policy.residencyDensity, policy.residencyMassFineCells,
     ], 60);
-    f.set([policy.finestTravelCells, 0, 0, policy.thinFeatureCells], 64);
+    // The finest travel threshold reaches the shader as the top rung of the
+    // velocityThresholds ladder that packAdaptivitySurfaceParameters builds, so
+    // this lane's first component is reserved rather than a second copy.
+    f.set([0, 0, 0, policy.thinFeatureCells], 64);
+    // The surface-evidence high bound is retired: partial-cell evidence is
+    // bounded below and then proved by representability, not by a ceiling.
     f.set([policy.thinFeatureDensity, policy.surfaceDensityMinimum,
-      policy.surfaceDensityMaximum, policy.detailTolerance], 68);
+      0, policy.detailTolerance], 68);
     f.set([policy.frontLookaheadSteps, policy.promoteScore,
       policy.emergencyScore, policy.demoteScore], 72);
     u.set([policy.topologyCadenceSteps, policy.promoteEpochs,
@@ -10476,7 +10496,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
   async readGeometricVolumeTransportReceiptQA() {
     this.assertLive();
     const readback = this.device.createBuffer({
-      label: "Sparse Geometric volume control QA readback", size: (126 + GEOMETRIC_SOURCE_LEDGER_FLOATS) * 4,
+      label: "Sparse Geometric volume control QA readback", size: (132 + GEOMETRIC_SOURCE_LEDGER_FLOATS) * 4,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
     try {
@@ -10492,7 +10512,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
       encoder.copyBufferToBuffer(this.conditioning, 4 * this.layout.volumeTransport.supportControlBaseWords,
         readback, (60 + GEOMETRIC_SOURCE_LEDGER_FLOATS) * 4, 152);
       encoder.copyBufferToBuffer(this.conditioning, 4 * this.layout.volumeTransport.wholeFrameControlBaseWords,
-        readback, (98 + GEOMETRIC_SOURCE_LEDGER_FLOATS) * 4, 112);
+        readback, (98 + GEOMETRIC_SOURCE_LEDGER_FLOATS) * 4, 136);
       this.device.queue.submit([encoder.finish()]);
       await readback.mapAsync(GPUMapMode.READ);
       const words = new Uint32Array(readback.getMappedRange());
@@ -10560,6 +10580,12 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
           cumulativeResidueDeletedVolumeFine3: couplingFloats[25]!,
           residueClearedPageCount: couplingWords[26]!,
           cumulativeResidueClearedPageCount: couplingWords[27]!,
+          adaptiveReturnSeedCellCount: couplingWords[28]!,
+          adaptiveReturnProposedFaceCount: couplingWords[29]!,
+          adaptiveReturnCellRoundCount: couplingWords[30]!,
+          adaptiveReturnFarDonorCount: couplingWords[31]!,
+          adaptiveReturnMaximumDistanceFine: couplingFloats[32]!,
+          adaptiveReturnAmbiguousCellRoundCount: couplingWords[33]!,
         }),
         subfaceCount: words[0]!, subfaceCapacity: this.layout.volumeTransport.subfaceCapacity,
         maxCourant: floats[1]!, plannedSubsteps: words[2]!, executedSubsteps: words[3]!,

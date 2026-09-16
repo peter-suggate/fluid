@@ -275,3 +275,59 @@ fn fine_contour_component_survives_when_every_cell_centre_is_air() {
     assert_eq!(volume, before);
     assert_eq!(receipt.relocated_volume, 0.0);
 }
+
+#[test]
+fn adaptive_distance_returns_far_residue_across_a_two_to_one_seam() {
+    for mixed in [false, true] {
+        let graph = graph(mixed);
+        let surface = surface(|x, _| x-6.0);
+        let capacity = vec![1.0;128];
+        let (fields, mut volume) = target_fields(&graph,&surface,&capacity);
+        let donor = cell_at(&graph,[11.5,3.5]);
+        let receiver = cell_at(&graph,[5.5,3.5]);
+        volume[donor] += 0.75; volume[receiver] -= 0.75;
+        let before = total(&volume);
+        let phi = levelset_surface::cell_phi(&graph,&surface).unwrap();
+        let receipt = sharpen_volume(&graph,&fields,&capacity,&surface,&phi,&mut volume).unwrap();
+        assert!(receipt.far_relocated_volume > 0.7, "mixed={mixed}: {receipt:?}");
+        assert!(volume[donor] < 0.05);
+        assert!((total(&volume)-before).abs()<1e-12);
+        assert_eq!(receipt.bound_violation_count,0);
+        assert!(receipt.maximum_relocation_distance <= 8.0);
+    }
+}
+
+#[test]
+fn adaptive_return_cannot_cross_a_closed_wall() {
+    let mut graph = graph(false);
+    let surface = surface(|x,_| x-6.0);
+    let capacity: Vec<_> = (0..8).flat_map(|_| (0..16).map(|x| if x==8 {0.0} else {1.0})).collect();
+    let (fields, mut volume) = target_fields(&graph,&surface,&capacity);
+    let donor = cell_at(&graph,[11.5,3.5]);
+    let receiver = cell_at(&graph,[5.5,3.5]);
+    volume[donor] += 0.75; volume[receiver] -= 0.75;
+    // Also exercise the row-aperture barrier, independently of capacity tests.
+    for row in &mut graph.rows { if row.axis==0 && row.center[0]==8.0 {row.open_fraction=0.0;} }
+    let before = volume.clone();
+    let phi = levelset_surface::cell_phi(&graph,&surface).unwrap();
+    let receipt = sharpen_volume(&graph,&fields,&capacity,&surface,&phi,&mut volume).unwrap();
+    assert_eq!(volume,before);
+    assert!(receipt.unassigned_volume >= 0.75);
+}
+
+#[test]
+fn equidistant_far_residue_does_not_choose_between_components() {
+    let graph = graph(false);
+    let surface = surface(|x,_| (x-3.5).min(11.5-x));
+    let capacity=vec![1.0;128];
+    let (fields,mut volume)=target_fields(&graph,&surface,&capacity);
+    let donor=cell_at(&graph,[7.5,3.5]);
+    volume[donor]=0.75;
+    volume[cell_at(&graph,[2.5,3.5])]-=0.375;
+    volume[cell_at(&graph,[12.5,3.5])]-=0.375;
+    let before=volume.clone();
+    let phi=levelset_surface::cell_phi(&graph,&surface).unwrap();
+    let receipt=sharpen_volume(&graph,&fields,&capacity,&surface,&phi,&mut volume).unwrap();
+    assert_eq!(volume,before);
+    assert!(receipt.ambiguous_cell_count>0);
+}

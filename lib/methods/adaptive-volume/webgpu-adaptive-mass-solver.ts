@@ -1,3 +1,4 @@
+import { sparseCM12DistanceSweeps, sparseCM12ReturnPasses } from "./sharpening-controls";
 import { correctionOptions } from "./correction-controls";
 import type { LiveFluidEdit, LiveFluidEditResult } from "../../core/live-fluid-edit";
 import { SimulationFailureError } from "../../core/simulation-failure";
@@ -1006,7 +1007,12 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     const sharpeningDistance = sparseCM12SharpeningDistance(values.sharpeningDistance);
     const sharpeningTraceSteps = sparseCM12SharpeningTraceSteps(values.sharpeningTraceSteps);
     const sharpeningStrength = sparseCM12SharpeningStrength(values.sharpeningStrength);
-    const gammaDiffusionEnabled = values.gammaDiffusion !== "off";
+    // Gamma diffusion is retired in adaptive-volume: conditionedDensity and
+    // conditionedGamma are reachable only from prepareSharpeningField,
+    // scatterSharpeningMass and finalizeSharpening, none of which this method
+    // dispatches. Match the construction path and hold the gate closed rather
+    // than inferring it from a value normalizeValues always pins to "off".
+    const gammaDiffusionEnabled = false;
     const surfaceSharpeningEnabled = values.surfaceSharpening !== "off";
     const pressureIterations = sparseCM12PressureIterations(values.pressureIterations);
     const pressureRelativeTolerance =
@@ -1033,6 +1039,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       surfaceMeshRefinement: Number(values.surfaceMeshRefinement) === 1 ? 1
       : Number(values.surfaceMeshRefinement) === 4 ? 4 : 2,
       sharpeningStrength,
+      distanceSweeps: sparseCM12DistanceSweeps(values.distanceSweeps),
+      returnPasses: sparseCM12ReturnPasses(values.returnPasses),
       gammaDiffusionEnabled, surfaceSharpeningEnabled,
       presentationColumnHeightMode: nextPresentationColumnHeightMode,
       presentationSurfaceMode: nextPresentationSurfaceMode,
@@ -1304,6 +1312,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         const record = source.recordsByKey.get(brick.key)!;
         return [brick.key, { resolution: admitted.has(brick.key) ? source.planned.get(brick.key) ?? brick.resolution : brick.resolution,
           frozen: frozen && record.active,
+          protectThinFeatures: record.active && (record.reasons & 256) !== 0,
           activate: admitted.has(brick.key) && source.frozenFrontier.has(brick.key),
           minimumCellWidth: physicalFloors.get(brick.key),
           maximumCellWidth: admitted.has(brick.key) ? physicalDemands.get(brick.key) : undefined,
@@ -1550,6 +1559,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         distanceCells: this.options.sharpeningDistance,
         traceSteps: this.options.sharpeningTraceSteps,
         strength: this.options.sharpeningStrength,
+        distanceSweeps: this.options.distanceSweeps,
+        returnPasses: this.options.returnPasses,
         gammaDiffusionEnabled: this.options.gammaDiffusionEnabled,
         surfaceSharpeningEnabled: this.options.surfaceSharpeningEnabled,
       },

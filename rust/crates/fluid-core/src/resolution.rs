@@ -45,6 +45,7 @@ pub mod resolution_fault {
     pub const LEAF_CAPACITY: u32 = 1 << 2;
     pub const CELL_CAPACITY: u32 = 1 << 3;
     pub const MISSING_BACKING: u32 = 1 << 4;
+    pub const THIN_FEATURE_VETO: u32 = 1 << 5;
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -182,6 +183,9 @@ pub struct ResolutionPolicyState {
     pub accepted_generation: u32,
     pub scheduling_cursor: usize,
     pub scheduling_credits: usize,
+    /// Direct-phi policy signature: matches the 3-D accepted-proof reset.
+    #[serde(default)]
+    pub direct_policy_signature: Vec<f64>,
     pub history: BTreeMap<u32, BrickActivityHistory>,
 }
 
@@ -544,6 +548,7 @@ pub fn publish_direct_surface_proofs(
     validate_inputs(topology, fields, dt, cell_size)?;
     validate_direct_surface(topology, Some(surface))?;
     let policy = &options.policy;
+    let thin_bricks = crate::levelset_thin_features::protected_bricks(surface, policy.thin_feature_cells);
     for brick in &topology.bricks {
         let history = state.history.entry(brick.seed.key).or_default();
         history.surface_proof = None;
@@ -557,6 +562,7 @@ pub fn publish_direct_surface_proofs(
             || options.injection_demanded_brick_keys.contains(&brick.seed.key)
             || policy.forced_surface_resolution_for_qa.is_some()
             || history.reasons & activity_reason::THIN_FLUID != 0
+            || thin_bricks.contains(&[brick.seed.coordinate[0], brick.seed.coordinate[1]])
             || velocity_floor(history.velocity_travel, thresholds(policy, dt, cell_size),
                 policy.activity_signals) > target
             || options.static_boundary_floor_by_brick.get(&brick.seed.key)
@@ -575,9 +581,9 @@ pub fn publish_direct_surface_proofs(
             surface, p.map(|v| v as f32)).unwrap() as f64;
         let tolerance = policy.surface_displacement_tolerance_cells;
         let mut valid = true;
-        for y in 0..8 { for x in 0..8 {
-            let p = [lo[0] as f64 + x as f64 + 0.5,
-                lo[1] as f64 + y as f64 + 0.5];
+        for y in 0..=16 { for x in 0..=16 {
+            let p = [lo[0] as f64 + x as f64 * 0.5,
+                lo[1] as f64 + y as f64 * 0.5];
             let lower = p.map(|v| (v / step).floor() * step);
             let t = [(p[0]-lower[0])/step, (p[1]-lower[1])/step];
             let fine = sample(p);
@@ -630,6 +636,26 @@ fn constrained_demanded_rung(
         .max(static_floor)
         .max(if retain_current { brick.resolution } else { 1 });
     apply_regions(requested, brick, &options.refinement_regions)
+}
+
+fn apply_thin_feature_veto(
+    topology: &CompiledTopology<2>, protected: &BTreeSet<[i32; 2]>,
+    measurements: &mut BTreeMap<u32, Measurement>,
+) {
+    for brick in &topology.bricks {
+        let seed = &brick.seed;
+        let touches = protected.iter().any(|p| (0..2).all(|axis|
+            p[axis] >= seed.coordinate[axis]
+                && p[axis] < seed.coordinate[axis] + seed.span_bricks as i32));
+        if touches {
+            if let Some(m) = measurements.get_mut(&seed.key) {
+                m.thin = true; m.deeply_enclosed = false;
+                m.history.reasons |= activity_reason::THIN_FLUID;
+                m.history.proof_epochs = 0;
+                m.history.surface_proof = None;
+            }
+        }
+    }
 }
 
 fn measure(
@@ -1069,8 +1095,8 @@ fn measure(
     {
         curvature_floor *= 2;
     }
-    let coarse_score = (normal_diameter
-        / (brick.seed.resolution as f64 * policy.curvature_tolerance.max(0.02)))
+    let coarse_score = (if direct_surface.is_some() { 0.0 } else { normal_diameter
+        / (brick.seed.resolution as f64 * policy.curvature_tolerance.max(0.02)) })
     .max(travel as f64 / (ts[3] as f64).max(1e-6));
     let score_byte = clamp_byte(if policy.coarse_first {
         coarse_score
@@ -1543,6 +1569,9 @@ fn plan_projected_transport_support_impl(
     validate_inputs(topology, fields, dt, cell_size)?;
     validate_direct_surface(topology, direct_surface)?;
     let ts = thresholds(policy, dt, cell_size);
+    let thin_bricks = direct_surface.map(|surface|
+        crate::levelset_thin_features::protected_bricks(surface, policy.thin_feature_cells))
+        .unwrap_or_default();
     let mut measurements = BTreeMap::new();
     for i in 0..topology.bricks.len() {
         measurements.insert(
@@ -1561,6 +1590,7 @@ fn plan_projected_transport_support_impl(
             ),
         );
     }
+    apply_thin_feature_veto(topology, &thin_bricks, &mut measurements);
     let accepted: Vec<_> = topology.bricks.iter().map(|r| r.seed.clone()).collect();
     let free_set = validate_free(&accepted, free_leaf_ids)?;
     let mut working: Vec<_> = accepted
@@ -1764,6 +1794,13 @@ fn plan_resolution_impl(
     validate_inputs(topology, fields, dt, cell_size)?;
     validate_direct_surface(topology, direct_surface)?;
     let policy = &options.policy;
+    let direct_policy_signature = if direct_surface.is_some() {
+        vec![if policy.coarse_first {1.0} else {0.0}, policy.energy_threshold,
+            policy.surface_displacement_tolerance_cells, policy.surface_quiet_epochs as f64,
+            policy.thin_feature_cells]
+    } else { Vec::new() };
+    let policy_changed = !previous.direct_policy_signature.is_empty()
+        && previous.direct_policy_signature != direct_policy_signature;
     let accepted_steps = previous.accepted_steps + 1;
     let topology_epoch =
         policy.topology_cadence_steps != 0 && accepted_steps % policy.topology_cadence_steps == 0;
@@ -1772,6 +1809,9 @@ fn plan_resolution_impl(
     for b in &accepted {
         valid_resolution(b.resolution)?;
     }
+    let thin_bricks = direct_surface.map(|surface|
+        crate::levelset_thin_features::protected_bricks(surface, policy.thin_feature_cells))
+        .unwrap_or_default();
     let mut measurements = BTreeMap::new();
     for i in 0..topology.bricks.len() {
         measurements.insert(
@@ -1790,6 +1830,7 @@ fn plan_resolution_impl(
             ),
         );
     }
+    apply_thin_feature_veto(topology, &thin_bricks, &mut measurements);
     let mut material_demand = directional_demand(
         &accepted,
         &measurements,
@@ -2048,7 +2089,7 @@ fn plan_resolution_impl(
         if policy.coarse_first && policy.forced_surface_resolution_for_qa.is_none() {
             let m = &measurements[&brick.key];
             let geometry_floor = m.curvature_floor.max(static_floor).max(moving_floor);
-            let incoming = if geometry_floor.max(measured_floor) < 8
+            let incoming = if direct_surface.is_none() && geometry_floor.max(measured_floor) < 8
                 && !m.thin
                 && !injection
                 && (surface || page_demand)
@@ -2092,19 +2133,20 @@ fn plan_resolution_impl(
                     .unwrap()
                     .history
                     .proof_epochs = 0;
-            } else if coarse_required < current && enclosed {
+            } else if coarse_required < current && enclosed && !m.surface {
                 requested = coarse_required;
                 reason = 2048;
+                measurements.get_mut(&brick.key).unwrap().history.proof_epochs = 0;
             } else if coarse_required < current {
                 let next = (current / 2).max(1);
                 let m = &measurements[&brick.key];
-                let fresh = !surface
+                let fresh = !policy_changed && (!surface
                     || (policy.surface_coarsening_enabled && m.history
                         .surface_proof
                         .as_ref()
                         .and_then(|p| p.generation_by_target_resolution.get(&next))
                         .copied()
-                        == Some(topology.graph.topology_generation));
+                        == Some(topology.graph.topology_generation)));
                 // The legacy branch above may have touched the measurement's
                 // epoch counter. GPU coarse-first reloads the accepted history
                 // here; count at most one proof epoch per accepted frame.
@@ -2119,7 +2161,7 @@ fn plan_resolution_impl(
                     .unwrap()
                     .history
                     .proof_epochs = epochs;
-                if epochs >= policy.surface_quiet_epochs {
+                if topology_epoch && epochs >= policy.surface_quiet_epochs {
                     requested = coarse_required.max(current / 2);
                     reason = 16;
                 }
@@ -2182,6 +2224,7 @@ fn plan_resolution_impl(
         let moving =
             options.moving_rigid_bodies && m.history.reasons & activity_reason::CUT_BOUNDARY != 0;
         if exact_empty
+            && !m.thin
             && !m.occupied
             && !material_demand.contains(&brick.key)
             && !moving
@@ -2194,6 +2237,14 @@ fn plan_resolution_impl(
     close_region_caps(&working, &mut targets, &options.refinement_regions);
     close_two_to_one(&working, &mut targets, &options.refinement_regions);
     let mut faults = 0;
+    // Region-cap closure may lower even a safety request. A direct-surface
+    // feature is an unconditional no-coarsening veto: conflicting constraints
+    // leave the accepted generation intact rather than erasing its geometry.
+    if direct_surface.is_some() && accepted.iter().any(|brick|
+        brick.active && measurements[&brick.key].thin
+            && (targets[&brick.key] < brick.resolution || !candidate_active[&brick.key])) {
+        faults |= resolution_fault::THIN_FEATURE_VETO;
+    }
     for i in 0..working.len() {
         for j in face_neighbors(&working, i) {
             if !candidate_active[&working[i].key] || !candidate_active[&working[j].key] {
@@ -2368,6 +2419,7 @@ fn plan_resolution_impl(
                 0
             },
             scheduling_credits: credit_budget - admitted.len(),
+            direct_policy_signature,
             history: next_history,
         },
         receipt: ResolutionPolicyReceipt {
@@ -2471,6 +2523,65 @@ mod tests {
         options.coarsen_inactive_pages = true;
         options.coarsest_demanded_pages = true;
         options
+    }
+
+    #[test]
+    fn off_centre_feature_veto_overrides_a_stale_surface_proof() {
+        let (topology, mut fields) = setup(vec![brick(0,[0,0],8,true)], [8,8]);
+        let surface = circle_surface([8,8], [4.0,4.0], 0.4);
+        fields.density = levelset_surface::implied_fill_fine_cells(&surface).unwrap();
+        assert!(topology.graph.cells.iter().all(|cell|
+            crate::levelset_redistance::sample_scalar(&surface,
+                [cell.center[0],cell.center[1]]).unwrap() > 0.0));
+        let options = coarsest_support_options();
+        let mut state = initialize_resolution_policy(&topology);
+        let history = state.history.get_mut(&0).unwrap();
+        history.reasons = activity_reason::SURFACE;
+        history.proof_epochs = 100;
+        history.surface_proof = Some(SurfaceProofState {
+            generation_by_target_resolution: BTreeMap::from([(4,topology.graph.topology_generation)])
+        });
+        let result = plan_resolution_with_surface(&topology,&fields,&state,
+            1.0/30.0,0.05,&options,&surface).unwrap();
+        assert_eq!(result.receipt.bricks[0].requested_resolution,8);
+        assert_ne!(result.state.history[&0].reasons & activity_reason::THIN_FLUID,0);
+        publish_direct_surface_proofs(&topology,&fields,&surface,&options,
+            &mut state,1.0/30.0,0.05).unwrap();
+        assert!(state.history[&0].surface_proof.is_none());
+    }
+
+    #[test]
+    fn region_cap_cannot_coarsen_a_represented_thin_feature() {
+        let (topology, mut fields) = setup(vec![brick(0,[0,0],8,true)], [8,8]);
+        let surface = circle_surface([8,8], [4.0,4.0], 0.4);
+        fields.density = levelset_surface::implied_fill_fine_cells(&surface).unwrap();
+        let mut options = coarsest_support_options();
+        options.refinement_regions.push(ResolutionRegion {
+            minimum_fine:[0.0,0.0], maximum_fine:[8.0,8.0],
+            minimum_cell_width:4, maximum_cell_width:None,
+        });
+        let result = plan_resolution_with_surface(&topology,&fields,
+            &initialize_resolution_policy(&topology),1.0/30.0,0.05,&options,&surface).unwrap();
+        assert_ne!(result.receipt.fault_bits & resolution_fault::THIN_FEATURE_VETO,0);
+        assert_eq!(result.candidate_bricks[0].resolution,8);
+    }
+
+    #[test]
+    fn direct_policy_change_restarts_surface_proof_epochs() {
+        let (topology, mut fields) = setup(vec![brick(0,[0,0],8,true)], [8,8]);
+        let surface=plane_surface([8,8],4.25);
+        fields.density=levelset_surface::implied_fill_fine_cells(&surface).unwrap();
+        let mut options=coarsest_support_options();
+        let mut state=initialize_resolution_policy(&topology);
+        state.history.get_mut(&0).unwrap().reasons=activity_reason::SURFACE;
+        publish_direct_surface_proofs(&topology,&fields,&surface,&options,&mut state,1.0/30.0,0.05).unwrap();
+        let first=plan_resolution_with_surface(&topology,&fields,&state,1.0/30.0,0.05,&options,&surface).unwrap();
+        state=first.state;
+        options.policy.surface_displacement_tolerance_cells=0.5;
+        publish_direct_surface_proofs(&topology,&fields,&surface,&options,&mut state,1.0/30.0,0.05).unwrap();
+        let changed=plan_resolution_with_surface(&topology,&fields,&state,1.0/30.0,0.05,&options,&surface).unwrap();
+        assert_eq!(changed.receipt.bricks[0].requested_resolution,8);
+        assert_eq!(changed.state.history[&0].proof_epochs,0);
     }
 
     fn circle_surface(dimensions: [u32; 2], centre: [f32; 2], radius: f32) -> RdfSurface {

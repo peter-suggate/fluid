@@ -41,17 +41,22 @@ test("coarse-first starts the pool at B1 and curved liquid fine, conserving auth
 test("coarse-first controls survive method normalization and runtime routing", () => {
   const values = resolveMethodValues(adaptiveMassMethod, "balanced", {
     selectorMode: "coarse-first", energyThreshold: 9, curvatureTolerance: 0.4,
-    anticipationSeconds: 0.8, anticipationRadiusBricks: 4, surfaceQuietEpochs: 5,
+    surfaceQuietEpochs: 5,
   });
   const policy = adaptiveMassSolverOptions(values).activityPolicy!;
   assert.equal(policy.coarseFirst, true);
   assert.equal(policy.activitySignals, true);
-  for (const key of ["energyThreshold", "curvatureTolerance", "anticipationSeconds",
-    "anticipationRadiusBricks", "surfaceQuietEpochs"] as const) {
+  for (const key of ["energyThreshold", "curvatureTolerance",
+    "surfaceQuietEpochs"] as const) {
     assert.equal(policy[key], values[key]);
-    assert.ok(ADAPTIVE_MASS_RUNTIME_PARAM_KEYS.includes(key));
     assert.ok(SPARSE_CM12_STAGES["resolution-planning"].controls.some(control =>
       control.kind === "param-range" && control.param === key),
     `${key} needs a slider in the resolution toolstrip`);
   }
+  // Curvature tolerance only seeds the opening atlas, so it must stay OUT of
+  // the runtime set: a live uniform write would move the slider and change
+  // nothing. Leaving it in the construction key rebuilds the solver instead.
+  assert.ok(ADAPTIVE_MASS_RUNTIME_PARAM_KEYS.includes("energyThreshold"));
+  assert.ok(ADAPTIVE_MASS_RUNTIME_PARAM_KEYS.includes("surfaceQuietEpochs"));
+  assert.equal(ADAPTIVE_MASS_RUNTIME_PARAM_KEYS.includes("curvatureTolerance"), false);
 });

@@ -38,7 +38,7 @@ const activityPolicy = Object.freeze({
   activitySignals: true, finestTravelCells: 1, fourTravelCells: 0.5,
   twoTravelCells: 0.25, thinFeatureCells: 2, thinFeatureDensity: 0,
   residencyDensity: 0.005, residencyMassFineCells: 1,
-  surfaceDensityMinimum: 0.05, surfaceDensityMaximum: 0.95,
+  surfaceDensityMinimum: 0.05,
   detailTolerance: 0.08, frontLookaheadSteps: 4, topologyCadenceSteps: 1,
   prepareBricksPerFrame: 64, promoteEpochs: 2, demoteEpochs: 1,
   promoteScore: 160 / 255, demoteScore: 96 / 255, emergencyScore: 224 / 255,

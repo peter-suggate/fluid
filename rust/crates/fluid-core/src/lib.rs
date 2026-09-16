@@ -17,6 +17,8 @@ pub mod lifecycle;
 pub mod lifecycle3d;
 pub mod levelset_volume;
 pub mod levelset_redistance;
+mod levelset_adaptive_distance;
+mod levelset_thin_features;
 pub mod levelset_sharpening;
 pub mod levelset_surface;
 pub mod numerics;

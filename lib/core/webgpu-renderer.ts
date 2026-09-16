@@ -234,6 +234,28 @@ export function canQueuePreparedGPUAdvance(pendingAdvances: number, maximumPendi
   return pendingAdvances < Math.max(1, maximumPendingAdvances);
 }
 
+/**
+ * Whether a solver frame still in flight holds this draw's presentation back.
+ *
+ * `framePending` is a split-submission solver saying the mandatory receipt for
+ * one encoded frame has not landed yet. *Before* the draw admits an advance,
+ * that frame belongs to an earlier draw whose image is already on screen, so
+ * presenting it again would only spend GPU time the pending frame wants.
+ *
+ * *After* the draw has admitted one it means the opposite: the pending frame is
+ * the advance this draw just submitted, whose state the solver published as it
+ * returned, and the presentation encoded behind it in the same queue is exactly
+ * the image of that state. Holding that back drops the picture of every advance
+ * the moment it is made, and the renderer then presents only when the pending
+ * batch ceiling refuses the next advance — one frame in two. The reader watches
+ * the simulation jump two steps at a time, and because advances are retired by
+ * the presentation that follows them, the host clock publishes its time two
+ * steps at a time with it.
+ */
+export function presentationHeldByPendingFrame(framePending: boolean, advanceSubmitted: boolean) {
+  return framePending && !advanceSubmitted;
+}
+
 /** Column-major right-handed world-to-WebGPU-clip transform for voxel raster passes. */
 export function voxelViewProjectionMatrix(camera: CameraState, aspect: number, near = 0.01, far = 100): Float32Array {
   const basis = cameraBasis(camera), position = basis.position;
@@ -3050,7 +3072,9 @@ export class FluidLabRenderer {
     const basis = cameraBasis(camera), position = basis.position;
     // Transport can resume after a small GPU receipt. Keep the last presented
     // image while that frame owns mutable simulation and scene resources.
-    if (this.gpuFluid?.framePending) {
+    // No advance has been admitted yet this draw, so a pending frame here is an
+    // earlier draw's and the image on screen is already its own.
+    if (presentationHeldByPendingFrame(Boolean(this.gpuFluid?.framePending), false)) {
       return this.currentFrameMetrics(config.methodId, presentationContext, false, cpuTrace?.finish());
     }
     // The owner map is allocated lazily and materialized only once something
@@ -3200,6 +3224,10 @@ export class FluidLabRenderer {
       return this.currentFrameMetrics(config.methodId, presentationContext, false, cpuTrace?.finish());
     }
     let gpuInfo = readyGPUFluid?.info;
+    // The advance ledger, read across the submission: an admitted advance is
+    // the one thing that can make a split-submission solver's frame pending
+    // between the draw's entry gate above and the presentation below.
+    const accountedSubmittedTime_s = this.gpuAccountedSubmittedTime_s;
     if (readyGPUFluid) {
       gpuInfo = this.submitPreparedGPUFluid(
         readyGPUFluid, time_s, bodies,
@@ -3207,7 +3235,8 @@ export class FluidLabRenderer {
         getMethod(config.methodId).resource,
       );
     }
-    if (readyGPUFluid?.framePending) {
+    const advanceSubmitted = this.gpuAccountedSubmittedTime_s > accountedSubmittedTime_s;
+    if (presentationHeldByPendingFrame(Boolean(readyGPUFluid?.framePending), advanceSubmitted)) {
       return this.currentFrameMetrics(config.methodId, presentationContext, false, cpuTrace?.finish());
     }
     // The global fine narrow band double-buffers generations. Refresh its

@@ -13,11 +13,13 @@ import { readPublishedCM12Field } from "./sparse-cm12-published-field";
 const arg = (key: string, fallback: string) => process.argv.find(v => v.startsWith(`--${key}=`))?.slice(key.length + 3) ?? fallback;
 const sceneId = arg("scene", "water-box-dam-break-slab");
 const steps = Number(arg("steps", "10"));
+const distanceSweeps = Number(arg("distance-sweeps", "8"));
+const returnPasses = Number(arg("return-passes", "4"));
 const output = arg("output", "artifacts/level-set-volume/sharpening-slab.json");
 assert.ok(Number.isInteger(steps) && steps >= 0);
 await acquireWebGPUExclusiveLock("dawn-probe", "sparse geometric sharpening");
 let device: GPUDevice | undefined, solver: WebGPUAdaptiveMassSolver | undefined;
-const report: Record<string, unknown> = { sceneId, steps, dt: 1 / 30, checkpoints: [] };
+const report: Record<string, unknown> = { sceneId, steps, distanceSweeps, returnPasses, dt: 1 / 30, checkpoints: [] };
 const errors: string[] = [];
 try {
   const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href) as NodeDawnProvider;
@@ -29,7 +31,7 @@ try {
   const scene = getScenePreset(sceneId).create();
   scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 30;
   solver = await WebGPUAdaptiveMassSolver.createCompiledTopologyTransport(device, scene, "balanced",
-    undefined, sparseCM12DawnDefaultOptions(), () => {});
+    undefined, { ...sparseCM12DawnDefaultOptions(), distanceSweeps, returnPasses }, () => {});
   await solver.waitForSimulationReady();
   report.dimensions = [solver.info.nx, solver.info.ny, solver.info.nz];
   const frameTimes: number[] = [];
@@ -40,10 +42,11 @@ try {
       await solver.awaitFrameCompletion(); await device.queue.onSubmittedWorkDone();
       frameTimes.push(performance.now() - started);
     }
-    if (![0, 1, 3, 5, 10, steps].includes(step)) continue;
-    const [fields, phi, volume, transport] = await Promise.all([
+    if (![0, 1, 3, 5, 10, 20, steps].includes(step)) continue;
+    const [fields, phi, volume, transport, activity] = await Promise.all([
       solver.readDiagnosticFields(true), readPublishedCM12Field(device, solver),
       solver.readAcceptedGeometricVolumeQA(), solver.readGeometricVolumeTransportReceiptQA(),
+      solver.readGPUActivityPolicy(),
     ]);
     let phiNegativeFineCells = 0;
     let airSideVolume = 0, deepAirVolume = 0, fractionalFineCells = 0, densitySum = 0;
@@ -54,7 +57,15 @@ try {
       if (phi.values[i]! > 0) airSideVolume += density;
       if (phi.values[i]! > scene.voxelDomain.finestCellSize_m) deepAirVolume += density;
     }
-    (report.checkpoints as unknown[]).push({ step, volume, coupling: transport.coupling,
+    const active = activity.bricks.filter(brick => brick.active);
+    const adaptivity = {
+      activeBricks: active.length,
+      resolutions: Object.fromEntries([1, 2, 4, 8, 16].map(r => [r, active.filter(b => b.acceptedResolution === r).length])),
+      thinBricks: active.filter(b => (b.reasons & 256) !== 0).length,
+      surfaceBricks: active.filter(b => (b.reasons & 1) !== 0).length,
+      bricks: active,
+    };
+    (report.checkpoints as unknown[]).push({ step, volume, adaptivity, coupling: transport.coupling,
       transportFault: transport.fault, phiNegativeFineCells, airSideVolume, deepAirVolume, fractionalFineCells, densitySum });
   }
   report.frameTimesMs = frameTimes;

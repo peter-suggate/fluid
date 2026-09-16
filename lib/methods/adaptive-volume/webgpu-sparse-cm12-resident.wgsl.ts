@@ -1,3 +1,4 @@
+import { createLevelSetThinFeaturesWGSL } from "./levelset-volume-thin-features.wgsl";
 import { SPARSE_CM12_DYNAMIC_SEAM_BINDING_WGSL, SPARSE_CM12_DYNAMIC_SEAM_PUBLICATION_WGSL } from "./sparse-cm12-dynamic-seam-binding.wgsl";
 import {
   createGeometricSolidMotionWGSL,
@@ -1497,7 +1498,7 @@ fn cm12ReleasedWallPhi(positionFine:vec3f)->vec2f{
     }) + createLevelSetVolumeRedistanceWGSL({
       layout: levelSetVolumeLayout,
       bandWidthExpression: "4.0",
-    })
+    }) + createLevelSetThinFeaturesWGSL()
     : /* wgsl */ `
 // Standalone shader fixtures without an LSV arena cannot impose its budget.
 const LSV_CELL_CAPACITY:u32=0xffffffffu;
@@ -1517,6 +1518,7 @@ fn lsvStencilAtPosition(_position:vec3f)->LsvCellStencil{return LsvCellStencil(f
 fn lsvStencilContains(_stencil:LsvCellStencil,_position:vec3f)->bool{return false;}
 fn lsvStencilSampleAt(_stencil:LsvCellStencil,_position:vec3f)->LsvPhiSample{
   return LsvPhiSample(lsvInvalidPhi(),false,false,0u);}
+fn lsvThinFeatureCell(_cell:u32,_width:f32)->u32{return 2u;}
 fn cm12PhiPresentationScale(_brick:u32,span:u32,resolution:u32)->u32{
   return BRICK_FINE_RESOLUTION*span/max(1u,resolution);}
 fn cm12PhiWidthAt(_positionFine:vec3f)->f32{return 0.0;}
@@ -1656,8 +1658,8 @@ struct Params {
   injectionCenter:vec4f,
   injectionRadius:vec4f,
   sharpening:vec4f,         // Algorithm 2 distance/substeps, residency density/mass
-  activityThresholds:vec4f, // finest travel normalization, reserved, thin width
-  activityDensity:vec4f,    // thin floor, surface low/high, detail tolerance
+  activityThresholds:vec4f, // three reserved lanes, thin width
+  activityDensity:vec4f,    // thin floor, surface low, reserved, detail tolerance
   activityTiming:vec4f,     // front lookahead, promote/emergency/demote scores
   activityEpochs:vec4u,     // cadence, promotion epochs, demotion epochs, activity signals enabled
   topologyScheduling:vec4u, // shadow budget, pressure tolerance, gamma diffusion, sharpening
@@ -1670,10 +1672,10 @@ struct Params {
   inflowVelocity:vec4f,     // prescribed finest-cells/second and enable
   refinementRegionControl:vec4u,
   refinementRegions:array<vec4f,16>, // min.xyz/floor, max.xyz/optional ceiling
-  surfaceProof:vec4u,       // displacement/normal float bits, enabled, QA rung
+  surfaceProof:vec4u,       // displacement float bits, reserved, enabled, QA rung
   velocityThresholds:array<vec4f,2>, // indexed by log2(resolution), B1..B16
-  coarseFirst:vec4f, // enabled, finest specific kinetic energy, κh, prediction seconds
-  coarseFirstHistory:vec4f, // search radius, surface proof epochs, reserved
+  coarseFirst:vec4f, // enabled, finest specific kinetic energy, two reserved
+  coarseFirstHistory:vec4f, // reserved, surface proof epochs, policy changed, reserved
   transportCorrections:vec4f, // conservation, gamma history, diffusion dose, sharpening tau
   recoveryCorrections:vec4f, // capacity dose, volume lambda multiplier, eta cap, reserved
   correctionReserved:vec4f, // x: column-height mode; y: surface mode; z: force presentation publication
@@ -6449,9 +6451,6 @@ fn forcedSurfaceResolutionForQA()->u32{return p.surfaceProof.w&31u;}
 fn surfaceDisplacementToleranceMetres()->f32{
   return max(0.0,bitcast<f32>(p.surfaceProof.x));
 }
-fn surfaceNormalMinimumDot()->f32{
-  return clamp(bitcast<f32>(p.surfaceProof.y),-1.0,1.0);
-}
 fn velocityTravelThreshold(resolution:u32)->f32{
   let level=templateLevelIndex(resolution);
   return p.velocityThresholds[level/4u][level%4u];
@@ -6746,8 +6745,8 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
     // and have exposed support on both sides of an axis.
     //
     // Scaling that band by the CELL width instead made the predicate
-    // rung-dependent, and thinFluid is an unconditional finest-rung safety
-    // floor. At B8 the band is half a fine cell; at B4 it is a whole one, so a
+    // rung-dependent; its retention veto must use a physical width. At B8 the
+    // band is half a fine cell; at B4 it is a whole one, so a
     // brick that had just proved it could demote re-flagged as thin on the
     // very next census and jumped straight back to B8 with no proof epochs.
     // Every ordinary pool surface also qualified, pinning most occupied mini32
@@ -6761,6 +6760,9 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
         cellIsThinFluid=cellIsThinFluid||(exposedSides&oppositeSides)==oppositeSides;
       }
     }
+    // Geometry can be thin even when every solver centre is air or diffuse
+    // volume obscures both exposed sides. Inspect the accepted phi crossings.
+    cellIsThinFluid=cellIsThinFluid||lsvThinFeatureCell(cell,thinFeatureWidth)==1u;
     thinFluidCell=thinFluidCell||cellIsThinFluid;
     // Weak wall-separation velocity is not liquid curvature. Static and
     // moving solids already have independent geometric/coupling floors.
@@ -6938,7 +6940,9 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
     &&densityMassFineCells>=p.sharpening.w;
   let axes=select(0u,reducedSurfaceAxes&7u,occupied);
   let surface=occupied&&axes!=0u;
-  let thinFluid=occupied&&(reducedSurfaceAxes&32u)!=0u;
+  // Geometric thin air gaps and small represented drops are independent of
+  // density residency thresholds. Their safety veto cannot be gated by mass.
+  let thinFluid=(reducedSurfaceAxes&32u)!=0u;
   let shape=select(0.0,1.0,countOneBits(axes)>=2u);
   // A certified flooded brick has no moving interface to size. Uniform fall
   // speed is transport demand, not missing bulk detail (the 2D selector uses
@@ -7570,21 +7574,18 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   if(activitySignals&&adaptiveSurface&&validForcedSurfaceRung){
     surfaceFloor=forcedSurfaceRung;
   }
-  // Thin sheets have no coarse retention authority: unlike a broad planar
-  // surface, losing one composite sample can remove the represented feature.
-  // Keep them at the ladder maximum even when a prior broad-surface proof left
-  // a B4 lease on the page.
-  let thinRequiresFinest=thinFluid;
-  let dynamicRequired=max(select(1u,recoveryFloor,recoveryRequired),max(max(
+  // Thin geometry vetoes loss of accepted resolution. It does not by itself
+  // request finest cells: a resolved sheet/drop may already be represented.
+  let thinFloor=select(1u,current,thinFluid);
+  let dynamicRequired=max(thinFloor,max(select(1u,recoveryFloor,recoveryRequired),max(max(
     max(interfaceVelocityFloor,surfaceFloor),
-    select(1u,BRICK_FINE_RESOLUTION,
-      thinRequiresFinest||pageDemand||frontierBoundary)),
-    select(1u,boundaryFloor,boundaryRequired)));
+    select(1u,BRICK_FINE_RESOLUTION,pageDemand||frontierBoundary)),
+    select(1u,boundaryFloor,boundaryRequired))));
   // Fully surrounded liquid has no liquid-air feature to resolve. Ignore its
   // history and bulk-translation floors and retain only the voxel/rigid boundary
   // floor; accepted/candidate 2:1 closure supplies all remaining resolution.
-  let required=select(dynamicRequired,
-    select(1u,boundaryFloor,boundaryRequired),enclosed);
+  let required=max(thinFloor,select(dynamicRequired,
+    select(1u,boundaryFloor,boundaryRequired),enclosed));
   // Use different physical thresholds on the two sides of a rung change.
   // A coarse rung promotes at the next-finer CFL, while a fine rung demotes
   // below the midpoint between its own and the next-coarser transport
@@ -7786,6 +7787,11 @@ fn validateCandidateResolution(@builtin(global_invocation_id)gid:vec3u){
     return;
   }
   var invalid=!validBrickResolution(accepted)||!validBrickResolution(candidate);
+  // Last gate after region-cap and 2:1 closure: neither a stale surface proof
+  // nor an authored cap may coarsen/retire accepted thin geometry.
+  let thinProtected=(atomicLoad(&activity[output+1u])&256u)!=0u;
+  invalid=invalid||(thinProtected&&brickActive(brick)
+    &&(candidate<accepted||!candidateBrickActive(brick)));
   var waitsForGeneration=false;
   let coordinate=cm12WorldLeafCoordinate(brick);
   let directions=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),
@@ -9687,7 +9693,7 @@ fn retireUnsupportedEmptyBricks(@builtin(workgroup_id)wid:vec3u,
   let brick=wid.x;if(brick>=p.dispatch.w){return;}
   if(lane==0u){atomicStore(&frontierDemanded,0u);}workgroupBarrier();
   let output=activityRecord(brick);
-  let eligible=brickActive(brick)&&(atomicLoad(&activity[output+1u])&64u)==0u;
+  let eligible=brickActive(brick)&&(atomicLoad(&activity[output+1u])&(64u|256u))==0u;
   if(eligible){
     // Read the authoritative post-transport bank, not the quantized census.
     // Test the stored amount density before multiplying by cell volume so
@@ -10139,7 +10145,7 @@ fn surfaceProofConstraintFailure(brick:u32,candidateResolution:u32)->u32{
     ||acceptedBrickResolution(brick)<=1u
     ||candidateResolution!=acceptedBrickResolution(brick)/2u){return 2u;}
   let output=activityRecord(brick);let reasons=atomicLoad(&activity[output+1u]);
-  if((reasons&1u)==0u||(reasons&1024u)!=0u){return 4u;}
+  if((reasons&1u)==0u||(reasons&(1024u|256u))!=0u){return 4u;}
   if(injectionReachesBrick(brick)){return 8u;}
   if(velocityResolutionFloor(activityF32(output+33u))
       >candidateResolution){return 16u;}
@@ -10247,6 +10253,13 @@ fn publishSparseCM12SurfaceRepresentabilityReceipts(
     brick,cm12PresentationBrickOrigin,cm12PresentationDensityOffset,true);}
   let targetResolution=surfaceProofTarget;
   let restrictionFactor=surfaceProofRestrictionFactor;
+  // Recheck accepted geometry independently of the previous census. Unknown
+  // support withholds a merge certificate instead of inventing empty space.
+  let acceptedCells=templateBrickCellRange(brick,acceptedBrickResolution(brick));
+  for(var local=lane;local<acceptedCells.y;local+=64u){
+    let thin=lsvThinFeatureCell(acceptedCells.x+local,p.activityThresholds.w);
+    if(thin!=0u){atomicOr(&surfaceProofFailure,32u);atomicStore(&surfaceProofValid,0u);}
+  }
   // Evaluate the actual candidate lattice; phi follows the solver rung.
   for(var index=lane;index<SURFACE_PROOF_LATTICE_CAPACITY;index+=64u){
     let z=index/(SURFACE_PROOF_LATTICE_AXIS*SURFACE_PROOF_LATTICE_AXIS);

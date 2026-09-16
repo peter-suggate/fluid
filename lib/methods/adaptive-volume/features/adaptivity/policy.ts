@@ -7,16 +7,18 @@ export interface SparseCM12ActivityPolicy {
   readonly coarseFirst: boolean;
   /** Specific kinetic energy (m²/s²) requesting the finest rung. */
   readonly energyThreshold: number;
-  /** Maximum normal variation per cell, approximately |curvature| h. */
+  /**
+   * Maximum normal variation per cell, approximately |curvature| h, applied
+   * once when the brick atlas is first built. Per-frame planning no longer
+   * reads curvature — feature-preserving coarsening sizes material by
+   * deformation and representability — so this only seeds the starting rung of
+   * interface bricks and selects the coarse-first bulk cover.
+   */
   readonly curvatureTolerance: number;
-  readonly anticipationSeconds: number;
-  readonly anticipationRadiusBricks: number;
   readonly surfaceQuietEpochs: number;
   /** Maximum rho=.5 edge-crossing displacement accepted by each one-rung
    * presentation proof, expressed in finest-cell widths. */
   readonly surfaceDisplacementToleranceCells: number;
-  /** Maximum narrow-band normal error accepted by the presentation proof. */
-  readonly surfaceNormalToleranceDegrees: number;
   /** Enables publication and consumption of surface representability receipts. */
   readonly surfaceCoarseningEnabled: boolean;
   /** QA-only fixed surface rung. Omitted in production and normal UI flows. */
@@ -33,7 +35,6 @@ export interface SparseCM12ActivityPolicy {
   readonly residencyDensity: number;
   readonly residencyMassFineCells: number;
   readonly surfaceDensityMinimum: number;
-  readonly surfaceDensityMaximum: number;
   readonly detailTolerance: number;
   readonly frontLookaheadSteps: number;
   readonly topologyCadenceSteps: number;
@@ -50,11 +51,8 @@ export const SPARSE_CM12_ACTIVITY_POLICY = Object.freeze({
   coarseFirst: true,
   energyThreshold: 8,
   curvatureTolerance: 0.25,
-  anticipationSeconds: 0.5,
-  anticipationRadiusBricks: 3,
   surfaceQuietEpochs: 2,
   surfaceDisplacementToleranceCells: 1,
-  surfaceNormalToleranceDegrees: 30,
   surfaceCoarseningEnabled: true,
   finestTravelCells: 1,
   fourTravelCells: 0.5,
@@ -64,7 +62,6 @@ export const SPARSE_CM12_ACTIVITY_POLICY = Object.freeze({
   residencyDensity: 0.005,
   residencyMassFineCells: 1,
   surfaceDensityMinimum: 0.05,
-  surfaceDensityMaximum: 0.95,
   detailTolerance: 0.08,
   frontLookaheadSteps: 4,
   topologyCadenceSteps: 1,
@@ -108,16 +105,10 @@ export function sparseCM12ActivityPolicy(
     coarseFirst: values.activitySignals !== false && values.coarseFirst !== false,
     energyThreshold: finiteClamp(values.energyThreshold, defaults.energyThreshold, 0.01, 100),
     curvatureTolerance: finiteClamp(values.curvatureTolerance, defaults.curvatureTolerance, 0.02, 2),
-    anticipationSeconds: finiteClamp(values.anticipationSeconds, defaults.anticipationSeconds, 0, 2),
-    anticipationRadiusBricks: integerClamp(values.anticipationRadiusBricks, defaults.anticipationRadiusBricks, 1, 6),
     surfaceQuietEpochs: integerClamp(values.surfaceQuietEpochs, defaults.surfaceQuietEpochs, 1, 32),
     surfaceDisplacementToleranceCells: finiteClamp(
       values.surfaceDisplacementToleranceCells,
       defaults.surfaceDisplacementToleranceCells, 0, 8,
-    ),
-    surfaceNormalToleranceDegrees: finiteClamp(
-      values.surfaceNormalToleranceDegrees,
-      defaults.surfaceNormalToleranceDegrees, 0, 90,
     ),
     surfaceCoarseningEnabled: values.surfaceCoarseningEnabled !== false,
     ...(values.freezeTopology === true ? { freezeTopology: true } : {}),
@@ -141,9 +132,6 @@ export function sparseCM12ActivityPolicy(
     ),
     surfaceDensityMinimum: finiteClamp(
       values.surfaceDensityMinimum, defaults.surfaceDensityMinimum, 0, 0.49,
-    ),
-    surfaceDensityMaximum: finiteClamp(
-      values.surfaceDensityMaximum, defaults.surfaceDensityMaximum, 0.51, 1,
     ),
     detailTolerance: finiteClamp(
       values.detailTolerance, defaults.detailTolerance, 0.005, 0.5,

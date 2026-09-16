@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
+use crate::levelset_adaptive_distance::{AdaptiveDistance, RETURN_REACH};
 use crate::levelset_redistance::sample_scalar;
 use crate::levelset_surface;
 use crate::presentation::RdfSurface;
@@ -16,6 +17,10 @@ const AMBIGUOUS: usize = usize::MAX - 1;
 #[serde(rename_all = "camelCase")]
 pub struct SharpeningReceipt {
     pub component_count: usize,
+    #[serde(default)]
+    pub adaptive_distance_cells: usize,
+    #[serde(default)]
+    pub far_relocated_volume: f64,
     pub ambiguous_cell_count: usize,
     /// Accepted V in cells without one unique nearby phi-liquid component.
     pub unassigned_volume: f64,
@@ -138,6 +143,8 @@ pub fn sharpen_volume(
 ) -> Result<SharpeningReceipt, ValidationError> {
     let [nx, ny] = surface.dimensions.map(|v| v as usize);
     if graph.dimension != 2 || fine_capacity.len() != nx * ny || volume.len() != graph.cells.len()
+        || fields.capacity.len() != graph.cells.len()
+        || phi.iter().any(|p| !p.is_finite())
         || phi.len() != graph.cells.len() || fine_capacity.iter().any(|v| !v.is_finite() || *v < 0.0)
         || volume.iter().any(|v| !v.is_finite() || *v < 0.0)
     { return Err(ValidationError("volume sharpening requires finite 2-D capacity, phi, and volume".into())); }
@@ -145,14 +152,23 @@ pub fn sharpen_volume(
     let owner = owner_raster(graph);
     let fill = levelset_surface::implied_fill_fine_cells(surface)?;
     let (fine_region, component_count) = region_labels(fine_capacity, &fill, nx, ny);
-    let (region, ambiguous_cell_count) = cell_labels(graph, &fine_region, nx);
+    let (seed_region, _) = cell_labels(graph, &fine_region, nx);
     let target = physical_targets(graph, fine_capacity, &fill, &owner);
     let capacity: Vec<f64> = graph.cells.iter().enumerate()
         .map(|(i, cell)| fields.capacity[i] as f64 * cell.measure as f64).collect();
+    let mut distance = AdaptiveDistance::build(graph, fields, surface, fine_capacity,
+        &owner, &seed_region, component_count, &target);
+    let near = |i: usize| seed_region[i] < component_count && phi[i].abs() as f64
+        <= 2.0 * graph.cells[i].widths[0].max(graph.cells[i].widths[1]) as f64;
+    let region: Vec<_> = (0..volume.len()).map(|i|
+        if seed_region[i] != NONE { seed_region[i] } else { distance.component[i] }).collect();
+    distance.component.clone_from(&region);
+    let ambiguous_cell_count = region.iter().filter(|&&r| r == AMBIGUOUS).count();
     let mut residual: Vec<f64> = volume.iter().zip(&target).map(|(v, h)| v - h).collect();
     let in_band = |i: usize| region[i] < component_count
-        && phi[i].abs() as f64 <= 2.0 * graph.cells[i].widths[0].max(graph.cells[i].widths[1]) as f64;
+        && (near(i) || distance.signed_distance[i].is_finite());
     let mut receipt = SharpeningReceipt { component_count, ambiguous_cell_count, ..Default::default() };
+    receipt.adaptive_distance_cells = distance.distance.iter().filter(|d| d.is_finite()).count();
     for i in 0..volume.len() {
         if region[i] >= component_count && volume[i] > 0.0 { receipt.unassigned_volume += volume[i]; }
         if in_band(i) { receipt.initial_band_absolute_mismatch += residual[i].abs(); }
@@ -163,14 +179,15 @@ pub fn sharpen_volume(
     }
     // Gate diffuse donor islands, rather than individual cells, at half of the
     // smallest cell in that island so thin isolated material is not erased.
-    let donors: Vec<_> = (0..volume.len()).filter(|&i| in_band(i) && residual[i] > 0.0).collect();
+    let mut donors: Vec<_> = (0..volume.len()).filter(|&i| in_band(i) && residual[i] > 0.0).collect();
+    // Complete established near-surface sharpening before the new far return.
+    donors.sort_by_key(|&i| (!near(i), i));
+    let maximum_width = graph.cells.iter().map(|c| c.widths[0].max(c.widths[1]) as f64)
+        .fold(1.0_f64, f64::max);
     let mut donor_dsu = Dsu::new(volume.len());
     let donor_set: HashSet<_> = donors.iter().copied().collect();
-    for &i in &donors { for &row_id in &graph.incidences[i] {
-        for term in &graph.rows[row_id as usize].terms {
-            let j = term.cell_id as usize;
-            if donor_set.contains(&j) && region[j] == region[i] { donor_dsu.join(i, j); }
-        }
+    for &i in &donors { for &(j, _) in &distance.edges[i] {
+        if donor_set.contains(&j) && region[j] == region[i] { donor_dsu.join(i, j); }
     }}
     let mut island_amount: HashMap<usize, f64> = HashMap::new();
     for &i in &donors {
@@ -186,36 +203,43 @@ pub fn sharpen_volume(
         // independent of the adaptive rung containing the diffuse island.
         if island_amount[&root] < 0.5 { continue; }
         let r = region[donor];
-        let center = [graph.cells[donor].center[0], graph.cells[donor].center[1]];
-        let sample = |dx: f32, dy: f32| sample_scalar(surface, [
-            (center[0] + dx).clamp(0.0, graph.dimensions[0]),
-            (center[1] + dy).clamp(0.0, graph.dimensions[1]),
-        ]).unwrap_or(phi[donor]);
-        let normal = [
-            (sample(0.5, 0.0) - sample(-0.5, 0.0)) as f64,
-            (sample(0.0, 0.5) - sample(0.0, -0.5)) as f64,
-        ];
-        let normal_length = normal[0].hypot(normal[1]);
-        if normal_length <= 1e-12 || !normal_length.is_finite() { continue; }
-        let normal = [normal[0] / normal_length, normal[1] / normal_length];
-        let sign = if phi[donor] >= 0.0 { 1.0 } else { -1.0 };
+        let center = graph.cells[donor].center;
         let width = graph.cells[donor].widths[0].max(graph.cells[donor].widths[1]) as f64;
-        let travel = (phi[donor].abs() as f64).min(2.0 * width);
-        let landing = [graph.cells[donor].center[0] as f64 - sign * normal[0] * travel,
-            graph.cells[donor].center[1] as f64 - sign * normal[1] * travel];
+        let (landing, normal) = if near(donor) {
+            let sample = |dx: f32, dy: f32| sample_scalar(surface, [
+                (center[0]+dx).clamp(0.0,graph.dimensions[0]),
+                (center[1]+dy).clamp(0.0,graph.dimensions[1]),
+            ]).unwrap_or(phi[donor]);
+            let gradient = [(sample(0.5,0.0)-sample(-0.5,0.0)) as f64,
+                (sample(0.0,0.5)-sample(0.0,-0.5)) as f64];
+            let length = gradient[0].hypot(gradient[1]);
+            if length <= 1e-12 || !length.is_finite() { continue; }
+            let sign = if phi[donor] >= 0.0 {1.0} else {-1.0};
+            let inward = gradient.map(|v| -sign*v/length);
+            let travel = (phi[donor].abs() as f64).min(2.0*width);
+            ([center[0] as f64+inward[0]*travel, center[1] as f64+inward[1]*travel], inward)
+        } else {
+            let landing = distance.closest[donor];
+            let vector = [landing[0]-center[0] as f64, landing[1]-center[1] as f64];
+            let length = vector[0].hypot(vector[1]).max(1e-12);
+            (landing, vector.map(|v| v/length))
+        };
+        let reach = if near(donor) {4.0*maximum_width} else {RETURN_REACH};
+        let paths = distance.paths(donor, reach);
         let mut receivers: Vec<_> = (0..volume.len()).filter(|&j| j != donor && in_band(j)
-            && region[j] == r && residual[j] < 0.0 && target[j] > 0.0)
+            && (!near(donor) || near(j)) && region[j] == r && residual[j] < 0.0 && target[j] > 0.0)
             .filter_map(|j| {
                 let dx = graph.cells[j].center[0] as f64 - graph.cells[donor].center[0] as f64;
                 let dy = graph.cells[j].center[1] as f64 - graph.cells[donor].center[1] as f64;
-                let actual = dx.hypot(dy);
+                if !paths[j].is_finite() { return None; }
+                let actual = if near(donor) { dx.hypot(dy) } else { paths[j] };
                 let landing_distance = (graph.cells[j].center[0] as f64 - landing[0])
                     .hypot(graph.cells[j].center[1] as f64 - landing[1]);
                 let radius = 2.0 * width.max(
                     graph.cells[j].widths[0].max(graph.cells[j].widths[1]) as f64);
-                if actual > radius || landing_distance >= radius { return None; }
+                if (near(donor) && actual > radius) || landing_distance >= radius { return None; }
                 let alignment = if actual > 1e-12 {
-                    ((dx * -sign * normal[0] + dy * -sign * normal[1]) / actual).max(0.0)
+                    ((dx * normal[0] + dy * normal[1]) / actual).max(0.0)
                 } else { 1.0 };
                 let kernel = (1.0 - landing_distance / radius).powi(2) * (0.25 + 0.75 * alignment);
                 Some((j, actual, kernel))
@@ -236,6 +260,7 @@ pub fn sharpen_volume(
                 volume[donor] -= moved; volume[receiver] += moved;
                 residual[donor] -= moved; residual[receiver] += moved;
                 receipt.relocated_volume += moved;
+                if !near(donor) { receipt.far_relocated_volume += moved; }
                 receipt.maximum_relocation_distance = receipt.maximum_relocation_distance.max(distance);
                 donor_used.insert(donor); receiver_used.insert(receiver);
             }
