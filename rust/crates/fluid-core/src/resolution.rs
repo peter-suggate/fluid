@@ -2123,8 +2123,7 @@ fn plan_resolution_impl(
             } else {
                 1
             };
-            let material_floor = if direct_surface.is_some() && m.history.mean_density > 0.0 { 2 } else { 1 };
-            let coarse_required = geometry_floor.max(material_floor)
+            let coarse_required = geometry_floor
                 .max(measured_floor)
                 .max(incoming_retention)
                 .max(safety);
@@ -2569,6 +2568,27 @@ mod tests {
             &initialize_resolution_policy(&topology),1.0/30.0,0.05,&options,&surface).unwrap();
         assert_ne!(result.receipt.fault_bits & resolution_fault::THIN_FEATURE_VETO,0);
         assert_eq!(result.candidate_bricks[0].resolution,8);
+    }
+
+    #[test]
+    fn submerged_direct_levelset_liquid_can_coarsen_to_b1() {
+        let (topology, mut fields) = setup(vec![brick(0, [0, 0], 2, true)], [8, 8]);
+        fields.density.fill(1.0);
+        let surface = plane_surface([8, 8], 32.0);
+        let options = coarsest_support_options();
+        let mut state = initialize_resolution_policy(&topology);
+        let mut resolution = 2;
+        for _ in 0..3 {
+            publish_direct_surface_proofs(&topology, &fields, &surface, &options,
+                &mut state, 1.0 / 30.0, 0.05).unwrap();
+            let decision = plan_resolution_with_surface(&topology, &fields, &state,
+                1.0 / 30.0, 0.05, &options, &surface).unwrap();
+            assert_eq!(decision.receipt.fault_bits, 0);
+            resolution = decision.receipt.bricks[0].scheduled_resolution;
+            state = decision.state;
+            if resolution == 1 { break; }
+        }
+        assert_eq!(resolution, 1, "liquid occupancy alone must not impose a B2 floor");
     }
 
     #[test]

@@ -22,8 +22,9 @@
  * Step, Reset. They sit in the middle of the bar beside what a step actually
  * costs. The scene, the transport arm and Δt sit beside them because each of
  * those starts a different *run* — a fact about the page rather than about the
- * water in it. Nothing in the sidebar is an intervention, and no lens is one;
- * if a reading ever moves the water it has been written in the wrong place.
+ * water in it. Nothing on the sidebar's Stage and Readout tabs is an
+ * intervention, and no lens is one; if a reading ever moves the water it has
+ * been written in the wrong place.
  *
  * Everything else is contextual, in the product's two senses of the word.
  *
@@ -36,11 +37,14 @@
  * what they are looking at without being offered a way to change it.
  *
  * An **instrument** — a control found by watching the water answer it — is a
- * row on the EDIT toolstrip at the viewport's corner: the lens over the water,
- * the two overlays, the surface, the pressure budget, and under a rule the two
- * strokes a drag can be. Sixteen lenses do not fit a pie, and a budget is not
- * chosen from a list once; that is the whole of the rule deciding which of the
- * two surfaces a capability belongs to.
+ * row on the EDIT column, docked in the sidebar's Edit tab: the lens over the
+ * water, the two overlays, the surface, the pressure budget, and under a rule
+ * the two strokes a drag can be. Sixteen lenses do not fit a pie, and a budget
+ * is not chosen from a list once; that is the whole of the rule deciding which
+ * of the two surfaces a capability belongs to. The column used to hang off the
+ * viewport's corner, and the readout stack off the opposite one; both are
+ * sidebar tabs now, because with a selected box's own strip beside them they
+ * were three panels over one picture.
  *
  * The keyboard is the studio's, in the studio's order: an open ring swallows
  * every key; `Tab` swaps the modes; `Escape` unwinds from the inside out — the
@@ -53,11 +57,11 @@
  * pages is how a reader learns the shortcuts are unreliable. The order, and why
  * it is that order, is `advance-lab/use-slice-shortcuts.ts`.
  *
- * The lens list on that strip and the strip along the bottom are one choice
+ * The lens list on that column and the strip along the bottom are one choice
  * offered twice, on purpose: the bottom strip lays the stages out as the loop,
  * with what each costs, for a reader studying the anatomy of the advance; the
- * toolstrip puts the same set where the pointer already is, for a reader
- * studying the water. Neither is a mode and neither moves anything — which is
+ * column puts the same set beside the other instruments, for a reader studying
+ * the water. Neither is a mode and neither moves anything — which is
  * why the page no longer walks them on a timer. A visualization that changed on
  * its own decided for the reader what they were looking at.
  *
@@ -83,8 +87,9 @@
  * Everything that is not the water is either a control or folded away. The
  * reader arrives at a running simulation with a caption on it; the stage's
  * sub-seams, the scene's provenance, the fidelity caveat and the table of what
- * a cell carries are all one click down, in the sidebar, and none of them is
- * open until asked for. That is the whole layout rule: the picture is the
+ * a cell carries are all one click down, in the sidebar's Stage tab, and none
+ * of them is open until asked for; the run's readouts are the Readout tab
+ * beside it. That is the whole layout rule: the picture is the
  * subject, and the prose is what you reach for when the picture raises a
  * question.
  *
@@ -224,9 +229,6 @@ const CELLWISE_REMAP_OPTION = ADVANCE_TRANSPORT_EXPERIMENTS["cellwise-remap"].op
  * `g` mean here exactly what they mean in the 3-D studio. The lab's own `r` is
  * gone: `r` is the studio's ray probe. */
 
-/** Where the EDIT strip hangs, as a fraction of the viewport — its corner. */
-const TOOLSTRIP_LEFT_FRACTION = 0.014;
-const TOOLSTRIP_TOP_FRACTION = 0.06;
 /** Smallest ball the solver can resolve, and the floor a sizing drag stops at. */
 const DROP_MINIMUM_FINE = 1;
 /* What a step costs is read off the median of this many of them, not off the
@@ -300,6 +302,20 @@ const CELL_STATE: readonly (readonly [string, string, string])[] = [
 ];
 
 type Metric = "workgroups" | "dispatches";
+/**
+ * The sidebar's three faces, in the order the tabs stand.
+ *
+ * Stage is what a lens *means*, Readout is what the run is doing, and Edit is
+ * the instrument column — the three things that used to share the viewport
+ * with the water. The first two are readings and can be looked at from either
+ * mode; Edit is a door into EDIT, since its rows are what that mode is for.
+ */
+type SidebarTab = "stage" | "readout" | "edit";
+const SIDEBAR_TABS: readonly { readonly id: SidebarTab; readonly label: string }[] = [
+  { id: "stage", label: "Stage" },
+  { id: "readout", label: "Readout" },
+  { id: "edit", label: "Edit" },
+];
 /** The reconstructions a reader may pick between, which is not all of them:
  *  the direct level set is what the level-set transport publishes rather than
  *  a choice, and `ADVANCE_SURFACE_VIEWS` is where that is written down. */
@@ -1600,6 +1616,33 @@ function AdvanceSlice({ session, lab }: {
     }
   }, [selectedRegionId, selectedRegion, session.ui]);
 
+  /* Which face of the sidebar is up, and the reading face to return to.
+   *
+   * The Edit tab follows the mode rather than owning it. Entering EDIT — from
+   * Tab, from the header's toggle, from the tab itself — raises the column,
+   * because that is what the column used to do by appearing at the corner; and
+   * leaving EDIT puts back whichever reading was up before, since the column is
+   * not mounted in LOOK. A reading chosen *while* editing just shows: the mode
+   * is about the water, and looking at the numbers does not put the pen down.
+   *
+   * Tracked as the mode last seen rather than swept by an effect, so the
+   * render that changes the mode is already the render that shows the tab. */
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>("stage");
+  const [readingTab, setReadingTab] = useState<Exclude<SidebarTab, "edit">>("stage");
+  const [tabMode, setTabMode] = useState(editing);
+  if (tabMode !== editing) {
+    setTabMode(editing);
+    setSidebarTab(editing ? "edit" : sidebarTab === "edit" ? readingTab : sidebarTab);
+  }
+  const chooseTab = (tab: SidebarTab): void => {
+    if (tab === "edit") {
+      if (!editing) session.ui.getState().setViewportMode("interact");
+    } else {
+      setReadingTab(tab);
+    }
+    setSidebarTab(tab);
+  };
+
   useSliceShortcuts(session, {
     refit,
     toggleOverlay,
@@ -1996,8 +2039,7 @@ function AdvanceSlice({ session, lab }: {
               slice with no liquid in it earns an overlay, because then there is
               no picture for it to cover. */}
           {(emptySlice || stroking || readings.fault || levelSetCapability) &&
-            <div className={`${styles.hud} ${styles.hudTop}`}
-              data-strip={editing ? "" : undefined}>
+            <div className={`${styles.hud} ${styles.hudTop}`}>
             {emptySlice && <div className={styles.alarm}>
               This authored centre slice contains no initial liquid.</div>}
             {readings.fault && <div className={`${styles.alarm} ${styles.rejected}`}>
@@ -2011,7 +2053,7 @@ function AdvanceSlice({ session, lab }: {
             {levelSetCapability && <div className={`${styles.alarm} ${styles.rejected}`}>
               {levelSetCapability} Choose another transport or scene to advance.</div>}
             {/* An armed stroke says so on the picture as well as on its row:
-                the row is at the corner and the water is where the hand is, and
+                the row is in the sidebar and the water is where the hand is, and
                 what the next press will do is a fact about the water. */}
             {droppingBall && <div className={styles.caption}>
               Dropping water — click to place a ball, drag out to size it.
@@ -2025,56 +2067,6 @@ function AdvanceSlice({ session, lab }: {
                 ? " at exactly that size" : " no coarser than that"}.
               {" "}<b>Esc</b> or <b>{getEditorGesture("region-draw").shortcut}</b> to stop.</div>}
           </div>}
-
-          <div className={`${styles.hud} ${styles.hudRight}`}>
-            <div className={styles.stack}>
-              <span className={styles.read}>frame <b>{readings.frame}</b></span>
-              <span className={styles.read}>microsteps <b>{readings.microsteps}</b></span>
-              <span className={styles.read}>max |u| <b>{readings.maxVelocity.toFixed(2)}</b></span>
-              <span className={styles.read}>volume drift <b>{(readings.drift * 100).toFixed(3)}%</b></span>
-              <span className={styles.read}>bricks re-rung <b>{readings.churn} / {readings.bricks}</b></span>
-              <span className={styles.read}>transport <b>{transportExperiment === "cellwise-remap"
-                ? "geometric remap" : transportExperiment === "level-set-volume"
-                  ? "level set + volume" : "baseline"}</b></span>
-              {readings.cellwise && <span className={styles.read} title={`Closure residual ${readings.cellwise.closureResidual.toExponential(2)} · area balance ${readings.cellwise.areaBalanceError.toExponential(2)}`}>
-                remap work <b>{readings.cellwise.traces} traces · {readings.cellwise.receivers} receivers</b>
-              </span>}
-              {readings.cellwise && readings.cellwise.correctedFolds > 0 &&
-                <span className={`${styles.read} ${styles.faulted}`}>
-                  folded receivers <b>{readings.cellwise.correctedFolds}</b></span>}
-              {readings.levelSetVolume && <span className={styles.read}>
-                over capacity <b>{readings.levelSetVolume.overCapacityCells} cells ·
-                  {" "}+{readings.levelSetVolume.maximumOverCapacityRatio.toFixed(2)} K max</b>
-              </span>}
-              {readings.levelSetVolume && <span className={styles.read}>
-                redistancing <b>active · {n(readings.levelSetVolume.redistancedSamples)} samples ·
-                  {" "}{n(readings.levelSetVolume.redistanceFallbackSamples)} fallbacks</b>
-              </span>}
-              {/* How many boxes are standing over this cut. A count and not a
-                  list: the picture already draws them, and the one being asked
-                  about is the one under the pointer. */}
-              {regionState.length > 0 && <span className={styles.read}>
-                enforced <b>{regionState.length} region
-                  {regionState.length === 1 ? "" : "s"}</b></span>}
-              {/* Which line the picture is drawing, and — since the choice is
-                  contextual now rather than a widget in a bar — where to change
-                  it. The one readout that takes the pointer, so it says so. */}
-              <span className={`${styles.read} ${styles.hint}`}
-                title={readingDirectLevelSet
-                  ? "The direct level set publishes its own surface, so this method reconstructs nothing to choose between. Tab for the edit strip; right-click the water for what it can do."
-                  : "Right-click the water and open Visuals to change the reconstruction, or press Tab and use the SURFACE row on the edit strip."}>
-                surface <b>{readingDirectLevelSet ? "Direct level set"
-                  : SURFACE_VIEWS.find(view => view.id === surfaceView)?.label}</b></span>
-              {/* The drift denominator moved, so say so beside it — otherwise
-                  the percentage above silently means something new. */}
-              {readings.injections > 0 && <span className={styles.read}>
-                drops added <b>{readings.injections}</b></span>}
-              {readings.fault && <span className={`${styles.read} ${styles.faulted}`}>
-                fault <b>{readings.fault.stage}</b></span>}
-              {runtimeFault && <span className={`${styles.read} ${styles.faulted}`}>
-                exception <b>{runtimeFault}</b></span>}
-            </div>
-          </div>
 
           {hover && <div className={styles.probe} style={{
             left: Math.max(8, Math.min(hover.width - PROBE_WIDTH - 8, hover.px + 14)),
@@ -2106,19 +2098,6 @@ function AdvanceSlice({ session, lab }: {
                 </div>)}
             </div>}
           </div>}
-
-          {/* The instruments, only in EDIT.
-
-              LOOK is deliberately bare — a run opens to be watched, and chrome
-              over the water is exactly what that mode exists to keep off it.
-              Everything on this column is a control found by watching the water
-              answer it, which is the whole of the rule dividing it from the
-              ring: a verb with a location is a right-click, an instrument is a
-              row that stays open under the hand. */}
-          {editing && <SliceToolstrip
-            leftFraction={TOOLSTRIP_LEFT_FRACTION}
-            topFraction={TOOLSTRIP_TOP_FRACTION}
-            regions={regionDoc} />}
 
           {/* The selected box's own controls, at the box's own corner — the
               3-D `EntityToolstrip`'s argument: a selection *is* the disclosure,
@@ -2198,7 +2177,30 @@ function AdvanceSlice({ session, lab }: {
         </div>
       </section>
 
-      <aside className={styles.inspector} aria-label="Stage detail">
+      {/* Everything about the water that is not the water. The readout stack
+          and the EDIT column used to stand over the picture's two top corners,
+          and a selected box's own strip — which hangs off the box — landed on
+          one or the other whenever the box reached the top of the slice. Three
+          panels over one picture is the page deciding the chrome matters more
+          than the subject, so the two that belong to no place on it are tabs
+          here, and only what *is* on the picture stays there: the boxes, their
+          handles and strip, the aimed ball, the probe and the alarms. */}
+      <aside className={styles.inspector} aria-label="Sidebar">
+        <div className={styles.tabs} role="tablist" aria-label="Sidebar">
+          {SIDEBAR_TABS.map(tab => <button type="button" role="tab" key={tab.id}
+            id={`advance-sidebar-tab-${tab.id}`} className={styles.tab}
+            aria-selected={sidebarTab === tab.id}
+            aria-controls={sidebarTab === tab.id ? `advance-sidebar-${tab.id}` : undefined}
+            /* A rejected frame or an exception is said on the tab as well, so
+               a reader on another face still learns the run has stopped. */
+            data-flag={tab.id === "readout" && (readings.fault || runtimeFault) ? "" : undefined}
+            title={tab.id === "edit" && !editing
+              ? "Enter EDIT (Tab) and show the instruments" : undefined}
+            onClick={() => chooseTab(tab.id)}>{tab.label}</button>)}
+        </div>
+
+        {sidebarTab === "stage" && <div className={styles.panel} role="tabpanel"
+          id="advance-sidebar-stage" aria-labelledby="advance-sidebar-tab-stage">
         <p className={styles.eyebrow}>adaptive volume · sparse geometric CM12</p>
 
         {representing ? <>
@@ -2452,7 +2454,7 @@ function AdvanceSlice({ session, lab }: {
             <p className={styles.summary}>
               A live 2-D slice of the solver&rsquo;s own model. Every stage of the resident
               encoder is a lens over this one picture — pick one from the strip below, or
-              from the LENS row on the edit strip, to see what it touches. Hover the water
+              from the lens row on the Edit tab, to see what it touches. Hover the water
               to read a cell, click to pin it, and right-click whatever you are asking
               about.
             </p>
@@ -2465,6 +2467,65 @@ function AdvanceSlice({ session, lab }: {
             </p>
           </Fold>
         </div>
+        </div>}
+
+        {sidebarTab === "readout" && <div className={styles.panel} role="tabpanel"
+          id="advance-sidebar-readout" aria-labelledby="advance-sidebar-tab-readout">
+          <dl className={styles.readout}>
+            <div><dt>frame</dt><dd>{readings.frame}</dd></div>
+            <div><dt>microsteps</dt><dd>{readings.microsteps}</dd></div>
+            <div><dt>max |u|</dt><dd>{readings.maxVelocity.toFixed(2)}</dd></div>
+            <div><dt>volume drift</dt><dd>{(readings.drift * 100).toFixed(3)}%</dd></div>
+            <div><dt>bricks re-rung</dt><dd>{readings.churn} / {readings.bricks}</dd></div>
+            <div><dt>transport</dt><dd>{transportExperiment === "cellwise-remap"
+              ? "geometric remap" : transportExperiment === "level-set-volume"
+                ? "level set + volume" : "baseline"}</dd></div>
+            {readings.cellwise && <div title={`Closure residual ${readings.cellwise.closureResidual.toExponential(2)} · area balance ${readings.cellwise.areaBalanceError.toExponential(2)}`}>
+              <dt>remap work</dt>
+              <dd>{readings.cellwise.traces} traces · {readings.cellwise.receivers} receivers</dd></div>}
+            {readings.cellwise && readings.cellwise.correctedFolds > 0 && <div data-faulted="">
+              <dt>folded receivers</dt><dd>{readings.cellwise.correctedFolds}</dd></div>}
+            {readings.levelSetVolume && <div>
+              <dt>over capacity</dt>
+              <dd>{readings.levelSetVolume.overCapacityCells} cells ·
+                {" "}+{readings.levelSetVolume.maximumOverCapacityRatio.toFixed(2)} K max</dd></div>}
+            {readings.levelSetVolume && <div>
+              <dt>redistancing</dt>
+              <dd>active · {n(readings.levelSetVolume.redistancedSamples)} samples ·
+                {" "}{n(readings.levelSetVolume.redistanceFallbackSamples)} fallbacks</dd></div>}
+            {/* How many boxes are standing over this cut. A count and not a
+                list: the picture already draws them, and the one being asked
+                about is the one under the pointer. */}
+            {regionState.length > 0 && <div>
+              <dt>enforced</dt>
+              <dd>{regionState.length} region{regionState.length === 1 ? "" : "s"}</dd></div>}
+            {/* Which line the picture is drawing, and where to change it. */}
+            <div title={readingDirectLevelSet
+              ? "The direct level set publishes its own surface, so this method reconstructs nothing to choose between."
+              : "Right-click the water and open Visuals to change the reconstruction, or use the SURFACE row on the Edit tab."}>
+              <dt>surface</dt>
+              <dd>{readingDirectLevelSet ? "Direct level set"
+                : SURFACE_VIEWS.find(view => view.id === surfaceView)?.label}</dd></div>
+            {/* The drift denominator moved, so say so beside it — otherwise
+                the percentage above silently means something new. */}
+            {readings.injections > 0 && <div>
+              <dt>drops added</dt><dd>{readings.injections}</dd></div>}
+            {readings.fault && <div data-faulted="">
+              <dt>fault</dt><dd>{readings.fault.stage}</dd></div>}
+            {runtimeFault && <div data-faulted="">
+              <dt>exception</dt><dd>{runtimeFault}</dd></div>}
+          </dl>
+        </div>}
+
+        {/* The instruments, only in EDIT. The tab stays offered in LOOK as the
+            way in: everything on this column is a control found by watching the
+            water answer it, which is what EDIT is for. The rule dividing it from
+            the ring is unchanged — a verb with a location is a right-click, an
+            instrument is a row that stays open under the hand. */}
+        {sidebarTab === "edit" && <div className={styles.panel} role="tabpanel"
+          id="advance-sidebar-edit" aria-labelledby="advance-sidebar-tab-edit">
+          {editing && <SliceToolstrip regions={regionDoc} />}
+        </div>}
       </aside>
     </div>
 

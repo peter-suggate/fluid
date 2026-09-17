@@ -76,9 +76,8 @@ export function createEmptyScene(options: EmptySceneOptions = {}): SceneDescript
     height_m: dimensions_cells.y * finestCellSize_m,
     depth_m: dimensions_cells.z * finestCellSize_m,
     fillFraction: 0,
-    // A fresh document is about to have things dropped into it from above, and
-    // a lid would be the first thing the user had to find and remove.
-    top: "open",
+    // New documents share the catalog's closed simulation ceiling.
+    top: "closed",
     fluidWallMode: "no-slip",
     // The domain is still the solver's boundary; it is simply not drawn as a
     // tank. Standing an aquarium in the middle of an empty room presumes the

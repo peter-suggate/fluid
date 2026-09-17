@@ -964,7 +964,7 @@ export function createHeroGardenHoseScene(options: HeroGardenHoseOptions = {}): 
   scene.container.width_m = HERO_GARDEN_CONTAINER.width_m;
   scene.container.height_m = HERO_GARDEN_CONTAINER.height_m;
   scene.container.depth_m = HERO_GARDEN_CONTAINER.depth_m;
-  scene.container.top = "open";
+  scene.container.top = "closed";
   scene.container.vessel = "none";
   scene.voxelDomain = {
     finestCellSize_m: cellSize_m,

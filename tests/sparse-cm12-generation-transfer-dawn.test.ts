@@ -68,6 +68,32 @@ const dawnModule = process.env.WEBGPU_NODE_MODULE;
   for (const row of fine.gradientRows) if (row.kind === "sparse-air") {
    assert.ok(Math.abs(after[c.faceOffset + row.id]! - data[a.faceOffset + row.id]!) < 1e-6);
   }
+  readback.unmap();
+  // Inserted faces must reconstruct the accepted MAC field even when the
+  // cached cell velocity is zero. A cell-mean fallback fails this fixture.
+  const staggered = new Float32Array(b.state.size / 4);
+  for (const cell of coarse.cells) {
+   staggered[b.densityOffset + cell.id] = 1;
+   staggered[b.gammaOffset + cell.id] = 1;
+  }
+  for (const row of coarse.gradientRows) {
+   staggered[b.faceOffset + row.id] = Math.sin(0.3 * row.centerFine[row.axis]!);
+  }
+  device.queue.writeBuffer(b.state, 0, staggered);
+  await transferSparseCM12GenerationFields(device, coarse, fine, b, c);
+  const analyticCopy = device.createCommandEncoder();
+  analyticCopy.copyBufferToBuffer(c.state, 0, readback, 0, c.state.size);
+  device.queue.submit([analyticCopy.finish()]); await readback.mapAsync(GPUMapMode.READ);
+  const prolonged = new Float32Array(readback.getMappedRange());
+  for (const row of fine.gradientRows) {
+   const q = row.centerFine[row.axis]!;
+   const lo = Math.floor(q / 8) * 8, hi = Math.min(lo + 8, [13, 15, 11][row.axis]!);
+   const t = (q - lo) / (hi - lo);
+   const expected = Math.sin(0.3 * lo) * (1 - t) + Math.sin(0.3 * hi) * t;
+   assert.ok(Math.abs(prolonged[c.faceOffset + row.id]! - expected) < 2e-7,
+    `axis ${row.axis} face ${q}: staggered prolongation`);
+  }
+  readback.unmap();
   assert.equal(await device.popErrorScope(), null);
  } finally { for (const buffer of buffers) buffer.destroy(); device?.destroy(); await releaseWebGPUExclusiveLock(); }
 });

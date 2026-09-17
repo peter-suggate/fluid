@@ -159,7 +159,7 @@ pub fn publish_pressure_geometry_from_phi(
 
 
 #[derive(Clone, Copy)]
-struct ReleasedWall {
+struct IncomingAirBoundary {
     axis: usize,
     boundary: f32,
     tangent_minimum: f32,
@@ -168,22 +168,38 @@ struct ReleasedWall {
     displacement: f32,
 }
 
-fn released_walls(graph: &Graph, fields: &Fields, dt: f32) -> Vec<ReleasedWall> {
+fn incoming_air_boundaries(graph: &Graph, fields: &Fields, dt: f32) -> Vec<IncomingAirBoundary> {
     let mut result = Vec::new();
-    for row in graph.rows.iter().filter(|row| {
-        row.kind == crate::types::RowKind::ClosedWorld && row.separating
-    }) {
+    for row in &graph.rows {
+        let axis = row.axis as usize;
+        if axis >= 2 { continue; }
+        let released = row.kind == crate::types::RowKind::ClosedWorld && row.separating;
+        // SparseAir also denotes interior allocation edges. Only an actual
+        // exterior open face supplies ambient air; never carve an internal seam
+        // or overwrite an explicitly prescribed liquid inflow.
+        let open_exterior = row.kind == crate::types::RowKind::SparseAir
+            && row.terms.len() == 1
+            && (row.center[axis] == 0.0 || row.center[axis] == graph.dimensions[axis])
+            && row.open_fraction > 1.0e-8
+            && fields.inflow_coverage.get(row.id as usize).copied().unwrap_or(0.0) == 0.0;
+        if !released && !open_exterior { continue; }
         for term in &row.terms {
             let inward = if term.coefficient >= 0.0 { 1.0 } else { -1.0 };
-            let away_speed = inward
-                * (fields.face_velocity[row.id as usize] - row.solid_velocity);
+            // Closed-wall release is wall-relative. An open domain boundary
+            // is stationary and uses the same fluid velocity as the sampler.
+            let normal_speed = if released {
+                fields.face_velocity[row.id as usize] - row.solid_velocity
+            } else {
+                (fields.face_velocity[row.id as usize]
+                    - (1.0 - row.open_fraction) * row.solid_velocity) / row.open_fraction
+            };
+            let away_speed = inward * normal_speed;
             if away_speed <= 1.0e-6 {
                 continue;
             }
             let cell = &graph.cells[term.cell_id as usize];
-            let axis = row.axis as usize;
             let tangent = 1 - axis;
-            result.push(ReleasedWall {
+            result.push(IncomingAirBoundary {
                 axis,
                 boundary: row.center[axis],
                 tangent_minimum: cell.minimum[tangent],
@@ -196,12 +212,12 @@ fn released_walls(graph: &Graph, fields: &Fields, dt: f32) -> Vec<ReleasedWall> 
     result
 }
 
-/// Signed distance to released solid faces, positive in the exterior solid.
-/// Taking the maximum with transported phi supplies the air continuation on
-/// both sides of the wall. The interior half is essential: it changes an old,
+/// Incoming air at an open boundary or a released solid face. Taking the
+/// maximum with transported phi supplies the inflowing air characteristic on
+/// both sides of the boundary. The interior half is essential: it changes an old,
 /// deeply negative contact value into `-distance_to_wall`, so a wall-normal
 /// translation moves the zero set by the actual characteristic distance.
-fn released_wall_phi(walls: &[ReleasedWall], point: [f32; 2]) -> Option<f32> {
+fn incoming_air_phi(walls: &[IncomingAirBoundary], point: [f32; 2]) -> Option<f32> {
     walls
         .iter()
         .filter(|wall| {
@@ -319,8 +335,8 @@ fn advect_shared_phi_with_velocity(
     if previous.vertex_phi_fine.len() != (nx + 1) * (ny + 1) {
         return Err(ValidationError("direct level-set vertex count does not match dimensions".into()));
     }
-    let released_walls = if dt > 0.0 {
-        released_walls(graph, fields, dt)
+    let air_boundaries = if dt > 0.0 {
+        incoming_air_boundaries(graph, fields, dt)
     } else {
         Vec::new()
     };
@@ -336,10 +352,10 @@ fn advect_shared_phi_with_velocity(
     }
     if dt > 0.0 {
         continue_phi_onto_closed_walls(graph, fields, &mut result);
-        // Separation wins at shared vertices/corners, including where a
-        // tangential closed face also supplies liquid continuation.
+        // Incoming ambient air and separation win at shared vertices/corners,
+        // including where a tangential closed face supplies liquid contact.
         for y in 0..=ny { for x in 0..=nx {
-            if let Some(wall_phi) = released_wall_phi(&released_walls, [x as f32, y as f32]) {
+            if let Some(wall_phi) = incoming_air_phi(&air_boundaries, [x as f32, y as f32]) {
                 let i = x + (nx + 1) * y;
                 result[i] = result[i].max(wall_phi);
             }
@@ -1230,6 +1246,72 @@ mod tests {
         }
         let zero_dt = advect_shared_phi(&graph, &fields, &previous, 0.0, &mut receipt).unwrap();
         assert_eq!(zero_dt, previous.vertex_phi_fine);
+    }
+
+    #[test]
+    fn incoming_air_releases_open_boundaries_on_every_axis_and_rung() {
+        for resolution in [8, 4, 2] {
+            for axis in 0..2 {
+                for side in 0..2 {
+                    let mut graph = graph([8, 8, 1], vec![brick(0, [0, 0, 0], resolution)]);
+                    let boundary = 8.0 * side as f32;
+                    let inward = if side == 0 { 1.0 } else { -1.0 };
+                    for row in &mut graph.rows {
+                        if row.axis as usize == axis && row.center[axis] == boundary {
+                            row.kind = crate::RowKind::SparseAir;
+                            row.open_fraction = 1.0;
+                        }
+                    }
+                    let previous = levelset_surface::publish([8, 8], vec![-4.0; 81], 64.0).unwrap();
+                    let mut speed = [0.0; 2];
+                    speed[axis] = 2.0 * inward;
+                    let fields = velocity_fields(&graph, speed);
+                    let phi = advect_shared_phi(&graph, &fields, &previous, 0.25,
+                        &mut LevelSetVolumeReceipt::default()).unwrap();
+                    for tangent in 0..=8 {
+                        let mut p = [tangent, tangent];
+                        p[axis] = 8 * side;
+                        assert!((phi[p[0] + 9*p[1]] - 0.5).abs() < 1e-6,
+                            "rung {resolution}, axis {axis}, side {side}, vertex {p:?}: {}",
+                            phi[p[0] + 9*p[1]]);
+                        p[axis] = if side == 0 { 1 } else { 7 };
+                        assert!((phi[p[0] + 9*p[1]] + 0.5).abs() < 1e-6);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ambient_air_boundary_respects_flux_sources_apertures_and_domain_extent() {
+        let mut graph = graph([8, 8, 1], vec![brick(0, [0, 0, 0], 8)]);
+        let id = graph.rows.iter().find(|r| r.axis == 1 && r.center == [3.5, 8.0, 0.0]).unwrap().id as usize;
+        graph.rows[id].kind = crate::RowKind::SparseAir;
+        graph.rows[id].open_fraction = 1.0;
+        let mut fields = velocity_fields(&graph, [0.0, -2.0]);
+        let phi = |g: &Graph, f: &Fields| incoming_air_phi(&incoming_air_boundaries(g, f, 0.25), [3.5, 8.0]);
+        assert_eq!(phi(&graph, &fields), Some(0.5));
+        fields.face_velocity[id] = 2.0;
+        assert_eq!(phi(&graph, &fields), None, "outflow does not inject air");
+        fields.face_velocity[id] = 0.0;
+        assert_eq!(phi(&graph, &fields), None, "stationary contact is unchanged");
+        fields.face_velocity[id] = -2.0;
+        fields.inflow_coverage = vec![0.0; graph.rows.len()];
+        fields.inflow_coverage[id] = 1.0;
+        assert_eq!(phi(&graph, &fields), None, "prescribed liquid inflow wins");
+        fields.inflow_coverage[id] = 0.0;
+        graph.rows[id].center[1] = 7.0;
+        assert_eq!(phi(&graph, &fields), None, "interior sparse support edge is not an air inlet");
+        graph.rows[id].center[1] = 8.0;
+        graph.rows[id].open_fraction = 0.0;
+        assert_eq!(phi(&graph, &fields), None, "solid aperture is not an air inlet");
+        graph.rows[id].open_fraction = 0.5;
+        graph.rows[id].solid_velocity = 1.0;
+        fields.face_velocity[id] = -0.5; // 0.5 * -2 + 0.5 * 1
+        assert_eq!(phi(&graph, &fields), Some(0.5), "use fluid velocity, not aperture-weighted flux");
+        let previous = levelset_surface::publish([8, 8], vec![-4.0; 81], 64.0).unwrap();
+        assert_eq!(advect_shared_phi(&graph, &fields, &previous, 0.0,
+            &mut LevelSetVolumeReceipt::default()).unwrap(), previous.vertex_phi_fine);
     }
 
     #[test]

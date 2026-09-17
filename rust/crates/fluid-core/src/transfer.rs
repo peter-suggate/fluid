@@ -219,6 +219,52 @@ pub fn plan_transfer(
                 plan.face_areas.push(area as f32);
             }
         }
+        // A newly inserted face lies inside an accepted cell. Prolong the
+        // accepted staggered field linearly in its normal direction rather
+        // than averaging cell velocities (which filters the faces twice).
+        // Tangential overlap still integrates flux exactly. These effective
+        // area weights sum to the represented part of the target face.
+        let plane = row.center[a];
+        let mut donors: BTreeSet<u32> = BTreeSet::new();
+        for q in lo.floor() as i32..hi.ceil() as i32 {
+            let mut p = [0; 2];
+            p[a] = plane.floor() as i32;
+            p[t] = q;
+            if let Some(ids) = spatial.get(&p) { donors.extend(ids); }
+        }
+        for &id in &donors {
+            let cell = &source.cells[id as usize];
+            if plane <= cell.minimum[a] || plane >= cell.maximum[a] { continue; }
+            let area = overlap(lo, hi, cell.minimum[t] as f64, cell.maximum[t] as f64);
+            if area <= 0.0 { continue; }
+            let fraction = (plane - cell.minimum[a]) as f64 / cell.widths[a] as f64;
+            for positive in [false, true] {
+                let boundary: Vec<_> = source.incidences[id as usize].iter().filter_map(|&r| {
+                    let face = &source.rows[r as usize];
+                    if face.axis != row.axis || (face.center[a] > cell.center[a]) != positive { return None; }
+                    let term = face.terms.iter().find(|term| term.cell_id == id)?;
+                    Some((r, term.coefficient.abs() as f64
+                        * face.static_dual_weight.unwrap_or(face.dual_weight) as f64))
+                }).collect();
+                let total: f64 = boundary.iter().map(|(_, w)| w).sum();
+                if (total-cell.widths[t] as f64).abs() > 1e-6*cell.widths[t] as f64 {
+                    return Err(ValidationError("face prolongation lacks accepted normal support".into()));
+                }
+                let factor = if positive { fraction } else { 1.0 - fraction };
+                for (r, weight) in boundary {
+                    plan.face_sources.push(r);
+                    plan.face_areas.push((area * factor * weight / total) as f32);
+                }
+            }
+        }
+        let start = *plan.face_offsets.last().unwrap() as usize;
+        let covered: f32 = plan.face_areas[start..].iter().sum();
+        if covered < row.measure - 1e-5 && !new_air.iter().any(|b| {
+            plane >= b.minimum_fine[a] && plane <= b.maximum_exclusive_fine[a]
+                && lo >= b.minimum_fine[t] as f64 && hi <= b.maximum_exclusive_fine[t] as f64
+        }) {
+            return Err(ValidationError("target face lacks accepted or explicit new-air support".into()));
+        }
     }
     plan.face_offsets.push(plan.face_sources.len() as u32);
     Ok(plan)
@@ -570,20 +616,14 @@ fn transfer_fields_impl(
     }
     for row in &target.rows {
         let id = row.id as usize;
-        let (mut flux, mut covered) = (0.0, 0.0);
+        let mut flux = 0.0;
         for entry in plan.face_offsets[id] as usize..plan.face_offsets[id + 1] as usize {
             let area = plan.face_areas[entry];
             flux += area * fields.face_velocity[plan.face_sources[entry] as usize];
-            covered += area;
         }
-        let (mut velocity, mut weight) = (0.0_f32, 0.0_f32);
-        for term in &row.terms {
-            let w = term.coefficient.abs();
-            velocity += w * result.cell_velocity[2 * term.cell_id as usize + row.axis as usize];
-            weight += w;
-        }
-        let fill = (row.measure - covered).max(0.0) * (velocity / weight.max(1e-20));
-        result.face_velocity[id] = (flux + fill) / row.measure;
+        // The plan certifies every represented patch. Only explicit new air
+        // may have no contribution; its initialized normal velocity is zero.
+        result.face_velocity[id] = flux / row.measure;
     }
     Ok(result)
 }

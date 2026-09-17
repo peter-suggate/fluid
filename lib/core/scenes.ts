@@ -155,7 +155,7 @@ function createExternalVoxelPoolTransferScene(sceneId: string): SceneDescription
     height_m: 12 * cellSize_m,
     depth_m: 16 * cellSize_m,
     fillFraction: 0.75,
-    top: "open",
+    top: "closed",
     fluidWallMode: "free-slip",
   };
   scene.voxelDomain = { finestCellSize_m: cellSize_m, brickSize_cells: 8 };
@@ -168,9 +168,8 @@ function createExternalVoxelPoolTransferScene(sceneId: string): SceneDescription
     // therefore literally a missing SolidWorld voxel region, not an opening
     // descriptor consumed by the solver.
     { operation: "clear", minimum: [8, 0, 5], maximumExclusive: [9, 4, 11] },
-    // Catch-basin floor, depth walls, and far wall. Its open top and open near
-    // end are closed by the small tank's existing shell everywhere except the
-    // clear above.
+    // Catch-basin floor, depth walls, and far wall. The small tank's shell
+    // closes the near end except for the authored opening above.
     { operation: "fill", minimum: [8, -1, 0], maximumExclusive: [32, 0, 16],
       materialId: 2 },
     { operation: "fill", minimum: [8, 0, -1], maximumExclusive: [32, 16, 0],
@@ -181,8 +180,8 @@ function createExternalVoxelPoolTransferScene(sceneId: string): SceneDescription
       materialId: 2 },
     // The initial tank is twelve cells high but the connectivity unit is an
     // eight-cell page. Extend only its vertical side voxels through the
-    // remainder of the second page so empty support cannot route around a wall
-    // before fluid reaches the open top. There is still no ceiling.
+    // remainder of the second page so empty support cannot route around a
+    // wall. The catalog compiler supplies the small tank's ceiling at y=12.
     { operation: "fill", minimum: [-1, 12, 0], maximumExclusive: [0, 16, 16],
       materialId: 2 },
     { operation: "fill", minimum: [8, 12, 0], maximumExclusive: [9, 16, 16],
@@ -752,7 +751,7 @@ export function createCoarseFirstPoolImpactScene(): SceneDescription {
   scene.duration_s = 4;
   scene.rigidBodies = [];
   scene.container = { ...scene.container, width_m: 6.4, height_m: 4.8,
-    depth_m: 6.4, fillFraction: 1 / 3, top: "open", fluidWallMode: "free-slip" };
+    depth_m: 6.4, fillFraction: 1 / 3, top: "closed", fluidWallMode: "free-slip" };
   scene.voxelDomain = { finestCellSize_m: 0.05, brickSize_cells: 8 };
   scene.fluid.initialCondition = "tank-fill";
   scene.fluid.initialLiquidVolumes = [
@@ -1260,7 +1259,7 @@ export function createTallCellsHillsideDamBreakScene(): SceneDescription {
     depth_m: nz * cell_m,
     fillFraction: reservoir.x * reservoir.y * reservoir.z
       / (nx * cell_m * ny * cell_m * nz * cell_m),
-    top: "open",
+    top: "closed",
     fluidWallMode: "free-slip",
     vessel: "none",
   };
@@ -2122,10 +2121,9 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     build: () => {
       const scene = sceneBody();
       scene.sceneId = "interactive-water-box-settled";
-      // This is the interactive drop tank: bodies authored above the rim must
-      // be able to enter it. A closed SolidWorld roof correctly repels them
-      // before they ever reach the water.
-      scene.container.top = "open";
+      // Catalog tanks use a physical ceiling; author dropped bodies inside it.
+      scene.container.top = "closed";
+      for (const body of scene.rigidBodies) body.position_m.y = 0.6;
       scene.fluid.initialCondition = "tank-fill";
       return scene;
     },

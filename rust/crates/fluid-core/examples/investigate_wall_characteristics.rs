@@ -42,13 +42,22 @@ fn main() {
             rows: serde_json::from_value(fs["rows"].clone()).unwrap(),
             ..Default::default()
         };
-        let fields = Fields {
+        let mut fields = Fields {
             face_velocity: serde_json::from_value(fs["faceVelocity"].clone()).unwrap(),
+            capacity: serde_json::from_value(fs["capacity"].clone()).unwrap(),
             ..Default::default()
         };
-        let velocity = StaggeredVelocity2d::new(&graph, &fields).unwrap();
         let phi: Vec<f32> = serde_json::from_value(a["phi"].clone()).unwrap();
         let surface = levelset_surface::publish([32, 16], phi.clone(), 128.0).unwrap();
+        if args.iter().any(|a| a == "--project-air") {
+            fluid_core::levelset_air_extension::project_air_extension(
+                &graph,
+                &mut fields,
+                &levelset_surface::cell_phi(&graph, &surface).unwrap(),
+            )
+            .unwrap();
+        }
+        let velocity = StaggeredVelocity2d::new(&graph, &fields).unwrap();
         let mut traces = Vec::new();
         let mut steps = 1;
         while steps <= maximum {

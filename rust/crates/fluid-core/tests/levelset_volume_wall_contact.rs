@@ -30,6 +30,11 @@ fn split_dam_contacts_dry_walls_without_persistent_fine_side_overload() {
                 world.state.fields.fault.is_none(),
                 "frame {frame}: numerical fault"
             );
+            let snapshot = if frame == 120 {
+                Some(world.snapshot(2).unwrap().to_vec())
+            } else {
+                None
+            };
             let graph = &world.state.topology.graph;
             let fields = &world.state.fields;
             let volume: f64 = graph
@@ -64,6 +69,47 @@ fn split_dam_contacts_dry_walls_without_persistent_fine_side_overload() {
                         "fine cell overloaded before wall pressure responded"
                     );
                 }
+            }
+            if frame == 120 {
+                // The level set must not be compressed by divergent air
+                // extension before sharpening gets a chance to return V.
+                let bytes = snapshot.as_ref().unwrap();
+                let word =
+                    |i: usize| u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap()) as usize;
+                let offset = (0..word(16))
+                    .map(|i| 32 + 16 * i)
+                    .find(|&i| word(i) == 31)
+                    .unwrap();
+                let start = word(offset + 8);
+                let vertices = (0..word(offset + 12))
+                    .map(|i| {
+                        f32::from_le_bytes(
+                            bytes[start + 4 * i..start + 4 * i + 4].try_into().unwrap(),
+                        )
+                    })
+                    .collect();
+                let surface =
+                    fluid_core::levelset_surface::publish([32, 16], vertices, 128.0).unwrap();
+                let fill = fluid_core::levelset_surface::implied_fill_fine_cells(&surface).unwrap();
+                let mut positive = [0.0_f64; 2];
+                for cell in &graph.cells {
+                    let mut target = 0.0;
+                    for y in cell.minimum[1] as usize..cell.maximum[1] as usize {
+                        for x in cell.minimum[0] as usize..cell.maximum[0] as usize {
+                            target += fill[x + 32 * y] as f64;
+                        }
+                    }
+                    let actual = fields.density[cell.id as usize] as f64 * cell.measure as f64;
+                    positive[usize::from(cell.center[0] >= 16.0)] += (actual - target).max(0.0);
+                }
+                assert!(
+                    positive.iter().all(|&v| v < 4.0),
+                    "split {left}/{right}: air extension created diffuse residue {positive:?}"
+                );
+                assert!(
+                    (positive[0] - positive[1]).abs() < 0.75,
+                    "split {left}/{right}: coarse/fine residue diverged {positive:?}"
+                );
             }
             if [20, 60, 120].contains(&frame) {
                 for right_wall in [false, true] {

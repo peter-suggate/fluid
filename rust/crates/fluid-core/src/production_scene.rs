@@ -150,8 +150,10 @@ pub(crate) fn source_boundaries(scene: &SceneDocument) -> [BoundaryMode; 6] {
     ]
 }
 fn reduced_boundaries(scene: &SceneDocument) -> [BoundaryMode; 6] {
-    // Source +Y is reflected into canvas/topology +Y exactly once.
+    // Reduced solver bricks retain source Y. Canvas reflection belongs to the
+    // raster adapters, not the topology's physical boundary flags.
     [
+        BoundaryMode::Closed,
         BoundaryMode::Closed,
         BoundaryMode::Closed,
         if scene.container.top == "open" {
@@ -159,7 +161,6 @@ fn reduced_boundaries(scene: &SceneDocument) -> [BoundaryMode; 6] {
         } else {
             BoundaryMode::Closed
         },
-        BoundaryMode::Closed,
         BoundaryMode::Closed,
         BoundaryMode::Closed,
     ]
@@ -765,7 +766,10 @@ mod tests {
     }
 
     #[test]
-    fn production_slices_match_frozen_typescript_constructor() {
+    fn production_slices_match_constructor_with_physical_y_boundaries() {
+        // Geometry/fields retain the frozen TypeScript oracle. The open-pool
+        // row-kind hash corrects its reflected Y boundary flags: solver Y is
+        // source Y, so the floor is closed and the top is open.
         let fixture: Fixture = serde_json::from_str(include_str!(
             "../../../core/testdata/production-scene-golden.json"
         ))

@@ -1114,7 +1114,9 @@ impl World {
             )));
         }
         if self.bricks_changed(&support.candidate_bricks) {
+            observe("projected-support-transfer-before", &self.state.topology.graph, &self.state.fields);
             self.transition(support.candidate_bricks, dt_s)?;
+            observe("projected-support-transfer-after", &self.state.topology.graph, &self.state.fields);
             if level_set_volume {
                 extend_velocity_with_level_set(
                     &self.state.topology.graph,
@@ -1125,6 +1127,7 @@ impl World {
             } else {
                 extend_velocity(&self.state.topology.graph, &mut self.state.fields, 8)?;
             }
+            observe("projected-support-extension-after", &self.state.topology.graph, &self.state.fields);
             if cellwise_remap {
                 reconstruct_interfaces_for_cellwise_remap(
                     &self.state.topology.graph,
@@ -1140,8 +1143,9 @@ impl World {
             }
             if cellwise_remap || level_set_volume {
                 let post_support_pressure_clock = NativeStageClock::start();
-                // Projected-support transfer conserves material and momentum, but
-                // the interpolated candidate face field is not discretely
+                // Transfer conserves material and gathers cell momentum, but
+                // face reconstruction and recollocation do not preserve that
+                // intermediate momentum. The candidate face field is not discretely
                 // divergence-free on its new rows. Geometric whole-step transport
                 // consumes this generation immediately, so close the candidate
                 // field with the same pressure operator before tracing it. Body
@@ -1469,7 +1473,9 @@ impl World {
                     &self.state.topology.graph, &self.state.fields,
                 )?);
             }
+            observe("resolution-transfer-before", &self.state.topology.graph, &self.state.fields);
             self.transition(decision.candidate_bricks, dt_s)?;
+            observe("resolution-transfer-after", &self.state.topology.graph, &self.state.fields);
         }
         self.refresh_surface()?;
         self.arena.release_after_publication()?;

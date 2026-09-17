@@ -1,6 +1,6 @@
 "use client";
 
-import { Toolstrip, ToolstripRule } from "../components/toolstrip";
+import { DockedToolstrip, ToolstripRule } from "../components/toolstrip";
 import { LiquidDropRow } from "../lib/features/liquid-drop/ui";
 import { RegionRow } from "../lib/features/refinement-region/ui";
 import { useSession } from "../lib/core/session/session-context";
@@ -8,7 +8,7 @@ import { LabFeatureSlot } from "./LabFeatureSlot";
 import { labRegionSpace, type LabRegionDocument } from "./lab-region-space";
 
 /**
- * The lab's EDIT strip: the instruments over the picture, then what a stroke
+ * The lab's EDIT column: the instruments over the picture, then what a stroke
  * adds.
  *
  * A frame, four slots and two shared rows. Nothing on this column is written
@@ -34,13 +34,18 @@ import { labRegionSpace, type LabRegionDocument } from "./lab-region-space";
  * answer. Sixteen lenses do not fit a pie; a pressure budget is found by
  * sliding it and watching, not by choosing it from a list once.
  *
+ * Docked in the sidebar's Edit tab rather than hung off the viewport's corner.
+ * It stood over the water for as long as the picture had room for it, and it
+ * stopped having room: the column, the readout stack in the opposite corner and
+ * a selected box's own strip were three panels over one slice, and the box's
+ * strip landed on the readouts whenever the box reached the top right. The
+ * rows are unchanged — `DockedToolstrip` is the same frame without the anchor.
+ *
  * Mounted only in EDIT. In LOOK the pointer cannot reach the water, so a column
- * of things to do to it would be a column of disabled rows.
+ * of things to do to it would be a column of disabled rows; the tab that holds
+ * it is the door into EDIT instead.
  */
 export interface SliceToolstripProps {
-  /** Where the column hangs, in viewport fractions — the corner, as the studio's. */
-  readonly leftFraction: number;
-  readonly topFraction: number;
   /**
    * The boxes drawn and the slice they are on.
    *
@@ -58,12 +63,7 @@ export function SliceToolstrip(props: SliceToolstripProps) {
   // Read so the column re-renders when the mode changes under it; the page
   // decides whether to mount it at all, which is the gate that matters.
   useSession();
-  return <Toolstrip
-    leftFraction={props.leftFraction}
-    topFraction={props.topFraction}
-    ariaLabel="Slice"
-    testId="slice-toolstrip"
-  >
+  return <DockedToolstrip ariaLabel="Slice" testId="slice-toolstrip">
     {/* What the picture *is*: the lens over the water and the annotations that
         compose over it, then which surface it reconstructs, then what one
         advance may spend answering the pressure. */}
@@ -76,5 +76,5 @@ export function SliceToolstrip(props: SliceToolstripProps) {
     <ToolstripRule />
     <RegionRow space={labRegionSpace} doc={props.regions} />
     <LiquidDropRow />
-  </Toolstrip>;
+  </DockedToolstrip>;
 }

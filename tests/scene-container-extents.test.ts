@@ -34,8 +34,8 @@ test("resizing a finished tank moves its voxel shell instead of stranding it", (
       `resized boundary ${coordinate.join(",")} must be solid`);
   }
 
-  assert.equal(sampleSolidWorld(world, [8, 48, 8]).solidFraction, 0,
-    "the resized tank must retain its open top");
+  assert.equal(sampleSolidWorld(world, [8, 48, 8]).solidFraction, 1,
+    "the resized tank must move its closed ceiling to the new height");
 
   // Structural editing is immutable: callers that still hold the source scene
   // must continue to see its original lattice and shell.

@@ -5,9 +5,14 @@ use fluid_core::{
 };
 
 fn main() {
-    let seed: serde_json::Value = serde_json::from_str(include_str!(
+    // Optional scene-document JSON and frame count let this probe follow the
+    // live scene catalog rather than only the historical dam fixture.
+    let args: Vec<String> = std::env::args().collect();
+    let source = args.get(1).map(|path| std::fs::read_to_string(path).unwrap());
+    let seed: serde_json::Value = serde_json::from_str(source.as_deref().unwrap_or(include_str!(
         "../../../core/testdata/water-box-dam-break-advance-seed.json"
-    )).unwrap();
+    ))).unwrap();
+    let frames: u32 = args.get(2).map(|s| s.parse().unwrap()).unwrap_or(10);
     let scene: SceneDocument = serde_json::from_value(seed["scene"].clone()).unwrap();
     let mut world = World::from_document(
         scene,
@@ -19,13 +24,18 @@ fn main() {
             ..Default::default()
         },
     ).unwrap();
-    for frame in 0..=10 {
+    for frame in 0..=frames {
+        let mut stage_cells = std::collections::BTreeMap::new();
         if frame > 0 {
-            world.advance(frame, 1.0 / 30.0).unwrap();
+            world.advance_with_observer(frame, 1.0 / 30.0, |stage, graph, _| {
+                stage_cells.insert(stage.to_string(), graph.cells.len());
+            }).unwrap();
         }
         println!("{}", serde_json::json!({
             "frame": frame,
             "cells": world.state.topology.graph.cells.len(),
+            "bricks": world.state.topology.bricks.iter().map(|b| &b.seed).collect::<Vec<_>>(),
+            "stageCells": stage_cells,
             "resolution": world.resolution_receipt,
             "policy": world.resolution_policy,
             "options": world.resolution_options,

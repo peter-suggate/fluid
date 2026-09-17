@@ -121,6 +121,10 @@ export interface SparseCM12GenerationTransferPlan {
   readonly faceOffsets: Uint32Array;
   readonly faceSources: Uint32Array;
   readonly faceAreas: Float32Array;
+  /** Non-coplanar faces prolong the accepted staggered field, never cell averages. */
+  readonly faceProlongationOffsets: Uint32Array;
+  readonly faceProlongationSources: Uint32Array;
+  readonly faceProlongationAreas: Float32Array;
 }
 
 export function compileSparseCM12GenerationTransfer(
@@ -165,19 +169,69 @@ export function compileSparseCM12GenerationTransfer(
     [plane, overlapIndex(boxes, maximumSpan, 2)]));
   const faceOffsets = new Uint32Array(target.gradientRows.length + 1);
   const faceSources: number[] = [], faceAreas: number[] = [];
+  const faceProlongationOffsets = new Uint32Array(target.gradientRows.length + 1);
+  const faceProlongationSources: number[] = [], faceProlongationAreas: number[] = [];
   for (const face of targetFaces) {
     faceOffsets[face.id] = faceSources.length;
     let covered = 0;
     for (const [id, area] of queries.get(face.plane)?.(face) ?? []) {
       faceSources.push(id); faceAreas.push(area); covered += area;
     }
+    faceProlongationOffsets[face.id] = faceProlongationSources.length;
+    const row = target.gradientRows[face.id]!;
+    if (covered < row.areaFineCells2 - 1e-6) {
+      const axis = row.axis, plane = row.centerFine[axis]!;
+      const tangents = [0, 1, 2].filter(a => a !== axis);
+      const donors = new Set<number>();
+      for (const term of row.terms) {
+        for (let at = cellOffsets[term.cellId]!; at < cellOffsets[term.cellId + 1]!; at++) {
+          if (cellSources[at] !== 0xffffffff) donors.add(cellSources[at]!);
+        }
+      }
+      for (const id of [...donors].sort((a,b) => a-b)) {
+        const donor = sourceCells[id]!;
+        if (plane <= donor.lower[axis]! || plane >= donor.lower[axis]! + donor.widths[axis]!) continue;
+        const area = tangents.reduce((v,a,t) => v * Math.max(0,
+          Math.min(face.lower[t]! + face.widths[t]!, donor.lower[a]! + donor.widths[a]!)
+            - Math.max(face.lower[t]!, donor.lower[a]!)), 1);
+        if (area <= 0) continue;
+        const fraction = (plane-donor.lower[axis]!)/donor.widths[axis]!;
+        const patch = { id, lower: tangents.map(a => donor.lower[a]!),
+          widths: tangents.map(a => donor.widths[a]!), span: donor.span };
+        for (const side of [0, 1]) {
+          const normal = donor.lower[axis]! + side*donor.widths[axis]!;
+          const boundary = queries.get(`${axis}/${normal}`)?.(patch) ?? [];
+          const total = boundary.reduce((v,[,a]) => v+a,0);
+          const expectedArea = tangents.reduce((v,a) => v*donor.widths[a]!,1);
+          if (Math.abs(total-expectedArea) > 1e-6*expectedArea)
+            throw new Error("CM12 prolongation lacks accepted face support");
+          for (const [before, weight] of boundary) {
+            faceProlongationSources.push(before);
+            faceProlongationAreas.push(area * (side ? fraction : 1-fraction)*weight/total);
+          }
+        }
+        covered += area;
+      }
+    }
+    if (covered < row.areaFineCells2 - 1e-6) {
+      const tangents = [0,1,2].filter(a => a !== row.axis);
+      const explicitAir = newAirCoverage.some(box =>
+        row.centerFine[row.axis]! >= box.minimumFine[row.axis]!
+        && row.centerFine[row.axis]! <= box.maximumExclusiveFine[row.axis]!
+        && tangents.every((a,t) => face.lower[t]! >= box.minimumFine[a]!
+          && face.lower[t]! + face.widths[t]! <= box.maximumExclusiveFine[a]!));
+      if (!explicitAir) throw new Error("CM12 target face lacks accepted or explicit new-air support");
+    }
     if (covered > target.gradientRows[face.id]!.areaFineCells2 + 1e-6) {
       throw new Error("CM12 target face has overlapping source flux authority");
     }
   }
   faceOffsets[target.gradientRows.length] = faceSources.length;
+  faceProlongationOffsets[target.gradientRows.length] = faceProlongationSources.length;
   return { cellOffsets, cellSources: Uint32Array.from(cellSources), cellVolumes: Float32Array.from(cellVolumes),
-    faceOffsets, faceSources: Uint32Array.from(faceSources), faceAreas: Float32Array.from(faceAreas) };
+    faceOffsets, faceSources: Uint32Array.from(faceSources), faceAreas: Float32Array.from(faceAreas),
+    faceProlongationOffsets, faceProlongationSources: Uint32Array.from(faceProlongationSources),
+    faceProlongationAreas: Float32Array.from(faceProlongationAreas) };
 }
 
 /** A candidate remap was infeasible; the accepted resident remains valid. */
@@ -251,19 +305,11 @@ export async function prepareSparseCM12GenerationTransfer(
   const faceOffsets = append(plan.faceOffsets);
   const faceSources = append(Uint32Array.from(plan.faceSources, (id) => source.rowIds[id]!));
   const faceAreas = append(bits(plan.faceAreas));
+  const prolongationOffsets = append(plan.faceProlongationOffsets);
+  const prolongationSources = append(Uint32Array.from(plan.faceProlongationSources, id => source.rowIds[id]!));
+  const prolongationAreas = append(bits(plan.faceProlongationAreas));
   const rowIds = append(target.rowIds);
   const areas = append(bits(targetGrid.gradientRows.map((row) => row.areaFineCells2)));
-  const axes = append(targetGrid.gradientRows.map((row) => row.axis));
-  const termOffsetsList = [0], termCellsList: number[] = [], termWeightsList: number[] = [];
-  for (const row of targetGrid.gradientRows) {
-    for (const term of row.terms) {
-      termCellsList.push(target.cellIds[term.cellId]!);
-      termWeightsList.push(Math.abs(term.coefficient));
-    }
-    termOffsetsList.push(termCellsList.length);
-  }
-  const termOffsets = append(termOffsetsList), termCells = append(termCellsList);
-  const termWeights = append(bits(termWeightsList));
   const sourceBoxes = "atlas" in sourceGrid ? cells(sourceGrid) : sourceGrid.cells;
   const targetBoxes = cells(targetGrid);
   const sourceCount = sourceBoxes.length;
@@ -602,13 +648,14 @@ fn oldCapacityFraction(cell: u32) -> f32 {
   if (!valid(velocity)) { atomicOr(&fault[0], 2u); }
   flux += area * velocity; covered += area;
  }
- var velocity = 0.0; var weight = 0.0; let axis = m[${axes}u + id];
- for (var at = m[${termOffsets}u + id]; at < m[${termOffsets}u + id + 1u]; at++) {
-  let w = f(${termWeights}u + at); let cell = m[${termCells}u + at];
-  velocity += w * next[${target.velocityOffset}u + 4u * cell + axis]; weight += w;
+ for (var at = m[${prolongationOffsets}u + id]; at < m[${prolongationOffsets}u + id + 1u]; at++) {
+  let area = f(${prolongationAreas}u + at);
+  let velocity = old[oldFace() + m[${prolongationSources}u + at]];
+  if (!valid(velocity)) { atomicOr(&fault[0], 2u); }
+  flux += area * velocity; covered += area;
  }
- let area = f(${areas}u + id);
- let value = (flux + max(0.0, area - covered) * velocity / max(weight, 1e-20)) / area;
+ // Uncovered area is certified new air by the host plan and starts at rest.
+ let value = flux / f(${areas}u + id);
  let dst = m[${rowIds}u + id];
  next[${target.faceOffset}u + dst] = value; next[${target.faceOtherOffset}u + dst] = value;
 }

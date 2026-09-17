@@ -282,9 +282,109 @@ pub fn plan_transfer_3d(
                 }
             }
         }
+        prolong_inserted_face(source, target, row, &mut plan, new_air)?;
     }
     plan.face_offsets.push(plan.face_sources.len() as u32);
     Ok(plan)
+}
+
+// Complete inserted faces from the accepted staggered field. Coplanar overlap
+// remains authoritative; an interior face interpolates the two donor planes.
+fn prolong_inserted_face(
+    source: &Graph,
+    target: &Graph,
+    row: &crate::Row,
+    plan: &mut TransferPlan,
+    new_air: &[NewAirCoverage3d],
+) -> Result<(), ValidationError> {
+    let axis = row.axis as usize;
+    let tangents: Vec<_> = (0..3).filter(|&a| a != axis).collect();
+    let (lower, widths) = face_box(target, row)?;
+    let plane = row.center[axis];
+    let mut donors = BTreeSet::new();
+    for term in &row.terms {
+        for at in
+            plan.cell_offsets[term.cell_id as usize]..plan.cell_offsets[term.cell_id as usize + 1]
+        {
+            let id = plan.cell_sources[at as usize];
+            if id != NEW_AIR {
+                donors.insert(id);
+            }
+        }
+    }
+    for id in donors {
+        let cell = &source.cells[id as usize];
+        if plane <= cell.minimum[axis] || plane >= cell.maximum[axis] {
+            continue;
+        }
+        let area = (0..2)
+            .map(|t| {
+                overlap(
+                    lower[t],
+                    lower[t] + widths[t],
+                    cell.minimum[tangents[t]] as f64,
+                    cell.maximum[tangents[t]] as f64,
+                )
+            })
+            .product::<f64>();
+        if area <= 0.0 {
+            continue;
+        }
+        let fraction = (plane - cell.minimum[axis]) as f64 / cell.widths[axis] as f64;
+        for positive in [false, true] {
+            let boundary: Vec<_> = source.incidences[id as usize]
+                .iter()
+                .filter_map(|&r| {
+                    let face = &source.rows[r as usize];
+                    if face.axis != row.axis || (face.center[axis] > cell.center[axis]) != positive
+                    {
+                        return None;
+                    }
+                    let term = face.terms.iter().find(|t| t.cell_id == id)?;
+                    Some((
+                        r,
+                        term.coefficient.abs() as f64
+                            * face.static_dual_weight.unwrap_or(face.dual_weight) as f64,
+                    ))
+                })
+                .collect();
+            let total: f64 = boundary.iter().map(|(_, w)| w).sum();
+            let expected_area = tangents.iter().map(|&a| cell.widths[a] as f64).product::<f64>();
+            if (total-expected_area).abs() > 1e-6*expected_area {
+                return Err(ValidationError(
+                    "3D face prolongation lacks accepted normal support".into(),
+                ));
+            }
+            let factor = if positive { fraction } else { 1.0 - fraction };
+            for (r, w) in boundary {
+                plan.face_sources.push(r);
+                plan.face_areas.push((area * factor * w / total) as f32);
+            }
+        }
+    }
+    let covered: f32 = plan.face_areas[*plan.face_offsets.last().unwrap() as usize..]
+        .iter()
+        .sum();
+    if covered < row.measure - 1e-5
+        && !new_air.iter().any(|b| {
+            plane >= b.minimum_fine[axis]
+                && plane <= b.maximum_exclusive_fine[axis]
+                && (0..2).all(|t| {
+                    lower[t] >= b.minimum_fine[tangents[t]] as f64
+                        && lower[t] + widths[t] <= b.maximum_exclusive_fine[tangents[t]] as f64
+                })
+        })
+    {
+        return Err(ValidationError(
+            "3D target face lacks accepted or explicit new-air support".into(),
+        ));
+    }
+    if covered > row.measure + 1e-5 {
+        return Err(ValidationError(
+            "3D target face has overlapping source flux authority".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub fn transfer_fields_3d(
@@ -512,20 +612,12 @@ fn transfer_fields_from_plan_3d(
     }
     for row in &target.rows {
         let id = row.id as usize;
-        let (mut flux, mut covered) = (0.0, 0.0);
+        let mut flux = 0.0;
         for entry in plan.face_offsets[id] as usize..plan.face_offsets[id + 1] as usize {
-            let area = plan.face_areas[entry];
-            flux += area * fields.face_velocity[plan.face_sources[entry] as usize];
-            covered += area;
+            flux += plan.face_areas[entry] * fields.face_velocity[plan.face_sources[entry] as usize];
         }
-        let (mut velocity, mut weight) = (0.0_f32, 0.0_f32);
-        for term in &row.terms {
-            let w = term.coefficient.abs();
-            velocity += w * result.cell_velocity[3 * term.cell_id as usize + row.axis as usize];
-            weight += w;
-        }
-        let fill = (row.measure - covered).max(0.0) * (velocity / weight.max(1e-20));
-        result.face_velocity[id] = (flux + fill) / row.measure;
+        // Only explicitly new air lacks represented face authority.
+        result.face_velocity[id] = flux / row.measure;
     }
     Ok(result)
 }
@@ -644,6 +736,7 @@ mod tests {
                     plan.face_areas.push(area as f32);
                 }
             }
+            prolong_inserted_face(source, target, row, &mut plan, new_air)?;
         }
         plan.face_offsets.push(plan.face_sources.len() as u32);
         Ok(plan)

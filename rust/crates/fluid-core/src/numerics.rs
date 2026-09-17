@@ -183,6 +183,9 @@ pub fn extend_velocity_with_level_set(
     }
     fields.validate_for(graph)?;
     crate::staggered_velocity::extend_faces(graph, fields, phi, depth_count)?;
+    if depth_count > 0 {
+        crate::levelset_air_extension::project_air_extension(graph, fields, phi)?;
+    }
     collocate_velocity(graph, fields);
     // Derived cell velocities remain useful to sizing and wall-release logic;
     // characteristic tracing reads the face field directly.
@@ -3748,6 +3751,14 @@ pub fn solve_pressure(
     })
 }
 
+/// Fluid velocity of the accepted MAC row, including released wall contact.
+pub(crate) fn collocation_face_velocity(row: &crate::Row, velocity: f32) -> f32 {
+    if row.kind == RowKind::ClosedWorld && row.separating { velocity }
+    else if row.open_fraction > 1e-6 {
+        div(velocity - mul(1.0-row.open_fraction, row.solid_velocity), row.open_fraction)
+    } else { row.solid_velocity }
+}
+
 pub fn collocate_velocity(graph: &Graph, fields: &mut Fields) {
     let d = graph.dimension as usize;
     fields.cell_velocity.fill(0.0);
@@ -3759,15 +3770,7 @@ pub fn collocate_velocity(graph: &Graph, fields: &mut Fields) {
                 term.coefficient.abs(),
                 row.static_dual_weight.unwrap_or(row.dual_weight),
             );
-            let fluid = if row.open_fraction > 1e-6 {
-                div(
-                    fields.face_velocity[row.id as usize]
-                        - mul(1.0 - row.open_fraction, row.solid_velocity),
-                    row.open_fraction,
-                )
-            } else {
-                row.solid_velocity
-            };
+            let fluid = collocation_face_velocity(row, fields.face_velocity[row.id as usize]);
             fields.cell_velocity[at] = add(fields.cell_velocity[at], mul(weight, fluid));
             weights[at] = add(weights[at], weight)
         }

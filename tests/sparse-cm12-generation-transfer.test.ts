@@ -101,3 +101,39 @@ test("signed generation geometry preserves full pages beyond both authored bound
   assert.deepEqual(Array.from(plan.cellSources),source.cells.map(cell=>cell.id));
   assert.deepEqual(Array.from(plan.faceSources),source.gradientRows.map(row=>row.id));
 });
+
+test("inserted generation faces use normal-linear accepted flux in all axes", () => {
+  const coarse=grid([8,8,8],[{q:[0,0,0],span:1,r:2}]);
+  const fine=grid([8,8,8],[{q:[0,0,0],span:1,r:4}]);
+  // Exercise the captured-geometry path as well as a full source grid.
+  for (const source of [coarse, {
+    dimensions: [8,8,8],
+    cells: coarse.cells.map(c=>({id:c.id,lower:c.centerFine.map((v,a)=>v-c.widthsFine[a]!/2),widths:c.widthsFine,span:4})),
+    faces: coarse.gradientRows.map(r=>({id:r.id,plane:`${r.axis}/${r.centerFine[r.axis]}`,
+      lower:[0,1,2].filter(a=>a!==r.axis).map(a=>r.centerFine[a]!-2),widths:[4,4],span:4})),
+  }]) {
+    const plan=compileSparseCM12GenerationTransfer(source,fine);
+    for (const row of fine.gradientRows) {
+      let flux=0, area=0;
+      for (const [offsets,ids,weights] of [
+        [plan.faceOffsets,plan.faceSources,plan.faceAreas],
+        [plan.faceProlongationOffsets,plan.faceProlongationSources,plan.faceProlongationAreas],
+      ] as const) for(let at=offsets[row.id]!;at<offsets[row.id+1]!;at++) {
+        const old=coarse.gradientRows[ids[at]!]!;
+        flux+=weights[at]!*Math.sin(0.3*old.centerFine[old.axis]!);area+=weights[at]!;
+      }
+      const q=row.centerFine[row.axis]!,low=Math.floor(q/4)*4,t=(q-low)/4;
+      const expected=(1-t)*Math.sin(0.3*low)+t*Math.sin(0.3*(low+4));
+      assert.ok(Math.abs(area-row.areaFineCells2)<1e-6);
+      assert.ok(Math.abs(flux/area-expected)<1e-6);
+    }
+  }
+});
+
+test("missing represented staggered support is rejected, not replaced by cell velocity", () => {
+  const coarse=grid([8,8,8],[{q:[0,0,0],span:1,r:2}]);
+  const fine=grid([8,8,8],[{q:[0,0,0],span:1,r:4}]);
+  assert.throws(()=>compileSparseCM12GenerationTransfer({dimensions:[8,8,8],
+    cells:coarse.cells.map(c=>({id:c.id,lower:c.centerFine.map((v,a)=>v-c.widthsFine[a]!/2),widths:c.widthsFine,span:4})),
+    faces:[]},fine),/accepted.*support/);
+});

@@ -119,16 +119,52 @@ export function Toolstrip({
   // nears an edge slides the column rather than clipping it. `originY: 0` hangs
   // its top edge off the corner, which is the corner it is about.
   const { ref, style } = useAnchoredFlyout<HTMLDivElement>({ leftFraction, topFraction, originY: 0 });
-  const [open, setOpen] = useState<string | undefined>(undefined);
-  const section = useMemo(() => ({ open, claim: setOpen }), [open]);
-  return <ToolstripSectionContext.Provider value={section}><div
+  return <ToolstripSections><div
     ref={ref}
     className={`toolstrip${narrow ? " is-narrow" : ""}`}
     data-testid={testId}
     style={style}
     role="group"
     aria-label={ariaLabel}
-  >{children}</div></ToolstripSectionContext.Provider>;
+  >{children}</div></ToolstripSections>;
+}
+
+/**
+ * The same column, docked in a sidebar rather than hung over the picture.
+ *
+ * Every argument for anchoring is an argument about a column standing *on* the
+ * image, and a host whose image is crowded enough that the column belongs
+ * beside it rather than over it still wants the rows exactly as they are —
+ * one declaration per capability, the one-open-row claim, the tips. So this is
+ * the frame without the anchor: in flow, full width, the page's own scheme
+ * rather than the dark clear's, and with its tips and menus opening *down* the
+ * panel instead of out past the right edge of it (`.toolstrip.is-docked`).
+ * A glyph row also says its name beside its mark, because a sidebar has the
+ * room an image does not, and a mark whose only name is on hover is the bargain
+ * the strip only makes for lack of space.
+ */
+export function DockedToolstrip({
+  ariaLabel,
+  testId,
+  children,
+}: {
+  ariaLabel: string;
+  testId?: string;
+  children: ReactNode;
+}) {
+  return <ToolstripSections><div
+    className="toolstrip is-docked"
+    data-testid={testId}
+    role="group"
+    aria-label={ariaLabel}
+  >{children}</div></ToolstripSections>;
+}
+
+/** One column's claim on which section has a row open — see `useToolstripSection`. */
+function ToolstripSections({ children }: { children: ReactNode }) {
+  const [open, setOpen] = useState<string | undefined>(undefined);
+  const section = useMemo(() => ({ open, claim: setOpen }), [open]);
+  return <ToolstripSectionContext.Provider value={section}>{children}</ToolstripSectionContext.Provider>;
 }
 
 /** What the column is about, when the subject's own outline does not say it. */

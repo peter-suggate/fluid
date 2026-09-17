@@ -1,0 +1,139 @@
+{
+  "scene": {
+    "schemaVersion": "2.0.0",
+    "sceneId": "coarse-first-pool-impact-half",
+    "randomSeed": 20260712,
+    "duration_s": 4,
+    "container": {
+      "width_m": 6.4,
+      "height_m": 4.8,
+      "depth_m": 6.4,
+      "fillFraction": 0.3333333333333333,
+      "top": "closed",
+      "fluidWallMode": "free-slip"
+    },
+    "solidVoxels": [
+      {
+        "operation": "fill",
+        "minimum": [
+          0,
+          -1,
+          0
+        ],
+        "maximumExclusive": [
+          64,
+          0,
+          64
+        ],
+        "materialId": 1
+      },
+      {
+        "operation": "fill",
+        "minimum": [
+          -1,
+          0,
+          0
+        ],
+        "maximumExclusive": [
+          0,
+          48,
+          64
+        ],
+        "materialId": 1
+      },
+      {
+        "operation": "fill",
+        "minimum": [
+          64,
+          0,
+          0
+        ],
+        "maximumExclusive": [
+          65,
+          48,
+          64
+        ],
+        "materialId": 1
+      },
+      {
+        "operation": "fill",
+        "minimum": [
+          0,
+          0,
+          -1
+        ],
+        "maximumExclusive": [
+          64,
+          48,
+          0
+        ],
+        "materialId": 1
+      },
+      {
+        "operation": "fill",
+        "minimum": [
+          0,
+          0,
+          64
+        ],
+        "maximumExclusive": [
+          64,
+          48,
+          65
+        ],
+        "materialId": 1
+      },
+      {
+        "operation": "fill",
+        "minimum": [
+          0,
+          48,
+          0
+        ],
+        "maximumExclusive": [
+          64,
+          49,
+          64
+        ],
+        "materialId": 1
+      }
+    ],
+    "voxelDomain": {
+      "finestCellSize_m": 0.1,
+      "brickSize_cells": 8
+    },
+    "fluid": {
+      "density_kg_m3": 998.2,
+      "dynamicViscosity_Pa_s": 0,
+      "surfaceTension_N_m": 0,
+      "gravity_m_s2": {
+        "x": 0,
+        "y": -9.80665,
+        "z": 0
+      },
+      "initialCondition": "tank-fill",
+      "initialLiquidVolumes": [
+        {
+          "shape": "sphere",
+          "center_m": {
+            "x": 0,
+            "y": 3.65,
+            "z": 0
+          },
+          "radius_m": 1
+        }
+      ]
+    },
+    "nominalResolution": {
+      "length_m": 0.025
+    },
+    "numerics": {
+      "fixedDt_s": 0.03333333333333333,
+      "maxDt_s": 0.03333333333333333,
+      "pressureRelativeTolerance": 1e-08,
+      "pressureMaxIterations": 1000
+    },
+    "rigidBodies": [],
+    "environment": "stage"
+  }
+}

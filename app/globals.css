@@ -2077,6 +2077,40 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .toolstrip-pane.is-wide .control-heading { margin: 3px 0 0; }
 .toolstrip-pane.is-wide .toolstrip-pane-row .toolstrip-choice { flex-wrap: nowrap; }
 
+/* The column docked in a sidebar (`DockedToolstrip`) rather than hung over the
+   image. The same rows, with each anchored rule's reason turned around. In
+   flow and full width, because the panel is its frame. The page's own scheme,
+   because what is under it is the panel and not the renderer's dark clear.
+   And nothing opens to the right, because the right of a sidebar is the
+   window's edge: tips and menus drop down the panel instead, measured from the
+   row rather than from the chevron so a list is as wide as the column. */
+.toolstrip.is-docked { position: relative; z-index: auto; align-items: stretch; width: 100%; pointer-events: auto; color-scheme: inherit; }
+.toolstrip.is-docked .toolstrip-row { flex-wrap: wrap; row-gap: 3px; }
+.toolstrip.is-docked .toolstrip-key:not(.is-chevron) { flex: 1 1 auto; max-width: none; }
+.toolstrip.is-docked .toolstrip-rule { width: auto; margin: 6px 0; }
+.toolstrip.is-docked .toolstrip-anchor { position: static; }
+.toolstrip.is-docked .toolstrip-menu { left: 0; right: 0; width: auto; max-width: none; }
+.toolstrip.is-docked .toolstrip-tip { left: 0; top: calc(100% + 3px); max-width: 100%; }
+/* A glyph row names itself beside its mark. On the image a mark is 24px because
+   the water needs the room; here the room is the panel's, and a column of
+   swatches whose names arrive only on hover is a puzzle nobody has to solve.
+   The name is the tip's own `strong`, so it is the same words either way; the
+   hint stays with the anchored column, where it is read in passing. */
+/* A zero basis, so a long name ellipsizes rather than wrapping the row's
+   chevron onto a line of its own: the wrap is decided on the basis, and the
+   name's full width would always be the widest thing in the column. */
+.toolstrip.is-docked .toolstrip-key.is-glyph { flex: 1 1 0; width: auto; min-width: 0; height: 24px; justify-content: flex-start; gap: 9px; padding: 0 6px; }
+.toolstrip.is-docked .toolstrip-key.is-glyph > :first-child { flex: none; }
+.toolstrip.is-docked .toolstrip-key.is-glyph > i:first-child { margin: 0 2.5px; }
+.toolstrip.is-docked .toolstrip-key.is-glyph .toolstrip-tip,
+.toolstrip.is-docked .toolstrip-row.is-open .toolstrip-key.is-glyph .toolstrip-tip { position: static; display: block; min-width: 0; max-width: none; padding: 0; overflow: hidden; border: 0; background: none; box-shadow: none; backdrop-filter: none; text-overflow: ellipsis; white-space: nowrap; visibility: visible; opacity: 1; }
+.toolstrip.is-docked .toolstrip-key.is-glyph .toolstrip-tip strong { color: inherit; font: var(--text-label); letter-spacing: normal; }
+.toolstrip.is-docked .toolstrip-key.is-glyph .toolstrip-tip small { display: none; }
+/* A pane measures itself out past the column's right edge and writes that as
+   an inline offset; docked, it is a card on its own line under the row that
+   opened it, so the measurement is overruled rather than trusted. */
+.toolstrip.is-docked .toolstrip-pane { position: relative; left: auto !important; right: auto !important; flex-basis: 100%; width: auto; max-height: none; transform: none !important; }
+
 /* A pane's width will not hold a sentence and a button side by side. */
 .fluid-field-film { display: grid; gap: 4px; justify-items: start; margin: 0; padding: 4px 5px; border: 1px solid var(--accent-line); border-radius: var(--radius-s); background: var(--accent-wash); }
 .fluid-field-film span { color: var(--muted); font: var(--text-micro); }

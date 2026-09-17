@@ -7649,11 +7649,7 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
     // and injection retain their independent B8 floor below.
     let airFloor=1u;
     let safetyFloor=select(airFloor,BRICK_FINE_RESOLUTION,thinFluid||injectionDemand);
-    // Four-spacing is the bulk working scale. Larger material cells need
-    // a separate transport reconstruction certificate, not just phi shape.
-    let materialFloor=select(1u,max(1u,BRICK_FINE_RESOLUTION/4u),
-      (atomicLoad(&activity[output+3u])&(1u<<13u))!=0u);
-    let coarseRequired=max(materialFloor,max(demandFloor,safetyFloor));
+    let coarseRequired=max(demandFloor,safetyFloor);
     requested=current;planReasons=32u;
     if(coarseRequired>current){
       requested=coarseRequired;
