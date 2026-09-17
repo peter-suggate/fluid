@@ -1,11 +1,13 @@
 "use client";
 
-import { useEffect, useLayoutEffect } from "react";
+import { useEffect, useLayoutEffect, useMemo } from "react";
 import { simulation } from "../lib/core/simulation/controller";
 import { startQueryStateSync } from "../lib/core/url-state";
 import { startSceneAutosave } from "../lib/core/scene-autosave";
 import { browserSceneLibraryStorage } from "../lib/core/scene-library";
 import { defaultSession } from "../lib/core/session/session";
+import { EditorHostProvider } from "../lib/core/session/host-context";
+import { studioEditorHost } from "../lib/core/simulation/editor-host";
 import { SessionProvider, useSession } from "../lib/core/session/session-context";
 import { useShellStore } from "../lib/core/stores/shell-store";
 import { CompareHost } from "./CompareHost";
@@ -21,6 +23,9 @@ import { CompareHost } from "./CompareHost";
  */
 export function FluidLab() {
   const session = useSession();
+  // Built once: the provider's value is identity-compared by every consumer, so
+  // a host rebuilt each render would re-render the whole studio per frame.
+  const editorHost = useMemo(() => studioEditorHost(defaultSession), []);
 
   useLayoutEffect(() => {
     // A scene has its own route. During client navigation (and Fast Refresh)
@@ -50,9 +55,16 @@ export function FluidLab() {
   // Every pane of chrome authors and reads one realm. This is pane A's; compare
   // mode mounts a second provider around a second `.viewport-shell` inside the
   // host, and nothing below there learns a new code path.
+  //
+  // The host is the *operations* over that realm, mounted as its own provider
+  // beside it: a capability module commits through `useEditorHost()` rather than
+  // through the `simulation` singleton, which is what lets one colocated module
+  // render here and in the 2-D advance lab. Nothing consumes it yet.
   return (
     <SessionProvider value={defaultSession}>
-      <CompareHost />
+      <EditorHostProvider value={editorHost}>
+        <CompareHost />
+      </EditorHostProvider>
     </SessionProvider>
   );
 }

@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { EditorAction } from "../lib/core/editor-action";
-import { sceneActionsAt } from "../lib/core/editor-entity-catalog";
+import { entityActionsAt, sceneActionsAt } from "../lib/core/editor-entity-catalog";
+import { labRegionWedges } from "../advance-lab/lab-ring";
+import { refinementRegionSelectionId } from "../lib/features/refinement-region/definition";
 import { cloneScene, defaultScene } from "../lib/core/model";
 import { sceneDocumentActions, sceneDocumentVerbs } from "../lib/core/editor-scene-document";
 import { gravityFeature } from "../lib/features/gravity/definition";
@@ -107,4 +109,53 @@ test("no studio ring wedge carries a host effect", () => {
     }
   };
   for (const ring of rings) walk(ring);
+});
+
+/**
+ * One capability, two hosts, one ring.
+ *
+ * The plugin exercise's claim on the ring, made checkable on the one capability
+ * both pages have: pointing at a refinement region offers *the same wedges* in
+ * the studio and in the 2-D advance lab — the same ids, in the same order, with
+ * the same labels, icons and tones — because both lists are composed by
+ * `lib/core/editor-entity-wedges.ts` rather than written out twice. Before WP6
+ * the lab's pair were `slice-region-select` ("Select") and `slice-region-remove`
+ * ("Remove"), which is two pages disagreeing about what the word for "delete
+ * this" is on one kind of object.
+ *
+ * The *effects* are deliberately excluded from the comparison and are the one
+ * thing that must differ: the studio writes a new `SceneDescription`, the lab
+ * sends a whole-list command to a running Rust world, and neither could express
+ * the other's. That is the seam working, not a gap in the pin — and the test
+ * above this one is what keeps the studio from ever emitting the lab's arm.
+ */
+test("a selected region offers the same wedges in the studio and in the lab", () => {
+  const scene = cloneScene(defaultScene);
+  scene.fluid = { ...scene.fluid, refinementRegions: [{
+    id: "region-1",
+    min_m: { x: 0.2, y: 0, z: 0.2 },
+    max_m: { x: 0.6, y: 0.4, z: 0.6 },
+    rule: "minimum-cell-size",
+    minimumCellSize_cells: 2,
+  }] };
+  const studio = entityActionsAt({ scene, bodies: [] }, {
+    selection: { kind: "refinement-region", id: refinementRegionSelectionId("region-1") },
+    point_m: POINT,
+  });
+  const lab = labRegionWedges(
+    { regions: [{ id: "region-1", minimumFine: [8, 8], maximumFine: [24, 24],
+      minimumCellWidth: 2 }], nx: 128, ny: 64 },
+    "region-1");
+
+  const shape = (actions: readonly EditorAction[]) => actions.map((action) => ({
+    id: action.id, label: action.label, icon: action.icon,
+    tone: action.tone, hint: action.hint, enabled: action.enabled,
+  }));
+  assert.deepEqual(shape(lab), shape(studio));
+  assert.deepEqual(studio.map((action) => action.id), ["select", "delete"],
+    "and the pair is still Edit then Delete, with the irreversible one last");
+
+  // The effects differ, and must: this is the seam, not a hole in the pin.
+  assert.equal(studio[1]?.effect?.kind, "scene");
+  assert.equal(lab[1]?.effect?.kind, "host");
 });

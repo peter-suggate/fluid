@@ -61,6 +61,43 @@ export const REFINEMENT_REGION_RULES = Object.freeze([
 
 export type RefinementRegionRule = (typeof REFINEMENT_REGION_RULES)[number]["id"];
 
+/**
+ * What the *next* refinement box drawn will carry, before there is a box.
+ *
+ * The 2-D advance lab had this and the studio did not, which is the whole of
+ * why drawing a region in 3-D always produced the same bound: the studio's
+ * draw read `DEFAULT_REFINEMENT_REGION_CELL_SIZE` and had nowhere to put a
+ * different answer. It is one field rather than a component's state because
+ * both hosts' draw commit reads it — `regionFromDraw` in
+ * `lib/features/refinement-region/policy.ts` is handed this record — and a
+ * chooser owning its own copy would be a bound the release could not see.
+ *
+ * `cellSize_cells` is **absent until the reader chooses one**, and absence
+ * means the host's own default (`RegionSpace.defaultCellSize_cells`). The two
+ * hosts ship different defaults for good reasons — the studio's 8 is a brick,
+ * the lab's 2 is two rungs off its four-rung ladder — and a single number here
+ * would have silently moved one of them. Once a reader picks, the pick is
+ * theirs on either host.
+ *
+ * Not serialized: it describes the next gesture, not the document, and a link
+ * that reopened someone else's pending choice would be stating a bound nobody
+ * on this end asked for.
+ */
+export interface RegionDraft {
+  /** Absent until chosen: the host's own default stands. */
+  readonly cellSize_cells?: number;
+  readonly rule: RefinementRegionRule;
+  /**
+   * Whether the box drawn next is held at one tier — a ceiling equal to its
+   * floor — rather than carrying a floor alone.
+   */
+  readonly holdAtOneTier: boolean;
+}
+
+export const DEFAULT_REGION_DRAFT: RegionDraft =
+  Object.freeze({ rule: "minimum-cell-size" as const, holdAtOneTier: false });
+
+
 /** Round a requested cell-size bound down onto the dyadic ladder above. */
 export function clampRefinementRegionCellSize(requested: number): number {
   if (!Number.isFinite(requested)) return DEFAULT_REFINEMENT_REGION_CELL_SIZE;

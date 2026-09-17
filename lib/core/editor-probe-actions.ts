@@ -1,3 +1,4 @@
+import { cellProbeWedge, rayProbeWedge } from "../features/inspect/ring";
 import type { EditorAction, EditorActionTarget } from "./editor-action";
 
 /**
@@ -20,6 +21,11 @@ import type { EditorAction, EditorActionTarget } from "./editor-action";
  * `EditorActionTarget`, because the aim is genuinely all either one reads — and
  * the callers that are not entities have no selection to offer. A probe pointing
  * at a bare voxel or a tank wall composes these the same way the water does.
+ *
+ * The wedges themselves are `lib/features/inspect/ring.ts`, because the advance
+ * lab offers the cell probe too and was writing its own. What is left in this
+ * file is the studio's half: that a probe is aimed at a pixel, and the sentence
+ * that is true when it is.
  */
 type AimedTarget = Pick<EditorActionTarget, "aim">;
 
@@ -32,14 +38,10 @@ type AimedTarget = Pick<EditorActionTarget, "aim">;
  * whatever it happened to be over would read as a different verb each time.
  */
 export function rayProbeAction(target: AimedTarget): EditorAction {
-  return {
-    id: "trace-ray",
-    label: "Trace ray",
-    icon: "trace-ray",
-    tone: "prop",
+  return rayProbeWedge({
     hint: "Pin the ray behind this pixel and read the work that drew it · orbit to see it in 3D",
     effect: { kind: "probe", probe: "ray", aim: target.aim },
-  };
+  });
 }
 
 /**
@@ -52,12 +54,8 @@ export function rayProbeAction(target: AimedTarget): EditorAction {
  * leaf, and on a liquid that is a surface cell.
  */
 export function cellProbeAction(target: AimedTarget): EditorAction {
-  return {
-    id: "inspect-cell",
-    label: "Inspect cell",
-    icon: "inspect-cell",
-    tone: "fluid",
+  return cellProbeWedge({
     hint: "Pin the pressure cell behind this pixel · [ and ] walk the ray in and out",
     effect: { kind: "probe", probe: "cell", aim: target.aim },
-  };
+  });
 }

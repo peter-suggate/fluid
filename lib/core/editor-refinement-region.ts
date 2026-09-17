@@ -8,7 +8,6 @@ import {
   pickSolidBox,
   positionFields,
   sceneContainerBox,
-  WORLD_FRAME,
   pickExcluded,
   type BoxExtent,
   type BoxResizePolicy,
@@ -19,14 +18,31 @@ import {
 } from "./editor-entity";
 import type { FluidRefinementRegion, SceneDescription, Vec3 } from "./model";
 import {
+  regionChoices,
+  regionDraftCellSize,
+  regionDrawIsDegenerate,
+  regionEntity,
+  regionFromDraw,
+  regionSnapStep_cells,
+  snapRegionBox,
+} from "../features/refinement-region/policy";
+import {
+  refinementRegionIdFromSelection,
+  refinementRegionSelectionId,
+  type RefinementRegionRecord,
+  type RegionSpace,
+} from "../features/refinement-region/definition";
+import { BRICK_FINE_CELLS } from "./sparse-brick-geometry";
+import {
   clampRefinementRegionCellSize,
   DEFAULT_REFINEMENT_REGION_CELL_SIZE,
+  DEFAULT_REGION_DRAFT,
   nextRefinementRegionId,
   OCTREE_REFINEMENT_REGION_CAPACITY,
   OCTREE_REFINEMENT_REGION_CELL_SIZES,
   refinementRegionLattice,
-  REFINEMENT_REGION_RULES,
   sceneRefinementRegions,
+  type RegionDraft,
 } from "./refinement-regions";
 
 /**
@@ -39,25 +55,35 @@ import {
  * lattice its sides land on, and the meaning it carries — and that is all this
  * file contains.
  *
- * The one thing worth knowing: the resize snap is the region's own smallest
- * allowed cell, not always the finest cell. A dyadic leaf of edge S is aligned
- * to multiples of S in cell space, so a box on that lattice contains whole
- * leaves of that size and the region holds exactly the cells it covers.
- * Snapping to the finest cell instead would lose a shell of cells all the way
- * around every region, which reads as the lower bound not being respected.
+ * The one thing worth knowing: the resize snap is **the brick**, or the
+ * region's own smallest allowed cell where that is coarser — see
+ * `regionSnapStep_cells`. A dyadic leaf of edge S is aligned to multiples of S
+ * in cell space, so a box on that lattice contains whole leaves of that size
+ * and the region holds exactly the cells it covers; and the solver binds a
+ * region brick by brick, so an edge inside a brick is a distinction it cannot
+ * honour. With the studio default `MIN = 8` the two are the same number, so
+ * nothing about a default region moved.
+ *
+ * Since the region package landed, this file is an **adapter**. Every rule —
+ * the outward snap, the two ladders and how they follow each other, the rows a
+ * region offers — lives in `lib/features/refinement-region` in finest cells and
+ * N dimensions. What is here is the three things that are genuinely the
+ * studio's: metres and `Vec3`, the scene document, and the address bar.
  */
 
-export const REFINEMENT_REGION_SELECTION_PREFIX = "refinement-region-";
-
-export function refinementRegionSelectionId(regionId: string): string {
-  return `${REFINEMENT_REGION_SELECTION_PREFIX}${regionId}`;
-}
-
-export function refinementRegionIdFromSelection(selectionId: string): string | undefined {
-  return selectionId.startsWith(REFINEMENT_REGION_SELECTION_PREFIX)
-    ? selectionId.slice(REFINEMENT_REGION_SELECTION_PREFIX.length)
-    : undefined;
-}
+/*
+ * The selection id is the package's, not this file's.
+ *
+ * It was restated by hand in `advance-lab/slice-regions.ts` and pinned against
+ * this constant by a test, which is the clearest single instance of the problem
+ * the package exists to end. Re-exported here so every studio call site keeps
+ * its import.
+ */
+export {
+  refinementRegionIdFromSelection,
+  refinementRegionSelectionId,
+  REFINEMENT_REGION_SELECTION_PREFIX,
+} from "../features/refinement-region/definition";
 
 export function refinementRegionBox(region: FluidRefinementRegion): BoxExtent {
   return { min: region.min_m, max: region.max_m };
@@ -80,7 +106,8 @@ export function refinementRegionResizePolicy(
   scene: SceneDescription,
   region: FluidRefinementRegion,
 ): BoxResizePolicy {
-  const step = refinementRegionCellExtent_m(scene, clampRefinementRegionCellSize(region.minimumCellSize_cells));
+  const step = refinementRegionCellExtent_m(scene,
+    regionSnapStep_cells(region, BRICK_FINE_CELLS));
   return {
     snap_m: [step[0]!, step[1]!, step[2]!],
     limits: sceneContainerBox(scene),
@@ -134,24 +161,91 @@ export function snapRefinementRegionBox(
   box: BoxExtent,
   cells: number,
 ): BoxExtent {
-  const limits = sceneContainerBox(scene);
-  const step = refinementRegionCellExtent_m(scene, cells);
-  const tolerance = 1e-6;
-  const min = { ...box.min }, max = { ...box.max };
-  (["x", "y", "z"] as const).forEach((axis, index) => {
-    const size = step[index]!;
-    const lo = Math.min(box.min[axis], box.max[axis]);
-    const hi = Math.max(box.min[axis], box.max[axis]);
-    const snapped = {
-      min: limits.min[axis] + Math.floor((lo - limits.min[axis]) / size + tolerance) * size,
-      max: limits.min[axis] + Math.ceil((hi - limits.min[axis]) / size - tolerance) * size,
-    };
-    min[axis] = Math.max(limits.min[axis], snapped.min);
-    max[axis] = Math.min(limits.max[axis], Math.max(snapped.max, snapped.min + size));
-    if (max[axis] - min[axis] < size) min[axis] = Math.max(limits.min[axis], max[axis] - size);
-  });
-  return { min, max };
+  // `cells` names the region's floor, and the *step* is the brick or that floor,
+  // whichever is coarser. Callers keep passing the floor because that is what a
+  // region carries; deciding what it means is the package's job.
+  const snapped = snapRegionBox(
+    boxToCells(scene, box.min), boxToCells(scene, box.max),
+    regionSnapStep_cells({ minimumCellSize_cells: cells }, BRICK_FINE_CELLS),
+    { dimensions: refinementRegionLattice(scene).dimensions });
+  return { min: cellsToMetres(scene, snapped.min), max: cellsToMetres(scene, snapped.max) };
 }
+
+// ---- the metre / Vec3 adapter --------------------------------------------
+
+const AXES = ["x", "y", "z"] as const;
+
+/** A world point as finest cells from the container corner. */
+function boxToCells(scene: SceneDescription, point: Vec3): number[] {
+  const { cellSize_m, origin_m } = refinementRegionLattice(scene);
+  return AXES.map((axis, index) => (point[axis] - origin_m[axis]) / cellSize_m[index]!);
+}
+
+/** The same point back in metres. Exactly inverse, so a round trip is identity. */
+function cellsToMetres(scene: SceneDescription, cells: readonly number[]): Vec3 {
+  const { cellSize_m, origin_m } = refinementRegionLattice(scene);
+  return {
+    x: origin_m.x + (cells[0] ?? 0) * cellSize_m[0]!,
+    y: origin_m.y + (cells[1] ?? 0) * cellSize_m[1]!,
+    z: origin_m.z + (cells[2] ?? 0) * cellSize_m[2]!,
+  };
+}
+
+/** The document's region as the shared record: cells, and dyadic bounds. */
+export function refinementRegionRecord(
+  scene: SceneDescription,
+  region: FluidRefinementRegion,
+): RefinementRegionRecord {
+  const floor = clampRefinementRegionCellSize(region.minimumCellSize_cells);
+  const ceiling = region.maximumCellSize_cells === undefined ? undefined
+    : Math.max(floor, clampRefinementRegionCellSize(region.maximumCellSize_cells));
+  return {
+    id: region.id,
+    rule: region.rule,
+    minimumCellSize_cells: floor,
+    ...(ceiling === undefined ? {} : { maximumCellSize_cells: ceiling }),
+    min_cells: boxToCells(scene, region.min_m),
+    max_cells: boxToCells(scene, region.max_m),
+  };
+}
+
+/** The shared record back as the document carries it. */
+export function refinementRegionFromRecord(
+  scene: SceneDescription,
+  record: RefinementRegionRecord,
+): FluidRefinementRegion {
+  return {
+    id: record.id,
+    rule: record.rule,
+    minimumCellSize_cells: record.minimumCellSize_cells,
+    ...(record.maximumCellSize_cells === undefined ? {}
+      : { maximumCellSize_cells: record.maximumCellSize_cells }),
+    min_m: cellsToMetres(scene, record.min_cells),
+    max_m: cellsToMetres(scene, record.max_cells),
+  };
+}
+
+/**
+ * The studio as a `RegionSpace`: three axes, metres behind them.
+ *
+ * `write` hands back a whole scene, which is a legal `Partial<SceneDescription>`
+ * and is what removal needs — dropping the last region drops the
+ * `refinementRegions` key, and a merge patch cannot express an absence.
+ */
+export const studioRegionSpace: RegionSpace<SceneDescription, Partial<SceneDescription>> = {
+  axes: 3,
+  lattice: (scene) => ({ dimensions: refinementRegionLattice(scene).dimensions }),
+  list: (scene) => sceneRefinementRegions(scene)
+    .map((region) => refinementRegionRecord(scene, region)),
+  write: (scene, id, next) => withRefinementRegion(scene, id,
+    next && refinementRegionFromRecord(scene, next)),
+  nextId: (scene) => nextRefinementRegionId(scene),
+  capacity: OCTREE_REFINEMENT_REGION_CAPACITY,
+  cellSizes: OCTREE_REFINEMENT_REGION_CELL_SIZES,
+  defaultCellSize_cells: DEFAULT_REFINEMENT_REGION_CELL_SIZE,
+  brick_cells: BRICK_FINE_CELLS,
+  cellEdge_mm: (scene) => refinementRegionLattice(scene).cellSize_m[0]! * 1000,
+};
 
 /**
  * The region a rubber-band drag describes.
@@ -161,6 +255,11 @@ export function snapRefinementRegionBox(
  * perspective camera. The height is seeded to the footprint's shorter side —
  * enough box to see and to grab — and is then an ordinary face drag like every
  * other extent in this editor.
+ *
+ * `undefined` for a press that has not travelled. The test is on the *drag*,
+ * before the height is seeded, because the seed is what would hide it: a box a
+ * step tall over a zero footprint is not a box anybody drew, and
+ * `regionFromDraw` — reading the seeded corners — could no longer tell.
  */
 export function refinementRegionFromDrag(
   scene: SceneDescription,
@@ -168,20 +267,39 @@ export function refinementRegionFromDrag(
   drag_m: Vec3,
   options: {
     readonly id?: string;
+    /**
+     * What the reader chose for the next box, from the shared ui-store draft.
+     *
+     * Absent means nobody has chosen, and the studio's own default rung stands
+     * — which is the behaviour this had before there was anywhere to state a
+     * choice. The explicit bounds below still win, because the URL reader and
+     * the tests describe a *particular* region rather than the pending one.
+     */
+    readonly draft?: RegionDraft;
     readonly minimumCellSize_cells?: number;
     readonly maximumCellSize_cells?: number;
   } = {},
-): FluidRefinementRegion {
-  const cells = clampRefinementRegionCellSize(
-    options.minimumCellSize_cells ?? DEFAULT_REFINEMENT_REGION_CELL_SIZE);
-  const maximumCells = options.maximumCellSize_cells === undefined ? undefined
-    : Math.max(cells, clampRefinementRegionCellSize(options.maximumCellSize_cells));
+): FluidRefinementRegion | undefined {
+  // A click, not a drag: the horizontal plane is where this gesture names its
+  // area, so that is where the question is asked. See `regionDrawIsDegenerate`.
+  if (regionDrawIsDegenerate([anchor_m.x, anchor_m.z], [drag_m.x, drag_m.z])) return undefined;
+  const draft = options.draft ?? DEFAULT_REGION_DRAFT;
+  const cells = clampRefinementRegionCellSize(options.minimumCellSize_cells
+    ?? regionDraftCellSize(studioRegionSpace, draft));
+  const maximumCells = options.maximumCellSize_cells !== undefined
+    ? Math.max(cells, clampRefinementRegionCellSize(options.maximumCellSize_cells))
+    : draft.holdAtOneTier ? cells : undefined;
   const limits = sceneContainerBox(scene);
   const footprint = {
     x: Math.abs(drag_m.x - anchor_m.x),
     z: Math.abs(drag_m.z - anchor_m.z),
   };
-  const height = Math.max(refinementRegionCellExtent_m(scene, cells)[1]!,
+  // At least one *step* tall, which is the brick unless the floor is coarser.
+  // Seeding a thinner box only to have the snap grow it back was the old
+  // behaviour by accident; naming the step here says what the minimum is.
+  const height = Math.max(
+    refinementRegionCellExtent_m(scene,
+      regionSnapStep_cells({ minimumCellSize_cells: cells }, BRICK_FINE_CELLS))[1]!,
     Math.min(footprint.x, footprint.z, limits.max.y - anchor_m.y));
   const drawn: BoxExtent = {
     min: {
@@ -195,15 +313,20 @@ export function refinementRegionFromDrag(
       z: Math.max(anchor_m.z, drag_m.z),
     },
   };
-  const box = snapRefinementRegionBox(scene, drawn, cells);
-  return {
-    id: options.id ?? nextRefinementRegionId(scene),
-    rule: "minimum-cell-size",
-    minimumCellSize_cells: cells,
-    ...(maximumCells === undefined ? {} : { maximumCellSize_cells: maximumCells }),
-    min_m: box.min,
-    max_m: box.max,
-  };
+  // The snap, the id and the record itself are the package's: `regionFromDraw`
+  // is what the lab's release calls too, so a box drawn in either host lands on
+  // the same lattice by the same arithmetic rather than by two transcriptions
+  // of it. Only the metres on either side of this call are the studio's.
+  const record = regionFromDraw(studioRegionSpace, scene,
+    boxToCells(scene, drawn.min), boxToCells(scene, drawn.max),
+    { cellSize_cells: cells, rule: draft.rule, holdAtOneTier: maximumCells !== undefined },
+    { id: options.id });
+  // Unreachable for a travelled drag — the footprint above is non-empty on at
+  // least one axis, so the corners handed over differ — and stated rather than
+  // asserted, because the package owns the rule and this adapter only relays it.
+  if (record === undefined) return undefined;
+  return refinementRegionFromRecord(scene, maximumCells === undefined ? record
+    : { ...record, maximumCellSize_cells: maximumCells });
 }
 
 /** Whether another region can be drawn, or the uniform tail is already full. */
@@ -338,94 +461,20 @@ export function withRefinementRegionsFromQuery(
 
 // ---- entity ---------------------------------------------------------------
 
-function refinementRegionChoices(
+/**
+ * The region's three enumerations, composed by the shared package.
+ *
+ * `regionChoices` is the whole of what used to stand here — the rule group, the
+ * two dyadic ladders and the re-snap each one forces — with the metres lifted
+ * out into `studioRegionSpace`. Deleting the copy is the point of the exercise:
+ * the lab renders these same three groups through `EntityOptionRows` and cannot
+ * drift from them, because there is nothing left to drift from.
+ */
+export function refinementRegionChoices(
   scene: SceneDescription,
   region: FluidRefinementRegion,
 ): EditorChoiceGroup[] {
-  const write = (next: Partial<FluidRefinementRegion>) =>
-    withRefinementRegion(scene, region.id, { ...region, ...next });
-  const cellSize_m = refinementRegionLattice(scene).cellSize_m;
-  const minimumCells = clampRefinementRegionCellSize(region.minimumCellSize_cells);
-  const maximumCells = region.maximumCellSize_cells === undefined ? undefined
-    : clampRefinementRegionCellSize(region.maximumCellSize_cells);
-  return [
-    {
-      id: "rule",
-      label: "This box means",
-      // Short tags throughout, because a region's column is the narrow one and
-      // "THIS BOX MEANS" is a sentence where the reader needs a label. The full
-      // phrasing is still on each row's tip, which is where a first reader
-      // meets it.
-      tag: "Means",
-      value: region.rule,
-      options: REFINEMENT_REGION_RULES.map((rule) => ({
-        id: rule.id,
-        label: rule.label,
-        hint: rule.hint,
-        enabled: true,
-        apply: () => write({ rule: rule.id }),
-      })),
-    },
-    {
-      id: "minimumCellSize",
-      label: "Smallest cell",
-      tag: "Min",
-      value: String(minimumCells),
-      options: OCTREE_REFINEMENT_REGION_CELL_SIZES.map((cells) => ({
-        id: String(cells),
-        label: `${cells}³`,
-        hint: `${cells}³ finest cells · ${(cells * cellSize_m[0]! * 1000).toFixed(0)} mm edge`,
-        enabled: true,
-        // Re-snap onto the new lattice: the box was aligned to the old floor,
-        // and an unaligned box loses a shell of cells to partial containment.
-        apply: () => {
-          const box = snapRefinementRegionBox(scene, refinementRegionBox(region), cells);
-          return write({
-            minimumCellSize_cells: cells,
-            ...(maximumCells !== undefined && maximumCells < cells
-              ? { maximumCellSize_cells: cells } : {}),
-            min_m: box.min,
-            max_m: box.max,
-          });
-        },
-      })),
-    },
-    {
-      id: "maximumCellSize",
-      label: "Largest cell",
-      tag: "Max",
-      value: maximumCells === undefined ? "auto" : String(maximumCells),
-      options: [
-        {
-          id: "auto",
-          label: "AUTO",
-          hint: "Evidence decides how far quiet fluid may coarsen",
-          enabled: true,
-          apply: () => write({ maximumCellSize_cells: undefined }),
-        },
-        ...OCTREE_REFINEMENT_REGION_CELL_SIZES.map((cells) => ({
-          id: String(cells),
-          label: `${cells}³`,
-          hint: `No cell larger than ${cells}³ finest cells · ${(cells * cellSize_m[0]! * 1000).toFixed(0)} mm edge`,
-          enabled: true,
-          apply: () => {
-            // A ceiling below the current floor means the user wants the whole
-            // interval to move down. Keep the bounds valid and re-snap to the
-            // newly selected smallest cell in the same edit.
-            const nextMinimum = Math.min(minimumCells, cells);
-            const box = snapRefinementRegionBox(
-              scene, refinementRegionBox(region), nextMinimum);
-            return write({
-              minimumCellSize_cells: nextMinimum,
-              maximumCellSize_cells: cells,
-              min_m: box.min,
-              max_m: box.max,
-            });
-          },
-        })),
-      ],
-    },
-  ];
+  return regionChoices(studioRegionSpace, scene, refinementRegionRecord(scene, region));
 }
 
 function refinementRegionEntityFor(
@@ -438,7 +487,7 @@ function refinementRegionEntityFor(
   const cells = clampRefinementRegionCellSize(region.minimumCellSize_cells);
   const maximumCells = region.maximumCellSize_cells === undefined ? undefined
     : Math.max(cells, clampRefinementRegionCellSize(region.maximumCellSize_cells));
-  const cellSize_m = refinementRegionLattice(scene).cellSize_m;
+  const record = refinementRegionRecord(scene, region);
   const write = (next: Partial<FluidRefinementRegion>) =>
     withRefinementRegion(scene, region.id, { ...region, ...next });
   const move = (centre_m: Vec3) => {
@@ -446,15 +495,18 @@ function refinementRegionEntityFor(
     const snapped = snapRefinementRegionBox(scene, moved, cells);
     return write({ min_m: snapped.min, max_m: snapped.max });
   };
+  // The rows, the label, the tone, the summary and the removal are the shared
+  // entity — the *same* object the lab renders its strip from. What the studio
+  // adds on top is the gizmo half: a world box, its eight handles, the move,
+  // and the position fields behind them, none of which the lab's SVG rectangles
+  // in canvas cells could use. Spread rather than duplicated, so a row added to
+  // the region appears in both hosts without this file changing.
   return {
-    selection: { kind: "refinement-region", id: refinementRegionSelectionId(region.id) },
-    label: region.id.toUpperCase(),
-    tone: "region",
-    frame: WORLD_FRAME,
+    ...regionEntity(studioRegionSpace, scene, record),
     box,
-    sizeLabel: `${[size.x, size.y, size.z].map((value) => value.toFixed(2)).join(" × ")} m · ${maximumCells === undefined
-      ? `≥ ${cells}³ cells`
-      : cells === maximumCells ? `${cells}³ cells` : `${cells}³–${maximumCells}³ cells`}`,
+    sizeLabel: `${[size.x, size.y, size.z].map((value) => value.toFixed(2)).join(" \u00d7 ")} m \u00b7 ${maximumCells === undefined
+      ? `\u2265 ${cells}\u00b3 cells`
+      : cells === maximumCells ? `${cells}\u00b3 cells` : `${cells}\u00b3\u2013${maximumCells}\u00b3 cells`}`,
     handles: [
       ...boxHandles(box, {
         drag: boxResizeDrag(box, refinementRegionResizePolicy(scene, region),
@@ -462,17 +514,7 @@ function refinementRegionEntityFor(
       }),
       ...moveHandles(boxCenter(box), move),
     ],
-    draftSubject: "refinement-region",
-    editLabel: (handle) => handle.space === "world"
-      ? `Moved ${region.id}` : `Resized ${region.id}`,
-    choices: refinementRegionChoices(scene, region),
     fields: positionFields(boxCenter(box), move),
-    summary: maximumCells === undefined
-      ? `No pressure cell smaller than ${(cells * cellSize_m[0]! * 1000).toFixed(0)} mm inside this box. Grading still splits leaves on its boundary.`
-      : cells === maximumCells
-        ? `Fully contained pressure cells are held at ${(cells * cellSize_m[0]! * 1000).toFixed(0)} mm inside this box.`
-        : `Fully contained pressure cells stay between ${(cells * cellSize_m[0]! * 1000).toFixed(0)} and ${(maximumCells * cellSize_m[0]! * 1000).toFixed(0)} mm inside this box.`,
-    remove: () => withRefinementRegion(scene, region.id, undefined),
   };
 }
 

@@ -43,6 +43,7 @@ type Zone =
   | "svo"
   | "harness"
   | "shape-lab"
+  | "advance-lab"
   | "lib-other"
   | "ui"
   | "tooling";
@@ -63,6 +64,7 @@ function zoneOf(relPath: string): Zone {
   if (relPath.startsWith("lib/svo/")) return "svo";
   if (relPath.startsWith("lib/harness/")) return "harness";
   if (relPath.startsWith("shape-lab/")) return "shape-lab";
+  if (relPath.startsWith("advance-lab/")) return "advance-lab";
   if (relPath.startsWith("lib/")) return "lib-other";
   if (relPath.startsWith("components/") || relPath.startsWith("app/") || relPath.startsWith("worker/"))
     return "ui";
@@ -107,6 +109,23 @@ const ALLOWED: Record<Zone, ReadonlySet<Zone>> = {
   // The lab expands SVO primitives and field programs on CPU — that is what it
   // is for. It stays barred from every method, which is the rule that matters.
   "shape-lab": new Set<Zone>(["core", "svo", "shape-lab"]),
+  // The 2-D advance lab is a second *host*, not a second method: it renders the
+  // same capability modules the studio does over a Rust/Wasm world. So it may
+  // reach core, the shared UI primitives, the feature packages and the framework
+  // that composes them, plus `lib/physics-wasm` (its world) and the adaptive-
+  // volume method's own declarations (the stage list it draws). What it may not
+  // reach is another method — the same absence every other zone carries.
+  "advance-lab": new Set<Zone>([
+    "core",
+    "ui",
+    "feature",
+    "composition",
+    "framework",
+    "lib-other",
+    "method-adaptive-volume",
+    "advance-lab",
+    "tooling",
+  ]),
   "lib-other": new Set<Zone>([
     "core",
     "lib-other",
@@ -123,7 +142,7 @@ const ALLOWED: Record<Zone, ReadonlySet<Zone>> = {
   // The UI presents the render layer's own diagnostics (pixel traces, SVO
   // render receipts), which is the same composition relationship core has with
   // it. What the UI must never reach is a method — that stays absent here.
-  ui: new Set<Zone>(["core", "ui", "svo", "shape-lab", "framework", "feature", "composition"]),
+  ui: new Set<Zone>(["core", "ui", "svo", "shape-lab", "advance-lab", "framework", "feature", "composition"]),
   tooling: new Set<Zone>([
     "feature",
     "composition",
@@ -140,6 +159,7 @@ const ALLOWED: Record<Zone, ReadonlySet<Zone>> = {
     "sparse-world",
     "lib-other",
     "shape-lab",
+    "advance-lab",
     "ui",
   ]),
 };
@@ -184,6 +204,12 @@ const COMPOSITION_ROOTS = new Set<string>([
   "components/AppShell.tsx",
   "components/SceneLibrary.tsx",
   "lib/core/webgpu-render-worker.ts",
+  // The 2-D advance lab is its own route and its own client boundary:
+  // `app/advance-lab/page.tsx` is a server component, so nothing the studio's
+  // shell installs is evaluated for it. This is the outermost `use client`
+  // module that route reaches, which makes it the graph's entry point by the
+  // same rule as the four above.
+  "advance-lab/AdvanceLab.tsx",
 ]);
 
 const METHOD_CATALOG = "lib/methods/index.ts";
@@ -200,7 +226,7 @@ const SPARSE_METHOD_OWNERS = new Map<string, Zone>([
 function main() {
   const strict = process.argv.includes("--strict");
   const violations: string[] = [];
-  const roots = ["lib", "components", "app", "worker", "shape-lab", "tools", "tests"];
+  const roots = ["lib", "components", "app", "worker", "shape-lab", "advance-lab", "tools", "tests"];
   for (const root of roots) {
     for (const file of listSources(join(REPO, root))) {
       const rel = relative(REPO, file);

@@ -19,6 +19,7 @@ import { useSceneStore } from "./stores/scene-store";
 import { useShellStore } from "./stores/shell-store";
 import { useUIStore } from "./stores/ui-store";
 import type { EditorAction, EditorActionTarget } from "./editor-action";
+import { entityDeleteWedge, entitySelectWedge } from "./editor-entity-wedges";
 import type {
   EditorEntity,
   EditorEntityContext,
@@ -239,24 +240,14 @@ export function entityActionsAt(
   if (!definition) return [];
   const entity = definition.find(context, target.selection.id);
   if (!entity) return [];
-  const general: EditorAction[] = [{
-    id: "select",
-    label: "Edit",
-    icon: "edit",
-    tone: entity.tone,
-    hint: `Select ${entity.label} and open its controls`,
-    effect: { kind: "select", selection: entity.selection, openControls: true },
-  }];
+  // `editor-entity-wedges.ts`, not written here: the advance lab composes the
+  // same two wedges for a selected region, and the pair was drifting — see that
+  // file. What stays here is which entity gets them and in what order.
+  const general: EditorAction[] = [entitySelectWedge(entity)];
   const remove = entity.remove;
   if (remove) {
-    general.push({
-      id: "delete",
-      label: "Delete",
-      icon: "delete",
-      tone: "danger",
-      hint: `Remove ${entity.label} from the scene`,
-      effect: { kind: "scene", label: `Deleted ${entity.label}`, scene: remove(), reseed: true },
-    });
+    general.push(entityDeleteWedge(entity,
+      { kind: "scene", label: `Deleted ${entity.label}`, scene: remove(), reseed: true }));
   }
   return [...(definition.actions?.(context, target) ?? []), ...general];
 }
@@ -310,7 +301,7 @@ export function sceneActionsAt(
   options: { readonly placement?: boolean; readonly methodId?: string } = {},
 ): readonly EditorAction[] {
   const placement = options.placement !== false
-    ? [...fluidPlayActions(point_m, normal), ...voxelSculptActions(scene, options.methodId)]
+    ? [...fluidPlayActions(scene, point_m, normal), ...voxelSculptActions(scene, options.methodId)]
     : [];
   return [...placement, sceneWedge(scene), sceneInstrumentWedge(scene), compareWedge()];
 }

@@ -1,7 +1,9 @@
 import { DecodedPhysicsPublication, PhysicsPlane } from "./publication";
 import type { PhysicsRevision } from "./protocol";
+import { BRICK_FINE_CELLS } from "../core/sparse-brick-geometry";
 
-export const ADVANCE_BRICK_FINE = 8;
+/** The lab draws the same brick the 3-D solver binds on — see `BRICK_FINE_CELLS`. */
+export const ADVANCE_BRICK_FINE = BRICK_FINE_CELLS;
 export const ADVANCE_RUNGS = Object.freeze([1, 2, 4, 8] as const);
 
 export interface AdvanceGraphCell {

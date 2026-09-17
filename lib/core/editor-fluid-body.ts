@@ -3,6 +3,9 @@ import { setGravity } from "../features/gravity/state";
 import { damBreakFractions, initialFluidBrickComponents } from "./initial-fluid";
 import { SCENE_SHAPES_BY_CODE } from "./scene-shape";
 import type { EditorAction, EditorActionTarget } from "./editor-action";
+import { liquidBallWedge, liquidWedge } from "../features/liquid-drop/ring";
+import { regionDrawWedge } from "../features/refinement-region/ring";
+import { studioRegionSpace } from "./editor-refinement-region";
 import { cellProbeAction } from "./editor-probe-actions";
 import {
   boxCenter,
@@ -647,49 +650,42 @@ function fluidBodyEntityFor(context: EditorEntityContext): EditorEntity | undefi
  * Placing one carries it: a solid you asked for at a point is a solid you are
  * holding, and making you find it again afterwards is the step the pie removes.
  */
-export function fluidPlayActions(point_m: Vec3, normal: Vec3): readonly EditorAction[] {
+export function fluidPlayActions(
+  scene: SceneDescription,
+  point_m: Vec3,
+  normal: Vec3,
+): readonly EditorAction[] {
   return [
-    {
-      id: "water",
-      label: "Water",
-      icon: "water-ball",
-      tone: "fluid",
-      hint: "Add, paint, erase or pour water here",
-      children: [
-        {
-          id: "ball",
-          label: "Ball",
-          icon: "water-ball",
-          tone: "fluid",
-          hint: "Click inside the tank to drop a ball of water \u00b7 drag out to size it",
-          effect: { kind: "arm", gesture: "fluid-ball" },
-        },
-        {
-          id: "paint",
-          label: "Paint",
-          icon: "paint",
-          tone: "fluid",
-          hint: "Click to add a water brick \u00b7 drag to paint a body of water",
-          effect: { kind: "arm", gesture: "fluid-paint" },
-        },
-        {
-          id: "erase",
-          label: "Erase",
-          icon: "erase",
-          tone: "fluid",
-          hint: "Click or drag to remove painted water bricks",
-          effect: { kind: "arm", gesture: "fluid-erase" },
-        },
-        {
-          id: "hose",
-          label: "Hose",
-          icon: "hose",
-          tone: "inflow",
-          hint: "Aim the hose here",
-          effect: { kind: "place-inflow", point_m, normal },
-        },
-      ],
-    },
+    liquidWedge([
+      liquidBallWedge({
+        hint: "Click inside the tank to drop a ball of water \u00b7 drag out to size it",
+        effect: { kind: "arm", gesture: "fluid-ball" },
+      }),
+      {
+        id: "paint",
+        label: "Paint",
+        icon: "paint",
+        tone: "fluid",
+        hint: "Click to add a water brick \u00b7 drag to paint a body of water",
+        effect: { kind: "arm", gesture: "fluid-paint" },
+      },
+      {
+        id: "erase",
+        label: "Erase",
+        icon: "erase",
+        tone: "fluid",
+        hint: "Click or drag to remove painted water bricks",
+        effect: { kind: "arm", gesture: "fluid-erase" },
+      },
+      {
+        id: "hose",
+        label: "Hose",
+        icon: "hose",
+        tone: "inflow",
+        hint: "Aim the hose here",
+        effect: { kind: "place-inflow", point_m, normal },
+      },
+    ]),
     {
       id: "carry-solid",
       label: "Solid",
@@ -714,14 +710,11 @@ export function fluidPlayActions(point_m: Vec3, normal: Vec3): readonly EditorAc
         })),
       ],
     },
-    {
-      id: "region",
-      label: "Region",
-      icon: "region",
-      tone: "region",
-      hint: "Drag a box over the water to cap how finely it is solved there",
-      effect: { kind: "arm", gesture: "region-draw" },
-    },
+    // `lib/features/refinement-region/ring.ts`, which the lab's ring mounts
+    // too. The wedge gained the document's own capacity as it moved: a constant
+    // hint promising a box could be drawn was a promise the eighth one does not
+    // keep, and the lab already said so.
+    regionDrawWedge(studioRegionSpace, scene),
   ];
 }
 
@@ -776,7 +769,7 @@ export function fluidRingActions(
   target: EditorActionTarget,
 ): readonly EditorAction[] {
   return [
-    ...fluidPlayActions(target.point_m, target.normal ?? { x: 0, y: 1, z: 0 }),
+    ...fluidPlayActions(scene, target.point_m, target.normal ?? { x: 0, y: 1, z: 0 }),
     {
       id: "inspect",
       label: "Inspect",

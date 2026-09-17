@@ -65,11 +65,13 @@
  * and the slice already obeyed one before it could draw one — the resolution
  * policy takes every region crossing this cut as a hard floor and ceiling on
  * the bricks it fully contains. What the lab adds is the authoring, and the
- * authoring is the 3-D editor's: arm REGION, drag a box, and on release it
- * commits, disarms and selects *itself*, so the handles land under the pointer
- * that drew them. Corners and edges resize, the body moves, both snapped to the
- * box's own smallest allowed cell; its floor and its ceiling are two rows on
- * its own strip at its own corner; Delete removes it. A drawn box is never
+ * authoring is the 3-D editor's — literally, since WP4-WP6: arm REGION, drag a
+ * box, and on release it commits, disarms and selects *itself*, so the handles
+ * land under the pointer that drew them. Corners and edges resize, the body
+ * moves, both snapped to the **brick** — the unit the solver actually binds a
+ * region in — rather than to the box's own floor cell; its floor and its
+ * ceiling are two rows on its own strip at its own corner, and those rows are
+ * the studio's `EntityOptionRows`; Delete removes it. A drawn box is never
  * written to the scene, nor to any copy of the document: it is a live command
  * to the running world, and the set of them is held by this page and by the
  * controller. Reset restarts the clock and the water and then hands the new
@@ -101,8 +103,10 @@
  *
  * What is left here is the page: the run, the readings and the pointer. The
  * rest of the interaction is beside it and testable without a browser —
- * `slice-actions.ts` composes the ring and performs it, `slice-regions.ts` is
- * every box's arithmetic, `SliceToolstrip.tsx` is the EDIT column,
+ * `lab-ring.ts` composes the ring and performs it against an `EditorHost`,
+ * `lab-host.ts` is that host, `lab-region-space.ts` is the lab's `RegionSpace`
+ * (every box's arithmetic now being `lib/features/refinement-region/policy.ts`,
+ * shared with the 3-D studio), `SliceToolstrip.tsx` is the EDIT column,
  * `SliceRegions.tsx` is the boxes and their handles, `use-slice-shortcuts.ts`
  * is the keyboard and `view-transform.ts` is the camera. The only prose this
  * file still owns is the table of what a cell carries, which no single stage
@@ -123,6 +127,16 @@ import { sceneDocument } from "../lib/core/scene-definition";
 import type { EditorActionEffect } from "../lib/core/editor-action";
 import { getEditorGesture } from "../lib/core/editor-gesture-catalog";
 import { createPaneSession, type PaneSession } from "../lib/core/session/session";
+import { EditorHostProvider } from "../lib/core/session/host-context";
+import { Toolstrip, ToolstripTitle } from "../components/toolstrip";
+import {
+  refinementRegionSelectionId, refinementRegionIdFromSelection,
+  regionCapacityRemaining, type RefinementRegionRecord, type RegionBox,
+} from "../lib/features/refinement-region/definition";
+import {
+  regionDraftCellSize, regionFromDraw, regionSnapStep_cells,
+} from "../lib/features/refinement-region/policy";
+import { RegionDeleteRow, RegionOptionRows } from "../lib/features/refinement-region/ui";
 import { SessionProvider } from "../lib/core/session/session-context";
 import { findSceneDefinition, SCENE_CATALOG, sceneCatalogCards } from "../lib/core/scenes";
 import {
@@ -132,8 +146,8 @@ import {
   type AdvanceWorkScene,
 } from "../lib/methods/adaptive-volume/features/advance-slice/advance-work";
 import {
-  ADVANCE_DEFAULT_TRANSPORT_EXPERIMENT, ADVANCE_SURFACE_VIEWS,
-  ADVANCE_TRANSPORT_EXPERIMENT_ORDER, ADVANCE_TRANSPORT_EXPERIMENTS,
+  ADVANCE_DEFAULT_TRANSPORT_EXPERIMENT, ADVANCE_SLICE_SETTINGS, ADVANCE_SURFACE_VIEWS,
+  ADVANCE_TRANSPORT_EXPERIMENTS,
   isAdvanceTransportExperiment, type AdvanceSurfaceViewId,
 } from "../lib/methods/adaptive-volume/features/advance-slice/definition";
 import {
@@ -154,20 +168,22 @@ import styles from "./AdvanceLab.module.css";
 import {
   ADVANCE_LENSES, BAND_TONE, CELL_FILL_KEYS, DIRECT_LEVEL_SET_CONTOUR_KEY,
   DIRECT_LEVEL_SET_KEY, type Lens, type LensKey, LIQUID_KEY, markQuery,
-  paletteVar, REPRESENT_LENS, SLICE_OVERLAY_ORDER, SLICE_OVERLAYS, type SliceOverlayId,
+  paletteVar, REPRESENT_LENS, REPRESENT_LENS_MODE,
+  SLICE_OVERLAY_ORDER, SLICE_OVERLAYS, type SliceOverlayId,
   SOLID_KEY, drawCellFillSlice, drawDirectLevelSetSlice, drawSlice, syncPalette,
   usesCellFillSlice,
 } from "./lenses";
+import { labEditorHost } from "./lab-host";
+import {
+  labRegionAt, labRegionCanvasBox, labRegionSpace, labSolverCell,
+  type LabRegionDocument,
+} from "./lab-region-space";
+import {
+  labActionPerformer, labRingActions, labRingTitle, type LabRingContext,
+} from "./lab-ring";
 import { advancePresentationReady, advancePresentationRevision } from "./playback";
-import {
-  sliceActionPerformer, sliceActionsAt, sliceRingTitle, type SliceRingContext,
-} from "./slice-actions";
-import { SliceRegions, SliceRegionToolstrip } from "./SliceRegions";
-import {
-  draftRegionBox, regionAt, regionBox, regionBoxIsDrawn,
-  sliceRegionIdFromSelection, sliceRegionSelectionId,
-  type SliceBox, type SliceLattice,
-} from "./slice-regions";
+import { SliceRegions } from "./SliceRegions";
+import { LabFeatureSlot } from "./LabFeatureSlot";
 import { SliceToolstrip } from "./SliceToolstrip";
 import { useSliceShortcuts } from "./use-slice-shortcuts";
 import {
@@ -299,9 +315,6 @@ interface InjectionReceipt {
   readonly candidateGeneration: number;
   readonly fault?: { readonly stage?: string } | null;
 }
-
-const ENFORCEMENT_CAPACITY = 8;
-const DEFAULT_ENFORCEMENT_CELL_SIZE: (typeof ADVANCE_RUNGS)[number] = 2;
 
 /* Which surface the picture reconstructs, in the order the menu offers them.
  * Declared beside the method as `ADVANCE_SURFACE_VIEWS`; this is that roster
@@ -631,7 +644,12 @@ export function AdvanceLab(): React.JSX.Element {
   // first render already reads `viewportMode` off it, and a session that
   // arrived one render late would open the page in a mode it then changed.
   const [session] = useState(() => createPaneSession("a"));
-  return <SessionProvider value={session}><AdvanceSlice session={session} /></SessionProvider>;
+  // `EditorHostProvider` is inside `AdvanceSlice` rather than here: the host is
+  // built out of the running controller, the published lattice and this render's
+  // region list, none of which exist above that component. See `lab-host.ts`.
+  return <SessionProvider value={session}>
+    <AdvanceSlice session={session} />
+  </SessionProvider>;
 }
 
 function AdvanceSlice({ session }: { session: PaneSession }): React.JSX.Element {
@@ -640,7 +658,6 @@ function AdvanceSlice({ session }: { session: PaneSession }): React.JSX.Element 
   const controller = useRef<AdvanceLabController | null>(null);
   const view = useRef<AdvanceView | null>(null);
   const advanceBusy = useRef(false);
-  const nextRegionId = useRef(0);
   /* The slice is mutable, while React rendering is interruptible. Play may
    * advance only after the preceding revision has actually reached the canvas;
    * otherwise an RDF derived during render can be painted over a later VOF
@@ -702,10 +719,10 @@ function AdvanceSlice({ session }: { session: PaneSession }): React.JSX.Element 
     readonly at: readonly [number, number] } | null>(null);
   /* What a newly drawn box will enforce. One choice, carried between draws,
    * because a reader comparing two placements of the same bound should not
-   * re-pick it every time. */
-  const [enforceCells, setEnforceCells] =
-    useState<(typeof ADVANCE_RUNGS)[number]>(DEFAULT_ENFORCEMENT_CELL_SIZE);
-  const [holdAtOneTier, setHoldAtOneTier] = useState(false);
+   * re-pick it every time — and in the session's UI store rather than here,
+   * because the row that sets it is the studio's row and the studio's release
+   * handler reads the same field. See `UIState.regionDraft`. */
+  const regionDraft = session.ui(state => state.regionDraft);
   const dragging = useRef<{ pointer: number; anchor: readonly [number, number];
     moved: boolean } | null>(null);
   const [room, setRoom] = useState({ width: 960, height: 560 });
@@ -998,22 +1015,31 @@ function AdvanceSlice({ session }: { session: PaneSession }): React.JSX.Element 
   const displayNx = publishedView?.nx ?? 1;
   const displayNy = publishedView?.ny ?? 1;
 
-  const capacityLeft = ENFORCEMENT_CAPACITY - regionState.length;
-  /* The lattice the boxes are measured in. Taken off the published view rather
-   * than the solver's own copy: the publication is what the picture was drawn
-   * from, so a box drawn a moment ago is on the same cut as the water it was
-   * drawn over. Region coordinates are lattice cells with y *up*; every box in
-   * this file is canvas cells with y *down*, and `regionBox` is the one place
-   * that flip happens. */
-  const lattice: SliceLattice = { nx: displayNx, ny: displayNy };
+  /* The boxes and the cut they are on, as the shared package reads a document.
+   *
+   * The lattice is taken off the published view rather than off the solver's
+   * own copy: the publication is what the picture was drawn from, so a box
+   * drawn a moment ago is on the same cut as the water it was drawn over.
+   *
+   * Region coordinates are lattice cells with y *up* — the frame the solver
+   * reads a region in, which is what a `RefinementRegionRecord` is defined to
+   * be — while every box painted in this file is canvas cells with y *down*.
+   * `labRegionCanvasBox` and `labSolverCell` are the only two places that flip
+   * happens. Built fresh per render rather than memoized: it is an object of
+   * three fields, and a stale one would be a document disagreeing with the
+   * picture it is drawn over. */
+  const regionDoc: LabRegionDocument =
+    { regions: regionState, nx: displayNx, ny: displayNy };
+  const regionRecords = labRegionSpace.list(regionDoc);
+  const capacityLeft = regionCapacityRemaining(labRegionSpace, regionDoc);
   /* Which box the reader is holding, read back out of the shared selection
-   * rather than kept beside it. The ring's Select wedge, a press on a box and
+   * rather than kept beside it. The ring's Edit wedge, a press on a box and
    * the Escape ladder all write that one field, so there is no second copy
    * here that could disagree with what the handles are drawn on. */
-  const selectedRegionId = sliceRegionIdFromSelection(
+  const selectedRegionId = refinementRegionIdFromSelection(
     selection?.kind === "refinement-region" ? selection.id : undefined);
   const selectedRegion = selectedRegionId === undefined ? undefined
-    : regionState.find(region => region.id === selectedRegionId);
+    : regionRecords.find(region => region.id === selectedRegionId);
   /* The rubber band, snapped as it will land rather than as the pointer drew
    * it: showing one rectangle and committing another is the page disagreeing
    * with itself, and the outward snap is the part a reader has to see to
@@ -1023,9 +1049,18 @@ function AdvanceSlice({ session }: { session: PaneSession }): React.JSX.Element 
    * changes. The mode can be left from three places — Tab, Escape, the header's
    * toggle — and a page that had to be told about each of them would sooner or
    * later miss one; a draft that only exists while its stroke is armed cannot
-   * be left behind by any of them. */
-  const draftBox: SliceBox | null = drawingRegion && sketch
-    ? draftRegionBox(sketch.anchor, sketch.at, enforceCells, lattice) : null;
+   * be left behind by any of them.
+   *
+   * `undefined` back from the shared rule is a press that has not travelled:
+   * no band on screen, and nothing for the release to commit. The snap's one
+   * step of thickness is for a box somebody drew, not for a click. */
+  const draftRecord: RefinementRegionRecord | null = drawingRegion && sketch
+    ? regionFromDraw(labRegionSpace, regionDoc,
+      labSolverCell(sketch.anchor, displayNy), labSolverCell(sketch.at, displayNy),
+      regionDraft) ?? null
+    : null;
+  const draftBox: RegionBox | null = draftRecord
+    ? labRegionCanvasBox(draftRecord, displayNy) : null;
 
   /* The camera, resolved once per render and used by everything that has to
    * agree with the drawing: the canvas transform, both overlay layers, the
@@ -1054,10 +1089,11 @@ function AdvanceSlice({ session }: { session: PaneSession }): React.JSX.Element 
   /* The selected box's top-right corner in viewport pixels, which is where its
    * own strip hangs — the 3-D editor anchors an entity's strip off the
    * projected corner of its bounds, and this is that projection. */
-  const selectedRegionBox = selectedRegion ? regionBox(selectedRegion, displayNy) : null;
+  const selectedRegionBox = selectedRegion
+    ? labRegionCanvasBox(selectedRegion, displayNy) : null;
   const selectedRegionCorner = selectedRegionBox
     ? clientFromCell(camera, fit, roomRect,
-      selectedRegionBox.maxFine[0], selectedRegionBox.minFine[1])
+      selectedRegionBox.max[0] ?? 0, selectedRegionBox.min[1] ?? 0)
     : null;
   const dpr = typeof window === "undefined" ? 1 : Math.min(2, window.devicePixelRatio || 1);
 
@@ -1372,35 +1408,104 @@ function AdvanceSlice({ session }: { session: PaneSession }): React.JSX.Element 
   };
 
   /**
+   * The lab's world, as the shared capability modules reach it.
+   *
+   * Built fresh each render rather than memoized, for the same reason the ring's
+   * performer is: every member closes over this render's controller handle,
+   * this render's regions and this render's lattice, and a host held over from
+   * an older one would write a box into a world that has since been replaced.
+   *
+   * `commitRegions` is `updateRegions` — the page owns the call because its
+   * answer is a new published view that the canvas, the readings and the fault
+   * banner all move with. Everything a shared row does to a region arrives
+   * here as a whole `LabRegionDocument`, which is exactly the shape
+   * `AdvanceLabController.setRefinementRegions` takes.
+   */
+  // `updateRegions` and `commitDrop` both read `controller.current`, so the
+  // compiler-backed lint sees a ref reaching a call made during render. It is
+  // reading the shape, not the schedule: nothing here *invokes* either one —
+  // they are stored on the host and called later, from a pointer handler, a
+  // ring wedge or a row's onChange, which is exactly where a ref may be read.
+  // The same is true of `perform` below, built from this host the same way.
+  // eslint-disable-next-line react-hooks/refs
+  const host = labEditorHost({
+    session,
+    commitRegions: next => updateRegions(next),
+    // Canvas cells, because that is the frame the ring's press was resolved in;
+    // `commitDrop` is the one place the flip to the solver's frame happens.
+    dropAt: (centre, radius) => commitDrop([centre[0] ?? 0, centre[1] ?? 0], radius),
+    /* The five instruments `advanceSliceFeature` declares, keyed by the
+     * `setting` each control names. This is the whole of what the strip's rows
+     * are handed: they read a value and write one, and which page state that
+     * lands in is this record's business rather than theirs.
+     *
+     * Every setter is an arrow rather than a reference, because two of them —
+     * `applyBudget` and `chooseRun` — are declared further down this component
+     * and would be in their temporal dead zone at the moment the host is
+     * built. A row calls them long after render. */
+    params: {
+      [ADVANCE_SLICE_SETTINGS.lens]: {
+        value: representing ? REPRESENT_LENS_MODE : selected,
+        set: next => {
+          if (next === REPRESENT_LENS_MODE) { setStep(1); return; }
+          select(next as AdvanceStageId);
+        },
+      },
+      /* A set, written as a list: the two annotations compose over whichever
+       * lens is up, so this is never a single choice. The row flips one
+       * membership and hands the whole list back. */
+      [ADVANCE_SLICE_SETTINGS.overlays]: {
+        value: [...overlays].join(","),
+        set: next => setOverlays(new Set(String(next).split(",")
+          .filter((id): id is SliceOverlayId =>
+            SLICE_OVERLAY_ORDER.includes(id as SliceOverlayId)))),
+      },
+      [ADVANCE_SLICE_SETTINGS.surface]: {
+        value: readingDirectLevelSet ? "direct-level-set" : surfaceView,
+        // The imposed reading is stated, never chosen: the row offers only the
+        // selectable views, so this guard is the second half of that fact
+        // rather than a duplicate of it.
+        set: next => { if (next !== "direct-level-set") setSurfaceView(next as SurfaceView); },
+      },
+      [ADVANCE_SLICE_SETTINGS.budget]: {
+        value: budget,
+        set: next => applyBudget(Number(next)),
+      },
+      [ADVANCE_SLICE_SETTINGS.transport]: {
+        value: transportExperiment,
+        set: next => {
+          const arm = next as AdvanceTransportExperiment;
+          setTransportExperiment(arm);
+          chooseRun(sceneId, arm);
+        },
+      },
+    },
+  });
+
+  /** One box written into the world, under the label a history would record. */
+  const writeRegion = (label: string, record: RefinementRegionRecord): void => {
+    host.commit(label, labRegionSpace.write(regionDoc, record.id, record));
+  };
+
+  /**
    * Commit the box the rubber band was already drawing.
    *
-   * The band shows the *snapped* rectangle rather than the raw drag, so this
-   * takes that box rather than the two corners: what the reader let go of is
-   * what lands, and there is no second rounding here to disagree with it.
+   * The band *is* this record — `draftRecord`, flipped back for painting — so
+   * what the reader let go of is literally what lands, and there is no second
+   * rounding here to disagree with it. A press with no drag commits one snap
+   * step, which is what the band showed while the pointer stood still.
    *
    * Then the 3-D editor's release contract, in its order — commit, disarm,
    * select — which is what puts the new box's handles and its own strip under
    * the pointer that just drew it instead of leaving the stroke armed over a
    * region nobody can yet reshape.
    */
-  const drawRegion = (box: SliceBox): void => {
-    const s = view.current;
-    if (!s || capacityLeft <= 0 || !regionBoxIsDrawn(box)) return;
-    const id = `advance-region-${++nextRegionId.current}`;
-    updateRegions([...regionState, { id,
-      minimumFine: [box.minFine[0], s.ny - box.maxFine[1]],
-      maximumFine: [box.maxFine[0], s.ny - box.minFine[1]],
-      minimumCellWidth: enforceCells,
-      ...(holdAtOneTier ? { maximumCellWidth: enforceCells } : {}) }]);
-    const ui = session.ui.getState();
-    ui.setArmedGesture(undefined);
-    ui.select({ kind: "refinement-region", id: sliceRegionSelectionId(id) });
-    ui.setSelectionControlsOpen(true);
-  };
-
-  const amendRegion = (region: AdvanceRefinementRegion, next: AdvanceRefinementRegion | undefined): void => {
-    updateRegions(next ? regionState.map(value => value.id === region.id ? next : value)
-      : regionState.filter(value => value.id !== region.id));
+  const drawRegion = (record: RefinementRegionRecord): void => {
+    if (!view.current || capacityLeft <= 0) return;
+    writeRegion(`Drew ${record.id.toUpperCase()}`, record);
+    host.arm(undefined);
+    host.select({ kind: "refinement-region",
+      id: refinementRegionSelectionId(record.id) }, true);
   };
 
   const dropRows = (drop: InjectionReceipt):
@@ -1462,8 +1567,8 @@ function AdvanceSlice({ session }: { session: PaneSession }): React.JSX.Element 
   }, []);
 
   const removeRegion = (regionId: string): void => {
-    const region = regionState.find(value => value.id === regionId);
-    if (region) amendRegion(region, undefined);
+    host.commit(`Deleted ${regionId.toUpperCase()}`,
+      labRegionSpace.write(regionDoc, regionId, undefined));
   };
 
   /* A selection outlives nothing: a run change empties the boxes, and a
@@ -1498,14 +1603,14 @@ function AdvanceSlice({ session }: { session: PaneSession }): React.JSX.Element 
    * a world that has since been replaced. It is five closures and an object.
    */
   const perform = (effect: EditorActionEffect, chosen: PaneSession): void =>
-    sliceActionPerformer({
-      dropBall: at => commitDrop(at, defaultDropRadius(displayNx, displayNy)),
+    labActionPerformer(host, {
+      doc: regionDoc,
+      dropRadius_cells: defaultDropRadius(displayNx, displayNy),
       pinCell: at => { const probe = probeCell(at); if (probe) pin(probe); },
       /* The direct level set is published rather than reconstructed, so it is
        * never one of the choices — the wedge states it and offers no effect. */
       setSurfaceView: next => { if (next !== "direct-level-set") setSurfaceView(next); },
       toggleOverlay,
-      removeRegion,
     })(effect, chosen);
 
   const failureRows: readonly (readonly [string, string, string])[] = readings.fault ? [
@@ -1520,7 +1625,12 @@ function AdvanceSlice({ session }: { session: PaneSession }): React.JSX.Element 
     ] : []),
   ] : [];
 
-  return <main className={styles.lab}>
+  /* The provider is here rather than around `AdvanceSlice` because the host is
+   * built from this render's world. Everything below it — the shared region
+   * rows, the shared ring's performer — commits through it and through nothing
+   * else, which is what makes a row that cannot see this page render correctly
+   * inside it. */
+  return <EditorHostProvider value={host}><main className={styles.lab}>
     <header className={styles.bar}>
       {/* Three cells, not one row: the transport sits in the middle of the
           *header*, which is only the middle of the row when both sides happen
@@ -1591,25 +1701,21 @@ function AdvanceSlice({ session }: { session: PaneSession }): React.JSX.Element 
       </div>
 
       <div className={`${styles.side} ${styles.trailing}`}>
-        <label className={`${styles.iters} ${styles.experiment}`} htmlFor="advance-transport">Transport
-          <select id="advance-transport" data-testid="advance-transport"
-            value={transportExperiment}
-            title="Select the volume transport. Changing it starts a new run from the scene, and from the scene's own enforcement regions rather than the drawn ones."
-            onChange={event => {
-              const next = event.target.value as AdvanceTransportExperiment;
-              setTransportExperiment(next);
-              chooseRun(sceneId, next);
-            }}>
-            {/* The arms, their names and what each one does are declared
-                beside the method; this is that roster read out, so adding an
-                arm there adds it here. It stays in the header rather than
-                moving to the edit strip because choosing one starts a new
-                *run* — it is not an instrument on the water in front of you. */}
-            {ADVANCE_TRANSPORT_EXPERIMENT_ORDER.map(id =>
-              <option key={id} value={id} title={ADVANCE_TRANSPORT_EXPERIMENTS[id].hint}>
-                {ADVANCE_TRANSPORT_EXPERIMENTS[id].label}</option>)}
-          </select>
-        </label>
+        {/* The transport arm, as a placement rather than a widget written
+            here: `advanceSliceFeature` puts it in `sim.transport`, and this is
+            that slot. It stays in the header rather than moving to the edit
+            strip because choosing one starts a new *run* — it is not an
+            instrument on the water in front of you, which is exactly what the
+            control's `update: "reset"` says.
+
+            The two header classes are on this wrapper rather than inside the
+            row, because a *page's* stylesheet is the page's: `.iters select`
+            is a descendant rule, so the control it renders is styled exactly as
+            the two readings beside it, and `lib`-side code never imports a CSS
+            module belonging to one route. */}
+        <div className={`${styles.iters} ${styles.experiment}`}>
+          <LabFeatureSlot slot="sim.transport" />
+        </div>
         <label className={styles.iters} htmlFor="advance-step">Δt
         <select id="advance-step" value={String(dt)}
           title="Seconds of physics per advance. 1/30 s is CM12's paper regime; the lab holds every scene to it whatever its own document asks for."
@@ -1656,24 +1762,24 @@ function AdvanceSlice({ session }: { session: PaneSession }): React.JSX.Element 
               ? aimAt(canvas.current, event.clientX, event.clientY) : null;
             const at = onSlice(aimed) ? aimed : null;
             setHover(null);
-            const context: SliceRingContext = {
+            const context: LabRingContext = {
               mode: viewportMode,
               at,
+              doc: regionDoc,
               /* What the press was *on*, which is what makes the region half
                  of this ring about one box rather than about a list. */
-              regionId: regionAt(regionState, displayNy, at)?.id,
+              regionId: labRegionAt(regionRecords, displayNy, at)?.id,
               surfaceView: readingDirectLevelSet ? "direct-level-set" : surfaceView,
               surfaceImposed: readingDirectLevelSet,
               overlays,
               overlaysOffered: SLICE_OVERLAY_ORDER.filter(overlayOffered),
-              capacityLeft,
             };
             /* Client pixels, the studio's convention: the ring draws itself in
                a fixed layer over the whole window rather than inside this box. */
             session.ui.getState().openRadialMenu({
               x: event.clientX, y: event.clientY,
-              title: sliceRingTitle(context),
-              actions: sliceActionsAt(context),
+              title: labRingTitle(context),
+              actions: labRingActions(context),
             });
           }}>
           {/* The bitmap is the room, not the slice: the picture is placed
@@ -1765,12 +1871,11 @@ function AdvanceSlice({ session }: { session: PaneSession }): React.JSX.Element 
               const at = aimAt(event.currentTarget, event.clientX, event.clientY);
               if (drawingRegion) {
                 setSketch(null);
-                /* The band the reader was watching, committed as it stood: the
-                 * same snap, off the same anchor, so nothing rounds twice. A
-                 * press with no drag draws an empty box, and `drawRegion`
-                 * declines it — snapping a point outward would still make a
-                 * legal region, but not the one anybody asked for. */
-                if (at) drawRegion(draftRegionBox(active.anchor, at, enforceCells, lattice));
+                /* The band the reader was watching, committed as it stood —
+                 * literally the same record, snapped once when it was drawn, so
+                 * nothing rounds twice and nothing can disagree with the
+                 * rectangle that was on screen a frame ago. */
+                if (at && draftRecord) drawRegion(draftRecord);
                 return;
               }
               const reach = at
@@ -1809,15 +1914,13 @@ function AdvanceSlice({ session }: { session: PaneSession }): React.JSX.Element 
                  * overlay claims it. */
                 const at = aimAt(event.currentTarget, event.clientX, event.clientY);
                 const region = onSlice(at)
-                  ? regionAt(regionState, displayNy, at) : undefined;
-                const ui = session.ui.getState();
+                  ? labRegionAt(regionRecords, displayNy, at) : undefined;
                 if (region) {
-                  ui.select({ kind: "refinement-region",
-                    id: sliceRegionSelectionId(region.id) });
-                  ui.setSelectionControlsOpen(true);
+                  host.select({ kind: "refinement-region",
+                    id: refinementRegionSelectionId(region.id) }, true);
                   return;
                 }
-                ui.select(undefined);
+                host.select(undefined);
               }
               const probe = probeAt(event.currentTarget, event.clientX, event.clientY);
               if (probe) pin(probe);
@@ -1848,8 +1951,7 @@ function AdvanceSlice({ session }: { session: PaneSession }): React.JSX.Element 
               is the reading the reader came for. Drawn in the same lattice
               units as the aim overlay, over every lens. */}
           <SliceRegions
-            regions={regionState}
-            lattice={lattice}
+            doc={regionDoc}
             viewBox={sliceBox}
             scale={scale}
             draft={draftBox}
@@ -1863,12 +1965,9 @@ function AdvanceSlice({ session }: { session: PaneSession }): React.JSX.Element 
             pixelAt={(x, y) => clientFromCell(camera, fit, roomRect, x, y)}
             cellAt={(clientX, clientY) => canvas.current
               ? aimAt(canvas.current, clientX, clientY) : null}
-            onSelect={id => {
-              const ui = session.ui.getState();
-              ui.select({ kind: "refinement-region", id: sliceRegionSelectionId(id) });
-              ui.setSelectionControlsOpen(true);
-            }}
-            onCommit={next => amendRegion(next, next)} />
+            onSelect={id => host.select({ kind: "refinement-region",
+              id: refinementRegionSelectionId(id) }, true)}
+            onCommit={next => writeRegion(`Reshaped ${next.id.toUpperCase()}`, next)} />
 
           {/* Nothing names the stage over the water: the sidebar says which lens
               this is and what it draws, and a caption pinned to the corner of
@@ -1898,8 +1997,10 @@ function AdvanceSlice({ session }: { session: PaneSession }): React.JSX.Element 
               {" "}<b>Esc</b> or <b>{getEditorGesture("fluid-ball").shortcut}</b> to stop.</div>}
             {drawingRegion && <div className={styles.caption}>
               Drawing an enforcement region — drag a box over the water. It will
-              snap out to whole {enforceCells}-cell leaves and, from the next step,
-              hold the bricks it contains{holdAtOneTier
+              snap out to whole {regionSnapStep_cells({ minimumCellSize_cells:
+                regionDraftCellSize(labRegionSpace, regionDraft) },
+              labRegionSpace.brick_cells)}-cell leaves and, from the next step,
+              hold the bricks it contains{regionDraft.holdAtOneTier
                 ? " at exactly that size" : " no coarser than that"}.
               {" "}<b>Esc</b> or <b>{getEditorGesture("region-draw").shortcut}</b> to stop.</div>}
           </div>}
@@ -1996,39 +2097,32 @@ function AdvanceSlice({ session }: { session: PaneSession }): React.JSX.Element 
           {editing && <SliceToolstrip
             leftFraction={TOOLSTRIP_LEFT_FRACTION}
             topFraction={TOOLSTRIP_TOP_FRACTION}
-            lens={representing ? { represent: true } : { represent: false, stage: selected }}
-            chooseLens={choice => {
-              if (choice.represent) { setStep(1); return; }
-              select(choice.stage);
-            }}
-            overlays={overlays}
-            overlayOffered={overlayOffered}
-            toggleOverlay={toggleOverlay}
-            surfaceView={readingDirectLevelSet ? "direct-level-set" : surfaceView}
-            surfaceImposed={readingDirectLevelSet}
-            setSurfaceView={next => { if (next !== "direct-level-set") setSurfaceView(next); }}
-            budget={budget}
-            setBudget={applyBudget}
-            draftCells={enforceCells}
-            setDraftCells={setEnforceCells}
-            draftHeldAtOneTier={holdAtOneTier}
-            setDraftHeldAtOneTier={setHoldAtOneTier}
-            capacityLeft={capacityLeft} />}
+            regions={regionDoc} />}
 
           {/* The selected box's own controls, at the box's own corner — the
               3-D `EntityToolstrip`'s argument: a selection *is* the disclosure,
-              so its rows stand open rather than behind a second click. */}
-          {editing && selectedRegion && selectedRegionCorner && <SliceRegionToolstrip
-            region={selectedRegion}
+              so its rows stand open rather than behind a second click.
+
+              The rows are not this page's any anymore. `RegionOptionRows` and
+              `RegionDeleteRow` are `lib/features/refinement-region/ui.tsx` over
+              `EntityOptionRows`, which is what the 3-D editor renders for the
+              same box — so MIN, MAX and Remove are one declaration and a rule
+              added to a region appears on both pages or on neither. They commit
+              through `useEditorHost`, which is the provider wrapped around this
+              whole page, so nothing here is handed a write callback. */}
+          {editing && selectedRegion && selectedRegionCorner && <Toolstrip
             leftFraction={Math.min(1, Math.max(0,
               selectedRegionCorner[0] / Math.max(1, room.width)))}
             topFraction={Math.min(1, Math.max(0,
               selectedRegionCorner[1] / Math.max(1, room.height)))}
-            onChange={next => amendRegion(selectedRegion, next)}
-            onRemove={() => {
-              removeRegion(selectedRegion.id);
-              session.ui.getState().select(undefined);
-            }} />}
+            ariaLabel="Enforcement region options"
+            narrow
+            testId="slice-region-toolstrip"
+          >
+            <ToolstripTitle>Enforcement region</ToolstripTitle>
+            <RegionOptionRows space={labRegionSpace} doc={regionDoc} record={selectedRegion} />
+            <RegionDeleteRow space={labRegionSpace} doc={regionDoc} record={selectedRegion} />
+          </Toolstrip>}
 
           {/* Which mode the page is in, in the corner it is in the studio. */}
           <EditorModeChip />
@@ -2358,5 +2452,5 @@ function AdvanceSlice({ session }: { session: PaneSession }): React.JSX.Element 
         Mounted outside the viewport so a press on a wedge is a press on the
         ring rather than another right-click on the water under it. */}
     <RadialMenu perform={perform} />
-  </main>;
+  </main></EditorHostProvider>;
 }

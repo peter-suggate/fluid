@@ -129,8 +129,16 @@ interface VisualizationCommon {
   readonly description: string;
   /** Where the numbers come from, in one phrase. Shown under the label. */
   readonly source?: string;
-  /** The entry's own colour, for a toggle chip. Distinct from the legend. */
-  readonly swatch?: `#${string}`;
+  /**
+   * The entry's own colour, for a toggle chip. Distinct from the legend.
+   *
+   * A custom property is as valid an answer as a literal: the 2-D advance lab
+   * resolves every tone it draws against the page's own theme, so its entries
+   * name the variable the chrome is built from rather than freezing one of the
+   * two readings of it into the declaration. Everything that consumes this
+   * hands it to CSS.
+   */
+  readonly swatch?: `#${string}` | `var(--${string})`;
   readonly legend?: readonly VisualizationLegendEntry[];
   /**
    * The quantity's own definition, when the view draws one another renderer

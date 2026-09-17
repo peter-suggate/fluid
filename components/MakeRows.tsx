@@ -2,6 +2,9 @@
 
 import { useState } from "react";
 import { TopologyFreezeButton } from "../lib/features/topology-freeze/ui";
+import { LiquidDropRow as SharedLiquidDropRow } from "../lib/features/liquid-drop/ui";
+import { RegionRow as SharedRegionRow } from "../lib/features/refinement-region/ui";
+import { studioRegionSpace } from "../lib/core/editor-refinement-region";
 import { performEditorAction } from "../lib/core/editor-action-runtime";
 import { placementFields } from "../lib/core/editor-placement";
 import { voxelToolGroups } from "../lib/core/editor-voxel-tool-actions";
@@ -42,16 +45,26 @@ import {
  * exists, and the ring is opened on the body they would work on.
  */
 
-/** Drag out a box that caps how finely the solver may refine inside it. */
-function RegionRow() {
-  const { armed, toggle } = useArmedStroke("region-draw");
-  return <ToolstripRow
-    icon={<EditorActionGlyph name="region" />}
-    name="Refinement region"
-    hint={strokeHint("region-draw", armed)}
-    active={armed}
-    testId="scene-region-row"
-    onClick={toggle}
+/**
+ * Drag out a box that caps how finely the solver may refine inside it.
+ *
+ * The row itself is `lib/features/refinement-region/ui.tsx` and is the *same
+ * component* the 2-D advance lab's strip mounts — which is how the studio
+ * gained the cell-size chooser the lab already had. What is the studio's here
+ * is the two arguments: its `RegionSpace` (metres behind three axes, the six-
+ * rung ladder, a capacity of eight) and the document those are read from.
+ *
+ * `TopologyFreezeButton` rides in `after`, following the chooser, exactly where
+ * it was. It is passed in rather than rendered by the shared row because it is
+ * not about the box: it freezes the whole solver's adaptivity, which is a fact
+ * about a running 3-D solve that the lab's Rust world has no counterpart for.
+ */
+export function RegionRow() {
+  const session = useSession();
+  const scene = session.scene((state) => state.scene);
+  return <SharedRegionRow
+    space={studioRegionSpace}
+    doc={scene}
     after={<TopologyFreezeButton />}
   />;
 }
@@ -76,12 +89,6 @@ function WaterRow() {
   const waterShape = session.ui((state) => state.waterShape);
   const setWaterShape = session.ui((state) => state.setWaterShape);
   const { armed, toggle } = useArmedStroke("fluid-ball");
-  const [picking, setPicking] = useState(false);
-  const { claim } = useToolstripSection("water-shape", () => setPicking(false));
-  const pick = (open: boolean) => {
-    claim(open);
-    setPicking(open);
-  };
   const tools = voxelToolGroups(scene, methodId).find((group) => group.group === "Fluid")?.tools ?? [];
   const chosen = tools.find((tool) => tool.id === waterShape) ?? tools[0];
   const ballFallsBack = chosen?.id === "fluid-ball" && chosen.unavailable !== undefined;
@@ -92,35 +99,18 @@ function WaterRow() {
     performEditorAction({ kind: "voxel-tool", toolId: chosen.id }, session);
   };
   const name = chosen ? `Drop a ${chosen.label.replace(/^water\s+/i, "")}` : "Drop water";
-  return <ToolstripRow
+  return <SharedLiquidDropRow
     icon={chosen && !ballFallsBack
       ? <EditorActionPathGlyph path={chosen.iconPath} />
       : <EditorActionGlyph name="water-ball" />}
     name={name}
     hint={armed ? strokeHint("fluid-ball", true) : (ballFallsBack ? strokeHint("fluid-ball", false) : chosen?.hint ?? strokeHint("fluid-ball", false))}
-    active={armed}
-    testId="scene-water-row"
-    onClick={arm}
-    after={tools.length > 1 ? <ToolstripMenuButton
-      label="Water shape"
-      hint="What the next drop pours. Shapes come from the installed water tools."
-      open={picking}
-      testId="scene-water-pick"
-      onOpen={pick}
-    >
-      {tools.map((tool) => <ToolstripMenuItem
-        key={tool.id}
-        icon={<EditorActionPathGlyph path={tool.iconPath} size={13} />}
-        label={tool.label}
-        title={tool.hint}
-        active={tool.id === chosen?.id}
-        testId={`scene-water-pick-${tool.id}`}
-        onClick={() => {
-          setWaterShape(tool.id);
-          pick(false);
-        }}
-      />)}
-    </ToolstripMenuButton> : undefined}
+    onArm={arm}
+    shapes={tools.map((tool) => ({
+      id: tool.id, label: tool.label, hint: tool.hint, iconPath: tool.iconPath,
+    }))}
+    chosenId={chosen?.id}
+    chooseShape={setWaterShape}
   />;
 }
 

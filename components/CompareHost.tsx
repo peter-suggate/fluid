@@ -1,10 +1,12 @@
 "use client";
 import { hostTransportBlockReason, hostTransportFailure } from "../lib/core/simulation/host-transport-status";
 
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { shellCompareStore, startCompareSync } from "../lib/core/compare/compare-model";
 import { COMPARE_ADOPTIONS, SECOND_PANE_ID } from "../lib/core/compare/compare-mode";
 import { createPaneSession, type PaneSession } from "../lib/core/session/session";
+import { EditorHostProvider } from "../lib/core/session/host-context";
+import { studioEditorHost } from "../lib/core/simulation/editor-host";
 import { SessionProvider, useSession } from "../lib/core/session/session-context";
 import { simulation } from "../lib/core/simulation/controller";
 import { useShellStore } from "../lib/core/stores/shell-store";
@@ -57,6 +59,9 @@ export function CompareHost() {
   const setFocusedPane = useShellStore((state) => state.setFocusedPane);
   const active = compare.active;
   const [sessionB] = useState(paneBSession);
+  // Pane B commits into pane B. One host per realm is the whole point of the
+  // seam: a shared row rendered in this column must not reach pane A.
+  const editorHostB = useMemo(() => studioEditorHost(sessionB), [sessionB]);
   const [splitFraction, setSplitFraction] = useState(0.5);
   const subscribeTransport = useCallback((notify: () => void) => {
     const panes = active ? [sessionA, sessionB] : [sessionA];
@@ -165,7 +170,9 @@ export function CompareHost() {
           onPointerDown={beginSplitDrag}
         />
         <SessionProvider value={sessionB}>
-          <ScenePane paneId={SECOND_PANE_ID} tagged focused={compare.focusedPane === "b"} onFocus={focusB} />
+          <EditorHostProvider value={editorHostB}>
+            <ScenePane paneId={SECOND_PANE_ID} tagged focused={compare.focusedPane === "b"} onFocus={focusB} />
+          </EditorHostProvider>
         </SessionProvider>
         <div ref={ghostRef} className="compare-splitter-ghost" aria-hidden="true" style={{ left: `${splitFraction * 100}%` }} />
         <CompareDiffStrip a={sessionA} b={sessionB} />

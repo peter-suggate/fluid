@@ -893,8 +893,11 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     // A rubber band on a horizontal plane through the press. `anchor` is the
     // corner the box is grown from, and `regionId` is claimed at the press so
     // every sample of the drag revises the same region instead of appending one
-    // per pointer-move.
-    | { id: number; action: "region-draw"; anchor: Vec3; regionId: string }
+    // per pointer-move. `drawn` is what separates the two gestures a press with
+    // this tool armed can turn out to be: it goes true the first time the
+    // pointer has travelled far enough to name an area, and a release without
+    // it commits nothing — a click is a selection, never a draw.
+    | { id: number; action: "region-draw"; anchor: Vec3; regionId: string; drawn: boolean }
     // A ball being dropped. `anchor` is the point under the press — the ball
     // rests on it and its surface passes through it — and `hover` is the
     // surface that anchor came from, kept so the ball can be re-rested as it
@@ -2089,12 +2092,21 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
    * entry per pointer sample. Same commit-on-release contract as every other
    * gesture: the draft previews, the release writes once.
    */
-  const updateRegionDraft = (anchor: Vec3, drag: Vec3, regionId: string) => {
+  const updateRegionDraft = (anchor: Vec3, drag: Vec3, regionId: string): boolean => {
     const committed = session.scene.getState().scene;
-    const region = refinementRegionFromDrag(committed, anchor, drag, { id: regionId });
+    // The bound the reader chose on the strip's chooser, not a constant. Read at
+    // every pointer sample rather than latched at the press, because the draft
+    // is a live store value and the preview has to be the box that will land.
+    const region = refinementRegionFromDrag(committed, anchor, drag,
+      { id: regionId, draft: session.ui.getState().regionDraft });
+    // A press that has not travelled names no box, so nothing previews and
+    // nothing is written — see `regionDrawIsDegenerate`. The press still opens
+    // the draft, because the very next pointer sample usually fills it.
+    if (region === undefined) return false;
     session.sceneDraft.getState().updateDraft({
       fluid: withRefinementRegion(committed, regionId, region).fluid,
     });
+    return true;
   };
 
   /**
@@ -2119,8 +2131,9 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     if (!anchor || !Number.isFinite(anchor.x)) return;
     const regionId = nextRefinementRegionId(scene);
     simulation.beginDraft("refinement-region", "Drew a refinement region", paneId);
-    pointerRef.current = { id: event.pointerId, action: "region-draw", anchor, regionId };
-    updateRegionDraft(anchor, anchor, regionId);
+    pointerRef.current = {
+      id: event.pointerId, action: "region-draw", anchor, regionId, drawn: false,
+    };
   };
 
   /**
@@ -2687,8 +2700,9 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     }
     if (active.action === "region-draw") {
       const ray = pointerRay(event);
-      updateRegionDraft(active.anchor,
+      const drawn = updateRegionDraft(active.anchor,
         planeHit(ray.origin, ray.direction, active.anchor, { x: 0, y: 1, z: 0 }), active.regionId);
+      if (drawn && !active.drawn) pointerRef.current = { ...active, drawn };
       return;
     }
     if (active.action === "fluid-ball") {
@@ -2891,7 +2905,12 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     // pointer. `setActiveTool` clears the axis lock, so the selection is set
     // afterwards — it survives, the lock does not.
     if (active.action === "region-draw") {
-      if (cancelled) { simulation.cancelDraft(paneId); return; }
+      // A press released where it began, which every tool in this editor treats
+      // as a different gesture from a drag. Here it is the one gesture that must
+      // do *nothing*: the snap guarantees a step of thickness, so committing
+      // would leave a one-brick region nobody drew — and the tool stays armed,
+      // because the reader is about to make the drag they just fumbled.
+      if (cancelled || !active.drawn) { simulation.cancelDraft(paneId); return; }
       simulation.commitDraft(undefined, paneId);
       session.ui.getState().setArmedGesture(undefined);
       session.ui.getState().select({

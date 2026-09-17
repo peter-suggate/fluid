@@ -9,6 +9,7 @@ import type { AxisConstraint } from "../editor-axis-constraint";
 import { DEFAULT_VIEWPORT_MODE, type ViewportMode } from "../editor-viewport-mode";
 import { VOXEL_REGION_SELECTION, type VoxelSelectionRegion } from "../editor-voxel-region";
 import type { PlacementDimensions } from "../editor-placement";
+import { DEFAULT_REGION_DRAFT, type RegionDraft } from "../refinement-regions";
 import { defaultCamera, type CameraState, type RigidShape } from "../model";
 
 /**
@@ -31,6 +32,10 @@ export type SceneryPropKind = "box" | "cylinder" | "ellipsoid" | "oak-v2";
  * was being taken. See `UIQueryState.sceneOverlay`.
  */
 export type SceneOverlay = "sim-pipeline" | "render-pipeline" | "diagnostics";
+
+/** The pending box's bound, declared beside the region rules it names. */
+export type { RegionDraft };
+
 import {
   DEFAULT_SVO_LIGHTING_OPTIONS,
   type SvoConeTracingMode,
@@ -228,6 +233,8 @@ interface UIStore {
    * argued for.
    */
   placementDimensions: PlacementDimensions;
+  /** What the next refinement box drawn will mean. See `RegionDraft`. */
+  regionDraft: RegionDraft;
   /** The pipeline or diagnostics instrument drawn over the scene, if any. */
   sceneOverlay: SceneOverlay | null;
   /** Fig. 2-style grid cross-section drawn on a slice plane in the scene. */
@@ -331,6 +338,8 @@ interface UIStore {
   setPlacementShape: (shape: RigidShape) => void;
   setWaterShape: (toolId: string) => void;
   setPlacementDimensions: (shape: RigidShape, dimensions_m: PlacementDimensions[RigidShape]) => void;
+  /** Merge into the pending box's bound. A partial, because the chooser sets one field at a time. */
+  setRegionDraft: (patch: Partial<RegionDraft>) => void;
   /** Show one instrument over the scene, or `null` to clear the one that is up. */
   setSceneOverlay: (overlay: SceneOverlay | null) => void;
   setGridOverlayAxis: (axis: GridOverlayConfig["axis"]) => void;
@@ -412,6 +421,7 @@ export const createUIStore = () => create<UIStore>((set) => ({
   placementShape: "sphere",
   waterShape: "fluid-ball",
   placementDimensions: {},
+  regionDraft: DEFAULT_REGION_DRAFT,
   sceneOverlay: null,
   gridOverlayAxis: "off",
   gridOverlaySlice: 0.5,
@@ -508,6 +518,13 @@ export const createUIStore = () => create<UIStore>((set) => ({
   // the value equals the default: what was typed is what is held.
   setPlacementDimensions: (shape, dimensions_m) => set((state) => ({
     placementDimensions: { ...state.placementDimensions, [shape]: dimensions_m },
+  })),
+  // Merged rather than replaced, and the whole record replaced on write: the
+  // chooser sets the cell size and the tier rule from two different menu items,
+  // and a setter taking the whole draft would make each of them restate the
+  // other's current value.
+  setRegionDraft: (patch) => set((state) => ({
+    regionDraft: { ...state.regionDraft, ...patch },
   })),
   // Assignment rather than a toggle set: opening one instrument closes whichever
   // was up, because the field can only hold one and the ring writes it directly.

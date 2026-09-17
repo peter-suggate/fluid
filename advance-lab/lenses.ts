@@ -24,10 +24,14 @@ import {
   type AdvanceRdfView, type AdvanceView,
 } from "../lib/physics-wasm/advance-view";
 import {
-  FRACTION_FLOOR, cellFillOpacity, fractionBand, fractionBandPaint, fractionReadout,
-  fractionResidueRamp,
+  FRACTION_FLOOR, FRACTION_VIEW_BANDS, cellFillOpacity, fractionBand, fractionBandPaint,
+  fractionReadout, fractionResidueRamp,
   type FractionBand, type FractionTone,
 } from "../lib/core/fluid-fraction-view";
+import {
+  fieldVisualization,
+  type FieldVisualization, type FieldVisualizationIcon, type VisualizationLegendEntry,
+} from "../lib/core/visualization-registry";
 import {
   ADVANCE_STAGE_ORDER, type AdvanceStageId,
 } from "../lib/methods/adaptive-volume/features/advance-slice/advance-work";
@@ -38,6 +42,7 @@ import {
 import {
   advanceStageSlice,
 } from "../lib/methods/adaptive-volume/features/advance-slice/loop";
+import { sparseCM12Stage } from "../lib/methods/adaptive-volume/sparse-cm12-stages";
 
 /**
  * The drawn palette, resolved from the page's own theme.
@@ -79,7 +84,7 @@ export const PALETTE: Record<PaletteTone, string> = {
 };
 
 /** Where each tone is authored. One name, used by the canvas and by the CSS. */
-const PALETTE_VAR: Readonly<Record<PaletteTone, string>> = {
+const PALETTE_VAR: Readonly<Record<PaletteTone, `--${string}`>> = {
   ground: "--slice-ground",
   grid: "--slice-grid",
   brick: "--slice-brick",
@@ -98,7 +103,8 @@ const PALETTE_VAR: Readonly<Record<PaletteTone, string>> = {
 };
 
 /** The tone as the chrome states it, for a swatch React draws rather than the canvas. */
-export const paletteVar = (tone: PaletteTone): string => `var(${PALETTE_VAR[tone]})`;
+export const paletteVar = (tone: PaletteTone): `var(--${string})` =>
+  `var(${PALETTE_VAR[tone]})`;
 
 /**
  * Read the drawn palette back off the page, before painting.
@@ -1285,3 +1291,119 @@ export const REPRESENT_LENS: Lens = joinLens(ADVANCE_REPRESENT_SLICE, {
     drawInterface(c, PALETTE.output, 2.6);
   },
 });
+
+/* ---- the lenses and the overlays, as field views --------------------- */
+
+/**
+ * The lens roster and the two annotations, declared the way the 3-D catalog
+ * declares a field view.
+ *
+ * `lib/features/field-view/ui.tsx` renders the row that offers these, and it is
+ * the *same* row the studio's tank corner mounts. Until this existed the lab
+ * had a `LensRow` and an `OverlayRow` of its own, restating the chevron, the
+ * mark, the swatch and the tip against a set of declarations the registry
+ * already had a shape for. There is nothing left of them to drift.
+ *
+ * What is declared here and not there is only what the registry cannot know:
+ * the mark's colour is a *role* the page resolves per theme (`paletteVar`), and
+ * the drawing itself is `ADVANCE_LENSES` / `SLICE_OVERLAYS` above. A view here
+ * and the picture it names are joined by `mode`, which is the stage id — so a
+ * stage the encoder renames is a type error rather than a lens that quietly
+ * stops appearing.
+ *
+ * The fraction overlay's colour is not this file's at all. Its swatch, its
+ * bands and the reading it formats come from `lib/core/fluid-fraction-view.ts`,
+ * which is also what the WGSL overlay and the 3-D `volume-levelset` entry read
+ * — one quantity, one definition, three renderers.
+ */
+
+/** A band's reading, as the mark the short list draws it with. */
+const BAND_ICON = {
+  transport: "flow",
+  momentum: "speed",
+  pressure: "pressure",
+  adaptivity: "levels",
+  output: "surface",
+} as const satisfies Record<keyof typeof BAND_TONE, FieldVisualizationIcon>;
+
+/** The mode a lens view is chosen by: step 1, or one of the encoded stages. */
+export const REPRESENT_LENS_MODE = "represent";
+
+function lensView(
+  mode: string, label: string, lens: Lens, tone: PaletteTone,
+  icon: FieldVisualizationIcon,
+): FieldVisualization {
+  return fieldVisualization({
+    kind: "field",
+    id: `advance-lens/${mode}`,
+    pass: "Advance slice",
+    label,
+    description: lens.caption,
+    mode,
+    // One cut, through the centre of the domain: the lab draws a 2-D slice and
+    // there is no other plane to offer. Declared `planeless` because the row's
+    // plane chooser is about a picture that could have been cut elsewhere.
+    axis: "z",
+    planeless: true,
+    icon,
+    swatch: paletteVar(tone),
+  });
+}
+
+/**
+ * Every lens, in the order the reader meets them: the state the advance starts
+ * from, then the stages in encode order.
+ */
+export const ADVANCE_LENS_VIEWS: readonly FieldVisualization[] = Object.freeze([
+  lensView(REPRESENT_LENS_MODE, "The state entering the advance",
+    REPRESENT_LENS, "adaptivity", "grid"),
+  ...ADVANCE_STAGE_ORDER.map((stage, at) => {
+    const declared = sparseCM12Stage(stage);
+    const band = declared.band as keyof typeof BAND_TONE;
+    return lensView(stage, `${at + 1}. ${declared.label}`,
+      ADVANCE_LENSES[stage], BAND_TONE[band], BAND_ICON[band]);
+  }),
+]);
+
+/**
+ * The two annotations, as the composable half of the same vocabulary.
+ *
+ * Switches rather than a choice — see `SLICE_OVERLAYS` — which is why they are
+ * rendered by `FieldOverlayRows` and not by the lens row. Their `mode` is the
+ * overlay id, so the page's own `ReadonlySet<SliceOverlayId>` is what the row
+ * reads through without a second mapping.
+ */
+export const SLICE_OVERLAY_VIEWS: readonly FieldVisualization[] = Object.freeze(
+  SLICE_OVERLAY_ORDER.map(id => {
+    const overlay = SLICE_OVERLAYS[id];
+    const common = {
+      kind: "field",
+      id: `advance-overlay/${id}`,
+      pass: "Advance slice",
+      label: overlay.label,
+      description: `${overlay.hint}.`,
+      mode: id,
+      axis: "z",
+      planeless: true,
+    } as const;
+    // V/K is one quantity with three renderers, and this is the one that draws
+    // it in 2-D. Its chip, its bands and its readout are the shared
+    // definition's rather than a fourth copy of the thresholds.
+    return id === "fraction"
+      ? fieldVisualization({
+        ...common,
+        icon: "density",
+        swatch: fractionBandPaint("liquid").swatch,
+        scalar: {
+          band: fractionBand, format: fractionReadout, bands: FRACTION_VIEW_BANDS,
+        },
+        legend: FRACTION_VIEW_BANDS.map((paint): VisualizationLegendEntry => ({
+          swatch: paint.swatch, label: paint.label, mark: "box",
+        })),
+      })
+      : fieldVisualization({
+        ...common,
+        icon: "surface",
+        swatch: paletteVar(overlay.keys[0]!.tone),
+      });
+  }));

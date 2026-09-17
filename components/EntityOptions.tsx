@@ -34,6 +34,38 @@ import {
 } from "./toolstrip";
 import { EditorActionGlyph } from "./EditorActionIcon";
 import { useSession } from "../lib/core/session/session-context";
+import { useEditorHost } from "../lib/core/session/host-context";
+import type { EditorCommitOptions, EditorHost } from "../lib/core/editor-host";
+
+/**
+ * How a patch lands on a host with no patch form.
+ *
+ * `EditorChoice.apply` and `EditorField.apply` describe a *merge*, which is the
+ * only thing a row knows how to produce. A host whose world has no merge — the
+ * advance lab's region list is one whole-list command — declares `Patch = Doc`
+ * and omits `commitPatch`, and the patch it is handed is then the document. The
+ * cast is safe exactly because of that equality, and it is here rather than in
+ * each row so there is one place stating why.
+ */
+export function patchCommitter<Doc, Patch>(host: EditorHost<Doc, Patch>) {
+  return host.commitPatch
+    ?? ((label: string, patch: Patch, options?: EditorCommitOptions) =>
+      host.commit(label, patch as unknown as Doc, options));
+}
+
+/**
+ * The history entry a row's commit is filed under.
+ *
+ * One function rather than the same template literal at four call sites,
+ * because the string is a *contract*: undo reads it back to the reader, and a
+ * row rendered by the advance lab has to file the same entry the studio does or
+ * the two hosts are not running the same capability. It is the one thing about
+ * a commit that rendered markup cannot show, which is why it is reachable on
+ * its own.
+ */
+export function entityCommitLabel(entityLabel: string, controlLabel: string): string {
+  return `Set ${entityLabel} ${controlLabel}`;
+}
 
 /**
  * Whether this scene has water at all, and — for a dry one — which lattice its
@@ -174,8 +206,11 @@ function PaneRow({ label, children }: { label: string; children: ReactNode }) {
   </div>;
 }
 
-function ChoiceRow({ group, entityLabel }: { group: EditorChoiceGroup; entityLabel: string }) {
+function ChoiceRow<Patch>({ group, entityLabel }: {
+  group: EditorChoiceGroup<Patch>; entityLabel: string;
+}) {
   const session = useSession();
+  const commit = patchCommitter(useEditorHost<unknown, Patch>());
   return <PaneRow label={group.label}>
     <ToolstripChoice
       ariaLabel={group.label}
@@ -189,26 +224,25 @@ function ChoiceRow({ group, entityLabel }: { group: EditorChoiceGroup; entityLab
       onChange={(value) => {
         const option = group.options.find((candidate) => candidate.id === value);
         if (!option || option.enabled === false || session.ui.getState().voxelStrokePending) return;
-        const patch = option.apply();
-        simulation.beginEdit(`Set ${entityLabel} ${group.label}`, session.id);
-        simulation.commitEdit(patch, { reseed: true }, session.id);
+        commit(entityCommitLabel(entityLabel, group.label), option.apply(), { reseed: true });
       }}
     />
   </PaneRow>;
 }
 
 /** One quantity, committed as a single history entry. */
-function FieldRow({ field, entityLabel }: { field: EditorField; entityLabel: string }) {
+function FieldRow<Patch>({ field, entityLabel }: {
+  field: EditorField<Patch>; entityLabel: string;
+}) {
   const session = useSession();
+  const commitPatch = patchCommitter(useEditorHost<unknown, Patch>());
   // Previewed locally and written once on release, for the same reason the
   // strip's own scrubs are: a commit is a history entry and a re-seed.
   const [preview, setPreview] = useState<number | undefined>(undefined);
   const commit = (value: number) => {
     setPreview(undefined);
     if (value === field.value || session.ui.getState().voxelStrokePending) return;
-    const patch = field.apply(value);
-    simulation.beginEdit(`Set ${entityLabel} ${field.label}`, session.id);
-    simulation.commitEdit(patch, { reseed: true }, session.id);
+    commitPatch(entityCommitLabel(entityLabel, field.label), field.apply(value), { reseed: true });
   };
   const bounded = field.min !== undefined && field.max !== undefined;
   const shown = preview ?? field.value;
@@ -249,12 +283,12 @@ function fieldDecimals(step: number): number {
 }
 
 /** One line of the column: a field on its own, or the several that share a row. */
-interface FieldEntry {
+interface FieldEntry<Patch> {
   /** The open-state key, unique across the strip's rows. */
   readonly id: string;
   /** Absent for an ordinary field, which is its own row. */
   readonly row?: EditorFieldRow;
-  readonly members: EditorField[];
+  readonly members: EditorField<Patch>[];
 }
 
 /**
@@ -265,9 +299,9 @@ interface FieldEntry {
  * other settings rearranged. Everything else passes through as a row of one, so
  * the caller has a single list to walk rather than two interleaved ones.
  */
-function foldFieldRows(fields: readonly EditorField[]): FieldEntry[] {
-  const entries: FieldEntry[] = [];
-  const folded = new Map<string, FieldEntry>();
+function foldFieldRows<Patch>(fields: readonly EditorField<Patch>[]): FieldEntry<Patch>[] {
+  const entries: FieldEntry<Patch>[] = [];
+  const folded = new Map<string, FieldEntry<Patch>>();
   for (const field of fields) {
     const row = field.row;
     if (row === undefined) {
@@ -279,7 +313,7 @@ function foldFieldRows(fields: readonly EditorField[]): FieldEntry[] {
       existing.members.push(field);
       continue;
     }
-    const entry: FieldEntry = { id: `row:${row.id}`, row, members: [field] };
+    const entry: FieldEntry<Patch> = { id: `row:${row.id}`, row, members: [field] };
     folded.set(row.id, entry);
     entries.push(entry);
   }
@@ -307,8 +341,10 @@ function foldFieldRows(fields: readonly EditorField[]): FieldEntry[] {
  * The gizmo remains the primary instrument. These are the same quantities the
  * handles move, written as numbers for when a handle is not the right one.
  */
-export function EntityOptionRows({ entity }: { entity: EditorEntity }) {
-  const session = useSession();
+export function EntityOptionRows<Patch, Doc>({ entity }: { entity: EditorEntity<Patch, Doc> }) {
+  // The one line that made this component studio-only. A row describes a patch;
+  // who lands it is the host's business, and both hosts mount one.
+  const commit = patchCommitter(useEditorHost<Doc, Patch>());
   // Which row is open, and what a scrub currently reads mid-drag. Both local:
   // they are the state of one strip in front of one selection, and the caller
   // keys this component by selection so neither survives a click on something
@@ -327,15 +363,13 @@ export function EntityOptionRows({ entity }: { entity: EditorEntity }) {
   const choices = entity.choices ?? [];
   const groups = entity.groups ?? [];
 
-  const commitChoice = (group: EditorChoiceGroup, option: EditorChoice) => {
-    simulation.beginEdit(`Set ${entity.label} ${group.label}`, session.id);
-    simulation.commitEdit(option.apply(), { reseed: true }, session.id);
+  const commitChoice = (group: EditorChoiceGroup<Patch>, option: EditorChoice<Patch>) => {
+    commit(entityCommitLabel(entity.label, group.label), option.apply(), { reseed: true });
   };
-  const commitField = (field: EditorField, value: number) => {
+  const commitField = (field: EditorField<Patch>, value: number) => {
     setPreview(undefined);
     if (value === field.value) return;
-    simulation.beginEdit(`Set ${entity.label} ${field.label}`, session.id);
-    simulation.commitEdit(field.apply(value), { reseed: true }, session.id);
+    commit(entityCommitLabel(entity.label, field.label), field.apply(value), { reseed: true });
   };
 
   return <>
@@ -440,8 +474,8 @@ export function EntityOptionRows({ entity }: { entity: EditorEntity }) {
 }
 
 /** Plugin-declared groups use the same folded rows and scrubs as the tank. */
-export function EditorControlGroupRows({ groups, entityLabel }: {
-  groups: readonly EditorControlGroup[]; entityLabel: string;
+export function EditorControlGroupRows<Patch>({ groups, entityLabel }: {
+  groups: readonly EditorControlGroup<Patch>[]; entityLabel: string;
 }) {
   const [open, setOpen] = useState<string | undefined>();
   const sectionId = useId();
@@ -496,8 +530,8 @@ export function EditorControlGroupRows({ groups, entityLabel }: {
  * reader got here, and it clears the selection itself, which is what takes this
  * strip off the screen the moment its subject stops existing.
  */
-export function EntityDeleteRow({ entity }: { entity: EditorEntity }) {
-  const session = useSession();
+export function EntityDeleteRow<Patch, Doc>({ entity }: { entity: EditorEntity<Patch, Doc> }) {
+  const host = useEditorHost<Doc, Patch>();
   const remove = entity.remove;
   if (remove === undefined) return null;
   return <ToolstripActionRow
@@ -507,12 +541,22 @@ export function EntityDeleteRow({ entity }: { entity: EditorEntity }) {
     hint="Takes it out of the document and re-seeds the run. Undoable, and the Delete key does the same."
     tone="danger"
     testId="entity-delete"
-    onClick={() => simulation.removeEntity(`Removed ${entity.label}`, remove(), session.id)}
+    // `simulation.removeEntity` spelled out through the seam, in its order: the
+    // selection is cleared *before* the commit because a re-seeding commit
+    // captures and restores whatever is selected, and a strip still pointing at
+    // a deleted box is the bug that guarded. The notice repeats the label the
+    // commit already said, exactly as the controller's own tail did.
+    onClick={() => {
+      const label = `Removed ${entity.label}`;
+      host.select(undefined);
+      host.commit(label, remove(), { reseed: true });
+      host.notice(label);
+    }}
   />;
 }
 
 /** What the object's settings add up to, and the switches that rebuild its world. */
-function EntitySceneTab({ entity }: { entity: EditorEntity }) {
+function EntitySceneTab({ entity }: { entity: EditorEntity<unknown, unknown> }) {
   return <>
     {entity.summary && <p className="toolstrip-pane-note">{entity.summary}</p>}
     {entity.offersSceneRebuild && <SceneRebuildControls />}
@@ -529,7 +573,7 @@ function EntitySceneTab({ entity }: { entity: EditorEntity }) {
  * no reading beside a list of the object's settings and belong with the live
  * state they change.
  */
-function EntityObjectTab({ entity }: { entity: EditorEntity }) {
+function EntityObjectTab({ entity }: { entity: EditorEntity<unknown, unknown> }) {
   const session = useSession();
   return <>
     {entity.simulatedBodyId && <BodyStateReadout bodyId={entity.simulatedBodyId} />}
@@ -563,7 +607,7 @@ function EntityObjectTab({ entity }: { entity: EditorEntity }) {
  * card out, and vice versa.
  */
 export function EntityMoreRow({ entity, leadingTabs = [] }: {
-  entity: EditorEntity;
+  entity: EditorEntity<unknown, unknown>;
   /** Faces to put before the object's own, for a strip that owns a solver. */
   leadingTabs?: readonly ToolstripTab[];
 }) {

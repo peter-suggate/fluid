@@ -19,10 +19,12 @@
  * with its draw table, so a stage the encoder renames is a type error on both
  * sides rather than a lens that quietly stops appearing.
  *
- * This module is a leaf on purpose — no imports at all — so the stage registry
- * may name its types without a cycle and every consumer of a threshold gets
- * the same number.
+ * This module is a leaf on purpose — its one import is the framework's
+ * `FeatureDefinition` *type*, which carries no runtime edge — so the stage
+ * registry may name its types without a cycle and every consumer of a
+ * threshold gets the same number.
  */
+import type { FeatureDefinition } from "../../../../framework/composition";
 
 /* ---- the marks a lens declares ------------------------------------- */
 
@@ -262,3 +264,121 @@ export function isAdvanceTransportExperiment(
   return value === "baseline" || value === "cellwise-remap"
     || value === "level-set-volume";
 }
+
+/* ---- the slice as a composed feature -------------------------------- */
+
+/**
+ * What the advance slice offers a host, as placements rather than as rows.
+ *
+ * The 2-D lab's toolstrip was five hand-written components and a `<select>` in
+ * the header, each one reading a piece of page state and writing it back. The
+ * studio's strip, for the same *kind* of thing, has been declarations and slots
+ * since the framework landed: a `FeatureControl` says what the instrument is
+ * and a `FeaturePlacement` says where it belongs and how prominent it is, and
+ * `ComposedFeatureSlot` renders any named slot without branching on features.
+ *
+ * So the lab's instruments are declared here, beside the encoder they are
+ * instruments *over*, and `advance-lab/LabFeatureSlot.tsx` renders them through
+ * the same machinery `components/SceneToolstrip.tsx` renders the studio's with.
+ * The lab is deliberately **not** registered as a `SimulationMethod` — that is
+ * a GPU contract (`lib/core/method-contract.ts`) a Rust/Wasm 2-D world
+ * satisfies none of — and it does not need to be: `composeFeatures` and
+ * `ComposedFeatureSlot` are free-standing, which is the whole point of the
+ * framework being data.
+ *
+ * Two controls declare no `options`. The lens roster is sixteen stages joined
+ * to sixteen pictures (`advance-lab/lenses.ts`), and the annotations are the
+ * same vocabulary; both are `FieldVisualization` entries the shared field-view
+ * row already reads. Restating them here as `{value,label}` pairs would be a
+ * second roster to keep in step, which is the duplication the exercise exists
+ * to end. What this file declares about them is what a *placement* needs: that
+ * they exist, what they are called, and where they belong.
+ */
+
+/**
+ * The keys the lab's `EditorHost.params` answers for.
+ *
+ * `FeatureControl.setting` is how a row addresses a value, so these names are
+ * the contract between the declarations below and whichever host honours them.
+ */
+export const ADVANCE_SLICE_SETTINGS = Object.freeze({
+  lens: "advanceLens",
+  overlays: "advanceOverlays",
+  surface: "advanceSurface",
+  budget: "pressureIterations",
+  transport: "transportExperiment",
+});
+
+/** Pressure iterations one advance may spend, and the range a host offers. */
+export const ADVANCE_PRESSURE_BUDGET_RANGE = Object.freeze({
+  minimum: 4, maximum: 256, step: 4,
+});
+
+export const advanceSliceFeature: FeatureDefinition = {
+  id: "simulation.advance-slice",
+  label: "Advance slice",
+  controls: [
+    {
+      id: "lens", setting: ADVANCE_SLICE_SETTINGS.lens, kind: "choice", update: "live",
+      label: "Stage lens",
+      hint: "Every stage of the resident advance, in encode order. Picking one changes what you can see about the water; it never changes the water.",
+    },
+    {
+      id: "overlays", setting: ADVANCE_SLICE_SETTINGS.overlays, kind: "choice", update: "live",
+      label: "Overlays",
+      hint: "Annotations that compose over whichever lens is up, so they are switches rather than a choice.",
+    },
+    {
+      id: "surface", setting: ADVANCE_SLICE_SETTINGS.surface, kind: "choice", update: "live",
+      label: "Surface",
+      hint: "Which reconstruction the picture draws. Both selectable readings are taken off the same accepted fractions and normals, so this is a choice of reconstruction and never of state.",
+      options: ADVANCE_SURFACE_VIEWS.map((view) => ({
+        value: view.id, label: view.label, hint: view.hint,
+      })),
+    },
+    {
+      id: "budget", setting: ADVANCE_SLICE_SETTINGS.budget, kind: "number", update: "live",
+      label: "Solve",
+      hint: "Pressure iterations one advance may spend. Too few and the divergence the picture shows is the solver giving up, not the water.",
+      min: ADVANCE_PRESSURE_BUDGET_RANGE.minimum,
+      max: ADVANCE_PRESSURE_BUDGET_RANGE.maximum,
+      step: ADVANCE_PRESSURE_BUDGET_RANGE.step,
+      unit: "its",
+    },
+    {
+      id: "transport", setting: ADVANCE_SLICE_SETTINGS.transport, kind: "choice",
+      // A new arm is a new run from the scene's own regions, not a dial on the
+      // water in front of you — which is why it is `reset` and why its
+      // placement is a slot the header renders rather than the edit strip.
+      update: "reset",
+      label: "Transport",
+      hint: "Which volume transport the run is testing. Changing it starts a new run from the scene, and from the scene's own enforcement regions rather than the drawn ones.",
+      options: ADVANCE_TRANSPORT_EXPERIMENT_ORDER.map((id) => ({
+        value: id,
+        label: ADVANCE_TRANSPORT_EXPERIMENTS[id].label,
+        hint: ADVANCE_TRANSPORT_EXPERIMENTS[id].hint,
+      })),
+    },
+  ],
+  /**
+   * Where each instrument belongs, and how prominent it is.
+   *
+   * The slot names are the studio's own — `scene.visibility` is *what is drawn
+   * on the water* on both hosts, `scene.surface` is *how its surface is
+   * reconstructed* — so a row declared here could be mounted in the studio by
+   * adding one binding to `applicationViews`, with no change to this file. The
+   * `sim.*` family is the instrument side: declared in the framework, rendered
+   * wherever a host has room for a dial.
+   *
+   * Order within a slot is the declaration order the reader meets them in:
+   * lens, then the annotations over it. `priority: "high"` is what puts the
+   * lens and the surface ahead of anything else placed in their slots.
+   */
+  placements: [
+    { slot: "scene.visibility", control: "lens", priority: "high" },
+    { slot: "scene.visibility", control: "overlays" },
+    { slot: "scene.surface", control: "surface", priority: "high" },
+    { slot: "sim.solve", control: "budget", presentation: "expanded" },
+    { slot: "sim.transport", control: "transport" },
+  ],
+};

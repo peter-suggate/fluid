@@ -1,4 +1,5 @@
 import { compileSparseCM12StableLeafFaceNeighbors } from "./sparse-cm12-factored-aei-topology";
+import { BRICK_FINE_CELLS } from "../../core/sparse-brick-geometry";
 /**
  * CPU reference storage for an arbitrary sparse atlas of equal-world dyadic
  * bricks. This is a topology/numerics oracle, not the eventual GPU page pool.
@@ -45,7 +46,8 @@ export interface SparseBrickLadder {
   readonly cellCapacity: number;
 }
 
-export const DEFAULT_BRICK_FINE_RESOLUTION: SparseBrickFineResolution = 8;
+/** The shared brick width, which core owns so `lib/features` can read it too. */
+export const DEFAULT_BRICK_FINE_RESOLUTION: SparseBrickFineResolution = BRICK_FINE_CELLS;
 /** @deprecated Use atlas.brickFineResolution for geometry. */
 export const BRICK_FINE_RESOLUTION = DEFAULT_BRICK_FINE_RESOLUTION;
 

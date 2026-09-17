@@ -130,7 +130,10 @@ export interface EditorHandle {
 /** Palette token, so every entity draws from one vocabulary. */
 export type EditorEntityTone = "fluid" | "tank" | "body" | "prop" | "inflow" | "region";
 
-export interface EditorEntity {
+export interface EditorEntity<
+  Patch = Partial<SceneDescription>,
+  Doc = SceneDescription,
+> {
   readonly selection: EditorSelection;
   /** Shown on the hover chip and the size readout. */
   readonly label: string;
@@ -164,12 +167,12 @@ export interface EditorEntity {
    * behind it, so the fields are the same quantities the handles move rather
    * than a second, larger surface that happens to live in a panel.
    */
-  readonly fields?: readonly EditorField[];
+  readonly fields?: readonly EditorField<Patch>[];
   /**
    * Enumerated settings, shown above the numeric fields because they are what
    * the entity *is* rather than how big it is.
    */
-  readonly choices?: readonly EditorChoiceGroup[];
+  readonly choices?: readonly EditorChoiceGroup<Patch>[];
   /**
    * Settings that belong to this entity but are not what a gesture on it moves,
    * as named clusters the flyout folds away.
@@ -181,7 +184,7 @@ export interface EditorEntity {
    * modal, but which must not turn the chip into a form the first time it is
    * expanded. One flat list of twenty controls is the panel this replaced.
    */
-  readonly groups?: readonly EditorControlGroup[];
+  readonly groups?: readonly EditorControlGroup<Patch>[];
   /**
    * A line under the controls stating what the current settings mean, in the
    * scene's own units. Absent when the fields already say it.
@@ -217,7 +220,7 @@ export interface EditorEntity {
    * merge patch cannot express one: dropping a scenery node means publishing
    * the list that no longer contains it.
    */
-  readonly remove?: () => SceneDescription;
+  readonly remove?: () => Doc;
 }
 
 /**
@@ -244,7 +247,7 @@ export interface EditorFieldRow {
   readonly hint?: string;
 }
 
-export interface EditorField extends ControlMetadata {
+export interface EditorField<Patch = Partial<SceneDescription>> extends ControlMetadata {
   readonly id: string;
   readonly label: string;
   /**
@@ -265,7 +268,7 @@ export interface EditorField extends ControlMetadata {
   /** Folded onto one row with the other fields naming the same row. */
   readonly row?: EditorFieldRow;
   /** The scene this field's new value describes. */
-  readonly apply: (value: number) => Partial<SceneDescription>;
+  readonly apply: (value: number) => Patch;
 }
 
 /**
@@ -279,7 +282,7 @@ export interface EditorField extends ControlMetadata {
  * chosen value describes — so the flyout renders both from one list and a new
  * entity gets choices without this file changing.
  */
-export interface EditorChoice {
+export interface EditorChoice<Patch = Partial<SceneDescription>> {
   readonly id: string;
   readonly label: string;
   /** Shown as the option's tooltip; the place to say what it costs. */
@@ -289,17 +292,17 @@ export interface EditorChoice {
    * says "this is the shape of the thing" while only one case is implemented.
    */
   readonly enabled?: boolean;
-  readonly apply: () => Partial<SceneDescription>;
+  readonly apply: () => Patch;
 }
 
-export interface EditorChoiceGroup {
+export interface EditorChoiceGroup<Patch = Partial<SceneDescription>> {
   readonly id: string;
   readonly label: string;
   /** The name in the column, when the full one is too long for it. */
   readonly tag?: string;
   /** The `EditorChoice.id` currently in force. */
   readonly value: string;
-  readonly options: readonly EditorChoice[];
+  readonly options: readonly EditorChoice<Patch>[];
 }
 
 /**
@@ -310,7 +313,7 @@ export interface EditorChoiceGroup {
  * ungrouped ones do. That is what let the configuration popover's Container and
  * Fluid sections move onto the tank without becoming a second panel.
  */
-export interface EditorControlGroup {
+export interface EditorControlGroup<Patch = Partial<SceneDescription>> {
   readonly id: string;
   readonly label: string;
   /** Compact strip label and current readout, supplied by the entity plugin. */
@@ -320,8 +323,8 @@ export interface EditorControlGroup {
   readonly hint?: string;
   /** Open on first expansion. Absent means folded, which is the point. */
   readonly defaultOpen?: boolean;
-  readonly choices?: readonly EditorChoiceGroup[];
-  readonly fields?: readonly EditorField[];
+  readonly choices?: readonly EditorChoiceGroup<Patch>[];
+  readonly fields?: readonly EditorField<Patch>[];
   /** A line under the group's controls, in the scene's own units. */
   readonly summary?: string;
 }
