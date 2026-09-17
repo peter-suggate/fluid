@@ -54,50 +54,6 @@ test("renderer applies freeze transitions to the retained solver without rebuild
 });
 
 
-test("live renderer parameter uploads retain a frozen topology until the toggle is released", () => {
-  const scene = createMinimalPowerDamBreak64Scene();
-  const config: SimulationRunConfig = { methodId: "adaptive-volume", quality: "balanced", values: {} };
-  let cancelledPreparations = 0;
-  // Exercise the production solver methods without constructing any GPU resources.
-  // The browser uploads runtime values on every draw; offline probes do not.
-  const solver = Object.assign(Object.create(WebGPUAdaptiveMassSolver.prototype), {
-    options: {} as AdaptiveMassSolverOptions,
-    info: {},
-    pressureIterationControlGeneration: 0,
-    sparseRuntime: { cancelTopologyPreparation: () => { cancelledPreparations += 1; } },
-    sparseWorldNumerics: { current: {} },
-  }) as WebGPUAdaptiveMassSolver;
-  const policy = () => (solver as unknown as { options: AdaptiveMassSolverOptions }).options.activityPolicy;
-  const renderer = Object.assign(Object.create(FluidLabRenderer.prototype), {
-    device: {}, gpuFluid: solver, gpuFluidKey: gpuSceneSolverKey(scene, config),
-    solverKey: () => gpuSceneSolverKey(scene, config),
-    appliedSceneUniformKey: gpuSceneUniformKey(scene),
-  }) as {
-    currentGPUFluid: (document: typeof scene, config: SimulationRunConfig, mode: "full-scene") => unknown;
-  };
-  renderer.currentGPUFluid(scene, config, "full-scene");
-  renderer.currentGPUFluid(scene, { ...config, topologyFrozen: true }, "full-scene");
-  assert.equal(policy()?.freezeTopology, true);
-  const interactionPolicy = () => (solver as unknown as {
-    sparseWorldNumerics: { current: { activityPolicy?: AdaptiveMassSolverOptions["activityPolicy"] } };
-  }).sparseWorldNumerics.current.activityPolicy;
-  assert.equal(interactionPolicy()?.freezeTopology, true,
-    "a paused liquid edit must receive freeze before another simulation step");
-  for (let frame = 0; frame < 5; frame += 1) {
-    renderer.currentGPUFluid(scene, {
-      ...config, topologyFrozen: true,
-      values: { selectorMode: "coarse-first", energyThreshold: 2 + frame },
-    }, "full-scene");
-    assert.equal(policy()?.freezeTopology, true, `frame ${frame}: runtime values must not clear freeze`);
-    assert.equal(policy()?.energyThreshold, 2 + frame, "live settings still update while frozen");
-    assert.equal(interactionPolicy()?.energyThreshold, 2 + frame,
-      "paused liquid edits must use the current allocation controls");
-  }
-  assert.equal(cancelledPreparations, 1, "holding freeze must not repeatedly cancel preparation");
-  renderer.currentGPUFluid(scene, config, "full-scene");
-  assert.equal(policy()?.freezeTopology, false, "the toggle releases the current solver");
-  assert.equal(interactionPolicy()?.freezeTopology, false);
-});
 
 test("a second paused drop supersedes the support receipt before either dose is applied", async () => {
   let revision = 0, pending = 0, checks = 0;

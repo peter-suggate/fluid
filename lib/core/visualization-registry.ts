@@ -68,6 +68,44 @@ export interface VisualizationLegendEntry {
 }
 
 /**
+ * One band of a scalar view: the reading a value falls into, and how it is
+ * painted.
+ *
+ * `tone` is a renderer-neutral role name, not a colour. A canvas that paints
+ * from the page's own CSS variables maps the token onto its palette; a legend
+ * and a shader take the literal `swatch`. That split is the point: the two
+ * renderers of one quantity have to agree about *which band a value is in* and
+ * about what that band is called, and they have no business agreeing about
+ * whether the page is in dark mode.
+ */
+export interface VisualizationScalarBand {
+  /** The band's own name, as `scalar.band(value)` returns it. */
+  readonly band: string;
+  readonly tone: string;
+  readonly swatch: string;
+  readonly label: string;
+  /** The shape drawn in this colour, when it is not a filled area. */
+  readonly mark?: VisualizationLegendMark;
+}
+
+/**
+ * The definition a scalar field view is read by, shared with whatever else
+ * draws the same quantity.
+ *
+ * A `legend` alone is a picture of a view; this is the view. `band` classifies
+ * a value the way the shader does, `format` writes it the way a probe does, and
+ * `bands` is what a legend can be *derived* from rather than hand-kept beside
+ * the shader that drew it. Declared optional because most field views are a
+ * single continuous ramp with nothing to classify — a view carries this when
+ * its thresholds are physical and more than one renderer has to honour them.
+ */
+export interface VisualizationScalar {
+  readonly band: (value: number) => string;
+  readonly format: (value: number) => string;
+  readonly bands: readonly VisualizationScalarBand[];
+}
+
+/**
  * A figure the visualization contributes to a HUD.
  *
  * `evidence` carries the same distinction the line work draws with solid versus
@@ -94,6 +132,12 @@ interface VisualizationCommon {
   /** The entry's own colour, for a toggle chip. Distinct from the legend. */
   readonly swatch?: `#${string}`;
   readonly legend?: readonly VisualizationLegendEntry[];
+  /**
+   * The quantity's own definition, when the view draws one another renderer
+   * also draws. A legend line that is a band should be built from this rather
+   * than typed beside it.
+   */
+  readonly scalar?: VisualizationScalar;
   /** Free-form tag a consumer may group or filter by; the framework ignores it. */
   readonly group?: string;
   /** Off by default when a view is expensive or narrow. Defaults to on. */

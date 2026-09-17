@@ -13,6 +13,7 @@ dawnTest("wireframe depth matches the shaded surface across a hydrostatic pool",
     const {create,globals}=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);
     Object.assign(globalThis,globals);const gpu=create(["backend=metal"]);
     const adapter=await gpu.requestAdapter();assert.ok(adapter);device=await adapter.requestDevice();
+    assert.ok(device);
     const width=512,height=512;
     const uniform=device.createBuffer({size:112,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
     const data=new Float32Array(28);data.set([width,height,0,0]);data.set([3.2,6,13,0],4);data.set([3.2,1.6,3.2,0],8);data.set([6.4,4.8,6.4,1.6],12);data.set([128,96,128,1],20);device.queue.writeBuffer(uniform,0,data);

@@ -184,6 +184,16 @@ export function performEditorAction(
       }
       return;
     }
+    case "host": {
+      // The one arm this runtime deliberately cannot answer. A host effect is
+      // performed by the page that composed it, and the studio composes none —
+      // so reaching here means a wedge from another host was routed through the
+      // studio's performer, which is a wiring mistake and not a user error.
+      // Warned rather than thrown: a ring has already closed by the time this
+      // runs, and taking the page down over a menu choice is the worse failure.
+      console.warn(`performEditorAction: ignored host effect "${effect.id}" — the studio composes none.`);
+      return;
+    }
     case "probe": {
       // Three calls, in this order, and none of them is redundant. Enabling
       // clears whatever pin the probe was holding, so the ask has to come after

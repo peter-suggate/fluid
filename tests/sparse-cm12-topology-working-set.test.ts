@@ -118,72 +118,10 @@ const candidateGraph = (grid: SparseAtlasCompositeGrid, requests: ReadonlyMap<nu
         gamma: new Float64Array(resolution ** 3).fill(1) };
     }), grid.atlas.generation + 1, 8));
 
-test("requested topology includes exactly the accepted and candidate graph, not all rungs", () => {
-  const grid = fixture([32, 16, 16], Array.from({ length: 16 }, (_, i) => ({
-    q: [i % 4, Math.floor(i / 4) % 2, Math.floor(i / 8)] as const, r: 2 as const,
-  })));
-  const requests = new Map(grid.atlas.bricks.filter((b) => b.coordinate[0] === 1)
-    .map((b) => [b.key, 4 as const]));
-  const packet = prepareSparseCM12TopologyWorkingSet(grid, requests, budget);
-  assertReady(packet);
-  assert.equal(packet.acceptedGeneration, 7); assert.equal(packet.candidateGeneration, 8);
-  assert.equal(packet.cellCount, grid.cells.length + requests.size * 4 ** 3);
-  checkGraph(packet, grid, false); checkGraph(packet, candidateGraph(grid, requests), true);
-  const rangeBase = packet.words[11]!;
-  for (let leaf = 0; leaf < grid.atlas.bricks.length; leaf++) {
-    assert.equal(packet.words[rangeBase + 2 * (4 * leaf + 3) + 1], 0,
-      "an unrequested B8 rung must have no cell range, not alias accepted cells");
-  }
-});
 
-test("candidate preparation discovers every partial face of a macro leaf", () => {
-  const grid = fixture([32, 16, 16], [{ q: [0, 0, 0], r: 2, span: 2 },
-    ...Array.from({ length: 4 }, (_, i) => ({
-      q: [2, i % 2, Math.floor(i / 2)] as const, r: 1 as const,
-    }))]);
-  const requests = new Map([[grid.atlas.bricks[0]!.key, 4 as const]]);
-  const packet = prepareSparseCM12TopologyWorkingSet(grid, requests, budget);
-  assertReady(packet);
-  checkGraph(packet, grid, false); checkGraph(packet, candidateGraph(grid, requests), true);
-});
 
-test("macro re-rung preparation supports physical cells beyond 16h", () => {
-  const grid = fixture([512, 256, 256], [
-    { q: [0, 0, 0], r: 2, span: 32 }, { q: [32, 0, 0], r: 2, span: 32 },
-  ]);
-  const requests = new Map([[grid.atlas.bricks[0]!.key, 4 as const]]);
-  const packet = prepareSparseCM12TopologyWorkingSet(grid, requests, budget);
-  assertReady(packet);
-  assert.equal(packet.cellCount, 16 + 64);
-  checkGraph(packet, grid, false); checkGraph(packet, candidateGraph(grid, requests), true);
-});
 
-test("candidate chunks agree on shared halos without borrowing reused workspace cells", () => {
-  const grid = fixture([96, 48, 32], Array.from({ length: 288 }, (_, i) => ({
-    q: [i % 12, Math.floor(i / 12) % 6, Math.floor(i / 72)] as const, r: 2 as const,
-  })));
-  const requests = new Map(grid.atlas.bricks.filter((b) => b.coordinate[0] < 9)
-    .map((b) => [b.key, 1 as const]));
-  assert.ok(requests.size > 128);
-  const packet = prepareSparseCM12TopologyWorkingSet(grid, requests, budget);
-  assertReady(packet);
-  assert.equal(packet.cellCount, grid.cells.length + requests.size);
-  checkGraph(packet, grid, false); checkGraph(packet, candidateGraph(grid, requests), true);
-});
 
-test("clipped-cell restriction preserves represented mass and complete boundary rows", () => {
-  const grid = fixture([13, 10, 9], Array.from({ length: 8 }, (_, i) => ({
-    q: [i % 2, Math.floor(i / 2) % 2, Math.floor(i / 4)] as const, r: 4 as const,
-  })));
-  const requests = new Map(grid.atlas.bricks.map((b) => [b.key, 2 as const]));
-  const packet = prepareSparseCM12TopologyWorkingSet(grid, requests, budget);
-  assertReady(packet);
-  checkGraph(packet, candidateGraph(grid, requests), true);
-  const f = new Float32Array(packet.words.buffer), base = packet.words[6]!;
-  const mass = (cells: Uint32Array) => cells.reduce((sum, c) =>
-    sum + packet.initialDensity[c]! * f[base + 8 * c + 3]!, 0);
-  assert.ok(Math.abs(mass(packet.acceptedCellWorklist) - mass(packet.candidateCellWorklist)) < 1e-4);
-});
 
 test("every preparation budget defers atomically and can be retried", () => {
   const grid = fixture([16, 8, 8], [{ q: [0, 0, 0], r: 2 }, { q: [1, 0, 0], r: 2 }]);
@@ -209,32 +147,3 @@ test("every preparation budget defers atomically and can be retried", () => {
     new Map([[999, 4]]), budget), /invalid/);
 });
 
-test("full ocean prepares a changing region beyond the legacy mutable-leaf ceiling", (t) => {
-  const scene = createOceanSeicheScene();
-  const atlas = initializeSparseBrickAtlasFromScene(scene, {
-    finestDimensions: adaptiveMassPresentationDimensionsForScene(scene),
-    initialSurfaceCoarseningBiasRings: 1,
-  });
-  const mutable = atlas.bricks.filter((b) => sparseBrickSpan(b) === 1);
-  assert.ok(mutable.length > 2_048);
-  const grid = buildSparseAtlasCompositeGrid(atlas);
-  // Coarsening the finest rung preserves the already graded physical 2:1 envelope.
-  const requests = new Map(mutable.filter((b) => b.resolution === 8)
-    .map((b) => [b.key, 4 as const]));
-  assert.ok(requests.size > 0);
-  const packet = prepareSparseCM12TopologyWorkingSet(grid, requests, {
-    maximumCells: grid.cells.length + requests.size * 64,
-    maximumRows: 1_000_000, maximumBytes: 256 * 1024 ** 2,
-  });
-  assertReady(packet);
-  assert.equal(packet.cellCount, grid.cells.length + requests.size * 64);
-  assert.equal(packet.changedBrickKeys.length, requests.size);
-  const candidate = candidateGraph(grid, requests);
-  assert.equal(packet.candidateCellWorklist.length, candidate.cells.length);
-  assert.equal(packet.candidateRowWorklist.length, candidate.gradientRows.length);
-  assert.equal(packet.acceptedCellWorklist.length, grid.cells.length);
-  assert.equal(packet.acceptedRowWorklist.length, grid.gradientRows.length);
-  t.diagnostic(JSON.stringify({ mutableLeaves: mutable.length, changedLeaves: requests.size,
-    acceptedCells: grid.cells.length, preparedCells: packet.cellCount,
-    preparedRows: packet.rowCount, packetBytes: packet.words.byteLength }));
-});

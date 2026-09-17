@@ -27,7 +27,7 @@ import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning } from "../lib/svo/
     assert.equal(legacyOff.surfaceMeshLodPixels, 1, "legacy off does not leave a zero threshold when re-enabled");
 
     for (const culling of [true, false]) {
-      const module = device.createShaderModule({ code: createSvoDrySceneFragmentWGSL(1,
+      const module: GPUShaderModule = device.createShaderModule({ code: createSvoDrySceneFragmentWGSL(1,
         "raster-primary", "bounds", "split", 0, false, true, false, false,
         { surfaceMesh: true, surfaceMeshCulling: culling }) });
       const errors = (await module.getCompilationInfo()).messages.filter(message => message.type === "error");

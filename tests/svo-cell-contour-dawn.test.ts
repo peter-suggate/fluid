@@ -15,7 +15,7 @@ import { sparseSceneProxyVoxelizationShaderFor } from "../lib/core/webgpu-sparse
     device = (await createDawnRenderDevice()).device;
     const canonical = createWebgpuSolidWorldPageLayout({ baseWords: 0, authoredPageCount: 1, includesMaterial: true });
     for (const mode of ["dense", "occupancy", "banded"] as const) {
-      const module = device.createShaderModule({ code: sparseSceneProxyVoxelizationShaderFor("dry", "f16-unorm8", mode, canonical, undefined, true) });
+      const module: GPUShaderModule = device.createShaderModule({ code: sparseSceneProxyVoxelizationShaderFor("dry", "f16-unorm8", mode, canonical, undefined, true) });
       assert.deepEqual((await module.getCompilationInfo()).messages.filter(m => m.type === "error"), [], `producer ${mode}`);
       await device.createComputePipelineAsync({ layout: "auto", compute: { module, entryPoint: "rebuildDirtyBrickPayload" } });
     }

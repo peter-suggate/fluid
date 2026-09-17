@@ -24,6 +24,7 @@ for (const scenario of ["still", "impact", "settling"] as const) (dawnModule ? t
     const gpu = dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
     const adapter = await gpu.requestAdapter(); assert.ok(adapter);
     device = await adapter.requestDevice({ requiredLimits: requiredFluidDeviceLimits(adapter.limits) });
+    assert.ok(device);
     const errors: string[] = [];
     device!.addEventListener("uncapturederror", (event) => { event.preventDefault(); errors.push(event.error.message); });
     let scene = sceneDocument(getSceneDefinition("coarse-first-pool-impact"));
@@ -112,6 +113,7 @@ for (const scenario of ["still", "impact", "settling"] as const) (dawnModule ? t
       const gpu = dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
       const adapter = await gpu.requestAdapter(); assert.ok(adapter);
       device = await adapter.requestDevice({ requiredLimits: requiredFluidDeviceLimits(adapter.limits) });
+      assert.ok(device);
       const scene = sceneDocument(getSceneDefinition("coarse-first-pool-impact-half"));
       const values = resolveMethodValues(adaptiveMassMethod, "balanced", {
         selectorMode: "coarse-first", timeStep: "paper",

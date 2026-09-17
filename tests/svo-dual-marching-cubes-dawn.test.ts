@@ -25,7 +25,7 @@ import { sparseSceneProxyVoxelizationShaderFor } from "../lib/core/webgpu-sparse
   assert.equal([...halo.keys(2)].length,27,"positive dual samples retain face, edge and corner neighbour bricks");
   for(const mode of ["dense","occupancy","banded"] as const){
    for(const terrain of [undefined,{baseWords:64,heightsBaseWords:128,width:16,depth:16,patchBaseWords:512,patchCapacity:4}]){
-   const m=device.createShaderModule({code:sparseSceneProxyVoxelizationShaderFor("dry","f16-unorm8",mode,undefined,terrain,false,1024,true)});
+   const m: GPUShaderModule=device.createShaderModule({code:sparseSceneProxyVoxelizationShaderFor("dry","f16-unorm8",mode,undefined,terrain,false,1024,true)});
    assert.deepEqual((await m.getCompilationInfo()).messages.filter(m=>m.type==="error"),[]);
    await device.createComputePipelineAsync({layout:"auto",compute:{module:m,entryPoint:"rebuildDirtyBrickPayload"}});
    }

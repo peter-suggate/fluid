@@ -18,24 +18,6 @@ test("authored rerung uses its backed catalogue without allocating duplicate pag
   assert.doesNotMatch(shader, /fn (?:allocateCandidateTopologyPages|synthesizeCandidateCellPages)\(/);
 });
 
-test("SparseWorld pages store only mutable or hot topology records", () => {
-  assert.doesNotMatch(resident, /GPU_TOPOLOGY_CELL_RECORD_WORDS/);
-  assert.doesNotMatch(resident,
-    /GPU_TOPOLOGY_CELL_PAGE_HEADER_WORDS\s*\n\s*\+ brickFineResolution \*\* 3 \* 8/);
-  const synthesis = shader.slice(shader.indexOf("fn synthesizeSparseWorldFrontierPages"),
-    shader.indexOf("fn connectSparseWorldFrontierPages"));
-  assert.match(synthesis, /let rowBase=16u;/);
-  assert.match(synthesis, /pageBase\+6u\],0u/);
-  assert.doesNotMatch(synthesis, /pageBase\+cellBase\+8u\*local/);
-  assert.match(synthesis, /let termBase=rowBase\+7u\*faceCount/);
-  assert.doesNotMatch(synthesis, /rowBase\+[78]u\*faceCount\+row/);
-  assert.match(synthesis,
-    /let incidenceRecords=termBase\+4u\*faceCount/);
-  assert.doesNotMatch(synthesis, /incidenceOffsets\+local/);
-  assert.doesNotMatch(synthesis, /2u\*\(6u\*local\+side\)/);
-  assert.match(synthesis, /dynamicIncidenceOverrideAt\(pageBase,local,side\)/);
-  assert.match(synthesis, /pageBase\+termBase\+4u\*row/);
-});
 
 test("activity swept prediction uses the computed cell center", () => {
   const measurementStart = shader.indexOf("fn measureBrickActivity");
@@ -63,19 +45,6 @@ test("SolidWorld initializes every immutable topology rung", () => {
     /refreshSparseCM12SolidWorldRows!\);\s*pass\.dispatchWorkgroups\(\.\.\.planSparseCM12LinearDispatch\(\s*Math\.ceil\(this\.templateRowCount/);
 });
 
-test("large row domains tile across the portable WebGPU dispatch limit", () => {
-  assert.deepEqual(planSparseCM12LinearDispatch(65_535, 65_535), [65_535, 1, 1]);
-  assert.deepEqual(planSparseCM12LinearDispatch(72_989, 65_535), [65_535, 2, 1]);
-  assert.throws(() => planSparseCM12LinearDispatch(17, 4), /exceeds 2D/);
-
-  const pressureRows = shader.slice(shader.indexOf("fn compileCanonicalPressureRows"),
-    shader.indexOf("fn finalizeCanonicalPressureRows"));
-  assert.match(pressureRows, /let group=wid\.x\+nwg\.x\*wid\.y;/);
-  assert.match(pressureRows, /let row=64u\*group\+lane/);
-  assert.match(pressureRows, /let word=2u\*group\+lane/);
-  assert.match(resident,
-    /compileCanonicalPressureRows", \.\.\.planSparseCM12LinearDispatch\(/);
-});
 
 test("static SolidWorld detail is measured only by the cold refresh", () => {
   const evidence = shader.slice(

@@ -83,7 +83,7 @@ test("the mesh shader extracts every level once and lets the camera pick one per
     device = (await createDawnRenderDevice()).device;
     const { createSvoDrySceneFragmentWGSL } = await import("../lib/svo/features/shading/program");
     for (const scale of [1, 0.5] as const) for (const culling of [true, false]) {
-      const module = device.createShaderModule({ code: createSvoDrySceneFragmentWGSL(scale, "raster-primary", "bounds", "split", 0, false, true, false, false,
+      const module: GPUShaderModule = device.createShaderModule({ code: createSvoDrySceneFragmentWGSL(scale, "raster-primary", "bounds", "split", 0, false, true, false, false,
         { surfaceMesh: true, surfaceMeshCulling: culling }) });
       assert.deepEqual((await module.getCompilationInfo()).messages.filter(message => message.type === "error"), []);
     }

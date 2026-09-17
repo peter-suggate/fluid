@@ -15,6 +15,7 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
     const gpu = dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
     const adapter = await gpu.requestAdapter(); assert.ok(adapter);
     device = await adapter.requestDevice();
+    assert.ok(device);
     const layout = createLevelSetVolumeLayout({ activeCellCapacity: 8, vertexCapacity: 64 });
     const sampleBase = layout.totalWords;
     const code = `

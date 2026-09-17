@@ -12,11 +12,28 @@ export interface AdvanceAuthoredScene {
   readonly document: unknown;
   readonly limitations?: readonly string[];
 }
+/**
+ * One enforcement box, in finest cells of the run's lattice.
+ *
+ * The `id` is the caller's handle on a box it can still amend or delete; the
+ * Rust `ResolutionRegion` does not declare it and does not deny unknown
+ * fields, so it rides the wire and is ignored there.
+ */
 export interface AdvanceRefinementRegion {
+  readonly id: string;
   readonly minimumFine: readonly [number, number];
   readonly maximumFine: readonly [number, number];
   readonly minimumCellWidth: number;
   readonly maximumCellWidth?: number;
+}
+
+export interface AdvanceLoadOptions {
+  readonly pressureIterations: number;
+  readonly pressureRelativeTolerance?: number;
+  readonly tracerBudget?: number;
+  readonly topologyPageBudget?: number;
+  readonly transportExperiment?: AdvanceTransportExperimentOption;
+  readonly production?: Readonly<Record<string, unknown>>;
 }
 
 /** Explicit opt-in selector understood by the Rust 2-D world boundary. */
@@ -31,6 +48,10 @@ export type AdvanceTransportExperimentOption = AdvanceTransportExperiment | {
 export class AdvanceLabController {
   private graph?: AdvanceGraph;
   private authored?: AdvanceAuthoredScene;
+  /* The enforcement boxes this run is carrying. They are a live command and
+   * live nowhere else — a fresh `World` is built without them — so the run
+   * that outlives a restart is the one this remembers. */
+  private regions: readonly AdvanceRefinementRegion[] = [];
 
   private constructor(private readonly client: PhysicsWasmClient) {}
 
@@ -44,14 +65,24 @@ export class AdvanceLabController {
     }));
   }
 
-  async load(scene: AdvanceAuthoredScene, options: { pressureIterations: number;
-    pressureRelativeTolerance?: number; tracerBudget?: number; topologyPageBudget?: number;
-    transportExperiment?: AdvanceTransportExperimentOption;
-    production?: Readonly<Record<string, unknown>> }): Promise<AdvanceView> {
+  /** Seed a world from a document. The remembered regions are left alone: only
+   * the caller knows whether this is the same run restarting or another one. */
+  async load(scene: AdvanceAuthoredScene, options: AdvanceLoadOptions): Promise<AdvanceView> {
     await this.client.load(scene.document, options);
     this.authored = scene;
     this.graph = undefined;
     return this.view(await this.client.snapshot(ADVANCE_VIEW_MASK));
+  }
+
+  /**
+   * Restart the loaded scene and hand the new world the regions the old one
+   * was carrying, so the first view already obeys them.
+   */
+  async resetRun(options: AdvanceLoadOptions): Promise<AdvanceView> {
+    const scene = this.authored;
+    if (!scene) throw new Error("Advance controller has no loaded scene to reset");
+    const seeded = await this.load(scene, options);
+    return this.regions.length === 0 ? seeded : this.setRefinementRegions(this.regions);
   }
 
   async advance(dt_s: number): Promise<AdvanceView> {
@@ -79,8 +110,13 @@ export class AdvanceLabController {
   }
 
   async setRefinementRegions(regions: readonly AdvanceRefinementRegion[]): Promise<AdvanceView> {
-    return this.command({ type: "set-refinement-regions", regions });
+    const view = await this.command({ type: "set-refinement-regions", regions });
+    this.regions = [...regions];
+    return view;
   }
+
+  /** Forget the boxes without touching the world — for a run being replaced. */
+  clearRefinementRegions(): void { this.regions = []; }
 
   destroy(): Promise<void> { return this.client.destroy(); }
 

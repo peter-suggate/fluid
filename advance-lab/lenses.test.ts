@@ -2,11 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   ADVANCE_LENSES, CELL_FILL_KEYS, DIRECT_LEVEL_SET_CONTOUR_KEY, DIRECT_LEVEL_SET_KEY,
-  FRACTION_FLOOR, LIQUID_KEY, PALETTE, REPRESENT_LENS, SLICE_OVERLAYS, SOLID_KEY,
-  cellFillIsOverCapacity, cellFillOpacity, drawCellFillSlice, drawDirectLevelSetSlice,
-  drawSlice, fractionReadout, fractionResidueRamp, interfaceSegments, markQuery,
+  LIQUID_KEY, PALETTE, REPRESENT_LENS, SLICE_OVERLAYS, SOLID_KEY,
+  drawCellFillSlice, drawDirectLevelSetSlice,
+  drawSlice, interfaceSegments, markQuery,
   rdfMinorityAreaDistorted, type LensContext, type LensKey, usesCellFillSlice,
 } from "./lenses";
+/* The fraction view itself is shared with the 3-D dense-grid overlay and lives
+ * beside it; the lab consumes it. These behaviours are pinned here because the
+ * lab is what draws them. */
+import {
+  FRACTION_FLOOR, cellFillIsOverCapacity, cellFillOpacity, fractionReadout,
+  fractionResidueRamp,
+} from "../lib/core/fluid-fraction-view";
 import {
   advanceCellAt,
   type AdvanceCellView, type AdvanceLattice, type AdvanceRdfView, type AdvanceView,

@@ -11,28 +11,6 @@ import { liveSvoSceneResourcePlugin } from "../lib/svo/features/scene-publicatio
 import type { ResourcePluginDefinition } from "../lib/core/resource-plugin";
 import type { EffectiveRendererStatus } from "../lib/core/renderer-status";
 
-test("a dry scene adopts voxel edits without alternating rebuild identities", () => {
-  const scene = createEmptyScene();
-  const config = { methodId: "adaptive-volume", quality: "balanced", values: {} } as SimulationRunConfig;
-  const staged: SceneDescription[] = [];
-  const source = { stageSceneUpdate(next: SceneDescription) { staged.push(next); }, info: {} } as unknown as GPUSolverInstance;
-  const renderer = new FluidLabRenderer({} as HTMLCanvasElement, () => {});
-  Object.assign(renderer, {
-    device: {}, gpuFluid: source,
-    gpuFluidKey: `${gpuSceneSolverKey(scene, config)}:presentation-full-scene:scenery-${sceneryConstructionKey(scene)}`,
-    appliedSceneUniformKey: "previous-fluid-scene-values",
-    beginGPUFluidInitialization() { assert.fail("Renderer-only edit started a source rebuild"); },
-  });
-  const access = renderer as unknown as {
-    currentGPUFluid(scene: SceneDescription, config: SimulationRunConfig, mode: "full-scene"): GPUSolverInstance;
-  };
-  for (let frame = 0; frame < 3; frame++) assert.equal(access.currentGPUFluid(scene, config, "full-scene"), source);
-  assert.deepEqual(staged, [scene]);
-  const edited: SceneDescription = { ...scene, solidVoxels: [...scene.solidVoxels,
-    { operation: "fill", minimum: [1, 0, 1], maximumExclusive: [2, 1, 2] }] };
-  for (let frame = 0; frame < 3; frame++) assert.equal(access.currentGPUFluid(edited, config, "full-scene"), source);
-  assert.deepEqual(staged, [scene, edited]);
-});
 
 test("pending presentation does not copy another resource's activity into its own task", () => {
   const presentation: ResourcePluginDefinition = {

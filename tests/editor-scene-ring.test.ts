@@ -3,7 +3,7 @@ import test from "node:test";
 import type { EditorAction } from "../lib/core/editor-action";
 import { sceneActionsAt } from "../lib/core/editor-entity-catalog";
 import { cloneScene, defaultScene } from "../lib/core/model";
-import { sceneDocumentVerbs } from "../lib/core/editor-scene-document";
+import { sceneDocumentActions, sceneDocumentVerbs } from "../lib/core/editor-scene-document";
 import { gravityFeature } from "../lib/features/gravity/definition";
 import { surfaceDisplayFeature } from "../lib/features/surface-display/definition";
 import { voxelTools } from "../lib/core/voxel-editor/registry";
@@ -75,4 +75,36 @@ test("declared priorities match the standing direction", () => {
     const expected = verb.id === "scene-enable-water" ? "high" : "low";
     assert.equal(verb.priority, expected, `${verb.id} priority`);
   }
+});
+
+/**
+ * The `host` arm belongs to the page that composed it, and the studio composes none.
+ *
+ * `EditorActionEffect` gained a `{ kind: "host" }` arm so a second page — the
+ * 2-D advance lab — could put its own verbs on the shared ring without naming
+ * them in `lib/core`. The bargain that makes that safe is one-directional:
+ * `performEditorAction` answers `host` with a warning and no work, so a studio
+ * wedge that ever carried one would be a wedge that silently does nothing. This
+ * is the assertion that keeps that from being a discovery.
+ */
+test("no studio ring wedge carries a host effect", () => {
+  const scenes = [cloneScene(defaultScene), (() => {
+    const dry = cloneScene(defaultScene);
+    dry.systems = { ...dry.systems, fluid: false };
+    return dry;
+  })()];
+  const rings: readonly (readonly EditorAction[])[] = scenes.flatMap((scene) => [
+    sceneActionsAt(scene, POINT),
+    sceneActionsAt(scene, POINT, undefined, { methodId: "uniform" }),
+    sceneActionsAt(scene, POINT, undefined, { placement: false, methodId: "adaptive-volume" }),
+    sceneDocumentActions(scene),
+  ]);
+  const walk = (actions: readonly EditorAction[]): void => {
+    for (const action of actions) {
+      assert.notEqual(action.effect?.kind, "host",
+        `${action.id} carries a host effect, which performEditorAction cannot run`);
+      walk(action.children ?? []);
+    }
+  };
+  for (const ring of rings) walk(ring);
 });

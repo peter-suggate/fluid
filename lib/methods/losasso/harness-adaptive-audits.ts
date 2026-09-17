@@ -151,6 +151,8 @@ export interface AdaptiveSurfacePublicationSnapshot {
   readonly transportBandMask: Uint32Array;
   readonly redistanceDistanceA: Float32Array;
   readonly redistanceDistanceB: Float32Array;
+  /** Graph-owned integral mass per accepted leaf, as the lane reads it back. */
+  readonly acceptedMass: Float32Array;
   readonly dimensions: readonly [number, number, number];
 }
 

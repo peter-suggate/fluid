@@ -9,10 +9,37 @@
  * can still honestly draw, which is why they exist as catalog entries at all
  * rather than as unlabelled overlay modes only the URL could reach.
  */
-import { fieldVisualization, type Visualization } from "./visualization-registry";
+import {
+  FRACTION_VIEW_BANDS, fractionBand, fractionBandPaint, fractionReadout,
+} from "./fluid-fraction-view";
+import {
+  fieldVisualization,
+  type Visualization, type VisualizationLegendEntry,
+} from "./visualization-registry";
 
 /** Sparse Geometric's combined conservative-volume and level-set slice. */
 export const VOLUME_LEVELSET_OVERLAY_MODE_CODE = 21;
+
+/**
+ * A legend line for one band of the fraction view, from the shared definition.
+ *
+ * The swatch and the label are not retyped here: this view and the 2-D advance
+ * lab draw one quantity, and a legend that restates its colours is the copy
+ * that drifts. What stays authored is how *this* renderer draws the band —
+ * the overcapacity mark is screen-space diagonal hatching in the shader, so the
+ * legend swatch is that hatch in the band's own colour.
+ */
+const fractionLegendEntry = (
+  band: Parameters<typeof fractionBandPaint>[0], hatched = false,
+): VisualizationLegendEntry => {
+  const paint = fractionBandPaint(band);
+  return {
+    swatch: hatched
+      ? `repeating-linear-gradient(135deg,${paint.swatch} 0 2px,transparent 2px 5px)`
+      : paint.swatch,
+    label: paint.label,
+  };
+};
 
 export function isSliceOnlyGridOverlayMode(mode: unknown): boolean {
   return mode === "volume-levelset";
@@ -81,11 +108,19 @@ export const gridOverlayVisualizations: readonly Visualization[] = Object.freeze
     description: "Conservative liquid volume fills each cell in blue, with the level-set zero contour in amber, overcapacity hatching, and the accepted adaptive grid through the chosen plane.",
     source: "Live conservative volume, published level set, and accepted adaptive-grid topology",
     mode: "volume-levelset", axis: "z", sliceOnly: true, icon: "surface",
-    swatch: "#2f8fd6",
+    swatch: fractionBandPaint("liquid").swatch,
+    /* V/K is one quantity with two renderers. The bands, their thresholds and
+     * their colours come from `fluid-fraction-view`, which is also what the
+     * WGSL branch for mode 21 and the 2-D advance lab read. */
+    scalar: { band: fractionBand, format: fractionReadout, bands: FRACTION_VIEW_BANDS },
     legend: [
-      { swatch: "#2f8fd6", label: "V/K — conservative cell fill" },
+      fractionLegendEntry("liquid"),
+      /* Not bands: the zero contour is the level set, drawn over the fill
+       * rather than as a reading of it, and the lattice is the topology the
+       * fill sits in. Both stay authored here because nothing else draws
+       * them. */
       { swatch: "#ef9f35", label: "φ = 0 — level-set interface", mark: "line" },
-      { swatch: "repeating-linear-gradient(135deg,#d99532 0 2px,transparent 2px 5px)", label: "V/K > 1 — overcapacity" },
+      fractionLegendEntry("overfull", true),
       { swatch: "#a8c7d8", label: "accepted adaptive grid", mark: "line" },
     ],
   }),

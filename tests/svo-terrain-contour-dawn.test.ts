@@ -12,7 +12,7 @@ import { SVO_GBUFFER_NORMAL_OCT8_WGSL } from "../lib/svo/contracts/svo-gbuffer";
   device=(await createDawnRenderDevice()).device;
   const terrain={baseWords:0,heightsBaseWords:16,width:8,depth:8,patchBaseWords:80,patchCapacity:1};
   for(const mode of ["dense","occupancy","banded"] as const){
-   const module=device.createShaderModule({code:sparseSceneProxyVoxelizationShaderFor("dry","f16-unorm8",mode,undefined,terrain,true)});
+   const module: GPUShaderModule=device.createShaderModule({code:sparseSceneProxyVoxelizationShaderFor("dry","f16-unorm8",mode,undefined,terrain,true)});
    assert.deepEqual((await module.getCompilationInfo()).messages.filter(m=>m.type==="error"),[]);
    await device.createComputePipelineAsync({layout:"auto",compute:{module,entryPoint:"rebuildDirtyBrickPayload"}});
   }

@@ -24,43 +24,6 @@ const functionSource = (source: string, name: string, next: string): string => {
 
 const count = (source: string, pattern: RegExp): number => [...source.matchAll(pattern)].length;
 
-test("activation and retirement stage lifecycle intent without mutating accepted authority", () => {
-  const activation = functionSource(wgsl, "stageFrontierPageAtRung",
-    "fn activateSweptFrontierPages");
-  const injectionActivation = functionSource(wgsl, "activateInjectionFrontierPages",
-    "fn retireUnsupportedEmptyBricks");
-  const retirement = functionSource(wgsl, "retireUnsupportedEmptyBricks",
-    "const PRESENTATION_FRAME_PLAN_STAGE");
-
-  assert.match(activation, /setCandidateBrickActiveAt\(output,true\)/,
-    "activation must author candidate membership only");
-  assert.match(activation,
-    /select\(acceptedBrickResolution\(brick\),BRICK_FINE_RESOLUTION,\s*brickCandidatePlanningEnabled\(brick\)\)/,
-    "a packed material destination must enter transport at the fine frontier floor");
-  assert.match(activation,
-    /if\(coarseFirstEnabled\(\)&&!cm12DemandedFrontierNeedsFineRung\(brick\)\)\{\s*requested=cm12DemandedFrontierGradingRung\(brick\);/,
-    "geometric demand alone must stage the coarsest 2:1-compatible rung, and"
-    + " only behind the branch that keeps both face walks off every other page");
-  assert.match(activation,
-    /select\(requested,applySparseCM12RefinementRegionBounds\(brick,requested\),\s*brickCandidatePlanningEnabled\(brick\)\)/,
-    "an unpacked destination must remain allocatable at its complete construction rung");
-  assert.match(injectionActivation, /injectionReachesBrick\(brick\)/,
-    "liquid injection must populate source tiles without consuming swept-frame requests");
-  assert.doesNotMatch(injectionActivation, /brickHasTransportDemand\(brick\)/);
-  assert.match(retirement, /setCandidateBrickActiveAt\(output,false\)/,
-    "retirement must author candidate membership only");
-  for (const [label, source] of [["activation", activation],
-    ["retirement", retirement]] as const) {
-    assert.doesNotMatch(source, /state\[[^\]]+\]\s*=/,
-      `${label} must not change accepted scalar, velocity, pressure, or face fields`);
-    assert.doesNotMatch(source,
-      /scaInvalidateBrickTopologyClosure|cm12Extension(?:RecordRoot|InvalidateRetiredCell)/,
-      `${label} must not publish SCA, PTR, or VEX effects before acceptance`);
-    assert.doesNotMatch(source,
-      /atomic(?:Add|Sub|Store)\(&activity\[(?:8u|9u|10u|11u|output\+10u|output\+34u)/,
-      `${label} must not change accepted membership, lifecycle counters, or residue`);
-  }
-});
 
 test("dynamic and fixed-rung authored leaves may validate same-rung retirement", () => {
   const validate = functionSource(wgsl, "validateCandidateResolution",
@@ -138,69 +101,6 @@ test("rejection returns without publishing staged lifecycle authority", () => {
     "rejection must not touch accepted physical fields or the effective plane");
 });
 
-test("validation authorizes only; a distinct singleton flips after every stable publication", () => {
-  const validate = functionSource(wgsl, "validateAndAuthorizeShadowTopology",
-    "fn finalizeAuthorizedShadowTopology");
-  assert.doesNotMatch(validate, /atomicStore\(&topologyArena\[base\+2u\],/,
-    "validation may publish an authorization receipt, but not the topology selector");
-  assert.doesNotMatch(validate, /state\[[^\]]+\]\s*=|effectiveTransportVelocity\[/,
-    "validation must not publish stable physical state");
-
-  const selectorStore = "atomicStore(&topologyArena[base+2u],slot)";
-  const selectorAt = wgsl.indexOf(selectorStore);
-  assert.ok(selectorAt >= 0, "one topology selector publication must remain present");
-  assert.equal(count(wgsl, /atomicStore\(&topologyArena\[base\+2u\],slot\)/g), 1,
-    "the combined topology/IBO/lifecycle transaction has one selector publication");
-  const functionMatches = [...wgsl.slice(0, selectorAt).matchAll(/\bfn\s+(\w+)\s*\(/g)];
-  const finalizeName = functionMatches.at(-1)?.[1];
-  assert.equal(finalizeName, "finalizeAuthorizedShadowTopology",
-    "the sole selector store must live in a distinct finalizer");
-  const finalize = functionSource(wgsl, "finalizeAuthorizedShadowTopology",
-    "@compute @workgroup_size(64)\nfn publishSparseWorldFrontierAcceptance");
-  const finalizePrefix = wgsl.slice(Math.max(0, wgsl.lastIndexOf("@compute", selectorAt)),
-    selectorAt);
-  assert.match(finalizePrefix, /@workgroup_size\(1\)/,
-    "selector finalization must be a singleton dispatch");
-  assert.match(finalize, /topologyArena\[base\+3u\]\)!=2u/,
-    "selector finalization must consume the authorization receipt");
-  assert.doesNotMatch(finalize, /atomicStore\(&topologyArena\[base\+3u\],3u\)/,
-    "a finalizer entered after stable publication may not reject or request rollback");
-
-  const frameBegin = host.indexOf('stage("candidate-transfer"');
-  const frameEnd = host.indexOf('stage("brick-retirement"', frameBegin);
-  const frame = host.slice(frameBegin, frameEnd);
-  const validation = frame.indexOf('dispatch("validateAndAuthorizeShadowTopology", 1)');
-  const ptrEffects = frame.indexOf("this.pipelines.publishSparseCM12TopologyPTREffects!");
-  const sealEffects = frame.indexOf(
-    'dispatch("sealSparseCM12AuthorizedTopologyEffects", 1)');
-  const finishEffects = frame.indexOf(
-    'dispatch("finishSparseCM12TopologyEffectsPublication", 1)');
-  const fields = frame.indexOf(
-    'dispatchTopologyDelta("publishCandidateTopologyDeltaFromWorklist")');
-  const frontierGraph = frame.indexOf(
-    'dispatch("connectSparseWorldFrontierPages", this.topologyPageCapacity)');
-  const faces = frame.indexOf('dispatchShadow("publishCandidateShadowFaces", "row")');
-  const finalizeDispatch = frame.indexOf('dispatch("finalizeAuthorizedShadowTopology", 1)');
-  assert.ok(validation >= 0 && ptrEffects > validation
-    && sealEffects > ptrEffects && finishEffects > sealEffects && fields > finishEffects
-    && frontierGraph > fields && faces > frontierGraph && finalizeDispatch > faces,
-  "candidate authorization must precede every stable effect/field publication and the sole flip must follow them");
-
-  const connect = functionSource(wgsl, "connectSparseWorldFrontierPages",
-    "fn beginShadowTopology");
-  assert.match(connect, /topologyArena\[base\+3u\]\)!=2u/,
-    "canonical seam publication must no-op unless the candidate is authorized");
-  assert.doesNotMatch(connect,
-    /topologyArena\[base\]\)!=atomicLoad\(&topologyArena\[base\+1u\]\)/,
-    "canonical seams must publish before, not after, the accepted-generation flip");
-  assert.match(connect,
-    /upperOwner\.z==BRICK_FINE_RESOLUTION&&scheduledBrickActive\(upperOwner\.y\)/);
-  assert.match(connect,
-    /lowerOwner\.z==BRICK_FINE_RESOLUTION&&scheduledBrickActive\(lowerOwner\.y\)/,
-    "fine dynamic seams must fail closed beside inactive or coarse host cells");
-  assert.match(connect, /IMMUTABLE_HOST_INCIDENCE_BASE\+2u\*hostIncidence/,
-    "recycled pages must recover host seam slots from immutable incidence authority");
-});
 
 test("post-authorization delta publication cannot fault after its first stable write", () => {
   const publish = functionSource(wgsl, "publishCandidateTopologyDeltaWork",

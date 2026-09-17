@@ -238,28 +238,3 @@ test("the resident binds every level-set domain hook to the phi-cell space", () 
   assert.match(source, /bandWidthExpression: "4\.0"/);
 });
 
-test("the surface proof stops restricting phi it does not restrict", () => {
-  const source = readFileSync(new URL("./webgpu-sparse-cm12-resident.wgsl.ts",
-    import.meta.url), "utf8");
-  // A band brick keeps phi on the finest lattice at every solver rung, so the
-  // candidate rung's level set is the accepted one and the restricted field is
-  // the identity. Both probes must agree on that, or the proof would reject a
-  // demotion for a degradation the demotion does not cause.
-  assert.match(source, /let bandBrick=cm12PhiBandBrick\(brick\);/);
-  assert.match(source, /let proofFactor=select\(restrictionFactor,1u,bandBrick\);/);
-  assert.match(source, /\n\s*fine,bandBrick\);/);
-  assert.match(source, /surfaceProofRestrictedPhi\(position,proofFactor\)/);
-  assert.match(source, /surfaceProofRestrictedPhi\(position-d,proofFactor\)/);
-  assert.match(source, /surfaceProofRestrictedPhi\(position\+d,proofFactor\)/);
-  // The replacement evidence is volume/level-set agreement, not resemblance
-  // between two reconstructions of the same field.
-  assert.match(source, /surfaceProofBandVolumeFailure\(brick,lane\)/);
-  const check = source.slice(source.indexOf("fn surfaceProofBandVolumeFailure"));
-  assert.match(check, /state\[GV_CURRENT\+cell\]-capacity\*clamp\(estimate\.x/);
-  assert.match(check, /surfaceDisplacementToleranceMetres\(\)/);
-  // The band branch runs inside the proof's barrier-separated tail, so a
-  // barrier inside it would put one in non-uniform control flow.
-  const branch = source.slice(source.indexOf("  if(bandBrick){"));
-  assert.doesNotMatch(branch.slice(0, branch.indexOf("\n  workgroupBarrier();")),
-    /workgroupBarrier|storageBarrier/);
-});

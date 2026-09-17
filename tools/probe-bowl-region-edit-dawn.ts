@@ -34,7 +34,7 @@ try {
     await solver.waitForSimulationReady();
     const folder=`${output}/${arm}`;await mkdir(folder,{recursive:true});
     await writeFile(`${folder}/scene-before.json`,JSON.stringify(scene,null,2));
-    const trace=[];
+    const trace: unknown[]=[];
     const capture=async(label:string)=>{
       const fields=await solver!.readDiagnosticFields(true);
       const published=await readPublishedCM12Field(device!,solver!);

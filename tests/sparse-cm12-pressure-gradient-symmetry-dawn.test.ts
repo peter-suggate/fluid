@@ -51,6 +51,7 @@ dawnTest("production pressure gradient pairs a 2:1 fine quad under every reflect
     const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);
     Object.assign(globalThis, dawn.globals);
     gpu = dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
+    assert.ok(gpu);
     const adapter = await gpu.requestAdapter(); assert.ok(adapter);
     device = await adapter.requestDevice();
     const module = device.createShaderModule({ code: `

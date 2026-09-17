@@ -191,7 +191,7 @@ const adjacencyCases = [2229, 2234].map(brickKey => {
     const value = values.find(candidate => candidate.frame === 17);
     const at = value?.coordinate as readonly number[] | undefined;
     return value && at && Math.max(Math.abs(at[0]! - coordinate[0]!),
-      Math.abs(at[1]! - coordinate[1]!)) <= 2 ? [{ brickKey: key, ...value }] : [];
+      Math.abs(at[1]! - coordinate[1]!)) <= 2 ? [{ ...value, brickKey: key }] : [];
   }) : [];
   return { frame: 17, brickKey, target: target ?? null, neighborhoodRadiusBricks: 2, neighbors };
 });

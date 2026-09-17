@@ -4,11 +4,11 @@ import test from "node:test";
 import {
   SPARSE_CM12_RESIDENT_STAGE_SUBSTAGES,
   SPARSE_CM12_RESIDENT_STAGES,
-} from "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident";
+} from "../../../webgpu-sparse-cm12-resident";
 import {
   ADVANCE_STAGE_ORDER, ADVANCE_WORK, ADVANCE_WORK_SCENES,
   advanceCosts, advanceStageCost, advanceWorkModel,
-} from "./advance-work";
+} from "../advance-work";
 
 const inputs = (over: Partial<Parameters<typeof advanceWorkModel>[0]> = {}) =>
   advanceWorkModel({
@@ -28,7 +28,7 @@ test("the work table covers the resident stage ABI, in encode order", () => {
 
 test("every kernel the work table prices is one the encoder dispatches", () => {
   const source = readFileSync(new URL(
-    "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.ts", import.meta.url), "utf8");
+    "../../../webgpu-sparse-cm12-resident.ts", import.meta.url), "utf8");
   const missing: string[] = [];
   for (const stage of ADVANCE_STAGE_ORDER) for (const seam of ADVANCE_WORK[stage].seams) {
     for (const kernel of seam.kernels) {
@@ -53,7 +53,6 @@ test("the work roster follows full pressure publication and topology-lifetime tr
     .flatMap(seam => seam.kernels.map(kernel => kernel.name));
   const pressure = names("pressure-topology");
   assert.deepEqual(pressure, [
-    "refreshGeometricInterface", "extendGeometricInterface",
     "beginSparseCM12PressureTopologyRepair", "beginFullPressureImage",
     "classifyFullPressureCellWords", "scanFullPressureCellWords",
     "publishFullPressureCellIds", "classifyFullPressureRowWords",
@@ -67,24 +66,29 @@ test("the work roster follows full pressure publication and topology-lifetime tr
     "initializePipelinedImage", "reducePipelinedInitialize",
     "publishPressureSolveDispatchGate", "dispatch gate → cell + solve indirect (2 copies)",
   ]);
-  assert.deepEqual(names("velocity-projection"), [
-    "beginIncrementalActivity", "projectSparseCM12AcceptedFaceRows",
-    "collocateAndDiagnose", "reduceDivergenceDiagnostics",
-    "publishSparseCM12FrameFaceOutput", "encodeTopologyEditTransaction",
-    "beginSparseCM12VelocityExtensionSchedule",
-    "compileSparseCM12VelocityExtensionSchedule",
-    "sealSparseCM12VelocityExtensionSchedule",
-    "projected packet schedule → transport indirect arguments",
-    "initializeVelocityExtensionPackets", "advanceVelocityExtensionPackets",
+  // Projection publishes its faces, commits the projected frontier, and
+  // recompiles the accepted topology before transport can read it.
+  const projection = names("velocity-projection");
+  assert.deepEqual(projection.slice(0, 8), [
+    "beginIncrementalActivity", "projectSparseCM12InteriorFaceTiles",
+    "projectSparseCM12SeamFacePackets", "projectSparseCM12SparseAirFacePackets",
+    "projectSparseCM12DynamicFaceRows", "collocateAndDiagnose",
+    "reduceDivergenceDiagnostics", "publishSparseCM12FrameFaceOutput",
   ]);
+  assert.ok(projection.indexOf("encodeTopologyEditTransaction")
+    < projection.indexOf("sealCompiledTopologyGeneration"));
+  assert.ok(projection.indexOf("sealCompiledTopologyGeneration")
+    < projection.indexOf("initializeVelocityExtensionPackets"));
+  // Topology compilation is a topology-lifetime cost, never a transport one.
   const transport = names("conservative-transport");
   assert.ok(!transport.includes("compileGeometricVolumeSubfaces"));
   assert.ok(!transport.includes("compileGeometricVolumeCellFaces"));
-  const movingInitialize = ADVANCE_WORK["conservative-transport"].seams
+  // Transport is one fixed schedule: no packet loop, no limiter continuation.
+  assert.equal(ADVANCE_WORK["conservative-transport"].loop, undefined);
+  const movingRows = ADVANCE_WORK["conservative-transport"].seams
     .flatMap(seam => seam.kernels)
-    .find(kernel => kernel.name === "initializeGeometricLowFluxLimits");
-  assert.deepEqual({ gate: movingInitialize?.gate, microstep: movingInitialize?.microstep },
-    { gate: "solids", microstep: true });
+    .find(kernel => kernel.name === "reexpressGeometricSolidRows");
+  assert.equal(movingRows?.gate, "solids");
 });
 
 test("the pressure solve keeps its tail encoded past the residual guard", () => {
@@ -94,8 +98,11 @@ test("the pressure solve keeps its tail encoded past the residual guard", () => 
   assert.equal(cost.dispatches, budget * 3 + (budget / 8 - 1) * 8 + 3);
 });
 
-test("transport is the frame's largest stage at mini32 scale", () => {
+test("transport is the frame's largest stage outside the pressure solve", () => {
   const costs = advanceCosts(inputs({ cfl: 1.5 }));
-  const largest = costs.indexOf(costs.reduce((a, b) => b.workgroups > a.workgroups ? b : a));
-  assert.equal(ADVANCE_STAGE_ORDER[largest], "conservative-transport");
+  const ranked = [...ADVANCE_STAGE_ORDER]
+    .map((stage, index) => ({ stage, workgroups: costs[index]!.workgroups }))
+    .filter(entry => entry.stage !== "pressure-solve")
+    .sort((a, b) => b.workgroups - a.workgroups);
+  assert.equal(ranked[0]!.stage, "conservative-transport");
 });

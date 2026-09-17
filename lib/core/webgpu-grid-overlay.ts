@@ -8,6 +8,7 @@
  */
 
 import { cameraApertureShaderLibrary } from "./webgpu-camera";
+import { fractionViewShaderConstants } from "./fluid-fraction-view";
 import type { SparseAdaptiveGridConsumerSource } from "./levelset-consumer-abi";
 import { gridOverlayLevelSetVolumeWGSL, gridOverlayLevelSetVolumeUniform } from "./grid-overlay-levelset-volume.wgsl";
 
@@ -958,10 +959,13 @@ fn sceneColor(display: vec3f) -> vec3f {
   return mapped / (vec3f(1.0) - mapped);
 }
 
+${fractionViewShaderConstants}
 // Below this the surface-density view stops claiming to resolve and draws
 // vacuum. It is the bottom of the residue band the transport actually
-// produces, six decades under a full cell.
-const DENSITY_FLOOR: f32 = 1e-6;
+// produces, six decades under a full cell — the same floor the conservative
+// fraction view uses, because it is the same statement about the same
+// transport.
+const DENSITY_FLOOR: f32 = FRACTION_FLOOR;
 
 fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
   dims:vec3i, axis: i32, footprint: f32) -> GridSample {
@@ -1211,8 +1215,8 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
       // contour so disagreement remains visible, as in the 2-D advance lab.
       let volume = sliceVolumeFill(cell);
       let fraction = clamp(volume.x, 0.0, 1.0);
-      let ground = sceneColor(vec3f(0.075, 0.063, 0.046));
-      let water = sceneColor(vec3f(0.325, 0.604, 0.871));
+      let ground = sceneColor(FRACTION_EMPTY_DISPLAY);
+      let water = sceneColor(FRACTION_LIQUID_DISPLAY);
       fill = mix(ground, water, fraction);
       alpha = select(0.0, 0.94, volume.y > 0.0);
       sampleDot = 0.0;
@@ -1228,7 +1232,7 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
         + samplePosition.y / derivative.y) / 9.0;
       let stripeDistance = min(fract(stripePosition), 1.0 - fract(stripePosition)) * 9.0;
       excessHatch = select(0.0, 1.0 - smoothstep(0.6, 1.35, stripeDistance),
-        volume.y > 0.0 && volume.x > 1.000001);
+        volume.y > 0.0 && volume.x > FRACTION_OVERFULL);
     } else if (fieldMode == 10) {
       // Chentanez--Mueller surface density rho: the mass a cell holds, in cell
       // volumes. Its two thresholds are physical rather than cosmetic, so they
@@ -1245,8 +1249,8 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
       // draws the same near-black at the same near-zero alpha, which is the
       // one failure this view exists to prevent. Here a unit of the ramp is a
       // fixed number of decades, so the low end separates from itself.
-      let dilute = clamp(log2(max(rho, DENSITY_FLOOR) / DENSITY_FLOOR) / log2(0.5 / DENSITY_FLOOR), 0.0, 1.0);
-      let full = clamp((rho - 0.5) * 2.0, 0.0, 1.0);
+      let dilute = clamp(log2(max(rho, DENSITY_FLOOR) / DENSITY_FLOOR) / log2(FRACTION_LIQUID_KNEE / DENSITY_FLOOR), 0.0, 1.0);
+      let full = clamp((rho - FRACTION_LIQUID_KNEE) * 2.0, 0.0, 1.0);
       let excess = clamp((rho - 1.0) * 4.0, 0.0, 1.0);
       // Three ramps, each authored through sceneColor as the pixels it becomes.
       // The dilute phase runs violet → teal → green across its decades, in two
@@ -1259,12 +1263,12 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
         dilute < 0.5));
       let liquidColor = sceneColor(mix(vec3f(0.251, 0.385, 0.640), vec3f(0.501, 0.646, 0.766), full));
       let excessColor = sceneColor(mix(vec3f(0.726, 0.673, 0.385), vec3f(0.802, 0.336, 0.251), excess));
-      fill = select(select(diluteColor, liquidColor, rho > 0.5), excessColor, rho > 1.0);
+      fill = select(select(diluteColor, liquidColor, rho > FRACTION_LIQUID_KNEE), excessColor, rho > 1.0);
       // The faintest resolved decade still arrives at half opacity. Slice
       // planes are thinned by SLICE_OPACITY on the way out, so the old 0.10
       // floor reached the frame at 0.06 — under what separates from the
       // background at all, whatever colour it was carrying.
-      alpha = select(select(0.46 + 0.30 * dilute, 0.62 + 0.30 * full, rho > 0.5), 0.95, rho > 1.0);
+      alpha = select(select(0.46 + 0.30 * dilute, 0.62 + 0.30 * full, rho > FRACTION_LIQUID_KNEE), 0.95, rho > 1.0);
       // An empty cell keeps only its grid lines. "Where is there any mass at
       // all" is the first question this view has to answer, and a floor of
       // tinted haze over vacuum is how that answer gets lost.
@@ -1314,7 +1318,9 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
   let opticalBoundaryColor = select(vec3f(0.93, 0.93, 0.98), vec3f(1.0, 0.08, 0.55), u.environment.w > 1.5);
   color = mix(color, opticalBoundaryColor, opticalBoundary);
   if (!gridBody.occupied && fieldMode == 21) {
-    let amber = sceneColor(vec3f(1.0, 0.76, 0.32));
+    // The zero contour and the overcapacity hatch have always shared one
+    // amber, and still do: this is the overfull band's own colour, named.
+    let amber = sceneColor(FRACTION_EXCESS_DISPLAY);
     color = mix(color, amber, max(liquidContour, excessHatch));
     alpha = max(alpha, max(liquidContour, excessHatch));
   }

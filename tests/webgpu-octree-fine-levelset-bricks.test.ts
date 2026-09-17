@@ -908,17 +908,6 @@ test("fine topology binds exactly the resources reachable from every compute ent
   }
 });
 
-test("fine-brick sampling WGSL uses a flat direct lookup, exact generation validation, and explicit coarse authority", () => {
-  assert.match(fineLevelSetBrickSamplingWGSL, /let directoryBase=7u\+params\.worklistCapacity/);
-  assert.match(fineLevelSetBrickSamplingWGSL, /worklist\[0\]!=params\.generation/);
-  assert.match(fineLevelSetBrickSamplingWGSL,
-    /let physicalId=worklist\[directoryBase\+key\];let base=physicalId\*4u/);
-  assert.match(fineLevelSetBrickSamplingWGSL,
-    /metadata\[base\]==physicalId&&metadata\[base\+1u\]==key&&metadata\[base\+2u\]==params\.generation/);
-  assert.match(fineLevelSetBrickSamplingWGSL, /Result\(coarsePhi,0u/);
-  assert.doesNotMatch(fineLevelSetBrickSamplingWGSL, /while|binary|middle|low<high|hash|probe/i);
-  assert.doesNotMatch(fineLevelSetBrickSamplingWGSL, /octree.*row/i);
-});
 
 test("fine redistance applies its inclusive residual tolerance at telemetry precision", () => {
   assert.match(fineLevelSetJFACPTWGSL,

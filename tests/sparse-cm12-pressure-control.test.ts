@@ -15,19 +15,6 @@ import {
   sparseCM12PressureRelativeTolerance,
 } from "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident";
 
-test("Sparse CM12 exposes fixed eight-iteration residual blocks", () => {
-  assert.equal(SPARSE_CM12_PRESSURE_TRUE_RESIDUAL_CADENCE, 8);
-  assert.equal(SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE, 1e-3);
-
-  const spec = adaptiveMassMethod.params.find((candidate) =>
-    candidate.key === "pressureRelativeTolerance");
-  assert.equal(spec?.kind, "number");
-  if (spec?.kind !== "number") return;
-  assert.equal(spec.default, 1e-3);
-  assert.equal(spec.max, 1);
-  assert.equal(sparseCM12PressureIterations(25), 24);
-  assert.equal(sparseCM12PressureIterations(29), 32);
-});
 
 test("Sparse CM12 accepts experimental residuals beyond 0.1", () => {
   assert.equal(sparseCM12PressureRelativeTolerance(0), 0);

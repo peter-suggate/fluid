@@ -106,16 +106,44 @@
 /* ---- workspace ------------------------------------------------------ */
 .workspace{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:12px;padding:12px;min-height:0}
 .stage{display:grid;grid-template-rows:minmax(0,1fr) auto;min-width:0;min-height:0;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius-m);overflow:hidden}
-.viewport{position:relative;min-height:0;display:grid;place-items:center;overflow:hidden;background:var(--slice-ground)}
-.canvas{display:block;touch-action:none;cursor:crosshair}
+.viewport{position:relative;min-height:0;overflow:hidden;background:var(--slice-ground)}
+/* The canvas is the viewport, not the slice: the camera places the picture
+   inside it, so there is nothing left to centre and no letterbox to centre it
+   in. Absolute rather than in flow so a fractional room size cannot round the
+   bitmap out of register with the overlays laid over it. */
+.canvas{position:absolute;left:0;top:0;display:block;touch-action:none;cursor:crosshair}
+/* Navigation says what it will do before the press, as the 3-D viewport's
+   cursor does. */
+.grab{cursor:grab}
+.grabbing{cursor:grabbing}
+
+/* The studio pins its toolstrip to the dark half of every token, because the
+   image under it is a fixed dark GPU clear whatever the page is set to. This
+   lab's picture is not — `--slice-ground` is cream under the light theme — so
+   the column is handed back to the page's own scheme. One declaration, because
+   every colour in the strip is a `light-dark()` token and none of them restates
+   a hue. The dimension tokens the same rule sets are chrome's scale rather than
+   a form's, and those are wanted here exactly as they are. */
+.viewport :global(.toolstrip){color-scheme:inherit}
+
+/* The studio reveals the mode toggle's key badge on `.viewport-shell:hover`,
+   and the lab has no shell for that selector to find. Revealed on the header
+   instead — the same rule ("say which key does this when the reader is near
+   it") applied to the box the toggle actually sits in. */
+.bar:hover :global(.viewport-mode-toggle) em{opacity:1}
 
 .hud{position:absolute;pointer-events:none;font:var(--text-readout)}
+/* The width the edit strip takes at the corner: one row's key at its widest,
+   plus the control an instrument row hangs beside it. Declared rather than
+   measured because it decides where a *sibling* sits, and a layout that waited
+   for a measurement would move the captions a frame after the mode changed. */
+.lab{--slice-strip-width:318px}
 .hudTop{left:12px;top:12px;max-width:min(52ch,56%)}
+/* EDIT puts the strip in this corner, so the alarms and the stroke's caption
+   step aside rather than sitting under it: the strip is a control and the
+   caption is a sentence, and a control wins a corner over a sentence. */
+.hudTop[data-strip]{left:calc(12px + var(--slice-strip-width));max-width:min(52ch,40%)}
 .hudRight{right:12px;top:12px;text-align:right}
-.hudFoot{left:12px;bottom:12px;display:flex;gap:6px;flex-wrap:wrap;max-width:74%}
-.chip{display:inline-flex;align-items:center;gap:7px;background:var(--overlay);border:1px solid var(--line);border-radius:999px;padding:3px 11px 3px 7px;letter-spacing:.03em;backdrop-filter:var(--frost-chip)}
-.chip i{width:8px;height:8px;border-radius:2px;flex:none}
-.chip em{font-style:normal;color:var(--dim)}
 .caption{margin-top:8px;font:var(--text-small);font-size:12.5px;line-height:1.5;color:var(--muted);background:var(--overlay);border:1px solid var(--line);border-radius:var(--radius-s);padding:8px 11px;backdrop-filter:var(--frost-chip)}
 .alarm{margin-top:8px;font:var(--text-small);line-height:1.45;color:var(--amber-ink);background:var(--overlay);border:1px solid var(--amber-line);border-radius:var(--radius-s);padding:7px 11px;backdrop-filter:var(--frost-chip)}
 .rejected{color:var(--red);border-color:color-mix(in srgb,var(--red) 48%,var(--line))}
@@ -126,15 +154,6 @@
 /* The one readout that answers the pointer: it is also the signpost to the
    menu that sets it. */
 .hint{pointer-events:auto;cursor:context-menu}
-.key{display:flex;align-items:center;gap:6px;color:var(--muted);font:var(--text-micro);letter-spacing:var(--track-wide);text-transform:uppercase;background:var(--overlay);border:1px solid var(--line);border-radius:999px;padding:2px 10px 2px 6px;backdrop-filter:var(--frost-chip)}
-.key i{width:10px;height:10px;border-radius:2px;display:inline-block}
-/* A legend entry that is also a switch. The row sits inside `.hud`, which is
-   inert by design so the pointer keeps reaching the canvas underneath — these
-   two chips are the only things in it that want the pointer back. */
-.keyToggle{pointer-events:auto;cursor:pointer}
-.keyToggle:hover{border-color:var(--accent-line);color:var(--ink)}
-.keyToggle[aria-pressed=true]{background:var(--accent-wash);border-color:var(--accent-line);color:var(--accent-strong)}
-.keyToggle:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 
 .probe{position:absolute;pointer-events:none;z-index:5;background:var(--panel);border:1px solid var(--line-strong);border-radius:var(--radius-s);padding:9px 11px;font:var(--text-readout);width:232px;box-shadow:var(--shadow-lift);backdrop-filter:var(--frost)}
 .probeHead{font:var(--text-micro);letter-spacing:var(--track-wide);text-transform:uppercase;color:var(--dim);margin-bottom:6px}
@@ -151,42 +170,13 @@
 .probeMark em{grid-column:2;font-style:normal;color:var(--dim);line-height:1.4}
 .probeRow span:last-child{font-variant-numeric:tabular-nums;color:var(--ink)}
 
-/* The right-click menu: what shapes the solve, opened on the water it shapes.
-   Above the probe, because it is the thing the pointer just asked for. */
-.menu{position:absolute;z-index:6;width:244px;max-height:calc(100% - 16px);overflow:auto;display:grid;gap:10px;padding:10px;background:var(--panel);border:1px solid var(--line-strong);border-radius:var(--radius-m);box-shadow:var(--shadow-lift);backdrop-filter:var(--frost)}
-.menuGroup{display:grid;gap:5px}
-.menuGroup+.menuGroup{padding-top:10px;border-top:1px solid var(--line)}
-.menuLabel{display:flex;align-items:baseline;justify-content:space-between;gap:8px;font:var(--text-micro);letter-spacing:var(--track-wide);text-transform:uppercase;color:var(--dim)}
-.menuLabel b{color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}
-.menuItem{display:grid;gap:2px;text-align:left;border:1px solid transparent;background:none;color:var(--ink);border-radius:var(--radius-s);padding:5px 8px;cursor:pointer;font:inherit}
-.menuItem b{font:var(--text-label)}
-.menuItem em{font:var(--text-micro);font-style:normal;color:var(--dim);line-height:1.35}
-.menuItem:hover{background:var(--panel-soft);border-color:var(--line-strong)}
-.menuItem[aria-pressed=true]{background:var(--accent-wash);border-color:var(--accent-line);color:var(--accent-strong)}
-.menuItem[aria-pressed=true] em{color:var(--accent-strong);opacity:.8}
-.menuRange{width:100%;accent-color:var(--accent);height:5px}
-/* The dyadic ladder, as a row of the sizes themselves: four numbers a reader
-   picks from, not a slider over values the lattice does not have. */
-.menuLadder{display:flex;gap:4px}
-.rung{flex:1;border:1px solid var(--line-strong);background:var(--panel-soft);color:var(--muted);border-radius:var(--radius-s);padding:4px 0;cursor:pointer;font:var(--text-label);font-variant-numeric:tabular-nums}
-.rung:hover{border-color:var(--accent-line);color:var(--ink)}
-.rung[aria-pressed=true]{background:var(--accent-wash);border-color:var(--accent-line);color:var(--accent-strong)}
-/* The lens list: sixteen rows, so it scrolls inside the panel rather than
-   making the panel itself sixteen rows tall. */
-.menuList{display:grid;gap:1px;max-height:172px;overflow:auto;margin:0 -2px;padding:0 2px}
-.menuPick{display:flex;align-items:center;gap:7px;text-align:left;border:1px solid transparent;background:none;color:var(--ink);border-radius:var(--radius-s);padding:4px 7px;cursor:pointer;font:var(--text-label);line-height:1.25}
-.menuPick i{width:7px;height:7px;border-radius:2px;flex:none}
-.menuPick em{font-style:normal;color:var(--dim);font-variant-numeric:tabular-nums;min-width:1.6ch;text-align:right}
-.menuPick:hover{background:var(--panel-soft);border-color:var(--line-strong)}
-.menuPick[aria-pressed=true]{background:var(--accent-wash);border-color:var(--accent-line);color:var(--accent-strong)}
-.menuPick[aria-pressed=true] em{color:var(--accent-strong)}
-.menuItem:disabled{opacity:.5;cursor:default}
-.menuItem:disabled:hover{background:none;border-color:transparent}
-
-/* The proposed drop. Centred exactly as the canvas is, so its viewBox and the
-   lattice are the same coordinates and nothing has to convert between them.
-   Drawn in the liquid tone, because that is what it is about to become. */
-.aim{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);pointer-events:none;z-index:4;overflow:visible}
+/* Each overlay is the whole viewport, laid exactly over the canvas, and its
+   own transform is its viewBox — the same camera the canvas was painted with,
+   expressed in cells, so nothing here has to convert between the two. Clipped
+   rather than spilling: what the camera has carried off the picture is off the
+   picture, and would otherwise draw over the readings in the margins. The drop
+   is in the liquid tone, because that is what it is about to become. */
+.aim{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:4;overflow:hidden}
 .aimBall{fill:var(--slice-liquid);fill-opacity:.26;stroke:var(--slice-liquid);stroke-width:1.5}
 /* The pages the drop would wake. Dashed, and in the adaptivity tone the rung
    lens already uses, so a reader reads them as topology and not as water. */
@@ -197,7 +187,21 @@
    dashed, because it is not one yet. */
 .regionBox{fill:var(--slice-adaptivity);fill-opacity:.07;stroke:var(--slice-adaptivity);stroke-width:1.5}
 .regionDraw{fill:var(--slice-adaptivity);fill-opacity:.1;stroke:var(--slice-adaptivity);stroke-width:1.5;stroke-dasharray:5 4}
+/* Attention, never concealment. The 3-D editor hides regions unless the stroke
+   is armed or one is selected — there is nothing in that frame that *is* a
+   region. This lab is an instrument about resolution, and what is holding a
+   brick at a rung is the reading a reader came for, so a box is dimmed at rest
+   instead of withheld. */
+.aim[data-dim],.tags[data-dim]{opacity:.42}
+/* The selected box's interior: the move. Invisible, and the only part of this
+   layer that ever takes the pointer, so an unselected box cannot steal a press
+   from the water or from a stroke armed over it. */
+.regionBody{fill:transparent;pointer-events:auto}
+.regionHandle{fill:var(--panel);stroke:var(--slice-adaptivity);stroke-width:1.5;pointer-events:auto}
+.regionHandle:hover{fill:var(--slice-adaptivity)}
+g[data-selected] .regionBox{fill-opacity:.14;stroke-width:2}
 .tags{position:absolute}
+.regionTag[data-selected]{color:var(--ink);border-color:var(--slice-adaptivity)}
 .regionTag{position:absolute;transform:translateY(-100%);white-space:nowrap;font:var(--text-micro);letter-spacing:var(--track-wide);text-transform:uppercase;color:var(--slice-adaptivity);background:var(--overlay);border:1px solid var(--line);border-radius:var(--radius-s);padding:1px 6px;backdrop-filter:var(--frost-chip)}
 
 /* ---- strip ---------------------------------------------------------- */
@@ -289,6 +293,5 @@
   .inspector{overflow:visible}
   .iters{display:none}
   .experiment{display:flex}
-  .hudFoot{display:none}
 }
 @media(prefers-reduced-motion:reduce){.tick .bar,.caret{transition:none}}

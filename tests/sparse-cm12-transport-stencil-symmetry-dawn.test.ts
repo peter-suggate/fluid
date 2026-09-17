@@ -146,7 +146,7 @@ dawnTest("transport dual cells locate graded 1/2/4/8 corners and clipped boundar
     device = await adapter.requestDevice();
     for (const fixture of ["graded", "clipped", "wall-wedge", "rung-corner", "ocean-junction", "ocean-apex"] as const) {
       const dimensions = fixture === "graded" || fixture.startsWith("ocean-") ? [64,64,64] : fixture !== "clipped" ? [32,32,32] : [13,10,9];
-      const shader = device.createShaderModule({code:`
+      const shader: GPUShaderModule = device.createShaderModule({code:`
 const INVALID=0xffffffffu;
 const DIM=vec3u(${dimensions.join(",")});
 struct Owner{cell:u32}

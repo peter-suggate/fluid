@@ -56,7 +56,7 @@ function requireTimingObject<Key extends string>(
   for (const key of keys) {
     const value: unknown = timings[key];
     assert.equal(typeof value, "number", `frame ${frame}: missing ${scope}.${key} timing`);
-    assert.ok(Number.isSafeInteger(value) && value >= 0,
+    assert.ok(Number.isSafeInteger(value as number) && (value as number) >= 0,
       `frame ${frame}: invalid ${scope}.${key} timing ${String(value)}`);
   }
   return timings as { available: boolean } & Record<Key, number>;

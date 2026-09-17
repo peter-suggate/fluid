@@ -1,4 +1,13 @@
-/** Discover colocated feature tests as well as cross-feature integration tests. */
+/**
+ * Discover colocated feature tests as well as cross-feature integration tests.
+ *
+ * `advance-lab/` is here because the 2-D advance lab is a route with its own
+ * drawing and playback code, and a test that never runs in the default suite is
+ * a test nobody is holding to anything. Everything the lab knows *about* the
+ * method has moved under `lib/methods/adaptive-volume/features/advance-slice/`
+ * and is discovered by the `lib` root; what stays in the page's own folder is
+ * the picture, and this is what keeps it checked.
+ */
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -12,7 +21,7 @@ async function discover(directory: string): Promise<string[]> {
   }));
   return groups.flat();
 }
-const files = (await Promise.all(["tests", "lib"].map(discover))).flat().sort();
+const files = (await Promise.all(["tests", "lib", "advance-lab"].map(discover))).flat().sort();
 if (process.argv.includes("--list")) {
   process.stdout.write(files.join("\n") + "\n");
 } else {

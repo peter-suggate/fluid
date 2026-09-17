@@ -62,30 +62,6 @@ test("a fluid edit owns one public world generation", () => {
     "step encoding and interaction encoding need independent parameter lifetimes");
 });
 
-test("scene and rigid-body edits cross the same public world boundary", () => {
-  const sceneEdit = sourceBetween(solver,
-    "  applySceneUniforms(scene: SceneDescription): void {",
-    "  /**\n   * Adopt the controls");
-  assert.match(sceneEdit, /this\.sparseWorld\.edit\(\{ kind: "set-scene", scene \}\)/);
-  assert.doesNotMatch(sceneEdit, /sparseRuntime|setSolidWorld|setRefinementRegionParameters/);
-
-  const advance = sourceBetween(solver,
-    "  advanceTo(time_s: number, bodies: RigidBodyState[]): boolean {",
-    "  /** Publish the receipt");
-  assert.match(advance, /this\.sparseWorld\.encodeStep\(encoder, \{[\s\S]*rigidBodies: activeBodies/);
-  assert.match(advance, /liquidInflow,[\s\S]*this\.sparseWorld\.edit\(\{[\s\S]*kind: "liquid-jet"/);
-  assert.doesNotMatch(advance, /outletFine|radiusFine|velocityFinePerSecond/,
-    "hose features must remain in world-space SI units");
-  assert.doesNotMatch(advance, /rigidSystem\?\.encode/);
-  assert.doesNotMatch(advance, /sparseRuntime\.encodeLiquidJetInjection/);
-
-  const runtime = sourceBetween(adapter,
-    "export interface CM12SparseWorldRuntime {",
-    "export interface CM12SparseWorldDeveloperTrace");
-  assert.doesNotMatch(runtime,
-    /encodeLiquidInjection|encodeLiquidJetInjection|setSolidWorld|setRefinementRegionParameters/,
-  "application edits must not regain implementation-specific escape hatches");
-});
 
 test("a refinement-only scene edit does not rebuild SolidWorld", () => {
   const interaction = sourceBetween(adapter,

@@ -29,7 +29,8 @@ npm run test:physics-wasm:world
 npm run test:physics-wasm:world3d
 npm run test:physics-wasm:adapter-world3d
 npm run test:physics-wasm:threaded
-node --import tsx --test lib/physics-wasm/*.test.ts advance-lab/*.test.ts
+node --import tsx --test lib/physics-wasm/*.test.ts advance-lab/*.test.ts \
+  lib/methods/adaptive-volume/features/advance-slice/verification/*.test.ts
 ```
 
 The Node world checks exercise the generated artifacts through their real binary publication boundary; the 3D flow also runs UI defaults with eight workers. The threaded check initializes four Node worker threads and verifies deterministic pressure output against the scalar and SIMD artifacts. Browser integration remains necessary for actual Web Worker bootstrap and shared-memory hosting.

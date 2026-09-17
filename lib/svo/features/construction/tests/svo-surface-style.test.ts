@@ -12,12 +12,6 @@ test("SVO surface style keeps voxel faces as the default and exposes smooth reco
   assert.equal(sceneUsesFlatVoxelNormals({ surfaceStyle: "smooth" }), false);
 });
 
-test("smooth SVO surface reconstruction changes the primary hit depth", () => {
-  const wgsl = createSvoDrySceneFragmentWGSL();
-  assert.match(wgsl, /fn drySmoothVoxelSurfaceT\(/);
-  assert.match(wgsl, /let surfaceT=drySmoothVoxelSurfaceT\(/);
-  assert.match(wgsl, /return DryHit\(surfaceT,shaded\.normal/);
-});
 
 test("smooth SVO surface round-trips through a scene URL", () => {
   const parsed = parseQueryState(

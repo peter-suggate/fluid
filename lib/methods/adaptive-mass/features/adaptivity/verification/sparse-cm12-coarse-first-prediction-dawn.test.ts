@@ -14,6 +14,7 @@ const dawnModule = process.env.WEBGPU_NODE_MODULE;
     const gpu = dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
     const adapter = await gpu.requestAdapter(); assert.ok(adapter);
     device = await adapter.requestDevice();
+    assert.ok(device);
     const cases = [
       { name: "slow lateral entry with fast tangential travel", delta: [8, 0, 0], source: [.1, -12, 0], receiver: [0, 0, 0], expected: .05 },
       { name: "coherent translating liquid", delta: [8, 0, 0], source: [20, -12, 0], receiver: [20, -12, 0], expected: 0 },

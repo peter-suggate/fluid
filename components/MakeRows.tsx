@@ -3,11 +3,11 @@
 import { useState } from "react";
 import { TopologyFreezeButton } from "../lib/features/topology-freeze/ui";
 import { performEditorAction } from "../lib/core/editor-action-runtime";
-import { getEditorGesture, type EditorGestureId } from "../lib/core/editor-gesture-catalog";
 import { placementFields } from "../lib/core/editor-placement";
 import { voxelToolGroups } from "../lib/core/editor-voxel-tool-actions";
 import { SCENE_SHAPES_BY_CODE, sceneShape } from "../lib/core/scene-shape";
 import { useSession } from "../lib/core/session/session-context";
+import { strokeHint, useArmedStroke } from "./armed-stroke";
 import { EditorActionGlyph, EditorActionPathGlyph } from "./EditorActionIcon";
 import {
   ToolstripMenuButton,
@@ -41,35 +41,6 @@ import {
  * water bricks stay in the ring: they are brushwork on a body that already
  * exists, and the ring is opened on the body they would work on.
  */
-
-/**
- * Arm state for one stroke, and the toggle that owns it.
- *
- * Written against the store rather than through `performEditorAction`, because
- * the effect union has an `arm` and no disarm: putting a stroke away is not
- * something a wedge can express — a ring closes on the choice, so it never
- * needed to — and it is half of what a row means.
- */
-function useArmedStroke(gesture: EditorGestureId) {
-  const session = useSession();
-  const armed = session.ui((state) => state.armedGesture) === gesture;
-  const setArmedGesture = session.ui((state) => state.setArmedGesture);
-  return { armed, toggle: () => setArmedGesture(armed ? undefined : gesture) };
-}
-
-/**
- * One line of the gesture's own hint, plus how to put it away.
- *
- * The catalog's hints are written for the chip under an armed mode and run to
- * three clauses; the row's tip clamps at three short lines. Taking the first
- * clause keeps the sentence the author wrote for the stroke rather than a second
- * paraphrase of it that can drift.
- */
-function strokeHint(gesture: EditorGestureId, armed: boolean): string {
-  const [first = ""] = getEditorGesture(gesture).hint.split(" · ");
-  const sentence = `${first.slice(0, 1).toUpperCase()}${first.slice(1)}.`;
-  return armed ? `${sentence} Click the mark again to put it away.` : sentence;
-}
 
 /** Drag out a box that caps how finely the solver may refine inside it. */
 function RegionRow() {

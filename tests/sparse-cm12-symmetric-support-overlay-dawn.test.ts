@@ -20,6 +20,7 @@ const dawnModule = process.env.WEBGPU_NODE_MODULE;
       const gpu = dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
       const adapter = await gpu.requestAdapter(); assert.ok(adapter);
       device = await adapter.requestDevice({ requiredLimits: requiredFluidDeviceLimits(adapter.limits) });
+      assert.ok(device);
       const errors: string[] = [];
       device.addEventListener("uncapturederror", event => { event.preventDefault(); errors.push(event.error.message); });
       const scene = createSymmetricExpansionScene();

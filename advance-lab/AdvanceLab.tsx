@@ -7,39 +7,76 @@
  * a cell is cut — fills the viewport, and every stage of the resident encoder
  * is a lens over that one picture rather than a diagram of its own. Picking a
  * stage changes what you can see about the water; it never changes the water.
+ * The picture is navigated as the 3-D studio is — the wheel zooms toward the
+ * cursor, shift-drag or middle-drag pans, and `0` refits the whole slice.
  *
- * Three controls do change it, and they are the only ones in the bar: the
- * transport — Play, Step, Reset. They run the clock, they belong to no place
- * on the picture, and they sit beside the clock they run on and what a step of
- * it actually costs. Nothing in the sidebar is an intervention, and no lens is
- * one; if a reading ever moves the water it has been written in the wrong
- * place.
+ * The page has one modal axis, and it is the 3-D studio's: LOOK and EDIT, on
+ * Tab. LOOK is the default, because a run opens ready to be watched — the wheel
+ * zooms toward the cursor, shift-drag or middle-drag pans, `0` refits, the
+ * pointer reads whichever cell it rests on and a click pins one, and nothing in
+ * the water can be touched. EDIT is where it can: everything inside it — what
+ * is selected, what a drag means, which stroke is armed — happens *inside* the
+ * mode, which is what lets one key put all of it down at once.
  *
- * Everything else is reached by right-clicking the water. Two are about the
- * place that was clicked — the drop, which lands a ball of liquid there, and
- * the enforcement region, whose menu is about the box under the pointer when
- * there is one and about drawing a new one when there is not. The rest are
- * about the picture: which lens is over the water, which surface it
- * reconstructs, and how many pressure iterations a step may spend. None of them
- * is about the page, and the product's own rule is that a capability is
- * contextual before it is chrome: a verb with a location is a right-click, not
- * a button that arms a mode and waits.
+ * Three controls run the clock and belong to no place on the picture: Play,
+ * Step, Reset. They sit in the middle of the bar beside what a step actually
+ * costs. The scene, the transport arm and Δt sit beside them because each of
+ * those starts a different *run* — a fact about the page rather than about the
+ * water in it. Nothing in the sidebar is an intervention, and no lens is one;
+ * if a reading ever moves the water it has been written in the wrong place.
  *
- * The lens list in that menu and the strip along the bottom are one choice
- * offered twice, on purpose: the strip lays the stages out as the loop, with
- * what each costs, for a reader studying the anatomy of the advance; the menu
- * puts the same set where the pointer already is, for a reader studying the
- * water. Neither is a mode and neither moves anything — which is why the page
- * no longer walks them on a timer. A visualization that changed on its own
- * decided for the reader what they were looking at.
+ * Everything else is contextual, in the product's two senses of the word.
+ *
+ * A **verb with a location** is a right-click. The ring opens on whatever the
+ * pointer was over and offers what *that* thing can do: on an enforcement box,
+ * Select, Remove and Inspect cell; on the water, a ball dropped here or a box
+ * drawn over it; on either, the Visuals wedge that says which surface is
+ * reconstructed and what is annotated over the lens. In LOOK the ring keeps the
+ * instruments and withholds every verb, so a reader watching a solve can ask
+ * what they are looking at without being offered a way to change it.
+ *
+ * An **instrument** — a control found by watching the water answer it — is a
+ * row on the EDIT toolstrip at the viewport's corner: the lens over the water,
+ * the two overlays, the surface, the pressure budget, and under a rule the two
+ * strokes a drag can be. Sixteen lenses do not fit a pie, and a budget is not
+ * chosen from a list once; that is the whole of the rule deciding which of the
+ * two surfaces a capability belongs to.
+ *
+ * The keyboard is the studio's, in the studio's order: an open ring swallows
+ * every key; `Tab` swaps the modes; `Escape` unwinds from the inside out — the
+ * armed stroke, then the selection, then EDIT itself; `Delete` and `Backspace`
+ * remove the selected region; `0` refits the picture; `f` and `n` toggle the
+ * two overlays in either mode, because an annotation is not an intervention;
+ * and `b` and `g` arm the ball and the enforcement box from the shared gesture
+ * catalog, entering EDIT in order to do it. The lab's old `r` is gone — in the
+ * studio `r` is the ray probe, and one letter meaning two things across two
+ * pages is how a reader learns the shortcuts are unreliable. The order, and why
+ * it is that order, is `advance-lab/use-slice-shortcuts.ts`.
+ *
+ * The lens list on that strip and the strip along the bottom are one choice
+ * offered twice, on purpose: the bottom strip lays the stages out as the loop,
+ * with what each costs, for a reader studying the anatomy of the advance; the
+ * toolstrip puts the same set where the pointer already is, for a reader
+ * studying the water. Neither is a mode and neither moves anything — which is
+ * why the page no longer walks them on a timer. A visualization that changed on
+ * its own decided for the reader what they were looking at.
  *
  * An enforcement region is the scene document's own `FluidRefinementRegion`,
  * and the slice already obeyed one before it could draw one — the resolution
  * policy takes every region crossing this cut as a hard floor and ceiling on
- * the bricks it fully contains. What the lab adds is the authoring, on the same
- * dyadic ladder the 3-D editor snaps to, written to the run's copy of the
- * document rather than to the scene: re-seeding the world would destroy the run
- * the box was drawn on, so Reset is what takes one back.
+ * the bricks it fully contains. What the lab adds is the authoring, and the
+ * authoring is the 3-D editor's: arm REGION, drag a box, and on release it
+ * commits, disarms and selects *itself*, so the handles land under the pointer
+ * that drew them. Corners and edges resize, the body moves, both snapped to the
+ * box's own smallest allowed cell; its floor and its ceiling are two rows on
+ * its own strip at its own corner; Delete removes it. A drawn box is never
+ * written to the scene, nor to any copy of the document: it is a live command
+ * to the running world, and the set of them is held by this page and by the
+ * controller. Reset restarts the clock and the water and then hands the new
+ * world the same boxes, so what a reader drew survives the run they drew it on
+ * — the regions are in finest cells of a lattice the same document rebuilds
+ * identically. Choosing another scene, or another transport, is a different
+ * run: that one starts over from whatever regions the document itself declares.
  *
  * Everything that is not the water is either a control or folded away. The
  * reader arrives at a running simulation with a caption on it; the stage's
@@ -49,24 +86,59 @@
  * subject, and the prose is what you reach for when the picture raises a
  * question.
  *
- * Nothing here restates the stage registry. Labels, tips and sub-seam names are
- * read from `SPARSE_CM12_STAGES`, the sizing comes from `ADVANCE_WORK`, and the
- * only prose this file owns is the four-step reading of the loop and the table
- * of what a cell carries — neither of which the encoder declares.
+ * Nothing here restates the method. Everything this page shows *about* the
+ * advance is declared beside it, in
+ * `lib/methods/adaptive-volume/features/advance-slice/`: the lens captions and
+ * the marks each stage's picture may put on a cell hang off
+ * `SPARSE_CM12_STAGES[stage].slice` alongside the labels, tips and sub-seam
+ * names; the sizing rules are `ADVANCE_WORK`; the thresholds every mark is cut
+ * at are `ADVANCE_SLICE_THRESHOLDS`; the surface and transport choices this
+ * page offers are `ADVANCE_SURFACE_VIEWS` and `ADVANCE_TRANSPORT_EXPERIMENTS`;
+ * and which of the loop's four readings a stage belongs to is declared per
+ * stage, so `LOOP_STEPS` is derived rather than written. The drawing — the
+ * canvas, the theme-resolved palette and one `draw(c)` per stage — is
+ * `advance-lab/lenses.ts`.
+ *
+ * What is left here is the page: the run, the readings and the pointer. The
+ * rest of the interaction is beside it and testable without a browser —
+ * `slice-actions.ts` composes the ring and performs it, `slice-regions.ts` is
+ * every box's arithmetic, `SliceToolstrip.tsx` is the EDIT column,
+ * `SliceRegions.tsx` is the boxes and their handles, `use-slice-shortcuts.ts`
+ * is the keyboard and `view-transform.ts` is the camera. The only prose this
+ * file still owns is the table of what a cell carries, which no single stage
+ * declares.
  */
+// This route is an independent client entry point. Install methods before
+// session stores evaluate; the server layout's registry is a separate realm.
+import "../lib/methods";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { EditorModeChip } from "../components/EditorModeChip";
+import { RadialMenu } from "../components/RadialMenu";
 import { ScenePickerPopover } from "../components/ScenePickerPopover";
 import { ThemeSwitch } from "../components/ThemeSwitch";
+import { ViewportModeToggle } from "../components/ViewportModeToggle";
 import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
 import { sceneDocument } from "../lib/core/scene-definition";
+import type { EditorActionEffect } from "../lib/core/editor-action";
+import { getEditorGesture } from "../lib/core/editor-gesture-catalog";
+import { createPaneSession, type PaneSession } from "../lib/core/session/session";
+import { SessionProvider } from "../lib/core/session/session-context";
 import { findSceneDefinition, SCENE_CATALOG, sceneCatalogCards } from "../lib/core/scenes";
 import {
   advanceCosts, ADVANCE_NOTES, ADVANCE_STAGE_ORDER, advanceSeamCost,
   advanceStageWork, advanceWorkModel, ADVANCE_DISPATCH_KINDS,
   type AdvanceCost, type AdvanceKernel, type AdvanceStageId,
   type AdvanceWorkScene,
-} from "./advance-work";
+} from "../lib/methods/adaptive-volume/features/advance-slice/advance-work";
+import {
+  ADVANCE_DEFAULT_TRANSPORT_EXPERIMENT, ADVANCE_SURFACE_VIEWS,
+  ADVANCE_TRANSPORT_EXPERIMENT_ORDER, ADVANCE_TRANSPORT_EXPERIMENTS,
+  isAdvanceTransportExperiment, type AdvanceSurfaceViewId,
+} from "../lib/methods/adaptive-volume/features/advance-slice/definition";
+import {
+  ADVANCE_LOOP_STEPS,
+} from "../lib/methods/adaptive-volume/features/advance-slice/loop";
 import { AdvanceLabController, type AdvanceAuthoredScene,
   type AdvanceRefinementRegion, type AdvanceTransportExperiment,
 } from "../lib/physics-wasm/advance-controller";
@@ -87,6 +159,22 @@ import {
   usesCellFillSlice,
 } from "./lenses";
 import { advancePresentationReady, advancePresentationRevision } from "./playback";
+import {
+  sliceActionPerformer, sliceActionsAt, sliceRingTitle, type SliceRingContext,
+} from "./slice-actions";
+import { SliceRegions, SliceRegionToolstrip } from "./SliceRegions";
+import {
+  draftRegionBox, regionAt, regionBox, regionBoxIsDrawn,
+  sliceRegionIdFromSelection, sliceRegionSelectionId,
+  type SliceBox, type SliceLattice,
+} from "./slice-regions";
+import { SliceToolstrip } from "./SliceToolstrip";
+import { useSliceShortcuts } from "./use-slice-shortcuts";
+import {
+  cellFromClient, clampedView, clientFromCell, fitScale, fitView, originPixels,
+  panned, pixelsPerCell, svgViewBox, zoomedToward,
+  type SliceView, type ViewportRect,
+} from "./view-transform";
 
 /** Milliseconds between advances — slow enough to watch a rung change. */
 const FRAME_MS = 46;
@@ -100,35 +188,27 @@ const PROBE_BASE_HEIGHT = 138;
  *  little generous: overestimating lifts the bubble, underestimating runs it
  *  off the bottom of the picture, and only one of those is recoverable. */
 const PROBE_MARK_HEIGHT = 54;
-/** The right-click menu, kept whole inside the picture the same way. */
-const MENU_WIDTH = 244;
-const MENU_HEIGHT = 520;
 /** Which scene the page is reading, kept in the URL so a refresh returns to it. */
 const SCENE_PARAM = "scene";
 const TRANSPORT_PARAM = "transport";
 const DEFAULT_SCENE_ID = "water-box-dam-break";
-const DEFAULT_TRANSPORT_EXPERIMENT: AdvanceTransportExperiment = "level-set-volume";
-const DEFAULT_PRESSURE_BUDGET = 28;
-const CELLWISE_PRESSURE_BUDGET = 256;
-const CELLWISE_REMAP_OPTION = Object.freeze({
-  mode: "cellwise-remap" as const, traceSegments: 1, edgeSamples: 1 as const,
-});
-/** Arms the drop, the same key the studio's BALL gesture answers to. */
-const DROP_KEY = "b";
-/** Arms the enforcement box. */
-const REGION_KEY = "r";
+/* The three transport arms, what each costs to solve and the parameterised
+ * selector the cellwise one rides, are declared beside the method, in
+ * `ADVANCE_TRANSPORT_EXPERIMENTS`. These are lookups into that table. */
+const DEFAULT_TRANSPORT_EXPERIMENT: AdvanceTransportExperiment =
+  ADVANCE_DEFAULT_TRANSPORT_EXPERIMENT;
+const DEFAULT_PRESSURE_BUDGET =
+  ADVANCE_TRANSPORT_EXPERIMENTS[DEFAULT_TRANSPORT_EXPERIMENT].defaultPressureBudget;
+const CELLWISE_REMAP_OPTION = ADVANCE_TRANSPORT_EXPERIMENTS["cellwise-remap"].option!;
+/* What a press on the water does is no longer a state of this page. It is the
+ * session's `armedGesture`, out of the shared catalog, so a stroke armed from a
+ * ring wedge, from a toolstrip row or from its key is one fact — and `b` and
+ * `g` mean here exactly what they mean in the 3-D studio. The lab's own `r` is
+ * gone: `r` is the studio's ray probe. */
 
-/**
- * What a press on the water does.
- *
- * Null is the resting state and the only one in which a click reads a cell:
- * both tools take the press, and neither is entered except from the menu on
- * the water it applies to.
- */
-type SliceTool = "drop" | "region" | null;
-/** One key per overlay, named for the quantity rather than its position. */
-const OVERLAY_KEYS: Readonly<Record<SliceOverlayId, string>> =
-  { fraction: "f", normal: "n" };
+/** Where the EDIT strip hangs, as a fraction of the viewport — its corner. */
+const TOOLSTRIP_LEFT_FRACTION = 0.014;
+const TOOLSTRIP_TOP_FRACTION = 0.06;
 /** Smallest ball the solver can resolve, and the floor a sizing drag stops at. */
 const DROP_MINIMUM_FINE = 1;
 /* What a step costs is read off the median of this many of them, not off the
@@ -173,14 +253,13 @@ function noteStepCost(ring: number[], ms: number,
 
 /**
  * The loop the whole method is: four readings, of which only three encode.
- * Step 1 is the state the advance starts from, so it has no stage range.
+ *
+ * Derived, never written down here. Which reading a stage falls under is
+ * declared per stage beside the method, and the ranges come off the encode
+ * order — so a stage inserted into the encoder moves the strip with it rather
+ * than shifting every hand-written index after it by one, silently.
  */
-const LOOP_STEPS = [
-  { n: 1, name: "Represent", from: 0, to: 0 },
-  { n: 2, name: "Solve the motion", from: 1, to: 7 },
-  { n: 3, name: "Transport", from: 8, to: 8 },
-  { n: 4, name: "Adapt and publish", from: 9, to: 15 },
-] as const;
+const LOOP_STEPS = ADVANCE_LOOP_STEPS;
 
 /**
  * What a cell and its rows carry between advances.
@@ -203,7 +282,10 @@ const CELL_STATE: readonly (readonly [string, string, string])[] = [
 ];
 
 type Metric = "workgroups" | "dispatches";
-type SurfaceView = "plic" | "shared-rdf";
+/** The reconstructions a reader may pick between, which is not all of them:
+ *  the direct level set is what the level-set transport publishes rather than
+ *  a choice, and `ADVANCE_SURFACE_VIEWS` is where that is written down. */
+type SurfaceView = Exclude<AdvanceSurfaceViewId, "direct-level-set">;
 
 interface InjectionReceipt {
   readonly accepted: boolean;
@@ -218,24 +300,18 @@ interface InjectionReceipt {
   readonly fault?: { readonly stage?: string } | null;
 }
 
-interface LabRegion extends AdvanceRefinementRegion {
-  readonly id: string;
-}
-
-const ENFORCEMENT_CELL_SIZES = ADVANCE_RUNGS;
 const ENFORCEMENT_CAPACITY = 8;
 const DEFAULT_ENFORCEMENT_CELL_SIZE: (typeof ADVANCE_RUNGS)[number] = 2;
 
-/* Which surface the picture reconstructs. Both are read off the same accepted
- * fractions and normals, so this is a choice of reconstruction and never of
- * state — the water is identical under either. */
+/* Which surface the picture reconstructs, in the order the menu offers them.
+ * Declared beside the method as `ADVANCE_SURFACE_VIEWS`; this is that roster
+ * narrowed to the ones a reader may actually choose between. Both of those are
+ * read off the same accepted fractions and normals, so it is a choice of
+ * reconstruction and never of state — the water is identical under either. */
 const SURFACE_VIEWS: readonly { readonly id: SurfaceView; readonly label: string;
-  readonly note: string }[] = [
-  { id: "shared-rdf", label: "Shared RDF",
-    note: "one isocontour, shared across rungs" },
-  { id: "plic", label: "Transport PLIC",
-    note: "the volume-correct line the transport itself cuts" },
-];
+  readonly note: string }[] = ADVANCE_SURFACE_VIEWS.flatMap(view =>
+  !view.selectable || view.id === "direct-level-set" ? []
+    : [{ id: view.id, label: view.label, note: view.hint }]);
 
 interface NumericalFailure {
   readonly stage: string;
@@ -378,7 +454,7 @@ function authoredScene(id: string): AdvanceAuthoredScene | null {
     document: sceneDocument(definition) }) : null;
 }
 
-function authoredRegions(scene: AdvanceAuthoredScene, next: AdvanceView): readonly LabRegion[] {
+function authoredRegions(scene: AdvanceAuthoredScene, next: AdvanceView): readonly AdvanceRefinementRegion[] {
   const document = scene.document as { fluid?: { refinementRegions?: readonly {
     id: string; min_m: { x: number; y: number; z: number }; max_m: { x: number; y: number; z: number };
     minimumCellSize_cells: number; maximumCellSize_cells?: number }[] } };
@@ -403,6 +479,11 @@ function requestedSceneId(): string {
   return asked && SCENE_IDS.has(asked) ? asked : DEFAULT_SCENE_ID;
 }
 
+/* What a transport arm costs to solve, and how well, is the arm's business and
+ * is declared with it in `ADVANCE_TRANSPORT_EXPERIMENTS`. These four stay as
+ * the page's own reading of that table: which arm a scene opens on, and what
+ * the address bar is allowed to ask for. */
+
 function defaultTransportExperiment(sceneId: string): AdvanceTransportExperiment {
   void sceneId;
   return DEFAULT_TRANSPORT_EXPERIMENT;
@@ -411,18 +492,17 @@ function defaultTransportExperiment(sceneId: string): AdvanceTransportExperiment
 function defaultPressureBudget(sceneId: string,
   transport: AdvanceTransportExperiment): number {
   void sceneId;
-  return transport === "baseline" ? DEFAULT_PRESSURE_BUDGET : CELLWISE_PRESSURE_BUDGET;
+  return ADVANCE_TRANSPORT_EXPERIMENTS[transport].defaultPressureBudget;
 }
 
-function pressureTolerance(_transport: AdvanceTransportExperiment): number {
-  return 1e-6;
+function pressureTolerance(transport: AdvanceTransportExperiment): number {
+  return ADVANCE_TRANSPORT_EXPERIMENTS[transport].pressureTolerance;
 }
 
 function requestedTransportExperiment(sceneId: string): AdvanceTransportExperiment {
   if (typeof window === "undefined") return defaultTransportExperiment(sceneId);
   const asked = new URLSearchParams(window.location.search).get(TRANSPORT_PARAM);
-  return asked === "cellwise-remap" || asked === "baseline" || asked === "level-set-volume"
-    ? asked : defaultTransportExperiment(sceneId);
+  return isAdvanceTransportExperiment(asked) ? asked : defaultTransportExperiment(sceneId);
 }
 
 /**
@@ -522,7 +602,39 @@ function Fold({ id, title, meta, flag, open, toggle, children }: {
   </div>;
 }
 
+/**
+ * The lab's own realm.
+ *
+ * `createPaneSession` builds the eight stores a simulation pane authors, runs
+ * and reports about itself, and the lab wants four fields out of one of them —
+ * `viewportMode`, `armedGesture`, `selection` and `radialMenu`. Taking the
+ * whole session rather than inventing a fifth copy of those four is what lets
+ * `ViewportModeToggle`, `EditorModeChip` and `RadialMenu` mount here unmodified:
+ * each reads `useSession()` and none of them knows or cares which pane it is
+ * bound to.
+ *
+ * Two things worth knowing about doing this:
+ *
+ *   - **The id is `"a"`, and it never reaches the studio.** `PaneId` is the
+ *     token `simulation.*` takes to pick a pane, and the lab calls none of
+ *     those — its performer handles `arm`, `select` and its own `host` verbs
+ *     and delegates nothing. The stores are fresh instances either way, so
+ *     nothing here can be read or written by pane A.
+ *   - **Nothing mirrors it into the address bar.** The URL writer is opt-in
+ *     (`startQueryStateSync`, mounted by `components/FluidLab.tsx`) and is
+ *     additionally gated on the path being `/scene`, so a session created here
+ *     writes nothing. The lab keeps owning `?scene=` and `?transport=` through
+ *     `publishRunSelection`, and the two cannot fight.
+ */
 export function AdvanceLab(): React.JSX.Element {
+  // Built once per mount, in the initializer rather than in an effect: the
+  // first render already reads `viewportMode` off it, and a session that
+  // arrived one render late would open the page in a mode it then changed.
+  const [session] = useState(() => createPaneSession("a"));
+  return <SessionProvider value={session}><AdvanceSlice session={session} /></SessionProvider>;
+}
+
+function AdvanceSlice({ session }: { session: PaneSession }): React.JSX.Element {
   const canvas = useRef<HTMLCanvasElement>(null);
   const viewport = useRef<HTMLDivElement>(null);
   const controller = useRef<AdvanceLabController | null>(null);
@@ -549,7 +661,7 @@ export function AdvanceLab(): React.JSX.Element {
     useState<AdvanceTransportExperiment>(DEFAULT_TRANSPORT_EXPERIMENT);
   const [picking, setPicking] = useState(false);
   const [authored, setAuthored] = useState<AdvanceAuthoredScene | null>(null);
-  const [regionState, setRegionState] = useState<readonly LabRegion[]>([]);
+  const [regionState, setRegionState] = useState<readonly AdvanceRefinementRegion[]>([]);
   const [budget, setBudget] = useState(DEFAULT_PRESSURE_BUDGET);
   const pressureBudgetTouched = useRef(false);
   const [dt, setDt] = useState(CM12_PAPER_DT_S);
@@ -567,12 +679,21 @@ export function AdvanceLab(): React.JSX.Element {
   const [hover, setHover] = useState<{ probe: Probe; px: number; py: number;
     width: number; height: number } | null>(null);
   const [runtimeFault, setRuntimeFault] = useState<string | null>(null);
-  /* The two gestures that change the run rather than read it, and the only
-   * modes this page has. Armed, a press-drag-release places and sizes a ball
-   * or draws an enforcement box; the probe under the pointer keeps working
-   * either way, because reading a cell is never the wrong thing to be doing.
-   * Both are entered from the right-click menu on the water they apply to. */
-  const [tool, setTool] = useState<SliceTool>(null);
+  /* The mode, the stroke and the selection all live in the session's UI store,
+   * so the chips, the ring and the toolstrip read one fact rather than three
+   * copies of it — and so the Escape ladder is the studio's ladder rather than
+   * a second one written here that could fall out of step with it. */
+  const viewportMode = session.ui(state => state.viewportMode);
+  const armedGesture = session.ui(state => state.armedGesture);
+  const selection = session.ui(state => state.selection);
+  const editing = viewportMode === "interact";
+  /* Armed, a press-drag-release places and sizes a ball or draws an enforcement
+   * box; the probe under the pointer keeps working either way, because reading
+   * a cell is never the wrong thing to be doing. Neither can be armed in LOOK,
+   * which is the whole content of the mode. */
+  const droppingBall = editing && armedGesture === "fluid-ball";
+  const drawingRegion = editing && armedGesture === "region-draw";
+  const stroking = droppingBall || drawingRegion;
   const [aim, setAim] = useState<Aim | null>(null);
   /* The rubber band, in canvas finest cells: what the release will snap onto
    * the ladder. Held here rather than painted into the slice for the same
@@ -588,17 +709,31 @@ export function AdvanceLab(): React.JSX.Element {
   const dragging = useRef<{ pointer: number; anchor: readonly [number, number];
     moved: boolean } | null>(null);
   const [room, setRoom] = useState({ width: 960, height: 560 });
-  /* Everything that changes the run, opened on the water it applies to. The
-   * panel is placed in viewport pixels like the probe bubble; `at` is the same
-   * press in finest cells, which is what makes Drop a verb with a location
-   * rather than a mode — null when the press missed the canvas. */
-  const [menu, setMenu] = useState<{ x: number; y: number;
-    at: readonly [number, number] | null;
-    /* The box the press landed on, by id rather than by value: the menu stays
-     * open while its bounds are changed, and a captured copy would go on
-     * showing the region as it was when the pointer went down. */
-    regionId: string | undefined } | null>(null);
-  const menuPanel = useRef<HTMLDivElement>(null);
+  /* Where the picture is looked at from. Not a mode and not an intervention:
+   * it moves the reader, never the water, which is why it lives beside `room`
+   * rather than beside the tools. Named `sliceView` because `view` is already
+   * the mutable handle on the world.
+   *
+   * It carries the lattice shape it was framed for, because a different
+   * lattice is a different picture and not the same one looked at from the old
+   * place. A view stamped with a shape that is no longer on screen is simply
+   * not the view: render falls back to the fit, and the next gesture stamps
+   * the new shape on. That is a derivation rather than an effect, so a scene
+   * change never shows one frame through the old scene's camera. */
+  const [sliceView, setSliceView] = useState<SliceView & { readonly framing: string }>(
+    () => ({ ...fitView(1, 1), framing: "" }));
+  /* The pan in flight: which pointer owns it and where it was last measured
+   * from, because a drag is a run of deltas and not one displacement. */
+  const panning = useRef<{ pointer: number; clientX: number; clientY: number } | null>(null);
+  const [grabbing, setGrabbing] = useState(false);
+  /* Shift held with no tool armed: the cursor has to say "this will pan"
+   * before the press, exactly as the studio's does. */
+  const [grabReady, setGrabReady] = useState(false);
+  /* A wheel burst is many events and one frame. Zoom is exponential, so the
+   * deltas of a burst sum, and coalescing them costs the reader nothing while
+   * saving every repaint but the last. */
+  const wheelBurst = useRef<{ deltaY: number; clientX: number; clientY: number;
+    frame: number } | null>(null);
   /* Wall-clock milliseconds one advance costs, which is not what the step is
    * worth in physics and not what the work model prices — it is what this
    * machine takes to do it, and the only reading on the page that would change
@@ -606,18 +741,6 @@ export function AdvanceLab(): React.JSX.Element {
   const [stepMs, setStepMs] = useState<number | null>(null);
   const stepCosts = useRef<number[]>([]);
   const [themeTick, setThemeTick] = useState(0);
-
-  /* A press outside the panel is a decision to stop using it — including a
-   * press on the water, which is what a reader does next. */
-  useEffect(() => {
-    if (!menu) return;
-    const away = (event: PointerEvent): void => {
-      if (menuPanel.current?.contains(event.target as Node)) return;
-      setMenu(null);
-    };
-    window.addEventListener("pointerdown", away);
-    return () => window.removeEventListener("pointerdown", away);
-  }, [menu]);
 
   /* The animation loop is started once; it reads the live controls from here. */
   const live = useRef({ playing, budget, dt });
@@ -722,52 +845,52 @@ export function AdvanceLab(): React.JSX.Element {
     return () => { media.removeEventListener("change", bump); observer.disconnect(); };
   }, []);
 
-  /* One key per tool — the drop keeps the studio's BALL key, so the hand that
-   * drops water in the app drops it here — and one per overlay, named for its
-   * quantity. Escape lets go of the mode without hunting for the menu that
-   * armed it. */
-  useEffect(() => {
-    const key = (event: KeyboardEvent): void => {
-      const target = event.target as HTMLElement | null;
-      if (event.metaKey || event.ctrlKey || event.altKey || target?.closest("input, select, textarea")) return;
-      if (event.key === "Escape") {
-        /* One Escape, one thing let go of: the menu if it is open, the armed
-         * tool if it is not. */
-        setMenu(open => {
-          if (!open) { setTool(null); setAim(null); setSketch(null); }
-          return null;
-        });
-        return;
-      }
-      const stroke = event.key.toLowerCase();
-      const overlay = SLICE_OVERLAY_ORDER.find(id => OVERLAY_KEYS[id] === stroke);
-      if (overlay) {
-        if (!(transportExperiment === "level-set-volume" && overlay === "normal"))
-          toggleOverlay(overlay);
-        return;
-      }
-      if (stroke !== DROP_KEY && stroke !== REGION_KEY) return;
-      const wanted: SliceTool = stroke === DROP_KEY ? "drop" : "region";
-      setAim(null);
-      setSketch(null);
-      setTool(current => current === wanted ? null : wanted);
-    };
-    window.addEventListener("keydown", key);
-    return () => window.removeEventListener("keydown", key);
-  }, [toggleOverlay, transportExperiment]);
+  /* Whether this transport draws an overlay at all. The direct level set
+   * publishes its own surface, so there is no reconstructed normal to annotate
+   * with — and a switch for a mark that cannot be made is a switch that lies. */
+  const overlayOffered = useCallback((id: SliceOverlayId): boolean =>
+    !(transportExperiment === "level-set-volume" && id === "normal"),
+  [transportExperiment]);
 
-  /** Rebuild from the selected production document's deterministic t=0 state. */
-  const reseed = useCallback((id: string,
+  /* Shift is the only modifier this page reads, and all it does is change what
+   * the cursor promises. Tracked on the window rather than on the canvas so
+   * pressing it while the pointer already rests on the water still offers the
+   * hand; released on blur because a modifier held into another window is not
+   * held when the reader comes back. */
+  useEffect(() => {
+    const sync = (event: KeyboardEvent): void => setGrabReady(event.shiftKey);
+    const release = (): void => setGrabReady(false);
+    window.addEventListener("keydown", sync);
+    window.addEventListener("keyup", sync);
+    window.addEventListener("blur", release);
+    return () => {
+      window.removeEventListener("keydown", sync);
+      window.removeEventListener("keyup", sync);
+      window.removeEventListener("blur", release);
+    };
+  }, []);
+
+  /**
+   * Another run: another scene, or the same one under another transport.
+   * It begins from the document's deterministic t=0 state and from the
+   * document's own regions, so the boxes the reader drew on the run being
+   * replaced are dropped here and nowhere else.
+   */
+  const chooseRun = useCallback((id: string,
     nextTransport: AdvanceTransportExperiment = transportExperiment): void => {
     const active = controller.current, scene = authoredScene(id);
     if (!active || !scene || !SCENE_IDS.has(id)) return;
     setSceneId(id);
     setAuthored(null);
     setRegionState([]);
+    active.clearRefinementRegions();
     setPinned(null);
     setHover(null);
     setAim(null);
-    setTool(null);
+    setSketch(null);
+    /* A new run is a new beginning, and a beginning is looked at rather than
+     * edited: the mode, the stroke, the selection and the ring all go down. */
+    session.ui.getState().setViewportMode("camera");
     setRuntimeFault(null);
     const nextBudget = pressureBudgetTouched.current
       ? live.current.budget : defaultPressureBudget(id, nextTransport);
@@ -775,7 +898,6 @@ export function AdvanceLab(): React.JSX.Element {
     /* A new scene is a new beginning, and a beginning is still. */
     setPlaying(false);
     live.current.playing = false;
-    setMenu(null);
     /* A new scene is a new cost: the old median priced a different lattice. */
     stepCosts.current = [];
     setStepMs(null);
@@ -788,7 +910,42 @@ export function AdvanceLab(): React.JSX.Element {
       view.current = next; setPublishedView(next); setAuthored(scene);
       setRegionState(authoredRegions(scene, next)); setReadings(read(next));
     }).catch(error => setRuntimeFault(error instanceof Error ? error.message : String(error)));
-  }, [transportExperiment]);
+  }, [transportExperiment, session.ui]);
+
+  /**
+   * The same run from t=0. Only the clock and the water go back: the boxes
+   * drawn on the slice, the pressure budget the reader set, the lens, the
+   * overlays and the surface all stay exactly as they were.
+   *
+   * Regions are finest-cell coordinates of this run's lattice, and a reset
+   * reloads the same document at the same resolution, so the lattice they were
+   * measured against is the one that comes back and they remain valid.
+   */
+  const resetRun = useCallback((): void => {
+    const active = controller.current;
+    if (!active) return;
+    setPinned(null);
+    setHover(null);
+    setAim(null);
+    setSketch(null);
+    session.ui.getState().setViewportMode("camera");
+    setRuntimeFault(null);
+    /* A run put back to its beginning is still, like one just opened. */
+    setPlaying(false);
+    live.current.playing = false;
+    /* The old median priced the frames of a run that no longer exists. */
+    stepCosts.current = [];
+    setStepMs(null);
+    /* The drop readout belongs to a step that has been taken back. */
+    setReadings(AT_REST);
+    void active.resetRun({ pressureIterations: live.current.budget,
+      pressureRelativeTolerance: pressureTolerance(transportExperiment),
+      transportExperiment: transportExperiment === "cellwise-remap"
+        ? CELLWISE_REMAP_OPTION : transportExperiment,
+      production: { dtS: live.current.dt, timeStep: "paper" } }).then(next => {
+      view.current = next; setPublishedView(next); setReadings(read(next));
+    }).catch(error => setRuntimeFault(error instanceof Error ? error.message : String(error)));
+  }, [transportExperiment, session.ui]);
 
   /** Re-time the next advance. The water keeps its state; only the clock moves. */
   const retime = useCallback((next: number): void => {
@@ -841,27 +998,90 @@ export function AdvanceLab(): React.JSX.Element {
   const displayNx = publishedView?.nx ?? 1;
   const displayNy = publishedView?.ny ?? 1;
 
-  /* Taken off the seed rather than the solver: the seed is the run's copy of
-   * the document, so a box drawn a moment ago is in it before the advance that
-   * will obey it has run. */
-  const regions = useMemo(() => regionState.map(region => ({ region, box: {
-    minFine: [region.minimumFine[0], displayNy - region.maximumFine[1]] as const,
-    maxFine: [region.maximumFine[0], displayNy - region.minimumFine[1]] as const,
-  } })), [regionState, displayNy]);
-
   const capacityLeft = ENFORCEMENT_CAPACITY - regionState.length;
-  const menuRegion: LabRegion | undefined = menu?.regionId === undefined
-    ? undefined : regions.find(drawn => drawn.region.id === menu.regionId)?.region;
-  /* Sixteen lenses do not fit a menu, so the list scrolls — and a scrolled list
-   * that opens anywhere but on the lens you are looking at is a list you have
-   * to search. */
-  const scrollIntoMenu = (node: HTMLButtonElement | null): void =>
-    node?.scrollIntoView({ block: "nearest" });
+  /* The lattice the boxes are measured in. Taken off the published view rather
+   * than the solver's own copy: the publication is what the picture was drawn
+   * from, so a box drawn a moment ago is on the same cut as the water it was
+   * drawn over. Region coordinates are lattice cells with y *up*; every box in
+   * this file is canvas cells with y *down*, and `regionBox` is the one place
+   * that flip happens. */
+  const lattice: SliceLattice = { nx: displayNx, ny: displayNy };
+  /* Which box the reader is holding, read back out of the shared selection
+   * rather than kept beside it. The ring's Select wedge, a press on a box and
+   * the Escape ladder all write that one field, so there is no second copy
+   * here that could disagree with what the handles are drawn on. */
+  const selectedRegionId = sliceRegionIdFromSelection(
+    selection?.kind === "refinement-region" ? selection.id : undefined);
+  const selectedRegion = selectedRegionId === undefined ? undefined
+    : regionState.find(region => region.id === selectedRegionId);
+  /* The rubber band, snapped as it will land rather than as the pointer drew
+   * it: showing one rectangle and committing another is the page disagreeing
+   * with itself, and the outward snap is the part a reader has to see to
+   * understand what a box means.
+   *
+   * Read through the armed stroke rather than swept by an effect when the mode
+   * changes. The mode can be left from three places — Tab, Escape, the header's
+   * toggle — and a page that had to be told about each of them would sooner or
+   * later miss one; a draft that only exists while its stroke is armed cannot
+   * be left behind by any of them. */
+  const draftBox: SliceBox | null = drawingRegion && sketch
+    ? draftRegionBox(sketch.anchor, sketch.at, enforceCells, lattice) : null;
 
-  /* Whole pixels per cell, so a grid line lands on one rather than across two. */
-  const scale = Math.max(2, Math.floor(Math.min(
-    room.width / displayNx, room.height / displayNy)));
+  /* The camera, resolved once per render and used by everything that has to
+   * agree with the drawing: the canvas transform, both overlay layers, the
+   * region tags and every pixel-to-cell reading. Clamped here rather than only
+   * where a gesture produces it, so a window resize re-frames the picture
+   * instead of stranding it — and the clamp is idempotent, so this costs the
+   * gestures nothing. */
+  const fit = fitScale(room, displayNx, displayNy);
+  /* The overlays and the canvas are the viewport, so their own frame starts at
+   * its corner: client coordinates and element coordinates coincide. */
+  const roomRect: ViewportRect = { left: 0, top: 0, width: room.width, height: room.height };
+  const framing = `${displayNx}x${displayNy}`;
+  const camera = clampedView(
+    sliceView.framing === framing ? sliceView : fitView(displayNx, displayNy),
+    fit, roomRect, displayNx, displayNy);
+  /* Whole pixels per cell, so a grid line lands on one rather than across two —
+   * but only while a whole number is close to the right one. Below two pixels a
+   * cell, rounding is a 50% error, and the fit view of a large slice lives
+   * there. */
+  const scale = pixelsPerCell(camera, fit);
+  /* Taken apart because the draw effect depends on the two numbers rather than
+   * on the pair: a fresh array every render would repaint the slice on every
+   * keystroke in the sidebar. */
+  const [originX, originY] = originPixels(camera, fit, roomRect);
+  const sliceBox = svgViewBox(camera, fit, roomRect, displayNx, displayNy);
+  /* The selected box's top-right corner in viewport pixels, which is where its
+   * own strip hangs — the 3-D editor anchors an entity's strip off the
+   * projected corner of its bounds, and this is that projection. */
+  const selectedRegionBox = selectedRegion ? regionBox(selectedRegion, displayNy) : null;
+  const selectedRegionCorner = selectedRegionBox
+    ? clientFromCell(camera, fit, roomRect,
+      selectedRegionBox.maxFine[0], selectedRegionBox.minFine[1])
+    : null;
   const dpr = typeof window === "undefined" ? 1 : Math.min(2, window.devicePixelRatio || 1);
+
+  /**
+   * Move the camera, from the view the reader can actually see.
+   *
+   * Every gesture clamps twice, and the first one is the load-bearing half: a
+   * window resized since the last press leaves the *stored* view outside the
+   * bound that render has been quietly correcting, and a pan that started from
+   * that stale value would jump before it moved. Measured against the live
+   * rect rather than `room` so a drag during a resize stays honest.
+   */
+  const steerView = useCallback((rect: ViewportRect,
+    move: (from: SliceView, fitNow: number) => SliceView): void => {
+    const fitNow = fitScale(rect, displayNx, displayNy);
+    const shape = `${displayNx}x${displayNy}`;
+    const legal = (candidate: SliceView): SliceView =>
+      clampedView(candidate, fitNow, rect, displayNx, displayNy);
+    setSliceView(current => ({
+      ...legal(move(legal(current.framing === shape ? current
+        : fitView(displayNx, displayNy)), fitNow)),
+      framing: shape,
+    }));
+  }, [displayNx, displayNy]);
 
   /* The picture is redrawn when the water moves, the lens changes or the room
    * resizes — never when the pointer does, so probing a cell costs nothing. */
@@ -875,9 +1095,18 @@ export function AdvanceLab(): React.JSX.Element {
     const g = target.getContext("2d");
     if (!g) return;
     syncPalette(target);
-    /* Cells are measured in CSS pixels and drawn at device resolution: one
-     * transform here keeps every hairline and label in the lenses honest. */
-    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    /* The bitmap is the viewport now rather than the slice, so what the lenses
+     * clear is no longer the whole of it: anything the picture has been panned
+     * off would otherwise stay painted in the margin. */
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.clearRect(0, 0, target.width, target.height);
+    /* Cells are measured in CSS pixels and drawn at device resolution, and the
+     * camera is carried in the origin rather than in the matrix scale: the
+     * lenses each multiply cells by `scale` themselves, so handing them the
+     * zoomed pixels-per-cell is the whole of the change they need — none.
+     * Keeping the matrix at `dpr` also keeps hairlines and labels at the size
+     * they were written for instead of magnifying them with the water. */
+    g.setTransform(dpr, 0, 0, dpr, dpr * originX, dpr * originY);
     const context = { g, s, lattice: s.lattice, scale };
     /* Derive and consume RDF in one synchronous publication boundary. Keeping
      * it in render-time memo state separated these two reads of the mutable
@@ -904,7 +1133,54 @@ export function AdvanceLab(): React.JSX.Element {
     paintedSharedRdf.current = sharedRdf;
     paintedPresentationRevision.current = readings.presentationRevision;
   }, [publishedView, readings, lens, surfaceView, overlays, scale, dpr, themeTick,
+    originX, originY, room.width, room.height,
     readingCellFill, readingDirectLevelSet, representing, selected]);
+
+  /* A wheel over the water is a zoom, and it has to be taken from a listener
+   * this page owns: React's own `onWheel` is delegated at the root and
+   * registered passive, so the `preventDefault` that stops the page scrolling
+   * under the picture is not available there. */
+  useEffect(() => {
+    const node = viewport.current;
+    if (!node) return;
+    const apply = (): void => {
+      const burst = wheelBurst.current;
+      wheelBurst.current = null;
+      if (!burst) return;
+      const rect = node.getBoundingClientRect();
+      steerView(rect, (from, fitNow) =>
+        zoomedToward(from, fitNow, rect, burst.clientX, burst.clientY, burst.deltaY));
+    };
+    const wheel = (event: WheelEvent): void => {
+      /* The one thing inside the viewport that owns its own wheel: sixteen
+       * lenses do not fit a column, so the edit strip's lens list scrolls, and
+       * swallowing that would leave half the list unreachable. */
+      const over = event.target instanceof Element ? event.target : null;
+      if (over?.closest(".toolstrip")) return;
+      event.preventDefault();
+      /* A wheel that reports lines or pages instead of pixels — Firefox, and
+       * any driver that rounds — would move an exponential-per-pixel zoom by a
+       * third of a percent a notch. Normalised to pixels here rather than by
+       * bending the rate, which is the studio's. */
+      const travel = event.deltaMode === 1 ? event.deltaY * 16
+        : event.deltaMode === 2 ? event.deltaY * node.clientHeight : event.deltaY;
+      const burst = wheelBurst.current;
+      wheelBurst.current = {
+        /* Summed, because the zoom is exponential in wheel travel: applying
+         * one 300 and three 100s about the same point is the same picture. */
+        deltaY: (burst?.deltaY ?? 0) + travel,
+        clientX: event.clientX, clientY: event.clientY,
+        frame: burst?.frame ?? requestAnimationFrame(apply),
+      };
+    };
+    node.addEventListener("wheel", wheel, { passive: false });
+    return () => {
+      node.removeEventListener("wheel", wheel);
+      const pending = wheelBurst.current;
+      wheelBurst.current = null;
+      if (pending) cancelAnimationFrame(pending.frame);
+    };
+  }, [steerView]);
 
   const model = useMemo(() => advanceWorkModel({
     scene: readings.work,
@@ -946,12 +1222,32 @@ export function AdvanceLab(): React.JSX.Element {
     if (step === 1) setStep(null);
   };
 
-  const probeAt = (target: HTMLCanvasElement, clientX: number, clientY: number): Probe | null => {
+  /**
+   * The cell under a client point, through the same camera the canvas drew
+   * with — measured off the live rect rather than off `room`, so a probe taken
+   * during a resize reads the box the pointer is actually over.
+   */
+  const aimIn = (target: Element, clientX: number, clientY: number):
+  readonly [number, number] | null => {
     const s = view.current;
     if (!s) return null;
     const box = target.getBoundingClientRect();
-    const fx = Math.floor(((clientX - box.left) / box.width) * s.nx);
-    const fy = Math.floor(((clientY - box.top) / box.height) * s.ny);
+    return cellFromClient(camera, fitScale(box, s.nx, s.ny), box, clientX, clientY);
+  };
+
+  /**
+   * What a cell carries, asked of the cell rather than of a pointer.
+   *
+   * Split out because the ring is answered *after* the press that opened it:
+   * Inspect cell carries the point the right-click landed on in its own effect
+   * and asks for it when it is chosen, by which time the pointer is over a
+   * wedge and not over the water.
+   */
+  const probeCell = (at: readonly [number, number]): Probe | null => {
+    const s = view.current;
+    if (!s) return null;
+    const fx = Math.floor(at[0]), fy = Math.floor(at[1]);
+    if (fx < 0 || fy < 0 || fx >= s.nx || fy >= s.ny) return null;
     const cell = advanceCellAt(s.lattice, s, fx, fy);
     if (!cell || !cell.open) return null;
     const left = fx > 0 ? s.capacityFine[advanceCell(s, fx - 1, fy)]! : 0;
@@ -965,6 +1261,11 @@ export function AdvanceLab(): React.JSX.Element {
         + Math.floor(fx / ADVANCE_BRICK_FINE)]!,
       material: s.materialFine[advanceCell(s, fx, fy)]!,
     };
+  };
+
+  const probeAt = (target: HTMLCanvasElement, clientX: number, clientY: number): Probe | null => {
+    const at = aimIn(target, clientX, clientY);
+    return at ? probeCell(at) : null;
   };
 
   const cellRows = (p: Probe): readonly (readonly [string, string, string])[] => [
@@ -1009,15 +1310,16 @@ export function AdvanceLab(): React.JSX.Element {
   const hoverMarks = hover && publishedView
     ? marksAt(publishedView, hover.probe.fx, hover.probe.fy) : [];
 
-  /** Where the pointer is, in canvas fine cells — continuous, not a cell index. */
+  /** Where the pointer is, in canvas fine cells — continuous, not a cell index.
+   *  Deliberately unbounded: a captured drag that leaves the slice keeps
+   *  rubber-banding, and the ladder snaps the result back inside. */
   const aimAt = (target: HTMLCanvasElement, clientX: number, clientY: number):
-  readonly [number, number] | null => {
-    const s = view.current;
-    if (!s) return null;
-    const box = target.getBoundingClientRect();
-    return [((clientX - box.left) / box.width) * s.nx,
-      ((clientY - box.top) / box.height) * s.ny];
-  };
+  readonly [number, number] | null => aimIn(target, clientX, clientY);
+
+  /** Whether a press landed on the water at all — the canvas is now the whole
+   *  viewport, so "on the paper" is a question about the slice, not the box. */
+  const onSlice = (at: readonly [number, number] | null): boolean =>
+    !!at && at[0] >= 0 && at[1] >= 0 && at[0] < displayNx && at[1] < displayNy;
 
   /**
    * The ball the pointer is proposing, with the pages it would wake.
@@ -1057,7 +1359,7 @@ export function AdvanceLab(): React.JSX.Element {
     }).catch(error => setRuntimeFault(error instanceof Error ? error.message : String(error)));
   };
 
-  const updateRegions = (next: readonly LabRegion[]): void => {
+  const updateRegions = (next: readonly AdvanceRefinementRegion[]): void => {
     const active = controller.current;
     if (!active) return;
     setRegionState(next);
@@ -1069,20 +1371,34 @@ export function AdvanceLab(): React.JSX.Element {
     }).catch(error => setRuntimeFault(error instanceof Error ? error.message : String(error)));
   };
 
-  const drawRegion = (anchor: readonly [number, number], at: readonly [number, number]): void => {
+  /**
+   * Commit the box the rubber band was already drawing.
+   *
+   * The band shows the *snapped* rectangle rather than the raw drag, so this
+   * takes that box rather than the two corners: what the reader let go of is
+   * what lands, and there is no second rounding here to disagree with it.
+   *
+   * Then the 3-D editor's release contract, in its order — commit, disarm,
+   * select — which is what puts the new box's handles and its own strip under
+   * the pointer that just drew it instead of leaving the stroke armed over a
+   * region nobody can yet reshape.
+   */
+  const drawRegion = (box: SliceBox): void => {
     const s = view.current;
-    if (!s || capacityLeft <= 0) return;
-    const lowX = Math.max(0, Math.floor(Math.min(anchor[0], at[0]) / enforceCells) * enforceCells);
-    const highX = Math.min(s.nx, Math.ceil(Math.max(anchor[0], at[0]) / enforceCells) * enforceCells);
-    const canvasLowY = Math.max(0, Math.floor(Math.min(anchor[1], at[1]) / enforceCells) * enforceCells);
-    const canvasHighY = Math.min(s.ny, Math.ceil(Math.max(anchor[1], at[1]) / enforceCells) * enforceCells);
-    updateRegions([...regionState, { id: `advance-region-${++nextRegionId.current}`,
-      minimumFine: [lowX, s.ny - canvasHighY], maximumFine: [highX, s.ny - canvasLowY],
+    if (!s || capacityLeft <= 0 || !regionBoxIsDrawn(box)) return;
+    const id = `advance-region-${++nextRegionId.current}`;
+    updateRegions([...regionState, { id,
+      minimumFine: [box.minFine[0], s.ny - box.maxFine[1]],
+      maximumFine: [box.maxFine[0], s.ny - box.minFine[1]],
       minimumCellWidth: enforceCells,
       ...(holdAtOneTier ? { maximumCellWidth: enforceCells } : {}) }]);
+    const ui = session.ui.getState();
+    ui.setArmedGesture(undefined);
+    ui.select({ kind: "refinement-region", id: sliceRegionSelectionId(id) });
+    ui.setSelectionControlsOpen(true);
   };
 
-  const amendRegion = (region: LabRegion, next: LabRegion | undefined): void => {
+  const amendRegion = (region: AdvanceRefinementRegion, next: AdvanceRefinementRegion | undefined): void => {
     updateRegions(next ? regionState.map(value => value.id === region.id ? next : value)
       : regionState.filter(value => value.id !== region.id));
   };
@@ -1104,6 +1420,93 @@ export function AdvanceLab(): React.JSX.Element {
     setPinned(probe);
     setFolds(current => new Set(current).add("cell"));
   };
+
+  /**
+   * The pressure budget, applied to the world as well as held in the page.
+   *
+   * An instrument that did not reach the solver would be a number the reader
+   * watched change nothing. `pressureBudgetTouched` latches here because a
+   * reader who has chosen a budget means it to survive a scene change, where an
+   * untouched one still takes the new scene's default.
+   */
+  const applyBudget = (iterations: number): void => {
+    pressureBudgetTouched.current = true;
+    setBudget(iterations);
+    const active = controller.current;
+    if (!active) return;
+    void active.setPressureBudget(iterations, pressureTolerance(transportExperiment))
+      .then(next => {
+        view.current = next;
+        setPublishedView(next);
+        setReadings(read(next));
+        setRuntimeFault(null);
+      })
+      .catch(error => setRuntimeFault(error instanceof Error ? error.message : String(error)));
+  };
+
+  /** `0`: frame the whole slice, measured off the live world rather than off
+   *  the last render, so a refit after a scene change frames the new lattice. */
+  const refit = useCallback((): void => {
+    const s = view.current;
+    if (!s) return;
+    setSliceView({ ...fitView(s.nx, s.ny), framing: `${s.nx}x${s.ny}` });
+  }, []);
+
+  /* Whatever a stroke had in flight. Put down by Tab and by every rung of the
+   * Escape ladder: a proposed ball or a rubber band left drawn under a mode
+   * that has been left is a picture of a gesture nobody is making. */
+  const clearDrafts = useCallback((): void => {
+    dragging.current = null;
+    setAim(null);
+    setSketch(null);
+  }, []);
+
+  const removeRegion = (regionId: string): void => {
+    const region = regionState.find(value => value.id === regionId);
+    if (region) amendRegion(region, undefined);
+  };
+
+  /* A selection outlives nothing: a run change empties the boxes, and a
+   * selection still naming one would draw handles on a region that is gone. */
+  useEffect(() => {
+    if (selectedRegionId !== undefined && selectedRegion === undefined) {
+      session.ui.getState().select(undefined);
+    }
+  }, [selectedRegionId, selectedRegion, session.ui]);
+
+  useSliceShortcuts(session, {
+    refit,
+    toggleOverlay,
+    overlayOffered,
+    clearDrafts,
+    /* Delete acts on the selection, and says whether it found one: the key
+     * belongs to the browser again when nothing is selected. */
+    removeSelectedRegion: () => {
+      if (!selectedRegion) return false;
+      removeRegion(selectedRegion.id);
+      session.ui.getState().select(undefined);
+      return true;
+    },
+  });
+
+  /**
+   * The ring's performer.
+   *
+   * Built fresh each render rather than memoized: every verb closes over this
+   * render's controller handle, this render's regions and this render's
+   * camera, and a performer held over from an older one would drop a ball into
+   * a world that has since been replaced. It is five closures and an object.
+   */
+  const perform = (effect: EditorActionEffect, chosen: PaneSession): void =>
+    sliceActionPerformer({
+      dropBall: at => commitDrop(at, defaultDropRadius(displayNx, displayNy)),
+      pinCell: at => { const probe = probeCell(at); if (probe) pin(probe); },
+      /* The direct level set is published rather than reconstructed, so it is
+       * never one of the choices — the wedge states it and offers no effect. */
+      setSurfaceView: next => { if (next !== "direct-level-set") setSurfaceView(next); },
+      toggleOverlay,
+      removeRegion,
+    })(effect, chosen);
 
   const failureRows: readonly (readonly [string, string, string])[] = readings.fault ? [
     ["stage", readings.fault.stage, "the numerical gate that refused the frame"],
@@ -1142,7 +1545,7 @@ export function AdvanceLab(): React.JSX.Element {
             currentId={sceneId}
             label="Choose the production scene this lab slices"
             choose={card => {
-              reseed(card.id, transportExperiment);
+              chooseRun(card.id, transportExperiment);
               setPicking(false);
             }}
             close={() => setPicking(false)} />}
@@ -1182,22 +1585,29 @@ export function AdvanceLab(): React.JSX.Element {
             setRuntimeFault(error instanceof Error ? error.message : String(error));
           }).finally(() => { advanceBusy.current = false; });
         }}>Step</button>
-        <button type="button" onClick={() => reseed(sceneId)}>Reset</button>
+        <button type="button"
+          title="Put the water back to t=0. The enforcement regions drawn on it stay."
+          onClick={resetRun}>Reset</button>
       </div>
 
       <div className={`${styles.side} ${styles.trailing}`}>
         <label className={`${styles.iters} ${styles.experiment}`} htmlFor="advance-transport">Transport
           <select id="advance-transport" data-testid="advance-transport"
             value={transportExperiment}
-            title="Select the volume transport used by the next run. Changing it resets the scene."
+            title="Select the volume transport. Changing it starts a new run from the scene, and from the scene's own enforcement regions rather than the drawn ones."
             onChange={event => {
               const next = event.target.value as AdvanceTransportExperiment;
               setTransportExperiment(next);
-              reseed(sceneId, next);
+              chooseRun(sceneId, next);
             }}>
-            <option value="baseline">Baseline</option>
-            <option value="cellwise-remap">Geometric remap</option>
-            <option value="level-set-volume">Level set + volume</option>
+            {/* The arms, their names and what each one does are declared
+                beside the method; this is that roster read out, so adding an
+                arm there adds it here. It stays in the header rather than
+                moving to the edit strip because choosing one starts a new
+                *run* — it is not an instrument on the water in front of you. */}
+            {ADVANCE_TRANSPORT_EXPERIMENT_ORDER.map(id =>
+              <option key={id} value={id} title={ADVANCE_TRANSPORT_EXPERIMENTS[id].hint}>
+                {ADVANCE_TRANSPORT_EXPERIMENTS[id].label}</option>)}
           </select>
         </label>
         <label className={styles.iters} htmlFor="advance-step">Δt
@@ -1215,6 +1625,10 @@ export function AdvanceLab(): React.JSX.Element {
           title={`Wall-clock cost of one advance on this machine, the median of the last ${STEP_COST_SAMPLES}. It prices the whole step at the current solve budget — not the physics, and not the work model's counts.`}>
           step<b className={styles.cost}>{stepMs === null ? "—" : `${stepMs.toFixed(1)} ms`}</b>
         </span>
+        {/* First the answer to "why did my click do nothing", then the
+            theme. Unmodified from the studio: it reads the session this page
+            provides, and knows nothing about which pane it is bound to. */}
+        <ViewportModeToggle />
         <span className={styles.themeSlot}><ThemeSwitch /></span>
       </div>
     </header>
@@ -1223,46 +1637,74 @@ export function AdvanceLab(): React.JSX.Element {
       <section className={styles.stage} aria-label="Advance viewer">
         <div className={styles.viewport} ref={viewport}
           onContextMenu={event => {
-            /* The settings belong to the picture, so the picture is where they
-               open. The browser's own menu has nothing to offer over a canvas
-               and would cover the water instead. */
+            /* Every capability this page has is a right-click on the thing it
+               acts on, which is why there is no menu bar over the water. The
+               browser's own menu has nothing to offer over a canvas and would
+               cover the subject instead. */
             event.preventDefault();
-            const host = viewport.current?.getBoundingClientRect();
-            if (!host) return;
-            /* Where the press landed on the water, taken now: the panel is
-               placed away from the pointer to stay on screen, so by the time
-               Drop is chosen the menu's own corner is no longer the point the
-               reader meant. A press on the letterbox has no point, and the
-               menu then offers the settings without the verb. */
-            const paper = canvas.current?.getBoundingClientRect();
-            const inside = !!paper && event.clientX >= paper.left
-              && event.clientX <= paper.right && event.clientY >= paper.top
-              && event.clientY <= paper.bottom;
-            const at = inside && canvas.current
+            const over = event.target instanceof Element ? event.target : null;
+            /* The edit strip is chrome laid over the picture, not the picture:
+               a press on a row is about that row. */
+            if (over?.closest(".toolstrip")) return;
+            /* Where the press landed on the water, taken now: the ring is
+               drawn around the pointer, so by the time a wedge is chosen the
+               point the reader meant is under the wedge rather than under the
+               cursor. A press off the slice has no point at all, and the
+               wedges that need one are offered disabled rather than withheld,
+               so the ring's shape does not change under the reader. */
+            const aimed = canvas.current
               ? aimAt(canvas.current, event.clientX, event.clientY) : null;
+            const at = onSlice(aimed) ? aimed : null;
             setHover(null);
-            setMenu({
-              x: Math.min(host.width - MENU_WIDTH - 8,
-                Math.max(8, event.clientX - host.left + 2)),
-              y: Math.min(host.height - MENU_HEIGHT - 8,
-                Math.max(8, event.clientY - host.top + 2)),
+            const context: SliceRingContext = {
+              mode: viewportMode,
               at,
-              /* What the press was *on*, which is what makes the enforcement
-                 half of this menu about one box rather than about a list. */
-              regionId: at ? regions.find(({ box }) => at[0] >= box.minFine[0]
-                && at[0] <= box.maxFine[0] && at[1] >= box.minFine[1]
-                && at[1] <= box.maxFine[1])?.region.id : undefined,
+              /* What the press was *on*, which is what makes the region half
+                 of this ring about one box rather than about a list. */
+              regionId: regionAt(regionState, displayNy, at)?.id,
+              surfaceView: readingDirectLevelSet ? "direct-level-set" : surfaceView,
+              surfaceImposed: readingDirectLevelSet,
+              overlays,
+              overlaysOffered: SLICE_OVERLAY_ORDER.filter(overlayOffered),
+              capacityLeft,
+            };
+            /* Client pixels, the studio's convention: the ring draws itself in
+               a fixed layer over the whole window rather than inside this box. */
+            session.ui.getState().openRadialMenu({
+              x: event.clientX, y: event.clientY,
+              title: sliceRingTitle(context),
+              actions: sliceActionsAt(context),
             });
           }}>
-          <canvas ref={canvas} className={styles.canvas} role="img"
-            width={Math.round(displayNx * scale * dpr)}
-            height={Math.round(displayNy * scale * dpr)}
-            style={{ width: displayNx * scale, height: displayNy * scale }}
+          {/* The bitmap is the room, not the slice: the picture is placed
+              inside it by the camera's origin. Sizing it to the water instead
+              meant a zoom multiplied the bitmap — 4x on a 512-cell slice is
+              half a gigabyte of canvas — and it is what put the letterbox
+              there, since a picture that cannot move can only be centred. */}
+          <canvas ref={canvas} role="img"
+            className={`${styles.canvas} ${grabbing ? styles.grabbing
+              : grabReady && !stroking ? styles.grab : ""}`}
+            width={Math.round(room.width * dpr)}
+            height={Math.round(room.height * dpr)}
+            style={{ width: room.width, height: room.height }}
             aria-label={`${representing ? "The state entering the advance" : declaration.label} for ${authored?.label ?? "the selected production scene"} on its ${displayNx} by ${displayNy} centre-Z slice at frame ${readings.frame}`}
             onPointerDown={event => {
-              if (!tool || event.button !== 0) return;
+              /* Navigation is claimed before any tool, exactly as the editor's
+               * gesture chain claims PAN on `shift || middleButton` ahead of
+               * the verb under the pointer. A reader who asks to move the page
+               * is asking to move the page. */
+              if (event.button === 1 || (event.button === 0 && event.shiftKey)) {
+                event.preventDefault();
+                event.currentTarget.setPointerCapture(event.pointerId);
+                panning.current = { pointer: event.pointerId,
+                  clientX: event.clientX, clientY: event.clientY };
+                setGrabbing(true);
+                setHover(null);
+                return;
+              }
+              if (!stroking || event.button !== 0) return;
               const at = aimAt(event.currentTarget, event.clientX, event.clientY);
-              if (!at) return;
+              if (!onSlice(at) || !at) return;
               /* The ball is complete before the pointer moves, so a plain click
                * is a whole gesture and a drag is the same gesture continued —
                * the studio's contract, and the reason arming is not a two-click
@@ -1270,21 +1712,34 @@ export function AdvanceLab(): React.JSX.Element {
                * the one gesture here that the drag is required for. */
               event.currentTarget.setPointerCapture(event.pointerId);
               dragging.current = { pointer: event.pointerId, anchor: at, moved: false };
-              if (tool === "region") setSketch({ anchor: at, at });
+              if (drawingRegion) setSketch({ anchor: at, at });
               else setAim(proposeAim(at, defaultDropRadius(displayNx, displayNy)));
             }}
             onPointerMove={event => {
+              const drag = panning.current;
+              if (drag && drag.pointer === event.pointerId) {
+                /* While the page is being moved, nothing is being read on it:
+                 * a probe or an aim taken mid-pan describes the cell the water
+                 * happened to slide under, which is not a question anyone
+                 * asked. The rect is the live one, so a pan during a resize is
+                 * still measured in the cells on screen. */
+                const dx = event.clientX - drag.clientX, dy = event.clientY - drag.clientY;
+                drag.clientX = event.clientX; drag.clientY = event.clientY;
+                steerView(event.currentTarget.getBoundingClientRect(),
+                  (from, fitNow) => panned(from, fitNow, dx, dy));
+                return;
+              }
               const probe = probeAt(event.currentTarget, event.clientX, event.clientY);
               const host = viewport.current?.getBoundingClientRect();
               setHover(probe && host ? {
                 probe, px: event.clientX - host.left, py: event.clientY - host.top,
                 width: host.width, height: host.height,
               } : null);
-              if (!tool) return;
+              if (!stroking) return;
               const at = aimAt(event.currentTarget, event.clientX, event.clientY);
               if (!at) return;
               const active = dragging.current;
-              if (tool === "region") {
+              if (drawingRegion) {
                 if (active) setSketch({ anchor: active.anchor, at });
                 return;
               }
@@ -1298,17 +1753,24 @@ export function AdvanceLab(): React.JSX.Element {
                 : defaultDropRadius(displayNx, displayNy)));
             }}
             onPointerUp={event => {
+              const drag = panning.current;
+              if (drag && drag.pointer === event.pointerId) {
+                panning.current = null;
+                setGrabbing(false);
+                return;
+              }
               const active = dragging.current;
               if (!active || active.pointer !== event.pointerId) return;
               dragging.current = null;
               const at = aimAt(event.currentTarget, event.clientX, event.clientY);
-              if (tool === "region") {
+              if (drawingRegion) {
                 setSketch(null);
-                /* A press with no drag drew no box. Snapping a point outward
-                 * would still make a legal region, but not the one the reader
-                 * asked for. */
-                if (at && Math.max(Math.abs(at[0] - active.anchor[0]),
-                  Math.abs(at[1] - active.anchor[1])) > 0.5) drawRegion(active.anchor, at);
+                /* The band the reader was watching, committed as it stood: the
+                 * same snap, off the same anchor, so nothing rounds twice. A
+                 * press with no drag draws an empty box, and `drawRegion`
+                 * declines it — snapping a point outward would still make a
+                 * legal region, but not the one anybody asked for. */
+                if (at) drawRegion(draftRegionBox(active.anchor, at, enforceCells, lattice));
                 return;
               }
               const reach = at
@@ -1321,15 +1783,42 @@ export function AdvanceLab(): React.JSX.Element {
                * should not charge. */
               setAim(at ? proposeAim(at, defaultDropRadius(displayNx, displayNy)) : null);
             }}
-            onPointerCancel={() => { dragging.current = null; setAim(null); setSketch(null); }}
+            onPointerCancel={() => {
+              dragging.current = null; panning.current = null;
+              setGrabbing(false); setAim(null); setSketch(null);
+            }}
             onPointerLeave={() => {
               setHover(null);
-              if (!dragging.current) { setAim(null); setSketch(null); }
+              if (!dragging.current && !panning.current) { setAim(null); setSketch(null); }
             }}
+            /* The middle button's own click, which Chrome would otherwise turn
+               into autoscroll over a picture that has just been panned. */
+            onAuxClick={event => event.preventDefault()}
             onClick={event => {
-              /* Armed, the click belongs to the tool. The probe under the
-               * pointer keeps reading either way; only pinning steps aside. */
-              if (tool) return;
+              /* Armed, the click belongs to the stroke; held with shift it
+               * belonged to the pan, and a pan does not pin a cell. The probe
+               * under the pointer keeps reading either way; only the click
+               * steps aside. */
+              if (stroking || event.shiftKey) return;
+              if (editing) {
+                /* In EDIT a press is about a thing: on a box it selects that
+                 * box — raising its handles and its own strip — and anywhere
+                 * else it puts the selection down, so the handles never stay
+                 * up over water the reader has moved on from. A selected box's
+                 * own interior never reaches here: it is the move, and the
+                 * overlay claims it. */
+                const at = aimAt(event.currentTarget, event.clientX, event.clientY);
+                const region = onSlice(at)
+                  ? regionAt(regionState, displayNy, at) : undefined;
+                const ui = session.ui.getState();
+                if (region) {
+                  ui.select({ kind: "refinement-region",
+                    id: sliceRegionSelectionId(region.id) });
+                  ui.setSelectionControlsOpen(true);
+                  return;
+                }
+                ui.select(undefined);
+              }
               const probe = probeAt(event.currentTarget, event.clientX, event.clientY);
               if (probe) pin(probe);
             }} />
@@ -1337,12 +1826,12 @@ export function AdvanceLab(): React.JSX.Element {
           {/* The ball the pointer is proposing, and the pages it would wake.
               An overlay rather than a lens: the canvas is repainted only when
               the water moves, and a cursor painted into it would cost a full
-              lattice publication for every mouse pixel. The viewBox is the
-              lattice, so this is drawn in finest cells with no scale
-              arithmetic of its own to get wrong. */}
-          {aim && <svg className={styles.aim} aria-hidden="true"
-            viewBox={`0 0 ${displayNx} ${displayNy}`}
-            style={{ width: displayNx * scale, height: displayNy * scale }}>
+              lattice publication for every mouse pixel. The layer is the whole
+              viewport and its viewBox is that viewport expressed in cells, so
+              this is still drawn in finest cells — the camera is the box, and
+              there is no scale arithmetic here to get out of step with the
+              canvas. */}
+          {droppingBall && aim && <svg className={styles.aim} aria-hidden="true" viewBox={sliceBox}>
             {aim.demanded.map(([x, y, span]) =>
               <rect key={`${x}:${y}`} x={x} y={y} width={span} height={span}
                 className={styles.aimBrick} vectorEffect="non-scaling-stroke" />)}
@@ -1350,52 +1839,45 @@ export function AdvanceLab(): React.JSX.Element {
               className={styles.aimBall} vectorEffect="non-scaling-stroke" />
           </svg>}
 
-          {/* The boxes this cut stands under, and the one being drawn.
-              Always on: an enforcement region is a standing instruction to the
-              topology, and a reader looking at a brick held at one rung has to
-              be able to see what is holding it. Drawn in the same lattice
+          {/* The boxes this cut stands under, the one being drawn, and — when
+              one is selected — its handles and the tag that says what it holds.
+              Dimmed rather than hidden at rest: the 3-D editor withholds
+              regions unless the stroke is armed or one is selected, because
+              nothing in that frame *is* a region, while this lab is an
+              instrument about resolution and what is holding a brick at a rung
+              is the reading the reader came for. Drawn in the same lattice
               units as the aim overlay, over every lens. */}
-          {(regions.length > 0 || sketch) && <svg className={styles.aim} aria-hidden="true"
-            viewBox={`0 0 ${displayNx} ${displayNy}`}
-            style={{ width: displayNx * scale, height: displayNy * scale }}>
-            {regions.map(({ region, box }) =>
-              <rect key={region.id} className={styles.regionBox}
-                x={box.minFine[0]} y={box.minFine[1]}
-                width={Math.max(0, box.maxFine[0] - box.minFine[0])}
-                height={Math.max(0, box.maxFine[1] - box.minFine[1])}
-                vectorEffect="non-scaling-stroke" />)}
-            {sketch && <rect className={styles.regionDraw}
-              x={Math.min(sketch.anchor[0], sketch.at[0])}
-              y={Math.min(sketch.anchor[1], sketch.at[1])}
-              width={Math.abs(sketch.at[0] - sketch.anchor[0])}
-              height={Math.abs(sketch.at[1] - sketch.anchor[1])}
-              vectorEffect="non-scaling-stroke" />}
-          </svg>}
-
-          {/* What each box enforces, in the lattice's own words, pinned to its
-              corner — a box that did not say what it holds would be a
-              rectangle with no meaning. The layer is placed exactly as the
-              canvas is, so a tag can be positioned in the same cells the box
-              is drawn in. */}
-          {regions.length > 0 && <div className={`${styles.aim} ${styles.tags}`}
-            aria-hidden="true"
-            style={{ width: displayNx * scale, height: displayNy * scale }}>
-            {regions.map(({ region, box }) =>
-              <span key={region.id} className={styles.regionTag} style={{
-                left: box.minFine[0] * scale, top: box.minFine[1] * scale,
-              }}>{region.maximumCellWidth === region.minimumCellWidth
-                  ? `held at ${region.minimumCellWidth}`
-                  : `≥ ${region.minimumCellWidth} cell${region.minimumCellWidth === 1 ? "" : "s"}`}
-              </span>)}
-          </div>}
+          <SliceRegions
+            regions={regionState}
+            lattice={lattice}
+            viewBox={sliceBox}
+            scale={scale}
+            draft={draftBox}
+            selectedId={selectedRegion?.id}
+            attentive={drawingRegion || selectedRegion !== undefined}
+            /* An armed stroke claims the press, exactly as the studio's gesture
+               chain does: while one is armed the boxes take no pointer at all,
+               so a new region drawn over a selected one draws rather than
+               grabbing the box underneath it. */
+            editing={editing && !stroking}
+            pixelAt={(x, y) => clientFromCell(camera, fit, roomRect, x, y)}
+            cellAt={(clientX, clientY) => canvas.current
+              ? aimAt(canvas.current, clientX, clientY) : null}
+            onSelect={id => {
+              const ui = session.ui.getState();
+              ui.select({ kind: "refinement-region", id: sliceRegionSelectionId(id) });
+              ui.setSelectionControlsOpen(true);
+            }}
+            onCommit={next => amendRegion(next, next)} />
 
           {/* Nothing names the stage over the water: the sidebar says which lens
               this is and what it draws, and a caption pinned to the corner of
               the picture sits on top of the one thing the page is for. Only a
               slice with no liquid in it earns an overlay, because then there is
               no picture for it to cover. */}
-          {(emptySlice || tool || readings.fault || levelSetCapability) &&
-            <div className={`${styles.hud} ${styles.hudTop}`}>
+          {(emptySlice || stroking || readings.fault || levelSetCapability) &&
+            <div className={`${styles.hud} ${styles.hudTop}`}
+              data-strip={editing ? "" : undefined}>
             {emptySlice && <div className={styles.alarm}>
               This authored centre slice contains no initial liquid.</div>}
             {readings.fault && <div className={`${styles.alarm} ${styles.rejected}`}>
@@ -1408,19 +1890,18 @@ export function AdvanceLab(): React.JSX.Element {
             </div>}
             {levelSetCapability && <div className={`${styles.alarm} ${styles.rejected}`}>
               {levelSetCapability} Choose another transport or scene to advance.</div>}
-            {/* Both tools are modes and neither has a button: without a
-                pressed control somewhere a reader has only the shape under the
-                pointer to tell them what the next press will do, and that
-                disappears the moment the pointer leaves the picture. */}
-            {tool === "drop" && <div className={styles.caption}>
+            {/* An armed stroke says so on the picture as well as on its row:
+                the row is at the corner and the water is where the hand is, and
+                what the next press will do is a fact about the water. */}
+            {droppingBall && <div className={styles.caption}>
               Dropping water — click to place a ball, drag out to size it.
-              {" "}<b>Esc</b> or <b>{DROP_KEY}</b> to stop.</div>}
-            {tool === "region" && <div className={styles.caption}>
+              {" "}<b>Esc</b> or <b>{getEditorGesture("fluid-ball").shortcut}</b> to stop.</div>}
+            {drawingRegion && <div className={styles.caption}>
               Drawing an enforcement region — drag a box over the water. It will
               snap out to whole {enforceCells}-cell leaves and, from the next step,
               hold the bricks it contains{holdAtOneTier
                 ? " at exactly that size" : " no coarser than that"}.
-              {" "}<b>Esc</b> or <b>{REGION_KEY}</b> to stop.</div>}
+              {" "}<b>Esc</b> or <b>{getEditorGesture("region-draw").shortcut}</b> to stop.</div>}
           </div>}
 
           <div className={`${styles.hud} ${styles.hudRight}`}>
@@ -1447,15 +1928,19 @@ export function AdvanceLab(): React.JSX.Element {
                 redistancing <b>active · {n(readings.levelSetVolume.redistancedSamples)} samples ·
                   {" "}{n(readings.levelSetVolume.redistanceFallbackSamples)} fallbacks</b>
               </span>}
+              {/* How many boxes are standing over this cut. A count and not a
+                  list: the picture already draws them, and the one being asked
+                  about is the one under the pointer. */}
+              {regionState.length > 0 && <span className={styles.read}>
+                enforced <b>{regionState.length} region
+                  {regionState.length === 1 ? "" : "s"}</b></span>}
               {/* Which line the picture is drawing, and — since the choice is
-                  now a right-click rather than a widget — where to change it.
-                  The one readout that takes the pointer, so it can say so. */}
-              {regions.length > 0 && <span className={styles.read}>
-                enforced <b>{regions.length} region{regions.length === 1 ? "" : "s"}</b></span>}
+                  contextual now rather than a widget in a bar — where to change
+                  it. The one readout that takes the pointer, so it says so. */}
               <span className={`${styles.read} ${styles.hint}`}
                 title={readingDirectLevelSet
-                  ? "Right-click the water to drop a ball there, draw an enforcement region or change the solve budget. The direct level-set surface is fixed for this method."
-                  : "Right-click the water to drop a ball there, draw an enforcement region, or choose the surface reconstruction and the solve budget."}>
+                  ? "The direct level set publishes its own surface, so this method reconstructs nothing to choose between. Tab for the edit strip; right-click the water for what it can do."
+                  : "Right-click the water and open Visuals to change the reconstruction, or press Tab and use the SURFACE row on the edit strip."}>
                 surface <b>{readingDirectLevelSet ? "Direct level set"
                   : SURFACE_VIEWS.find(view => view.id === surfaceView)?.label}</b></span>
               {/* The drift denominator moved, so say so beside it — otherwise
@@ -1467,30 +1952,6 @@ export function AdvanceLab(): React.JSX.Element {
               {runtimeFault && <span className={`${styles.read} ${styles.faulted}`}>
                 exception <b>{runtimeFault}</b></span>}
             </div>
-          </div>
-
-          {/* Two switches, and no legend beside them.
-              Volume fraction and the interface normal are not stages, so they
-              cannot be lenses; they are what every cell carries at every stage,
-              and they compose over whichever lens is up. That makes them
-              annotations on the picture, which is where their control belongs.
-              What used to sit beside them was a standing list of every mark the
-              lens could make — a reading nobody can use without matching a
-              colour by eye against a cell a few pixels wide. The probe answers
-              that per cell now, so the list is gone and only the switches,
-              which are not a reading at all, stay on the picture. */}
-          <div className={`${styles.hud} ${styles.hudFoot}`}>
-            {SLICE_OVERLAY_ORDER.filter(id => !(readingDirectLevelSet && id === "normal")).map(id => {
-              const overlay = SLICE_OVERLAYS[id], on = overlays.has(id);
-              return <button type="button" key={id} aria-pressed={on}
-                className={`${styles.key} ${styles.keyToggle}`}
-                title={`${overlay.hint} (${OVERLAY_KEYS[id]})`}
-                onClick={() => toggleOverlay(id)}>
-                <i style={{
-                  background: paletteVar(overlay.keys[0]!.tone),
-                  opacity: on ? 1 : 0.3,
-                }} />{overlay.label}</button>;
-            })}
           </div>
 
           {hover && <div className={styles.probe} style={{
@@ -1524,165 +1985,53 @@ export function AdvanceLab(): React.JSX.Element {
             </div>}
           </div>}
 
-          {/* What shapes the solve, on the thing it shapes. Neither of these is
-              touched more than once a sitting, and both are about the water
-              under the pointer rather than about the page, which is why they
-              are a right-click on the picture and not two more widgets in a
-              bar a reader reads every minute. */}
-          {menu && <div className={styles.menu} ref={menuPanel}
-            style={{ left: menu.x, top: menu.y }}
-            role="dialog" aria-label="Water, surface and solve settings">
-            {/* The verb comes first because it is the one thing here that
-                happens *at* the press: the ball lands where the reader
-                right-clicked, and the mode it leaves behind is only so that
-                the second and third ball cost one click each. */}
-            <div className={styles.menuGroup}>
-              <button type="button" className={styles.menuItem}
-                aria-pressed={tool === "drop" && !menu.at}
-                onClick={() => {
-                  if (menu.at) commitDrop(menu.at, defaultDropRadius(displayNx, displayNy));
-                  /* Armed either way: with a point this is "and another one
-                   * like it", and without one it is the mode by itself. */
-                  setTool("drop");
-                  setMenu(null);
-                }}>
-                <b>{menu.at ? "Drop a ball here" : "Drop water"}</b>
-                <em>{menu.at
-                  ? `lands now · click or drag out for more · ${DROP_KEY} · Esc`
-                  : `click the water to place one, drag out to size it · ${DROP_KEY}`}</em></button>
-              {tool && <button type="button" className={styles.menuItem}
-                onClick={() => { setTool(null); setAim(null); setSketch(null); setMenu(null); }}>
-                <b>{tool === "drop" ? "Stop dropping" : "Stop drawing"}</b>
-                <em>let the pointer go back to reading cells</em></button>}
-            </div>
+          {/* The instruments, only in EDIT.
 
-            {/* Which lens is over the water.
-                The strip along the bottom is the same choice laid out as the
-                loop, with its costs; this is that choice where the pointer
-                already is, for a reader who is looking at the picture rather
-                than at the anatomy of the advance. One list, in the order the
-                stages run, with the band each belongs to as its dot — the
-                strip's own colouring, so the two readings of the same set
-                cannot drift apart. */}
-            <div className={styles.menuGroup}>
-              <span className={styles.menuLabel}>Visualization
-                <b>{representing ? "t = 0" : index + 1}</b></span>
-              <div className={styles.menuList}>
-                <button type="button" className={styles.menuPick}
-                  aria-pressed={representing}
-                  ref={representing ? scrollIntoMenu : undefined}
-                  title={REPRESENT_LENS.caption}
-                  onClick={() => { setStep(1); setMenu(null); }}>
-                  <i style={{ background: paletteVar("muted") }} />
-                  The state entering the advance</button>
-                {ADVANCE_STAGE_ORDER.map((stage, i) => {
-                  const at = sparseCM12Stage(stage);
-                  const on = !representing && stage === selected;
-                  return <button type="button" key={stage} className={styles.menuPick}
-                    aria-pressed={on} ref={on ? scrollIntoMenu : undefined}
-                    title={ADVANCE_LENSES[stage].caption}
-                    onClick={() => { select(stage); setMenu(null); }}>
-                    <i style={{ background: paletteVar(BAND_TONE[at.band]) }} />
-                    <em>{i + 1}</em>{at.label}</button>;
-                })}
-              </div>
-            </div>
+              LOOK is deliberately bare — a run opens to be watched, and chrome
+              over the water is exactly what that mode exists to keep off it.
+              Everything on this column is a control found by watching the water
+              answer it, which is the whole of the rule dividing it from the
+              ring: a verb with a location is a right-click, an instrument is a
+              row that stays open under the hand. */}
+          {editing && <SliceToolstrip
+            leftFraction={TOOLSTRIP_LEFT_FRACTION}
+            topFraction={TOOLSTRIP_TOP_FRACTION}
+            lens={representing ? { represent: true } : { represent: false, stage: selected }}
+            chooseLens={choice => {
+              if (choice.represent) { setStep(1); return; }
+              select(choice.stage);
+            }}
+            overlays={overlays}
+            overlayOffered={overlayOffered}
+            toggleOverlay={toggleOverlay}
+            surfaceView={readingDirectLevelSet ? "direct-level-set" : surfaceView}
+            surfaceImposed={readingDirectLevelSet}
+            setSurfaceView={next => { if (next !== "direct-level-set") setSurfaceView(next); }}
+            budget={budget}
+            setBudget={applyBudget}
+            draftCells={enforceCells}
+            setDraftCells={setEnforceCells}
+            draftHeldAtOneTier={holdAtOneTier}
+            setDraftHeldAtOneTier={setHoldAtOneTier}
+            capacityLeft={capacityLeft} />}
 
-            {/* The enforcement box. Contextual in the strongest sense the page
-                has: a press inside a box is about *that* box, and a press on
-                open water is about drawing a new one. Nothing here is a list
-                of every region in the scene — the picture already draws them,
-                and the one under the pointer is the one being asked about. */}
-            <div className={styles.menuGroup}>
-              <span className={styles.menuLabel}>Enforcement
-                <b>{regions.length || ""}</b></span>
-              {menuRegion ? <>
-                <div className={styles.menuLadder} role="group"
-                  aria-label="Smallest pressure cell allowed inside this region">
-                  {ENFORCEMENT_CELL_SIZES.map(size =>
-                    <button type="button" key={size} className={styles.rung}
-                      aria-pressed={menuRegion.minimumCellWidth === size}
-                      title={`Hold fully contained bricks to cells of ${size} finest cell${size === 1 ? "" : "s"}`}
-                      onClick={() => amendRegion(menuRegion, {
-                        ...menuRegion, minimumCellWidth: size,
-                        /* A ceiling that was equal to the floor is a region
-                           held at one tier, and follows the floor. A wider
-                           authored ceiling is kept, only never left below the
-                           floor it now has to be above. */
-                        ...(menuRegion.maximumCellWidth === undefined ? {}
-                          : { maximumCellWidth:
-                            menuRegion.maximumCellWidth === menuRegion.minimumCellWidth
-                              ? size : Math.max(size, menuRegion.maximumCellWidth) }),
-                      })}>{size}</button>)}
-                </div>
-                <button type="button" className={styles.menuItem}
-                  aria-pressed={menuRegion.maximumCellWidth !== undefined}
-                  onClick={() => amendRegion(menuRegion,
-                    menuRegion.maximumCellWidth === undefined
-                      ? { ...menuRegion, maximumCellWidth: menuRegion.minimumCellWidth }
-                      : { ...menuRegion, maximumCellWidth: undefined })}>
-                  <b>Hold at one tier</b>
-                  <em>equal bounds stop contained bricks coarsening as well as refining</em></button>
-                <button type="button" className={styles.menuItem}
-                  onClick={() => { amendRegion(menuRegion, undefined); setMenu(null); }}>
-                  <b>Remove this region</b>
-                  <em>the bricks it held go back to being evidence-driven</em></button>
-              </> : <>
-                <div className={styles.menuLadder} role="group"
-                  aria-label="Smallest pressure cell a drawn region will allow">
-                  {ENFORCEMENT_CELL_SIZES.map(size =>
-                    <button type="button" key={size} className={styles.rung}
-                      aria-pressed={enforceCells === size}
-                      title={`Draw boxes that hold contained bricks to cells of ${size} finest cell${size === 1 ? "" : "s"}`}
-                      onClick={() => setEnforceCells(size)}>{size}</button>)}
-                </div>
-                <button type="button" className={styles.menuItem}
-                  aria-pressed={holdAtOneTier}
-                  onClick={() => setHoldAtOneTier(value => !value)}>
-                  <b>Hold at one tier</b>
-                  <em>a drawn box bounds coarsening as well as refining</em></button>
-                <button type="button" className={styles.menuItem}
-                  aria-pressed={tool === "region"}
-                  disabled={capacityLeft <= 0}
-                  onClick={() => { setTool("region"); setMenu(null); }}>
-                  <b>Draw an enforcement region</b>
-                  <em>{capacityLeft > 0
-                    ? `drag a box over the water · ${REGION_KEY} · ${capacityLeft} left`
-                    : "the document's eight boxes are all drawn"}</em></button>
-              </>}
-            </div>
-            <div className={styles.menuGroup}>
-              <span className={styles.menuLabel}>Surface</span>
-              {readingDirectLevelSet ? <button type="button" className={styles.menuItem}
-                aria-pressed disabled>
-                <b>Direct level set</b><em>the advected phi zero set is the published surface</em>
-              </button> : SURFACE_VIEWS.map(view =>
-                <button type="button" key={view.id} className={styles.menuItem}
-                  aria-pressed={surfaceView === view.id}
-                  onClick={() => { setSurfaceView(view.id); setMenu(null); }}>
-                  <b>{view.label}</b><em>{view.note}</em></button>)}
-            </div>
-            <div className={styles.menuGroup}>
-              {/* The slider stays open under the hand: a budget is found by
-                  watching the water answer, not chosen from a list. */}
-              <label className={styles.menuLabel} htmlFor="advance-budget">
-                Solve iterations<b>{budget}</b></label>
-              <input id="advance-budget" className={styles.menuRange} type="range"
-                min={4} max={256} step={4} value={budget}
-                title="Pressure iterations one advance may spend. Too few and the divergence the picture shows is the solver giving up, not the water."
-                onChange={event => {
-                  const iterations = Number(event.target.value);
-                  pressureBudgetTouched.current = true;
-                  setBudget(iterations);
-                  const active = controller.current;
-                  if (!active) return;
-                  void active.setPressureBudget(iterations,
-                    pressureTolerance(transportExperiment)).then(next => {
-                    view.current = next; setPublishedView(next); setReadings(read(next)); setRuntimeFault(null);
-                  }).catch(error => setRuntimeFault(error instanceof Error ? error.message : String(error)));
-                }} />
-            </div>
-          </div>}
+          {/* The selected box's own controls, at the box's own corner — the
+              3-D `EntityToolstrip`'s argument: a selection *is* the disclosure,
+              so its rows stand open rather than behind a second click. */}
+          {editing && selectedRegion && selectedRegionCorner && <SliceRegionToolstrip
+            region={selectedRegion}
+            leftFraction={Math.min(1, Math.max(0,
+              selectedRegionCorner[0] / Math.max(1, room.width)))}
+            topFraction={Math.min(1, Math.max(0,
+              selectedRegionCorner[1] / Math.max(1, room.height)))}
+            onChange={next => amendRegion(selectedRegion, next)}
+            onRemove={() => {
+              removeRegion(selectedRegion.id);
+              session.ui.getState().select(undefined);
+            }} />}
+
+          {/* Which mode the page is in, in the corner it is in the studio. */}
+          <EditorModeChip />
         </div>
 
         {/* The advance, end to end. The four readings sit over the stages they
@@ -1987,9 +2336,10 @@ export function AdvanceLab(): React.JSX.Element {
             open={folds.has("reading")} toggle={toggleFold}>
             <p className={styles.summary}>
               A live 2-D slice of the solver&rsquo;s own model. Every stage of the resident
-              encoder is a lens over this one picture — pick one from the strip below or
-              from the right-click menu on the water to see what it touches, hover the
-              water to read a cell, click to pin it.
+              encoder is a lens over this one picture — pick one from the strip below, or
+              from the LENS row on the edit strip, to see what it touches. Hover the water
+              to read a cell, click to pin it, and right-click whatever you are asking
+              about.
             </p>
             <p className={styles.hint}>
               {model.cells ? readings.work.provenance
@@ -2002,5 +2352,11 @@ export function AdvanceLab(): React.JSX.Element {
         </div>
       </aside>
     </div>
+
+    {/* The ring, unmodified, over the whole window: its layer is fixed, its
+        coordinates are client pixels, and only its performer is this page's.
+        Mounted outside the viewport so a press on a wedge is a press on the
+        ring rather than another right-click on the water under it. */}
+    <RadialMenu perform={perform} />
   </main>;
 }

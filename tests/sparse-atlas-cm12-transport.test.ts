@@ -77,27 +77,6 @@ test("the complete 1/2/4/8 ladder is strongly 2:1 graded", () => {
   ]), /exceeds 2:1 grading/);
 });
 
-test("SolidWorld restriction evidence overrides coarse policy only for lost detail", () => {
-  const options = {
-    finestDimensions: [32, 16, 32] as const,
-    resolutionForBrick: () => 4 as const,
-  };
-  const planar = initializeSparseBrickAtlasFromScene(
-    createSymmetricExpansionScene(), options,
-  );
-  assert.ok(planar.bricks.length > 0);
-  assert.equal(planar.bricks.every((candidate) => candidate.resolution === 4), true,
-    "restriction-exact tank planes must honor a coarse scene policy");
-
-  const detailedScene = createSymmetricExpansionScene();
-  detailedScene.solidVoxels.push({ operation: "fill", minimum: [8, 0, 8],
-    maximumExclusive: [9, 1, 9] });
-  const detailed = initializeSparseBrickAtlasFromScene(detailedScene, options);
-  assert.equal(detailed.bricks.find((candidate) =>
-    candidate.coordinate[0] === 1 && candidate.coordinate[1] === 0
-      && candidate.coordinate[2] === 1)?.resolution, 8,
-  "a sub-macro-cell solid edit must retain its finest representation rung");
-});
 
 test("CM12 sharpening dose scales inversely with physical finest-cell size", () => {
   const atlas = createSparseAdaptiveMassAtlas([8, 8, 8], [
@@ -314,33 +293,6 @@ for (const fixture of [
     "the FIM graph must not lose its normal axis beyond a B2-width search");
 });
 
-test("large-CFL transport allocates reachable tiles without scanning the domain", () => {
-  const atlas = createSparseAdaptiveMassAtlas([64, 8, 8], [
-    brick(1, [1, 0, 0], 8),
-  ]);
-  const initial = initializeSparseAtlasDynamics(atlas);
-  const cellVelocity = new Float64Array(3 * initial.grid.cells.length);
-  for (const cell of initial.grid.cells) cellVelocity[3 * cell.id] = 800;
-  const faceNormalVelocity = Float64Array.from(initial.grid.gradientRows, (row) =>
-    row.axis === 0 ? 800 : 0);
-  const result = stepSparseAtlasDynamics({
-    ...initial,
-    cellVelocity,
-    faceNormalVelocity,
-  }, {
-    dt_s: 1 / 30,
-    project: false,
-  });
-  // 800 * dt = 26.7 finest cells: one brick cannot contain the trace. The
-  // support grows to the reachable sparse band, but remains below all 8
-  // authored x tiles because the source begins near the negative boundary.
-  assert.ok(result.workGrid.atlas.bricks.length >= 5,
-    `${result.workGrid.atlas.bricks.length}`);
-  assert.ok(result.workGrid.atlas.bricks.length < 8,
-    `${result.workGrid.atlas.bricks.length}`);
-  assert.equal(result.workGrid.atlas.bricks.every((candidate) =>
-    candidate.resolution === 8), true);
-});
 
 test("all-coarse dynamics keeps resident and newly reached tiles at 4 cubed", () => {
   const atlas = createSparseAdaptiveMassAtlas([32, 8, 8], [

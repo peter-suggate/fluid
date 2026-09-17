@@ -566,7 +566,7 @@ dawnTest("adaptive phi publishes closed curved surfaces across a B8:B4 join",
         acceptedTopologyGeneration:activity.acceptedTopologyGeneration};
       const snapshot=solver.fieldSnapshotSourceForQA,words=snapshot.templateWords;
       const templateFloats=new Float32Array(words.buffer,words.byteOffset,words.length);
-      const density=new Float32Array(await read(device,snapshot.state,4*snapshot.cellCapacity,
+      const density: Float32Array=new Float32Array(await read(device,snapshot.state,4*snapshot.cellCapacity,
         4*snapshot.layout.densityA));
       const acceptedCells:Array<{id:number;center:Point;width:Point}>=[];
       for(const brick of activity.bricks){
@@ -589,8 +589,8 @@ dawnTest("adaptive phi publishes closed curved surfaces across a B8:B4 join",
           [...partialWidths].join(",")}; rungs=${[...new Set(activity.bricks.filter(b=>b.active)
             .map(b=>b.acceptedResolution))].join(",")}; bricks=${activity.bricks.filter(b=>b.active)
               .map(b=>`${b.coordinate.join("/")}:B${b.acceptedResolution}`).join(",")}`);
-      const densityBefore=new Uint32Array(density.buffer.slice(0));
-      const initialSamples=new Uint32Array(await read(device,solver.globalFineLevelSetSource.samples,
+      const densityBefore: Uint32Array=new Uint32Array(density.buffer.slice(0));
+      const initialSamples: Uint32Array=new Uint32Array(await read(device,solver.globalFineLevelSetSource.samples,
         solver.globalFineLevelSetSource.plan.payloadCapacityBytes));
       const rdf=await runField(device,`${name}-shipping-rdf`,2,()=>0,false,solver.globalFineLevelSetSource);
       const rdfShape=curvedPublishedMetrics(rdf.mesh,rdf.metrics.vertexCount,shape.residual);
@@ -622,9 +622,9 @@ dawnTest("adaptive phi publishes closed curved surfaces across a B8:B4 join",
       }
       solver.applyRuntimeValues({...values,presentationSurface:"rdf"});
       await solver.assertSimulationHealthy();assert.equal(solver.presentationSurfaceMode,"rdf");
-      const republishedSamples=new Uint32Array(await read(device,solver.globalFineLevelSetSource.samples,
+      const republishedSamples: Uint32Array=new Uint32Array(await read(device,solver.globalFineLevelSetSource.samples,
         solver.globalFineLevelSetSource.plan.payloadCapacityBytes));
-      const densityAfter=new Uint32Array(await read(device,snapshot.state,4*snapshot.cellCapacity,
+      const densityAfter: Uint32Array=new Uint32Array(await read(device,snapshot.state,4*snapshot.cellCapacity,
         4*snapshot.layout.densityA));
       assert.deepEqual(densityAfter,densityBefore,`${name}: presentation toggle mutated accepted VOF`);
       assert.deepEqual(republishedSamples,initialSamples,`${name}: RDF republish is not deterministic`);

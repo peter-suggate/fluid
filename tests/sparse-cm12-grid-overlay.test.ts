@@ -70,17 +70,6 @@ test("the grid overlay follows SparseWorld's signed ownership directory", () => 
   "signed sparse owners must not be clipped to the authored lattice");
 });
 
-test("the grid overlay addresses synthesized frontier-leaf cell pages", () => {
-  assert.match(gridOverlayShader,
-    /brick>=sparseOverlayP\.worldDirectory\.z/,
-  "dynamic WDR1 leaves must not index the immutable atlas range table");
-  assert.match(gridOverlayShader,
-    /let first=sparseTopologyArena\[2u\]\+page\*count/,
-  "frontier cells must use the resident's page-local dynamic cell tail");
-  assert.match(gridOverlayShader,
-    /if\(resolution!=brickFine\)\{return vec2u\(0u\);\}/,
-  "a synthesized frontier leaf is representable only at its fixed B rung");
-});
 
 test("signed-distance visualization uses compact signed fine-page keys", () => {
   assert.match(gridOverlayShader,

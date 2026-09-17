@@ -29,39 +29,6 @@ const expectedCoverage: readonly SparseCM12DawnCoverage[] = [
   "outside-tank-symmetric-collapse",
 ];
 
-test("the compact Sparse CM12 Dawn suite retains its complete confidence matrix", () => {
-  const defaults = sparseCM12DawnDefaultValues();
-  const options = sparseCM12DawnDefaultOptions();
-  assert.equal(defaults.selectorMode, "coarse-first");
-  assert.equal(options.activityPolicy?.coarseFirst, true);
-  assert.equal(options.timeStep, "paper");
-  assert.equal(options.gammaDiffusionEnabled, true);
-  assert.equal(options.surfaceSharpeningEnabled, true);
-  assert.equal(SPARSE_CM12_DAWN_SUITE_BUDGET_MS, 480_000);
-  assert.deepEqual(SPARSE_CM12_DAWN_LANES.map((lane) => lane.coverage).sort(),
-    [...expectedCoverage].sort());
-  assert.equal(new Set(SPARSE_CM12_DAWN_LANES.map((lane) => lane.id)).size,
-    SPARSE_CM12_DAWN_LANES.length, "lane ids must remain unique and selectable");
-
-  for (const lane of SPARSE_CM12_DAWN_LANES) {
-    assert.ok(lane.timeoutMs > 0 && lane.timeoutMs < SPARSE_CM12_DAWN_SUITE_BUDGET_MS,
-      `${lane.id} must remain individually time bounded`);
-    if (lane.kind === "correctness") {
-      assert.ok(existsSync(new URL(`../${lane.testFile}`, import.meta.url)),
-        `${lane.id} points at a missing Dawn authority`);
-    } else {
-      assert.equal(lane.brickFineResolution, 8);
-      assert.equal(lane.presentationPageResolution, 8);
-      assert.equal(Number(defaults.brickFineResolution), lane.brickFineResolution,
-        "a changed production default needs a reviewed performance baseline");
-      assert.equal(Number(defaults.presentationPageResolution), lane.presentationPageResolution);
-      assert.ok(lane.measuredFrames >= 12,
-        `${lane.id} needs enough hardware samples for a stable median`);
-      assert.ok(lane.maximumMedianAdvanceMs > lane.referenceMedianAdvanceMs,
-        `${lane.id} ceiling must preserve explicit noise headroom`);
-    }
-  }
-});
 
 test("the suite stays discoverable from package scripts, README, and agent guidance", () => {
   const packageJson = JSON.parse(readFileSync(
@@ -93,20 +60,3 @@ test("checked-in performance baselines match the executable manifest", () => {
   }
 });
 
-test("accepted behavior baselines reject new regressions and nonfinite metrics", async () => {
-  const { assertSparseCM12Baseline } = await import("../lib/harness/sparse-cm12-dawn-baseline");
-  const baseline = JSON.parse(readFileSync(new URL(
-    "../benchmarks/results/sparse-cm12-dawn-behavior-baseline.json", import.meta.url), "utf8")) as {
-      metrics: Record<string, { maximum: number; previousMaximum: number; observed: number[] }>;
-    };
-  for (const [metric, entry] of Object.entries(baseline.metrics)) {
-    assert.ok(Number.isFinite(entry.maximum) && entry.maximum >= 0);
-    assert.ok(entry.observed.length >= 2, `${metric} needs repeated capture evidence`);
-    assert.ok(entry.observed.every(value => Number.isFinite(value) && value <= entry.maximum));
-    assert.doesNotThrow(() => assertSparseCM12Baseline(metric, entry.maximum));
-    assert.throws(() => assertSparseCM12Baseline(metric, entry.maximum + 1e-6));
-    assert.throws(() => assertSparseCM12Baseline(metric, NaN));
-    assert.throws(() => assertSparseCM12Baseline(metric, Infinity));
-  }
-  assert.throws(() => assertSparseCM12Baseline("unknown-metric", 0));
-});

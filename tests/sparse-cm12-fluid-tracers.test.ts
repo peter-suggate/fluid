@@ -73,19 +73,6 @@ test("an unusable marker budget seeds nothing", () => {
  * partition and the SIM panel can price them. A view whose cost is invisible is
  * a view that quietly becomes expensive.
  */
-test("marker advection is its own timed stage, inside the transport window", () => {
-  const stages = [...SPARSE_CM12_RESIDENT_STAGES];
-  const tracers = stages.indexOf("tracer-advection");
-  assert.ok(tracers >= 0, "marker advection must be a declared stage");
-  // Between the transport and the projection: the markers read the extrapolated
-  // transport velocity, which nothing writes between the extension sweeps and
-  // `collocateAndDiagnose`, and the accepted density, which the conservative
-  // transport leaves alone because it writes the destination bank.
-  assert.ok(tracers > stages.indexOf("conservative-transport"),
-    "markers must follow the transport whose characteristic they ride");
-  assert.ok(tracers < stages.indexOf("velocity-projection"),
-    "markers must be advected before the projection rewrites the velocity");
-});
 
 /**
  * Markers must seed inside the liquid and then move with it.

@@ -245,7 +245,7 @@ export default function Probe(){
      if(monotone&&h>3&&h-top>worst){worst=h-top;where=[x,z];}if(h>3&&top===0)lost++;
     }
     rows.push({step,worst,where,lost,invalidWet,positiveWet});setStatus(JSON.stringify(rows,null,2));
-    await fetch("/api/cm12-probe?step="+step,{method:"POST",body:new Blob([fields.density.buffer,phi.buffer,width.buffer])});
+    await fetch("/api/cm12-probe?step="+step,{method:"POST",body:new Blob([new Float32Array(fields.density),phi,width])});
    }
    setStatus("Complete live\n"+JSON.stringify(rows,null,2));
   }catch(e){setStatus("Failed live: "+String(e)+"\n"+JSON.stringify(rows,null,2));}finally{solver?.destroy();device?.destroy();}

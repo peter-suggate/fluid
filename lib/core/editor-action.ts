@@ -164,6 +164,32 @@ export type EditorActionEffect =
   | {
     readonly kind: "scene-document";
     readonly op: "new" | "save" | "export" | "import" | "enable-water";
+  }
+  /**
+   * A verb only the page that composed it can perform.
+   *
+   * Every other arm names something the studio's runtime owns — the document,
+   * the solver, the carry, the probes. This one names nothing: it carries an id
+   * the *host* understands and a payload the host reads, and it exists because
+   * `RadialRing` now has a second host. The 2-D advance lab (route
+   * `/advance-lab`) composes wedges for dropping a ball of liquid at a point,
+   * pinning a slice cell, switching the reconstructed surface and toggling a
+   * lens overlay; none of those is a thing in a scene document, and none of
+   * them could be expressed by widening `scene`, `place` or `probe` without
+   * putting the lab's own model into core.
+   *
+   * The studio composes none of it, and `tests/editor-scene-ring.test.ts`
+   * holds it to that: `performEditorAction` answers this arm with a warning and
+   * nothing else, which is what keeps the union total in the one runtime that
+   * must stay exhaustive. A host that emits these supplies its own performer —
+   * see `RadialMenu`'s `perform` prop.
+   */
+  | {
+    readonly kind: "host";
+    /** Which of the host's verbs this is. Unique within that host. */
+    readonly id: string;
+    /** Whatever the verb needs. Opaque here on purpose: core may not name it. */
+    readonly payload?: unknown;
   };
 
 /** Palette token, shared with `EditorEntityTone` so a wedge is coloured like its entity. */

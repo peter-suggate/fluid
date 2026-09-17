@@ -1,9 +1,9 @@
 /**
  * What one advance actually costs to encode and to run.
  *
- * The stage registry beside this folder says what each stage *is*; the encoder
- * says what each stage *does*. This is the third thing, and the only one that
- * was not already written down: for every sub-seam, the dispatches it encodes
+ * The stage registry two levels up says what each stage *is*; the encoder
+ * beside it says what each stage *does*. This is the third thing, and the only
+ * one that was not already written down: for every sub-seam, the dispatches it encodes
  * and the rule that sizes each one. From that a scene's accepted-cell count,
  * row count and brick count become a count of workgroups — which is the figure
  * that moves when a scene grows, and the figure a stage timing has to be read
@@ -24,14 +24,19 @@
  * | a sub-seam is added or moved | change that stage's seams | `advance-work.test.ts` |
  * | a sub-seam is renamed | rename its `id` | `SparseCM12ResidentSubstage<Stage>` |
  *
- * The sizing rules are the lab's own reading of the encoder's dispatch
- * helpers, not a receipt: they model the shape of the work, and they are not
- * a substitute for a trace.
+ * The sizing rules are a reading of the encoder's dispatch helpers, not a
+ * receipt: they model the shape of the work, and they are not a substitute for
+ * a trace.
+ *
+ * This is method knowledge, not lab knowledge — how a stage is sized is a fact
+ * about the encoder — which is why it lives here rather than in the page that
+ * draws the bar chart. The 2-D advance lab is its only reader today; a stage
+ * timing anywhere is meant to be read against it.
  */
 import type {
   SPARSE_CM12_RESIDENT_STAGES,
   SparseCM12ResidentSubstage,
-} from "../lib/methods/adaptive-volume/webgpu-sparse-cm12-resident";
+} from "../../webgpu-sparse-cm12-resident";
 
 /**
  * The stages the production graph still encodes.
@@ -159,9 +164,10 @@ export interface AdvanceStageWork<Stage extends AdvanceStageId> {
    * Stages whose encoded work is a loop rather than a list.
    *
    * `pressure` repeats its body once per iteration of the solver budget and
-   * keeps the tail encoded past convergence; `transport` repeats its packet
-   * body once per microstep-times-limiter-pass and zeroes its commit
-   * dispatches on every pass but the converging one.
+   * keeps the tail encoded past convergence. `transport` is the packet-loop
+   * shape: it repeats a seam body once per microstep-times-limiter-pass and
+   * zeroes its commit dispatches on every pass but the converging one. No
+   * stage carries it since geometric transport became one fixed schedule.
    */
   readonly loop?: "pressure" | "transport";
   readonly notes?: readonly AdvanceNoteId[];
@@ -198,8 +204,7 @@ export function advanceStageWork(stage: AdvanceStageId): AnyAdvanceStageWork {
 }
 
 export type AdvanceNoteId =
-  | "topology-flip" | "continuation" | "unclosed-seams"
-  | "zero-workgroup" | "one-diagonal";
+  | "topology-flip" | "zero-workgroup" | "one-diagonal";
 
 /**
  * The order the encoder writes the stages in, which is not the order the
@@ -225,7 +230,7 @@ export const ADVANCE_WORK: AdvanceWorkTable = {
     seams: [
       {
         id: "frame-control-authority",
-        note: "Translate host inputs and persistent receipts into a fixed set of indirect families, then refresh the PLIC interface cache.",
+        note: "Translate host inputs and persistent receipts into a fixed set of indirect families, then seed the frame's transport destination.",
         kernels: [
           kernel("beginSparseCM12FrameControl", "one"),
           kernel("publishSparseCM12FrameBodyAuthority", "one"),
@@ -234,8 +239,6 @@ export const ADVANCE_WORK: AdvanceWorkTable = {
           kernel("publishSparseCM12MovingSolidActivity", "cell", { gate: "solids" }),
           kernel("sparseCM12FrameControlNoop", "one", { repeats: 2, note: "body + row bypass" }),
           kernel("seedGeometricVolumeDestination", "cell"),
-          kernel("refreshGeometricInterface", "cell"),
-          kernel("extendGeometricInterface", "cell"),
           kernel("publishGeometricTransportFrontierSource", "cell"),
           kernel("beginGeometricSolidSnapshot", "one", { gate: "solids" }),
           kernel("snapshotGeometricSolidCells", "cell", { gate: "solids" }),
@@ -315,10 +318,8 @@ export const ADVANCE_WORK: AdvanceWorkTable = {
     seams: [
       {
         id: "ptr-setup-brick-plan",
-        note: "Refresh PLIC, open the topology journal, and begin a complete pressure image while the preceding accepted image remains immutable.",
+        note: "Open the topology journal and begin a complete pressure image while the preceding accepted image remains immutable.",
         kernels: [
-          kernel("refreshGeometricInterface", "cell"),
-          kernel("extendGeometricInterface", "cell"),
           kernel("beginSparseCM12PressureTopologyRepair", "one"),
           kernel("beginFullPressureImage", "one"),
         ],
@@ -437,16 +438,61 @@ export const ADVANCE_WORK: AdvanceWorkTable = {
   "velocity-projection": {
     seams: [
       {
-        id: null,
-        label: "projection + projected support",
-        note: "Project and collocate the accepted pressure image, publish its face output, transact any accepted topology edit, then rebuild projected transport-extension packets for the resulting generation.",
+        id: "projection-faces",
+        note: "Project the accepted pressure image across the three face families, collocate and diagnose the result, then publish the frame's face output.",
         kernels: [
           kernel("beginIncrementalActivity", "one"),
-          kernel("projectSparseCM12AcceptedFaceRows", "row"),
+          kernel("projectSparseCM12InteriorFaceTiles", "faceTile"),
+          kernel("projectSparseCM12SeamFacePackets", "seamPk"),
+          kernel("projectSparseCM12SparseAirFacePackets", "seamPk"),
+          kernel("projectSparseCM12DynamicFaceRows", "row"),
           kernel("collocateAndDiagnose", "cell"),
           kernel("reduceDivergenceDiagnostics", "one"),
           kernel("publishSparseCM12FrameFaceOutput", "one"),
+        ],
+      },
+      {
+        id: "projected-frontier-commit",
+        note: "Transact whatever the projected receiver census admitted. Entirely gated on that count: with no receivers it publishes no candidate at all.",
+        kernels: [
           kernel("encodeTopologyEditTransaction", "one", { host: true }),
+        ],
+      },
+      {
+        id: "projected-topology-rebuild",
+        note: "Transport reads the compiled CNX and level-set planes of whatever was just accepted, so the commit above has to be recompiled before it runs.",
+        kernels: [
+          kernel("beginCompiledTopologyGeneration", "one"),
+          kernel("clearCompiledTopologyGeneration", "row"),
+          kernel("compileCompiledTopologyCells", "cell"),
+          kernel("compileCompiledTopologyRows", "row"),
+          kernel("compileCompiledTopologyCellIncidences", "cell"),
+          kernel("beginGeometricVolumeTopologyCompilation", "one"),
+          kernel("compileGeometricVolumeSubfaces", "row"),
+          kernel("compileGeometricVolumeCellFaces", "cell"),
+          kernel("publishGeometricVolumeTopology", "one"),
+          kernel("sealCompiledTopologyGeneration", "one"),
+          kernel("lsvPlanPhiCells", "one"),
+          kernel("lsvBeginTopology", "one"),
+          kernel("lsvClearTopology", "cell", { note: "level-set lattice, self-sized" }),
+          kernel("lsvCatalogCellCorners", "cell"),
+          kernel("lsvPublishBuildVertexDispatch", "one"),
+          kernel("lsvInsertVertexHash", "cell", { note: "phi vertices" }),
+          kernel("lsvResolveCellCorners", "cell"),
+          kernel("lsvCompileConstraints", "cell", { note: "phi vertices" }),
+          kernel("lsvTransferPhi", "cell", { note: "phi vertices" }),
+          kernel("lsvBeginBuildConstraintProjection", "one"),
+          kernel("lsvApplyBuildConstraints", "cell", { perRung: true, note: "one pass per dyadic level" }),
+          kernel("lsvAdvanceBuildConstraintProjection", "one", { perRung: true }),
+          kernel("lsvValidateTopology", "cell"),
+          kernel("lsvSealTopology", "one"),
+          kernel("lsvPublishTopology", "one"),
+        ],
+      },
+      {
+        id: null, label: "(stage remainder)",
+        note: "Rebuild projected transport-extension packets for the resulting generation: projection changes liquid velocity even when no topology was admitted, so that field is re-extended into air before transport traces receiver boxes.",
+        kernels: [
           kernel("beginSparseCM12VelocityExtensionSchedule", "one"),
           kernel("compileSparseCM12VelocityExtensionSchedule", "leaf"),
           kernel("sealSparseCM12VelocityExtensionSchedule", "one"),
@@ -458,57 +504,52 @@ export const ADVANCE_WORK: AdvanceWorkTable = {
     ],
   },
   "conservative-transport": {
-    loop: "transport",
-    notes: ["continuation", "unclosed-seams", "zero-workgroup"],
+    notes: ["zero-workgroup"],
     seams: [
       {
-        id: "transport-trace",
-        note: "Validate the sealed physical-face image and build the CFL plan. Full CNX faces and cell CSR rebuild only at accepted-topology boundaries outside this ordinary transport trace. This ABI seam is never closed, so its interval folds into transport-gather.",
-        kernels: [
-          kernel("beginGeometricVolumeTransport", "one"),
-          kernel("initializeGeometricVolumeCells", "cell"),
-          kernel("beginGeometricTransportEnvelope", "one"),
-          kernel("gatherGeometricTransportMaterialBounds", "cell"),
-          kernel("gatherGeometricTransportVelocityBounds", "row"),
-          kernel("sealGeometricTransportEnvelope", "one"),
-          kernel("sealGeometricVolumePlan", "one", { note: "microsteps = max(1, ⌈2·CFL⌉), fault above 128" }),
-          kernel("publishVolumeDispatches", "one", { host: true }),
-        ],
-      },
-      {
-        id: "transport-scatter",
-        note: "One packet: a PLIC flux pass and one relaxation of the shared low-flux limiter. Fixed geometry commits reconstructed flux directly; only moving-solid FISTA encodes factor initialization, publication and materialization. Packets repeat until the volume audit passes, up to 1024 limiter passes. This seam is also never closed in the encoder.",
-        kernels: [
-          kernel("reconstructGeometricVolumeInterface", "volCell"),
-          kernel("computeGeometricVolumeFluxes", "volFace"),
-          kernel("beginGeometricLowFluxLimits", "volOne"),
-          kernel("initializeGeometricLowFluxLimits", "volCell", {
-            gate: "solids", microstep: true,
-          }),
-          kernel("updateGeometricLowFluxLimits", "volCell"),
-          kernel("commitGeometricLowFluxLimits", "volCell", { gate: "solids" }),
-          kernel("advanceGeometricLowFluxLimits", "volOne"),
-          kernel("publishVolumeDispatches", "volOne", { host: true }),
-        ],
-      },
-      {
         id: "transport-gather",
-        note: "The commit half of a packet. Its indirect counts are zero on every pass except the one where the limiter converged — the dispatches are still encoded and still cost a launch.",
+        note: "The whole of geometric transport, in one closed interval: advect and reproject the adaptive level set, redistance it, move volume in a single whole-frame coupling, sharpen the result, and return the far field. No packet continuation and no limiter loop — the schedule is fixed, and only the sharpening return is gated.",
         kernels: [
-          kernel("applyGeometricLowFluxFactors", "volFace", {
-            commit: true, gate: "solids",
-          }),
-          kernel("initializeGeometricClosingComponents", "volCell", { commit: true, gate: "solids" }),
-          kernel("allocateGeometricClosingResidual", "volCell", { commit: true, gate: "solids" }),
-          kernel("computeGeometricVolumeLimits", "volCell", { commit: true }),
-          kernel("limitGeometricVolumeFluxes", "volFace", { commit: true }),
-          kernel("validateGeometricVolumeCells", "volCell", { commit: true }),
-          kernel("commitGeometricVolumeCells", "volCell", { commit: true }),
-          kernel("advanceGeometricVolumeSubstep", "volOne"),
-          kernel("publishVolumeDispatches", "volOne", { host: true }),
-          kernel("finishGeometricVolumeTransport", "one", { once: true }),
-          kernel("reexpressGeometricSolidRows", "row", { gate: "solids", once: true }),
-          kernel("finishGeometricSolidPublication", "one", { gate: "solids", once: true }),
+          kernel("lsvPrepareVertexDispatch", "one"),
+          bufferCopy("level-set vertex dispatch \u2192 accepted indirect arguments"),
+          kernel("lsvAdvectPhi", "cell", { note: "phi vertices" }),
+          kernel("lsvBeginConstraintProjection", "one", { repeats: 3, note: "advect, redistance, correct" }),
+          kernel("lsvApplyConstraints", "cell", { perRung: true, repeats: 3, note: "one pass per dyadic level, three projections" }),
+          kernel("lsvAdvanceConstraintProjection", "one", { perRung: true, repeats: 3 }),
+          kernel("lsvCommitPhi", "one"),
+          kernel("lsvrBegin", "one"),
+          kernel("lsvrCaptureOriginal", "cell", { note: "phi vertices" }),
+          kernel("lsvrSeedClosestPoints", "cell", { note: "phi vertices" }),
+          kernel("lsvrAdvance", "one", { repeats: 17 }),
+          kernel("lsvrRelaxClosestPoints", "cell", { repeats: 16, note: "a four-fine-cell band crosses at most sixteen graph edges" }),
+          kernel("lsvrResolve", "cell", { note: "phi vertices" }),
+          kernel("lsvrAuditContour", "cell", { note: "phi vertices" }),
+          kernel("beginWholeFrameVolumeTransport", "one"),
+          kernel("initializeWholeFrameVolumeCells", "cell"),
+          kernel("buildWholeFrameVolumeCoupling", "cell"),
+          kernel("addWholeFrameUncoveredDonorFallbacks", "cell"),
+          kernel("normalizeWholeFrameVolumeRowsAtoB", "cell", { repeats: 3 }),
+          kernel("normalizeWholeFrameVolumeDonorsBtoA", "cell", { repeats: 3 }),
+          kernel("auditWholeFrameVolumeMarginals", "cell"),
+          kernel("gatherWholeFrameVolumeOutflow", "cell"),
+          kernel("gatherWholeFrameVolume", "cell"),
+          kernel("validateWholeFrameVolume", "cell"),
+          kernel("commitWholeFrameVolume", "cell"),
+          kernel("finishWholeFrameVolumeTransport", "one"),
+          kernel("prepareWholeFrameVolumeSharpening", "cell"),
+          kernel("proposeWholeFrameVolumeSharpening", "row"),
+          kernel("gatherWholeFrameVolumeSharpening", "cell"),
+          kernel("commitWholeFrameVolumeSharpening", "cell"),
+          kernel("beginAdaptiveVolumeReturn", "one"),
+          kernel("seedAdaptiveVolumeReturn", "cell", { note: "sharpening return only" }),
+          kernel("relaxAdaptiveVolumeReturnA", "cell", { repeats: 2, note: "one pair per distance sweep" }),
+          kernel("relaxAdaptiveVolumeReturnB", "cell", { repeats: 2, note: "one pair per distance sweep" }),
+          kernel("prepareAdaptiveVolumeReturn", "cell", { note: "one per return pass" }),
+          kernel("proposeAdaptiveVolumeReturn", "row", { note: "one per return pass" }),
+          kernel("correctWholeFrameVolumePhi", "cell", { note: "phi vertices" }),
+          kernel("deleteTinyVolumeResidues", "brickLn"),
+          kernel("reexpressGeometricSolidRows", "row", { gate: "solids" }),
+          kernel("finishGeometricSolidPublication", "one", { gate: "solids" }),
         ],
       },
     ],
@@ -538,11 +579,9 @@ export const ADVANCE_WORK: AdvanceWorkTable = {
       },
       {
         id: null, label: "(stage remainder)",
-        note: "The frame receipt and a final interface refresh on the published density.",
+        note: "The frame scalar receipt on the published density.",
         kernels: [
           kernel("publishSparseCM12FrameScalarOutput", "one"),
-          kernel("refreshGeometricInterface", "cell"),
-          kernel("extendGeometricInterface", "cell"),
         ],
       },
     ],
@@ -615,11 +654,9 @@ export const ADVANCE_WORK: AdvanceWorkTable = {
       },
       {
         id: "frontier-activation-and-retirement",
-        note: "Activate swept pages, reserve the transport face support, enforce the dynamic seam floor, and mark unsupported empty bricks for retirement.",
+        note: "Activate swept pages and mark unsupported empty bricks for retirement.",
         kernels: [
           kernel("activateSweptFrontierPages", "brickWG"),
-          kernel("reserveGeometricTransportFaceSupport", "brickLn"),
-          kernel("enforceGeometricDynamicSeamFloor", "brickLn"),
           kernel("retireUnsupportedEmptyBricks", "brickWG", { gate: "unfrozen" }),
         ],
       },
@@ -687,17 +724,30 @@ export const ADVANCE_WORK: AdvanceWorkTable = {
           kernel("beginSparseCM12TopologyEffectsPreflight", "one"),
           kernel("recordCandidateTopologyEffectsFromTopologyDelta", "delta"),
           kernel("finalizeSparseCM12TopologyEffectsPreflight", "one"),
-          kernel("validateShadowFieldTransferPreflight", "one"),
+        ],
+      },
+      {
+        id: "candidate-ibo-construction",
+        note: "Compile the interned-boundary delta for the candidate generation.",
+        kernels: [
+          kernel("beginSparseCM12InternedBoundaryDelta", "one"),
+          kernel("compileSparseCM12InternedBoundaryDelta", "delta"),
+        ],
+      },
+      {
+        id: "candidate-ibo-validation",
+        note: "Receipt the changed set, validate every delta packet, and close the interned-boundary build.",
+        kernels: [
+          kernel("finalizeSparseCM12ISAChangedSetReceipt", "one"),
+          kernel("validateSparseCM12InternedBoundaryDeltaPackets", "delta"),
+          kernel("finalizeSparseCM12InternedBoundaryDelta", "one"),
         ],
       },
       {
         id: "candidate-tei-compilation",
-        note: "Rebuild and certify the complete transport-address image in the inactive generation slot.",
+        note: "Rebuild the transport-address image for the changed set only, in the inactive generation slot.",
         kernels: [
-          kernel("beginSparseCM12TransportExecutionImageFullGeneration", "one"),
-          kernel("compileSparseCM12TransportExecutionImageFullGeneration", "leaf"),
-          kernel("certifySparseCM12TransportExecutionImageFullGeneration", "leaf"),
-          kernel("sealSparseCM12TransportExecutionImageFullGeneration", "one"),
+          kernel("compileSparseCM12TransportExecutionImageShadow", "delta"),
         ],
       },
       {
@@ -705,25 +755,6 @@ export const ADVANCE_WORK: AdvanceWorkTable = {
         note: "One GPU-authored decision: the whole transaction is accepted or none of it is.",
         kernels: [
           kernel("validateAndAuthorizeShadowTopology", "one"),
-        ],
-      },
-      {
-        id: "candidate-topology-compilation",
-        note: "Reconcile the complete candidate seam graph, rebuild and certify all CNX connectivity and physical planes, then restore the accepted seam generation on refusal.",
-        kernels: [
-          kernel("connectSparseWorldFrontierPages", "brickWG"),
-          kernel("beginCompiledTopologyGeneration", "one"),
-          kernel("clearCompiledTopologyGeneration", "row"),
-          kernel("compileCompiledTopologyCells", "shCell"),
-          kernel("compileCompiledTopologyRows", "shRow"),
-          kernel("compileCompiledTopologyCellIncidences", "shCell"),
-          kernel("beginGeometricVolumeTopologyCompilation", "one"),
-          kernel("compileGeometricVolumeSubfaces", "shRow"),
-          kernel("compileGeometricVolumeCellFaces", "shCell"),
-          kernel("publishGeometricVolumeTopology", "one"),
-          kernel("sealCompiledTopologyGeneration", "one"),
-          kernel("validateCompiledShadowTopology", "one"),
-          kernel("restoreSparseWorldAcceptedIncidenceGeneration", "brickWG"),
         ],
       },
       {
@@ -741,13 +772,23 @@ export const ADVANCE_WORK: AdvanceWorkTable = {
       },
       {
         id: "candidate-state-publication",
-        note: "The flip. Fields, membership, frontier acceptance and the world execution image all become the accepted generation here.",
+        note: "The flip. Fields, membership, the reconciled voxel seam graph, frontier acceptance and the world execution image all become the accepted generation here.",
         kernels: [
           kernel("publishCandidateTopologyDeltaFromWorklist", "delta"),
-          kernel("connectSparseWorldFrontierPages", "one"),
+          kernel("resetSparseWorldFrontierBindings", "pages", { gate: "world" }),
+          kernel("connectSparseWorldFrontierPages", "pages", { gate: "world" }),
           kernel("publishCandidateShadowFaces", "shRow"),
           kernel("finalizeAuthorizedShadowTopology", "one"),
-          kernel("publishSparseWorldFrontierAcceptance", "one"),
+          kernel("publishSparseWorldFrontierAcceptance", "pages", { gate: "world" }),
+          kernel("compileSparseWorldFrontierExecutionImage", "pages", { gate: "world" }),
+        ],
+      },
+      {
+        id: "candidate-image-replay",
+        note: "Replay the retired transport-address and interned-boundary records so the next frame's image starts from the accepted generation.",
+        kernels: [
+          kernel("replaySparseCM12TransportExecutionImageRetired", "delta"),
+          kernel("replaySparseCM12InternedBoundaryDelta", "delta"),
         ],
       },
     ],
@@ -953,17 +994,9 @@ export const ADVANCE_NOTES: Readonly<Record<AdvanceNoteId, {
     heading: "The topology flip lands in the next advance",
     body: "Candidate transfer commits at the frame tail, but pressure topology already ran at the head. This advance's commit is the next advance's full-pressure-image input, never this one's — so a stage that reports a topology generation is reporting the one accepted at the end of the previous frame.",
   },
-  continuation: {
-    heading: "Transport can span several command submissions",
-    body: "With a packet chunk of 8 the host encodes eight packets, submits, maps a four-word progress buffer, and only then decides whether to encode more. The frame is a continuation, not one command buffer. A direct command-encoder caller instead gets a fixed schedule of 512 packets.",
-  },
-  "unclosed-seams": {
-    heading: "Two sub-seams are declared but never closed",
-    body: "transport-trace and transport-scatter appear in the stage ABI and carry phase labels, but the encoder only calls closeSubstage(\"transport-gather\"). All three labels resolve to a single measured interval, so the trace and limiter halves of transport are not separately timed.",
-  },
   "zero-workgroup": {
     heading: "A zero-workgroup indirect dispatch is still a launch",
-    body: "Transport commit kernels run only on a converging pass, and moving-solid initialization runs only on the first limiter pass of a microstep; all remain encoded in every packet with zero indirect counts otherwise. The pressure solve also keeps its full tail encoded after tolerance. Encoded dispatches and executed workgroups therefore diverge sharply.",
+    body: "Every level-set pass in transport is sized by a dispatch the GPU published for itself, so an unchanged lattice launches zero workgroups where a changed one launches thousands — the launch is encoded either way. The pressure solve likewise keeps its full tail encoded after tolerance. Encoded dispatches and executed workgroups therefore diverge sharply.",
   },
   "one-diagonal": {
     heading: "The preconditioner is one positive diagonal",

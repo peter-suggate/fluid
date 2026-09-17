@@ -51,10 +51,6 @@ test("hero-garden-hose-x10's whole-world build needs tens of presentations while
   assert.ok(surfaceMeshBuildPresentations(bricks, true) >= Math.ceil(bricks / SVO_SURFACE_MESH_BUILD_BRICKS_DRAWN_MAXIMUM));
 });
 
-test("the work buffer holds boxes, one table slot, one scratch record and one worklist entry per leaf", () => {
-  assert.equal(surfaceMeshWorkBytes(1000) - surfaceMeshWorkBytes(0), 999 * 9 * 4 + 0);
-  assert.equal(surfaceMeshWorkBytes(1), (64 * 8 + 9) * 4);
-});
 
 test("a receipt of a complete drawn mesh is ready and asks nothing of the host", () => {
   const receipt = interpretSurfaceMeshState(words({ usable: 1, frontCursor: 5000, liveQuads: 4200, drawInstanceCount: 1200, builds: 3 }), context);

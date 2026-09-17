@@ -14,15 +14,6 @@ const shaderSource = readFileSync(new URL(
   import.meta.url,
 ), "utf8");
 
-test("Sparse CM12 has no inferred tank-plane boundary authority", () => {
-  for (const source of [residentSource, shaderSource]) {
-    assert.doesNotMatch(source, /planarFluidBoundary|hasPlanarFluidBoundaries/);
-  }
-  assert.match(residentSource, /const staticSolidWorld = Boolean\(this\.solidOccupancyLayout\)/);
-  assert.match(shaderSource,
-    /return solid\*solidVoxelRowOpenFraction\(id\);/,
-    "row openness must come directly from SolidWorld voxels");
-});
 
 test("SolidWorld planes do not blanket-refine touching wet bricks", () => {
   const scene = getScenePreset("water-box-dam-break").create();

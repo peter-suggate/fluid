@@ -5,6 +5,17 @@
  * the same rungs — so switching stages moves the reading rather than the
  * subject. That is the whole design: a stage list that changes what you can
  * see about one scene, not fifteen separate diagrams.
+ *
+ * What a lens *claims* is not in this file. The caption a stage reads under,
+ * the marks its picture may put on a cell, what carrying one of them says and
+ * the numbers each is cut at are all declarations about the encoder, and they
+ * live beside it, in `lib/methods/adaptive-volume/features/advance-slice/` —
+ * the per-stage half on `SPARSE_CM12_STAGES[stage].slice`, the thresholds as
+ * `ADVANCE_SLICE_THRESHOLDS`. What stays here is the drawing: the palette the
+ * page resolves per theme, the canvas primitives, one `draw(c)` per stage, and
+ * the predicate that answers each declared mark for the cell under the pointer.
+ * `ADVANCE_LENSES` is the two joined, which is why a mark declared with no
+ * predicate is a failure rather than a blank row in the probe.
  */
 import {
   ADVANCE_BRICK_FINE, ADVANCE_RUNGS, advanceCell, advanceCellAt, advanceCellPlane,
@@ -12,7 +23,21 @@ import {
   type AdvanceCellView, type AdvanceLattice, type AdvancePlane, type AdvanceRdfVertex,
   type AdvanceRdfView, type AdvanceView,
 } from "../lib/physics-wasm/advance-view";
-import type { AdvanceStageId } from "./advance-work";
+import {
+  FRACTION_FLOOR, cellFillOpacity, fractionBand, fractionBandPaint, fractionReadout,
+  fractionResidueRamp,
+  type FractionBand, type FractionTone,
+} from "../lib/core/fluid-fraction-view";
+import {
+  ADVANCE_STAGE_ORDER, type AdvanceStageId,
+} from "../lib/methods/adaptive-volume/features/advance-slice/advance-work";
+import {
+  ADVANCE_REPRESENT_SLICE, ADVANCE_SLICE_THRESHOLDS,
+  type AdvanceSliceDeclaration, type AdvanceSliceKey, type AdvanceSliceTone,
+} from "../lib/methods/adaptive-volume/features/advance-slice/definition";
+import {
+  advanceStageSlice,
+} from "../lib/methods/adaptive-volume/features/advance-slice/loop";
 
 /**
  * The drawn palette, resolved from the page's own theme.
@@ -25,10 +50,15 @@ import type { AdvanceStageId } from "./advance-work";
  * a server render — and `syncPalette` replaces them from the live custom
  * properties declared beside the viewport in `AdvanceLab.module.css`.
  */
-export type PaletteTone =
-  | "ground" | "grid" | "brick" | "liquid" | "solid" | "solidEdge"
-  | "amber" | "muted" | "ink" | "alarm"
-  | "transport" | "momentum" | "pressure" | "adaptivity" | "output";
+/**
+ * The tone a mark or a band is drawn in.
+ *
+ * The roles are the method's — a declaration beside the encoder names one, and
+ * this file is where a name becomes a colour — so the union is imported rather
+ * than restated. Adding a role is a change to the declaration vocabulary, and
+ * `PALETTE_VAR` below is what makes an unpainted one a type error.
+ */
+export type PaletteTone = AdvanceSliceTone;
 
 export const PALETTE: Record<PaletteTone, string> = {
   ground: "#0b1420",
@@ -88,6 +118,26 @@ export function syncPalette(host: Element): void {
   }
 }
 
+/**
+ * The shared fraction view's colour roles, in the lab's own tones.
+ *
+ * `lib/core/fluid-fraction-view` states which band a cell's V/K is in and what
+ * that band is called; it also carries a literal colour, for a legend or a
+ * shader. The canvas here cannot use that literal — the lab paints tones the
+ * page resolves per theme — so this is the one table where the shared roles
+ * become lab tones. One table, so a role that gains a renderer does not gain a
+ * second opinion about what colour it is.
+ */
+const FRACTION_TONE: Readonly<Record<FractionTone, PaletteTone>> = {
+  empty: "ground",
+  residue: "transport",
+  liquid: "liquid",
+  excess: "alarm",
+};
+
+/** One shared fraction role, resolved to the colour the canvas can hold. */
+const fractionInk = (tone: FractionTone): string => PALETTE[FRACTION_TONE[tone]];
+
 /** Which tone stands for each band of the advance. */
 export const BAND_TONE = {
   transport: "transport",
@@ -108,17 +158,27 @@ export const BAND_TONE = {
  * readings come out of this single record, so the probe cannot drift from the
  * ink on the canvas.
  */
-export interface LensKey {
-  readonly tone: PaletteTone;
-  readonly label: string;
-  /** What carrying this mark says about the cell. One line, for the probe. */
-  readonly note: string;
+export interface LensKey extends AdvanceSliceKey {
   /** True when the cell the query names carries this mark. */
   readonly holds: (q: MarkQuery) => boolean;
 }
 
-const key = (tone: PaletteTone, label: string, note: string,
-  holds: (q: MarkQuery) => boolean): LensKey => ({ tone, label, note, holds });
+const key = (id: string, tone: PaletteTone, label: string, note: string,
+  holds: (q: MarkQuery) => boolean): LensKey => ({ id, tone, label, note, holds });
+
+/**
+ * A key for one band of the shared fraction view.
+ *
+ * The name and the line the probe reads out come from
+ * `lib/core/fluid-fraction-view`, so what the lab calls a band and what the
+ * 3-D overlay's legend calls it cannot drift apart; only the tone is the lab's,
+ * because only the lab has a theme.
+ */
+const fractionKey = (band: FractionBand,
+  holds: (q: MarkQuery) => boolean): LensKey => {
+  const paint = fractionBandPaint(band);
+  return key(`fraction-${band}`, FRACTION_TONE[paint.tone], paint.label, paint.note, holds);
+};
 
 /**
  * What the pointer is over, for a mark to answer about.
@@ -160,6 +220,22 @@ export function markQuery(s: AdvanceView, cell: AdvanceCellView,
   };
 }
 
+/**
+ * The numbers every predicate below is cut at, named once beside the method.
+ *
+ * Destructured rather than reached through, because a threshold read inline
+ * reads as a magic number in the drawing; these are claims about the solver,
+ * and the picture, the probe and the overlays all have to be cut at the same
+ * ones or they are three different readings of one cell.
+ */
+const {
+  interfaceFill, pressureFill, velocityCapacity, velocityVolume,
+  closedAperture, openAperture, residentBrickVolume, activeBrickScore,
+  changedVolume, fluxShare, solidCapacity,
+  rdfFullCapacity, rdfPartialFill,
+  rdfMinorityAreaTolerance, rdfMinorityAmplification,
+} = ADVANCE_SLICE_THRESHOLDS;
+
 /** The aperture of a vertical row, cut exactly as `face-preparation` cuts it. */
 const rowAperture = (s: AdvanceView, x: number, y: number): number => Math.min(
   x > 0 ? s.capacityFine[advanceCell(s, x - 1, y)]! : 0,
@@ -178,15 +254,17 @@ const boundingRowsY = (q: MarkQuery): readonly number[] =>
 /** `velocityField` draws an arrow only where there is liquid to carry one. */
 const carriesVelocity = (q: MarkQuery): boolean => {
   const i = advanceCell(q.s, q.fx, q.fy);
-  return q.s.capacityFine[i]! > 0.05 && q.s.liquidVolumeFine[i]! > 1e-5;
+  return q.s.capacityFine[i]! > velocityCapacity
+    && q.s.liquidVolumeFine[i]! > velocityVolume;
 };
 
 /** Cut: the interface passes through this cell, so it carries a PLIC plane. */
 const cutCell = (q: MarkQuery): boolean =>
-  q.cell.open && q.cell.fill > 1e-3 && q.cell.fill < 1 - 1e-3;
+  q.cell.open && q.cell.fill > interfaceFill && q.cell.fill < 1 - interfaceFill;
 
 /** The half-full test every pressure lens tints against. */
-const pressureCell = (q: MarkQuery): boolean => q.cell.open && q.cell.fill > 0.5;
+const pressureCell = (q: MarkQuery): boolean =>
+  q.cell.open && q.cell.fill > pressureFill;
 
 export interface Lens {
   /** What the reader is looking at, in the lens's own terms. */
@@ -282,9 +360,9 @@ export function rdfMinorityAreaDistorted(acceptedLiquid: number,
   const accepted = acceptedLiquid <= area / 2 ? acceptedLiquid : area - acceptedLiquid;
   const represented = acceptedLiquid <= area / 2 ? representedLiquid : area - representedLiquid;
   const absoluteError = Math.abs(represented - accepted);
-  if (!(absoluteError > 1e-3 * area)) return false;
+  if (!(absoluteError > rdfMinorityAreaTolerance * area)) return false;
   const smaller = Math.min(accepted, represented), larger = Math.max(accepted, represented);
-  return smaller <= 0 ? larger > 0 : larger > 1.5 * smaller;
+  return smaller <= 0 ? larger > 0 : larger > rdfMinorityAmplification * smaller;
 }
 
 interface RdfDisplaySource { readonly nx: number; readonly ny: number }
@@ -294,8 +372,8 @@ export function sliceRdfPlicFallbackCells(s: RdfDisplaySource, lattice: AdvanceL
   sharedRdf: RdfDisplaySurface): ReadonlySet<number> {
   const result = new Set<number>(), stride = s.nx + 1, phi = sharedRdf.vertexPhiFine;
   for (const cell of lattice.cells) {
-    if (!cell.open || cell.capacity < 0.999999 * cell.width * cell.height
-      || cell.fill <= 1e-6 || cell.fill >= 1 - 1e-6) continue;
+    if (!cell.open || cell.capacity < rdfFullCapacity * cell.width * cell.height
+      || cell.fill <= rdfPartialFill || cell.fill >= 1 - rdfPartialFill) continue;
     const topologyY0 = s.ny - cell.y0 - cell.height;
     let valid = true;
     for (let y = topologyY0; y < topologyY0 + cell.height; y += 1)
@@ -322,9 +400,10 @@ export function inspectSliceRdfDisplay(s: RdfDisplaySource, lattice: AdvanceLatt
   sharedRdf: RdfDisplaySurface): readonly SliceRdfDisplayCell[] {
   const fallback = sliceRdfPlicFallbackCells(s, lattice, sharedRdf);
   const stride = s.nx + 1, phi = sharedRdf.vertexPhiFine;
-  return lattice.cells.filter(cell => cell.open && cell.fill > 1e-6 && cell.fill < 1 - 1e-6)
+  return lattice.cells
+    .filter(cell => cell.open && cell.fill > rdfPartialFill && cell.fill < 1 - rdfPartialFill)
     .map(cell => {
-      const cut = cell.capacity < 0.999999 * cell.width * cell.height;
+      const cut = cell.capacity < rdfFullCapacity * cell.width * cell.height;
       const topologyY0 = s.ny - cell.y0 - cell.height;
       const samples: { x: number; y: number; value: number }[] = [];
       for (let y = topologyY0; y <= topologyY0 + cell.height; y += 1)
@@ -359,17 +438,17 @@ export function drawSlice(c: LensContext, sharedRdf?: AdvanceRdfView): void {
       // by RDF. It is rendered by the explicit PLIC/fill fallback below and is
       // counted in the preview receipt rather than silently crossed.
       const dense = advanceCell(s, x, canvasY), capacity = s.capacityFine[dense]!;
-      if (capacity < 0.999999) continue;
+      if (capacity < rdfFullCapacity) continue;
       const acceptedFill = s.liquidVolumeFine[dense]! / Math.max(capacity, 1e-8);
       // A pure accepted owner is stronger evidence than a render-only RDF.
       // Publishing it directly prevents a shared-vertex fit from carving an
       // enclosed opposite-phase cell out of homogeneous bulk. Mixed owners
       // retain the shared RDF, including genuine subcell sheets and droplets.
-      if (acceptedFill >= 1 - 1e-6) {
+      if (acceptedFill >= 1 - rdfPartialFill) {
         g.rect(x * S, canvasY * S, S, S);
         continue;
       }
-      if (acceptedFill <= 1e-6) continue;
+      if (acceptedFill <= rdfPartialFill) continue;
       const owner = advanceCellAt(lattice, s, x + 0.5, canvasY + 0.5);
       if (owner && plicFallback.has(owner.topologyCell)) continue;
       const a = phi[x + stride * y]!;
@@ -382,12 +461,12 @@ export function drawSlice(c: LensContext, sharedRdf?: AdvanceRdfView): void {
     }
   }
   for (const cell of lattice.cells) {
-    if (!cell.open || cell.fill <= 1e-3) continue;
-    if (sharedRdf && cell.capacity >= 0.999999 * cell.width * cell.height
+    if (!cell.open || cell.fill <= interfaceFill) continue;
+    if (sharedRdf && cell.capacity >= rdfFullCapacity * cell.width * cell.height
       && !plicFallback.has(cell.topologyCell)) continue;
     const x = cell.x0 * S, y = cell.y0 * S;
     const w = cell.width * S, h = cell.height * S;
-    if (cell.fill >= 1 - 1e-6) { g.rect(x, y, w, h); continue; }
+    if (cell.fill >= 1 - rdfPartialFill) { g.rect(x, y, w, h); continue; }
     const plane = plicFallback.has(cell.topologyCell) ? cell.plane : advanceCellPlane(lattice, cell);
     /* No published plane means the solver could not resolve this interface, so
      * the picture falls back to the monotone reading the solver itself falls
@@ -441,19 +520,10 @@ function drawLatticeAndSolids(c: LensContext): void {
   drawSolidRaster(c);
 }
 
-/** Linear diagnostic opacity for authoritative cell fill. Zero stays clear. */
-export function cellFillOpacity(fill: number): number {
-  return Math.min(1, Math.max(0, Number.isFinite(fill) ? fill : 0));
-}
-
-export function cellFillIsOverCapacity(fill: number): boolean {
-  return Number.isFinite(fill) && fill > 1 + 1e-6;
-}
-
 /** The liquid the base picture cuts into a cell, under every lens but transport. */
-export const LIQUID_KEY: LensKey = key("liquid", "liquid",
+export const LIQUID_KEY: LensKey = key("liquid", "liquid", "liquid",
   "the published surface geometry places liquid in this cell",
-  q => q.cell.open && q.cell.fill > 1e-3);
+  q => q.cell.open && q.cell.fill > interfaceFill);
 
 const directPhiCorners = (q: MarkQuery): readonly number[] => {
   const y = q.s.ny - 1 - q.fy, stride = q.s.nx + 1;
@@ -462,11 +532,13 @@ const directPhiCorners = (q: MarkQuery): readonly number[] => {
     phi[q.fx + 1 + stride * (y + 1)]!, phi[q.fx + stride * (y + 1)]!];
 };
 
-export const DIRECT_LEVEL_SET_KEY: LensKey = key("liquid", "direct level-set liquid",
+export const DIRECT_LEVEL_SET_KEY: LensKey = key("direct-level-set-liquid",
+  "liquid", "direct level-set liquid",
   "the advected signed-distance field is negative in part of this finest cell",
   q => directPhiCorners(q).some(value => Number.isFinite(value) && value < 0));
 
-export const DIRECT_LEVEL_SET_CONTOUR_KEY: LensKey = key("output", "direct zero set",
+export const DIRECT_LEVEL_SET_CONTOUR_KEY: LensKey = key("direct-zero-set",
+  "output", "direct zero set",
   "the published signed-distance zero set crosses this finest cell",
   q => {
     const corners = directPhiCorners(q);
@@ -475,20 +547,21 @@ export const DIRECT_LEVEL_SET_CONTOUR_KEY: LensKey = key("output", "direct zero 
   });
 
 /** Solid, which every lens draws and no lens owns. */
-export const SOLID_KEY: LensKey = key("solid", "solid",
+export const SOLID_KEY: LensKey = key("solid", "solid", "solid",
   "solid takes part of this cell; K is the open capacity left to the water",
-  q => q.s.capacityFine[advanceCell(q.s, q.fx, q.fy)]! < 1 - 1e-4);
+  q => q.s.capacityFine[advanceCell(q.s, q.fx, q.fy)]! < 1 - solidCapacity);
 
 export const CELL_FILL_KEYS: readonly LensKey[] = [
-  key("liquid", "cell fill opacity · clamp(V/K, 0, 1)",
+  key("cell-fill", "liquid", "cell fill opacity · clamp(V/K, 0, 1)",
     "the blue wash is V/K itself, clamped — opacity, not geometry",
     q => q.cell.open && cellFillOpacity(q.cell.fill) > 0),
-  key("output", "accepted surface contour",
+  key("accepted-surface-contour", "output", "accepted surface contour",
     "the published surface passes through this cell",
-    q => q.cell.open && q.cell.fill > 1e-6 && q.cell.fill < 1 - 1e-6),
-  key("amber", "over-capacity cell · V/K > 1",
+    q => q.cell.open && fractionBand(q.cell.fill) !== "vacuum"
+      && q.cell.fill < 1 - FRACTION_FLOOR),
+  key("over-capacity-cell", "amber", "over-capacity cell · V/K > 1",
     "V is past the open capacity K, and the projection has to drain it",
-    q => q.cell.open && cellFillIsOverCapacity(q.cell.fill)),
+    q => q.cell.open && fractionBand(q.cell.fill) === "overfull"),
 ];
 
 /** The transport stage defaults to the authoritative cell-fill reading. */
@@ -535,7 +608,7 @@ export function drawCellFillSlice(c: LensContext, sharedRdf?: AdvanceRdfView): v
   g.strokeStyle = PALETTE.amber;
   g.lineWidth = 1.5;
   for (const cell of lattice.cells) {
-    if (!cell.open || !cellFillIsOverCapacity(cell.fill)) continue;
+    if (!cell.open || fractionBand(cell.fill) !== "overfull") continue;
     const x = cell.x0 * S, y = cell.y0 * S;
     const w = cell.width * S, h = cell.height * S;
     g.globalAlpha = 0.95;
@@ -603,7 +676,8 @@ function velocityField(
   for (let y = 1; y < s.ny - 1; y += stride) {
     for (let x = 1; x < s.nx - 1; x += stride) {
       const i = advanceCell(s, x, y);
-      if (s.capacityFine[i] <= 0.05 || s.liquidVolumeFine[i] <= 1e-5) continue;
+      if (s.capacityFine[i] <= velocityCapacity
+        || s.liquidVolumeFine[i] <= velocityVolume) continue;
       const ux = 0.5 * (u[advanceRowX(s, x, y)]! + u[advanceRowX(s, x + 1, y)]!);
       const uy = 0.5 * (v[advanceRowY(s, x, y)]! + v[advanceRowY(s, x, y + 1)]!);
       arrow(g, (x + 0.5) * S, (y + 0.5) * S, ux * S * 1.5, uy * S * 1.5, 1.1);
@@ -719,50 +793,6 @@ export interface SliceOverlay {
 /** Declaration order, which is also draw order: washes first, lines over them. */
 export const SLICE_OVERLAY_ORDER = ["fraction", "normal"] as const;
 
-/**
- * Below this a cell is vacuum, not dilute.
- *
- * Six decades under a full cell — the bottom of the residue band transport
- * actually produces, and the same floor `dense-grid/density` draws vacuum at.
- * A cell under it keeps its grid lines and nothing else: "is there any liquid
- * here at all" is the first question this overlay has to answer, and a floor of
- * tinted haze over empty cells is how that answer gets lost.
- */
-export const FRACTION_FLOOR = 1e-6;
-
-/**
- * Where a sub-half fraction sits on the residue ramp, in [0, 1].
- *
- * Volume fraction is not a linear quantity down here. Transport leaves residue
- * across every decade between the floor and about 10⁻², and a linear ramp over
- * [0, ½] buries all of it in the bottom two percent: every residue cell then
- * draws the same near-nothing at the same near-zero alpha, which is the one
- * failure this overlay exists to prevent. A unit of the ramp is a fixed number
- * of decades instead, so the low end separates from itself.
- */
-export function fractionResidueRamp(fill: number): number {
-  return Math.min(1, Math.max(0,
-    Math.log2(Math.max(fill, FRACTION_FLOOR) / FRACTION_FLOOR)
-    / Math.log2(0.5 / FRACTION_FLOOR)));
-}
-
-/**
- * The fraction as the fewest characters that keep it honest.
- *
- * A cell is a handful of pixels wide, so the readout is sized to the answer
- * rather than formatted uniformly: `.42` for anything the two decimals can
- * carry, a bare `1` for a full cell, and `1e-4` once two decimals would round
- * a resolved residue cell to `.00` and make it indistinguishable from vacuum.
- * Overfull keeps its whole value — `1.04` is a fault the lab reports, and the
- * digit that says how far past capacity the cell is, is the point of it.
- */
-export function fractionReadout(fill: number): string {
-  if (fill > 1 + 1e-4) return fill.toFixed(2);
-  if (fill >= 0.995) return "1";
-  if (fill >= 0.005) return fill.toFixed(2).slice(1);
-  return `1e${Math.round(Math.log10(Math.max(fill, FRACTION_FLOOR)))}`;
-}
-
 /** Roughly the pixels `label` needs for a readout, at its 10px monospace. */
 const readoutPixels = (text: string): number => text.length * 6 + 5;
 
@@ -772,39 +802,40 @@ export const SLICE_OVERLAYS: Readonly<Record<SliceOverlayId, SliceOverlay>> = {
     hint: "Write V/K into every cell that has room for it, and tint the dilute decades the water's own outline cannot show",
     caption: "V/K per accepted cell — the conserved quantity itself, read off the compact record rather than resampled. The water already draws the liquid half of the range geometrically, so the tint is spent where the geometry cannot help: the dilute decades below a half, which a cut line renders as a sliver too thin to see, and the overfull cells past V = K that the projection has to drain. The value is written into any cell with the pixels to hold it, so on a fine scene at a low zoom the tint is the whole reading and the numbers arrive as the cells grow.",
     keys: [
-      key("ink", "V/K", "the conserved quantity itself, read off the compact record",
-        q => q.cell.open && q.cell.fill > FRACTION_FLOOR),
-      key("transport", "dilute residue, by decade",
-        "under half a cell, where a cut line is a sliver too thin to see",
-        q => q.cell.open && q.cell.fill > FRACTION_FLOOR && q.cell.fill < 0.5),
-      key("alarm", "overfull, V > K", "past capacity: the wash is the fault, not the water",
-        q => q.cell.open && q.cell.fill > 1 + 1e-4),
+      /* Not a band: every cell with any liquid in it gets the number, and the
+       * number is written in ink. Its note is the liquid band's, because the
+       * quantity it states is the same one. */
+      key("fraction-readout", "ink", "V/K", fractionBandPaint("liquid").note,
+        q => q.cell.open && fractionBand(q.cell.fill) !== "vacuum"),
+      fractionKey("dilute", q => q.cell.open && fractionBand(q.cell.fill) === "dilute"),
+      fractionKey("overfull", q => q.cell.open && fractionBand(q.cell.fill) === "overfull"),
     ],
     draw(c) {
       const { g, lattice, scale: S } = c;
       for (const cell of lattice.cells) {
-        if (!cell.open || cell.fill <= FRACTION_FLOOR) continue;
+        const band = fractionBand(cell.fill);
+        if (!cell.open || band === "vacuum") continue;
         const x = cell.x0 * S, y = cell.y0 * S;
         const w = cell.width * S, h = cell.height * S;
-        const overfull = cell.fill > 1 + 1e-4;
         /* The liquid band gets no wash. Between a half and a full cell the
          * picture underneath is already the answer — a PLIC polygon covering
          * that share of the cell — and tinting it would only dim the one part
          * of this field the reader can already measure by eye. */
-        if (overfull) {
-          g.fillStyle = PALETTE.alarm;
+        if (band === "overfull") {
+          g.fillStyle = fractionInk("excess");
           g.globalAlpha = 0.42;
           g.fillRect(x, y, w, h);
           g.globalAlpha = 1;
-        } else if (cell.fill < 0.5) {
-          g.fillStyle = PALETTE.transport;
+        } else if (band === "dilute") {
+          g.fillStyle = fractionInk("residue");
           g.globalAlpha = 0.14 + 0.40 * fractionResidueRamp(cell.fill);
           g.fillRect(x, y, w, h);
           g.globalAlpha = 1;
         }
         const text = fractionReadout(cell.fill);
         if (Math.min(w, h) < readoutPixels(text)) continue;
-        label(c, x + w / 2, y + h / 2, text, overfull ? PALETTE.alarm : PALETTE.ink);
+        label(c, x + w / 2, y + h / 2, text,
+          band === "overfull" ? fractionInk("excess") : PALETTE.ink);
       }
     },
   },
@@ -813,10 +844,10 @@ export const SLICE_OVERLAYS: Readonly<Record<SliceOverlayId, SliceOverlay>> = {
     hint: "Draw the PLIC normal each cut cell carries, from its own interface line and out of the liquid",
     caption: "The PLIC normal each cut cell carries, drawn from the middle of its own interface chord and pointing out of the liquid. This is the record transport and the pressure embedding both read, in the canvas frame the picture is drawn in — so a normal that disagrees with the line it sits on is a reconstruction fault, not a drawing one. A cut cell the reconstruction gave no normal at all is ringed rather than left blank.",
     keys: [
-      key("output", "interface normal, out of the liquid",
+      key("interface-normal", "output", "interface normal, out of the liquid",
         "the PLIC normal this cut cell carries, drawn from the middle of its own chord",
         q => cutCell(q) && advanceCellPlane(q.lattice, q.cell) !== null),
-      key("alarm", "cut cell with no reconstruction",
+      key("unreconstructed-cut-cell", "alarm", "cut cell with no reconstruction",
         "cut, and given no normal — the liquid drawn here is the solver's fallback",
         q => cutCell(q) && advanceCellPlane(q.lattice, q.cell) === null),
     ],
@@ -828,7 +859,8 @@ export const SLICE_OVERLAYS: Readonly<Record<SliceOverlayId, SliceOverlay>> = {
       drawInterface(c, PALETTE.output, 1.6);
       g.fillStyle = PALETTE.output;
       for (const cell of lattice.cells) {
-        if (!cell.open || cell.fill <= 1e-3 || cell.fill >= 1 - 1e-3) continue;
+        if (!cell.open || cell.fill <= interfaceFill
+          || cell.fill >= 1 - interfaceFill) continue;
         const x = cell.x0 * S, y = cell.y0 * S;
         const w = cell.width * S, h = cell.height * S;
         const plane = advanceCellPlane(lattice, cell);
@@ -859,19 +891,31 @@ export const SLICE_OVERLAYS: Readonly<Record<SliceOverlayId, SliceOverlay>> = {
   },
 };
 
-/* ---- one lens per stage -------------------------------------------- */
+/* ---- how each stage's lens is drawn --------------------------------- */
 
-export const ADVANCE_LENSES: Readonly<Record<AdvanceStageId, Lens>> = {
+/**
+ * The drawing half of every stage lens, and nothing else.
+ *
+ * What each mark is *called*, what it *means* and what colour role it takes
+ * are declared beside the method, in `SPARSE_CM12_STAGES[stage].slice`. This
+ * table answers the other half: how the stage is painted, and — per declared
+ * mark id — the one predicate that decides whether the cell under the pointer
+ * carries it. The two are joined below, so a mark declared with no predicate,
+ * or a predicate answering for a mark nobody declared, fails at the join
+ * rather than becoming a silent gap in the probe.
+ */
+interface StageDrawing {
+  readonly draw: (c: LensContext) => void;
+  /** One predicate per declared mark id, cut at the shared thresholds. */
+  readonly holds: Readonly<Record<string, (q: MarkQuery) => boolean>>;
+}
+
+const ADVANCE_STAGE_DRAWING = {
   "transport-velocity-extension": {
-    caption: "Eight packet sweeps push face velocity out of the liquid into the empty band, so transport has a defined velocity everywhere it might sweep. A ghost row is one no liquid cell touches.",
-    keys: [
-      key("transport", "extended ghost row",
-        "the sweeps wrote velocity here: no liquid cell touches this row",
-        q => q.s.extensionFine[advanceCell(q.s, q.fx, q.fy)] !== 0),
-      key("amber", "carried velocity",
-        "liquid here carries its own face velocity into the sweep",
-        carriesVelocity),
-    ],
+    holds: {
+      "extended-ghost-row": q => q.s.extensionFine[advanceCell(q.s, q.fx, q.fy)] !== 0,
+      "carried-velocity": carriesVelocity,
+    },
     draw(c) {
       const { g, s, scale: S } = c;
       g.strokeStyle = PALETTE.transport;
@@ -889,15 +933,11 @@ export const ADVANCE_LENSES: Readonly<Record<AdvanceStageId, Lens>> = {
     },
   },
   "face-preparation": {
-    caption: "Every row is re-cut against the solids. The stored face velocity already folds in the aperture as u = a·u_fluid + (1−a)·u_wall — flux code must never multiply by a twice.",
-    keys: [
-      key("solidEdge", "closed row · a = 0",
-        "a row of this cell is shut against the solid, so no flux crosses it",
-        q => eitherRow(q, aperture => aperture <= 0.05)),
-      key("momentum", "partly open row",
-        "a row of this cell is part solid; the stored u already folds that aperture in",
-        q => eitherRow(q, aperture => aperture > 0.05 && aperture <= 0.98)),
-    ],
+    holds: {
+      "closed-row": q => eitherRow(q, aperture => aperture <= closedAperture),
+      "partly-open-row": q =>
+        eitherRow(q, aperture => aperture > closedAperture && aperture <= openAperture),
+    },
     draw(c) {
       const { g, s, scale: S } = c;
       g.lineWidth = 2.6;
@@ -905,9 +945,10 @@ export const ADVANCE_LENSES: Readonly<Record<AdvanceStageId, Lens>> = {
         const aperture = Math.min(
           x > 0 ? s.capacityFine[advanceCell(s, x - 1, y)] : 0,
           x < s.nx ? s.capacityFine[advanceCell(s, x, y)] : 0);
-        if (aperture > 0.98) continue;
-        g.strokeStyle = aperture <= 0.05 ? PALETTE.solidEdge : PALETTE.momentum;
-        g.globalAlpha = aperture <= 0.05 ? 0.8 : 0.95;
+        if (aperture > openAperture) continue;
+        const shut = aperture <= closedAperture;
+        g.strokeStyle = shut ? PALETTE.solidEdge : PALETTE.momentum;
+        g.globalAlpha = shut ? 0.8 : 0.95;
         g.beginPath();
         g.moveTo(x * S, y * S + 1);
         g.lineTo(x * S, (y + 1) * S - 1);
@@ -917,41 +958,37 @@ export const ADVANCE_LENSES: Readonly<Record<AdvanceStageId, Lens>> = {
     },
   },
   "body-forces": {
-    caption: "Gravity lands on the rows, not the cells — one add per row that touches liquid. Nothing else in the advance writes velocity without being projected afterwards.",
-    keys: [key("momentum", "row taking g·dt",
-      "gravity lands on this row once, and the projection answers for it",
-      q => q.s.liquidVolumeFine[advanceCell(q.s, q.fx, q.fy)]! > 1e-5
-        || q.s.liquidVolumeFine[advanceCell(q.s, q.fx, Math.max(0, q.fy - 1))]! > 1e-5)],
+    holds: {
+      "row-taking-gravity": q =>
+        q.s.liquidVolumeFine[advanceCell(q.s, q.fx, q.fy)]! > velocityVolume
+        || q.s.liquidVolumeFine[advanceCell(q.s, q.fx, Math.max(0, q.fy - 1))]! > velocityVolume,
+    },
     draw(c) {
       const { g, s, scale: S } = c;
       g.strokeStyle = PALETTE.momentum;
       g.globalAlpha = 0.9;
       for (let y = 0; y < s.ny; y += 2) for (let x = 1; x < s.nx - 1; x += 2) {
         const above = advanceCell(s, x, Math.max(0, y - 1)), here = advanceCell(s, x, y);
-        if (s.liquidVolumeFine[above] <= 1e-5 && s.liquidVolumeFine[here] <= 1e-5) continue;
+        if (s.liquidVolumeFine[above] <= velocityVolume
+          && s.liquidVolumeFine[here] <= velocityVolume) continue;
         arrow(g, (x + 0.5) * S, y * S - 5, 0, 11, 1.3);
       }
       g.globalAlpha = 1;
     },
   },
   "pressure-topology": {
-    caption: "The compact leaf set this solve runs on. The repair is incremental — seeded from the previous generation, walked over dirty worklists — but the classify pass is still a full accepted-cell scan.",
-    keys: [
-      key("pressure", "pressure cell",
-        "over half full, so this cell is a leaf in the set the solve runs on",
-        pressureCell),
-      key("adaptivity", "2:1 port",
-        "this brick meets a horizontal neighbour a rung away; the seam is a 2:1 port",
-        q => {
-          const column = q.brick % q.s.bx, rung = q.s.brickRung[q.brick];
-          return (column > 0 && q.s.brickRung[q.brick - 1] !== rung)
-            || (column + 1 < q.s.bx && q.s.brickRung[q.brick + 1] !== rung);
-        }),
-    ],
+    holds: {
+      "pressure-cell": pressureCell,
+      "two-to-one-port": q => {
+        const column = q.brick % q.s.bx, rung = q.s.brickRung[q.brick];
+        return (column > 0 && q.s.brickRung[q.brick - 1] !== rung)
+          || (column + 1 < q.s.bx && q.s.brickRung[q.brick + 1] !== rung);
+      },
+    },
     draw(c) {
       const { g, s, lattice, scale: S } = c;
       for (const cell of lattice.cells) {
-        if (!cell.open || cell.fill <= 0.5) continue;
+        if (!cell.open || cell.fill <= pressureFill) continue;
         tint(c, cell.x0, cell.y0, cell.width, PALETTE.pressure, 0.3, cell.height);
       }
       g.strokeStyle = PALETTE.adaptivity;
@@ -968,21 +1005,16 @@ export const ADVANCE_LENSES: Readonly<Record<AdvanceStageId, Lens>> = {
     },
   },
   "pressure-rhs": {
-    caption: "Divergence of the extended face field, one row per canonical incidence. Blue is compressing, red expanding; a converged solve drives every one of them to zero.",
-    keys: [
-      key("pressure", "negative divergence",
-        "the cell is compressing; a converged solve drives this to zero",
-        q => pressureCell(q) && cellMean(q.s, q.cell, i => q.s.divergenceFine[i]!) < 0),
-      key("alarm", "positive divergence",
-        "the cell is expanding; a converged solve drives this to zero",
-        q => pressureCell(q) && cellMean(q.s, q.cell, i => q.s.divergenceFine[i]!) > 0),
-    ],
+    holds: {
+      "negative-divergence": q => pressureCell(q) && cellMean(q.s, q.cell, i => q.s.divergenceFine[i]!) < 0,
+      "positive-divergence": q => pressureCell(q) && cellMean(q.s, q.cell, i => q.s.divergenceFine[i]!) > 0,
+    },
     draw(c) {
       const { s, lattice } = c;
       let peak = 1e-6;
       for (let i = 0; i < s.divergenceFine.length; i++) peak = Math.max(peak, Math.abs(s.divergenceFine[i]));
       for (const cell of lattice.cells) {
-        if (!cell.open || cell.fill <= 0.5) continue;
+        if (!cell.open || cell.fill <= pressureFill) continue;
         const mean = cellMean(s, cell, i => s.divergenceFine[i]);
         tint(c, cell.x0, cell.y0, cell.width,
           mean < 0 ? PALETTE.pressure : PALETTE.alarm,
@@ -991,24 +1023,20 @@ export const ADVANCE_LENSES: Readonly<Record<AdvanceStageId, Lens>> = {
     },
   },
   "pressure-solve": {
-    caption: "The solved pressure. One reduction per iteration, a single positive Jacobi diagonal as the preconditioner, and a true-residual guard every eighth iteration — the tail stays encoded whether or not it has converged.",
-    keys: [
-      key("pressure", "high pressure", "solved pressure, above the free-surface value",
-        q => pressureCell(q) && cellMean(q.s, q.cell, i => q.s.pressureFine[i]!) > 0),
-      key("ground", "free surface · p = 0",
-        "water with no solved pressure over it: the Dirichlet value the surface is pinned to",
-        /* Restricted to cells that hold water. Every empty cell in the domain
-         * is also at p = 0, and saying so about air three bricks from the
-         * liquid would bury the one place the reading means something. */
-        q => q.cell.open && q.cell.fill > 1e-3
-          && (!pressureCell(q) || cellMean(q.s, q.cell, i => q.s.pressureFine[i]!) <= 0)),
-    ],
+    holds: {
+      "high-pressure": q => pressureCell(q) && cellMean(q.s, q.cell, i => q.s.pressureFine[i]!) > 0,
+      /* Restricted to cells that hold water. Every empty cell in the domain
+       * is also at p = 0, and saying so about air three bricks from the
+       * liquid would bury the one place the reading means something. */
+      "free-surface": q => q.cell.open && q.cell.fill > interfaceFill
+        && (!pressureCell(q) || cellMean(q.s, q.cell, i => q.s.pressureFine[i]!) <= 0),
+    },
     draw(c) {
       const { s, lattice } = c;
       let peak = 1e-6;
       for (let i = 0; i < s.pressureFine.length; i++) peak = Math.max(peak, s.pressureFine[i]);
       for (const cell of lattice.cells) {
-        if (!cell.open || cell.fill <= 0.5) continue;
+        if (!cell.open || cell.fill <= pressureFill) continue;
         const mean = cellMean(s, cell, i => s.pressureFine[i]);
         tint(c, cell.x0, cell.y0, cell.width, PALETTE.pressure,
           Math.min(0.9, (Math.max(0, mean) / peak) * 0.95), cell.height);
@@ -1016,35 +1044,27 @@ export const ADVANCE_LENSES: Readonly<Record<AdvanceStageId, Lens>> = {
     },
   },
   "velocity-projection": {
-    caption: "Grey is the field entering the projection, amber the divergence-free field leaving it. The difference is the pressure gradient, applied one row at a time.",
-    keys: [
-      key("muted", "before projection",
-        "the grey arrow: the field entering the projection, gravity already in it",
-        carriesVelocity),
-      key("amber", "after projection",
-        "the amber arrow: the divergence-free field leaving it",
-        carriesVelocity),
-    ],
+    holds: {
+      "before-projection": carriesVelocity,
+      "after-projection": carriesVelocity,
+    },
     draw(c) {
       velocityField(c, 3, PALETTE.muted, 0.55, true);
       velocityField(c, 3, PALETTE.amber, 0.95, false);
     },
   },
   "conservative-transport": {
-    caption: "Volume moves as swept prisms cut from the PLIC polygon and handed across one shared subface. Each arrow is a paired debit and credit; a marked row is one the bounded limiter had to cut back.",
-    keys: [
-      key("transport", "swept flux",
-        "volume crossed a row of this cell as a swept prism this advance",
-        q => {
-          const peak = Math.max(q.peakOf(q.s.limitedFluxXFine), q.peakOf(q.s.limitedFluxYFine));
-          return boundingRowsX(q).some(row => Math.abs(q.s.limitedFluxXFine[row]!) >= peak * 0.05)
-            || boundingRowsY(q).some(row => Math.abs(q.s.limitedFluxYFine[row]!) >= peak * 0.05);
-        }),
-      key("alarm", "limiter clipped",
-        "the bounded limiter had to cut a row of this cell back to keep V inside K",
-        q => boundingRowsX(q).some(row => q.s.fluxLimitedXFine[row] !== 0)
-          || boundingRowsY(q).some(row => q.s.fluxLimitedYFine[row] !== 0)),
-    ],
+    holds: {
+      "swept-flux": q => {
+        const peak = Math.max(q.peakOf(q.s.limitedFluxXFine), q.peakOf(q.s.limitedFluxYFine));
+        return boundingRowsX(q)
+          .some(row => Math.abs(q.s.limitedFluxXFine[row]!) >= peak * fluxShare)
+          || boundingRowsY(q)
+            .some(row => Math.abs(q.s.limitedFluxYFine[row]!) >= peak * fluxShare);
+      },
+      "limiter-clipped": q => boundingRowsX(q).some(row => q.s.fluxLimitedXFine[row] !== 0)
+        || boundingRowsY(q).some(row => q.s.fluxLimitedYFine[row] !== 0),
+    },
     draw(c) {
       const { g, s, scale: S } = c;
       let peak = 1e-6;
@@ -1054,7 +1074,7 @@ export const ADVANCE_LENSES: Readonly<Record<AdvanceStageId, Lens>> = {
       g.fillStyle = PALETTE.transport;
       for (let y = 0; y < s.ny; y++) for (let x = 0; x <= s.nx; x++) {
         const flux = s.limitedFluxXFine[advanceRowX(s, x, y)];
-        if (Math.abs(flux) < peak * 0.05) continue;
+        if (Math.abs(flux) < peak * fluxShare) continue;
         g.globalAlpha = Math.min(1, 0.3 + Math.abs(flux) / peak);
         const width = Math.max(2, Math.abs(flux) * S * 2.2);
         g.fillRect(x * S - (flux > 0 ? width : 0), y * S + 2, width, S - 4);
@@ -1062,7 +1082,7 @@ export const ADVANCE_LENSES: Readonly<Record<AdvanceStageId, Lens>> = {
       }
       for (let y = 0; y <= s.ny; y++) for (let x = 0; x < s.nx; x++) {
         const flux = s.limitedFluxYFine[advanceRowY(s, x, y)];
-        if (Math.abs(flux) < peak * 0.05) continue;
+        if (Math.abs(flux) < peak * fluxShare) continue;
         g.globalAlpha = Math.min(1, 0.3 + Math.abs(flux) / peak);
         arrow(g, (x + 0.5) * S, y * S - (flux > 0 ? 4 : -4), 0, Math.sign(flux) * 9);
       }
@@ -1079,12 +1099,11 @@ export const ADVANCE_LENSES: Readonly<Record<AdvanceStageId, Lens>> = {
     },
   },
   "tracer-advection": {
-    caption: "Markers ride the same published transport velocity the volume does. They carry no mass — they exist so a colour or an age can be read back out of the flow.",
-    keys: [key("adaptivity", "marker",
-      "a marker rides this cell; it carries no mass, only what was written on it",
-      q => q.s.markers.some(marker =>
+    holds: {
+      "marker": q => q.s.markers.some(marker =>
         marker.x >= q.cell.x0 && marker.x < q.cell.x0 + q.cell.width
-        && marker.y >= q.cell.y0 && marker.y < q.cell.y0 + q.cell.height))],
+        && marker.y >= q.cell.y0 && marker.y < q.cell.y0 + q.cell.height),
+    },
     draw(c) {
       const { g, s, scale: S } = c;
       g.fillStyle = PALETTE.adaptivity;
@@ -1098,17 +1117,17 @@ export const ADVANCE_LENSES: Readonly<Record<AdvanceStageId, Lens>> = {
     },
   },
   "scalar-publication": {
-    caption: "What this advance actually changed. Only these cells enter the dirty worklists the adaptivity band walks — everything unlit is carried forward untouched.",
-    keys: [key("output", "volume changed",
-      "this advance moved volume here, so the cell enters the dirty worklists",
-      q => {
+    holds: {
+      "volume-changed": q => {
         let changed = 0;
         for (let j = 0; j < q.cell.height; j += 1) for (let i = 0; i < q.cell.width; i += 1) {
           const index = advanceCell(q.s, q.cell.x0 + i, q.cell.y0 + j);
-          changed += Math.abs(q.s.liquidVolumeFine[index]! - q.s.previousLiquidVolumeFine[index]!);
+          changed += Math.abs(
+            q.s.liquidVolumeFine[index]! - q.s.previousLiquidVolumeFine[index]!);
         }
-        return changed >= 1e-4;
-      })],
+        return changed >= changedVolume;
+      },
+    },
     draw(c) {
       const { s, lattice } = c;
       for (const cell of lattice.cells) {
@@ -1118,22 +1137,21 @@ export const ADVANCE_LENSES: Readonly<Record<AdvanceStageId, Lens>> = {
           const index = advanceCell(s, cell.x0 + i, cell.y0 + j);
           changed += Math.abs(s.liquidVolumeFine[index] - s.previousLiquidVolumeFine[index]);
         }
-        if (changed < 1e-4) continue;
+        if (changed < changedVolume) continue;
         tint(c, cell.x0, cell.y0, cell.width, PALETTE.output,
           Math.min(0.8, 0.18 + changed * 3), cell.height);
       }
     },
   },
   "activity-measurement": {
-    caption: "One score per brick, from interface presence and peak speed. This is the only number the resolution policy reads — geometry and motion, never an authored region.",
-    keys: [key("adaptivity", "high activity",
-      "interface presence and peak speed, scored; the only number the resolution policy reads",
-      q => q.s.brickActivity[q.brick]! > 0.001)],
+    holds: {
+      "high-activity": q => q.s.brickActivity[q.brick]! > activeBrickScore,
+    },
     draw(c) {
       const { s, scale: S } = c;
       for (let by = 0; by < s.by; by++) for (let bx = 0; bx < s.bx; bx++) {
         const score = s.brickActivity[by * s.bx + bx];
-        if (score <= 0.001) continue;
+        if (score <= activeBrickScore) continue;
         tint(c, bx * ADVANCE_BRICK_FINE, by * ADVANCE_BRICK_FINE, ADVANCE_BRICK_FINE,
           PALETTE.adaptivity, Math.min(0.7, score * 0.8));
         label(c, (bx + 0.5) * ADVANCE_BRICK_FINE * S, (by + 0.5) * ADVANCE_BRICK_FINE * S,
@@ -1142,10 +1160,9 @@ export const ADVANCE_LENSES: Readonly<Record<AdvanceStageId, Lens>> = {
     },
   },
   "resolution-planning": {
-    caption: "The activity score becomes a target rung on the dyadic ladder — 1, 2, 4 or 8 cells per brick edge — then 2:1 grading pulls in any neighbour sitting more than one rung away.",
-    keys: [key("adaptivity", "target rung",
-      "the rung this brick is planned to carry, after 2:1 grading pulled its neighbours in",
-      () => true)],
+    holds: {
+      "target-rung": () => true,
+    },
     draw(c) {
       const { s, scale: S } = c;
       for (let by = 0; by < s.by; by++) for (let bx = 0; bx < s.bx; bx++) {
@@ -1158,10 +1175,9 @@ export const ADVANCE_LENSES: Readonly<Record<AdvanceStageId, Lens>> = {
     },
   },
   "candidate-transfer": {
-    caption: "Bricks whose rung moved this advance. The shadow topology is built beside the live one and committed as a single transaction at the frame tail — so this flip is the next advance's input, never this one's.",
-    keys: [key("output", "rung changed",
-      "this brick's rung moved; the flip commits at the frame tail, so it is the next advance's input",
-      q => q.s.brickRung[q.brick] !== q.s.previousBrickRung[q.brick])],
+    holds: {
+      "rung-changed": q => q.s.brickRung[q.brick] !== q.s.previousBrickRung[q.brick],
+    },
     draw(c) {
       const { g, s, scale: S } = c;
       g.lineWidth = 3;
@@ -1178,22 +1194,17 @@ export const ADVANCE_LENSES: Readonly<Record<AdvanceStageId, Lens>> = {
     },
   },
   "brick-retirement": {
-    caption: "A brick holding no liquid and no source is released back to the atlas. The hatched bricks pay nothing this frame — the sparse set is the lit region plus its band, and no more.",
-    keys: [
-      key("muted", "retired brick",
-        "no liquid and no source: this brick is released back to the atlas",
-        q => brickVolumeAt(q.s, q.brick) <= 1e-3),
-      key("liquid", "resident brick",
-        "still holding liquid, so this brick pays for the frame",
-        q => brickVolumeAt(q.s, q.brick) > 1e-3),
-    ],
+    holds: {
+      "retired-brick": q => brickVolumeAt(q.s, q.brick) <= residentBrickVolume,
+      "resident-brick": q => brickVolumeAt(q.s, q.brick) > residentBrickVolume,
+    },
     draw(c) {
       const { g, s, scale: S } = c;
       g.strokeStyle = PALETTE.muted;
       g.globalAlpha = 0.45;
       g.lineWidth = 1;
       for (let by = 0; by < s.by; by++) for (let bx = 0; bx < s.bx; bx++) {
-        if (brickVolume(s, bx, by) > 1e-3) continue;
+        if (brickVolume(s, bx, by) > residentBrickVolume) continue;
         g.save();
         g.beginPath();
         g.rect(bx * ADVANCE_BRICK_FINE * S, by * ADVANCE_BRICK_FINE * S,
@@ -1211,34 +1222,66 @@ export const ADVANCE_LENSES: Readonly<Record<AdvanceStageId, Lens>> = {
     },
   },
   "presentation-publication": {
-    caption: "The surface the renderer receives: the PLIC segments of every interface cell, stitched across brick boundaries at whatever rung each brick happens to be carrying.",
-    keys: [key("output", "published interface",
-      "a PLIC chord in this cell is part of the surface the renderer receives",
-      q => advanceCellPlane(q.lattice, q.cell) !== null)],
+    holds: {
+      "published-interface": q => advanceCellPlane(q.lattice, q.cell) !== null,
+    },
     draw(c) { drawInterface(c, PALETTE.output, 2.6); },
   },
-};
+} as const satisfies Readonly<Record<AdvanceStageId, StageDrawing>>;
+
+/**
+ * Join one declaration to its drawing.
+ *
+ * The declaration is the roster: a mark exists because the method says the
+ * stage can put it on a cell. The drawing has to answer for every one of them
+ * and for no others — an unanswered mark would sit in the strip and never
+ * appear in the probe, and an unclaimed predicate is a reading nobody named.
+ */
+function joinLens(declaration: Omit<AdvanceSliceDeclaration, "loopStep">,
+  drawing: StageDrawing): Lens {
+  const answered = new Set(Object.keys(drawing.holds));
+  const keys = declaration.keys.map(declared => {
+    const holds = drawing.holds[declared.id];
+    if (!holds) throw new Error(`the "${declared.id}" mark is declared but never answered`);
+    answered.delete(declared.id);
+    return { ...declared, holds };
+  });
+  if (answered.size) {
+    throw new Error(`nothing declares the ${[...answered].join(", ")} mark`);
+  }
+  return { caption: declaration.caption, keys, draw: drawing.draw };
+}
+
+/* ---- one lens per stage -------------------------------------------- */
+
+/**
+ * The lens roster, assembled rather than written.
+ *
+ * `Record<AdvanceStageId, Lens>` is what makes a stage the encoder renames a
+ * type error here as well as in the registry, and `advanceStageSlice` is what
+ * makes a stage with no declaration a loud failure rather than a blank caption.
+ */
+export const ADVANCE_LENSES: Readonly<Record<AdvanceStageId, Lens>> = Object.freeze(
+  Object.fromEntries(ADVANCE_STAGE_ORDER.map(stage =>
+    [stage, joinLens(advanceStageSlice(stage), ADVANCE_STAGE_DRAWING[stage])],
+  )) as Record<AdvanceStageId, Lens>);
 
 /**
  * Step 1 of the loop is not a stage — it is the state the advance starts from,
  * so it gets a lens of its own rather than borrowing one.
  */
-export const REPRESENT_LENS: Lens = {
-  caption: "Before anything moves: a sparse set of bricks, each carrying its own rung on the dyadic ladder, and inside them the liquid volume held per cell with an exact PLIC line wherever a cell is cut. Nothing here is a level set — the conserved quantity is volume.",
-  keys: [
-    key("adaptivity", "brick rung", "cells per brick edge, on the dyadic ladder",
-      () => true),
-    key("output", "reconstructed interface",
-      "an exact PLIC line, cut from the volume this cell holds",
-      q => advanceCellPlane(q.lattice, q.cell) !== null),
-  ],
+export const REPRESENT_LENS: Lens = joinLens(ADVANCE_REPRESENT_SLICE, {
+  holds: {
+    "brick-rung": () => true,
+    "reconstructed-interface": q => advanceCellPlane(q.lattice, q.cell) !== null,
+  },
   draw(c) {
     const { s, scale: S } = c;
     for (let by = 0; by < s.by; by++) for (let bx = 0; bx < s.bx; bx++) {
-      if (brickVolume(s, bx, by) <= 1e-3) continue;
+      if (brickVolume(s, bx, by) <= residentBrickVolume) continue;
       label(c, (bx + 0.5) * ADVANCE_BRICK_FINE * S, by * ADVANCE_BRICK_FINE * S + 9,
         `${ADVANCE_RUNGS[s.brickRung[by * s.bx + bx]!]}²`, PALETTE.muted);
     }
     drawInterface(c, PALETTE.output, 2.6);
   },
-};
+});

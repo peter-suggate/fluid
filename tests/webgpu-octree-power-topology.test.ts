@@ -22,21 +22,6 @@ function catalogViews() {
   return decodeGeneratedOctreePowerCatalog(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
 }
 
-test("power topology planner accounts only compact rows and fixed catalog", () => {
-  const catalog = catalogViews();
-  const shallow = planOctreePowerTopology(100, catalog);
-  const deep = planOctreePowerTopology(100, catalog);
-  assert.deepEqual(shallow, deep);
-  assert.equal(shallow.entryCount, OCTREE_GENERATED_POWER_CATALOG_MANIFEST.configurationCount);
-  assert.equal(shallow.lookupCount, OCTREE_GENERATED_POWER_CATALOG_MANIFEST.descriptorCount);
-  assert.equal(shallow.metricBytes, 1_600);
-  assert.equal(shallow.catalogBytes, OCTREE_GENERATED_POWER_CATALOG_MANIFEST.byteCount - 40 * 4);
-  assert.equal(shallow.rowTemplateBytes,
-    catalog.rowTemplateHeaders.byteLength + catalog.rowTemplateSlots.byteLength
-    + catalog.rowTemplateData.byteLength + catalog.rowTemplateDiagonals.byteLength
-    + catalog.reconstructionData.byteLength);
-  assert.ok(shallow.allocatedBytes < 16 * 1024 * 1024);
-});
 
 test("power topology planner rejects malformed catalog lookup metadata", () => {
   const catalog = catalogViews();

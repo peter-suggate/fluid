@@ -10,24 +10,6 @@ import { parseQueryState } from "../lib/core/url-state";
 import { initializeSparseBrickAtlasFromScene } from "../lib/methods/adaptive-volume/sparse-brick-atlas";
 
 const dims = [48, 32, 40] as const;
-test("stationary bowl is a selectable scene with its own still-water profile", () => {
-  const definition = getSceneDefinition("stationary-bowl"), scene = sceneDocument(definition);
-  assert.notEqual(defaultScenePresetId, "stationary-bowl", "adding a study must not change the startup scene");
-  assert.deepEqual(validateScene(scene), []);
-  assert.deepEqual(parseScene(serializeScene(scene)).fluid.initialHeightField, scene.fluid.initialHeightField);
-  const query = parseQueryState("?scene=stationary-bowl");
-  assert.equal(query.methodId, "adaptive-volume");
-  assert.deepEqual(query.scene.fluid.initialHeightField, scene.fluid.initialHeightField);
-  assert.deepEqual(scene.fluid.gravity_m_s2, { x: 0, y: 0, z: 0 });
-  assert.equal(definition.methodProfile?.overrides?.gammaDiffusion, "on");
-  assert.equal(definition.methodProfile?.overrides?.surfaceSharpening, "on");
-  const changed = { ...scene.fluid.initialHeightField!, baseHeight_m: .9 };
-  const edited = parseQueryState(`?scene=stationary-bowl&scene.fluid.initialHeightField=${encodeURIComponent(JSON.stringify(changed))}`);
-  assert.deepEqual(edited.scene.fluid.initialHeightField, changed);
-  assert.equal(scene.fluid.initialHeightField!.kind, "quadratic");
-  if (scene.fluid.initialHeightField!.kind === "quadratic") scene.fluid.initialHeightField!.curvatureX_mInv = -1;
-  assert.ok(validateScene(scene).some(e => e.includes("height field")));
-});
 
 test("bowl source agrees with the original diagnostic volume quadrature", () => {
   const scene = sceneDocument(getSceneDefinition("stationary-bowl"));

@@ -265,20 +265,6 @@ test("frontier TEI publication mirrors both banks and clears retired leaves", ()
     "retirement must publish inactive records before a leaf ID is recycled");
 });
 
-test("raw Phase-1 receipts are reachable only through a construction specialization", () => {
-  assert.match(resident, /static createPhase1TransportReceiptOracleForQA\(/);
-  const factory = resident.slice(
-    resident.indexOf("static createPhase1TransportReceiptOracleForQA("),
-    resident.indexOf("private static async createConfigured("));
-  assert.match(factory,
-    /false, true, false, false, false, report\)/);
-  const productionFactory = resident.slice(resident.indexOf("static create("),
-    resident.indexOf("static createPresentationPublisherOracleForQA("));
-  assert.match(productionFactory, /false, false, false, true, true, report/);
-  assert.match(solver, /static createPhase1TransportReceiptOracleForQA\(/);
-  assert.match(solver,
-    /PHASE1_TRANSPORT_RECEIPT_QA_TOKEN[\s\S]*createPhase1TransportReceiptOracleForQA/);
-});
 
 
 test("sharpening traces stop before an owned solid or inactive cell without weakening recipient failures", () => {

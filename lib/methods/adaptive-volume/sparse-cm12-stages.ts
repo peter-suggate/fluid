@@ -1,6 +1,7 @@
 import { correctionStageControl } from "./correction-controls";
 import { adaptivityStageControl } from "./features/adaptivity/definition";
 import { algorithmStageControl } from "./features/algorithms/definition";
+import type { AdvanceSliceDeclaration } from "./features/advance-slice/definition";
 /**
  * Every Sparse CM12 stage, described once.
  *
@@ -83,6 +84,18 @@ interface SparseCM12StageDeclarationBase<Stage extends SparseCM12ResidentStageId
    * stage is a type error here, not a ◎ that opens the wrong picture.
    */
   readonly lens: (AnyStageLens & { readonly stage: Stage }) | null;
+  /**
+   * How the 2-D advance slice reads this stage: its caption, the marks the
+   * picture may put on a cell, and which of the loop's four readings it falls
+   * under. Declaration only — what this stage *is*, said once more in the
+   * terms a reader watching one cell needs, never a drawing. The lab joins it
+   * with its own `draw`/`holds` table in `advance-lab/lenses.ts`.
+   *
+   * Absent exactly on the stages the production graph no longer encodes: a
+   * retired stage has nothing to show, and giving it a caption would put a
+   * lens in the strip for work that never runs.
+   */
+  readonly slice?: AdvanceSliceDeclaration;
   readonly tip: FluidPipelineTip;
   /** The short factual chip under the label. Never a description. */
   readonly chip: (context: FluidPipelineContext) => string;
@@ -320,6 +333,16 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       },
     },
     lens: null,
+    slice: {
+      caption: "Eight packet sweeps push face velocity out of the liquid into the empty band, so transport has a defined velocity everywhere it might sweep. A ghost row is one no liquid cell touches.",
+      keys: [
+        { id: "extended-ghost-row", tone: "transport", label: "extended ghost row",
+          note: "the sweeps wrote velocity here: no liquid cell touches this row" },
+        { id: "carried-velocity", tone: "amber", label: "carried velocity",
+          note: "liquid here carries its own face velocity into the sweep" },
+      ],
+      loopStep: 2,
+    },
     tip: {
       summary: "FCA1 seals the frame's body and boundary authority. VEX2 caches accepted packet addresses by topology generation, selects compact or direct execution from occupancy, initializes packet validity and runs eight packet sweeps over the accepted topology image; sweep 8 publishes the effective transport velocity. Last, the AEI transport packet authority is compiled from the prior frame's final-scalar masks.",
       reads: "projected face velocity, accepted topology image, prior final-scalar packet masks",
@@ -342,6 +365,16 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       },
     },
     lens: null,
+    slice: {
+      caption: "Every row is re-cut against the solids. The stored face velocity already folds in the aperture as u = a·u_fluid + (1−a)·u_wall — flux code must never multiply by a twice.",
+      keys: [
+        { id: "closed-row", tone: "solidEdge", label: "closed row · a = 0",
+          note: "a row of this cell is shut against the solid, so no flux crosses it" },
+        { id: "partly-open-row", tone: "momentum", label: "partly open row",
+          note: "a row of this cell is part solid; the stored u already folds that aperture in" },
+      ],
+      loopStep: 2,
+    },
     tip: {
       summary: "Traces accepted faces with RK2 through extended velocity, then samples the source staggered face field on the finest incident lattice. Physical subface overlap selects mixed-resolution samples. Dry support, moving cut faces and uncertified exterior patches use the extended velocity field. Explicit coarse regions can enlarge trajectory sampling without coarsening the advected face field.",
       reads: "source face velocity, extended trajectory velocity, accepted cells and composite row topology",
@@ -364,6 +397,16 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       },
     },
     lens: null,
+    slice: {
+      caption: "Volume moves as swept prisms cut from the PLIC polygon and handed across one shared subface. Each arrow is a paired debit and credit; a marked row is one the bounded limiter had to cut back.",
+      keys: [
+        { id: "swept-flux", tone: "transport", label: "swept flux",
+          note: "volume crossed a row of this cell as a swept prism this advance" },
+        { id: "limiter-clipped", tone: "alarm", label: "limiter clipped",
+          note: "the bounded limiter had to cut a row of this cell back to keep V inside K" },
+      ],
+      loopStep: 3,
+    },
     tip: {
       summary: "Advects the accepted adaptive phi field, builds a sparse whole-frame donor/receiver coupling, normalizes its marginals, and gathers extensive liquid volume once. Excess volume remains explicit for the pressure source instead of being clipped to cell capacity.",
       reads: "adaptive phi, extensive liquid volume, cell capacity, projected face velocity and compiled topology",
@@ -384,6 +427,14 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     label: "Marker advection", band: "transport", side: "right",
     phase: { id: "other", label: "Fluid marker advection along the transport characteristic" },
     lens: null,
+    slice: {
+      caption: "Markers ride the same published transport velocity the volume does. They carry no mass — they exist so a colour or an age can be read back out of the flow.",
+      keys: [
+        { id: "marker", tone: "adaptivity", label: "marker",
+          note: "a marker rides this cell; it carries no mass, only what was written on it" },
+      ],
+      loopStep: 4,
+    },
     tip: {
       summary: "Presentation-only markers integrated through the extended velocity that supplies the geometric face fluxes. Encoded only while the marker view is on, so this reads zero on an ordinary frame.",
       reads: "extended transport velocity, accepted density",
@@ -513,6 +564,14 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       },
     },
     lens: null,
+    slice: {
+      caption: "What this advance actually changed. Only these cells enter the dirty worklists the adaptivity band walks — everything unlit is carried forward untouched.",
+      keys: [
+        { id: "volume-changed", tone: "output", label: "volume changed",
+          note: "this advance moved volume here, so the cell enters the dirty worklists" },
+      ],
+      loopStep: 4,
+    },
     tip: {
       summary: "Publishes final-scalar packet masks and the completed scalar output without modifying density or gamma. This publication runs even when every correction is disabled.",
       reads: "completed scalar stage coverage",
@@ -526,6 +585,14 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     label: "Body forces", band: "momentum", side: "left",
     phase: { id: "velocity-advection", label: "Body-force prediction" },
     lens: null,
+    slice: {
+      caption: "Gravity lands on the rows, not the cells — one add per row that touches liquid. Nothing else in the advance writes velocity without being projected afterwards.",
+      keys: [
+        { id: "row-taking-gravity", tone: "momentum", label: "row taking g·dt",
+          note: "gravity lands on this row once, and the projection answers for it" },
+      ],
+      loopStep: 2,
+    },
     tip: {
       summary: "Applies gravity and scene acceleration on the accepted face rows before projection.",
       reads: "transported face velocity, scene acceleration",
@@ -564,6 +631,16 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       },
     },
     lens: null,
+    slice: {
+      caption: "The compact leaf set this solve runs on. The repair is incremental — seeded from the previous generation, walked over dirty worklists — but the classify pass is still a full accepted-cell scan.",
+      keys: [
+        { id: "pressure-cell", tone: "pressure", label: "pressure cell",
+          note: "over half full, so this cell is a leaf in the set the solve runs on" },
+        { id: "two-to-one-port", tone: "adaptivity", label: "2:1 port",
+          note: "this brick meets a horizontal neighbour a rung away; the seam is a 2:1 port" },
+      ],
+      loopStep: 2,
+    },
     tip: {
       summary: "Incremental. Seeds the persistent pressure cache and the bounded topology repair from the prior accepted generation, classifies only changed cells and rows — bootstrap plus dirty worklists — with ghost-fluid theta at sparse air, repairs the brick, aggregate-edge and hierarchy caches, and assembles one symmetric GᵀWG operator across regular and 2:1 faces. Its timestamp is attributed to the topology generation accepted at the end of the prior advance; this advance's later commit is reported separately as next-frame input.",
       reads: "prior end-frame topology receipt, conditioned atlas, density-derived phi, temporal cell/row worklists and matched PCM generations",
@@ -579,6 +656,16 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       label: "Finite-volume divergence RHS + compatibility projection",
     },
     lens: null,
+    slice: {
+      caption: "Divergence of the extended face field, one row per canonical incidence. Blue is compressing, red expanding; a converged solve drives every one of them to zero.",
+      keys: [
+        { id: "negative-divergence", tone: "pressure", label: "negative divergence",
+          note: "the cell is compressing; a converged solve drives this to zero" },
+        { id: "positive-divergence", tone: "alarm", label: "positive divergence",
+          note: "the cell is expanding; a converged solve drives this to zero" },
+      ],
+      loopStep: 2,
+    },
     tip: {
       summary: "Builds the finite-volume divergence RHS from predicted face flux, geometric source volume and moving-solid capacity change, with enclosed components projected onto their compatible quotient space. It applies the brick-aggregate + hierarchy preconditioner once for the initial direction, reduces the initial true residual and primes the pipelined image the solve iterates on.",
       reads: "predicted face velocity, active pressure rows, pressure cache, source and solid-capacity rates",
@@ -591,6 +678,16 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     label: "Pressure solve", band: "pressure", side: "left",
     phase: { id: "pressure-solve", label: "One-reduction sparse MGPCG pressure solve" },
     lens: null,
+    slice: {
+      caption: "The solved pressure. One reduction per iteration, a single positive Jacobi diagonal as the preconditioner, and a true-residual guard every eighth iteration — the tail stays encoded whether or not it has converged.",
+      keys: [
+        { id: "high-pressure", tone: "pressure", label: "high pressure",
+          note: "solved pressure, above the free-surface value" },
+        { id: "free-surface", tone: "ground", label: "free surface · p = 0",
+          note: "water with no solved pressure over it: the Dirichlet value the surface is pinned to" },
+      ],
+      loopStep: 2,
+    },
     tip: {
       summary: "Pipelined conjugate gradient with one uniform positive Jacobi preconditioner and one reduction per iteration. A guarded true-residual reduction after each fixed eight-iteration block gates later arithmetic or restarts the direction after curvature loss, and a final true residual closes the stage.",
       reads: "canonical incidence rows, diagonal, compatible RHS",
@@ -655,6 +752,16 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       },
     },
     lens: null,
+    slice: {
+      caption: "Grey is the field entering the projection, amber the divergence-free field leaving it. The difference is the pressure gradient, applied one row at a time.",
+      keys: [
+        { id: "before-projection", tone: "muted", label: "before projection",
+          note: "the grey arrow: the field entering the projection, gravity already in it" },
+        { id: "after-projection", tone: "amber", label: "after projection",
+          note: "the amber arrow: the divergence-free field leaving it" },
+      ],
+      loopStep: 2,
+    },
     tip: {
       summary: "Advances the incremental-activity clock, then projects the compiled dirty/pressure row masks directly through the same composite rows that built the divergence, conservative 2:1 ports and sparse-air boundaries included. Collocation publishes divergence maxima during its existing incidence traversal; rigid-body reaction and frame face output follow.",
       reads: "predicted face velocity, pressure, dirty bricks",
@@ -691,6 +798,14 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     },
     timedWork: activityTimedWork,
     lens: null,
+    slice: {
+      caption: "One score per brick, from interface presence and peak speed. This is the only number the resolution policy reads — geometry and motion, never an authored region.",
+      keys: [
+        { id: "high-activity", tone: "adaptivity", label: "high activity",
+          note: "interface presence and peak speed, scored; the only number the resolution policy reads" },
+      ],
+      loopStep: 4,
+    },
     tip: {
       summary: "This interval is larger than its historical ‘activity measurement’ name implied. It publishes scalar/topology masks, measures and ages brick activity, seals the census and, when dynamic sparse-world growth is enabled, scans and synthesizes frontier pages.",
       reads: "conditioned density, momentum, previous records, dirty-brick worklist",
@@ -733,6 +848,14 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     },
     timedWork: candidatePlanTimedWork,
     lens: null,
+    slice: {
+      caption: "The activity score becomes a target rung on the dyadic ladder — 1, 2, 4 or 8 cells per brick edge — then 2:1 grading pulls in any neighbour sitting more than one rung away.",
+      keys: [
+        { id: "target-rung", tone: "adaptivity", label: "target rung",
+          note: "the rung this brick is planned to carry, after 2:1 grading pulled its neighbours in" },
+      ],
+      loopStep: 4,
+    },
     tip: {
       summary: "This is a candidate-topology construction interval, not just a policy decision. It scores and grades resolutions, consumes generation-stamped surface-output proofs, activates and retires pages, schedules the budget, allocates and synthesizes candidate cells, builds shadow row/leaf/structure worklists and publishes five indirect command copies for the following transaction.",
       reads: "transported density, momentum, policy history and accepted surface-output proofs",
@@ -818,6 +941,14 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       },
     },
     lens: null,
+    slice: {
+      caption: "Bricks whose rung moved this advance. The shadow topology is built beside the live one and committed as a single transaction at the frame tail — so this flip is the next advance's input, never this one's.",
+      keys: [
+        { id: "rung-changed", tone: "output", label: "rung changed",
+          note: "this brick's rung moved; the flip commits at the frame tail, so it is the next advance's input" },
+      ],
+      loopStep: 4,
+    },
     tip: {
       summary: "One transaction over the topology delta resolution planning built: density, gamma, momentum and exterior faces transfer into double-buffered shadow slots; shadow faces are validated; the effects census and preflight run; the interned-boundary (IBO) delta is built and independently validated and the transport execution image (TEI) shadow compiled; the transaction is authorized; PTR effects publish; the receipt seals; fields and membership publish; retired images replay. That end-frame flip is input to the next advance's pressure topology, never this advance's.",
       reads: "shadow worklists, candidate levels, accepted cell and face state",
@@ -830,6 +961,16 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     label: "Post-commit activity mask", band: "adaptivity", side: "right",
     phase: { id: "adaptive-publication", label: "Post-topology activity-mask publication" },
     lens: null,
+    slice: {
+      caption: "A brick holding no liquid and no source is released back to the atlas. The hatched bricks pay nothing this frame — the sparse set is the lit region plus its band, and no more.",
+      keys: [
+        { id: "retired-brick", tone: "muted", label: "retired brick",
+          note: "no liquid and no source: this brick is released back to the atlas" },
+        { id: "resident-brick", tone: "liquid", label: "resident brick",
+          note: "still holding liquid, so this brick pays for the frame" },
+      ],
+      loopStep: 4,
+    },
     tip: {
       summary: "Marks every brick the topology commit changed in the post-topology activity mask, so the next advance's direct face and activity transforms select exactly the bricks that moved. The decision to retire an unsupported empty brick is taken in resolution planning; this stage publishes the retired and reshaped brick bits.",
       reads: "committed topology, incremental-activity state",
@@ -863,6 +1004,14 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     }],
     phase: { id: "adaptive-publication", label: "Encode compact sparse presentation pages" },
     lens: null,
+    slice: {
+      caption: "The surface the renderer receives: the PLIC segments of every interface cell, stitched across brick boundaries at whatever rung each brick happens to be carrying.",
+      keys: [
+        { id: "published-interface", tone: "output", label: "published interface",
+          note: "a PLIC chord in this cell is part of the surface the renderer receives" },
+      ],
+      loopStep: 4,
+    },
     tip: {
       summary: "Classifies which bricks the renderer can see, publishes their compact level-set pages in place, proves whether each accepted B8 surface remains representable at B4, and commits frame control. Nothing is expanded to a dense field and nothing crosses to the host.",
       reads: "committed sparse authority",

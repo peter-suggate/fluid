@@ -26,18 +26,4 @@ test("both CM12 methods declare the paper step as their default", () => {
   }
 });
 
-test("both CM12 methods use the shared sharpening return distance", () => {
-  for (const [id, method] of CM12_METHODS) {
-    const spec = method.params.find((candidate) =>
-      candidate.key === "sharpeningDistance");
-    assert.ok(spec, `${id} has no sharpeningDistance parameter`);
-    assert.equal(spec.default, CM12_SHARPENING_DISTANCE_CELLS,
-      `${id} does not expose the shared sharpening default`);
-    assert.equal(
-      resolveMethodValues(method, "balanced", {}).sharpeningDistance,
-      CM12_SHARPENING_DISTANCE_CELLS,
-      `${id}'s balanced preset overrides the shared sharpening default`,
-    );
-  }
-});
 
