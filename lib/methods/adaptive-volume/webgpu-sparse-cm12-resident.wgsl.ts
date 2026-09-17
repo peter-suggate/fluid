@@ -1,3 +1,6 @@
+import { createMomentumSnapshotWGSL } from "./sparse-cm12-momentum-snapshot.wgsl";
+import { sparseCM12LevelSetBoundariesWGSL } from "./sparse-cm12-levelset-boundaries.wgsl";
+import { createAirExtensionWGSL } from "./sparse-cm12-air-extension.wgsl";
 import { createLevelSetThinFeaturesWGSL } from "./levelset-volume-thin-features.wgsl";
 import { SPARSE_CM12_DYNAMIC_SEAM_BINDING_WGSL, SPARSE_CM12_DYNAMIC_SEAM_PUBLICATION_WGSL } from "./sparse-cm12-dynamic-seam-binding.wgsl";
 import {
@@ -1400,59 +1403,7 @@ fn lsvClipCharacteristic(origin:vec3f,candidate:vec3f)->vec3f{
   if(acceptedPointInsideSolid(origin+offset)){return origin;}
   return clipBoundarySegment(origin+offset,bounded+offset)-offset;
 }
-// Sweep exterior air into the phi field by the actual final MAC displacement
-// of a released one-sided world face. Project the vertex onto each physical
-// domain plane instead of searching only its adjacent cells: a large-CFL gap
-// can cross more than one wall cell, while the applicable tangential patch is
-// still found in constant work through the accepted owner directory.
-fn cm12ReleasedWallPhi(positionFine:vec3f)->vec2f{
-  var carved=-3.402823466e38;var hasRelease=false;
-  let epsilon=max(1e-4,8.0*1.1920928955078125e-7
-    *max(1.0,max(abs(positionFine.x),max(abs(positionFine.y),abs(positionFine.z)))));
-  let gravityWeight=length(p.acceleration.xyz);
-  if(gravityWeight<=1e-6){return vec2f(carved,0.0);}
-  for(var face=0u;face<6u;face+=1u){
-    let axis=face/2u;let upper=(face&1u)!=0u;
-    let boundary=select(0.0,f32(p.dimensions[axis]),upper);
-    let expectedInward=select(1.0,-1.0,upper);
-    // Pressure uses the same gravity-normal predicate, so other planes cannot
-    // contain an applicable separating row for this frame.
-    if(expectedInward*p.acceleration[axis]<=0.5*gravityWeight){continue;}
-    // Four signs select every cell incident to a tangential edge or corner.
-    let tangent0=(axis+1u)%3u;let tangent1=(axis+2u)%3u;
-    for(var quadrant=0u;quadrant<4u;quadrant+=1u){
-      var probe=positionFine;
-      probe[tangent0]+=epsilon*select(-1.0,1.0,(quadrant&1u)!=0u);
-      probe[tangent1]+=epsilon*select(-1.0,1.0,(quadrant&2u)!=0u);
-      probe[axis]=boundary+epsilon*expectedInward;
-      let owner=compactOwnerCellAt(vec3i(floor(probe)));
-      if(owner.x==INVALID){continue;}let cell=owner.x;
-      let incidences=cnxCellIncidenceRangeUnchecked(cell);
-      for(var at=incidences.x;at<incidences.y;at+=1u){
-        let rowOrdinal=cnxIncidenceRowOrdinalUnchecked(at);
-        let row=cnxStableRowUnchecked(rowOrdinal);
-        if(rowKind(row)!=3u||rowAxis(row)!=axis
-          ||!rowSeparatingFromClosedWorld(row)){continue;}
-        let range=cnxRowTermRangeByOrdinalUnchecked(rowOrdinal);
-        if(range.y-range.x!=1u||cnxRowTermCellUnchecked(range.x)!=cell){continue;}
-        let coefficient=cnxRowTermCoefficientUnchecked(range.x);
-        let inward=select(-1.0,1.0,coefficient>=0.0);
-        let center=rowCenter(row);
-        if(inward!=expectedInward||abs(center[axis]-boundary)>epsilon){continue;}
-        let away=inward*(state[destinationFaceVelocity()+row]-rowSolidVelocity(row));
-        if(away<=1e-6){continue;}
-        let widths=cellWidths(cell);var footprint=true;
-        for(var tangent=0u;tangent<3u;tangent+=1u){if(tangent!=axis){
-          footprint=footprint
-            &&abs(positionFine[tangent]-center[tangent])<=0.5*widths[tangent]+epsilon;}}
-        if(!footprint){continue;}
-        let interiorDistance=inward*(positionFine[axis]-center[axis]);
-        carved=max(carved,p.frame.x*away-interiorDistance);hasRelease=true;
-      }
-    }
-  }
-  return vec2f(carved,select(0.0,1.0,hasRelease));
-}
+${sparseCM12LevelSetBoundariesWGSL}
 ` + createLevelSetVolumeWGSL({
       layout: levelSetVolumeLayout,
       acceptedGenerationExpression: "cnxSourceGeneration()",
@@ -1486,6 +1437,7 @@ fn cm12ReleasedWallPhi(positionFine:vec3f)->vec2f{
       boundCharacteristic: (origin, candidate) =>
         `lsvClipCharacteristic(${origin},${candidate})`,
       releasedWallPhi: position => `cm12ReleasedWallPhi(${position})`,
+      closedWallPhi: position => `cm12ClosedWallPhi(${position})`,
       liveUnionSample: position =>
         `levelSetSourceUnionSampleAt(${position})`,
       dtExpression: "p.frame.x",
@@ -1752,6 +1704,9 @@ ${framePlanPresentationEntries}
 ${pressureTopologyRepairEntries}
 ${effectiveTransportVelocityEntries}
 ${velocityExtensionEntries}
+${effectiveTransportVelocityLayout && compiledTopologyLayout ? createAirExtensionWGSL(effectiveTransportVelocityLayout.cellCapacity, compiledTopologyLayout.rowCapacity) : "fn airTransportReady()->bool{return false;} fn airBoundaryFaceVelocity(row:u32)->f32{return state[destinationFaceVelocity()+row];} fn airSampleVelocity(p:vec3f,s:vec3f,d:bool)->vec3f{_=p;_=s;_=d;return vec3f(0.0);}"}
+${effectiveTransportVelocityLayout && compiledTopologyLayout ? createMomentumSnapshotWGSL(effectiveTransportVelocityLayout.cellCapacity, compiledTopologyLayout.rowCapacity, compiledTopologyLayout.incidenceCapacity) : "fn momentumSnapshotReady()->bool{return false;} fn momentumSnapshotSample(p:vec3f)->vec3f{_=p;return vec3f(0.0);}"}
+
 ${pressureExecutionImageEntries}
 ${compiledTopologyEntries}
 ${compiledTopologyTransportAccessEntries}
@@ -2666,6 +2621,7 @@ fn clearSparseCM12RetiredFaceVelocitySupport(@builtin(workgroup_id)wid:vec3u,
 }
 
 fn sampleFaceVelocitySupport(position:vec3f)->vec3f{
+  if(momentumSnapshotReady()){return momentumSnapshotSample(position);}
   // FACE_VELOCITY_SUPPORT represents the finest lattice through cell owners.
   // Choosing interpolation spacing from the point owner makes the field jump
   // when an RK2 departure crosses a 2:1 seam: an infinitesimal move changes
@@ -2685,6 +2641,7 @@ fn sampleFaceVelocitySupport(position:vec3f)->vec3f{
   }}}return result;
 }
 fn sampleFaceVelocitySupportAtSpans(position:vec3f,spans:vec3f)->vec3f{
+  if(momentumSnapshotReady()){return momentumSnapshotSample(position);}
   let clamped=clamp(position,0.5*spans,
     vec3f(p.dimensions.xyz)-0.5*spans);
   let shifted=clamped/spans-vec3f(0.5);let lower=vec3i(floor(shifted));
@@ -2707,7 +2664,8 @@ fn traceFaceDeparture(position:vec3f)->vec3f{
   let initial=sampleFaceVelocitySupport(initialPosition);
   let substeps=clamp(i32(ceil(length(initial)*p.frame.x)),1,16);
   let subDt=p.frame.x/f32(substeps);var traced=initialPosition;
-  let lower=vec3f(0.5);let upper=vec3f(p.dimensions.xyz)-vec3f(0.5);
+  let lower=select(vec3f(0.5),cm12WorldFineLower(),momentumSnapshotReady());
+  let upper=select(vec3f(p.dimensions.xyz)-vec3f(0.5),cm12WorldFineUpper(),momentumSnapshotReady());
   for(var step=0;step<substeps;step+=1){
     var first=initial;if(step>0){first=sampleFaceVelocitySupport(traced);}
     let midpoint=clipBoundarySegment(traced,
@@ -2725,7 +2683,8 @@ fn traceFaceDepartureAtSpans(position:vec3f,spans:vec3f)->vec3f{
   let initial=sampleFaceVelocitySupportAtSpans(initialPosition,spans);
   let substeps=clamp(i32(ceil(length(initial/spans)*p.frame.x)),1,16);
   let subDt=p.frame.x/f32(substeps);var traced=initialPosition;
-  let lower=0.5*spans;let upper=vec3f(p.dimensions.xyz)-0.5*spans;
+  let lower=select(0.5*spans,cm12WorldFineLower(),momentumSnapshotReady());
+  let upper=select(vec3f(p.dimensions.xyz)-0.5*spans,cm12WorldFineUpper(),momentumSnapshotReady());
   for(var step=0;step<substeps;step+=1){
     var first=initial;
     if(step>0){first=sampleFaceVelocitySupportAtSpans(traced,spans);}
@@ -3563,6 +3522,7 @@ fn cm12TransportOwnerAtFine(q:vec3i,direct:bool)->CM12TransportOwner{
 }
 fn sampleEffectiveTransportVelocityAtSpansMode(
  position:vec3f,spansInput:vec3f,direct:bool)->vec3f{
+  if(airTransportReady()){return airSampleVelocity(position,spansInput,direct);}
   // Hold the source control-volume lattice fixed for the complete RK2 trace.
   // Re-selecting it from the point owner would jump at a 2:1 seam, while a
   // hard-coded finest lattice creates a half-cell dead zone inside every
@@ -4067,14 +4027,9 @@ fn prepareTransportFaceRow(row:u32,rowOrdinal:u32){
       }
     }
   }
-  // The departure value is read from the same collocated support cache the
-  // RK2 trace already samples. The retired geometric-FCT design sampled the
-  // staggered source rows instead: an owner lookup plus an incidence walk per
-  // stencil node, whose strict uniformity certification never holds on mixed
-  // resolution, so every row paid 64 rejected probes and then 8 area-weighted
-  // cell samples. Under the phi/V design this face velocity feeds only the
-  // momentum path (body forces, pressure RHS, projection); the level set and
-  // the volume coupling both sample the extended velocity, never this field.
+  // The enabled path samples the immutable pre-remesh face field for both
+  // RK2 and the departure value. Startup, a replaced resident, or a liquid
+  // edit uses current support until the next projected snapshot is sealed.
   var characteristic=0.0;
   if(regionWidth>1.0){
     let spans=vec3f(regionWidth);
@@ -6663,7 +6618,6 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
         hasOpenOpposingTerm=true;
         let neighborDensity=state[destinationDensity()+neighbor]
           /max(cellOpenFraction(neighbor),1e-6);
-        sideHasFluid=sideHasFluid||neighborDensity>featureDensity;
         // Residency looks ahead at the configured feature floor, before the
         // rendered rho=.5 surface arrives. Publish a face receipt from the
         // high-fill endpoint without adding to the 27-neighbour allocation
@@ -6675,6 +6629,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
         }
         let neighborPhiSample=lsvCellSample(neighbor);
         let neighborWet=neighborPhiSample.valid&&neighborPhiSample.phi<0.0;
+        sideHasFluid=sideHasFluid||neighborWet;
         let crossesIsovalue=ownPhiSample.metric&&neighborPhiSample.metric
           &&neighborWet!=ownWet;
         let neighborVelocityAt=destinationCellVelocity()+4u*neighbor;
@@ -6734,7 +6689,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
         predictedMotion=max(predictedMotion,p.frame.x
           *abs(ownVelocity[axis])/max(0.25*distance,1e-12));
       }
-      if(rho>featureDensity&&!sideHasFluid){
+      if(ownWet&&!sideHasFluid){
         let side=select(0u,1u,rowPosition[axis]>center[axis]);
         exposedSides|=1u<<(2u*axis+side);
       }
@@ -8776,20 +8731,35 @@ fn transferCandidateCellsWork(lid:vec3u,brick:u32,validBrick:bool){
         candidateState[candidateFieldIndex(0u,brick,local)]=fraction;
         remaining=transferAccumulateAmount(remaining,-fraction*volume);
       }
-      // Redistribute only the PLIC/representation residual. Subtract actual
-      // stored child amounts, retaining a compensated remainder so small
-      // terms cannot silently disappear in the parent sum.
+      // Scale reductions together and share additions by remaining capacity.
+      // Every child uses the same frozen residual and denominator, so the
+      // first child cannot absorb the entire geometric allocation residual.
       for(var sweep=0u;sweep<2u;sweep+=1u){
+        let residual=remaining.x+remaining.y;var weightSum=vec2f(0.0);
+        for(var child=0u;child<factor*factor*factor;child+=1u){
+          let q=parentBase+vec3u(child%factor,(child/factor)%factor,child/(factor*factor));
+          if(any(q>=candidateDimensions)){continue;}
+          let local=transferLocalIndex(q,candidateDimensions);let cell=candidateRange.x+local;
+          let amount=candidateState[candidateFieldIndex(0u,brick,local)]*cellVolume(cell);
+          let weight=select(max(0.0,cellOpenVolume(cell)-amount),amount,residual<0.0);
+          weightSum=transferAccumulateAmount(weightSum,weight);
+        }
+        let available=weightSum.x+weightSum.y;
+        // Over-capacity parent mass is still conserved; when all children are
+        // full, distribute its representational remainder by open capacity.
+        let useCapacity=residual>0.0&&available<=0.0;
+        let denominator=select(available,totalCapacity,useCapacity);
+        if(denominator<=0.0){break;}
         for(var child=0u;child<factor*factor*factor;child+=1u){
           let q=parentBase+vec3u(child%factor,(child/factor)%factor,child/(factor*factor));
           if(any(q>=candidateDimensions)){continue;}
           let local=transferLocalIndex(q,candidateDimensions);let cell=candidateRange.x+local;
           let volume=cellVolume(cell);if(volume<=0.0){continue;}
-          let at=candidateFieldIndex(0u,brick,local);let previous=candidateState[at];
-          let oldAmount=previous*volume;let capacity=cellOpenVolume(cell);
-          let residual=remaining.x+remaining.y;
-          let delta=max(-oldAmount,residual);
-          let next=max(0.0,(oldAmount+delta)/volume);
+          let at=candidateFieldIndex(0u,brick,local);let oldAmount=candidateState[at]*volume;
+          let capacity=cellOpenVolume(cell);
+          var weight=select(max(0.0,capacity-oldAmount),oldAmount,residual<0.0);
+          if(useCapacity){weight=capacity;}
+          let next=max(0.0,(oldAmount+residual*(weight/denominator))/volume);
           candidateState[at]=next;
           remaining=transferAccumulateAmount(remaining,oldAmount);
           remaining=transferAccumulateAmount(remaining,-next*volume);

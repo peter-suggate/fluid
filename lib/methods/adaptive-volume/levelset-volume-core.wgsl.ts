@@ -70,6 +70,8 @@ export interface LevelSetVolumeWGSLOptions {
   /** Returns vec2f(released-wall phi, active flag) at a finest-lattice vertex.
    * The provider reads final projected MAC wall velocities; the core takes the
    * maximum with transported phi after characteristic sampling. */
+  /** Negative advected interior continuation at a closed wall; release wins. */
+  readonly closedWallPhi?: (positionFine: string) => string;
   readonly releasedWallPhi?: (positionFine: string) => string;
   /** Optional sparse-domain proof: positive radius of a ball containing only
    * unrepresented air in the source image. Zero means no certificate. */
@@ -199,10 +201,14 @@ fn lsvFloat(at:u32)->f32{return bitcast<f32>(lsvLoad(at));}
 fn lsvStoreFloat(at:u32,value:f32){lsvStore(at,bitcast<u32>(value));}
 fn lsvStoreAdvectedPhi(slot:u32,bank:u32,vertex:u32,advectedPhi:f32,
  advectedSupport:u32,releasedWall:vec2f){
-  let wallWins=releasedWall.y>0.0&&releasedWall.x>advectedPhi;
-  let phi=select(advectedPhi,releasedWall.x,wallWins);
+  var transported=advectedPhi;var contact=false;
+  ${options.closedWallPhi ? `let continued=${options.closedWallPhi("lsvVertexPosition(slot,vertex)")};
+  contact=continued.y>0.0&&continued.x<0.0;
+  if(contact){transported=continued.x;}` : ""}
+  let wallWins=releasedWall.y>0.0&&releasedWall.x>transported;
+  let phi=select(transported,releasedWall.x,wallWins);
   var support=advectedSupport;
-  if(wallWins){support=select(select(LSV_SUPPORT_DEEP_AIR,LSV_SUPPORT_DEEP_LIQUID,phi<0.0),
+  if(wallWins||contact){support=select(select(LSV_SUPPORT_DEEP_AIR,LSV_SUPPORT_DEEP_LIQUID,phi<0.0),
     LSV_SUPPORT_METRIC,abs(phi)<=4.0);}
   lsvStoreFloat(lsvPhiBase(slot,bank)+vertex,phi);
   lsvStore(lsvSupportBase(slot,bank)+vertex,support);

@@ -14,11 +14,12 @@ import { createGeometricDamStageEnergy } from "./geometric-dam-stage-energy";
 const arg = (name:string,fallback:string) => process.argv.find(v=>v.startsWith(`--${name}=`))?.slice(name.length+3)??fallback;
 const steps=Number(arg("steps","60")), extruded=arg("extruded","0")==="1", freeze=arg("freeze","0")==="1";
 const dt=Number(arg("dt",String(1/30))), sharpen=arg("sharpen","1")!=="0";
+const airExtensionEnabled=arg("air","0")==="1";
 const output=arg("output","artifacts/level-set-volume/half-pool-dissipation-3d.json");
 const tapSteps=new Set(arg("taps","5,10,15,20,30,45,60").split(",").map(Number));
 await acquireWebGPUExclusiveLock("dawn-probe","half-pool dissipation");
 let device:GPUDevice|undefined,solver:WebGPUAdaptiveMassSolver|undefined;
-const report:any={steps,dt,extruded,freeze,sharpen,checkpoints:[],stageEnergy:[]};
+const report:any={steps,dt,extruded,freeze,sharpen,airExtensionEnabled,checkpoints:[],stageEnergy:[]};
 try{
  const dawn=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);Object.assign(globalThis,dawn.globals);
  const gpu=createProcessRetainedDawnGPU(dawn,["backend=metal"]);const adapter=await gpu.requestAdapter();assert.ok(adapter);
@@ -27,7 +28,7 @@ try{
  let scene=getScenePreset("coarse-first-pool-impact-half").create();
  if(extruded){scene=sceneAtContainerExtents(scene,{width_m:3.2,height_m:2.4,depth_m:0.4});scene.container.depthBoundary="symmetry";scene.fluid.initialLiquidVolumes=[{shape:"cylinder",center_m:{x:0,y:1.825,z:0},radius_m:0.5,halfHeight_m:0.4}];}
  scene.numerics.fixedDt_s=scene.numerics.maxDt_s=dt;
- const options={...sparseCM12DawnDefaultOptions(),surfaceSharpeningEnabled:sharpen};
+ const options={...sparseCM12DawnDefaultOptions(),surfaceSharpeningEnabled:sharpen,airExtensionEnabled};
  solver=await WebGPUAdaptiveMassSolver.createCompiledTopologyTransport(device,scene,"balanced",undefined,options,()=>{});
  await solver.waitForSimulationReady();if(freeze)solver.setTopologyFrozen(true);
  const h=scene.voxelDomain.finestCellSize_m;const {nx,ny,nz}=solver.info;report.dimensions=[nx,ny,nz];report.h=h;report.scene=scene;
@@ -49,7 +50,8 @@ try{
    for(let a=0;a<3;a++){const v=fields.velocity[3*i+a]!;kinetic[a]!+=0.5*m*v*v;momentum[a]!+=m*v;}
   }
   const active=activity.bricks.filter(b=>b.active);
-  report.checkpoints.push({step,time:step*dt,mass,kinetic,potential,mechanical:potential+kinetic.reduce((a,b)=>a+b,0),meanVelocity:momentum.map(v=>v/mass),meanY:meanY/mass,abovePool,maxY,volume,stats,coupling:transport.coupling,resolutions:Object.fromEntries([1,2,4,8].map(r=>[r,active.filter(b=>b.acceptedResolution===r).length]))});
+  const air=await solver.readAirExtensionReceiptQA();
+  report.checkpoints.push({air,step,time:step*dt,mass,kinetic,potential,mechanical:potential+kinetic.reduce((a,b)=>a+b,0),meanVelocity:momentum.map(v=>v/mass),meanY:meanY/mass,abovePool,maxY,volume,stats,coupling:transport.coupling,resolutions:Object.fromEntries([1,2,4,8].map(r=>[r,active.filter(b=>b.acceptedResolution===r).length]))});
  }
  report.completed=true;
 }catch(e){report.completed=false;report.error=String(e);process.exitCode=1;}

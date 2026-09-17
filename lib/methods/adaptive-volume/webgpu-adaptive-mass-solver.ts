@@ -1042,6 +1042,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       distanceSweeps: sparseCM12DistanceSweeps(values.distanceSweeps),
       returnPasses: sparseCM12ReturnPasses(values.returnPasses),
       gammaDiffusionEnabled, surfaceSharpeningEnabled,
+      airExtensionEnabled: values.airExtension !== "off",
       presentationColumnHeightMode: nextPresentationColumnHeightMode,
       presentationSurfaceMode: nextPresentationSurfaceMode,
       pressureIterations, pressureRelativeTolerance, activityPolicy };
@@ -1906,6 +1907,10 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   async readVelocityExtensionHeaderQA() {
     await this.awaitFrameSettlement();
     return this.sparseWorldTrace.readVelocityExtensionHeaderQA();
+  }
+  async readAirExtensionReceiptQA() {
+    await this.awaitFrameSettlement();
+    return this.sparseWorldTrace.readAirExtensionReceiptQA();
   }
   async readVelocityExtensionQA() {
     await this.awaitFrameSettlement();

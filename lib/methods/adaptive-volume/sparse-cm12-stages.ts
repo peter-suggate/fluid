@@ -414,6 +414,7 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       feeds: "pressure, adaptivity and presentation publication",
     },
     controls: [
+      algorithmStageControl("airExtension"),
       algorithmStageControl("surfaceSharpening"),
       algorithmStageControl("sharpeningStrength"),
       algorithmStageControl("distanceSweeps"),
@@ -746,6 +747,9 @@ export const SPARSE_CM12_STAGES = Object.freeze({
         id: "velocity-projection",
         label: "Projected transport frontier commit",
       },
+      "projected-velocity-extension": { id: "velocity-projection", label: "Projected velocity extension" },
+      "air-band-correction": { id: "velocity-projection", label: "Air-band velocity correction" },
+      "momentum-snapshot": { id: "velocity-projection", label: "Pre-remesh momentum snapshot" },
       "projected-topology-rebuild": {
         id: "velocity-projection",
         label: "Projected commit compiled-topology rebuild",

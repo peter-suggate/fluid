@@ -776,6 +776,17 @@ export function createCoarseFirstPoolImpactHalfScene(): SceneDescription {
   return scene;
 }
 
+/** Z-invariant disk/pool cross-section, eight fine cells deep with free-slip
+ * end walls. Extend the cylinder beyond the walls so its caps cannot alter phi. */
+export function createCoarseFirstPoolImpactHalfSlabScene(): SceneDescription {
+  const scene = createCoarseFirstPoolImpactHalfScene();
+  scene.sceneId = "coarse-first-pool-impact-half-slab";
+  scene.container.depth_m = 0.8;
+  scene.fluid.initialLiquidVolumes = [{ shape: "cylinder",
+    center_m: { x: 0, y: 3.65, z: 0 }, radius_m: 1, halfHeight_m: 2 }];
+  return scene;
+}
+
 /** Quarter the linear resolution: the same tank and ball on 0.2 m finest cells
  * (32x24x32). */
 export function createCoarseFirstPoolImpactQuarterScene(): SceneDescription {
@@ -2735,6 +2746,18 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     } },
     build: createCoarseFirstPoolImpactHalfScene,
     camera: { distance_m: 11, target_m: { x: 0, y: 1.8, z: 0 } },
+  }),
+  defineScene({
+    id: "coarse-first-pool-impact-half-slab",
+    name: "Coarse-first · disk into still pool (half-resolution slab)",
+    blurb: "A 6.4 × 4.8 × 0.8 m extrusion for 2D comparison: 64×48×8 finest cells at 0.1 m, a 1 m radius disk centred at 3.65 m above a 1.6 m pool, and closed free-slip walls. Matches the half-resolution pool's XY cross-section, gravity and timestep; compare the centre slice and volume per 0.8 m depth.",
+    audience: "validation", shelf: "Dam-break ladder", environment: "stage",
+    methodProfile: { methodId: "adaptive-volume", quality: "balanced", overrides: {
+      selectorMode: "coarse-first", timeStep: "paper", brickFineResolution: "8",
+    } },
+    build: createCoarseFirstPoolImpactHalfSlabScene,
+    camera: { azimuth_rad: 0, elevation_rad: 0, distance_m: 10,
+      target_m: { x: 0, y: 2.4, z: 0 } },
   }),
   defineScene({
     id: "coarse-first-pool-impact-quarter",

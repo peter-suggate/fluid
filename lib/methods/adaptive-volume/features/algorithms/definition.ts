@@ -5,6 +5,12 @@ import { ADAPTIVE_VOLUME_RETURN_PROPAGATION_PAIRS, ADAPTIVE_VOLUME_RETURN_ROUNDS
 
 export const ALGORITHM_PARAMS: MethodParamSpec[] = [
   {
+    kind: "select", key: "airExtension", label: "Air-band velocity correction",
+    default: "on", tier: "coarse", update: "runtime",
+    options: [{ value: "off", label: "Off" }, { value: "on", label: "On" }],
+    hint: "Uses direct face transport with an air-band correction and preserves the face field across remeshing for momentum. Adds an iterative GPU solve and snapshot storage. Compare runs from the same reset state.",
+  },
+  {
     kind: "select", key: "timeStep", label: "Time step", default: "paper",
     tier: "coarse", update: "runtime",
     options: [

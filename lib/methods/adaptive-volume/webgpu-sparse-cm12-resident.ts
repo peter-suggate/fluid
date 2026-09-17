@@ -1,3 +1,5 @@
+import { MOMENTUM_SNAPSHOT_ENTRY_POINTS, momentumSnapshotLayout } from "./sparse-cm12-momentum-snapshot";
+import { AIR_EXTENSION_ENTRY_POINTS, AIR_EXTENSION_ITERATIONS, AIR_EXTENSION_SWEEPS, airExtensionLayout, decodeAirExtensionReceipt } from "./sparse-cm12-air-extension";
 import { sparseCM12DistanceSweeps, sparseCM12ReturnPasses } from "./sharpening-controls";
 import { DYNAMIC_PAGE_CELL_COUNT, DYNAMIC_PAGE_ROW_COUNT, DYNAMIC_PAGE_TERM_COUNT, DYNAMIC_PAGE_WORDS, prepareDynamicPageImage, packDynamicSeamCatalogue, dynamicRungLayout } from "./sparse-cm12-dynamic-rung-catalog";
 import { geometricVolumeQAWGSL } from "./geometric-volume-qa.wgsl";
@@ -254,6 +256,7 @@ export interface SharpeningTrace extends SparseCM12CorrectionControls {
   readonly gammaDiffusionEnabled?: boolean;
   /** Defaults on; the mandatory final-scalar publication is independent. */
   readonly surfaceSharpeningEnabled?: boolean;
+  readonly airExtensionEnabled?: boolean;
   readonly presentationColumnHeightEnabled?: boolean;
   readonly presentationColumnHeightMode?: "off" | "auto" | "on";
   readonly presentationSurfaceMode?: "rdf" | "plic";
@@ -432,6 +435,9 @@ export const SPARSE_CM12_RESIDENT_STAGE_SUBSTAGES = Object.freeze({
     "projection-faces",
     "projected-frontier-commit",
     "projected-topology-rebuild",
+    "projected-velocity-extension",
+    "air-band-correction",
+    "momentum-snapshot",
   ],
   "activity-measurement": [
     "dirty-brick-mask-publication",
@@ -3221,7 +3227,12 @@ export class WebGPUSparseCM12Resident {
   readonly rowCount: number;
   private readonly residentAllocatedBytes: number;
   private generationPlanningGateBytes = 0;
-  get allocatedBytes(): number { return this.residentAllocatedBytes + this.generationPlanningGateBytes; }
+  get allocatedBytes(): number { return this.residentAllocatedBytes + this.generationPlanningGateBytes + this.airExtensionAllocatedBytes + (this.momentumSnapshot?.size ?? 0); }
+  private airExtensionAllocatedBytes = 0;
+  private lastAirExtensionEnabled = false;
+  private retiredEffectiveVelocity?: GPUBuffer;
+  private momentumSnapshot?: GPUBuffer;
+  private momentumSnapshotBindGroup?: GPUBindGroup;
   private readonly parameters: GPUBuffer;
   private readonly topology: GPUBuffer;
   private readonly state: GPUBuffer;
@@ -3274,13 +3285,13 @@ export class WebGPUSparseCM12Resident {
   private acceptedVolumeQASource?: string;
   private acceptedVolumeQAPipeline?: Promise<GPUComputePipeline>;
   private readonly pressureBindGroup: GPUBindGroup;
-  private readonly transportBindGroup: GPUBindGroup;
-  private readonly transportDepthBindGroups: readonly GPUBindGroup[];
-  private readonly effectiveVelocityPressureBindGroup: GPUBindGroup;
+  private transportBindGroup: GPUBindGroup;
+  private transportDepthBindGroups: readonly GPUBindGroup[];
+  private effectiveVelocityPressureBindGroup: GPUBindGroup;
   private readonly presentationAllocatorBindGroup: GPUBindGroup;
   private readonly transportExecutionImage?: GPUBuffer;
   private readonly transportExecutionImageLayout?: SparseCM12TransportExecutionImageLayout;
-  private readonly effectiveTransportVelocity?: GPUBuffer;
+  private effectiveTransportVelocity?: GPUBuffer;
   private readonly pipelines: Record<string, GPUComputePipeline>;
   private simulationPipelinesReady = false;
   private simulationPipelineFailure?: string;
@@ -5724,6 +5735,8 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
       ] as const : []),
       "seedTracers", "advanceTracers",
       "initializeVelocityExtensionPackets", "advanceVelocityExtensionPackets",
+      ...AIR_EXTENSION_ENTRY_POINTS,
+      ...MOMENTUM_SNAPSHOT_ENTRY_POINTS,
       "prepareSparseCM12AcceptedFaceRows", "projectSparseCM12DynamicFaceRows",
       "forceFaces", "enforceSparseCM12InflowFaces",
       ...SPARSE_CM12_FULL_PRESSURE_IMAGE_ENTRY_POINTS,
@@ -6233,6 +6246,54 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
     }
   }
 
+  /** Allocate on the first enabled frame. Off pays no scratch allocation or
+   * copy; later toggles reuse the buffer. Keep the old source alive until this
+   * resident is destroyed because this copy is still in the caller's encoder. */
+  private ensureAirExtensionStorage(encoder: GPUCommandEncoder): void {
+    if (this.airExtensionAllocatedBytes !== 0) return;
+    const layout = airExtensionLayout(this.cellCount, this.rowCount);
+    if (layout.byteLength > this.device.limits.maxStorageBufferBindingSize) {
+      throw new Error(`Air-band correction needs a ${layout.byteLength}-byte transport buffer, exceeding the device storage limit`);
+    }
+    const snapshotLayout = momentumSnapshotLayout(this.cellCount, this.rowCount,
+      this.compiledTopologyLayout.incidenceCapacity);
+    if (snapshotLayout.byteLength > this.device.limits.maxStorageBufferBindingSize
+        || 4 * (snapshotLayout.hashCapacity + 1) > this.conditioning.size) {
+      throw new Error(`Immutable momentum snapshot needs ${snapshotLayout.byteLength} bytes and ${4 * (snapshotLayout.hashCapacity + 1)} bytes of hash scratch`);
+    }
+    this.momentumSnapshot = this.device.createBuffer({ label: "Sparse CM12 immutable pre-remesh staggered momentum",
+      size: snapshotLayout.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    const old = this.effectiveTransportVelocity!;
+    const buffer = this.device.createBuffer({ label: "Sparse CM12 optional air-band transport",
+      size: layout.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    encoder.copyBufferToBuffer(old, 0, buffer, 0, old.size);
+    this.retiredEffectiveVelocity = old;
+    this.effectiveTransportVelocity = buffer;
+    this.airExtensionAllocatedBytes = buffer.size;
+    const bindLayout = sparseCM12DeviceCompilationCache(this.device).bindGroupLayout;
+    const makeGroup = (depth: number, pressure: boolean, snapshot = false) => this.device.createBindGroup({
+      label: "Sparse CM12 optional air-band bindings", layout: bindLayout,
+      entries: [
+        { binding: 0, resource: { buffer: this.parameters } },
+        { binding: 1, resource: { buffer: this.topology } },
+        { binding: 2, resource: { buffer: this.state } },
+        { binding: 3, resource: { buffer } },
+        { binding: 4, resource: { buffer: snapshot ? this.momentumSnapshot! : this.scalars } },
+        { binding: 5, resource: { buffer: this.velocityExtensionDepths, offset: 256 * depth, size: 4 } },
+        { binding: 11, resource: { buffer: this.conditioning } },
+        { binding: 12, resource: { buffer: this.activity } },
+        { binding: 13, resource: { buffer: this.candidateState } },
+        { binding: 14, resource: { buffer: pressure ? this.fineMetadata : this.transportExecutionImage! } },
+        { binding: 15, resource: { buffer: this.pressureWorklists } },
+        { binding: 16, resource: { buffer: this.topologyArena } },
+      ],
+    });
+    this.transportDepthBindGroups = Array.from({ length: 8 }, (_, depth) => makeGroup(depth, false));
+    this.transportBindGroup = this.transportDepthBindGroups[0]!;
+    this.effectiveVelocityPressureBindGroup = makeGroup(0, true);
+    this.momentumSnapshotBindGroup = makeGroup(0, false, true);
+  }
+
   private lastEncodedAcceleration?: readonly [number, number, number];
 
   encode(
@@ -6250,6 +6311,9 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
     inflow?: SparseCM12InflowControl,
   ): void {
     this.assertLive();
+    this.lastAirExtensionEnabled = sharpening?.airExtensionEnabled === true;
+    if (this.lastAirExtensionEnabled) this.ensureAirExtensionStorage(encoder);
+    else if (this.momentumSnapshot) encoder.clearBuffer(this.momentumSnapshot, 0, 4);
     this.lastInflow = inflow;
     const packed = this.lastPacked!;
     this.writeParameters(packed, dt_s, finestCellSize_m, pressureScale,
@@ -6479,6 +6543,10 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
     const leafCapacity = this.worldDirectoryLayout.leafCapacity;
     const bricks = Math.ceil(leafCapacity / WORKGROUP_SIZE);
     stage("transport-velocity-extension", ({ closeSubstage }) => {
+      if (sharpening?.airExtensionEnabled) {
+        selectBindGroup(this.transportBindGroup);
+        dispatch("airBegin", 1);
+      }
       // FCA1 translates external inputs and persistent frame receipts into a
       // sealed set of fixed indirect families. The host always encodes both
       // work and singleton bypass packets; it never inspects evolving state.
@@ -6561,7 +6629,9 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
         this.incrementalActivityLayout.brickCount);
       this.refinementPolicyDirty = false;
       closeSubstage("face-support-publication");
+      if (sharpening?.airExtensionEnabled) selectBindGroup(this.momentumSnapshotBindGroup!);
       dispatchAccepted("prepareSparseCM12AcceptedFaceRows", "row");
+      selectBindGroup(this.transportBindGroup);
       closeSubstage("accepted-face-row-preparation");
     });
     stage("body-forces", () => {
@@ -6770,6 +6840,48 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
           dispatchVelocityExtension("advanceVelocityExtensionPackets", 12);
         }
       }
+      closeSubstage("projected-velocity-extension");
+      if (sharpening?.airExtensionEnabled) {
+        selectBindGroup(this.transportBindGroup);
+        dispatchAccepted("airClassifyCells", "cell");
+        dispatchAccepted("airSeedFaces", "row");
+        for (let depth = 0; depth < AIR_EXTENSION_SWEEPS; depth++) {
+          dispatchAccepted(depth % 2 === 0 ? "airExtendFacesA" : "airExtendFacesB", "row");
+        }
+        dispatchAccepted("airPrepareRows", "row");
+        dispatchAccepted("airConnect", "row");
+        dispatchAccepted("airAssemble", "cell");
+        dispatchAccepted("airInitialize", "cell");
+        dispatch("airReduceInitial", 1);
+        for (let iteration = 0; iteration < AIR_EXTENSION_ITERATIONS; iteration++) {
+          dispatchAccepted("airApply", "cell");
+          dispatch("airReduceAlpha", 1);
+          dispatchAccepted("airUpdate", "cell");
+          dispatch("airReduceBeta", 1);
+          dispatchAccepted("airDirection", "cell");
+        }
+        dispatchAccepted("airMeasure", "cell");
+        dispatch("airReduceFinal", 1);
+        dispatchAccepted("airCorrect", "row");
+      }
+      closeSubstage("air-band-correction");
+      if (sharpening?.airExtensionEnabled) {
+        // Capture geometry/connectivity before scalar transport and remeshing.
+        // The next momentum gather never reads live CNX or TEI for this field.
+        const snapshotLayout = momentumSnapshotLayout(this.cellCount, this.rowCount,
+          this.compiledTopologyLayout.incidenceCapacity);
+        closePass();
+        encoder.clearBuffer(this.conditioning, 0, 4 * (snapshotLayout.hashCapacity + 1));
+        selectBindGroup(this.momentumSnapshotBindGroup!);
+        dispatch("momentumSnapshotBegin", 1);
+        dispatchAccepted("momentumSnapshotCells", "cell");
+        dispatchAccepted("momentumSnapshotFaces", "row");
+        dispatch("momentumSnapshotSeal", 1);
+        closePass();
+        encoder.copyBufferToBuffer(this.conditioning, 0, this.momentumSnapshot!,
+          4 * snapshotLayout.hashBase, 4 * snapshotLayout.hashCapacity);
+      }
+      closeSubstage("momentum-snapshot");
       selectBindGroup(this.bindGroup);
     });
     const encodeAfterTransport = () => {
@@ -8081,6 +8193,8 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
       return;
     }
 
+    // A new authored impulse must not advect through a pre-injection field.
+    if (this.momentumSnapshot) encoder.clearBuffer(this.momentumSnapshot, 0, 4);
     const injectionPass = encoder.beginComputePass({
       label: "Sparse Geometric (CM12) resident liquid injection",
     });
@@ -8192,7 +8306,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
     // not alias either accepted density bank.
     u.set([l.sharpeningDelta, l.symmetryGamma, l.tracers,
       l.faceVelocitySupport], 36);
-    f.set([dt_s, finestCellSize_m, pressureScale, 0], 40);
+    f.set([dt_s, finestCellSize_m, pressureScale, sharpening?.airExtensionEnabled ? 1 : 0], 40);
     f.set([...acceleration, accelerationChanged ? 1 : 0], 44);
     u.set([Math.ceil(this.cellCount / WORKGROUP_SIZE),
       Math.ceil(this.rowCount / WORKGROUP_SIZE),
@@ -11618,6 +11732,33 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
     }
   }
 
+  /** Read only on request; never synchronizes an ordinary simulation frame. */
+  async readAirExtensionReceiptQA() {
+    this.assertLive();
+    const layout = airExtensionLayout(this.cellCount, this.rowCount);
+    if (!this.lastAirExtensionEnabled) return { ...decodeAirExtensionReceipt(new Float32Array(16)),
+      enabled: false, momentumSnapshotReady: false, momentumSnapshotCells: 0, momentumSnapshotFaces: 0,
+      momentumSnapshotBytes: this.momentumSnapshot?.size ?? 0,
+      allocatedBytes: this.airExtensionAllocatedBytes + (this.momentumSnapshot?.size ?? 0), encodedDispatches: 0 };
+    const readback = this.device.createBuffer({ size: 80,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    try {
+      const encoder = this.device.createCommandEncoder();
+      encoder.copyBufferToBuffer(this.effectiveTransportVelocity!, 16 * layout.header, readback, 0, 64);
+      if (this.momentumSnapshot) encoder.copyBufferToBuffer(this.momentumSnapshot, 0, readback, 64, 16);
+      this.device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      const mapped = readback.getMappedRange();
+      const snapshot = new Uint32Array(mapped, 64, 4);
+      return { ...decodeAirExtensionReceipt(new Float32Array(mapped)),
+        enabled: true, allocatedBytes: this.airExtensionAllocatedBytes + (this.momentumSnapshot?.size ?? 0),
+        momentumSnapshotReady: snapshot[0] === 0x4d4f4d31,
+        momentumSnapshotCells: snapshot[1], momentumSnapshotFaces: snapshot[2],
+        momentumSnapshotBytes: this.momentumSnapshot?.size ?? 0,
+        encodedDispatches: 15 + AIR_EXTENSION_SWEEPS + 5 * AIR_EXTENSION_ITERATIONS };
+    } finally { if (readback.mapState === "mapped") readback.unmap(); readback.destroy(); }
+  }
+
   /** VEX2 mask/depth/value diagnostic. No frame decision consumes it. */
   async readVelocityExtensionQA() {
     this.assertLive();
@@ -11855,6 +11996,8 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
     }
     this.transportExecutionImage?.destroy();
     this.effectiveTransportVelocity?.destroy();
+    this.retiredEffectiveVelocity?.destroy();
+    this.momentumSnapshot?.destroy();
     this.compiledTopologyIndirectPublisher.arguments.destroy();
     this.projectedTransportIndirectPublisher.arguments.destroy();
     this.transportPacketIndirectArguments?.destroy();

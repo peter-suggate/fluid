@@ -67,6 +67,7 @@ export interface AdaptiveMassSolverOptions extends SparseCM12CorrectionControls 
   readonly gammaDiffusionEnabled?: boolean;
   /** Whether Sec. 3.5's conservative surface-sharpening transform runs. */
   readonly surfaceSharpeningEnabled?: boolean;
+  readonly airExtensionEnabled?: boolean;
   /** Validated column-height presentation policy; defaults to adaptive-coarse auto. */
   readonly presentationColumnHeightMode?: "off" | "auto" | "on";
   /** Shared reconstructed-distance presentation is the production default. */
@@ -220,6 +221,7 @@ export function adaptiveMassSolverOptions(
     timeStep: values.timeStep === "scene" ? "scene" : "paper",
     gammaDiffusionEnabled: false,
     surfaceSharpeningEnabled: values.surfaceSharpening !== "off",
+    airExtensionEnabled: values.airExtension !== "off",
     densityCapacityRepairEnabled: false,
     volumeCorrectionEnabled: false,
     presentationColumnHeightMode: values.presentationColumnHeight === "off" ? "off"
@@ -310,6 +312,7 @@ export const adaptiveMassMethod: SimulationMethod = {
       timeStep: values.timeStep === "scene" ? "scene" : "paper",
       gammaDiffusion: "off",
       surfaceSharpening: values.surfaceSharpening === "off" ? "off" : "on",
+      airExtension: values.airExtension === "off" ? "off" : "on",
       presentationColumnHeight: values.presentationColumnHeight === "off" ? "off"
         : values.presentationColumnHeight === "on" ? "on" : "auto",
       pressureIterations: sparseCM12PressureIterations(values.pressureIterations),
@@ -337,6 +340,7 @@ export const adaptiveMassMethod: SimulationMethod = {
       timeStep: "paper",
       gammaDiffusion: "off",
       surfaceSharpening: "on",
+      airExtension: "on",
       presentationColumnHeight: "auto",
       pressureIterations: SPARSE_CM12_PRESSURE_ITERATIONS,
       pressureRelativeTolerance: SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE,

@@ -5,6 +5,10 @@ in Advance Lab, including the air-extension correction published to the UI.
 It is an implementation and evidence record for the 3D adaptive-volume +
 levelset port; it does not claim that port has been implemented or validated.
 
+The subsequent GPU implementation, default-on comparison control, measured
+costs and outstanding validation are recorded in
+[3D staggered transport and air-band correction](3d-air-extension-prototype.md).
+
 Subsequent boundary work is documented in
 [Ceiling contact and open-boundary sticking](2d-ceiling-contact-and-open-boundary.md).
 Catalog tops are now closed. The 2D scalar transport also supplies incoming
