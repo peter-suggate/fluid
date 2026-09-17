@@ -41,6 +41,7 @@ pub mod scene;
 pub mod scene_model;
 pub mod solid_world;
 pub mod sources;
+pub mod staggered_velocity;
 pub mod topology;
 pub mod tracers;
 pub mod transfer;

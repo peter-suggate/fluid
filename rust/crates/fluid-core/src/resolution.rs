@@ -795,12 +795,17 @@ fn measure(
                 let nid = term.cell_id as usize;
                 let neighbor_fill =
                     fields.density[nid] as f64 / (fields.capacity[nid] as f64).max(1e-6);
-                side_has_fluid |= neighbor_fill > feature_density;
                 let neighbor_wet = direct_surface.map_or(neighbor_fill >= 0.5, |surface| {
                     let neighbor = &topology.graph.cells[nid];
                     crate::levelset_redistance::sample_scalar(surface,
                         [neighbor.center[0], neighbor.center[1]]).is_some_and(|phi| phi < 0.0)
                 });
+                // Direct level-set geometry must use one phase authority on
+                // both sides of a face. Conservative volume may remain in
+                // phi-air after transport/sharpening; it cannot hide exposure
+                // and veto thin-feature protection on just one side of a dam.
+                side_has_fluid |= direct_surface.map_or(
+                    neighbor_fill > feature_density, |_| neighbor_wet);
                 if policy.coarse_first && direct_surface.is_some()
                     && neighbor_fill > feature_density {
                     let position = topology.graph.cells[nid].center[axis] as f64;
@@ -846,7 +851,7 @@ fn measure(
                 predicted =
                     predicted.max(f(dt * v.abs() / (0.25 * row.distance as f64).max(1e-12)));
             }
-            if rho > feature_density && !side_has_fluid {
+            if direct_surface.map_or(rho > feature_density, |_| wet) && !side_has_fluid {
                 let side = usize::from(row.center[axis] > cell.center[axis]);
                 exposed |= 1 << (2 * axis + side);
             }
@@ -2900,6 +2905,22 @@ mod tests {
         assert!(fine.surface && coarse.surface);
         assert_eq!(fine.curvature_floor, coarse.curvature_floor);
         assert_eq!(fine.curvature_floor, 1);
+    }
+
+    #[test]
+    fn direct_phi_thin_feature_is_independent_of_volume_in_phi_air() {
+        let (topology, mut fields) = setup(vec![brick(0, [0, 0], 4, true)], [8, 8]);
+        let vertices: Vec<_> = (0..=8).flat_map(|y| (0..=8).map(move |_| y as f32 - 1.2)).collect();
+        let surface = levelset_surface::publish([8, 8], vertices, 9.6).unwrap();
+        let policy = ActivityPolicy::default();
+        for air_volume in [0.0, 0.1, 1.0] {
+            for cell in &topology.graph.cells {
+                fields.density[cell.id as usize] = if cell.center[1] < 1.2 {0.6} else {air_volume};
+            }
+            let measured = measure(&topology, &fields, 0, None, &policy, false,
+                1.0/30.0, thresholds(&policy, 1.0/30.0, 0.05), true, Some(&surface));
+            assert!(measured.thin, "phi-air volume {air_volume} hid a thin wall-attached liquid layer");
+        }
     }
 
     #[test]

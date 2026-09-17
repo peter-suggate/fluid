@@ -515,6 +515,10 @@ pub struct World {
     rdf_topology: RdfTopology,
     rdf_support: RdfSupport,
     surface: RdfSurface,
+    // The preceding accepted face field survives a final coarsening until
+    // advection samples it directly into the new face layout. This avoids a
+    // restrict-then-advect filter (Ando--Batty 2020, section 3.2).
+    transport_velocity_source: Option<crate::staggered_velocity::StaggeredVelocity2d>,
     graph_json: Vec<u8>,
     last_graph_publication: Option<u32>,
     publication: Vec<u8>,
@@ -724,6 +728,7 @@ impl World {
             rdf_topology,
             rdf_support,
             surface,
+            transport_velocity_source: None,
             graph_json,
             last_graph_publication: None,
             publication: Vec::new(),
@@ -912,7 +917,11 @@ impl World {
             }
             observe("transport-velocity-extension", graph, fields);
             if level_set_volume {
-                prepare_faces_for_level_set_volume(graph, fields, dt)?;
+                if let Some(source) = self.transport_velocity_source.take() {
+                    crate::numerics::prepare_faces_from_staggered_velocity(graph, fields, dt, &source)?;
+                } else {
+                    prepare_faces_for_level_set_volume(graph, fields, dt)?;
+                }
             } else if cellwise_remap {
                 prepare_faces_for_cellwise_remap(graph, fields, dt)?;
             } else {
@@ -1452,6 +1461,14 @@ impl World {
             decision.receipt.candidate_generation > self.state.topology.graph.topology_generation;
         self.resolution_receipt = Some(decision.receipt);
         if changed {
+            if level_set_volume && decision.candidate_bricks.iter().any(|b| {
+                b.active && self.state.topology.bricks.iter().any(|old|
+                    old.seed.active && old.seed.key == b.key && old.seed.resolution > b.resolution)
+            }) {
+                self.transport_velocity_source = Some(crate::staggered_velocity::StaggeredVelocity2d::new(
+                    &self.state.topology.graph, &self.state.fields,
+                )?);
+            }
             self.transition(decision.candidate_bricks, dt_s)?;
         }
         self.refresh_surface()?;
@@ -1476,6 +1493,7 @@ impl World {
         &mut self,
         drop: crate::injection::LiquidDrop,
     ) -> Result<(), ValidationError> {
+        self.transport_velocity_source = None;
         use crate::injection::{
             addressable, apply_dose, demanded_bricks, requested_area, InjectionReceipt,
         };

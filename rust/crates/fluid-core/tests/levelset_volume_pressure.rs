@@ -135,7 +135,18 @@ fn production_embedding_releases_excess_without_persisting_pressure_source() {
     );
 
     for sequence in 2..=4 {
-        world.advance(sequence, dt).unwrap();
+        let expected_rate = 0.5 * total_excess(&world) / dt;
+        let mut rates = Vec::new();
+        world.advance_with_observer(sequence, dt, |stage, _, fields| {
+            if stage == "pressure-rhs" {
+                rates.push(fields.source_rate.iter().map(|&rate| rate as f64).sum::<f64>());
+            }
+        }).unwrap();
+        assert!(!rates.is_empty(), "frame {sequence} skipped pressure feedback");
+        for rate in rates {
+            assert!((rate - expected_rate).abs() <= 2.0e-5 * expected_rate.max(1.0),
+                "frame {sequence}: pressure source {rate}, expected {expected_rate}");
+        }
         assert!(world.state.fields.source_rate.iter().all(|&rate| rate == 0.0));
         let volume = physical_volume(&world);
         assert!(
@@ -145,7 +156,10 @@ fn production_embedding_releases_excess_without_persisting_pressure_source() {
     }
     let final_excess = total_excess(&world);
     assert!(
-        final_excess < excess_after_one,
-        "repeated pressure feedback did not continue releasing excess: frame1={excess_after_one}, frame4={final_excess}"
+        // Receiver balancing can release virtually all original excess in
+        // frame one; later motion may create fresh crowding. Check the exact
+        // repeated feedback above and net decay from the authored perturbation.
+        final_excess < initial_excess,
+        "pressure/transport failed to release the perturbation: initial={initial_excess}, frame4={final_excess}"
     );
 }

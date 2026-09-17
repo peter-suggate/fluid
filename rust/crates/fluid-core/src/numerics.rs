@@ -181,6 +181,11 @@ pub fn extend_velocity_with_level_set(
             "level-set velocity extension requires one finite phi per cell".into(),
         ));
     }
+    fields.validate_for(graph)?;
+    crate::staggered_velocity::extend_faces(graph, fields, phi, depth_count)?;
+    collocate_velocity(graph, fields);
+    // Derived cell velocities remain useful to sizing and wall-release logic;
+    // characteristic tracing reads the face field directly.
     extend_velocity_impl(graph, fields, depth_count, Some(phi))
 }
 
@@ -2493,7 +2498,28 @@ pub fn prepare_faces_for_level_set_volume(
     fields: &mut Fields,
     dt: f32,
 ) -> Result<(), ValidationError> {
-    prepare_faces_impl(graph, fields, dt, false, true)
+    let velocity = crate::staggered_velocity::StaggeredVelocity2d::new(graph, fields)?;
+    prepare_faces_from_staggered_velocity(graph, fields, dt, &velocity)
+}
+
+pub(crate) fn prepare_faces_from_staggered_velocity(
+    graph: &Graph,
+    fields: &mut Fields,
+    dt: f32,
+    velocity: &crate::staggered_velocity::StaggeredVelocity2d,
+) -> Result<(), ValidationError> {
+    for row in &graph.rows {
+        if row.kind == RowKind::ClosedWorld && !row.separating || row.open_fraction <= 1e-8 {
+            fields.face_velocity[row.id as usize] = row.solid_velocity;
+            continue;
+        }
+        let start = [row.center[0], row.center[1]];
+        let departure = clip_segment(graph, fields, start, velocity.trace(start, dt));
+        let value = velocity.sample(departure)[row.axis as usize];
+        fields.face_velocity[row.id as usize] =
+            row.open_fraction * value + (1.0 - row.open_fraction) * row.solid_velocity;
+    }
+    Ok(())
 }
 
 fn prepare_faces_impl(
@@ -4363,7 +4389,9 @@ mod tests {
             .find(|cell| cell.center[0] == 2.5 && cell.center[1] == 2.5)
             .unwrap()
             .id as usize;
-        fields.cell_velocity[2 * phi_liquid] = 7.0;
+        for &row_id in &graph.incidences[phi_liquid] {
+            if graph.rows[row_id as usize].axis == 0 { fields.face_velocity[row_id as usize] = 7.0; }
+        }
         fields.capacity[phi_liquid] = 1.0e-12;
         phi[phi_liquid] = -1.0;
         extend_velocity_with_level_set(&graph, &mut fields, &phi, 1).unwrap();

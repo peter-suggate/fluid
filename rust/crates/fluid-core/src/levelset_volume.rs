@@ -1,6 +1,6 @@
 //! Conservative volume plus signed-distance transport experiment.
 
-use crate::numerics::{owner_at, sample_support};
+use crate::staggered_velocity::StaggeredVelocity2d;
 use crate::levelset_redistance::{sample_scalar, RedistanceField};
 use crate::levelset_surface;
 use crate::presentation::{RdfSupport, RdfSurface, RdfTopology};
@@ -157,18 +157,6 @@ pub fn publish_pressure_geometry_from_phi(
     Ok(())
 }
 
-fn trace_point(graph: &Graph, fields: &Fields, start: [f32; 2], span: f32, dt: f32) -> [f32; 2] {
-    let first = sample_support(graph, fields, start[0], start[1], span);
-    let midpoint = [
-        (start[0] - 0.5 * dt * first[0]).clamp(0.0, graph.dimensions[0]),
-        (start[1] - 0.5 * dt * first[1]).clamp(0.0, graph.dimensions[1]),
-    ];
-    let velocity = sample_support(graph, fields, midpoint[0], midpoint[1], span);
-    [
-        (start[0] - dt * velocity[0]).clamp(0.0, graph.dimensions[0]),
-        (start[1] - dt * velocity[1]).clamp(0.0, graph.dimensions[1]),
-    ]
-}
 
 #[derive(Clone, Copy)]
 struct ReleasedWall {
@@ -227,9 +215,64 @@ fn released_wall_phi(walls: &[ReleasedWall], point: [f32; 2]) -> Option<f32> {
         .reduce(f32::max)
 }
 
+/// Continue resolved liquid onto a closed domain wall. A wall vertex traced
+/// with zero normal velocity otherwise retains its initially-air sign forever,
+/// leaving a false air gap and delaying pressure contact in the adjacent cell.
+/// Use one *finest* interval of interior support, independent of adaptive rung.
+/// Only liquid is extended: copying interior air would erase a subcell film
+/// already touching the wall. Recession follows tangential advection or the
+/// explicit separating-wall carve applied after this continuation.
+fn continue_phi_onto_closed_walls(graph: &Graph, fields: &Fields, vertices: &mut [f32]) {
+    let [nx, ny] = [graph.dimensions[0] as usize, graph.dimensions[1] as usize];
+    let stride = nx + 1;
+    let mut closed = vec![0_u8; vertices.len()];
+    let mut separating = vec![0_u8; vertices.len()];
+    for row in &graph.rows {
+        if row.kind != crate::types::RowKind::ClosedWorld || row.axis >= 2 {
+            continue;
+        }
+        let axis = row.axis as usize;
+        let end = [nx, ny][axis];
+        let side = if row.center[axis] == 0.0 { 0 }
+            else if row.center[axis] == end as f32 { 1 }
+            else { continue };
+        if !row.terms.iter().any(|term|
+            fields.capacity.get(term.cell_id as usize).copied().unwrap_or(1.0) > 0.0) {
+            continue;
+        }
+        let tangent = 1 - axis;
+        let half = 0.5 * row.static_measure.unwrap_or(row.measure);
+        let lo = (row.center[tangent] - half).ceil().max(0.0) as usize;
+        let hi = (row.center[tangent] + half).floor().min([nx, ny][tangent] as f32) as usize;
+        let bit = 1 << (2 * axis + side);
+        for t in lo..=hi {
+            let mut p = [0; 2];
+            p[axis] = if side == 0 { 0 } else { end };
+            p[tangent] = t;
+            let i = p[0] + stride * p[1];
+            closed[i] |= bit;
+            if row.separating { separating[i] |= bit; }
+        }
+    }
+    // Gather from the immutable advected field. At a closed corner use the
+    // diagonal interior vertex, so x/y and row ordering cannot bias contact.
+    let advected = vertices.to_vec();
+    for (i, &mask) in closed.iter().enumerate() {
+        let mask = mask & !separating[i];
+        if mask == 0 { continue; }
+        let mut p = [i % stride, i / stride];
+        for axis in 0..2 {
+            if mask & (1 << (2 * axis)) != 0 { p[axis] += 1; }
+            if mask & (1 << (2 * axis + 1)) != 0 { p[axis] -= 1; }
+        }
+        let interior = advected[p[0] + stride * p[1]];
+        if interior < 0.0 { vertices[i] = interior; }
+    }
+}
+
 fn trace_rk2(
     graph: &Graph,
-    fields: &Fields,
+    velocity: &StaggeredVelocity2d,
     dt: f32,
 ) -> (Vec<[[f64; 2]; 5]>, f64, f64) {
     let mut footprints = Vec::with_capacity(graph.cells.len());
@@ -244,7 +287,7 @@ fn trace_rk2(
             [cell.minimum[0], cell.maximum[1]],
             start,
         ];
-        let traced = starts.map(|point| trace_point(graph, fields, point, span, dt));
+        let traced = starts.map(|point| velocity.trace(point, dt));
         for (before, after) in starts.iter().zip(traced) {
             let distance = ((after[0] - before[0]).powi(2)
                 + (after[1] - before[1]).powi(2)).sqrt() as f64;
@@ -256,12 +299,21 @@ fn trace_rk2(
     (footprints, max_distance, max_courant)
 }
 
+#[cfg(test)]
 fn advect_shared_phi(
     graph: &Graph,
     fields: &Fields,
     previous: &RdfSurface,
     dt: f32,
     _receipt: &mut LevelSetVolumeReceipt,
+) -> Result<Vec<f32>, ValidationError> {
+    let velocity = StaggeredVelocity2d::new(graph, fields)?;
+    advect_shared_phi_with_velocity(graph, fields, previous, dt, &velocity)
+}
+
+fn advect_shared_phi_with_velocity(
+    graph: &Graph, fields: &Fields, previous: &RdfSurface, dt: f32,
+    velocity: &StaggeredVelocity2d,
 ) -> Result<Vec<f32>, ValidationError> {
     let [nx, ny] = previous.dimensions.map(|value| value as usize);
     if previous.vertex_phi_fine.len() != (nx + 1) * (ny + 1) {
@@ -276,29 +328,22 @@ fn advect_shared_phi(
     for y in 0..=ny {
         for x in 0..=nx {
             let start = [x as f32, y as f32];
-            let owner_point = [
-                start[0].clamp(0.5, graph.dimensions[0] - 0.5),
-                start[1].clamp(0.5, graph.dimensions[1] - 0.5), 0.0,
-            ];
-            let span = owner_at(graph, owner_point).map(|id| {
-                graph.cells[id].widths[0].min(graph.cells[id].widths[1]).max(1.0)
-            }).unwrap_or(1.0);
-            let first = sample_support(graph, fields, start[0], start[1], span);
-            let midpoint = [
-                (start[0] - 0.5 * dt * first[0]).clamp(0.0, graph.dimensions[0]),
-                (start[1] - 0.5 * dt * first[1]).clamp(0.0, graph.dimensions[1]),
-            ];
-            let velocity = sample_support(graph, fields, midpoint[0], midpoint[1], span);
-            let raw_departure = [start[0] - dt * velocity[0], start[1] - dt * velocity[1]];
-            let departure = [
-                raw_departure[0].clamp(0.0, graph.dimensions[0]),
-                raw_departure[1].clamp(0.0, graph.dimensions[1]),
-            ];
+            let departure = velocity.trace(start, dt);
             let sampled = sample_scalar(previous, departure)
                 .ok_or_else(|| ValidationError("direct level-set departure has no finite scalar".into()))?;
-            result.push(released_wall_phi(&released_walls, start)
-                .map_or(sampled, |wall_phi| sampled.max(wall_phi)));
+            result.push(sampled);
         }
+    }
+    if dt > 0.0 {
+        continue_phi_onto_closed_walls(graph, fields, &mut result);
+        // Separation wins at shared vertices/corners, including where a
+        // tangential closed face also supplies liquid continuation.
+        for y in 0..=ny { for x in 0..=nx {
+            if let Some(wall_phi) = released_wall_phi(&released_walls, [x as f32, y as f32]) {
+                let i = x + (nx + 1) * y;
+                result[i] = result[i].max(wall_phi);
+            }
+        }}
     }
     Ok(result)
 }
@@ -533,16 +578,93 @@ fn balance_capacity_marginals(
             }
         }
     }
-    let max_row = rows.iter().enumerate().map(|(i, row)| {
-        let sum: f64 = row.iter().map(|entry| entry.1).sum();
-        if capacity[i] > EPS { ((sum - capacity[i]) / capacity[i]).abs() } else { sum.abs() }
-    }).fold(0.0_f64, f64::max);
-    let mut columns = vec![0.0; capacity.len()];
-    for row in rows.iter() { for &(donor, value) in row { columns[donor] += value; } }
-    let max_column = columns.iter().zip(capacity).map(|(sum, q)| {
-        if *q > EPS { ((sum - q) / q).abs() } else { sum.abs() }
-    }).fold(0.0_f64, f64::max);
+    let (max_row, max_column) = capacity_residuals(rows, capacity);
     (max_row, max_column, zero_weight_donors)
+}
+
+fn capacity_residuals(rows: &[Vec<(usize, f64)>], capacity: &[f64]) -> (f64, f64) {
+    const EPS: f64 = 1e-30;
+    let max_row = rows
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let sum: f64 = row.iter().map(|entry| entry.1).sum();
+            if capacity[i] > EPS {
+                ((sum - capacity[i]) / capacity[i]).abs()
+            } else {
+                sum.abs()
+            }
+        })
+        .fold(0.0_f64, f64::max);
+    let mut columns = vec![0.0; capacity.len()];
+    for row in rows.iter() {
+        for &(donor, value) in row {
+            columns[donor] += value;
+        }
+    }
+    let max_column = columns
+        .iter()
+        .zip(capacity)
+        .map(|(sum, q)| {
+            if *q > EPS {
+                ((sum - q) / q).abs()
+            } else {
+                sum.abs()
+            }
+        })
+        .fold(0.0_f64, f64::max);
+    (max_row, max_column)
+}
+
+/// Limit liquid crowding through the existing geometric overlap weights.
+/// Scale only over-filled receivers, then restore every donor marginal. Empty
+/// capacity is not filled artificially: iterating the capacity-only balancing
+/// to convergence spreads closed-boundary errors into remote translating liquid.
+/// No mass is clipped or moved outside the existing donor/receiver stencil.
+/// An infeasible stencil may retain excess at the work cap; receipts expose it.
+fn balance_liquid_receiver_capacity(
+    weights: &mut [Vec<(usize, f64)>],
+    capacity: &[f64],
+    volume: &[f64],
+) {
+    for _ in 0..64 {
+        let mut excess = false;
+        for (receiver, row) in weights.iter_mut().enumerate() {
+            let mass: f64 = row
+                .iter()
+                .map(|&(d, w)| {
+                    if capacity[d] > 1e-30 {
+                        w * volume[d] / capacity[d]
+                    } else {
+                        0.0
+                    }
+                })
+                .sum();
+            if mass > capacity[receiver] * (1.0 + 1e-6) {
+                excess = true;
+                let scale = capacity[receiver] / mass;
+                for (_, w) in row {
+                    *w *= scale;
+                }
+            }
+        }
+        if !excess {
+            break;
+        }
+        let mut columns = vec![0.0; capacity.len()];
+        for row in weights.iter() {
+            for &(d, w) in row {
+                columns[d] += w;
+            }
+        }
+        for row in weights.iter_mut() {
+            for (d, w) in row {
+                if columns[*d] > 1e-30 {
+                    *w *= capacity[*d] / columns[*d];
+                }
+            }
+        }
+    }
 }
 
 fn maximum_excess_ratio(density: f32, capacity: f32) -> Option<f64> {
@@ -796,7 +918,8 @@ pub fn advance_with_fine_capacity(
     let _ = RedistanceField::new(previous_surface)?;
     let mut receipt = LevelSetVolumeReceipt::default();
     let clock = StageClock::start();
-    let (footprints, distance, courant) = trace_rk2(graph, fields, dt);
+    let velocity = StaggeredVelocity2d::new(graph, fields)?;
+    let (footprints, distance, courant) = trace_rk2(graph, &velocity, dt);
     receipt.trace_nanoseconds = clock.elapsed();
     receipt.maximum_trace_distance = distance;
     receipt.maximum_trace_courant = courant;
@@ -817,7 +940,9 @@ pub fn advance_with_fine_capacity(
     receipt.initial_liquid_volume = volume.iter().sum();
     let (mut weights, zero_support_donors) =
         raw_weights_from_footprints(graph, &footprints, &capacity);
-    let (row_residual, donor_residual, zero_weight) = balance_capacity_marginals(&mut weights, &capacity);
+    let (_, _, zero_weight) = balance_capacity_marginals(&mut weights, &capacity);
+    balance_liquid_receiver_capacity(&mut weights, &capacity, &volume);
+    let (row_residual, donor_residual) = capacity_residuals(&weights, &capacity);
     receipt.maximum_normalized_row_residual = row_residual;
     receipt.maximum_donor_residual = donor_residual;
     receipt.zero_weight_donors = zero_support_donors.max(zero_weight);
@@ -882,7 +1007,7 @@ pub fn advance_with_fine_capacity(
     receipt.volume_gather_nanoseconds = clock.elapsed();
 
     let clock = StageClock::start();
-    let vertices = advect_shared_phi(graph, fields, previous_surface, dt, &mut receipt)?;
+    let vertices = advect_shared_phi_with_velocity(graph, fields, previous_surface, dt, &velocity)?;
     receipt.phi_gather_nanoseconds = clock.elapsed();
 
     let clock = StageClock::start();
@@ -983,6 +1108,7 @@ mod tests {
         let mut fields = Fields::default();
         fields.cell_velocity = graph.cells.iter()
             .flat_map(|_| velocity).collect();
+        fields.face_velocity = graph.rows.iter().map(|row| velocity[row.axis as usize]).collect();
         fields
     }
 
@@ -998,6 +1124,66 @@ mod tests {
             if y < 8 { -6.5 } else if y == 8 { -2.75 } else { 1.0 }
         })).collect();
         levelset_surface::publish(dimensions, vertices, 8.25 * dimensions[0] as f64).unwrap()
+    }
+
+    #[test]
+    fn wall_contact_uses_fine_support_on_every_side_and_rung() {
+        for resolution in [2, 4, 8] {
+            let mut graph = graph([8, 8, 1], vec![brick(0, [0, 0, 0], resolution)]);
+            let fields = velocity_fields(&graph, [0.0; 2]);
+            let mut phi = vec![2.0; 81];
+            for [x, y] in [[1, 4], [7, 4], [4, 1], [4, 7], [1, 1]] {
+                phi[x + 9*y] = -0.25;
+            }
+            let before = phi.clone();
+            continue_phi_onto_closed_walls(&graph, &fields, &mut phi);
+            for [x, y] in [[0, 4], [8, 4], [4, 0], [4, 8], [0, 0]] {
+                assert_eq!(phi[x + 9*y], -0.25, "rung {resolution}, {x}/{y}");
+            }
+            for y in 1..8 { for x in 1..8 {
+                assert_eq!(phi[x+9*y], before[x+9*y], "interior phi must not move");
+            }}
+            graph.rows.reverse();
+            let mut reversed = before;
+            continue_phi_onto_closed_walls(&graph, &fields, &mut reversed);
+            assert_eq!(phi, reversed, "corner contact depends on row order");
+        }
+    }
+
+    #[test]
+    fn wall_contact_does_not_fill_open_or_separating_boundary_patches() {
+        let mut graph = graph([8, 8, 1], vec![brick(0, [0, 0, 0], 8)]);
+        let fields = velocity_fields(&graph, [0.0; 2]);
+        for row in &mut graph.rows {
+            if row.kind != crate::RowKind::ClosedWorld || row.axis != 0 { continue; }
+            if row.center[0] == 8.0 { row.kind = crate::RowKind::SparseAir; }
+            if row.center[0] == 0.0 && row.center[1] >= 4.0 { row.separating = true; }
+        }
+        let mut phi = vec![2.0; 81];
+        for y in 1..8 { phi[1+9*y] = -0.5; phi[7+9*y] = -0.5; }
+        continue_phi_onto_closed_walls(&graph, &fields, &mut phi);
+        assert_eq!(phi[9*2], -0.5);
+        assert_eq!(phi[9*4], 2.0, "separating patch wins at a shared endpoint");
+        assert_eq!(phi[9*6], 2.0);
+        assert_eq!(phi[8+9*2], 2.0, "open boundary is not a solid contact");
+    }
+
+    #[test]
+    fn wall_contact_preserves_subcell_films_and_tangential_recession() {
+        let graph = graph([8, 8, 1], vec![brick(0, [0, 0, 0], 8)]);
+        let fields = velocity_fields(&graph, [0.0; 2]);
+        let mut film: Vec<f32> = (0..=8).flat_map(|y| (0..=8).map(move |_| y as f32-0.25)).collect();
+        let before = film.clone();
+        continue_phi_onto_closed_walls(&graph, &fields, &mut film);
+        assert_eq!(film, before, "interior air cannot erase a shallow resting film");
+
+        let previous = levelset_surface::publish([8, 8], (0..=8)
+            .flat_map(|y| (0..=8).map(move |_| (y as f32-3.0).abs()-0.75))
+            .collect(), 12.0).unwrap();
+        let moving = velocity_fields(&graph, [0.0, 1.0]);
+        let next = advect_shared_phi(&graph, &moving, &previous, 1.0, &mut Default::default()).unwrap();
+        assert!(next[9*3] > 0.0, "old wall contact must recede with tangential flow");
+        assert!(next[9*4] < 0.0, "new wall contact follows the moving liquid");
     }
 
     #[test]
@@ -1097,6 +1283,25 @@ mod tests {
         ];
         assert!((columns[0] - capacity[0]).abs() < 1e-14);
         assert!((columns[1] - capacity[1]).abs() < 1e-14);
+    }
+
+    #[test]
+    fn receiver_balancing_limits_crowding_without_changing_donor_mass() {
+        let capacity = [1.0, 1.0];
+        let volume = [1.0, 1.0];
+        let mut rows = vec![vec![(0, 0.9), (1, 0.9)], vec![(0, 0.1), (1, 0.1)]];
+        balance_liquid_receiver_capacity(&mut rows, &capacity, &volume);
+        let (receiver, donor) = capacity_residuals(&rows, &capacity);
+        assert!(receiver <= 1e-6, "{receiver}");
+        assert!(donor <= 1e-14, "{donor}");
+        let mut feasible = vec![vec![(0, 0.8)], vec![(0, 0.2), (1, 1.0)]];
+        let before = feasible.clone();
+        balance_liquid_receiver_capacity(&mut feasible, &capacity, &[1.0, 0.0]);
+        assert_eq!(feasible, before, "dry capacity must not pull translating liquid backwards");
+        let mut infeasible = vec![vec![(0, 1.0), (1, 1.0)], vec![]];
+        balance_liquid_receiver_capacity(&mut infeasible, &capacity, &volume);
+        let (_, donor) = capacity_residuals(&infeasible, &capacity);
+        assert!(donor <= 1e-14, "an infeasible receiver must not discard donor mass");
     }
 
     #[test]
@@ -1386,7 +1591,8 @@ mod tests {
         fields.face_velocity = graph.rows.iter().map(|row| {
             0.5 * (row.center[row.axis as usize] - 4.0)
         }).collect();
-        let (footprints, _, _) = trace_rk2(&graph, &fields, 0.1);
+        let velocity = StaggeredVelocity2d::new(&graph, &fields).unwrap();
+        let (footprints, _, _) = trace_rk2(&graph, &velocity, 0.1);
         let id = cell_at(&graph, [3.0, 3.0]);
         let triangles = footprint_triangles(footprints[id], &graph.cells[id]);
         let area: f64 = triangles.iter().map(|triangle| polygon_area(triangle)).sum();

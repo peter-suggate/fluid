@@ -453,7 +453,38 @@ fn transfer_fields_impl(
             contributions[entry] = proposed;
             remaining = add(remaining, -proposed);
         }
-        for _ in 0..2 {
+        if allow_overcapacity && amount >= 0.0 {
+            // Phi geometry and conservative V are independent authorities.
+            // Their mismatch is not roundoff: assigning it to the first child
+            // creates directional density/pressure impulses on refinement.
+            // Scale geometric liquid down together, or fill the remaining
+            // open capacity proportionally. Preserve excess above capacity
+            // with the same capacity weights; never discard accepted V.
+            let child_capacity = |entry: usize| {
+                target_capacity[entry_target[entry]] as f64 * plan.cell_areas[entry] as f64
+            };
+            let available: f64 = group.iter().map(|&e| child_capacity(e)).sum();
+            let geometric: f64 = group.iter().map(|&e|
+                (contributions[e] as f64).min(child_capacity(e))).sum();
+            let base = (amount as f64).min(available);
+            let excess = (amount as f64 - available).max(0.0);
+            remaining = [amount, 0.0];
+            for &entry in group {
+                let child = child_capacity(entry);
+                let initial = (contributions[entry] as f64).min(child);
+                let corrected = if base < geometric {
+                    initial * (base / geometric)
+                } else if available > geometric {
+                    initial + (child - initial) * ((base - geometric) / (available - geometric))
+                } else {
+                    initial
+                };
+                contributions[entry] = (corrected + if available > 0.0 {
+                    excess * child / available
+                } else { 0.0 }) as f32;
+                remaining = add(remaining, -contributions[entry]);
+            }
+        } else { for _ in 0..2 {
             for &entry in group {
                 let child = target_capacity[entry_target[entry]] * plan.cell_areas[entry];
                 let previous = contributions[entry];
@@ -471,7 +502,7 @@ fn transfer_fields_impl(
                 remaining = add(remaining, previous);
                 remaining = add(remaining, -proposed);
             }
-        }
+        }}
         let remainder = remaining[0] + remaining[1];
         if remainder.abs() > tolerance(amount.abs()) {
             return Err(deferred(256, id, remainder, amount.abs()));

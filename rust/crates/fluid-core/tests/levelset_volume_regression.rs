@@ -123,8 +123,8 @@ fn high_courant_uncovered_donors_remain_conservative() {
             0.0
         }
     });
-    for velocity in fields.cell_velocity.chunks_exact_mut(2) {
-        velocity[0] = 20.0;
+    for row in &graph.rows {
+        fields.face_velocity[row.id as usize] = if row.axis == 0 { 20.0 } else { 0.0 };
     }
     let (rdf_topology, rdf_support, previous_surface) = surface(&graph, &mut fields);
     let before = physical_volume(&graph, &fields);
@@ -371,8 +371,8 @@ fn identical_shared_phi_with_different_volume_and_poisoned_plic_has_identical_fu
     for values in [&mut a, &mut b] {
         values.interface_normal.fill(f32::NAN);
         values.interface_offset.fill(f32::NAN);
-        for velocity in values.cell_velocity.chunks_exact_mut(2) {
-            velocity.copy_from_slice(&[0.3, -0.2]);
+        for row in &graph.rows {
+            values.face_velocity[row.id as usize] = [0.3, -0.2][row.axis as usize];
         }
     }
     let mut phi_a = levelset_surface::cell_phi(&graph, &previous).unwrap();
@@ -410,9 +410,8 @@ fn small_translations_cross_fine_coarse_seam_in_both_directions() {
             };
             if in_x && cell.minimum[1] >= 2.0 && cell.maximum[1] <= 6.0 { 1.0 } else { 0.0 }
         });
-        for velocity in fields.cell_velocity.chunks_exact_mut(2) {
-            velocity[0] = vx;
-            velocity[1] = vy;
+        for row in &graph.rows {
+            fields.face_velocity[row.id as usize] = [vx, vy][row.axis as usize];
         }
         let destination_volume = |values: &Fields| -> f64 {
             graph.cells.iter().filter(|cell| if source_on_fine {

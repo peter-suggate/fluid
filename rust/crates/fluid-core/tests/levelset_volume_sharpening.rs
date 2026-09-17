@@ -331,3 +331,28 @@ fn equidistant_far_residue_does_not_choose_between_components() {
     assert_eq!(volume,before);
     assert!(receipt.ambiguous_cell_count>0);
 }
+
+#[test]
+fn symmetric_donors_share_limited_receiver_capacity_without_directional_bias() {
+    let graph = graph(false);
+    let surface = surface(|_, y| y - 4.0);
+    let capacity = vec![1.0; 16*8];
+    let (fields, mut volume) = target_fields(&graph, &surface, &capacity);
+    for cell in &graph.cells {
+        if cell.center[0] == 7.5 || cell.center[0] == 8.5 {
+            if cell.center[1] == 4.5 {volume[cell.id as usize] = 0.75;}
+            if cell.center[1] == 3.5 {volume[cell.id as usize] = 0.5;}
+        }
+    }
+    let initial:f64 = volume.iter().sum();
+    let phi = levelset_surface::cell_phi(&graph, &surface).unwrap();
+    let receipt = sharpen_volume(&graph, &fields, &capacity, &surface, &phi, &mut volume).unwrap();
+    assert!((volume.iter().sum::<f64>()-initial).abs()<1e-12);
+    assert_eq!(receipt.bound_violation_count,0);
+    assert!((receipt.relocated_volume-1.0).abs()<1e-12);
+    for cell in &graph.cells {
+        let mirror=graph.cells.iter().find(|c|c.center[0]==16.0-cell.center[0] && c.center[1]==cell.center[1]).unwrap();
+        let (a,b)=(volume[cell.id as usize],volume[mirror.id as usize]);
+        assert!((a-b).abs()<1e-12,"{:?}: {a} vs reflected {b}",cell.center);
+    }
+}

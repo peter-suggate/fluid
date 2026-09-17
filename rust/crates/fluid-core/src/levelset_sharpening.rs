@@ -179,9 +179,7 @@ pub fn sharpen_volume(
     }
     // Gate diffuse donor islands, rather than individual cells, at half of the
     // smallest cell in that island so thin isolated material is not erased.
-    let mut donors: Vec<_> = (0..volume.len()).filter(|&i| in_band(i) && residual[i] > 0.0).collect();
-    // Complete established near-surface sharpening before the new far return.
-    donors.sort_by_key(|&i| (!near(i), i));
+    let donors: Vec<_> = (0..volume.len()).filter(|&i| in_band(i) && residual[i] > 0.0).collect();
     let maximum_width = graph.cells.iter().map(|c| c.widths[0].max(c.widths[1]) as f64)
         .fold(1.0_f64, f64::max);
     let mut donor_dsu = Dsu::new(volume.len());
@@ -197,6 +195,7 @@ pub fn sharpen_volume(
     let mut donor_used = HashSet::new(); let mut receiver_used = HashSet::new();
     let before_component: Vec<f64> = (0..component_count).map(|r| (0..volume.len())
         .filter(|&i| region[i] == r).map(|i| volume[i]).sum()).collect();
+    let mut stencils = Vec::new();
     for donor in donors {
         let root = donor_dsu.find(donor);
         // Coordinates are measured in finest-cell units, so this gate is
@@ -245,24 +244,52 @@ pub fn sharpen_volume(
                 Some((j, actual, kernel))
             }).collect();
         receivers.sort_by_key(|entry| entry.0);
+        stencils.push((donor, receivers));
+    }
+    // Donors compete for receiver capacity simultaneously. Sequential donor
+    // commits let the first spatial/ID order consume shared room and produce
+    // directional volume residue even from perfectly reflected input fields.
+    // Preserve near-surface priority, but gather and limit each phase before
+    // committing any volume. Every accepted edge subtracts and adds the same
+    // amount within one phi component.
+    for near_phase in [true, false] {
         for _ in 0..4 {
-            let weighted: Vec<_> = receivers.iter().filter_map(|&(receiver, distance, kernel)| {
-                let room = (-residual[receiver])
-                    .min((capacity[receiver] - volume[receiver]).max(0.0));
-                (room > 0.0 && kernel > 0.0).then_some((receiver, distance, room, kernel * room))
-            }).collect();
-            let weight_sum: f64 = weighted.iter().map(|entry| entry.3).sum();
-            let budget = residual[donor];
-            if budget <= 1e-12 || weight_sum <= 0.0 { break; }
-            for (receiver, distance, room, weight) in weighted {
-                let moved = room.min(budget * weight / weight_sum).min(residual[donor]);
+            let room: Vec<f64> = (0..volume.len()).map(|i|
+                (-residual[i]).max(0.0).min((capacity[i]-volume[i]).max(0.0))).collect();
+            let mut demand = vec![0.0; volume.len()];
+            let mut proposals = Vec::new();
+            for (donor, receivers) in &stencils {
+                if near(*donor) != near_phase || residual[*donor] <= 1e-12 { continue; }
+                let weight_sum: f64 = receivers.iter().map(|&(receiver, _, kernel)|
+                    kernel * room[receiver]).sum();
+                if weight_sum <= 0.0 { continue; }
+                let budget = residual[*donor];
+                for &(receiver, distance, kernel) in receivers {
+                    let requested = room[receiver].min(budget * kernel * room[receiver] / weight_sum);
+                    if requested <= 0.0 { continue; }
+                    proposals.push((*donor, receiver, distance, requested));
+                    demand[receiver] += requested;
+                }
+            }
+            if proposals.is_empty() { break; }
+            for (donor, receiver, distance, requested) in proposals {
+                // Allocation is already simultaneous. Bound the final f64
+                // subtraction/addition as well, so exhaustion to roundoff
+                // cannot publish a tiny negative donor or overfill a receiver.
+                let moved = (requested * (room[receiver] / demand[receiver]).min(1.0))
+                    .min(residual[donor].max(0.0))
+                    .min((-residual[receiver]).max(0.0))
+                    .min((capacity[receiver]-volume[receiver]).max(0.0));
                 if moved <= 0.0 { continue; }
-                volume[donor] -= moved; volume[receiver] += moved;
-                residual[donor] -= moved; residual[receiver] += moved;
+                volume[donor] -= moved;
+                volume[receiver] += moved;
+                residual[donor] -= moved;
+                residual[receiver] += moved;
                 receipt.relocated_volume += moved;
-                if !near(donor) { receipt.far_relocated_volume += moved; }
+                if !near_phase { receipt.far_relocated_volume += moved; }
                 receipt.maximum_relocation_distance = receipt.maximum_relocation_distance.max(distance);
-                donor_used.insert(donor); receiver_used.insert(receiver);
+                donor_used.insert(donor);
+                receiver_used.insert(receiver);
             }
         }
     }
