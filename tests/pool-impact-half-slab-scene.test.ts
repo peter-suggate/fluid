@@ -21,7 +21,9 @@ test("half-pool slab keeps the XY physics and seeds the same disk through its de
   for (const [x, y] of [[0, 3.65], [.8, 3.65], [1.2, 3.65], [0, 2.8]]) {
     const expected = Math.hypot(x!, y! - 3.65) - 1;
     for (const z of [-.4, -.35, 0, .35, .4]) {
-      assert.ok(Math.abs(initialLiquidVolumesSignedDistance(slab, { x: x!, y: y!, z }) - expected) < 1e-12);
+      const distance = initialLiquidVolumesSignedDistance(slab, { x: x!, y: y!, z });
+      assert.notEqual(distance, undefined);
+      assert.ok(Math.abs(distance! - expected) < 1e-12);
     }
   }
 });
