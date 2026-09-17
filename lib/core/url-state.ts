@@ -1,7 +1,9 @@
+import { managedQueryKey } from "../framework/persistence";
 import { uiFeatureQuery, type FeatureUIQueryState } from "../features/persistence";
 import { runtimeFeatureQuery, initialRuntimeFeatures, pickRuntimeFeatures, runtimeFeaturesChanged, type RuntimeFeatureState } from "../features/runtime-lifecycle";
 import { GRAVITY_QUERY_PATHS, isGravityVector } from "../features/gravity/state";
 import { refinementRegionsToQuery, withRefinementRegionsFromQuery } from "./editor-refinement-region";
+import { REGIONS_QUERY_KEY } from "../features/refinement-region/persistence";
 import { sceneSeedsQuery, withSceneSeedsFromQuery } from "./initial-brick-seed-query";
 import { CAMERA_DISTANCE_RANGE } from "./math";
 import { defaultMethodId, interactiveMethodId, registeredSimulationMethods } from "./method-registry";
@@ -13,6 +15,7 @@ import { isPressureJournalOverlayMode } from "../features/pressure-inspection/gp
 import { cameraForPreset, defaultScenePresetId, findSceneDefinition, getScenePreset, scenePresets, type ScenePreset } from "./scenes";
 import { sceneDefinitionTakesLattice, sceneDocumentAtLattice } from "./scene-definition";
 import { resolveSession, type PaneSession } from "./session/session";
+import { replaceLocationSearch, startHostQueryStateSync } from "./query-state-sync";
 import {
   compareQueryEntries,
   INITIAL_COMPARE_STATE,
@@ -243,14 +246,14 @@ function sceneQueryBaseline(presetId: string): SceneQueryBaseline {
 }
 
 /**
- * Refinement regions ride their own key, not a `scene.*` path.
+ * Regions ride their own key, and the key itself is the feature's.
  *
- * Every other scene value in the query is the document's own number, which is
- * right for a metre extent and wrong for a drawn box: a region is a question
- * about a *part of the domain* ("what does it cost to stop resolving the back
- * third"), and that question is worth carrying between scenes. So the key holds
- * percentages of the container and is resolved against whatever container the
- * link lands on. See `refinementRegionsToQuery`.
+ * The value is percentages of the container resolved against whatever container
+ * the link lands on, because the question a region asks is about a *part of the
+ * domain* ("what does it cost to stop resolving the back third"), and that
+ * question is worth carrying between scenes. See
+ * `lib/features/refinement-region/persistence.ts`, which owns both the key and
+ * the encoding so the 2-D lab writes the same value.
  *
  * Compared as encoded strings against the preset's own regions, which is the
  * same container-relative comparison the value itself makes, so a preset that
@@ -258,7 +261,6 @@ function sceneQueryBaseline(presetId: string): SceneQueryBaseline {
  * list still writes the key, as the empty string, or hydration would restore
  * the preset's boxes over a deliberate removal.
  */
-const REGIONS_QUERY_KEY = "regions";
 
 /**
  * Canopy dials ride their own key for the same reason regions do: the scenery
@@ -683,21 +685,49 @@ function uiQueryState(query: URLSearchParams, preset: ScenePreset): UIQueryState
 }
 
 /**
- * Keys this module owns and therefore rewrites from scratch on every canonical
- * write. `panel`, `panelWidth` and `sceneConfig` are retired — the docked right
- * panel and the configuration popover are both gone — but they stay listed so a
- * link from before the hero-scene cut is *tolerated*: the key parses to nothing
- * and is dropped from the address rather than surviving as a stale flag nothing
- * reads. What replaced the dock is `overlay`, which is a live key and is
- * deliberately not a migration target: the retired panel names are not the
+ * Keys the studio owns by name, beside the ones its features bring.
+ *
+ * Exported because the *set* is what a reader of a link depends on, and the one
+ * way to pin it is to enumerate it: a key that quietly leaves this list survives
+ * forever in every address it appears in, and one that quietly joins it deletes
+ * somebody else's parameter on the first store change.
+ */
+export const STUDIO_QUERY_KEYS: readonly string[] = [
+  "method", "scene", "quality", "view", "diagnostics", "waterdiag",
+  OVERLAY_QUERY_KEY, "performance", "validation",
+  "grid", "gridSlice", "gridMode", "lensPhase",
+  "render", "svoLighting", "svoSilhouetteRefinement", "svoSurface",
+  "environment", "fps",
+];
+
+/**
+ * Names that parse to nothing and are dropped rather than carried.
+ *
+ * The docked right panel and the configuration popover are both gone, but the
+ * names stay listed so a link from before the hero-scene cut is *tolerated*:
+ * the key is removed from the address rather than surviving as a stale flag
+ * nothing reads. What replaced the dock is `overlay`, which is a live key and is
+ * deliberately not a migration target — the retired panel names are not the
  * instruments, so an old link opens the scene bare.
  */
-function isManagedKey(key: string) {
-  return uiFeatureQuery.keys.includes(key) || runtimeFeatureQuery.keys.includes(key) || key === "method" || key === "scene" || key === "quality" || key === "view" || key === "diagnostics" || key === "waterdiag" || key === "panel" || key === "panelWidth" || key === OVERLAY_QUERY_KEY
-    || key === "performance" || key === "validation" || key === "sceneConfig" || key === "grid" || key === "gridSlice" || key === "gridMode" || key === "lensPhase"
-    || isCompareQueryKey(key)
-    || key === REGIONS_QUERY_KEY || key === CANOPY_QUERY_KEY || key === STONES_QUERY_KEY || key === RIM_QUERY_KEY || key === SEEDS_QUERY_KEY || key === "render" || key === "svoLighting" || key === "svoSilhouetteRefinement" || key === "svoSurface" || key === "environment" || key === "fps" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
-}
+export const RETIRED_QUERY_KEYS: readonly string[] = ["panel", "panelWidth", "sceneConfig"];
+
+/**
+ * Keys this module rewrites from scratch on every canonical write.
+ *
+ * Composed from its owners rather than spelled out: the two feature codecs
+ * carry their own keys, the five scene-side values carry theirs, and compare's
+ * `b.*` block is a predicate because pane B's vocabulary is pane A's.
+ */
+const isManagedKey = managedQueryKey(
+  uiFeatureQuery,
+  runtimeFeatureQuery,
+  { keys: [REGIONS_QUERY_KEY, CANOPY_QUERY_KEY, STONES_QUERY_KEY, RIM_QUERY_KEY, SEEDS_QUERY_KEY] },
+  { keys: STUDIO_QUERY_KEYS },
+  { keys: RETIRED_QUERY_KEYS },
+  { prefixes: ["camera.", "param.", "scene."] },
+  { matches: [isCompareQueryKey] },
+);
 
 /** Build a canonical query string from the stores, preserving unrelated keys. */
 export function serializeQueryState(
@@ -809,10 +839,18 @@ export function replaceQueryStateUrl(
   // `b.*` diff beside it. Today there is one pane and it is A.
   session: PaneSession = resolveSession(),
 ) {
-  const search = serializeQueryState(window.location.search, session.scene.getState(), session.method.getState(), session.ui.getState(), useShellStore.getState(), preparedSceneEntries, session.runtime.getState());
-  const next = `${window.location.pathname}${search ? `?${search}` : ""}${window.location.hash}`;
-  const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
-  if (next !== current) window.history.replaceState(window.history.state, "", next);
+  replaceLocationSearch(studioQuerySearch(window.location.search, session, preparedSceneEntries));
+}
+
+/** Pane A, pane B and the shell as one canonical query. The studio's `serialize`. */
+function studioQuerySearch(
+  search: string,
+  session: PaneSession,
+  preparedSceneEntries?: readonly SceneQueryEntry[],
+): string {
+  return serializeQueryState(search, session.scene.getState(), session.method.getState(),
+    session.ui.getState(), useShellStore.getState(), preparedSceneEntries,
+    session.runtime.getState());
 }
 
 /** The canonical location for the document currently held by the stores. */
@@ -836,80 +874,53 @@ export interface QueryStateSyncOptions {
  */
 export function startQueryStateSync(onHydrated: (presetId: string) => void, options: QueryStateSyncOptions = {}) {
   const session = options.session ?? resolveSession();
-  let active = true;
-  let queued = false;
-  let applyingUrl = false;
   const cachedSceneLayer = createSceneQueryLayerCache();
-  const scenePageActive = () => window.location.pathname === "/scene" || window.location.pathname.startsWith("/scene/");
-
-  const writeUrl = () => {
+  return startHostQueryStateSync({
     // AppShell retains this component while the library route is visible. Its
     // URL belongs to the library and must neither mirror nor hydrate the hidden
     // studio until navigation returns to /scene.
-    if (!active || applyingUrl || !scenePageActive()) return;
-    replaceQueryStateUrl(cachedSceneLayer(session.scene.getState()), session);
-  };
-
-  const scheduleWrite = () => {
-    if (queued || applyingUrl) return;
-    queued = true;
-    queueMicrotask(() => { queued = false; writeUrl(); });
-  };
-
-  const hydrate = () => {
-    applyingUrl = true;
-    const search = window.location.search;
-    const state = parseQueryState(search);
-    const shellState = useShellStore.getState();
-    const restoredShell = shellSessionFromQuery(search, shellState);
-    // The `b.*` block restores both panes: a compare link is one address, and
-    // reloading it has to bring back the second pane and the diff it carried,
-    // not just pane A with a stray flag.
-    const restoredCompare = parseCompareQuery(search);
-    useShellStore.setState({
-      view: restoredShell.view,
-      studioEntered: restoredShell.studioEntered,
-      compare: restoredCompare.active
-        ? { ...restoredCompare, focusedPane: shellState.compare.focusedPane }
-        : INITIAL_COMPARE_STATE,
-      ...(restoredShell.view === "studio" ? { librarySearch: "" } : {}),
-    });
-    // Offline comparison methods remain parseable and serializable, while the
-    // interactive application admits only the choices exposed by its picker.
-    session.method.setState({ methodId: interactiveMethodId(state.methodId), quality: state.quality, overrides: state.overrides });
-    session.scene.getState().setScene(state.scene, state.presetId);
-    session.ui.setState(state.ui);
-    onHydrated(state.presetId);
-    session.runtime.setState(pickRuntimeFeatures(state));
-    applyingUrl = false;
-    writeUrl();
-  };
-
-  if (options.hydrateFromUrl === false) writeUrl();
-  else hydrate();
-  const stopMethod = session.method.subscribe(scheduleWrite);
-  const stopScene = session.scene.subscribe(scheduleWrite);
-  const stopUI = session.ui.subscribe(scheduleWrite);
-  const stopRuntime = session.runtime.subscribe((state, previous) => {
-    if (runtimeFeaturesChanged(previous, state)) scheduleWrite();
+    path: "/scene",
+    serialize: (search) => studioQuerySearch(search, session,
+      cachedSceneLayer(session.scene.getState())),
+    hydrate: (search) => {
+      const state = parseQueryState(search);
+      const shellState = useShellStore.getState();
+      const restoredShell = shellSessionFromQuery(search, shellState);
+      // The `b.*` block restores both panes: a compare link is one address, and
+      // reloading it has to bring back the second pane and the diff it carried,
+      // not just pane A with a stray flag.
+      const restoredCompare = parseCompareQuery(search);
+      useShellStore.setState({
+        view: restoredShell.view,
+        studioEntered: restoredShell.studioEntered,
+        compare: restoredCompare.active
+          ? { ...restoredCompare, focusedPane: shellState.compare.focusedPane }
+          : INITIAL_COMPARE_STATE,
+        ...(restoredShell.view === "studio" ? { librarySearch: "" } : {}),
+      });
+      // Offline comparison methods remain parseable and serializable, while the
+      // interactive application admits only the choices exposed by its picker.
+      session.method.setState({ methodId: interactiveMethodId(state.methodId), quality: state.quality, overrides: state.overrides });
+      session.scene.getState().setScene(state.scene, state.presetId);
+      session.ui.setState(state.ui);
+      onHydrated(state.presetId);
+      session.runtime.setState(pickRuntimeFeatures(state));
+    },
+    sources: [
+      (onChange) => session.method.subscribe(onChange),
+      (onChange) => session.scene.subscribe(onChange),
+      (onChange) => session.ui.subscribe(onChange),
+      (onChange) => session.runtime.subscribe((state, previous) => {
+        if (runtimeFeaturesChanged(previous, state)) onChange();
+      }),
+      // Search text and section disclosure are intentionally session-only; only
+      // the layer in front belongs in the address bar. The compare record is in
+      // the address for the same reason the view is: it says which page this is,
+      // and a reload has to land on the same one.
+      (onChange) => useShellStore.subscribe((shell, previous) => {
+        if (shell.view !== previous.view || shell.compare !== previous.compare) onChange();
+      }),
+    ],
+    ...(options.hydrateFromUrl === undefined ? {} : { hydrateFromUrl: options.hydrateFromUrl }),
   });
-  // Search text and section disclosure are intentionally session-only; only
-  // the layer in front belongs in the address bar.
-  const stopShell = useShellStore.subscribe((shell, previous) => {
-    // The compare record is in the address for the same reason the view is: it
-    // says which page this is, and a reload has to land on the same one.
-    if (shell.view !== previous.view || shell.compare !== previous.compare) scheduleWrite();
-  });
-  const hydrateScenePage = () => { if (scenePageActive()) hydrate(); };
-  window.addEventListener("popstate", hydrateScenePage);
-
-  return () => {
-    active = false;
-    stopMethod();
-    stopScene();
-    stopUI();
-    stopRuntime();
-    stopShell();
-    window.removeEventListener("popstate", hydrateScenePage);
-  };
 }

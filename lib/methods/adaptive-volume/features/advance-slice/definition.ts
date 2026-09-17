@@ -25,6 +25,7 @@
  * threshold gets the same number.
  */
 import type { FeatureDefinition } from "../../../../framework/composition";
+import type { QueryCodec } from "../../../../framework/persistence";
 
 /* ---- the marks a lens declares ------------------------------------- */
 
@@ -264,6 +265,87 @@ export function isAdvanceTransportExperiment(
   return value === "baseline" || value === "cellwise-remap"
     || value === "level-set-volume";
 }
+
+/* ---- the run in the address bar ------------------------------------- */
+
+/** The reconstruction a run opens on, and the one a link need not name. */
+export const ADVANCE_DEFAULT_SURFACE_VIEW: AdvanceSurfaceViewId = "shared-rdf";
+
+/**
+ * Which arm, what it may spend, and how the surface is drawn — as three keys.
+ *
+ * Here rather than in the lab page because all three are claims about *this
+ * method*: the arms and their default budgets are `ADVANCE_TRANSPORT_EXPERIMENTS`,
+ * the bound the budget is held to is `ADVANCE_PRESSURE_BUDGET_RANGE`, and the
+ * roster of readings is `ADVANCE_SURFACE_VIEWS`. An arm added beside the method
+ * travels in a link without the page learning its name.
+ *
+ * `solve` is written only when it differs from *the arm's* default, which is why
+ * the three cannot be three independent `QueryValue`s: the budget's baseline is
+ * 28 iterations under `baseline` and 256 under the other two, so a link that
+ * named a budget beside an arm it happens to match would be carrying a number
+ * that says nothing — and switching arms would then strand it.
+ */
+export interface AdvanceRunQueryState {
+  readonly transportExperiment: AdvanceTransportExperimentId;
+  readonly pressureBudget: number;
+  readonly surfaceView: AdvanceSurfaceViewId;
+}
+
+const TRANSPORT_QUERY_KEY = "transport";
+const SOLVE_QUERY_KEY = "solve";
+const SURFACE_QUERY_KEY = "surface";
+
+/** A reading the reader may actually choose; the imposed one is never written. */
+function selectableSurfaceView(raw: string | null): AdvanceSurfaceViewId | undefined {
+  const view = ADVANCE_SURFACE_VIEWS.find((candidate) => candidate.id === raw);
+  return view?.selectable === true ? view.id : undefined;
+}
+
+export const advanceRunQuery: QueryCodec<AdvanceRunQueryState> = {
+  keys: [TRANSPORT_QUERY_KEY, SOLVE_QUERY_KEY, SURFACE_QUERY_KEY],
+  read: (query) => {
+    const asked = query.get(TRANSPORT_QUERY_KEY);
+    const transportExperiment = isAdvanceTransportExperiment(asked)
+      ? asked : ADVANCE_DEFAULT_TRANSPORT_EXPERIMENT;
+    const arm = ADVANCE_TRANSPORT_EXPERIMENTS[transportExperiment];
+    // `Number(null)` is `0`, which is finite — so an absent key has to be asked
+    // about before the number is read, or every link with no budget in it would
+    // hydrate to the bottom of the dial and then write that number back.
+    const raw = query.get(SOLVE_QUERY_KEY);
+    const solve = raw === null || raw.trim() === "" ? Number.NaN : Number(raw);
+    // Snapped to the dial's own step rather than only clamped: a budget between
+    // two positions is one the row cannot show, so the mirror would rewrite the
+    // address on the first render and the link would not be idempotent.
+    const budget = Number.isFinite(solve)
+      ? Math.max(ADVANCE_PRESSURE_BUDGET_RANGE.minimum,
+        Math.min(ADVANCE_PRESSURE_BUDGET_RANGE.maximum,
+          Math.round(solve / ADVANCE_PRESSURE_BUDGET_RANGE.step)
+          * ADVANCE_PRESSURE_BUDGET_RANGE.step))
+      : arm.defaultPressureBudget;
+    return {
+      transportExperiment,
+      pressureBudget: budget,
+      surfaceView: selectableSurfaceView(query.get(SURFACE_QUERY_KEY))
+        ?? ADVANCE_DEFAULT_SURFACE_VIEW,
+    };
+  },
+  write: (query, state) => {
+    for (const key of [TRANSPORT_QUERY_KEY, SOLVE_QUERY_KEY, SURFACE_QUERY_KEY]) {
+      query.delete(key);
+    }
+    if (state.transportExperiment !== ADVANCE_DEFAULT_TRANSPORT_EXPERIMENT) {
+      query.set(TRANSPORT_QUERY_KEY, state.transportExperiment);
+    }
+    const arm = ADVANCE_TRANSPORT_EXPERIMENTS[state.transportExperiment];
+    if (state.pressureBudget !== arm.defaultPressureBudget) {
+      query.set(SOLVE_QUERY_KEY, String(state.pressureBudget));
+    }
+    if (state.surfaceView !== ADVANCE_DEFAULT_SURFACE_VIEW) {
+      query.set(SURFACE_QUERY_KEY, state.surfaceView);
+    }
+  },
+};
 
 /* ---- the slice as a composed feature -------------------------------- */
 

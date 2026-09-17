@@ -43,6 +43,7 @@ import {
   advanceStageSlice,
 } from "../lib/methods/adaptive-volume/features/advance-slice/loop";
 import { sparseCM12Stage } from "../lib/methods/adaptive-volume/sparse-cm12-stages";
+import { fieldViewQuery } from "../lib/features/field-view/persistence";
 
 /**
  * The drawn palette, resolved from the page's own theme.
@@ -1407,3 +1408,44 @@ export const SLICE_OVERLAY_VIEWS: readonly FieldVisualization[] = Object.freeze(
         swatch: paletteVar(overlay.keys[0]!.tone),
       });
   }));
+
+/**
+ * The lab's field view as a query value.
+ *
+ * Declared here, where the roster is, rather than in the page: which lenses
+ * exist and which annotations compose over them is this file's fact, and the
+ * address bar is one more reader of it. A stage added to `ADVANCE_STAGE_ORDER`
+ * becomes a nameable lens in a link without the page or the sync loop learning
+ * anything.
+ *
+ * `accepts` is `includes` over the sixteen declared modes, which is the closed
+ * half of the bargain `fieldViewQuery` strikes: the studio's lens vocabulary is
+ * five open-ended predicates over four solvers, and the shared codec asks for a
+ * predicate so neither host has to narrow to the other's shape.
+ *
+ * The lens the lab opens on is `conservative-transport` — the stage the slice is
+ * about — and not `represent`, which is the state *entering* the advance and is
+ * reached by scrubbing to step 1 rather than by choosing a lens.
+ */
+export const ADVANCE_DEFAULT_LENS_MODE = "conservative-transport";
+
+/**
+ * The lens and the annotations, in the address.
+ *
+ * The same `gridMode`/`overlays` pair the studio's field flyout writes, through
+ * the same codec — the two pages never share an address, so one vocabulary on
+ * two hosts costs nothing and a link that means "show me this" reads the same
+ * way on both. What differs is only which names each host will accept, which is
+ * why `accepts` is the roster rather than a shared union.
+ *
+ * `represent` is excluded deliberately, even though it is a lens *view*: it is
+ * the state entering the advance, reached by scrubbing to step 1, and the page
+ * holds it as a scrub position rather than as the chosen stage. Admitting it
+ * here would hydrate a non-stage into the lens and draw nothing.
+ */
+export const advanceFieldViewQuery = fieldViewQuery({
+  initialMode: ADVANCE_DEFAULT_LENS_MODE,
+  accepts: (raw) => raw !== REPRESENT_LENS_MODE
+    && ADVANCE_LENS_VIEWS.some((view) => view.mode === raw),
+  overlays: SLICE_OVERLAY_ORDER,
+});

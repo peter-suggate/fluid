@@ -116,14 +116,14 @@
 // session stores evaluate; the server layout's registry is a separate realm.
 import "../lib/methods";
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useStore } from "zustand";
 import { EditorModeChip } from "../components/EditorModeChip";
 import { RadialMenu } from "../components/RadialMenu";
 import { ScenePickerPopover } from "../components/ScenePickerPopover";
 import { ThemeSwitch } from "../components/ThemeSwitch";
 import { ViewportModeToggle } from "../components/ViewportModeToggle";
 import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
-import { sceneDocument } from "../lib/core/scene-definition";
 import type { EditorActionEffect } from "../lib/core/editor-action";
 import { getEditorGesture } from "../lib/core/editor-gesture-catalog";
 import { createPaneSession, type PaneSession } from "../lib/core/session/session";
@@ -138,7 +138,7 @@ import {
 } from "../lib/features/refinement-region/policy";
 import { RegionDeleteRow, RegionOptionRows } from "../lib/features/refinement-region/ui";
 import { SessionProvider } from "../lib/core/session/session-context";
-import { findSceneDefinition, SCENE_CATALOG, sceneCatalogCards } from "../lib/core/scenes";
+import { sceneCatalogCards } from "../lib/core/scenes";
 import {
   advanceCosts, ADVANCE_NOTES, ADVANCE_STAGE_ORDER, advanceSeamCost,
   advanceStageWork, advanceWorkModel, ADVANCE_DISPATCH_KINDS,
@@ -146,9 +146,8 @@ import {
   type AdvanceWorkScene,
 } from "../lib/methods/adaptive-volume/features/advance-slice/advance-work";
 import {
-  ADVANCE_DEFAULT_TRANSPORT_EXPERIMENT, ADVANCE_SLICE_SETTINGS, ADVANCE_SURFACE_VIEWS,
-  ADVANCE_TRANSPORT_EXPERIMENTS,
-  isAdvanceTransportExperiment, type AdvanceSurfaceViewId,
+  ADVANCE_SLICE_SETTINGS, ADVANCE_SURFACE_VIEWS,
+  ADVANCE_TRANSPORT_EXPERIMENTS, type AdvanceSurfaceViewId,
 } from "../lib/methods/adaptive-volume/features/advance-slice/definition";
 import {
   ADVANCE_LOOP_STEPS,
@@ -174,6 +173,11 @@ import {
   usesCellFillSlice,
 } from "./lenses";
 import { labEditorHost } from "./lab-host";
+import { LAB_SCENE_IDS, labAuthoredScene } from "./lab-scenes";
+import { createLabStore, type LabStore } from "./lab-store";
+import {
+  labRegionsFromQuery, labRegionsToQuery, startLabQueryStateSync,
+} from "./lab-url-state";
 import {
   labRegionAt, labRegionCanvasBox, labRegionSpace, labSolverCell,
   type LabRegionDocument,
@@ -188,7 +192,7 @@ import { SliceToolstrip } from "./SliceToolstrip";
 import { useSliceShortcuts } from "./use-slice-shortcuts";
 import {
   cellFromClient, clampedView, clientFromCell, fitScale, fitView, originPixels,
-  panned, pixelsPerCell, svgViewBox, zoomedToward,
+  panned, pixelsPerCell, sliceViewFromFraction, svgViewBox, zoomedToward,
   type SliceView, type ViewportRect,
 } from "./view-transform";
 
@@ -204,17 +208,15 @@ const PROBE_BASE_HEIGHT = 138;
  *  little generous: overestimating lifts the bubble, underestimating runs it
  *  off the bottom of the picture, and only one of those is recoverable. */
 const PROBE_MARK_HEIGHT = 54;
-/** Which scene the page is reading, kept in the URL so a refresh returns to it. */
-const SCENE_PARAM = "scene";
-const TRANSPORT_PARAM = "transport";
-const DEFAULT_SCENE_ID = "water-box-dam-break";
-/* The three transport arms, what each costs to solve and the parameterised
+/* Which scene the page is reading, which arm it is testing and what the solve
+ * may spend all travel in the address bar — and every one of those keys is
+ * declared by the module that owns the thing it names rather than here. See
+ * `lab-url-state.ts`, which mounts them, and `lab-store.ts`, which holds the
+ * answers so a mirror outside React can watch them.
+ *
+ * The three transport arms, what each costs to solve and the parameterised
  * selector the cellwise one rides, are declared beside the method, in
- * `ADVANCE_TRANSPORT_EXPERIMENTS`. These are lookups into that table. */
-const DEFAULT_TRANSPORT_EXPERIMENT: AdvanceTransportExperiment =
-  ADVANCE_DEFAULT_TRANSPORT_EXPERIMENT;
-const DEFAULT_PRESSURE_BUDGET =
-  ADVANCE_TRANSPORT_EXPERIMENTS[DEFAULT_TRANSPORT_EXPERIMENT].defaultPressureBudget;
+ * `ADVANCE_TRANSPORT_EXPERIMENTS`. This is a lookup into that table. */
 const CELLWISE_REMAP_OPTION = ADVANCE_TRANSPORT_EXPERIMENTS["cellwise-remap"].option!;
 /* What a press on the water does is no longer a state of this page. It is the
  * session's `armedGesture`, out of the shared catalog, so a stroke armed from a
@@ -458,15 +460,6 @@ interface Probe {
   readonly material: number;
 }
 
-const SCENE_IDS: ReadonlySet<string> =
-  new Set(SCENE_CATALOG.map(scene => scene.id));
-
-function authoredScene(id: string): AdvanceAuthoredScene | null {
-  const definition = findSceneDefinition(id);
-  return definition ? Object.freeze({ id, label: definition.name,
-    document: sceneDocument(definition) }) : null;
-}
-
 function authoredRegions(scene: AdvanceAuthoredScene, next: AdvanceView): readonly AdvanceRefinementRegion[] {
   const document = scene.document as { fluid?: { refinementRegions?: readonly {
     id: string; min_m: { x: number; y: number; z: number }; max_m: { x: number; y: number; z: number };
@@ -485,22 +478,28 @@ function authoredRegions(scene: AdvanceAuthoredScene, next: AdvanceView): readon
         : { maximumCellWidth: region.maximumCellSize_cells }) }));
 }
 
-/** The scene asked for in the URL, if it is one this lab can actually seed. */
-function requestedSceneId(): string {
-  if (typeof window === "undefined") return DEFAULT_SCENE_ID;
-  const asked = new URLSearchParams(window.location.search).get(SCENE_PARAM);
-  return asked && SCENE_IDS.has(asked) ? asked : DEFAULT_SCENE_ID;
+/**
+ * A freshly loaded run's boxes, and the baseline the address compares against.
+ *
+ * Both halves belong together: the lattice a region is a percentage *of* is the
+ * one this view publishes, and the encoding of the document's own boxes is what
+ * keeps a scene that authors them out of every link until somebody edits them.
+ * Split apart, the two could describe different lattices for one frame.
+ */
+function seedRegions(lab: LabStore, scene: AdvanceAuthoredScene,
+  next: AdvanceView): readonly AdvanceRefinementRegion[] {
+  const store = lab.getState();
+  store.setLattice(next.nx, next.ny);
+  const authored = authoredRegions(scene, next);
+  store.setRegionBaseline(labRegionsToQuery(authored, next.nx, next.ny));
+  return authored;
 }
 
 /* What a transport arm costs to solve, and how well, is the arm's business and
- * is declared with it in `ADVANCE_TRANSPORT_EXPERIMENTS`. These four stay as
- * the page's own reading of that table: which arm a scene opens on, and what
- * the address bar is allowed to ask for. */
-
-function defaultTransportExperiment(sceneId: string): AdvanceTransportExperiment {
-  void sceneId;
-  return DEFAULT_TRANSPORT_EXPERIMENT;
-}
+ * is declared with it in `ADVANCE_TRANSPORT_EXPERIMENTS`. These two stay as the
+ * page's own reading of that table: what a new run spends, and how hard its
+ * solve is held. Which arm a run *opens* on is no longer read here — it is the
+ * `transport` key's default, in `advanceRunQuery`. */
 
 function defaultPressureBudget(sceneId: string,
   transport: AdvanceTransportExperiment): number {
@@ -510,29 +509,6 @@ function defaultPressureBudget(sceneId: string,
 
 function pressureTolerance(transport: AdvanceTransportExperiment): number {
   return ADVANCE_TRANSPORT_EXPERIMENTS[transport].pressureTolerance;
-}
-
-function requestedTransportExperiment(sceneId: string): AdvanceTransportExperiment {
-  if (typeof window === "undefined") return defaultTransportExperiment(sceneId);
-  const asked = new URLSearchParams(window.location.search).get(TRANSPORT_PARAM);
-  return isAdvanceTransportExperiment(asked) ? asked : defaultTransportExperiment(sceneId);
-}
-
-/**
- * Mirror the reading into the address bar.
- *
- * `replaceState` rather than a push: choosing a scene is changing what this one
- * page is showing, not navigating, so Back should still leave the lab. The URL
- * exists so a refresh — or a link to a colleague — returns to the same water.
- */
-function publishRunSelection(id: string, transport: AdvanceTransportExperiment): void {
-  if (typeof window === "undefined") return;
-  const url = new URL(window.location.href);
-  if (id === DEFAULT_SCENE_ID) url.searchParams.delete(SCENE_PARAM);
-  else url.searchParams.set(SCENE_PARAM, id);
-  if (transport === defaultTransportExperiment(id)) url.searchParams.delete(TRANSPORT_PARAM);
-  else url.searchParams.set(TRANSPORT_PARAM, transport);
-  window.history.replaceState(null, "", `${url.pathname}${url.search}`);
 }
 
 function workScene(view: AdvanceView): AdvanceWorkScene {
@@ -633,26 +609,34 @@ function Fold({ id, title, meta, flag, open, toggle, children }: {
  *     those — its performer handles `arm`, `select` and its own `host` verbs
  *     and delegates nothing. The stores are fresh instances either way, so
  *     nothing here can be read or written by pane A.
- *   - **Nothing mirrors it into the address bar.** The URL writer is opt-in
- *     (`startQueryStateSync`, mounted by `components/FluidLab.tsx`) and is
- *     additionally gated on the path being `/scene`, so a session created here
- *     writes nothing. The lab keeps owning `?scene=` and `?transport=` through
- *     `publishRunSelection`, and the two cannot fight.
+ *   - **The address bar is the same loop, not a second one.** The studio's
+ *     writer (`startQueryStateSync`, mounted by `components/FluidLab.tsx`) is
+ *     gated on the path being `/scene`, and this page's
+ *     (`startLabQueryStateSync`) on its being `/advance-lab`, so exactly one of
+ *     them ever writes and the two cannot fight. What each mirrors is declared
+ *     by the module that owns it; nothing in this file names a query key.
  */
 export function AdvanceLab(): React.JSX.Element {
   // Built once per mount, in the initializer rather than in an effect: the
   // first render already reads `viewportMode` off it, and a session that
   // arrived one render late would open the page in a mode it then changed.
   const [session] = useState(() => createPaneSession("a"));
+  /* The reading this page can be linked to, beside the session and built the
+   * same way. Outside React because a mirror has to subscribe to what it
+   * mirrors, and React state is readable only from inside the component that
+   * holds it. See `lab-store.ts`. */
+  const [lab] = useState(() => createLabStore());
   // `EditorHostProvider` is inside `AdvanceSlice` rather than here: the host is
   // built out of the running controller, the published lattice and this render's
   // region list, none of which exist above that component. See `lab-host.ts`.
   return <SessionProvider value={session}>
-    <AdvanceSlice session={session} />
+    <AdvanceSlice session={session} lab={lab} />
   </SessionProvider>;
 }
 
-function AdvanceSlice({ session }: { session: PaneSession }): React.JSX.Element {
+function AdvanceSlice({ session, lab }: {
+  session: PaneSession; lab: LabStore;
+}): React.JSX.Element {
   const canvas = useRef<HTMLCanvasElement>(null);
   const viewport = useRef<HTMLDivElement>(null);
   const controller = useRef<AdvanceLabController | null>(null);
@@ -665,21 +649,40 @@ function AdvanceSlice({ session }: { session: PaneSession }): React.JSX.Element 
   const paintedPresentationRevision = useRef<string | null>(null);
   const paintedSharedRdf = useRef<AdvanceRdfView | undefined>(undefined);
 
-  const [selected, setSelected] = useState<AdvanceStageId>("conservative-transport");
+  /* Everything a link can name, out of the lab store rather than out of a hook.
+   * The setters are the store's and never change identity, so a closure that
+   * captured one is as safe as a `useState` setter was; what is different is
+   * that `startLabQueryStateSync` can subscribe to the same facts, which is the
+   * whole reason they moved. See `lab-store.ts`.
+   *
+   * Read through zustand's own `useStore` rather than by calling the bound hook
+   * this store also is. Both subscribe identically; the difference is that the
+   * React Compiler recognises a hook by its callee's name, and under the
+   * store's own name it has to assume every snapshot could be mutated later —
+   * which costs the component every `useMemo` that depends on one.
+   *
+   * The setters are read out for the handlers built during render. Anything
+   * inside a `useCallback` or an effect calls `lab.getState().setX(...)`
+   * instead, for the same reason: a function pulled out of `getState()` is
+   * stable at runtime but opaque to the compiler, so naming one in a dependency
+   * array gives the memoization up. The store itself is a prop and is fine. */
+  const {
+    setLens: setSelected, setOverlays, setTransport: setTransportExperiment,
+    setBudget, setSurface: setSurfaceView, setRegions: setRegionState,
+  } = lab.getState();
+  const selected = useStore(lab, state => state.lens);
+  const surfaceView = useStore(lab, state => state.surface) as SurfaceView;
+  const overlays = useStore(lab, state => state.overlays);
+  const sceneId = useStore(lab, state => state.sceneId);
+  const transportExperiment = useStore(lab, state => state.transport);
+  const regionState = useStore(lab, state => state.regions);
+  const budget = useStore(lab, state => state.budget);
+  const sliceView = useStore(lab, state => state.view);
+
   const [step, setStep] = useState<number | null>(null);
   const [metric, setMetric] = useState<Metric>("workgroups");
-  const [surfaceView, setSurfaceView] = useState<SurfaceView>("shared-rdf");
-  /* Off until asked for, like every fold in the sidebar: the water is the
-   * subject, and an annotation nobody turned on is chrome over it. */
-  const [overlays, setOverlays] = useState<ReadonlySet<SliceOverlayId>>(
-    () => new Set<SliceOverlayId>());
-  const [sceneId, setSceneId] = useState(DEFAULT_SCENE_ID);
-  const [transportExperiment, setTransportExperiment] =
-    useState<AdvanceTransportExperiment>(DEFAULT_TRANSPORT_EXPERIMENT);
   const [picking, setPicking] = useState(false);
   const [authored, setAuthored] = useState<AdvanceAuthoredScene | null>(null);
-  const [regionState, setRegionState] = useState<readonly AdvanceRefinementRegion[]>([]);
-  const [budget, setBudget] = useState(DEFAULT_PRESSURE_BUDGET);
   const pressureBudgetTouched = useRef(false);
   const [dt, setDt] = useState(CM12_PAPER_DT_S);
   /* Every scene opens still. A reader arrives at t=0 and starts it by hand;
@@ -726,19 +729,6 @@ function AdvanceSlice({ session }: { session: PaneSession }): React.JSX.Element 
   const dragging = useRef<{ pointer: number; anchor: readonly [number, number];
     moved: boolean } | null>(null);
   const [room, setRoom] = useState({ width: 960, height: 560 });
-  /* Where the picture is looked at from. Not a mode and not an intervention:
-   * it moves the reader, never the water, which is why it lives beside `room`
-   * rather than beside the tools. Named `sliceView` because `view` is already
-   * the mutable handle on the world.
-   *
-   * It carries the lattice shape it was framed for, because a different
-   * lattice is a different picture and not the same one looked at from the old
-   * place. A view stamped with a shape that is no longer on screen is simply
-   * not the view: render falls back to the fit, and the next gesture stamps
-   * the new shape on. That is a derivation rather than an effect, so a scene
-   * change never shows one frame through the old scene's camera. */
-  const [sliceView, setSliceView] = useState<SliceView & { readonly framing: string }>(
-    () => ({ ...fitView(1, 1), framing: "" }));
   /* The pan in flight: which pointer owns it and where it was last measured
    * from, because a drag is a run of deltas and not one displacement. */
   const panning = useRef<{ pointer: number; clientX: number; clientY: number } | null>(null);
@@ -763,10 +753,22 @@ function AdvanceSlice({ session }: { session: PaneSession }): React.JSX.Element 
   const live = useRef({ playing, budget, dt });
   useEffect(() => { live.current = { playing, budget, dt }; });
 
+  /**
+   * The address bar, hydrated once and then mirrored.
+   *
+   * A layout effect rather than an ordinary one so the store carries the link's
+   * answers before the boot below reads them: React runs every layout effect to
+   * completion before any passive effect, which is the same ordering
+   * `components/FluidLab.tsx` relies on in the studio. What each key means, and
+   * which module declares it, is `lab-url-state.ts`.
+   */
+  useLayoutEffect(() => startLabQueryStateSync(session, lab), [session, lab]);
+
   useEffect(() => {
-    const initialId = requestedSceneId();
-    const initialTransport = requestedTransportExperiment(initialId);
-    const initialBudget = defaultPressureBudget(initialId, initialTransport);
+    const linked = lab.getState();
+    const initialId = linked.sceneId;
+    const initialTransport = linked.transport;
+    const initialBudget = linked.budget;
     let handle = 0, last = 0, cancelled = false;
     const publish = (next: AdvanceView): void => {
       if (cancelled) return;
@@ -783,19 +785,33 @@ function AdvanceSlice({ session }: { session: PaneSession }): React.JSX.Element 
     void AdvanceLabController.create().then(async nextController => {
       if (cancelled) { await nextController.destroy(); return; }
       controller.current = nextController;
-      const scene = authoredScene(initialId);
+      const scene = labAuthoredScene(initialId);
       if (!scene) throw new Error(`Unknown Advance Lab scene ${initialId}`);
-      setSceneId(initialId);
-      setTransportExperiment(initialTransport);
-      setBudget(initialBudget);
       setAuthored(scene);
       const initialView = await nextController.load(scene, { pressureIterations: initialBudget,
         pressureRelativeTolerance: pressureTolerance(initialTransport),
         transportExperiment: initialTransport === "cellwise-remap"
           ? CELLWISE_REMAP_OPTION : initialTransport,
         production: { dtS: live.current.dt, timeStep: "paper" } });
-      setRegionState(authoredRegions(scene, initialView));
-      publish(initialView);
+      /* The lattice a link's percentages and its camera were measured against
+       * only exists now, two awaits after hydration — so this is where both are
+       * applied. A run chosen later has its lattice in hand already, which is
+       * why only the opening one has to wait. */
+      const authored = seedRegions(lab, scene, initialView);
+      const store = lab.getState();
+      const { linkedRegions, linkedView } = store;
+      const boxes = linkedRegions === null ? authored
+        : labRegionsFromQuery(linkedRegions, initialView.nx, initialView.ny);
+      store.setRegions(boxes);
+      if (linkedView) {
+        store.setView({
+          ...sliceViewFromFraction(linkedView, initialView.nx, initialView.ny),
+          framing: `${initialView.nx}x${initialView.ny}`,
+        });
+      }
+      store.clearLinked();
+      publish(linkedRegions === null ? initialView
+        : await nextController.setRefinementRegions(boxes));
     }).catch(error => setRuntimeFault(error instanceof Error ? error.message : String(error)));
 
     const loop = (time: number): void => {
@@ -822,7 +838,9 @@ function AdvanceSlice({ session }: { session: PaneSession }): React.JSX.Element 
     return () => { cancelled = true; cancelAnimationFrame(handle);
       const active = controller.current; controller.current = null; view.current = null;
       if (active) void active.destroy(); };
-  }, []);
+    // The store is a prop, built once beside the session, so the boot still
+    // runs exactly once per mount.
+  }, [lab]);
 
   /* The picture is sized to the room it is given, so the water is the page at
    * any window rather than a fixed postage stamp in the middle of one. */
@@ -843,12 +861,16 @@ function AdvanceSlice({ session }: { session: PaneSession }): React.JSX.Element 
    * was given wants both at once, and making them exclusive would be the page
    * deciding that question for them. */
   const toggleOverlay = useCallback((id: SliceOverlayId): void => {
-    setOverlays(current => {
+    // Through the store rather than through the setter destructured above, so
+    // the only dependency is the store itself: a setter read out of
+    // `getState()` is stable at runtime but opaque to the React Compiler, which
+    // then has to assume it could change and gives the memoization up.
+    lab.getState().setOverlays(current => {
       const next = new Set(current);
       if (!next.delete(id)) next.add(id);
       return next;
     });
-  }, []);
+  }, [lab]);
 
   /* The drawing is made of the page's own tokens, so a theme change is a
    * repaint: paused water would otherwise keep the palette it was painted in. */
@@ -895,11 +917,11 @@ function AdvanceSlice({ session }: { session: PaneSession }): React.JSX.Element 
    */
   const chooseRun = useCallback((id: string,
     nextTransport: AdvanceTransportExperiment = transportExperiment): void => {
-    const active = controller.current, scene = authoredScene(id);
-    if (!active || !scene || !SCENE_IDS.has(id)) return;
-    setSceneId(id);
+    const active = controller.current, scene = labAuthoredScene(id);
+    if (!active || !scene || !LAB_SCENE_IDS.has(id)) return;
+    lab.getState().setSceneId(id);
     setAuthored(null);
-    setRegionState([]);
+    lab.getState().setRegions([]);
     active.clearRefinementRegions();
     setPinned(null);
     setHover(null);
@@ -911,23 +933,22 @@ function AdvanceSlice({ session }: { session: PaneSession }): React.JSX.Element 
     setRuntimeFault(null);
     const nextBudget = pressureBudgetTouched.current
       ? live.current.budget : defaultPressureBudget(id, nextTransport);
-    setBudget(nextBudget);
+    lab.getState().setBudget(nextBudget);
     /* A new scene is a new beginning, and a beginning is still. */
     setPlaying(false);
     live.current.playing = false;
     /* A new scene is a new cost: the old median priced a different lattice. */
     stepCosts.current = [];
     setStepMs(null);
-    publishRunSelection(id, nextTransport);
     void active.load(scene, { pressureIterations: nextBudget,
       pressureRelativeTolerance: pressureTolerance(nextTransport),
       transportExperiment: nextTransport === "cellwise-remap"
         ? CELLWISE_REMAP_OPTION : nextTransport,
       production: { dtS: live.current.dt, timeStep: "paper" } }).then(next => {
       view.current = next; setPublishedView(next); setAuthored(scene);
-      setRegionState(authoredRegions(scene, next)); setReadings(read(next));
+      lab.getState().setRegions(seedRegions(lab, scene, next)); setReadings(read(next));
     }).catch(error => setRuntimeFault(error instanceof Error ? error.message : String(error)));
-  }, [transportExperiment, session.ui]);
+  }, [lab, session.ui, transportExperiment]);
 
   /**
    * The same run from t=0. Only the clock and the water go back: the boxes
@@ -1112,12 +1133,12 @@ function AdvanceSlice({ session }: { session: PaneSession }): React.JSX.Element 
     const shape = `${displayNx}x${displayNy}`;
     const legal = (candidate: SliceView): SliceView =>
       clampedView(candidate, fitNow, rect, displayNx, displayNy);
-    setSliceView(current => ({
+    lab.getState().setView(current => ({
       ...legal(move(legal(current.framing === shape ? current
         : fitView(displayNx, displayNy)), fitNow)),
       framing: shape,
     }));
-  }, [displayNx, displayNy]);
+  }, [displayNx, displayNy, lab]);
 
   /* The picture is redrawn when the water moves, the lens changes or the room
    * resizes — never when the pointer does, so probing a cell costs nothing. */
@@ -1554,8 +1575,8 @@ function AdvanceSlice({ session }: { session: PaneSession }): React.JSX.Element 
   const refit = useCallback((): void => {
     const s = view.current;
     if (!s) return;
-    setSliceView({ ...fitView(s.nx, s.ny), framing: `${s.nx}x${s.ny}` });
-  }, []);
+    lab.getState().setView({ ...fitView(s.nx, s.ny), framing: `${s.nx}x${s.ny}` });
+  }, [lab]);
 
   /* Whatever a stroke had in flight. Put down by Tab and by every rung of the
    * Escape ladder: a proposed ball or a rubber band left drawn under a mode

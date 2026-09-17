@@ -39,6 +39,8 @@
  * viewport, where client coordinates and element coordinates coincide).
  */
 
+import type { QueryCodec } from "../lib/framework/persistence";
+
 /** Just the extent of a box — all `fitScale` needs. */
 export interface ViewportBox {
   readonly width: number;
@@ -196,3 +198,105 @@ export function svgViewBox(
   const width = rect.width / ppc, height = rect.height / ppc;
   return `${round(legal.panFine[0] - width / 2)} ${round(legal.panFine[1] - height / 2)} ${round(width)} ${round(height)}`;
 }
+
+/* ---- the camera in the address bar ---------------------------------- */
+
+/**
+ * The camera as three query values, in **fractions of the slice**.
+ *
+ * Cells would make a link lattice-specific, which is the opposite of what
+ * looking at something means: "the top-left quarter, four times in" is the same
+ * instruction on a 96-cell slice and on a 256-cell one, and the lab's whole
+ * subject is what changes when a lattice does. A fraction is also what makes the
+ * fit view the *absence* of all three keys — `fitView` is
+ * `{ zoom: 1, panFine: [nx / 2, ny / 2] }`, which is exactly `(1, 0.5, 0.5)` —
+ * so an ordinary visit carries no camera at all.
+ *
+ * `zoom` is already lattice-independent and travels as itself, held to
+ * `SLICE_ZOOM_RANGE` on the way in because a link is external input and a zoom
+ * below the fit addresses letterbox.
+ *
+ * Here rather than in the page for the reason the transform itself is here: the
+ * clamp, the range and what the two numbers mean are this file's, and a second
+ * reading of them in the page's URL code is the copy that would drift.
+ */
+
+export const SLICE_VIEW_QUERY_KEYS: readonly string[] =
+  Object.freeze(["view.zoom", "view.x", "view.y"]);
+
+/** A camera with no lattice behind it: a zoom and a centre in 0..1. */
+export interface SliceViewFraction {
+  readonly zoom: number;
+  readonly x: number;
+  readonly y: number;
+}
+
+export const FIT_SLICE_VIEW_FRACTION: SliceViewFraction =
+  Object.freeze({ zoom: 1, x: 0.5, y: 0.5 });
+
+/** The camera as fractions of this lattice. A degenerate axis reads as centred. */
+export function sliceViewFraction(
+  view: SliceView,
+  nx: number,
+  ny: number,
+): SliceViewFraction {
+  return {
+    zoom: view.zoom,
+    x: nx > 0 ? view.panFine[0] / nx : 0.5,
+    y: ny > 0 ? view.panFine[1] / ny : 0.5,
+  };
+}
+
+/** The same camera back in cells. Exactly inverse, so a round trip is identity. */
+export function sliceViewFromFraction(
+  fraction: SliceViewFraction,
+  nx: number,
+  ny: number,
+): SliceView {
+  return { zoom: fraction.zoom, panFine: [fraction.x * nx, fraction.y * ny] };
+}
+
+/**
+ * Trim a fraction to the precision a pixel actually needs.
+ *
+ * Four places is a fifth of a cell on a 2048-cell slice, and the rounding is
+ * what keeps the mirror idempotent: a pan lands on an irrational fraction, and
+ * a link that wrote seventeen digits would read back a camera a hair from the
+ * one it named and rewrite itself forever.
+ */
+function fractionText(value: number): string {
+  return String(Number(value.toFixed(4)));
+}
+
+export const sliceViewQuery: QueryCodec<{ readonly sliceView: SliceViewFraction }> = {
+  keys: SLICE_VIEW_QUERY_KEYS,
+  read: (query) => {
+    const read = (key: string, fallback: number, minimum: number, maximum: number) => {
+      const raw = query.get(key);
+      if (raw === null || raw.trim() === "") return fallback;
+      const value = Number(raw);
+      return Number.isFinite(value) && value >= minimum && value <= maximum
+        ? value : fallback;
+    };
+    return {
+      sliceView: {
+        zoom: read(SLICE_VIEW_QUERY_KEYS[0]!, FIT_SLICE_VIEW_FRACTION.zoom,
+          SLICE_ZOOM_RANGE.minimum, SLICE_ZOOM_RANGE.maximum),
+        x: read(SLICE_VIEW_QUERY_KEYS[1]!, FIT_SLICE_VIEW_FRACTION.x, 0, 1),
+        y: read(SLICE_VIEW_QUERY_KEYS[2]!, FIT_SLICE_VIEW_FRACTION.y, 0, 1),
+      },
+    };
+  },
+  write: (query, state) => {
+    const values: readonly [string, number, number][] = [
+      [SLICE_VIEW_QUERY_KEYS[0]!, state.sliceView.zoom, FIT_SLICE_VIEW_FRACTION.zoom],
+      [SLICE_VIEW_QUERY_KEYS[1]!, state.sliceView.x, FIT_SLICE_VIEW_FRACTION.x],
+      [SLICE_VIEW_QUERY_KEYS[2]!, state.sliceView.y, FIT_SLICE_VIEW_FRACTION.y],
+    ];
+    for (const [key, value, fit] of values) {
+      query.delete(key);
+      const text = fractionText(value);
+      if (text !== fractionText(fit)) query.set(key, text);
+    }
+  },
+};

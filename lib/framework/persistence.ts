@@ -56,3 +56,42 @@ export function combineQueryCodecs<State extends object>(codecs: readonly QueryC
     },
   };
 }
+
+/**
+ * What one owner claims of the address bar.
+ *
+ * Three shapes rather than one list because all three are real: most keys are
+ * named, a few families are a prefix (`camera.`, `param.`, `scene.`), and one —
+ * compare's `b.*` diff — is a predicate over a second codec's whole vocabulary.
+ * A host that had to flatten those into strings would be back to restating its
+ * features' keys, which is the thing this exists to stop.
+ */
+export interface QueryKeyOwnership {
+  readonly keys?: readonly string[];
+  readonly prefixes?: readonly string[];
+  readonly matches?: readonly ((key: string) => boolean)[];
+}
+
+/**
+ * The test for "this key is mine to rewrite", composed from its owners.
+ *
+ * A canonical write clears every key it owns and writes the current answer
+ * back, so this predicate is what separates *my state, stale* from *somebody
+ * else's key, leave it alone* — an analytics tag, a Next.js router parameter, a
+ * link someone hand-edited. Getting it wrong in either direction is a bug with
+ * no compile error: too narrow and a retired flag survives forever, too wide
+ * and a foreign key silently vanishes on the first store change.
+ *
+ * A `QueryCodec` is already a legal owner, since it carries `keys` — which is
+ * the point. A host names the codecs it mounts, and the keys arrive with them.
+ */
+export function managedQueryKey(
+  ...owners: readonly QueryKeyOwnership[]
+): (key: string) => boolean {
+  const keys = new Set(owners.flatMap((owner) => owner.keys ?? []));
+  const prefixes = owners.flatMap((owner) => owner.prefixes ?? []);
+  const matches = owners.flatMap((owner) => owner.matches ?? []);
+  return (key) => keys.has(key)
+    || prefixes.some((prefix) => key.startsWith(prefix))
+    || matches.some((test) => test(key));
+}

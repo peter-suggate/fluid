@@ -1173,3 +1173,102 @@ what "which field is drawn" is called.
 The other load-bearing claim is §9.2's — that percent-of-container and percent-of-lattice
 are the same number. It is the first thing to re-verify if `refinementRegionLattice`
 ever stops taking its origin from the container.
+
+---
+
+# Deviations (WP9, as landed)
+
+Numbering continues the WP0–WP6 list above.
+
+**The region codec.**
+
+43. *`regionsFromQuery`'s space needs two members §9.2 did not name.* The signature is
+    `regionsFromQuery(space: Pick<RegionSpace, "axes"|"lattice"|"capacity"|"brick_cells"|"cellSizes"|"defaultCellSize_cells">, doc, raw)`.
+    `cellSizes` and `defaultCellSize_cells` are the extra two: a link names a floor, and
+    the floor a *host* will honour is its own dyadic ladder — four rungs in the lab,
+    the studio's constant in the studio — so clamping it inside the package without
+    them would have meant the studio's ladder silently policing lab links.
+44. *`withRegionsFromQuery` is **not** in the package.* `RegionSpace.write` is
+    per-record (`write(doc, id, next)`), and a query value replaces the *whole* list
+    including dropping the key when it is empty — an absence a per-record merge cannot
+    express. Each host keeps its own one-line document write:
+    `withRefinementRegionsFromQuery` in `lib/core/editor-refinement-region.ts`, and the
+    lab's `setRefinementRegions` call, which is already whole-list.
+45. *Percent of the **lattice**, and the equivalence is measured rather than argued.*
+    §9.2's load-bearing claim is that percent-of-container and percent-of-lattice are
+    the same number. A first probe over every shipped preset found 150 differences in
+    528,441 comparisons — all on `high-resolution-dam-break`, at cells 43/81/91 of 128,
+    all fourth-decimal ties. Restricted to the sides a reader can actually *place*
+    (multiples of the snap step, plus the lattice limit) the probe reports **0
+    differences across 2,533 lines and 85 presets**. That is the proof behind
+    `tests/region-query-both-hosts.test.ts`, which pins the shipped literal
+    `0_0_0_100_100_100_2` through the real metre adapter.
+46. *Four decimal places is the wire's granularity, and the tests use dyadic lattices
+    because of it.* A side at cell 8 of a 96-cell lattice writes `8.3333`, which reads
+    back 7.99968 cells and snaps *outward* — down a whole step for a minimum. This is
+    the format's, not the package's: the studio's metre path did exactly the same
+    before WP9. A link is a hundredth of a percent of the domain rather than a cell
+    address, and the snap is what keeps that from mattering in practice.
+
+**The allow-list and the shared field view.**
+
+47. *`QueryKeyOwnership` carries three shapes, not one list.* `managedQueryKey(...owners)`
+    takes `{ keys?, prefixes?, matches? }`, because all three are real in the studio:
+    named keys, the `camera.`/`param.`/`scene.` families, and compare's `b.*` diff,
+    which is a predicate over a second codec's whole vocabulary. A `QueryCodec` is
+    already a legal owner, since it carries `keys` — which is the point. `url-state.ts`
+    also had to export `STUDIO_QUERY_KEYS` and `RETIRED_QUERY_KEYS` for the studio's own
+    unowned names.
+48. *The studio does **not** adopt `fieldViewQuery`.* §9.7 recommended the shared codec
+    take the host's `accepts(raw)` so the studio could pass its five-predicate union
+    unchanged. The codec is built that way and lives at
+    `lib/features/field-view/persistence.ts` — but only the lab mounts it. The studio's
+    `parseGridOverlayMode` path (`url-state.ts:647-648,770`) is untouched, because the
+    brief's pin is that studio behaviour is byte-identical and the cheapest way to hold
+    that is not to move the code that produces it. The key `gridMode` is shared and the
+    two hosts agree on what "which field is drawn" is called, which is what the owner
+    asked for; converting the studio's reader is a separate, pinnable change.
+    (`overlays` has no studio counterpart at all — the studio's `overlay` key is the
+    instrument panel, a different thing.)
+49. *`accepts` excludes `represent`.* It is in `ADVANCE_LENS_VIEWS`, so a roster-derived
+    acceptance would have admitted it, but the page holds it as a *scrub position*
+    (step 1) rather than as the chosen stage, and `LabState.lens` is an
+    `AdvanceStageId`. Admitting it would hydrate a non-stage into the lens.
+
+**The lab's store, and two bugs the tests found.**
+
+50. *Fourteen fields, not the nine `useState`s §9.3 counted.* `nx`, `ny`,
+    `baselineRegions`, `linkedRegions` and `linkedView` are carried as well, because the
+    mirror runs *outside* React: it has to turn cells into percentages with no published
+    view in hand, compare against the scene's authored boxes to decide whether to write
+    the key at all, and park the two values that cannot be applied until the controller
+    publishes a lattice — two awaits after hydration.
+51. *The lab store is read through `useStore(lab, selector)`, and its setters are called
+    through `lab.getState()` inside hooks.* The React Compiler recognises a hook by its
+    callee's name; `lab(selector)` — the bound hook the store also is — is not one, so
+    every snapshot it returns is treated as possibly-mutable and kills the `useMemo`
+    that depends on it. A local `const useLab = lab` alias does not help. The same rule
+    applies to setters: one pulled out of `getState()` is stable at runtime but opaque
+    to the compiler, so naming one in a dependency array gives the memoization up.
+    Reading through zustand's own `useStore` and calling `lab.getState().setX(...)`
+    inside hook bodies is what keeps `AdvanceLab.tsx` at zero lint errors.
+52. *The camera needed the same wait the boxes got.* `serializeLabQuery` writes
+    `state.linkedView ?? sliceViewFraction(shownView(state), nx, ny)`. Without the left
+    half, hydration's immediate canonical write replaced a link's `view.*` with the fit
+    view *before* the boot could apply it — a reload silently lost the framing.
+    `advance-lab/lab-url-state.test.ts`'s idempotence claim is what found it.
+53. *`advanceRunQuery.read` has to ask whether `solve` is present before reading it.*
+    `Number(null)` is `0`, which is finite, so the clamp branch turned every link with
+    no budget in it into the bottom of the dial — and then wrote that number back, so an
+    ordinary visit acquired `?solve=4`. Same test.
+
+**Tests.**
+
+54. *§9.5(b) and (c) are split across two files.* The abstract claims — encoding, snap,
+    capacity, the three tail forms — are
+    `lib/features/refinement-region/verification/persistence.test.ts` against fabricated
+    spaces; the real-adapter claims are `tests/region-query-both-hosts.test.ts`, which
+    needs the method registry and a built scene. `tests/managed-query-keys.test.ts`
+    probes the studio's predicate *behaviourally* (a sentinel on a key either survives a
+    canonical write or does not) rather than by exporting it, so nothing there reads the
+    module's source.
