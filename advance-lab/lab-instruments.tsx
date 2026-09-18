@@ -250,3 +250,20 @@ export function LabTransportRow({ control }: FeatureControlViewProps) {
     </select>
   </>;
 }
+
+/** Representation selection is a reset of the run, independent of its lens. */
+export function LabAdaptiveSdfRow({ control }: FeatureControlViewProps) {
+  const adaptive = useParam(ADVANCE_SLICE_SETTINGS.adaptiveSdf);
+  const transport = useParam(ADVANCE_SLICE_SETTINGS.transport);
+  if (transport.value !== "level-set-volume") return null;
+  const enabled = adaptive.value !== false;
+  return <ToolstripRow
+    tag={control.label}
+    value={enabled ? "on" : "off"}
+    name={control.label}
+    hint={control.hint}
+    active={enabled}
+    testId="advance-adaptive-sdf"
+    onClick={() => adaptive.set(!enabled)}
+  />;
+}

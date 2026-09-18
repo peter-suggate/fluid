@@ -57,6 +57,7 @@ export const LAB_PATH = "/advance-lab";
 export interface LabQueryState {
   readonly sceneId: string;
   readonly transport: LabState["transport"];
+  readonly adaptiveSdf: boolean;
   readonly budget: number;
   readonly lens: AdvanceStageId;
   readonly overlays: ReadonlySet<SliceOverlayId>;
@@ -106,6 +107,7 @@ export function parseLabQuery(search: string): LabQueryState {
   return {
     sceneId: labSceneQuery.read(query).sceneId,
     transport: run.transportExperiment,
+    adaptiveSdf: run.adaptiveSdf !== false,
     budget: run.pressureBudget,
     lens: field.mode as AdvanceStageId,
     overlays: new Set(field.overlays as readonly SliceOverlayId[]),
@@ -145,6 +147,7 @@ export function serializeLabQuery(
   labSceneQuery.write(query, { sceneId: state.sceneId });
   advanceRunQuery.write(query, {
     transportExperiment: state.transport,
+    adaptiveSdf: state.adaptiveSdf,
     pressureBudget: state.budget,
     surfaceView: state.surface,
   });
@@ -202,6 +205,7 @@ export function startLabQueryStateSync(
       const store = lab.getState();
       store.setSceneId(state.sceneId);
       store.setTransport(state.transport);
+      store.setAdaptiveSdf(state.adaptiveSdf);
       store.setBudget(state.budget);
       store.setLens(state.lens);
       store.setOverlays(state.overlays);

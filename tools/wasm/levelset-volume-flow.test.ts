@@ -13,9 +13,10 @@ function assertRedistancingReceipt(receipt: Readonly<Record<string, unknown>>): 
   assert.ok(value && typeof value === "object", "the selected transport returns its own receipt");
   const levelSetVolume = value as Readonly<Record<string, unknown>>;
   assert.ok(Number(levelSetVolume.redistancedSamples) > 0,
-    "redistancing evaluates the accepted contour at cell centres for derived geometry");
-  assert.ok(Number(levelSetVolume.redistanceSegmentCount) > 0,
-    "redistancing indexes the accepted shared-interface contour");
+    "redistancing updates the selected SDF representation");
+  assert.ok(Number(levelSetVolume.adaptiveSdf
+    ? levelSetVolume.redistanceSeedCount : levelSetVolume.redistanceSegmentCount) > 0,
+    "redistancing indexes adaptive edge seeds or the fine-grid contour");
   assert.ok(Number.isInteger(levelSetVolume.redistanceFallbackSamples)
     && Number(levelSetVolume.redistanceFallbackSamples) >= 0,
   "redistancing publishes its fallback-sample count");

@@ -18,6 +18,8 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
     const scene=getScenePreset("coarse-first-pool-impact-half").create();const dt=1/30;
     solver=await WebGPUAdaptiveMassSolver.createCompiledTopologyTransport(device,scene,"balanced",undefined,sparseCM12DawnDefaultOptions(),()=>{});
     await solver.waitForSimulationReady();
+    assert.equal((await solver.readGeometricVolumeTransportReceiptQA()).coupling.liquidCapacityBalancing.converged,
+      false, "an unadvanced scene must not claim balancing convergence");
     const step=async(n:number)=>{while(!solver!.advanceTo(n*dt,[]))await new Promise<void>(setImmediate);
       await solver!.awaitFrameCompletion();await solver!.waitForTopologyReady();};
     await step(1);await step(2);
@@ -30,6 +32,9 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
     assert.equal(off.allocatedBytes,initial.allocatedBytes,"switching off retains reusable storage");
     solver.applyRuntimeValues({...sparseCM12DawnDefaultValues(),airExtension:"on"});await step(4);
     const on=await solver.readAirExtensionReceiptQA();assert.ok(on.momentumSnapshotReady);assert.equal(on.allocatedBytes,initial.allocatedBytes);
+    const transport=await solver.readGeometricVolumeTransportReceiptQA();
+    assert.ok(transport.transportCompleted);
+    assert.ok(transport.coupling.finalDonorResidual<1e-5,"liquid edits and runtime toggles preserve donor marginals");
     assert.ok(on.ready&&on.converged);assert.deepEqual(errors,[]);
   }finally{solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
 });

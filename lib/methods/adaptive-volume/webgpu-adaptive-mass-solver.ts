@@ -269,6 +269,11 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   setStageCaptureForQA(capture: SparseCM12ResidentStageSeams["close"] | undefined): void {
     this.stageCaptureForQA = capture;
   }
+  private substageCaptureForQA?: (stage: Parameters<SparseCM12ResidentStageSeams["close"]>[0],
+    substage: string, encoder: GPUCommandEncoder) => void;
+  setSubstageCaptureForQA(capture: typeof this.substageCaptureForQA): void {
+    this.substageCaptureForQA = capture;
+  }
   get fieldSnapshotSourceForQA() { return this.sparseRuntime.fieldSnapshotSourceForQA; }
   private atlas: SparseAdaptiveMassAtlas;
   private lastTime_s = 0;
@@ -1510,9 +1515,13 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       ?? (passBrokerLabelIsolationRequested()
         ? SPARSE_CM12_LABEL_ISOLATION_SEAMS : undefined);
     const captureStage = this.stageCaptureForQA;
-    const diagnosticStageSeams: SparseCM12ResidentStageSeams | undefined = captureStage
+    const captureSubstage = this.substageCaptureForQA;
+    const diagnosticStageSeams: SparseCM12ResidentStageSeams | undefined = captureStage || captureSubstage
       ? { ...baseStageSeams, close: (stage, encoder) => {
-        baseStageSeams?.close(stage, encoder); captureStage(stage, encoder);
+        baseStageSeams?.close(stage, encoder); captureStage?.(stage, encoder);
+      }, closeSubstage: (stage, substage) => {
+        baseStageSeams?.closeSubstage?.(stage, substage);
+        captureSubstage?.(stage, substage, rawEncoder);
       } } : baseStageSeams;
     const rawEncoder = this.device.createCommandEncoder({
       label: `Sparse Geometric (CM12) resident frame ${(this.lastTime_s + dt_s).toFixed(6)}`,

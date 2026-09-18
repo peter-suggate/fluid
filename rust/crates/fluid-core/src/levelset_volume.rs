@@ -67,6 +67,10 @@ pub struct LevelSetVolumeReceipt {
     pub redistanced_samples: usize,
     pub redistance_fallback_samples: usize,
     pub redistance_segment_count: usize,
+    pub adaptive_sdf: bool,
+    pub sdf_vertex_count: usize,
+    pub sdf_constrained_vertex_count: usize,
+    pub redistance_seed_count: usize,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -325,6 +329,75 @@ fn advect_shared_phi(
 ) -> Result<Vec<f32>, ValidationError> {
     let velocity = StaggeredVelocity2d::new(graph, fields)?;
     advect_shared_phi_with_velocity(graph, fields, previous, dt, &velocity)
+}
+
+fn advect_adaptive_phi(
+    graph: &Graph, fields: &Fields, source: &crate::adaptive_sdf::AdaptiveSdf,
+    dt: f32, velocity: &StaggeredVelocity2d,
+) -> Result<crate::adaptive_sdf::AdaptiveSdf, ValidationError> {
+    use crate::adaptive_sdf::Sample;
+    if source.generation() != graph.topology_generation {
+        return Err(ValidationError("adaptive SDF topology generation is stale".into()));
+    }
+    let mut result = source.clone();
+    let positions: Vec<_> = source.positions().collect();
+    let index: BTreeMap<_, _> = positions.iter().enumerate().map(|(i,p)| ([p[0] as usize,p[1] as usize],i)).collect();
+    let mut closed = vec![0_u8; positions.len()];
+    let mut separating = closed.clone();
+    for row in &graph.rows {
+        let axis = row.axis as usize;
+        if row.kind != crate::types::RowKind::ClosedWorld || axis >= 2 { continue; }
+        let upper = row.center[axis] == graph.dimensions[axis];
+        if !upper && row.center[axis] != 0.0 { continue; }
+        if !row.terms.iter().any(|t| fields.capacity[t.cell_id as usize] > 0.0) { continue; }
+        let tangent = 1-axis; let half = 0.5*row.static_measure.unwrap_or(row.measure);
+        let lo = (row.center[tangent]-half).ceil().max(0.0) as usize;
+        let hi = (row.center[tangent]+half).floor().min(graph.dimensions[tangent]) as usize;
+        let bit = 1 << (2*axis+usize::from(upper));
+        for t in lo..=hi {
+            let mut p = [0;2]; p[axis] = row.center[axis] as usize; p[tangent] = t;
+            if let Some(&i) = index.get(&p) { closed[i] |= bit; if row.separating { separating[i] |= bit; } }
+        }
+    }
+    let incoming = if dt > 0.0 { incoming_air_boundaries(graph, fields, dt) } else { Vec::new() };
+    for (i,&p) in positions.iter().enumerate() {
+        if !source.independent(i) { continue; }
+        let departure = velocity.trace(p,dt);
+        let old = source.value(i);
+        let travel = ((departure[0]-p[0]).powi(2)+(departure[1]-p[1]).powi(2)).sqrt();
+        let clearance = old.phi.abs()-travel;
+        let mut sample = if old.support != 3 && clearance > 1e-5 {
+            Sample { phi: if old.phi < 0.0 { -clearance } else { clearance }, support: old.support }
+        } else {
+            let mut s = source.sample_extended(departure)
+                .ok_or_else(|| ValidationError(format!("adaptive SDF departure lacks support at {departure:?}")))?;
+            if old.support == 3 && s.phi.abs() <= 4.0 { s.support = 3; }
+            s
+        };
+        if dt > 0.0 {
+            // Same immutable interior RK2 trace as cm12ClosedWallPhi in 3-D.
+            let mask = closed[i] & !separating[i];
+            if mask != 0 {
+                let mut interior = p;
+                for axis in 0..2 {
+                    if mask & (1 << (2*axis)) != 0 { interior[axis] += 1.0; }
+                    if mask & (2 << (2*axis)) != 0 { interior[axis] -= 1.0; }
+                }
+                if let Some(s) = source.sample_extended(velocity.trace(interior,dt)) {
+                    // Continue newly arriving contact, but never shorten an
+                    // existing liquid distance. Copying the inward value over
+                    // deeper liquid erodes a pool whose coarse cell spans the
+                    // wall and free surface, even when velocity is zero.
+                    if s.phi < 0.0 && s.phi < sample.phi { sample = Sample::new(s.phi); }
+                }
+            }
+            if let Some(phi) = incoming_air_phi(&incoming,p) {
+                if phi > sample.phi { sample = Sample::new(phi); }
+            }
+        }
+        result.set(i,sample);
+    }
+    result.constrain(); Ok(result)
 }
 
 fn advect_shared_phi_with_velocity(
@@ -1023,35 +1096,47 @@ pub fn advance_with_fine_capacity(
     receipt.volume_gather_nanoseconds = clock.elapsed();
 
     let clock = StageClock::start();
-    let vertices = advect_shared_phi_with_velocity(graph, fields, previous_surface, dt, &velocity)?;
-    receipt.phi_gather_nanoseconds = clock.elapsed();
-
+    let surface = if let Some(source) = &previous_surface.adaptive_sdf {
+        let mut sdf = advect_adaptive_phi(graph, fields, source, dt, &velocity)?;
+        receipt.phi_gather_nanoseconds = clock.elapsed();
+        let clock = StageClock::start();
+        let redistance = sdf.redistance();
+        receipt.redistance_nanoseconds += clock.elapsed();
+        let clock = StageClock::start();
+        receipt.adaptive_sdf = true;
+        receipt.sdf_vertex_count = sdf.vertex_count();
+        receipt.sdf_constrained_vertex_count = sdf.constrained_count();
+        receipt.redistance_seed_count = redistance.seeds;
+        receipt.redistanced_samples = redistance.updated;
+        receipt.redistance_fallback_samples = redistance.fallback;
+        let surface = levelset_surface::publish_adaptive(sdf, previous_surface.dimensions, receipt.final_liquid_volume)?;
+        *phi = levelset_surface::cell_phi(graph, &surface)?;
+        receipt.rdf_nanoseconds = clock.elapsed();
+        surface
+    } else {
+        let vertices = advect_shared_phi_with_velocity(graph, fields, previous_surface, dt, &velocity)?;
+        receipt.phi_gather_nanoseconds = clock.elapsed();
+        let clock = StageClock::start();
+        let vertices = redistance_vertices(previous_surface.dimensions, vertices, receipt.final_liquid_volume, &mut receipt)?;
+        let surface = levelset_surface::publish(previous_surface.dimensions, vertices, receipt.final_liquid_volume)?;
+        receipt.sdf_vertex_count = surface.vertex_phi_fine.len();
+        receipt.rdf_nanoseconds = clock.elapsed();
+        let clock = StageClock::start();
+        let accepted_redistance = RedistanceField::new(&surface)?;
+        receipt.redistance_segment_count = accepted_redistance.segment_count();
+        *phi = graph.cells.iter().map(|cell| {
+            let point = [cell.center[0], cell.center[1]];
+            if let Some(value) = accepted_redistance.sample(point) {
+                receipt.redistanced_samples += 1; value
+            } else {
+                receipt.redistance_fallback_samples += 1;
+                sample_scalar(&surface, point).unwrap_or(f32::NAN)
+            }
+        }).collect();
+        receipt.redistance_nanoseconds += clock.elapsed();
+        surface
+    };
     let clock = StageClock::start();
-    let vertices = redistance_vertices(
-        previous_surface.dimensions,
-        vertices,
-        receipt.final_liquid_volume,
-        &mut receipt,
-    )?;
-    let surface = levelset_surface::publish(
-        previous_surface.dimensions,
-        vertices,
-        receipt.final_liquid_volume,
-    )?;
-    receipt.rdf_nanoseconds = clock.elapsed();
-    let clock = StageClock::start();
-    let accepted_redistance = RedistanceField::new(&surface)?;
-    receipt.redistance_segment_count = accepted_redistance.segment_count();
-    *phi = graph.cells.iter().map(|cell| {
-        let point = [cell.center[0], cell.center[1]];
-        if let Some(value) = accepted_redistance.sample(point) {
-            receipt.redistanced_samples += 1;
-            value
-        } else {
-            receipt.redistance_fallback_samples += 1;
-            sample_scalar(&surface, point).unwrap_or(f32::NAN)
-        }
-    }).collect();
     if phi.iter().any(|value| !value.is_finite()) {
         return Err(ValidationError("direct level-set has no finite cell-centre scalar".into()));
     }
@@ -1140,6 +1225,27 @@ mod tests {
             if y < 8 { -6.5 } else if y == 8 { -2.75 } else { 1.0 }
         })).collect();
         levelset_surface::publish(dimensions, vertices, 8.25 * dimensions[0] as f64).unwrap()
+    }
+
+    #[test]
+    fn adaptive_wall_contact_preserves_a_stationary_shallow_pool() {
+        use crate::adaptive_sdf::{AdaptiveSdf, Sample};
+        for resolution in [1, 2, 4, 8] {
+            let graph = graph([8, 8, 1], vec![brick(0, [0, 0, 0], resolution)]);
+            let mut fields = velocity_fields(&graph, [0.0; 2]);
+            fields.capacity = vec![1.0; graph.cells.len()];
+            let velocity = StaggeredVelocity2d::new(&graph, &fields).unwrap();
+            let source = AdaptiveSdf::from_graph(&graph, |p| Some(Sample::new(p[1] - 6.5))).unwrap();
+            let mut next = advect_adaptive_phi(&graph, &fields, &source, 1.0 / 30.0, &velocity).unwrap();
+            assert!(next.sample([4.0, 6.5]).unwrap().phi.abs() < 1e-6,
+                "rung {resolution}: a stationary closed wall moved the interface");
+            for _ in 0..10 {
+                next.redistance();
+                next = advect_adaptive_phi(&graph, &fields, &next, 1.0 / 30.0, &velocity).unwrap();
+            }
+            assert!(next.sample([4.0, 6.5]).unwrap().phi.abs() < 1e-5,
+                "rung {resolution}: wall continuation eroded a resting pool");
+        }
     }
 
     #[test]

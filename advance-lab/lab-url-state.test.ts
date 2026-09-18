@@ -195,3 +195,16 @@ test("an edited box writes the key, and an emptied list writes it empty", async 
     stop();
   });
 });
+
+
+test("adaptive SDF defaults on and its off comparison survives a link round trip", () => {
+  const lab = createLabStore();
+  assert.equal(lab.getState().adaptiveSdf, true);
+  assert.equal(parseLabQuery("").adaptiveSdf, true);
+  lab.getState().setAdaptiveSdf(false);
+  const query = serializeLabQuery("?ref=kept", lab.getState(), { topologyFrozen: false });
+  assert.equal(new URLSearchParams(query).get("adaptiveSdf"), "0");
+  assert.equal(parseLabQuery(query).adaptiveSdf, false);
+  lab.getState().setAdaptiveSdf(true);
+  assert.equal(new URLSearchParams(serializeLabQuery(query, lab.getState(), { topologyFrozen: false })).has("adaptiveSdf"), false);
+});

@@ -13,7 +13,7 @@ const live = new Set<GPU>();
     const adapter = await gpu.requestAdapter(); assert.ok(adapter); device = await adapter.requestDevice(); assert.ok(device);
     const source = readFileSync(new URL("../lib/methods/adaptive-volume/resident-volume.wgsl.ts", import.meta.url), "utf8");
     const reduction = source.match(/fn gvAddPhiReduction\([\s\S]*?\n}/)![0];
-    const cleanup = source.slice(source.indexOf("var<workgroup> gvResidueReject"), source.indexOf("// One bounded global volume feedback step."));
+    const cleanup = source.slice(source.indexOf("var<workgroup> gvResidueReject"), source.indexOf("${createAdaptiveVolumeReturnWGSL()}"));
     const code = `
 @group(0)@binding(0)var<storage,read_write>state:array<f32>;
 @group(0)@binding(1)var<storage,read_write>conditioning:array<atomic<i32>>;

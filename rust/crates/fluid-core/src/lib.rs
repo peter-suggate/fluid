@@ -58,3 +58,5 @@ pub use numerics::*;
 pub use pressure::*;
 pub use transport::*;
 pub use types::*;
+
+pub mod adaptive_sdf;

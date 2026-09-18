@@ -161,7 +161,10 @@ test("Reset re-applies the regions the run was carrying", async () => {
   await controller.setRefinementRegions([REGION]);
   worker.requests.length = 0;
 
-  const view = await controller.resetRun(OPTIONS);
+  const view = await controller.resetRun({ ...OPTIONS, adaptiveSdf: false });
+  const load = worker.requests.find(request => request.type === "load");
+  assert.ok(load && load.type === "load");
+  assert.equal(JSON.parse(load.optionsJson).adaptiveSdf, false, "SDF toggle reaches the restarted world");
   assert.equal((view.metadata as { revision: PhysicsRevision }).revision.frame, 0);
   /* The restart seeds the world and then hands it the same boxes, so the view
    * the caller publishes is already the one that obeys them. */

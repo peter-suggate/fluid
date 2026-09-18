@@ -1,68 +1,70 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
+import { getScenePreset } from "../lib/core/scenes";
+import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
+import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
+import { sparseCM12DawnDefaultOptions } from "../lib/harness/sparse-cm12-dawn-defaults";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
-import { createGeometricVolumeResidentWGSL, type SparseGeometricVolumeLayout } from "../lib/methods/adaptive-volume/resident-volume.wgsl";
+import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
-(process.env.WEBGPU_NODE_MODULE ? test : test.skip)("phi feedback is bounded, bidirectional, and preserves phase-only support", { timeout: 60_000 }, async () => {
-  await acquireWebGPUExclusiveLock("dawn-test", "bounded volume-to-phi feedback");
-  let device: GPUDevice | undefined, gpu: GPU | undefined;
-  try {
-    const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);
-    Object.assign(globalThis, dawn.globals); gpu = dawn.create(["backend=metal"]);
-    const adapter = await gpu!.requestAdapter(); assert.ok(adapter); device = await adapter.requestDevice();
-    const production = createGeometricVolumeResidentWGSL({} as SparseGeometricVolumeLayout);
-    const code = `
-@group(0) @binding(0) var<storage,read_write> state:array<f32>;
-@group(0) @binding(1) var<storage,read_write> conditioning:array<atomic<i32>>;
-const GV_WHOLE_FRAME_CONTROL=0u; const LSV_SUPPORT_METRIC=3u;
-fn gvFailed()->bool{return false;}
-fn surfaceSharpeningEnabled()->bool{return true;}
-fn surfaceSharpeningStrength()->f32{return bitcast<f32>(atomicLoad(&conditioning[24u]));}
-fn lsvAccepted()->bool{return true;}
-fn lsvAcceptedSlot()->u32{return 0u;}
-fn lsvHeader(s:u32,w:u32)->u32{_=s;return w;}
-fn lsvLoad(w:u32)->u32{return select(0u,8u,w==3u);}
-fn lsvConstraintCount(s:u32,v:u32)->u32{_=s;return u32(state[48u+v]);}
-fn lsvVertexSupport(s:u32,b:u32,v:u32)->u32{_=s;_=b;return u32(state[32u+v]);}
-fn lsvVertexPhi(s:u32,b:u32,v:u32)->f32{_=s;return state[8u*b+v];}
-fn lsvPhiBase(s:u32,b:u32)->u32{_=s;return 8u*b;}
-fn lsvStoreFloat(i:u32,v:f32){state[i]=v;}
-` + production.slice(production.indexOf("// One bounded global volume feedback step."));
-    const module = device.createShaderModule({ code });
-    assert.deepEqual((await module.getCompilationInfo()).messages.filter(m => m.type === "error"), []);
-    const pipeline = device.createComputePipeline({ layout: "auto", compute: { module, entryPoint: "correctWholeFrameVolumePhi" } });
-    const initial = [0.05, -0.05, 1.5, -1.5, 3, 0.001, -0.001, 0.05];
-    for (const fixture of [
-      { residual: 100, area: 1, strength: 1, offset: 0.1 },
-      { residual: -100, area: 1, strength: 1, offset: -0.1 },
-      { residual: 0.04, area: 2, strength: 1, offset: 0.005 },
-      { residual: 0, area: 1, strength: 1, offset: 0 },
-      { residual: 100, area: 0, strength: 1, offset: 0 },
-      { residual: 100, area: 1, strength: 0, offset: 0 },
-    ]) {
-      const values = new Float32Array(64); values.set(initial); values.set(initial, 8);
-      values.fill(3, 32, 40); values[37] = 1; values[38] = 2; values[55] = 1;
-      const controls = new Float32Array(32); controls[22] = fixture.residual;
-      controls[23] = fixture.area; controls[24] = fixture.strength;
-      const storage = device.createBuffer({ size: values.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
-      const control = device.createBuffer({ size: controls.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-      const read: GPUBuffer = device.createBuffer({ size: values.byteLength, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-      device.queue.writeBuffer(storage, 0, values); device.queue.writeBuffer(control, 0, controls);
-      const binding = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
-        { binding: 0, resource: { buffer: storage } }, { binding: 1, resource: { buffer: control } },
-      ] });
-      const encoder = device.createCommandEncoder(); const pass = encoder.beginComputePass();
-      pass.setPipeline(pipeline); pass.setBindGroup(0, binding); pass.dispatchWorkgroups(1); pass.end();
-      encoder.copyBufferToBuffer(storage, 0, read, 0, values.byteLength); device.queue.submit([encoder.finish()]);
-      await read.mapAsync(GPUMapMode.READ); const actual: Float32Array = new Float32Array(read.getMappedRange());
-      for (let bank = 0; bank < 2; bank++) initial.forEach((phi, i) => {
-        const weight = i >= 5 ? 0 : Math.max(0, Math.min(1, 2 - Math.abs(phi)));
-        assert.ok(Math.abs(actual[8 * bank + i]! - (phi - fixture.offset * weight)) < 1e-6,
-          `${JSON.stringify(fixture)}: vertex ${i}, bank ${bank}`);
-      });
-      assert.deepEqual(Array.from(actual.slice(32)), Array.from(values.slice(32)), "support and constraint metadata remain intact");
-      read.unmap(); storage.destroy(); control.destroy(); read.destroy();
-    }
-  } finally { device?.destroy(); gpu = undefined; await releaseWebGPUExclusiveLock(); }
-});
+// A coarse disk has an initial SDF/material mismatch. Global phi feedback used
+// to distribute that error onto the disconnected resting pool, whose coarse
+// air-gap redistance then amplified the manufactured rise on every frame.
+(process.env.WEBGPU_NODE_MODULE ? test : test.skip)(
+  "min8 disk volume mismatch does not inflate the disconnected resting pool",
+  { timeout: 120_000 }, async () => {
+    await acquireWebGPUExclusiveLock("dawn-test", "min8 pool/disk phi separation");
+    let device: GPUDevice | undefined;
+    let solver: WebGPUAdaptiveMassSolver | undefined;
+    try {
+      const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);
+      Object.assign(globalThis, dawn.globals);
+      const gpu = createProcessRetainedDawnGPU(dawn, [`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
+      const adapter = await gpu.requestAdapter(); assert.ok(adapter);
+      device = await adapter.requestDevice({ requiredLimits: requiredFluidDeviceLimits(adapter.limits) });
+      assert.ok(device);
+      const scene = getScenePreset("coarse-first-pool-impact-half-slab").create();
+      scene.numerics.fixedDt_s = scene.numerics.maxDt_s = .009;
+      scene.fluid.refinementRegions = [{
+        id: "min8", rule: "minimum-cell-size", minimumCellSize_cells: 8,
+        min_m: { x: -3.2, y: 0, z: -.4 }, max_m: { x: 3.2, y: 4.8, z: .4 },
+      }];
+      solver = await WebGPUAdaptiveMassSolver.createCompiledTopologyTransport(
+        device, scene, "balanced", undefined,
+        { ...sparseCM12DawnDefaultOptions(), timeStep: "scene" }, () => {});
+      await solver.waitForSimulationReady();
+      const initial = await solver.readDiagnosticFields(true);
+      const initialVolume = initial.density.reduce((sum, value) => sum + value, 0);
+      for (let frame = 1; frame <= 9; frame++) {
+        while (!solver.advanceTo(frame * .009, [])) await new Promise<void>(resolve => setImmediate(resolve));
+        await solver.awaitFrameCompletion(); await solver.waitForTopologyReady();
+        const sdf: Awaited<ReturnType<WebGPUAdaptiveMassSolver["readAdaptiveLevelSetQA"]>> =
+          await solver.readAdaptiveLevelSetQA(true);
+        assert.equal(sdf.fault, 0);
+        assert.ok(sdf.activeCells <= 48, "the test must retain the min8 coarse representation");
+        const vertices = sdf.vertices; assert.ok(vertices);
+        const phi = (y: number, z: number) => {
+          const vertex = vertices.find(v => v.positionFine[0] === 32
+            && v.positionFine[1] === y && v.positionFine[2] === z);
+          assert.ok(vertex, `missing centre vertex at y=${y}, z=${z}`);
+          return vertex.phiFine;
+        };
+        for (const z of [0, 8]) {
+          const y = phi(16, z) >= 0 ? 8 : 16;
+          const a = phi(y, z), b = phi(y + 8, z);
+          assert.ok(a <= 0 && b >= 0, `frame ${frame}: pool crossing disappeared`);
+          const height = .1 * (y - 8 * a / (b - a));
+          // 2 cm is a fifth of one finest cell; the old feedback moves the
+          // surface by 2.8 cm in frame 1 and roughly 60 cm by frame 8.
+          assert.ok(Math.abs(height - 1.6) < .02,
+            `frame ${frame}, z=${z}: disconnected pool moved to ${height} m`);
+          assert.ok(phi(24, z) > 0 && phi(32, z) < 0, "disk and pool stay separated");
+        }
+        const fields = await solver.readDiagnosticFields(true);
+        const volume = fields.density.reduce((sum, value) => sum + value, 0);
+        assert.ok(Math.abs(volume - initialVolume) / initialVolume < 1e-6,
+          "surface stability must retain conservative material");
+      }
+    } finally { solver?.destroy(); device?.destroy(); await releaseWebGPUExclusiveLock(); }
+  });

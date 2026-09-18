@@ -45,12 +45,17 @@ fn scene() -> SceneDocument {
 }
 
 fn world(fixed_resolution: Option<u32>) -> World {
+    world_with_sdf(fixed_resolution, false)
+}
+
+fn world_with_sdf(fixed_resolution: Option<u32>, adaptive_sdf: bool) -> World {
     let mut production = ProductionSceneOptions::default();
     production.atlas.fixed_resolution = fixed_resolution;
     World::from_document(
         scene(),
         production,
         WorldOptions {
+            adaptive_sdf,
             pressure_iterations: 256,
             pressure_relative_tolerance: 1.0e-6,
             transport_experiment: TransportExperiment::LevelSetVolume,
@@ -233,4 +238,40 @@ fn flat_pool_remains_hydrostatic_through_asymmetric_refinement() {
     println!(
         "30-frame hydrostatic maxima: liquid face speed={maximum_speed:.12} fine/s, surface-height error={maximum_height_error:.12} fine, volume drift={maximum_volume_drift:.12} fine^2"
     );
+}
+
+// Adaptive deep-phase values are clearance certificates, not exact distances.
+// Keep the original all-cell distance test above for the fine-grid path, and
+// require the adaptive path to preserve the actual interface and hydrostatics.
+#[test]
+fn adaptive_flat_pool_preserves_interface_through_asymmetric_refinement() {
+    let mut world = world_with_sdf(None, true);
+    let initial_volume = physical_volume(&world);
+    let mut sequence = 0;
+    for frame in 1..=30 {
+        if frame == 4 {
+            sequence += 1;
+            world.apply_command(sequence, 1, Command::SetRefinementRegions {
+                regions: vec![ResolutionRegion {
+                    minimum_fine: [0.0, 0.0], maximum_fine: [16.0, 24.0],
+                    minimum_cell_width: 1, maximum_cell_width: Some(1),
+                }],
+            }).unwrap();
+        }
+        sequence += 1;
+        world.advance(sequence, DT).unwrap();
+        assert!(maximum_liquid_face_speed(&world) <= 1e-3, "frame {frame}: hydrostatic velocity");
+        assert!((physical_volume(&world) - initial_volume).abs() <= 2e-5);
+        let mut interface_cells = 0;
+        for cell in &world.state.topology.graph.cells {
+            if cell.minimum[1] as f64 <= SURFACE_Y_FINE && cell.maximum[1] as f64 >= SURFACE_Y_FINE {
+                interface_cells += 1;
+                let phi = world.level_set_phi[cell.id as usize];
+                assert!((cell.center[1] as f64 - phi as f64 - SURFACE_Y_FINE).abs() <= 2e-4,
+                    "frame {frame}: interface cell {} moved", cell.id);
+            }
+        }
+        assert!(interface_cells > 0);
+        assert!(world.level_set_phi.iter().all(|v| v.is_finite()));
+    }
 }

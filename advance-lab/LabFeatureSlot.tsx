@@ -8,7 +8,7 @@ import {
   advanceSliceFeature,
 } from "../lib/methods/adaptive-volume/features/advance-slice/definition";
 import {
-  LabBudgetRow, LabLensRow, LabOverlayRows, LabSurfaceRow, LabTransportRow,
+  LabAdaptiveSdfRow, LabBudgetRow, LabLensRow, LabOverlayRows, LabSurfaceRow, LabTransportRow,
 } from "./lab-instruments";
 
 /**
@@ -38,6 +38,7 @@ export const LAB_FEATURE_VIEWS: FeatureControlViews = {
   "simulation.advance-slice/surface": LabSurfaceRow,
   "simulation.advance-slice/budget": LabBudgetRow,
   "simulation.advance-slice/transport": LabTransportRow,
+  "simulation.advance-slice/adaptive-sdf": LabAdaptiveSdfRow,
 };
 
 export function LabFeatureSlot({ slot }: { readonly slot: string }) {

@@ -24,7 +24,7 @@ export interface SparseGeometricVolumeLayout {
   readonly transportEdgeMetadata: number;
   readonly transportEdgeWeightsA: number;
   readonly transportEdgeWeightsB: number;
-  /** Dedicated atomic receipt/control tail; at least 24 words. */
+  /** Dedicated atomic receipt/control tail; 64 words. */
   readonly wholeFrameControlBaseWords: number;
   /** Atomic i32 heads in the conditioning arena, one word per cell. */
   readonly transportReceiverHeadsBaseWords: number;
@@ -38,6 +38,9 @@ export const WHOLE_FRAME_VOLUME_ENTRY_POINTS = Object.freeze([
   "addWholeFrameUncoveredDonorFallbacks",
   "normalizeWholeFrameVolumeRowsAtoB",
   "normalizeWholeFrameVolumeDonorsBtoA",
+  "balanceWholeFrameLiquidReceivers",
+  "balanceWholeFrameLiquidDonors",
+  "finishWholeFrameLiquidBalanceRound",
   "auditWholeFrameVolumeMarginals",
   "gatherWholeFrameVolumeOutflow",
   "gatherWholeFrameVolume",
@@ -49,9 +52,11 @@ export const WHOLE_FRAME_VOLUME_ENTRY_POINTS = Object.freeze([
   "proposeWholeFrameVolumeSharpening",
   "gatherWholeFrameVolumeSharpening",
   "commitWholeFrameVolumeSharpening",
-  "correctWholeFrameVolumePhi",
   "deleteTinyVolumeResidues",
 ] as const);
+
+export const LIQUID_CAPACITY_BALANCING_ROUNDS = 64;
+export const LIQUID_CAPACITY_RELATIVE_TOLERANCE = 1e-6;
 
 export const WHOLE_FRAME_VOLUME_CONTROL = Object.freeze({
   edgeCount: 0, edgeOverflowCount: 1, emptyReceiverCount: 2,
@@ -69,6 +74,9 @@ export const WHOLE_FRAME_VOLUME_CONTROL = Object.freeze({
   adaptiveReturnSeedCellCount: 28, adaptiveReturnProposedFaceCount: 29,
   adaptiveReturnCellRoundCount: 30, adaptiveReturnFarDonorCount: 31,
   adaptiveReturnMaximumDistance: 32, adaptiveReturnAmbiguousCellRoundCount: 33,
+  liquidBalanceActive: 34, liquidBalanceRoundExcess: 35,
+  liquidBalanceRounds: 36, liquidBalanceInitialMaximumExcessRatio: 37,
+  liquidBalanceFinalMaximumExcessRatio: 38,
 });
 
 /** Production whole-frame conservative translated-box volume coupling. */
@@ -96,6 +104,7 @@ const GV_EDGE_B:u32=${layout.transportEdgeWeightsB}u;
 const GV_RECEIVER_HEADS:u32=${layout.transportReceiverHeadsBaseWords}u;
 const GV_DONOR_HEADS:u32=${layout.transportDonorHeadsBaseWords}u;
 const GV_WHOLE_FRAME_CONTROL:u32=${layout.wholeFrameControlBaseWords}u;
+const GV_LIQUID_BALANCE_TOLERANCE:f32=${LIQUID_CAPACITY_RELATIVE_TOLERANCE};
 
 fn gvLoad(word:u32)->u32{return bitcast<u32>(atomicLoad(&conditioning[GV_CONTROL+word]));}
 fn gvStore(word:u32,value:u32){atomicStore(&conditioning[GV_CONTROL+word],bitcast<i32>(value));}
@@ -319,6 +328,8 @@ fn beginWholeFrameVolumeTransport(){
   atomicStore(&conditioning[GV_WHOLE_FRAME_CONTROL+24u],0);
   atomicStore(&conditioning[GV_WHOLE_FRAME_CONTROL+26u],0);
   // Words 25 and 27 are lifetime loss/page counters; never clear per frame.
+  for(var word=34u;word<=38u;word+=1u){atomicStore(&conditioning[GV_WHOLE_FRAME_CONTROL+word],0);}
+  atomicStore(&conditioning[GV_WHOLE_FRAME_CONTROL+34u],1);
   geometricSolidSetTransportFraction(0.0);
 }
 
@@ -877,6 +888,50 @@ fn normalizeWholeFrameVolumeDonorsBtoA(@builtin(global_invocation_id)gid:vec3u){
   let cell=acceptedTemplateCellInvocation(gid.x);if(cell!=INVALID&&!gvFailed()){gvNormalizeDonor(cell,GV_EDGE_B,GV_EDGE_A);}
 }
 
+// Liquid-only balancing preserves every donor marginal and the original
+// geometric stencil. Unlike more capacity-only Sinkhorn rounds, it does not
+// fill dry receiver capacity artificially. All receivers use the same A bank;
+// donors see only completed receiver proposals in B.
+@compute @workgroup_size(64)
+fn balanceWholeFrameLiquidReceivers(@builtin(global_invocation_id)gid:vec3u){
+  if(atomicLoad(&conditioning[GV_WHOLE_FRAME_CONTROL+34u])==0||gvFailed()){return;}
+  let receiver=acceptedTemplateCellInvocation(gid.x);if(receiver==INVALID){return;}
+  var edge=bitcast<u32>(atomicLoad(&conditioning[GV_RECEIVER_HEADS+receiver]));
+  var amount=0.0;var count=0u;
+  for(;edge!=INVALID&&count<=GV_EDGE_CAPACITY;count+=1u){
+    let donor=gvEdgeDonor(edge);let capacity=gvDonorCapacity(donor);
+    if(capacity>0.0){amount+=state[GV_CURRENT+donor]*(state[GV_EDGE_A+edge]/capacity);}
+    edge=gvEdgeReceiverNext(edge);
+  }
+  if(count>GV_EDGE_CAPACITY){gvFault(16u,receiver,amount,3.0,0.0);return;}
+  let capacity=gvReceiverCapacity(receiver);
+  let excess=max(0.0,amount-capacity)/max(capacity,1e-30);
+  atomicMax(&conditioning[GV_WHOLE_FRAME_CONTROL+35u],bitcast<i32>(excess));
+  let scale=select(1.0,capacity/max(amount,1e-30),excess>GV_LIQUID_BALANCE_TOLERANCE);
+  edge=bitcast<u32>(atomicLoad(&conditioning[GV_RECEIVER_HEADS+receiver]));
+  for(var i=0u;edge!=INVALID&&i<=GV_EDGE_CAPACITY;i+=1u){
+    state[GV_EDGE_B+edge]=state[GV_EDGE_A+edge]*scale;edge=gvEdgeReceiverNext(edge);
+  }
+}
+@compute @workgroup_size(64)
+fn balanceWholeFrameLiquidDonors(@builtin(global_invocation_id)gid:vec3u){
+  if(atomicLoad(&conditioning[GV_WHOLE_FRAME_CONTROL+34u])==0||gvFailed()){return;}
+  if(bitcast<f32>(atomicLoad(&conditioning[GV_WHOLE_FRAME_CONTROL+35u]))<=GV_LIQUID_BALANCE_TOLERANCE){return;}
+  let donor=acceptedTemplateCellInvocation(gid.x);
+  if(donor!=INVALID){gvNormalizeDonor(donor,GV_EDGE_B,GV_EDGE_A);}
+}
+@compute @workgroup_size(1)
+fn finishWholeFrameLiquidBalanceRound(){
+  if(atomicLoad(&conditioning[GV_WHOLE_FRAME_CONTROL+34u])==0||gvFailed()){return;}
+  let excess=atomicLoad(&conditioning[GV_WHOLE_FRAME_CONTROL+35u]);
+  if(atomicLoad(&conditioning[GV_WHOLE_FRAME_CONTROL+36u])==0){
+    atomicStore(&conditioning[GV_WHOLE_FRAME_CONTROL+37u],excess);}
+  if(bitcast<f32>(excess)<=GV_LIQUID_BALANCE_TOLERANCE){
+    atomicStore(&conditioning[GV_WHOLE_FRAME_CONTROL+34u],0);
+  }else{atomicAdd(&conditioning[GV_WHOLE_FRAME_CONTROL+36u],1);}
+  atomicStore(&conditioning[GV_WHOLE_FRAME_CONTROL+35u],0);
+}
+
 @compute @workgroup_size(64)
 fn auditWholeFrameVolumeMarginals(@builtin(global_invocation_id)gid:vec3u){
   let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID||gvFailed()){return;}
@@ -921,6 +976,11 @@ fn gatherWholeFrameVolume(@builtin(global_invocation_id)gid:vec3u){
   }
   if(count>GV_EDGE_CAPACITY){gvFault(16u,receiver,amount,2.0,0.0);return;}
   state[GV_LOW+receiver]=amount;
+  // Fresh measurement after the last donor normalization, including a capped
+  // solve. Never report the pre-normalization receiver proposal as convergence.
+  let capacity=gvReceiverCapacity(receiver);
+  atomicMax(&conditioning[GV_WHOLE_FRAME_CONTROL+38u],
+    bitcast<i32>(max(0.0,amount-capacity)/max(capacity,1e-30)));
 }
 
 @compute @workgroup_size(64)
@@ -1276,26 +1336,6 @@ fn deleteTinyVolumeResidues(@builtin(workgroup_id)wid:vec3u,
   }
 }
 
-// One bounded global volume feedback step. It moves the existing interface;
-// it cannot create a new component in phase-only sparse backing. Constraint
-// projection follows this dispatch, before consumers see the corrected field.
-@compute @workgroup_size(64)
-fn correctWholeFrameVolumePhi(@builtin(global_invocation_id)gid:vec3u){
-  if(gvFailed()||!surfaceSharpeningEnabled()||!lsvAccepted()){return;}
-  let slot=lsvAcceptedSlot();let vertex=gid.x;
-  if(vertex>=lsvLoad(lsvHeader(slot,3u))||lsvConstraintCount(slot,vertex)>0u){return;}
-  let area=bitcast<f32>(atomicLoad(&conditioning[GV_WHOLE_FRAME_CONTROL+23u]));
-  let residual=bitcast<f32>(atomicLoad(&conditioning[GV_WHOLE_FRAME_CONTROL+22u]));
-  if(area<=1e-8){return;}
-  let offset=clamp(0.25*residual/area,-0.1,0.1)*clamp(surfaceSharpeningStrength(),0.0,1.0);
-  let source=lsvLoad(lsvHeader(slot,4u));
-  if(lsvVertexSupport(slot,source,vertex)!=LSV_SUPPORT_METRIC){return;}
-  let phi=lsvVertexPhi(slot,source,vertex);
-  // Uniform near the contour, fading before the metric-band edge. Consume
-  // no deep-phase clearance and leave distant disconnected backing intact.
-  let weight=clamp(2.0-abs(phi),0.0,1.0);
-  for(var bank=0u;bank<2u;bank+=1u){lsvStoreFloat(lsvPhiBase(slot,bank)+vertex,phi-offset*weight);}
-}
 ${createAdaptiveVolumeReturnWGSL()}
 `;
 }

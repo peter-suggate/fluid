@@ -392,6 +392,12 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       label: "Adaptive phi and whole-frame volume transport",
     },
     substages: {
+      "transport-coupling": {
+        id: "fine-sdf-advection", label: "Phi advection and geometric transport coupling",
+      },
+      "liquid-capacity-balancing": {
+        id: "fine-sdf-advection", label: "Liquid receiver capacity balancing",
+      },
       "transport-gather": {
         id: "fine-sdf-advection", label: "Conservative volume gather and commit",
       },
@@ -408,7 +414,7 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       loopStep: 3,
     },
     tip: {
-      summary: "Advects the accepted adaptive phi field, builds a sparse whole-frame donor/receiver coupling, normalizes its marginals, and gathers extensive liquid volume once. Excess volume remains explicit for the pressure source instead of being clipped to cell capacity.",
+      summary: "Advects adaptive phi, builds a sparse donor/receiver coupling, and balances overfull liquid receivers while preserving donor totals. Gathers extensive liquid volume once; any excess remaining after the bounded balancing stays explicit for the pressure source.",
       reads: "adaptive phi, extensive liquid volume, cell capacity, projected face velocity and compiled topology",
       writes: "advected adaptive phi, conservative liquid volume and transport receipts",
       feeds: "pressure, adaptivity and presentation publication",

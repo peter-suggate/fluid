@@ -546,7 +546,6 @@ export const ADVANCE_WORK: AdvanceWorkTable = {
           kernel("relaxAdaptiveVolumeReturnB", "cell", { repeats: 2, note: "one pair per distance sweep" }),
           kernel("prepareAdaptiveVolumeReturn", "cell", { note: "one per return pass" }),
           kernel("proposeAdaptiveVolumeReturn", "row", { note: "one per return pass" }),
-          kernel("correctWholeFrameVolumePhi", "cell", { note: "phi vertices" }),
           kernel("deleteTinyVolumeResidues", "brickLn"),
           kernel("reexpressGeometricSolidRows", "row", { gate: "solids" }),
           kernel("finishGeometricSolidPublication", "one", { gate: "solids" }),

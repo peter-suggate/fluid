@@ -47,6 +47,7 @@ const MARK: Readonly<Record<string, string>> = {
   surface: 'data-testid="slice-surface-row"',
   budget: 'data-testid="slice-budget-row"',
   transport: 'data-testid="advance-transport"',
+  "adaptive-sdf": 'data-testid="advance-adaptive-sdf"',
 };
 
 /** A page's worth of answers, so every row has something to draw. */
@@ -56,7 +57,8 @@ function labHost(session: ReturnType<typeof createPaneSession>) {
     [ADVANCE_SLICE_SETTINGS.overlays]: "fraction",
     [ADVANCE_SLICE_SETTINGS.surface]: ADVANCE_SURFACE_VIEWS[0]!.id,
     [ADVANCE_SLICE_SETTINGS.budget]: 64,
-    [ADVANCE_SLICE_SETTINGS.transport]: ADVANCE_TRANSPORT_EXPERIMENT_ORDER[0]!,
+    [ADVANCE_SLICE_SETTINGS.transport]: "level-set-volume",
+    [ADVANCE_SLICE_SETTINGS.adaptiveSdf]: true,
   };
   return labEditorHost({
     session,

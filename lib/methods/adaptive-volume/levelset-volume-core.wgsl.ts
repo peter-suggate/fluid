@@ -203,7 +203,10 @@ fn lsvStoreAdvectedPhi(slot:u32,bank:u32,vertex:u32,advectedPhi:f32,
  advectedSupport:u32,releasedWall:vec2f){
   var transported=advectedPhi;var contact=false;
   ${options.closedWallPhi ? `let continued=${options.closedWallPhi("lsvVertexPosition(slot,vertex)")};
-  contact=continued.y>0.0&&continued.x<0.0;
+  // Wall continuation may add arriving liquid contact, but may not replace a
+  // deeper transported liquid distance with a shallower interior value. On a
+  // coarse cell spanning a wall and free surface that erodes a resting pool.
+  contact=continued.y>0.0&&continued.x<0.0&&continued.x<transported;
   if(contact){transported=continued.x;}` : ""}
   let wallWins=releasedWall.y>0.0&&releasedWall.x>transported;
   let phi=select(transported,releasedWall.x,wallWins);

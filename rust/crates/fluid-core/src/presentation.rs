@@ -31,6 +31,9 @@ pub struct RdfReceipt {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RdfSurface {
+    /// Runtime scalar authority; the fine raster is only its publication.
+    #[serde(skip)]
+    pub adaptive_sdf: Option<crate::adaptive_sdf::AdaptiveSdf>,
     pub dimensions: [u32; 2],
     /// Non-finite vertices serialize as null, never as a zero level set.
     pub vertex_phi_fine: Vec<f32>,
@@ -714,6 +717,7 @@ pub fn reconstruct_shared_rdf(
     receipt.mean_absolute_partial_cell_error_fine /= partial_count.max(1) as f64;
     receipt.signed_area_error_fine = receipt.represented_area_fine - receipt.exact_area_fine;
     Ok(RdfSurface {
+        adaptive_sdf: None,
         dimensions: [nx as u32, ny as u32],
         vertex_phi_fine: vertices,
         segments_fine: segments,

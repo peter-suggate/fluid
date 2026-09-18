@@ -116,7 +116,7 @@ pub fn publish(
         }
     }
     receipt.signed_area_error_fine = receipt.represented_area_fine - diagnostic_volume;
-    Ok(RdfSurface { dimensions, vertex_phi_fine, segments_fine: segments, receipt })
+    Ok(RdfSurface { adaptive_sdf: None, dimensions, vertex_phi_fine, segments_fine: segments, receipt })
 }
 
 /// Seed the shared field from retained authored geometry, before any adaptive
@@ -222,6 +222,10 @@ pub fn refresh(surface: &RdfSurface, diagnostic_volume: f64) -> Result<RdfSurfac
 }
 
 pub fn cell_phi(graph: &Graph, surface: &RdfSurface) -> Result<Vec<f32>, ValidationError> {
+    if let Some(sdf) = &surface.adaptive_sdf {
+        return graph.cells.iter().map(|cell| sdf.sample([cell.center[0], cell.center[1]])
+            .map(|s| s.phi).ok_or_else(|| ValidationError("adaptive SDF has no cell-centre scalar".into()))).collect();
+    }
     let distance = RedistanceField::new(surface)?;
     graph.cells.iter().map(|cell| {
         let point = [cell.center[0], cell.center[1]];
@@ -269,4 +273,18 @@ mod tests {
             assert!(RedistanceField::new(&surface).unwrap().sample(midpoint).unwrap().abs() < 1e-5);
         }
     }
+}
+
+/// A compatibility raster and contour derived only from adaptive corner values.
+pub fn publish_adaptive(sdf: crate::adaptive_sdf::AdaptiveSdf, dimensions: [u32; 2], volume: f64) -> Result<RdfSurface, ValidationError> {
+    let mut surface = publish(dimensions, sdf.raster()?, volume)?;
+    surface.adaptive_sdf = Some(sdf);
+    Ok(surface)
+}
+
+pub fn adapt_to_graph(surface: &RdfSurface, graph: &Graph) -> Result<RdfSurface, ValidationError> {
+    let sdf = if let Some(old) = &surface.adaptive_sdf { old.remap(graph)? } else {
+        crate::adaptive_sdf::AdaptiveSdf::from_graph(graph, |p| sample_scalar(surface, p).map(crate::adaptive_sdf::Sample::new))?
+    };
+    publish_adaptive(sdf, surface.dimensions, surface.receipt.exact_area_fine)
 }

@@ -3,7 +3,7 @@ import { AIR_EXTENSION_ENTRY_POINTS, AIR_EXTENSION_ITERATIONS, AIR_EXTENSION_SWE
 import { sparseCM12DistanceSweeps, sparseCM12ReturnPasses } from "./sharpening-controls";
 import { DYNAMIC_PAGE_CELL_COUNT, DYNAMIC_PAGE_ROW_COUNT, DYNAMIC_PAGE_TERM_COUNT, DYNAMIC_PAGE_WORDS, prepareDynamicPageImage, packDynamicSeamCatalogue, dynamicRungLayout } from "./sparse-cm12-dynamic-rung-catalog";
 import { geometricVolumeQAWGSL } from "./geometric-volume-qa.wgsl";
-import { WHOLE_FRAME_VOLUME_ENTRY_POINTS, type SparseGeometricVolumeLayout } from "./resident-volume.wgsl";
+import { LIQUID_CAPACITY_BALANCING_ROUNDS, LIQUID_CAPACITY_RELATIVE_TOLERANCE, WHOLE_FRAME_VOLUME_ENTRY_POINTS, type SparseGeometricVolumeLayout } from "./resident-volume.wgsl";
 import { createInitialLevelSetGeometryWGSL } from "./levelset-initial-geometry";
 import {
   LEVELSET_VOLUME_GLOBAL_HEADER as LSV_GLOBAL_HEADER,
@@ -406,6 +406,8 @@ export const SPARSE_CM12_RESIDENT_STAGE_SUBSTAGES = Object.freeze({
     "accepted-face-row-preparation",
   ],
   "conservative-transport": [
+    "transport-coupling",
+    "liquid-capacity-balancing",
     "transport-gather",
   ],
   "tracer-advection": [],
@@ -7199,6 +7201,13 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
         dispatchAccepted("normalizeWholeFrameVolumeRowsAtoB", "cell");
         dispatchAccepted("normalizeWholeFrameVolumeDonorsBtoA", "cell");
       }
+      closeSubstage("transport-coupling");
+      for (let round = 0; round < LIQUID_CAPACITY_BALANCING_ROUNDS; round += 1) {
+        dispatchAccepted("balanceWholeFrameLiquidReceivers", "cell");
+        dispatchAccepted("balanceWholeFrameLiquidDonors", "cell");
+        dispatch("finishWholeFrameLiquidBalanceRound", 1);
+      }
+      closeSubstage("liquid-capacity-balancing");
       dispatchAccepted("auditWholeFrameVolumeMarginals", "cell");
       dispatchAccepted("gatherWholeFrameVolumeOutflow", "cell");
       dispatchAccepted("gatherWholeFrameVolume", "cell");
@@ -7229,12 +7238,9 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
           dispatchAccepted("commitWholeFrameVolumeSharpening", "cell");
         }
       }
-      dispatchPhi("correctWholeFrameVolumePhi");
-      dispatch("lsvBeginConstraintProjection", 1);
-      for (let level = 0; level < phiConstraintLevels; level += 1) {
-        dispatchPhi("lsvApplyConstraints");
-        dispatch("lsvAdvanceConstraintProjection", 1);
-      }
+      // Sharpen conservative volume against the transported surface; do not
+      // distribute aggregate volume error back into phi. A disconnected drop's
+      // representation error must not move a resting pool (as in the 2D path).
       dispatch("deleteTinyVolumeResidues", this.incrementalActivityLayout.brickCount);
       if (this.rigidCoupling) {
         dispatchAccepted("reexpressGeometricSolidRows", "row");
@@ -10610,7 +10616,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
   async readGeometricVolumeTransportReceiptQA() {
     this.assertLive();
     const readback = this.device.createBuffer({
-      label: "Sparse Geometric volume control QA readback", size: (132 + GEOMETRIC_SOURCE_LEDGER_FLOATS) * 4,
+      label: "Sparse Geometric volume control QA readback", size: (137 + GEOMETRIC_SOURCE_LEDGER_FLOATS) * 4,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
     try {
@@ -10626,7 +10632,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
       encoder.copyBufferToBuffer(this.conditioning, 4 * this.layout.volumeTransport.supportControlBaseWords,
         readback, (60 + GEOMETRIC_SOURCE_LEDGER_FLOATS) * 4, 152);
       encoder.copyBufferToBuffer(this.conditioning, 4 * this.layout.volumeTransport.wholeFrameControlBaseWords,
-        readback, (98 + GEOMETRIC_SOURCE_LEDGER_FLOATS) * 4, 136);
+        readback, (98 + GEOMETRIC_SOURCE_LEDGER_FLOATS) * 4, 156);
       this.device.queue.submit([encoder.finish()]);
       await readback.mapAsync(GPUMapMode.READ);
       const words = new Uint32Array(readback.getMappedRange());
@@ -10671,6 +10677,15 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
         coupling: Object.freeze({
           footprint: "rk2-translated-box" as const,
           balancingRounds: 3,
+          liquidCapacityBalancing: Object.freeze({
+            rounds: couplingWords[36]!, maximumRounds: LIQUID_CAPACITY_BALANCING_ROUNDS,
+            relativeTolerance: LIQUID_CAPACITY_RELATIVE_TOLERANCE,
+            initialMaximumExcessRatio: couplingFloats[37]!,
+            finalMaximumExcessRatio: couplingFloats[38]!,
+            converged: words[4] === 0 && words[2]! > 0 && words[3] === words[2]
+              && couplingFloats[38]! <= LIQUID_CAPACITY_RELATIVE_TOLERANCE,
+            encodedDispatches: 3 * LIQUID_CAPACITY_BALANCING_ROUNDS,
+          }),
           edgeCount: couplingWords[0]!, edgeCapacity: this.layout.volumeTransport.transportEdgeCapacity,
           edgeOverflowCount: couplingWords[1]!, emptyReceiverCount: couplingWords[2]!,
           fallbackDonorCount: couplingWords[3]!, invalidSupportCount: couplingWords[4]!,

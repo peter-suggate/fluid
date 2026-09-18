@@ -158,6 +158,7 @@ fn positive_liquid_in_zero_capacity_cell_is_rejected_without_mutation() {
     let rdf_topology = RdfTopology::compile(&graph).unwrap();
     let rdf_support = RdfSupport::default();
     let previous_surface = RdfSurface {
+        adaptive_sdf: None,
         dimensions: [8, 8],
         vertex_phi_fine: vec![1.0; 9 * 9],
         segments_fine: Vec::new(),
@@ -333,6 +334,7 @@ fn level_set_topology_transfer_uses_phi_plane_for_cut_donor_split() {
 fn redistance_uses_one_fine_coordinate_metric_across_mixed_widths() {
     let graph = seam_topology();
     let surface = RdfSurface {
+        adaptive_sdf: None,
         dimensions: [16, 8],
         vertex_phi_fine: (0..=8)
             .flat_map(|_| (0..=16).map(|x| x as f32 - 8.0))

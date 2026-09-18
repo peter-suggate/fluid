@@ -14,7 +14,8 @@ import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-
 const arg=(key:string,fallback:string)=>process.argv.find(v=>v.startsWith(`--${key}=`))?.slice(key.length+3)??fallback;
 const steps=Number(arg("steps","5"));const thin=arg("thin","0")==="1";
 const output=arg("out","artifacts/level-set-volume/air-extension-3d.json");
-const report:{thin:boolean;steps:number;arms:unknown[];error?:string}={thin,steps,arms:[]};
+const report:{scene:string;thin:boolean;steps:number;arms:unknown[];error?:string}={
+  scene:arg("scene","coarse-first-pool-impact-half"),thin,steps,arms:[]};
 await acquireWebGPUExclusiveLock("dawn-probe","air-band reset-state A/B");
 let device:GPUDevice|undefined,solver:WebGPUAdaptiveMassSolver|undefined;
 try{
@@ -39,28 +40,36 @@ try{
     await solver.waitForSimulationReady();
     const frames:unknown[]=[];report.arms.push({enabled,frames});
     for(let step=1;step<=steps;step++){
-      const query=device.createQuerySet({type:"timestamp",count:6});
+      const query=device.createQuerySet({type:"timestamp",count:8});
       const resolve=device.createBuffer({size:256,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC});
-      const readback=device.createBuffer({size:48,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
+      const readback=device.createBuffer({size:64,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
       let seen=0;
-      solver.setStageCaptureForQA((stage,encoder)=>{
-        const index=["transport-velocity-extension","face-preparation","pressure-solve","velocity-projection","conservative-transport","presentation-publication"].indexOf(stage);
-        if(index<0)return;
+      const mark=(index:number,encoder:GPUCommandEncoder)=>{
         const source=solver!.fieldSnapshotSourceForQA;
         const markerGroup=device!.createBindGroup({layout:markerPipeline.getBindGroupLayout(0),entries:[
           {binding:0,resource:{buffer:source.state}},{binding:1,resource:{buffer:source.effectiveTransportVelocity!}}]});
         const pass=encoder.beginComputePass({timestampWrites:{querySet:query,beginningOfPassWriteIndex:index}});
         pass.setPipeline(markerPipeline);pass.setBindGroup(0,markerGroup);pass.dispatchWorkgroups(1);pass.end();seen|=1<<index;
+      };
+      solver.setStageCaptureForQA((stage,encoder)=>{
+        const index=["transport-velocity-extension","face-preparation","pressure-solve","velocity-projection","conservative-transport","presentation-publication"].indexOf(stage);
+        if(index>=0)mark(index,encoder);
+      });
+      solver.setSubstageCaptureForQA((stage,substage,encoder)=>{
+        if(stage!=="conservative-transport")return;
+        if(substage==="transport-coupling")mark(6,encoder);
+        if(substage==="liquid-capacity-balancing")mark(7,encoder);
       });
       const start=performance.now();while(!solver.advanceTo(step*dt,[]))await new Promise<void>(setImmediate);
-      await solver.awaitFrameCompletion();await solver.waitForTopologyReady();solver.setStageCaptureForQA(undefined);
-      const wallMs=performance.now()-start;assert.equal(seen,63);
-      const encoder=device.createCommandEncoder();encoder.resolveQuerySet(query,0,6,resolve,0);
-      encoder.copyBufferToBuffer(resolve,0,readback,0,48);device.queue.submit([encoder.finish()]);
+      await solver.awaitFrameCompletion();await solver.waitForTopologyReady();solver.setStageCaptureForQA(undefined);solver.setSubstageCaptureForQA(undefined);
+      const wallMs=performance.now()-start;assert.equal(seen,255);
+      const encoder=device.createCommandEncoder();encoder.resolveQuerySet(query,0,8,resolve,0);
+      encoder.copyBufferToBuffer(resolve,0,readback,0,64);device.queue.submit([encoder.finish()]);
       await readback.mapAsync(GPUMapMode.READ);const stamps=Array.from(new BigUint64Array(readback.getMappedRange()));
       const ms=(a:number,b:number)=>Number(stamps[b]!-stamps[a]!)/1e6;
       const [air,volume,transport]=await Promise.all([solver.readAirExtensionReceiptQA(),solver.readAcceptedGeometricVolumeQA(),solver.readGeometricVolumeTransportReceiptQA()]);
-      frames.push({step,wallMs,momentumPreparationGpuMs:ms(0,1),projectionAndExtensionGpuMs:ms(2,3),transportGpuMs:ms(3,4),tailGpuMs:ms(4,5),air,volume,coupling:transport.coupling});
+      frames.push({step,wallMs,momentumPreparationGpuMs:ms(0,1),projectionAndExtensionGpuMs:ms(2,3),transportGpuMs:ms(3,4),
+        liquidCapacityBalancingGpuMs:ms(6,7),tailGpuMs:ms(4,5),air,volume,coupling:transport.coupling});
       readback.unmap();readback.destroy();resolve.destroy();query.destroy();
       mkdirSync(dirname(output),{recursive:true});writeFileSync(output,JSON.stringify(report,null,2)+"\n");
     }

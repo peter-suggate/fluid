@@ -77,6 +77,7 @@ impl<'a> RedistanceField<'a> {
 }
 
 pub fn sample_scalar(surface: &RdfSurface, point: [f32; 2]) -> Option<f32> {
+    if let Some(sdf) = &surface.adaptive_sdf { return sdf.sample_extended(point).map(|s| s.phi); }
     let [nx, ny] = surface.dimensions.map(|value| value as usize);
     if nx == 0 || ny == 0 || surface.vertex_phi_fine.len() != (nx + 1) * (ny + 1) {
         return None;
@@ -190,7 +191,7 @@ mod tests {
     use crate::presentation::RdfReceipt;
 
     fn surface(vertices: Vec<f32>, segments: Vec<f32>) -> RdfSurface {
-        RdfSurface { dimensions: [2, 2], vertex_phi_fine: vertices, segments_fine: segments, receipt: RdfReceipt::default() }
+        RdfSurface { adaptive_sdf: None, dimensions: [2, 2], vertex_phi_fine: vertices, segments_fine: segments, receipt: RdfReceipt::default() }
     }
 
     #[test]
@@ -262,6 +263,7 @@ mod tests {
             ]);
         }
         let source = RdfSurface {
+            adaptive_sdf: None,
             dimensions,
             vertex_phi_fine: vertices,
             segments_fine: segments,

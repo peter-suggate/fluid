@@ -290,11 +290,13 @@ export interface AdvanceRunQueryState {
   readonly transportExperiment: AdvanceTransportExperimentId;
   readonly pressureBudget: number;
   readonly surfaceView: AdvanceSurfaceViewId;
+  readonly adaptiveSdf?: boolean;
 }
 
 const TRANSPORT_QUERY_KEY = "transport";
 const SOLVE_QUERY_KEY = "solve";
 const SURFACE_QUERY_KEY = "surface";
+const ADAPTIVE_SDF_QUERY_KEY = "adaptiveSdf";
 
 /** A reading the reader may actually choose; the imposed one is never written. */
 function selectableSurfaceView(raw: string | null): AdvanceSurfaceViewId | undefined {
@@ -303,7 +305,7 @@ function selectableSurfaceView(raw: string | null): AdvanceSurfaceViewId | undef
 }
 
 export const advanceRunQuery: QueryCodec<AdvanceRunQueryState> = {
-  keys: [TRANSPORT_QUERY_KEY, SOLVE_QUERY_KEY, SURFACE_QUERY_KEY],
+  keys: [TRANSPORT_QUERY_KEY, SOLVE_QUERY_KEY, SURFACE_QUERY_KEY, ADAPTIVE_SDF_QUERY_KEY],
   read: (query) => {
     const asked = query.get(TRANSPORT_QUERY_KEY);
     const transportExperiment = isAdvanceTransportExperiment(asked)
@@ -325,18 +327,20 @@ export const advanceRunQuery: QueryCodec<AdvanceRunQueryState> = {
       : arm.defaultPressureBudget;
     return {
       transportExperiment,
+      adaptiveSdf: query.get(ADAPTIVE_SDF_QUERY_KEY) !== "0",
       pressureBudget: budget,
       surfaceView: selectableSurfaceView(query.get(SURFACE_QUERY_KEY))
         ?? ADVANCE_DEFAULT_SURFACE_VIEW,
     };
   },
   write: (query, state) => {
-    for (const key of [TRANSPORT_QUERY_KEY, SOLVE_QUERY_KEY, SURFACE_QUERY_KEY]) {
+    for (const key of [TRANSPORT_QUERY_KEY, SOLVE_QUERY_KEY, SURFACE_QUERY_KEY, ADAPTIVE_SDF_QUERY_KEY]) {
       query.delete(key);
     }
     if (state.transportExperiment !== ADVANCE_DEFAULT_TRANSPORT_EXPERIMENT) {
       query.set(TRANSPORT_QUERY_KEY, state.transportExperiment);
     }
+    if (state.adaptiveSdf === false) query.set(ADAPTIVE_SDF_QUERY_KEY, "0");
     const arm = ADVANCE_TRANSPORT_EXPERIMENTS[state.transportExperiment];
     if (state.pressureBudget !== arm.defaultPressureBudget) {
       query.set(SOLVE_QUERY_KEY, String(state.pressureBudget));
@@ -389,6 +393,7 @@ export const ADVANCE_SLICE_SETTINGS = Object.freeze({
   surface: "advanceSurface",
   budget: "pressureIterations",
   transport: "transportExperiment",
+  adaptiveSdf: "adaptiveSdf",
 });
 
 /** Pressure iterations one advance may spend, and the range a host offers. */
@@ -400,6 +405,11 @@ export const advanceSliceFeature: FeatureDefinition = {
   id: "simulation.advance-slice",
   label: "Advance slice",
   controls: [
+    {
+      id: "adaptive-sdf", setting: ADVANCE_SLICE_SETTINGS.adaptiveSdf, kind: "toggle", update: "reset",
+      label: "Adaptive SDF",
+      hint: "On: shared SDF corners follow adaptive cell sizes, as in 3D. Off: retain the fine-grid SDF. Changing this resets the run and keeps refinement regions.",
+    },
     {
       id: "lens", setting: ADVANCE_SLICE_SETTINGS.lens, kind: "choice", update: "live",
       label: "Stage lens",
@@ -462,5 +472,6 @@ export const advanceSliceFeature: FeatureDefinition = {
     { slot: "scene.surface", control: "surface", priority: "high" },
     { slot: "sim.solve", control: "budget", presentation: "expanded" },
     { slot: "sim.transport", control: "transport" },
+    { slot: "scene.simulation", control: "adaptive-sdf" },
   ],
 };

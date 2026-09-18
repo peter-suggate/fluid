@@ -1,0 +1,207 @@
+{
+  "schemaVersion": "2.0.0",
+  "sceneId": "cm12-figure-2",
+  "randomSeed": 2012,
+  "duration_s": 6,
+  "container": {
+    "width_m": 6.4,
+    "height_m": 6.4,
+    "depth_m": 0.4,
+    "fillFraction": 0,
+    "top": "closed",
+    "fluidWallMode": "free-slip",
+    "depthBoundary": "symmetry"
+  },
+  "solidVoxels": [
+    {
+      "operation": "fill",
+      "minimum": [
+        0,
+        -1,
+        0
+      ],
+      "maximumExclusive": [
+        128,
+        0,
+        8
+      ],
+      "materialId": 1
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        -1,
+        0,
+        0
+      ],
+      "maximumExclusive": [
+        0,
+        128,
+        8
+      ],
+      "materialId": 1
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        128,
+        0,
+        0
+      ],
+      "maximumExclusive": [
+        129,
+        128,
+        8
+      ],
+      "materialId": 1
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        0,
+        0,
+        -1
+      ],
+      "maximumExclusive": [
+        128,
+        128,
+        0
+      ],
+      "materialId": 1
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        0,
+        0,
+        8
+      ],
+      "maximumExclusive": [
+        128,
+        128,
+        9
+      ],
+      "materialId": 1
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        0,
+        128,
+        0
+      ],
+      "maximumExclusive": [
+        128,
+        129,
+        8
+      ],
+      "materialId": 1
+    }
+  ],
+  "voxelDomain": {
+    "finestCellSize_m": 0.05,
+    "brickSize_cells": 8
+  },
+  "fluid": {
+    "density_kg_m3": 998.2,
+    "dynamicViscosity_Pa_s": 0.001002,
+    "surfaceTension_N_m": 0,
+    "gravity_m_s2": {
+      "x": 0,
+      "y": -10,
+      "z": 0
+    },
+    "initialCondition": "tank-fill",
+    "initialLiquidVolumes": [
+      {
+        "shape": "cylinder",
+        "center_m": {
+          "x": 0,
+          "y": 4.5,
+          "z": 0
+        },
+        "radius_m": 0.7000000000000001,
+        "halfHeight_m": 0.2
+      }
+    ]
+  },
+  "nominalResolution": {
+    "length_m": 0.05
+  },
+  "numerics": {
+    "fixedDt_s": 0.03333333333333333,
+    "maxDt_s": 0.03333333333333333,
+    "pressureRelativeTolerance": 1e-8,
+    "pressureMaxIterations": 1000
+  },
+  "rigidBodies": [],
+  "scenery": {
+    "palettes": {
+      "white": {
+        "tint": [
+          1,
+          1,
+          1
+        ]
+      },
+      "daylight": {
+        "tint": [
+          1,
+          1,
+          1
+        ]
+      }
+    },
+    "nodes": [
+      {
+        "kind": "room-shell",
+        "id": "shell",
+        "materialModel": "room",
+        "floor": {
+          "palette": "white",
+          "value": 0.9
+        },
+        "wall": {
+          "colorLinear": [
+            1,
+            1,
+            1
+          ]
+        },
+        "ceiling": {
+          "palette": "white",
+          "value": 0.9
+        }
+      },
+      {
+        "kind": "box",
+        "id": "light/softbox",
+        "group": "softbox",
+        "tags": [
+          "softbox",
+          "light",
+          "emits-negative-y"
+        ],
+        "place": {
+          "position": {
+            "x": 0,
+            "y": 7.359999999999999,
+            "z": -0.04000000000000001
+          },
+          "anchor": "floor"
+        },
+        "halfSize": {
+          "x": 1.7920000000000003,
+          "y": 0.028000000000000004,
+          "z": 0.11200000000000002
+        },
+        "material": {
+          "palette": "daylight",
+          "value": 1,
+          "emission": 1
+        }
+      }
+    ]
+  },
+  "environment": "stage"
+}

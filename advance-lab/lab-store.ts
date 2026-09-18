@@ -52,6 +52,7 @@ export interface LabState {
   /* ---- the run ---- */
   readonly sceneId: string;
   readonly transport: AdvanceTransportExperiment;
+  readonly adaptiveSdf: boolean;
   readonly budget: number;
   /* ---- the reading ---- */
   readonly lens: AdvanceStageId;
@@ -93,6 +94,7 @@ export interface LabState {
 
   setSceneId(sceneId: string): void;
   setTransport(transport: AdvanceTransportExperiment): void;
+  setAdaptiveSdf(enabled: boolean): void;
   setBudget(budget: number): void;
   setLens(lens: AdvanceStageId): void;
   setOverlays(overlays: ReadonlySet<SliceOverlayId>
@@ -115,6 +117,7 @@ export function createLabStore(): LabStore {
   return create<LabState>((set) => ({
     sceneId: DEFAULT_LAB_SCENE_ID,
     transport: ADVANCE_DEFAULT_TRANSPORT_EXPERIMENT,
+    adaptiveSdf: true,
     budget: ADVANCE_TRANSPORT_EXPERIMENTS[ADVANCE_DEFAULT_TRANSPORT_EXPERIMENT]
       .defaultPressureBudget,
     lens: ADVANCE_DEFAULT_LENS_MODE as AdvanceStageId,
@@ -132,6 +135,7 @@ export function createLabStore(): LabStore {
 
     setSceneId: (sceneId) => set({ sceneId }),
     setTransport: (transport) => set({ transport }),
+    setAdaptiveSdf: (adaptiveSdf) => set({ adaptiveSdf }),
     setBudget: (budget) => set({ budget }),
     setLens: (lens) => set({ lens }),
     setOverlays: (overlays) => set((current) => ({

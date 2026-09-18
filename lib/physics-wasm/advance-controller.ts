@@ -33,6 +33,7 @@ export interface AdvanceLoadOptions {
   readonly tracerBudget?: number;
   readonly topologyPageBudget?: number;
   readonly transportExperiment?: AdvanceTransportExperimentOption;
+  readonly adaptiveSdf?: boolean;
   readonly production?: Readonly<Record<string, unknown>>;
 }
 

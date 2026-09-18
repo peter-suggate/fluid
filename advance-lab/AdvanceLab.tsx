@@ -366,6 +366,9 @@ interface LevelSetVolumeReading {
   readonly redistancedSamples: number;
   readonly redistanceFallbackSamples: number;
   readonly redistanceSegmentCount: number;
+  readonly redistanceSeedCount: number;
+  readonly sdfVertexCount: number;
+  readonly sdfConstrainedVertexCount: number;
 }
 
 interface Readings {
@@ -428,6 +431,9 @@ const read = (view: AdvanceView): Readings => {
     redistancedSamples: Number(levelSetValue.redistancedSamples ?? 0),
     redistanceFallbackSamples: Number(levelSetValue.redistanceFallbackSamples ?? 0),
     redistanceSegmentCount: Number(levelSetValue.redistanceSegmentCount ?? 0),
+    redistanceSeedCount: Number(levelSetValue.redistanceSeedCount ?? 0),
+    sdfVertexCount: Number(levelSetValue.sdfVertexCount ?? 0),
+    sdfConstrainedVertexCount: Number(levelSetValue.sdfConstrainedVertexCount ?? 0),
   } : null;
   return {
   presentationRevision: advancePresentationRevision(view),
@@ -691,6 +697,7 @@ function AdvanceSlice({ session, lab }: {
   const overlays = useStore(lab, state => state.overlays);
   const sceneId = useStore(lab, state => state.sceneId);
   const transportExperiment = useStore(lab, state => state.transport);
+  const adaptiveSdf = useStore(lab, state => state.adaptiveSdf);
   const regionState = useStore(lab, state => state.regions);
   const budget = useStore(lab, state => state.budget);
   const sliceView = useStore(lab, state => state.view);
@@ -805,6 +812,7 @@ function AdvanceSlice({ session, lab }: {
       if (!scene) throw new Error(`Unknown Advance Lab scene ${initialId}`);
       setAuthored(scene);
       const initialView = await nextController.load(scene, { pressureIterations: initialBudget,
+        adaptiveSdf: linked.adaptiveSdf,
         pressureRelativeTolerance: pressureTolerance(initialTransport),
         transportExperiment: initialTransport === "cellwise-remap"
           ? CELLWISE_REMAP_OPTION : initialTransport,
@@ -957,6 +965,7 @@ function AdvanceSlice({ session, lab }: {
     stepCosts.current = [];
     setStepMs(null);
     void active.load(scene, { pressureIterations: nextBudget,
+      adaptiveSdf: lab.getState().adaptiveSdf,
       pressureRelativeTolerance: pressureTolerance(nextTransport),
       transportExperiment: nextTransport === "cellwise-remap"
         ? CELLWISE_REMAP_OPTION : nextTransport,
@@ -993,13 +1002,14 @@ function AdvanceSlice({ session, lab }: {
     /* The drop readout belongs to a step that has been taken back. */
     setReadings(AT_REST);
     void active.resetRun({ pressureIterations: live.current.budget,
+      adaptiveSdf: lab.getState().adaptiveSdf,
       pressureRelativeTolerance: pressureTolerance(transportExperiment),
       transportExperiment: transportExperiment === "cellwise-remap"
         ? CELLWISE_REMAP_OPTION : transportExperiment,
       production: { dtS: live.current.dt, timeStep: "paper" } }).then(next => {
       view.current = next; setPublishedView(next); setReadings(read(next));
     }).catch(error => setRuntimeFault(error instanceof Error ? error.message : String(error)));
-  }, [transportExperiment, session.ui]);
+  }, [lab, transportExperiment, session.ui]);
 
   /** Re-time the next advance. The water keeps its state; only the clock moves. */
   const retime = useCallback((next: number): void => {
@@ -1507,6 +1517,10 @@ function AdvanceSlice({ session, lab }: {
       [ADVANCE_SLICE_SETTINGS.budget]: {
         value: budget,
         set: next => applyBudget(Number(next)),
+      },
+      [ADVANCE_SLICE_SETTINGS.adaptiveSdf]: {
+        value: adaptiveSdf,
+        set: next => { lab.getState().setAdaptiveSdf(Boolean(next)); resetRun(); },
       },
       [ADVANCE_SLICE_SETTINGS.transport]: {
         value: transportExperiment,
@@ -2250,9 +2264,13 @@ function AdvanceSlice({ session, lab }: {
           <p className={styles.summary}>{readingCellwiseTransport
             ? "One full sparse adaptive advance: pressure projection, natural 2:1 topology changes, receiver-band continuity closure, shared-chain correction, then one material gather and commit. It does not run baseline transport substeps."
             : readingLevelSetTransport
-              ? "One RK2 backward trace drives both fields. V uses the conservative translated-footprint gather. Phi is sampled from the previous accepted surface, redistanced around the same zero set, and published directly; V does not fit, mask, or reposition that surface."
+              ? (adaptiveSdf
+                ? "V uses the conservative gather. Phi is traced at independent adaptive corners, hanging vertices follow coarse edges, and edge-seed redistancing matches the 3D representation. Coarse sampling can move the zero set during redistancing; volume does not reposition it."
+                : "One RK2 backward trace drives both fields. V uses the conservative translated-footprint gather. Fine-grid phi is redistanced against contour segments and published directly; volume does not reposition it.")
             : readingDirectSurfacePublication
-              ? "The accepted fine-vertex phi field is contoured directly with the shared centre-fan triangulation. No PLIC plane, V/K intercept, or phi eligibility mask participates in this surface."
+              ? (adaptiveSdf
+                ? "The SDF uses shared corners at accepted adaptive cell sizes, with constrained hanging vertices and bilinear interpolation. The displayed contour is sampled from that field."
+                : "The accepted fine-vertex phi field is contoured directly with the shared centre-fan triangulation. No PLIC plane, V/K intercept, or phi eligibility mask participates in this surface.")
             : declaration.tip.summary}
             {readingCellFill && " Cell fill is authoritative V/K drawn over each whole cell: zero is clear, opacity is linear through one, and amber marks excess above capacity. A fractional boundary cell can be a legitimate interface; disagreement with the thin contour reveals where volume and surface differ."}</p>
           {readingCellwiseTransport ? <div className={styles.figures}>
@@ -2264,13 +2282,16 @@ function AdvanceSlice({ session, lab }: {
               ? readings.cellwise.areaBalanceError.toExponential(2) : "—"}</b><span>area balance</span></div>
           </div> : readingLevelSetTransport ? <div className={styles.figures}>
             <div className={styles.figure}><b>{readings.levelSetVolume
-              ? "active" : "—"}</b><span>exact redistancing</span></div>
+              ? (adaptiveSdf ? "adaptive" : "fine grid") : "—"}</b><span>redistancing</span></div>
+            <div className={styles.figure}><b>{readings.levelSetVolume
+              ? n(readings.levelSetVolume.sdfVertexCount) : "—"}</b><span>SDF vertices</span></div>
             <div className={styles.figure}><b>{readings.levelSetVolume
               ? n(readings.levelSetVolume.redistancedSamples) : "—"}</b><span>distance samples</span></div>
             <div className={styles.figure}><b>{readings.levelSetVolume
               ? n(readings.levelSetVolume.redistanceFallbackSamples) : "—"}</b><span>fallback samples</span></div>
             <div className={styles.figure}><b>{readings.levelSetVolume
-              ? n(readings.levelSetVolume.redistanceSegmentCount) : "—"}</b><span>accepted contour segments</span></div>
+              ? n(adaptiveSdf ? readings.levelSetVolume.redistanceSeedCount
+                : readings.levelSetVolume.redistanceSegmentCount) : "—"}</b><span>{adaptiveSdf ? "distance seeds" : "accepted contour segments"}</span></div>
             <div className={styles.figure}><b>{readings.levelSetVolume
               ? n(readings.levelSetVolume.overCapacityCells) : "—"}</b><span>over-capacity cells</span></div>
             <div className={styles.figure}><b>{readings.levelSetVolume

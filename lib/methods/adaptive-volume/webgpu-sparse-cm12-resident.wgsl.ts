@@ -10127,7 +10127,10 @@ fn surfaceProofOutputSampleFailure(local:vec3i)->u32{
   let coarse=surfaceProofPhiAt(local,true);
   let fineWet=fine<0.0;
   let tolerance=surfaceDisplacementToleranceMetres();
-  if((coarse<0.0)!=fineWet&&min(abs(fine),abs(coarse))>tolerance){return 1u;}
+  // Require proximity in both fields. A flattened restricted field can be
+  // almost zero throughout a large air gap; its small magnitude cannot excuse
+  // changing the phase far from the accepted surface (or vice versa).
+  if((coarse<0.0)!=fineWet&&max(abs(fine),abs(coarse))>tolerance){return 1u;}
   for(var axis=0u;axis<3u;axis+=1u){
     for(var direction=-1;direction<=1;direction+=2){
       if(direction<0&&local[axis]!=0){continue;}

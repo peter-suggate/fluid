@@ -69,6 +69,7 @@ export function SliceToolstrip(props: SliceToolstripProps) {
         advance may spend answering the pressure. */}
     <LabFeatureSlot slot="scene.visibility" />
     <LabFeatureSlot slot="scene.surface" />
+    <LabFeatureSlot slot="scene.simulation" />
     <LabFeatureSlot slot="sim.solve" />
     {/* The seam between the two halves of the column, drawn rather than
         inferred: readings that say what the picture *is*, and strokes that say

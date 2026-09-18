@@ -374,6 +374,8 @@ pub struct WorldOptions {
     pub topology_page_budget: Option<u32>,
     #[serde(skip_serializing_if = "baseline_transport_experiment")]
     pub transport_experiment: TransportExperiment,
+    /// Shared corners at accepted cell widths; false retains the fine-grid arm.
+    pub adaptive_sdf: bool,
 }
 impl Default for WorldOptions {
     fn default() -> Self {
@@ -385,6 +387,7 @@ impl Default for WorldOptions {
             tracer_budget: TRACER_BUDGET,
             topology_page_budget: None,
             transport_experiment: TransportExperiment::Baseline,
+            adaptive_sdf: true,
         }
     }
 }
@@ -645,6 +648,9 @@ impl World {
                 &rdf_support,
             )?
         };
+        let surface = if options.transport_experiment.is_levelset_volume() && options.adaptive_sdf {
+            crate::levelset_surface::adapt_to_graph(&surface, &state.topology.graph)?
+        } else { surface };
         let level_set_phi = if options.transport_experiment.is_levelset_volume() {
             crate::levelset_surface::cell_phi(&state.topology.graph, &surface)?
         } else {
@@ -1537,6 +1543,7 @@ impl World {
         // scalar before the plan measures which pages the new interface crosses.
         // Published here and committed only once the transfer has been accepted:
         // a refused drop must not leave behind an interface the volume never saw.
+        let injection_source = self.surface.adaptive_sdf.clone();
         let injected_surface = if level_set_volume {
             Some(crate::levelset_surface::union_drop(
                 &self.surface,
@@ -1611,7 +1618,13 @@ impl World {
             // cell scalar and the pressure planes are rebuilt from the surface
             // for the same reason the advance rebuilds them: nothing downstream
             // may read a phi the published contour no longer agrees with.
-            self.surface = surface;
+            self.surface = if let Some(source) = injection_source {
+                let sdf = crate::adaptive_sdf::AdaptiveSdf::from_graph(&self.state.topology.graph, |p| {
+                    let ball = ((p[0] as f64-drop.centre_fine[0]).hypot(p[1] as f64-drop.centre_fine[1])-drop.radius_fine) as f32;
+                    source.sample_extended(p).map(|old| if ball < old.phi { crate::adaptive_sdf::Sample::new(ball) } else { old })
+                })?;
+                crate::levelset_surface::publish_adaptive(sdf, surface.dimensions, surface.receipt.exact_area_fine)?
+            } else { surface };
             self.level_set_phi = crate::levelset_surface::cell_phi(
                 &self.state.topology.graph,
                 &self.surface,
@@ -1724,7 +1737,11 @@ impl World {
         };
         let rdf_topology = RdfTopology::compile(&staged.topology.graph)?;
         let graph_json = Self::encode_graph(&staged)?;
+        let adaptive_surface = if self.surface.adaptive_sdf.is_some() {
+            Some(crate::levelset_surface::adapt_to_graph(&self.surface, &staged.topology.graph)?)
+        } else { None };
         self.state = staged;
+        if let Some(surface) = adaptive_surface { self.surface = surface; }
         self.arena = arena;
         self.embedding = embedding;
         self.rdf_topology = rdf_topology;
@@ -1823,7 +1840,7 @@ impl World {
         let scene = serde_json::json!({"dimensions":self.state.description.dimensions,"cellSizeM":self.cell_size(),"dtS":self.timestep_s,"originM":self.state.description.origin_m,
             "frame":self.physical.as_ref().map(|p|p.frame),"hasStaticWorld":self.physical.as_ref().is_some_and(|p|p.solid_world.as_ref().is_some_and(|w|!w.pages.is_empty()||!w.regions.is_empty())),
             "hasInflow":self.physical.as_ref().is_some_and(|p|p.scene.fluid.inflow.is_some()),"hasRigidBodies":self.physical.as_ref().is_some_and(|p|!p.bodies.is_empty())});
-        let metadata=serde_json::to_vec(&serde_json::json!({"revision":self.revision,"receipt":self.receipt(),"surface":self.surface.receipt,
+        let metadata=serde_json::to_vec(&serde_json::json!({"revision":self.revision,"receipt":self.receipt(),"surface":self.surface.receipt,"sdf":{"adaptive":self.surface.adaptive_sdf.is_some(),"vertexCount":self.surface.adaptive_sdf.as_ref().map_or(self.surface.vertex_phi_fine.len(),|s|s.vertex_count()),"constrainedVertexCount":self.surface.adaptive_sdf.as_ref().map_or(0,|s|s.constrained_count())},
             "graphIncluded":include_graph,"tracerLattice":self.tracers.lattice,"tracersEnabled":self.tracers.enabled,"scene":scene,
             "resolution":self.resolution_receipt,"retirement":self.arena.retirement,
             "pressureAuthority":self.embedding.as_ref().map_or(&self.pressure_authority.receipt,|e|&e.pressure_authority.receipt),
@@ -2083,8 +2100,10 @@ mod tests {
     }
 
     #[test]
-    fn level_set_topology_transition_preserves_direct_surface_exactly() {
+    fn fine_grid_level_set_topology_transition_preserves_direct_surface_exactly() {
         let mut world = level_set_world();
+        world.options.adaptive_sdf = false;
+        world.surface.adaptive_sdf = None;
         let vertices = world.surface.vertex_phi_fine.clone();
         let segments = world.surface.segments_fine.clone();
         let mut bricks: Vec<_> = world.state.topology.bricks.iter().map(|brick| brick.seed.clone()).collect();
@@ -2094,6 +2113,23 @@ mod tests {
         assert_eq!(world.surface.vertex_phi_fine, vertices);
         assert_eq!(world.surface.segments_fine, segments);
         assert_eq!(world.level_set_phi.len(), world.state.topology.graph.cells.len());
+    }
+    #[test]
+    fn adaptive_sdf_is_default_and_tracks_accepted_topology() {
+        assert!(serde_json::from_str::<WorldOptions>("{}").unwrap().adaptive_sdf);
+        assert!(!serde_json::from_str::<WorldOptions>(r#"{"adaptiveSdf":false}"#).unwrap().adaptive_sdf);
+        let mut world = level_set_world();
+        let before = world.surface.adaptive_sdf.as_ref().unwrap().vertex_count();
+        let mut bricks: Vec<_> = world.state.topology.bricks.iter().map(|b| b.seed.clone()).collect();
+        bricks[0].resolution = 4;
+        world.transition(bricks, 1.0 / 60.0).unwrap();
+        let sdf = world.surface.adaptive_sdf.as_ref().unwrap();
+        assert!(sdf.vertex_count() < before);
+        assert_eq!(sdf.generation(), world.state.topology.graph.topology_generation);
+        world.advance(1, 1.0 / 60.0).unwrap();
+        let sdf = world.surface.adaptive_sdf.as_ref().unwrap();
+        assert_eq!(sdf.generation(), world.state.topology.graph.topology_generation);
+        assert!(world.level_set_phi.iter().all(|v| v.is_finite()));
     }
     #[test]
     fn level_set_uniform_translation_preserves_coarse_bulk_resolution() {

@@ -23,7 +23,8 @@ const overlapMeasure = (a: VolumeBoxCell, b: VolumeBoxCell,
   return measure;
 };
 
-/** CPU oracle for the GPU translated-box coupling and its three balancing rounds. */
+/** CPU oracle for translated-box coupling: three capacity rounds, followed by
+ * bounded liquid-only receiver balancing with conserved donor marginals. */
 export function referenceWholeFrameVolumeCoupling(
   cells: readonly VolumeBoxCell[],
   receiverDisplacements: readonly (readonly [number, number, number])[],
@@ -68,11 +69,24 @@ export function referenceWholeFrameVolumeCoupling(
       for (const edge of column) edge.weight *= factor;
     }
   }
-  const amounts = cells.map((_cell, receiver) => edges
+  const gather = () => cells.map((_cell, receiver) => edges
     .filter(edge => edge.receiver === receiver)
     .reduce((sum, edge) => sum + cells[edge.donor]!.amount
       * edge.weight / cells[edge.donor]!.donorCapacity, 0));
-  return { edges, amounts };
+  for (let round = 0; round < 64; round++) {
+    const amounts = gather();
+    if (amounts.every((amount, receiver) => amount <= cells[receiver]!.receiverCapacity * (1 + 1e-6))) break;
+    for (const edge of edges) {
+      const amount = amounts[edge.receiver]!, capacity = cells[edge.receiver]!.receiverCapacity;
+      if (amount > capacity * (1 + 1e-6)) edge.weight *= capacity / amount;
+    }
+    const columns = cells.map((_cell, donor) => edges.filter(edge => edge.donor === donor)
+      .reduce((sum, edge) => sum + edge.weight, 0));
+    for (const edge of edges) {
+      if (columns[edge.donor]! > 0) edge.weight *= cells[edge.donor]!.donorCapacity / columns[edge.donor]!;
+    }
+  }
+  return { edges, amounts: gather() };
 }
 
 /** Budget-only CPU oracle for supplied face connections; GPU relay/gating is tested separately. */

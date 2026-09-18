@@ -603,7 +603,12 @@ pub fn publish_direct_surface_proofs(
             valid &= !(fine < 0.0 && minimum >= 0.0)
                 && !(fine > 0.0 && maximum < 0.0);
             if (fine < 0.0) != (coarse < 0.0) {
-                valid &= fine.abs().min(coarse.abs()) <= tolerance;
+                // Both fields must put a changed phase inside the displacement
+                // band. Restriction can flatten phi almost to zero across a
+                // large air gap; its small value does not certify proximity to
+                // the accepted surface (nor may a small fine value excuse a
+                // distant candidate surface).
+                valid &= fine.abs().max(coarse.abs()) <= tolerance;
             }
         }}
         if valid {
@@ -2657,6 +2662,31 @@ mod tests {
             1.0 / 30.0, 0.05, &options, &surface).unwrap();
         assert_eq!(decision.receipt.bricks[0].scheduled_resolution, 8);
         assert_eq!(decision.state.history[&0].proof_epochs, 0);
+    }
+
+    #[test]
+    fn direct_phi_proof_rejects_small_coarse_values_that_swallow_distant_air() {
+        let (topology, mut fields) = setup(vec![
+            brick(0, [0, 0], 2, true), brick(1, [0, 1], 2, true),
+        ], [8, 16]);
+        // A pool at y=8.5, with positive but small clearance at the ceiling.
+        // Removing the y=12 row moves the coarse zero to y=15.84 even though
+        // every falsely wet coarse value has magnitude less than 0.5.
+        let vertices = (0..=16).flat_map(|y| (0..=8).map(move |_| {
+            if y <= 12 { y as f32 - 8.5 }
+            else { 3.5 + (y as f32 - 12.0) * (0.01 - 3.5) / 4.0 }
+        })).collect();
+        let surface = levelset_surface::publish([8, 16], vertices, 68.0).unwrap();
+        let surface = levelset_surface::adapt_to_graph(&surface, &topology.graph).unwrap();
+        fields.density = topology.graph.cells.iter().map(|c|
+            if c.center[1] < 8.5 { 1.0 } else { 0.0 }).collect();
+        let options = coarsest_support_options();
+        let mut state = initialize_resolution_policy(&topology);
+        state.history.get_mut(&1).unwrap().reasons |= activity_reason::SURFACE;
+        publish_direct_surface_proofs(&topology, &fields, &surface, &options,
+            &mut state, 1.0 / 30.0, 0.05).unwrap();
+        assert!(state.history[&1].surface_proof.is_none(),
+            "small candidate magnitudes cannot certify a multi-cell surface displacement");
     }
 
     #[test]
