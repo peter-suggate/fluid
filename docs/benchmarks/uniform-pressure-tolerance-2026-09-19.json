@@ -1,0 +1,2414 @@
+[
+  {
+    "case": "dam",
+    "size": 64,
+    "tolerance": 0,
+    "medianWall_ms": 78.325875,
+    "medianPressure_ms": 53.936128,
+    "meanPressure_ms": 53.71039288888889,
+    "stats": {
+      "nx": 64,
+      "ny": 64,
+      "nz": 64,
+      "storedNy": 64,
+      "cellCount": 262144,
+      "equivalentUniformCells": 262144,
+      "compressionRatio": 1,
+      "activeCompressionRatio": 1,
+      "activeSampleCount": 262144,
+      "regularLayers": 64,
+      "maximumNeighborDelta": 0,
+      "gridKind": "uniform",
+      "cellSize_m": 0.0125,
+      "pressureIterations": 0,
+      "pressureSolver": "CM11a dense LCP multigrid (3 Full-Cycles + 4 V-Cycles, 6/6 pre/post PRBGS)",
+      "allocatedBytes": 120228244,
+      "quality": "balanced",
+      "submittedTime_s": 0.39999999999999997,
+      "simulatedTime_s": 0.39999999999999997,
+      "completedTime_s": 0.39999999999999997,
+      "simulationLag_s": 5.551115123125783e-17,
+      "encodedSteps": 12,
+      "maximumTallCellHeight": 0,
+      "volumeControl": true,
+      "hostFluidAuthority": "gpu-resident",
+      "hostSimulationSizedWorkItems": 0,
+      "hostSchedulingUsesReadback": false,
+      "initialVolumeCellSum": 94208.00000000116,
+      "volumeCellSum": 94207.93017578125,
+      "representedVolumeCellSum": 81170.8916015625,
+      "volumeDrift": -7.411708126077653e-07,
+      "representedVolumeDrift": -0.138386425764675,
+      "rawVolumeDrift": -7.411708126077653e-07,
+      "volumeTelemetrySource": "dense-volume",
+      "maxSpeed_m_s": 26.530620574951172,
+      "front_m": 0.4,
+      "frontTelemetrySource": "dense-volume",
+      "uniformPipelineFacts": {
+        "extrapolationFrontSweeps": 16,
+        "extrapolationHierarchyLevels": 6,
+        "extrapolationPassesPerInvocation": 48,
+        "multigridLevels": 6,
+        "multigridPasses": {
+          "setup": 19,
+          "full-cycle": 1392,
+          "v-cycle": 596,
+          "finish": 1
+        },
+        "multigridPassesTotal": 2008,
+        "pressureSchedule": {
+          "residualTolerance": 0,
+          "fullCycles": 3,
+          "vCycles": 4,
+          "preSweeps": 6,
+          "postSweeps": 6
+        }
+      },
+      "lastDt_s": 0.03333333333333333,
+      "lastSubsteps": 1,
+      "referenceLiquidVolume_cells": 94208.00000000116,
+      "uniformUnplaceableSolidExcess_cells": 0,
+      "uniformCM11aResidualInfinity": 9.506857895758003e-05,
+      "uniformCM11aConverged": true,
+      "uniformCM11aCoarseIterations": 10,
+      "uniformCM11aCapFailure": false,
+      "uniformCM11aFailingCoarseInvocation": 0,
+      "uniformCM11aCoarseMaxAbsRhs": 0,
+      "uniformCM11aCoarseMaxDiagonalPressure": 0,
+      "uniformCM11aCoarseMaxAbsPressure": 0,
+      "uniformCM11aCoarseProjectedGapPressure": 0,
+      "uniformCM11aCoarseNormalizedProjectedResidual": 0,
+      "uniformCM11aFineResidualInfinity": 0.00611099973320961,
+      "uniformCM11aFineProjectedGapPressure": 0.005156372208148241,
+      "uniformCM11aCoarseActiveRows": 0,
+      "uniformCM11aCoarseFreeRows": 0,
+      "uniformCM11aCoarseWorstRow": 0,
+      "uniformCM11aCoarseWorstRowActive": false,
+      "uniformCM11aCoarseWorstRowHalo": false,
+      "uniformFIMTerminalActiveFaces": 152,
+      "uniformFIMConverged": false,
+      "uniformFIMExecutedPasses": 16,
+      "uniformActiveRegionMinimum": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "uniformActiveRegionMaximum": {
+        "x": 64,
+        "y": 64,
+        "z": 64
+      },
+      "uniformActiveRegionCellCount": 262144,
+      "uniformActiveRegionFraction": 1
+    },
+    "samples": [
+      {
+        "frame": 1,
+        "wall_ms": 98.81504100000006,
+        "pressure_ms": 39.64928,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0005219029262661934
+      },
+      {
+        "frame": 2,
+        "wall_ms": 67.27387500000009,
+        "pressure_ms": 42.205184,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0006652314332313836
+      },
+      {
+        "frame": 3,
+        "wall_ms": 81.36283299999991,
+        "pressure_ms": 57.081856,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0006073432159610093
+      },
+      {
+        "frame": 4,
+        "wall_ms": 69.998875,
+        "pressure_ms": 46.006272,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0007620487594977021
+      },
+      {
+        "frame": 5,
+        "wall_ms": 74.86675000000014,
+        "pressure_ms": 51.249152,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.000951484777033329
+      },
+      {
+        "frame": 6,
+        "wall_ms": 81.45633399999997,
+        "pressure_ms": 57.278464,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0011336159659549594
+      },
+      {
+        "frame": 7,
+        "wall_ms": 81.05445800000007,
+        "pressure_ms": 57.933824,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.001288060680963099
+      },
+      {
+        "frame": 8,
+        "wall_ms": 87.95037500000012,
+        "pressure_ms": 62.980096,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.00163001730106771
+      },
+      {
+        "frame": 9,
+        "wall_ms": 75.07562499999995,
+        "pressure_ms": 51.77344,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.001993170939385891
+      },
+      {
+        "frame": 10,
+        "wall_ms": 78.325875,
+        "pressure_ms": 53.936128,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0021862268913537264
+      },
+      {
+        "frame": 11,
+        "wall_ms": 79.42299999999977,
+        "pressure_ms": 55.37792,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0023252791725099087
+      },
+      {
+        "frame": 12,
+        "wall_ms": 70.71741699999984,
+        "pressure_ms": 46.85824,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.00611099973320961
+      }
+    ]
+  },
+  {
+    "case": "dam",
+    "size": 64,
+    "tolerance": 0.001,
+    "medianWall_ms": 77.78254199999992,
+    "medianPressure_ms": 54.460416,
+    "meanPressure_ms": 52.967651555555555,
+    "stats": {
+      "nx": 64,
+      "ny": 64,
+      "nz": 64,
+      "storedNy": 64,
+      "cellCount": 262144,
+      "equivalentUniformCells": 262144,
+      "compressionRatio": 1,
+      "activeCompressionRatio": 1,
+      "activeSampleCount": 262144,
+      "regularLayers": 64,
+      "maximumNeighborDelta": 0,
+      "gridKind": "uniform",
+      "cellSize_m": 0.0125,
+      "pressureIterations": 0,
+      "pressureSolver": "CM11a dense LCP multigrid (3 Full-Cycles + 4 V-Cycles, 6/6 pre/post PRBGS)",
+      "allocatedBytes": 120228244,
+      "quality": "balanced",
+      "submittedTime_s": 0.39999999999999997,
+      "simulatedTime_s": 0.39999999999999997,
+      "completedTime_s": 0.39999999999999997,
+      "simulationLag_s": 5.551115123125783e-17,
+      "encodedSteps": 12,
+      "maximumTallCellHeight": 0,
+      "volumeControl": true,
+      "hostFluidAuthority": "gpu-resident",
+      "hostSimulationSizedWorkItems": 0,
+      "hostSchedulingUsesReadback": false,
+      "initialVolumeCellSum": 94208.00000000116,
+      "volumeCellSum": 94208.01171875,
+      "representedVolumeCellSum": 81108.296875,
+      "volumeDrift": 1.2439228978267915e-07,
+      "representedVolumeDrift": -0.13905085688053034,
+      "rawVolumeDrift": 1.2439228978267915e-07,
+      "volumeTelemetrySource": "dense-volume",
+      "maxSpeed_m_s": 26.392715454101562,
+      "front_m": 0.4,
+      "frontTelemetrySource": "dense-volume",
+      "uniformPipelineFacts": {
+        "extrapolationFrontSweeps": 16,
+        "extrapolationHierarchyLevels": 6,
+        "extrapolationPassesPerInvocation": 48,
+        "multigridLevels": 6,
+        "multigridPasses": {
+          "setup": 19,
+          "full-cycle": 1392,
+          "v-cycle": 596,
+          "finish": 1
+        },
+        "multigridPassesTotal": 2008,
+        "pressureSchedule": {
+          "residualTolerance": 0.001,
+          "fullCycles": 3,
+          "vCycles": 4,
+          "preSweeps": 6,
+          "postSweeps": 6
+        }
+      },
+      "lastDt_s": 0.03333333333333333,
+      "lastSubsteps": 1,
+      "referenceLiquidVolume_cells": 94208.00000000116,
+      "uniformUnplaceableSolidExcess_cells": 0,
+      "uniformCM11aResidualInfinity": 9.779158426681533e-05,
+      "uniformCM11aConverged": true,
+      "uniformCM11aCoarseIterations": 10,
+      "uniformCM11aCapFailure": false,
+      "uniformCM11aFailingCoarseInvocation": 0,
+      "uniformCM11aCoarseMaxAbsRhs": 0,
+      "uniformCM11aCoarseMaxDiagonalPressure": 0,
+      "uniformCM11aCoarseMaxAbsPressure": 0,
+      "uniformCM11aCoarseProjectedGapPressure": 0,
+      "uniformCM11aCoarseNormalizedProjectedResidual": 0,
+      "uniformCM11aFineResidualInfinity": 0.007897548377513885,
+      "uniformCM11aFineProjectedGapPressure": 0.006171875633299351,
+      "uniformCM11aCoarseActiveRows": 0,
+      "uniformCM11aCoarseFreeRows": 0,
+      "uniformCM11aCoarseWorstRow": 0,
+      "uniformCM11aCoarseWorstRowActive": false,
+      "uniformCM11aCoarseWorstRowHalo": false,
+      "uniformFIMTerminalActiveFaces": 154,
+      "uniformFIMConverged": false,
+      "uniformFIMExecutedPasses": 16,
+      "uniformActiveRegionMinimum": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "uniformActiveRegionMaximum": {
+        "x": 64,
+        "y": 64,
+        "z": 64
+      },
+      "uniformActiveRegionCellCount": 262144,
+      "uniformActiveRegionFraction": 1
+    },
+    "samples": [
+      {
+        "frame": 1,
+        "wall_ms": 62.92524999999978,
+        "pressure_ms": 33.685504,
+        "fullCycles": 3,
+        "vCycles": 0,
+        "residual": 0.00023530147154815495
+      },
+      {
+        "frame": 2,
+        "wall_ms": 56.87599999999975,
+        "pressure_ms": 31.195136,
+        "fullCycles": 3,
+        "vCycles": 0,
+        "residual": 0.00024000312259886414
+      },
+      {
+        "frame": 3,
+        "wall_ms": 66.12245799999982,
+        "pressure_ms": 41.94304,
+        "fullCycles": 3,
+        "vCycles": 0,
+        "residual": 0.0002588969946373254
+      },
+      {
+        "frame": 4,
+        "wall_ms": 67.31150000000025,
+        "pressure_ms": 42.92608,
+        "fullCycles": 3,
+        "vCycles": 0,
+        "residual": 0.0008400537190027535
+      },
+      {
+        "frame": 5,
+        "wall_ms": 68.0441249999999,
+        "pressure_ms": 43.712512,
+        "fullCycles": 3,
+        "vCycles": 1,
+        "residual": 0.0009804104920476675
+      },
+      {
+        "frame": 6,
+        "wall_ms": 71.92329099999961,
+        "pressure_ms": 47.906816,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.001097483211196959
+      },
+      {
+        "frame": 7,
+        "wall_ms": 80.46320800000012,
+        "pressure_ms": 56.885248,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0012797123054042459
+      },
+      {
+        "frame": 8,
+        "wall_ms": 75.27787500000022,
+        "pressure_ms": 51.707904,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0018700326327234507
+      },
+      {
+        "frame": 9,
+        "wall_ms": 86.65783299999975,
+        "pressure_ms": 62.2592,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0019535161554813385
+      },
+      {
+        "frame": 10,
+        "wall_ms": 80.38754100000006,
+        "pressure_ms": 57.278464,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0019493420841172338
+      },
+      {
+        "frame": 11,
+        "wall_ms": 77.78254199999992,
+        "pressure_ms": 54.460416,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0018816421506926417
+      },
+      {
+        "frame": 12,
+        "wall_ms": 83.19337499999983,
+        "pressure_ms": 59.572224,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.007897548377513885
+      }
+    ]
+  },
+  {
+    "case": "dam",
+    "size": 64,
+    "tolerance": 0.001,
+    "medianWall_ms": 77.21750000000065,
+    "medianPressure_ms": 50.7904,
+    "meanPressure_ms": 52.74191644444444,
+    "stats": {
+      "nx": 64,
+      "ny": 64,
+      "nz": 64,
+      "storedNy": 64,
+      "cellCount": 262144,
+      "equivalentUniformCells": 262144,
+      "compressionRatio": 1,
+      "activeCompressionRatio": 1,
+      "activeSampleCount": 262144,
+      "regularLayers": 64,
+      "maximumNeighborDelta": 0,
+      "gridKind": "uniform",
+      "cellSize_m": 0.0125,
+      "pressureIterations": 0,
+      "pressureSolver": "CM11a dense LCP multigrid (3 Full-Cycles + 4 V-Cycles, 6/6 pre/post PRBGS)",
+      "allocatedBytes": 120228244,
+      "quality": "balanced",
+      "submittedTime_s": 0.39999999999999997,
+      "simulatedTime_s": 0.39999999999999997,
+      "completedTime_s": 0.39999999999999997,
+      "simulationLag_s": 5.551115123125783e-17,
+      "encodedSteps": 12,
+      "maximumTallCellHeight": 0,
+      "volumeControl": true,
+      "hostFluidAuthority": "gpu-resident",
+      "hostSimulationSizedWorkItems": 0,
+      "hostSchedulingUsesReadback": false,
+      "initialVolumeCellSum": 94208.00000000116,
+      "volumeCellSum": 94208.00537109375,
+      "representedVolumeCellSum": 81106.30322265625,
+      "volumeDrift": 5.701312612354275e-08,
+      "representedVolumeDrift": -0.1390720191209319,
+      "rawVolumeDrift": 5.701312612354275e-08,
+      "volumeTelemetrySource": "dense-volume",
+      "maxSpeed_m_s": 26.396278381347656,
+      "front_m": 0.4,
+      "frontTelemetrySource": "dense-volume",
+      "uniformPipelineFacts": {
+        "extrapolationFrontSweeps": 16,
+        "extrapolationHierarchyLevels": 6,
+        "extrapolationPassesPerInvocation": 48,
+        "multigridLevels": 6,
+        "multigridPasses": {
+          "setup": 19,
+          "full-cycle": 1392,
+          "v-cycle": 596,
+          "finish": 1
+        },
+        "multigridPassesTotal": 2008,
+        "pressureSchedule": {
+          "residualTolerance": 0.001,
+          "fullCycles": 3,
+          "vCycles": 4,
+          "preSweeps": 6,
+          "postSweeps": 6
+        }
+      },
+      "lastDt_s": 0.03333333333333333,
+      "lastSubsteps": 1,
+      "referenceLiquidVolume_cells": 94208.00000000116,
+      "uniformUnplaceableSolidExcess_cells": 0,
+      "uniformCM11aResidualInfinity": 9.819921979214996e-05,
+      "uniformCM11aConverged": true,
+      "uniformCM11aCoarseIterations": 10,
+      "uniformCM11aCapFailure": false,
+      "uniformCM11aFailingCoarseInvocation": 0,
+      "uniformCM11aCoarseMaxAbsRhs": 0,
+      "uniformCM11aCoarseMaxDiagonalPressure": 0,
+      "uniformCM11aCoarseMaxAbsPressure": 0,
+      "uniformCM11aCoarseProjectedGapPressure": 0,
+      "uniformCM11aCoarseNormalizedProjectedResidual": 0,
+      "uniformCM11aFineResidualInfinity": 0.005194506142288446,
+      "uniformCM11aFineProjectedGapPressure": 0.004861084278672934,
+      "uniformCM11aCoarseActiveRows": 0,
+      "uniformCM11aCoarseFreeRows": 0,
+      "uniformCM11aCoarseWorstRow": 0,
+      "uniformCM11aCoarseWorstRowActive": false,
+      "uniformCM11aCoarseWorstRowHalo": false,
+      "uniformFIMTerminalActiveFaces": 154,
+      "uniformFIMConverged": false,
+      "uniformFIMExecutedPasses": 16,
+      "uniformActiveRegionMinimum": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "uniformActiveRegionMaximum": {
+        "x": 64,
+        "y": 64,
+        "z": 64
+      },
+      "uniformActiveRegionCellCount": 262144,
+      "uniformActiveRegionFraction": 1
+    },
+    "samples": [
+      {
+        "frame": 1,
+        "wall_ms": 64.18745799999988,
+        "pressure_ms": 34.865152,
+        "fullCycles": 3,
+        "vCycles": 0,
+        "residual": 0.00023530147154815495
+      },
+      {
+        "frame": 2,
+        "wall_ms": 59.71424999999999,
+        "pressure_ms": 35.38944,
+        "fullCycles": 3,
+        "vCycles": 0,
+        "residual": 0.0002362814120715484
+      },
+      {
+        "frame": 3,
+        "wall_ms": 66.92158299999937,
+        "pressure_ms": 42.92608,
+        "fullCycles": 3,
+        "vCycles": 0,
+        "residual": 0.00025689142057672143
+      },
+      {
+        "frame": 4,
+        "wall_ms": 74.18945799999983,
+        "pressure_ms": 49.872896,
+        "fullCycles": 3,
+        "vCycles": 0,
+        "residual": 0.0008191828383132815
+      },
+      {
+        "frame": 5,
+        "wall_ms": 70.62083299999995,
+        "pressure_ms": 46.137344,
+        "fullCycles": 3,
+        "vCycles": 2,
+        "residual": 0.0009204067173413932
+      },
+      {
+        "frame": 6,
+        "wall_ms": 74.82583400000021,
+        "pressure_ms": 50.7904,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.001207251101732254
+      },
+      {
+        "frame": 7,
+        "wall_ms": 74.20187499999975,
+        "pressure_ms": 50.13504,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0013018223689869046
+      },
+      {
+        "frame": 8,
+        "wall_ms": 77.21750000000065,
+        "pressure_ms": 48.758784,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0016863687196746469
+      },
+      {
+        "frame": 9,
+        "wall_ms": 77.58979099999942,
+        "pressure_ms": 51.249152,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0019409937085583806
+      },
+      {
+        "frame": 10,
+        "wall_ms": 80.78195800000049,
+        "pressure_ms": 55.771136,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0019696911331266165
+      },
+      {
+        "frame": 11,
+        "wall_ms": 82.45758399999977,
+        "pressure_ms": 58.261504,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0020089219324290752
+      },
+      {
+        "frame": 12,
+        "wall_ms": 87.4283749999995,
+        "pressure_ms": 63.700992,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.005194506142288446
+      }
+    ]
+  },
+  {
+    "case": "dam",
+    "size": 64,
+    "tolerance": 0,
+    "medianWall_ms": 76.46462499999961,
+    "medianPressure_ms": 52.953088,
+    "meanPressure_ms": 52.334136888888885,
+    "stats": {
+      "nx": 64,
+      "ny": 64,
+      "nz": 64,
+      "storedNy": 64,
+      "cellCount": 262144,
+      "equivalentUniformCells": 262144,
+      "compressionRatio": 1,
+      "activeCompressionRatio": 1,
+      "activeSampleCount": 262144,
+      "regularLayers": 64,
+      "maximumNeighborDelta": 0,
+      "gridKind": "uniform",
+      "cellSize_m": 0.0125,
+      "pressureIterations": 0,
+      "pressureSolver": "CM11a dense LCP multigrid (3 Full-Cycles + 4 V-Cycles, 6/6 pre/post PRBGS)",
+      "allocatedBytes": 120228244,
+      "quality": "balanced",
+      "submittedTime_s": 0.39999999999999997,
+      "simulatedTime_s": 0.39999999999999997,
+      "completedTime_s": 0.39999999999999997,
+      "simulationLag_s": 5.551115123125783e-17,
+      "encodedSteps": 12,
+      "maximumTallCellHeight": 0,
+      "volumeControl": true,
+      "hostFluidAuthority": "gpu-resident",
+      "hostSimulationSizedWorkItems": 0,
+      "hostSchedulingUsesReadback": false,
+      "initialVolumeCellSum": 94208.00000000116,
+      "volumeCellSum": 94207.93359375,
+      "representedVolumeCellSum": 81170.9609375,
+      "volumeDrift": -7.04889724483615e-07,
+      "representedVolumeDrift": -0.13838568977688734,
+      "rawVolumeDrift": -7.04889724483615e-07,
+      "volumeTelemetrySource": "dense-volume",
+      "maxSpeed_m_s": 26.526247024536133,
+      "front_m": 0.4,
+      "frontTelemetrySource": "dense-volume",
+      "uniformPipelineFacts": {
+        "extrapolationFrontSweeps": 16,
+        "extrapolationHierarchyLevels": 6,
+        "extrapolationPassesPerInvocation": 48,
+        "multigridLevels": 6,
+        "multigridPasses": {
+          "setup": 19,
+          "full-cycle": 1392,
+          "v-cycle": 596,
+          "finish": 1
+        },
+        "multigridPassesTotal": 2008,
+        "pressureSchedule": {
+          "residualTolerance": 0,
+          "fullCycles": 3,
+          "vCycles": 4,
+          "preSweeps": 6,
+          "postSweeps": 6
+        }
+      },
+      "lastDt_s": 0.03333333333333333,
+      "lastSubsteps": 1,
+      "referenceLiquidVolume_cells": 94208.00000000116,
+      "uniformUnplaceableSolidExcess_cells": 0,
+      "uniformCM11aResidualInfinity": 9.506857895758003e-05,
+      "uniformCM11aConverged": true,
+      "uniformCM11aCoarseIterations": 10,
+      "uniformCM11aCapFailure": false,
+      "uniformCM11aFailingCoarseInvocation": 0,
+      "uniformCM11aCoarseMaxAbsRhs": 0,
+      "uniformCM11aCoarseMaxDiagonalPressure": 0,
+      "uniformCM11aCoarseMaxAbsPressure": 0,
+      "uniformCM11aCoarseProjectedGapPressure": 0,
+      "uniformCM11aCoarseNormalizedProjectedResidual": 0,
+      "uniformCM11aFineResidualInfinity": 0.0073465569876134396,
+      "uniformCM11aFineProjectedGapPressure": 0.005729167256504297,
+      "uniformCM11aCoarseActiveRows": 0,
+      "uniformCM11aCoarseFreeRows": 0,
+      "uniformCM11aCoarseWorstRow": 0,
+      "uniformCM11aCoarseWorstRowActive": false,
+      "uniformCM11aCoarseWorstRowHalo": false,
+      "uniformFIMTerminalActiveFaces": 152,
+      "uniformFIMConverged": false,
+      "uniformFIMExecutedPasses": 16,
+      "uniformActiveRegionMinimum": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "uniformActiveRegionMaximum": {
+        "x": 64,
+        "y": 64,
+        "z": 64
+      },
+      "uniformActiveRegionCellCount": 262144,
+      "uniformActiveRegionFraction": 1
+    },
+    "samples": [
+      {
+        "frame": 1,
+        "wall_ms": 65.08245799999986,
+        "pressure_ms": 35.913728,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0005219029262661934
+      },
+      {
+        "frame": 2,
+        "wall_ms": 66.2768329999999,
+        "pressure_ms": 42.860544,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0006652314332313836
+      },
+      {
+        "frame": 3,
+        "wall_ms": 72.14199999999983,
+        "pressure_ms": 42.860544,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0006861960864625871
+      },
+      {
+        "frame": 4,
+        "wall_ms": 72.50600000000031,
+        "pressure_ms": 49.086464,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0008087147725746036
+      },
+      {
+        "frame": 5,
+        "wall_ms": 75.98254200000065,
+        "pressure_ms": 52.297728,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0009240591316483915
+      },
+      {
+        "frame": 6,
+        "wall_ms": 78.88025000000016,
+        "pressure_ms": 55.902208,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0012221868382766843
+      },
+      {
+        "frame": 7,
+        "wall_ms": 76.46462499999961,
+        "pressure_ms": 52.953088,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.00123960105702281
+      },
+      {
+        "frame": 8,
+        "wall_ms": 78.96837499999947,
+        "pressure_ms": 56.229888,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0015527949435636401
+      },
+      {
+        "frame": 9,
+        "wall_ms": 78.20358399999986,
+        "pressure_ms": 53.542912,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0021914446260780096
+      },
+      {
+        "frame": 10,
+        "wall_ms": 78.80283299999974,
+        "pressure_ms": 53.805056,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0019942144863307476
+      },
+      {
+        "frame": 11,
+        "wall_ms": 71.58787500000017,
+        "pressure_ms": 48.037888,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0018127355724573135
+      },
+      {
+        "frame": 12,
+        "wall_ms": 73.3080829999999,
+        "pressure_ms": 49.152,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0073465569876134396
+      }
+    ]
+  },
+  {
+    "case": "rest",
+    "size": 64,
+    "tolerance": 0,
+    "medianWall_ms": 73.48258299999998,
+    "medianPressure_ms": 48.889856,
+    "meanPressure_ms": 48.234496,
+    "stats": {
+      "nx": 64,
+      "ny": 64,
+      "nz": 64,
+      "storedNy": 64,
+      "cellCount": 262144,
+      "equivalentUniformCells": 262144,
+      "compressionRatio": 1,
+      "activeCompressionRatio": 1,
+      "activeSampleCount": 262144,
+      "regularLayers": 64,
+      "maximumNeighborDelta": 0,
+      "gridKind": "uniform",
+      "cellSize_m": 0.0125,
+      "pressureIterations": 0,
+      "pressureSolver": "CM11a dense LCP multigrid (3 Full-Cycles + 4 V-Cycles, 6/6 pre/post PRBGS)",
+      "allocatedBytes": 120228244,
+      "quality": "balanced",
+      "submittedTime_s": 0.39999999999999997,
+      "simulatedTime_s": 0.39999999999999997,
+      "completedTime_s": 0.39999999999999997,
+      "simulationLag_s": 5.551115123125783e-17,
+      "encodedSteps": 12,
+      "maximumTallCellHeight": 0,
+      "volumeControl": true,
+      "hostFluidAuthority": "gpu-resident",
+      "hostSimulationSizedWorkItems": 0,
+      "hostSchedulingUsesReadback": false,
+      "initialVolumeCellSum": 131072,
+      "volumeCellSum": 131072,
+      "representedVolumeCellSum": 131072,
+      "volumeDrift": 0,
+      "representedVolumeDrift": 0,
+      "rawVolumeDrift": 0,
+      "volumeTelemetrySource": "dense-volume",
+      "maxSpeed_m_s": 7.139923582144547e-06,
+      "front_m": 0.4,
+      "frontTelemetrySource": "dense-volume",
+      "uniformPipelineFacts": {
+        "extrapolationFrontSweeps": 16,
+        "extrapolationHierarchyLevels": 6,
+        "extrapolationPassesPerInvocation": 48,
+        "multigridLevels": 6,
+        "multigridPasses": {
+          "setup": 19,
+          "full-cycle": 1392,
+          "v-cycle": 596,
+          "finish": 1
+        },
+        "multigridPassesTotal": 2008,
+        "pressureSchedule": {
+          "residualTolerance": 0,
+          "fullCycles": 3,
+          "vCycles": 4,
+          "preSweeps": 6,
+          "postSweeps": 6
+        }
+      },
+      "lastDt_s": 0.03333333333333333,
+      "lastSubsteps": 1,
+      "referenceLiquidVolume_cells": 131072,
+      "uniformUnplaceableSolidExcess_cells": 0,
+      "uniformCM11aResidualInfinity": 8.538314432371408e-05,
+      "uniformCM11aConverged": true,
+      "uniformCM11aCoarseIterations": 14,
+      "uniformCM11aCapFailure": false,
+      "uniformCM11aFailingCoarseInvocation": 0,
+      "uniformCM11aCoarseMaxAbsRhs": 0,
+      "uniformCM11aCoarseMaxDiagonalPressure": 0,
+      "uniformCM11aCoarseMaxAbsPressure": 0,
+      "uniformCM11aCoarseProjectedGapPressure": 0,
+      "uniformCM11aCoarseNormalizedProjectedResidual": 0,
+      "uniformCM11aFineResidualInfinity": 0.0008919208194129169,
+      "uniformCM11aFineProjectedGapPressure": 0.0006955589633435011,
+      "uniformCM11aCoarseActiveRows": 0,
+      "uniformCM11aCoarseFreeRows": 0,
+      "uniformCM11aCoarseWorstRow": 0,
+      "uniformCM11aCoarseWorstRowActive": false,
+      "uniformCM11aCoarseWorstRowHalo": false,
+      "uniformFIMTerminalActiveFaces": 0,
+      "uniformFIMConverged": true,
+      "uniformFIMExecutedPasses": 4,
+      "uniformActiveRegionMinimum": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "uniformActiveRegionMaximum": {
+        "x": 64,
+        "y": 64,
+        "z": 64
+      },
+      "uniformActiveRegionCellCount": 262144,
+      "uniformActiveRegionFraction": 1
+    },
+    "samples": [
+      {
+        "frame": 1,
+        "wall_ms": 102.95833299999993,
+        "pressure_ms": 44.302336,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0007827506633475423
+      },
+      {
+        "frame": 2,
+        "wall_ms": 70.92766699999993,
+        "pressure_ms": 44.171264,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0008876548381522298
+      },
+      {
+        "frame": 3,
+        "wall_ms": 83.71150000000011,
+        "pressure_ms": 51.77344,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0009321816614829004
+      },
+      {
+        "frame": 4,
+        "wall_ms": 73.48258299999998,
+        "pressure_ms": 48.627712,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0008862972026690841
+      },
+      {
+        "frame": 5,
+        "wall_ms": 70.56287499999985,
+        "pressure_ms": 46.989312,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.000990111380815506
+      },
+      {
+        "frame": 6,
+        "wall_ms": 73.74424999999997,
+        "pressure_ms": 50.200576,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0009402812574990094
+      },
+      {
+        "frame": 7,
+        "wall_ms": 74.44287500000019,
+        "pressure_ms": 50.003968,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0008876727079041302
+      },
+      {
+        "frame": 8,
+        "wall_ms": 73.65966700000013,
+        "pressure_ms": 49.086464,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0009006316540762782
+      },
+      {
+        "frame": 9,
+        "wall_ms": 73.25341700000013,
+        "pressure_ms": 48.889856,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0008902871049940586
+      },
+      {
+        "frame": 10,
+        "wall_ms": 67.28837499999986,
+        "pressure_ms": 43.646976,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0009865087922662497
+      },
+      {
+        "frame": 11,
+        "wall_ms": 67.13658400000008,
+        "pressure_ms": 43.188224,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0009486330091021955
+      },
+      {
+        "frame": 12,
+        "wall_ms": 77.44733300000007,
+        "pressure_ms": 53.477376,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0008919208194129169
+      }
+    ]
+  },
+  {
+    "case": "rest",
+    "size": 64,
+    "tolerance": 0.0001,
+    "medianWall_ms": 79.95233300000018,
+    "medianPressure_ms": 53.805056,
+    "meanPressure_ms": 54.19099022222222,
+    "stats": {
+      "nx": 64,
+      "ny": 64,
+      "nz": 64,
+      "storedNy": 64,
+      "cellCount": 262144,
+      "equivalentUniformCells": 262144,
+      "compressionRatio": 1,
+      "activeCompressionRatio": 1,
+      "activeSampleCount": 262144,
+      "regularLayers": 64,
+      "maximumNeighborDelta": 0,
+      "gridKind": "uniform",
+      "cellSize_m": 0.0125,
+      "pressureIterations": 0,
+      "pressureSolver": "CM11a dense LCP multigrid (3 Full-Cycles + 4 V-Cycles, 6/6 pre/post PRBGS)",
+      "allocatedBytes": 120228244,
+      "quality": "balanced",
+      "submittedTime_s": 0.39999999999999997,
+      "simulatedTime_s": 0.39999999999999997,
+      "completedTime_s": 0.39999999999999997,
+      "simulationLag_s": 5.551115123125783e-17,
+      "encodedSteps": 12,
+      "maximumTallCellHeight": 0,
+      "volumeControl": true,
+      "hostFluidAuthority": "gpu-resident",
+      "hostSimulationSizedWorkItems": 0,
+      "hostSchedulingUsesReadback": false,
+      "initialVolumeCellSum": 131072,
+      "volumeCellSum": 131072,
+      "representedVolumeCellSum": 131072,
+      "volumeDrift": 0,
+      "representedVolumeDrift": 0,
+      "rawVolumeDrift": 0,
+      "volumeTelemetrySource": "dense-volume",
+      "maxSpeed_m_s": 7.719795576122124e-06,
+      "front_m": 0.4,
+      "frontTelemetrySource": "dense-volume",
+      "uniformPipelineFacts": {
+        "extrapolationFrontSweeps": 16,
+        "extrapolationHierarchyLevels": 6,
+        "extrapolationPassesPerInvocation": 48,
+        "multigridLevels": 6,
+        "multigridPasses": {
+          "setup": 19,
+          "full-cycle": 1392,
+          "v-cycle": 596,
+          "finish": 1
+        },
+        "multigridPassesTotal": 2008,
+        "pressureSchedule": {
+          "residualTolerance": 0.0001,
+          "fullCycles": 3,
+          "vCycles": 4,
+          "preSweeps": 6,
+          "postSweeps": 6
+        }
+      },
+      "lastDt_s": 0.03333333333333333,
+      "lastSubsteps": 1,
+      "referenceLiquidVolume_cells": 131072,
+      "uniformUnplaceableSolidExcess_cells": 0,
+      "uniformCM11aResidualInfinity": 8.53744859341532e-05,
+      "uniformCM11aConverged": true,
+      "uniformCM11aCoarseIterations": 14,
+      "uniformCM11aCapFailure": false,
+      "uniformCM11aFailingCoarseInvocation": 0,
+      "uniformCM11aCoarseMaxAbsRhs": 0,
+      "uniformCM11aCoarseMaxDiagonalPressure": 0,
+      "uniformCM11aCoarseMaxAbsPressure": 0,
+      "uniformCM11aCoarseProjectedGapPressure": 0,
+      "uniformCM11aCoarseNormalizedProjectedResidual": 0,
+      "uniformCM11aFineResidualInfinity": 0.000985566759482026,
+      "uniformCM11aFineProjectedGapPressure": 0.0007685881573706865,
+      "uniformCM11aCoarseActiveRows": 0,
+      "uniformCM11aCoarseFreeRows": 0,
+      "uniformCM11aCoarseWorstRow": 0,
+      "uniformCM11aCoarseWorstRowActive": false,
+      "uniformCM11aCoarseWorstRowHalo": false,
+      "uniformFIMTerminalActiveFaces": 0,
+      "uniformFIMConverged": true,
+      "uniformFIMExecutedPasses": 4,
+      "uniformActiveRegionMinimum": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "uniformActiveRegionMaximum": {
+        "x": 64,
+        "y": 64,
+        "z": 64
+      },
+      "uniformActiveRegionCellCount": 262144,
+      "uniformActiveRegionFraction": 1
+    },
+    "samples": [
+      {
+        "frame": 1,
+        "wall_ms": 75.38299999999981,
+        "pressure_ms": 47.251456,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0007827506633475423
+      },
+      {
+        "frame": 2,
+        "wall_ms": 73.13141700000006,
+        "pressure_ms": 48.16896,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0008876548381522298
+      },
+      {
+        "frame": 3,
+        "wall_ms": 79.6795830000001,
+        "pressure_ms": 56.754176,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0009894343093037605
+      },
+      {
+        "frame": 4,
+        "wall_ms": 82.79708299999993,
+        "pressure_ms": 58.523648,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0009925586637109518
+      },
+      {
+        "frame": 5,
+        "wall_ms": 77.53749999999991,
+        "pressure_ms": 53.805056,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0009893319802358747
+      },
+      {
+        "frame": 6,
+        "wall_ms": 72.7922080000003,
+        "pressure_ms": 48.955392,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0008904662099666893
+      },
+      {
+        "frame": 7,
+        "wall_ms": 79.95233300000018,
+        "pressure_ms": 56.885248,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0009082640171982348
+      },
+      {
+        "frame": 8,
+        "wall_ms": 80.59270800000013,
+        "pressure_ms": 56.623104,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0008928071474656463
+      },
+      {
+        "frame": 9,
+        "wall_ms": 75.0341669999998,
+        "pressure_ms": 51.11808,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0008398767095059156
+      },
+      {
+        "frame": 10,
+        "wall_ms": 75.6652079999999,
+        "pressure_ms": 51.380224,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.000888149137608707
+      },
+      {
+        "frame": 11,
+        "wall_ms": 81.48108299999967,
+        "pressure_ms": 56.885248,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0009895983384922147
+      },
+      {
+        "frame": 12,
+        "wall_ms": 83.13562499999989,
+        "pressure_ms": 53.542912,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.000985566759482026
+      }
+    ]
+  },
+  {
+    "case": "rest",
+    "size": 64,
+    "tolerance": 0.0001,
+    "medianWall_ms": 75.7055420000006,
+    "medianPressure_ms": 51.511296,
+    "meanPressure_ms": 50.92147200000001,
+    "stats": {
+      "nx": 64,
+      "ny": 64,
+      "nz": 64,
+      "storedNy": 64,
+      "cellCount": 262144,
+      "equivalentUniformCells": 262144,
+      "compressionRatio": 1,
+      "activeCompressionRatio": 1,
+      "activeSampleCount": 262144,
+      "regularLayers": 64,
+      "maximumNeighborDelta": 0,
+      "gridKind": "uniform",
+      "cellSize_m": 0.0125,
+      "pressureIterations": 0,
+      "pressureSolver": "CM11a dense LCP multigrid (3 Full-Cycles + 4 V-Cycles, 6/6 pre/post PRBGS)",
+      "allocatedBytes": 120228244,
+      "quality": "balanced",
+      "submittedTime_s": 0.39999999999999997,
+      "simulatedTime_s": 0.39999999999999997,
+      "completedTime_s": 0.39999999999999997,
+      "simulationLag_s": 5.551115123125783e-17,
+      "encodedSteps": 12,
+      "maximumTallCellHeight": 0,
+      "volumeControl": true,
+      "hostFluidAuthority": "gpu-resident",
+      "hostSimulationSizedWorkItems": 0,
+      "hostSchedulingUsesReadback": false,
+      "initialVolumeCellSum": 131072,
+      "volumeCellSum": 131072,
+      "representedVolumeCellSum": 131072,
+      "volumeDrift": 0,
+      "representedVolumeDrift": 0,
+      "rawVolumeDrift": 0,
+      "volumeTelemetrySource": "dense-volume",
+      "maxSpeed_m_s": 7.769858711981215e-06,
+      "front_m": 0.4,
+      "frontTelemetrySource": "dense-volume",
+      "uniformPipelineFacts": {
+        "extrapolationFrontSweeps": 16,
+        "extrapolationHierarchyLevels": 6,
+        "extrapolationPassesPerInvocation": 48,
+        "multigridLevels": 6,
+        "multigridPasses": {
+          "setup": 19,
+          "full-cycle": 1392,
+          "v-cycle": 596,
+          "finish": 1
+        },
+        "multigridPassesTotal": 2008,
+        "pressureSchedule": {
+          "residualTolerance": 0.0001,
+          "fullCycles": 3,
+          "vCycles": 4,
+          "preSweeps": 6,
+          "postSweeps": 6
+        }
+      },
+      "lastDt_s": 0.03333333333333333,
+      "lastSubsteps": 1,
+      "referenceLiquidVolume_cells": 131072,
+      "uniformUnplaceableSolidExcess_cells": 0,
+      "uniformCM11aResidualInfinity": 8.537968824384734e-05,
+      "uniformCM11aConverged": true,
+      "uniformCM11aCoarseIterations": 14,
+      "uniformCM11aCapFailure": false,
+      "uniformCM11aFailingCoarseInvocation": 0,
+      "uniformCM11aCoarseMaxAbsRhs": 0,
+      "uniformCM11aCoarseMaxDiagonalPressure": 0,
+      "uniformCM11aCoarseMaxAbsPressure": 0,
+      "uniformCM11aCoarseProjectedGapPressure": 0,
+      "uniformCM11aCoarseNormalizedProjectedResidual": 0,
+      "uniformCM11aFineResidualInfinity": 0.000936947122681886,
+      "uniformCM11aFineProjectedGapPressure": 0.0007306724437512457,
+      "uniformCM11aCoarseActiveRows": 0,
+      "uniformCM11aCoarseFreeRows": 0,
+      "uniformCM11aCoarseWorstRow": 0,
+      "uniformCM11aCoarseWorstRowActive": false,
+      "uniformCM11aCoarseWorstRowHalo": false,
+      "uniformFIMTerminalActiveFaces": 0,
+      "uniformFIMConverged": true,
+      "uniformFIMExecutedPasses": 4,
+      "uniformActiveRegionMinimum": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "uniformActiveRegionMaximum": {
+        "x": 64,
+        "y": 64,
+        "z": 64
+      },
+      "uniformActiveRegionCellCount": 262144,
+      "uniformActiveRegionFraction": 1
+    },
+    "samples": [
+      {
+        "frame": 1,
+        "wall_ms": 81.27995800000008,
+        "pressure_ms": 49.414144,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0007827506633475423
+      },
+      {
+        "frame": 2,
+        "wall_ms": 73.7800000000002,
+        "pressure_ms": 49.872896,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0008876548381522298
+      },
+      {
+        "frame": 3,
+        "wall_ms": 77.5402909999998,
+        "pressure_ms": 53.346304,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0009918974246829748
+      },
+      {
+        "frame": 4,
+        "wall_ms": 73.78041699999994,
+        "pressure_ms": 49.217536,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0008168068598024547
+      },
+      {
+        "frame": 5,
+        "wall_ms": 79.55158299999994,
+        "pressure_ms": 51.838976,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0009396181558258832
+      },
+      {
+        "frame": 6,
+        "wall_ms": 78.14187500000025,
+        "pressure_ms": 54.591488,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0009421110153198242
+      },
+      {
+        "frame": 7,
+        "wall_ms": 71.22070900000017,
+        "pressure_ms": 47.775744,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0008867392316460609
+      },
+      {
+        "frame": 8,
+        "wall_ms": 77.4591249999994,
+        "pressure_ms": 53.608448,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0008821684750728309
+      },
+      {
+        "frame": 9,
+        "wall_ms": 73.53062499999942,
+        "pressure_ms": 49.47968,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0008868976728990674
+      },
+      {
+        "frame": 10,
+        "wall_ms": 70.70095899999978,
+        "pressure_ms": 47.579136,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0010447076056152582
+      },
+      {
+        "frame": 11,
+        "wall_ms": 75.7055420000006,
+        "pressure_ms": 51.511296,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0009373950306326151
+      },
+      {
+        "frame": 12,
+        "wall_ms": 76.26529199999914,
+        "pressure_ms": 52.690944,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.000936947122681886
+      }
+    ]
+  },
+  {
+    "case": "rest",
+    "size": 64,
+    "tolerance": 0,
+    "medianWall_ms": 76.22612500000014,
+    "medianPressure_ms": 52.232192,
+    "meanPressure_ms": 51.58411377777778,
+    "stats": {
+      "nx": 64,
+      "ny": 64,
+      "nz": 64,
+      "storedNy": 64,
+      "cellCount": 262144,
+      "equivalentUniformCells": 262144,
+      "compressionRatio": 1,
+      "activeCompressionRatio": 1,
+      "activeSampleCount": 262144,
+      "regularLayers": 64,
+      "maximumNeighborDelta": 0,
+      "gridKind": "uniform",
+      "cellSize_m": 0.0125,
+      "pressureIterations": 0,
+      "pressureSolver": "CM11a dense LCP multigrid (3 Full-Cycles + 4 V-Cycles, 6/6 pre/post PRBGS)",
+      "allocatedBytes": 120228244,
+      "quality": "balanced",
+      "submittedTime_s": 0.39999999999999997,
+      "simulatedTime_s": 0.39999999999999997,
+      "completedTime_s": 0.39999999999999997,
+      "simulationLag_s": 5.551115123125783e-17,
+      "encodedSteps": 12,
+      "maximumTallCellHeight": 0,
+      "volumeControl": true,
+      "hostFluidAuthority": "gpu-resident",
+      "hostSimulationSizedWorkItems": 0,
+      "hostSchedulingUsesReadback": false,
+      "initialVolumeCellSum": 131072,
+      "volumeCellSum": 131072,
+      "representedVolumeCellSum": 131072,
+      "volumeDrift": 0,
+      "representedVolumeDrift": 0,
+      "rawVolumeDrift": 0,
+      "volumeTelemetrySource": "dense-volume",
+      "maxSpeed_m_s": 7.558164270449197e-06,
+      "front_m": 0.4,
+      "frontTelemetrySource": "dense-volume",
+      "uniformPipelineFacts": {
+        "extrapolationFrontSweeps": 16,
+        "extrapolationHierarchyLevels": 6,
+        "extrapolationPassesPerInvocation": 48,
+        "multigridLevels": 6,
+        "multigridPasses": {
+          "setup": 19,
+          "full-cycle": 1392,
+          "v-cycle": 596,
+          "finish": 1
+        },
+        "multigridPassesTotal": 2008,
+        "pressureSchedule": {
+          "residualTolerance": 0,
+          "fullCycles": 3,
+          "vCycles": 4,
+          "preSweeps": 6,
+          "postSweeps": 6
+        }
+      },
+      "lastDt_s": 0.03333333333333333,
+      "lastSubsteps": 1,
+      "referenceLiquidVolume_cells": 131072,
+      "uniformUnplaceableSolidExcess_cells": 0,
+      "uniformCM11aResidualInfinity": 8.537464600522071e-05,
+      "uniformCM11aConverged": true,
+      "uniformCM11aCoarseIterations": 14,
+      "uniformCM11aCapFailure": false,
+      "uniformCM11aFailingCoarseInvocation": 0,
+      "uniformCM11aCoarseMaxAbsRhs": 0,
+      "uniformCM11aCoarseMaxDiagonalPressure": 0,
+      "uniformCM11aCoarseMaxAbsPressure": 0,
+      "uniformCM11aCoarseProjectedGapPressure": 0,
+      "uniformCM11aCoarseNormalizedProjectedResidual": 0,
+      "uniformCM11aFineResidualInfinity": 0.0009973535779863596,
+      "uniformCM11aFineProjectedGapPressure": 0.0007777800783514977,
+      "uniformCM11aCoarseActiveRows": 0,
+      "uniformCM11aCoarseFreeRows": 0,
+      "uniformCM11aCoarseWorstRow": 0,
+      "uniformCM11aCoarseWorstRowActive": false,
+      "uniformCM11aCoarseWorstRowHalo": false,
+      "uniformFIMTerminalActiveFaces": 0,
+      "uniformFIMConverged": true,
+      "uniformFIMExecutedPasses": 4,
+      "uniformActiveRegionMinimum": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "uniformActiveRegionMaximum": {
+        "x": 64,
+        "y": 64,
+        "z": 64
+      },
+      "uniformActiveRegionCellCount": 262144,
+      "uniformActiveRegionFraction": 1
+    },
+    "samples": [
+      {
+        "frame": 1,
+        "wall_ms": 73.15200000000004,
+        "pressure_ms": 45.023232,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0007827506633475423
+      },
+      {
+        "frame": 2,
+        "wall_ms": 82.25345799999923,
+        "pressure_ms": 56.164352,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0008876548381522298
+      },
+      {
+        "frame": 3,
+        "wall_ms": 82.22245800000019,
+        "pressure_ms": 53.08416,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0009321816614829004
+      },
+      {
+        "frame": 4,
+        "wall_ms": 74.45024999999987,
+        "pressure_ms": 49.938432,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0008394999313168228
+      },
+      {
+        "frame": 5,
+        "wall_ms": 78.68666699999994,
+        "pressure_ms": 55.640064,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.000836516497656703
+      },
+      {
+        "frame": 6,
+        "wall_ms": 78.80070800000067,
+        "pressure_ms": 54.788096,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0008861965034157038
+      },
+      {
+        "frame": 7,
+        "wall_ms": 73.61391700000058,
+        "pressure_ms": 49.414144,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0009891764493659139
+      },
+      {
+        "frame": 8,
+        "wall_ms": 76.22612500000014,
+        "pressure_ms": 52.690944,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0008843063260428607
+      },
+      {
+        "frame": 9,
+        "wall_ms": 69.5727079999997,
+        "pressure_ms": 46.137344,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0009448656928725541
+      },
+      {
+        "frame": 10,
+        "wall_ms": 80.79299999999967,
+        "pressure_ms": 57.081856,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0010953665478155017
+      },
+      {
+        "frame": 11,
+        "wall_ms": 81.3045830000001,
+        "pressure_ms": 52.232192,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0009994246065616608
+      },
+      {
+        "frame": 12,
+        "wall_ms": 70.45987500000047,
+        "pressure_ms": 46.333952,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0009973535779863596
+      }
+    ]
+  },
+  {
+    "case": "rest",
+    "size": 64,
+    "tolerance": 0,
+    "medianWall_ms": 72.95241699999997,
+    "medianPressure_ms": 47.448064,
+    "meanPressure_ms": 48.17624177777778,
+    "stats": {
+      "nx": 64,
+      "ny": 64,
+      "nz": 64,
+      "storedNy": 64,
+      "cellCount": 262144,
+      "equivalentUniformCells": 262144,
+      "compressionRatio": 1,
+      "activeCompressionRatio": 1,
+      "activeSampleCount": 262144,
+      "regularLayers": 64,
+      "maximumNeighborDelta": 0,
+      "gridKind": "uniform",
+      "cellSize_m": 0.0125,
+      "pressureIterations": 0,
+      "pressureSolver": "CM11a dense LCP multigrid (3 Full-Cycles + 4 V-Cycles, 6/6 pre/post PRBGS)",
+      "allocatedBytes": 120228244,
+      "quality": "balanced",
+      "submittedTime_s": 0.39999999999999997,
+      "simulatedTime_s": 0.39999999999999997,
+      "completedTime_s": 0.39999999999999997,
+      "simulationLag_s": 5.551115123125783e-17,
+      "encodedSteps": 12,
+      "maximumTallCellHeight": 0,
+      "volumeControl": true,
+      "hostFluidAuthority": "gpu-resident",
+      "hostSimulationSizedWorkItems": 0,
+      "hostSchedulingUsesReadback": false,
+      "initialVolumeCellSum": 131072,
+      "volumeCellSum": 131072,
+      "representedVolumeCellSum": 131072,
+      "volumeDrift": 0,
+      "representedVolumeDrift": 0,
+      "rawVolumeDrift": 0,
+      "volumeTelemetrySource": "dense-volume",
+      "maxSpeed_m_s": 7.739300599496346e-06,
+      "front_m": 0.4,
+      "frontTelemetrySource": "dense-volume",
+      "uniformPipelineFacts": {
+        "extrapolationFrontSweeps": 16,
+        "extrapolationHierarchyLevels": 6,
+        "extrapolationPassesPerInvocation": 48,
+        "multigridLevels": 6,
+        "multigridPasses": {
+          "setup": 19,
+          "full-cycle": 1392,
+          "v-cycle": 596,
+          "finish": 1
+        },
+        "multigridPassesTotal": 2008,
+        "pressureSchedule": {
+          "residualTolerance": 0,
+          "fullCycles": 3,
+          "vCycles": 4,
+          "preSweeps": 6,
+          "postSweeps": 6
+        }
+      },
+      "lastDt_s": 0.03333333333333333,
+      "lastSubsteps": 1,
+      "referenceLiquidVolume_cells": 131072,
+      "uniformUnplaceableSolidExcess_cells": 0,
+      "uniformCM11aResidualInfinity": 8.538480324205011e-05,
+      "uniformCM11aConverged": true,
+      "uniformCM11aCoarseIterations": 14,
+      "uniformCM11aCapFailure": false,
+      "uniformCM11aFailingCoarseInvocation": 0,
+      "uniformCM11aCoarseMaxAbsRhs": 0,
+      "uniformCM11aCoarseMaxDiagonalPressure": 0,
+      "uniformCM11aCoarseMaxAbsPressure": 0,
+      "uniformCM11aCoarseProjectedGapPressure": 0,
+      "uniformCM11aCoarseNormalizedProjectedResidual": 0,
+      "uniformCM11aFineResidualInfinity": 0.000984048005193472,
+      "uniformCM11aFineProjectedGapPressure": 0.0007674038060940802,
+      "uniformCM11aCoarseActiveRows": 0,
+      "uniformCM11aCoarseFreeRows": 0,
+      "uniformCM11aCoarseWorstRow": 0,
+      "uniformCM11aCoarseWorstRowActive": false,
+      "uniformCM11aCoarseWorstRowHalo": false,
+      "uniformFIMTerminalActiveFaces": 0,
+      "uniformFIMConverged": true,
+      "uniformFIMExecutedPasses": 4,
+      "uniformActiveRegionMinimum": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "uniformActiveRegionMaximum": {
+        "x": 64,
+        "y": 64,
+        "z": 64
+      },
+      "uniformActiveRegionCellCount": 262144,
+      "uniformActiveRegionFraction": 1
+    },
+    "samples": [
+      {
+        "frame": 1,
+        "wall_ms": 105.99979199999996,
+        "pressure_ms": 42.008576,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0007827506633475423
+      },
+      {
+        "frame": 2,
+        "wall_ms": 75.92541699999992,
+        "pressure_ms": 46.923776,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0008876548381522298
+      },
+      {
+        "frame": 3,
+        "wall_ms": 73.68662500000005,
+        "pressure_ms": 48.693248,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0009321816614829004
+      },
+      {
+        "frame": 4,
+        "wall_ms": 71.41874999999982,
+        "pressure_ms": 46.399488,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0008930966723710299
+      },
+      {
+        "frame": 5,
+        "wall_ms": 67.93837499999995,
+        "pressure_ms": 43.974656,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0008913175552152097
+      },
+      {
+        "frame": 6,
+        "wall_ms": 100.40754100000004,
+        "pressure_ms": 51.838976,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0008477850933559239
+      },
+      {
+        "frame": 7,
+        "wall_ms": 67.20741599999997,
+        "pressure_ms": 42.991616,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0009458423010073602
+      },
+      {
+        "frame": 8,
+        "wall_ms": 73.70229200000017,
+        "pressure_ms": 48.693248,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0008379976497963071
+      },
+      {
+        "frame": 9,
+        "wall_ms": 71.5915,
+        "pressure_ms": 46.661632,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0008388686692342162
+      },
+      {
+        "frame": 10,
+        "wall_ms": 72.95241699999997,
+        "pressure_ms": 47.448064,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0009317389340139925
+      },
+      {
+        "frame": 11,
+        "wall_ms": 76.82391600000005,
+        "pressure_ms": 52.822016,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0008982627186924219
+      },
+      {
+        "frame": 12,
+        "wall_ms": 76.21612499999992,
+        "pressure_ms": 52.75648,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.000984048005193472
+      }
+    ]
+  },
+  {
+    "case": "rest",
+    "size": 64,
+    "tolerance": 0.001,
+    "medianWall_ms": 62.91224999999986,
+    "medianPressure_ms": 38.862848,
+    "meanPressure_ms": 38.41865955555556,
+    "stats": {
+      "nx": 64,
+      "ny": 64,
+      "nz": 64,
+      "storedNy": 64,
+      "cellCount": 262144,
+      "equivalentUniformCells": 262144,
+      "compressionRatio": 1,
+      "activeCompressionRatio": 1,
+      "activeSampleCount": 262144,
+      "regularLayers": 64,
+      "maximumNeighborDelta": 0,
+      "gridKind": "uniform",
+      "cellSize_m": 0.0125,
+      "pressureIterations": 0,
+      "pressureSolver": "CM11a dense LCP multigrid (3 Full-Cycles + 4 V-Cycles, 6/6 pre/post PRBGS)",
+      "allocatedBytes": 120228244,
+      "quality": "balanced",
+      "submittedTime_s": 0.39999999999999997,
+      "simulatedTime_s": 0.39999999999999997,
+      "completedTime_s": 0.39999999999999997,
+      "simulationLag_s": 5.551115123125783e-17,
+      "encodedSteps": 12,
+      "maximumTallCellHeight": 0,
+      "volumeControl": true,
+      "hostFluidAuthority": "gpu-resident",
+      "hostSimulationSizedWorkItems": 0,
+      "hostSchedulingUsesReadback": false,
+      "initialVolumeCellSum": 131072,
+      "volumeCellSum": 131072,
+      "representedVolumeCellSum": 131072,
+      "volumeDrift": 0,
+      "representedVolumeDrift": 0,
+      "rawVolumeDrift": 0,
+      "volumeTelemetrySource": "dense-volume",
+      "maxSpeed_m_s": 5.177388175070519e-06,
+      "front_m": 0.4,
+      "frontTelemetrySource": "dense-volume",
+      "uniformPipelineFacts": {
+        "extrapolationFrontSweeps": 16,
+        "extrapolationHierarchyLevels": 6,
+        "extrapolationPassesPerInvocation": 48,
+        "multigridLevels": 6,
+        "multigridPasses": {
+          "setup": 19,
+          "full-cycle": 1392,
+          "v-cycle": 596,
+          "finish": 1
+        },
+        "multigridPassesTotal": 2008,
+        "pressureSchedule": {
+          "residualTolerance": 0.001,
+          "fullCycles": 3,
+          "vCycles": 4,
+          "preSweeps": 6,
+          "postSweeps": 6
+        }
+      },
+      "lastDt_s": 0.03333333333333333,
+      "lastSubsteps": 1,
+      "referenceLiquidVolume_cells": 131072,
+      "uniformUnplaceableSolidExcess_cells": 0,
+      "uniformCM11aResidualInfinity": 8.534254448022693e-05,
+      "uniformCM11aConverged": true,
+      "uniformCM11aCoarseIterations": 14,
+      "uniformCM11aCapFailure": false,
+      "uniformCM11aFailingCoarseInvocation": 0,
+      "uniformCM11aCoarseMaxAbsRhs": 0,
+      "uniformCM11aCoarseMaxDiagonalPressure": 0,
+      "uniformCM11aCoarseMaxAbsPressure": 0,
+      "uniformCM11aCoarseProjectedGapPressure": 0,
+      "uniformCM11aCoarseNormalizedProjectedResidual": 0,
+      "uniformCM11aFineResidualInfinity": 0.0004226572054903954,
+      "uniformCM11aFineProjectedGapPressure": 0.00038677745033055544,
+      "uniformCM11aCoarseActiveRows": 0,
+      "uniformCM11aCoarseFreeRows": 0,
+      "uniformCM11aCoarseWorstRow": 0,
+      "uniformCM11aCoarseWorstRowActive": false,
+      "uniformCM11aCoarseWorstRowHalo": false,
+      "uniformFIMTerminalActiveFaces": 0,
+      "uniformFIMConverged": true,
+      "uniformFIMExecutedPasses": 4,
+      "uniformActiveRegionMinimum": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "uniformActiveRegionMaximum": {
+        "x": 64,
+        "y": 64,
+        "z": 64
+      },
+      "uniformActiveRegionCellCount": 262144,
+      "uniformActiveRegionFraction": 1
+    },
+    "samples": [
+      {
+        "frame": 1,
+        "wall_ms": 58.8744999999999,
+        "pressure_ms": 30.80192,
+        "fullCycles": 3,
+        "vCycles": 0,
+        "residual": 0.00043055423884652555
+      },
+      {
+        "frame": 2,
+        "wall_ms": 64.92516599999999,
+        "pressure_ms": 37.421056,
+        "fullCycles": 3,
+        "vCycles": 0,
+        "residual": 0.00045537829282693565
+      },
+      {
+        "frame": 3,
+        "wall_ms": 66.86879199999976,
+        "pressure_ms": 40.173568,
+        "fullCycles": 3,
+        "vCycles": 0,
+        "residual": 0.00047453754814341664
+      },
+      {
+        "frame": 4,
+        "wall_ms": 67.57274999999981,
+        "pressure_ms": 40.173568,
+        "fullCycles": 3,
+        "vCycles": 0,
+        "residual": 0.00041534638148732483
+      },
+      {
+        "frame": 5,
+        "wall_ms": 62.407624999999825,
+        "pressure_ms": 37.814272,
+        "fullCycles": 3,
+        "vCycles": 0,
+        "residual": 0.00044113610056228936
+      },
+      {
+        "frame": 6,
+        "wall_ms": 62.01283300000023,
+        "pressure_ms": 36.175872,
+        "fullCycles": 3,
+        "vCycles": 0,
+        "residual": 0.0003996858431492001
+      },
+      {
+        "frame": 7,
+        "wall_ms": 59.54349999999977,
+        "pressure_ms": 35.192832,
+        "fullCycles": 3,
+        "vCycles": 0,
+        "residual": 0.0004687411419581622
+      },
+      {
+        "frame": 8,
+        "wall_ms": 63.649417000000085,
+        "pressure_ms": 39.845888,
+        "fullCycles": 3,
+        "vCycles": 0,
+        "residual": 0.00047518263454549015
+      },
+      {
+        "frame": 9,
+        "wall_ms": 63.48762500000021,
+        "pressure_ms": 38.600704,
+        "fullCycles": 3,
+        "vCycles": 0,
+        "residual": 0.00041356432484462857
+      },
+      {
+        "frame": 10,
+        "wall_ms": 62.69137499999988,
+        "pressure_ms": 39.256064,
+        "fullCycles": 3,
+        "vCycles": 0,
+        "residual": 0.0004436961899045855
+      },
+      {
+        "frame": 11,
+        "wall_ms": 62.91224999999986,
+        "pressure_ms": 38.862848,
+        "fullCycles": 3,
+        "vCycles": 0,
+        "residual": 0.00042864124407060444
+      },
+      {
+        "frame": 12,
+        "wall_ms": 63.594666999999845,
+        "pressure_ms": 39.845888,
+        "fullCycles": 3,
+        "vCycles": 0,
+        "residual": 0.0004226572054903954
+      }
+    ]
+  },
+  {
+    "case": "rest",
+    "size": 64,
+    "tolerance": 0.001,
+    "medianWall_ms": 62.059957999999824,
+    "medianPressure_ms": 38.141952,
+    "meanPressure_ms": 38.89925688888889,
+    "stats": {
+      "nx": 64,
+      "ny": 64,
+      "nz": 64,
+      "storedNy": 64,
+      "cellCount": 262144,
+      "equivalentUniformCells": 262144,
+      "compressionRatio": 1,
+      "activeCompressionRatio": 1,
+      "activeSampleCount": 262144,
+      "regularLayers": 64,
+      "maximumNeighborDelta": 0,
+      "gridKind": "uniform",
+      "cellSize_m": 0.0125,
+      "pressureIterations": 0,
+      "pressureSolver": "CM11a dense LCP multigrid (3 Full-Cycles + 4 V-Cycles, 6/6 pre/post PRBGS)",
+      "allocatedBytes": 120228244,
+      "quality": "balanced",
+      "submittedTime_s": 0.39999999999999997,
+      "simulatedTime_s": 0.39999999999999997,
+      "completedTime_s": 0.39999999999999997,
+      "simulationLag_s": 5.551115123125783e-17,
+      "encodedSteps": 12,
+      "maximumTallCellHeight": 0,
+      "volumeControl": true,
+      "hostFluidAuthority": "gpu-resident",
+      "hostSimulationSizedWorkItems": 0,
+      "hostSchedulingUsesReadback": false,
+      "initialVolumeCellSum": 131072,
+      "volumeCellSum": 131072,
+      "representedVolumeCellSum": 131072,
+      "volumeDrift": 0,
+      "representedVolumeDrift": 0,
+      "rawVolumeDrift": 0,
+      "volumeTelemetrySource": "dense-volume",
+      "maxSpeed_m_s": 5.177388175070519e-06,
+      "front_m": 0.4,
+      "frontTelemetrySource": "dense-volume",
+      "uniformPipelineFacts": {
+        "extrapolationFrontSweeps": 16,
+        "extrapolationHierarchyLevels": 6,
+        "extrapolationPassesPerInvocation": 48,
+        "multigridLevels": 6,
+        "multigridPasses": {
+          "setup": 19,
+          "full-cycle": 1392,
+          "v-cycle": 596,
+          "finish": 1
+        },
+        "multigridPassesTotal": 2008,
+        "pressureSchedule": {
+          "residualTolerance": 0.001,
+          "fullCycles": 3,
+          "vCycles": 4,
+          "preSweeps": 6,
+          "postSweeps": 6
+        }
+      },
+      "lastDt_s": 0.03333333333333333,
+      "lastSubsteps": 1,
+      "referenceLiquidVolume_cells": 131072,
+      "uniformUnplaceableSolidExcess_cells": 0,
+      "uniformCM11aResidualInfinity": 8.534254448022693e-05,
+      "uniformCM11aConverged": true,
+      "uniformCM11aCoarseIterations": 14,
+      "uniformCM11aCapFailure": false,
+      "uniformCM11aFailingCoarseInvocation": 0,
+      "uniformCM11aCoarseMaxAbsRhs": 0,
+      "uniformCM11aCoarseMaxDiagonalPressure": 0,
+      "uniformCM11aCoarseMaxAbsPressure": 0,
+      "uniformCM11aCoarseProjectedGapPressure": 0,
+      "uniformCM11aCoarseNormalizedProjectedResidual": 0,
+      "uniformCM11aFineResidualInfinity": 0.0004226572054903954,
+      "uniformCM11aFineProjectedGapPressure": 0.00038677745033055544,
+      "uniformCM11aCoarseActiveRows": 0,
+      "uniformCM11aCoarseFreeRows": 0,
+      "uniformCM11aCoarseWorstRow": 0,
+      "uniformCM11aCoarseWorstRowActive": false,
+      "uniformCM11aCoarseWorstRowHalo": false,
+      "uniformFIMTerminalActiveFaces": 0,
+      "uniformFIMConverged": true,
+      "uniformFIMExecutedPasses": 4,
+      "uniformActiveRegionMinimum": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "uniformActiveRegionMaximum": {
+        "x": 64,
+        "y": 64,
+        "z": 64
+      },
+      "uniformActiveRegionCellCount": 262144,
+      "uniformActiveRegionFraction": 1
+    },
+    "samples": [
+      {
+        "frame": 1,
+        "wall_ms": 65.76749999999993,
+        "pressure_ms": 36.241408,
+        "fullCycles": 3,
+        "vCycles": 0,
+        "residual": 0.00043055423884652555
+      },
+      {
+        "frame": 2,
+        "wall_ms": 60.77445799999987,
+        "pressure_ms": 36.962304,
+        "fullCycles": 3,
+        "vCycles": 0,
+        "residual": 0.00045537829282693565
+      },
+      {
+        "frame": 3,
+        "wall_ms": 57.76108299999987,
+        "pressure_ms": 34.07872,
+        "fullCycles": 3,
+        "vCycles": 0,
+        "residual": 0.00047453754814341664
+      },
+      {
+        "frame": 4,
+        "wall_ms": 64.71574999999984,
+        "pressure_ms": 39.845888,
+        "fullCycles": 3,
+        "vCycles": 0,
+        "residual": 0.00041534638148732483
+      },
+      {
+        "frame": 5,
+        "wall_ms": 60.078791999999794,
+        "pressure_ms": 33.09568,
+        "fullCycles": 3,
+        "vCycles": 0,
+        "residual": 0.00044113610056228936
+      },
+      {
+        "frame": 6,
+        "wall_ms": 69.64470799999981,
+        "pressure_ms": 44.630016,
+        "fullCycles": 3,
+        "vCycles": 0,
+        "residual": 0.0003996858431492001
+      },
+      {
+        "frame": 7,
+        "wall_ms": 60.27483399999983,
+        "pressure_ms": 36.306944,
+        "fullCycles": 3,
+        "vCycles": 0,
+        "residual": 0.0004687411419581622
+      },
+      {
+        "frame": 8,
+        "wall_ms": 69.91658299999972,
+        "pressure_ms": 45.678592,
+        "fullCycles": 3,
+        "vCycles": 0,
+        "residual": 0.00047518263454549015
+      },
+      {
+        "frame": 9,
+        "wall_ms": 67.17995800000017,
+        "pressure_ms": 42.5984,
+        "fullCycles": 3,
+        "vCycles": 0,
+        "residual": 0.00041356432484462857
+      },
+      {
+        "frame": 10,
+        "wall_ms": 57.363000000000284,
+        "pressure_ms": 34.340864,
+        "fullCycles": 3,
+        "vCycles": 0,
+        "residual": 0.0004436961899045855
+      },
+      {
+        "frame": 11,
+        "wall_ms": 62.059957999999824,
+        "pressure_ms": 38.141952,
+        "fullCycles": 3,
+        "vCycles": 0,
+        "residual": 0.00042864124407060444
+      },
+      {
+        "frame": 12,
+        "wall_ms": 61.922334000000774,
+        "pressure_ms": 35.454976,
+        "fullCycles": 3,
+        "vCycles": 0,
+        "residual": 0.0004226572054903954
+      }
+    ]
+  },
+  {
+    "case": "rest",
+    "size": 64,
+    "tolerance": 0,
+    "medianWall_ms": 72.65095800000017,
+    "medianPressure_ms": 48.627712,
+    "meanPressure_ms": 48.43110399999999,
+    "stats": {
+      "nx": 64,
+      "ny": 64,
+      "nz": 64,
+      "storedNy": 64,
+      "cellCount": 262144,
+      "equivalentUniformCells": 262144,
+      "compressionRatio": 1,
+      "activeCompressionRatio": 1,
+      "activeSampleCount": 262144,
+      "regularLayers": 64,
+      "maximumNeighborDelta": 0,
+      "gridKind": "uniform",
+      "cellSize_m": 0.0125,
+      "pressureIterations": 0,
+      "pressureSolver": "CM11a dense LCP multigrid (3 Full-Cycles + 4 V-Cycles, 6/6 pre/post PRBGS)",
+      "allocatedBytes": 120228244,
+      "quality": "balanced",
+      "submittedTime_s": 0.39999999999999997,
+      "simulatedTime_s": 0.39999999999999997,
+      "completedTime_s": 0.39999999999999997,
+      "simulationLag_s": 5.551115123125783e-17,
+      "encodedSteps": 12,
+      "maximumTallCellHeight": 0,
+      "volumeControl": true,
+      "hostFluidAuthority": "gpu-resident",
+      "hostSimulationSizedWorkItems": 0,
+      "hostSchedulingUsesReadback": false,
+      "initialVolumeCellSum": 131072,
+      "volumeCellSum": 131072,
+      "representedVolumeCellSum": 131072,
+      "volumeDrift": 0,
+      "representedVolumeDrift": 0,
+      "rawVolumeDrift": 0,
+      "volumeTelemetrySource": "dense-volume",
+      "maxSpeed_m_s": 7.668862053833436e-06,
+      "front_m": 0.4,
+      "frontTelemetrySource": "dense-volume",
+      "uniformPipelineFacts": {
+        "extrapolationFrontSweeps": 16,
+        "extrapolationHierarchyLevels": 6,
+        "extrapolationPassesPerInvocation": 48,
+        "multigridLevels": 6,
+        "multigridPasses": {
+          "setup": 19,
+          "full-cycle": 1392,
+          "v-cycle": 596,
+          "finish": 1
+        },
+        "multigridPassesTotal": 2008,
+        "pressureSchedule": {
+          "residualTolerance": 0,
+          "fullCycles": 3,
+          "vCycles": 4,
+          "preSweeps": 6,
+          "postSweeps": 6
+        }
+      },
+      "lastDt_s": 0.03333333333333333,
+      "lastSubsteps": 1,
+      "referenceLiquidVolume_cells": 131072,
+      "uniformUnplaceableSolidExcess_cells": 0,
+      "uniformCM11aResidualInfinity": 8.538513066014275e-05,
+      "uniformCM11aConverged": true,
+      "uniformCM11aCoarseIterations": 14,
+      "uniformCM11aCapFailure": false,
+      "uniformCM11aFailingCoarseInvocation": 0,
+      "uniformCM11aCoarseMaxAbsRhs": 0,
+      "uniformCM11aCoarseMaxDiagonalPressure": 0,
+      "uniformCM11aCoarseMaxAbsPressure": 0,
+      "uniformCM11aCoarseProjectedGapPressure": 0,
+      "uniformCM11aCoarseNormalizedProjectedResidual": 0,
+      "uniformCM11aFineResidualInfinity": 0.0008431210881099105,
+      "uniformCM11aFineProjectedGapPressure": 0.0006575027946382761,
+      "uniformCM11aCoarseActiveRows": 0,
+      "uniformCM11aCoarseFreeRows": 0,
+      "uniformCM11aCoarseWorstRow": 0,
+      "uniformCM11aCoarseWorstRowActive": false,
+      "uniformCM11aCoarseWorstRowHalo": false,
+      "uniformFIMTerminalActiveFaces": 0,
+      "uniformFIMConverged": true,
+      "uniformFIMExecutedPasses": 4,
+      "uniformActiveRegionMinimum": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "uniformActiveRegionMaximum": {
+        "x": 64,
+        "y": 64,
+        "z": 64
+      },
+      "uniformActiveRegionCellCount": 262144,
+      "uniformActiveRegionFraction": 1
+    },
+    "samples": [
+      {
+        "frame": 1,
+        "wall_ms": 70.56070799999998,
+        "pressure_ms": 42.139648,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0007827506633475423
+      },
+      {
+        "frame": 2,
+        "wall_ms": 76.04891700000007,
+        "pressure_ms": 51.642368,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0008876548381522298
+      },
+      {
+        "frame": 3,
+        "wall_ms": 70.39274999999998,
+        "pressure_ms": 46.596096,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0009321816614829004
+      },
+      {
+        "frame": 4,
+        "wall_ms": 72.65095800000017,
+        "pressure_ms": 49.020928,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0008882041438482702
+      },
+      {
+        "frame": 5,
+        "wall_ms": 66.92054199999984,
+        "pressure_ms": 42.991616,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.000941908045206219
+      },
+      {
+        "frame": 6,
+        "wall_ms": 68.20491700000002,
+        "pressure_ms": 44.89216,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0008874471532180905
+      },
+      {
+        "frame": 7,
+        "wall_ms": 78.49362500000007,
+        "pressure_ms": 54.198272,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.000932864670176059
+      },
+      {
+        "frame": 8,
+        "wall_ms": 72.63370799999939,
+        "pressure_ms": 48.955392,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0009916775161400437
+      },
+      {
+        "frame": 9,
+        "wall_ms": 73.78616599999987,
+        "pressure_ms": 47.382528,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0010432630078867078
+      },
+      {
+        "frame": 10,
+        "wall_ms": 72.93516600000021,
+        "pressure_ms": 47.84128,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0010385162895545363
+      },
+      {
+        "frame": 11,
+        "wall_ms": 75.52804199999991,
+        "pressure_ms": 51.970048,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0008973161457106471
+      },
+      {
+        "frame": 12,
+        "wall_ms": 71.71762500000023,
+        "pressure_ms": 48.627712,
+        "fullCycles": 3,
+        "vCycles": 4,
+        "residual": 0.0008431210881099105
+      }
+    ]
+  }
+]

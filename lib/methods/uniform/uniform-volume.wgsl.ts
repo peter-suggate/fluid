@@ -6,6 +6,16 @@ export const UNIFORM_VOLUME_ENTRIES = [
   "uvPrepareSharpen", "uvProposeSharpen", "uvLimitSharpen", "uvCommitSharpen", "uvPublish", "uvBeginLiquidBalance", "uvBalanceLiquidRows",
   "uvBalanceLiquidDonors", "uvFinishLiquidBalance",
 ] as const;
+/** The four Sec. 3.5 sweeps that exist in a dense and a 4h work-map variant. */
+export const UNIFORM_VOLUME_SHARPEN_ENTRIES = [
+  "uvPrepareSharpen", "uvProposeSharpen", "uvLimitSharpen", "uvCommitSharpen",
+] as const;
+export const UNIFORM_VOLUME_TILE_CLASSIFY_ENTRY = "uvClassifySharpenTiles";
+/** Pipeline-overridable constant selecting the tiled sharpening variant. */
+export const UNIFORM_VOLUME_TILE_WORK_OVERRIDE = "UV_SHARPEN_TILE_WORK";
+/** Words 2N+0..6 of the third conditioning plane stay liquid-balance owned. */
+export const UNIFORM_VOLUME_SHARPEN_TILE_COUNT_WORD = 7;
+export const UNIFORM_VOLUME_SHARPEN_TILE_MAP_WORD = 8;
 export const UNIFORM_VOLUME_EDGE_BYTES = 80;
 export const uniformVolumeWGSL = /* wgsl */ `
 ${geometricPlaneBoxWGSL}
@@ -160,9 +170,18 @@ fn uvNormalizeDonors(@builtin(global_invocation_id)gid:vec3u){
     uvEdges[i].weight[k]/=max(sum,1e-20);}
 }
 // Same liquid-only receiver cap / donor normalization as adaptive-volume.
-// The GPU convergence flag makes converged rounds no-ops without a readback.
+// A uniform GPU flag skips corrective work after convergence. Dispatch counts
+// are also published for the benchmark-only indirect comparison.
+// Words 2N+0..6 of the third conditioning plane are this stage's: the flag,
+// the running maximum error, three indirect dispatch dimensions, the executed
+// round count and the last error. Word 2N+7 and everything above it belong to
+// the 4h sharpening map, which runs after balancing has finished.
 @compute @workgroup_size(1)
-fn uvBeginLiquidBalance(){atomicStore(&sharpenDeposits[2u*cellCount()],1);atomicStore(&sharpenDeposits[2u*cellCount()+1u],0);}
+fn uvBeginLiquidBalance(){let base=2u*cellCount();atomicStore(&sharpenDeposits[base],1);
+  atomicStore(&sharpenDeposits[base+1u],0);
+  for(var axis=0u;axis<3u;axis++){atomicStore(&sharpenDeposits[base+2u+axis],(dims()[axis]+3)/4);}
+  atomicStore(&sharpenDeposits[base+5u],0);atomicStore(&sharpenDeposits[base+6u],0);
+}
 @compute @workgroup_size(4,4,4)
 fn uvBalanceLiquidRows(@builtin(global_invocation_id)gid:vec3u){
   let id=vec3i(gid);if(!valid(id)||atomicLoad(&sharpenDeposits[2u*cellCount()])==0){return;}
@@ -170,7 +189,7 @@ fn uvBalanceLiquidRows(@builtin(global_invocation_id)gid:vec3u){
   for(var k=0u;k<9u;k++){amount+=uvEdges[i].weight[k]*volume(uvCell(uvEdges[i].donor[k]));}
   let capacity=uvOpen(id);let excess=max(0.0,amount-capacity)/max(capacity,1e-20);
   atomicMax(&sharpenDeposits[2u*cellCount()+1u],bitcast<i32>(excess));
-  let scale=select(1.0,capacity/max(amount,1e-20),excess>1e-6);
+  let scale=select(1.0,capacity/max(amount,1e-20),excess>params.dropExtent.w);
   for(var k=0u;k<9u;k++){uvEdges[i].weight[k]*=scale;uvAddDonor(uvEdges[i].donor[k],uvEdges[i].weight[k]);}
 }
 @compute @workgroup_size(4,4,4)
@@ -182,8 +201,14 @@ fn uvBalanceLiquidDonors(@builtin(global_invocation_id)gid:vec3u){
 }
 @compute @workgroup_size(1)
 fn uvFinishLiquidBalance(){
-  if(bitcast<f32>(atomicLoad(&sharpenDeposits[2u*cellCount()+1u]))<=1e-6){atomicStore(&sharpenDeposits[2u*cellCount()],0);}
-  atomicStore(&sharpenDeposits[2u*cellCount()+1u],0);
+  let base=2u*cellCount();if(atomicLoad(&sharpenDeposits[base])==0){return;}
+  let error=atomicLoad(&sharpenDeposits[base+1u]);
+  atomicStore(&sharpenDeposits[base+6u],error);
+  if(bitcast<f32>(error)<=params.dropExtent.w){
+    atomicStore(&sharpenDeposits[base],0);
+    for(var axis=0u;axis<3u;axis++){atomicStore(&sharpenDeposits[base+2u+axis],0);}
+  }else{atomicAdd(&sharpenDeposits[base+5u],1);}
+  atomicStore(&sharpenDeposits[base+1u],0);
 }
 @compute @workgroup_size(4,4,4)
 fn uvGather(@builtin(global_invocation_id)gid:vec3u){
@@ -209,8 +234,46 @@ fn uvTarget(id:vec3i)->f32{
 }
 // After transport the fixed stencil arena is scratch for face proposals and
 // cell budgets: three positive-face fluxes, surplus, need, phi, and two limits.
+// 4h work map for the eight sharpening sweeps. Phi is fixed throughout them, so
+// one classification pass serves the whole stage. A tile with no cell in the
+// admission band has identically zero need and surplus, even if it contains
+// nonzero V; every flux touching it is therefore zero. Prepare/propose/limit
+// skip such a tile, neighbours read its fluxes as zero, and commit copies its V
+// across the ping-pong pair. Never treat stale transport-edge scratch as a
+// sharpening flux. The map reuses the third conditioning plane, which liquid
+// balancing has finished with, behind that plane's eight-word control header.
+// The dense control is the same module with the override left false: the
+// lookups fold away and the numerics are bit-identical.
+override UV_SHARPEN_TILE_WORK:bool=false;
+const UV_SHARPEN_TILE_MAP_WORD=8u;
+const UV_SHARPEN_TILE_COUNT_WORD=7u;
+fn uvSharpenTileIndex(id:vec3i)->u32{
+  let d=(vec3u(dims())+vec3u(3))/4u;let t=vec3u(id)/4u;
+  return 2u*cellCount()+UV_SHARPEN_TILE_MAP_WORD+t.x+d.x*(t.y+d.y*t.z);
+}
+fn uvSharpenTileActive(id:vec3i)->bool{
+  if(!UV_SHARPEN_TILE_WORK){return true;}
+  return atomicLoad(&sharpenDeposits[uvSharpenTileIndex(id)])!=0;
+}
+var<workgroup> uvTileAdmission:atomic<u32>;
+@compute @workgroup_size(4,4,4)
+fn uvClassifySharpenTiles(@builtin(global_invocation_id)gid:vec3u,
+  @builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)tile:vec3u){
+  if(lane==0u){atomicStore(&uvTileAdmission,0u);}workgroupBarrier();
+  if(valid(vec3i(gid))){
+    let phi=uvPhi(vec3f(gid)+vec3f(0.5));
+    let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
+    // Negated comparison conservatively retains non-finite input as active.
+    if(!(abs(phi)>=params.tuning.y*h)){atomicStore(&uvTileAdmission,1u);}
+  }
+  workgroupBarrier();
+  if(lane==0u){let admission=atomicLoad(&uvTileAdmission);
+    atomicStore(&sharpenDeposits[uvSharpenTileIndex(vec3i(tile*4u))],i32(admission));
+    if(admission!=0u){atomicAdd(&sharpenDeposits[2u*cellCount()+UV_SHARPEN_TILE_COUNT_WORD],1);}}
+}
 @compute @workgroup_size(4,4,4)
 fn uvPrepareSharpen(@builtin(global_invocation_id)gid:vec3u){
+  if(!uvSharpenTileActive(vec3i(gid))){return;}
   let id=vec3i(gid);if(!valid(id)){return;}let i=linearIndex(id);
   let phi=uvPhi(vec3f(id)+vec3f(0.5));let desired=textureLoad(gammaIn,id,0).x;
   let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
@@ -223,11 +286,12 @@ fn uvPrepareSharpen(@builtin(global_invocation_id)gid:vec3u){
 }
 @compute @workgroup_size(4,4,4)
 fn uvProposeSharpen(@builtin(global_invocation_id)gid:vec3u){
+  if(!uvSharpenTileActive(vec3i(gid))){return;}
   let id=vec3i(gid);if(!valid(id)){return;}let i=linearIndex(id);
   let phiA=uvEdges[i].weight[5];
   for(var axis=0u;axis<3u;axis++){
     uvEdges[i].weight[axis]=0.0;var e=vec3i(0);e[axis]=1;let q=id+e;
-    if(!valid(q)||uvOpen(id)<0.99999||uvOpen(q)<0.99999||faceOpenFraction(id,axis)<0.99999){continue;}
+    if(!valid(q)||!uvSharpenTileActive(q)||uvOpen(id)<0.99999||uvOpen(q)<0.99999||faceOpenFraction(id,axis)<0.99999){continue;}
     let j=linearIndex(q);let phiB=uvEdges[j].weight[5];
     let middle=uvPhi(vec3f(id)+vec3f(0.5)+0.5*vec3f(e));let epsilon=1e-6;
     let inwardA=phiA>=0.0&&phiB<phiA-epsilon&&middle<=phiA+epsilon&&middle>=phiB-epsilon;
@@ -241,20 +305,25 @@ fn uvProposeSharpen(@builtin(global_invocation_id)gid:vec3u){
 }
 @compute @workgroup_size(4,4,4)
 fn uvLimitSharpen(@builtin(global_invocation_id)gid:vec3u){
+  if(!uvSharpenTileActive(vec3i(gid))){return;}
   let id=vec3i(gid);if(!valid(id)){return;}let i=linearIndex(id);var outgoing=0.0;var incoming=0.0;
   for(var axis=0u;axis<3u;axis++){var e=vec3i(0);e[axis]=1;
     let positive=uvEdges[i].weight[axis];var negative=0.0;
-    if(valid(id-e)){negative=uvEdges[linearIndex(id-e)].weight[axis];}
+    if(valid(id-e)&&uvSharpenTileActive(id-e)){negative=uvEdges[linearIndex(id-e)].weight[axis];}
     outgoing+=max(positive,0.0)+max(-negative,0.0);incoming+=max(-positive,0.0)+max(negative,0.0);}
   uvEdges[i].padding=vec2f(min(1.0,uvEdges[i].weight[3]/max(outgoing,1e-20)),
     min(1.0,uvEdges[i].weight[4]/max(incoming,1e-20)));
 }
 fn uvLimitedFlux(i:u32,j:u32,axis:u32)->f32{
+  if(!uvSharpenTileActive(uvCell(i))||!uvSharpenTileActive(uvCell(j))){return 0.0;}
   let raw=uvEdges[i].weight[axis];let a=uvEdges[i].padding;let b=uvEdges[j].padding;
   return raw*select(min(a.y,b.x),min(a.x,b.y),raw>=0.0);
 }
 @compute @workgroup_size(4,4,4)
 fn uvCommitSharpen(@builtin(global_invocation_id)gid:vec3u){
+  if(valid(vec3i(gid))&&!uvSharpenTileActive(vec3i(gid))){
+    textureStore(volumeOut,vec3i(gid),vec4f(volume(vec3i(gid))));return;
+  }
   let id=vec3i(gid);if(!valid(id)){return;}let i=linearIndex(id);var terms:array<f32,6>;
   for(var axis=0u;axis<3u;axis++){var e=vec3i(0);e[axis]=1;terms[2u*axis]=0.0;terms[2u*axis+1u]=0.0;
     if(valid(id+e)){terms[2u*axis]=-uvLimitedFlux(i,linearIndex(id+e),axis);}

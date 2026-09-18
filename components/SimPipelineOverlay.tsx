@@ -298,12 +298,13 @@ export function SimPipelineOverlay({ lenses: override }: {
           return <PipeChoice key={key} label={control.label}
             value={String(values[control.param] ?? "")}
             options={control.options.map((option) => ({ ...option }))}
+            disabled={control.enabled ? !control.enabled(context) : false}
             onChange={(value) => simulation.setMethodParam(methodId, control.param, value, session.id)} />;
         case "param-range":
           return <PipeRange key={key} label={control.label} unit={control.unit}
             value={Number(values[control.param] ?? control.min)}
             min={control.min} max={control.max} step={control.step} digits={control.digits ?? 0}
-            hint={control.hint}
+            hint={control.hint} editable={control.editable}
             disabled={control.enabled ? !control.enabled(context) : false}
             onChange={(value) => simulation.setMethodParam(methodId, control.param, value, session.id)} />;
         case "readout":

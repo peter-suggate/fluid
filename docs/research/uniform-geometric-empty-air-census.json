@@ -1,0 +1,351 @@
+{
+  "notes": [
+    "Initial phi only; includes liquid interiors and cells with any vertex phi <= band * max(cell size).",
+    "Ignores solid clipping, independent V, dynamic sources, characteristic reach, normalization dependencies and velocity hierarchy dependencies.",
+    "No band is claimed sufficient. Counts are geometry sensitivity only; no GPU timing or peak residency measurement.",
+    "Major payload uses the host allocation plan plus pressure, extension hierarchy, phi and stencils. Excludes small buffers, terrain, rigid resources, driver padding and audits; not an exact VRAM measurement.",
+    "Memory includes four velocity fields and two transport fields even under semi-Lagrangian, matching current constructor allocation."
+  ],
+  "memory": [
+    {
+      "n": 32,
+      "stencilMiB": 2.5,
+      "majorPayloadMiB": 15.30716323852539
+    },
+    {
+      "n": 64,
+      "stencilMiB": 20,
+      "majorPayloadMiB": 115.64011001586914
+    },
+    {
+      "n": 128,
+      "stencilMiB": 160,
+      "majorPayloadMiB": 899.2428321838379
+    },
+    {
+      "n": 256,
+      "stencilMiB": 1280,
+      "majorPayloadMiB": 7093.197605133057
+    }
+  ],
+  "results": [
+    {
+      "id": "minimal-power-dam-break-32",
+      "dims": [
+        32,
+        32,
+        32
+      ],
+      "bands": [
+        {
+          "bandCells": 0,
+          "geometricCells": 13230,
+          "tiles": [
+            {
+              "B": 4,
+              "active": 288,
+              "total": 512,
+              "activePercent": 56.25
+            },
+            {
+              "B": 8,
+              "active": 36,
+              "total": 64,
+              "activePercent": 56.25
+            },
+            {
+              "B": 16,
+              "active": 8,
+              "total": 8,
+              "activePercent": 100
+            }
+          ]
+        },
+        {
+          "bandCells": 4,
+          "geometricCells": 18400,
+          "tiles": [
+            {
+              "B": 4,
+              "active": 288,
+              "total": 512,
+              "activePercent": 56.25
+            },
+            {
+              "B": 8,
+              "active": 36,
+              "total": 64,
+              "activePercent": 56.25
+            },
+            {
+              "B": 16,
+              "active": 8,
+              "total": 8,
+              "activePercent": 100
+            }
+          ]
+        },
+        {
+          "bandCells": 8,
+          "geometricCells": 24832,
+          "tiles": [
+            {
+              "B": 4,
+              "active": 392,
+              "total": 512,
+              "activePercent": 76.5625
+            },
+            {
+              "B": 8,
+              "active": 64,
+              "total": 64,
+              "activePercent": 100
+            },
+            {
+              "B": 16,
+              "active": 8,
+              "total": 8,
+              "activePercent": 100
+            }
+          ]
+        },
+        {
+          "bandCells": 16,
+          "geometricCells": 32768,
+          "tiles": [
+            {
+              "B": 4,
+              "active": 512,
+              "total": 512,
+              "activePercent": 100
+            },
+            {
+              "B": 8,
+              "active": 64,
+              "total": 64,
+              "activePercent": 100
+            },
+            {
+              "B": 16,
+              "active": 8,
+              "total": 8,
+              "activePercent": 100
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "minimal-power-dam-break-64",
+      "dims": [
+        64,
+        64,
+        64
+      ],
+      "bands": [
+        {
+          "bandCells": 0,
+          "geometricCells": 99179,
+          "tiles": [
+            {
+              "B": 4,
+              "active": 1815,
+              "total": 4096,
+              "activePercent": 44.3115234375
+            },
+            {
+              "B": 8,
+              "active": 288,
+              "total": 512,
+              "activePercent": 56.25
+            },
+            {
+              "B": 16,
+              "active": 36,
+              "total": 64,
+              "activePercent": 56.25
+            }
+          ]
+        },
+        {
+          "bandCells": 4,
+          "geometricCells": 121816,
+          "tiles": [
+            {
+              "B": 4,
+              "active": 1936,
+              "total": 4096,
+              "activePercent": 47.265625
+            },
+            {
+              "B": 8,
+              "active": 288,
+              "total": 512,
+              "activePercent": 56.25
+            },
+            {
+              "B": 16,
+              "active": 36,
+              "total": 64,
+              "activePercent": 56.25
+            }
+          ]
+        },
+        {
+          "bandCells": 8,
+          "geometricCells": 146845,
+          "tiles": [
+            {
+              "B": 4,
+              "active": 2304,
+              "total": 4096,
+              "activePercent": 56.25
+            },
+            {
+              "B": 8,
+              "active": 288,
+              "total": 512,
+              "activePercent": 56.25
+            },
+            {
+              "B": 16,
+              "active": 36,
+              "total": 64,
+              "activePercent": 56.25
+            }
+          ]
+        },
+        {
+          "bandCells": 16,
+          "geometricCells": 198001,
+          "tiles": [
+            {
+              "B": 4,
+              "active": 3120,
+              "total": 4096,
+              "activePercent": 76.171875
+            },
+            {
+              "B": 8,
+              "active": 392,
+              "total": 512,
+              "activePercent": 76.5625
+            },
+            {
+              "B": 16,
+              "active": 64,
+              "total": 64,
+              "activePercent": 100
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "large-power-dam-break",
+      "dims": [
+        64,
+        20,
+        64
+      ],
+      "bands": [
+        {
+          "bandCells": 0,
+          "geometricCells": 1815,
+          "tiles": [
+            {
+              "B": 4,
+              "active": 36,
+              "total": 1280,
+              "activePercent": 2.8125
+            },
+            {
+              "B": 8,
+              "active": 8,
+              "total": 192,
+              "activePercent": 4.166666666666667
+            },
+            {
+              "B": 16,
+              "active": 1,
+              "total": 32,
+              "activePercent": 3.125
+            }
+          ]
+        },
+        {
+          "bandCells": 4,
+          "geometricCells": 3676,
+          "tiles": [
+            {
+              "B": 4,
+              "active": 80,
+              "total": 1280,
+              "activePercent": 6.25
+            },
+            {
+              "B": 8,
+              "active": 12,
+              "total": 192,
+              "activePercent": 6.25
+            },
+            {
+              "B": 16,
+              "active": 2,
+              "total": 32,
+              "activePercent": 6.25
+            }
+          ]
+        },
+        {
+          "bandCells": 8,
+          "geometricCells": 6281,
+          "tiles": [
+            {
+              "B": 4,
+              "active": 120,
+              "total": 1280,
+              "activePercent": 9.375
+            },
+            {
+              "B": 8,
+              "active": 24,
+              "total": 192,
+              "activePercent": 12.5
+            },
+            {
+              "B": 16,
+              "active": 6,
+              "total": 32,
+              "activePercent": 18.75
+            }
+          ]
+        },
+        {
+          "bandCells": 16,
+          "geometricCells": 12665,
+          "tiles": [
+            {
+              "B": 4,
+              "active": 230,
+              "total": 1280,
+              "activePercent": 17.96875
+            },
+            {
+              "B": 8,
+              "active": 45,
+              "total": 192,
+              "activePercent": 23.4375
+            },
+            {
+              "B": 16,
+              "active": 8,
+              "total": 32,
+              "activePercent": 25
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

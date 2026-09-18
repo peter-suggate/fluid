@@ -38,11 +38,25 @@ struct UniformMGParams {
 // 10..11: final finest projected residual and pressure gap.
 // 12..14: active/free coarsest rows and packed worst-row state for the first
 // failing solve (lane | active<<16 | halo<<17).
-@group(1) @binding(13) var<storage,read_write> mgConvergence:array<atomic<u32>,15>;
+// 15..18: cycle residual norm bits, stopped, completed Full-Cycles, V-Cycles.
+@group(1) @binding(13) var<storage,read_write> mgConvergence:array<atomic<u32>,19>;
 // Per-level immutable (+x,+y,+z) coefficients and liquid flag, baked once
 // after topology and the one-cell phi continuation are complete.
 @group(1) @binding(14) var mgCoefficientsIn: texture_3d<f32>;
 @group(1) @binding(15) var mgCoefficientsOut: texture_storage_3d<rgba32float,write>;
+
+@group(1) @binding(17) var<uniform> mgTolerance:vec4f;
+var<workgroup> mgCycleStopped:u32;
+fn mgSkipCycle()->bool{return mg.levelDims.w!=0u&&atomicLoad(&mgConvergence[15u+1])!=0u;}
+
+@compute @workgroup_size(1)
+fn mgCheckCycleConvergence(){
+  if(mgSkipCycle()){return;}
+  atomicAdd(&mgConvergence[15u+mg.control.z],1u);
+  if(mgTolerance.x>0.0&&bitcast<f32>(atomicLoad(&mgConvergence[15u+0]))<=mgTolerance.x){
+    atomicStore(&mgConvergence[15u+1],1u);
+  }
+}
 
 fn mgValid(p:vec3i,d:vec3u)->bool{return all(p>=vec3i(0))&&all(p<vec3i(d));}
 fn mgClamp(p:vec3i,d:vec3u)->vec3i{return clamp(p,vec3i(0),vec3i(d)-vec3i(1));}
@@ -134,6 +148,7 @@ fn mgApply(id:vec3i)->f32{
 
 @compute @workgroup_size(4,4,4)
 fn mgBuildFinestTopology(@builtin(global_invocation_id) gid:vec3u){
+  if(mgSkipCycle()){return;}
   let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}let simulation=id-vec3i(1);
   let h=mg.spacing.xyz;
   if(mgInterior(id,mg.levelDims.xyz)){
@@ -151,6 +166,7 @@ fn mgBuildFinestTopology(@builtin(global_invocation_id) gid:vec3u){
 
 @compute @workgroup_size(4,4,4)
 fn mgBuildFinestRhs(@builtin(global_invocation_id) gid:vec3u){
+  if(mgSkipCycle()){return;}
   let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}let simulation=id-vec3i(1);
   var rhs=0.0;var minimum=-3.402823e38;
   if(mgInterior(id,mg.levelDims.xyz)){
@@ -168,6 +184,7 @@ fn mgBuildFinestRhs(@builtin(global_invocation_id) gid:vec3u){
 
 @compute @workgroup_size(4,4,4)
 fn mgDownsampleTopology(@builtin(global_invocation_id) gid:vec3u){
+  if(mgSkipCycle()){return;}
   let id=mgActiveId(gid);if(!mgValid(id,mg.coarseDims.xyz)){return;}
   var topologyTerms:array<vec4f,8>;var phiTerms:array<f32,8>;var positiveTerms:array<f32,8>;var positiveFlags:array<f32,8>;var negativeFlags:array<f32,8>;
   for(var corner=0u;corner<8u;corner+=1u){
@@ -191,6 +208,7 @@ fn mgDownsampleTopology(@builtin(global_invocation_id) gid:vec3u){
 
 @compute @workgroup_size(4,4,4)
 fn mgResidual(@builtin(global_invocation_id) gid:vec3u){
+  if(mgSkipCycle()){return;}
   let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
   // CM11a defines b only on pressure unknowns. Air rows have no diagonal in
   // A, so carrying their velocity divergence as b-Ap would inject arbitrary
@@ -204,6 +222,7 @@ fn mgResidual(@builtin(global_invocation_id) gid:vec3u){
 // restriction and prolongation.
 @compute @workgroup_size(4,4,4)
 fn mgRestrictResidual(@builtin(global_invocation_id) gid:vec3u){
+  if(mgSkipCycle()){return;}
   let id=mgActiveId(gid);if(!mgValid(id,mg.coarseDims.xyz)){return;}var terms:array<f32,8>;
   for(var corner=0u;corner<8u;corner+=1u){let o=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));terms[corner]=textureLoad(mgResidualIn,mgFineChild(id,o),0).x;}
   textureStore(mgRhsOut,id,vec4f(mgD4Sum8(terms)/8.0));
@@ -237,42 +256,49 @@ fn mgTrilinearPressure(fineId:vec3i)->f32{
 
 @compute @workgroup_size(4,4,4)
 fn mgProlongateAdd(@builtin(global_invocation_id) gid:vec3u){
+  if(mgSkipCycle()){return;}
   let id=mgActiveId(gid);if(!mgValid(id,mg.coarseDims.xyz)){return;}
   textureStore(mgPressureOut,id,vec4f(textureLoad(mgResidualIn,id,0).x+mgTrilinearPressure(id)));
 }
 
 @compute @workgroup_size(4,4,4)
 fn mgProlongateAssign(@builtin(global_invocation_id) gid:vec3u){
+  if(mgSkipCycle()){return;}
   let id=mgActiveId(gid);if(!mgValid(id,mg.coarseDims.xyz)){return;}
   textureStore(mgPressureOut,id,vec4f(mgTrilinearPressure(id)));
 }
 
 @compute @workgroup_size(4,4,4)
 fn mgCopyPressure(@builtin(global_invocation_id) gid:vec3u){
+  if(mgSkipCycle()){return;}
   let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
   textureStore(mgPressureOut,id,vec4f(mgP(id)));
 }
 
 @compute @workgroup_size(4,4,4)
 fn mgClearPressure(@builtin(global_invocation_id) gid:vec3u){
+  if(mgSkipCycle()){return;}
   let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
   textureStore(mgPressureOut,id,vec4f(0.0));
 }
 
 @compute @workgroup_size(4,4,4)
 fn mgClearMinimum(@builtin(global_invocation_id) gid:vec3u){
+  if(mgSkipCycle()){return;}
   let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
   textureStore(mgMinimumOut,id,vec4f(-3.402823e38));
 }
 
 @compute @workgroup_size(4,4,4)
 fn mgShiftMinimum(@builtin(global_invocation_id) gid:vec3u){
+  if(mgSkipCycle()){return;}
   let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
   textureStore(mgMinimumOut,id,vec4f(textureLoad(mgMinimumIn,id,0).x-mgP(id)));
 }
 
 @compute @workgroup_size(4,4,4)
 fn mgAddPressure(@builtin(global_invocation_id) gid:vec3u){
+  if(mgSkipCycle()){return;}
   let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
   textureStore(mgPressureOut,id,vec4f(mgP(id)+textureLoad(mgResidualIn,id,0).x));
 }
@@ -282,6 +308,7 @@ fn mgAddPressure(@builtin(global_invocation_id) gid:vec3u){
 // that field from their face-adjacent non-solid cells for exactly one pass.
 @compute @workgroup_size(4,4,4)
 fn mgExtrapolatePhiOneCell(@builtin(global_invocation_id) gid:vec3u){
+  if(mgSkipCycle()){return;}
   let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
   if(mgTopology(id).x>1e-5){textureStore(mgPhiOut,id,vec4f(mgPhi(id)));return;}
   let e=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
@@ -293,6 +320,7 @@ fn mgExtrapolatePhiOneCell(@builtin(global_invocation_id) gid:vec3u){
 
 @compute @workgroup_size(4,4,4)
 fn mgBakeCoefficients(@builtin(global_invocation_id) gid:vec3u){
+  if(mgSkipCycle()){return;}
   let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
   let coefficients=vec3f(
     mgCoefficientRaw(id,id+vec3i(1,0,0),0u),
@@ -305,6 +333,7 @@ fn mgBakeCoefficients(@builtin(global_invocation_id) gid:vec3u){
 // current p; mgMinimumOut is the next-coarser constraint field.
 @compute @workgroup_size(4,4,4)
 fn mgDownsampleSubtract(@builtin(global_invocation_id) gid:vec3u){
+  if(mgSkipCycle()){return;}
   let id=mgActiveId(gid);if(!mgValid(id,mg.coarseDims.xyz)){return;}var lower=-3.402823e38;
   for(var corner=0u;corner<8u;corner+=1u){let o=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let q=mgFineChild(id,o);lower=max(lower,textureLoad(mgMinimumIn,q,0).x-mgP(q));}
   textureStore(mgMinimumOut,id,vec4f(lower));
@@ -312,6 +341,7 @@ fn mgDownsampleSubtract(@builtin(global_invocation_id) gid:vec3u){
 
 @compute @workgroup_size(4,4,4)
 fn mgDownsampleMinimum(@builtin(global_invocation_id) gid:vec3u){
+  if(mgSkipCycle()){return;}
   let id=mgActiveId(gid);if(!mgValid(id,mg.coarseDims.xyz)){return;}var lower=-3.402823e38;
   for(var corner=0u;corner<8u;corner+=1u){let o=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let q=mgFineChild(id,o);lower=max(lower,textureLoad(mgMinimumIn,q,0).x);}
   textureStore(mgMinimumOut,id,vec4f(lower));
@@ -319,6 +349,7 @@ fn mgDownsampleMinimum(@builtin(global_invocation_id) gid:vec3u){
 
 @compute @workgroup_size(4,4,4)
 fn mgSmoothColour(@builtin(global_invocation_id) gid:vec3u){
+  if(mgSkipCycle()){return;}
   let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
   let old=mgP(id);let coarseDone=(mg.control.w&2u)!=0u&&atomicLoad(&mgConvergence[1])!=0u;
   // Pass-through cells carry the CM11a Eq. 18 projection with them. Nothing
@@ -398,6 +429,8 @@ fn mgCoarseCoefficient(id:vec3i,q:vec3i,axis:u32)->f32{
 // paper's high-precision solve without a host readback.
 @compute @workgroup_size(256)
 fn mgSolveCoarsest(@builtin(local_invocation_index) lane:u32){
+  if(lane==0u){mgCycleStopped=select(0u,1u,mgSkipCycle());}
+  if(workgroupUniformLoad(&mgCycleStopped)!=0u){return;}
   let d=mg.levelDims.xyz;let count=d.x*d.y*d.z;let live=lane<count;
   let id=vec3i(i32(lane%d.x),i32((lane/d.x)%d.y),i32(lane/(d.x*d.y)));
   if(live){mgCoarseP[lane]=mgP(id);mgCoarsePLow[lane]=0.0;mgCoarseRhs[lane]=textureLoad(mgRhsIn,id,0).x;
@@ -467,11 +500,18 @@ fn mgSolveCoarsest(@builtin(local_invocation_index) lane:u32){
 
 @compute @workgroup_size(4,4,4)
 fn mgMeasureFineResidual(@builtin(global_invocation_id) gid:vec3u){
+  if(mgSkipCycle()||(mg.control.z==1u&&mgTolerance.x<=0.0)){return;}
   let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)||!mgBakedLiquid(id)){return;}
   let e=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
   var diagonalTerms:array<f32,6>;for(var n=0;n<6;n+=1){diagonalTerms[n]=mgCoefficient(id,id+e[n],u32(n/2));}let diagonal=mgD4Sum6(diagonalTerms);
   if(diagonal<=0.0){return;}let residual=textureLoad(mgRhsIn,id,0).x-mgApply(id);let pressure=mgP(id);let minimum=textureLoad(mgMinimumIn,id,0).x;let gap=max(0.0,pressure-minimum);
   let projectsToMinimum=residual<0.0&&-residual>=gap*diagonal;let projected=select(abs(residual),gap*diagonal,projectsToMinimum);
+  if(mg.control.z==1u){
+    let norm=projected*params.dimsDt.w/params.physical.x;
+    // Non-finite values must never be mistaken for convergence.
+    atomicMax(&mgConvergence[15u+0],select(0x7f800000u,bitcast<u32>(norm),norm>=0.0&&norm<3.402823e38));
+    return;
+  }
   atomicMax(&mgConvergence[10],bitcast<u32>(projected*params.dimsDt.w/params.physical.x));atomicMax(&mgConvergence[11],bitcast<u32>(projected/diagonal));
 }
 `;

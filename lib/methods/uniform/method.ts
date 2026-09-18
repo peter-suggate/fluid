@@ -23,6 +23,12 @@ const runtimeUpdate = { update: "runtime" as const };
 const params: MethodParamSpec[] = [
   ...ALGORITHM_PARAMS,
   {
+    ...runtimeUpdate, kind: "number", key: "pressureResidualTolerance",
+    label: "Pressure residual tolerance", default: 0.0001, tier: "fine",
+    min: 0, max: 10, step: 0.0001, digits: 4, unit: "s⁻¹",
+    hint: "Stop after a complete Full-Cycle or V-Cycle when the projected residual infinity norm is at or below this tolerance. Zero runs every configured cycle.",
+  },
+  {
     ...runtimeUpdate,
     kind: "number",
     key: "gammaDiffusionIterations",
@@ -131,6 +137,7 @@ export function uniformReferenceSolverOptions(
     solidExcessCorrection: values.solidExcessCorrection !== "off",
     rigidCoupling: values.rigidCoupling !== "off",
     pressureSchedule: {
+      residualTolerance: numberValue(values, params, "pressureResidualTolerance"),
       fullCycles: whole("pressureFullCycles"),
       vCycles: whole("pressureVCycles"),
       preSweeps: whole("pressureSweeps"),

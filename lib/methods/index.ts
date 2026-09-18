@@ -64,8 +64,8 @@ installSimulationMethods({
   // link would have hydrated as the default method and simulated something
   // else.
   interactive: [losassoMethod, powerLiquidsMethod, uniformMethod, uniformVolumeMethod, adaptiveMassMethod, adaptiveVolumeMethod],
-  // Sparse Geometric is the application default for every scene. A scene profile
+  // Uniform Geometric is the application default for every scene. A scene profile
   // seeds settings for an explicitly selected comparison method; opening the
   // scene does not switch to that method.
-  defaultId: adaptiveVolumeMethod.id,
+  defaultId: uniformVolumeMethod.id,
 });

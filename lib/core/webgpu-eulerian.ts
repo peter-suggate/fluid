@@ -408,6 +408,11 @@ export interface GPUEulerianInfo {
   uniformFIMTerminalActiveFaces?: number;
   uniformFIMConverged?: boolean;
   uniformFIMExecutedPasses?: number;
+  /** The 4h work map selected the Sec. 3.5 sweeps in the latest step. False is
+   * the dense control, or sharpening being off; the counts are then absent. */
+  uniformSharpenWorkMap?: boolean;
+  uniformSharpenTilesActive?: number;
+  uniformSharpenTilesTotal?: number;
   /** Latest rolling uniform work box, copied only by the existing diagnostics readback. */
   uniformActiveRegionMinimum?: GPUFieldLocation;
   uniformActiveRegionMaximum?: GPUFieldLocation;

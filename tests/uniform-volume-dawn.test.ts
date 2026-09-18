@@ -25,7 +25,7 @@ async function read(device:GPUDevice,texture:GPUTexture):Promise<Float32Array>{
 function write(device:GPUDevice,texture:GPUTexture,values:Float32Array){const components=texture.format==="rgba32float"?4:1;device.queue.writeTexture({texture},values as Float32Array<ArrayBuffer>,{bytesPerRow:texture.width*components*4,rowsPerImage:texture.height},[texture.width,texture.height,texture.depthOrArrayLayers]);}
 const sum=(a:Float32Array)=>a.reduce((s,v)=>s+v,0);
 interface TestAccess {
-  transportA:GPUTexture;volumeB:GPUTexture;
+  transportA:GPUTexture;volumeB:GPUTexture;conditioningScratch:GPUBuffer;
   writeParams(dt:number,bodies:number,inflow:number):void;
   encodeGeometricVolume(encoder:GPUCommandEncoder):void;
 }
@@ -43,7 +43,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
     scene.voxelDomain.finestCellSize_m=scene.container.width_m/16;
     scene.fluid.initialCondition="tank-fill";scene.container.fillFraction=0.5;
     scene.fluid.gravity_m_s2={x:0,y:0,z:0};scene.fluid.initialLiquidVolumes=[];
-    solver=await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,{geometricVolume:true,densitySharpening:false,solidExcessCorrection:false},()=>{});
+    solver=await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,{geometricVolume:true,liquidCapacityBalancing:true,densitySharpening:false,solidExcessCorrection:false},()=>{});
     const access=solver as unknown as TestAccess;const {nx,ny,nz}=solver.info;
     const v0=await read(device,solver.volumeTexture);const phi0=await read(device,solver.vertexPhiTexture!);
     await t.test("combined slice reads independent vertex phi and V/open capacity",async()=>{
@@ -77,6 +77,11 @@ ${createGridOverlayLevelSetVolumeWGSL(true)}
     await t.test("zero velocity preserves V and planar phi",async()=>{
       assert.ok(solver!.advanceTo(1/30));await device!.queue.onSubmittedWorkDone();
       assert.deepEqual(await read(device!,solver!.volumeTexture),v0);
+      const diagnostics=(solver as unknown as {pressureMultigrid:{diagnostics:GPUBuffer}}).pressureMultigrid.diagnostics;
+      const receipt=device!.createBuffer({size:12,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
+      try{const e=device!.createCommandEncoder();e.copyBufferToBuffer(diagnostics,64,receipt,0,12);device!.queue.submit([e.finish()]);
+        await receipt.mapAsync(GPUMapMode.READ);assert.deepEqual([...new Uint32Array(receipt.getMappedRange())],[1,1,0],"default tolerance skips remaining cycles in a converged pool");
+      }finally{receipt.unmap();receipt.destroy();}
       const phi=await read(device!,solver!.vertexPhiTexture!);
       assert.ok(phi.every((p,i)=>Math.abs(p-phi0[i]!)<1e-6));
     });
@@ -98,10 +103,28 @@ ${createGridOverlayLevelSetVolumeWGSL(true)}
       reset(0.375);const actual=await encode();assert.ok(actual.every(v=>Number.isFinite(v)&&v>=0));
       assert.ok(Math.abs(sum(actual)-sum(volume))<1e-5*sum(volume));
     });
+    await t.test("capacity error gates GPU rounds and respects the round cap",async()=>{
+      const index=4+nx*(4+ny*4);const original=volume[index]!;volume[index]=1.05;
+      const receipt=async()=>{
+        const b=device!.createBuffer({size:28,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+        const e=device!.createCommandEncoder();e.copyBufferToBuffer(access.conditioningScratch,2*nx*ny*nz*4,b,0,28);device!.queue.submit([e.finish()]);
+        await b.mapAsync(GPUMapMode.READ);const words=new Uint32Array(b.getMappedRange()).slice();b.unmap();b.destroy();return words;
+      };
+      for(const tolerance of [10,0.1]){
+        solver!.applyRuntimeValues({liquidCapacityBalancing:"on",densitySharpening:"off",liquidCapacityBalancingRounds:3,liquidCapacityBalancingTolerance:tolerance});
+        reset(0);const actual=await encode();const words=await receipt();
+        assert.equal(words[5],tolerance===10?0:3,"only errors above tolerance schedule corrective rounds");
+        assert.deepEqual([...words.slice(2,5)],tolerance===10?[0,0,0]:[Math.ceil(nx/4),Math.ceil(ny/4),Math.ceil(nz/4)]);
+        assert.ok(Math.abs(sum(actual)-sum(volume))<1e-5*sum(volume));
+      }
+      volume[index]=original;
+      solver!.applyRuntimeValues({liquidCapacityBalancing:"on",densitySharpening:"off"});reset(0);await encode();
+      assert.equal((await receipt())[5],0,"a feasible identity map needs no corrective round");
+    });
     await t.test("sharpening conserves V and leaves phi unchanged",async()=>{
       volume[6+nx*(3+ny*3)]=0.8; volume[7+nx*(3+ny*3)]=0.2;
       reset(0);const unsharpened=await encode();const before=await read(device!,solver!.vertexPhiTexture!);
-      solver!.applyRuntimeValues({densitySharpening:"on",sharpeningStrength:1});reset(0);const sharp=await encode();
+      solver!.applyRuntimeValues({liquidCapacityBalancing:"on",densitySharpening:"on",sharpeningStrength:1});reset(0);const sharp=await encode();
       assert.deepEqual(await read(device!,solver!.vertexPhiTexture!),before);
       assert.ok(Math.abs(sum(sharp)-sum(unsharpened))<1e-5*sum(volume));assert.ok(sharp.every(v=>Number.isFinite(v)&&v>=-1e-7));
       assert.ok(sharp.some((v,i)=>Math.abs(v-unsharpened[i]!)>1e-5),"sharpening must actually move volume");
@@ -129,9 +152,38 @@ ${createGridOverlayLevelSetVolumeWGSL(true)}
       const velocity=await read(device!,solver!.velocityTexture);let max=0;for(let i=0;i<velocity.length;i+=4)max=Math.max(max,Math.hypot(velocity[i]!,velocity[i+1]!,velocity[i+2]!));
       assert.ok(max<0.01,`hydrostatic max speed ${max}`);
     });
+    await t.test("pressure cycle convergence preserves parity, resets, and supports live tolerance",async()=>{
+      const run=async(fullCycles:number,vCycles:number,tolerance:number)=>{
+        const candidate=await WebGPUUniformReferenceSolver.createAsync(device!,scene,"balanced",undefined,{
+          geometricVolume:true,densitySharpening:false,solidExcessCorrection:false,
+          pressureSchedule:{fullCycles,vCycles,preSweeps:6,postSweeps:6,residualTolerance:tolerance},
+        },()=>{});
+        const mg=(candidate as unknown as {pressureMultigrid:{diagnostics:GPUBuffer;pressureTexture:GPUTexture}}).pressureMultigrid;
+        const status=async()=>{
+          const buffer=device!.createBuffer({size:76,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
+          try{const e=device!.createCommandEncoder();e.copyBufferToBuffer(mg.diagnostics,0,buffer,0,76);device!.queue.submit([e.finish()]);
+            await buffer.mapAsync(GPUMapMode.READ);return new Uint32Array(buffer.getMappedRange()).slice();
+          }finally{buffer.unmap();buffer.destroy();}
+        };
+        try{
+          assert.ok(candidate.advanceTo(1/30));
+          const first=await status();const pressure=await read(device!,mg.pressureTexture);
+          assert.ok(pressure.some(p=>p>0),"exercise nonzero pressure, not only an empty solve");
+          if(tolerance>0){
+            assert.equal(first[16],1);assert.equal(first[17],fullCycles>0?1:0);assert.equal(first[18],fullCycles>0?0:1);
+            candidate.applyRuntimeValues({pressureResidualTolerance:0,densitySharpening:"off"});
+            assert.ok(candidate.advanceTo(2/30));const second=await status();
+            assert.equal(second[16],0);assert.equal(second[17],fullCycles);assert.equal(second[18],vCycles);
+          }else{assert.equal(first[16],0);assert.equal(first[17],fullCycles);assert.equal(first[18],vCycles);}
+          return pressure;
+        }finally{candidate.destroy();}
+      };
+      assert.deepEqual(await run(3,4,1e6),await run(1,0,0),"Full-Cycle stop must preserve its canonical pressure");
+      assert.deepEqual(await run(0,4,1e6),await run(0,1,0),"V-Cycle stop must preserve odd pressure parity");
+    });
     await t.test("mini32 retains its liquid region through far-wall impact",async()=>{
       solver!.destroy();
-      solver=await uniformVolumeMethod.createSolverAsync!(device!,sceneDocument(getSceneDefinition("minimal-power-dam-break-32")),"balanced",resolveMethodValues(uniformVolumeMethod,"balanced",{}),undefined,()=>{}) as WebGPUUniformReferenceSolver;
+      solver=await uniformVolumeMethod.createSolverAsync!(device!,sceneDocument(getSceneDefinition("minimal-power-dam-break-32")),"balanced",resolveMethodValues(uniformVolumeMethod,"balanced",{liquidCapacityBalancing:"on",velocityTransport:"semi-lagrangian"}),undefined,()=>{}) as WebGPUUniformReferenceSolver;
       for(let frame=1;frame<=90;frame++){
         assert.ok(solver.advanceTo(frame/30));
         if(frame===30||frame===90){

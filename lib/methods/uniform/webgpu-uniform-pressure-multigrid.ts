@@ -23,6 +23,7 @@ export interface UniformCM11aSchedule {
   readonly vCycles: number;
   readonly preSweeps: number;
   readonly postSweeps: number;
+  readonly residualTolerance?: number;
 }
 
 export const DEFAULT_UNIFORM_CM11A_SCHEDULE: UniformCM11aSchedule = Object.freeze({
@@ -30,6 +31,7 @@ export const DEFAULT_UNIFORM_CM11A_SCHEDULE: UniformCM11aSchedule = Object.freez
   vCycles: UNIFORM_CM11A_V_CYCLES,
   preSweeps: UNIFORM_CM11A_PRE_SWEEPS,
   postSweeps: UNIFORM_CM11A_POST_SWEEPS,
+  residualTolerance: 0.0001,
 });
 
 const ENTRY_POINTS = [
@@ -38,7 +40,7 @@ const ENTRY_POINTS = [
   "mgResidual", "mgRestrictResidual", "mgProlongateAdd", "mgProlongateAssign",
   "mgDownsampleSubtract", "mgDownsampleMinimum", "mgSmoothColour",
   "mgCopyPressure", "mgClearPressure", "mgClearMinimum",
-  "mgShiftMinimum", "mgAddPressure", "mgSolveCoarsest", "mgMeasureFineResidual",
+  "mgShiftMinimum", "mgAddPressure", "mgSolveCoarsest", "mgMeasureFineResidual", "mgCheckCycleConvergence",
 ] as const;
 type EntryPoint = typeof ENTRY_POINTS[number];
 
@@ -53,7 +55,8 @@ const ENTRY_BINDINGS: Readonly<Record<EntryPoint, readonly number[]>> = Object.f
   mgCopyPressure: [0, 1, 2], mgClearPressure: [0, 2], mgClearMinimum: [0, 12],
   mgShiftMinimum: [0, 1, 11, 12], mgAddPressure: [0, 1, 2, 9],
   mgSolveCoarsest: [0, 1, 2, 3, 5, 7, 11, 13],
-  mgMeasureFineResidual: [0, 1, 3, 11, 13, 14],
+  mgMeasureFineResidual: [0, 1, 3, 11, 13, 14, 17],
+  mgCheckCycleConvergence: [0, 17],
 });
 
 type TexturePair = readonly [GPUTexture, GPUTexture];
@@ -229,6 +232,7 @@ export class WebGPUUniformPressureMultigrid {
   readonly levels: readonly UniformPressureMultigridLevel[];
   readonly shaderFragment = uniformPressureMultigridWGSL;
   readonly diagnostics: GPUBuffer;
+  private readonly toleranceBuffer: GPUBuffer;
   readonly allocatedBytes: number;
   /** CM11a Algorithm 3 p_tmp; no V-cycle scratch dispatch may alias it. */
   private readonly fullCycleBackup: GPUTexture;
@@ -259,7 +263,7 @@ export class WebGPUUniformPressureMultigrid {
     this.finestSize = hierarchy.levelDimensions[0]!;
     const usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING
       | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST;
-    let allocatedBytes = 60;
+    let allocatedBytes = 92;
     const texture = (label: string, format: GPUTextureFormat,
       size: readonly [number, number, number]) => {
       const result = device.createTexture({ label, size: [...size], dimension: "3d", format, usage });
@@ -280,12 +284,16 @@ export class WebGPUUniformPressureMultigrid {
     }
     this.levels = Object.freeze(levels);
     this.fullCycleBackup = texture("Uniform CM11a Full-Cycle p_tmp", "r32float", levels[0]!.dimensions);
-    this.diagnostics = device.createBuffer({ label: "Uniform CM11a convergence status", size: 60,
+    this.diagnostics = device.createBuffer({ label: "Uniform CM11a convergence status", size: 76,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    this.toleranceBuffer = device.createBuffer({ label: "Pressure residual tolerance", size: 16,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.setResidualTolerance(schedule.residualTolerance ?? 0.0001);
     this.allocatedBytes = allocatedBytes;
     const textureBinding = { sampleType: "unfilterable-float", viewDimension: "3d" } as const;
     const scalarStorage = { access: "write-only", format: "r32float", viewDimension: "3d" } as const;
     const allEntries: GPUBindGroupLayoutEntry[] = [
+      { binding: 17, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
       ...[1, 3, 5, 7, 9, 11].map((binding) => ({ binding, visibility: GPUShaderStage.COMPUTE, texture: textureBinding })),
       ...[2, 4, 6, 10, 12].map((binding) => ({ binding, visibility: GPUShaderStage.COMPUTE, storageTexture: scalarStorage })),
@@ -296,8 +304,13 @@ export class WebGPUUniformPressureMultigrid {
     ];
     this.groupLayouts = Object.freeze(Object.fromEntries(ENTRY_POINTS.map((entryPoint) => [entryPoint,
       device.createBindGroupLayout({ label: `Uniform CM11a hierarchy layout - ${entryPoint}`,
-        entries: allEntries.filter(({ binding }) => ENTRY_BINDINGS[entryPoint].includes(binding)) }),
+        entries: allEntries.filter(({ binding }) => (binding === 13 || ENTRY_BINDINGS[entryPoint].includes(binding))) }),
     ])) as Record<EntryPoint, GPUBindGroupLayout>);
+  }
+
+  setResidualTolerance(value: number): void {
+    const tolerance = Number.isFinite(value) ? Math.max(0, value) : 0;
+    this.device.queue.writeBuffer(this.toleranceBuffer, 0, new Float32Array([tolerance, 0, 0, 0]));
   }
 
   get pressureTexture(): GPUTexture { return this.levels[0]!.pressure[0]; }
@@ -338,10 +351,13 @@ export class WebGPUUniformPressureMultigrid {
       // A WebGPU texture usage scope spans the whole compute pass. End the
       // pass between hierarchy stages so storage outputs can become sampled
       // inputs in the next stage.
+      if (dispatch.entryPoint === "mgMeasureFineResidual" && dispatch.stage !== "finish") {
+        encoder.clearBuffer(this.diagnostics, 60, 4);
+      }
       const pass = encoder.beginComputePass({ label: `Uniform CM11a ${dispatch.entryPoint}` });
       pass.setPipeline(dispatch.pipeline); pass.setBindGroup(1, dispatch.group);
       pass.setBindGroup(0, uniformGroup);
-      if (this.activeDispatch && dispatch.entryPoint !== "mgSolveCoarsest") {
+      if (this.activeDispatch && dispatch.entryPoint !== "mgSolveCoarsest" && dispatch.entryPoint !== "mgCheckCycleConvergence") {
         const indirectOffset = (16 + dispatch.activeLevel * 10 + 3) * 4;
         pass.dispatchWorkgroupsIndirect(this.activeDispatch, indirectOffset);
       } else {
@@ -454,8 +470,9 @@ export class WebGPUUniformPressureMultigrid {
       const paperDestination = paperM - destinationIndex;
       const params = this.parameterBuffer(source.dimensions, destination.dimensions, destinationIndex,
         [control[0] || paperDestination, control[1] || paperM - UNIFORM_CM11A_PHI_PRESERVATION_LEVELS,
-          control[2], control[3]]);
+          control[2], control[3]], planStage === "full-cycle" || planStage === "v-cycle");
       const allEntries: GPUBindGroupEntry[] = [
+          { binding: 17, resource: { buffer: this.toleranceBuffer } },
           { binding: 0, resource: { buffer: params } },
           { binding: 1, resource: resources.pressureIn.createView() }, { binding: 2, resource: resources.pressureOut.createView() },
           { binding: 3, resource: resources.rhsIn.createView() }, { binding: 4, resource: resources.rhsOut.createView() },
@@ -469,7 +486,7 @@ export class WebGPUUniformPressureMultigrid {
         ];
       const group = this.device.createBindGroup({ label: `Uniform CM11a bindings - ${entryPoint}`,
         layout: this.groupLayouts[entryPoint],
-        entries: allEntries.filter(({ binding }) => ENTRY_BINDINGS[entryPoint].includes(binding)) });
+        entries: allEntries.filter(({ binding }) => (binding === 13 || ENTRY_BINDINGS[entryPoint].includes(binding))) });
       this.ownedGroups.push(group);
       result.push({ pipeline: this.pipelines![entryPoint], group,
         entryPoint, stage: planStage,
@@ -561,10 +578,19 @@ export class WebGPUUniformPressureMultigrid {
       emit("mgAddPressure", 0, 0, { residualIn: backup }); flipPressure(0);
       min[0] = 0;
     };
+    const checkpoint = () => {
+      // Canonicalize before deciding to stop. All later cycle writes are gated,
+      // so the final projection always sees the last completed cycle in A.
+      if (p[0] !== 0) {
+        emit("mgCopyPressure", 0, 0, { pressureOut: this.levels[0]!.pressure[0] }); p[0] = 0;
+      }
+      emit("mgMeasureFineResidual", 0, 0, { rhsIn: originalRhs }, [0, 0, 1, 0]);
+      emit("mgCheckCycleConvergence", 0, 0, {}, [0, 0, planStage === "full-cycle" ? 2 : 3, 0], [1, 1, 1]);
+    };
     planStage = "full-cycle";
-    for (let cycle = 0; cycle < this.schedule.fullCycles; cycle += 1) fullCycle();
+    for (let cycle = 0; cycle < this.schedule.fullCycles; cycle += 1) { fullCycle(); checkpoint(); }
     planStage = "v-cycle";
-    for (let cycle = 0; cycle < this.schedule.vCycles; cycle += 1) vCycle(0, originalRhs);
+    for (let cycle = 0; cycle < this.schedule.vCycles; cycle += 1) { vCycle(0, originalRhs); checkpoint(); }
     planStage = "finish";
     if (p[0] !== 0) { emit("mgCopyPressure", 0, 0, { pressureOut: this.levels[0]!.pressure[0] }); p[0] = 0; }
     emit("mgMeasureFineResidual", 0, 0, {
@@ -576,7 +602,7 @@ export class WebGPUUniformPressureMultigrid {
   }
 
   private parameterBuffer(level: readonly [number, number, number], coarse: readonly [number, number, number],
-    activeLevel: number, control: readonly [number, number, number, number]): GPUBuffer {
+    activeLevel: number, control: readonly [number, number, number, number], gated: boolean): GPUBuffer {
     const bytes = new ArrayBuffer(80); const u = new Uint32Array(bytes); const f = new Float32Array(bytes);
     u.set(this.levels[0]!.dimensions, 0); u.set(level, 4); u.set(coarse, 8);
     // Each axis has coarsened by however many times *it* was halved, which is
@@ -587,6 +613,7 @@ export class WebGPUUniformPressureMultigrid {
       value * (this.finestSize[axis]! / (level[axis]! - 2))), 12);
     u.set(control, 16);
     u[3] = activeLevel;
+    u[7] = gated ? 1 : 0;
     const buffer = this.device.createBuffer({ label: "Uniform CM11a dispatch parameters", size: 80,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.device.queue.writeBuffer(buffer, 0, bytes); this.ownedParams.push(buffer); return buffer;
@@ -597,6 +624,7 @@ export class WebGPUUniformPressureMultigrid {
       level.volume, level.residual, level.minimum]) { pair[0].destroy(); pair[1].destroy(); }
     for (const level of this.levels) level.coefficients.destroy();
     this.fullCycleBackup.destroy();
+    this.toleranceBuffer.destroy();
     for (const buffer of this.ownedParams) buffer.destroy(); this.diagnostics.destroy();
     if (this.coarsestCaptureBuffers) for (const buffer of [this.coarsestCaptureBuffers.pressure,
       this.coarsestCaptureBuffers.rhs, this.coarsestCaptureBuffers.minimum,

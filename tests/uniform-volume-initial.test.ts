@@ -4,7 +4,10 @@ import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { uniformVolumeInitialPhi } from "../lib/methods/uniform/uniform-volume-initial";
 import { uniformVolumeMethod } from "../lib/methods/uniform/uniform-volume-method";
+import { UNIFORM_VOLUME_PIPELINE } from "../lib/methods/uniform/uniform-volume-pipeline";
 import { resolveMethodValues } from "../lib/core/method-contract";
+import type { MethodParamValues } from "../lib/core/method-contract";
+import type { FluidPipelineContext } from "../lib/core/fluid-pipeline";
 
 test("uniform geometric vertex planes use metres and include all domain faces",()=>{
   const scene=structuredClone(sceneDocument(getSceneDefinition("minimal-power-dam-break-32")));
@@ -25,4 +28,28 @@ test("uniform geometric controls resolve independently from density algorithms",
   const values=resolveMethodValues(uniformVolumeMethod,"balanced",{});
   assert.equal(values.densitySharpening,"on");assert.equal(values.gammaDiffusion,undefined);
   assert.ok(uniformVolumeMethod.resolveComposition?.(values));
+});
+test("the sharpening work map is the live default, with the dense schedule retained",()=>{
+  const spec=uniformVolumeMethod.params.find(p=>p.key==="sharpeningWorkMap");
+  assert.equal(spec?.kind,"select");assert.equal(spec?.default,"on");assert.equal(spec?.update,"runtime");
+  assert.equal(resolveMethodValues(uniformVolumeMethod,"balanced",{}).sharpeningWorkMap,"on");
+  // Runtime keys are excluded from the construction key, so the schedule toggles
+  // on the attached solver instead of rebuilding it back to t=0.
+  assert.ok(uniformVolumeMethod.runtimeParamKeys?.includes("sharpeningWorkMap"));
+  const stage=UNIFORM_VOLUME_PIPELINE.stages.find(s=>s.id==="uniform-volume-sharpen")!;
+  const at=(values:MethodParamValues,info?:unknown):FluidPipelineContext=>({values,info:(info??null) as never,
+    sceneId:"minimal-power-dam-break-32",bodyCount:0,hasTerrain:false,hasInflow:false,running:true});
+  const counted={uniformSharpenWorkMap:true,uniformSharpenTilesActive:118,uniformSharpenTilesTotal:512};
+  assert.equal(stage.chip(at({densitySharpening:"on",sharpeningWorkMap:"on"})),"4h work map");
+  assert.equal(stage.chip(at({densitySharpening:"on",sharpeningWorkMap:"on"},counted)),"4h work map · 23% tiles");
+  assert.equal(stage.chip(at({densitySharpening:"on",sharpeningWorkMap:"off"},counted)),"dense finest lattice");
+  const choice=stage.controls?.find(c=>c.kind==="param-choice"&&c.param==="sharpeningWorkMap");
+  assert.ok(choice?.kind==="param-choice");
+  assert.equal(choice.enabled?.(at({densitySharpening:"on",sharpeningWorkMap:"on"})),true);
+  assert.equal(choice.enabled?.(at({densitySharpening:"off",sharpeningWorkMap:"on"})),false);
+  const readout=stage.controls?.find(c=>c.kind==="readout");
+  assert.ok(readout?.kind==="readout");
+  assert.equal(readout.value(at({sharpeningWorkMap:"on"},counted)),"118 / 512 (23%)");
+  assert.equal(readout.value(at({sharpeningWorkMap:"on"})),"—");
+  assert.equal(readout.value(at({sharpeningWorkMap:"off"},counted)),"—");
 });

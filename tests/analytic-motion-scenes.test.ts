@@ -18,7 +18,7 @@ for (const motion of ["translation", "free-fall"] as const) test(`${motion} UI p
   assert.deepEqual(validateScene(scene), []);
   assert.deepEqual(parseScene(serializeScene(scene)).fluid, scene.fluid);
   const query = parseQueryState(`?scene=${id}`);
-  assert.equal(query.methodId, "adaptive-volume");
+  assert.equal(query.methodId, "uniform-volume");
   assert.deepEqual(query.scene.fluid, scene.fluid);
   assert.equal(definition.methodProfile?.overrides.selectorMode, "coarse-first");
   const atlas = initializeSparseBrickAtlasFromScene(scene, { finestDimensions: [32,32,8],
@@ -41,7 +41,7 @@ for (const motion of ["translation", "free-fall"] as const) test(`${motion} UI p
 test("free-fall keyframes refine and coarsen without changing the analytic body", () => {
   const scene=createRerungFreeFallScene();
   assert.deepEqual(validateScene(scene),[]);
-  assert.equal(parseQueryState("?scene=coarse-surface-free-fall-rerung").methodId,"adaptive-volume");
+  assert.equal(parseQueryState("?scene=coarse-surface-free-fall-rerung").methodId,"uniform-volume");
   assert.deepEqual([0,.1,.2].map(t=>refinementKeyframeAt(scene,t)!.regions.map(r=>r.minimumCellSize_cells)),[[8,4],[4,8],[8,4]]);
   assert.equal(refinementKeyframeAt(scene,.099)!.time_s,0);
   scene.fluid.refinementKeyframes![1]!.time_s=0;
@@ -53,7 +53,7 @@ for(const live of [false,true]) test(`standing wave ${live ? "live" : "fixed"} p
   assert.deepEqual(validateScene(scene),[]);
   assert.deepEqual(parseScene(serializeScene(scene)).fluid,scene.fluid);
   const query=parseQueryState(`?scene=${scene.sceneId}`);
-  assert.equal(query.methodId,"adaptive-volume");
+  assert.equal(query.methodId,"uniform-volume");
   const atlas=initializeSparseBrickAtlasFromScene(scene,{finestDimensions:[32,24,8],brickFineResolution:8,
     maximumMacroSpanBricks:1,coarseFirstCurvatureTolerance:.05});
   const surface=atlas.bricks.filter(b=>b.coordinate[1]===1&&b.density.some(v=>v>0));

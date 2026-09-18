@@ -1,0 +1,543 @@
+{
+  "scene": "minimal-power-dam-break-64",
+  "dimensions": [
+    64,
+    64,
+    64
+  ],
+  "velocityTransport": "maccormack",
+  "tolerancePercent": 0.1,
+  "roundCap": 64,
+  "snapshot": "before receiver cap, rounds 1/4/16/64",
+  "notes": "GPU readbacks distort timings. This is a work census, not an optimized implementation benchmark. Exact affected means receiver bricks sharing a positive-liquid donor with a violating receiver.",
+  "samples": [
+    {
+      "frame": 2,
+      "round": 1,
+      "cells": 262144,
+      "violations": 12097,
+      "wetReceivers": 99519,
+      "positiveEdges": 751480,
+      "changedDonors": 14594,
+      "exactAffectedReceivers": 17399,
+      "maximumError": 0.2907762825489044,
+      "infeasibleDonors": 0,
+      "infeasibleVolume": 0,
+      "capacityLowerBound": 0,
+      "singleReceiverDonors": 0,
+      "bricks": [
+        {
+          "B": 4,
+          "total": 4096,
+          "violating": 301,
+          "donorBricks": 325,
+          "exactAffected": 388,
+          "coarseAffected": 411
+        },
+        {
+          "B": 8,
+          "total": 512,
+          "violating": 59,
+          "donorBricks": 50,
+          "exactAffected": 65,
+          "coarseAffected": 75
+        }
+      ]
+    },
+    {
+      "frame": 2,
+      "round": 4,
+      "cells": 262144,
+      "violations": 13051,
+      "wetReceivers": 99519,
+      "positiveEdges": 751480,
+      "changedDonors": 17104,
+      "exactAffectedReceivers": 20111,
+      "maximumError": 0.10283768706722185,
+      "infeasibleDonors": 0,
+      "infeasibleVolume": 0,
+      "capacityLowerBound": 0,
+      "singleReceiverDonors": 0,
+      "bricks": [
+        {
+          "B": 4,
+          "total": 4096,
+          "violating": 358,
+          "donorBricks": 354,
+          "exactAffected": 417,
+          "coarseAffected": 445
+        },
+        {
+          "B": 8,
+          "total": 512,
+          "violating": 60,
+          "donorBricks": 51,
+          "exactAffected": 64,
+          "coarseAffected": 76
+        }
+      ]
+    },
+    {
+      "frame": 2,
+      "round": 16,
+      "cells": 262144,
+      "violations": 14693,
+      "wetReceivers": 99519,
+      "positiveEdges": 751480,
+      "changedDonors": 20140,
+      "exactAffectedReceivers": 23479,
+      "maximumError": 0.023931085597723722,
+      "infeasibleDonors": 0,
+      "infeasibleVolume": 0,
+      "capacityLowerBound": 0,
+      "singleReceiverDonors": 0,
+      "bricks": [
+        {
+          "B": 4,
+          "total": 4096,
+          "violating": 406,
+          "donorBricks": 414,
+          "exactAffected": 469,
+          "coarseAffected": 518
+        },
+        {
+          "B": 8,
+          "total": 512,
+          "violating": 63,
+          "donorBricks": 63,
+          "exactAffected": 79,
+          "coarseAffected": 95
+        }
+      ]
+    },
+    {
+      "frame": 2,
+      "round": 64,
+      "cells": 262144,
+      "violations": 16937,
+      "wetReceivers": 99519,
+      "positiveEdges": 751480,
+      "changedDonors": 24788,
+      "exactAffectedReceivers": 28696,
+      "maximumError": 0.0033844076097011566,
+      "infeasibleDonors": 0,
+      "infeasibleVolume": 0,
+      "capacityLowerBound": 0,
+      "singleReceiverDonors": 0,
+      "bricks": [
+        {
+          "B": 4,
+          "total": 4096,
+          "violating": 484,
+          "donorBricks": 484,
+          "exactAffected": 565,
+          "coarseAffected": 600
+        },
+        {
+          "B": 8,
+          "total": 512,
+          "violating": 80,
+          "donorBricks": 74,
+          "exactAffected": 94,
+          "coarseAffected": 107
+        }
+      ]
+    },
+    {
+      "frame": 8,
+      "round": 1,
+      "cells": 262144,
+      "violations": 51693,
+      "wetReceivers": 116362,
+      "positiveEdges": 872231,
+      "changedDonors": 72625,
+      "exactAffectedReceivers": 87484,
+      "maximumError": 8.993292355244897,
+      "infeasibleDonors": 2237,
+      "infeasibleVolume": 3069.386727809906,
+      "capacityLowerBound": 4.993035316467285,
+      "singleReceiverDonors": 3169,
+      "bricks": [
+        {
+          "B": 4,
+          "total": 4096,
+          "violating": 1451,
+          "donorBricks": 1583,
+          "exactAffected": 1568,
+          "coarseAffected": 1742
+        },
+        {
+          "B": 8,
+          "total": 512,
+          "violating": 212,
+          "donorBricks": 235,
+          "exactAffected": 222,
+          "coarseAffected": 278
+        }
+      ]
+    },
+    {
+      "frame": 8,
+      "round": 4,
+      "cells": 262144,
+      "violations": 58847,
+      "wetReceivers": 116362,
+      "positiveEdges": 872231,
+      "changedDonors": 77891,
+      "exactAffectedReceivers": 88915,
+      "maximumError": 8.024392646543902,
+      "infeasibleDonors": 2237,
+      "infeasibleVolume": 3069.386727809906,
+      "capacityLowerBound": 4.993035316467285,
+      "singleReceiverDonors": 3169,
+      "bricks": [
+        {
+          "B": 4,
+          "total": 4096,
+          "violating": 1470,
+          "donorBricks": 1604,
+          "exactAffected": 1581,
+          "coarseAffected": 1754
+        },
+        {
+          "B": 8,
+          "total": 512,
+          "violating": 212,
+          "donorBricks": 237,
+          "exactAffected": 225,
+          "coarseAffected": 280
+        }
+      ]
+    },
+    {
+      "frame": 8,
+      "round": 16,
+      "cells": 262144,
+      "violations": 66600,
+      "wetReceivers": 116362,
+      "positiveEdges": 872231,
+      "changedDonors": 83416,
+      "exactAffectedReceivers": 90000,
+      "maximumError": 7.471743433334346,
+      "infeasibleDonors": 2237,
+      "infeasibleVolume": 3069.386727809906,
+      "capacityLowerBound": 4.993035316467285,
+      "singleReceiverDonors": 3169,
+      "bricks": [
+        {
+          "B": 4,
+          "total": 4096,
+          "violating": 1481,
+          "donorBricks": 1611,
+          "exactAffected": 1586,
+          "coarseAffected": 1759
+        },
+        {
+          "B": 8,
+          "total": 512,
+          "violating": 212,
+          "donorBricks": 237,
+          "exactAffected": 228,
+          "coarseAffected": 280
+        }
+      ]
+    },
+    {
+      "frame": 8,
+      "round": 64,
+      "cells": 262144,
+      "violations": 69456,
+      "wetReceivers": 116362,
+      "positiveEdges": 872231,
+      "changedDonors": 85448,
+      "exactAffectedReceivers": 89188,
+      "maximumError": 6.91177225609609,
+      "infeasibleDonors": 2237,
+      "infeasibleVolume": 3069.386727809906,
+      "capacityLowerBound": 4.993035316467285,
+      "singleReceiverDonors": 3169,
+      "bricks": [
+        {
+          "B": 4,
+          "total": 4096,
+          "violating": 1457,
+          "donorBricks": 1609,
+          "exactAffected": 1600,
+          "coarseAffected": 1763
+        },
+        {
+          "B": 8,
+          "total": 512,
+          "violating": 213,
+          "donorBricks": 241,
+          "exactAffected": 234,
+          "coarseAffected": 279
+        }
+      ]
+    },
+    {
+      "frame": 22,
+      "round": 1,
+      "cells": 262144,
+      "violations": 57277,
+      "wetReceivers": 127104,
+      "positiveEdges": 979760,
+      "changedDonors": 76491,
+      "exactAffectedReceivers": 88168,
+      "maximumError": 20.221019434313877,
+      "infeasibleDonors": 310,
+      "infeasibleVolume": 961.5436143875122,
+      "capacityLowerBound": 9.300633430480957,
+      "singleReceiverDonors": 570,
+      "bricks": [
+        {
+          "B": 4,
+          "total": 4096,
+          "violating": 1554,
+          "donorBricks": 1632,
+          "exactAffected": 1714,
+          "coarseAffected": 1877
+        },
+        {
+          "B": 8,
+          "total": 512,
+          "violating": 235,
+          "donorBricks": 240,
+          "exactAffected": 259,
+          "coarseAffected": 286
+        }
+      ]
+    },
+    {
+      "frame": 22,
+      "round": 4,
+      "cells": 262144,
+      "violations": 63211,
+      "wetReceivers": 127106,
+      "positiveEdges": 979760,
+      "changedDonors": 79275,
+      "exactAffectedReceivers": 89703,
+      "maximumError": 14.325246229486035,
+      "infeasibleDonors": 310,
+      "infeasibleVolume": 961.5436143875122,
+      "capacityLowerBound": 9.300633430480957,
+      "singleReceiverDonors": 570,
+      "bricks": [
+        {
+          "B": 4,
+          "total": 4096,
+          "violating": 1566,
+          "donorBricks": 1635,
+          "exactAffected": 1720,
+          "coarseAffected": 1873
+        },
+        {
+          "B": 8,
+          "total": 512,
+          "violating": 234,
+          "donorBricks": 239,
+          "exactAffected": 259,
+          "coarseAffected": 284
+        }
+      ]
+    },
+    {
+      "frame": 22,
+      "round": 16,
+      "cells": 262144,
+      "violations": 68729,
+      "wetReceivers": 127109,
+      "positiveEdges": 979760,
+      "changedDonors": 81573,
+      "exactAffectedReceivers": 90914,
+      "maximumError": 12.380708246644936,
+      "infeasibleDonors": 310,
+      "infeasibleVolume": 961.5436143875122,
+      "capacityLowerBound": 9.300633430480957,
+      "singleReceiverDonors": 570,
+      "bricks": [
+        {
+          "B": 4,
+          "total": 4096,
+          "violating": 1577,
+          "donorBricks": 1639,
+          "exactAffected": 1724,
+          "coarseAffected": 1859
+        },
+        {
+          "B": 8,
+          "total": 512,
+          "violating": 235,
+          "donorBricks": 240,
+          "exactAffected": 258,
+          "coarseAffected": 280
+        }
+      ]
+    },
+    {
+      "frame": 22,
+      "round": 64,
+      "cells": 262144,
+      "violations": 69887,
+      "wetReceivers": 127114,
+      "positiveEdges": 979616,
+      "changedDonors": 81734,
+      "exactAffectedReceivers": 90273,
+      "maximumError": 12.139325549760855,
+      "infeasibleDonors": 319,
+      "infeasibleVolume": 981.346821308136,
+      "capacityLowerBound": 9.300633430480957,
+      "singleReceiverDonors": 603,
+      "bricks": [
+        {
+          "B": 4,
+          "total": 4096,
+          "violating": 1554,
+          "donorBricks": 1632,
+          "exactAffected": 1707,
+          "coarseAffected": 1836
+        },
+        {
+          "B": 8,
+          "total": 512,
+          "violating": 230,
+          "donorBricks": 239,
+          "exactAffected": 256,
+          "coarseAffected": 270
+        }
+      ]
+    },
+    {
+      "frame": 30,
+      "round": 1,
+      "cells": 262144,
+      "violations": 53537,
+      "wetReceivers": 141852,
+      "positiveEdges": 1099837,
+      "changedDonors": 73792,
+      "exactAffectedReceivers": 83364,
+      "maximumError": 101.52318466139414,
+      "infeasibleDonors": 2087,
+      "infeasibleVolume": 6156.639261007309,
+      "capacityLowerBound": 101.1216812133789,
+      "singleReceiverDonors": 4912,
+      "bricks": [
+        {
+          "B": 4,
+          "total": 4096,
+          "violating": 1435,
+          "donorBricks": 1569,
+          "exactAffected": 1581,
+          "coarseAffected": 1723
+        },
+        {
+          "B": 8,
+          "total": 512,
+          "violating": 211,
+          "donorBricks": 235,
+          "exactAffected": 233,
+          "coarseAffected": 282
+        }
+      ]
+    },
+    {
+      "frame": 30,
+      "round": 4,
+      "cells": 262144,
+      "violations": 59012,
+      "wetReceivers": 141852,
+      "positiveEdges": 1099837,
+      "changedDonors": 76868,
+      "exactAffectedReceivers": 84547,
+      "maximumError": 101.12168302436231,
+      "infeasibleDonors": 2087,
+      "infeasibleVolume": 6156.639261007309,
+      "capacityLowerBound": 101.1216812133789,
+      "singleReceiverDonors": 4912,
+      "bricks": [
+        {
+          "B": 4,
+          "total": 4096,
+          "violating": 1438,
+          "donorBricks": 1576,
+          "exactAffected": 1579,
+          "coarseAffected": 1714
+        },
+        {
+          "B": 8,
+          "total": 512,
+          "violating": 210,
+          "donorBricks": 235,
+          "exactAffected": 232,
+          "coarseAffected": 283
+        }
+      ]
+    },
+    {
+      "frame": 30,
+      "round": 16,
+      "cells": 262144,
+      "violations": 64399,
+      "wetReceivers": 141852,
+      "positiveEdges": 1099837,
+      "changedDonors": 79203,
+      "exactAffectedReceivers": 84922,
+      "maximumError": 101.1216812133789,
+      "infeasibleDonors": 2087,
+      "infeasibleVolume": 6156.639261007309,
+      "capacityLowerBound": 101.1216812133789,
+      "singleReceiverDonors": 4912,
+      "bricks": [
+        {
+          "B": 4,
+          "total": 4096,
+          "violating": 1437,
+          "donorBricks": 1574,
+          "exactAffected": 1572,
+          "coarseAffected": 1694
+        },
+        {
+          "B": 8,
+          "total": 512,
+          "violating": 208,
+          "donorBricks": 232,
+          "exactAffected": 229,
+          "coarseAffected": 268
+        }
+      ]
+    },
+    {
+      "frame": 30,
+      "round": 64,
+      "cells": 262144,
+      "violations": 67412,
+      "wetReceivers": 141852,
+      "positiveEdges": 1098996,
+      "changedDonors": 79581,
+      "exactAffectedReceivers": 84261,
+      "maximumError": 101.1216812133789,
+      "infeasibleDonors": 2124,
+      "infeasibleVolume": 6219.977628350258,
+      "capacityLowerBound": 101.1216812133789,
+      "singleReceiverDonors": 5032,
+      "bricks": [
+        {
+          "B": 4,
+          "total": 4096,
+          "violating": 1427,
+          "donorBricks": 1555,
+          "exactAffected": 1553,
+          "coarseAffected": 1669
+        },
+        {
+          "B": 8,
+          "total": 512,
+          "violating": 207,
+          "donorBricks": 229,
+          "exactAffected": 227,
+          "coarseAffected": 266
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,2961 @@
+{
+  "description": "Dawn/Metal 4h sharpening experiment; ABBA 30 frames, first three excluded. Dense storage. Default solver does not enable experiment.",
+  "runs": [
+    {
+      "sceneId": "minimal-power-dam-break-64",
+      "tileWork": false,
+      "frames": 30,
+      "medianWall_ms": 85.66587499999969,
+      "medianSharpen_ms": 5.24288,
+      "stats": {
+        "nx": 64,
+        "ny": 64,
+        "nz": 64,
+        "storedNy": 64,
+        "cellCount": 262144,
+        "equivalentUniformCells": 262144,
+        "compressionRatio": 1,
+        "activeCompressionRatio": 1,
+        "activeSampleCount": 262144,
+        "regularLayers": 64,
+        "maximumNeighborDelta": 0,
+        "gridKind": "uniform",
+        "cellSize_m": 0.0125,
+        "pressureIterations": 0,
+        "pressureSolver": "CM11a dense LCP multigrid (3 Full-Cycles + 4 V-Cycles, 6/6 pre/post PRBGS)",
+        "allocatedBytes": 120228244,
+        "quality": "balanced",
+        "submittedTime_s": 0.9999999999999999,
+        "simulatedTime_s": 0.9999999999999999,
+        "completedTime_s": 0.9999999999999999,
+        "simulationLag_s": 1.1102230246251565e-16,
+        "encodedSteps": 30,
+        "maximumTallCellHeight": 0,
+        "volumeControl": true,
+        "hostFluidAuthority": "gpu-resident",
+        "hostSimulationSizedWorkItems": 0,
+        "hostSchedulingUsesReadback": false,
+        "initialVolumeCellSum": 94208.00000000116,
+        "volumeCellSum": 94207.6640625,
+        "representedVolumeCellSum": 89079.37646484375,
+        "volumeDrift": -3.56591267370233e-06,
+        "representedVolumeDrift": -0.05443936327230544,
+        "rawVolumeDrift": -3.56591267370233e-06,
+        "volumeTelemetrySource": "dense-volume",
+        "maxSpeed_m_s": 7.854539394378662,
+        "front_m": 0.4,
+        "frontTelemetrySource": "dense-volume",
+        "uniformPipelineFacts": {
+          "extrapolationFrontSweeps": 16,
+          "extrapolationHierarchyLevels": 6,
+          "extrapolationPassesPerInvocation": 48,
+          "multigridLevels": 6,
+          "multigridPasses": {
+            "setup": 19,
+            "full-cycle": 1392,
+            "v-cycle": 596,
+            "finish": 1
+          },
+          "multigridPassesTotal": 2008,
+          "pressureSchedule": {
+            "residualTolerance": 0.0001,
+            "fullCycles": 3,
+            "vCycles": 4,
+            "preSweeps": 6,
+            "postSweeps": 6
+          }
+        },
+        "lastDt_s": 0.03333333333333333,
+        "lastSubsteps": 1,
+        "referenceLiquidVolume_cells": 94208.00000000116,
+        "uniformUnplaceableSolidExcess_cells": 0,
+        "uniformCM11aResidualInfinity": 9.883686288958415e-05,
+        "uniformCM11aConverged": true,
+        "uniformCM11aCoarseIterations": 12,
+        "uniformCM11aCycleConverged": false,
+        "uniformCM11aFullCyclesExecuted": 3,
+        "uniformCM11aVCyclesExecuted": 4,
+        "uniformCM11aCapFailure": false,
+        "uniformCM11aFailingCoarseInvocation": 0,
+        "uniformCM11aCoarseMaxAbsRhs": 0,
+        "uniformCM11aCoarseMaxDiagonalPressure": 0,
+        "uniformCM11aCoarseMaxAbsPressure": 0,
+        "uniformCM11aCoarseProjectedGapPressure": 0,
+        "uniformCM11aCoarseNormalizedProjectedResidual": 0,
+        "uniformCM11aFineResidualInfinity": 0.0012689466821029782,
+        "uniformCM11aFineProjectedGapPressure": 0.001020507887005806,
+        "uniformCM11aCoarseActiveRows": 0,
+        "uniformCM11aCoarseFreeRows": 0,
+        "uniformCM11aCoarseWorstRow": 0,
+        "uniformCM11aCoarseWorstRowActive": false,
+        "uniformCM11aCoarseWorstRowHalo": false,
+        "uniformFIMTerminalActiveFaces": 81,
+        "uniformFIMConverged": false,
+        "uniformFIMExecutedPasses": 16,
+        "uniformActiveRegionMinimum": {
+          "x": 0,
+          "y": 0,
+          "z": 0
+        },
+        "uniformActiveRegionMaximum": {
+          "x": 64,
+          "y": 64,
+          "z": 64
+        },
+        "uniformActiveRegionCellCount": 262144,
+        "uniformActiveRegionFraction": 1
+      },
+      "samples": [
+        {
+          "frame": 1,
+          "wall_ms": 103.21941700000002,
+          "sharpen_ms": 4.980736
+        },
+        {
+          "frame": 2,
+          "wall_ms": 67.15429200000017,
+          "sharpen_ms": 4.849664
+        },
+        {
+          "frame": 3,
+          "wall_ms": 80.99087500000019,
+          "sharpen_ms": 13.959168
+        },
+        {
+          "frame": 4,
+          "wall_ms": 78.21070800000007,
+          "sharpen_ms": 4.849664
+        },
+        {
+          "frame": 5,
+          "wall_ms": 83.80733299999997,
+          "sharpen_ms": 4.784128
+        },
+        {
+          "frame": 6,
+          "wall_ms": 85.29358300000013,
+          "sharpen_ms": 5.111808
+        },
+        {
+          "frame": 7,
+          "wall_ms": 80.85804200000007,
+          "sharpen_ms": 10.944512
+        },
+        {
+          "frame": 8,
+          "wall_ms": 80.3784169999999,
+          "sharpen_ms": 4.9152
+        },
+        {
+          "frame": 9,
+          "wall_ms": 87.62158399999998,
+          "sharpen_ms": 12.255232
+        },
+        {
+          "frame": 10,
+          "wall_ms": 81.71912500000008,
+          "sharpen_ms": 10.878976
+        },
+        {
+          "frame": 11,
+          "wall_ms": 83.18408400000021,
+          "sharpen_ms": 10.944512
+        },
+        {
+          "frame": 12,
+          "wall_ms": 88.13920800000005,
+          "sharpen_ms": 5.24288
+        },
+        {
+          "frame": 13,
+          "wall_ms": 87.17216599999983,
+          "sharpen_ms": 10.81344
+        },
+        {
+          "frame": 14,
+          "wall_ms": 81.37162500000022,
+          "sharpen_ms": 4.849664
+        },
+        {
+          "frame": 15,
+          "wall_ms": 87.94537499999979,
+          "sharpen_ms": 8.454144
+        },
+        {
+          "frame": 16,
+          "wall_ms": 81.39270800000031,
+          "sharpen_ms": 11.075584
+        },
+        {
+          "frame": 17,
+          "wall_ms": 87.4386669999999,
+          "sharpen_ms": 16.842752
+        },
+        {
+          "frame": 18,
+          "wall_ms": 85.91704100000015,
+          "sharpen_ms": 4.9152
+        },
+        {
+          "frame": 19,
+          "wall_ms": 81.9943330000001,
+          "sharpen_ms": 11.010048
+        },
+        {
+          "frame": 20,
+          "wall_ms": 94.95158399999991,
+          "sharpen_ms": 6.029312
+        },
+        {
+          "frame": 21,
+          "wall_ms": 92.02012500000001,
+          "sharpen_ms": 4.980736
+        },
+        {
+          "frame": 22,
+          "wall_ms": 80.04366699999991,
+          "sharpen_ms": 4.980736
+        },
+        {
+          "frame": 23,
+          "wall_ms": 91.79762500000015,
+          "sharpen_ms": 4.9152
+        },
+        {
+          "frame": 24,
+          "wall_ms": 81.97570799999994,
+          "sharpen_ms": 4.849664
+        },
+        {
+          "frame": 25,
+          "wall_ms": 88.77833299999975,
+          "sharpen_ms": 10.878976
+        },
+        {
+          "frame": 26,
+          "wall_ms": 88.709292,
+          "sharpen_ms": 5.439488
+        },
+        {
+          "frame": 27,
+          "wall_ms": 89.19658299999992,
+          "sharpen_ms": 5.57056
+        },
+        {
+          "frame": 28,
+          "wall_ms": 85.66587499999969,
+          "sharpen_ms": 4.849664
+        },
+        {
+          "frame": 29,
+          "wall_ms": 84.4702500000003,
+          "sharpen_ms": 4.784128
+        },
+        {
+          "frame": 30,
+          "wall_ms": 132.7437090000003,
+          "sharpen_ms": 4.784128
+        }
+      ]
+    },
+    {
+      "sceneId": "minimal-power-dam-break-64",
+      "tileWork": true,
+      "frames": 30,
+      "medianWall_ms": 79.64733299999989,
+      "medianSharpen_ms": 1.572864,
+      "parity": [
+        {
+          "maxAbs": 179.4636535627757,
+          "meanAbs": 0.07838180401677554,
+          "sumA": 94208.04906862875,
+          "sumB": 94208.04859714399
+        },
+        {
+          "maxAbs": 0.4124131500720978,
+          "meanAbs": 0.011236725623020164,
+          "sumA": 7051.687164192533,
+          "sumB": 6839.337622016334
+        },
+        {
+          "maxAbs": 6.357926368713379,
+          "meanAbs": 0.02720703326528852,
+          "sumA": -103166.6687751784,
+          "sumB": -98397.52933258118
+        }
+      ],
+      "stats": {
+        "nx": 64,
+        "ny": 64,
+        "nz": 64,
+        "storedNy": 64,
+        "cellCount": 262144,
+        "equivalentUniformCells": 262144,
+        "compressionRatio": 1,
+        "activeCompressionRatio": 1,
+        "activeSampleCount": 262144,
+        "regularLayers": 64,
+        "maximumNeighborDelta": 0,
+        "gridKind": "uniform",
+        "cellSize_m": 0.0125,
+        "pressureIterations": 0,
+        "pressureSolver": "CM11a dense LCP multigrid (3 Full-Cycles + 4 V-Cycles, 6/6 pre/post PRBGS)",
+        "allocatedBytes": 120228244,
+        "quality": "balanced",
+        "submittedTime_s": 0.9999999999999999,
+        "simulatedTime_s": 0.9999999999999999,
+        "completedTime_s": 0.9999999999999999,
+        "simulationLag_s": 1.1102230246251565e-16,
+        "encodedSteps": 30,
+        "maximumTallCellHeight": 0,
+        "volumeControl": true,
+        "hostFluidAuthority": "gpu-resident",
+        "hostSimulationSizedWorkItems": 0,
+        "hostSchedulingUsesReadback": false,
+        "initialVolumeCellSum": 94208.00000000116,
+        "volumeCellSum": 94207.6025390625,
+        "representedVolumeCellSum": 87957.59033203125,
+        "volumeDrift": -4.218972259937036e-06,
+        "representedVolumeDrift": -0.0663469096888782,
+        "rawVolumeDrift": -4.218972259937036e-06,
+        "volumeTelemetrySource": "dense-volume",
+        "maxSpeed_m_s": 6.1605634689331055,
+        "front_m": 0.4,
+        "frontTelemetrySource": "dense-volume",
+        "uniformPipelineFacts": {
+          "extrapolationFrontSweeps": 16,
+          "extrapolationHierarchyLevels": 6,
+          "extrapolationPassesPerInvocation": 48,
+          "multigridLevels": 6,
+          "multigridPasses": {
+            "setup": 19,
+            "full-cycle": 1392,
+            "v-cycle": 596,
+            "finish": 1
+          },
+          "multigridPassesTotal": 2008,
+          "pressureSchedule": {
+            "residualTolerance": 0.0001,
+            "fullCycles": 3,
+            "vCycles": 4,
+            "preSweeps": 6,
+            "postSweeps": 6
+          }
+        },
+        "lastDt_s": 0.03333333333333333,
+        "lastSubsteps": 1,
+        "referenceLiquidVolume_cells": 94208.00000000116,
+        "uniformUnplaceableSolidExcess_cells": 0,
+        "uniformCM11aResidualInfinity": 8.84730470716022e-05,
+        "uniformCM11aConverged": true,
+        "uniformCM11aCoarseIterations": 12,
+        "uniformCM11aCycleConverged": false,
+        "uniformCM11aFullCyclesExecuted": 3,
+        "uniformCM11aVCyclesExecuted": 4,
+        "uniformCM11aCapFailure": false,
+        "uniformCM11aFailingCoarseInvocation": 0,
+        "uniformCM11aCoarseMaxAbsRhs": 0,
+        "uniformCM11aCoarseMaxDiagonalPressure": 0,
+        "uniformCM11aCoarseMaxAbsPressure": 0,
+        "uniformCM11aCoarseProjectedGapPressure": 0,
+        "uniformCM11aCoarseNormalizedProjectedResidual": 0,
+        "uniformCM11aFineResidualInfinity": 0.0011048532323911786,
+        "uniformCM11aFineProjectedGapPressure": 0.0009982300689443946,
+        "uniformCM11aCoarseActiveRows": 0,
+        "uniformCM11aCoarseFreeRows": 0,
+        "uniformCM11aCoarseWorstRow": 0,
+        "uniformCM11aCoarseWorstRowActive": false,
+        "uniformCM11aCoarseWorstRowHalo": false,
+        "uniformFIMTerminalActiveFaces": 69,
+        "uniformFIMConverged": false,
+        "uniformFIMExecutedPasses": 16,
+        "uniformActiveRegionMinimum": {
+          "x": 0,
+          "y": 0,
+          "z": 0
+        },
+        "uniformActiveRegionMaximum": {
+          "x": 64,
+          "y": 64,
+          "z": 64
+        },
+        "uniformActiveRegionCellCount": 262144,
+        "uniformActiveRegionFraction": 1
+      },
+      "samples": [
+        {
+          "frame": 1,
+          "wall_ms": 80.88633300000038,
+          "sharpen_ms": 1.6384
+        },
+        {
+          "frame": 2,
+          "wall_ms": 76.97254100000009,
+          "sharpen_ms": 1.507328
+        },
+        {
+          "frame": 3,
+          "wall_ms": 87.8930419999997,
+          "sharpen_ms": 1.703936
+        },
+        {
+          "frame": 4,
+          "wall_ms": 74.42641600000024,
+          "sharpen_ms": 1.572864
+        },
+        {
+          "frame": 5,
+          "wall_ms": 87.67420800000036,
+          "sharpen_ms": 1.6384
+        },
+        {
+          "frame": 6,
+          "wall_ms": 80.75575000000026,
+          "sharpen_ms": 1.376256
+        },
+        {
+          "frame": 7,
+          "wall_ms": 77.0899159999999,
+          "sharpen_ms": 1.376256
+        },
+        {
+          "frame": 8,
+          "wall_ms": 79.64733299999989,
+          "sharpen_ms": 1.507328
+        },
+        {
+          "frame": 9,
+          "wall_ms": 81.30883399999948,
+          "sharpen_ms": 1.245184
+        },
+        {
+          "frame": 10,
+          "wall_ms": 76.68645900000047,
+          "sharpen_ms": 1.179648
+        },
+        {
+          "frame": 11,
+          "wall_ms": 74.03345799999988,
+          "sharpen_ms": 1.245184
+        },
+        {
+          "frame": 12,
+          "wall_ms": 76.3657919999996,
+          "sharpen_ms": 1.245184
+        },
+        {
+          "frame": 13,
+          "wall_ms": 84.69258399999944,
+          "sharpen_ms": 1.376256
+        },
+        {
+          "frame": 14,
+          "wall_ms": 82.48841700000048,
+          "sharpen_ms": 1.179648
+        },
+        {
+          "frame": 15,
+          "wall_ms": 74.47487499999988,
+          "sharpen_ms": 1.179648
+        },
+        {
+          "frame": 16,
+          "wall_ms": 76.9253749999998,
+          "sharpen_ms": 1.376256
+        },
+        {
+          "frame": 17,
+          "wall_ms": 77.89199999999983,
+          "sharpen_ms": 1.31072
+        },
+        {
+          "frame": 18,
+          "wall_ms": 86.00916599999982,
+          "sharpen_ms": 1.507328
+        },
+        {
+          "frame": 19,
+          "wall_ms": 78.77424999999948,
+          "sharpen_ms": 1.6384
+        },
+        {
+          "frame": 20,
+          "wall_ms": 86.36495800000012,
+          "sharpen_ms": 1.769472
+        },
+        {
+          "frame": 21,
+          "wall_ms": 86.16612500000065,
+          "sharpen_ms": 1.703936
+        },
+        {
+          "frame": 22,
+          "wall_ms": 83.51170899999943,
+          "sharpen_ms": 1.703936
+        },
+        {
+          "frame": 23,
+          "wall_ms": 62.880583000000115,
+          "sharpen_ms": 1.572864
+        },
+        {
+          "frame": 24,
+          "wall_ms": 83.9482909999997,
+          "sharpen_ms": 4.194304
+        },
+        {
+          "frame": 25,
+          "wall_ms": 85.66704200000004,
+          "sharpen_ms": 1.6384
+        },
+        {
+          "frame": 26,
+          "wall_ms": 75.41137500000059,
+          "sharpen_ms": 1.769472
+        },
+        {
+          "frame": 27,
+          "wall_ms": 86.29612499999985,
+          "sharpen_ms": 1.835008
+        },
+        {
+          "frame": 28,
+          "wall_ms": 84.03212499999972,
+          "sharpen_ms": 1.900544
+        },
+        {
+          "frame": 29,
+          "wall_ms": 79.34754199999952,
+          "sharpen_ms": 1.835008
+        },
+        {
+          "frame": 30,
+          "wall_ms": 79.13358299999982,
+          "sharpen_ms": 1.703936
+        }
+      ]
+    },
+    {
+      "sceneId": "minimal-power-dam-break-64",
+      "tileWork": true,
+      "frames": 30,
+      "medianWall_ms": 83.28754200000003,
+      "medianSharpen_ms": 1.507328,
+      "parity": [
+        {
+          "maxAbs": 247.51176524162292,
+          "meanAbs": 0.06489373833452836,
+          "sumA": 94208.04906862875,
+          "sumB": 94208.04895055392
+        },
+        {
+          "maxAbs": 0.3004654326941818,
+          "meanAbs": 0.005981407311614903,
+          "sumA": 7051.687164192533,
+          "sumB": 7212.984171677362
+        },
+        {
+          "maxAbs": 4.612000942230225,
+          "meanAbs": 0.01664911328464859,
+          "sumA": -103166.6687751784,
+          "sumB": -101783.91368859546
+        }
+      ],
+      "stats": {
+        "nx": 64,
+        "ny": 64,
+        "nz": 64,
+        "storedNy": 64,
+        "cellCount": 262144,
+        "equivalentUniformCells": 262144,
+        "compressionRatio": 1,
+        "activeCompressionRatio": 1,
+        "activeSampleCount": 262144,
+        "regularLayers": 64,
+        "maximumNeighborDelta": 0,
+        "gridKind": "uniform",
+        "cellSize_m": 0.0125,
+        "pressureIterations": 0,
+        "pressureSolver": "CM11a dense LCP multigrid (3 Full-Cycles + 4 V-Cycles, 6/6 pre/post PRBGS)",
+        "allocatedBytes": 120228244,
+        "quality": "balanced",
+        "submittedTime_s": 0.9999999999999999,
+        "simulatedTime_s": 0.9999999999999999,
+        "completedTime_s": 0.9999999999999999,
+        "simulationLag_s": 1.1102230246251565e-16,
+        "encodedSteps": 30,
+        "maximumTallCellHeight": 0,
+        "volumeControl": true,
+        "hostFluidAuthority": "gpu-resident",
+        "hostSimulationSizedWorkItems": 0,
+        "hostSchedulingUsesReadback": false,
+        "initialVolumeCellSum": 94208.00000000116,
+        "volumeCellSum": 94207.578125,
+        "representedVolumeCellSum": 88756.56591796875,
+        "volumeDrift": -4.478122889395253e-06,
+        "representedVolumeDrift": -0.05786593582320341,
+        "rawVolumeDrift": -4.478122889395253e-06,
+        "volumeTelemetrySource": "dense-volume",
+        "maxSpeed_m_s": 6.333458423614502,
+        "front_m": 0.4,
+        "frontTelemetrySource": "dense-volume",
+        "uniformPipelineFacts": {
+          "extrapolationFrontSweeps": 16,
+          "extrapolationHierarchyLevels": 6,
+          "extrapolationPassesPerInvocation": 48,
+          "multigridLevels": 6,
+          "multigridPasses": {
+            "setup": 19,
+            "full-cycle": 1392,
+            "v-cycle": 596,
+            "finish": 1
+          },
+          "multigridPassesTotal": 2008,
+          "pressureSchedule": {
+            "residualTolerance": 0.0001,
+            "fullCycles": 3,
+            "vCycles": 4,
+            "preSweeps": 6,
+            "postSweeps": 6
+          }
+        },
+        "lastDt_s": 0.03333333333333333,
+        "lastSubsteps": 1,
+        "referenceLiquidVolume_cells": 94208.00000000116,
+        "uniformUnplaceableSolidExcess_cells": 0,
+        "uniformCM11aResidualInfinity": 9.287244756706059e-05,
+        "uniformCM11aConverged": true,
+        "uniformCM11aCoarseIterations": 12,
+        "uniformCM11aCycleConverged": false,
+        "uniformCM11aFullCyclesExecuted": 3,
+        "uniformCM11aVCyclesExecuted": 4,
+        "uniformCM11aCapFailure": false,
+        "uniformCM11aFailingCoarseInvocation": 0,
+        "uniformCM11aCoarseMaxAbsRhs": 0,
+        "uniformCM11aCoarseMaxDiagonalPressure": 0,
+        "uniformCM11aCoarseMaxAbsPressure": 0,
+        "uniformCM11aCoarseProjectedGapPressure": 0,
+        "uniformCM11aCoarseNormalizedProjectedResidual": 0,
+        "uniformCM11aFineResidualInfinity": 0.00212087482213974,
+        "uniformCM11aFineProjectedGapPressure": 0.00187606830149889,
+        "uniformCM11aCoarseActiveRows": 0,
+        "uniformCM11aCoarseFreeRows": 0,
+        "uniformCM11aCoarseWorstRow": 0,
+        "uniformCM11aCoarseWorstRowActive": false,
+        "uniformCM11aCoarseWorstRowHalo": false,
+        "uniformFIMTerminalActiveFaces": 97,
+        "uniformFIMConverged": false,
+        "uniformFIMExecutedPasses": 16,
+        "uniformActiveRegionMinimum": {
+          "x": 0,
+          "y": 0,
+          "z": 0
+        },
+        "uniformActiveRegionMaximum": {
+          "x": 64,
+          "y": 64,
+          "z": 64
+        },
+        "uniformActiveRegionCellCount": 262144,
+        "uniformActiveRegionFraction": 1
+      },
+      "samples": [
+        {
+          "frame": 1,
+          "wall_ms": 75.0980840000002,
+          "sharpen_ms": 1.6384
+        },
+        {
+          "frame": 2,
+          "wall_ms": 73.41454200000044,
+          "sharpen_ms": 1.572864
+        },
+        {
+          "frame": 3,
+          "wall_ms": 87.56037500000002,
+          "sharpen_ms": 1.769472
+        },
+        {
+          "frame": 4,
+          "wall_ms": 81.33600000000024,
+          "sharpen_ms": 1.6384
+        },
+        {
+          "frame": 5,
+          "wall_ms": 72.32304099999965,
+          "sharpen_ms": 1.376256
+        },
+        {
+          "frame": 6,
+          "wall_ms": 90.30195800000001,
+          "sharpen_ms": 1.6384
+        },
+        {
+          "frame": 7,
+          "wall_ms": 83.3862079999999,
+          "sharpen_ms": 1.507328
+        },
+        {
+          "frame": 8,
+          "wall_ms": 83.65454099999988,
+          "sharpen_ms": 1.441792
+        },
+        {
+          "frame": 9,
+          "wall_ms": 77.39645799999926,
+          "sharpen_ms": 1.376256
+        },
+        {
+          "frame": 10,
+          "wall_ms": 82.44200000000001,
+          "sharpen_ms": 8.454144
+        },
+        {
+          "frame": 11,
+          "wall_ms": 83.28754200000003,
+          "sharpen_ms": 1.114112
+        },
+        {
+          "frame": 12,
+          "wall_ms": 79.37816699999985,
+          "sharpen_ms": 1.114112
+        },
+        {
+          "frame": 13,
+          "wall_ms": 78.93579200000022,
+          "sharpen_ms": 1.179648
+        },
+        {
+          "frame": 14,
+          "wall_ms": 80.20062499999949,
+          "sharpen_ms": 1.114112
+        },
+        {
+          "frame": 15,
+          "wall_ms": 84.73041700000067,
+          "sharpen_ms": 1.376256
+        },
+        {
+          "frame": 16,
+          "wall_ms": 80.4252090000009,
+          "sharpen_ms": 1.31072
+        },
+        {
+          "frame": 17,
+          "wall_ms": 84.63895899999989,
+          "sharpen_ms": 1.441792
+        },
+        {
+          "frame": 18,
+          "wall_ms": 85.66883299999972,
+          "sharpen_ms": 1.376256
+        },
+        {
+          "frame": 19,
+          "wall_ms": 97.07537500000035,
+          "sharpen_ms": 1.507328
+        },
+        {
+          "frame": 20,
+          "wall_ms": 93.90937500000109,
+          "sharpen_ms": 1.769472
+        },
+        {
+          "frame": 21,
+          "wall_ms": 80.71216599999934,
+          "sharpen_ms": 1.703936
+        },
+        {
+          "frame": 22,
+          "wall_ms": 79.6374160000014,
+          "sharpen_ms": 1.900544
+        },
+        {
+          "frame": 23,
+          "wall_ms": 85.38395800000035,
+          "sharpen_ms": 1.703936
+        },
+        {
+          "frame": 24,
+          "wall_ms": 84.62258400000064,
+          "sharpen_ms": 1.572864
+        },
+        {
+          "frame": 25,
+          "wall_ms": 84.2098330000008,
+          "sharpen_ms": 1.769472
+        },
+        {
+          "frame": 26,
+          "wall_ms": 81.86391699999876,
+          "sharpen_ms": 1.703936
+        },
+        {
+          "frame": 27,
+          "wall_ms": 75.80312500000036,
+          "sharpen_ms": 1.703936
+        },
+        {
+          "frame": 28,
+          "wall_ms": 84.12075000000004,
+          "sharpen_ms": 1.835008
+        },
+        {
+          "frame": 29,
+          "wall_ms": 91.05870900000082,
+          "sharpen_ms": 1.769472
+        },
+        {
+          "frame": 30,
+          "wall_ms": 82.2484170000007,
+          "sharpen_ms": 1.441792
+        }
+      ]
+    },
+    {
+      "sceneId": "minimal-power-dam-break-64",
+      "tileWork": false,
+      "frames": 30,
+      "medianWall_ms": 83.82937499999935,
+      "medianSharpen_ms": 4.980736,
+      "parity": [
+        {
+          "maxAbs": 189.3591651916504,
+          "meanAbs": 0.07393856753380923,
+          "sumA": 94208.04906862875,
+          "sumB": 94208.04895837785
+        },
+        {
+          "maxAbs": 0.4066264405846596,
+          "meanAbs": 0.013453132986818335,
+          "sumA": 7051.687164192533,
+          "sumB": 7024.663785013537
+        },
+        {
+          "maxAbs": 4.612000942230225,
+          "meanAbs": 0.022045621117076517,
+          "sumA": -103166.6687751784,
+          "sumB": -99340.14946513365
+        }
+      ],
+      "stats": {
+        "nx": 64,
+        "ny": 64,
+        "nz": 64,
+        "storedNy": 64,
+        "cellCount": 262144,
+        "equivalentUniformCells": 262144,
+        "compressionRatio": 1,
+        "activeCompressionRatio": 1,
+        "activeSampleCount": 262144,
+        "regularLayers": 64,
+        "maximumNeighborDelta": 0,
+        "gridKind": "uniform",
+        "cellSize_m": 0.0125,
+        "pressureIterations": 0,
+        "pressureSolver": "CM11a dense LCP multigrid (3 Full-Cycles + 4 V-Cycles, 6/6 pre/post PRBGS)",
+        "allocatedBytes": 120228244,
+        "quality": "balanced",
+        "submittedTime_s": 0.9999999999999999,
+        "simulatedTime_s": 0.9999999999999999,
+        "completedTime_s": 0.9999999999999999,
+        "simulationLag_s": 1.1102230246251565e-16,
+        "encodedSteps": 30,
+        "maximumTallCellHeight": 0,
+        "volumeControl": true,
+        "hostFluidAuthority": "gpu-resident",
+        "hostSimulationSizedWorkItems": 0,
+        "hostSchedulingUsesReadback": false,
+        "initialVolumeCellSum": 94208.00000000116,
+        "volumeCellSum": 94207.6572265625,
+        "representedVolumeCellSum": 88013.57958984375,
+        "volumeDrift": -3.6384748499506303e-06,
+        "representedVolumeDrift": -0.06575259436732908,
+        "rawVolumeDrift": -3.6384748499506303e-06,
+        "volumeTelemetrySource": "dense-volume",
+        "maxSpeed_m_s": 6.044060707092285,
+        "front_m": 0.4,
+        "frontTelemetrySource": "dense-volume",
+        "uniformPipelineFacts": {
+          "extrapolationFrontSweeps": 16,
+          "extrapolationHierarchyLevels": 6,
+          "extrapolationPassesPerInvocation": 48,
+          "multigridLevels": 6,
+          "multigridPasses": {
+            "setup": 19,
+            "full-cycle": 1392,
+            "v-cycle": 596,
+            "finish": 1
+          },
+          "multigridPassesTotal": 2008,
+          "pressureSchedule": {
+            "residualTolerance": 0.0001,
+            "fullCycles": 3,
+            "vCycles": 4,
+            "preSweeps": 6,
+            "postSweeps": 6
+          }
+        },
+        "lastDt_s": 0.03333333333333333,
+        "lastSubsteps": 1,
+        "referenceLiquidVolume_cells": 94208.00000000116,
+        "uniformUnplaceableSolidExcess_cells": 0,
+        "uniformCM11aResidualInfinity": 9.967527148546651e-05,
+        "uniformCM11aConverged": true,
+        "uniformCM11aCoarseIterations": 12,
+        "uniformCM11aCycleConverged": false,
+        "uniformCM11aFullCyclesExecuted": 3,
+        "uniformCM11aVCyclesExecuted": 4,
+        "uniformCM11aCapFailure": false,
+        "uniformCM11aFailingCoarseInvocation": 0,
+        "uniformCM11aCoarseMaxAbsRhs": 0,
+        "uniformCM11aCoarseMaxDiagonalPressure": 0,
+        "uniformCM11aCoarseMaxAbsPressure": 0,
+        "uniformCM11aCoarseProjectedGapPressure": 0,
+        "uniformCM11aCoarseNormalizedProjectedResidual": 0,
+        "uniformCM11aFineResidualInfinity": 0.0020488700829446316,
+        "uniformCM11aFineProjectedGapPressure": 0.0018032838124781847,
+        "uniformCM11aCoarseActiveRows": 0,
+        "uniformCM11aCoarseFreeRows": 0,
+        "uniformCM11aCoarseWorstRow": 0,
+        "uniformCM11aCoarseWorstRowActive": false,
+        "uniformCM11aCoarseWorstRowHalo": false,
+        "uniformFIMTerminalActiveFaces": 64,
+        "uniformFIMConverged": false,
+        "uniformFIMExecutedPasses": 16,
+        "uniformActiveRegionMinimum": {
+          "x": 0,
+          "y": 0,
+          "z": 0
+        },
+        "uniformActiveRegionMaximum": {
+          "x": 64,
+          "y": 64,
+          "z": 64
+        },
+        "uniformActiveRegionCellCount": 262144,
+        "uniformActiveRegionFraction": 1
+      },
+      "samples": [
+        {
+          "frame": 1,
+          "wall_ms": 71.31329199999891,
+          "sharpen_ms": 4.849664
+        },
+        {
+          "frame": 2,
+          "wall_ms": 73.25283299999865,
+          "sharpen_ms": 4.980736
+        },
+        {
+          "frame": 3,
+          "wall_ms": 78.49933299999975,
+          "sharpen_ms": 4.980736
+        },
+        {
+          "frame": 4,
+          "wall_ms": 81.43820799999958,
+          "sharpen_ms": 4.9152
+        },
+        {
+          "frame": 5,
+          "wall_ms": 74.92329099999915,
+          "sharpen_ms": 4.980736
+        },
+        {
+          "frame": 6,
+          "wall_ms": 73.14316599999984,
+          "sharpen_ms": 8.192
+        },
+        {
+          "frame": 7,
+          "wall_ms": 78.23845799999981,
+          "sharpen_ms": 4.849664
+        },
+        {
+          "frame": 8,
+          "wall_ms": 88.78387499999917,
+          "sharpen_ms": 4.9152
+        },
+        {
+          "frame": 9,
+          "wall_ms": 76.22050000000127,
+          "sharpen_ms": 4.849664
+        },
+        {
+          "frame": 10,
+          "wall_ms": 84.34320800000023,
+          "sharpen_ms": 4.9152
+        },
+        {
+          "frame": 11,
+          "wall_ms": 74.14670800000022,
+          "sharpen_ms": 4.9152
+        },
+        {
+          "frame": 12,
+          "wall_ms": 76.63104200000089,
+          "sharpen_ms": 5.046272
+        },
+        {
+          "frame": 13,
+          "wall_ms": 138.91141699999935,
+          "sharpen_ms": 4.980736
+        },
+        {
+          "frame": 14,
+          "wall_ms": 83.82937499999935,
+          "sharpen_ms": 5.111808
+        },
+        {
+          "frame": 15,
+          "wall_ms": 81.24145800000042,
+          "sharpen_ms": 4.980736
+        },
+        {
+          "frame": 16,
+          "wall_ms": 95.85441600000013,
+          "sharpen_ms": 7.20896
+        },
+        {
+          "frame": 17,
+          "wall_ms": 81.03974999999991,
+          "sharpen_ms": 14.155776
+        },
+        {
+          "frame": 18,
+          "wall_ms": 83.27266699999927,
+          "sharpen_ms": 4.9152
+        },
+        {
+          "frame": 19,
+          "wall_ms": 85.08462500000132,
+          "sharpen_ms": 11.599872
+        },
+        {
+          "frame": 20,
+          "wall_ms": 90.01187500000015,
+          "sharpen_ms": 5.046272
+        },
+        {
+          "frame": 21,
+          "wall_ms": 84.98420799999985,
+          "sharpen_ms": 4.784128
+        },
+        {
+          "frame": 22,
+          "wall_ms": 99.44620899999973,
+          "sharpen_ms": 5.111808
+        },
+        {
+          "frame": 23,
+          "wall_ms": 81.65204199999971,
+          "sharpen_ms": 4.784128
+        },
+        {
+          "frame": 24,
+          "wall_ms": 83.57854100000077,
+          "sharpen_ms": 4.849664
+        },
+        {
+          "frame": 25,
+          "wall_ms": 91.79758299999958,
+          "sharpen_ms": 4.980736
+        },
+        {
+          "frame": 26,
+          "wall_ms": 80.89754100000027,
+          "sharpen_ms": 4.9152
+        },
+        {
+          "frame": 27,
+          "wall_ms": 84.78425000000061,
+          "sharpen_ms": 11.206656
+        },
+        {
+          "frame": 28,
+          "wall_ms": 88.63037500000064,
+          "sharpen_ms": 4.849664
+        },
+        {
+          "frame": 29,
+          "wall_ms": 105.21458300000086,
+          "sharpen_ms": 4.980736
+        },
+        {
+          "frame": 30,
+          "wall_ms": 87.88999999999942,
+          "sharpen_ms": 4.784128
+        }
+      ]
+    },
+    {
+      "gate": "minimal-power-dam-break-64",
+      "wallRatio": 0.9612946380503339,
+      "sharpenRatio": 0.3012820512820513,
+      "noSlowdown": true
+    },
+    {
+      "sceneId": "large-power-dam-break",
+      "tileWork": false,
+      "frames": 30,
+      "medianWall_ms": 45.27995900000133,
+      "medianSharpen_ms": 1.835008,
+      "stats": {
+        "nx": 64,
+        "ny": 20,
+        "nz": 64,
+        "storedNy": 20,
+        "cellCount": 81920,
+        "equivalentUniformCells": 81920,
+        "compressionRatio": 1,
+        "activeCompressionRatio": 1,
+        "activeSampleCount": 81920,
+        "regularLayers": 20,
+        "maximumNeighborDelta": 0,
+        "gridKind": "uniform",
+        "cellSize_m": 0.05,
+        "pressureIterations": 0,
+        "pressureSolver": "CM11a dense LCP multigrid (3 Full-Cycles + 4 V-Cycles, 6/6 pre/post PRBGS)",
+        "allocatedBytes": 39197116,
+        "quality": "balanced",
+        "submittedTime_s": 0.9999999999999999,
+        "simulatedTime_s": 0.9999999999999999,
+        "completedTime_s": 0.9999999999999999,
+        "simulationLag_s": 1.1102230246251565e-16,
+        "encodedSteps": 30,
+        "maximumTallCellHeight": 0,
+        "volumeControl": true,
+        "hostFluidAuthority": "gpu-resident",
+        "hostSimulationSizedWorkItems": 0,
+        "hostSchedulingUsesReadback": false,
+        "initialVolumeCellSum": 1472.0000000000025,
+        "volumeCellSum": 1471.88916015625,
+        "representedVolumeCellSum": 3201.62744140625,
+        "volumeDrift": -7.529880689707944e-05,
+        "representedVolumeDrift": 1.1750186422596771,
+        "rawVolumeDrift": -7.529880689707944e-05,
+        "volumeTelemetrySource": "dense-volume",
+        "maxSpeed_m_s": 2.9827287197113037,
+        "front_m": 0.8500000000000001,
+        "frontTelemetrySource": "dense-volume",
+        "uniformPipelineFacts": {
+          "extrapolationFrontSweeps": 16,
+          "extrapolationHierarchyLevels": 5,
+          "extrapolationPassesPerInvocation": 46,
+          "multigridLevels": 6,
+          "multigridPasses": {
+            "setup": 19,
+            "full-cycle": 1392,
+            "v-cycle": 596,
+            "finish": 1
+          },
+          "multigridPassesTotal": 2008,
+          "pressureSchedule": {
+            "residualTolerance": 0.0001,
+            "fullCycles": 3,
+            "vCycles": 4,
+            "preSweeps": 6,
+            "postSweeps": 6
+          }
+        },
+        "lastDt_s": 0.03333333333333333,
+        "lastSubsteps": 1,
+        "referenceLiquidVolume_cells": 1472.0000000000025,
+        "uniformUnplaceableSolidExcess_cells": 0,
+        "uniformCM11aResidualInfinity": 0,
+        "uniformCM11aConverged": true,
+        "uniformCM11aCoarseIterations": 1,
+        "uniformCM11aCycleConverged": true,
+        "uniformCM11aFullCyclesExecuted": 2,
+        "uniformCM11aVCyclesExecuted": 0,
+        "uniformCM11aCapFailure": false,
+        "uniformCM11aFailingCoarseInvocation": 0,
+        "uniformCM11aCoarseMaxAbsRhs": 0,
+        "uniformCM11aCoarseMaxDiagonalPressure": 0,
+        "uniformCM11aCoarseMaxAbsPressure": 0,
+        "uniformCM11aCoarseProjectedGapPressure": 0,
+        "uniformCM11aCoarseNormalizedProjectedResidual": 0,
+        "uniformCM11aFineResidualInfinity": 8.191828237613663e-05,
+        "uniformCM11aFineProjectedGapPressure": 0.0011967888567596674,
+        "uniformCM11aCoarseActiveRows": 0,
+        "uniformCM11aCoarseFreeRows": 0,
+        "uniformCM11aCoarseWorstRow": 0,
+        "uniformCM11aCoarseWorstRowActive": false,
+        "uniformCM11aCoarseWorstRowHalo": false,
+        "uniformFIMTerminalActiveFaces": 0,
+        "uniformFIMConverged": true,
+        "uniformFIMExecutedPasses": 8,
+        "uniformActiveRegionMinimum": {
+          "x": 0,
+          "y": 0,
+          "z": 0
+        },
+        "uniformActiveRegionMaximum": {
+          "x": 64,
+          "y": 20,
+          "z": 64
+        },
+        "uniformActiveRegionCellCount": 81920,
+        "uniformActiveRegionFraction": 1
+      },
+      "samples": [
+        {
+          "frame": 1,
+          "wall_ms": 57.73566599999867,
+          "sharpen_ms": 1.769472
+        },
+        {
+          "frame": 2,
+          "wall_ms": 42.53691699999945,
+          "sharpen_ms": 1.96608
+        },
+        {
+          "frame": 3,
+          "wall_ms": 56.54329200000029,
+          "sharpen_ms": 1.769472
+        },
+        {
+          "frame": 4,
+          "wall_ms": 46.27900000000045,
+          "sharpen_ms": 1.769472
+        },
+        {
+          "frame": 5,
+          "wall_ms": 54.56995800000004,
+          "sharpen_ms": 5.177344
+        },
+        {
+          "frame": 6,
+          "wall_ms": 58.87404199999946,
+          "sharpen_ms": 1.769472
+        },
+        {
+          "frame": 7,
+          "wall_ms": 50.649625000000015,
+          "sharpen_ms": 1.900544
+        },
+        {
+          "frame": 8,
+          "wall_ms": 55.840165999999954,
+          "sharpen_ms": 5.57056
+        },
+        {
+          "frame": 9,
+          "wall_ms": 53.951499999999214,
+          "sharpen_ms": 1.769472
+        },
+        {
+          "frame": 10,
+          "wall_ms": 86.52620800000113,
+          "sharpen_ms": 1.835008
+        },
+        {
+          "frame": 11,
+          "wall_ms": 54.123374999999214,
+          "sharpen_ms": 1.769472
+        },
+        {
+          "frame": 12,
+          "wall_ms": 48.86879100000078,
+          "sharpen_ms": 1.769472
+        },
+        {
+          "frame": 13,
+          "wall_ms": 44.38062499999978,
+          "sharpen_ms": 1.769472
+        },
+        {
+          "frame": 14,
+          "wall_ms": 51.04912499999955,
+          "sharpen_ms": 1.769472
+        },
+        {
+          "frame": 15,
+          "wall_ms": 44.89170800000102,
+          "sharpen_ms": 1.835008
+        },
+        {
+          "frame": 16,
+          "wall_ms": 51.88920800000051,
+          "sharpen_ms": 1.769472
+        },
+        {
+          "frame": 17,
+          "wall_ms": 48.86433399999987,
+          "sharpen_ms": 1.835008
+        },
+        {
+          "frame": 18,
+          "wall_ms": 44.387291999999434,
+          "sharpen_ms": 1.835008
+        },
+        {
+          "frame": 19,
+          "wall_ms": 44.57270799999969,
+          "sharpen_ms": 1.835008
+        },
+        {
+          "frame": 20,
+          "wall_ms": 44.53454199999942,
+          "sharpen_ms": 1.769472
+        },
+        {
+          "frame": 21,
+          "wall_ms": 41.42566599999918,
+          "sharpen_ms": 1.769472
+        },
+        {
+          "frame": 22,
+          "wall_ms": 44.68629200000032,
+          "sharpen_ms": 1.835008
+        },
+        {
+          "frame": 23,
+          "wall_ms": 44.86162499999955,
+          "sharpen_ms": 1.835008
+        },
+        {
+          "frame": 24,
+          "wall_ms": 42.56779199999983,
+          "sharpen_ms": 1.769472
+        },
+        {
+          "frame": 25,
+          "wall_ms": 44.97395800000049,
+          "sharpen_ms": 1.769472
+        },
+        {
+          "frame": 26,
+          "wall_ms": 45.27995900000133,
+          "sharpen_ms": 1.835008
+        },
+        {
+          "frame": 27,
+          "wall_ms": 40.25462499999958,
+          "sharpen_ms": 1.769472
+        },
+        {
+          "frame": 28,
+          "wall_ms": 45.96624999999949,
+          "sharpen_ms": 1.835008
+        },
+        {
+          "frame": 29,
+          "wall_ms": 43.96537499999977,
+          "sharpen_ms": 1.835008
+        },
+        {
+          "frame": 30,
+          "wall_ms": 44.280124999999316,
+          "sharpen_ms": 1.900544
+        }
+      ]
+    },
+    {
+      "sceneId": "large-power-dam-break",
+      "tileWork": true,
+      "frames": 30,
+      "medianWall_ms": 43.5034169999999,
+      "medianSharpen_ms": 0.524288,
+      "parity": [
+        {
+          "maxAbs": 0.2795618772506714,
+          "meanAbs": 2.3884295040560234e-05,
+          "sumA": 1472.0003663744803,
+          "sumB": 1472.0003593690142
+        },
+        {
+          "maxAbs": 3.3482909202575684e-05,
+          "meanAbs": 1.753883179581431e-06,
+          "sumA": 36747.99801620509,
+          "sumB": 36748.078343166475
+        },
+        {
+          "maxAbs": 0.000947311520576477,
+          "meanAbs": 4.986311523680342e-08,
+          "sumA": 3488.227978605777,
+          "sumB": 3488.228890132159
+        }
+      ],
+      "stats": {
+        "nx": 64,
+        "ny": 20,
+        "nz": 64,
+        "storedNy": 20,
+        "cellCount": 81920,
+        "equivalentUniformCells": 81920,
+        "compressionRatio": 1,
+        "activeCompressionRatio": 1,
+        "activeSampleCount": 81920,
+        "regularLayers": 20,
+        "maximumNeighborDelta": 0,
+        "gridKind": "uniform",
+        "cellSize_m": 0.05,
+        "pressureIterations": 0,
+        "pressureSolver": "CM11a dense LCP multigrid (3 Full-Cycles + 4 V-Cycles, 6/6 pre/post PRBGS)",
+        "allocatedBytes": 39197116,
+        "quality": "balanced",
+        "submittedTime_s": 0.9999999999999999,
+        "simulatedTime_s": 0.9999999999999999,
+        "completedTime_s": 0.9999999999999999,
+        "simulationLag_s": 1.1102230246251565e-16,
+        "encodedSteps": 30,
+        "maximumTallCellHeight": 0,
+        "volumeControl": true,
+        "hostFluidAuthority": "gpu-resident",
+        "hostSimulationSizedWorkItems": 0,
+        "hostSchedulingUsesReadback": false,
+        "initialVolumeCellSum": 1472.0000000000025,
+        "volumeCellSum": 1471.888671875,
+        "representedVolumeCellSum": 3201.6005859375,
+        "volumeDrift": -7.563051970278595e-05,
+        "representedVolumeDrift": 1.1750003980553632,
+        "rawVolumeDrift": -7.563051970278595e-05,
+        "volumeTelemetrySource": "dense-volume",
+        "maxSpeed_m_s": 2.982797145843506,
+        "front_m": 0.8500000000000001,
+        "frontTelemetrySource": "dense-volume",
+        "uniformPipelineFacts": {
+          "extrapolationFrontSweeps": 16,
+          "extrapolationHierarchyLevels": 5,
+          "extrapolationPassesPerInvocation": 46,
+          "multigridLevels": 6,
+          "multigridPasses": {
+            "setup": 19,
+            "full-cycle": 1392,
+            "v-cycle": 596,
+            "finish": 1
+          },
+          "multigridPassesTotal": 2008,
+          "pressureSchedule": {
+            "residualTolerance": 0.0001,
+            "fullCycles": 3,
+            "vCycles": 4,
+            "preSweeps": 6,
+            "postSweeps": 6
+          }
+        },
+        "lastDt_s": 0.03333333333333333,
+        "lastSubsteps": 1,
+        "referenceLiquidVolume_cells": 1472.0000000000025,
+        "uniformUnplaceableSolidExcess_cells": 0,
+        "uniformCM11aResidualInfinity": 0,
+        "uniformCM11aConverged": true,
+        "uniformCM11aCoarseIterations": 1,
+        "uniformCM11aCycleConverged": true,
+        "uniformCM11aFullCyclesExecuted": 2,
+        "uniformCM11aVCyclesExecuted": 0,
+        "uniformCM11aCapFailure": false,
+        "uniformCM11aFailingCoarseInvocation": 0,
+        "uniformCM11aCoarseMaxAbsRhs": 0,
+        "uniformCM11aCoarseMaxDiagonalPressure": 0,
+        "uniformCM11aCoarseMaxAbsPressure": 0,
+        "uniformCM11aCoarseProjectedGapPressure": 0,
+        "uniformCM11aCoarseNormalizedProjectedResidual": 0,
+        "uniformCM11aFineResidualInfinity": 8.296182932099327e-05,
+        "uniformCM11aFineProjectedGapPressure": 0.001207923050969839,
+        "uniformCM11aCoarseActiveRows": 0,
+        "uniformCM11aCoarseFreeRows": 0,
+        "uniformCM11aCoarseWorstRow": 0,
+        "uniformCM11aCoarseWorstRowActive": false,
+        "uniformCM11aCoarseWorstRowHalo": false,
+        "uniformFIMTerminalActiveFaces": 0,
+        "uniformFIMConverged": true,
+        "uniformFIMExecutedPasses": 8,
+        "uniformActiveRegionMinimum": {
+          "x": 0,
+          "y": 0,
+          "z": 0
+        },
+        "uniformActiveRegionMaximum": {
+          "x": 64,
+          "y": 20,
+          "z": 64
+        },
+        "uniformActiveRegionCellCount": 81920,
+        "uniformActiveRegionFraction": 1
+      },
+      "samples": [
+        {
+          "frame": 1,
+          "wall_ms": 45.852208000000246,
+          "sharpen_ms": 0.458752
+        },
+        {
+          "frame": 2,
+          "wall_ms": 41.87666700000045,
+          "sharpen_ms": 0.524288
+        },
+        {
+          "frame": 3,
+          "wall_ms": 44.937041999999565,
+          "sharpen_ms": 0.458752
+        },
+        {
+          "frame": 4,
+          "wall_ms": 48.85479200000009,
+          "sharpen_ms": 0.524288
+        },
+        {
+          "frame": 5,
+          "wall_ms": 47.10370900000089,
+          "sharpen_ms": 0.65536
+        },
+        {
+          "frame": 6,
+          "wall_ms": 44.88720900000044,
+          "sharpen_ms": 0.458752
+        },
+        {
+          "frame": 7,
+          "wall_ms": 46.08995900000082,
+          "sharpen_ms": 0.524288
+        },
+        {
+          "frame": 8,
+          "wall_ms": 41.285124999998516,
+          "sharpen_ms": 0.458752
+        },
+        {
+          "frame": 9,
+          "wall_ms": 43.5034169999999,
+          "sharpen_ms": 0.524288
+        },
+        {
+          "frame": 10,
+          "wall_ms": 44.23424999999952,
+          "sharpen_ms": 0.458752
+        },
+        {
+          "frame": 11,
+          "wall_ms": 45.961834000001545,
+          "sharpen_ms": 0.458752
+        },
+        {
+          "frame": 12,
+          "wall_ms": 46.125083000000814,
+          "sharpen_ms": 4.128768
+        },
+        {
+          "frame": 13,
+          "wall_ms": 48.26641700000073,
+          "sharpen_ms": 0.458752
+        },
+        {
+          "frame": 14,
+          "wall_ms": 44.842624999999316,
+          "sharpen_ms": 0.458752
+        },
+        {
+          "frame": 15,
+          "wall_ms": 44.763208000000304,
+          "sharpen_ms": 0.524288
+        },
+        {
+          "frame": 16,
+          "wall_ms": 41.30724999999984,
+          "sharpen_ms": 0.524288
+        },
+        {
+          "frame": 17,
+          "wall_ms": 51.49358399999983,
+          "sharpen_ms": 0.524288
+        },
+        {
+          "frame": 18,
+          "wall_ms": 61.6244999999999,
+          "sharpen_ms": 0.524288
+        },
+        {
+          "frame": 19,
+          "wall_ms": 41.24412499999926,
+          "sharpen_ms": 0.589824
+        },
+        {
+          "frame": 20,
+          "wall_ms": 37.81337499999972,
+          "sharpen_ms": 0.524288
+        },
+        {
+          "frame": 21,
+          "wall_ms": 43.494166999998924,
+          "sharpen_ms": 0.524288
+        },
+        {
+          "frame": 22,
+          "wall_ms": 38.60675000000083,
+          "sharpen_ms": 0.524288
+        },
+        {
+          "frame": 23,
+          "wall_ms": 43.07125000000087,
+          "sharpen_ms": 0.524288
+        },
+        {
+          "frame": 24,
+          "wall_ms": 39.572291999998924,
+          "sharpen_ms": 0.524288
+        },
+        {
+          "frame": 25,
+          "wall_ms": 43.20941700000003,
+          "sharpen_ms": 0.65536
+        },
+        {
+          "frame": 26,
+          "wall_ms": 37.72141600000032,
+          "sharpen_ms": 0.524288
+        },
+        {
+          "frame": 27,
+          "wall_ms": 41.60962499999914,
+          "sharpen_ms": 0.65536
+        },
+        {
+          "frame": 28,
+          "wall_ms": 39.54937500000051,
+          "sharpen_ms": 0.589824
+        },
+        {
+          "frame": 29,
+          "wall_ms": 43.624916999999186,
+          "sharpen_ms": 0.589824
+        },
+        {
+          "frame": 30,
+          "wall_ms": 36.889499999999316,
+          "sharpen_ms": 0.589824
+        }
+      ]
+    },
+    {
+      "sceneId": "large-power-dam-break",
+      "tileWork": true,
+      "frames": 30,
+      "medianWall_ms": 44.480459000002156,
+      "medianSharpen_ms": 0.524288,
+      "parity": [
+        {
+          "maxAbs": 0.06622052192687988,
+          "meanAbs": 2.89180738139867e-06,
+          "sumA": 1472.0003663744803,
+          "sumB": 1472.0003427256515
+        },
+        {
+          "maxAbs": 3.3404678106307983e-05,
+          "meanAbs": 1.7168640838386914e-06,
+          "sumA": 36747.99801620509,
+          "sumB": 36748.07317862654
+        },
+        {
+          "maxAbs": 0.0009217560291290283,
+          "meanAbs": 3.3321259707008724e-08,
+          "sumA": 3488.227978605777,
+          "sumB": 3488.2288870438933
+        }
+      ],
+      "stats": {
+        "nx": 64,
+        "ny": 20,
+        "nz": 64,
+        "storedNy": 20,
+        "cellCount": 81920,
+        "equivalentUniformCells": 81920,
+        "compressionRatio": 1,
+        "activeCompressionRatio": 1,
+        "activeSampleCount": 81920,
+        "regularLayers": 20,
+        "maximumNeighborDelta": 0,
+        "gridKind": "uniform",
+        "cellSize_m": 0.05,
+        "pressureIterations": 0,
+        "pressureSolver": "CM11a dense LCP multigrid (3 Full-Cycles + 4 V-Cycles, 6/6 pre/post PRBGS)",
+        "allocatedBytes": 39197116,
+        "quality": "balanced",
+        "submittedTime_s": 0.9999999999999999,
+        "simulatedTime_s": 0.9999999999999999,
+        "completedTime_s": 0.9999999999999999,
+        "simulationLag_s": 1.1102230246251565e-16,
+        "encodedSteps": 30,
+        "maximumTallCellHeight": 0,
+        "volumeControl": true,
+        "hostFluidAuthority": "gpu-resident",
+        "hostSimulationSizedWorkItems": 0,
+        "hostSchedulingUsesReadback": false,
+        "initialVolumeCellSum": 1472.0000000000025,
+        "volumeCellSum": 1471.888671875,
+        "representedVolumeCellSum": 3201.6015625,
+        "volumeDrift": -7.563051970278595e-05,
+        "representedVolumeDrift": 1.1750010614809745,
+        "rawVolumeDrift": -7.563051970278595e-05,
+        "volumeTelemetrySource": "dense-volume",
+        "maxSpeed_m_s": 2.9827914237976074,
+        "front_m": 0.8500000000000001,
+        "frontTelemetrySource": "dense-volume",
+        "uniformPipelineFacts": {
+          "extrapolationFrontSweeps": 16,
+          "extrapolationHierarchyLevels": 5,
+          "extrapolationPassesPerInvocation": 46,
+          "multigridLevels": 6,
+          "multigridPasses": {
+            "setup": 19,
+            "full-cycle": 1392,
+            "v-cycle": 596,
+            "finish": 1
+          },
+          "multigridPassesTotal": 2008,
+          "pressureSchedule": {
+            "residualTolerance": 0.0001,
+            "fullCycles": 3,
+            "vCycles": 4,
+            "preSweeps": 6,
+            "postSweeps": 6
+          }
+        },
+        "lastDt_s": 0.03333333333333333,
+        "lastSubsteps": 1,
+        "referenceLiquidVolume_cells": 1472.0000000000025,
+        "uniformUnplaceableSolidExcess_cells": 0,
+        "uniformCM11aResidualInfinity": 0,
+        "uniformCM11aConverged": true,
+        "uniformCM11aCoarseIterations": 1,
+        "uniformCM11aCycleConverged": true,
+        "uniformCM11aFullCyclesExecuted": 2,
+        "uniformCM11aVCyclesExecuted": 0,
+        "uniformCM11aCapFailure": false,
+        "uniformCM11aFailingCoarseInvocation": 0,
+        "uniformCM11aCoarseMaxAbsRhs": 0,
+        "uniformCM11aCoarseMaxDiagonalPressure": 0,
+        "uniformCM11aCoarseMaxAbsPressure": 0,
+        "uniformCM11aCoarseProjectedGapPressure": 0,
+        "uniformCM11aCoarseNormalizedProjectedResidual": 0,
+        "uniformCM11aFineResidualInfinity": 8.244005584856495e-05,
+        "uniformCM11aFineProjectedGapPressure": 0.001200326019898057,
+        "uniformCM11aCoarseActiveRows": 0,
+        "uniformCM11aCoarseFreeRows": 0,
+        "uniformCM11aCoarseWorstRow": 0,
+        "uniformCM11aCoarseWorstRowActive": false,
+        "uniformCM11aCoarseWorstRowHalo": false,
+        "uniformFIMTerminalActiveFaces": 0,
+        "uniformFIMConverged": true,
+        "uniformFIMExecutedPasses": 8,
+        "uniformActiveRegionMinimum": {
+          "x": 0,
+          "y": 0,
+          "z": 0
+        },
+        "uniformActiveRegionMaximum": {
+          "x": 64,
+          "y": 20,
+          "z": 64
+        },
+        "uniformActiveRegionCellCount": 81920,
+        "uniformActiveRegionFraction": 1
+      },
+      "samples": [
+        {
+          "frame": 1,
+          "wall_ms": 41.505333000000974,
+          "sharpen_ms": 0.458752
+        },
+        {
+          "frame": 2,
+          "wall_ms": 37.05791699999827,
+          "sharpen_ms": 0.458752
+        },
+        {
+          "frame": 3,
+          "wall_ms": 46.85279100000116,
+          "sharpen_ms": 0.458752
+        },
+        {
+          "frame": 4,
+          "wall_ms": 45.80195800000001,
+          "sharpen_ms": 4.063232
+        },
+        {
+          "frame": 5,
+          "wall_ms": 45.085791000001336,
+          "sharpen_ms": 0.458752
+        },
+        {
+          "frame": 6,
+          "wall_ms": 47.52549999999974,
+          "sharpen_ms": 0.458752
+        },
+        {
+          "frame": 7,
+          "wall_ms": 44.537749999999505,
+          "sharpen_ms": 0.458752
+        },
+        {
+          "frame": 8,
+          "wall_ms": 49.60295899999983,
+          "sharpen_ms": 0.458752
+        },
+        {
+          "frame": 9,
+          "wall_ms": 43.083291999999346,
+          "sharpen_ms": 0.458752
+        },
+        {
+          "frame": 10,
+          "wall_ms": 44.95120799999859,
+          "sharpen_ms": 0.458752
+        },
+        {
+          "frame": 11,
+          "wall_ms": 44.41479199999958,
+          "sharpen_ms": 0.524288
+        },
+        {
+          "frame": 12,
+          "wall_ms": 50.00437500000044,
+          "sharpen_ms": 0.524288
+        },
+        {
+          "frame": 13,
+          "wall_ms": 42.70391699999891,
+          "sharpen_ms": 0.524288
+        },
+        {
+          "frame": 14,
+          "wall_ms": 53.08399999999892,
+          "sharpen_ms": 0.524288
+        },
+        {
+          "frame": 15,
+          "wall_ms": 50.25679200000013,
+          "sharpen_ms": 0.524288
+        },
+        {
+          "frame": 16,
+          "wall_ms": 49.42666700000336,
+          "sharpen_ms": 0.589824
+        },
+        {
+          "frame": 17,
+          "wall_ms": 43.45204100000046,
+          "sharpen_ms": 0.524288
+        },
+        {
+          "frame": 18,
+          "wall_ms": 46.228250000000116,
+          "sharpen_ms": 0.720896
+        },
+        {
+          "frame": 19,
+          "wall_ms": 48.62420900000143,
+          "sharpen_ms": 4.194304
+        },
+        {
+          "frame": 20,
+          "wall_ms": 44.480459000002156,
+          "sharpen_ms": 4.128768
+        },
+        {
+          "frame": 21,
+          "wall_ms": 43.000332999999955,
+          "sharpen_ms": 0.524288
+        },
+        {
+          "frame": 22,
+          "wall_ms": 38.48737500000061,
+          "sharpen_ms": 0.524288
+        },
+        {
+          "frame": 23,
+          "wall_ms": 44.52400000000125,
+          "sharpen_ms": 0.720896
+        },
+        {
+          "frame": 24,
+          "wall_ms": 42.734207999998034,
+          "sharpen_ms": 0.589824
+        },
+        {
+          "frame": 25,
+          "wall_ms": 38.87975000000006,
+          "sharpen_ms": 0.589824
+        },
+        {
+          "frame": 26,
+          "wall_ms": 42.730500000001484,
+          "sharpen_ms": 0.65536
+        },
+        {
+          "frame": 27,
+          "wall_ms": 39.14950000000317,
+          "sharpen_ms": 0.65536
+        },
+        {
+          "frame": 28,
+          "wall_ms": 41.99458299999969,
+          "sharpen_ms": 0.589824
+        },
+        {
+          "frame": 29,
+          "wall_ms": 37.564792000001034,
+          "sharpen_ms": 0.589824
+        },
+        {
+          "frame": 30,
+          "wall_ms": 40.70916699999725,
+          "sharpen_ms": 0.65536
+        }
+      ]
+    },
+    {
+      "sceneId": "large-power-dam-break",
+      "tileWork": false,
+      "frames": 30,
+      "medianWall_ms": 49.96583299999838,
+      "medianSharpen_ms": 1.900544,
+      "parity": [
+        {
+          "maxAbs": 0.0003243684768676758,
+          "meanAbs": 2.2183946643051085e-07,
+          "sumA": 1472.0003663744803,
+          "sumB": 1472.0003478273434
+        },
+        {
+          "maxAbs": 3.347918391227722e-05,
+          "meanAbs": 1.632171798791687e-06,
+          "sumA": 36747.99801620509,
+          "sumB": 36748.075537569384
+        },
+        {
+          "maxAbs": 0.0009045153856277466,
+          "meanAbs": 3.225944738005637e-08,
+          "sumA": 3488.227978605777,
+          "sumB": 3488.228839479387
+        }
+      ],
+      "stats": {
+        "nx": 64,
+        "ny": 20,
+        "nz": 64,
+        "storedNy": 20,
+        "cellCount": 81920,
+        "equivalentUniformCells": 81920,
+        "compressionRatio": 1,
+        "activeCompressionRatio": 1,
+        "activeSampleCount": 81920,
+        "regularLayers": 20,
+        "maximumNeighborDelta": 0,
+        "gridKind": "uniform",
+        "cellSize_m": 0.05,
+        "pressureIterations": 0,
+        "pressureSolver": "CM11a dense LCP multigrid (3 Full-Cycles + 4 V-Cycles, 6/6 pre/post PRBGS)",
+        "allocatedBytes": 39197116,
+        "quality": "balanced",
+        "submittedTime_s": 0.9999999999999999,
+        "simulatedTime_s": 0.9999999999999999,
+        "completedTime_s": 0.9999999999999999,
+        "simulationLag_s": 1.1102230246251565e-16,
+        "encodedSteps": 30,
+        "maximumTallCellHeight": 0,
+        "volumeControl": true,
+        "hostFluidAuthority": "gpu-resident",
+        "hostSimulationSizedWorkItems": 0,
+        "hostSchedulingUsesReadback": false,
+        "initialVolumeCellSum": 1472.0000000000025,
+        "volumeCellSum": 1471.88818359375,
+        "representedVolumeCellSum": 3201.60107421875,
+        "volumeDrift": -7.596223250849247e-05,
+        "representedVolumeDrift": 1.1750007297681688,
+        "rawVolumeDrift": -7.596223250849247e-05,
+        "volumeTelemetrySource": "dense-volume",
+        "maxSpeed_m_s": 2.9827895164489746,
+        "front_m": 0.8500000000000001,
+        "frontTelemetrySource": "dense-volume",
+        "uniformPipelineFacts": {
+          "extrapolationFrontSweeps": 16,
+          "extrapolationHierarchyLevels": 5,
+          "extrapolationPassesPerInvocation": 46,
+          "multigridLevels": 6,
+          "multigridPasses": {
+            "setup": 19,
+            "full-cycle": 1392,
+            "v-cycle": 596,
+            "finish": 1
+          },
+          "multigridPassesTotal": 2008,
+          "pressureSchedule": {
+            "residualTolerance": 0.0001,
+            "fullCycles": 3,
+            "vCycles": 4,
+            "preSweeps": 6,
+            "postSweeps": 6
+          }
+        },
+        "lastDt_s": 0.03333333333333333,
+        "lastSubsteps": 1,
+        "referenceLiquidVolume_cells": 1472.0000000000025,
+        "uniformUnplaceableSolidExcess_cells": 0,
+        "uniformCM11aResidualInfinity": 0,
+        "uniformCM11aConverged": true,
+        "uniformCM11aCoarseIterations": 1,
+        "uniformCM11aCycleConverged": true,
+        "uniformCM11aFullCyclesExecuted": 2,
+        "uniformCM11aVCyclesExecuted": 0,
+        "uniformCM11aCapFailure": false,
+        "uniformCM11aFailingCoarseInvocation": 0,
+        "uniformCM11aCoarseMaxAbsRhs": 0,
+        "uniformCM11aCoarseMaxDiagonalPressure": 0,
+        "uniformCM11aCoarseMaxAbsPressure": 0,
+        "uniformCM11aCoarseProjectedGapPressure": 0,
+        "uniformCM11aCoarseNormalizedProjectedResidual": 0,
+        "uniformCM11aFineResidualInfinity": 8.191828237613663e-05,
+        "uniformCM11aFineProjectedGapPressure": 0.0011967888567596674,
+        "uniformCM11aCoarseActiveRows": 0,
+        "uniformCM11aCoarseFreeRows": 0,
+        "uniformCM11aCoarseWorstRow": 0,
+        "uniformCM11aCoarseWorstRowActive": false,
+        "uniformCM11aCoarseWorstRowHalo": false,
+        "uniformFIMTerminalActiveFaces": 0,
+        "uniformFIMConverged": true,
+        "uniformFIMExecutedPasses": 8,
+        "uniformActiveRegionMinimum": {
+          "x": 0,
+          "y": 0,
+          "z": 0
+        },
+        "uniformActiveRegionMaximum": {
+          "x": 64,
+          "y": 20,
+          "z": 64
+        },
+        "uniformActiveRegionCellCount": 81920,
+        "uniformActiveRegionFraction": 1
+      },
+      "samples": [
+        {
+          "frame": 1,
+          "wall_ms": 47.22008300000016,
+          "sharpen_ms": 1.900544
+        },
+        {
+          "frame": 2,
+          "wall_ms": 46.644124999998894,
+          "sharpen_ms": 1.900544
+        },
+        {
+          "frame": 3,
+          "wall_ms": 49.02704200000153,
+          "sharpen_ms": 1.835008
+        },
+        {
+          "frame": 4,
+          "wall_ms": 50.726416000001336,
+          "sharpen_ms": 1.835008
+        },
+        {
+          "frame": 5,
+          "wall_ms": 49.19100000000253,
+          "sharpen_ms": 1.900544
+        },
+        {
+          "frame": 6,
+          "wall_ms": 48.70308300000033,
+          "sharpen_ms": 1.900544
+        },
+        {
+          "frame": 7,
+          "wall_ms": 49.84258300000147,
+          "sharpen_ms": 1.96608
+        },
+        {
+          "frame": 8,
+          "wall_ms": 51.11420799999905,
+          "sharpen_ms": 1.900544
+        },
+        {
+          "frame": 9,
+          "wall_ms": 51.76204200000211,
+          "sharpen_ms": 2.359296
+        },
+        {
+          "frame": 10,
+          "wall_ms": 54.93620899999951,
+          "sharpen_ms": 2.228224
+        },
+        {
+          "frame": 11,
+          "wall_ms": 51.28083400000105,
+          "sharpen_ms": 1.835008
+        },
+        {
+          "frame": 12,
+          "wall_ms": 51.18170900000041,
+          "sharpen_ms": 1.900544
+        },
+        {
+          "frame": 13,
+          "wall_ms": 70.32579199999964,
+          "sharpen_ms": 2.29376
+        },
+        {
+          "frame": 14,
+          "wall_ms": 56.710125000001426,
+          "sharpen_ms": 2.29376
+        },
+        {
+          "frame": 15,
+          "wall_ms": 49.96583299999838,
+          "sharpen_ms": 1.900544
+        },
+        {
+          "frame": 16,
+          "wall_ms": 50.217499999998836,
+          "sharpen_ms": 1.835008
+        },
+        {
+          "frame": 17,
+          "wall_ms": 48.94962499999747,
+          "sharpen_ms": 1.900544
+        },
+        {
+          "frame": 18,
+          "wall_ms": 47.749125000002095,
+          "sharpen_ms": 1.900544
+        },
+        {
+          "frame": 19,
+          "wall_ms": 46.98624999999811,
+          "sharpen_ms": 1.900544
+        },
+        {
+          "frame": 20,
+          "wall_ms": 42.916917000002286,
+          "sharpen_ms": 1.769472
+        },
+        {
+          "frame": 21,
+          "wall_ms": 44.07304099999965,
+          "sharpen_ms": 1.835008
+        },
+        {
+          "frame": 22,
+          "wall_ms": 48.783707999999024,
+          "sharpen_ms": 1.769472
+        },
+        {
+          "frame": 23,
+          "wall_ms": 50.97604099999808,
+          "sharpen_ms": 1.835008
+        },
+        {
+          "frame": 24,
+          "wall_ms": 56.04174999999668,
+          "sharpen_ms": 1.900544
+        },
+        {
+          "frame": 25,
+          "wall_ms": 50.11241700000028,
+          "sharpen_ms": 1.769472
+        },
+        {
+          "frame": 26,
+          "wall_ms": 48.81616600000052,
+          "sharpen_ms": 1.900544
+        },
+        {
+          "frame": 27,
+          "wall_ms": 48.25020900000163,
+          "sharpen_ms": 1.900544
+        },
+        {
+          "frame": 28,
+          "wall_ms": 48.90516600000046,
+          "sharpen_ms": 1.96608
+        },
+        {
+          "frame": 29,
+          "wall_ms": 56.13695899999948,
+          "sharpen_ms": 1.769472
+        },
+        {
+          "frame": 30,
+          "wall_ms": 48.067416999998386,
+          "sharpen_ms": 1.835008
+        }
+      ]
+    },
+    {
+      "gate": "large-power-dam-break",
+      "wallRatio": 0.9237560437315941,
+      "sharpenRatio": 0.2807017543859649,
+      "noSlowdown": true
+    }
+  ],
+  "denseStageCensus": [
+    {
+      "sceneId": "minimal-power-dam-break-64",
+      "tileWork": false,
+      "frames": 30,
+      "stageMedians": {
+        "extension_ms": 7.733248,
+        "transport_ms": 4.25984,
+        "phi_ms": 0.589824,
+        "pressure_ms": 32.44032
+      },
+      "medianWall_ms": 74.79929100000027,
+      "medianSharpen_ms": 5.57056,
+      "stats": {
+        "nx": 64,
+        "ny": 64,
+        "nz": 64,
+        "storedNy": 64,
+        "cellCount": 262144,
+        "equivalentUniformCells": 262144,
+        "compressionRatio": 1,
+        "activeCompressionRatio": 1,
+        "activeSampleCount": 262144,
+        "regularLayers": 64,
+        "maximumNeighborDelta": 0,
+        "gridKind": "uniform",
+        "cellSize_m": 0.0125,
+        "pressureIterations": 0,
+        "pressureSolver": "CM11a dense LCP multigrid (3 Full-Cycles + 4 V-Cycles, 6/6 pre/post PRBGS)",
+        "allocatedBytes": 120228244,
+        "quality": "balanced",
+        "submittedTime_s": 0.9999999999999999,
+        "simulatedTime_s": 0.9999999999999999,
+        "completedTime_s": 0.9999999999999999,
+        "simulationLag_s": 1.1102230246251565e-16,
+        "encodedSteps": 30,
+        "maximumTallCellHeight": 0,
+        "volumeControl": true,
+        "hostFluidAuthority": "gpu-resident",
+        "hostSimulationSizedWorkItems": 0,
+        "hostSchedulingUsesReadback": false,
+        "initialVolumeCellSum": 94208.00000000116,
+        "volumeCellSum": 94207.57080078125,
+        "representedVolumeCellSum": 88878.7861328125,
+        "volumeDrift": -4.555868078232718e-06,
+        "representedVolumeDrift": -0.056568591491047454,
+        "rawVolumeDrift": -4.555868078232718e-06,
+        "volumeTelemetrySource": "dense-volume",
+        "maxSpeed_m_s": 7.1934614181518555,
+        "front_m": 0.4,
+        "frontTelemetrySource": "dense-volume",
+        "uniformPipelineFacts": {
+          "extrapolationFrontSweeps": 16,
+          "extrapolationHierarchyLevels": 6,
+          "extrapolationPassesPerInvocation": 48,
+          "multigridLevels": 6,
+          "multigridPasses": {
+            "setup": 19,
+            "full-cycle": 1392,
+            "v-cycle": 596,
+            "finish": 1
+          },
+          "multigridPassesTotal": 2008,
+          "pressureSchedule": {
+            "residualTolerance": 0.0001,
+            "fullCycles": 3,
+            "vCycles": 4,
+            "preSweeps": 6,
+            "postSweeps": 6
+          }
+        },
+        "lastDt_s": 0.03333333333333333,
+        "lastSubsteps": 1,
+        "referenceLiquidVolume_cells": 94208.00000000116,
+        "uniformUnplaceableSolidExcess_cells": 0,
+        "uniformCM11aResidualInfinity": 9.693323954707012e-05,
+        "uniformCM11aConverged": true,
+        "uniformCM11aCoarseIterations": 12,
+        "uniformCM11aCycleConverged": false,
+        "uniformCM11aFullCyclesExecuted": 3,
+        "uniformCM11aVCyclesExecuted": 4,
+        "uniformCM11aCapFailure": false,
+        "uniformCM11aFailingCoarseInvocation": 0,
+        "uniformCM11aCoarseMaxAbsRhs": 0,
+        "uniformCM11aCoarseMaxDiagonalPressure": 0,
+        "uniformCM11aCoarseMaxAbsPressure": 0,
+        "uniformCM11aCoarseProjectedGapPressure": 0,
+        "uniformCM11aCoarseNormalizedProjectedResidual": 0,
+        "uniformCM11aFineResidualInfinity": 0.0009019734570756555,
+        "uniformCM11aFineProjectedGapPressure": 0.000986328232102096,
+        "uniformCM11aCoarseActiveRows": 0,
+        "uniformCM11aCoarseFreeRows": 0,
+        "uniformCM11aCoarseWorstRow": 0,
+        "uniformCM11aCoarseWorstRowActive": false,
+        "uniformCM11aCoarseWorstRowHalo": false,
+        "uniformFIMTerminalActiveFaces": 30,
+        "uniformFIMConverged": false,
+        "uniformFIMExecutedPasses": 16,
+        "uniformActiveRegionMinimum": {
+          "x": 0,
+          "y": 0,
+          "z": 0
+        },
+        "uniformActiveRegionMaximum": {
+          "x": 64,
+          "y": 64,
+          "z": 64
+        },
+        "uniformActiveRegionCellCount": 262144,
+        "uniformActiveRegionFraction": 1
+      },
+      "samples": [
+        {
+          "frame": 1,
+          "wall_ms": 94.5759579999999,
+          "sharpen_ms": 4.9152,
+          "extension_ms": 23.658496,
+          "transport_ms": 2.62144,
+          "phi_ms": 0.458752,
+          "pressure_ms": 27.787264
+        },
+        {
+          "frame": 2,
+          "wall_ms": 68.71454200000016,
+          "sharpen_ms": 4.9152,
+          "extension_ms": 2.031616,
+          "transport_ms": 3.538944,
+          "phi_ms": 0.524288,
+          "pressure_ms": 32.11264
+        },
+        {
+          "frame": 3,
+          "wall_ms": 80.48308399999996,
+          "sharpen_ms": 5.963776,
+          "extension_ms": 6.160384,
+          "transport_ms": 3.93216,
+          "phi_ms": 0.458752,
+          "pressure_ms": 38.469632
+        },
+        {
+          "frame": 4,
+          "wall_ms": 74.38170799999989,
+          "sharpen_ms": 5.767168,
+          "extension_ms": 6.356992,
+          "transport_ms": 4.063232,
+          "phi_ms": 0.851968,
+          "pressure_ms": 32.702464
+        },
+        {
+          "frame": 5,
+          "wall_ms": 74.796333,
+          "sharpen_ms": 4.9152,
+          "extension_ms": 7.667712,
+          "transport_ms": 3.866624,
+          "phi_ms": 0.589824,
+          "pressure_ms": 32.636928
+        },
+        {
+          "frame": 6,
+          "wall_ms": 76.32337499999994,
+          "sharpen_ms": 5.832704,
+          "extension_ms": 7.405568,
+          "transport_ms": 4.128768,
+          "phi_ms": 0.720896,
+          "pressure_ms": 33.75104
+        },
+        {
+          "frame": 7,
+          "wall_ms": 69.78641700000003,
+          "sharpen_ms": 5.308416,
+          "extension_ms": 5.963776,
+          "transport_ms": 4.128768,
+          "phi_ms": 0.786432,
+          "pressure_ms": 28.83584
+        },
+        {
+          "frame": 8,
+          "wall_ms": 75.86791700000003,
+          "sharpen_ms": 5.636096,
+          "extension_ms": 7.471104,
+          "transport_ms": 4.456448,
+          "phi_ms": 0.65536,
+          "pressure_ms": 32.178176
+        },
+        {
+          "frame": 9,
+          "wall_ms": 74.66729099999998,
+          "sharpen_ms": 5.308416,
+          "extension_ms": 8.126464,
+          "transport_ms": 4.521984,
+          "phi_ms": 0.786432,
+          "pressure_ms": 30.736384
+        },
+        {
+          "frame": 10,
+          "wall_ms": 76.24770799999988,
+          "sharpen_ms": 5.767168,
+          "extension_ms": 7.602176,
+          "transport_ms": 4.325376,
+          "phi_ms": 0.720896,
+          "pressure_ms": 33.030144
+        },
+        {
+          "frame": 11,
+          "wall_ms": 74.79929100000027,
+          "sharpen_ms": 5.767168,
+          "extension_ms": 7.53664,
+          "transport_ms": 4.194304,
+          "phi_ms": 0.786432,
+          "pressure_ms": 31.260672
+        },
+        {
+          "frame": 12,
+          "wall_ms": 75.91304100000025,
+          "sharpen_ms": 6.094848,
+          "extension_ms": 7.733248,
+          "transport_ms": 4.390912,
+          "phi_ms": 0.65536,
+          "pressure_ms": 32.964608
+        },
+        {
+          "frame": 13,
+          "wall_ms": 76.2414590000003,
+          "sharpen_ms": 4.980736,
+          "extension_ms": 7.20896,
+          "transport_ms": 4.194304,
+          "phi_ms": 0.65536,
+          "pressure_ms": 28.573696
+        },
+        {
+          "frame": 14,
+          "wall_ms": 73.91675000000032,
+          "sharpen_ms": 4.849664,
+          "extension_ms": 7.340032,
+          "transport_ms": 3.866624,
+          "phi_ms": 0.786432,
+          "pressure_ms": 32.374784
+        },
+        {
+          "frame": 15,
+          "wall_ms": 69.14887499999986,
+          "sharpen_ms": 5.439488,
+          "extension_ms": 6.684672,
+          "transport_ms": 3.93216,
+          "phi_ms": 0.589824,
+          "pressure_ms": 28.377088
+        },
+        {
+          "frame": 16,
+          "wall_ms": 76.0352499999999,
+          "sharpen_ms": 5.046272,
+          "extension_ms": 7.733248,
+          "transport_ms": 3.93216,
+          "phi_ms": 0.524288,
+          "pressure_ms": 34.144256
+        },
+        {
+          "frame": 17,
+          "wall_ms": 76.26058400000011,
+          "sharpen_ms": 5.636096,
+          "extension_ms": 7.733248,
+          "transport_ms": 4.456448,
+          "phi_ms": 0.524288,
+          "pressure_ms": 33.292288
+        },
+        {
+          "frame": 18,
+          "wall_ms": 74.08845800000017,
+          "sharpen_ms": 5.57056,
+          "extension_ms": 8.454144,
+          "transport_ms": 4.390912,
+          "phi_ms": 0.524288,
+          "pressure_ms": 31.653888
+        },
+        {
+          "frame": 19,
+          "wall_ms": 72.30675000000019,
+          "sharpen_ms": 6.094848,
+          "extension_ms": 6.291456,
+          "transport_ms": 3.997696,
+          "phi_ms": 0.524288,
+          "pressure_ms": 30.081024
+        },
+        {
+          "frame": 20,
+          "wall_ms": 75.94566699999996,
+          "sharpen_ms": 5.701632,
+          "extension_ms": 7.995392,
+          "transport_ms": 4.456448,
+          "phi_ms": 0.524288,
+          "pressure_ms": 33.292288
+        },
+        {
+          "frame": 21,
+          "wall_ms": 76.8287919999998,
+          "sharpen_ms": 5.111808,
+          "extension_ms": 8.978432,
+          "transport_ms": 4.718592,
+          "phi_ms": 0.589824,
+          "pressure_ms": 33.554432
+        },
+        {
+          "frame": 22,
+          "wall_ms": 73.84879099999989,
+          "sharpen_ms": 4.784128,
+          "extension_ms": 7.798784,
+          "transport_ms": 3.735552,
+          "phi_ms": 0.720896,
+          "pressure_ms": 32.44032
+        },
+        {
+          "frame": 23,
+          "wall_ms": 77.14554099999987,
+          "sharpen_ms": 5.767168,
+          "extension_ms": 8.388608,
+          "transport_ms": 4.456448,
+          "phi_ms": 0.524288,
+          "pressure_ms": 33.619968
+        },
+        {
+          "frame": 24,
+          "wall_ms": 72.3420000000001,
+          "sharpen_ms": 4.784128,
+          "extension_ms": 7.471104,
+          "transport_ms": 4.456448,
+          "phi_ms": 0.589824,
+          "pressure_ms": 30.670848
+        },
+        {
+          "frame": 25,
+          "wall_ms": 72.87145800000008,
+          "sharpen_ms": 5.24288,
+          "extension_ms": 6.815744,
+          "transport_ms": 4.325376,
+          "phi_ms": 0.720896,
+          "pressure_ms": 30.80192
+        },
+        {
+          "frame": 26,
+          "wall_ms": 78.45483400000012,
+          "sharpen_ms": 5.701632,
+          "extension_ms": 8.51968,
+          "transport_ms": 4.194304,
+          "phi_ms": 0.589824,
+          "pressure_ms": 35.192832
+        },
+        {
+          "frame": 27,
+          "wall_ms": 70.92583299999978,
+          "sharpen_ms": 4.849664,
+          "extension_ms": 8.388608,
+          "transport_ms": 3.801088,
+          "phi_ms": 0.589824,
+          "pressure_ms": 28.704768
+        },
+        {
+          "frame": 28,
+          "wall_ms": 74.68366699999979,
+          "sharpen_ms": 5.767168,
+          "extension_ms": 8.51968,
+          "transport_ms": 4.456448,
+          "phi_ms": 0.524288,
+          "pressure_ms": 31.326208
+        },
+        {
+          "frame": 29,
+          "wall_ms": 78.14291700000012,
+          "sharpen_ms": 5.963776,
+          "extension_ms": 8.585216,
+          "transport_ms": 4.25984,
+          "phi_ms": 0.720896,
+          "pressure_ms": 33.161216
+        },
+        {
+          "frame": 30,
+          "wall_ms": 97.84641600000032,
+          "sharpen_ms": 5.308416,
+          "extension_ms": 9.109504,
+          "transport_ms": 4.718592,
+          "phi_ms": 0.589824,
+          "pressure_ms": 33.161216
+        }
+      ]
+    },
+    {
+      "sceneId": "large-power-dam-break",
+      "tileWork": false,
+      "frames": 30,
+      "stageMedians": {
+        "extension_ms": 3.014656,
+        "transport_ms": 1.376256,
+        "phi_ms": 0.196608,
+        "pressure_ms": 12.713984
+      },
+      "medianWall_ms": 44.302167000000736,
+      "medianSharpen_ms": 1.96608,
+      "stats": {
+        "nx": 64,
+        "ny": 20,
+        "nz": 64,
+        "storedNy": 20,
+        "cellCount": 81920,
+        "equivalentUniformCells": 81920,
+        "compressionRatio": 1,
+        "activeCompressionRatio": 1,
+        "activeSampleCount": 81920,
+        "regularLayers": 20,
+        "maximumNeighborDelta": 0,
+        "gridKind": "uniform",
+        "cellSize_m": 0.05,
+        "pressureIterations": 0,
+        "pressureSolver": "CM11a dense LCP multigrid (3 Full-Cycles + 4 V-Cycles, 6/6 pre/post PRBGS)",
+        "allocatedBytes": 39197116,
+        "quality": "balanced",
+        "submittedTime_s": 0.9999999999999999,
+        "simulatedTime_s": 0.9999999999999999,
+        "completedTime_s": 0.9999999999999999,
+        "simulationLag_s": 1.1102230246251565e-16,
+        "encodedSteps": 30,
+        "maximumTallCellHeight": 0,
+        "volumeControl": true,
+        "hostFluidAuthority": "gpu-resident",
+        "hostSimulationSizedWorkItems": 0,
+        "hostSchedulingUsesReadback": false,
+        "initialVolumeCellSum": 1472.0000000000025,
+        "volumeCellSum": 1471.89208984375,
+        "representedVolumeCellSum": 3201.630859375,
+        "volumeDrift": -7.330853006284031e-05,
+        "representedVolumeDrift": 1.175020964249317,
+        "rawVolumeDrift": -7.330853006284031e-05,
+        "volumeTelemetrySource": "dense-volume",
+        "maxSpeed_m_s": 2.9827170372009277,
+        "front_m": 0.8500000000000001,
+        "frontTelemetrySource": "dense-volume",
+        "uniformPipelineFacts": {
+          "extrapolationFrontSweeps": 16,
+          "extrapolationHierarchyLevels": 5,
+          "extrapolationPassesPerInvocation": 46,
+          "multigridLevels": 6,
+          "multigridPasses": {
+            "setup": 19,
+            "full-cycle": 1392,
+            "v-cycle": 596,
+            "finish": 1
+          },
+          "multigridPassesTotal": 2008,
+          "pressureSchedule": {
+            "residualTolerance": 0.0001,
+            "fullCycles": 3,
+            "vCycles": 4,
+            "preSweeps": 6,
+            "postSweeps": 6
+          }
+        },
+        "lastDt_s": 0.03333333333333333,
+        "lastSubsteps": 1,
+        "referenceLiquidVolume_cells": 1472.0000000000025,
+        "uniformUnplaceableSolidExcess_cells": 0,
+        "uniformCM11aResidualInfinity": 0,
+        "uniformCM11aConverged": true,
+        "uniformCM11aCoarseIterations": 1,
+        "uniformCM11aCycleConverged": true,
+        "uniformCM11aFullCyclesExecuted": 2,
+        "uniformCM11aVCyclesExecuted": 0,
+        "uniformCM11aCapFailure": false,
+        "uniformCM11aFailingCoarseInvocation": 0,
+        "uniformCM11aCoarseMaxAbsRhs": 0,
+        "uniformCM11aCoarseMaxDiagonalPressure": 0,
+        "uniformCM11aCoarseMaxAbsPressure": 0,
+        "uniformCM11aCoarseProjectedGapPressure": 0,
+        "uniformCM11aCoarseNormalizedProjectedResidual": 0,
+        "uniformCM11aFineResidualInfinity": 8.244005584856495e-05,
+        "uniformCM11aFineProjectedGapPressure": 0.0011986042372882366,
+        "uniformCM11aCoarseActiveRows": 0,
+        "uniformCM11aCoarseFreeRows": 0,
+        "uniformCM11aCoarseWorstRow": 0,
+        "uniformCM11aCoarseWorstRowActive": false,
+        "uniformCM11aCoarseWorstRowHalo": false,
+        "uniformFIMTerminalActiveFaces": 0,
+        "uniformFIMConverged": true,
+        "uniformFIMExecutedPasses": 8,
+        "uniformActiveRegionMinimum": {
+          "x": 0,
+          "y": 0,
+          "z": 0
+        },
+        "uniformActiveRegionMaximum": {
+          "x": 64,
+          "y": 20,
+          "z": 64
+        },
+        "uniformActiveRegionCellCount": 81920,
+        "uniformActiveRegionFraction": 1
+      },
+      "samples": [
+        {
+          "frame": 1,
+          "wall_ms": 41.474874999999884,
+          "sharpen_ms": 1.835008,
+          "extension_ms": 0.917504,
+          "transport_ms": 1.048576,
+          "phi_ms": 0.131072,
+          "pressure_ms": 11.337728
+        },
+        {
+          "frame": 2,
+          "wall_ms": 42.76454199999989,
+          "sharpen_ms": 2.424832,
+          "extension_ms": 1.441792,
+          "transport_ms": 1.114112,
+          "phi_ms": 0.262144,
+          "pressure_ms": 13.959168
+        },
+        {
+          "frame": 3,
+          "wall_ms": 42.98454099999981,
+          "sharpen_ms": 1.900544,
+          "extension_ms": 5.177344,
+          "transport_ms": 1.114112,
+          "phi_ms": 0.196608,
+          "pressure_ms": 10.682368
+        },
+        {
+          "frame": 4,
+          "wall_ms": 46.0954999999999,
+          "sharpen_ms": 2.490368,
+          "extension_ms": 2.686976,
+          "transport_ms": 1.245184,
+          "phi_ms": 0.196608,
+          "pressure_ms": 15.597568
+        },
+        {
+          "frame": 5,
+          "wall_ms": 45.45958299999984,
+          "sharpen_ms": 2.097152,
+          "extension_ms": 6.684672,
+          "transport_ms": 1.179648,
+          "phi_ms": 0.196608,
+          "pressure_ms": 12.058624
+        },
+        {
+          "frame": 6,
+          "wall_ms": 41.41258400000015,
+          "sharpen_ms": 1.835008,
+          "extension_ms": 2.686976,
+          "transport_ms": 1.114112,
+          "phi_ms": 0.131072,
+          "pressure_ms": 12.713984
+        },
+        {
+          "frame": 7,
+          "wall_ms": 53.363292,
+          "sharpen_ms": 1.900544,
+          "extension_ms": 3.735552,
+          "transport_ms": 1.441792,
+          "phi_ms": 0.393216,
+          "pressure_ms": 17.69472
+        },
+        {
+          "frame": 8,
+          "wall_ms": 41.93304199999966,
+          "sharpen_ms": 1.96608,
+          "extension_ms": 2.29376,
+          "transport_ms": 1.114112,
+          "phi_ms": 0.196608,
+          "pressure_ms": 12.845056
+        },
+        {
+          "frame": 9,
+          "wall_ms": 48.27795800000058,
+          "sharpen_ms": 1.900544,
+          "extension_ms": 2.29376,
+          "transport_ms": 1.769472,
+          "phi_ms": 0.196608,
+          "pressure_ms": 17.956864
+        },
+        {
+          "frame": 10,
+          "wall_ms": 44.663000000000466,
+          "sharpen_ms": 2.162688,
+          "extension_ms": 5.89824,
+          "transport_ms": 1.245184,
+          "phi_ms": 0.131072,
+          "pressure_ms": 12.189696
+        },
+        {
+          "frame": 11,
+          "wall_ms": 46.76245800000015,
+          "sharpen_ms": 2.097152,
+          "extension_ms": 2.818048,
+          "transport_ms": 1.179648,
+          "phi_ms": 0.131072,
+          "pressure_ms": 16.71168
+        },
+        {
+          "frame": 12,
+          "wall_ms": 44.2241669999994,
+          "sharpen_ms": 1.900544,
+          "extension_ms": 5.505024,
+          "transport_ms": 1.179648,
+          "phi_ms": 0.196608,
+          "pressure_ms": 12.058624
+        },
+        {
+          "frame": 13,
+          "wall_ms": 48.969333000000006,
+          "sharpen_ms": 2.555904,
+          "extension_ms": 3.342336,
+          "transport_ms": 1.31072,
+          "phi_ms": 0.32768,
+          "pressure_ms": 16.71168
+        },
+        {
+          "frame": 14,
+          "wall_ms": 42.91395800000009,
+          "sharpen_ms": 1.900544,
+          "extension_ms": 3.211264,
+          "transport_ms": 1.245184,
+          "phi_ms": 0.131072,
+          "pressure_ms": 12.713984
+        },
+        {
+          "frame": 15,
+          "wall_ms": 48.78258300000016,
+          "sharpen_ms": 2.162688,
+          "extension_ms": 3.60448,
+          "transport_ms": 1.572864,
+          "phi_ms": 0.262144,
+          "pressure_ms": 16.71168
+        },
+        {
+          "frame": 16,
+          "wall_ms": 44.997708999999304,
+          "sharpen_ms": 2.031616,
+          "extension_ms": 5.89824,
+          "transport_ms": 1.376256,
+          "phi_ms": 0.196608,
+          "pressure_ms": 12.45184
+        },
+        {
+          "frame": 17,
+          "wall_ms": 45.72545799999989,
+          "sharpen_ms": 1.96608,
+          "extension_ms": 2.62144,
+          "transport_ms": 1.835008,
+          "phi_ms": 0.262144,
+          "pressure_ms": 15.335424
+        },
+        {
+          "frame": 18,
+          "wall_ms": 39.90679199999977,
+          "sharpen_ms": 1.900544,
+          "extension_ms": 3.211264,
+          "transport_ms": 1.31072,
+          "phi_ms": 0.196608,
+          "pressure_ms": 9.8304
+        },
+        {
+          "frame": 19,
+          "wall_ms": 44.302167000000736,
+          "sharpen_ms": 2.162688,
+          "extension_ms": 2.555904,
+          "transport_ms": 1.703936,
+          "phi_ms": 0.262144,
+          "pressure_ms": 11.862016
+        },
+        {
+          "frame": 20,
+          "wall_ms": 43.5200420000001,
+          "sharpen_ms": 1.900544,
+          "extension_ms": 6.356992,
+          "transport_ms": 1.376256,
+          "phi_ms": 0.196608,
+          "pressure_ms": 10.027008
+        },
+        {
+          "frame": 21,
+          "wall_ms": 46.194000000000415,
+          "sharpen_ms": 2.097152,
+          "extension_ms": 2.424832,
+          "transport_ms": 1.572864,
+          "phi_ms": 0.196608,
+          "pressure_ms": 15.597568
+        },
+        {
+          "frame": 22,
+          "wall_ms": 39.5181249999996,
+          "sharpen_ms": 2.031616,
+          "extension_ms": 2.490368,
+          "transport_ms": 1.376256,
+          "phi_ms": 0.262144,
+          "pressure_ms": 9.633792
+        },
+        {
+          "frame": 23,
+          "wall_ms": 40.12975000000006,
+          "sharpen_ms": 1.900544,
+          "extension_ms": 2.555904,
+          "transport_ms": 1.376256,
+          "phi_ms": 0.262144,
+          "pressure_ms": 10.551296
+        },
+        {
+          "frame": 24,
+          "wall_ms": 45.43920899999921,
+          "sharpen_ms": 1.835008,
+          "extension_ms": 3.014656,
+          "transport_ms": 1.572864,
+          "phi_ms": 0.262144,
+          "pressure_ms": 13.631488
+        },
+        {
+          "frame": 25,
+          "wall_ms": 41.11991600000056,
+          "sharpen_ms": 1.96608,
+          "extension_ms": 3.145728,
+          "transport_ms": 1.507328,
+          "phi_ms": 0.458752,
+          "pressure_ms": 9.8304
+        },
+        {
+          "frame": 26,
+          "wall_ms": 39.42437500000051,
+          "sharpen_ms": 1.769472,
+          "extension_ms": 2.031616,
+          "transport_ms": 1.31072,
+          "phi_ms": 0.262144,
+          "pressure_ms": 10.420224
+        },
+        {
+          "frame": 27,
+          "wall_ms": 44.34741699999995,
+          "sharpen_ms": 2.097152,
+          "extension_ms": 2.162688,
+          "transport_ms": 1.6384,
+          "phi_ms": 0.393216,
+          "pressure_ms": 14.41792
+        },
+        {
+          "frame": 28,
+          "wall_ms": 40.07337499999994,
+          "sharpen_ms": 1.96608,
+          "extension_ms": 3.211264,
+          "transport_ms": 1.441792,
+          "phi_ms": 0.196608,
+          "pressure_ms": 9.568256
+        },
+        {
+          "frame": 29,
+          "wall_ms": 42.983791999999994,
+          "sharpen_ms": 2.031616,
+          "extension_ms": 2.097152,
+          "transport_ms": 1.441792,
+          "phi_ms": 0.32768,
+          "pressure_ms": 12.845056
+        },
+        {
+          "frame": 30,
+          "wall_ms": 41.30504099999962,
+          "sharpen_ms": 1.96608,
+          "extension_ms": 5.767168,
+          "transport_ms": 1.376256,
+          "phi_ms": 0.262144,
+          "pressure_ms": 8.650752
+        }
+      ]
+    }
+  ]
+}

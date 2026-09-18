@@ -74,6 +74,9 @@ export type FluidStageControl =
     readonly label: string;
     readonly hint?: string;
     readonly options: ReadonlyArray<{ readonly value: string; readonly label: string; readonly hint?: string }>;
+    /** Withhold the choice (while retaining its state) when a parent stage
+     * gate makes the selection irrelevant. */
+    readonly enabled?: (context: FluidPipelineContext) => boolean;
   }
   | {
     readonly kind: "param-range";
@@ -84,6 +87,7 @@ export type FluidStageControl =
     readonly max: number;
     readonly step: number;
     readonly digits?: number;
+    readonly editable?: boolean;
     readonly hint?: string;
     /** Hide the input semantics (while retaining its readout) when a parent
      * stage gate makes the value irrelevant. */

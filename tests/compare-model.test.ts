@@ -91,7 +91,7 @@ test("changing B's solver records exactly one override", () => {
   b.method.getState().setMethodId(other);
   assert.deepEqual(Object.keys(store.getState().diff), ["method"]);
   assert.equal(store.getState().diff.method, other);
-  assert.equal(a.method.getState().methodId, other === "uniform" ? "adaptive-volume" : a.method.getState().methodId);
+  assert.equal(a.method.getState().methodId, other === "uniform" ? "uniform-volume" : a.method.getState().methodId);
   assert.notEqual(a.method.getState().methodId, other);
   sync.stop();
 });
