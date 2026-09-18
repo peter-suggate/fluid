@@ -3,7 +3,7 @@ export const SPARSE_CM12_DYNAMIC_SEAM_BINDING_WGSL = /* wgsl */ `
 fn cm12PreparedSeamHeader(own:u32,other:u32,side:u32)->u32{
   if(!validBrickResolution(own)||(other!=0u&&!validBrickResolution(other))||side>=6u){return INVALID;}
   let neighbor=select(0u,1u+cm12DynamicRungIndex(max(1u,other)),other!=0u);
-  let at=CM12_DYNAMIC_SEAM_CATALOGUE+4u*((cm12DynamicRungIndex(own)*5u+neighbor)*6u+side);
+  let at=CM12_DYNAMIC_SEAM_CATALOGUE+4u*((cm12DynamicRungIndex(own)*(CM12_DYNAMIC_RUNG_COUNT+1u)+neighbor)*6u+side);
   return select(INVALID,at,ta(at+3u)==1u);
 }
 fn cm12PreparedPageReady(leaf:u32)->bool{
@@ -35,11 +35,11 @@ fn cm12PreparedDynamicFace(leaf:u32,resolution:u32,side:u32,point:vec3f)->vec4u{
   }
   let header=cm12PreparedSeamHeader(ownerResolution,otherResolution,ownerSide);
   if(header==INVALID){return vec4u(INVALID);}
-  let origin=8.0*vec3f(cm12WorldLeafCoordinate(owner));
-  let relative=point-origin;let width=8.0/f32(ownerResolution);
-  if(relative[axis]!=select(0.0,8.0,(ownerSide&1u)!=0u)){return vec4u(INVALID);}
+  let origin=f32(BRICK_FINE_RESOLUTION)*vec3f(cm12WorldLeafCoordinate(owner));
+  let relative=point-origin;let width=f32(BRICK_FINE_RESOLUTION)/f32(ownerResolution);
+  if(relative[axis]!=select(0.0,f32(BRICK_FINE_RESOLUTION),(ownerSide&1u)!=0u)){return vec4u(INVALID);}
   let u=relative[(axis+1u)%3u];let v=relative[(axis+2u)%3u];
-  if(u<0.0||v<0.0||u>=8.0||v>=8.0){return vec4u(INVALID);}
+  if(u<0.0||v<0.0||u>=f32(BRICK_FINE_RESOLUTION)||v>=f32(BRICK_FINE_RESOLUTION)){return vec4u(INVALID);}
   let uv=u32(floor(u/width))+ownerResolution*u32(floor(v/width));
   let rowRecord=CM12_DYNAMIC_SEAM_CATALOGUE+ta(CM12_DYNAMIC_SEAM_CATALOGUE+ta(header+2u)+2u*uv);
   let row=ta(rowRecord);let page=owner-CM12_WDR_INITIAL_LEAVES;
@@ -52,8 +52,8 @@ fn cm12ScheduledDynamicRowBinding(row:u32)->vec4u{
   let resolution=cm12DynamicRowRung(within);let local=within-cm12DynamicRowOffset(resolution);
   let perAxis=(resolution+1u)*resolution*resolution;let axis=local/perAxis;
   let face=local%(resolution+1u);if(face!=0u&&face!=resolution){return vec4u(INVALID);}
-  let uv=(local%perAxis)/(resolution+1u);let width=8.0/f32(resolution);
-  let leaf=CM12_WDR_INITIAL_LEAVES+page;var point=8.0*vec3f(cm12WorldLeafCoordinate(leaf));
+  let uv=(local%perAxis)/(resolution+1u);let width=f32(BRICK_FINE_RESOLUTION)/f32(resolution);
+  let leaf=CM12_WDR_INITIAL_LEAVES+page;var point=f32(BRICK_FINE_RESOLUTION)*vec3f(cm12WorldLeafCoordinate(leaf));
   point[axis]+=f32(face)*width;
   point[(axis+1u)%3u]+=(f32(uv%resolution)+0.5)*width;
   point[(axis+2u)%3u]+=(f32(uv/resolution)+0.5)*width;
@@ -133,7 +133,7 @@ fn resetSparseWorldFrontierBindings(@builtin(local_invocation_index)lane:u32,@bu
   let pageBase=candidateTopologyPageBase(page);
   // Restore host slots from their immutable authority before any page binds
   // next-generation seams. This dispatch precedes all new bindings.
-  for(var rung=1u;rung<=8u;rung*=2u){
+  for(var rung=1u;rung<=BRICK_FINE_RESOLUTION;rung*=2u){
     for(var side=0u;side<6u;side+=1u){
       let header=cm12PreparedSeamHeader(rung,0u,side);
       for(var ordinal=lane;ordinal<ta(header+1u);ordinal+=64u){
@@ -156,7 +156,7 @@ fn connectSparseWorldFrontierPages(@builtin(local_invocation_index)lane:u32,@bui
   let page=wid.x;if(page>=ta(topologyWorklistBase()+27u)||ta(topologyWorklistBase()+3u)!=2u){return;}
   let leaf=CM12_WDR_INITIAL_LEAVES+page;
   if(!cm12PreparedPageReady(leaf)||!candidateBrickActive(leaf)){return;}
-  let resolution=scheduledBrickResolution(leaf);let origin=8.0*vec3f(cm12WorldLeafCoordinate(leaf));
+  let resolution=scheduledBrickResolution(leaf);let origin=f32(BRICK_FINE_RESOLUTION)*vec3f(cm12WorldLeafCoordinate(leaf));
   for(var side=0u;side<6u;side+=1u){
     let axis=side/2u;var delta=vec3i(0);delta[axis]=select(-1,1,(side&1u)!=0u);
     var other=cm12WorldOwnerAt(cm12WorldLeafCoordinate(leaf)+delta);

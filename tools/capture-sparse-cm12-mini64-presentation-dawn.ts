@@ -28,7 +28,7 @@ import { resolveMethodValues, type GPUSolverInstance } from
 import { createGlobalFineLevelSetConsumerSource } from
   "../lib/core/octree-consumer-sampling";
 import { encodeRgbPng } from "../lib/core/png-codec";
-import { createCornerBrickDropScene, createMinimalPowerDamBreak64Scene,
+import { createCornerBrickDropScene, createMinimalPowerDamBreak32Scene, createMinimalPowerDamBreak64Scene,
   createSparseCM12LongDamBreakScene } from "../lib/core/scenes";
 import { solidVoxelShellForScene } from "../lib/core/scene-lattice";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
@@ -47,6 +47,10 @@ import { WebGPUAdaptiveMassSolver } from
   "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
 const CAPTURE_SCENARIO = process.env.FLUID_PRESENTATION_CAPTURE_SCENARIO ?? "dam";
+const BRICK_FINE_RESOLUTION = Number(process.env.FLUID_BRICK_FINE_RESOLUTION ?? 8);
+assert.ok(BRICK_FINE_RESOLUTION === 4 || BRICK_FINE_RESOLUTION === 8);
+const PRODUCTION_ADAPTIVITY = process.env.FLUID_PRESENTATION_PRODUCTION_ADAPTIVITY === "1";
+const MINI32 = CAPTURE_SCENARIO === "mini32";
 const LONG_DAM = CAPTURE_SCENARIO === "long-dam";
 const CORNER_DROP = CAPTURE_SCENARIO === "corner-drop";
 const GEOMETRY_AUDIT = CORNER_DROP
@@ -141,12 +145,12 @@ try {
 
   const scene = LONG_DAM ? createSparseCM12LongDamBreakScene()
     : CORNER_DROP ? createCornerBrickDropScene()
-    : createMinimalPowerDamBreak64Scene();
+    : MINI32 ? createMinimalPowerDamBreak32Scene() : createMinimalPowerDamBreak64Scene();
   if (CORNER_DROP) {
     scene.solidVoxels = [...solidVoxelShellForScene(scene), ...scene.solidVoxels];
   }
   scene.duration_s = Math.max(scene.duration_s, STEPS * CM12_PAPER_DT_S);
-  if (!CORNER_DROP) scene.fluid.refinementRegions = [{
+  if (!CORNER_DROP && !PRODUCTION_ADAPTIVITY) scene.fluid.refinementRegions = [{
     id: MAXIMUM_CELL_SIZE > 0 ? "production-render-whole-domain-max1"
       : "mini64-production-render-whole-domain-min8",
     rule: "minimum-cell-size",
@@ -166,10 +170,11 @@ try {
   }];
   const values = resolveMethodValues(adaptiveMassMethod, "balanced", {
     resolutionMode: "adaptive",
-    brickFineResolution: "8",
-    presentationPageResolution: "8",
+    ...(process.env.FLUID_PARITY_SELECTOR ? { selectorMode: process.env.FLUID_PARITY_SELECTOR } : {}),
+    brickFineResolution: String(BRICK_FINE_RESOLUTION),
+    presentationPageResolution: String(BRICK_FINE_RESOLUTION),
     ...(LONG_DAM ? { finestTravelCells: 4, fourTravelCells: 2,
-      twoTravelCells: 1 } : { surfaceFineRings: 1 }),
+      twoTravelCells: 1 } : { surfaceFineRings: Number(process.env.FLUID_PARITY_SURFACE_RINGS ?? 1) }),
     timeStep: "paper",
   });
   solver = await WebGPUAdaptiveMassSolver.createCompiledTopologyTransport(
@@ -177,21 +182,30 @@ try {
   );
   await solver.waitForSimulationReady();
   assert.deepEqual([solver.info.nx, solver.info.ny, solver.info.nz],
-    LONG_DAM ? [192, 96, 32] : CORNER_DROP ? [24, 16, 24] : [64, 64, 64]);
+    LONG_DAM ? [192, 96, 32] : CORNER_DROP ? [24, 16, 24] : MINI32 ? [32, 32, 32] : [64, 64, 64]);
   for (let step = 1; step <= STEPS; step += 1) {
     while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) {
       await new Promise<void>((done) => setImmediate(done));
     }
-    await device.queue.onSubmittedWorkDone();
+    await solver.awaitFrameCompletion();
   }
 
+  if (process.env.FLUID_PRESENTATION_CAPTURE_FIELDS === "1") {
+    const fields = await solver.readDiagnosticFields(true);
+    const phi = await solver.readAdaptiveLevelSetQA(true);
+    const volume = await solver.readAcceptedGeometricVolumeQA();
+    await mkdir(dirname(receiptPath), { recursive: true });
+    await writeFile(receiptPath.replace(/\.json$/, "-fields.json"), JSON.stringify({
+      density: Array.from(fields.density), velocity: Array.from(fields.velocity), phi, volume,
+    }));
+  }
   const activity = await solver.readGPUActivityPolicy();
   const activeBricks = activity.bricks.filter((brick) => brick.active);
   const surfaceBricks = activeBricks.filter((brick) => (brick.reasons & 1) !== 0);
   assert.ok(surfaceBricks.length > 0, "the evolved dam must retain surface bricks");
-  if (!CORNER_DROP) {
+  if (!CORNER_DROP && !PRODUCTION_ADAPTIVITY) {
     assert.ok(surfaceBricks.every((brick) => brick.acceptedResolution
-        === (MAXIMUM_CELL_SIZE === 1 ? 8 : 1)),
+        === (MAXIMUM_CELL_SIZE === 1 ? BRICK_FINE_RESOLUTION : 1)),
       MAXIMUM_CELL_SIZE === 1
         ? "every rendered surface brick must remain fully fine"
         : "every rendered surface brick must exercise the B8 scale-8 presentation branch");
@@ -250,6 +264,9 @@ try {
     ? [0.52 * span, 0.37 * span, 0.57 * span, 0]
     : CORNER_DROP ? [0.82 * span, 0.58 * span, 0.9 * span, 0]
     : [1.55 * span, 1.12 * span, 1.72 * span, 0], 4);
+  if (PRODUCTION_ADAPTIVITY && !LONG_DAM && !CORNER_DROP) {
+    packed.set([0.9 * span, 0.7 * span, 1.0 * span, 0], 4);
+  }
   packed.set([0, (CORNER_DROP ? 0.14 : 0.38) * scene.container.height_m, 0,
     scene.container.top === "closed" ? 1 : 0], 8);
   packed.set([scene.container.width_m, scene.container.height_m,
@@ -586,26 +603,26 @@ try {
     configuration: {
       scene: scene.sceneId,
       grid: [solver.info.nx, solver.info.ny, solver.info.nz],
-      brickFineResolution: 8,
-      presentationPageResolution: 8,
-      minimumCellSize_cells: MAXIMUM_CELL_SIZE > 0 ? 1 : 8,
+      brickFineResolution: BRICK_FINE_RESOLUTION,
+      presentationPageResolution: BRICK_FINE_RESOLUTION,
+      minimumCellSize_cells: PRODUCTION_ADAPTIVITY ? undefined : MAXIMUM_CELL_SIZE > 0 ? 1 : 8,
       maximumCellSize_cells: MAXIMUM_CELL_SIZE || undefined,
-      refinementRegion: CORNER_DROP ? "none" : "whole-domain",
+      refinementRegion: CORNER_DROP || PRODUCTION_ADAPTIVITY ? "none" : "whole-domain",
       timeStep: "paper",
       steps: STEPS,
       time_s: STEPS * CM12_PAPER_DT_S,
     },
     branchProof: {
-      interpretation: MAXIMUM_CELL_SIZE === 1
+      interpretation: PRODUCTION_ADAPTIVITY ? "production adaptive cell widths" : MAXIMUM_CELL_SIZE === 1
         ? "acceptedResolution 8 in B8 means cell scale 1"
         : "acceptedResolution 1 in B8 means cell scale 8",
       activeBricks: activeBricks.length,
       activeResolutionHistogram: resolutionHistogram(activeBricks),
       surfaceBricks: surfaceBricks.length,
       surfaceResolutionHistogram: resolutionHistogram(surfaceBricks),
-      everySurfaceBrickUsesExpectedScale: CORNER_DROP ? undefined
+      everySurfaceBrickUsesExpectedScale: CORNER_DROP || PRODUCTION_ADAPTIVITY ? undefined
         : surfaceBricks.every(
-          (brick) => brick.acceptedResolution === (MAXIMUM_CELL_SIZE === 1 ? 8 : 1)),
+          (brick) => brick.acceptedResolution === (MAXIMUM_CELL_SIZE === 1 ? BRICK_FINE_RESOLUTION : 1)),
     },
     presentation,
     renderer: diagnostics,

@@ -2003,6 +2003,7 @@ export class FluidLabRenderer {
       ? createGlobalFineLevelSetConsumerSource(globalFineLevelSet)
       : undefined);
     this.waterPipeline?.setCoarseLevelSet(this.gpuFluid?.coarseLevelSetSource);
+    this.gridOverlayPipeline?.setDenseLevelSetVolumeSource(this.gpuFluid?.denseLevelSetVolumeSource);
     this.gridOverlayPipeline?.setVolume(texture, columnBases, gridCells, velocity, pressureSamples, divergence, pressure, density);
     this.gridOverlayPipeline?.setSparseSource(sparsePresentation?.adaptiveGrid
       ?? this.gpuFluid?.sparseAdaptiveGridSource);
@@ -3272,6 +3273,7 @@ export class FluidLabRenderer {
         readyGPUFluid.volumeTexture,
       );
     }
+    this.gridOverlayPipeline?.setDenseLevelSetVolumeSource(this.gpuFluid?.denseLevelSetVolumeSource);
     if (gpuInfo && this.gpuFluid && this.columnBaseTexture && this.gridCellTexture && this.velocityFallbackTexture && this.pressureSamplesFallbackTexture && this.scalarFallbackTexture) {const activeSparsePresentation=this.sparseWorldPresentation(this.gpuFluid);const compactSurface=Boolean(activeSparsePresentation?.fineLevelSet||this.gpuFluid.globalFineLevelSetSource||this.gpuFluid.coarseLevelSetSource);this.gridOverlayPipeline?.setVolume(compactSurface?this.scalarFallbackTexture:this.gpuFluid.surfaceFieldTexture??this.gpuFluid.volumeTexture, this.gpuFluid.columnBaseTexture ?? this.columnBaseTexture, this.gpuFluid.gridCellTexture ?? this.gridCellTexture, this.gpuFluid.velocityTexture ?? this.velocityFallbackTexture, this.gpuFluid.gridPressureSamplesTexture ?? this.pressureSamplesFallbackTexture, this.gpuFluid.gridDivergenceTexture ?? this.scalarFallbackTexture, this.gpuFluid.gridPressureTexture ?? this.scalarFallbackTexture, this.gpuFluid.volumeTexture);this.gridOverlayPipeline?.setSparseSource(activeSparsePresentation?.adaptiveGrid??this.gpuFluid.sparseAdaptiveGridSource);}
     // A newly attached sparse source may still be compiling its water
     // classifier/scan/emitter. Wait before creating an encoder or claiming

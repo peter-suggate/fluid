@@ -232,13 +232,13 @@ fn cm12SolidVoxelOccupied(worldFine:vec3i)->bool{
 // face-adjacent voxels is non-solid. This is derived directly from SolidWorld;
 // there is no second connectivity or boundary-mask authority.
 fn cm12FluidFaceHasEmptyVoxelPair(sourcePage:vec3i,offset:vec3i)->bool{
-  let sourceOrigin=sourcePage*8;
+  let b=i32(BRICK_FINE_RESOLUTION);let sourceOrigin=sourcePage*b;
   if(abs(offset.x)+abs(offset.y)+abs(offset.z)!=1){return false;}
-  for(var voxel=0u;voxel<64u;voxel+=1u){
-    let u=i32(voxel&7u);let v=i32(voxel>>3u);var local=vec3i(0);
-    if(offset.x!=0){local=vec3i(select(7,0,offset.x<0),u,v);}
-    else if(offset.y!=0){local=vec3i(u,select(7,0,offset.y<0),v);}
-    else{local=vec3i(u,v,select(7,0,offset.z<0));}
+  for(var voxel=0u;voxel<BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;voxel+=1u){
+    let u=i32(voxel%BRICK_FINE_RESOLUTION);let v=i32(voxel/BRICK_FINE_RESOLUTION);var local=vec3i(0);
+    if(offset.x!=0){local=vec3i(select(b-1,0,offset.x<0),u,v);}
+    else if(offset.y!=0){local=vec3i(u,select(b-1,0,offset.y<0),v);}
+    else{local=vec3i(u,v,select(b-1,0,offset.z<0));}
     let source=sourceOrigin+local;
     if(cm12SolidVoxelFractionQ8(source)<255u
       &&cm12SolidVoxelFractionQ8(source+offset)<255u){return true;}
@@ -472,9 +472,9 @@ export function createWebgpuSparseCM12ResidentWGSL(
       "Sparse Geometric (CM12) pressure composition requires CNX/PTR/PEI/TFX images",
     );
   }
-  if (brickFineResolution !== 8 || presentationPageResolution !== 8) {
+  if (![4, 8].includes(brickFineResolution) || presentationPageResolution !== brickFineResolution) {
     throw new Error(
-      "Sparse Geometric (CM12) production pressure composition is B8/P8",
+      "Sparse Geometric (CM12) pressure requires matched B4/P4 or B8/P8 pages",
     );
   }
   const templateLevelCount = Math.log2(brickFineResolution) + 1;
@@ -1912,7 +1912,7 @@ fn pipelinedPressureActive()->bool{return scalars[5]>0.5&&scalars[14]<0.5;}
 fn pressurePreconditionerActive()->bool{return scalars[5]>0.5&&scalars[19]>0.5;}
 
 ${PRESSURE_JOURNAL_ACCESS_WGSL}
-${createSparseCM12CellAccessWGSL(SPARSE_CM12_ATOMIC_ARENA_READERS, true)}
+${createSparseCM12CellAccessWGSL(SPARSE_CM12_ATOMIC_ARENA_READERS, true, brickFineResolution)}
 ${createSparseCM12RowAccessWGSL(SPARSE_CM12_ATOMIC_ARENA_READERS, true, "cm12RecordFailure(1u,cell,vec4u(begin,end,maximum,0u));")}
 ${geometricInterfaceWGSL}
 ${createGeometricSolidMotionWGSL(movingSolidLayout)}
@@ -2102,8 +2102,8 @@ fn candidateFaceBoundaryRowRange(brick:u32,accepted:u32,
     let within=cm12DynamicCellOffset(accepted)+q.x+accepted*(q.y+accepted*q.z);
     let page=brick-CM12_WDR_INITIAL_LEAVES;
     let at=dynamicIncidenceOverrideAt(candidateTopologyPageBase(page),within,side);
-    let row=ta(at);let center=rowCenter(row)-8.0*vec3f(cm12WorldLeafCoordinate(brick));
-    let width=8.0/f32(accepted);
+    let row=ta(at);let center=rowCenter(row)-f32(BRICK_FINE_RESOLUTION)*vec3f(cm12WorldLeafCoordinate(brick));
+    let width=f32(BRICK_FINE_RESOLUTION)/f32(accepted);
     let owns=u32(floor(center[(axis+1u)%3u]/width))==qU
       &&u32(floor(center[(axis+2u)%3u]/width))==qV;
     return vec2u(row|0x80000000u,select(0u,1u,owns));
@@ -6479,7 +6479,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
     +vec3f(0.5*f32(brickSpan(brick))))*f32(BRICK_FINE_RESOLUTION);
   var surfaceAxes=0u;var densityInterfaceCell=false;
   var occupiedCell=false;var substantialDensityCell=false;
-  var thinFluidCell=false;
+  var thinFluidCell=false;var surfaceDistanceBandCell=false;
   // AND-reduction carried as its OR-complement through the existing mask
   // reduction: a brick is deeply enclosed liquid only when NO cell of it
   // fails the submerged-ball test below.
@@ -6537,6 +6537,33 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
     let center=cellCenter(cell);
     let ownPhiSample=lsvSampleAt(center);
     let ownWet=ownPhiSample.valid&&ownPhiSample.phi<0.0;
+    // Keep the metric liquid band at unit spacing independently of payload
+    // width. A zero-crossing-only brick floor halves this physical support
+    // when B8 is split into B4 payloads, damping the pressure-driven crest.
+    surfaceDistanceBandCell=surfaceDistanceBandCell||(!activitySignalsEnabled()
+      &&ownWet&&ownPhiSample.metric&&-ownPhiSample.phi<=4.0);
+    // Surface-distance mode follows the represented zero set, including a
+    // crossing wholly inside a cell whose centre and neighbour centres share
+    // the liquid sign. Deep support still certifies phase; it must not hide
+    // an edge crossing merely because it is not a metric distance sample.
+    if(!activitySignalsEnabled()){
+      let stencil=lsvStencilAtPosition(center);
+      if(stencil.resolved){
+        for(var axis=0u;axis<3u;axis+=1u){
+          let bit=1u<<axis;
+          for(var corner=0u;corner<8u;corner+=1u){
+            if((corner&bit)!=0u){continue;}
+            let other=corner|bit;
+            if(stencil.support[corner]==LSV_SUPPORT_ABSENT||stencil.support[other]==LSV_SUPPORT_ABSENT
+              ||stencil.support[corner]==LSV_INVALID||stencil.support[other]==LSV_INVALID){continue;}
+            let a=stencil.phi[corner];let b=stencil.phi[other];
+            if(lsvFinite(a)&&lsvFinite(b)&&((a<0.0&&b>=0.0)||(b<0.0&&a>=0.0))){
+              interfaceCell=true;ownDensityInterface=true;densityInterfaceCell=true;surfaceAxes|=bit;
+            }
+          }
+        }
+      }
+    }
     // Enclosure at accepted-cell granularity. phi is a signed distance near
     // the interface, so the ball of radius -phi about the cell centre lies in
     // liquid; it contains the cell once -phi reaches the cell half-diagonal
@@ -6837,9 +6864,9 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
     |select(0u,16u,occupiedCell)
     |select(0u,32u,thinFluidCell)|select(0u,64u,cutBoundaryCell)
     |select(0u,128u,densityInterfaceCell)
-    |select(0u,256u,shallowLiquidCell);
-  // support and swept-support each occupy bits 0..26. Split the nine flag
-  // bits across their unused high bits: 62 bits fit in two words.
+    |select(0u,256u,shallowLiquidCell)|select(0u,512u,surfaceDistanceBandCell);
+  // support and swept-support each occupy bits 0..26. Split the ten flag
+  // bits across their unused high bits: 64 bits fit in two words.
   activityMasks[lane]=vec2u((supportMask&0x07ffffffu)|((activityFlags&31u)<<27u),
     (sweptSupportMask&0x07ffffffu)|((activityFlags>>5u)<<27u));
   workgroupBarrier();
@@ -6960,6 +6987,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   let immediateDeformation=reducedMetrics.x>=p.activityTiming.z;
   let immediatePredictedMotion=reducedMetrics.y>=p.activityTiming.z;
   if(coarseFirstEnabled()){reasons|=curvatureFloor<<16u;}
+  if(occupied&&(reducedSurfaceAxes&512u)!=0u){reasons|=2097152u;}
   if(surface){reasons|=1u;}if(immediateDeformation){reasons|=2u;}
   if(temporal>0.0){reasons|=4u;}
   if(reducedMetrics.z>p.activityDensity.w){reasons|=8u;}
@@ -7378,7 +7406,10 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   // Record the request independently of accepted state; both host templates
   // and prepared dynamic rungs participate in the in-place transaction.
   atomicStore(&activity[output+47u],current);
-  if(brickResolutionFrozen(brick)||!brickCandidatePlanningEnabled(brick)){
+  // An unbacked leaf still publishes its requested rung for asynchronous
+  // generation preparation. Only the executable plan is held at the accepted
+  // rung below; returning here silently freezes newly wet authored leaves.
+  if(brickResolutionFrozen(brick)){
     atomicStore(&activity[output+8u],current);
     atomicStore(&activity[output+9u],32u);
     return;
@@ -7439,7 +7470,7 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   // contains no density interface. Do not turn that decomposition-dependent
   // contact bit into a hard surface floor until motion reaches the first
   // physical adaptive threshold; a real density crossing remains authoritative.
-  let quietPolicyWallSeparation=surface&&!densitySurface
+  let quietPolicyWallSeparation=activitySignals&&surface&&!densitySurface
     &&measuredVelocityFloor==1u&&policyTileUniformlyFilled(brick);
   // Restricting a cell-cut planar surface can move its rho=.5 crossing from
   // inside a wet page onto the face between it and its dry
@@ -7472,7 +7503,7 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   // brick. Once its motion is quiet and it is again overwhelmingly liquid, a
   // new internal rho crossing may not overwrite that known-safe deep level.
   // Genuine surface bricks have an 8^3 recovery floor and remain fine.
-  let settledRecoveredBulk=recoveryLocked&&policySurface
+  let settledRecoveredBulk=activitySignals&&recoveryLocked&&policySurface
     &&activityF32(output+4u)>=1.0-2.0*p.activityDensity.y
     &&select(true,quietEpochs>=p.activityEpochs.z,activitySignals);
   // Only an exposed liquid-air interface owns the hard surface floor. An
@@ -7524,7 +7555,8 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   // accepted-output receipt below is still required before it can commit.
   let activitySurfaceFloor=select(1u,nextSurfaceRung,adaptiveSurface);
   var surfaceFloor=select(
-    select(1u,BRICK_FINE_RESOLUTION,policySurface&&!settledRecoveredBulk),
+    select(1u,BRICK_FINE_RESOLUTION,(policySurface&&!settledRecoveredBulk)
+      ||(!activitySignals&&(reasons&2097152u)!=0u)),
     activitySurfaceFloor,activitySignals);
   if(activitySignals&&adaptiveSurface&&validForcedSurfaceRung){
     surfaceFloor=forcedSurfaceRung;
@@ -7994,10 +8026,13 @@ fn certifyGeometricTopologyFaces(@builtin(workgroup_id)wid:vec3u,
   // before it can be published as a receiver. Do not defer this to binding.
   if(brick>=CM12_WDR_INITIAL_LEAVES&&lane<6u){
     let side=lane;let axis=side/2u;
-    var point=8.0*vec3f(cm12WorldLeafCoordinate(brick))+vec3f(4.0);
-    point[axis]+=select(-4.0,4.0,(side&1u)!=0u);
+    let half=0.5*f32(BRICK_FINE_RESOLUTION);
+    var point=f32(BRICK_FINE_RESOLUTION)*vec3f(cm12WorldLeafCoordinate(brick))+vec3f(half);
+    point[axis]+=select(-half,half,(side&1u)!=0u);
     if(cm12PreparedDynamicFace(brick,scheduledBrickResolution(brick),side,point).x==INVALID){
-      cm12RecordFailure(8u,brick,vec4u(side,scheduledBrickResolution(brick),0u,0u));
+      var delta=vec3i(0);delta[axis]=select(-1,1,(side&1u)!=0u);
+      let other=cm12WorldOwnerAt(cm12WorldLeafCoordinate(brick)+delta);
+      cm12RecordFailure(8u,brick,vec4u(side,scheduledBrickResolution(brick),other,select(0u,brickSpan(other),other!=INVALID)));
       atomicStore(&geometricBrickBackingMissing,1u);
     }
   }
@@ -8171,7 +8206,7 @@ fn synthesizeSparseWorldFrontierPages(@builtin(local_invocation_index)lane:u32,
   let pageBase=candidateTopologyPageBase(select(0u,page,validPage));
   let resolution=1u;
   let receipt=atomicLoad(&topologyArena[pageBase+3u]);
-  let synthesize=validPage&&atomicLoad(&topologyArena[pageBase+2u])==512u
+  let synthesize=validPage&&atomicLoad(&topologyArena[pageBase+2u])==BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION
     &&(receipt&0x8000001fu)!=0x8000001fu;
   let leaf=atomicLoad(&topologyArena[pageBase]);
   let first=ta(2u)+page*CM12_DYNAMIC_CELLS;
@@ -9240,7 +9275,7 @@ fn candidateRemappedFaceVelocity(row:u32)->f32{
   let binding=cm12ScheduledDynamicRowBinding(row);
   if(binding.x!=INVALID){
     let leaf=CM12_WDR_INITIAL_LEAVES+(binding.x-ta(3u))/CM12_DYNAMIC_ROWS;
-    center=8.0*vec3f(cm12WorldLeafCoordinate(leaf))
+    center=f32(BRICK_FINE_RESOLUTION)*vec3f(cm12WorldLeafCoordinate(leaf))
       +vec3f(taf(binding.z+1u),taf(binding.z+2u),taf(binding.z+3u));
     let area=taf(binding.z+4u);widths=vec3f(sqrt(area));
     unchanged=all(center==rowCenter(row))&&area==rowStaticArea(row);
@@ -10249,8 +10284,9 @@ fn publishSparseCM12SurfaceRepresentabilityReceipts(
   }
   workgroupBarrier();
   for(var index=lane;index<PRESENTATION_SAMPLES_PER_PAGE;index+=64u){
-    let z=index/64u;let remainder=index-z*64u;
-    let y=remainder/8u;let x=remainder-y*8u;
+    let z=index/(PRESENTATION_PAGE_RESOLUTION*PRESENTATION_PAGE_RESOLUTION);
+    let remainder=index-z*PRESENTATION_PAGE_RESOLUTION*PRESENTATION_PAGE_RESOLUTION;
+    let y=remainder/PRESENTATION_PAGE_RESOLUTION;let x=remainder-y*PRESENTATION_PAGE_RESOLUTION;
     let failure=surfaceProofOutputSampleFailure(vec3i(i32(x),i32(y),i32(z)));
     if(failure!=0u){
       atomicOr(&surfaceProofFailure,failure);atomicStore(&surfaceProofValid,0u);

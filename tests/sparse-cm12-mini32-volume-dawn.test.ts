@@ -180,10 +180,15 @@ dawnTest("mini32 conserves liquid volume through four seconds",
           }
           assert.equal(wetCornerSamples, 2 * 8 ** 3,
             "the step-one corner fixture must keep both stacked wet bricks");
-          for (const coordinate of ["0,0,0", "0,1,0"]) {
-            assert.equal(negativeByPage.get(coordinate), 8 ** 3,
-              `step one carved wet presentation brick ${coordinate}`);
-          }
+          // Cover the same physical 8×16×8 wet corner for either page size.
+          const pageWidth = solver.globalFineLevelSetSource.plan.brickResolution;
+          for (let z = 0; z < 8 / pageWidth; z++)
+            for (let y = 0; y < 16 / pageWidth; y++)
+              for (let x = 0; x < 8 / pageWidth; x++) {
+                const coordinate = `${x},${y},${z}`;
+                assert.equal(negativeByPage.get(coordinate), pageWidth ** 3,
+                  `step one carved wet presentation brick ${coordinate}`);
+              }
         }
         if (step % 2 === 0) await device.queue.onSubmittedWorkDone();
         if ((step < sampleFrom || step % sampleEvery !== 0) && step !== steps) continue;

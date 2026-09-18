@@ -152,7 +152,10 @@ dawnTest("Sparse CM12 hydrostatic ladders stay within the accepted baseline", {
       max_m: { x: 0.5 * scene.container.width_m, y: 1.3,
         z: 0.5 * scene.container.depth_m },
     }];
-    const values = resolveMethodValues(adaptiveMassMethod, "balanced", {});
+    // Keep this measured B8/coarse-first oracle fixed as production defaults evolve.
+    const values = resolveMethodValues(adaptiveMassMethod, "balanced", {
+      brickFineResolution: "8", selectorMode: "coarse-first",
+    });
     solver = await adaptiveMassMethod.createSolverAsync!(
       device, scene, "balanced", values, undefined, () => {},
     ) as WebGPUAdaptiveMassSolver;
@@ -253,10 +256,8 @@ dawnTest("Sparse CM12 hydrostatic ladders stay within the accepted baseline", {
     solver.destroy();
     solver = undefined;
 
-    // Enter through the exact studio query and method-resolution path used by
-    // the reported UI scene. This covers both the paused/reset grid frame and
-    // the running policy; a hand-built solver-options approximation previously
-    // missed the product thresholds and did not catch the unchanged reset view.
+    // Preserve the studio scene/query path and its measured B8 coarse-first
+    // comparison policy. B4 surface-distance production is covered separately.
     const offsetUI = parseQueryState(
       "?scene=hydrostatic-power-large-offset&method=adaptive-volume&grid=volume",
     );
@@ -264,7 +265,7 @@ dawnTest("Sparse CM12 hydrostatic ladders stay within the accepted baseline", {
     assert.equal(offsetUI.ui.gridOverlayAxis, "volume");
     assert.equal(offsetUI.ui.gridOverlayMode, "structure");
     const offsetValues = resolveMethodValues(adaptiveMassMethod,
-      offsetUI.quality, {});
+      offsetUI.quality, { brickFineResolution: "8", selectorMode: "coarse-first" });
     assert.equal(offsetValues.selectorMode, "coarse-first");
     assert.equal("resolutionMode" in offsetValues, false);
     const offsetSolver = await adaptiveMassMethod.createSolverAsync!(
@@ -277,17 +278,17 @@ dawnTest("Sparse CM12 hydrostatic ladders stay within the accepted baseline", {
       const resetSurface = resetSnapshot.bricks.filter((brick) => brick.active
         && brick.coordinate[1] === 1);
       assert.equal(resetSurface.length, 8,
-        "the exact UI reset frame must contain all eight surface pages");
+        "the B8 coarse-first reset frame must contain all eight surface pages");
       assert.ok(resetSurface.every((brick) => brick.acceptedResolution === 1),
-        `the exact UI reset frame must present its calm surface at B1: ${
+        `the B8 coarse-first reset frame must present its calm surface at B1: ${
           resetSurface.map((brick) => `${brick.coordinate.join(",")}=${
             brick.acceptedResolution}`).join("; ")}`);
       assert.ok(resetSurface.every((brick) => (brick.reasons & 64) !== 0),
-        "the exact UI reset surface must publish occupied pressure topology");
+        "the B8 coarse-first reset surface must publish occupied pressure topology");
       const resetHeights = await readPublishedTopHeights(device, offsetSolver);
       const resetFinite = [...resetHeights].filter(Number.isFinite);
       assert.equal(resetFinite.length, 32 * 16,
-        "the exact UI reset must publish every large-offset surface column");
+        "the B8 coarse-first reset must publish every large-offset surface column");
       const resetMean = resetFinite.reduce((sum, height) => sum + height, 0)
         /resetFinite.length;
       assertSparseCM12Baseline("hydrostatic.resetHeightError_cells", Math.abs(resetMean - 15.25));

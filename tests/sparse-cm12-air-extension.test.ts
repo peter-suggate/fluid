@@ -5,15 +5,17 @@ import { adaptiveMassMethod, adaptiveMassSolverOptions, ADAPTIVE_MASS_RUNTIME_PA
 import { ALGORITHM_PARAMS } from "../lib/methods/adaptive-volume/features/algorithms/definition";
 import { airExtensionLayout } from "../lib/methods/adaptive-volume/sparse-cm12-air-extension";
 
-test("air correction defaults on, is normalized, and switchable without resetting the scene",()=>{
+test("air correction defaults off, is normalized, and switchable without resetting the scene",()=>{
   const control=ALGORITHM_PARAMS.find(p=>p.key==="airExtension")!;
-  assert.equal(control.default,"on");assert.equal(control.update,"runtime");
+  assert.equal(control.default,"off");assert.equal(control.update,"runtime");
   assert.ok(ADAPTIVE_MASS_RUNTIME_PARAM_KEYS.includes("airExtension"));
   for(const value of [undefined,"off","on","invalid"]){
     const values: Record<string,string>=value===undefined?{}:{airExtension:value};
     const normalized=adaptiveMassMethod.normalizeValues!(values);
-    assert.equal(normalized.airExtension,value==="off"?"off":"on");
-    assert.equal(adaptiveMassSolverOptions(normalized).airExtensionEnabled,value!=="off");
+    assert.equal(normalized.airExtension,value==="on"?"on":"off");
+    assert.equal(adaptiveMassSolverOptions(normalized).airExtensionEnabled,value==="on");
+    if(value==="invalid")assert.throws(()=>adaptiveMassSolverOptions(values),/supported variant/);
+    else assert.equal(adaptiveMassSolverOptions(values).airExtensionEnabled,value==="on");
   }
 });
 

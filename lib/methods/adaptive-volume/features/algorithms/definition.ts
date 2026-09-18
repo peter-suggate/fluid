@@ -5,8 +5,20 @@ import { ADAPTIVE_VOLUME_RETURN_PROPAGATION_PAIRS, ADAPTIVE_VOLUME_RETURN_ROUNDS
 
 export const ALGORITHM_PARAMS: MethodParamSpec[] = [
   {
-    kind: "select", key: "airExtension", label: "Air-band velocity correction",
+    kind: "select", key: "preflightSupport", label: "Sparse support lookahead",
     default: "on", tier: "coarse", update: "runtime",
+    options: [{ value: "off", label: "Off" }, { value: "on", label: "On" }],
+    hint: "Stages extra sparse pages before face advection. Off skips this stage's page allocation, synthesis and swept-support staging. Frame controls, motion bounds and activity bookkeeping still run; post-projection receiver checks and later topology planning remain active. Fast motion or inflows may need the early support. Compare from the same reset state.",
+  },
+  {
+    kind: "select", key: "velocityExtension", label: "Velocity extension sweeps",
+    default: "on", tier: "coarse", update: "runtime",
+    options: [{ value: "off", label: "Off" }, { value: "on", label: "On" }],
+    hint: "Runs eight sweeps before face advection. Off keeps liquid velocities and clears air velocities, but skips propagation into air; trajectories near the surface may change. Frame and sparse-support preparation still run. Post-projection extension and air-band correction have separate work. Compare from the same reset state.",
+  },
+  {
+    kind: "select", key: "airExtension", label: "Air-band velocity correction",
+    default: "off", tier: "coarse", update: "runtime",
     options: [{ value: "off", label: "Off" }, { value: "on", label: "On" }],
     hint: "Uses direct face transport with an air-band correction and preserves the face field across remeshing for momentum. Adds an iterative GPU solve and snapshot storage. Compare runs from the same reset state.",
   },

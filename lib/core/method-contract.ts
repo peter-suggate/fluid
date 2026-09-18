@@ -17,6 +17,7 @@ import type { AnyStageLens, StageLensSource } from "./stage-lens";
 import type { GPUFluidTracerSource } from "./webgpu-tracer-overlay";
 import type { SparseVoxelSceneRenderSource } from "./webgpu-voxel-debug";
 import type {
+  DenseLevelSetVolumeConsumerSource,
   SparseAdaptiveGridConsumerSource,
   WebGPUFineLevelSetBrickSource,
 } from "./levelset-consumer-abi";
@@ -257,6 +258,7 @@ export interface GPUSolverInstance {
   assertSimulationHealthy?(): Promise<void>;
   /** Capture a health receipt in the caller's submission; read only after submitting it. */
   captureSimulationHealth?(encoder: GPUCommandEncoder): () => Promise<void>;
+  readonly denseLevelSetVolumeSource?: DenseLevelSetVolumeConsumerSource;
   readonly volumeTexture: GPUTexture;
   /** Field the renderer contours; a smooth level set when the solver keeps one separate from volumeTexture. */
   readonly surfaceFieldTexture?: GPUTexture;

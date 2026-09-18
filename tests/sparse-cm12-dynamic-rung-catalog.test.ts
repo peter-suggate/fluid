@@ -4,7 +4,7 @@ import { createSparseAdaptiveMassAtlas, type SparseAdaptiveMassBrick } from "../
 import { buildSparseAtlasCompositeGrid } from "../lib/methods/adaptive-volume/sparse-atlas-composite-projection";
 import { DYNAMIC_PAGE_RUNGS, DYNAMIC_RUNG_LAYOUTS, DYNAMIC_PAGE_CELL_COUNT,
   DYNAMIC_PAGE_ROW_COUNT, DYNAMIC_PAGE_TERM_COUNT, dynamicRowTermOffset,
-  preparedDynamicSeamCatalogue, compileDynamicSeamVariant } from "../lib/methods/adaptive-volume/sparse-cm12-dynamic-rung-catalog";
+  preparedDynamicSeamCatalogue, compileDynamicSeamVariant, dynamicRungCatalogue } from "../lib/methods/adaptive-volume/sparse-cm12-dynamic-rung-catalog";
 
 test("prepared dynamic rung identities do not alias source and candidate storage", () => {
   assert.equal(DYNAMIC_PAGE_CELL_COUNT, 585);
@@ -25,8 +25,8 @@ test("prepared dynamic rung identities do not alias source and candidate storage
   assert.equal(Math.max(...occupied), DYNAMIC_PAGE_TERM_COUNT - 1);
 });
 
-test("every prepared dynamic seam matches the authoritative CM12 operator on all six sides", () => {
-  const catalogue = preparedDynamicSeamCatalogue();
+for (const b of [4, 8] as const) test(`B${b} prepared dynamic seams match the authoritative CM12 operator on all six sides`, () => {
+  const catalogue = dynamicRungCatalogue(b).preparedDynamicSeamCatalogue();
   for (const variant of catalogue.values()) {
     const axis = Math.floor(variant.side / 2), positive = variant.side % 2 === 1;
     const coordinate: [number, number, number] = [1, 1, 1];
@@ -38,13 +38,13 @@ test("every prepared dynamic seam matches the authoritative CM12 operator on all
     });
     const own = brick(coordinate, variant.own);
     const bricks = [own]; if (variant.neighbor) bricks.push(brick(otherCoordinate, variant.neighbor));
-    const grid = buildSparseAtlasCompositeGrid(createSparseAdaptiveMassAtlas([24, 24, 24], bricks));
-    const plane = 8 + (positive ? 8 : 0);
+    const grid = buildSparseAtlasCompositeGrid(createSparseAdaptiveMassAtlas([3*b, 3*b, 3*b], bricks, 1, b));
+    const plane = b + (positive ? b : 0);
     const rows = grid.gradientRows.filter(row => row.axis === axis && row.centerFine[axis] === plane
       && row.terms.some(term => grid.cells[term.cellId]!.brickKey === own.key));
     assert.equal(variant.rows.length, rows.length);
     for (const compiled of variant.rows) {
-      const source = rows.find(row => row.centerFine.every((value, a) => Math.abs(value - 8 - compiled.center[a]!) < 1e-10));
+      const source = rows.find(row => row.centerFine.every((value, a) => Math.abs(value - b - compiled.center[a]!) < 1e-10));
       assert.ok(source, `${variant.own}/${variant.neighbor}/${variant.side}: missing row`);
       assert.equal(compiled.area, source.area); assert.equal(compiled.distance, source.distance);
       const canonical = (terms: readonly { neighbor: boolean; local: number; coefficient: number }[]) => terms

@@ -1,5 +1,5 @@
 import type {
-  SparseLevelSetVolumeConsumerLayout,
+  SparseLevelSetVolumeConsumerLayout, DenseLevelSetVolumeConsumerSource,
 } from "./levelset-consumer-abi";
 
 /** Six vec4u lanes consumed by the read-only grid-overlay LSV helper. */
@@ -12,10 +12,14 @@ export const GRID_OVERLAY_LSV_UNIFORM_WORDS = 24;
  */
 export function gridOverlayLevelSetVolumeUniform(
   layout: SparseLevelSetVolumeConsumerLayout | undefined,
+  dense?: DenseLevelSetVolumeConsumerSource,
 ): Uint32Array<ArrayBuffer> {
   const words = new Uint32Array(new ArrayBuffer(
     4 * GRID_OVERLAY_LSV_UNIFORM_WORDS));
-  if (!layout) return words;
+  if (!layout) {
+    if (dense) { words[0] = 2; new Float32Array(words.buffer)[20] = Math.min(...dense.cellSize_m); }
+    return words;
+  }
   words.set([
     1, layout.globalHeaderBaseWords, layout.slot0BaseWords, layout.slotStrideWords,
     layout.slotHeaderOffsetWords, layout.cornerRefsOffsetWords,
@@ -41,13 +45,23 @@ export function gridOverlayLevelSetVolumeUniform(
  * containing LSV cell through its bounded hash, then interpolates its eight
  * direct corner references; it never performs eight spatial hash lookups.
  */
-export const gridOverlayLevelSetVolumeWGSL = /* wgsl */ `
+export function createGridOverlayLevelSetVolumeWGSL(dense = false): string { return /* wgsl */ `
 struct GridOverlayLevelSetVolumeParams {
   global:vec4u, offsets0:vec4u, offsets1:vec4u,
   capacities:vec4u, volume:vec4u, reserved:vec4u,
 }
 @group(0) @binding(20) var<uniform> sliceLsvP:GridOverlayLevelSetVolumeParams;
 
+${dense ? `@group(0) @binding(21) var sliceDensePhi:texture_3d<f32>;
+@group(0) @binding(22) var sliceDenseOpen:texture_3d<f32>;
+fn sliceDenseLevelSetPhi(position:vec3f)->vec2f{
+  let dims=vec3i(textureDimensions(sliceDensePhi))-vec3i(1);
+  if(any(position<vec3f(0))||any(position>vec3f(dims))){return vec2f(0);}
+  let base=min(vec3i(floor(position)),dims-vec3i(1));let t=position-vec3f(base);var phi=0.0;
+  for(var k=0u;k<8u;k++){let o=vec3i(i32(k&1u),i32((k>>1u)&1u),i32((k>>2u)&1u));
+    let w=select(vec3f(1)-t,t,o==vec3i(1));phi+=w.x*w.y*w.z*textureLoad(sliceDensePhi,base+o,0).x;}
+  return vec2f(phi/max(bitcast<f32>(sliceLsvP.reserved.x),1e-12),select(0.0,1.0,sliceLsvFinite(phi)));
+}` : ""}
 const SLICE_LSV_MAGIC:u32=0x4c535631u;
 const SLICE_LSV_VERSION:u32=1u;
 const SLICE_LSV_INVALID:u32=0xffffffffu;
@@ -115,6 +129,7 @@ fn sliceLsvOwner(slot:u32,position:vec3f)->u32{
   return SLICE_LSV_INVALID;
 }
 fn sliceLevelSetPhi(positionFine:vec3f)->vec2f{
+  ${dense ? "if(sliceLsvP.global.x==2u){return sliceDenseLevelSetPhi(positionFine);}" : ""}
   if(!sliceLsvAccepted()){return vec2f(0.0);}
   let slot=sliceLsvSlot();let ordinal=sliceLsvOwner(slot,positionFine);
   if(ordinal==SLICE_LSV_INVALID||ordinal>=sliceLsvP.capacities.x){return vec2f(0.0);}
@@ -147,6 +162,12 @@ fn sliceLevelSetPhi(positionFine:vec3f)->vec2f{
 }
 
 fn sliceVolumeFill(cell:vec3i)->vec2f{
+  ${dense ? `if(sliceLsvP.global.x==2u){
+    if(any(cell<vec3i(0))||any(cell>=vec3i(textureDimensions(densityField)))){return vec2f(0);}
+    let capacity=textureLoad(sliceDenseOpen,cell,0).x;let volume=textureLoad(densityField,cell,0).x;
+    let valid=capacity>0.0&&sliceLsvFinite(volume)&&volume>=-1e-6;
+    return vec2f(max(volume,0.0)/max(capacity,1e-20),select(0.0,1.0,valid));
+  }` : ""}
   if(!sliceLsvEnabled()){return vec2f(0.0);}
   let owner=sparseOwner(cell);if(owner.x==SLICE_LSV_INVALID){return vec2f(0.0);}
   // commitWholeFrameVolume publishes rho=V/|cell| in the accepted bank, while
@@ -159,4 +180,5 @@ fn sliceVolumeFill(cell:vec3i)->vec2f{
   let valid=sliceLsvFinite(density)&&sliceLsvFinite(open)&&density>=0.0&&open>0.0;
   return vec2f(select(0.0,density/open,valid),select(0.0,1.0,valid));
 }
-`;
+`; }
+export const gridOverlayLevelSetVolumeWGSL = createGridOverlayLevelSetVolumeWGSL();

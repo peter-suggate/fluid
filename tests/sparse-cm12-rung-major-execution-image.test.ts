@@ -10,6 +10,7 @@ import {
   type SparseBrickVec3,
 } from "../lib/methods/adaptive-volume/sparse-brick-atlas";
 import {
+  sparseCM12TransportTileAtFine,
   createSparseCM12TransportExecutionImage,
   createSparseCM12TransportExecutionImageLayout,
   decodeSparseCM12TransportExecutionImageLeafScaleLog2,
@@ -87,7 +88,7 @@ function fixture(options: {
     acceptedBrickResolution: () => options.resolution,
     templateBrickCellRange: () => [1000, liveCount],
   }, { generation: 19, layout });
-  return { image, valid, liveCount, scale };
+  return { atlas, image, valid, liveCount, scale };
 }
 
 test("TEI2 construction does not require the dense authored-owner directory", () => {
@@ -302,27 +303,16 @@ test("TEI2 clips packet counts and owner-lower masks at the world edge", () => {
   assert.equal(packetCells, liveCount);
 });
 
-test("TEI2 maps logical tiles across a clipped macro leaf into its home packets", () => {
-  const { image, liveCount } = fixture({
-    dimensions: [32, 16, 16], resolution: 8, spanBricks: 2,
-  });
-  const { layout, words } = image;
-  assert.equal(layout.leafCapacity, 1);
-  assert.equal(layout.packetCapacity, 64);
-  assert.equal(layout.spatialTileCapacity, 128);
-  let selectedCells = 0;
-  const referenced = new Set<number>();
-  for (let tile = 0; tile < layout.spatialTileCapacity; tile += 1) {
-    const at = layout.slotSpatialTileBaseOffsets[0]
-      + tile * SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_SPATIAL_TILE_WORDS;
-    referenced.add(words[at + SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_SPATIAL_TILE.packetId]!);
-    selectedCells += popcount(words[
-      at + SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_SPATIAL_TILE.laneMaskLow]!)
-      + popcount(words[
-        at + SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_SPATIAL_TILE.laneMaskHigh]!);
+test("TEI2 resolves every clipped macro tile without reserving its covered volume", () => {
+  const { atlas, image, liveCount } = fixture({ dimensions: [32, 16, 16], resolution: 8, spanBricks: 2 });
+  assert.equal(image.layout.spatialTileCapacity, 64);
+  const cells = new Set<number>();
+  for (let z = 0; z < 16; z += 4) for (let y = 0; y < 16; y += 4) for (let x = 0; x < 32; x += 4) {
+    const tile = sparseCM12TransportTileAtFine(atlas, image, [x, y, z]);
+    assert.notEqual(tile.packetId, SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_INVALID);
+    for (let lane = 0; lane < 64; lane++) if (((lane < 32 ? tile.maskLow : tile.maskHigh) >>> (lane & 31)) & 1) cells.add(tile.packetId * 64 + lane);
   }
-  assert.deepEqual([...referenced].sort((a, b) => a - b), [0, 1]);
-  assert.equal(selectedCells, liveCount);
+  assert.equal(cells.size, liveCount);
 });
 
 test("TEI2 inactive leaves publish no packets or spatial authority", () => {

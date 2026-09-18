@@ -113,9 +113,9 @@ export const SPARSE_CM12_COMPLEXITY_LADDER_METHOD_PROFILE: MethodProfile = Objec
   methodId: "adaptive-volume",
   quality: "balanced",
   overrides: Object.freeze({
-    brickFineResolution: "8",
+    brickFineResolution: "4",
     maximumMacroSpanBricks: "auto",
-    selectorMode: "coarse-first",
+    selectorMode: "surface",
     surfaceFineRings: 1,
     timeStep: "paper",
   }),
@@ -126,9 +126,9 @@ export const BOUNDED_POOL_TRANSFER_METHOD_PROFILE: MethodProfile = Object.freeze
   methodId: "adaptive-volume",
   quality: "balanced",
   overrides: Object.freeze({
-    brickFineResolution: "8",
+    brickFineResolution: "4",
     maximumMacroSpanBricks: "auto",
-    selectorMode: "coarse-first",
+    selectorMode: "surface",
     surfaceFineRings: 1,
     timeStep: "paper",
   }),
@@ -244,7 +244,7 @@ export const SYMMETRIC_EXPANSION_METHOD_PROFILE = ADAPTIVE_LOSASSO_UI_METHOD_PRO
 /** Canonical Sparse CM12 product path for the same D4 expansion oracle.
  *
  * Keep the octree/LoSasso card above as its independent comparison lane. The
- * Sparse CM12 card names B8/P8 and the interactive production pressure
+ * Sparse CM12 card names B4/P4 and the interactive production pressure
  * budget. The stricter 108-iteration accuracy oracle remains a separate Dawn
  * lane; making that offline budget the UI default needlessly drops the scene
  * below real time.
@@ -254,9 +254,9 @@ MethodProfile = Object.freeze({
   methodId: "adaptive-volume",
   quality: "balanced",
   overrides: Object.freeze({
-    brickFineResolution: "8",
-    presentationPageResolution: "8",
-    selectorMode: "coarse-first",
+    brickFineResolution: "4",
+    presentationPageResolution: "4",
+    selectorMode: "surface",
     timeStep: "paper",
     pressureIterations: 64,
   }),
@@ -2719,7 +2719,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     blurb: "A suspended ring of water drops onto a dry floor. Watch the hole deform as the ring flattens and spreads on impact.",
     audience: "explore", shelf: "Tanks", environment: "stage",
     methodProfile: { methodId: "adaptive-volume", quality: "balanced", overrides: {
-      selectorMode: "coarse-first", timeStep: "paper", brickFineResolution: "8",
+      selectorMode: "surface", timeStep: "paper", brickFineResolution: "4",
       surfaceMeshRefinement: "2",
     } },
     build: createFallingWaterTorusScene,
@@ -2731,7 +2731,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     blurb: "A fine liquid ball falls into a broad hydrostatic pool. Coarse-first adaptation refines from local curvature and energy while approaching liquid retains detail already established at the receiver.",
     audience: "validation", shelf: "Dam-break ladder", environment: "stage",
     methodProfile: { methodId: "adaptive-volume", quality: "balanced", overrides: {
-      selectorMode: "coarse-first", timeStep: "paper", brickFineResolution: "8",
+      selectorMode: "coarse-first", timeStep: "paper", brickFineResolution: "4",
     } },
     build: createCoarseFirstPoolImpactScene,
     camera: { distance_m: 11, target_m: { x: 0, y: 1.8, z: 0 } },
@@ -2742,7 +2742,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     blurb: "The same 6.4 × 4.8 × 6.4 m pool impact at half the linear resolution: 0.1 m finest cells on a 64×48×64 lattice, one eighth of the cells. Identical physical dimensions and falling ball, so only resolution varies across the family.",
     audience: "validation", shelf: "Dam-break ladder", environment: "stage",
     methodProfile: { methodId: "adaptive-volume", quality: "balanced", overrides: {
-      selectorMode: "coarse-first", timeStep: "paper", brickFineResolution: "8",
+      selectorMode: "coarse-first", timeStep: "paper", brickFineResolution: "4",
     } },
     build: createCoarseFirstPoolImpactHalfScene,
     camera: { distance_m: 11, target_m: { x: 0, y: 1.8, z: 0 } },
@@ -2753,7 +2753,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     blurb: "A 6.4 × 4.8 × 0.8 m extrusion for 2D comparison: 64×48×8 finest cells at 0.1 m, a 1 m radius disk centred at 3.65 m above a 1.6 m pool, and closed free-slip walls. Matches the half-resolution pool's XY cross-section, gravity and timestep; compare the centre slice and volume per 0.8 m depth.",
     audience: "validation", shelf: "Dam-break ladder", environment: "stage",
     methodProfile: { methodId: "adaptive-volume", quality: "balanced", overrides: {
-      selectorMode: "coarse-first", timeStep: "paper", brickFineResolution: "8",
+      selectorMode: "coarse-first", timeStep: "paper", brickFineResolution: "4",
     } },
     build: createCoarseFirstPoolImpactHalfSlabScene,
     camera: { azimuth_rad: 0, elevation_rad: 0, distance_m: 10,
@@ -2765,7 +2765,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     blurb: "The same 6.4 × 4.8 × 6.4 m pool impact at one quarter the linear resolution: 0.2 m finest cells on a 32×24×32 lattice, one sixty-fourth of the cells. Identical physical dimensions and falling ball.",
     audience: "validation", shelf: "Dam-break ladder", environment: "stage",
     methodProfile: { methodId: "adaptive-volume", quality: "balanced", overrides: {
-      selectorMode: "coarse-first", timeStep: "paper", brickFineResolution: "8",
+      selectorMode: "coarse-first", timeStep: "paper", brickFineResolution: "4",
     } },
     build: createCoarseFirstPoolImpactQuarterScene,
     camera: { distance_m: 11, target_m: { x: 0, y: 1.8, z: 0 } },

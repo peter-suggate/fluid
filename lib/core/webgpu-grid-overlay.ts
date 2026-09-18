@@ -9,8 +9,8 @@
 
 import { cameraApertureShaderLibrary } from "./webgpu-camera";
 import { fractionViewShaderConstants } from "./fluid-fraction-view";
-import type { SparseAdaptiveGridConsumerSource } from "./levelset-consumer-abi";
-import { gridOverlayLevelSetVolumeWGSL, gridOverlayLevelSetVolumeUniform } from "./grid-overlay-levelset-volume.wgsl";
+import type { SparseAdaptiveGridConsumerSource, DenseLevelSetVolumeConsumerSource } from "./levelset-consumer-abi";
+import { createGridOverlayLevelSetVolumeWGSL, gridOverlayLevelSetVolumeUniform } from "./grid-overlay-levelset-volume.wgsl";
 
 export const gridOverlayShader = /* wgsl */ `
 struct Uniforms {
@@ -67,7 +67,7 @@ struct SparseParams {
 struct SparseOverlayParams { worldDirectory:vec4u, dynamicCells:vec4u, rungOffsets:vec4u }
 @group(0) @binding(18) var<uniform> sparseOverlayP: SparseOverlayParams;
 @group(0) @binding(19) var<storage,read> sparseFramePlan: array<u32>;
-${gridOverlayLevelSetVolumeWGSL}
+${createGridOverlayLevelSetVolumeWGSL(true)}
 struct VertexOutput { @builtin(position) position: vec4f, @location(0) uv: vec2f }
 @vertex fn vertexMain(@builtin(vertex_index) index: u32) -> VertexOutput {
   var positions = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
@@ -1479,6 +1479,7 @@ export class GridOverlayPipeline {
   private mappedPressure?: GPUTexture;
   private density?: GPUTexture;
   private sparseSource?: SparseAdaptiveGridConsumerSource;
+  private denseLevelSetVolumeSource?: DenseLevelSetVolumeConsumerSource;
   private readonly sparseDummyParams: GPUBuffer;
   private readonly sparseOverlayParams: GPUBuffer;
   private readonly sparseLevelSetVolumeParams: GPUBuffer;
@@ -1555,11 +1556,19 @@ export class GridOverlayPipeline {
     this.rebuildBindGroup();
   }
 
+  setDenseLevelSetVolumeSource(source: DenseLevelSetVolumeConsumerSource | undefined) {
+    if (source === this.denseLevelSetVolumeSource) return;
+    this.denseLevelSetVolumeSource = source;
+    this.device.queue.writeBuffer(this.sparseLevelSetVolumeParams, 0,
+      gridOverlayLevelSetVolumeUniform(this.sparseSource?.levelSetVolume, source));
+    this.rebuildBindGroup();
+  }
+
   setSparseSource(source: SparseAdaptiveGridConsumerSource | undefined) {
     if (this.sparseSource === source) return;
     this.sparseSource = source;
     this.device.queue.writeBuffer(this.sparseLevelSetVolumeParams, 0,
-      gridOverlayLevelSetVolumeUniform(source?.levelSetVolume));
+      gridOverlayLevelSetVolumeUniform(source?.levelSetVolume, this.denseLevelSetVolumeSource));
     const base = source?.worldDirectoryBaseWords;
     const initialLeaves = source?.worldDirectoryInitialLeaves;
     const activityRecordWords = source?.activityRecordWords;
@@ -1629,6 +1638,8 @@ export class GridOverlayPipeline {
         { binding: 18, resource: { buffer: this.sparseOverlayParams } },
         { binding: 19, resource: framePlanResource },
         { binding: 20, resource: { buffer: this.sparseLevelSetVolumeParams } },
+        { binding: 21, resource: (this.denseLevelSetVolumeSource?.vertexPhi ?? this.volume).createView({dimension:"3d"}) },
+        { binding: 22, resource: (this.denseLevelSetVolumeSource?.openFraction ?? this.density).createView({dimension:"3d"}) },
       ]
     });
   }

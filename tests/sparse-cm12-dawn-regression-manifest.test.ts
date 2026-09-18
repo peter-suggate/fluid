@@ -53,7 +53,7 @@ test("checked-in performance baselines match the executable manifest", () => {
   for (const lane of SPARSE_CM12_DAWN_LANES) {
     if (lane.kind !== "performance") continue;
     const baseline = baselines.performance[
-      `${lane.scene}-b${lane.brickFineResolution}-p${lane.presentationPageResolution}`];
+      lane.referenceBaselineKey];
     assert.ok(baseline, `${lane.id} has no checked-in baseline receipt`);
     assert.equal(lane.referenceMedianAdvanceMs, baseline.referenceMs);
     assert.equal(lane.maximumMedianAdvanceMs, baseline.maximumMs);

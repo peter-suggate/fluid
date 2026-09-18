@@ -1,4 +1,4 @@
-import { dynamicRungLayoutWGSL } from "./sparse-cm12-dynamic-rung-catalog";
+import { dynamicRungCatalogue } from "./sparse-cm12-dynamic-rung-catalog";
 /**
  * The one place that knows where a CM12 row or cell record lives.
  *
@@ -70,6 +70,7 @@ const TEMPLATE_CELL_RESOLUTION_MASK:u32=31u;`;
 export function createSparseCM12CellAccessWGSL(
   readers: SparseCM12ArenaReaders,
   dynamicPages = false,
+  brickFineResolution = 8,
 ): string {
   const { word: w, float: f } = readers;
   if (!dynamicPages) return `fn cellBase(id:u32)->u32{return ${w("6u")}+id*8u;}
@@ -85,7 +86,7 @@ fn cellMinimumWidth(id:u32)->f32{let widths=cellWidths(id);
   return min(widths.x,min(widths.y,widths.z));}
 fn cellMinimum(id:u32)->vec3i{return vec3i(round(cellCenter(id)-0.5*cellWidths(id)));}`;
 
-  return `${dynamicRungLayoutWGSL()}
+  return `${dynamicRungCatalogue(brickFineResolution).dynamicRungLayoutWGSL()}
 fn dynamicCellLocal(id:u32)->u32{return id-${w("2u")};}
 fn dynamicCellPage(local:u32)->u32{return local/CM12_DYNAMIC_CELLS;}
 fn dynamicCellWithin(local:u32)->u32{return local%CM12_DYNAMIC_CELLS;}
@@ -94,7 +95,7 @@ fn dynamicCellMinimum(local:u32)->vec3i{
   let within=dynamicCellWithin(local);let resolution=cm12DynamicCellRung(within);
   let cell=within-cm12DynamicCellOffset(resolution);
   let q=vec3u(cell%resolution,(cell/resolution)%resolution,cell/(resolution*resolution));
-  return cm12WorldLeafCoordinate(dynamicCellLeaf(local))*8+vec3i(q*(8u/resolution));
+  return cm12WorldLeafCoordinate(dynamicCellLeaf(local))*i32(BRICK_FINE_RESOLUTION)+vec3i(q*(BRICK_FINE_RESOLUTION/resolution));
 }
 fn cellMetadata(id:u32)->u32{if(id<${w("2u")}){
   return ${w(`${w("6u")}+id*8u+7u`)};}
@@ -106,10 +107,10 @@ fn cellBrick(id:u32)->u32{return cellMetadata(id)>>TEMPLATE_CELL_RESOLUTION_BITS
 fn cellResolution(id:u32)->u32{return cellMetadata(id)&TEMPLATE_CELL_RESOLUTION_MASK;}
 fn cellWidths(id:u32)->vec3f{if(id<${w("2u")}){
   let b=${w("6u")}+id*8u;return vec3f(${f("b+4u")},${f("b+5u")},${f("b+6u")});}
-  return vec3f(8.0/f32(cellResolution(id)));
+  return vec3f(f32(BRICK_FINE_RESOLUTION)/f32(cellResolution(id)));
 }
 fn cellVolume(id:u32)->f32{if(id<${w("2u")}){return ${f(`${w("6u")}+id*8u+3u`)};}
-  let width=8.0/f32(cellResolution(id));return width*width*width;
+  let width=f32(BRICK_FINE_RESOLUTION)/f32(cellResolution(id));return width*width*width;
 }
 fn cellCenter(id:u32)->vec3f{if(id<${w("2u")}){
   let b=${w("6u")}+id*8u;return vec3f(${f("b")},${f("b+1u")},${f("b+2u")});}
@@ -239,7 +240,7 @@ fn incidenceTerm(index:u32)->u32{return ${w(`${w("10u")}+2u*index+1u`)};}`;
   let local=id-host;let page=local/rows;let within=local%rows;
   let pageBase=candidateTopologyPageBase(page);
   let base=pageBase+${w("pageBase+7u")}+within;
-  return 8.0*vec3f(cm12WorldLeafCoordinate(${w("pageBase")}))
+  return f32(BRICK_FINE_RESOLUTION)*vec3f(cm12WorldLeafCoordinate(${w("pageBase")}))
     +vec3f(${f("base+4u*rows")},${f("base+5u*rows")},${f("base+6u*rows")});
 }`
     : `fn rowCenter(id:u32)->vec3f{return vec3f(${f("rowWord(id,6u)")},${f("rowWord(id,7u)")},${f("rowWord(id,8u)")});}`;

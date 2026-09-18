@@ -760,7 +760,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         label: "Build resident dyadic sparse bricks",
         dependencies: ["adaptive-volume.plan"],
         run: () => {
-          const fineResolution = options.brickFineResolution ?? 8;
+          const fineResolution = options.brickFineResolution ?? 4;
           const resolutionForBrick = options.initialResolutionForQA === undefined
             ? undefined : () => options.initialResolutionForQA!;
           atlas = initializeSparseBrickAtlasFromScene(scene, {
@@ -838,7 +838,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
                 options.pressureIterations) }
               : undefined,
             presentationPageResolution:
-              options.presentationPageResolution ?? options.brickFineResolution ?? 8,
+              options.presentationPageResolution ?? options.brickFineResolution ?? 4,
             report: (label: string) => onProgress({
               phase: "allocation",
               taskId: "adaptive-volume.resident",
@@ -849,7 +849,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
             topologyPageCapacityMaximum:
               options.topologyPageBudget
                 ?? (curvedInitialLiquidNeedsFineFrontier
-                  ? 1024
+                  ? 1024 * (8 / (options.brickFineResolution ?? 4)) ** 3
                   : undefined),
             solidWorld: initialSolidWorld,
             refinementRegionParameters: packSparseCM12RefinementRegions(
@@ -1047,7 +1047,9 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       distanceSweeps: sparseCM12DistanceSweeps(values.distanceSweeps),
       returnPasses: sparseCM12ReturnPasses(values.returnPasses),
       gammaDiffusionEnabled, surfaceSharpeningEnabled,
-      airExtensionEnabled: values.airExtension !== "off",
+      airExtensionEnabled: values.airExtension === "on",
+      velocityExtensionEnabled: values.velocityExtension !== "off",
+      preflightSupportEnabled: values.preflightSupport !== "off",
       presentationColumnHeightMode: nextPresentationColumnHeightMode,
       presentationSurfaceMode: nextPresentationSurfaceMode,
       pressureIterations, pressureRelativeTolerance, activityPolicy };

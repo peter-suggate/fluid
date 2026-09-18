@@ -1218,8 +1218,9 @@ function enforceInitialPhysicalRegionFloors(
 
 /** Coalesce represented, uniform bulk only; retain a base-brick surface band. */
 function coarseFirstBulkCover(initial: SparseAdaptiveMassAtlas,
-  maximumSpan: number): SparseAdaptiveMassAtlas {
+  maximumSpan: number, scene: SceneDescription): SparseAdaptiveMassAtlas {
   let atlas = initial;
+  const world = initialSolidWorldCache.get(scene) ?? solidWorldForScene(scene);
   const full = (brick: SparseAdaptiveMassBrick) => brick.resolution === 1
     && brick.density.every(rho => rho === 1) && brick.gamma.every(gamma => gamma === 1);
   for (let span = 2; span <= maximumSpan; span *= 2) {
@@ -1242,7 +1243,20 @@ function coarseFirstBulkCover(initial: SparseAdaptiveMassAtlas,
           const q = [...origin] as [number, number, number];
           q[axis] += sign < 0 ? -1 : span;
           q[tangents[0]!] += u; q[tangents[1]!] += v;
-          if (q.some((value, a) => value < 0 || value >= atlas.brickDimensions[a]!)) continue;
+          if (q.some((value, a) => value < 0 || value >= atlas.brickDimensions[a]!)) {
+            // Keep base pages at open world frontiers: new pages bind
+            // prepared ordinary-page seams. Solid walls permit bulk merging.
+            const b = atlas.brickFineResolution;
+            for (let j = 0; j < b && eligible; j++) for (let i = 0; i < b; i++) {
+              const outside = q.map(v => v * b) as [number, number, number];
+              outside[axis] += sign < 0 ? b - 1 : 0;
+              outside[tangents[0]!] += i; outside[tangents[1]!] += j;
+              const inside = [...outside] as [number, number, number]; inside[axis] -= sign;
+              if (sampleSolidWorld(world, outside).solidFraction < 1
+                && sampleSolidWorld(world, inside).solidFraction < 1) { eligible = false; break; }
+            }
+            continue;
+          }
           const neighbor = sparseBrickContainingCoordinate(atlas, q);
           // No surface merge or unseen feature loss; preserve physical 2:1.
           if (!neighbor || !full(neighbor) || sparseBrickSpan(neighbor) < span / 2) {
@@ -1999,7 +2013,7 @@ export function initializeSparseBrickAtlasFromScene(
     refinementRegionParameters,
   );
   return options.coarseFirstCurvatureTolerance !== undefined && refinementRegions.length === 0
-    ? coarseFirstBulkCover(supported, maximumMacroSpanBricks) : supported;
+    ? coarseFirstBulkCover(supported, maximumMacroSpanBricks, scene) : supported;
 }
 
 /**

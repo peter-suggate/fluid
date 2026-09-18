@@ -7,6 +7,7 @@ import { OctreePowerCoarseDynamicsLane } from "./power/octree-power-lane";
 import { spgridRowCapacityForBindingLimit } from "./power/webgpu-octree-spgrid-vcycle";
 import { structuredVelocityRowCapacityForBindingLimit } from "./power/webgpu-octree-structured-velocity-gpu";
 import { powerLiquidsMethod } from "./power/method";
+import { uniformVolumeMethod } from "./uniform/uniform-volume-method";
 import { uniformMethod } from "./uniform/method";
 import { adaptiveMassMethod } from "./adaptive-mass/method";
 import { adaptiveMassMethod as adaptiveVolumeMethod } from "./adaptive-volume/method";
@@ -25,6 +26,7 @@ const simulationMethods: ReadonlyArray<SimulationMethod> = [
   losassoMethod,
   powerLiquidsMethod,
   uniformMethod,
+  uniformVolumeMethod,
   adaptiveMassMethod,
   adaptiveVolumeMethod,
 ];
@@ -61,7 +63,7 @@ installSimulationMethods({
   // substitutes the default for a non-interactive id: a `method=power-liquids`
   // link would have hydrated as the default method and simulated something
   // else.
-  interactive: [losassoMethod, powerLiquidsMethod, uniformMethod, adaptiveMassMethod, adaptiveVolumeMethod],
+  interactive: [losassoMethod, powerLiquidsMethod, uniformMethod, uniformVolumeMethod, adaptiveMassMethod, adaptiveVolumeMethod],
   // Sparse Geometric is the application default for every scene. A scene profile
   // seeds settings for an explicitly selected comparison method; opening the
   // scene does not switch to that method.

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { resolveMethodValues } from "../lib/core/method-contract";
-import { scenePresets } from "../lib/core/scenes";
+import { scenePresets, SPARSE_CM12_COMPLEXITY_LADDER_METHOD_PROFILE, BOUNDED_POOL_TRANSFER_METHOD_PROFILE, SPARSE_CM12_SYMMETRIC_EXPANSION_METHOD_PROFILE } from "../lib/core/scenes";
 import { adaptiveMassMethod, adaptiveMassSolverOptions } from
   "../lib/methods/adaptive-volume/method";
 import { createSparseCM12FrameControl } from
@@ -17,7 +17,7 @@ test("Sparse CM12 exposes and normalizes the matched B4/P4 production profile", 
     candidate.key === "brickFineResolution");
   assert.equal(spec?.kind, "select");
   if (spec?.kind !== "select") return;
-  assert.deepEqual(spec.options.map(({ value }) => value), ["4", "8", "16"]);
+  assert.deepEqual(spec.options.map(({ value }) => value), ["4", "8"]);
 
   const values = resolveMethodValues(adaptiveMassMethod, "balanced", {
     brickFineResolution: "4",
@@ -32,14 +32,14 @@ test("Sparse CM12 exposes and normalizes the matched B4/P4 production profile", 
   }, { brickFineResolution: 4, presentationPageResolution: 4 });
 });
 
-test("Sparse CM12 defaults production scenes to matched B8/P8", () => {
+test("Sparse CM12 defaults production scenes to matched B4/P4", () => {
   const values = resolveMethodValues(adaptiveMassMethod, "balanced", {});
-  assert.equal(values.brickFineResolution, "8");
-  assert.equal(values.presentationPageResolution, "8");
+  assert.equal(values.brickFineResolution, "4");
+  assert.equal(values.presentationPageResolution, "4");
   assert.deepEqual({
     brickFineResolution: adaptiveMassSolverOptions({}).brickFineResolution,
     presentationPageResolution: adaptiveMassSolverOptions({}).presentationPageResolution,
-  }, { brickFineResolution: 8, presentationPageResolution: 8 });
+  }, { brickFineResolution: 4, presentationPageResolution: 4 });
 
   const productionScenes = scenePresets.filter(
     ({ methodProfile }) => methodProfile?.methodId === "adaptive-volume",
@@ -48,9 +48,20 @@ test("Sparse CM12 defaults production scenes to matched B8/P8", () => {
   for (const scene of productionScenes) {
     const sceneValues = resolveMethodValues(adaptiveMassMethod,
       scene.methodProfile!.quality, scene.methodProfile!.overrides);
-    assert.equal(sceneValues.brickFineResolution, "8", scene.id);
-    assert.equal(sceneValues.presentationPageResolution, "8", scene.id);
+    assert.equal(sceneValues.brickFineResolution, "4", scene.id);
+    assert.equal(sceneValues.presentationPageResolution, "4", scene.id);
   }
+});
+
+test("B4 production selects surface distance while explicit comparison policies remain available", () => {
+  const values = resolveMethodValues(adaptiveMassMethod, "balanced", {});
+  assert.equal(values.selectorMode, "surface");
+  assert.equal(adaptiveMassSolverOptions({}).activityPolicy?.activitySignals, false);
+  for (const profile of [SPARSE_CM12_COMPLEXITY_LADDER_METHOD_PROFILE,
+    BOUNDED_POOL_TRANSFER_METHOD_PROFILE, SPARSE_CM12_SYMMETRIC_EXPANSION_METHOD_PROFILE]) {
+    assert.equal(resolveMethodValues(adaptiveMassMethod, profile.quality, profile.overrides).selectorMode, "surface");
+  }
+  assert.equal(resolveMethodValues(adaptiveMassMethod, "balanced", { selectorMode: "coarse-first" }).selectorMode, "coarse-first");
 });
 
 test("Sparse CM12 production authority ABIs admit matched B4/P4", () => {
@@ -68,4 +79,11 @@ test("Sparse CM12 production authority ABIs admit matched B4/P4", () => {
   assert.equal(frame.layout.brickFineResolution, 4);
   assert.equal(frame.layout.presentationPageResolution, 4);
   assert.equal(finalScalarMasks.maximumPacketsPerLeaf, 1);
+});
+
+test("B8 remains an explicit GPU comparison profile", () => {
+  const values = resolveMethodValues(adaptiveMassMethod, "balanced", { brickFineResolution: "8" });
+  const options = adaptiveMassSolverOptions(values);
+  assert.equal(options.brickFineResolution, 8);
+  assert.equal(options.presentationPageResolution, 8);
 });

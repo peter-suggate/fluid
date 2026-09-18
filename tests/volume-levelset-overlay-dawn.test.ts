@@ -64,12 +64,14 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
       const uniform = device.createBuffer({ size: 144, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       const uniforms = new Float32Array(36); uniforms.set([24, 16, 16, 0], 20);
       device.queue.writeBuffer(uniform, 0, uniforms);
+      const dummy = device.createTexture({size:[1,1,1],dimension:"3d",format:"r32float",usage:GPUTextureUsage.TEXTURE_BINDING});
       const group = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
         { binding: 0, resource: { buffer: uniform } },
         { binding: 10, resource: source.params }, { binding: 11, resource: source.topology },
         { binding: 12, resource: source.state }, { binding: 13, resource: source.activity },
         { binding: 17, resource: source.topologyArena }, { binding: 18, resource: { buffer: overlay } },
         { binding: 20, resource: { buffer: lsv } },
+        ...[9,21,22].map(binding=>({binding,resource:dummy.createView()})),
       ] });
       const input = device.createBuffer({ size: queries.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
       device.queue.writeBuffer(input, 0, queries);
@@ -90,7 +92,7 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
         assert.equal(result[4 * i + 3], 1, `frame ${frame}, vertex ${i} capacity missing`);
         assert.ok(Math.abs(result[4 * i + 2]! - rho) < 1e-5, `frame ${frame}, vertex ${i}: fill ${result[4*i+2]} vs ${rho}`);
       });
-      readback.unmap(); for (const buffer of [overlay, lsv, uniform, input, output, readback]) buffer.destroy();
+      dummy.destroy(); readback.unmap(); for (const buffer of [overlay, lsv, uniform, input, output, readback]) buffer.destroy();
     }
     assert.deepEqual(errors, []);
   } finally { solver?.destroy(); device?.destroy(); await releaseWebGPUExclusiveLock(); }

@@ -1,3 +1,4 @@
+import { uniformVolumeWGSL } from "./uniform-volume.wgsl";
 import { sceneShapeWgsl } from "../../core/scene-shape";
 import { inflowBoundaryWGSL } from "../../core/inflow-boundary";
 import { createCm12NumericsWGSL } from "../../core/cm12-numerics";
@@ -12,7 +13,7 @@ const uniformMacCormackAuditEnabled = typeof process !== "undefined"
  * It provides a matched-lattice GPU baseline for transport and projection
  * comparisons without octree topology, sparse residency, or backend cutovers.
  */
-export const uniformReferenceComputeShader = /* wgsl */ `
+export function createUniformReferenceComputeShader(geometric = false): string { return /* wgsl */ `
 const MACCORMACK_AUDIT_ENABLED: bool = ${uniformMacCormackAuditEnabled};
 ${createCm12NumericsWGSL()}
 struct Params {
@@ -158,10 +159,10 @@ fn dropSource(q:vec3i)->f32{
   return covered;
 }
 fn volume(p: vec3i) -> f32 { if (!valid(p)) { return 0.0; } return textureLoad(volumeIn,p,0).x; }
-fn levelSetAuthority() -> bool { return params.physical.w > 0.5; }
+fn levelSetAuthority() -> bool { return ${geometric ? "true" : "params.physical.w > 0.5"}; }
 fn surfaceValue(p: vec3i) -> f32 {
   if (!valid(p)) { return select(0.0, 5.0 * min(params.cellGravity.x, min(params.cellGravity.y, params.cellGravity.z)), levelSetAuthority()); }
-  return textureLoad(surfaceIn, p, 0).x;
+  return ${geometric ? "uvPhi(vec3f(p)+vec3f(0.5))" : "textureLoad(surfaceIn, p, 0).x"};
 }
 fn surfaceOccupancy(p: vec3i) -> f32 {
   if (!valid(p)) { return 0.0; }
@@ -231,12 +232,13 @@ fn pressureDensity(p:vec3i)->f32{
   return continued;
 }
 fn pressurePhi(p:vec3i)->f32{
+  ${geometric ? "return uvPhi(vec3f(clampCell(p))+vec3f(0.5));" : `
   let dx=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
-  return -(pressureDensity(p)-0.5)*dx;
+  return -(pressureDensity(p)-0.5)*dx;`}
 }
 // Sec. 3.7 explicitly extrapolates rho' into adjacent V=0 cells so those
 // cells participate in the pressure system. Do not filter them back out by V.
-fn pressureLiquid(p:vec3i)->bool{return valid(p)&&pressureDensity(p)>0.5;}
+fn pressureLiquid(p:vec3i)->bool{return valid(p)&&${geometric ? "pressurePhi(p)<0.0" : "pressureDensity(p)>0.5"};}
 fn ghostFluidFraction(liquidCell:vec3i,airCell:vec3i)->f32{
   let liquidPhi=pressurePhi(liquidCell);let airPhi=pressurePhi(airCell);
   return cm12GhostFluidTheta(liquidPhi,airPhi,1e-6);
@@ -536,6 +538,14 @@ fn extrapolatedRigidVelocityAtFace(world:vec3f)->vec3f{
 // authored solid exterior, so its inferred geometric fraction is 1/2.
 fn pressureFaceData(id:vec3i,axis:u32)->vec4f{
   var neighbor=id;neighbor[axis]+=1;
+  ${geometric ? `if(valid(id)!=valid(neighbor)){
+    let upper=valid(id);let inward=select(1.0,-1.0,upper);
+    let acceleration=select(0.0,params.cellGravity.w,axis==1u);
+    let released=inward*acceleration>0.5*abs(params.cellGravity.w);
+    let ambient=axis==1u&&upper&&params.boundary.w>0.5;
+    return vec4f(0.0,0.0,0.0,select(select(0.0,0.5,released),1.0,ambient));
+  }
+  if(staticSolidVoxelOccupied(id)||staticSolidVoxelOccupied(neighbor)){return vec4f(0.0);}` : ""}
   if(staticSolidVoxelOccupied(id)||staticSolidVoxelOccupied(neighbor)){
     return vec4f(0.0,0.0,0.0,0.5);
   }
@@ -544,6 +554,7 @@ fn pressureFaceData(id:vec3i,axis:u32)->vec4f{
     // faces are symmetry planes, not CM11a separating solid boundaries.
     if(axis==2u&&depthSymmetry()&&valid(id)!=valid(neighbor)){return vec4f(0.0);}
     if(valid(id)==valid(neighbor)){return vec4f(0.0);}
+
     return vec4f(0.0,0.0,0.0,select(1.0,0.5,
       staticSolidVoxelOccupied(id)||staticSolidVoxelOccupied(neighbor)));
   }
@@ -565,7 +576,7 @@ fn pressureFaceVolumeFraction(id:vec3i,axis:u32)->f32{return pressureFaceData(id
 // positive-MAC face fractions used by projection; it never reclassifies raw
 // surface density or approximates a second solid boundary.
 fn storeExtrapolationAuthority(id:vec3i){if(!valid(id)){return;}
-  textureStore(volumeOut,id,vec4f(pressureDensity(id)));
+  textureStore(volumeOut,id,vec4f(${geometric ? "0.5-pressurePhi(id)/min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z))" : "pressureDensity(id)"}));
   textureStore(velocityOut,id,vec4f(
     faceOpenFraction(id,0u),faceOpenFraction(id,1u),faceOpenFraction(id,2u),0.0));
 }
@@ -1022,6 +1033,7 @@ fn divergenceAt(id: vec3i, checkSolid: bool) -> f32 {
 // divergence (lambda = 0.5, eta = 1 per the paper), divided by dx, so the
 // pressure solve pushes the excess out.
 fn volumeCorrectionDivergence(id: vec3i) -> f32 {
+  ${geometric ? "return min(0.5*max(0.0,volume(id)-cellOpenFraction(id)),cellOpenFraction(id))/max(params.dimsDt.w,1e-12);" : `
   // Preserve CM12's calibrated small-excess slope exactly:
   // min(lambda * (rho' - 1), eta) / dx with lambda=0.5 and eta=1.
   // Replacing this by excess/dt makes the correction three times stronger at
@@ -1033,7 +1045,7 @@ fn volumeCorrectionDivergence(id: vec3i) -> f32 {
   // changing the published equation at the Figure 2/3 resolution.
   return cm12VolumeCorrectionDivergence(
     pressureDensity(id),params.cellGravity.x,params.dimsDt.w,
-  );
+  ); `}
 }
 
 fn curvatureAt(id:vec3i)->f32{
@@ -1543,5 +1555,8 @@ fn finalizeActiveRegion(){
   }
 }
 @compute @workgroup_size(4,4,4)
-fn reduceDiagnostics(@builtin(global_invocation_id) gid:vec3u){let id=activeId(gid);if(!valid(id)){return;}let represented=surfaceOccupancy(id);let conservative=volume(id);atomicAdd(&reductions[0],u32(represented*2048.0+0.5));if(surfaceLiquid(id)){atomicMax(&reductions[1],u32(id.x+1));}let speed=length(faceVelocity(id));atomicMax(&reductions[2],bitcast<u32>(speed));atomicAdd(&reductions[3],u32(clamp(conservative,0.0,8.0)*2048.0+0.5));}
-`;
+fn reduceDiagnostics(@builtin(global_invocation_id) gid:vec3u){let id=activeId(gid);if(!valid(id)){return;}let represented=surfaceOccupancy(id);let conservative=volume(id);atomicAdd(&reductions[0],u32(represented*2048.0+0.5));if(surfaceLiquid(id)){atomicMax(&reductions[1],u32(id.x+1));}let speed=length(faceVelocity(id));atomicMax(&reductions[2],bitcast<u32>(speed));atomicAdd(&reductions[3],u32(${geometric ? "max(conservative,0.0)" : "clamp(conservative,0.0,8.0)"}*2048.0+0.5));}
+${geometric ? uniformVolumeWGSL : ""}
+`; }
+
+export const uniformReferenceComputeShader = createUniformReferenceComputeShader();

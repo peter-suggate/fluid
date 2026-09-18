@@ -68,6 +68,10 @@ export interface AdaptiveMassSolverOptions extends SparseCM12CorrectionControls 
   /** Whether Sec. 3.5's conservative surface-sharpening transform runs. */
   readonly surfaceSharpeningEnabled?: boolean;
   readonly airExtensionEnabled?: boolean;
+  /** Eight pre-advection velocity-extension sweeps; liquid initialization always runs. */
+  readonly velocityExtensionEnabled?: boolean;
+  /** Stage sparse transport support before advection; bookkeeping always runs. */
+  readonly preflightSupportEnabled?: boolean;
   /** Validated column-height presentation policy; defaults to adaptive-coarse auto. */
   readonly presentationColumnHeightMode?: "off" | "auto" | "on";
   /** Shared reconstructed-distance presentation is the production default. */
@@ -179,7 +183,7 @@ const boundedInteger = (value: unknown, fallback: number, minimum: number, maxim
     ? Math.min(maximum, Math.max(minimum, Math.round(value))) : fallback;
 
 const brickFineResolution = (value: unknown): SparseBrickFineResolution =>
-  value === 4 || value === "4" ? 4 : value === 16 || value === "16" ? 16 : 8;
+  value === 8 || value === "8" ? 8 : 4;
 
 const presentationPageResolution = (
   _value: unknown,
@@ -194,7 +198,7 @@ const maximumMacroSpanBricks = (value: unknown): number | undefined => {
 };
 
 const selectorMode = (value: unknown): "surface" | "activity" | "coarse-first" =>
-  value === "surface" ? "surface" : value === "activity" ? "activity" : "coarse-first";
+  value === "coarse-first" ? "coarse-first" : value === "activity" ? "activity" : "surface";
 
 const activityPolicy = (values: MethodParamValues): SparseCM12ActivityPolicy =>
   sparseCM12ActivityPolicy({
@@ -221,7 +225,9 @@ export function adaptiveMassSolverOptions(
     timeStep: values.timeStep === "scene" ? "scene" : "paper",
     gammaDiffusionEnabled: false,
     surfaceSharpeningEnabled: values.surfaceSharpening !== "off",
-    airExtensionEnabled: values.airExtension !== "off",
+    airExtensionEnabled: values.airExtension === "on",
+    velocityExtensionEnabled: values.velocityExtension !== "off",
+    preflightSupportEnabled: values.preflightSupport !== "off",
     densityCapacityRepairEnabled: false,
     volumeCorrectionEnabled: false,
     presentationColumnHeightMode: values.presentationColumnHeight === "off" ? "off"
@@ -312,7 +318,9 @@ export const adaptiveMassMethod: SimulationMethod = {
       timeStep: values.timeStep === "scene" ? "scene" : "paper",
       gammaDiffusion: "off",
       surfaceSharpening: values.surfaceSharpening === "off" ? "off" : "on",
-      airExtension: values.airExtension === "off" ? "off" : "on",
+      airExtension: values.airExtension === "on" ? "on" : "off",
+      velocityExtension: values.velocityExtension === "off" ? "off" : "on",
+      preflightSupport: values.preflightSupport === "off" ? "off" : "on",
       presentationColumnHeight: values.presentationColumnHeight === "off" ? "off"
         : values.presentationColumnHeight === "on" ? "on" : "auto",
       pressureIterations: sparseCM12PressureIterations(values.pressureIterations),
@@ -332,15 +340,17 @@ export const adaptiveMassMethod: SimulationMethod = {
     const { activitySignals: _activitySignals, ...activityDefaults } =
       SPARSE_CM12_ACTIVITY_POLICY;
     return {
-      brickFineResolution: "8",
-      presentationPageResolution: "8",
+      brickFineResolution: "4",
+      presentationPageResolution: "4",
       maximumMacroSpanBricks: "auto",
-      selectorMode: "coarse-first",
+      selectorMode: "surface",
       surfaceFineRings: 1,
       timeStep: "paper",
       gammaDiffusion: "off",
       surfaceSharpening: "on",
-      airExtension: "on",
+      airExtension: "off",
+      velocityExtension: "on",
+      preflightSupport: "on",
       presentationColumnHeight: "auto",
       pressureIterations: SPARSE_CM12_PRESSURE_ITERATIONS,
       pressureRelativeTolerance: SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE,
@@ -362,11 +372,10 @@ export const adaptiveMassMethod: SimulationMethod = {
     signal,
   ) => {
     const options = adaptiveMassSolverOptions(values);
-    if ((options.brickFineResolution !== 4 && options.brickFineResolution !== 8
-        && options.brickFineResolution !== 16)
+    if ((options.brickFineResolution !== 4 && options.brickFineResolution !== 8)
       || options.presentationPageResolution !== options.brickFineResolution) {
       return Promise.reject(new RangeError(
-        "Sparse CM12 production requires a matched B4/P4, B8/P8, or B16/P16 profile",
+        "Sparse CM12 production requires a matched B4/P4 or B8/P8 profile",
       ));
     }
     if (resolvePhysicsExecutionBackend(values) === "cpu") {

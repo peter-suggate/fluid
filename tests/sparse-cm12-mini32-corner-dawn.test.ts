@@ -7,7 +7,7 @@ import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
-import { adaptiveMassMethod } from "../lib/methods/adaptive-volume/method";
+import { adaptiveMassMethod, adaptiveMassSolverOptions } from "../lib/methods/adaptive-volume/method";
 import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
@@ -27,13 +27,15 @@ const dawnModule = process.env.WEBGPU_NODE_MODULE;
       const values = resolveMethodValues(adaptiveMassMethod, "balanced", {
         selectorMode: "coarse-first", timeStep: "paper",
       });
+      const b = adaptiveMassSolverOptions(values).brickFineResolution!;
+      const corner = 24 / b;
       solver = await adaptiveMassMethod.createSolverAsync!(device!, scene, "balanced", values,
         undefined, () => {}) as WebGPUAdaptiveMassSolver;
       await solver.waitForSimulationReady();
       const mass = (density: Float32Array) => density.reduce((sum, value) => sum + value, 0);
       const initialMass = mass((await solver.readDiagnosticFields(true)).density);
       const initialActivity = await solver.readGPUActivityPolicy();
-      assert.equal(initialActivity.bricks.find(b => b.coordinate.join("/") === "3/0/3")?.active, false,
+      assert.equal(initialActivity.bricks.find(b => b.coordinate.join("/") === `${corner}/0/${corner}`)?.active, false,
         "refinement backing must not activate the dry corner at initialization");
       for (let step = 1; step <= 8; step++) {
         while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
@@ -43,14 +45,14 @@ const dawnModule = process.env.WEBGPU_NODE_MODULE;
           // Regression: almost vertical shared motion used to count as a B8
           // impact through a touching lateral face. Its 2:1 closure then
           // refined the back-top corner B2 -> B4 at exactly the default dt.
-          const top = firstStep.bricks.filter(b => b.active && b.coordinate[1] === 3);
+          const top = firstStep.bricks.filter(b => b.active && b.coordinate[1] >= corner);
           for (const brick of top) {
             const initial = initialActivity.bricks.find(b => b.leafId === brick.leafId)!;
             assert.equal(brick.acceptedResolution, initial.acceptedResolution,
               `first-step top refinement at ${brick.coordinate}: ${brick.planReasons}`);
           }
-          assert.equal(top.find(b => b.coordinate.join("/") === "0/3/0")?.acceptedResolution, 2);
-          assert.ok(top.some(b => b.acceptedResolution === 8), "retain the sharp dam-edge geometry");
+          assert.equal(top.find(b => b.coordinate.join("/") === `0/${corner}/0`)?.acceptedResolution, b / 4);
+          assert.ok(top.some(brick => brick.acceptedResolution === b), "retain the sharp dam-edge geometry");
           assert.equal(firstStep.faultFlags, 0);
         }
       }
@@ -62,7 +64,7 @@ const dawnModule = process.env.WEBGPU_NODE_MODULE;
       assert.equal(activity.faultFlags, 0);
       assert.equal(stats.topologyGenerationCount ?? 0, 0, "the front must not wait for background generation replacement");
       const active = activity.bricks.filter(b => b.active);
-      assert.ok(active.some(b => b.coordinate[0] === 3 && b.coordinate[1] === 0 && b.coordinate[2] === 3),
+      assert.ok(active.some(b => b.coordinate[0] === corner && b.coordinate[1] === 0 && b.coordinate[2] === corner),
         "the floor corner must be resident before the dam front reaches it");
       let cornerMass = 0, symmetryError = 0;
       for (let z = 0; z < 32; z++) for (let y = 0; y < 32; y++) for (let x = 0; x < 32; x++) {
@@ -80,7 +82,7 @@ const dawnModule = process.env.WEBGPU_NODE_MODULE;
           brick.acceptedResolution, "corner growth must preserve x/z topology symmetry");
       }
       assert.ok(Math.abs(mass(fields.density) / initialMass - 1) < 0.005);
-      assert.ok(active.some(b => b.acceptedResolution < 8), "retain adaptive coarse support");
+      assert.ok(active.some(brick => brick.acceptedResolution < b), "retain adaptive coarse support");
       assert.deepEqual(errors, []);
     } finally {
       solver?.destroy(); device?.destroy(); await releaseWebGPUExclusiveLock();

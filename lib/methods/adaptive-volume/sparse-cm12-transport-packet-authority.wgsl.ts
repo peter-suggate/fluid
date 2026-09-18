@@ -223,21 +223,25 @@ fn compileSparseCM12TransportPacketsFromFinalScalarMasks(
   var dirty=!fsm1Published()||fsm1TopologyGeneration()
     !=atomicLoad(&topologyArena[topologyWorklistBase()]);
   dirty=dirty||incrementalActivityBrickVelocityDirty(leaf);
-  let tileCounts=(leafDescriptor.scale*packet.counts+vec3u(3u))/4u;
-  for(var tz=0u;!dirty&&tz<tileCounts.z;tz+=1u){
-    for(var ty=0u;!dirty&&ty<tileCounts.y;ty+=1u){
-      for(var tx=0u;!dirty&&tx<tileCounts.x;tx+=1u){
-        let tileOrigin=origin+vec3i(4u*vec3u(tx,ty,tz));
-        for(var dz=-1;!dirty&&dz<=1;dz+=1){for(var dy=-1;!dirty&&dy<=1;dy+=1){
-          for(var dx=-1;!dirty&&dx<=1;dx+=1){
-            let q=tileOrigin+4*vec3i(dx,dy,dz);
-            let neighbor=cm12TeiSpatialTile(cm12TransportSpatialTileId(q),slot);
-            if(neighbor.packetId==0xffffffffu){continue;}
-            let mask=fsm1Nonexact(neighbor.packetId)&~fsm1Bulk(neighbor.packetId)
-              &neighbor.laneMask;
-            dirty=(mask.x|mask.y)!=0u;
-          }
-        }}
+  // Face grading does not bound diagonal neighbours tightly enough to skip
+  // finest tiles safely. Large physical cells conservatively take transport;
+  // their work remains bounded by payload size, independent of macro span.
+  // Ordinary packets retain the exact four-cell spatial mask stencil.
+  dirty=dirty||leafDescriptor.scale>8u;
+  let extent=leafDescriptor.scale*packet.counts;
+  let stride=4u;
+  let probes=(extent+vec3u(stride-1u))/stride;
+  for(var z=-1;!dirty&&z<=i32(probes.z);z+=1){
+    for(var y=-1;!dirty&&y<=i32(probes.y);y+=1){
+      for(var x=-1;!dirty&&x<=i32(probes.x);x+=1){
+        let offset=vec3i(select(min(u32(max(x,0))*stride,extent.x),0u,x<0),
+          select(min(u32(max(y,0))*stride,extent.y),0u,y<0),
+          select(min(u32(max(z,0))*stride,extent.z),0u,z<0));
+        let q=origin+select(offset,vec3i(-4),vec3i(x,y,z)<vec3i(0));
+        let neighbor=cm12TeiSpatialTileAtFine(q,slot);
+        if(neighbor.packetId==0xffffffffu){continue;}
+        let mask=fsm1Nonexact(neighbor.packetId)&~fsm1Bulk(neighbor.packetId)&neighbor.laneMask;
+        dirty=(mask.x|mask.y)!=0u;
       }
     }
   }

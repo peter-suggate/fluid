@@ -1,5 +1,5 @@
 /**
- * PEI1 is the production B8/P8 coarse pressure execution image. It occupies
+ * PEI1 is the production B4/P4 or B8/P8 coarse pressure execution image. It occupies
  * binding 15's existing ordinary-u32 pressure worklist arena and contains only
  * data consumed by the iterative solve: dense pressure-cell IDs, one canonical
  * global membership bitset, dense wet-brick IDs and dense hierarchy tokens. PCF's finalized
@@ -43,8 +43,8 @@ export const SPARSE_CM12_PRESSURE_EXECUTION_IMAGE_HEADER = Object.freeze({
 
 export interface SparseCM12PressureExecutionImageLayout {
   readonly baseWords: number;
-  readonly brickFineResolution: 8;
-  readonly presentationPageResolution: 8;
+  readonly brickFineResolution: 4 | 8;
+  readonly presentationPageResolution: 4 | 8;
   readonly cellCapacity: number;
   readonly rowCapacity: number;
   readonly brickCapacity: number;
@@ -89,11 +89,11 @@ export function createSparseCM12PressureExecutionImageLayout(options: {
   readonly rowCapacity?: number;
   readonly brickCapacity: number;
   readonly hierarchyCapacity: number;
-  readonly brickFineResolution: 8;
-  readonly presentationPageResolution: 8;
+  readonly brickFineResolution: 4 | 8;
+  readonly presentationPageResolution: 4 | 8;
 }): SparseCM12PressureExecutionImageLayout {
-  if (options.brickFineResolution !== 8 || options.presentationPageResolution !== 8) {
-    throw new Error("PEI1 is the B8/P8 pressure ABI");
+  if (![4, 8].includes(options.brickFineResolution) || options.presentationPageResolution !== options.brickFineResolution) {
+    throw new Error("PEI1 requires matched B4/P4 or B8/P8 pressure pages");
   }
   if (!Number.isSafeInteger(options.baseWords) || options.baseWords < 0
     || options.baseWords >= 0x4000_0000) {
@@ -128,8 +128,8 @@ export function createSparseCM12PressureExecutionImageLayout(options: {
   const wetBrickBaseWords = plane(brickCapacity);
   const hierarchyTokenBaseWords = plane(hierarchyCapacity);
   const totalWords = alignWords(at);
-  return Object.freeze({ baseWords, brickFineResolution: 8,
-    presentationPageResolution: 8, cellCapacity, rowCapacity, brickCapacity, hierarchyCapacity,
+  return Object.freeze({ baseWords, brickFineResolution: options.brickFineResolution,
+    presentationPageResolution: options.presentationPageResolution, cellCapacity, rowCapacity, brickCapacity, hierarchyCapacity,
     pressureCellBaseWords, pressureCellSlotBaseWords,
     pressureMembershipBaseWords, pressureMembershipSlotBaseWords,
     pressureMembershipWordCount, pressureRowMembershipSlotBaseWords,

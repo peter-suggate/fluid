@@ -46,13 +46,15 @@ export interface SparseCM12DawnPerformanceLane extends CommonLane {
   readonly scene: "mini32" | "mini64";
   // Identify the reviewed baseline; the runner obtains solver settings from
   // production defaults and validates the probe's resolved values.
-  readonly brickFineResolution: 8;
-  readonly presentationPageResolution: 8;
+  readonly brickFineResolution: 4;
+  readonly presentationPageResolution: 4;
   readonly warmupFrames: number;
   readonly measuredFrames: number;
   readonly captureGapMs: number;
   readonly maximumMedianAdvanceMs: number;
   readonly referenceMedianAdvanceMs: number;
+  /** B4 must meet the existing measured B8 ceiling; no rebaseline. */
+  readonly referenceBaselineKey: "mini32-b8-p8" | "mini64-b8-p8";
 }
 
 export type SparseCM12DawnLane = SparseCM12DawnTestLane
@@ -144,11 +146,12 @@ export const SPARSE_CM12_DAWN_LANES: readonly SparseCM12DawnLane[] = [
     kind: "performance",
     description: "mini32 production-default hardware-timestamped frame ceiling",
     scene: "mini32",
-    brickFineResolution: 8,
-    presentationPageResolution: 8,
+    brickFineResolution: 4,
+    presentationPageResolution: 4,
     warmupFrames: 3,
     measuredFrames: 12,
     captureGapMs: 110,
+    referenceBaselineKey: "mini32-b8-p8",
     referenceMedianAdvanceMs: 24.576,
     maximumMedianAdvanceMs: 40,
     timeoutMs: 20_000,
@@ -159,11 +162,12 @@ export const SPARSE_CM12_DAWN_LANES: readonly SparseCM12DawnLane[] = [
     kind: "performance",
     description: "mini64 production-default hardware-timestamped frame ceiling",
     scene: "mini64",
-    brickFineResolution: 8,
-    presentationPageResolution: 8,
+    brickFineResolution: 4,
+    presentationPageResolution: 4,
     warmupFrames: 3,
     measuredFrames: 12,
     captureGapMs: 110,
+    referenceBaselineKey: "mini64-b8-p8",
     referenceMedianAdvanceMs: 83.5584,
     maximumMedianAdvanceMs: 110,
     timeoutMs: 60_000,

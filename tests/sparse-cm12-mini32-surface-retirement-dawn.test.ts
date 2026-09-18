@@ -21,7 +21,7 @@ const dawnTest = dawnModule ? test : test.skip;
 
 const key = (coordinate: readonly number[]) => coordinate.join("/");
 
-dawnTest("mini32 retires vacant bricks and refines every represented surface crossing",
+for (const b of [4, 8] as const) dawnTest(`B${b} mini32 retires vacant bricks and refines every represented surface crossing`,
   { timeout: 240_000 }, async () => {
     await acquireWebGPUExclusiveLock("dawn-test",
       "tests/sparse-cm12-mini32-surface-retirement-dawn.test.ts");
@@ -50,7 +50,7 @@ dawnTest("mini32 retires vacant bricks and refines every represented surface cro
       // finalizer and creates an unbounded world with no floor.
       const scene = sceneDocument(getSceneDefinition("minimal-power-dam-break-32"));
       const values = resolveMethodValues(adaptiveMassMethod, "balanced", {
-        brickFineResolution: "8",
+        brickFineResolution: String(b),
         resolutionMode: "adaptive",
         selectorMode: "surface",
         surfaceFineRings: 1,
@@ -65,10 +65,10 @@ dawnTest("mini32 retires vacant bricks and refines every represented surface cro
       const initialByCoordinate = new Map(initial.bricks.map((brick) =>
         [key(brick.coordinate), brick] as const));
       assert.ok(initial.bricks.some((brick) => brick.active
-        && brick.acceptedResolution < 8),
+        && brick.acceptedResolution < b),
       "the fixture must begin with coarsened resident bricks");
       const initiallyCoarseKeys = new Set(initial.bricks.filter((brick) => brick.active
-        && brick.acceptedResolution < 8).map((brick) => brick.key));
+        && brick.acceptedResolution < b).map((brick) => brick.key));
       const initiallyCoarseHistory: Array<Readonly<{
         step: number; coordinate: readonly number[]; active: boolean;
         accepted: number; reasons: number; planned: number; planReasons: number;
@@ -138,9 +138,9 @@ dawnTest("mini32 retires vacant bricks and refines every represented surface cro
       const brickMaximumDensity = new Map<string, number>();
       for (const brick of activity.bricks) {
         let maximum = 0;
-        for (let z = 8 * brick.coordinate[2]; z < 8 * (brick.coordinate[2] + 1); z += 1) {
-          for (let y = 8 * brick.coordinate[1]; y < 8 * (brick.coordinate[1] + 1); y += 1) {
-            for (let x = 8 * brick.coordinate[0]; x < 8 * (brick.coordinate[0] + 1); x += 1) {
+        for (let z = b * brick.coordinate[2]; z < b * (brick.coordinate[2] + 1); z += 1) {
+          for (let y = b * brick.coordinate[1]; y < b * (brick.coordinate[1] + 1); y += 1) {
+            for (let x = b * brick.coordinate[0]; x < b * (brick.coordinate[0] + 1); x += 1) {
               if (x >= 0 && y >= 0 && z >= 0 && x < nx && y < ny && z < nz) {
                 maximum = Math.max(maximum, fields.density[index(x, y, z)]!);
               }
@@ -159,10 +159,10 @@ dawnTest("mini32 retires vacant bricks and refines every represented surface cro
             const qx = x + dx!, qy = y + dy!, qz = z + dz!;
             if (qx >= nx || qy >= ny || qz >= nz
               || (fields.density[index(qx, qy, qz)]! >= 0.5) === wet) continue;
-            const ownKey = key([Math.floor(x / 8), Math.floor(y / 8),
-              Math.floor(z / 8)]);
-            const neighborKey = key([Math.floor(qx / 8), Math.floor(qy / 8),
-              Math.floor(qz / 8)]);
+            const ownKey = key([Math.floor(x / b), Math.floor(y / b),
+              Math.floor(z / b)]);
+            const neighborKey = key([Math.floor(qx / b), Math.floor(qy / b),
+              Math.floor(qz / b)]);
             crossingKeys.add(ownKey);
             crossingKeys.add(neighborKey);
             crossingOwnerPairs.push([ownKey, neighborKey]);
@@ -174,12 +174,12 @@ dawnTest("mini32 retires vacant bricks and refines every represented surface cro
         .map((coordinate) => activeByCoordinate.get(coordinate))
         .filter((brick): brick is (typeof active)[number] => brick !== undefined);
       const initiallyCoarseCrossings = crossingBricks.filter((brick) =>
-        (initialByCoordinate.get(key(brick.coordinate))?.acceptedResolution ?? 8) < 8);
+        (initialByCoordinate.get(key(brick.coordinate))?.acceptedResolution ?? b) < b);
       const coarseCrossings = crossingBricks.filter((brick) =>
-        brick.acceptedResolution !== 8);
+        brick.acceptedResolution !== b);
       const unownedCrossings = crossingOwnerPairs.filter(([own, neighbor]) =>
-        activeByCoordinate.get(own)?.acceptedResolution !== 8
-        && activeByCoordinate.get(neighbor)?.acceptedResolution !== 8);
+        activeByCoordinate.get(own)?.acceptedResolution !== b
+        && activeByCoordinate.get(neighbor)?.acceptedResolution !== b);
       // Mirror retireUnsupportedEmptyBricks: a dry leaf remains resident only
       // while an active neighbour's immutable sweep mask requests it.
       const requestedAsDestination = (target: (typeof active)[number]): boolean => {
@@ -195,19 +195,19 @@ dawnTest("mini32 retires vacant bricks and refines every represented surface cro
             if ((neighbour.supportMask & 2 ** bit) !== 0) return true;
           }
         }
-        const lower = target.coordinate.map((value) => 8 * value);
-        for (let z = lower[2]; z < lower[2] + 8; z += 1)
-          for (let y = lower[1]; y < lower[1] + 8; y += 1)
-            for (let x = lower[0]; x < lower[0] + 8; x += 1) {
+        const lower = target.coordinate.map((value) => b * value);
+        for (let z = lower[2]; z < lower[2] + b; z += 1)
+          for (let y = lower[1]; y < lower[1] + b; y += 1)
+            for (let x = lower[0]; x < lower[0] + b; x += 1) {
               if (x < 0 || y < 0 || z < 0 || x >= nx || y >= ny || z >= nz) continue;
               for (const [dx, dy, dz] of [[-1, 0, 0], [1, 0, 0], [0, -1, 0],
                 [0, 1, 0], [0, 0, -1], [0, 0, 1]] as const) {
                 const qx = x + dx, qy = y + dy, qz = z + dz;
                 if (qx < 0 || qy < 0 || qz < 0 || qx >= nx || qy >= ny || qz >= nz)
                   continue;
-                if (Math.floor(qx / 8) === target.coordinate[0]
-                  && Math.floor(qy / 8) === target.coordinate[1]
-                  && Math.floor(qz / 8) === target.coordinate[2]) continue;
+                if (Math.floor(qx / b) === target.coordinate[0]
+                  && Math.floor(qy / b) === target.coordinate[1]
+                  && Math.floor(qz / b) === target.coordinate[2]) continue;
                 const ownAt = index(x, y, z), sourceAt = index(qx, qy, qz);
                 if (fields.solidOpenFraction[ownAt]! > 1e-6
                   && fields.solidOpenFraction[sourceAt]! > 1e-6
@@ -223,8 +223,8 @@ dawnTest("mini32 retires vacant bricks and refines every represented surface cro
       const initiallyCoarseSurface = initiallyCoarseHistory.filter((brick) =>
         brick.active && (brick.reasons & 1) !== 0);
       const initiallyCoarseSurfaceViolations = initiallyCoarseSurface.filter((brick) =>
-        brick.accepted !== 8);
-      const topActive = active.filter((brick) => brick.coordinate[1] === 3);
+        brick.accepted !== b);
+      const topActive = active.filter((brick) => brick.coordinate[1] === Math.ceil(ny / b) - 1);
 
       if (process.env.FLUID_MINI32_SURFACE_TRACE === "1") {
         process.stderr.write(`[mini32-surface-retirement] ${JSON.stringify({
@@ -254,7 +254,7 @@ dawnTest("mini32 retires vacant bricks and refines every represented surface cro
             transferStatus: brick.transferStatus,
             faceTransferStatus: brick.faceTransferStatus,
           })),
-          initialRungs: Object.fromEntries([1, 2, 4, 8].map((resolution) =>
+          initialRungs: Object.fromEntries([1, 2, 4, 8].filter(r => r <= b).map((resolution) =>
             [resolution, initial.bricks.filter((brick) => brick.active
               && brick.acceptedResolution === resolution).map((brick) => brick.coordinate)])),
           crossingBricks: crossingBricks.map((brick) => ({
@@ -290,7 +290,7 @@ dawnTest("mini32 retires vacant bricks and refines every represented surface cro
           initiallyCoarseSurfaceViolations.map((brick) =>
             `step ${brick.step} ${brick.coordinate.join(",")}=${brick.accepted}`).join("; ")}`);
       assert.equal(unownedCrossings.length, 0,
-        `represented surface crossings lack a B8 geometric owner: ${
+        `represented surface crossings lack a finest-rung geometric owner: ${
           unownedCrossings.slice(0, 16).map((pair) => pair.join("/")).join("; ")}`);
       assert.ok(topActive.every(requestedAsDestination),
         `vacant top bricks remained without geometric support: ${topActive.filter(

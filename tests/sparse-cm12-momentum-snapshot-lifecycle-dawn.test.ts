@@ -16,7 +16,8 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
     device=await adapter.requestDevice({requiredLimits:requiredFluidDeviceLimits(adapter.limits)});assert.ok(device);
     const errors:string[]=[];device.addEventListener("uncapturederror",event=>{event.preventDefault();errors.push(event.error.message);});
     const scene=getScenePreset("coarse-first-pool-impact-half").create();const dt=1/30;
-    solver=await WebGPUAdaptiveMassSolver.createCompiledTopologyTransport(device,scene,"balanced",undefined,sparseCM12DawnDefaultOptions(),()=>{});
+    solver=await WebGPUAdaptiveMassSolver.createCompiledTopologyTransport(device,scene,"balanced",undefined,
+      {...sparseCM12DawnDefaultOptions(),airExtensionEnabled:true},()=>{});
     await solver.waitForSimulationReady();
     assert.equal((await solver.readGeometricVolumeTransportReceiptQA()).coupling.liquidCapacityBalancing.converged,
       false, "an unadvanced scene must not claim balancing convergence");

@@ -344,12 +344,15 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       loopStep: 2,
     },
     tip: {
-      summary: "FCA1 seals the frame's body and boundary authority. VEX2 caches accepted packet addresses by topology generation, selects compact or direct execution from occupancy, initializes packet validity and runs eight packet sweeps over the accepted topology image; sweep 8 publishes the effective transport velocity. Last, the AEI transport packet authority is compiled from the prior frame's final-scalar masks.",
-      reads: "projected face velocity, accepted topology image, prior final-scalar packet masks",
-      writes: "sealed frame control, extended transport velocity cache, transport packet families",
+      summary: "Prepares frame controls, motion bounds and activity bookkeeping. Optionally stages extra sparse support needed by moving liquid. Caches accepted packet addresses by topology generation, initializes liquid velocities and clears air velocities, then optionally runs eight sweeps to extend velocity into air. Support lookahead and extension sweeps can be disabled independently.",
+      reads: "accepted velocity, liquid level set, accepted topology and body/boundary inputs",
+      writes: "sealed frame control, staged sparse support and transport velocity cache",
       feeds: "face preparation and geometric volume transport",
     },
-    chip: () => "FCA1 · VEX2 8 cached-packet sweeps · AEI packets",
+    controls: [algorithmStageControl("velocityExtension"), algorithmStageControl("preflightSupport")],
+    chip: (context) => `${context.values.velocityExtension === "off"
+      ? "liquid seeds only · 0 extension sweeps"
+      : "8 cached-packet sweeps"} · support lookahead ${context.values.preflightSupport === "off" ? "off" : "on"}`,
   },
   "face-preparation": {
     label: "Face preparation", band: "transport", side: "right",
@@ -420,7 +423,6 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       feeds: "pressure, adaptivity and presentation publication",
     },
     controls: [
-      algorithmStageControl("airExtension"),
       algorithmStageControl("surfaceSharpening"),
       algorithmStageControl("sharpeningStrength"),
       algorithmStageControl("distanceSweeps"),
@@ -778,6 +780,7 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       writes: "projected face and collocated velocity, divergence receipts, frame face output",
       feeds: "activity measurement and the next frame's velocity extension",
     },
+    controls: [algorithmStageControl("airExtension")],
     chip: (context) => context.info?.maxDivergenceAfter_s === undefined
       ? "G/D shared rows · touched faces only"
       : `|div|∞ ${context.info.maxDivergenceAfter_s.toExponential(2)} s⁻¹`,

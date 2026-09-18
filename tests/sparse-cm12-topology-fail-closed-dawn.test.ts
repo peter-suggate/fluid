@@ -31,8 +31,11 @@ const live = new Set<GPU>();
 struct Params { failure:vec4u, dispatch:vec4u }
 @group(0)@binding(3)var<uniform>p:Params;
 const GEOMETRIC_TOPOLOGY_BACKING_MISSING=34u;
+const BRICK_FINE_RESOLUTION=8u;
 const CM12_WDR_INITIAL_LEAVES=1u;const INVALID=0xffffffffu;
 fn cm12WorldLeafCoordinate(brick:u32)->vec3i{return vec3i(0);}
+fn cm12WorldOwnerAt(coordinate:vec3i)->u32{return INVALID;}
+fn brickSpan(brick:u32)->u32{return 1u;}
 fn cm12PreparedDynamicFace(brick:u32,r:u32,side:u32,point:vec3f)->vec4u{return vec4u(0u);}
 var<workgroup>geometricBrickBackingMissing:atomic<u32>;
 var<workgroup>geometricBrickCertificationEnabled:u32;

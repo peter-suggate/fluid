@@ -272,3 +272,12 @@ export interface OctreeTechniqueDebugSource {
   };
   readonly generation: number;
 }
+
+/** Stable dense authority for the combined V/K fill and independent phi contour. */
+export interface DenseLevelSetVolumeConsumerSource {
+  /** Shared vertices; dimensions are cell dimensions plus one on every axis. */
+  readonly vertexPhi: GPUTexture;
+  /** Final open cell fraction K/|cell|, including static and moving solids. */
+  readonly openFraction: GPUTexture;
+  readonly cellSize_m: readonly [number, number, number];
+}

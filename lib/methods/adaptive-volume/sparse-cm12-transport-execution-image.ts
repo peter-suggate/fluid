@@ -2,11 +2,11 @@ import type {
   SparseCM12LogicalOwnerDirectory,
   SparseCM12LogicalOwnerRuntime,
 } from "./sparse-cm12-logical-owner-directory";
-import { sparseBrickSpan, type SparseAdaptiveMassAtlas } from "./sparse-brick-atlas";
+import { sparseBrickSpan, sparseBrickContainingCoordinate, type SparseAdaptiveMassAtlas } from "./sparse-brick-atlas";
 
-/** Accepted transport execution image, version 2 (rung-major packets). */
+/** Accepted transport execution image, version 3 (compact rung-major packets). */
 export const SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_MAGIC = 0x5445_4932; // TEI2
-export const SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_VERSION = 2;
+export const SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_VERSION = 3;
 export const SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_HEADER_WORDS = 24;
 export const SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_SLOT_HEADER_WORDS = 8;
 export const SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_LEAF_WORDS = 8;
@@ -50,6 +50,9 @@ export interface SparseCM12TransportExecutionImageLayout {
   /** Stable ABI: packetId = leaf * 64 + rung-local packet ordinal. */
   readonly packetsPerLeaf: 64;
   readonly packetCapacity: number;
+  /** Stored descriptors; stable identities retain their 64-slot leaf stride. */
+  readonly storedPacketsPerLeaf: number;
+  readonly storedPacketCapacity: number;
   readonly packetEdge: 4;
   readonly packetAxisCapacity: 4;
   readonly spatialTilesPerLogicalBrickAxis: number;
@@ -137,11 +140,9 @@ export function createSparseCM12TransportExecutionImageLayout(options: {
   if (maximumSpanBricks < 1 || (maximumSpanBricks & (maximumSpanBricks - 1)) !== 0) {
     throw new RangeError("TEI2 maximum span must be a positive power of two");
   }
-  const logicalSlotsPerLeaf = checked(options.logicalSlotsPerLeaf
-    ?? maximumSpanBricks ** 3, "logicalSlotsPerLeaf");
-  if (logicalSlotsPerLeaf < 1 || logicalSlotsPerLeaf > maximumSpanBricks ** 3) {
-    throw new RangeError("TEI2 logical slots per leaf exceed the maximum span");
-  }
+  // Only the leaf's origin tiles are cached. Arbitrary world queries resolve
+  // the owner and derive packet/lane arithmetically, independent of span.
+  const logicalSlotsPerLeaf = 1;
   const spatialTilesPerLeaf = checked(logicalSlotsPerLeaf
     * spatialTilesPerLogicalBrick, "spatialTilesPerLeaf");
   const spatialTileCapacity = checked(options.leafCapacity * spatialTilesPerLeaf,
@@ -151,7 +152,9 @@ export function createSparseCM12TransportExecutionImageLayout(options: {
     * SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_PACKETS_PER_LEAF, "packetCapacity");
   const leafWords = checked(leafCapacity
     * SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_LEAF_WORDS, "leafWords");
-  const packetWords = checked(packetCapacity
+  const storedPacketsPerLeaf = spatialTilesPerLogicalBrick;
+  const storedPacketCapacity = checked(leafCapacity * storedPacketsPerLeaf, "storedPacketCapacity");
+  const packetWords = checked(storedPacketCapacity
     * SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_PACKET_WORDS, "packetWords");
   const spatialTileWords = checked(spatialTileCapacity
     * SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_SPATIAL_TILE_WORDS, "spatialTileWords");
@@ -174,7 +177,7 @@ export function createSparseCM12TransportExecutionImageLayout(options: {
     logicalBrickDimensions: [...options.logicalBrickDimensions] as [number, number, number],
     leafCapacity,
     packetsPerLeaf: SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_PACKETS_PER_LEAF,
-    packetCapacity,
+    packetCapacity, storedPacketsPerLeaf, storedPacketCapacity,
     packetEdge: SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_PACKET_EDGE,
     packetAxisCapacity: SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_PACKET_AXIS_CAPACITY,
     spatialTilesPerLogicalBrickAxis, spatialTilesPerLogicalBrick,
@@ -233,7 +236,7 @@ function writeSlot(
     }
     const scale = spanFine / resolution;
     const originFine = source.coordinate.map((v) => v * layout.brickFineResolution);
-    const extent = originFine.map((v, axis) => Math.max(0, Math.min(
+    const extent = originFine.map((v, axis) => source.unclipped ? spanFine : Math.max(0, Math.min(
       spanFine, atlas.dimensions[axis]! - v,
     )));
     const valid = extent.map((v) => Math.ceil(v / scale));
@@ -252,12 +255,12 @@ function writeSlot(
 
     const packetAxis = packetAxisForResolution(resolution);
     for (let localPacket = 0;
-      localPacket < SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_PACKETS_PER_LEAF;
+      localPacket < layout.storedPacketsPerLeaf;
       localPacket += 1) {
       const packetId = brick * SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_PACKETS_PER_LEAF
         + localPacket;
       const packetAt = packetBase
-        + packetId * SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_PACKET_WORDS;
+        + (brick * layout.storedPacketsPerLeaf + localPacket) * SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_PACKET_WORDS;
       words[packetAt] = generation;
       words[packetAt + 1] = SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_INVALID;
       words[packetAt + 2] = 0;
@@ -313,12 +316,12 @@ function writeSlot(
     const owner = { brick, origin: source.coordinate,
       spanBricks: sparseBrickSpan(source) } as const;
     if (!runtime.brickActive(owner.brick)
-      || origin.some((v, axis) => v >= atlas.dimensions[axis]!)) continue;
+      || (!source.unclipped && origin.some((v, axis) => v < 0 || v >= atlas.dimensions[axis]!))) continue;
     const resolution = runtime.acceptedBrickResolution(owner.brick);
     const spanFine = layout.brickFineResolution * owner.spanBricks;
     const scale = spanFine / resolution;
     const leafOrigin = owner.origin.map((v) => v * layout.brickFineResolution);
-    const extent = leafOrigin.map((v, axis) => Math.max(0, Math.min(
+    const extent = leafOrigin.map((v, axis) => source.unclipped ? spanFine : Math.max(0, Math.min(
       spanFine, atlas.dimensions[axis]! - v,
     )));
     const valid = extent.map((v) => Math.ceil(v / scale));
@@ -336,7 +339,7 @@ function writeSlot(
     for (let lane = 0; lane < 64; lane += 1) {
       const q = [origin[0] + (lane & 3), origin[1] + ((lane >>> 2) & 3),
         origin[2] + (lane >>> 4)] as const;
-      if (q.some((v, axis) => v >= atlas.dimensions[axis]!)) continue;
+      if (!source.unclipped && q.some((v, axis) => v < 0 || v >= atlas.dimensions[axis]!)) continue;
       const relative = q.map((v, axis) => v - leafOrigin[axis]!);
       if (relative.some((v) => v < 0 || v % scale !== 0)) continue;
       const local = relative.map((v) => v / scale);
@@ -375,12 +378,7 @@ export function createSparseCM12TransportExecutionImage(
       ?? atlas.brickDimensions,
     leafCapacity: atlas.bricks.length,
     maximumSpanBricks: atlas.maximumSpanBricks,
-    logicalSlotsPerLeaf: Math.max(1, ...atlas.bricks.map((brick) => {
-      const span = sparseBrickSpan(brick);
-      const extent = brick.coordinate.map((origin, axis) => Math.max(0,
-        Math.min(span, atlas.brickDimensions[axis]! - origin)));
-      return (extent[2]! - 1) * span * span + (extent[1]! - 1) * span + extent[0]!;
-    })),
+
   });
   const layout = options.layout ?? requiredLayout;
   const expectedLayout = createSparseCM12TransportExecutionImageLayout({
@@ -418,7 +416,38 @@ export function createSparseCM12TransportExecutionImage(
     layout.slotLeafBaseOffsets[0], layout.slotPacketBaseOffsets[0],
     layout.slotSpatialTileBaseOffsets[0], layout.totalWords, 0,
   ]);
+  words[23] = layout.storedPacketsPerLeaf;
   writeSlot(words, layout, 0, atlas, runtime, generation);
   writeSlot(words, layout, 1, atlas, runtime, generation);
   return Object.freeze({ layout, words });
+}
+
+/** CPU oracle for direct spatial addressing, including far corners of macros. */
+export function sparseCM12TransportTileAtFine(atlas: SparseAdaptiveMassAtlas,
+  image: SparseCM12TransportExecutionImage, fine: readonly [number, number, number], slot: 0 | 1 = 0) {
+  const invalid = { packetId: SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_INVALID, maskLow: 0, maskHigh: 0 };
+  const source = sparseBrickContainingCoordinate(atlas, fine.map(q => Math.floor(q / atlas.brickFineResolution)) as [number, number, number]);
+  if (!source) return invalid;
+  const leaf = atlas.bricks.indexOf(source), { layout, words } = image;
+  const at = layout.slotLeafBaseOffsets[slot] + leaf * SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_LEAF_WORDS;
+  if (!words[at] || !(words[at + 1]! & 0x80000000)) return invalid;
+  const resolution = words[at + 1]! & 31, scale = words[at + 6]!;
+  const valid = [words[at + 5]! & 31, (words[at + 5]! >>> 5) & 31, (words[at + 5]! >>> 10) & 31];
+  const origin = source.coordinate.map(q => q * atlas.brickFineResolution);
+  const home = fine.map((q, axis) => Math.floor((q - origin[axis]!) / scale));
+  if (home.some((q, axis) => q < 0 || q >= valid[axis]!)) return invalid;
+  const packetAxis = packetAxisForResolution(resolution);
+  const packet = packetLocalId(home.map(q => Math.floor(q / 4)), packetAxis);
+  let maskLow = 0, maskHigh = 0;
+  for (let lane = 0; lane < 64; lane++) {
+    const q = [fine[0] + (lane & 3), fine[1] + ((lane >>> 2) & 3), fine[2] + (lane >>> 4)];
+    if (!source.unclipped && q.some((v, axis) => v < 0 || v >= atlas.dimensions[axis]!)) continue;
+    const local = q.map((v, axis) => Math.floor((v - origin[axis]!) / scale));
+    if (local.some((v, axis) => v < 0 || v >= valid[axis]!)) continue;
+    if (packetLocalId(local.map(v => Math.floor(v / 4)), packetAxis) !== packet) continue;
+    const cellLane = (local[0]! % 4) + 4 * ((local[1]! % 4) + 4 * (local[2]! % 4));
+    if (cellLane < 32) maskLow = (maskLow | (1 << cellLane)) >>> 0;
+    else maskHigh = (maskHigh | (1 << (cellLane - 32))) >>> 0;
+  }
+  return { packetId: leaf * layout.packetsPerLeaf + packet, maskLow, maskHigh };
 }

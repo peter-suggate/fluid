@@ -1,7 +1,7 @@
 import { MOMENTUM_SNAPSHOT_ENTRY_POINTS, momentumSnapshotLayout } from "./sparse-cm12-momentum-snapshot";
 import { AIR_EXTENSION_ENTRY_POINTS, AIR_EXTENSION_ITERATIONS, AIR_EXTENSION_SWEEPS, airExtensionLayout, decodeAirExtensionReceipt } from "./sparse-cm12-air-extension";
 import { sparseCM12DistanceSweeps, sparseCM12ReturnPasses } from "./sharpening-controls";
-import { DYNAMIC_PAGE_CELL_COUNT, DYNAMIC_PAGE_ROW_COUNT, DYNAMIC_PAGE_TERM_COUNT, DYNAMIC_PAGE_WORDS, prepareDynamicPageImage, packDynamicSeamCatalogue, dynamicRungLayout } from "./sparse-cm12-dynamic-rung-catalog";
+import { dynamicRungCatalogue } from "./sparse-cm12-dynamic-rung-catalog";
 import { geometricVolumeQAWGSL } from "./geometric-volume-qa.wgsl";
 import { LIQUID_CAPACITY_BALANCING_ROUNDS, LIQUID_CAPACITY_RELATIVE_TOLERANCE, WHOLE_FRAME_VOLUME_ENTRY_POINTS, type SparseGeometricVolumeLayout } from "./resident-volume.wgsl";
 import { createInitialLevelSetGeometryWGSL } from "./levelset-initial-geometry";
@@ -257,6 +257,8 @@ export interface SharpeningTrace extends SparseCM12CorrectionControls {
   /** Defaults on; the mandatory final-scalar publication is independent. */
   readonly surfaceSharpeningEnabled?: boolean;
   readonly airExtensionEnabled?: boolean;
+  readonly velocityExtensionEnabled?: boolean;
+  readonly preflightSupportEnabled?: boolean;
   readonly presentationColumnHeightEnabled?: boolean;
   readonly presentationColumnHeightMode?: "off" | "auto" | "on";
   readonly presentationSurfaceMode?: "rdf" | "plic";
@@ -1075,8 +1077,7 @@ const GPU_TOPOLOGY_PAGE_POOL_MINIMUM = 32;
 const GPU_TOPOLOGY_PAGE_BUDGET_DEFAULT = 512;
 const GPU_TOPOLOGY_CELL_PAGE_HEADER_WORDS = 16;
 const gpuTopologyCellPageWords = (brickFineResolution: number) => {
-  if (brickFineResolution !== 8) throw new RangeError("dynamic catalogue requires eight-spacing pages");
-  return DYNAMIC_PAGE_WORDS;
+  return dynamicRungCatalogue(brickFineResolution).DYNAMIC_PAGE_WORDS;
 };
 
 export interface SparseCM12TopologyPagePoolPlan {
@@ -1159,7 +1160,7 @@ export function sparseCM12TopologyPagePoolPlan(
   mutableFrontierBricks: number,
   enabled = true,
   brickFineResolution = 8,
-  pageBudget = GPU_TOPOLOGY_PAGE_BUDGET_DEFAULT,
+  pageBudget = GPU_TOPOLOGY_PAGE_BUDGET_DEFAULT * (8 / brickFineResolution) ** 3,
 ): SparseCM12TopologyPagePoolPlan {
   if (!Number.isSafeInteger(pageBudget) || pageBudget < 0) {
     throw new RangeError("Sparse Geometric (CM12) topology page budget must be a nonnegative safe integer");
@@ -3674,8 +3675,8 @@ export class WebGPUSparseCM12Resident {
       },
       worldDirectoryBaseWords: this.worldDirectoryLayout.baseWords,
       worldDirectoryInitialLeaves: this.worldDirectoryLayout.initialLeaves,
-      dynamicPageCellStride: DYNAMIC_PAGE_CELL_COUNT,
-      dynamicPageRungOffsets: [1, 2, 4, 8].map(r => dynamicRungLayout(r).cellOffset) as [number, number, number, number],
+      dynamicPageCellStride: dynamicRungCatalogue(this.brickFineResolution).DYNAMIC_PAGE_CELL_COUNT,
+      dynamicPageRungOffsets: [1, 2, 4, 8].map(r => r <= this.brickFineResolution ? dynamicRungCatalogue(this.brickFineResolution).dynamicRungLayout(r).cellOffset : 0) as [number, number, number, number],
     };
     this.diagnosticsReadback = diagnosticsReadback;
     this.bindGroup = bindGroup;
@@ -4090,16 +4091,17 @@ export class WebGPUSparseCM12Resident {
     implicitSharpeningOwnerArithmeticForQA = false,
     alternatingCapacityRepairReceiptsForQA = false,
     gatherCapacityRepairForQA = false,
-    topologyPageCapacityMaximum = GPU_TOPOLOGY_PAGE_BUDGET_DEFAULT,
+    topologyPageCapacityMaximum = GPU_TOPOLOGY_PAGE_BUDGET_DEFAULT * (8 / atlas.brickFineResolution) ** 3,
     acceptedOnly = false,
     transferredSymmetry?: { scalar: boolean; face: boolean },
     initialVelocity_m_s?: readonly [number, number, number],
     candidateKeys?: ReadonlySet<number>,
     initialScene?: SceneDescription,
   ): Promise<WebGPUSparseCM12Resident> {
-    if (atlas.brickFineResolution !== 8 || presentationPageResolution !== 8) {
-      throw new Error("Sparse Geometric (CM12) PEI1 production is an aggressive B8/P8 cutover");
+    if (![4, 8].includes(atlas.brickFineResolution) || presentationPageResolution !== atlas.brickFineResolution) {
+      throw new Error("Sparse Geometric (CM12) requires matched B4/P4 or B8/P8 pages");
     }
+    const { DYNAMIC_PAGE_CELL_COUNT, DYNAMIC_PAGE_ROW_COUNT, DYNAMIC_PAGE_TERM_COUNT, prepareDynamicPageImage, packDynamicSeamCatalogue } = dynamicRungCatalogue(atlas.brickFineResolution);
     const initialSolidWorld = solidWorld;
     const dynamicWorldGrowth = true;
     const signedWorldGrowth = true;
@@ -4113,9 +4115,16 @@ export class WebGPUSparseCM12Resident {
     const apron = new Set<string>();
     for (const brick of atlas.bricks) if (initiallyActiveBrickKeys.has(brick.key)
       && sparseBrickSpan(brick) <= 2) {
-      const [bx, by, bz] = brick.coordinate, span = sparseBrickSpan(brick);
-      for (let z = -1; z <= span; z++) for (let y = -1; y <= span; y++)
-        for (let x = -1; x <= span; x++) apron.add(`${bx + x}/${by + y}/${bz + z}`);
+      const span = sparseBrickSpan(brick);
+      // Keep preparation coverage physical when a B8 tile becomes eight B4
+      // payloads. A one-payload apron otherwise leaves authored dry leaves
+      // without rerung storage as soon as the surface reaches them.
+      const tile = Math.max(1, 8 / atlas.brickFineResolution);
+      const lower = brick.coordinate.map(q => Math.floor(q / tile) * tile - tile);
+      const upper = brick.coordinate.map(q => Math.ceil((q + span) / tile) * tile + tile);
+      for (let z = lower[2]!; z < upper[2]!; z++)
+        for (let y = lower[1]!; y < upper[1]!; y++)
+          for (let x = lower[0]!; x < upper[0]!; x++) apron.add(`${x}/${y}/${z}`);
     }
     let mutableBrickKeysForBudget = atlas.bricks.filter(brick =>
       (initiallyActiveBrickKeys.has(brick.key) && sparseBrickSpan(brick) <= 2)
@@ -4159,7 +4168,7 @@ export class WebGPUSparseCM12Resident {
       // turns sparse physical capacity into the complete logical volume. The
       // The caller may reserve a larger bounded course for compact curved
       // volumes, whose required B8 frontier starts farther from the pool.
-      // Ordinary scenes retain the established 512-page ceiling.
+      // Preserve the 512 B8-page physical coverage budget across ladders.
       Math.max(1, 12 * initiallyActiveBrickKeys.size - residentInactiveBrickCount),
       true,
       atlas.brickFineResolution,
@@ -4179,19 +4188,10 @@ export class WebGPUSparseCM12Resident {
       })
       : undefined;
     const transportExecutionImageLayout = createSparseCM12TransportExecutionImageLayout({
-        brickFineResolution: atlas.brickFineResolution as 8 | 16,
+        brickFineResolution: atlas.brickFineResolution,
         logicalBrickDimensions: atlas.brickDimensions,
         leafCapacity: worldLeafCapacity,
         maximumSpanBricks: atlas.maximumSpanBricks,
-        // Reduce, never spread: a grown atlas passed as arguments overflows
-        // the host call stack.
-        logicalSlotsPerLeaf: atlas.bricks.reduce((slots, brick) => {
-          const span = sparseBrickSpan(brick);
-          const extent = brick.coordinate.map((origin, axis) => Math.max(0,
-            Math.min(span, atlas.brickDimensions[axis]! - origin)));
-          return Math.max(slots, (extent[2]! - 1) * span * span
-            + (extent[1]! - 1) * span + extent[0]!);
-        }, 1),
       });
     // Production ownership remains the signed-coordinate WDR1 hash. The two
     // implicit-arithmetic experiments upload the already-built immutable LOD1
@@ -4575,8 +4575,8 @@ export class WebGPUSparseCM12Resident {
       rowCapacity: physicsRowCapacity,
       brickCapacity: 0,
       hierarchyCapacity: 0,
-      brickFineResolution: 8,
-      presentationPageResolution: 8,
+      brickFineResolution: atlas.brickFineResolution as 4 | 8,
+      presentationPageResolution: presentationPageResolution as 4 | 8,
     });
     const pressureWorklistWords = createSparseCM12PressureExecutionImageInitialWords(
       pressureExecutionImageLayout);
@@ -4767,7 +4767,7 @@ export class WebGPUSparseCM12Resident {
     const internedBoundaryCatalog = transportExecutionImageLayout
       ? compileSparseCM12FactoredAEIPackedTemplateCatalog({
         words: templates.words,
-        brickFineResolution: atlas.brickFineResolution as 8 | 16,
+        brickFineResolution: atlas.brickFineResolution,
         brickKeyByLeafId: atlas.bricks.map((brick) => brick.key),
         validDimensions: (leaf, resolution) => {
           const brick = atlas.bricks[leaf]!;
@@ -6577,7 +6577,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
       closePass();
       this.encodeTopologyEditTransaction(encoder, finestCellSize_m,
         [0, 0, 0], [0, 0, 0], 0, 0, dt_s, false, activityPolicy, "prepare", true,
-        false, true);
+        false, true, sharpening?.preflightSupportEnabled !== false);
       selectBindGroup(this.bindGroup);
       dispatchAccepted("publishGeometricTransportFrontierSource", "cell");
       if (this.rigidCoupling) {
@@ -6610,9 +6610,14 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
       };
       dispatchVelocityExtension("initializeVelocityExtensionPackets", 0);
       closeSubstage("velocity-extension-mask-initialization");
-      for (let depth = 1; depth <= 8; depth += 1) {
-        selectBindGroup(this.transportDepthBindGroups[depth - 1]!);
-        dispatchVelocityExtension("advanceVelocityExtensionPackets", 12);
+      // Initialization clears old air velocities and leaves wet-only validity
+      // in bank A, also the final bank of the normal eight-sweep schedule.
+      // Skipping propagation therefore cannot reuse last frame's air field.
+      if (sharpening?.velocityExtensionEnabled !== false) {
+        for (let depth = 1; depth <= 8; depth += 1) {
+          selectBindGroup(this.transportDepthBindGroups[depth - 1]!);
+          dispatchVelocityExtension("advanceVelocityExtensionPackets", 12);
+        }
       }
       closeSubstage("velocity-extension-sweeps");
       // Scalar TPA/sharpening packets belonged to retired CM12 transport.
@@ -7888,6 +7893,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
     transportFrontier = false,
     projectedTransportFrontier = false,
     frontierPrologueOnly = false,
+    preflightSupportEnabled = true,
   ): void {
     this.assertLive();
     // Every edit, injection, region refresh and rigid-shadow transaction runs
@@ -8031,6 +8037,13 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
           dispatchTopology("finalizeIncrementalActivityMasks", 1);
           dispatchTopology("measureBrickActivity", this.incrementalActivityLayout.brickCount);
           dispatchTopology("finalizeIncrementalActivityCensus", 1);
+        }
+        // The live ablation affects only early speculative support. Keep the
+        // fresh envelope, clock, masks and census above; measured projected
+        // receivers and the normal postphysics planner retain their own work.
+        if (frontierPrologueOnly && !preflightSupportEnabled) {
+          closeTopologyPass();
+          return;
         }
         if (this.solidOccupancyLayout) {
           if (projectedTransportFrontier) {
@@ -9067,8 +9080,8 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
         sourceFirst.set(key, this.templateWords[range]!);
       } else {
         if (record.topologyPage === undefined) throw new Error("CM12 active world leaf has no topology page");
-        sourceFirst.set(key, this.templateWords[2]! + record.topologyPage * DYNAMIC_PAGE_CELL_COUNT
-          + dynamicRungLayout(resolution).cellOffset);
+        sourceFirst.set(key, this.templateWords[2]! + record.topologyPage * dynamicRungCatalogue(this.brickFineResolution).DYNAMIC_PAGE_CELL_COUNT
+          + dynamicRungCatalogue(this.brickFineResolution).dynamicRungLayout(resolution).cellOffset);
         sourcePageCoordinates.set(record.topologyPage, coordinate);
       }
     }
@@ -9286,13 +9299,13 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
       // oracles observe the complete accepted world rather than silently
       // clipping back to the authored seed atlas.
       if (includeWorldLeaves) {
-        const cellsPerPage = DYNAMIC_PAGE_CELL_COUNT;
+        const cellsPerPage = dynamicRungCatalogue(this.brickFineResolution).DYNAMIC_PAGE_CELL_COUNT;
         const dynamicCellOffset = this.templateCellCount
           - cellsPerPage * this.topologyPageCapacity;
         for (const record of activitySnapshot.records) {
           if (record.leafId < this.initialWorldLeafCount || !record.active
             || record.topologyPage === undefined || !record.coordinate) continue;
-          const rung = dynamicRungLayout(record.acceptedResolution);
+          const rung = dynamicRungCatalogue(this.brickFineResolution).dynamicRungLayout(record.acceptedResolution);
           const first = dynamicCellOffset + record.topologyPage * cellsPerPage + rung.cellOffset;
           const origin = record.coordinate.map((value) =>
             value * this.brickFineResolution) as [number, number, number];
@@ -9699,7 +9712,8 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
         const packetBase = imageLayout.slotPacketBaseOffsets[slot]!;
         for (const [packetId, expected] of canonical) {
           const at = packetBase
-            + SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_PACKET_WORDS * packetId;
+            + SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_PACKET_WORDS
+              * (Math.floor(packetId / 64) * imageLayout.storedPacketsPerLeaf + packetId % 64);
           const actual = Array.from(validation.slice(at + 1, at + 4));
           if (actual[0] !== expected[0] || actual[1] !== expected[1]
             || actual[2] !== expected[2]) {
@@ -11237,7 +11251,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
     const image = this.transportExecutionImage;
     if (!layout || !image) return Object.freeze({ activePages: 0, packets: 0, cells: 0 });
     const leafWords = 8;
-    const packetWordsPerPage = 64
+    const packetWordsPerPage = layout.storedPacketsPerLeaf
       * SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_PACKET_WORDS;
     const slotWords = this.topologyPageCapacity * (leafWords + packetWordsPerPage);
     const readback = this.device.createBuffer({
@@ -11268,7 +11282,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
       const slot = words[0]! & 1;
       const slotBase = 1 + slot * slotWords;
       const packetBase = slotBase + leafWords * this.topologyPageCapacity;
-      const cellsPerPage = DYNAMIC_PAGE_CELL_COUNT;
+      const cellsPerPage = dynamicRungCatalogue(this.brickFineResolution).DYNAMIC_PAGE_CELL_COUNT;
       const dynamicCellBase = this.templateCellCount
         - cellsPerPage * this.topologyPageCapacity;
       let activePages = 0, packets = 0, cells = 0;
@@ -11278,7 +11292,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
         if ((flags & 0x8000_0000) === 0) continue;
         activePages += 1;
         const resolution = flags & 31;
-        const rung = dynamicRungLayout(resolution);
+        const rung = dynamicRungCatalogue(this.brickFineResolution).dynamicRungLayout(resolution);
         const first = dynamicCellBase + page * cellsPerPage + rung.cellOffset;
         const expectedValid = resolution
           | (resolution << 5) | (resolution << 10);
@@ -11291,7 +11305,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
         const packetAxis = Math.ceil(resolution / 4);
         const packetWidth = Math.min(4, resolution);
         const activePacketCount = packetAxis ** 3;
-        for (let local = 0; local < 64; local += 1) {
+        for (let local = 0; local < layout.storedPacketsPerLeaf; local += 1) {
           const at = packetBase + packetWordsPerPage * page
             + SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_PACKET_WORDS * local;
           const packetFirst = words[at + 1]!;
@@ -11411,8 +11425,8 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
     const pageHeaderWords = 16;
     const pageHeaderBytes = 4 * pageHeaderWords * this.topologyPageCapacity;
     const activityRecordBytes = 4 * ACTIVITY_RECORD_WORDS * this.topologyPageCapacity;
-    const cellsPerPage = DYNAMIC_PAGE_CELL_COUNT;
-    const rowsPerPage = DYNAMIC_PAGE_ROW_COUNT;
+    const cellsPerPage = dynamicRungCatalogue(this.brickFineResolution).DYNAMIC_PAGE_CELL_COUNT;
+    const rowsPerPage = dynamicRungCatalogue(this.brickFineResolution).DYNAMIC_PAGE_ROW_COUNT;
     const dynamicFieldBytes = 4 * cellsPerPage * this.topologyPageCapacity;
     const dynamicFaceBytes = 4 * rowsPerPage * this.topologyPageCapacity;
     const transportLeafWords = 8 * this.topologyPageCapacity;
@@ -11559,7 +11573,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
         }
         if (words[activityBase + ACTIVITY_RECORD_WORDS * page + 10] === 0) continue;
         const resolution = words[activityBase + ACTIVITY_RECORD_WORDS * page + 12]!;
-        const rung = dynamicRungLayout(resolution);
+        const rung = dynamicRungCatalogue(this.brickFineResolution).dynamicRungLayout(resolution);
         let pageMass = 0;
         for (let local = 0; local < rung.cellCount; local += 1) {
           const density = Math.max(0, floats[densityABase + page * cellsPerPage + rung.cellOffset + local]!,
@@ -11957,7 +11971,7 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
           refinementPolicyMinimumResolution: Math.max(1,
             (words[at + 38]! >>> 16) & 0x1f),
           refinementPolicyMaximumResolution:
-            ((words[at + 38]! >>> 21) & 0x1f) || 8,
+            ((words[at + 38]! >>> 21) & 0x1f) || this.brickFineResolution,
           representableNextResolution: words[at + 12] > 1
             && words[at + 39 + Math.log2(words[at + 12]! / 2)] !== 0
             ? words[at + 12]! / 2 as SparseBrickResolution : undefined,

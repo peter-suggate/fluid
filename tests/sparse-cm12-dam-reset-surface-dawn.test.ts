@@ -25,7 +25,7 @@ const nativeInstances = new Set<GPU>();
     const errors: string[] = [];
     device.addEventListener("uncapturederror", event => { event.preventDefault(); errors.push(event.error.message); });
     const scene = createMinimalPowerDamBreak32Scene();
-    const values = resolveMethodValues(adaptiveMassMethod, "balanced", {});
+    const values = resolveMethodValues(adaptiveMassMethod, "balanced", { selectorMode: "coarse-first" });
     assert.equal(values.selectorMode, "coarse-first");
     solver = await adaptiveMassMethod.createSolverAsync!(device, scene, "balanced", values, undefined, () => {}) as WebGPUAdaptiveMassSolver;
     await solver.waitForSimulationReady();

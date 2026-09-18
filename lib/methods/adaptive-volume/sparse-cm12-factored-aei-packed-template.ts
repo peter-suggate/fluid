@@ -21,7 +21,7 @@ export const SPARSE_CM12_PACKED_TEMPLATE_HEADER = Object.freeze({
 
 export interface SparseCM12FactoredAEIPackedTemplateAuthority {
   readonly words: Uint32Array;
-  readonly brickFineResolution: 8 | 16;
+  readonly brickFineResolution: 4 | 8 | 16;
   /** Atlas-array-order stable keys; leaf identity is always the array index. */
   readonly brickKeyByLeafId: readonly number[];
   readonly validDimensions: (
