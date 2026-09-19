@@ -123,6 +123,10 @@ import {
 } from "./gpu-startup";
 import { initialRasterPresentationReadiness, requiresFencedInitialRasterPresentation } from "./gpu-t0-presentation";
 import { liveSvoSceneResourcePlugin, WebGPULiveSvoScene } from "../svo/features/scene-publication/webgpu-live-svo-scene";
+import {
+  surfaceMeshAllowsLiveStartup,
+  surfaceMeshConstructionFailed,
+} from "../svo/features/primary-visibility/svo-surface-mesh";
 import { planSceneRuntime } from "./scene-runtime";
 import type { GPUStatus } from "./gpu-status";
 import {
@@ -3588,9 +3592,8 @@ export class FluidLabRenderer {
           startedAt_ms: pendingLiveSvo.startedAt_ms, kind: "startup", retainingPrevious: false,
           resource: svoPresentationResourcePlugin });
       }
-    } else if (pendingLiveSvo && startupMesh?.state === "blocked"
-      && startupMesh.fallbackReason !== "publication") {
-      this.failPendingLiveSvoPresentation(new Error(startupMesh.detail ?? "Raster mesh construction failed"));
+    } else if (pendingLiveSvo && surfaceMeshConstructionFailed(startupMesh)) {
+      this.failPendingLiveSvoPresentation(new Error(startupMesh?.detail ?? "Raster mesh construction failed"));
     }
     const initialLiveSvoSubmission = pendingLiveSvo
       && !pendingLiveSvo.submitted
@@ -3600,8 +3603,9 @@ export class FluidLabRenderer {
       && svoEncoded
       // A fenced empty frame does not establish that raster startup has
       // finished. The mesh receipt is copied after the GPU's draw publication.
-      && (!this.svoDryScenePipeline?.surfaceMeshStatus
-        || this.svoDryScenePipeline.surfaceMeshStatus.state === "ready")
+      // Smooth reconstruction withholds the mesh by policy; traversal is then
+      // the intended primary, including on authored glass spheres (figure 8).
+      && surfaceMeshAllowsLiveStartup(this.svoDryScenePipeline?.surfaceMeshStatus)
       ? pendingLiveSvo
       : undefined;
     if (initialLiveSvoSubmission?.submit()) {

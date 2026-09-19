@@ -44,6 +44,32 @@ export interface SvoSurfaceMeshStatus {
   fallbackReason?: "budget" | "smooth" | "inside-solid" | "publication" | "extraction";
 }
 
+/**
+ * Construction actually failed: the arena cannot hold the mesh, or extraction
+ * exceeded its subdivision bound. Smooth reconstruction and an inside-solid
+ * camera withhold the mesh by policy; traversal is then the intended primary,
+ * and live SVO startup must settle rather than halt the simulation.
+ */
+export function surfaceMeshConstructionFailed(
+  status?: Pick<SvoSurfaceMeshStatus, "state" | "fallbackReason">,
+): boolean {
+  return status?.state === "blocked"
+    && (status.fallbackReason === "budget" || status.fallbackReason === "extraction");
+}
+
+/**
+ * A live first-frame fence can settle. Smooth surfaces and an inside-solid
+ * camera keep SVO traversal visible on purpose; waiting for publication is
+ * still pending, not ready.
+ */
+export function surfaceMeshAllowsLiveStartup(
+  status?: Pick<SvoSurfaceMeshStatus, "state" | "fallbackReason">,
+): boolean {
+  if (!status || status.state === "ready") return true;
+  return status.state === "blocked"
+    && (status.fallbackReason === "smooth" || status.fallbackReason === "inside-solid");
+}
+
 /** Mesh-specific meaning stays beside the producer; the panel only renders facts. */
 export function surfaceMeshProgress(status?: SvoSurfaceMeshStatus): WorkProgress {
   if (!status) return { label: "Waiting for mesh publication", state: "waiting", detail: "Mesh counters have not arrived from the GPU." };

@@ -11,8 +11,10 @@ import {
   SVO_SURFACE_MESH_QUAD_BYTES,
   SVO_SURFACE_MESH_STATE,
   interpretSurfaceMeshState,
+  surfaceMeshAllowsLiveStartup,
   surfaceMeshBuildBricks,
   surfaceMeshBuildPresentations,
+  surfaceMeshConstructionFailed,
   surfaceMeshWorkBytes,
 } from "../lib/svo/features/primary-visibility/svo-surface-mesh";
 
@@ -121,6 +123,27 @@ test("withheld, invalid and faulted receipts fall back with their reasons", () =
   assert.equal(first.status.drawn, false);
   assert.equal(first.status.restartReason, "initial");
   assert.equal(interpretSurfaceMeshState(words({}), context).status.fallbackReason, "publication");
+});
+
+test("smooth reconstruction withholds the mesh by policy and must not halt live SVO startup", () => {
+  const smooth = { state: "blocked" as const, fallbackReason: "smooth" as const };
+  const inside = { state: "blocked" as const, fallbackReason: "inside-solid" as const };
+  const waiting = { state: "blocked" as const, fallbackReason: "publication" as const };
+  const budget = { state: "blocked" as const, fallbackReason: "budget" as const };
+  const extraction = { state: "blocked" as const, fallbackReason: "extraction" as const };
+  assert.equal(surfaceMeshConstructionFailed(smooth), false);
+  assert.equal(surfaceMeshAllowsLiveStartup(smooth), true);
+  assert.equal(surfaceMeshConstructionFailed(inside), false);
+  assert.equal(surfaceMeshAllowsLiveStartup(inside), true);
+  assert.equal(surfaceMeshConstructionFailed(waiting), false);
+  assert.equal(surfaceMeshAllowsLiveStartup(waiting), false);
+  assert.equal(surfaceMeshConstructionFailed(budget), true);
+  assert.equal(surfaceMeshAllowsLiveStartup(budget), false);
+  assert.equal(surfaceMeshConstructionFailed(extraction), true);
+  assert.equal(surfaceMeshAllowsLiveStartup(extraction), false);
+  assert.equal(surfaceMeshAllowsLiveStartup(undefined), true);
+  assert.equal(surfaceMeshAllowsLiveStartup({ state: "ready" }), true);
+  assert.equal(surfaceMeshAllowsLiveStartup({ state: "pending" }), false);
 });
 
 test("the drawn arena follows the front word", () => {
