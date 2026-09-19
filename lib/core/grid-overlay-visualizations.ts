@@ -105,7 +105,7 @@ export const gridOverlayVisualizations: readonly Visualization[] = Object.freeze
   fieldVisualization({
     kind: "field", id: "dense-grid/volume-levelset", pass: "Dense grid",
     label: "Volume + level set",
-    description: "Conservative liquid volume fills each cell in blue, with the level-set zero contour in amber, overcapacity hatching, and the accepted adaptive grid through the chosen plane.",
+    description: "Conservative liquid volume fills each cell in blue, with the level-set zero contour in amber, overcapacity hatching, and the accepted adaptive grid through the chosen plane. On the uniform lattice each cell's V/K is written into it once the cell is large enough on screen to hold the number, as in the 2-D advance lab.",
     source: "Live conservative volume, published level set, and accepted adaptive-grid topology",
     mode: "volume-levelset", axis: "z", sliceOnly: true, icon: "surface",
     swatch: fractionBandPaint("liquid").swatch,

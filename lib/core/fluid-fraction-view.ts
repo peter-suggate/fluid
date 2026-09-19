@@ -107,6 +107,43 @@ export function fractionResidueRamp(fill: number): number {
     / Math.log2(FRACTION_LIQUID_KNEE / FRACTION_FLOOR)));
 }
 
+/** At or above this a non-overfull fill reads as a bare `1`: two decimals would round it there. */
+export const FRACTION_READOUT_WHOLE = 0.995;
+
+/** Below this two decimals would print `.00`, so the readout switches to a decade. */
+export const FRACTION_READOUT_HUNDREDTH = 0.005;
+
+/**
+ * Every character {@link fractionReadout} can write, in glyph-code order.
+ *
+ * The shader cannot format a string, so it writes the readout as indices into
+ * this alphabet and draws each one from a bitmap font keyed the same way.
+ */
+export const FRACTION_READOUT_ALPHABET = "0123456789.e-";
+
+/**
+ * The largest fill the shader will write out.
+ *
+ * Its readout packs eight 4-bit glyph codes into one word, and `9999.99` is
+ * seven of them. A cell past ten thousand times its capacity is already the
+ * loudest thing on the hatch; the number would add nothing but width.
+ */
+export const FRACTION_READOUT_CEILING = 1e4;
+
+/** Pixels a readout character advances: the lab's 10px monospace, and the shader font's 5 + 1. */
+export const FRACTION_READOUT_ADVANCE_PIXELS = 6;
+
+/**
+ * The pixels a cell needs, across both of its sides, before it is written in.
+ *
+ * One rule for both renderers, so a number arrives at the same zoom in the lab
+ * and in the 3-D slice: the readout's run of characters plus a margin, and the
+ * cell has to be at least that tall as well as that wide.
+ */
+export function fractionReadoutRoomPixels(length: number): number {
+  return length * FRACTION_READOUT_ADVANCE_PIXELS + 5;
+}
+
 /**
  * The fraction as the fewest characters that keep it honest.
  *
@@ -122,8 +159,8 @@ export function fractionResidueRamp(fill: number): number {
  */
 export function fractionReadout(fill: number): string {
   if (fractionBand(fill) === "overfull") return fill.toFixed(2);
-  if (fill >= 0.995) return "1";
-  if (fill >= 0.005) return fill.toFixed(2).slice(1);
+  if (fill >= FRACTION_READOUT_WHOLE) return "1";
+  if (fill >= FRACTION_READOUT_HUNDREDTH) return fill.toFixed(2).slice(1);
   return `1e${Math.round(Math.log10(Math.max(fill, FRACTION_FLOOR)))}`;
 }
 
@@ -238,6 +275,9 @@ export const fractionViewShaderConstants = /* wgsl */ `
 const FRACTION_FLOOR: f32 = ${wgslFloatLiteral(FRACTION_FLOOR)};
 const FRACTION_LIQUID_KNEE: f32 = ${wgslFloatLiteral(FRACTION_LIQUID_KNEE)};
 const FRACTION_OVERFULL: f32 = ${wgslFloatLiteral(FRACTION_OVERFULL)};
+const FRACTION_READOUT_WHOLE: f32 = ${wgslFloatLiteral(FRACTION_READOUT_WHOLE)};
+const FRACTION_READOUT_HUNDREDTH: f32 = ${wgslFloatLiteral(FRACTION_READOUT_HUNDREDTH)};
+const FRACTION_READOUT_CEILING: f32 = ${wgslFloatLiteral(FRACTION_READOUT_CEILING)};
 // Display-space, for sceneColor(): see wgslDisplayColor's comment.
 const FRACTION_EMPTY_DISPLAY: vec3f = ${wgslDisplayColor(fractionBandPaint("vacuum").swatch)};
 const FRACTION_LIQUID_DISPLAY: vec3f = ${wgslDisplayColor(fractionBandPaint("liquid").swatch)};

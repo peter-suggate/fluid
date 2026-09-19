@@ -11,11 +11,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  FRACTION_FLOOR, FRACTION_LIQUID_KNEE, FRACTION_OVERFULL, FRACTION_VIEW_BANDS,
+  FRACTION_FLOOR, FRACTION_LIQUID_KNEE, FRACTION_OVERFULL, FRACTION_READOUT_ALPHABET,
+  FRACTION_READOUT_CEILING, FRACTION_VIEW_BANDS,
   cellFillIsOverCapacity, fractionBand, fractionBandPaint, fractionReadout,
   fractionViewShaderConstants, wgslDisplayColor, wgslFloatLiteral,
 } from "../lib/core/fluid-fraction-view";
 import { gridOverlayVisualizations } from "../lib/core/grid-overlay-visualizations";
+import {
+  FRACTION_READOUT_FONT, FRACTION_READOUT_GLYPH_HEIGHT, FRACTION_READOUT_GLYPH_WIDTH,
+  FRACTION_READOUT_MAX_GLYPHS,
+} from "../lib/core/fraction-readout.wgsl";
 import { gridOverlayShader } from "../lib/core/webgpu-grid-overlay";
 
 /** The `fieldMode == 21` arm, which is the fraction view in the 3-D overlay. */
@@ -160,4 +165,31 @@ test("the volume + level-set legend is derived from the shared bands", () => {
   assert.deepEqual(field.legend?.slice(1, 2).concat(field.legend.slice(3))
     .map(entry => entry.label),
   ["φ = 0 — level-set interface", "accepted adaptive grid"]);
+});
+
+test("the shader's font can write every readout the lab writes", () => {
+  /* The 3-D slice spells V/K as glyph codes into this alphabet, packed four
+   * bits apiece into one word. A character the lab can print that the font
+   * lacks would draw as a gap; one more than a word holds would wrap. The
+   * formatting itself is checked against fractionReadout on Dawn, in
+   * tests/fraction-readout-dawn.test.ts. */
+  assert.ok(FRACTION_READOUT_ALPHABET.length <= 16, "a glyph code is four bits");
+  for (let i = 0; i <= 4000; i += 1) {
+    const fill = 10 ** (-6 + (Math.log10(FRACTION_READOUT_CEILING) + 6) * i / 4000) * (1 - 1e-9);
+    if (fractionBand(fill) === "vacuum") continue;
+    const text = fractionReadout(fill);
+    assert.ok(text.length <= FRACTION_READOUT_MAX_GLYPHS, `${text} is longer than one packed word`);
+    for (const character of text) {
+      assert.ok(FRACTION_READOUT_ALPHABET.includes(character), `${text} writes ${character}, which has no glyph`);
+    }
+  }
+  for (const character of FRACTION_READOUT_ALPHABET) {
+    const rows = FRACTION_READOUT_FONT[character];
+    assert.ok(rows, `no glyph for ${character}`);
+    assert.equal(rows.length, FRACTION_READOUT_GLYPH_HEIGHT, `${character} is not ${FRACTION_READOUT_GLYPH_HEIGHT} rows`);
+    for (const row of rows) assert.match(row, new RegExp(`^[.#]{${FRACTION_READOUT_GLYPH_WIDTH}}$`), `${character}: ${row}`);
+    assert.ok(rows.some(row => row.includes("#")), `${character} draws nothing`);
+  }
+  assert.equal(new Set(FRACTION_READOUT_ALPHABET.split("").map(c => FRACTION_READOUT_FONT[c]!.join("|"))).size,
+    FRACTION_READOUT_ALPHABET.length, "two characters share a glyph");
 });

@@ -25,7 +25,7 @@ import {
 } from "../lib/physics-wasm/advance-view";
 import {
   FRACTION_FLOOR, FRACTION_VIEW_BANDS, cellFillOpacity, fractionBand, fractionBandPaint,
-  fractionReadout, fractionResidueRamp,
+  fractionReadout, fractionReadoutRoomPixels, fractionResidueRamp,
   type FractionBand, type FractionTone,
 } from "../lib/core/fluid-fraction-view";
 import {
@@ -801,7 +801,7 @@ export interface SliceOverlay {
 export const SLICE_OVERLAY_ORDER = ["fraction", "normal"] as const;
 
 /** Roughly the pixels `label` needs for a readout, at its 10px monospace. */
-const readoutPixels = (text: string): number => text.length * 6 + 5;
+const readoutPixels = (text: string): number => fractionReadoutRoomPixels(text.length);
 
 export const SLICE_OVERLAYS: Readonly<Record<SliceOverlayId, SliceOverlay>> = {
   fraction: {

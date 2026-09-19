@@ -942,6 +942,8 @@ export class FluidLabRenderer {
   private presentationTexture?: GPUTexture;
   private presentationTextureKey = "";
   private activeRenderScale = 1;
+  /** Presentation pixels per CSS pixel: device pixel ratio times render scale. */
+  private presentationPixelRatio = 1;
   private uniformBuffer?: GPUBuffer;
   private bodyBuffer?: GPUBuffer;
   private fluidTexture?: GPUTexture;
@@ -3009,6 +3011,7 @@ export class FluidLabRenderer {
     }
     if (!this.device || !this.format || !this.upscalePipeline || !this.upscaleSampler) return;
     this.activeRenderScale = renderScale;
+    this.presentationPixelRatio = ratio * renderScale;
     const renderWidth = Math.max(1, Math.floor(width * renderScale));
     const renderHeight = Math.max(1, Math.floor(height * renderScale));
     const key = `${renderWidth}x${renderHeight}`;
@@ -3354,9 +3357,11 @@ export class FluidLabRenderer {
       // lens became a scene property; see CAMERA_APERTURE_UNIFORM_LANE for why
       // it rides here rather than in a field of its own.
       position.x, position.y, position.z, cameraTanHalfFov(camera),
-      // cameraTarget.w is padding. Geometry comes from SolidWorld rather than
+      // cameraTarget.w is presentation pixels per CSS pixel, so text the grid
+      // overlay writes (the volume + level-set readout) keeps the lab's size
+      // on a high-density display. Geometry comes from SolidWorld rather than
       // an analytic container-shape/top mode encoded in the camera uniform.
-      camera.target_m.x, camera.target_m.y, camera.target_m.z, 0,
+      camera.target_m.x, camera.target_m.y, camera.target_m.z, this.presentationPixelRatio,
       scene.container.width_m, scene.container.height_m, scene.container.depth_m, scene.container.height_m * scene.container.fillFraction,
       // options.w carries the largest represented adaptive pressure-cell
       // width. The grid overlay uses it to normalize its categorical scale

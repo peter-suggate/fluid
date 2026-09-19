@@ -9,6 +9,7 @@
 
 import { cameraApertureShaderLibrary } from "./webgpu-camera";
 import { fractionViewShaderConstants } from "./fluid-fraction-view";
+import { fractionReadoutShaderLibrary } from "./fraction-readout.wgsl";
 import type { SparseAdaptiveGridConsumerSource, DenseLevelSetVolumeConsumerSource } from "./levelset-consumer-abi";
 import { createGridOverlayLevelSetVolumeWGSL, gridOverlayLevelSetVolumeUniform } from "./grid-overlay-levelset-volume.wgsl";
 
@@ -960,6 +961,7 @@ fn sceneColor(display: vec3f) -> vec3f {
 }
 
 ${fractionViewShaderConstants}
+${fractionReadoutShaderLibrary}
 // Below this the surface-density view stops claiming to resolve and draws
 // vacuum. It is the bottom of the residue band the transport actually
 // produces, six decades under a full cell — the same floor the conservative
@@ -1363,6 +1365,53 @@ fn overlayGridFrame()->OverlayGridFrame{
     authoredMinimum+vec3f(minimumFine)*cellSize,vec3f(dimensions)*cellSize);
 }
 
+// Where a world point lands in the framebuffer (y down), and its depth along
+// the view: the inverse of the ray fragmentMain builds for a pixel.
+fn overlayFramebufferPixel(world:vec3f,origin:vec3f,forward:vec3f,right:vec3f,up:vec3f)->vec3f{
+  let offset=world-origin;let depth=dot(offset,forward);
+  let ndc=vec2f(dot(offset,right)/(u.viewport.x/max(u.viewport.y,1.0)),dot(offset,up))
+    /(max(depth,1e-6)*cameraTanHalfFov());
+  return vec3f((0.5+0.5*ndc.x)*u.viewport.x,(0.5-0.5*ndc.y)*u.viewport.y,depth);
+}
+
+// The V/K readout the 2-D advance lab writes into every cell with room for it:
+// ink (x), casing (y), and whether the cell is overfull (z) at this pixel.
+// Dense lane only — there a slice cell is exactly the lattice cell whose V/K
+// the mode-21 fill paints. A sparse lane's accepted cells are adaptive records
+// this pass never resolves, and a number repeated across a coarse cell's fine
+// cells would state a resolution the record does not have.
+fn volumeLevelSetReadout(pixel:vec2f,point:vec3f,frame:OverlayGridFrame,axis:i32,
+  origin:vec3f,forward:vec3f,right:vec3f,up:vec3f)->vec3f{
+  if(sliceLsvP.global.x!=2u){return vec3f(0.0);}
+  let dims=vec3f(frame.dimensions);let cellSize=frame.size/dims;
+  let local=clamp((point-frame.boundsMin)/frame.size,vec3f(0.0),vec3f(0.99999))*dims;
+  let localCell=clamp(vec3i(floor(local)),vec3i(0),frame.dimensions-vec3i(1));
+  let volume=sliceVolumeFill(frame.minimumFine+localCell);
+  let glyphs=fractionReadoutGlyphs(volume.x);
+  if(volume.y<=0.0||glyphs.y==0u){return vec3f(0.0);}
+  // The plane runs through cell centres, so this is the cell's own centre;
+  // the two half-edges span it in the plane.
+  let centreWorld=frame.boundsMin+(vec3f(localCell)+vec3f(0.5))*cellSize;
+  var first=vec3f(0.5*cellSize.x,0.0,0.0);var second=vec3f(0.0,0.5*cellSize.y,0.0);
+  if(axis==2){first=vec3f(0.0,0.0,0.5*cellSize.z);}
+  else if(axis==3){second=vec3f(0.0,0.0,0.5*cellSize.z);}
+  let centre=overlayFramebufferPixel(centreWorld,origin,forward,right,up);
+  if(centre.z<=0.0){return vec3f(0.0);}
+  let a=overlayFramebufferPixel(centreWorld+first,origin,forward,right,up).xy-centre.xy;
+  let b=overlayFramebufferPixel(centreWorld+second,origin,forward,right,up).xy-centre.xy;
+  // The lab writes a number once the cell is at least its room on both sides.
+  // Here the same centred square has to fit inside the cell's projected
+  // parallelogram (centre ± a ± b), which holds an oblique view to that rule
+  // and keeps the text inside the one cell whose pixels can draw it.
+  // cameraTarget.w is the presentation's pixels per CSS pixel.
+  let scale=max(1,i32(round(u.cameraTarget.w)));
+  let half=0.5*fractionReadoutRoom(glyphs,scale);
+  let area=abs(a.x*b.y-a.y*b.x);
+  if(half*(abs(b.x)+abs(b.y))>area||half*(abs(a.x)+abs(a.y))>area){return vec3f(0.0);}
+  return vec3f(fractionReadoutInk(pixel,centre.xy,glyphs,scale),
+    select(0.0,1.0,volume.x>FRACTION_OVERFULL));
+}
+
 fn volumeComposite(accumulated:vec4f,color:vec3f,alpha:f32)->vec4f {
   let contribution=(1.0-accumulated.a)*clamp(alpha,0.0,1.0);
   return vec4f(accumulated.rgb+color*contribution,accumulated.a+contribution);
@@ -1457,6 +1506,15 @@ fn volumeField(uv:vec2f)->vec4f {
   let grip = select(clamp(1.0 - (boundsMax.y - point.y) / (0.03 * size.y), 0.0, 1.0), clamp(1.0 - horizontalEdgeDistance / (0.035 * min(size.x, size.z)), 0.0, 1.0), axis == 3) * 0.8;
   overlay.color = mix(overlay.color, vec3f(0.51, 0.95, 0.82), grip);
   overlay.alpha = max(overlay.alpha, grip);
+  if (i32(round(u.debug.w)) == 21 && !overlay.solid) {
+    // Last, so the number reads over the fill, the contour, the hatch and the
+    // grip alike. Overfull is written in the hatch's own amber, as the lab does.
+    let readout = volumeLevelSetReadout(input.position.xy, point, frame, axis, origin, forward, right, up);
+    let ink = sceneColor(select(READOUT_INK_DISPLAY, FRACTION_EXCESS_DISPLAY, readout.z > 0.5));
+    overlay.color = mix(mix(overlay.color, sceneColor(READOUT_CASING_DISPLAY), readout.y), ink, readout.x);
+    overlay.alpha = max(overlay.alpha, max(readout.x, readout.y));
+    overlay.lattice = max(overlay.lattice, max(readout.x, readout.y));
+  }
   // Slice planes sit between the camera and the water they describe, so the
   // fill is uniformly thinned. The lattice is not: it is what the plane is
   // there to show, and thinning the two together is what dissolved the
