@@ -12,6 +12,7 @@ interface ExtrapolationPipelines {
   readonly restrict: GPUComputePipeline;
   readonly prolong: GPUComputePipeline;
   readonly pack: GPUComputePipeline;
+  readonly coarseTable: GPUComputePipeline;
 }
 
 interface HierarchyLevel {
@@ -73,7 +74,11 @@ export class WebGPUUniformVelocityExtrapolator {
   private readonly packCurrentGroup: GPUBindGroup;
   private readonly packPredictedGroup: GPUBindGroup;
   readonly activeStateTexture: GPUTexture;
-  private readonly activeFrontPasses: number;
+  /** The ceil(n/4) hierarchy level, when it exists and tiles the lattice exactly. */
+  readonly coarseVelocityLevel?: GPUTexture;
+  private readonly coarseTableGroup?: GPUBindGroup;
+  private readonly activeFrontPassLimit: number;
+  private activeFrontPasses: number;
 
   constructor(
     private readonly device: GPUDevice,
@@ -87,6 +92,7 @@ export class WebGPUUniformVelocityExtrapolator {
     currentTransport: GPUTexture,
     predictedTransport: GPUTexture,
     private readonly activeRegion: GPUBuffer,
+    private readonly tileScratch: GPUBuffer,
     private readonly activeDispatch?: GPUBuffer,
   ) {
     const [nx, ny, nz] = dims;
@@ -131,6 +137,10 @@ export class WebGPUUniformVelocityExtrapolator {
       { binding: 9, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 10, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 11, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      // The parent's conditioning scratch, as one read_write binding: the 4h
+      // table is written by one pass of its own and the class word is read by
+      // the rest, so no dispatch ever sees it both ways.
+      { binding: 12, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
     ] });
     this.pipelineLayout = device.createPipelineLayout({ label: "Uniform Sec. 3.3 extrapolation pipeline layout", bindGroupLayouts: [this.layout] });
 
@@ -140,7 +150,8 @@ export class WebGPUUniformVelocityExtrapolator {
     // front had converged. Sixteen wavefronts cover the complete 26-neighbour
     // dependency diameter of that band, including cut-cell detours, while the
     // indirect active counter still proves termination rather than guessing it.
-    this.activeFrontPasses = Math.min(Math.max(...dims), 16);
+    this.activeFrontPassLimit = Math.min(Math.max(...dims), 16);
+    this.activeFrontPasses = this.activeFrontPassLimit;
 
     const frontBuffer = (config: FrontConfig): GPUBuffer => {
       const buffer = device.createBuffer({
@@ -177,6 +188,7 @@ export class WebGPUUniformVelocityExtrapolator {
       { binding: 9, resource: { buffer: this.convergence } },
       { binding: 10, resource: { buffer: preparesIndirect ? this.dispatchArgs : this.unusedDispatchStorage } },
       { binding: 11, resource: { buffer: this.activeRegion } },
+      { binding: 12, resource: { buffer: this.tileScratch } },
     ] });
 
     this.seedCurrentGroup = group(currentVelocity, this.resolvedValues, this.resolvedDistances, this.valuesA, this.distancesA);
@@ -202,6 +214,7 @@ export class WebGPUUniformVelocityExtrapolator {
       { binding: 9, resource: { buffer: this.convergence } },
       { binding: 10, resource: { buffer: this.dispatchArgs } },
       { binding: 11, resource: { buffer: this.activeRegion } },
+      { binding: 12, resource: { buffer: this.tileScratch } },
     ] });
     this.activeStateTexture = this.resolvedDistances;
 
@@ -265,6 +278,20 @@ export class WebGPUUniformVelocityExtrapolator {
     const packedValues = this.hierarchyLevels.length > 0 ? this.valuesA : this.resolvedValues;
     this.packCurrentGroup = group(currentVelocity, packedValues, this.valuesA, currentTransport, this.valuesB);
     this.packPredictedGroup = group(predictedVelocity, packedValues, this.valuesA, predictedTransport, this.valuesB);
+
+    // The 4h level the parent's two-level sampler reads. Its prolong-filled
+    // `up` texture is the complete field; when it is also the coarsest level
+    // nothing prolongs into it, and its restricted `down` is the whole result.
+    const coarse = this.hierarchyLevels[1];
+    if (coarse && dims.every((value, axis) => value === 4 * coarse.dims[axis]!)) {
+      this.coarseVelocityLevel = this.hierarchyLevels.length > 2 ? coarse.up : coarse.down;
+      // The two storage-texture outputs are inert here but must still be
+      // distinct subresources: one dispatch may not write the same texture
+      // through two bindings.
+      this.coarseTableGroup = group(
+        currentVelocity, this.coarseVelocityLevel, this.resolvedDistances, this.valuesB, this.distancesB,
+      );
+    }
   }
 
   /** FIM scratch plus the explicit CM11b down/up velocity hierarchy. */
@@ -278,7 +305,18 @@ export class WebGPUUniformVelocityExtrapolator {
     return baseBytes + hierarchyBytes;
   }
 
-  get activeFrontPassCeiling(): number { return this.activeFrontPasses; }
+  /** Hard wavefront ceiling; `frontPasses` is what an encode actually issues. */
+  get activeFrontPassCeiling(): number { return this.activeFrontPassLimit; }
+
+  get frontPasses(): number { return this.activeFrontPasses; }
+
+  /** Live sweep budget. Below the band's dependency diameter the front is
+   * resolved unconverged: updated faces keep their provisional value, and band
+   * faces never reached stay unknown and fall to the hierarchy fill. */
+  setFrontPasses(passes: number): void {
+    this.activeFrontPasses = Number.isFinite(passes)
+      ? Math.min(this.activeFrontPassLimit, Math.max(1, Math.round(passes))) : this.activeFrontPassLimit;
+  }
 
   /** Four u32 words: active A/B counts, latest parity, and executed updates. */
   get convergenceDiagnostics(): GPUBuffer { return this.convergence; }
@@ -304,7 +342,7 @@ export class WebGPUUniformVelocityExtrapolator {
     const compile = (label: string, entryPoint: string) => compiler.compileComputePipeline({
       label, layout: this.pipelineLayout, compute: { module: shaderModule, entryPoint },
     }, { priority: "critical", signal });
-    const [clear, seed, update, prepare, resolve, restrict, prolong, pack] = await Promise.all([
+    const [clear, seed, update, prepare, resolve, restrict, prolong, pack, coarseTable] = await Promise.all([
       compile("Uniform Sec. 3.3 clear sparse state", "clearExtrapolationState"),
       compile("Uniform Sec. 3.3 seed active front", "seedActiveFront"),
       compile("Uniform Sec. 3.3 update active front", "updateActiveFront"),
@@ -313,8 +351,9 @@ export class WebGPUUniformVelocityExtrapolator {
       compile("Uniform Sec. 3.3 hierarchy restrict", "restrictKnownVelocity"),
       compile("Uniform Sec. 3.3 hierarchy prolong", "prolongUnknownVelocity"),
       compile("Uniform Sec. 3.3 transport shell", "packTransportShell"),
+      compile("Uniform Sec. 3.3 publish 4h face table", "publishCoarseVelocityTable"),
     ]);
-    this.pipelines = { clear, seed, update, prepare, resolve, restrict, prolong, pack };
+    this.pipelines = { clear, seed, update, prepare, resolve, restrict, prolong, pack, coarseTable };
     const encoder = this.device.createCommandEncoder({ label: "Uniform Sec. 3.3 initialize sparse state" });
     for (const [label, group] of [["A", this.seedCurrentGroup], ["B", this.updateABGroup],
       ["resolved", this.resolveGroup]] as const) {
@@ -330,6 +369,7 @@ export class WebGPUUniformVelocityExtrapolator {
     encoder: GPUCommandEncoder,
     predicted: boolean,
     boundary?: (stage: UniformExtrapolationTraceStage) => void,
+    publishCoarseTable = false,
   ): void {
     const pipelines = this.pipelines;
     if (!pipelines) throw new Error("Uniform Sec. 3.3 extrapolation pipelines are not initialized");
@@ -392,8 +432,28 @@ export class WebGPUUniformVelocityExtrapolator {
       Math.ceil((this.dims[1] + 2) / 4),
       Math.ceil((this.dims[2] + 2) / 4));
     pass.end();
+    if (publishCoarseTable) this.encodeCoarseVelocityTable(encoder);
     boundary?.("hierarchy-fill");
   }
+
+  /**
+   * One pass over ceil(n/4)^3 publishing the 4h level into the parent's face
+   * table. It follows the hierarchy fill because it reads it; the caller asks
+   * for it only while the two-level sampler is on.
+   */
+  encodeCoarseVelocityTable(encoder: GPUCommandEncoder): boolean {
+    const level = this.hierarchyLevels[1];
+    if (!this.pipelines || !this.coarseTableGroup || !level) return false;
+    const pass = encoder.beginComputePass({ label: "Uniform Sec. 3.3 publish 4h face table" });
+    pass.setPipeline(this.pipelines.coarseTable); pass.setBindGroup(0, this.coarseTableGroup);
+    pass.dispatchWorkgroups(
+      Math.ceil(level.dims[0] / 4), Math.ceil(level.dims[1] / 4), Math.ceil(level.dims[2] / 4));
+    pass.end();
+    return true;
+  }
+
+  /** True once the ceil(n/4) level exists and tiles the lattice exactly. */
+  get coarseVelocityTableAvailable(): boolean { return this.coarseTableGroup !== undefined; }
 
   destroy(): void {
     this.valuesA.destroy(); this.valuesB.destroy();

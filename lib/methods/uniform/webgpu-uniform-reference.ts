@@ -8,6 +8,9 @@ import {
   UNIFORM_VOLUME_SHARPEN_TILE_MAP_WORD,
   UNIFORM_VOLUME_TILE_CLASSIFY_ENTRY,
   UNIFORM_VOLUME_TILE_WORK_OVERRIDE,
+  UNIFORM_VOLUME_TWO_LEVEL_COUNTER_WORDS,
+  UNIFORM_VOLUME_TWO_LEVEL_ENTRIES,
+  UNIFORM_VOLUME_TWO_LEVEL_WORDS_PER_TILE,
 } from "./uniform-volume.wgsl";
 import { createUniformReferenceComputeShader } from "./webgpu-uniform-reference.wgsl";
 import { uniformVolumeInitialPhi } from "./uniform-volume-initial";
@@ -80,6 +83,36 @@ export interface WebGPUUniformReferenceOptions {
    * can flip this between steps.
    */
   geometricTileWork?: boolean;
+  /** Sec. 3.3 FIM sweep budget; clamped to the extrapolator's wavefront ceiling. */
+  extensionFrontSweeps?: number;
+  /**
+   * Discard |V| below this many cell volumes wherever Sec. 3.4 or Sec. 3.5
+   * finally writes V, tiny negatives included. Zero is off and stores the
+   * untreated sum bit for bit.
+   */
+  volumeDustThreshold?: number;
+  /**
+   * Experiment E1: sample velocity from the restricted 4h level outside the
+   * fine tile map. Numerics only -- every lattice and every dispatch is the
+   * size it was; nothing shrinks yet.
+   */
+  twoLevelVelocity?: boolean;
+  /** Chebyshev dilation of the E1 seed tiles, in 4h tiles. */
+  twoLevelFineReach?: number;
+  /**
+   * E2: run the velocity extension's finest passes on the shell tiles instead
+   * of densely. Meaningful only while `twoLevelVelocity` is on, because the
+   * shrunk fine field is exactly what the 4h sampler replaces.
+   */
+  twoLevelExtensionTiles?: boolean;
+  /** Extra 4h tiles the shell adds past the fine set; absent derives it. */
+  twoLevelShellReach?: number;
+  /**
+   * E2b: velocity advection and the projection take their far-air arm directly
+   * in cells outside the fine tiles. Also gated on `twoLevelVelocity`, since the
+   * tile map is only built when that is on.
+   */
+  twoLevelAdvectionTiles?: boolean;
   liquidCapacityBalancing?: boolean;
   liquidCapacityBalancingRounds?: number;
   liquidCapacityBalancingTolerance?: number;
@@ -262,6 +295,22 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   /** The classify dispatch ran in the most recent encoded step. */
   private sharpenTileMapEncoded = false;
   private geometricRedistance: boolean;
+  /** Sec. 3.4/3.5 rounding-residue floor in cell volumes; 0 is off. */
+  private volumeDustThreshold: number;
+  /** Experiment E1 live toggle and its Chebyshev fine reach, in 4h tiles. */
+  private twoLevelVelocity: boolean;
+  private twoLevelFineReach: number;
+  /** E2: the extension's finest passes run on the shell tiles, not densely. */
+  private twoLevelExtensionTiles: boolean;
+  /** E2b: advection and projection take their far-air arm outside the fine tiles. */
+  private twoLevelAdvectionTiles: boolean;
+  /** How far past the fine set the extension must still be exact, in 4h tiles. */
+  private twoLevelShellReach: number;
+  /** Coarse cells whose E1 tables fit the conditioning plane; 0 disables E1. */
+  private twoLevelTileCount: number;
+  private twoLevelPipelines: Partial<Record<typeof UNIFORM_VOLUME_TWO_LEVEL_ENTRIES[number], GPUComputePipeline>> = {};
+  /** The E1 map was built in the most recent encoded step. */
+  private twoLevelEncoded = false;
   private liquidCapacityBalancing: boolean;
   private liquidCapacityBalancingRounds: number;
   private liquidCapacityBalancingTolerance: number;
@@ -422,6 +471,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.geometricVolume = options.geometricVolume === true;
     this.geometricTileWork = this.geometricVolume && options.geometricTileWork !== false;
     this.geometricRedistance = options.geometricRedistance !== false;
+    this.volumeDustThreshold = Number.isFinite(options.volumeDustThreshold)
+      ? Math.min(1, Math.max(0, options.volumeDustThreshold!)) : 0;
+    this.twoLevelVelocity = this.geometricVolume && options.twoLevelVelocity === true;
+    this.twoLevelFineReach = Number.isFinite(options.twoLevelFineReach)
+      ? Math.round(Math.min(8, Math.max(0, options.twoLevelFineReach!))) : 2;
+    this.twoLevelExtensionTiles = options.twoLevelExtensionTiles !== false;
+    this.twoLevelAdvectionTiles = options.twoLevelAdvectionTiles !== false;
     this.liquidCapacityBalancing = options.liquidCapacityBalancing === true;
     this.liquidCapacityBalancingRounds = Number.isFinite(options.liquidCapacityBalancingRounds)
       ? Math.round(Math.min(64, Math.max(1, options.liquidCapacityBalancingRounds!))) : 64;
@@ -467,6 +523,25 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const tileRecords = Math.ceil(nx / 4) * Math.ceil(ny / 4) * Math.ceil(nz / 4);
     this.sharpenTileCount = this.geometricVolume
       && UNIFORM_VOLUME_SHARPEN_TILE_MAP_WORD + tileRecords <= nx * ny * nz ? tileRecords : 0;
+    // The 4h face table and class map sit in the second conditioning plane,
+    // whose per-step clears are ranged away from it. Same size test, plus the
+    // shell counter above the two ping-pong planes. Every axis must be a
+    // multiple of four: the sampler's convention is "fine face 4t+3 is coarse
+    // face t", which is what the extension hierarchy's own transfer computes
+    // only when the coarse level tiles the lattice exactly.
+    this.twoLevelTileCount = this.geometricVolume
+      && [nx, ny, nz].every((value) => value % 4 === 0)
+      && UNIFORM_VOLUME_TWO_LEVEL_WORDS_PER_TILE * tileRecords
+        + UNIFORM_VOLUME_TWO_LEVEL_COUNTER_WORDS <= nx * ny * nz ? tileRecords : 0;
+    // One tile covers the finest trilinear tap, which reaches one cell below a
+    // fine tile. The FIM's accurate band is two of the LARGEST cells, so on an
+    // anisotropic lattice it spans 2*max(h)/min(h) of the smallest; the shell
+    // must contain that too, measured from a seed tile's own boundary.
+    const spacing = [scene.container.width_m / nx, scene.container.height_m / ny,
+      scene.container.depth_m / nz];
+    this.twoLevelShellReach = Number.isFinite(options.twoLevelShellReach)
+      ? Math.round(Math.min(8, Math.max(0, options.twoLevelShellReach!)))
+      : Math.max(1, Math.ceil(0.5 * Math.max(...spacing) / Math.min(...spacing)));
     const allocation = planUniformHostAllocation(nx, ny, nz, "maccormack");
     this.negativeBoundaryVelocityBytes = allocation.boundaryVelocityBytes;
     const usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING
@@ -537,7 +612,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         pressureProjection: velocity("Uniform audit velocity after pressure projection"),
       });
     }
-    this.params = device.createBuffer({ label: "Uniform reference parameters", size: 176, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.params = device.createBuffer({ label: "Uniform reference parameters", size: 192, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const packSolidVoxels = (source: SceneDescription): Uint32Array => {
       const world = solidWorldForScene(source);
       const sx = nx + 2, sy = ny + 2, sz = nz + 2;
@@ -575,6 +650,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       label: "Uniform reference active indirect dispatches", size: activeRegionBytes,
       usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
     });
+    // Created before the extrapolator: the extension binds it read_write to
+    // read the tile classes and to publish the 4h face table the sampler reads.
+    this.conditioningScratch = device.createBuffer({ label: "Uniform reference compatibility scratch", size: allocation.conditioningBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.velocityExtrapolator = new WebGPUUniformVelocityExtrapolator(
       device, [nx, ny, nz], [
         scene.container.width_m / nx,
@@ -582,12 +660,16 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         scene.container.depth_m / nz,
       ], this.params, this.surfaceA, this.velocityD,
       this.velocityA, this.velocityC, this.transportA, this.transportB,
-      this.activeRegion, this.activeRegionEnabled ? this.activeDispatch : undefined,
+      this.activeRegion, this.conditioningScratch,
+      this.activeRegionEnabled ? this.activeDispatch : undefined,
     );
+    // Without a ceil(n/4) hierarchy level there is no 4h field to sample.
+    if (!this.velocityExtrapolator.coarseVelocityTableAvailable) this.twoLevelTileCount = 0;
+    if (this.twoLevelTileCount === 0) this.twoLevelVelocity = false;
     this.extrapolationActiveStateTexture = this.velocityExtrapolator.activeStateTexture;
     this.extrapolationActiveFrontPassCeiling = this.velocityExtrapolator.activeFrontPassCeiling;
+    if (options.extensionFrontSweeps !== undefined) this.velocityExtrapolator.setFrontPasses(options.extensionFrontSweeps);
     this.reductions = device.createBuffer({ label: "Uniform reference diagnostics and volume control", size: 32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
-    this.conditioningScratch = device.createBuffer({ label: "Uniform reference compatibility scratch", size: allocation.conditioningBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     if (typeof process !== "undefined" && process.env.FLUID_UNIFORM_SYMMETRY_STAGE_AUDIT === "1") {
       this.symmetryStageAuditBetaBuffer = device.createBuffer({
         label: "Uniform audit Sec. 3.4 beta",
@@ -855,6 +937,17 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         }, { priority: "visible", signal });
       } });
     }
+    // E1's four map passes are always resident so the experiment is a live
+    // toggle; with it off they are never encoded.
+    if (this.twoLevelTileCount > 0) for (const entryPoint of UNIFORM_VOLUME_TWO_LEVEL_ENTRIES) {
+      const id = `uniform.volume.twolevel.${entryPoint}`; ids.push(id);
+      tasks.push({ id, phase: "solver-pipelines", label: entryPoint, run: async () => {
+        this.twoLevelPipelines[entryPoint] = await compiler.compileComputePipeline({
+          label: `Uniform Geometric E1 - ${entryPoint}`, layout: this.mainPipelineLayout,
+          compute: { module: shaderModule, entryPoint },
+        }, { priority: "visible", signal });
+      } });
+    }
     const pipelineReadyId = "uniform.pipeline.publish";
     tasks.push({ id: pipelineReadyId, phase: "solver-pipelines", label: "Publish uniform reference programs", dependencies: ids, run: () => {
       this.pipelines = compiled as UniformReferencePipelines;
@@ -916,17 +1009,26 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.info.nx, this.info.ny, this.info.nz, dt,
       c.width_m / this.info.nx, c.height_m / this.info.ny, c.depth_m / this.info.nz, this.scene.fluid.gravity_m_s2.y,
       c.width_m, c.height_m, c.depth_m, sceneHasTerrain(this.scene) ? 1 : 0,
-      this.scene.fluid.density_kg_m3, this.scene.fluid.dynamicViscosity_Pa_s, 1, 0,
+      this.scene.fluid.density_kg_m3, this.scene.fluid.dynamicViscosity_Pa_s,
+      // E1's fine reach in 4h tiles, or -1 with the experiment off. Negative is
+      // the whole gate: the two-level branch in sampleVelocityComponent is then
+      // never taken and the four map passes are never encoded.
+      this.twoLevelEnabled ? this.twoLevelFineReach : -1, 0,
       this.scene.fluid.surfaceTension_N_m, c.fluidWallMode === "no-slip" ? 1 : 0, activeBodyCount, c.top === "open" ? 1 : 0,
       outlet?.x ?? 0, outlet?.y ?? 0, outlet?.z ?? 0, inflow?.radius_m ?? 0,
       inflow?.velocity_m_s.x ?? 0, inflow?.velocity_m_s.y ?? 0, inflow?.velocity_m_s.z ?? 0, this.inflowBoundary?.apertureScale ?? 0,
       inflowStrength, this.referenceVolumeCells, c.fillFraction * this.info.ny, 4,
       this.sharpeningStrength, this.sharpeningDistance,
-      0,
+      this.volumeDustThreshold,
       c.depthBoundary === "symmetry" ? 1 : 0,
       drop?.centre_m.x ?? 0, drop?.centre_m.y ?? 0, drop?.centre_m.z ?? 0, drop?.radius_m ?? 0,
       drop?.halfHeight_m ?? 0, this.liquidOnlyVelocityAdvection ? 1 : 0,
       this.solidVoxelScratchOffsetWords, this.liquidCapacityBalancingTolerance / 100,
+      // The shell reach in 4h tiles, whether the extension's finest passes run
+      // on those tiles, and whether advection and projection take their far-air
+      // arm outside the fine tiles. All inert while the sampler is off.
+      this.twoLevelShellReach, this.twoLevelExtensionEnabled ? 1 : 0,
+      this.twoLevelAdvectionEnabled ? 1 : 0, 0,
     ]));
   }
 
@@ -983,10 +1085,21 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.velocityTransport = values.velocityTransport === "maccormack"
       ? "maccormack" : "semi-lagrangian";
     this.liquidOnlyVelocityAdvection = values.liquidOnlyVelocityAdvection === "on";
+    // Partial-values callers must not reset the sweep budget.
+    if (values.extensionFrontSweeps !== undefined && Number(values.extensionFrontSweeps) !== this.velocityExtrapolator.frontPasses) {
+      this.velocityExtrapolator.setFrontPasses(Number(values.extensionFrontSweeps));
+      this.publishUniformPipelineFacts();
+    }
     if (this.geometricVolume) {
       // Absent means "leave as constructed": partial value records must not
       // silently switch a dense-constructed solver onto the work map.
       if (values.sharpeningWorkMap !== undefined) this.geometricTileWork = values.sharpeningWorkMap !== "off";
+      if (values.volumeDustThreshold !== undefined) this.volumeDustThreshold = finite("volumeDustThreshold", 0, 0, 1);
+      if (values.twoLevelVelocity !== undefined) this.twoLevelVelocity = this.twoLevelTileCount > 0 && values.twoLevelVelocity === "on";
+      if (values.twoLevelFineReach !== undefined) this.twoLevelFineReach = Math.round(finite("twoLevelFineReach", 2, 0, 8));
+      if (values.twoLevelExtension !== undefined) this.twoLevelExtensionTiles = values.twoLevelExtension !== "dense";
+      if (values.twoLevelAdvection !== undefined) this.twoLevelAdvectionTiles = values.twoLevelAdvection !== "dense";
+      if (values.twoLevelShellReach !== undefined) this.twoLevelShellReach = Math.round(finite("twoLevelShellReach", 1, 0, 8));
       this.geometricRedistance = values.redistance !== "off";
       this.liquidCapacityBalancing = values.liquidCapacityBalancing === "on";
       this.liquidCapacityBalancingRounds = Math.round(finite("liquidCapacityBalancingRounds", 64, 1, 64));
@@ -1171,10 +1284,14 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       [this.info.nx, this.info.ny, this.info.nz],
     );
     if (!predicted) seam?.(UNIFORM_ADVANCE_PHASE.extensionAuthority);
+    // The 4h field the two-level sampler reads is this hierarchy's own
+    // ceil(n/4) level, published inside the fill phase once it has completed.
+    // MacCormack extends twice per step, so the table always describes the
+    // field the next sample would otherwise have interpolated finely.
     this.velocityExtrapolator.encode(encoder, predicted, !predicted && seam ? ((stage) => seam(
       stage === "narrow-band-front" ? UNIFORM_ADVANCE_PHASE.extensionFront
         : UNIFORM_ADVANCE_PHASE.extensionHierarchy,
-    )) : undefined);
+    )) : undefined, this.twoLevelEncoded);
   }
 
   /**
@@ -1187,7 +1304,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const multigridPasses = this.pressureMultigrid.planStageCounts;
     if (!multigridPasses) return;
     this.info.uniformPipelineFacts = {
-      extrapolationFrontSweeps: this.velocityExtrapolator.activeFrontPassCeiling,
+      extrapolationFrontSweeps: this.velocityExtrapolator.frontPasses,
       extrapolationHierarchyLevels: this.velocityExtrapolator.hierarchyLevelCount,
       extrapolationPassesPerInvocation: this.velocityExtrapolator.encodedPassCount,
       multigridLevels: this.pressureMultigrid.levelCount,
@@ -1200,6 +1317,26 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   /** The 4h map is requested, dimensionally possible, and sharpening is on. */
   private get sharpenTileWork(): boolean {
     return this.geometricTileWork && this.sharpenTileCount > 0 && this.densitySharpening;
+  }
+
+  /** Experiment E1 is requested, dimensionally possible, and geometric. */
+  private get twoLevelEnabled(): boolean {
+    return this.twoLevelVelocity && this.twoLevelTileCount > 0;
+  }
+
+  /** E2 shrinks the extension only under the sampler that replaces its output. */
+  private get twoLevelExtensionEnabled(): boolean {
+    return this.twoLevelEnabled && this.twoLevelExtensionTiles;
+  }
+
+  /** E2b needs the same map, so it is gated on the same sampler. */
+  private get twoLevelAdvectionEnabled(): boolean {
+    return this.twoLevelEnabled && this.twoLevelAdvectionTiles;
+  }
+
+  /** Byte offset of the shell-tile counter, above the two dilation planes. */
+  private get twoLevelShellCountOffset(): number {
+    return (this.info.nx * this.info.ny * this.info.nz + 6 * this.twoLevelTileCount) * 4;
   }
 
   /** Byte offset of the classify dispatch's active-tile counter. */
@@ -1222,9 +1359,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     else encoder.copyTextureToTexture({texture:this.vertexPhiScratch!},{texture:this.vertexPhiTexture!},[this.info.nx+1,this.info.ny+1,this.info.nz+1]);
     seam?.(UNIFORM_VOLUME_PHASE.phi);
     run("uvBuildEdges");
-    encoder.clearBuffer(this.conditioningScratch); run("uvSumDonors"); run("uvFallback");
+    // Ranged to the N-word donor-sum region. Words [N,2N) carry E1's restricted
+    // faces and class map, which the whole step samples; nothing in this stage
+    // addresses them, and the balance header and 4h map live above 2N.
+    const donorSumBytes = this.info.nx * this.info.ny * this.info.nz * 4;
+    encoder.clearBuffer(this.conditioningScratch, 0, donorSumBytes); run("uvSumDonors"); run("uvFallback");
     for (let round = 0; round < 3; round++) {
-      run("uvNormalizeRows"); encoder.clearBuffer(this.conditioningScratch);
+      run("uvNormalizeRows"); encoder.clearBuffer(this.conditioningScratch, 0, donorSumBytes);
       run("uvSumDonors"); run("uvNormalizeDonors");
     }
     seam?.(UNIFORM_VOLUME_PHASE.coupling);
@@ -1367,6 +1508,22 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.boundaryVelocityA, 0, this.symmetryStageAuditNegativeBoundaryVelocity, 0,
       this.negativeBoundaryVelocityBytes,
     );
+    this.twoLevelEncoded = this.twoLevelEnabled;
+    // The tile classes, at the HEAD of the step and before the extension that
+    // now runs on them: seeded from start-of-step V and phi, solids and this
+    // step's sources, then dilated to FINE (k tiles) and SHELL (k + shell
+    // reach) in one separated three-axis scan. Nothing between here and the
+    // transport stage writes V or phi, so the classes a post-extension pass
+    // would have produced are the same ones; and nothing between here and the
+    // sharpening map clears words [N,2N), which is where they live.
+    if (this.twoLevelEncoded) {
+      const tiles: [number, number, number] = [Math.ceil(this.info.nx/4), Math.ceil(this.info.ny/4), Math.ceil(this.info.nz/4)];
+      const grid: [number, number, number] = [Math.ceil(tiles[0]/4), Math.ceil(tiles[1]/4), Math.ceil(tiles[2]/4)];
+      encoder.clearBuffer(this.conditioningScratch, this.twoLevelShellCountOffset, 4);
+      for (const entry of UNIFORM_VOLUME_TWO_LEVEL_ENTRIES) {
+        this.runDirect(encoder, `Uniform Geometric two-level ${entry}`, this.twoLevelPipelines[entry]!, this.densityTraceGroup, grid);
+      }
+    }
     this.encodeVelocityExtrapolation(encoder, false, seam);
 
     // Sec. 3.6 must see the updated solid geometry before Sec. 3.4 excludes
@@ -1375,7 +1532,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // zero by the gather, so the supposedly conservative operator loses the
     // displaced liquid before the historical post-sharpening cleanup runs.
     if (this.solidExcessCorrection && (activeBodies.length > 0 || sceneHasTerrain(this.scene))) {
-      encoder.clearBuffer(this.conditioningScratch);
+      // Ranged to the donor-sum region for the same reason the transport
+      // clears are: the scatter/resolve pair only addresses [0,N), and words
+      // [N,2N) carry the 4h classes for the rest of the step. (Uniform
+      // Geometric forces this stage off; the range keeps it safe if it returns.)
+      encoder.clearBuffer(this.conditioningScratch, 0, this.info.nx * this.info.ny * this.info.nz * 4);
       this.run(encoder, "Uniform moving-solid entry excess scatter",
         this.pipelines.scatterSolidExcess, this.solidEntryScatterGroup);
       this.run(encoder, "Uniform moving-solid entry excess resolve",
@@ -1596,10 +1757,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.readbackPending = true;
     this.statsReadback ??= this.device.createBuffer({ label: "Uniform reference diagnostics readback", size: 208, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = this.device.createCommandEncoder({ label: "Uniform reference diagnostics readback" });
-    encoder.copyBufferToBuffer(this.reductions, 0, this.statsReadback, 0, 20);
+    encoder.copyBufferToBuffer(this.reductions, 0, this.statsReadback, 0, 32);
     // Only the step that ran the classify dispatch leaves a meaningful count.
     const tileMap = this.sharpenTileMapEncoded;
     if (tileMap) encoder.copyBufferToBuffer(this.conditioningScratch, this.sharpenTileCountWordOffset, this.statsReadback, 192, 4);
+    if (this.twoLevelEncoded) encoder.copyBufferToBuffer(this.conditioningScratch, this.twoLevelShellCountOffset, this.statsReadback, 196, 4);
     encoder.copyBufferToBuffer(this.pressureMultigrid.diagnostics, 0, this.statsReadback, 32, 60);
     encoder.copyBufferToBuffer(this.pressureMultigrid.diagnostics, 64, this.statsReadback, 176, 12);
     encoder.copyBufferToBuffer(this.velocityExtrapolator.convergenceDiagnostics, 0, this.statsReadback, 96, 16);
@@ -1659,6 +1821,23 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.info.uniformSharpenWorkMap = tileMap;
       this.info.uniformSharpenTilesActive = tileMap ? words[48]! : undefined;
       this.info.uniformSharpenTilesTotal = tileMap ? this.sharpenTileCount : undefined;
+      // The floor's own price: cells zeroed across the gather and the eight
+      // commit sweeps, and the mass that went with them in sixty-fourths of
+      // the threshold. Off, both are structurally zero.
+      const dust = this.geometricVolume && this.volumeDustThreshold > 0;
+      Object.assign(this.info, {
+        uniformVolumeDustThreshold: this.geometricVolume ? this.volumeDustThreshold : undefined,
+        uniformVolumeDustCells: dust ? words[5]! : undefined,
+        uniformVolumeDustMass_cells: dust ? words[6]! * this.volumeDustThreshold / 64 : undefined,
+        uniformTwoLevelVelocity: this.geometricVolume ? this.twoLevelEncoded : undefined,
+        uniformTwoLevelFineReach: this.geometricVolume ? this.twoLevelFineReach : undefined,
+        uniformTwoLevelFineTiles: this.twoLevelEncoded ? words[7]! : undefined,
+        uniformTwoLevelTilesTotal: this.twoLevelEncoded ? this.twoLevelTileCount : undefined,
+        uniformTwoLevelShellTiles: this.twoLevelEncoded ? words[49]! : undefined,
+        uniformTwoLevelShellReach: this.geometricVolume ? this.twoLevelShellReach : undefined,
+        uniformTwoLevelExtensionTiles: this.twoLevelEncoded ? this.twoLevelExtensionTiles : undefined,
+        uniformTwoLevelAdvectionTiles: this.twoLevelEncoded ? this.twoLevelAdvectionTiles : undefined,
+      });
       return this.info;
     } finally {
       if (this.statsReadback.mapState === "mapped") this.statsReadback.unmap();
@@ -1801,12 +1980,20 @@ const UNIFORM_FLUID_STAGES: readonly FluidPipelineStage[] = [
             : "—",
       },
       {
+        kind: "param-range", param: "extensionFrontSweeps", label: "Front sweeps", unit: "sweeps",
+        min: 1, max: 16, step: 1, digits: 0,
+        hint: "FIM sweep budget for the two-cell accurate band; every sweep costs an update and a dispatch-gate pass even once converged. Below the sweeps the front needs, unreached band faces fall to the hierarchy fill. Changes apply live.",
+      },
+      {
         kind: "readout",
-        label: "Front sweeps",
-        hint: "Bounded FIM iteration ceiling; indirect work resolves early and later sweeps are no-ops on converged cells.",
+        label: "Sweeps with work",
+        hint: "Sweeps that still had active faces in the latest diagnostics sample, against the budget. Faces left active when the budget ran out were resolved unconverged.",
         value: (context) => {
           const facts = uniformFacts(context);
-          return facts ? `${facts.extrapolationFrontSweeps}` : "—";
+          const executed = context.info?.uniformFIMExecutedPasses;
+          if (!facts || executed === undefined) return "—";
+          const left = context.info?.uniformFIMTerminalActiveFaces ?? 0;
+          return `${executed} of ${facts.extrapolationFrontSweeps} · ${left === 0 ? "converged" : `${left} faces unconverged`}`;
         },
       },
     ],

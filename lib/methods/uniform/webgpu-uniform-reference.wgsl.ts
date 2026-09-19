@@ -33,6 +33,10 @@ struct Params {
   // x: the half-depth a dropped disk spans along z, zero for a ball. A 2D
   // case's liquid is extruded through the slab, so its drops are too.
   dropExtent: vec4f,
+  // x: the shell reach in 4h tiles, i.e. how far past the fine set the velocity
+  // extension must still be exact. y: 1 when the extension runs on those tiles
+  // rather than densely. Both are inert unless physical.z is non-negative.
+  twoLevel: vec4f,
 }
 @group(0) @binding(0) var velocityIn: texture_3d<f32>;
 @group(0) @binding(1) var velocityOut: texture_storage_3d<rgba32float, write>;
@@ -43,8 +47,9 @@ struct Params {
 @group(0) @binding(6) var<uniform> params: Params;
 @group(0) @binding(7) var heightIn: texture_2d<f32>;
 @group(0) @binding(8) var heightOut: texture_storage_2d<rg32float, write>;
-// 0..3 are published diagnostics. 4..6 are transient, same-command-buffer
-// volume-control totals (current, add capacity, remove capacity).
+// 0..4 are published diagnostics. The geometric method adds 5 and 6 for the
+// volume dust floor (cells zeroed, discarded mass in sixty-fourths of the
+// threshold) and 7 for the count of fine tiles in the E1 two-level map.
 @group(0) @binding(9) var<storage,read_write> reductions:array<atomic<u32>,8>;
 struct RigidBody {
   positionShape: vec4f,
@@ -258,6 +263,10 @@ fn sampleVolume(p:vec3f)->f32{
   return d4Sum8(terms);
 }
 fn sampleVelocityComponent(p:vec3f,component:u32)->f32{
+  // Experiment E1's single choke point. The decision is per sample point, not
+  // per thread, so a characteristic leaving the fine band crosses the level
+  // interface part way exactly as a shrunk lattice would make it.
+  ${geometric ? "if(params.physical.z>=0.0&&!uvTwoLevelFineAt(p)){return uvCoarseVelocityComponent(p,component);}" : ""}
   var offset=vec3f(0.5);offset[component]=1.0;var lower=vec3f(0.0);lower[component]=-1.0;let q=clamp(p-offset,lower,vec3f(dims()-vec3i(1)));
   let base=vec3i(floor(q));let fraction=fract(q);var terms:array<f32,8>;
   for(var corner=0u;corner<8u;corner+=1u){
@@ -911,7 +920,16 @@ fn applyVelocityForces(id:vec3i,inputVelocity:vec3f,dt:f32,h:vec3f)->vec3f{
 
 @compute @workgroup_size(4,4,4)
 fn semiLagrangianAdvection(@builtin(global_invocation_id) gid:vec3u){
-  let id=activeId(gid);if(!valid(id)){return;}carryBoundaryVelocity(id);let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let cell=vec3f(id);
+  let id=activeId(gid);if(!valid(id)){return;}carryBoundaryVelocity(id);${geometric ? `
+  // Experiment E2b. Outside the fine tiles no cell within eight cells carries
+  // liquid, a solid or a source, so the projection below rewrites every
+  // component of this cell: a face keeps its advected value only when it or its +axis
+  // neighbour owns a pressure row. The three backward traces and the force term
+  // are therefore dead work. V and the pressure seed are still carried, exactly
+  // as the dense path does.
+  if(params.twoLevel.z>0.5&&!uvTwoLevelFineAt(vec3f(id)+vec3f(0.5))){
+    textureStore(velocityOut,id,vec4f(0.0));textureStore(volumeOut,id,vec4f(volume(id),0.0,0.0,0.0));textureStore(pressureOut,id,vec4f(0.0));return;
+  }` : ""}let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let cell=vec3f(id);
   var v=vec3f(advectVelocityComponent(cell+vec3f(1.0,0.5,0.5),0u,dt,h),advectVelocityComponent(cell+vec3f(0.5,1.0,0.5),1u,dt,h),advectVelocityComponent(cell+vec3f(0.5,0.5,1.0),2u,dt,h));
   // A closed-face sample uses the solid-side zero extension. Preserve an old
   // velocity directed away from a positive wall before adding this step's
@@ -1058,7 +1076,16 @@ fn curvatureAt(id:vec3i)->f32{
 
 @compute @workgroup_size(4,4,4)
 fn project(@builtin(global_invocation_id) gid: vec3u) {
-  let id=activeId(gid); if (!valid(id)) { return; }
+  let id=activeId(gid); if (!valid(id)) { return; }${geometric ? `
+  // Experiment E2b, the same tile set. A cell outside the fine tiles has no
+  // pressure row and no liquid or solid neighbour, so every branch below lands
+  // on the far-air arm: each open face is set to zero, and a boundary face of a
+  // cell with no row is set to zero too. Write that result directly and skip
+  // the face data, the pressure taps and the ghost-fluid fractions.
+  if(params.twoLevel.z>0.5&&!uvTwoLevelFineAt(vec3f(id)+vec3f(0.5))){
+    textureStore(velocityOut,id,vec4f(0.0));storeBoundaryVelocity(id,vec3f(0.0));
+    textureStore(volumeOut,id,vec4f(textureLoad(volumeIn,id,0).x));return;
+  }` : ""}
   let h=params.cellGravity.xyz;let scale=params.dimsDt.w/params.physical.x;var v=velocity(id);var boundaryV=boundaryVelocity(id);let d=dims();
   let ex=id+vec3i(1,0,0);let ey=id+vec3i(0,1,0);let ez=id+vec3i(0,0,1);
   let p0=select(0.0,projectPressureValue(id),pressureLiquid(id));

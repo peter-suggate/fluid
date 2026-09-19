@@ -11,6 +11,14 @@ export const UNIFORM_VOLUME_SHARPEN_ENTRIES = [
   "uvPrepareSharpen", "uvProposeSharpen", "uvLimitSharpen", "uvCommitSharpen",
 ] as const;
 export const UNIFORM_VOLUME_TILE_CLASSIFY_ENTRY = "uvClassifySharpenTiles";
+/** E1/E2: seed the 4h classes at the head of the step, then dilate them. */
+export const UNIFORM_VOLUME_TWO_LEVEL_ENTRIES = [
+  "uvTwoLevelSeed", "uvTwoLevelDilateX", "uvTwoLevelDilateY", "uvTwoLevelDilateZ",
+] as const;
+/** Words the E1 tables occupy above the N-word donor-sum region, per coarse cell. */
+export const UNIFORM_VOLUME_TWO_LEVEL_WORDS_PER_TILE = 6;
+/** One counter word above the two ping-pong planes: shell tiles this step. */
+export const UNIFORM_VOLUME_TWO_LEVEL_COUNTER_WORDS = 1;
 /** Pipeline-overridable constant selecting the tiled sharpening variant. */
 export const UNIFORM_VOLUME_TILE_WORK_OVERRIDE = "UV_SHARPEN_TILE_WORK";
 /** Words 2N+0..6 of the third conditioning plane stay liquid-balance owned. */
@@ -210,13 +218,28 @@ fn uvFinishLiquidBalance(){
   }else{atomicAdd(&sharpenDeposits[base+5u],1);}
   atomicStore(&sharpenDeposits[base+1u],0);
 }
+// Sec. 3.4 and Sec. 3.5 both write V as a sum with cancellation, so a cell the
+// characteristic barely reached keeps float32 rounding residue: on figure 7 at
+// step 60 that residue is four fifths of the 553k nonzero cells yet 1.3e-7 of
+// the mass, and every one of those cells keeps a 4h tile live for any work map.
+// The floor is in cell volumes and catches the ULP-scale negatives under the
+// same test. A zero threshold never compares true -- NaN included -- so the
+// control arm stores the untreated sum bit for bit. Words 5 and 6 of the
+// diagnostics buffer price it: cells zeroed, and the discarded mass in
+// sixty-fourths of the threshold.
+fn uvDustFloor(value:f32)->f32{
+  if(value==0.0||!(abs(value)<params.tuning.z)){return value;}
+  atomicAdd(&reductions[5],1u);
+  atomicAdd(&reductions[6],min(u32(abs(value)/params.tuning.z*64.0),64u));
+  return 0.0;
+}
 @compute @workgroup_size(4,4,4)
 fn uvGather(@builtin(global_invocation_id)gid:vec3u){
   let id=vec3i(gid);if(!valid(id)){return;}let i=linearIndex(id);var value=0.0;
   for(var k=0u;k<9u;k++){value+=uvEdges[i].weight[k]*volume(uvCell(uvEdges[i].donor[k]));}
   value+=min(dropSource(id),max(0.0,uvOpen(id)-value));
   if(uvOpen(id)>0.0){value+=inflowSweptPlugSource(id,params.dimsDt.w);}
-  textureStore(volumeOut,id,vec4f(value));
+  textureStore(volumeOut,id,vec4f(uvDustFloor(value)));
   textureStore(gammaOut,id,vec4f(uvTarget(id)));
 }
 fn uvTarget(id:vec3i)->f32{
@@ -322,13 +345,121 @@ fn uvLimitedFlux(i:u32,j:u32,axis:u32)->f32{
 @compute @workgroup_size(4,4,4)
 fn uvCommitSharpen(@builtin(global_invocation_id)gid:vec3u){
   if(valid(vec3i(gid))&&!uvSharpenTileActive(vec3i(gid))){
-    textureStore(volumeOut,vec3i(gid),vec4f(volume(vec3i(gid))));return;
+    textureStore(volumeOut,vec3i(gid),vec4f(uvDustFloor(volume(vec3i(gid)))));return;
   }
   let id=vec3i(gid);if(!valid(id)){return;}let i=linearIndex(id);var terms:array<f32,6>;
   for(var axis=0u;axis<3u;axis++){var e=vec3i(0);e[axis]=1;terms[2u*axis]=0.0;terms[2u*axis+1u]=0.0;
     if(valid(id+e)){terms[2u*axis]=-uvLimitedFlux(i,linearIndex(id+e),axis);}
     if(valid(id-e)){terms[2u*axis+1u]=uvLimitedFlux(linearIndex(id-e),i,axis);}}
-  textureStore(volumeOut,id,vec4f(volume(id)+d4Sum6(terms)));
+  textureStore(volumeOut,id,vec4f(uvDustFloor(volume(id)+d4Sum6(terms))));
+}
+// The two-level velocity sampler and the tile classes the shrunk velocity
+// extension runs on: one classification per step on the ceil(n/4)^3 tile grid,
+// encoded at the HEAD of the step from start-of-step V and phi, plus a 4h face
+// table filled from the extension hierarchy's own ceil(n/4) level once the
+// extension has run. Both live in words [N,2N) of the conditioning plane -- a
+// region the geometric path never addresses, and whose per-step clears are
+// ranged away from it so this survives the whole step. params.physical.z is the
+// Chebyshev fine reach k, or -1 with the experiment off, in which case the
+// sampler branch is never taken and the fine path stores the same bits.
+// Class word bits: 1 = FINE (samples the finest lattice), 2 = SHELL (FINE
+// dilated by params.twoLevel.x, the set on which fine extension output must be
+// valid). SHELL is read by the extrapolator module, not here.
+fn uvCoarseDims()->vec3i{return (dims()+vec3i(3))/4;}
+fn uvCoarseCount()->u32{let c=uvCoarseDims();return u32(c.x*c.y*c.z);}
+fn uvCoarseIndex(t:vec3i)->u32{let c=uvCoarseDims();return u32(t.x+c.x*(t.y+c.y*t.z));}
+fn uvCoarseBase()->u32{return cellCount();}
+fn uvCoarsePlane(plane:u32)->u32{return cellCount()+4u*uvCoarseCount()+plane*uvCoarseCount();}
+fn uvTwoLevelFineAt(p:vec3f)->bool{
+  let cell=clamp(vec3i(floor(p)),vec3i(0),dims()-vec3i(1));
+  return (atomicLoad(&sharpenDeposits[uvCoarseBase()+4u*uvCoarseIndex(cell/4)+3u])&1)!=0;
+}
+fn uvCoarseFace(t:vec3i,component:u32)->f32{
+  if(any(t<vec3i(0))||any(t>=uvCoarseDims())){return 0.0;}
+  return bitcast<f32>(atomicLoad(&sharpenDeposits[uvCoarseBase()+4u*uvCoarseIndex(t)+component]));
+}
+// The fine path's padded shell returns zero outside the lattice; the explicit
+// range test is that same rule on the 4h lattice, so a characteristic leaving
+// the domain meets the same closed wall at either level. A fine cell index maps
+// to the coarse lattice by a quarter, which carries the upper-face convention
+// with it: fine face 4t+3 is coarse face t. The table itself is written by the
+// extrapolator from its own ceil(n/4) hierarchy level, which is a complete 4h
+// MAC field in that same convention and -- unlike a restriction of the fine
+// transport shell -- survives shrinking the fine extension.
+fn uvCoarseVelocityComponent(p:vec3f,component:u32)->f32{
+  let cd=uvCoarseDims();
+  var offset=vec3f(0.5);offset[component]=1.0;var lower=vec3f(0.0);lower[component]=-1.0;
+  let q=clamp(0.25*p-offset,lower,vec3f(cd-vec3i(1)));
+  let base=vec3i(floor(q));let fraction=fract(q);var terms:array<f32,8>;
+  for(var corner=0u;corner<8u;corner+=1u){
+    let o=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
+    let weights=select(vec3f(1.0)-fraction,fraction,vec3f(o)>vec3f(0.5));
+    terms[corner]=weights.x*weights.y*weights.z*uvCoarseFace(base+o,component);
+  }
+  return d4Sum8(terms);
+}
+// SEED: liquid above the dust floor, any solid or terrain share, a source this
+// step, or a vertex on the liquid side of the 4h band. Partial open fraction
+// covers rigid bodies and terrain, so neither needs the toggle forced off. The
+// vertex test is ONE-SIDED (phi < band, not |phi| < band) so that every cell
+// with a negative centre phi is in a seed tile: the centre is the mean of its
+// eight vertices, so a negative centre forces a negative -- hence in-band --
+// vertex. That is what makes "the FIM accurate band lies inside SHELL" a
+// theorem rather than a property of the V test. It is a superset of E1's
+// two-sided test; deep liquid is already seeded by V.
+@compute @workgroup_size(4,4,4)
+fn uvTwoLevelSeed(@builtin(global_invocation_id)gid:vec3u){
+  let t=vec3i(gid);if(any(t>=uvCoarseDims())){return;}
+  let slot=uvCoarseBase()+4u*uvCoarseIndex(t);
+  let dust=select(params.tuning.z,1e-6,params.tuning.z<=0.0);
+  var seed=false;
+  for(var z=0;z<4;z++){for(var y=0;y<4;y++){for(var x=0;x<4;x++){
+    let id=4*t+vec3i(x,y,z);if(!valid(id)){continue;}
+    if(abs(volume(id))>dust||uvOpen(id)<0.99999){seed=true;}
+    if(dropSource(id)>0.0||inflowSweptPlugSource(id,params.dimsDt.w)>0.0){seed=true;}}}}
+  let h=params.cellGravity.xyz;let band=4.0*max(h.x,max(h.y,h.z));
+  let last=min(4*t+vec3i(4),dims());
+  for(var z=4*t.z;z<=last.z;z++){for(var y=4*t.y;y<=last.y;y++){for(var x=4*t.x;x<=last.x;x++){
+    if(textureLoad(uvPhiIn,vec3i(x,y,z),0).x<band){seed=true;}}}}
+  atomicStore(&sharpenDeposits[slot+3u],select(0,1,seed));
+}
+// Chebyshev dilation, separated into three axis scans. Each scan carries two
+// independent radii in two bits: FINE at k tiles and SHELL at k+s. Chebyshev
+// balls compose, so SHELL is exactly FINE dilated by s. The pair of single-word
+// planes above the table is the ping-pong; the z scan lands the final class
+// back in the table so the sampler reads one place.
+fn uvTwoLevelFineReach()->i32{return i32(max(params.physical.z,0.0));}
+fn uvTwoLevelShellReach()->i32{return uvTwoLevelFineReach()+i32(max(params.twoLevel.x,1.0));}
+/** Both class bits of tile q on the pass's input plane; the seed plane is one bit. */
+fn uvTwoLevelClassIn(plane:u32,q:vec3i)->i32{
+  if(plane==2u){return select(0,3,atomicLoad(&sharpenDeposits[uvCoarseBase()+4u*uvCoarseIndex(q)+3u])!=0);}
+  return atomicLoad(&sharpenDeposits[uvCoarsePlane(plane)+uvCoarseIndex(q)]);
+}
+fn uvTwoLevelDilate(previous:u32,axis:u32,t:vec3i)->i32{
+  let c=uvCoarseDims();let k=uvTwoLevelFineReach();let s=uvTwoLevelShellReach();var hit=0;
+  for(var d=-s;d<=s;d++){var q=t;q[axis]+=d;if(q[axis]<0||q[axis]>=c[axis]){continue;}
+    let value=uvTwoLevelClassIn(previous,q);if(value==0){continue;}
+    if((value&1)!=0&&d>=-k&&d<=k){hit|=1;}
+    if((value&2)!=0){hit|=2;}}
+  return hit;
+}
+@compute @workgroup_size(4,4,4)
+fn uvTwoLevelDilateX(@builtin(global_invocation_id)gid:vec3u){
+  let t=vec3i(gid);if(any(t>=uvCoarseDims())){return;}
+  atomicStore(&sharpenDeposits[uvCoarsePlane(0u)+uvCoarseIndex(t)],uvTwoLevelDilate(2u,0u,t));
+}
+@compute @workgroup_size(4,4,4)
+fn uvTwoLevelDilateY(@builtin(global_invocation_id)gid:vec3u){
+  let t=vec3i(gid);if(any(t>=uvCoarseDims())){return;}
+  atomicStore(&sharpenDeposits[uvCoarsePlane(1u)+uvCoarseIndex(t)],uvTwoLevelDilate(0u,1u,t));
+}
+@compute @workgroup_size(4,4,4)
+fn uvTwoLevelDilateZ(@builtin(global_invocation_id)gid:vec3u){
+  let t=vec3i(gid);if(any(t>=uvCoarseDims())){return;}
+  let hit=uvTwoLevelDilate(1u,2u,t);
+  atomicStore(&sharpenDeposits[uvCoarseBase()+4u*uvCoarseIndex(t)+3u],hit);
+  if((hit&1)!=0){atomicAdd(&reductions[7],1u);}
+  if((hit&2)!=0){atomicAdd(&sharpenDeposits[uvCoarsePlane(2u)],1);}
 }
 @compute @workgroup_size(4,4,4)
 fn uvPublish(@builtin(global_invocation_id)gid:vec3u){

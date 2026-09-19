@@ -29,6 +29,12 @@ const params: MethodParamSpec[] = [
     hint: "Stop after a complete Full-Cycle or V-Cycle when the projected residual infinity norm is at or below this tolerance. Zero runs every configured cycle.",
   },
   {
+    ...runtimeUpdate, kind: "number", key: "extensionFrontSweeps",
+    label: "Extension front sweeps", default: 16, tier: "fine",
+    min: 1, max: 16, step: 1, digits: 0, unit: "sweeps",
+    hint: "Sec. 3.3 FIM sweep budget for the two-cell accurate band. Each sweep is an update and a dispatch-gate pass whether or not work remains; sixteen covers the band's full dependency diameter. Fewer sweeps resolve an unconverged front and leave unreached band faces to the hierarchy fill.",
+  },
+  {
     ...runtimeUpdate,
     kind: "number",
     key: "gammaDiffusionIterations",
@@ -136,6 +142,7 @@ export function uniformReferenceSolverOptions(
     sharpeningDistance: numberValue(values, params, "sharpeningDistance"),
     solidExcessCorrection: values.solidExcessCorrection !== "off",
     rigidCoupling: values.rigidCoupling !== "off",
+    extensionFrontSweeps: whole("extensionFrontSweeps"),
     pressureSchedule: {
       residualTolerance: numberValue(values, params, "pressureResidualTolerance"),
       fullCycles: whole("pressureFullCycles"),

@@ -20,6 +20,13 @@ struct Params {
   inflowPositionRadius: vec4f,
   inflowVelocityLength: vec4f,
   inflowTiming: vec4f,
+  tuning: vec4f,
+  drop: vec4f,
+  dropExtent: vec4f,
+  // Shared with the parent solver's own Params. x: the shell reach in 4h tiles
+  // (unused here; the class map already carries the dilated set). y: 1 when this
+  // module's finest passes run on the shell tiles instead of densely.
+  twoLevel: vec4f,
 }
 struct FrontParams {
   sourceParity: u32,
@@ -56,11 +63,42 @@ struct DispatchArgs {
 @group(0) @binding(9) var<storage, read_write> convergence: ConvergenceState;
 @group(0) @binding(10) var<storage, read_write> dispatchArgs: DispatchArgs;
 @group(0) @binding(11) var<storage, read> activeRegion: array<u32>;
+// The parent solver's conditioning scratch. Words [N, N+4C) are the 4h table
+// the two-level sampler reads: three face components and a class word whose
+// bit 1 is SHELL. This module writes only the three face words, in one pass of
+// its own, and reads only the class word -- never both in one dispatch.
+@group(0) @binding(12) var<storage, read_write> tileScratch: array<u32>;
 
 const DISTANCE_INFINITY: f32 = 65504.0;
 const ACCURATE_BAND_CELLS: f32 = 2.0;
 
 fn baseDims() -> vec3i { return vec3i(textureDimensions(densityIn)); }
+// The tile table is addressed in the PARENT's lattice, so it must not be sized
+// from densityIn: the resolve pass rebinds that slot to an (n+2)^3 FIM scratch
+// texture, and a table base computed from it lands outside the table entirely.
+// faceOpenIn is the one binding every group points at the parent's own lattice.
+fn tileDims() -> vec3i { return vec3i(textureDimensions(faceOpenIn)); }
+fn coarseDims() -> vec3i { return (tileDims() + vec3i(3)) / 4; }
+fn coarseIndex(t: vec3i) -> u32 { let c = coarseDims(); return u32(t.x + c.x * (t.y + c.y * t.z)); }
+fn tileTableBase() -> u32 { let d = tileDims(); return u32(d.x * d.y * d.z); }
+/**
+ * Shrunk-extension gate. With it off every predicate below is true and the
+ * module is bit-identical to the dense schedule.
+ *
+ * SHELL is the fine set dilated by one more tile than the sampler's, so it
+ * covers (a) the finest trilinear tap, which reaches one cell below a fine
+ * tile, (b) the FIM's own two-cell accurate band around any liquid cell, and
+ * (c) the +-1 and +-2 neighbour reads of the Godunov update. Everything outside
+ * it is stale, and every reader consults this predicate rather than being
+ * cleared: an out-of-shell face reads as unknown and infinitely far, which is
+ * exactly what a dense schedule writes wherever the band does not reach.
+ */
+fn tiledExtension() -> bool { return params.twoLevel.y > 0.5; }
+fn shellAt(p: vec3i) -> bool {
+  if (!tiledExtension()) { return true; }
+  let cell = clamp(p, vec3i(0), tileDims() - vec3i(1));
+  return (tileScratch[tileTableBase() + 4u * coarseIndex(cell / 4) + 3u] & 2u) != 0u;
+}
 fn activeBaseId(gid:vec3u)->vec3i{return vec3i(gid)+vec3i(vec3u(activeRegion[7],activeRegion[8],activeRegion[9]));}
 fn hierarchyActiveId(gid:vec3u)->vec3i{
   if(frontParams.activeLevel==0xffffffffu){return vec3i(gid);}
@@ -148,7 +186,7 @@ fn clearExtrapolationState(@builtin(global_invocation_id) gid:vec3u){
 @compute @workgroup_size(4, 4, 4)
 fn seedActiveFront(@builtin(global_invocation_id) gid: vec3u) {
   let p = activeBaseId(gid); let d = baseDims();
-  if (!inBounds(p, d)) { return; }
+  if (!inBounds(p, d) || !shellAt(p)) { return; }
   let inputVelocity = textureLoad(velocityIn, p, 0).xyz;
   var values = vec3f(0.0);
   var distances = vec3f(DISTANCE_INFINITY);
@@ -171,12 +209,12 @@ fn seedActiveFront(@builtin(global_invocation_id) gid: vec3u) {
 
 fn neighborDistance(p: vec3i, component: u32) -> f32 {
   let d = baseDims();
-  if (!openBaseFace(p, component)) { return DISTANCE_INFINITY; }
+  if (!openBaseFace(p, component) || !shellAt(p)) { return DISTANCE_INFINITY; }
   return faceDistance(textureLoad(secondaryIn, p, 0), component);
 }
 fn neighborValue(p: vec3i, component: u32) -> f32 {
   let d = baseDims();
-  if (!openBaseFace(p, component)) { return 0.0; }
+  if (!openBaseFace(p, component) || !shellAt(p)) { return 0.0; }
   let state = textureLoad(primaryIn, p, 0);
   return select(0.0, faceValue(state, component), componentKnown(state, component));
 }
@@ -253,7 +291,7 @@ fn isActive(state: vec4f, component: u32) -> bool {
 }
 fn activeNodeConverges(p: vec3i, component: u32) -> bool {
   let d = baseDims();
-  if (!openBaseFace(p, component) || sourceFace(p, component)) { return false; }
+  if (!openBaseFace(p, component) || sourceFace(p, component) || !shellAt(p)) { return false; }
   let distanceState = textureLoad(secondaryIn, p, 0);
   if (!isActive(distanceState, component)) { return false; }
   let oldDistance = faceDistance(distanceState, component);
@@ -287,7 +325,7 @@ fn activatedByConvergedUpwindNeighbor(p: vec3i, component: u32) -> bool {
 @compute @workgroup_size(4, 4, 4)
 fn updateActiveFront(@builtin(global_invocation_id) gid: vec3u) {
   let p = activeBaseId(gid); let d = baseDims();
-  if (!inBounds(p, d)) { return; }
+  if (!inBounds(p, d) || !shellAt(p)) { return; }
   let oldValues = textureLoad(primaryIn, p, 0);
   let oldDistances = textureLoad(secondaryIn, p, 0);
   var values = oldValues.xyz;
@@ -363,7 +401,7 @@ fn prepareActiveDispatch(@builtin(global_invocation_id) gid: vec3u) {
 @compute @workgroup_size(4, 4, 4)
 fn resolveConvergedFront(@builtin(global_invocation_id) gid: vec3u) {
   let p = activeBaseId(gid); let d = baseDims();
-  if (!inBounds(p, d)) { return; }
+  if (!inBounds(p, d) || !shellAt(p)) { return; }
   let parity = atomicLoad(&convergence.latestParity);
   let values = select(textureLoad(primaryIn, p, 0), textureLoad(velocityIn, p, 0), parity == 1u);
   let distances = select(textureLoad(secondaryIn, p, 0), textureLoad(densityIn, p, 0), parity == 1u);
@@ -380,6 +418,20 @@ fn hierarchyTargetDims() -> vec3i {
     frontParams.hierarchyTargetUsesBaseDims != 0u);
 }
 
+/**
+ * The one stale-state leak the shrunk extension can create, closed at the
+ * reader. Only the finest restrict has a base-dimension source, and that source
+ * is resolvedValues, which the shrunk resolve writes inside SHELL only. A
+ * tile that has just left SHELL still carries last step's real band values with
+ * their known bits set; unchecked, the restrict would carry them up and
+ * corrupt the very ceil(n/4) level the sampler now depends on. Treating an
+ * out-of-shell fine face as unknown is exactly what the dense schedule writes
+ * there -- resolveConvergedFront copies a seed side whose far-air entry is
+ * (0,0,0, known=0) -- so no clearing pass and no hysteresis is needed.
+ */
+fn sourceKnownAt(q: vec3i) -> bool {
+  return frontParams.hierarchySourceUsesBaseDims == 0u || shellAt(q);
+}
 // CM11b Sec. 3.3.1 evaluates each hierarchy transfer by trilinear
 // interpolation using known velocities only and renormalizes the weights.
 // The component-axis coordinate is face centered; the other two coordinates
@@ -404,7 +456,7 @@ fn hierarchyComponentSample(
         let weight = weights.x * weights.y * weights.z;
         let state = textureLoad(primaryIn, q, 0);
         let corner=u32(ox+2*oy+4*oz);contributions[corner]=vec2f(0.0);
-        if (weight > 0.0 && componentKnown(state, component)) {
+        if (weight > 0.0 && componentKnown(state, component) && sourceKnownAt(q)) {
           contributions[corner]=vec2f(weight*state[component],weight);
         }
       }
@@ -415,7 +467,7 @@ fn hierarchyComponentSample(
 }
 
 fn hierarchyKnownContribution(p: vec3i, sourceDims: vec3i, component: u32) -> vec2f {
-  if (!inBounds(p, sourceDims)) { return vec2f(0.0); }
+  if (!inBounds(p, sourceDims) || !sourceKnownAt(p)) { return vec2f(0.0); }
   let state = textureLoad(primaryIn, p, 0);
   return select(vec2f(0.0), vec2f(state[component], 1.0), componentKnown(state, component));
 }
@@ -480,6 +532,11 @@ fn prolongUnknownVelocity(@builtin(global_invocation_id) gid: vec3u) {
   let sourceDims = hierarchySourceDims();
   let targetDims = hierarchyTargetDims();
   if (!inBounds(p, targetDims)) { return; }
+  // Only the finest prolong is shrunk. Its target doubles as the FIM's side A
+  // and is read afterwards only by the pack, which runs on the same set. Every
+  // coarser level stays dense: it is the far field the sampler reads, and its
+  // source taps walk outside any tile set even though their values cannot.
+  if (frontParams.hierarchyTargetUsesBaseDims != 0u && !shellAt(p)) { return; }
   let existing = textureLoad(secondaryIn, p, 0);
   var values = existing.xyz;
   var knownMask = u32(round(existing.w));
@@ -497,7 +554,7 @@ fn prolongUnknownVelocity(@builtin(global_invocation_id) gid: vec3u) {
 @compute @workgroup_size(4, 4, 4)
 fn packTransportShell(@builtin(global_invocation_id) gid: vec3u) {
   let p=activeBaseId(gid);let padded=p+vec3i(1);let d=baseDims();
-  if(!inBounds(p,d)){return;}
+  if(!inBounds(p,d)||!shellAt(p)){return;}
   let state = textureLoad(primaryIn, p, 0);
   var values = vec3f(0.0); var knownMask = 0u; var openMask = 0u;
   for (var component = 0u; component < 3u; component += 1u) {
@@ -511,5 +568,44 @@ fn packTransportShell(@builtin(global_invocation_id) gid: vec3u) {
   // w retains known bits 0..2 and authoritative open-face bits 3..5 for the
   // opt-in Dawn conformance readback. All transport consumers sample xyz only.
   textureStore(primaryOut, padded, vec4f(values, f32(knownMask | (openMask << 3u))));
+}
+
+/**
+ * Publish the ceil(n/4) hierarchy level as the parent solver's 4h face table.
+ *
+ * primaryIn is that level's prolong-filled up texture, or its down when
+ * it is the coarsest level and nothing prolongs into it. The transfer's
+ * component-axis map is (t+1)*S/T - 1, which at S/T = 4 is fine face 4t+3, the
+ * upper face of coarse cell t -- the same convention the parent's coarse
+ * sampler reads, and the reason the host requires every axis to be a multiple
+ * of four before it offers this path.
+ *
+ * Two conventions are applied on top of the level's own values. An unknown
+ * component publishes zero, which is what the fine pack writes for an unknown
+ * face. And the last coarse layer on the component axis maps onto the outer
+ * domain wall, where the fine pack writes zero unless the wall is open (an
+ * authored atmospheric +Y face); the hierarchy would otherwise publish the
+ * prolonged interior value there. Interior closed faces need no such test:
+ * every tile holding a partially open cell seeds, so solids are always inside
+ * the fine set and their faces are never read from this table.
+ */
+@compute @workgroup_size(4,4,4)
+fn publishCoarseVelocityTable(@builtin(global_invocation_id) gid: vec3u) {
+  let t = vec3i(gid); let c = coarseDims();
+  if (!inBounds(t, c) || any(vec3i(textureDimensions(primaryIn)) != c)) { return; }
+  let state = textureLoad(primaryIn, t, 0);
+  let slot = tileTableBase() + 4u * coarseIndex(t);
+  for (var component = 0u; component < 3u; component += 1u) {
+    var value = select(0.0, state[component], componentKnown(state, component));
+    if (t[component] + 1 == c[component]) {
+      var open = false;
+      for (var a = 0; a < 4; a += 1) { for (var b = 0; b < 4; b += 1) {
+        var p = 4 * t; p[(component + 1u) % 3u] += a; p[(component + 2u) % 3u] += b; p[component] += 3;
+        if (openBaseFace(p, component)) { open = true; }
+      } }
+      if (!open) { value = 0.0; }
+    }
+    tileScratch[slot + component] = bitcast<u32>(value);
+  }
 }
 `;

@@ -1,0 +1,2134 @@
+{
+  "order": "dense/tiled/tiled/dense",
+  "frames": 30,
+  "summary": [
+    {
+      "sceneId": "minimal-power-dam-break-64",
+      "dims": [
+        64,
+        64,
+        64
+      ],
+      "denseWall_ms": 55.205208500000026,
+      "tiledWall_ms": 54.036999499999865,
+      "denseExtension_ms": 6.094848,
+      "tiledExtension_ms": 4.980736,
+      "denseFront_ms": 5.767168,
+      "tiledFront_ms": 4.554752,
+      "denseHierarchy_ms": 0.262144,
+      "tiledHierarchy_ms": 0.262144,
+      "denseAuthority_ms": 0.098304,
+      "wallRatio": 0.978838790184079,
+      "frontRatio": 0.7897727272727273,
+      "wallSaving_ms": 1.1682090000001608,
+      "tilesNear": 2318,
+      "tilesTotal": 4096,
+      "denseWallRuns": [
+        55.64904200000001,
+        54.761375000000044
+      ],
+      "tiledWallRuns": [
+        53.73841599999969,
+        54.33558300000004
+      ]
+    },
+    {
+      "sceneId": "large-power-dam-break",
+      "dims": [
+        64,
+        20,
+        64
+      ],
+      "denseWall_ms": 37.43456249999963,
+      "tiledWall_ms": 37.08331249999992,
+      "denseExtension_ms": 2.588672,
+      "tiledExtension_ms": 2.228224,
+      "denseFront_ms": 2.359296,
+      "tiledFront_ms": 2.031616,
+      "denseHierarchy_ms": 0.131072,
+      "tiledHierarchy_ms": 0.16383999999999999,
+      "denseAuthority_ms": 0.065536,
+      "wallRatio": 0.9906169599284161,
+      "frontRatio": 0.8611111111111112,
+      "wallSaving_ms": 0.35124999999970896,
+      "tilesNear": 266,
+      "tilesTotal": 1280,
+      "denseWallRuns": [
+        37.089749999999185,
+        37.77937500000007
+      ],
+      "tiledWallRuns": [
+        36.953207999998995,
+        37.213417000000845
+      ]
+    }
+  ],
+  "results": [
+    {
+      "sceneId": "minimal-power-dam-break-64",
+      "dims": [
+        64,
+        64,
+        64
+      ],
+      "frames": 30,
+      "runs": [
+        {
+          "tileWork": false,
+          "wall_ms": 55.64904200000001,
+          "extension_ms": 6.029312,
+          "front_ms": 5.701632,
+          "hierarchy_ms": 0.262144,
+          "authority_ms": 0.131072
+        },
+        {
+          "tileWork": true,
+          "wall_ms": 53.73841599999969,
+          "extension_ms": 4.980736,
+          "front_ms": 4.521984,
+          "hierarchy_ms": 0.262144,
+          "authority_ms": 0.131072,
+          "tilesNear": 2318,
+          "tilesTotal": 4096
+        },
+        {
+          "tileWork": true,
+          "wall_ms": 54.33558300000004,
+          "extension_ms": 4.980736,
+          "front_ms": 4.58752,
+          "hierarchy_ms": 0.262144,
+          "authority_ms": 0.131072,
+          "tilesNear": 2318,
+          "tilesTotal": 4096
+        },
+        {
+          "tileWork": false,
+          "wall_ms": 54.761375000000044,
+          "extension_ms": 6.160384,
+          "front_ms": 5.832704,
+          "hierarchy_ms": 0.262144,
+          "authority_ms": 0.065536
+        }
+      ],
+      "samples": [
+        {
+          "sceneId": "minimal-power-dam-break-64",
+          "tileWork": false,
+          "samples": [
+            {
+              "frame": 1,
+              "wall_ms": 83.64870799999994,
+              "extension_ms": 27.983872,
+              "authority_ms": 0.131072,
+              "front_ms": 26.411008,
+              "hierarchy_ms": 1.441792
+            },
+            {
+              "frame": 2,
+              "wall_ms": 50.18820800000003,
+              "extension_ms": 1.441792,
+              "authority_ms": 0.065536,
+              "front_ms": 1.179648,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 3,
+              "wall_ms": 62.92379200000005,
+              "extension_ms": 4.521984,
+              "authority_ms": 0.131072,
+              "front_ms": 4.128768,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 4,
+              "wall_ms": 53.212541999999985,
+              "extension_ms": 4.718592,
+              "authority_ms": 0.065536,
+              "front_ms": 4.456448,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 5,
+              "wall_ms": 54.56379200000015,
+              "extension_ms": 4.980736,
+              "authority_ms": 0.131072,
+              "front_ms": 4.58752,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 6,
+              "wall_ms": 54.200624999999945,
+              "extension_ms": 5.308416,
+              "authority_ms": 0.131072,
+              "front_ms": 4.9152,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 7,
+              "wall_ms": 54.86141599999996,
+              "extension_ms": 5.636096,
+              "authority_ms": 0.131072,
+              "front_ms": 5.24288,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 8,
+              "wall_ms": 55.8365839999999,
+              "extension_ms": 5.832704,
+              "authority_ms": 0.131072,
+              "front_ms": 5.439488,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 9,
+              "wall_ms": 57.13258300000007,
+              "extension_ms": 5.963776,
+              "authority_ms": 0.131072,
+              "front_ms": 5.57056,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 10,
+              "wall_ms": 53.833708000000115,
+              "extension_ms": 5.767168,
+              "authority_ms": 0.131072,
+              "front_ms": 5.373952,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 11,
+              "wall_ms": 54.96458400000006,
+              "extension_ms": 5.89824,
+              "authority_ms": 0.131072,
+              "front_ms": 5.505024,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 12,
+              "wall_ms": 53.44166700000005,
+              "extension_ms": 5.832704,
+              "authority_ms": 0.131072,
+              "front_ms": 5.439488,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 13,
+              "wall_ms": 53.71466600000008,
+              "extension_ms": 6.029312,
+              "authority_ms": 0.065536,
+              "front_ms": 5.701632,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 14,
+              "wall_ms": 53.96283399999993,
+              "extension_ms": 6.160384,
+              "authority_ms": 0.131072,
+              "front_ms": 5.701632,
+              "hierarchy_ms": 0.32768
+            },
+            {
+              "frame": 15,
+              "wall_ms": 56.06975000000011,
+              "extension_ms": 6.029312,
+              "authority_ms": 0.131072,
+              "front_ms": 5.636096,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 16,
+              "wall_ms": 58.19275000000016,
+              "extension_ms": 5.963776,
+              "authority_ms": 0.131072,
+              "front_ms": 5.57056,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 17,
+              "wall_ms": 57.308874999999944,
+              "extension_ms": 5.89824,
+              "authority_ms": 0.131072,
+              "front_ms": 5.505024,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 18,
+              "wall_ms": 54.51720799999998,
+              "extension_ms": 6.029312,
+              "authority_ms": 0.065536,
+              "front_ms": 5.701632,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 19,
+              "wall_ms": 54.66754200000014,
+              "extension_ms": 6.22592,
+              "authority_ms": 0.131072,
+              "front_ms": 5.832704,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 20,
+              "wall_ms": 55.01295900000014,
+              "extension_ms": 6.291456,
+              "authority_ms": 0.131072,
+              "front_ms": 5.89824,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 21,
+              "wall_ms": 56.3039160000003,
+              "extension_ms": 6.5536,
+              "authority_ms": 0.065536,
+              "front_ms": 6.22592,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 22,
+              "wall_ms": 58.42962499999976,
+              "extension_ms": 6.684672,
+              "authority_ms": 0.065536,
+              "front_ms": 6.356992,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 23,
+              "wall_ms": 56.353917000000365,
+              "extension_ms": 6.488064,
+              "authority_ms": 0.131072,
+              "front_ms": 6.094848,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 24,
+              "wall_ms": 55.64904200000001,
+              "extension_ms": 6.684672,
+              "authority_ms": 0.131072,
+              "front_ms": 6.291456,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 25,
+              "wall_ms": 58.68570899999986,
+              "extension_ms": 6.750208,
+              "authority_ms": 0.131072,
+              "front_ms": 6.356992,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 26,
+              "wall_ms": 58.23845799999981,
+              "extension_ms": 7.143424,
+              "authority_ms": 0.131072,
+              "front_ms": 6.750208,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 27,
+              "wall_ms": 58.8901249999999,
+              "extension_ms": 6.815744,
+              "authority_ms": 0.065536,
+              "front_ms": 6.488064,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 28,
+              "wall_ms": 57.39833399999998,
+              "extension_ms": 7.20896,
+              "authority_ms": 0.065536,
+              "front_ms": 6.88128,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 29,
+              "wall_ms": 56.31783399999995,
+              "extension_ms": 7.012352,
+              "authority_ms": 0.131072,
+              "front_ms": 6.684672,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 30,
+              "wall_ms": 54.974083000000064,
+              "extension_ms": 6.88128,
+              "authority_ms": 0.131072,
+              "front_ms": 6.488064,
+              "hierarchy_ms": 0.262144
+            }
+          ]
+        },
+        {
+          "sceneId": "minimal-power-dam-break-64",
+          "tileWork": true,
+          "samples": [
+            {
+              "frame": 1,
+              "wall_ms": 74.563083,
+              "extension_ms": 23.330816,
+              "authority_ms": 0.131072,
+              "front_ms": 22.020096,
+              "hierarchy_ms": 1.179648
+            },
+            {
+              "frame": 2,
+              "wall_ms": 50.591375000000426,
+              "extension_ms": 1.179648,
+              "authority_ms": 0.065536,
+              "front_ms": 0.851968,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 3,
+              "wall_ms": 51.94704199999978,
+              "extension_ms": 3.538944,
+              "authority_ms": 0.065536,
+              "front_ms": 3.211264,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 4,
+              "wall_ms": 53.76820799999996,
+              "extension_ms": 3.866624,
+              "authority_ms": 0.131072,
+              "front_ms": 3.473408,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 5,
+              "wall_ms": 53.15279199999986,
+              "extension_ms": 4.128768,
+              "authority_ms": 0.131072,
+              "front_ms": 3.735552,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 6,
+              "wall_ms": 53.190250000000106,
+              "extension_ms": 4.521984,
+              "authority_ms": 0.131072,
+              "front_ms": 4.128768,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 7,
+              "wall_ms": 53.109915999999885,
+              "extension_ms": 4.718592,
+              "authority_ms": 0.131072,
+              "front_ms": 4.325376,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 8,
+              "wall_ms": 56.47325000000001,
+              "extension_ms": 4.784128,
+              "authority_ms": 0.131072,
+              "front_ms": 4.390912,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 9,
+              "wall_ms": 56.13725000000022,
+              "extension_ms": 4.784128,
+              "authority_ms": 0.065536,
+              "front_ms": 4.521984,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 10,
+              "wall_ms": 52.79845900000009,
+              "extension_ms": 4.58752,
+              "authority_ms": 0.131072,
+              "front_ms": 4.194304,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 11,
+              "wall_ms": 52.462125000000015,
+              "extension_ms": 4.718592,
+              "authority_ms": 0.131072,
+              "front_ms": 4.325376,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 12,
+              "wall_ms": 52.078500000000076,
+              "extension_ms": 4.653056,
+              "authority_ms": 0.131072,
+              "front_ms": 4.25984,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 13,
+              "wall_ms": 52.620458999999755,
+              "extension_ms": 4.849664,
+              "authority_ms": 0.131072,
+              "front_ms": 4.456448,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 14,
+              "wall_ms": 53.53083300000026,
+              "extension_ms": 4.980736,
+              "authority_ms": 0.065536,
+              "front_ms": 4.653056,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 15,
+              "wall_ms": 53.538416999999754,
+              "extension_ms": 4.849664,
+              "authority_ms": 0.065536,
+              "front_ms": 4.521984,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 16,
+              "wall_ms": 52.898375000000215,
+              "extension_ms": 4.718592,
+              "authority_ms": 0.131072,
+              "front_ms": 4.325376,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 17,
+              "wall_ms": 53.234665999999834,
+              "extension_ms": 4.9152,
+              "authority_ms": 0.131072,
+              "front_ms": 4.521984,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 18,
+              "wall_ms": 53.551666999999725,
+              "extension_ms": 4.980736,
+              "authority_ms": 0.131072,
+              "front_ms": 4.521984,
+              "hierarchy_ms": 0.32768
+            },
+            {
+              "frame": 19,
+              "wall_ms": 53.55237500000021,
+              "extension_ms": 5.046272,
+              "authority_ms": 0.065536,
+              "front_ms": 4.718592,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 20,
+              "wall_ms": 53.73841599999969,
+              "extension_ms": 5.24288,
+              "authority_ms": 0.131072,
+              "front_ms": 4.849664,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 21,
+              "wall_ms": 53.98412499999995,
+              "extension_ms": 5.636096,
+              "authority_ms": 0.131072,
+              "front_ms": 5.24288,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 22,
+              "wall_ms": 54.20708399999967,
+              "extension_ms": 5.636096,
+              "authority_ms": 0.131072,
+              "front_ms": 5.24288,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 23,
+              "wall_ms": 55.2134159999996,
+              "extension_ms": 5.636096,
+              "authority_ms": 0.131072,
+              "front_ms": 5.24288,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 24,
+              "wall_ms": 54.59195799999998,
+              "extension_ms": 5.701632,
+              "authority_ms": 0.065536,
+              "front_ms": 5.373952,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 25,
+              "wall_ms": 54.409082999999555,
+              "extension_ms": 5.767168,
+              "authority_ms": 0.065536,
+              "front_ms": 5.439488,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 26,
+              "wall_ms": 55.10162499999933,
+              "extension_ms": 6.029312,
+              "authority_ms": 0.131072,
+              "front_ms": 5.636096,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 27,
+              "wall_ms": 61.00262500000008,
+              "extension_ms": 5.832704,
+              "authority_ms": 0.131072,
+              "front_ms": 5.439488,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 28,
+              "wall_ms": 77.49012500000026,
+              "extension_ms": 5.89824,
+              "authority_ms": 0.131072,
+              "front_ms": 5.505024,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 29,
+              "wall_ms": 55.370750000000044,
+              "extension_ms": 6.029312,
+              "authority_ms": 0.065536,
+              "front_ms": 5.701632,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 30,
+              "wall_ms": 53.95112499999959,
+              "extension_ms": 5.767168,
+              "authority_ms": 0.131072,
+              "front_ms": 5.373952,
+              "hierarchy_ms": 0.262144
+            }
+          ]
+        },
+        {
+          "sceneId": "minimal-power-dam-break-64",
+          "tileWork": true,
+          "samples": [
+            {
+              "frame": 1,
+              "wall_ms": 52.34050000000025,
+              "extension_ms": 1.376256,
+              "authority_ms": 0.131072,
+              "front_ms": 0.851968,
+              "hierarchy_ms": 0.393216
+            },
+            {
+              "frame": 2,
+              "wall_ms": 49.14650000000074,
+              "extension_ms": 1.179648,
+              "authority_ms": 0.065536,
+              "front_ms": 0.851968,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 3,
+              "wall_ms": 51.72583299999951,
+              "extension_ms": 3.60448,
+              "authority_ms": 0.065536,
+              "front_ms": 3.2768,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 4,
+              "wall_ms": 55.13795800000025,
+              "extension_ms": 3.866624,
+              "authority_ms": 0.131072,
+              "front_ms": 3.473408,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 5,
+              "wall_ms": 53.96458399999938,
+              "extension_ms": 4.194304,
+              "authority_ms": 0.131072,
+              "front_ms": 3.866624,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 6,
+              "wall_ms": 53.142249999999876,
+              "extension_ms": 4.456448,
+              "authority_ms": 0.065536,
+              "front_ms": 4.194304,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 7,
+              "wall_ms": 52.9170409999997,
+              "extension_ms": 4.653056,
+              "authority_ms": 0.131072,
+              "front_ms": 4.25984,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 8,
+              "wall_ms": 53.48474999999962,
+              "extension_ms": 4.784128,
+              "authority_ms": 0.131072,
+              "front_ms": 4.390912,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 9,
+              "wall_ms": 54.83845800000017,
+              "extension_ms": 4.718592,
+              "authority_ms": 0.131072,
+              "front_ms": 4.325376,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 10,
+              "wall_ms": 56.47791600000073,
+              "extension_ms": 4.58752,
+              "authority_ms": 0.131072,
+              "front_ms": 4.194304,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 11,
+              "wall_ms": 53.80674999999974,
+              "extension_ms": 4.390912,
+              "authority_ms": 0.065536,
+              "front_ms": 4.063232,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 12,
+              "wall_ms": 52.336334000000534,
+              "extension_ms": 4.58752,
+              "authority_ms": 0.131072,
+              "front_ms": 4.194304,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 13,
+              "wall_ms": 53.04854200000045,
+              "extension_ms": 4.849664,
+              "authority_ms": 0.131072,
+              "front_ms": 4.456448,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 14,
+              "wall_ms": 53.721292000000176,
+              "extension_ms": 4.980736,
+              "authority_ms": 0.131072,
+              "front_ms": 4.58752,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 15,
+              "wall_ms": 54.233000000000175,
+              "extension_ms": 4.849664,
+              "authority_ms": 0.065536,
+              "front_ms": 4.521984,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 16,
+              "wall_ms": 56.00600000000031,
+              "extension_ms": 4.784128,
+              "authority_ms": 0.065536,
+              "front_ms": 4.456448,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 17,
+              "wall_ms": 57.34866599999987,
+              "extension_ms": 4.9152,
+              "authority_ms": 0.131072,
+              "front_ms": 4.521984,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 18,
+              "wall_ms": 53.69812499999989,
+              "extension_ms": 4.980736,
+              "authority_ms": 0.131072,
+              "front_ms": 4.58752,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 19,
+              "wall_ms": 54.33558300000004,
+              "extension_ms": 4.980736,
+              "authority_ms": 0.065536,
+              "front_ms": 4.718592,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 20,
+              "wall_ms": 54.902250000000095,
+              "extension_ms": 5.308416,
+              "authority_ms": 0.131072,
+              "front_ms": 4.9152,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 21,
+              "wall_ms": 55.33158300000014,
+              "extension_ms": 5.767168,
+              "authority_ms": 0.131072,
+              "front_ms": 5.373952,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 22,
+              "wall_ms": 54.161167000000205,
+              "extension_ms": 5.57056,
+              "authority_ms": 0.131072,
+              "front_ms": 5.177344,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 23,
+              "wall_ms": 54.32875000000058,
+              "extension_ms": 5.636096,
+              "authority_ms": 0.065536,
+              "front_ms": 5.373952,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 24,
+              "wall_ms": 55.24150000000009,
+              "extension_ms": 5.767168,
+              "authority_ms": 0.131072,
+              "front_ms": 5.373952,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 25,
+              "wall_ms": 54.46229099999982,
+              "extension_ms": 5.832704,
+              "authority_ms": 0.131072,
+              "front_ms": 5.439488,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 26,
+              "wall_ms": 54.74108299999989,
+              "extension_ms": 5.89824,
+              "authority_ms": 0.131072,
+              "front_ms": 5.505024,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 27,
+              "wall_ms": 56.1245829999998,
+              "extension_ms": 5.89824,
+              "authority_ms": 0.131072,
+              "front_ms": 5.505024,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 28,
+              "wall_ms": 81.23574999999983,
+              "extension_ms": 5.963776,
+              "authority_ms": 0.065536,
+              "front_ms": 5.636096,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 29,
+              "wall_ms": 54.550500000000284,
+              "extension_ms": 6.029312,
+              "authority_ms": 0.065536,
+              "front_ms": 5.701632,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 30,
+              "wall_ms": 54.257957999999235,
+              "extension_ms": 5.832704,
+              "authority_ms": 0.131072,
+              "front_ms": 5.439488,
+              "hierarchy_ms": 0.262144
+            }
+          ]
+        },
+        {
+          "sceneId": "minimal-power-dam-break-64",
+          "tileWork": false,
+          "samples": [
+            {
+              "frame": 1,
+              "wall_ms": 52.403833000000304,
+              "extension_ms": 1.703936,
+              "authority_ms": 0.131072,
+              "front_ms": 1.179648,
+              "hierarchy_ms": 0.393216
+            },
+            {
+              "frame": 2,
+              "wall_ms": 49.01708400000007,
+              "extension_ms": 1.441792,
+              "authority_ms": 0.131072,
+              "front_ms": 1.048576,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 3,
+              "wall_ms": 52.321249999999964,
+              "extension_ms": 4.456448,
+              "authority_ms": 0.065536,
+              "front_ms": 4.128768,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 4,
+              "wall_ms": 52.30420799999956,
+              "extension_ms": 4.718592,
+              "authority_ms": 0.065536,
+              "front_ms": 4.390912,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 5,
+              "wall_ms": 52.95158399999946,
+              "extension_ms": 4.9152,
+              "authority_ms": 0.065536,
+              "front_ms": 4.653056,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 6,
+              "wall_ms": 53.73308299999917,
+              "extension_ms": 5.308416,
+              "authority_ms": 0.065536,
+              "front_ms": 4.980736,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 7,
+              "wall_ms": 53.58220800000072,
+              "extension_ms": 5.701632,
+              "authority_ms": 0.131072,
+              "front_ms": 5.308416,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 8,
+              "wall_ms": 54.66324999999961,
+              "extension_ms": 5.767168,
+              "authority_ms": 0.065536,
+              "front_ms": 5.439488,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 9,
+              "wall_ms": 55.49666700000034,
+              "extension_ms": 6.22592,
+              "authority_ms": 0.065536,
+              "front_ms": 5.89824,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 10,
+              "wall_ms": 53.80066700000043,
+              "extension_ms": 5.767168,
+              "authority_ms": 0.131072,
+              "front_ms": 5.373952,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 11,
+              "wall_ms": 54.02854099999968,
+              "extension_ms": 5.767168,
+              "authority_ms": 0.065536,
+              "front_ms": 5.439488,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 12,
+              "wall_ms": 54.942041000000245,
+              "extension_ms": 5.963776,
+              "authority_ms": 0.131072,
+              "front_ms": 5.505024,
+              "hierarchy_ms": 0.32768
+            },
+            {
+              "frame": 13,
+              "wall_ms": 56.36987500000032,
+              "extension_ms": 6.094848,
+              "authority_ms": 0.065536,
+              "front_ms": 5.767168,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 14,
+              "wall_ms": 54.16279099999974,
+              "extension_ms": 6.22592,
+              "authority_ms": 0.131072,
+              "front_ms": 5.832704,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 15,
+              "wall_ms": 54.379249999999956,
+              "extension_ms": 6.029312,
+              "authority_ms": 0.065536,
+              "front_ms": 5.701632,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 16,
+              "wall_ms": 54.186916000000565,
+              "extension_ms": 5.963776,
+              "authority_ms": 0.131072,
+              "front_ms": 5.57056,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 17,
+              "wall_ms": 54.364291000000776,
+              "extension_ms": 6.029312,
+              "authority_ms": 0.065536,
+              "front_ms": 5.701632,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 18,
+              "wall_ms": 54.65625,
+              "extension_ms": 6.029312,
+              "authority_ms": 0.065536,
+              "front_ms": 5.701632,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 19,
+              "wall_ms": 54.714082999999846,
+              "extension_ms": 6.291456,
+              "authority_ms": 0.131072,
+              "front_ms": 5.89824,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 20,
+              "wall_ms": 54.761375000000044,
+              "extension_ms": 6.160384,
+              "authority_ms": 0.065536,
+              "front_ms": 5.832704,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 21,
+              "wall_ms": 54.94220800000039,
+              "extension_ms": 6.619136,
+              "authority_ms": 0.131072,
+              "front_ms": 6.22592,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 22,
+              "wall_ms": 55.26258399999915,
+              "extension_ms": 6.488064,
+              "authority_ms": 0.131072,
+              "front_ms": 6.094848,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 23,
+              "wall_ms": 58.74304200000006,
+              "extension_ms": 6.5536,
+              "authority_ms": 0.131072,
+              "front_ms": 6.160384,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 24,
+              "wall_ms": 56.59950000000026,
+              "extension_ms": 6.5536,
+              "authority_ms": 0.065536,
+              "front_ms": 6.22592,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 25,
+              "wall_ms": 55.49254100000144,
+              "extension_ms": 6.619136,
+              "authority_ms": 0.131072,
+              "front_ms": 6.22592,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 26,
+              "wall_ms": 56.07574999999997,
+              "extension_ms": 6.619136,
+              "authority_ms": 0.065536,
+              "front_ms": 6.356992,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 27,
+              "wall_ms": 59.4798750000009,
+              "extension_ms": 7.077888,
+              "authority_ms": 0.065536,
+              "front_ms": 6.750208,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 28,
+              "wall_ms": 56.55208399999901,
+              "extension_ms": 6.684672,
+              "authority_ms": 0.065536,
+              "front_ms": 6.356992,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 29,
+              "wall_ms": 55.41345799999908,
+              "extension_ms": 6.750208,
+              "authority_ms": 0.065536,
+              "front_ms": 6.422528,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 30,
+              "wall_ms": 55.35100000000057,
+              "extension_ms": 6.684672,
+              "authority_ms": 0.131072,
+              "front_ms": 6.291456,
+              "hierarchy_ms": 0.262144
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "sceneId": "large-power-dam-break",
+      "dims": [
+        64,
+        20,
+        64
+      ],
+      "frames": 30,
+      "runs": [
+        {
+          "tileWork": false,
+          "wall_ms": 37.089749999999185,
+          "extension_ms": 2.62144,
+          "front_ms": 2.359296,
+          "hierarchy_ms": 0.131072,
+          "authority_ms": 0.065536
+        },
+        {
+          "tileWork": true,
+          "wall_ms": 36.953207999998995,
+          "extension_ms": 2.228224,
+          "front_ms": 2.031616,
+          "hierarchy_ms": 0.131072,
+          "authority_ms": 0.065536,
+          "tilesNear": 266,
+          "tilesTotal": 1280
+        },
+        {
+          "tileWork": true,
+          "wall_ms": 37.213417000000845,
+          "extension_ms": 2.228224,
+          "front_ms": 2.031616,
+          "hierarchy_ms": 0.196608,
+          "authority_ms": 0.065536,
+          "tilesNear": 266,
+          "tilesTotal": 1280
+        },
+        {
+          "tileWork": false,
+          "wall_ms": 37.77937500000007,
+          "extension_ms": 2.555904,
+          "front_ms": 2.359296,
+          "hierarchy_ms": 0.131072,
+          "authority_ms": 0.065536
+        }
+      ],
+      "samples": [
+        {
+          "sceneId": "large-power-dam-break",
+          "tileWork": false,
+          "samples": [
+            {
+              "frame": 1,
+              "wall_ms": 36.48370900000009,
+              "extension_ms": 0.917504,
+              "authority_ms": 0.065536,
+              "front_ms": 0.65536,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 2,
+              "wall_ms": 33.66424999999981,
+              "extension_ms": 1.048576,
+              "authority_ms": 0.065536,
+              "front_ms": 0.851968,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 3,
+              "wall_ms": 35.2232499999991,
+              "extension_ms": 1.703936,
+              "authority_ms": 0.065536,
+              "front_ms": 1.441792,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 4,
+              "wall_ms": 36.48424999999952,
+              "extension_ms": 2.686976,
+              "authority_ms": 0.065536,
+              "front_ms": 2.490368,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 5,
+              "wall_ms": 37.71570800000154,
+              "extension_ms": 2.883584,
+              "authority_ms": 0.065536,
+              "front_ms": 2.686976,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 6,
+              "wall_ms": 37.089749999999185,
+              "extension_ms": 2.686976,
+              "authority_ms": 0.065536,
+              "front_ms": 2.490368,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 7,
+              "wall_ms": 37.84504200000083,
+              "extension_ms": 2.883584,
+              "authority_ms": 0.065536,
+              "front_ms": 2.62144,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 8,
+              "wall_ms": 37.49266700000044,
+              "extension_ms": 2.29376,
+              "authority_ms": 0.065536,
+              "front_ms": 2.031616,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 9,
+              "wall_ms": 36.97100000000137,
+              "extension_ms": 2.29376,
+              "authority_ms": 0.065536,
+              "front_ms": 2.031616,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 10,
+              "wall_ms": 38.97408399999949,
+              "extension_ms": 2.424832,
+              "authority_ms": 0.065536,
+              "front_ms": 2.228224,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 11,
+              "wall_ms": 71.53170900000077,
+              "extension_ms": 2.818048,
+              "authority_ms": 0.065536,
+              "front_ms": 2.555904,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 12,
+              "wall_ms": 38.26616699999977,
+              "extension_ms": 2.94912,
+              "authority_ms": 0.065536,
+              "front_ms": 2.752512,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 13,
+              "wall_ms": 37.541165999999066,
+              "extension_ms": 3.014656,
+              "authority_ms": 0.065536,
+              "front_ms": 2.818048,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 14,
+              "wall_ms": 38.01708299999882,
+              "extension_ms": 3.145728,
+              "authority_ms": 0.065536,
+              "front_ms": 2.94912,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 15,
+              "wall_ms": 38.1294170000001,
+              "extension_ms": 3.145728,
+              "authority_ms": 0.065536,
+              "front_ms": 2.883584,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 16,
+              "wall_ms": 39.90637500000048,
+              "extension_ms": 2.883584,
+              "authority_ms": 0.065536,
+              "front_ms": 2.686976,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 17,
+              "wall_ms": 38.85362499999974,
+              "extension_ms": 2.62144,
+              "authority_ms": 0.065536,
+              "front_ms": 2.424832,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 18,
+              "wall_ms": 40.05504199999996,
+              "extension_ms": 2.752512,
+              "authority_ms": 0.065536,
+              "front_ms": 2.490368,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 19,
+              "wall_ms": 36.34449999999924,
+              "extension_ms": 2.62144,
+              "authority_ms": 0,
+              "front_ms": 2.424832,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 20,
+              "wall_ms": 35.37845799999923,
+              "extension_ms": 2.490368,
+              "authority_ms": 0,
+              "front_ms": 2.29376,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 21,
+              "wall_ms": 35.29600000000028,
+              "extension_ms": 2.490368,
+              "authority_ms": 0.065536,
+              "front_ms": 2.228224,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 22,
+              "wall_ms": 35.663000000000466,
+              "extension_ms": 2.490368,
+              "authority_ms": 0.065536,
+              "front_ms": 2.29376,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 23,
+              "wall_ms": 35.48420799999985,
+              "extension_ms": 2.555904,
+              "authority_ms": 0.065536,
+              "front_ms": 2.359296,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 24,
+              "wall_ms": 35.276708999999755,
+              "extension_ms": 2.62144,
+              "authority_ms": 0.065536,
+              "front_ms": 2.359296,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 25,
+              "wall_ms": 34.95141700000022,
+              "extension_ms": 2.097152,
+              "authority_ms": 0.065536,
+              "front_ms": 1.900544,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 26,
+              "wall_ms": 34.47308300000077,
+              "extension_ms": 2.097152,
+              "authority_ms": 0.065536,
+              "front_ms": 1.900544,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 27,
+              "wall_ms": 37.00258300000132,
+              "extension_ms": 1.96608,
+              "authority_ms": 0.065536,
+              "front_ms": 1.703936,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 28,
+              "wall_ms": 37.391625000000204,
+              "extension_ms": 1.900544,
+              "authority_ms": 0.065536,
+              "front_ms": 1.703936,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 29,
+              "wall_ms": 34.601666999999,
+              "extension_ms": 1.96608,
+              "authority_ms": 0.065536,
+              "front_ms": 1.769472,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 30,
+              "wall_ms": 34.008874999999534,
+              "extension_ms": 1.507328,
+              "authority_ms": 0.065536,
+              "front_ms": 1.31072,
+              "hierarchy_ms": 0.131072
+            }
+          ]
+        },
+        {
+          "sceneId": "large-power-dam-break",
+          "tileWork": true,
+          "samples": [
+            {
+              "frame": 1,
+              "wall_ms": 36.47624999999971,
+              "extension_ms": 0.851968,
+              "authority_ms": 0.065536,
+              "front_ms": 0.524288,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 2,
+              "wall_ms": 33.44612500000039,
+              "extension_ms": 0.917504,
+              "authority_ms": 0.065536,
+              "front_ms": 0.720896,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 3,
+              "wall_ms": 34.989416999998866,
+              "extension_ms": 1.376256,
+              "authority_ms": 0.065536,
+              "front_ms": 1.179648,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 4,
+              "wall_ms": 36.15962500000023,
+              "extension_ms": 2.29376,
+              "authority_ms": 0.065536,
+              "front_ms": 2.031616,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 5,
+              "wall_ms": 40.10583399999996,
+              "extension_ms": 2.555904,
+              "authority_ms": 0.065536,
+              "front_ms": 2.29376,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 6,
+              "wall_ms": 41.18654200000128,
+              "extension_ms": 2.359296,
+              "authority_ms": 0.065536,
+              "front_ms": 2.097152,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 7,
+              "wall_ms": 40.62195799999972,
+              "extension_ms": 2.359296,
+              "authority_ms": 0.065536,
+              "front_ms": 2.162688,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 8,
+              "wall_ms": 45.865874999999505,
+              "extension_ms": 1.96608,
+              "authority_ms": 0.065536,
+              "front_ms": 1.703936,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 9,
+              "wall_ms": 38.65049999999974,
+              "extension_ms": 1.96608,
+              "authority_ms": 0.065536,
+              "front_ms": 1.703936,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 10,
+              "wall_ms": 39.1723750000001,
+              "extension_ms": 2.097152,
+              "authority_ms": 0.065536,
+              "front_ms": 1.835008,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 11,
+              "wall_ms": 38.13420899999983,
+              "extension_ms": 2.424832,
+              "authority_ms": 0.065536,
+              "front_ms": 2.162688,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 12,
+              "wall_ms": 38.37462500000038,
+              "extension_ms": 2.555904,
+              "authority_ms": 0.065536,
+              "front_ms": 2.29376,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 13,
+              "wall_ms": 37.9940000000006,
+              "extension_ms": 2.555904,
+              "authority_ms": 0.065536,
+              "front_ms": 2.359296,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 14,
+              "wall_ms": 38.075332999998864,
+              "extension_ms": 2.62144,
+              "authority_ms": 0.065536,
+              "front_ms": 2.424832,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 15,
+              "wall_ms": 39.278416999999536,
+              "extension_ms": 2.686976,
+              "authority_ms": 0.065536,
+              "front_ms": 2.490368,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 16,
+              "wall_ms": 37.89787500000057,
+              "extension_ms": 2.555904,
+              "authority_ms": 0.065536,
+              "front_ms": 2.29376,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 17,
+              "wall_ms": 36.953207999998995,
+              "extension_ms": 2.29376,
+              "authority_ms": 0.065536,
+              "front_ms": 2.097152,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 18,
+              "wall_ms": 35.28520900000149,
+              "extension_ms": 2.228224,
+              "authority_ms": 0.065536,
+              "front_ms": 2.031616,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 19,
+              "wall_ms": 34.78837500000009,
+              "extension_ms": 2.228224,
+              "authority_ms": 0.065536,
+              "front_ms": 2.031616,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 20,
+              "wall_ms": 35.39229200000045,
+              "extension_ms": 2.097152,
+              "authority_ms": 0,
+              "front_ms": 1.900544,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 21,
+              "wall_ms": 34.88395800000035,
+              "extension_ms": 2.097152,
+              "authority_ms": 0.065536,
+              "front_ms": 1.900544,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 22,
+              "wall_ms": 34.91662499999984,
+              "extension_ms": 2.097152,
+              "authority_ms": 0.065536,
+              "front_ms": 1.900544,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 23,
+              "wall_ms": 34.950582999999824,
+              "extension_ms": 2.162688,
+              "authority_ms": 0.065536,
+              "front_ms": 1.96608,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 24,
+              "wall_ms": 34.990625000000364,
+              "extension_ms": 2.228224,
+              "authority_ms": 0,
+              "front_ms": 2.097152,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 25,
+              "wall_ms": 34.38312500000029,
+              "extension_ms": 1.769472,
+              "authority_ms": 0.065536,
+              "front_ms": 1.507328,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 26,
+              "wall_ms": 37.398041999998895,
+              "extension_ms": 1.769472,
+              "authority_ms": 0.065536,
+              "front_ms": 1.572864,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 27,
+              "wall_ms": 35.68462499999987,
+              "extension_ms": 1.507328,
+              "authority_ms": 0.065536,
+              "front_ms": 1.31072,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 28,
+              "wall_ms": 34.28258300000016,
+              "extension_ms": 1.507328,
+              "authority_ms": 0.065536,
+              "front_ms": 1.31072,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 29,
+              "wall_ms": 33.88133299999936,
+              "extension_ms": 1.572864,
+              "authority_ms": 0.065536,
+              "front_ms": 1.31072,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 30,
+              "wall_ms": 33.34412499999962,
+              "extension_ms": 1.179648,
+              "authority_ms": 0,
+              "front_ms": 1.048576,
+              "hierarchy_ms": 0.131072
+            }
+          ]
+        },
+        {
+          "sceneId": "large-power-dam-break",
+          "tileWork": true,
+          "samples": [
+            {
+              "frame": 1,
+              "wall_ms": 36.91645900000003,
+              "extension_ms": 0.786432,
+              "authority_ms": 0.065536,
+              "front_ms": 0.458752,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 2,
+              "wall_ms": 34.201750000000175,
+              "extension_ms": 0.851968,
+              "authority_ms": 0.065536,
+              "front_ms": 0.65536,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 3,
+              "wall_ms": 36.16595800000141,
+              "extension_ms": 1.441792,
+              "authority_ms": 0.065536,
+              "front_ms": 1.179648,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 4,
+              "wall_ms": 36.444666999999754,
+              "extension_ms": 2.29376,
+              "authority_ms": 0.065536,
+              "front_ms": 2.031616,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 5,
+              "wall_ms": 37.026083000000654,
+              "extension_ms": 2.490368,
+              "authority_ms": 0.065536,
+              "front_ms": 2.228224,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 6,
+              "wall_ms": 36.81241600000067,
+              "extension_ms": 2.29376,
+              "authority_ms": 0.065536,
+              "front_ms": 2.097152,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 7,
+              "wall_ms": 38.061375000001135,
+              "extension_ms": 2.490368,
+              "authority_ms": 0.065536,
+              "front_ms": 2.228224,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 8,
+              "wall_ms": 37.7918750000008,
+              "extension_ms": 1.900544,
+              "authority_ms": 0,
+              "front_ms": 1.703936,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 9,
+              "wall_ms": 36.837250000000495,
+              "extension_ms": 1.96608,
+              "authority_ms": 0.065536,
+              "front_ms": 1.703936,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 10,
+              "wall_ms": 37.64379200000076,
+              "extension_ms": 2.031616,
+              "authority_ms": 0.065536,
+              "front_ms": 1.835008,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 11,
+              "wall_ms": 37.52495799999997,
+              "extension_ms": 2.359296,
+              "authority_ms": 0.065536,
+              "front_ms": 2.162688,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 12,
+              "wall_ms": 37.336874999999054,
+              "extension_ms": 2.555904,
+              "authority_ms": 0.065536,
+              "front_ms": 2.359296,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 13,
+              "wall_ms": 37.213417000000845,
+              "extension_ms": 2.62144,
+              "authority_ms": 0.065536,
+              "front_ms": 2.359296,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 14,
+              "wall_ms": 37.26258299999972,
+              "extension_ms": 2.686976,
+              "authority_ms": 0.065536,
+              "front_ms": 2.424832,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 15,
+              "wall_ms": 37.64824999999837,
+              "extension_ms": 2.686976,
+              "authority_ms": 0.065536,
+              "front_ms": 2.490368,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 16,
+              "wall_ms": 37.5802079999994,
+              "extension_ms": 2.490368,
+              "authority_ms": 0.065536,
+              "front_ms": 2.29376,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 17,
+              "wall_ms": 36.13179200000013,
+              "extension_ms": 2.228224,
+              "authority_ms": 0,
+              "front_ms": 2.031616,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 18,
+              "wall_ms": 35.01133300000038,
+              "extension_ms": 2.228224,
+              "authority_ms": 0.065536,
+              "front_ms": 2.031616,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 19,
+              "wall_ms": 40.194541000000754,
+              "extension_ms": 2.228224,
+              "authority_ms": 0.065536,
+              "front_ms": 2.031616,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 20,
+              "wall_ms": 40.27104099999997,
+              "extension_ms": 2.097152,
+              "authority_ms": 0,
+              "front_ms": 1.900544,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 21,
+              "wall_ms": 36.28362500000003,
+              "extension_ms": 2.097152,
+              "authority_ms": 0.065536,
+              "front_ms": 1.835008,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 22,
+              "wall_ms": 36.77087500000016,
+              "extension_ms": 2.162688,
+              "authority_ms": 0.065536,
+              "front_ms": 1.96608,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 23,
+              "wall_ms": 39.268041999999696,
+              "extension_ms": 2.490368,
+              "authority_ms": 0.065536,
+              "front_ms": 1.96608,
+              "hierarchy_ms": 0.458752
+            },
+            {
+              "frame": 24,
+              "wall_ms": 38.36804099999972,
+              "extension_ms": 2.29376,
+              "authority_ms": 0.065536,
+              "front_ms": 2.097152,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 25,
+              "wall_ms": 37.91349999999875,
+              "extension_ms": 1.769472,
+              "authority_ms": 0.065536,
+              "front_ms": 1.572864,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 26,
+              "wall_ms": 34.87299999999959,
+              "extension_ms": 1.835008,
+              "authority_ms": 0.065536,
+              "front_ms": 1.572864,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 27,
+              "wall_ms": 34.69929199999933,
+              "extension_ms": 1.507328,
+              "authority_ms": 0.065536,
+              "front_ms": 1.31072,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 28,
+              "wall_ms": 35.126750000001266,
+              "extension_ms": 1.507328,
+              "authority_ms": 0.065536,
+              "front_ms": 1.245184,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 29,
+              "wall_ms": 36.12208400000054,
+              "extension_ms": 1.6384,
+              "authority_ms": 0.065536,
+              "front_ms": 1.376256,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 30,
+              "wall_ms": 36.66312499999913,
+              "extension_ms": 1.179648,
+              "authority_ms": 0.065536,
+              "front_ms": 0.98304,
+              "hierarchy_ms": 0.131072
+            }
+          ]
+        },
+        {
+          "sceneId": "large-power-dam-break",
+          "tileWork": false,
+          "samples": [
+            {
+              "frame": 1,
+              "wall_ms": 36.65091599999869,
+              "extension_ms": 0.98304,
+              "authority_ms": 0.065536,
+              "front_ms": 0.65536,
+              "hierarchy_ms": 0.262144
+            },
+            {
+              "frame": 2,
+              "wall_ms": 34.06233299999985,
+              "extension_ms": 1.114112,
+              "authority_ms": 0.065536,
+              "front_ms": 0.851968,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 3,
+              "wall_ms": 35.28229099999953,
+              "extension_ms": 1.703936,
+              "authority_ms": 0.065536,
+              "front_ms": 1.441792,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 4,
+              "wall_ms": 36.42229099999895,
+              "extension_ms": 2.62144,
+              "authority_ms": 0.065536,
+              "front_ms": 2.424832,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 5,
+              "wall_ms": 38.99749999999949,
+              "extension_ms": 2.94912,
+              "authority_ms": 0.065536,
+              "front_ms": 2.752512,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 6,
+              "wall_ms": 39.0652910000008,
+              "extension_ms": 2.686976,
+              "authority_ms": 0.065536,
+              "front_ms": 2.490368,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 7,
+              "wall_ms": 38.36041699999987,
+              "extension_ms": 2.883584,
+              "authority_ms": 0.065536,
+              "front_ms": 2.686976,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 8,
+              "wall_ms": 37.98237499999959,
+              "extension_ms": 2.29376,
+              "authority_ms": 0.065536,
+              "front_ms": 2.097152,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 9,
+              "wall_ms": 37.283041000000594,
+              "extension_ms": 2.359296,
+              "authority_ms": 0.065536,
+              "front_ms": 2.097152,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 10,
+              "wall_ms": 38.038957999999184,
+              "extension_ms": 2.424832,
+              "authority_ms": 0.065536,
+              "front_ms": 2.162688,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 11,
+              "wall_ms": 37.84912500000064,
+              "extension_ms": 2.818048,
+              "authority_ms": 0.065536,
+              "front_ms": 2.62144,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 12,
+              "wall_ms": 38.77820799999972,
+              "extension_ms": 2.94912,
+              "authority_ms": 0.065536,
+              "front_ms": 2.752512,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 13,
+              "wall_ms": 40.820458000000144,
+              "extension_ms": 3.014656,
+              "authority_ms": 0,
+              "front_ms": 2.818048,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 14,
+              "wall_ms": 41.405124999999316,
+              "extension_ms": 3.211264,
+              "authority_ms": 0.065536,
+              "front_ms": 2.94912,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 15,
+              "wall_ms": 39.35908299999937,
+              "extension_ms": 3.080192,
+              "authority_ms": 0.065536,
+              "front_ms": 2.883584,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 16,
+              "wall_ms": 39.69724999999926,
+              "extension_ms": 2.94912,
+              "authority_ms": 0.065536,
+              "front_ms": 2.752512,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 17,
+              "wall_ms": 37.25787500000115,
+              "extension_ms": 2.62144,
+              "authority_ms": 0.065536,
+              "front_ms": 2.424832,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 18,
+              "wall_ms": 38.871083,
+              "extension_ms": 2.686976,
+              "authority_ms": 0.065536,
+              "front_ms": 2.490368,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 19,
+              "wall_ms": 36.65916700000162,
+              "extension_ms": 2.555904,
+              "authority_ms": 0.065536,
+              "front_ms": 2.359296,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 20,
+              "wall_ms": 51.88004100000035,
+              "extension_ms": 2.490368,
+              "authority_ms": 0.065536,
+              "front_ms": 2.29376,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 21,
+              "wall_ms": 37.77937500000007,
+              "extension_ms": 2.490368,
+              "authority_ms": 0.065536,
+              "front_ms": 2.228224,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 22,
+              "wall_ms": 35.6948339999999,
+              "extension_ms": 2.555904,
+              "authority_ms": 0.065536,
+              "front_ms": 2.359296,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 23,
+              "wall_ms": 35.44966700000077,
+              "extension_ms": 2.490368,
+              "authority_ms": 0.065536,
+              "front_ms": 2.29376,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 24,
+              "wall_ms": 35.567166000000725,
+              "extension_ms": 2.62144,
+              "authority_ms": 0.065536,
+              "front_ms": 2.424832,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 25,
+              "wall_ms": 35.07600000000093,
+              "extension_ms": 2.097152,
+              "authority_ms": 0.065536,
+              "front_ms": 1.900544,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 26,
+              "wall_ms": 34.78558300000077,
+              "extension_ms": 2.162688,
+              "authority_ms": 0.065536,
+              "front_ms": 1.900544,
+              "hierarchy_ms": 0.196608
+            },
+            {
+              "frame": 27,
+              "wall_ms": 34.81379100000049,
+              "extension_ms": 1.900544,
+              "authority_ms": 0.065536,
+              "front_ms": 1.703936,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 28,
+              "wall_ms": 35.597374999999374,
+              "extension_ms": 1.835008,
+              "authority_ms": 0.065536,
+              "front_ms": 1.6384,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 29,
+              "wall_ms": 35.18562500000007,
+              "extension_ms": 1.96608,
+              "authority_ms": 0,
+              "front_ms": 1.835008,
+              "hierarchy_ms": 0.131072
+            },
+            {
+              "frame": 30,
+              "wall_ms": 33.699625000001106,
+              "extension_ms": 1.572864,
+              "authority_ms": 0.065536,
+              "front_ms": 1.376256,
+              "hierarchy_ms": 0.131072
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
