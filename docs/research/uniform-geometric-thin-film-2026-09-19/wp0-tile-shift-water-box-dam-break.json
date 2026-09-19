@@ -1,0 +1,225 @@
+{
+ "scene": "water-box-dam-break",
+ "gravity": [
+  1.5,
+  -9.81,
+  0.7
+ ],
+ "arms": {
+  "abandoned": {
+   "ledger": [
+    {
+     "frame": 60,
+     "mass": 1679.997,
+     "roughRms": 0.1012,
+     "roughMax": 0.492,
+     "multiCross": 0,
+     "vHeightRough": 0.2928,
+     "vPhiHeightMismatch": 0.656,
+     "bandRmsSpeed": 0.413,
+     "bandJitterUy": 0.1464,
+     "maxSpeed": 1.769,
+     "pRoughPhi": 0.1018,
+     "pRoughAll": 0.2965,
+     "grantedOnSurface": 128,
+     "grantedMeanV": 3.365,
+     "grantedMeanPhiFill": 0.681,
+     "tileShift": {
+      "tiles": 34,
+      "meanShift": 0.223,
+      "rmsShift": 0.508,
+      "maxShift": 1.545,
+      "neighbourStepRms": 0.305,
+      "deficitAll": -174.7,
+      "deficitInBand": 112.8,
+      "cellAbsResidualInBand": 212.1,
+      "shells": {
+       "air>1.5h": [
+        3512,
+        18,
+        0
+       ],
+       "air band": [
+        784,
+        196.3,
+        58.8
+       ],
+       "liquid band": [
+        646,
+        569.2,
+        594
+       ],
+       "liquid 1.5-4h": [
+        754,
+        643.1,
+        754
+       ],
+       "liquid >4h": [
+        448,
+        253.4,
+        448
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       4,
+       372,
+       72,
+       0,
+       0
+      ]
+     },
+     "faces": 732,
+     "moved": 143,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 45,
+     "grantedIsolated": 45
+    },
+    {
+     "frame": 120,
+     "mass": 1679.994,
+     "roughRms": 0.0364,
+     "roughMax": 0.124,
+     "multiCross": 0,
+     "vHeightRough": 0.2193,
+     "vPhiHeightMismatch": 0.4746,
+     "bandRmsSpeed": 0.4673,
+     "bandJitterUy": 0.1181,
+     "maxSpeed": 1.341,
+     "pRoughPhi": 0.0371,
+     "pRoughAll": 0.2152,
+     "grantedOnSurface": 271,
+     "grantedMeanV": 13.853,
+     "grantedMeanPhiFill": 2.129,
+     "tileShift": {
+      "tiles": 28,
+      "meanShift": 0.708,
+      "rmsShift": 0.901,
+      "maxShift": 1.697,
+      "neighbourStepRms": 0.333,
+      "deficitAll": -109.8,
+      "deficitInBand": 281.8,
+      "cellAbsResidualInBand": 306.3,
+      "shells": {
+       "air>1.5h": [
+        3769,
+        23.4,
+        0
+       ],
+       "air band": [
+        586,
+        295.3,
+        50.7
+       ],
+       "liquid band": [
+        594,
+        581.3,
+        544.1
+       ],
+       "liquid 1.5-4h": [
+        842,
+        632.5,
+        842
+       ],
+       "liquid >4h": [
+        353,
+        147.5,
+        353
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       33,
+       320,
+       0,
+       0,
+       0
+      ]
+     },
+     "faces": 597,
+     "moved": 101,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 20,
+     "grantedIsolated": 20
+    },
+    {
+     "frame": 180,
+     "mass": 1679.991,
+     "roughRms": 0.0225,
+     "roughMax": 0.088,
+     "multiCross": 0,
+     "vHeightRough": 0.2484,
+     "vPhiHeightMismatch": 0.5398,
+     "bandRmsSpeed": 0.3542,
+     "bandJitterUy": 0.1211,
+     "maxSpeed": 1.338,
+     "pRoughPhi": 0.0228,
+     "pRoughAll": 0.2304,
+     "grantedOnSurface": 288,
+     "grantedMeanV": 8.768,
+     "grantedMeanPhiFill": 1.037,
+     "tileShift": {
+      "tiles": 26,
+      "meanShift": 0.655,
+      "rmsShift": 0.843,
+      "maxShift": 1.658,
+      "neighbourStepRms": 0.362,
+      "deficitAll": -129.2,
+      "deficitInBand": 314.9,
+      "cellAbsResidualInBand": 327.9,
+      "shells": {
+       "air>1.5h": [
+        3790,
+        36,
+        0
+       ],
+       "air band": [
+        522,
+        305.8,
+        37.5
+       ],
+       "liquid band": [
+        628,
+        614.3,
+        567.7
+       ],
+       "liquid 1.5-4h": [
+        828,
+        600.2,
+        828
+       ],
+       "liquid >4h": [
+        376,
+        123.7,
+        376
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       88,
+       288,
+       0,
+       0,
+       0
+      ]
+     },
+     "faces": 617,
+     "moved": 153,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 35,
+     "grantedIsolated": 35
+    }
+   ]
+  }
+ },
+ "errors": []
+}

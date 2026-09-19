@@ -4,7 +4,7 @@ export const UNIFORM_VOLUME_ENTRIES = [
   "uvAdvectPhi", "uvRedistancePhi", "uvBuildEdges", "uvSumDonors",
   "uvFallback", "uvNormalizeRows", "uvNormalizeDonors", "uvGather",
   "uvPrepareSharpen", "uvProposeSharpen", "uvLimitSharpen", "uvCommitSharpen", "uvPublish", "uvBeginLiquidBalance", "uvBalanceLiquidRows",
-  "uvBalanceLiquidDonors", "uvFinishLiquidBalance",
+  "uvBalanceLiquidDonors", "uvFinishLiquidBalance", "uvAgreementResidual",
 ] as const;
 /** The four Sec. 3.5 sweeps that exist in a dense and a 4h work-map variant. */
 export const UNIFORM_VOLUME_SHARPEN_ENTRIES = [
@@ -132,10 +132,65 @@ fn uvClosedWallPhi(p:vec3f,advected:f32)->f32{
   let continued=uvPhi(uvTrace(interior,params.dimsDt.w));
   return select(advected,min(advected,continued),continued<0.0);
 }
+// phi/V agreement (docs/uniform-geometric-phi-volume-agreement-handoff.md). V knows
+// how much liquid is near a place; phi knows where the surface is. Nothing else
+// in the method moves phi toward V, so phi's transport losses are permanent.
+//
+// The residual pass runs first, on start-of-step V, gamma (= uvTarget of the
+// same phi) and phi, which are mutually consistent. It packs, for a fully open
+// cell inside the 1.5h band, r = V - uvTarget and a = 1 for a cut cell as
+// r + 4a into the gamma ping-pong, which is scratch outside uvGather.
+const UV_AGREEMENT_PACK=4.0;
+@compute @workgroup_size(4,4,4)
+fn uvAgreementResidual(@builtin(global_invocation_id)gid:vec3u){
+  let id=vec3i(gid);if(!valid(id)){return;}var packed=0.0;
+  let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
+  if(uvOpen(id)>=0.99999){let g=textureLoad(gammaIn,id,0).x;let v=volume(id);
+    if((g>0.0||v>0.0)&&abs(uvPhi(vec3f(id)+vec3f(0.5)))<1.5*h){
+      packed=clamp(v-g,-1.5,1.5)+select(0.0,UV_AGREEMENT_PACK,g>0.0&&g<1.0);}}
+  textureStore(gammaOut,id,vec4f(packed));
+}
+// A band vertex gathers R and A over the 8^3 cells around it with tent weights
+// and moves along its own normal by gain*R/A cells. It reads V only as a patch
+// integral: per cell, V's pattern is transport noise that sharpening has already
+// reshaped to phi's outline, and reading it as geometry makes every surface
+// bubble. Overlapping tents, not 4h tiles: a tile splits R from A wherever the
+// surface runs near its face (lateral roughness per unit gain 0.13 against
+// 0.005). And low gain: at 0.25 cells per unit residual smooth regional mismatch
+// drives phi fast enough to make waves (dam break roughness x3); at 0.05 the
+// clamp is nearly idle on a pool and only matters to a film's erosion rate.
+fn uvAgreementShift(p:vec3f)->f32{
+  let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));var R=0.0;var A=0.0;let base=vec3i(p);
+  for(var dz=-4;dz<4;dz++){for(var dy=-4;dy<4;dy++){for(var dx=-4;dx<4;dx++){
+    let c=base+vec3i(dx,dy,dz);if(!valid(c)){continue;}
+    let packed=textureLoad(gammaIn,c,0).x;if(packed==0.0){continue;}
+    let cut=packed>0.5*UV_AGREEMENT_PACK;
+    let o=abs(vec3f(f32(dx),f32(dy),f32(dz))+vec3f(0.5))/4.5;let w=(1.0-o.x)*(1.0-o.y)*(1.0-o.z);
+    R+=w*(packed-select(0.0,UV_AGREEMENT_PACK,cut));if(cut){A+=w;}}}}
+  if(A<1.0){return 0.0;}let s=R/A;if(abs(s)<0.02){return 0.0;}
+  return h*clamp(params.agreement.z*s,-params.agreement.w,params.agreement.w);
+}
+// Where phi offers no surface to disagree with -- no liquid centre in the 4^3
+// cells around the vertex -- but the eight adjacent cells average over a quarter
+// full, V is the only description of the liquid there is, and it is written
+// INTO phi so rows, extension and render all see it. This is what keeps a film
+// thinner than phi can carry alive: a seeded cell owns an ordinary pressure row.
+fn uvSeedPhi(p:vec3f,phi:f32)->f32{
+  let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));let base=vec3i(p);var sum=0.0;var n=0.0;
+  for(var k=0u;k<8u;k++){let c=base-vec3i(1)+uvCorner(k);if(valid(c)&&uvOpen(c)>=0.99999){sum+=volume(c);n+=1.0;}}
+  if(n<1.0||sum/n<=0.25){return phi;}
+  for(var dz=-2;dz<2;dz++){for(var dy=-2;dy<2;dy++){for(var dx=-2;dx<2;dx++){let c=base+vec3i(dx,dy,dz);
+    if(valid(c)&&uvPhi(vec3f(c)+vec3f(0.5))<0.0){return phi;}}}}
+  return min(phi,h*(0.5-sum/n));
+}
 @compute @workgroup_size(4,4,4)
 fn uvAdvectPhi(@builtin(global_invocation_id)gid:vec3u){
   if(any(gid>vec3u(dims()))){return;}let p=vec3f(gid);
-  textureStore(uvPhiOut,vec3i(gid),vec4f(uvSourcePhi(p,uvReleasedWalls(p,uvClosedWallPhi(p,uvPhi(uvTrace(p,params.dimsDt.w)))))));
+  var value=uvSourcePhi(p,uvReleasedWalls(p,uvClosedWallPhi(p,uvPhi(uvTrace(p,params.dimsDt.w)))));
+  let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
+  if(params.agreement.z>0.0&&abs(value)<2.0*h){value-=uvAgreementShift(p);}
+  if(params.agreement.y>0.5){value=uvSeedPhi(p,value);}
+  textureStore(uvPhiOut,vec3i(gid),vec4f(value));
 }
 @compute @workgroup_size(4,4,4)
 fn uvRedistancePhi(@builtin(global_invocation_id)gid:vec3u){
@@ -347,6 +402,15 @@ fn uvClassifySharpenTiles(@builtin(global_invocation_id)gid:vec3u,
     let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
     // Negated comparison conservatively retains non-finite input as active.
     if(!(abs(phi)>=params.tuning.y*h)){atomicStore(&uvTileAdmission,1u);}
+    // Compaction pours between liquid cells at any depth. A liquid cell is
+    // live if it is below capacity or has a face neighbour that is: the second
+    // half is what admits the full tile a deficient one must draw from.
+    else if(params.agreement.x>0.5&&phi<0.0){let id=vec3i(gid);
+      var live=uvOpen(id)>0.99999&&volume(id)<uvOpen(id)-1e-4;
+      for(var axis=0;axis<3&&!live;axis+=1){for(var side=-1;side<=1;side+=2){
+        var n=id;n[axis]+=side;if(valid(n)&&uvOpen(n)>0.99999&&volume(n)<uvOpen(n)-1e-4
+          &&uvPhi(vec3f(n)+vec3f(0.5))<0.0){live=true;}}}
+      if(live){atomicStore(&uvTileAdmission,1u);}}
   }
   workgroupBarrier();
   if(lane==0u){let admission=atomicLoad(&uvTileAdmission);
@@ -360,9 +424,16 @@ fn uvPrepareSharpen(@builtin(global_invocation_id)gid:vec3u){
   let phi=uvPhi(vec3f(id)+vec3f(0.5));let desired=textureLoad(gammaIn,id,0).x;
   let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
   let dose=clamp(params.tuning.x,0.0,1.0);let own=volume(id);
-  let admitted=uvOpen(id)>0.99999&&abs(phi)<params.tuning.y*h;
+  // Compaction admits every phi-liquid cell, and a liquid cell offers ALL of
+  // its V: uvProposeSharpen only lets the part above phi's fill go anywhere but
+  // to a deeper neighbour. Without it nothing refills a void inside the liquid
+  // (entrained air the level set deleted but V kept): the band is 2.1h wide,
+  // Sec. 3.7 only expels excess, and the dam break's deep interior sits at a
+  // third full while its displaced volume piles on the surface.
+  let compact=params.agreement.x>0.5;
+  let admitted=uvOpen(id)>0.99999&&select(abs(phi)<params.tuning.y*h,phi<params.tuning.y*h,compact);
   let relay=phi>0.0&&desired<=1e-6;
-  uvEdges[i].weight[3]=select(0.0,dose*max(own-desired,0.0),admitted);
+  uvEdges[i].weight[3]=select(0.0,dose*select(max(own-desired,0.0),own,compact&&phi<0.0),admitted);
   uvEdges[i].weight[4]=select(0.0,dose*max(select(desired,1.0,relay)-own,0.0),admitted);
   uvEdges[i].weight[5]=phi;
 }
@@ -380,8 +451,16 @@ fn uvProposeSharpen(@builtin(global_invocation_id)gid:vec3u){
     let inwardB=phiB>=0.0&&phiA<phiB-epsilon&&middle<=phiB+epsilon&&middle>=phiA-epsilon;
     let relayA=phiA>0.0&&textureLoad(gammaIn,id,0).x<=1e-6;
     let relayB=phiB>0.0&&textureLoad(gammaIn,q,0).x<=1e-6;
-    let ab=select(0.0,min(uvEdges[i].weight[3],uvEdges[j].weight[4]),(middle<=epsilon&&!relayB)||inwardA);
-    let ba=select(0.0,min(uvEdges[j].weight[3],uvEdges[i].weight[4]),(middle<=epsilon&&!relayA)||inwardB);
+    // With compaction a liquid cell's budget is its whole V, but only toward
+    // a deeper (smaller phi) liquid neighbour; any other way it offers what it
+    // always did, its surplus over phi's fill. Pouring is monotone in phi, so
+    // it cannot cycle. With compaction off weight[3] IS that surplus.
+    var capA=uvEdges[i].weight[3];var capB=uvEdges[j].weight[3];
+    if(params.agreement.x>0.5){let dose=clamp(params.tuning.x,0.0,1.0);
+      if(!(phiA<0.0&&phiB<phiA-epsilon)){capA=min(capA,dose*max(volume(id)-textureLoad(gammaIn,id,0).x,0.0));}
+      if(!(phiB<0.0&&phiA<phiB-epsilon)){capB=min(capB,dose*max(volume(q)-textureLoad(gammaIn,q,0).x,0.0));}}
+    let ab=select(0.0,min(capA,uvEdges[j].weight[4]),(middle<=epsilon&&!relayB)||inwardA);
+    let ba=select(0.0,min(capB,uvEdges[i].weight[4]),(middle<=epsilon&&!relayA)||inwardB);
     uvEdges[i].weight[axis]=ab-ba;
   }
 }

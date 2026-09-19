@@ -167,6 +167,25 @@ const transportChip = (context: FluidPipelineContext) => {
  */
 const couplingChip = (context: FluidPipelineContext) =>
   dustThreshold(context) > 0 ? `${dustChip(context)} · ${transportChip(context)}` : dustChip(context);
+const onOff=[{value:"on",label:"On"},{value:"off",label:"Off"}];
+/** The two stages that write V into phi sit on the level set they write. */
+const phiAgreementControls = [
+  {kind:"param-choice" as const,param:"phiSeedFromVolume",label:"Seed from V",options:onOff,
+    hint:"Where no cell centre nearby is phi-liquid but the cells around a vertex average over a quarter full, write V's implied depth into phi. A film under half a cell then owns ordinary pressure rows and renders; beside an existing phi surface it never fires."},
+  {kind:"param-choice" as const,param:"phiAgreement",label:"Follow V",options:onOff,
+    hint:"Shift band phi along its normal by V minus phi's fill, gathered over the 8x8x8 cells around each vertex with tent weights. Per cell that residual is noise; as a patch integral it is phi's transport drift. Wants compaction on, or the residual has the wrong sign."},
+  {kind:"param-range" as const,param:"phiAgreementGain",label:"Gain",unit:"cells",
+    min:0,max:1,step:0.01,digits:2,hint:"Cells of shift per unit patch residual. 0.25 roughened the dam break threefold; 0.05 is inside baseline noise.",
+    enabled:(context: FluidPipelineContext)=>context.values.phiAgreement === "on"},
+  {kind:"param-range" as const,param:"phiAgreementClamp",label:"Clamp",unit:"cells / step",
+    min:0,max:0.5,step:0.005,digits:3,hint:"Largest shift in one step. The dam break is indifferent from 0.01 to 0.05 at gain 0.05; the thin film needs at least 0.02 to keep up with its own erosion.",
+    enabled:(context: FluidPipelineContext)=>context.values.phiAgreement === "on"},
+];
+const phiChip = (context: FluidPipelineContext) => {
+  const parts=[context.values.phiSeedFromVolume === "on" ? "seeded from V" : "",
+    context.values.phiAgreement === "on" ? "follows V" : ""].filter(Boolean);
+  return parts.length ? `dense finest lattice · ${parts.join(" · ")}` : "dense finest lattice";
+};
 const volumeStages: FluidPipelineStage[] = [
   ["phi", "Vertex level set", "RK2 characteristics and bounded closest-point redistancing; phi is independent of V."],
   ["coupling", "Conservative volume transport", "Eight box-overlap donors plus an identity fallback; three receiver/donor balancing rounds."],
@@ -181,7 +200,8 @@ const volumeStages: FluidPipelineStage[] = [
     ? context.values.liquidCapacityBalancing !== "on" ? "off · gather only" : `${context.values.liquidCapacityBalancingRounds ?? 64} rounds maximum`
     : id === "sharpen" ? sharpenChip(context)
     : id === "coupling" ? couplingChip(context)
-    : "dense finest lattice",
+    : phiChip(context),
+  ...(id === "phi" ? { controls: phiAgreementControls } : {}),
   ...(id === "coupling" ? {
     controls:[{kind:"param-range" as const,param:"volumeDustThreshold",label:"Dust floor",unit:"cell volumes",
       min:0,max:1e-3,step:1e-7,digits:7,
@@ -212,6 +232,9 @@ const volumeStages: FluidPipelineStage[] = [
     controls:[{kind:"param-choice" as const,param:"sharpeningWorkMap",label:"Work map",
       options:[{value:"on",label:"4h tiles",hint:"Skip prepare/propose/limit in tiles where no cell can be admitted; V is still copied on commit."},
         {value:"off",label:"Dense",hint:"The dense reference schedule, retained for comparison."}],
+      enabled:(context: FluidPipelineContext)=>context.values.densitySharpening !== "off"},
+      {kind:"param-choice" as const,param:"volumeCompaction",label:"Compaction",options:onOff,
+      hint:"A liquid cell may pour all of its V into a deeper liquid neighbour, at any depth, so voids inside the liquid refill. Off, only the 2.1h band is admitted and only surplus over phi's fill moves. The work map admits the extra tiles only while they are under-full.",
       enabled:(context: FluidPipelineContext)=>context.values.densitySharpening !== "off"},
       {kind:"readout" as const,label:"Active tiles",
       hint:"4×4×4 tiles holding a cell inside the admission band, in the latest diagnostics sample. Phi is fixed across the eight sweeps, so one classification schedules them all.",

@@ -55,9 +55,26 @@ params.push({kind:"select",key:"transportWorkMap",label:"Transport work",default
 params.push({kind:"number",key:"transportReach",label:"Transport margin",default:1,tier:"fine",update:"runtime",
   min:0,max:8,step:1,digits:0,unit:"tiles",
   hint:"Extra 4h tiles added to the reach this step's own measured maximum displacement requires. The classify measures that displacement one dispatch before the dilation reads it, so the set already tracks the flow; this is only headroom. Zero is the exact predicate."});
-params.push({kind:"select",key:"volumePressureRows",label:"Volume pressure rows",default:"abandoned",tier:"fine",update:"runtime",
+params.push({kind:"select",key:"volumePressureRows",label:"Volume pressure rows",default:"off",tier:"fine",update:"runtime",
   options:[{value:"abandoned",label:"Abandoned cells"},{value:"all",label:"All"},{value:"off",label:"Off"}],
   hint:"Let a cell holding at least half its open capacity in V own a pressure row even where the level set reads dry. Without it a film thinner than half a cell has no pressure, its volume stacks against the far wall with nothing to push it back, and once no cell centre is liquid the solve stops. Abandoned cells grants the row only where no face neighbour is phi-liquid; All also lets V move the free surface beside phi-liquid, which roughens every surface. Off is the phi-only control."});
+// phi/V agreement (docs/uniform-geometric-phi-volume-agreement-handoff.md): three
+// independent stages, all off until they have been judged in the app.
+params.push({kind:"select",key:"volumeCompaction",label:"Volume compaction",default:"off",tier:"fine",update:"runtime",
+  options:[{value:"on",label:"On"},{value:"off",label:"Off"}],
+  hint:"Let sharpening pour V from a liquid cell into a deeper liquid neighbour at any depth, not only inside the 2.1h band. The level set deletes entrained air but V keeps the void, and nothing else refills it: the dam break's deep interior settles a third full while the displaced volume piles on the surface."});
+params.push({kind:"select",key:"phiSeedFromVolume",label:"Seed phi from volume",default:"off",tier:"fine",update:"runtime",
+  options:[{value:"on",label:"On"},{value:"off",label:"Off"}],
+  hint:"Where no cell centre nearby is phi-liquid but the cells around a vertex average over a quarter full, write V's implied depth into phi. Keeps a film thinner than half a cell alive: the seeded cells own ordinary pressure rows and render. Never fires beside an existing phi surface."});
+params.push({kind:"select",key:"phiAgreement",label:"Phi follows volume",default:"off",tier:"fine",update:"runtime",
+  options:[{value:"on",label:"On"},{value:"off",label:"Off"}],
+  hint:"Move band phi along its normal by a slow, smooth residual: V minus phi's fill, gathered over the 8x8x8 cells around each vertex with tent weights. Cancels phi's transport drift without reading per-cell V as geometry. Wants compaction on, or the residual has the wrong sign."});
+params.push({kind:"number",key:"phiAgreementGain",label:"Agreement gain",default:0.05,tier:"fine",update:"runtime",
+  min:0,max:1,step:0.01,digits:2,unit:"cells / residual",
+  hint:"Cells of normal shift per unit of patch residual. 0.25 roughened the dam break threefold; 0.05 stays inside baseline noise."});
+params.push({kind:"number",key:"phiAgreementClamp",label:"Agreement clamp",default:0.02,tier:"fine",update:"runtime",
+  min:0,max:0.5,step:0.005,digits:3,unit:"cells / step",
+  hint:"Largest shift in one step. At gain 0.05 the dam break does not care (0.01 to 0.05 all read the same roughness); the thin film does: 0.002 cannot keep up with its erosion, 0.02 and 0.05 hold phi within 6-14% of V."});
 const point = "simulation.uniform-volume.algorithms";
 const choices = params.filter(p => p.kind === "select");
 const algorithmFeature = parameterVariantFeature(point, choices, ["simulation.dense-grid"]);
@@ -100,7 +117,11 @@ export const uniformVolumeMethod: SimulationMethod = {
       twoLevelAdvectionTiles: values.twoLevelAdvection !== "dense",
       transportTiles: values.transportWorkMap !== "dense",
       transportReach: Number(values.transportReach ?? 1),
-      volumePressureRows: values.volumePressureRows === "all" ? "all" : values.volumePressureRows === "off" ? "off" : "abandoned",
+      volumePressureRows: values.volumePressureRows === "all" ? "all" : values.volumePressureRows === "abandoned" ? "abandoned" : "off",
+      volumeCompaction: values.volumeCompaction === "on",
+      phiSeedFromVolume: values.phiSeedFromVolume === "on",
+      phiAgreementGain: values.phiAgreement === "on" ? Number(values.phiAgreementGain ?? 0.05) : 0,
+      phiAgreementClamp: Number(values.phiAgreementClamp ?? 0.02),
       activeRegion: false, gammaDiffusionIterations: 0, densityPostProcessing: false,
       solidExcessCorrection: false,
     }, progress, signal),

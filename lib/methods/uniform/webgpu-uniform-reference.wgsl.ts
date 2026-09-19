@@ -37,6 +37,10 @@ struct Params {
   // extension must still be exact. y: 1 when the extension runs on those tiles
   // rather than densely. Both are inert unless physical.z is non-negative.
   twoLevel: vec4f,
+  // Geometric only: the phi/V agreement stages, all inert at zero.
+  // x: inward compaction of V. y: seed phi from V where phi has no surface.
+  // z: gain of the slow normal shift (0 is off). w: its clamp in cells a step.
+  agreement: vec4f,
 }
 @group(0) @binding(0) var velocityIn: texture_3d<f32>;
 @group(0) @binding(1) var velocityOut: texture_storage_3d<rgba32float, write>;

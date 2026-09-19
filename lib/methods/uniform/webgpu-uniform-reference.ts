@@ -134,6 +134,18 @@ export interface WebGPUUniformReferenceOptions {
    * roughens every surface (docs/research/uniform-geometric-thin-film-2026-09-19).
    */
   volumePressureRows?: boolean | "off" | "abandoned" | "all";
+  /**
+   * Geometric only, all off by default
+   * (docs/uniform-geometric-phi-volume-agreement-handoff.md). Compaction lets
+   * sharpening pour V toward deeper liquid at any depth so voids inside the
+   * liquid refill; the seed writes V into phi where phi has no surface at all;
+   * the shift moves band phi along its normal by a slow, tent-gathered V - fill
+   * residual. Gain 0 disables the shift; the clamp is in cells a step.
+   */
+  volumeCompaction?: boolean;
+  phiSeedFromVolume?: boolean;
+  phiAgreementGain?: number;
+  phiAgreementClamp?: number;
   liquidCapacityBalancing?: boolean;
   liquidCapacityBalancingRounds?: number;
   liquidCapacityBalancingTolerance?: number;
@@ -341,6 +353,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private transportReach: number;
   /** V may claim a pressure row that centre phi alone would deny. */
   private volumePressureRows: 0 | 1 | 2;
+  /** phi/V agreement stages; see the option docs. */
+  private volumeCompaction: boolean;
+  private phiSeedFromVolume: boolean;
+  private phiAgreementGain: number;
+  private phiAgreementClamp: number;
   /** The transport restriction was encoded in the most recent step. */
   private transportTilesEncoded = false;
   /** Coarse cells whose E1 tables fit the conditioning plane; 0 disables E1. */
@@ -539,6 +556,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.transportReach = Number.isFinite(options.transportReach)
       ? Math.round(Math.min(8, Math.max(-8, options.transportReach!))) : 1;
     this.volumePressureRows = options.volumePressureRows === "all" ? 2 : options.volumePressureRows === true || options.volumePressureRows === "abandoned" ? 1 : 0;
+    this.volumeCompaction = options.volumeCompaction === true;
+    this.phiSeedFromVolume = options.phiSeedFromVolume === true;
+    this.phiAgreementGain = Number.isFinite(options.phiAgreementGain) ? Math.min(1, Math.max(0, options.phiAgreementGain!)) : 0;
+    this.phiAgreementClamp = Number.isFinite(options.phiAgreementClamp) ? Math.min(0.5, Math.max(0, options.phiAgreementClamp!)) : 0.02;
     this.liquidCapacityBalancing = options.liquidCapacityBalancing === true;
     this.liquidCapacityBalancingRounds = Number.isFinite(options.liquidCapacityBalancingRounds)
       ? Math.round(Math.min(64, Math.max(1, options.liquidCapacityBalancingRounds!))) : 64;
@@ -677,7 +698,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         pressureProjection: velocity("Uniform audit velocity after pressure projection"),
       });
     }
-    this.params = device.createBuffer({ label: "Uniform reference parameters", size: 192, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.params = device.createBuffer({ label: "Uniform reference parameters", size: 208, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const packSolidVoxels = (source: SceneDescription): Uint32Array => {
       const world = solidWorldForScene(source);
       const sx = nx + 2, sy = ny + 2, sz = nz + 2;
@@ -1101,6 +1122,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       // executes the identical instruction stream it did before E3.
       this.twoLevelAdvectionEnabled ? 1 : 0,
       this.transportTilesEnabled ? this.transportReach + 8 : -1,
+      // agreement: compaction, phi seed, shift gain and clamp. Geometric only.
+      this.geometricVolume && this.volumeCompaction ? 1 : 0, this.geometricVolume && this.phiSeedFromVolume ? 1 : 0,
+      this.geometricVolume ? this.phiAgreementGain : 0, this.phiAgreementClamp,
     ]));
   }
 
@@ -1183,6 +1207,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       if (values.transportWorkMap !== undefined) this.transportTiles = values.transportWorkMap !== "dense";
       if (values.transportReach !== undefined) this.transportReach = Math.round(finite("transportReach", 1, -8, 8));
       if (values.volumePressureRows !== undefined) this.volumePressureRows = values.volumePressureRows === "all" ? 2 : values.volumePressureRows === "off" ? 0 : 1;
+      if (values.volumeCompaction !== undefined) this.volumeCompaction = values.volumeCompaction === "on";
+      if (values.phiSeedFromVolume !== undefined) this.phiSeedFromVolume = values.phiSeedFromVolume === "on";
+      if (values.phiAgreement !== undefined) this.phiAgreementGain = values.phiAgreement === "on" ? finite("phiAgreementGain", 0.05, 0, 1) : 0;
+      if (values.phiAgreementClamp !== undefined) this.phiAgreementClamp = finite("phiAgreementClamp", 0.02, 0, 0.5);
       this.geometricRedistance = values.redistance !== "off";
       this.liquidCapacityBalancing = values.liquidCapacityBalancing === "on";
       this.liquidCapacityBalancingRounds = Math.round(finite("liquidCapacityBalancingRounds", 64, 1, 64));
@@ -1515,7 +1543,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const run = (entry: typeof UNIFORM_VOLUME_ENTRIES[number], group = this.densityTraceGroup) =>
       this.run(encoder, entry, this.volumePipelines[entry]!, group);
     const vertices: [number, number, number] = [Math.ceil((this.info.nx+1)/4), Math.ceil((this.info.ny+1)/4), Math.ceil((this.info.nz+1)/4)];
-    this.runDirect(encoder, "Advect dense vertex phi", this.volumePipelines.uvAdvectPhi!, this.densityTraceGroup, vertices);
+    // The shift's residual is packed into the gamma scratch half from
+    // start-of-step V, gamma and phi, and the advect then binds that half as
+    // its gamma input. uvGather and uvPublish both rewrite it later this step.
+    const shift = this.phiAgreementGain > 0;
+    if (shift) run("uvAgreementResidual");
+    this.runDirect(encoder, "Advect dense vertex phi", this.volumePipelines.uvAdvectPhi!, shift ? this.densityGatherGroup : this.densityTraceGroup, vertices);
     if (this.geometricRedistance) this.runDirect(encoder, "Redistance dense vertex phi", this.volumePipelines.uvRedistancePhi!, this.phiReverseGroup!, vertices);
     else encoder.copyTextureToTexture({texture:this.vertexPhiScratch!},{texture:this.vertexPhiTexture!},[this.info.nx+1,this.info.ny+1,this.info.nz+1]);
     seam?.(UNIFORM_VOLUME_PHASE.phi);

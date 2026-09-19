@@ -1,0 +1,7403 @@
+{
+ "scene": "water-box-dam-break",
+ "gravity": [
+  1.5,
+  -9.81,
+  0.7
+ ],
+ "arms": {
+  "off": {
+   "patchHits": [],
+   "ledger": [
+    {
+     "frame": 0,
+     "mass": 1680,
+     "maxV": 1,
+     "roughRms": 1.6462,
+     "roughMax": 7.548,
+     "multiCross": 0,
+     "vHeightRough": 1.6771,
+     "vPhiHeightMismatch": 0.0438,
+     "bandRmsSpeed": 0,
+     "bandJitterUy": 0,
+     "maxSpeed": 0,
+     "pRoughPhi": 1.6462,
+     "pRoughAll": 1.6771,
+     "grantedOnSurface": 0,
+     "grantedMeanV": 0,
+     "grantedMeanPhiFill": 0,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 0,
+        "mean": 0,
+        "rms": 0,
+        "lateralResidualRms": 0
+       },
+       "blurredTiles": {
+        "columns": 0,
+        "mean": 0,
+        "rms": 0,
+        "lateralResidualRms": 0
+       },
+       "cellTent_r2": {
+        "columns": 0,
+        "mean": 0,
+        "rms": 0,
+        "lateralResidualRms": 0
+       },
+       "cellTent_r4": {
+        "columns": 0,
+        "mean": 0,
+        "rms": 0,
+        "lateralResidualRms": 0
+       }
+      },
+      "tiles": 0,
+      "meanShift": 0,
+      "rmsShift": 0,
+      "maxShift": 0,
+      "neighbourStepRms": 0,
+      "deficitAll": 0,
+      "deficitInBand": 0,
+      "cellAbsResidualInBand": 0,
+      "shells": {
+       "air>1.5h": [
+        3999,
+        0,
+        0
+       ],
+       "air band": [
+        465,
+        0,
+        0
+       ],
+       "liquid band": [
+        424,
+        424,
+        424
+       ],
+       "liquid 1.5-4h": [
+        776,
+        776,
+        776
+       ],
+       "liquid >4h": [
+        480,
+        480,
+        480
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       480,
+       0
+      ]
+     },
+     "faces": 428,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 10,
+     "mass": 1680,
+     "maxV": 5.75,
+     "roughRms": 0.058,
+     "roughMax": 0.319,
+     "multiCross": 0,
+     "vHeightRough": 0.3441,
+     "vPhiHeightMismatch": 0.3318,
+     "bandRmsSpeed": 1.6502,
+     "bandJitterUy": 0.248,
+     "maxSpeed": 4.083,
+     "pRoughPhi": 0.0589,
+     "pRoughAll": 0.1238,
+     "grantedOnSurface": 46,
+     "grantedMeanV": 50.311,
+     "grantedMeanPhiFill": 13.337,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 306,
+        "mean": 0.103,
+        "rms": 0.263,
+        "lateralResidualRms": 0.081
+       },
+       "blurredTiles": {
+        "columns": 348,
+        "mean": 0.118,
+        "rms": 0.185,
+        "lateralResidualRms": 0.0403
+       },
+       "cellTent_r2": {
+        "columns": 348,
+        "mean": 0.094,
+        "rms": 0.205,
+        "lateralResidualRms": 0.0147
+       },
+       "cellTent_r4": {
+        "columns": 348,
+        "mean": 0.071,
+        "rms": 0.104,
+        "lateralResidualRms": 0.0032
+       }
+      },
+      "tiles": 25,
+      "meanShift": 0.108,
+      "rmsShift": 0.252,
+      "maxShift": 0.768,
+      "neighbourStepRms": 0.266,
+      "deficitAll": 113.4,
+      "deficitInBand": 54.6,
+      "cellAbsResidualInBand": 102.7,
+      "shells": {
+       "air>1.5h": [
+        4014,
+        14.3,
+        0.2
+       ],
+       "air band": [
+        567,
+        88.8,
+        47.3
+       ],
+       "liquid band": [
+        536,
+        505.2,
+        492.2
+       ],
+       "liquid 1.5-4h": [
+        575,
+        642.9,
+        575
+       ],
+       "liquid >4h": [
+        452,
+        428.8,
+        452
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       28,
+       172,
+       59,
+       193
+      ]
+     },
+     "faces": 537,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 20,
+     "mass": 1679.999,
+     "maxV": 2.53,
+     "roughRms": 0.2989,
+     "roughMax": 1.481,
+     "multiCross": 0,
+     "vHeightRough": 0.4957,
+     "vPhiHeightMismatch": 0.5345,
+     "bandRmsSpeed": 0.7493,
+     "bandJitterUy": 0.1809,
+     "maxSpeed": 2.991,
+     "pRoughPhi": 0.2989,
+     "pRoughAll": 0.6388,
+     "grantedOnSurface": 65,
+     "grantedMeanV": 94.239,
+     "grantedMeanPhiFill": 26.511,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 376,
+        "mean": 0.075,
+        "rms": 0.182,
+        "lateralResidualRms": 0.0728
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.077,
+        "rms": 0.127,
+        "lateralResidualRms": 0.0265
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.079,
+        "rms": 0.146,
+        "lateralResidualRms": 0.0232
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.081,
+        "rms": 0.115,
+        "lateralResidualRms": 0.0104
+       }
+      },
+      "tiles": 44,
+      "meanShift": 0.17,
+      "rmsShift": 0.349,
+      "maxShift": 1.13,
+      "neighbourStepRms": 0.194,
+      "deficitAll": -44.9,
+      "deficitInBand": 77.2,
+      "cellAbsResidualInBand": 147.5,
+      "shells": {
+       "air>1.5h": [
+        3495,
+        14.8,
+        0
+       ],
+       "air band": [
+        940,
+        159.4,
+        78.7
+       ],
+       "liquid band": [
+        698,
+        631.7,
+        635.2
+       ],
+       "liquid 1.5-4h": [
+        746,
+        682.7,
+        746
+       ],
+       "liquid >4h": [
+        265,
+        191.5,
+        265
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       190,
+       61,
+       5,
+       9
+      ]
+     },
+     "faces": 713,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 30,
+     "mass": 1679.998,
+     "maxV": 3.33,
+     "roughRms": 0.2756,
+     "roughMax": 1.428,
+     "multiCross": 3,
+     "vHeightRough": 0.4421,
+     "vPhiHeightMismatch": 0.7888,
+     "bandRmsSpeed": 0.9113,
+     "bandJitterUy": 0.1781,
+     "maxSpeed": 3.576,
+     "pRoughPhi": 0.2755,
+     "pRoughAll": 0.5043,
+     "grantedOnSurface": 105,
+     "grantedMeanV": 136.553,
+     "grantedMeanPhiFill": 28.356,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 372,
+        "mean": 0.038,
+        "rms": 0.425,
+        "lateralResidualRms": 0.1821
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.121,
+        "rms": 0.258,
+        "lateralResidualRms": 0.0679
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.118,
+        "rms": 0.308,
+        "lateralResidualRms": 0.0418
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.204,
+        "rms": 0.256,
+        "lateralResidualRms": 0.0102
+       }
+      },
+      "tiles": 31,
+      "meanShift": 0.083,
+      "rmsShift": 0.506,
+      "maxShift": 1.636,
+      "neighbourStepRms": 0.451,
+      "deficitAll": -100.6,
+      "deficitInBand": 80,
+      "cellAbsResidualInBand": 210.7,
+      "shells": {
+       "air>1.5h": [
+        3602,
+        26.6,
+        0
+       ],
+       "air band": [
+        754,
+        171.6,
+        57.1
+       ],
+       "liquid band": [
+        646,
+        547,
+        581.5
+       ],
+       "liquid 1.5-4h": [
+        660,
+        589,
+        660
+       ],
+       "liquid >4h": [
+        482,
+        345.7,
+        482
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       316,
+       112,
+       44,
+       10
+      ]
+     },
+     "faces": 641,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 40,
+     "mass": 1679.998,
+     "maxV": 7.02,
+     "roughRms": 0.1134,
+     "roughMax": 0.702,
+     "multiCross": 0,
+     "vHeightRough": 0.395,
+     "vPhiHeightMismatch": 0.609,
+     "bandRmsSpeed": 0.6254,
+     "bandJitterUy": 0.0896,
+     "maxSpeed": 2.74,
+     "pRoughPhi": 0.1137,
+     "pRoughAll": 0.3369,
+     "grantedOnSurface": 124,
+     "grantedMeanV": 142.514,
+     "grantedMeanPhiFill": 29.524,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 350,
+        "mean": 0.183,
+        "rms": 0.465,
+        "lateralResidualRms": 0.1658
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.221,
+        "rms": 0.368,
+        "lateralResidualRms": 0.0587
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.199,
+        "rms": 0.361,
+        "lateralResidualRms": 0.0286
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.247,
+        "rms": 0.345,
+        "lateralResidualRms": 0.0068
+       }
+      },
+      "tiles": 34,
+      "meanShift": 0.291,
+      "rmsShift": 0.581,
+      "maxShift": 1.718,
+      "neighbourStepRms": 0.449,
+      "deficitAll": -78.7,
+      "deficitInBand": 133.9,
+      "cellAbsResidualInBand": 202.6,
+      "shells": {
+       "air>1.5h": [
+        3715,
+        20.3,
+        0
+       ],
+       "air band": [
+        674,
+        185.3,
+        58.1
+       ],
+       "liquid band": [
+        615,
+        567.3,
+        560.6
+       ],
+       "liquid 1.5-4h": [
+        751,
+        653,
+        751
+       ],
+       "liquid >4h": [
+        389,
+        254.1,
+        389
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       293,
+       90,
+       2,
+       4
+      ]
+     },
+     "faces": 584,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 50,
+     "mass": 1679.998,
+     "maxV": 2.77,
+     "roughRms": 0.0831,
+     "roughMax": 0.518,
+     "multiCross": 0,
+     "vHeightRough": 0.299,
+     "vPhiHeightMismatch": 0.5425,
+     "bandRmsSpeed": 0.4848,
+     "bandJitterUy": 0.1067,
+     "maxSpeed": 1.997,
+     "pRoughPhi": 0.0833,
+     "pRoughAll": 0.24,
+     "grantedOnSurface": 93,
+     "grantedMeanV": 101.744,
+     "grantedMeanPhiFill": 22.264,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 305,
+        "mean": 0.088,
+        "rms": 0.326,
+        "lateralResidualRms": 0.081
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.091,
+        "rms": 0.306,
+        "lateralResidualRms": 0.0463
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.115,
+        "rms": 0.317,
+        "lateralResidualRms": 0.019
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.161,
+        "rms": 0.264,
+        "lateralResidualRms": 0.0081
+       }
+      },
+      "tiles": 29,
+      "meanShift": 0.244,
+      "rmsShift": 0.549,
+      "maxShift": 1.897,
+      "neighbourStepRms": 0.35,
+      "deficitAll": -149.1,
+      "deficitInBand": 91,
+      "cellAbsResidualInBand": 152.7,
+      "shells": {
+       "air>1.5h": [
+        3664,
+        17.3,
+        0
+       ],
+       "air band": [
+        657,
+        152.3,
+        54.7
+       ],
+       "liquid band": [
+        617,
+        561.8,
+        568.3
+       ],
+       "liquid 1.5-4h": [
+        791,
+        692.5,
+        791
+       ],
+       "liquid >4h": [
+        415,
+        256.1,
+        415
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       1,
+       328,
+       67,
+       9,
+       10
+      ]
+     },
+     "faces": 533,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 60,
+     "mass": 1679.997,
+     "maxV": 3.12,
+     "roughRms": 0.0811,
+     "roughMax": 0.513,
+     "multiCross": 0,
+     "vHeightRough": 0.3158,
+     "vPhiHeightMismatch": 0.6257,
+     "bandRmsSpeed": 0.4881,
+     "bandJitterUy": 0.1034,
+     "maxSpeed": 2.3,
+     "pRoughPhi": 0.0811,
+     "pRoughAll": 0.3004,
+     "grantedOnSurface": 113,
+     "grantedMeanV": 116.767,
+     "grantedMeanPhiFill": 25.031,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 369,
+        "mean": 0.091,
+        "rms": 0.371,
+        "lateralResidualRms": 0.0991
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.148,
+        "rms": 0.275,
+        "lateralResidualRms": 0.0435
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.14,
+        "rms": 0.297,
+        "lateralResidualRms": 0.0158
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.179,
+        "rms": 0.257,
+        "lateralResidualRms": 0.0073
+       }
+      },
+      "tiles": 33,
+      "meanShift": 0.154,
+      "rmsShift": 0.399,
+      "maxShift": 0.988,
+      "neighbourStepRms": 0.263,
+      "deficitAll": -190,
+      "deficitInBand": 90.7,
+      "cellAbsResidualInBand": 160.7,
+      "shells": {
+       "air>1.5h": [
+        3625,
+        25.6,
+        0
+       ],
+       "air band": [
+        657,
+        162.2,
+        55.6
+       ],
+       "liquid band": [
+        624,
+        560.4,
+        576.4
+       ],
+       "liquid 1.5-4h": [
+        749,
+        646.4,
+        749
+       ],
+       "liquid >4h": [
+        489,
+        285.4,
+        489
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       1,
+       405,
+       83,
+       0,
+       0
+      ]
+     },
+     "faces": 564,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 70,
+     "mass": 1679.996,
+     "maxV": 1.32,
+     "roughRms": 0.031,
+     "roughMax": 0.094,
+     "multiCross": 0,
+     "vHeightRough": 0.2864,
+     "vPhiHeightMismatch": 0.5772,
+     "bandRmsSpeed": 0.4208,
+     "bandJitterUy": 0.0826,
+     "maxSpeed": 2.994,
+     "pRoughPhi": 0.0315,
+     "pRoughAll": 0.2649,
+     "grantedOnSurface": 171,
+     "grantedMeanV": 164.359,
+     "grantedMeanPhiFill": 28.842,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 363,
+        "mean": 0.313,
+        "rms": 0.484,
+        "lateralResidualRms": 0.0731
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.349,
+        "rms": 0.46,
+        "lateralResidualRms": 0.0482
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.34,
+        "rms": 0.469,
+        "lateralResidualRms": 0.0182
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.363,
+        "rms": 0.447,
+        "lateralResidualRms": 0.0092
+       }
+      },
+      "tiles": 29,
+      "meanShift": 0.33,
+      "rmsShift": 0.48,
+      "maxShift": 0.914,
+      "neighbourStepRms": 0.24,
+      "deficitAll": -163.1,
+      "deficitInBand": 154.8,
+      "cellAbsResidualInBand": 200.1,
+      "shells": {
+       "air>1.5h": [
+        3700,
+        28.2,
+        0
+       ],
+       "air band": [
+        601,
+        202.3,
+        49.1
+       ],
+       "liquid band": [
+        598,
+        550.6,
+        549
+       ],
+       "liquid 1.5-4h": [
+        831,
+        674.4,
+        831
+       ],
+       "liquid >4h": [
+        414,
+        224.5,
+        414
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       16,
+       343,
+       55,
+       0,
+       0
+      ]
+     },
+     "faces": 526,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 80,
+     "mass": 1679.996,
+     "maxV": 4.42,
+     "roughRms": 0.0375,
+     "roughMax": 0.329,
+     "multiCross": 0,
+     "vHeightRough": 0.2501,
+     "vPhiHeightMismatch": 0.6435,
+     "bandRmsSpeed": 0.4021,
+     "bandJitterUy": 0.0787,
+     "maxSpeed": 1.084,
+     "pRoughPhi": 0.0381,
+     "pRoughAll": 0.2697,
+     "grantedOnSurface": 172,
+     "grantedMeanV": 188.703,
+     "grantedMeanPhiFill": 29.041,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 323,
+        "mean": 0.332,
+        "rms": 0.542,
+        "lateralResidualRms": 0.1112
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.352,
+        "rms": 0.437,
+        "lateralResidualRms": 0.0521
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.334,
+        "rms": 0.43,
+        "lateralResidualRms": 0.0187
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.372,
+        "rms": 0.432,
+        "lateralResidualRms": 0.0083
+       }
+      },
+      "tiles": 29,
+      "meanShift": 0.42,
+      "rmsShift": 0.667,
+      "maxShift": 2.121,
+      "neighbourStepRms": 0.447,
+      "deficitAll": -165,
+      "deficitInBand": 166.7,
+      "cellAbsResidualInBand": 208.1,
+      "shells": {
+       "air>1.5h": [
+        3674,
+        36.9,
+        0
+       ],
+       "air band": [
+        623,
+        214.9,
+        48.9
+       ],
+       "liquid band": [
+        618,
+        567.8,
+        567.1
+       ],
+       "liquid 1.5-4h": [
+        823,
+        639.7,
+        823
+       ],
+       "liquid >4h": [
+        406,
+        220.7,
+        406
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       13,
+       323,
+       70,
+       0,
+       0
+      ]
+     },
+     "faces": 529,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 90,
+     "mass": 1679.996,
+     "maxV": 1.08,
+     "roughRms": 0.026,
+     "roughMax": 0.065,
+     "multiCross": 0,
+     "vHeightRough": 0.2581,
+     "vPhiHeightMismatch": 0.5395,
+     "bandRmsSpeed": 0.4192,
+     "bandJitterUy": 0.0513,
+     "maxSpeed": 1.086,
+     "pRoughPhi": 0.0266,
+     "pRoughAll": 0.2689,
+     "grantedOnSurface": 221,
+     "grantedMeanV": 202.472,
+     "grantedMeanPhiFill": 35.5,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 365,
+        "mean": 0.448,
+        "rms": 0.593,
+        "lateralResidualRms": 0.1017
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.489,
+        "rms": 0.555,
+        "lateralResidualRms": 0.0573
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.465,
+        "rms": 0.533,
+        "lateralResidualRms": 0.0179
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.512,
+        "rms": 0.544,
+        "lateralResidualRms": 0.0088
+       }
+      },
+      "tiles": 29,
+      "meanShift": 0.487,
+      "rmsShift": 0.621,
+      "maxShift": 1.274,
+      "neighbourStepRms": 0.315,
+      "deficitAll": -159.6,
+      "deficitInBand": 192.5,
+      "cellAbsResidualInBand": 221,
+      "shells": {
+       "air>1.5h": [
+        3703,
+        34.6,
+        0
+       ],
+       "air band": [
+        597,
+        230.7,
+        45.5
+       ],
+       "liquid band": [
+        601,
+        558.4,
+        551
+       ],
+       "liquid 1.5-4h": [
+        766,
+        633.8,
+        766
+       ],
+       "liquid >4h": [
+        477,
+        222.5,
+        477
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       29,
+       437,
+       11,
+       0,
+       0
+      ]
+     },
+     "faces": 513,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 100,
+     "mass": 1679.996,
+     "maxV": 1.15,
+     "roughRms": 0.0219,
+     "roughMax": 0.079,
+     "multiCross": 0,
+     "vHeightRough": 0.2672,
+     "vPhiHeightMismatch": 0.5262,
+     "bandRmsSpeed": 0.3787,
+     "bandJitterUy": 0.0478,
+     "maxSpeed": 0.983,
+     "pRoughPhi": 0.0223,
+     "pRoughAll": 0.269,
+     "grantedOnSurface": 259,
+     "grantedMeanV": 247.219,
+     "grantedMeanPhiFill": 39.568,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 349,
+        "mean": 0.57,
+        "rms": 0.724,
+        "lateralResidualRms": 0.1201
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.596,
+        "rms": 0.673,
+        "lateralResidualRms": 0.0547
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.582,
+        "rms": 0.662,
+        "lateralResidualRms": 0.0219
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.631,
+        "rms": 0.671,
+        "lateralResidualRms": 0.0094
+       }
+      },
+      "tiles": 25,
+      "meanShift": 0.608,
+      "rmsShift": 0.767,
+      "maxShift": 1.553,
+      "neighbourStepRms": 0.412,
+      "deficitAll": -151.2,
+      "deficitInBand": 222.7,
+      "cellAbsResidualInBand": 256.7,
+      "shells": {
+       "air>1.5h": [
+        3719,
+        34.1,
+        0
+       ],
+       "air band": [
+        597,
+        265.5,
+        47.2
+       ],
+       "liquid band": [
+        596,
+        556.4,
+        552
+       ],
+       "liquid 1.5-4h": [
+        747,
+        592,
+        747
+       ],
+       "liquid >4h": [
+        485,
+        232,
+        485
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       45,
+       401,
+       39,
+       0,
+       0
+      ]
+     },
+     "faces": 505,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 110,
+     "mass": 1679.996,
+     "maxV": 1.22,
+     "roughRms": 0.024,
+     "roughMax": 0.074,
+     "multiCross": 0,
+     "vHeightRough": 0.2308,
+     "vPhiHeightMismatch": 0.5821,
+     "bandRmsSpeed": 0.3083,
+     "bandJitterUy": 0.0535,
+     "maxSpeed": 0.94,
+     "pRoughPhi": 0.0244,
+     "pRoughAll": 0.2423,
+     "grantedOnSurface": 247,
+     "grantedMeanV": 254.458,
+     "grantedMeanPhiFill": 37.184,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 337,
+        "mean": 0.508,
+        "rms": 0.699,
+        "lateralResidualRms": 0.1372
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.564,
+        "rms": 0.665,
+        "lateralResidualRms": 0.0632
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.527,
+        "rms": 0.638,
+        "lateralResidualRms": 0.0212
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.612,
+        "rms": 0.672,
+        "lateralResidualRms": 0.0109
+       }
+      },
+      "tiles": 28,
+      "meanShift": 0.523,
+      "rmsShift": 0.721,
+      "maxShift": 1.519,
+      "neighbourStepRms": 0.459,
+      "deficitAll": -147.4,
+      "deficitInBand": 242.1,
+      "cellAbsResidualInBand": 283.7,
+      "shells": {
+       "air>1.5h": [
+        3713,
+        28,
+        0
+       ],
+       "air band": [
+        601,
+        280.5,
+        50.3
+       ],
+       "liquid band": [
+        611,
+        570.1,
+        558.1
+       ],
+       "liquid 1.5-4h": [
+        846,
+        627.8,
+        846
+       ],
+       "liquid >4h": [
+        373,
+        173.7,
+        373
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       27,
+       324,
+       22,
+       0,
+       0
+      ]
+     },
+     "faces": 514,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 120,
+     "mass": 1679.996,
+     "maxV": 1.22,
+     "roughRms": 0.0242,
+     "roughMax": 0.092,
+     "multiCross": 0,
+     "vHeightRough": 0.2387,
+     "vPhiHeightMismatch": 0.6612,
+     "bandRmsSpeed": 0.4243,
+     "bandJitterUy": 0.0605,
+     "maxSpeed": 1.38,
+     "pRoughPhi": 0.0249,
+     "pRoughAll": 0.2484,
+     "grantedOnSurface": 252,
+     "grantedMeanV": 285.855,
+     "grantedMeanPhiFill": 44.002,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 227,
+        "mean": 0.845,
+        "rms": 1.048,
+        "lateralResidualRms": 0.1874
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.758,
+        "rms": 0.835,
+        "lateralResidualRms": 0.0809
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.69,
+        "rms": 0.773,
+        "lateralResidualRms": 0.024
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.826,
+        "rms": 0.854,
+        "lateralResidualRms": 0.0127
+       }
+      },
+      "tiles": 24,
+      "meanShift": 0.765,
+      "rmsShift": 0.955,
+      "maxShift": 1.854,
+      "neighbourStepRms": 0.553,
+      "deficitAll": -145.8,
+      "deficitInBand": 266.7,
+      "cellAbsResidualInBand": 293.2,
+      "shells": {
+       "air>1.5h": [
+        3697,
+        27.6,
+        0
+       ],
+       "air band": [
+        650,
+        317.1,
+        60.8
+       ],
+       "liquid band": [
+        522,
+        500.4,
+        489.9
+       ],
+       "liquid 1.5-4h": [
+        842,
+        644.7,
+        842
+       ],
+       "liquid >4h": [
+        433,
+        190.2,
+        433
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       33,
+       396,
+       4,
+       0,
+       0
+      ]
+     },
+     "faces": 454,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 130,
+     "mass": 1679.996,
+     "maxV": 1.14,
+     "roughRms": 0.0512,
+     "roughMax": 0.338,
+     "multiCross": 0,
+     "vHeightRough": 0.2425,
+     "vPhiHeightMismatch": 0.5502,
+     "bandRmsSpeed": 0.2046,
+     "bandJitterUy": 0.0372,
+     "maxSpeed": 0.544,
+     "pRoughPhi": 0.0515,
+     "pRoughAll": 0.2469,
+     "grantedOnSurface": 267,
+     "grantedMeanV": 303.394,
+     "grantedMeanPhiFill": 44.884,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 341,
+        "mean": 0.419,
+        "rms": 0.589,
+        "lateralResidualRms": 0.0858
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.587,
+        "rms": 0.651,
+        "lateralResidualRms": 0.064
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.587,
+        "rms": 0.651,
+        "lateralResidualRms": 0.0211
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.691,
+        "rms": 0.716,
+        "lateralResidualRms": 0.0083
+       }
+      },
+      "tiles": 30,
+      "meanShift": 0.687,
+      "rmsShift": 0.96,
+      "maxShift": 2.508,
+      "neighbourStepRms": 0.553,
+      "deficitAll": -138.8,
+      "deficitInBand": 286.7,
+      "cellAbsResidualInBand": 312.7,
+      "shells": {
+       "air>1.5h": [
+        3708,
+        25.5,
+        0
+       ],
+       "air band": [
+        601,
+        316.5,
+        50.1
+       ],
+       "liquid band": [
+        654,
+        607.9,
+        587.7
+       ],
+       "liquid 1.5-4h": [
+        690,
+        538.8,
+        690
+       ],
+       "liquid >4h": [
+        491,
+        191.3,
+        491
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       77,
+       407,
+       7,
+       0,
+       0
+      ]
+     },
+     "faces": 527,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 140,
+     "mass": 1679.996,
+     "maxV": 1.16,
+     "roughRms": 0.0167,
+     "roughMax": 0.046,
+     "multiCross": 0,
+     "vHeightRough": 0.2321,
+     "vPhiHeightMismatch": 0.6954,
+     "bandRmsSpeed": 0.4343,
+     "bandJitterUy": 0.0314,
+     "maxSpeed": 1.07,
+     "pRoughPhi": 0.0176,
+     "pRoughAll": 0.2437,
+     "grantedOnSurface": 251,
+     "grantedMeanV": 301.934,
+     "grantedMeanPhiFill": 34.824,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 297,
+        "mean": 1.086,
+        "rms": 1.321,
+        "lateralResidualRms": 0.2619
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 1.006,
+        "rms": 1.075,
+        "lateralResidualRms": 0.1026
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.89,
+        "rms": 0.987,
+        "lateralResidualRms": 0.0249
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 1.036,
+        "rms": 1.063,
+        "lateralResidualRms": 0.0081
+       }
+      },
+      "tiles": 24,
+      "meanShift": 0.96,
+      "rmsShift": 1.198,
+      "maxShift": 2.138,
+      "neighbourStepRms": 0.814,
+      "deficitAll": -145.2,
+      "deficitInBand": 285.7,
+      "cellAbsResidualInBand": 320.5,
+      "shells": {
+       "air>1.5h": [
+        3736,
+        28.5,
+        0
+       ],
+       "air band": [
+        591,
+        322.7,
+        43
+       ],
+       "liquid band": [
+        572,
+        543.2,
+        537.2
+       ],
+       "liquid 1.5-4h": [
+        873,
+        644.8,
+        873
+       ],
+       "liquid >4h": [
+        372,
+        140.7,
+        372
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       50,
+       321,
+       1,
+       0,
+       0
+      ]
+     },
+     "faces": 425,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 150,
+     "mass": 1679.996,
+     "maxV": 1.16,
+     "roughRms": 0.0193,
+     "roughMax": 0.059,
+     "multiCross": 0,
+     "vHeightRough": 0.2843,
+     "vPhiHeightMismatch": 0.5845,
+     "bandRmsSpeed": 0.1654,
+     "bandJitterUy": 0.0313,
+     "maxSpeed": 0.614,
+     "pRoughPhi": 0.0203,
+     "pRoughAll": 0.2756,
+     "grantedOnSurface": 272,
+     "grantedMeanV": 308.49,
+     "grantedMeanPhiFill": 42.737,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 370,
+        "mean": 0.546,
+        "rms": 0.727,
+        "lateralResidualRms": 0.164
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.686,
+        "rms": 0.777,
+        "lateralResidualRms": 0.0635
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.65,
+        "rms": 0.748,
+        "lateralResidualRms": 0.0253
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.751,
+        "rms": 0.812,
+        "lateralResidualRms": 0.0121
+       }
+      },
+      "tiles": 28,
+      "meanShift": 0.642,
+      "rmsShift": 0.828,
+      "maxShift": 1.533,
+      "neighbourStepRms": 0.36,
+      "deficitAll": -149.4,
+      "deficitInBand": 288.6,
+      "cellAbsResidualInBand": 312.9,
+      "shells": {
+       "air>1.5h": [
+        3714,
+        42.2,
+        0
+       ],
+       "air band": [
+        604,
+        324.4,
+        50.1
+       ],
+       "liquid band": [
+        582,
+        549.6,
+        535.3
+       ],
+       "liquid 1.5-4h": [
+        815,
+        580.2,
+        815
+       ],
+       "liquid >4h": [
+        429,
+        183.5,
+        429
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       67,
+       350,
+       12,
+       0,
+       0
+      ]
+     },
+     "faces": 512,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 160,
+     "mass": 1679.996,
+     "maxV": 1.13,
+     "roughRms": 0.0158,
+     "roughMax": 0.061,
+     "multiCross": 0,
+     "vHeightRough": 0.2437,
+     "vPhiHeightMismatch": 0.6795,
+     "bandRmsSpeed": 0.3894,
+     "bandJitterUy": 0.0365,
+     "maxSpeed": 1.098,
+     "pRoughPhi": 0.0166,
+     "pRoughAll": 0.2415,
+     "grantedOnSurface": 265,
+     "grantedMeanV": 323.81,
+     "grantedMeanPhiFill": 42.066,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 337,
+        "mean": 0.722,
+        "rms": 0.976,
+        "lateralResidualRms": 0.1193
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.819,
+        "rms": 0.93,
+        "lateralResidualRms": 0.0791
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.772,
+        "rms": 0.871,
+        "lateralResidualRms": 0.0143
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.883,
+        "rms": 0.934,
+        "lateralResidualRms": 0.0075
+       }
+      },
+      "tiles": 25,
+      "meanShift": 0.751,
+      "rmsShift": 0.973,
+      "maxShift": 1.673,
+      "neighbourStepRms": 0.376,
+      "deficitAll": -138.5,
+      "deficitInBand": 297.7,
+      "cellAbsResidualInBand": 326.3,
+      "shells": {
+       "air>1.5h": [
+        3735,
+        43.3,
+        0
+       ],
+       "air band": [
+        599,
+        335.2,
+        53.5
+       ],
+       "liquid band": [
+        564,
+        535,
+        519
+       ],
+       "liquid 1.5-4h": [
+        836,
+        616.2,
+        836
+       ],
+       "liquid >4h": [
+        410,
+        150.3,
+        410
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       95,
+       300,
+       15,
+       0,
+       0
+      ]
+     },
+     "faces": 451,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 170,
+     "mass": 1679.997,
+     "maxV": 1.16,
+     "roughRms": 0.0161,
+     "roughMax": 0.058,
+     "multiCross": 0,
+     "vHeightRough": 0.2275,
+     "vPhiHeightMismatch": 0.6218,
+     "bandRmsSpeed": 0.3123,
+     "bandJitterUy": 0.0345,
+     "maxSpeed": 0.881,
+     "pRoughPhi": 0.0167,
+     "pRoughAll": 0.2292,
+     "grantedOnSurface": 286,
+     "grantedMeanV": 338.097,
+     "grantedMeanPhiFill": 40.704,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 325,
+        "mean": 0.543,
+        "rms": 0.799,
+        "lateralResidualRms": 0.099
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.777,
+        "rms": 0.85,
+        "lateralResidualRms": 0.0755
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.765,
+        "rms": 0.841,
+        "lateralResidualRms": 0.0207
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.891,
+        "rms": 0.917,
+        "lateralResidualRms": 0.01
+       }
+      },
+      "tiles": 29,
+      "meanShift": 0.753,
+      "rmsShift": 1.1,
+      "maxShift": 2.94,
+      "neighbourStepRms": 0.49,
+      "deficitAll": -135.7,
+      "deficitInBand": 323.6,
+      "cellAbsResidualInBand": 352.1,
+      "shells": {
+       "air>1.5h": [
+        3730,
+        38.2,
+        0
+       ],
+       "air band": [
+        608,
+        356.7,
+        50.3
+       ],
+       "liquid band": [
+        568,
+        544.6,
+        527.4
+       ],
+       "liquid 1.5-4h": [
+        749,
+        567.7,
+        749
+       ],
+       "liquid >4h": [
+        489,
+        172.8,
+        489
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       114,
+       369,
+       6,
+       0,
+       0
+      ]
+     },
+     "faces": 474,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 180,
+     "mass": 1679.997,
+     "maxV": 1.16,
+     "roughRms": 0.0148,
+     "roughMax": 0.09,
+     "multiCross": 0,
+     "vHeightRough": 0.2269,
+     "vPhiHeightMismatch": 0.562,
+     "bandRmsSpeed": 0.2693,
+     "bandJitterUy": 0.0315,
+     "maxSpeed": 0.698,
+     "pRoughPhi": 0.0157,
+     "pRoughAll": 0.2148,
+     "grantedOnSurface": 283,
+     "grantedMeanV": 330.552,
+     "grantedMeanPhiFill": 35.666,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 281,
+        "mean": 0.76,
+        "rms": 0.974,
+        "lateralResidualRms": 0.1043
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.836,
+        "rms": 0.919,
+        "lateralResidualRms": 0.0724
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.839,
+        "rms": 0.908,
+        "lateralResidualRms": 0.02
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.944,
+        "rms": 0.978,
+        "lateralResidualRms": 0.0109
+       }
+      },
+      "tiles": 26,
+      "meanShift": 0.953,
+      "rmsShift": 1.175,
+      "maxShift": 2.234,
+      "neighbourStepRms": 0.56,
+      "deficitAll": -136.3,
+      "deficitInBand": 334.6,
+      "cellAbsResidualInBand": 353.3,
+      "shells": {
+       "air>1.5h": [
+        3718,
+        33.8,
+        0
+       ],
+       "air band": [
+        608,
+        357.6,
+        50.5
+       ],
+       "liquid band": [
+        594,
+        569.3,
+        541.8
+       ],
+       "liquid 1.5-4h": [
+        777,
+        566.8,
+        777
+       ],
+       "liquid >4h": [
+        447,
+        152.5,
+        447
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       117,
+       329,
+       1,
+       0,
+       0
+      ]
+     },
+     "faces": 479,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    }
+   ]
+  },
+  "t-compact": {
+   "patchHits": [],
+   "ledger": [
+    {
+     "frame": 0,
+     "mass": 1680,
+     "maxV": 1,
+     "roughRms": 1.6462,
+     "roughMax": 7.548,
+     "multiCross": 0,
+     "vHeightRough": 1.6771,
+     "vPhiHeightMismatch": 0.0438,
+     "bandRmsSpeed": 0,
+     "bandJitterUy": 0,
+     "maxSpeed": 0,
+     "pRoughPhi": 1.6462,
+     "pRoughAll": 1.6771,
+     "grantedOnSurface": 0,
+     "grantedMeanV": 0,
+     "grantedMeanPhiFill": 0,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 0,
+        "mean": 0,
+        "rms": 0,
+        "lateralResidualRms": 0
+       },
+       "blurredTiles": {
+        "columns": 0,
+        "mean": 0,
+        "rms": 0,
+        "lateralResidualRms": 0
+       },
+       "cellTent_r2": {
+        "columns": 0,
+        "mean": 0,
+        "rms": 0,
+        "lateralResidualRms": 0
+       },
+       "cellTent_r4": {
+        "columns": 0,
+        "mean": 0,
+        "rms": 0,
+        "lateralResidualRms": 0
+       }
+      },
+      "tiles": 0,
+      "meanShift": 0,
+      "rmsShift": 0,
+      "maxShift": 0,
+      "neighbourStepRms": 0,
+      "deficitAll": 0,
+      "deficitInBand": 0,
+      "cellAbsResidualInBand": 0,
+      "shells": {
+       "air>1.5h": [
+        3999,
+        0,
+        0
+       ],
+       "air band": [
+        465,
+        0,
+        0
+       ],
+       "liquid band": [
+        424,
+        424,
+        424
+       ],
+       "liquid 1.5-4h": [
+        776,
+        776,
+        776
+       ],
+       "liquid >4h": [
+        480,
+        480,
+        480
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       480,
+       0
+      ]
+     },
+     "faces": 428,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 10,
+     "mass": 1680,
+     "maxV": 5.7,
+     "roughRms": 0.0586,
+     "roughMax": 0.358,
+     "multiCross": 0,
+     "vHeightRough": 0.3598,
+     "vPhiHeightMismatch": 0.3532,
+     "bandRmsSpeed": 1.622,
+     "bandJitterUy": 0.2452,
+     "maxSpeed": 4.155,
+     "pRoughPhi": 0.0587,
+     "pRoughAll": 0.1085,
+     "grantedOnSurface": 39,
+     "grantedMeanV": 44.543,
+     "grantedMeanPhiFill": 8.651,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 305,
+        "mean": 0.018,
+        "rms": 0.238,
+        "lateralResidualRms": 0.0767
+       },
+       "blurredTiles": {
+        "columns": 347,
+        "mean": 0.058,
+        "rms": 0.186,
+        "lateralResidualRms": 0.0473
+       },
+       "cellTent_r2": {
+        "columns": 347,
+        "mean": 0.038,
+        "rms": 0.228,
+        "lateralResidualRms": 0.0148
+       },
+       "cellTent_r4": {
+        "columns": 347,
+        "mean": 0.002,
+        "rms": 0.099,
+        "lateralResidualRms": 0.0038
+       }
+      },
+      "tiles": 25,
+      "meanShift": 0.031,
+      "rmsShift": 0.248,
+      "maxShift": 0.781,
+      "neighbourStepRms": 0.264,
+      "deficitAll": 127.2,
+      "deficitInBand": 29.2,
+      "cellAbsResidualInBand": 100.5,
+      "shells": {
+       "air>1.5h": [
+        4026,
+        14.3,
+        0.3
+       ],
+       "air band": [
+        574,
+        75.8,
+        49.4
+       ],
+       "liquid band": [
+        531,
+        492.8,
+        490.1
+       ],
+       "liquid 1.5-4h": [
+        570,
+        649.7,
+        570
+       ],
+       "liquid >4h": [
+        443,
+        447.4,
+        443
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       356,
+       87
+      ]
+     },
+     "faces": 530,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 20,
+     "mass": 1679.999,
+     "maxV": 3.81,
+     "roughRms": 0.243,
+     "roughMax": 1.119,
+     "multiCross": 0,
+     "vHeightRough": 0.514,
+     "vPhiHeightMismatch": 0.5456,
+     "bandRmsSpeed": 0.7636,
+     "bandJitterUy": 0.1843,
+     "maxSpeed": 2.801,
+     "pRoughPhi": 0.2427,
+     "pRoughAll": 0.619,
+     "grantedOnSurface": 42,
+     "grantedMeanV": 87.86,
+     "grantedMeanPhiFill": 11.317,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 345,
+        "mean": -0.203,
+        "rms": 0.729,
+        "lateralResidualRms": 0.3357
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": -0.022,
+        "rms": 0.354,
+        "lateralResidualRms": 0.083
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.053,
+        "rms": 1.159,
+        "lateralResidualRms": 0.1495
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": -0.066,
+        "rms": 0.233,
+        "lateralResidualRms": 0.0145
+       }
+      },
+      "tiles": 41,
+      "meanShift": 0.016,
+      "rmsShift": 0.671,
+      "maxShift": 3.164,
+      "neighbourStepRms": 0.894,
+      "deficitAll": 46.5,
+      "deficitInBand": 15.7,
+      "cellAbsResidualInBand": 183.9,
+      "shells": {
+       "air>1.5h": [
+        3605,
+        21,
+        0
+       ],
+       "air band": [
+        905,
+        139,
+        67.4
+       ],
+       "liquid band": [
+        685,
+        561.1,
+        617.1
+       ],
+       "liquid 1.5-4h": [
+        706,
+        714.5,
+        706
+       ],
+       "liquid >4h": [
+        243,
+        244.3,
+        243
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       226,
+       17
+      ]
+     },
+     "faces": 698,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 30,
+     "mass": 1679.998,
+     "maxV": 3.72,
+     "roughRms": 0.2714,
+     "roughMax": 1.298,
+     "multiCross": 1,
+     "vHeightRough": 0.4104,
+     "vPhiHeightMismatch": 0.647,
+     "bandRmsSpeed": 0.855,
+     "bandJitterUy": 0.1573,
+     "maxSpeed": 3.296,
+     "pRoughPhi": 0.2714,
+     "pRoughAll": 0.5111,
+     "grantedOnSurface": 81,
+     "grantedMeanV": 90.156,
+     "grantedMeanPhiFill": 21.096,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 377,
+        "mean": -0.079,
+        "rms": 0.366,
+        "lateralResidualRms": 0.1567
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": -0.043,
+        "rms": 0.201,
+        "lateralResidualRms": 0.0562
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": -0.039,
+        "rms": 0.29,
+        "lateralResidualRms": 0.0324
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.016,
+        "rms": 0.155,
+        "lateralResidualRms": 0.0094
+       }
+      },
+      "tiles": 32,
+      "meanShift": -0.032,
+      "rmsShift": 0.46,
+      "maxShift": 1.307,
+      "neighbourStepRms": 0.435,
+      "deficitAll": 5.7,
+      "deficitInBand": -18,
+      "cellAbsResidualInBand": 198.4,
+      "shells": {
+       "air>1.5h": [
+        3664,
+        25.8,
+        0
+       ],
+       "air band": [
+        808,
+        124.9,
+        65
+       ],
+       "liquid band": [
+        632,
+        491.3,
+        569.4
+       ],
+       "liquid 1.5-4h": [
+        595,
+        596.8,
+        595
+       ],
+       "liquid >4h": [
+        445,
+        441.1,
+        445
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       3,
+       2,
+       7,
+       417,
+       16
+      ]
+     },
+     "faces": 641,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 40,
+     "mass": 1679.998,
+     "maxV": 5.91,
+     "roughRms": 0.1214,
+     "roughMax": 0.72,
+     "multiCross": 0,
+     "vHeightRough": 0.3494,
+     "vPhiHeightMismatch": 0.7586,
+     "bandRmsSpeed": 0.5585,
+     "bandJitterUy": 0.0687,
+     "maxSpeed": 2.394,
+     "pRoughPhi": 0.1212,
+     "pRoughAll": 0.3041,
+     "grantedOnSurface": 94,
+     "grantedMeanV": 103.062,
+     "grantedMeanPhiFill": 24.395,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 333,
+        "mean": -0.047,
+        "rms": 0.497,
+        "lateralResidualRms": 0.153
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.026,
+        "rms": 0.338,
+        "lateralResidualRms": 0.0646
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.039,
+        "rms": 0.35,
+        "lateralResidualRms": 0.0251
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.093,
+        "rms": 0.279,
+        "lateralResidualRms": 0.0071
+       }
+      },
+      "tiles": 31,
+      "meanShift": 0.117,
+      "rmsShift": 0.565,
+      "maxShift": 1.839,
+      "neighbourStepRms": 0.365,
+      "deficitAll": 52.7,
+      "deficitInBand": 49.8,
+      "cellAbsResidualInBand": 189.8,
+      "shells": {
+       "air>1.5h": [
+        3854,
+        20.3,
+        0
+       ],
+       "air band": [
+        670,
+        140.2,
+        56.9
+       ],
+       "liquid band": [
+        574,
+        490.8,
+        524.3
+       ],
+       "liquid 1.5-4h": [
+        716,
+        698.7,
+        716
+       ],
+       "liquid >4h": [
+        330,
+        330,
+        330
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       330,
+       0
+      ]
+     },
+     "faces": 568,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 50,
+     "mass": 1679.997,
+     "maxV": 3.24,
+     "roughRms": 0.0672,
+     "roughMax": 0.366,
+     "multiCross": 0,
+     "vHeightRough": 0.2466,
+     "vPhiHeightMismatch": 0.5915,
+     "bandRmsSpeed": 0.4825,
+     "bandJitterUy": 0.0832,
+     "maxSpeed": 2.221,
+     "pRoughPhi": 0.0673,
+     "pRoughAll": 0.2079,
+     "grantedOnSurface": 81,
+     "grantedMeanV": 82.94,
+     "grantedMeanPhiFill": 16.106,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 308,
+        "mean": -0.094,
+        "rms": 0.471,
+        "lateralResidualRms": 0.1022
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": -0.048,
+        "rms": 0.353,
+        "lateralResidualRms": 0.0611
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": -0.008,
+        "rms": 0.4,
+        "lateralResidualRms": 0.0183
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.027,
+        "rms": 0.296,
+        "lateralResidualRms": 0.0078
+       }
+      },
+      "tiles": 29,
+      "meanShift": 0.173,
+      "rmsShift": 0.783,
+      "maxShift": 3.334,
+      "neighbourStepRms": 0.323,
+      "deficitAll": 35.5,
+      "deficitInBand": 17.2,
+      "cellAbsResidualInBand": 179.5,
+      "shells": {
+       "air>1.5h": [
+        3865,
+        17.4,
+        0
+       ],
+       "air band": [
+        631,
+        119.7,
+        43.3
+       ],
+       "liquid band": [
+        610,
+        504,
+        563.3
+       ],
+       "liquid 1.5-4h": [
+        729,
+        729.7,
+        729
+       ],
+       "liquid >4h": [
+        309,
+        309.1,
+        309
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       308,
+       1
+      ]
+     },
+     "faces": 499,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 60,
+     "mass": 1679.996,
+     "maxV": 1.73,
+     "roughRms": 0.0497,
+     "roughMax": 0.265,
+     "multiCross": 0,
+     "vHeightRough": 0.2869,
+     "vPhiHeightMismatch": 0.6038,
+     "bandRmsSpeed": 0.3284,
+     "bandJitterUy": 0.0806,
+     "maxSpeed": 1.489,
+     "pRoughPhi": 0.0501,
+     "pRoughAll": 0.2332,
+     "grantedOnSurface": 102,
+     "grantedMeanV": 94.192,
+     "grantedMeanPhiFill": 19.372,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 370,
+        "mean": -0.08,
+        "rms": 0.468,
+        "lateralResidualRms": 0.1326
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": -0.04,
+        "rms": 0.328,
+        "lateralResidualRms": 0.0615
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": -0.052,
+        "rms": 0.385,
+        "lateralResidualRms": 0.0214
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.006,
+        "rms": 0.285,
+        "lateralResidualRms": 0.0074
+       }
+      },
+      "tiles": 32,
+      "meanShift": 0.051,
+      "rmsShift": 0.511,
+      "maxShift": 1.309,
+      "neighbourStepRms": 0.346,
+      "deficitAll": 15.8,
+      "deficitInBand": 4.4,
+      "cellAbsResidualInBand": 206,
+      "shells": {
+       "air>1.5h": [
+        3813,
+        15.2,
+        0
+       ],
+       "air band": [
+        665,
+        133.4,
+        49.5
+       ],
+       "liquid band": [
+        613,
+        482.2,
+        561.6
+       ],
+       "liquid 1.5-4h": [
+        683,
+        680.5,
+        683
+       ],
+       "liquid >4h": [
+        370,
+        368.7,
+        370
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       1,
+       0,
+       3,
+       366,
+       0
+      ]
+     },
+     "faces": 561,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 70,
+     "mass": 1679.996,
+     "maxV": 1.08,
+     "roughRms": 0.028,
+     "roughMax": 0.103,
+     "multiCross": 0,
+     "vHeightRough": 0.2471,
+     "vPhiHeightMismatch": 0.6997,
+     "bandRmsSpeed": 0.5176,
+     "bandJitterUy": 0.0662,
+     "maxSpeed": 1.756,
+     "pRoughPhi": 0.0282,
+     "pRoughAll": 0.2393,
+     "grantedOnSurface": 151,
+     "grantedMeanV": 132.528,
+     "grantedMeanPhiFill": 28.78,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 300,
+        "mean": 0.051,
+        "rms": 0.62,
+        "lateralResidualRms": 0.1743
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.14,
+        "rms": 0.36,
+        "lateralResidualRms": 0.0861
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.162,
+        "rms": 0.427,
+        "lateralResidualRms": 0.0229
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.258,
+        "rms": 0.328,
+        "lateralResidualRms": 0.0077
+       }
+      },
+      "tiles": 28,
+      "meanShift": 0.195,
+      "rmsShift": 0.658,
+      "maxShift": 1.775,
+      "neighbourStepRms": 0.544,
+      "deficitAll": 40.6,
+      "deficitInBand": 49,
+      "cellAbsResidualInBand": 226.6,
+      "shells": {
+       "air>1.5h": [
+        3909,
+        13.8,
+        0
+       ],
+       "air band": [
+        602,
+        169.5,
+        50.2
+       ],
+       "liquid band": [
+        579,
+        464.9,
+        535.2
+       ],
+       "liquid 1.5-4h": [
+        774,
+        751.7,
+        774
+       ],
+       "liquid >4h": [
+        280,
+        280.1,
+        280
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       280,
+       0
+      ]
+     },
+     "faces": 464,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 80,
+     "mass": 1679.995,
+     "maxV": 1.09,
+     "roughRms": 0.0339,
+     "roughMax": 0.191,
+     "multiCross": 0,
+     "vHeightRough": 0.2707,
+     "vPhiHeightMismatch": 0.6096,
+     "bandRmsSpeed": 0.2175,
+     "bandJitterUy": 0.0433,
+     "maxSpeed": 0.613,
+     "pRoughPhi": 0.0341,
+     "pRoughAll": 0.2318,
+     "grantedOnSurface": 111,
+     "grantedMeanV": 89.274,
+     "grantedMeanPhiFill": 20.063,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 350,
+        "mean": -0.029,
+        "rms": 0.497,
+        "lateralResidualRms": 0.1925
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.048,
+        "rms": 0.323,
+        "lateralResidualRms": 0.0717
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.035,
+        "rms": 0.398,
+        "lateralResidualRms": 0.0178
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.12,
+        "rms": 0.278,
+        "lateralResidualRms": 0.0055
+       }
+      },
+      "tiles": 30,
+      "meanShift": 0.123,
+      "rmsShift": 0.575,
+      "maxShift": 1.398,
+      "neighbourStepRms": 0.585,
+      "deficitAll": 44.5,
+      "deficitInBand": 34.3,
+      "cellAbsResidualInBand": 166.1,
+      "shells": {
+       "air>1.5h": [
+        3897,
+        13.4,
+        0
+       ],
+       "air band": [
+        612,
+        134.2,
+        44.7
+       ],
+       "liquid band": [
+        631,
+        531.5,
+        586.8
+       ],
+       "liquid 1.5-4h": [
+        710,
+        708.6,
+        710
+       ],
+       "liquid >4h": [
+        294,
+        292.2,
+        294
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       3,
+       1,
+       290,
+       0
+      ]
+     },
+     "faces": 524,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 90,
+     "mass": 1679.995,
+     "maxV": 1.08,
+     "roughRms": 0.0196,
+     "roughMax": 0.057,
+     "multiCross": 0,
+     "vHeightRough": 0.2356,
+     "vPhiHeightMismatch": 0.636,
+     "bandRmsSpeed": 0.4167,
+     "bandJitterUy": 0.0306,
+     "maxSpeed": 1.673,
+     "pRoughPhi": 0.0205,
+     "pRoughAll": 0.2037,
+     "grantedOnSurface": 106,
+     "grantedMeanV": 96.989,
+     "grantedMeanPhiFill": 17.392,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 302,
+        "mean": 0.115,
+        "rms": 0.6,
+        "lateralResidualRms": 0.1647
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.052,
+        "rms": 0.469,
+        "lateralResidualRms": 0.0977
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.055,
+        "rms": 0.491,
+        "lateralResidualRms": 0.0171
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.156,
+        "rms": 0.338,
+        "lateralResidualRms": 0.0087
+       }
+      },
+      "tiles": 27,
+      "meanShift": 0.127,
+      "rmsShift": 0.531,
+      "maxShift": 1.254,
+      "neighbourStepRms": 0.504,
+      "deficitAll": 44.4,
+      "deficitInBand": 34.6,
+      "cellAbsResidualInBand": 182.9,
+      "shells": {
+       "air>1.5h": [
+        3917,
+        14.2,
+        0
+       ],
+       "air band": [
+        589,
+        139,
+        47.4
+       ],
+       "liquid band": [
+        587,
+        480.1,
+        537.1
+       ],
+       "liquid 1.5-4h": [
+        721,
+        717.1,
+        721
+       ],
+       "liquid >4h": [
+        330,
+        329.6,
+        330
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       1,
+       0,
+       329,
+       0
+      ]
+     },
+     "faces": 458,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 100,
+     "mass": 1679.995,
+     "maxV": 1.02,
+     "roughRms": 0.0166,
+     "roughMax": 0.075,
+     "multiCross": 0,
+     "vHeightRough": 0.2424,
+     "vPhiHeightMismatch": 0.5377,
+     "bandRmsSpeed": 0.3024,
+     "bandJitterUy": 0.0331,
+     "maxSpeed": 0.902,
+     "pRoughPhi": 0.0175,
+     "pRoughAll": 0.2349,
+     "grantedOnSurface": 125,
+     "grantedMeanV": 108.072,
+     "grantedMeanPhiFill": 20.009,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 350,
+        "mean": 0.074,
+        "rms": 0.425,
+        "lateralResidualRms": 0.1157
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.134,
+        "rms": 0.312,
+        "lateralResidualRms": 0.0655
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.11,
+        "rms": 0.337,
+        "lateralResidualRms": 0.0139
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.171,
+        "rms": 0.268,
+        "lateralResidualRms": 0.0055
+       }
+      },
+      "tiles": 27,
+      "meanShift": 0.094,
+      "rmsShift": 0.418,
+      "maxShift": 0.894,
+      "neighbourStepRms": 0.393,
+      "deficitAll": 52.5,
+      "deficitInBand": 50.7,
+      "cellAbsResidualInBand": 169.2,
+      "shells": {
+       "air>1.5h": [
+        3921,
+        13,
+        0
+       ],
+       "air band": [
+        601,
+        147.4,
+        50.8
+       ],
+       "liquid band": [
+        560,
+        468.8,
+        514.7
+       ],
+       "liquid 1.5-4h": [
+        700,
+        688.8,
+        700
+       ],
+       "liquid >4h": [
+        362,
+        362.1,
+        362
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       362,
+       0
+      ]
+     },
+     "faces": 491,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 110,
+     "mass": 1679.994,
+     "maxV": 1.08,
+     "roughRms": 0.0109,
+     "roughMax": 0.037,
+     "multiCross": 0,
+     "vHeightRough": 0.1934,
+     "vPhiHeightMismatch": 0.5064,
+     "bandRmsSpeed": 0.3387,
+     "bandJitterUy": 0.0366,
+     "maxSpeed": 0.839,
+     "pRoughPhi": 0.0126,
+     "pRoughAll": 0.2008,
+     "grantedOnSurface": 118,
+     "grantedMeanV": 92.618,
+     "grantedMeanPhiFill": 19.504,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 342,
+        "mean": -0.005,
+        "rms": 0.339,
+        "lateralResidualRms": 0.0936
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.111,
+        "rms": 0.265,
+        "lateralResidualRms": 0.0478
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.127,
+        "rms": 0.309,
+        "lateralResidualRms": 0.0152
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.186,
+        "rms": 0.283,
+        "lateralResidualRms": 0.0047
+       }
+      },
+      "tiles": 28,
+      "meanShift": 0.143,
+      "rmsShift": 0.566,
+      "maxShift": 2.343,
+      "neighbourStepRms": 0.487,
+      "deficitAll": 66.7,
+      "deficitInBand": 55.5,
+      "cellAbsResidualInBand": 148.5,
+      "shells": {
+       "air>1.5h": [
+        3944,
+        11.1,
+        0
+       ],
+       "air band": [
+        589,
+        137.6,
+        49.8
+       ],
+       "liquid band": [
+        582,
+        502.2,
+        534.6
+       ],
+       "liquid 1.5-4h": [
+        754,
+        753.9,
+        754
+       ],
+       "liquid >4h": [
+        275,
+        275.1,
+        275
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       275,
+       0
+      ]
+     },
+     "faces": 465,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 120,
+     "mass": 1679.994,
+     "maxV": 1.14,
+     "roughRms": 0.0198,
+     "roughMax": 0.076,
+     "multiCross": 0,
+     "vHeightRough": 0.2118,
+     "vPhiHeightMismatch": 0.5946,
+     "bandRmsSpeed": 0.3402,
+     "bandJitterUy": 0.0381,
+     "maxSpeed": 0.804,
+     "pRoughPhi": 0.0206,
+     "pRoughAll": 0.2039,
+     "grantedOnSurface": 140,
+     "grantedMeanV": 117.974,
+     "grantedMeanPhiFill": 23.44,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 329,
+        "mean": 0.064,
+        "rms": 0.514,
+        "lateralResidualRms": 0.1291
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.152,
+        "rms": 0.392,
+        "lateralResidualRms": 0.079
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.181,
+        "rms": 0.438,
+        "lateralResidualRms": 0.0154
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.259,
+        "rms": 0.372,
+        "lateralResidualRms": 0.0072
+       }
+      },
+      "tiles": 25,
+      "meanShift": 0.133,
+      "rmsShift": 0.537,
+      "maxShift": 1.095,
+      "neighbourStepRms": 0.392,
+      "deficitAll": 74.4,
+      "deficitInBand": 66.1,
+      "cellAbsResidualInBand": 187.9,
+      "shells": {
+       "air>1.5h": [
+        3954,
+        11,
+        0
+       ],
+       "air band": [
+        584,
+        152.2,
+        47.2
+       ],
+       "liquid band": [
+        593,
+        506.4,
+        545.3
+       ],
+       "liquid 1.5-4h": [
+        753,
+        750.4,
+        753
+       ],
+       "liquid >4h": [
+        260,
+        260,
+        260
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       260,
+       0
+      ]
+     },
+     "faces": 470,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 130,
+     "mass": 1679.994,
+     "maxV": 1.2,
+     "roughRms": 0.0128,
+     "roughMax": 0.041,
+     "multiCross": 0,
+     "vHeightRough": 0.2182,
+     "vPhiHeightMismatch": 0.5944,
+     "bandRmsSpeed": 0.2045,
+     "bandJitterUy": 0.0353,
+     "maxSpeed": 0.941,
+     "pRoughPhi": 0.0134,
+     "pRoughAll": 0.1998,
+     "grantedOnSurface": 127,
+     "grantedMeanV": 109.056,
+     "grantedMeanPhiFill": 19.031,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 293,
+        "mean": 0.076,
+        "rms": 0.377,
+        "lateralResidualRms": 0.1113
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.035,
+        "rms": 0.624,
+        "lateralResidualRms": 0.1639
+       },
+       "cellTent_r2": {
+        "columns": 379,
+        "mean": -2.089,
+        "rms": 19.554,
+        "lateralResidualRms": 2.7245
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.216,
+        "rms": 0.366,
+        "lateralResidualRms": 0.0081
+       }
+      },
+      "tiles": 25,
+      "meanShift": 0.195,
+      "rmsShift": 0.464,
+      "maxShift": 1.119,
+      "neighbourStepRms": 0.391,
+      "deficitAll": 83.1,
+      "deficitInBand": 72.8,
+      "cellAbsResidualInBand": 167.8,
+      "shells": {
+       "air>1.5h": [
+        3953,
+        10.1,
+        0
+       ],
+       "air band": [
+        601,
+        152.4,
+        47
+       ],
+       "liquid band": [
+        584,
+        511.3,
+        543.8
+       ],
+       "liquid 1.5-4h": [
+        620,
+        620.2,
+        620
+       ],
+       "liquid >4h": [
+        386,
+        386.1,
+        386
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       386,
+       0
+      ]
+     },
+     "faces": 474,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 140,
+     "mass": 1679.993,
+     "maxV": 1.15,
+     "roughRms": 0.0129,
+     "roughMax": 0.048,
+     "multiCross": 0,
+     "vHeightRough": 0.2144,
+     "vPhiHeightMismatch": 0.5703,
+     "bandRmsSpeed": 0.3441,
+     "bandJitterUy": 0.045,
+     "maxSpeed": 1.3,
+     "pRoughPhi": 0.0135,
+     "pRoughAll": 0.2037,
+     "grantedOnSurface": 146,
+     "grantedMeanV": 128.186,
+     "grantedMeanPhiFill": 26.153,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 312,
+        "mean": 0.125,
+        "rms": 0.503,
+        "lateralResidualRms": 0.1017
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.216,
+        "rms": 0.42,
+        "lateralResidualRms": 0.0735
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.245,
+        "rms": 0.445,
+        "lateralResidualRms": 0.0138
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.322,
+        "rms": 0.425,
+        "lateralResidualRms": 0.0061
+       }
+      },
+      "tiles": 26,
+      "meanShift": 0.321,
+      "rmsShift": 0.755,
+      "maxShift": 2.738,
+      "neighbourStepRms": 0.583,
+      "deficitAll": 88.5,
+      "deficitInBand": 84.9,
+      "cellAbsResidualInBand": 177,
+      "shells": {
+       "air>1.5h": [
+        3975,
+        9.9,
+        0
+       ],
+       "air band": [
+        578,
+        158.7,
+        48.8
+       ],
+       "liquid band": [
+        594,
+        520.7,
+        545.8
+       ],
+       "liquid 1.5-4h": [
+        641,
+        634.9,
+        641
+       ],
+       "liquid >4h": [
+        356,
+        355.8,
+        356
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       1,
+       355,
+       0
+      ]
+     },
+     "faces": 445,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 150,
+     "mass": 1679.993,
+     "maxV": 1.05,
+     "roughRms": 0.0115,
+     "roughMax": 0.05,
+     "multiCross": 0,
+     "vHeightRough": 0.2136,
+     "vPhiHeightMismatch": 0.6833,
+     "bandRmsSpeed": 0.2489,
+     "bandJitterUy": 0.0279,
+     "maxSpeed": 0.664,
+     "pRoughPhi": 0.0128,
+     "pRoughAll": 0.2062,
+     "grantedOnSurface": 144,
+     "grantedMeanV": 135.079,
+     "grantedMeanPhiFill": 21.806,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 338,
+        "mean": 0.04,
+        "rms": 0.532,
+        "lateralResidualRms": 0.1459
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.182,
+        "rms": 0.397,
+        "lateralResidualRms": 0.0897
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.158,
+        "rms": 0.452,
+        "lateralResidualRms": 0.0167
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.268,
+        "rms": 0.384,
+        "lateralResidualRms": 0.0081
+       }
+      },
+      "tiles": 28,
+      "meanShift": 0.179,
+      "rmsShift": 0.629,
+      "maxShift": 1.404,
+      "neighbourStepRms": 0.534,
+      "deficitAll": 85.6,
+      "deficitInBand": 74.3,
+      "cellAbsResidualInBand": 198.9,
+      "shells": {
+       "air>1.5h": [
+        3965,
+        13.4,
+        0
+       ],
+       "air band": [
+        581,
+        167.7,
+        48.3
+       ],
+       "liquid band": [
+        585,
+        488,
+        533.1
+       ],
+       "liquid 1.5-4h": [
+        776,
+        774,
+        776
+       ],
+       "liquid >4h": [
+        237,
+        237,
+        237
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       237,
+       0
+      ]
+     },
+     "faces": 468,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 160,
+     "mass": 1679.993,
+     "maxV": 1.05,
+     "roughRms": 0.0115,
+     "roughMax": 0.037,
+     "multiCross": 0,
+     "vHeightRough": 0.2017,
+     "vPhiHeightMismatch": 0.5905,
+     "bandRmsSpeed": 0.284,
+     "bandJitterUy": 0.0238,
+     "maxSpeed": 0.7,
+     "pRoughPhi": 0.0129,
+     "pRoughAll": 0.1999,
+     "grantedOnSurface": 154,
+     "grantedMeanV": 135.241,
+     "grantedMeanPhiFill": 25.043,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 316,
+        "mean": 0.104,
+        "rms": 0.485,
+        "lateralResidualRms": 0.1456
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.233,
+        "rms": 0.42,
+        "lateralResidualRms": 0.0767
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.24,
+        "rms": 0.463,
+        "lateralResidualRms": 0.0139
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.312,
+        "rms": 0.417,
+        "lateralResidualRms": 0.0058
+       }
+      },
+      "tiles": 24,
+      "meanShift": 0.245,
+      "rmsShift": 0.646,
+      "maxShift": 1.907,
+      "neighbourStepRms": 0.584,
+      "deficitAll": 99.6,
+      "deficitInBand": 89,
+      "cellAbsResidualInBand": 185.6,
+      "shells": {
+       "air>1.5h": [
+        3983,
+        10.7,
+        0
+       ],
+       "air band": [
+        566,
+        160.2,
+        37.4
+       ],
+       "liquid band": [
+        598,
+        512.2,
+        546
+       ],
+       "liquid 1.5-4h": [
+        737,
+        736.9,
+        737
+       ],
+       "liquid >4h": [
+        260,
+        260,
+        260
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       260,
+       0
+      ]
+     },
+     "faces": 445,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 170,
+     "mass": 1679.993,
+     "maxV": 1.12,
+     "roughRms": 0.0127,
+     "roughMax": 0.038,
+     "multiCross": 0,
+     "vHeightRough": 0.2035,
+     "vPhiHeightMismatch": 0.629,
+     "bandRmsSpeed": 0.2673,
+     "bandJitterUy": 0.027,
+     "maxSpeed": 0.623,
+     "pRoughPhi": 0.0136,
+     "pRoughAll": 0.193,
+     "grantedOnSurface": 151,
+     "grantedMeanV": 130.139,
+     "grantedMeanPhiFill": 22.049,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 347,
+        "mean": 0.127,
+        "rms": 0.524,
+        "lateralResidualRms": 0.1432
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.249,
+        "rms": 0.426,
+        "lateralResidualRms": 0.0719
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.271,
+        "rms": 0.474,
+        "lateralResidualRms": 0.0154
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.349,
+        "rms": 0.442,
+        "lateralResidualRms": 0.0062
+       }
+      },
+      "tiles": 27,
+      "meanShift": 0.184,
+      "rmsShift": 0.593,
+      "maxShift": 1.52,
+      "neighbourStepRms": 0.472,
+      "deficitAll": 100,
+      "deficitInBand": 92.5,
+      "cellAbsResidualInBand": 191.3,
+      "shells": {
+       "air>1.5h": [
+        3991,
+        10.5,
+        0
+       ],
+       "air band": [
+        558,
+        163.2,
+        41
+       ],
+       "liquid band": [
+        613,
+        527.3,
+        556.9
+       ],
+       "liquid 1.5-4h": [
+        655,
+        652,
+        655
+       ],
+       "liquid >4h": [
+        327,
+        327,
+        327
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       327,
+       0
+      ]
+     },
+     "faces": 450,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 180,
+     "mass": 1679.992,
+     "maxV": 1.13,
+     "roughRms": 0.0089,
+     "roughMax": 0.034,
+     "multiCross": 0,
+     "vHeightRough": 0.227,
+     "vPhiHeightMismatch": 0.6022,
+     "bandRmsSpeed": 0.2724,
+     "bandJitterUy": 0.0237,
+     "maxSpeed": 0.908,
+     "pRoughPhi": 0.0102,
+     "pRoughAll": 0.2286,
+     "grantedOnSurface": 172,
+     "grantedMeanV": 145.526,
+     "grantedMeanPhiFill": 31.59,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 326,
+        "mean": 0.094,
+        "rms": 0.465,
+        "lateralResidualRms": 0.1509
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.239,
+        "rms": 0.39,
+        "lateralResidualRms": 0.0731
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.252,
+        "rms": 0.485,
+        "lateralResidualRms": 0.0205
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.349,
+        "rms": 0.417,
+        "lateralResidualRms": 0.0053
+       }
+      },
+      "tiles": 25,
+      "meanShift": 0.335,
+      "rmsShift": 0.868,
+      "maxShift": 2.816,
+      "neighbourStepRms": 0.733,
+      "deficitAll": 108.2,
+      "deficitInBand": 97.4,
+      "cellAbsResidualInBand": 195,
+      "shells": {
+       "air>1.5h": [
+        3993,
+        10.8,
+        0
+       ],
+       "air band": [
+        588,
+        179.6,
+        52.1
+       ],
+       "liquid band": [
+        571,
+        497.6,
+        527.6
+       ],
+       "liquid 1.5-4h": [
+        647,
+        647,
+        647
+       ],
+       "liquid >4h": [
+        345,
+        345,
+        345
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       345,
+       0
+      ]
+     },
+     "faces": 435,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    }
+   ]
+  },
+  "t-compact-dense": {
+   "patchHits": [],
+   "ledger": [
+    {
+     "frame": 0,
+     "mass": 1680,
+     "maxV": 1,
+     "roughRms": 1.6462,
+     "roughMax": 7.548,
+     "multiCross": 0,
+     "vHeightRough": 1.6771,
+     "vPhiHeightMismatch": 0.0438,
+     "bandRmsSpeed": 0,
+     "bandJitterUy": 0,
+     "maxSpeed": 0,
+     "pRoughPhi": 1.6462,
+     "pRoughAll": 1.6771,
+     "grantedOnSurface": 0,
+     "grantedMeanV": 0,
+     "grantedMeanPhiFill": 0,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 0,
+        "mean": 0,
+        "rms": 0,
+        "lateralResidualRms": 0
+       },
+       "blurredTiles": {
+        "columns": 0,
+        "mean": 0,
+        "rms": 0,
+        "lateralResidualRms": 0
+       },
+       "cellTent_r2": {
+        "columns": 0,
+        "mean": 0,
+        "rms": 0,
+        "lateralResidualRms": 0
+       },
+       "cellTent_r4": {
+        "columns": 0,
+        "mean": 0,
+        "rms": 0,
+        "lateralResidualRms": 0
+       }
+      },
+      "tiles": 0,
+      "meanShift": 0,
+      "rmsShift": 0,
+      "maxShift": 0,
+      "neighbourStepRms": 0,
+      "deficitAll": 0,
+      "deficitInBand": 0,
+      "cellAbsResidualInBand": 0,
+      "shells": {
+       "air>1.5h": [
+        3999,
+        0,
+        0
+       ],
+       "air band": [
+        465,
+        0,
+        0
+       ],
+       "liquid band": [
+        424,
+        424,
+        424
+       ],
+       "liquid 1.5-4h": [
+        776,
+        776,
+        776
+       ],
+       "liquid >4h": [
+        480,
+        480,
+        480
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       480,
+       0
+      ]
+     },
+     "faces": 428,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 10,
+     "mass": 1680,
+     "maxV": 5.7,
+     "roughRms": 0.0586,
+     "roughMax": 0.358,
+     "multiCross": 0,
+     "vHeightRough": 0.3598,
+     "vPhiHeightMismatch": 0.3532,
+     "bandRmsSpeed": 1.622,
+     "bandJitterUy": 0.2452,
+     "maxSpeed": 4.155,
+     "pRoughPhi": 0.0587,
+     "pRoughAll": 0.1085,
+     "grantedOnSurface": 39,
+     "grantedMeanV": 44.544,
+     "grantedMeanPhiFill": 8.65,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 305,
+        "mean": 0.018,
+        "rms": 0.238,
+        "lateralResidualRms": 0.0767
+       },
+       "blurredTiles": {
+        "columns": 347,
+        "mean": 0.058,
+        "rms": 0.186,
+        "lateralResidualRms": 0.0473
+       },
+       "cellTent_r2": {
+        "columns": 347,
+        "mean": 0.038,
+        "rms": 0.228,
+        "lateralResidualRms": 0.0148
+       },
+       "cellTent_r4": {
+        "columns": 347,
+        "mean": 0.002,
+        "rms": 0.099,
+        "lateralResidualRms": 0.0038
+       }
+      },
+      "tiles": 25,
+      "meanShift": 0.031,
+      "rmsShift": 0.248,
+      "maxShift": 0.782,
+      "neighbourStepRms": 0.264,
+      "deficitAll": 127.2,
+      "deficitInBand": 29.2,
+      "cellAbsResidualInBand": 100.5,
+      "shells": {
+       "air>1.5h": [
+        4026,
+        14.3,
+        0.3
+       ],
+       "air band": [
+        574,
+        75.8,
+        49.4
+       ],
+       "liquid band": [
+        531,
+        492.8,
+        490
+       ],
+       "liquid 1.5-4h": [
+        570,
+        649.7,
+        570
+       ],
+       "liquid >4h": [
+        443,
+        447.4,
+        443
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       356,
+       87
+      ]
+     },
+     "faces": 530,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 20,
+     "mass": 1679.999,
+     "maxV": 3.81,
+     "roughRms": 0.2431,
+     "roughMax": 1.118,
+     "multiCross": 0,
+     "vHeightRough": 0.5144,
+     "vPhiHeightMismatch": 0.5459,
+     "bandRmsSpeed": 0.7633,
+     "bandJitterUy": 0.1842,
+     "maxSpeed": 2.802,
+     "pRoughPhi": 0.2428,
+     "pRoughAll": 0.619,
+     "grantedOnSurface": 42,
+     "grantedMeanV": 87.884,
+     "grantedMeanPhiFill": 11.399,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 345,
+        "mean": -0.203,
+        "rms": 0.728,
+        "lateralResidualRms": 0.3355
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": -0.022,
+        "rms": 0.353,
+        "lateralResidualRms": 0.0829
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.053,
+        "rms": 1.16,
+        "lateralResidualRms": 0.1497
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": -0.066,
+        "rms": 0.233,
+        "lateralResidualRms": 0.0144
+       }
+      },
+      "tiles": 41,
+      "meanShift": 0.016,
+      "rmsShift": 0.672,
+      "maxShift": 3.163,
+      "neighbourStepRms": 0.894,
+      "deficitAll": 46.4,
+      "deficitInBand": 15.6,
+      "cellAbsResidualInBand": 183.8,
+      "shells": {
+       "air>1.5h": [
+        3604,
+        20.9,
+        0
+       ],
+       "air band": [
+        906,
+        139.1,
+        67.5
+       ],
+       "liquid band": [
+        685,
+        561.1,
+        617.1
+       ],
+       "liquid 1.5-4h": [
+        706,
+        714.5,
+        706
+       ],
+       "liquid >4h": [
+        243,
+        244.3,
+        243
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       226,
+       17
+      ]
+     },
+     "faces": 698,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 30,
+     "mass": 1679.998,
+     "maxV": 3.7,
+     "roughRms": 0.2716,
+     "roughMax": 1.298,
+     "multiCross": 1,
+     "vHeightRough": 0.411,
+     "vPhiHeightMismatch": 0.6472,
+     "bandRmsSpeed": 0.855,
+     "bandJitterUy": 0.1573,
+     "maxSpeed": 3.296,
+     "pRoughPhi": 0.2716,
+     "pRoughAll": 0.5105,
+     "grantedOnSurface": 81,
+     "grantedMeanV": 90.117,
+     "grantedMeanPhiFill": 21.1,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 377,
+        "mean": -0.079,
+        "rms": 0.366,
+        "lateralResidualRms": 0.1566
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": -0.043,
+        "rms": 0.201,
+        "lateralResidualRms": 0.0562
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": -0.039,
+        "rms": 0.29,
+        "lateralResidualRms": 0.0324
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.016,
+        "rms": 0.154,
+        "lateralResidualRms": 0.0095
+       }
+      },
+      "tiles": 32,
+      "meanShift": -0.031,
+      "rmsShift": 0.46,
+      "maxShift": 1.308,
+      "neighbourStepRms": 0.434,
+      "deficitAll": 5.8,
+      "deficitInBand": -17.8,
+      "cellAbsResidualInBand": 198.3,
+      "shells": {
+       "air>1.5h": [
+        3664,
+        25.7,
+        0
+       ],
+       "air band": [
+        808,
+        124.9,
+        64.9
+       ],
+       "liquid band": [
+        632,
+        491.4,
+        569.3
+       ],
+       "liquid 1.5-4h": [
+        595,
+        596.8,
+        595
+       ],
+       "liquid >4h": [
+        445,
+        441.1,
+        445
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       3,
+       2,
+       7,
+       417,
+       16
+      ]
+     },
+     "faces": 641,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 40,
+     "mass": 1679.998,
+     "maxV": 5.91,
+     "roughRms": 0.1216,
+     "roughMax": 0.724,
+     "multiCross": 0,
+     "vHeightRough": 0.3428,
+     "vPhiHeightMismatch": 0.7533,
+     "bandRmsSpeed": 0.5585,
+     "bandJitterUy": 0.0685,
+     "maxSpeed": 2.391,
+     "pRoughPhi": 0.1214,
+     "pRoughAll": 0.3037,
+     "grantedOnSurface": 93,
+     "grantedMeanV": 102.278,
+     "grantedMeanPhiFill": 24.285,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 333,
+        "mean": -0.05,
+        "rms": 0.5,
+        "lateralResidualRms": 0.1529
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.025,
+        "rms": 0.339,
+        "lateralResidualRms": 0.0647
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.041,
+        "rms": 0.349,
+        "lateralResidualRms": 0.025
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.095,
+        "rms": 0.279,
+        "lateralResidualRms": 0.0071
+       }
+      },
+      "tiles": 31,
+      "meanShift": 0.116,
+      "rmsShift": 0.567,
+      "maxShift": 1.838,
+      "neighbourStepRms": 0.364,
+      "deficitAll": 52.6,
+      "deficitInBand": 49.5,
+      "cellAbsResidualInBand": 189.4,
+      "shells": {
+       "air>1.5h": [
+        3855,
+        20.4,
+        0
+       ],
+       "air band": [
+        669,
+        140,
+        57
+       ],
+       "liquid band": [
+        575,
+        491.9,
+        525.4
+       ],
+       "liquid 1.5-4h": [
+        713,
+        695.7,
+        713
+       ],
+       "liquid >4h": [
+        332,
+        332,
+        332
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       332,
+       0
+      ]
+     },
+     "faces": 568,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 50,
+     "mass": 1679.997,
+     "maxV": 3.51,
+     "roughRms": 0.0673,
+     "roughMax": 0.37,
+     "multiCross": 0,
+     "vHeightRough": 0.2586,
+     "vPhiHeightMismatch": 0.5977,
+     "bandRmsSpeed": 0.4826,
+     "bandJitterUy": 0.0821,
+     "maxSpeed": 2.245,
+     "pRoughPhi": 0.0674,
+     "pRoughAll": 0.2298,
+     "grantedOnSurface": 82,
+     "grantedMeanV": 84.889,
+     "grantedMeanPhiFill": 15.417,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 308,
+        "mean": -0.093,
+        "rms": 0.471,
+        "lateralResidualRms": 0.1032
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": -0.05,
+        "rms": 0.354,
+        "lateralResidualRms": 0.0616
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": -0.015,
+        "rms": 0.4,
+        "lateralResidualRms": 0.0179
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.024,
+        "rms": 0.296,
+        "lateralResidualRms": 0.0076
+       }
+      },
+      "tiles": 29,
+      "meanShift": 0.155,
+      "rmsShift": 0.695,
+      "maxShift": 2.63,
+      "neighbourStepRms": 0.33,
+      "deficitAll": 34.7,
+      "deficitInBand": 16.7,
+      "cellAbsResidualInBand": 180.7,
+      "shells": {
+       "air>1.5h": [
+        3857,
+        17.3,
+        0
+       ],
+       "air band": [
+        640,
+        121.1,
+        44.4
+       ],
+       "liquid band": [
+        610,
+        503.9,
+        563.9
+       ],
+       "liquid 1.5-4h": [
+        727,
+        727.7,
+        727
+       ],
+       "liquid >4h": [
+        310,
+        310.1,
+        310
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       309,
+       1
+      ]
+     },
+     "faces": 501,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 60,
+     "mass": 1679.996,
+     "maxV": 1.76,
+     "roughRms": 0.0485,
+     "roughMax": 0.245,
+     "multiCross": 0,
+     "vHeightRough": 0.2852,
+     "vPhiHeightMismatch": 0.5948,
+     "bandRmsSpeed": 0.3284,
+     "bandJitterUy": 0.0798,
+     "maxSpeed": 1.521,
+     "pRoughPhi": 0.049,
+     "pRoughAll": 0.2354,
+     "grantedOnSurface": 104,
+     "grantedMeanV": 96.208,
+     "grantedMeanPhiFill": 20.967,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 370,
+        "mean": -0.083,
+        "rms": 0.469,
+        "lateralResidualRms": 0.132
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": -0.041,
+        "rms": 0.327,
+        "lateralResidualRms": 0.0613
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": -0.051,
+        "rms": 0.388,
+        "lateralResidualRms": 0.0214
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.007,
+        "rms": 0.285,
+        "lateralResidualRms": 0.0075
+       }
+      },
+      "tiles": 32,
+      "meanShift": 0.048,
+      "rmsShift": 0.514,
+      "maxShift": 1.352,
+      "neighbourStepRms": 0.349,
+      "deficitAll": 15.7,
+      "deficitInBand": 3.7,
+      "cellAbsResidualInBand": 203.3,
+      "shells": {
+       "air>1.5h": [
+        3833,
+        15.7,
+        0
+       ],
+       "air band": [
+        645,
+        131.6,
+        49.4
+       ],
+       "liquid band": [
+        610,
+        480.4,
+        558.9
+       ],
+       "liquid 1.5-4h": [
+        687,
+        684.6,
+        687
+       ],
+       "liquid >4h": [
+        369,
+        367.8,
+        369
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       1,
+       0,
+       3,
+       365,
+       0
+      ]
+     },
+     "faces": 559,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 70,
+     "mass": 1679.996,
+     "maxV": 1.08,
+     "roughRms": 0.028,
+     "roughMax": 0.106,
+     "multiCross": 0,
+     "vHeightRough": 0.2552,
+     "vPhiHeightMismatch": 0.6991,
+     "bandRmsSpeed": 0.516,
+     "bandJitterUy": 0.0667,
+     "maxSpeed": 1.768,
+     "pRoughPhi": 0.0285,
+     "pRoughAll": 0.2482,
+     "grantedOnSurface": 151,
+     "grantedMeanV": 132.553,
+     "grantedMeanPhiFill": 28.731,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 301,
+        "mean": 0.037,
+        "rms": 0.634,
+        "lateralResidualRms": 0.172
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.139,
+        "rms": 0.361,
+        "lateralResidualRms": 0.0863
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.166,
+        "rms": 0.43,
+        "lateralResidualRms": 0.0225
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.259,
+        "rms": 0.332,
+        "lateralResidualRms": 0.0079
+       }
+      },
+      "tiles": 28,
+      "meanShift": 0.186,
+      "rmsShift": 0.668,
+      "maxShift": 1.768,
+      "neighbourStepRms": 0.529,
+      "deficitAll": 39.2,
+      "deficitInBand": 47.5,
+      "cellAbsResidualInBand": 227,
+      "shells": {
+       "air>1.5h": [
+        3907,
+        13.8,
+        0
+       ],
+       "air band": [
+        601,
+        168.5,
+        49.1
+       ],
+       "liquid band": [
+        581,
+        464.7,
+        536.6
+       ],
+       "liquid 1.5-4h": [
+        772,
+        749.9,
+        772
+       ],
+       "liquid >4h": [
+        283,
+        283.1,
+        283
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       283,
+       0
+      ]
+     },
+     "faces": 464,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 80,
+     "mass": 1679.995,
+     "maxV": 1.11,
+     "roughRms": 0.0343,
+     "roughMax": 0.195,
+     "multiCross": 0,
+     "vHeightRough": 0.287,
+     "vPhiHeightMismatch": 0.6104,
+     "bandRmsSpeed": 0.2192,
+     "bandJitterUy": 0.0424,
+     "maxSpeed": 0.613,
+     "pRoughPhi": 0.0344,
+     "pRoughAll": 0.228,
+     "grantedOnSurface": 112,
+     "grantedMeanV": 90.565,
+     "grantedMeanPhiFill": 20.575,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 350,
+        "mean": -0.062,
+        "rms": 0.575,
+        "lateralResidualRms": 0.221
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.03,
+        "rms": 0.351,
+        "lateralResidualRms": 0.0785
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.009,
+        "rms": 0.449,
+        "lateralResidualRms": 0.0203
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.109,
+        "rms": 0.293,
+        "lateralResidualRms": 0.0058
+       }
+      },
+      "tiles": 30,
+      "meanShift": 0.092,
+      "rmsShift": 0.619,
+      "maxShift": 1.671,
+      "neighbourStepRms": 0.649,
+      "deficitAll": 43.2,
+      "deficitInBand": 33.8,
+      "cellAbsResidualInBand": 164.6,
+      "shells": {
+       "air>1.5h": [
+        3894,
+        13.4,
+        0
+       ],
+       "air band": [
+        616,
+        133.3,
+        45.1
+       ],
+       "liquid band": [
+        631,
+        534.3,
+        588.7
+       ],
+       "liquid 1.5-4h": [
+        711,
+        708.9,
+        711
+       ],
+       "liquid >4h": [
+        292,
+        290.2,
+        292
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       3,
+       1,
+       288,
+       0
+      ]
+     },
+     "faces": 525,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 90,
+     "mass": 1679.995,
+     "maxV": 1.07,
+     "roughRms": 0.0198,
+     "roughMax": 0.059,
+     "multiCross": 0,
+     "vHeightRough": 0.2387,
+     "vPhiHeightMismatch": 0.6264,
+     "bandRmsSpeed": 0.4145,
+     "bandJitterUy": 0.0307,
+     "maxSpeed": 1.69,
+     "pRoughPhi": 0.0204,
+     "pRoughAll": 0.2106,
+     "grantedOnSurface": 108,
+     "grantedMeanV": 100.137,
+     "grantedMeanPhiFill": 18.576,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 300,
+        "mean": 0.112,
+        "rms": 0.59,
+        "lateralResidualRms": 0.1661
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.042,
+        "rms": 0.47,
+        "lateralResidualRms": 0.0967
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.046,
+        "rms": 0.495,
+        "lateralResidualRms": 0.016
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.151,
+        "rms": 0.328,
+        "lateralResidualRms": 0.008
+       }
+      },
+      "tiles": 27,
+      "meanShift": 0.119,
+      "rmsShift": 0.522,
+      "maxShift": 1.294,
+      "neighbourStepRms": 0.51,
+      "deficitAll": 42.5,
+      "deficitInBand": 34,
+      "cellAbsResidualInBand": 180,
+      "shells": {
+       "air>1.5h": [
+        3918,
+        14.1,
+        0
+       ],
+       "air band": [
+        590,
+        139.9,
+        49
+       ],
+       "liquid band": [
+        582,
+        477.6,
+        534.5
+       ],
+       "liquid 1.5-4h": [
+        725,
+        719.7,
+        725
+       ],
+       "liquid >4h": [
+        329,
+        328.7,
+        329
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       1,
+       0,
+       328,
+       0
+      ]
+     },
+     "faces": 456,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 100,
+     "mass": 1679.995,
+     "maxV": 1.02,
+     "roughRms": 0.0164,
+     "roughMax": 0.076,
+     "multiCross": 0,
+     "vHeightRough": 0.2407,
+     "vPhiHeightMismatch": 0.5405,
+     "bandRmsSpeed": 0.3001,
+     "bandJitterUy": 0.0335,
+     "maxSpeed": 0.91,
+     "pRoughPhi": 0.0174,
+     "pRoughAll": 0.2333,
+     "grantedOnSurface": 117,
+     "grantedMeanV": 103.588,
+     "grantedMeanPhiFill": 18.92,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 350,
+        "mean": 0.075,
+        "rms": 0.438,
+        "lateralResidualRms": 0.1162
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.128,
+        "rms": 0.32,
+        "lateralResidualRms": 0.067
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.107,
+        "rms": 0.345,
+        "lateralResidualRms": 0.0136
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.165,
+        "rms": 0.271,
+        "lateralResidualRms": 0.0054
+       }
+      },
+      "tiles": 27,
+      "meanShift": 0.093,
+      "rmsShift": 0.425,
+      "maxShift": 0.913,
+      "neighbourStepRms": 0.386,
+      "deficitAll": 50.2,
+      "deficitInBand": 47.8,
+      "cellAbsResidualInBand": 168,
+      "shells": {
+       "air>1.5h": [
+        3915,
+        13.2,
+        0
+       ],
+       "air band": [
+        604,
+        144.2,
+        50.5
+       ],
+       "liquid band": [
+        560,
+        468.4,
+        514.3
+       ],
+       "liquid 1.5-4h": [
+        704,
+        693.1,
+        704
+       ],
+       "liquid >4h": [
+        361,
+        361,
+        361
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       361,
+       0
+      ]
+     },
+     "faces": 491,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 110,
+     "mass": 1679.994,
+     "maxV": 1.05,
+     "roughRms": 0.0107,
+     "roughMax": 0.039,
+     "multiCross": 0,
+     "vHeightRough": 0.1987,
+     "vPhiHeightMismatch": 0.4954,
+     "bandRmsSpeed": 0.3355,
+     "bandJitterUy": 0.0344,
+     "maxSpeed": 0.82,
+     "pRoughPhi": 0.0121,
+     "pRoughAll": 0.1974,
+     "grantedOnSurface": 122,
+     "grantedMeanV": 95.266,
+     "grantedMeanPhiFill": 20.619,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 342,
+        "mean": -0.005,
+        "rms": 0.336,
+        "lateralResidualRms": 0.0898
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.112,
+        "rms": 0.264,
+        "lateralResidualRms": 0.0465
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.13,
+        "rms": 0.304,
+        "lateralResidualRms": 0.015
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.186,
+        "rms": 0.279,
+        "lateralResidualRms": 0.0045
+       }
+      },
+      "tiles": 28,
+      "meanShift": 0.141,
+      "rmsShift": 0.551,
+      "maxShift": 2.27,
+      "neighbourStepRms": 0.472,
+      "deficitAll": 65.6,
+      "deficitInBand": 54.8,
+      "cellAbsResidualInBand": 146.9,
+      "shells": {
+       "air>1.5h": [
+        3942,
+        11,
+        0
+       ],
+       "air band": [
+        592,
+        138,
+        50.9
+       ],
+       "liquid band": [
+        581,
+        502.2,
+        534.6
+       ],
+       "liquid 1.5-4h": [
+        755,
+        754.7,
+        755
+       ],
+       "liquid >4h": [
+        274,
+        274.1,
+        274
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       274,
+       0
+      ]
+     },
+     "faces": 463,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 120,
+     "mass": 1679.994,
+     "maxV": 1.12,
+     "roughRms": 0.0202,
+     "roughMax": 0.078,
+     "multiCross": 0,
+     "vHeightRough": 0.2095,
+     "vPhiHeightMismatch": 0.5691,
+     "bandRmsSpeed": 0.339,
+     "bandJitterUy": 0.038,
+     "maxSpeed": 0.81,
+     "pRoughPhi": 0.0211,
+     "pRoughAll": 0.1969,
+     "grantedOnSurface": 136,
+     "grantedMeanV": 115.296,
+     "grantedMeanPhiFill": 23.999,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 328,
+        "mean": 0.067,
+        "rms": 0.494,
+        "lateralResidualRms": 0.1225
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.154,
+        "rms": 0.379,
+        "lateralResidualRms": 0.0758
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.186,
+        "rms": 0.423,
+        "lateralResidualRms": 0.0155
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.259,
+        "rms": 0.364,
+        "lateralResidualRms": 0.0071
+       }
+      },
+      "tiles": 25,
+      "meanShift": 0.133,
+      "rmsShift": 0.515,
+      "maxShift": 1.029,
+      "neighbourStepRms": 0.377,
+      "deficitAll": 73.9,
+      "deficitInBand": 68,
+      "cellAbsResidualInBand": 183,
+      "shells": {
+       "air>1.5h": [
+        3954,
+        11.1,
+        0
+       ],
+       "air band": [
+        584,
+        151.6,
+        47.4
+       ],
+       "liquid band": [
+        596,
+        512.5,
+        548.7
+       ],
+       "liquid 1.5-4h": [
+        750,
+        744.8,
+        750
+       ],
+       "liquid >4h": [
+        260,
+        260,
+        260
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       260,
+       0
+      ]
+     },
+     "faces": 470,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 130,
+     "mass": 1679.993,
+     "maxV": 1.14,
+     "roughRms": 0.0131,
+     "roughMax": 0.045,
+     "multiCross": 0,
+     "vHeightRough": 0.2206,
+     "vPhiHeightMismatch": 0.579,
+     "bandRmsSpeed": 0.2059,
+     "bandJitterUy": 0.0387,
+     "maxSpeed": 0.918,
+     "pRoughPhi": 0.0146,
+     "pRoughAll": 0.1995,
+     "grantedOnSurface": 131,
+     "grantedMeanV": 110.6,
+     "grantedMeanPhiFill": 18.419,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 294,
+        "mean": 0.076,
+        "rms": 0.379,
+        "lateralResidualRms": 0.1156
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.076,
+        "rms": 0.479,
+        "lateralResidualRms": 0.1159
+       },
+       "cellTent_r2": {
+        "columns": 379,
+        "mean": -1.343,
+        "rms": 16.097,
+        "lateralResidualRms": 2.1044
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.23,
+        "rms": 0.356,
+        "lateralResidualRms": 0.0078
+       }
+      },
+      "tiles": 25,
+      "meanShift": 0.206,
+      "rmsShift": 0.486,
+      "maxShift": 1.162,
+      "neighbourStepRms": 0.428,
+      "deficitAll": 84.8,
+      "deficitInBand": 74.7,
+      "cellAbsResidualInBand": 171,
+      "shells": {
+       "air>1.5h": [
+        3950,
+        10,
+        0
+       ],
+       "air band": [
+        603,
+        152.8,
+        45.6
+       ],
+       "liquid band": [
+        582,
+        508.1,
+        540.6
+       ],
+       "liquid 1.5-4h": [
+        624,
+        624.1,
+        624
+       ],
+       "liquid >4h": [
+        385,
+        385.1,
+        385
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       385,
+       0
+      ]
+     },
+     "faces": 473,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 140,
+     "mass": 1679.993,
+     "maxV": 1.26,
+     "roughRms": 0.0126,
+     "roughMax": 0.049,
+     "multiCross": 0,
+     "vHeightRough": 0.2139,
+     "vPhiHeightMismatch": 0.5697,
+     "bandRmsSpeed": 0.344,
+     "bandJitterUy": 0.044,
+     "maxSpeed": 1.297,
+     "pRoughPhi": 0.0133,
+     "pRoughAll": 0.203,
+     "grantedOnSurface": 145,
+     "grantedMeanV": 127.355,
+     "grantedMeanPhiFill": 26.072,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 296,
+        "mean": 0.123,
+        "rms": 0.485,
+        "lateralResidualRms": 0.0997
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.217,
+        "rms": 0.408,
+        "lateralResidualRms": 0.0734
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.248,
+        "rms": 0.437,
+        "lateralResidualRms": 0.0145
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.326,
+        "rms": 0.419,
+        "lateralResidualRms": 0.006
+       }
+      },
+      "tiles": 25,
+      "meanShift": 0.336,
+      "rmsShift": 0.77,
+      "maxShift": 2.836,
+      "neighbourStepRms": 0.605,
+      "deficitAll": 90,
+      "deficitInBand": 86.9,
+      "cellAbsResidualInBand": 178.1,
+      "shells": {
+       "air>1.5h": [
+        3977,
+        9.7,
+        0
+       ],
+       "air band": [
+        578,
+        159.7,
+        49.5
+       ],
+       "liquid band": [
+        591,
+        519.1,
+        542.5
+       ],
+       "liquid 1.5-4h": [
+        642,
+        635.5,
+        642
+       ],
+       "liquid >4h": [
+        356,
+        355.9,
+        356
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       1,
+       355,
+       0
+      ]
+     },
+     "faces": 446,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 150,
+     "mass": 1679.993,
+     "maxV": 1.05,
+     "roughRms": 0.0109,
+     "roughMax": 0.042,
+     "multiCross": 0,
+     "vHeightRough": 0.2116,
+     "vPhiHeightMismatch": 0.669,
+     "bandRmsSpeed": 0.2483,
+     "bandJitterUy": 0.029,
+     "maxSpeed": 0.696,
+     "pRoughPhi": 0.0122,
+     "pRoughAll": 0.2088,
+     "grantedOnSurface": 147,
+     "grantedMeanV": 133.83,
+     "grantedMeanPhiFill": 23.072,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 338,
+        "mean": 0.056,
+        "rms": 0.554,
+        "lateralResidualRms": 0.1539
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.194,
+        "rms": 0.402,
+        "lateralResidualRms": 0.0901
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.176,
+        "rms": 0.452,
+        "lateralResidualRms": 0.0156
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.284,
+        "rms": 0.388,
+        "lateralResidualRms": 0.0079
+       }
+      },
+      "tiles": 28,
+      "meanShift": 0.184,
+      "rmsShift": 0.629,
+      "maxShift": 1.289,
+      "neighbourStepRms": 0.548,
+      "deficitAll": 86.8,
+      "deficitInBand": 76.6,
+      "cellAbsResidualInBand": 196.4,
+      "shells": {
+       "air>1.5h": [
+        3968,
+        12.8,
+        0
+       ],
+       "air band": [
+        579,
+        167.2,
+        48.3
+       ],
+       "liquid band": [
+        587,
+        492.6,
+        534.9
+       ],
+       "liquid 1.5-4h": [
+        773,
+        770.4,
+        773
+       ],
+       "liquid >4h": [
+        237,
+        237,
+        237
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       237,
+       0
+      ]
+     },
+     "faces": 468,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 160,
+     "mass": 1679.993,
+     "maxV": 1.06,
+     "roughRms": 0.0109,
+     "roughMax": 0.04,
+     "multiCross": 0,
+     "vHeightRough": 0.1901,
+     "vPhiHeightMismatch": 0.5927,
+     "bandRmsSpeed": 0.2805,
+     "bandJitterUy": 0.0268,
+     "maxSpeed": 0.645,
+     "pRoughPhi": 0.0123,
+     "pRoughAll": 0.1862,
+     "grantedOnSurface": 156,
+     "grantedMeanV": 134.785,
+     "grantedMeanPhiFill": 24.273,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 317,
+        "mean": 0.106,
+        "rms": 0.485,
+        "lateralResidualRms": 0.1479
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.237,
+        "rms": 0.416,
+        "lateralResidualRms": 0.076
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.247,
+        "rms": 0.46,
+        "lateralResidualRms": 0.0143
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.32,
+        "rms": 0.419,
+        "lateralResidualRms": 0.0058
+       }
+      },
+      "tiles": 24,
+      "meanShift": 0.242,
+      "rmsShift": 0.637,
+      "maxShift": 1.855,
+      "neighbourStepRms": 0.573,
+      "deficitAll": 97.6,
+      "deficitInBand": 90.4,
+      "cellAbsResidualInBand": 184.3,
+      "shells": {
+       "air>1.5h": [
+        3980,
+        9.9,
+        0
+       ],
+       "air band": [
+        569,
+        160.3,
+        37.9
+       ],
+       "liquid band": [
+        595,
+        512.4,
+        544.5
+       ],
+       "liquid 1.5-4h": [
+        738,
+        735.2,
+        738
+       ],
+       "liquid >4h": [
+        262,
+        262,
+        262
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       262,
+       0
+      ]
+     },
+     "faces": 446,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 170,
+     "mass": 1679.992,
+     "maxV": 1.09,
+     "roughRms": 0.0126,
+     "roughMax": 0.041,
+     "multiCross": 0,
+     "vHeightRough": 0.2062,
+     "vPhiHeightMismatch": 0.6374,
+     "bandRmsSpeed": 0.2653,
+     "bandJitterUy": 0.0276,
+     "maxSpeed": 0.62,
+     "pRoughPhi": 0.014,
+     "pRoughAll": 0.1847,
+     "grantedOnSurface": 154,
+     "grantedMeanV": 131.279,
+     "grantedMeanPhiFill": 22.407,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 347,
+        "mean": 0.144,
+        "rms": 0.595,
+        "lateralResidualRms": 0.1637
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.246,
+        "rms": 0.44,
+        "lateralResidualRms": 0.0741
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.263,
+        "rms": 0.494,
+        "lateralResidualRms": 0.0163
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.339,
+        "rms": 0.441,
+        "lateralResidualRms": 0.0061
+       }
+      },
+      "tiles": 27,
+      "meanShift": 0.19,
+      "rmsShift": 0.638,
+      "maxShift": 1.811,
+      "neighbourStepRms": 0.551,
+      "deficitAll": 99.6,
+      "deficitInBand": 90.8,
+      "cellAbsResidualInBand": 194.1,
+      "shells": {
+       "air>1.5h": [
+        3987,
+        10.4,
+        0
+       ],
+       "air band": [
+        563,
+        162.9,
+        41.6
+       ],
+       "liquid band": [
+        609,
+        523.3,
+        553.8
+       ],
+       "liquid 1.5-4h": [
+        659,
+        657.4,
+        659
+       ],
+       "liquid >4h": [
+        326,
+        326,
+        326
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       326,
+       0
+      ]
+     },
+     "faces": 452,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 180,
+     "mass": 1679.992,
+     "maxV": 1.1,
+     "roughRms": 0.0092,
+     "roughMax": 0.034,
+     "multiCross": 0,
+     "vHeightRough": 0.2331,
+     "vPhiHeightMismatch": 0.6203,
+     "bandRmsSpeed": 0.2695,
+     "bandJitterUy": 0.0216,
+     "maxSpeed": 0.903,
+     "pRoughPhi": 0.0106,
+     "pRoughAll": 0.2217,
+     "grantedOnSurface": 170,
+     "grantedMeanV": 151.505,
+     "grantedMeanPhiFill": 34.173,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 328,
+        "mean": 0.095,
+        "rms": 0.422,
+        "lateralResidualRms": 0.1299
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.241,
+        "rms": 0.39,
+        "lateralResidualRms": 0.0718
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.258,
+        "rms": 0.475,
+        "lateralResidualRms": 0.0189
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.343,
+        "rms": 0.416,
+        "lateralResidualRms": 0.0053
+       }
+      },
+      "tiles": 25,
+      "meanShift": 0.358,
+      "rmsShift": 0.923,
+      "maxShift": 3.336,
+      "neighbourStepRms": 0.734,
+      "deficitAll": 108.4,
+      "deficitInBand": 97.9,
+      "cellAbsResidualInBand": 195.3,
+      "shells": {
+       "air>1.5h": [
+        3993,
+        10.2,
+        0
+       ],
+       "air band": [
+        593,
+        185.7,
+        54.9
+       ],
+       "liquid band": [
+        567,
+        492.9,
+        525.7
+       ],
+       "liquid 1.5-4h": [
+        647,
+        647.2,
+        647
+       ],
+       "liquid >4h": [
+        344,
+        344,
+        344
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       344,
+       0
+      ]
+     },
+     "faces": 425,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    }
+   ]
+  },
+  "t-all": {
+   "patchHits": [],
+   "ledger": [
+    {
+     "frame": 0,
+     "mass": 1680,
+     "maxV": 1,
+     "roughRms": 1.6462,
+     "roughMax": 7.548,
+     "multiCross": 0,
+     "vHeightRough": 1.6771,
+     "vPhiHeightMismatch": 0.0438,
+     "bandRmsSpeed": 0,
+     "bandJitterUy": 0,
+     "maxSpeed": 0,
+     "pRoughPhi": 1.6462,
+     "pRoughAll": 1.6771,
+     "grantedOnSurface": 0,
+     "grantedMeanV": 0,
+     "grantedMeanPhiFill": 0,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 0,
+        "mean": 0,
+        "rms": 0,
+        "lateralResidualRms": 0
+       },
+       "blurredTiles": {
+        "columns": 0,
+        "mean": 0,
+        "rms": 0,
+        "lateralResidualRms": 0
+       },
+       "cellTent_r2": {
+        "columns": 0,
+        "mean": 0,
+        "rms": 0,
+        "lateralResidualRms": 0
+       },
+       "cellTent_r4": {
+        "columns": 0,
+        "mean": 0,
+        "rms": 0,
+        "lateralResidualRms": 0
+       }
+      },
+      "tiles": 0,
+      "meanShift": 0,
+      "rmsShift": 0,
+      "maxShift": 0,
+      "neighbourStepRms": 0,
+      "deficitAll": 0,
+      "deficitInBand": 0,
+      "cellAbsResidualInBand": 0,
+      "shells": {
+       "air>1.5h": [
+        3999,
+        0,
+        0
+       ],
+       "air band": [
+        465,
+        0,
+        0
+       ],
+       "liquid band": [
+        424,
+        424,
+        424
+       ],
+       "liquid 1.5-4h": [
+        776,
+        776,
+        776
+       ],
+       "liquid >4h": [
+        480,
+        480,
+        480
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       480,
+       0
+      ]
+     },
+     "faces": 428,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 10,
+     "mass": 1680,
+     "maxV": 5.74,
+     "roughRms": 0.0569,
+     "roughMax": 0.308,
+     "multiCross": 0,
+     "vHeightRough": 0.3697,
+     "vPhiHeightMismatch": 0.3516,
+     "bandRmsSpeed": 1.6333,
+     "bandJitterUy": 0.2496,
+     "maxSpeed": 4.131,
+     "pRoughPhi": 0.0576,
+     "pRoughAll": 0.1075,
+     "grantedOnSurface": 35,
+     "grantedMeanV": 38.913,
+     "grantedMeanPhiFill": 8.174,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 307,
+        "mean": 0.022,
+        "rms": 0.239,
+        "lateralResidualRms": 0.0756
+       },
+       "blurredTiles": {
+        "columns": 348,
+        "mean": 0.06,
+        "rms": 0.174,
+        "lateralResidualRms": 0.0455
+       },
+       "cellTent_r2": {
+        "columns": 348,
+        "mean": 0.041,
+        "rms": 0.212,
+        "lateralResidualRms": 0.0144
+       },
+       "cellTent_r4": {
+        "columns": 348,
+        "mean": 0.008,
+        "rms": 0.092,
+        "lateralResidualRms": 0.0037
+       }
+      },
+      "tiles": 26,
+      "meanShift": 0.04,
+      "rmsShift": 0.246,
+      "maxShift": 0.809,
+      "neighbourStepRms": 0.263,
+      "deficitAll": 126.3,
+      "deficitInBand": 31.5,
+      "cellAbsResidualInBand": 98.5,
+      "shells": {
+       "air>1.5h": [
+        4021,
+        12.3,
+        0.3
+       ],
+       "air band": [
+        574,
+        74.5,
+        47.3
+       ],
+       "liquid band": [
+        534,
+        495.4,
+        491.1
+       ],
+       "liquid 1.5-4h": [
+        570,
+        648.4,
+        570
+       ],
+       "liquid >4h": [
+        445,
+        449.4,
+        445
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       359,
+       86
+      ]
+     },
+     "faces": 533,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 20,
+     "mass": 1679.999,
+     "maxV": 5.08,
+     "roughRms": 0.3076,
+     "roughMax": 1.575,
+     "multiCross": 4,
+     "vHeightRough": 0.5181,
+     "vPhiHeightMismatch": 0.5156,
+     "bandRmsSpeed": 0.7554,
+     "bandJitterUy": 0.1891,
+     "maxSpeed": 2.926,
+     "pRoughPhi": 0.3079,
+     "pRoughAll": 0.6534,
+     "grantedOnSurface": 40,
+     "grantedMeanV": 61.022,
+     "grantedMeanPhiFill": 14.246,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 361,
+        "mean": -0.105,
+        "rms": 0.812,
+        "lateralResidualRms": 0.35
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": -0.03,
+        "rms": 0.266,
+        "lateralResidualRms": 0.0586
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": -0.041,
+        "rms": 0.416,
+        "lateralResidualRms": 0.0341
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": -0.053,
+        "rms": 0.203,
+        "lateralResidualRms": 0.0126
+       }
+      },
+      "tiles": 45,
+      "meanShift": 0.033,
+      "rmsShift": 0.655,
+      "maxShift": 3.283,
+      "neighbourStepRms": 0.918,
+      "deficitAll": 27.5,
+      "deficitInBand": 11.1,
+      "cellAbsResidualInBand": 165.5,
+      "shells": {
+       "air>1.5h": [
+        3539,
+        6.1,
+        0
+       ],
+       "air band": [
+        961,
+        135.2,
+        81.1
+       ],
+       "liquid band": [
+        706,
+        590.4,
+        633.4
+       ],
+       "liquid 1.5-4h": [
+        690,
+        698.8,
+        690
+       ],
+       "liquid >4h": [
+        248,
+        249.5,
+        248
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       228,
+       20
+      ]
+     },
+     "faces": 723,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 30,
+     "mass": 1679.998,
+     "maxV": 1.82,
+     "roughRms": 0.3673,
+     "roughMax": 1.593,
+     "multiCross": 7,
+     "vHeightRough": 0.4377,
+     "vPhiHeightMismatch": 0.6652,
+     "bandRmsSpeed": 0.8831,
+     "bandJitterUy": 0.2377,
+     "maxSpeed": 3.009,
+     "pRoughPhi": 0.3791,
+     "pRoughAll": 0.6324,
+     "grantedOnSurface": 76,
+     "grantedMeanV": 84.545,
+     "grantedMeanPhiFill": 19.548,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 366,
+        "mean": -0.144,
+        "rms": 0.461,
+        "lateralResidualRms": 0.1999
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": -0.097,
+        "rms": 0.241,
+        "lateralResidualRms": 0.0649
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": -0.079,
+        "rms": 0.316,
+        "lateralResidualRms": 0.0477
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": -0.03,
+        "rms": 0.17,
+        "lateralResidualRms": 0.0145
+       }
+      },
+      "tiles": 35,
+      "meanShift": -0.123,
+      "rmsShift": 0.575,
+      "maxShift": 1.895,
+      "neighbourStepRms": 0.455,
+      "deficitAll": -59.6,
+      "deficitInBand": -66,
+      "cellAbsResidualInBand": 251.8,
+      "shells": {
+       "air>1.5h": [
+        3428,
+        6.7,
+        0
+       ],
+       "air band": [
+        972,
+        132.1,
+        72.9
+       ],
+       "liquid band": [
+        678,
+        475.5,
+        600.7
+       ],
+       "liquid 1.5-4h": [
+        618,
+        623,
+        618
+       ],
+       "liquid >4h": [
+        448,
+        442.6,
+        448
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       4,
+       4,
+       2,
+       422,
+       16
+      ]
+     },
+     "faces": 703,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 40,
+     "mass": 1679.997,
+     "maxV": 4.62,
+     "roughRms": 0.1428,
+     "roughMax": 1.183,
+     "multiCross": 1,
+     "vHeightRough": 0.3218,
+     "vPhiHeightMismatch": 0.7793,
+     "bandRmsSpeed": 0.5078,
+     "bandJitterUy": 0.0677,
+     "maxSpeed": 2.364,
+     "pRoughPhi": 0.143,
+     "pRoughAll": 0.294,
+     "grantedOnSurface": 70,
+     "grantedMeanV": 80.711,
+     "grantedMeanPhiFill": 14.831,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 360,
+        "mean": -0.163,
+        "rms": 0.603,
+        "lateralResidualRms": 0.1521
+       },
+       "blurredTiles": {
+        "columns": 379,
+        "mean": -0.097,
+        "rms": 0.414,
+        "lateralResidualRms": 0.0796
+       },
+       "cellTent_r2": {
+        "columns": 379,
+        "mean": -0.097,
+        "rms": 0.464,
+        "lateralResidualRms": 0.0257
+       },
+       "cellTent_r4": {
+        "columns": 379,
+        "mean": -0.036,
+        "rms": 0.308,
+        "lateralResidualRms": 0.0102
+       }
+      },
+      "tiles": 34,
+      "meanShift": -0.049,
+      "rmsShift": 0.554,
+      "maxShift": 1.541,
+      "neighbourStepRms": 0.374,
+      "deficitAll": -12.7,
+      "deficitInBand": -17,
+      "cellAbsResidualInBand": 228.6,
+      "shells": {
+       "air>1.5h": [
+        3369,
+        6.4,
+        0
+       ],
+       "air band": [
+        1089,
+        122.5,
+        59.6
+       ],
+       "liquid band": [
+        637,
+        504.1,
+        584.1
+       ],
+       "liquid 1.5-4h": [
+        674,
+        671.5,
+        674
+       ],
+       "liquid >4h": [
+        375,
+        375.4,
+        375
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       372,
+       3
+      ]
+     },
+     "faces": 603,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 50,
+     "mass": 1679.995,
+     "maxV": 2.61,
+     "roughRms": 0.079,
+     "roughMax": 0.51,
+     "multiCross": 0,
+     "vHeightRough": 0.2959,
+     "vPhiHeightMismatch": 0.5421,
+     "bandRmsSpeed": 0.5454,
+     "bandJitterUy": 0.097,
+     "maxSpeed": 2.474,
+     "pRoughPhi": 0.0792,
+     "pRoughAll": 0.2796,
+     "grantedOnSurface": 75,
+     "grantedMeanV": 68.005,
+     "grantedMeanPhiFill": 19.884,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 305,
+        "mean": -0.195,
+        "rms": 0.523,
+        "lateralResidualRms": 0.1272
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": -0.1,
+        "rms": 0.309,
+        "lateralResidualRms": 0.0549
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": -0.095,
+        "rms": 0.367,
+        "lateralResidualRms": 0.0233
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": -0.033,
+        "rms": 0.224,
+        "lateralResidualRms": 0.006
+       }
+      },
+      "tiles": 33,
+      "meanShift": -0.058,
+      "rmsShift": 0.429,
+      "maxShift": 1.258,
+      "neighbourStepRms": 0.359,
+      "deficitAll": -7,
+      "deficitInBand": -7.5,
+      "cellAbsResidualInBand": 147.4,
+      "shells": {
+       "air>1.5h": [
+        3766,
+        5,
+        0
+       ],
+       "air band": [
+        705,
+        113.3,
+        59.8
+       ],
+       "liquid band": [
+        576,
+        469.1,
+        530.2
+       ],
+       "liquid 1.5-4h": [
+        789,
+        784,
+        789
+       ],
+       "liquid >4h": [
+        308,
+        308.6,
+        308
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       292,
+       16
+      ]
+     },
+     "faces": 512,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 60,
+     "mass": 1679.993,
+     "maxV": 1.21,
+     "roughRms": 0.0541,
+     "roughMax": 0.318,
+     "multiCross": 0,
+     "vHeightRough": 0.2562,
+     "vPhiHeightMismatch": 0.5236,
+     "bandRmsSpeed": 0.3171,
+     "bandJitterUy": 0.0819,
+     "maxSpeed": 1.431,
+     "pRoughPhi": 0.0547,
+     "pRoughAll": 0.2275,
+     "grantedOnSurface": 78,
+     "grantedMeanV": 67.08,
+     "grantedMeanPhiFill": 18.973,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 348,
+        "mean": -0.146,
+        "rms": 0.389,
+        "lateralResidualRms": 0.1168
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": -0.132,
+        "rms": 0.297,
+        "lateralResidualRms": 0.0534
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": -0.141,
+        "rms": 0.422,
+        "lateralResidualRms": 0.0246
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": -0.068,
+        "rms": 0.228,
+        "lateralResidualRms": 0.0068
+       }
+      },
+      "tiles": 33,
+      "meanShift": -0.008,
+      "rmsShift": 0.444,
+      "maxShift": 1.596,
+      "neighbourStepRms": 0.346,
+      "deficitAll": -24.9,
+      "deficitInBand": -29.3,
+      "cellAbsResidualInBand": 177.6,
+      "shells": {
+       "air>1.5h": [
+        3754,
+        6.9,
+        0
+       ],
+       "air band": [
+        689,
+        111.4,
+        56
+       ],
+       "liquid band": [
+        633,
+        496.2,
+        580.9
+       ],
+       "liquid 1.5-4h": [
+        672,
+        670.8,
+        672
+       ],
+       "liquid >4h": [
+        396,
+        394.6,
+        396
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       1,
+       2,
+       0,
+       390,
+       3
+      ]
+     },
+     "faces": 592,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 70,
+     "mass": 1679.992,
+     "maxV": 1.08,
+     "roughRms": 0.0348,
+     "roughMax": 0.112,
+     "multiCross": 0,
+     "vHeightRough": 0.2508,
+     "vPhiHeightMismatch": 0.5755,
+     "bandRmsSpeed": 0.5896,
+     "bandJitterUy": 0.0757,
+     "maxSpeed": 1.936,
+     "pRoughPhi": 0.0355,
+     "pRoughAll": 0.2399,
+     "grantedOnSurface": 112,
+     "grantedMeanV": 92.746,
+     "grantedMeanPhiFill": 25.519,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 314,
+        "mean": -0.034,
+        "rms": 0.561,
+        "lateralResidualRms": 0.1687
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.048,
+        "rms": 0.282,
+        "lateralResidualRms": 0.0659
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.064,
+        "rms": 0.317,
+        "lateralResidualRms": 0.0221
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.135,
+        "rms": 0.213,
+        "lateralResidualRms": 0.0087
+       }
+      },
+      "tiles": 28,
+      "meanShift": 0.004,
+      "rmsShift": 0.515,
+      "maxShift": 1.635,
+      "neighbourStepRms": 0.376,
+      "deficitAll": 2.2,
+      "deficitInBand": 14.1,
+      "cellAbsResidualInBand": 185.1,
+      "shells": {
+       "air>1.5h": [
+        3720,
+        4.9,
+        0
+       ],
+       "air band": [
+        751,
+        135.9,
+        51.7
+       ],
+       "liquid band": [
+        585,
+        468.1,
+        538.1
+       ],
+       "liquid 1.5-4h": [
+        786,
+        769.7,
+        786
+       ],
+       "liquid >4h": [
+        302,
+        301.4,
+        302
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       2,
+       0,
+       300,
+       0
+      ]
+     },
+     "faces": 487,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 80,
+     "mass": 1679.99,
+     "maxV": 1.79,
+     "roughRms": 0.0443,
+     "roughMax": 0.285,
+     "multiCross": 0,
+     "vHeightRough": 0.261,
+     "vPhiHeightMismatch": 0.4734,
+     "bandRmsSpeed": 0.246,
+     "bandJitterUy": 0.0525,
+     "maxSpeed": 0.774,
+     "pRoughPhi": 0.0446,
+     "pRoughAll": 0.225,
+     "grantedOnSurface": 70,
+     "grantedMeanV": 52.796,
+     "grantedMeanPhiFill": 16.368,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 364,
+        "mean": -0.045,
+        "rms": 0.283,
+        "lateralResidualRms": 0.1111
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": -0.012,
+        "rms": 0.175,
+        "lateralResidualRms": 0.0398
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": -0.015,
+        "rms": 0.218,
+        "lateralResidualRms": 0.0135
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.018,
+        "rms": 0.142,
+        "lateralResidualRms": 0.0042
+       }
+      },
+      "tiles": 32,
+      "meanShift": 0.046,
+      "rmsShift": 0.33,
+      "maxShift": 1.064,
+      "neighbourStepRms": 0.355,
+      "deficitAll": 5.7,
+      "deficitInBand": 8.3,
+      "cellAbsResidualInBand": 124,
+      "shells": {
+       "air>1.5h": [
+        3595,
+        6.1,
+        0.1
+       ],
+       "air band": [
+        872,
+        105.5,
+        51.7
+       ],
+       "liquid band": [
+        639,
+        539,
+        584.5
+       ],
+       "liquid 1.5-4h": [
+        750,
+        742.4,
+        750
+       ],
+       "liquid >4h": [
+        288,
+        287,
+        288
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       1,
+       0,
+       1,
+       286,
+       0
+      ]
+     },
+     "faces": 579,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 90,
+     "mass": 1679.989,
+     "maxV": 1.07,
+     "roughRms": 0.0266,
+     "roughMax": 0.116,
+     "multiCross": 0,
+     "vHeightRough": 0.2526,
+     "vPhiHeightMismatch": 0.5211,
+     "bandRmsSpeed": 0.488,
+     "bandJitterUy": 0.0545,
+     "maxSpeed": 1.935,
+     "pRoughPhi": 0.0277,
+     "pRoughAll": 0.2096,
+     "grantedOnSurface": 77,
+     "grantedMeanV": 65.552,
+     "grantedMeanPhiFill": 12.013,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 269,
+        "mean": 0.086,
+        "rms": 0.379,
+        "lateralResidualRms": 0.1022
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": -0.039,
+        "rms": 0.366,
+        "lateralResidualRms": 0.0848
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": -0.003,
+        "rms": 0.377,
+        "lateralResidualRms": 0.0171
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.086,
+        "rms": 0.2,
+        "lateralResidualRms": 0.0069
+       }
+      },
+      "tiles": 27,
+      "meanShift": 0.111,
+      "rmsShift": 0.333,
+      "maxShift": 0.792,
+      "neighbourStepRms": 0.325,
+      "deficitAll": 7.5,
+      "deficitInBand": 11.9,
+      "cellAbsResidualInBand": 156.8,
+      "shells": {
+       "air>1.5h": [
+        3865,
+        6.5,
+        0
+       ],
+       "air band": [
+        605,
+        113.1,
+        42.6
+       ],
+       "liquid band": [
+        587,
+        484.3,
+        542.8
+       ],
+       "liquid 1.5-4h": [
+        761,
+        750.5,
+        761
+       ],
+       "liquid >4h": [
+        326,
+        325.6,
+        326
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       1,
+       0,
+       325,
+       0
+      ]
+     },
+     "faces": 467,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 100,
+     "mass": 1679.988,
+     "maxV": 1.06,
+     "roughRms": 0.0198,
+     "roughMax": 0.098,
+     "multiCross": 0,
+     "vHeightRough": 0.267,
+     "vPhiHeightMismatch": 0.4243,
+     "bandRmsSpeed": 0.3198,
+     "bandJitterUy": 0.0457,
+     "maxSpeed": 1.071,
+     "pRoughPhi": 0.0209,
+     "pRoughAll": 0.2384,
+     "grantedOnSurface": 80,
+     "grantedMeanV": 66.175,
+     "grantedMeanPhiFill": 15.608,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 343,
+        "mean": 0.048,
+        "rms": 0.279,
+        "lateralResidualRms": 0.0866
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.061,
+        "rms": 0.202,
+        "lateralResidualRms": 0.0434
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.055,
+        "rms": 0.21,
+        "lateralResidualRms": 0.0112
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.093,
+        "rms": 0.162,
+        "lateralResidualRms": 0.0042
+       }
+      },
+      "tiles": 28,
+      "meanShift": 0.077,
+      "rmsShift": 0.311,
+      "maxShift": 0.858,
+      "neighbourStepRms": 0.299,
+      "deficitAll": 14.3,
+      "deficitInBand": 29.8,
+      "cellAbsResidualInBand": 126.5,
+      "shells": {
+       "air>1.5h": [
+        3856,
+        6.4,
+        0
+       ],
+       "air band": [
+        624,
+        116.8,
+        50.4
+       ],
+       "liquid band": [
+        559,
+        473.8,
+        510.3
+       ],
+       "liquid 1.5-4h": [
+        710,
+        690.1,
+        710
+       ],
+       "liquid >4h": [
+        395,
+        392.9,
+        395
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       2,
+       1,
+       0,
+       392,
+       0
+      ]
+     },
+     "faces": 520,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 110,
+     "mass": 1679.987,
+     "maxV": 1.04,
+     "roughRms": 0.0131,
+     "roughMax": 0.072,
+     "multiCross": 0,
+     "vHeightRough": 0.2143,
+     "vPhiHeightMismatch": 0.3651,
+     "bandRmsSpeed": 0.4141,
+     "bandJitterUy": 0.0468,
+     "maxSpeed": 1.257,
+     "pRoughPhi": 0.0147,
+     "pRoughAll": 0.2157,
+     "grantedOnSurface": 79,
+     "grantedMeanV": 58.273,
+     "grantedMeanPhiFill": 18.835,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 326,
+        "mean": -0.065,
+        "rms": 0.312,
+        "lateralResidualRms": 0.0878
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.012,
+        "rms": 0.167,
+        "lateralResidualRms": 0.0343
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.028,
+        "rms": 0.206,
+        "lateralResidualRms": 0.0116
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.069,
+        "rms": 0.141,
+        "lateralResidualRms": 0.0035
+       }
+      },
+      "tiles": 26,
+      "meanShift": -0.007,
+      "rmsShift": 0.313,
+      "maxShift": 0.914,
+      "neighbourStepRms": 0.283,
+      "deficitAll": 23.8,
+      "deficitInBand": 18.9,
+      "cellAbsResidualInBand": 120.2,
+      "shells": {
+       "air>1.5h": [
+        3806,
+        5.3,
+        0
+       ],
+       "air band": [
+        679,
+        104.3,
+        50
+       ],
+       "liquid band": [
+        600,
+        511.8,
+        547.2
+       ],
+       "liquid 1.5-4h": [
+        780,
+        779.3,
+        780
+       ],
+       "liquid >4h": [
+        279,
+        279.2,
+        279
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       279,
+       0
+      ]
+     },
+     "faces": 468,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 120,
+     "mass": 1679.986,
+     "maxV": 1.06,
+     "roughRms": 0.0213,
+     "roughMax": 0.102,
+     "multiCross": 0,
+     "vHeightRough": 0.2286,
+     "vPhiHeightMismatch": 0.3972,
+     "bandRmsSpeed": 0.3744,
+     "bandJitterUy": 0.0429,
+     "maxSpeed": 0.88,
+     "pRoughPhi": 0.0219,
+     "pRoughAll": 0.2362,
+     "grantedOnSurface": 83,
+     "grantedMeanV": 67.927,
+     "grantedMeanPhiFill": 17.829,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 307,
+        "mean": -0.114,
+        "rms": 0.612,
+        "lateralResidualRms": 0.1898
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.027,
+        "rms": 0.268,
+        "lateralResidualRms": 0.0586
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.033,
+        "rms": 0.336,
+        "lateralResidualRms": 0.014
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.11,
+        "rms": 0.206,
+        "lateralResidualRms": 0.0047
+       }
+      },
+      "tiles": 26,
+      "meanShift": 0.045,
+      "rmsShift": 0.64,
+      "maxShift": 2.099,
+      "neighbourStepRms": 0.604,
+      "deficitAll": 25.7,
+      "deficitInBand": 23.2,
+      "cellAbsResidualInBand": 142.8,
+      "shells": {
+       "air>1.5h": [
+        3797,
+        4.7,
+        0
+       ],
+       "air band": [
+        691,
+        115.7,
+        43.9
+       ],
+       "liquid band": [
+        600,
+        505.8,
+        554.4
+       ],
+       "liquid 1.5-4h": [
+        774,
+        771.8,
+        774
+       ],
+       "liquid >4h": [
+        282,
+        282,
+        282
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       282,
+       0
+      ]
+     },
+     "faces": 485,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 130,
+     "mass": 1679.985,
+     "maxV": 1.21,
+     "roughRms": 0.0151,
+     "roughMax": 0.058,
+     "multiCross": 0,
+     "vHeightRough": 0.2337,
+     "vPhiHeightMismatch": 0.4328,
+     "bandRmsSpeed": 0.2723,
+     "bandJitterUy": 0.0505,
+     "maxSpeed": 1.072,
+     "pRoughPhi": 0.0162,
+     "pRoughAll": 0.2178,
+     "grantedOnSurface": 83,
+     "grantedMeanV": 65.096,
+     "grantedMeanPhiFill": 16.951,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 310,
+        "mean": 0.017,
+        "rms": 0.326,
+        "lateralResidualRms": 0.1062
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.024,
+        "rms": 0.231,
+        "lateralResidualRms": 0.0473
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.045,
+        "rms": 0.252,
+        "lateralResidualRms": 0.0152
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.091,
+        "rms": 0.203,
+        "lateralResidualRms": 0.0044
+       }
+      },
+      "tiles": 26,
+      "meanShift": 0.084,
+      "rmsShift": 0.344,
+      "maxShift": 0.931,
+      "neighbourStepRms": 0.336,
+      "deficitAll": 30.4,
+      "deficitInBand": 27.1,
+      "cellAbsResidualInBand": 138.6,
+      "shells": {
+       "air>1.5h": [
+        3880,
+        3.7,
+        0
+       ],
+       "air band": [
+        608,
+        114.5,
+        44.7
+       ],
+       "liquid band": [
+        609,
+        515.2,
+        557.9
+       ],
+       "liquid 1.5-4h": [
+        629,
+        628.7,
+        629
+       ],
+       "liquid >4h": [
+        418,
+        417.9,
+        418
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       1,
+       416,
+       1
+      ]
+     },
+     "faces": 497,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 140,
+     "mass": 1679.984,
+     "maxV": 1.05,
+     "roughRms": 0.0339,
+     "roughMax": 0.398,
+     "multiCross": 0,
+     "vHeightRough": 0.2364,
+     "vPhiHeightMismatch": 0.3976,
+     "bandRmsSpeed": 0.4175,
+     "bandJitterUy": 0.0733,
+     "maxSpeed": 1.524,
+     "pRoughPhi": 0.0344,
+     "pRoughAll": 0.2374,
+     "grantedOnSurface": 80,
+     "grantedMeanV": 62.17,
+     "grantedMeanPhiFill": 14.237,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 335,
+        "mean": -0.021,
+        "rms": 0.347,
+        "lateralResidualRms": 0.095
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.026,
+        "rms": 0.247,
+        "lateralResidualRms": 0.0478
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.042,
+        "rms": 0.286,
+        "lateralResidualRms": 0.0137
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.102,
+        "rms": 0.198,
+        "lateralResidualRms": 0.004
+       }
+      },
+      "tiles": 28,
+      "meanShift": 0.108,
+      "rmsShift": 0.417,
+      "maxShift": 1.135,
+      "neighbourStepRms": 0.313,
+      "deficitAll": 21.7,
+      "deficitInBand": 24.5,
+      "cellAbsResidualInBand": 125.7,
+      "shells": {
+       "air>1.5h": [
+        3846,
+        2.9,
+        0
+       ],
+       "air band": [
+        639,
+        107.8,
+        51.6
+       ],
+       "liquid band": [
+        597,
+        513,
+        544.7
+       ],
+       "liquid 1.5-4h": [
+        699,
+        693.6,
+        699
+       ],
+       "liquid >4h": [
+        363,
+        362.6,
+        363
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       1,
+       0,
+       362,
+       0
+      ]
+     },
+     "faces": 475,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 150,
+     "mass": 1679.983,
+     "maxV": 1.04,
+     "roughRms": 0.0207,
+     "roughMax": 0.127,
+     "multiCross": 0,
+     "vHeightRough": 0.2289,
+     "vPhiHeightMismatch": 0.3809,
+     "bandRmsSpeed": 0.274,
+     "bandJitterUy": 0.031,
+     "maxSpeed": 0.653,
+     "pRoughPhi": 0.0216,
+     "pRoughAll": 0.2047,
+     "grantedOnSurface": 71,
+     "grantedMeanV": 61.5,
+     "grantedMeanPhiFill": 15.038,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 357,
+        "mean": -0.007,
+        "rms": 0.31,
+        "lateralResidualRms": 0.1214
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.046,
+        "rms": 0.144,
+        "lateralResidualRms": 0.03
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.022,
+        "rms": 0.183,
+        "lateralResidualRms": 0.0117
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.067,
+        "rms": 0.104,
+        "lateralResidualRms": 0.0032
+       }
+      },
+      "tiles": 28,
+      "meanShift": 0.05,
+      "rmsShift": 0.342,
+      "maxShift": 0.758,
+      "neighbourStepRms": 0.446,
+      "deficitAll": 12.7,
+      "deficitInBand": 19.6,
+      "cellAbsResidualInBand": 122.1,
+      "shells": {
+       "air>1.5h": [
+        3679,
+        3.5,
+        0
+       ],
+       "air band": [
+        802,
+        109.5,
+        49.2
+       ],
+       "liquid band": [
+        562,
+        476.3,
+        517.1
+       ],
+       "liquid 1.5-4h": [
+        821,
+        810.7,
+        821
+       ],
+       "liquid >4h": [
+        280,
+        279.9,
+        280
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       280,
+       0
+      ]
+     },
+     "faces": 487,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 160,
+     "mass": 1679.981,
+     "maxV": 1.05,
+     "roughRms": 0.0196,
+     "roughMax": 0.14,
+     "multiCross": 0,
+     "vHeightRough": 0.2074,
+     "vPhiHeightMismatch": 0.414,
+     "bandRmsSpeed": 0.3468,
+     "bandJitterUy": 0.038,
+     "maxSpeed": 0.818,
+     "pRoughPhi": 0.0203,
+     "pRoughAll": 0.1615,
+     "grantedOnSurface": 59,
+     "grantedMeanV": 51.106,
+     "grantedMeanPhiFill": 13.042,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 334,
+        "mean": 0.042,
+        "rms": 0.365,
+        "lateralResidualRms": 0.101
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.065,
+        "rms": 0.239,
+        "lateralResidualRms": 0.0362
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.052,
+        "rms": 0.243,
+        "lateralResidualRms": 0.0105
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.082,
+        "rms": 0.19,
+        "lateralResidualRms": 0.0032
+       }
+      },
+      "tiles": 26,
+      "meanShift": 0.051,
+      "rmsShift": 0.333,
+      "maxShift": 0.802,
+      "neighbourStepRms": 0.293,
+      "deficitAll": 11.5,
+      "deficitInBand": 23.7,
+      "cellAbsResidualInBand": 112.2,
+      "shells": {
+       "air>1.5h": [
+        3746,
+        2.6,
+        0
+       ],
+       "air band": [
+        741,
+        108,
+        52.9
+       ],
+       "liquid band": [
+        557,
+        484.2,
+        515.6
+       ],
+       "liquid 1.5-4h": [
+        798,
+        783.2,
+        798
+       ],
+       "liquid >4h": [
+        302,
+        302.1,
+        302
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       302,
+       0
+      ]
+     },
+     "faces": 479,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 170,
+     "mass": 1679.981,
+     "maxV": 1.04,
+     "roughRms": 0.0152,
+     "roughMax": 0.06,
+     "multiCross": 0,
+     "vHeightRough": 0.2291,
+     "vPhiHeightMismatch": 0.4141,
+     "bandRmsSpeed": 0.3351,
+     "bandJitterUy": 0.0445,
+     "maxSpeed": 0.986,
+     "pRoughPhi": 0.0158,
+     "pRoughAll": 0.2245,
+     "grantedOnSurface": 79,
+     "grantedMeanV": 64.754,
+     "grantedMeanPhiFill": 15.525,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 341,
+        "mean": -0.037,
+        "rms": 0.402,
+        "lateralResidualRms": 0.1042
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.04,
+        "rms": 0.269,
+        "lateralResidualRms": 0.0538
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.052,
+        "rms": 0.288,
+        "lateralResidualRms": 0.0134
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.1,
+        "rms": 0.218,
+        "lateralResidualRms": 0.0051
+       }
+      },
+      "tiles": 28,
+      "meanShift": 0.076,
+      "rmsShift": 0.473,
+      "maxShift": 1.216,
+      "neighbourStepRms": 0.331,
+      "deficitAll": 16.5,
+      "deficitInBand": 16.3,
+      "cellAbsResidualInBand": 136.6,
+      "shells": {
+       "air>1.5h": [
+        3889,
+        3,
+        0
+       ],
+       "air band": [
+        594,
+        118.3,
+        54.2
+       ],
+       "liquid band": [
+        590,
+        490.4,
+        538.2
+       ],
+       "liquid 1.5-4h": [
+        716,
+        713.2,
+        716
+       ],
+       "liquid >4h": [
+        355,
+        355,
+        355
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       355,
+       0
+      ]
+     },
+     "faces": 476,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    },
+    {
+     "frame": 180,
+     "mass": 1679.98,
+     "maxV": 1.07,
+     "roughRms": 0.0164,
+     "roughMax": 0.06,
+     "multiCross": 0,
+     "vHeightRough": 0.2275,
+     "vPhiHeightMismatch": 0.3662,
+     "bandRmsSpeed": 0.352,
+     "bandJitterUy": 0.043,
+     "maxSpeed": 1.042,
+     "pRoughPhi": 0.0178,
+     "pRoughAll": 0.1915,
+     "grantedOnSurface": 60,
+     "grantedMeanV": 43.853,
+     "grantedMeanPhiFill": 12.504,
+     "tileShift": {
+      "shiftFields": {
+       "disjointTiles": {
+        "columns": 270,
+        "mean": 0.017,
+        "rms": 0.229,
+        "lateralResidualRms": 0.0612
+       },
+       "blurredTiles": {
+        "columns": 384,
+        "mean": 0.028,
+        "rms": 0.204,
+        "lateralResidualRms": 0.0457
+       },
+       "cellTent_r2": {
+        "columns": 384,
+        "mean": 0.029,
+        "rms": 0.38,
+        "lateralResidualRms": 0.019
+       },
+       "cellTent_r4": {
+        "columns": 384,
+        "mean": 0.105,
+        "rms": 0.182,
+        "lateralResidualRms": 0.0035
+       }
+      },
+      "tiles": 23,
+      "meanShift": 0.097,
+      "rmsShift": 0.278,
+      "maxShift": 0.743,
+      "neighbourStepRms": 0.233,
+      "deficitAll": 19.4,
+      "deficitInBand": 18.1,
+      "cellAbsResidualInBand": 113.4,
+      "shells": {
+       "air>1.5h": [
+        3855,
+        2.3,
+        0
+       ],
+       "air band": [
+        632,
+        100,
+        42.2
+       ],
+       "liquid band": [
+        575,
+        496.7,
+        536.3
+       ],
+       "liquid 1.5-4h": [
+        695,
+        694,
+        695
+       ],
+       "liquid >4h": [
+        387,
+        387,
+        387
+       ]
+      },
+      "deepInteriorVHist_lt25_lt75_lt98_full_over": [
+       0,
+       0,
+       0,
+       387,
+       0
+      ]
+     },
+     "faces": 458,
+     "moved": 0,
+     "meanDTheta": 0,
+     "dThetaMax": 0,
+     "meanRelPressure": 0,
+     "airClamped": 0,
+     "liquidOverridden": 0,
+     "granted": 0,
+     "grantedIsolated": 0
+    }
+   ]
+  }
+ },
+ "errors": []
+}
