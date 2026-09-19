@@ -219,13 +219,19 @@ export class WebGPUUniformVelocityExtrapolator {
     this.activeStateTexture = this.resolvedDistances;
 
     // CM11b Sec. 3.3.1 requires the reverse pass to leave every finest-grid
-    // value known. Its coarsest tall-cell level spans the short axis. On this
-    // regular-grid adaptation, include the /2 level that likewise collapses
-    // the shortest extent to one cell; stopping one level earlier leaves an
-    // unsupported upper slab. Ceil division preserves coverage for scene
-    // sizes that are not exact powers of two.
+    // value known, which takes a coarsest level that sees liquid from every
+    // cell: coarsen until EVERY axis is one cell, a collapsed axis staying at
+    // one (ceil(1/2) = 1). Stopping when the shortest axis collapses -- the
+    // tall-cell reading, whose coarsest level spans the short vertical --
+    // covers that axis only. The paper's 2D figures run as a 128x128x8 slab,
+    // which then topped out at 16x16x1: the fill reached one 8-cell block past
+    // the liquid, every face beyond it packed as zero, and a falling ball's
+    // lower surface met still air and was sliced flat at a block boundary
+    // every step. Prolongation fills only unknown values, so levels above one
+    // that is already fully known change nothing. Ceil division preserves
+    // coverage for scene sizes that are not exact powers of two.
     let levelDims: Dims3 = dims;
-    while (Math.min(...levelDims) > 1) {
+    while (Math.max(...levelDims) > 1) {
       levelDims = [
         Math.ceil(levelDims[0] / 2),
         Math.ceil(levelDims[1] / 2),
@@ -262,10 +268,15 @@ export class WebGPUUniformVelocityExtrapolator {
       const filledFine = levelIndex >= 0
         ? this.hierarchyLevels[levelIndex].up
         : this.valuesA;
+      // As in the restrict: a level with a collapsed axis has no active-region
+      // ABI entry and is dispatched whole. Only the continuation past the
+      // shortest axis makes such a level a prolong target.
+      const indirect = this.activeDispatch !== undefined
+        && (levelIndex < 0 || Math.min(...this.hierarchyLevels[levelIndex].dims) > 1);
       const hierarchyConfig = frontBuffer({
         sourceParity: 0, targetParity: 0,
         hierarchyTargetUsesBaseDims: levelIndex < 0,
-        activeLevel: this.activeDispatch ? (levelIndex < 0 ? 0 : levelIndex + 1) : -1,
+        activeLevel: indirect ? (levelIndex < 0 ? 0 : levelIndex + 1) : -1,
       });
       this.hierarchyUpGroups.push(group(
         currentVelocity, coarser, existingFine, filledFine, this.valuesB, hierarchyConfig,
@@ -417,9 +428,10 @@ export class WebGPUUniformVelocityExtrapolator {
       const targetDims = levelIndex >= 0 ? this.hierarchyLevels[levelIndex].dims : this.dims;
       const pass = encoder.beginComputePass({ label: `${prefix} hierarchy prolong ${passIndex + 1}` });
       pass.setPipeline(pipelines.prolong); pass.setBindGroup(0, this.hierarchyUpGroups[passIndex]);
-      if (this.activeDispatch) pass.dispatchWorkgroupsIndirect(this.activeDispatch,
-        levelIndex < 0 ? 13 * 4 : (16 + (levelIndex + 1) * 10 + 3) * 4);
-      else pass.dispatchWorkgroups(
+      if (this.activeDispatch && (levelIndex < 0 || Math.min(...targetDims) > 1)) {
+        pass.dispatchWorkgroupsIndirect(this.activeDispatch,
+          levelIndex < 0 ? 13 * 4 : (16 + (levelIndex + 1) * 10 + 3) * 4);
+      } else pass.dispatchWorkgroups(
         Math.ceil(targetDims[0] / 4), Math.ceil(targetDims[1] / 4), Math.ceil(targetDims[2] / 4));
       pass.end();
     }
