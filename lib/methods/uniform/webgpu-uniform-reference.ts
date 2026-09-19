@@ -126,8 +126,11 @@ export interface WebGPUUniformReferenceOptions {
    * Geometric only. A cell holding at least half its open capacity in V owns a
    * pressure row even where centre phi is positive, so sub-half-cell films keep
    * incompressibility and Sec. 3.7's excess divergence can reach stacked V.
+   * "abandoned" (or true) restricts that to cells with no phi-liquid face
+   * neighbour; "all" lets V move the free surface beside phi-liquid too, which
+   * roughens every surface (docs/research/uniform-geometric-thin-film-2026-09-19).
    */
-  volumePressureRows?: boolean;
+  volumePressureRows?: boolean | "off" | "abandoned" | "all";
   liquidCapacityBalancing?: boolean;
   liquidCapacityBalancingRounds?: number;
   liquidCapacityBalancingTolerance?: number;
@@ -326,7 +329,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   /** Extra 4h tiles the transport set adds past the fine set. */
   private transportReach: number;
   /** V may claim a pressure row that centre phi alone would deny. */
-  private volumePressureRows: boolean;
+  private volumePressureRows: 0 | 1 | 2;
   /** The transport restriction was encoded in the most recent step. */
   private transportTilesEncoded = false;
   /** Coarse cells whose E1 tables fit the conditioning plane; 0 disables E1. */
@@ -512,7 +515,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // be a restriction at all (the front stalls; nothing is created or lost).
     this.transportReach = Number.isFinite(options.transportReach)
       ? Math.round(Math.min(8, Math.max(-8, options.transportReach!))) : 1;
-    this.volumePressureRows = options.volumePressureRows === true;
+    this.volumePressureRows = options.volumePressureRows === "all" ? 2 : options.volumePressureRows === true || options.volumePressureRows === "abandoned" ? 1 : 0;
     this.liquidCapacityBalancing = options.liquidCapacityBalancing === true;
     this.liquidCapacityBalancingRounds = Number.isFinite(options.liquidCapacityBalancingRounds)
       ? Math.round(Math.min(64, Math.max(1, options.liquidCapacityBalancingRounds!))) : 64;
@@ -1050,7 +1053,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       // never taken and the four map passes are never encoded.
       // w: geometric only, V claims pressure rows. The paper shader's use of
       // this word (level-set authority) has always been written as zero.
-      this.twoLevelEnabled ? this.twoLevelFineReach : -1, this.geometricVolume && this.volumePressureRows ? 1 : 0,
+      this.twoLevelEnabled ? this.twoLevelFineReach : -1, this.geometricVolume ? this.volumePressureRows : 0,
       this.scene.fluid.surfaceTension_N_m, c.fluidWallMode === "no-slip" ? 1 : 0, activeBodyCount, c.top === "open" ? 1 : 0,
       outlet?.x ?? 0, outlet?.y ?? 0, outlet?.z ?? 0, inflow?.radius_m ?? 0,
       inflow?.velocity_m_s.x ?? 0, inflow?.velocity_m_s.y ?? 0, inflow?.velocity_m_s.z ?? 0, this.inflowBoundary?.apertureScale ?? 0,
@@ -1144,7 +1147,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       if (values.twoLevelShellReach !== undefined) this.twoLevelShellReach = Math.round(finite("twoLevelShellReach", 1, 0, 8));
       if (values.transportWorkMap !== undefined) this.transportTiles = values.transportWorkMap !== "dense";
       if (values.transportReach !== undefined) this.transportReach = Math.round(finite("transportReach", 1, -8, 8));
-      if (values.volumePressureRows !== undefined) this.volumePressureRows = values.volumePressureRows !== "off";
+      if (values.volumePressureRows !== undefined) this.volumePressureRows = values.volumePressureRows === "all" ? 2 : values.volumePressureRows === "off" ? 0 : 1;
       this.geometricRedistance = values.redistance !== "off";
       this.liquidCapacityBalancing = values.liquidCapacityBalancing === "on";
       this.liquidCapacityBalancingRounds = Math.round(finite("liquidCapacityBalancingRounds", 64, 1, 64));

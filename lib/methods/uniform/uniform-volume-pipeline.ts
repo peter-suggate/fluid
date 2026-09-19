@@ -129,7 +129,8 @@ const transportReach = (context: FluidPipelineContext) => {
     displacement:info?.uniformTransportMaxDisplacement_cells ?? 0};
 };
 const volumePressureRowsControl = {kind:"param-choice" as const,param:"volumePressureRows",label:"Volume pressure rows",
-  options:[{value:"on",label:"On",hint:"A cell holding at least half its open capacity in V owns a pressure row even where centre phi is positive, at the ghost distance that fill implies. Thin films keep incompressibility and the excess-volume divergence can reach V stacked in phi-dry cells."},
+  options:[{value:"abandoned",label:"Abandoned",hint:"A cell holding at least half its open capacity in V owns a pressure row where centre phi is positive AND no face neighbour is phi-liquid: exactly the cells whose faces the projection would zero. Thin films keep incompressibility; beside a phi surface, phi alone places the free surface."},
+    {value:"all",label:"All",hint:"V claims the row, and sets the ghost distance, wherever it implies more liquid than phi. V sits in a patchy one-cell layer over a phi surface, so random columns read a cell taller than their neighbours and the surface bubbles. Kept for comparison."},
     {value:"off",label:"Off",hint:"Rows from centre phi alone: the control. A film under half a cell has no pressure, and with no liquid centre left the solve stops."}]};
 const transportControls = [
   {kind:"param-choice" as const,param:"transportWorkMap",label:"Transport work",

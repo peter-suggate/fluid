@@ -237,7 +237,36 @@ fn pressureDensity(p:vec3i)->f32{
   return continued;
 }
 fn pressurePhi(p:vec3i)->f32{
-  ${geometric ? "return uvPhi(vec3f(clampCell(p))+vec3f(0.5));" : `
+  ${geometric ? `
+  // Vertex phi is transported non-conservatively and nothing returns it to V,
+  // so a film thinner than half a cell has a positive centre and, on phi
+  // alone, no pressure row: its faces are zeroed by the projection, V rides
+  // the extrapolated field into the far wall and stacks there, and Sec. 3.7's
+  // excess divergence -- the only V-to-dynamics coupling -- sits inside the
+  // row it was denied. params.physical.w lets V claim the row: a cell holding
+  // at least half its open capacity is liquid, at the ghost distance that
+  // fill implies. Every consumer of the pressure interface (rows, RHS, ghost
+  // fractions, the multigrid topology and the extension's source test) reads
+  // this one function, so they cannot disagree about which cells are liquid.
+  //
+  // w=1 grants that row only to a cell the projection abandons: one with no
+  // phi-liquid face neighbour, whose faces are all air-air. V is conservative,
+  // not geometric -- beside a phi surface it sits in a patchy one-cell layer
+  // (V near 0.9 where phi's fill reads 0.15), so letting it place the free
+  // surface there makes random columns a full cell taller than their
+  // neighbours: rho*g*h across one face, every step, which is the bubbling.
+  // A cell beside phi-liquid already has a projected face, so phi keeps it.
+  // w=2 is that unrestricted rule, min(phi, V distance) everywhere.
+  let q=clampCell(p);let phi=uvPhi(vec3f(q)+vec3f(0.5));
+  let open=cellOpenFraction(q);
+  if(params.physical.w<0.5||open<=1e-5){return phi;}
+  let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
+  let volumePhi=h*(0.5-volume(q)/open);
+  if(params.physical.w>1.5){return min(phi,volumePhi);}
+  if(phi<0.0||volumePhi>=0.0){return phi;}
+  for(var axis=0;axis<3;axis+=1){for(var side=-1;side<=1;side+=2){
+    var n=q;n[axis]+=side;if(valid(n)&&uvPhi(vec3f(n)+vec3f(0.5))<0.0){return phi;}}}
+  return max(volumePhi,-0.5*h);` : `
   let dx=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
   return -(pressureDensity(p)-0.5)*dx;`}
 }
