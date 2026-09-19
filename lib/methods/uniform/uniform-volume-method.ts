@@ -13,10 +13,9 @@ const params: MethodParamSpec[] = uniformMethod.params.filter(p => !omitted.has(
   // V alone, and that every geometric kernel — the vertex phi lattice
   // included — is dispatched from its origin. Measured on the tall-air fixture
   // (docs/research/uniform-geometric-tall-air-2026-09-19/solve-window-report.md):
-  // -23% on a 4x-taller domain, +1.1% on the small one. Default stays OFF until
-  // the defaults benchmark that is running against it lands.
+  // -23% on a 4x-taller domain, +1.1% on the small one.
   if (p.key === "activeRegion" && p.kind === "select") return { ...p,
-    label: "Solve window", default: "off",
+    label: "Solve window", default: "on",
     options: [{ value: "on", label: "Liquid window" }, { value: "off", label: "Whole domain" }],
     hint: "Run every kernel, every pressure-multigrid pass and every extension-hierarchy pass on the box holding the liquid, the near-surface band and this step's sources, padded by the largest reach any stage uses and aligned to the 4h tile lattice. A domain that is mostly empty air then costs what its liquid costs. Needs the volume dust floor above zero, which is what makes V exactly zero outside the box. Whole domain is the dense control." };
   // Two sweeps: the front only needs to carry the band one cell per step, and the

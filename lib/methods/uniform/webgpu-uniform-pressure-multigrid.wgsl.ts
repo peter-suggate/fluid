@@ -200,7 +200,15 @@ fn mgBuildFinestRhs(@builtin(global_invocation_id) gid:vec3u){
     if(pressureLiquid(simulation)){
       let checkSolid=nearAnyBody(worldCell(simulation));rhs=params.physical.x*(divergenceAt(simulation,checkSolid)-volumeCorrectionDivergence(simulation))/params.dimsDt.w;
     }
-  }else if(!mgOpenTopHalo(id,mg.levelDims.xyz)){minimum=0.0;}
+  }else if(!mgOpenTopHalo(id,mg.levelDims.xyz)){
+    minimum=0.0;
+    // The solid halo is a constrained pressure row, not prescribed p=0.
+    // Its incident predicted wall flux must enter b, or positive contact
+    // pressure cannot cancel velocity directed into the exterior solid.
+    if(geometricVolumeEnabled()&&pressurePhi(simulation)<0.0){
+      rhs=params.physical.x*divergenceAt(simulation,false)/params.dimsDt.w;
+    }
+  }
   // The hierarchy uses A p = b with A p = sum a(p_i-p_j). The existing fine
   // projection convention therefore publishes b=-rho div(u*)/dt.
   textureStore(mgRhsOut,id,vec4f(-rhs));

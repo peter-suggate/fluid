@@ -379,7 +379,8 @@ fn pressureDensity(p:vec3i)->f32{
   for(var index=0;index<6;index+=1){let q=p+offsets[index];if(cellOpenFraction(q)>1e-5){continued=max(continued,pressureDensityOpen(q));}}
   return continued;
 }
-fn pressurePhi(p:vec3i)->f32{
+fn geometricVolumeEnabled()->bool{return ${geometric ? "true" : "false"};}
+fn pressureSurfacePhi(p:vec3i)->f32{
   ${geometric ? `
   // Vertex phi is transported non-conservatively and nothing returns it to V,
   // so a film thinner than half a cell has a positive centre and, on phi
@@ -413,12 +414,26 @@ fn pressurePhi(p:vec3i)->f32{
   let dx=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
   return -(pressureDensity(p)-0.5)*dx;`}
 }
+// CM11a includes one layer of solid pressure unknowns. Continue the liquid
+// interface from open neighbours, never from stale phi trapped inside solid.
+fn pressurePhi(p:vec3i)->f32{
+  if(!geometricVolumeEnabled()||cellOpenFraction(p)>1e-5){return pressureSurfacePhi(p);}
+  let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
+  if(params.boundary.w>0.5&&p.y==dims().y&&p.x>=0&&p.x<dims().x&&p.z>=0&&p.z<dims().z){return 0.5*h;}
+  let offsets=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
+  var terms:array<f32,6>;var weights:array<f32,6>;
+  for(var i=0u;i<6u;i++){let q=p+offsets[i];let open=cellOpenFraction(q);
+    terms[i]=0.0;weights[i]=0.0;if(open<=1e-5){continue;}
+    let phi=pressureSurfacePhi(q);if(phi<0.0){terms[i]=open*phi;weights[i]=open;}}
+  let weight=d4Sum6(weights);
+  return select(0.5*h,d4Sum6(terms)/max(weight,1e-9),weight>0.0);
+}
 // Sec. 3.7 explicitly extrapolates rho' into adjacent V=0 cells so those
 // cells participate in the pressure system. Do not filter them back out by V.
 fn pressureLiquid(p:vec3i)->bool{return valid(p)&&${geometric ? "pressurePhi(p)<0.0" : "pressureDensity(p)>0.5"};}
 fn ghostFluidFraction(liquidCell:vec3i,airCell:vec3i)->f32{
   let liquidPhi=pressurePhi(liquidCell);let airPhi=pressurePhi(airCell);
-  return cm12GhostFluidTheta(liquidPhi,airPhi,1e-6);
+  return cm12GhostFluidTheta(liquidPhi,airPhi,${geometric ? "1e-9" : "1e-6"});
 }
 fn sampledFaceVelocity(p:vec3i,component:u32)->f32{
   let d=dims();if(p[component]<0||p[component]>=d[component]){return 0.0;}
@@ -720,13 +735,19 @@ fn extrapolatedRigidVelocityAtFace(world:vec3f)->vec3f{
 fn pressureFaceData(id:vec3i,axis:u32)->vec4f{
   var neighbor=id;neighbor[axis]+=1;
   ${geometric ? `if(valid(id)!=valid(neighbor)){
-    let upper=valid(id);let inward=select(1.0,-1.0,upper);
-    let acceleration=select(0.0,params.cellGravity.w,axis==1u);
-    let released=inward*acceleration>0.5*abs(params.cellGravity.w);
-    let ambient=axis==1u&&upper&&params.boundary.w>0.5;
-    return vec4f(0.0,0.0,0.0,select(select(0.0,0.5,released),1.0,ambient));
+    if(axis==2u&&depthSymmetry()){return vec4f(0.0);}
+    let ambient=axis==1u&&max(id.y,neighbor.y)==dims().y&&params.boundary.w>0.5;
+    // Intersect the domain wall with interior voxel/terrain/body occupancy.
+    // Half a dual cell is fluid only when its interior half is open.
+    let interior=select(neighbor,id,valid(id));
+    let open=cellOpenFraction(interior);
+    return vec4f(0.0,0.0,0.0,select(0.5*open,0.5*(1.0+open),ambient));
   }
-  if(staticSolidVoxelOccupied(id)||staticSolidVoxelOccupied(neighbor)){return vec4f(0.0);}` : ""}
+  if(staticSolidVoxelOccupied(id)||staticSolidVoxelOccupied(neighbor)){
+    // The pressure weight is dual volume, not the blocked transport aperture.
+    let open=0.5*(cellOpenFraction(id)+cellOpenFraction(neighbor));
+    return vec4f(0.0,0.0,0.0,open);
+  }` : ""}
   if(staticSolidVoxelOccupied(id)||staticSolidVoxelOccupied(neighbor)){
     return vec4f(0.0,0.0,0.0,0.5);
   }
@@ -759,7 +780,7 @@ fn pressureFaceVolumeFraction(id:vec3i,axis:u32)->f32{return pressureFaceData(id
 fn storeExtrapolationAuthority(id:vec3i){if(!valid(id)){return;}
   textureStore(volumeOut,id,vec4f(${geometric ? "0.5-pressurePhi(id)/min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z))" : "pressureDensity(id)"}));
   textureStore(velocityOut,id,vec4f(
-    faceOpenFraction(id,0u),faceOpenFraction(id,1u),faceOpenFraction(id,2u),0.0));
+    ${geometric ? "pressureFaceVolumeFraction(id,0u),pressureFaceVolumeFraction(id,1u),pressureFaceVolumeFraction(id,2u)" : "faceOpenFraction(id,0u),faceOpenFraction(id,1u),faceOpenFraction(id,2u)"},0.0));
 }
 @compute @workgroup_size(4,4,4)
 fn buildExtrapolationAuthority(@builtin(global_invocation_id) gid:vec3u){storeExtrapolationAuthority(activeId(gid));}
@@ -1246,6 +1267,27 @@ fn curvatureAt(id:vec3i)->f32{
   return -((x+z)+y);
 }
 
+${geometric ? `
+// Match the finest CM11a matrix for interior and domain faces alike. Halo
+// pressure texels can hold transfer scratch even when they have no row;
+// canonical air pressure is zero, never the stored texel in that case.
+fn geometricPressureValue(p:vec3i)->f32{
+  return select(0.0,projectPressureValue(p),pressurePhi(p)<0.0);
+}
+fn geometricProjectedFace(id:vec3i,axis:u32,predicted:f32)->f32{
+  var q=id;q[axis]+=1;
+  let face=pressureFaceData(id,axis);
+  if(face.w<=1e-6){return face[axis];}
+  let a=pressurePhi(id)<0.0;let b=pressurePhi(q)<0.0;
+  if(!a&&!b){return 0.0;}
+  var theta=1.0;
+  if(a&&!b){theta=ghostFluidFraction(id,q);}
+  if(!a&&b){theta=ghostFluidFraction(q,id);}
+  return predicted-params.dimsDt.w/params.physical.x*
+    (geometricPressureValue(q)-geometricPressureValue(id))/(params.cellGravity[axis]*theta);
+}
+` : ""}
+
 @compute @workgroup_size(4,4,4)
 fn project(@builtin(global_invocation_id) gid: vec3u) {
   let id=activeId(gid); if (!valid(id)) { return; }${geometric ? `
@@ -1264,6 +1306,11 @@ fn project(@builtin(global_invocation_id) gid: vec3u) {
   let neighbors=array<vec3i,3>(ex,ey,ez);
   for(var axis=0u;axis<3u;axis+=1u){
     let neighbor=neighbors[axis];
+    ${geometric ? `
+    if(id[axis]==0){var halo=id;halo[axis]-=1;
+      boundaryV[axis]=geometricProjectedFace(halo,axis,boundaryV[axis]);}
+    v[axis]=geometricProjectedFace(id,axis,v[axis]);
+    ` : `
     if(id[axis]==0){
       var halo=id;halo[axis]-=1;
       let boundaryOpen=pressureFaceVolumeFraction(halo,axis);
@@ -1300,8 +1347,23 @@ fn project(@builtin(global_invocation_id) gid: vec3u) {
       if(!centreLiquid&&neighborLiquid){theta=ghostFluidFraction(neighbor,id);}
       v[axis]-=scale*(p1-p0)/(h[axis]*theta);
     }else{v[axis]=0.0;}
+    `}
   }
-  v=applyInflowVelocity(id,v);textureStore(velocityOut,id,vec4f(v,0.0));storeBoundaryVelocity(id,boundaryV); textureStore(volumeOut,id,vec4f(textureLoad(volumeIn,id,0).x));
+  var released=0u;
+  ${geometric ? `
+  // Publish the solved contact active set with the MAC field. Phi must not
+  // infer release from a tiny velocity residual at pressure-supported walls.
+  for(var axis=0u;axis<3u;axis++){
+    var q=id;q[axis]+=1;let ownOpen=cellOpenFraction(id);let otherOpen=cellOpenFraction(q);
+    if((ownOpen>1e-5)!=(otherOpen>1e-5)){
+      let solid=select(id,q,ownOpen>1e-5);let inward=select(1.0,-1.0,ownOpen>1e-5);
+      let wall=pressureFaceData(id,axis);
+      if(wall.w>1e-6&&geometricPressureValue(solid)<=0.0&&inward*(v[axis]-wall[axis])*params.dimsDt.w>1e-4*h[axis]){released|=1u<<axis;}
+    }
+    if(id[axis]==0){var halo=id;halo[axis]-=1;
+      if(cellOpenFraction(id)>1e-5&&pressureFaceVolumeFraction(halo,axis)>1e-6&&geometricPressureValue(halo)<=0.0&&boundaryV[axis]*params.dimsDt.w>1e-4*h[axis]){released|=1u<<(axis+3u);}}
+  }` : ""}
+  v=applyInflowVelocity(id,v);textureStore(velocityOut,id,vec4f(v,f32(released)));storeBoundaryVelocity(id,boundaryV); textureStore(volumeOut,id,vec4f(textureLoad(volumeIn,id,0).x));
 }
 
 // Moving-solid bookkeeping after the variational projection.  The old
@@ -1331,7 +1393,7 @@ fn coupleRigid(@builtin(global_invocation_id) gid:vec3u){
   // The nozzle mouth is an open boundary. Coupling the visual nozzle body
   // must not replace the prescribed reservoir velocity at that opening.
   v=applyInflowVelocity(id,v);
-  textureStore(velocityOut,id,vec4f(v,0.0));textureStore(volumeOut,id,vec4f(phi));
+  textureStore(velocityOut,id,vec4f(v,textureLoad(velocityIn,id,0).w));textureStore(volumeOut,id,vec4f(phi));
 }
 
 // Paper Sec 3.9.1 phi-s for the resident adaptive level set. While an adaptive

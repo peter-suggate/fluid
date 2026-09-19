@@ -1,8 +1,9 @@
+import { uniformVolumeDonorSumWGSL } from "./uniform-volume-donor-sum.wgsl";
 import { geometricPlaneBoxWGSL } from "../../core/geometric-plane-box.wgsl";
 /** Dense vertex phi and fixed receiver stencils; all positions are lattice units. */
 export const UNIFORM_VOLUME_ENTRIES = [
-  "uvAdvectPhi", "uvRedistancePhi", "uvBuildEdges", "uvSumDonors",
-  "uvFallback", "uvNormalizeRows", "uvNormalizeDonors", "uvGather",
+  "uvAdvectPhi", "uvRedistancePhi", "uvBuildEdges",
+  "uvFinishDonorSums", "uvFinishLiquidDonorSums", "uvFallback", "uvNormalizeRows", "uvNormalizeDonors", "uvGather",
   "uvPrepareSharpen", "uvProposeSharpen", "uvLimitSharpen", "uvCommitSharpen", "uvPublish", "uvBeginLiquidBalance", "uvBalanceLiquidRows",
   "uvBalanceLiquidDonors", "uvFinishLiquidBalance", "uvAgreementResidual",
 ] as const;
@@ -39,13 +40,7 @@ ${geometricPlaneBoxWGSL}
 @group(0) @binding(32) var uvPhiOut:texture_storage_3d<r32float,write>;
 struct UVEdges { donor:array<u32,9>, weight:array<f32,9>, padding:vec2f }
 @group(0) @binding(33) var<storage,read_write> uvEdges:array<UVEdges>;
-// Positive floating point sums avoid fixed-point underflow during balancing.
-fn uvAddDonor(index:u32,value:f32){
-  if(value==0.0){return;}var old=atomicLoad(&sharpenDeposits[index]);
-  loop {let next=bitcast<i32>(bitcast<f32>(old)+value);
-    let result=atomicCompareExchangeWeak(&sharpenDeposits[index],old,next);
-    if(result.exchanged){break;}old=result.old_value;}
-}
+${uniformVolumeDonorSumWGSL}
 fn uvCorner(i:u32)->vec3i{return vec3i(i32(i&1u),i32((i>>1u)&1u),i32((i>>2u)&1u));}
 // THE SOLVE WINDOW. Words 7..12 of the active-region header are the union of
 // this step's padded seed box with the previous one -- the box every windowed
@@ -103,6 +98,12 @@ fn uvSourcePhi(p:vec3f,phi:f32)->f32{
       max(-axial,axial-speed*params.dimsDt.w));result=min(result,plug);}
   return result;
 }
+// Bits published by projection: positive faces 0..2, negative domain faces 3..5.
+fn uvContactReleased(face:vec3i,axis:u32)->bool{
+  var cell=face;var bit=axis;if(face[axis]<0){cell[axis]=0;bit+=3u;}
+  if(!valid(cell)){return false;}
+  return (u32(round(textureLoad(velocityIn,cell,0).w))&(1u<<bit))!=0u;
+}
 // Ambient air swept in by separating MAC wall velocities, in metres.
 fn uvReleasedWalls(p:vec3f,advected:f32)->f32{
   var result=advected;let h=params.cellGravity.xyz;
@@ -110,10 +111,8 @@ fn uvReleasedWalls(p:vec3f,advected:f32)->f32{
     if(axis==2u&&params.tuning.w>0.5){continue;}
     for(var side=0u;side<2u;side++){
       let upper=side==1u;let inward=select(1.0,-1.0,upper);
-      let acceleration=select(0.0,params.cellGravity.w,axis==1u);
-      let released=inward*acceleration>0.5*abs(params.cellGravity.w);
+      // Release is determined by the projected velocity, in every orientation.
       let ambient=axis==1u&&upper&&params.boundary.w>0.5;
-      if(!released&&!ambient){continue;}
       let plane=select(0.0,f32(dims()[axis]),upper);
       for(var corner=0u;corner<4u;corner++){
         var probe=p;probe[(axis+1u)%3u]+=select(-1e-4,1e-4,(corner&1u)!=0u);
@@ -126,8 +125,9 @@ fn uvReleasedWalls(p:vec3f,advected:f32)->f32{
         // answer, reading the stale plane would not be.
         if(!uvInWindow(cell)){continue;}
         let speed=select(boundaryVelocity(cell)[axis],velocity(cell)[axis],upper);
-        let away=inward*speed;
-        if(away>1e-6){result=max(result,params.dimsDt.w*away-inward*(p[axis]-plane)*h[axis]);}
+        let away=inward*speed;var face=cell;if(!upper){face[axis]-=1;}
+        if(!ambient&&!uvContactReleased(face,axis)){continue;}
+        if(params.dimsDt.w*away>1e-4*h[axis]){result=max(result,params.dimsDt.w*away-inward*(p[axis]-plane)*h[axis]);}
       }
     }
   }
@@ -143,16 +143,69 @@ fn uvClosedWallPhi(p:vec3f,advected:f32)->f32{
     for(var side=0u;side<2u;side++){
       let upper=side==1u;let inward=select(1.0,-1.0,upper);
       let plane=select(0.0,f32(dims()[axis]),upper);
-      let acceleration=select(0.0,params.cellGravity.w,axis==1u);
-      let released=inward*acceleration>0.5*abs(params.cellGravity.w);
       let ambient=axis==1u&&upper&&params.boundary.w>0.5;
-      if(abs(p[axis]-plane)>1e-5||released||ambient){continue;}
+      if(abs(p[axis]-plane)>1e-5||ambient){continue;}
+      var probe=p;probe[axis]+=inward;
+      // A dry wall is wetted only by arriving liquid. Copying any nearby wet
+      // interior reattaches a departing sheet after its wall face becomes air.
+      if(advected>=0.0&&inward*sampleVelocity(probe)[axis]>=-1e-6){continue;}
       interior[axis]+=inward;contact=true;
     }
   }
   if(!contact||uvOpen(clampCell(vec3i(floor(interior))))<=1e-5){return advected;}
   let continued=uvPhi(uvTrace(interior,params.dimsDt.w));
   return select(advected,min(advected,continued),continued<0.0);
+}
+// A released embedded wall supplies incoming air just like the domain halo.
+// Follow the characteristic to its first solid hit; this reaches a wall even
+// when one step sweeps several cells. Scalar mass transport still stops there.
+fn uvEmbeddedAir(p:vec3f,advected:f32)->f32{
+  let h=params.cellGravity.xyz;let dt=params.dimsDt.w;
+  let mid=clamp(p-0.5*dt*sampleVelocity(p)/h,vec3f(0),vec3f(dims()));
+  let end=clamp(p-dt*sampleVelocity(mid)/h,vec3f(0),vec3f(dims()));
+  let steps=max(1u,u32(ceil(2.0*max(abs(end.x-p.x),max(abs(end.y-p.y),abs(end.z-p.z))))));
+  var previous=p;var result=advected;
+  for(var step=1u;step<=steps;step++){
+    let q=mix(p,end,f32(step)/f32(steps));let solid=vec3i(floor(q));
+    if(valid(solid)&&cellOpenFraction(solid)<=1e-5){
+      for(var axis=0u;axis<3u;axis++){for(var side=-1;side<=1;side+=2){
+        var fluid=solid;fluid[axis]+=side;if(cellOpenFraction(fluid)<=1e-5){continue;}
+        let inward=f32(side);let plane=f32(solid[axis])+select(0.0,1.0,side>0);
+        // Only the first crossed face may supply air, not the far side of a wall.
+        let distance=inward*(p[axis]-plane);if(distance< -1e-5||inward*(end[axis]-p[axis])>=0.0){continue;}
+        let a=inward*(previous[axis]-plane);let b=inward*(q[axis]-plane);
+        if(a< -1e-5||b>1e-5){continue;}
+        let face=select(fluid,solid,side>0);let data=pressureFaceData(face,axis);
+        let away=inward*(domainFaceFluidVelocity(face,axis)-data[axis]);
+        if(uvContactReleased(face,axis)&&dt*away>1e-4*h[axis]){result=max(result,dt*away-distance*h[axis]);}
+      }}
+      return result;
+    }
+    previous=q;
+  }
+  return result;
+}
+// Continue arriving liquid onto voxel wall vertices. The air update runs last
+// so solved separation always wins over contact continuation at edges/corners.
+fn uvEmbeddedContact(p:vec3f,advected:f32)->f32{
+  var result=advected;var air=-1e20;
+  for(var k=0u;k<8u;k++){
+    let fluid=vec3i(p)-vec3i(1)+uvCorner(k);if(cellOpenFraction(fluid)<=1e-5){continue;}
+    for(var axis=0u;axis<3u;axis++){
+      let side=select(-1,1,fluid[axis]<i32(p[axis]));var solid=fluid;solid[axis]+=side;
+      if(!valid(solid)||cellOpenFraction(solid)>1e-5){continue;}
+      var interior=p;interior[axis]-=f32(side);
+      if(advected<0.0||f32(side)*sampleVelocity(interior)[axis]>1e-6){
+        result=min(result,uvPhi(uvTrace(interior,params.dimsDt.w)));
+      }
+      let face=select(solid,fluid,side>0);let data=pressureFaceData(face,axis);
+      let away=-f32(side)*(domainFaceFluidVelocity(face,axis)-data[axis]);
+      let travel=params.dimsDt.w*away;
+      // Contact-solver residue must not cut a cell-wide air sheet.
+      if(uvContactReleased(face,axis)&&travel>1e-4*params.cellGravity[axis]){air=max(air,travel);}
+    }
+  }
+  return max(result,air);
 }
 // phi/V agreement (docs/uniform-geometric-phi-volume-agreement-handoff.md). V knows
 // how much liquid is near a place; phi knows where the surface is. Nothing else
@@ -208,7 +261,10 @@ fn uvSeedPhi(p:vec3f,phi:f32)->f32{
 @compute @workgroup_size(4,4,4)
 fn uvAdvectPhi(@builtin(global_invocation_id)gid:vec3u){
   let vertex=activeVertexId(gid);if(any(vertex<vec3i(0))||any(vertex>dims())){return;}let p=vec3f(vertex);
-  var value=uvSourcePhi(p,uvReleasedWalls(p,uvClosedWallPhi(p,uvPhi(uvTrace(p,params.dimsDt.w)))));
+  let advected=uvPhi(uvTrace(p,params.dimsDt.w));
+  let contact=uvEmbeddedContact(p,uvClosedWallPhi(p,advected));
+  let released=uvReleasedWalls(p,uvEmbeddedAir(p,contact));
+  var value=uvSourcePhi(p,released);
   let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
   if(params.agreement.z>0.0&&abs(value)<2.0*h){value-=uvAgreementShift(p);}
   if(params.agreement.y>0.5){value=uvSeedPhi(p,value);}
@@ -272,13 +328,19 @@ fn uvBuildEdges(@builtin(global_invocation_id)gid:vec3u){
   for(var k=0u;k<8u;k++){let o=uvCorner(k);let q=base+o;
     let w=select(vec3f(1)-f,f,o==vec3i(1));
     if(valid(q)&&uvOpen(id)>0.0){uvEdges[index].donor[k]=linearIndex(q);
-      uvEdges[index].weight[k]=w.x*w.y*w.z*min(uvOpen(id),uvOpen(q));}}
+      let weight=w.x*w.y*w.z*min(uvOpen(id),uvOpen(q));
+      uvEdges[index].weight[k]=weight;uvAddDonor(linearIndex(q),weight);}}
 }
 @compute @workgroup_size(4,4,4)
-fn uvSumDonors(@builtin(global_invocation_id)gid:vec3u){
-  let id=activeId(gid);if(uvTransportSkip(id)){return;}
-  if(!valid(id)){return;}let index=linearIndex(id);
-  for(var k=0u;k<9u;k++){uvAddDonor(uvEdges[index].donor[k],uvEdges[index].weight[k]);}
+fn uvFinishDonorSums(@builtin(global_invocation_id)gid:vec3u){
+  let id=vec3i(gid);if(!valid(id)){return;}
+  let i=linearIndex(id);atomicStore(&sharpenDeposits[i],bitcast<i32>(uvDonorSum(i)));
+}
+@compute @workgroup_size(4,4,4)
+fn uvFinishLiquidDonorSums(@builtin(global_invocation_id)gid:vec3u){
+  if(atomicLoad(&sharpenDeposits[2u*cellCount()])==0){return;}
+  let id=vec3i(gid);if(!valid(id)){return;}
+  let i=linearIndex(id);atomicStore(&sharpenDeposits[i],bitcast<i32>(uvDonorSum(i)));
 }
 @compute @workgroup_size(4,4,4)
 fn uvFallback(@builtin(global_invocation_id)gid:vec3u){
@@ -292,7 +354,8 @@ fn uvNormalizeRows(@builtin(global_invocation_id)gid:vec3u){
   if(!valid(id)){return;}let i=linearIndex(id);var sum=0.0;
   for(var k=0u;k<9u;k++){sum+=uvEdges[i].weight[k];}
   let scale=uvOpen(id)/max(sum,1e-20);
-  for(var k=0u;k<9u;k++){uvEdges[i].weight[k]*=scale;}
+  for(var k=0u;k<9u;k++){let weight=uvEdges[i].weight[k]*scale;
+    uvEdges[i].weight[k]=weight;uvAddDonor(uvEdges[i].donor[k],weight);}
 }
 @compute @workgroup_size(4,4,4)
 fn uvNormalizeDonors(@builtin(global_invocation_id)gid:vec3u){

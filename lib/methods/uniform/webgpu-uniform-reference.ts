@@ -475,6 +475,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   readonly denseLevelSetVolumeSource?: DenseLevelSetVolumeConsumerSource;
   private readonly vertexPhiScratch?: GPUTexture;
   private readonly volumeEdges?: GPUBuffer;
+  private readonly volumeDonorSums?: GPUBuffer;
   private volumePipelines: Partial<Record<typeof UNIFORM_VOLUME_ENTRIES[number], GPUComputePipeline>> = {};
   private phiReverseGroup?: GPUBindGroup;
   private readonly shaderSource: string;
@@ -612,6 +613,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly rigidGroup: GPUBindGroup;
   private readonly reductionGroup: GPUBindGroup;
   private readonly densityTraceGroup: GPUBindGroup;
+  private readonly volumeDonorGroup: GPUBindGroup;
   private readonly densityScatterGroup: GPUBindGroup;
   private readonly densityGatherGroup: GPUBindGroup;
   private readonly gammaDiffusionGroups: readonly [GPUBindGroup, GPUBindGroup];
@@ -842,6 +844,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         cellSize_m: [scene.container.width_m/nx, scene.container.height_m/ny, scene.container.depth_m/nz] };
       this.liquidBalanceDispatch = device.createBuffer({label:"Uniform liquid balance indirect dispatch",size:12,
         usage:GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST});
+      // Smaller than the edge buffer checked above: six 32-bit limbs/cell.
+      this.volumeDonorSums = device.createBuffer({ label: "Uniform Geometric exact donor sums", size: nx*ny*nz*24,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
       this.volumeEdges = device.createBuffer({ label: "Uniform Geometric nine-donor stencils", size: edgeBytes,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
     }
@@ -1018,7 +1023,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       reversed = velocityIn, transport = this.transportA, surface = volumeIn,
       gammaRead = this.gammaA, gammaWrite = this.gammaB,
       boundaryRead = this.boundaryVelocityA, boundaryWrite = this.boundaryVelocityB,
-      velocityPhase = volumeIn, reversePhi = false, pressureOnly = false) => device.createBindGroup({
+      velocityPhase = volumeIn, reversePhi = false, pressureOnly = false, donorSums = false) => device.createBindGroup({
         layout: pressureOnly ? this.pressureInputLayout : this.mainLayout, entries: ([
           ...(this.geometricVolume ? [
             { binding: 31, resource: (reversePhi ? this.vertexPhiScratch! : this.vertexPhiTexture!).createView() },
@@ -1030,7 +1035,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
           { binding: 4, resource: volumeIn.createView() }, { binding: 5, resource: volumeOut.createView() },
           { binding: 6, resource: { buffer: this.params } }, { binding: 7, resource: heightIn.createView() },
           { binding: 8, resource: heightOut.createView() }, { binding: 9, resource: { buffer: this.reductions } },
-          { binding: 10, resource: { buffer: this.rigidSystem.stateBuffer } }, { binding: 11, resource: { buffer: this.rigidExchange } },
+          { binding: 10, resource: { buffer: this.rigidSystem.stateBuffer } }, { binding: 11, resource: { buffer: donorSums ? this.volumeDonorSums! : this.rigidExchange } },
           { binding: 12, resource: predicted.createView() }, { binding: 13, resource: reversed.createView() },
           { binding: 14, resource: transport.createView() }, { binding: 15, resource: sampler },
           { binding: 16, resource: velocityPhase.createView() },
@@ -1081,6 +1086,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // Paper Sec. 3.4 step 7 scatters the deficit from pre-advection gamma^n.
     this.densityScatterGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA,
       this.velocityA, this.velocityA, this.transportA, this.volumeA, this.gammaA, this.gammaB);
+    // Donor passes do not exchange rigid impulses. Reuse that binding slot
+    // to stay within the adapter's ten-storage-buffer stage limit.
+    this.volumeDonorGroup = this.geometricVolume ? group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA,
+      this.velocityA, this.velocityA, this.transportA, this.volumeA, this.gammaA, this.gammaB, this.boundaryVelocityA, this.boundaryVelocityB, this.volumeA, false, false, true) : this.densityTraceGroup;
     this.densityGatherGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA,
       this.velocityA, this.velocityA, this.transportA, this.volumeA, this.gammaB, this.gammaA);
     this.gammaDiffusionGroups = [
@@ -1122,7 +1131,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       cellSize_m: Math.min(scene.container.width_m / nx, scene.container.height_m / ny, scene.container.depth_m / nz),
       pressureIterations: 0, pressureSolver: `CM11a dense LCP multigrid (${this.pressureSchedule.fullCycles} Full-Cycles + ${this.pressureSchedule.vCycles} V-Cycles, ${this.pressureSchedule.preSweeps}/${this.pressureSchedule.postSweeps} pre/post PRBGS)`,
       allocatedBytes: allocation.allocatedBytes + this.pressureMultigrid.allocatedBytes
-        + (this.geometricVolume ? 8 * (nx+1)*(ny+1)*(nz+1) + count*UNIFORM_VOLUME_EDGE_BYTES + 12 : 0)
+        + (this.geometricVolume ? 8 * (nx+1)*(ny+1)*(nz+1) + count*(UNIFORM_VOLUME_EDGE_BYTES + 24) + 12 : 0)
         + activeRegionBytes * 3 + activeSummaryBytes + packedSolidVoxels.byteLength
         + (this.symmetryStageAuditMacCormackBuffer ? 0 : 16), quality,
       submittedTime_s: 0, simulatedTime_s: 0, completedTime_s: 0,
@@ -2250,8 +2259,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   }
 
   private encodeGeometricVolume(encoder: GPUCommandEncoder, seam?: (phase: GPUTimestampPhase) => void): void {
-    const run = (entry: typeof UNIFORM_VOLUME_ENTRIES[number], group = this.densityTraceGroup) =>
-      this.run(encoder, entry, this.volumePipelines[entry]!, group);
+    const run = (entry: typeof UNIFORM_VOLUME_ENTRIES[number], group = this.densityTraceGroup) => {
+      if(entry === "uvFinishDonorSums" || entry === "uvFinishLiquidDonorSums")
+        this.runDirect(encoder,entry,this.volumePipelines[entry]!,this.volumeDonorGroup,[Math.ceil(this.info.nx/4),Math.ceil(this.info.ny/4),Math.ceil(this.info.nz/4)]);
+      else this.run(encoder,entry,this.volumePipelines[entry]!,(entry === "uvBuildEdges" || entry === "uvNormalizeRows") ? this.volumeDonorGroup : group);
+    };
 
     // The shift's residual is packed into the gamma scratch half from
     // start-of-step V, gamma and phi, and the advect then binds that half as
@@ -2262,15 +2274,14 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     if (this.geometricRedistance) this.runVertex(encoder, "Redistance dense vertex phi", this.volumePipelines.uvRedistancePhi!, this.phiReverseGroup!);
     else encoder.copyTextureToTexture({texture:this.vertexPhiScratch!},{texture:this.vertexPhiTexture!},[this.info.nx+1,this.info.ny+1,this.info.nz+1]);
     seam?.(UNIFORM_VOLUME_PHASE.phi);
-    run("uvBuildEdges");
-    // Ranged to the N-word donor-sum region. Words [N,2N) carry E1's restricted
-    // faces and class map, which the whole step samples; nothing in this stage
-    // addresses them, and the balance header and 4h map live above 2N.
-    const donorSumBytes = this.info.nx * this.info.ny * this.info.nz * 4;
-    encoder.clearBuffer(this.conditioningScratch, 0, donorSumBytes); run("uvSumDonors"); run("uvFallback");
+    // Deposit donor weights while each row is already in registers. Integer
+    // accumulation is exact and order independent, so this saves four full
+    // edge-table scans without changing the transport normalization scheme.
+    encoder.clearBuffer(this.volumeDonorSums!);
+    run("uvBuildEdges"); run("uvFinishDonorSums"); run("uvFallback");
     for (let round = 0; round < 3; round++) {
-      run("uvNormalizeRows"); encoder.clearBuffer(this.conditioningScratch, 0, donorSumBytes);
-      run("uvSumDonors"); run("uvNormalizeDonors");
+      encoder.clearBuffer(this.volumeDonorSums!);
+      run("uvNormalizeRows"); run("uvFinishDonorSums"); run("uvNormalizeDonors");
     }
     seam?.(UNIFORM_VOLUME_PHASE.coupling);
     if (this.liquidCapacityBalancing) {
@@ -2278,7 +2289,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       const publishDispatch = () => { if (this.liquidBalanceIndirect) encoder.copyBufferToBuffer(this.conditioningScratch, dispatchOffset, this.liquidBalanceDispatch!, 0, 12); };
       const dispatchBalance = (entry: "uvBalanceLiquidRows" | "uvBalanceLiquidDonors") => {
         const pass = encoder.beginComputePass({label:entry});
-        pass.setPipeline(this.volumePipelines[entry]!);pass.setBindGroup(0,this.densityTraceGroup);
+        pass.setPipeline(this.volumePipelines[entry]!);pass.setBindGroup(0,entry === "uvBalanceLiquidRows" ? this.volumeDonorGroup : this.densityTraceGroup);
         // The window takes precedence over the benchmark-only converged-round
         // indirect: that record is sized from the whole lattice, and dispatching
         // it from the window origin would run threads off the domain.
@@ -2291,11 +2302,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.runDirect(encoder, "Begin liquid capacity balancing", this.volumePipelines.uvBeginLiquidBalance!, this.densityTraceGroup, [1,1,1]);
       publishDispatch();
       for (let round = 0; round < this.liquidCapacityBalancingRounds; round++) {
-        encoder.clearBuffer(this.conditioningScratch, 0, this.info.nx*this.info.ny*this.info.nz*4);
+        encoder.clearBuffer(this.volumeDonorSums!);
         // Rows measure the current error and tentatively cap only violations.
         // The global error gates donor normalization and the next row scan.
         // Direct dispatch with a uniform early return wins our Dawn/Metal A/B.
-        dispatchBalance("uvBalanceLiquidRows");
+        dispatchBalance("uvBalanceLiquidRows");run("uvFinishLiquidDonorSums");
         this.runDirect(encoder, "Gate liquid balancing by maximum error", this.volumePipelines.uvFinishLiquidBalance!, this.densityTraceGroup, [1,1,1]);
         publishDispatch();dispatchBalance("uvBalanceLiquidDonors");
       }
@@ -2882,7 +2893,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.heightA, this.heightB, this.terrainTexture,
       this.transportA, this.transportB,
     ])) texture.destroy();
-    this.vertexPhiTexture?.destroy(); this.vertexPhiScratch?.destroy(); this.volumeEdges?.destroy(); this.liquidBalanceDispatch?.destroy();
+    this.vertexPhiTexture?.destroy(); this.vertexPhiScratch?.destroy(); this.volumeEdges?.destroy(); this.volumeDonorSums?.destroy(); this.liquidBalanceDispatch?.destroy();
     this.boundaryVelocityA.destroy(); this.boundaryVelocityB.destroy();
     this.boundaryVelocityC.destroy(); this.boundaryVelocityD.destroy();
     this.symmetryStageAuditNegativeBoundaryVelocity?.destroy();

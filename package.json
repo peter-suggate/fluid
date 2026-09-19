@@ -57,6 +57,7 @@
     "test:dawn:sparse-cm12:paused-regions": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_WEBGPU_BACKEND=${WEBGPU_BACKEND:-metal} node --import tsx --test --test-concurrency=1 tests/sparse-cm12-paused-region-dawn.test.ts",
     "test:dawn:sparse-cm12:trace-gravity": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_WEBGPU_BACKEND=${WEBGPU_BACKEND:-metal} node --import tsx --test --test-concurrency=1 tests/sparse-cm12-trace-gravity-dawn.test.ts",
     "test:dawn:gravity-direction": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_WEBGPU_BACKEND=${WEBGPU_BACKEND:-metal} node --import tsx --test --test-concurrency=1 tests/sparse-cm12-gravity-direction-dawn.test.ts tests/sparse-cm12-gravity-pressure-cache-dawn.test.ts",
+    "test:dawn:uniform-geometric-boundaries": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx --test tests/uniform-geometric-boundary-dawn.test.ts",
     "test:dawn:uniform-volume": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx --test --test-concurrency=1 tests/uniform-volume-dawn.test.ts tests/volume-levelset-overlay-dawn.test.ts",
     "probe:dawn:uniform-volume": "node --import tsx tools/probe-uniform-volume-dawn.ts",
     "test:dawn:sparse-cm12": "node --import tsx tools/run-sparse-cm12-dawn-regression-suite.ts",

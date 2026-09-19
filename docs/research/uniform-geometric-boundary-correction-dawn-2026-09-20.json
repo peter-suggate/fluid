@@ -1,0 +1,3990 @@
+{
+  "scene": "cm12-figure-12",
+  "resolution": [
+    128,
+    128,
+    128
+  ],
+  "settings": {
+    "activeRegion": "off",
+    "densitySharpening": "on",
+    "rigidCoupling": "on",
+    "velocityTransport": "semi-lagrangian",
+    "liquidOnlyVelocityAdvection": "off",
+    "timeStep": "paper",
+    "pressureResidualTolerance": 10,
+    "pressureCycleBudget": "lagged",
+    "pressureBudgetHeadroom": 1,
+    "extensionFrontSweeps": 2,
+    "sharpeningStrength": 1,
+    "sharpeningDistance": 2.1,
+    "pressureFullCycles": 3,
+    "pressureVCycles": 4,
+    "pressureSweeps": 6,
+    "pressureWindow": "window",
+    "redistance": "on",
+    "liquidCapacityBalancing": "off",
+    "liquidCapacityBalancingRounds": 64,
+    "liquidCapacityBalancingTolerance": 0.1,
+    "sharpeningWorkMap": "on",
+    "volumeDustThreshold": 1e-06,
+    "twoLevelVelocity": "on",
+    "twoLevelFineReach": 2,
+    "twoLevelExtension": "tiles",
+    "twoLevelShellReach": 1,
+    "twoLevelAdvection": "tiles",
+    "transportWorkMap": "tiles",
+    "transportReach": 1,
+    "volumePressureRows": "off",
+    "volumeCompaction": "off",
+    "phiSeedFromVolume": "off",
+    "phiAgreement": "off",
+    "phiAgreementGain": 0.05,
+    "phiAgreementClamp": 0.02
+  },
+  "trace": [
+    {
+      "frame": 1,
+      "t": 0.03333333333333333,
+      "negativeBoundaryMax": 0,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.999999853782,
+      "maxV": 1,
+      "orphans": 0,
+      "minP": 0,
+      "maxP": 0,
+      "stages": {
+        "previous": {
+          "max": 0,
+          "at": [
+            0,
+            0,
+            0
+          ],
+          "axis": 0,
+          "solid": true,
+          "energy": 0,
+          "allEnergy": 0,
+          "solidEnergy": 0
+        },
+        "advection": {
+          "max": 0.3333333432674408,
+          "at": [
+            62,
+            87,
+            45
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 2283.1112471781976,
+          "allEnergy": 3300.000196694085,
+          "solidEnergy": 0
+        },
+        "projection": {
+          "max": 0.3333333432674408,
+          "at": [
+            62,
+            87,
+            47
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 2245.7132406648548,
+          "allEnergy": 2376.0001416198133,
+          "solidEnergy": 0
+        }
+      },
+      "residual": 0,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 2,
+      "t": 0.06666666666666667,
+      "negativeBoundaryMax": 0,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.999999695225,
+      "maxV": 1,
+      "orphans": 0,
+      "minP": -0.004115500953048468,
+      "maxP": 0.00552153866738081,
+      "stages": {
+        "previous": {
+          "max": 0.3333333432674408,
+          "at": [
+            62,
+            87,
+            47
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 2253.1667110510675,
+          "allEnergy": 2376.0001416198133,
+          "solidEnergy": 0
+        },
+        "advection": {
+          "max": 0.666680097579956,
+          "at": [
+            61,
+            87,
+            47
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 9132.429593063936,
+          "allEnergy": 93812.44027621156,
+          "solidEnergy": 1409.3331665796582
+        },
+        "projection": {
+          "max": 0.6666771173477173,
+          "at": [
+            57,
+            78,
+            54
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 8980.60369459521,
+          "allEnergy": 9486.198639032355,
+          "solidEnergy": 0
+        }
+      },
+      "residual": 1.752006483002333e-06,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 3,
+      "t": 0.1,
+      "negativeBoundaryMax": 0,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.99993020564,
+      "maxV": 1.000001311302185,
+      "orphans": 0,
+      "minP": -0.004877506289631128,
+      "maxP": 0.010965719819068909,
+      "stages": {
+        "previous": {
+          "max": 0.6666771173477173,
+          "at": [
+            57,
+            78,
+            54
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 9011.064363894595,
+          "allEnergy": 9486.198639032355,
+          "solidEnergy": 0
+        },
+        "advection": {
+          "max": 1.0000298023223877,
+          "at": [
+            58,
+            75,
+            58
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 20547.925101747143,
+          "allEnergy": 352115.52951855515,
+          "solidEnergy": 5637.199934318803
+        },
+        "projection": {
+          "max": 1.0000219345092773,
+          "at": [
+            60,
+            76,
+            55
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 20200.9759861361,
+          "allEnergy": 21375.90554541995,
+          "solidEnergy": 0
+        }
+      },
+      "residual": 4.0715162867854815e-06,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 4,
+      "t": 0.13333333333333333,
+      "negativeBoundaryMax": 0,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.99993485365,
+      "maxV": 1.000002384185791,
+      "orphans": 60,
+      "minP": -0.009234333410859108,
+      "maxP": 0.016552887856960297,
+      "stages": {
+        "previous": {
+          "max": 1.0000219345092773,
+          "at": [
+            60,
+            76,
+            55
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 20268.60433453444,
+          "allEnergy": 21375.90554541995,
+          "solidEnergy": 0
+        },
+        "advection": {
+          "max": 1.3333837985992432,
+          "at": [
+            55,
+            78,
+            54
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 36529.577867935535,
+          "allEnergy": 779740.4275358852,
+          "solidEnergy": 12683.519769807266
+        },
+        "projection": {
+          "max": 1.3333677053451538,
+          "at": [
+            55,
+            79,
+            53
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 35881.486116108994,
+          "allEnergy": 37880.655073868424,
+          "solidEnergy": 0
+        }
+      },
+      "residual": 6.828338428022107e-06,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 5,
+      "t": 0.16666666666666666,
+      "negativeBoundaryMax": 0,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.99983326604,
+      "maxV": 1.0000061988830566,
+      "orphans": 20,
+      "minP": -0.018677296116948128,
+      "maxP": 0.020382212474942207,
+      "stages": {
+        "previous": {
+          "max": 1.3333677053451538,
+          "at": [
+            55,
+            79,
+            53
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 35922.0297508171,
+          "allEnergy": 37880.655073868424,
+          "solidEnergy": 0
+        },
+        "advection": {
+          "max": 1.666736364364624,
+          "at": [
+            57,
+            75,
+            56
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 57077.36942706733,
+          "allEnergy": 1377619.6108221493,
+          "solidEnergy": 22548.512045074316
+        },
+        "projection": {
+          "max": 1.6667200326919556,
+          "at": [
+            57,
+            75,
+            56
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 56007.95231954216,
+          "allEnergy": 59066.23922643778,
+          "solidEnergy": 0
+        }
+      },
+      "residual": 5.122050424688496e-06,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 6,
+      "t": 0.2,
+      "negativeBoundaryMax": 0,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.999941846356,
+      "maxV": 1.0000226497650146,
+      "orphans": 48,
+      "minP": -0.0283957626670599,
+      "maxP": 0.030857307836413383,
+      "stages": {
+        "previous": {
+          "max": 1.6667200326919556,
+          "at": [
+            57,
+            75,
+            56
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 55879.479657769545,
+          "allEnergy": 59066.23922643778,
+          "solidEnergy": 0
+        },
+        "advection": {
+          "max": 2.000107526779175,
+          "at": [
+            61,
+            72,
+            59
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 82191.3010504949,
+          "allEnergy": 2148061.0632164623,
+          "solidEnergy": 35231.89521984611
+        },
+        "projection": {
+          "max": 2.0000922679901123,
+          "at": [
+            61,
+            72,
+            59
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 80648.61190200796,
+          "allEnergy": 85007.30867359403,
+          "solidEnergy": 0
+        }
+      },
+      "residual": 5.363333912100643e-06,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 7,
+      "t": 0.23333333333333334,
+      "negativeBoundaryMax": 0,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20548.000116096384,
+      "maxV": 1.0000313520431519,
+      "orphans": 92,
+      "minP": -0.034554190933704376,
+      "maxP": 0.02043386735022068,
+      "stages": {
+        "previous": {
+          "max": 2.0000922679901123,
+          "at": [
+            61,
+            72,
+            59
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 79888.2835663643,
+          "allEnergy": 85007.30867359403,
+          "solidEnergy": 0
+        },
+        "advection": {
+          "max": 2.3334755897521973,
+          "at": [
+            61,
+            71,
+            59
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 111871.40078603449,
+          "allEnergy": 3108467.0832315255,
+          "solidEnergy": 50735.74302801025
+        },
+        "projection": {
+          "max": 2.333446502685547,
+          "at": [
+            61,
+            71,
+            59
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 109623.49035968166,
+          "allEnergy": 115530.14800722542,
+          "solidEnergy": 0
+        }
+      },
+      "residual": 1.3467106327880174e-05,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 8,
+      "t": 0.26666666666666666,
+      "negativeBoundaryMax": 0,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20548.000113982023,
+      "maxV": 1.000043511390686,
+      "orphans": 108,
+      "minP": -0.0428546741604805,
+      "maxP": 0.022548990324139595,
+      "stages": {
+        "previous": {
+          "max": 2.333446502685547,
+          "at": [
+            61,
+            71,
+            59
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 107887.30144272429,
+          "allEnergy": 115530.14800722542,
+          "solidEnergy": 0
+        },
+        "advection": {
+          "max": 2.6668190956115723,
+          "at": [
+            74,
+            77,
+            53
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 146117.6403186805,
+          "allEnergy": 4238873.203419486,
+          "solidEnergy": 69057.22312614389
+        },
+        "projection": {
+          "max": 2.66680908203125,
+          "at": [
+            60,
+            83,
+            47
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 143074.3220623165,
+          "allEnergy": 150782.680561618,
+          "solidEnergy": 0
+        }
+      },
+      "residual": 1.1631284905888606e-05,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 9,
+      "t": 0.3,
+      "negativeBoundaryMax": 0,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20548.000125732047,
+      "maxV": 1.0000765323638916,
+      "orphans": 136,
+      "minP": -0.054139334708452225,
+      "maxP": 0.02365906350314617,
+      "stages": {
+        "previous": {
+          "max": 2.66680908203125,
+          "at": [
+            60,
+            83,
+            47
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 139469.91275213196,
+          "allEnergy": 150782.680561618,
+          "solidEnergy": 0
+        },
+        "advection": {
+          "max": 3.000156879425049,
+          "at": [
+            48,
+            81,
+            57
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 184930.09100394393,
+          "allEnergy": 5557186.020898719,
+          "solidEnergy": 90197.05978033271
+        },
+        "projection": {
+          "max": 3.0001676082611084,
+          "at": [
+            48,
+            81,
+            57
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 181165.0286942547,
+          "allEnergy": 191302.30332911425,
+          "solidEnergy": 0
+        }
+      },
+      "residual": 8.40364555187989e-06,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 10,
+      "t": 0.3333333333333333,
+      "negativeBoundaryMax": 0,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.999835503695,
+      "maxV": 1.0001312494277954,
+      "orphans": 136,
+      "minP": -0.0587160661816597,
+      "maxP": 0.03397836908698082,
+      "stages": {
+        "previous": {
+          "max": 3.0001676082611084,
+          "at": [
+            48,
+            81,
+            57
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 175177.531093139,
+          "allEnergy": 191302.30332911425,
+          "solidEnergy": 0
+        },
+        "advection": {
+          "max": 3.3335812091827393,
+          "at": [
+            48,
+            79,
+            57
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 228308.652406998,
+          "allEnergy": 7107870.848976579,
+          "solidEnergy": 114155.79295070957
+        },
+        "projection": {
+          "max": 3.3335864543914795,
+          "at": [
+            57,
+            79,
+            48
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 223700.44308932306,
+          "allEnergy": 236175.6388046742,
+          "solidEnergy": 0
+        }
+      },
+      "residual": 9.299948033003602e-06,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 11,
+      "t": 0.36666666666666664,
+      "negativeBoundaryMax": 0,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.999898104325,
+      "maxV": 1.0001451969146729,
+      "orphans": 196,
+      "minP": -0.0724673718214035,
+      "maxP": 0.02654988132417202,
+      "stages": {
+        "previous": {
+          "max": 3.3335864543914795,
+          "at": [
+            57,
+            79,
+            48
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 214174.85544910253,
+          "allEnergy": 236175.6388046742,
+          "solidEnergy": 0
+        },
+        "advection": {
+          "max": 3.666980743408203,
+          "at": [
+            52,
+            74,
+            52
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 276253.41283410817,
+          "allEnergy": 8789681.52251277,
+          "solidEnergy": 140933.70255332676
+        },
+        "projection": {
+          "max": 3.666982650756836,
+          "at": [
+            75,
+            74,
+            52
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 269917.85019659443,
+          "allEnergy": 283782.7630628583,
+          "solidEnergy": 0
+        }
+      },
+      "residual": 1.2228288142068777e-05,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 12,
+      "t": 0.4,
+      "negativeBoundaryMax": 0,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.99988468919,
+      "maxV": 1.000170111656189,
+      "orphans": 292,
+      "minP": -0.08193916827440262,
+      "maxP": 0.03192015364766121,
+      "stages": {
+        "previous": {
+          "max": 3.666982650756836,
+          "at": [
+            75,
+            74,
+            52
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 255674.91067873666,
+          "allEnergy": 283782.7630628583,
+          "solidEnergy": 0
+        },
+        "advection": {
+          "max": 4.000345230102539,
+          "at": [
+            52,
+            72,
+            52
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 328763.8497208072,
+          "allEnergy": 10723801.308448184,
+          "solidEnergy": 170529.13542118738
+        },
+        "projection": {
+          "max": 4.000348091125488,
+          "at": [
+            52,
+            72,
+            52
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 320733.7022093447,
+          "allEnergy": 336956.7703833152,
+          "solidEnergy": 0
+        }
+      },
+      "residual": 1.6438254533568397e-05,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 13,
+      "t": 0.43333333333333335,
+      "negativeBoundaryMax": 0,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20548.000001732886,
+      "maxV": 1.0001996755599976,
+      "orphans": 308,
+      "minP": -0.08046791702508926,
+      "maxP": 0.03735915198922157,
+      "stages": {
+        "previous": {
+          "max": 4.000348091125488,
+          "at": [
+            52,
+            72,
+            52
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 300842.96214527695,
+          "allEnergy": 336956.7703833152,
+          "solidEnergy": 0
+        },
+        "advection": {
+          "max": 4.333637237548828,
+          "at": [
+            77,
+            70,
+            54
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 385841.18673975376,
+          "allEnergy": 12733757.47286737,
+          "solidEnergy": 202944.72081826397
+        },
+        "projection": {
+          "max": 4.333651065826416,
+          "at": [
+            77,
+            70,
+            54
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 375944.88465009345,
+          "allEnergy": 394780.304309063,
+          "solidEnergy": 0
+        }
+      },
+      "residual": 2.013575613091234e-05,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 14,
+      "t": 0.4666666666666667,
+      "negativeBoundaryMax": 0,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20548.000062890944,
+      "maxV": 1.0002824068069458,
+      "orphans": 272,
+      "minP": -0.0843542143702507,
+      "maxP": 0.05153598636388779,
+      "stages": {
+        "previous": {
+          "max": 4.333651065826416,
+          "at": [
+            77,
+            70,
+            54
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 349129.5554779336,
+          "allEnergy": 394780.304309063,
+          "solidEnergy": 0
+        },
+        "advection": {
+          "max": 4.667018890380859,
+          "at": [
+            78,
+            69,
+            72
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 447484.00529425836,
+          "allEnergy": 14893776.720934402,
+          "solidEnergy": 238180.8623127448
+        },
+        "projection": {
+          "max": 4.667044639587402,
+          "at": [
+            78,
+            69,
+            55
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 435588.96976965916,
+          "allEnergy": 457416.2107628955,
+          "solidEnergy": 0
+        }
+      },
+      "residual": 1.4076011211727746e-05,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 15,
+      "t": 0.5,
+      "negativeBoundaryMax": 0,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20548.000109472985,
+      "maxV": 1.000320553779602,
+      "orphans": 308,
+      "minP": -0.10580319911241531,
+      "maxP": 0.03848731145262718,
+      "stages": {
+        "previous": {
+          "max": 4.667044639587402,
+          "at": [
+            78,
+            69,
+            55
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 400711.02483331115,
+          "allEnergy": 457416.2107628955,
+          "solidEnergy": 0
+        },
+        "advection": {
+          "max": 5.000431060791016,
+          "at": [
+            78,
+            66,
+            55
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 513693.289577292,
+          "allEnergy": 17360676.022508614,
+          "solidEnergy": 276233.5369569121
+        },
+        "projection": {
+          "max": 5.000429630279541,
+          "at": [
+            78,
+            66,
+            55
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 500086.2566215831,
+          "allEnergy": 524495.0684045753,
+          "solidEnergy": 0
+        }
+      },
+      "residual": 1.681569847278297e-05,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 16,
+      "t": 0.5333333333333333,
+      "negativeBoundaryMax": 0,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20548.00017547549,
+      "maxV": 1.0003242492675781,
+      "orphans": 344,
+      "minP": -0.10409890115261078,
+      "maxP": 0.046028584241867065,
+      "stages": {
+        "previous": {
+          "max": 5.000429630279541,
+          "at": [
+            78,
+            66,
+            55
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 454433.86459296505,
+          "allEnergy": 524495.0684045753,
+          "solidEnergy": 0
+        },
+        "advection": {
+          "max": 5.3338117599487305,
+          "at": [
+            78,
+            63,
+            72
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 584465.0397722006,
+          "allEnergy": 19858481.50439117,
+          "solidEnergy": 317121.15416523954
+        },
+        "projection": {
+          "max": 5.333813190460205,
+          "at": [
+            78,
+            63,
+            72
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 568233.4219635804,
+          "allEnergy": 594938.4271298127,
+          "solidEnergy": 0
+        }
+      },
+      "residual": 2.0057159417774528e-05,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 17,
+      "t": 0.5666666666666667,
+      "negativeBoundaryMax": 0,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20548.000185934787,
+      "maxV": 1.0003405809402466,
+      "orphans": 356,
+      "minP": -0.10823129117488861,
+      "maxP": 0.04625401273369789,
+      "stages": {
+        "previous": {
+          "max": 5.333813190460205,
+          "at": [
+            78,
+            63,
+            72
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 510866.7001128494,
+          "allEnergy": 594938.4271298127,
+          "solidEnergy": 0
+        },
+        "advection": {
+          "max": 5.667236328125,
+          "at": [
+            49,
+            60,
+            55
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 659808.2502068748,
+          "allEnergy": 22600475.229197778,
+          "solidEnergy": 360787.7729407149
+        },
+        "projection": {
+          "max": 5.667237281799316,
+          "at": [
+            49,
+            60,
+            55
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 640204.6682259025,
+          "allEnergy": 671758.1402452305,
+          "solidEnergy": 0
+        }
+      },
+      "residual": 1.1305340194667224e-05,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 18,
+      "t": 0.6,
+      "negativeBoundaryMax": 0,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20548.000191038078,
+      "maxV": 1.0003948211669922,
+      "orphans": 360,
+      "minP": -0.10377592593431473,
+      "maxP": 0.054665155708789825,
+      "stages": {
+        "previous": {
+          "max": 5.667237281799316,
+          "at": [
+            49,
+            60,
+            55
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 570790.120435713,
+          "allEnergy": 671758.1402452305,
+          "solidEnergy": 0
+        },
+        "advection": {
+          "max": 6.000490188598633,
+          "at": [
+            49,
+            56,
+            55
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 739713.494854292,
+          "allEnergy": 25446047.284860563,
+          "solidEnergy": 407244.6926739538
+        },
+        "projection": {
+          "max": 6.000523567199707,
+          "at": [
+            49,
+            56,
+            55
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 716965.4875355534,
+          "allEnergy": 750808.9380465201,
+          "solidEnergy": 0
+        }
+      },
+      "residual": 1.1618409189395607e-05,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 19,
+      "t": 0.6333333333333333,
+      "negativeBoundaryMax": 0,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.999986284907,
+      "maxV": 1.0005420446395874,
+      "orphans": 400,
+      "minP": -0.07812952250242233,
+      "maxP": 0.21387846767902374,
+      "stages": {
+        "previous": {
+          "max": 6.000523567199707,
+          "at": [
+            49,
+            56,
+            55
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 631474.8752331376,
+          "allEnergy": 750808.9380465201,
+          "solidEnergy": 0
+        },
+        "advection": {
+          "max": 6.333964824676514,
+          "at": [
+            78,
+            53,
+            72
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 824187.2506206759,
+          "allEnergy": 28549236.86124757,
+          "solidEnergy": 456581.35917658376
+        },
+        "projection": {
+          "max": 6.333964824676514,
+          "at": [
+            78,
+            53,
+            72
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 798552.1268930855,
+          "allEnergy": 835586.858681053,
+          "solidEnergy": 0
+        }
+      },
+      "residual": 1.2300888556637801e-05,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 20,
+      "t": 0.6666666666666666,
+      "negativeBoundaryMax": 0,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.999958977714,
+      "maxV": 1.0004318952560425,
+      "orphans": 512,
+      "minP": -0.1532011330127716,
+      "maxP": 0.03783430531620979,
+      "stages": {
+        "previous": {
+          "max": 6.333964824676514,
+          "at": [
+            78,
+            53,
+            72
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 695486.151879511,
+          "allEnergy": 835586.858681053,
+          "solidEnergy": 0
+        },
+        "advection": {
+          "max": 6.6674017906188965,
+          "at": [
+            78,
+            49,
+            72
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 913227.1773782251,
+          "allEnergy": 31804098.221399624,
+          "solidEnergy": 508761.2647036295
+        },
+        "projection": {
+          "max": 6.667314529418945,
+          "at": [
+            57,
+            48,
+            79
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 883686.3044093236,
+          "allEnergy": 924257.668638391,
+          "solidEnergy": 0
+        }
+      },
+      "residual": 1.6862162738107145e-05,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 21,
+      "t": 0.7,
+      "negativeBoundaryMax": 0,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.99999203725,
+      "maxV": 1.0004160404205322,
+      "orphans": 544,
+      "minP": -0.17952778935432434,
+      "maxP": 0.04886356368660927,
+      "stages": {
+        "previous": {
+          "max": 6.667314529418945,
+          "at": [
+            57,
+            48,
+            79
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 761597.3089106982,
+          "allEnergy": 924257.668638391,
+          "solidEnergy": 0
+        },
+        "advection": {
+          "max": 7.000733852386475,
+          "at": [
+            70,
+            44,
+            48
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 1006824.4188041337,
+          "allEnergy": 35299455.7268301,
+          "solidEnergy": 563695.5018624702
+        },
+        "projection": {
+          "max": 7.000504970550537,
+          "at": [
+            63,
+            42,
+            80
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 973207.8707932889,
+          "allEnergy": 1017818.1790847296,
+          "solidEnergy": 0
+        }
+      },
+      "residual": 1.847655585152097e-05,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 22,
+      "t": 0.7333333333333333,
+      "negativeBoundaryMax": 0,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.999954941017,
+      "maxV": 1.0004639625549316,
+      "orphans": 532,
+      "minP": -0.15549197793006897,
+      "maxP": 0.06779718399047852,
+      "stages": {
+        "previous": {
+          "max": 7.000504970550537,
+          "at": [
+            63,
+            42,
+            80
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 830884.5684408507,
+          "allEnergy": 1017818.1790847296,
+          "solidEnergy": 0
+        },
+        "advection": {
+          "max": 7.333890438079834,
+          "at": [
+            66,
+            38,
+            47
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 1105000.8087390608,
+          "allEnergy": 38708283.669871345,
+          "solidEnergy": 621474.5351179589
+        },
+        "projection": {
+          "max": 7.333890914916992,
+          "at": [
+            66,
+            38,
+            47
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 1066916.5044153435,
+          "allEnergy": 1115770.088496961,
+          "solidEnergy": 0
+        }
+      },
+      "residual": 1.6299403796438128e-05,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 23,
+      "t": 0.7666666666666667,
+      "negativeBoundaryMax": 0,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.999901486728,
+      "maxV": 1.0007638931274414,
+      "orphans": 604,
+      "minP": -0.12508971989154816,
+      "maxP": 0.14152464270591736,
+      "stages": {
+        "previous": {
+          "max": 7.333890914916992,
+          "at": [
+            66,
+            38,
+            47
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 898390.724012692,
+          "allEnergy": 1115770.088496961,
+          "solidEnergy": 0
+        },
+        "advection": {
+          "max": 7.667220115661621,
+          "at": [
+            80,
+            33,
+            65
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 1207736.6535797152,
+          "allEnergy": 41652798.80561847,
+          "solidEnergy": 682119.0273221328
+        },
+        "projection": {
+          "max": 7.6672234535217285,
+          "at": [
+            80,
+            33,
+            65
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 1163699.293327508,
+          "allEnergy": 1216452.5072103292,
+          "solidEnergy": 0
+        }
+      },
+      "residual": 1.758435246301815e-05,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 24,
+      "t": 0.8,
+      "negativeBoundaryMax": 0,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.99986646591,
+      "maxV": 1.0006742477416992,
+      "orphans": 620,
+      "minP": -0.20074810087680817,
+      "maxP": 0.07015521079301834,
+      "stages": {
+        "previous": {
+          "max": 7.6672234535217285,
+          "at": [
+            80,
+            33,
+            65
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 970274.4834794275,
+          "allEnergy": 1216452.5072103292,
+          "solidEnergy": 0
+        },
+        "advection": {
+          "max": 8.000631332397461,
+          "at": [
+            65,
+            28,
+            47
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 1315040.3259346618,
+          "allEnergy": 44615931.710760385,
+          "solidEnergy": 745548.7636642439
+        },
+        "projection": {
+          "max": 8.000631332397461,
+          "at": [
+            80,
+            28,
+            65
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 1267892.7218178941,
+          "allEnergy": 1323762.6710844482,
+          "solidEnergy": 0
+        }
+      },
+      "residual": 2.3007416530163027e-05,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 25,
+      "t": 0.8333333333333334,
+      "negativeBoundaryMax": 0,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.99990690275,
+      "maxV": 1.005487322807312,
+      "orphans": 644,
+      "minP": -0.21254445612430573,
+      "maxP": 0.060941193252801895,
+      "stages": {
+        "previous": {
+          "max": 8.000631332397461,
+          "at": [
+            80,
+            28,
+            65
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 1042994.3380808424,
+          "allEnergy": 1323762.6710844482,
+          "solidEnergy": 0
+        },
+        "advection": {
+          "max": 8.334014892578125,
+          "at": [
+            67,
+            13,
+            60
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 1426896.4394880515,
+          "allEnergy": 47145764.913277,
+          "solidEnergy": 811735.9512453792
+        },
+        "projection": {
+          "max": 8.333985328674316,
+          "at": [
+            80,
+            23,
+            65
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 1375183.3317832716,
+          "allEnergy": 1435263.1024107512,
+          "solidEnergy": 0
+        }
+      },
+      "residual": 2.7366893846192397e-05,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 26,
+      "t": 0.8666666666666667,
+      "negativeBoundaryMax": 0,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.999737207443,
+      "maxV": 1.254713773727417,
+      "orphans": 760,
+      "minP": 0,
+      "maxP": 451.9884948730469,
+      "stages": {
+        "previous": {
+          "max": 8.333985328674316,
+          "at": [
+            80,
+            23,
+            65
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 1119418.90856651,
+          "allEnergy": 1435263.1024107512,
+          "solidEnergy": 0
+        },
+        "advection": {
+          "max": 8.667316436767578,
+          "at": [
+            66,
+            18,
+            47
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 1543346.7537737759,
+          "allEnergy": 49958794.10263472,
+          "solidEnergy": 880809.3077846741
+        },
+        "projection": {
+          "max": 8.798343658447266,
+          "at": [
+            64,
+            4,
+            63
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 1481505.4490401098,
+          "allEnergy": 1545078.5540349516,
+          "solidEnergy": 0
+        }
+      },
+      "residual": 0.03804008662700653,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 27,
+      "t": 0.9,
+      "negativeBoundaryMax": 0.0450081042945385,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.999749528826,
+      "maxV": 2.8637356758117676,
+      "orphans": 584,
+      "minP": 0,
+      "maxP": 104195.84375,
+      "stages": {
+        "previous": {
+          "max": 8.798343658447266,
+          "at": [
+            64,
+            4,
+            63
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 1216207.2091656195,
+          "allEnergy": 1545078.5540349516,
+          "solidEnergy": 0
+        },
+        "advection": {
+          "max": 9.03207015991211,
+          "at": [
+            67,
+            0,
+            54
+          ],
+          "axis": 1,
+          "solid": true,
+          "energy": 1663487.4391484782,
+          "allEnergy": 52669223.16549589,
+          "solidEnergy": 955625.1841040237
+        },
+        "projection": {
+          "max": 22.89740562438965,
+          "at": [
+            75,
+            1,
+            62
+          ],
+          "axis": 0,
+          "solid": false,
+          "energy": 1428153.5117855142,
+          "allEnergy": 1480093.9923934236,
+          "solidEnergy": 923.5363710261983
+        }
+      },
+      "residual": 4.326354026794434,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 28,
+      "t": 0.9333333333333333,
+      "negativeBoundaryMax": 0.0017061947146430612,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20548.000037768496,
+      "maxV": 6.049901485443115,
+      "orphans": 436,
+      "minP": 0,
+      "maxP": 107008.640625,
+      "stages": {
+        "previous": {
+          "max": 22.89740562438965,
+          "at": [
+            75,
+            1,
+            62
+          ],
+          "axis": 0,
+          "solid": false,
+          "energy": 1492329.05915082,
+          "allEnergy": 1480093.9923934236,
+          "solidEnergy": 923.5363710261983
+        },
+        "advection": {
+          "max": 10.681406021118164,
+          "at": [
+            56,
+            0,
+            51
+          ],
+          "axis": 1,
+          "solid": true,
+          "energy": 1503483.316450532,
+          "allEnergy": 53507120.93807519,
+          "solidEnergy": 1001594.660635941
+        },
+        "projection": {
+          "max": 29.00992202758789,
+          "at": [
+            62,
+            2,
+            46
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 1092319.0207777736,
+          "allEnergy": 1040594.5386899036,
+          "solidEnergy": 14421.366794415588
+        }
+      },
+      "residual": 6.710795879364014,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 2
+    },
+    {
+      "frame": 29,
+      "t": 0.9666666666666667,
+      "negativeBoundaryMax": 0.0015757519286125898,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20548.000043248616,
+      "maxV": 10.206499099731445,
+      "orphans": 616,
+      "minP": 0,
+      "maxP": 58715.671875,
+      "stages": {
+        "previous": {
+          "max": 29.00992202758789,
+          "at": [
+            62,
+            2,
+            46
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 1272695.449295859,
+          "allEnergy": 1040594.5386899036,
+          "solidEnergy": 14421.366794415588
+        },
+        "advection": {
+          "max": 13.388562202453613,
+          "at": [
+            51,
+            4,
+            43
+          ],
+          "axis": 2,
+          "solid": true,
+          "energy": 1072150.2837657765,
+          "allEnergy": 46409294.365042195,
+          "solidEnergy": 836301.4344475742
+        },
+        "projection": {
+          "max": 26.047264099121094,
+          "at": [
+            69,
+            3,
+            81
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 873536.1676764708,
+          "allEnergy": 648552.3873840979,
+          "solidEnergy": 24653.718732572208
+        }
+      },
+      "residual": 6.665885925292969,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 2
+    },
+    {
+      "frame": 30,
+      "t": 1,
+      "negativeBoundaryMax": 0.0010526749538257718,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.99958733331,
+      "maxV": 21.59560203552246,
+      "orphans": 653,
+      "minP": -0.8092724084854126,
+      "maxP": 29144.1796875,
+      "stages": {
+        "previous": {
+          "max": 26.047264099121094,
+          "at": [
+            69,
+            3,
+            81
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 1080109.5734935373,
+          "allEnergy": 648552.3873840979,
+          "solidEnergy": 24653.718732572208
+        },
+        "advection": {
+          "max": 15.69859790802002,
+          "at": [
+            71,
+            4,
+            40
+          ],
+          "axis": 2,
+          "solid": true,
+          "energy": 659262.8957537274,
+          "allEnergy": 32813453.844997134,
+          "solidEnergy": 492814.3872192129
+        },
+        "projection": {
+          "max": 17.81783103942871,
+          "at": [
+            60,
+            5,
+            87
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 621507.4435374503,
+          "allEnergy": 423146.18988976226,
+          "solidEnergy": 16568.23552994603
+        }
+      },
+      "residual": 3.6945042610168457,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 2
+    },
+    {
+      "frame": 31,
+      "t": 1.0333333333333334,
+      "negativeBoundaryMax": 0.0038682902231812477,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.99908306093,
+      "maxV": 16.241846084594727,
+      "orphans": 631,
+      "minP": -184.43345642089844,
+      "maxP": 15454.712890625,
+      "stages": {
+        "previous": {
+          "max": 17.81783103942871,
+          "at": [
+            60,
+            5,
+            87
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 647898.6599123931,
+          "allEnergy": 423146.18988976226,
+          "solidEnergy": 16568.23552994603
+        },
+        "advection": {
+          "max": 11.88698673248291,
+          "at": [
+            69,
+            6,
+            91
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 507912.84972896805,
+          "allEnergy": 5674856.9806112815,
+          "solidEnergy": 110192.74715032897
+        },
+        "projection": {
+          "max": 14.116345405578613,
+          "at": [
+            89,
+            6,
+            57
+          ],
+          "axis": 0,
+          "solid": false,
+          "energy": 461125.43591134925,
+          "allEnergy": 312779.9681356872,
+          "solidEnergy": 25406.674112282813
+        }
+      },
+      "residual": 8.489442825317383,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 32,
+      "t": 1.0666666666666667,
+      "negativeBoundaryMax": 0.0010605001589283347,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.998538700653,
+      "maxV": 21.80510711669922,
+      "orphans": 851,
+      "minP": -106.22584533691406,
+      "maxP": 12202.0400390625,
+      "stages": {
+        "previous": {
+          "max": 14.116345405578613,
+          "at": [
+            89,
+            6,
+            57
+          ],
+          "axis": 0,
+          "solid": false,
+          "energy": 445555.93720687606,
+          "allEnergy": 312779.9681356872,
+          "solidEnergy": 25406.674112282813
+        },
+        "advection": {
+          "max": 12.00856876373291,
+          "at": [
+            34,
+            9,
+            80
+          ],
+          "axis": 0,
+          "solid": true,
+          "energy": 374592.6021890898,
+          "allEnergy": 1196200.1189528045,
+          "solidEnergy": 44116.75917583177
+        },
+        "projection": {
+          "max": 10.853554725646973,
+          "at": [
+            92,
+            9,
+            49
+          ],
+          "axis": 0,
+          "solid": false,
+          "energy": 310232.90075956273,
+          "allEnergy": 236202.42468295316,
+          "solidEnergy": 14017.267929388088
+        }
+      },
+      "residual": 6.869583606719971,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 33,
+      "t": 1.1,
+      "negativeBoundaryMax": 0.0010591965401545167,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.998262121124,
+      "maxV": 22.846908569335938,
+      "orphans": 967,
+      "minP": -226.719970703125,
+      "maxP": 8406.197265625,
+      "stages": {
+        "previous": {
+          "max": 10.853554725646973,
+          "at": [
+            92,
+            9,
+            49
+          ],
+          "axis": 0,
+          "solid": false,
+          "energy": 277102.96655579744,
+          "allEnergy": 236202.42468295316,
+          "solidEnergy": 14017.267929388088
+        },
+        "advection": {
+          "max": 10.713173866271973,
+          "at": [
+            94,
+            11,
+            47
+          ],
+          "axis": 0,
+          "solid": false,
+          "energy": 285888.37353616406,
+          "allEnergy": 906890.8739295264,
+          "solidEnergy": 25799.280909823283
+        },
+        "projection": {
+          "max": 8.65656566619873,
+          "at": [
+            91,
+            7,
+            54
+          ],
+          "axis": 0,
+          "solid": false,
+          "energy": 244577.20950460777,
+          "allEnergy": 198769.16890017566,
+          "solidEnergy": 8086.360397088393
+        }
+      },
+      "residual": 5.127964496612549,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 34,
+      "t": 1.1333333333333333,
+      "negativeBoundaryMax": 0.0006981967017054558,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.997685746057,
+      "maxV": 13.295032501220703,
+      "orphans": 1567,
+      "minP": -445.87005615234375,
+      "maxP": 7512.79931640625,
+      "stages": {
+        "previous": {
+          "max": 8.65656566619873,
+          "at": [
+            91,
+            7,
+            54
+          ],
+          "axis": 0,
+          "solid": false,
+          "energy": 199736.02810964914,
+          "allEnergy": 198769.16890017566,
+          "solidEnergy": 8086.360397088393
+        },
+        "advection": {
+          "max": 7.582998752593994,
+          "at": [
+            59,
+            11,
+            99
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 267558.9461156009,
+          "allEnergy": 6272682.065609543,
+          "solidEnergy": 157607.74709014033
+        },
+        "projection": {
+          "max": 7.70719051361084,
+          "at": [
+            59,
+            11,
+            99
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 204192.14416712377,
+          "allEnergy": 191140.34490826546,
+          "solidEnergy": 11124.932542862174
+        }
+      },
+      "residual": 3.874051332473755,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 35,
+      "t": 1.1666666666666667,
+      "negativeBoundaryMax": 0.0005615577101707458,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.996768112476,
+      "maxV": 11.163257598876953,
+      "orphans": 2030,
+      "minP": -123.77750396728516,
+      "maxP": 5323.9228515625,
+      "stages": {
+        "previous": {
+          "max": 7.70719051361084,
+          "at": [
+            59,
+            11,
+            99
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 171070.51937162085,
+          "allEnergy": 191140.34490826546,
+          "solidEnergy": 11124.932542862174
+        },
+        "advection": {
+          "max": 7.707190036773682,
+          "at": [
+            59,
+            11,
+            101
+          ],
+          "axis": 1,
+          "solid": true,
+          "energy": 233972.18731914303,
+          "allEnergy": 5577034.679466369,
+          "solidEnergy": 122449.93214348874
+        },
+        "projection": {
+          "max": 6.862187385559082,
+          "at": [
+            72,
+            14,
+            101
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 161033.0764897451,
+          "allEnergy": 166535.55452265136,
+          "solidEnergy": 9960.50877132912
+        }
+      },
+      "residual": 3.3917715549468994,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 36,
+      "t": 1.2,
+      "negativeBoundaryMax": 0.0005377500783652067,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.996053428313,
+      "maxV": 7.038485050201416,
+      "orphans": 2199,
+      "minP": -132.36785888671875,
+      "maxP": 5660.82763671875,
+      "stages": {
+        "previous": {
+          "max": 6.862187385559082,
+          "at": [
+            72,
+            14,
+            101
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 135715.611127606,
+          "allEnergy": 166535.55452265136,
+          "solidEnergy": 9960.50877132912
+        },
+        "advection": {
+          "max": 6.238325595855713,
+          "at": [
+            77,
+            16,
+            103
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 191303.62941763634,
+          "allEnergy": 4239314.808076105,
+          "solidEnergy": 76943.25607800102
+        },
+        "projection": {
+          "max": 8.165778160095215,
+          "at": [
+            99,
+            14,
+            44
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 136252.01247142497,
+          "allEnergy": 146340.71272530808,
+          "solidEnergy": 10074.502933814998
+        }
+      },
+      "residual": 2.736220359802246,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 37,
+      "t": 1.2333333333333334,
+      "negativeBoundaryMax": 0.0010150088928639889,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.99528767189,
+      "maxV": 9.03369426727295,
+      "orphans": 2395,
+      "minP": -304.9900817871094,
+      "maxP": 5990.1474609375,
+      "stages": {
+        "previous": {
+          "max": 8.165778160095215,
+          "at": [
+            99,
+            14,
+            44
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 116394.71825894725,
+          "allEnergy": 146340.71272530808,
+          "solidEnergy": 10074.502933814998
+        },
+        "advection": {
+          "max": 6.396589756011963,
+          "at": [
+            28,
+            18,
+            37
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 164395.1257385841,
+          "allEnergy": 5384516.11872916,
+          "solidEnergy": 87996.51888946192
+        },
+        "projection": {
+          "max": 7.2676472663879395,
+          "at": [
+            29,
+            19,
+            94
+          ],
+          "axis": 1,
+          "solid": true,
+          "energy": 111265.63132184708,
+          "allEnergy": 127159.55886353941,
+          "solidEnergy": 12734.884591482738
+        }
+      },
+      "residual": 2.2627530097961426,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 38,
+      "t": 1.2666666666666666,
+      "negativeBoundaryMax": 0.0008977731340564787,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.99429764776,
+      "maxV": 12.583775520324707,
+      "orphans": 3000,
+      "minP": -244.49560546875,
+      "maxP": 8192.3798828125,
+      "stages": {
+        "previous": {
+          "max": 7.2676472663879395,
+          "at": [
+            29,
+            19,
+            94
+          ],
+          "axis": 1,
+          "solid": true,
+          "energy": 97098.6503209404,
+          "allEnergy": 127159.55886353941,
+          "solidEnergy": 12734.884591482738
+        },
+        "advection": {
+          "max": 6.934313774108887,
+          "at": [
+            29,
+            19,
+            95
+          ],
+          "axis": 1,
+          "solid": true,
+          "energy": 135754.39237932305,
+          "allEnergy": 5737524.98517013,
+          "solidEnergy": 82588.60747666542
+        },
+        "projection": {
+          "max": 6.804323196411133,
+          "at": [
+            28,
+            22,
+            97
+          ],
+          "axis": 1,
+          "solid": true,
+          "energy": 84859.76324629619,
+          "allEnergy": 100445.39642532823,
+          "solidEnergy": 11889.511303328807
+        }
+      },
+      "residual": 3.568915605545044,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 39,
+      "t": 1.3,
+      "negativeBoundaryMax": 0.0013790286611765623,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.99345746584,
+      "maxV": 14.990784645080566,
+      "orphans": 3830,
+      "minP": -155.2066192626953,
+      "maxP": 5913.64111328125,
+      "stages": {
+        "previous": {
+          "max": 6.804323196411133,
+          "at": [
+            28,
+            22,
+            97
+          ],
+          "axis": 1,
+          "solid": true,
+          "energy": 75278.84264583858,
+          "allEnergy": 100445.39642532823,
+          "solidEnergy": 11889.511303328807
+        },
+        "advection": {
+          "max": 6.39803409576416,
+          "at": [
+            27,
+            22,
+            97
+          ],
+          "axis": 1,
+          "solid": true,
+          "energy": 110435.48267794838,
+          "allEnergy": 5270875.367842426,
+          "solidEnergy": 69213.61198113093
+        },
+        "projection": {
+          "max": 6.784284591674805,
+          "at": [
+            95,
+            8,
+            65
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 60835.66851079604,
+          "allEnergy": 70121.59443995204,
+          "solidEnergy": 8280.010299763604
+        }
+      },
+      "residual": 2.4030964374542236,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 40,
+      "t": 1.3333333333333333,
+      "negativeBoundaryMax": 0.0027561821043491364,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.992403990796,
+      "maxV": 24.73249626159668,
+      "orphans": 4484,
+      "minP": -176.7163543701172,
+      "maxP": 6659.40966796875,
+      "stages": {
+        "previous": {
+          "max": 6.784284591674805,
+          "at": [
+            95,
+            8,
+            65
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 54496.30922503891,
+          "allEnergy": 70121.59443995204,
+          "solidEnergy": 8280.010299763604
+        },
+        "advection": {
+          "max": 5.778923511505127,
+          "at": [
+            29,
+            22,
+            99
+          ],
+          "axis": 1,
+          "solid": true,
+          "energy": 85438.22450794086,
+          "allEnergy": 4020789.3268739996,
+          "solidEnergy": 51023.75543362416
+        },
+        "projection": {
+          "max": 4.852128982543945,
+          "at": [
+            36,
+            26,
+            108
+          ],
+          "axis": 1,
+          "solid": true,
+          "energy": 41631.39929817765,
+          "allEnergy": 48062.42037701601,
+          "solidEnergy": 4877.9790024324375
+        }
+      },
+      "residual": 1.5301313400268555,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 41,
+      "t": 1.3666666666666667,
+      "negativeBoundaryMax": 0.0024095296394079924,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.99098889137,
+      "maxV": 22.607954025268555,
+      "orphans": 4813,
+      "minP": -188.01698303222656,
+      "maxP": 7270.99169921875,
+      "stages": {
+        "previous": {
+          "max": 4.852128982543945,
+          "at": [
+            36,
+            26,
+            108
+          ],
+          "axis": 1,
+          "solid": true,
+          "energy": 37755.31522476032,
+          "allEnergy": 48062.42037701601,
+          "solidEnergy": 4877.9790024324375
+        },
+        "advection": {
+          "max": 4.511288642883301,
+          "at": [
+            34,
+            26,
+            107
+          ],
+          "axis": 1,
+          "solid": true,
+          "energy": 61339.46000970785,
+          "allEnergy": 2869630.078484813,
+          "solidEnergy": 34410.596419579946
+        },
+        "projection": {
+          "max": 4.165073394775391,
+          "at": [
+            36,
+            29,
+            109
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 29017.88536583439,
+          "allEnergy": 33798.429930628445,
+          "solidEnergy": 2759.8523740456535
+        }
+      },
+      "residual": 1.503301978111267,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 42,
+      "t": 1.4,
+      "negativeBoundaryMax": 0.0020411075092852116,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.989299928042,
+      "maxV": 24.407320022583008,
+      "orphans": 4991,
+      "minP": -366.0460205078125,
+      "maxP": 5184.8583984375,
+      "stages": {
+        "previous": {
+          "max": 4.165073394775391,
+          "at": [
+            36,
+            29,
+            109
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 26599.215738954495,
+          "allEnergy": 33798.429930628445,
+          "solidEnergy": 2759.8523740456535
+        },
+        "advection": {
+          "max": 3.813121795654297,
+          "at": [
+            36,
+            33,
+            109
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 41334.445003942994,
+          "allEnergy": 1745553.4545572123,
+          "solidEnergy": 19380.349809287556
+        },
+        "projection": {
+          "max": 4.316995143890381,
+          "at": [
+            35,
+            7,
+            55
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 20906.33143894969,
+          "allEnergy": 24956.9603891658,
+          "solidEnergy": 1928.4050794901111
+        }
+      },
+      "residual": 1.4577614068984985,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 43,
+      "t": 1.4333333333333333,
+      "negativeBoundaryMax": 0.002030591480433941,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.987631452557,
+      "maxV": 15.277312278747559,
+      "orphans": 5017,
+      "minP": -274.202392578125,
+      "maxP": 5506.99462890625,
+      "stages": {
+        "previous": {
+          "max": 4.316995143890381,
+          "at": [
+            35,
+            7,
+            55
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 19468.43851894734,
+          "allEnergy": 24956.9603891658,
+          "solidEnergy": 1928.4050794901111
+        },
+        "advection": {
+          "max": 2.3208227157592773,
+          "at": [
+            64,
+            14,
+            102
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 27685.928070313956,
+          "allEnergy": 1036619.271639074,
+          "solidEnergy": 10517.484492925812
+        },
+        "projection": {
+          "max": 4.094029903411865,
+          "at": [
+            43,
+            9,
+            88
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 14895.098978124355,
+          "allEnergy": 18180.255095604756,
+          "solidEnergy": 1278.850955165368
+        }
+      },
+      "residual": 1.5058884620666504,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 44,
+      "t": 1.4666666666666666,
+      "negativeBoundaryMax": 0.001751523930579424,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.985879091226,
+      "maxV": 13.497900009155273,
+      "orphans": 5183,
+      "minP": -312.10260009765625,
+      "maxP": 4341.8115234375,
+      "stages": {
+        "previous": {
+          "max": 4.094029903411865,
+          "at": [
+            43,
+            9,
+            88
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 13975.538380306927,
+          "allEnergy": 18180.255095604756,
+          "solidEnergy": 1278.850955165368
+        },
+        "advection": {
+          "max": 2.116285562515259,
+          "at": [
+            53,
+            10,
+            94
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 18869.72696843796,
+          "allEnergy": 701743.2477059973,
+          "solidEnergy": 6833.438661842925
+        },
+        "projection": {
+          "max": 2.6427087783813477,
+          "at": [
+            38,
+            9,
+            84
+          ],
+          "axis": 0,
+          "solid": false,
+          "energy": 9903.163730807542,
+          "allEnergy": 12576.324954232663,
+          "solidEnergy": 918.0815364084941
+        }
+      },
+      "residual": 1.222389578819275,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 45,
+      "t": 1.5,
+      "negativeBoundaryMax": 0.0014749834081158042,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.98391824554,
+      "maxV": 8.963491439819336,
+      "orphans": 5375,
+      "minP": -70.7395248413086,
+      "maxP": 3180.434814453125,
+      "stages": {
+        "previous": {
+          "max": 2.6427087783813477,
+          "at": [
+            38,
+            9,
+            84
+          ],
+          "axis": 0,
+          "solid": false,
+          "energy": 9328.685467376874,
+          "allEnergy": 12576.324954232663,
+          "solidEnergy": 918.0815364084941
+        },
+        "advection": {
+          "max": 1.9058220386505127,
+          "at": [
+            103,
+            14,
+            65
+          ],
+          "axis": 1,
+          "solid": false,
+          "energy": 13296.99888569594,
+          "allEnergy": 513083.3673447097,
+          "solidEnergy": 5311.372369692945
+        },
+        "projection": {
+          "max": 3.1240320205688477,
+          "at": [
+            101,
+            12,
+            66
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 6186.714641217857,
+          "allEnergy": 8168.270557786042,
+          "solidEnergy": 689.6150355994005
+        }
+      },
+      "residual": 1.3074525594711304,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 46,
+      "t": 1.5333333333333334,
+      "negativeBoundaryMax": 0.001201461534947157,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.981975600287,
+      "maxV": 9.063459396362305,
+      "orphans": 5538,
+      "minP": -5.468294143676758,
+      "maxP": 3621.152099609375,
+      "stages": {
+        "previous": {
+          "max": 3.1240320205688477,
+          "at": [
+            101,
+            12,
+            66
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 5868.54364201571,
+          "allEnergy": 8168.270557786042,
+          "solidEnergy": 689.6150355994005
+        },
+        "advection": {
+          "max": 1.9541031122207642,
+          "at": [
+            103,
+            15,
+            65
+          ],
+          "axis": 0,
+          "solid": false,
+          "energy": 8991.527272091256,
+          "allEnergy": 329252.32223340793,
+          "solidEnergy": 3711.9319201841677
+        },
+        "projection": {
+          "max": 2.4725723266601562,
+          "at": [
+            101,
+            12,
+            66
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 3710.89057800066,
+          "allEnergy": 5056.467337548414,
+          "solidEnergy": 540.5698978414534
+        }
+      },
+      "residual": 1.1308430433273315,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 47,
+      "t": 1.5666666666666667,
+      "negativeBoundaryMax": 0.0009448961936868727,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.980070335234,
+      "maxV": 7.649511814117432,
+      "orphans": 5626,
+      "minP": -6.437290191650391,
+      "maxP": 3111.3603515625,
+      "stages": {
+        "previous": {
+          "max": 2.4725723266601562,
+          "at": [
+            101,
+            12,
+            66
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 3584.6499218135364,
+          "allEnergy": 5056.467337548414,
+          "solidEnergy": 540.5698978414534
+        },
+        "advection": {
+          "max": 1.8633924722671509,
+          "at": [
+            54,
+            9,
+            96
+          ],
+          "axis": 1,
+          "solid": true,
+          "energy": 6114.656166721913,
+          "allEnergy": 199057.54452504072,
+          "solidEnergy": 2866.523353886376
+        },
+        "projection": {
+          "max": 2.2947139739990234,
+          "at": [
+            100,
+            12,
+            53
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 2285.3345060682072,
+          "allEnergy": 3088.9291832435674,
+          "solidEnergy": 476.04929204692763
+        }
+      },
+      "residual": 1.1417537927627563,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 48,
+      "t": 1.6,
+      "negativeBoundaryMax": 0.0009066589409485459,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.978273132212,
+      "maxV": 12.08730697631836,
+      "orphans": 5671,
+      "minP": 0,
+      "maxP": 3082.8935546875,
+      "stages": {
+        "previous": {
+          "max": 2.2947139739990234,
+          "at": [
+            100,
+            12,
+            53
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 2225.032729271405,
+          "allEnergy": 3088.9291832435674,
+          "solidEnergy": 476.04929204692763
+        },
+        "advection": {
+          "max": 1.8633924722671509,
+          "at": [
+            54,
+            9,
+            96
+          ],
+          "axis": 1,
+          "solid": true,
+          "energy": 4455.861698692524,
+          "allEnergy": 100953.2910181312,
+          "solidEnergy": 2121.2570883999883
+        },
+        "projection": {
+          "max": 1.8762625455856323,
+          "at": [
+            62,
+            11,
+            100
+          ],
+          "axis": 0,
+          "solid": false,
+          "energy": 1516.8587310601636,
+          "allEnergy": 2092.24263654551,
+          "solidEnergy": 508.7454184871493
+        }
+      },
+      "residual": 1.1270301342010498,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 49,
+      "t": 1.6333333333333333,
+      "negativeBoundaryMax": 0.0009403306758031249,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.97629989535,
+      "maxV": 13.040570259094238,
+      "orphans": 5681,
+      "minP": 0,
+      "maxP": 3057.2685546875,
+      "stages": {
+        "previous": {
+          "max": 1.8762625455856323,
+          "at": [
+            62,
+            11,
+            100
+          ],
+          "axis": 0,
+          "solid": false,
+          "energy": 1492.4084940148302,
+          "allEnergy": 2092.24263654551,
+          "solidEnergy": 508.7454184871493
+        },
+        "advection": {
+          "max": 1.8633924722671509,
+          "at": [
+            54,
+            9,
+            96
+          ],
+          "axis": 1,
+          "solid": true,
+          "energy": 4054.0634405762657,
+          "allEnergy": 44069.68980263042,
+          "solidEnergy": 1896.3553778086111
+        },
+        "projection": {
+          "max": 2.2814691066741943,
+          "at": [
+            100,
+            11,
+            60
+          ],
+          "axis": 1,
+          "solid": true,
+          "energy": 1390.2089596168641,
+          "allEnergy": 1935.5864757524132,
+          "solidEnergy": 627.539973379172
+        }
+      },
+      "residual": 1.1488932371139526,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 50,
+      "t": 1.6666666666666667,
+      "negativeBoundaryMax": 0.0007824944332242012,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.974724871503,
+      "maxV": 13.711240768432617,
+      "orphans": 5727,
+      "minP": -2.6847140789031982,
+      "maxP": 3073.7685546875,
+      "stages": {
+        "previous": {
+          "max": 2.2814691066741943,
+          "at": [
+            100,
+            11,
+            60
+          ],
+          "axis": 1,
+          "solid": true,
+          "energy": 1363.589392094423,
+          "allEnergy": 1935.5864757524132,
+          "solidEnergy": 627.539973379172
+        },
+        "advection": {
+          "max": 1.8633924722671509,
+          "at": [
+            54,
+            9,
+            96
+          ],
+          "axis": 1,
+          "solid": true,
+          "energy": 4537.971254812573,
+          "allEnergy": 16325.58571214375,
+          "solidEnergy": 1894.668690497773
+        },
+        "projection": {
+          "max": 2.447812557220459,
+          "at": [
+            49,
+            11,
+            96
+          ],
+          "axis": 0,
+          "solid": false,
+          "energy": 1718.2152224483598,
+          "allEnergy": 2404.082761603532,
+          "solidEnergy": 771.8934430124872
+        }
+      },
+      "residual": 1.1826039552688599,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 51,
+      "t": 1.7,
+      "negativeBoundaryMax": 0.0009234534227289259,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.973387207494,
+      "maxV": 14.163536071777344,
+      "orphans": 5722,
+      "minP": -6.1979780197143555,
+      "maxP": 3094.37548828125,
+      "stages": {
+        "previous": {
+          "max": 2.447812557220459,
+          "at": [
+            49,
+            11,
+            96
+          ],
+          "axis": 0,
+          "solid": false,
+          "energy": 1677.8128960499541,
+          "allEnergy": 2404.082761603532,
+          "solidEnergy": 771.8934430124872
+        },
+        "advection": {
+          "max": 1.8633924722671509,
+          "at": [
+            54,
+            9,
+            96
+          ],
+          "axis": 1,
+          "solid": true,
+          "energy": 5788.84418667823,
+          "allEnergy": 19872.95791364979,
+          "solidEnergy": 2236.4053829612976
+        },
+        "projection": {
+          "max": 2.6035501956939697,
+          "at": [
+            97,
+            12,
+            50
+          ],
+          "axis": 0,
+          "solid": false,
+          "energy": 2411.2734019705827,
+          "allEnergy": 3413.480413135716,
+          "solidEnergy": 945.4841121973635
+        }
+      },
+      "residual": 1.1583858728408813,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 52,
+      "t": 1.7333333333333334,
+      "negativeBoundaryMax": 0.001129798125475645,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.971708870773,
+      "maxV": 16.0225772857666,
+      "orphans": 5706,
+      "minP": 0,
+      "maxP": 3102.02978515625,
+      "stages": {
+        "previous": {
+          "max": 2.6035501956939697,
+          "at": [
+            97,
+            12,
+            50
+          ],
+          "axis": 0,
+          "solid": false,
+          "energy": 2350.3712569435984,
+          "allEnergy": 3413.480413135716,
+          "solidEnergy": 945.4841121973635
+        },
+        "advection": {
+          "max": 1.8633924722671509,
+          "at": [
+            54,
+            9,
+            96
+          ],
+          "axis": 1,
+          "solid": true,
+          "energy": 7721.078859238259,
+          "allEnergy": 43062.2194980336,
+          "solidEnergy": 2722.5799860791076
+        },
+        "projection": {
+          "max": 2.334930658340454,
+          "at": [
+            96,
+            12,
+            50
+          ],
+          "axis": 0,
+          "solid": false,
+          "energy": 3482.0493645286247,
+          "allEnergy": 4901.831600007678,
+          "solidEnergy": 1134.2930470405847
+        }
+      },
+      "residual": 1.1349523067474365,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 53,
+      "t": 1.7666666666666666,
+      "negativeBoundaryMax": 0.0010870809201151133,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.96980082353,
+      "maxV": 17.25722312927246,
+      "orphans": 5711,
+      "minP": -1.445433259010315,
+      "maxP": 3115.751953125,
+      "stages": {
+        "previous": {
+          "max": 2.334930658340454,
+          "at": [
+            96,
+            12,
+            50
+          ],
+          "axis": 0,
+          "solid": false,
+          "energy": 3381.8440946138808,
+          "allEnergy": 4901.831600007678,
+          "solidEnergy": 1134.2930470405847
+        },
+        "advection": {
+          "max": 2.0380284786224365,
+          "at": [
+            95,
+            12,
+            50
+          ],
+          "axis": 0,
+          "solid": false,
+          "energy": 10395.693688610598,
+          "allEnergy": 88234.80969523713,
+          "solidEnergy": 3419.256058210297
+        },
+        "projection": {
+          "max": 2.47941255569458,
+          "at": [
+            97,
+            10,
+            60
+          ],
+          "axis": 0,
+          "solid": false,
+          "energy": 4785.037480302211,
+          "allEnergy": 6755.591803221894,
+          "solidEnergy": 1321.402004906551
+        }
+      },
+      "residual": 1.1754987239837646,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 54,
+      "t": 1.8,
+      "negativeBoundaryMax": 0.0013408743543550372,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.9677626186,
+      "maxV": 17.88643455505371,
+      "orphans": 5757,
+      "minP": 0,
+      "maxP": 3133.8701171875,
+      "stages": {
+        "previous": {
+          "max": 2.47941255569458,
+          "at": [
+            97,
+            10,
+            60
+          ],
+          "axis": 0,
+          "solid": false,
+          "energy": 4664.180071084786,
+          "allEnergy": 6755.591803221894,
+          "solidEnergy": 1321.402004906551
+        },
+        "advection": {
+          "max": 1.8633924722671509,
+          "at": [
+            54,
+            9,
+            96
+          ],
+          "axis": 1,
+          "solid": true,
+          "energy": 13385.102297305828,
+          "allEnergy": 157396.75732088674,
+          "solidEnergy": 4222.75469294635
+        },
+        "projection": {
+          "max": 2.0725772380828857,
+          "at": [
+            96,
+            10,
+            53
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 6189.09333296119,
+          "allEnergy": 8838.485080835912,
+          "solidEnergy": 1491.4860139077005
+        }
+      },
+      "residual": 1.2343379259109497,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 55,
+      "t": 1.8333333333333333,
+      "negativeBoundaryMax": 0.0018743866821750998,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.96541703361,
+      "maxV": 14.356154441833496,
+      "orphans": 5837,
+      "minP": -3.177619695663452,
+      "maxP": 3188.45654296875,
+      "stages": {
+        "previous": {
+          "max": 2.0725772380828857,
+          "at": [
+            96,
+            10,
+            53
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 6052.330128719457,
+          "allEnergy": 8838.485080835912,
+          "solidEnergy": 1491.4860139077005
+        },
+        "advection": {
+          "max": 1.8633924722671509,
+          "at": [
+            54,
+            9,
+            96
+          ],
+          "axis": 1,
+          "solid": true,
+          "energy": 16652.967675009997,
+          "allEnergy": 249312.57769962624,
+          "solidEnergy": 5143.528294035753
+        },
+        "projection": {
+          "max": 2.58193039894104,
+          "at": [
+            30,
+            10,
+            54
+          ],
+          "axis": 0,
+          "solid": false,
+          "energy": 7817.338408827365,
+          "allEnergy": 11083.121718517374,
+          "solidEnergy": 1650.6892197943885
+        }
+      },
+      "residual": 1.3128600120544434,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 56,
+      "t": 1.8666666666666667,
+      "negativeBoundaryMax": 0.002461135620251298,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.96283554168,
+      "maxV": 14.930838584899902,
+      "orphans": 5847,
+      "minP": 0,
+      "maxP": 3203.642822265625,
+      "stages": {
+        "previous": {
+          "max": 2.58193039894104,
+          "at": [
+            30,
+            10,
+            54
+          ],
+          "axis": 0,
+          "solid": false,
+          "energy": 7639.249509400652,
+          "allEnergy": 11083.121718517374,
+          "solidEnergy": 1650.6892197943885
+        },
+        "advection": {
+          "max": 1.9019665718078613,
+          "at": [
+            97,
+            12,
+            72
+          ],
+          "axis": 0,
+          "solid": false,
+          "energy": 19987.517540196277,
+          "allEnergy": 349845.03279598564,
+          "solidEnergy": 6039.853212269887
+        },
+        "projection": {
+          "max": 2.3720898628234863,
+          "at": [
+            96,
+            10,
+            55
+          ],
+          "axis": 0,
+          "solid": false,
+          "energy": 9471.463604831093,
+          "allEnergy": 13434.834775361676,
+          "solidEnergy": 1808.1296068837462
+        }
+      },
+      "residual": 1.2408548593521118,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 57,
+      "t": 1.9,
+      "negativeBoundaryMax": 0.0005816930788569152,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.960116762948,
+      "maxV": 15.830342292785645,
+      "orphans": 5853,
+      "minP": -6.517524242401123,
+      "maxP": 3241.8134765625,
+      "stages": {
+        "previous": {
+          "max": 2.3720898628234863,
+          "at": [
+            96,
+            10,
+            55
+          ],
+          "axis": 0,
+          "solid": false,
+          "energy": 9321.108086709657,
+          "allEnergy": 13434.834775361676,
+          "solidEnergy": 1808.1296068837462
+        },
+        "advection": {
+          "max": 1.900754690170288,
+          "at": [
+            77,
+            13,
+            32
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 23256.967284626513,
+          "allEnergy": 427885.5767855827,
+          "solidEnergy": 6755.500795415798
+        },
+        "projection": {
+          "max": 2.1240956783294678,
+          "at": [
+            95,
+            10,
+            54
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 11113.233040002668,
+          "allEnergy": 15700.29220663862,
+          "solidEnergy": 1936.9757712306596
+        }
+      },
+      "residual": 1.3186438083648682,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 58,
+      "t": 1.9333333333333333,
+      "negativeBoundaryMax": 0.0006867813062854111,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.957343999176,
+      "maxV": 16.431209564208984,
+      "orphans": 5869,
+      "minP": 0,
+      "maxP": 3316.34521484375,
+      "stages": {
+        "previous": {
+          "max": 2.1240956783294678,
+          "at": [
+            95,
+            10,
+            54
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 11002.17431843255,
+          "allEnergy": 15700.29220663862,
+          "solidEnergy": 1936.9757712306596
+        },
+        "advection": {
+          "max": 1.8278388977050781,
+          "at": [
+            69,
+            8,
+            95
+          ],
+          "axis": 1,
+          "solid": true,
+          "energy": 26271.466620471638,
+          "allEnergy": 531695.3545549602,
+          "solidEnergy": 7603.767638289704
+        },
+        "projection": {
+          "max": 2.4587886333465576,
+          "at": [
+            31,
+            10,
+            54
+          ],
+          "axis": 0,
+          "solid": false,
+          "energy": 12913.783399326565,
+          "allEnergy": 17891.550624892952,
+          "solidEnergy": 2046.8462831975785
+        }
+      },
+      "residual": 1.3932682275772095,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 59,
+      "t": 1.9666666666666666,
+      "negativeBoundaryMax": 0.0007175984792411327,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.95433578135,
+      "maxV": 11.780122756958008,
+      "orphans": 5876,
+      "minP": -1.2052650451660156,
+      "maxP": 3396.075439453125,
+      "stages": {
+        "previous": {
+          "max": 2.4587886333465576,
+          "at": [
+            31,
+            10,
+            54
+          ],
+          "axis": 0,
+          "solid": false,
+          "energy": 12783.411347187714,
+          "allEnergy": 17891.550624892952,
+          "solidEnergy": 2046.8462831975785
+        },
+        "advection": {
+          "max": 1.8278388977050781,
+          "at": [
+            69,
+            8,
+            95
+          ],
+          "axis": 1,
+          "solid": true,
+          "energy": 29120.961984174668,
+          "allEnergy": 609214.8331311235,
+          "solidEnergy": 8108.889314963278
+        },
+        "projection": {
+          "max": 2.245997667312622,
+          "at": [
+            55,
+            10,
+            96
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 14578.145428757865,
+          "allEnergy": 19932.426095617797,
+          "solidEnergy": 2105.873819107568
+        }
+      },
+      "residual": 1.4554948806762695,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    },
+    {
+      "frame": 60,
+      "t": 2,
+      "negativeBoundaryMax": 0.0005964494193904102,
+      "latticeOrigin": [
+        0,
+        0,
+        0
+      ],
+      "latticeDimensions": [
+        130,
+        130,
+        130
+      ],
+      "mass": 20547.95131495423,
+      "maxV": 10.620553016662598,
+      "orphans": 5841,
+      "minP": -19.0239200592041,
+      "maxP": 3470.787109375,
+      "stages": {
+        "previous": {
+          "max": 2.245997667312622,
+          "at": [
+            55,
+            10,
+            96
+          ],
+          "axis": 2,
+          "solid": false,
+          "energy": 14427.221838517502,
+          "allEnergy": 19932.426095617797,
+          "solidEnergy": 2105.873819107568
+        },
+        "advection": {
+          "max": 1.8278388977050781,
+          "at": [
+            69,
+            8,
+            95
+          ],
+          "axis": 1,
+          "solid": true,
+          "energy": 32039.016244618888,
+          "allEnergy": 676651.9353303856,
+          "solidEnergy": 8583.734867889252
+        },
+        "projection": {
+          "max": 1.8385716676712036,
+          "at": [
+            95,
+            10,
+            73
+          ],
+          "axis": 0,
+          "solid": false,
+          "energy": 16164.426208479574,
+          "allEnergy": 22003.50141584011,
+          "solidEnergy": 2167.0949585365474
+        }
+      },
+      "residual": 1.5055798292160034,
+      "cap": false,
+      "coarseResidual": 0,
+      "cycles": 1
+    }
+  ],
+  "solidContactCheck": [
+    {
+      "frame": 31,
+      "positivePressureSolidContacts": 2226,
+      "maximumPublishedSolidDivergence": 2.378966808319092,
+      "at": [
+        81,
+        3,
+        75
+      ]
+    },
+    {
+      "frame": 32,
+      "positivePressureSolidContacts": 2557,
+      "maximumPublishedSolidDivergence": 1.9253814220428467,
+      "at": [
+        82,
+        5,
+        82
+      ]
+    },
+    {
+      "frame": 33,
+      "positivePressureSolidContacts": 2719,
+      "maximumPublishedSolidDivergence": 1.5201866626739502,
+      "at": [
+        80,
+        5,
+        84
+      ]
+    },
+    {
+      "frame": 34,
+      "positivePressureSolidContacts": 3137,
+      "maximumPublishedSolidDivergence": 1.043509840965271,
+      "at": [
+        82,
+        3,
+        74
+      ]
+    }
+  ],
+  "shaderSha256": "ff5c59e21c01b21aaba6c2a36aacdcbb37774e973df764ca2dc1928e9c399dca"
+}
