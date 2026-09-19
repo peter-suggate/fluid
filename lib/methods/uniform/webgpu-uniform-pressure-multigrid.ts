@@ -31,8 +31,60 @@ export const DEFAULT_UNIFORM_CM11A_SCHEDULE: UniformCM11aSchedule = Object.freez
   vCycles: UNIFORM_CM11A_V_CYCLES,
   preSweeps: UNIFORM_CM11A_PRE_SWEEPS,
   postSweeps: UNIFORM_CM11A_POST_SWEEPS,
-  residualTolerance: 0.0001,
+  residualTolerance: 10,
 });
+
+/**
+ * Cycles the lagged budget never drops below. One complete cycle always runs,
+ * so a step whose demand estimate is stale by a frame still projects against a
+ * coarse-corrected pressure rather than against the previous step's field.
+ */
+export const UNIFORM_CM11A_MINIMUM_CYCLE_BUDGET = 1;
+/** Cycles added above the last observed demand when it converged. */
+export const UNIFORM_CM11A_DEFAULT_BUDGET_HEADROOM = 1;
+
+export interface UniformCM11aCycleBudgetInput {
+  /**
+   * Cycles the latest *observed* step executed before its residual gate
+   * tripped. Undefined until the first asynchronous diagnostics sample lands.
+   */
+  readonly lastExecutedCycles?: number;
+  /** Whether that step met the tolerance; false means it ran to its ceiling. */
+  readonly lastConverged?: boolean;
+  readonly headroom: number;
+  readonly minCycles?: number;
+  /** The configured schedule: Full-Cycles + V-Cycles actually planned. */
+  readonly maxCycles: number;
+}
+
+/**
+ * How many cycles the next step encodes, from the last demand the async stats
+ * readback reported.
+ *
+ * The GPU-side gate already stops a converged solve early, but a skipped pass
+ * still costs its launch floor and its CPU encode, so the saving has to be
+ * taken on the host by not encoding the tail at all. The signal is lagged by
+ * however many frames the readback takes, which is why the rule is asymmetric:
+ * shrinking is capped at one cycle of headroom above observed demand, while a
+ * step that used every encoded cycle *and still missed tolerance* doubles, so
+ * an impact frame recovers its full schedule within one or two steps instead
+ * of climbing one cycle at a time.
+ */
+export function uniformCM11aCycleBudget(input: UniformCM11aCycleBudgetInput): number {
+  const maxCycles = Number.isFinite(input.maxCycles) ? Math.max(0, Math.floor(input.maxCycles)) : 0;
+  const minCycles = Math.min(maxCycles, Math.max(0, Math.floor(
+    Number.isFinite(input.minCycles) ? input.minCycles! : UNIFORM_CM11A_MINIMUM_CYCLE_BUDGET)));
+  const executed = input.lastExecutedCycles;
+  // No sample yet: encode the configured schedule, which is exactly what the
+  // solver did before this rule existed.
+  if (executed === undefined || !Number.isFinite(executed)) return maxCycles;
+  const observed = Math.max(0, Math.floor(executed));
+  const headroom = Number.isFinite(input.headroom) ? Math.max(0, Math.floor(input.headroom)) : 0;
+  const demand = input.lastConverged
+    ? observed + headroom
+    : Math.max(2 * observed, observed + 2);
+  return Math.min(maxCycles, Math.max(minCycles, demand));
+}
 
 const ENTRY_POINTS = [
   "mgBuildFinestTopology", "mgBuildFinestRhs", "mgDownsampleTopology", "mgExtrapolatePhiOneCell",
@@ -244,6 +296,17 @@ export class WebGPUUniformPressureMultigrid {
   private readonly ownedGroups: GPUBindGroup[] = [];
   private pipelines?: Readonly<Record<EntryPoint, GPUComputePipeline>>;
   private plan?: readonly PlannedDispatch[];
+  /**
+   * Plan index after each complete cycle, `[setupEnd, afterCycle1, ...]`, so
+   * entry `k` is where a budget of `k` cycles stops encoding. Every cycle ends
+   * on its checkpoint, which canonicalizes finest pressure into parity A, and
+   * the finish dispatches are bound to parity A — so truncating here is the
+   * only place the encoded prefix can be cut without rebuilding bind groups.
+   */
+  private cycleBoundaries?: readonly number[];
+  /** First plan index of the always-encoded finish section. */
+  private finishStart = 0;
+  private activeResidualTolerance = 0;
   private coarsestCaptureBuffers?: CoarsestCaptureBuffers;
   private destroyed = false;
 
@@ -288,7 +351,7 @@ export class WebGPUUniformPressureMultigrid {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.toleranceBuffer = device.createBuffer({ label: "Pressure residual tolerance", size: 16,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.setResidualTolerance(schedule.residualTolerance ?? 0.0001);
+    this.setResidualTolerance(schedule.residualTolerance ?? 10);
     this.allocatedBytes = allocatedBytes;
     const textureBinding = { sampleType: "unfilterable-float", viewDimension: "3d" } as const;
     const scalarStorage = { access: "write-only", format: "r32float", viewDimension: "3d" } as const;
@@ -310,8 +373,16 @@ export class WebGPUUniformPressureMultigrid {
 
   setResidualTolerance(value: number): void {
     const tolerance = Number.isFinite(value) ? Math.max(0, value) : 0;
+    this.activeResidualTolerance = tolerance;
     this.device.queue.writeBuffer(this.toleranceBuffer, 0, new Float32Array([tolerance, 0, 0, 0]));
   }
+
+  /**
+   * The tolerance the GPU gate is currently comparing against. Zero disables
+   * the early exit entirely, which is also the only state in which a cycle
+   * count carries no information about how many cycles the solve needed.
+   */
+  get residualTolerance(): number { return this.activeResidualTolerance; }
 
   get pressureTexture(): GPUTexture { return this.levels[0]!.pressure[0]; }
 
@@ -336,18 +407,35 @@ export class WebGPUUniformPressureMultigrid {
     this.plan = Object.freeze(this.buildPlan());
   }
 
-  /** Encode the configured Full-Cycle/V-Cycle schedule. */
+  /**
+   * Encode the configured Full-Cycle/V-Cycle schedule, or its first
+   * `cycleBudget` cycles.
+   *
+   * Truncation drops the tail cycles from the command stream entirely: fewer
+   * `beginComputePass` calls, fewer dispatches, less CPU encode. The setup
+   * pyramid and the finish section are always encoded. The GPU-side
+   * `mgSkipCycle` gate is untouched and remains the inner stop, so a step that
+   * converges inside its budget still exits early.
+   */
   encode(
     encoder: GPUCommandEncoder,
     uniformGroup: GPUBindGroup,
     boundary?: (stage: UniformCM11aPlanStage) => void,
+    cycleBudget?: number,
   ): void {
     this.assertLive(); if (!this.plan) throw new Error("Uniform CM11a hierarchy is not initialized");
     encoder.clearBuffer(this.diagnostics);
+    const prefixEnd = this.cycleBoundaries?.[this.clampCycleBudget(cycleBudget)] ?? this.plan.length;
     let openStage: UniformCM11aPlanStage | undefined;
-    for (const dispatch of this.plan) {
+    for (let index = 0; index < this.plan.length; index += 1) {
+      const dispatch = this.plan[index]!;
       if (openStage !== undefined && dispatch.stage !== openStage) boundary?.(openStage);
       openStage = dispatch.stage;
+      // A truncated cycle encodes nothing at all. Its stage seam is still
+      // reported above, in order, so the advance's phase partition keeps all
+      // four sections and a section with no passes reads as zero-length
+      // instead of vanishing from the trace.
+      if (index >= prefixEnd && index < this.finishStart) continue;
       // A WebGPU texture usage scope spans the whole compute pass. End the
       // pass between hierarchy stages so storage outputs can become sampled
       // inputs in the next stage.
@@ -380,6 +468,25 @@ export class WebGPUUniformPressureMultigrid {
   }
 
   get levelCount(): number { return this.levels.length; }
+
+  /** Cycles the built plan carries: Full-Cycles plus V-Cycles. */
+  get cycleCount(): number { return Math.max(0, (this.cycleBoundaries?.length ?? 1) - 1); }
+
+  /** Compute passes the whole plan encodes. Undefined until `initialize`. */
+  get planPassCount(): number | undefined { return this.plan?.length; }
+
+  /** Compute passes a given cycle budget encodes, setup and finish included. */
+  encodedPassCount(cycleBudget?: number): number | undefined {
+    if (!this.plan || !this.cycleBoundaries) return undefined;
+    return this.cycleBoundaries[this.clampCycleBudget(cycleBudget)]!
+      + (this.plan.length - this.finishStart);
+  }
+
+  private clampCycleBudget(cycleBudget?: number): number {
+    const total = this.cycleCount;
+    if (cycleBudget === undefined || !Number.isFinite(cycleBudget)) return total;
+    return Math.min(total, Math.max(0, Math.floor(cycleBudget)));
+  }
 
   /** Compute passes per advance in each cycle-schedule group, from the plan
    * actually built for this grid. Undefined until `initialize` resolves. */
@@ -587,11 +694,20 @@ export class WebGPUUniformPressureMultigrid {
       emit("mgMeasureFineResidual", 0, 0, { rhsIn: originalRhs }, [0, 0, 1, 0]);
       emit("mgCheckCycleConvergence", 0, 0, {}, [0, 0, planStage === "full-cycle" ? 2 : 3, 0], [1, 1, 1]);
     };
+    // Where a lagged budget may cut. Entry 0 is the end of setup; entry k is
+    // the end of cycle k, which is always a checkpoint.
+    const cycleBoundaries: number[] = [result.length];
     planStage = "full-cycle";
-    for (let cycle = 0; cycle < this.schedule.fullCycles; cycle += 1) { fullCycle(); checkpoint(); }
+    for (let cycle = 0; cycle < this.schedule.fullCycles; cycle += 1) {
+      fullCycle(); checkpoint(); cycleBoundaries.push(result.length);
+    }
     planStage = "v-cycle";
-    for (let cycle = 0; cycle < this.schedule.vCycles; cycle += 1) { vCycle(0, originalRhs); checkpoint(); }
+    for (let cycle = 0; cycle < this.schedule.vCycles; cycle += 1) {
+      vCycle(0, originalRhs); checkpoint(); cycleBoundaries.push(result.length);
+    }
     planStage = "finish";
+    this.cycleBoundaries = Object.freeze(cycleBoundaries);
+    this.finishStart = result.length;
     if (p[0] !== 0) { emit("mgCopyPressure", 0, 0, { pressureOut: this.levels[0]!.pressure[0] }); p[0] = 0; }
     emit("mgMeasureFineResidual", 0, 0, {
       pressureIn: this.levels[0]!.pressure[0], rhsIn: originalRhs,

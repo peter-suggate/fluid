@@ -45,10 +45,13 @@ import { WebGPURigidBodySystem } from "../../core/webgpu-rigid-body";
 import { uniformReferenceComputeShader } from "./webgpu-uniform-reference.wgsl";
 import { WebGPUUniformVelocityExtrapolator } from "./webgpu-uniform-velocity-extrapolation";
 import {
+  UNIFORM_CM11A_DEFAULT_BUDGET_HEADROOM,
   UNIFORM_CM11A_FULL_CYCLES,
+  UNIFORM_CM11A_MINIMUM_CYCLE_BUDGET,
   UNIFORM_CM11A_POST_SWEEPS,
   UNIFORM_CM11A_PRE_SWEEPS,
   UNIFORM_CM11A_V_CYCLES,
+  uniformCM11aCycleBudget,
   WebGPUUniformPressureMultigrid,
   type UniformCM11aSchedule,
 } from "./webgpu-uniform-pressure-multigrid";
@@ -156,6 +159,14 @@ export interface WebGPUUniformReferenceOptions {
   rigidCoupling?: boolean;
   /** CM11a cycle and smoothing schedule. */
   pressureSchedule?: UniformCM11aSchedule;
+  /**
+   * "lagged" encodes only as many cycles as the last observed step needed;
+   * "fixed" encodes the whole configured schedule, which is what the solver
+   * always did. Runtime-switchable.
+   */
+  pressureCycleBudget?: "lagged" | "fixed";
+  /** Cycles the lagged budget adds above the last observed demand. */
+  pressureBudgetHeadroom?: number;
   /** Paper Sec. 3.8 render reconstruction; Results states it is normally off. */
   densityPostProcessing?: boolean;
   /**
@@ -474,6 +485,18 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private solidExcessCorrection: boolean;
   private rigidCoupling: boolean;
   private readonly pressureSchedule: UniformCM11aSchedule;
+  /** Host-side cycle budgeting; "fixed" reproduces the pre-P1 command stream. */
+  private pressureCycleBudgetLagged: boolean;
+  private pressureBudgetHeadroom: number;
+  /**
+   * Latest asynchronously observed pressure demand. It lags the encoded step
+   * by however long the map takes — one to a few frames — which is exactly why
+   * the budget rule grows aggressively and shrinks by one cycle at a time.
+   */
+  private pressureCyclesExecutedSample?: number;
+  private pressureCycleConvergedSample = false;
+  private pressureCycleDemandReadback?: GPUBuffer;
+  private pressureCycleDemandPending = false;
   private paperTimeStep: boolean;
   private velocityTransport: GPUVelocityTransport;
   private liquidOnlyVelocityAdvection: boolean;
@@ -538,8 +561,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       vCycles: UNIFORM_CM11A_V_CYCLES,
       preSweeps: UNIFORM_CM11A_PRE_SWEEPS,
       postSweeps: UNIFORM_CM11A_POST_SWEEPS,
-      residualTolerance: 0.0001,
+      residualTolerance: 10,
     };
+    this.pressureCycleBudgetLagged = options.pressureCycleBudget !== "fixed";
+    this.pressureBudgetHeadroom = Number.isFinite(options.pressureBudgetHeadroom)
+      ? Math.round(Math.min(4, Math.max(0, options.pressureBudgetHeadroom!)))
+      : UNIFORM_CM11A_DEFAULT_BUDGET_HEADROOM;
     this.paperTimeStep = options.timeStep !== "scene";
     this.velocityTransport = options.velocityTransport === "maccormack"
       ? "maccormack" : "semi-lagrangian";
@@ -1109,7 +1136,15 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       const value = Number(values[key]);
       return Number.isFinite(value) ? Math.min(maximum, Math.max(minimum, value)) : fallback;
     };
-    this.pressureMultigrid.setResidualTolerance(finite("pressureResidualTolerance", 0.0001, 0, 10));
+    this.pressureMultigrid.setResidualTolerance(finite("pressureResidualTolerance", 10, 0, 100));
+    // Switching to "fixed" mid-run restores the full encoded schedule on the
+    // next step; switching back re-enters at the full schedule too, because
+    // the demand sample is dropped so nothing stale sizes the first budget.
+    const lagged = values.pressureCycleBudget !== "fixed";
+    if (lagged !== this.pressureCycleBudgetLagged) this.pressureCyclesExecutedSample = undefined;
+    this.pressureCycleBudgetLagged = lagged;
+    this.pressureBudgetHeadroom = Math.round(finite(
+      "pressureBudgetHeadroom", UNIFORM_CM11A_DEFAULT_BUDGET_HEADROOM, 0, 4));
     const postProcessing = uniformDensityPostProcessingEnabled(
       values.densityPostProcessing,
       this.scene.sceneId,
@@ -1360,6 +1395,73 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       multigridPassesTotal: Object.values(multigridPasses).reduce((sum, count) => sum + count, 0),
       pressureSchedule: this.pressureSchedule,
     };
+  }
+
+  /**
+   * Cycles the next pressure solve encodes, and the telemetry that explains it.
+   *
+   * Fixed mode returns the configured schedule, so its command stream is the
+   * one the solver encoded before P1 existed. Lagged mode sizes the encoded
+   * prefix from the latest asynchronous diagnostics sample; the GPU-side
+   * residual gate still stops a converged solve inside that prefix.
+   */
+  private planPressureCycleBudget(): number {
+    const maxCycles = this.pressureMultigrid.cycleCount;
+    // A zero tolerance means "run every configured cycle": the GPU gate never
+    // stops, so the executed count reports the schedule rather than the
+    // demand, and lagging on it would silently cap a solve the operator asked
+    // to run in full. The budget stands down whenever the gate is disabled.
+    const lagged = this.pressureCycleBudgetLagged
+      && this.pressureMultigrid.residualTolerance > 0;
+    const budget = lagged
+      ? uniformCM11aCycleBudget({
+        lastExecutedCycles: this.pressureCyclesExecutedSample,
+        lastConverged: this.pressureCycleConvergedSample,
+        headroom: this.pressureBudgetHeadroom,
+        minCycles: UNIFORM_CM11A_MINIMUM_CYCLE_BUDGET,
+        maxCycles,
+      })
+      : maxCycles;
+    Object.assign(this.info, {
+      uniformPressureCycleBudget: this.pressureCycleBudgetLagged ? "lagged" : "fixed",
+      uniformPressureBudgetHeadroom: this.pressureCycleBudgetLagged
+        ? this.pressureBudgetHeadroom : undefined,
+      uniformPressureCyclesEncoded: budget,
+      uniformPressureCyclesConfigured: maxCycles,
+      uniformPressurePassesEncoded: this.pressureMultigrid.encodedPassCount(budget),
+      uniformPressurePassesConfigured: this.pressureMultigrid.planPassCount,
+    });
+    return budget;
+  }
+
+  /**
+   * Ask the queue for the cycle counters this step just wrote.
+   *
+   * This is the same asynchronous, post-submit readback shape as `readStats`,
+   * on its own twelve-byte buffer so the two never contend: nothing in the
+   * frame path waits on it, and a step simply skips the copy while an earlier
+   * map is still outstanding. It never gates correctness — only how many
+   * cycles the *next* step bothers to encode.
+   */
+  private readPressureCycleDemand(): void {
+    const buffer = this.pressureCycleDemandReadback;
+    if (!buffer || this.disposed) return;
+    this.pressureCycleDemandPending = true;
+    void buffer.mapAsync(GPUMapMode.READ).then(() => {
+      if (this.disposed) { this.pressureCycleDemandPending = false; return; }
+      try {
+        const words = new Uint32Array(buffer.getMappedRange().slice(0));
+        this.pressureCycleConvergedSample = words[0] === 1;
+        this.pressureCyclesExecutedSample = words[1]! + words[2]!;
+        Object.assign(this.info, {
+          uniformPressureCyclesExecuted: this.pressureCyclesExecutedSample,
+          uniformPressureCyclesConverged: this.pressureCycleConvergedSample,
+        });
+      } finally {
+        if (buffer.mapState === "mapped") buffer.unmap();
+        this.pressureCycleDemandPending = false;
+      }
+    }).catch(() => { this.pressureCycleDemandPending = false; });
   }
 
   /** The 4h map is requested, dimensionally possible, and sharpening is on. */
@@ -1739,7 +1841,20 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     );
     seam?.(UNIFORM_ADVANCE_PHASE.advectionCorrection);
     this.pressureMultigrid.encode(encoder, this.pressureMultigridGroup,
-      seam && ((stage) => seam(UNIFORM_PRESSURE_STAGE_PHASE[stage])));
+      seam && ((stage) => seam(UNIFORM_PRESSURE_STAGE_PHASE[stage])),
+      this.planPressureCycleBudget());
+    // The cycle counters are final the instant the solve is encoded, and this
+    // copy adds no pass, so it cannot move a stage seam. It is encoded only
+    // while the lagged budget is live and no earlier map is outstanding.
+    let pressureCycleDemandEncoded = false;
+    if (this.pressureCycleBudgetLagged && !this.pressureCycleDemandPending) {
+      this.pressureCycleDemandReadback ??= this.device.createBuffer({
+        label: "Uniform CM11a cycle demand readback", size: 16,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      encoder.copyBufferToBuffer(this.pressureMultigrid.diagnostics, 64,
+        this.pressureCycleDemandReadback, 0, 12);
+      pressureCycleDemandEncoded = true;
+    }
     this.run(encoder, "Uniform pressure projection", this.pipelines.project, this.projectGroup);
     if (this.symmetryStageAuditTextures) encoder.copyTextureToTexture(
       { texture: this.velocityA }, { texture: this.symmetryStageAuditTextures.pressureProjection },
@@ -1778,6 +1893,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     physicsTrace?.resolve(encoder);
     physicsQueueTrace?.begin();
     this.device.queue.submit([encoder.finish()]);
+    if (pressureCycleDemandEncoded) this.readPressureCycleDemand();
     if (physicsCPUTrace) {
       this.info.physicsCPUTrace = physicsCPUTrace.finish({ id: "other", label: "Capture closure + command submission" });
       this.info.physicsCaptureIdentity = {
@@ -1834,6 +1950,14 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     try {
       await this.statsReadback.mapAsync(GPUMapMode.READ);
       const words = new Uint32Array(this.statsReadback.getMappedRange().slice(0));
+      // The same counters the lagged budget reads on its own buffer. A caller
+      // that polls stats every step (the Dawn probes and harness do) therefore
+      // keeps the demand signal fresh even when the solver's own copy was
+      // skipped because an earlier map was still outstanding.
+      if ((this.info.encodedSteps ?? 0) > 0) {
+        this.pressureCyclesExecutedSample = words[45]! + words[46]!;
+        this.pressureCycleConvergedSample = words[44] === 1;
+      }
       const reference = Math.max(1, this.referenceVolumeCells);
       this.info.representedVolumeCellSum = words[0] / 2048;
       this.info.volumeCellSum = words[3] / 2048;
@@ -1853,6 +1977,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         uniformCM11aCycleConverged: words[44] === 1,
         uniformCM11aFullCyclesExecuted: words[45],
         uniformCM11aVCyclesExecuted: words[46],
+        uniformPressureCyclesExecuted: words[45]! + words[46]!,
+        uniformPressureCyclesConverged: words[44] === 1,
         uniformCM11aCapFailure: words[11] !== 0,
         uniformCM11aFailingCoarseInvocation: words[12],
         uniformCM11aCoarseMaxAbsRhs: new Float32Array(new Uint32Array([words[13]]).buffer)[0],
@@ -1988,6 +2114,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.rigidSystem.destroy();
     this.rigidExchange.destroy();
     this.statsReadback?.destroy();
+    // An outstanding map rejects on destroy; `readPressureCycleDemand` catches
+    // it and the `disposed` guard keeps it from touching a dead solver.
+    this.pressureCycleDemandReadback?.destroy();
   }
 }
 
@@ -2272,7 +2401,7 @@ const UNIFORM_FLUID_STAGES: readonly FluidPipelineStage[] = [
       UNIFORM_ADVANCE_PHASE.pressureVCycles.label,
     ],
     tip: {
-      summary: "The CM11a LCP multigrid solve: full cycles first (coarsest-up, seeding every level), then V-cycles to polish. The counts are caps: remaining cycles exit once the fine projected residual meets tolerance. Each level runs projected red-black Gauss-Seidel sweeps with the liquid-air complementarity condition enforced per sweep.",
+      summary: "The CM11a LCP multigrid solve: full cycles first (coarsest-up, seeding every level), then V-cycles to polish. The counts are caps: remaining cycles exit once the fine projected residual meets tolerance. Each level runs projected red-black Gauss-Seidel sweeps with the liquid-air complementarity condition enforced per sweep. Under the lagged cycle budget the cap is also applied on the host, so cycles the last observed step did not need are never encoded and never pay their launch floor.",
       reads: "per-level topology + RHS",
       writes: "pressure",
       feeds: "parity copy + fine residual",
@@ -2280,8 +2409,46 @@ const UNIFORM_FLUID_STAGES: readonly FluidPipelineStage[] = [
     controls: [
       {
         kind: "param-range", param: "pressureResidualTolerance", label: "Residual tolerance", unit: "s⁻¹",
-        min: 0, max: 10, step: 0.0001, digits: 4, editable: true,
+        min: 0, max: 100, step: 0.0001, digits: 4, editable: true,
         hint: "Stop remaining Full-Cycles and V-Cycles once the projected residual ∞-norm is at or below tolerance. Zero disables early exit; changes apply live.",
+      },
+      {
+        kind: "param-choice", param: "pressureCycleBudget", label: "Cycle budget",
+        options: [
+          { value: "lagged", label: "Lagged", hint: "Encode only as many cycles as the latest diagnostics sample says the solve needed, plus the headroom. A cycle that is never encoded costs neither its GPU launch floor (~6-13 µs a pass, whether or not the body runs) nor its ~11 µs of CPU encode. The residual gate still stops a converged solve inside the encoded prefix." },
+          { value: "fixed", label: "Fixed", hint: "Always encode the configured schedule and let the GPU-side gate skip the remainder. This is the command stream the solver encoded before the budget existed." },
+        ],
+      },
+      {
+        kind: "param-range", param: "pressureBudgetHeadroom", label: "Budget headroom",
+        unit: "cycles", min: 0, max: 4, step: 1, digits: 0,
+        hint: "Cycles encoded above the last observed demand. The signal lags the encoded step by one or more frames, so the rule is asymmetric: it shrinks by this headroom and grows by doubling whenever a step used every encoded cycle without meeting tolerance.",
+        enabled: (context) => context.values.pressureCycleBudget !== "fixed",
+      },
+      {
+        kind: "readout", label: "Cycles encoded",
+        hint: "Cycles in the command stream this step, against the configured schedule. Under Fixed the two are always equal.",
+        value: (context) => {
+          const info = context.info as unknown as {
+            uniformPressureCyclesEncoded?: number; uniformPressureCyclesConfigured?: number } | null;
+          const encoded = info?.uniformPressureCyclesEncoded;
+          const configured = info?.uniformPressureCyclesConfigured;
+          return encoded === undefined || configured === undefined
+            ? "—" : `${encoded} of ${configured}`;
+        },
+      },
+      {
+        kind: "readout", label: "Passes encoded",
+        hint: "Compute passes the whole pressure solve encoded this step — setup pyramid, cycles and finish — against the configured schedule's count.",
+        value: (context) => {
+          const info = context.info as unknown as {
+            uniformPressurePassesEncoded?: number; uniformPressurePassesConfigured?: number } | null;
+          const encoded = info?.uniformPressurePassesEncoded;
+          const configured = info?.uniformPressurePassesConfigured;
+          if (encoded === undefined || configured === undefined) return "—";
+          const share = configured > 0 ? Math.round(100 * encoded / configured) : 100;
+          return `${encoded} / ${configured} (${share}%)`;
+        },
       },
       {
         kind: "param-range",
@@ -2336,9 +2503,29 @@ const UNIFORM_FLUID_STAGES: readonly FluidPipelineStage[] = [
       const preSweeps = configured?.preSweeps ?? Number(context.values.pressureSweeps ?? UNIFORM_CM11A_PRE_SWEEPS);
       const postSweeps = configured?.postSweeps ?? Number(context.values.pressureSweeps ?? UNIFORM_CM11A_POST_SWEEPS);
       const schedule = `${fullCycles} full + ${vCycles} V · ${preSweeps}+${postSweeps} sweeps`;
-      return facts
-        ? `${facts.multigridPasses["full-cycle"] + facts.multigridPasses["v-cycle"]} passes · ${schedule}`
-        : schedule;
+      const cyclePasses = facts
+        ? facts.multigridPasses["full-cycle"] + facts.multigridPasses["v-cycle"] : undefined;
+      const info = context.info as unknown as {
+        uniformPressureCycleBudget?: "lagged" | "fixed";
+        uniformPressureCyclesEncoded?: number; uniformPressureCyclesConfigured?: number;
+        uniformPressurePassesEncoded?: number } | null;
+      const lagged = (info?.uniformPressureCycleBudget
+        ?? (context.values.pressureCycleBudget === "fixed" ? "fixed" : "lagged")) === "lagged";
+      const encodedCycles = info?.uniformPressureCyclesEncoded;
+      const configuredCycles = info?.uniformPressureCyclesConfigured;
+      if (!lagged) {
+        return cyclePasses === undefined
+          ? `fixed · ${schedule}` : `fixed · ${cyclePasses} passes · ${schedule}`;
+      }
+      if (encodedCycles === undefined || configuredCycles === undefined) return `lagged · ${schedule}`;
+      // Cycle passes only, so the number means the same thing on both arms:
+      // the encoded stream minus the setup pyramid and the finish section.
+      const encodedCyclePasses = facts && info?.uniformPressurePassesEncoded !== undefined
+        ? info.uniformPressurePassesEncoded - facts.multigridPasses.setup - facts.multigridPasses.finish
+        : undefined;
+      return `lagged · ${encodedCycles} of ${configuredCycles} cycles`
+        + (encodedCyclePasses !== undefined && cyclePasses !== undefined
+          ? ` · ${encodedCyclePasses} of ${cyclePasses} passes` : "");
     },
   },
   {

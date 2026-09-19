@@ -24,9 +24,21 @@ const params: MethodParamSpec[] = [
   ...ALGORITHM_PARAMS,
   {
     ...runtimeUpdate, kind: "number", key: "pressureResidualTolerance",
-    label: "Pressure residual tolerance", default: 0.0001, tier: "fine",
-    min: 0, max: 10, step: 0.0001, digits: 4, unit: "s⁻¹",
+    label: "Pressure residual tolerance", default: 10, tier: "fine",
+    min: 0, max: 100, step: 0.0001, digits: 4, unit: "s⁻¹",
     hint: "Stop after a complete Full-Cycle or V-Cycle when the projected residual infinity norm is at or below this tolerance. Zero runs every configured cycle.",
+  },
+  {
+    ...runtimeUpdate, kind: "select", key: "pressureCycleBudget",
+    label: "Pressure cycle budget", default: "lagged", tier: "fine",
+    options: [{ value: "lagged", label: "Lagged" }, { value: "fixed", label: "Fixed" }],
+    hint: "Lagged encodes only as many multigrid cycles as the latest diagnostics sample says the solve needed, so the unused tail costs neither its GPU launch floor nor its CPU encode. Fixed always encodes the configured schedule and lets the GPU residual gate skip the remainder, which is the pre-P1 command stream.",
+  },
+  {
+    ...runtimeUpdate, kind: "number", key: "pressureBudgetHeadroom",
+    label: "Budget headroom", default: 1, tier: "fine",
+    min: 0, max: 4, step: 1, digits: 0, unit: "cycles",
+    hint: "Cycles the lagged budget encodes above the last observed demand. A step that used every encoded cycle without meeting tolerance doubles its budget instead, so an impact frame recovers the full schedule in one or two steps.",
   },
   {
     ...runtimeUpdate, kind: "number", key: "extensionFrontSweeps",
@@ -150,6 +162,8 @@ export function uniformReferenceSolverOptions(
       preSweeps: whole("pressureSweeps"),
       postSweeps: whole("pressureSweeps"),
     },
+    pressureCycleBudget: values.pressureCycleBudget === "fixed" ? "fixed" : "lagged",
+    pressureBudgetHeadroom: whole("pressureBudgetHeadroom"),
     densityPostProcessing: uniformDensityPostProcessingEnabled(
       values.densityPostProcessing,
       scene?.sceneId,

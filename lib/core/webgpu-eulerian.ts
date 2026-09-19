@@ -404,6 +404,21 @@ export interface GPUEulerianInfo {
   uniformCM11aCoarseWorstRow?: number;
   uniformCM11aCoarseWorstRowActive?: boolean;
   uniformCM11aCoarseWorstRowHalo?: boolean;
+  /**
+   * CM11a host-side cycle budgeting. "fixed" encodes the configured schedule
+   * every step; "lagged" encodes only as many cycles as the latest
+   * asynchronous diagnostics sample says the solve needed, so the tail's
+   * launch floor and CPU encode are never paid. Encoded counts are host facts
+   * known at encode time; executed counts arrive with the readback.
+   */
+  uniformPressureCycleBudget?: "lagged" | "fixed";
+  uniformPressureBudgetHeadroom?: number;
+  uniformPressureCyclesEncoded?: number;
+  uniformPressureCyclesConfigured?: number;
+  uniformPressurePassesEncoded?: number;
+  uniformPressurePassesConfigured?: number;
+  uniformPressureCyclesExecuted?: number;
+  uniformPressureCyclesConverged?: boolean;
   /** Sec. 3.3 FIM must terminate with an empty active list. */
   uniformFIMTerminalActiveFaces?: number;
   uniformFIMConverged?: boolean;
