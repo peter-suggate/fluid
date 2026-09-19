@@ -61,6 +61,18 @@ const TRACE_GAP_MS = 115;
 /** The first accepted sample still pays lazily-created resources. */
 const WARMUP_SAMPLES = 1;
 const VARIANTS = (process.env.FLUID_PROBE_VARIANTS ?? "geometric").split(",");
+/**
+ * Named arms. A variant with no entry runs the method's own defaults, which is
+ * what "geometric" has always meant here; the E3 arms override one select each
+ * so the two schedules are captured in ONE process (this lane is bimodal, so a
+ * stage delta across two captures is not a measurement).
+ */
+const VARIANT_VALUES: Record<string, Record<string, unknown>> = {
+  geometric: {},
+  tiles: { transportWorkMap: "tiles" },
+  dense: { transportWorkMap: "dense" },
+  "tiles-margin0": { transportWorkMap: "tiles", transportReach: 0 },
+};
 /** A median over fewer than two dozen samples cannot see this lane's bimodality. */
 const MIN_SAMPLES = Number(process.env.FLUID_PROBE_MIN_SAMPLES ?? 24);
 
@@ -191,7 +203,7 @@ try {
     const scene = structuredClone(sceneDocument(getSceneDefinition(process.env.FLUID_PROBE_SCENE ?? "cm12-figure-7")));
     const values = resolveMethodValues(uniformVolumeMethod, "balanced", {
       timeStep: "scene",
-
+      ...(VARIANT_VALUES[variant] ?? {}),
     });
     const solver = await uniformVolumeMethod.createSolverAsync!(
       device, scene, "balanced", values, undefined, () => {});
@@ -330,7 +342,8 @@ try {
       ...Object.fromEntries([...sample.phases].map(([label, value]) => [label, Number(value.toFixed(3))])),
     }));
     report.push({
-      variant: `densityPostProcessing=${variant}`,
+      variant,
+      variantValues: VARIANT_VALUES[variant] ?? {},
       sceneId: scene.sceneId,
       timestampQuery: features.length > 0,
       measurementSources: [...sources],
@@ -367,6 +380,13 @@ try {
         cm11aCoarseActiveRows: lastInfo.uniformCM11aCoarseActiveRows,
         cm11aCoarseFreeRows: lastInfo.uniformCM11aCoarseFreeRows,
         maxSpeed_m_s: lastInfo.maxSpeed_m_s,
+        transportWorkMap: lastInfo.uniformTransportWorkMap,
+        transportTiles: lastInfo.uniformTransportTiles,
+        transportTilesTotal: lastInfo.uniformTransportTilesTotal,
+        transportReachTiles: lastInfo.uniformTransportReachTiles,
+        transportRequiredReachTiles: lastInfo.uniformTransportRequiredReachTiles,
+        transportMaxDisplacement_cells: lastInfo.uniformTransportMaxDisplacement_cells,
+        twoLevelFineTiles: lastInfo.uniformTwoLevelFineTiles,
         gammaDiffusionIterations: values.gammaDiffusionIterations,
         velocityTransport: values.velocityTransport,
       },

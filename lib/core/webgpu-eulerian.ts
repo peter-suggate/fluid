@@ -422,6 +422,21 @@ export interface GPUEulerianInfo {
   uniformTwoLevelFineReach?: number;
   uniformTwoLevelFineTiles?: number;
   uniformTwoLevelTilesTotal?: number;
+  /**
+   * Experiment E3's live transport set: whether the twelve conservative
+   * transport passes ran on it, how many 4h tiles it held, the reach this
+   * step's measured maximum backward displacement required, the authored
+   * margin on top of it, and the reach the dilation actually used. Used below
+   * required means the shader's cap bit and a front can stall at the set
+   * boundary; it is otherwise required + margin by construction.
+   */
+  uniformTransportWorkMap?: boolean;
+  uniformTransportTiles?: number;
+  uniformTransportTilesTotal?: number;
+  uniformTransportReachTiles?: number;
+  uniformTransportReachMargin?: number;
+  uniformTransportRequiredReachTiles?: number;
+  uniformTransportMaxDisplacement_cells?: number;
   /** Latest rolling uniform work box, copied only by the existing diagnostics readback. */
   uniformActiveRegionMinimum?: GPUFieldLocation;
   uniformActiveRegionMaximum?: GPUFieldLocation;

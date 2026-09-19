@@ -113,6 +113,21 @@ export interface WebGPUUniformReferenceOptions {
    * tile map is only built when that is on.
    */
   twoLevelAdvectionTiles?: boolean;
+  /**
+   * E3: run every pass of the conservative volume transport only on the live
+   * tile set. Gated on `twoLevelVelocity` (which builds the class map) and on a
+   * positive `volumeDustThreshold`, which is what makes "V is zero outside the
+   * set" -- the predicate that keeps the restriction lossless -- true.
+   */
+  transportTiles?: boolean;
+  /** Extra 4h tiles the transport set adds past the fine set. */
+  transportReach?: number;
+  /**
+   * Geometric only. A cell holding at least half its open capacity in V owns a
+   * pressure row even where centre phi is positive, so sub-half-cell films keep
+   * incompressibility and Sec. 3.7's excess divergence can reach stacked V.
+   */
+  volumePressureRows?: boolean;
   liquidCapacityBalancing?: boolean;
   liquidCapacityBalancingRounds?: number;
   liquidCapacityBalancingTolerance?: number;
@@ -306,6 +321,14 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private twoLevelAdvectionTiles: boolean;
   /** How far past the fine set the extension must still be exact, in 4h tiles. */
   private twoLevelShellReach: number;
+  /** E3: the twelve transport passes run on the live tile set, not densely. */
+  private transportTiles: boolean;
+  /** Extra 4h tiles the transport set adds past the fine set. */
+  private transportReach: number;
+  /** V may claim a pressure row that centre phi alone would deny. */
+  private volumePressureRows: boolean;
+  /** The transport restriction was encoded in the most recent step. */
+  private transportTilesEncoded = false;
   /** Coarse cells whose E1 tables fit the conditioning plane; 0 disables E1. */
   private twoLevelTileCount: number;
   private twoLevelPipelines: Partial<Record<typeof UNIFORM_VOLUME_TWO_LEVEL_ENTRIES[number], GPUComputePipeline>> = {};
@@ -478,6 +501,18 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       ? Math.round(Math.min(8, Math.max(0, options.twoLevelFineReach!))) : 2;
     this.twoLevelExtensionTiles = options.twoLevelExtensionTiles !== false;
     this.twoLevelAdvectionTiles = options.twoLevelAdvectionTiles !== false;
+    this.transportTiles = options.transportTiles !== false;
+    // A MARGIN in 4h tiles on top of the reach the step's own measured maximum
+    // displacement requires, not a fixed reach: the classify measures that
+    // displacement one dispatch before the dilation reads it, so the set
+    // tracks the flow instead of being sized for the worst frame of the run.
+    // The panel's range starts at zero, the exact predicate. A NEGATIVE margin
+    // is a verification-only deficit: it starves the live set below what the
+    // measured displacement requires, which is how the restriction is shown to
+    // be a restriction at all (the front stalls; nothing is created or lost).
+    this.transportReach = Number.isFinite(options.transportReach)
+      ? Math.round(Math.min(8, Math.max(-8, options.transportReach!))) : 1;
+    this.volumePressureRows = options.volumePressureRows === true;
     this.liquidCapacityBalancing = options.liquidCapacityBalancing === true;
     this.liquidCapacityBalancingRounds = Number.isFinite(options.liquidCapacityBalancingRounds)
       ? Math.round(Math.min(64, Math.max(1, options.liquidCapacityBalancingRounds!))) : 64;
@@ -1013,7 +1048,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       // E1's fine reach in 4h tiles, or -1 with the experiment off. Negative is
       // the whole gate: the two-level branch in sampleVelocityComponent is then
       // never taken and the four map passes are never encoded.
-      this.twoLevelEnabled ? this.twoLevelFineReach : -1, 0,
+      // w: geometric only, V claims pressure rows. The paper shader's use of
+      // this word (level-set authority) has always been written as zero.
+      this.twoLevelEnabled ? this.twoLevelFineReach : -1, this.geometricVolume && this.volumePressureRows ? 1 : 0,
       this.scene.fluid.surfaceTension_N_m, c.fluidWallMode === "no-slip" ? 1 : 0, activeBodyCount, c.top === "open" ? 1 : 0,
       outlet?.x ?? 0, outlet?.y ?? 0, outlet?.z ?? 0, inflow?.radius_m ?? 0,
       inflow?.velocity_m_s.x ?? 0, inflow?.velocity_m_s.y ?? 0, inflow?.velocity_m_s.z ?? 0, this.inflowBoundary?.apertureScale ?? 0,
@@ -1028,7 +1065,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       // on those tiles, and whether advection and projection take their far-air
       // arm outside the fine tiles. All inert while the sampler is off.
       this.twoLevelShellReach, this.twoLevelExtensionEnabled ? 1 : 0,
-      this.twoLevelAdvectionEnabled ? 1 : 0, 0,
+      // w is E3's transport reach in 4h tiles past the fine set, or -1 with the
+      // live set off -- the same negative gate physical.z uses, so every
+      // transport kernel's tile test folds to "never skip" and the dense arm
+      // executes the identical instruction stream it did before E3.
+      this.twoLevelAdvectionEnabled ? 1 : 0,
+      this.transportTilesEnabled ? this.transportReach + 8 : -1,
     ]));
   }
 
@@ -1100,6 +1142,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       if (values.twoLevelExtension !== undefined) this.twoLevelExtensionTiles = values.twoLevelExtension !== "dense";
       if (values.twoLevelAdvection !== undefined) this.twoLevelAdvectionTiles = values.twoLevelAdvection !== "dense";
       if (values.twoLevelShellReach !== undefined) this.twoLevelShellReach = Math.round(finite("twoLevelShellReach", 1, 0, 8));
+      if (values.transportWorkMap !== undefined) this.transportTiles = values.transportWorkMap !== "dense";
+      if (values.transportReach !== undefined) this.transportReach = Math.round(finite("transportReach", 1, -8, 8));
+      if (values.volumePressureRows !== undefined) this.volumePressureRows = values.volumePressureRows !== "off";
       this.geometricRedistance = values.redistance !== "off";
       this.liquidCapacityBalancing = values.liquidCapacityBalancing === "on";
       this.liquidCapacityBalancingRounds = Math.round(finite("liquidCapacityBalancingRounds", 64, 1, 64));
@@ -1334,6 +1379,17 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     return this.twoLevelEnabled && this.twoLevelAdvectionTiles;
   }
 
+  /**
+   * E3 needs the class map E1 builds, and it needs its own predicate to hold.
+   * The gather writes zero outside the live set, so a cell outside it that
+   * still carried V would simply lose it. With the dust floor at zero a cell
+   * can carry ULP-scale V anywhere in the domain and "V is zero outside the
+   * live set" fails, so the dense schedule is forced instead.
+   */
+  private get transportTilesEnabled(): boolean {
+    return this.twoLevelEnabled && this.transportTiles && this.volumeDustThreshold > 0;
+  }
+
   /** Byte offset of the shell-tile counter, above the two dilation planes. */
   private get twoLevelShellCountOffset(): number {
     return (this.info.nx * this.info.ny * this.info.nz + 6 * this.twoLevelTileCount) * 4;
@@ -1509,6 +1565,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.negativeBoundaryVelocityBytes,
     );
     this.twoLevelEncoded = this.twoLevelEnabled;
+    this.transportTilesEncoded = this.transportTilesEnabled;
     // The tile classes, at the HEAD of the step and before the extension that
     // now runs on them: seeded from start-of-step V and phi, solids and this
     // step's sources, then dilated to FINE (k tiles) and SHELL (k + shell
@@ -1519,7 +1576,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     if (this.twoLevelEncoded) {
       const tiles: [number, number, number] = [Math.ceil(this.info.nx/4), Math.ceil(this.info.ny/4), Math.ceil(this.info.nz/4)];
       const grid: [number, number, number] = [Math.ceil(tiles[0]/4), Math.ceil(tiles[1]/4), Math.ceil(tiles[2]/4)];
-      encoder.clearBuffer(this.conditioningScratch, this.twoLevelShellCountOffset, 4);
+      // Shell tiles, transport tiles and the measured maximum displacement.
+      encoder.clearBuffer(this.conditioningScratch, this.twoLevelShellCountOffset,
+        UNIFORM_VOLUME_TWO_LEVEL_COUNTER_WORDS * 4);
       for (const entry of UNIFORM_VOLUME_TWO_LEVEL_ENTRIES) {
         this.runDirect(encoder, `Uniform Geometric two-level ${entry}`, this.twoLevelPipelines[entry]!, this.densityTraceGroup, grid);
       }
@@ -1761,7 +1820,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // Only the step that ran the classify dispatch leaves a meaningful count.
     const tileMap = this.sharpenTileMapEncoded;
     if (tileMap) encoder.copyBufferToBuffer(this.conditioningScratch, this.sharpenTileCountWordOffset, this.statsReadback, 192, 4);
-    if (this.twoLevelEncoded) encoder.copyBufferToBuffer(this.conditioningScratch, this.twoLevelShellCountOffset, this.statsReadback, 196, 4);
+    if (this.twoLevelEncoded) encoder.copyBufferToBuffer(this.conditioningScratch,
+      this.twoLevelShellCountOffset, this.statsReadback, 196,
+      UNIFORM_VOLUME_TWO_LEVEL_COUNTER_WORDS * 4);
     encoder.copyBufferToBuffer(this.pressureMultigrid.diagnostics, 0, this.statsReadback, 32, 60);
     encoder.copyBufferToBuffer(this.pressureMultigrid.diagnostics, 64, this.statsReadback, 176, 12);
     encoder.copyBufferToBuffer(this.velocityExtrapolator.convergenceDiagnostics, 0, this.statsReadback, 96, 16);
@@ -1837,6 +1898,24 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         uniformTwoLevelShellReach: this.geometricVolume ? this.twoLevelShellReach : undefined,
         uniformTwoLevelExtensionTiles: this.twoLevelEncoded ? this.twoLevelExtensionTiles : undefined,
         uniformTwoLevelAdvectionTiles: this.twoLevelEncoded ? this.twoLevelAdvectionTiles : undefined,
+      });
+      // E3. The measured displacement is the domain maximum of |v|*dt/h in
+      // cells, taken at the head of the step on the velocity transport traces.
+      // The required reach is that step's ceil(D)+1 cells in whole tiles, which
+      // is what the dilation used plus the margin -- so "used below required"
+      // can only mean the shader's cap bit, and the panel says so.
+      const displacement = this.twoLevelEncoded
+        ? new Float32Array(new Uint32Array([words[51]!]).buffer)[0]! : 0;
+      const requiredReach = Math.ceil((Math.ceil(Math.max(displacement, 0)) + 1) / 4);
+      Object.assign(this.info, {
+        uniformTransportWorkMap: this.geometricVolume ? this.transportTilesEncoded : undefined,
+        uniformTransportTiles: this.transportTilesEncoded ? words[50]! : undefined,
+        uniformTransportTilesTotal: this.twoLevelEncoded ? this.twoLevelTileCount : undefined,
+        uniformTransportReachMargin: this.geometricVolume ? this.transportReach : undefined,
+        uniformTransportReachTiles: this.twoLevelEncoded
+          ? Math.max(0, Math.min(16, requiredReach + this.transportReach)) : undefined,
+        uniformTransportMaxDisplacement_cells: this.twoLevelEncoded ? displacement : undefined,
+        uniformTransportRequiredReachTiles: this.twoLevelEncoded ? requiredReach : undefined,
       });
       return this.info;
     } finally {

@@ -49,6 +49,15 @@ params.push({kind:"number",key:"twoLevelShellReach",label:"Shell reach",default:
 params.push({kind:"select",key:"twoLevelAdvection",label:"Advection work",default:"tiles",tier:"fine",update:"runtime",
   options:[{value:"tiles",label:"Fine tiles"},{value:"dense",label:"Dense"}],
   hint:"Outside the fine tiles, velocity advection and the projection take their far-air arm directly: no backward traces, no face data, no pressure taps. Those cells have no pressure row and no liquid neighbour, so the projection overwrote the advected value anyway. Only meaningful with the two-level sampler on."});
+params.push({kind:"select",key:"transportWorkMap",label:"Transport work",default:"tiles",tier:"fine",update:"runtime",
+  options:[{value:"tiles",label:"Live tiles"},{value:"dense",label:"Dense"}],
+  hint:"Run every pass of the conservative volume transport only on the 4h tiles that can hold or receive liquid this step. Donor columns normalise over the receivers that sample them, so this is exactly conservative while every cell outside the set holds V=0 — which is what the dust floor guarantees. Dense retains the full-lattice schedule, and is forced when the dust floor or the two-level sampler is off."});
+params.push({kind:"number",key:"transportReach",label:"Transport margin",default:1,tier:"fine",update:"runtime",
+  min:0,max:8,step:1,digits:0,unit:"tiles",
+  hint:"Extra 4h tiles added to the reach this step's own measured maximum displacement requires. The classify measures that displacement one dispatch before the dilation reads it, so the set already tracks the flow; this is only headroom. Zero is the exact predicate."});
+params.push({kind:"select",key:"volumePressureRows",label:"Volume pressure rows",default:"on",tier:"fine",update:"runtime",
+  options:[{value:"on",label:"On"},{value:"off",label:"Off"}],
+  hint:"Let a cell holding at least half its open capacity in V own a pressure row even where the level set reads dry. Without it a film thinner than half a cell has no pressure, its volume stacks against the far wall with nothing to push it back, and once no cell centre is liquid the solve stops. Off is the phi-only control."});
 const point = "simulation.uniform-volume.algorithms";
 const choices = params.filter(p => p.kind === "select");
 const algorithmFeature = parameterVariantFeature(point, choices, ["simulation.dense-grid"]);
@@ -89,6 +98,9 @@ export const uniformVolumeMethod: SimulationMethod = {
       twoLevelExtensionTiles: values.twoLevelExtension !== "dense",
       twoLevelShellReach: Number(values.twoLevelShellReach ?? 1),
       twoLevelAdvectionTiles: values.twoLevelAdvection !== "dense",
+      transportTiles: values.transportWorkMap !== "dense",
+      transportReach: Number(values.transportReach ?? 1),
+      volumePressureRows: values.volumePressureRows !== "off",
       activeRegion: false, gammaDiffusionIterations: 0, densityPostProcessing: false,
       solidExcessCorrection: false,
     }, progress, signal),

@@ -21,6 +21,10 @@ type VolumeInfo = {
   uniformTwoLevelVelocity?: boolean; uniformTwoLevelFineTiles?: number; uniformTwoLevelTilesTotal?: number;
   uniformTwoLevelShellTiles?: number; uniformTwoLevelShellReach?: number;
   uniformTwoLevelExtensionTiles?: boolean; uniformTwoLevelAdvectionTiles?: boolean;
+  uniformTransportWorkMap?: boolean; uniformTransportTiles?: number;
+  uniformTransportTilesTotal?: number; uniformTransportReachTiles?: number;
+  uniformTransportReachMargin?: number;
+  uniformTransportRequiredReachTiles?: number; uniformTransportMaxDisplacement_cells?: number;
 } | null;
 const volumeInfo = (context: FluidPipelineContext) => context.info as unknown as VolumeInfo;
 /** The authored floor, in cell volumes; zero and absent both read as off. */
@@ -96,6 +100,72 @@ const advectionChip = (context: FluidPipelineContext) => {
   const fine = fineMap(context);
   return fine ? `far air skipped · ${fine.percent}% tiles` : "far air skipped";
 };
+/**
+ * E3. The restriction needs the class map the two-level sampler builds, and it
+ * needs the dust floor, which is the only reason "V is zero outside the live
+ * set" — the predicate it is exactly conservative under — holds. Either one off
+ * means the solver has forced the dense schedule, so say which.
+ */
+const transportForcedDense = (context: FluidPipelineContext): string | undefined => {
+  if (context.values.transportWorkMap === "dense") return "transport dense";
+  if (context.values.twoLevelVelocity !== "on") return "transport dense · no tile map";
+  if (dustThreshold(context) <= 0) return "transport dense · dust floor off";
+  return undefined;
+};
+const transportMap = (context: FluidPipelineContext) => {
+  const info = volumeInfo(context);
+  if (transportForcedDense(context) || info?.uniformTransportWorkMap === false) return undefined;
+  const live = info?.uniformTransportTiles, total = info?.uniformTransportTilesTotal;
+  if (live === undefined || total === undefined || total <= 0) return undefined;
+  return {live,total,percent:Math.round(100*live/total)};
+};
+/** The reach the dilation used against the reach the step's displacement required. */
+const transportReach = (context: FluidPipelineContext) => {
+  const info = volumeInfo(context);
+  const used = info?.uniformTransportReachTiles;
+  const required = info?.uniformTransportRequiredReachTiles;
+  if (used === undefined || required === undefined) return undefined;
+  return {used,required,short:used<required,
+    displacement:info?.uniformTransportMaxDisplacement_cells ?? 0};
+};
+const volumePressureRowsControl = {kind:"param-choice" as const,param:"volumePressureRows",label:"Volume pressure rows",
+  options:[{value:"on",label:"On",hint:"A cell holding at least half its open capacity in V owns a pressure row even where centre phi is positive, at the ghost distance that fill implies. Thin films keep incompressibility and the excess-volume divergence can reach V stacked in phi-dry cells."},
+    {value:"off",label:"Off",hint:"Rows from centre phi alone: the control. A film under half a cell has no pressure, and with no liquid centre left the solve stops."}]};
+const transportControls = [
+  {kind:"param-choice" as const,param:"transportWorkMap",label:"Transport work",
+    options:[{value:"tiles",label:"Live tiles",hint:"Build edges, sum and normalise donors and gather only in the 4h tiles that can hold or receive liquid this step. Outside them the gather stores V=0 and gamma=0 without evaluating either."},
+      {value:"dense",label:"Dense",hint:"The full-lattice schedule, retained so the shrink can be measured on its own."}],
+    enabled:(context: FluidPipelineContext)=>context.values.twoLevelVelocity === "on" && dustThreshold(context) > 0},
+  {kind:"param-range" as const,param:"transportReach",label:"Transport margin",unit:"tiles",
+    min:0,max:8,step:1,digits:0,
+    hint:"Extra tiles added to the reach this step's measured maximum displacement requires. The set already tracks the flow, so this is headroom; zero is the exact predicate.",
+    enabled:(context: FluidPipelineContext)=>context.values.twoLevelVelocity === "on" && dustThreshold(context) > 0},
+  {kind:"readout" as const,label:"Live tiles",
+    hint:"4×4×4 tiles the twelve transport passes ran on, in the latest diagnostics sample. The rest are known to hold V=0 and are skipped whole-workgroup.",
+    value:(context: FluidPipelineContext)=>{const map=transportMap(context);
+      return map?`${map.live} / ${map.total} (${map.percent}%)`:"—";}},
+  {kind:"readout" as const,label:"Reach",
+    hint:"Tiles the seed was dilated by, against the tiles this step's largest measured backward displacement required. Used is required plus the margin unless the shader's sixteen-tile cap bit, which is the only way it can read SHORT.",
+    value:(context: FluidPipelineContext)=>{const reach=transportReach(context);
+      if(!reach)return "—";
+      return `${reach.used} used · ${reach.required} required${reach.short?" · SHORT":""}`
+        + ` (${reach.displacement.toFixed(1)} cells)`;}},
+];
+const transportChip = (context: FluidPipelineContext) => {
+  const forced = transportForcedDense(context);
+  if (forced) return forced;
+  const reach = transportReach(context);
+  const map = transportMap(context);
+  const short = reach?.short ? " · reach SHORT" : "";
+  return map ? `live tiles ${map.percent}%${short}` : `live tiles${short}`;
+};
+/**
+ * The floor's chip and the live set's, in that order. With the floor off the
+ * set cannot run at all and the floor's own "dense finest lattice" already
+ * says so, so the stage does not repeat it.
+ */
+const couplingChip = (context: FluidPipelineContext) =>
+  dustThreshold(context) > 0 ? `${dustChip(context)} · ${transportChip(context)}` : dustChip(context);
 const volumeStages: FluidPipelineStage[] = [
   ["phi", "Vertex level set", "RK2 characteristics and bounded closest-point redistancing; phi is independent of V."],
   ["coupling", "Conservative volume transport", "Eight box-overlap donors plus an identity fallback; three receiver/donor balancing rounds."],
@@ -109,7 +179,7 @@ const volumeStages: FluidPipelineStage[] = [
   chip:context=>id === "balance"
     ? context.values.liquidCapacityBalancing !== "on" ? "off · gather only" : `${context.values.liquidCapacityBalancingRounds ?? 64} rounds maximum`
     : id === "sharpen" ? sharpenChip(context)
-    : id === "coupling" ? dustChip(context)
+    : id === "coupling" ? couplingChip(context)
     : "dense finest lattice",
   ...(id === "coupling" ? {
     controls:[{kind:"param-range" as const,param:"volumeDustThreshold",label:"Dust floor",unit:"cell volumes",
@@ -120,7 +190,8 @@ const volumeStages: FluidPipelineStage[] = [
       value:(context: FluidPipelineContext)=>{
         const info=volumeInfo(context);const cells=info?.uniformVolumeDustCells;
         if(dustThreshold(context)<=0||cells===undefined)return "—";
-        return `${cells.toLocaleString()} cells · ${(info?.uniformVolumeDustMass_cells ?? 0).toExponential(2)} cell volumes`;}}],
+        return `${cells.toLocaleString()} cells · ${(info?.uniformVolumeDustMass_cells ?? 0).toExponential(2)} cell volumes`;}},
+      ...transportControls],
   } : {}),
   ...(id === "balance" ? {
     toggle:{param:"liquidCapacityBalancing",on:"on",off:"off"},
@@ -165,6 +236,10 @@ export const UNIFORM_VOLUME_PIPELINE: FluidPipelineGraph = {
       controls:[...(mapped.controls ?? []),...twoLevelControls],
       chip:context=>{const extra=twoLevelChip(context);const base=mapped.chip?.(context);
         return extra?(base?`${base} · ${extra}`:extra):base;}}];
+    // Which cells own a pressure row is decided where the topology and RHS
+    // are built, so the V claim sits on that stage.
+    if(stage.id==="pressure-system")return [{...mapped,
+      controls:[...(mapped.controls ?? []),volumePressureRowsControl]}];
     // E2b shrinks both of these, off the same fine map, so the one control sits
     // on both stages rather than in a shelf away from the work it prices.
     if(stage.id==="velocity-advection"||stage.id==="pressure-projection")return [{...mapped,

@@ -17,8 +17,16 @@ export const UNIFORM_VOLUME_TWO_LEVEL_ENTRIES = [
 ] as const;
 /** Words the E1 tables occupy above the N-word donor-sum region, per coarse cell. */
 export const UNIFORM_VOLUME_TWO_LEVEL_WORDS_PER_TILE = 6;
-/** One counter word above the two ping-pong planes: shell tiles this step. */
-export const UNIFORM_VOLUME_TWO_LEVEL_COUNTER_WORDS = 1;
+/**
+ * Counter words above the two ping-pong planes, all cleared at the head of the
+ * step: shell tiles, transport (E3 live-set) tiles, and the largest backward
+ * displacement in cells any cell's start-of-step velocity can produce, which is
+ * what the transport predicate's required reach is derived from.
+ */
+export const UNIFORM_VOLUME_TWO_LEVEL_COUNTER_WORDS = 3;
+export const UNIFORM_VOLUME_TWO_LEVEL_SHELL_COUNT_WORD = 0;
+export const UNIFORM_VOLUME_TWO_LEVEL_TRANSPORT_COUNT_WORD = 1;
+export const UNIFORM_VOLUME_TWO_LEVEL_DISPLACEMENT_WORD = 2;
 /** Pipeline-overridable constant selecting the tiled sharpening variant. */
 export const UNIFORM_VOLUME_TILE_WORK_OVERRIDE = "UV_SHARPEN_TILE_WORK";
 /** Words 2N+0..6 of the third conditioning plane stay liquid-balance owned. */
@@ -142,8 +150,42 @@ fn uvRedistancePhi(@builtin(global_invocation_id)gid:vec3u){
   textureStore(uvPhiOut,vec3i(gid),vec4f(value));
 }
 fn uvOpen(id:vec3i)->f32{if(!valid(id)){return 0.0;}return cellOpenFraction(id);}
+// E3. Every pass of Sec. 3.4's conservative transport runs only on the live
+// tile set TRANSPORT (class bit 4): the seed dilated by the fine reach plus
+// params.twoLevel.w tiles. A 4x4x4 workgroup IS one 4h tile, so the test below
+// is uniform across the workgroup and the exit costs one predicated branch.
+//
+// Why this is exactly the dense result. uvNormalizeDonors divides every weight
+// by the column sum accumulated over the rows that were BUILT, so after it
+// sum over receivers in the set of w[i][d] = 1 for every donor d any of them
+// samples -- and uvFallback gives a donor nobody samples a self-edge. The
+// gather therefore moves every donor's V somewhere and never duplicates it,
+// for any built set. What restricting the set can do is (a) DESTROY the V of a
+// cell outside it, because the gather writes zero there rather than the old
+// value (identity would double it instead, which is the one thing that creates
+// volume), and (b) refuse liquid to a cell outside it that should have been
+// wetted, which stalls a front without losing a drop.
+//
+// (a) is closed by the predicate "V = 0 outside the set", which holds because
+// the volume dust floor zeroes |V| below the threshold wherever V is written
+// and every cell at or above it seeds its own tile. With the floor at zero the
+// predicate fails, so the host forces the dense schedule there.
+// (b) is closed by the reach, which must cover ceil(D)+1 cells for this step's
+// largest displacement D. The classify measures D and publishes it beside the
+// configured reach, because nothing in the numbers reveals a short one.
+fn uvTransportTiles()->bool{return params.twoLevel.w>=0.0;}
+fn uvTransportTileAt(id:vec3i)->bool{
+  let t=clamp(id/4,vec3i(0),uvCoarseDims()-vec3i(1));
+  return (atomicLoad(&sharpenDeposits[uvCoarseBase()+4u*uvCoarseIndex(t)+3u])&4)!=0;
+}
+/** Uniform across a workgroup; false whenever the experiment is off. */
+fn uvTransportSkip(gid:vec3u)->bool{
+  if(!uvTransportTiles()){return false;}
+  return !uvTransportTileAt(vec3i(gid));
+}
 @compute @workgroup_size(4,4,4)
 fn uvBuildEdges(@builtin(global_invocation_id)gid:vec3u){
+  if(uvTransportSkip(gid)){return;}
   let id=vec3i(gid);if(!valid(id)){return;}let index=linearIndex(id);
   let departure=uvTrace(vec3f(id)+vec3f(0.5),params.dimsDt.w)-vec3f(0.5);
   let base=vec3i(floor(departure));let f=fract(departure);
@@ -155,16 +197,19 @@ fn uvBuildEdges(@builtin(global_invocation_id)gid:vec3u){
 }
 @compute @workgroup_size(4,4,4)
 fn uvSumDonors(@builtin(global_invocation_id)gid:vec3u){
+  if(uvTransportSkip(gid)){return;}
   let id=vec3i(gid);if(!valid(id)){return;}let index=linearIndex(id);
   for(var k=0u;k<9u;k++){uvAddDonor(uvEdges[index].donor[k],uvEdges[index].weight[k]);}
 }
 @compute @workgroup_size(4,4,4)
 fn uvFallback(@builtin(global_invocation_id)gid:vec3u){
+  if(uvTransportSkip(gid)){return;}
   let id=vec3i(gid);if(!valid(id)){return;}let i=linearIndex(id);
   if(atomicLoad(&sharpenDeposits[i])==0){uvEdges[i].weight[8]=max(uvOpen(id),1e-6);}
 }
 @compute @workgroup_size(4,4,4)
 fn uvNormalizeRows(@builtin(global_invocation_id)gid:vec3u){
+  if(uvTransportSkip(gid)){return;}
   let id=vec3i(gid);if(!valid(id)){return;}let i=linearIndex(id);var sum=0.0;
   for(var k=0u;k<9u;k++){sum+=uvEdges[i].weight[k];}
   let scale=uvOpen(id)/max(sum,1e-20);
@@ -172,6 +217,7 @@ fn uvNormalizeRows(@builtin(global_invocation_id)gid:vec3u){
 }
 @compute @workgroup_size(4,4,4)
 fn uvNormalizeDonors(@builtin(global_invocation_id)gid:vec3u){
+  if(uvTransportSkip(gid)){return;}
   let id=vec3i(gid);if(!valid(id)){return;}let i=linearIndex(id);
   for(var k=0u;k<9u;k++){let donor=uvEdges[i].donor[k];
     let sum=bitcast<f32>(atomicLoad(&sharpenDeposits[donor]));
@@ -192,6 +238,7 @@ fn uvBeginLiquidBalance(){let base=2u*cellCount();atomicStore(&sharpenDeposits[b
 }
 @compute @workgroup_size(4,4,4)
 fn uvBalanceLiquidRows(@builtin(global_invocation_id)gid:vec3u){
+  if(uvTransportSkip(gid)){return;}
   let id=vec3i(gid);if(!valid(id)||atomicLoad(&sharpenDeposits[2u*cellCount()])==0){return;}
   let i=linearIndex(id);var amount=0.0;
   for(var k=0u;k<9u;k++){amount+=uvEdges[i].weight[k]*volume(uvCell(uvEdges[i].donor[k]));}
@@ -202,6 +249,7 @@ fn uvBalanceLiquidRows(@builtin(global_invocation_id)gid:vec3u){
 }
 @compute @workgroup_size(4,4,4)
 fn uvBalanceLiquidDonors(@builtin(global_invocation_id)gid:vec3u){
+  if(uvTransportSkip(gid)){return;}
   let id=vec3i(gid);if(!valid(id)||atomicLoad(&sharpenDeposits[2u*cellCount()])==0){return;}
   let i=linearIndex(id);
   for(var k=0u;k<9u;k++){let donor=uvEdges[i].donor[k];let sum=bitcast<f32>(atomicLoad(&sharpenDeposits[donor]));
@@ -235,7 +283,18 @@ fn uvDustFloor(value:f32)->f32{
 }
 @compute @workgroup_size(4,4,4)
 fn uvGather(@builtin(global_invocation_id)gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}let i=linearIndex(id);var value=0.0;
+  let id=vec3i(gid);if(!valid(id)){return;}
+  // Outside the live set both outputs are known in closed form, so neither the
+  // nine-term gather nor uvTarget's eight trilinear phi probes are evaluated.
+  // V is zero there by the predicate above. Gamma is zero because TRANSPORT
+  // contains every tile with a vertex inside the 4h band -- outside it every
+  // corner sample of uvTarget is positive, so both its fill count and its
+  // plane-box fraction are zero. The stores themselves stay: volumeOut and
+  // gammaOut are ping-pong targets whose previous contents are two steps old.
+  if(uvTransportSkip(gid)){
+    textureStore(volumeOut,id,vec4f(0.0));textureStore(gammaOut,id,vec4f(0.0));return;
+  }
+  let i=linearIndex(id);var value=0.0;
   for(var k=0u;k<9u;k++){value+=uvEdges[i].weight[k]*volume(uvCell(uvEdges[i].donor[k]));}
   value+=min(dropSource(id),max(0.0,uvOpen(id)-value));
   if(uvOpen(id)>0.0){value+=inflowSweptPlugSource(id,params.dimsDt.w);}
@@ -412,11 +471,19 @@ fn uvTwoLevelSeed(@builtin(global_invocation_id)gid:vec3u){
   let t=vec3i(gid);if(any(t>=uvCoarseDims())){return;}
   let slot=uvCoarseBase()+4u*uvCoarseIndex(t);
   let dust=select(params.tuning.z,1e-6,params.tuning.z<=0.0);
-  var seed=false;
+  let spacing=params.cellGravity.xyz;
+  var seed=false;var displacement=0.0;
   for(var z=0;z<4;z++){for(var y=0;y<4;y++){for(var x=0;x<4;x++){
     let id=4*t+vec3i(x,y,z);if(!valid(id)){continue;}
     if(abs(volume(id))>dust||uvOpen(id)<0.99999){seed=true;}
-    if(dropSource(id)>0.0||inflowSweptPlugSource(id,params.dimsDt.w)>0.0){seed=true;}}}}
+    if(dropSource(id)>0.0||inflowSweptPlugSource(id,params.dimsDt.w)>0.0){seed=true;}
+    // E3's required reach, in cells, along the axis that moves furthest. This
+    // is the start-of-step velocity, which the extension then propagates into
+    // the air as copies before transport traces it, so the domain maximum taken
+    // here bounds every backward displacement this step.
+    let step=abs(velocity(id))*params.dimsDt.w/spacing;
+    displacement=max(displacement,max(step.x,max(step.y,step.z)));}}}
+  atomicMax(&sharpenDeposits[uvCoarsePlane(2u)+2u],bitcast<i32>(displacement));
   let h=params.cellGravity.xyz;let band=4.0*max(h.x,max(h.y,h.z));
   let last=min(4*t+vec3i(4),dims());
   for(var z=4*t.z;z<=last.z;z++){for(var y=4*t.y;y<=last.y;y++){for(var x=4*t.x;x<=last.x;x++){
@@ -430,17 +497,41 @@ fn uvTwoLevelSeed(@builtin(global_invocation_id)gid:vec3u){
 // back in the table so the sampler reads one place.
 fn uvTwoLevelFineReach()->i32{return i32(max(params.physical.z,0.0));}
 fn uvTwoLevelShellReach()->i32{return uvTwoLevelFineReach()+i32(max(params.twoLevel.x,1.0));}
-/** Both class bits of tile q on the pass's input plane; the seed plane is one bit. */
+/**
+ * E3's live transport set, dilated from the same seed as FINE and SHELL but by
+ * a reach this step MEASURED rather than one authored. uvTwoLevelSeed wrote the
+ * domain maximum backward displacement D, in cells, into the counter word one
+ * dispatch ago, so the predicate's own ceil(D)+1 cells is available here; a
+ * seed cell is at most 4m cells from the boundary of its m-tile dilation, so
+ * m = ceil((ceil(D)+1)/4) is exactly what the predicate asks for and
+ * params.twoLevel.w carries the margin on top of it, in tiles, BIASED BY EIGHT
+ * so that negative w can mean the experiment is off without colliding with a
+ * negative margin -- which is not reachable from the panel and exists only so a
+ * verification run can starve the set below its own predicate and watch the
+ * front stall. Off returns zero, leaving the scan range, and therefore the FINE
+ * and SHELL bits, exactly as they were. The cap keeps a blown-up velocity field
+ * from turning the separated scan into a domain sweep; the host publishes
+ * required against used, so a capped step is visible.
+ */
+fn uvTwoLevelTransportReach()->i32{
+  if(params.twoLevel.w<0.0){return 0;}
+  let d=bitcast<f32>(atomicLoad(&sharpenDeposits[uvCoarsePlane(2u)+2u]));
+  let required=i32(ceil((ceil(max(d,0.0))+1.0)/4.0));
+  return clamp(required+i32(params.twoLevel.w)-8,0,16);
+}
+/** All three class bits of tile q on the pass's input plane; the seed is one bit. */
 fn uvTwoLevelClassIn(plane:u32,q:vec3i)->i32{
-  if(plane==2u){return select(0,3,atomicLoad(&sharpenDeposits[uvCoarseBase()+4u*uvCoarseIndex(q)+3u])!=0);}
+  if(plane==2u){return select(0,7,atomicLoad(&sharpenDeposits[uvCoarseBase()+4u*uvCoarseIndex(q)+3u])!=0);}
   return atomicLoad(&sharpenDeposits[uvCoarsePlane(plane)+uvCoarseIndex(q)]);
 }
 fn uvTwoLevelDilate(previous:u32,axis:u32,t:vec3i)->i32{
-  let c=uvCoarseDims();let k=uvTwoLevelFineReach();let s=uvTwoLevelShellReach();var hit=0;
-  for(var d=-s;d<=s;d++){var q=t;q[axis]+=d;if(q[axis]<0||q[axis]>=c[axis]){continue;}
+  let c=uvCoarseDims();let k=uvTwoLevelFineReach();let s=uvTwoLevelShellReach();
+  let m=uvTwoLevelTransportReach();let r=max(s,m);var hit=0;
+  for(var d=-r;d<=r;d++){var q=t;q[axis]+=d;if(q[axis]<0||q[axis]>=c[axis]){continue;}
     let value=uvTwoLevelClassIn(previous,q);if(value==0){continue;}
     if((value&1)!=0&&d>=-k&&d<=k){hit|=1;}
-    if((value&2)!=0){hit|=2;}}
+    if((value&2)!=0&&d>=-s&&d<=s){hit|=2;}
+    if((value&4)!=0&&d>=-m&&d<=m){hit|=4;}}
   return hit;
 }
 @compute @workgroup_size(4,4,4)
@@ -460,6 +551,7 @@ fn uvTwoLevelDilateZ(@builtin(global_invocation_id)gid:vec3u){
   atomicStore(&sharpenDeposits[uvCoarseBase()+4u*uvCoarseIndex(t)+3u],hit);
   if((hit&1)!=0){atomicAdd(&reductions[7],1u);}
   if((hit&2)!=0){atomicAdd(&sharpenDeposits[uvCoarsePlane(2u)],1);}
+  if((hit&4)!=0){atomicAdd(&sharpenDeposits[uvCoarsePlane(2u)+1u],1);}
 }
 @compute @workgroup_size(4,4,4)
 fn uvPublish(@builtin(global_invocation_id)gid:vec3u){
