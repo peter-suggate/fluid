@@ -12,6 +12,52 @@ import { fractionViewShaderConstants } from "./fluid-fraction-view";
 import { fractionReadoutShaderLibrary } from "./fraction-readout.wgsl";
 import type { SparseAdaptiveGridConsumerSource, DenseLevelSetVolumeConsumerSource } from "./levelset-consumer-abi";
 import { createGridOverlayLevelSetVolumeWGSL, gridOverlayLevelSetVolumeUniform } from "./grid-overlay-levelset-volume.wgsl";
+import { methodViewShaderConstants } from "./grid-overlay-visualizations";
+import {
+  SOLVE_WINDOW_BOX_WORD, SOLVE_WINDOW_HOST_GROUPS_WORD, SOLVE_WINDOW_RECORD_WORDS, SOLVE_WINDOW_SEED_WORD,
+  TILE_CLASS_FINE, TILE_CLASS_RECORD_CLASS_WORD, TILE_CLASS_RECORD_WORDS, TILE_CLASS_SHELL,
+  type GPUFluidViewRecords,
+} from "./method-view-records";
+
+/**
+ * Readers of binding 23, one per method view. Each view's layout is the one
+ * documented on its source type in `method-view-records`.
+ */
+export const gridOverlayViewRecordsWGSL = /* wgsl */ `
+@group(0) @binding(23) var<storage,read> viewRecords:array<u32>;
+const TILE_CLASS_FINE:u32=${TILE_CLASS_FINE}u;
+const TILE_CLASS_SHELL:u32=${TILE_CLASS_SHELL}u;
+// The class of the tile holding a cell of a dense dims lattice. A binding
+// shorter than the tile count stands for a lattice sampled fine everywhere.
+fn tileClassAt(cell:vec3i,dims:vec3i)->u32{
+  let tiles=(dims+vec3i(3))/4;
+  let count=u32(tiles.x*tiles.y*tiles.z);
+  if(arrayLength(&viewRecords)<${TILE_CLASS_RECORD_WORDS}u*count){return TILE_CLASS_FINE|TILE_CLASS_SHELL;}
+  let t=clamp(cell,vec3i(0),dims-vec3i(1))/4;
+  return viewRecords[${TILE_CLASS_RECORD_WORDS}u*u32(t.x+tiles.x*(t.y+tiles.y*t.z))+${TILE_CLASS_RECORD_CLASS_WORD}u];
+}
+struct SolveWindowView{
+  seedMinimum:vec3i,seedMaximum:vec3i,
+  minimum:vec3i,maximum:vec3i,
+  // Exclusive end of the cells the launch covered, from the window origin.
+  launched:vec3i,
+}
+fn solveWindowRecordBox(word:u32)->vec3i{
+  return vec3i(i32(viewRecords[word]),i32(viewRecords[word+1u]),i32(viewRecords[word+2u]));
+}
+// A binding shorter than the header is the whole domain, dispatched densely.
+fn solveWindowView(dims:vec3i)->SolveWindowView{
+  if(arrayLength(&viewRecords)<${SOLVE_WINDOW_RECORD_WORDS}u){
+    return SolveWindowView(vec3i(0),dims,vec3i(0),dims,dims);
+  }
+  let minimum=solveWindowRecordBox(${SOLVE_WINDOW_BOX_WORD}u);
+  let maximum=solveWindowRecordBox(${SOLVE_WINDOW_BOX_WORD + 3}u);
+  let counts=solveWindowRecordBox(${SOLVE_WINDOW_HOST_GROUPS_WORD}u);
+  let launched=select(maximum,min(dims,minimum+4*counts),all(counts>vec3i(0)));
+  return SolveWindowView(solveWindowRecordBox(${SOLVE_WINDOW_SEED_WORD}u),
+    solveWindowRecordBox(${SOLVE_WINDOW_SEED_WORD + 3}u),minimum,maximum,launched);
+}
+`;
 
 export const gridOverlayShader = /* wgsl */ `
 struct Uniforms {
@@ -69,6 +115,7 @@ struct SparseOverlayParams { worldDirectory:vec4u, dynamicCells:vec4u, rungOffse
 @group(0) @binding(18) var<uniform> sparseOverlayP: SparseOverlayParams;
 @group(0) @binding(19) var<storage,read> sparseFramePlan: array<u32>;
 ${createGridOverlayLevelSetVolumeWGSL(true)}
+${gridOverlayViewRecordsWGSL}
 struct VertexOutput { @builtin(position) position: vec4f, @location(0) uv: vec2f }
 @vertex fn vertexMain(@builtin(vertex_index) index: u32) -> VertexOutput {
   var positions = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
@@ -949,6 +996,42 @@ fn gridLinePaint(distancePixels: f32, halfWidth: f32) -> f32 {
   return 1.0 - smoothstep(halfWidth - 0.5, halfWidth + 0.5, distancePixels);
 }
 
+// Pixel distance from a slice point to the outline the plane cuts through the
+// cell box [low, high); far away where the plane misses the box. The plane
+// point and derivative are in the slice's first/second-axis cell units.
+fn sliceBoxEdgePixels(planePoint: vec2f, derivative: vec2f, cell: vec3i,
+  low: vec3i, high: vec3i, firstAxis: i32, secondAxis: i32) -> f32 {
+  let normalAxis = 3 - firstAxis - secondAxis;
+  if (cell[normalAxis] < low[normalAxis] || cell[normalAxis] >= high[normalAxis]) { return 1e6; }
+  let lower = vec2f(f32(low[firstAxis]), f32(low[secondAxis]));
+  let upper = vec2f(f32(high[firstAxis]), f32(high[secondAxis]));
+  let outside = max(max(lower - planePoint, planePoint - upper), vec2f(0.0)) / derivative;
+  let inside = min(planePoint - lower, upper - planePoint) / derivative;
+  return select(min(inside.x, inside.y), length(outside), any(outside > vec2f(0.0)));
+}
+
+// The slice's pixel footprint from view DEPTH rather than ray length. Depth
+// is affine across the plane, so stripes phased by it stay straight; the ray
+// length grows toward the frame edge and bent them into arcs. Set per fragment.
+var<private> sliceHatchFootprint: f32;
+
+// Screen-sized diagonal stripes, 9 px apart and anchored to the plane, for a
+// mark that must not be read as a value on the view's own colour scale.
+fn sliceScreenHatch(samplePosition: vec2f, derivative: vec2f, footprint: f32) -> f32 {
+  let steady = derivative * select(1.0, sliceHatchFootprint / footprint, sliceHatchFootprint > 0.0);
+  let stripePosition = (samplePosition.x / steady.x
+    + samplePosition.y / steady.y) / 9.0;
+  let stripeDistance = min(fract(stripePosition), 1.0 - fract(stripePosition)) * 9.0;
+  return 1.0 - smoothstep(0.6, 1.35, stripeDistance);
+}
+
+// The level set's zero contour, about a pixel wide; zero where no phi is published.
+fn sliceZeroContour(position: vec3f, derivative: vec2f) -> f32 {
+  let phi = sliceLevelSetPhi(position);
+  let pixelFine = max(derivative.x, derivative.y);
+  return select(0.0, 1.0 - smoothstep(0.5 * pixelFine, 1.4 * pixelFine, abs(phi.x)), phi.y > 0.0);
+}
+
 // displayColor tonemaps by c/(c+1) before gamma-encoding, so a gradient
 // authored in linear light lands wherever that compression puts it, and its
 // bright half collapses into one colour. A ramp whose whole job is to keep
@@ -961,6 +1044,7 @@ fn sceneColor(display: vec3f) -> vec3f {
 }
 
 ${fractionViewShaderConstants}
+${methodViewShaderConstants}
 ${fractionReadoutShaderLibrary}
 // Below this the surface-density view stops claiming to resolve and draws
 // vacuum. It is the bottom of the residue band the transport actually
@@ -1035,6 +1119,15 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
   var opticalBoundary = 0.0;
   var liquidContour = 0.0;
   var excessHatch = 0.0;
+  // A method view's own structure — the 4^3 tile lattice, the solve window —
+  // cased like the structure view's lattice, and a second line in the view's
+  // accent colour drawn over it.
+  var viewBoundary = 0.0;
+  // A dark casing wider than viewBoundary's light core, for an outline that
+  // has to read on the pale studio ground as well as over water.
+  var viewCasing = 0.0;
+  var viewAccent = 0.0;
+  var viewAccentColor = vec3f(0.0);
   if (adaptiveGrid) {
     // The simulation transports its fields on a dense cubic backing texture,
     // but pressure is represented by adaptive quadtree/tall cells. The id
@@ -1223,18 +1316,61 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
       alpha = select(0.0, 0.94, volume.y > 0.0);
       sampleDot = 0.0;
       lineStrength = 0.55;
-      let phi = sliceLevelSetPhi(vec3f(fineOrigin) + local3);
-      let pixelFine = max(derivative.x, derivative.y);
-      liquidContour = select(0.0,
-        1.0 - smoothstep(0.5 * pixelFine, 1.4 * pixelFine, abs(phi.x)),
-        phi.y > 0.0);
+      liquidContour = sliceZeroContour(vec3f(fineOrigin) + local3, derivative);
       // Screen-sized diagonal stripes identify V > K without changing the
       // liquid colour scale. No density threshold is used to classify phi.
-      let stripePosition = (samplePosition.x / derivative.x
-        + samplePosition.y / derivative.y) / 9.0;
-      let stripeDistance = min(fract(stripePosition), 1.0 - fract(stripePosition)) * 9.0;
-      excessHatch = select(0.0, 1.0 - smoothstep(0.6, 1.35, stripeDistance),
+      excessHatch = select(0.0, sliceScreenHatch(samplePosition, derivative, footprint),
         volume.y > 0.0 && volume.x > FRACTION_OVERFULL);
+    } else if (fieldMode == 22 && !sparseGridEnabled()) {
+      // One class per 4^3 tile, from the step just taken. Far air keeps only
+      // the tile lattice: it is the part of the domain the view is about
+      // being able to see through.
+      let tileClass = tileClassAt(cell, dims);
+      let fine = (tileClass & TILE_CLASS_FINE) != 0u;
+      let shell = (tileClass & TILE_CLASS_SHELL) != 0u;
+      fill = sceneColor(select(SHELL_TILE_DISPLAY, FINE_TILE_DISPLAY, fine));
+      alpha = select(select(0.0, 0.30, shell), 0.66, fine);
+      sampleDot = 0.0;
+      // The finest lattice is drawn only where the sampler reads it. Outside a
+      // fine tile the tile itself is the cell, so its boundary is the grid.
+      lineStrength = select(0.0, 0.4, fine);
+      // The tile lattice is the subject, cased like the structure view's cell
+      // lattice. It holds until a tile is a few pixels across rather than a
+      // cell, since that is the scale it is read at. Far air draws it quieter,
+      // so the edge of the fine region is the line that reads first.
+      let tileFraction = fract(samplePosition * 0.25);
+      let tileDistance = min(min(tileFraction.x, 1.0 - tileFraction.x) * 4.0 / derivative.x,
+        min(tileFraction.y, 1.0 - tileFraction.y) * 4.0 / derivative.y);
+      viewBoundary = gridLinePaint(tileDistance, 1.0) * smoothstep(4.0, 9.0, 4.0 * pixelsPerCell)
+        * select(0.75, 1.0, fine || shell);
+      // The level set locates the liquid the classes were seeded from.
+      liquidContour = sliceZeroContour(vec3f(fineOrigin) + local3, derivative);
+    } else if (fieldMode == 23 && !sparseGridEnabled()) {
+      // Where the step ran. Cells the launch never reached are the point of
+      // the window, so they are veiled; the window itself stays clear over
+      // the liquid it was built around.
+      let window = solveWindowView(dims);
+      let inWindow = all(cell >= window.minimum) && all(cell < window.maximum);
+      let launched = all(cell >= window.minimum) && all(cell < window.launched);
+      let hatch = sliceScreenHatch(samplePosition, derivative, footprint);
+      fill = select(select(sceneColor(WINDOW_OUTSIDE_DISPLAY), sceneColor(WINDOW_LAG_DISPLAY), launched),
+        sceneColor(WINDOW_CLIPPED_DISPLAY), inWindow && !launched);
+      alpha = select(select(0.62, max(0.14, 0.85 * hatch), launched),
+        select(0.0, 0.8, !launched), inWindow);
+      sampleDot = 0.0;
+      // The finest lattice is drawn only where the step touched it.
+      lineStrength = select(0.0, 0.3, inWindow && launched);
+      let planePoint = samplePosition + vec2f(f32(fineOrigin[firstPlaneAxis]), f32(fineOrigin[secondPlaneAxis]));
+      let windowEdge = sliceBoxEdgePixels(planePoint, derivative, cell,
+        window.minimum, window.maximum, firstPlaneAxis, secondPlaneAxis);
+      viewBoundary = gridLinePaint(windowEdge, 1.5);
+      viewCasing = gridLinePaint(windowEdge, 2.5);
+      // This step's own box, narrower and on top: where it meets the window
+      // the cased line carries its colour down the middle.
+      viewAccent = gridLinePaint(sliceBoxEdgePixels(planePoint, derivative, cell,
+        window.seedMinimum, window.seedMaximum, firstPlaneAxis, secondPlaneAxis), 0.75);
+      viewAccentColor = sceneColor(WINDOW_SEED_DISPLAY);
+      liquidContour = sliceZeroContour(vec3f(fineOrigin) + local3, derivative);
     } else if (fieldMode == 10) {
       // Chentanez--Mueller surface density rho: the mass a cell holds, in cell
       // volumes. Its two thresholds are physical rather than cosmetic, so they
@@ -1319,7 +1455,15 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
   color = mix(color, vec3f(0.02, 0.05, 0.06), sampleDot);
   let opticalBoundaryColor = select(vec3f(0.93, 0.93, 0.98), vec3f(1.0, 0.08, 0.55), u.environment.w > 1.5);
   color = mix(color, opticalBoundaryColor, opticalBoundary);
-  if (!gridBody.occupied && fieldMode == 21) {
+  let methodView = fieldMode == 22 || fieldMode == 23;
+  if (!gridBody.occupied && methodView) {
+    color = mix(color, gridLineColor, max(viewBoundary, viewCasing));
+    color = mix(color, vec3f(2.2, 2.6, 2.5), smoothstep(0.45, 0.95, viewBoundary));
+    color = mix(color, viewAccentColor, viewAccent);
+    alpha = max(alpha, max(max(viewBoundary, viewCasing), viewAccent));
+  }
+  let contoured = (fieldMode == 21 || methodView) && !gridBody.occupied;
+  if (contoured) {
     // The zero contour and the overcapacity hatch have always shared one
     // amber, and still do: this is the overfull band's own colour, named.
     let amber = sceneColor(FRACTION_EXCESS_DISPLAY);
@@ -1331,9 +1475,10 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
   // lines: there the lattice is the subject, and thinning it with the fill is
   // what dissolved the view at a distance. A field view's grid stays a thinned
   // reference frame beneath its own content, and sample dots stay with the
-  // fill in either — they are read close up, where nothing is thin.
+  // fill in either — they are read close up, where nothing is thin. The
+  // method views claim their own structure for the same reason.
   let lattice = max(max(select(0.0, line, structureView), opticalBoundary),
-    select(0.0, max(liquidContour, excessHatch), fieldMode == 21 && !gridBody.occupied));
+    select(0.0, max(max(liquidContour, excessHatch), max(max(viewBoundary, viewCasing), viewAccent)), contoured));
   return GridSample(color, alpha, lattice, gridBody.occupied);
 }
 
@@ -1464,7 +1609,8 @@ fn volumeField(uv:vec2f)->vec4f {
   // This diagnostic is a cross-section. Also guard stale/direct callers so
   // they cannot accidentally repeat sparse phi lookups throughout a raymarch.
   let requestedAxis = i32(round(u.debug.x));
-  let axis = select(requestedAxis, 1, requestedAxis == 4 && i32(round(u.debug.w)) == 21);
+  let sliceOnlyMode = i32(round(u.debug.w)) >= 21 && i32(round(u.debug.w)) <= 23;
+  let axis = select(requestedAxis, 1, requestedAxis == 4 && sliceOnlyMode);
   if (axis <= 0 || u.gridInfo.w <= 0.5) { discard; }
   if (axis == 4) { return volumeField(input.uv); }
   let ndc = input.uv * 2.0 - 1.0;
@@ -1499,6 +1645,7 @@ fn volumeField(uv:vec2f)->vec4f {
   let inside = all(point >= boundsMin - vec3f(1e-4)) && all(point <= boundsMax + vec3f(1e-4));
   if (distance <= 0.0 || !inside) { discard; }
   let footprint = distance * 1.44 / max(u.viewport.y, 1.0);
+  sliceHatchFootprint = dot(point - origin, forward) * 1.44 / max(u.viewport.y, 1.0);
   var overlay=gridSample(point,boundsMin,size,frame.minimumFine,
     frame.dimensions,axis,footprint);
   if (distance >= nearestBodyDistance(origin, direction) && !overlay.solid) { discard; }
@@ -1538,6 +1685,7 @@ export class GridOverlayPipeline {
   private density?: GPUTexture;
   private sparseSource?: SparseAdaptiveGridConsumerSource;
   private denseLevelSetVolumeSource?: DenseLevelSetVolumeConsumerSource;
+  private viewRecords?: GPUFluidViewRecords;
   private readonly sparseDummyParams: GPUBuffer;
   private readonly sparseOverlayParams: GPUBuffer;
   private readonly sparseLevelSetVolumeParams: GPUBuffer;
@@ -1622,6 +1770,18 @@ export class GridOverlayPipeline {
     this.rebuildBindGroup();
   }
 
+  /**
+   * Binding 23: the records of whichever method view is on screen, offered
+   * every frame. Solvers withdraw theirs when the step stops writing them, and
+   * a switch between views swaps what is bound, so both rebuild the group.
+   */
+  setViewRecords(source: GPUFluidViewRecords | undefined) {
+    const next = source?.records, bound = this.viewRecords?.records;
+    if (next?.buffer === bound?.buffer && next?.offset === bound?.offset && next?.size === bound?.size) return;
+    this.viewRecords = source;
+    this.rebuildBindGroup();
+  }
+
   setSparseSource(source: SparseAdaptiveGridConsumerSource | undefined) {
     if (this.sparseSource === source) return;
     this.sparseSource = source;
@@ -1698,6 +1858,7 @@ export class GridOverlayPipeline {
         { binding: 20, resource: { buffer: this.sparseLevelSetVolumeParams } },
         { binding: 21, resource: (this.denseLevelSetVolumeSource?.vertexPhi ?? this.volume).createView({dimension:"3d"}) },
         { binding: 22, resource: (this.denseLevelSetVolumeSource?.openFraction ?? this.density).createView({dimension:"3d"}) },
+        { binding: 23, resource: this.viewRecords?.records ?? { buffer: this.sparseDummyStorage } },
       ]
     });
   }

@@ -99,11 +99,26 @@ fn shellAt(p: vec3i) -> bool {
   let cell = clamp(p, vec3i(0), tileDims() - vec3i(1));
   return (tileScratch[tileTableBase() + 4u * coarseIndex(cell / 4) + 3u] & 2u) != 0u;
 }
-fn activeBaseId(gid:vec3u)->vec3i{return vec3i(gid)+vec3i(vec3u(activeRegion[7],activeRegion[8],activeRegion[9]));}
+// Group counts come from the host, sized off a box a couple of steps old, so
+// the last workgroups overrun the exact window. Those threads exit here, at
+// the window's exact extent for the finest passes and at a level's own packed
+// extent for the hierarchy, rather than extending velocity into air nobody
+// reads. A level whose extent did not fit the packed word reports all ones and
+// clips nothing, which is the safe direction.
+fn activeUnpackExtent(packed:u32)->vec3u{
+  if((packed&0x40000000u)==0u){return vec3u(0xffffffffu);}
+  return vec3u(packed&1023u,(packed>>10u)&1023u,(packed>>20u)&1023u);
+}
+fn activeBaseId(gid:vec3u)->vec3i{
+  let origin=vec3u(activeRegion[7],activeRegion[8],activeRegion[9]);
+  if(any(gid>=vec3u(activeRegion[10],activeRegion[11],activeRegion[12])-origin)){return vec3i(-1);}
+  return vec3i(gid)+vec3i(origin);
+}
 fn hierarchyActiveId(gid:vec3u)->vec3i{
   if(frontParams.activeLevel==0xffffffffu){return vec3i(gid);}
   if(frontParams.hierarchyTargetUsesBaseDims!=0u){return activeBaseId(gid);}
   let base=16u+10u*frontParams.activeLevel;
+  if(any(gid>=activeUnpackExtent(activeRegion[base+9u]))){return vec3i(-1);}
   // Pressure hierarchy coordinates carry a one-cell domain halo; velocity
   // hierarchy textures do not. Its conservative 2/3-cell active halo remains
   // after translating the origin back by one.

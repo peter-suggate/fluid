@@ -111,6 +111,20 @@ const ENTRY_BINDINGS: Readonly<Record<EntryPoint, readonly number[]>> = Object.f
   mgCheckCycleConvergence: [0, 17],
 });
 
+/**
+ * The same split, per entry point and computed once. The plan walk runs this
+ * test thousands of times and rebuilding the sets and filtered lists inside it
+ * was a measurable share of a re-plan.
+ */
+const SAMPLED_BINDINGS: readonly number[] = [1, 3, 5, 7, 9, 11, 14];
+const WRITABLE_BINDINGS: readonly number[] = [2, 4, 6, 8, 10, 12, 15];
+const entryBindingsWhere = (keep: readonly number[]): Readonly<Record<EntryPoint, readonly number[]>> =>
+  Object.freeze(Object.fromEntries((Object.entries(ENTRY_BINDINGS) as [EntryPoint, readonly number[]][])
+    .map(([entry, bindings]) => [entry, Object.freeze(bindings.filter((b) => keep.includes(b)))]))) as
+    Readonly<Record<EntryPoint, readonly number[]>>;
+const ENTRY_SAMPLED = entryBindingsWhere(SAMPLED_BINDINGS);
+const ENTRY_WRITABLE = entryBindingsWhere(WRITABLE_BINDINGS);
+
 type TexturePair = readonly [GPUTexture, GPUTexture];
 export interface UniformPressureMultigridLevel {
   /** Texture dimensions include one persistent solid/domain halo cell. */
@@ -142,6 +156,103 @@ export interface UniformCM11aHierarchyPlan {
   readonly semiCoarsened: boolean;
   /** Why the hierarchy is impossible, or `undefined` when it is buildable. */
   readonly rejection?: string;
+}
+
+/** Alignments a window capacity and origin may use, widest first. */
+export const UNIFORM_CM11A_WINDOW_ALIGNMENTS = [32, 16] as const;
+
+export interface UniformCM11aWindowPlan {
+  readonly capacity: UniformCM11aLevelSize;
+  readonly origin: readonly [number, number, number];
+  readonly hierarchy: UniformCM11aHierarchyPlan;
+  /** Alignment used per axis; a domain-wide axis reports its own length. */
+  readonly alignment: readonly [number, number, number];
+}
+
+/**
+ * Where the current capacity can sit so that it covers `[low, high)`.
+ *
+ * Returns the aligned origin, or undefined when the capacity is simply too
+ * small. The caller uses this to keep an instance across a step in which the
+ * liquid moved but did not grow -- which is most steps.
+ */
+export function seatUniformCM11aWindow(
+  domain: UniformCM11aLevelSize,
+  capacity: readonly [number, number, number],
+  alignment: readonly [number, number, number],
+  low: readonly [number, number, number],
+  high: readonly [number, number, number],
+): [number, number, number] | undefined {
+  const origin: [number, number, number] = [0, 0, 0];
+  for (let axis = 0; axis < 3; axis += 1) {
+    const step = alignment[axis]!, size = domain[axis]!, width = capacity[axis]!;
+    if (width > size) return undefined;
+    const seat = Math.max(0, Math.min(Math.floor(Math.max(0, low[axis]!) / step) * step, size - width));
+    if (seat > low[axis]! || seat + width < high[axis]!) return undefined;
+    origin[axis] = seat;
+  }
+  return origin;
+}
+
+/**
+ * Capacity and origin of a CM11a lattice covering `[low, high)`.
+ *
+ * Aligning both keeps every coarse grid registered to the domain, so the
+ * origin only has to move when the liquid crosses an alignment boundary, and
+ * the same capacity is reached again and again instead of drifting by a cell
+ * a step. The lockstep hierarchy is preferred over semi-coarsening for the
+ * same reason the domain planner prefers it, so a capacity one alignment step
+ * wider, or a shortest axis lifted to a power of two, is tried before giving
+ * up on it.
+ */
+export function planUniformCM11aWindow(
+  domain: UniformCM11aLevelSize,
+  low: readonly [number, number, number],
+  high: readonly [number, number, number],
+): UniformCM11aWindowPlan {
+  const alignment = domain.map((size) =>
+    UNIFORM_CM11A_WINDOW_ALIGNMENTS.find((step) => size % step === 0 && size > step) ?? size,
+  ) as unknown as [number, number, number];
+  const seat = (request: readonly number[]): { capacity: UniformCM11aLevelSize;
+    origin: [number, number, number] } => {
+    const capacity: number[] = []; const origin: number[] = [];
+    for (let axis = 0; axis < 3; axis += 1) {
+      const step = alignment[axis]!, size = domain[axis]!;
+      const width = Math.min(size, Math.max(step, Math.ceil(request[axis]! / step) * step));
+      capacity.push(width);
+      origin.push(Math.max(0, Math.min(
+        Math.floor(Math.max(0, low[axis]!) / step) * step, size - width)));
+    }
+    return { capacity: capacity as unknown as UniformCM11aLevelSize,
+      origin: origin as [number, number, number] };
+  };
+  const requested = [0, 1, 2].map((axis) => {
+    const step = alignment[axis]!;
+    const start = Math.floor(Math.max(0, low[axis]!) / step) * step;
+    return Math.max(2, Math.min(domain[axis]!, Math.max(high[axis]! - start, 0)));
+  });
+  const candidates: number[][] = [requested];
+  for (let axis = 0; axis < 3; axis += 1) {
+    const bumped = [...requested];
+    bumped[axis] = Math.min(domain[axis]!, bumped[axis]! + alignment[axis]!);
+    candidates.push(bumped);
+  }
+  const lifted = [...requested];
+  const shortest = lifted.indexOf(Math.min(...lifted));
+  lifted[shortest] = Math.min(domain[shortest]!,
+    2 ** Math.ceil(Math.log2(Math.max(2, lifted[shortest]!))));
+  candidates.push(lifted, [...domain]);
+  let fallback: UniformCM11aWindowPlan | undefined;
+  for (const candidate of candidates) {
+    const { capacity, origin } = seat(candidate);
+    const hierarchy = planUniformCM11aHierarchy(capacity);
+    if (hierarchy.rejection) continue;
+    const plan: UniformCM11aWindowPlan = { capacity, origin, hierarchy, alignment };
+    if (!hierarchy.semiCoarsened) return plan;
+    fallback ??= plan;
+  }
+  return fallback ?? { capacity: domain, origin: [0, 0, 0],
+    hierarchy: planUniformCM11aHierarchy(domain), alignment };
 }
 
 const haloedCells = (size: UniformCM11aLevelSize): number =>
@@ -280,6 +391,21 @@ interface GroupResources {
  * the same solid, free-surface, divergence, and volume-correction helpers as
  * projection instead of maintaining a second discretization.
  */
+/**
+ * Everything a CM11a instance compiles that does not depend on its dimensions.
+ *
+ * Bind-group layouts are built from a fixed binding table and the pipelines
+ * from a fixed entry-point list, so two instances of different capacity share
+ * both. That is what makes a re-plan synchronous and cheap: a new instance is
+ * textures, param buffers, bind groups and a plan, with nothing to compile and
+ * nothing to await.
+ */
+export interface UniformPressureMultigridPrograms {
+  readonly module: GPUShaderModule;
+  readonly groupLayouts: Readonly<Record<string, GPUBindGroupLayout>>;
+  readonly pipelines: Readonly<Record<string, GPUComputePipeline>>;
+}
+
 export class WebGPUUniformPressureMultigrid {
   readonly levels: readonly UniformPressureMultigridLevel[];
   readonly shaderFragment = uniformPressureMultigridWGSL;
@@ -294,8 +420,26 @@ export class WebGPUUniformPressureMultigrid {
   private readonly groupLayouts: Readonly<Record<EntryPoint, GPUBindGroupLayout>>;
   private readonly ownedParams: GPUBuffer[] = [];
   private readonly ownedGroups: GPUBindGroup[] = [];
+  /**
+   * The plan is thousands of dispatches over a few dozen textures, and the
+   * same (entry point, resources, parameters) triple recurs on every cycle of
+   * every level. Building each of the three afresh per dispatch is what made a
+   * re-plan a visible hitch: on the whole 64x512x64 domain, 59k texture views,
+   * 4.2k parameter buffers and 4.2k bind groups cost 143 ms of the 178.
+   * Caching them is pure de-duplication -- a bind group is immutable, and two
+   * dispatches naming the same resources need only one -- so the encoded
+   * command stream is unchanged.
+   */
+  private readonly viewCache = new Map<GPUTexture, GPUTextureView>();
+  private readonly paramCache = new Map<string, GPUBuffer>();
+  private readonly groupCache = new Map<string, GPUBindGroup>();
+  /** Stable per-texture ids, so a bind group's resources have a cache key. */
+  private readonly textureIds = new Map<GPUTexture, number>();
   private pipelines?: Readonly<Record<EntryPoint, GPUComputePipeline>>;
+  private shaderModule?: GPUShaderModule;
   private plan?: readonly PlannedDispatch[];
+  /** A deferred build in progress; see `advancePlan`. */
+  private planSteps?: Generator<void, PlannedDispatch[], void>;
   /**
    * Plan index after each complete cycle, `[setupEnd, afterCycle1, ...]`, so
    * entry `k` is where a budget of `k` cycles stops encoding. Every cycle ends
@@ -308,13 +452,22 @@ export class WebGPUUniformPressureMultigrid {
   private finishStart = 0;
   private activeResidualTolerance = 0;
   private coarsestCaptureBuffers?: CoarsestCaptureBuffers;
-  private destroyed = false;
+  private windowLevelGroups?: readonly (readonly [number, number, number])[];
+  private windowLattice = false;
+  private isDestroyed = false;
 
   constructor(private readonly device: GPUDevice,
     dimensions: readonly [number, number, number],
     spacing: readonly [number, number, number],
     private readonly schedule: UniformCM11aSchedule = DEFAULT_UNIFORM_CM11A_SCHEDULE,
-    private readonly activeDispatch?: GPUBuffer) {
+    private readonly activeDispatch?: GPUBuffer,
+    programs?: UniformPressureMultigridPrograms,
+    /**
+     * Allocate the lattice but leave the plan to `advancePlan`. A prewarm
+     * builds the capacity the window is about to need across several frames,
+     * so the step that switches only swaps an instance that is already ready.
+     */
+    deferPlan = false) {
     const hierarchy = planUniformCM11aHierarchy(
       dimensions as readonly [number, number, number]);
     if (hierarchy.rejection) throw new RangeError(hierarchy.rejection);
@@ -365,10 +518,28 @@ export class WebGPUUniformPressureMultigrid {
       { binding: 14, visibility: GPUShaderStage.COMPUTE, texture: textureBinding },
       { binding: 15, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rgba32float", viewDimension: "3d" } },
     ];
-    this.groupLayouts = Object.freeze(Object.fromEntries(ENTRY_POINTS.map((entryPoint) => [entryPoint,
-      device.createBindGroupLayout({ label: `Uniform CM11a hierarchy layout - ${entryPoint}`,
-        entries: allEntries.filter(({ binding }) => (binding === 13 || ENTRY_BINDINGS[entryPoint].includes(binding))) }),
-    ])) as Record<EntryPoint, GPUBindGroupLayout>);
+    this.groupLayouts = (programs?.groupLayouts as Record<EntryPoint, GPUBindGroupLayout> | undefined)
+      ?? Object.freeze(Object.fromEntries(ENTRY_POINTS.map((entryPoint) => [entryPoint,
+        device.createBindGroupLayout({ label: `Uniform CM11a hierarchy layout - ${entryPoint}`,
+          entries: allEntries.filter(({ binding }) => (binding === 13 || ENTRY_BINDINGS[entryPoint].includes(binding))) }),
+      ])) as Record<EntryPoint, GPUBindGroupLayout>);
+    // Given another instance's compiled programs this one is ready here, with
+    // no await anywhere: a re-plan happens inside a single step.
+    if (programs) {
+      this.shaderModule = programs.module;
+      this.pipelines = programs.pipelines as Readonly<Record<EntryPoint, GPUComputePipeline>>;
+      if (deferPlan) this.planSteps = this.buildPlanSteps();
+      else this.plan = Object.freeze(this.buildPlan());
+    }
+  }
+
+  /**
+   * The compiled, dimension-independent half of this instance, for handing to
+   * a sibling planned on a different capacity. Undefined until initialized.
+   */
+  get programs(): UniformPressureMultigridPrograms | undefined {
+    if (!this.shaderModule || !this.pipelines) return undefined;
+    return { module: this.shaderModule, groupLayouts: this.groupLayouts, pipelines: this.pipelines };
   }
 
   setResidualTolerance(value: number): void {
@@ -386,6 +557,32 @@ export class WebGPUUniformPressureMultigrid {
 
   get pressureTexture(): GPUTexture { return this.levels[0]!.pressure[0]; }
 
+  /**
+   * Per-level group counts the host chose for this step, or undefined to keep
+   * taking them from the GPU's indirect records.
+   *
+   * The level ORIGIN still comes from `activeRegion` inside the shader, so
+   * this only replaces the launch size -- and only ever with a count that is
+   * at most the dense one the plan already carries. The plan itself is
+   * untouched: the same dispatches are encoded in the same order, so the
+   * encoded pass count cannot move with the window.
+   */
+  setWindowLevelGroups(groups?: readonly (readonly [number, number, number])[]): void {
+    this.windowLevelGroups = groups;
+  }
+
+  /**
+   * Whether this instance IS the window.
+   *
+   * A lattice planned on the window covers exactly the cells it owns, so every
+   * dispatch is the plan's own dense count, direct, with no origin to add and
+   * no level record to consult. The encoded pass count is the same either way.
+   */
+  setWindowLattice(active: boolean): void { this.windowLattice = active; }
+
+  /** True once `destroy` has run; an evicted instance must not be adopted. */
+  get destroyed(): boolean { return this.isDestroyed; }
+
   /** Physical (halo-free) dimensions used to seed the shared active ABI. */
   get levelPhysicalDimensions(): readonly UniformCM11aLevelSize[] {
     return this.levels.map((level) => [level.dimensions[0] - 2,
@@ -398,6 +595,7 @@ export class WebGPUUniformPressureMultigrid {
     const compiler = gpuCompilationManagerFor(this.device);
     const shaderModule = compiler.createShaderModule({ label: "Uniform CM11a pressure hierarchy",
       code: input.shaderSource });
+    this.shaderModule = shaderModule;
     const entries = await Promise.all(ENTRY_POINTS.map(async (entryPoint) => [entryPoint,
       await compiler.compileComputePipeline({ label: `Uniform CM11a - ${entryPoint}`,
         layout: this.device.createPipelineLayout({ label: `Uniform CM11a layout - ${entryPoint}`,
@@ -445,9 +643,17 @@ export class WebGPUUniformPressureMultigrid {
       const pass = encoder.beginComputePass({ label: `Uniform CM11a ${dispatch.entryPoint}` });
       pass.setPipeline(dispatch.pipeline); pass.setBindGroup(1, dispatch.group);
       pass.setBindGroup(0, uniformGroup);
-      if (this.activeDispatch && dispatch.entryPoint !== "mgSolveCoarsest" && dispatch.entryPoint !== "mgCheckCycleConvergence") {
-        const indirectOffset = (16 + dispatch.activeLevel * 10 + 3) * 4;
-        pass.dispatchWorkgroupsIndirect(this.activeDispatch, indirectOffset);
+      if (this.windowLattice) {
+        pass.dispatchWorkgroups(...dispatch.workgroups);
+      } else if (this.activeDispatch && dispatch.entryPoint !== "mgSolveCoarsest" && dispatch.entryPoint !== "mgCheckCycleConvergence") {
+        const chosen = this.windowLevelGroups?.[dispatch.activeLevel];
+        if (chosen) {
+          pass.dispatchWorkgroups(Math.min(chosen[0], dispatch.workgroups[0]),
+            Math.min(chosen[1], dispatch.workgroups[1]), Math.min(chosen[2], dispatch.workgroups[2]));
+        } else {
+          const indirectOffset = (16 + dispatch.activeLevel * 10 + 3) * 4;
+          pass.dispatchWorkgroupsIndirect(this.activeDispatch, indirectOffset);
+        }
       } else {
         pass.dispatchWorkgroups(...dispatch.workgroups);
       }
@@ -539,7 +745,29 @@ export class WebGPUUniformPressureMultigrid {
     } finally { for (const buffer of buffers) buffer.unmap(); }
   }
 
-  private buildPlan(): PlannedDispatch[] {
+  /** One view per texture; the plan asks for the same handful thousands of times. */
+  private viewOf(texture: GPUTexture): GPUTextureView {
+    let view = this.viewCache.get(texture);
+    if (!view) { view = texture.createView(); this.viewCache.set(texture, view); }
+    return view;
+  }
+
+  private textureId(texture: GPUTexture): number {
+    let id = this.textureIds.get(texture);
+    if (id === undefined) { id = this.textureIds.size; this.textureIds.set(texture, id); }
+    return id;
+  }
+
+  /**
+   * Walk the schedule, yielding at every cycle boundary.
+   *
+   * A capacity change rebuilds this, and on the whole domain that is thousands
+   * of dispatches: too much for one frame. Every cycle is a natural pause --
+   * the walk's only state between them is the ping-pong parities and the
+   * boundary list -- so a prewarm can spend a millisecond or two a frame here
+   * and have the instance ready before the window needs it.
+   */
+  private *buildPlanSteps(): Generator<void, PlannedDispatch[], void> {
     const result: PlannedDispatch[] = [];
     // The schedule group each emit lands in; reassigned as the plan walks its
     // fixed sections so every dispatch self-reports where it sits.
@@ -560,41 +788,60 @@ export class WebGPUUniformPressureMultigrid {
         coefficientsIn: source.coefficients, coefficientsOut: destination.coefficients,
       };
       const resources = { ...defaults, ...overrides };
-      const texturesByBinding = new Map<number, GPUTexture>([
-        [1, resources.pressureIn], [2, resources.pressureOut], [3, resources.rhsIn], [4, resources.rhsOut],
-        [5, resources.phiIn], [6, resources.phiOut], [7, resources.volumeIn], [8, resources.volumeOut],
-        [9, resources.residualIn], [10, resources.residualOut], [11, resources.minimumIn], [12, resources.minimumOut],
-        [14, resources.coefficientsIn], [15, resources.coefficientsOut],
-      ]);
-      const sampledBindings = new Set([1, 3, 5, 7, 9, 11, 14]);
-      const writableBindings = new Set([2, 4, 6, 8, 10, 12, 15]);
-      const sampled = ENTRY_BINDINGS[entryPoint].filter((binding) => sampledBindings.has(binding)).map((binding) => texturesByBinding.get(binding));
-      const writable = ENTRY_BINDINGS[entryPoint].filter((binding) => writableBindings.has(binding)).map((binding) => texturesByBinding.get(binding));
-      if (sampled.some((texture) => texture !== undefined && writable.includes(texture))) {
-        throw new Error(`Uniform CM11a ${entryPoint} aliases a sampled and writable texture`);
+      // Indexed by binding, so neither this nor the alias test below allocates
+      // per dispatch: the walk runs them thousands of times per re-plan.
+      const texturesByBinding: (GPUTexture | undefined)[] = [];
+      texturesByBinding[1] = resources.pressureIn; texturesByBinding[2] = resources.pressureOut;
+      texturesByBinding[3] = resources.rhsIn; texturesByBinding[4] = resources.rhsOut;
+      texturesByBinding[5] = resources.phiIn; texturesByBinding[6] = resources.phiOut;
+      texturesByBinding[7] = resources.volumeIn; texturesByBinding[8] = resources.volumeOut;
+      texturesByBinding[9] = resources.residualIn; texturesByBinding[10] = resources.residualOut;
+      texturesByBinding[11] = resources.minimumIn; texturesByBinding[12] = resources.minimumOut;
+      texturesByBinding[14] = resources.coefficientsIn; texturesByBinding[15] = resources.coefficientsOut;
+      for (const sampledBinding of ENTRY_SAMPLED[entryPoint]) {
+        const texture = texturesByBinding[sampledBinding];
+        for (const writableBinding of ENTRY_WRITABLE[entryPoint]) {
+          if (texture !== undefined && texture === texturesByBinding[writableBinding]) {
+            throw new Error(`Uniform CM11a ${entryPoint} aliases a sampled and writable texture`);
+          }
+        }
       }
       const paperM = this.levels.length;
       const paperDestination = paperM - destinationIndex;
-      const params = this.parameterBuffer(source.dimensions, destination.dimensions, destinationIndex,
+      const [params, paramsKey] = this.parameterBuffer(source.dimensions, destination.dimensions,
+        destinationIndex,
         [control[0] || paperDestination, control[1] || paperM - UNIFORM_CM11A_PHI_PRESERVATION_LEVELS,
           control[2], control[3]], planStage === "full-cycle" || planStage === "v-cycle");
-      const allEntries: GPUBindGroupEntry[] = [
+      // Only the bindings this entry point declares reach the group, so the
+      // key is that filtered list -- two entry points that read the same
+      // texture through different bindings must not share a group.
+      const bindings = ENTRY_BINDINGS[entryPoint];
+      let groupKey = `${entryPoint}|${paramsKey}`;
+      for (const binding of bindings) {
+        const texture = texturesByBinding[binding];
+        if (texture !== undefined) groupKey += `|${binding}:${this.textureId(texture)}`;
+      }
+      let group = this.groupCache.get(groupKey);
+      if (!group) {
+        const allEntries: GPUBindGroupEntry[] = [
           { binding: 17, resource: { buffer: this.toleranceBuffer } },
           { binding: 0, resource: { buffer: params } },
-          { binding: 1, resource: resources.pressureIn.createView() }, { binding: 2, resource: resources.pressureOut.createView() },
-          { binding: 3, resource: resources.rhsIn.createView() }, { binding: 4, resource: resources.rhsOut.createView() },
-          { binding: 5, resource: resources.phiIn.createView() }, { binding: 6, resource: resources.phiOut.createView() },
-          { binding: 7, resource: resources.volumeIn.createView() }, { binding: 8, resource: resources.volumeOut.createView() },
-          { binding: 9, resource: resources.residualIn.createView() }, { binding: 10, resource: resources.residualOut.createView() },
-          { binding: 11, resource: resources.minimumIn.createView() }, { binding: 12, resource: resources.minimumOut.createView() },
+          { binding: 1, resource: this.viewOf(resources.pressureIn) }, { binding: 2, resource: this.viewOf(resources.pressureOut) },
+          { binding: 3, resource: this.viewOf(resources.rhsIn) }, { binding: 4, resource: this.viewOf(resources.rhsOut) },
+          { binding: 5, resource: this.viewOf(resources.phiIn) }, { binding: 6, resource: this.viewOf(resources.phiOut) },
+          { binding: 7, resource: this.viewOf(resources.volumeIn) }, { binding: 8, resource: this.viewOf(resources.volumeOut) },
+          { binding: 9, resource: this.viewOf(resources.residualIn) }, { binding: 10, resource: this.viewOf(resources.residualOut) },
+          { binding: 11, resource: this.viewOf(resources.minimumIn) }, { binding: 12, resource: this.viewOf(resources.minimumOut) },
           { binding: 13, resource: { buffer: this.diagnostics } },
-          { binding: 14, resource: resources.coefficientsIn.createView() },
-          { binding: 15, resource: resources.coefficientsOut.createView() },
+          { binding: 14, resource: this.viewOf(resources.coefficientsIn) },
+          { binding: 15, resource: this.viewOf(resources.coefficientsOut) },
         ];
-      const group = this.device.createBindGroup({ label: `Uniform CM11a bindings - ${entryPoint}`,
-        layout: this.groupLayouts[entryPoint],
-        entries: allEntries.filter(({ binding }) => (binding === 13 || ENTRY_BINDINGS[entryPoint].includes(binding))) });
-      this.ownedGroups.push(group);
+        group = this.device.createBindGroup({ label: `Uniform CM11a bindings - ${entryPoint}`,
+          layout: this.groupLayouts[entryPoint],
+          entries: allEntries.filter(({ binding }) => (binding === 13 || bindings.includes(binding))) });
+        this.groupCache.set(groupKey, group);
+        this.ownedGroups.push(group);
+      }
       result.push({ pipeline: this.pipelines![entryPoint], group,
         entryPoint, stage: planStage,
         activeLevel: destinationIndex,
@@ -700,10 +947,12 @@ export class WebGPUUniformPressureMultigrid {
     planStage = "full-cycle";
     for (let cycle = 0; cycle < this.schedule.fullCycles; cycle += 1) {
       fullCycle(); checkpoint(); cycleBoundaries.push(result.length);
+      yield;
     }
     planStage = "v-cycle";
     for (let cycle = 0; cycle < this.schedule.vCycles; cycle += 1) {
       vCycle(0, originalRhs); checkpoint(); cycleBoundaries.push(result.length);
+      yield;
     }
     planStage = "finish";
     this.cycleBoundaries = Object.freeze(cycleBoundaries);
@@ -717,8 +966,42 @@ export class WebGPUUniformPressureMultigrid {
     return result;
   }
 
+  private buildPlan(): PlannedDispatch[] {
+    const steps = this.buildPlanSteps();
+    for (;;) { const next = steps.next(); if (next.done) return next.value; }
+  }
+
+  /**
+   * Spend up to `budgetMs` on a deferred plan, and report whether it is ready.
+   *
+   * A budget of zero still advances one cycle, so a caller cannot livelock the
+   * build by asking for nothing. Ready instances answer true without work.
+   */
+  advancePlan(budgetMs: number): boolean {
+    if (this.plan) return true;
+    if (!this.pipelines) return false;
+    this.planSteps ??= this.buildPlanSteps();
+    const started = typeof performance !== "undefined" ? performance.now() : 0;
+    for (;;) {
+      const next = this.planSteps.next();
+      if (next.done) {
+        this.plan = Object.freeze(next.value); this.planSteps = undefined; return true;
+      }
+      if ((typeof performance !== "undefined" ? performance.now() : 0) - started >= budgetMs) return false;
+    }
+  }
+
+  /** Whether this instance is still being built a cycle at a time. */
+  get planPending(): boolean { return this.plan === undefined && this.planSteps !== undefined; }
+
+  /**
+   * The 80 uniform bytes a dispatch reads, and a key for them. Dimensions,
+   * level and control repeat across every cycle, so a plan of thousands needs
+   * only a few dozen distinct buffers.
+   */
   private parameterBuffer(level: readonly [number, number, number], coarse: readonly [number, number, number],
-    activeLevel: number, control: readonly [number, number, number, number], gated: boolean): GPUBuffer {
+    activeLevel: number, control: readonly [number, number, number, number],
+    gated: boolean): [GPUBuffer, string] {
     const bytes = new ArrayBuffer(80); const u = new Uint32Array(bytes); const f = new Float32Array(bytes);
     u.set(this.levels[0]!.dimensions, 0); u.set(level, 4); u.set(coarse, 8);
     // Each axis has coarsened by however many times *it* was halved, which is
@@ -730,12 +1013,17 @@ export class WebGPUUniformPressureMultigrid {
     u.set(control, 16);
     u[3] = activeLevel;
     u[7] = gated ? 1 : 0;
+    const key = `${level.join(",")}|${coarse.join(",")}|${activeLevel}|${control.join(",")}|${gated ? 1 : 0}`;
+    const cached = this.paramCache.get(key);
+    if (cached) return [cached, key];
     const buffer = this.device.createBuffer({ label: "Uniform CM11a dispatch parameters", size: 80,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.device.queue.writeBuffer(buffer, 0, bytes); this.ownedParams.push(buffer); return buffer;
+    this.device.queue.writeBuffer(buffer, 0, bytes); this.ownedParams.push(buffer);
+    this.paramCache.set(key, buffer);
+    return [buffer, key];
   }
 
-  destroy(): void { if (this.destroyed) return; this.destroyed = true;
+  destroy(): void { if (this.isDestroyed) return; this.isDestroyed = true;
     for (const level of this.levels) for (const pair of [level.pressure, level.rhs, level.phi,
       level.volume, level.residual, level.minimum]) { pair[0].destroy(); pair[1].destroy(); }
     for (const level of this.levels) level.coefficients.destroy();
@@ -746,6 +1034,8 @@ export class WebGPUUniformPressureMultigrid {
       this.coarsestCaptureBuffers.rhs, this.coarsestCaptureBuffers.minimum,
       this.coarsestCaptureBuffers.phi, this.coarsestCaptureBuffers.topology]) buffer.destroy();
     this.ownedParams.length = 0; this.ownedGroups.length = 0; this.plan = undefined; this.pipelines = undefined;
+    this.viewCache.clear(); this.paramCache.clear(); this.groupCache.clear(); this.textureIds.clear();
+    this.planSteps = undefined;
   }
-  private assertLive(): void { if (this.destroyed) throw new Error("Uniform CM11a hierarchy is destroyed"); }
+  private assertLive(): void { if (this.isDestroyed) throw new Error("Uniform CM11a hierarchy is destroyed"); }
 }

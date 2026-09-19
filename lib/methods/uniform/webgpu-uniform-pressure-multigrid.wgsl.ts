@@ -72,7 +72,17 @@ fn mgD4Sum8Vec4(value:array<vec4f,8>)->vec4f{
   return y0+y1;
 }
 fn mgActiveId(gid:vec3u)->vec3i{
+  // A window-local lattice IS the window: its dispatches cover the whole
+  // capacity with a static plan and there is no origin to add.
+  if(pressureWindowLattice()){return vec3i(gid);}
+  // Domain-lattice mode places the level inside the whole-domain lattice, so
+  // the host's lag-padded group counts overrun the level's own box. Those
+  // threads exit at the packed extent the finalize published for this level; a
+  // level whose extent did not fit the word clears the flag and clips nothing.
   let base=16u+10u*mg.fineDims.w;
+  let packed=activeRegion[base+9u];
+  if((packed&0x40000000u)!=0u&&any(gid>=vec3u(
+    packed&1023u,(packed>>10u)&1023u,(packed>>20u)&1023u))){return vec3i(-1);}
   return vec3i(gid)+vec3i(vec3u(activeRegion[base],activeRegion[base+1u],activeRegion[base+2u]));
 }
 // The map from a coarse cell to one of its fine children. A semi-coarsened
@@ -95,6 +105,12 @@ fn mgLiquid(p:vec3i)->bool{return mgValid(p,mg.levelDims.xyz)&&mgPhi(p)<0.0;}
 fn mgInterior(p:vec3i,d:vec3u)->bool{return all(p>=vec3i(1))&&all(p<vec3i(d)-vec3i(1));}
 fn mgOpenTopHalo(p:vec3i,d:vec3u)->bool{
   return params.boundary.w>0.5&&p.y==i32(d.y)-1&&p.x>0&&p.x<i32(d.x)-1&&p.z>0&&p.z<i32(d.z)-1;
+}
+// Cells the finest build takes from simulation space. Without a window that is
+// the interior, and the halo is the domain boundary. With one, every cell whose
+// simulation coordinate is in the domain qualifies, halo included.
+fn mgSimulationCell(p:vec3i,d:vec3u,simulation:vec3i)->bool{
+  return mgInterior(p,d)||(pressureWindowLattice()&&valid(simulation));
 }
 fn mgFaceV(id:vec3i,neighbor:vec3i,axis:u32)->f32{
   let positive=neighbor[axis]>id[axis];
@@ -149,9 +165,18 @@ fn mgApply(id:vec3i)->f32{
 @compute @workgroup_size(4,4,4)
 fn mgBuildFinestTopology(@builtin(global_invocation_id) gid:vec3u){
   if(mgSkipCycle()){return;}
-  let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}let simulation=id-vec3i(1);
+  let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
+  let simulation=id-vec3i(1)+pressureWindowOrigin();
   let h=mg.spacing.xyz;
-  if(mgInterior(id,mg.levelDims.xyz)){
+  // A halo cell whose SIMULATION coordinate is still inside the domain is not
+  // a boundary at all: the window keeps at least its padding of air between
+  // the liquid and its own edge, so that cell is ordinary far air and is
+  // built exactly as an interior cell would be -- real open fractions, real
+  // face V, real phi. That is stronger than the lid rule it replaces: it
+  // stays correct when a solid, a terrain column or the domain's own free
+  // surface happens to sit in the window's halo. Only a halo whose simulation
+  // coordinate leaves the DOMAIN is a wall, and it keeps today's behaviour.
+  if(mgSimulationCell(id,mg.levelDims.xyz,simulation)){
     let topology=vec4f(cellOpenFraction(simulation),pressureFaceVolumeFraction(simulation,0u),pressureFaceVolumeFraction(simulation,1u),pressureFaceVolumeFraction(simulation,2u));
     textureStore(mgPhiOut,id,vec4f(pressurePhi(simulation)));textureStore(mgVolumeOut,id,topology);return;
   }
@@ -167,9 +192,10 @@ fn mgBuildFinestTopology(@builtin(global_invocation_id) gid:vec3u){
 @compute @workgroup_size(4,4,4)
 fn mgBuildFinestRhs(@builtin(global_invocation_id) gid:vec3u){
   if(mgSkipCycle()){return;}
-  let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}let simulation=id-vec3i(1);
+  let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
+  let simulation=id-vec3i(1)+pressureWindowOrigin();
   var rhs=0.0;var minimum=-3.402823e38;
-  if(mgInterior(id,mg.levelDims.xyz)){
+  if(mgSimulationCell(id,mg.levelDims.xyz,simulation)){
     minimum=select(-3.402823e38,0.0,cellInsideSolid(simulation)||cellInsideTerrain(simulation));
     if(pressureLiquid(simulation)){
       let checkSolid=nearAnyBody(worldCell(simulation));rhs=params.physical.x*(divergenceAt(simulation,checkSolid)-volumeCorrectionDivergence(simulation))/params.dimsDt.w;

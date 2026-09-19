@@ -457,6 +457,25 @@ export interface GPUEulerianInfo {
   uniformActiveRegionMaximum?: GPUFieldLocation;
   uniformActiveRegionCellCount?: number;
   uniformActiveRegionFraction?: number;
+  /**
+   * How the solve window's dispatches were sized: "host" means the CPU chose
+   * the group counts from a lagged box (direct launches, exact origins), and
+   * "indirect" means the GPU's own records drove every launch.
+   */
+  uniformSolveWindowDispatch?: "host" | "indirect";
+  /** Steps whose exact window outgrew the host's counts and were clipped. */
+  uniformSolveWindowClippedSteps?: number;
+  /** Steps the host sized at whole-domain counts (start-up, edits, penalty). */
+  uniformSolveWindowDenseSteps?: number;
+  /** Worst observed age, in steps, of the box the host sized a dispatch from. */
+  uniformSolveWindowMaxLagSteps?: number;
+  /** Window-local CM11a lattice: capacity and origin in simulation cells. */
+  uniformPressureLattice?: string;
+  /** False while that lattice is the whole domain (fallback or startup). */
+  uniformPressureLatticeWindowed?: boolean;
+  /** Instances built since load, and how long the last one took. */
+  uniformPressureLatticeReplans?: number;
+  uniformPressureLatticeReplanMs?: number;
   /** Chentanez--Mueller mass stored above rho=1 after the latest transport. */
   adaptiveCompressedExcessVolume_cells?: number;
   /** Conserved mass currently below the rho=.5 visible-surface threshold. */

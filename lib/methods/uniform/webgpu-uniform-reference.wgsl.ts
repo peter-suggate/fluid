@@ -98,11 +98,142 @@ struct RigidBody {
 // beginning at word 16.
 @group(0) @binding(29) var<storage,read> activeRegion:array<u32>;
 @group(0) @binding(30) var<storage,read_write> activeScratch:array<u32>;
-// Header words 0..175 mirror activeRegion; eight words per workgroup follow.
-const ACTIVE_SUMMARY_BASE:u32=176u;
+// Header words 0..255 mirror activeRegion; eight words per workgroup follow.
+// Words 176..178 are the (n+1)-lattice vertex dispatch Uniform Geometric's phi
+// passes use; 179 pads the record to a four-word stride. Words 180..236 are the
+// group counts the HOST chose for this step's direct dispatches, which the
+// finalize below checks its own exact counts against. Words 237/238 carry this
+// step's packed per-axis travel from the reduce to the finalize, 239 publishes
+// the two-sided total the host pads its lagged counts with, and 240..242 are
+// the pressure-window origin the host writes for the CM11a lattice.
+const ACTIVE_SUMMARY_BASE:u32=256u;
+const ACTIVE_VERTEX_DISPATCH_WORD:u32=176u;
+const ACTIVE_CPU_LEVEL_BASE_WORD:u32=180u;
+const ACTIVE_CPU_MAIN_WORD:u32=228u;
+const ACTIVE_CPU_VERTEX_WORD:u32=231u;
+const ACTIVE_CPU_MODE_WORD:u32=234u;
+const ACTIVE_VIOLATION_WORD:u32=235u;
+const ACTIVE_VIOLATION_AXES_WORD:u32=236u;
+const ACTIVE_TRAVEL_PLUS_WORD:u32=237u;
+const ACTIVE_TRAVEL_MINUS_WORD:u32=238u;
+const ACTIVE_TRAVEL_TOTAL_WORD:u32=239u;
+const ACTIVE_PRESSURE_ORIGIN_WORD:u32=240u;
+const ACTIVE_PRESSURE_CAPACITY_WORD:u32=243u;
+const ACTIVE_PRESSURE_MODE_WORD:u32=246u;
 fn dims() -> vec3i { return vec3i(textureDimensions(volumeIn)); }
-fn activeId(gid:vec3u)->vec3i{return vec3i(gid)+vec3i(vec3u(
-  activeRegion[7],activeRegion[8],activeRegion[9]));}
+// Three per-axis counts to a word, ten bits each. Travel saturates, which is
+// harmless: a step that moves a thousand cells is already outside the regime.
+fn activePackTravel(value:vec3u)->u32{
+  let c=min(value,vec3u(1023u));
+  return (c.x|(c.y<<10u))|(c.z<<20u);
+}
+fn activeUnpackTravel(packed:u32)->vec3u{
+  return vec3u(packed&1023u,(packed>>10u)&1023u,(packed>>20u)&1023u);
+}
+// Field-wise max. A plain max() on the packed word would let the high field
+// zero the low ones, which is not the conservative direction.
+fn activeMaxPacked(a:u32,b:u32)->u32{
+  return (max(a&1023u,b&1023u)|(max((a>>10u)&1023u,(b>>10u)&1023u)<<10u))
+    |(max((a>>20u)&1023u,(b>>20u)&1023u)<<20u);
+}
+// Packed extents, bit 30 a usable flag: a count that does not fit clears the
+// flag and the reader falls back to no clip at all, always the safe direction.
+fn activePackExtent(value:vec3u)->u32{
+  if(any(value>=vec3u(1024u))){return 0u;}
+  return ((value.x|(value.y<<10u))|(value.z<<20u))|0x40000000u;
+}
+fn activeUnpackExtent(packed:u32)->vec3u{
+  if((packed&0x40000000u)==0u){return vec3u(0xffffffffu);}
+  return vec3u(packed&1023u,(packed>>10u)&1023u,(packed>>20u)&1023u);
+}
+fn activeWindowOrigin()->vec3u{return vec3u(activeRegion[7],activeRegion[8],activeRegion[9]);}
+fn activeWindowExtent()->vec3u{
+  return vec3u(activeRegion[10],activeRegion[11],activeRegion[12])-activeWindowOrigin();
+}
+// The host sizes this dispatch from a box a couple of steps old, so its last
+// workgroups overrun the exact window. Those threads exit here, at
+// activeRegion[10..12] minus the origin: the union box the finalize published,
+// which is also what the DISPATCH clips to when the box outgrows the counts.
+// The overrun band is then genuinely free and the host's lag allowance is a
+// launch-size allowance only, with no bearing on the answer.
+//
+// That was not true until the vertex lattice below carried its own read reach.
+// While the phi passes wrote only the box, a vertex on its face redistanced
+// from phi the previous step had left outside it, the overrun band was
+// refreshing it every step, and exiting here moved the tall-air far-wall
+// impact peak from 3.11 m/s to 4.39. With the reach written, clip-all and
+// no-clip agree on peak speed, front position and volume at 1x and 8x
+// (docs/research/uniform-geometric-tall-air-2026-09-19/pressure-window-report.md).
+fn activeId(gid:vec3u)->vec3i{
+  if(any(gid>=activeWindowExtent())){return vec3i(-1);}
+  return vec3i(activeWindowOrigin()+gid);
+}
+// The (n+1)^3 vertex lattice the geometric phi passes run on. It is one wider
+// than the cell box on every axis, and it is DILATED by the phi stage's own
+// internal read reach on both sides, which is the one thing the window's
+// padding cannot express: the padding covers what a CELL reads, and the phi
+// passes read each other.
+//
+//   uvAdvectPhi writes the advected phi; uvRedistancePhi then reads it through
+//   uvPhi at the closest point, q clamped to p +- 4, with uvGradient probing
+//   +- 0.25 and the trilinear tap one vertex past that ................... 6
+//   uvAgreementShift's tent gather, when the shift runs: base + [-4,4)
+//   plus a tap ............................................................ 5
+//
+// Write only the box and a vertex on its face redistances from phi four
+// vertices outside it, which the previous step's ping-pong partner still
+// holds. That is what the host's lag allowance was covering: measured on the
+// tall-air dam, stopping at the box moves the far-wall impact peak to
+// 4.392 m/s against the whole-domain control's 3.106, and a margin of four
+// vertices removes the whole difference. With the reach written, every phi a
+// phi pass reads was written this step and the lattice is sound on its own
+// box, which is what lets every kernel's overrun threads exit again.
+//
+// With the window off this folds to the plain [0,dims] domain test.
+const VERTEX_PHI_REACH:u32=6u;
+fn activeVertexLow()->vec3u{
+  let origin=activeWindowOrigin();
+  return origin-min(origin,vec3u(VERTEX_PHI_REACH));
+}
+fn activeVertexId(gid:vec3u)->vec3i{
+  let low=activeVertexLow();
+  let high=min(vec3u(dims()),
+    vec3u(activeRegion[10],activeRegion[11],activeRegion[12])+vec3u(VERTEX_PHI_REACH));
+  if(any(gid>high-low)){return vec3i(-1);}
+  return vec3i(low+gid);
+}
+// The CM11a pressure hierarchy can be planned on the WINDOW rather than the
+// domain. When it is, the host publishes the lattice origin and capacity in
+// simulation cells and the whole hierarchy is window-local: a pressure cell
+// id maps to simulation id - 1 + origin, and every pressure dispatch covers
+// the whole capacity lattice with a static plan, so the level records are not
+// consulted at all.
+fn pressureWindowLattice()->bool{return activeRegion[ACTIVE_PRESSURE_MODE_WORD]==1u;}
+fn pressureWindowOrigin()->vec3i{
+  if(!pressureWindowLattice()){return vec3i(0);}
+  return vec3i(vec3u(activeRegion[ACTIVE_PRESSURE_ORIGIN_WORD],
+    activeRegion[ACTIVE_PRESSURE_ORIGIN_WORD+1u],activeRegion[ACTIVE_PRESSURE_ORIGIN_WORD+2u]));
+}
+${geometric ? `
+// Uniform Geometric's solve-window predicate. A cell is a seed when it holds
+// liquid above the dust floor, or when any of its eight vertices is on the
+// liquid side of the 4h band that the redistance, uvTarget and the two-level
+// classify all treat as near-surface. Solids and terrain are deliberately NOT
+// seeds: a solid far from the liquid needs no fluid work of any kind, and
+// seeding on it would make the window the whole domain in any scene with a
+// container floor. Sources are added by the external-source scan, which is the
+// only pass that can see liquid arriving outside the previous window.
+fn geometricActiveSeed(id:vec3i)->bool{
+  if(!valid(id)){return false;}
+  let dust=select(params.tuning.z,1e-6,params.tuning.z<=0.0);
+  if(abs(volume(id))>dust){return true;}
+  let band=4.0*max(params.cellGravity.x,max(params.cellGravity.y,params.cellGravity.z));
+  for(var k=0u;k<8u;k++){
+    if(textureLoad(uvPhiIn,id+uvCorner(k),0).x<band){return true;}
+  }
+  return false;
+}
+` : ""}
 fn inflowGridDims()->vec3i{return dims();}
 fn valid(p: vec3i) -> bool { let d=dims(); return all(p >= vec3i(0)) && all(p < d); }
 fn clampCell(p: vec3i) -> vec3i { return clamp(p, vec3i(0), dims()-vec3i(1)); }
@@ -210,7 +341,15 @@ fn pressureValue(p:vec3i)->f32{
 // other main-shader pressure scratch remains an unpadded simulation texture.
 fn projectPressureValue(p:vec3i)->f32{
   let pressureDims=vec3i(textureDimensions(pressureIn));
-  return textureLoad(pressureIn,clamp(p+vec3i(1),vec3i(0),pressureDims-vec3i(1)),0).x;
+  let local=p+vec3i(1)-pressureWindowOrigin();
+  // A window lattice ends before the domain does. A lookup that leaves it on
+  // a side still INSIDE the domain has left the solved region into far air,
+  // whose pressure is zero; one that leaves the domain keeps the clamp, which
+  // is the wall/lid ghost the projection has always read. The second case can
+  // only arise where the window is snapped to that wall, so the clamped cell
+  // is still the domain halo it was without a window.
+  if(valid(p)&&(any(local<vec3i(0))||any(local>=pressureDims))){return 0.0;}
+  return textureLoad(pressureIn,clamp(local,vec3i(0),pressureDims-vec3i(1)),0).x;
 }
 fn cellOpenFraction(p:vec3i)->f32{
   if(!valid(p)||staticSolidVoxelOccupied(p)){return 0.0;}
@@ -1482,6 +1621,18 @@ fn postprocessResolve(@builtin(global_invocation_id) gid:vec3u){
 var<workgroup> activeMinimumLanes:array<vec3u,256>;
 var<workgroup> activeMaximumLanes:array<vec3u,256>;
 var<workgroup> activeSpeedLanes:array<u32,256>;
+var<workgroup> activeTravelPlusLanes:array<u32,256>;
+var<workgroup> activeTravelMinusLanes:array<u32,256>;
+// Per-axis, per-DIRECTION travel in cells, reduced over wet cells only. The
+// window's padding is built from these rather than from one global |v| so that
+// liquid sloshing sideways does not pad the window upward, and falling liquid
+// pads only downward. The one-step gravity and inflow terms are added by the
+// finalize, which is where their directions are known.
+fn activeTravelCells(id:vec3i,positive:bool)->vec3u{
+  let v=faceVelocity(id);
+  let directed=max(select(-v,v,positive),vec3f(0.0));
+  return vec3u(ceil(directed*params.dimsDt.w/params.cellGravity.xyz));
+}
 fn writeActiveWorkgroupSummary(
   id:vec3i, wet:bool, localIndex:u32, workgroupId:vec3u, groupCount:vec3u,
 ){
@@ -1489,13 +1640,19 @@ fn writeActiveWorkgroupSummary(
   var minimum=d;
   var maximum=vec3u(0u);
   var speedBits=0u;
+  var travelPlus=0u;
+  var travelMinus=0u;
   if(wet){
     minimum=vec3u(id);maximum=minimum+vec3u(1u);
     speedBits=bitcast<u32>(length(faceVelocity(id)));
+    travelPlus=activePackTravel(activeTravelCells(id,true));
+    travelMinus=activePackTravel(activeTravelCells(id,false));
   }
   activeMinimumLanes[localIndex]=minimum;
   activeMaximumLanes[localIndex]=maximum;
   activeSpeedLanes[localIndex]=speedBits;
+  activeTravelPlusLanes[localIndex]=travelPlus;
+  activeTravelMinusLanes[localIndex]=travelMinus;
   workgroupBarrier();
   var stride=32u;
   loop{
@@ -1503,17 +1660,21 @@ fn writeActiveWorkgroupSummary(
       activeMinimumLanes[localIndex]=min(activeMinimumLanes[localIndex],activeMinimumLanes[localIndex+stride]);
       activeMaximumLanes[localIndex]=max(activeMaximumLanes[localIndex],activeMaximumLanes[localIndex+stride]);
       activeSpeedLanes[localIndex]=max(activeSpeedLanes[localIndex],activeSpeedLanes[localIndex+stride]);
+      activeTravelPlusLanes[localIndex]=activeMaxPacked(activeTravelPlusLanes[localIndex],activeTravelPlusLanes[localIndex+stride]);
+      activeTravelMinusLanes[localIndex]=activeMaxPacked(activeTravelMinusLanes[localIndex],activeTravelMinusLanes[localIndex+stride]);
     }
     workgroupBarrier();
     if(stride==1u){break;}stride/=2u;
   }
   if(localIndex==0u){
     let summaryIndex=workgroupId.x+groupCount.x*(workgroupId.y+groupCount.y*workgroupId.z);
-    let base=ACTIVE_SUMMARY_BASE+8u*summaryIndex;
+    let base=ACTIVE_SUMMARY_BASE+12u*summaryIndex;
     activeScratch[base]=activeMinimumLanes[0].x;activeScratch[base+1u]=activeMinimumLanes[0].y;
     activeScratch[base+2u]=activeMinimumLanes[0].z;activeScratch[base+3u]=activeSpeedLanes[0];
     activeScratch[base+4u]=activeMaximumLanes[0].x;activeScratch[base+5u]=activeMaximumLanes[0].y;
     activeScratch[base+6u]=activeMaximumLanes[0].z;activeScratch[base+7u]=0u;
+    activeScratch[base+8u]=activeTravelPlusLanes[0];activeScratch[base+9u]=activeTravelMinusLanes[0];
+    activeScratch[base+10u]=0u;activeScratch[base+11u]=0u;
   }
 }
 @compute @workgroup_size(4,4,4)
@@ -1523,7 +1684,7 @@ fn scanActiveRegion(
   @builtin(workgroup_id) workgroupId:vec3u,
 ){
   let id=activeId(gid);
-  let wet=valid(id)&&volume(id)>1e-5;
+  let wet=${geometric ? "geometricActiveSeed(id)" : "valid(id)&&volume(id)>1e-5"};
   let groupCount=vec3u(activeRegion[13],activeRegion[14],activeRegion[15]);
   writeActiveWorkgroupSummary(id,wet,localIndex,workgroupId,groupCount);
 }
@@ -1535,22 +1696,27 @@ fn scanExternalActiveSources(
 ){
   let id=vec3i(gid);let inDomain=valid(id);
   let source=inDomain&&(inflowSweptPlugSource(id,params.dimsDt.w)>0.0||dropSource(id)>0.0);
-  let wet=inDomain&&(volume(id)>1e-5||source);
+  let wet=${geometric ? "source||geometricActiveSeed(id)" : "inDomain&&(volume(id)>1e-5||source)"};
   let groupCount=(vec3u(dims())+vec3u(3u))/4u;
   writeActiveWorkgroupSummary(id,wet,localIndex,workgroupId,groupCount);
 }
 fn reduceActiveSummaryRange(groupCount:vec3u,lane:u32){
   let d=vec3u(dims());let summaryCount=groupCount.x*groupCount.y*groupCount.z;
   var minimum=d;var maximum=vec3u(0u);var speedBits=0u;
+  var travelPlus=0u;var travelMinus=0u;
   for(var summaryIndex=lane;summaryIndex<summaryCount;summaryIndex+=256u){
-    let base=ACTIVE_SUMMARY_BASE+8u*summaryIndex;
+    let base=ACTIVE_SUMMARY_BASE+12u*summaryIndex;
     minimum=min(minimum,vec3u(activeScratch[base],activeScratch[base+1u],activeScratch[base+2u]));
     maximum=max(maximum,vec3u(activeScratch[base+4u],activeScratch[base+5u],activeScratch[base+6u]));
     speedBits=max(speedBits,activeScratch[base+3u]);
+    travelPlus=activeMaxPacked(travelPlus,activeScratch[base+8u]);
+    travelMinus=activeMaxPacked(travelMinus,activeScratch[base+9u]);
   }
   activeMinimumLanes[lane]=minimum;
   activeMaximumLanes[lane]=maximum;
   activeSpeedLanes[lane]=speedBits;
+  activeTravelPlusLanes[lane]=travelPlus;
+  activeTravelMinusLanes[lane]=travelMinus;
   workgroupBarrier();
   var stride=128u;
   loop{
@@ -1558,6 +1724,8 @@ fn reduceActiveSummaryRange(groupCount:vec3u,lane:u32){
       activeMinimumLanes[lane]=min(activeMinimumLanes[lane],activeMinimumLanes[lane+stride]);
       activeMaximumLanes[lane]=max(activeMaximumLanes[lane],activeMaximumLanes[lane+stride]);
       activeSpeedLanes[lane]=max(activeSpeedLanes[lane],activeSpeedLanes[lane+stride]);
+      activeTravelPlusLanes[lane]=activeMaxPacked(activeTravelPlusLanes[lane],activeTravelPlusLanes[lane+stride]);
+      activeTravelMinusLanes[lane]=activeMaxPacked(activeTravelMinusLanes[lane],activeTravelMinusLanes[lane+stride]);
     }
     workgroupBarrier();
     if(stride==1u){break;}stride/=2u;
@@ -1566,6 +1734,8 @@ fn reduceActiveSummaryRange(groupCount:vec3u,lane:u32){
     activeScratch[0]=activeMinimumLanes[0].x;activeScratch[1]=activeMinimumLanes[0].y;activeScratch[2]=activeMinimumLanes[0].z;
     activeScratch[3]=activeMaximumLanes[0].x;activeScratch[4]=activeMaximumLanes[0].y;activeScratch[5]=activeMaximumLanes[0].z;
     activeScratch[6]=activeSpeedLanes[0];
+    activeScratch[ACTIVE_TRAVEL_PLUS_WORD]=activeTravelPlusLanes[0];
+    activeScratch[ACTIVE_TRAVEL_MINUS_WORD]=activeTravelMinusLanes[0];
   }
 }
 @compute @workgroup_size(256)
@@ -1584,15 +1754,133 @@ fn finalizeActiveRegion(){
   let observedMax=vec3u(activeScratch[3],activeScratch[4],activeScratch[5]);
   let speed=max(bitcast<f32>(activeScratch[6]),length(params.inflowVelocityLength.xyz));
   let travel=vec3u(ceil(vec3f(speed*params.dimsDt.w)/params.cellGravity.xyz));
-  let padding=travel+vec3u(u32(ceil(params.tuning.y))+4u);
+  // The two one-step terms the scan cannot see, each charged only to the
+  // direction it actually pushes: this step's gravity kick (the scan reads the
+  // velocity BEFORE the kick, so liquid falls g*dt*dt/h further than it
+  // measured) and any authored inflow, whose liquid does not exist yet.
+  let stepDt=params.dimsDt.w;
+  let gravityCells=abs(params.cellGravity.w)*stepDt*stepDt/params.cellGravity.y;
+  var accelerationPlus=vec3f(0.0);
+  var accelerationMinus=vec3f(0.0);
+  accelerationPlus.y=select(0.0,gravityCells,params.cellGravity.w>0.0);
+  accelerationMinus.y=select(0.0,gravityCells,params.cellGravity.w<0.0);
+  let inflowCells=abs(params.inflowVelocityLength.xyz)*stepDt/params.cellGravity.xyz;
+  accelerationPlus+=select(vec3f(0.0),inflowCells,params.inflowVelocityLength.xyz>vec3f(0.0));
+  accelerationMinus+=select(vec3f(0.0),inflowCells,params.inflowVelocityLength.xyz<vec3f(0.0));
+  let travelPlus=activeUnpackTravel(activeScratch[ACTIVE_TRAVEL_PLUS_WORD])
+    +vec3u(ceil(accelerationPlus));
+  let travelMinus=activeUnpackTravel(activeScratch[ACTIVE_TRAVEL_MINUS_WORD])
+    +vec3u(ceil(accelerationMinus));
+  // What the host pads its lagged box with: how much further each SIDE can
+  // move in one step, per axis, and their sum for the dispatch extent.
+  activeScratch[ACTIVE_TRAVEL_PLUS_WORD]=activePackTravel(travelPlus);
+  activeScratch[ACTIVE_TRAVEL_MINUS_WORD]=activePackTravel(travelMinus);
+  activeScratch[ACTIVE_TRAVEL_TOTAL_WORD]=activePackTravel(travelPlus+travelMinus);
+${geometric ? `
+  // SOLVE-WINDOW PADDING, in cells, for Uniform Geometric. Per axis and per
+  // SIDE, because liquid sloshing sideways must not pad the window upward and
+  // falling liquid must not pad it upward either.
+  //
+  // The window must contain every cell that can hold liquid this step plus
+  // every stencil such a cell reads. Two groups of reaches, and they do NOT
+  // stack: a stencil is read AFTER the motion, so it is measured from where
+  // the liquid ends up, while the two-level classes are measured from where it
+  // is now. The padding is the larger of the two.
+  //
+  //   MOTION then stencil (these two add):
+  //     travel_side: ceil(v_side dt/h) from the scan, plus this step's gravity
+  //       kick and any inflow, per axis and direction ......... travelPlus/Minus
+  //     largest post-motion stencil reach:
+  //       uvRedistancePhi closest point: q clamped to p +- 4, uvGradient
+  //         probes +- 0.25 and uvPhi taps one cell past that ........... 6
+  //       uvAgreementShift tent gather: base + [-4,4) plus a tap ....... 5
+  //       uvSeedPhi: base + [-2,2) plus a tap .......................... 3
+  //       backward characteristics: one trilinear tap .................. 1
+  //       Sec. 3.5 sharpening: eight sweeps of one-cell face exchange, each
+  //         confined to |phi| < tuning.y*h ............... ceil(tuning.y) + 1
+  //
+  //   STANDING reach, from the liquid as it is now (no travel term):
+  //     two-level SHELL tiles, the set the extension's finest passes run on,
+  //       and the set the sampler is allowed to read finely: (k + s) * 4,
+  //       floored at the two-coarse-cell (8 cell) trilinear tap into the 4h
+  //       face table. At the shipped defaults (k=2, s=1) that is 12 cells.
+  //       Exactly 12, with nothing on top: the window is rounded out to the
+  //       4h lattice below, and roundDown4(m - 12) is the first cell of the
+  //       tile twelve cells under the liquid's own tile, so the alignment
+  //       supplies the part-tile the liquid cell sits in. Adding slack here
+  //       would buy a whole extra tile of nothing.
+  //
+  // The E3 live transport set is deliberately NOT a term. The window is the
+  // hard clip: a live tile outside it is simply not dispatched, its cells keep
+  // the V they already had (zero, by the dust-floor predicate this schedule
+  // requires), and no volume is created or destroyed. Its only job is to reach
+  // wherever liquid can actually arrive, which is exactly travel_side.
+  // Alignment to the 4h tile lattice happens below, after the union with the
+  // previous box.
+  let fineTiles=u32(max(params.physical.z,0.0));
+  let shellTiles=fineTiles+u32(max(params.twoLevel.x,1.0));
+  let standingReach=vec3u(max(4u*shellTiles,8u));
+  let stencilReach=vec3u(max(6u,u32(ceil(params.tuning.y))+1u));
+  // REDIRECTION, the third travel term, and the reason a purely per-direction
+  // padding is not safe. Gravity is not the only acceleration a step applies:
+  // where a stream meets a wall, the floor or another stream, the pressure
+  // impulse turns its momentum into some other direction WITHIN the step, so
+  // the velocity the scan measured on the way in says nothing about the jet
+  // that leaves. What bounds that jet is the momentum arriving: a collision
+  // redistributes speed, it does not manufacture it. The largest travel on any
+  // axis and either side is therefore the one-step acceleration bound for
+  // every direction, exactly as g*dt*dt/h is for the downward one.
+  //
+  // It is a FLOOR on each side's travel, not a term added to it: liquid that
+  // is only sloshing sideways has a small maximum and still pads the window
+  // upward by the standing reach alone, which is the case this padding exists
+  // to keep small. It bites only where something is genuinely moving fast, and
+  // there it is the difference between a far-wall impact jet that has valid
+  // far-air velocity above it and one that does not. Measured on the tall-air
+  // dam at 1x, 4x and 8x: without it the impact step reports 4.39 m/s against
+  // the whole-domain control's 3.11.
+  // It is the SPEED that is redirected, not one component of it, so the floor
+  // is the isotropic travel the paper arm pads with -- which makes the
+  // per-direction travel a term that can only ever lose to it. That is the
+  // honest result: directional padding is safe for the host's LAG allowance,
+  // where what grows is the box's span, and not for the window itself.
+  //
+  // Half again on top, because this step's measured travel is a lower bound on
+  // next step's: the impulse that redirects the momentum also concentrates it.
+  // Measured on the tall-air dam's far-wall impact, 8.6 cells of displacement
+  // became 11.7 in the following step (x1.36). This is what the old isotropic
+  // padding's unexplained +4 and the host pad's 1.5 were both standing in for,
+  // and it is zero at rest, so the floor above a calm surface is unaffected.
+  let redirect=travel+(travel+vec3u(1u))/vec3u(2u);
+  let paddingLow=max(standingReach,max(travelMinus,redirect)+stencilReach);
+  let paddingHigh=max(standingReach,max(travelPlus,redirect)+stencilReach);
+` : `
+  let paddingLow=travel+vec3u(u32(ceil(params.tuning.y))+4u);
+  let paddingHigh=paddingLow;
+`}
   let previousMinimum=vec3u(activeRegion[0],activeRegion[1],activeRegion[2]);
   let previousMaximum=vec3u(activeRegion[3],activeRegion[4],activeRegion[5]);
   var currentMinimum=previousMinimum;
   var currentMaximum=previousMaximum;
   if(all(observedMax>observedMin)){
-    currentMinimum=observedMin-min(observedMin,padding);
-    currentMaximum=min(d,observedMax+padding);
+    currentMinimum=observedMin-min(observedMin,paddingLow);
+    currentMaximum=min(d,observedMax+paddingHigh);
   }
+${geometric ? `
+  // A 4x4x4 workgroup must still coincide with one 4h tile: the sharpening
+  // work map, the two-level classes and the E3 live set all index their tile
+  // by cell/4 and exit whole-workgroup on that test, which is only uniform
+  // across the workgroup while the dispatch origin is a multiple of four.
+  currentMinimum=currentMinimum-(currentMinimum%vec3u(4u));
+  currentMaximum=min(d,currentMaximum+((vec3u(4u)-(currentMaximum%vec3u(4u)))%vec3u(4u)));
+  // Snap to a domain wall the window has come within one padding of.
+  // uvReleasedWalls reads the wall-plane velocity from every vertex it
+  // processes; the term only reaches vertices within dt*|v|/h of the plane,
+  // so with the wall inside the window whenever the liquid is within padding
+  // + travel of it, a windowed vertex never reads a stale plane.
+  currentMinimum=select(currentMinimum,vec3u(0u),currentMinimum<=paddingLow);
+  currentMaximum=select(currentMaximum,d,currentMaximum+paddingHigh>=d);
+` : ""}
   let minimum=min(previousMinimum,currentMinimum);
   let maximum=max(previousMaximum,currentMaximum);
   activeScratch[0]=currentMinimum.x;activeScratch[1]=currentMinimum.y;activeScratch[2]=currentMinimum.z;
@@ -1601,6 +1889,28 @@ fn finalizeActiveRegion(){
   activeScratch[10]=maximum.x;activeScratch[11]=maximum.y;activeScratch[12]=maximum.z;
   let groups=(maximum-minimum+vec3u(3u))/4u;
   activeScratch[13]=groups.x;activeScratch[14]=groups.y;activeScratch[15]=groups.z;
+  // The (n+1)^3 vertex lattice the geometric phi passes run on. Vertices
+  // minimum..maximum inclusive belong to the window's cells, so the dispatch
+  // is one vertex wider than the cell box on every axis and shares its origin.
+  let vertexGroups=(maximum-minimum+vec3u(1u)+vec3u(3u))/4u;
+  activeScratch[ACTIVE_VERTEX_DISPATCH_WORD]=vertexGroups.x;
+  activeScratch[ACTIVE_VERTEX_DISPATCH_WORD+1u]=vertexGroups.y;
+  activeScratch[ACTIVE_VERTEX_DISPATCH_WORD+2u]=vertexGroups.z;
+  // Containment check for host-sized direct dispatches. The origin every kernel
+  // reads is the exact one computed above; only the group COUNT comes from the
+  // host, which chose it from a box two or three steps old. A step whose exact
+  // extent outgrew that choice is clipped -- the far edge of the window simply
+  // is not dispatched -- so each such step is counted here and the host answers
+  // by going back to whole-domain counts for a while.
+  var violationAxes=0u;
+  if(activeScratch[ACTIVE_CPU_MODE_WORD]==1u){
+    if(groups.x>activeScratch[ACTIVE_CPU_MAIN_WORD]){violationAxes|=1u;}
+    if(groups.y>activeScratch[ACTIVE_CPU_MAIN_WORD+1u]){violationAxes|=2u;}
+    if(groups.z>activeScratch[ACTIVE_CPU_MAIN_WORD+2u]){violationAxes|=4u;}
+    if(vertexGroups.x>activeScratch[ACTIVE_CPU_VERTEX_WORD]){violationAxes|=8u;}
+    if(vertexGroups.y>activeScratch[ACTIVE_CPU_VERTEX_WORD+1u]){violationAxes|=16u;}
+    if(vertexGroups.z>activeScratch[ACTIVE_CPU_VERTEX_WORD+2u]){violationAxes|=32u;}
+  }
   for(var level=0u;level<16u;level+=1u){
     let base=16u+10u*level;
     let physical=vec3u(activeScratch[base+6u],activeScratch[base+7u],activeScratch[base+8u]);
@@ -1612,7 +1922,28 @@ fn finalizeActiveRegion(){
     let levelGroups=(end-origin+vec3u(3u))/4u;
     activeScratch[base]=origin.x;activeScratch[base+1u]=origin.y;activeScratch[base+2u]=origin.z;
     activeScratch[base+3u]=levelGroups.x;activeScratch[base+4u]=levelGroups.y;activeScratch[base+5u]=levelGroups.z;
+    // The exact extent this level owns, for the clip-mask arms.
+    activeScratch[base+9u]=activePackExtent(end-origin);
+    if(activeScratch[ACTIVE_CPU_MODE_WORD]==1u){
+      let cpuBase=ACTIVE_CPU_LEVEL_BASE_WORD+3u*level;
+      if(levelGroups.x>activeScratch[cpuBase]||levelGroups.y>activeScratch[cpuBase+1u]
+        ||levelGroups.z>activeScratch[cpuBase+2u]){violationAxes|=64u;}
+    }
   }
+  // The window-local CM11a lattice the host chose has to contain this step's
+  // exact box, for the same reason and with the same answer as the counts
+  // above: it was chosen from a lagged box, and a step it does not cover is
+  // counted here and answered with whole-domain steps.
+  if(activeScratch[ACTIVE_PRESSURE_MODE_WORD]==1u){
+    let latticeOrigin=vec3u(activeScratch[ACTIVE_PRESSURE_ORIGIN_WORD],
+      activeScratch[ACTIVE_PRESSURE_ORIGIN_WORD+1u],activeScratch[ACTIVE_PRESSURE_ORIGIN_WORD+2u]);
+    let latticeCapacity=vec3u(activeScratch[ACTIVE_PRESSURE_CAPACITY_WORD],
+      activeScratch[ACTIVE_PRESSURE_CAPACITY_WORD+1u],activeScratch[ACTIVE_PRESSURE_CAPACITY_WORD+2u]);
+    if(any(minimum<latticeOrigin)||any(maximum>latticeOrigin+latticeCapacity)){violationAxes|=128u;}
+  }
+  activeScratch[ACTIVE_VIOLATION_WORD]=activeRegion[ACTIVE_VIOLATION_WORD]
+    +select(0u,1u,violationAxes!=0u);
+  activeScratch[ACTIVE_VIOLATION_AXES_WORD]=violationAxes;
 }
 @compute @workgroup_size(4,4,4)
 fn reduceDiagnostics(@builtin(global_invocation_id) gid:vec3u){let id=activeId(gid);if(!valid(id)){return;}let represented=surfaceOccupancy(id);let conservative=volume(id);atomicAdd(&reductions[0],u32(represented*2048.0+0.5));if(surfaceLiquid(id)){atomicMax(&reductions[1],u32(id.x+1));}let speed=length(faceVelocity(id));atomicMax(&reductions[2],bitcast<u32>(speed));atomicAdd(&reductions[3],u32(${geometric ? "max(conservative,0.0)" : "clamp(conservative,0.0,8.0)"}*2048.0+0.5));}

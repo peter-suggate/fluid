@@ -61,6 +61,56 @@ const twoLevelChip = (context: FluidPipelineContext) => {
   const shell = shellMap(context);
   return shell ? `two-level · tiles ${shell.percent}%` : "two-level · tiles";
 };
+/**
+ * The solve window, relabelled for the predicate Uniform Geometric uses.
+ *
+ * It is the paper method's `activeRegion` param and its constructor-level
+ * update kind, on the same stage, so the two methods can never disagree about
+ * what the control means; what differs is the seed (liquid above the dust
+ * floor OR a vertex on the liquid side of the 4h band, never a solid), the
+ * padding (the largest reach any stage uses), and that the box is aligned to
+ * the 4h tile lattice so a workgroup is still a tile.
+ */
+const solveWindowForcedDense = (context: FluidPipelineContext): string | undefined => {
+  if (context.values.activeRegion !== "on") return "whole domain";
+  if (dustThreshold(context) <= 0) return "whole domain · dust floor off";
+  return undefined;
+};
+const solveWindowControls = [
+  {kind:"param-choice" as const,param:"activeRegion",label:"Solve window",
+    options:[{value:"on",label:"Liquid window",
+      hint:"Every kernel, every pressure-multigrid pass and every extension-hierarchy pass runs on the box holding the liquid, the near-surface band and this step's sources, padded by the largest reach any stage uses. Empty air outside it costs nothing. Needs the dust floor above zero."},
+      {value:"off",label:"Whole domain",
+      hint:"The full bounding box, dispatched directly. The dense control."}]},
+  {kind:"readout" as const,label:"Work box",
+    hint:"The GPU-measured dispatch box of the latest diagnostics sample: the union of this step's padded seed box with the previous one, which is what gives every ping-pong target one clearing tail.",
+    value:(context: FluidPipelineContext)=>{
+      const forced = solveWindowForcedDense(context);
+      if (forced) return forced;
+      const cells = context.info?.uniformActiveRegionCellCount;
+      const fraction = context.info?.uniformActiveRegionFraction;
+      const total = context.info?.cellCount;
+      if (cells === undefined || fraction === undefined || !total) return "—";
+      return `${cells.toLocaleString()} / ${total.toLocaleString()} cells · ${(100 * fraction).toFixed(1)}%`;
+    }},
+  {kind:"readout" as const,label:"Window launches",
+    hint:"How the window's dispatches are sized. The host picks the group counts from a box a few steps old while every kernel still reads this step's exact origin, because an indirect launch costs several times a direct one on this lane. Clipped steps are steps whose exact box outgrew the host's counts: the far edge of the window is not dispatched that step, so a front stalls there, and the host answers with whole-domain counts for the next eight steps. Dense steps are those whole-domain ones, plus start-up, scene edits and steps with a source.",
+    value:(context: FluidPipelineContext)=>{
+      const forced = solveWindowForcedDense(context);
+      if (forced) return forced;
+      const mode = context.info?.uniformSolveWindowDispatch;
+      if (mode === undefined) return "—";
+      if (mode === "indirect") return "GPU indirect records";
+      const clipped = context.info?.uniformSolveWindowClippedSteps ?? 0;
+      const dense = context.info?.uniformSolveWindowDenseSteps ?? 0;
+      return `host-sized · ${clipped} clipped · ${dense} dense`;
+    }},
+];
+const solveWindowChip = (context: FluidPipelineContext) => {
+  if (solveWindowForcedDense(context)) return undefined;
+  const fraction = context.info?.uniformActiveRegionFraction;
+  return fraction === undefined ? "solve window" : `solve window ${(100 * fraction).toFixed(1)}%`;
+};
 const twoLevelControls = [
   {kind:"param-choice" as const,param:"twoLevelVelocity",label:"Sampler",
     options:[{value:"off",label:"All fine",hint:"Every velocity sample reads the finest lattice."},
@@ -132,6 +182,46 @@ const volumePressureRowsControl = {kind:"param-choice" as const,param:"volumePre
   options:[{value:"abandoned",label:"Abandoned",hint:"A cell holding at least half its open capacity in V owns a pressure row where centre phi is positive AND no face neighbour is phi-liquid: exactly the cells whose faces the projection would zero. Thin films keep incompressibility; beside a phi surface, phi alone places the free surface."},
     {value:"all",label:"All",hint:"V claims the row, and sets the ghost distance, wherever it implies more liquid than phi. V sits in a patchy one-cell layer over a phi surface, so random columns read a cell taller than their neighbours and the surface bubbles. Kept for comparison."},
     {value:"off",label:"Off",hint:"Rows from centre phi alone: the control. A film under half a cell has no pressure, and with no liquid centre left the solve stops."}]};
+/**
+ * The CM11a lattice the hierarchy is planned for.
+ *
+ * It belongs on the system-build stage because that is where the plan is
+ * spent: the topology and RHS pyramid, and every level's dimensions, come
+ * from the capacity this control picks. The cliff it exists for is the
+ * planner's, not the launches': a domain whose shortest axis will not divide
+ * the level count falls out of lockstep coarsening into semi-coarsening, and
+ * pays half again the levels and twice the passes for the same liquid.
+ */
+const pressureLatticeControls = [
+  {kind:"param-choice" as const,param:"pressureWindow",label:"Pressure lattice",
+    options:[{value:"window",label:"Liquid window",
+      hint:"Plan the hierarchy for a capacity that holds the solve window, seated at an aligned origin in simulation cells. Halo cells that land inside the domain are far air: open, phi positive, p = 0. Re-planned when the window outgrows the capacity, and — after thirty settled steps — when it shrinks well inside one."},
+      {value:"domain",label:"Whole domain",
+      hint:"One hierarchy for the full lattice, planned once at load. The control, and the fallback a violated or freshly reset step uses."}],
+    enabled:(context: FluidPipelineContext)=>context.values.activeRegion === "on" && dustThreshold(context) > 0},
+  {kind:"readout" as const,label:"Lattice",
+    hint:"Capacity in cells and origin in simulation cells, of the instance the latest step solved on, with the level count its plan has. Whole domain while the solve window is off, at start-up, and for the eight steps after a containment violation.",
+    value:(context: FluidPipelineContext)=>{
+      const info = context.info as unknown as
+        { uniformPressureLattice?: string; uniformPressureLatticeWindowed?: boolean } | null;
+      if (context.values.activeRegion !== "on") return "whole domain";
+      const lattice = info?.uniformPressureLattice;
+      if (lattice === undefined) return "whole domain";
+      const facts = context.info?.uniformPipelineFacts;
+      const levels = facts ? ` · ${facts.multigridLevels} levels` : "";
+      return `${lattice}${info?.uniformPressureLatticeWindowed === false ? " · domain" : ""}${levels}`;
+    }},
+  {kind:"readout" as const,label:"Re-plans",
+    hint:"Hierarchies built since load, and how long the last one took on the host. Creation reuses the compiled pipelines and bind-group layouts, so it is a plan plus texture and buffer allocation, not a shader compile.",
+    value:(context: FluidPipelineContext)=>{
+      const info = context.info as unknown as
+        { uniformPressureLatticeReplans?: number; uniformPressureLatticeReplanMs?: number } | null;
+      const count = info?.uniformPressureLatticeReplans;
+      if (count === undefined) return "—";
+      const ms = info?.uniformPressureLatticeReplanMs;
+      return ms ? `${count} · last ${ms.toFixed(1)} ms` : `${count}`;
+    }},
+];
 const transportControls = [
   {kind:"param-choice" as const,param:"transportWorkMap",label:"Transport work",
     options:[{value:"tiles",label:"Live tiles",hint:"Build edges, sum and normalise donors and gather only in the 4h tiles that can hold or receive liquid this step. Outside them the gather stores V=0 and gamma=0 without evaluating either."},
@@ -257,13 +347,18 @@ export const UNIFORM_VOLUME_PIPELINE: FluidPipelineGraph = {
     // tiles are what this stage's finest passes now run on, so both controls
     // belong beside the sweep budget that produced the field they sample.
     if(stage.id==="velocity-extension")return [{...mapped,
-      controls:[...(mapped.controls ?? []),...twoLevelControls],
-      chip:context=>{const extra=twoLevelChip(context);const base=mapped.chip?.(context);
+      controls:[...solveWindowControls,
+        ...(mapped.controls ?? []).filter(control=>
+          !(control.kind === "param-choice" && control.param === "activeRegion")
+          && !(control.kind === "readout" && control.label === "Work box")),
+        ...twoLevelControls],
+      chip:context=>{const extra=[solveWindowChip(context),twoLevelChip(context)].filter(Boolean).join(" · ");
+        const base=mapped.chip?.(context);
         return extra?(base?`${base} · ${extra}`:extra):base;}}];
     // Which cells own a pressure row is decided where the topology and RHS
     // are built, so the V claim sits on that stage.
     if(stage.id==="pressure-system")return [{...mapped,
-      controls:[...(mapped.controls ?? []),volumePressureRowsControl]}];
+      controls:[...(mapped.controls ?? []),volumePressureRowsControl,...pressureLatticeControls]}];
     // E2b shrinks both of these, off the same fine map, so the one control sits
     // on both stages rather than in a shelf away from the work it prices.
     if(stage.id==="velocity-advection"||stage.id==="pressure-projection")return [{...mapped,

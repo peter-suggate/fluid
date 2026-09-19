@@ -393,7 +393,8 @@ function parseSceneOverlay(raw: string | null): SceneOverlay | null {
 const DENSE_GRID_OVERLAY_MODES: Readonly<Record<string, true>> = {
   structure: true, resolution: true, optical: true, cfl: true, speed: true,
   phi: true, divergence: true, pressure: true, projection: true,
-  representation: true, density: true, "volume-levelset": true,
+  representation: true, density: true, "volume-levelset": true, "fine-tiles": true,
+  "solve-window": true,
   tracers: true, "face-velocity": true,
 };
 

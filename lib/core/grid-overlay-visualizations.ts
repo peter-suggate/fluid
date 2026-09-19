@@ -10,7 +10,7 @@
  * rather than as unlabelled overlay modes only the URL could reach.
  */
 import {
-  FRACTION_VIEW_BANDS, fractionBand, fractionBandPaint, fractionReadout,
+  FRACTION_VIEW_BANDS, fractionBand, fractionBandPaint, fractionReadout, wgslDisplayColor,
 } from "./fluid-fraction-view";
 import {
   fieldVisualization,
@@ -19,6 +19,39 @@ import {
 
 /** Sparse Geometric's combined conservative-volume and level-set slice. */
 export const VOLUME_LEVELSET_OVERLAY_MODE_CODE = 21;
+
+/** Uniform Geometric's two-level 4³ tile classes. */
+export const FINE_TILES_OVERLAY_MODE_CODE = 22;
+
+/** The uniform solvers' solve window and what the host launched from it. */
+export const SOLVE_WINDOW_OVERLAY_MODE_CODE = 23;
+
+/**
+ * The method views' palette, in display space. The shader reads these through
+ * {@link methodViewShaderConstants} and the legends below read them directly,
+ * so the swatch is the colour on screen.
+ */
+const FINE_TILE_SWATCH = "#3fae8f";
+const SHELL_TILE_SWATCH = "#a6d8c6";
+/** The cased tile boundary's light core, vec3f(2.2, 2.6, 2.5) once displayed. */
+const TILE_BOUNDARY_SWATCH = "#d7dcdb";
+/** The overlay's cell hairline, vec3f(0.03, 0.08, 0.09) once displayed. */
+const CELL_LINE_SWATCH = "#334e52";
+const WINDOW_SEED_SWATCH = "#5fb4e6";
+const WINDOW_LAG_SWATCH = "#93a5b9";
+const WINDOW_CLIPPED_SWATCH = "#d2493f";
+/** Mid-toned so it dims the pale studio ground and lifts dark water alike. */
+const WINDOW_OUTSIDE_SWATCH = "#6b767b";
+
+export const methodViewShaderConstants = /* wgsl */ `
+// Generated from lib/core/grid-overlay-visualizations.ts, beside the legends.
+const FINE_TILE_DISPLAY: vec3f = ${wgslDisplayColor(FINE_TILE_SWATCH)};
+const SHELL_TILE_DISPLAY: vec3f = ${wgslDisplayColor(SHELL_TILE_SWATCH)};
+const WINDOW_SEED_DISPLAY: vec3f = ${wgslDisplayColor(WINDOW_SEED_SWATCH)};
+const WINDOW_LAG_DISPLAY: vec3f = ${wgslDisplayColor(WINDOW_LAG_SWATCH)};
+const WINDOW_CLIPPED_DISPLAY: vec3f = ${wgslDisplayColor(WINDOW_CLIPPED_SWATCH)};
+const WINDOW_OUTSIDE_DISPLAY: vec3f = ${wgslDisplayColor(WINDOW_OUTSIDE_SWATCH)};
+`;
 
 /**
  * A legend line for one band of the fraction view, from the shared definition.
@@ -42,7 +75,7 @@ const fractionLegendEntry = (
 };
 
 export function isSliceOnlyGridOverlayMode(mode: unknown): boolean {
-  return mode === "volume-levelset";
+  return mode === "volume-levelset" || mode === "fine-tiles" || mode === "solve-window";
 }
 
 export const gridOverlayVisualizations: readonly Visualization[] = Object.freeze([
@@ -122,6 +155,37 @@ export const gridOverlayVisualizations: readonly Visualization[] = Object.freeze
       { swatch: "#ef9f35", label: "φ = 0 — level-set interface", mark: "line" },
       fractionLegendEntry("overfull", true),
       { swatch: "#a8c7d8", label: "accepted adaptive grid", mark: "line" },
+    ],
+  }),
+  fieldVisualization({
+    kind: "field", id: "dense-grid/fine-tiles", pass: "Dense grid",
+    label: "Fine tiles",
+    description: "The two-level velocity sampler's 4³ tiles through the chosen plane. Fine tiles read velocity from the finest lattice; shell tiles are the extra ring the extension still solves at full resolution; every other tile samples the 4h face table. The finest lattice is drawn only inside fine tiles; elsewhere the tile is the cell. Classified at the head of each step from start-of-step volume, level set, solids and sources, then dilated by the fine and shell reach. With the sampler off, every tile is fine.",
+    source: "Uniform Geometric's per-step tile classes",
+    mode: "fine-tiles", axis: "z", sliceOnly: true,
+    legend: [
+      { swatch: FINE_TILE_SWATCH, label: "fine — velocity from the finest lattice" },
+      { swatch: SHELL_TILE_SWATCH, label: "shell — extension at full resolution, 4h sampler" },
+      { swatch: "transparent", label: "far air — 4h face table only" },
+      { swatch: TILE_BOUNDARY_SWATCH, label: "4³ tile boundary", mark: "line" },
+      { swatch: CELL_LINE_SWATCH, label: "finest lattice — inside fine tiles only", mark: "line" },
+      { swatch: fractionBandPaint("overfull").swatch, label: "φ = 0 — level-set interface", mark: "line" },
+    ],
+  }),
+  fieldVisualization({
+    kind: "field", id: "dense-grid/solve-window", pass: "Dense grid",
+    label: "Solve window",
+    description: "Where the step ran, through the chosen plane. The window is this step's padded liquid box united with the previous step's, aligned to 4h tiles; every kernel, pressure-multigrid pass and extension pass is dispatched from its corner. The host sizes each launch from a box a couple of steps old, so a launch can run past the window (hatched: those threads exit immediately at the window's edge, so the slack costs launch size and nothing else) or, when the liquid outgrew that box, stop short of it (red: that edge was not dispatched and a front stalls there). Nothing outside the launch is touched. With the window off, the whole domain is the window.",
+    source: "The uniform solve-window header the step's finalize wrote",
+    mode: "solve-window", axis: "z", sliceOnly: true,
+    legend: [
+      { swatch: TILE_BOUNDARY_SWATCH, label: "window — this step's box ∪ the last", mark: "line" },
+      { swatch: WINDOW_SEED_SWATCH, label: "this step's box — liquid, band and sources, padded", mark: "line" },
+      { swatch: `repeating-linear-gradient(135deg,${WINDOW_LAG_SWATCH} 0 2px,transparent 2px 5px)`, label: "launched past the window" },
+      { swatch: WINDOW_CLIPPED_SWATCH, label: "clipped — in the window, not launched" },
+      { swatch: WINDOW_OUTSIDE_SWATCH, label: "not dispatched" },
+      { swatch: CELL_LINE_SWATCH, label: "finest lattice — inside the window only", mark: "line" },
+      { swatch: fractionBandPaint("overfull").swatch, label: "φ = 0 — level-set interface", mark: "line" },
     ],
   }),
 ]);

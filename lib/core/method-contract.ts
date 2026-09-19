@@ -11,6 +11,7 @@ import type { GPURigidBodyPick, GPURigidBodyPose } from "./webgpu-rigid-body";
 import type { Vec3 } from "./model";
 import type { GPUSecondaryParticleSource } from "./webgpu-secondary-particles";
 import type { GPUFluidFaceVelocitySource } from "./webgpu-face-velocity-overlay";
+import type { GPUFluidSolveWindowSource, GPUFluidTileClassSource } from "./method-view-records";
 import type { GPUPressureJournalSource } from "../features/pressure-inspection/gpu/overlay";
 import type { PressureJournal, PressureJournalDescriptor } from "../features/pressure-inspection/journal";
 import type { AnyStageLens, StageLensSource } from "./stage-lens";
@@ -291,6 +292,18 @@ export interface GPUSolverInstance {
    * a view that reads them adds a draw and no simulation work at all.
    */
   readonly faceVelocitySource?: GPUFluidFaceVelocitySource;
+  /**
+   * Optional 4³ tile classes, for the fine-tiles view. Like face velocities it
+   * reads what the step already wrote; unlike them it comes and goes with a
+   * runtime toggle, so it is read fresh every frame.
+   */
+  readonly tileClassSource?: GPUFluidTileClassSource;
+  /**
+   * Optional solve-window header, for the solve-window view. It shares the
+   * overlay's binding with the tile classes, since one view draws at a time,
+   * and like them it is withdrawn with its toggle.
+   */
+  readonly solveWindowSource?: GPUFluidSolveWindowSource;
   /**
    * Optional captured pressure-solve journal, for the pressure-lab film.
    *

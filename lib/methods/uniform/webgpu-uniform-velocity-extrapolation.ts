@@ -60,6 +60,19 @@ export class WebGPUUniformVelocityExtrapolator {
   private readonly unusedDispatchStorage: GPUBuffer;
   private readonly levelBuffers: GPUBuffer[] = [];
   private readonly hierarchyLevels: HierarchyLevel[] = [];
+  /**
+   * The fill pyramid's own level dimensions, finest first.
+   *
+   * The shared active-region level table used to be seeded from the PRESSURE
+   * hierarchy's level dimensions, with record = extension level + 1. That only
+   * describes this pyramid while both hierarchies halve in lockstep, which
+   * stops being true the moment the pressure plan semi-coarsens or is planned
+   * on a window instead of the domain. Where that assumption no longer holds
+   * the table is seeded from here instead.
+   */
+  get hierarchyLevelDimensions(): readonly (readonly [number, number, number])[] {
+    return this.hierarchyLevels.map((level) => [...level.dims] as [number, number, number]);
+  }
   private readonly hierarchyDownGroups: GPUBindGroup[] = [];
   private readonly hierarchyUpGroups: GPUBindGroup[] = [];
   private readonly seedCurrentGroup: GPUBindGroup;
@@ -376,6 +389,23 @@ export class WebGPUUniformVelocityExtrapolator {
     this.device.queue.submit([encoder.finish()]);
   }
 
+  /**
+   * Group counts the host chose for this step, or undefined to keep taking
+   * them from the GPU's indirect records. `base` sizes the finest passes (the
+   * seed, resolve, prolong-to-base and pack, all of which read the main-grid
+   * origin at word 7); `levels` is indexed by the shared active-region level
+   * record, which hierarchy level i uses as record i+1. Only the launch size
+   * changes: every origin still comes from `activeRegion`.
+   */
+  setWindowGroups(base?: readonly [number, number, number],
+    levels?: readonly (readonly [number, number, number])[]): void {
+    this.windowBaseGroups = base;
+    this.windowLevelGroups = levels;
+  }
+
+  private windowBaseGroups?: readonly [number, number, number];
+  private windowLevelGroups?: readonly (readonly [number, number, number])[];
+
   encode(
     encoder: GPUCommandEncoder,
     predicted: boolean,
@@ -389,7 +419,8 @@ export class WebGPUUniformVelocityExtrapolator {
     const dispatchBase = (label: string, pipeline: GPUComputePipeline, group: GPUBindGroup) => {
       const pass = encoder.beginComputePass({ label });
       pass.setPipeline(pipeline); pass.setBindGroup(0, group);
-      if (this.activeDispatch) pass.dispatchWorkgroupsIndirect(this.activeDispatch, 13 * 4);
+      if (this.activeDispatch && this.windowBaseGroups) pass.dispatchWorkgroups(...this.windowBaseGroups);
+      else if (this.activeDispatch) pass.dispatchWorkgroupsIndirect(this.activeDispatch, 13 * 4);
       else pass.dispatchWorkgroups(
         Math.ceil(this.dims[0] / 4), Math.ceil(this.dims[1] / 4), Math.ceil(this.dims[2] / 4));
       pass.end();
@@ -417,7 +448,10 @@ export class WebGPUUniformVelocityExtrapolator {
       const level = this.hierarchyLevels[levelIndex];
       const pass = encoder.beginComputePass({ label: `${prefix} hierarchy restrict ${levelIndex + 1}` });
       pass.setPipeline(pipelines.restrict); pass.setBindGroup(0, this.hierarchyDownGroups[levelIndex]);
-      if (this.activeDispatch && Math.min(...level.dims) > 1) {
+      const restrictGroups = this.windowLevelGroups?.[levelIndex + 1];
+      if (this.activeDispatch && Math.min(...level.dims) > 1 && restrictGroups) {
+        pass.dispatchWorkgroups(...restrictGroups);
+      } else if (this.activeDispatch && !this.windowBaseGroups && Math.min(...level.dims) > 1) {
         pass.dispatchWorkgroupsIndirect(this.activeDispatch, (16 + (levelIndex + 1) * 10 + 3) * 4);
       } else pass.dispatchWorkgroups(
         Math.ceil(level.dims[0] / 4), Math.ceil(level.dims[1] / 4), Math.ceil(level.dims[2] / 4));
@@ -428,7 +462,14 @@ export class WebGPUUniformVelocityExtrapolator {
       const targetDims = levelIndex >= 0 ? this.hierarchyLevels[levelIndex].dims : this.dims;
       const pass = encoder.beginComputePass({ label: `${prefix} hierarchy prolong ${passIndex + 1}` });
       pass.setPipeline(pipelines.prolong); pass.setBindGroup(0, this.hierarchyUpGroups[passIndex]);
-      if (this.activeDispatch && (levelIndex < 0 || Math.min(...targetDims) > 1)) {
+      const prolongGroups = levelIndex < 0 ? this.windowBaseGroups
+        : this.windowLevelGroups?.[levelIndex + 1];
+      if (this.activeDispatch && (levelIndex < 0 || Math.min(...targetDims) > 1) && prolongGroups) {
+        pass.dispatchWorkgroups(...prolongGroups);
+      } else if (this.activeDispatch && !this.windowBaseGroups
+        && (levelIndex < 0 || Math.min(...targetDims) > 1)) {
+        // A level past the shared level table has no record; host-sized mode
+        // falls to the dense count below rather than a zero-size indirect one.
         pass.dispatchWorkgroupsIndirect(this.activeDispatch,
           levelIndex < 0 ? 13 * 4 : (16 + (levelIndex + 1) * 10 + 3) * 4);
       } else pass.dispatchWorkgroups(
@@ -438,7 +479,8 @@ export class WebGPUUniformVelocityExtrapolator {
     const pass = encoder.beginComputePass({ label: `${prefix} pack transport shell` });
     pass.setPipeline(pipelines.pack);
     pass.setBindGroup(0, predicted ? this.packPredictedGroup : this.packCurrentGroup);
-    if (this.activeDispatch) pass.dispatchWorkgroupsIndirect(this.activeDispatch, 13 * 4);
+    if (this.activeDispatch && this.windowBaseGroups) pass.dispatchWorkgroups(...this.windowBaseGroups);
+    else if (this.activeDispatch) pass.dispatchWorkgroupsIndirect(this.activeDispatch, 13 * 4);
     else pass.dispatchWorkgroups(
       Math.ceil((this.dims[0] + 2) / 4),
       Math.ceil((this.dims[1] + 2) / 4),

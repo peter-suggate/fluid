@@ -1,4 +1,8 @@
 import type { DenseLevelSetVolumeConsumerSource } from "../../core/levelset-consumer-abi";
+import {
+  SOLVE_WINDOW_HOST_GROUPS_WORD, SOLVE_WINDOW_RECORD_WORDS,
+  type GPUFluidSolveWindowSource, type GPUFluidTileClassSource,
+} from "../../core/method-view-records";
 import { UNIFORM_VOLUME_PHASE } from "./uniform-volume-stages";
 import {
   UNIFORM_VOLUME_EDGE_BYTES,
@@ -53,6 +57,8 @@ import {
   UNIFORM_CM11A_V_CYCLES,
   uniformCM11aCycleBudget,
   WebGPUUniformPressureMultigrid,
+  planUniformCM11aWindow,
+  seatUniformCM11aWindow,
   type UniformCM11aSchedule,
 } from "./webgpu-uniform-pressure-multigrid";
 import type { UniformCM11aCoarsestCapture, UniformCM11aPlanStage } from "./webgpu-uniform-pressure-multigrid";
@@ -151,6 +157,11 @@ export interface WebGPUUniformReferenceOptions {
   liquidCapacityBalancingTolerance?: number;
   /** GPU-resident sparse work boxes; false retains the original dense control. */
   activeRegion?: boolean;
+  /**
+   * Plan the CM11a pressure hierarchy on the solve window instead of the
+   * domain. Only effective while `activeRegion` is on; defaults to on there.
+   */
+  pressureWindow?: boolean;
   /** Velocity transport used by Algorithm 1 step 3. */
   velocityTransport?: GPUVelocityTransport;
   /** Reject hierarchy-only air samples when updating liquid momentum. */
@@ -278,7 +289,94 @@ const UNIFORM_ACTIVE_MAIN_DISPATCH_OFFSET = 13 * 4;
 const UNIFORM_ACTIVE_LEVEL_WORDS = 10;
 const UNIFORM_ACTIVE_LEVEL_BASE_WORD = 16;
 const UNIFORM_ACTIVE_MAX_LEVELS = 16;
-const UNIFORM_ACTIVE_SUMMARY_BYTES = 32;
+/**
+ * Uniform Geometric's phi passes run on the (n+1)^3 vertex lattice, which is
+ * one vertex wider than the window's cell box on every axis and shares its
+ * origin. Its indirect record sits above the level table; the fourth word pads
+ * the header to a four-word stride, and `ACTIVE_SUMMARY_BASE` in the shader is
+ * this word plus four.
+ */
+const UNIFORM_ACTIVE_VERTEX_DISPATCH_WORD = UNIFORM_ACTIVE_LEVEL_BASE_WORD
+  + UNIFORM_ACTIVE_MAX_LEVELS * UNIFORM_ACTIVE_LEVEL_WORDS;
+const UNIFORM_ACTIVE_VERTEX_DISPATCH_OFFSET = UNIFORM_ACTIVE_VERTEX_DISPATCH_WORD * 4;
+/**
+ * Group counts the HOST chose for this step's direct dispatches, and the
+ * violation ledger `finalizeActiveRegion` keeps against them. An indirect
+ * launch costs 15-25 us on this Dawn/Metal lane against 3-6 us for a direct
+ * one, and the window converts about a thousand launches a step, so the counts
+ * are chosen on the CPU from a lagged box while the ORIGIN every kernel reads
+ * stays the GPU's exact one.
+ */
+const UNIFORM_ACTIVE_CPU_LEVEL_BASE_WORD = UNIFORM_ACTIVE_VERTEX_DISPATCH_WORD + 4;
+const UNIFORM_ACTIVE_CPU_MAIN_WORD = UNIFORM_ACTIVE_CPU_LEVEL_BASE_WORD
+  + UNIFORM_ACTIVE_MAX_LEVELS * 3;
+const UNIFORM_ACTIVE_CPU_VERTEX_WORD = UNIFORM_ACTIVE_CPU_MAIN_WORD + 3;
+const UNIFORM_ACTIVE_CPU_MODE_WORD = UNIFORM_ACTIVE_CPU_VERTEX_WORD + 3;
+const UNIFORM_ACTIVE_VIOLATION_WORD = UNIFORM_ACTIVE_CPU_MODE_WORD + 1;
+const UNIFORM_ACTIVE_VIOLATION_AXES_WORD = UNIFORM_ACTIVE_VIOLATION_WORD + 1;
+/**
+ * Per-axis travel in cells, both directions summed, packed three to a word
+ * (ten bits each) by `finalizeActiveRegion`. This is how much wider the exact
+ * box can get in one step, per axis, and it is what the lagged group counts
+ * below are padded with. The two words under it are the finalize's own
+ * scratch for the plus and minus halves.
+ */
+const UNIFORM_ACTIVE_TRAVEL_TOTAL_WORD = UNIFORM_ACTIVE_VIOLATION_AXES_WORD + 3;
+/** Origin of the window-local CM11a lattice, in simulation cells. */
+const UNIFORM_ACTIVE_PRESSURE_ORIGIN_WORD = UNIFORM_ACTIVE_TRAVEL_TOTAL_WORD + 1;
+/** Mirror of VERTEX_PHI_REACH: the phi stage's own read reach, in vertices. */
+const UNIFORM_VERTEX_PHI_REACH = 6;
+const UNIFORM_ACTIVE_HEADER_WORDS = 256;
+// The solve-window view decodes this header by the words `method-view-records`
+// names: the seed box at 0, the window at 7, and the host's main group counts.
+if (UNIFORM_ACTIVE_CPU_MAIN_WORD !== SOLVE_WINDOW_HOST_GROUPS_WORD
+  || UNIFORM_ACTIVE_HEADER_WORDS < SOLVE_WINDOW_RECORD_WORDS) {
+  throw new Error("The active-region header moved; update SOLVE_WINDOW_* in core/method-view-records.ts");
+}
+const UNIFORM_ACTIVE_SUMMARY_BYTES = 48;
+/**
+ * Steps of lag the host assumes between the box the GPU computed and the box
+ * its group counts must still cover. The never-awaited readback is one step
+ * behind at best; the measured maximum over a sixty-frame capture was also
+ * one, so two is that plus a skipped copy. The containment flag and the
+ * whole-domain fallback are the safety net, not this number.
+ *
+ * It is a LAUNCH SIZE only: every windowed kernel exits the threads whose
+ * workgroup overruns the published window, so raising or lowering this changes
+ * how many threads return immediately and nothing about the answer.
+ */
+const UNIFORM_WINDOW_LAG_STEPS = 2;
+/** Steps of whole-domain counts a clipped step buys. */
+const UNIFORM_WINDOW_VIOLATION_PENALTY_STEPS = 8;
+/**
+ * Cells of slack on the CPU-known starting wet box, for the steps before the
+ * first readback lands. Generous on purpose: a lattice one alignment step too
+ * wide costs a little memory, and a lattice too small costs a re-plan.
+ */
+const UNIFORM_PRESSURE_WINDOW_SEED_PAD = 32;
+/**
+ * Consecutive steps a smaller capacity must suffice for before the lattice
+ * shrinks to it. Growth is immediate; only shrinking waits, because a surface
+ * breathing across an alignment boundary would otherwise re-plan forever.
+ */
+const UNIFORM_PRESSURE_WINDOW_SHRINK_STEPS = 30;
+/** CM11a instances kept alive, including the domain-capacity one. */
+const UNIFORM_PRESSURE_WINDOW_CACHE = 3;
+/**
+ * Cells of headroom at which the next capacity starts being built.
+ *
+ * Growth is the one re-plan that cannot wait: the step that outgrows the
+ * capacity needs the bigger lattice in the same step. Building it costs ~10 ms
+ * of host walk, which at the budget below is several steps, so the trigger has
+ * to lead the box by several steps of ITS OWN travel and not by a fixed
+ * distance -- eight cells of headroom is five steps of a calm surface and one
+ * step of a far-wall impact, which is exactly when the hitch would land.
+ */
+const UNIFORM_PRESSURE_PREWARM_HEADROOM = 8;
+/** Steps of the box's own measured travel the prewarm tries to lead by. */
+const UNIFORM_PRESSURE_PREWARM_STEPS = 6;
+/** Host milliseconds a step may spend on the prewarm's plan walk. */
+const UNIFORM_PRESSURE_PREWARM_BUDGET_MS = 2;
 
 /**
  * The exact partition of one uniform advance, in encode order.
@@ -365,6 +463,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private twoLevelPipelines: Partial<Record<typeof UNIFORM_VOLUME_TWO_LEVEL_ENTRIES[number], GPUComputePipeline>> = {};
   /** The E1 map was built in the most recent encoded step. */
   private twoLevelEncoded = false;
+  /** The E1 records, as the fine-tiles view binds them; see `tileClassSource`. */
+  private readonly tileClassRecords?: GPUFluidTileClassSource;
   private liquidCapacityBalancing: boolean;
   private liquidCapacityBalancingRounds: number;
   private liquidCapacityBalancingTolerance: number;
@@ -413,9 +513,20 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   readonly negativeBoundaryVelocityBytes: number;
   /** Negative x/y/z domain MAC faces paired with velocityTexture. */
   get negativeBoundaryVelocityBuffer(): GPUBuffer { return this.boundaryVelocityA; }
-  /** Read-only accepted pressure/gamma for matched-lattice Dawn comparisons. */
+  /**
+   * Read-only accepted pressure/gamma for matched-lattice Dawn comparisons.
+   *
+   * With the pressure lattice planned on the window the texture is
+   * window-local: it has `latticeDimensions` haloed cells and its cell
+   * (i,j,k) is simulation cell (i,j,k) - 1 + `latticeOrigin`. A caller that
+   * assumes the domain plus a one-cell halo must apply that or keep the
+   * lattice off.
+   */
   get physicsFieldsForQA() {
-    return { pressure: this.pressureMultigrid.pressureTexture, gamma: this.gammaA };
+    return { pressure: this.pressureMultigrid.pressureTexture, gamma: this.gammaA,
+      latticeOrigin: [...this.pressureWindowOrigin] as [number, number, number],
+      latticeDimensions: this.pressureWindowCapacity.map((value) => value + 2) as
+        [number, number, number] };
   }
   /** Eight vec4 decision records for every stored MAC face/component. */
   readonly symmetryStageAuditMacCormackBuffer?: GPUBuffer;
@@ -444,7 +555,37 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly transportA: GPUTexture;
   private readonly transportB: GPUTexture;
   private readonly velocityExtrapolator: WebGPUUniformVelocityExtrapolator;
-  private readonly pressureMultigrid: WebGPUUniformPressureMultigrid;
+  private pressureMultigrid: WebGPUUniformPressureMultigrid;
+  /**
+   * CM11a instances by capacity, most recently used last.
+   *
+   * A window-local lattice is planned for a CAPACITY, not for the domain, and
+   * the capacity changes only when the liquid's box outgrows it (at once) or
+   * has been comfortably inside a smaller one for a while. Keeping the last
+   * few alive means the common sloshing case never builds anything: the
+   * instances share their compiled pipelines and bind-group layouts, so all a
+   * new one costs is textures, param buffers, bind groups and a plan.
+   */
+  private readonly pressureInstances = new Map<string, WebGPUUniformPressureMultigrid>();
+  private readonly pressureDomainKey: string;
+  private pressureWindowLattice = false;
+  private pressureWindowLatticeActive = false;
+  private pressureWindowOrigin: [number, number, number] = [0, 0, 0];
+  private pressureWindowCapacity: [number, number, number];
+  private pressureWindowDomainSteps = 0;
+  private pressureWindowShrinkStreak = 0;
+  private pressureWindowReplans = 0;
+  private pressureWindowReplanMs = 0;
+  /** The capacity being built ahead of the window needing it. */
+  private pressurePrewarm?: { key: string; instance: WebGPUUniformPressureMultigrid };
+  private pressurePrewarmMs = 0;
+  private pressurePrewarmSteps = 0;
+  // Origin(3), capacity(3), mode(1).
+  private pressureWindowHeaderWords = new Uint32Array(7);
+  /** The starting wet box, for the steps before the first readback lands. */
+  private pressureWindowSeedBox?: { minimum: number[]; maximum: number[] };
+  /** Coarsest-capture request, re-armed on whichever instance is current. */
+  private pressureCoarsestCapture?: number;
   private readonly params: GPUBuffer;
   private readonly solidVoxelScratchOffsetWords: number;
   private readonly reductions: GPUBuffer;
@@ -466,7 +607,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly reverseGroup: GPUBindGroup;
   private readonly correctGroup: GPUBindGroup;
   private readonly pressureMultigridGroup: GPUBindGroup;
-  private readonly projectGroup: GPUBindGroup;
+  private projectGroup: GPUBindGroup;
+  private readonly makeProjectGroup: (pressure: GPUTexture) => GPUBindGroup;
   private readonly rigidGroup: GPUBindGroup;
   private readonly reductionGroup: GPUBindGroup;
   private readonly densityTraceGroup: GPUBindGroup;
@@ -526,6 +668,25 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private hardwarePhysicsTraceInvalid = false;
   /** UI-selectable A/B control; the environment override keeps Dawn scripts reproducible. */
   private readonly activeRegionEnabled: boolean;
+  /** Set by a live scene edit; the next step censuses the whole domain. */
+  private activeRegionRescanPending = false;
+  /** A/B escape hatch: keep the GPU's indirect records driving every dispatch. */
+  private readonly windowDispatchIndirect: boolean;
+  private windowReadback?: GPUBuffer;
+  private windowReadbackPending = false;
+  private windowLagged?: {
+    minimum: number[]; maximum: number[]; speed_m_s: number; travel: number[];
+  };
+  private windowForcedDenseSteps = 0;
+  private windowViolations = 0;
+  private windowViolationAxes = 0;
+  private windowDenseSteps = 0;
+  private windowStep = 0;
+  private windowReadbackStep = 0;
+  private windowLaggedStep = 0;
+  private windowMaxLagSteps = 0;
+  private windowMainGroups?: [number, number, number];
+  private windowVertexGroups?: [number, number, number];
 
   private constructor(
     private readonly device: GPUDevice,
@@ -566,8 +727,18 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.liquidCapacityBalancingTolerance = Number.isFinite(options.liquidCapacityBalancingTolerance)
       ? Math.min(100, Math.max(0, options.liquidCapacityBalancingTolerance!)) : 0.1;
     this.shaderSource = this.geometricVolume ? createUniformReferenceComputeShader(true) : uniformReferenceComputeShader;
-    this.activeRegionEnabled = !this.geometricVolume && options.activeRegion === true
+    // Uniform Geometric calls this the SOLVE WINDOW. It needs a positive dust
+    // floor for the same reason E3's live set does: the window's diagnostics
+    // reduction sums V over the box, which equals the domain sum only while
+    // every cell outside the box holds exactly zero, and that is what the
+    // floor guarantees. With the floor off the dense schedule is forced.
+    this.activeRegionEnabled = options.activeRegion === true
+      && (!this.geometricVolume || this.volumeDustThreshold > 0)
       && (typeof process === "undefined" || process.env.FLUID_UNIFORM_ACTIVE_REGION !== "0");
+    // The window's group counts come from the host by default; the GPU's own
+    // indirect records remain selectable for the A/B that priced them.
+    this.windowDispatchIndirect = typeof process !== "undefined"
+      && process.env.FLUID_UNIFORM_WINDOW_DISPATCH === "indirect";
     this.densityPostProcessing = options.densityPostProcessing === true;
     this.densitySharpening = options.densitySharpening !== false;
     this.sharpeningMassCorrection = options.sharpeningMassCorrection !== false;
@@ -713,8 +884,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       return words;
     };
     const packedSolidVoxels = packSolidVoxels(scene);
-    const activeRegionBytes = (UNIFORM_ACTIVE_LEVEL_BASE_WORD
-      + UNIFORM_ACTIVE_MAX_LEVELS * UNIFORM_ACTIVE_LEVEL_WORDS) * 4;
+    const activeRegionBytes = UNIFORM_ACTIVE_HEADER_WORDS * 4;
     this.activeRegion = device.createBuffer({
       label: "Uniform reference active liquid region", size: activeRegionBytes,
       // readStats copies the published bounds/counters into its readback
@@ -752,6 +922,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // Without a ceil(n/4) hierarchy level there is no 4h field to sample.
     if (!this.velocityExtrapolator.coarseVelocityTableAvailable) this.twoLevelTileCount = 0;
     if (this.twoLevelTileCount === 0) this.twoLevelVelocity = false;
+    // The E1 table: four words per 4h tile from word N -- three 4h faces, then
+    // the class word the fine-tiles view reads. N*4 bytes is a multiple of 256,
+    // the storage offset alignment, because every axis is a multiple of four.
+    if (this.twoLevelTileCount > 0) this.tileClassRecords = { records: {
+      buffer: this.conditioningScratch, offset: 4 * nx * ny * nz, size: 16 * this.twoLevelTileCount,
+    } };
     this.extrapolationActiveStateTexture = this.velocityExtrapolator.activeStateTexture;
     this.extrapolationActiveFrontPassCeiling = this.velocityExtrapolator.activeFrontPassCeiling;
     if (options.extensionFrontSweeps !== undefined) this.velocityExtrapolator.setFrontPasses(options.extensionFrontSweeps);
@@ -829,6 +1005,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       scene.container.height_m / ny,
       scene.container.depth_m / nz,
     ], this.pressureSchedule, this.activeRegionEnabled ? this.activeDispatch : undefined);
+    this.pressureWindowCapacity = [nx, ny, nz];
+    this.pressureDomainKey = this.pressureWindowCapacity.join("x");
+    this.pressureInstances.set(this.pressureDomainKey, this.pressureMultigrid);
+    this.pressureWindowLattice = this.geometricVolume && this.activeRegionEnabled
+      && !this.windowDispatchIndirect && options.pressureWindow !== false;
     this.mainPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.mainLayout] });
     const sampler = device.createSampler({ minFilter: "linear", magFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
     const group = (velocityIn: GPUTexture, velocityOut: GPUTexture, pressureIn: GPUTexture,
@@ -889,7 +1070,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.gammaA, this.gammaB, this.boundaryVelocityA, this.boundaryVelocityB,
       this.surfaceA);
     this.pressureMultigridGroup = group(this.velocityB, this.velocityA, this.pressureA, this.pressureB, this.volumeB, this.volumeA, this.heightB, this.heightA, this.velocityB, this.velocityB, this.transportA, this.volumeB, this.gammaA, this.gammaB, this.boundaryVelocityB, this.boundaryVelocityA, this.volumeB, false, this.geometricVolume);
-    this.projectGroup = group(this.velocityB, this.velocityA, this.pressureMultigrid.pressureTexture, this.pressureA, this.volumeB, this.volumeA, this.heightB, this.heightA, this.velocityB, this.velocityB, this.transportA, this.volumeB, this.gammaA, this.gammaB, this.boundaryVelocityB, this.boundaryVelocityA);
+    // Rebuilt whenever the active CM11a instance changes: this is the only
+    // bind group that names the hierarchy's finest pressure texture.
+    this.makeProjectGroup = (pressure: GPUTexture) => group(this.velocityB, this.velocityA, pressure, this.pressureA, this.volumeB, this.volumeA, this.heightB, this.heightA, this.velocityB, this.velocityB, this.transportA, this.volumeB, this.gammaA, this.gammaB, this.boundaryVelocityB, this.boundaryVelocityA);
+    this.projectGroup = this.makeProjectGroup(this.pressureMultigrid.pressureTexture);
     this.rigidGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA, this.velocityA, this.velocityA, this.transportA, this.volumeA, this.gammaA, this.gammaB, this.boundaryVelocityA, this.boundaryVelocityB);
     this.reductionGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA);
     this.densityTraceGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA,
@@ -1075,7 +1259,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.pipelines.extrapolationAuthorityDense, this.extrapolationAuthorityGroup,
       [Math.ceil(this.info.nx / 4), Math.ceil(this.info.ny / 4), Math.ceil(this.info.nz / 4)]);
     if (this.geometricVolume) {
-      this.run(encoder, "Uniform Geometric surface publication", this.volumePipelines.uvPublish!, this.wallFilmResolveGroup);
+      // Dense, once: uvPublish also writes the static open-fraction plane the
+      // renderer reads, and a windowed t=0 publication would leave every solid
+      // cell outside the initial box reading the uploaded gamma of one.
+      this.runDirect(encoder, "Uniform Geometric surface publication",
+        this.volumePipelines.uvPublish!, this.wallFilmResolveGroup,
+        [Math.ceil(this.info.nx / 4), Math.ceil(this.info.ny / 4), Math.ceil(this.info.nz / 4)]);
     } else if (this.densityPostProcessing) {
       this.run(encoder, "Uniform initial post-process blur x", this.pipelines.postprocessBlurX, this.postprocessBlurXGroup);
       this.run(encoder, "Uniform initial post-process blur y", this.pipelines.postprocessBlurY, this.postprocessBlurYGroup);
@@ -1189,6 +1378,22 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.velocityTransport = values.velocityTransport === "maccormack"
       ? "maccormack" : "semi-lagrangian";
     this.liquidOnlyVelocityAdvection = values.liquidOnlyVelocityAdvection === "on";
+    if (values.pressureWindow !== undefined) {
+      const wanted = values.pressureWindow !== "domain" && this.geometricVolume
+        && this.activeRegionEnabled && !this.windowDispatchIndirect;
+      if (wanted !== this.pressureWindowLattice) {
+        // Live, because the instance cache makes it live: the capacity this
+        // step needs is either already built or is built synchronously from
+        // the programs the load-time instance compiled. The shared level table
+        // has to change hands at the same moment, because with the lattice on
+        // it describes the extension's pyramid and with it off the pressure's.
+        this.pressureWindowLattice = wanted;
+        this.pressureWindowShrinkStreak = 0;
+        this.pressureWindowDomainSteps = UNIFORM_WINDOW_LAG_STEPS;
+        this.adoptPressureInstance([this.info.nx, this.info.ny, this.info.nz], [0, 0, 0]);
+        this.writeActiveLevelDimensions();
+      }
+    }
     // Partial-values callers must not reset the sweep budget.
     if (values.extensionFrontSweeps !== undefined && Number(values.extensionFrontSweeps) !== this.velocityExtrapolator.frontPasses) {
       this.velocityExtrapolator.setFrontPasses(Number(values.extensionFrontSweeps));
@@ -1287,14 +1492,22 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
 
   private initializeActiveRegion(wetMinimum: number[], wetMaximum: number[]): void {
     const dimensions = [this.info.nx, this.info.ny, this.info.nz];
-    const words = new Uint32Array(UNIFORM_ACTIVE_LEVEL_BASE_WORD
-      + UNIFORM_ACTIVE_MAX_LEVELS * UNIFORM_ACTIVE_LEVEL_WORDS);
+    const words = new Uint32Array(UNIFORM_ACTIVE_HEADER_WORDS);
     const empty = wetMaximum.every((value) => value === 0);
-    const minimum = !this.activeRegionEnabled || empty ? [0, 0, 0]
+    // Uniform Geometric seeds the window at the WHOLE domain and lets the
+    // first step's scan shrink it, which costs two conservative steps. The
+    // t=0 publication is a dense dispatch, but every geometric kernel adds the
+    // window origin to its id, so a t=0 window that did not start at the
+    // origin would leave the static open-fraction plane unwritten below it --
+    // for a droplet in a tall tank, that is most of the domain. From the first
+    // step on, the GPU finalize keeps the geometric window's origin a multiple
+    // of four, so a 4^3 workgroup is still exactly one 4h tile.
+    const wholeDomain = !this.activeRegionEnabled || this.geometricVolume;
+    const minimum = wholeDomain || empty ? [0, 0, 0]
       : wetMinimum.map((value) => Math.max(0, value - 8));
-    const maximum = !this.activeRegionEnabled ? dimensions
-      : empty ? [1, 1, 1] : wetMaximum.map((value, axis) =>
-        Math.min(dimensions[axis]!, value + 8));
+    const maximum = wholeDomain ? dimensions
+      : empty ? [1, 1, 1]
+      : wetMaximum.map((value, axis) => Math.min(dimensions[axis]!, value + 8));
     // Words 0..5 retain the padded wet/source box from the previous step.
     // Words 7..12 are the union of two consecutive boxes, giving ping-pong
     // targets one clearing tail without retaining the entire swept history.
@@ -1303,7 +1516,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     words.set(minimum, 7);
     words.set(maximum, 10);
     words.set(maximum.map((value, axis) => Math.ceil((value - minimum[axis]!) / 4)), 13);
-    this.pressureMultigrid.levelPhysicalDimensions.forEach((level, index) => {
+    words.set(maximum.map((value, axis) => Math.ceil((value - minimum[axis]! + 1) / 4)),
+      UNIFORM_ACTIVE_VERTEX_DISPATCH_WORD);
+    this.activeLevelDimensions.forEach((level, index) => {
+      if (index >= UNIFORM_ACTIVE_MAX_LEVELS) return;
       const base = UNIFORM_ACTIVE_LEVEL_BASE_WORD + index * UNIFORM_ACTIVE_LEVEL_WORDS;
       const scale = dimensions.map((value, axis) => value / level[axis]!);
       const origin = minimum.map((value, axis) => Math.max(0, Math.floor(value / scale[axis]!) - 2));
@@ -1316,6 +1532,25 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.device.queue.writeBuffer(this.activeRegion, 0, words);
     this.device.queue.writeBuffer(this.activeScratch, 0, words);
     this.device.queue.writeBuffer(this.activeDispatch, 0, words);
+    // A reset re-seeds the box, so every lagged host count is stale: the next
+    // steps run whole-domain counts until a fresh readback lands.
+    this.windowLagged = undefined;
+    this.windowMainGroups = undefined;
+    this.windowVertexGroups = undefined;
+    this.windowViolations = 0;
+    this.windowViolationAxes = 0;
+    this.pressureMultigrid.setWindowLevelGroups(undefined);
+    this.velocityExtrapolator.setWindowGroups(undefined, undefined);
+    // The CPU-known starting box, so the opening steps can plan a window
+    // lattice instead of building the domain-sized instance nothing reuses.
+    this.pressureWindowSeedBox = empty ? undefined
+      : { minimum: [...wetMinimum], maximum: [...wetMaximum] };
+    // A reset seeds the geometric window at the whole domain, so the first
+    // step's union box is the whole domain too and no smaller lattice could
+    // contain it. Two steps of domain capacity cover that and the step after.
+    this.pressureWindowDomainSteps = UNIFORM_WINDOW_LAG_STEPS;
+    this.pressureWindowShrinkStreak = 0;
+    this.adoptPressureInstance([...dimensions] as [number, number, number], [0, 0, 0]);
   }
 
   private upload3DF32(texture: GPUTexture, values: Float32Array, nx: number, ny: number, nz: number): void {
@@ -1337,7 +1572,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
 
   private dispatch(pass: GPUComputePassEncoder, pipeline: GPUComputePipeline, group: GPUBindGroup): void {
     pass.setPipeline(pipeline); pass.setBindGroup(0, group);
-    if (this.activeRegionEnabled) {
+    if (this.windowMainGroups) {
+      pass.dispatchWorkgroups(...this.windowMainGroups);
+    } else if (this.activeRegionEnabled) {
       pass.dispatchWorkgroupsIndirect(this.activeDispatch, UNIFORM_ACTIVE_MAIN_DISPATCH_OFFSET);
     } else pass.dispatchWorkgroups(
       Math.ceil(this.info.nx / 4), Math.ceil(this.info.ny / 4), Math.ceil(this.info.nz / 4));
@@ -1356,10 +1593,466 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     pass.dispatchWorkgroups(...workgroups); pass.end();
   }
 
+  /**
+   * Uniform Geometric's (n+1)^3 vertex lattice, windowed.
+   *
+   * The window's own origin serves the vertex passes unchanged — vertex v
+   * belongs to cells v-1..v — so only the extent differs, by one vertex per
+   * axis. `finalizeActiveRegion` publishes that record; with the window off
+   * this is the dense (n+1)/4 dispatch it always was.
+   */
+  private runVertex(encoder: GPUCommandEncoder, label: string, pipeline: GPUComputePipeline,
+    group: GPUBindGroup): void {
+    const pass = encoder.beginComputePass({ label });
+    pass.setPipeline(pipeline); pass.setBindGroup(0, group);
+    if (this.windowVertexGroups) {
+      pass.dispatchWorkgroups(...this.windowVertexGroups);
+    } else if (this.activeRegionEnabled) {
+      pass.dispatchWorkgroupsIndirect(this.activeDispatch, UNIFORM_ACTIVE_VERTEX_DISPATCH_OFFSET);
+    } else pass.dispatchWorkgroups(Math.ceil((this.info.nx + 1) / 4),
+      Math.ceil((this.info.ny + 1) / 4), Math.ceil((this.info.nz + 1) / 4));
+    pass.end();
+  }
+
+  /**
+   * Size this step's dispatches on the host, from the box the GPU published a
+   * couple of steps ago.
+   *
+   * The window is exact where it has to be and lagged where it is cheap: every
+   * kernel still reads the ORIGIN (and each level's origin) out of
+   * `activeRegion`, written by this step's own scan/reduce/finalize, so no
+   * sample moves. Only the group COUNT is chosen here, and a count is only
+   * ever wrong by being too small -- threads past the exact extent exit
+   * immediately in `activeId`, so the slack costs launches and nothing else.
+   *
+   * The count must therefore cover however much the box can have grown since
+   * the readback: `UNIFORM_WINDOW_LAG_STEPS` steps of the per-axis two-sided
+   * travel the GPU measured, plus a cell per side and the four-cell tile
+   * alignment. `finalizeActiveRegion` checks the exact extent
+   * against what was chosen and counts every step it did not fit; one such
+   * step clips the far edge of the window (the front stalls there; V is
+   * neither created nor destroyed, since an undispatched cell keeps the value
+   * it already had) and buys `UNIFORM_WINDOW_VIOLATION_PENALTY_STEPS` steps of
+   * whole-domain counts.
+   *
+   * Dense counts are also forced before the first readback, after a reset or
+   * scene edit, and on any step with an external source, because on those the
+   * lagged box says nothing about where liquid is about to be.
+   */
+  private planWindowDispatch(dt: number, externalSources: boolean): void {
+    if (!this.activeRegionEnabled || this.windowDispatchIndirect) return;
+    const dims = [this.info.nx, this.info.ny, this.info.nz];
+    const container = this.scene.container;
+    const spacing = [container.width_m / dims[0]!, container.height_m / dims[1]!,
+      container.depth_m / dims[2]!];
+    this.windowStep += 1;
+    const lagged = this.windowLagged;
+    if (lagged) {
+      this.windowMaxLagSteps = Math.max(this.windowMaxLagSteps,
+        this.windowStep - this.windowLaggedStep);
+    }
+    // A source or a scene edit invalidates the lagged box for as long as the
+    // readback takes to catch up, not just for this step.
+    if (externalSources || this.activeRegionRescanPending) {
+      this.windowForcedDenseSteps = Math.max(this.windowForcedDenseSteps,
+        UNIFORM_WINDOW_LAG_STEPS + 1);
+      // Liquid can appear anywhere on these steps, so the pressure lattice
+      // goes back to the domain until the readback describes where it landed.
+      this.pressureWindowDomainSteps = Math.max(this.pressureWindowDomainSteps,
+        UNIFORM_WINDOW_LAG_STEPS + 1);
+    }
+    const dense = lagged === undefined || this.windowForcedDenseSteps > 0;
+    if (this.windowForcedDenseSteps > 0) this.windowForcedDenseSteps -= 1;
+    if (dense) this.windowDenseSteps += 1;
+    this.planPressureLattice(dense, lagged);
+    // Verification hook: FLUID_UNIFORM_WINDOW_LAG_PAD=0 starves the lag
+    // allowance so the exact box outgrows the host's counts on purpose, which
+    // is how the clipped-step path is shown to stall a front rather than
+    // create or destroy volume.
+    const padOverride = typeof process !== "undefined"
+      ? Number(process.env.FLUID_UNIFORM_WINDOW_LAG_PAD) : Number.NaN;
+    const extent = dims.map((n, axis) => {
+      if (dense) return n;
+      // The exact box grows by at most this step's two-sided travel per step,
+      // which the GPU measured per axis over the wet cells and published. Two
+      // steps of that, a cell per side for the rounding, and four more for the
+      // growth of the exact PADDING itself: the padding carries the same
+      // travel term, so a step that accelerates widens the box twice over.
+      const travel = lagged!.travel[axis] ?? Math.ceil(
+        (2 * lagged!.speed_m_s * dt) / spacing[axis]!);
+      const lag = Number.isFinite(padOverride) ? padOverride
+        : UNIFORM_WINDOW_LAG_STEPS * (travel + 2) + 4;
+      const padded = lagged!.maximum[axis]! - lagged!.minimum[axis]! + lag;
+      return Math.min(n, Math.ceil(padded / 4) * 4);
+    });
+    const groups = (values: readonly number[]): [number, number, number] =>
+      [Math.ceil(values[0]! / 4), Math.ceil(values[1]! / 4), Math.ceil(values[2]! / 4)];
+    this.windowMainGroups = groups(extent);
+    // The phi passes run on the cell box dilated by their own internal read
+    // reach on both sides (VERTEX_PHI_REACH in the shader), so every phi a phi
+    // pass reads was written this step. The host's counts must be a superset
+    // of that box, and `extent` is already a superset of the exact span.
+    this.windowVertexGroups = groups(extent.map((value) =>
+      value + 1 + 2 * UNIFORM_VERTEX_PHI_REACH));
+    // Per level, the same walk `finalizeActiveRegion` does: the level box is
+    // the scaled cell box, grown by the two-cell low halo and the three-cell
+    // high one, and one more for the floor/ceil pair the scaling can straddle.
+    const levelGroups = this.activeLevelDimensions.map((level) =>
+      groups(level.map((size, axis) =>
+        Math.min(size + 2, Math.ceil(extent[axis]! * size / dims[axis]!) + 6))));
+    const base = UNIFORM_ACTIVE_CPU_LEVEL_BASE_WORD;
+    const words = new Uint32Array(UNIFORM_ACTIVE_CPU_MODE_WORD + 1 - base);
+    levelGroups.forEach((level, index) => {
+      if (index >= UNIFORM_ACTIVE_MAX_LEVELS) return;
+      words.set(level, index * 3);
+    });
+    words.set(this.windowMainGroups, UNIFORM_ACTIVE_CPU_MAIN_WORD - base);
+    words.set(this.windowVertexGroups, UNIFORM_ACTIVE_CPU_VERTEX_WORD - base);
+    words[UNIFORM_ACTIVE_CPU_MODE_WORD - base] = dense ? 0 : 1;
+    this.device.queue.writeBuffer(this.activeScratch, base * 4, words);
+    this.pressureMultigrid.setWindowLevelGroups(levelGroups);
+    this.velocityExtrapolator.setWindowGroups(this.windowMainGroups, levelGroups);
+  }
+
+  /**
+   * Level dimensions the shared active-region table describes.
+   *
+   * Two consumers read that table: the pressure hierarchy's own per-level
+   * dispatches and the extension's fill pyramid, which maps record = its level
+   * + 1. They can only share one table while both hierarchies halve the same
+   * way. With the pressure lattice planned on the window the pressure passes
+   * stop consulting the table altogether, so it is seeded from the extension's
+   * own pyramid instead -- which also fixes the 8x case, where the pressure
+   * plan semi-coarsens and the records described a hierarchy the extension
+   * does not have.
+   */
+  private get activeLevelDimensions(): readonly (readonly [number, number, number])[] {
+    if (!this.pressureWindowLattice) return this.pressureMultigrid.levelPhysicalDimensions;
+    return [[this.info.nx, this.info.ny, this.info.nz] as const,
+      ...this.velocityExtrapolator.hierarchyLevelDimensions];
+  }
+
+  /**
+   * Choose this step's window-local CM11a lattice: capacity, origin, instance.
+   *
+   * The lattice must contain every cell the window works on, so it is sized
+   * from the same lagged box and the same per-side travel the dispatch counts
+   * use, and `finalizeActiveRegion` checks the exact box against it and counts
+   * the steps it did not cover. Capacity is aligned so coarse grids stay
+   * registered to the domain, which is what keeps the origin still while the
+   * liquid moves inside it.
+   *
+   * Growth is immediate; shrinking waits, because a capacity change is the
+   * only expensive thing here and a surface that breathes across an alignment
+   * boundary would otherwise re-plan every few steps.
+   */
+  private planPressureLattice(dense: boolean,
+    lagged: { minimum: number[]; maximum: number[]; travel: number[] } | undefined): void {
+    const domain: [number, number, number] = [this.info.nx, this.info.ny, this.info.nz];
+    const wholeDomain = !this.pressureWindowLattice || this.pressureWindowDomainSteps > 0;
+    if (this.pressureWindowDomainSteps > 0) this.pressureWindowDomainSteps -= 1;
+    if (wholeDomain) {
+      // A domain-capacity instance at origin zero is bit-identical under the
+      // window rule: every halo's simulation coordinate leaves the domain, so
+      // every halo is the wall or lid it always was. The mode word therefore
+      // stays on whenever the lattice is enabled at all, and only the capacity
+      // and origin move -- there is no second code path to keep in step.
+      this.adoptPressureInstance(domain, [0, 0, 0]);
+      // The domain instance carries these steps, but the window will want its
+      // own capacity the moment the lag expires -- at start-up, and again after
+      // every violation. Build it here rather than paying the walk on the step
+      // that switches.
+      if (this.pressureWindowLattice) {
+        // From the SEED box, not the lagged one: a reset seeds the geometric
+        // window at the whole domain, so the readback these steps see is the
+        // domain itself and would prewarm the capacity already in hand. The
+        // CPU-known starting box is what the window will actually be.
+        const { low, high } = this.pressureLatticeBox(domain, undefined);
+        this.prewarmCapacity(planUniformCM11aWindow(domain, low, high).capacity);
+      }
+      return;
+    }
+    const { low, high, travel } = this.pressureLatticeBox(domain, lagged);
+    const target = planUniformCM11aWindow(domain, low, high);
+    const seated = seatUniformCM11aWindow(domain, this.pressureWindowCapacity,
+      target.alignment, low, high);
+    // The hysteresis exists to stop a surface breathing across an alignment
+    // boundary from re-planning every few steps. Leaving the WHOLE DOMAIN is
+    // not that: it is the initial seating, and the state every violation and
+    // every reset returns to. Waiting thirty steps for it would make the
+    // startup plan -- the one the window exists to replace -- the cost of the
+    // first second of every scene, and of every recovery after one.
+    const fromDomain = this.pressureWindowCapacity.join("x") === this.pressureDomainKey;
+    if (!fromDomain && seated
+      && !this.pressureInstances.get(this.pressureWindowCapacity.join("x"))?.destroyed) {
+      const smaller = target.capacity.reduce((product, value) => product * value, 1)
+        < this.pressureWindowCapacity.reduce((product, value) => product * value, 1);
+      this.pressureWindowShrinkStreak = smaller ? this.pressureWindowShrinkStreak + 1 : 0;
+      if (this.pressureWindowShrinkStreak < UNIFORM_PRESSURE_WINDOW_SHRINK_STEPS) {
+        this.adoptPressureInstance(this.pressureWindowCapacity, seated);
+        this.prewarmNeighbourLattice(domain, low, high, target.alignment, travel);
+        return;
+      }
+    }
+    this.pressureWindowShrinkStreak = 0;
+    this.adoptPressureInstance([...target.capacity] as [number, number, number],
+      [...target.origin] as [number, number, number]);
+    this.prewarmNeighbourLattice(domain, low, high, target.alignment, travel);
+    void dense;
+  }
+
+  /**
+   * The padded box the pressure lattice must cover this step.
+   *
+   * Before the first readback the host still knows where the liquid started,
+   * so the opening steps plan from the seed box rather than the domain.
+   */
+  private pressureLatticeBox(domain: [number, number, number],
+    lagged: { minimum: number[]; maximum: number[]; travel: number[] } | undefined):
+    { low: [number, number, number]; high: [number, number, number]; travel: readonly number[] } {
+    const box = lagged ?? this.pressureWindowSeedBox;
+    const travel = lagged?.travel ?? [0, 0, 0];
+    const low: [number, number, number] = [0, 0, 0];
+    const high: [number, number, number] = [0, 0, 0];
+    for (let axis = 0; axis < 3; axis += 1) {
+      const slack = lagged
+        ? UNIFORM_WINDOW_LAG_STEPS * (travel[axis] ?? 0) + 4
+        : UNIFORM_PRESSURE_WINDOW_SEED_PAD;
+      low[axis] = Math.max(0, (box?.minimum[axis] ?? 0) - slack);
+      high[axis] = Math.min(domain[axis]!, (box?.maximum[axis] ?? domain[axis]!) + slack);
+    }
+    return { low, high, travel };
+  }
+
+  /**
+   * Build the capacity the window is about to need, a little each step.
+   *
+   * The trigger is headroom, not growth rate: once the padded box comes within
+   * eight cells of filling the capacity on the axis with the least room, the
+   * next step up on that axis is planned in the background. Nothing here
+   * touches the current instance or the encoded step -- the prewarm is an
+   * unreferenced lattice until `adoptPressureInstance` asks for its key -- so
+   * the worst case of a wrong guess is the memory it holds and the host time
+   * it spent, both of which stop as soon as the headroom recovers.
+   */
+  private prewarmNeighbourLattice(domain: [number, number, number],
+    low: readonly number[], high: readonly number[], alignment: readonly number[],
+    travel: readonly number[]): void {
+    let axis = -1;
+    let tightest = Number.POSITIVE_INFINITY;
+    for (let candidate = 0; candidate < 3; candidate += 1) {
+      // An axis already at the domain has nowhere to grow.
+      if (this.pressureWindowCapacity[candidate]! >= domain[candidate]!) continue;
+      const headroom = this.pressureWindowCapacity[candidate]!
+        - (high[candidate]! - low[candidate]!);
+      const lead = UNIFORM_PRESSURE_PREWARM_HEADROOM
+        + UNIFORM_PRESSURE_PREWARM_STEPS * (travel[candidate] ?? 0);
+      if (headroom <= lead && headroom < tightest) { tightest = headroom; axis = candidate; }
+    }
+    if (axis < 0) { this.discardPressurePrewarm(); return; }
+    const grown = [...high];
+    grown[axis] = Math.min(domain[axis]!, high[axis]! + alignment[axis]!);
+    this.prewarmCapacity(planUniformCM11aWindow(domain, low as [number, number, number],
+      grown as [number, number, number]).capacity);
+  }
+
+  /** Create or advance the prewarm for one capacity; see the caller above. */
+  private prewarmCapacity(capacity: readonly number[]): void {
+    const key = capacity.join("x");
+    if (key === this.pressureWindowCapacity.join("x") || this.pressureInstances.has(key)) {
+      this.discardPressurePrewarm(); return;
+    }
+    if (this.pressurePrewarm && this.pressurePrewarm.key !== key) this.discardPressurePrewarm();
+    const started = typeof performance !== "undefined" ? performance.now() : 0;
+    if (!this.pressurePrewarm) {
+      const programs = this.pressureMultigrid.programs;
+      if (!programs) return;
+      try {
+        this.pressurePrewarm = { key, instance: new WebGPUUniformPressureMultigrid(this.device,
+          [...capacity] as [number, number, number], [
+            this.scene.container.width_m / this.info.nx,
+            this.scene.container.height_m / this.info.ny,
+            this.scene.container.depth_m / this.info.nz,
+          ], this.pressureSchedule, this.activeRegionEnabled ? this.activeDispatch : undefined,
+          programs, true) };
+        this.pressurePrewarm.instance.setResidualTolerance(this.pressureMultigrid.residualTolerance);
+      } catch {
+        // A capacity the planner cannot build is not worth a step; the switch
+        // will fall back to the domain instance as it always did.
+        this.pressurePrewarm = undefined; return;
+      }
+      // The step that allocates the lattice does no walking: allocation is the
+      // one part of a build that cannot be cut into cycles, so it gets the
+      // step to itself.
+    } else {
+      // One cycle at a time until the budget is spent. The check is after a
+      // cycle, not inside one, so a step overshoots by at most the cycle it
+      // was in the middle of; a cycle is the smallest resumable unit the plan
+      // walk has, because everything finer shares the ping-pong parities.
+      this.pressurePrewarm.instance.advancePlan(UNIFORM_PRESSURE_PREWARM_BUDGET_MS);
+    }
+    this.pressurePrewarmMs += (typeof performance !== "undefined" ? performance.now() : 0) - started;
+    this.pressurePrewarmSteps += 1;
+  }
+
+  private discardPressurePrewarm(): void {
+    this.pressurePrewarm?.instance.destroy();
+    this.pressurePrewarm = undefined;
+  }
+
+  /**
+   * Make an instance of this capacity current, creating it if the cache has
+   * none. Creation is synchronous: the compiled programs come from the
+   * instance built at load, so nothing here compiles or awaits.
+   */
+  private adoptPressureInstance(capacity: [number, number, number],
+    origin: [number, number, number]): void {
+    const key = capacity.join("x");
+    let instance = this.pressureInstances.get(key);
+    if (!instance && this.pressurePrewarm?.key === key) {
+      // The prewarm guessed right. Whatever cycles it has left cost a fraction
+      // of the walk, and they are the only thing standing between here and a
+      // ready instance.
+      const started = typeof performance !== "undefined" ? performance.now() : 0;
+      instance = this.pressurePrewarm.instance;
+      instance.advancePlan(Number.POSITIVE_INFINITY);
+      this.pressurePrewarm = undefined;
+      this.pressureWindowReplanMs = (typeof performance !== "undefined" ? performance.now() : 0) - started;
+      this.pressureWindowReplans += 1;
+      this.pressureInstances.set(key, instance);
+    }
+    if (!instance) {
+      const programs = this.pressureMultigrid.programs;
+      const started = typeof performance !== "undefined" ? performance.now() : 0;
+      try {
+        if (!programs) throw new Error("Uniform CM11a programs are not compiled");
+        instance = new WebGPUUniformPressureMultigrid(this.device, capacity, [
+          this.scene.container.width_m / this.info.nx,
+          this.scene.container.height_m / this.info.ny,
+          this.scene.container.depth_m / this.info.nz,
+        ], this.pressureSchedule, this.activeRegionEnabled ? this.activeDispatch : undefined,
+          programs);
+        instance.setResidualTolerance(this.pressureMultigrid.residualTolerance);
+      } catch {
+        // A capacity the planner cannot build is not worth failing a step for:
+        // fall back to the domain instance, which always exists.
+        this.pressureWindowDomainSteps = Math.max(this.pressureWindowDomainSteps,
+          UNIFORM_WINDOW_VIOLATION_PENALTY_STEPS);
+        if (key !== this.pressureDomainKey) {
+          this.adoptPressureInstance([this.info.nx, this.info.ny, this.info.nz], [0, 0, 0]);
+        }
+        return;
+      }
+      this.pressureWindowReplanMs = (typeof performance !== "undefined" ? performance.now() : 0) - started;
+      this.pressureWindowReplans += 1;
+      this.pressureInstances.set(key, instance);
+    } else {
+      this.pressureInstances.delete(key); this.pressureInstances.set(key, instance);
+    }
+    for (const [evictKey, evicted] of [...this.pressureInstances]) {
+      if (this.pressureInstances.size <= UNIFORM_PRESSURE_WINDOW_CACHE) break;
+      if (evictKey === key || evictKey === this.pressureDomainKey) continue;
+      evicted.destroy(); this.pressureInstances.delete(evictKey);
+    }
+    if (instance !== this.pressureMultigrid) {
+      this.pressureMultigrid = instance;
+      this.projectGroup = this.makeProjectGroup(instance.pressureTexture);
+      // Level count, per-stage pass counts and the plan total all move with
+      // the capacity, and the panel's chips read them from the info record.
+      this.publishUniformPipelineFacts();
+      if (this.pressureCoarsestCapture !== undefined) {
+        instance.enableCoarsestCapture(this.pressureCoarsestCapture);
+      }
+    }
+    instance.setWindowLattice(this.pressureWindowLattice);
+    this.pressureWindowCapacity = capacity;
+    this.pressureWindowOrigin = origin;
+    this.pressureWindowLatticeActive = this.pressureWindowLattice
+      && key !== this.pressureDomainKey;
+    this.writePressureLatticeHeader(origin, capacity, this.pressureWindowLattice);
+  }
+
+  /**
+   * Rewrite the physical dimensions in the shared level table.
+   *
+   * `finalizeActiveRegion` derives every level's origin and group count from
+   * these words each step, so flipping which hierarchy the table describes is
+   * this one write plus the next finalize.
+   */
+  private writeActiveLevelDimensions(): void {
+    const words = new Uint32Array(UNIFORM_ACTIVE_MAX_LEVELS * UNIFORM_ACTIVE_LEVEL_WORDS);
+    this.activeLevelDimensions.forEach((level, index) => {
+      if (index >= UNIFORM_ACTIVE_MAX_LEVELS) return;
+      words.set(level, index * UNIFORM_ACTIVE_LEVEL_WORDS + 6);
+    });
+    // Only the dimension triple of each record: origins and group counts are
+    // the finalize's, and the stride keeps them where they were.
+    for (let index = 0; index < UNIFORM_ACTIVE_MAX_LEVELS; index += 1) {
+      const base = (UNIFORM_ACTIVE_LEVEL_BASE_WORD + index * UNIFORM_ACTIVE_LEVEL_WORDS + 6) * 4;
+      const triple = words.slice(index * UNIFORM_ACTIVE_LEVEL_WORDS + 6,
+        index * UNIFORM_ACTIVE_LEVEL_WORDS + 9);
+      this.device.queue.writeBuffer(this.activeScratch, base, triple);
+      this.device.queue.writeBuffer(this.activeRegion, base, triple);
+    }
+  }
+
+  /** Publish the lattice the GPU must agree with: origin, capacity, mode. */
+  private writePressureLatticeHeader(origin: readonly number[], capacity: readonly number[],
+    windowLattice: boolean): void {
+    const words = this.pressureWindowHeaderWords;
+    words.set(origin, 0); words.set(capacity, 3); words[6] = windowLattice ? 1 : 0;
+    this.device.queue.writeBuffer(this.activeScratch,
+      UNIFORM_ACTIVE_PRESSURE_ORIGIN_WORD * 4, words);
+    this.device.queue.writeBuffer(this.activeRegion,
+      UNIFORM_ACTIVE_PRESSURE_ORIGIN_WORD * 4, words);
+  }
+
+  /**
+   * Ask the queue for the box this step published, without waiting for it.
+   *
+   * Same shape as `readPressureCycleDemand`: its own small buffer, nothing in
+   * the frame path awaits it, and a step simply skips the copy while an
+   * earlier map is outstanding. It never gates correctness -- only how tightly
+   * the NEXT steps size their dispatches.
+   */
+  private readWindowBox(): void {
+    const buffer = this.windowReadback;
+    if (!buffer || this.disposed) return;
+    this.windowReadbackPending = true;
+    void buffer.mapAsync(GPUMapMode.READ).then(() => {
+      if (this.disposed) { this.windowReadbackPending = false; return; }
+      try {
+        const words = new Uint32Array(buffer.getMappedRange().slice(0));
+        const travelBits = words[18]!;
+        this.windowLagged = {
+          minimum: [words[7]!, words[8]!, words[9]!],
+          maximum: [words[10]!, words[11]!, words[12]!],
+          speed_m_s: new Float32Array(new Uint32Array([words[6]!]).buffer)[0]!,
+          travel: [travelBits & 1023, (travelBits >>> 10) & 1023, (travelBits >>> 20) & 1023],
+        };
+        this.windowLaggedStep = this.windowReadbackStep;
+        const violations = words[16]!;
+        if (violations > this.windowViolations) {
+          this.windowForcedDenseSteps = UNIFORM_WINDOW_VIOLATION_PENALTY_STEPS;
+          this.pressureWindowDomainSteps = UNIFORM_WINDOW_VIOLATION_PENALTY_STEPS;
+          this.windowViolationAxes = words[17]!;
+        }
+        this.windowViolations = violations;
+      } finally {
+        if (buffer.mapState === "mapped") buffer.unmap();
+        this.windowReadbackPending = false;
+      }
+    }).catch(() => { this.windowReadbackPending = false; });
+  }
+
   private encodeActiveRegion(encoder: GPUCommandEncoder, externalSources: boolean): void {
     if (!this.pipelines) throw new Error("Uniform reference pipelines are not initialized");
     if (!this.activeRegionEnabled) return;
-    if (externalSources) {
+    // A live scene edit can move a solid into liquid, or change the terrain,
+    // anywhere in the domain. One dense census restores a conservative box.
+    const forced = this.activeRegionRescanPending;
+    this.activeRegionRescanPending = false;
+    if (externalSources || forced) {
       // A new inlet/drop may begin beyond the previous box. One dense pass
       // summarizes both existing liquid and sources, avoiding a second census.
       this.runDirect(encoder, "Uniform scan liquid and external active sources",
@@ -1376,9 +2069,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.runDirect(encoder, "Uniform finalize active liquid dispatches", this.pipelines.finalizeActiveRegion,
       this.reductionGroup, [1, 1, 1]);
     encoder.copyBufferToBuffer(this.activeScratch, 0, this.activeRegion, 0,
-      (UNIFORM_ACTIVE_LEVEL_BASE_WORD + UNIFORM_ACTIVE_MAX_LEVELS * UNIFORM_ACTIVE_LEVEL_WORDS) * 4);
+      UNIFORM_ACTIVE_HEADER_WORDS * 4);
     encoder.copyBufferToBuffer(this.activeScratch, 0, this.activeDispatch, 0,
-      (UNIFORM_ACTIVE_LEVEL_BASE_WORD + UNIFORM_ACTIVE_MAX_LEVELS * UNIFORM_ACTIVE_LEVEL_WORDS) * 4);
+      UNIFORM_ACTIVE_HEADER_WORDS * 4);
   }
 
   private encodeVelocityExtrapolation(
@@ -1497,6 +2190,23 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     return this.geometricTileWork && this.sharpenTileCount > 0 && this.densitySharpening;
   }
 
+  /**
+   * The tile classes the most recent step ran on. Withdrawn while the sampler is
+   * off, when the records go stale and every cell reads the finest lattice.
+   */
+  get tileClassSource(): GPUFluidTileClassSource | undefined {
+    return this.twoLevelEncoded ? this.tileClassRecords : undefined;
+  }
+
+  /**
+   * The active-region header this step's finalize wrote, for the solve-window
+   * view. Withdrawn while the window is off, when the dense schedule dispatches
+   * the whole domain and the header is only its t=0 seed.
+   */
+  get solveWindowSource(): GPUFluidSolveWindowSource | undefined {
+    return this.activeRegionEnabled ? { records: { buffer: this.activeRegion } } : undefined;
+  }
+
   /** Experiment E1 is requested, dimensionally possible, and geometric. */
   private get twoLevelEnabled(): boolean {
     return this.twoLevelVelocity && this.twoLevelTileCount > 0;
@@ -1542,14 +2252,14 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private encodeGeometricVolume(encoder: GPUCommandEncoder, seam?: (phase: GPUTimestampPhase) => void): void {
     const run = (entry: typeof UNIFORM_VOLUME_ENTRIES[number], group = this.densityTraceGroup) =>
       this.run(encoder, entry, this.volumePipelines[entry]!, group);
-    const vertices: [number, number, number] = [Math.ceil((this.info.nx+1)/4), Math.ceil((this.info.ny+1)/4), Math.ceil((this.info.nz+1)/4)];
+
     // The shift's residual is packed into the gamma scratch half from
     // start-of-step V, gamma and phi, and the advect then binds that half as
     // its gamma input. uvGather and uvPublish both rewrite it later this step.
     const shift = this.phiAgreementGain > 0;
     if (shift) run("uvAgreementResidual");
-    this.runDirect(encoder, "Advect dense vertex phi", this.volumePipelines.uvAdvectPhi!, shift ? this.densityGatherGroup : this.densityTraceGroup, vertices);
-    if (this.geometricRedistance) this.runDirect(encoder, "Redistance dense vertex phi", this.volumePipelines.uvRedistancePhi!, this.phiReverseGroup!, vertices);
+    this.runVertex(encoder, "Advect dense vertex phi", this.volumePipelines.uvAdvectPhi!, shift ? this.densityGatherGroup : this.densityTraceGroup);
+    if (this.geometricRedistance) this.runVertex(encoder, "Redistance dense vertex phi", this.volumePipelines.uvRedistancePhi!, this.phiReverseGroup!);
     else encoder.copyTextureToTexture({texture:this.vertexPhiScratch!},{texture:this.vertexPhiTexture!},[this.info.nx+1,this.info.ny+1,this.info.nz+1]);
     seam?.(UNIFORM_VOLUME_PHASE.phi);
     run("uvBuildEdges");
@@ -1569,7 +2279,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       const dispatchBalance = (entry: "uvBalanceLiquidRows" | "uvBalanceLiquidDonors") => {
         const pass = encoder.beginComputePass({label:entry});
         pass.setPipeline(this.volumePipelines[entry]!);pass.setBindGroup(0,this.densityTraceGroup);
-        if (this.liquidBalanceIndirect) pass.dispatchWorkgroupsIndirect(this.liquidBalanceDispatch!,0);
+        // The window takes precedence over the benchmark-only converged-round
+        // indirect: that record is sized from the whole lattice, and dispatching
+        // it from the window origin would run threads off the domain.
+        if (this.windowMainGroups) pass.dispatchWorkgroups(...this.windowMainGroups);
+        else if (this.activeRegionEnabled) pass.dispatchWorkgroupsIndirect(this.activeDispatch, UNIFORM_ACTIVE_MAIN_DISPATCH_OFFSET);
+        else if (this.liquidBalanceIndirect) pass.dispatchWorkgroupsIndirect(this.liquidBalanceDispatch!,0);
         else pass.dispatchWorkgroups(Math.ceil(this.info.nx/4),Math.ceil(this.info.ny/4),Math.ceil(this.info.nz/4));
         pass.end();
       };
@@ -1689,7 +2404,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // Preserve Sec. 3.6 unplaceable-excess telemetry written during the step.
     encoder.clearBuffer(this.reductions);
     encoder.clearBuffer(this.rigidExchange);
-    this.encodeActiveRegion(encoder, strength > 0 || drop !== undefined);
+    const windowExternalSources = strength > 0 || drop !== undefined;
+    this.planWindowDispatch(dt, windowExternalSources);
+    this.encodeActiveRegion(encoder, windowExternalSources);
     if (this.symmetryStageAuditTextures) encoder.copyTextureToTexture(
       { texture: this.velocityA }, { texture: this.symmetryStageAuditTextures.preExtrapolationVelocity },
       [this.info.nx, this.info.ny, this.info.nz],
@@ -1920,6 +2637,21 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // counter) rather than on a synthetic marker pass after it: a marker
     // touches no frame resource, so Metal is free to schedule it early and its
     // timestamp lands before the boundary it is meant to close.
+    // The box is final the moment the active region is finalized, and these
+    // copies add no compute pass, so they cannot move a stage seam.
+    let windowReadbackEncoded = false;
+    if (this.activeRegionEnabled && !this.windowDispatchIndirect && !this.windowReadbackPending) {
+      this.windowReadback ??= this.device.createBuffer({
+        label: "Uniform solve-window box readback", size: 80,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      encoder.copyBufferToBuffer(this.activeRegion, 0, this.windowReadback, 0, 64);
+      encoder.copyBufferToBuffer(this.activeRegion, UNIFORM_ACTIVE_VIOLATION_WORD * 4,
+        this.windowReadback, 64, 8);
+      encoder.copyBufferToBuffer(this.activeRegion, UNIFORM_ACTIVE_TRAVEL_TOTAL_WORD * 4,
+        this.windowReadback, 72, 4);
+      this.windowReadbackStep = this.windowStep;
+      windowReadbackEncoded = true;
+    }
     physicsTrace?.completeFinalPhaseOnNextPass(UNIFORM_ADVANCE_PHASE.diagnosticsReduction);
     this.run(encoder, "Uniform diagnostics reduction", this.pipelines.reduce, this.reductionGroup);
     physicsCPUTrace?.completePhase(UNIFORM_ADVANCE_PHASE.diagnosticsReduction);
@@ -1927,6 +2659,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     physicsQueueTrace?.begin();
     this.device.queue.submit([encoder.finish()]);
     if (pressureCycleDemandEncoded) this.readPressureCycleDemand();
+    if (windowReadbackEncoded) this.readWindowBox();
     if (physicsCPUTrace) {
       this.info.physicsCPUTrace = physicsCPUTrace.finish({ id: "other", label: "Capture closure + command submission" });
       this.info.physicsCaptureIdentity = {
@@ -2040,6 +2773,23 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         uniformActiveRegionMaximum: activeMaximum,
         uniformActiveRegionCellCount: activeCellCount,
         uniformActiveRegionFraction: activeCellCount / Math.max(1, this.info.cellCount),
+        uniformSolveWindowDispatch: this.activeRegionEnabled
+          ? (this.windowDispatchIndirect ? "indirect" : "host") : undefined,
+        uniformSolveWindowClippedSteps: this.activeRegionEnabled && !this.windowDispatchIndirect
+          ? this.windowViolations : undefined,
+        uniformSolveWindowDenseSteps: this.activeRegionEnabled && !this.windowDispatchIndirect
+          ? this.windowDenseSteps : undefined,
+        uniformPressureLattice: this.pressureWindowLattice
+          ? `${this.pressureWindowCapacity.join("x")} @ ${this.pressureWindowOrigin.join(",")}`
+          : undefined,
+        uniformPressureLatticeWindowed: this.pressureWindowLattice
+          ? this.pressureWindowLatticeActive : undefined,
+        uniformPressureLatticeReplans: this.pressureWindowLattice
+          ? this.pressureWindowReplans : undefined,
+        uniformPressureLatticeReplanMs: this.pressureWindowLattice
+          ? this.pressureWindowReplanMs : undefined,
+        uniformSolveWindowMaxLagSteps: this.activeRegionEnabled && !this.windowDispatchIndirect
+          ? this.windowMaxLagSteps : undefined,
       });
       this.info.uniformSharpenWorkMap = tileMap;
       this.info.uniformSharpenTilesActive = tileMap ? words[48]! : undefined;
@@ -2087,6 +2837,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   }
 
   enableCM11aCoarsestCapture(invocation = 1): void {
+    this.pressureCoarsestCapture = invocation;
     this.pressureMultigrid.enableCoarsestCapture(invocation);
   }
   readCM11aCoarsestCapture(): Promise<UniformCM11aCoarsestCapture | undefined> {
@@ -2111,6 +2862,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.inflowBoundary = scene.fluid.inflow
       ? createInflowGridBoundary(scene.fluid.inflow, scene.container, [this.info.nx, this.info.ny, this.info.nz])
       : undefined;
+    this.activeRegionRescanPending = true;
   }
 
   get rigidRenderBuffer(): GPUBuffer { return this.rigidSystem.renderBuffer; }
@@ -2137,7 +2889,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.symmetryStageAuditBetaBuffer?.destroy();
     this.macCormackAuditBinding.destroy();
     this.velocityExtrapolator.destroy();
-    this.pressureMultigrid.destroy();
+    for (const instance of this.pressureInstances.values()) instance.destroy();
+    this.pressureInstances.clear();
+    this.discardPressurePrewarm();
     this.params.destroy();
     this.reductions.destroy();
     this.conditioningScratch.destroy();

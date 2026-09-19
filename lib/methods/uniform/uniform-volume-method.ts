@@ -4,9 +4,21 @@ import { uniformMethod, uniformReferenceSolverOptions } from "./method";
 import { WebGPUUniformReferenceSolver } from "./webgpu-uniform-reference";
 import type { SimulationMethod, MethodParamSpec, MethodParamValues } from "../../core/method-contract";
 
-const omitted = new Set(["activeRegion", "gammaDiffusion", "gammaDiffusionIterations", "sharpeningMassCorrection", "solidExcessCorrection", "densityPostProcessing"]);
+const omitted = new Set(["gammaDiffusion", "gammaDiffusionIterations", "sharpeningMassCorrection", "solidExcessCorrection", "densityPostProcessing"]);
 const params: MethodParamSpec[] = uniformMethod.params.filter(p => !omitted.has(p.key)).map(p => {
   if (p.key === "velocityTransport" && p.kind === "select") return { ...p, default: "semi-lagrangian" };
+  // The solve window. Same key, same constructor-level update kind and the
+  // same "Work box" readout as the paper method's active region; what differs
+  // is that the geometric predicate is liquid OR near-surface phi rather than
+  // V alone, and that every geometric kernel — the vertex phi lattice
+  // included — is dispatched from its origin. Measured on the tall-air fixture
+  // (docs/research/uniform-geometric-tall-air-2026-09-19/solve-window-report.md):
+  // -23% on a 4x-taller domain, +1.1% on the small one. Default stays OFF until
+  // the defaults benchmark that is running against it lands.
+  if (p.key === "activeRegion" && p.kind === "select") return { ...p,
+    label: "Solve window", default: "off",
+    options: [{ value: "on", label: "Liquid window" }, { value: "off", label: "Whole domain" }],
+    hint: "Run every kernel, every pressure-multigrid pass and every extension-hierarchy pass on the box holding the liquid, the near-surface band and this step's sources, padded by the largest reach any stage uses and aligned to the 4h tile lattice. A domain that is mostly empty air then costs what its liquid costs. Needs the volume dust floor above zero, which is what makes V exactly zero outside the box. Whole domain is the dense control." };
   // Two sweeps: the front only needs to carry the band one cell per step, and the
   // hierarchy fill covers what it does not reach (docs/benchmarks/uniform-extension-front-sweeps-2026-09-19.md
   // measured eight within 0.01 cell of sixteen; Peter set two 2026-09-19). The paper method keeps sixteen.
@@ -20,6 +32,15 @@ const params: MethodParamSpec[] = uniformMethod.params.filter(p => !omitted.has(
     hint: "Only cells within this distance of phi=0 participate in local volume return." };
   return p;
 });
+// The CM11a hierarchy planned on the window rather than the domain. It is the
+// planner cliff this pays for, not the launches: a tall, mostly empty domain
+// falls off lockstep coarsening into semi-coarsening, and the plan it gets has
+// half again the levels and twice the passes of the same liquid in a small
+// domain. A lattice sized to the liquid gets the small domain's plan back.
+// Live, because the instance cache makes it live.
+params.push({kind:"select",key:"pressureWindow",label:"Pressure lattice",default:"window",tier:"fine",update:"runtime",
+  options:[{value:"window",label:"Liquid window"},{value:"domain",label:"Whole domain"}],
+  hint:"Plan the CM11a pressure hierarchy for a lattice that holds the solve window instead of the whole domain, with the origin in simulation cells and the halo outside it treated as far air. Needs the solve window to be on; with it off this has no effect. Whole domain is the control, and is what a violated or freshly reset step falls back to."});
 params.push({kind:"select",key:"redistance",label:"Level-set redistancing",default:"on",tier:"fine",update:"runtime",
   options:[{value:"on",label:"On"},{value:"off",label:"Off"}],hint:"Reconstruct metric distance near phi=0 after transport. Disable to isolate contour drift."});
 params.push({kind:"select",key:"liquidCapacityBalancing",label:"Liquid capacity balancing",default:"off",tier:"fine",update:"runtime",
@@ -90,7 +111,7 @@ export const uniformVolumeMethod: SimulationMethod = {
   label: "Uniform Geometric",
   shortLabel: "Uniform Geometric",
   badge: "UNIFORM GEOMETRIC",
-  supportedFieldModes: [...uniformMethod.supportedFieldModes!, "volume-levelset"],
+  supportedFieldModes: [...uniformMethod.supportedFieldModes!, "volume-levelset", "fine-tiles", "solve-window"],
   description: "All-fine vertex level set and conservative liquid volume.",
   detail: "Dense specialization of the geometric volume method: RK2 vertex phi, balanced conservative volume transport, phi-only surface geometry and conservative V-only sharpening. Intended for small scenes.",
   resource: { ...uniformMethod.resource!, id: "fluid.uniform-volume", label: "Uniform Geometric fluid" },
@@ -122,7 +143,9 @@ export const uniformVolumeMethod: SimulationMethod = {
       phiSeedFromVolume: values.phiSeedFromVolume === "on",
       phiAgreementGain: values.phiAgreement === "on" ? Number(values.phiAgreementGain ?? 0.05) : 0,
       phiAgreementClamp: Number(values.phiAgreementClamp ?? 0.02),
-      activeRegion: false, gammaDiffusionIterations: 0, densityPostProcessing: false,
+      activeRegion: values.activeRegion === "on",
+      pressureWindow: values.pressureWindow !== "domain",
+      gammaDiffusionIterations: 0, densityPostProcessing: false,
       solidExcessCorrection: false,
     }, progress, signal),
 };

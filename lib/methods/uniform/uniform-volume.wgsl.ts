@@ -47,6 +47,22 @@ fn uvAddDonor(index:u32,value:f32){
     if(result.exchanged){break;}old=result.old_value;}
 }
 fn uvCorner(i:u32)->vec3i{return vec3i(i32(i&1u),i32((i>>1u)&1u),i32((i>>2u)&1u));}
+// THE SOLVE WINDOW. Words 7..12 of the active-region header are the union of
+// this step's padded seed box with the previous one -- the box every windowed
+// dispatch runs on, and therefore the box outside which nothing is written
+// this step. With the window off the host publishes [0,dims), so every test
+// below folds to a plain domain test and the dense arm keeps its exact instruction stream.
+fn uvWindowMin()->vec3i{return vec3i(vec3u(activeRegion[7],activeRegion[8],activeRegion[9]));}
+fn uvWindowMax()->vec3i{return vec3i(vec3u(activeRegion[10],activeRegion[11],activeRegion[12]));}
+fn uvInWindow(id:vec3i)->bool{return all(id>=uvWindowMin())&&all(id<uvWindowMax());}
+/** One 4h tile past the window on every side: the seed's vertex test reads the
+ * upper vertex plane of its tile, which belongs to the next tile along. */
+fn uvTileInWindow(t:vec3i)->bool{
+  return all(t>=uvWindowMin()/4-vec3i(1))&&all(t<(uvWindowMax()+vec3i(3))/4+vec3i(1));
+}
+fn uvStepHasExternalSource()->bool{
+  return params.drop.w>0.0||length(params.inflowVelocityLength.xyz)*inflowStrength()>1e-6;
+}
 fn uvCell(i:u32)->vec3i{let d=vec3u(dims());return vec3i(vec3u(i%d.x,(i/d.x)%d.y,i/(d.x*d.y)));}
 fn uvPhi(position:vec3f)->f32{
   let p=clamp(position,vec3f(0),vec3f(dims()));
@@ -103,6 +119,12 @@ fn uvReleasedWalls(p:vec3f,advected:f32)->f32{
         var probe=p;probe[(axis+1u)%3u]+=select(-1e-4,1e-4,(corner&1u)!=0u);
         probe[(axis+2u)%3u]+=select(-1e-4,1e-4,(corner&2u)!=0u);
         probe[axis]=plane+inward*1e-4;let cell=clampCell(vec3i(floor(probe)));
+        // Outside the window the plane's velocity was not written this step.
+        // The term only reaches vertices within dt*|v|/h of the plane and the
+        // window snaps to a wall it comes within one padding of, so a vertex
+        // this dispatch owns is never one of them: skipping is the dense
+        // answer, reading the stale plane would not be.
+        if(!uvInWindow(cell)){continue;}
         let speed=select(boundaryVelocity(cell)[axis],velocity(cell)[axis],upper);
         let away=inward*speed;
         if(away>1e-6){result=max(result,params.dimsDt.w*away-inward*(p[axis]-plane)*h[axis]);}
@@ -143,7 +165,7 @@ fn uvClosedWallPhi(p:vec3f,advected:f32)->f32{
 const UV_AGREEMENT_PACK=4.0;
 @compute @workgroup_size(4,4,4)
 fn uvAgreementResidual(@builtin(global_invocation_id)gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}var packed=0.0;
+  let id=activeId(gid);if(!valid(id)){return;}var packed=0.0;
   let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
   if(uvOpen(id)>=0.99999){let g=textureLoad(gammaIn,id,0).x;let v=volume(id);
     if((g>0.0||v>0.0)&&abs(uvPhi(vec3f(id)+vec3f(0.5)))<1.5*h){
@@ -185,16 +207,16 @@ fn uvSeedPhi(p:vec3f,phi:f32)->f32{
 }
 @compute @workgroup_size(4,4,4)
 fn uvAdvectPhi(@builtin(global_invocation_id)gid:vec3u){
-  if(any(gid>vec3u(dims()))){return;}let p=vec3f(gid);
+  let vertex=activeVertexId(gid);if(any(vertex<vec3i(0))||any(vertex>dims())){return;}let p=vec3f(vertex);
   var value=uvSourcePhi(p,uvReleasedWalls(p,uvClosedWallPhi(p,uvPhi(uvTrace(p,params.dimsDt.w)))));
   let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
   if(params.agreement.z>0.0&&abs(value)<2.0*h){value-=uvAgreementShift(p);}
   if(params.agreement.y>0.5){value=uvSeedPhi(p,value);}
-  textureStore(uvPhiOut,vec3i(gid),vec4f(value));
+  textureStore(uvPhiOut,vertex,vec4f(value));
 }
 @compute @workgroup_size(4,4,4)
 fn uvRedistancePhi(@builtin(global_invocation_id)gid:vec3u){
-  if(any(gid>vec3u(dims()))){return;}let p=vec3f(gid);let initial=uvPhi(p);
+  let vertex=activeVertexId(gid);if(any(vertex<vec3i(0))||any(vertex>dims())){return;}let p=vec3f(vertex);let initial=uvPhi(p);
   let h=params.cellGravity.xyz;let band=4.0*max(h.x,max(h.y,h.z));
   var value=initial;
   if(abs(initial)>1e-8&&abs(initial)<band){var q=p;
@@ -202,7 +224,7 @@ fn uvRedistancePhi(@builtin(global_invocation_id)gid:vec3u){
       q=clamp(q-clamp(uvPhi(q)*g/(h*h*norm),vec3f(-2),vec3f(2)),
         max(vec3f(0),p-vec3f(4)),min(vec3f(dims()),p+vec3f(4)));}
     if(abs(uvPhi(q))<0.005*min(h.x,min(h.y,h.z))){value=sign(initial)*length((p-q)*h);}}
-  textureStore(uvPhiOut,vec3i(gid),vec4f(value));
+  textureStore(uvPhiOut,vertex,vec4f(value));
 }
 fn uvOpen(id:vec3i)->f32{if(!valid(id)){return 0.0;}return cellOpenFraction(id);}
 // E3. Every pass of Sec. 3.4's conservative transport runs only on the live
@@ -233,15 +255,17 @@ fn uvTransportTileAt(id:vec3i)->bool{
   let t=clamp(id/4,vec3i(0),uvCoarseDims()-vec3i(1));
   return (atomicLoad(&sharpenDeposits[uvCoarseBase()+4u*uvCoarseIndex(t)+3u])&4)!=0;
 }
-/** Uniform across a workgroup; false whenever the experiment is off. */
-fn uvTransportSkip(gid:vec3u)->bool{
+/** Uniform across a workgroup; false whenever the experiment is off. The
+ * window origin is aligned to the 4h lattice, so a windowed workgroup is still
+ * exactly one tile and the test is still uniform across it. */
+fn uvTransportSkip(id:vec3i)->bool{
   if(!uvTransportTiles()){return false;}
-  return !uvTransportTileAt(vec3i(gid));
+  return !uvTransportTileAt(id);
 }
 @compute @workgroup_size(4,4,4)
 fn uvBuildEdges(@builtin(global_invocation_id)gid:vec3u){
-  if(uvTransportSkip(gid)){return;}
-  let id=vec3i(gid);if(!valid(id)){return;}let index=linearIndex(id);
+  let id=activeId(gid);if(uvTransportSkip(id)){return;}
+  if(!valid(id)){return;}let index=linearIndex(id);
   let departure=uvTrace(vec3f(id)+vec3f(0.5),params.dimsDt.w)-vec3f(0.5);
   let base=vec3i(floor(departure));let f=fract(departure);
   for(var k=0u;k<9u;k++){uvEdges[index].donor[k]=index;uvEdges[index].weight[k]=0.0;}
@@ -252,28 +276,28 @@ fn uvBuildEdges(@builtin(global_invocation_id)gid:vec3u){
 }
 @compute @workgroup_size(4,4,4)
 fn uvSumDonors(@builtin(global_invocation_id)gid:vec3u){
-  if(uvTransportSkip(gid)){return;}
-  let id=vec3i(gid);if(!valid(id)){return;}let index=linearIndex(id);
+  let id=activeId(gid);if(uvTransportSkip(id)){return;}
+  if(!valid(id)){return;}let index=linearIndex(id);
   for(var k=0u;k<9u;k++){uvAddDonor(uvEdges[index].donor[k],uvEdges[index].weight[k]);}
 }
 @compute @workgroup_size(4,4,4)
 fn uvFallback(@builtin(global_invocation_id)gid:vec3u){
-  if(uvTransportSkip(gid)){return;}
-  let id=vec3i(gid);if(!valid(id)){return;}let i=linearIndex(id);
+  let id=activeId(gid);if(uvTransportSkip(id)){return;}
+  if(!valid(id)){return;}let i=linearIndex(id);
   if(atomicLoad(&sharpenDeposits[i])==0){uvEdges[i].weight[8]=max(uvOpen(id),1e-6);}
 }
 @compute @workgroup_size(4,4,4)
 fn uvNormalizeRows(@builtin(global_invocation_id)gid:vec3u){
-  if(uvTransportSkip(gid)){return;}
-  let id=vec3i(gid);if(!valid(id)){return;}let i=linearIndex(id);var sum=0.0;
+  let id=activeId(gid);if(uvTransportSkip(id)){return;}
+  if(!valid(id)){return;}let i=linearIndex(id);var sum=0.0;
   for(var k=0u;k<9u;k++){sum+=uvEdges[i].weight[k];}
   let scale=uvOpen(id)/max(sum,1e-20);
   for(var k=0u;k<9u;k++){uvEdges[i].weight[k]*=scale;}
 }
 @compute @workgroup_size(4,4,4)
 fn uvNormalizeDonors(@builtin(global_invocation_id)gid:vec3u){
-  if(uvTransportSkip(gid)){return;}
-  let id=vec3i(gid);if(!valid(id)){return;}let i=linearIndex(id);
+  let id=activeId(gid);if(uvTransportSkip(id)){return;}
+  if(!valid(id)){return;}let i=linearIndex(id);
   for(var k=0u;k<9u;k++){let donor=uvEdges[i].donor[k];
     let sum=bitcast<f32>(atomicLoad(&sharpenDeposits[donor]));
     uvEdges[i].weight[k]/=max(sum,1e-20);}
@@ -293,8 +317,8 @@ fn uvBeginLiquidBalance(){let base=2u*cellCount();atomicStore(&sharpenDeposits[b
 }
 @compute @workgroup_size(4,4,4)
 fn uvBalanceLiquidRows(@builtin(global_invocation_id)gid:vec3u){
-  if(uvTransportSkip(gid)){return;}
-  let id=vec3i(gid);if(!valid(id)||atomicLoad(&sharpenDeposits[2u*cellCount()])==0){return;}
+  let id=activeId(gid);if(uvTransportSkip(id)){return;}
+  if(!valid(id)||atomicLoad(&sharpenDeposits[2u*cellCount()])==0){return;}
   let i=linearIndex(id);var amount=0.0;
   for(var k=0u;k<9u;k++){amount+=uvEdges[i].weight[k]*volume(uvCell(uvEdges[i].donor[k]));}
   let capacity=uvOpen(id);let excess=max(0.0,amount-capacity)/max(capacity,1e-20);
@@ -304,8 +328,8 @@ fn uvBalanceLiquidRows(@builtin(global_invocation_id)gid:vec3u){
 }
 @compute @workgroup_size(4,4,4)
 fn uvBalanceLiquidDonors(@builtin(global_invocation_id)gid:vec3u){
-  if(uvTransportSkip(gid)){return;}
-  let id=vec3i(gid);if(!valid(id)||atomicLoad(&sharpenDeposits[2u*cellCount()])==0){return;}
+  let id=activeId(gid);if(uvTransportSkip(id)){return;}
+  if(!valid(id)||atomicLoad(&sharpenDeposits[2u*cellCount()])==0){return;}
   let i=linearIndex(id);
   for(var k=0u;k<9u;k++){let donor=uvEdges[i].donor[k];let sum=bitcast<f32>(atomicLoad(&sharpenDeposits[donor]));
     uvEdges[i].weight[k]/=max(sum,1e-30);}
@@ -338,7 +362,7 @@ fn uvDustFloor(value:f32)->f32{
 }
 @compute @workgroup_size(4,4,4)
 fn uvGather(@builtin(global_invocation_id)gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}
+  let id=activeId(gid);if(!valid(id)){return;}
   // Outside the live set both outputs are known in closed form, so neither the
   // nine-term gather nor uvTarget's eight trilinear phi probes are evaluated.
   // V is zero there by the predicate above. Gamma is zero because TRANSPORT
@@ -346,7 +370,7 @@ fn uvGather(@builtin(global_invocation_id)gid:vec3u){
   // corner sample of uvTarget is positive, so both its fill count and its
   // plane-box fraction are zero. The stores themselves stay: volumeOut and
   // gammaOut are ping-pong targets whose previous contents are two steps old.
-  if(uvTransportSkip(gid)){
+  if(uvTransportSkip(id)){
     textureStore(volumeOut,id,vec4f(0.0));textureStore(gammaOut,id,vec4f(0.0));return;
   }
   let i=linearIndex(id);var value=0.0;
@@ -388,7 +412,12 @@ fn uvSharpenTileIndex(id:vec3i)->u32{
   let d=(vec3u(dims())+vec3u(3))/4u;let t=vec3u(id)/4u;
   return 2u*cellCount()+UV_SHARPEN_TILE_MAP_WORD+t.x+d.x*(t.y+d.y*t.z);
 }
+// The window bound is part of the predicate, not an optimization: the eight
+// sweeps read a NEIGHBOUR tile's proposals out of the fixed stencil arena, and
+// outside the window that arena still holds this step's transport edges. A
+// tile the classify did not visit is not a sharpening tile.
 fn uvSharpenTileActive(id:vec3i)->bool{
+  if(!uvInWindow(id)){return false;}
   if(!UV_SHARPEN_TILE_WORK){return true;}
   return atomicLoad(&sharpenDeposits[uvSharpenTileIndex(id)])!=0;
 }
@@ -396,16 +425,17 @@ var<workgroup> uvTileAdmission:atomic<u32>;
 @compute @workgroup_size(4,4,4)
 fn uvClassifySharpenTiles(@builtin(global_invocation_id)gid:vec3u,
   @builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)tile:vec3u){
+  let cell=activeId(gid);
   if(lane==0u){atomicStore(&uvTileAdmission,0u);}workgroupBarrier();
-  if(valid(vec3i(gid))){
-    let phi=uvPhi(vec3f(gid)+vec3f(0.5));
+  if(valid(cell)){
+    let phi=uvPhi(vec3f(cell)+vec3f(0.5));
     let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
     // Negated comparison conservatively retains non-finite input as active.
     if(!(abs(phi)>=params.tuning.y*h)){atomicStore(&uvTileAdmission,1u);}
     // Compaction pours between liquid cells at any depth. A liquid cell is
     // live if it is below capacity or has a face neighbour that is: the second
     // half is what admits the full tile a deficient one must draw from.
-    else if(params.agreement.x>0.5&&phi<0.0){let id=vec3i(gid);
+    else if(params.agreement.x>0.5&&phi<0.0){let id=cell;
       var live=uvOpen(id)>0.99999&&volume(id)<uvOpen(id)-1e-4;
       for(var axis=0;axis<3&&!live;axis+=1){for(var side=-1;side<=1;side+=2){
         var n=id;n[axis]+=side;if(valid(n)&&uvOpen(n)>0.99999&&volume(n)<uvOpen(n)-1e-4
@@ -414,13 +444,13 @@ fn uvClassifySharpenTiles(@builtin(global_invocation_id)gid:vec3u,
   }
   workgroupBarrier();
   if(lane==0u){let admission=atomicLoad(&uvTileAdmission);
-    atomicStore(&sharpenDeposits[uvSharpenTileIndex(vec3i(tile*4u))],i32(admission));
+    atomicStore(&sharpenDeposits[uvSharpenTileIndex(activeId(tile*4u))],i32(admission));
     if(admission!=0u){atomicAdd(&sharpenDeposits[2u*cellCount()+UV_SHARPEN_TILE_COUNT_WORD],1);}}
 }
 @compute @workgroup_size(4,4,4)
 fn uvPrepareSharpen(@builtin(global_invocation_id)gid:vec3u){
-  if(!uvSharpenTileActive(vec3i(gid))){return;}
-  let id=vec3i(gid);if(!valid(id)){return;}let i=linearIndex(id);
+  let id=activeId(gid);if(!uvSharpenTileActive(id)){return;}
+  if(!valid(id)){return;}let i=linearIndex(id);
   let phi=uvPhi(vec3f(id)+vec3f(0.5));let desired=textureLoad(gammaIn,id,0).x;
   let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
   let dose=clamp(params.tuning.x,0.0,1.0);let own=volume(id);
@@ -439,8 +469,8 @@ fn uvPrepareSharpen(@builtin(global_invocation_id)gid:vec3u){
 }
 @compute @workgroup_size(4,4,4)
 fn uvProposeSharpen(@builtin(global_invocation_id)gid:vec3u){
-  if(!uvSharpenTileActive(vec3i(gid))){return;}
-  let id=vec3i(gid);if(!valid(id)){return;}let i=linearIndex(id);
+  let id=activeId(gid);if(!uvSharpenTileActive(id)){return;}
+  if(!valid(id)){return;}let i=linearIndex(id);
   let phiA=uvEdges[i].weight[5];
   for(var axis=0u;axis<3u;axis++){
     uvEdges[i].weight[axis]=0.0;var e=vec3i(0);e[axis]=1;let q=id+e;
@@ -466,8 +496,8 @@ fn uvProposeSharpen(@builtin(global_invocation_id)gid:vec3u){
 }
 @compute @workgroup_size(4,4,4)
 fn uvLimitSharpen(@builtin(global_invocation_id)gid:vec3u){
-  if(!uvSharpenTileActive(vec3i(gid))){return;}
-  let id=vec3i(gid);if(!valid(id)){return;}let i=linearIndex(id);var outgoing=0.0;var incoming=0.0;
+  let id=activeId(gid);if(!uvSharpenTileActive(id)){return;}
+  if(!valid(id)){return;}let i=linearIndex(id);var outgoing=0.0;var incoming=0.0;
   for(var axis=0u;axis<3u;axis++){var e=vec3i(0);e[axis]=1;
     let positive=uvEdges[i].weight[axis];var negative=0.0;
     if(valid(id-e)&&uvSharpenTileActive(id-e)){negative=uvEdges[linearIndex(id-e)].weight[axis];}
@@ -482,10 +512,11 @@ fn uvLimitedFlux(i:u32,j:u32,axis:u32)->f32{
 }
 @compute @workgroup_size(4,4,4)
 fn uvCommitSharpen(@builtin(global_invocation_id)gid:vec3u){
-  if(valid(vec3i(gid))&&!uvSharpenTileActive(vec3i(gid))){
-    textureStore(volumeOut,vec3i(gid),vec4f(uvDustFloor(volume(vec3i(gid)))));return;
+  let id=activeId(gid);
+  if(valid(id)&&!uvSharpenTileActive(id)){
+    textureStore(volumeOut,id,vec4f(uvDustFloor(volume(id))));return;
   }
-  let id=vec3i(gid);if(!valid(id)){return;}let i=linearIndex(id);var terms:array<f32,6>;
+  if(!valid(id)){return;}let i=linearIndex(id);var terms:array<f32,6>;
   for(var axis=0u;axis<3u;axis++){var e=vec3i(0);e[axis]=1;terms[2u*axis]=0.0;terms[2u*axis+1u]=0.0;
     if(valid(id+e)){terms[2u*axis]=-uvLimitedFlux(i,linearIndex(id+e),axis);}
     if(valid(id-e)){terms[2u*axis+1u]=uvLimitedFlux(linearIndex(id-e),i,axis);}}
@@ -549,6 +580,15 @@ fn uvCoarseVelocityComponent(p:vec3f,component:u32)->f32{
 fn uvTwoLevelSeed(@builtin(global_invocation_id)gid:vec3u){
   let t=vec3i(gid);if(any(t>=uvCoarseDims())){return;}
   let slot=uvCoarseBase()+4u*uvCoarseIndex(t);
+  // This pass stays dense -- it is one dispatch over ceil(n/4)^3 tiles and it
+  // is what tells the solve window's own consumers where the liquid is -- but
+  // a tile a whole tile clear of the previous window cannot seed: liquid
+  // cannot have appeared there (the window covered every seed plus its reach),
+  // so V is zero and every vertex is outside the 4h band. Only a source can
+  // break that, and a source step is a host-known uniform condition.
+  if(!uvTileInWindow(t)&&!uvStepHasExternalSource()){
+    atomicStore(&sharpenDeposits[slot+3u],0);return;
+  }
   let dust=select(params.tuning.z,1e-6,params.tuning.z<=0.0);
   let spacing=params.cellGravity.xyz;
   var seed=false;var displacement=0.0;
@@ -634,7 +674,7 @@ fn uvTwoLevelDilateZ(@builtin(global_invocation_id)gid:vec3u){
 }
 @compute @workgroup_size(4,4,4)
 fn uvPublish(@builtin(global_invocation_id)gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}
+  let id=activeId(gid);if(!valid(id)){return;}
   let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
   textureStore(volumeOut,id,vec4f(0.5-uvPhi(vec3f(id)+vec3f(0.5))/h));
   textureStore(gammaOut,id,vec4f(uvOpen(id)));
