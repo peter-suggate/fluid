@@ -256,7 +256,7 @@
     "test:uniform-lab:inflow": "node --import tsx tools/wasm/uniform-lab-inflow.ts",
     "test:uniform-lab:scenes": "node --import tsx tools/wasm/uniform-lab-scenes.ts",
     "test:uniform-pressure:2d": "node --import tsx tools/wasm/uniform-pressure-stability.ts",
-    "test:dawn:uniform-pressure": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx --test --test-concurrency=1 tests/uniform-pressure-safety-dawn.test.ts tests/uniform-pressure-fig9-dawn.test.ts"
+    "test:dawn:uniform-pressure": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx --test --test-concurrency=1 tests/uniform-coarse-solver-dawn.test.ts tests/uniform-pressure-safety-dawn.test.ts tests/uniform-pressure-fig9-dawn.test.ts"
   },
   "dependencies": {
     "lucide-react": "^1.31.0",

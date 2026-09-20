@@ -1,3 +1,4 @@
+import { uniformCoarseSolverWGSL, uniformPressureStateWGSL } from "./uniform-coarse-solver.wgsl";
 /**
  * CM11a dense pressure-hierarchy fragment.
  *
@@ -6,7 +7,7 @@
  * helpers as projection.  The fragment intentionally contains no alternate
  * solid or free-surface discretization.
  */
-import { UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE, UNIFORM_CM11A_RECOVERY_SWEEPS, UNIFORM_CM11A_RECOVERY_REDUCTION } from "./pressure-policy";
+import { UNIFORM_CM11A_RECOVERY_SWEEPS, UNIFORM_CM11A_RECOVERY_REDUCTION } from "./pressure-policy";
 export { UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE } from "./pressure-policy";
 
 export const uniformPressureMultigridWGSL = /* wgsl */ `
@@ -38,11 +39,11 @@ struct UniformMGParams {
 // projected pressure-gap max, and normalized projected residual max.
 // 10..11: final finest projected residual and pressure gap.
 // 12..14: active/free coarsest rows and packed worst-row state for the first
-// failing solve (lane | active<<16 | halo<<17).
+// failing solve (row | active<<30 | halo<<31).
 // 15..18: cycle residual norm bits, stopped, completed Full-Cycles, V-Cycles.
 // 19..25: best residual, rejected cycles, recovery sweeps, recovery mode,
 // rejected candidate, initial residual, recovery exhausted.
-@group(1) @binding(13) var<storage,read_write> mgConvergence:array<atomic<u32>,26>;
+${uniformPressureStateWGSL}
 // Per-level immutable (+x,+y,+z) coefficients and liquid flag, baked once
 // after topology and the one-cell phi continuation are complete.
 @group(1) @binding(14) var mgCoefficientsIn: texture_3d<f32>;
@@ -52,56 +53,56 @@ struct UniformMGParams {
 var<workgroup> mgCycleStopped:u32;
 fn mgSkipCycle()->bool{
   if(mg.levelDims.w==0u){return false;}
-  if(atomicLoad(&mgConvergence[16])!=0u){return true;}
-  let recovery=atomicLoad(&mgConvergence[22])!=0u;
+  if(atomicLoad(&mgState.convergence[16])!=0u){return true;}
+  let recovery=atomicLoad(&mgState.convergence[22])!=0u;
   return select(recovery,!recovery,mg.levelDims.w==2u);
 }
 
 @compute @workgroup_size(1)
 fn mgCheckCycleConvergence(){
   if(mgSkipCycle()){return;}
-  let candidate=atomicLoad(&mgConvergence[15]);
+  let candidate=atomicLoad(&mgState.convergence[15]);
   if(mg.control.z==0u){
-    atomicStore(&mgConvergence[19],candidate);
-    atomicStore(&mgConvergence[24],candidate);
+    atomicStore(&mgState.convergence[19],candidate);
+    atomicStore(&mgState.convergence[24],candidate);
     return;
   }
-  if(mg.control.z==4u){atomicAdd(&mgConvergence[21],${UNIFORM_CM11A_RECOVERY_SWEEPS}u);}
-  else{atomicAdd(&mgConvergence[15u+mg.control.z],1u);}
-  let accepted=candidate<0x7f800000u&&candidate<=atomicLoad(&mgConvergence[19]);
-  atomicStore(&mgConvergence[23],select(1u,0u,accepted));
-  if(accepted){atomicStore(&mgConvergence[19],candidate);}
+  if(mg.control.z==4u){atomicAdd(&mgState.convergence[21],${UNIFORM_CM11A_RECOVERY_SWEEPS}u);}
+  else{atomicAdd(&mgState.convergence[15u+mg.control.z],1u);}
+  let accepted=candidate<0x7f800000u&&candidate<=atomicLoad(&mgState.convergence[19]);
+  atomicStore(&mgState.convergence[23],select(1u,0u,accepted));
+  if(accepted){atomicStore(&mgState.convergence[19],candidate);}
   else if(mg.control.z!=4u){
-    atomicAdd(&mgConvergence[20],1u);
-    atomicStore(&mgConvergence[22],1u);
+    atomicAdd(&mgState.convergence[20],1u);
+    atomicStore(&mgState.convergence[22],1u);
     return;
   }
-  let threshold=select(mgTolerance.x,min(mgTolerance.x,bitcast<f32>(atomicLoad(&mgConvergence[24]))*${UNIFORM_CM11A_RECOVERY_REDUCTION}),mg.control.z==4u);
-  if(threshold>0.0&&bitcast<f32>(atomicLoad(&mgConvergence[19]))<=threshold){
-    atomicStore(&mgConvergence[16],1u);
+  let threshold=select(mgTolerance.x,min(mgTolerance.x,bitcast<f32>(atomicLoad(&mgState.convergence[24]))*${UNIFORM_CM11A_RECOVERY_REDUCTION}),mg.control.z==4u);
+  if(threshold>0.0&&bitcast<f32>(atomicLoad(&mgState.convergence[19]))<=threshold){
+    atomicStore(&mgState.convergence[16],1u);
   }
 }
 
 @compute @workgroup_size(4,4,4)
 fn mgSaveAccepted(@builtin(global_invocation_id) gid:vec3u){
-  if(atomicLoad(&mgConvergence[23])!=0u){return;}
+  if(atomicLoad(&mgState.convergence[23])!=0u){return;}
   let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
   textureStore(mgPressureOut,id,vec4f(mgP(id)));
 }
 @compute @workgroup_size(4,4,4)
 fn mgRestoreRejected(@builtin(global_invocation_id) gid:vec3u){
   if(mg.control.w==0u){
-    if(atomicLoad(&mgConvergence[23])==0u){return;}
+    if(atomicLoad(&mgState.convergence[23])==0u){return;}
     // Smoothing may transiently worsen the infinity norm. Continue its finite
     // working iterate privately; finish always restores the best field.
-    if(mg.levelDims.w==2u&&atomicLoad(&mgConvergence[15])<0x7f800000u){return;}
+    if(mg.levelDims.w==2u&&atomicLoad(&mgState.convergence[15])<0x7f800000u){return;}
   }
   let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
   textureStore(mgPressureOut,id,textureLoad(mgResidualIn,id,0));
 }
 @compute @workgroup_size(1)
 fn mgFinishSafety(){
-  atomicStore(&mgConvergence[25],select(0u,1u,atomicLoad(&mgConvergence[22])!=0u&&atomicLoad(&mgConvergence[16])==0u));
+  atomicStore(&mgState.convergence[25],select(0u,1u,atomicLoad(&mgState.convergence[22])!=0u&&atomicLoad(&mgState.convergence[16])==0u));
 }
 
 fn mgValid(p:vec3i,d:vec3u)->bool{return all(p>=vec3i(0))&&all(p<vec3i(d));}
@@ -431,7 +432,7 @@ fn mgDownsampleMinimum(@builtin(global_invocation_id) gid:vec3u){
 fn mgSmoothColour(@builtin(global_invocation_id) gid:vec3u){
   if(mgSkipCycle()){return;}
   let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
-  let old=mgP(id);let coarseDone=(mg.control.w&2u)!=0u&&atomicLoad(&mgConvergence[1])!=0u;
+  let old=mgP(id);let coarseDone=(mg.control.w&2u)!=0u&&atomicLoad(&mgState.convergence[1])!=0u;
   // Pass-through cells carry the CM11a Eq. 18 projection with them. Nothing
   // reads a wrong-colour or non-liquid cell between the two colour passes
   // (neighbour sums are mgLiquid-gated and an update never reads its own old
@@ -449,134 +450,7 @@ fn mgSmoothColour(@builtin(global_invocation_id) gid:vec3u){
   textureStore(mgPressureOut,id,vec4f(max(p,textureLoad(mgMinimumIn,id,0).x)));
 }
 
-var<workgroup> mgCoarseP:array<f32,256>;
-var<workgroup> mgCoarsePLow:array<f32,256>;
-var<workgroup> mgCoarseRhs:array<f32,256>;
-var<workgroup> mgCoarsePhi:array<f32,256>;
-var<workgroup> mgCoarseMin:array<f32,256>;
-var<workgroup> mgCoarseTopology:array<vec4f,256>;
-var<workgroup> mgCoarseResidualBits:atomic<u32>;
-var<workgroup> mgCoarseMaxBBits:atomic<u32>;
-var<workgroup> mgCoarseMaxDiagPBits:atomic<u32>;
-var<workgroup> mgCoarseMaxPBits:atomic<u32>;
-var<workgroup> mgCoarseMaxGapBits:atomic<u32>;
-var<workgroup> mgCoarseActiveRows:atomic<u32>;
-var<workgroup> mgCoarseFreeRows:atomic<u32>;
-var<workgroup> mgCoarseWorstLane:atomic<u32>;
-var<workgroup> mgCoarseRowResidual:array<f32,256>;
-var<workgroup> mgCoarseRowState:array<u32,256>;
-var<workgroup> mgCoarseConvergedFlag:u32;
-
-fn mgTwoSum(a:f32,b:f32)->vec2f{
-  let s=a+b;let bb=s-a;return vec2f(s,(a-(s-bb))+(b-bb));
-}
-fn mgDSAdd(a:vec2f,b:vec2f)->vec2f{
-  let s=mgTwoSum(a.x,b.x);let t=mgTwoSum(a.y,b.y);let u=mgTwoSum(s.y,t.x);let v=mgTwoSum(s.x,u.x);
-  return vec2f(v.x,v.y+u.y+t.y);
-}
-fn mgDSScale(a:vec2f,b:f32)->vec2f{
-  let product=a.x*b;let error=fma(a.x,b,-product)+a.y*b;let sum=mgTwoSum(product,error);return sum;
-}
-fn mgDSDivide(a:vec2f,b:f32)->vec2f{
-  let q=a.x/b;let remainder=mgDSAdd(a,-mgDSScale(vec2f(q,0.0),b));let correction=(remainder.x+remainder.y)/b;
-  return mgTwoSum(q,correction);
-}
-fn mgD4Sum6DS(value:array<vec2f,6>)->vec2f{
-  return mgDSAdd(mgDSAdd(mgDSAdd(value[0],value[1]),mgDSAdd(value[4],value[5])),mgDSAdd(value[2],value[3]));
-}
-fn mgCoarsePressure(index:u32)->vec2f{return vec2f(mgCoarseP[index],mgCoarsePLow[index]);}
-
-fn mgCoarseIndex(p:vec3i)->u32{let d=vec3i(mg.levelDims.xyz);return u32(p.x+d.x*(p.y+d.y*p.z));}
-fn mgCoarseCoefficient(id:vec3i,q:vec3i,axis:u32)->f32{
-  let ci=mgCoarseIndex(id);let h=mg.spacing[axis];
-  let d=vec3i(mg.levelDims.xyz);
-  if(any(q<vec3i(0))||any(q>=d)){
-    if(axis==1u&&id.y==d.y-1&&q.y==d.y&&params.boundary.w>0.5){
-      let phi=mgCoarsePhi[ci];let theta=cm12GhostFluidTheta(phi,0.5*h,1e-9);
-      return mgCoarseTopology[ci].z/(h*h*theta);
-    }
-    return 0.0;
-  }
-  let qi=mgCoarseIndex(q);let positive=q[axis]>id[axis];
-  let vf=select(mgCoarseTopology[qi][axis+1u],mgCoarseTopology[ci][axis+1u],positive);
-  if(vf<=1e-6){return 0.0;}let qPhi=mgCoarsePhi[qi];var theta=1.0;
-  if(qPhi>=0.0){let phi=mgCoarsePhi[ci];theta=cm12GhostFluidTheta(phi,qPhi,1e-9);}
-  return vf/(h*h*theta);
-}
-
-// The hierarchy's short axis ends at two cells. The host limits the resulting
-// rectangular coarsest grid to 256 cells so one workgroup can execute the
-// paper's high-precision solve without a host readback.
-@compute @workgroup_size(256)
-fn mgSolveCoarsest(@builtin(local_invocation_index) lane:u32){
-  if(lane==0u){mgCycleStopped=select(0u,1u,mgSkipCycle());}
-  if(workgroupUniformLoad(&mgCycleStopped)!=0u){return;}
-  let d=mg.levelDims.xyz;let count=d.x*d.y*d.z;let live=lane<count;
-  let id=vec3i(i32(lane%d.x),i32((lane/d.x)%d.y),i32(lane/(d.x*d.y)));
-  if(live){mgCoarseP[lane]=mgP(id);mgCoarsePLow[lane]=0.0;mgCoarseRhs[lane]=textureLoad(mgRhsIn,id,0).x;
-    mgCoarsePhi[lane]=mgPhi(id);mgCoarseMin[lane]=textureLoad(mgMinimumIn,id,0).x;
-    mgCoarseTopology[lane]=mgTopology(id);}workgroupBarrier();
-  let e=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
-  var converged=false;var iterations=0u;
-  for(var iteration=0u;iteration<mg.control.w;iteration+=1u){
-    if(!converged){iterations=iteration+1u;}
-    for(var color=0u;color<2u;color+=1u){
-      if(!converged&&live&&mgCoarsePhi[lane]<0.0&&u32((id.x+id.y+id.z)&1)==color){
-        var diagonalTerms:array<f32,6>;var sumTerms:array<vec2f,6>;
-        for(var n=0;n<6;n+=1){let q=id+e[n];let a=mgCoarseCoefficient(id,q,u32(n/2));diagonalTerms[n]=a;sumTerms[n]=vec2f(0.0);if(all(q>=vec3i(0))&&all(q<vec3i(d))){let qi=mgCoarseIndex(q);if(mgCoarsePhi[qi]<0.0){sumTerms[n]=mgDSScale(mgCoarsePressure(qi),a);}}}
-        let diagonal=mgD4Sum6(diagonalTerms);let sum=mgD4Sum6DS(sumTerms);
-        if(diagonal>0.0){let next=mgDSDivide(mgDSAdd(sum,vec2f(mgCoarseRhs[lane],0.0)),diagonal);
-          if(next.x+next.y<mgCoarseMin[lane]){mgCoarseP[lane]=mgCoarseMin[lane];mgCoarsePLow[lane]=0.0;}
-          else{mgCoarseP[lane]=next.x;mgCoarsePLow[lane]=next.y;}}
-      }
-      workgroupBarrier();
-    }
-    if(!converged&&live&&mgCoarseP[lane]+mgCoarsePLow[lane]<mgCoarseMin[lane]){mgCoarseP[lane]=mgCoarseMin[lane];mgCoarsePLow[lane]=0.0;}workgroupBarrier();
-    if(lane==0u&&!converged){atomicStore(&mgCoarseResidualBits,0u);atomicStore(&mgCoarseMaxBBits,0u);atomicStore(&mgCoarseMaxDiagPBits,0u);atomicStore(&mgCoarseMaxPBits,0u);atomicStore(&mgCoarseMaxGapBits,0u);atomicStore(&mgCoarseActiveRows,0u);atomicStore(&mgCoarseFreeRows,0u);atomicStore(&mgCoarseWorstLane,0xffffffffu);}if(live){mgCoarseRowResidual[lane]=0.0;mgCoarseRowState[lane]=0u;}workgroupBarrier();
-    if(!converged&&live&&mgCoarsePhi[lane]<0.0){var appliedTerms:array<vec2f,6>;var diagonalTerms:array<f32,6>;
-      for(var n=0;n<6;n+=1){let q=id+e[n];let a=mgCoarseCoefficient(id,q,u32(n/2));diagonalTerms[n]=a;var neighbor=vec2f(0.0);if(all(q>=vec3i(0))&&all(q<vec3i(d))){let qi=mgCoarseIndex(q);if(mgCoarsePhi[qi]<0.0){neighbor=mgCoarsePressure(qi);}}appliedTerms[n]=mgDSScale(mgDSAdd(mgCoarsePressure(lane),-neighbor),a);}
-      let applied=mgD4Sum6DS(appliedTerms);let diagonal=mgD4Sum6(diagonalTerms);
-      let linearResidualPair=mgDSAdd(vec2f(mgCoarseRhs[lane],0.0),-applied);let linearResidual=linearResidualPair.x+linearResidualPair.y;
-      // A raw linear residual is non-zero at a legitimately active lower
-      // bound. Measure the projected LCP fixed-point residual instead; away
-      // from p_min it is exactly the linear residual in the paper's units.
-      if(diagonal>0.0){let pressure=mgCoarseP[lane]+mgCoarsePLow[lane];let gap=max(0.0,pressure-mgCoarseMin[lane]);
-        // Evaluate the projected fixed-point residual without adding a tiny
-        // correction to a large pressure (which would round away in f32).
-        let projectsToMinimum=linearResidual<0.0&&-linearResidual>=gap*diagonal;
-        let lcpResidual=select(abs(linearResidual),gap*diagonal,projectsToMinimum);
-        // A p=b is scaled by rho/dt in the pressure system. TallCells reports
-        // its absolute infinity tolerance in s^-1, so convergence and the
-        // public residual must use the equivalent divergence residual.
-        let divergenceResidual=lcpResidual*params.dimsDt.w/params.physical.x;
-        let rowActive=projectsToMinimum;
-        mgCoarseRowResidual[lane]=divergenceResidual;mgCoarseRowState[lane]=select(0u,1u,rowActive);
-        if(rowActive){atomicAdd(&mgCoarseActiveRows,1u);}else{atomicAdd(&mgCoarseFreeRows,1u);}
-        atomicMax(&mgCoarseResidualBits,bitcast<u32>(divergenceResidual));atomicMax(&mgCoarseMaxBBits,bitcast<u32>(abs(mgCoarseRhs[lane])));
-        atomicMax(&mgCoarseMaxDiagPBits,bitcast<u32>(diagonal*abs(pressure)));atomicMax(&mgCoarseMaxPBits,bitcast<u32>(abs(pressure)));
-        atomicMax(&mgCoarseMaxGapBits,bitcast<u32>(lcpResidual/diagonal));}
-    }
-    workgroupBarrier();if(!converged&&live&&bitcast<u32>(mgCoarseRowResidual[lane])==atomicLoad(&mgCoarseResidualBits)){atomicMin(&mgCoarseWorstLane,lane);}workgroupBarrier();
-    // The residual maximum is a workgroup atomic every lane reads after a
-    // barrier, but WGSL's uniformity analysis cannot see that, so route the
-    // verdict through workgroupUniformLoad (itself a barrier) to make the
-    // break formally uniform. Post-convergence iterations computed nothing
-    // (every phase above is gated on !converged), so leaving the loop early
-    // is bit-identical; it just stops paying ~8 barrier waves per remaining
-    // capped iteration on this one 256-lane workgroup.
-    if(lane==0u){mgCoarseConvergedFlag=select(0u,1u,bitcast<f32>(atomicLoad(&mgCoarseResidualBits))<=${UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE});}
-    if(workgroupUniformLoad(&mgCoarseConvergedFlag)==1u){converged=true;break;}
-  }
-  if(live){textureStore(mgPressureOut,id,vec4f(mgCoarseP[lane]+mgCoarsePLow[lane]));}
-  if(lane==0u){atomicMax(&mgConvergence[0],atomicLoad(&mgCoarseResidualBits));atomicStore(&mgConvergence[1],select(0u,1u,converged));atomicMax(&mgConvergence[2],iterations);atomicMax(&mgConvergence[3],select(1u,0u,converged));
-    if(!converged){let claimed=atomicCompareExchangeWeak(&mgConvergence[4],0u,mg.control.z);if(claimed.exchanged){let maxB=bitcast<f32>(atomicLoad(&mgCoarseMaxBBits));let maxDiagP=bitcast<f32>(atomicLoad(&mgCoarseMaxDiagPBits));
-      atomicStore(&mgConvergence[5],atomicLoad(&mgCoarseMaxBBits));atomicStore(&mgConvergence[6],atomicLoad(&mgCoarseMaxDiagPBits));atomicStore(&mgConvergence[7],atomicLoad(&mgCoarseMaxPBits));atomicStore(&mgConvergence[8],atomicLoad(&mgCoarseMaxGapBits));
-      let rawResidual=bitcast<f32>(atomicLoad(&mgCoarseResidualBits))*params.physical.x/max(params.dimsDt.w,1e-20);
-      atomicStore(&mgConvergence[9],bitcast<u32>(rawResidual/max(maxB,max(maxDiagP,1e-20))));
-      let worstLane=atomicLoad(&mgCoarseWorstLane);let worstId=vec3i(i32(worstLane%d.x),i32((worstLane/d.x)%d.y),i32(worstLane/(d.x*d.y)));
-      let halo=!mgInterior(worstId,d);let packed=worstLane|(mgCoarseRowState[worstLane]<<16u)|(select(0u,1u,halo)<<17u);
-      atomicStore(&mgConvergence[12],atomicLoad(&mgCoarseActiveRows));atomicStore(&mgConvergence[13],atomicLoad(&mgCoarseFreeRows));atomicStore(&mgConvergence[14],packed);}}}
-}
+${uniformCoarseSolverWGSL}
 
 @compute @workgroup_size(4,4,4)
 fn mgMeasureFineResidual(@builtin(global_invocation_id) gid:vec3u){
@@ -585,8 +459,8 @@ fn mgMeasureFineResidual(@builtin(global_invocation_id) gid:vec3u){
   // Air values also participate in prolongation: never accept NaN/Inf there.
   let pressure=mgP(id);
   if((bitcast<u32>(pressure)&0x7f800000u)==0x7f800000u){
-    if(mg.control.z==1u){atomicMax(&mgConvergence[15],0x7f800000u);}
-    else{atomicMax(&mgConvergence[10],0x7f800000u);}return;
+    if(mg.control.z==1u){atomicMax(&mgState.convergence[15],0x7f800000u);}
+    else{atomicMax(&mgState.convergence[10],0x7f800000u);}return;
   }
   if(!mgBakedLiquid(id)){return;}
   let e=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
@@ -596,9 +470,9 @@ fn mgMeasureFineResidual(@builtin(global_invocation_id) gid:vec3u){
   if(mg.control.z==1u){
     let norm=projected*params.dimsDt.w/params.physical.x;
     // Non-finite values must never be mistaken for convergence.
-    atomicMax(&mgConvergence[15u+0],select(0x7f800000u,bitcast<u32>(norm),norm>=0.0&&(bitcast<u32>(norm)&0x7f800000u)!=0x7f800000u&&(bitcast<u32>(residual)&0x7f800000u)!=0x7f800000u));
+    atomicMax(&mgState.convergence[15u+0],select(0x7f800000u,bitcast<u32>(norm),norm>=0.0&&(bitcast<u32>(norm)&0x7f800000u)!=0x7f800000u&&(bitcast<u32>(residual)&0x7f800000u)!=0x7f800000u));
     return;
   }
-  atomicMax(&mgConvergence[10],bitcast<u32>(projected*params.dimsDt.w/params.physical.x));atomicMax(&mgConvergence[11],bitcast<u32>(projected/diagonal));
+  atomicMax(&mgState.convergence[10],bitcast<u32>(projected*params.dimsDt.w/params.physical.x));atomicMax(&mgState.convergence[11],bitcast<u32>(projected/diagonal));
 }
 `;

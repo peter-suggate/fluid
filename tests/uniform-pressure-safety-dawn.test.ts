@@ -42,8 +42,8 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
     scene.fluid.initialLiquidVolumes = [];
     scene.solidVoxels = [...solidVoxelShellForScene(scene)];
     for (const kind of ["finite", "nan", "infinity", "after-accepted-cycle"] as const) await t.test(kind, async () => {
-      fault = kind === "finite" ? "1e20" : kind === "nan" ? "bitcast<f32>(0x7fc00000u+atomicLoad(&mgConvergence[17]))" : kind === "infinity" ? "bitcast<f32>(0x7f800000u+atomicLoad(&mgConvergence[17]))"
-        : "select(mgP(id)+textureLoad(mgResidualIn,id,0).x,1e20,atomicLoad(&mgConvergence[17])>0u)";
+      fault = kind === "finite" ? "1e20" : kind === "nan" ? "bitcast<f32>(0x7fc00000u+atomicLoad(&mgState.convergence[17]))" : kind === "infinity" ? "bitcast<f32>(0x7f800000u+atomicLoad(&mgState.convergence[17]))"
+        : "select(mgP(id)+textureLoad(mgResidualIn,id,0).x,1e20,atomicLoad(&mgState.convergence[17])>0u)";
       const before = hits;
       const solver = await WebGPUUniformReferenceSolver.createAsync(device!, scene, "balanced", undefined, {
         geometricVolume: true, activeRegion: false,

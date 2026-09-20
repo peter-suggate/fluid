@@ -1,6 +1,6 @@
 /** Pure hierarchy and window planning, shared by method hosts and scene tools. */
-/** The 256-lane workgroup that solves the coarsest level exactly. */
-export const UNIFORM_CM11A_COARSEST_LANES = 256;
+/** Preferred coarse-grid size for hierarchy planning, not a solver limit. */
+export const UNIFORM_CM11A_COARSEST_TARGET_CELLS = 256;
 
 /** Physical cells on each axis, halo excluded. */
 export type UniformCM11aLevelSize = readonly [number, number, number];
@@ -10,7 +10,7 @@ export interface UniformCM11aHierarchyPlan {
   readonly levelCount: number;
   /** Physical lattice of every level, finest first. */
   readonly levelDimensions: readonly UniformCM11aLevelSize[];
-  /** Coarsest lattice with its one-cell halo, which the 256 lanes cover. */
+  /** Coarsest lattice cell count, including its one-cell halo. */
   readonly coarsestCells: number;
   /** True when each axis coarsens on its own schedule. */
   readonly semiCoarsened: boolean;
@@ -103,15 +103,17 @@ export function planUniformCM11aWindow(
     2 ** Math.ceil(Math.log2(Math.max(2, lifted[shortest]!))));
   candidates.push(lifted, [...domain]);
   let fallback: UniformCM11aWindowPlan | undefined;
+  let largerFallback: UniformCM11aWindowPlan | undefined;
   for (const candidate of candidates) {
     const { capacity, origin } = seat(candidate);
     const hierarchy = planUniformCM11aHierarchy(capacity);
     if (hierarchy.rejection) continue;
     const plan: UniformCM11aWindowPlan = { capacity, origin, hierarchy, alignment };
     if (!hierarchy.semiCoarsened) return plan;
-    fallback ??= plan;
+    if (hierarchy.coarsestCells <= UNIFORM_CM11A_COARSEST_TARGET_CELLS) fallback ??= plan;
+    else largerFallback ??= plan;
   }
-  return fallback ?? { capacity: domain, origin: [0, 0, 0],
+  return fallback ?? largerFallback ?? { capacity: domain, origin: [0, 0, 0],
     hierarchy: planUniformCM11aHierarchy(domain), alignment };
 }
 
@@ -134,7 +136,7 @@ function lockstepLevels(dimensions: UniformCM11aLevelSize, dimension: 2 | 3 = 3)
     const step = 2 ** index;
     levels.push([dimensions[0] / step, dimensions[1] / step, dimension === 2 ? 1 : dimensions[2] / step]);
   }
-  return haloedCells(levels[levels.length - 1]!) <= UNIFORM_CM11A_COARSEST_LANES ? levels : undefined;
+  return haloedCells(levels[levels.length - 1]!) <= UNIFORM_CM11A_COARSEST_TARGET_CELLS ? levels : undefined;
 }
 
 /**
@@ -172,6 +174,8 @@ function semiCoarsenedLevels(dimensions: UniformCM11aLevelSize): UniformCM11aLev
  * the lockstep plan is preferred whenever it exists and semi-coarsening is
  * reached only by lattices that have no hierarchy at all today. Every scene
  * that loads now keeps the hierarchy, and the numbers, that it already has.
+ * Odd terminal axes are retained too. The coarse solver uses strided storage
+ * for every grid; the target above only preserves the hierarchy preference.
  */
 export function planUniformCM11aHierarchy(
   dimensions: UniformCM11aLevelSize,
@@ -189,9 +193,5 @@ export function planUniformCM11aHierarchy(
     levelCount: levels.length, levelDimensions: Object.freeze(levels),
     coarsestCells, semiCoarsened: lockstep === undefined,
   };
-  if (coarsestCells > UNIFORM_CM11A_COARSEST_LANES) {
-    return { ...plan,
-      rejection: "CM11a coarsest grid must be integral and fit its 256-lane high-precision solve" };
-  }
   return plan;
 }

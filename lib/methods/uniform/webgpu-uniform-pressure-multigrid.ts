@@ -8,6 +8,7 @@ import {
 } from "./pressure-policy";
 export * from "./pressure-policy";
 export * from "./pressure-plan";
+import { UNIFORM_CM11A_COARSE_ROW_BYTES, UNIFORM_CM11A_COARSE_HEADER_BYTES } from "./uniform-coarse-solver.wgsl";
 import { planUniformCM11aHierarchy, type UniformCM11aLevelSize } from "./pressure-plan";
 
 const ENTRY_POINTS = [
@@ -101,6 +102,7 @@ interface CoarsestCaptureBuffers {
   readonly invocation: number;
   readonly dimensions: readonly [number, number, number];
   readonly byteLength: number;
+  readonly bytesPerRow: number;
   readonly pressure: GPUBuffer; readonly rhs: GPUBuffer; readonly minimum: GPUBuffer;
   readonly phi: GPUBuffer; readonly topology: GPUBuffer;
 }
@@ -207,6 +209,11 @@ export class WebGPUUniformPressureMultigrid {
     if (!spacing.every((value) => Number.isFinite(value) && value > 0)) {
       throw new RangeError("CM11a grid spacing must be positive and finite");
     }
+    const coarseScratchBytes = hierarchy.coarsestCells * UNIFORM_CM11A_COARSE_ROW_BYTES;
+    const stateBytes = UNIFORM_CM11A_COARSE_HEADER_BYTES + coarseScratchBytes;
+    if (stateBytes > Math.min(device.limits.maxStorageBufferBindingSize, device.limits.maxBufferSize)) {
+      throw new RangeError(`CM11a coarse grid ${hierarchy.levelDimensions.at(-1)!.join("x")} needs ${coarseScratchBytes} scratch bytes, exceeding device buffer limits`);
+    }
     this.spacing = spacing;
     const { levelCount } = hierarchy;
     this.finestSize = hierarchy.levelDimensions[0]!;
@@ -234,11 +241,12 @@ export class WebGPUUniformPressureMultigrid {
     this.levels = Object.freeze(levels);
     this.fullCycleBackup = texture("Uniform CM11a Full-Cycle p_tmp", "r32float", levels[0]!.dimensions);
     this.acceptedPressure = texture("Uniform CM11a accepted pressure", "r32float", levels[0]!.dimensions);
-    this.diagnostics = device.createBuffer({ label: "Uniform CM11a convergence status", size: 104,
+    this.diagnostics = device.createBuffer({ label: "Uniform CM11a convergence status", size: stateBytes,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.toleranceBuffer = device.createBuffer({ label: "Pressure residual tolerance", size: 16,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.setResidualTolerance(schedule.residualTolerance ?? 10);
+    allocatedBytes += stateBytes - 104;
     this.allocatedBytes = allocatedBytes;
     const textureBinding = { sampleType: "unfilterable-float", viewDimension: "3d" } as const;
     const scalarStorage = { access: "write-only", format: "r32float", viewDimension: "3d" } as const;
@@ -356,7 +364,7 @@ export class WebGPUUniformPressureMultigrid {
     cycleBudget?: number,
   ): void {
     this.assertLive(); if (!this.plan) throw new Error("Uniform CM11a hierarchy is not initialized");
-    encoder.clearBuffer(this.diagnostics);
+    encoder.clearBuffer(this.diagnostics, 0, 104);
     const prefixEnd = this.cycleBoundaries?.[this.clampCycleBudget(cycleBudget)] ?? this.plan.length;
     let openStage: UniformCM11aPlanStage | undefined;
     for (let index = 0; index < this.plan.length; index += 1) {
@@ -395,7 +403,7 @@ export class WebGPUUniformPressureMultigrid {
       if (dispatch.coarsestCapture && this.coarsestCaptureBuffers
         && dispatch.coarsestCapture.invocation === this.coarsestCaptureBuffers.invocation) {
         const capture = dispatch.coarsestCapture, buffers = this.coarsestCaptureBuffers;
-        const destination = (buffer: GPUBuffer) => ({ buffer, bytesPerRow: 256,
+        const destination = (buffer: GPUBuffer) => ({ buffer, bytesPerRow: buffers.bytesPerRow,
           rowsPerImage: capture.dimensions[1] });
         encoder.copyTextureToBuffer({ texture: capture.pressure }, destination(buffers.pressure), capture.dimensions);
         encoder.copyTextureToBuffer({ texture: capture.rhs }, destination(buffers.rhs), capture.dimensions);
@@ -446,10 +454,11 @@ export class WebGPUUniformPressureMultigrid {
       throw new RangeError("CM11a coarsest capture invocation must be a positive integer");
     }
     const dimensions = this.levels.at(-1)!.dimensions;
-    const byteLength = 256 * dimensions[1] * dimensions[2];
+    const bytesPerRow = Math.ceil(dimensions[0] * 16 / 256) * 256;
+    const byteLength = bytesPerRow * dimensions[1] * dimensions[2];
     const buffer = (label: string) => this.device.createBuffer({ label, size: byteLength,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-    this.coarsestCaptureBuffers = { invocation, dimensions, byteLength,
+    this.coarsestCaptureBuffers = { invocation, dimensions, byteLength, bytesPerRow,
       pressure: buffer("Uniform CM11a capture pressure"), rhs: buffer("Uniform CM11a capture rhs"),
       minimum: buffer("Uniform CM11a capture p-min"), phi: buffer("Uniform CM11a capture phi"),
       topology: buffer("Uniform CM11a capture topology") };
@@ -465,7 +474,7 @@ export class WebGPUUniformPressureMultigrid {
       const unpack = (buffer: GPUBuffer, components: number) => {
         const bytes = new Uint8Array(buffer.getMappedRange()); const values: number[] = [];
         for (let z = 0; z < dz; z += 1) for (let y = 0; y < dy; y += 1) {
-          const row = new Float32Array(bytes.buffer, bytes.byteOffset + 256 * (y + dy * z), 64);
+          const row = new Float32Array(bytes.buffer, bytes.byteOffset + capture.bytesPerRow * (y + dy * z), capture.bytesPerRow / 4);
           for (let x = 0; x < dx; x += 1) for (let c = 0; c < components; c += 1) {
             values.push(row[components * x + c]!);
           }
