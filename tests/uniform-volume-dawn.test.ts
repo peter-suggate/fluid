@@ -48,7 +48,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
     const v0=await read(device,solver.volumeTexture);const phi0=await read(device,solver.vertexPhiTexture!);
     await t.test("combined slice reads independent vertex phi and V/open capacity",async()=>{
       const d=device!; const source=solver!.denseLevelSetVolumeSource!;
-      const module=d.createShaderModule({code:`
+      const shaderModule=d.createShaderModule({code:`
 @group(0) @binding(9) var densityField:texture_3d<f32>;
 var<private> sparseTopologyArena:array<u32,1>;
 var<private> sparseState:array<f32,1>;
@@ -58,8 +58,8 @@ ${createGridOverlayLevelSetVolumeWGSL(true)}
 @group(0) @binding(23) var<storage,read_write> result:array<vec4f>;
 @compute @workgroup_size(1) fn probe(){result[0]=vec4f(sliceLevelSetPhi(vec3f(3.25,3.5,3.75)),sliceVolumeFill(vec3i(3)));}
 `});
-      assert.deepEqual((await module.getCompilationInfo()).messages.filter(m=>m.type==="error"),[]);
-      const pipeline=await d.createComputePipelineAsync({layout:"auto",compute:{module,entryPoint:"probe"}});
+      assert.deepEqual((await shaderModule.getCompilationInfo()).messages.filter(m=>m.type==="error"),[]);
+      const pipeline=await d.createComputePipelineAsync({layout:"auto",compute:{module:shaderModule,entryPoint:"probe"}});
       const params=d.createBuffer({size:96,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
       d.queue.writeBuffer(params,0,gridOverlayLevelSetVolumeUniform(undefined,source));
       const output=d.createBuffer({size:16,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
@@ -142,8 +142,8 @@ ${createGridOverlayLevelSetVolumeWGSL(true)}
         },()=>{});
         const mg=(candidate as unknown as {pressureMultigrid:{diagnostics:GPUBuffer;pressureTexture:GPUTexture}}).pressureMultigrid;
         const status=async()=>{
-          const buffer=device!.createBuffer({size:76,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
-          try{const e=device!.createCommandEncoder();e.copyBufferToBuffer(mg.diagnostics,0,buffer,0,76);device!.queue.submit([e.finish()]);
+          const buffer=device!.createBuffer({size:104,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
+          try{const e=device!.createCommandEncoder();e.copyBufferToBuffer(mg.diagnostics,0,buffer,0,104);device!.queue.submit([e.finish()]);
             await buffer.mapAsync(GPUMapMode.READ);return new Uint32Array(buffer.getMappedRange()).slice();
           }finally{buffer.unmap();buffer.destroy();}
         };
@@ -155,7 +155,16 @@ ${createGridOverlayLevelSetVolumeWGSL(true)}
             assert.equal(first[16],1);assert.equal(first[17],fullCycles>0?1:0);assert.equal(first[18],fullCycles>0?0:1);
             candidate.applyRuntimeValues({pressureResidualTolerance:0,densitySharpening:"off"});
             assert.ok(candidate.advanceTo(2/30));const second=await status();
-            assert.equal(second[16],0);assert.equal(second[17],fullCycles);assert.equal(second[18],vCycles);
+            assert.equal(second[16],0);
+            if(second[20]===0){assert.equal(second[17],fullCycles);assert.equal(second[18],vCycles);}
+            else {
+              assert.equal(second[20],1,"one rejected cycle switches permanently to recovery");
+              assert.ok(second[17]!+second[18]!<=fullCycles+vCycles);
+              assert.equal(second[21],64,"zero tolerance exhausts the bounded recovery schedule");
+              assert.equal(second[25],1,"exhaustion is reported honestly");
+              assert.ok(second[19]!<=second[24]!,"published residual cannot exceed initial residual");
+              assert.ok((await read(device!,mg.pressureTexture)).every(Number.isFinite));
+            }
           }else{assert.equal(first[16],0);assert.equal(first[17],fullCycles);assert.equal(first[18],vCycles);}
           return pressure;
         }finally{candidate.destroy();}

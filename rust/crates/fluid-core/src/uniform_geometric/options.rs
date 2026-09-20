@@ -4,13 +4,15 @@ use serde::{Deserialize, Serialize};
 
 pub const UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE: f32 = 0.0001_f32;
 pub const UNIFORM_CM11A_COARSE_SWEEP_CAP: usize = 4096;
-pub const UNIFORM_CM11A_CONSTRAINT_LEVELS: usize = 3;
 pub const UNIFORM_CM11A_DEFAULT_BUDGET_HEADROOM: usize = 1;
 pub const UNIFORM_CM11A_FULL_CYCLES: usize = 3;
 pub const UNIFORM_CM11A_MINIMUM_CYCLE_BUDGET: usize = 1;
 pub const UNIFORM_CM11A_PHI_PRESERVATION_LEVELS: usize = 2;
 pub const UNIFORM_CM11A_POST_SWEEPS: usize = 6;
 pub const UNIFORM_CM11A_PRE_SWEEPS: usize = 6;
+pub const UNIFORM_CM11A_RECOVERY_BATCHES: usize = 8;
+pub const UNIFORM_CM11A_RECOVERY_REDUCTION: f32 = 0.1_f32;
+pub const UNIFORM_CM11A_RECOVERY_SWEEPS: usize = 8;
 pub const UNIFORM_CM11A_V_CYCLES: usize = 4;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

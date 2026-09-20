@@ -2612,7 +2612,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   async readStats(): Promise<GPUEulerianInfo> {
     if (this.disposed || this.readbackPending) return this.info;
     this.readbackPending = true;
-    this.statsReadback ??= this.device.createBuffer({ label: "Uniform reference diagnostics readback", size: 208, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    this.statsReadback ??= this.device.createBuffer({ label: "Uniform reference diagnostics readback", size: 240, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = this.device.createCommandEncoder({ label: "Uniform reference diagnostics readback" });
     encoder.copyBufferToBuffer(this.reductions, 0, this.statsReadback, 0, 32);
     // Only the step that ran the classify dispatch leaves a meaningful count.
@@ -2623,6 +2623,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       UNIFORM_VOLUME_TWO_LEVEL_COUNTER_WORDS * 4);
     encoder.copyBufferToBuffer(this.pressureMultigrid.diagnostics, 0, this.statsReadback, 32, 60);
     encoder.copyBufferToBuffer(this.pressureMultigrid.diagnostics, 64, this.statsReadback, 176, 12);
+    encoder.copyBufferToBuffer(this.pressureMultigrid.diagnostics, 76, this.statsReadback, 208, 28);
     encoder.copyBufferToBuffer(this.velocityExtrapolator.convergenceDiagnostics, 0, this.statsReadback, 96, 16);
     encoder.copyBufferToBuffer(this.activeRegion, 0, this.statsReadback, 112, 64);
     this.device.queue.submit([encoder.finish()]);
@@ -2654,6 +2655,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         uniformCM11aConverged: words[11] === 0,
         uniformCM11aCoarseIterations: words[10],
         uniformCM11aCycleConverged: words[44] === 1,
+        uniformPressureAcceptedResidual: new Float32Array(new Uint32Array([words[52]]).buffer)[0],
+        uniformPressureRejectedCycles: words[53],
+        uniformPressureRecoverySweeps: words[54],
+        uniformPressureInitialResidual: new Float32Array(new Uint32Array([words[57]]).buffer)[0],
+        uniformPressureRecoveryExhausted: words[58] !== 0,
         uniformCM11aFullCyclesExecuted: words[45],
         uniformCM11aVCyclesExecuted: words[46],
         uniformPressureCyclesExecuted: words[45]! + words[46]!,

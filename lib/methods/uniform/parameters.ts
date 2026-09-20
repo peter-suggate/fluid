@@ -12,7 +12,7 @@ export const UNIFORM_PARAMS: MethodParamSpec[] = [
     ...runtimeUpdate, kind: "number", key: "pressureResidualTolerance",
     label: "Pressure residual tolerance", default: 10, tier: "fine",
     min: 0, max: 100, step: 0.0001, digits: 4, unit: "s⁻¹",
-    hint: "Stop after a complete Full-Cycle or V-Cycle when the projected residual infinity norm is at or below this tolerance. Zero runs every configured cycle.",
+    hint: "Stop after a complete Full-Cycle or V-Cycle when the projected residual infinity norm is at or below this tolerance. Zero disables tolerance-based early exit; divergent cycles still switch to safeguarded recovery.",
   },
   {
     ...runtimeUpdate, kind: "select", key: "pressureCycleBudget",

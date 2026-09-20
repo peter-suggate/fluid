@@ -1,13 +1,17 @@
 /** Backend-neutral CM11a schedule and lagged budget policy. */
 export const UNIFORM_CM11A_FULL_CYCLES = 3;
 export const UNIFORM_CM11A_V_CYCLES = 4;
-// CM11a measured four pre/post sweeps on its published grids. Six is the
-// minimum robust schedule for the deeper 64x32x64 hierarchy: at four or five,
-// a late Full-Cycle coarse correction reaches the 4096-sweep cap and its
-// unconverged pressure injects 10^7 m/s into the first projection.
+// Retain the validated six pre/post sweeps. Full-depth bounds and the
+// finest-level acceptance gate protect deeper hierarchies from divergence.
 export const UNIFORM_CM11A_PRE_SWEEPS = 6;
 export const UNIFORM_CM11A_POST_SWEEPS = 6;
-export const UNIFORM_CM11A_CONSTRAINT_LEVELS = 3;
+// Bounded projected-smoothing recovery after a rejected multigrid cycle.
+// Only a finite iterate with a non-increasing residual can be published.
+export const UNIFORM_CM11A_RECOVERY_BATCHES = 8;
+export const UNIFORM_CM11A_RECOVERY_SWEEPS = 8;
+// Recovery starts from a rejected solve, sometimes already under a loose
+// absolute tolerance. Demand useful reduction before declaring recovery done.
+export const UNIFORM_CM11A_RECOVERY_REDUCTION = 0.1;
 export const UNIFORM_CM11A_PHI_PRESERVATION_LEVELS = 2;
 // TallCells reports 1e-4 s^-1 as its GPU/single-precision absolute L-infinity
 // tolerance; 1e-8 belongs to its double-precision CPU comparison. CM11a

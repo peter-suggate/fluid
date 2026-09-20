@@ -14,8 +14,9 @@
  *   node --import tsx .../pressure-plan-census.mts --validate=<probe-output.json>[,<more.json>]
  */
 import { readFileSync } from "node:fs";
-import { planUniformCM11aHierarchy, planUniformCM11aWindow, UNIFORM_CM11A_CONSTRAINT_LEVELS,
+import { planUniformCM11aHierarchy, planUniformCM11aWindow,
   UNIFORM_CM11A_FULL_CYCLES, UNIFORM_CM11A_V_CYCLES,
+  UNIFORM_CM11A_RECOVERY_BATCHES, UNIFORM_CM11A_RECOVERY_SWEEPS,
   UNIFORM_CM11A_PRE_SWEEPS, UNIFORM_CM11A_POST_SWEEPS } from "../../../lib/methods/uniform/webgpu-uniform-pressure-multigrid";
 import { tallAirScene, TALL_AIR_RESERVOIR_M } from "./tall-air-scene.mjs";
 import { sceneLatticeDimensions } from "../../../lib/core/scene-lattice-dimensions";
@@ -53,7 +54,7 @@ function mirrorPlan(physical: readonly (readonly [number, number, number])[]): {
     emit("mgResidual", level);
     emit("mgRestrictResidual", level, level + 1);
     emit("mgClearPressure", level + 1); p[level + 1]! ^= 1;
-    emit(level < UNIFORM_CM11A_CONSTRAINT_LEVELS ? "mgDownsampleSubtract" : "mgClearMinimum", level, level + 1);
+    emit("mgDownsampleSubtract", level, level + 1);
     vCycle(level + 1);
     emit("mgProlongateAdd", level + 1, level); p[level]! ^= 1;
     for (let i = 0; i < SCHEDULE.postSweeps; i += 1) sweep(level);
@@ -62,7 +63,7 @@ function mirrorPlan(physical: readonly (readonly [number, number, number])[]): {
     emit("mgCopyPressure", 0); emit("mgShiftMinimum", 0); emit("mgResidual", 0);
     for (let level = 0; level + 1 < M; level += 1) {
       emit("mgRestrictResidual", level, level + 1);
-      emit(level < UNIFORM_CM11A_CONSTRAINT_LEVELS ? "mgDownsampleMinimum" : "mgClearMinimum", level, level + 1);
+      emit("mgDownsampleMinimum", level, level + 1);
     }
     emit("mgClearPressure", M - 1); p[M - 1]! ^= 1;
     coarseSolve();
@@ -76,10 +77,13 @@ function mirrorPlan(physical: readonly (readonly [number, number, number])[]): {
     if (p[0] !== 0) { emit("mgCopyPressure", 0); p[0] = 0; }
     emit("mgMeasureFineResidual", 0);
     emit("mgCheckCycleConvergence", 0, 0, [1, 1, 1]);
+    emit("mgSaveAccepted", 0); emit("mgRestoreRejected", 0);
   };
   emit("mgBuildFinestTopology", 0); emit("mgBuildFinestRhs", 0);
   for (let level = 0; level + 1 < M; level += 1) emit("mgDownsampleTopology", level, level + 1);
   for (let level = 0; level < M; level += 1) { emit("mgExtrapolatePhiOneCell", level); emit("mgBakeCoefficients", level); }
+  emit("mgMeasureFineResidual", 0);
+  emit("mgCheckCycleConvergence", 0, 0, [1, 1, 1]); emit("mgCopyPressure", 0);
   const cycleBoundaries: number[] = [emits.length];
   stage = "full-cycle";
   for (let c = 0; c < SCHEDULE.fullCycles; c += 1) { fullCycle(); checkpoint(); cycleBoundaries.push(emits.length); }
@@ -87,6 +91,11 @@ function mirrorPlan(physical: readonly (readonly [number, number, number])[]): {
   for (let c = 0; c < SCHEDULE.vCycles; c += 1) { vCycle(0); checkpoint(); cycleBoundaries.push(emits.length); }
   stage = "finish";
   const finishStart = emits.length;
+  for (let batch = 0; batch < UNIFORM_CM11A_RECOVERY_BATCHES; batch++) {
+    for (let i = 0; i < UNIFORM_CM11A_RECOVERY_SWEEPS; i++) sweep(0);
+    checkpoint();
+  }
+  emit("mgRestoreRejected", 0); emit("mgFinishSafety", 0, 0, [1, 1, 1]);
   if (p[0] !== 0) { emit("mgCopyPressure", 0); p[0] = 0; }
   emit("mgMeasureFineResidual", 0);
   return { emits, cycleBoundaries, finishStart };

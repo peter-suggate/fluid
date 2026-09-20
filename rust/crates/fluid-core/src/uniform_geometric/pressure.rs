@@ -2,8 +2,9 @@
 //! halo. Port of webgpu-uniform-pressure-multigrid.{ts,wgsl.ts}.
 use super::options::{
     UniformGeometricOptions, UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE,
-    UNIFORM_CM11A_COARSE_SWEEP_CAP, UNIFORM_CM11A_CONSTRAINT_LEVELS,
-    UNIFORM_CM11A_PHI_PRESERVATION_LEVELS,
+    UNIFORM_CM11A_COARSE_SWEEP_CAP, UNIFORM_CM11A_PHI_PRESERVATION_LEVELS,
+    UNIFORM_CM11A_RECOVERY_BATCHES, UNIFORM_CM11A_RECOVERY_REDUCTION,
+    UNIFORM_CM11A_RECOVERY_SWEEPS,
 };
 use crate::types::ValidationError;
 const FREE: f32 = -3.402823e38;
@@ -197,6 +198,10 @@ impl Level {
     fn norm(&self, rhs: &[f32], scale: f32) -> f32 {
         let mut maximum = 0.0_f32;
         for i in 0..self.p.len() {
+            // Also inspect inactive rows: prolongation can read their values.
+            if !self.p[i].is_finite() {
+                return f32::INFINITY;
+            }
             if self.phi[i] >= 0.0 {
                 continue;
             }
@@ -205,13 +210,17 @@ impl Level {
                 continue;
             }
             let r = rhs[i] - self.apply(i);
+            if !r.is_finite() {
+                return f32::INFINITY;
+            }
             let gap = (self.p[i] - self.minimum[i]).max(0.0);
             let residual = if r < 0.0 && -r >= gap * diagonal {
                 gap * diagonal
             } else {
                 r.abs()
             };
-            let value = residual * scale;
+            let violation = (self.minimum[i] - self.p[i]).max(0.0) * diagonal;
+            let value = residual.max(violation) * scale;
             if !value.is_finite() {
                 return f32::INFINITY;
             }
@@ -272,6 +281,10 @@ pub struct PressureReceipt {
     pub converged: bool,
     pub coarse_iterations: usize,
     pub coarse_cap_fail: bool,
+    pub initial_residual: f32,
+    pub rejected_cycles: usize,
+    pub recovery_sweeps: usize,
+    pub recovery_exhausted: bool,
 }
 pub struct Pressure {
     pub levels: Vec<Level>,
@@ -338,13 +351,12 @@ impl Pressure {
         let coarse = &self.levels[level + 1];
         let values = (0..coarse.p.len())
             .map(|i| {
-                if level >= UNIFORM_CM11A_CONSTRAINT_LEVELS {
-                    FREE
-                } else {
-                    fine.children(coarse, i).iter().fold(FREE, |m, &j| {
-                        m.max(fine.minimum[j] - if subtract { fine.p[j] } else { 0.0 })
-                    })
-                }
+                // A bound-active row may have a valid nonzero equation
+                // residual. Every coarse correction must inherit its bound;
+                // dropping it makes the coarse solve chase forbidden suction.
+                fine.children(coarse, i).iter().fold(FREE, |m, &j| {
+                    m.max(fine.minimum[j] - if subtract { fine.p[j] } else { 0.0 })
+                })
             })
             .collect();
         self.levels[level + 1].minimum = values;
@@ -439,6 +451,55 @@ impl Pressure {
             self.levels[l].smooth(rhs);
         }
     }
+    /// A rejected candidate never reaches velocity projection. Keep the best
+    /// finite feasible iterate even when recovery cannot reach the tolerance.
+    fn accept_candidate(
+        &mut self,
+        residual: f32,
+        best: &mut Vec<f32>,
+        best_residual: &mut f32,
+    ) -> bool {
+        if residual.is_finite() && residual <= *best_residual {
+            best.clone_from(&self.levels[0].p);
+            *best_residual = residual;
+            true
+        } else {
+            self.levels[0].p.clone_from(best);
+            false
+        }
+    }
+    fn recover(
+        &mut self,
+        rhs: &[f32],
+        scale: f32,
+        tolerance: f32,
+        best: &mut Vec<f32>,
+        best_residual: &mut f32,
+    ) {
+        for _ in 0..UNIFORM_CM11A_RECOVERY_BATCHES {
+            for _ in 0..UNIFORM_CM11A_RECOVERY_SWEEPS {
+                self.levels[0].smooth(rhs);
+            }
+            self.receipt.recovery_sweeps += UNIFORM_CM11A_RECOVERY_SWEEPS;
+            let candidate = self.levels[0].norm(rhs, scale);
+            // Red-black smoothing can transiently increase the infinity norm.
+            // Keep its finite working iterate between batches, but publish only
+            // the best field. A non-finite batch restarts from that safe field.
+            if !candidate.is_finite() {
+                self.levels[0].p.clone_from(best);
+            } else if candidate <= *best_residual {
+                best.clone_from(&self.levels[0].p);
+                *best_residual = candidate;
+            }
+            if tolerance > 0.0 && *best_residual <= tolerance {
+                self.receipt.converged = true;
+                break;
+            }
+        }
+        self.levels[0].p.clone_from(best);
+        self.receipt.residual = *best_residual;
+        self.receipt.recovery_exhausted = !self.receipt.converged;
+    }
     pub fn solve(&mut self, o: &UniformGeometricOptions, dt: f32, rho: f32, open_top: bool) {
         let maximum = (o.pressure_full_cycles + o.pressure_v_cycles) as usize;
         // Same demand rule as pressure-policy.ts. The CPU observes its previous
@@ -502,6 +563,10 @@ impl Pressure {
         let rhs = self.levels[0].rhs.clone();
         let original_min = self.levels[0].minimum.clone();
         let scale = dt / rho;
+        let mut best = self.levels[0].p.clone();
+        let mut best_residual = self.levels[0].norm(&rhs, scale);
+        self.receipt.initial_residual = best_residual;
+        self.receipt.residual = best_residual;
         for cycle in 0..budget {
             if cycle < o.pressure_full_cycles as usize {
                 let backup = self.levels[0].p.clone();
@@ -527,7 +592,22 @@ impl Pressure {
                 self.v_cycle(0, &rhs, o, scale);
             }
             self.receipt.cycles = cycle + 1;
-            self.receipt.residual = self.levels[0].norm(&rhs, scale);
+            let candidate = self.levels[0].norm(&rhs, scale);
+            if !self.accept_candidate(candidate, &mut best, &mut best_residual) {
+                self.receipt.rejected_cycles += 1;
+                // Once multigrid diverges, do not feed its correction back into
+                // another cycle. Recover using only projected fine-grid sweeps.
+                self.recover(
+                    &rhs,
+                    scale,
+                    o.pressure_residual_tolerance
+                        .min(self.receipt.initial_residual * UNIFORM_CM11A_RECOVERY_REDUCTION),
+                    &mut best,
+                    &mut best_residual,
+                );
+                break;
+            }
+            self.receipt.residual = best_residual;
             if o.pressure_residual_tolerance > 0.0
                 && self.receipt.residual <= o.pressure_residual_tolerance
             {
@@ -535,5 +615,93 @@ impl Pressure {
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod safety_tests {
+    use super::*;
+
+    #[test]
+    fn rejected_and_nonfinite_candidates_restore_the_accepted_field() {
+        let mut solver = Pressure::new([8, 8], [0.05; 2]).unwrap();
+        solver.levels[0].p.fill(12.0);
+        let mut best = solver.levels[0].p.clone();
+        let mut norm = 3.0;
+        for candidate in [4.0, f32::INFINITY, f32::NAN] {
+            solver.levels[0].p.fill(1e20);
+            assert!(!solver.accept_candidate(candidate, &mut best, &mut norm));
+            assert_eq!(solver.levels[0].p, best);
+            assert_eq!(norm, 3.0);
+        }
+        solver.levels[0].p.fill(8.0);
+        assert!(solver.accept_candidate(2.0, &mut best, &mut norm));
+        assert_eq!(best, solver.levels[0].p);
+        assert_eq!(norm, 2.0);
+    }
+
+    #[test]
+    fn wall_bounds_survive_all_six_transfers() {
+        let mut solver = Pressure::new([128, 128], [0.05; 2]).unwrap();
+        for y in 0..solver.levels[0].dims[1] {
+            let i = y * solver.levels[0].dims[0];
+            solver.levels[0].minimum[i] = 0.0;
+            solver.levels[0].p[i] = 7.0;
+        }
+        for l in 0..solver.levels.len() - 1 {
+            solver.restrict_min(l, l == 0);
+            assert_eq!(solver.levels[l + 1].minimum[0], -7.0);
+            assert!(solver.levels[l + 1].minimum.iter().any(|&v| v == FREE));
+        }
+    }
+
+    #[test]
+    fn rejected_pressure_recovers_with_bounded_projected_sweeps() {
+        let mut solver = Pressure::new([4, 4], [1.0; 2]).unwrap();
+        let l = &mut solver.levels[0];
+        for y in 1..=4 {
+            for x in 1..=4 {
+                let i = x + l.dims[0] * y;
+                l.phi[i] = -1.0;
+                l.topology[i] = [1.0; 3];
+                l.minimum[i] = 0.0;
+                l.rhs[i] = 1.0;
+            }
+        }
+        l.bake(false);
+        let rhs = l.rhs.clone();
+        let mut best = l.p.clone();
+        let mut norm = l.norm(&rhs, 1.0);
+        let initial = norm;
+        l.p.fill(1e20);
+        let bad = l.norm(&rhs, 1.0);
+        assert!(!solver.accept_candidate(bad, &mut best, &mut norm));
+        solver.recover(&rhs, 1.0, 0.01, &mut best, &mut norm);
+        assert!(norm < initial && norm <= 0.01, "residual {norm}");
+        assert!(solver.receipt.converged);
+        assert!(solver.receipt.recovery_sweeps > 0 && solver.receipt.recovery_sweeps <= 64);
+        assert!(solver.levels[0]
+            .p
+            .iter()
+            .all(|p| p.is_finite() && *p >= 0.0));
+        // Disabled early stopping exhausts the cap honestly, retaining the best.
+        solver.receipt = PressureReceipt::default();
+        solver.recover(&rhs, 1.0, 0.0, &mut best, &mut norm);
+        assert!(solver.receipt.recovery_exhausted);
+        assert_eq!(solver.receipt.recovery_sweeps, 64);
+        assert_eq!(solver.levels[0].p, best);
+    }
+
+    #[test]
+    fn inactive_nan_and_bound_violations_are_not_convergence() {
+        let mut level = Level::new([2, 2], [1.0; 2]);
+        let rhs = vec![0.0; level.p.len()];
+        level.p[0] = f32::NAN;
+        assert!(level.norm(&rhs, 1.0).is_infinite());
+        level.p[0] = -1.0;
+        level.phi[0] = -1.0;
+        level.minimum[0] = 0.0;
+        level.coefficients[0] = [1.0; 4];
+        assert!(level.norm(&rhs, 1.0) >= 4.0);
     }
 }

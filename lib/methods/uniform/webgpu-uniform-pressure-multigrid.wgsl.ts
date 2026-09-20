@@ -6,7 +6,7 @@
  * helpers as projection.  The fragment intentionally contains no alternate
  * solid or free-surface discretization.
  */
-import { UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE } from "./pressure-policy";
+import { UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE, UNIFORM_CM11A_RECOVERY_SWEEPS, UNIFORM_CM11A_RECOVERY_REDUCTION } from "./pressure-policy";
 export { UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE } from "./pressure-policy";
 
 export const uniformPressureMultigridWGSL = /* wgsl */ `
@@ -40,7 +40,9 @@ struct UniformMGParams {
 // 12..14: active/free coarsest rows and packed worst-row state for the first
 // failing solve (lane | active<<16 | halo<<17).
 // 15..18: cycle residual norm bits, stopped, completed Full-Cycles, V-Cycles.
-@group(1) @binding(13) var<storage,read_write> mgConvergence:array<atomic<u32>,19>;
+// 19..25: best residual, rejected cycles, recovery sweeps, recovery mode,
+// rejected candidate, initial residual, recovery exhausted.
+@group(1) @binding(13) var<storage,read_write> mgConvergence:array<atomic<u32>,26>;
 // Per-level immutable (+x,+y,+z) coefficients and liquid flag, baked once
 // after topology and the one-cell phi continuation are complete.
 @group(1) @binding(14) var mgCoefficientsIn: texture_3d<f32>;
@@ -48,15 +50,58 @@ struct UniformMGParams {
 
 @group(1) @binding(17) var<uniform> mgTolerance:vec4f;
 var<workgroup> mgCycleStopped:u32;
-fn mgSkipCycle()->bool{return mg.levelDims.w!=0u&&atomicLoad(&mgConvergence[15u+1])!=0u;}
+fn mgSkipCycle()->bool{
+  if(mg.levelDims.w==0u){return false;}
+  if(atomicLoad(&mgConvergence[16])!=0u){return true;}
+  let recovery=atomicLoad(&mgConvergence[22])!=0u;
+  return select(recovery,!recovery,mg.levelDims.w==2u);
+}
 
 @compute @workgroup_size(1)
 fn mgCheckCycleConvergence(){
   if(mgSkipCycle()){return;}
-  atomicAdd(&mgConvergence[15u+mg.control.z],1u);
-  if(mgTolerance.x>0.0&&bitcast<f32>(atomicLoad(&mgConvergence[15u+0]))<=mgTolerance.x){
-    atomicStore(&mgConvergence[15u+1],1u);
+  let candidate=atomicLoad(&mgConvergence[15]);
+  if(mg.control.z==0u){
+    atomicStore(&mgConvergence[19],candidate);
+    atomicStore(&mgConvergence[24],candidate);
+    return;
   }
+  if(mg.control.z==4u){atomicAdd(&mgConvergence[21],${UNIFORM_CM11A_RECOVERY_SWEEPS}u);}
+  else{atomicAdd(&mgConvergence[15u+mg.control.z],1u);}
+  let accepted=candidate<0x7f800000u&&candidate<=atomicLoad(&mgConvergence[19]);
+  atomicStore(&mgConvergence[23],select(1u,0u,accepted));
+  if(accepted){atomicStore(&mgConvergence[19],candidate);}
+  else if(mg.control.z!=4u){
+    atomicAdd(&mgConvergence[20],1u);
+    atomicStore(&mgConvergence[22],1u);
+    return;
+  }
+  let threshold=select(mgTolerance.x,min(mgTolerance.x,bitcast<f32>(atomicLoad(&mgConvergence[24]))*${UNIFORM_CM11A_RECOVERY_REDUCTION}),mg.control.z==4u);
+  if(threshold>0.0&&bitcast<f32>(atomicLoad(&mgConvergence[19]))<=threshold){
+    atomicStore(&mgConvergence[16],1u);
+  }
+}
+
+@compute @workgroup_size(4,4,4)
+fn mgSaveAccepted(@builtin(global_invocation_id) gid:vec3u){
+  if(atomicLoad(&mgConvergence[23])!=0u){return;}
+  let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
+  textureStore(mgPressureOut,id,vec4f(mgP(id)));
+}
+@compute @workgroup_size(4,4,4)
+fn mgRestoreRejected(@builtin(global_invocation_id) gid:vec3u){
+  if(mg.control.w==0u){
+    if(atomicLoad(&mgConvergence[23])==0u){return;}
+    // Smoothing may transiently worsen the infinity norm. Continue its finite
+    // working iterate privately; finish always restores the best field.
+    if(mg.levelDims.w==2u&&atomicLoad(&mgConvergence[15])<0x7f800000u){return;}
+  }
+  let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
+  textureStore(mgPressureOut,id,textureLoad(mgResidualIn,id,0));
+}
+@compute @workgroup_size(1)
+fn mgFinishSafety(){
+  atomicStore(&mgConvergence[25],select(0u,1u,atomicLoad(&mgConvergence[22])!=0u&&atomicLoad(&mgConvergence[16])==0u));
 }
 
 fn mgValid(p:vec3i,d:vec3u)->bool{return all(p>=vec3i(0))&&all(p<vec3i(d));}
@@ -535,16 +580,23 @@ fn mgSolveCoarsest(@builtin(local_invocation_index) lane:u32){
 
 @compute @workgroup_size(4,4,4)
 fn mgMeasureFineResidual(@builtin(global_invocation_id) gid:vec3u){
-  if(mgSkipCycle()||(mg.control.z==1u&&mgTolerance.x<=0.0)){return;}
-  let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)||!mgBakedLiquid(id)){return;}
+  if(mgSkipCycle()){return;}
+  let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
+  // Air values also participate in prolongation: never accept NaN/Inf there.
+  let pressure=mgP(id);
+  if((bitcast<u32>(pressure)&0x7f800000u)==0x7f800000u){
+    if(mg.control.z==1u){atomicMax(&mgConvergence[15],0x7f800000u);}
+    else{atomicMax(&mgConvergence[10],0x7f800000u);}return;
+  }
+  if(!mgBakedLiquid(id)){return;}
   let e=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
   var diagonalTerms:array<f32,6>;for(var n=0;n<6;n+=1){diagonalTerms[n]=mgCoefficient(id,id+e[n],u32(n/2));}let diagonal=mgD4Sum6(diagonalTerms);
-  if(diagonal<=0.0){return;}let residual=textureLoad(mgRhsIn,id,0).x-mgApply(id);let pressure=mgP(id);let minimum=textureLoad(mgMinimumIn,id,0).x;let gap=max(0.0,pressure-minimum);
-  let projectsToMinimum=residual<0.0&&-residual>=gap*diagonal;let projected=select(abs(residual),gap*diagonal,projectsToMinimum);
+  if(diagonal<=0.0){return;}let residual=textureLoad(mgRhsIn,id,0).x-mgApply(id);let minimum=textureLoad(mgMinimumIn,id,0).x;let gap=max(0.0,pressure-minimum);
+  let projectsToMinimum=residual<0.0&&-residual>=gap*diagonal;let projected=max(select(abs(residual),gap*diagonal,projectsToMinimum),max(0.0,minimum-pressure)*diagonal);
   if(mg.control.z==1u){
     let norm=projected*params.dimsDt.w/params.physical.x;
     // Non-finite values must never be mistaken for convergence.
-    atomicMax(&mgConvergence[15u+0],select(0x7f800000u,bitcast<u32>(norm),norm>=0.0&&norm<3.402823e38));
+    atomicMax(&mgConvergence[15u+0],select(0x7f800000u,bitcast<u32>(norm),norm>=0.0&&(bitcast<u32>(norm)&0x7f800000u)!=0x7f800000u&&(bitcast<u32>(residual)&0x7f800000u)!=0x7f800000u));
     return;
   }
   atomicMax(&mgConvergence[10],bitcast<u32>(projected*params.dimsDt.w/params.physical.x));atomicMax(&mgConvergence[11],bitcast<u32>(projected/diagonal));

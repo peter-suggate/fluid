@@ -1,0 +1,5423 @@
+{
+  "frozenPressure": {
+    "budget": 2,
+    "coarseCapFail": false,
+    "coarseIterations": 7,
+    "converged": false,
+    "cycles": 2,
+    "initialResidual": 130.71156311035156,
+    "recoveryExhausted": false,
+    "recoverySweeps": 0,
+    "rejectedCycles": 0,
+    "residual": 0.35901814699172974
+  },
+  "artifacts": [
+    "native",
+    "scalar",
+    "simd"
+  ],
+  "frames": 180,
+  "peakSpeed": 43.18186950683594,
+  "receipts": [
+    {
+      "frame": 1,
+      "injectedVolume": 0,
+      "maxSpeed": 1.0339469909667969,
+      "phiArea": 3840.002760603209,
+      "pressure": {
+        "budget": 7,
+        "coarseCapFail": false,
+        "coarseIterations": 3,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 6.6666669845581055,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.0099397674202919
+      },
+      "sharpeningDust": 0,
+      "time": 0.03333333507180214,
+      "transport": {
+        "dustCells": 0,
+        "dustVolume": 0,
+        "fallbackDonors": 0,
+        "finalVolume": 3840,
+        "initialVolume": 3840,
+        "maxDonorError": 0,
+        "skippedCells": 10768
+      },
+      "volume": 3840
+    },
+    {
+      "frame": 2,
+      "injectedVolume": 0,
+      "maxSpeed": 2.256700038909912,
+      "phiArea": 3839.881753622496,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 3,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 8.612255096435547,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.012227416038513184
+      },
+      "sharpeningDust": 0,
+      "time": 0.06666667014360428,
+      "transport": {
+        "dustCells": 0,
+        "dustVolume": 0,
+        "fallbackDonors": 0,
+        "finalVolume": 3839.9999951299687,
+        "initialVolume": 3840,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 10768
+      },
+      "volume": 3839.9999950724596
+    },
+    {
+      "frame": 3,
+      "injectedVolume": 0,
+      "maxSpeed": 2.9259541034698486,
+      "phiArea": 3839.3904831740074,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 3,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 9.854324340820312,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.017344413325190544
+      },
+      "sharpeningDust": 9.545492503093556e-7,
+      "time": 0.10000000521540642,
+      "transport": {
+        "dustCells": 1,
+        "dustVolume": 2.12348837180798e-7,
+        "fallbackDonors": 0,
+        "finalVolume": 3839.9999934553834,
+        "initialVolume": 3839.9999950724596,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 10352
+      },
+      "volume": 3839.9999927037597
+    },
+    {
+      "frame": 4,
+      "injectedVolume": 0,
+      "maxSpeed": 3.4445929527282715,
+      "phiArea": 3839.1645241600927,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 3,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 11.623494148254395,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.04261072725057602
+      },
+      "sharpeningDust": 0.000012049121096424642,
+      "time": 0.13333334028720856,
+      "transport": {
+        "dustCells": 20,
+        "dustVolume": 0.000007814541355344318,
+        "fallbackDonors": 0,
+        "finalVolume": 3839.999985677812,
+        "initialVolume": 3839.9999927037597,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 10352
+      },
+      "volume": 3839.9999732137107
+    },
+    {
+      "frame": 5,
+      "injectedVolume": 0,
+      "maxSpeed": 4.270453453063965,
+      "phiArea": 3838.7915816518944,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 3,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 13.226536750793457,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.041260503232479095
+      },
+      "sharpeningDust": 0.000026321249777083722,
+      "time": 0.1666666753590107,
+      "transport": {
+        "dustCells": 39,
+        "dustVolume": 0.000012996133216702788,
+        "fallbackDonors": 0,
+        "finalVolume": 3839.999965640839,
+        "initialVolume": 3839.9999732137107,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 10352
+      },
+      "volume": 3839.999939644815
+    },
+    {
+      "frame": 6,
+      "injectedVolume": 0,
+      "maxSpeed": 5.364236831665039,
+      "phiArea": 3837.2943670797395,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 3,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 19.274452209472656,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.07317455857992172
+      },
+      "sharpeningDust": 0.00001253614431107053,
+      "time": 0.20000001043081284,
+      "transport": {
+        "dustCells": 39,
+        "dustVolume": 0.000016643891174172865,
+        "fallbackDonors": 0,
+        "finalVolume": 3839.9999219198126,
+        "initialVolume": 3839.999939644815,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 10352
+      },
+      "volume": 3839.999909226426
+    },
+    {
+      "frame": 7,
+      "injectedVolume": 0,
+      "maxSpeed": 5.729028701782227,
+      "phiArea": 3838.8053855713224,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 3,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 18.097373962402344,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.04067036136984825
+      },
+      "sharpeningDust": 0.000015879558134201943,
+      "time": 0.23333334550261497,
+      "transport": {
+        "dustCells": 43,
+        "dustVolume": 0.000019560688157227446,
+        "fallbackDonors": 13,
+        "finalVolume": 3839.9998914592416,
+        "initialVolume": 3839.999909226426,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 9616
+      },
+      "volume": 3839.999875681514
+    },
+    {
+      "frame": 8,
+      "injectedVolume": 0,
+      "maxSpeed": 6.378398418426514,
+      "phiArea": 3839.383349578078,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 3,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 22.43135643005371,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.1015927717089653
+      },
+      "sharpeningDust": 0.000012639527426472341,
+      "time": 0.2666666805744171,
+      "transport": {
+        "dustCells": 41,
+        "dustVolume": 0.000017167525669492534,
+        "fallbackDonors": 24,
+        "finalVolume": 3839.9998594479284,
+        "initialVolume": 3839.999875681514,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 9728
+      },
+      "volume": 3839.999846642335
+    },
+    {
+      "frame": 9,
+      "injectedVolume": 0,
+      "maxSpeed": 7.160783767700195,
+      "phiArea": 3840.3982065592427,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 3,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 12.053523063659668,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.07128410786390305
+      },
+      "sharpeningDust": 0.000009877681407033378,
+      "time": 0.30000001564621925,
+      "transport": {
+        "dustCells": 29,
+        "dustVolume": 0.000008352020362423218,
+        "fallbackDonors": 35,
+        "finalVolume": 3839.999840310351,
+        "initialVolume": 3839.999846642335,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 9680
+      },
+      "volume": 3839.9998305784884
+    },
+    {
+      "frame": 10,
+      "injectedVolume": 0,
+      "maxSpeed": 7.733890056610107,
+      "phiArea": 3843.048513883972,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 4,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 16.496091842651367,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.06471678614616394
+      },
+      "sharpeningDust": 0.000019375799581666797,
+      "time": 0.3333333507180214,
+      "transport": {
+        "dustCells": 22,
+        "dustVolume": 0.000006739398954902498,
+        "fallbackDonors": 50,
+        "finalVolume": 3839.9998231667523,
+        "initialVolume": 3839.9998305784884,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 9584
+      },
+      "volume": 3839.999803734614
+    },
+    {
+      "frame": 11,
+      "injectedVolume": 0,
+      "maxSpeed": 7.6228108406066895,
+      "phiArea": 3842.085825402057,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 4,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 36.94200134277344,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.7213665843009949
+      },
+      "sharpeningDust": 0.000011966340935032349,
+      "time": 0.36666668578982353,
+      "transport": {
+        "dustCells": 26,
+        "dustVolume": 0.000009522357156607764,
+        "fallbackDonors": 70,
+        "finalVolume": 3839.999795691419,
+        "initialVolume": 3839.999803734614,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 9696
+      },
+      "volume": 3839.999783872015
+    },
+    {
+      "frame": 12,
+      "injectedVolume": 0,
+      "maxSpeed": 8.29920482635498,
+      "phiArea": 3845.6819396336796,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 4,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 11.496659278869629,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.16962043941020966
+      },
+      "sharpeningDust": 0.000004104304252905422,
+      "time": 0.40000002086162567,
+      "transport": {
+        "dustCells": 24,
+        "dustVolume": 0.000011287161924666833,
+        "fallbackDonors": 306,
+        "finalVolume": 3839.9997731577105,
+        "initialVolume": 3839.999783872015,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 9648
+      },
+      "volume": 3839.9997687717287
+    },
+    {
+      "frame": 13,
+      "injectedVolume": 0,
+      "maxSpeed": 8.756741523742676,
+      "phiArea": 3850.4996247044764,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 4,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 7.779293537139893,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.10168179869651794
+      },
+      "sharpeningDust": 6.489160568889929e-7,
+      "time": 0.4333333559334278,
+      "transport": {
+        "dustCells": 38,
+        "dustVolume": 0.000011700276152826206,
+        "fallbackDonors": 321,
+        "finalVolume": 3839.9997570340543,
+        "initialVolume": 3839.9997687717287,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 9568
+      },
+      "volume": 3839.999756373712
+    },
+    {
+      "frame": 14,
+      "injectedVolume": 0,
+      "maxSpeed": 10.224116325378418,
+      "phiArea": 3857.9636936190072,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 4,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 21.84185028076172,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.16285721957683563
+      },
+      "sharpeningDust": 8.580682333558798e-7,
+      "time": 0.46666669100522995,
+      "transport": {
+        "dustCells": 35,
+        "dustVolume": 0.000010233721890351433,
+        "fallbackDonors": 330,
+        "finalVolume": 3839.9997445020435,
+        "initialVolume": 3839.999756373712,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 9392
+      },
+      "volume": 3839.9997438426444
+    },
+    {
+      "frame": 15,
+      "injectedVolume": 0,
+      "maxSpeed": 7.924774169921875,
+      "phiArea": 3863.6307064130233,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 4,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 7.1478590965271,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.20681290328502655
+      },
+      "sharpeningDust": 0.000001150758748735825,
+      "time": 0.5000000260770321,
+      "transport": {
+        "dustCells": 36,
+        "dustVolume": 0.000013728840819737798,
+        "fallbackDonors": 317,
+        "finalVolume": 3839.9997312243113,
+        "initialVolume": 3839.9997438426444,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 9328
+      },
+      "volume": 3839.9997296197257
+    },
+    {
+      "frame": 16,
+      "injectedVolume": 0,
+      "maxSpeed": 8.603708267211914,
+      "phiArea": 3868.5053795270505,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 4,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 10.385287284851074,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.28891780972480774
+      },
+      "sharpeningDust": 0.00000236027540267969,
+      "time": 0.5333333611488342,
+      "transport": {
+        "dustCells": 41,
+        "dustVolume": 0.000013063713250716091,
+        "fallbackDonors": 308,
+        "finalVolume": 3839.999716866895,
+        "initialVolume": 3839.9997296197257,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 9264
+      },
+      "volume": 3839.9997144371955
+    },
+    {
+      "frame": 17,
+      "injectedVolume": 0,
+      "maxSpeed": 9.67521858215332,
+      "phiArea": 3873.7114262419636,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 4,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 25.438472747802734,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.14091290533542633
+      },
+      "sharpeningDust": 7.016205927357078e-7,
+      "time": 0.5666666962206364,
+      "transport": {
+        "dustCells": 54,
+        "dustVolume": 0.000017320440013124383,
+        "fallbackDonors": 310,
+        "finalVolume": 3839.999697804239,
+        "initialVolume": 3839.9997144371955,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 8944
+      },
+      "volume": 3839.9996969973618
+    },
+    {
+      "frame": 18,
+      "injectedVolume": 0,
+      "maxSpeed": 9.15820598602295,
+      "phiArea": 3881.6349989941646,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 7.366977691650391,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.21778279542922974
+      },
+      "sharpeningDust": 0.0000018765694562716817,
+      "time": 0.6000000312924385,
+      "transport": {
+        "dustCells": 54,
+        "dustVolume": 0.000017205635051364965,
+        "fallbackDonors": 282,
+        "finalVolume": 3839.999683189791,
+        "initialVolume": 3839.9996969973618,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 8864
+      },
+      "volume": 3839.9996816641756
+    },
+    {
+      "frame": 19,
+      "injectedVolume": 0,
+      "maxSpeed": 10.772321701049805,
+      "phiArea": 3887.4599953816905,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 27.59174346923828,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.20109088718891144
+      },
+      "sharpeningDust": 9.576324373483658e-7,
+      "time": 0.6333333663642406,
+      "transport": {
+        "dustCells": 58,
+        "dustVolume": 0.000023648518766794524,
+        "fallbackDonors": 308,
+        "finalVolume": 3839.9996552777952,
+        "initialVolume": 3839.9996816641756,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 8752
+      },
+      "volume": 3839.999654032504
+    },
+    {
+      "frame": 20,
+      "injectedVolume": 0,
+      "maxSpeed": 9.850581169128418,
+      "phiArea": 3892.9533560696145,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 19.47136688232422,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.13642702996730804
+      },
+      "sharpeningDust": 0.0000017520058008813066,
+      "time": 0.6666667014360428,
+      "transport": {
+        "dustCells": 49,
+        "dustVolume": 0.000021196138107804074,
+        "fallbackDonors": 328,
+        "finalVolume": 3839.999637424929,
+        "initialVolume": 3839.999654032504,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 7648
+      },
+      "volume": 3839.999635637379
+    },
+    {
+      "frame": 21,
+      "injectedVolume": 0,
+      "maxSpeed": 10.493067741394043,
+      "phiArea": 3896.446143974201,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 12.756978034973145,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.20981577038764954
+      },
+      "sharpeningDust": 0,
+      "time": 0.7000000365078449,
+      "transport": {
+        "dustCells": 42,
+        "dustVolume": 0.000016284741308769668,
+        "fallbackDonors": 290,
+        "finalVolume": 3839.9996205224325,
+        "initialVolume": 3839.999635637379,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 8464
+      },
+      "volume": 3839.9996207066506
+    },
+    {
+      "frame": 22,
+      "injectedVolume": 0,
+      "maxSpeed": 11.102066040039062,
+      "phiArea": 3899.614942030632,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 22.6022891998291,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.21073772013187408
+      },
+      "sharpeningDust": 0.0000010750668479886372,
+      "time": 0.7333333715796471,
+      "transport": {
+        "dustCells": 43,
+        "dustVolume": 0.000017261261691992047,
+        "fallbackDonors": 283,
+        "finalVolume": 3839.999605935779,
+        "initialVolume": 3839.9996207066506,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 8256
+      },
+      "volume": 3839.999604821871
+    },
+    {
+      "frame": 23,
+      "injectedVolume": 0,
+      "maxSpeed": 10.920353889465332,
+      "phiArea": 3904.9551939494513,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 10.07165813446045,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.15395541489124298
+      },
+      "sharpeningDust": 0,
+      "time": 0.7666667066514492,
+      "transport": {
+        "dustCells": 51,
+        "dustVolume": 0.000020504415936775655,
+        "fallbackDonors": 298,
+        "finalVolume": 3839.9995880249558,
+        "initialVolume": 3839.999604821871,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 7584
+      },
+      "volume": 3839.999587778681
+    },
+    {
+      "frame": 24,
+      "injectedVolume": 0,
+      "maxSpeed": 23.02952766418457,
+      "phiArea": 3894.530395921087,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 2,
+        "initialResidual": 217.59561157226562,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 1.2256395816802979
+      },
+      "sharpeningDust": 0.0000026193149551545503,
+      "time": 0.8000000417232513,
+      "transport": {
+        "dustCells": 50,
+        "dustVolume": 0.000022190377161113162,
+        "fallbackDonors": 290,
+        "finalVolume": 3839.9995623076306,
+        "initialVolume": 3839.999587778681,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 7488
+      },
+      "volume": 3839.9995592262353
+    },
+    {
+      "frame": 25,
+      "injectedVolume": 0,
+      "maxSpeed": 19.77726936340332,
+      "phiArea": 3861.098547604852,
+      "pressure": {
+        "budget": 3,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 198.43055725097656,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.4493087828159332
+      },
+      "sharpeningDust": 0.000001526791493233759,
+      "time": 0.8333333767950535,
+      "transport": {
+        "dustCells": 45,
+        "dustVolume": 0.000019270131955018144,
+        "fallbackDonors": 102,
+        "finalVolume": 3839.999543847912,
+        "initialVolume": 3839.9995592262353,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 6112
+      },
+      "volume": 3839.9995418341496
+    },
+    {
+      "frame": 26,
+      "injectedVolume": 0,
+      "maxSpeed": 28.81414222717285,
+      "phiArea": 3825.648083310978,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 4,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 207.8241729736328,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.34980884194374084
+      },
+      "sharpeningDust": 0.0000017631506352699944,
+      "time": 0.8666667118668556,
+      "transport": {
+        "dustCells": 45,
+        "dustVolume": 0.00001572075089395497,
+        "fallbackDonors": 80,
+        "finalVolume": 3839.9995235877795,
+        "initialVolume": 3839.9995418341496,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 7120
+      },
+      "volume": 3839.99952163934
+    },
+    {
+      "frame": 27,
+      "injectedVolume": 0,
+      "maxSpeed": 24.5143985748291,
+      "phiArea": 3784.6844725630945,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 4,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 127.93174743652344,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.41410374641418457
+      },
+      "sharpeningDust": 0,
+      "time": 0.9000000469386578,
+      "transport": {
+        "dustCells": 44,
+        "dustVolume": 0.000019163004791877825,
+        "fallbackDonors": 31,
+        "finalVolume": 3839.9995049580175,
+        "initialVolume": 3839.99952163934,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 5952
+      },
+      "volume": 3839.99950497769
+    },
+    {
+      "frame": 28,
+      "injectedVolume": 0,
+      "maxSpeed": 28.13260269165039,
+      "phiArea": 3745.2120799312725,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 4,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 119.10086822509766,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.7145413160324097
+      },
+      "sharpeningDust": 0.0000021398849980869272,
+      "time": 0.9333333820104599,
+      "transport": {
+        "dustCells": 37,
+        "dustVolume": 0.000015012592315399864,
+        "fallbackDonors": 29,
+        "finalVolume": 3839.9994887586013,
+        "initialVolume": 3839.99950497769,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 6736
+      },
+      "volume": 3839.9994866520497
+    },
+    {
+      "frame": 29,
+      "injectedVolume": 0,
+      "maxSpeed": 25.571828842163086,
+      "phiArea": 3776.2059385152825,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 4,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 208.88336181640625,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.9867376685142517
+      },
+      "sharpeningDust": 0.0000012217597600283625,
+      "time": 0.966666717082262,
+      "transport": {
+        "dustCells": 63,
+        "dustVolume": 0.000025442030719524666,
+        "fallbackDonors": 53,
+        "finalVolume": 3839.9994639961587,
+        "initialVolume": 3839.9994866520497,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 6784
+      },
+      "volume": 3839.9994628338295
+    },
+    {
+      "frame": 30,
+      "injectedVolume": 0,
+      "maxSpeed": 24.050399780273438,
+      "phiArea": 3759.543250297953,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 4,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 206.89947509765625,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.9425647854804993
+      },
+      "sharpeningDust": 0,
+      "time": 1.0000000521540642,
+      "transport": {
+        "dustCells": 74,
+        "dustVolume": 0.000023120333154713624,
+        "fallbackDonors": 545,
+        "finalVolume": 3839.999445441304,
+        "initialVolume": 3839.9994628338295,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 6992
+      },
+      "volume": 3839.999445410275
+    },
+    {
+      "frame": 31,
+      "injectedVolume": 0,
+      "maxSpeed": 21.094146728515625,
+      "phiArea": 3761.158637893459,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 77.71439361572266,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.852351725101471
+      },
+      "sharpeningDust": 3.2159732654690742e-9,
+      "time": 1.0333333872258663,
+      "transport": {
+        "dustCells": 81,
+        "dustVolume": 0.00002872869702441605,
+        "fallbackDonors": 383,
+        "finalVolume": 3839.9994179589535,
+        "initialVolume": 3839.999445410275,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 6592
+      },
+      "volume": 3839.9994176487808
+    },
+    {
+      "frame": 32,
+      "injectedVolume": 0,
+      "maxSpeed": 17.16189193725586,
+      "phiArea": 3762.0254690852016,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 104.69436645507812,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 1.5212451219558716
+      },
+      "sharpeningDust": 0.0000032589549618933233,
+      "time": 1.0666667222976685,
+      "transport": {
+        "dustCells": 72,
+        "dustVolume": 0.00002797075401206328,
+        "fallbackDonors": 373,
+        "finalVolume": 3839.999391439813,
+        "initialVolume": 3839.9994176487808,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 6880
+      },
+      "volume": 3839.999388648913
+    },
+    {
+      "frame": 33,
+      "injectedVolume": 0,
+      "maxSpeed": 16.452329635620117,
+      "phiArea": 3754.4405270297575,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 4,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 92.3699722290039,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.9414104223251343
+      },
+      "sharpeningDust": 0.000006776406564767967,
+      "time": 1.1000000573694706,
+      "transport": {
+        "dustCells": 81,
+        "dustVolume": 0.00003245847325367146,
+        "fallbackDonors": 459,
+        "finalVolume": 3839.9993579127986,
+        "initialVolume": 3839.999388648913,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 6704
+      },
+      "volume": 3839.999350996637
+    },
+    {
+      "frame": 34,
+      "injectedVolume": 0,
+      "maxSpeed": 15.533292770385742,
+      "phiArea": 3752.828441071091,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 72.15557098388672,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.8991462588310242
+      },
+      "sharpeningDust": 0.000003674420725019445,
+      "time": 1.1333333924412727,
+      "transport": {
+        "dustCells": 67,
+        "dustVolume": 0.000027091969431070062,
+        "fallbackDonors": 432,
+        "finalVolume": 3839.9993222143753,
+        "initialVolume": 3839.999350996637,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 7136
+      },
+      "volume": 3839.9993189642987
+    },
+    {
+      "frame": 35,
+      "injectedVolume": 0,
+      "maxSpeed": 14.327524185180664,
+      "phiArea": 3755.0716513519874,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 102.81324005126953,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 1.0254671573638916
+      },
+      "sharpeningDust": 0.000005126525309151475,
+      "time": 1.1666667275130749,
+      "transport": {
+        "dustCells": 59,
+        "dustVolume": 0.000025592852138878186,
+        "fallbackDonors": 401,
+        "finalVolume": 3839.999300088859,
+        "initialVolume": 3839.9993189642987,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 6832
+      },
+      "volume": 3839.999293761315
+    },
+    {
+      "frame": 36,
+      "injectedVolume": 0,
+      "maxSpeed": 13.526416778564453,
+      "phiArea": 3766.5237225401215,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 59.10293197631836,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.7976574301719666
+      },
+      "sharpeningDust": 0.00001263887230606997,
+      "time": 1.200000062584877,
+      "transport": {
+        "dustCells": 70,
+        "dustVolume": 0.000026571442940603873,
+        "fallbackDonors": 399,
+        "finalVolume": 3839.999266155585,
+        "initialVolume": 3839.999293761315,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 6480
+      },
+      "volume": 3839.9992533557056
+    },
+    {
+      "frame": 37,
+      "injectedVolume": 0,
+      "maxSpeed": 13.21408748626709,
+      "phiArea": 3769.94166475995,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 4,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 65.64664459228516,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.7502891421318054
+      },
+      "sharpeningDust": 0.000011015110374046344,
+      "time": 1.2333333976566792,
+      "transport": {
+        "dustCells": 81,
+        "dustVolume": 0.0000346207922043984,
+        "fallbackDonors": 398,
+        "finalVolume": 3839.999211657481,
+        "initialVolume": 3839.9992533557056,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 6128
+      },
+      "volume": 3839.999200022528
+    },
+    {
+      "frame": 38,
+      "injectedVolume": 0,
+      "maxSpeed": 12.592194557189941,
+      "phiArea": 3787.176581230997,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 4,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 92.4527816772461,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.7933831214904785
+      },
+      "sharpeningDust": 0.000006689063184239785,
+      "time": 1.2666667327284813,
+      "transport": {
+        "dustCells": 74,
+        "dustVolume": 0.00003038803359223241,
+        "fallbackDonors": 358,
+        "finalVolume": 3839.9991720575545,
+        "initialVolume": 3839.999200022528,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 6224
+      },
+      "volume": 3839.9991653952457
+    },
+    {
+      "frame": 39,
+      "injectedVolume": 0,
+      "maxSpeed": 16.332414627075195,
+      "phiArea": 3803.5547088438193,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 6,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 262.9945983886719,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.6619314551353455
+      },
+      "sharpeningDust": 0.000009027015153151297,
+      "time": 1.3000000678002834,
+      "transport": {
+        "dustCells": 78,
+        "dustVolume": 0.000029274603522144726,
+        "fallbackDonors": 354,
+        "finalVolume": 3839.9991358282277,
+        "initialVolume": 3839.9991653952457,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 6272
+      },
+      "volume": 3839.999126513441
+    },
+    {
+      "frame": 40,
+      "injectedVolume": 0,
+      "maxSpeed": 14.515935897827148,
+      "phiArea": 3788.9568358261313,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 6,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 234.06533813476562,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.8139672875404358
+      },
+      "sharpeningDust": 0.000009847057185652375,
+      "time": 1.3333334028720856,
+      "transport": {
+        "dustCells": 84,
+        "dustVolume": 0.00003089274747547499,
+        "fallbackDonors": 250,
+        "finalVolume": 3839.999096773388,
+        "initialVolume": 3839.999126513441,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 6448
+      },
+      "volume": 3839.999087530325
+    },
+    {
+      "frame": 41,
+      "injectedVolume": 0,
+      "maxSpeed": 11.300872802734375,
+      "phiArea": 3786.997855650159,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 6,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 72.9410171508789,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.9174264073371887
+      },
+      "sharpeningDust": 0.000003728488024989929,
+      "time": 1.3666667379438877,
+      "transport": {
+        "dustCells": 80,
+        "dustVolume": 0.000026754741546897165,
+        "fallbackDonors": 25,
+        "finalVolume": 3839.999067425618,
+        "initialVolume": 3839.999087530325,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 6560
+      },
+      "volume": 3839.9990630514803
+    },
+    {
+      "frame": 42,
+      "injectedVolume": 0,
+      "maxSpeed": 10.34984016418457,
+      "phiArea": 3793.9432068508795,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 6,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 106.08233642578125,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.4880448281764984
+      },
+      "sharpeningDust": 0.000015063688636018924,
+      "time": 1.4000000730156898,
+      "transport": {
+        "dustCells": 72,
+        "dustVolume": 0.00002962125444794239,
+        "fallbackDonors": 12,
+        "finalVolume": 3839.9990383778004,
+        "initialVolume": 3839.9990630514803,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 6608
+      },
+      "volume": 3839.9990230566927
+    },
+    {
+      "frame": 43,
+      "injectedVolume": 0,
+      "maxSpeed": 7.434325218200684,
+      "phiArea": 3807.5977513777907,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 6,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 79.44924926757812,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.4201792776584625
+      },
+      "sharpeningDust": 0.000005418442242444144,
+      "time": 1.433333408087492,
+      "transport": {
+        "dustCells": 96,
+        "dustVolume": 0.000025810444379520403,
+        "fallbackDonors": 11,
+        "finalVolume": 3839.9990023785,
+        "initialVolume": 3839.9990230566927,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 7392
+      },
+      "volume": 3839.998997058148
+    },
+    {
+      "frame": 44,
+      "injectedVolume": 0,
+      "maxSpeed": 6.1591949462890625,
+      "phiArea": 3811.4813266536075,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 91.63815307617188,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.3076145052909851
+      },
+      "sharpeningDust": 0.0000042564763020891405,
+      "time": 1.4666667431592941,
+      "transport": {
+        "dustCells": 70,
+        "dustVolume": 0.000028445033796842267,
+        "fallbackDonors": 15,
+        "finalVolume": 3839.9989691633273,
+        "initialVolume": 3839.998997058148,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 7584
+      },
+      "volume": 3839.9989649733684
+    },
+    {
+      "frame": 45,
+      "injectedVolume": 0,
+      "maxSpeed": 5.837996959686279,
+      "phiArea": 3822.9438809743356,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 56.74583053588867,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.4647224545478821
+      },
+      "sharpeningDust": 0.0000073292932256663335,
+      "time": 1.5000000782310963,
+      "transport": {
+        "dustCells": 74,
+        "dustVolume": 0.00003327785540463424,
+        "fallbackDonors": 9,
+        "finalVolume": 3839.998935312751,
+        "initialVolume": 3839.9989649733684,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 7632
+      },
+      "volume": 3839.9989281323537
+    },
+    {
+      "frame": 46,
+      "injectedVolume": 0,
+      "maxSpeed": 5.521368980407715,
+      "phiArea": 3830.71700937039,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 42.992088317871094,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.318100243806839
+      },
+      "sharpeningDust": 0.000005855135270849132,
+      "time": 1.5333334133028984,
+      "transport": {
+        "dustCells": 75,
+        "dustVolume": 0.00003354341004335737,
+        "fallbackDonors": 9,
+        "finalVolume": 3839.9988945444475,
+        "initialVolume": 3839.9989281323537,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 7680
+      },
+      "volume": 3839.9988897959643
+    },
+    {
+      "frame": 47,
+      "injectedVolume": 0,
+      "maxSpeed": 5.266974925994873,
+      "phiArea": 3840.4341177605093,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 86.8157730102539,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.2991482615470886
+      },
+      "sharpeningDust": 0.00001235486831774324,
+      "time": 1.5666667483747005,
+      "transport": {
+        "dustCells": 82,
+        "dustVolume": 0.000034252047017346854,
+        "fallbackDonors": 8,
+        "finalVolume": 3839.998865846747,
+        "initialVolume": 3839.9988897959643,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 7712
+      },
+      "volume": 3839.998853152392
+    },
+    {
+      "frame": 48,
+      "injectedVolume": 0,
+      "maxSpeed": 5.015171051025391,
+      "phiArea": 3853.6060516336875,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 60.144142150878906,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.22025112807750702
+      },
+      "sharpeningDust": 0.000010988378619458672,
+      "time": 1.6000000834465027,
+      "transport": {
+        "dustCells": 74,
+        "dustVolume": 0.00003582264991708328,
+        "fallbackDonors": 6,
+        "finalVolume": 3839.9988145635193,
+        "initialVolume": 3839.998853152392,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 7744
+      },
+      "volume": 3839.9988032087203
+    },
+    {
+      "frame": 49,
+      "injectedVolume": 0,
+      "maxSpeed": 5.222956657409668,
+      "phiArea": 3862.6148673452917,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 37.067134857177734,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.30659565329551697
+      },
+      "sharpeningDust": 0.000006642138316692581,
+      "time": 1.6333334185183048,
+      "transport": {
+        "dustCells": 81,
+        "dustVolume": 0.000026599077440625507,
+        "fallbackDonors": 6,
+        "finalVolume": 3839.9987726170425,
+        "initialVolume": 3839.9988032087203,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 7808
+      },
+      "volume": 3839.99876535862
+    },
+    {
+      "frame": 50,
+      "injectedVolume": 0,
+      "maxSpeed": 5.348209381103516,
+      "phiArea": 3873.2317519878707,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 52.050445556640625,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.29123035073280334
+      },
+      "sharpeningDust": 0.000006078830040223693,
+      "time": 1.666666753590107,
+      "transport": {
+        "dustCells": 74,
+        "dustVolume": 0.000032589290385992564,
+        "fallbackDonors": 9,
+        "finalVolume": 3839.9987290573868,
+        "initialVolume": 3839.99876535862,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 7872
+      },
+      "volume": 3839.9987222908208
+    },
+    {
+      "frame": 51,
+      "injectedVolume": 0,
+      "maxSpeed": 5.29219388961792,
+      "phiArea": 3889.7515218418557,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 30.27909278869629,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.2349710762500763
+      },
+      "sharpeningDust": 0.00000944377217138026,
+      "time": 1.700000088661909,
+      "transport": {
+        "dustCells": 67,
+        "dustVolume": 0.000025586256294118925,
+        "fallbackDonors": 7,
+        "finalVolume": 3839.9986891030803,
+        "initialVolume": 3839.9987222908208,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 7872
+      },
+      "volume": 3839.99867938016
+    },
+    {
+      "frame": 52,
+      "injectedVolume": 0,
+      "maxSpeed": 5.465726375579834,
+      "phiArea": 3900.2998455286724,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 27.085153579711914,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.23974040150642395
+      },
+      "sharpeningDust": 0.0000037131731005501933,
+      "time": 1.7333334237337112,
+      "transport": {
+        "dustCells": 53,
+        "dustVolume": 0.000023621947839558288,
+        "fallbackDonors": 49,
+        "finalVolume": 3839.9986614491636,
+        "initialVolume": 3839.99867938016,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 8736
+      },
+      "volume": 3839.9986576258107
+    },
+    {
+      "frame": 53,
+      "injectedVolume": 0,
+      "maxSpeed": 5.622730731964111,
+      "phiArea": 3913.016792547936,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 32.69108581542969,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.1752781718969345
+      },
+      "sharpeningDust": 0.000013420218692772323,
+      "time": 1.7666667588055134,
+      "transport": {
+        "dustCells": 81,
+        "dustVolume": 0.000040216715315510854,
+        "fallbackDonors": 31,
+        "finalVolume": 3839.998615584331,
+        "initialVolume": 3839.9986576258107,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 8592
+      },
+      "volume": 3839.998602648382
+    },
+    {
+      "frame": 54,
+      "injectedVolume": 0,
+      "maxSpeed": 5.882224082946777,
+      "phiArea": 3925.9837110660155,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 57.29798126220703,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.21393536031246185
+      },
+      "sharpeningDust": 0.000006697135688682465,
+      "time": 1.8000000938773155,
+      "transport": {
+        "dustCells": 49,
+        "dustVolume": 0.000021750846852505723,
+        "fallbackDonors": 28,
+        "finalVolume": 3839.9985766070267,
+        "initialVolume": 3839.998602648382,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 8368
+      },
+      "volume": 3839.9985692867976
+    },
+    {
+      "frame": 55,
+      "injectedVolume": 0,
+      "maxSpeed": 6.014323711395264,
+      "phiArea": 3938.7945819569286,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 21.436738967895508,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.17543570697307587
+      },
+      "sharpeningDust": 0.000013311971258644917,
+      "time": 1.8333334289491177,
+      "transport": {
+        "dustCells": 39,
+        "dustVolume": 0.00002201523188860577,
+        "fallbackDonors": 22,
+        "finalVolume": 3839.9985472034004,
+        "initialVolume": 3839.9985692867976,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 8304
+      },
+      "volume": 3839.9985335602323
+    },
+    {
+      "frame": 56,
+      "injectedVolume": 0,
+      "maxSpeed": 6.0973076820373535,
+      "phiArea": 3945.020029762926,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 19.16961669921875,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.20399200916290283
+      },
+      "sharpeningDust": 0.000002264338434088131,
+      "time": 1.8666667640209198,
+      "transport": {
+        "dustCells": 69,
+        "dustVolume": 0.00002809998046321427,
+        "fallbackDonors": 3,
+        "finalVolume": 3839.9985049938578,
+        "initialVolume": 3839.9985335602323,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 7264
+      },
+      "volume": 3839.998502602625
+    },
+    {
+      "frame": 57,
+      "injectedVolume": 0,
+      "maxSpeed": 6.369132995605469,
+      "phiArea": 3950.525450776615,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 25.503093719482422,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.19715772569179535
+      },
+      "sharpeningDust": 0.00001132491837552152,
+      "time": 1.900000099092722,
+      "transport": {
+        "dustCells": 68,
+        "dustVolume": 0.000028665979982855916,
+        "fallbackDonors": 6,
+        "finalVolume": 3839.9984722726804,
+        "initialVolume": 3839.998502602625,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 7328
+      },
+      "volume": 3839.9984612739163
+    },
+    {
+      "frame": 58,
+      "injectedVolume": 0,
+      "maxSpeed": 6.345093250274658,
+      "phiArea": 3960.5331683856493,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 29.21770668029785,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.14703986048698425
+      },
+      "sharpeningDust": 0.00001792247826415405,
+      "time": 1.933333434164524,
+      "transport": {
+        "dustCells": 68,
+        "dustVolume": 0.0000266545032083787,
+        "fallbackDonors": 6,
+        "finalVolume": 3839.9984321559004,
+        "initialVolume": 3839.9984612739163,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 7136
+      },
+      "volume": 3839.9984138890677
+    },
+    {
+      "frame": 59,
+      "injectedVolume": 0,
+      "maxSpeed": 6.41586446762085,
+      "phiArea": 3973.1648314755876,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 41.71113967895508,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.12611249089241028
+      },
+      "sharpeningDust": 0.000001566660557728028,
+      "time": 1.9666667692363262,
+      "transport": {
+        "dustCells": 79,
+        "dustVolume": 0.00003188192943104351,
+        "fallbackDonors": 6,
+        "finalVolume": 3839.9983803255013,
+        "initialVolume": 3839.9984138890677,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 7088
+      },
+      "volume": 3839.9983789306066
+    },
+    {
+      "frame": 60,
+      "injectedVolume": 0,
+      "maxSpeed": 7.0687479972839355,
+      "phiArea": 3980.665081406536,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 26.29161262512207,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.2116170972585678
+      },
+      "sharpeningDust": 0.00001939225387559418,
+      "time": 2.0000001043081284,
+      "transport": {
+        "dustCells": 85,
+        "dustVolume": 0.00003639166897090318,
+        "fallbackDonors": 28,
+        "finalVolume": 3839.9983388937035,
+        "initialVolume": 3839.9983789306066,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 6816
+      },
+      "volume": 3839.9983199011876
+    },
+    {
+      "frame": 61,
+      "injectedVolume": 0,
+      "maxSpeed": 6.875746726989746,
+      "phiArea": 3988.0681773446413,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 83.32750701904297,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.20780792832374573
+      },
+      "sharpeningDust": 0.000003736200255843869,
+      "time": 2.0333334393799305,
+      "transport": {
+        "dustCells": 85,
+        "dustVolume": 0.000037505963637940454,
+        "fallbackDonors": 27,
+        "finalVolume": 3839.9982819501283,
+        "initialVolume": 3839.9983199011876,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 6656
+      },
+      "volume": 3839.9982781050044
+    },
+    {
+      "frame": 62,
+      "injectedVolume": 0,
+      "maxSpeed": 7.138150215148926,
+      "phiArea": 3987.377563794559,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 44.51163101196289,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.16653242707252502
+      },
+      "sharpeningDust": 0.000011270976870036975,
+      "time": 2.0666667744517326,
+      "transport": {
+        "dustCells": 93,
+        "dustVolume": 0.00003259433417213131,
+        "fallbackDonors": 25,
+        "finalVolume": 3839.9982472161164,
+        "initialVolume": 3839.9982781050044,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 6624
+      },
+      "volume": 3839.998236209689
+    },
+    {
+      "frame": 63,
+      "injectedVolume": 0,
+      "maxSpeed": 7.7429962158203125,
+      "phiArea": 3986.3429594972404,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 127.88549041748047,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.18794888257980347
+      },
+      "sharpeningDust": 0.00001555784331230825,
+      "time": 2.1000001095235348,
+      "transport": {
+        "dustCells": 107,
+        "dustVolume": 0.000047813571404597965,
+        "fallbackDonors": 32,
+        "finalVolume": 3839.9981884260856,
+        "initialVolume": 3839.998236209689,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 6352
+      },
+      "volume": 3839.9981724297027
+    },
+    {
+      "frame": 64,
+      "injectedVolume": 0,
+      "maxSpeed": 7.608252048492432,
+      "phiArea": 3981.3843350541865,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 73.76985931396484,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.2749430239200592
+      },
+      "sharpeningDust": 0.000003835655775219493,
+      "time": 2.133333444595337,
+      "transport": {
+        "dustCells": 98,
+        "dustVolume": 0.00003981318356061081,
+        "fallbackDonors": 34,
+        "finalVolume": 3839.9981332889474,
+        "initialVolume": 3839.9981724297027,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 6288
+      },
+      "volume": 3839.9981299418987
+    },
+    {
+      "frame": 65,
+      "injectedVolume": 0,
+      "maxSpeed": 8.59506893157959,
+      "phiArea": 3977.96846784238,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 5,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 76.0561752319336,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.14327019453048706
+      },
+      "sharpeningDust": 0.000007864484302899655,
+      "time": 2.166666779667139,
+      "transport": {
+        "dustCells": 112,
+        "dustVolume": 0.00005360133853260507,
+        "fallbackDonors": 39,
+        "finalVolume": 3839.9980798493025,
+        "initialVolume": 3839.9981299418987,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 6048
+      },
+      "volume": 3839.9980717909084
+    },
+    {
+      "frame": 66,
+      "injectedVolume": 0,
+      "maxSpeed": 8.200820922851562,
+      "phiArea": 3965.787692217994,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 6,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 98.37574005126953,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.14580224454402924
+      },
+      "sharpeningDust": 0.000016346492543561908,
+      "time": 2.200000114738941,
+      "transport": {
+        "dustCells": 105,
+        "dustVolume": 0.000047085227134813223,
+        "fallbackDonors": 32,
+        "finalVolume": 3839.9980237610034,
+        "initialVolume": 3839.9980717909084,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 5984
+      },
+      "volume": 3839.998007201135
+    },
+    {
+      "frame": 67,
+      "injectedVolume": 0,
+      "maxSpeed": 9.168768882751465,
+      "phiArea": 3953.5972783865545,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 6,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 78.34923553466797,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.2026703953742981
+      },
+      "sharpeningDust": 0.000018100551471889048,
+      "time": 2.2333334498107433,
+      "transport": {
+        "dustCells": 107,
+        "dustVolume": 0.0000459483993944243,
+        "fallbackDonors": 25,
+        "finalVolume": 3839.9979603007314,
+        "initialVolume": 3839.998007201135,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 5808
+      },
+      "volume": 3839.9979421570115
+    },
+    {
+      "frame": 68,
+      "injectedVolume": 0,
+      "maxSpeed": 8.48180866241455,
+      "phiArea": 3943.1208187723823,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 6,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 28.481773376464844,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.13609938323497772
+      },
+      "sharpeningDust": 0.000005039211202984006,
+      "time": 2.2666667848825455,
+      "transport": {
+        "dustCells": 99,
+        "dustVolume": 0.000046567063276548026,
+        "fallbackDonors": 19,
+        "finalVolume": 3839.9978925158775,
+        "initialVolume": 3839.9979421570115,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 5552
+      },
+      "volume": 3839.997887669035
+    },
+    {
+      "frame": 69,
+      "injectedVolume": 0,
+      "maxSpeed": 8.57119369506836,
+      "phiArea": 3924.1937713249367,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 6,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 26.763710021972656,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.3844428062438965
+      },
+      "sharpeningDust": 0.000015099848553745687,
+      "time": 2.3000001199543476,
+      "transport": {
+        "dustCells": 94,
+        "dustVolume": 0.000043892286265112546,
+        "fallbackDonors": 34,
+        "finalVolume": 3839.997841509184,
+        "initialVolume": 3839.997887669035,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 5392
+      },
+      "volume": 3839.9978272089925
+    },
+    {
+      "frame": 70,
+      "injectedVolume": 0,
+      "maxSpeed": 8.530545234680176,
+      "phiArea": 3911.3356223504766,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 6,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 28.415477752685547,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.19971853494644165
+      },
+      "sharpeningDust": 0.000020142800906342018,
+      "time": 2.3333334550261497,
+      "transport": {
+        "dustCells": 86,
+        "dustVolume": 0.000035289551875761216,
+        "fallbackDonors": 19,
+        "finalVolume": 3839.9977930311707,
+        "initialVolume": 3839.9978272089925,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 5328
+      },
+      "volume": 3839.997773539107
+    },
+    {
+      "frame": 71,
+      "injectedVolume": 0,
+      "maxSpeed": 8.758912086486816,
+      "phiArea": 3893.1051339790793,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 6,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 85.10958862304688,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.20341426134109497
+      },
+      "sharpeningDust": 0.000009978695061363396,
+      "time": 2.366666790097952,
+      "transport": {
+        "dustCells": 91,
+        "dustVolume": 0.00003645787385475607,
+        "fallbackDonors": 46,
+        "finalVolume": 3839.9977415472545,
+        "initialVolume": 3839.997773539107,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 5264
+      },
+      "volume": 3839.9977316652235
+    },
+    {
+      "frame": 72,
+      "injectedVolume": 0,
+      "maxSpeed": 8.902411460876465,
+      "phiArea": 3860.9510786681785,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 6,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 30.58449935913086,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.39162200689315796
+      },
+      "sharpeningDust": 0.000004320257119161397,
+      "time": 2.400000125169754,
+      "transport": {
+        "dustCells": 88,
+        "dustVolume": 0.00003342272556280945,
+        "fallbackDonors": 41,
+        "finalVolume": 3839.997703211036,
+        "initialVolume": 3839.9977316652235,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 5200
+      },
+      "volume": 3839.9976987980795
+    },
+    {
+      "frame": 73,
+      "injectedVolume": 0,
+      "maxSpeed": 9.087628364562988,
+      "phiArea": 3841.085701464239,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 7,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 38.727081298828125,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.34053781628608704
+      },
+      "sharpeningDust": 0.000009833970068484632,
+      "time": 2.433333460241556,
+      "transport": {
+        "dustCells": 113,
+        "dustVolume": 0.000043324972899716485,
+        "fallbackDonors": 175,
+        "finalVolume": 3839.9976552327244,
+        "initialVolume": 3839.9976987980795,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 5120
+      },
+      "volume": 3839.9976450956774
+    },
+    {
+      "frame": 74,
+      "injectedVolume": 0,
+      "maxSpeed": 9.873239517211914,
+      "phiArea": 3844.8002996456657,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 7,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 84.77277374267578,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.6231829524040222
+      },
+      "sharpeningDust": 0.00002149096235370962,
+      "time": 2.4666667953133583,
+      "transport": {
+        "dustCells": 120,
+        "dustVolume": 0.000052663889036214107,
+        "fallbackDonors": 126,
+        "finalVolume": 3839.9975915216755,
+        "initialVolume": 3839.9976450956774,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 4768
+      },
+      "volume": 3839.9975699318134
+    },
+    {
+      "frame": 75,
+      "injectedVolume": 0,
+      "maxSpeed": 9.652653694152832,
+      "phiArea": 3829.530083167243,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 7,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 31.49043846130371,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.7795378565788269
+      },
+      "sharpeningDust": 0.000024336164472060773,
+      "time": 2.5000001303851604,
+      "transport": {
+        "dustCells": 108,
+        "dustVolume": 0.000044003367687617256,
+        "fallbackDonors": 117,
+        "finalVolume": 3839.9975205363135,
+        "initialVolume": 3839.9975699318134,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 4560
+      },
+      "volume": 3839.997496132869
+    },
+    {
+      "frame": 76,
+      "injectedVolume": 0,
+      "maxSpeed": 9.944812774658203,
+      "phiArea": 3803.7940122060827,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 7,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 31.611169815063477,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.4318212568759918
+      },
+      "sharpeningDust": 0.00001148864572542152,
+      "time": 2.5333334654569626,
+      "transport": {
+        "dustCells": 90,
+        "dustVolume": 0.000034598684365505505,
+        "fallbackDonors": 13,
+        "finalVolume": 3839.9974675420217,
+        "initialVolume": 3839.997496132869,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 4400
+      },
+      "volume": 3839.9974558784147
+    },
+    {
+      "frame": 77,
+      "injectedVolume": 0,
+      "maxSpeed": 9.96438980102539,
+      "phiArea": 3780.373779742429,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 7,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 43.68342590332031,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.5739626884460449
+      },
+      "sharpeningDust": 0.000008811715701995126,
+      "time": 2.5666668005287647,
+      "transport": {
+        "dustCells": 79,
+        "dustVolume": 0.00003275922869039327,
+        "fallbackDonors": 13,
+        "finalVolume": 3839.99742690535,
+        "initialVolume": 3839.9974558784147,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 4304
+      },
+      "volume": 3839.9974181919315
+    },
+    {
+      "frame": 78,
+      "injectedVolume": 0,
+      "maxSpeed": 9.949389457702637,
+      "phiArea": 3765.323073978341,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 7,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 31.17874526977539,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.7021490931510925
+      },
+      "sharpeningDust": 0.0000029462873953889357,
+      "time": 2.600000135600567,
+      "transport": {
+        "dustCells": 68,
+        "dustVolume": 0.00002988527083047643,
+        "fallbackDonors": 24,
+        "finalVolume": 3839.99739663888,
+        "initialVolume": 3839.9974181919315,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 4336
+      },
+      "volume": 3839.997393158708
+    },
+    {
+      "frame": 79,
+      "injectedVolume": 0,
+      "maxSpeed": 9.830735206604004,
+      "phiArea": 3732.220244002223,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 7,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 37.023345947265625,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.8753955960273743
+      },
+      "sharpeningDust": 0.000026209964573808975,
+      "time": 2.633333470672369,
+      "transport": {
+        "dustCells": 69,
+        "dustVolume": 0.00002750686695351945,
+        "fallbackDonors": 42,
+        "finalVolume": 3839.9973632725923,
+        "initialVolume": 3839.997393158708,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 4288
+      },
+      "volume": 3839.997336721054
+    },
+    {
+      "frame": 80,
+      "injectedVolume": 0,
+      "maxSpeed": 9.614657402038574,
+      "phiArea": 3736.0693968937885,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 7,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 29.34737205505371,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.7192042469978333
+      },
+      "sharpeningDust": 0.000024718740519347193,
+      "time": 2.666666805744171,
+      "transport": {
+        "dustCells": 73,
+        "dustVolume": 0.000024784301314362267,
+        "fallbackDonors": 24,
+        "finalVolume": 3839.997302772718,
+        "initialVolume": 3839.997336721054,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 4336
+      },
+      "volume": 3839.9972779889567
+    },
+    {
+      "frame": 81,
+      "injectedVolume": 0,
+      "maxSpeed": 8.348992347717285,
+      "phiArea": 3726.6835597479367,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 7,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 30.070690155029297,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.402816504240036
+      },
+      "sharpeningDust": 0.000027037985603328707,
+      "time": 2.7000001408159733,
+      "transport": {
+        "dustCells": 61,
+        "dustVolume": 0.00002944678475613749,
+        "fallbackDonors": 53,
+        "finalVolume": 3839.997244329154,
+        "initialVolume": 3839.9972779889567,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 4304
+      },
+      "volume": 3839.997217416387
+    },
+    {
+      "frame": 82,
+      "injectedVolume": 0,
+      "maxSpeed": 8.663199424743652,
+      "phiArea": 3708.4863354252084,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 7,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 12.431429862976074,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.5988848209381104
+      },
+      "sharpeningDust": 0.000011415524284075218,
+      "time": 2.7333334758877754,
+      "transport": {
+        "dustCells": 60,
+        "dustVolume": 0.000026669879458651735,
+        "fallbackDonors": 48,
+        "finalVolume": 3839.9971867745385,
+        "initialVolume": 3839.997217416387,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 4240
+      },
+      "volume": 3839.9971752060324
+    },
+    {
+      "frame": 83,
+      "injectedVolume": 0,
+      "maxSpeed": 8.812922477722168,
+      "phiArea": 3679.5741383056156,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 7,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 24.8549747467041,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.4691656231880188
+      },
+      "sharpeningDust": 0.000004334639015723951,
+      "time": 2.7666668109595776,
+      "transport": {
+        "dustCells": 56,
+        "dustVolume": 0.000020820582992797654,
+        "fallbackDonors": 52,
+        "finalVolume": 3839.9971684964726,
+        "initialVolume": 3839.9971752060324,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 4096
+      },
+      "volume": 3839.997164066578
+    },
+    {
+      "frame": 84,
+      "injectedVolume": 0,
+      "maxSpeed": 8.905921936035156,
+      "phiArea": 3647.317125149047,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 7,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 21.54783058166504,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.241376131772995
+      },
+      "sharpeningDust": 0.000003935081508643634,
+      "time": 2.8000001460313797,
+      "transport": {
+        "dustCells": 57,
+        "dustVolume": 0.000023033234833658156,
+        "fallbackDonors": 54,
+        "finalVolume": 3839.997129083313,
+        "initialVolume": 3839.997164066578,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 4000
+      },
+      "volume": 3839.9971258432115
+    },
+    {
+      "frame": 85,
+      "injectedVolume": 0,
+      "maxSpeed": 9.178481101989746,
+      "phiArea": 3605.020866612671,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 7,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 21.683216094970703,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.9733913540840149
+      },
+      "sharpeningDust": 0.000011149220540573879,
+      "time": 2.833333481103182,
+      "transport": {
+        "dustCells": 40,
+        "dustVolume": 0.000011393448709484666,
+        "fallbackDonors": 44,
+        "finalVolume": 3839.9971172431706,
+        "initialVolume": 3839.9971258432115,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 3840
+      },
+      "volume": 3839.9971055617016
+    },
+    {
+      "frame": 86,
+      "injectedVolume": 0,
+      "maxSpeed": 10.006897926330566,
+      "phiArea": 3566.8737014173676,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 7,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 30.16672134399414,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.3251575231552124
+      },
+      "sharpeningDust": 0.00001892547533088873,
+      "time": 2.866666816174984,
+      "transport": {
+        "dustCells": 32,
+        "dustVolume": 0.000012413462379123885,
+        "fallbackDonors": 50,
+        "finalVolume": 3839.997094255022,
+        "initialVolume": 3839.9971055617016,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 3712
+      },
+      "volume": 3839.9970748557694
+    },
+    {
+      "frame": 87,
+      "injectedVolume": 0,
+      "maxSpeed": 9.754772186279297,
+      "phiArea": 3526.7952766461785,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 7,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 21.253883361816406,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.515479326248169
+      },
+      "sharpeningDust": 0.000025450562247897324,
+      "time": 2.900000151246786,
+      "transport": {
+        "dustCells": 31,
+        "dustVolume": 0.000011464796824345314,
+        "fallbackDonors": 57,
+        "finalVolume": 3839.9970621673856,
+        "initialVolume": 3839.9970748557694,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 3696
+      },
+      "volume": 3839.9970369038047
+    },
+    {
+      "frame": 88,
+      "injectedVolume": 0,
+      "maxSpeed": 7.533895969390869,
+      "phiArea": 3508.8492628925596,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 7,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 24.912569046020508,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.699574887752533
+      },
+      "sharpeningDust": 0.00001954948743332352,
+      "time": 2.9333334863185883,
+      "transport": {
+        "dustCells": 30,
+        "dustVolume": 0.000010415169839461669,
+        "fallbackDonors": 53,
+        "finalVolume": 3839.9970238277065,
+        "initialVolume": 3839.9970369038047,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 3536
+      },
+      "volume": 3839.9970043667436
+    },
+    {
+      "frame": 89,
+      "injectedVolume": 0,
+      "maxSpeed": 9.62302017211914,
+      "phiArea": 3466.9895376176573,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 7,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 29.960838317871094,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.7093190550804138
+      },
+      "sharpeningDust": 0.000012746875654556789,
+      "time": 2.9666668213903904,
+      "transport": {
+        "dustCells": 35,
+        "dustVolume": 0.000011243867950483377,
+        "fallbackDonors": 66,
+        "finalVolume": 3839.996984323946,
+        "initialVolume": 3839.9970043667436,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 3472
+      },
+      "volume": 3839.996971571786
+    },
+    {
+      "frame": 90,
+      "injectedVolume": 0,
+      "maxSpeed": 8.558184623718262,
+      "phiArea": 3477.685372286127,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 7,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 22.136734008789062,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.5129922032356262
+      },
+      "sharpeningDust": 0.000008008692930161487,
+      "time": 3.0000001564621925,
+      "transport": {
+        "dustCells": 45,
+        "dustVolume": 0.000017073497625919032,
+        "fallbackDonors": 70,
+        "finalVolume": 3839.996957981547,
+        "initialVolume": 3839.996971571786,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 3408
+      },
+      "volume": 3839.9969504115506
+    },
+    {
+      "frame": 91,
+      "injectedVolume": 0,
+      "maxSpeed": 8.059922218322754,
+      "phiArea": 3470.3434777654475,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 7,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 21.672468185424805,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.4461420178413391
+      },
+      "sharpeningDust": 0.0000037419187037812662,
+      "time": 3.0333334915339947,
+      "transport": {
+        "dustCells": 46,
+        "dustVolume": 0.00001645915067464976,
+        "fallbackDonors": 121,
+        "finalVolume": 3839.9969324942504,
+        "initialVolume": 3839.9969504115506,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 3264
+      },
+      "volume": 3839.996928581996
+    },
+    {
+      "frame": 92,
+      "injectedVolume": 0,
+      "maxSpeed": 7.95656156539917,
+      "phiArea": 3461.2799003442633,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 7,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 19.440919876098633,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.5779202580451965
+      },
+      "sharpeningDust": 0.0000013113703971612267,
+      "time": 3.066666826605797,
+      "transport": {
+        "dustCells": 43,
+        "dustVolume": 0.000018711276559724155,
+        "fallbackDonors": 63,
+        "finalVolume": 3839.9969135022807,
+        "initialVolume": 3839.996928581996,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 3120
+      },
+      "volume": 3839.9969129103742
+    },
+    {
+      "frame": 93,
+      "injectedVolume": 0,
+      "maxSpeed": 7.695340156555176,
+      "phiArea": 3442.7998290119867,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 7,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 29.602399826049805,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.3000997006893158
+      },
+      "sharpeningDust": 0.000002653285832820984,
+      "time": 3.100000161677599,
+      "transport": {
+        "dustCells": 57,
+        "dustVolume": 0.000022866559284739907,
+        "fallbackDonors": 64,
+        "finalVolume": 3839.996891189671,
+        "initialVolume": 3839.9969129103742,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 2960
+      },
+      "volume": 3839.9968865959304
+    },
+    {
+      "frame": 94,
+      "injectedVolume": 0,
+      "maxSpeed": 7.906904697418213,
+      "phiArea": 3436.159842595225,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 7,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 31.40848159790039,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.25400280952453613
+      },
+      "sharpeningDust": 0.000002126319941453403,
+      "time": 3.133333496749401,
+      "transport": {
+        "dustCells": 47,
+        "dustVolume": 0.000017495177703885645,
+        "fallbackDonors": 89,
+        "finalVolume": 3839.9968691954255,
+        "initialVolume": 3839.9968865959304,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 2880
+      },
+      "volume": 3839.996867515685
+    },
+    {
+      "frame": 95,
+      "injectedVolume": 0,
+      "maxSpeed": 7.7502007484436035,
+      "phiArea": 3431.0740821645595,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 25.350908279418945,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.36970555782318115
+      },
+      "sharpeningDust": 0.0000013369347016123356,
+      "time": 3.1666668318212032,
+      "transport": {
+        "dustCells": 47,
+        "dustVolume": 0.000019390771169525145,
+        "fallbackDonors": 141,
+        "finalVolume": 3839.9968463990585,
+        "initialVolume": 3839.996867515685,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 2768
+      },
+      "volume": 3839.996844300062
+    },
+    {
+      "frame": 96,
+      "injectedVolume": 0,
+      "maxSpeed": 8.00953197479248,
+      "phiArea": 3423.5015949337394,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 30.605180740356445,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.7832328081130981
+      },
+      "sharpeningDust": 0.0000019469782728265272,
+      "time": 3.2000001668930054,
+      "transport": {
+        "dustCells": 43,
+        "dustVolume": 0.000020096443908990125,
+        "fallbackDonors": 124,
+        "finalVolume": 3839.9968179859156,
+        "initialVolume": 3839.996844300062,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 2656
+      },
+      "volume": 3839.996818059862
+    },
+    {
+      "frame": 97,
+      "injectedVolume": 0,
+      "maxSpeed": 15.984944343566895,
+      "phiArea": 3420.392093848408,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 168.97206115722656,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.6752488613128662
+      },
+      "sharpeningDust": 0.0000056627013123033976,
+      "time": 3.2333335019648075,
+      "transport": {
+        "dustCells": 40,
+        "dustVolume": 0.00001703809531261591,
+        "fallbackDonors": 112,
+        "finalVolume": 3839.996811579208,
+        "initialVolume": 3839.996818059862,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 2592
+      },
+      "volume": 3839.996806079892
+    },
+    {
+      "frame": 98,
+      "injectedVolume": 0,
+      "maxSpeed": 17.361665725708008,
+      "phiArea": 3396.242347115185,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 209.01705932617188,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 1.1969249248504639
+      },
+      "sharpeningDust": 0.000004407490621360921,
+      "time": 3.2666668370366096,
+      "transport": {
+        "dustCells": 58,
+        "dustVolume": 0.000025310301886349862,
+        "fallbackDonors": 119,
+        "finalVolume": 3839.996773081514,
+        "initialVolume": 3839.996806079892,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 2064
+      },
+      "volume": 3839.996769163672
+    },
+    {
+      "frame": 99,
+      "injectedVolume": 0,
+      "maxSpeed": 18.128623962402344,
+      "phiArea": 3368.712142565055,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 9,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 166.5847930908203,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 5.7433552742004395
+      },
+      "sharpeningDust": 0.0000026804115123013617,
+      "time": 3.300000172108412,
+      "transport": {
+        "dustCells": 53,
+        "dustVolume": 0.000024591637959758827,
+        "fallbackDonors": 130,
+        "finalVolume": 3839.996744840801,
+        "initialVolume": 3839.996769163672,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 2048
+      },
+      "volume": 3839.9967437784057
+    },
+    {
+      "frame": 100,
+      "injectedVolume": 0,
+      "maxSpeed": 28.925762176513672,
+      "phiArea": 3338.4433878340733,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 9,
+        "converged": true,
+        "cycles": 2,
+        "initialResidual": 179.83514404296875,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 3.6268954277038574
+      },
+      "sharpeningDust": 8.124252417474054e-7,
+      "time": 3.333333507180214,
+      "transport": {
+        "dustCells": 64,
+        "dustVolume": 0.00003086159470463978,
+        "fallbackDonors": 106,
+        "finalVolume": 3839.9967118128516,
+        "initialVolume": 3839.9967437784057,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 1600
+      },
+      "volume": 3839.9967091554054
+    },
+    {
+      "frame": 101,
+      "injectedVolume": 0,
+      "maxSpeed": 43.18186950683594,
+      "phiArea": 3282.859320200965,
+      "pressure": {
+        "budget": 3,
+        "coarseCapFail": false,
+        "coarseIterations": 9,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 177.2972869873047,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 1.8940235376358032
+      },
+      "sharpeningDust": 0.000005414879467480205,
+      "time": 3.366666842252016,
+      "transport": {
+        "dustCells": 46,
+        "dustVolume": 0.000020330334911666803,
+        "fallbackDonors": 111,
+        "finalVolume": 3839.9966932468815,
+        "initialVolume": 3839.9967091554054,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 1232
+      },
+      "volume": 3839.996687484503
+    },
+    {
+      "frame": 102,
+      "injectedVolume": 0,
+      "maxSpeed": 20.56222915649414,
+      "phiArea": 3321.075601484976,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 120.3179931640625,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.9087843298912048
+      },
+      "sharpeningDust": 0.000002660308382473886,
+      "time": 3.400000177323818,
+      "transport": {
+        "dustCells": 59,
+        "dustVolume": 0.000028537073717416206,
+        "fallbackDonors": 68,
+        "finalVolume": 3839.996660170766,
+        "initialVolume": 3839.996687484503,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 624
+      },
+      "volume": 3839.9966570442625
+    },
+    {
+      "frame": 103,
+      "injectedVolume": 0,
+      "maxSpeed": 20.050323486328125,
+      "phiArea": 3406.00167506095,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 84.74170684814453,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 1.0756970643997192
+      },
+      "sharpeningDust": 0.000004128138698433759,
+      "time": 3.4333335123956203,
+      "transport": {
+        "dustCells": 49,
+        "dustVolume": 0.000024880413974415205,
+        "fallbackDonors": 202,
+        "finalVolume": 3839.996637737674,
+        "initialVolume": 3839.9966570442625,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 1520
+      },
+      "volume": 3839.99663316822
+    },
+    {
+      "frame": 104,
+      "injectedVolume": 0,
+      "maxSpeed": 20.92130470275879,
+      "phiArea": 3521.2288549875993,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 96.47692108154297,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.35777944326400757
+      },
+      "sharpeningDust": 0.000011599353570090898,
+      "time": 3.4666668474674225,
+      "transport": {
+        "dustCells": 64,
+        "dustVolume": 0.00003127470448749392,
+        "fallbackDonors": 198,
+        "finalVolume": 3839.996601018138,
+        "initialVolume": 3839.99663316822,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 1408
+      },
+      "volume": 3839.996589472883
+    },
+    {
+      "frame": 105,
+      "injectedVolume": 0,
+      "maxSpeed": 18.91509246826172,
+      "phiArea": 3669.3714510323084,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 92.9365234375,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 1.5701806545257568
+      },
+      "sharpeningDust": 0.000009004758112496347,
+      "time": 3.5000001825392246,
+      "transport": {
+        "dustCells": 58,
+        "dustVolume": 0.00002746874059289528,
+        "fallbackDonors": 216,
+        "finalVolume": 3839.9965670945094,
+        "initialVolume": 3839.996589472883,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 1296
+      },
+      "volume": 3839.996558650936
+    },
+    {
+      "frame": 106,
+      "injectedVolume": 0,
+      "maxSpeed": 18.854736328125,
+      "phiArea": 3791.4550403817557,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 6,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 42.89420700073242,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 1.3821265697479248
+      },
+      "sharpeningDust": 0.000001311997152697586,
+      "time": 3.5333335176110268,
+      "transport": {
+        "dustCells": 72,
+        "dustVolume": 0.000031722301450543,
+        "fallbackDonors": 313,
+        "finalVolume": 3839.996530213285,
+        "initialVolume": 3839.996558650936,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 1136
+      },
+      "volume": 3839.996528636527
+    },
+    {
+      "frame": 107,
+      "injectedVolume": 0,
+      "maxSpeed": 14.442505836486816,
+      "phiArea": 3880.6114134135423,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 6,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 31.04877471923828,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.24191515147686005
+      },
+      "sharpeningDust": 0.000005197967993808561,
+      "time": 3.566666852682829,
+      "transport": {
+        "dustCells": 74,
+        "dustVolume": 0.000027700382134954182,
+        "fallbackDonors": 962,
+        "finalVolume": 3839.996498623832,
+        "initialVolume": 3839.996528636527,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 960
+      },
+      "volume": 3839.9964931749482
+    },
+    {
+      "frame": 108,
+      "injectedVolume": 0,
+      "maxSpeed": 15.250276565551758,
+      "phiArea": 3949.903303518992,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 6,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 28.325361251831055,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.2171589881181717
+      },
+      "sharpeningDust": 0.000010094611866406922,
+      "time": 3.600000187754631,
+      "transport": {
+        "dustCells": 69,
+        "dustVolume": 0.000030706005205383136,
+        "fallbackDonors": 1003,
+        "finalVolume": 3839.9964639208833,
+        "initialVolume": 3839.9964931749482,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 944
+      },
+      "volume": 3839.996453702402
+    },
+    {
+      "frame": 109,
+      "injectedVolume": 0,
+      "maxSpeed": 15.203059196472168,
+      "phiArea": 4004.2019607899565,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 7,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 21.384403228759766,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.26441919803619385
+      },
+      "sharpeningDust": 0.000014605934097744466,
+      "time": 3.633333522826433,
+      "transport": {
+        "dustCells": 71,
+        "dustVolume": 0.00003476560477277957,
+        "fallbackDonors": 1011,
+        "finalVolume": 3839.996418925064,
+        "initialVolume": 3839.996453702402,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 640
+      },
+      "volume": 3839.996404288724
+    },
+    {
+      "frame": 110,
+      "injectedVolume": 0,
+      "maxSpeed": 12.66746711730957,
+      "phiArea": 4050.9604560964112,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 42.32920837402344,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.5308931469917297
+      },
+      "sharpeningDust": 0.000016042690958784078,
+      "time": 3.6666668578982353,
+      "transport": {
+        "dustCells": 63,
+        "dustVolume": 0.000028167242482446397,
+        "fallbackDonors": 1023,
+        "finalVolume": 3839.9963730561576,
+        "initialVolume": 3839.996404288724,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 304
+      },
+      "volume": 3839.996356963882
+    },
+    {
+      "frame": 111,
+      "injectedVolume": 0,
+      "maxSpeed": 13.48415470123291,
+      "phiArea": 4080.4384810408937,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 55.70500564575195,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.24788470566272736
+      },
+      "sharpeningDust": 0.00001141533959980734,
+      "time": 3.7000001929700375,
+      "transport": {
+        "dustCells": 79,
+        "dustVolume": 0.00003752416618274523,
+        "fallbackDonors": 934,
+        "finalVolume": 3839.996317661064,
+        "initialVolume": 3839.996356963882,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 0
+      },
+      "volume": 3839.9963068556513
+    },
+    {
+      "frame": 112,
+      "injectedVolume": 0,
+      "maxSpeed": 12.115848541259766,
+      "phiArea": 4100.255134235821,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 9,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 61.4726676940918,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 1.2654632329940796
+      },
+      "sharpeningDust": 0.0000059989197325194255,
+      "time": 3.7333335280418396,
+      "transport": {
+        "dustCells": 74,
+        "dustVolume": 0.00003531411374524396,
+        "fallbackDonors": 974,
+        "finalVolume": 3839.9962711392754,
+        "initialVolume": 3839.9963068556513,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 0
+      },
+      "volume": 3839.9962657005644
+    },
+    {
+      "frame": 113,
+      "injectedVolume": 0,
+      "maxSpeed": 11.904770851135254,
+      "phiArea": 4122.005517154088,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 12.51089096069336,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.41064009070396423
+      },
+      "sharpeningDust": 0.000003357998991759814,
+      "time": 3.7666668631136417,
+      "transport": {
+        "dustCells": 79,
+        "dustVolume": 0.00003563326499556041,
+        "fallbackDonors": 909,
+        "finalVolume": 3839.9962288971665,
+        "initialVolume": 3839.9962657005644,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 48
+      },
+      "volume": 3839.9962250016642
+    },
+    {
+      "frame": 114,
+      "injectedVolume": 0,
+      "maxSpeed": 11.191458702087402,
+      "phiArea": 4122.870723770873,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 204.13926696777344,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.8660109639167786
+      },
+      "sharpeningDust": 0.000004905330570181832,
+      "time": 3.800000198185444,
+      "transport": {
+        "dustCells": 72,
+        "dustVolume": 0.00003184607023865027,
+        "fallbackDonors": 901,
+        "finalVolume": 3839.996192171272,
+        "initialVolume": 3839.9962250016642,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 96
+      },
+      "volume": 3839.9961870857733
+    },
+    {
+      "frame": 115,
+      "injectedVolume": 0,
+      "maxSpeed": 10.92007827758789,
+      "phiArea": 4121.68612679579,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 174.3451690673828,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.5313863158226013
+      },
+      "sharpeningDust": 0.0000058635915252125415,
+      "time": 3.833333533257246,
+      "transport": {
+        "dustCells": 70,
+        "dustVolume": 0.00003279360218977345,
+        "fallbackDonors": 18,
+        "finalVolume": 3839.9961545244837,
+        "initialVolume": 3839.9961870857733,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 176
+      },
+      "volume": 3839.996148917197
+    },
+    {
+      "frame": 116,
+      "injectedVolume": 0,
+      "maxSpeed": 18.1982421875,
+      "phiArea": 4116.438246094024,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 197.24728393554688,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.5267356634140015
+      },
+      "sharpeningDust": 0.000003640367424395663,
+      "time": 3.866666868329048,
+      "transport": {
+        "dustCells": 80,
+        "dustVolume": 0.00003858539902878988,
+        "fallbackDonors": 413,
+        "finalVolume": 3839.996111693272,
+        "initialVolume": 3839.996148917197,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 160
+      },
+      "volume": 3839.9961084388638
+    },
+    {
+      "frame": 117,
+      "injectedVolume": 0,
+      "maxSpeed": 11.51824951171875,
+      "phiArea": 4122.797842825314,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 81.08342742919922,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.6163612008094788
+      },
+      "sharpeningDust": 0.000006687909433367167,
+      "time": 3.9000002034008503,
+      "transport": {
+        "dustCells": 71,
+        "dustVolume": 0.00002982219365388339,
+        "fallbackDonors": 13,
+        "finalVolume": 3839.996075360854,
+        "initialVolume": 3839.9961084388638,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 0
+      },
+      "volume": 3839.996069042605
+    },
+    {
+      "frame": 118,
+      "injectedVolume": 0,
+      "maxSpeed": 10.361572265625,
+      "phiArea": 4133.290497366455,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 79.2496109008789,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.5710320472717285
+      },
+      "sharpeningDust": 0.00000867727379727512,
+      "time": 3.9333335384726524,
+      "transport": {
+        "dustCells": 81,
+        "dustVolume": 0.000036901373274167426,
+        "fallbackDonors": 19,
+        "finalVolume": 3839.996028294627,
+        "initialVolume": 3839.996069042605,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 256
+      },
+      "volume": 3839.996019922744
+    },
+    {
+      "frame": 119,
+      "injectedVolume": 0,
+      "maxSpeed": 10.717278480529785,
+      "phiArea": 4157.418666012054,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 76.33131408691406,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.6961447596549988
+      },
+      "sharpeningDust": 0.000016510718637618993,
+      "time": 3.9666668735444546,
+      "transport": {
+        "dustCells": 82,
+        "dustVolume": 0.00003140055550332477,
+        "fallbackDonors": 6,
+        "finalVolume": 3839.995996842369,
+        "initialVolume": 3839.996019922744,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 944
+      },
+      "volume": 3839.9959803282673
+    },
+    {
+      "frame": 120,
+      "injectedVolume": 0,
+      "maxSpeed": 9.084687232971191,
+      "phiArea": 4176.424630850772,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 37.45974349975586,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.7147596478462219
+      },
+      "sharpeningDust": 0.000021055927106772288,
+      "time": 4.000000208616257,
+      "transport": {
+        "dustCells": 117,
+        "dustVolume": 0.00003335624281219918,
+        "fallbackDonors": 16,
+        "finalVolume": 3839.995950542685,
+        "initialVolume": 3839.9959803282673,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 256
+      },
+      "volume": 3839.995930030685
+    },
+    {
+      "frame": 121,
+      "injectedVolume": 0,
+      "maxSpeed": 6.378490924835205,
+      "phiArea": 4190.512381323423,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 21.815196990966797,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.6625441908836365
+      },
+      "sharpeningDust": 0.000017156663773221226,
+      "time": 4.033333543688059,
+      "transport": {
+        "dustCells": 113,
+        "dustVolume": 0.000029978447494097282,
+        "fallbackDonors": 2,
+        "finalVolume": 3839.995894741001,
+        "initialVolume": 3839.995930030685,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 944
+      },
+      "volume": 3839.9958775803625
+    },
+    {
+      "frame": 122,
+      "injectedVolume": 0,
+      "maxSpeed": 6.789736747741699,
+      "phiArea": 4199.266697690514,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 57.13814926147461,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.25137028098106384
+      },
+      "sharpeningDust": 0.000017603943263111432,
+      "time": 4.066666878759861,
+      "transport": {
+        "dustCells": 143,
+        "dustVolume": 0.000032892698482764327,
+        "fallbackDonors": 1,
+        "finalVolume": 3839.9958448647653,
+        "initialVolume": 3839.9958775803625,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 912
+      },
+      "volume": 3839.9958271641917
+    },
+    {
+      "frame": 123,
+      "injectedVolume": 0,
+      "maxSpeed": 7.43559455871582,
+      "phiArea": 4208.103328327517,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 33.52425003051758,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 1.0034167766571045
+      },
+      "sharpeningDust": 0.000024689592464710586,
+      "time": 4.100000213831663,
+      "transport": {
+        "dustCells": 151,
+        "dustVolume": 0.00004351043244730547,
+        "fallbackDonors": 0,
+        "finalVolume": 3839.99578000811,
+        "initialVolume": 3839.9958271641917,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 864
+      },
+      "volume": 3839.9957554602715
+    },
+    {
+      "frame": 124,
+      "injectedVolume": 0,
+      "maxSpeed": 7.263744831085205,
+      "phiArea": 4216.8010858583475,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 19.310565948486328,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.7494853734970093
+      },
+      "sharpeningDust": 0.00002177579870021873,
+      "time": 4.133333548903465,
+      "transport": {
+        "dustCells": 150,
+        "dustVolume": 0.000047343650407254134,
+        "fallbackDonors": 0,
+        "finalVolume": 3839.995707630706,
+        "initialVolume": 3839.9957554602715,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 832
+      },
+      "volume": 3839.995685611223
+    },
+    {
+      "frame": 125,
+      "injectedVolume": 0,
+      "maxSpeed": 7.143206596374512,
+      "phiArea": 4224.602900885744,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 24.625858306884766,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 1.482219934463501
+      },
+      "sharpeningDust": 0.00001731393655290958,
+      "time": 4.166666883975267,
+      "transport": {
+        "dustCells": 173,
+        "dustVolume": 0.00006080164933719868,
+        "fallbackDonors": 0,
+        "finalVolume": 3839.995626682162,
+        "initialVolume": 3839.995685611223,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 848
+      },
+      "volume": 3839.995609204786
+    },
+    {
+      "frame": 126,
+      "injectedVolume": 0,
+      "maxSpeed": 7.094187259674072,
+      "phiArea": 4228.959150533157,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 23.593059539794922,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 2.5571048259735107
+      },
+      "sharpeningDust": 0.000017770631586699892,
+      "time": 4.2000002190470695,
+      "transport": {
+        "dustCells": 148,
+        "dustVolume": 0.000048401968790343086,
+        "fallbackDonors": 0,
+        "finalVolume": 3839.9955613823795,
+        "initialVolume": 3839.995609204786,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 832
+      },
+      "volume": 3839.9955432063366
+    },
+    {
+      "frame": 127,
+      "injectedVolume": 0,
+      "maxSpeed": 6.640991687774658,
+      "phiArea": 4230.984793668713,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 23.18071937561035,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.40704041719436646
+      },
+      "sharpeningDust": 0.000008614981027221802,
+      "time": 4.233333554118872,
+      "transport": {
+        "dustCells": 134,
+        "dustVolume": 0.000041334730467260106,
+        "fallbackDonors": 1,
+        "finalVolume": 3839.995503675115,
+        "initialVolume": 3839.9955432063366,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 848
+      },
+      "volume": 3839.995495313348
+    },
+    {
+      "frame": 128,
+      "injectedVolume": 0,
+      "maxSpeed": 6.7267374992370605,
+      "phiArea": 4238.528931995249,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 7,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 62.16292953491211,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.7129483819007874
+      },
+      "sharpeningDust": 0.000004991137132037693,
+      "time": 4.266666889190674,
+      "transport": {
+        "dustCells": 146,
+        "dustVolume": 0.000048763720922273546,
+        "fallbackDonors": 11,
+        "finalVolume": 3839.995446142122,
+        "initialVolume": 3839.995495313348,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 816
+      },
+      "volume": 3839.995440669504
+    },
+    {
+      "frame": 129,
+      "injectedVolume": 0,
+      "maxSpeed": 7.077801704406738,
+      "phiArea": 4238.301824615155,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 9,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 31.895864486694336,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.3960021436214447
+      },
+      "sharpeningDust": 0.000006491958401966258,
+      "time": 4.300000224262476,
+      "transport": {
+        "dustCells": 144,
+        "dustVolume": 0.000053746355636374865,
+        "fallbackDonors": 17,
+        "finalVolume": 3839.9953887497736,
+        "initialVolume": 3839.995440669504,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 800
+      },
+      "volume": 3839.995381983088
+    },
+    {
+      "frame": 130,
+      "injectedVolume": 0,
+      "maxSpeed": 6.591973781585693,
+      "phiArea": 4242.483213687627,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 9,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 43.7956657409668,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.42005640268325806
+      },
+      "sharpeningDust": 0.0000051546479085118335,
+      "time": 4.333333559334278,
+      "transport": {
+        "dustCells": 123,
+        "dustVolume": 0.00004578354976791932,
+        "fallbackDonors": 19,
+        "finalVolume": 3839.995336889913,
+        "initialVolume": 3839.995381983088,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 768
+      },
+      "volume": 3839.9953319788715
+    },
+    {
+      "frame": 131,
+      "injectedVolume": 0,
+      "maxSpeed": 7.140474796295166,
+      "phiArea": 4236.287308245511,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 9,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 51.231239318847656,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.32282590866088867
+      },
+      "sharpeningDust": 0.0000068033094180464104,
+      "time": 4.36666689440608,
+      "transport": {
+        "dustCells": 137,
+        "dustVolume": 0.00005460523138031692,
+        "fallbackDonors": 17,
+        "finalVolume": 3839.9952749962404,
+        "initialVolume": 3839.9953319788715,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 688
+      },
+      "volume": 3839.9952685140606
+    },
+    {
+      "frame": 132,
+      "injectedVolume": 0,
+      "maxSpeed": 6.844169616699219,
+      "phiArea": 4235.307295050472,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 10,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 108.24024200439453,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.32414576411247253
+      },
+      "sharpeningDust": 0.000003823635267963255,
+      "time": 4.400000229477882,
+      "transport": {
+        "dustCells": 119,
+        "dustVolume": 0.00005051865895300267,
+        "fallbackDonors": 16,
+        "finalVolume": 3839.9952142402954,
+        "initialVolume": 3839.9952685140606,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 688
+      },
+      "volume": 3839.9952104297017
+    },
+    {
+      "frame": 133,
+      "injectedVolume": 0,
+      "maxSpeed": 6.978084087371826,
+      "phiArea": 4240.079733995333,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 10,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 85.77452087402344,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.24831213057041168
+      },
+      "sharpeningDust": 0.000002469324385856453,
+      "time": 4.4333335645496845,
+      "transport": {
+        "dustCells": 107,
+        "dustVolume": 0.000045263486383700924,
+        "fallbackDonors": 20,
+        "finalVolume": 3839.9951647639145,
+        "initialVolume": 3839.9952104297017,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 656
+      },
+      "volume": 3839.995162620885
+    },
+    {
+      "frame": 134,
+      "injectedVolume": 0,
+      "maxSpeed": 6.9437994956970215,
+      "phiArea": 4240.915742039366,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 10,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 96.64237213134766,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.23390895128250122
+      },
+      "sharpeningDust": 0.000004682999872329674,
+      "time": 4.466666899621487,
+      "transport": {
+        "dustCells": 110,
+        "dustVolume": 0.00004444397198033467,
+        "fallbackDonors": 14,
+        "finalVolume": 3839.9951205219104,
+        "initialVolume": 3839.995162620885,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 592
+      },
+      "volume": 3839.9951160486517
+    },
+    {
+      "frame": 135,
+      "injectedVolume": 0,
+      "maxSpeed": 7.467235088348389,
+      "phiArea": 4249.986984007388,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 10,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 50.68180465698242,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.3601590096950531
+      },
+      "sharpeningDust": 0.000011361364215645153,
+      "time": 4.500000234693289,
+      "transport": {
+        "dustCells": 124,
+        "dustVolume": 0.00005255047087704412,
+        "fallbackDonors": 126,
+        "finalVolume": 3839.995065975133,
+        "initialVolume": 3839.9951160486517,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 576
+      },
+      "volume": 3839.9950546630816
+    },
+    {
+      "frame": 136,
+      "injectedVolume": 0,
+      "maxSpeed": 7.759941101074219,
+      "phiArea": 4259.854617081917,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 10,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 72.8202896118164,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.84889817237854
+      },
+      "sharpeningDust": 0.0000051846189990101266,
+      "time": 4.533333569765091,
+      "transport": {
+        "dustCells": 164,
+        "dustVolume": 0.00007003937811389527,
+        "fallbackDonors": 142,
+        "finalVolume": 3839.994988536754,
+        "initialVolume": 3839.9950546630816,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 464
+      },
+      "volume": 3839.994983413463
+    },
+    {
+      "frame": 137,
+      "injectedVolume": 0,
+      "maxSpeed": 7.7374396324157715,
+      "phiArea": 4272.341841330823,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 9,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 47.953575134277344,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.5840765237808228
+      },
+      "sharpeningDust": 0.0000060097336245235056,
+      "time": 4.566666904836893,
+      "transport": {
+        "dustCells": 143,
+        "dustVolume": 0.00005490186591217139,
+        "fallbackDonors": 126,
+        "finalVolume": 3839.9949281320205,
+        "initialVolume": 3839.994983413463,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 416
+      },
+      "volume": 3839.9949222339446
+    },
+    {
+      "frame": 138,
+      "injectedVolume": 0,
+      "maxSpeed": 7.804856300354004,
+      "phiArea": 4283.059860969948,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 9,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 161.53794860839844,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.7883613109588623
+      },
+      "sharpeningDust": 0.000008442039018063952,
+      "time": 4.600000239908695,
+      "transport": {
+        "dustCells": 167,
+        "dustVolume": 0.00006406865689889685,
+        "fallbackDonors": 61,
+        "finalVolume": 3839.9948617922355,
+        "initialVolume": 3839.9949222339446,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 208
+      },
+      "volume": 3839.9948532383905
+    },
+    {
+      "frame": 139,
+      "injectedVolume": 0,
+      "maxSpeed": 8.02737045288086,
+      "phiArea": 4290.039566887852,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 9,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 166.20968627929688,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.6153976917266846
+      },
+      "sharpeningDust": 0.0000050489988439039735,
+      "time": 4.633333574980497,
+      "transport": {
+        "dustCells": 191,
+        "dustVolume": 0.00007442359601028681,
+        "fallbackDonors": 17,
+        "finalVolume": 3839.9947742073587,
+        "initialVolume": 3839.9948532383905,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 64
+      },
+      "volume": 3839.994768638851
+    },
+    {
+      "frame": 140,
+      "injectedVolume": 0,
+      "maxSpeed": 8.149565696716309,
+      "phiArea": 4291.415059502364,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 9,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 147.6908416748047,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.30009642243385315
+      },
+      "sharpeningDust": 0.000012375743835946196,
+      "time": 4.6666669100522995,
+      "transport": {
+        "dustCells": 243,
+        "dustVolume": 0.0001023536872687969,
+        "fallbackDonors": 26,
+        "finalVolume": 3839.994667801111,
+        "initialVolume": 3839.994768638851,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 96
+      },
+      "volume": 3839.9946552742085
+    },
+    {
+      "frame": 141,
+      "injectedVolume": 0,
+      "maxSpeed": 8.523392677307129,
+      "phiArea": 4295.5455549921535,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 10,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 105.66498565673828,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.44847655296325684
+      },
+      "sharpeningDust": 0.0000044973796775593655,
+      "time": 4.700000245124102,
+      "transport": {
+        "dustCells": 169,
+        "dustVolume": 0.00006464381026083377,
+        "fallbackDonors": 8,
+        "finalVolume": 3839.9945904794945,
+        "initialVolume": 3839.9946552742085,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 0
+      },
+      "volume": 3839.994585984757
+    },
+    {
+      "frame": 142,
+      "injectedVolume": 0,
+      "maxSpeed": 8.398702621459961,
+      "phiArea": 4287.584072164484,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 11,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 93.74068450927734,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 1.6190038919448853
+      },
+      "sharpeningDust": 0.000007644928530226025,
+      "time": 4.733333580195904,
+      "transport": {
+        "dustCells": 178,
+        "dustVolume": 0.00007389042117544875,
+        "fallbackDonors": 7,
+        "finalVolume": 3839.9945039657796,
+        "initialVolume": 3839.994585984757,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 32
+      },
+      "volume": 3839.9944964069173
+    },
+    {
+      "frame": 143,
+      "injectedVolume": 0,
+      "maxSpeed": 8.478408813476562,
+      "phiArea": 4291.954090081606,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 11,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 75.81070709228516,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.9751455783843994
+      },
+      "sharpeningDust": 0.0000037313595271371014,
+      "time": 4.766666915267706,
+      "transport": {
+        "dustCells": 192,
+        "dustVolume": 0.00008490230721924785,
+        "fallbackDonors": 5,
+        "finalVolume": 3839.994407795971,
+        "initialVolume": 3839.9944964069173,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 16
+      },
+      "volume": 3839.994403360004
+    },
+    {
+      "frame": 144,
+      "injectedVolume": 0,
+      "maxSpeed": 8.679755210876465,
+      "phiArea": 4294.587118898719,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 10,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 39.47465133666992,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.8786754608154297
+      },
+      "sharpeningDust": 0.00000965563566523997,
+      "time": 4.800000250339508,
+      "transport": {
+        "dustCells": 183,
+        "dustVolume": 0.0000694638548451032,
+        "fallbackDonors": 28,
+        "finalVolume": 3839.9943350633635,
+        "initialVolume": 3839.994403360004,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 64
+      },
+      "volume": 3839.9943255032117
+    },
+    {
+      "frame": 145,
+      "injectedVolume": 0,
+      "maxSpeed": 8.777682304382324,
+      "phiArea": 4271.0890923455845,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 11,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 32.6461296081543,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.8863497972488403
+      },
+      "sharpeningDust": 0.000007907683084340533,
+      "time": 4.83333358541131,
+      "transport": {
+        "dustCells": 202,
+        "dustVolume": 0.00007040402473647983,
+        "fallbackDonors": 12,
+        "finalVolume": 3839.9942584579285,
+        "initialVolume": 3839.9943255032117,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 0
+      },
+      "volume": 3839.9942506595917
+    },
+    {
+      "frame": 146,
+      "injectedVolume": 0,
+      "maxSpeed": 8.660595893859863,
+      "phiArea": 4262.681422326904,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 11,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 161.15243530273438,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.7192618250846863
+      },
+      "sharpeningDust": 0.000012358201729512075,
+      "time": 4.866666920483112,
+      "transport": {
+        "dustCells": 136,
+        "dustVolume": 0.000059951247799228113,
+        "fallbackDonors": 7,
+        "finalVolume": 3839.994190578248,
+        "initialVolume": 3839.9942506595917,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 96
+      },
+      "volume": 3839.994177852437
+    },
+    {
+      "frame": 147,
+      "injectedVolume": 0,
+      "maxSpeed": 8.791165351867676,
+      "phiArea": 4256.672836751365,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 10,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 58.686073303222656,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.9427680373191833
+      },
+      "sharpeningDust": 0.000010664359251677524,
+      "time": 4.9000002555549145,
+      "transport": {
+        "dustCells": 155,
+        "dustVolume": 0.00006817071062537039,
+        "fallbackDonors": 26,
+        "finalVolume": 3839.9941110484997,
+        "initialVolume": 3839.994177852437,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 112
+      },
+      "volume": 3839.9941007028074
+    },
+    {
+      "frame": 148,
+      "injectedVolume": 0,
+      "maxSpeed": 8.961377143859863,
+      "phiArea": 4249.177339930553,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 11,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 45.27039337158203,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.7286728620529175
+      },
+      "sharpeningDust": 0.00001341243228125677,
+      "time": 4.933333590626717,
+      "transport": {
+        "dustCells": 136,
+        "dustVolume": 0.00005770603940513652,
+        "fallbackDonors": 0,
+        "finalVolume": 3839.9940394879,
+        "initialVolume": 3839.9941007028074,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 0
+      },
+      "volume": 3839.994025789381
+    },
+    {
+      "frame": 149,
+      "injectedVolume": 0,
+      "maxSpeed": 9.139392852783203,
+      "phiArea": 4248.801410899511,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 11,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 55.78216552734375,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 1.6555969715118408
+      },
+      "sharpeningDust": 0.000010468141397268482,
+      "time": 4.966666925698519,
+      "transport": {
+        "dustCells": 147,
+        "dustVolume": 0.00006112732318985792,
+        "fallbackDonors": 1,
+        "finalVolume": 3839.993964468963,
+        "initialVolume": 3839.994025789381,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 0
+      },
+      "volume": 3839.9939539189227
+    },
+    {
+      "frame": 150,
+      "injectedVolume": 0,
+      "maxSpeed": 9.785115242004395,
+      "phiArea": 4239.53685676887,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 12,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 63.73306655883789,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.9172794818878174
+      },
+      "sharpeningDust": 0.000006304652572453051,
+      "time": 5.000000260770321,
+      "transport": {
+        "dustCells": 155,
+        "dustVolume": 0.00006502312108658259,
+        "fallbackDonors": 15,
+        "finalVolume": 3839.9938905646422,
+        "initialVolume": 3839.9939539189227,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 16
+      },
+      "volume": 3839.9938844272074
+    },
+    {
+      "frame": 151,
+      "injectedVolume": 0,
+      "maxSpeed": 13.151846885681152,
+      "phiArea": 4217.599779865646,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 12,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 111.58443450927734,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 3.503941535949707
+      },
+      "sharpeningDust": 0.000005902634143239993,
+      "time": 5.033333595842123,
+      "transport": {
+        "dustCells": 129,
+        "dustVolume": 0.000051546550826675475,
+        "fallbackDonors": 27,
+        "finalVolume": 3839.9938305460514,
+        "initialVolume": 3839.9938844272074,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 32
+      },
+      "volume": 3839.993824829396
+    },
+    {
+      "frame": 152,
+      "injectedVolume": 0,
+      "maxSpeed": 11.42328929901123,
+      "phiArea": 4200.611330382249,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 12,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 169.5113983154297,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 1.145241379737854
+      },
+      "sharpeningDust": 0.000009581225071997324,
+      "time": 5.066666930913925,
+      "transport": {
+        "dustCells": 118,
+        "dustVolume": 0.00004634143324455664,
+        "fallbackDonors": 19,
+        "finalVolume": 3839.9937769858857,
+        "initialVolume": 3839.993824829396,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 0
+      },
+      "volume": 3839.9937671425564
+    },
+    {
+      "frame": 153,
+      "injectedVolume": 0,
+      "maxSpeed": 10.448086738586426,
+      "phiArea": 4180.647969435661,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 10,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 131.93101501464844,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.5665072798728943
+      },
+      "sharpeningDust": 0.0000036662850675384107,
+      "time": 5.100000265985727,
+      "transport": {
+        "dustCells": 111,
+        "dustVolume": 0.00004663549386663135,
+        "fallbackDonors": 9,
+        "finalVolume": 3839.9937197448403,
+        "initialVolume": 3839.9937671425564,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 0
+      },
+      "volume": 3839.993716615368
+    },
+    {
+      "frame": 154,
+      "injectedVolume": 0,
+      "maxSpeed": 10.296673774719238,
+      "phiArea": 4137.445922716921,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 10,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 71.28999328613281,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.542896032333374
+      },
+      "sharpeningDust": 0.000003952196266254759,
+      "time": 5.1333336010575294,
+      "transport": {
+        "dustCells": 103,
+        "dustVolume": 0.00003912941096695377,
+        "fallbackDonors": 15,
+        "finalVolume": 3839.9936752768926,
+        "initialVolume": 3839.993716615368,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 64
+      },
+      "volume": 3839.9936717394176
+    },
+    {
+      "frame": 155,
+      "injectedVolume": 0,
+      "maxSpeed": 9.957599639892578,
+      "phiArea": 4096.261791566768,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 11,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 101.60511016845703,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 1.1220004558563232
+      },
+      "sharpeningDust": 0.0000014876945897412952,
+      "time": 5.166666936129332,
+      "transport": {
+        "dustCells": 101,
+        "dustVolume": 0.000043000873546882035,
+        "fallbackDonors": 21,
+        "finalVolume": 3839.993627609141,
+        "initialVolume": 3839.9936717394176,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 16
+      },
+      "volume": 3839.9936264206854
+    },
+    {
+      "frame": 156,
+      "injectedVolume": 0,
+      "maxSpeed": 11.724827766418457,
+      "phiArea": 4066.834717863376,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 10,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 114.71146392822266,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 1.18816077709198
+      },
+      "sharpeningDust": 9.75603143160697e-7,
+      "time": 5.200000271201134,
+      "transport": {
+        "dustCells": 95,
+        "dustVolume": 0.00003578707338536269,
+        "fallbackDonors": 43,
+        "finalVolume": 3839.9935909464684,
+        "initialVolume": 3839.9936264206854,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 32
+      },
+      "volume": 3839.993589905771
+    },
+    {
+      "frame": 157,
+      "injectedVolume": 0,
+      "maxSpeed": 10.595870018005371,
+      "phiArea": 4050.7052350277563,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 9,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 88.35020446777344,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.815509557723999
+      },
+      "sharpeningDust": -4.656612873077393e-10,
+      "time": 5.233333606272936,
+      "transport": {
+        "dustCells": 114,
+        "dustVolume": 0.00004631295417856403,
+        "fallbackDonors": 15,
+        "finalVolume": 3839.9935422865465,
+        "initialVolume": 3839.993589905771,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 48
+      },
+      "volume": 3839.9935430435517
+    },
+    {
+      "frame": 158,
+      "injectedVolume": 0,
+      "maxSpeed": 11.575260162353516,
+      "phiArea": 4034.441292155112,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 9,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 106.97765350341797,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.8444721698760986
+      },
+      "sharpeningDust": 0,
+      "time": 5.266666941344738,
+      "transport": {
+        "dustCells": 121,
+        "dustVolume": 0.00004581047612339795,
+        "fallbackDonors": 5,
+        "finalVolume": 3839.993494070829,
+        "initialVolume": 3839.9935430435517,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 0
+      },
+      "volume": 3839.9934943426624
+    },
+    {
+      "frame": 159,
+      "injectedVolume": 0,
+      "maxSpeed": 13.58544921875,
+      "phiArea": 4019.820833499136,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 136.73912048339844,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.7162661552429199
+      },
+      "sharpeningDust": 8.96397978067398e-9,
+      "time": 5.30000027641654,
+      "transport": {
+        "dustCells": 124,
+        "dustVolume": 0.000053952116649602644,
+        "fallbackDonors": 8,
+        "finalVolume": 3839.9934372074913,
+        "initialVolume": 3839.9934943426624,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 0
+      },
+      "volume": 3839.9934374353807
+    },
+    {
+      "frame": 160,
+      "injectedVolume": 0,
+      "maxSpeed": 10.463687896728516,
+      "phiArea": 4007.077267837689,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 179.1416473388672,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.450114369392395
+      },
+      "sharpeningDust": 1.1932570487260818e-9,
+      "time": 5.333333611488342,
+      "transport": {
+        "dustCells": 132,
+        "dustVolume": 0.000058348096704463615,
+        "fallbackDonors": 272,
+        "finalVolume": 3839.9933839295777,
+        "initialVolume": 3839.9934374353807,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 0
+      },
+      "volume": 3839.993384146552
+    },
+    {
+      "frame": 161,
+      "injectedVolume": 0,
+      "maxSpeed": 10.036852836608887,
+      "phiArea": 4007.2278389056846,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 90.30812072753906,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.3050861656665802
+      },
+      "sharpeningDust": 5.384208634495735e-9,
+      "time": 5.366666946560144,
+      "transport": {
+        "dustCells": 116,
+        "dustVolume": 0.000044611384760750994,
+        "fallbackDonors": 258,
+        "finalVolume": 3839.993338068545,
+        "initialVolume": 3839.993384146552,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 96
+      },
+      "volume": 3839.993338653284
+    },
+    {
+      "frame": 162,
+      "injectedVolume": 0,
+      "maxSpeed": 10.927547454833984,
+      "phiArea": 4004.262694964069,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 37.670536041259766,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.26939913630485535
+      },
+      "sharpeningDust": 7.864427971071564e-7,
+      "time": 5.400000281631947,
+      "transport": {
+        "dustCells": 136,
+        "dustVolume": 0.000055919216485289525,
+        "fallbackDonors": 261,
+        "finalVolume": 3839.99328473356,
+        "initialVolume": 3839.993338653284,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 192
+      },
+      "volume": 3839.993283831735
+    },
+    {
+      "frame": 163,
+      "injectedVolume": 0,
+      "maxSpeed": 12.081740379333496,
+      "phiArea": 4000.7183792641736,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 51.84618377685547,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.42155101895332336
+      },
+      "sharpeningDust": 0.0000032981088793349045,
+      "time": 5.433333616703749,
+      "transport": {
+        "dustCells": 125,
+        "dustVolume": 0.00005668195040708923,
+        "fallbackDonors": 263,
+        "finalVolume": 3839.9932339340785,
+        "initialVolume": 3839.993283831735,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 240
+      },
+      "volume": 3839.9932305100265
+    },
+    {
+      "frame": 164,
+      "injectedVolume": 0,
+      "maxSpeed": 8.979655265808105,
+      "phiArea": 3998.7274694540683,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 150.00083923339844,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.3614794611930847
+      },
+      "sharpeningDust": 3.026798367500305e-9,
+      "time": 5.466666951775551,
+      "transport": {
+        "dustCells": 120,
+        "dustVolume": 0.000047460424085432606,
+        "fallbackDonors": 134,
+        "finalVolume": 3839.9931837773133,
+        "initialVolume": 3839.9932305100265,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 16
+      },
+      "volume": 3839.993184129325
+    },
+    {
+      "frame": 165,
+      "injectedVolume": 0,
+      "maxSpeed": 7.926936149597168,
+      "phiArea": 4007.715321937001,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 50.475555419921875,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.18735526502132416
+      },
+      "sharpeningDust": 0.0000013133436596035608,
+      "time": 5.500000286847353,
+      "transport": {
+        "dustCells": 113,
+        "dustVolume": 0.00004075822781446359,
+        "fallbackDonors": 131,
+        "finalVolume": 3839.993147017958,
+        "initialVolume": 3839.993184129325,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 256
+      },
+      "volume": 3839.9931457608045
+    },
+    {
+      "frame": 166,
+      "injectedVolume": 0,
+      "maxSpeed": 8.691770553588867,
+      "phiArea": 4013.220110586444,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 122.73418426513672,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.48760247230529785
+      },
+      "sharpeningDust": 0.000004000624869604508,
+      "time": 5.533333621919155,
+      "transport": {
+        "dustCells": 144,
+        "dustVolume": 0.00005559057124626676,
+        "fallbackDonors": 132,
+        "finalVolume": 3839.993090774517,
+        "initialVolume": 3839.9931457608045,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 272
+      },
+      "volume": 3839.9930870243456
+    },
+    {
+      "frame": 167,
+      "injectedVolume": 0,
+      "maxSpeed": 6.26483154296875,
+      "phiArea": 4018.4190825734404,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 52.83747482299805,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.26372551918029785
+      },
+      "sharpeningDust": 0.000004099374280031043,
+      "time": 5.566666956990957,
+      "transport": {
+        "dustCells": 137,
+        "dustVolume": 0.000051805571873175804,
+        "fallbackDonors": 136,
+        "finalVolume": 3839.993037871994,
+        "initialVolume": 3839.9930870243456,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 304
+      },
+      "volume": 3839.993033716915
+    },
+    {
+      "frame": 168,
+      "injectedVolume": 0,
+      "maxSpeed": 5.496031761169434,
+      "phiArea": 4015.948839264631,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 36.541072845458984,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.4029022455215454
+      },
+      "sharpeningDust": 0.000002644369203608221,
+      "time": 5.600000292062759,
+      "transport": {
+        "dustCells": 123,
+        "dustVolume": 0.00004077874470298504,
+        "fallbackDonors": 133,
+        "finalVolume": 3839.9929862629833,
+        "initialVolume": 3839.993033716915,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 336
+      },
+      "volume": 3839.992983760886
+    },
+    {
+      "frame": 169,
+      "injectedVolume": 0,
+      "maxSpeed": 5.351625442504883,
+      "phiArea": 4016.3857023783175,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 133.712890625,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.3378315567970276
+      },
+      "sharpeningDust": 8.685844932188047e-7,
+      "time": 5.6333336271345615,
+      "transport": {
+        "dustCells": 122,
+        "dustVolume": 0.00004390114131935449,
+        "fallbackDonors": 11,
+        "finalVolume": 3839.9929370135383,
+        "initialVolume": 3839.992983760886,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 304
+      },
+      "volume": 3839.9929357090655
+    },
+    {
+      "frame": 170,
+      "injectedVolume": 0,
+      "maxSpeed": 5.867956161499023,
+      "phiArea": 4005.58902809142,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 195.00332641601562,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.6137563586235046
+      },
+      "sharpeningDust": 0.0000014477723198069725,
+      "time": 5.666666962206364,
+      "transport": {
+        "dustCells": 130,
+        "dustVolume": 0.000044104988756649144,
+        "fallbackDonors": 13,
+        "finalVolume": 3839.9928902668344,
+        "initialVolume": 3839.9929357090655,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 304
+      },
+      "volume": 3839.992888478697
+    },
+    {
+      "frame": 171,
+      "injectedVolume": 0,
+      "maxSpeed": 6.491398811340332,
+      "phiArea": 4013.2508508916935,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 125.80147552490234,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.185274139046669
+      },
+      "sharpeningDust": 0.0000035821360029331117,
+      "time": 5.700000297278166,
+      "transport": {
+        "dustCells": 137,
+        "dustVolume": 0.000046227323425518385,
+        "fallbackDonors": 10,
+        "finalVolume": 3839.9928452764707,
+        "initialVolume": 3839.992888478697,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 352
+      },
+      "volume": 3839.992841939905
+    },
+    {
+      "frame": 172,
+      "injectedVolume": 0,
+      "maxSpeed": 4.980947971343994,
+      "phiArea": 4022.2345378417776,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 91.47285461425781,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.22110594809055328
+      },
+      "sharpeningDust": 0.0000071143702484732785,
+      "time": 5.733333632349968,
+      "transport": {
+        "dustCells": 147,
+        "dustVolume": 0.000050289559303778875,
+        "fallbackDonors": 2,
+        "finalVolume": 3839.9927902653835,
+        "initialVolume": 3839.992841939905,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 352
+      },
+      "volume": 3839.99278343877
+    },
+    {
+      "frame": 173,
+      "injectedVolume": 0,
+      "maxSpeed": 5.467001914978027,
+      "phiArea": 4031.7021543015435,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 59.13572692871094,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.5416070222854614
+      },
+      "sharpeningDust": 0.000004886412455107347,
+      "time": 5.76666696742177,
+      "transport": {
+        "dustCells": 119,
+        "dustVolume": 0.000042556721879721815,
+        "fallbackDonors": 7,
+        "finalVolume": 3839.992742847614,
+        "initialVolume": 3839.99278343877,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 336
+      },
+      "volume": 3839.9927378268485
+    },
+    {
+      "frame": 174,
+      "injectedVolume": 0,
+      "maxSpeed": 5.047336101531982,
+      "phiArea": 4037.907479494839,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 36.85322189331055,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.2226327508687973
+      },
+      "sharpeningDust": 0.0000029075553698021395,
+      "time": 5.800000302493572,
+      "transport": {
+        "dustCells": 99,
+        "dustVolume": 0.00003353754923551833,
+        "fallbackDonors": 9,
+        "finalVolume": 3839.9927037936973,
+        "initialVolume": 3839.9927378268485,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 320
+      },
+      "volume": 3839.992700345471
+    },
+    {
+      "frame": 175,
+      "injectedVolume": 0,
+      "maxSpeed": 4.9716267585754395,
+      "phiArea": 4044.132805513589,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 42.84786605834961,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.11227619647979736
+      },
+      "sharpeningDust": 0.0000016489094605276478,
+      "time": 5.833333637565374,
+      "transport": {
+        "dustCells": 110,
+        "dustVolume": 0.000037471572613023696,
+        "fallbackDonors": 16,
+        "finalVolume": 3839.99266337017,
+        "initialVolume": 3839.992700345471,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 320
+      },
+      "volume": 3839.992662391269
+    },
+    {
+      "frame": 176,
+      "injectedVolume": 0,
+      "maxSpeed": 4.80370569229126,
+      "phiArea": 4040.6685174951563,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 63.11630630493164,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.08461938053369522
+      },
+      "sharpeningDust": 0.000003272457433922682,
+      "time": 5.8666669726371765,
+      "transport": {
+        "dustCells": 129,
+        "dustVolume": 0.000048660858544880004,
+        "fallbackDonors": 24,
+        "finalVolume": 3839.9926211021934,
+        "initialVolume": 3839.992662391269,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 336
+      },
+      "volume": 3839.9926178945166
+    },
+    {
+      "frame": 177,
+      "injectedVolume": 0,
+      "maxSpeed": 5.0129008293151855,
+      "phiArea": 4047.9281939213806,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 32.38469696044922,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.3642283082008362
+      },
+      "sharpeningDust": 0.0000033043796747733722,
+      "time": 5.900000307708979,
+      "transport": {
+        "dustCells": 117,
+        "dustVolume": 0.00003091308980818219,
+        "fallbackDonors": 0,
+        "finalVolume": 3839.9925897093526,
+        "initialVolume": 3839.9926178945166,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 272
+      },
+      "volume": 3839.9925865005744
+    },
+    {
+      "frame": 178,
+      "injectedVolume": 0,
+      "maxSpeed": 4.671234607696533,
+      "phiArea": 4052.3361393871774,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 18.558115005493164,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.1457744538784027
+      },
+      "sharpeningDust": 6.687805580440909e-7,
+      "time": 5.933333642780781,
+      "transport": {
+        "dustCells": 91,
+        "dustVolume": 0.000025800621630489573,
+        "fallbackDonors": 1,
+        "finalVolume": 3839.9925628694937,
+        "initialVolume": 3839.9925865005744,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 272
+      },
+      "volume": 3839.992562042633
+    },
+    {
+      "frame": 179,
+      "injectedVolume": 0,
+      "maxSpeed": 4.873292922973633,
+      "phiArea": 4053.6653531988923,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 39.64649200439453,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.36360326409339905
+      },
+      "sharpeningDust": 0.000002918602319823549,
+      "time": 5.966666977852583,
+      "transport": {
+        "dustCells": 115,
+        "dustVolume": 0.000027117887080069236,
+        "fallbackDonors": 10,
+        "finalVolume": 3839.9925325019376,
+        "initialVolume": 3839.992562042633,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 288
+      },
+      "volume": 3839.9925299269144
+    },
+    {
+      "frame": 180,
+      "injectedVolume": 0,
+      "maxSpeed": 7.345675945281982,
+      "phiArea": 4049.208294783195,
+      "pressure": {
+        "budget": 2,
+        "coarseCapFail": false,
+        "coarseIterations": 8,
+        "converged": true,
+        "cycles": 1,
+        "initialResidual": 140.59579467773438,
+        "recoveryExhausted": false,
+        "recoverySweeps": 0,
+        "rejectedCycles": 0,
+        "residual": 0.6361079216003418
+      },
+      "sharpeningDust": 7.89222383446031e-7,
+      "time": 6.000000312924385,
+      "transport": {
+        "dustCells": 133,
+        "dustVolume": 0.00003774839709222433,
+        "fallbackDonors": 19,
+        "finalVolume": 3839.9924889164513,
+        "initialVolume": 3839.9925299269144,
+        "maxDonorError": 1.1920928955078125e-7,
+        "skippedCells": 272
+      },
+      "volume": 3839.992487140835
+    }
+  ]
+}

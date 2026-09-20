@@ -1,0 +1,81 @@
+diff --git a/rust/crates/fluid-core/src/uniform_geometric/pressure.rs b/rust/crates/fluid-core/src/uniform_geometric/pressure.rs
+index b3c1d12a..92b34e0d 100644
+--- a/rust/crates/fluid-core/src/uniform_geometric/pressure.rs
++++ b/rust/crates/fluid-core/src/uniform_geometric/pressure.rs
+@@ -242,7 +242,8 @@ impl Level {
+                     }
+                     let w = (if k & 1 == 0 { 1.0 - f[0] } else { f[0] })
+                         * (if k & 2 == 0 { 1.0 - f[1] } else { f[1] });
+-                    sum += w * self.p[self.index(r).unwrap()];
++                    let j=self.index(r).unwrap();
++                    sum += w * if std::env::var_os("AUDIT_MASK_AIR").is_some() && self.phi[j]>=0.0 {0.0} else {self.p[j]};
+                     total += w;
+                 }
+                 if total > 0.0 {
+@@ -338,7 +339,7 @@ impl Pressure {
+         let coarse = &self.levels[level + 1];
+         let values = (0..coarse.p.len())
+             .map(|i| {
+-                if level >= UNIFORM_CM11A_CONSTRAINT_LEVELS {
++                if level >= std::env::var("AUDIT_CONSTRAINT_LEVELS").ok().and_then(|s|s.parse().ok()).unwrap_or(UNIFORM_CM11A_CONSTRAINT_LEVELS) {
+                     FREE
+                 } else {
+                     fine.children(coarse, i).iter().fold(FREE, |m, &j| {
+@@ -428,6 +429,12 @@ impl Pressure {
+         }
+         let residual = self.levels[l].residual(rhs);
+         let coarse_rhs = self.restrict(l, &residual);
++        if l == 3 && std::env::var_os("AUDIT_TRACE").is_some() {
++            let level=&self.levels[l];
++            let mut worst=0.0f32; let mut at=0; let mut count=0;
++            for i in 0..residual.len() { if level.phi[i]<0.0 && level.minimum[i]>-1e30 && level.p[i]<=level.minimum[i]+1e-4 && residual[i]<0.0 {count+=1; if residual[i]<worst {worst=residual[i];at=i;}} }
++            eprintln!("cutoff active-bound rows={} worst residual={} at={:?} p={} min={} topology={:?}",count,worst,level.point(at),level.p[at],level.minimum[at],level.topology[at]);
++        }
+         self.levels[l + 1].p.fill(0.0);
+         self.restrict_min(l, true);
+         self.v_cycle(l + 1, &coarse_rhs, o, scale);
+@@ -484,7 +491,7 @@ impl Pressure {
+                 }
+                 phis[i] = if positives > 0
+                     && positives < 4
+-                    && l + 1 <= UNIFORM_CM11A_PHI_PRESERVATION_LEVELS
++                    && l + 1 <= std::env::var("AUDIT_PHI_LEVELS").ok().and_then(|s|s.parse().ok()).unwrap_or(UNIFORM_CM11A_PHI_PRESERVATION_LEVELS)
+                 {
+                     positive / positives as f32
+                 } else {
+diff --git a/rust/crates/fluid-core/src/uniform_geometric/world.rs b/rust/crates/fluid-core/src/uniform_geometric/world.rs
+index 8518d559..ef68d6ba 100644
+--- a/rust/crates/fluid-core/src/uniform_geometric/world.rs
++++ b/rust/crates/fluid-core/src/uniform_geometric/world.rs
+@@ -391,6 +391,9 @@ impl World {
+                 };
+             }
+         }
++        if std::env::var_os("FIG9_AUDIT").is_some() && self.receipt.frame == 103 {
++            std::fs::write("/tmp/fig9-pressure.json", serde_json::to_string(&serde_json::json!({"dims":g.dims,"h":g.h,"phi":fine.phi,"topology":fine.topology,"minimum":fine.minimum,"rhs":fine.rhs,"options":self.options,"dt":dt,"rho":self.rho})).unwrap()).unwrap();
++        }
+         self.pressure.solve(&self.options, dt, self.rho, g.open_top);
+         let fine = &self.pressure.levels[0];
+         let pressure = |p: [i32; 2]| -> f32 {
+diff --git a/rust/crates/fluid-core/examples/fig9_pressure_audit.rs b/rust/crates/fluid-core/examples/fig9_pressure_audit.rs
+new file mode 100644
+--- /dev/null
++++ b/rust/crates/fluid-core/examples/fig9_pressure_audit.rs
+@@ -0,0 +1,17 @@
++use fluid_core::uniform_geometric::{pressure::Pressure, UniformGeometricOptions};
++fn main() {
++ let r:serde_json::Value=serde_json::from_str(&std::fs::read_to_string("/tmp/fig9-pressure.json").unwrap()).unwrap();
++ for (name,full,v,sweeps) in [("full1",1.,0.,6.),("full2",2.,0.,6.),("full3",3.,0.,6.),("v1",0.,1.,6.),("v7",0.,7.,6.),("v30",0.,30.,6.),("smooth",0.,1.,1000.)] {
++ let mut p=Pressure::new(serde_json::from_value(r["dims"].clone()).unwrap(),serde_json::from_value(r["h"].clone()).unwrap()).unwrap();
++ p.levels[0].phi=serde_json::from_value(r["phi"].clone()).unwrap();
++ p.levels[0].topology=serde_json::from_value(r["topology"].clone()).unwrap();
++ p.levels[0].minimum=serde_json::from_value(r["minimum"].clone()).unwrap();
++ p.levels[0].rhs=serde_json::from_value(r["rhs"].clone()).unwrap();
++ if let Ok(n)=std::env::var("AUDIT_LEVELS") {p.levels.truncate(n.parse().unwrap());}
++ let mut o:UniformGeometricOptions=serde_json::from_value(r["options"].clone()).unwrap();
++ o.pressure_full_cycles=full; o.pressure_v_cycles=v; o.pressure_sweeps=sweeps; o.pressure_residual_tolerance=0.;
++ p.solve(&o,r["dt"].as_f64().unwrap() as f32,r["rho"].as_f64().unwrap() as f32,false);
++ println!("{} {:?} maxima {:?}",name,p.receipt,p.levels.iter().map(|l| l.p.iter().copied().map(f32::abs).fold(0.,f32::max)).collect::<Vec<_>>());
++ if name=="full2" { std::fs::write("/tmp/fig9-levels.json",serde_json::to_string(&p.levels.iter().map(|l|serde_json::json!({"dims":l.dims,"phi":l.phi,"topology":l.topology,"p":l.p,"rhs":l.rhs,"min":l.minimum})).collect::<Vec<_>>()).unwrap()).unwrap(); }
++ }
++}
