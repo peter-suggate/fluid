@@ -1,0 +1,299 @@
+{
+  "initial": {
+    "mass": 2391.0800018310547,
+    "airborneVolume": 425,
+    "airborneArea": 428.4375,
+    "ballAreas": [
+      112.625,
+      153.5,
+      112.625,
+      49.6875
+    ]
+  },
+  "summaries": [
+    {
+      "name": "fixed",
+      "sweeps": 2,
+      "balance": false,
+      "elapsedMs": 1230.820667,
+      "frames": [
+        {
+          "frame": 12,
+          "mass": 2391.080055122963,
+          "airborneVolume": 424.9999997779885,
+          "airborneArea": 412.375,
+          "ballAreas": [
+            108.71875,
+            150.03125,
+            108.71875,
+            44.90625
+          ]
+        },
+        {
+          "frame": 20,
+          "mass": 2391.080043190622,
+          "airborneVolume": 424.9999879427137,
+          "airborneArea": 403.0625,
+          "ballAreas": [
+            106.4375,
+            148.125,
+            106.4375,
+            42.0625
+          ]
+        },
+        {
+          "frame": 24,
+          "mass": 2391.0799894037523,
+          "airborneVolume": 424.9944233740546,
+          "airborneArea": 398.34375,
+          "ballAreas": [
+            105.3125,
+            146.9375,
+            105.3125,
+            40.78125
+          ]
+        },
+        {
+          "frame": 30,
+          "mass": 2391.0798644726055,
+          "airborneVolume": 0,
+          "airborneArea": 0,
+          "ballAreas": [
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "frame": 36,
+          "mass": 2391.0798475383444,
+          "airborneVolume": 93.20926443335338,
+          "airborneArea": 57.25,
+          "ballAreas": [
+            19.203125,
+            25.625,
+            12.421875,
+            0
+          ]
+        },
+        {
+          "frame": 40,
+          "mass": 2391.0797556490656,
+          "airborneVolume": 137.7156310635695,
+          "airborneArea": 102.984375,
+          "ballAreas": [
+            41.59375,
+            22.84375,
+            38.546875,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "name": "fixed-balanced",
+      "sweeps": 2,
+      "balance": true,
+      "elapsedMs": 1183.661875,
+      "frames": [
+        {
+          "frame": 12,
+          "mass": 2391.0800526421235,
+          "airborneVolume": 424.99999413482226,
+          "airborneArea": 412.125,
+          "ballAreas": [
+            108.6875,
+            149.9375,
+            108.6875,
+            44.8125
+          ]
+        },
+        {
+          "frame": 20,
+          "mass": 2391.0799002307017,
+          "airborneVolume": 424.9999440022034,
+          "airborneArea": 403.171875,
+          "ballAreas": [
+            106.5,
+            148.171875,
+            106.5,
+            42
+          ]
+        },
+        {
+          "frame": 24,
+          "mass": 2391.079788522838,
+          "airborneVolume": 424.9969367867993,
+          "airborneArea": 398.3125,
+          "ballAreas": [
+            105.34375,
+            146.96875,
+            105.34375,
+            40.65625
+          ]
+        },
+        {
+          "frame": 30,
+          "mass": 2391.079732815488,
+          "airborneVolume": 0,
+          "airborneArea": 1.3125,
+          "ballAreas": [
+            0,
+            1.3125,
+            0,
+            0
+          ]
+        },
+        {
+          "frame": 36,
+          "mass": 2391.0797005689133,
+          "airborneVolume": 63.49010593922799,
+          "airborneArea": 62.390625,
+          "ballAreas": [
+            25.078125,
+            2.4375,
+            31.171875,
+            3.703125
+          ]
+        },
+        {
+          "frame": 40,
+          "mass": 2391.07962022641,
+          "airborneVolume": 115.55779978903183,
+          "airborneArea": 107.515625,
+          "ballAreas": [
+            50.765625,
+            0,
+            56.75,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "name": "no-pool",
+      "sweeps": 2,
+      "balance": false,
+      "elapsedMs": 689.344667,
+      "frames": [
+        {
+          "frame": 12,
+          "mass": 424.9999994566706,
+          "airborneVolume": 424.9999994566706,
+          "airborneArea": 425.28125,
+          "ballAreas": [
+            112.09375,
+            154.15625,
+            112.09375,
+            46.9375
+          ]
+        },
+        {
+          "frame": 20,
+          "mass": 424.99999388758715,
+          "airborneVolume": 424.99999388758715,
+          "airborneArea": 425.125,
+          "ballAreas": [
+            112.3125,
+            154.84375,
+            112.3125,
+            45.65625
+          ]
+        },
+        {
+          "frame": 24,
+          "mass": 424.99998914148296,
+          "airborneVolume": 424.99959619038873,
+          "airborneArea": 424.90625,
+          "ballAreas": [
+            112.1875,
+            155.40625,
+            112.1875,
+            45.125
+          ]
+        }
+      ]
+    },
+    {
+      "name": "prior",
+      "sweeps": 2,
+      "balance": false,
+      "elapsedMs": 1099.3778750000001,
+      "frames": [
+        {
+          "frame": 12,
+          "mass": 2391.0799654208367,
+          "airborneVolume": 424.99991575615616,
+          "airborneArea": 406.59375,
+          "ballAreas": [
+            105.109375,
+            150,
+            106.015625,
+            45.46875
+          ]
+        },
+        {
+          "frame": 20,
+          "mass": 2391.079749163461,
+          "airborneVolume": 424.9998283454645,
+          "airborneArea": 329.4375,
+          "ballAreas": [
+            35.03125,
+            151.859375,
+            90.1875,
+            52.359375
+          ]
+        },
+        {
+          "frame": 24,
+          "mass": 2391.0793533299825,
+          "airborneVolume": 424.99979636989417,
+          "airborneArea": 258.765625,
+          "ballAreas": [
+            20.6875,
+            131.28125,
+            65.796875,
+            41
+          ]
+        },
+        {
+          "frame": 30,
+          "mass": 2391.0791755827545,
+          "airborneVolume": 424.9997779486097,
+          "airborneArea": 3.84375,
+          "ballAreas": [
+            0,
+            2.234375,
+            0,
+            1.609375
+          ]
+        },
+        {
+          "frame": 36,
+          "mass": 2391.0790339191535,
+          "airborneVolume": 293.23351000444336,
+          "airborneArea": 0.75,
+          "ballAreas": [
+            0,
+            0,
+            0,
+            0.75
+          ]
+        },
+        {
+          "frame": 40,
+          "mass": 2391.0789627156796,
+          "airborneVolume": 293.23881163680016,
+          "airborneArea": 0.71875,
+          "ballAreas": [
+            0,
+            0,
+            0,
+            0.71875
+          ]
+        }
+      ]
+    }
+  ]
+}

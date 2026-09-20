@@ -1,0 +1,197 @@
+[
+  {
+    "sceneId": "cm12-figure-3",
+    "mode": "prior",
+    "dims": [
+      128,
+      128,
+      8
+    ],
+    "medianWallMs": 32.59275000000025,
+    "medianExtensionMs": 0.7490520500000002,
+    "extensionPasses": 22,
+    "scratchBytes": 16824808,
+    "frames": [
+      {
+        "frame": 0,
+        "mass": 19128.640014648438,
+        "airborneVolume": 3400,
+        "airborneNegativeVertices": 2898
+      },
+      {
+        "frame": 20,
+        "mass": 19128.641046211786,
+        "airborneVolume": 3400.0002145922726,
+        "airborneNegativeVertices": 2565
+      },
+      {
+        "frame": 24,
+        "mass": 19128.6410086398,
+        "airborneVolume": 3400.0001054947097,
+        "airborneNegativeVertices": 2213
+      },
+      {
+        "frame": 30,
+        "mass": 19128.64238877907,
+        "airborneVolume": 3359.2311601759498,
+        "airborneNegativeVertices": 190
+      },
+      {
+        "frame": 40,
+        "mass": 19128.642091722053,
+        "airborneVolume": 2132.1131703854758,
+        "airborneNegativeVertices": 0
+      },
+      {
+        "frame": 60,
+        "mass": 19128.63996338908,
+        "airborneVolume": 2124.0148497435957,
+        "airborneNegativeVertices": 0
+      }
+    ]
+  },
+  {
+    "sceneId": "cm12-figure-3",
+    "mode": "nearest-unfused",
+    "dims": [
+      128,
+      128,
+      8
+    ],
+    "medianWallMs": 33.76454199999989,
+    "medianExtensionMs": 1.2419937500000287,
+    "extensionPasses": 22,
+    "scratchBytes": 17425544,
+    "frames": [
+      {
+        "frame": 0,
+        "mass": 19128.640014648438,
+        "airborneVolume": 3400,
+        "airborneNegativeVertices": 2898
+      },
+      {
+        "frame": 20,
+        "mass": 19128.639726901387,
+        "airborneVolume": 3400.0001082404087,
+        "airborneNegativeVertices": 2754
+      },
+      {
+        "frame": 24,
+        "mass": 19128.639929951984,
+        "airborneVolume": 3399.9435735394327,
+        "airborneNegativeVertices": 2766
+      },
+      {
+        "frame": 30,
+        "mass": 19128.64091050579,
+        "airborneVolume": 0.3808098463754277,
+        "airborneNegativeVertices": 31
+      },
+      {
+        "frame": 40,
+        "mass": 19128.64203489638,
+        "airborneVolume": 1020.758600526519,
+        "airborneNegativeVertices": 859
+      },
+      {
+        "frame": 60,
+        "mass": 19128.640726076184,
+        "airborneVolume": 404.90861941136393,
+        "airborneNegativeVertices": 9
+      }
+    ]
+  },
+  {
+    "sceneId": "cm12-figure-3",
+    "mode": "nearest-fused",
+    "dims": [
+      128,
+      128,
+      8
+    ],
+    "medianWallMs": 34.30041699999947,
+    "medianExtensionMs": 1.1893771000000015,
+    "extensionPasses": 21,
+    "scratchBytes": 17425544,
+    "frames": [
+      {
+        "frame": 0,
+        "mass": 19128.640014648438,
+        "airborneVolume": 3400,
+        "airborneNegativeVertices": 2898
+      },
+      {
+        "frame": 20,
+        "mass": 19128.639726901387,
+        "airborneVolume": 3400.0001082404087,
+        "airborneNegativeVertices": 2754
+      },
+      {
+        "frame": 24,
+        "mass": 19128.639929951984,
+        "airborneVolume": 3399.9435735394327,
+        "airborneNegativeVertices": 2766
+      },
+      {
+        "frame": 30,
+        "mass": 19128.64091050579,
+        "airborneVolume": 0.3808098463754277,
+        "airborneNegativeVertices": 31
+      },
+      {
+        "frame": 40,
+        "mass": 19128.64201210406,
+        "airborneVolume": 1025.9240976086162,
+        "airborneNegativeVertices": 856
+      },
+      {
+        "frame": 60,
+        "mass": 19128.640600650484,
+        "airborneVolume": 411.02417416513924,
+        "airborneNegativeVertices": 5
+      }
+    ]
+  },
+  {
+    "sceneId": "minimal-power-dam-break-64",
+    "mode": "prior",
+    "dims": [
+      64,
+      64,
+      64
+    ],
+    "medianWallMs": 39.450041999998575,
+    "medianExtensionMs": 1.8970062500000495,
+    "extensionPasses": 20,
+    "scratchBytes": 28798056,
+    "frames": []
+  },
+  {
+    "sceneId": "minimal-power-dam-break-64",
+    "mode": "nearest-unfused",
+    "dims": [
+      64,
+      64,
+      64
+    ],
+    "medianWallMs": 39.190207999999984,
+    "medianExtensionMs": 2.13408959999997,
+    "extensionPasses": 20,
+    "scratchBytes": 29996424,
+    "frames": []
+  },
+  {
+    "sceneId": "minimal-power-dam-break-64",
+    "mode": "nearest-fused",
+    "dims": [
+      64,
+      64,
+      64
+    ],
+    "medianWallMs": 38.95275000000038,
+    "medianExtensionMs": 2.1505583000000117,
+    "extensionPasses": 19,
+    "scratchBytes": 29996424,
+    "frames": []
+  }
+]

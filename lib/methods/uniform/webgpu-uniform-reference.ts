@@ -96,6 +96,10 @@ export interface WebGPUUniformReferenceOptions {
   geometricTileWork?: boolean;
   /** Sec. 3.3 FIM sweep budget; clamped to the extrapolator's wavefront ceiling. */
   extensionFrontSweeps?: number;
+  /** Nearest original-source hierarchy; defaults on for geometric volume. */
+  sourceAwareExtension?: boolean;
+  /** Diagnostic control for checking the fused final transfer. */
+  fuseExtensionPack?: boolean;
   /**
    * Discard |V| below this many cell volumes wherever Sec. 3.4 or Sec. 3.5
    * finally writes V, tiny negatives included. Zero is off and stores the
@@ -895,6 +899,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.velocityA, this.velocityC, this.transportA, this.transportB,
       this.activeRegion, this.conditioningScratch,
       this.activeRegionEnabled ? this.activeDispatch : undefined,
+      options.sourceAwareExtension ?? this.geometricVolume, options.fuseExtensionPack,
     );
     // Without a ceil(n/4) hierarchy level there is no 4h field to sample.
     if (!this.velocityExtrapolator.coarseVelocityTableAvailable) this.twoLevelTileCount = 0;

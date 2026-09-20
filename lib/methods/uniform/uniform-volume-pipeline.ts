@@ -335,7 +335,9 @@ export const UNIFORM_VOLUME_PIPELINE: FluidPipelineGraph = {
     // tiles are what this stage's finest passes now run on, so both controls
     // belong beside the sweep budget that produced the field they sample.
     if(stage.id==="velocity-extension")return [{...mapped,
-      controls:[...solveWindowControls,
+      tip:{...mapped.tip,summary:"Extend nearby velocities with the narrow-band front, then fill missing air velocities from the nearest original source carried through the hierarchy. Keeps distant stationary liquid from slowing falling drops. The final 3D fill also packs the transport field."},
+      controls:[{kind:"readout" as const,label:"Air fallback",value:()=>"Nearest source",
+        hint:"Enabled by default. Carries original source locations through coarse levels; the front sweep budget is unchanged."},...solveWindowControls,
         ...(mapped.controls ?? []).filter(control=>
           !(control.kind === "param-choice" && control.param === "activeRegion")
           && !(control.kind === "readout" && control.label === "Work box")),

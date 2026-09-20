@@ -9,12 +9,67 @@ struct Face {
     value: [f32; 2],
     distance: [f32; 2],
     known: u8,
+    origin: [[f32; 2]; 2],
     active: u8,
 }
 
 #[cfg(test)]
 mod conforming_tests {
     use super::*;
+    #[test]
+    fn remote_pool_does_not_dilute_a_falling_drops_air_extension() {
+        for pool in [false, true] {
+            let mut g = Grid::new([64, 64], [0.05; 2], false).unwrap();
+            for y in 0..=64 {
+                for x in 0..=64 {
+                    let ball = ((x as f32 - 32.0).hypot(y as f32 - 45.0) - 6.0) * 0.05;
+                    g.phi[x + 65 * y] = if pool {
+                        ball.min((y as f32 - 20.0) * 0.05)
+                    } else {
+                        ball
+                    };
+                }
+            }
+            for i in 0..g.volume.len() {
+                let p = g.point(i);
+                g.volume[i] = g.target(p);
+                if p[1] > 25
+                    && (g.pressure_phi(p, "off") < 0.0
+                        || g.pressure_phi([p[0], p[1] + 1], "off") < 0.0)
+                {
+                    g.velocity[i][1] = -4.0;
+                }
+            }
+            let mut o = UniformGeometricOptions::default();
+            o.extension_front_sweeps = 2.0;
+            let e = Extension::build(&g, &o, 1.0 / 30.0);
+            // Previously the pool changed the second air layer from -4 to -3,
+            // and the next layer to -2, despite being far from these samples.
+            for y in 34..40 {
+                assert!(
+                    (e.fine_face([32, y], 1) + 4.0).abs() < 1e-5,
+                    "pool={pool}, y={y}"
+                );
+            }
+            if pool {
+                assert!(e.fine_face([32, 20], 1).abs() < 1e-5);
+            }
+            for i in 0..g.velocity.len() {
+                let p = g.point(i);
+                for a in 0..2 {
+                    let mut q = p;
+                    q[a] += 1;
+                    if g.pressure_phi(p, "off") < 0.0 || g.pressure_phi(q, "off") < 0.0 {
+                        assert!(
+                            (e.values[i][a] - g.velocity[i][a]).abs() < 1e-5,
+                            "liquid face changed"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn reconstruction_has_mac_divergence_and_shared_normal_flux() {
         let mut g = Grid::new([12, 12], [0.05, 0.08], false).unwrap();
@@ -78,33 +133,61 @@ fn hierarchy_sample(
     p: [usize; 2],
     td: [usize; 2],
     a: usize,
-) -> (f32, f32) {
+    root: [usize; 2],
+    h: [f32; 2],
+    restricting: bool,
+) -> (f32, f32, [f32; 2]) {
+    let location: [f32; 2] = std::array::from_fn(|b| {
+        (p[b] as f32 + if b == a { 1.0 } else { 0.5 }) * root[b] as f32 / td[b] as f32
+    });
     let q: [f32; 2] = std::array::from_fn(|b| {
-        if b == a {
-            (p[b] + 1) as f32 * sd[b] as f32 / td[b] as f32 - 1.0
-        } else {
-            (p[b] as f32 + 0.5) * sd[b] as f32 / td[b] as f32 - 0.5
-        }
+        location[b] * sd[b] as f32 / root[b] as f32 - if b == a { 1.0 } else { 0.5 }
     });
     let base = q.map(|v| v.floor() as i32);
-    let f = [q[0] - q[0].floor(), q[1] - q[1].floor()];
-    let mut sum = 0.0;
+    let mut best = f32::INFINITY;
+    let mut value = 0.0;
     let mut weight = 0.0;
-    for k in 0..4 {
-        let r = [
-            (base[0] + (k & 1)).clamp(0, sd[0] as i32 - 1),
-            (base[1] + ((k >> 1) & 1)).clamp(0, sd[1] as i32 - 1),
-        ];
-        let v = source[index(sd, r).unwrap()];
-        let w = (if k & 1 == 0 { 1.0 - f[0] } else { f[0] })
-            * (if k & 2 == 0 { 1.0 - f[1] } else { f[1] });
-        if v.known & (1 << a) != 0 && w > 0.0 {
-            sum += w * v.value[a];
-            weight += w;
+    let mut origin = [0.0; 2];
+    // Preserve provenance: a value borrowed from the pool stays located at
+    // the pool, rather than becoming a fresh authority at an intervening air cell.
+    for pass in 0..if restricting { 2 } else { 1 } {
+        if pass == 1 && weight > 0.0 {
+            break;
+        }
+        for k in 0..4 {
+            let r: [i32; 2] = std::array::from_fn(|b| {
+                (if pass == 0 {
+                    base[b] + ((k >> b) & 1)
+                } else {
+                    2 * p[b] as i32 + ((k >> b) & 1)
+                })
+                .clamp(0, sd[b] as i32 - 1)
+            });
+            let v = source[index(sd, r).unwrap()];
+            if v.known & (1 << a) == 0 {
+                continue;
+            }
+            let distance = ((v.origin[a][0] - location[0]) * h[0]).powi(2)
+                + ((v.origin[a][1] - location[1]) * h[1]).powi(2);
+            let epsilon = 1e-6 * h[0].min(h[1]).powi(2);
+            if distance < best - epsilon {
+                best = distance;
+                value = v.value[a];
+                weight = 1.0;
+                origin = v.origin[a];
+            } else if (distance - best).abs() <= epsilon {
+                value += v.value[a];
+                weight += 1.0;
+            }
         }
     }
-    (if weight > 0.0 { sum / weight } else { 0.0 }, weight)
+    (
+        if weight > 0.0 { value / weight } else { 0.0 },
+        weight,
+        origin,
+    )
 }
+
 impl Extension {
     pub fn build(g: &Grid, o: &UniformGeometricOptions, dt: f32) -> Self {
         Self::build_inner(g, o, dt, None)
@@ -343,6 +426,16 @@ impl Extension {
             }
             faces = next;
         }
+        // The hierarchy carries where each known velocity came from, not just
+        // the velocity. Filled air must not become new authority that spreads
+        // a remote body's motion back into a nearby drop on prolongation.
+        for (i, face) in faces.iter_mut().enumerate() {
+            let p = g.point(i);
+            for a in 0..2 {
+                face.origin[a] =
+                    std::array::from_fn(|b| p[b] as f32 + if a == b { 1.0 } else { 0.5 });
+            }
+        }
         let mut levels = vec![(dims, faces)];
         while levels.last().unwrap().0.iter().any(|&n| n > 1) {
             let (sd, s) = levels.last().unwrap();
@@ -351,28 +444,13 @@ impl Extension {
             for y in 0..td[1] {
                 for x in 0..td[0] {
                     for a in 0..2 {
-                        let (mut value, mut weight) = hierarchy_sample(s, *sd, [x, y], td, a);
-                        if weight <= 0.0 && a == 1 {
-                            let mut sum = 0.0;
-                            for k in 0..4 {
-                                if let Some(j) = index(
-                                    *sd,
-                                    [(2 * x + (k & 1)) as i32, (2 * y + (k >> 1)) as i32],
-                                ) {
-                                    if s[j].known & (1 << a) != 0 {
-                                        sum += s[j].value[a];
-                                        weight += 1.0;
-                                    }
-                                }
-                            }
-                            if weight > 0.0 {
-                                value = sum / weight;
-                            }
-                        }
+                        let (value, weight, origin) =
+                            hierarchy_sample(s, *sd, [x, y], td, a, dims, g.h, true);
                         if weight > 0.0 {
                             let v = &mut target[x + td[0] * y];
                             v.value[a] = value;
                             v.known |= 1 << a;
+                            v.origin[a] = origin;
                         }
                     }
                 }
@@ -386,10 +464,19 @@ impl Extension {
                     for a in 0..2 {
                         let i = x + td[0] * y;
                         if levels[l].1[i].known & (1 << a) == 0 {
-                            let (v, w) =
-                                hierarchy_sample(&levels[l + 1].1, levels[l + 1].0, [x, y], td, a);
+                            let (v, w, origin) = hierarchy_sample(
+                                &levels[l + 1].1,
+                                levels[l + 1].0,
+                                [x, y],
+                                td,
+                                a,
+                                dims,
+                                g.h,
+                                false,
+                            );
                             if w > 0.0 {
                                 levels[l].1[i].value[a] = v;
+                                levels[l].1[i].origin[a] = origin;
                                 levels[l].1[i].known |= 1 << a;
                             }
                         }

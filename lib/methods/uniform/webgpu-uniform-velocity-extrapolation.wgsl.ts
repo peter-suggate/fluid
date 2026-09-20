@@ -6,6 +6,8 @@
  * band. Farther velocities are filled by CM11b Sec. 3.3.1's known-value,
  * renormalized trilinear restriction followed by reverse-order prolongation.
  * Each staggered component is interpolated on its own positive-face lattice.
+ * The geometric method instead carries nearest original-source provenance to
+ * keep separate fluid bodies from diluting each other's air extension.
  */
 import { createCm12NumericsWGSL } from "../../core/cm12-numerics";
 
@@ -68,6 +70,16 @@ struct DispatchArgs {
 // bit 1 is SHELL. This module writes only the three face words, in one pass of
 // its own, and reads only the class word -- never both in one dispatch.
 @group(0) @binding(12) var<storage, read_write> tileScratch: array<u32>;
+
+@group(0) @binding(13) var sourceOrigins: texture_3d<u32>;
+@group(0) @binding(14) var existingOrigins: texture_3d<u32>;
+@group(0) @binding(15) var outputOrigins: texture_storage_3d<rgba32uint, write>;
+override SOURCE_AWARE_HIERARCHY: bool = false;
+// Pipeline constants make provenance index decoding shifts/multiplies instead
+// of per-candidate dynamic integer divisions, especially on power-of-two grids.
+override ROOT_NX: u32 = 1u;
+override ROOT_NY: u32 = 1u;
+override ROOT_NZ: u32 = 1u;
 
 const DISTANCE_INFINITY: f32 = 65504.0;
 const ACCURATE_BAND_CELLS: f32 = 2.0;
@@ -515,6 +527,57 @@ fn hierarchyCorrespondingCellSample(
   );
 }
 
+// Carry original fine-face provenance rather than promoting filled coarse air
+// to a new source. Otherwise a distant stationary pool repeatedly averages
+// into the extension under a falling drop. Fine FIM values remain untouched.
+struct NearestSample { value: f32, weight: f32, origin: u32 }
+fn faceLocation(p: vec3i, dims: vec3i, component: u32) -> vec3f {
+  var point = (vec3f(p) + vec3f(0.5)) * vec3f(baseDims()) / vec3f(dims);
+  point[component] = f32(p[component]+1) * f32(baseDims()[component]) / f32(dims[component]);
+  return point;
+}
+fn originalFace(origin: u32) -> vec3i {
+  let d = vec3u(ROOT_NX,ROOT_NY,ROOT_NZ); let index = origin - 1u;
+  return vec3i(vec3u(index % d.x, (index / d.x) % d.y, index / (d.x*d.y)));
+}
+fn nearestHierarchySample(p: vec3i, sd: vec3i, td: vec3i, component: u32, footprint: bool) -> NearestSample {
+  let location = faceLocation(p, td, component);
+  var sourcePosition = (vec3f(p)+vec3f(0.5))*vec3f(sd)/vec3f(td)-vec3f(0.5);
+  sourcePosition[component] = f32(p[component]+1)*f32(sd[component])/f32(td[component])-1.0;
+  let lower = select(vec3i(floor(sourcePosition)), 2*p, footprint);
+  let h = params.cellGravity.xyz;
+  let epsilon = 1e-6 * min(h.x,min(h.y,h.z)) * min(h.x,min(h.y,h.z));
+  var best = 1e30;
+  var distances: array<f32,8>;
+  var origins: array<u32,8>;
+  var values: array<f32,8>;
+  for (var k=0u; k<8u; k++) {
+    let q = clamp(lower + vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u)),vec3i(0),sd-vec3i(1));
+    let state = textureLoad(primaryIn,q,0);
+    distances[k] = 1e30;
+    if (!componentKnown(state,component) || !sourceKnownAt(q)) { continue; }
+    var origin: u32;
+    if (frontParams.hierarchySourceUsesBaseDims != 0u) {
+      let d = baseDims(); origin = u32(q.x+d.x*(q.y+d.y*q.z))+1u;
+    } else { origin = textureLoad(sourceOrigins,q,0)[component]; }
+    if (origin == 0u) { continue; }
+    let delta = (faceLocation(originalFace(origin),baseDims(),component)-location)*h;
+    let distance = dot(delta,delta);
+    distances[k] = distance; origins[k] = origin; values[k] = state[component];
+    best = min(best,distance);
+  }
+  var contributions: array<vec2f,8>; var origin = 0u;
+  for (var k=0u; k<8u; k++) {
+    contributions[k] = vec2f(0.0);
+    if (origins[k] != 0u && abs(distances[k]-best) <= epsilon) {
+      contributions[k] = vec2f(values[k],1.0);
+      if (origin == 0u) { origin = origins[k]; }
+    }
+  }
+  let sum = d4Sum8Vec2(contributions);
+  return NearestSample(select(0.0,sum.x/sum.y,sum.y>0.0),sum.y,origin);
+}
+
 @compute @workgroup_size(4, 4, 4)
 fn restrictKnownVelocity(@builtin(global_invocation_id) gid: vec3u) {
   let p = hierarchyActiveId(gid);
@@ -523,7 +586,17 @@ fn restrictKnownVelocity(@builtin(global_invocation_id) gid: vec3u) {
   if (!inBounds(p, targetDims)) { return; }
   var values = vec3f(0.0);
   var knownMask = 0u;
+  var origins = vec3u(0u);
   for (var component = 0u; component < 3u; component += 1u) {
+    if (SOURCE_AWARE_HIERARCHY) {
+      var result = nearestHierarchySample(p,sourceDims,targetDims,component,false);
+      if (result.weight <= 0.0) { result = nearestHierarchySample(p,sourceDims,targetDims,component,true); }
+      if (result.weight > 0.0) {
+        values[component] = result.value; origins[component] = result.origin;
+        knownMask |= bitFor(component);
+      }
+      continue;
+    }
     var result = hierarchyComponentSample(p, sourceDims, targetDims, component);
     // The corresponding-cell fallback is cell-centred. It is valid for the
     // vertical component used by the paper's tall-cell construction, but its
@@ -538,39 +611,44 @@ fn restrictKnownVelocity(@builtin(global_invocation_id) gid: vec3u) {
       knownMask |= bitFor(component);
     }
   }
+  if (SOURCE_AWARE_HIERARCHY) { textureStore(outputOrigins,p,vec4u(origins,0u)); }
   textureStore(primaryOut, p, vec4f(values, f32(knownMask)));
 }
 
-@compute @workgroup_size(4, 4, 4)
-fn prolongUnknownVelocity(@builtin(global_invocation_id) gid: vec3u) {
-  let p = hierarchyActiveId(gid);
-  let sourceDims = hierarchySourceDims();
-  let targetDims = hierarchyTargetDims();
-  if (!inBounds(p, targetDims)) { return; }
-  // Only the finest prolong is shrunk. Its target doubles as the FIM's side A
-  // and is read afterwards only by the pack, which runs on the same set. Every
-  // coarser level stays dense: it is the far field the sampler reads, and its
-  // source taps walk outside any tile set even though their values cannot.
-  if (frontParams.hierarchyTargetUsesBaseDims != 0u && !shellAt(p)) { return; }
+fn prolongValue(p: vec3i) -> vec4f {
   let existing = textureLoad(secondaryIn, p, 0);
   var values = existing.xyz;
   var knownMask = u32(round(existing.w));
+  var origins = vec3u(0u);
+  if (SOURCE_AWARE_HIERARCHY && frontParams.hierarchyTargetUsesBaseDims == 0u) {
+    origins = textureLoad(existingOrigins,p,0).xyz;
+  }
   for (var component = 0u; component < 3u; component += 1u) {
     if (componentKnown(existing, component)) { continue; }
-    let result = hierarchyComponentSample(p, sourceDims, targetDims, component);
-    if (result.y > 0.0) {
-      values[component] = result.x;
-      knownMask |= bitFor(component);
+    if (SOURCE_AWARE_HIERARCHY) {
+      let result = nearestHierarchySample(p,hierarchySourceDims(),hierarchyTargetDims(),component,false);
+      if (result.weight > 0.0) {
+        values[component] = result.value; origins[component] = result.origin;
+        knownMask |= bitFor(component);
+      }
+    } else {
+      let result = hierarchyComponentSample(p, hierarchySourceDims(), hierarchyTargetDims(), component);
+      if (result.y > 0.0) { values[component] = result.x; knownMask |= bitFor(component); }
     }
   }
-  textureStore(primaryOut, p, vec4f(values, f32(knownMask)));
+  if (SOURCE_AWARE_HIERARCHY && frontParams.hierarchyTargetUsesBaseDims == 0u) {
+    textureStore(outputOrigins,p,vec4u(origins,0u));
+  }
+  return vec4f(values,f32(knownMask));
 }
-
-@compute @workgroup_size(4, 4, 4)
-fn packTransportShell(@builtin(global_invocation_id) gid: vec3u) {
-  let p=activeBaseId(gid);let padded=p+vec3i(1);let d=baseDims();
-  if(!inBounds(p,d)||!shellAt(p)){return;}
-  let state = textureLoad(primaryIn, p, 0);
+@compute @workgroup_size(4,4,4)
+fn prolongUnknownVelocity(@builtin(global_invocation_id) gid: vec3u) {
+  let p = hierarchyActiveId(gid);
+  if (!inBounds(p,hierarchyTargetDims())) { return; }
+  if (frontParams.hierarchyTargetUsesBaseDims != 0u && !shellAt(p)) { return; }
+  textureStore(primaryOut,p,prolongValue(p));
+}
+fn packValue(p: vec3i, state: vec4f) {
   var values = vec3f(0.0); var knownMask = 0u; var openMask = 0u;
   for (var component = 0u; component < 3u; component += 1u) {
     if (openBaseFace(p, component)) {
@@ -580,9 +658,21 @@ fn packTransportShell(@builtin(global_invocation_id) gid: vec3u) {
       }
     }
   }
-  // w retains known bits 0..2 and authoritative open-face bits 3..5 for the
-  // opt-in Dawn conformance readback. All transport consumers sample xyz only.
-  textureStore(primaryOut, padded, vec4f(values, f32(knownMask | (openMask << 3u))));
+  textureStore(primaryOut,p+vec3i(1),vec4f(values,f32(knownMask | (openMask << 3u))));
+}
+@compute @workgroup_size(4,4,4)
+fn prolongAndPack(@builtin(global_invocation_id) gid: vec3u) {
+  let p = hierarchyActiveId(gid);
+  if (!inBounds(p,baseDims()) || !shellAt(p)) { return; }
+  packValue(p,prolongValue(p));
+}
+
+@compute @workgroup_size(4, 4, 4)
+fn packTransportShell(@builtin(global_invocation_id) gid: vec3u) {
+  let p=activeBaseId(gid);let d=baseDims();
+  if(!inBounds(p,d)||!shellAt(p)){return;}
+  let state = textureLoad(primaryIn, p, 0);
+  packValue(p,state);
 }
 
 /**
