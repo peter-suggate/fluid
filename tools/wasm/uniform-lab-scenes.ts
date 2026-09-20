@@ -88,6 +88,30 @@ for (const artifact of ["scalar", "simd"] as const) {
     workerFactory: factory,
   });
   try {
+    const sceneryScene = sceneDocument(findSceneDefinition("water-box-dam-break")!);
+    sceneryScene.rigidBodies = [];
+    sceneryScene.scenery = { palettes: {}, nodes: [{ kind: "terrain-shell", id: "shell", materialModel: "porcelain" }, {
+      kind: "box", id: "scenery-wall",
+      place: { units: "metres", position: { x: 0, y: sceneryScene.container.height_m / 2, z: 0 } },
+      halfSize: { x: sceneryScene.voxelDomain.finestCellSize_m,
+        y: sceneryScene.container.height_m / 2, z: sceneryScene.container.depth_m / 2 },
+      material: { colorLinear: [1, 1, 1] },
+    }] };
+    const scenerySeed = uniformLabSeed(sceneryScene, 0);
+    let sceneryView = await controller.load(sceneryScene, "area-only", false, 0);
+    const wallCells = scenerySeed.capacity.flatMap((capacity, i) => {
+      const x = (i % sceneryView.nx + 0.5) * sceneryView.cellSize[0] - sceneryScene.container.width_m / 2;
+      return Math.abs(x) < sceneryScene.voxelDomain.finestCellSize_m && capacity === 0 ? [i] : [];
+    });
+    assert.ok(wallCells.length >= sceneryView.ny, "scenery wall is voxelized");
+    for (let step = 0; step < 12; step++) {
+      sceneryView = await controller.advance(1 / 30);
+      for (const i of wallCells) {
+        assert.equal(sceneryView.capacity[i], 0, "scenery capacity survives advance");
+        assert.equal(sceneryView.volume[i], 0, "water cannot enter scenery");
+      }
+      assert.ok(sceneryView.volume.every(Number.isFinite));
+    }
     const balancedScene = sceneDocument(findSceneDefinition("coarse-first-pool-impact-half")!);
     let balancedView = await controller.load(balancedScene, "area-only", true);
     assert.equal(balancedView.surfaceDeficitBalancing, true);
@@ -333,6 +357,7 @@ for (const artifact of ["scalar", "simd"] as const) {
     const ui = {
       surfaceExperiment: "regional-area" as const,
       surfaceDeficitBalancing: true,
+      sliceDepth_m: -0.15,
       sceneId: "water-box-dam-break",
       dt: 1 / 60,
       layers: visualLayers(["pressure", "grid"]),

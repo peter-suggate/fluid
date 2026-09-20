@@ -9,10 +9,12 @@ export function LabSceneSelector({
   sceneId,
   dimensions,
   choose,
+  sliceLabel = "centre-Z slice",
 }: {
   sceneId: string;
   dimensions?: readonly [number, number];
   choose: (id: string) => void;
+  sliceLabel?: string;
 }) {
   const [open, setOpen] = useState(false);
   return (
@@ -32,7 +34,7 @@ export function LabSceneSelector({
         </b>
         {dimensions && (
           <em>
-            {dimensions[0]}×{dimensions[1]} centre-Z slice
+            {dimensions[0]}×{dimensions[1]} {sliceLabel}
           </em>
         )}
         <svg viewBox="0 0 10 10" aria-hidden="true">

@@ -21,10 +21,23 @@ export interface UniformLabState {
   dt: number;
   layers: VisualLayerState;
   sliceView: SliceViewFraction;
+  sliceDepth_m?: number;
 }
 export const uniformLabQuery = combineQueryCodecs<UniformLabState>([
   labSceneQuery,
   labStepQuery,
+  {
+    keys: ["sliceDepth"],
+    read: (query: URLSearchParams) => {
+      const raw = query.get("sliceDepth");
+      const value = raw === null || raw.trim() === "" ? undefined : Number(raw);
+      return { sliceDepth_m: value !== undefined && Number.isFinite(value) ? value : undefined };
+    },
+    write: (query: URLSearchParams, state: UniformLabState) => {
+      if (state.sliceDepth_m === undefined) query.delete("sliceDepth");
+      else query.set("sliceDepth", String(state.sliceDepth_m));
+    },
+  },
   {
     keys: ["surfaceExperiment"],
     read: (query: URLSearchParams) => {
@@ -83,6 +96,7 @@ export function startUniformLabQuerySync(
       if (
         hydrated &&
         (next.sceneId !== store.getState().sceneId ||
+          next.sliceDepth_m !== store.getState().sliceDepth_m ||
           next.surfaceExperiment !== store.getState().surfaceExperiment ||
           next.surfaceDeficitBalancing !== store.getState().surfaceDeficitBalancing ||
           JSON.stringify(parsed.scene) !==

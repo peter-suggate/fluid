@@ -15,6 +15,7 @@ import {
   uniformVolumeInitialPhi,
 } from "../methods/uniform/uniform-volume-initial";
 import { resolveUniformGeometricValues } from "../methods/uniform/uniform-geometric-parameters";
+import { scenerySliceFraction, uniformLabSlice } from "./scenery-slice";
 
 /** 2D owns its balancing toggle separately; window scheduling is deferred. */
 export const UNIFORM_LAB_VALUES = Object.freeze(
@@ -29,19 +30,20 @@ export function uniformLabSceneLimitation(
     return "This scene exceeds the Uniform 2D grid budget.";
   return undefined;
 }
-/** Central XY slice, sampled by the same initial-field functions as 3D. */
-export function uniformLabSeed(scene: SceneDescription) {
+/** XY slice with scenery baked into the static fluid capacity. */
+export function uniformLabSeed(scene: SceneDescription, sliceDepth_m?: number) {
   const limitation = uniformLabSceneLimitation(scene);
   if (limitation) throw new Error(limitation);
   const dimensions = sceneLatticeDimensions(scene, Number.MAX_SAFE_INTEGER);
   const [nx, ny, nz] = dimensions;
-  const z = Math.floor(nz / 2);
+  const { index: z, z_m } = uniformLabSlice(scene, nz, sliceDepth_m);
   const cellSize = [
     scene.container.width_m / nx,
     scene.container.height_m / ny,
   ];
   const { volume, terrain } = uniformInitialVolume(scene, dimensions, true, z);
   const solid = solidWorldForScene(scene);
+  const scenery = scenerySliceFraction(scene, dimensions, z_m);
   const capacity = Array.from({ length: nx * ny }, (_, i) => {
     const x = i % nx,
       y = Math.floor(i / nx);
@@ -49,14 +51,14 @@ export function uniformLabSeed(scene: SceneDescription) {
     const terrainFraction = sceneHasTerrain(scene)
       ? Math.min(1, Math.max(0, terrain[x + nx * z]! / cellSize[1]! - y))
       : 0;
-    return open * (1 - terrainFraction);
+    return Math.min(open * (1 - terrainFraction), 1 - scenery[i]!);
   });
   return {
     dimensions: [nx, ny],
     cellSize,
-    volume: [...volume],
+    volume: Array.from(volume, (value, i) => Math.min(value, capacity[i]!)),
     capacity,
-    phi: [...uniformVolumeInitialPhi(scene, dimensions, nz / 2)],
+    phi: [...uniformVolumeInitialPhi(scene, dimensions, z + 0.5)],
     gravity: [scene.fluid.gravity_m_s2.x, scene.fluid.gravity_m_s2.y],
     density: scene.fluid.density_kg_m3,
     viscosity: scene.fluid.dynamicViscosity_Pa_s,
@@ -153,12 +155,12 @@ export class UniformLabController {
       }),
     );
   }
-  async load(scene: SceneDescription, experiment: SurfaceExperiment = "area-only", surfaceDeficitBalancing = false) {
+  async load(scene: SceneDescription, experiment: SurfaceExperiment = "area-only", surfaceDeficitBalancing = false, sliceDepth_m?: number) {
     await this.client.load(scene, {
       method: "uniform-volume",
       dimension: 2,
       methodValues: UNIFORM_LAB_VALUES,
-      uniformSeed: uniformLabSeed(scene),
+      uniformSeed: uniformLabSeed(scene, sliceDepth_m),
     });
     if (experiment !== "area-only") await this.command({ type: "set-surface-experiment", profile: experiment });
     if (surfaceDeficitBalancing) return this.command({ type: "set-surface-deficit-balancing", enabled: true });

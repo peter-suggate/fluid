@@ -34,6 +34,8 @@ import { sceneShape } from "../lib/core/scene-shape";
 import type { Vec3 } from "../lib/core/model";
 import { findSceneDefinition } from "../lib/core/scenes";
 import { sceneDocument } from "../lib/core/scene-definition";
+import { sceneLatticeDimensions } from "../lib/core/scene-lattice";
+import { uniformLabSlice } from "../lib/physics-wasm/scenery-slice";
 import { UNIFORM_VOLUME_PIPELINE } from "../lib/methods/uniform/uniform-volume-pipeline";
 import { UNIFORM_GEOMETRIC_PARAMS } from "../lib/methods/uniform/uniform-geometric-parameters";
 import {
@@ -116,8 +118,12 @@ function draw(
   const tc = Math.ceil(v.nx / 4);
   // Solids are scene context even when every diagnostic is hidden.
   for (let y = 0; y < v.ny; y++) for (let x = 0; x < v.nx; x++) {
-    if (v.capacity[x + v.nx * y]! <= 1e-5) { g.fillStyle = solid; g.fillRect(x, y, 1, 1); }
+    const fraction = 1 - v.capacity[x + v.nx * y]!;
+    if (fraction > 0) {
+      g.fillStyle = solid; g.globalAlpha = fraction; g.fillRect(x, y, 1, 1);
+    }
   }
+  g.globalAlpha = 1;
   for (const layer of VISUAL_LAYERS) {
     if (!layers.visible || !layers.enabled.includes(layer.id)) continue;
     const lens = layer.id;
@@ -288,7 +294,10 @@ export function UniformLab() {
 }
 function UniformRun({ session }: { session: PaneSession }) {
   const [store] = useState(() => createUniformLabStore(location.search));
-  const { sceneId, dt, layers, surfaceExperiment, surfaceDeficitBalancing, sliceView: camera } = useStore(store);
+  const { sceneId, dt, layers, surfaceExperiment, surfaceDeficitBalancing, sliceDepth_m, sliceView: camera } = useStore(store);
+  const scene = useStore(session.scene, (state) => state.scene);
+  const nz = sceneLatticeDimensions(scene, Number.MAX_SAFE_INTEGER)[2];
+  const slice = uniformLabSlice(scene, nz, sliceDepth_m);
 
   const setCamera = (value: Camera | ((current: Camera) => Camera)) =>
     store.setState({
@@ -364,7 +373,7 @@ function UniformRun({ session }: { session: PaneSession }) {
           return;
         }
         controller.current = owner;
-        const initial = await owner.load(scene, surfaceExperiment, surfaceDeficitBalancing);
+        const initial = await owner.load(scene, surfaceExperiment, surfaceDeficitBalancing, sliceDepth_m);
         if (alive) {
           setView(initial);
           setLoading(false);
@@ -382,7 +391,7 @@ function UniformRun({ session }: { session: PaneSession }) {
       if (controller.current === owner) controller.current = undefined;
       if (owner) void owner.destroy().catch(() => {});
     };
-  }, [sceneId, surfaceExperiment, surfaceDeficitBalancing, restart, session.scene]);
+  }, [sceneId, surfaceExperiment, surfaceDeficitBalancing, sliceDepth_m, restart, session.scene]);
   const edit = (
     operation: (owner: UniformLabController) => Promise<UniformView>,
   ) => {
@@ -557,6 +566,7 @@ function UniformRun({ session }: { session: PaneSession }) {
     <main className={`${base.lab} ${css.root}`}>
       <header className={css.bar}>
         <LabSceneSelector
+          sliceLabel={`z = ${slice.z_m.toFixed(3)} m`}
           sceneId={sceneId}
           dimensions={view ? [view.nx, view.ny] : undefined}
           choose={chooseScene}
@@ -919,7 +929,7 @@ function UniformRun({ session }: { session: PaneSession }) {
           )}
           <footer className={css.caption}>
             {view
-              ? `${view.nx} × ${view.ny} cells · central XY slice · Δt = ${(dt * 1000).toFixed(2)} ms`
+              ? `${view.nx} × ${view.ny} cells · XY slice z = ${slice.z_m.toFixed(3)} m · Δt = ${(dt * 1000).toFixed(2)} ms`
               : ""}
             <span>Wheel to zoom · shift-drag to pan · click to pin a cell</span>
           </footer>
@@ -927,6 +937,24 @@ function UniformRun({ session }: { session: PaneSession }) {
         <aside className={css.sidebar}>
           <h1>Uniform Geometric</h1>
           <p className={css.muted}>Shared 3D defaults · whole-domain solve</p>
+          <label>
+            Slice depth (m)
+            <input type="number" aria-label="Slice depth (m)"
+              min={-scene.container.depth_m / 2} max={scene.container.depth_m / 2}
+              step={scene.container.depth_m / nz}
+              key={`${sceneId}:${sliceDepth_m}`}
+              defaultValue={sliceDepth_m ?? Number(slice.z_m.toFixed(6))}
+              disabled={loading}
+              onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }}
+              onBlur={(event) => {
+                const value = event.currentTarget.valueAsNumber;
+                if (!Number.isFinite(value) || value === sliceDepth_m) return;
+                setPlaying(false);
+                beginLoad();
+                store.setState({ sliceDepth_m: value });
+              }} />
+          </label>
+          <p className={css.muted}>Changing depth restarts the run. Scenery blocks water; rigid bodies and the nozzle retain their XY projection.</p>
           <label>
             2D surface correction
             <select
