@@ -1,7 +1,9 @@
 # Uniform Geometric: pages own the simulation domain
 
 Design review, 2026-09-21. Supersedes the window-backed phi optimization plan.
-This is the proposed architecture, not a claim that the current prototype implements it.
+This is the target architecture, not a claim that the current prototype implements it.
+See [the initial cutover](uniform-page-domain-cutover.md) and the
+[GPU residency component](uniform-page-generation.md) for implemented checkpoints.
 
 ## Required contract
 
@@ -19,11 +21,12 @@ are asynchronous observations and cannot be required to finish the advance.
 
 - Production scratch pages map a finite dense logical grid into transient physical
   slots. Their membership is rebuilt for each phase; they do not own persistent state.
-- The window still defines `activeId`, vertex support, pressure origin/capacity, and
-  the work of most stages. A page list underneath this remains a second authority.
+- The initial production cutover replaces window addressing with a page catalogue,
+  but retains every authored page. The GPU residency component has not yet replaced
+  that catalogue or its dense field/pressure backing.
 - Dense phi, velocity, V, pressure and correction/reduction storage still scale with
   the authored lattice. Empty space between disconnected bodies is not free.
-- The recent uncommitted GPU-only prototype removes page-demand waits by reserving
+- The committed GPU-only prototype removes page-demand waits by reserving
   the entire finite-domain scratch arena at construction. That demonstrates how to
   remove the waits, but is not an acceptable final sparse-memory architecture.
 - Freezing far-air phi in the attempted sparse advection path failed a longer moved-
