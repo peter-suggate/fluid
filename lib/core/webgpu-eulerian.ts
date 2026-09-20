@@ -13,6 +13,9 @@ export interface GPUFieldLocation {
 }
 
 export interface GPUEulerianInfo {
+  uniformDomainAuthority?: "pages";
+  uniformDomainPages?: number;
+  uniformDomainMigration?: string;
   uniformVolumeTransportWorkgroups?: number;
   uniformVolumeSharpenWorkgroups?: number;
   uniformVolumePageEdge?: number;

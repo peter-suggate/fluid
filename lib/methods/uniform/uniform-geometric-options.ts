@@ -8,7 +8,7 @@ import type { SceneDescription } from "../../core/model";
 export function uniformGeometricSolverOptions(overrides: MethodParamValues = {}, scene?: Pick<SceneDescription,"sceneId">): WebGPUUniformReferenceOptions {
   const values=resolveUniformGeometricValues(overrides);
   return {
-      ...uniformReferenceSolverOptions(values, scene), geometricVolume: true,
+      ...uniformReferenceSolverOptions(values, scene), geometricVolume: true, pageDomain:true,
       volumePages: values.volumeStorage === "auto" ? "auto" : values.volumeStorage === "pages16" ? 16 : values.volumeStorage === "pages32" ? 32 : undefined,
       sharpeningStrength: Number(values.sharpeningStrength),
       velocityTransport: values.velocityTransport === "maccormack" ? "maccormack" : "semi-lagrangian",
@@ -29,8 +29,8 @@ export function uniformGeometricSolverOptions(overrides: MethodParamValues = {},
       phiSeedFromVolume: values.phiSeedFromVolume === "on",
       phiAgreementGain: values.phiAgreement === "on" ? Number(values.phiAgreementGain) : 0,
       phiAgreementClamp: Number(values.phiAgreementClamp),
-      activeRegion: values.activeRegion === "on",
-      pressureWindow: values.pressureWindow !== "domain",
+      activeRegion:false,
+      pressureWindow:false,
       gammaDiffusionIterations: 0, densityPostProcessing: false,
       solidExcessCorrection: false,
   };

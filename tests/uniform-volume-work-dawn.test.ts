@@ -23,7 +23,7 @@ async function readTexture(device: GPUDevice, texture: GPUTexture): Promise<Floa
 }
 
 const modulePath=process.env.WEBGPU_NODE_MODULE;
-(modulePath?test:test.skip)("page-first transport and sharpening preserve full phi and volume through drops and moved inflow",{timeout:240000},async()=>{
+(modulePath?test:test.skip)("page-domain dispatch preserves full phi and volume through drops and moved inflow",{timeout:240000},async()=>{
  await acquireWebGPUExclusiveLock("dawn-test","Uniform page-first volume");
  let device:GPUDevice|undefined;const solvers:WebGPUUniformReferenceSolver[]=[];
  try {
@@ -34,7 +34,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
   const errors:string[]=[];device.addEventListener("uncapturederror",e=>{e.preventDefault();errors.push(e.error.message);});
   const scene=sceneDocument(getSceneDefinition("hero-garden-hose"));
   for(const volumePageWork of [true,false])
-   solvers.push(await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,{...uniformGeometricSolverOptions({volumeStorage:"pages32",pressureWindow:"domain",pressureCycleBudget:"fixed"},scene),volumePageWork},()=>{}));
+   solvers.push(await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,{...uniformGeometricSolverOptions({volumeStorage:"pages32",pressureWindow:"domain",pressureCycleBudget:"fixed"},scene),volumePageWork,pageDomain:volumePageWork},()=>{}));
   for(let frame=1;frame<=64;frame++){
    for(const solver of solvers){
     if(frame===41)solver.applyRuntimeValues({redistance:"off"});
@@ -60,7 +60,12 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
 
    }
   }
-  for(const solver of solvers)assert.equal(solver.info.uniformSolveWindowClippedSteps,0);
+  for(const solver of solvers){
+   assert.equal(solver.info.hostSchedulingUsesReadback,false);
+   assert.equal(solver.solveWindowSource,undefined);
+  }
+  assert.equal(solvers[0]!.info.uniformDomainAuthority,"pages");
+  assert.equal(solvers[1]!.info.uniformDomainAuthority,undefined);
 
   assert.deepEqual(errors,[]);
  }finally{for(const s of solvers)s.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}

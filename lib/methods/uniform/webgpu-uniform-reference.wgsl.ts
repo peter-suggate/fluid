@@ -1,3 +1,4 @@
+import {uniformPageDomainWGSL,type UniformPageDomain} from "./uniform-page-domain";
 import { uniformVolumePagesWGSL, type UniformVolumePageShaderOptions } from "./uniform-volume-pages.wgsl";
 import { uniformVolumeWGSL } from "./uniform-volume.wgsl";
 import { sceneShapeWgsl } from "../../core/scene-shape";
@@ -14,7 +15,7 @@ const uniformMacCormackAuditEnabled = typeof process !== "undefined"
  * It provides a matched-lattice GPU baseline for transport and projection
  * comparisons without octree topology, sparse residency, or backend cutovers.
  */
-export function createUniformReferenceComputeShader(geometric = false, referenceDimension: 2 | 3 = 3, pages?: UniformVolumePageShaderOptions): string { return /* wgsl */ `
+export function createUniformReferenceComputeShader(geometric = false, referenceDimension: 2 | 3 = 3, pages?: UniformVolumePageShaderOptions, domain?:UniformPageDomain): string { return /* wgsl */ `
 // The dimensional oracle suppresses the absent derivative; symmetry walls alone
 // do not prevent roundoff from creating a transverse level-set gradient.
 const UNIFORM_REFERENCE_DIMENSION: u32 = ${referenceDimension}u;
@@ -170,8 +171,10 @@ fn activeWindowExtent()->vec3u{
 // no-clip agree on peak speed, front position and volume at 1x and 8x
 // (docs/research/uniform-geometric-tall-air-2026-09-19/pressure-window-report.md).
 fn activeId(gid:vec3u)->vec3i{
+  ${domain ? "return pageDomainCell(gid);" : `
   if(any(gid>=activeWindowExtent())){return vec3i(-1);}
   return vec3i(activeWindowOrigin()+gid);
+  `}
 }
 // The (n+1)^3 vertex lattice the geometric phi passes run on. It is one wider
 // than the cell box on every axis, and it is DILATED by the phi stage's own
@@ -201,11 +204,13 @@ fn activeVertexLow()->vec3u{
   return origin-min(origin,vec3u(VERTEX_PHI_REACH));
 }
 fn activeVertexId(gid:vec3u)->vec3i{
+  ${domain ? "return pageDomainVertex(gid);" : `
   let low=activeVertexLow();
   let high=min(vec3u(dims()),
     vec3u(activeRegion[10],activeRegion[11],activeRegion[12])+vec3u(VERTEX_PHI_REACH));
   if(any(gid>high-low)){return vec3i(-1);}
   return vec3i(low+gid);
+  `}
 }
 // The CM11a pressure hierarchy can be planned on the WINDOW rather than the
 // domain. When it is, the host publishes the lattice origin and capacity in
@@ -2036,6 +2041,7 @@ ${geometric ? `
 }
 @compute @workgroup_size(4,4,4)
 fn reduceDiagnostics(@builtin(global_invocation_id) gid:vec3u){let id=activeId(gid);if(!valid(id)){return;}let represented=surfaceOccupancy(id);let conservative=volume(id);atomicAdd(&reductions[0],u32(represented*2048.0+0.5));if(surfaceLiquid(id)){atomicMax(&reductions[1],u32(id.x+1));}let speed=length(faceVelocity(id));atomicMax(&reductions[2],bitcast<u32>(speed));atomicAdd(&reductions[3],u32(${geometric ? "max(conservative,0.0)" : "clamp(conservative,0.0,8.0)"}*2048.0+0.5));}
+${uniformPageDomainWGSL(domain)}
 ${geometric ? uniformVolumePagesWGSL(pages) + uniformVolumeWGSL : ""}
 `; }
 

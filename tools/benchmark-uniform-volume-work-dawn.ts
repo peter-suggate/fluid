@@ -21,12 +21,12 @@ try{
  device=managedGPUDevice(await adapter.requestDevice({requiredFeatures:["timestamp-query"],requiredLimits:requiredFluidDeviceLimits(adapter.limits)}),{requireWorkerRealm:false});
  usePerformanceInstrumentationStore.getState().setEnabled(true);
  const errors:string[]=[];device.addEventListener("uncapturederror",e=>{e.preventDefault();errors.push(e.error.message);});
- for(const sceneId of ["hero-garden-hose","minimal-power-dam-break-64"]){
+ for(const sceneId of (process.env.UNIFORM_BENCH_SCENE?[process.env.UNIFORM_BENCH_SCENE]:["hero-garden-hose","minimal-power-dam-break-64"])){
   const scene=sceneDocument(getSceneDefinition(sceneId));
   const arms:{mode:string;full:number[];stages:Record<string,number[]>;pages:number|undefined}[]=[];
   for(const mode of ["window","pages","pages","window"]){
    const solver=await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,
-    {...uniformGeometricSolverOptions({volumeStorage:sceneId==="minimal-power-dam-break-64"?(mode==="window"?"dense":"auto"):"pages32",pressureWindow:"domain",pressureCycleBudget:"fixed"},scene),volumePageWork:mode==="pages"},()=>{});
+    {...uniformGeometricSolverOptions({volumeStorage:sceneId==="minimal-power-dam-break-64"?(mode==="window"?"dense":"auto"):"pages32",pressureWindow:"domain",pressureCycleBudget:"fixed"},scene),volumePageWork:mode==="pages",pageDomain:mode==="pages",activeRegion:mode==="window",pressureWindow:false},()=>{});
    const full:number[]=[],stages:Record<string,number[]>={};let priorSample=-1;
    try{
     for(let frame=1;frame<=24;frame++){
@@ -47,5 +47,5 @@ try{
   results.push(result);console.log(JSON.stringify({...result,arms:undefined}));
  }
  assert.deepEqual(errors,[]);
- writeFileSync("docs/research/uniform-volume-work-2026-09-21.json",JSON.stringify(results,null,2)+"\n");
+ writeFileSync(process.env.UNIFORM_BENCH_OUTPUT??"docs/research/uniform-page-domain-2026-09-21.json",JSON.stringify(results,null,2)+"\n");
 }finally{device?.destroy();await releaseWebGPUExclusiveLock();}

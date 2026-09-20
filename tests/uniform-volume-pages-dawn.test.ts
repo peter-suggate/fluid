@@ -59,7 +59,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
       }
     }
     const solver=solvers[1]!;
-    assert.equal(solvers[0]!.volumePageSource,undefined);
+    assert.ok(solvers[0]!.volumePageSource,"page domain is visible even with dense scratch backing");
     assert.equal(solver.info.uniformVolumePageEdge,16);
     const tex=(format:GPUTextureFormat)=>{const t=device!.createTexture({size:[1,1,1],dimension:"3d",format,usage:GPUTextureUsage.TEXTURE_BINDING});resources.push(t);return t;};
     const target=device.createTexture({size:[16,16],format:"rgba8unorm",usage:GPUTextureUsage.RENDER_ATTACHMENT});
