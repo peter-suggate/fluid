@@ -260,6 +260,8 @@ const couplingChip = (context: FluidPipelineContext) =>
 const onOff=[{value:"on",label:"On"},{value:"off",label:"Off"}];
 /** The two stages that write V into phi sit on the level set they write. */
 const phiAgreementControls = [
+  {kind:"param-choice" as const,param:"totalSurfaceVolume",label:"Total surface volume",options:onOff,
+    hint:"One bounded global normal shift to match the surface volume to V. No regional correction or cellwise reconstruction."},
   {kind:"param-choice" as const,param:"phiSeedFromVolume",label:"Seed from V",options:onOff,
     hint:"Where no cell centre nearby is phi-liquid but the cells around a vertex average over a quarter full, write V's implied depth into phi. A film under half a cell then owns ordinary pressure rows and renders; beside an existing phi surface it never fires."},
   {kind:"param-choice" as const,param:"phiAgreement",label:"Follow V",options:onOff,
@@ -272,14 +274,14 @@ const phiAgreementControls = [
     enabled:(context: FluidPipelineContext)=>context.values.phiAgreement === "on"},
 ];
 const phiChip = (context: FluidPipelineContext) => {
-  const parts=[context.values.phiSeedFromVolume === "on" ? "seeded from V" : "",
+  const parts=[context.values.totalSurfaceVolume === "on" ? "total volume constrained" : "",context.values.phiSeedFromVolume === "on" ? "seeded from V" : "",
     context.values.phiAgreement === "on" ? "follows V" : ""].filter(Boolean);
   return parts.length ? `dense finest lattice · ${parts.join(" · ")}` : "dense finest lattice";
 };
 const volumeStages: FluidPipelineStage[] = [
-  ["phi", "Vertex level set", "RK2 characteristics and bounded closest-point redistancing; phi is independent of V."],
+  ["phi", "Vertex level set", "RK2 characteristics and bounded closest-point redistancing. The optional global volume constraint runs after conservative gather."],
   ["coupling", "Conservative volume transport", "Eight box-overlap donors plus an identity fallback; three receiver/donor balancing rounds."],
-  ["gather", "Conservative volume gather", "Gather donor-normalized liquid volume and cache phi capacity for sharpening."],
+  ["gather", "Conservative volume gather", "Gather donor-normalized liquid volume, optionally constrain total surface volume, and cache corrected phi capacity for sharpening."],
   ["sharpen", "Volume sharpening", "Eight symmetric face-transfer sweeps with aggregate donor and receiver budgets; phi is immutable across them, so the 4h work map skips whole tiles with no cell in the admission band bit-identically to the dense schedule."],
 ].map(([id,label,summary]) => ({
   id: `uniform-volume-${id}`, band:"surface", side:"left", label:label!,

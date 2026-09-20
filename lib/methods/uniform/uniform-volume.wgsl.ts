@@ -5,7 +5,7 @@ export const UNIFORM_VOLUME_ENTRIES = [
   "uvAdvectPhi", "uvRedistancePhi", "uvBuildEdges",
   "uvFinishDonorSums", "uvFallback", "uvNormalizeRows", "uvNormalizeDonors", "uvGather",
   "uvPrepareSharpen", "uvProposeSharpen", "uvLimitSharpen", "uvCommitSharpen", "uvPublish",
-  "uvAgreementResidual",
+  "uvAgreementResidual", "uvCorrectionCapacity", "uvCorrectionTargets",
 ] as const;
 /** The four Sec. 3.5 sweeps that exist in a dense and a 4h work-map variant. */
 export const UNIFORM_VOLUME_SHARPEN_ENTRIES = [
@@ -41,6 +41,15 @@ ${geometricPlaneBoxWGSL}
 struct UVEdges { donor:array<u32,9>, weight:array<f32,9>, padding:vec2f }
 @group(0) @binding(33) var<storage,read_write> uvEdges:array<UVEdges>;
 ${uniformVolumeDonorSumWGSL}
+@compute @workgroup_size(4,4,4)
+fn uvCorrectionCapacity(@builtin(global_invocation_id)gid:vec3u){
+ let id=vec3i(gid);if(!valid(id)){return;}textureStore(gammaOut,id,vec4f(uvOpen(id)));
+}
+@compute @workgroup_size(4,4,4)
+fn uvCorrectionTargets(@builtin(global_invocation_id)gid:vec3u){
+ let id=vec3i(gid);if(!valid(id)){return;}textureStore(gammaOut,id,vec4f(uvTarget(id)));
+}
+
 fn uvCorner(i:u32)->vec3i{return vec3i(i32(i&1u),i32((i>>1u)&1u),i32((i>>2u)&1u));}
 // THE SOLVE WINDOW. Words 7..12 of the active-region header are the union of
 // this step's padded seed box with the previous one -- the box every windowed

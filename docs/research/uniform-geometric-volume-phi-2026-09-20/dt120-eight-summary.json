@@ -1,0 +1,459 @@
+{
+  "arm": {
+    "id": "dt120-eight",
+    "dt": 0.008333333333333333,
+    "rounds": 8,
+    "options": {}
+  },
+  "seconds": 4,
+  "dimensions": [
+    192,
+    96
+  ],
+  "cellSize": [
+    0.012499999999999999,
+    0.012499999999999999
+  ],
+  "initial": {
+    "bandResidual": -0.0000021457672119140625,
+    "contourArea": 1280,
+    "contourL1": 3.5083047055376466e-13,
+    "excessOverCapacity": 0,
+    "farAirVolume": 0,
+    "frontCell": 31,
+    "interiorDeficit": 0,
+    "liquidCells": 1280,
+    "maxCourant": 0,
+    "maxVolume": 1,
+    "rowlessVolume": 0,
+    "targetArea": 1280.0000021457672,
+    "targetL1": 0.0000021457672119140625,
+    "volume": 1280
+  },
+  "final": {
+    "bandResidual": 87.49512820357211,
+    "contourArea": 1436.0736160996673,
+    "contourL1": 591.3173849488616,
+    "excessOverCapacity": 0.7729970216751099,
+    "farAirVolume": 116.68153824411775,
+    "frontCell": 191,
+    "interiorDeficit": 360.4133543819189,
+    "liquidCells": 1445,
+    "maxCourant": 1.1743295192718506,
+    "maxVolume": 1.1747187376022339,
+    "rowlessVolume": 226.20702163081012,
+    "targetArea": 1435.9719411411243,
+    "targetL1": 591.413481110504,
+    "volume": 1279.9794980208144
+  },
+  "advectionAreaChange": 107.32737053991787,
+  "redistanceAreaChange": 48.746240910888446,
+  "dust": 0.020479588705130038,
+  "conservationError": -0.000022390480580725125,
+  "quadratureDifference": 0.0000046488610223605065,
+  "maxCourant": 5.353427410125732,
+  "maxPressureResidual": 2.1893556118011475,
+  "elapsedMs": 15017.447291,
+  "sharpeningReplays": [
+    {
+      "frame": 60,
+      "metrics": {
+        "bandResidual": 8.790257823101342,
+        "contourArea": 1314.3689800191003,
+        "contourL1": 112.9371090516245,
+        "excessOverCapacity": 11.973099946975708,
+        "farAirVolume": 18.307487487449293,
+        "frontCell": 140,
+        "interiorDeficit": 62.42906108498573,
+        "liquidCells": 1313,
+        "maxCourant": 2.9476191997528076,
+        "maxVolume": 5.54750919342041,
+        "rowlessVolume": 54.692271498136506,
+        "targetArea": 1314.3710524598828,
+        "targetL1": 112.9345790557918,
+        "volume": 1279.998757061654
+      },
+      "rounds": 0
+    },
+    {
+      "frame": 60,
+      "metrics": {
+        "bandResidual": 8.790233135968833,
+        "contourArea": 1314.3689800191003,
+        "contourL1": 95.54778066686453,
+        "excessOverCapacity": 11.945823550224304,
+        "farAirVolume": 18.307487487449293,
+        "frontCell": 140,
+        "interiorDeficit": 62.42906108498573,
+        "liquidCells": 1313,
+        "maxCourant": 2.9476191997528076,
+        "maxVolume": 5.54750919342041,
+        "rowlessVolume": 47.22378470143826,
+        "targetArea": 1314.3710524598828,
+        "targetL1": 95.54437616507653,
+        "volume": 1279.9987323745213
+      },
+      "rounds": 8
+    },
+    {
+      "frame": 60,
+      "metrics": {
+        "bandResidual": 8.790233133524453,
+        "contourArea": 1314.3689800191003,
+        "contourL1": 95.54778066442015,
+        "excessOverCapacity": 11.945823550224304,
+        "farAirVolume": 18.307487487449293,
+        "frontCell": 140,
+        "interiorDeficit": 62.42906108498573,
+        "liquidCells": 1313,
+        "maxCourant": 2.9476191997528076,
+        "maxVolume": 5.54750919342041,
+        "rowlessVolume": 47.22378469899388,
+        "targetArea": 1314.3710524598828,
+        "targetL1": 95.54437616263215,
+        "volume": 1279.9987323720766
+      },
+      "rounds": 32
+    },
+    {
+      "frame": 60,
+      "metrics": {
+        "bandResidual": 8.790233133524453,
+        "contourArea": 1314.3689800191003,
+        "contourL1": 95.54778066442015,
+        "excessOverCapacity": 11.945823550224304,
+        "farAirVolume": 18.307487487449293,
+        "frontCell": 140,
+        "interiorDeficit": 62.42906108498573,
+        "liquidCells": 1313,
+        "maxCourant": 2.9476191997528076,
+        "maxVolume": 5.54750919342041,
+        "rowlessVolume": 47.22378469899388,
+        "targetArea": 1314.3710524598828,
+        "targetL1": 95.54437616263215,
+        "volume": 1279.9987323720766
+      },
+      "rounds": 128
+    },
+    {
+      "frame": 60,
+      "metrics": {
+        "bandResidual": 8.790233133524453,
+        "contourArea": 1314.3689800191003,
+        "contourL1": 95.54778066442015,
+        "excessOverCapacity": 11.945823550224304,
+        "farAirVolume": 18.307487487449293,
+        "frontCell": 140,
+        "interiorDeficit": 62.42906108498573,
+        "liquidCells": 1313,
+        "maxCourant": 2.9476191997528076,
+        "maxVolume": 5.54750919342041,
+        "rowlessVolume": 47.22378469899388,
+        "targetArea": 1314.3710524598828,
+        "targetL1": 95.54437616263215,
+        "volume": 1279.9987323720766
+      },
+      "rounds": 512
+    },
+    {
+      "frame": 120,
+      "metrics": {
+        "bandResidual": 49.92771739893101,
+        "contourArea": 1340.8140382028855,
+        "contourL1": 228.21473301619525,
+        "excessOverCapacity": 11.610435366630554,
+        "farAirVolume": 25.061083301934787,
+        "frontCell": 191,
+        "interiorDeficit": 135.71620593965054,
+        "liquidCells": 1347,
+        "maxCourant": 1.7098755836486816,
+        "maxVolume": 3.02791166305542,
+        "rowlessVolume": 99.95893744962359,
+        "targetArea": 1340.543830083814,
+        "targetL1": 228.51847804721456,
+        "volume": 1279.9937692864435
+      },
+      "rounds": 0
+    },
+    {
+      "frame": 120,
+      "metrics": {
+        "bandResidual": 49.92768394626421,
+        "contourArea": 1340.8140382028855,
+        "contourL1": 220.74103634185403,
+        "excessOverCapacity": 11.292495369911194,
+        "farAirVolume": 25.061083301934787,
+        "frontCell": 191,
+        "interiorDeficit": 135.71620593965054,
+        "liquidCells": 1347,
+        "maxCourant": 1.7098755836486816,
+        "maxVolume": 3.02791166305542,
+        "rowlessVolume": 96.80169936896607,
+        "targetArea": 1340.543830083814,
+        "targetL1": 221.02569415848018,
+        "volume": 1279.9937358337768
+      },
+      "rounds": 8
+    },
+    {
+      "frame": 120,
+      "metrics": {
+        "bandResidual": 49.92768389978778,
+        "contourArea": 1340.8140382028855,
+        "contourL1": 220.7410362953776,
+        "excessOverCapacity": 11.292495369911194,
+        "farAirVolume": 25.061083301934787,
+        "frontCell": 191,
+        "interiorDeficit": 135.71620593965054,
+        "liquidCells": 1347,
+        "maxCourant": 1.7098755836486816,
+        "maxVolume": 3.02791166305542,
+        "rowlessVolume": 96.80169932248964,
+        "targetArea": 1340.543830083814,
+        "targetL1": 221.02569411200375,
+        "volume": 1279.9937357873002
+      },
+      "rounds": 32
+    },
+    {
+      "frame": 120,
+      "metrics": {
+        "bandResidual": 49.92768389811681,
+        "contourArea": 1340.8140382028855,
+        "contourL1": 220.74103629370663,
+        "excessOverCapacity": 11.292495369911194,
+        "farAirVolume": 25.061083301934787,
+        "frontCell": 191,
+        "interiorDeficit": 135.71620593965054,
+        "liquidCells": 1347,
+        "maxCourant": 1.7098755836486816,
+        "maxVolume": 3.02791166305542,
+        "rowlessVolume": 96.80169932081867,
+        "targetArea": 1340.543830083814,
+        "targetL1": 221.02569411033278,
+        "volume": 1279.9937357856295
+      },
+      "rounds": 128
+    },
+    {
+      "frame": 120,
+      "metrics": {
+        "bandResidual": 49.92768389811681,
+        "contourArea": 1340.8140382028855,
+        "contourL1": 220.74103629370663,
+        "excessOverCapacity": 11.292495369911194,
+        "farAirVolume": 25.061083301934787,
+        "frontCell": 191,
+        "interiorDeficit": 135.71620593965054,
+        "liquidCells": 1347,
+        "maxCourant": 1.7098755836486816,
+        "maxVolume": 3.02791166305542,
+        "rowlessVolume": 96.80169932081867,
+        "targetArea": 1340.543830083814,
+        "targetL1": 221.02569411033278,
+        "volume": 1279.9937357856295
+      },
+      "rounds": 512
+    },
+    {
+      "frame": 240,
+      "metrics": {
+        "bandResidual": -8.908111647465148,
+        "contourArea": 1452.8164827181156,
+        "contourL1": 484.9574743833466,
+        "excessOverCapacity": 30.942097663879395,
+        "farAirVolume": 105.23135642253374,
+        "frontCell": 191,
+        "interiorDeficit": 269.8367095589638,
+        "liquidCells": 1424,
+        "maxCourant": 1.294796109199524,
+        "maxVolume": 3.9028539657592773,
+        "rowlessVolume": 195.21361197186775,
+        "targetArea": 1452.695177541972,
+        "targetL1": 485.02338027430756,
+        "volume": 1279.9873732442986
+      },
+      "rounds": 0
+    },
+    {
+      "frame": 240,
+      "metrics": {
+        "bandResidual": -8.90811166018375,
+        "contourArea": 1452.8164827181156,
+        "contourL1": 471.279661573304,
+        "excessOverCapacity": 30.704859375953674,
+        "farAirVolume": 105.23135642253374,
+        "frontCell": 191,
+        "interiorDeficit": 269.8367095589638,
+        "liquidCells": 1424,
+        "maxCourant": 1.294796109199524,
+        "maxVolume": 3.9028539657592773,
+        "rowlessVolume": 188.98376101129224,
+        "targetArea": 1452.695177541972,
+        "targetL1": 470.8182877979466,
+        "volume": 1279.9873732315802
+      },
+      "rounds": 8
+    },
+    {
+      "frame": 240,
+      "metrics": {
+        "bandResidual": -8.9081116228881,
+        "contourArea": 1452.8164827181156,
+        "contourL1": 471.27902276801694,
+        "excessOverCapacity": 30.704859375953674,
+        "farAirVolume": 105.23135642253374,
+        "frontCell": 191,
+        "interiorDeficit": 269.8367095589638,
+        "liquidCells": 1424,
+        "maxCourant": 1.294796109199524,
+        "maxVolume": 3.9028539657592773,
+        "rowlessVolume": 188.98344162729654,
+        "targetArea": 1452.695177541972,
+        "targetL1": 470.81764899265954,
+        "volume": 1279.987373268876
+      },
+      "rounds": 32
+    },
+    {
+      "frame": 240,
+      "metrics": {
+        "bandResidual": -8.9081116228881,
+        "contourArea": 1452.8164827181156,
+        "contourL1": 471.27902276801694,
+        "excessOverCapacity": 30.704859375953674,
+        "farAirVolume": 105.23135642253374,
+        "frontCell": 191,
+        "interiorDeficit": 269.8367095589638,
+        "liquidCells": 1424,
+        "maxCourant": 1.294796109199524,
+        "maxVolume": 3.9028539657592773,
+        "rowlessVolume": 188.98344162729654,
+        "targetArea": 1452.695177541972,
+        "targetL1": 470.81764899265954,
+        "volume": 1279.987373268876
+      },
+      "rounds": 128
+    },
+    {
+      "frame": 240,
+      "metrics": {
+        "bandResidual": -8.9081116228881,
+        "contourArea": 1452.8164827181156,
+        "contourL1": 471.27902276801694,
+        "excessOverCapacity": 30.704859375953674,
+        "farAirVolume": 105.23135642253374,
+        "frontCell": 191,
+        "interiorDeficit": 269.8367095589638,
+        "liquidCells": 1424,
+        "maxCourant": 1.294796109199524,
+        "maxVolume": 3.9028539657592773,
+        "rowlessVolume": 188.98344162729654,
+        "targetArea": 1452.695177541972,
+        "targetL1": 470.81764899265954,
+        "volume": 1279.987373268876
+      },
+      "rounds": 512
+    },
+    {
+      "frame": 480,
+      "metrics": {
+        "bandResidual": 87.49513451482892,
+        "contourArea": 1436.0736160996673,
+        "contourL1": 597.3885360370917,
+        "excessOverCapacity": 1.0036003589630127,
+        "farAirVolume": 116.68153824411775,
+        "frontCell": 191,
+        "interiorDeficit": 360.4133543819189,
+        "liquidCells": 1445,
+        "maxCourant": 1.1141507625579834,
+        "maxVolume": 1.1747187376022339,
+        "rowlessVolume": 228.13527667534902,
+        "targetArea": 1435.9719411411243,
+        "targetL1": 597.4899918608763,
+        "volume": 1279.979504332071
+      },
+      "rounds": 0
+    },
+    {
+      "frame": 480,
+      "metrics": {
+        "bandResidual": 87.49512820357211,
+        "contourArea": 1436.0736160996673,
+        "contourL1": 591.3173849488616,
+        "excessOverCapacity": 0.7729970216751099,
+        "farAirVolume": 116.68153824411775,
+        "frontCell": 191,
+        "interiorDeficit": 360.4133543819189,
+        "liquidCells": 1445,
+        "maxCourant": 1.1141507625579834,
+        "maxVolume": 1.1747187376022339,
+        "rowlessVolume": 226.20702163081012,
+        "targetArea": 1435.9719411411243,
+        "targetL1": 591.413481110504,
+        "volume": 1279.9794980208144
+      },
+      "rounds": 8
+    },
+    {
+      "frame": 480,
+      "metrics": {
+        "bandResidual": 87.49511349227032,
+        "contourArea": 1436.0736160996673,
+        "contourL1": 591.3130011574931,
+        "excessOverCapacity": 0.7729970216751099,
+        "farAirVolume": 116.68153824411775,
+        "frontCell": 191,
+        "interiorDeficit": 360.4133543819189,
+        "liquidCells": 1445,
+        "maxCourant": 1.1141507625579834,
+        "maxVolume": 1.1747187376022339,
+        "rowlessVolume": 226.20482899559056,
+        "targetArea": 1435.9719411411243,
+        "targetL1": 591.4090973191355,
+        "volume": 1279.9794833095125
+      },
+      "rounds": 32
+    },
+    {
+      "frame": 480,
+      "metrics": {
+        "bandResidual": 87.49511349227032,
+        "contourArea": 1436.0736160996673,
+        "contourL1": 591.3130011574931,
+        "excessOverCapacity": 0.7729970216751099,
+        "farAirVolume": 116.68153824411775,
+        "frontCell": 191,
+        "interiorDeficit": 360.4133543819189,
+        "liquidCells": 1445,
+        "maxCourant": 1.1141507625579834,
+        "maxVolume": 1.1747187376022339,
+        "rowlessVolume": 226.20482899559056,
+        "targetArea": 1435.9719411411243,
+        "targetL1": 591.4090973191355,
+        "volume": 1279.9794833095125
+      },
+      "rounds": 128
+    },
+    {
+      "frame": 480,
+      "metrics": {
+        "bandResidual": 87.49511349227032,
+        "contourArea": 1436.0736160996673,
+        "contourL1": 591.3130011574931,
+        "excessOverCapacity": 0.7729970216751099,
+        "farAirVolume": 116.68153824411775,
+        "frontCell": 191,
+        "interiorDeficit": 360.4133543819189,
+        "liquidCells": 1445,
+        "maxCourant": 1.1141507625579834,
+        "maxVolume": 1.1747187376022339,
+        "rowlessVolume": 226.20482899559056,
+        "targetArea": 1435.9719411411243,
+        "targetL1": 591.4090973191355,
+        "volume": 1279.9794833095125
+      },
+      "rounds": 512
+    }
+  ]
+}

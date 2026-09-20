@@ -42,6 +42,16 @@ pub struct Request {
     audit_surface: bool,
     #[serde(default)]
     redistance_only: bool,
+    #[serde(default)]
+    audit_stages: bool,
+    #[serde(default)]
+    sharpening_rounds: Option<usize>,
+    #[serde(default)]
+    audit_replay_frames: Vec<u32>,
+    #[serde(default)]
+    audit_trace_frames: Vec<u32>,
+    #[serde(default)]
+    swept_extension: Option<super::swept_extension::Config>,
 }
 fn dims() -> [usize; 2] {
     [16, 16]
@@ -86,6 +96,10 @@ pub fn run(r: Request) -> Result<serde_json::Value, ValidationError> {
         }
         World::from_grid(g, r.options, r.gravity, r.density, 0.0, 0.0)?
     };
+    if let Some(config) = r.swept_extension {
+        config.validate()?;
+        world.swept_extension = config;
+    }
     if r.redistance_only {
         super::surface::redistance(&mut world.grid);
         return Ok(serde_json::json!({"phi":world.grid.phi}));
@@ -95,13 +109,62 @@ pub fn run(r: Request) -> Result<serde_json::Value, ValidationError> {
     }
     let initial: f64 = world.grid.volume.iter().map(|&v| v as f64).sum();
     let mut receipts = Vec::new();
-    for _ in 0..r.frames {
-        world.advance(r.dt)?;
+    let mut stages = Vec::new();
+    let mut replays = Vec::new();
+    let mut trace_replays = Vec::new();
+    let rounds = r.sharpening_rounds.unwrap_or(8);
+    if rounds > 512 {
+        return Err(ValidationError(
+            "diagnostic sharpening rounds must be <= 512".into(),
+        ));
+    }
+    for frame in 1..=r.frames {
+        if r.audit_stages
+            || r.sharpening_rounds.is_some()
+            || !r.audit_replay_frames.is_empty()
+            || !r.audit_trace_frames.is_empty()
+        {
+            let options = world.options.clone();
+            world.advance_observed(r.dt, rounds, |stage, grid| {
+                if stage == "start" && r.audit_trace_frames.contains(&frame) {
+                    trace_replays.push(serde_json::json!({"frame":frame,
+                        "initialArea":super::diagnostics::measure(grid,r.dt,32).contour_area,
+                        "traces":super::diagnostics::trace_replays(grid,&options,r.dt)}));
+                }
+                if r.audit_stages {
+                    stages.push(serde_json::json!({"frame":frame,"stage":stage,
+                        "metrics":super::diagnostics::measure(grid,r.dt,32)}));
+                }
+                if stage == "transported" && r.audit_replay_frames.contains(&frame) {
+                    let mut replay = grid.clone();
+                    let mut completed = 0;
+                    for rounds in [0, 8, 32, 128, 512] {
+                        super::surface::sharpen_rounds(&mut replay, &options, rounds - completed);
+                        completed = rounds;
+                        replays.push(serde_json::json!({"frame":frame,"rounds":rounds,
+                            "metrics":super::diagnostics::measure(&replay,r.dt,128)}));
+                    }
+                }
+            })?;
+        } else {
+            world.advance(r.dt)?;
+        }
         receipts.push(world.receipt.clone());
     }
     let mut result = serde_json::json!({"initialVolume":initial,"receipts":receipts,"volume":world.grid.volume,"phi":world.grid.phi,"velocity":world.grid.velocity,"lowX":world.grid.low_x,"lowY":world.grid.low_y,"pressure":world.pressure.levels[0].p,"released":world.grid.released,"tileClasses":world.tile_classes});
     if let Some(phi) = world.advected_phi_audit {
         result["advectedPhi"] = serde_json::json!(phi);
+    }
+    if r.audit_stages {
+        result["stages"] = serde_json::json!(stages);
+        result["finalHighResolutionMetrics"] =
+            serde_json::json!(super::diagnostics::measure(&world.grid, r.dt, 128));
+    }
+    if !replays.is_empty() {
+        result["sharpeningReplays"] = serde_json::json!(replays);
+    }
+    if !trace_replays.is_empty() {
+        result["traceReplays"] = serde_json::json!(trace_replays);
     }
     Ok(result)
 }

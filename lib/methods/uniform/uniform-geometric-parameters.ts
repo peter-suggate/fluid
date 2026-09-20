@@ -87,6 +87,10 @@ params.push({kind:"number",key:"phiAgreementClamp",label:"Agreement clamp",defau
   min:0,max:0.5,step:0.005,digits:3,unit:"cells / step",
   hint:"Largest shift in one step. At gain 0.05 the dam break does not care (0.01 to 0.05 all read the same roughness); the thin film does: 0.002 cannot keep up with its erosion, 0.02 and 0.05 hold phi within 6-14% of V."});
 
+params.push({kind:"select",key:"totalSurfaceVolume",label:"Total surface volume",default:"on",tier:"coarse",update:"runtime",
+  options:[{value:"off",label:"Off"},{value:"on",label:"On"}],
+  hint:"Shift the existing surface uniformly along its normals to match total conservative V. Bounded to one cell per step; no regional correction or phi seeding. One global constraint across all liquid bodies. Source frames are skipped."});
+
 /** Shared by the studio, advance-lab, native Rust generator and scene harnesses. */
 export const UNIFORM_GEOMETRIC_PARAMS: readonly MethodParamSpec[] = Object.freeze(params);
 export const UNIFORM_GEOMETRIC_DEFAULTS: Readonly<MethodParamValues> = Object.freeze(

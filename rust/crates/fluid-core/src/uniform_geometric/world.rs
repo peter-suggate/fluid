@@ -27,10 +27,14 @@ pub struct Receipt {
     pub pressure: super::pressure::PressureReceipt,
     pub volume: f64,
     pub phi_area: f64,
+    pub contour_area: f64,
+    pub contour_l1: f64,
     pub max_speed: f32,
     pub injected_volume: f64,
+    pub swept_extension: super::swept_extension::Receipt,
 }
 pub struct World {
+    pub swept_extension: super::swept_extension::Config,
     pub grid: Grid,
     pub options: UniformGeometricOptions,
     pub pressure: Pressure,
@@ -108,6 +112,11 @@ impl World {
         let pressure = Pressure::new(grid.dims, grid.h)?;
         let transport = Transport::new(grid.volume.len());
         Ok(Self {
+            swept_extension: if options.total_surface_volume == "on" {
+                super::swept_extension::Config::lab_profile("area-only")?
+            } else {
+                super::swept_extension::Config::default()
+            },
             grid,
             options,
             pressure,
@@ -181,11 +190,32 @@ impl World {
         )
     }
     pub fn advance(&mut self, dt: f32) -> Result<(), ValidationError> {
+        self.advance_observed(dt, 8, |_, _| {})
+    }
+
+    /// Diagnostic stage observer. Observations are read-only and absent from the
+    /// ordinary advance; iteration overrides are not shared numerical defaults.
+    pub fn advance_observed(
+        &mut self,
+        dt: f32,
+        sharpening_rounds: usize,
+        mut observe: impl FnMut(&str, &Grid),
+    ) -> Result<(), ValidationError> {
         if !dt.is_finite() || dt <= 0.0 {
             return Err(ValidationError("invalid uniform timestep".into()));
         }
+        observe("start", &self.grid);
+        let phi_reference = (self.swept_extension.mode
+            == super::swept_extension::Mode::TransportAgreement)
+            .then(|| {
+                (0..self.grid.volume.len())
+                    .map(|i| super::swept_extension::contour_fill(&self.grid, i, 0.0))
+                    .collect::<Vec<_>>()
+            });
         let prior_phase = super::velocity::phase(&self.grid, &self.options);
-        let extension = Extension::build(&self.grid, &self.options, dt);
+        let (extension, correction) =
+            super::swept_extension::build(&self.grid, &self.options, dt, &self.swept_extension);
+        self.receipt.swept_extension = correction;
         self.tile_classes.clone_from(&extension.classes);
         let active: Vec<_> = (0..self.grid.volume.len())
             .map(|i| extension.transport_at(self.grid.point(i), &self.options))
@@ -200,12 +230,14 @@ impl World {
             })
             .collect();
         surface::advect(&mut self.grid, &extension, &self.options, dt);
+        observe("advected", &self.grid);
         if let Some(audit) = &mut self.advected_phi_audit {
             audit.clone_from(&self.grid.phi);
         }
         if self.options.redistance == "on" {
             surface::redistance(&mut self.grid);
         }
+        observe("redistanced", &self.grid);
         let mut next = vec![0.0; self.grid.volume.len()];
         self.receipt.transport = self.transport.advance(
             self.grid.dims,
@@ -229,15 +261,62 @@ impl World {
             self.grid.drops.clear();
         }
         self.grid.volume = next;
-        self.receipt.sharpening_dust = surface::sharpen(&mut self.grid, &self.options);
+        observe("transported", &self.grid);
+        if let Some(reference) = phi_reference.filter(|_| self.receipt.injected_volume == 0.0) {
+            let transported: Vec<f32> = self
+                .transport
+                .edges
+                .iter()
+                .enumerate()
+                .map(|(i, edge)| {
+                    if !active[i] {
+                        return 0.0;
+                    }
+                    (0..5)
+                        .map(|k| edge.weights[k] * reference[edge.donors[k]])
+                        .sum()
+                })
+                .collect();
+            self.receipt.swept_extension.surface = Some(super::swept_extension::correct_surface(
+                &mut self.grid,
+                &transported,
+                &self.swept_extension,
+            ));
+            self.receipt.swept_extension.accepted = true;
+        }
+        if self.swept_extension.mode == super::swept_extension::Mode::RegionalVolume
+            && self.receipt.injected_volume == 0.0
+        {
+            let reference = self.grid.volume.clone();
+            self.receipt.swept_extension.surface = Some(super::swept_extension::correct_surface(
+                &mut self.grid,
+                &reference,
+                &self.swept_extension,
+            ));
+            self.receipt.swept_extension.accepted = true;
+        }
+        if self.receipt.swept_extension.surface.is_some() {
+            observe("corrected", &self.grid);
+        }
+        self.receipt.sharpening_dust =
+            surface::sharpen_rounds(&mut self.grid, &self.options, sharpening_rounds);
+        observe("sharpened", &self.grid);
         self.advect_velocity(&extension, &prior_phase, dt);
         self.project(dt);
+        observe("projected", &self.grid);
         self.receipt.frame += 1;
         self.receipt.time += dt as f64;
         self.receipt.volume = self.grid.volume.iter().map(|&v| v as f64).sum();
         self.receipt.phi_area = (0..self.grid.volume.len())
             .map(|i| self.grid.target(self.grid.point(i)) as f64)
             .sum();
+        self.receipt.contour_area = 0.0;
+        self.receipt.contour_l1 = 0.0;
+        for i in 0..self.grid.volume.len() {
+            let area = super::swept_extension::contour_fill(&self.grid, i, 0.0) as f64;
+            self.receipt.contour_area += area;
+            self.receipt.contour_l1 += (area - self.grid.volume[i] as f64).abs();
+        }
         self.receipt.max_speed = self
             .grid
             .velocity

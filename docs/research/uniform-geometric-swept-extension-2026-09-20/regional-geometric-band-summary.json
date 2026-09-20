@@ -1,0 +1,42 @@
+{
+  "id": "regional-geometric-band",
+  "config": {
+    "mode": "regional-volume",
+    "areaGuard": true,
+    "localSweeps": 4,
+    "coarseSweeps": 24,
+    "cycles": 1,
+    "traceSteps": 1,
+    "agreementGain": 0.3,
+    "agreementClamp": 0.5,
+    "agreementIterations": 2
+  },
+  "scene": "sparse-cm12-long-dam-break",
+  "seconds": 4,
+  "dt": 0.03333333333333333,
+  "initialVolume": 1280,
+  "final": {
+    "bandResidual": 16.995613420265727,
+    "contourArea": 1280.0007037751357,
+    "contourL1": 200.87854450212066,
+    "excessOverCapacity": 30.50331223011017,
+    "farAirVolume": 56.78402849480153,
+    "frontCell": 191,
+    "interiorDeficit": 109.53955695033073,
+    "liquidCells": 1291,
+    "maxCourant": 2.897515058517456,
+    "maxVolume": 2.1951656341552734,
+    "rowlessVolume": 85.60658208311179,
+    "targetArea": 1283.32531625079,
+    "targetL1": 207.42332226208055,
+    "volume": 1279.9986387270742
+  },
+  "elapsedMs": 3899.89475,
+  "msPerStep": 32.499122916666664,
+  "maxPressureResidual": 4.563013553619385,
+  "rejected": 0,
+  "maxCorrection": 0.0062500000931322575,
+  "activeMean": 0,
+  "divergenceBefore": 0,
+  "divergenceAfter": 0
+}

@@ -25,6 +25,14 @@ import type {
   PhysicsWorkerRequest,
 } from "../../lib/physics-wasm/protocol";
 import type { FluidWasmModule } from "../../lib/physics-wasm/module";
+assert.equal(uniformLabQuery.read(new URLSearchParams()).surfaceExperiment,"area-only");
+assert.equal(uniformLabQuery.read(new URLSearchParams("surfaceExperiment=off")).surfaceExperiment,"off");
+for (const profile of ["off","area-only"] as const) {
+  const query=new URLSearchParams();
+  uniformLabQuery.write(query,{...uniformLabQuery.read(query),surfaceExperiment:profile});
+  assert.equal(uniformLabQuery.read(query).surfaceExperiment,profile);
+  assert.equal(query.has("surfaceExperiment"),profile==="off");
+}
 const summaries: unknown[] = [];
 const baseline = new Map<string, unknown>();
 assert.deepEqual(UNIFORM_LAB_VALUES, {
@@ -163,6 +171,30 @@ for (const artifact of ["scalar", "simd"] as const) {
       summaries.push(summary);
       console.log(JSON.stringify(summary));
     }
+    for (const profile of ["regional", "regional-area", "area-only"] as const) {
+      const scene = sceneDocument(findSceneDefinition("water-box-dam-break")!);
+      let view = await controller.load(scene, profile);
+      assert.equal((view.receipt.surfaceExperiment as {mode:string}).mode, "regional-volume");
+      for (let frame=0; frame<12; frame++) view=await controller.advance(1/30);
+      const receipt=view.receipt.uniform as {contourArea:number; volume:number; sweptExtension:{surface:unknown}};
+      assert.ok(receipt.sweptExtension.surface);
+      if (profile!=="regional") assert.ok(Math.abs(receipt.contourArea-receipt.volume)<0.03);
+      const fields={volume:[...view.volume], phi:[...view.phi], velocity:[...view.velocity]};
+      if (artifact==="scalar") baseline.set(profile,fields);
+      else assert.deepEqual(fields,baseline.get(profile), `${profile}: scalar/SIMD parity`);
+      if (profile==="regional-area") {
+        await controller.injectLiquid([0.9,0.65],0.08);
+        view=await controller.advance(1/30);
+        const injected=view.receipt.uniform as {injectedVolume:number;sweptExtension:{surface:unknown}};
+        assert.ok(injected.injectedVolume>0);
+        assert.equal(injected.sweptExtension.surface,null,"source frame skips feedback");
+      }
+      const reset=await controller.load(scene);
+      const config=reset.receipt.surfaceExperiment as {mode:string;areaGuard:boolean;agreementIterations:number};
+      assert.equal(config.mode,"regional-volume");assert.equal(config.areaGuard,true);assert.equal(config.agreementIterations,0);
+      const disabled=await controller.load(scene,"off");
+      assert.equal((disabled.receipt.surfaceExperiment as {mode:string}).mode,"off");
+    }
     const scene = sceneDocument(findSceneDefinition("water-box-dam-break")!);
     let edited = await controller.load(scene);
     const before = edited.volume.reduce((a, b) => a + b, 0);
@@ -287,6 +319,7 @@ for (const artifact of ["scalar", "simd"] as const) {
       }).map(([k, v]) => [k, v]),
     );
     const ui = {
+      surfaceExperiment: "regional-area" as const,
       sceneId: "water-box-dam-break",
       dt: 1 / 60,
       layers: visualLayers(["pressure", "grid"]),

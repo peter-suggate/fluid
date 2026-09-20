@@ -114,6 +114,15 @@
   background: var(--panel);
   font-size: 12px;
 }
+.sidebar > label {
+  display: grid;
+  gap: 7px;
+  margin-top: 16px;
+}
+.sidebar > label select {
+  width: 100%;
+  min-width: 0;
+}
 .sidebar h1 {
   font-size: 18px;
   margin: 0 0 5px;

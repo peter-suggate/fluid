@@ -123,6 +123,13 @@ impl Session {
         self.ordered(sequence, epoch)?;
         match command.get("type").and_then(|v| v.as_str()) {
             Some("snapshot") => {}
+            Some("set-surface-experiment") => {
+                let profile = command
+                    .get("profile")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| ValidationError("Missing surface experiment profile".into()))?;
+                self.world.swept_extension = super::swept_extension::Config::lab_profile(profile)?;
+            }
             Some("inject-liquid") => {
                 let drop: super::grid::LiquidDrop = serde_json::from_value(
                     command
@@ -227,6 +234,7 @@ impl Session {
         value["method"] = serde_json::json!("uniform-volume");
         value["uniform"] =
             serde_json::to_value(&self.world.receipt).expect("uniform receipt is serializable");
+        value["surfaceExperiment"] = serde_json::json!(self.world.swept_extension);
         value["initialVolume"] = serde_json::json!(self.initial_volume);
         value["injectedVolume"] = serde_json::json!(self.injected_volume);
         value["rigidBodies"] = serde_json::json!(self.physical.bodies);

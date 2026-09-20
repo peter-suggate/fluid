@@ -238,6 +238,11 @@ pub fn redistance(g: &mut Grid) {
     g.phi = redistanced;
 }
 pub fn sharpen(g: &mut Grid, o: &UniformGeometricOptions) -> f64 {
+    sharpen_rounds(g, o, 8)
+}
+
+/// Diagnostic iteration control; the production schedule remains eight rounds.
+pub fn sharpen_rounds(g: &mut Grid, o: &UniformGeometricOptions, rounds: usize) -> f64 {
     if o.density_sharpening == "off" {
         return 0.0;
     }
@@ -257,7 +262,7 @@ pub fn sharpen(g: &mut Grid, o: &UniformGeometricOptions) -> f64 {
     let mut need = vec![0.0; n];
     let mut flux = vec![[0.0; 2]; n];
     let mut limits = vec![[0.0; 2]; n];
-    for _ in 0..8 {
+    for _ in 0..rounds {
         for i in 0..n {
             let admitted = g.capacity[i] > 0.99999
                 && (if compact {

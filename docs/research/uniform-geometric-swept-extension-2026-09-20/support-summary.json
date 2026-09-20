@@ -1,0 +1,37 @@
+{
+  "id": "support",
+  "config": {
+    "mode": "support",
+    "localSweeps": 4,
+    "coarseSweeps": 24,
+    "cycles": 1
+  },
+  "scene": "sparse-cm12-long-dam-break",
+  "seconds": 4,
+  "dt": 0.03333333333333333,
+  "initialVolume": 1280,
+  "final": {
+    "bandResidual": 71.77683510165662,
+    "contourArea": 1055.3616848250385,
+    "contourL1": 536.5184453506433,
+    "excessOverCapacity": 34.94881272315979,
+    "farAirVolume": 301.6283833767949,
+    "frontCell": 191,
+    "interiorDeficit": 156.3402991592884,
+    "liquidCells": 1056,
+    "maxCourant": 1.5142914056777954,
+    "maxVolume": 6.726132869720459,
+    "rowlessVolume": 371.15380927284343,
+    "targetArea": 1055.2291285262252,
+    "targetL1": 538.1974904010925,
+    "volume": 1279.9963789518654
+  },
+  "elapsedMs": 3464.439916,
+  "msPerStep": 28.87033263333333,
+  "maxPressureResidual": 4.624870777130127,
+  "rejected": 0,
+  "maxCorrection": 0,
+  "activeMean": 0,
+  "divergenceBefore": 0,
+  "divergenceAfter": 0
+}

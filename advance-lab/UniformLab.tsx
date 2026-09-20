@@ -41,6 +41,7 @@ import {
   UNIFORM_LAB_VALUES,
   uniformLabSceneLimitation,
   type UniformView,
+  type SurfaceExperiment,
 } from "../lib/physics-wasm/uniform-controller";
 import {
   advanceRdfTriangles,
@@ -287,7 +288,7 @@ export function UniformLab() {
 }
 function UniformRun({ session }: { session: PaneSession }) {
   const [store] = useState(() => createUniformLabStore(location.search));
-  const { sceneId, dt, layers, sliceView: camera } = useStore(store);
+  const { sceneId, dt, layers, surfaceExperiment, sliceView: camera } = useStore(store);
 
   const setCamera = (value: Camera | ((current: Camera) => Camera)) =>
     store.setState({
@@ -363,7 +364,7 @@ function UniformRun({ session }: { session: PaneSession }) {
           return;
         }
         controller.current = owner;
-        const initial = await owner.load(scene);
+        const initial = await owner.load(scene, surfaceExperiment);
         if (alive) {
           setView(initial);
           setLoading(false);
@@ -381,7 +382,7 @@ function UniformRun({ session }: { session: PaneSession }) {
       if (controller.current === owner) controller.current = undefined;
       if (owner) void owner.destroy().catch(() => {});
     };
-  }, [sceneId, restart, session.scene]);
+  }, [sceneId, surfaceExperiment, restart, session.scene]);
   const edit = (
     operation: (owner: UniformLabController) => Promise<UniformView>,
   ) => {
@@ -495,6 +496,7 @@ function UniformRun({ session }: { session: PaneSession }) {
     initial =
       Number(view?.receipt.initialVolume ?? 0) +
       Number(view?.receipt.injectedVolume ?? 0);
+  const surfaceStats = view?.receipt.uniform as { contourArea?: number; contourL1?: number } | undefined;
   const pressure = (
     view?.receipt.uniform as
       | {
@@ -925,6 +927,29 @@ function UniformRun({ session }: { session: PaneSession }) {
         <aside className={css.sidebar}>
           <h1>Uniform Geometric</h1>
           <p className={css.muted}>Shared 3D defaults · whole-domain solve</p>
+          <label>
+            2D surface correction
+            <select
+              aria-label="2D surface correction"
+              value={surfaceExperiment}
+              disabled={loading}
+              onChange={(event) => {
+                setPlaying(false);
+                beginLoad();
+                store.setState({ surfaceExperiment: event.target.value as SurfaceExperiment });
+              }}
+            >
+              <option value="off">Baseline</option>
+              <option value="regional">Smooth regional correction</option>
+              <option value="regional-area">Regional + total area</option>
+              <option value="area-only">Total area (default)</option>
+            </select>
+          </label>
+          <p className={css.muted}>
+            {surfaceExperiment === "off" ? "Original surface advection." : surfaceExperiment === "area-only" ? "Bounded surface shift to match total V." : "Smooth displacements of the advected surface from regional V/phi error."}
+            {surfaceExperiment === "regional-area" ? " Includes a total-area constraint." : ""}
+            {" "}Changing the correction resets and pauses the scene.
+          </p>
           <dl>
             <dt>Liquid area</dt>
             <dd>
@@ -935,6 +960,10 @@ function UniformRun({ session }: { session: PaneSession }) {
             </dd>
             <dt>Volume change</dt>
             <dd>{initial ? ((total / initial - 1) * 100).toFixed(5) : "0"}%</dd>
+            <dt>Surface / V area</dt>
+            <dd data-testid="uniform-surface-ratio">{view?.revision.frame && total ? ((surfaceStats?.contourArea ?? 0) / total * 100).toFixed(2) + "%" : "—"}</dd>
+            <dt>V/phi mismatch</dt>
+            <dd title="Sum of cellwise absolute V minus surface occupancy, divided by total V.">{view?.revision.frame && total ? ((surfaceStats?.contourL1 ?? 0) / total * 100).toFixed(2) + "%" : "—"}</dd>
             <dt>Pressure residual</dt>
             <dd>
               {view?.revision.frame

@@ -82,6 +82,8 @@ pub struct UniformGeometricOptions {
     pub phi_agreement_gain: f32,
     #[serde(rename = "phiAgreementClamp")]
     pub phi_agreement_clamp: f32,
+    #[serde(rename = "totalSurfaceVolume")]
+    pub total_surface_volume: String,
 }
 impl Default for UniformGeometricOptions {
     fn default() -> Self {
@@ -118,6 +120,7 @@ impl Default for UniformGeometricOptions {
             phi_agreement: "off".into(),
             phi_agreement_gain: 0.05_f32,
             phi_agreement_clamp: 0.02_f32,
+            total_surface_volume: "on".into(),
         }
     }
 }
@@ -315,6 +318,11 @@ impl UniformGeometricOptions {
         {
             return Err(ValidationError(
                 "Invalid uniform parameter phiAgreementClamp".into(),
+            ));
+        }
+        if !["off", "on"].contains(&self.total_surface_volume.as_str()) {
+            return Err(ValidationError(
+                "Invalid uniform parameter totalSurfaceVolume".into(),
             ));
         }
         Ok(())

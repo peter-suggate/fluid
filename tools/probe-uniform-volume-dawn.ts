@@ -28,7 +28,7 @@ try {
   assert.deepEqual(messages.filter(m=>m.type==="error").map(m=>`${m.lineNum}: ${m.message}`),[]);
   const scene=sceneDocument(getSceneDefinition(arg("scene","minimal-power-dam-break-32")));
   const method=arg("method","uniform-volume")==="adaptive-volume"?adaptiveMassMethod:uniformVolumeMethod;
-  const values=resolveMethodValues(method,"balanced",{redistance:arg("redistance","on")});
+  const values=resolveMethodValues(method,"balanced",{redistance:arg("redistance","on"),totalSurfaceVolume:arg("total-surface-volume","on")});
   const start=performance.now();
   solver=await method.createSolverAsync!(device,scene,"balanced",values,undefined,()=>{},new AbortController().signal) as WebGPUUniformReferenceSolver;
   await solver.waitForSimulationReady?.();

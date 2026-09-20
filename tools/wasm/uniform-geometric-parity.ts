@@ -66,7 +66,7 @@ try {
     scene.solidVoxels=[...boxSolidVoxelShell([expectedNx,expectedNy,1],{top:scene.container.top})];
     if(name==="embedded-ceiling")scene.solidVoxels.push({operation:"fill",minimum:[0,12,0],maximumExclusive:[expectedNx,13,1]});
     const values=resolveUniformGeometricValues({activeRegion:"off",twoLevelVelocity:"off",pressureCycleBudget:"fixed",volumeDustThreshold:0,...JSON.parse(process.env.FLUID_UNIFORM_PARITY_VALUES??"{}")});
-    const solver=await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,{...uniformGeometricSolverOptions(values,scene),referenceDimension:2},()=>{});
+    const solver=await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,{...uniformGeometricSolverOptions(values,scene),totalSurfaceVolume:false,referenceDimension:2},()=>{});
     try {
       const {nx,ny,nz}=solver.info;assert.deepEqual([nx,ny,nz],[expectedNx,expectedNy,1]);
       if(["dam-collapse","mirrored-dam","ceiling-release","embedded-ceiling"].includes(name)){
@@ -97,11 +97,11 @@ try {
         const velocity4=slice(await read(device,solver.velocityTexture),nx,ny,Math.floor(nz/2),4);
         const velocity=velocity4.filter((_,i)=>i%4<2);
         const released=velocity4.filter((_,i)=>i%4===3).map(bits=>(bits&3)|((bits>>1)&12));
-        const run:SpawnSyncReturns<string>=spawnSync("rust/target/release/examples/uniform_geometric_scene",[],{input:JSON.stringify({dimensions:[nx,ny],cellSize:[0.05,0.05],volume:initialVolume,capacity:initialCapacity,phi:initialPhi,gravity:[0,scene.fluid.gravity_m_s2.y],options:values,openTop:scene.container.top==="open",frames:frame}),encoding:"utf8",maxBuffer:32*1024*1024});
+        const run:SpawnSyncReturns<string>=spawnSync("rust/target/release/examples/uniform_geometric_scene",[],{input:JSON.stringify({dimensions:[nx,ny],cellSize:[0.05,0.05],volume:initialVolume,capacity:initialCapacity,phi:initialPhi,gravity:[0,scene.fluid.gravity_m_s2.y],options:{...values,totalSurfaceVolume:"off"},openTop:scene.container.top==="open",frames:frame}),encoding:"utf8",maxBuffer:32*1024*1024});
         assert.equal(run.status,0,run.stderr);const rust=JSON.parse(run.stdout);
         const diff=(a:number[],b:number[])=>Math.max(...a.map((v,i)=>Math.abs(v-b[i]!)));
         const sample={frame,volumeMaxError:diff(volume,rust.volume),phiMaxError:diff(phi,rust.phi),velocityMaxError:diff(velocity,rust.velocity.flat()),gpuVolume:volume.reduce((a,b)=>a+b,0),rustVolume:rust.receipts.at(-1).volume,rustMaxSpeed:rust.receipts.at(-1).maxSpeed,rustPressure:rust.receipts.at(-1).pressure};
-        const matchedInput:Record<string,unknown>={auditSurface:true,dimensions:[nx,ny],cellSize:[0.05,0.05],volume:before!.volume,capacity:initialCapacity,phi:before!.phi,velocity:Array.from({length:nx*ny},(_,i)=>before!.velocity.slice(4*i,4*i+2)),released:Array.from({length:nx*ny},(_,i)=>{const bits=before!.velocity[4*i+3]!;return (bits&3)|((bits>>1)&12);}),lowX:before!.boundary.slice(0,ny),lowY:before!.boundary.slice(ny,ny+nx),gravity:[0,scene.fluid.gravity_m_s2.y],options:values,openTop:scene.container.top==="open",frames:1};
+        const matchedInput:Record<string,unknown>={auditSurface:true,dimensions:[nx,ny],cellSize:[0.05,0.05],volume:before!.volume,capacity:initialCapacity,phi:before!.phi,velocity:Array.from({length:nx*ny},(_,i)=>before!.velocity.slice(4*i,4*i+2)),released:Array.from({length:nx*ny},(_,i)=>{const bits=before!.velocity[4*i+3]!;return (bits&3)|((bits>>1)&12);}),lowX:before!.boundary.slice(0,ny),lowY:before!.boundary.slice(ny,ny+nx),gravity:[0,scene.fluid.gravity_m_s2.y],options:{...values,totalSurfaceVolume:"off"},openTop:scene.container.top==="open",frames:1};
         const matched:SpawnSyncReturns<string>=spawnSync("rust/target/release/examples/uniform_geometric_scene",[],{input:JSON.stringify(matchedInput),encoding:"utf8",maxBuffer:32*1024*1024});
         assert.equal(matched.status,0,String(matched.stderr));const one=JSON.parse(String(matched.stdout));
         const advectedPhi3d:number[]=[...await read(device,solver.advectedVertexPhiTexture!)];

@@ -142,6 +142,7 @@ export function createUniformView(source: PhysicsPublication): UniformView {
     publication.release();
   }
 }
+export type SurfaceExperiment = "off" | "regional" | "regional-area" | "area-only";
 export class UniformLabController {
   private constructor(private readonly client: PhysicsWasmClient) {}
   static async create(options: PhysicsWasmClientOptions = {}) {
@@ -152,13 +153,14 @@ export class UniformLabController {
       }),
     );
   }
-  async load(scene: SceneDescription) {
+  async load(scene: SceneDescription, experiment: SurfaceExperiment = "area-only") {
     await this.client.load(scene, {
       method: "uniform-volume",
       dimension: 2,
       methodValues: UNIFORM_LAB_VALUES,
       uniformSeed: uniformLabSeed(scene),
     });
+    if (experiment !== "area-only") return this.command({ type: "set-surface-experiment", profile: experiment });
     return createUniformView(await this.client.snapshot());
   }
   async advance(dt: number) {

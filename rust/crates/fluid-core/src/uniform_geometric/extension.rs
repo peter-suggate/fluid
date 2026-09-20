@@ -11,6 +11,51 @@ struct Face {
     known: u8,
     active: u8,
 }
+
+#[cfg(test)]
+mod conforming_tests {
+    use super::*;
+    #[test]
+    fn reconstruction_has_mac_divergence_and_shared_normal_flux() {
+        let mut g = Grid::new([12, 12], [0.05, 0.08], false).unwrap();
+        g.phi.fill(-1.0);
+        for i in 0..g.velocity.len() {
+            let p = g.point(i);
+            g.velocity[i] = [
+                (0.3 * p[0] as f32).sin() + 0.02 * (p[1] as f32).powi(2),
+                (0.2 * p[1] as f32).cos() + 0.01 * (p[0] as f32).powi(2),
+            ];
+        }
+        let mut o = UniformGeometricOptions::default();
+        o.two_level_velocity = "off".into();
+        let mut e = Extension::build(&g, &o, 0.03);
+        e.enable_conforming(&g);
+        for cell in [[3, 4], [5, 6], [7, 3]] {
+            let expected = (e.fine_face(cell, 0) - e.fine_face([cell[0] - 1, cell[1]], 0)) / g.h[0]
+                + (e.fine_face(cell, 1) - e.fine_face([cell[0], cell[1] - 1], 1)) / g.h[1];
+            for f in [[0.2, 0.3], [0.7, 0.8], [0.4, 0.6]] {
+                let p = [cell[0] as f32 + f[0], cell[1] as f32 + f[1]];
+                let mut div = 0.0;
+                for a in 0..2 {
+                    let mut lo = p;
+                    let mut hi = p;
+                    lo[a] -= 0.001;
+                    hi[a] += 0.001;
+                    div += (e.sample(hi)[a] - e.sample(lo)[a]) / ((hi[a] - lo[a]) * g.h[a]);
+                }
+                assert!((div - expected).abs() < 0.005, "{div} != {expected}");
+            }
+            let p = [cell[0] as f32 + 1.0, cell[1] as f32 + 0.37];
+            assert!(
+                (e.sample([p[0] - 1e-5, p[1]])[0] - e.sample([p[0] + 1e-5, p[1]])[0]).abs() < 1e-4
+            );
+            let flux = (e.sample([p[0], cell[1] as f32 + 0.25])[0]
+                + e.sample([p[0], cell[1] as f32 + 0.75])[0])
+                * 0.5;
+            assert!((flux - e.fine_face(cell, 0)).abs() < 1e-6);
+        }
+    }
+}
 #[derive(Clone)]
 pub struct Extension {
     dims: [usize; 2],
@@ -19,6 +64,9 @@ pub struct Extension {
     coarse: Vec<[f32; 2]>,
     coarse_dims: [usize; 2],
     two_level: bool,
+    conforming_slopes: Option<Vec<[f32; 2]>>,
+    h: [f32; 2],
+    pub trace_steps: usize,
 }
 fn index(d: [usize; 2], p: [i32; 2]) -> Option<usize> {
     (p[0] >= 0 && p[1] >= 0 && p[0] < d[0] as i32 && p[1] < d[1] as i32)
@@ -368,6 +416,9 @@ impl Extension {
             coarse,
             coarse_dims: cd,
             two_level: two,
+            conforming_slopes: None,
+            h: g.h,
+            trace_steps: 1,
         }
     }
     pub fn with_coarse_from(&self, other: &Self) -> Self {
@@ -395,6 +446,9 @@ impl Extension {
         self.values[index(self.dims, p).unwrap()][a]
     }
     pub fn sample(&self, p: [f32; 2]) -> [f32; 2] {
+        if self.conforming_slopes.is_some() && self.fine_at(p) {
+            return self.conforming_sample(p);
+        }
         let tile = [
             ((p[0].floor() as i32).clamp(0, self.dims[0] as i32 - 1) as usize) / 4,
             ((p[1].floor() as i32).clamp(0, self.dims[1] as i32 - 1) as usize) / 4,
@@ -427,6 +481,13 @@ impl Extension {
         })
     }
     pub fn trace(&self, g: &Grid, p: [f32; 2], dt: f32) -> [f32; 2] {
+        let mut q = p;
+        for _ in 0..self.trace_steps {
+            q = self.trace_single(g, q, dt / self.trace_steps as f32);
+        }
+        q
+    }
+    fn trace_single(&self, g: &Grid, p: [f32; 2], dt: f32) -> [f32; 2] {
         let v = self.sample(p);
         let mid = g.clamp([
             p[0] - 0.5 * dt * v[0] / g.h[0],
@@ -447,5 +508,50 @@ impl Extension {
             previous = q;
         }
         end
+    }
+
+    /// Experimental H(div) reconstruction: shared linear normal face profiles
+    /// plus interior bubbles cancel the tangential-slope divergence. The
+    /// pointwise divergence equals the cell's MAC flux divergence everywhere.
+    pub fn enable_conforming(&mut self, g: &Grid) {
+        let mut slopes = vec![[0.0; 2]; self.values.len()];
+        for i in 0..slopes.len() {
+            let p = g.point(i);
+            for a in 0..2 {
+                if g.pressure_face(p, a) <= 1e-5 {
+                    continue;
+                }
+                let mut lo = p;
+                lo[1 - a] -= 1;
+                let mut hi = p;
+                hi[1 - a] += 1;
+                slopes[i][a] = 0.5 * (self.fine_face(hi, a) - self.fine_face(lo, a));
+            }
+        }
+        self.conforming_slopes = Some(slopes);
+    }
+    fn conforming_sample(&self, p: [f32; 2]) -> [f32; 2] {
+        let cell: [i32; 2] =
+            std::array::from_fn(|a| (p[a].floor() as i32).clamp(0, self.dims[a] as i32 - 1));
+        let x = (p[0] - cell[0] as f32).clamp(0.0, 1.0);
+        let y = (p[1] - cell[1] as f32).clamp(0.0, 1.0);
+        let left = [cell[0] - 1, cell[1]];
+        let bottom = [cell[0], cell[1] - 1];
+        let slopes = self.conforming_slopes.as_ref().unwrap();
+        let slope = |q, a| index(self.dims, q).map_or(0.0, |i| slopes[i][a]);
+        let sl = slope(left, 0);
+        let sr = slope(cell, 0);
+        let tb = slope(bottom, 1);
+        let tt = slope(cell, 1);
+        [
+            (1.0 - x) * self.fine_face(left, 0)
+                + x * self.fine_face(cell, 0)
+                + ((1.0 - x) * sl + x * sr) * (y - 0.5)
+                + 0.5 * self.h[0] / self.h[1] * (tt - tb) * x * (1.0 - x),
+            (1.0 - y) * self.fine_face(bottom, 1)
+                + y * self.fine_face(cell, 1)
+                + ((1.0 - y) * tb + y * tt) * (x - 0.5)
+                + 0.5 * self.h[1] / self.h[0] * (sr - sl) * y * (1.0 - y),
+        ]
     }
 }

@@ -1,3 +1,4 @@
+import type { SurfaceExperiment } from "../lib/physics-wasm/uniform-controller";
 import { readVisualLayers, writeVisualLayers, legacyVisualLayers, type VisualLayerState } from "../lib/core/visual-layers";
 import {
   createSceneQueryLayerCache,
@@ -15,6 +16,7 @@ import { sliceViewQuery, type SliceViewFraction } from "./view-transform";
 
 export interface UniformLabState {
   sceneId: string;
+  surfaceExperiment: SurfaceExperiment;
   dt: number;
   layers: VisualLayerState;
   sliceView: SliceViewFraction;
@@ -22,6 +24,17 @@ export interface UniformLabState {
 export const uniformLabQuery = combineQueryCodecs<UniformLabState>([
   labSceneQuery,
   labStepQuery,
+  {
+    keys: ["surfaceExperiment"],
+    read: (query: URLSearchParams) => {
+      const value = query.get("surfaceExperiment");
+      return { surfaceExperiment: (value === "off" || value === "regional" || value === "regional-area" ? value : "area-only") as SurfaceExperiment };
+    },
+    write: (query: URLSearchParams, state: UniformLabState) => {
+      if (state.surfaceExperiment === "area-only") query.delete("surfaceExperiment");
+      else query.set("surfaceExperiment", state.surfaceExperiment);
+    },
+  },
   {
     keys: ["layers", "field", "grid"],
     read: (query: URLSearchParams) => ({
@@ -61,6 +74,7 @@ export function startUniformLabQuerySync(
       if (
         hydrated &&
         (next.sceneId !== store.getState().sceneId ||
+          next.surfaceExperiment !== store.getState().surfaceExperiment ||
           JSON.stringify(parsed.scene) !==
             JSON.stringify(session.scene.getState().scene))
       )

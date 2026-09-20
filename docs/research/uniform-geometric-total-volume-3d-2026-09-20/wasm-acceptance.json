@@ -1,0 +1,175 @@
+{
+  "profile": {
+    "activeRegion": "off",
+    "densitySharpening": "on",
+    "rigidCoupling": "on",
+    "velocityTransport": "semi-lagrangian",
+    "liquidOnlyVelocityAdvection": "off",
+    "timeStep": "paper",
+    "pressureResidualTolerance": 10,
+    "pressureCycleBudget": "lagged",
+    "pressureBudgetHeadroom": 1,
+    "extensionFrontSweeps": 2,
+    "sharpeningStrength": 1,
+    "sharpeningDistance": 2.1,
+    "pressureFullCycles": 3,
+    "pressureVCycles": 4,
+    "pressureSweeps": 6,
+    "pressureWindow": "window",
+    "redistance": "on",
+    "sharpeningWorkMap": "on",
+    "volumeDustThreshold": 0.000001,
+    "twoLevelVelocity": "on",
+    "twoLevelFineReach": 2,
+    "twoLevelExtension": "tiles",
+    "twoLevelShellReach": 1,
+    "twoLevelAdvection": "tiles",
+    "transportWorkMap": "tiles",
+    "transportReach": 1,
+    "volumePressureRows": "off",
+    "volumeCompaction": "off",
+    "phiSeedFromVolume": "off",
+    "phiAgreement": "off",
+    "phiAgreementGain": 0.05,
+    "phiAgreementClamp": 0.02,
+    "totalSurfaceVolume": "off"
+  },
+  "scenes": [
+    {
+      "artifact": "scalar",
+      "scene": "water-box-dam-break",
+      "frames": 60,
+      "dimensions": [
+        24,
+        16
+      ],
+      "initialMass": 168,
+      "finalMass": 167.99993474159805,
+      "dust": 0.00006507849142467492,
+      "medianMs": 1.3374999999999773,
+      "p95Ms": 2.482666999999992
+    },
+    {
+      "artifact": "scalar",
+      "scene": "minimal-power-dam-break-32",
+      "frames": 60,
+      "dimensions": [
+        32,
+        32
+      ],
+      "initialMass": 588.7999999523163,
+      "finalMass": 588.7996928684727,
+      "dust": 0.0003003828315559093,
+      "medianMs": 2.855166000000054,
+      "p95Ms": 3.10024999999996
+    },
+    {
+      "artifact": "scalar",
+      "scene": "ceiling-slab-drop",
+      "frames": 60,
+      "dimensions": [
+        24,
+        16
+      ],
+      "initialMass": 64,
+      "finalMass": 63.99993565536579,
+      "dust": 0.00006515494281577221,
+      "medianMs": 1.1201670000000377,
+      "p95Ms": 1.3562080000000378
+    },
+    {
+      "artifact": "scalar",
+      "scene": "live-liquid-and-rigid-tools",
+      "frames": 36,
+      "bodyY": 0.3043156862258911,
+      "injectedVolume": 13,
+      "liquidVolume": 179.23036068145177,
+      "volumeChange": -1.7696393185482293
+    },
+    {
+      "artifact": "scalar",
+      "scene": "authored-tool-url-reload",
+      "frames": 1
+    },
+    {
+      "artifact": "scalar",
+      "scene": "planar-rigid-buoyancy",
+      "frames": 30,
+      "bodyY": 0.32140180468559265
+    },
+    {
+      "artifact": "scalar",
+      "scene": "shared-rigid-shape-roster",
+      "frames": 15,
+      "shapes": 5
+    },
+    {
+      "artifact": "simd",
+      "scene": "water-box-dam-break",
+      "frames": 60,
+      "dimensions": [
+        24,
+        16
+      ],
+      "initialMass": 168,
+      "finalMass": 167.99993474159805,
+      "dust": 0.00006507849142467492,
+      "medianMs": 1.2571250000000873,
+      "p95Ms": 2.2504579999999805
+    },
+    {
+      "artifact": "simd",
+      "scene": "minimal-power-dam-break-32",
+      "frames": 60,
+      "dimensions": [
+        32,
+        32
+      ],
+      "initialMass": 588.7999999523163,
+      "finalMass": 588.7996928684727,
+      "dust": 0.0003003828315559093,
+      "medianMs": 2.8576250000000982,
+      "p95Ms": 3.2350420000000213
+    },
+    {
+      "artifact": "simd",
+      "scene": "ceiling-slab-drop",
+      "frames": 60,
+      "dimensions": [
+        24,
+        16
+      ],
+      "initialMass": 64,
+      "finalMass": 63.99993565536579,
+      "dust": 0.00006515494281577221,
+      "medianMs": 1.1192499999999654,
+      "p95Ms": 1.3447920000000977
+    },
+    {
+      "artifact": "simd",
+      "scene": "live-liquid-and-rigid-tools",
+      "frames": 36,
+      "bodyY": 0.3043156862258911,
+      "injectedVolume": 13,
+      "liquidVolume": 179.23036068145177,
+      "volumeChange": -1.7696393185482293
+    },
+    {
+      "artifact": "simd",
+      "scene": "authored-tool-url-reload",
+      "frames": 1
+    },
+    {
+      "artifact": "simd",
+      "scene": "planar-rigid-buoyancy",
+      "frames": 30,
+      "bodyY": 0.32140180468559265
+    },
+    {
+      "artifact": "simd",
+      "scene": "shared-rigid-shape-roster",
+      "frames": 15,
+      "shapes": 5
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "id": "regional-area-water-box",
+  "config": {
+    "mode": "regional-volume",
+    "areaGuard": true,
+    "localSweeps": 4,
+    "coarseSweeps": 24,
+    "cycles": 1,
+    "traceSteps": 1,
+    "agreementGain": 0.3,
+    "agreementClamp": 0.5,
+    "agreementIterations": 2
+  },
+  "scene": "interactive-water-box",
+  "seconds": 4,
+  "dt": 0.03333333333333333,
+  "initialVolume": 168,
+  "final": {
+    "bandResidual": 28.70877173182089,
+    "contourArea": 168.00009103303944,
+    "contourL1": 60.34520593266344,
+    "excessOverCapacity": 2.883440613746643,
+    "farAirVolume": 0.22493446353519175,
+    "frontCell": 23,
+    "interiorDeficit": 29.1543999761343,
+    "liquidCells": 166,
+    "maxCourant": 0.8624036312103271,
+    "maxVolume": 1.4123058319091797,
+    "rowlessVolume": 30.177482032479475,
+    "targetArea": 167.90336190909147,
+    "targetL1": 60.44187916934652,
+    "volume": 167.9997822430746
+  },
+  "elapsedMs": 155.21837499999998,
+  "msPerStep": 1.2934864583333332,
+  "maxPressureResidual": 0.5743108987808228,
+  "rejected": 0,
+  "maxCorrection": 0.0257415808737278,
+  "activeMean": 0,
+  "divergenceBefore": 0,
+  "divergenceAfter": 0
+}

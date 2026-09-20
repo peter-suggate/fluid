@@ -1,0 +1,37 @@
+{
+  "id": "coarse",
+  "config": {
+    "mode": "coarse",
+    "localSweeps": 4,
+    "coarseSweeps": 24,
+    "cycles": 1
+  },
+  "scene": "sparse-cm12-long-dam-break",
+  "seconds": 4,
+  "dt": 0.03333333333333333,
+  "initialVolume": 1280,
+  "final": {
+    "bandResidual": 53.67284376360476,
+    "contourArea": 1084.7240965610251,
+    "contourL1": 496.83650653231643,
+    "excessOverCapacity": 18.585167288780212,
+    "farAirVolume": 285.39158056791007,
+    "frontCell": 191,
+    "interiorDeficit": 147.0183484107256,
+    "liquidCells": 1084,
+    "maxCourant": 2.31095290184021,
+    "maxVolume": 4.773554801940918,
+    "rowlessVolume": 346.16018317754447,
+    "targetArea": 1084.0551628478388,
+    "targetL1": 499.10452759300847,
+    "volume": 1279.996447117282
+  },
+  "elapsedMs": 3489.955083,
+  "msPerStep": 29.082959024999997,
+  "maxPressureResidual": 4.624870777130127,
+  "rejected": 92,
+  "maxCorrection": 1.605323076248169,
+  "activeMean": 778,
+  "divergenceBefore": 37218.404435015036,
+  "divergenceAfter": 54250.35125104989
+}

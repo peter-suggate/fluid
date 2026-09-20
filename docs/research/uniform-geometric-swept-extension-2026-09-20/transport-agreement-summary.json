@@ -1,0 +1,41 @@
+{
+  "id": "transport-agreement",
+  "config": {
+    "mode": "transport-agreement",
+    "localSweeps": 4,
+    "coarseSweeps": 24,
+    "cycles": 1,
+    "traceSteps": 1,
+    "agreementGain": 0.7,
+    "agreementClamp": 0.5,
+    "agreementIterations": 2
+  },
+  "scene": "sparse-cm12-long-dam-break",
+  "seconds": 4,
+  "dt": 0.03333333333333333,
+  "initialVolume": 1280,
+  "final": {
+    "bandResidual": 67.07952355127782,
+    "contourArea": 901.5375822948989,
+    "contourL1": 686.1677215642942,
+    "excessOverCapacity": 186.37566077709198,
+    "farAirVolume": 462.8696303636581,
+    "frontCell": 191,
+    "interiorDeficit": 155.2214375436306,
+    "liquidCells": 897,
+    "maxCourant": 3.2741706371307373,
+    "maxVolume": 8.483186721801758,
+    "rowlessVolume": 534.8074504087027,
+    "targetArea": 899.5386439252179,
+    "targetL1": 693.0117180830613,
+    "volume": 1279.9970593551457
+  },
+  "elapsedMs": 4008.811917,
+  "msPerStep": 33.406765975,
+  "maxPressureResidual": 2.4850316047668457,
+  "rejected": 0,
+  "maxCorrection": 0.0062500000931322575,
+  "activeMean": 0,
+  "divergenceBefore": 0,
+  "divergenceAfter": 0
+}

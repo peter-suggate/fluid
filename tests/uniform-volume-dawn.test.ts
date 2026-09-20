@@ -44,6 +44,8 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
     scene.fluid.initialCondition="tank-fill";scene.container.fillFraction=0.5;
     scene.fluid.gravity_m_s2={x:0,y:0,z:0};scene.fluid.initialLiquidVolumes=[];
     solver=await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,{geometricVolume:true,densitySharpening:false,solidExcessCorrection:false},()=>{});
+    assert.equal((solver as unknown as {totalSurfaceVolume:boolean}).totalSurfaceVolume,true,"3D geometric constructor defaults to total-volume correction");
+    solver.applyRuntimeValues({totalSurfaceVolume:"off",densitySharpening:"off",solidExcessCorrection:"off",densityPostProcessing:"off"}); // Original algorithm invariants below are the explicit baseline.
     const access=solver as unknown as TestAccess;const {nx,ny,nz}=solver.info;
     const v0=await read(device,solver.volumeTexture);const phi0=await read(device,solver.vertexPhiTexture!);
     await t.test("combined slice reads independent vertex phi and V/open capacity",async()=>{
@@ -123,6 +125,16 @@ ${createGridOverlayLevelSetVolumeWGSL(true)}
       const contacted=await read(device!,solver!.vertexPhiTexture!);
       assert.ok(contacted[nx+(nx+1)*(4+(ny+1)*4)]!<0,"closed-wall phi must accept arriving interior liquid despite zero normal wall velocity");
     });
+    await t.test("total surface volume is live, preserves V, and restores a shrunken pool",async()=>{
+      solver!.applyRuntimeValues({totalSurfaceVolume:"on",densitySharpening:"off"});
+      write(device!,solver!.volumeTexture,v0);
+      write(device!,solver!.vertexPhiTexture!,Float32Array.from(phi0,v=>v+0.3*hx));
+      write(device!,access.transportA,new Float32Array(transport.length));access.writeParams(1/30,0,0);
+      const result=await encode();const corrected=await read(device!,solver!.vertexPhiTexture!);
+      assert.deepEqual(result,v0,"constraint leaves conservative V untouched");
+      for(let i=0;i<phi0.length;i++)if(Math.abs(phi0[i]!)<1e-7)assert.ok(Math.abs(corrected[i]!)<1e-5);
+      solver!.applyRuntimeValues({totalSurfaceVolume:"off",densitySharpening:"on"});
+    });
     await t.test("planar pool stays hydrostatic under gravity",async()=>{
       write(device!,solver!.volumeTexture,v0);write(device!,solver!.vertexPhiTexture!,phi0);
       write(device!,solver!.velocityTexture,new Float32Array(nx*ny*nz*4));
@@ -137,7 +149,7 @@ ${createGridOverlayLevelSetVolumeWGSL(true)}
     await t.test("pressure cycle convergence preserves parity, resets, and supports live tolerance",async()=>{
       const run=async(fullCycles:number,vCycles:number,tolerance:number)=>{
         const candidate=await WebGPUUniformReferenceSolver.createAsync(device!,scene,"balanced",undefined,{
-          geometricVolume:true,densitySharpening:false,solidExcessCorrection:false,
+          geometricVolume:true,totalSurfaceVolume:false,densitySharpening:false,solidExcessCorrection:false,
           pressureSchedule:{fullCycles,vCycles,preSweeps:6,postSweeps:6,residualTolerance:tolerance},
         },()=>{});
         const mg=(candidate as unknown as {pressureMultigrid:{diagnostics:GPUBuffer;pressureTexture:GPUTexture}}).pressureMultigrid;

@@ -1,0 +1,38 @@
+{
+  "id": "conforming-tiles-trace4",
+  "config": {
+    "mode": "conforming",
+    "localSweeps": 4,
+    "coarseSweeps": 24,
+    "cycles": 1,
+    "traceSteps": 4
+  },
+  "scene": "sparse-cm12-long-dam-break",
+  "seconds": 4,
+  "dt": 0.03333333333333333,
+  "initialVolume": 1280,
+  "final": {
+    "bandResidual": 53.171587310149334,
+    "contourArea": 674.8244206845552,
+    "contourL1": 1064.837471659572,
+    "excessOverCapacity": 330.608855843544,
+    "farAirVolume": 751.9706334771681,
+    "frontCell": 191,
+    "interiorDeficit": 201.20684844255447,
+    "liquidCells": 684,
+    "maxCourant": 1.445595622062683,
+    "maxVolume": 4.887843132019043,
+    "rowlessVolume": 843.2353232145169,
+    "targetArea": 675.7182040289044,
+    "targetL1": 1065.8787875264745,
+    "volume": 1279.9971536189175
+  },
+  "elapsedMs": 4256.692833,
+  "msPerStep": 35.472440275000004,
+  "maxPressureResidual": 3.0252957344055176,
+  "rejected": 0,
+  "maxCorrection": 5.492072105407715,
+  "activeMean": 5043.308333333333,
+  "divergenceBefore": 64331.59439128934,
+  "divergenceAfter": 31394.23126620578
+}

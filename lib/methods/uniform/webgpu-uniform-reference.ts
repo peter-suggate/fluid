@@ -1,3 +1,4 @@
+import { UniformSurfaceVolumeCorrection } from "./webgpu-uniform-surface-volume";
 import { uniformDensityPostProcessingEnabled } from "./uniform-options";
 export { uniformDensityPostProcessingEnabled } from "./uniform-options";
 import type { DenseLevelSetVolumeConsumerSource } from "../../core/levelset-consumer-abi";
@@ -83,6 +84,8 @@ export interface WebGPUUniformReferenceOptions {
   /** Independent dense vertex level set and conservative cell volume. */
   geometricVolume?: boolean;
   geometricRedistance?: boolean;
+  /** Global surface-volume constraint; defaults on for 3D geometric volume. */
+  totalSurfaceVolume?: boolean;
   /**
    * 4h work map for the geometric sharpening sweeps, on by default with
    * `geometricVolume`. False is the dense control: identical numerics, every
@@ -419,6 +422,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   /** phi/V agreement stages; see the option docs. */
   private volumeCompaction: boolean;
   private phiSeedFromVolume: boolean;
+  private totalSurfaceVolume: boolean;
+  private surfaceVolumeHasSource = false;
+  private surfaceVolumeCorrection?: UniformSurfaceVolumeCorrection;
   private phiAgreementGain: number;
   private phiAgreementClamp: number;
   /** The transport restriction was encoded in the most recent step. */
@@ -685,6 +691,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.volumePressureRows = options.volumePressureRows === "all" ? 2 : options.volumePressureRows === true || options.volumePressureRows === "abandoned" ? 1 : 0;
     this.volumeCompaction = options.volumeCompaction === true;
     this.phiSeedFromVolume = options.phiSeedFromVolume === true;
+    this.totalSurfaceVolume = this.geometricVolume && (options.referenceDimension ?? 3) === 3 && options.totalSurfaceVolume !== false;
     this.phiAgreementGain = Number.isFinite(options.phiAgreementGain) ? Math.min(1, Math.max(0, options.phiAgreementGain!)) : 0;
     this.phiAgreementClamp = Number.isFinite(options.phiAgreementClamp) ? Math.min(0.5, Math.max(0, options.phiAgreementClamp!)) : 0.02;
     this.shaderSource = this.geometricVolume ? createUniformReferenceComputeShader(true, options.referenceDimension ?? 3) : uniformReferenceComputeShader;
@@ -1106,6 +1113,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.velocityTexture = this.velocityA;
     this.preProjectionVelocityTexture = this.velocityB;
     this.extrapolatedVelocityTexture = this.transportA;
+    if (this.geometricVolume && (options.referenceDimension ?? 3) === 3) {
+      this.surfaceVolumeCorrection = new UniformSurfaceVolumeCorrection(device, [nx,ny,nz],
+        [scene.container.width_m/nx,scene.container.height_m/ny,scene.container.depth_m/nz],
+        this.vertexPhiTexture!,this.volumeB,this.gammaB);
+    }
     this.initializeVolumeAndTerrain();
   }
 
@@ -1188,6 +1200,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         }, { priority: "visible", signal });
       } });
     }
+    if (this.surfaceVolumeCorrection) {
+      const id="uniform.volume.total-surface"; ids.push(id);
+      tasks.push({id,phase:"solver-pipelines",label:"Total surface volume correction",
+        run:()=>this.surfaceVolumeCorrection!.initialize(signal)});
+    }
     const pipelineReadyId = "uniform.pipeline.publish";
     tasks.push({ id: pipelineReadyId, phase: "solver-pipelines", label: "Publish uniform reference programs", dependencies: ids, run: () => {
       this.pipelines = compiled as UniformReferencePipelines;
@@ -1247,6 +1264,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   }
 
   private writeParams(dt: number, activeBodyCount: number, inflowStrength: number, drop?: InjectedLiquidBall): void {
+    this.surfaceVolumeHasSource = !!drop || inflowStrength > 0;
     const c = this.scene.container;
     const inflow = this.scene.fluid.inflow;
     const outlet = this.inflowBoundary?.outletCenter_m;
@@ -1382,6 +1400,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       if (values.transportWorkMap !== undefined) this.transportTiles = values.transportWorkMap !== "dense";
       if (values.transportReach !== undefined) this.transportReach = Math.round(finite("transportReach", 1, -8, 8));
       if (values.volumePressureRows !== undefined) this.volumePressureRows = values.volumePressureRows === "all" ? 2 : values.volumePressureRows === "off" ? 0 : 1;
+      if (values.totalSurfaceVolume !== undefined) this.totalSurfaceVolume = values.totalSurfaceVolume === "on";
       if (values.volumeCompaction !== undefined) this.volumeCompaction = values.volumeCompaction === "on";
       if (values.phiSeedFromVolume !== undefined) this.phiSeedFromVolume = values.phiSeedFromVolume === "on";
       if (values.phiAgreement !== undefined) this.phiAgreementGain = values.phiAgreement === "on" ? finite("phiAgreementGain", 0.05, 0, 1) : 0;
@@ -2217,6 +2236,17 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     }
     seam?.(UNIFORM_VOLUME_PHASE.coupling);
     run("uvGather");
+    // Whole-domain reduction: a window-local total would silently lose the
+    // contribution of sleeping liquid. Capacity and target refreshes are dense.
+    // Sources skip the feedback just as in the 2D experiment.
+    if (this.totalSurfaceVolume && this.surfaceVolumeCorrection && !this.surfaceVolumeHasSource) {
+      const dense=[Math.ceil(this.info.nx/4),Math.ceil(this.info.ny/4),Math.ceil(this.info.nz/4)] as const;
+      this.runDirect(encoder,"Surface volume capacities",this.volumePipelines.uvCorrectionCapacity!,this.densityTraceGroup,dense);
+      const priorBytes=this.surfaceVolumeCorrection.allocatedBytes;
+      this.surfaceVolumeCorrection.encode(encoder);
+      this.info.allocatedBytes+=this.surfaceVolumeCorrection.allocatedBytes-priorBytes;
+      this.runDirect(encoder,"Refresh corrected surface targets",this.volumePipelines.uvCorrectionTargets!,this.densityTraceGroup,dense);
+    }
     encoder.copyTextureToTexture({texture:this.gammaB},{texture:this.gammaA},[this.info.nx,this.info.ny,this.info.nz]);
     seam?.(UNIFORM_VOLUME_PHASE.gather);
     this.sharpenTileMapEncoded = this.sharpenTileWork;
@@ -2804,6 +2834,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.heightA, this.heightB, this.terrainTexture,
       this.transportA, this.transportB,
     ])) texture.destroy();
+    this.surfaceVolumeCorrection?.destroy();
     this.vertexPhiTexture?.destroy(); this.vertexPhiScratch?.destroy(); this.volumeEdges?.destroy(); this.volumeDonorSums?.destroy();
     this.boundaryVelocityA.destroy(); this.boundaryVelocityB.destroy();
     this.boundaryVelocityC.destroy(); this.boundaryVelocityD.destroy();
