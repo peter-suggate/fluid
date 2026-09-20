@@ -430,7 +430,6 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private totalSurfaceVolume: boolean;
   private surfaceDeficitBalancing: boolean;
   private readonly surfaceDeficitBalanceBytes: number;
-  private surfaceVolumeHasSource = false;
   private surfaceVolumeCorrection?: UniformSurfaceVolumeCorrection;
   private phiAgreementGain: number;
   private phiAgreementClamp: number;
@@ -1274,7 +1273,6 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   }
 
   private writeParams(dt: number, activeBodyCount: number, inflowStrength: number, drop?: InjectedLiquidBall): void {
-    this.surfaceVolumeHasSource = !!drop || inflowStrength > 0;
     const c = this.scene.container;
     const inflow = this.scene.fluid.inflow;
     const outlet = this.inflowBoundary?.outletCenter_m;
@@ -2261,8 +2259,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     run("uvGather");
     // Whole-domain reduction: a window-local total would silently lose the
     // contribution of sleeping liquid. Capacity and target refreshes are dense.
-    // Sources skip the feedback just as in the 2D experiment.
-    if (this.totalSurfaceVolume && this.surfaceVolumeCorrection && !this.surfaceVolumeHasSource) {
+    // Gather has already added hose/drop volume, so its current V is the
+    // correction target on source steps too. Continuous inflow must not
+    // silently disable the user's total-surface-volume constraint.
+    if (this.totalSurfaceVolume && this.surfaceVolumeCorrection) {
       const dense=[Math.ceil(this.info.nx/4),Math.ceil(this.info.ny/4),Math.ceil(this.info.nz/4)] as const;
       this.runDirect(encoder,"Surface volume capacities",this.volumePipelines.uvCorrectionCapacity!,this.densityTraceGroup,dense);
       const priorBytes=this.surfaceVolumeCorrection.allocatedBytes;

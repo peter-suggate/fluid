@@ -1925,6 +1925,14 @@ export function createHeroGardenHoseSceneWithSet(
   return { ...scene, scenery: { ...composed, nodes: [...applyHeroGardenNodeOverrides(composed.nodes)] } };
 }
 
+function createHeroGardenHoseFillingScene(lattice?: SceneLattice): SceneDescription {
+  const scene = createHeroGardenHoseSceneWithSet({ ...lattice, water: true });
+  // Compose props against the authored waterline before emptying the basin.
+  // The fluid solver stays enabled so the hose supplies all water over time.
+  scene.container.fillFraction = 0;
+  return scene;
+}
+
 export type SparseCM12ComplexitySceneId =
   | "empty-16"
   | "full-16"
@@ -2251,18 +2259,13 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   defineScene({
     id: "hero-garden-hose",
     name: "Porcelain pond · hose filling",
-    blurb: "A raised porcelain pond with a hose over it. The coping, the basin and the ground are one generated heightfield, so the water meets the rim exactly where the rim is. Opens dry — turn Water on under Scene configuration · Fluid to fill it.",
+    blurb: "An empty raised porcelain pond gradually filling from a garden hose. The coping, the basin and the ground are one generated heightfield, so the water meets the rim exactly where the rim is.",
     audience: "explore",
     shelf: "Garden",
     environment: "garden",
     // The set *is* the scene here — a generated heightfield vessel, its coping,
-    // its beds and its props — and it opens dry, so the default fluid-only path
-    // would present an empty frame.
+    // its beds and its props — alongside the pond water and hose inflow.
     presentationMode: "full-scene",
-    // Dry by default. The set is what is ready to be looked at; the water is
-    // still in bring-up, and a scene that opens is worth more than a scene that
-    // opens correctly. `systems.fluid` is the switch, and nothing else differs.
-    //
     // The set is composed here rather than inside `createHeroGardenHoseScene`
     // because the layout depends on the vessel — it seats every prop through
     // `pondVesselHeightAt` and runs its pebble beds along `pondVesselPlanCurve`
@@ -2271,7 +2274,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     // ordering with no arrow pointing backwards. Appending rather than mutating
     // matters too: `scene.scenery` is a module-level constant shared by every
     // document the factory produces.
-    build: () => createHeroGardenHoseSceneWithSet(),
+    build: () => createHeroGardenHoseFillingScene(),
     // The one route to this scene at another lattice, and the reason it is a
     // member of the definition rather than a call somewhere: the terrain bake,
     // the layout composed against it and every generator's legibility floor are
@@ -2279,7 +2282,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     // it exists. `tools/run-svo-dry-render-smoke.ts` already reached the factory
     // directly for `FLUID_SVO_DRY_SMOKE_REFINEMENT`; this is the same call, from
     // the side the product loads scenes on.
-    buildAt: (lattice: SceneLattice) => createHeroGardenHoseSceneWithSet(lattice),
+    buildAt: (lattice: SceneLattice) => createHeroGardenHoseFillingScene(lattice),
     camera: heroGardenCamera,
     // No GPU lane yet, and so deliberately no variant: an authored variant that
     // no lane claims is a fork by another name. The settling lane returns with

@@ -125,11 +125,13 @@ ${createGridOverlayLevelSetVolumeWGSL(true)}
       const contacted=await read(device!,solver!.vertexPhiTexture!);
       assert.ok(contacted[nx+(nx+1)*(4+(ny+1)*4)]!<0,"closed-wall phi must accept arriving interior liquid despite zero normal wall velocity");
     });
-    await t.test("total surface volume is live, preserves V, and restores a shrunken pool",async()=>{
+    for (const inflowStrength of [0, 1]) await t.test(`total surface volume restores a shrunken pool with source strength ${inflowStrength}`,async()=>{
       solver!.applyRuntimeValues({totalSurfaceVolume:"on",densitySharpening:"off"});
       write(device!,solver!.volumeTexture,v0);
       write(device!,solver!.vertexPhiTexture!,Float32Array.from(phi0,v=>v+0.3*hx));
-      write(device!,access.transportA,new Float32Array(transport.length));access.writeParams(1/30,0,0);
+      // Isolate the source-step scheduling decision from injected geometry.
+      // The hero hose probe separately exercises real continuous inflow.
+      write(device!,access.transportA,new Float32Array(transport.length));access.writeParams(1/30,0,inflowStrength);
       const result=await encode();const corrected=await read(device!,solver!.vertexPhiTexture!);
       assert.deepEqual(result,v0,"constraint leaves conservative V untouched");
       for(let i=0;i<phi0.length;i++)if(Math.abs(phi0[i]!)<1e-7)assert.ok(Math.abs(corrected[i]!)<1e-5);

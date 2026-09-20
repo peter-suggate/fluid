@@ -37,12 +37,11 @@ export const SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM = -3;
 
 /**
  * Requested authored-environment detail when no URL or saved tuning overrides it.
- * Depth 3 is validated on hero-garden-hose-x10 with bounded mesh extraction
- * and renderer-only source lanes (see docs/svo-depth3-rendering.md).
+ * Start at the authored lattice; finer detail remains available in the control.
  * Fluid retains its coarser simulation lattice. Device allocation preflight
  * can select a lower rung, which builtRefinementDepth reports to the UI.
  */
-export const SVO_ENVIRONMENT_REFINEMENT_DEPTH_DEFAULT = 3;
+export const SVO_ENVIRONMENT_REFINEMENT_DEPTH_DEFAULT = 0;
 
 /**
  * The voxel a set is actually drawn into, given the lattice and the depth.

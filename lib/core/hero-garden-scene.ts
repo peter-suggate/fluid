@@ -161,16 +161,16 @@ export const HERO_GARDEN_BRICK_CELLS = 8 as const;
  *
  * The header above is the record: 7.5 mm overruns a one-workgroup-per-interface-
  * leaf dispatch at WebGPU's 65 535 ceiling, and 12.5 mm was the finest measured
- * to publish once the SPGrid page-directory bug was fixed. Held at 25 mm rather
- * than 12.5 because bring-up measured *publication*, not a settled pond, and
- * one path that reaches this is a user toggling water on a scene already open —
- * the wrong moment to discover a finer rung does not hold.
+ * to publish once the SPGrid page-directory bug was fixed.
  *
  * The clamp lives with the constraint. `DEFAULT_FINEST_CELL_SIZE_M` is what the
  * picture wants; this is what the solver can carry, and only a document that
  * asks for fluid pays it.
  */
-export const HERO_GARDEN_SOLVER_CELL_M = 0.025;
+export const HERO_GARDEN_SOLVER_CELL_M = 0.0125;
+
+/** Preserve the authored waterline and set placement as the solver gets finer. */
+const HERO_GARDEN_WATERLINE_REFERENCE_CELL_M = 0.025;
 
 /**
  * How finely the vessel is baked, which is *not* the lattice the solver runs on.
@@ -271,9 +271,9 @@ export const HERO_GARDEN_TERRAIN_SAMPLE_M = heroGardenTerrainSample_m();
  * against this waterline — and re-solving that between two rungs of a resolution
  * ladder would mean the finer frame could not be compared with the coarser one.
  *
- * **So the default is `HERO_GARDEN_SOLVER_CELL_M` and not `HERO_GARDEN_CELL_M`,
- * and the difference between those two is a bug this signature has already
- * had.** They were the same 25 mm when this rule was written; the day the
+ * The default retains the original 25 mm solver reference even when the solver
+ * runs finer. Changing this datum has already caused a layout regression:
+ * the day the
  * picture's lattice went to `DEFAULT_FINEST_CELL_SIZE_M` the default argument
  * silently became 6.25 mm, the clearance halved to its 20 mm floor, and
  * `HERO_GARDEN_WATERLINE_M` — a module constant that `HERO_STONE_SET`,
@@ -288,14 +288,14 @@ export const HERO_GARDEN_TERRAIN_SAMPLE_M = heroGardenTerrainSample_m();
  * this answers to. 20 mm is the floor either way: past 12.5 mm cells the
  * absolute clearance binds and this stops moving at all.
  */
-export function heroGardenWaterBelowGround_m(cellSize_m: number = HERO_GARDEN_SOLVER_CELL_M): number {
+export function heroGardenWaterBelowGround_m(cellSize_m: number = HERO_GARDEN_WATERLINE_REFERENCE_CELL_M): number {
   if (!(cellSize_m > 0) || !Number.isFinite(cellSize_m)) {
     throw new RangeError("Hero garden water clearance needs a positive finite cell size");
   }
   return Math.max(0.02, 1.6 * cellSize_m);
 }
 
-/** The clearance at the solver's lattice: 40 mm, and 1.6 cells of it. */
+/** The authored clearance: 40 mm, retained when the solver lattice gets finer. */
 export const HERO_GARDEN_WATER_BELOW_GROUND_M = heroGardenWaterBelowGround_m();
 
 /**
@@ -417,18 +417,18 @@ export const HERO_GARDEN_VESSEL: PondVesselSpec = Object.freeze(
  * and the plunge point are all solved against it, so it is derived once and
  * passed rather than recomputed anywhere.
  *
- * The default is the solver's lattice, so this is one level for the whole scene
+ * The default is the authored reference lattice, so this is one level for the whole scene
  * rather than one per rung — see `heroGardenWaterBelowGround_m`. The parameter
  * is kept because the clearance rule is genuinely a function of a lattice and a
- * caller that solves at a coarser cell than `HERO_GARDEN_SOLVER_CELL_M` needs a
+ * caller that solves at a coarser cell than the authored reference needs a
  * deeper pond; what it must not do is hand the *picture's* cell to a rule about
  * a fill.
  */
-export function heroGardenWaterline_m(cellSize_m: number = HERO_GARDEN_SOLVER_CELL_M): number {
+export function heroGardenWaterline_m(cellSize_m: number = HERO_GARDEN_WATERLINE_REFERENCE_CELL_M): number {
   return pondVesselWaterline(HERO_GARDEN_VESSEL, heroGardenWaterBelowGround_m(cellSize_m));
 }
 
-/** The level at the solver's lattice. `withHeroLayout` is solved against this one. */
+/** The authored level. `withHeroLayout` is solved against this one. */
 export const HERO_GARDEN_WATERLINE_M = heroGardenWaterline_m();
 
 /**
@@ -998,16 +998,16 @@ export function createHeroGardenHoseScene(options: HeroGardenHoseOptions = {}): 
   /**
    * One level for both documents, and that is the point of it.
    *
-   * The clearance is a rule about a *fill* on the *solver's* lattice, and this
-   * factory's wet path already clamps to `HERO_GARDEN_SOLVER_CELL_M`, so at
-   * every rung either document can be built at, `heroGardenWaterline_m` of the
-   * solver's cell is the answer — a dry render simply has no fill to round. A
+   * Keep the authored clearance when solving at a finer lattice, so improving
+   * resolution does not raise the water or move props composed against it. A
    * lattice that is coarser still is the one case where the water genuinely has
    * to drop, and it is left to say so: `withHeroLayout` refuses a document whose
    * level is not the one the set was composed against, which is louder than a
    * shore that quietly moves under stones already standing on it.
    */
-  const waterline_m = heroGardenWaterline_m(options.water === true ? cellSize_m : HERO_GARDEN_SOLVER_CELL_M);
+  const waterline_m = heroGardenWaterline_m(options.water === true
+    ? Math.max(cellSize_m, HERO_GARDEN_WATERLINE_REFERENCE_CELL_M)
+    : HERO_GARDEN_WATERLINE_REFERENCE_CELL_M);
   scene.container.fillFraction = waterline_m / HERO_GARDEN_CONTAINER.height_m;
   scene.fluid.initialCondition = "tank-fill";
   scene.fluid.inflow = heroGardenInflow();
