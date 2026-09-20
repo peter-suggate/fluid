@@ -3,9 +3,9 @@ import { geometricPlaneBoxWGSL } from "../../core/geometric-plane-box.wgsl";
 /** Dense vertex phi and fixed receiver stencils; all positions are lattice units. */
 export const UNIFORM_VOLUME_ENTRIES = [
   "uvAdvectPhi", "uvRedistancePhi", "uvBuildEdges",
-  "uvFinishDonorSums", "uvFinishLiquidDonorSums", "uvFallback", "uvNormalizeRows", "uvNormalizeDonors", "uvGather",
-  "uvPrepareSharpen", "uvProposeSharpen", "uvLimitSharpen", "uvCommitSharpen", "uvPublish", "uvBeginLiquidBalance", "uvBalanceLiquidRows",
-  "uvBalanceLiquidDonors", "uvFinishLiquidBalance", "uvAgreementResidual",
+  "uvFinishDonorSums", "uvFallback", "uvNormalizeRows", "uvNormalizeDonors", "uvGather",
+  "uvPrepareSharpen", "uvProposeSharpen", "uvLimitSharpen", "uvCommitSharpen", "uvPublish",
+  "uvAgreementResidual",
 ] as const;
 /** The four Sec. 3.5 sweeps that exist in a dense and a 4h work-map variant. */
 export const UNIFORM_VOLUME_SHARPEN_ENTRIES = [
@@ -30,7 +30,7 @@ export const UNIFORM_VOLUME_TWO_LEVEL_TRANSPORT_COUNT_WORD = 1;
 export const UNIFORM_VOLUME_TWO_LEVEL_DISPLACEMENT_WORD = 2;
 /** Pipeline-overridable constant selecting the tiled sharpening variant. */
 export const UNIFORM_VOLUME_TILE_WORK_OVERRIDE = "UV_SHARPEN_TILE_WORK";
-/** Words 2N+0..6 of the third conditioning plane stay liquid-balance owned. */
+/** The first seven words remain reserved for work counters and layout stability. */
 export const UNIFORM_VOLUME_SHARPEN_TILE_COUNT_WORD = 7;
 export const UNIFORM_VOLUME_SHARPEN_TILE_MAP_WORD = 8;
 export const UNIFORM_VOLUME_EDGE_BYTES = 80;
@@ -68,7 +68,7 @@ fn uvPhi(position:vec3f)->f32{
   return d4Sum8(values);
 }
 fn uvGradient(p:vec3f)->vec3f{
-  var g=vec3f(0);for(var a=0u;a<3u;a++){var e=vec3f(0);e[a]=0.25;
+  var g=vec3f(0);for(var a=0u;a<UNIFORM_REFERENCE_DIMENSION;a++){var e=vec3f(0);e[a]=0.25;
     let lo=clamp(p-e,vec3f(0),vec3f(dims()));let hi=clamp(p+e,vec3f(0),vec3f(dims()));
     g[a]=(uvPhi(hi)-uvPhi(lo))/max(hi[a]-lo[a],1e-6);}
   return g;
@@ -337,12 +337,6 @@ fn uvFinishDonorSums(@builtin(global_invocation_id)gid:vec3u){
   let i=linearIndex(id);atomicStore(&sharpenDeposits[i],bitcast<i32>(uvDonorSum(i)));
 }
 @compute @workgroup_size(4,4,4)
-fn uvFinishLiquidDonorSums(@builtin(global_invocation_id)gid:vec3u){
-  if(atomicLoad(&sharpenDeposits[2u*cellCount()])==0){return;}
-  let id=vec3i(gid);if(!valid(id)){return;}
-  let i=linearIndex(id);atomicStore(&sharpenDeposits[i],bitcast<i32>(uvDonorSum(i)));
-}
-@compute @workgroup_size(4,4,4)
 fn uvFallback(@builtin(global_invocation_id)gid:vec3u){
   let id=activeId(gid);if(uvTransportSkip(id)){return;}
   if(!valid(id)){return;}let i=linearIndex(id);
@@ -364,49 +358,6 @@ fn uvNormalizeDonors(@builtin(global_invocation_id)gid:vec3u){
   for(var k=0u;k<9u;k++){let donor=uvEdges[i].donor[k];
     let sum=bitcast<f32>(atomicLoad(&sharpenDeposits[donor]));
     uvEdges[i].weight[k]/=max(sum,1e-20);}
-}
-// Same liquid-only receiver cap / donor normalization as adaptive-volume.
-// A uniform GPU flag skips corrective work after convergence. Dispatch counts
-// are also published for the benchmark-only indirect comparison.
-// Words 2N+0..6 of the third conditioning plane are this stage's: the flag,
-// the running maximum error, three indirect dispatch dimensions, the executed
-// round count and the last error. Word 2N+7 and everything above it belong to
-// the 4h sharpening map, which runs after balancing has finished.
-@compute @workgroup_size(1)
-fn uvBeginLiquidBalance(){let base=2u*cellCount();atomicStore(&sharpenDeposits[base],1);
-  atomicStore(&sharpenDeposits[base+1u],0);
-  for(var axis=0u;axis<3u;axis++){atomicStore(&sharpenDeposits[base+2u+axis],(dims()[axis]+3)/4);}
-  atomicStore(&sharpenDeposits[base+5u],0);atomicStore(&sharpenDeposits[base+6u],0);
-}
-@compute @workgroup_size(4,4,4)
-fn uvBalanceLiquidRows(@builtin(global_invocation_id)gid:vec3u){
-  let id=activeId(gid);if(uvTransportSkip(id)){return;}
-  if(!valid(id)||atomicLoad(&sharpenDeposits[2u*cellCount()])==0){return;}
-  let i=linearIndex(id);var amount=0.0;
-  for(var k=0u;k<9u;k++){amount+=uvEdges[i].weight[k]*volume(uvCell(uvEdges[i].donor[k]));}
-  let capacity=uvOpen(id);let excess=max(0.0,amount-capacity)/max(capacity,1e-20);
-  atomicMax(&sharpenDeposits[2u*cellCount()+1u],bitcast<i32>(excess));
-  let scale=select(1.0,capacity/max(amount,1e-20),excess>params.dropExtent.w);
-  for(var k=0u;k<9u;k++){uvEdges[i].weight[k]*=scale;uvAddDonor(uvEdges[i].donor[k],uvEdges[i].weight[k]);}
-}
-@compute @workgroup_size(4,4,4)
-fn uvBalanceLiquidDonors(@builtin(global_invocation_id)gid:vec3u){
-  let id=activeId(gid);if(uvTransportSkip(id)){return;}
-  if(!valid(id)||atomicLoad(&sharpenDeposits[2u*cellCount()])==0){return;}
-  let i=linearIndex(id);
-  for(var k=0u;k<9u;k++){let donor=uvEdges[i].donor[k];let sum=bitcast<f32>(atomicLoad(&sharpenDeposits[donor]));
-    uvEdges[i].weight[k]/=max(sum,1e-30);}
-}
-@compute @workgroup_size(1)
-fn uvFinishLiquidBalance(){
-  let base=2u*cellCount();if(atomicLoad(&sharpenDeposits[base])==0){return;}
-  let error=atomicLoad(&sharpenDeposits[base+1u]);
-  atomicStore(&sharpenDeposits[base+6u],error);
-  if(bitcast<f32>(error)<=params.dropExtent.w){
-    atomicStore(&sharpenDeposits[base],0);
-    for(var axis=0u;axis<3u;axis++){atomicStore(&sharpenDeposits[base+2u+axis],0);}
-  }else{atomicAdd(&sharpenDeposits[base+5u],1);}
-  atomicStore(&sharpenDeposits[base+1u],0);
 }
 // Sec. 3.4 and Sec. 3.5 both write V as a sum with cancellation, so a cell the
 // characteristic barely reached keeps float32 rounding residue: on figure 7 at
@@ -464,8 +415,8 @@ fn uvTarget(id:vec3i)->f32{
 // nonzero V; every flux touching it is therefore zero. Prepare/propose/limit
 // skip such a tile, neighbours read its fluxes as zero, and commit copies its V
 // across the ping-pong pair. Never treat stale transport-edge scratch as a
-// sharpening flux. The map reuses the third conditioning plane, which liquid
-// balancing has finished with, behind that plane's eight-word control header.
+// sharpening flux. The map uses the third conditioning plane behind its
+// reserved work-counter header.
 // The dense control is the same module with the override left false: the
 // lookups fold away and the numerics are bit-identical.
 override UV_SHARPEN_TILE_WORK:bool=false;

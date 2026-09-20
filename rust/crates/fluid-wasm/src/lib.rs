@@ -24,6 +24,7 @@ pub struct FluidWorld {
 }
 enum OwnedWorld {
     Slice(fluid_core::world::World),
+    Uniform(fluid_core::uniform_geometric::session::Session),
     Volume(fluid_core::world3d::World3d),
 }
 #[wasm_bindgen]
@@ -31,6 +32,14 @@ impl FluidWorld {
     pub fn from_scene(scene_json: &str, options_json: &str) -> Result<FluidWorld, JsValue> {
         let scene: serde_json::Value = decode(scene_json)?;
         let options: serde_json::Value = decode(options_json)?;
+        if options.get("method").and_then(serde_json::Value::as_str) == Some("uniform-volume") {
+            if options.get("dimension").and_then(serde_json::Value::as_u64) != Some(2) { return Err(error("Uniform Rust currently requires dimension 2")); }
+            let seed=serde_json::from_value(options.get("uniformSeed").cloned().ok_or_else(||error("uniform initial fields are required"))?).map_err(error)?;
+            let values=serde_json::from_value(options.get("methodValues").cloned().ok_or_else(||error("resolved uniform defaults are required"))?).map_err(error)?;
+            let epoch=options.get("runEpoch").and_then(serde_json::Value::as_u64).and_then(|v|u32::try_from(v).ok()).ok_or_else(||error("invalid run epoch"))?;
+            let sequence=options.get("commandSequence").and_then(serde_json::Value::as_u64).and_then(|v|u32::try_from(v).ok()).ok_or_else(||error("invalid command sequence"))?;
+            return Ok(Self{inner:OwnedWorld::Uniform(fluid_core::uniform_geometric::session::Session::new(seed,values,epoch,sequence).map_err(error)?)});
+        }
         if options.get("dimension").and_then(serde_json::Value::as_u64) == Some(3) {
             let mut world_options: fluid_core::world::WorldOptions =
                 serde_json::from_value(options.clone()).map_err(error)?;
@@ -89,6 +98,7 @@ impl FluidWorld {
     pub fn advance(&mut self, command_sequence: u32, dt_s: f64) -> Result<String, JsValue> {
         match &mut self.inner {
             OwnedWorld::Slice(world) => world.advance(command_sequence, dt_s),
+            OwnedWorld::Uniform(world) => world.advance(command_sequence, dt_s),
             OwnedWorld::Volume(world) => world.advance(command_sequence, dt_s),
         }
         .map_err(error)?;
@@ -97,6 +107,7 @@ impl FluidWorld {
     pub fn receipt(&self) -> Result<String, JsValue> {
         match &self.inner {
             OwnedWorld::Slice(world) => encode(&world.receipt()),
+            OwnedWorld::Uniform(world) => encode(&world.receipt()),
             OwnedWorld::Volume(world) => encode(&world.receipt()),
         }
     }
@@ -109,6 +120,7 @@ impl FluidWorld {
         }
         let envelope: Envelope = decode(command_json)?;
         match &mut self.inner {
+            OwnedWorld::Uniform(world) => world.apply_command(envelope.command_sequence, envelope.run_epoch, decode(command_json)?),
             OwnedWorld::Slice(world) => world.apply_command(
                 envelope.command_sequence,
                 envelope.run_epoch,
@@ -126,11 +138,20 @@ impl FluidWorld {
     pub fn snapshot(&mut self, view_mask: u32) -> Result<Vec<u8>, JsValue> {
         let publication = match &mut self.inner {
             OwnedWorld::Slice(world) => world.snapshot(view_mask),
+            OwnedWorld::Uniform(world) => world.snapshot(view_mask),
             OwnedWorld::Volume(world) => world.snapshot(view_mask),
         }
         .map_err(error)?;
         Ok(publication.to_vec())
     }
+}
+
+/// Whole-scene verification boundary for the uniform migration. Production
+/// selection remains gated on the complete dimensional contract.
+#[wasm_bindgen]
+pub fn run_uniform_geometric_scene(request_json: &str) -> Result<String, JsValue> {
+    let output=fluid_core::uniform_geometric::scene_runner::run(decode(request_json)?).map_err(error)?;
+    encode(&output)
 }
 
 #[derive(Deserialize)]

@@ -1,0 +1,84 @@
+/** Backend-neutral CM11a schedule and lagged budget policy. */
+export const UNIFORM_CM11A_FULL_CYCLES = 3;
+export const UNIFORM_CM11A_V_CYCLES = 4;
+// CM11a measured four pre/post sweeps on its published grids. Six is the
+// minimum robust schedule for the deeper 64x32x64 hierarchy: at four or five,
+// a late Full-Cycle coarse correction reaches the 4096-sweep cap and its
+// unconverged pressure injects 10^7 m/s into the first projection.
+export const UNIFORM_CM11A_PRE_SWEEPS = 6;
+export const UNIFORM_CM11A_POST_SWEEPS = 6;
+export const UNIFORM_CM11A_CONSTRAINT_LEVELS = 3;
+export const UNIFORM_CM11A_PHI_PRESERVATION_LEVELS = 2;
+// TallCells reports 1e-4 s^-1 as its GPU/single-precision absolute L-infinity
+// tolerance; 1e-8 belongs to its double-precision CPU comparison. CM11a
+// itself fixes the cycle schedule but does not prescribe a residual tolerance.
+export const UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE = 1e-4;
+export const UNIFORM_CM11A_COARSE_SWEEP_CAP = 4096;
+
+export interface UniformCM11aSchedule {
+  readonly fullCycles: number;
+  readonly vCycles: number;
+  readonly preSweeps: number;
+  readonly postSweeps: number;
+  readonly residualTolerance?: number;
+}
+
+export const DEFAULT_UNIFORM_CM11A_SCHEDULE: UniformCM11aSchedule = Object.freeze({
+  fullCycles: UNIFORM_CM11A_FULL_CYCLES,
+  vCycles: UNIFORM_CM11A_V_CYCLES,
+  preSweeps: UNIFORM_CM11A_PRE_SWEEPS,
+  postSweeps: UNIFORM_CM11A_POST_SWEEPS,
+  residualTolerance: 10,
+});
+
+/**
+ * Cycles the lagged budget never drops below. One complete cycle always runs,
+ * so a step whose demand estimate is stale by a frame still projects against a
+ * coarse-corrected pressure rather than against the previous step's field.
+ */
+export const UNIFORM_CM11A_MINIMUM_CYCLE_BUDGET = 1;
+/** Cycles added above the last observed demand when it converged. */
+export const UNIFORM_CM11A_DEFAULT_BUDGET_HEADROOM = 1;
+
+export interface UniformCM11aCycleBudgetInput {
+  /**
+   * Cycles the latest *observed* step executed before its residual gate
+   * tripped. Undefined until the first asynchronous diagnostics sample lands.
+   */
+  readonly lastExecutedCycles?: number;
+  /** Whether that step met the tolerance; false means it ran to its ceiling. */
+  readonly lastConverged?: boolean;
+  readonly headroom: number;
+  readonly minCycles?: number;
+  /** The configured schedule: Full-Cycles + V-Cycles actually planned. */
+  readonly maxCycles: number;
+}
+
+/**
+ * How many cycles the next step encodes, from the last demand the async stats
+ * readback reported.
+ *
+ * The GPU-side gate already stops a converged solve early, but a skipped pass
+ * still costs its launch floor and its CPU encode, so the saving has to be
+ * taken on the host by not encoding the tail at all. The signal is lagged by
+ * however many frames the readback takes, which is why the rule is asymmetric:
+ * shrinking is capped at one cycle of headroom above observed demand, while a
+ * step that used every encoded cycle *and still missed tolerance* doubles, so
+ * an impact frame recovers its full schedule within one or two steps instead
+ * of climbing one cycle at a time.
+ */
+export function uniformCM11aCycleBudget(input: UniformCM11aCycleBudgetInput): number {
+  const maxCycles = Number.isFinite(input.maxCycles) ? Math.max(0, Math.floor(input.maxCycles)) : 0;
+  const minCycles = Math.min(maxCycles, Math.max(0, Math.floor(
+    Number.isFinite(input.minCycles) ? input.minCycles! : UNIFORM_CM11A_MINIMUM_CYCLE_BUDGET)));
+  const executed = input.lastExecutedCycles;
+  // No sample yet: encode the configured schedule, which is exactly what the
+  // solver did before this rule existed.
+  if (executed === undefined || !Number.isFinite(executed)) return maxCycles;
+  const observed = Math.max(0, Math.floor(executed));
+  const headroom = Number.isFinite(input.headroom) ? Math.max(0, Math.floor(input.headroom)) : 0;
+  const demand = input.lastConverged
+    ? observed + headroom
+    : Math.max(2 * observed, observed + 2);
+  return Math.min(maxCycles, Math.max(minCycles, demand));
+}

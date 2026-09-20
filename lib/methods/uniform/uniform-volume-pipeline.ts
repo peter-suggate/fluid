@@ -1,5 +1,5 @@
 import type { FluidPipelineGraph, FluidPipelineStage, FluidPipelineContext } from "../../core/fluid-pipeline";
-import { UNIFORM_FLUID_PIPELINE } from "./webgpu-uniform-reference";
+import { UNIFORM_FLUID_PIPELINE } from "./uniform-pipeline";
 import { UNIFORM_VOLUME_PHASE as P } from "./uniform-volume-stages";
 
 /** The solver's published tile-map counts, when the map ran and diagnostics arrived. */
@@ -279,15 +279,14 @@ const phiChip = (context: FluidPipelineContext) => {
 const volumeStages: FluidPipelineStage[] = [
   ["phi", "Vertex level set", "RK2 characteristics and bounded closest-point redistancing; phi is independent of V."],
   ["coupling", "Conservative volume transport", "Eight box-overlap donors plus an identity fallback; three receiver/donor balancing rounds."],
-  ["balance", "Liquid capacity balancing", "Maximum receiver overfill gates corrective work; remaining rounds exit immediately once tolerance is met. Final volume gather and cached phi capacity still run when disabled."],
+  ["gather", "Conservative volume gather", "Gather donor-normalized liquid volume and cache phi capacity for sharpening."],
   ["sharpen", "Volume sharpening", "Eight symmetric face-transfer sweeps with aggregate donor and receiver budgets; phi is immutable across them, so the 4h work map skips whole tiles with no cell in the admission band bit-identically to the dense schedule."],
 ].map(([id,label,summary]) => ({
   id: `uniform-volume-${id}`, band:"surface", side:"left", label:label!,
-  phaseLabels:[P[id as "phi"|"coupling"|"balance"|"sharpen"].label],
-  tip:{summary:summary!}, state: context => (id === "sharpen" && context.values.densitySharpening === "off")
-    || (id === "balance" && context.values.liquidCapacityBalancing !== "on") ? "off" : "on",
-  chip:context=>id === "balance"
-    ? context.values.liquidCapacityBalancing !== "on" ? "off · gather only" : `${context.values.liquidCapacityBalancingRounds ?? 64} rounds maximum`
+  phaseLabels:[P[id as "phi"|"coupling"|"gather"|"sharpen"].label],
+  tip:{summary:summary!}, state: context => (id === "sharpen" && context.values.densitySharpening === "off") ? "off" : "on",
+  chip:context=>id === "gather"
+    ? "conservative gather"
     : id === "sharpen" ? sharpenChip(context)
     : id === "coupling" ? couplingChip(context)
     : phiChip(context),
@@ -303,19 +302,6 @@ const volumeStages: FluidPipelineStage[] = [
         if(dustThreshold(context)<=0||cells===undefined)return "—";
         return `${cells.toLocaleString()} cells · ${(info?.uniformVolumeDustMass_cells ?? 0).toExponential(2)} cell volumes`;}},
       ...transportControls],
-  } : {}),
-  ...(id === "balance" ? {
-    toggle:{param:"liquidCapacityBalancing",on:"on",off:"off"},
-    controls:[{kind:"param-choice" as const,param:"liquidCapacityBalancing",label:"Balancing",
-      options:[{value:"on",label:"On"},{value:"off",label:"Off"}]},
-      {kind:"param-range" as const,param:"liquidCapacityBalancingRounds",label:"Max rounds",unit:"rounds",
-      min:1,max:64,step:1,digits:0,
-      hint:"Maximum balancing rounds per step; converged rounds exit immediately.",
-      enabled:(context: FluidPipelineContext)=>context.values.liquidCapacityBalancing === "on"},
-      {kind:"param-range" as const,param:"liquidCapacityBalancingTolerance",label:"Error tolerance",unit:"%",
-        min:0,max:100,step:0.01,digits:2,
-        hint:"Maximum receiver overfill / open capacity. At or below this tolerance correction kernels exit immediately.",
-        enabled:(context: FluidPipelineContext)=>context.values.liquidCapacityBalancing === "on"}],
   } : {}),
   ...(id === "sharpen" ? {
     toggle:{param:"densitySharpening",on:"on",off:"off"},

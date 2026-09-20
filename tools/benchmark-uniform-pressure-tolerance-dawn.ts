@@ -26,7 +26,7 @@ try {
  for(const size of [64]) for(const tolerance of [0,requested,requested,0]){
   const scene=structuredClone(sceneDocument(getSceneDefinition(`minimal-power-dam-break-${size}`)));
   if(process.argv.includes("--rest")){scene.fluid.initialCondition="tank-fill";scene.fluid.initialLiquidVolumes=[];scene.container.fillFraction=0.5;}
-  const solver=await uniformVolumeMethod.createSolverAsync!(device,scene,"balanced",resolveMethodValues(uniformVolumeMethod,"balanced",{liquidCapacityBalancing:"off",velocityTransport:"semi-lagrangian",pressureResidualTolerance:tolerance}),undefined,()=>{}) as WebGPUUniformReferenceSolver;
+  const solver=await uniformVolumeMethod.createSolverAsync!(device,scene,"balanced",resolveMethodValues(uniformVolumeMethod,"balanced",{velocityTransport:"semi-lagrangian",pressureResidualTolerance:tolerance}),undefined,()=>{}) as WebGPUUniformReferenceSolver;
   const access=solver as unknown as Access;
   const query=device.createQuerySet({type:"timestamp",count:2});
   const resolved=device.createBuffer({size:256,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC});

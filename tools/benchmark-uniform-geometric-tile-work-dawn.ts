@@ -1,3 +1,4 @@
+import { UNIFORM_VOLUME_PHASE } from "../lib/methods/uniform/uniform-volume-stages";
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
@@ -57,7 +58,7 @@ try {
       const values=resolveMethodValues(uniformVolumeMethod,"balanced",{});
       const solver=await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,{
         ...uniformReferenceSolverOptions(values,scene),geometricVolume:true,geometricTileWork:tileWork,
-        geometricRedistance:true,liquidCapacityBalancing:false,activeRegion:false,
+        geometricRedistance:true,activeRegion:false,
         gammaDiffusionIterations:0,densityPostProcessing:false,solidExcessCorrection:false,
       },()=>{});
       const query=device.createQuerySet({type:"timestamp",count:stages?10:2});
@@ -84,7 +85,7 @@ try {
           original(encoder,(phase:{label:string})=>{
             (seam as ((p:unknown)=>void)|undefined)?.(phase);
             if(phase.label==="Dense vertex phi transport and redistance"){stamp!(encoder,7);stamp!(encoder,4);}
-            if(phase.label==="Dense liquid capacity balancing"){stamp!(encoder,5);stamp!(encoder,0);}
+            if(phase.label===UNIFORM_VOLUME_PHASE.gather.label){stamp!(encoder,5);stamp!(encoder,0);}
             if(phase.label==="Dense conservative volume sharpening")stamp!(encoder,1);
           });return;
         }

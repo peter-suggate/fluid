@@ -13,7 +13,10 @@ const uniformMacCormackAuditEnabled = typeof process !== "undefined"
  * It provides a matched-lattice GPU baseline for transport and projection
  * comparisons without octree topology, sparse residency, or backend cutovers.
  */
-export function createUniformReferenceComputeShader(geometric = false): string { return /* wgsl */ `
+export function createUniformReferenceComputeShader(geometric = false, referenceDimension: 2 | 3 = 3): string { return /* wgsl */ `
+// The dimensional oracle suppresses the absent derivative; symmetry walls alone
+// do not prevent roundoff from creating a transverse level-set gradient.
+const UNIFORM_REFERENCE_DIMENSION: u32 = ${referenceDimension}u;
 const MACCORMACK_AUDIT_ENABLED: bool = ${uniformMacCormackAuditEnabled};
 ${createCm12NumericsWGSL()}
 struct Params {

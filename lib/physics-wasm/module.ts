@@ -18,6 +18,8 @@ export interface FluidWasmModule {
   /** Transitional cross-language oracle; excluded from production stepping. */
   readonly run_stage?: (stage: string, graphJson: string, fieldsJson: string,
     optionsJson: string) => string;
+  /** Whole-scene uniform migration oracle; not interactive world selection. */
+  readonly run_uniform_geometric_scene?: (requestJson: string) => string;
   readonly run_pressure?: (diagonal: Float32Array, rhs: Float32Array,
     pressure: Float32Array, member: Uint8Array, graphJson: string, optionsJson: string) => string;
 }

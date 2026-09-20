@@ -35,6 +35,7 @@ async function sourceFingerprint() {
   await visit(rustRoot);
   return hash.digest("hex");
 }
+await run(process.execPath, ["--import", "tsx", resolve(repository,"tools/wasm/generate-uniform-geometric-contract.ts"), "--check"]);
 const sourceSha256 = await sourceFingerprint();
 
 async function run(command, args, env = process.env) {

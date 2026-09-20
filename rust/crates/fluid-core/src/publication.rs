@@ -43,6 +43,10 @@ pub enum PlaneId {
     Density3D = 60,
     SurfacePhi3D = 61,
     Velocity3D = 62,
+    UniformLowX = 70,
+    UniformLowY = 71,
+    UniformReleased = 72,
+    UniformTiles = 73,
     GraphJson = 100,
     SceneJson = 101,
 }

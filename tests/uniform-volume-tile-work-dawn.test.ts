@@ -1,3 +1,4 @@
+import { UNIFORM_VOLUME_PHASE } from "../lib/methods/uniform/uniform-volume-stages";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
@@ -146,7 +147,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
       const pair:WebGPUUniformReferenceSolver[]=[];
       for(const geometricTileWork of [false,true]) {
         const s=await WebGPUUniformReferenceSolver.createAsync(device,liveScene,"balanced",undefined,{
-          geometricVolume:true,geometricTileWork,liquidCapacityBalancing:false,
+          geometricVolume:true,geometricTileWork,
           densitySharpening:true,velocityTransport:"semi-lagrangian",gammaDiffusionIterations:0,solidExcessCorrection:false,
         },()=>{});pair.push(s);solvers.push(s);
       }
@@ -155,7 +156,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
       const original=a.encodeGeometricVolume.bind(a);
       a.encodeGeometricVolume=(e,seam)=>original(e,phase=>{
         seam?.(phase);
-        if(phase.label!=="Dense liquid capacity balancing")return;
+        if(phase.label!==UNIFORM_VOLUME_PHASE.gather.label)return;
         for(const [from,to] of [[a.volumeB,b.volumeB],[a.gammaA,b.gammaA],[dense.vertexPhiTexture!,tiled.vertexPhiTexture!]]) {
           e.copyTextureToTexture({texture:from!},{texture:to!},[from!.width,from!.height,from!.depthOrArrayLayers]);
         }

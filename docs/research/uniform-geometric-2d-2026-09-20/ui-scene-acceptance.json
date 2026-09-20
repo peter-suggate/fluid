@@ -1,0 +1,122 @@
+{
+  "profile": {
+    "activeRegion": "off",
+    "densitySharpening": "on",
+    "rigidCoupling": "on",
+    "velocityTransport": "semi-lagrangian",
+    "liquidOnlyVelocityAdvection": "off",
+    "timeStep": "paper",
+    "pressureResidualTolerance": 10,
+    "pressureCycleBudget": "lagged",
+    "pressureBudgetHeadroom": 1,
+    "extensionFrontSweeps": 2,
+    "sharpeningStrength": 1,
+    "sharpeningDistance": 2.1,
+    "pressureFullCycles": 3,
+    "pressureVCycles": 4,
+    "pressureSweeps": 6,
+    "pressureWindow": "window",
+    "redistance": "on",
+    "sharpeningWorkMap": "on",
+    "volumeDustThreshold": 0.000001,
+    "twoLevelVelocity": "on",
+    "twoLevelFineReach": 2,
+    "twoLevelExtension": "tiles",
+    "twoLevelShellReach": 1,
+    "twoLevelAdvection": "tiles",
+    "transportWorkMap": "tiles",
+    "transportReach": 1,
+    "volumePressureRows": "off",
+    "volumeCompaction": "off",
+    "phiSeedFromVolume": "off",
+    "phiAgreement": "off",
+    "phiAgreementGain": 0.05,
+    "phiAgreementClamp": 0.02
+  },
+  "scenes": [
+    {
+      "artifact": "scalar",
+      "scene": "water-box-dam-break",
+      "frames": 60,
+      "dimensions": [
+        24,
+        16
+      ],
+      "initialMass": 168,
+      "finalMass": 167.99993474159805,
+      "dust": 0.00006507849142467492,
+      "medianMs": 1.2077090000000226,
+      "p95Ms": 2.530417
+    },
+    {
+      "artifact": "scalar",
+      "scene": "minimal-power-dam-break-32",
+      "frames": 60,
+      "dimensions": [
+        32,
+        32
+      ],
+      "initialMass": 588.7999999523163,
+      "finalMass": 588.7998370532769,
+      "dust": 0.00016057383464485042,
+      "medianMs": 2.6962919999999713,
+      "p95Ms": 3.0836669999999913
+    },
+    {
+      "artifact": "scalar",
+      "scene": "ceiling-slab-drop",
+      "frames": 60,
+      "dimensions": [
+        24,
+        16
+      ],
+      "initialMass": 64,
+      "finalMass": 63.99993565536579,
+      "dust": 0.00006515494281577221,
+      "medianMs": 1.059082999999987,
+      "p95Ms": 1.2930410000000165
+    },
+    {
+      "artifact": "simd",
+      "scene": "water-box-dam-break",
+      "frames": 60,
+      "dimensions": [
+        24,
+        16
+      ],
+      "initialMass": 168,
+      "finalMass": 167.99993474159805,
+      "dust": 0.00006507849142467492,
+      "medianMs": 1.2199580000000196,
+      "p95Ms": 2.3191249999999854
+    },
+    {
+      "artifact": "simd",
+      "scene": "minimal-power-dam-break-32",
+      "frames": 60,
+      "dimensions": [
+        32,
+        32
+      ],
+      "initialMass": 588.7999999523163,
+      "finalMass": 588.7998370532769,
+      "dust": 0.00016057383464485042,
+      "medianMs": 2.8007499999999936,
+      "p95Ms": 3.1094590000000153
+    },
+    {
+      "artifact": "simd",
+      "scene": "ceiling-slab-drop",
+      "frames": 60,
+      "dimensions": [
+        24,
+        16
+      ],
+      "initialMass": 64,
+      "finalMass": 63.99993565536579,
+      "dust": 0.00006515494281577221,
+      "medianMs": 1.0669579999999996,
+      "p95Ms": 1.3217920000000731
+    }
+  ]
+}

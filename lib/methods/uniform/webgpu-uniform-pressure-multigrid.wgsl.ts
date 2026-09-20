@@ -6,7 +6,8 @@
  * helpers as projection.  The fragment intentionally contains no alternate
  * solid or free-surface discretization.
  */
-export const UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE = 1e-4;
+import { UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE } from "./pressure-policy";
+export { UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE } from "./pressure-policy";
 
 export const uniformPressureMultigridWGSL = /* wgsl */ `
 struct UniformMGParams {

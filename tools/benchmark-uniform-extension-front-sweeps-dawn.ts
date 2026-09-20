@@ -296,7 +296,7 @@ function digest(values: Float32Array): string {
 function volumeDifference(a: Float32Array, b: Float32Array) {
   let maximum = 0, sumA = 0, sumB = 0, changed = 0, nonFinite = 0;
   let maxArm = -Infinity, maxReference = -Infinity, overfullArm = 0, overfullReference = 0;
-  // This configuration (liquid capacity balancing off by default) already
+  // The retained conservative transport configuration already
   // leaves a population of grossly overfull cells in the N=16 reference
   // itself, and they dominate a plain max. Report the max over the ordinary
   // cells beside it.

@@ -19,8 +19,8 @@
  */
 import {
   ADVANCE_BRICK_FINE, ADVANCE_RUNGS, advanceCell, advanceCellAt, advanceCellPlane,
-  advanceRdfTriangles, advanceRowX, advanceRowY, clipUnitSquare, UNIT_SQUARE,
-  type AdvanceCellView, type AdvanceLattice, type AdvancePlane, type AdvanceRdfVertex,
+  clippedScalarTriangle, advanceRdfTriangles, advanceRowX, advanceRowY, clipUnitSquare, UNIT_SQUARE,
+  type AdvanceCellView, type AdvanceLattice, type AdvancePlane,
   type AdvanceRdfView, type AdvanceView,
 } from "../lib/physics-wasm/advance-view";
 import {
@@ -342,18 +342,6 @@ function drawSolidRaster(c: LensContext): void {
   g.globalAlpha = 1;
 }
 
-function clippedScalarTriangle(points: readonly AdvanceRdfVertex[]): number[] {
-  const polygon: [number, number, number][] = [];
-  for (let i = 0; i < points.length; i += 1) {
-    const a = points[i]!, b = points[(i + 1) % points.length]!;
-    if (a[2] <= 0) polygon.push([...a]);
-    if ((a[2] < 0) !== (b[2] < 0)) {
-      const t = a[2] / (a[2] - b[2]);
-      polygon.push([a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]), 0]);
-    }
-  }
-  return polygon.flatMap(point => [point[0], point[1]]);
-}
 
 function appendPolygon(g: CanvasRenderingContext2D, polygon: readonly number[], scale: number): void {
   if (polygon.length < 6) return;

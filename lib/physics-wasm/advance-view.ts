@@ -150,6 +150,20 @@ readonly (readonly AdvanceRdfVertex[])[] {
   return corners.map((corner, index) => [corner, corners[(index + 1) % 4]!, centre]);
 }
 
+export function clippedScalarTriangle(points: readonly AdvanceRdfVertex[]): number[] {
+  const polygon: [number, number, number][] = [];
+  for (let i = 0; i < points.length; i += 1) {
+    const a = points[i]!, b = points[(i + 1) % points.length]!;
+    if (a[2] <= 0) polygon.push([...a]);
+    if ((a[2] < 0) !== (b[2] < 0)) {
+      const t = a[2] / (a[2] - b[2]);
+      polygon.push([a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]), 0]);
+    }
+  }
+  return polygon.flatMap(point => [point[0], point[1]]);
+}
+
+
 function rasterCells(graph: AdvanceGraph, values: Float32Array, nx: number, ny: number): Float32Array {
   const output = new Float32Array(nx * ny);
   for (const cell of graph.cells) for (let y = Math.floor(cell.minimum[1]!); y < Math.ceil(cell.maximum[1]!); y++)

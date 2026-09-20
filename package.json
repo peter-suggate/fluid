@@ -249,7 +249,11 @@
     "test:physics-wasm:world": "node --import tsx --test tools/wasm/full-world-flow.test.ts",
     "test:physics-wasm:world3d": "node --import tsx tools/wasm/node-world3d-flow.ts",
     "test:physics-wasm:world3d:sustained": "node --import tsx tools/wasm/node-world3d-flow.ts --ui-default-frames=60",
-    "test:physics-wasm:adapter-world3d": "node --import tsx --test tools/wasm/adapter-world3d-flow.test.ts"
+    "test:physics-wasm:adapter-world3d": "node --import tsx --test tools/wasm/adapter-world3d-flow.test.ts",
+    "generate:uniform-geometric-contract": "node --import tsx tools/wasm/generate-uniform-geometric-contract.ts",
+    "check:uniform-geometric-contract": "node --import tsx tools/wasm/generate-uniform-geometric-contract.ts --check",
+    "probe:uniform-geometric:parity": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx tools/wasm/uniform-geometric-parity.ts",
+    "test:uniform-lab:scenes": "node --import tsx tools/wasm/uniform-lab-scenes.ts"
   },
   "dependencies": {
     "lucide-react": "^1.31.0",

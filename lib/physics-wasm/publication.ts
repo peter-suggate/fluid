@@ -17,13 +17,14 @@ export const PhysicsPlane = Object.freeze({
   BrickResolutionBefore: 43, BrickActivity: 44, MaterialFine: 45,
   CapacityFine: 46,
   Density3D: 60, SurfacePhi3D: 61, Velocity3D: 62,
+  UniformLowX: 70, UniformLowY: 71, UniformReleased: 72, UniformTiles: 73,
 } as const);
 export type PhysicsPlaneId = typeof PhysicsPlane[keyof typeof PhysicsPlane];
 export type PhysicsPlaneValue = Float32Array<ArrayBuffer> | Uint8Array<ArrayBuffer>;
 
 const F32_PLANES = new Set<number>([1, 2, 3, 4, 5, 6, 7, 8, 12, 13, 14, 15, 16,
-  17, 18, 19, 20, 21, 22, 30, 31, 32, 40, 41, 42, 44, 45, 46, 60, 61, 62]);
-const U8_PLANES = new Set<number>([9, 10, 11, 43]);
+  17, 18, 19, 20, 21, 22, 30, 31, 32, 40, 41, 42, 44, 45, 46, 60, 61, 62, 70, 71]);
+const U8_PLANES = new Set<number>([9, 10, 11, 43, 72, 73]);
 const JSON_PLANES = new Set<number>([100, 101]);
 const KNOWN_PLANES = new Set([...F32_PLANES, ...U8_PLANES, ...JSON_PLANES]);
 const decoder = new TextDecoder("utf-8", { fatal: true });

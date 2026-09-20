@@ -25,9 +25,9 @@ export const LAB_SCENE_IDS: ReadonlySet<string> =
 /**
  * The scene a bare `/advance-lab` opens.
  *
- * The canonical B8 sparse layout: one genuinely featureless wet corner page, a
- * bare floor, and a collapse to watch. A reader arriving with no link should
- * land on the picture every note about this lab was written against.
+ * Keep the same authored dam collapse across the Uniform and Adaptive labs:
+ * a wet corner, a bare floor, and a collapse to watch. Changing the method
+ * must not silently choose a different default scene.
  */
 export const DEFAULT_LAB_SCENE_ID = "water-box-dam-break";
 

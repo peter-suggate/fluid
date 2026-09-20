@@ -43,7 +43,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
     scene.voxelDomain.finestCellSize_m=scene.container.width_m/16;
     scene.fluid.initialCondition="tank-fill";scene.container.fillFraction=0.5;
     scene.fluid.gravity_m_s2={x:0,y:0,z:0};scene.fluid.initialLiquidVolumes=[];
-    solver=await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,{geometricVolume:true,liquidCapacityBalancing:true,densitySharpening:false,solidExcessCorrection:false},()=>{});
+    solver=await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,{geometricVolume:true,densitySharpening:false,solidExcessCorrection:false},()=>{});
     const access=solver as unknown as TestAccess;const {nx,ny,nz}=solver.info;
     const v0=await read(device,solver.volumeTexture);const phi0=await read(device,solver.vertexPhiTexture!);
     await t.test("combined slice reads independent vertex phi and V/open capacity",async()=>{
@@ -103,28 +103,10 @@ ${createGridOverlayLevelSetVolumeWGSL(true)}
       reset(0.375);const actual=await encode();assert.ok(actual.every(v=>Number.isFinite(v)&&v>=0));
       assert.ok(Math.abs(sum(actual)-sum(volume))<1e-5*sum(volume));
     });
-    await t.test("capacity error gates GPU rounds and respects the round cap",async()=>{
-      const index=4+nx*(4+ny*4);const original=volume[index]!;volume[index]=1.05;
-      const receipt=async()=>{
-        const b=device!.createBuffer({size:28,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
-        const e=device!.createCommandEncoder();e.copyBufferToBuffer(access.conditioningScratch,2*nx*ny*nz*4,b,0,28);device!.queue.submit([e.finish()]);
-        await b.mapAsync(GPUMapMode.READ);const words=new Uint32Array(b.getMappedRange()).slice();b.unmap();b.destroy();return words;
-      };
-      for(const tolerance of [10,0.1]){
-        solver!.applyRuntimeValues({liquidCapacityBalancing:"on",densitySharpening:"off",liquidCapacityBalancingRounds:3,liquidCapacityBalancingTolerance:tolerance});
-        reset(0);const actual=await encode();const words=await receipt();
-        assert.equal(words[5],tolerance===10?0:3,"only errors above tolerance schedule corrective rounds");
-        assert.deepEqual([...words.slice(2,5)],tolerance===10?[0,0,0]:[Math.ceil(nx/4),Math.ceil(ny/4),Math.ceil(nz/4)]);
-        assert.ok(Math.abs(sum(actual)-sum(volume))<1e-5*sum(volume));
-      }
-      volume[index]=original;
-      solver!.applyRuntimeValues({liquidCapacityBalancing:"on",densitySharpening:"off"});reset(0);await encode();
-      assert.equal((await receipt())[5],0,"a feasible identity map needs no corrective round");
-    });
     await t.test("sharpening conserves V and leaves phi unchanged",async()=>{
       volume[6+nx*(3+ny*3)]=0.8; volume[7+nx*(3+ny*3)]=0.2;
       reset(0);const unsharpened=await encode();const before=await read(device!,solver!.vertexPhiTexture!);
-      solver!.applyRuntimeValues({liquidCapacityBalancing:"on",densitySharpening:"on",sharpeningStrength:1});reset(0);const sharp=await encode();
+      solver!.applyRuntimeValues({densitySharpening:"on",sharpeningStrength:1});reset(0);const sharp=await encode();
       assert.deepEqual(await read(device!,solver!.vertexPhiTexture!),before);
       assert.ok(Math.abs(sum(sharp)-sum(unsharpened))<1e-5*sum(volume));assert.ok(sharp.every(v=>Number.isFinite(v)&&v>=-1e-7));
       assert.ok(sharp.some((v,i)=>Math.abs(v-unsharpened[i]!)>1e-5),"sharpening must actually move volume");
@@ -183,7 +165,7 @@ ${createGridOverlayLevelSetVolumeWGSL(true)}
     });
     await t.test("mini32 conserves liquid through separating far-wall impact",async()=>{
       solver!.destroy();
-      solver=await uniformVolumeMethod.createSolverAsync!(device!,sceneDocument(getSceneDefinition("minimal-power-dam-break-32")),"balanced",resolveMethodValues(uniformVolumeMethod,"balanced",{liquidCapacityBalancing:"on",velocityTransport:"semi-lagrangian"}),undefined,()=>{}) as WebGPUUniformReferenceSolver;
+      solver=await uniformVolumeMethod.createSolverAsync!(device!,sceneDocument(getSceneDefinition("minimal-power-dam-break-32")),"balanced",resolveMethodValues(uniformVolumeMethod,"balanced",{velocityTransport:"semi-lagrangian"}),undefined,()=>{}) as WebGPUUniformReferenceSolver;
       for(let frame=1;frame<=90;frame++){
         assert.ok(solver.advanceTo(frame/30));
         if(frame===30||frame===90){
@@ -194,7 +176,10 @@ ${createGridOverlayLevelSetVolumeWGSL(true)}
           const maximumVolume=volume.reduce((maximum,value)=>Math.max(maximum,value),0);
           console.log(JSON.stringify({case:"mini32-separating-wall",frame,representedVolumeDrift:stats.representedVolumeDrift,maximumVolume}));
           assert.ok(Math.abs(sum(volume)/stats.initialVolumeCellSum!-1)<1e-5);
-          if(frame===90)assert.ok(maximumVolume<1.1,`impact capacity bound exceeded: maximum V=${maximumVolume}`);
+          // V<=capacity was guaranteed only by the removed optional liquid
+          // balancing experiment. The retained default can concentrate V at
+          // impact; keep maximumVolume in the receipt, conservation and finite
+          // field assertions below, without claiming a capacity guarantee.
         }
       }
     });

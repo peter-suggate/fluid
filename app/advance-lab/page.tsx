@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
-import { AdvanceLab } from "../../advance-lab/AdvanceLab";
+import { Lab } from "../../advance-lab/Lab";
 export const metadata: Metadata = {
-  title: "Sparse geometric advance — Fluid Lab",
-  description: "One frame of the adaptive-volume solver, drawn on a live 2-D slice: fifteen stages, forty sub-seams, and the work each one encodes.",
+  title: "Uniform Geometric advance — Fluid Lab",
+  description: "Uniform Geometric in Rust: a live 2D testbed with shared 3D defaults, field inspection, and adaptive comparison.",
 };
-export default function AdvanceLabPage() { return <AdvanceLab />; }
+export default function AdvanceLabPage() { return <Lab />; }
