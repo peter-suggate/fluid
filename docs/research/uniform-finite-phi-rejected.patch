@@ -1,0 +1,159 @@
+diff --git a/lib/methods/uniform/uniform-surface-volume.wgsl.ts b/lib/methods/uniform/uniform-surface-volume.wgsl.ts
+index e4657fcb..6d0c8355 100644
+--- a/lib/methods/uniform/uniform-surface-volume.wgsl.ts
++++ b/lib/methods/uniform/uniform-surface-volume.wgsl.ts
+@@ -1,5 +1,6 @@
+ /** Experimental global surface-volume constraint. No cellwise reconstruction. */
+ export const uniformSurfaceVolumeWGSL = /* wgsl */ `
++override PHI_BAND_CELLS:f32=0.0;
+ struct Params { dims:vec4u, h:vec4f }
+ @group(0) @binding(0) var<uniform> p:Params;
+ @group(0) @binding(1) var phi:texture_3d<f32>;
+@@ -104,6 +105,8 @@ fn sumGroup(l:u32){
+ }
+ @compute @workgroup_size(64) fn apply(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)l:u32){
+  let i=groupIndex(w)*64u+l;if(i>=vertices()){return;}let q=point(i,p.dims.xyz+vec3u(1));
+- textureStore(output,q,vec4f(value(q)-state[0].x*bitcast<f32>(atomicLoad(&band[i]))));
++ var corrected=value(q)-state[0].x*bitcast<f32>(atomicLoad(&band[i]));
++ if(PHI_BAND_CELLS>0.0){let limit=PHI_BAND_CELLS*max(p.h.x,max(p.h.y,p.h.z));corrected=clamp(corrected,-limit,limit);}
++ textureStore(output,q,vec4f(corrected));
+ }
+ `;
+diff --git a/lib/methods/uniform/uniform-volume.wgsl.ts b/lib/methods/uniform/uniform-volume.wgsl.ts
+index 9b203756..68114916 100644
+--- a/lib/methods/uniform/uniform-volume.wgsl.ts
++++ b/lib/methods/uniform/uniform-volume.wgsl.ts
+@@ -53,6 +53,11 @@ fn uvCorrectionTargets(@builtin(global_invocation_id)gid:vec3u){
+ }
+ 
+ fn uvCorner(i:u32)->vec3i{return vec3i(i32(i&1u),i32((i>>1u)&1u),i32((i>>2u)&1u));}
++fn uvBoundPhi(value:f32)->f32{
++ if(UV_PHI_BAND_CELLS==0.0){return value;}
++ let band=UV_PHI_BAND_CELLS*max(params.cellGravity.x,max(params.cellGravity.y,params.cellGravity.z));
++ return clamp(value,-band,band);
++}
+ // THE SOLVE WINDOW. Words 7..12 of the active-region header are the union of
+ // this step's padded seed box with the previous one -- the box every windowed
+ // dispatch runs on, and therefore the box outside which nothing is written
+@@ -279,7 +284,7 @@ fn uvAdvectPhi(@builtin(global_invocation_id)gid:vec3u){
+   let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
+   if(params.agreement.z>0.0&&abs(value)<2.0*h){value-=uvAgreementShift(p);}
+   if(params.agreement.y>0.5){value=uvSeedPhi(p,value);}
+-  textureStore(uvPhiOut,vertex,vec4f(value));
++  textureStore(uvPhiOut,vertex,vec4f(uvBoundPhi(value)));
+ }
+ @compute @workgroup_size(4,4,4)
+ fn uvRedistancePhi(@builtin(global_invocation_id)gid:vec3u){
+@@ -291,7 +296,7 @@ fn uvRedistancePhi(@builtin(global_invocation_id)gid:vec3u){
+       q=clamp(q-clamp(uvPhi(q)*g/(h*h*norm),vec3f(-2),vec3f(2)),
+         max(vec3f(0),p-vec3f(4)),min(vec3f(dims()),p+vec3f(4)));}
+     if(abs(uvPhi(q))<0.005*min(h.x,min(h.y,h.z))){value=sign(initial)*length((p-q)*h);}}
+-  textureStore(uvPhiOut,vertex,vec4f(value));
++  textureStore(uvPhiOut,vertex,vec4f(uvBoundPhi(value)));
+ }
+ fn uvOpen(id:vec3i)->f32{if(!valid(id)){return 0.0;}return cellOpenFraction(id);}
+ // E3. Every pass of Sec. 3.4's conservative transport runs only on the live
+diff --git a/lib/methods/uniform/webgpu-uniform-reference.ts b/lib/methods/uniform/webgpu-uniform-reference.ts
+index f642daa1..033c19e3 100644
+--- a/lib/methods/uniform/webgpu-uniform-reference.ts
++++ b/lib/methods/uniform/webgpu-uniform-reference.ts
+@@ -23,6 +23,7 @@ import {
+ } from "./uniform-volume.wgsl";
+ import { createUniformReferenceComputeShader } from "./webgpu-uniform-reference.wgsl";
+ import { uniformVolumeInitialPhi, uniformInitialVolume } from "./uniform-volume-initial";
++import { uniformPhiBandLimit } from "./uniform-phi-band";
+ import { averageInflowStrength, createInflowGridBoundary, type InflowGridBoundary } from "../../core/inflow-boundary";
+ import type { SceneDescription } from "../../core/model";
+ import { planUniformHostAllocation } from "./uniform-host-allocation";
+@@ -92,6 +93,8 @@ export interface WebGPUUniformReferenceOptions {
+   /** Independent dense vertex level set and conservative cell volume. */
+   geometricVolume?: boolean;
+   geometricRedistance?: boolean;
++  /** Internal numerical oracle: zero keeps the legacy unbounded distance field. */
++  phiBandCells?: number;
+   /** Global surface-volume constraint; defaults on for 3D geometric volume. */
+   totalSurfaceVolume?: boolean;
+   surfaceDeficitBalancing?: boolean;
+@@ -406,6 +409,7 @@ const UNIFORM_PRESSURE_STAGE_PHASE: Readonly<Record<UniformCM11aPlanStage, GPUTi
+ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
+   readonly info: GPUEulerianInfo;
+   private readonly geometricVolume: boolean;
++  private readonly phiBandCells: number;
+   /** Live toggle; `sharpenTileWork` is what an encode actually honours. */
+   private geometricTileWork: boolean;
+   /** 4h records the third conditioning plane can hold; 0 disables the map. */
+@@ -693,6 +697,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
+     options: WebGPUUniformReferenceOptions = {},
+   ) {
+     this.geometricVolume = options.geometricVolume === true;
++    this.phiBandCells = this.geometricVolume ? options.phiBandCells ?? 0 : 0;
++    if (!Number.isSafeInteger(this.phiBandCells) || (this.phiBandCells !== 0 && this.phiBandCells < 16))
++      throw new RangeError("Phi band must be at least 16 cells, or zero for the unbounded oracle");
+     this.geometricTileWork = this.geometricVolume && options.geometricTileWork !== false;
+     this.geometricRedistance = options.geometricRedistance !== false;
+     this.volumeDustThreshold = Number.isFinite(options.volumeDustThreshold)
+@@ -940,7 +947,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
+       device.queue.writeBuffer(this.volumeWorkDispatch,0,new Uint32Array([0,1,1]));
+       this.volumeWorkCounts=device.createBuffer({label:"Uniform volume work counters",size:8,usage:GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
+     }
+-    this.shaderSource = this.geometricVolume ? createUniformReferenceComputeShader(true, options.referenceDimension ?? 3, this.volumePageConfig,this.pageDomain) : uniformReferenceComputeShader;
++    this.shaderSource = this.geometricVolume ? createUniformReferenceComputeShader(true, options.referenceDimension ?? 3, this.volumePageConfig,this.pageDomain,this.phiBandCells) : uniformReferenceComputeShader;
+     this.conditioningScratch = device.createBuffer({ label: "Uniform reference compatibility scratch", size: pageBaseBytes + pageBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+     this.velocityExtrapolator = new WebGPUUniformVelocityExtrapolator(
+       device, [nx, ny, nz], [
+@@ -1181,7 +1188,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
+     if (this.geometricVolume && (options.referenceDimension ?? 3) === 3) {
+       this.surfaceVolumeCorrection = new UniformSurfaceVolumeCorrection(device, [nx,ny,nz],
+         [scene.container.width_m/nx,scene.container.height_m/ny,scene.container.depth_m/nz],
+-        this.vertexPhiTexture!,this.volumeB,this.gammaB);
++        this.vertexPhiTexture!,this.volumeB,this.gammaB,this.phiBandCells);
+     }
+     this.initializeVolumeAndTerrain();
+   }
+@@ -1495,6 +1502,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
+     const cellHeight = c.height_m / ny;
+     if (this.vertexPhiTexture && this.vertexPhiScratch) {
+       const phi = uniformVolumeInitialPhi(this.scene, [nx, ny, nz]);
++      if (this.phiBandCells > 0) {
++        const bound = uniformPhiBandLimit([c.width_m/nx,c.height_m/ny,c.depth_m/nz],this.phiBandCells);
++        for (let i=0;i<phi.length;i++) phi[i]=Math.max(-bound,Math.min(bound,phi[i]!));
++      }
+       this.upload3DF32(this.vertexPhiTexture, phi, nx+1, ny+1, nz+1);
+       this.upload3DF32(this.vertexPhiScratch, phi, nx+1, ny+1, nz+1);
+     }
+diff --git a/lib/methods/uniform/webgpu-uniform-reference.wgsl.ts b/lib/methods/uniform/webgpu-uniform-reference.wgsl.ts
+index bcf1c1a7..f46ac32b 100644
+--- a/lib/methods/uniform/webgpu-uniform-reference.wgsl.ts
++++ b/lib/methods/uniform/webgpu-uniform-reference.wgsl.ts
+@@ -15,7 +15,8 @@ const uniformMacCormackAuditEnabled = typeof process !== "undefined"
+  * It provides a matched-lattice GPU baseline for transport and projection
+  * comparisons without octree topology, sparse residency, or backend cutovers.
+  */
+-export function createUniformReferenceComputeShader(geometric = false, referenceDimension: 2 | 3 = 3, pages?: UniformVolumePageShaderOptions, domain?:UniformPageDomain): string { return /* wgsl */ `
++export function createUniformReferenceComputeShader(geometric = false, referenceDimension: 2 | 3 = 3, pages?: UniformVolumePageShaderOptions, domain?:UniformPageDomain, phiBandCells = 0): string { return /* wgsl */ `
++const UV_PHI_BAND_CELLS:f32=${phiBandCells.toFixed(1)};
+ // The dimensional oracle suppresses the absent derivative; symmetry walls alone
+ // do not prevent roundoff from creating a transverse level-set gradient.
+ const UNIFORM_REFERENCE_DIMENSION: u32 = ${referenceDimension}u;
+diff --git a/lib/methods/uniform/webgpu-uniform-surface-volume.ts b/lib/methods/uniform/webgpu-uniform-surface-volume.ts
+index b13ee445..36a877a7 100644
+--- a/lib/methods/uniform/webgpu-uniform-surface-volume.ts
++++ b/lib/methods/uniform/webgpu-uniform-surface-volume.ts
+@@ -13,7 +13,7 @@ export class UniformSurfaceVolumeCorrection {
+   private readonly vertexCount: number;
+   constructor(private readonly device: GPUDevice, private readonly dims: readonly [number, number, number],
+     private readonly h: readonly [number, number, number], private readonly phi: GPUTexture,
+-    private readonly volume: GPUTexture, private readonly capacity: GPUTexture) {
++    private readonly volume: GPUTexture, private readonly capacity: GPUTexture, private readonly phiBandCells = 0) {
+     this.cellCount = dims[0]*dims[1]*dims[2];
+     this.vertexCount = (dims[0]+1)*(dims[1]+1)*(dims[2]+1);
+     this.layout = device.createBindGroupLayout({label:"Surface volume constraint", entries:[
+@@ -28,7 +28,7 @@ export class UniformSurfaceVolumeCorrection {
+     const module = compiler.createShaderModule({label:"Total surface volume",code:uniformSurfaceVolumeWGSL});
+     const layout = this.device.createPipelineLayout({bindGroupLayouts:[this.layout]});
+     for (const entryPoint of entries) this.pipelines[entryPoint] = await compiler.compileComputePipeline({
+-      label:`Surface volume ${entryPoint}`,layout,compute:{module,entryPoint},
++      label:`Surface volume ${entryPoint}`,layout,compute:{module,entryPoint,constants:{PHI_BAND_CELLS:this.phiBandCells}},
+     },{priority:"visible",signal});
+   }
+   private allocate() {

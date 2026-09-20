@@ -69,6 +69,9 @@ WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx --test te
 It is also included in `npm run test:dawn:uniform-page-domain`. No Sparse CM12
 implementation or shared topology code was modified.
 
+The [GPU support producer](uniform-page-support.md) now drives this transaction in
+isolated tests. A direct finite-phi cap failed numerical comparison and was rejected.
+
 Next: define and test the finite phi-band/support contract, connect its GPU support
 producer to this pool, then replace operator field reads/writes and the coupled
 pressure hierarchy. Production residency cannot shrink safely before those consumers

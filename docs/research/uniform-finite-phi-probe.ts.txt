@@ -1,0 +1,82 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { pathToFileURL } from "node:url";
+import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
+import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
+import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
+import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
+import { sceneDocument } from "../lib/core/scene-definition";
+import { getSceneDefinition } from "../lib/core/scenes";
+import { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
+import { uniformGeometricSolverOptions } from "../lib/methods/uniform/uniform-geometric-options";
+
+async function readTexture(device: GPUDevice, texture: GPUTexture): Promise<Float32Array> {
+  const row=Math.ceil(texture.width*4/256)*256;
+  const b=device.createBuffer({size:row*texture.height*texture.depthOrArrayLayers,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+  try {
+    const e=device.createCommandEncoder();e.copyTextureToBuffer({texture},{buffer:b,bytesPerRow:row,rowsPerImage:texture.height},[texture.width,texture.height,texture.depthOrArrayLayers]);
+    device.queue.submit([e.finish()]);await b.mapAsync(GPUMapMode.READ);
+    const src=new Float32Array(b.getMappedRange()), result=new Float32Array(texture.width*texture.height*texture.depthOrArrayLayers);
+    for(let z=0;z<texture.depthOrArrayLayers;z++)for(let y=0;y<texture.height;y++)result.set(src.subarray((z*texture.height+y)*row/4,(z*texture.height+y)*row/4+texture.width),(z*texture.height+y)*texture.width);
+    return result;
+  } finally {if(b.mapState==="mapped")b.unmap();b.destroy();}
+}
+
+const modulePath=process.env.WEBGPU_NODE_MODULE;
+(modulePath?test:test.skip)("finite phi band preserves interface and mass through drops and moved inflow",{timeout:240000},async()=>{
+ await acquireWebGPUExclusiveLock("dawn-test","Uniform page-first volume");
+ let device:GPUDevice|undefined;const solvers:WebGPUUniformReferenceSolver[]=[];
+ try {
+  const dawn=await import(pathToFileURL(modulePath!).href);Object.assign(globalThis,dawn.globals);
+  const gpu=createProcessRetainedDawnGPU(dawn,[`backend=${process.env.FLUID_WEBGPU_BACKEND??"metal"}`]);
+  const adapter=await gpu.requestAdapter();assert.ok(adapter);
+  device=managedGPUDevice(await adapter.requestDevice({requiredLimits:requiredFluidDeviceLimits(adapter.limits)}),{requireWorkerRealm:false});
+  const errors:string[]=[];device.addEventListener("uncapturederror",e=>{e.preventDefault();errors.push(e.error.message);});
+  const scene=sceneDocument(getSceneDefinition("hero-garden-hose"));
+  for(const phiBandCells of [16,0])
+   solvers.push(await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,{...uniformGeometricSolverOptions({volumeStorage:"pages32",pressureWindow:"domain",pressureCycleBudget:"fixed"},scene),phiBandCells,volumePageWork:true,pageDomain:true},()=>{}));
+  for(let frame=1;frame<=(process.env.PHI_BAND_DIAGNOSTIC?12:64);frame++){
+   for(const solver of solvers){
+    if(frame===41)solver.applyRuntimeValues({redistance:"off"});
+    if(frame===44)solver.applyRuntimeValues({redistance:"on"});
+    if(frame===33)solver.applySceneUniforms({...scene,fluid:{...scene.fluid,inflow:undefined}});
+    if(frame===45)solver.applySceneUniforms({...scene,fluid:{...scene.fluid,inflow:{...scene.fluid.inflow!,center_m:{x:.15,y:.45,z:-.2}}}});
+    if(frame===25)solver.injectLiquidBall({centre_m:{x:.65,y:.5,z:.35},radius_m:.04});
+    assert.ok(solver.advanceTo(frame/30));await solver.awaitFrameCompletion();await solver.readStats();
+   }
+   if([1,12,24,25,32,40,43,44,45,64].includes(frame)||process.env.PHI_BAND_DIAGNOSTIC){
+    for(const field of ["volumeTexture","advectedVertexPhiTexture","vertexPhiTexture"] as const){
+     const a=await readTexture(device,solvers[0]![field]!),b=await readTexture(device,solvers[1]![field]!);
+     const h=Math.max(scene.container.width_m/solvers[0]!.info.nx,scene.container.height_m/solvers[0]!.info.ny,scene.container.depth_m/solvers[0]!.info.nz);
+     let maxError=0,l1=0,mass=0,signs=0,bandCount=0;
+     for(let i=0;i<a.length;i++){
+      assert.ok(Number.isFinite(a[i]) && Number.isFinite(b[i]));
+      if(field!=="volumeTexture"){
+       assert.ok(Math.abs(a[i]!)<=16*h+1e-6,"stored phi must remain bounded");
+       if(Math.min(Math.abs(a[i]!),Math.abs(b[i]!))>4*h)continue;
+       bandCount++;if((a[i]!<0)!==(b[i]!<0))signs++;
+      }else mass+=Math.abs(b[i]!);
+      const delta=Math.abs(a[i]!-b[i]!);l1+=delta;maxError=Math.max(maxError,delta);
+     }
+     const relativeL1=l1/Math.max(mass,1);
+     console.log(JSON.stringify({frame,field,maxError,maxErrorCells:maxError/h,relativeL1,signs,bandCount}));
+     if(process.env.PHI_BAND_DIAGNOSTIC)continue;
+     if(field==="volumeTexture")assert.ok(relativeL1<=0.005,`V L1 / reference mass at frame ${frame}: ${relativeL1}`);
+     else {
+      assert.ok(maxError/h<=0.1,`near-interface phi error at frame ${frame}: ${maxError/h} cells`);
+      assert.ok(signs<=Math.max(1,bandCount*0.001),`interface sign changes ${signs}/${bandCount}`);
+     }
+    }
+
+   }
+  }
+  for(const solver of solvers){
+   assert.equal(solver.info.hostSchedulingUsesReadback,false);
+   assert.equal(solver.solveWindowSource,undefined);
+  }
+  assert.equal(solvers[0]!.info.uniformDomainAuthority,"pages");
+  assert.equal(solvers[1]!.info.uniformDomainAuthority,"pages");
+
+  assert.deepEqual(errors,[]);
+ }finally{for(const s of solvers)s.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
+});
