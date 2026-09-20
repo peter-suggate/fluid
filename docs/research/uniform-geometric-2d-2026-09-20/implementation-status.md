@@ -213,15 +213,34 @@ was introduced. Quantifying and comparing moving-solid volume loss against the
 3D method remains a scene-level follow-up; the body-free conservation assertions
 remain unchanged.
 
+## Continuous planar inflow
+
+Uniform 2D accepts inflow scenes, including `hero-garden-hose`. The nozzle is
+projected into XY, preserving its XY position and velocity and discarding its
+Z offset, like the planar rigid adapter. Static scenery remains the central XY
+slice. A purely Z-directed nozzle has no planar flow.
+
+Each step integrates the authored start/end/ramp schedule and emits a swept
+rectangular jet from the nozzle outlet. Its area is `2 * radius * planar speed *
+integrated strength`; this is planar area, not the 3D circular volume rate.
+Exact cell clipping preserves subcell jets. Emission respects available cell
+capacity, updates the surface, and enforces jet velocity around receiving cells
+before and after pressure projection. Blocked or full cells reject emission;
+the receipt counts only accepted liquid. Source frames skip surface feedback,
+as existing live liquid drops do. Reset clears the source clock and counters.
+
+Run `npm run test:uniform-lab:inflow` after rebuilding the scalar and SIMD
+artifacts to check the garden hose and a timed jet through the production worker
+and publication decoder, including conservation, finite fields, reset and parity.
+
 ## Deferred work
 
 1. Solve-window and pressure-window scheduling. `activeRegion: on` still fails
    explicitly in Rust; the UI's sole documented override is `off`.
 2. Editable stage controls, intermediate-stage capture and live parameter
    changes. Current controls display the shared defaults and completed fields.
-3. Continuous inflow and voxel sculpting. Inflow scenes fail explicitly on load;
-   the shared picker retains the complete production catalog. The live liquid
-   ball and rigid tools are implemented (see below), but arbitrary 3D rigid
+3. Voxel sculpting. Continuous planar inflow, live liquid
+   ball and rigid tools are implemented, but arbitrary 3D rigid
    trajectories and moving-solid conservation do not yet have GPU parity evidence.
 4. Broader stage parity for anisotropic/high-CFL scenes and material forces,
    sharpening work-map scheduling, and the GPU's asynchronous lagged-budget

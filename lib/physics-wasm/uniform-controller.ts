@@ -24,8 +24,6 @@ export const UNIFORM_LAB_VALUES = Object.freeze(
 export function uniformLabSceneLimitation(
   scene: SceneDescription,
 ): string | undefined {
-  if (scene.fluid.inflow)
-    return "Inflow scenes are not available in Uniform 2D yet.";
   const [nx, ny] = sceneLatticeDimensions(scene, Number.MAX_SAFE_INTEGER);
   if (nx < 2 || ny < 2 || nx * ny > 4_194_304)
     return "This scene exceeds the Uniform 2D grid budget.";

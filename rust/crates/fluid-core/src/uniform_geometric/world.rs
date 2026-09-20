@@ -47,6 +47,7 @@ pub struct World {
     pub energy_experiment: super::energy_experiment::Config,
     pub energy_receipt: super::energy_experiment::Receipt,
     transport: Transport,
+    pub inflow: Option<crate::scene_model::FluidInflow>,
     pub(super) gravity: [f32; 2],
     pub(super) rho: f32,
     viscosity: f32,
@@ -125,6 +126,7 @@ impl World {
             options,
             pressure,
             transport,
+            inflow: None,
             gravity,
             rho,
             viscosity,
@@ -141,9 +143,9 @@ impl World {
         scene: &SceneDocument,
         options: UniformGeometricOptions,
     ) -> Result<Self, ValidationError> {
-        if !scene.rigid_bodies.is_empty() || scene.fluid.inflow.is_some() {
+        if !scene.rigid_bodies.is_empty() {
             return Err(ValidationError(
-                "uniform 2D scene adapter: rigid bodies and inflow are not yet ported".into(),
+                "uniform 2D scene adapter: rigid bodies are not yet ported".into(),
             ));
         }
         let dims = lattice_dimensions(scene);
@@ -184,7 +186,7 @@ impl World {
                     initial_liquid_surface_scalar(scene, point, dims) as f32;
             }
         }
-        Self::from_grid(
+        let mut world = Self::from_grid(
             grid,
             options,
             [
@@ -194,7 +196,9 @@ impl World {
             scene.fluid.density_kg_m3 as f32,
             scene.fluid.dynamic_viscosity_pa_s as f32,
             scene.fluid.surface_tension_n_m as f32,
-        )
+        )?;
+        world.inflow = scene.fluid.inflow;
+        Ok(world)
     }
     pub fn advance(&mut self, dt: f32) -> Result<(), ValidationError> {
         self.advance_observed(dt, 8, |_, _| {})
@@ -211,6 +215,10 @@ impl World {
         if !dt.is_finite() || dt <= 0.0 {
             return Err(ValidationError("invalid uniform timestep".into()));
         }
+        let inflow = self
+            .inflow
+            .as_ref()
+            .and_then(|source| super::inflow::Step::new(source, self.receipt.time, dt, &self.grid));
         observe("start", &self.grid);
         let previous_energy = if self.energy_experiment.mode == "energy-cap" {
             super::energy_experiment::energy(&self.grid, self.rho, self.gravity)
@@ -273,6 +281,9 @@ impl World {
             self.grid.drops.clear();
         }
         self.grid.volume = next;
+        if let Some(source) = &inflow {
+            self.receipt.injected_volume += source.inject(&mut self.grid);
+        }
         observe("transported", &self.grid);
         if let Some(reference) = phi_reference.filter(|_| self.receipt.injected_volume == 0.0) {
             let transported: Vec<f32> = self
@@ -314,11 +325,17 @@ impl World {
             surface::sharpen_rounds(&mut self.grid, &self.options, sharpening_rounds);
         observe("sharpened", &self.grid);
         self.advect_velocity(&extension, &prior_phase, dt, &mut observe);
+        if let Some(source) = &inflow {
+            source.enforce_velocity(&mut self.grid);
+        }
         observe("forced", &self.grid);
         if self.energy_experiment.mode == "off" {
             self.project(dt);
         } else {
             super::energy_experiment::project(self, dt, previous_energy);
+        }
+        if let Some(source) = &inflow {
+            source.enforce_velocity(&mut self.grid);
         }
         observe("projected", &self.grid);
         self.receipt.frame += 1;

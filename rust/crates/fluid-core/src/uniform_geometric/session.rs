@@ -50,6 +50,7 @@ impl Session {
             seed.viscosity,
             seed.surface_tension,
         )?;
+        world.inflow = scene.fluid.inflow;
         let physical = super::physical::Physical::new(&scene, &world.grid)?;
         physical.geometry(&mut world.grid);
         let initial_volume = world.grid.volume.iter().map(|&v| v as f64).sum();

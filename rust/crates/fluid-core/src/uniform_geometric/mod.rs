@@ -16,3 +16,5 @@ pub mod world;
 pub use options::UniformGeometricOptions;
 
 pub mod physical;
+
+mod inflow;
