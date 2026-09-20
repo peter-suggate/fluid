@@ -86,6 +86,7 @@ export interface WebGPUUniformReferenceOptions {
   geometricRedistance?: boolean;
   /** Global surface-volume constraint; defaults on for 3D geometric volume. */
   totalSurfaceVolume?: boolean;
+  surfaceDeficitBalancing?: boolean;
   /**
    * 4h work map for the geometric sharpening sweeps, on by default with
    * `geometricVolume`. False is the dense control: identical numerics, every
@@ -423,6 +424,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private volumeCompaction: boolean;
   private phiSeedFromVolume: boolean;
   private totalSurfaceVolume: boolean;
+  private surfaceDeficitBalancing: boolean;
+  private readonly surfaceDeficitBalanceBytes: number;
   private surfaceVolumeHasSource = false;
   private surfaceVolumeCorrection?: UniformSurfaceVolumeCorrection;
   private phiAgreementGain: number;
@@ -691,6 +694,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.volumePressureRows = options.volumePressureRows === "all" ? 2 : options.volumePressureRows === true || options.volumePressureRows === "abandoned" ? 1 : 0;
     this.volumeCompaction = options.volumeCompaction === true;
     this.phiSeedFromVolume = options.phiSeedFromVolume === true;
+    this.surfaceDeficitBalancing = this.geometricVolume && (options.referenceDimension ?? 3) === 3 && options.surfaceDeficitBalancing !== false;
     this.totalSurfaceVolume = this.geometricVolume && (options.referenceDimension ?? 3) === 3 && options.totalSurfaceVolume !== false;
     this.phiAgreementGain = Number.isFinite(options.phiAgreementGain) ? Math.min(1, Math.max(0, options.phiAgreementGain!)) : 0;
     this.phiAgreementClamp = Number.isFinite(options.phiAgreementClamp) ? Math.min(0.5, Math.max(0, options.phiAgreementClamp!)) : 0.02;
@@ -880,7 +884,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     });
     // Created before the extrapolator: the extension binds it read_write to
     // read the tile classes and to publish the 4h face table the sampler reads.
-    this.conditioningScratch = device.createBuffer({ label: "Uniform reference compatibility scratch", size: allocation.conditioningBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    this.surfaceDeficitBalanceBytes = this.geometricVolume ? (2 + 2 * tileRecords) * 4 : 0;
+    this.conditioningScratch = device.createBuffer({ label: "Uniform reference compatibility scratch", size: allocation.conditioningBytes + this.surfaceDeficitBalanceBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.velocityExtrapolator = new WebGPUUniformVelocityExtrapolator(
       device, [nx, ny, nz], [
         scene.container.width_m / nx,
@@ -1098,7 +1103,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       regularLayers: ny, maximumNeighborDelta: 0, gridKind: "uniform",
       cellSize_m: Math.min(scene.container.width_m / nx, scene.container.height_m / ny, scene.container.depth_m / nz),
       pressureIterations: 0, pressureSolver: `CM11a dense LCP multigrid (${this.pressureSchedule.fullCycles} Full-Cycles + ${this.pressureSchedule.vCycles} V-Cycles, ${this.pressureSchedule.preSweeps}/${this.pressureSchedule.postSweeps} pre/post PRBGS)`,
-      allocatedBytes: allocation.allocatedBytes + this.pressureMultigrid.allocatedBytes
+      allocatedBytes: allocation.allocatedBytes + this.surfaceDeficitBalanceBytes + this.pressureMultigrid.allocatedBytes
         + (this.geometricVolume ? 8 * (nx+1)*(ny+1)*(nz+1) + count*(UNIFORM_VOLUME_EDGE_BYTES + 24) + 12 : 0)
         + activeRegionBytes * 3 + activeSummaryBytes + packedSolidVoxels.byteLength
         + (this.symmetryStageAuditMacCormackBuffer ? 0 : 16), quality,
@@ -1400,6 +1405,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       if (values.transportWorkMap !== undefined) this.transportTiles = values.transportWorkMap !== "dense";
       if (values.transportReach !== undefined) this.transportReach = Math.round(finite("transportReach", 1, -8, 8));
       if (values.volumePressureRows !== undefined) this.volumePressureRows = values.volumePressureRows === "all" ? 2 : values.volumePressureRows === "off" ? 0 : 1;
+      if (values.surfaceDeficitBalancing !== undefined) this.surfaceDeficitBalancing = !!this.surfaceVolumeCorrection && values.surfaceDeficitBalancing === "on";
       if (values.totalSurfaceVolume !== undefined) this.totalSurfaceVolume = values.totalSurfaceVolume === "on";
       if (values.volumeCompaction !== undefined) this.volumeCompaction = values.volumeCompaction === "on";
       if (values.phiSeedFromVolume !== undefined) this.phiSeedFromVolume = values.phiSeedFromVolume === "on";
@@ -2209,6 +2215,18 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       ?? this.volumePipelines[entry]!;
   }
 
+  /** Two GPU reductions, using the post-transport surface target already in gammaA. */
+  private encodeSurfaceDeficitBalance(encoder: GPUCommandEncoder): void {
+    if (!this.geometricVolume) return;
+    if (!this.surfaceDeficitBalancing) {
+      // Clear the previous rate when toggled off; never reuse a stale source.
+      encoder.clearBuffer(this.conditioningScratch, this.info.cellCount * 12, 4);
+      return;
+    }
+    this.run(encoder, "Surface-deficit partial sums", this.volumePipelines.uvBalanceMeasure!, this.sharpenComputeGroup);
+    this.runDirect(encoder, "Surface-deficit global balance", this.volumePipelines.uvBalanceReduce!, this.sharpenComputeGroup, [1, 1, 1]);
+  }
+
   private encodeGeometricVolume(encoder: GPUCommandEncoder, seam?: (phase: GPUTimestampPhase) => void): void {
     const run = (entry: typeof UNIFORM_VOLUME_ENTRIES[number], group = this.densityTraceGroup) => {
       if(entry === "uvFinishDonorSums")
@@ -2536,6 +2554,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       [this.info.nx, this.info.ny, this.info.nz],
     );
     seam?.(UNIFORM_ADVANCE_PHASE.advectionCorrection);
+    this.encodeSurfaceDeficitBalance(encoder);
     this.pressureMultigrid.encode(encoder, this.pressureMultigridGroup,
       seam && ((stage) => seam(UNIFORM_PRESSURE_STAGE_PHASE[stage])),
       this.planPressureCycleBudget());

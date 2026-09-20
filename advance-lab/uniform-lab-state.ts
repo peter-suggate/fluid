@@ -17,6 +17,7 @@ import { sliceViewQuery, type SliceViewFraction } from "./view-transform";
 export interface UniformLabState {
   sceneId: string;
   surfaceExperiment: SurfaceExperiment;
+  surfaceDeficitBalancing: boolean;
   dt: number;
   layers: VisualLayerState;
   sliceView: SliceViewFraction;
@@ -33,6 +34,14 @@ export const uniformLabQuery = combineQueryCodecs<UniformLabState>([
     write: (query: URLSearchParams, state: UniformLabState) => {
       if (state.surfaceExperiment === "area-only") query.delete("surfaceExperiment");
       else query.set("surfaceExperiment", state.surfaceExperiment);
+    },
+  },
+  {
+    keys: ["surfaceDeficitBalancing"],
+    read: (query: URLSearchParams) => ({ surfaceDeficitBalancing: query.get("surfaceDeficitBalancing") === "1" }),
+    write: (query: URLSearchParams, state: UniformLabState) => {
+      if (state.surfaceDeficitBalancing) query.set("surfaceDeficitBalancing", "1");
+      else query.delete("surfaceDeficitBalancing");
     },
   },
   {
@@ -75,6 +84,7 @@ export function startUniformLabQuerySync(
         hydrated &&
         (next.sceneId !== store.getState().sceneId ||
           next.surfaceExperiment !== store.getState().surfaceExperiment ||
+          next.surfaceDeficitBalancing !== store.getState().surfaceDeficitBalancing ||
           JSON.stringify(parsed.scene) !==
             JSON.stringify(session.scene.getState().scene))
       )

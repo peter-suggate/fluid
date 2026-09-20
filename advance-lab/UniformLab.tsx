@@ -288,7 +288,7 @@ export function UniformLab() {
 }
 function UniformRun({ session }: { session: PaneSession }) {
   const [store] = useState(() => createUniformLabStore(location.search));
-  const { sceneId, dt, layers, surfaceExperiment, sliceView: camera } = useStore(store);
+  const { sceneId, dt, layers, surfaceExperiment, surfaceDeficitBalancing, sliceView: camera } = useStore(store);
 
   const setCamera = (value: Camera | ((current: Camera) => Camera)) =>
     store.setState({
@@ -364,7 +364,7 @@ function UniformRun({ session }: { session: PaneSession }) {
           return;
         }
         controller.current = owner;
-        const initial = await owner.load(scene, surfaceExperiment);
+        const initial = await owner.load(scene, surfaceExperiment, surfaceDeficitBalancing);
         if (alive) {
           setView(initial);
           setLoading(false);
@@ -382,7 +382,7 @@ function UniformRun({ session }: { session: PaneSession }) {
       if (controller.current === owner) controller.current = undefined;
       if (owner) void owner.destroy().catch(() => {});
     };
-  }, [sceneId, surfaceExperiment, restart, session.scene]);
+  }, [sceneId, surfaceExperiment, surfaceDeficitBalancing, restart, session.scene]);
   const edit = (
     operation: (owner: UniformLabController) => Promise<UniformView>,
   ) => {
@@ -949,6 +949,24 @@ function UniformRun({ session }: { session: PaneSession }) {
             {surfaceExperiment === "off" ? "Original surface advection." : surfaceExperiment === "area-only" ? "Bounded surface shift to match total V." : "Smooth displacements of the advected surface from regional V/phi error."}
             {surfaceExperiment === "regional-area" ? " Includes a total-area constraint." : ""}
             {" "}Changing the correction resets and pauses the scene.
+          </p>
+          <label>
+            <input
+              type="checkbox"
+              aria-label="Surface-deficit balancing"
+              checked={surfaceDeficitBalancing}
+              disabled={loading}
+              onChange={(event) => {
+                setPlaying(false);
+                beginLoad();
+                store.setState({ surfaceDeficitBalancing: event.target.checked });
+              }}
+            />{" "}
+            Surface-deficit balancing (2D experiment)
+          </label>
+          <p className={css.muted}>
+            Preserves overfill expansion and balances it with contraction in underfilled liquid to reduce persistent sloshing.
+            {" "}Changing this resets and pauses the scene.
           </p>
           <dl>
             <dt>Liquid area</dt>

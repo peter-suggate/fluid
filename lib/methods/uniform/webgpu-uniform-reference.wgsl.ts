@@ -1247,7 +1247,8 @@ fn divergenceAt(id: vec3i, checkSolid: bool) -> f32 {
 // divergence (lambda = 0.5, eta = 1 per the paper), divided by dx, so the
 // pressure solve pushes the excess out.
 fn volumeCorrectionDivergence(id: vec3i) -> f32 {
-  ${geometric ? "return min(0.5*max(0.0,volume(id)-cellOpenFraction(id)),cellOpenFraction(id))/max(params.dimsDt.w,1e-12);" : `
+  ${geometric ? `let positive=min(0.5*max(0.0,volume(id)-cellOpenFraction(id)),cellOpenFraction(id));
+  ${referenceDimension === 3 ? "let rate=bitcast<f32>(atomicLoad(&sharpenDeposits[uvBalanceBase()]));return (positive-rate*uvSurfaceDeficit(id))/max(params.dimsDt.w,1e-12);" : "return positive/max(params.dimsDt.w,1e-12);"}` : `
   // Preserve CM12's calibrated small-excess slope exactly:
   // min(lambda * (rho' - 1), eta) / dx with lambda=0.5 and eta=1.
   // Replacing this by excess/dt makes the correction three times stronger at

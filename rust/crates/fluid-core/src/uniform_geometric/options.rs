@@ -84,6 +84,8 @@ pub struct UniformGeometricOptions {
     pub phi_agreement_clamp: f32,
     #[serde(rename = "totalSurfaceVolume")]
     pub total_surface_volume: String,
+    #[serde(rename = "surfaceDeficitBalancing")]
+    pub surface_deficit_balancing: String,
 }
 impl Default for UniformGeometricOptions {
     fn default() -> Self {
@@ -121,6 +123,7 @@ impl Default for UniformGeometricOptions {
             phi_agreement_gain: 0.05_f32,
             phi_agreement_clamp: 0.02_f32,
             total_surface_volume: "on".into(),
+            surface_deficit_balancing: "on".into(),
         }
     }
 }
@@ -323,6 +326,11 @@ impl UniformGeometricOptions {
         if !["off", "on"].contains(&self.total_surface_volume.as_str()) {
             return Err(ValidationError(
                 "Invalid uniform parameter totalSurfaceVolume".into(),
+            ));
+        }
+        if !["on", "off"].contains(&self.surface_deficit_balancing.as_str()) {
+            return Err(ValidationError(
+                "Invalid uniform parameter surfaceDeficitBalancing".into(),
             ));
         }
         Ok(())

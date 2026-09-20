@@ -286,6 +286,7 @@ pub struct PressureReceipt {
     pub recovery_sweeps: usize,
     pub recovery_exhausted: bool,
 }
+#[derive(Clone)]
 pub struct Pressure {
     pub levels: Vec<Level>,
     pub receipt: PressureReceipt,

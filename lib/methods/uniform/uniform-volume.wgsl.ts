@@ -5,6 +5,7 @@ export const UNIFORM_VOLUME_ENTRIES = [
   "uvAdvectPhi", "uvRedistancePhi", "uvBuildEdges",
   "uvFinishDonorSums", "uvFallback", "uvNormalizeRows", "uvNormalizeDonors", "uvGather",
   "uvPrepareSharpen", "uvProposeSharpen", "uvLimitSharpen", "uvCommitSharpen", "uvPublish",
+  "uvBalanceMeasure", "uvBalanceReduce",
   "uvAgreementResidual", "uvCorrectionCapacity", "uvCorrectionTargets",
 ] as const;
 /** The four Sec. 3.5 sweeps that exist in a dense and a 4h work-map variant. */
@@ -701,5 +702,51 @@ fn uvPublish(@builtin(global_invocation_id)gid:vec3u){
   let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
   textureStore(volumeOut,id,vec4f(0.5-uvPhi(vec3f(id)+vec3f(0.5))/h));
   textureStore(gammaOut,id,vec4f(uvOpen(id)));
+}
+
+// A dedicated tail of the existing scratch buffer avoids another storage
+// binding. [rate, partial-count, (positive volume, deficit volume)...].
+// Rate is dimensionless and capped at one; RHS divides it by this step's dt.
+fn uvBalanceBase()->u32{return 3u*cellCount();}
+fn uvSurfaceDeficit(id:vec3i)->f32{
+  let cap=cellOpenFraction(id);let v=volume(id);
+  if(cap<=1e-5||v>cap||pressurePhi(id)>=0.0){return 0.0;}
+  return max(0.0,textureLoad(gammaIn,id,0).x-v);
+}
+var<workgroup> uvBalanceSums:array<vec2f,64>;
+fn uvBalanceSum(l:u32){
+  workgroupBarrier();
+  for(var stride=32u;stride>0u;stride/=2u){
+    if(l<stride){uvBalanceSums[l]+=uvBalanceSums[l+stride];}workgroupBarrier();
+  }
+}
+@compute @workgroup_size(4,4,4)
+fn uvBalanceMeasure(@builtin(global_invocation_id)gid:vec3u,
+ @builtin(workgroup_id)w:vec3u,@builtin(num_workgroups)groups:vec3u,
+ @builtin(local_invocation_index)l:u32){
+  let id=activeId(gid);var sums=vec2f(0);
+  if(valid(id)){
+    let cap=cellOpenFraction(id);
+    if(cap>1e-5&&pressurePhi(id)<0.0){
+      sums=vec2f(min(0.5*max(0.0,volume(id)-cap),cap),uvSurfaceDeficit(id));
+    }
+  }
+  uvBalanceSums[l]=sums;uvBalanceSum(l);
+  if(l==0u){
+    let index=w.x+groups.x*(w.y+groups.y*w.z);let base=uvBalanceBase();
+    atomicStore(&sharpenDeposits[base+2u+2u*index],bitcast<i32>(uvBalanceSums[0].x));
+    atomicStore(&sharpenDeposits[base+3u+2u*index],bitcast<i32>(uvBalanceSums[0].y));
+    if(index==0u){atomicStore(&sharpenDeposits[base+1u],i32(groups.x*groups.y*groups.z));}
+  }
+}
+@compute @workgroup_size(64)
+fn uvBalanceReduce(@builtin(local_invocation_index)l:u32){
+  let base=uvBalanceBase();let count=u32(atomicLoad(&sharpenDeposits[base+1u]));var sums=vec2f(0);
+  for(var i=l;i<count;i+=64u){sums+=vec2f(
+    bitcast<f32>(atomicLoad(&sharpenDeposits[base+2u+2u*i])),
+    bitcast<f32>(atomicLoad(&sharpenDeposits[base+3u+2u*i])));}
+  uvBalanceSums[l]=sums;uvBalanceSum(l);
+  if(l==0u){var rate=0.0;if(uvBalanceSums[0].y>0.0){rate=min(1.0,uvBalanceSums[0].x/uvBalanceSums[0].y);}
+    atomicStore(&sharpenDeposits[base],bitcast<i32>(rate));}
 }
 `;

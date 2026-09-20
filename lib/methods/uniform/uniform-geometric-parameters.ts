@@ -91,6 +91,10 @@ params.push({kind:"select",key:"totalSurfaceVolume",label:"Total surface volume"
   options:[{value:"off",label:"Off"},{value:"on",label:"On"}],
   hint:"Shift the existing surface uniformly along its normals to match total conservative V. Bounded to one cell per step; no regional correction or phi seeding. One global constraint across all liquid bodies. Source frames are skipped."});
 
+params.push({kind:"select",key:"surfaceDeficitBalancing",label:"Surface-deficit balancing",default:"on",tier:"coarse",update:"runtime",
+  options:[{value:"on",label:"On"},{value:"off",label:"Off"}],
+  hint:"Preserve overfill expansion and balance it globally with contraction in underfilled pressure-liquid cells, weighted by the existing surface-fill estimate. Reduces persistent sloshing; capped to the available deficit per step."});
+
 /** Shared by the studio, advance-lab, native Rust generator and scene harnesses. */
 export const UNIFORM_GEOMETRIC_PARAMS: readonly MethodParamSpec[] = Object.freeze(params);
 export const UNIFORM_GEOMETRIC_DEFAULTS: Readonly<MethodParamValues> = Object.freeze(

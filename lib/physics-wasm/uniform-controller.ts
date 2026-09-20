@@ -16,9 +16,9 @@ import {
 } from "../methods/uniform/uniform-volume-initial";
 import { resolveUniformGeometricValues } from "../methods/uniform/uniform-geometric-parameters";
 
-/** The only lab override: window scheduling is deferred, as requested. */
+/** 2D owns its balancing toggle separately; window scheduling is deferred. */
 export const UNIFORM_LAB_VALUES = Object.freeze(
-  resolveUniformGeometricValues({ activeRegion: "off" }),
+  resolveUniformGeometricValues({ activeRegion: "off", surfaceDeficitBalancing: "off" }),
 );
 
 export function uniformLabSceneLimitation(
@@ -82,6 +82,7 @@ export interface UniformView {
   readonly released: Uint8Array;
   readonly tiles: Uint8Array;
   readonly receipt: Readonly<Record<string, unknown>>;
+  readonly surfaceDeficitBalancing: boolean;
 }
 export function createUniformView(source: PhysicsPublication): UniformView {
   const publication = decodePhysicsPublication(source);
@@ -137,6 +138,7 @@ export function createUniformView(source: PhysicsPublication): UniformView {
       released: u8(PhysicsPlane.UniformReleased, nx * ny),
       tiles: u8(PhysicsPlane.UniformTiles),
       receipt: m.receipt as Record<string, unknown>,
+      surfaceDeficitBalancing: (m.receipt as Record<string, unknown>)?.surfaceDeficitBalancing === true,
     };
   } finally {
     publication.release();
@@ -153,14 +155,15 @@ export class UniformLabController {
       }),
     );
   }
-  async load(scene: SceneDescription, experiment: SurfaceExperiment = "area-only") {
+  async load(scene: SceneDescription, experiment: SurfaceExperiment = "area-only", surfaceDeficitBalancing = false) {
     await this.client.load(scene, {
       method: "uniform-volume",
       dimension: 2,
       methodValues: UNIFORM_LAB_VALUES,
       uniformSeed: uniformLabSeed(scene),
     });
-    if (experiment !== "area-only") return this.command({ type: "set-surface-experiment", profile: experiment });
+    if (experiment !== "area-only") await this.command({ type: "set-surface-experiment", profile: experiment });
+    if (surfaceDeficitBalancing) return this.command({ type: "set-surface-deficit-balancing", enabled: true });
     return createUniformView(await this.client.snapshot());
   }
   async advance(dt: number) {

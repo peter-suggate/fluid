@@ -130,6 +130,25 @@ impl Session {
                     .ok_or_else(|| ValidationError("Missing surface experiment profile".into()))?;
                 self.world.swept_extension = super::swept_extension::Config::lab_profile(profile)?;
             }
+            Some("set-surface-deficit-balancing") => {
+                let enabled = command
+                    .get("enabled")
+                    .and_then(|v| v.as_bool())
+                    .ok_or_else(|| {
+                        ValidationError("Missing surface-deficit balancing state".into())
+                    })?;
+                self.world.energy_experiment = super::energy_experiment::Config {
+                    mode: if enabled {
+                        "balance-surface-deficit"
+                    } else {
+                        "off"
+                    }
+                    .into(),
+                    audit_receipt: false,
+                    ..Default::default()
+                };
+                self.world.energy_receipt = Default::default();
+            }
             Some("inject-liquid") => {
                 let drop: super::grid::LiquidDrop = serde_json::from_value(
                     command
@@ -235,6 +254,8 @@ impl Session {
         value["uniform"] =
             serde_json::to_value(&self.world.receipt).expect("uniform receipt is serializable");
         value["surfaceExperiment"] = serde_json::json!(self.world.swept_extension);
+        value["surfaceDeficitBalancing"] =
+            serde_json::json!(self.world.energy_experiment.mode == "balance-surface-deficit");
         value["initialVolume"] = serde_json::json!(self.initial_volume);
         value["injectedVolume"] = serde_json::json!(self.injected_volume);
         value["rigidBodies"] = serde_json::json!(self.physical.bodies);

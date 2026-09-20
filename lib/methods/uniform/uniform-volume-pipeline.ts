@@ -346,7 +346,7 @@ export const UNIFORM_VOLUME_PIPELINE: FluidPipelineGraph = {
     // Which cells own a pressure row is decided where the topology and RHS
     // are built, so the V claim sits on that stage.
     if(stage.id==="pressure-system")return [{...mapped,
-      controls:[...(mapped.controls ?? []),volumePressureRowsControl,...pressureLatticeControls]}];
+      controls:[...(mapped.controls ?? []),volumePressureRowsControl,{kind:"param-choice" as const,param:"surfaceDeficitBalancing",label:"Surface-deficit balancing",options:onOff,hint:"Preserve overfill expansion and balance it globally with contraction in underfilled liquid. Reduces persistent sloshing."},...pressureLatticeControls]}];
     // E2b shrinks both of these, off the same fine map, so the one control sits
     // on both stages rather than in a shelf away from the work it prices.
     if(stage.id==="velocity-advection"||stage.id==="pressure-projection")return [{...mapped,

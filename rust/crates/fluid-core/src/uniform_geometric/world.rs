@@ -42,9 +42,13 @@ pub struct World {
     /// Allocated only by diagnostic scene runners.
     pub advected_phi_audit: Option<Vec<f32>>,
     pub tile_classes: Vec<u8>,
+    /// Opt-in pressure-source ablation for the diagnostic runner; never a lab default.
+    pub diagnostic_disable_overfill_correction: bool,
+    pub energy_experiment: super::energy_experiment::Config,
+    pub energy_receipt: super::energy_experiment::Receipt,
     transport: Transport,
-    gravity: [f32; 2],
-    rho: f32,
+    pub(super) gravity: [f32; 2],
+    pub(super) rho: f32,
     viscosity: f32,
     sigma: f32,
 }
@@ -127,6 +131,9 @@ impl World {
             sigma,
             receipt: Receipt::default(),
             advected_phi_audit: None,
+            diagnostic_disable_overfill_correction: false,
+            energy_experiment: Default::default(),
+            energy_receipt: Default::default(),
             tile_classes: Vec::new(),
         })
     }
@@ -205,6 +212,11 @@ impl World {
             return Err(ValidationError("invalid uniform timestep".into()));
         }
         observe("start", &self.grid);
+        let previous_energy = if self.energy_experiment.mode == "energy-cap" {
+            super::energy_experiment::energy(&self.grid, self.rho, self.gravity)
+        } else {
+            (0.0, 0.0)
+        };
         let phi_reference = (self.swept_extension.mode
             == super::swept_extension::Mode::TransportAgreement)
             .then(|| {
@@ -301,8 +313,13 @@ impl World {
         self.receipt.sharpening_dust =
             surface::sharpen_rounds(&mut self.grid, &self.options, sharpening_rounds);
         observe("sharpened", &self.grid);
-        self.advect_velocity(&extension, &prior_phase, dt);
-        self.project(dt);
+        self.advect_velocity(&extension, &prior_phase, dt, &mut observe);
+        observe("forced", &self.grid);
+        if self.energy_experiment.mode == "off" {
+            self.project(dt);
+        } else {
+            super::energy_experiment::project(self, dt, previous_energy);
+        }
         observe("projected", &self.grid);
         self.receipt.frame += 1;
         self.receipt.time += dt as f64;
@@ -378,9 +395,19 @@ impl World {
         }
         value
     }
-    fn advect_velocity(&mut self, e: &Extension, prior_phase: &[bool], dt: f32) {
+    fn advect_velocity(
+        &mut self,
+        e: &Extension,
+        prior_phase: &[bool],
+        dt: f32,
+        observe: &mut impl FnMut(&str, &Grid),
+    ) {
         let g = &self.grid;
         let mut next = super::velocity::advect(g, e, prior_phase, &self.options, dt);
+        std::mem::swap(&mut self.grid.velocity, &mut next);
+        observe("velocityAdvected", &self.grid);
+        std::mem::swap(&mut self.grid.velocity, &mut next);
+        let g = &self.grid;
         for i in 0..next.len() {
             let p = g.point(i);
             if self.options.velocity_transport != "maccormack"
@@ -423,8 +450,20 @@ impl World {
         }
         self.grid.velocity = next;
     }
-    fn project(&mut self, dt: f32) {
+    pub(super) fn project(&mut self, dt: f32) {
         let g = &self.grid;
+        let balance = self
+            .energy_experiment
+            .mode
+            .starts_with("balance-")
+            .then(|| {
+                super::energy_experiment::balance(
+                    g,
+                    &self.options.volume_pressure_rows,
+                    dt,
+                    &self.energy_experiment,
+                )
+            });
         let fine = &mut self.pressure.levels[0];
         for y in 0..fine.dims[1] {
             for x in 0..fine.dims[0] {
@@ -460,9 +499,14 @@ impl World {
                             - (g.pressure_face(q, a) - open) * g.solid_speed(q, a);
                     }
                 }
-                let correction = g.index(p).map_or(0.0, |j| {
-                    (0.5 * (g.volume[j] - open).max(0.0)).min(open) / dt.max(1e-12)
-                });
+                let correction = if self.diagnostic_disable_overfill_correction {
+                    0.0
+                } else {
+                    g.index(p).map_or(0.0, |j| {
+                        (0.5 * (g.volume[j] - open).max(0.0)).min(open) / dt.max(1e-12)
+                            + balance.as_ref().map_or(0.0, |v| v[j])
+                    })
+                };
                 fine.rhs[i] = if fine.phi[i] < 0.0 {
                     -self.rho * (divergence - correction) / dt
                 } else {

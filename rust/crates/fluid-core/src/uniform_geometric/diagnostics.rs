@@ -372,6 +372,8 @@ mod tests {
                     "transported",
                     "corrected",
                     "sharpened",
+                    "velocityAdvected",
+                    "forced",
                     "projected"
                 ]
             );

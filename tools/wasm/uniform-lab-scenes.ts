@@ -33,11 +33,14 @@ for (const profile of ["off","area-only"] as const) {
   assert.equal(uniformLabQuery.read(query).surfaceExperiment,profile);
   assert.equal(query.has("surfaceExperiment"),profile==="off");
 }
+assert.equal(uniformLabQuery.read(new URLSearchParams()).surfaceDeficitBalancing, false);
+assert.equal(uniformLabQuery.read(new URLSearchParams("surfaceDeficitBalancing=1")).surfaceDeficitBalancing, true);
 const summaries: unknown[] = [];
 const baseline = new Map<string, unknown>();
 assert.deepEqual(UNIFORM_LAB_VALUES, {
   ...UNIFORM_GEOMETRIC_DEFAULTS,
   activeRegion: "off",
+  surfaceDeficitBalancing: "off",
 });
 for (const artifact of ["scalar", "simd"] as const) {
   const root = new URL(
@@ -85,6 +88,15 @@ for (const artifact of ["scalar", "simd"] as const) {
     workerFactory: factory,
   });
   try {
+    const balancedScene = sceneDocument(findSceneDefinition("coarse-first-pool-impact-half")!);
+    let balancedView = await controller.load(balancedScene, "area-only", true);
+    assert.equal(balancedView.surfaceDeficitBalancing, true);
+    balancedView = await controller.advance(1 / 30);
+    assert.equal(balancedView.surfaceDeficitBalancing, true);
+    assert.ok(balancedView.velocity.every(Number.isFinite));
+    const baselineView = await controller.load(balancedScene);
+    assert.equal(baselineView.surfaceDeficitBalancing, false, "reloading without the toggle restores baseline");
+    assert.equal(baselineView.revision.frame, 0);
     for (const sceneId of [
       "water-box-dam-break",
       "minimal-power-dam-break-32",
@@ -320,6 +332,7 @@ for (const artifact of ["scalar", "simd"] as const) {
     );
     const ui = {
       surfaceExperiment: "regional-area" as const,
+      surfaceDeficitBalancing: true,
       sceneId: "water-box-dam-break",
       dt: 1 / 60,
       layers: visualLayers(["pressure", "grid"]),

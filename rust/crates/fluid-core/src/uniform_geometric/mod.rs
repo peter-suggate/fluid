@@ -1,6 +1,7 @@
 //! Uniform Geometric 2D backend for advance-lab and differential scene probes.
 //! Configuration is generated from the same method schema as the GPU backend.
 pub mod extension;
+pub mod energy_experiment;
 pub mod diagnostics;
 pub mod grid;
 pub mod options;
