@@ -3,7 +3,7 @@ import { methodConfigurationImpact } from "../method-lifecycle";
 import { validateMethodConfiguration } from "../stores/method-store";
 import { hostTransportBlockReason, hostTransportFailure } from "./host-transport-status";
 import { BUILD_ID, canonicalScene, cloneScene, parseScene, type RunState, type SceneDescription } from "../model";
-import { adoptRigidBodyRoster, boundingRadius, cloneRigidBodies, createBodyDescription, initializeRigidBodies, initializeRigidBody, rigidDiagnostics, type RigidBodyState, type RigidStepDiagnostics } from "../rigid-body";
+import { nextRigidBodyIndex, adoptRigidBodyRoster, boundingRadius, cloneRigidBodies, createBodyDescription, initializeRigidBodies, initializeRigidBody, rigidDiagnostics, type RigidBodyState, type RigidStepDiagnostics } from "../rigid-body";
 import type { RigidBodyDescription } from "../model";
 import type { RigidShape, Vec3 } from "../model";
 import { BROWSER_GPU_THROUGHPUT_DEPTH, sceneEditRequiresReset } from "../webgpu-renderer";
@@ -1345,8 +1345,7 @@ class SimulationController {
     const scene = sceneStore.scene;
     if (scene.rigidBodies.length >= MAX_BODIES) { this.session(paneId).runtime.getState().setNotice(`Renderer limit is ${MAX_BODIES} bodies in this verified increment`, "warn"); return; }
     this.recordHistory(`add ${shape}`, undefined, paneId);
-    let bodyIndex = 1;
-    while (scene.rigidBodies.some((body) => body.id === `body-${shape}-${bodyIndex}`)) bodyIndex += 1;
+    const bodyIndex = nextRigidBodyIndex(scene.rigidBodies, shape);
     const description = createBodyDescription(shape, bodyIndex, scene.container.height_m);
     sceneStore.patchScene({ rigidBodies: [...scene.rigidBodies, description] });
     const paneRuntime = this.runtime(paneId);
@@ -1371,8 +1370,7 @@ class SimulationController {
     const scene = sceneStore.scene;
     if (scene.rigidBodies.length >= MAX_BODIES) { this.session(paneId).runtime.getState().setNotice(`Renderer limit is ${MAX_BODIES} bodies in this verified increment`, "warn"); return undefined; }
     this.recordHistory(`place ${shape}`, undefined, paneId);
-    let bodyIndex = 1;
-    while (scene.rigidBodies.some((body) => body.id === `body-${shape}-${bodyIndex}`)) bodyIndex += 1;
+    const bodyIndex = nextRigidBodyIndex(scene.rigidBodies, shape);
     // The size the placement row is showing, when it is showing one. Applied
     // before the radius is taken, or a body sized up in the strip would be
     // rested against the footprint of the one the table ships.

@@ -79,8 +79,9 @@ impl Extension {
         for i in 0..g.volume.len() {
             let p = g.point(i);
             let t = p[0] as usize / 4 + cd[0] * (p[1] as usize / 4);
-            seed[t] |=
-                g.volume[i].abs() > o.volume_dust_threshold.max(1e-6) || g.capacity[i] < 0.99999;
+            seed[t] |= g.volume[i].abs() > o.volume_dust_threshold.max(1e-6)
+                || g.capacity[i] < 0.99999
+                || g.drop_fraction(g.point(i)) > 0.0;
             for a in 0..2 {
                 displacement = displacement.max(g.velocity[i][a].abs() * dt / g.h[a]);
             }

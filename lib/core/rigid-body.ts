@@ -3,6 +3,13 @@ import type { Quaternion, RigidBodyDescription, RigidShape, SceneDescription, Ve
 import { sceneShape } from "./scene-shape";
 import { sceneHasTerrain, terrainHeightAt, terrainNormalAt } from "./terrain";
 
+/** Allocate the same readable body identity in every editing host. */
+export function nextRigidBodyIndex(bodies: readonly RigidBodyDescription[], shape: RigidShape, start = 1): number {
+  let index = start;
+  while (bodies.some(body => body.id === `body-${shape}-${index}`)) index += 1;
+  return index;
+}
+
 export interface MassProperties {
   volume_m3: number;
   mass_kg: number;

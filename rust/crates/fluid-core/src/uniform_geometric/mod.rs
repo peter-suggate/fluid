@@ -11,3 +11,5 @@ pub mod transport;
 pub mod velocity;
 pub mod world;
 pub use options::UniformGeometricOptions;
+
+pub mod physical;

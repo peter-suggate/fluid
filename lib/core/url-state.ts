@@ -569,6 +569,12 @@ export function parseQueryState(search: string): QueryState {
         if (isGravityVector(value)) setAtPath(patched, path, value);
         continue;
       }
+      // Most scenes omit this optional roster. An authored drop must still
+      // round-trip when there was no baseline array to infer its type from.
+      if (path === "fluid.initialLiquidVolumes") {
+        if (Array.isArray(value)) setAtPath(patched, path, value);
+        continue;
+      }
       if (path === "surfaceStyle") {
         if (value === "smooth" || value === "voxel-flat") setAtPath(patched, path, value);
         continue;
@@ -713,6 +719,12 @@ export const STUDIO_QUERY_KEYS: readonly string[] = [
  */
 export const RETIRED_QUERY_KEYS: readonly string[] = ["panel", "panelWidth", "sceneConfig"];
 
+/** Scene-document URL ownership, shared by studio and alternate simulation hosts. */
+export const isSceneQueryKey = managedQueryKey(
+  { keys: [REGIONS_QUERY_KEY, CANOPY_QUERY_KEY, STONES_QUERY_KEY, RIM_QUERY_KEY, SEEDS_QUERY_KEY] },
+  { prefixes: ["scene."] },
+);
+
 /**
  * Keys this module rewrites from scratch on every canonical write.
  *
@@ -723,10 +735,10 @@ export const RETIRED_QUERY_KEYS: readonly string[] = ["panel", "panelWidth", "sc
 const isManagedKey = managedQueryKey(
   uiFeatureQuery,
   runtimeFeatureQuery,
-  { keys: [REGIONS_QUERY_KEY, CANOPY_QUERY_KEY, STONES_QUERY_KEY, RIM_QUERY_KEY, SEEDS_QUERY_KEY] },
+  { matches: [isSceneQueryKey] },
   { keys: STUDIO_QUERY_KEYS },
   { keys: RETIRED_QUERY_KEYS },
-  { prefixes: ["camera.", "param.", "scene."] },
+  { prefixes: ["camera.", "param."] },
   { matches: [isCompareQueryKey] },
 );
 

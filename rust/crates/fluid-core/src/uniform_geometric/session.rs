@@ -27,10 +27,13 @@ pub struct Session {
     initial_volume: f64,
     publication: Vec<u8>,
     halted: bool,
+    physical: super::physical::Physical,
+    injected_volume: f64,
 }
 impl Session {
     pub fn new(
         seed: Seed,
+        scene: crate::initial_scene::SceneDocument,
         options: UniformGeometricOptions,
         run_epoch: u32,
         command_sequence: u32,
@@ -47,6 +50,8 @@ impl Session {
             seed.viscosity,
             seed.surface_tension,
         )?;
+        let physical = super::physical::Physical::new(&scene, &world.grid)?;
+        physical.geometry(&mut world.grid);
         let initial_volume = world.grid.volume.iter().map(|&v| v as f64).sum();
         world.receipt.volume = initial_volume;
         world.receipt.phi_area = (0..world.grid.volume.len())
@@ -70,6 +75,8 @@ impl Session {
             initial_volume,
             publication: Vec::new(),
             halted: false,
+            physical,
+            injected_volume: 0.0,
         })
     }
     fn ordered(&self, sequence: u32, epoch: u32) -> Result<(), ValidationError> {
@@ -88,9 +95,17 @@ impl Session {
         if !dt.is_finite() || dt <= 0.0 || dt > 1.0 {
             return Err(ValidationError("invalid uniform timestep".into()));
         }
+        self.physical.geometry(&mut self.world.grid);
         if let Err(error) = self.world.advance(dt as f32) {
             self.halted = true;
             return Err(error);
+        }
+        self.injected_volume += self.world.receipt.injected_volume;
+        if self.world.options.rigid_coupling == "on" {
+            if let Err(error) = self.physical.advance(&self.world.grid, dt as f32) {
+                self.halted = true;
+                return Err(error);
+            }
         }
         self.revision.command_sequence = sequence;
         self.revision.frame = self.world.receipt.frame;
@@ -106,9 +121,103 @@ impl Session {
         command: serde_json::Value,
     ) -> Result<(), ValidationError> {
         self.ordered(sequence, epoch)?;
-        match command.get("type").and_then(|v|v.as_str()) {
-            Some("snapshot")=>{},
-            _=>return Err(ValidationError("uniform lab currently supports playback and scene reset; this live edit is unavailable".into())),
+        match command.get("type").and_then(|v| v.as_str()) {
+            Some("snapshot") => {}
+            Some("inject-liquid") => {
+                let drop: super::grid::LiquidDrop = serde_json::from_value(
+                    command
+                        .get("drop")
+                        .cloned()
+                        .ok_or_else(|| ValidationError("Missing liquid drop".into()))?,
+                )
+                .map_err(|e| ValidationError(e.to_string()))?;
+                if !drop.radius_m.is_finite()
+                    || drop.radius_m <= 0.0
+                    || drop.centre_m.iter().any(|v| !v.is_finite())
+                    || self.world.grid.drops.len() >= 64
+                {
+                    return Err(ValidationError(
+                        "Invalid liquid drop or pending drop budget exceeded".into(),
+                    ));
+                }
+                self.world.grid.drops.push(drop);
+                self.revision.injections += 1;
+            }
+            Some("remove-rigid-body") => {
+                let id = command
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| ValidationError("Missing body id".into()))?;
+                self.physical.bodies.retain(|b| b.description.id != id);
+                self.physical.geometry(&mut self.world.grid);
+                self.revision.field_revision += 1;
+            }
+            Some("set-rigid-pose") => {
+                let id = command
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| ValidationError("Missing body id".into()))?;
+                let position: crate::scene_model::Vec3 = serde_json::from_value(
+                    command
+                        .get("position_m")
+                        .cloned()
+                        .ok_or_else(|| ValidationError("Missing body position".into()))?,
+                )
+                .map_err(|e| ValidationError(e.to_string()))?;
+                let velocity: crate::scene_model::Vec3 = serde_json::from_value(
+                    command
+                        .get("velocity_m_s")
+                        .cloned()
+                        .ok_or_else(|| ValidationError("Missing body velocity".into()))?,
+                )
+                .map_err(|e| ValidationError(e.to_string()))?;
+                if position
+                    .array()
+                    .iter()
+                    .chain(velocity.array().iter())
+                    .any(|v| !v.is_finite())
+                {
+                    return Err(ValidationError("Invalid rigid pose".into()));
+                }
+                let body = self
+                    .physical
+                    .bodies
+                    .iter_mut()
+                    .find(|b| b.description.id == id)
+                    .ok_or_else(|| ValidationError("Unknown rigid body".into()))?;
+                body.position_m = position;
+                body.position_m.z = 0.0;
+                body.linear_velocity_m_s = velocity;
+                body.linear_velocity_m_s.z = 0.0;
+                body.held = command
+                    .get("held")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                self.physical.geometry(&mut self.world.grid);
+                self.revision.field_revision += 1;
+            }
+            Some("add-rigid-body") => {
+                let body = serde_json::from_value(
+                    command
+                        .get("body")
+                        .cloned()
+                        .ok_or_else(|| ValidationError("Missing rigid body".into()))?,
+                )
+                .map_err(|e| ValidationError(e.to_string()))?;
+                self.physical.add(body)?;
+                if command.get("held").and_then(|v| v.as_bool()) == Some(true) {
+                    if let Some(b) = self.physical.bodies.last_mut() {
+                        b.held = true;
+                    }
+                }
+                self.physical.geometry(&mut self.world.grid);
+                self.revision.field_revision += 1;
+            }
+            _ => {
+                return Err(ValidationError(
+                    "Unsupported Uniform editing command".into(),
+                ))
+            }
         }
         self.revision.command_sequence = sequence;
         Ok(())
@@ -119,6 +228,9 @@ impl Session {
         value["uniform"] =
             serde_json::to_value(&self.world.receipt).expect("uniform receipt is serializable");
         value["initialVolume"] = serde_json::json!(self.initial_volume);
+        value["injectedVolume"] = serde_json::json!(self.injected_volume);
+        value["rigidBodies"] = serde_json::json!(self.physical.bodies);
+        value["pendingDrops"] = serde_json::json!(self.world.grid.drops);
         value["halted"] = serde_json::json!(self.halted);
         value
     }

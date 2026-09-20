@@ -1,7 +1,7 @@
 import { gravityFeature } from "../features/gravity/definition";
 import { setGravity } from "../features/gravity/state";
 import { damBreakFractions, initialFluidBrickComponents } from "./initial-fluid";
-import { SCENE_SHAPES_BY_CODE } from "./scene-shape";
+import { rigidPlacementWedge } from "../features/rigid-placement/ring";
 import type { EditorAction, EditorActionTarget } from "./editor-action";
 import { liquidBallWedge, liquidWedge } from "../features/liquid-drop/ring";
 import { regionDrawWedge } from "../features/refinement-region/ring";
@@ -686,30 +686,7 @@ export function fluidPlayActions(
         effect: { kind: "place-inflow", point_m, normal },
       },
     ]),
-    {
-      id: "carry-solid",
-      label: "Solid",
-      icon: "solid",
-      tone: "body",
-      // Clearing is not here any more: solids are cleared by dragging across
-      // them, which selects the region, and the verb then lives on that
-      // selection's own ring. A wedge that armed a mode to do the same drag was
-      // a second way to start the same gesture. See `editor-voxel-region.ts`.
-      hint: "Place a solid here",
-      // The shape's own name is the icon's name: the vocabulary in
-      // `EditorActionIcon` covers every `SceneShapeName`, so a shape added to
-      // the table draws itself in the ring without a second table to update.
-      children: [
-        ...SCENE_SHAPES_BY_CODE.map((shape) => ({
-          id: shape.name,
-          label: shape.label,
-          icon: shape.name,
-          tone: "body" as const,
-          hint: `Place a ${shape.label.toLowerCase()} here and carry it`,
-          effect: { kind: "place" as const, shape: shape.name, point_m, carry: true },
-        })),
-      ],
-    },
+    rigidPlacementWedge(point_m),
     // `lib/features/refinement-region/ring.ts`, which the lab's ring mounts
     // too. The wedge gained the document's own capacity as it moved: a constant
     // hint promising a box could be drawn was a promise the eighth one does not

@@ -11,6 +11,10 @@ pub struct Grid {
     pub low_x: Vec<f32>,
     pub low_y: Vec<f32>,
     pub released: Vec<u8>,
+    pub drops: Vec<LiquidDrop>,
+    pub rigid_faces: Option<Vec<[f32; 2]>>,
+    pub rigid_speeds: Option<Vec<[f32; 2]>>,
+    pub rigid_centres: Option<Vec<bool>>,
 }
 impl Grid {
     /// Bound allocations before accepting an external scene or diagnostic request.
@@ -41,7 +45,35 @@ impl Grid {
             low_x: vec![0.0; dims[1]],
             low_y: vec![0.0; dims[0]],
             released: vec![0; n],
+            rigid_faces: None,
+            rigid_speeds: None,
+            rigid_centres: None,
+            drops: Vec::new(),
         })
+    }
+    pub fn drop_fraction(&self, p: [i32; 2]) -> f32 {
+        let mut value = 0.0_f32;
+        for drop in &self.drops {
+            let mut covered = 0.0;
+            for k in 0..4 {
+                let x = (p[0] as f32 + 0.25 + 0.5 * (k & 1) as f32) * self.h[0] - drop.centre_m[0];
+                let y = (p[1] as f32 + 0.25 + 0.5 * (k >> 1) as f32) * self.h[1] - drop.centre_m[1];
+                if x.hypot(y) <= drop.radius_m {
+                    covered += 0.25;
+                }
+            }
+            value = (value + covered).min(1.0);
+        }
+        value
+    }
+    pub fn source_phi(&self, p: [f32; 2], mut phi: f32) -> f32 {
+        for drop in &self.drops {
+            phi = phi.min(
+                (p[0] * self.h[0] - drop.centre_m[0]).hypot(p[1] * self.h[1] - drop.centre_m[1])
+                    - drop.radius_m,
+            );
+        }
+        phi
     }
     pub fn index(&self, p: [i32; 2]) -> Option<usize> {
         (p[0] >= 0 && p[1] >= 0 && p[0] < self.dims[0] as i32 && p[1] < self.dims[1] as i32)
@@ -148,7 +180,17 @@ impl Grid {
             0.5 * h
         }
     }
+    pub fn solid_speed(&self, p: [i32; 2], a: usize) -> f32 {
+        self.index(p)
+            .and_then(|i| self.rigid_speeds.as_ref().map(|v| v[i][a]))
+            .unwrap_or(0.0)
+    }
     pub fn pressure_face(&self, p: [i32; 2], a: usize) -> f32 {
+        self.index(p)
+            .and_then(|i| self.rigid_faces.as_ref().map(|v| v[i][a]))
+            .unwrap_or_else(|| self.base_pressure_face(p, a))
+    }
+    pub fn base_pressure_face(&self, p: [i32; 2], a: usize) -> f32 {
         let mut q = p;
         q[a] += 1;
         let x = self.open(p);
@@ -174,6 +216,14 @@ impl Grid {
             return self.low_y[p[0] as usize];
         }
         self.index(p).map_or(0.0, |i| self.velocity[i][a])
+    }
+    pub fn relative_face(&self, p: [i32; 2], a: usize) -> f32 {
+        let velocity = self.face(p, a);
+        if self.rigid_speeds.is_some() {
+            velocity - self.solid_speed(p, a)
+        } else {
+            velocity
+        }
     }
     pub fn is_released(&self, p: [i32; 2], a: usize) -> bool {
         let mut q = p;
@@ -273,4 +323,13 @@ pub fn plane_fraction(n: [f32; 2], offset: f32) -> f32 {
     } else {
         f
     }
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LiquidDrop {
+    #[serde(rename = "centre_m")]
+    pub centre_m: [f32; 2],
+    #[serde(rename = "radius_m")]
+    pub radius_m: f32,
 }

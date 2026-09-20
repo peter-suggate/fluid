@@ -71,7 +71,7 @@ pub fn advect(g: &mut Grid, velocity: &Extension, o: &UniformGeometricOptions, d
                         value = value.min(g.phi_at(velocity.trace(g, inside, dt)));
                     }
                     let face = if side > 0 { fluid } else { solid };
-                    let travel = -side as f32 * g.face(face, a) * dt;
+                    let travel = -side as f32 * g.relative_face(face, a) * dt;
                     if g.is_released(face, a) && travel > 1e-4 * g.h[a] {
                         air = air.max(travel);
                     }
@@ -113,7 +113,7 @@ pub fn advect(g: &mut Grid, velocity: &Extension, o: &UniformGeometricOptions, d
                                 continue;
                             }
                             let face = if side > 0 { solid } else { fluid };
-                            let travel = dt * inward * g.face(face, a);
+                            let travel = dt * inward * g.relative_face(face, a);
                             if g.is_released(face, a) && travel > 1e-4 * g.h[a] {
                                 value = value.max(travel - distance * g.h[a]);
                             }
@@ -139,13 +139,14 @@ pub fn advect(g: &mut Grid, velocity: &Extension, o: &UniformGeometricOptions, d
                         if !ambient && !g.is_released(face, a) {
                             continue;
                         }
-                        let travel = dt * inward * g.face(face, a);
+                        let travel = dt * inward * g.relative_face(face, a);
                         if travel > 1e-4 * g.h[a] {
                             value = value.max(travel - inward * (p[a] - plane) * g.h[a]);
                         }
                     }
                 }
             }
+            value = g.source_phi(p, value);
             if o.phi_agreement == "on" && value.abs() < 2.0 * h {
                 let mut r = 0.0;
                 let mut area = 0.0;

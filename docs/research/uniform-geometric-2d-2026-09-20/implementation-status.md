@@ -45,7 +45,9 @@ option, source, material-force profile or live-edit operation has exact parity.
   releasing pooled publication buffers. Scalar and SIMD artifacts are rebuilt.
 - The UI uses the shared scene catalog and shared initial V/phi builders to
   sample a central XY slice. It offers play/pause, step, reset, scene selection,
-  six field views, grid, fit/zoom/pan and cell inspection. Stage descriptions and
+  six field views, grid, fit/zoom/pan and cell inspection. The timestep selector
+  spans 1/15 to 1/120 s and changes the next advance without reseeding.
+  Stage descriptions and
   read-only defaults come directly from the shared pipeline and parameter schema.
 - Bare URLs select Uniform; explicit adaptive method or legacy transport URLs
   retain the adaptive lab. Method switching and history navigation dispose the
@@ -147,14 +149,80 @@ full, mirrored dam, embedded ceiling and an odd-width pool.
   on the UI integration revision. Targeted UI/controller lint passed. Repository
   type checking still reports 15 errors in unchanged sparse tests/tools.
 
+The post-UI canonical Sparse CM12 gate completed in 408.2 seconds with 4 passing
+and 13 failing lanes, matching the earlier failure categories (8 timeouts,
+4 correctness failures, 1 performance ceiling). The mini64 median was 196.7 ms
+against the unchanged 110 ms ceiling. See [post-UI gate receipts](sparse-gate-ui.json).
+
+## Shared editor follow-up
+
+- The scene selector now mounts the production `ScenePickerPopover`, including
+  thumbnails, grouped catalog, recents, search and keyboard navigation. Both 2D
+  methods use `LabSceneSelector` and the same timestep roster.
+- The clean Uniform sidebar mounts the existing liquid-drop feature row and the
+  extracted rigid-placement feature row. The latter is also mounted by the 3D
+  toolstrip; shape choices, dimensions, arming and icons share one implementation.
+  The radial menu shares the liquid actions, rigid placement roster and delete
+  action. Supported rigid shapes are sphere, box, capsule, cylinder and cup.
+- Live commands run through the owned Wasm world. Liquid drops seed phi and add
+  covered volume at the source stage on the next advance. Rigid commands add,
+  grab, drag, release and remove bodies without recreating the fluid world.
+  The XY adapter supplies solid coverage, face velocity and fluid exchange to
+  the existing Rust rigid integrator and static-world contacts. Planar mass and
+  Z inertia use the primitive's cross-section and one cell of depth; ordinary
+  3D bodies keep the original mass/volume path. This is dimensional integration,
+  not a claim of exact 3D rigid-trajectory parity.
+- URL persistence uses `startHostQueryStateSync`, query codecs and the studio's
+  cached scene-diff layer. Scene, timestep, field, grid and fractional camera
+  position/zoom survive reload. Drops and rigid edits update the authored scene
+  in the URL. Like the studio, this restores authored state, not elapsed solver
+  history. Reset restarts that authored document. A shared parser fix retains
+  optional liquid-volume arrays even when the preset did not contain one.
+  Scene validation now reads the canonical shape roster, so cups also survive
+  reload rather than triggering a silent fallback to the unedited preset.
+- Shared body identity allocation avoids reusing an existing body's ID after
+  deletion. Queued edits check their world owner before updating the document
+  or displaying a receipt, so a reset cannot adopt an old world's completion.
+
+Validation on this follow-up:
+
+- The existing owned-world scene harness now covers authored URL round trips,
+  live injection, held/released bodies, removal, all five shapes and a submerged
+  light disk rising under buoyancy. Scalar and SIMD scenes pass; live-tool and
+  shape-roster fields agree exactly. No unit tests were added.
+- Browser verification passed scene search/keyboard selection, timestep changes,
+  restored drop/body geometry, rigid dragging, radial deletion and URL updates.
+  The browser recorded no console errors.
+- [Current UI-default parity receipts](parity-ui-defaults.json) pass all 33
+  checkpoints across 11 scenes at the original bounds, with native, scalar and
+  SIMD agreement. These core fixtures contain no moving rigid bodies.
+- The 47 existing publication, worker, lens, persistence and adaptive-world
+  checks pass, as do three existing Rust rigid-reference checks. Targeted lint
+  passes. Repository type checking retains 15 errors in unchanged sparse files.
+
+The post-tool canonical Sparse CM12 gate completed in 418.7 seconds: 4 passing
+and 13 failing lanes, matching the prior categories (8 timeouts, 4 correctness
+failures, 1 performance ceiling). Mini64 measured 198.25 ms against the unchanged
+110 ms ceiling. See [tool-integration gate receipts](sparse-gate-tools.json).
+No lane or timing threshold was weakened.
+
+Moving bodies can occlude conserved donors and reduce liquid volume; the UI
+reports that drift. The 36-frame live-tool scene reports 179.23036 cell areas after starting
+with 168 and injecting 13: a loss of 1.76964 (about 0.98%). No capacity balancing or compensating mass injection
+was introduced. Quantifying and comparing moving-solid volume loss against the
+3D method remains a scene-level follow-up; the body-free conservation assertions
+remain unchanged.
+
 ## Deferred work
 
 1. Solve-window and pressure-window scheduling. `activeRegion: on` still fails
    explicitly in Rust; the UI's sole documented override is `off`.
 2. Editable stage controls, intermediate-stage capture and live parameter
    changes. Current controls display the shared defaults and completed fields.
-3. Source/inflow, live liquid/voxel editing and dynamic rigid coupling. These
-   are not silently emulated; unsupported scenes are disabled in the selector.
+3. Continuous inflow and voxel sculpting. Inflow scenes fail explicitly on load;
+   the shared picker retains the complete production catalog. The live liquid
+   ball and rigid tools are implemented (see below), but arbitrary 3D rigid
+   trajectories and moving-solid conservation do not yet have GPU parity evidence.
 4. Broader stage parity for anisotropic/high-CFL scenes and material forces,
    sharpening work-map scheduling, and the GPU's asynchronous lagged-budget
    observation timing. The existing strict numerical receipts remain evidence

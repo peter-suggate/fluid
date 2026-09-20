@@ -1,3 +1,4 @@
+import { SCENE_SHAPES_BY_CODE } from "./scene-shape";
 import sharedDefaultScene from "./default-scene.json";
 import type { InitialLiquidHeightField } from "./initial-height-field";
 import { validateRefinementRegions } from "./refinement-regions";
@@ -714,7 +715,7 @@ export function validateScene(scene: SceneDescription): string[] {
     for (const body of scene.rigidBodies) {
       if (!body.id || ids.has(body.id)) errors.push("Rigid body IDs must be unique and non-empty");
       ids.add(body.id);
-      if (!(["sphere", "box", "capsule", "cylinder"] as string[]).includes(body.shape)) errors.push(`Unsupported rigid shape ${body.shape}`);
+      if (!SCENE_SHAPES_BY_CODE.some(shape => shape.name === body.shape)) errors.push(`Unsupported rigid shape ${body.shape}`);
       if (!(body.dimensions_m.x > 0) || !(body.dimensions_m.y > 0) || !(body.dimensions_m.z > 0)) errors.push(`Body ${body.id} dimensions must be positive`);
       if (!(body.density_kg_m3 > 0)) errors.push(`Body ${body.id} density must be positive`);
       if (body.restitution < 0 || body.restitution > 1) errors.push(`Body ${body.id} restitution must be in [0, 1]`);

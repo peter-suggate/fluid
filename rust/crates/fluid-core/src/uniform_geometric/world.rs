@@ -28,6 +28,7 @@ pub struct Receipt {
     pub volume: f64,
     pub phi_area: f64,
     pub max_speed: f32,
+    pub injected_volume: f64,
 }
 pub struct World {
     pub grid: Grid,
@@ -215,6 +216,18 @@ impl World {
             &active,
             &mut next,
         )?;
+        self.receipt.injected_volume = 0.0;
+        if !self.grid.drops.is_empty() {
+            for i in 0..next.len() {
+                let added = self
+                    .grid
+                    .drop_fraction(self.grid.point(i))
+                    .min((self.grid.capacity[i] - next[i]).max(0.0));
+                next[i] += added;
+                self.receipt.injected_volume += added as f64;
+            }
+            self.grid.drops.clear();
+        }
         self.grid.volume = next;
         self.receipt.sharpening_dust = surface::sharpen(&mut self.grid, &self.options);
         self.advect_velocity(&extension, &prior_phase, dt);
@@ -347,7 +360,11 @@ impl World {
                     g.pressure_face(p, 0),
                     g.pressure_face(p, 1),
                 ];
-                fine.minimum[i] = if open <= 1e-5 && !ambient {
+                fine.minimum[i] = if (open <= 1e-5
+                    || g.index(p)
+                        .is_some_and(|j| g.rigid_centres.as_ref().is_some_and(|v| v[j])))
+                    && !ambient
+                {
                     0.0
                 } else {
                     -3.402823e38
@@ -359,6 +376,10 @@ impl World {
                     divergence += (g.pressure_face(p, a) * g.face(p, a)
                         - g.pressure_face(q, a) * g.face(q, a))
                         / g.h[a];
+                    if g.rigid_speeds.is_some() {
+                        divergence += (g.pressure_face(p, a) - open) * g.solid_speed(p, a)
+                            - (g.pressure_face(q, a) - open) * g.solid_speed(q, a);
+                    }
                 }
                 let correction = g.index(p).map_or(0.0, |j| {
                     (0.5 * (g.volume[j] - open).max(0.0)).min(open) / dt.max(1e-12)
@@ -382,7 +403,7 @@ impl World {
             let mut q = p;
             q[a] += 1;
             if g.pressure_face(p, a) <= 1e-6 {
-                return 0.0;
+                return g.solid_speed(p, a);
             }
             let pa = g.pressure_phi(p, &self.options.volume_pressure_rows);
             let pb = g.pressure_phi(q, &self.options.volume_pressure_rows);
@@ -409,7 +430,14 @@ impl World {
                     let inward = if own { -1.0 } else { 1.0 };
                     if g.pressure_face(p, a) > 1e-6
                         && pressure(solid) <= 0.0
-                        && inward * v * dt > 1e-4 * g.h[a]
+                        && inward
+                            * (if g.rigid_speeds.is_some() {
+                                v - g.solid_speed(p, a)
+                            } else {
+                                v
+                            })
+                            * dt
+                            > 1e-4 * g.h[a]
                     {
                         released[i] |= 1 << a;
                     }

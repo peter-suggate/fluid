@@ -38,7 +38,7 @@ impl FluidWorld {
             let values=serde_json::from_value(options.get("methodValues").cloned().ok_or_else(||error("resolved uniform defaults are required"))?).map_err(error)?;
             let epoch=options.get("runEpoch").and_then(serde_json::Value::as_u64).and_then(|v|u32::try_from(v).ok()).ok_or_else(||error("invalid run epoch"))?;
             let sequence=options.get("commandSequence").and_then(serde_json::Value::as_u64).and_then(|v|u32::try_from(v).ok()).ok_or_else(||error("invalid command sequence"))?;
-            return Ok(Self{inner:OwnedWorld::Uniform(fluid_core::uniform_geometric::session::Session::new(seed,values,epoch,sequence).map_err(error)?)});
+            return Ok(Self{inner:OwnedWorld::Uniform(fluid_core::uniform_geometric::session::Session::new(seed,serde_json::from_value(scene).map_err(error)?,values,epoch,sequence).map_err(error)?)});
         }
         if options.get("dimension").and_then(serde_json::Value::as_u64) == Some(3) {
             let mut world_options: fluid_core::world::WorldOptions =

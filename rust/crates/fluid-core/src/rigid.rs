@@ -155,6 +155,14 @@ pub struct RigidBodyState {
     pub angular_momentum_kg_m2_s: Vec3,
     #[serde(rename = "mass_kg")]
     pub mass_kg: f64,
+    /// A planar host extrudes area through its slice thickness. Ordinary 3D
+    /// states leave this absent and retain the original primitive arithmetic.
+    #[serde(
+        default,
+        rename = "dimensionalVolume_m3",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub dimensional_volume_m3: Option<f64>,
     #[serde(rename = "inverseMass_kg")]
     pub inverse_mass_kg: f64,
     #[serde(rename = "inverseInertiaBody_kg_m2")]
@@ -261,6 +269,7 @@ pub fn initialize_body(
             z: inertia.z * omega.z,
         },
         mass_kg: mass,
+        dimensional_volume_m3: None,
         inverse_mass_kg: if fixed { 0.0 } else { 1.0 / mass },
         inverse_inertia_body_kg_m2: Vec3 {
             x: if fixed { 0.0 } else { 1.0 / inertia.x },
@@ -283,6 +292,58 @@ fn inverse_inertia(body: &[f32; 32], value: V, density: f32) -> V {
         ),
     )
 }
+/// Planar mass and Z inertia, with the same state and integration path as 3D.
+pub fn initialize_body_2d(
+    description: RigidBodyDescription,
+    depth: f64,
+) -> Result<RigidBodyState, SceneModelError> {
+    let mut body = initialize_body(description)?;
+    let d = body.description.dimensions_m;
+    let rho = body.description.density_kg_m3 * depth;
+    let rectangle = |w: f64, h: f64| {
+        let mass = rho * w * h;
+        (mass, mass * (w * w + h * h) / 12.0)
+    };
+    let (mass, inertia) = match body.description.shape {
+        RigidShape::Sphere => {
+            let mass = rho * std::f64::consts::PI * d.x * d.x;
+            (mass, 0.5 * mass * d.x * d.x)
+        }
+        RigidShape::Box => rectangle(d.x, d.y),
+        RigidShape::Cylinder => rectangle(2.0 * d.x, d.y),
+        RigidShape::Capsule => {
+            let (rm, ri) = rectangle(2.0 * d.x, d.y);
+            let dm = rho * std::f64::consts::PI * d.x * d.x;
+            (
+                rm + dm,
+                ri + dm * (0.5 * d.x * d.x + 0.25 * d.y * d.y)
+                    + 4.0 / 3.0 * rho * d.y * d.x.powi(3),
+            )
+        }
+        RigidShape::Cup => {
+            let t = d.z.clamp(1e-4, 0.95 * d.x.min(d.y));
+            let (outer, oi) = rectangle(2.0 * d.x, d.y);
+            let (inner, ii) = rectangle(2.0 * (d.x - t), d.y - t);
+            (outer - inner, oi - ii - inner * 0.25 * t * t)
+        }
+    };
+    body.mass_kg = mass;
+    body.dimensional_volume_m3 = Some(mass / body.description.density_kg_m3);
+    let fixed = body.description.motion == RigidMotion::Static;
+    body.inverse_mass_kg = if fixed { 0.0 } else { 1.0 / mass };
+    body.inverse_inertia_body_kg_m2 = Vec3 {
+        x: 0.0,
+        y: 0.0,
+        z: if fixed { 0.0 } else { 1.0 / inertia },
+    };
+    body.angular_momentum_kg_m2_s = Vec3 {
+        x: 0.0,
+        y: 0.0,
+        z: inertia * body.angular_velocity_rad_s.z,
+    };
+    Ok(body)
+}
+
 fn pack(body: &RigidBodyState, density: f32) -> Result<[f32; 32], SceneModelError> {
     let mut r = [0.0; 32];
     let d = body.description.dimensions_m;
@@ -644,8 +705,12 @@ pub fn advance_rigid_bodies_with_contacts(
         }
         let e = exchange.get(index).copied().unwrap_or_default().lanes;
         let wet = e[6] as f32 / 65536.0 / snapshots;
-        let volume =
-            primitive_volume(state.description.shape, state.description.dimensions_m)? as f32;
+        let volume = match state.dimensional_volume_m3 {
+            Some(volume) => volume as f32,
+            None => {
+                primitive_volume(state.description.shape, state.description.dimensions_m)? as f32
+            }
+        };
         let displaced = (wet * cell_volume).clamp(0.0, volume);
         let impulse = v(e[0] as f32 * 1e-6, e[1] as f32 * 1e-6, e[2] as f32 * 1e-6);
         let angular = v(e[3] as f32 * 1e-6, e[4] as f32 * 1e-6, e[5] as f32 * 1e-6);
@@ -839,6 +904,51 @@ pub(crate) fn body_contains(body: &RigidBodyState, p: Vec3) -> Result<bool, Scen
         }
     })
 }
+/// Signed primitive distance in body coordinates, shared by grid hosts.
+pub(crate) fn body_signed_distance(body: &RigidBodyState, world: Vec3) -> f32 {
+    let q = body.orientation;
+    let d = sub(
+        v(world.x as f32, world.y as f32, world.z as f32),
+        v(
+            body.position_m.x as f32,
+            body.position_m.y as f32,
+            body.position_m.z as f32,
+        ),
+    );
+    let p = qrotate([q.w as f32, -q.x as f32, -q.y as f32, -q.z as f32], d);
+    let size = body.description.dimensions_m;
+    let box_sdf = |a: f32, b: f32, c: f32| {
+        length(v(a.max(0.0), b.max(0.0), c.max(0.0))) + a.max(b).max(c).min(0.0)
+    };
+    let cylinder = |radius: f32, height: f32| {
+        let x = p[0].hypot(p[2]) - radius;
+        let y = p[1].abs() - 0.5 * height;
+        x.max(0.0).hypot(y.max(0.0)) + x.max(y).min(0.0)
+    };
+    match body.description.shape {
+        RigidShape::Sphere => length(p) - size.x as f32,
+        RigidShape::Box => box_sdf(
+            p[0].abs() - 0.5 * size.x as f32,
+            p[1].abs() - 0.5 * size.y as f32,
+            p[2].abs() - 0.5 * size.z as f32,
+        ),
+        RigidShape::Capsule => {
+            length(v(
+                p[0],
+                p[1] - p[1].clamp(-0.5 * size.y as f32, 0.5 * size.y as f32),
+                p[2],
+            )) - size.x as f32
+        }
+        RigidShape::Cylinder => cylinder(size.x as f32, size.y as f32),
+        RigidShape::Cup => {
+            let t = (size.z as f32).clamp(1e-4, 0.95 * (size.x as f32).min(size.y as f32));
+            let cavity =
+                (p[0].hypot(p[2]) - (size.x as f32 - t)).max(-0.5 * size.y as f32 + t - p[1]);
+            cylinder(size.x as f32, size.y as f32).max(-cavity)
+        }
+    }
+}
+
 pub(crate) fn round_ties_even(value: f64) -> i32 {
     let floor = value.floor();
     let fraction = value - floor;

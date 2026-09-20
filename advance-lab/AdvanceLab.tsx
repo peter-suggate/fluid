@@ -125,7 +125,8 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { useStore } from "zustand";
 import { EditorModeChip } from "../components/EditorModeChip";
 import { RadialMenu } from "../components/RadialMenu";
-import { ScenePickerPopover } from "../components/ScenePickerPopover";
+import { LabSceneSelector } from "./LabSceneSelector";
+import { STEP_SIZES } from "./lab-step";
 import { ThemeSwitch } from "../components/ThemeSwitch";
 import { ViewportModeToggle } from "../components/ViewportModeToggle";
 import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
@@ -143,7 +144,6 @@ import {
 } from "../lib/features/refinement-region/policy";
 import { RegionDeleteRow, RegionOptionRows } from "../lib/features/refinement-region/ui";
 import { SessionProvider } from "../lib/core/session/session-context";
-import { sceneCatalogCards } from "../lib/core/scenes";
 import {
   advanceCosts, ADVANCE_NOTES, ADVANCE_STAGE_ORDER, advanceSeamCost,
   advanceStageWork, advanceWorkModel, ADVANCE_DISPATCH_KINDS,
@@ -244,18 +244,6 @@ const STEP_COST_SAMPLES = 9;
  */
 const defaultDropRadius = (nx: number, ny: number): number =>
   Math.max(2, Math.min(nx, ny) / 12);
-
-/* Step sizes the lab will run. The scene documents do not agree on one — most
- * resolve to CM12's paper regime, a handful of coarse fixtures to 1/60 s — so
- * the lab states the step itself and holds every scene to the paper one until
- * a reader says otherwise. Nothing else in the seed depends on it, which is
- * why retiming is a change to the next advance rather than a new run. */
-const STEP_SIZES: readonly { readonly dt: number; readonly label: string }[] = [
-  { dt: 1 / 15, label: "1/15 s" },
-  { dt: CM12_PAPER_DT_S, label: "1/30 s" },
-  { dt: 1 / 60, label: "1/60 s" },
-  { dt: 1 / 120, label: "1/120 s" },
-];
 
 /**
  * Take one advance's wall cost, and publish the median of the recent ones.
@@ -704,7 +692,6 @@ function AdvanceSlice({ session, lab }: {
 
   const [step, setStep] = useState<number | null>(null);
   const [metric, setMetric] = useState<Metric>("workgroups");
-  const [picking, setPicking] = useState(false);
   const [authored, setAuthored] = useState<AdvanceAuthoredScene | null>(null);
   const pressureBudgetTouched = useRef(false);
   const [dt, setDt] = useState(CM12_PAPER_DT_S);
@@ -1718,26 +1705,9 @@ function AdvanceSlice({ session, lab }: {
       <div className={styles.side}>
         <Link href="/" className={styles.mark} title="Fluid Lab">FL</Link>
 
-        <div className={styles.anchor}>
-          <button type="button" className={styles.sceneChip}
-            data-scene-selector-toggle=""
-            aria-haspopup="dialog" aria-expanded={picking}
-            onClick={() => setPicking(open => !open)}>
-            <b>{authored?.label ?? "Loading scene"}</b>
-            <em>{displayNx}×{displayNy} centre-Z slice</em>
-            <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2 3.6 5 6.6 8 3.6" /></svg>
-          </button>
-          {picking && <ScenePickerPopover
-            className={styles.scenePopover}
-            cards={sceneCatalogCards}
-            currentId={sceneId}
-            label="Choose the production scene this lab slices"
-            choose={card => {
-              chooseRun(card.id, transportExperiment);
-              setPicking(false);
-            }}
-            close={() => setPicking(false)} />}
-        </div>
+        <LabSceneSelector sceneId={sceneId}
+          dimensions={[displayNx, displayNy]}
+          choose={id => chooseRun(id, transportExperiment)} />
 
         {caveats > 0 && <button type="button" className={styles.caveat}
           onClick={() => setFolds(current => new Set(current).add("scene"))}>

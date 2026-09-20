@@ -1,24 +1,15 @@
 "use client";
 
-import { useState } from "react";
+import { RigidDropRow } from "../lib/features/rigid-placement/ui";
 import { TopologyFreezeButton } from "../lib/features/topology-freeze/ui";
 import { LiquidDropRow as SharedLiquidDropRow } from "../lib/features/liquid-drop/ui";
 import { RegionRow as SharedRegionRow } from "../lib/features/refinement-region/ui";
 import { studioRegionSpace } from "../lib/core/editor-refinement-region";
 import { performEditorAction } from "../lib/core/editor-action-runtime";
-import { placementFields } from "../lib/core/editor-placement";
 import { voxelToolGroups } from "../lib/core/editor-voxel-tool-actions";
-import { SCENE_SHAPES_BY_CODE, sceneShape } from "../lib/core/scene-shape";
 import { useSession } from "../lib/core/session/session-context";
 import { strokeHint, useArmedStroke } from "./armed-stroke";
 import { EditorActionGlyph, EditorActionPathGlyph } from "./EditorActionIcon";
-import {
-  ToolstripMenuButton,
-  ToolstripMenuItem,
-  ToolstripNumber,
-  ToolstripRow,
-  useToolstripSection,
-} from "./toolstrip";
 
 /**
  * The three strokes that put something into the scene.
@@ -115,84 +106,6 @@ function WaterRow() {
 }
 
 /**
- * Drop a solid, at a shape and a size chosen here.
- *
- * The field view's treatment, because it is the same shape of question: one
- * choice out of a handful, so the mark *is* the current answer and the chevron
- * beside it is the rest. A sphere by default — the store's own default, not a
- * second opinion about it — and the row draws whichever shape is standing.
- *
- * Its numbers are the shape's own. A sphere has a radius, a cylinder a radius
- * and a height, a cup an outer radius, a height and a wall: three floats in the
- * document, but only as many of them as this shape actually reads, labelled with
- * the words the shape table already uses for them. They are here rather than
- * behind the drop because sizing before placing is the whole point of a template
- * — dropping a body to find out how big it is, resizing it, and dropping the
- * next one to find out again is the loop this row removes.
- */
-function BodyRow() {
-  const session = useSession();
-  const shape = session.ui((state) => state.placementShape);
-  const placed = session.ui((state) => state.placementDimensions);
-  const setPlacementShape = session.ui((state) => state.setPlacementShape);
-  const setPlacementDimensions = session.ui((state) => state.setPlacementDimensions);
-  const { armed, toggle } = useArmedStroke("body-drag");
-  // Local for the same reason the field view's list is: it is the state of one
-  // disclosure. The claim is what keeps a single card open across the column, so
-  // opening this list closes whatever else the strip had up.
-  const [picking, setPicking] = useState(false);
-  const { claim } = useToolstripSection("placement-shape", () => setPicking(false));
-  const pick = (open: boolean) => {
-    claim(open);
-    setPicking(open);
-  };
-
-  const kind = sceneShape(shape);
-  const fields = placementFields(shape, placed);
-  return <ToolstripRow
-    icon={<EditorActionGlyph name={shape} />}
-    name={`Drop a ${kind.label.toLowerCase()}`}
-    hint={strokeHint("body-drag", armed)}
-    active={armed}
-    testId="scene-body-row"
-    onClick={toggle}
-    after={<>
-      <ToolstripMenuButton
-        label="Body shape"
-        hint="What the next drop puts down. Its own numbers follow the shape."
-        open={picking}
-        testId="scene-body-pick"
-        onOpen={pick}
-      >
-        {SCENE_SHAPES_BY_CODE.map((candidate) => <ToolstripMenuItem
-          key={candidate.name}
-          icon={<EditorActionGlyph name={candidate.name} size={13} />}
-          label={candidate.label}
-          active={candidate.name === shape}
-          testId={`scene-body-pick-${candidate.name}`}
-          onClick={() => {
-            setPlacementShape(candidate.name);
-            pick(false);
-          }}
-        />)}
-      </ToolstripMenuButton>
-      <div className="toolstrip-dimensions">
-        {fields.map((field) => <ToolstripNumber
-          key={field.axis}
-          tag={field.tag}
-          value={field.value}
-          step={field.step}
-          min={field.min}
-          ariaLabel={`${kind.label} ${field.label}`}
-          onCommit={(value) => setPlacementDimensions(shape, field.apply(value))}
-        />)}
-        <span>m</span>
-      </div>
-    </>}
-  />;
-}
-
-/**
  * The making rows, in the order they are reached for.
  *
  * Region first because it is about an existing solve rather than about the
@@ -204,6 +117,6 @@ export function MakeRows({ fluid }: { fluid: boolean }) {
   return <>
     {fluid && <RegionRow />}
     <WaterRow />
-    <BodyRow />
+    <RigidDropRow />
   </>;
 }
