@@ -18,6 +18,7 @@ const sharpenChip = (context: FluidPipelineContext) => {
 };
 type VolumeInfo = {
   uniformVolumePageTransportReceiptMs?: number; uniformVolumePageSharpenReceiptMs?: number;
+  uniformVolumeTransportWorkgroups?: number; uniformVolumeSharpenWorkgroups?: number;
   uniformVolumePageEdge?: number; uniformVolumePagesActive?: number; uniformVolumePagesTotal?: number;
   uniformVolumePageBytes?: number; uniformVolumePageStage?: string;
   uniformVolumeDustCells?: number; uniformVolumeDustMass_cells?: number;
@@ -227,18 +228,23 @@ const pressureLatticeControls = [
 ];
 const transportControls = [
   {kind:"param-choice" as const,param:"volumeStorage",label:"Volume record storage",
-    options:[{value:"dense",label:"Dense",hint:"Current dense storage and synchronous advance."},
-      {value:"pages16",label:"16³ pages",hint:"Demand-allocated transport/sharpening records; other fields remain dense."},
+    options:[{value:"auto",label:"Automatic",hint:"Page-first work for large scenes; direct small-scene path."},{value:"dense",label:"Dense",hint:"Dense storage and synchronous advance."},
+      {value:"pages16",label:"16³ pages",hint:"GPU-assigned transport/sharpening pages; capacity reserved at initialization."},
       {value:"pages32",label:"32³ pages",hint:"Larger pages amortize address translation. Rebuilds the simulation."}]},
   {kind:"readout" as const,label:"Resident volume pages",
-    hint:"Actual last-stage page demand and reserved high-water storage for the 80-byte volume records.",
+    hint:"Actual last-stage active page count and total reserved arena capacity for the 80-byte records. Reservation is currently domain-sized; compute work follows active tiles.",
     value:(context: FluidPipelineContext)=>{const info=volumeInfo(context);
-      return info?.uniformVolumePageEdge ? `${info.uniformVolumePagesActive ?? 0} / ${info.uniformVolumePagesTotal ?? 0} · ${((info.uniformVolumePageBytes ?? 0)/1048576).toFixed(1)} MiB · ${info.uniformVolumePageStage ?? "initial"}` : "dense";}},
-  {kind:"readout" as const,label:"Page receipt waits",
-    hint:"Host wall time waiting for GPU page demand and allocating storage, transport / sharpening. Includes completion of preceding GPU work; do not add these to stage timings. Paged stage timings include gaps between submissions, not just GPU compute time.",
-    value:(context: FluidPipelineContext)=>{const info=volumeInfo(context);
-      if (!info?.uniformVolumePageEdge) return "not paged";
-      return `${(info.uniformVolumePageTransportReceiptMs ?? 0).toFixed(1)} / ${(info.uniformVolumePageSharpenReceiptMs ?? 0).toFixed(1)} ms`; }},
+      return info?.uniformVolumePageEdge ? `${info.uniformVolumePagesActive ?? 0} / ${info.uniformVolumePagesTotal ?? 0} · ${((info.uniformVolumePageBytes ?? 0)/1048576).toFixed(1)} MiB reserved · ${info.uniformVolumePageStage ?? "initial"}` : "dense";}},
+  {kind:"readout" as const,label:"Scheduled volume tiles",
+    hint:"Actual 4³ workgroups dispatched for transport / sharpening. Sharpening reuses its list and cached geometry across eight sweeps. Domain capacity is shown for comparison.",
+    value:(context:FluidPipelineContext)=>{const info=volumeInfo(context);
+      if(info?.uniformVolumeTransportWorkgroups===undefined)return "direct small-scene / dense schedule";
+      const d=context.info;
+      const capacity=d?Math.ceil(d.nx/4)*Math.ceil(d.ny/4)*Math.ceil(d.nz/4):0;
+      return `${info.uniformVolumeTransportWorkgroups} / ${info.uniformVolumeSharpenWorkgroups??0} · domain ${capacity}`;}},
+  {kind:"readout" as const,label:"Page scheduling",
+    hint:"GPU page compaction and indirect tile dispatches stay in one command buffer. No CPU page-demand readback, arena allocation, or frame continuation.",
+    value:(context:FluidPipelineContext)=>volumeInfo(context)?.uniformVolumePageEdge?"GPU only · one submission":"direct"},
   {kind:"param-choice" as const,param:"transportWorkMap",label:"Transport work",
     options:[{value:"tiles",label:"Live tiles",hint:"Build edges, sum and normalise donors and gather only in the 4h tiles that can hold or receive liquid this step. Outside them the gather stores V=0 and gamma=0 without evaluating either."},
       {value:"dense",label:"Dense",hint:"The full-lattice schedule, retained so the shrink can be measured on its own."}],

@@ -43,10 +43,8 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
     for(let frame=1;frame<=5;frame++) {
       for(const solver of solvers) {
         assert.ok(solver.advanceTo(frame/30));
-        if(solver.volumePageSource && solver.info.hostSchedulingUsesReadback) {
-          assert.equal(solver.framePending,true);
-          assert.equal(solver.advanceTo((frame+1)/30),false,"must not start a second split frame");
-        }
+        assert.equal(solver.info.hostSchedulingUsesReadback,false);
+        assert.equal(solver.framePending,false);
         await solver.awaitFrameCompletion();await device.queue.onSubmittedWorkDone();
         await solver.readStats();
         assert.equal(solver.framePending,false);
@@ -80,7 +78,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
   } finally {for(const r of resources)r.destroy();for(const s of solvers)s.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
 });
 
-(modulePath?test:test.skip)("garden hose paged arena grows safely across split frames and live liquid insertion",{timeout:240000},async()=>{
+(modulePath?test:test.skip)("garden hose GPU-only page work preserves live liquid insertion",{timeout:240000},async()=>{
   await acquireWebGPUExclusiveLock("dawn-test","Uniform pages garden hose");
   let device:GPUDevice|undefined;
   const solvers:WebGPUUniformReferenceSolver[]=[];
@@ -98,10 +96,8 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
         if(frame===9)solver.applyRuntimeValues({sharpeningWorkMap:"on",transportWorkMap:"tiles"});
         if(frame===2 || frame===7)solver.injectLiquidBall({centre_m:{x:0.65,y:0.5,z:0.35},radius_m:0.04});
         assert.ok(solver.advanceTo(frame/30));
-        if(solver.volumePageSource) {
-          assert.equal(solver.framePending,true);
-          assert.equal(solver.advanceTo((frame+1)/30),false);
-        }
+        assert.equal(solver.framePending,false);
+        assert.equal(solver.info.hostSchedulingUsesReadback,false);
         await solver.awaitFrameCompletion();await solver.readStats();
       }
       for(const field of ["volumeTexture","vertexPhiTexture"] as const) {

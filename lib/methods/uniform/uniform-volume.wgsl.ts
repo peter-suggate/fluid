@@ -5,6 +5,7 @@ export const UNIFORM_VOLUME_ENTRIES = [
   "uvAdvectPhi", "uvRedistancePhi", "uvBuildEdges",
   "uvFinishDonorSums", "uvFallback", "uvNormalizeRows", "uvNormalizeDonors", "uvGather",
   "uvPrepareSharpen", "uvProposeSharpen", "uvLimitSharpen", "uvCommitSharpen", "uvPublish",
+  "uvCacheSharpenCells", "uvCacheSharpenFaces",
   "uvBalanceMeasure", "uvBalanceReduce",
   "uvAgreementResidual", "uvCorrectionCapacity", "uvCorrectionTargets",
 ] as const;
@@ -330,7 +331,7 @@ fn uvTransportSkip(id:vec3i)->bool{
 }
 @compute @workgroup_size(4,4,4)
 fn uvBuildEdges(@builtin(global_invocation_id)gid:vec3u){
-  let id=activeId(gid);if(uvTransportSkip(id)){return;}
+  let id=uvWorkId(gid);if(uvTransportSkip(id)){return;}
   if(!valid(id)){return;}let index=linearIndex(id);
   let departure=uvTrace(vec3f(id)+vec3f(0.5),params.dimsDt.w)-vec3f(0.5);
   let base=vec3i(floor(departure));let f=fract(departure);
@@ -348,13 +349,13 @@ fn uvFinishDonorSums(@builtin(global_invocation_id)gid:vec3u){
 }
 @compute @workgroup_size(4,4,4)
 fn uvFallback(@builtin(global_invocation_id)gid:vec3u){
-  let id=activeId(gid);if(uvTransportSkip(id)){return;}
+  let id=uvWorkId(gid);if(uvTransportSkip(id)){return;}
   if(!valid(id)){return;}let i=linearIndex(id);
   if(atomicLoad(&sharpenDeposits[i])==0){uvEdges[uvEdgeAddress(i)].weight[8]=max(uvOpen(id),1e-6);}
 }
 @compute @workgroup_size(4,4,4)
 fn uvNormalizeRows(@builtin(global_invocation_id)gid:vec3u){
-  let id=activeId(gid);if(uvTransportSkip(id)){return;}
+  let id=uvWorkId(gid);if(uvTransportSkip(id)){return;}
   if(!valid(id)){return;}let i=linearIndex(id);var sum=0.0;
   for(var k=0u;k<9u;k++){sum+=uvEdges[uvEdgeAddress(i)].weight[k];}
   let scale=uvOpen(id)/max(sum,1e-20);
@@ -363,7 +364,7 @@ fn uvNormalizeRows(@builtin(global_invocation_id)gid:vec3u){
 }
 @compute @workgroup_size(4,4,4)
 fn uvNormalizeDonors(@builtin(global_invocation_id)gid:vec3u){
-  let id=activeId(gid);if(uvTransportSkip(id)){return;}
+  let id=uvWorkId(gid);if(uvTransportSkip(id)){return;}
   if(!valid(id)){return;}let i=linearIndex(id);
   for(var k=0u;k<9u;k++){let donor=uvEdges[uvEdgeAddress(i)].donor[k];
     let sum=bitcast<f32>(atomicLoad(&sharpenDeposits[donor]));
@@ -471,11 +472,45 @@ fn uvClassifySharpenTiles(@builtin(global_invocation_id)gid:vec3u,
     atomicStore(&sharpenDeposits[uvSharpenTileIndex(activeId(tile*4u))],i32(admission));
     if(admission!=0u){atomicAdd(&sharpenDeposits[2u*cellCount()+UV_SHARPEN_TILE_COUNT_WORD],1);}}
 }
+// Geometry and the target surface are fixed throughout the eight sweeps.
+// Reuse the transport donor words as a per-page sharpening geometry cache.
+@compute @workgroup_size(4,4,4)
+fn uvCacheSharpenCells(@builtin(global_invocation_id)gid:vec3u){
+ let id=uvWorkId(gid);if(!valid(id)||!uvSharpenTileActive(id)){return;}
+ let i=uvEdgeAddress(linearIndex(id));
+ uvEdges[i].weight[5]=uvPhi(vec3f(id)+vec3f(0.5));
+ uvEdges[i].weight[6]=textureLoad(gammaIn,id,0).x;
+ uvEdges[i].donor[4]=select(0u,1u,uvOpen(id)>0.99999);
+}
+@compute @workgroup_size(4,4,4)
+fn uvCacheSharpenFaces(@builtin(global_invocation_id)gid:vec3u){
+ let id=uvWorkId(gid);if(!valid(id)||!uvSharpenTileActive(id)){return;}
+ let i=uvEdgeAddress(linearIndex(id));let phiA=uvEdges[i].weight[5];
+ for(var axis=0u;axis<3u;axis++){
+  uvEdges[i].donor[axis]=0u;var e=vec3i(0);e[axis]=1;let q=id+e;
+  if(!valid(q)||!uvSharpenTileActive(q)||uvOpen(id)<0.99999||uvOpen(q)<0.99999||faceOpenFraction(id,axis)<0.99999){continue;}
+  let j=uvEdgeAddress(linearIndex(q));let phiB=uvEdges[j].weight[5];
+  let middle=uvPhi(vec3f(id)+vec3f(0.5)+0.5*vec3f(e));let epsilon=1e-6;
+  let inwardA=phiA>=0.0&&phiB<phiA-epsilon&&middle<=phiA+epsilon&&middle>=phiB-epsilon;
+  let inwardB=phiB>=0.0&&phiA<phiB-epsilon&&middle<=phiB+epsilon&&middle>=phiA-epsilon;
+  let relayA=phiA>0.0&&uvEdges[i].weight[6]<=1e-6;
+  let relayB=phiB>0.0&&uvEdges[j].weight[6]<=1e-6;
+  uvEdges[i].donor[axis]=1u
+   |select(0u,2u,(middle<=epsilon&&!relayB)||inwardA)
+   |select(0u,4u,(middle<=epsilon&&!relayA)||inwardB)
+   |select(0u,8u,phiA<0.0&&phiB<phiA-epsilon)
+   |select(0u,16u,phiB<0.0&&phiA<phiB-epsilon);
+ }
+}
 @compute @workgroup_size(4,4,4)
 fn uvPrepareSharpen(@builtin(global_invocation_id)gid:vec3u){
-  let id=activeId(gid);if(!uvSharpenTileActive(id)){return;}
+  let id=uvWorkId(gid);if(!uvSharpenTileActive(id)){return;}
   if(!valid(id)){return;}let i=linearIndex(id);
-  let phi=uvPhi(vec3f(id)+vec3f(0.5));let desired=textureLoad(gammaIn,id,0).x;
+  var phi:f32;var desired:f32;var open:bool;
+  if(uvPageWorkEnabled()){
+    phi=uvEdges[uvEdgeAddress(i)].weight[5];desired=uvEdges[uvEdgeAddress(i)].weight[6];
+    open=uvEdges[uvEdgeAddress(i)].donor[4]!=0u;
+  }else{phi=uvPhi(vec3f(id)+vec3f(0.5));desired=textureLoad(gammaIn,id,0).x;open=uvOpen(id)>0.99999;}
   let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
   let dose=clamp(params.tuning.x,0.0,1.0);let own=volume(id);
   // Compaction admits every phi-liquid cell, and a liquid cell offers ALL of
@@ -485,7 +520,7 @@ fn uvPrepareSharpen(@builtin(global_invocation_id)gid:vec3u){
   // Sec. 3.7 only expels excess, and the dam break's deep interior sits at a
   // third full while its displaced volume piles on the surface.
   let compact=params.agreement.x>0.5;
-  let admitted=uvOpen(id)>0.99999&&select(abs(phi)<params.tuning.y*h,phi<params.tuning.y*h,compact);
+  let admitted=open&&select(abs(phi)<params.tuning.y*h,phi<params.tuning.y*h,compact);
   let relay=phi>0.0&&desired<=1e-6;
   uvEdges[uvEdgeAddress(i)].weight[3]=select(0.0,dose*select(max(own-desired,0.0),own,compact&&phi<0.0),admitted);
   uvEdges[uvEdgeAddress(i)].weight[4]=select(0.0,dose*max(select(desired,1.0,relay)-own,0.0),admitted);
@@ -493,11 +528,22 @@ fn uvPrepareSharpen(@builtin(global_invocation_id)gid:vec3u){
 }
 @compute @workgroup_size(4,4,4)
 fn uvProposeSharpen(@builtin(global_invocation_id)gid:vec3u){
-  let id=activeId(gid);if(!uvSharpenTileActive(id)){return;}
+  let id=uvWorkId(gid);if(!uvSharpenTileActive(id)){return;}
   if(!valid(id)){return;}let i=linearIndex(id);
   let phiA=uvEdges[uvEdgeAddress(i)].weight[5];
   for(var axis=0u;axis<3u;axis++){
     uvEdges[uvEdgeAddress(i)].weight[axis]=0.0;var e=vec3i(0);e[axis]=1;let q=id+e;
+    if(uvPageWorkEnabled()){
+      let flags=uvEdges[uvEdgeAddress(i)].donor[axis];if((flags&1u)==0u){continue;}
+      let j=uvEdgeAddress(linearIndex(q));let own=uvEdgeAddress(i);
+      var capA=uvEdges[own].weight[3];var capB=uvEdges[j].weight[3];
+      if(params.agreement.x>0.5){let dose=clamp(params.tuning.x,0.0,1.0);
+        if((flags&8u)==0u){capA=min(capA,dose*max(volume(id)-uvEdges[own].weight[6],0.0));}
+        if((flags&16u)==0u){capB=min(capB,dose*max(volume(q)-uvEdges[j].weight[6],0.0));}}
+      let ab=select(0.0,min(capA,uvEdges[j].weight[4]),(flags&2u)!=0u);
+      let ba=select(0.0,min(capB,uvEdges[own].weight[4]),(flags&4u)!=0u);
+      uvEdges[own].weight[axis]=ab-ba;continue;
+    }
     if(!valid(q)||!uvSharpenTileActive(q)||uvOpen(id)<0.99999||uvOpen(q)<0.99999||faceOpenFraction(id,axis)<0.99999){continue;}
     let j=linearIndex(q);let phiB=uvEdges[uvEdgeAddress(j)].weight[5];
     let middle=uvPhi(vec3f(id)+vec3f(0.5)+0.5*vec3f(e));let epsilon=1e-6;
@@ -520,7 +566,7 @@ fn uvProposeSharpen(@builtin(global_invocation_id)gid:vec3u){
 }
 @compute @workgroup_size(4,4,4)
 fn uvLimitSharpen(@builtin(global_invocation_id)gid:vec3u){
-  let id=activeId(gid);if(!uvSharpenTileActive(id)){return;}
+  let id=uvWorkId(gid);if(!uvSharpenTileActive(id)){return;}
   if(!valid(id)){return;}let i=linearIndex(id);var outgoing=0.0;var incoming=0.0;
   for(var axis=0u;axis<3u;axis++){var e=vec3i(0);e[axis]=1;
     let positive=uvEdges[uvEdgeAddress(i)].weight[axis];var negative=0.0;
@@ -536,7 +582,7 @@ fn uvLimitedFlux(i:u32,j:u32,axis:u32)->f32{
 }
 @compute @workgroup_size(4,4,4)
 fn uvCommitSharpen(@builtin(global_invocation_id)gid:vec3u){
-  let id=activeId(gid);
+  let id=uvWorkId(gid);
   if(valid(id)&&!uvSharpenTileActive(id)){
     textureStore(volumeOut,id,vec4f(uvDustFloor(volume(id))));return;
   }

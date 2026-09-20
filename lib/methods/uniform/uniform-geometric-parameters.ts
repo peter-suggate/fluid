@@ -95,9 +95,9 @@ params.push({kind:"select",key:"surfaceDeficitBalancing",label:"Surface-deficit 
   options:[{value:"on",label:"On"},{value:"off",label:"Off"}],
   hint:"Preserve overfill expansion and balance it globally with contraction in underfilled pressure-liquid cells, weighted by the existing surface-fill estimate. Reduces persistent sloshing; capped to the available deficit per step."});
 
-params.push({kind:"select",key:"volumeStorage",label:"Volume record storage",default:"dense",tier:"fine",update:"solver",
-  options:[{value:"dense",label:"Dense"},{value:"pages16",label:"16³ pages"},{value:"pages32",label:"32³ pages"}],
-  hint:"3D GPU transport and sharpening records in demand-allocated pages. Rebuilds the solver. Other fields remain dense. Large domains synchronize page demand per phase; grids up to 64³ use preallocated capacity. Dense retains the current performance path."});
+params.push({kind:"select",key:"volumeStorage",label:"Volume record storage",default:"auto",tier:"fine",update:"solver",
+  options:[{value:"auto",label:"Automatic"},{value:"dense",label:"Dense"},{value:"pages16",label:"16³ pages"},{value:"pages32",label:"32³ pages"}],
+  hint:"Automatic uses 32³ pages and compact GPU work lists above 64 cells on any axis, preserving the direct path for smaller scenes. The GPU assigns pages and schedules active tiles without mid-frame CPU readbacks. Arena capacity is reserved at initialization and remains domain-sized; other fields remain dense. Rebuilds the solver."});
 
 /** Shared by the studio and scene harnesses. */
 export const UNIFORM_GEOMETRIC_PARAMS: readonly MethodParamSpec[] = Object.freeze(params);

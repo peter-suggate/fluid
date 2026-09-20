@@ -1,5 +1,9 @@
 # First page-driven compute target: vertex phi
 
+Superseded by [the page-domain architecture review](uniform-page-domain-design.md).
+The active page generation must replace window authority across the complete solver,
+rather than optimize individual stages inside the window.
+
 Select `uvAdvectPhi` and `uvRedistancePhi` as the first substantive rewrite.
 The browser measured this combined stage at approximately 28–49 ms in the
 hose scene before the inflow scheduling fix. Re-measure after that fix;

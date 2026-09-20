@@ -9,7 +9,7 @@ export function uniformGeometricSolverOptions(overrides: MethodParamValues = {},
   const values=resolveUniformGeometricValues(overrides);
   return {
       ...uniformReferenceSolverOptions(values, scene), geometricVolume: true,
-      volumePages: values.volumeStorage === "pages16" ? 16 : values.volumeStorage === "pages32" ? 32 : undefined,
+      volumePages: values.volumeStorage === "auto" ? "auto" : values.volumeStorage === "pages16" ? 16 : values.volumeStorage === "pages32" ? 32 : undefined,
       sharpeningStrength: Number(values.sharpeningStrength),
       velocityTransport: values.velocityTransport === "maccormack" ? "maccormack" : "semi-lagrangian",
       surfaceDeficitBalancing: values.surfaceDeficitBalancing === "on",
