@@ -124,6 +124,7 @@ const ACTIVE_TRAVEL_TOTAL_WORD:u32=239u;
 const ACTIVE_PRESSURE_ORIGIN_WORD:u32=240u;
 const ACTIVE_PRESSURE_CAPACITY_WORD:u32=243u;
 const ACTIVE_PRESSURE_MODE_WORD:u32=246u;
+const ACTIVE_SCAN_GROUPS_WORD:u32=247u;
 fn dims() -> vec3i { return vec3i(textureDimensions(volumeIn)); }
 // Three per-axis counts to a word, ten bits each. Travel saturates, which is
 // harmless: a step that moves a thousand cells is already outside the regime.
@@ -1734,6 +1735,11 @@ fn writeActiveWorkgroupSummary(
     if(stride==1u){break;}stride/=2u;
   }
   if(localIndex==0u){
+    if(all(workgroupId==vec3u(0u))){
+      activeScratch[ACTIVE_SCAN_GROUPS_WORD]=groupCount.x;
+      activeScratch[ACTIVE_SCAN_GROUPS_WORD+1u]=groupCount.y;
+      activeScratch[ACTIVE_SCAN_GROUPS_WORD+2u]=groupCount.z;
+    }
     let summaryIndex=workgroupId.x+groupCount.x*(workgroupId.y+groupCount.y*workgroupId.z);
     let base=ACTIVE_SUMMARY_BASE+12u*summaryIndex;
     activeScratch[base]=activeMinimumLanes[0].x;activeScratch[base+1u]=activeMinimumLanes[0].y;
@@ -1761,11 +1767,11 @@ fn scanActiveRegion(
   @builtin(global_invocation_id) gid:vec3u,
   @builtin(local_invocation_index) localIndex:u32,
   @builtin(workgroup_id) workgroupId:vec3u,
+  @builtin(num_workgroups) groupCount:vec3u,
 ){
   let id=activeId(gid);
   let source=uniformInflowWindowSeed(id);
   let wet=${geometric ? "source||geometricActiveSeed(id)" : "source||(valid(id)&&volume(id)>1e-5)"};
-  let groupCount=vec3u(activeRegion[13],activeRegion[14],activeRegion[15]);
   writeActiveWorkgroupSummary(id,wet,localIndex,workgroupId,groupCount);
 }
 @compute @workgroup_size(4,4,4)
@@ -1773,11 +1779,11 @@ fn scanExternalActiveSources(
   @builtin(global_invocation_id) gid:vec3u,
   @builtin(local_invocation_index) localIndex:u32,
   @builtin(workgroup_id) workgroupId:vec3u,
+  @builtin(num_workgroups) groupCount:vec3u,
 ){
   let id=vec3i(gid);let inDomain=valid(id);
   let source=uniformInflowWindowSeed(id)||(inDomain&&dropSource(id)>0.0);
   let wet=${geometric ? "source||geometricActiveSeed(id)" : "inDomain&&(volume(id)>1e-5||source)"};
-  let groupCount=(vec3u(dims())+vec3u(3u))/4u;
   writeActiveWorkgroupSummary(id,wet,localIndex,workgroupId,groupCount);
 }
 fn reduceActiveSummaryRange(groupCount:vec3u,lane:u32){
@@ -1820,7 +1826,10 @@ fn reduceActiveSummaryRange(groupCount:vec3u,lane:u32){
 }
 @compute @workgroup_size(256)
 fn reduceActiveRegionSummaries(@builtin(local_invocation_index) lane:u32){
-  reduceActiveSummaryRange(vec3u(activeRegion[13],activeRegion[14],activeRegion[15]),lane);
+  // Direct launches deliberately over-cover the exact GPU window. Indexing
+  // their summaries with the smaller exact dimensions aliases empty overrun
+  // groups onto valid groups, making the census depend on GPU scheduling.
+  reduceActiveSummaryRange(vec3u(activeScratch[ACTIVE_SCAN_GROUPS_WORD],activeScratch[ACTIVE_SCAN_GROUPS_WORD+1u],activeScratch[ACTIVE_SCAN_GROUPS_WORD+2u]),lane);
 }
 @compute @workgroup_size(256)
 fn reduceExternalActiveRegionSummaries(@builtin(local_invocation_index) lane:u32){
