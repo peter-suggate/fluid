@@ -1,4 +1,6 @@
 "use client";
+import { VISUAL_LAYERS, scalarLayerPaint, layerOpacity, type VisualLayerState } from "../lib/core/visual-layers";
+import { VisualLayerRows } from "../lib/features/field-view/layers-ui";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useStore } from "zustand";
 import { LabSceneSelector } from "./LabSceneSelector";
@@ -8,8 +10,6 @@ import { STEP_SIZES } from "./lab-step";
 import {
   createUniformLabStore,
   startUniformLabQuerySync,
-  UNIFORM_LENSES,
-  type UniformLens as Lens,
 } from "./uniform-lab-state";
 import {
   createPaneSession,
@@ -49,7 +49,6 @@ import {
 import base from "./AdvanceLab.module.css";
 import css from "./UniformLab.module.css";
 
-const lenses = UNIFORM_LENSES;
 const stages = UNIFORM_VOLUME_PIPELINE.stages;
 interface Camera {
   zoom: number;
@@ -92,8 +91,7 @@ function bodyDistance(body: RigidBodyState, x: number, y: number) {
 function draw(
   canvas: HTMLCanvasElement,
   v: UniformView,
-  lens: Lens,
-  grid: boolean,
+  layers: VisualLayerState,
   camera: Camera,
   preview?: DropPreview,
 ) {
@@ -113,25 +111,32 @@ function draw(
   g.scale(sx, -sy);
   const liquid = colour("--slice-liquid", "#4f9ae0"),
     solid = colour("--slice-solid", "#887c68");
-  let maximum = 1e-8;
-  if (lens === "pressure")
-    for (const p of v.pressure) maximum = Math.max(maximum, Math.abs(p));
-  if (lens === "velocity")
-    for (let i = 0; i < v.nx * v.ny; i++)
-      maximum = Math.max(
-        maximum,
-        Math.hypot(v.velocity[2 * i]!, v.velocity[2 * i + 1]!),
-      );
+  const maximum = 1;
   const tc = Math.ceil(v.nx / 4);
-  for (let y = 0; y < v.ny; y++)
-    for (let x = 0; x < v.nx; x++) {
-      const i = x + v.nx * y;
-      if (v.capacity[i]! <= 1e-5) {
-        g.fillStyle = solid;
-        g.fillRect(x, y, 1, 1);
-        continue;
+  // Solids are scene context even when every diagnostic is hidden.
+  for (let y = 0; y < v.ny; y++) for (let x = 0; x < v.nx; x++) {
+    if (v.capacity[x + v.nx * y]! <= 1e-5) { g.fillStyle = solid; g.fillRect(x, y, 1, 1); }
+  }
+  for (const layer of VISUAL_LAYERS) {
+    if (!layers.visible || !layers.enabled.includes(layer.id)) continue;
+    const lens = layer.id;
+    if (lens === "grid" || lens === "window") {
+      g.save(); g.globalAlpha = layerOpacity(layers, lens);
+      g.strokeStyle = layer.color; g.lineWidth = (lens === "window" ? 2 : 1) / Math.max(sx, sy);
+      g.beginPath();
+      if (lens === "window") g.rect(0, 0, v.nx, v.ny);
+      else if (Math.min(sx, sy) >= 5) {
+        for (let x = 0; x <= v.nx; x++) { g.moveTo(x, 0); g.lineTo(x, v.ny); }
+        for (let y = 0; y <= v.ny; y++) { g.moveTo(0, y); g.lineTo(v.nx, y); }
       }
-      if (lens === "surface" || lens === "release") {
+      g.stroke(); g.restore(); continue;
+    }
+    for (let y = 0; y < v.ny; y++) for (let x = 0; x < v.nx; x++) {
+      const i = x + v.nx * y;
+      if (v.capacity[i]! <= 1e-5) continue;
+      g.save();
+      g.globalAlpha = layerOpacity(layers, lens);
+      if (lens === "surface") {
         const a = x + (v.nx + 1) * y;
         g.fillStyle = liquid;
         g.beginPath();
@@ -149,41 +154,38 @@ function draw(
           for (let k = 2; k < p.length; k += 2) g.lineTo(p[k]!, p[k + 1]!);
           g.closePath();
         }
+        g.globalAlpha *= 0.22;
         g.fill();
-      } else if (lens === "tiles") {
-        const bits = v.tiles[Math.floor(x / 4) + tc * Math.floor(y / 4)] ?? 0;
-        g.fillStyle =
-          bits & 1
-            ? "#3679ac"
-            : bits & 2
-              ? "#537654"
-              : bits & 4
-                ? "#88642e"
-                : "#333941";
-        g.fillRect(x, y, 1, 1);
-      } else {
-        const value =
-          lens === "volume"
-            ? v.volume[i]! / Math.max(v.capacity[i]!, 1e-6)
-            : lens === "pressure"
-              ? Math.abs(v.pressure[i]!) / maximum
-              : Math.hypot(v.velocity[2 * i]!, v.velocity[2 * i + 1]!) /
-                maximum;
-        if (value > 0) {
-          g.globalAlpha = Math.min(1, value);
-          g.fillStyle =
-            lens === "pressure"
-              ? v.pressure[i]! < 0
-                ? "#dd9955"
-                : "#7e9ee5"
-              : liquid;
-          g.fillRect(x, y, 1, 1);
-          g.globalAlpha = 1;
+        g.globalAlpha = layerOpacity(layers, lens);
+        g.strokeStyle = "#ef9f35";
+        g.lineWidth = 1.5 / Math.max(sx, sy);
+        g.beginPath();
+        for (const triangle of advanceRdfTriangles(x, y, v.phi[a]!, v.phi[a + 1]!, v.phi[a + v.nx + 2]!, v.phi[a + v.nx + 1]!)) {
+          const crossings: number[][] = [];
+          triangle.forEach((p, j) => {
+            const q = triangle[(j + 1) % 3]!;
+            if ((p[2] < 0) !== (q[2] < 0)) { const t = p[2] / (p[2] - q[2]); crossings.push([p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1])]); }
+          });
+          if (crossings.length === 2) { g.moveTo(crossings[0]![0]!, crossings[0]![1]!); g.lineTo(crossings[1]![0]!, crossings[1]![1]!); }
+        }
+        g.stroke();
+      } else if (lens === "phi") {
+        const a = x + (v.nx + 1) * y;
+        const phi = (v.phi[a]! + v.phi[a + 1]! + v.phi[a + v.nx + 1]! + v.phi[a + v.nx + 2]!) / 4;
+        const paint = scalarLayerPaint("phi", phi / Math.min(...v.cellSize));
+        g.fillStyle = `rgb(${paint.color.join(",")})`; g.globalAlpha *= paint.alpha; g.fillRect(x, y, 1, 1);
+      } else if (["density", "tiles", "volume", "pressure", "velocity"].includes(lens)) {
+        const value = lens === "density" ? v.volume[i]! : lens === "tiles" ? (v.tiles[Math.floor(x / 4) + tc * Math.floor(y / 4)] ?? 0) : lens === "volume" ? v.volume[i]! / Math.max(v.capacity[i]!, 1e-6) : lens === "pressure" ? v.pressure[i]! : Math.hypot(v.velocity[2 * i]!, v.velocity[2 * i + 1]!);
+        const paint = scalarLayerPaint(lens, value);
+        g.fillStyle = `rgb(${paint.color.join(",")})`; g.globalAlpha *= paint.alpha; g.fillRect(x, y, 1, 1);
+        if (lens === "volume" && value > 1.0001) {
+          g.globalAlpha = layerOpacity(layers, lens); g.strokeStyle = "#ef9f35"; g.lineWidth = 1 / Math.max(sx, sy);
+          g.beginPath(); g.moveTo(x, y); g.lineTo(x + 1, y + 1); g.stroke();
         }
       }
       if (lens === "release" && v.released[i]) {
         const bits = v.released[i]!;
-        g.strokeStyle = "#f5be52";
+        g.strokeStyle = layer.color;
         g.lineWidth = 2 / Math.max(sx, sy);
         g.beginPath();
         if (bits & 1) {
@@ -204,7 +206,27 @@ function draw(
         }
         g.stroke();
       }
+      g.restore();
     }
+    g.save();
+    if (lens === "velocity") {
+      g.globalAlpha = layerOpacity(layers, "velocity");
+      const stride = Math.max(1, Math.ceil(15 / Math.min(sx, sy)));
+      g.strokeStyle = colour("--slice-ink", "#ddd");
+      g.lineWidth = 1 / Math.max(sx, sy);
+      g.beginPath();
+      for (let y = 0; y < v.ny; y += stride)
+        for (let x = 0; x < v.nx; x += stride) {
+          const i = x + v.nx * y;
+          const u = Math.max(-1, Math.min(1, v.velocity[2 * i]! / maximum)),
+            w = Math.max(-1, Math.min(1, v.velocity[2 * i + 1]! / maximum));
+          g.moveTo(x + 0.5, y + 0.5);
+          g.lineTo(x + 0.5 + u * stride * 0.8, y + 0.5 + w * stride * 0.8);
+        }
+      g.stroke();
+    }
+    g.restore();
+  }
   for (const body of (v.receipt.rigidBodies ?? []) as RigidBodyState[]) {
     const distance = (x: number, y: number) =>
       bodyDistance(body, (x - v.nx / 2) * v.cellSize[0], y * v.cellSize[1]);
@@ -247,36 +269,12 @@ function draw(
     g.stroke();
     g.setLineDash([]);
   }
-  if (lens === "velocity") {
-    const stride = Math.max(1, Math.ceil(15 / Math.min(sx, sy)));
-    g.strokeStyle = colour("--slice-ink", "#ddd");
-    g.lineWidth = 1 / Math.max(sx, sy);
-    g.beginPath();
-    for (let y = 0; y < v.ny; y += stride)
-      for (let x = 0; x < v.nx; x += stride) {
-        const i = x + v.nx * y;
-        const u = v.velocity[2 * i]! / maximum,
-          w = v.velocity[2 * i + 1]! / maximum;
-        g.moveTo(x + 0.5, y + 0.5);
-        g.lineTo(x + 0.5 + u * stride * 0.8, y + 0.5 + w * stride * 0.8);
-      }
-    g.stroke();
-  }
+
+  g.globalAlpha = 1;
   g.strokeStyle = colour("--slice-grid", "#777");
   g.lineWidth = 1 / Math.max(sx, sy);
-  g.beginPath();
-  if (grid && Math.min(sx, sy) >= 5) {
-    for (let x = 0; x <= v.nx; x++) {
-      g.moveTo(x, 0);
-      g.lineTo(x, v.ny);
-    }
-    for (let y = 0; y <= v.ny; y++) {
-      g.moveTo(0, y);
-      g.lineTo(v.nx, y);
-    }
-  }
-  g.rect(0, 0, v.nx, v.ny);
-  g.stroke();
+  g.strokeRect(0, 0, v.nx, v.ny);
+
 }
 
 export function UniformLab() {
@@ -289,9 +287,8 @@ export function UniformLab() {
 }
 function UniformRun({ session }: { session: PaneSession }) {
   const [store] = useState(() => createUniformLabStore(location.search));
-  const { sceneId, dt, lens, grid, sliceView: camera } = useStore(store);
-  const setLens = (lens: Lens) => store.setState({ lens });
-  const setGrid = (grid: boolean) => store.setState({ grid });
+  const { sceneId, dt, layers, sliceView: camera } = useStore(store);
+
   const setCamera = (value: Camera | ((current: Camera) => Camera)) =>
     store.setState({
       sliceView:
@@ -475,8 +472,8 @@ function UniformRun({ session }: { session: PaneSession }) {
   }, []);
   useEffect(() => {
     if (canvas.current && view)
-      draw(canvas.current, view, lens, grid, camera, dropStroke.current);
-  }, [view, lens, grid, camera, paint]);
+      draw(canvas.current, view, layers, camera, dropStroke.current);
+  }, [view, layers, camera, paint]);
   const chooseScene = (sceneId: string) => {
     if (sceneId === store.getState().sceneId) return;
     const definition = findSceneDefinition(sceneId);
@@ -614,25 +611,7 @@ function UniformRun({ session }: { session: PaneSession }) {
       <div className={css.layout}>
         <section className={css.viewport} aria-label="Uniform simulation">
           <div className={css.tools}>
-            <select
-              aria-label="Field"
-              value={lens}
-              onChange={(e) => setLens(e.target.value as Lens)}
-            >
-              {lenses.map(([id, label]) => (
-                <option key={id} value={id}>
-                  {label}
-                </option>
-              ))}
-            </select>
-            <label>
-              <input
-                type="checkbox"
-                checked={grid}
-                onChange={(e) => setGrid(e.target.checked)}
-              />{" "}
-              Grid
-            </label>
+            <DockedToolstrip ariaLabel="Visual layers"><VisualLayerRows state={layers} onChange={layers => store.setState({ layers })} /></DockedToolstrip>
             <button onClick={() => setCamera(fit)}>Fit</button>
           </div>
           <canvas
@@ -1035,7 +1014,7 @@ function UniformRun({ session }: { session: PaneSession }) {
               </dl>
             </section>
           )}
-          {lens === "tiles" && (
+          {layers.visible && layers.enabled.includes("tiles") && (
             <p>
               Blue: fine · green: extension shell · amber: transport · grey:
               coarse air

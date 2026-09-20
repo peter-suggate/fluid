@@ -1,0 +1,149 @@
+{
+  "focusedChecks": {
+    "unitAndRegression": {
+      "passed": 24,
+      "failed": 0
+    },
+    "dawn": {
+      "passed": 2,
+      "failed": 0
+    }
+  },
+  "sparseCM12Gate": {
+    "suite": "sparse-cm12-dawn-regression",
+    "startedAt": "2026-09-20T02:31:20.242Z",
+    "backend": "metal",
+    "elapsedMs": 437481.1,
+    "budgetMs": 480000,
+    "withinBudget": true,
+    "passed": false,
+    "receipts": [
+      {
+        "id": "simulation-failure-halt",
+        "kind": "correctness",
+        "passed": true,
+        "elapsedMs": 344.178
+      },
+      {
+        "id": "symmetric-expansion",
+        "kind": "correctness",
+        "passed": false,
+        "elapsedMs": 20023.962083,
+        "failure": "exceeded 20000 ms timeout"
+      },
+      {
+        "id": "mixed-ratio-topology",
+        "kind": "correctness",
+        "passed": true,
+        "elapsedMs": 459.4300839999996
+      },
+      {
+        "id": "topology-page-budget",
+        "kind": "correctness",
+        "passed": false,
+        "elapsedMs": 30027.003999999997,
+        "failure": "exceeded 30000 ms timeout"
+      },
+      {
+        "id": "clipped-topology-transfer",
+        "kind": "correctness",
+        "passed": false,
+        "elapsedMs": 20055.570458000002,
+        "failure": "exceeded 20000 ms timeout"
+      },
+      {
+        "id": "topology-generation-storage",
+        "kind": "correctness",
+        "passed": true,
+        "elapsedMs": 403.51154200000747
+      },
+      {
+        "id": "hydrostatic-adaptivity",
+        "kind": "correctness",
+        "passed": false,
+        "elapsedMs": 45036.93129200001,
+        "failure": "exceeded 45000 ms timeout"
+      },
+      {
+        "id": "mini32-correctness",
+        "kind": "correctness",
+        "passed": false,
+        "elapsedMs": 25042.300583999997,
+        "failure": "exceeded 25000 ms timeout"
+      },
+      {
+        "id": "min8-region-surface",
+        "kind": "correctness",
+        "passed": false,
+        "elapsedMs": 30030.934290999983,
+        "failure": "exceeded 30000 ms timeout"
+      },
+      {
+        "id": "mini32-performance",
+        "kind": "performance",
+        "passed": false,
+        "elapsedMs": 20042.77891699999,
+        "failure": "exceeded 20000 ms timeout"
+      },
+      {
+        "id": "mini64-performance",
+        "kind": "performance",
+        "passed": false,
+        "elapsedMs": 52205.867540999985,
+        "failure": "mini64-performance median 262.2751 ms exceeds 110 ms baseline ceiling"
+      },
+      {
+        "id": "mini64-min8-surface",
+        "kind": "correctness",
+        "passed": false,
+        "elapsedMs": 40036.571000000025,
+        "failure": "exceeded 40000 ms timeout"
+      },
+      {
+        "id": "long-dam-far-wall",
+        "kind": "correctness",
+        "passed": false,
+        "elapsedMs": 51250.47054100002,
+        "failure": "exited 1"
+      },
+      {
+        "id": "tall-cells-hills-far-wall",
+        "kind": "correctness",
+        "passed": false,
+        "elapsedMs": 38665.058708,
+        "failure": "exited 1"
+      },
+      {
+        "id": "live-rigid-body-coupling",
+        "kind": "correctness",
+        "passed": false,
+        "elapsedMs": 25023.56699999998,
+        "failure": "exceeded 25000 ms timeout"
+      },
+      {
+        "id": "live-liquid-injection",
+        "kind": "correctness",
+        "passed": false,
+        "elapsedMs": 25039.64187500003,
+        "failure": "exceeded 25000 ms timeout"
+      },
+      {
+        "id": "outside-tank-symmetric-collapse",
+        "kind": "correctness",
+        "passed": false,
+        "elapsedMs": 13774.055333000026,
+        "failure": "exited 1"
+      }
+    ]
+  },
+  "existingOverlayFailure": {
+    "test": "volume-levelset-overlay-dawn",
+    "message": "frame 0, vertex 16 capacity missing",
+    "reproducesWithUnchangedShader": true
+  },
+  "typecheck": "Blocked by existing errors in sparse tests and probe tools; no errors in modified overlay code.",
+  "browser": {
+    "uniform2D": "Verified volume + surface + grid, persistent checked menu and URL state.",
+    "uniform3D": "Verified volume + tiles + window + surface + grid, persistent checked menu, live rendering and no browser errors."
+  }
+}

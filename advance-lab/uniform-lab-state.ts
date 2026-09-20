@@ -1,3 +1,4 @@
+import { readVisualLayers, writeVisualLayers, legacyVisualLayers, type VisualLayerState } from "../lib/core/visual-layers";
 import {
   createSceneQueryLayerCache,
   isSceneQueryKey,
@@ -5,46 +6,35 @@ import {
 } from "../lib/core/url-state";
 import type { PaneSession } from "../lib/core/session/session";
 import { createStore } from "zustand/vanilla";
-import {
-  booleanQuery,
-  choiceQuery,
-  combineQueryCodecs,
-  queryRecord,
-} from "../lib/framework/persistence";
+import { combineQueryCodecs } from "../lib/framework/persistence";
 import { startHostQueryStateSync } from "../lib/core/query-state-sync";
 import { labMethodFromSearch } from "./lab-method";
 import { labSceneQuery } from "./lab-scenes";
 import { labStepQuery } from "./lab-step";
 import { sliceViewQuery, type SliceViewFraction } from "./view-transform";
 
-export const UNIFORM_LENSES = [
-  ["surface", "Surface · phi = 0"],
-  ["volume", "Conserved volume"],
-  ["pressure", "Pressure"],
-  ["velocity", "Velocity"],
-  ["tiles", "Work tiles"],
-  ["release", "Released faces"],
-] as const;
-export type UniformLens = (typeof UNIFORM_LENSES)[number][0];
 export interface UniformLabState {
   sceneId: string;
   dt: number;
-  lens: UniformLens;
-  grid: boolean;
+  layers: VisualLayerState;
   sliceView: SliceViewFraction;
 }
-const fields = queryRecord({
-  lens: choiceQuery<UniformLens>(
-    "field",
-    "surface",
-    UNIFORM_LENSES.map(([id]) => id),
-  ),
-  grid: booleanQuery("grid", false),
-});
 export const uniformLabQuery = combineQueryCodecs<UniformLabState>([
   labSceneQuery,
   labStepQuery,
-  fields,
+  {
+    keys: ["layers", "field", "grid"],
+    read: (query: URLSearchParams) => ({
+      layers: readVisualLayers(query.get("layers"), legacyVisualLayers(
+        query.get("field") ?? "surface", query.get("grid") === "1",
+      )),
+    }),
+    write: (query: URLSearchParams, state: UniformLabState) => {
+      query.delete("field");
+      query.delete("grid");
+      query.set("layers", writeVisualLayers(state.layers));
+    },
+  },
   sliceViewQuery,
 ]);
 export function createUniformLabStore(search: string) {

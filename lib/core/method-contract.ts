@@ -300,10 +300,14 @@ export interface GPUSolverInstance {
   readonly tileClassSource?: GPUFluidTileClassSource;
   /**
    * Optional solve-window header, for the solve-window view. It shares the
-   * overlay's binding with the tile classes, since one view draws at a time,
-   * and like them it is withdrawn with its toggle.
+   * overlay's packed records with tile classes in composed views, and is
+   * withdrawn with its toggle.
    */
   readonly solveWindowSource?: GPUFluidSolveWindowSource;
+  /** Origin of a haloed, window-local pressure texture, in simulation cells. */
+  readonly gridPressureOrigin?: readonly [number, number, number];
+  /** Packed negative-domain MAC faces, for cell-centred diagnostic velocity. */
+  readonly gridVelocityBoundary?: GPUBufferBinding;
   /**
    * Optional captured pressure-solve journal, for the pressure-lab film.
    *

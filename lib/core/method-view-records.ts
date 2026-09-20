@@ -2,11 +2,10 @@
  * The records a solver publishes for its own grid-overlay views.
  *
  * Each view reads what the step already wrote, so it adds a draw and no
- * simulation work. Only one grid-overlay mode draws at a time, so the views
- * share one binding — the overlay fragment stage's tenth and last storage
- * buffer on Apple Chrome — and the renderer binds the ACTIVE view's records
- * there. Every reader guards on `arrayLength`: the one-word dummy, bound
- * whenever a solver withdraws its records, reads as the method's dense schedule.
+ * simulation work. Legacy single views bind their source directly. Composed
+ * layers copy the window header and tile records into one presentation buffer,
+ * retaining the same storage-binding budget. Missing sources denote the dense
+ * schedule (whole-domain window and fine sampling everywhere).
  *
  * Shapes only, like `levelset-consumer-abi`: the solver that fills a record and
  * the shader that reads it both name its words from here, and neither imports

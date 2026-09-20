@@ -1856,6 +1856,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
    chevron that opened it is right there and closes it. */
 .toolstrip-menu { position: absolute; z-index: 6; left: -5px; top: calc(100% + 4px); display: grid; gap: 1px; width: max-content; min-width: 148px; max-width: 232px; max-height: 46vh; padding: 4px; overflow: hidden auto; border: 1px solid var(--line-strong); border-radius: var(--radius-s); background: var(--overlay); box-shadow: var(--shadow-card); backdrop-filter: var(--frost-chip); }
 .toolstrip-menu button { display: flex; align-items: center; gap: 7px; min-height: 21px; padding: 0 6px; border: 1px solid transparent; border-radius: var(--radius-s); background: transparent; color: var(--muted); cursor: pointer; text-align: left; }
+.toolstrip-menu .visual-layer-option > button { width: 100%; }
 .toolstrip-menu button:hover { border-color: var(--accent-line); color: var(--accent); }
 .toolstrip-menu button.active { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); }
 /* Two kinds of mark on one list: the glyph a pass claimed for the handful worth

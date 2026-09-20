@@ -91,6 +91,7 @@ interface UIOverrideSpec {
 const UI_OVERRIDES: Readonly<Record<string, UIOverrideSpec>> = {
   grid: { label: "Grid overlay", group: "render", hint: "Slice axis of the field overlay" },
   gridSlice: { label: "Grid slice", group: "render" },
+  layers: { label: "Visual layers", group: "render" },
   gridMode: { label: "Overlay field", group: "render" },
   lensPhase: { label: "Lens phase", group: "render", hint: "Scrubber position within the open stage lens" },
   svoShadows: { label: "Shadows", group: "render", boolean: true },
@@ -341,6 +342,7 @@ export function sceneOverrideClearPlan(
       case "overlay": ui.sceneOverlay = initialUI.sceneOverlay; break;
       case "grid": ui.gridOverlayAxis = initialUI.gridOverlayAxis; break;
       case "gridSlice": ui.gridOverlaySlice = initialUI.gridOverlaySlice; break;
+      case "layers": ui.visualLayers = initialUI.visualLayers; break;
       case "gridMode": ui.gridOverlayMode = initialUI.gridOverlayMode; break;
       case "lensPhase": ui.gridOverlayLensPhase = initialUI.gridOverlayLensPhase; break;
       case "svoShadows": ui.svoShadowsEnabled = initialUI.svoShadowsEnabled; break;

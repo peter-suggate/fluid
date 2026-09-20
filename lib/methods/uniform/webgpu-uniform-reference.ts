@@ -484,6 +484,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * assumes the domain plus a one-cell halo must apply that or keep the
    * lattice off.
    */
+  get gridVelocityBoundary(): GPUBufferBinding { return { buffer: this.boundaryVelocityA }; }
+  get gridPressureTexture(): GPUTexture { return this.pressureMultigrid.pressureTexture; }
+  get gridPressureOrigin(): readonly [number, number, number] { return this.pressureWindowOrigin; }
   get physicsFieldsForQA() {
     return { pressure: this.pressureMultigrid.pressureTexture, gamma: this.gammaA,
       latticeOrigin: [...this.pressureWindowOrigin] as [number, number, number],

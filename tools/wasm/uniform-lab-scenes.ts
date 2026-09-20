@@ -7,6 +7,7 @@ import {
   createSceneQueryLayerCache,
   parseQueryState,
 } from "../../lib/core/url-state";
+import { visualLayers } from "../../lib/core/visual-layers";
 import { uniformLabQuery } from "../../advance-lab/uniform-lab-state";
 import { createBodyDescription } from "../../lib/core/rigid-body";
 import { findSceneDefinition } from "../../lib/core/scenes";
@@ -288,8 +289,7 @@ for (const artifact of ["scalar", "simd"] as const) {
     const ui = {
       sceneId: "water-box-dam-break",
       dt: 1 / 60,
-      lens: "pressure" as const,
-      grid: true,
+      layers: visualLayers(["pressure", "grid"]),
       sliceView: { x: 0.4, y: 0.6, zoom: 2 },
     };
     uniformLabQuery.write(params, ui);

@@ -1,0 +1,13 @@
+# Composable visual layers
+
+Uniform Geometric in the 2D lab and 3D studio now use `lib/core/visual-layers.ts` as their semantic catalog. It owns stable IDs, labels, descriptions, composition order, opacity defaults and scalar color/normalization rules. Canvas and WGSL remain separate rendering adapters. Other methods retain their single-view controls.
+
+The ten layers are signed distance, surface density, conserved volume, pressure, work tiles, working window, liquid surface, grid, velocity and released faces. Scalar fills precede boundaries and glyphs. Layers have transparent backgrounds, and grid lines and surface contours are independently selected. The shared toolstrip supports checked multi-selection, per-layer opacity, and a master hide/restore switch. Plane/depth remain shared 3D settings.
+
+Each pane owns a `VisualLayerState` (`enabled`, `visible`, `opacity`). The `layers` query parameter roundtrips that state, including an empty selection. Old 2D `field`/`grid` links migrate; legacy 3D bundled modes map to their field and surface layers. Grid is opt-in: neither the default selection nor migrated bundled modes enable it implicitly; explicit saved grid selections are preserved. Selecting a legacy mode explicitly clears the saved layer selection before migrating it. There is no global selection shared between independent panes.
+
+The 3D compositor keeps the existing storage-buffer budget by copying the small working-window header, tile records and negative-domain MAC faces into one presentation buffer. It reads published vertex phi directly, addresses pressure with its halo and moving lattice origin, and averages opposing MAC faces for cell-centred velocity. No diagnostic GPU readback or simulation pass is added.
+
+Pressure uses a fixed 10 kPa intensity scale and velocity a 1 m/s scale in both adapters. Signed distance uses cell widths. Conserved volume is V/K; surface density is V per cell volume. Tile bits distinguish fine sampling, extension shell, and transport reach when published. Uniform 2D currently dispatches the entire domain, so its working-window boundary is the domain boundary; this change does not enable window scheduling.
+
+Verification: `tests/visual-layers.test.ts` covers selection, opacity, legacy migration and URL persistence. `tests/visual-layers-dawn.test.ts` renders every layer and combinations on real GPU textures and verifies hide/zero-opacity behavior. The existing tile-view Dawn test covers producer record decoding. Run the repository's Sparse CM12 gate after changes to shared presentation code; never run Dawn concurrently with browser simulation.

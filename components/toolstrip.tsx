@@ -443,6 +443,7 @@ export function ToolstripMenuButton({
  * lost its icons.
  */
 export function ToolstripMenuItem({
+  multiple = false,
   icon,
   swatch,
   label,
@@ -452,6 +453,7 @@ export function ToolstripMenuItem({
   testId,
   onClick,
 }: {
+  multiple?: boolean;
   icon?: ReactNode;
   swatch?: string;
   label: string;
@@ -464,7 +466,7 @@ export function ToolstripMenuItem({
 }) {
   return <button
     type="button"
-    role="menuitemradio"
+    role={multiple ? "menuitemcheckbox" : "menuitemradio"}
     className={active ? "active" : ""}
     aria-checked={active}
     title={title}

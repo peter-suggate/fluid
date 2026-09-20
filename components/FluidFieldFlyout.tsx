@@ -14,7 +14,7 @@ import {
   type StageLensReceipt,
 } from "../lib/core/stage-lens";
 import { pickFieldOverlay, type FieldOverlayView } from "../lib/core/field-overlay-pick";
-import { methodHasQuickFields } from "./FieldQuickBar";
+import { FieldViewRows, methodHasQuickFields } from "./FieldQuickBar";
 import { useSession } from "../lib/core/session/session-context";
 import { resolvedMethodValues } from "../lib/core/stores/method-store";
 import { DEFAULT_GRID_OVERLAY_AXIS } from "../lib/core/stores/ui-store";
@@ -341,6 +341,8 @@ export function FieldControlRows({ lenses: override }: {
     }] : []),
     { value: "off", label: "HIDE" },
   ];
+
+  if (methodId === "uniform-volume") return <FieldViewRows />;
 
   return <>
     {/* Always shown rather than opened, because this is the control a reader

@@ -1,4 +1,6 @@
 "use client";
+import { VisualLayerRows } from "../lib/features/field-view/layers-ui";
+import { legacyVisualLayers } from "../lib/core/visual-layers";
 
 import { getMethod } from "../lib/core/method-registry";
 import { VISUALIZATION_FIELDS, VISUALIZATION_QUICK_FIELDS } from "../lib/core/visualization-catalog";
@@ -52,9 +54,19 @@ export function FieldViewRows() {
   const setOverlayAxis = session.ui((state) => state.setGridOverlayAxis);
   const setOverlaySlice = session.ui((state) => state.setGridOverlaySlice);
 
+  const layers = session.ui(state => state.visualLayers);
   const method = getMethod(methodId);
   const volumeCapable = method.capabilities?.volumeRendering === true;
   const supported = new Set(method.supportedFieldModes ?? []);
+  if (methodId === "uniform-volume") return <VisualLayerRows
+    state={layers ?? { ...legacyVisualLayers(overlayMode), visible: overlayAxis !== "off" }}
+    onChange={visualLayers => session.ui.setState({
+      visualLayers,
+      gridOverlayMode: "structure",
+      gridOverlayAxis: overlayAxis === "off" || overlayAxis === "volume" ? "z" : overlayAxis,
+    })}
+    plane={{ axis: overlayAxis, slice: overlaySlice, setAxis: setOverlayAxis, setSlice: setOverlaySlice }}
+  />;
   return <SharedFieldViewRows
     // Catalog order, narrowed to this solver. The shared row splits it into the
     // short list and the rest on the `icon` each pass declared, which is the

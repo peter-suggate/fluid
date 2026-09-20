@@ -1,3 +1,4 @@
+import { readVisualLayers, writeVisualLayers, type VisualLayerState } from "./visual-layers";
 import { managedQueryKey } from "../framework/persistence";
 import { uiFeatureQuery, type FeatureUIQueryState } from "../features/persistence";
 import { runtimeFeatureQuery, initialRuntimeFeatures, pickRuntimeFeatures, runtimeFeaturesChanged, type RuntimeFeatureState } from "../features/runtime-lifecycle";
@@ -101,6 +102,7 @@ export type UIQueryState = FeatureUIQueryState & {
   sceneOverlay: SceneOverlay | null;
   gridOverlayAxis: GridOverlayConfig["axis"];
   gridOverlaySlice: number;
+  visualLayers?: VisualLayerState;
   gridOverlayMode: GridOverlayMode;
   gridOverlayLensPhase: number;
 
@@ -681,6 +683,7 @@ function uiQueryState(query: URLSearchParams, preset: ScenePreset): UIQueryState
     gridOverlaySlice: sliceOnlyVolume ? 0.5 : parsedGridAxis === "volume"
       ? Math.max(0.05, numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1))
       : numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1),
+    visualLayers: query.has("layers") ? readVisualLayers(query.get("layers")) : undefined,
     gridOverlayMode: parsedGridMode,
     // Only the lens knows how many phases it has, so the ceiling is the
     // overlay's to enforce; a link can only be stopped from naming a
@@ -702,7 +705,7 @@ function uiQueryState(query: URLSearchParams, preset: ScenePreset): UIQueryState
 export const STUDIO_QUERY_KEYS: readonly string[] = [
   "method", "scene", "quality", "view", "diagnostics", "waterdiag",
   OVERLAY_QUERY_KEY, "performance", "validation",
-  "grid", "gridSlice", "gridMode", "lensPhase",
+  "grid", "gridSlice", "gridMode", "lensPhase", "layers",
   "render", "svoLighting", "svoSilhouetteRefinement", "svoSurface",
   "environment", "fps",
 ];
@@ -780,6 +783,7 @@ export function serializeQueryState(
   const serializedGridSlice = sliceOnlyVolume ? 0.5 : uiState.gridOverlaySlice;
   if (serializedGridAxis !== "off") query.set("grid", serializedGridAxis);
   if (serializedGridSlice !== 0.5) query.set("gridSlice", String(serializedGridSlice));
+  if (uiState.visualLayers) query.set("layers", writeVisualLayers(uiState.visualLayers));
   if (uiState.gridOverlayMode !== "structure") query.set("gridMode", uiState.gridOverlayMode);
   // Gated on the mode as well as the value: a scrubber position outside a lens
   // addresses nothing, and a key that rode along on every other field view

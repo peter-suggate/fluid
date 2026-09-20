@@ -1,3 +1,4 @@
+import { VISUAL_LAYERS, visualLayerPaintWGSL, layerOpacity, type VisualLayerState } from "./visual-layers";
 /**
  * Solver-grid cross-section rendered as an independent presentation layer.
  *
@@ -24,6 +25,13 @@ import {
  * documented on its source type in `method-view-records`.
  */
 export const gridOverlayViewRecordsWGSL = /* wgsl */ `
+${visualLayerPaintWGSL}
+struct LayerUniforms { control:vec4f, opacity:array<vec4f,3>, pressureOrigin:vec4f, }
+@group(0) @binding(24) var<uniform> layers:LayerUniforms;
+var<private> layerMode:i32;
+var<private> recordComposition:bool;
+var<private> recordWindowPresent:bool;
+var<private> recordTilesPresent:bool;
 @group(0) @binding(23) var<storage,read> viewRecords:array<u32>;
 const TILE_CLASS_FINE:u32=${TILE_CLASS_FINE}u;
 const TILE_CLASS_SHELL:u32=${TILE_CLASS_SHELL}u;
@@ -32,9 +40,10 @@ const TILE_CLASS_SHELL:u32=${TILE_CLASS_SHELL}u;
 fn tileClassAt(cell:vec3i,dims:vec3i)->u32{
   let tiles=(dims+vec3i(3))/4;
   let count=u32(tiles.x*tiles.y*tiles.z);
-  if(arrayLength(&viewRecords)<${TILE_CLASS_RECORD_WORDS}u*count){return TILE_CLASS_FINE|TILE_CLASS_SHELL;}
+  let offset=select(0u,256u,recordComposition);
+  if((recordComposition && !recordTilesPresent) || arrayLength(&viewRecords)<offset+${TILE_CLASS_RECORD_WORDS}u*count){return TILE_CLASS_FINE|TILE_CLASS_SHELL;}
   let t=clamp(cell,vec3i(0),dims-vec3i(1))/4;
-  return viewRecords[${TILE_CLASS_RECORD_WORDS}u*u32(t.x+tiles.x*(t.y+tiles.y*t.z))+${TILE_CLASS_RECORD_CLASS_WORD}u];
+  return viewRecords[offset+${TILE_CLASS_RECORD_WORDS}u*u32(t.x+tiles.x*(t.y+tiles.y*t.z))+${TILE_CLASS_RECORD_CLASS_WORD}u];
 }
 struct SolveWindowView{
   seedMinimum:vec3i,seedMaximum:vec3i,
@@ -47,7 +56,7 @@ fn solveWindowRecordBox(word:u32)->vec3i{
 }
 // A binding shorter than the header is the whole domain, dispatched densely.
 fn solveWindowView(dims:vec3i)->SolveWindowView{
-  if(arrayLength(&viewRecords)<${SOLVE_WINDOW_RECORD_WORDS}u){
+  if(arrayLength(&viewRecords)<${SOLVE_WINDOW_RECORD_WORDS}u || (recordComposition && !recordWindowPresent)){
     return SolveWindowView(vec3i(0),dims,vec3i(0),dims,dims);
   }
   let minimum=solveWindowRecordBox(${SOLVE_WINDOW_BOX_WORD}u);
@@ -810,6 +819,7 @@ fn fluidSample(cell: vec3i) -> f32 {
 
 fn levelSetSample(cell: vec3i) -> f32 {
   let dims = vec3i(u.gridInfo.xyz);
+  if(layers.control.x>0.5 && sliceLsvP.global.x==2u){return sliceDenseLevelSetPhi(vec3f(cell)+vec3f(0.5)).x*bitcast<f32>(sliceLsvP.reserved.x);}
   if(sparseGridEnabled()){return sparseFinePhiAt(cell);}
   let q = clamp(cell, vec3i(0), dims - vec3i(1));
   let h = u.container.y / max(u.gridInfo.y, 1.0);
@@ -873,6 +883,21 @@ fn velocitySample(cell: vec3i) -> vec3f {
     let at=sparseVelocityOffset()+4u*owner.x;return sparseP.frame.y
       *vec3f(sparseState[at],sparseState[at+1u],sparseState[at+2u]);}
   let q = clamp(cell, vec3i(0), dims - vec3i(1));
+  if(layers.control.x>0.5){
+    let positive=textureLoad(velocityField,q,0).xyz;var negative=vec3f(0.0);
+    for(var axis=0u;axis<3u;axis+=1u){
+      var neighbor=q;neighbor[axis]-=1;
+      if(q[axis]>0){negative[axis]=textureLoad(velocityField,neighbor,0)[axis];}
+      else if(layers.control.z>0.0){
+        var index=q.y+dims.y*q.z;
+        if(axis==1u){index=dims.y*dims.z+q.x+dims.x*q.z;}
+        if(axis==2u){index=dims.y*dims.z+dims.x*dims.z+q.x+dims.x*q.y;}
+        negative[axis]=bitcast<f32>(viewRecords[u32(layers.control.z)+u32(index)]);
+      }
+    }
+    return (positive+negative)*0.5;
+  }
+
   if (u.gridInfo.w < 1.5 || u.gridInfo.w > 2.5) { return textureLoad(velocityField, q, 0).xyz; }
   let base = i32(round(textureLoad(tallCellBases, q.xz, 0).x));
   if (q.y < base && base > 0) {
@@ -891,6 +916,12 @@ fn divergenceSample(cell:vec3i)->f32{
   return textureLoad(divergenceField,cell,0).x;
 }
 fn mappedPressureSample(cell:vec3i)->f32{
+  if(layers.control.x>0.5){
+    if(levelSetSample(cell)>=0.0){return 0.0;}
+    let q=cell-vec3i(layers.pressureOrigin.xyz)+vec3i(1);
+    if(any(q<vec3i(0))||any(q>=vec3i(textureDimensions(mappedPressureField)))){return 0.0;}
+    return textureLoad(mappedPressureField,q,0).x;
+  }
   if(sparseGridEnabled()){let owner=sparseOwner(cell);if(owner.x==SPARSE_INVALID){return 0.0;}
     return sparseState[sparseP.stateOffsets2.x+owner.x]*sparseP.frame.z;}
   return textureLoad(mappedPressureField,cell,0).x;
@@ -1079,7 +1110,7 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
   let pixelsPerCell = 1.0 / max(derivative.x, derivative.y);
   let dotFade = smoothstep(9.0, 18.0, pixelsPerCell);
   let adaptiveGrid = u.debug.z > 0.5;
-  let fieldMode = i32(round(u.debug.w));
+  let fieldMode = select(i32(round(u.debug.w)),layerMode,layers.control.x>0.5);
   // Structure is the one view whose subject is the lattice, so it holds its
   // lines further into the distance than the field views, where the grid is
   // only a reference frame and a bolder one would eat the content.
@@ -1434,9 +1465,48 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
       sampleDot = 0.0;
     }
   }
+  if (layers.control.x > 0.5) {
+    // Atomic layers never inherit another view's grid, dots or contour.
+    sampleDot=0.0; liquidContour=0.0;
+    var scalar=0.0;
+    if(fieldMode==3){scalar=levelSetSample(cell)/max(min(size.x/f32(dims.x),min(size.y/f32(dims.y),size.z/f32(dims.z))),1e-9);}
+    if(fieldMode==5){scalar=mappedPressureSample(cell);}
+    if(fieldMode==10){scalar=densitySample(cell);}
+    if(fieldMode==21){scalar=sliceVolumeFill(cell).x;}
+    if(fieldMode==22){scalar=f32(tileClassAt(cell,dims));}
+    if(fieldMode==3||fieldMode==5||fieldMode==10||fieldMode==21||fieldMode==22){let paint=scalarLayerPaint(fieldMode,scalar);fill=sceneColor(paint.rgb);alpha=paint.a;}
+
+    line=select(0.0,max(firstGridLine,secondGridLine),fieldMode==0);
+    if(fieldMode==0){fill=vec3f(0.55,0.72,0.8);alpha=0.0;}
+    if(fieldMode==24){
+      let contour=sliceZeroContour(vec3f(fineOrigin)+local3,derivative);
+      fill=mix(sceneColor(FRACTION_LIQUID_DISPLAY),sceneColor(FRACTION_EXCESS_DISPLAY),contour);
+      alpha=max(select(0.0,0.22,levelSetSample(cell)<0.0),contour);
+    }
+    if(fieldMode==25){
+      let bits=u32(round(textureLoad(velocityField,cell,0).w));
+      let f=fract(samplePosition);
+      var face=0.0;
+      if((bits & (1u<<u32(firstPlaneAxis)))!=0u){face=max(face,gridLinePaint((1.0-f.x)/derivative.x,1.2));}
+      if((bits & (1u<<u32(secondPlaneAxis)))!=0u){face=max(face,gridLinePaint((1.0-f.y)/derivative.y,1.2));}
+      if((bits & (1u<<u32(firstPlaneAxis+3)))!=0u){face=max(face,gridLinePaint(f.x/derivative.x,1.2));}
+      if((bits & (1u<<u32(secondPlaneAxis+3)))!=0u){face=max(face,gridLinePaint(f.y/derivative.y,1.2));}
+      fill=vec3f(0.95,0.65,0.2);alpha=face;
+    }
+    if(fieldMode==26){
+      let v=velocitySample(cell);let scale=1.0;
+      let vector=vec2f(v[firstPlaneAxis],v[secondPlaneAxis])/scale*0.4;
+      let p=fract(samplePosition)-vec2f(0.5);
+      let t=clamp(dot(p,vector)/max(dot(vector,vector),1e-8),0.0,1.0);
+      let stroke=(1.0-smoothstep(0.6,1.6,length((p-vector*t)/derivative)))*smoothstep(5.0,10.0,pixelsPerCell);
+      fill=mix(sceneColor(FRACTION_LIQUID_DISPLAY),vec3f(0.9),stroke);
+      alpha=max(clamp(length(v)/scale,0.0,1.0)*0.25,stroke*select(0.0,1.0,length(v)>1e-7));
+    }
+  }
   line *= lineFade * lineStrength;
   let gridBody = gridBodySample(representedCell(cell,dims,fineOrigin,
     boundsMin,size,adaptiveGrid,tallGrid));
+  if (gridBody.occupied && layers.control.x > 0.5) { return GridSample(vec3f(0.0),0.0,0.0,true); }
   if (gridBody.occupied) {
     fill = mix(vec3f(0.96, 0.43, 0.12), vec3f(1.0, 0.78, 0.38), 0.18 * gridBody.selected);
     alpha = 0.97;
@@ -1606,6 +1676,9 @@ fn volumeField(uv:vec2f)->vec4f {
 }
 
 @fragment fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
+  recordComposition=layers.control.x>0.5;
+  recordWindowPresent=layers.control.y>0.5;
+  recordTilesPresent=layers.pressureOrigin.w>0.5;
   // This diagnostic is a cross-section. Also guard stale/direct callers so
   // they cannot accidentally repeat sparse phi lookups throughout a raymarch.
   let requestedAxis = i32(round(u.debug.x));
@@ -1646,8 +1719,22 @@ fn volumeField(uv:vec2f)->vec4f {
   if (distance <= 0.0 || !inside) { discard; }
   let footprint = distance * 1.44 / max(u.viewport.y, 1.0);
   sliceHatchFootprint = dot(point - origin, forward) * 1.44 / max(u.viewport.y, 1.0);
-  var overlay=gridSample(point,boundsMin,size,frame.minimumFine,
-    frame.dimensions,axis,footprint);
+  var overlay=GridSample(vec3f(0),0.0,0.0,false);
+  if(layers.control.x>0.5){
+    var accumulated=vec4f(0.0);
+    let modes=array<i32,10>(${VISUAL_LAYERS.map(l => l.mode).join(",")});
+    for(var index=0u;index<10u;index+=1u){
+      let opacity=layers.opacity[index/4u][index%4u];
+      if(opacity<=0.0){continue;}
+      layerMode=modes[index];
+      let sample=gridSample(point,boundsMin,size,frame.minimumFine,frame.dimensions,axis,footprint);
+      let a=clamp(sample.alpha*opacity,0.0,1.0);
+      accumulated=vec4f(sample.color*a+accumulated.rgb*(1.0-a),a+accumulated.a*(1.0-a));
+    }
+    if(accumulated.a<=0.001 || distance>=nearestBodyDistance(origin,direction)){discard;}
+    return vec4f(displayColor(accumulated.rgb/accumulated.a),accumulated.a);
+  }
+  overlay=gridSample(point,boundsMin,size,frame.minimumFine,frame.dimensions,axis,footprint);
   if (distance >= nearestBodyDistance(origin, direction) && !overlay.solid) { discard; }
   let horizontalEdgeDistance = min(min(point.x - boundsMin.x, boundsMax.x - point.x), min(point.z - boundsMin.z, boundsMax.z - point.z));
   let grip = select(clamp(1.0 - (boundsMax.y - point.y) / (0.03 * size.y), 0.0, 1.0), clamp(1.0 - horizontalEdgeDistance / (0.035 * min(size.x, size.z)), 0.0, 1.0), axis == 3) * 0.8;
@@ -1673,6 +1760,9 @@ fn volumeField(uv:vec2f)->vec4f {
 `;
 
 export class GridOverlayPipeline {
+  private readonly layerUniform: GPUBuffer;
+  private layerRecords?: GPUBuffer;
+  private layerSources?: { tiles?: GPUFluidViewRecords; window?: GPUFluidViewRecords; boundary?: GPUBufferBinding; boundaryOffset: number };
   private pipeline?: GPURenderPipeline;
   private bindGroup?: GPUBindGroup;
   private volume?: GPUTexture;
@@ -1698,6 +1788,7 @@ export class GridOverlayPipeline {
     private readonly uniformBuffer: GPUBuffer,
     private readonly bodyBuffer: GPUBuffer
   ) {
+    this.layerUniform = device.createBuffer({ label: "Visual layer selection", size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.sparseDummyParams = device.createBuffer({
       label: "Grid overlay empty sparse parameters",
       size: 256,
@@ -1782,6 +1873,30 @@ export class GridOverlayPipeline {
     this.rebuildBindGroup();
   }
 
+  setLayers(state: VisualLayerState | undefined, tiles?: GPUFluidViewRecords, window?: GPUFluidViewRecords, pressureOrigin?: readonly [number, number, number], boundary?: GPUBufferBinding) {
+    const values = new Float32Array(20);
+    if (pressureOrigin) values.set(pressureOrigin, 16);
+    if (state) {
+      tiles = state.visible && state.enabled.includes("tiles") ? tiles : undefined;
+      window = state.visible && state.enabled.includes("window") ? window : undefined;
+      boundary = state.visible && state.enabled.includes("velocity") ? boundary : undefined;
+      values[0] = 1; values[1] = window ? 1 : 0;
+      VISUAL_LAYERS.forEach((layer, i) => { values[4 + i] = state.visible && state.enabled.includes(layer.id) ? layerOpacity(state, layer.id) : 0; });
+      const tileBytes = tiles ? (tiles.records.size ?? tiles.records.buffer.size - (tiles.records.offset ?? 0)) : 0;
+      const boundaryOffset = 1024 + tileBytes;
+      const boundaryBytes = boundary ? (boundary.size ?? boundary.buffer.size - (boundary.offset ?? 0)) : 0;
+      values[2] = boundary ? boundaryOffset / 4 : 0; values[19] = tiles ? 1 : 0;
+      const bytes = boundaryOffset + boundaryBytes;
+      if (!this.layerRecords || this.layerRecords.size < bytes) {
+        this.layerRecords?.destroy();
+        this.layerRecords = this.device.createBuffer({ label: "Composed visual records", size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      }
+      this.layerSources = { tiles, window, boundary, boundaryOffset };
+      this.setViewRecords({ records: { buffer: this.layerRecords } });
+    } else this.layerSources = undefined;
+    this.device.queue.writeBuffer(this.layerUniform, 0, values);
+  }
+
   setSparseSource(source: SparseAdaptiveGridConsumerSource | undefined) {
     if (this.sparseSource === source) return;
     this.sparseSource = source;
@@ -1859,12 +1974,19 @@ export class GridOverlayPipeline {
         { binding: 21, resource: (this.denseLevelSetVolumeSource?.vertexPhi ?? this.volume).createView({dimension:"3d"}) },
         { binding: 22, resource: (this.denseLevelSetVolumeSource?.openFraction ?? this.density).createView({dimension:"3d"}) },
         { binding: 23, resource: this.viewRecords?.records ?? { buffer: this.sparseDummyStorage } },
+        { binding: 24, resource: { buffer: this.layerUniform } },
       ]
     });
   }
 
   encode(encoder: GPUCommandEncoder, target: GPUTextureView): boolean {
     if (!this.pipeline || !this.bindGroup) return false;
+    if (this.layerSources && this.layerRecords) {
+      const { tiles, window, boundary, boundaryOffset } = this.layerSources;
+      if (boundary) encoder.copyBufferToBuffer(boundary.buffer, boundary.offset ?? 0, this.layerRecords, boundaryOffset, boundary.size ?? boundary.buffer.size - (boundary.offset ?? 0));
+      if (window) encoder.copyBufferToBuffer(window.records.buffer, window.records.offset ?? 0, this.layerRecords, 0, SOLVE_WINDOW_RECORD_WORDS * 4);
+      if (tiles) encoder.copyBufferToBuffer(tiles.records.buffer, tiles.records.offset ?? 0, this.layerRecords, 1024, tiles.records.size ?? tiles.records.buffer.size - (tiles.records.offset ?? 0));
+    }
     const pass = encoder.beginRenderPass({
       label: "Solver grid overlay",
       colorAttachments: [{ view: target, loadOp: "load", storeOp: "store" }]
@@ -1877,6 +1999,8 @@ export class GridOverlayPipeline {
   }
 
   destroy() {
+    this.layerUniform.destroy();
+    this.layerRecords?.destroy();
     this.sparseDummyParams.destroy();
     this.sparseOverlayParams.destroy();
     this.sparseLevelSetVolumeParams.destroy();

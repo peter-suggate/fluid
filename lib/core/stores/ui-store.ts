@@ -1,3 +1,4 @@
+import type { VisualLayerState } from "../visual-layers";
 import { uiFeatureQuery } from "../../features/persistence";
 import { surfaceDisplayQuery } from "../../features/surface-display/definition";
 import { resolveSvoPipelineComposition } from "../../svo/pipeline/composition";
@@ -241,6 +242,7 @@ interface UIStore {
   gridOverlayAxis: GridOverlayConfig["axis"];
   gridOverlaySlice: number;
   /** Field painted on the slice, including adaptive pressure diagnostics. */
+  visualLayers?: VisualLayerState;
   gridOverlayMode: GridOverlayMode;
   /** Scrubber position along a stage lens's phases. Ignored by every other mode. */
   gridOverlayLensPhase: number;
@@ -529,7 +531,10 @@ export const createUIStore = () => create<UIStore>((set) => ({
   // Assignment rather than a toggle set: opening one instrument closes whichever
   // was up, because the field can only hold one and the ring writes it directly.
   setSceneOverlay: (sceneOverlay) => set({ sceneOverlay }),
-  setGridOverlayAxis: (gridOverlayAxis) => set({ gridOverlayAxis }),
+  setGridOverlayAxis: (gridOverlayAxis) => set(state => ({
+    gridOverlayAxis,
+    visualLayers: state.visualLayers ? { ...state.visualLayers, visible: gridOverlayAxis !== "off" } : undefined,
+  })),
   setGridOverlaySlice: (gridOverlaySlice) => set({ gridOverlaySlice: Math.max(0, Math.min(1, gridOverlaySlice)) }),
   // Moving to another lens drops the scrubber. A phase is a position inside one
   // stage's reading of itself, so "phase 3" of the projection means nothing on
@@ -537,6 +542,7 @@ export const createUIStore = () => create<UIStore>((set) => ({
   // nobody chose, and on a lens with fewer phases, on none at all.
   setGridOverlayMode: (gridOverlayMode) => set((state) => ({
     gridOverlayMode,
+    visualLayers: undefined,
     gridOverlayLensPhase: isStageLensOverlayMode(gridOverlayMode) && gridOverlayMode !== state.gridOverlayMode
       ? 0 : state.gridOverlayLensPhase,
   })),

@@ -1,3 +1,4 @@
+import { legacyVisualLayers, type VisualLayerState } from "./visual-layers";
 import { authoredFluidGeometryKey } from "./authored-fluid-edit";
 import { publishOpaqueSurfaceCapability } from "../svo/features/shading/deferred-specialization";
 import { validateLiveFluidEdit, type LiveFluidEdit, type LiveFluidEditResult } from "./live-fluid-edit";
@@ -307,6 +308,7 @@ export interface GridOverlayConfig {
   axis: "off" | "z" | "x" | "y" | "volume";
   position: number;
   mode?: GridOverlayMode;
+  layers?: VisualLayerState;
   /** Scrubber position within the selected lens's phases. */
   lensPhase?: number;
 }
@@ -3043,6 +3045,13 @@ export class FluidLabRenderer {
   }
 
   draw(time_s: number, scene: SceneDescription, camera: CameraState, bodies: RigidBodyState[], selectedBodyId: string | undefined, config: SimulationRunConfig, gridOverlay?: GridOverlayConfig, environmentId: EnvironmentId = defaultEnvironmentId, presentationMode: ScenePresentationMode = "full-scene", fluidSurfaceRenderMode: FluidSurfaceRenderMode = "shaded", svoLightingOptions: SvoLightingOptions = DEFAULT_SVO_LIGHTING_OPTIONS, svoDiagnostics: SvoRenderDiagnostics = DEFAULT_SVO_RENDER_DIAGNOSTICS, svoTuning: SvoRenderTuning = DEFAULT_SVO_RENDER_TUNING, pixelTrace?: PixelTraceConfig, fluidCellTrace?: FluidCellTraceConfig): RendererFrameMetrics {
+    if (config.methodId === "uniform-volume" && gridOverlay && !isStageLensOverlayMode(gridOverlay.mode ?? "")) {
+      const layers = gridOverlay.layers ?? { ...legacyVisualLayers(gridOverlay.mode ?? "structure"), visible: gridOverlay.axis !== "off" };
+      const visible = layers.visible && layers.enabled.length > 0;
+      const axis = gridOverlay.axis === "off" || gridOverlay.axis === "volume" ? "z" : gridOverlay.axis;
+      gridOverlay = { ...gridOverlay, layers, mode: "structure", axis: visible ? axis : "off" };
+    }
+
     const measurementInstrumentationEnabled = usePerformanceInstrumentationStore.getState().enabled;
     const cpuTrace = measurementInstrumentationEnabled
       ? new CPUPerformanceTrace(
@@ -3281,10 +3290,11 @@ export class FluidLabRenderer {
       );
     }
     this.gridOverlayPipeline?.setDenseLevelSetVolumeSource(this.gpuFluid?.denseLevelSetVolumeSource);
-    // Binding 23 holds the records of the method view on screen; every other
-    // view reads the dummy there, so the mode alone picks what is bound.
-    this.gridOverlayPipeline?.setViewRecords(gridOverlay?.mode === "fine-tiles" ? this.gpuFluid?.tileClassSource
+    // Legacy modes bind one source directly; composed Uniform layers pack the
+    // selected sources together without increasing the storage-binding budget.
+    if (config.methodId !== "uniform-volume") this.gridOverlayPipeline?.setViewRecords(gridOverlay?.mode === "fine-tiles" ? this.gpuFluid?.tileClassSource
       : gridOverlay?.mode === "solve-window" ? this.gpuFluid?.solveWindowSource : undefined);
+    this.gridOverlayPipeline?.setLayers(config.methodId === "uniform-volume" ? gridOverlay?.layers : undefined, this.gpuFluid?.tileClassSource, this.gpuFluid?.solveWindowSource, this.gpuFluid?.gridPressureOrigin, this.gpuFluid?.gridVelocityBoundary);
     if (gpuInfo && this.gpuFluid && this.columnBaseTexture && this.gridCellTexture && this.velocityFallbackTexture && this.pressureSamplesFallbackTexture && this.scalarFallbackTexture) {const activeSparsePresentation=this.sparseWorldPresentation(this.gpuFluid);const compactSurface=Boolean(activeSparsePresentation?.fineLevelSet||this.gpuFluid.globalFineLevelSetSource||this.gpuFluid.coarseLevelSetSource);this.gridOverlayPipeline?.setVolume(compactSurface?this.scalarFallbackTexture:this.gpuFluid.surfaceFieldTexture??this.gpuFluid.volumeTexture, this.gpuFluid.columnBaseTexture ?? this.columnBaseTexture, this.gpuFluid.gridCellTexture ?? this.gridCellTexture, this.gpuFluid.velocityTexture ?? this.velocityFallbackTexture, this.gpuFluid.gridPressureSamplesTexture ?? this.pressureSamplesFallbackTexture, this.gpuFluid.gridDivergenceTexture ?? this.scalarFallbackTexture, this.gpuFluid.gridPressureTexture ?? this.scalarFallbackTexture, this.gpuFluid.volumeTexture);this.gridOverlayPipeline?.setSparseSource(activeSparsePresentation?.adaptiveGrid??this.gpuFluid.sparseAdaptiveGridSource);}
     // A newly attached sparse source may still be compiling its water
     // classifier/scan/emitter. Wait before creating an encoder or claiming
