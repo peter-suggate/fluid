@@ -76,7 +76,15 @@ export type MethodStoreHook = ReturnType<typeof createMethodStore>;
  * with no `SessionProvider` mounted reads, and what non-React callers that
  * have not yet been threaded a session resolve to.
  */
-export const useMethodStore = createMethodStore();
+// Production chunk evaluation can load a UI dependency before the entry
+// point's method-catalog side effect. Resolve the default on first use, once
+// the entry point has finished installing methods, rather than on import.
+let defaultStore: MethodStoreHook | undefined;
+const defaultMethodStore = () => defaultStore ??= createMethodStore();
+export const useMethodStore = new Proxy(
+  (...args: unknown[]) => Reflect.apply(defaultMethodStore(), undefined, args),
+  { get: (_target, key) => Reflect.get(defaultMethodStore(), key) },
+) as MethodStoreHook;
 
 /** Effective values for the active method: defaults ← quality preset ← user overrides. */
 export function resolvedMethodValues(state: Pick<MethodStore, "methodId" | "quality" | "overrides">): MethodParamValues {

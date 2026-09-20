@@ -12,6 +12,7 @@ import {
 
 interface VisualLayerRowsProps {
   readonly state: VisualLayerState;
+  readonly hidePages?: boolean;
   readonly onChange: (state: VisualLayerState) => void;
   readonly plane?: {
     axis: string;
@@ -22,7 +23,7 @@ interface VisualLayerRowsProps {
 }
 
 /** The same multi-select instrument in the 2D lab and 3D studio. */
-export function VisualLayerRows({ state, onChange, plane }: VisualLayerRowsProps) {
+export function VisualLayerRows({ state, onChange, plane, hidePages }: VisualLayerRowsProps) {
   const [open, setOpen] = useState(false);
   const { claim } = useToolstripSection("visual-layers", () => setOpen(false));
   const menu = <ToolstripMenuButton
@@ -31,7 +32,7 @@ export function VisualLayerRows({ state, onChange, plane }: VisualLayerRowsProps
     open={open}
     onOpen={value => { claim(value); setOpen(value); }}
   >
-    {VISUAL_LAYERS.map(layer => {
+    {VISUAL_LAYERS.filter(layer => !hidePages || layer.id !== "pages").map(layer => {
       const selected = state.enabled.includes(layer.id);
       return <div key={layer.id} role="none" className="visual-layer-option">
         <ToolstripMenuItem

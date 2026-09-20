@@ -13,6 +13,13 @@ export interface GPUFieldLocation {
 }
 
 export interface GPUEulerianInfo {
+  uniformVolumePageEdge?: number;
+  uniformVolumePagesActive?: number;
+  uniformVolumePagesTotal?: number;
+  uniformVolumePageBytes?: number;
+  uniformVolumePageStage?: string;
+  uniformVolumePageTransportReceiptMs?: number;
+  uniformVolumePageSharpenReceiptMs?: number;
   nx: number;
   ny: number;
   nz: number;

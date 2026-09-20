@@ -95,8 +95,14 @@ params.push({kind:"select",key:"surfaceDeficitBalancing",label:"Surface-deficit 
   options:[{value:"on",label:"On"},{value:"off",label:"Off"}],
   hint:"Preserve overfill expansion and balance it globally with contraction in underfilled pressure-liquid cells, weighted by the existing surface-fill estimate. Reduces persistent sloshing; capped to the available deficit per step."});
 
-/** Shared by the studio, advance-lab, native Rust generator and scene harnesses. */
+params.push({kind:"select",key:"volumeStorage",label:"Volume record storage",default:"dense",tier:"fine",update:"solver",
+  options:[{value:"dense",label:"Dense"},{value:"pages16",label:"16³ pages"},{value:"pages32",label:"32³ pages"}],
+  hint:"3D GPU transport and sharpening records in demand-allocated pages. Rebuilds the solver. Other fields remain dense. Large domains synchronize page demand per phase; grids up to 64³ use preallocated capacity. Dense retains the current performance path."});
+
+/** Shared by the studio and scene harnesses. */
 export const UNIFORM_GEOMETRIC_PARAMS: readonly MethodParamSpec[] = Object.freeze(params);
+/** Storage is a WebGPU implementation choice, excluded from the native contract. */
+export const UNIFORM_GEOMETRIC_NATIVE_PARAMS = Object.freeze(params.filter(p => p.key !== "volumeStorage"));
 export const UNIFORM_GEOMETRIC_DEFAULTS: Readonly<MethodParamValues> = Object.freeze(
   Object.fromEntries(params.map(p => [p.key, p.default])),
 );

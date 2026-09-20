@@ -25,7 +25,7 @@ test("old lab links migrate surface/released faces and the independent grid", ()
 });
 test("3D links roundtrip combined layers and opacity", () => {
   const state = parseQueryState("method=uniform-volume&grid=z");
-  state.ui.visualLayers = { ...visualLayers(["volume", "window", "tiles", "release"]), opacity: { volume: 0.2 } };
+  state.ui.visualLayers = { ...visualLayers(["volume", "window", "tiles", "pages", "release"]), opacity: { volume: 0.2 } };
   const query = serializeQueryState("", { presetId: state.presetId, scene: state.scene }, state, state.ui);
   assert.deepEqual(parseQueryState(query).ui.visualLayers, state.ui.visualLayers);
 });

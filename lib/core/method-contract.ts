@@ -11,7 +11,7 @@ import type { GPURigidBodyPick, GPURigidBodyPose } from "./webgpu-rigid-body";
 import type { Vec3 } from "./model";
 import type { GPUSecondaryParticleSource } from "./webgpu-secondary-particles";
 import type { GPUFluidFaceVelocitySource } from "./webgpu-face-velocity-overlay";
-import type { GPUFluidSolveWindowSource, GPUFluidTileClassSource } from "./method-view-records";
+import type { GPUFluidSolveWindowSource, GPUFluidTileClassSource, GPUFluidVolumePageSource } from "./method-view-records";
 import type { GPUPressureJournalSource } from "../features/pressure-inspection/gpu/overlay";
 import type { PressureJournal, PressureJournalDescriptor } from "../features/pressure-inspection/journal";
 import type { AnyStageLens, StageLensSource } from "./stage-lens";
@@ -298,6 +298,8 @@ export interface GPUSolverInstance {
    * runtime toggle, so it is read fresh every frame.
    */
   readonly tileClassSource?: GPUFluidTileClassSource;
+  /** Actual transient geometric volume page table (header, flags, slots). */
+  readonly volumePageSource?: GPUFluidVolumePageSource;
   /**
    * Optional solve-window header, for the solve-window view. It shares the
    * overlay's packed records with tile classes in composed views, and is

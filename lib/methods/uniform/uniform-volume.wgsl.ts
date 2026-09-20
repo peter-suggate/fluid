@@ -334,12 +334,12 @@ fn uvBuildEdges(@builtin(global_invocation_id)gid:vec3u){
   if(!valid(id)){return;}let index=linearIndex(id);
   let departure=uvTrace(vec3f(id)+vec3f(0.5),params.dimsDt.w)-vec3f(0.5);
   let base=vec3i(floor(departure));let f=fract(departure);
-  for(var k=0u;k<9u;k++){uvEdges[index].donor[k]=index;uvEdges[index].weight[k]=0.0;}
+  for(var k=0u;k<9u;k++){uvEdges[uvEdgeAddress(index)].donor[k]=index;uvEdges[uvEdgeAddress(index)].weight[k]=0.0;}
   for(var k=0u;k<8u;k++){let o=uvCorner(k);let q=base+o;
     let w=select(vec3f(1)-f,f,o==vec3i(1));
-    if(valid(q)&&uvOpen(id)>0.0){uvEdges[index].donor[k]=linearIndex(q);
+    if(valid(q)&&uvOpen(id)>0.0){uvEdges[uvEdgeAddress(index)].donor[k]=linearIndex(q);
       let weight=w.x*w.y*w.z*min(uvOpen(id),uvOpen(q));
-      uvEdges[index].weight[k]=weight;uvAddDonor(linearIndex(q),weight);}}
+      uvEdges[uvEdgeAddress(index)].weight[k]=weight;uvAddDonor(linearIndex(q),weight);}}
 }
 @compute @workgroup_size(4,4,4)
 fn uvFinishDonorSums(@builtin(global_invocation_id)gid:vec3u){
@@ -350,24 +350,24 @@ fn uvFinishDonorSums(@builtin(global_invocation_id)gid:vec3u){
 fn uvFallback(@builtin(global_invocation_id)gid:vec3u){
   let id=activeId(gid);if(uvTransportSkip(id)){return;}
   if(!valid(id)){return;}let i=linearIndex(id);
-  if(atomicLoad(&sharpenDeposits[i])==0){uvEdges[i].weight[8]=max(uvOpen(id),1e-6);}
+  if(atomicLoad(&sharpenDeposits[i])==0){uvEdges[uvEdgeAddress(i)].weight[8]=max(uvOpen(id),1e-6);}
 }
 @compute @workgroup_size(4,4,4)
 fn uvNormalizeRows(@builtin(global_invocation_id)gid:vec3u){
   let id=activeId(gid);if(uvTransportSkip(id)){return;}
   if(!valid(id)){return;}let i=linearIndex(id);var sum=0.0;
-  for(var k=0u;k<9u;k++){sum+=uvEdges[i].weight[k];}
+  for(var k=0u;k<9u;k++){sum+=uvEdges[uvEdgeAddress(i)].weight[k];}
   let scale=uvOpen(id)/max(sum,1e-20);
-  for(var k=0u;k<9u;k++){let weight=uvEdges[i].weight[k]*scale;
-    uvEdges[i].weight[k]=weight;uvAddDonor(uvEdges[i].donor[k],weight);}
+  for(var k=0u;k<9u;k++){let weight=uvEdges[uvEdgeAddress(i)].weight[k]*scale;
+    uvEdges[uvEdgeAddress(i)].weight[k]=weight;uvAddDonor(uvEdges[uvEdgeAddress(i)].donor[k],weight);}
 }
 @compute @workgroup_size(4,4,4)
 fn uvNormalizeDonors(@builtin(global_invocation_id)gid:vec3u){
   let id=activeId(gid);if(uvTransportSkip(id)){return;}
   if(!valid(id)){return;}let i=linearIndex(id);
-  for(var k=0u;k<9u;k++){let donor=uvEdges[i].donor[k];
+  for(var k=0u;k<9u;k++){let donor=uvEdges[uvEdgeAddress(i)].donor[k];
     let sum=bitcast<f32>(atomicLoad(&sharpenDeposits[donor]));
-    uvEdges[i].weight[k]/=max(sum,1e-20);}
+    uvEdges[uvEdgeAddress(i)].weight[k]/=max(sum,1e-20);}
 }
 // Sec. 3.4 and Sec. 3.5 both write V as a sum with cancellation, so a cell the
 // characteristic barely reached keeps float32 rounding residue: on figure 7 at
@@ -398,7 +398,7 @@ fn uvGather(@builtin(global_invocation_id)gid:vec3u){
     textureStore(volumeOut,id,vec4f(0.0));textureStore(gammaOut,id,vec4f(0.0));return;
   }
   let i=linearIndex(id);var value=0.0;
-  for(var k=0u;k<9u;k++){value+=uvEdges[i].weight[k]*volume(uvCell(uvEdges[i].donor[k]));}
+  for(var k=0u;k<9u;k++){value+=uvEdges[uvEdgeAddress(i)].weight[k]*volume(uvCell(uvEdges[uvEdgeAddress(i)].donor[k]));}
   value+=min(dropSource(id),max(0.0,uvOpen(id)-value));
   if(uvOpen(id)>0.0){value+=inflowSweptPlugSource(id,params.dimsDt.w);}
   textureStore(volumeOut,id,vec4f(uvDustFloor(value)));
@@ -487,19 +487,19 @@ fn uvPrepareSharpen(@builtin(global_invocation_id)gid:vec3u){
   let compact=params.agreement.x>0.5;
   let admitted=uvOpen(id)>0.99999&&select(abs(phi)<params.tuning.y*h,phi<params.tuning.y*h,compact);
   let relay=phi>0.0&&desired<=1e-6;
-  uvEdges[i].weight[3]=select(0.0,dose*select(max(own-desired,0.0),own,compact&&phi<0.0),admitted);
-  uvEdges[i].weight[4]=select(0.0,dose*max(select(desired,1.0,relay)-own,0.0),admitted);
-  uvEdges[i].weight[5]=phi;
+  uvEdges[uvEdgeAddress(i)].weight[3]=select(0.0,dose*select(max(own-desired,0.0),own,compact&&phi<0.0),admitted);
+  uvEdges[uvEdgeAddress(i)].weight[4]=select(0.0,dose*max(select(desired,1.0,relay)-own,0.0),admitted);
+  uvEdges[uvEdgeAddress(i)].weight[5]=phi;
 }
 @compute @workgroup_size(4,4,4)
 fn uvProposeSharpen(@builtin(global_invocation_id)gid:vec3u){
   let id=activeId(gid);if(!uvSharpenTileActive(id)){return;}
   if(!valid(id)){return;}let i=linearIndex(id);
-  let phiA=uvEdges[i].weight[5];
+  let phiA=uvEdges[uvEdgeAddress(i)].weight[5];
   for(var axis=0u;axis<3u;axis++){
-    uvEdges[i].weight[axis]=0.0;var e=vec3i(0);e[axis]=1;let q=id+e;
+    uvEdges[uvEdgeAddress(i)].weight[axis]=0.0;var e=vec3i(0);e[axis]=1;let q=id+e;
     if(!valid(q)||!uvSharpenTileActive(q)||uvOpen(id)<0.99999||uvOpen(q)<0.99999||faceOpenFraction(id,axis)<0.99999){continue;}
-    let j=linearIndex(q);let phiB=uvEdges[j].weight[5];
+    let j=linearIndex(q);let phiB=uvEdges[uvEdgeAddress(j)].weight[5];
     let middle=uvPhi(vec3f(id)+vec3f(0.5)+0.5*vec3f(e));let epsilon=1e-6;
     let inwardA=phiA>=0.0&&phiB<phiA-epsilon&&middle<=phiA+epsilon&&middle>=phiB-epsilon;
     let inwardB=phiB>=0.0&&phiA<phiB-epsilon&&middle<=phiB+epsilon&&middle>=phiA-epsilon;
@@ -509,13 +509,13 @@ fn uvProposeSharpen(@builtin(global_invocation_id)gid:vec3u){
     // a deeper (smaller phi) liquid neighbour; any other way it offers what it
     // always did, its surplus over phi's fill. Pouring is monotone in phi, so
     // it cannot cycle. With compaction off weight[3] IS that surplus.
-    var capA=uvEdges[i].weight[3];var capB=uvEdges[j].weight[3];
+    var capA=uvEdges[uvEdgeAddress(i)].weight[3];var capB=uvEdges[uvEdgeAddress(j)].weight[3];
     if(params.agreement.x>0.5){let dose=clamp(params.tuning.x,0.0,1.0);
       if(!(phiA<0.0&&phiB<phiA-epsilon)){capA=min(capA,dose*max(volume(id)-textureLoad(gammaIn,id,0).x,0.0));}
       if(!(phiB<0.0&&phiA<phiB-epsilon)){capB=min(capB,dose*max(volume(q)-textureLoad(gammaIn,q,0).x,0.0));}}
-    let ab=select(0.0,min(capA,uvEdges[j].weight[4]),(middle<=epsilon&&!relayB)||inwardA);
-    let ba=select(0.0,min(capB,uvEdges[i].weight[4]),(middle<=epsilon&&!relayA)||inwardB);
-    uvEdges[i].weight[axis]=ab-ba;
+    let ab=select(0.0,min(capA,uvEdges[uvEdgeAddress(j)].weight[4]),(middle<=epsilon&&!relayB)||inwardA);
+    let ba=select(0.0,min(capB,uvEdges[uvEdgeAddress(i)].weight[4]),(middle<=epsilon&&!relayA)||inwardB);
+    uvEdges[uvEdgeAddress(i)].weight[axis]=ab-ba;
   }
 }
 @compute @workgroup_size(4,4,4)
@@ -523,15 +523,15 @@ fn uvLimitSharpen(@builtin(global_invocation_id)gid:vec3u){
   let id=activeId(gid);if(!uvSharpenTileActive(id)){return;}
   if(!valid(id)){return;}let i=linearIndex(id);var outgoing=0.0;var incoming=0.0;
   for(var axis=0u;axis<3u;axis++){var e=vec3i(0);e[axis]=1;
-    let positive=uvEdges[i].weight[axis];var negative=0.0;
-    if(valid(id-e)&&uvSharpenTileActive(id-e)){negative=uvEdges[linearIndex(id-e)].weight[axis];}
+    let positive=uvEdges[uvEdgeAddress(i)].weight[axis];var negative=0.0;
+    if(valid(id-e)&&uvSharpenTileActive(id-e)){negative=uvEdges[uvEdgeAddress(linearIndex(id-e))].weight[axis];}
     outgoing+=max(positive,0.0)+max(-negative,0.0);incoming+=max(-positive,0.0)+max(negative,0.0);}
-  uvEdges[i].padding=vec2f(min(1.0,uvEdges[i].weight[3]/max(outgoing,1e-20)),
-    min(1.0,uvEdges[i].weight[4]/max(incoming,1e-20)));
+  uvEdges[uvEdgeAddress(i)].padding=vec2f(min(1.0,uvEdges[uvEdgeAddress(i)].weight[3]/max(outgoing,1e-20)),
+    min(1.0,uvEdges[uvEdgeAddress(i)].weight[4]/max(incoming,1e-20)));
 }
 fn uvLimitedFlux(i:u32,j:u32,axis:u32)->f32{
   if(!uvSharpenTileActive(uvCell(i))||!uvSharpenTileActive(uvCell(j))){return 0.0;}
-  let raw=uvEdges[i].weight[axis];let a=uvEdges[i].padding;let b=uvEdges[j].padding;
+  let raw=uvEdges[uvEdgeAddress(i)].weight[axis];let a=uvEdges[uvEdgeAddress(i)].padding;let b=uvEdges[uvEdgeAddress(j)].padding;
   return raw*select(min(a.y,b.x),min(a.x,b.y),raw>=0.0);
 }
 @compute @workgroup_size(4,4,4)

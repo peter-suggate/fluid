@@ -53,3 +53,8 @@ export const SOLVE_WINDOW_BOX_WORD = 7;
  */
 export const SOLVE_WINDOW_HOST_GROUPS_WORD = 228;
 export const SOLVE_WINDOW_RECORD_WORDS = SOLVE_WINDOW_HOST_GROUPS_WORD + 3;
+
+/** Uniform volume scratch pages: eight header words (edge, page dimensions XYZ,
+ * live count, sharpening-map flag, two reserved), then one flag and one slot
+ * per logical page. Missing source means this solver does not publish pages. */
+export type GPUFluidVolumePageSource = GPUFluidViewRecords;

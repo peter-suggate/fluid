@@ -1,0 +1,114 @@
+{
+  "revision": "5d4d31f2",
+  "note": "Isolated clean worktree. First checks ran Node 25; last two checks used matching Node 22. Mini64 initial attempt lacked an ignored baseline artifact; repeated after copying it. See receipts; no lane weakened.",
+  "runs": [
+    {
+      "suite": "sparse-cm12-dawn-regression",
+      "startedAt": "2026-09-20T19:00:05.382Z",
+      "backend": "metal",
+      "elapsedMs": 48901.3,
+      "budgetMs": 480000,
+      "withinBudget": true,
+      "passed": false,
+      "receipts": [
+        {
+          "id": "long-dam-far-wall",
+          "kind": "correctness",
+          "passed": false,
+          "elapsedMs": 48899.223916,
+          "failure": "exited 1"
+        }
+      ]
+    },
+    {
+      "suite": "sparse-cm12-dawn-regression",
+      "startedAt": "2026-09-20T19:00:55.117Z",
+      "backend": "metal",
+      "elapsedMs": 43335.3,
+      "budgetMs": 480000,
+      "withinBudget": true,
+      "passed": false,
+      "receipts": [
+        {
+          "id": "tall-cells-hills-far-wall",
+          "kind": "correctness",
+          "passed": false,
+          "elapsedMs": 43333.833209000004,
+          "failure": "exited 1"
+        }
+      ]
+    },
+    {
+      "suite": "sparse-cm12-dawn-regression",
+      "startedAt": "2026-09-20T19:01:39.068Z",
+      "backend": "metal",
+      "elapsedMs": 20035,
+      "budgetMs": 480000,
+      "withinBudget": true,
+      "passed": false,
+      "receipts": [
+        {
+          "id": "outside-tank-symmetric-collapse",
+          "kind": "correctness",
+          "passed": false,
+          "elapsedMs": 20034.288875,
+          "failure": "exceeded 20000 ms timeout"
+        }
+      ]
+    },
+    {
+      "suite": "sparse-cm12-dawn-regression",
+      "startedAt": "2026-09-20T19:01:59.752Z",
+      "backend": "metal",
+      "elapsedMs": 1583.2,
+      "budgetMs": 480000,
+      "withinBudget": true,
+      "passed": false,
+      "receipts": [
+        {
+          "id": "mini64-performance",
+          "kind": "performance",
+          "passed": false,
+          "elapsedMs": 1581.557,
+          "failure": "probe exited 1"
+        }
+      ]
+    },
+    {
+      "suite": "sparse-cm12-dawn-regression",
+      "startedAt": "2026-09-20T19:02:46.504Z",
+      "backend": "metal",
+      "elapsedMs": 20027.8,
+      "budgetMs": 480000,
+      "withinBudget": true,
+      "passed": false,
+      "receipts": [
+        {
+          "id": "outside-tank-symmetric-collapse",
+          "kind": "correctness",
+          "passed": false,
+          "elapsedMs": 20027.216166000002,
+          "failure": "exceeded 20000 ms timeout"
+        }
+      ]
+    },
+    {
+      "suite": "sparse-cm12-dawn-regression",
+      "startedAt": "2026-09-20T19:03:06.768Z",
+      "backend": "metal",
+      "elapsedMs": 46743.2,
+      "budgetMs": 480000,
+      "withinBudget": true,
+      "passed": false,
+      "receipts": [
+        {
+          "id": "mini64-performance",
+          "kind": "performance",
+          "passed": false,
+          "elapsedMs": 46733.079834,
+          "failure": "mini64-performance median 209.5841 ms exceeds 110 ms baseline ceiling"
+        }
+      ]
+    }
+  ]
+}

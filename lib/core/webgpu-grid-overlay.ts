@@ -1352,6 +1352,24 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
       // liquid colour scale. No density threshold is used to classify phi.
       excessHatch = select(0.0, sliceScreenHatch(samplePosition, derivative, footprint),
         volume.y > 0.0 && volume.x > FRACTION_OVERFULL);
+    } else if (fieldMode == 27 && !sparseGridEnabled()) {
+      let base=u32(layers.control.w);
+      if(base==0u || arrayLength(&viewRecords)<base+8u){return GridSample(vec3f(0),0.0,0.0,false);}
+      let edge=viewRecords[base];
+      if(edge==0u){return GridSample(vec3f(0),0.0,0.0,false);}
+      let pd=vec3u(viewRecords[base+1u],viewRecords[base+2u],viewRecords[base+3u]);
+      let q=vec3u(max(cell,vec3i(0)))/edge;
+      if(any(q>=pd)){return GridSample(vec3f(0),0.0,0.0,false);}
+      let page=q.x+pd.x*(q.y+pd.y*q.z);
+      let live=viewRecords[base+8u+page]!=0u;
+      let slot=viewRecords[base+8u+pd.x*pd.y*pd.z+page];
+      fill=sceneColor(mix(vec3f(0.42,0.27,0.72),vec3f(0.72,0.62,0.93),f32(slot%7u)/6.0));
+      alpha=select(0.0,0.35,live);sampleDot=0.0;lineStrength=0.0;
+      let pageFraction=fract(samplePosition/f32(edge));
+      let pageDistance=min(min(pageFraction.x,1.0-pageFraction.x)*f32(edge)/derivative.x,
+        min(pageFraction.y,1.0-pageFraction.y)*f32(edge)/derivative.y);
+      viewBoundary=gridLinePaint(pageDistance,1.5)*select(0.15,1.0,live);
+      liquidContour=sliceZeroContour(vec3f(fineOrigin)+local3,derivative);
     } else if (fieldMode == 22 && !sparseGridEnabled()) {
       // One class per 4^3 tile, from the step just taken. Far air keeps only
       // the tile lattice: it is the part of the domain the view is about
@@ -1525,7 +1543,7 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
   color = mix(color, vec3f(0.02, 0.05, 0.06), sampleDot);
   let opticalBoundaryColor = select(vec3f(0.93, 0.93, 0.98), vec3f(1.0, 0.08, 0.55), u.environment.w > 1.5);
   color = mix(color, opticalBoundaryColor, opticalBoundary);
-  let methodView = fieldMode == 22 || fieldMode == 23;
+  let methodView = fieldMode == 22 || fieldMode == 23 || fieldMode == 27;
   if (!gridBody.occupied && methodView) {
     color = mix(color, gridLineColor, max(viewBoundary, viewCasing));
     color = mix(color, vec3f(2.2, 2.6, 2.5), smoothstep(0.45, 0.95, viewBoundary));
@@ -1722,8 +1740,8 @@ fn volumeField(uv:vec2f)->vec4f {
   var overlay=GridSample(vec3f(0),0.0,0.0,false);
   if(layers.control.x>0.5){
     var accumulated=vec4f(0.0);
-    let modes=array<i32,10>(${VISUAL_LAYERS.map(l => l.mode).join(",")});
-    for(var index=0u;index<10u;index+=1u){
+    let modes=array<i32,${VISUAL_LAYERS.length}>(${VISUAL_LAYERS.map(l => l.mode).join(",")});
+    for(var index=0u;index<${VISUAL_LAYERS.length}u;index+=1u){
       let opacity=layers.opacity[index/4u][index%4u];
       if(opacity<=0.0){continue;}
       layerMode=modes[index];
@@ -1762,7 +1780,7 @@ fn volumeField(uv:vec2f)->vec4f {
 export class GridOverlayPipeline {
   private readonly layerUniform: GPUBuffer;
   private layerRecords?: GPUBuffer;
-  private layerSources?: { tiles?: GPUFluidViewRecords; window?: GPUFluidViewRecords; boundary?: GPUBufferBinding; boundaryOffset: number };
+  private layerSources?: { tiles?: GPUFluidViewRecords; window?: GPUFluidViewRecords; boundary?: GPUBufferBinding; boundaryOffset: number; pages?: GPUFluidViewRecords; pageOffset: number };
   private pipeline?: GPURenderPipeline;
   private bindGroup?: GPUBindGroup;
   private volume?: GPUTexture;
@@ -1873,25 +1891,29 @@ export class GridOverlayPipeline {
     this.rebuildBindGroup();
   }
 
-  setLayers(state: VisualLayerState | undefined, tiles?: GPUFluidViewRecords, window?: GPUFluidViewRecords, pressureOrigin?: readonly [number, number, number], boundary?: GPUBufferBinding) {
+  setLayers(state: VisualLayerState | undefined, tiles?: GPUFluidViewRecords, window?: GPUFluidViewRecords, pressureOrigin?: readonly [number, number, number], boundary?: GPUBufferBinding, pages?: GPUFluidViewRecords) {
     const values = new Float32Array(20);
     if (pressureOrigin) values.set(pressureOrigin, 16);
     if (state) {
       tiles = state.visible && state.enabled.includes("tiles") ? tiles : undefined;
       window = state.visible && state.enabled.includes("window") ? window : undefined;
       boundary = state.visible && state.enabled.includes("velocity") ? boundary : undefined;
+      pages = state.visible && state.enabled.includes("pages") ? pages : undefined;
       values[0] = 1; values[1] = window ? 1 : 0;
       VISUAL_LAYERS.forEach((layer, i) => { values[4 + i] = state.visible && state.enabled.includes(layer.id) ? layerOpacity(state, layer.id) : 0; });
       const tileBytes = tiles ? (tiles.records.size ?? tiles.records.buffer.size - (tiles.records.offset ?? 0)) : 0;
       const boundaryOffset = 1024 + tileBytes;
       const boundaryBytes = boundary ? (boundary.size ?? boundary.buffer.size - (boundary.offset ?? 0)) : 0;
       values[2] = boundary ? boundaryOffset / 4 : 0; values[19] = tiles ? 1 : 0;
-      const bytes = boundaryOffset + boundaryBytes;
+      const pageOffset = boundaryOffset + boundaryBytes;
+      const pageBytes = pages ? (pages.records.size ?? pages.records.buffer.size - (pages.records.offset ?? 0)) : 0;
+      values[3] = pages ? pageOffset / 4 : 0;
+      const bytes = pageOffset + pageBytes;
       if (!this.layerRecords || this.layerRecords.size < bytes) {
         this.layerRecords?.destroy();
         this.layerRecords = this.device.createBuffer({ label: "Composed visual records", size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
       }
-      this.layerSources = { tiles, window, boundary, boundaryOffset };
+      this.layerSources = { tiles, window, boundary, boundaryOffset, pages, pageOffset };
       this.setViewRecords({ records: { buffer: this.layerRecords } });
     } else this.layerSources = undefined;
     this.device.queue.writeBuffer(this.layerUniform, 0, values);
@@ -1982,7 +2004,8 @@ export class GridOverlayPipeline {
   encode(encoder: GPUCommandEncoder, target: GPUTextureView): boolean {
     if (!this.pipeline || !this.bindGroup) return false;
     if (this.layerSources && this.layerRecords) {
-      const { tiles, window, boundary, boundaryOffset } = this.layerSources;
+      const { tiles, window, boundary, boundaryOffset, pages, pageOffset } = this.layerSources;
+      if (pages) encoder.copyBufferToBuffer(pages.records.buffer, pages.records.offset ?? 0, this.layerRecords, pageOffset, pages.records.size ?? pages.records.buffer.size - (pages.records.offset ?? 0));
       if (boundary) encoder.copyBufferToBuffer(boundary.buffer, boundary.offset ?? 0, this.layerRecords, boundaryOffset, boundary.size ?? boundary.buffer.size - (boundary.offset ?? 0));
       if (window) encoder.copyBufferToBuffer(window.records.buffer, window.records.offset ?? 0, this.layerRecords, 0, SOLVE_WINDOW_RECORD_WORDS * 4);
       if (tiles) encoder.copyBufferToBuffer(tiles.records.buffer, tiles.records.offset ?? 0, this.layerRecords, 1024, tiles.records.size ?? tiles.records.buffer.size - (tiles.records.offset ?? 0));

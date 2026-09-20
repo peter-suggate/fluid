@@ -1,3 +1,4 @@
+import { uniformVolumePagesWGSL, type UniformVolumePageShaderOptions } from "./uniform-volume-pages.wgsl";
 import { uniformVolumeWGSL } from "./uniform-volume.wgsl";
 import { sceneShapeWgsl } from "../../core/scene-shape";
 import { inflowBoundaryWGSL } from "../../core/inflow-boundary";
@@ -13,7 +14,7 @@ const uniformMacCormackAuditEnabled = typeof process !== "undefined"
  * It provides a matched-lattice GPU baseline for transport and projection
  * comparisons without octree topology, sparse residency, or backend cutovers.
  */
-export function createUniformReferenceComputeShader(geometric = false, referenceDimension: 2 | 3 = 3): string { return /* wgsl */ `
+export function createUniformReferenceComputeShader(geometric = false, referenceDimension: 2 | 3 = 3, pages?: UniformVolumePageShaderOptions): string { return /* wgsl */ `
 // The dimensional oracle suppresses the absent derivative; symmetry walls alone
 // do not prevent roundoff from creating a transverse level-set gradient.
 const UNIFORM_REFERENCE_DIMENSION: u32 = ${referenceDimension}u;
@@ -1743,6 +1744,18 @@ fn writeActiveWorkgroupSummary(
     activeScratch[base+10u]=0u;activeScratch[base+11u]=0u;
   }
 }
+// Conservative full-strength swept inlet footprint. Retain this seed while
+// the inlet runs even if its current ramp injects no measurable liquid yet.
+// The swept disk and its antialias/cell-overlap support fit inside this AABB.
+fn uniformInflowWindowSeed(id:vec3i)->bool{
+  if(!valid(id)||inflowStrength()<=0.0){return false;}
+  let h=params.cellGravity.xyz;
+  let start=params.inflowPositionRadius.xyz;
+  let end=start+params.inflowVelocityLength.xyz*params.dimsDt.w;
+  let pad=vec3f(params.inflowPositionRadius.w+length(h));
+  let world=vec3f(-0.5*params.container.x,0.0,-0.5*params.container.z)+(vec3f(id)+vec3f(0.5))*h;
+  return all(world>=min(start,end)-pad)&&all(world<=max(start,end)+pad);
+}
 @compute @workgroup_size(4,4,4)
 fn scanActiveRegion(
   @builtin(global_invocation_id) gid:vec3u,
@@ -1750,7 +1763,8 @@ fn scanActiveRegion(
   @builtin(workgroup_id) workgroupId:vec3u,
 ){
   let id=activeId(gid);
-  let wet=${geometric ? "geometricActiveSeed(id)" : "valid(id)&&volume(id)>1e-5"};
+  let source=uniformInflowWindowSeed(id);
+  let wet=${geometric ? "source||geometricActiveSeed(id)" : "source||(valid(id)&&volume(id)>1e-5)"};
   let groupCount=vec3u(activeRegion[13],activeRegion[14],activeRegion[15]);
   writeActiveWorkgroupSummary(id,wet,localIndex,workgroupId,groupCount);
 }
@@ -1761,7 +1775,7 @@ fn scanExternalActiveSources(
   @builtin(workgroup_id) workgroupId:vec3u,
 ){
   let id=vec3i(gid);let inDomain=valid(id);
-  let source=inDomain&&(inflowSweptPlugSource(id,params.dimsDt.w)>0.0||dropSource(id)>0.0);
+  let source=uniformInflowWindowSeed(id)||(inDomain&&dropSource(id)>0.0);
   let wet=${geometric ? "source||geometricActiveSeed(id)" : "inDomain&&(volume(id)>1e-5||source)"};
   let groupCount=(vec3u(dims())+vec3u(3u))/4u;
   writeActiveWorkgroupSummary(id,wet,localIndex,workgroupId,groupCount);
@@ -2013,7 +2027,7 @@ ${geometric ? `
 }
 @compute @workgroup_size(4,4,4)
 fn reduceDiagnostics(@builtin(global_invocation_id) gid:vec3u){let id=activeId(gid);if(!valid(id)){return;}let represented=surfaceOccupancy(id);let conservative=volume(id);atomicAdd(&reductions[0],u32(represented*2048.0+0.5));if(surfaceLiquid(id)){atomicMax(&reductions[1],u32(id.x+1));}let speed=length(faceVelocity(id));atomicMax(&reductions[2],bitcast<u32>(speed));atomicAdd(&reductions[3],u32(${geometric ? "max(conservative,0.0)" : "clamp(conservative,0.0,8.0)"}*2048.0+0.5));}
-${geometric ? uniformVolumeWGSL : ""}
+${geometric ? uniformVolumePagesWGSL(pages) + uniformVolumeWGSL : ""}
 `; }
 
 export const uniformReferenceComputeShader = createUniformReferenceComputeShader();

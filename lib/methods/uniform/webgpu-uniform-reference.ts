@@ -1,10 +1,11 @@
+import { UNIFORM_VOLUME_PAGE_ENTRIES, type UniformVolumePageShaderOptions } from "./uniform-volume-pages.wgsl";
 import { UniformSurfaceVolumeCorrection } from "./webgpu-uniform-surface-volume";
 import { uniformDensityPostProcessingEnabled } from "./uniform-options";
 export { uniformDensityPostProcessingEnabled } from "./uniform-options";
 import type { DenseLevelSetVolumeConsumerSource } from "../../core/levelset-consumer-abi";
 import {
   SOLVE_WINDOW_HOST_GROUPS_WORD, SOLVE_WINDOW_RECORD_WORDS,
-  type GPUFluidSolveWindowSource, type GPUFluidTileClassSource,
+  type GPUFluidSolveWindowSource, type GPUFluidTileClassSource, type GPUFluidVolumePageSource,
 } from "../../core/method-view-records";
 import { UNIFORM_VOLUME_PHASE } from "./uniform-volume-stages";
 import {
@@ -79,6 +80,8 @@ import { sampleSolidWorld, solidWorldForScene } from "../../core/solid-world";
 export { UNIFORM_PAPER_DT_S } from "./uniform-paper";
 
 export interface WebGPUUniformReferenceOptions {
+  /** Opt-in paged storage for transport/sharpening scratch (3D only). */
+  volumePages?: 16 | 32;
   /** Scene-parity oracle only: one symmetry-depth cell, with a 2D pressure hierarchy. */
   referenceDimension?: 2 | 3;
   /** Independent dense vertex level set and conservative cell volume. */
@@ -447,7 +450,17 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly vertexPhiScratch?: GPUTexture;
   /** Most recent transported phi, before closest-point redistancing (diagnostics). */
   get advectedVertexPhiTexture(): GPUTexture | undefined { return this.vertexPhiScratch; }
-  private readonly volumeEdges?: GPUBuffer;
+  private volumeEdges?: GPUBuffer;
+  private readonly volumePageEdge: 0 | 16 | 32;
+  private readonly volumePageFullCapacity: boolean;
+  private readonly volumePageConfig?: UniformVolumePageShaderOptions;
+  private pagePipelines: Partial<Record<typeof UNIFORM_VOLUME_PAGE_ENTRIES[number], GPUComputePipeline>> = {};
+  private pageReadback?: GPUBuffer;
+  private pageFrame?: Promise<void>;
+  private pageFailure?: Error;
+  private pageEncoder?: GPUCommandEncoder;
+  private pageGroups = new Map<GPUBindGroup, GPUBindGroupDescriptor>();
+  private reboundPageGroups = new Map<GPUBindGroup, GPUBindGroup>();
   private readonly volumeDonorSums?: GPUBuffer;
   private volumePipelines: Partial<Record<typeof UNIFORM_VOLUME_ENTRIES[number], GPUComputePipeline>> = {};
   private phiReverseGroup?: GPUBindGroup;
@@ -648,6 +661,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly activeRegionEnabled: boolean;
   /** Set by a live scene edit; the next step censuses the whole domain. */
   private activeRegionRescanPending = false;
+  /** Timestep whose full-strength inlet support was included in the prior window. */
+  private inflowWindowDt = 0;
   /** A/B escape hatch: keep the GPU's indirect records driving every dispatch. */
   private readonly windowDispatchIndirect: boolean;
   private windowReadback?: GPUBuffer;
@@ -701,7 +716,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.totalSurfaceVolume = this.geometricVolume && (options.referenceDimension ?? 3) === 3 && options.totalSurfaceVolume !== false;
     this.phiAgreementGain = Number.isFinite(options.phiAgreementGain) ? Math.min(1, Math.max(0, options.phiAgreementGain!)) : 0;
     this.phiAgreementClamp = Number.isFinite(options.phiAgreementClamp) ? Math.min(0.5, Math.max(0, options.phiAgreementClamp!)) : 0.02;
-    this.shaderSource = this.geometricVolume ? createUniformReferenceComputeShader(true, options.referenceDimension ?? 3) : uniformReferenceComputeShader;
+    this.volumePageEdge = this.geometricVolume && options.referenceDimension !== 2 ? options.volumePages ?? 0 : 0;
     // Uniform Geometric calls this the SOLVE WINDOW. It needs a positive dust
     // floor for the same reason E3's live set does: the window's diagnostics
     // reduction sums V over the box, which equals the domain sum only while
@@ -744,13 +759,17 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     void GPUStageTimestampRecorder.prepare(device);
     const [nx, ny, sourceNz] = sceneLatticeDimensions(scene, this.geometricVolume ? Number.MAX_SAFE_INTEGER : device.limits.maxTextureDimension3D);
     const nz = options.referenceDimension === 2 ? 1 : sourceNz;
+    const paddedPageCells = this.volumePageEdge ? [nx, ny, nz].reduce((n, d) => n * Math.ceil(d / this.volumePageEdge) * this.volumePageEdge, 1) : 0;
+    this.volumePageFullCapacity = this.volumePageEdge !== 0 && paddedPageCells <= 64 ** 3;
     if (options.referenceDimension === 2 && (!this.geometricVolume || scene.container.depthBoundary !== "symmetry" || options.activeRegion))
       throw new Error("2D reference requires geometric mode, symmetry depth and whole-domain work");
     if (this.geometricVolume) {
       if (Math.max(nx,ny,nz)+2 > device.limits.maxTextureDimension3D)
         throw new Error("Uniform Geometric finest lattice exceeds the device texture limit");
-      if (nx*ny*nz*UNIFORM_VOLUME_EDGE_BYTES > Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize))
+      if (!this.volumePageEdge && nx*ny*nz*UNIFORM_VOLUME_EDGE_BYTES > Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize))
         throw new Error("Uniform Geometric finest lattice exceeds the device stencil buffer limit");
+      if (nx*ny*nz*24 > Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize))
+        throw new Error("Uniform Geometric donor sums exceed the device storage limit");
     }
     // The map lives above the work counters in the third conditioning
     // plane, which is N words. A grid too small to hold both keeps the dense
@@ -813,7 +832,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     if (this.geometricVolume) {
       this.vertexPhiTexture = texture3d("Uniform Geometric vertex phi", "r32float", [nx + 1, ny + 1, nz + 1]);
       this.vertexPhiScratch = texture3d("Uniform Geometric vertex phi scratch", "r32float", [nx + 1, ny + 1, nz + 1]);
-      const edgeBytes = nx * ny * nz * UNIFORM_VOLUME_EDGE_BYTES;
+      const edgeBytes = this.volumePageEdge ? (this.volumePageFullCapacity ? paddedPageCells : 1) * UNIFORM_VOLUME_EDGE_BYTES : nx * ny * nz * UNIFORM_VOLUME_EDGE_BYTES;
       if (edgeBytes > device.limits.maxStorageBufferBindingSize || edgeBytes > device.limits.maxBufferSize)
         throw new Error(`Uniform Geometric receiver stencils require ${edgeBytes} bytes, exceeding the device limit`);
       this.denseLevelSetVolumeSource = { vertexPhi: this.vertexPhiTexture, openFraction: this.gammaB,
@@ -822,7 +841,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.volumeDonorSums = device.createBuffer({ label: "Uniform Geometric exact donor sums", size: nx*ny*nz*24,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
       this.volumeEdges = device.createBuffer({ label: "Uniform Geometric nine-donor stencils", size: edgeBytes,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     }
     this.heightA = device.createTexture({ label: "Uniform reference column base", size: [nx, nz], format: "rg32float", usage });
     this.heightB = device.createTexture({ label: "Uniform reference column occupancy", size: [nx, nz], format: "rg32float", usage });
@@ -888,7 +907,14 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // Created before the extrapolator: the extension binds it read_write to
     // read the tile classes and to publish the 4h face table the sampler reads.
     this.surfaceDeficitBalanceBytes = this.geometricVolume ? (2 + 2 * tileRecords) * 4 : 0;
-    this.conditioningScratch = device.createBuffer({ label: "Uniform reference compatibility scratch", size: allocation.conditioningBytes + this.surfaceDeficitBalanceBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    const pageBaseBytes = allocation.conditioningBytes + this.surfaceDeficitBalanceBytes;
+    if (this.volumePageEdge) this.volumePageConfig = {
+      edge: this.volumePageEdge, base: pageBaseBytes / 4,
+      count: [nx, ny, nz].reduce((n, d) => n * Math.ceil(d / this.volumePageEdge), 1),
+    };
+    const pageBytes = this.volumePageConfig ? 4 * (8 + 2 * this.volumePageConfig.count) : 0;
+    this.shaderSource = this.geometricVolume ? createUniformReferenceComputeShader(true, options.referenceDimension ?? 3, this.volumePageConfig) : uniformReferenceComputeShader;
+    this.conditioningScratch = device.createBuffer({ label: "Uniform reference compatibility scratch", size: pageBaseBytes + pageBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.velocityExtrapolator = new WebGPUUniformVelocityExtrapolator(
       device, [nx, ny, nz], [
         scene.container.width_m / nx,
@@ -1000,7 +1026,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       reversed = velocityIn, transport = this.transportA, surface = volumeIn,
       gammaRead = this.gammaA, gammaWrite = this.gammaB,
       boundaryRead = this.boundaryVelocityA, boundaryWrite = this.boundaryVelocityB,
-      velocityPhase = volumeIn, reversePhi = false, pressureOnly = false, donorSums = false) => device.createBindGroup({
+      velocityPhase = volumeIn, reversePhi = false, pressureOnly = false, donorSums = false) => this.createPageAwareGroup({
         layout: pressureOnly ? this.pressureInputLayout : this.mainLayout, entries: ([
           ...(this.geometricVolume ? [
             { binding: 31, resource: (reversePhi ? this.vertexPhiScratch! : this.vertexPhiTexture!).createView() },
@@ -1107,15 +1133,16 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       regularLayers: ny, maximumNeighborDelta: 0, gridKind: "uniform",
       cellSize_m: Math.min(scene.container.width_m / nx, scene.container.height_m / ny, scene.container.depth_m / nz),
       pressureIterations: 0, pressureSolver: `CM11a dense LCP multigrid (${this.pressureSchedule.fullCycles} Full-Cycles + ${this.pressureSchedule.vCycles} V-Cycles, ${this.pressureSchedule.preSweeps}/${this.pressureSchedule.postSweeps} pre/post PRBGS)`,
-      allocatedBytes: allocation.allocatedBytes + this.surfaceDeficitBalanceBytes + this.pressureMultigrid.allocatedBytes
-        + (this.geometricVolume ? 8 * (nx+1)*(ny+1)*(nz+1) + count*(UNIFORM_VOLUME_EDGE_BYTES + 24) + 12 : 0)
+      allocatedBytes: allocation.allocatedBytes + pageBytes + this.surfaceDeficitBalanceBytes + this.pressureMultigrid.allocatedBytes
+        + (this.geometricVolume ? 8 * (nx+1)*(ny+1)*(nz+1) + count*24 + (this.volumeEdges?.size ?? 0) + 12 : 0)
         + activeRegionBytes * 3 + activeSummaryBytes + packedSolidVoxels.byteLength
         + (this.symmetryStageAuditMacCormackBuffer ? 0 : 16), quality,
       submittedTime_s: 0, simulatedTime_s: 0, completedTime_s: 0,
       simulationLag_s: 0, encodedSteps: 0, maximumTallCellHeight: 0,
       volumeControl: true,
       hostFluidAuthority: "gpu-resident", hostSimulationSizedWorkItems: 0,
-      hostSchedulingUsesReadback: false,
+      hostSchedulingUsesReadback: this.volumePageEdge !== 0 && !this.volumePageFullCapacity,
+      ...(this.volumePageConfig ? { uniformVolumePageEdge: this.volumePageEdge, uniformVolumePagesTotal: this.volumePageConfig.count, uniformVolumePageBytes: this.volumeEdges!.size } : {}),
     };
     this.volumeTexture = this.volumeA;
     this.columnBaseTexture = this.heightA;
@@ -1174,6 +1201,15 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       tasks.push({ id, phase: "solver-pipelines", label: entryPoint, run: async () => {
         this.volumePipelines[entryPoint] = await compiler.compileComputePipeline({
           label: `Uniform Geometric - ${entryPoint}`, layout: this.mainPipelineLayout,
+          compute: { module: shaderModule, entryPoint },
+        }, { priority: "visible", signal });
+      } });
+    }
+    if (this.volumePageConfig) for (const entryPoint of UNIFORM_VOLUME_PAGE_ENTRIES) {
+      const id = `uniform.pages.${entryPoint}`; ids.push(id);
+      tasks.push({ id, phase: "solver-pipelines", label: entryPoint, run: async () => {
+        this.pagePipelines[entryPoint] = await compiler.compileComputePipeline({
+          label: `Uniform pages - ${entryPoint}`, layout: this.mainPipelineLayout,
           compute: { module: shaderModule, entryPoint },
         }, { priority: "visible", signal });
       } });
@@ -1341,6 +1377,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * work immediately, so reconstruct the current density once for display.
    */
   applyRuntimeValues(values: MethodParamValues): void {
+    // A split frame must keep the same controls through all its submissions.
+    // The renderer reapplies the latest values before the next advance.
+    if (this.pageFrame) return;
     const finite = (key: string, fallback: number, minimum: number, maximum: number) => {
       const value = Number(values[key]);
       return Number.isFinite(value) ? Math.min(maximum, Math.max(minimum, value)) : fallback;
@@ -1540,7 +1579,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   }
 
   private dispatch(pass: GPUComputePassEncoder, pipeline: GPUComputePipeline, group: GPUBindGroup): void {
-    pass.setPipeline(pipeline); pass.setBindGroup(0, group);
+    pass.setPipeline(pipeline); pass.setBindGroup(0, this.volumePageConfig ? this.reboundPageGroups.get(group) ?? group : group);
     if (this.windowMainGroups) {
       pass.dispatchWorkgroups(...this.windowMainGroups);
     } else if (this.activeRegionEnabled) {
@@ -1558,7 +1597,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private runDirect(encoder: GPUCommandEncoder, label: string, pipeline: GPUComputePipeline,
     group: GPUBindGroup, workgroups: readonly [number, number, number]): void {
     const pass = encoder.beginComputePass({ label });
-    pass.setPipeline(pipeline); pass.setBindGroup(0, group);
+    pass.setPipeline(pipeline); pass.setBindGroup(0, this.volumePageConfig ? this.reboundPageGroups.get(group) ?? group : group);
     pass.dispatchWorkgroups(...workgroups); pass.end();
   }
 
@@ -1573,7 +1612,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private runVertex(encoder: GPUCommandEncoder, label: string, pipeline: GPUComputePipeline,
     group: GPUBindGroup): void {
     const pass = encoder.beginComputePass({ label });
-    pass.setPipeline(pipeline); pass.setBindGroup(0, group);
+    pass.setPipeline(pipeline); pass.setBindGroup(0, this.volumePageConfig ? this.reboundPageGroups.get(group) ?? group : group);
     if (this.windowVertexGroups) {
       pass.dispatchWorkgroups(...this.windowVertexGroups);
     } else if (this.activeRegionEnabled) {
@@ -1605,7 +1644,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * whole-domain counts.
    *
    * Dense counts are also forced before the first readback, after a reset or
-   * scene edit, and on any step with an external source, because on those the
+   * scene edit, and when an external source introduces new support, because on those the
    * lagged box says nothing about where liquid is about to be.
    */
   private planWindowDispatch(dt: number, externalSources: boolean): void {
@@ -2213,6 +2252,74 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       + UNIFORM_VOLUME_SHARPEN_TILE_COUNT_WORD) * 4;
   }
 
+  private createPageAwareGroup(descriptor: GPUBindGroupDescriptor): GPUBindGroup {
+    const group = this.device.createBindGroup(descriptor);
+    if (this.volumePageConfig && [...descriptor.entries].some(e => e.binding === 33)) this.pageGroups.set(group, descriptor);
+    return group;
+  }
+
+  get volumePageSource(): GPUFluidVolumePageSource | undefined {
+    const p = this.volumePageConfig;
+    return p ? { records: { buffer: this.conditioningScratch, offset: p.base * 4, size: (8 + 2 * p.count) * 4 } } : undefined;
+  }
+
+  /** Exact per-stage demand; no lagged support guess can truncate this arena.
+   * The previous submission completes before storage is replaced. Scratch has
+   * no history across these phases, so it needs no state transfer.
+   */
+  private prepareVolumePages(encoder: GPUCommandEncoder, sharpen: boolean): (() => Promise<void>) | undefined {
+    const p = this.volumePageConfig!;
+    encoder.clearBuffer(this.conditioningScratch, 4 * (p.base + 8), 4 * p.count);
+    this.device.queue.writeBuffer(this.conditioningScratch, 4 * (p.base + 5), new Uint32Array([sharpen && this.sharpenTileWork ? 1 : 0]));
+    const entry = sharpen ? "uvMarkSharpenPages" : "uvMarkTransportPages";
+    this.run(encoder, entry, this.pagePipelines[entry]!, sharpen ? this.sharpenComputeGroup : this.densityTraceGroup);
+    this.runDirect(encoder, "Compact volume pages", this.pagePipelines.uvCompactPages!, this.densityTraceGroup, [1, 1, 1]);
+    this.info.uniformVolumePageStage = sharpen ? "sharpening" : "transport";
+    if (this.volumePageFullCapacity) {
+      // The entire logical page set fits this small-scene allocation. No
+      // readback is needed to prove capacity, so retain one submission.
+      encoder.clearBuffer(this.volumeEdges!);
+      return undefined;
+    }
+    this.pageReadback ??= this.device.createBuffer({ label: "Volume page demand", size: 4,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    encoder.copyBufferToBuffer(this.conditioningScratch, 4 * (p.base + 4), this.pageReadback, 0, 4);
+    this.device.queue.submit([encoder.finish()]);
+    return async () => {
+      const receiptStarted = performance.now();
+      await this.pageReadback!.mapAsync(GPUMapMode.READ);
+      const count = new Uint32Array(this.pageReadback!.getMappedRange())[0]!;
+      this.pageReadback!.unmap();
+      if (this.disposed) return;
+      const required = Math.max(UNIFORM_VOLUME_EDGE_BYTES, count * p.edge ** 3 * UNIFORM_VOLUME_EDGE_BYTES);
+      const limit = Math.min(this.device.limits.maxStorageBufferBindingSize, this.device.limits.maxBufferSize);
+      if (required > limit) throw new Error(`Uniform volume pages require ${required} bytes, above device limit ${limit}; the frame was not published`);
+      const old = this.volumeEdges!;
+      // Grow exactly to required page capacity. Keep high-water storage to avoid
+      // allocation churn between transport and sharpening and successive frames.
+      if (old.size < required) {
+        this.volumeEdges = this.device.createBuffer({ label: "Uniform paged volume records", size: required,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+        for (const [group, descriptor] of this.pageGroups) {
+          this.reboundPageGroups.set(group, this.device.createBindGroup({ ...descriptor,
+            entries: [...descriptor.entries].map(e => e.binding === 33 ? { binding: 33, resource: { buffer: this.volumeEdges! } } : e) }));
+        }
+        this.info.allocatedBytes += required - old.size;
+        old.destroy();
+      }
+      Object.assign(this.info, { uniformVolumePageEdge: p.edge, uniformVolumePagesActive: count,
+        uniformVolumePagesTotal: p.count, uniformVolumePageBytes: this.volumeEdges!.size,
+        uniformVolumePageStage: sharpen ? "sharpening" : "transport" });
+      this.pageEncoder = this.device.createCommandEncoder({ label: "Uniform page continuation" });
+      // Newly mapped scratch addresses may contain another phase's old records.
+      // Zero the entire reserved arena before any new phase can read a neighbor.
+      this.pageEncoder.clearBuffer(this.volumeEdges!);
+      const receiptMs = performance.now() - receiptStarted;
+      if (sharpen) this.info.uniformVolumePageSharpenReceiptMs = receiptMs;
+      else this.info.uniformVolumePageTransportReceiptMs = receiptMs;
+    };
+  }
+
   private sharpenPipeline(entry: typeof UNIFORM_VOLUME_SHARPEN_ENTRIES[number]): GPUComputePipeline {
     return (this.sharpenTileWork ? this.sharpenTilePipelines[entry] : undefined)
       ?? this.volumePipelines[entry]!;
@@ -2226,11 +2333,22 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       encoder.clearBuffer(this.conditioningScratch, this.info.cellCount * 12, 4);
       return;
     }
-    this.run(encoder, "Surface-deficit partial sums", this.volumePipelines.uvBalanceMeasure!, this.sharpenComputeGroup);
+    // Keep the global reduction's summation order independent of host launch
+    // trimming. Repacking partial sums with changing group dimensions produces
+    // tiny rate differences that can amplify after live liquid insertion.
+    // This reduction remains capacity-shaped until it has a stable page order.
+    this.runDirect(encoder, "Surface-deficit partial sums", this.volumePipelines.uvBalanceMeasure!,
+      this.sharpenComputeGroup, [Math.ceil(this.info.nx / 4), Math.ceil(this.info.ny / 4), Math.ceil(this.info.nz / 4)]);
     this.runDirect(encoder, "Surface-deficit global balance", this.volumePipelines.uvBalanceReduce!, this.sharpenComputeGroup, [1, 1, 1]);
   }
 
+  /** Synchronous dense hook retained for same-input scheduling probes. */
   private encodeGeometricVolume(encoder: GPUCommandEncoder, seam?: (phase: GPUTimestampPhase) => void): void {
+    const next = this.encodeGeometricVolumeStages(encoder, seam).next();
+    if (!next.done) throw new Error("Paged volume must run through the split-frame scheduler");
+  }
+
+  private *encodeGeometricVolumeStages(encoder: GPUCommandEncoder, seam?: (phase: GPUTimestampPhase) => void): Generator<() => Promise<void>, void> {
     const run = (entry: typeof UNIFORM_VOLUME_ENTRIES[number], group = this.densityTraceGroup) => {
       if(entry === "uvFinishDonorSums")
         this.runDirect(encoder,entry,this.volumePipelines[entry]!,this.volumeDonorGroup,[Math.ceil(this.info.nx/4),Math.ceil(this.info.ny/4),Math.ceil(this.info.nz/4)]);
@@ -2249,6 +2367,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // Deposit donor weights while each row is already in registers. Integer
     // accumulation is exact and order independent, so this saves four full
     // edge-table scans without changing the transport normalization scheme.
+    if (this.volumePageConfig) { const wait = this.prepareVolumePages(encoder, false); if (wait) yield wait; }
     encoder.clearBuffer(this.volumeDonorSums!);
     run("uvBuildEdges"); run("uvFinishDonorSums"); run("uvFallback");
     for (let round = 0; round < 3; round++) {
@@ -2277,6 +2396,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       encoder.clearBuffer(this.conditioningScratch, this.sharpenTileCountWordOffset, 4);
       this.run(encoder, "Classify 4h sharpening work", this.tileClassifyPipeline!, this.sharpenComputeGroup);
     }
+    if (this.volumePageConfig && this.densitySharpening) { const wait = this.prepareVolumePages(encoder, true); if (wait) yield wait; }
     if (this.densitySharpening) for (let round = 0; round < 8; round++) {
       const group = round % 2 === 0 ? this.sharpenComputeGroup : this.sharpenResolveGroup;
       for (const entry of UNIFORM_VOLUME_SHARPEN_ENTRIES) this.run(encoder, entry, this.sharpenPipeline(entry), group);
@@ -2284,7 +2404,36 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     if (this.densitySharpening) seam?.(UNIFORM_VOLUME_PHASE.sharpen);
   }
 
+  get framePending(): boolean { return this.pageFrame !== undefined; }
+  async awaitFrameCompletion(): Promise<void> {
+    await this.pageFrame;
+    if (this.pageFailure) throw this.pageFailure;
+  }
+  async assertSimulationHealthy(): Promise<void> { await this.awaitFrameCompletion(); }
+
   advanceTo(time_s: number, bodies: RigidBodyState[] = []): boolean {
+    if (this.pageFailure) throw this.pageFailure;
+    if (this.pageFrame || this.disposed) return false;
+    const step = this.encodeAdvance(time_s, bodies);
+    const first = step.next();
+    if (first.done) return first.value;
+    this.pageFrame = (async () => {
+      let next: IteratorResult<() => Promise<void>, boolean> = first;
+      while (!next.done) {
+        await next.value();
+        if (this.disposed) return;
+        next = step.next();
+      }
+      await this.device.queue.onSubmittedWorkDone();
+    })().catch(error => {
+      if (!this.disposed) this.pageFailure = error instanceof Error ? error : new Error(String(error));
+    }).finally(() => { this.pageFrame = undefined; this.pageEncoder = undefined; });
+    // Accepted work is pending; submittedTime remains unchanged until the final
+    // submission, so the renderer holds presentation through the split frame.
+    return true;
+  }
+
+  private *encodeAdvance(time_s: number, bodies: RigidBodyState[]): Generator<() => Promise<void>, boolean> {
     if (this.disposed) return false;
     // The paper's method is calibrated for its own large-step regime (dt=1/30
     // in every Sec. 4 example): sharpening opposes per-resample transport
@@ -2301,8 +2450,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     if (!this.pipelines) throw new Error("Uniform reference pipelines are not initialized");
     const dt = advance.dt_s;
     this.lastTime = advance.nextTime_s;
-    this.info.submittedTime_s = this.lastTime;
-    this.info.simulatedTime_s = this.lastTime;
+    if (!this.volumePageConfig) {
+      this.info.submittedTime_s = this.lastTime;
+      this.info.simulatedTime_s = this.lastTime;
+    }
     this.info.simulationLag_s = advance.lag_s;
     this.info.lastDt_s = dt;
     this.info.lastSubsteps = 1;
@@ -2347,7 +2498,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const physicsTraceContext = `uniform:sim-${this.lastTime.toFixed(6)}`;
     const physicsCPUTrace = shouldTracePhysics
       ? new CPUPerformanceTrace(physicsTraceSampleId, physicsTraceContext,
-        { id: "command-encoding", label: "Uniform advance planning + command encoding" })
+        { id: "command-encoding", label: this.volumePageConfig ? "Uniform advance planning, encoding + page receipt waits" : "Uniform advance planning + command encoding" })
       : undefined;
     // markersReady: without the compiled closing marker the final boundary
     // decodes as unsampled and one bad sample would retire hardware tracing.
@@ -2362,7 +2513,16 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       ? new GPUQueueWallPerformanceTraceRecorder(physicsTraceSampleId, "physics", physicsTraceContext)
       : undefined;
     const rawEncoder = this.device.createCommandEncoder({ label: "Uniform reference step" });
-    const encoder = physicsTrace ? physicsTrace.instrument(rawEncoder) : rawEncoder;
+    this.pageEncoder = rawEncoder;
+    const advancingEncoder = this.volumePageConfig ? new Proxy(rawEncoder, { get: (_target, key) => {
+      const current = this.pageEncoder!;
+      const value = Reflect.get(current, key, current);
+      return typeof value === "function" ? value.bind(current) : value;
+    } }) : rawEncoder;
+    // Instrument outside the forwarding proxy so continuation submissions share
+    // the same timestamp chain, query set and pending stage boundaries.
+    const encoder = physicsTrace ? physicsTrace.instrument(advancingEncoder) : advancingEncoder;
+    if (this.volumePageConfig) physicsQueueTrace?.begin();
     physicsTrace?.begin();
     const seam = physicsTrace || physicsCPUTrace
       ? (phase: GPUTimestampPhase) => {
@@ -2373,9 +2533,18 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // Preserve Sec. 3.6 unplaceable-excess telemetry written during the step.
     encoder.clearBuffer(this.reductions);
     encoder.clearBuffer(this.rigidExchange);
-    const windowExternalSources = strength > 0 || drop !== undefined;
+    // A continuing inlet is retained by the GPU window seed at full strength.
+    // Its support only needs rediscovery on activation, a larger swept extent,
+    // or a scene edit (activeRegionRescanPending). Drops remain arbitrary.
+    const inflowSupportDt = Math.fround(dt); // Match the timestep uploaded to WGSL.
+    const windowExternalSources = drop !== undefined
+      || (strength > 0 && inflowSupportDt > this.inflowWindowDt);
+    this.inflowWindowDt = strength > 0 ? inflowSupportDt : 0;
     this.planWindowDispatch(dt, windowExternalSources);
-    this.encodeActiveRegion(encoder, windowExternalSources);
+    // Keep the complete source census for now: remote near-interface phi can
+    // remain outside the previous window, especially after live insertion.
+    // Census coverage must not force every later kernel to use domain counts.
+    this.encodeActiveRegion(encoder, strength > 0 || drop !== undefined);
     if (this.symmetryStageAuditTextures) encoder.copyTextureToTexture(
       { texture: this.velocityA }, { texture: this.symmetryStageAuditTextures.preExtrapolationVelocity },
       [this.info.nx, this.info.ny, this.info.nz],
@@ -2427,7 +2596,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     }
 
     if (this.geometricVolume) {
-      this.encodeGeometricVolume(encoder, seam);
+      if (this.volumePageConfig) yield* this.encodeGeometricVolumeStages(encoder, seam);
+      else this.encodeGeometricVolume(encoder, seam);
     } else {
     // Algorithm 1 steps 1-2, paper Secs. 3.3-3.5: use the extrapolated
     // current velocity for the modified conservative semi-Lagrangian density
@@ -2626,7 +2796,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.run(encoder, "Uniform diagnostics reduction", this.pipelines.reduce, this.reductionGroup);
     physicsCPUTrace?.completePhase(UNIFORM_ADVANCE_PHASE.diagnosticsReduction);
     physicsTrace?.resolve(encoder);
-    physicsQueueTrace?.begin();
+    if (!this.volumePageConfig) physicsQueueTrace?.begin();
     this.device.queue.submit([encoder.finish()]);
     if (pressureCycleDemandEncoded) this.readPressureCycleDemand();
     if (windowReadbackEncoded) this.readWindowBox();
@@ -2659,6 +2829,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         }
       }).catch(() => {}).finally(() => { this.physicsTracePending = false; });
     }
+    this.info.submittedTime_s = this.lastTime;
+    this.info.simulatedTime_s = this.lastTime;
     const submittedTime = this.lastTime;
     void this.device.queue.onSubmittedWorkDone().then(() => {
       if (!this.disposed) this.info.completedTime_s = Math.max(this.info.completedTime_s ?? 0, submittedTime);
@@ -2667,11 +2839,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   }
 
   async readStats(): Promise<GPUEulerianInfo> {
+    await this.awaitFrameCompletion();
     if (this.disposed || this.readbackPending) return this.info;
     this.readbackPending = true;
     this.statsReadback ??= this.device.createBuffer({ label: "Uniform reference diagnostics readback", size: 240, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = this.device.createCommandEncoder({ label: "Uniform reference diagnostics readback" });
     encoder.copyBufferToBuffer(this.reductions, 0, this.statsReadback, 0, 32);
+    if (this.volumePageConfig) encoder.copyBufferToBuffer(this.conditioningScratch, 4 * (this.volumePageConfig.base + 4), this.statsReadback, 236, 4);
     // Only the step that ran the classify dispatch leaves a meaningful count.
     const tileMap = this.sharpenTileMapEncoded;
     if (tileMap) encoder.copyBufferToBuffer(this.conditioningScratch, this.sharpenTileCountWordOffset, this.statsReadback, 192, 4);
@@ -2695,6 +2869,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         this.pressureCyclesExecutedSample = words[45]! + words[46]!;
         this.pressureCycleConvergedSample = words[44] === 1;
       }
+      if (this.volumePageConfig) this.info.uniformVolumePagesActive = words[59]!;
       const reference = Math.max(1, this.referenceVolumeCells);
       this.info.representedVolumeCellSum = words[0] / 2048;
       this.info.volumeCellSum = words[3] / 2048;
@@ -2858,6 +3033,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.heightA, this.heightB, this.terrainTexture,
       this.transportA, this.transportB,
     ])) texture.destroy();
+    this.pageReadback?.destroy();
+    this.pageGroups.clear(); this.reboundPageGroups.clear();
     this.surfaceVolumeCorrection?.destroy();
     this.vertexPhiTexture?.destroy(); this.vertexPhiScratch?.destroy(); this.volumeEdges?.destroy(); this.volumeDonorSums?.destroy();
     this.boundaryVelocityA.destroy(); this.boundaryVelocityB.destroy();

@@ -2,13 +2,13 @@ import { spawnSync } from "node:child_process";
 import * as pressurePolicy from "../../lib/methods/uniform/pressure-policy";
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { UNIFORM_GEOMETRIC_PARAMS } from "../../lib/methods/uniform/uniform-geometric-parameters";
+import { UNIFORM_GEOMETRIC_NATIVE_PARAMS } from "../../lib/methods/uniform/uniform-geometric-parameters";
 
 const snake = (key: string) => key.replace(/[A-Z]/g, c => `_${c.toLowerCase()}`);
 const quote = JSON.stringify;
-const fields = UNIFORM_GEOMETRIC_PARAMS.map(p => `    #[serde(rename = ${quote(p.key)})]\n    pub ${snake(p.key)}: ${p.kind === "number" ? "f32" : "String"},`).join("\n");
-const defaults = UNIFORM_GEOMETRIC_PARAMS.map(p => `            ${snake(p.key)}: ${p.kind === "number" ? `${p.default}_f32` : `${quote(p.default)}.into()`},`).join("\n");
-const validation = UNIFORM_GEOMETRIC_PARAMS.map(p => p.kind === "number"
+const fields = UNIFORM_GEOMETRIC_NATIVE_PARAMS.map(p => `    #[serde(rename = ${quote(p.key)})]\n    pub ${snake(p.key)}: ${p.kind === "number" ? "f32" : "String"},`).join("\n");
+const defaults = UNIFORM_GEOMETRIC_NATIVE_PARAMS.map(p => `            ${snake(p.key)}: ${p.kind === "number" ? `${p.default}_f32` : `${quote(p.default)}.into()`},`).join("\n");
+const validation = UNIFORM_GEOMETRIC_NATIVE_PARAMS.map(p => p.kind === "number"
   ? `        if !self.${snake(p.key)}.is_finite() || !((${p.min}_f32)..=(${p.max}_f32)).contains(&self.${snake(p.key)})${p.step === 1 ? ` || self.${snake(p.key)}.fract() != 0.0` : ""} { return Err(ValidationError(${quote(`Invalid uniform parameter ${p.key}`)}.into())); }`
   : `        if ![${p.options.map(o => quote(o.value)).join(", ")}].contains(&self.${snake(p.key)}.as_str()) { return Err(ValidationError(${quote(`Invalid uniform parameter ${p.key}`)}.into())); }`).join("\n");
 const constants = Object.entries(pressurePolicy).filter(([key,value])=>key.startsWith("UNIFORM_CM11A_")&&typeof value==="number").map(([key,value])=>`pub const ${key}: ${Number.isInteger(value)?"usize":"f32"} = ${value}${Number.isInteger(value)?"":"_f32"};`).join("\n");

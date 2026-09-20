@@ -17,6 +17,9 @@ const sharpenChip = (context: FluidPipelineContext) => {
   return map ? `4h work map · ${map.percent}% tiles` : "4h work map";
 };
 type VolumeInfo = {
+  uniformVolumePageTransportReceiptMs?: number; uniformVolumePageSharpenReceiptMs?: number;
+  uniformVolumePageEdge?: number; uniformVolumePagesActive?: number; uniformVolumePagesTotal?: number;
+  uniformVolumePageBytes?: number; uniformVolumePageStage?: string;
   uniformVolumeDustCells?: number; uniformVolumeDustMass_cells?: number;
   uniformTwoLevelVelocity?: boolean; uniformTwoLevelFineTiles?: number; uniformTwoLevelTilesTotal?: number;
   uniformTwoLevelShellTiles?: number; uniformTwoLevelShellReach?: number;
@@ -94,7 +97,7 @@ const solveWindowControls = [
       return `${cells.toLocaleString()} / ${total.toLocaleString()} cells · ${(100 * fraction).toFixed(1)}%`;
     }},
   {kind:"readout" as const,label:"Window launches",
-    hint:"How the window's dispatches are sized. The host picks the group counts from a box a few steps old while every kernel still reads this step's exact origin, because an indirect launch costs several times a direct one on this lane. Clipped steps are steps whose exact box outgrew the host's counts: the far edge of the window is not dispatched that step, so a front stalls there, and the host answers with whole-domain counts for the next eight steps. Dense steps are those whole-domain ones, plus start-up, scene edits and steps with a source.",
+    hint:"How the window's dispatches are sized. The host picks the group counts from a box a few steps old while every kernel still reads this step's exact origin, because an indirect launch costs several times a direct one on this lane. Clipped steps are steps whose exact box outgrew the host's counts: the far edge of the window is not dispatched that step, so a front stalls there, and the host answers with whole-domain counts for the next eight steps. Dense steps are those whole-domain ones, plus start-up, scene edits, drops, and new or expanded inlet support. A continuing inlet keeps its footprint in the window without forcing dense launches every step.",
     value:(context: FluidPipelineContext)=>{
       const forced = solveWindowForcedDense(context);
       if (forced) return forced;
@@ -223,6 +226,19 @@ const pressureLatticeControls = [
     }},
 ];
 const transportControls = [
+  {kind:"param-choice" as const,param:"volumeStorage",label:"Volume record storage",
+    options:[{value:"dense",label:"Dense",hint:"Current dense storage and synchronous advance."},
+      {value:"pages16",label:"16³ pages",hint:"Demand-allocated transport/sharpening records; other fields remain dense."},
+      {value:"pages32",label:"32³ pages",hint:"Larger pages amortize address translation. Rebuilds the simulation."}]},
+  {kind:"readout" as const,label:"Resident volume pages",
+    hint:"Actual last-stage page demand and reserved high-water storage for the 80-byte volume records.",
+    value:(context: FluidPipelineContext)=>{const info=volumeInfo(context);
+      return info?.uniformVolumePageEdge ? `${info.uniformVolumePagesActive ?? 0} / ${info.uniformVolumePagesTotal ?? 0} · ${((info.uniformVolumePageBytes ?? 0)/1048576).toFixed(1)} MiB · ${info.uniformVolumePageStage ?? "initial"}` : "dense";}},
+  {kind:"readout" as const,label:"Page receipt waits",
+    hint:"Host wall time waiting for GPU page demand and allocating storage, transport / sharpening. Includes completion of preceding GPU work; do not add these to stage timings. Paged stage timings include gaps between submissions, not just GPU compute time.",
+    value:(context: FluidPipelineContext)=>{const info=volumeInfo(context);
+      if (!info?.uniformVolumePageEdge) return "not paged";
+      return `${(info.uniformVolumePageTransportReceiptMs ?? 0).toFixed(1)} / ${(info.uniformVolumePageSharpenReceiptMs ?? 0).toFixed(1)} ms`; }},
   {kind:"param-choice" as const,param:"transportWorkMap",label:"Transport work",
     options:[{value:"tiles",label:"Live tiles",hint:"Build edges, sum and normalise donors and gather only in the 4h tiles that can hold or receive liquid this step. Outside them the gather stores V=0 and gamma=0 without evaluating either."},
       {value:"dense",label:"Dense",hint:"The full-lattice schedule, retained so the shrink can be measured on its own."}],

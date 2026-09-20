@@ -96,6 +96,7 @@ function usePhysicsTiming(methodId: string): {
 function costExplanation(
   cost: FluidPipelineMeasurement,
   measurementDomain: "cpu" | "gpu" | undefined,
+  paged = false,
 ): string {
   switch (cost.kind) {
     case "withheld":
@@ -109,7 +110,7 @@ function costExplanation(
     case "unmeasured":
       return "No phase in the advance partition names this stage yet — either no trace has arrived, or the fallback queue-wall observation is too coarse to split the advance.";
     default:
-      return `${formatPipelineDuration(cost.duration_ms ?? 0)} ${measurementDomain === "cpu" ? "CPU active time" : "GPU execution time"} between this stage's trace seams, averaged across the trace window.${cost.encodedFraction !== undefined
+      return `${formatPipelineDuration(cost.duration_ms ?? 0)} ${paged ? "elapsed time" : measurementDomain === "cpu" ? "CPU active time" : "GPU execution time"} between this stage's trace seams, averaged across the trace window.${paged ? " Includes page-submission gaps and receipt waits; this is not pure GPU compute time." : ""}${cost.encodedFraction !== undefined
         ? `\n\nEncoded in ${Math.round(cost.encodedFraction * 100)}% of sampled advances; the figure is the expected cost per advance, not the per-encode mean.`
         : ""}`;
   }
@@ -379,7 +380,7 @@ export function SimPipelineOverlay({ lenses: override }: {
               kind: cost.kind,
               duration_ms: cost.duration_ms,
               encodedFraction: cost.encodedFraction,
-              explanation: `${stage.label}\n\n${costExplanation(cost, measurementDomain)}`,
+              explanation: `${stage.label}\n\n${costExplanation(cost, measurementDomain, methodId === "uniform-volume" && values.volumeStorage !== "dense")}`,
             },
             lamp: {
               // A stage the advance always encodes is a status, not a control:

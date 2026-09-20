@@ -127,6 +127,7 @@ function draw(
   for (const layer of VISUAL_LAYERS) {
     if (!layers.visible || !layers.enabled.includes(layer.id)) continue;
     const lens = layer.id;
+    if (lens === "pages") continue;
     if (lens === "grid" || lens === "window") {
       g.save(); g.globalAlpha = layerOpacity(layers, lens);
       g.strokeStyle = layer.color; g.lineWidth = (lens === "window" ? 2 : 1) / Math.max(sx, sy);
@@ -499,7 +500,7 @@ function UniformRun({ session }: { session: PaneSession }) {
   const parameters = UNIFORM_GEOMETRIC_PARAMS.filter(
     (p) =>
       keys.has(p.key) &&
-      !["activeRegion", "pressureWindow", "sharpeningWorkMap"].includes(p.key),
+      !["activeRegion", "pressureWindow", "sharpeningWorkMap", "volumeStorage"].includes(p.key),
   );
   const total = view?.volume.reduce((a, b) => a + b, 0) ?? 0,
     initial =
@@ -623,7 +624,7 @@ function UniformRun({ session }: { session: PaneSession }) {
       <div className={css.layout}>
         <section className={css.viewport} aria-label="Uniform simulation">
           <div className={css.tools}>
-            <DockedToolstrip ariaLabel="Visual layers"><VisualLayerRows state={layers} onChange={layers => store.setState({ layers })} /></DockedToolstrip>
+            <DockedToolstrip ariaLabel="Visual layers"><VisualLayerRows hidePages state={layers} onChange={layers => store.setState({ layers })} /></DockedToolstrip>
             <button onClick={() => setCamera(fit)}>Fit</button>
           </div>
           <canvas
