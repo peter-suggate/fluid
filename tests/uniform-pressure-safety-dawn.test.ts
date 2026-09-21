@@ -24,10 +24,14 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
     let hits = 0;
     const original = raw.createShaderModule.bind(raw);
     raw.createShaderModule = descriptor => {
-      const from = "textureStore(mgPressureOut,id,vec4f(mgP(id)+textureLoad(mgResidualIn,id,0).x));";
+      const dense = "textureStore(mgPressureOut,id,vec4f(mgP(id)+textureLoad(mgResidualIn,id,0).x));";
+      const paged = "mgPressureOutStore(id,vec4f(mgP(id)+mgResidualInLoad(id).x));";
+      const from=descriptor.code.includes(dense)?dense:paged;
       if (fault && descriptor.code.includes(from)) {
         hits++;
-        return original({ ...descriptor, code: descriptor.code.replace(from, `textureStore(mgPressureOut,id,vec4f(${fault}));`) });
+        const value=from===dense?fault:fault.replace("textureLoad(mgResidualIn,id,0)","mgResidualInLoad(id)");
+        const replacement=from===dense?`textureStore(mgPressureOut,id,vec4f(${value}));`:`mgPressureOutStore(id,vec4f(${value}));`;
+        return original({ ...descriptor, code: descriptor.code.replace(from, replacement) });
       }
       return original(descriptor);
     };
@@ -41,12 +45,13 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
     scene.container.fillFraction = 0.5;
     scene.fluid.initialLiquidVolumes = [];
     scene.solidVoxels = [...solidVoxelShellForScene(scene)];
-    for (const kind of ["finite", "nan", "infinity", "after-accepted-cycle"] as const) await t.test(kind, async () => {
+    for (const pageDomain of [false, true]) for (const kind of ["finite", "nan", "infinity", "after-accepted-cycle"] as const) await t.test(`${pageDomain ? "GPU indirect" : "reference"}: ${kind}`, async () => {
       fault = kind === "finite" ? "1e20" : kind === "nan" ? "bitcast<f32>(0x7fc00000u+atomicLoad(&mgState.convergence[17]))" : kind === "infinity" ? "bitcast<f32>(0x7f800000u+atomicLoad(&mgState.convergence[17]))"
         : "select(mgP(id)+textureLoad(mgResidualIn,id,0).x,1e20,atomicLoad(&mgState.convergence[17])>0u)";
       const before = hits;
       const solver = await WebGPUUniformReferenceSolver.createAsync(device!, scene, "balanced", undefined, {
-        geometricVolume: true, activeRegion: false,
+        geometricVolume: true, activeRegion: false, pageDomain, pressureCycleBudget: "fixed",
+        pressureCycleDispatch: pageDomain ? "indirect" : "direct",
         pressureSchedule: { fullCycles: 3, vCycles: 4, preSweeps: 6, postSweeps: 6, residualTolerance: kind === "after-accepted-cycle" ? 0 : 0.1 },
       }, () => {});
       try {
@@ -58,7 +63,7 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
           assert.ok(Number(stats.uniformPressureRecoverySweeps) > 0 && Number(stats.uniformPressureRecoverySweeps) <= 64);
           assert.ok(Number(stats.uniformPressureAcceptedResidual) <= Number(stats.uniformPressureInitialResidual));
           assert.ok(Number.isFinite(stats.uniformCM11aFineResidualInfinity));
-          assert.ok(Number(stats.maxSpeed_m_s) < 1, "corrupt pressure cannot reach velocity projection");
+          assert.ok(Number(stats.maxSpeed_m_s) < 1, `corrupt pressure cannot reach velocity projection: speed=${stats.maxSpeed_m_s}, frame=${frame}, residual=${stats.uniformPressureAcceptedResidual}, initial=${stats.uniformPressureInitialResidual}`);
           if (kind === "after-accepted-cycle") {
             assert.equal(stats.uniformCM11aFullCyclesExecuted, 2);
             assert.equal(stats.uniformPressureRecoverySweeps, 64);

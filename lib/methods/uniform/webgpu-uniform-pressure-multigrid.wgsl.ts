@@ -58,6 +58,23 @@ fn mgSkipCycle()->bool{
   return select(recovery,!recovery,mg.levelDims.w==2u);
 }
 
+// Published only after accepted/rejected pressure has been committed. A
+// converged solve launches zero workgroups for all subsequent cycle kernels.
+// Save/restore and final diagnostics remain unconditional.
+@group(1) @binding(18) var<storage,read_write> mgCycleDispatch:array<u32>;
+@compute @workgroup_size(1)
+fn mgPublishCycleDispatch(){
+  let records=mg.control.z;
+  let stopped=atomicLoad(&mgState.convergence[16])!=0u;
+  let recovery=atomicLoad(&mgState.convergence[22])!=0u;
+  for(var gate=1u;gate<=2u;gate++){
+    let enabled=!stopped&&select(!recovery,recovery,gate==2u);
+    for(var i=0u;i<records*3u;i++){
+      mgCycleDispatch[gate*records*3u+i]=select(0u,mgCycleDispatch[i],enabled);
+    }
+  }
+}
+
 @compute @workgroup_size(1)
 fn mgCheckCycleConvergence(){
   if(mgSkipCycle()){return;}

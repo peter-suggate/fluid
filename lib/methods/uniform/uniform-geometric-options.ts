@@ -8,8 +8,8 @@ import type { SceneDescription } from "../../core/model";
 export function uniformGeometricSolverOptions(overrides: MethodParamValues = {}, scene?: Pick<SceneDescription,"sceneId">): WebGPUUniformReferenceOptions {
   const values=resolveUniformGeometricValues(overrides);
   return {
-      ...uniformReferenceSolverOptions(values, scene), geometricVolume: true, pageDomain:true,
-      volumePages: values.volumeStorage === "auto" ? "auto" : values.volumeStorage === "pages16" ? 16 : values.volumeStorage === "pages32" ? 32 : undefined,
+      ...uniformReferenceSolverOptions(values, scene), geometricVolume: true, pageDomain:true, pressureCycleBudget:"fixed",
+      volumePages: 32,
       sharpeningStrength: Number(values.sharpeningStrength),
       velocityTransport: values.velocityTransport === "maccormack" ? "maccormack" : "semi-lagrangian",
       surfaceDeficitBalancing: values.surfaceDeficitBalancing === "on",

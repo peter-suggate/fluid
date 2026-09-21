@@ -1,3 +1,4 @@
+import {uniformPressurePageExtent,uniformPressurePageWorkgroups,uniformPressurePagedShader,uniformPressurePageAddressWGSL} from "./uniform-pressure-pages";
 import { gpuCompilationManagerFor } from "../../core/gpu-compilation-manager";
 import { uniformPressureMultigridWGSL } from "./webgpu-uniform-pressure-multigrid.wgsl";
 
@@ -17,7 +18,7 @@ const ENTRY_POINTS = [
   "mgResidual", "mgRestrictResidual", "mgProlongateAdd", "mgProlongateAssign",
   "mgDownsampleSubtract", "mgDownsampleMinimum", "mgSmoothColour",
   "mgCopyPressure", "mgClearPressure", "mgClearMinimum",
-  "mgShiftMinimum", "mgAddPressure", "mgSolveCoarsest", "mgMeasureFineResidual", "mgCheckCycleConvergence", "mgSaveAccepted", "mgRestoreRejected", "mgFinishSafety",
+  "mgPublishCycleDispatch", "mgShiftMinimum", "mgAddPressure", "mgSolveCoarsest", "mgMeasureFineResidual", "mgCheckCycleConvergence", "mgSaveAccepted", "mgRestoreRejected", "mgFinishSafety",
 ] as const;
 type EntryPoint = typeof ENTRY_POINTS[number];
 
@@ -34,6 +35,7 @@ const ENTRY_BINDINGS: Readonly<Record<EntryPoint, readonly number[]>> = Object.f
   mgSolveCoarsest: [0, 1, 2, 3, 5, 7, 11, 13],
   mgMeasureFineResidual: [0, 1, 3, 11, 13, 14, 17],
   mgCheckCycleConvergence: [0, 17],
+  mgPublishCycleDispatch: [0, 18],
   mgSaveAccepted: [0, 1, 2], mgRestoreRejected: [0, 2, 9], mgFinishSafety: [0],
 });
 
@@ -82,6 +84,7 @@ interface PlannedDispatch {
   readonly workgroups: readonly [number, number, number];
   readonly activeLevel: number;
   readonly residualCheckpoint: boolean;
+  readonly cycleGate: number;
   readonly coarsestCapture?: {
     readonly invocation: number;
     readonly dimensions: readonly [number, number, number];
@@ -118,7 +121,7 @@ interface GroupResources {
 }
 
 /**
- * Dense uniform implementation of CM11a Algorithms 1--3. The shader source
+ * Uniform implementation of CM11a Algorithms 1--3 with paged or dense backing. The shader source
  * passed to initialize must be the authoritative uniform shader followed by
  * {@link uniformPressureMultigridWGSL}; this lets mgBuildFinest call exactly
  * the same solid, free-surface, divergence, and volume-correction helpers as
@@ -134,6 +137,7 @@ interface GroupResources {
  * nothing to await.
  */
 export interface UniformPressureMultigridPrograms {
+  readonly pagedStorage: boolean;
   readonly module: GPUShaderModule;
   readonly groupLayouts: Readonly<Record<string, GPUBindGroupLayout>>;
   readonly pipelines: Readonly<Record<string, GPUComputePipeline>>;
@@ -141,9 +145,17 @@ export interface UniformPressureMultigridPrograms {
 
 export class WebGPUUniformPressureMultigrid {
   readonly levels: readonly UniformPressureMultigridLevel[];
-  readonly shaderFragment = uniformPressureMultigridWGSL;
+  get shaderFragment():string {return this.pagedStorage?uniformPressurePagedShader(uniformPressureMultigridWGSL):uniformPressureMultigridWGSL;}
+  private readonly logicalDimensions = new Map<GPUTexture,readonly [number,number,number]>();
+  private pressurePublication?: GPUTexture;
+  private pressurePublicationPipeline?: GPUComputePipeline;
+  private pressurePublicationGroup?: GPUBindGroup;
+  private pageCapturePipeline?: GPUComputePipeline;
+  private readonly pageCaptureBuffers:GPUBuffer[]=[];
+  private readonly pageCaptureOperations=new Map<GPUTexture,{group:GPUBindGroup;staging:GPUBuffer;target:GPUBuffer}>();
   readonly diagnostics: GPUBuffer;
   private readonly toleranceBuffer: GPUBuffer;
+  private readonly cycleDispatch: GPUBuffer;
   readonly allocatedBytes: number;
   /** CM11a Algorithm 3 p_tmp; no V-cycle scratch dispatch may alias it. */
   private readonly fullCycleBackup: GPUTexture;
@@ -202,7 +214,9 @@ export class WebGPUUniformPressureMultigrid {
      * so the step that switches only swaps an instance that is already ready.
      */
     deferPlan = false,
-    referenceDimension: 2 | 3 = 3) {
+    referenceDimension: 2 | 3 = 3,
+    private readonly gpuCycleDispatch = false,
+    private readonly pagedStorage = false) {
     const hierarchy = planUniformCM11aHierarchy(
       dimensions as readonly [number, number, number], referenceDimension);
     if (hierarchy.rejection) throw new RangeError(hierarchy.rejection);
@@ -222,8 +236,10 @@ export class WebGPUUniformPressureMultigrid {
     let allocatedBytes = 120;
     const texture = (label: string, format: GPUTextureFormat,
       size: readonly [number, number, number]) => {
-      const result = device.createTexture({ label, size: [...size], dimension: "3d", format, usage });
-      allocatedBytes += size[0] * size[1] * size[2] * (format === "rgba32float" ? 16 : 4);
+      const extent=this.pagedStorage?uniformPressurePageExtent(size):size;
+      const result = device.createTexture({ label, size: [...extent], dimension: "3d", format, usage });
+      this.logicalDimensions.set(result,size);
+      allocatedBytes += extent[0] * extent[1] * extent[2] * (format === "rgba32float" ? 16 : 4);
       return result;
     };
     const levels: UniformPressureMultigridLevel[] = [];
@@ -239,6 +255,21 @@ export class WebGPUUniformPressureMultigrid {
         minimum: pair("p-min"), coefficients: texture(`Uniform CM11a L${index} coefficients`, "rgba32float", size) }));
     }
     this.levels = Object.freeze(levels);
+    // Three banks: immutable launch geometry, normal cycles, recovery cycles.
+    // The final record in each bank is the single-workgroup coarse solve.
+    const records = levels.length + 1;
+    const cycleWords = new Uint32Array(records * 9);
+    levels.forEach((level, index) => cycleWords.set(this.pagedStorage?uniformPressurePageWorkgroups(level.dimensions):level.dimensions.map(n => Math.ceil(n / 4)), index * 3));
+    cycleWords.set([1, 1, 1], levels.length * 3);
+    this.cycleDispatch = device.createBuffer({label: "Uniform GPU pressure cycle dispatch", size: cycleWords.byteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST});
+    device.queue.writeBuffer(this.cycleDispatch, 0, cycleWords);
+    allocatedBytes += cycleWords.byteLength;
+    if(this.pagedStorage){
+      const size=levels[0]!.dimensions;
+      this.pressurePublication=device.createTexture({label:"Uniform pressure presentation adapter",size:[...size],dimension:"3d",format:"r32float",usage});
+      allocatedBytes+=size[0]*size[1]*size[2]*4;
+    }
     this.fullCycleBackup = texture("Uniform CM11a Full-Cycle p_tmp", "r32float", levels[0]!.dimensions);
     this.acceptedPressure = texture("Uniform CM11a accepted pressure", "r32float", levels[0]!.dimensions);
     this.diagnostics = device.createBuffer({ label: "Uniform CM11a convergence status", size: stateBytes,
@@ -251,6 +282,7 @@ export class WebGPUUniformPressureMultigrid {
     const textureBinding = { sampleType: "unfilterable-float", viewDimension: "3d" } as const;
     const scalarStorage = { access: "write-only", format: "r32float", viewDimension: "3d" } as const;
     const allEntries: GPUBindGroupLayoutEntry[] = [
+      { binding: 18, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 17, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
       ...[1, 3, 5, 7, 9, 11].map((binding) => ({ binding, visibility: GPUShaderStage.COMPUTE, texture: textureBinding })),
@@ -268,6 +300,7 @@ export class WebGPUUniformPressureMultigrid {
     // Given another instance's compiled programs this one is ready here, with
     // no await anywhere: a re-plan happens inside a single step.
     if (programs) {
+      if(programs.pagedStorage!==this.pagedStorage)throw new Error("Cannot reuse pressure programs across field layouts");
       this.shaderModule = programs.module;
       this.pipelines = programs.pipelines as Readonly<Record<EntryPoint, GPUComputePipeline>>;
       if (deferPlan) this.planSteps = this.buildPlanSteps();
@@ -280,8 +313,10 @@ export class WebGPUUniformPressureMultigrid {
    * a sibling planned on a different capacity. Undefined until initialized.
    */
   get programs(): UniformPressureMultigridPrograms | undefined {
-    if (!this.shaderModule || !this.pipelines) return undefined;
-    return { module: this.shaderModule, groupLayouts: this.groupLayouts, pipelines: this.pipelines };
+    // Paged instances own dimension-specific publication resources; only the
+    // legacy window backend supports synchronous program reuse.
+    if (this.pagedStorage || !this.shaderModule || !this.pipelines) return undefined;
+    return { module: this.shaderModule, groupLayouts: this.groupLayouts, pipelines: this.pipelines, pagedStorage: this.pagedStorage };
   }
 
   setResidualTolerance(value: number): void {
@@ -297,7 +332,7 @@ export class WebGPUUniformPressureMultigrid {
    */
   get residualTolerance(): number { return this.activeResidualTolerance; }
 
-  get pressureTexture(): GPUTexture { return this.levels[0]!.pressure[0]; }
+  get pressureTexture(): GPUTexture { return this.pressurePublication??this.levels[0]!.pressure[0]; }
 
   /**
    * Per-level group counts the host chose for this step, or undefined to keep
@@ -338,13 +373,44 @@ export class WebGPUUniformPressureMultigrid {
     const shaderModule = compiler.createShaderModule({ label: "Uniform CM11a pressure hierarchy",
       code: input.shaderSource });
     this.shaderModule = shaderModule;
+    const emptyUniformLayout = this.device.createBindGroupLayout({entries: []});
     const entries = await Promise.all(ENTRY_POINTS.map(async (entryPoint) => [entryPoint,
       await compiler.compileComputePipeline({ label: `Uniform CM11a - ${entryPoint}`,
         layout: this.device.createPipelineLayout({ label: `Uniform CM11a layout - ${entryPoint}`,
-          bindGroupLayouts: [input.uniformBindGroupLayout, this.groupLayouts[entryPoint]] }),
+          bindGroupLayouts: [entryPoint === "mgPublishCycleDispatch" ? emptyUniformLayout : input.uniformBindGroupLayout, this.groupLayouts[entryPoint]] }),
         compute: { module: shaderModule, entryPoint } }, { priority: "visible", signal: input.signal })] as const));
     this.pipelines = Object.freeze(Object.fromEntries(entries) as Record<EntryPoint, GPUComputePipeline>);
     this.plan = Object.freeze(this.buildPlan());
+    if(this.pagedStorage){
+      const dims=this.levels[0]!.dimensions;
+      const module=compiler.createShaderModule({label:"Uniform paged pressure publication",code:`
+        @group(0) @binding(0) var input:texture_3d<f32>;
+        @group(0) @binding(1) var output:texture_storage_3d<r32float,write>;
+        ${uniformPressurePageAddressWGSL}
+        @compute @workgroup_size(4,4,4) fn publish(@builtin(global_invocation_id)g:vec3u){
+          let d=vec3u(${dims.join("u,")}u);if(any(g>=d)){return;}
+          textureStore(output,vec3i(g),textureLoad(input,mgPageAddress(vec3i(g),d,textureDimensions(input)),0));
+        }`});
+      this.pressurePublicationPipeline=await compiler.compileComputePipeline({label:"Uniform pressure page publication",layout:"auto",compute:{module,entryPoint:"publish"}},{priority:"visible",signal:input.signal});
+      this.pressurePublicationGroup=this.device.createBindGroup({layout:this.pressurePublicationPipeline.getBindGroupLayout(0),entries:[
+        {binding:0,resource:this.levels[0]!.pressure[0].createView()},
+        {binding:1,resource:this.pressurePublication!.createView()},
+      ]});
+      const captureModule=compiler.createShaderModule({label:"Uniform pressure page capture",code:`
+        struct Capture {dims:vec4u,packing:vec4u}
+        @group(0) @binding(0) var input:texture_3d<f32>;
+        @group(0) @binding(1) var<storage,read_write> output:array<f32>;
+        @group(0) @binding(2) var<uniform> capture:Capture;
+        ${uniformPressurePageAddressWGSL}
+        @compute @workgroup_size(64) fn captureField(@builtin(global_invocation_id)g:vec3u){
+          let d=capture.dims.xyz;let i=g.x;if(i>=d.x*d.y*d.z){return;}
+          let q=vec3u(i%d.x,(i/d.x)%d.y,i/(d.x*d.y));
+          let v=textureLoad(input,mgPageAddress(vec3i(q),d,textureDimensions(input)),0);
+          let offset=(q.z*d.y+q.y)*capture.packing.x+q.x*capture.dims.w;
+          for(var component=0u;component<capture.dims.w;component++){output[offset+component]=v[component];}
+        }`});
+      this.pageCapturePipeline=await compiler.compileComputePipeline({label:"Uniform pressure page capture",layout:"auto",compute:{module:captureModule,entryPoint:"captureField"}},{priority:"background",signal:input.signal});
+    }
   }
 
   /**
@@ -384,8 +450,12 @@ export class WebGPUUniformPressureMultigrid {
       }
       const pass = encoder.beginComputePass({ label: `Uniform CM11a ${dispatch.entryPoint}` });
       pass.setPipeline(dispatch.pipeline); pass.setBindGroup(1, dispatch.group);
-      pass.setBindGroup(0, uniformGroup);
-      if (this.windowLattice) {
+      if (dispatch.entryPoint !== "mgPublishCycleDispatch") pass.setBindGroup(0, uniformGroup);
+      if (this.gpuCycleDispatch && dispatch.cycleGate !== 0) {
+        const record = dispatch.entryPoint === "mgSolveCoarsest" ? this.levels.length : dispatch.activeLevel;
+        pass.dispatchWorkgroupsIndirect(this.cycleDispatch,
+          (dispatch.cycleGate * (this.levels.length + 1) + record) * 12);
+      } else if (this.windowLattice) {
         pass.dispatchWorkgroups(...dispatch.workgroups);
       } else if (this.activeDispatch && dispatch.entryPoint !== "mgSolveCoarsest" && dispatch.entryPoint !== "mgCheckCycleConvergence" && dispatch.entryPoint !== "mgFinishSafety") {
         const chosen = this.windowLevelGroups?.[dispatch.activeLevel];
@@ -405,12 +475,27 @@ export class WebGPUUniformPressureMultigrid {
         const capture = dispatch.coarsestCapture, buffers = this.coarsestCaptureBuffers;
         const destination = (buffer: GPUBuffer) => ({ buffer, bytesPerRow: buffers.bytesPerRow,
           rowsPerImage: capture.dimensions[1] });
+        if(this.pagedStorage){
+          for(const field of [capture.pressure,capture.rhs,capture.minimum,capture.phi,capture.topology]){
+            const operation=this.pageCaptureOperations.get(field)!;
+            const pass=encoder.beginComputePass({label:"Capture logical pressure page field"});
+            pass.setPipeline(this.pageCapturePipeline!);pass.setBindGroup(0,operation.group);
+            pass.dispatchWorkgroups(Math.ceil(capture.dimensions.reduce((n,d)=>n*d,1)/64));pass.end();
+            encoder.copyBufferToBuffer(operation.staging,0,operation.target,0,buffers.byteLength);
+          }
+        }else{
         encoder.copyTextureToBuffer({ texture: capture.pressure }, destination(buffers.pressure), capture.dimensions);
         encoder.copyTextureToBuffer({ texture: capture.rhs }, destination(buffers.rhs), capture.dimensions);
         encoder.copyTextureToBuffer({ texture: capture.minimum }, destination(buffers.minimum), capture.dimensions);
         encoder.copyTextureToBuffer({ texture: capture.phi }, destination(buffers.phi), capture.dimensions);
         encoder.copyTextureToBuffer({ texture: capture.topology }, destination(buffers.topology), capture.dimensions);
+        }
       }
+    }
+    if(this.pressurePublicationPipeline){
+      const pass=encoder.beginComputePass({label:"Publish paged pressure for projection"});
+      pass.setPipeline(this.pressurePublicationPipeline);pass.setBindGroup(0,this.pressurePublicationGroup!);
+      pass.dispatchWorkgroups(...this.levels[0]!.dimensions.map(n=>Math.ceil(n/4)) as [number,number,number]);pass.end();
     }
     if (openStage !== undefined) boundary?.(openStage);
   }
@@ -421,13 +506,13 @@ export class WebGPUUniformPressureMultigrid {
   get cycleCount(): number { return Math.max(0, (this.cycleBoundaries?.length ?? 1) - 1); }
 
   /** Compute passes the whole plan encodes. Undefined until `initialize`. */
-  get planPassCount(): number | undefined { return this.plan?.length; }
+  get planPassCount(): number | undefined { return this.plan ? this.plan.length+Number(this.pagedStorage) : undefined; }
 
   /** Compute passes a given cycle budget encodes, setup and finish included. */
   encodedPassCount(cycleBudget?: number): number | undefined {
     if (!this.plan || !this.cycleBoundaries) return undefined;
     return this.cycleBoundaries[this.clampCycleBudget(cycleBudget)]!
-      + (this.plan.length - this.finishStart);
+      + (this.plan.length - this.finishStart) + Number(this.pagedStorage);
   }
 
   private clampCycleBudget(cycleBudget?: number): number {
@@ -444,6 +529,7 @@ export class WebGPUUniformPressureMultigrid {
       setup: 0, "full-cycle": 0, "v-cycle": 0, finish: 0,
     };
     for (const dispatch of this.plan) counts[dispatch.stage] += 1;
+    counts.finish+=Number(this.pagedStorage);
     return counts;
   }
 
@@ -462,6 +548,21 @@ export class WebGPUUniformPressureMultigrid {
       pressure: buffer("Uniform CM11a capture pressure"), rhs: buffer("Uniform CM11a capture rhs"),
       minimum: buffer("Uniform CM11a capture p-min"), phi: buffer("Uniform CM11a capture phi"),
       topology: buffer("Uniform CM11a capture topology") };
+    if(this.pagedStorage){
+      const capture=this.plan?.find(d=>d.coarsestCapture?.invocation===invocation)?.coarsestCapture;
+      if(!capture||!this.pageCapturePipeline)throw new Error("Paged pressure capture requires an initialized invocation");
+      const target=this.coarsestCaptureBuffers;
+      for(const name of ["pressure","rhs","minimum","phi","topology"] as const){
+        const staging=this.device.createBuffer({label:`Page capture ${name}`,size:byteLength,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
+        const params=this.device.createBuffer({label:"Page capture geometry",size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+        this.device.queue.writeBuffer(params,0,new Uint32Array([...dimensions,name==="topology"?4:1,bytesPerRow/4,0,0,0]));
+        const group=this.device.createBindGroup({layout:this.pageCapturePipeline.getBindGroupLayout(0),entries:[
+          {binding:0,resource:capture[name].createView()},{binding:1,resource:{buffer:staging}},{binding:2,resource:{buffer:params}},
+        ]});
+        this.pageCaptureBuffers.push(staging,params);
+        this.pageCaptureOperations.set(capture[name],{group,staging,target:target[name]});
+      }
+    }
   }
 
   async readCoarsestCapture(): Promise<UniformCM11aCoarsestCapture | undefined> {
@@ -555,7 +656,7 @@ export class WebGPUUniformPressureMultigrid {
       const [params, paramsKey] = this.parameterBuffer(source.dimensions, destination.dimensions,
         destinationIndex,
         [control[0] || paperDestination, control[1] || paperM - UNIFORM_CM11A_PHI_PRESERVATION_LEVELS,
-          control[2], control[3]], recovering ? 2 : (planStage === "full-cycle" || planStage === "v-cycle" ? 1 : 0));
+          control[2], control[3]], recovering ? 2 : (planStage === "full-cycle" || planStage === "v-cycle" ? 1 : 0),texturesByBinding);
       // Only the bindings this entry point declares reach the group, so the
       // key is that filtered list -- two entry points that read the same
       // texture through different bindings must not share a group.
@@ -568,6 +669,7 @@ export class WebGPUUniformPressureMultigrid {
       let group = this.groupCache.get(groupKey);
       if (!group) {
         const allEntries: GPUBindGroupEntry[] = [
+          { binding: 18, resource: { buffer: this.cycleDispatch } },
           { binding: 17, resource: { buffer: this.toleranceBuffer } },
           { binding: 0, resource: { buffer: params } },
           { binding: 1, resource: this.viewOf(resources.pressureIn) }, { binding: 2, resource: this.viewOf(resources.pressureOut) },
@@ -589,9 +691,12 @@ export class WebGPUUniformPressureMultigrid {
       result.push({ pipeline: this.pipelines![entryPoint], group,
         entryPoint, stage: planStage,
         activeLevel: destinationIndex,
+        cycleGate: !["mgPublishCycleDispatch", "mgCheckCycleConvergence", "mgSaveAccepted", "mgRestoreRejected", "mgFinishSafety"].includes(entryPoint)
+          ? (recovering ? 2 : (planStage === "full-cycle" || planStage === "v-cycle" ? 1 : 0)) : 0,
         residualCheckpoint: entryPoint === "mgMeasureFineResidual" && control[2] === 1,
-        workgroups: [Math.ceil(dispatchDimensions[0] / 4), Math.ceil(dispatchDimensions[1] / 4),
-          Math.ceil(dispatchDimensions[2] / 4)],
+        workgroups: this.pagedStorage && dispatchDimensions.some(n=>n>1)
+          ? uniformPressurePageWorkgroups(dispatchDimensions)
+          : [Math.ceil(dispatchDimensions[0] / 4), Math.ceil(dispatchDimensions[1] / 4), Math.ceil(dispatchDimensions[2] / 4)],
         ...(entryPoint === "mgSolveCoarsest" ? { coarsestCapture: {
           invocation: control[2],
           dimensions: source.dimensions, pressure: resources.pressureOut, rhs: resources.rhsIn,
@@ -686,12 +791,14 @@ export class WebGPUUniformPressureMultigrid {
       // Dedicated storage cannot alias Full-Cycle or V-cycle scratch.
       emit("mgSaveAccepted", 0, 0, { pressureOut: this.acceptedPressure });
       emit("mgRestoreRejected", 0, 0, { pressureOut: this.levels[0]!.pressure[0], residualIn: this.acceptedPressure });
+      if (this.gpuCycleDispatch) emit("mgPublishCycleDispatch", 0, 0, {}, [0, 0, this.levels.length + 1, 0], [1, 1, 1]);
     };
     // Where a lagged budget may cut. Entry 0 is the end of setup; entry k is
     // the end of cycle k, which is always a checkpoint.
     emit("mgMeasureFineResidual", 0, 0, { rhsIn: originalRhs }, [0, 0, 1, 0]);
     emit("mgCheckCycleConvergence", 0, 0, {}, [0, 0, 0, 0], [1, 1, 1]);
     emit("mgCopyPressure", 0, 0, { pressureOut: this.acceptedPressure });
+    if (this.gpuCycleDispatch) emit("mgPublishCycleDispatch", 0, 0, {}, [0, 0, this.levels.length + 1, 0], [1, 1, 1]);
     const cycleBoundaries: number[] = [result.length];
     planStage = "full-cycle";
     for (let cycle = 0; cycle < this.schedule.fullCycles; cycle += 1) {
@@ -758,8 +865,8 @@ export class WebGPUUniformPressureMultigrid {
    */
   private parameterBuffer(level: readonly [number, number, number], coarse: readonly [number, number, number],
     activeLevel: number, control: readonly [number, number, number, number],
-    gated: number): [GPUBuffer, string] {
-    const bytes = new ArrayBuffer(80); const u = new Uint32Array(bytes); const f = new Float32Array(bytes);
+    gated: number, texturesByBinding: readonly (GPUTexture|undefined)[]): [GPUBuffer, string] {
+    const bytes = new ArrayBuffer(this.pagedStorage?336:80); const u = new Uint32Array(bytes); const f = new Float32Array(bytes);
     u.set(this.levels[0]!.dimensions, 0); u.set(level, 4); u.set(coarse, 8);
     // Each axis has coarsened by however many times *it* was halved, which is
     // no longer one shared 2**levelIndex once a hierarchy is semi-coarsened.
@@ -770,10 +877,14 @@ export class WebGPUUniformPressureMultigrid {
     u.set(control, 16);
     u[3] = activeLevel;
     u[7] = gated;
-    const key = `${level.join(",")}|${coarse.join(",")}|${activeLevel}|${control.join(",")}|${gated}`;
+    if(this.pagedStorage)texturesByBinding.forEach((texture,binding)=>{
+      if(texture)u.set(this.logicalDimensions.get(texture)!,20+4*binding);
+    });
+    const dimensionsKey=this.pagedStorage?Array.from(u.subarray(20)).join(","):"";
+    const key = `${dimensionsKey}|${level.join(",")}|${coarse.join(",")}|${activeLevel}|${control.join(",")}|${gated}`;
     const cached = this.paramCache.get(key);
     if (cached) return [cached, key];
-    const buffer = this.device.createBuffer({ label: "Uniform CM11a dispatch parameters", size: 80,
+    const buffer = this.device.createBuffer({ label: "Uniform CM11a dispatch parameters", size: bytes.byteLength,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.device.queue.writeBuffer(buffer, 0, bytes); this.ownedParams.push(buffer);
     this.paramCache.set(key, buffer);
@@ -784,6 +895,9 @@ export class WebGPUUniformPressureMultigrid {
     for (const level of this.levels) for (const pair of [level.pressure, level.rhs, level.phi,
       level.volume, level.residual, level.minimum]) { pair[0].destroy(); pair[1].destroy(); }
     for (const level of this.levels) level.coefficients.destroy();
+    for(const buffer of this.pageCaptureBuffers)buffer.destroy();
+    this.pressurePublication?.destroy();
+    this.cycleDispatch.destroy();
     this.fullCycleBackup.destroy();
     this.acceptedPressure.destroy();
     this.toleranceBuffer.destroy();

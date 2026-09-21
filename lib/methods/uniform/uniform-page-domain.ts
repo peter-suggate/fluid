@@ -13,8 +13,6 @@ export interface UniformPageDomain {
   words: Uint32Array;
   cellDispatchOffset: number;
   vertexDispatchOffset: number;
-  /** Contiguous-page specialization, still owned by this domain generation. */
-  contiguous: boolean;
 }
 
 export function initialUniformPageDomain(dimensions: readonly [number,number,number],
@@ -27,17 +25,16 @@ export function initialUniformPageDomain(dimensions: readonly [number,number,num
   const count=coordinates.length,capacity=count;
   const layout=planUniformPages(edge,capacity,coordinates);
   const words=new Uint32Array(UNIFORM_PAGE_DOMAIN_HEADER+17*capacity);
-  const contiguous=Math.max(...dimensions)<=64 && !reverse;
-  const cells=contiguous?dimensions.map(n=>Math.ceil(n/4)):[count*edge/4,edge/4,edge/4];
+  const cells=[count*edge/4,edge/4,edge/4];
   const v=Math.ceil((edge+1)/4);
-  const vertices=contiguous?dimensions.map(n=>Math.ceil((n+1)/4)):[count*v,v,v];
-  words.set([...cells,0,...vertices,0,count,edge,0,contiguous?1:0,...dimensions]);
+  const vertices=[count*v,v,v];
+  words.set([...cells,0,...vertices,0,count,edge,0,0,...dimensions]);
   for(const slot of layout.activeSlots){
     const at=UNIFORM_PAGE_DOMAIN_HEADER+slot*UNIFORM_PAGE_DOMAIN_RECORD;
     words.set([...layout.coordinates[slot]!,slot,...layout.neighbors.subarray(slot*6,slot*6+6),1],at);
   }
   words.set(layout.activeSlots,UNIFORM_PAGE_DOMAIN_HEADER+16*capacity);
-  return {edge,capacity,count,words,contiguous,
+  return {edge,capacity,count,words,
     cellDispatchOffset:UNIFORM_PAGE_DOMAIN_BASE*4,
     vertexDispatchOffset:(UNIFORM_PAGE_DOMAIN_BASE+4)*4};
 }
@@ -54,14 +51,12 @@ fn pageDomainOrigin(page:u32)->vec3i{
  return vec3i(vec3u(activeRegion[at],activeRegion[at+1u],activeRegion[at+2u]))*i32(PAGE_DOMAIN_EDGE);
 }
 fn pageDomainCell(g:vec3u)->vec3i{
- if(activeRegion[PAGE_DOMAIN_BASE+11u]!=0u){return vec3i(g);}
  let page=g.x/PAGE_DOMAIN_EDGE;
  if(page>=activeRegion[PAGE_DOMAIN_BASE+8u]){return vec3i(-1);}
  let id=pageDomainOrigin(page)+vec3i(vec3u(g.x%PAGE_DOMAIN_EDGE,g.y,g.z));
  if(any(id>=dims())){return vec3i(-1);}return id;
 }
 fn pageDomainVertex(g:vec3u)->vec3i{
- if(activeRegion[PAGE_DOMAIN_BASE+11u]!=0u){return vec3i(g);}
  let width=((PAGE_DOMAIN_EDGE+4u)/4u)*4u;let page=g.x/width;
  if(page>=activeRegion[PAGE_DOMAIN_BASE+8u]){return vec3i(-1);}
  let local=vec3u(g.x%width,g.y,g.z);let id=pageDomainOrigin(page)+vec3i(local);

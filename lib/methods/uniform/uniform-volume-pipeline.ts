@@ -12,7 +12,7 @@ const workMap = (context: FluidPipelineContext) => {
   return {active,total,percent:Math.round(100*active/total)};
 };
 const sharpenChip = (context: FluidPipelineContext) => {
-  if (context.values.sharpeningWorkMap === "off") return "dense finest lattice";
+  if (context.values.sharpeningWorkMap === "off") return "page domain";
   const map = workMap(context);
   return map ? `4h work map · ${map.percent}% tiles` : "4h work map";
 };
@@ -38,7 +38,7 @@ const dustThreshold = (context: FluidPipelineContext) => {
 };
 const dustChip = (context: FluidPipelineContext) => {
   const threshold = dustThreshold(context);
-  return threshold > 0 ? `dust floor ${threshold.toExponential(0)}` : "dense finest lattice";
+  return threshold > 0 ? `dust floor ${threshold.toExponential(0)}` : "page domain";
 };
 /** The E1 fine map's share of the 4h tile grid, when the experiment ran. */
 const fineMap = (context: FluidPipelineContext) => {
@@ -147,24 +147,22 @@ const volumePressureRowsControl = {kind:"param-choice" as const,param:"volumePre
  * pays half again the levels and twice the passes for the same liquid.
  */
 const transportControls = [
-  {kind:"param-choice" as const,param:"volumeStorage",label:"Volume record storage",
-    options:[{value:"auto",label:"Automatic",hint:"Page-first work for large scenes; direct small-scene path."},{value:"dense",label:"Dense",hint:"Dense storage and synchronous advance."},
-      {value:"pages16",label:"16³ pages",hint:"GPU-assigned transport/sharpening pages; capacity reserved at initialization."},
-      {value:"pages32",label:"32³ pages",hint:"Larger pages amortize address translation. Rebuilds the simulation."}]},
+  {kind:"readout" as const,label:"Field storage",value:()=>"Persistent texture pages",
+    hint:"All fluid, extension and pressure fields use page backing. Transport records use 32³ pages. This is the default for every scene."},
   {kind:"readout" as const,label:"Resident volume pages",
     hint:"Actual last-stage active page count and total reserved arena capacity for the 80-byte records. Reservation is currently domain-sized; compute work follows active tiles.",
     value:(context: FluidPipelineContext)=>{const info=volumeInfo(context);
-      return info?.uniformVolumePageEdge ? `${info.uniformVolumePagesActive ?? 0} / ${info.uniformVolumePagesTotal ?? 0} · ${((info.uniformVolumePageBytes ?? 0)/1048576).toFixed(1)} MiB reserved · ${info.uniformVolumePageStage ?? "initial"}` : "dense";}},
+      return info?.uniformVolumePageEdge ? `${info.uniformVolumePagesActive ?? 0} / ${info.uniformVolumePagesTotal ?? 0} · ${((info.uniformVolumePageBytes ?? 0)/1048576).toFixed(1)} MiB reserved · ${info.uniformVolumePageStage ?? "initial"}` : "Initializing pages";}},
   {kind:"readout" as const,label:"Scheduled volume tiles",
     hint:"Actual 4³ workgroups dispatched for transport / sharpening. Sharpening reuses its list and cached geometry across eight sweeps. Domain capacity is shown for comparison.",
     value:(context:FluidPipelineContext)=>{const info=volumeInfo(context);
-      if(info?.uniformVolumeTransportWorkgroups===undefined)return "direct small-scene / dense schedule";
+      if(info?.uniformVolumeTransportWorkgroups===undefined)return info ? "Page-domain schedule" : "Initializing pages";
       const d=context.info;
       const capacity=d?Math.ceil(d.nx/4)*Math.ceil(d.ny/4)*Math.ceil(d.nz/4):0;
       return `${info.uniformVolumeTransportWorkgroups} / ${info.uniformVolumeSharpenWorkgroups??0} · domain ${capacity}`;}},
   {kind:"readout" as const,label:"Page scheduling",
     hint:"GPU page compaction and indirect tile dispatches stay in one command buffer. No CPU page-demand readback, arena allocation, or frame continuation.",
-    value:(context:FluidPipelineContext)=>volumeInfo(context)?.uniformVolumePageEdge?"GPU only · one submission":"direct"},
+    value:(context:FluidPipelineContext)=>volumeInfo(context)?.uniformVolumePageEdge?"GPU only · one submission":"Initializing pages"},
   {kind:"param-choice" as const,param:"transportWorkMap",label:"Transport work",
     options:[{value:"tiles",label:"Live tiles",hint:"Build edges, sum and normalise donors and gather only in the 4h tiles that can hold or receive liquid this step. Outside them the gather stores V=0 and gamma=0 without evaluating either."},
       {value:"dense",label:"Dense",hint:"The full-lattice schedule, retained so the shrink can be measured on its own."}],
@@ -194,7 +192,7 @@ const transportChip = (context: FluidPipelineContext) => {
 };
 /**
  * The floor's chip and the live set's, in that order. With the floor off the
- * set cannot run at all and the floor's own "dense finest lattice" already
+ * set cannot run at all and the floor's own "page domain" already
  * says so, so the stage does not repeat it.
  */
 const couplingChip = (context: FluidPipelineContext) =>
@@ -218,7 +216,7 @@ const phiAgreementControls = [
 const phiChip = (context: FluidPipelineContext) => {
   const parts=[context.values.totalSurfaceVolume === "on" ? "total volume constrained" : "",context.values.phiSeedFromVolume === "on" ? "seeded from V" : "",
     context.values.phiAgreement === "on" ? "follows V" : ""].filter(Boolean);
-  return parts.length ? `dense finest lattice · ${parts.join(" · ")}` : "dense finest lattice";
+  return parts.length ? `page domain · ${parts.join(" · ")}` : "page domain";
 };
 const volumeStages: FluidPipelineStage[] = [
   ["phi", "Vertex level set", "RK2 characteristics and bounded closest-point redistancing. The optional global volume constraint runs after conservative gather."],
@@ -270,7 +268,8 @@ export const UNIFORM_VOLUME_PIPELINE: FluidPipelineGraph = {
     if(stage.id==="density-post-process")return [{...stage,label:"Phi surface publication",phaseLabels:[P.surface.label],
       toggle:undefined,controls:undefined,state:()=>"on" as const,chip:()=>"phi = 0",
       tip:{summary:"Publish the independent vertex level set in the renderer's dense contour encoding."}}];
-    const mapped={...stage,tip:{...stage.tip,
+    const mapped={...stage,controls:stage.controls?.filter(control=>!("param" in control &&
+      ["pressureCycleBudget","pressureBudgetHeadroom","volumeStorage"].includes(control.param))),tip:{...stage.tip,
       summary:stage.tip.summary.replaceAll("surface density","level-set geometry"),
       reads:stage.tip.reads?.replaceAll("surface density","vertex phi and V")}};
     // The two-level sampler reads this stage's own hierarchy, and the shell
@@ -280,7 +279,7 @@ export const UNIFORM_VOLUME_PIPELINE: FluidPipelineGraph = {
       tip:{...mapped.tip,summary:"Extend nearby velocities with the narrow-band front, then fill missing air velocities from the nearest original source carried through the hierarchy. Keeps distant stationary liquid from slowing falling drops. The final 3D fill also packs the transport field."},
       controls:[{kind:"readout" as const,label:"Air fallback",value:()=>"Nearest source",
         hint:"Enabled by default. Carries original source locations through coarse levels; the front sweep budget is unchanged."},{kind:"readout" as const,label:"Domain authority",value:(context:FluidPipelineContext)=>`Resident pages · ${context.info?.uniformDomainPages??"—"} pages`},
-        {kind:"readout" as const,label:"Migration status",value:(context:FluidPipelineContext)=>context.info?.uniformDomainMigration??"Initializing page domain",hint:"Initial cutover retains every authored page to preserve the existing far-air phi contract. Sparse activation, persistent field storage, and the sparse pressure hierarchy are still under construction."},
+        {kind:"readout" as const,label:"Migration status",value:(context:FluidPipelineContext)=>context.info?.uniformDomainMigration??"Initializing page domain",hint:"Fluid, extension and pressure fields use physical pages. Every authored page remains resident to preserve far-air phi; fluid-driven activation and retirement remain unfinished. Dense publication adapters still serve the renderer."},
         ...(mapped.controls ?? []).filter(control=>
           !(control.kind === "param-choice" && control.param === "activeRegion")
           && !(control.kind === "readout" && control.label === "Work box")),
@@ -288,10 +287,13 @@ export const UNIFORM_VOLUME_PIPELINE: FluidPipelineGraph = {
       chip:context=>{const extra=["page domain",twoLevelChip(context)].filter(Boolean).join(" · ");
         const base=mapped.chip?.(context);
         return extra?(base?`${base} · ${extra}`:extra):base;}}];
+    if(stage.id==="pressure-cycles")return [{...mapped,
+      tip:{...mapped.tip,summary:"One coupled CM11a pressure solve across page seams. Full cycles build the solution from coarse to fine, then V-cycles refine it. The configured counts are fixed GPU schedule caps; convergence and recovery gate their indirect dispatches on the GPU."},
+      chip:context=>mapped.chip?.({...context,values:{...context.values,pressureCycleBudget:"fixed"}})??"GPU cycle gate"}];
     // Which cells own a pressure row is decided where the topology and RHS
     // are built, so the V claim sits on that stage.
     if(stage.id==="pressure-system")return [{...mapped,
-      controls:[...(mapped.controls ?? []),volumePressureRowsControl,{kind:"param-choice" as const,param:"surfaceDeficitBalancing",label:"Surface-deficit balancing",options:onOff,hint:"Preserve overfill expansion and balance it globally with contraction in underfilled liquid. Reduces persistent sloshing."},{kind:"readout" as const,label:"Pressure backing",value:()=>"Dense hierarchy · sparse replacement pending"}]}];
+      controls:[...(mapped.controls ?? []),volumePressureRowsControl,{kind:"param-choice" as const,param:"surfaceDeficitBalancing",label:"Surface-deficit balancing",options:onOff,hint:"Preserve overfill expansion and balance it globally with contraction in underfilled liquid. Reduces persistent sloshing."},{kind:"readout" as const,label:"Pressure backing",value:()=>"Paged coupled hierarchy"}]}];
     // E2b shrinks both of these, off the same fine map, so the one control sits
     // on both stages rather than in a shelf away from the work it prices.
     if(stage.id==="velocity-advection"||stage.id==="pressure-projection")return [{...mapped,

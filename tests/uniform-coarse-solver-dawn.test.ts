@@ -128,12 +128,16 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
         await solve(dims);await solve(dims,1);
       });
     }
-    await t.test("authored wet garden constructs and advances with default geometric windows",async()=>{
+    await t.test("authored wet garden constructs and advances with default geometric pages",async()=>{
       const scene=createHeroGardenHoseScene({water:true});
       const solver=await WebGPUUniformReferenceSolver.createAsync(device!,scene,"balanced",undefined,
         uniformGeometricSolverOptions({},scene),()=>{});
       try {
-        assert.deepEqual([solver.info.nx,solver.info.ny,solver.info.nz],[72,48,48]);
+        assert.deepEqual([solver.info.nx,solver.info.ny,solver.info.nz],
+          [scene.container.width_m,scene.container.height_m,scene.container.depth_m]
+            .map(length=>Math.round(length/scene.voxelDomain.finestCellSize_m)));
+        assert.equal(solver.info.uniformDomainAuthority,"pages");
+        assert.equal(solver.solveWindowSource,undefined);
         solver.enableCM11aCoarsestCapture(1);
         for(let frame=1;frame<=3;frame++) {
           while(!solver.advanceTo(frame/30,[]))await new Promise(setImmediate);

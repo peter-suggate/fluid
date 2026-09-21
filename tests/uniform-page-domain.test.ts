@@ -23,9 +23,32 @@ test("page-owned cells and vertices have one owner under reordered and partial p
  }
 });
 
-test("mini64 contiguous specialization derives its dispatch from the page generation",()=>{
+test("mini64 uses the same page traversal as large scenes",()=>{
  const d=initialUniformPageDomain([64,64,64]);
- assert.equal(d.count,8);assert.equal(d.contiguous,true);
- assert.deepEqual(Array.from(d.words.slice(0,3)),[16,16,16]);
- assert.deepEqual(Array.from(d.words.slice(4,7)),[17,17,17]);
+ assert.equal(d.count,8);
+ assert.deepEqual(Array.from(d.words.slice(0,3)),[64,8,8]);
+ assert.deepEqual(Array.from(d.words.slice(4,7)),[72,9,9]);
+});
+
+
+test("geometric pages cannot restore legacy host pressure scheduling from saved settings",async()=>{
+ const {uniformGeometricSolverOptions}=await import("../lib/methods/uniform/uniform-geometric-options");
+ const {resolveUniformGeometricValues}=await import("../lib/methods/uniform/uniform-geometric-parameters");
+ const saved={pressureCycleBudget:"lagged",pressureBudgetHeadroom:0};
+ const values=resolveUniformGeometricValues(saved);
+ assert.equal(values.pressureCycleBudget,undefined);
+ assert.equal(values.pressureBudgetHeadroom,undefined);
+ assert.equal(uniformGeometricSolverOptions(saved).pressureCycleBudget,"fixed");
+});
+
+test("every geometric scene uses pages regardless of saved dense storage",async()=>{
+ const {uniformGeometricSolverOptions}=await import("../lib/methods/uniform/uniform-geometric-options");
+ const {UNIFORM_GEOMETRIC_PARAMS,resolveUniformGeometricValues}=await import("../lib/methods/uniform/uniform-geometric-parameters");
+ for(const volumeStorage of ["auto","dense","pages16","pages32"]){
+  const options=uniformGeometricSolverOptions({volumeStorage,activeRegion:"on",pressureWindow:"window"});
+  assert.equal(options.pageDomain,true);assert.equal(options.volumePages,32);
+  assert.equal(options.activeRegion,false);assert.equal(options.pressureWindow,false);
+  assert.equal(resolveUniformGeometricValues({volumeStorage}).volumeStorage,undefined);
+ }
+ assert.equal(UNIFORM_GEOMETRIC_PARAMS.some(p=>p.key==="volumeStorage"),false);
 });

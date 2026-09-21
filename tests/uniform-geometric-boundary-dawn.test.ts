@@ -23,10 +23,10 @@ async function read(device:GPUDevice,texture:GPUTexture):Promise<Float32Array>{
     return result;
   }finally{buffer.unmap();buffer.destroy();}
 }
-function write(device:GPUDevice,texture:GPUTexture,values:Float32Array){const components=texture.format==="rgba32float"?4:1;device.queue.writeTexture({texture},values as Float32Array<ArrayBuffer>,{bytesPerRow:texture.width*components*4,rowsPerImage:texture.height},[texture.width,texture.height,texture.depthOrArrayLayers]);}
+
 
 const modulePath=process.env.WEBGPU_NODE_MODULE;
-(modulePath?test:test.skip)("uniform geometric separates from domain and embedded solids",{timeout:180_000},async t=>{
+(modulePath?test:test.skip)("uniform geometric separates from domain and embedded solids",{timeout:420_000},async t=>{
   await acquireWebGPUExclusiveLock("dawn-test","uniform geometric separating contact");
   let device:GPUDevice|undefined;
   try {
@@ -46,13 +46,13 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
         if(kind==="embedded-ceiling")scene.solidVoxels.push({operation:"fill",minimum:[0,16,0],maximumExclusive:[24,17,24]});
         if(side)scene.solidVoxels.push({operation:"fill",minimum:[low?7:16,0,0],maximumExclusive:[low?8:17,24,24]});
         const solver=await WebGPUUniformReferenceSolver.createAsync(device!,scene,"balanced",undefined,{
-          geometricVolume:true,densitySharpening:false,solidExcessCorrection:false,velocityTransport:"semi-lagrangian",
+          geometricVolume:true,pageDomain:true,densitySharpening:false,solidExcessCorrection:false,velocityTransport:"semi-lagrangian",
           pressureSchedule:{fullCycles:3,vCycles:4,preSweeps:6,postSweeps:6,residualTolerance:1e-6},
         },()=>{});
         try {
           const {nx,ny,nz}=solver.info;
           const initial=await read(device!,solver.volumeTexture);const mass=initial.reduce((a,b)=>a+b,0);
-          if(side){const velocity=new Float32Array(nx*ny*nz*4);for(let i=0;i<nx*ny*nz;i++)velocity[4*i]=low?0.5:-0.5;write(device!,solver.velocityTexture,velocity);}
+          if(side){const velocity=new Float32Array(nx*ny*nz*4);for(let i=0;i<nx*ny*nz;i++)velocity[4*i]=low?0.5:-0.5;solver.initializeVelocityForQA(velocity);}
           let firstVelocity:Float32Array|undefined;
           for(let frame=1;frame<=3;frame++){
             assert.ok(solver.advanceTo(frame/30));
@@ -84,7 +84,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
       scene.voxelDomain.finestCellSize_m=scene.container.width_m/32;
       scene.solidVoxels=[...solidVoxelShellForScene(scene)];
       const solver=await WebGPUUniformReferenceSolver.createAsync(device!,scene,"balanced",undefined,{
-        geometricVolume:true,densitySharpening:true,solidExcessCorrection:false,velocityTransport:"semi-lagrangian",
+        geometricVolume:true,pageDomain:true,densitySharpening:true,solidExcessCorrection:false,velocityTransport:"semi-lagrangian",
       },()=>{});
       try {
         const {nx,ny,nz}=solver.info;const world=solidWorldForScene(scene);

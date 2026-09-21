@@ -1,3 +1,6 @@
+import type { UniformPageDomain } from "./uniform-page-domain";
+import { uniformVelocityPagedShader, uniformVelocityPageWorkgroups } from "./uniform-velocity-pages";
+import { UniformTexturePages } from "./uniform-texture-pages";
 import { gpuCompilationManagerFor } from "../../core/gpu-compilation-manager";
 import { uniformVelocityExtrapolationShader } from "./webgpu-uniform-velocity-extrapolation.wgsl";
 
@@ -115,16 +118,20 @@ export class WebGPUUniformVelocityExtrapolator {
     private readonly activeDispatch?: GPUBuffer,
     private readonly sourceAwareHierarchy = false,
     private readonly fuseTransportPack = sourceAwareHierarchy,
+    private readonly fieldPages?: UniformTexturePages,
+    private readonly pageDomain?: UniformPageDomain,
+    private readonly pageDomainDispatch?: GPUBuffer,
   ) {
+    const view = (texture: GPUTexture) => fieldPages?.view(texture) ?? texture.createView();
     const [nx, ny, nz] = dims;
     const extent: Dims3 = [nx + 2, ny + 2, nz + 2];
     const usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING
       | GPUTextureUsage.COPY_SRC;
-    const scratch = (label: string) => device.createTexture({
+    const scratch = (label: string) => (fieldPages ?? device).createTexture({
       label, size: extent, dimension: "3d", format: "rgba32float", usage,
     });
-    this.dummyOrigins = device.createTexture({ label: "Extension unused source origins", size: [1,1,1], dimension: "3d", format: "rgba32uint", usage });
-    this.dummyOriginsOut = device.createTexture({ label: "Extension unused output origins", size: [1,1,1], dimension: "3d", format: "rgba32uint", usage });
+    this.dummyOrigins = (fieldPages ?? device).createTexture({ label: "Extension unused source origins", size: [1,1,1], dimension: "3d", format: "rgba32uint", usage });
+    this.dummyOriginsOut = (fieldPages ?? device).createTexture({ label: "Extension unused output origins", size: [1,1,1], dimension: "3d", format: "rgba32uint", usage });
     this.valuesA = scratch("Uniform Sec. 3.3 FIM values A");
     this.valuesB = scratch("Uniform Sec. 3.3 FIM values B");
     this.distancesA = scratch("Uniform Sec. 3.3 FIM distances A");
@@ -167,6 +174,7 @@ export class WebGPUUniformVelocityExtrapolator {
       { binding: 13, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "uint", viewDimension: "3d" } },
       { binding: 14, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "uint", viewDimension: "3d" } },
       { binding: 15, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rgba32uint", viewDimension: "3d" } },
+      ...(fieldPages?.layout([]) ?? []),
     ] });
     this.pipelineLayout = device.createPipelineLayout({ label: "Uniform Sec. 3.3 extrapolation pipeline layout", bindGroupLayouts: [this.layout] });
 
@@ -202,23 +210,23 @@ export class WebGPUUniformVelocityExtrapolator {
       primaryOut: GPUTexture, secondaryOut: GPUTexture, levels: GPUBuffer = dummyLevels,
       preparesIndirect = false,
       originsIn = this.dummyOrigins, existingOrigins = this.dummyOrigins, originsOut = this.dummyOriginsOut,
-    ) => device.createBindGroup({ layout: this.layout, entries: [
-      { binding: 0, resource: velocity.createView() },
-      { binding: 1, resource: density.createView() },
+    ) => (fieldPages ?? device).createBindGroup({ layout: this.layout, entries: [
+      { binding: 0, resource: view(velocity) },
+      { binding: 1, resource: view(density) },
       { binding: 2, resource: { buffer: params } },
-      { binding: 3, resource: primaryIn.createView() },
-      { binding: 4, resource: secondaryIn.createView() },
-      { binding: 5, resource: primaryOut.createView() },
-      { binding: 6, resource: secondaryOut.createView() },
+      { binding: 3, resource: view(primaryIn) },
+      { binding: 4, resource: view(secondaryIn) },
+      { binding: 5, resource: view(primaryOut) },
+      { binding: 6, resource: view(secondaryOut) },
       { binding: 7, resource: { buffer: levels } },
-      { binding: 8, resource: faceOpen.createView() },
+      { binding: 8, resource: view(faceOpen) },
       { binding: 9, resource: { buffer: this.convergence } },
       { binding: 10, resource: { buffer: preparesIndirect ? this.dispatchArgs : this.unusedDispatchStorage } },
       { binding: 11, resource: { buffer: this.activeRegion } },
       { binding: 12, resource: { buffer: this.tileScratch } },
-      { binding: 13, resource: originsIn.createView() },
-      { binding: 14, resource: existingOrigins.createView() },
-      { binding: 15, resource: originsOut.createView() },
+      { binding: 13, resource: view(originsIn) },
+      { binding: 14, resource: view(existingOrigins) },
+      { binding: 15, resource: view(originsOut) },
     ] });
 
     this.seedCurrentGroup = group(currentVelocity, this.resolvedValues, this.resolvedDistances, this.valuesA, this.distancesA);
@@ -231,23 +239,23 @@ export class WebGPUUniformVelocityExtrapolator {
     this.updateBAGroup = group(currentVelocity, this.valuesB, this.distancesB, this.valuesA, this.distancesA, updateBALevels);
     this.prepareABGroup = group(currentVelocity, this.valuesA, this.distancesA, this.valuesB, this.distancesB, updateABLevels, true);
     this.prepareBAGroup = group(currentVelocity, this.valuesB, this.distancesB, this.valuesA, this.distancesA, updateBALevels, true);
-    this.resolveGroup = device.createBindGroup({ layout: this.layout, entries: [
-      { binding: 0, resource: this.valuesB.createView() },
-      { binding: 1, resource: this.distancesB.createView() },
+    this.resolveGroup = (fieldPages ?? device).createBindGroup({ layout: this.layout, entries: [
+      { binding: 0, resource: view(this.valuesB) },
+      { binding: 1, resource: view(this.distancesB) },
       { binding: 2, resource: { buffer: params } },
-      { binding: 3, resource: this.valuesA.createView() },
-      { binding: 4, resource: this.distancesA.createView() },
-      { binding: 5, resource: this.resolvedValues.createView() },
-      { binding: 6, resource: this.resolvedDistances.createView() },
+      { binding: 3, resource: view(this.valuesA) },
+      { binding: 4, resource: view(this.distancesA) },
+      { binding: 5, resource: view(this.resolvedValues) },
+      { binding: 6, resource: view(this.resolvedDistances) },
       { binding: 7, resource: { buffer: dummyLevels } },
-      { binding: 8, resource: faceOpen.createView() },
+      { binding: 8, resource: view(faceOpen) },
       { binding: 9, resource: { buffer: this.convergence } },
       { binding: 10, resource: { buffer: this.dispatchArgs } },
       { binding: 11, resource: { buffer: this.activeRegion } },
       { binding: 12, resource: { buffer: this.tileScratch } },
-      { binding: 13, resource: this.dummyOrigins.createView() },
-      { binding: 14, resource: this.dummyOrigins.createView() },
-      { binding: 15, resource: this.dummyOriginsOut.createView() },
+      { binding: 13, resource: view(this.dummyOrigins) },
+      { binding: 14, resource: view(this.dummyOrigins) },
+      { binding: 15, resource: view(this.dummyOriginsOut) },
     ] });
     this.activeStateTexture = this.resolvedDistances;
 
@@ -270,14 +278,14 @@ export class WebGPUUniformVelocityExtrapolator {
         Math.ceil(levelDims[1] / 2),
         Math.ceil(levelDims[2] / 2),
       ];
-      const levelTexture = (direction: "down" | "up") => device.createTexture({
+      const levelTexture = (direction: "down" | "up") => (fieldPages ?? device).createTexture({
         label: `Uniform Sec. 3.3 hierarchy ${direction} ${levelDims.join("x")}`,
         size: levelDims,
         dimension: "3d",
         format: "rgba32float",
         usage,
       });
-      const origins = () => sourceAwareHierarchy ? device.createTexture({
+      const origins = () => sourceAwareHierarchy ? (fieldPages ?? device).createTexture({
         label: `Uniform nearest-source origins ${levelDims.join("x")}`,
         size: levelDims, dimension: "3d", format: "rgba32uint", usage,
       }) : undefined;
@@ -392,12 +400,21 @@ export class WebGPUUniformVelocityExtrapolator {
       - (this.fuseTransportPack && this.fusedGroups.length ? 1 : 0);
   }
 
+  private dispatchBasePages(pass: GPUComputePassEncoder): void {
+    if(this.pageDomainDispatch)pass.dispatchWorkgroupsIndirect(this.pageDomainDispatch,0);
+    else pass.dispatchWorkgroups(...this.workgroups(this.dims));
+  }
+
+  private workgroups(dims: Dims3): [number,number,number] {
+    return this.fieldPages ? uniformVelocityPageWorkgroups(dims) : dims.map(n=>Math.ceil(n/4)) as [number,number,number];
+  }
+
   async initialize(signal?: AbortSignal): Promise<void> {
     if (this.pipelines) return;
     const compiler = gpuCompilationManagerFor(this.device);
     const shaderModule = compiler.createShaderModule({
       label: "Uniform Sec. 3.3 extrapolation kernels",
-      code: uniformVelocityExtrapolationShader,
+      code: this.fieldPages?.shader(uniformVelocityPagedShader(uniformVelocityExtrapolationShader,this.dims,this.pageDomain)) ?? uniformVelocityExtrapolationShader,
     });
     const compile = (label: string, entryPoint: string) => compiler.compileComputePipeline({
       label, layout: this.pipelineLayout, compute: { module: shaderModule, entryPoint, constants: {
@@ -423,7 +440,7 @@ export class WebGPUUniformVelocityExtrapolator {
       ["resolved", this.resolveGroup]] as const) {
       const pass = encoder.beginComputePass({ label: `Uniform Sec. 3.3 clear ${label}` });
       pass.setPipeline(clear); pass.setBindGroup(0, group);
-      pass.dispatchWorkgroups(Math.ceil(this.dims[0] / 4), Math.ceil(this.dims[1] / 4), Math.ceil(this.dims[2] / 4));
+      this.dispatchBasePages(pass);
       pass.end();
     }
     this.device.queue.submit([encoder.finish()]);
@@ -461,8 +478,7 @@ export class WebGPUUniformVelocityExtrapolator {
       pass.setPipeline(pipeline); pass.setBindGroup(0, group);
       if (this.activeDispatch && this.windowBaseGroups) pass.dispatchWorkgroups(...this.windowBaseGroups);
       else if (this.activeDispatch) pass.dispatchWorkgroupsIndirect(this.activeDispatch, 13 * 4);
-      else pass.dispatchWorkgroups(
-        Math.ceil(this.dims[0] / 4), Math.ceil(this.dims[1] / 4), Math.ceil(this.dims[2] / 4));
+      else this.dispatchBasePages(pass);
       pass.end();
     };
     const prefix = predicted ? "Uniform predicted Sec. 3.3" : "Uniform Sec. 3.3";
@@ -493,8 +509,7 @@ export class WebGPUUniformVelocityExtrapolator {
         pass.dispatchWorkgroups(...restrictGroups);
       } else if (this.activeDispatch && !this.windowBaseGroups && Math.min(...level.dims) > 1) {
         pass.dispatchWorkgroupsIndirect(this.activeDispatch, (16 + (levelIndex + 1) * 10 + 3) * 4);
-      } else pass.dispatchWorkgroups(
-        Math.ceil(level.dims[0] / 4), Math.ceil(level.dims[1] / 4), Math.ceil(level.dims[2] / 4));
+      } else pass.dispatchWorkgroups(...this.workgroups(level.dims));
       pass.end();
     }
     for (let passIndex = 0; passIndex < this.hierarchyUpGroups.length; passIndex += 1) {
@@ -514,8 +529,8 @@ export class WebGPUUniformVelocityExtrapolator {
         // falls to the dense count below rather than a zero-size indirect one.
         pass.dispatchWorkgroupsIndirect(this.activeDispatch,
           levelIndex < 0 ? 13 * 4 : (16 + (levelIndex + 1) * 10 + 3) * 4);
-      } else pass.dispatchWorkgroups(
-        Math.ceil(targetDims[0] / 4), Math.ceil(targetDims[1] / 4), Math.ceil(targetDims[2] / 4));
+      } else if(levelIndex<0)this.dispatchBasePages(pass);
+      else pass.dispatchWorkgroups(...this.workgroups(targetDims));
       pass.end();
     }
     if (!this.fuseTransportPack || !this.fusedGroups.length) {
@@ -524,6 +539,7 @@ export class WebGPUUniformVelocityExtrapolator {
       pass.setBindGroup(0, predicted ? this.packPredictedGroup : this.packCurrentGroup);
       if (this.activeDispatch && this.windowBaseGroups) pass.dispatchWorkgroups(...this.windowBaseGroups);
       else if (this.activeDispatch) pass.dispatchWorkgroupsIndirect(this.activeDispatch, 13 * 4);
+      else if(this.fieldPages)this.dispatchBasePages(pass);
       else pass.dispatchWorkgroups(
         Math.ceil((this.dims[0] + 2) / 4),
         Math.ceil((this.dims[1] + 2) / 4),
@@ -544,8 +560,7 @@ export class WebGPUUniformVelocityExtrapolator {
     if (!this.pipelines || !this.coarseTableGroup || !level) return false;
     const pass = encoder.beginComputePass({ label: "Uniform Sec. 3.3 publish 4h face table" });
     pass.setPipeline(this.pipelines.coarseTable); pass.setBindGroup(0, this.coarseTableGroup);
-    pass.dispatchWorkgroups(
-      Math.ceil(level.dims[0] / 4), Math.ceil(level.dims[1] / 4), Math.ceil(level.dims[2] / 4));
+    pass.dispatchWorkgroups(...this.workgroups(level.dims));
     pass.end();
     return true;
   }

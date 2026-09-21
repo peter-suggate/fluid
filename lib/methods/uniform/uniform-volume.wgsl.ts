@@ -344,7 +344,7 @@ fn uvBuildEdges(@builtin(global_invocation_id)gid:vec3u){
 }
 @compute @workgroup_size(4,4,4)
 fn uvFinishDonorSums(@builtin(global_invocation_id)gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}
+  let id=uvDonorId(gid);if(!valid(id)){return;}
   let i=linearIndex(id);atomicStore(&sharpenDeposits[i],bitcast<i32>(uvDonorSum(i)));
 }
 @compute @workgroup_size(4,4,4)

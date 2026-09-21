@@ -2042,7 +2042,7 @@ ${geometric ? `
 @compute @workgroup_size(4,4,4)
 fn reduceDiagnostics(@builtin(global_invocation_id) gid:vec3u){let id=activeId(gid);if(!valid(id)){return;}let represented=surfaceOccupancy(id);let conservative=volume(id);atomicAdd(&reductions[0],u32(represented*2048.0+0.5));if(surfaceLiquid(id)){atomicMax(&reductions[1],u32(id.x+1));}let speed=length(faceVelocity(id));atomicMax(&reductions[2],bitcast<u32>(speed));atomicAdd(&reductions[3],u32(${geometric ? "max(conservative,0.0)" : "clamp(conservative,0.0,8.0)"}*2048.0+0.5));}
 ${uniformPageDomainWGSL(domain)}
-${geometric ? uniformVolumePagesWGSL(pages) + uniformVolumeWGSL : ""}
+${geometric ? `fn uvDonorId(g:vec3u)->vec3i{return ${domain ? "pageDomainCell(g)" : "vec3i(g)"};}\n` + uniformVolumePagesWGSL(pages) + uniformVolumeWGSL : ""}
 `; }
 
 export const uniformReferenceComputeShader = createUniformReferenceComputeShader();

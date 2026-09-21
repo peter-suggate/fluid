@@ -1,7 +1,7 @@
 import { UNIFORM_PARAMS } from "./parameters";
 import { numberValue, type MethodParamSpec, type MethodParamValues } from "../../core/method-contract";
 
-const omitted = new Set(["gammaDiffusion", "gammaDiffusionIterations", "sharpeningMassCorrection", "solidExcessCorrection", "densityPostProcessing", "activeRegion"]);
+const omitted = new Set(["gammaDiffusion", "gammaDiffusionIterations", "sharpeningMassCorrection", "solidExcessCorrection", "densityPostProcessing", "activeRegion", "pressureCycleBudget", "pressureBudgetHeadroom"]);
 const params: MethodParamSpec[] = UNIFORM_PARAMS.filter(p => !omitted.has(p.key)).map(p => {
   if (p.key === "velocityTransport" && p.kind === "select") return { ...p, default: "semi-lagrangian" };
   // Two sweeps: the front only needs to carry the band one cell per step, and the
@@ -69,15 +69,11 @@ params.push({kind:"number",key:"phiAgreementClamp",label:"Agreement clamp",defau
 
 params.push({kind:"select",key:"totalSurfaceVolume",label:"Total surface volume",default:"on",tier:"coarse",update:"runtime",
   options:[{value:"off",label:"Off"},{value:"on",label:"On"}],
-  hint:"Shift the existing surface uniformly along its normals to match total conservative V. Bounded to one cell per step; no regional correction or phi seeding. One global constraint across all liquid bodies. Source frames are skipped."});
+  hint:"Shift the existing surface uniformly along its normals to match total conservative V. Bounded to one cell per step; no regional correction or phi seeding. One global constraint across all liquid bodies. Includes continuous inflow."});
 
 params.push({kind:"select",key:"surfaceDeficitBalancing",label:"Surface-deficit balancing",default:"on",tier:"coarse",update:"runtime",
   options:[{value:"on",label:"On"},{value:"off",label:"Off"}],
   hint:"Preserve overfill expansion and balance it globally with contraction in underfilled pressure-liquid cells, weighted by the existing surface-fill estimate. Reduces persistent sloshing; capped to the available deficit per step."});
-
-params.push({kind:"select",key:"volumeStorage",label:"Volume record storage",default:"auto",tier:"fine",update:"solver",
-  options:[{value:"auto",label:"Automatic"},{value:"dense",label:"Dense"},{value:"pages16",label:"16³ pages"},{value:"pages32",label:"32³ pages"}],
-  hint:"Automatic uses 32³ pages and compact GPU work lists above 64 cells on any axis, preserving the direct path for smaller scenes. The GPU assigns pages and schedules active tiles without mid-frame CPU readbacks. Arena capacity is reserved at initialization and remains domain-sized; other fields remain dense. Rebuilds the solver."});
 
 /** Shared by the studio and scene harnesses. */
 export const UNIFORM_GEOMETRIC_PARAMS: readonly MethodParamSpec[] = Object.freeze(params);

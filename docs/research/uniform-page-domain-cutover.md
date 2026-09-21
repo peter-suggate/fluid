@@ -1,5 +1,9 @@
 # Initial production page-domain cutover
 
+Historical checkpoint. The later [persistent field page cutover](uniform-persistent-field-pages.md)
+replaces its dense storage and Mini64 traversal specialization. Timing receipts and
+legacy-oracle parity below apply to this earlier checkpoint, not the current code.
+
 This is an incremental migration, not completion of the sparse solver described in
 [the architecture design](uniform-page-domain-design.md).
 
