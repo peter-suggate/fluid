@@ -1,3 +1,4 @@
+import { uniformPageHasNativeCoordinates } from "./uniform-page-execution";
 import { UniformPageDomainPublication } from "./uniform-page-domain-publication";
 import { UniformTexturePages } from "./uniform-texture-pages";
 import {initialUniformPageDomain,type UniformPageDomain} from "./uniform-page-domain";
@@ -467,6 +468,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   get advectedVertexPhiTexture(): GPUTexture | undefined { return this.vertexPhiScratch && this.present(this.vertexPhiScratch); }
   private volumeEdges?: GPUBuffer;
   private readonly pageDomain?: UniformPageDomain;
+  private readonly nativePageCoordinates: boolean = false;
   private readonly pageDomainPublication?: UniformPageDomainPublication;
   private readonly pageDomainDispatch?: GPUBuffer;
   private readonly pageDomainView?: GPUBuffer;
@@ -760,10 +762,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       postSweeps: UNIFORM_CM11A_POST_SWEEPS,
       residualTolerance: 10,
     };
-    this.pressureCycleBudgetLagged = !(this.geometricVolume && options.pageDomain) && options.pressureCycleBudget !== "fixed";
+    this.pressureCycleBudgetLagged = options.pressureCycleBudget !== "fixed";
     this.pressureBudgetHeadroom = Number.isFinite(options.pressureBudgetHeadroom)
       ? Math.round(Math.min(4, Math.max(0, options.pressureBudgetHeadroom!)))
-      : UNIFORM_CM11A_DEFAULT_BUDGET_HEADROOM;
+      : this.geometricVolume && options.pageDomain ? 0 : UNIFORM_CM11A_DEFAULT_BUDGET_HEADROOM;
     this.paperTimeStep = options.timeStep !== "scene";
     this.velocityTransport = options.velocityTransport === "maccormack"
       ? "maccormack" : "semi-lagrangian";
@@ -774,10 +776,14 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     void GPUStageTimestampRecorder.prepare(device);
     const [nx, ny, sourceNz] = sceneLatticeDimensions(scene, this.geometricVolume ? Number.MAX_SAFE_INTEGER : device.limits.maxTextureDimension3D);
     const nz = options.referenceDimension === 2 ? 1 : sourceNz;
-    this.volumePageEdge = this.geometricVolume && options.referenceDimension !== 2
+    if (this.geometricVolume && options.pageDomain) {
+      this.pageDomain = initialUniformPageDomain([nx, ny, nz]);
+      this.nativePageCoordinates = uniformPageHasNativeCoordinates(this.pageDomain);
+      if (!this.nativePageCoordinates) this.fieldPages = new UniformTexturePages(device, options.fieldStorageForQA !== "dense");
+    }
+    this.volumePageEdge = this.geometricVolume && options.referenceDimension !== 2 && !this.nativePageCoordinates
       ? options.volumePages === "auto" ? (Math.max(nx,ny,nz)>64 ? 32 : 0) : options.volumePages ?? 0
       : 0;
-    if(this.geometricVolume && options.pageDomain) { this.pageDomain=initialUniformPageDomain([nx,ny,nz]); this.fieldPages=new UniformTexturePages(device,options.fieldStorageForQA!=="dense"); }
     const paddedPageCells = this.volumePageEdge ? [nx, ny, nz].reduce((n, d) => n * Math.ceil(d / this.volumePageEdge) * this.volumePageEdge, 1) : 0;
     if (options.referenceDimension === 2 && (!this.geometricVolume || scene.container.depthBoundary !== "symmetry" || options.activeRegion))
       throw new Error("2D reference requires geometric mode, symmetry depth and whole-domain work");
@@ -925,12 +931,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     if(this.pageDomain){
       device.queue.writeBuffer(this.activeRegion,activeRegionBytes,this.pageDomain.words.buffer);
       this.pageDomainPublication=new UniformPageDomainPublication(device,this.pageDomain,this.activeRegion);
-      this.pageDomainDispatch=this.pageDomainPublication.dispatch;
+      if (!this.nativePageCoordinates) this.pageDomainDispatch=this.pageDomainPublication.dispatch;
       this.pageDomainView=this.pageDomainPublication.view;
     }
     // Created before the extrapolator: the extension binds it read_write to
     // read the tile classes and to publish the 4h face table the sampler reads.
-    const balanceRecords = this.pageDomain ? this.pageDomain.capacity * (this.pageDomain.edge / 4) ** 3 : tileRecords;
+    const balanceRecords = this.pageDomain && !this.nativePageCoordinates ? this.pageDomain.capacity * (this.pageDomain.edge / 4) ** 3 : tileRecords;
     this.surfaceDeficitBalanceBytes = this.geometricVolume ? (2 + 2 * balanceRecords) * 4 : 0;
     const pageBaseBytes = allocation.conditioningBytes + this.surfaceDeficitBalanceBytes;
     if (this.volumePageEdge) this.volumePageConfig = {
@@ -948,7 +954,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       device.queue.writeBuffer(this.volumeWorkDispatch,0,new Uint32Array([0,1,1]));
       this.volumeWorkCounts=device.createBuffer({label:"Uniform volume work counters",size:8,usage:GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
     }
-    const source = this.geometricVolume ? createUniformReferenceComputeShader(true, options.referenceDimension ?? 3, this.volumePageConfig,this.pageDomain) : uniformReferenceComputeShader;
+    const source = this.geometricVolume ? createUniformReferenceComputeShader(true, options.referenceDimension ?? 3, this.volumePageConfig,this.nativePageCoordinates ? undefined : this.pageDomain) : uniformReferenceComputeShader;
     this.shaderSource = this.fieldPages?.shader(source,new Map([
       [0,this.velocityA],[1,this.velocityB],[3,this.pressureB],[4,this.volumeA],[5,this.volumeB],
       [12,this.velocityC],[13,this.velocityD],[14,this.transportA],[16,this.surfaceA],
@@ -1054,8 +1060,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       scene.container.depth_m / nz,
     ], this.pressureSchedule, this.activeRegionEnabled ? this.activeDispatch : undefined,
       undefined, false, options.referenceDimension ?? 3, options.pressureCycleDispatch === "indirect" ||
-        (options.pressureCycleDispatch !== "direct" && this.pageDomain !== undefined),
-      this.pageDomain !== undefined);
+        (options.pressureCycleDispatch !== "direct" && this.fieldPages !== undefined),
+      this.fieldPages !== undefined);
     this.pressureWindowCapacity = [nx, ny, nz];
     this.pressureDomainKey = this.pressureWindowCapacity.join("x");
     this.pressureInstances.set(this.pressureDomainKey, this.pressureMultigrid);
@@ -1176,7 +1182,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       compressionRatio: 1, activeCompressionRatio: 1, activeSampleCount: count,
       regularLayers: ny, maximumNeighborDelta: 0, gridKind: "uniform",
       cellSize_m: Math.min(scene.container.width_m / nx, scene.container.height_m / ny, scene.container.depth_m / nz),
-      pressureIterations: 0, pressureSolver: `CM11a ${this.pageDomain ? "paged" : "dense"} LCP multigrid (${this.pressureSchedule.fullCycles} Full-Cycles + ${this.pressureSchedule.vCycles} V-Cycles, ${this.pressureSchedule.preSweeps}/${this.pressureSchedule.postSweeps} pre/post PRBGS)`,
+      pressureIterations: 0, pressureSolver: `CM11a ${this.nativePageCoordinates ? "native-page" : this.pageDomain ? "paged" : "dense"} LCP multigrid (${this.pressureSchedule.fullCycles} Full-Cycles + ${this.pressureSchedule.vCycles} V-Cycles, ${this.pressureSchedule.preSweeps}/${this.pressureSchedule.postSweeps} pre/post PRBGS)`,
       allocatedBytes: allocation.allocatedBytes + 8 + pageBytes + (this.volumeWorkDispatch?20:0) + (this.volumePageSharpenFlag?4:0) + this.surfaceDeficitBalanceBytes + this.pressureMultigrid.allocatedBytes
         + (this.geometricVolume ? 8 * (nx+1)*(ny+1)*(nz+1) + count*24 + (this.volumeEdges?.size ?? 0) + 12 : 0)
         + activeRegionBytes * 3 + (this.pageDomain ? this.pageDomain.words.byteLength + 32 + (this.pageDomainView?.size??0) : 0) + activeSummaryBytes + packedSolidVoxels.byteLength
@@ -1185,9 +1191,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       simulationLag_s: 0, encodedSteps: 0, maximumTallCellHeight: 0,
       volumeControl: true,
       hostFluidAuthority: "gpu-resident", hostSimulationSizedWorkItems: 0,
-      hostSchedulingUsesReadback: false,
+      hostSchedulingUsesReadback: this.pressureCycleBudgetLagged && this.pressureMultigrid.residualTolerance > 0,
       ...(this.pageDomain?{uniformDomainAuthority:"pages" as const,uniformDomainPages:this.pageDomain.count,
-        uniformDomainMigration:"Paged fluid and pressure fields; all-resident domain"}:{}),
+        ...(this.nativePageCoordinates ? {uniformVolumePageEdge:this.pageDomain.edge,uniformVolumePagesTotal:1,uniformVolumePagesActive:1} : {}),
+        uniformDomainMigration:this.nativePageCoordinates ? "Native single-page coordinates; all-resident domain" : "Paged fluid and pressure fields; all-resident domain"}:{}),
       ...(this.volumePageConfig ? { uniformVolumePageEdge: this.volumePageEdge, uniformVolumePagesTotal: this.volumePageConfig.count, uniformVolumePageBytes: this.volumeEdges!.size } : {}),
     };
     this.volumeTexture = this.present(this.volumeA);
@@ -1439,13 +1446,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     };
     this.pressureMultigrid.setResidualTolerance(finite("pressureResidualTolerance", 10, 0, 100));
     // Switching to "fixed" mid-run restores the full encoded schedule on the
-    // next step; switching back re-enters at the full schedule too, because
-    // the demand sample is dropped so nothing stale sizes the first budget.
-    const lagged = !this.pageDomain && values.pressureCycleBudget !== "fixed";
+    // next step; switching back drops the previous demand sample and uses
+    // the startup budget.
+    const lagged = values.pressureCycleBudget !== "fixed";
     if (lagged !== this.pressureCycleBudgetLagged) this.pressureCyclesExecutedSample = undefined;
     this.pressureCycleBudgetLagged = lagged;
     this.pressureBudgetHeadroom = Math.round(finite(
-      "pressureBudgetHeadroom", UNIFORM_CM11A_DEFAULT_BUDGET_HEADROOM, 0, 4));
+      "pressureBudgetHeadroom", this.pageDomain ? 0 : UNIFORM_CM11A_DEFAULT_BUDGET_HEADROOM, 0, 4));
     const postProcessing = uniformDensityPostProcessingEnabled(
       values.densityPostProcessing,
       this.scene.sceneId,
@@ -2214,6 +2221,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const budget = lagged
       ? uniformCM11aCycleBudget({
         lastExecutedCycles: this.pressureCyclesExecutedSample,
+        initialCycles: this.pageDomain ? UNIFORM_CM11A_MINIMUM_CYCLE_BUDGET : undefined,
         lastConverged: this.pressureCycleConvergedSample,
         headroom: this.pressureBudgetHeadroom,
         minCycles: UNIFORM_CM11A_MINIMUM_CYCLE_BUDGET,
@@ -2221,7 +2229,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       })
       : maxCycles;
     Object.assign(this.info, {
-      uniformPressureCycleBudget: this.pressureCycleBudgetLagged ? "lagged" : "fixed",
+      hostSchedulingUsesReadback: lagged,
+      uniformPressureCycleBudget: lagged ? "lagged" : "fixed",
       uniformPressureBudgetHeadroom: this.pressureCycleBudgetLagged
         ? this.pressureBudgetHeadroom : undefined,
       uniformPressureCyclesEncoded: budget,
@@ -2544,7 +2553,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // Preserve Sec. 3.6 unplaceable-excess telemetry written during the step.
     encoder.clearBuffer(this.reductions);
     encoder.clearBuffer(this.rigidExchange);
-    this.pageDomainPublication?.encode(encoder);
+    if (!this.nativePageCoordinates) this.pageDomainPublication?.encode(encoder);
     if(!this.pageDomain){
     // A continuing inlet is retained by the GPU window seed at full strength.
     // Its support only needs rediscovery on activation, a larger swept extent,

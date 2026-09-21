@@ -43,7 +43,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
     for(let frame=1;frame<=5;frame++) {
       for(const solver of solvers) {
         assert.ok(solver.advanceTo(frame/30));
-        assert.equal(solver.info.hostSchedulingUsesReadback,false);
+        assert.equal(solver.info.hostSchedulingUsesReadback,true);
         assert.equal(solver.framePending,false);
         await solver.awaitFrameCompletion();await device.queue.onSubmittedWorkDone();
         await solver.readStats();
@@ -60,7 +60,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
     }
     const solver=solvers[1]!;
     assert.ok(solvers[0]!.volumePageSource,"page domain is visible even with dense scratch backing");
-    assert.equal(solver.info.uniformVolumePageEdge,16);
+    assert.equal(solver.info.uniformVolumePageEdge,32);
     const tex=(format:GPUTextureFormat)=>{const t=device!.createTexture({size:[1,1,1],dimension:"3d",format,usage:GPUTextureUsage.TEXTURE_BINDING});resources.push(t);return t;};
     const target=device.createTexture({size:[16,16],format:"rgba8unorm",usage:GPUTextureUsage.RENDER_ATTACHMENT});
     const uniforms=device.createBuffer({size:416,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
@@ -78,7 +78,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
   } finally {for(const r of resources)r.destroy();for(const s of solvers)s.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
 });
 
-(modulePath?test:test.skip)("garden hose GPU-only page work preserves live liquid insertion",{timeout:240000},async()=>{
+(modulePath?test:test.skip)("garden hose page work preserves live liquid insertion",{timeout:240000},async()=>{
   await acquireWebGPUExclusiveLock("dawn-test","Uniform pages garden hose");
   let device:GPUDevice|undefined;
   const solvers:WebGPUUniformReferenceSolver[]=[];
@@ -97,7 +97,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
         if(frame===2 || frame===7)solver.injectLiquidBall({centre_m:{x:0.65,y:0.5,z:0.35},radius_m:0.04});
         assert.ok(solver.advanceTo(frame/30));
         assert.equal(solver.framePending,false);
-        assert.equal(solver.info.hostSchedulingUsesReadback,false);
+        assert.equal(solver.info.hostSchedulingUsesReadback,true);
         await solver.awaitFrameCompletion();await solver.readStats();
       }
       for(const field of ["volumeTexture","vertexPhiTexture"] as const) {

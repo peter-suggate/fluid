@@ -50,7 +50,9 @@ export interface UniformCM11aCycleBudgetInput {
    * tripped. Undefined until the first asynchronous diagnostics sample lands.
    */
   readonly lastExecutedCycles?: number;
-  /** Whether that step met the tolerance; false means it ran to its ceiling. */
+  /** Startup prefix; omitted preserves the reference solver’s full startup. */
+  readonly initialCycles?: number;
+  /** Whether that step met tolerance; false requests a larger prefix. */
   readonly lastConverged?: boolean;
   readonly headroom: number;
   readonly minCycles?: number;
@@ -66,7 +68,7 @@ export interface UniformCM11aCycleBudgetInput {
  * still costs its launch floor and its CPU encode, so the saving has to be
  * taken on the host by not encoding the tail at all. The signal is lagged by
  * however many frames the readback takes, which is why the rule is asymmetric:
- * shrinking is capped at one cycle of headroom above observed demand, while a
+ * a converged step uses observed demand plus the configured headroom, while a
  * step that used every encoded cycle *and still missed tolerance* doubles, so
  * an impact frame recovers its full schedule within one or two steps instead
  * of climbing one cycle at a time.
@@ -76,9 +78,10 @@ export function uniformCM11aCycleBudget(input: UniformCM11aCycleBudgetInput): nu
   const minCycles = Math.min(maxCycles, Math.max(0, Math.floor(
     Number.isFinite(input.minCycles) ? input.minCycles! : UNIFORM_CM11A_MINIMUM_CYCLE_BUDGET)));
   const executed = input.lastExecutedCycles;
-  // No sample yet: encode the configured schedule, which is exactly what the
-  // solver did before this rule existed.
-  if (executed === undefined || !Number.isFinite(executed)) return maxCycles;
+  if (executed === undefined || !Number.isFinite(executed)) {
+    const initial = Number.isFinite(input.initialCycles) ? Math.floor(input.initialCycles!) : maxCycles;
+    return Math.min(maxCycles, Math.max(minCycles, initial));
+  }
   const observed = Math.max(0, Math.floor(executed));
   const headroom = Number.isFinite(input.headroom) ? Math.max(0, Math.floor(input.headroom)) : 0;
   const demand = input.lastConverged

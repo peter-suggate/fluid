@@ -7,8 +7,10 @@ import type { SceneDescription } from "../../core/model";
 /** Backend-neutral parameter resolution; GPU names are confined to this adapter. */
 export function uniformGeometricSolverOptions(overrides: MethodParamValues = {}, scene?: Pick<SceneDescription,"sceneId">): WebGPUUniformReferenceOptions {
   const values=resolveUniformGeometricValues(overrides);
+  // Plans are prebuilt; only the encoded prefix follows asynchronous residual
+  // evidence. Start at one cycle and reserve no speculative tail.
   return {
-      ...uniformReferenceSolverOptions(values, scene), geometricVolume: true, pageDomain:true, pressureCycleBudget:"fixed",
+      ...uniformReferenceSolverOptions(values, scene), geometricVolume: true, pageDomain:true, pressureCycleBudget:"lagged", pressureBudgetHeadroom:0,
       volumePages: 32,
       sharpeningStrength: Number(values.sharpeningStrength),
       velocityTransport: values.velocityTransport === "maccormack" ? "maccormack" : "semi-lagrangian",

@@ -38,14 +38,13 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
   // Both arms compile the same numerical operators. Only the physical field
   // backing differs; legacy source compilation is tracked by the trajectory probe.
   for(const pagedFields of [true,false])
-   solvers.push(await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,{...uniformGeometricSolverOptions({volumeStorage:"pages32",pressureWindow:"domain",pressureCycleBudget:"fixed"},scene),fieldStorageForQA:pagedFields?undefined:"dense",volumePageWork:true,pageDomain:true},()=>{}));
-  // A saved legacy setting must not re-enable readback-driven page scheduling.
-  solvers[0]!.applyRuntimeValues({pressureCycleBudget:"lagged"});
-  solvers[1]!.applyRuntimeValues({pressureCycleBudget:"fixed"});
+   solvers.push(await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,{...uniformGeometricSolverOptions({volumeStorage:"pages32",pressureWindow:"domain",pressureCycleBudget:"fixed"},scene),pressureCycleBudget:"fixed",fieldStorageForQA:pagedFields?undefined:"dense",volumePageWork:true,pageDomain:true},()=>{}));
+  // Keep pressure encoding identical to isolate field backing in this oracle.
+  for (const solver of solvers) solver.applyRuntimeValues({pressureCycleBudget:"fixed"});
   for(let frame=1;frame<=64;frame++){
    for(const solver of solvers){
-    if(frame===13)solver.applyRuntimeValues({surfaceDeficitBalancing:"on"});
-    if(frame===20)solver.applyRuntimeValues({surfaceDeficitBalancing:"off"});
+    if(frame===13)solver.applyRuntimeValues({surfaceDeficitBalancing:"on",pressureCycleBudget:"fixed"});
+    if(frame===20)solver.applyRuntimeValues({surfaceDeficitBalancing:"off",pressureCycleBudget:"fixed"});
     if(frame===41)solver.applyRuntimeValues({redistance:"off",pressureCycleBudget:"fixed"});
     if(frame===44)solver.applyRuntimeValues({redistance:"on",pressureCycleBudget:"fixed"});
     if(frame===33)solver.applySceneUniforms({...scene,fluid:{...scene.fluid,inflow:undefined}});

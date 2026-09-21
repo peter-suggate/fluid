@@ -31,14 +31,15 @@ test("mini64 uses the same page traversal as large scenes",()=>{
 });
 
 
-test("geometric pages cannot restore legacy host pressure scheduling from saved settings",async()=>{
+test("geometric pages use the evidence budget independently of legacy saved controls",async()=>{
  const {uniformGeometricSolverOptions}=await import("../lib/methods/uniform/uniform-geometric-options");
  const {resolveUniformGeometricValues}=await import("../lib/methods/uniform/uniform-geometric-parameters");
- const saved={pressureCycleBudget:"lagged",pressureBudgetHeadroom:0};
+ const saved={pressureCycleBudget:"fixed",pressureBudgetHeadroom:4};
  const values=resolveUniformGeometricValues(saved);
  assert.equal(values.pressureCycleBudget,undefined);
  assert.equal(values.pressureBudgetHeadroom,undefined);
- assert.equal(uniformGeometricSolverOptions(saved).pressureCycleBudget,"fixed");
+ assert.equal(uniformGeometricSolverOptions(saved).pressureCycleBudget,"lagged");
+ assert.equal(uniformGeometricSolverOptions(saved).pressureBudgetHeadroom,0);
 });
 
 test("every geometric scene uses pages regardless of saved dense storage",async()=>{
