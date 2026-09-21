@@ -953,7 +953,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       [0,this.velocityA],[1,this.velocityB],[3,this.pressureB],[4,this.volumeA],[5,this.volumeB],
       [12,this.velocityC],[13,this.velocityD],[14,this.transportA],[16,this.surfaceA],
       [20,this.surfaceA],[24,this.gammaA],[25,this.gammaB],[31,this.vertexPhiField!],[32,this.vertexPhiScratch!],
-    ])) ?? source;
+    ]),!!this.pageDomain) ?? source;
     this.conditioningScratch = device.createBuffer({ label: "Uniform reference compatibility scratch", size: pageBaseBytes + pageBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.velocityExtrapolator = new WebGPUUniformVelocityExtrapolator(
       device, [nx, ny, nz], [
@@ -978,7 +978,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.extrapolationActiveStateTexture = this.present(this.velocityExtrapolator.activeStateTexture);
     this.extrapolationActiveFrontPassCeiling = this.velocityExtrapolator.activeFrontPassCeiling;
     if (options.extensionFrontSweeps !== undefined) this.velocityExtrapolator.setFrontPasses(options.extensionFrontSweeps);
-    this.reductions = device.createBuffer({ label: "Uniform reference diagnostics and volume control", size: 32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    this.reductions = device.createBuffer({ label: "Uniform reference diagnostics and volume control", size: 40, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     if (typeof process !== "undefined" && process.env.FLUID_UNIFORM_SYMMETRY_STAGE_AUDIT === "1") {
       this.symmetryStageAuditBetaBuffer = device.createBuffer({
         label: "Uniform audit Sec. 3.4 beta",
@@ -1177,7 +1177,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       regularLayers: ny, maximumNeighborDelta: 0, gridKind: "uniform",
       cellSize_m: Math.min(scene.container.width_m / nx, scene.container.height_m / ny, scene.container.depth_m / nz),
       pressureIterations: 0, pressureSolver: `CM11a ${this.pageDomain ? "paged" : "dense"} LCP multigrid (${this.pressureSchedule.fullCycles} Full-Cycles + ${this.pressureSchedule.vCycles} V-Cycles, ${this.pressureSchedule.preSweeps}/${this.pressureSchedule.postSweeps} pre/post PRBGS)`,
-      allocatedBytes: allocation.allocatedBytes + pageBytes + (this.volumeWorkDispatch?20:0) + (this.volumePageSharpenFlag?4:0) + this.surfaceDeficitBalanceBytes + this.pressureMultigrid.allocatedBytes
+      allocatedBytes: allocation.allocatedBytes + 8 + pageBytes + (this.volumeWorkDispatch?20:0) + (this.volumePageSharpenFlag?4:0) + this.surfaceDeficitBalanceBytes + this.pressureMultigrid.allocatedBytes
         + (this.geometricVolume ? 8 * (nx+1)*(ny+1)*(nz+1) + count*24 + (this.volumeEdges?.size ?? 0) + 12 : 0)
         + activeRegionBytes * 3 + (this.pageDomain ? this.pageDomain.words.byteLength + 32 + (this.pageDomainView?.size??0) : 0) + activeSummaryBytes + packedSolidVoxels.byteLength
         + (this.symmetryStageAuditMacCormackBuffer ? 0 : 16), quality,
@@ -2856,9 +2856,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     await this.awaitFrameCompletion();
     if (this.disposed || this.readbackPending) return this.info;
     this.readbackPending = true;
-    this.statsReadback ??= this.device.createBuffer({ label: "Uniform reference diagnostics readback", size: 248, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    this.statsReadback ??= this.device.createBuffer({ label: "Uniform reference diagnostics readback", size: 256, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = this.device.createCommandEncoder({ label: "Uniform reference diagnostics readback" });
     encoder.copyBufferToBuffer(this.reductions, 0, this.statsReadback, 0, 32);
+    encoder.copyBufferToBuffer(this.reductions, 32, this.statsReadback, 248, 8);
     if (this.volumePageConfig) encoder.copyBufferToBuffer(this.conditioningScratch, 4 * (this.volumePageConfig.base + 4), this.statsReadback, 236, 4);
     if(this.volumeWorkCounts)encoder.copyBufferToBuffer(this.volumeWorkCounts,0,this.statsReadback,240,8);
     // Only the step that ran the classify dispatch leaves a meaningful count.
@@ -2888,6 +2889,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       if(this.volumeWorkCounts){
         this.info.uniformVolumeTransportWorkgroups=words[60]!;
         this.info.uniformVolumeSharpenWorkgroups=this.densitySharpening?words[61]!:0;
+      }
+      if(this.pageDomain){
+        this.info.uniformPageMissingReadFields=words[62]!;
+        this.info.uniformPageMissingReads=words[63]!;
       }
       const reference = Math.max(1, this.referenceVolumeCells);
       this.info.representedVolumeCellSum = words[0] / 2048;

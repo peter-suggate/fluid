@@ -18,8 +18,6 @@ pub const UNIFORM_CM11A_V_CYCLES: usize = 4;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct UniformGeometricOptions {
-    #[serde(rename = "activeRegion")]
-    pub active_region: String,
     #[serde(rename = "densitySharpening")]
     pub density_sharpening: String,
     #[serde(rename = "rigidCoupling")]
@@ -32,10 +30,6 @@ pub struct UniformGeometricOptions {
     pub time_step: String,
     #[serde(rename = "pressureResidualTolerance")]
     pub pressure_residual_tolerance: f32,
-    #[serde(rename = "pressureCycleBudget")]
-    pub pressure_cycle_budget: String,
-    #[serde(rename = "pressureBudgetHeadroom")]
-    pub pressure_budget_headroom: f32,
     #[serde(rename = "extensionFrontSweeps")]
     pub extension_front_sweeps: f32,
     #[serde(rename = "sharpeningStrength")]
@@ -48,8 +42,6 @@ pub struct UniformGeometricOptions {
     pub pressure_v_cycles: f32,
     #[serde(rename = "pressureSweeps")]
     pub pressure_sweeps: f32,
-    #[serde(rename = "pressureWindow")]
-    pub pressure_window: String,
     #[serde(rename = "redistance")]
     pub redistance: String,
     #[serde(rename = "sharpeningWorkMap")]
@@ -90,22 +82,18 @@ pub struct UniformGeometricOptions {
 impl Default for UniformGeometricOptions {
     fn default() -> Self {
         Self {
-            active_region: "on".into(),
             density_sharpening: "on".into(),
             rigid_coupling: "on".into(),
             velocity_transport: "semi-lagrangian".into(),
             liquid_only_velocity_advection: "off".into(),
             time_step: "paper".into(),
             pressure_residual_tolerance: 10_f32,
-            pressure_cycle_budget: "lagged".into(),
-            pressure_budget_headroom: 1_f32,
             extension_front_sweeps: 2_f32,
             sharpening_strength: 1_f32,
             sharpening_distance: 2.1_f32,
             pressure_full_cycles: 3_f32,
             pressure_v_cycles: 4_f32,
             pressure_sweeps: 6_f32,
-            pressure_window: "window".into(),
             redistance: "on".into(),
             sharpening_work_map: "on".into(),
             volume_dust_threshold: 0.000001_f32,
@@ -129,11 +117,6 @@ impl Default for UniformGeometricOptions {
 }
 impl UniformGeometricOptions {
     pub fn validate(&self) -> Result<(), ValidationError> {
-        if !["on", "off"].contains(&self.active_region.as_str()) {
-            return Err(ValidationError(
-                "Invalid uniform parameter activeRegion".into(),
-            ));
-        }
         if !["on", "off"].contains(&self.density_sharpening.as_str()) {
             return Err(ValidationError(
                 "Invalid uniform parameter densitySharpening".into(),
@@ -162,19 +145,6 @@ impl UniformGeometricOptions {
         {
             return Err(ValidationError(
                 "Invalid uniform parameter pressureResidualTolerance".into(),
-            ));
-        }
-        if !["lagged", "fixed"].contains(&self.pressure_cycle_budget.as_str()) {
-            return Err(ValidationError(
-                "Invalid uniform parameter pressureCycleBudget".into(),
-            ));
-        }
-        if !self.pressure_budget_headroom.is_finite()
-            || !((0_f32)..=(4_f32)).contains(&self.pressure_budget_headroom)
-            || self.pressure_budget_headroom.fract() != 0.0
-        {
-            return Err(ValidationError(
-                "Invalid uniform parameter pressureBudgetHeadroom".into(),
             ));
         }
         if !self.extension_front_sweeps.is_finite()
@@ -221,11 +191,6 @@ impl UniformGeometricOptions {
         {
             return Err(ValidationError(
                 "Invalid uniform parameter pressureSweeps".into(),
-            ));
-        }
-        if !["window", "domain"].contains(&self.pressure_window.as_str()) {
-            return Err(ValidationError(
-                "Invalid uniform parameter pressureWindow".into(),
             ));
         }
         if !["on", "off"].contains(&self.redistance.as_str()) {

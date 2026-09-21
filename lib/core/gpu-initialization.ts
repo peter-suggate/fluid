@@ -203,11 +203,8 @@ export class GPUInitializationTaskRunner {
     }
   }
 
-  /** Compile a batch of mutually independent pipeline tasks concurrently.
-   *
-   * Completion is recorded in the batch's declared order regardless of which
-   * task finished first, so `completed` and the progress counter read exactly
-   * as they would have serially. Only the wall clock differs. */
+  /** Compile independent tasks concurrently and report actual completions.
+   * The displayed label follows the first unfinished task in declared order. */
   private async runCompileBatch(batch: readonly GPUInitializationTask[]) {
     if (this.signal.aborted) throw new DOMException("GPU initialization superseded", "AbortError");
     for (const task of batch) this.assertDependenciesComplete(task);
@@ -217,22 +214,44 @@ export class GPUInitializationTaskRunner {
     this.tasksSincePaint = 0;
     if (this.signal.aborted) throw new DOMException("GPU initialization superseded", "AbortError");
     const started = initializationCensusEnabled ? performance.now() : 0;
-    await Promise.all(batch.map((task) => Promise.resolve(
-      task.run(this.signal, (label, completedWorkUnits) => this.reportTask(task, label, completedWorkUnits)))));
+    const partial = new Map<string, number>();
+    const labels = new Map<string, string>();
+    let failed = false;
+    const publish = () => {
+      if (failed || this.signal.aborted) return;
+      const pending = batch.find((task) => !this.completed.has(task.id)) ?? batch[batch.length - 1]!;
+      this.report({ phase: pending.phase, taskId: pending.id,
+        label: labels.get(pending.id) ?? pending.label,
+        completed: this.completedWorkUnits + [...partial.values()].reduce((a, b) => a + b, 0),
+        total: this.total });
+    };
+    try {
+      await Promise.all(batch.map(async (task) => {
+        const units = Math.max(1, Math.floor(task.workUnits ?? 1));
+        await task.run(this.signal, (label, done = 0) => {
+          labels.set(task.id, label);
+          partial.set(task.id, Math.max(partial.get(task.id) ?? 0,
+            Math.max(0, Math.min(units - 1, Math.floor(done)))));
+          publish();
+        });
+        if (failed || this.signal.aborted) return;
+        partial.delete(task.id);
+        this.completed.add(task.id);
+        this.completedWorkUnits += units;
+        publish();
+      }));
+    } catch (error) {
+      failed = true;
+      throw error;
+    }
+    if (this.signal.aborted) throw new DOMException("GPU initialization superseded", "AbortError");
     if (initializationCensusEnabled) {
-      // The batch is one wall-clock interval, so attributing it per task would
-      // invent numbers. Charge it to the batch and name its members.
       initializationCensus.push({
         taskId: `[parallel ${batch.length}] ${batch.map((task) => task.id).join(" ")}`,
         phase: batch[0]!.phase, elapsed_ms: performance.now() - started,
       });
     }
     this.tasksSincePaint += batch.length;
-    for (const task of batch) {
-      this.completed.add(task.id);
-      this.completedWorkUnits += Math.max(1, Math.floor(task.workUnits ?? 1));
-      this.reportTask(task, task.label);
-    }
   }
 
   private assertDependenciesComplete(task: GPUInitializationTask) {

@@ -25,6 +25,7 @@ const CAP:u32=${this.domain.capacity}u;
 const EDGE:u32=${this.domain.edge}u;
 @compute @workgroup_size(1) fn publish(){
  let count=accepted[B+8u];
+ for(var i=0u;i<CAP;i++){accepted[B+16u+17u*CAP+i]=0u;}
  // Validation of coordinates/uniqueness belongs to generation acceptance.
  // A corrupt count must never turn into an out-of-bounds indirect traversal.
  let valid=count<=CAP;let n=select(0u,count,valid);
@@ -39,6 +40,7 @@ const EDGE:u32=${this.domain.edge}u;
   let at=B+16u+16u*slot;
   let q=vec3u(accepted[at],accepted[at+1u],accepted[at+2u]);
   let linear=q.x+grid.x*(q.y+grid.y*q.z);
+  accepted[B+16u+17u*CAP+linear]=1u;
   view[8u+linear]=1u;view[8u+CAP+i]=linear;
  }
 }`});

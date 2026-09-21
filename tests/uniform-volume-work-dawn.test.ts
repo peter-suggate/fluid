@@ -52,6 +52,8 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
     if(frame===45)solver.applySceneUniforms({...scene,fluid:{...scene.fluid,inflow:{...scene.fluid.inflow!,center_m:{x:.15,y:.45,z:-.2}}}});
     if(frame===25)solver.injectLiquidBall({centre_m:{x:.65,y:.5,z:.35},radius_m:.04});
     assert.ok(solver.advanceTo(frame/30));await solver.awaitFrameCompletion();await solver.readStats();
+    assert.equal(solver.info.uniformPageMissingReads,0,`accepted pages cover root field reads at frame ${frame}`);
+    assert.equal(solver.info.uniformPageMissingReadFields,0);
    }
    if([1,12,24,25,32,40,43,44,45,64].includes(frame)||(process.env.PHI_DIAGNOSTIC&&frame>32)){
     for(const field of ["volumeTexture","advectedVertexPhiTexture","vertexPhiTexture","velocityTexture","surfaceFieldTexture"] as const){

@@ -1,0 +1,69 @@
+import {UniformPageGeneration} from "./uniform-page-generation";
+import {UniformPageRedistance} from "./uniform-page-redistance";
+
+/** Migration adapter for validating page-native reconstruction on the production
+ * transport field. Dense import/export is temporary and must disappear with the
+ * persistent-field cutover. It is never a residency authority of its own.
+ */
+export class UniformPagePhiAdapter {
+ private constructor(readonly pool:UniformPageGeneration,readonly redistance:UniformPageRedistance,
+  private readonly pipelines:readonly GPUComputePipeline[],private readonly group:GPUBindGroup,
+  private readonly dispatch:GPUBuffer){}
+ static async create(device:GPUDevice,dims:readonly [number,number,number],spacing:readonly [number,number,number],input:GPUTexture,output:GPUTexture){
+  const edge=16,extent=dims.map(n=>Math.ceil((n+1)/edge)),capacity=extent[0]!*extent[1]!*extent[2]!;
+  const band=16*Math.max(...spacing);
+  const pool=await UniformPageGeneration.create(device,{edge,capacity,requestCapacity:capacity,initialCell:[band]});
+  let redistance:UniformPageRedistance|undefined;
+  try{
+   redistance=await UniformPageRedistance.create(device,pool,0,spacing,16);
+   const requests=new Uint32Array(pool.layout.requestWords);requests[0]=capacity;let i=0;
+   for(let z=0;z<extent[2]!;z++)for(let y=0;y<extent[1]!;y++)for(let x=0;x<extent[0]!;x++)requests.set([x,y,z,1],4+4*i++);
+   device.queue.writeBuffer(pool.requests,0,requests);const e=device.createCommandEncoder();pool.encodePrepare(e);pool.encodePublish(e);device.queue.submit([e.finish()]);
+   const module=device.createShaderModule({code:`
+    @group(0) @binding(0) var<storage,read> accepted:array<u32>;
+    @group(0) @binding(1) var<storage,read_write> fields:array<f32>;
+    @group(0) @binding(2) var incoming:texture_3d<f32>;
+    @group(0) @binding(3) var outgoing:texture_storage_3d<r32float,write>;
+    @group(0) @binding(4) var<storage,read> result:array<f32>;
+    @group(0) @binding(5) var<storage,read> support:array<u32>;
+    fn position(id:vec3u)->vec4u{
+     let slot=accepted[${pool.layout.activeBase}u+id.y];let at=16u+16u*slot;
+     let local=vec3u(id.x%16u,(id.x/16u)%16u,id.x/256u);
+     return vec4u(vec3u(accepted[at],accepted[at+1u],accepted[at+2u])*16u+local,slot*4096u+id.x);
+    }
+    @compute @workgroup_size(64) fn importPhi(@builtin(global_invocation_id)id:vec3u){
+     if(id.x>=4096u||id.y>=accepted[1]){return;}let p=position(id);
+     // Outside authored physical bounds is not a second free surface. Continue
+     // the boundary sample through this adapter's padding; the sparse solver
+     // must provide its explicit solid/container boundary extension instead.
+     fields[p.w]=textureLoad(incoming,vec3i(min(p.xyz,vec3u(${dims.join("u,")}u))),0).x;
+    }
+    @compute @workgroup_size(64) fn exportPhi(@builtin(global_invocation_id)id:vec3u){
+     if(id.x>=4096u||id.y>=accepted[1]){return;}let p=position(id);
+     if(any(p.xyz>vec3u(${dims.join("u,")}u))){return;}let value=select(result[p.w],fields[p.w],support[p.w]==1u||support[p.w]==3u);textureStore(outgoing,vec3i(p.xyz),vec4f(value));
+    }
+   `});
+   const layout=device.createBindGroupLayout({entries:[
+    {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
+    {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
+    {binding:2,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
+    {binding:3,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"r32float",viewDimension:"3d"}},
+    {binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
+    {binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
+   ]});
+   const pipelineLayout=device.createPipelineLayout({bindGroupLayouts:[layout]});
+   const pipelines=await Promise.all(["importPhi","exportPhi"].map(entryPoint=>device.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint}})));
+   const group=device.createBindGroup({layout,entries:[{binding:0,resource:{buffer:pool.accepted}},{binding:1,resource:{buffer:pool.fields}},
+    {binding:2,resource:input.createView()},{binding:3,resource:output.createView()},{binding:4,resource:{buffer:redistance.result}},{binding:5,resource:{buffer:redistance.support}}]});
+   const dispatch=device.createBuffer({size:12,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.INDIRECT});
+   return new UniformPagePhiAdapter(pool,redistance,pipelines,group,dispatch);
+  }catch(error){redistance?.destroy();pool.destroy();throw error;}
+ }
+ encode(encoder:GPUCommandEncoder){
+  encoder.copyBufferToBuffer(this.pool.accepted,32,this.dispatch,0,12);
+  const run=(index:number)=>{const pass=encoder.beginComputePass({label:index===0?"Import phi into page fields":"Publish reconstructed page phi"});pass.setPipeline(this.pipelines[index]!);pass.setBindGroup(0,this.group);pass.dispatchWorkgroupsIndirect(this.dispatch,0);pass.end();};
+  run(0);this.redistance.encode(encoder);run(1);
+ }
+ get allocatedBytes(){return this.pool.allocatedBytes+this.redistance.allocatedBytes+this.dispatch.size;}
+ destroy(){this.pool.destroy();this.redistance.destroy();this.dispatch.destroy();}
+}

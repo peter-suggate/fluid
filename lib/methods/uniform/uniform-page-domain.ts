@@ -24,7 +24,7 @@ export function initialUniformPageDomain(dimensions: readonly [number,number,num
   if(reverse)coordinates.reverse();
   const count=coordinates.length,capacity=count;
   const layout=planUniformPages(edge,capacity,coordinates);
-  const words=new Uint32Array(UNIFORM_PAGE_DOMAIN_HEADER+17*capacity);
+  const words=new Uint32Array(UNIFORM_PAGE_DOMAIN_HEADER+18*capacity);
   const cells=[count*edge/4,edge/4,edge/4];
   const v=Math.ceil((edge+1)/4);
   const vertices=[count*v,v,v];
@@ -34,6 +34,8 @@ export function initialUniformPageDomain(dimensions: readonly [number,number,num
     words.set([...layout.coordinates[slot]!,slot,...layout.neighbors.subarray(slot*6,slot*6+6),1],at);
   }
   words.set(layout.activeSlots,UNIFORM_PAGE_DOMAIN_HEADER+16*capacity);
+  // Coordinate-indexed accepted membership; rebuilt on GPU at publication.
+  words.fill(1,UNIFORM_PAGE_DOMAIN_HEADER+17*capacity);
   return {edge,capacity,count,words,
     cellDispatchOffset:UNIFORM_PAGE_DOMAIN_BASE*4,
     vertexDispatchOffset:(UNIFORM_PAGE_DOMAIN_BASE+4)*4};
@@ -49,6 +51,16 @@ fn pageDomainOrigin(page:u32)->vec3i{
  let slot=activeRegion[PAGE_DOMAIN_BASE+16u+16u*PAGE_DOMAIN_CAPACITY+page];
  let at=PAGE_DOMAIN_BASE+16u+16u*slot;
  return vec3i(vec3u(activeRegion[at],activeRegion[at+1u],activeRegion[at+2u]))*i32(PAGE_DOMAIN_EDGE);
+}
+fn pageDomainContainsSample(p:vec3i,fieldDims:vec3u)->bool{
+ // Out-of-field reads retain their physical boundary semantics. A vertex on
+ // the authored upper boundary belongs to its final cell page.
+ if(any(p<vec3i(0))||any(p>=vec3i(fieldDims))){return true;}
+ let d=vec3u(activeRegion[PAGE_DOMAIN_BASE+12u],activeRegion[PAGE_DOMAIN_BASE+13u],activeRegion[PAGE_DOMAIN_BASE+14u]);
+ let q=min(vec3u(p),d-vec3u(1))/PAGE_DOMAIN_EDGE;
+ let grid=(d+vec3u(PAGE_DOMAIN_EDGE-1u))/PAGE_DOMAIN_EDGE;
+ let key=q.x+grid.x*(q.y+grid.y*q.z);
+ return activeRegion[PAGE_DOMAIN_BASE+16u+17u*PAGE_DOMAIN_CAPACITY+key]!=0u;
 }
 fn pageDomainCell(g:vec3u)->vec3i{
  let page=g.x/PAGE_DOMAIN_EDGE;

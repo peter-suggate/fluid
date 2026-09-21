@@ -430,7 +430,6 @@ mod tests {
             "energy-cap",
         ] {
             let mut options = UniformGeometricOptions::default();
-            options.active_region = "off".into();
             options.total_surface_volume = "off".into();
             let mut w = World::from_grid(pool(), options, [0.0, 0.0], 1000.0, 0.0, 0.0).unwrap();
             w.energy_experiment.mode = mode.into();

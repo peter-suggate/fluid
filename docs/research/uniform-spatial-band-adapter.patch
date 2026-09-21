@@ -1,0 +1,73 @@
+diff --git a/lib/methods/uniform/webgpu-uniform-reference.ts b/lib/methods/uniform/webgpu-uniform-reference.ts
+index f642daa1..18aefc34 100644
+--- a/lib/methods/uniform/webgpu-uniform-reference.ts
++++ b/lib/methods/uniform/webgpu-uniform-reference.ts
+@@ -23,6 +23,7 @@ import {
+ } from "./uniform-volume.wgsl";
+ import { createUniformReferenceComputeShader } from "./webgpu-uniform-reference.wgsl";
+ import { uniformVolumeInitialPhi, uniformInitialVolume } from "./uniform-volume-initial";
++import { UniformPagePhiAdapter } from "./uniform-page-phi-adapter";
+ import { averageInflowStrength, createInflowGridBoundary, type InflowGridBoundary } from "../../core/inflow-boundary";
+ import type { SceneDescription } from "../../core/model";
+ import { planUniformHostAllocation } from "./uniform-host-allocation";
+@@ -92,6 +93,8 @@ export interface WebGPUUniformReferenceOptions {
+   /** Independent dense vertex level set and conservative cell volume. */
+   geometricVolume?: boolean;
+   geometricRedistance?: boolean;
++  /** Internal migration validation; not a user-selectable solver mode. */
++  pageMetricReconstruction?: boolean;
+   /** Global surface-volume constraint; defaults on for 3D geometric volume. */
+   totalSurfaceVolume?: boolean;
+   surfaceDeficitBalancing?: boolean;
+@@ -406,6 +411,8 @@ const UNIFORM_PRESSURE_STAGE_PHASE: Readonly<Record<UniformCM11aPlanStage, GPUTi
+ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
+   readonly info: GPUEulerianInfo;
+   private readonly geometricVolume: boolean;
++  private readonly pageMetricReconstruction: boolean;
++  private pagePhiAdapter?: UniformPagePhiAdapter;
+   /** Live toggle; `sharpenTileWork` is what an encode actually honours. */
+   private geometricTileWork: boolean;
+   /** 4h records the third conditioning plane can hold; 0 disables the map. */
+@@ -693,6 +700,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
+     options: WebGPUUniformReferenceOptions = {},
+   ) {
+     this.geometricVolume = options.geometricVolume === true;
++    this.pageMetricReconstruction = this.geometricVolume && options.pageMetricReconstruction === true;
+     this.geometricTileWork = this.geometricVolume && options.geometricTileWork !== false;
+     this.geometricRedistance = options.geometricRedistance !== false;
+     this.volumeDustThreshold = Number.isFinite(options.volumeDustThreshold)
+@@ -1279,6 +1288,15 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
+       tasks.push({id,phase:"solver-pipelines",label:"Total surface volume correction",
+         run:()=>this.surfaceVolumeCorrection!.initialize(signal)});
+     }
++    if(this.pageMetricReconstruction){
++      const id="uniform.volume.page-metric";ids.push(id);
++      tasks.push({id,phase:"solver-pipelines",label:"Page metric reconstruction",run:async()=>{
++        const {nx,ny,nz}=this.info;const c=this.scene.container;
++        this.pagePhiAdapter=await UniformPagePhiAdapter.create(this.device,[nx,ny,nz],
++          [c.width_m/nx,c.height_m/ny,c.depth_m/nz],this.vertexPhiTexture!,this.vertexPhiScratch!);
++        this.info.allocatedBytes+=this.pagePhiAdapter.allocatedBytes;
++      }});
++    }
+     const pipelineReadyId = "uniform.pipeline.publish";
+     tasks.push({ id: pipelineReadyId, phase: "solver-pipelines", label: "Publish uniform reference programs", dependencies: ids, run: () => {
+       this.pipelines = compiled as UniformReferencePipelines;
+@@ -2362,6 +2380,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
+     this.runVertex(encoder, "Advect dense vertex phi", this.volumePipelines.uvAdvectPhi!, shift ? this.densityGatherGroup : this.densityTraceGroup);
+     if (this.geometricRedistance) this.runVertex(encoder, "Redistance dense vertex phi", this.volumePipelines.uvRedistancePhi!, this.phiReverseGroup!);
+     else encoder.copyTextureToTexture({texture:this.vertexPhiScratch!},{texture:this.vertexPhiTexture!},[this.info.nx+1,this.info.ny+1,this.info.nz+1]);
++    if (this.geometricRedistance && this.pagePhiAdapter) {
++      this.pagePhiAdapter.encode(encoder);
++      encoder.copyTextureToTexture({texture:this.vertexPhiScratch!},{texture:this.vertexPhiTexture!},[this.info.nx+1,this.info.ny+1,this.info.nz+1]);
++    }
+     seam?.(UNIFORM_VOLUME_PHASE.phi);
+     // Deposit donor weights while each row is already in registers. Integer
+     // accumulation is exact and order independent, so this saves four full
+@@ -3028,6 +3050,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
+     this.activeScratch.destroy();
+     this.activeDispatch.destroy();
+     this.pageDomainDispatch?.destroy();
++    this.pagePhiAdapter?.destroy();
+     this.pageDomainView?.destroy();
+     this.volumeWorkDispatch?.destroy();
+     this.volumeWorkCounts?.destroy();

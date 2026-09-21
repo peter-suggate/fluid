@@ -59,7 +59,7 @@ struct Params {
 // 0..4 are published diagnostics. The geometric method adds 5 and 6 for the
 // volume dust floor (cells zeroed, discarded mass in sixty-fourths of the
 // threshold) and 7 for the count of fine tiles in the E1 two-level map.
-@group(0) @binding(9) var<storage,read_write> reductions:array<atomic<u32>,8>;
+@group(0) @binding(9) var<storage,read_write> reductions:array<atomic<u32>,10>;
 struct RigidBody {
   positionShape: vec4f,
   dimensions: vec4f,

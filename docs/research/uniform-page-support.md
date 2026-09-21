@@ -2,41 +2,67 @@
 
 ## Implemented support mechanism
 
-`UniformPageSupport` now feeds `UniformPageGeneration` in the same command buffer.
-It scans only accepted resident pages, retains every nonzero conservative volume
-and every phi below the positive interface band (including all deep negative phi),
-measures velocity displacement on the GPU, and emits signed neighboring page
-requests. External source records seed remote regions without a world-sized scan.
+`UniformPageSupport` feeds `UniformPageGeneration` in the same command buffer.
+It now summarizes each accepted page with one workgroup: half-open occupied bounds,
+4³ tile masks, physical volume, maximum full-cell fraction, interface bounds,
+phi/V disagreement count and signed velocity intervals. Only accepted slots are
+written; unused pool metadata is neither scanned nor cleared by classification.
+The reduction order is fixed within each page. Negative/nonfinite V is a fault.
 
-The caller supplies spacing, timestep, conservative extra displacement allowances,
-and the compound operator's read reach. The default reach covers elementary phi
-advection/redistancing only; contact continuation, agreement, extension, pressure,
-correction, sources and presentation dependencies still need their complete support
-contract before production retirement is legal. Source commands must already cover
-their complete interface-band footprint. Start velocity alone does not certify RK2
-midpoint velocity or later force/projection updates; allowances and subsequent
-validation remain required.
+Support starts at actual occupied bounds rather than the complete page. A bounded
+local closure includes velocities from every accepted page intersecting the predicted
+read neighborhood, including air-only pages. A distant fast body does not contribute
+unless that neighborhood reaches it. Forward destination bounds carry role 32;
+backward-query/stencil support carries role 8; original seed roles remain 1/2 and
+source protection is 16. Roles are merged by the generation planner.
 
-The output is a complete desired set. Duplicate requests are merged by the generation
-planner. The request buffer has a separate fixed capacity; duplicates can exhaust
-it even when the unique set would fit. That is a reported failure, never truncation.
-The producer records request overflow, coordinate overflow and nonfinite-field faults.
-All refuse candidate publication. The serial request emitter and topology planner
-still need large-pool timing measurements before deployment.
+The current conservative read box includes forward destinations followed by backward
+sampling, so the *read* extent can be symmetric even with one-way motion. This is
+intentional: directional destinations alone do not bound backward queries. Local
+page coordinates stay integer until a small within-page offset is needed. Half-open
+cell endpoints use `floor(lo / edge)` through `ceil(hi / edge) - 1` inclusive.
 
-Dawn/Metal tests pass for:
+Closure uses at most eight GPU iterations and fails rather than silently limiting
+reach. The request header reports count, fault, and maximum iterations. Faults are
+1=request overflow, 2=signed coordinate overflow, 3=invalid fields, 4=closure limit.
+The request emitter and topology planner remain serial. Duplicate requests can still
+exhaust the request budget before the unique resident budget; no truncation is used.
 
-- GPU-only classify → request → allocate → initialize → publish in one submission.
-- A mass-bearing page with ambient phi, and deep negative phi with zero V.
-- A 27-page signed frontier crossing the x=0 seam.
-- Current GPU velocity increasing support to 45 pages; insufficient pool capacity
-  leaves accepted membership unchanged.
-- Remote-source pool exhaustion preserving the entire accepted field pool.
-- Excessive reach and NaN refusing publication.
-- Emptying, retiring, then initializing a remote source without host allocation.
+V's units must be specified at construction: physical volume, full-cell fraction,
+or open-cell fraction with an explicit aperture field. Uniform Geometric's V uses
+full-cell fractions (its solid-excess code compares V directly with open fraction),
+so its eventual adapter must multiply by cell volume exactly once, without multiplying
+by aperture again. Physical sums are diagnostics, not yet cleanup authorization.
 
-This component is not wired into production fluid operators. The UI remains on the
-all-resident cutover. No new scene speedup or memory reduction is claimed.
+The caller supplies actual-stage spacing, substep duration, conservative extra travel
+allowances, and the composed operator read reach. The default reach still covers only
+the elementary phi advection/redistance calculation. Missing pages use the declared
+ambient initialization velocity for prediction; freshly initialized pages must have
+zero V and phi outside the seed band, preventing recursive ambient seeding.
+
+**This remains a predictor, not an end-to-end support certificate.** Source commands
+must include their swept/interface footprint and source-velocity uncertainty. Pressure
+or extension must not change sampled velocity after prediction without revalidation.
+Actual operator sample checks, finite-phi validity, contact and correction contracts,
+and whole-fluid rollback are still required. Retaining phi below the positive band
+remains conservative until that field contract replaces it; disagreement is counted,
+not used as permission to discard fluid.
+
+Dawn/Metal checks cover:
+
+- GPU classify → request → allocate → initialize → publish without host count reads.
+- A corner seed requiring eight pages, and an interior seed requiring one page/one tile.
+- Deep negative phi with zero V retained conservatively.
+- A million-page separation between a quiet pond and fast jet without shared dilation.
+- Neighboring air velocity, backward reads and an unresolved multi-page velocity chain.
+- Signed-coordinate extrema and exact page endpoint semantics.
+- All three physical-volume conventions, including anisotropic cell dimensions.
+- Request, resident/transition and coordinate overflow, and NaN rejection.
+- Empty retirement and remote source initialization.
+
+The focused generation/support/publication gate passes 13 tests. This component is
+not wired into production fluid operators. The UI remains on the all-resident
+cutover. No production scene speedup or memory reduction is claimed.
 
 ## Rejected direct phi cap
 

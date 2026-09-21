@@ -115,3 +115,45 @@ hose through 1.733 seconds, then was paused. The 45-page overlay was visible and
 the SIM panel displayed per-stage timings (one observed window: 257.33 ms per
 advance). No browser console errors were reported. This is a functional UI
 receipt, not a performance benchmark or sparse-residency acceptance.
+
+## Root field-read membership audit (2026-09-21)
+
+The accepted-domain publisher now rebuilds a coordinate-indexed membership map
+beside the compact catalogue. Root field texture-load wrappers query this map,
+including interpolation taps and canonical upper-boundary vertex ownership.
+Missing reads atomically record the field-binding mask and count in the existing
+GPU diagnostics buffer; no host readback makes a domain or dispatch decision.
+SIM exposes **Missing page reads** for Uniform Geometric by default. Values refresh
+at the existing pause boundary; running frames never map solver state.
+
+This is a migration diagnostic, not a missing-data fallback. Loads preserve their
+existing field values, so a missing read cannot yet cause whole-step rollback.
+The extension and pressure-hierarchy loaders are not covered by this root audit.
+Page membership also does not establish valid metric phi within a resident page.
+Those contracts still block production retirement; all authored pages remain resident.
+
+Validation: reduced, reordered, empty, and restored catalogues report the exact
+missing-read count and field mask without changing loaded values. The 64-frame
+paged/dense storage comparison remains exact through moved/stopped sources,
+injection and redistance changes, with zero missing root-field reads every frame.
+The focused publication/pressure-safety/storage gate passes 11 tests; the follow-up
+64-frame audit assertion also passes. Nine page-domain unit tests pass.
+
+The full `npm run build` now succeeds after regenerating the Rust options contract
+and removing Rust references to the already-retired window/lagged-budget settings.
+The 19 Uniform Rust library tests pass. A broader Cargo test invocation cannot
+compile unrelated `world3d_minimal_power` fixtures missing `adaptive_sdf`.
+TypeScript checking still reports the 15 existing errors outside the changed files.
+
+Canonical Sparse CM12 gate: **failed**, 392.7 s within the 480 s budget, 4/17
+lanes passed. Unchanged ceilings/assertions. Failures include initial support-count
+assertions in symmetric expansion and Long Dam, authored re-rung not committing,
+terrain transport fallback at frame 48, missing compiled topology at outside-drop
+frame 1, Mini64 median 212.86 ms against 110 ms, and seven lane timeouts. Full log:
+`/tmp/uniform-read-audit-sparse-gate.log`. These failures are not presented as a
+passing regression gate or all attributed to a verified baseline.
+
+Browser verification on the production garden-hose scene: paused at 3.7333 s,
+45 resident pages, **Missing page reads: 0 · fields 0x0**, no console errors.
+The initial UI text says “Pause to sample” because diagnostics are intentionally
+read only at the pause boundary. This receipt does not claim sparse retirement.

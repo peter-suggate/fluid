@@ -34,3 +34,13 @@ test("fixed page addresses do not constant-fold the numerical operator's dimensi
  assert.match(result,/fn logicalDims\(\)->vec3u\{return uniformFieldPages\[1\].xyz;/);
  assert.match(result,/uniformFieldPageAddressUnchecked\(p,vec3u\(65u,65u,65u\)/);
 });
+
+test("nested field loops keep their trip counts in immutable runtime metadata",async()=>{
+ const {uniformFieldRuntimeLoops,UNIFORM_FIELD_LOOP_BOUNDS}=await import('../lib/methods/uniform/uniform-field-loop-bounds');
+ assert.deepEqual(UNIFORM_FIELD_LOOP_BOUNDS,[2,3,6,8]);
+ assert.equal(uniformFieldRuntimeLoops('for(var sample=0u;sample<4u;sample++){}'),'for(var sample=0u;sample<(uniformFieldPages[35][0] * 2u);sample++){}');
+ const original='for(var axis=0u;axis<3u;axis++){for(var tap=0;tap<8;tap++){sample(axis,tap);}}';
+ assert.equal(uniformFieldRuntimeLoops(original),'for(var axis=0u;axis<uniformFieldPages[35][1];axis++){for(var tap=0;tap<i32(uniformFieldPages[35][3]);tap++){sample(axis,tap);}}');
+ for(const unchanged of ['for(var i=0u;i<16u;i++){}','for(var i=0u;i<=8u;i++){}','for(var i=0u;j<8u;i++){}','for(var i=0.0;i<8.0;i+=1.0){}'])
+  assert.equal(uniformFieldRuntimeLoops(unchanged),unchanged);
+});

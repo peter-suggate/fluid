@@ -503,22 +503,9 @@ impl Pressure {
     }
     pub fn solve(&mut self, o: &UniformGeometricOptions, dt: f32, rho: f32, open_top: bool) {
         let maximum = (o.pressure_full_cycles + o.pressure_v_cycles) as usize;
-        // Same demand rule as pressure-policy.ts. The CPU observes its previous
-        // completed solve synchronously; GPU callers observe an asynchronous sample.
-        let budget = if o.pressure_cycle_budget == "lagged"
-            && o.pressure_residual_tolerance > 0.0
-            && self.receipt.cycles > 0
-        {
-            let observed = self.receipt.cycles;
-            let demand = if self.receipt.converged {
-                observed + o.pressure_budget_headroom as usize
-            } else {
-                (2 * observed).max(observed + 2)
-            };
-            demand.max(1).min(maximum)
-        } else {
-            maximum
-        };
+        // The shared Uniform contract uses fixed schedule caps. Convergence may
+        // stop this solve early, but prior-frame diagnostics never reduce its cap.
+        let budget = maximum;
         self.receipt = PressureReceipt {
             budget,
             ..Default::default()

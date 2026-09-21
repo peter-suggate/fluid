@@ -1,3 +1,4 @@
+import {UNIFORM_FIELD_LOOP_BOUNDS,UNIFORM_FIELD_LOOP_METADATA,uniformFieldRuntimeLoops} from "./uniform-field-loop-bounds";
 import {uniformPressurePageExtent,uniformPressurePageAddressWGSL,rewritePressureTextureCalls} from "./uniform-pressure-pages";
 import {gpuCompilationManagerFor} from "../../core/gpu-compilation-manager";
 
@@ -30,16 +31,19 @@ export class UniformTexturePages {
  }
  createBindGroup(descriptor:GPUBindGroupDescriptor):GPUBindGroup{
   const entries=[...descriptor.entries],data=new Uint32Array(36*4);
+  data.set(UNIFORM_FIELD_LOOP_BOUNDS,UNIFORM_FIELD_LOOP_METADATA*4);
   for(const entry of entries){const field=this.views.get(entry.resource as GPUTextureView);if(field)data.set([...field.dims,Number(field.paged)],4*entry.binding);}
   const buffer=this.device.createBuffer({label:'Uniform field page layouts',size:data.byteLength,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
   this.device.queue.writeBuffer(buffer,0,data);this.uniforms.push(buffer);
   return this.device.createBindGroup({...descriptor,entries:[...entries,{binding:BINDING,resource:{buffer}}]});
  }
- shader(source:string, fixedFields:ReadonlyMap<number,GPUTexture>=new Map()):string{
+ shader(source:string, fixedFields:ReadonlyMap<number,GPUTexture>=new Map(), auditPageReads=false):string{
   const fields=new Map<string,{binding:number;type:string}>();
   for(const m of source.matchAll(/@group\(0\)\s*@binding\((\d+)\)\s*var\s+(\w+):\s*(texture(?:_storage)?_3d[^;]+);/g))fields.set(m[2]!,{binding:Number(m[1]),type:m[3]!});
   const vector=(d:Dims)=>`vec3u(${d.map(n=>`${n}u`).join(',')})`;
   const fixed=(binding:number)=>{const texture=fixedFields.get(binding);return texture && this.fields.get(texture);};
+  if(auditPageReads && (!source.includes("fn pageDomainContainsSample(") || !source.includes("var<storage,read_write> reductions:")))
+   throw new Error("Page read auditing requires accepted membership and the root diagnostic buffer");
   let code=source;
   for(const [name,{binding}] of fields)code=code.replace(new RegExp(`textureDimensions\\(${name}(?:,\\s*0)?\\)`,'g'),`uniformFieldPages[${binding}].xyz`);
   code=rewritePressureTextureCalls(code,fields);
@@ -48,18 +52,22 @@ export class UniformTexturePages {
    const kind=type.includes('u32')||type.includes('uint')?'u':'f';
    const metadata=fixed(binding),texture=fixedFields.get(binding);
    const at=metadata && texture
-    ? `var at=p;if(uniformFieldPages[${binding}].w!=0u){at=uniformFieldPageAddress(p,${vector(metadata.dims)},${vector(uniformPressurePageExtent(metadata.dims))});}`
+    ? (metadata.paged ? `let at=uniformFieldPageAddress(p,${vector(metadata.dims)},${vector(uniformPressurePageExtent(metadata.dims))});` : `let at=p;`)
     : `var at=p;if(uniformFieldPages[${binding}].w!=0u){at=uniformFieldPageAddress(p,uniformFieldPages[${binding}].xyz,textureDimensions(${name}));}`;
    // Both level-set samplers clamp their taps before loading. Keeping that
    // invariant explicit avoids an extra branch inside iterative redistancing.
    const clampedPhi=name==='uvPhiIn'||name==='phi';
    const address=clampedPhi?at.replace('uniformFieldPageAddress(', 'uniformFieldPageAddressUnchecked('):at;
    const guard=clampedPhi?'':`if(any(at<vec3i(0))){return vec4${kind}(0);}`;
+   // Audit actual loads, including all interpolation taps. This records a
+   // dependency fault; rollback/ambient substitution belongs to the operator
+   // transaction, not the texture-address adapter.
+   const audit=auditPageReads?`if(!pageDomainContainsSample(p,uniformFieldPages[${binding}].xyz)){atomicOr(&reductions[8],1u<<${binding}u);atomicAdd(&reductions[9],1u);}`:'';
    helpers+=type.startsWith('texture_storage')
     ? `fn ${name}Store(p:vec3i,value:vec4${kind}){${at} if(any(at<vec3i(0))){return;}textureStore(${name},at,value);}\n`
-    : `fn ${name}Load(p:vec3i)->vec4${kind}{${address} ${guard}return textureLoad(${name},at,0);}\n`;
+    : `fn ${name}Load(p:vec3i)->vec4${kind}{${audit}${address} ${guard}return textureLoad(${name},at,0);}\n`;
   }
-  return code+helpers;
+  return uniformFieldRuntimeLoops(code)+helpers;
  }
  upload(texture:GPUTexture,values:Float32Array):void{
   const field=this.fields.get(texture);if(!field)throw new Error('Upload requires a registered field');

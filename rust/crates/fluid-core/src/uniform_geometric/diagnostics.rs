@@ -338,7 +338,6 @@ mod tests {
             grid.volume[i] = grid.target(grid.point(i));
         }
         let mut options = UniformGeometricOptions::default();
-        options.active_region = "off".into();
         let mut normal = World::from_grid(
             grid.clone(),
             options.clone(),

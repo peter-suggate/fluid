@@ -13,6 +13,9 @@ export interface GPUFieldLocation {
 }
 
 export interface GPUEulerianInfo {
+  /** Root solver field-load audit; not yet extension/pressure hierarchy coverage. */
+  uniformPageMissingReadFields?: number;
+  uniformPageMissingReads?: number;
   uniformDomainAuthority?: "pages";
   uniformDomainPages?: number;
   uniformDomainMigration?: string;

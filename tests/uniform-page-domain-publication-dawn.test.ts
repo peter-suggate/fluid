@@ -4,6 +4,7 @@ import {pathToFileURL} from "node:url";
 import {createProcessRetainedDawnGPU} from "../lib/harness/node-dawn-provider";
 import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {initialUniformPageDomain,UNIFORM_PAGE_DOMAIN_BASE,uniformPageDomainWGSL} from "../lib/methods/uniform/uniform-page-domain";
+import {UniformTexturePages} from "../lib/methods/uniform/uniform-texture-pages";
 import {UniformPageDomainPublication} from "../lib/methods/uniform/uniform-page-domain-publication";
 
 const modulePath=process.env.WEBGPU_NODE_MODULE;
@@ -30,6 +31,25 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
    }`});
   const pipeline=await device.createComputePipelineAsync({layout:"auto",compute:{module,entryPoint:"visit"}});
   const group=device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:accepted}},{binding:1,resource:{buffer:visited}}]});
+  const pages=new UniformTexturePages(device);
+  const field=pages.createTexture({size:[65,33,17],dimension:"3d",format:"r32float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST});
+  pages.upload(field,new Float32Array(65*33*17).fill(2));
+  const reductions=device.createBuffer({size:40,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
+  const auditModule=device.createShaderModule({code:pages.shader(`
+   @group(0) @binding(0) var inputField:texture_3d<f32>;
+   @group(0) @binding(9) var<storage,read_write> reductions:array<atomic<u32>,10>;
+   @group(0) @binding(29) var<storage,read> activeRegion:array<u32>;
+   fn dims()->vec3i{return vec3i(65,33,17);}
+   ${uniformPageDomainWGSL(domain)}
+   @compute @workgroup_size(4,4,4) fn audit(@builtin(global_invocation_id)g:vec3u){
+    if(any(g>=vec3u(65,33,17))){return;}
+    let value=textureLoad(inputField,vec3i(g),0).x;
+    if(value!=2.0){atomicAdd(&reductions[0],1u);}
+   }`,new Map([[0,field]]),true)});
+  const auditPipeline=await device.createComputePipelineAsync({layout:"auto",compute:{module:auditModule,entryPoint:"audit"}});
+  const auditGroup=pages.createBindGroup({layout:auditPipeline.getBindGroupLayout(0),entries:[
+   {binding:0,resource:pages.view(field)},{binding:9,resource:{buffer:reductions}},{binding:29,resource:{buffer:accepted}},
+  ]});
   try{
    for(const count of [domain.count,2,0,domain.count]){
     const words=domain.words.slice();words[8]=count;
@@ -52,8 +72,16 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
     }
     assert.deepEqual(actual.slice(32),expected);
     for(let i=0;i<domain.capacity;i++)assert.equal(actual[16+i],Number(visible.has(i)),"retired overlay flags cleared");
+    const auditEncoder=device.createCommandEncoder();auditEncoder.clearBuffer(reductions);
+    const ap=auditEncoder.beginComputePass();ap.setPipeline(auditPipeline);ap.setBindGroup(0,auditGroup);ap.dispatchWorkgroups(17,9,5);ap.end();
+    auditEncoder.copyBufferToBuffer(reductions,0,output,0,40);device.queue.submit([auditEncoder.finish()]);
+    await output.mapAsync(GPUMapMode.READ);const audit=new Uint32Array(output.getMappedRange().slice(0,40));output.unmap();
+    const missing=expected.reduce((sum,n)=>sum+Number(n===0),0);
+    assert.equal(audit[0],0,"auditing leaves field values unchanged");
+    assert.equal(audit[8],missing?1:0,"field binding mask identifies absent-page reads");
+    assert.equal(audit[9],missing,"every absent-page tap is counted, and restored membership clears the fault");
    }
    assert.deepEqual(errors,[]);
-  }finally{publication.destroy();accepted.destroy();visited.destroy();output.destroy();}
+  }finally{publication.destroy();accepted.destroy();visited.destroy();output.destroy();pages.destroy();field.destroy();reductions.destroy();}
  }finally{device?.destroy();await releaseWebGPUExclusiveLock();}
 });

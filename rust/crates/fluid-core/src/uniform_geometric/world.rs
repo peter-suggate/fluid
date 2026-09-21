@@ -63,9 +63,6 @@ impl World {
         sigma: f32,
     ) -> Result<Self, ValidationError> {
         options.validate()?;
-        if options.active_region == "on" {
-            return Err(ValidationError("uniform 2D solve-window scheduling is not yet ported; use an explicit whole-domain reference profile".into()));
-        }
         if grid.h.iter().any(|h| !h.is_finite() || *h <= 0.0) || !rho.is_finite() || rho <= 0.0 {
             return Err(ValidationError("invalid uniform physical scale".into()));
         }
