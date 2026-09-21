@@ -32,7 +32,11 @@
  *                                    4, one complete post-construction advance
  *   --uniform-mini-64                dense uniform method on the 64-cubed mini
  *                                    dam; captures two adjacent advances by
- *                                    default with every Uniform pass isolated
+ *                                    default with every Uniform pass isolated.
+ *                                    Combine with --method=uniform-volume to
+ *                                    profile Uniform Geometric on the same
+ *                                    scene; that method owns the paper 1/30 s
+ *                                    cadence, so the lane switches to it.
  *   --frames=N                       adjacent representative advances retained
  *                                    in the report (default 1, uniform preset 2)
  *   --counter-start-gate             gate before advance 1 only until the
@@ -101,6 +105,7 @@ import { arch, platform, release } from "node:os";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
+import { UNIFORM_PAPER_DT_S } from "../lib/methods/uniform/uniform-paper";
 import {
   POWER_DAM_LANE_ENVIRONMENT,
   powerDamLaneWithSteps,
@@ -132,6 +137,30 @@ if (uniformMini64 && losassoD4FirstFrame) {
 if (uniformMini64 && flag("lane") !== undefined) {
   throw new Error("--uniform-mini-64 owns its scene lane and cannot be combined with --lane");
 }
+/**
+ * The uniform preset's scene, harness lane and expected grid.
+ *
+ * `--uniform-mini-64` used to hard-code `minimal-power-dam-break-64` at
+ * 64^3, which is below the threshold at which the uniform solver turns on its
+ * compact tile work list and indirect volume dispatch -- so that preset can
+ * only ever profile the small-lattice code path. The three values are flags so
+ * a larger, sparser scene can be profiled through exactly the same capture and
+ * reduction; the defaults reproduce the mini64 preset byte-for-byte.
+ */
+const uniformScene = flag("uniform-scene") ?? "minimal-power-dam-break-64";
+const uniformSceneLane = flag("uniform-lane") ?? "uniform-one-step";
+const expectGrid = flag("expect-grid") ?? (uniformScene === "minimal-power-dam-break-64"
+  ? "64,64,64" : undefined);
+if (!uniformMini64 && (flag("uniform-scene") !== undefined
+  || flag("uniform-lane") !== undefined || flag("expect-grid") !== undefined)) {
+  throw new Error("--uniform-scene/--uniform-lane/--expect-grid require --uniform-mini-64");
+}
+if (uniformMini64 && expectGrid === undefined) {
+  throw new Error("--uniform-scene needs --expect-grid=nx,ny,nz so the capture states the lattice it ran");
+}
+if (expectGrid !== undefined && !/^\d+,\d+,\d+$/.test(expectGrid)) {
+  throw new Error("--expect-grid must be three comma-separated positive integers");
+}
 if (losassoD4FirstFrame && flag("lane") !== undefined
   && flag("lane") !== "symmetric-expansion") {
   throw new Error("--losasso-d4-first-frame is locked to --lane=symmetric-expansion");
@@ -159,6 +188,17 @@ if (maximumLeafSize !== undefined
   throw new Error("--maximum-leaf-size must be a positive integer");
 }
 const methodOverride = flag("method");
+/**
+ * Uniform Geometric (`uniform-volume`) on the same 64-cubed mini dam.
+ *
+ * It shares the dense lane's scene, grid and harness plugin, but not its
+ * cadence. `resolveUniformGeometricValues` rebuilds the value bag from the
+ * geometric parameter list alone, which declares no `timeStep`, so the solver
+ * always runs the paper's 1/30 s step. Forwarding the dense lane's 4 ms
+ * cadence would make it reject eight advances in nine and trip
+ * FLUID_MAX_CONSECUTIVE_REJECTED_ADVANCES before Instruments sees a frame.
+ */
+const uniformGeometric = uniformMini64 && methodOverride === "uniform-volume";
 const steps = flag("steps") === undefined
   ? losassoD4FirstFrame ? 1 : uniformMini64 ? 8 : undefined : Number(flag("steps"));
 const retainedFrames = Number(flag("frames") ?? (uniformMini64 ? 2 : 1));
@@ -420,17 +460,24 @@ const laneSteps = sizingPlan?.steps ?? steps;
  * The clean measurement regime. Every in-process probe is off: those probes
  * are what distort the frame, and Instruments replaces them from outside.
  */
+const uniformMini64Dt = uniformGeometric ? UNIFORM_PAPER_DT_S : 0.004;
 const inheritedLaneEnvironment = uniformMini64 ? {
-  FLUID_SCENE: "minimal-power-dam-break-64",
-  FLUID_LANE: "uniform-one-step",
-  FLUID_TARGET_S: String(requestedSteps * 0.004),
-  FLUID_MAX_DT: "0.004",
+  FLUID_SCENE: uniformScene,
+  FLUID_LANE: uniformSceneLane,
+  FLUID_TARGET_S: String(requestedSteps * uniformMini64Dt),
+  FLUID_MAX_DT: String(uniformMini64Dt),
   FLUID_ORACLE_STEPS: String(requestedSteps),
   FLUID_EXPECT_EXACT_STEPS: String(requestedSteps),
-  FLUID_EXPECT_GRID: "64,64,64",
+  FLUID_EXPECT_GRID: expectGrid!,
   FLUID_METHOD: "uniform",
-  FLUID_UNIFORM_TIME_STEP: "scene",
-  FLUID_UNIFORM_DENSITY_POSTPROCESSING: "0",
+  // Uniform Geometric honours neither of these: `timeStep` is dropped by its
+  // own value resolution (paper cadence above) and density post-processing is
+  // hardwired off in `uniformGeometricSolverOptions`. Forwarding them would
+  // state a configuration the running method never applies.
+  ...(uniformGeometric ? {} : {
+    FLUID_UNIFORM_TIME_STEP: "scene",
+    FLUID_UNIFORM_DENSITY_POSTPROCESSING: "0",
+  }),
 } : laneSteps === undefined
   ? POWER_DAM_LANE_ENVIRONMENT[lane] : powerDamLaneWithSteps(lane, laneSteps);
 const laneEnvironment = methodOverride === "adaptive-volume" ? {
@@ -952,6 +999,7 @@ const main = async (): Promise<void> => {
 
   console.log(`lane ${uniformMini64 ? "uniform-mini-64" : lane}: ${profileEnvironment.FLUID_ORACLE_STEPS} advances`
     + ` of ${profileEnvironment.FLUID_SCENE} at grid ${profileEnvironment.FLUID_EXPECT_GRID}`
+    + ` with method ${profileEnvironment.FLUID_METHOD} at dt ${profileEnvironment.FLUID_MAX_DT} s`
     + (uniformMini64 ? `, retaining ${retainedFrames} adjacent detailed frames`
       : `, interface band ${profileEnvironment.FLUID_OCTREE_INTERFACE_BAND ?? "scene default"}`));
   console.log(fullDiagnostics

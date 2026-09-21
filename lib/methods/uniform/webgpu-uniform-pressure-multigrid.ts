@@ -10,7 +10,22 @@ import {
 export * from "./pressure-policy";
 export * from "./pressure-plan";
 import { UNIFORM_CM11A_COARSE_ROW_BYTES, UNIFORM_CM11A_COARSE_HEADER_BYTES } from "./uniform-coarse-solver.wgsl";
+import { uniformAbOn } from "./uniform-ab-switch";
 import { planUniformCM11aHierarchy, type UniformCM11aLevelSize } from "./pressure-plan";
+
+/**
+ * Profiling-only: append ` L<level>` to each multigrid compute-pass label.
+ *
+ * Every smoother/residual/restrict/prolong dispatch normally carries the same
+ * per-kernel label at every level, so an external profiler (xctrace) and the
+ * in-process pass-timestamp audit both collapse all levels into one bucket.
+ * Reading the flag once at module scope keeps the encode path free of an
+ * environment lookup, and leaving the flag unset reproduces the previous label
+ * byte-for-byte.
+ */
+const BATCH_PASSES = uniformAbOn("batch");
+const MG_LEVEL_LABELS = typeof process !== "undefined"
+  && process.env?.FLUID_UNIFORM_MG_LEVEL_LABELS === "1";
 
 const ENTRY_POINTS = [
   "mgBuildFinestTopology", "mgBuildFinestRhs", "mgDownsampleTopology", "mgExtrapolatePhiOneCell",
@@ -435,24 +450,37 @@ export class WebGPUUniformPressureMultigrid {
     encoder.clearBuffer(this.diagnostics, 0, 104);
     const prefixEnd = this.cycleBoundaries?.[this.clampCycleBudget(cycleBudget)] ?? this.plan.length;
     let openStage: UniformCM11aPlanStage | undefined;
+    // A WebGPU usage scope is one dispatch, not one compute pass, so a storage
+    // write here and a sampled read of the same texture in the next dispatch
+    // may share a pass (2000-dispatch ping-pong probe, validation on, 2026-09-21).
+    // Dawn already merges adjacent passes into one Metal encoder, so this saves
+    // no GPU time; it removes the per-pass begin/end and the rebinding of the
+    // 29-entry group 0 on the CPU. Profiling lanes keep one labelled pass per
+    // dispatch so external traces stay attributable per kernel.
+    const batch = BATCH_PASSES && !MG_LEVEL_LABELS;
+    let shared: GPUComputePassEncoder | undefined, sharedHasGroup0 = false;
+    const closeShared = () => { shared?.end(); shared = undefined; sharedHasGroup0 = false; };
     for (let index = 0; index < this.plan.length; index += 1) {
       const dispatch = this.plan[index]!;
-      if (openStage !== undefined && dispatch.stage !== openStage) boundary?.(openStage);
+      if (openStage !== undefined && dispatch.stage !== openStage) { closeShared(); boundary?.(openStage); }
       openStage = dispatch.stage;
       // A truncated cycle encodes nothing at all. Its stage seam is still
       // reported above, in order, so the advance's phase partition keeps all
       // four sections and a section with no passes reads as zero-length
       // instead of vanishing from the trace.
       if (index >= prefixEnd && index < this.finishStart) continue;
-      // A WebGPU texture usage scope spans the whole compute pass. End the
-      // pass between hierarchy stages so storage outputs can become sampled
-      // inputs in the next stage.
       if (dispatch.residualCheckpoint) {
+        closeShared();
         encoder.clearBuffer(this.diagnostics, 60, 4);
       }
-      const pass = encoder.beginComputePass({ label: `Uniform CM11a ${dispatch.entryPoint}` });
+      const pass = shared ?? encoder.beginComputePass({ label: batch ? "Uniform CM11a pressure cycle" : MG_LEVEL_LABELS
+        ? `Uniform CM11a ${dispatch.entryPoint} L${dispatch.activeLevel}`
+        : `Uniform CM11a ${dispatch.entryPoint}` });
+      if (batch) shared = pass;
       pass.setPipeline(dispatch.pipeline); pass.setBindGroup(1, dispatch.group);
-      if (dispatch.entryPoint !== "mgPublishCycleDispatch") pass.setBindGroup(0, uniformGroup);
+      if (dispatch.entryPoint !== "mgPublishCycleDispatch" && !sharedHasGroup0) {
+        pass.setBindGroup(0, uniformGroup); sharedHasGroup0 = batch;
+      }
       if (this.gpuCycleDispatch && dispatch.cycleGate !== 0) {
         const record = dispatch.entryPoint === "mgSolveCoarsest" ? this.levels.length : dispatch.activeLevel;
         pass.dispatchWorkgroupsIndirect(this.cycleDispatch,
@@ -471,9 +499,12 @@ export class WebGPUUniformPressureMultigrid {
       } else {
         pass.dispatchWorkgroups(...dispatch.workgroups);
       }
-      pass.end();
+      if (!batch) pass.end();
+      // This kernel's layout carries no group 0; rebind for whatever follows.
+      else if (dispatch.entryPoint === "mgPublishCycleDispatch") sharedHasGroup0 = false;
       if (dispatch.coarsestCapture && this.coarsestCaptureBuffers
         && dispatch.coarsestCapture.invocation === this.coarsestCaptureBuffers.invocation) {
+        closeShared();
         const capture = dispatch.coarsestCapture, buffers = this.coarsestCaptureBuffers;
         const destination = (buffer: GPUBuffer) => ({ buffer, bytesPerRow: buffers.bytesPerRow,
           rowsPerImage: capture.dimensions[1] });
@@ -494,6 +525,7 @@ export class WebGPUUniformPressureMultigrid {
         }
       }
     }
+    closeShared();
     if(this.pressurePublicationPipeline){
       const pass=encoder.beginComputePass({label:"Publish paged pressure for projection"});
       pass.setPipeline(this.pressurePublicationPipeline);pass.setBindGroup(0,this.pressurePublicationGroup!);

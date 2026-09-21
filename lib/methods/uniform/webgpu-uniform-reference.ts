@@ -25,6 +25,7 @@ import {
   UNIFORM_VOLUME_TWO_LEVEL_WORDS_PER_TILE,
 } from "./uniform-volume.wgsl";
 import { createUniformReferenceComputeShader } from "./webgpu-uniform-reference.wgsl";
+import { uniformAbOn } from "./uniform-ab-switch";
 import { uniformVolumeInitialPhi, uniformInitialVolume } from "./uniform-volume-initial";
 import { averageInflowStrength, createInflowGridBoundary, type InflowGridBoundary } from "../../core/inflow-boundary";
 import type { SceneDescription } from "../../core/model";
@@ -1152,6 +1153,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
           { binding: 30, resource: { buffer: this.activeScratch } },
         ] as GPUBindGroupEntry[]).filter(e => !pressureOnly || (e.binding !== 32 && e.binding !== 33)),
       });
+    // Pressure setup and projection never read the reverse-advection slot, so
+    // under Geometric it carries this advance's V_face authority instead.
+    const sharedFaceOpen = this.geometricVolume ? this.velocityD : this.velocityB;
     this.extrapolationAuthorityGroup = group(
       this.velocityA, this.velocityD, this.pressureA, this.pressureB,
       this.volumeA, this.surfaceA, this.heightB, this.heightA,
@@ -1178,10 +1182,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.velocityC, this.velocityD, this.transportA, this.volumeB,
       this.gammaA, this.gammaB, this.boundaryVelocityA, this.boundaryVelocityB,
       this.surfaceA);
-    this.pressureMultigridGroup = group(this.velocityB, this.velocityA, this.pressureA, this.pressureB, this.volumeB, this.volumeA, this.heightB, this.heightA, this.velocityB, this.velocityB, this.transportA, this.volumeB, this.gammaA, this.gammaB, this.boundaryVelocityB, this.boundaryVelocityA, this.volumeB, false, this.geometricVolume);
+    this.pressureMultigridGroup = group(this.velocityB, this.velocityA, this.pressureA, this.pressureB, this.volumeB, this.volumeA, this.heightB, this.heightA, this.velocityB, sharedFaceOpen, this.transportA, this.volumeB, this.gammaA, this.gammaB, this.boundaryVelocityB, this.boundaryVelocityA, this.volumeB, false, this.geometricVolume);
     // Rebuilt whenever the active CM11a instance changes: this is the only
     // bind group that names the hierarchy's finest pressure texture.
-    this.makeProjectGroup = (pressure: GPUTexture) => group(this.velocityB, this.velocityA, pressure, this.pressureA, this.volumeB, this.volumeA, this.heightB, this.heightA, this.velocityB, this.velocityB, this.transportA, this.volumeB, this.gammaA, this.gammaB, this.boundaryVelocityB, this.boundaryVelocityA);
+    this.makeProjectGroup = (pressure: GPUTexture) => group(this.velocityB, this.velocityA, pressure, this.pressureA, this.volumeB, this.volumeA, this.heightB, this.heightA, this.velocityB, sharedFaceOpen, this.transportA, this.volumeB, this.gammaA, this.gammaB, this.boundaryVelocityB, this.boundaryVelocityA);
     this.projectGroup = this.makeProjectGroup(this.pressureMultigrid.pressureTexture);
     this.rigidGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA, this.velocityA, this.velocityA, this.transportA, this.volumeA, this.gammaA, this.gammaB, this.boundaryVelocityA, this.boundaryVelocityB);
     this.reductionGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA);
@@ -1453,7 +1457,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       c.depthBoundary === "symmetry" ? 1 : 0,
       drop?.centre_m.x ?? 0, drop?.centre_m.y ?? 0, drop?.centre_m.z ?? 0, drop?.radius_m ?? 0,
       drop?.halfHeight_m ?? 0, this.liquidOnlyVelocityAdvection ? 1 : 0,
-      this.solidVoxelScratchOffsetWords, 0,
+      // w: velocityD still holds this advance's V_face authority when pressure
+      // runs. MacCormack and the stage audit both overwrite it after the store.
+      this.solidVoxelScratchOffsetWords, this.sharedFaceOpenValid() ? 1 : 0,
       // The shell reach in 4h tiles, whether the extension's finest passes run
       // on those tiles, and whether advection and projection take their far-air
       // arm outside the fine tiles. All inert while the sampler is off.
@@ -1721,6 +1727,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       pass.dispatchWorkgroupsIndirect(this.activeDispatch, UNIFORM_ACTIVE_MAIN_DISPATCH_OFFSET);
     } else pass.dispatchWorkgroups(
       Math.ceil(this.info.nx / 4), Math.ceil(this.info.ny / 4), Math.ceil(this.info.nz / 4));
+  }
+
+  private sharedFaceOpenValid(): boolean {
+    return this.geometricVolume && uniformAbOn("facecache") && !this.activeRegionEnabled
+      && this.velocityTransport !== "maccormack" && !this.symmetryStageAuditFields;
   }
 
   private run(encoder: GPUCommandEncoder, label: string, pipeline: GPUComputePipeline, group: GPUBindGroup): void {

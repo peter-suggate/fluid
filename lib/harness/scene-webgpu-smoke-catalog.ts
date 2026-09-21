@@ -41,6 +41,7 @@ export const sceneWebGPUSmokeIds = [
   "dam-break-boxes",
   "cm12-figure-2",
   "cm12-figure-3",
+  "cm12-figure-7",
   "cm12-figure-8",
   "cm12-figure-12",
   "mass-conserving-figure-9-dam-break",
@@ -673,6 +674,32 @@ const suiteList = [
       ],
     }),
   }, "free-fall"),
+  /**
+   * Figure 7 is the sparse large-lattice profiling scene: a liquid ball falling
+   * into an empty 128^3 tank, about 1.6% of the lattice wet at release. It is
+   * the only catalog scene above the 64-cell threshold at which the uniform
+   * solver switches on its compact tile work list, so it is what a per-cell
+   * cost measurement has to run on. The lane is a timing lane: it states the
+   * grid and the paper cadence and nothing about the trajectory, because the
+   * capture picks its own step count through `FLUID_EXPECT_EXACT_STEPS`.
+   */
+  suite("cm12-figure-7", "CM12 Figure 7 ball drop into an empty tank", { definitionId: "cm12-figure-7" }, {
+    "uniform-one-step": lane({ id: "uniform-one-step",
+      description: "Paper 1/30 s steps on the published 128^3 lattice",
+      target_s: 12 / 30, exactSteps: 12, maxDt_s: 1 / 30, oracleSteps: 12,
+      methods: methods(["uniform"], { uniform: { timeStep: "paper", densityPostProcessing: "off" } }),
+      timeout_ms: 900_000,
+      // Sec. 3.7 permits rho' > 1 through the impact, exactly as Figure 8 does.
+      maximumStoredDensity: 3,
+      maximumRepresentedVolumeDrift: 0.05,
+      collect: { fieldStats: "none", performanceProfile: true, gpuCommandAudit: true },
+      diagnostics: [],
+      acceptance: [
+        { id: "cm12-figure7-grid", metric: "methods.uniform.grid", operator: "equal", expected: [128, 128, 128] },
+        { id: "cm12-figure7-finite", metric: "methods.uniform.info.nonFiniteCount", operator: "equal", expected: 0 },
+      ],
+    }),
+  }, "uniform-one-step"),
   suite("cm12-figure-8", "CM12 Figure 8 dam break in a spherical container", { definitionId: "cm12-figure-8" }, {
     motion: lane({ id: "motion", description: "Fifteen paper steps establish conserved downslope slosh",
       target_s: 0.5, exactSteps: 15, maxDt_s: 1 / 30, oracleSteps: 15,

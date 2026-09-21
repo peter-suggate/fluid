@@ -241,15 +241,15 @@ fn mgBuildFinestTopology(@builtin(global_invocation_id) gid:vec3u){
   // surface happens to sit in the window's halo. Only a halo whose simulation
   // coordinate leaves the DOMAIN is a wall, and it keeps today's behaviour.
   if(mgSimulationCell(id,mg.levelDims.xyz,simulation)){
-    let topology=vec4f(cellOpenFraction(simulation),pressureFaceVolumeFraction(simulation,0u),pressureFaceVolumeFraction(simulation,1u),pressureFaceVolumeFraction(simulation,2u));
+    let topology=vec4f(cellOpenFraction(simulation),pressureFaceVolumeFractionShared(simulation,0u),pressureFaceVolumeFractionShared(simulation,1u),pressureFaceVolumeFractionShared(simulation,2u));
     textureStore(mgPhiOut,id,vec4f(pressurePhi(simulation)));textureStore(mgVolumeOut,id,topology);return;
   }
   let openTop=mgOpenTopHalo(id,mg.levelDims.xyz);var topology=vec4f(select(0.0,1.0,openTop));
   // Low-side halo cells own the three missing negative face-centred dual
   // cells. Their closed, grid-aligned domain halves have V=1/2.
-  if(id.x==0&&id.y>0&&id.y<i32(mg.levelDims.y)-1&&id.z>0&&id.z<i32(mg.levelDims.z)-1){topology.y=pressureFaceVolumeFraction(simulation,0u);}
-  if(id.y==0&&id.x>0&&id.x<i32(mg.levelDims.x)-1&&id.z>0&&id.z<i32(mg.levelDims.z)-1){topology.z=pressureFaceVolumeFraction(simulation,1u);}
-  if(id.z==0&&id.x>0&&id.x<i32(mg.levelDims.x)-1&&id.y>0&&id.y<i32(mg.levelDims.y)-1){topology.w=pressureFaceVolumeFraction(simulation,2u);}
+  if(id.x==0&&id.y>0&&id.y<i32(mg.levelDims.y)-1&&id.z>0&&id.z<i32(mg.levelDims.z)-1){topology.y=pressureFaceVolumeFractionShared(simulation,0u);}
+  if(id.y==0&&id.x>0&&id.x<i32(mg.levelDims.x)-1&&id.z>0&&id.z<i32(mg.levelDims.z)-1){topology.z=pressureFaceVolumeFractionShared(simulation,1u);}
+  if(id.z==0&&id.x>0&&id.x<i32(mg.levelDims.x)-1&&id.y>0&&id.y<i32(mg.levelDims.y)-1){topology.w=pressureFaceVolumeFractionShared(simulation,2u);}
   textureStore(mgPhiOut,id,vec4f(0.5*min(h.x,min(h.y,h.z))));textureStore(mgVolumeOut,id,topology);
 }
 

@@ -4,9 +4,13 @@ import { uniformVolumeWGSL } from "./uniform-volume.wgsl";
 import { sceneShapeWgsl } from "../../core/scene-shape";
 import { inflowBoundaryWGSL } from "../../core/inflow-boundary";
 import { createCm12NumericsWGSL } from "../../core/cm12-numerics";
+import { uniformAbOn } from "./uniform-ab-switch";
 
 const uniformMacCormackAuditEnabled = typeof process !== "undefined"
   && process.env.FLUID_UNIFORM_SYMMETRY_STAGE_AUDIT === "1";
+const uniformAbBaseline = !uniformAbOn("opentest");
+const uniformAbFaceBaseline = !uniformAbOn("facetest");
+const uniformAbOpenLocalBaseline = !uniformAbOn("openlocal");
 
 /**
  * Dense uniform-grid reference kernels.
@@ -363,7 +367,7 @@ fn projectPressureValue(p:vec3i)->f32{
 }
 fn cellOpenFraction(p:vec3i)->f32{
   if(!valid(p)||staticSolidVoxelOccupied(p)){return 0.0;}
-  return clamp((1.0-cellSolidFraction(p))*(1.0-cellTerrainFraction(p)),0.0,1.0);
+  return clamp((1.0-${uniformAbBaseline ? "cellSolidFraction(p)" : "bodySolidFractionAt(p)"})*(1.0-cellTerrainFraction(p)),0.0,1.0);
 }
 // Chentanez--Mueller Sec. 3.7, Eq. 20.  Surface density represents mass in
 // the non-solid part of a cut cell, so pressure classification and the ghost
@@ -412,8 +416,9 @@ fn pressureSurfacePhi(p:vec3i)->f32{
   // A cell beside phi-liquid already has a projected face, so phi keeps it.
   // w=2 is that unrestricted rule, min(phi, V distance) everywhere.
   let q=clampCell(p);let phi=uvPhi(vec3f(q)+vec3f(0.5));
-  let open=cellOpenFraction(q);
-  if(params.physical.w<0.5||open<=1e-5){return phi;}
+  ${uniformAbOpenLocalBaseline ? `let open=cellOpenFraction(q);
+  if(params.physical.w<0.5||open<=1e-5){return phi;}` : `if(params.physical.w<0.5){return phi;}
+  let open=cellOpenFraction(q);if(open<=1e-5){return phi;}`}
   let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
   let volumePhi=h*(0.5-volume(q)/open);
   if(params.physical.w>1.5){return min(phi,volumePhi);}
@@ -683,11 +688,17 @@ fn bodySolidFraction(body:RigidBody,p:vec3i)->f32{
   }
   return inside/8.0;
 }
-fn cellSolidFraction(p:vec3i)->f32{
-  if(staticSolidVoxelOccupied(p)){return 1.0;}
+// The rigid-body half of cellSolidFraction, for callers that have already
+// proven the static voxel empty: the packed-bitfield walk is five dependent
+// storage loads that no store-bearing kernel can hoist.
+fn bodySolidFractionAt(p:vec3i)->f32{
   let bodyCount=u32(round(params.boundary.z));var fraction=0.0;
   for(var bodyIndex=0u;bodyIndex<12u;bodyIndex+=1u){if(bodyIndex>=bodyCount){break;}fraction=max(fraction,bodySolidFraction(rigidBodies[bodyIndex],p));}
   return fraction;
+}
+fn cellSolidFraction(p:vec3i)->f32{
+  if(staticSolidVoxelOccupied(p)){return 1.0;}
+  return bodySolidFractionAt(p);
 }
 fn worldInsideTerrain(world:vec3f)->bool{
   if(!hasTerrain()){return false;}
@@ -723,8 +734,8 @@ fn faceOpenFraction(id:vec3i,axis:u32)->f32{
   var neighbor=id;neighbor[axis]+=1;
   if(staticSolidVoxelOccupied(id)||staticSolidVoxelOccupied(neighbor)){return 0.0;}
   if(!valid(id)||!valid(neighbor)){
-    return select(1.0,0.0,staticSolidVoxelOccupied(id)
-      ||staticSolidVoxelOccupied(neighbor));
+    return ${uniformAbFaceBaseline ? `select(1.0,0.0,staticSolidVoxelOccupied(id)
+      ||staticSolidVoxelOccupied(neighbor))` : "1.0"};
   }
   return 1.0-faceSolidData(id,axis).w;
 }
@@ -783,6 +794,14 @@ fn pressureFaceData(id:vec3i,axis:u32)->vec4f{
   return vec4f(select(extrapolated,solidVelocity/max(solid,1e-6),solid>0.0),1.0-solid/8.0);
 }
 fn pressureFaceVolumeFraction(id:vec3i,axis:u32)->f32{return pressureFaceData(id,axis).w;}
+// storeExtrapolationAuthority already evaluated all three V_face values of every
+// in-domain cell this advance (eight solid samples each). The pressure setup and
+// projection groups bind that texture in the otherwise idle reverse-advection
+// slot; params.dropExtent.w says it still holds them (MacCormack reuses it).
+fn pressureFaceVolumeFractionShared(id:vec3i,axis:u32)->f32{
+  if(params.dropExtent.w>0.5&&valid(id)){return textureLoad(reversedVelocityIn,id,0)[axis];}
+  return pressureFaceVolumeFraction(id,axis);
+}
 // Secs. 3.3 and 3.7 share one interface authority. The extrapolator consumes
 // rho'=rho/V (including Eq. 20's adjacent-solid continuation) and the exact
 // positive-MAC face fractions used by projection; it never reclassifies raw
@@ -1241,7 +1260,7 @@ fn divergenceAt(id: vec3i, checkSolid: bool) -> f32 {
   let h=params.cellGravity.xyz;let vi=cellOpenFraction(id);var terms:array<f32,6>;
   for(var axis=0u;axis<3u;axis+=1u){
     var minus=id;minus[axis]-=1;
-    let vp=pressureFaceVolumeFraction(id,axis);let vm=pressureFaceVolumeFraction(minus,axis);
+    let vp=pressureFaceVolumeFractionShared(id,axis);let vm=pressureFaceVolumeFractionShared(minus,axis);
     let up=domainFaceFluidVelocity(id,axis);let um=domainFaceFluidVelocity(minus,axis);
     let usp=domainFaceSolidVelocity(id,axis,checkSolid);let usm=domainFaceSolidVelocity(minus,axis,checkSolid);
     terms[2u*axis]=(vp*up)/h[axis]+(vp-vi)*usp;
@@ -1287,8 +1306,7 @@ fn geometricPressureValue(p:vec3i)->f32{
 }
 fn geometricProjectedFace(id:vec3i,axis:u32,predicted:f32)->f32{
   var q=id;q[axis]+=1;
-  let face=pressureFaceData(id,axis);
-  if(face.w<=1e-6){return face[axis];}
+  if(pressureFaceVolumeFractionShared(id,axis)<=1e-6){return pressureFaceData(id,axis)[axis];}
   let a=pressurePhi(id)<0.0;let b=pressurePhi(q)<0.0;
   if(!a&&!b){return 0.0;}
   var theta=1.0;
@@ -1324,7 +1342,7 @@ fn project(@builtin(global_invocation_id) gid: vec3u) {
     ` : `
     if(id[axis]==0){
       var halo=id;halo[axis]-=1;
-      let boundaryOpen=pressureFaceVolumeFraction(halo,axis);
+      let boundaryOpen=pressureFaceVolumeFractionShared(halo,axis);
       if(boundaryOpen>1e-5&&pressureLiquid(id)){boundaryV[axis]-=scale*(p0-projectPressureValue(halo))/h[axis];}
       else{boundaryV[axis]=0.0;}
     }
@@ -1335,7 +1353,7 @@ fn project(@builtin(global_invocation_id) gid: vec3u) {
           v.y-=scale*(0.0-p0)/(h.y*theta);
         }else{v.y=0.0;}
       }else if(pressureLiquid(id)){
-        let boundaryOpen=pressureFaceVolumeFraction(id,axis);
+        let boundaryOpen=pressureFaceVolumeFractionShared(id,axis);
         if(boundaryOpen>1e-5){
           // A partially open solid face couples to the CM11a p_min=0 halo.
           v[axis]-=scale*(projectPressureValue(neighbor)-p0)/h[axis];
@@ -1348,8 +1366,8 @@ fn project(@builtin(global_invocation_id) gid: vec3u) {
       }
       continue;
     }
-    let pressureFace=pressureFaceData(id,axis);let open=pressureFace.w;
-    if(open<=1e-5){v[axis]=pressureFace[axis];continue;}
+    let open=pressureFaceVolumeFractionShared(id,axis);
+    if(open<=1e-5){v[axis]=pressureFaceData(id,axis)[axis];continue;}
     let centreLiquid=pressureLiquid(id);let neighborLiquid=pressureLiquid(neighbor);
     if(centreLiquid||neighborLiquid){
       let p1=select(0.0,projectPressureValue(neighbor),neighborLiquid);
@@ -1372,7 +1390,7 @@ fn project(@builtin(global_invocation_id) gid: vec3u) {
       if(wall.w>1e-6&&geometricPressureValue(solid)<=0.0&&inward*(v[axis]-wall[axis])*params.dimsDt.w>1e-4*h[axis]){released|=1u<<axis;}
     }
     if(id[axis]==0){var halo=id;halo[axis]-=1;
-      if(cellOpenFraction(id)>1e-5&&pressureFaceVolumeFraction(halo,axis)>1e-6&&geometricPressureValue(halo)<=0.0&&boundaryV[axis]*params.dimsDt.w>1e-4*h[axis]){released|=1u<<(axis+3u);}}
+      if(cellOpenFraction(id)>1e-5&&pressureFaceVolumeFractionShared(halo,axis)>1e-6&&geometricPressureValue(halo)<=0.0&&boundaryV[axis]*params.dimsDt.w>1e-4*h[axis]){released|=1u<<(axis+3u);}}
   }` : ""}
   v=applyInflowVelocity(id,v);textureStore(velocityOut,id,vec4f(v,f32(released)));storeBoundaryVelocity(id,boundaryV); textureStore(volumeOut,id,vec4f(textureLoad(volumeIn,id,0).x));
 }
