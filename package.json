@@ -261,6 +261,7 @@
     "test:uniform-lab:inflow": "node --import tsx tools/wasm/uniform-lab-inflow.ts",
     "test:uniform-lab:scenes": "node --import tsx tools/wasm/uniform-lab-scenes.ts",
     "test:uniform-pressure:2d": "node --import tsx tools/wasm/uniform-pressure-stability.ts",
+    "test:dawn:uniform-garden": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx --test --test-concurrency=1 tests/uniform-garden-transport-dawn.test.ts",
     "test:dawn:uniform-native-stages": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx --test --test-concurrency=1 tests/uniform-native-stages-dawn.test.ts",
     "test:dawn:uniform-phi": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx --test --test-concurrency=1 tests/uniform-phi-layout-dawn.test.ts",
     "test:dawn:uniform-pressure": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx --test --test-concurrency=1 tests/uniform-coarse-solver-dawn.test.ts tests/uniform-pressure-safety-dawn.test.ts tests/uniform-pressure-fig9-dawn.test.ts tests/uniform-pressure-budget-dawn.test.ts tests/uniform-pressure-layout-dawn.test.ts",

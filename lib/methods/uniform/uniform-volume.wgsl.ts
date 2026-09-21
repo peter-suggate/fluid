@@ -637,10 +637,12 @@ fn uvCoarseVelocityComponent(p:vec3f,component:u32)->f32{
   }
   return d4Sum8(terms);
 }
-// SEED: liquid above the dust floor, any solid or terrain share, a source this
-// step, or a vertex on the liquid side of the 4h band. Partial open fraction
-// covers rigid bodies and terrain, so neither needs the toggle forced off. The
-// vertex test is ONE-SIDED (phi < band, not |phi| < band) so that every cell
+// FINE/SHELL seeds: liquid at or above the dust floor, any solid/terrain share,
+// a source this step, or a vertex on the liquid side of the 4h band. TRANSPORT
+// excludes solid-only seeds: static boundaries do not create fluid or gamma.
+// Both sets retain phi support because gather also computes uvTarget. Partial
+// open fraction covers rigid bodies and terrain without disabling the map.
+// The vertex test is ONE-SIDED (phi < band, not |phi| < band) so that every cell
 // with a negative centre phi is in a seed tile: the centre is the mean of its
 // eight vertices, so a negative centre forces a negative -- hence in-band --
 // vertex. That is what makes "the FIM accurate band lies inside SHELL" a
@@ -661,11 +663,14 @@ fn uvTwoLevelSeed(@builtin(global_invocation_id)gid:vec3u){
   }
   let dust=select(params.tuning.z,1e-6,params.tuning.z<=0.0);
   let spacing=params.cellGravity.xyz;
-  var seed=false;var displacement=0.0;
+  var seed=false;var transportSeed=false;var displacement=0.0;
   for(var z=0;z<4;z++){for(var y=0;y<4;y++){for(var x=0;x<4;x++){
     let id=4*t+vec3i(x,y,z);if(!valid(id)){continue;}
-    if(abs(volume(id))>dust||uvOpen(id)<0.99999){seed=true;}
-    if(dropSource(id)>0.0||inflowSweptPlugSource(id,params.dimsDt.w)>0.0){seed=true;}
+    // Include threshold equality: uvDustFloor discards strictly smaller values.
+    let liquid=abs(volume(id))>=dust;
+    let source=dropSource(id)>0.0||inflowSweptPlugSource(id,params.dimsDt.w)>0.0;
+    if(liquid||source){seed=true;transportSeed=true;}
+    if(uvOpen(id)<0.99999){seed=true;}
     // E3's required reach, in cells, along the axis that moves furthest. This
     // is the start-of-step velocity, which the extension then propagates into
     // the air as copies before transport traces it, so the domain maximum taken
@@ -676,18 +681,18 @@ fn uvTwoLevelSeed(@builtin(global_invocation_id)gid:vec3u){
   let h=params.cellGravity.xyz;let band=4.0*max(h.x,max(h.y,h.z));
   let last=min(4*t+vec3i(4),dims());
   for(var z=4*t.z;z<=last.z;z++){for(var y=4*t.y;y<=last.y;y++){for(var x=4*t.x;x<=last.x;x++){
-    if(textureLoad(uvPhiIn,vec3i(x,y,z),0).x<band){seed=true;}}}}
-  atomicStore(&sharpenDeposits[slot+3u],select(0,1,seed));
+    if(textureLoad(uvPhiIn,vec3i(x,y,z),0).x<band){seed=true;transportSeed=true;}}}}
+  atomicStore(&sharpenDeposits[slot+3u],select(0,3,seed)|select(0,4,transportSeed));
 }
-// Chebyshev dilation, separated into three axis scans. Each scan carries two
-// independent radii in two bits: FINE at k tiles and SHELL at k+s. Chebyshev
+// Chebyshev dilation, separated into three axis scans. Each scan preserves
+// FINE, SHELL and TRANSPORT bits with their independent support radii. Chebyshev
 // balls compose, so SHELL is exactly FINE dilated by s. The pair of single-word
 // planes above the table is the ping-pong; the z scan lands the final class
 // back in the table so the sampler reads one place.
 fn uvTwoLevelFineReach()->i32{return i32(max(params.physical.z,0.0));}
 fn uvTwoLevelShellReach()->i32{return uvTwoLevelFineReach()+i32(max(params.twoLevel.x,1.0));}
 /**
- * E3's live transport set, dilated from the same seed as FINE and SHELL but by
+ * E3's live transport set, dilated from liquid/source/phi seeds (not solids) by
  * a reach this step MEASURED rather than one authored. uvTwoLevelSeed wrote the
  * domain maximum backward displacement D, in cells, into the counter word one
  * dispatch ago, so the predicate's own ceil(D)+1 cells is available here; a
@@ -708,9 +713,9 @@ fn uvTwoLevelTransportReach()->i32{
   let required=i32(ceil((ceil(max(d,0.0))+1.0)/4.0));
   return clamp(required+i32(params.twoLevel.w)-8,0,16);
 }
-/** All three class bits of tile q on the pass's input plane; the seed is one bit. */
+/** Independent support bits survive the first scan; boundaries seed only FINE/SHELL. */
 fn uvTwoLevelClassIn(plane:u32,q:vec3i)->i32{
-  if(plane==2u){return select(0,7,atomicLoad(&sharpenDeposits[uvCoarseBase()+4u*uvCoarseIndex(q)+3u])!=0);}
+  if(plane==2u){return atomicLoad(&sharpenDeposits[uvCoarseBase()+4u*uvCoarseIndex(q)+3u]);}
   return atomicLoad(&sharpenDeposits[uvCoarsePlane(plane)+uvCoarseIndex(q)]);
 }
 fn uvTwoLevelDilate(previous:u32,axis:u32,t:vec3i)->i32{

@@ -226,3 +226,10 @@ execution to root cell operators, velocity extension/hierarchy and surface
 correction, plus the selected 1e-3 dust floor. Removing per-tap audit atomics
 also restores GPU overlap; profiling measures projection and overlapping publication together.
 Actual demand-only field allocation remains explicitly unfinished.
+
+See [garden transport support](garden-transport-results.md) for independent fluid
+and boundary seeds, the dense-transport oracle and measured garden speedup.
+The preceding [paused-render investigation](garden-paused-render-results.md)
+found mesh rasterization intact and records the separate lighting cost.
+
+Garden UI timing reproduction and voxel-stone correction: [garden-browser-reproduction.md](garden-browser-reproduction.md).

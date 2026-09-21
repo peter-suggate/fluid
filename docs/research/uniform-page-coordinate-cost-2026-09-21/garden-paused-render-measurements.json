@@ -1,0 +1,662 @@
+[
+  {
+    "variant": "steady",
+    "records": [
+      {
+        "phase": "raster-pixel-proof",
+        "pending": false,
+        "counts": [
+          0,
+          0,
+          0,
+          415685,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "phase": "complete",
+        "adapterInfo": {
+          "vendor": "apple",
+          "architecture": "metal-3",
+          "device": "apple-m1-max",
+          "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+        },
+        "depth": 0,
+        "allocated": 147039980,
+        "preparation_ms": 662.1044169999999,
+        "total_ms": 1320.1995419999998,
+        "maintenanceBatches": 1,
+        "frames": 2,
+        "maxBatch_ms": 54.85091599999987,
+        "receipt": [
+          4,
+          14411,
+          0,
+          0,
+          82107,
+          0,
+          0,
+          1,
+          1283,
+          1,
+          1,
+          0,
+          1,
+          1,
+          1636,
+          0
+        ],
+        "validationErrors": []
+      },
+      {
+        "phase": "steady-paused-render",
+        "width": 1000,
+        "height": 620,
+        "frames": 20,
+        "median_ms": 8.375167000000147,
+        "p95_ms": 8.851916999999958
+      },
+      {
+        "phase": "steady-paused-stages",
+        "reading": {
+          "passes": [
+            {
+              "label": "Voxel surface mesh revision check",
+              "kind": "compute",
+              "begin_ms": 0,
+              "end_ms": 0,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Voxel surface mesh publication",
+              "kind": "compute",
+              "begin_ms": 0.065536,
+              "end_ms": 0.065536,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Voxel surface mesh background and exact planes",
+              "kind": "render",
+              "begin_ms": 0.131072,
+              "end_ms": 0.262144,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": false
+            },
+            {
+              "label": "Voxel mesh detail selection",
+              "kind": "compute",
+              "begin_ms": 0.262144,
+              "end_ms": 0.32768,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Voxel mesh back-face, frustum and dirty-box culling",
+              "kind": "compute",
+              "begin_ms": 0.32768,
+              "end_ms": 0.32768,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Voxel surface mesh rasterization",
+              "kind": "render",
+              "begin_ms": 0.393216,
+              "end_ms": 0.458752,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": false
+            },
+            {
+              "label": "Sparse voxel analytic rigid primary discovery",
+              "kind": "render",
+              "begin_ms": 0.393216,
+              "end_ms": 0.524288,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": false
+            },
+            {
+              "label": "Sparse voxel raster-rigid certificate bridge",
+              "kind": "render",
+              "begin_ms": 0.393216,
+              "end_ms": 0.524288,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": false
+            },
+            {
+              "label": "Sparse voxel deferred sky lighting",
+              "kind": "render",
+              "begin_ms": 0.458752,
+              "end_ms": 0.589824,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": false
+            },
+            {
+              "label": "Sparse voxel deferred dry lighting",
+              "kind": "render",
+              "begin_ms": 0.458752,
+              "end_ms": 7.53664,
+              "duration_ms": 7.077888,
+              "sampled": true,
+              "trusted": false
+            }
+          ],
+          "span_ms": 7.53664,
+          "sum_ms": 7.733248,
+          "trustedSum_ms": 0.065536,
+          "overlap": 1.026086956521739,
+          "sampledPassCount": 10,
+          "untrustedPassCount": 6
+        }
+      }
+    ]
+  },
+  {
+    "variant": "main",
+    "records": [
+      {
+        "phase": "raster-pixel-proof",
+        "pending": false,
+        "counts": [
+          0,
+          0,
+          0,
+          415685,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "phase": "complete",
+        "adapterInfo": {
+          "vendor": "apple",
+          "architecture": "metal-3",
+          "device": "apple-m1-max",
+          "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+        },
+        "depth": 0,
+        "allocated": 147039980,
+        "preparation_ms": 655.5119590000002,
+        "total_ms": 1285.096542,
+        "maintenanceBatches": 1,
+        "frames": 2,
+        "maxBatch_ms": 45.67791699999998,
+        "receipt": [
+          4,
+          14411,
+          0,
+          0,
+          82107,
+          0,
+          0,
+          1,
+          1283,
+          1,
+          1,
+          0,
+          1,
+          1,
+          1636,
+          0
+        ],
+        "validationErrors": []
+      },
+      {
+        "phase": "steady-paused-render",
+        "width": 1000,
+        "height": 620,
+        "frames": 20,
+        "median_ms": 8.55141599999979,
+        "p95_ms": 9.18591699999979
+      },
+      {
+        "phase": "steady-paused-stages",
+        "reading": {
+          "passes": [
+            {
+              "label": "Voxel surface mesh revision check",
+              "kind": "compute",
+              "begin_ms": 0,
+              "end_ms": 0,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Voxel surface mesh publication",
+              "kind": "compute",
+              "begin_ms": 0.851968,
+              "end_ms": 0.851968,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Voxel surface mesh background and exact planes",
+              "kind": "render",
+              "begin_ms": 0.720896,
+              "end_ms": 0.917504,
+              "duration_ms": 0.196608,
+              "sampled": true,
+              "trusted": false
+            },
+            {
+              "label": "Voxel mesh detail selection",
+              "kind": "compute",
+              "begin_ms": 0.98304,
+              "end_ms": 0.98304,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Voxel mesh back-face, frustum and dirty-box culling",
+              "kind": "compute",
+              "begin_ms": 1.114112,
+              "end_ms": 1.114112,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Voxel surface mesh rasterization",
+              "kind": "render",
+              "begin_ms": 1.179648,
+              "end_ms": 1.245184,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": false
+            },
+            {
+              "label": "Sparse voxel analytic rigid primary discovery",
+              "kind": "render",
+              "begin_ms": 1.179648,
+              "end_ms": 1.31072,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": false
+            },
+            {
+              "label": "Sparse voxel raster-rigid certificate bridge",
+              "kind": "render",
+              "begin_ms": 1.179648,
+              "end_ms": 1.31072,
+              "duration_ms": 0.131072,
+              "sampled": true,
+              "trusted": false
+            },
+            {
+              "label": "Sparse voxel deferred sky lighting",
+              "kind": "render",
+              "begin_ms": 1.245184,
+              "end_ms": 1.31072,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": false
+            },
+            {
+              "label": "Sparse voxel deferred dry lighting",
+              "kind": "render",
+              "begin_ms": 1.245184,
+              "end_ms": 8.323072,
+              "duration_ms": 7.077888,
+              "sampled": true,
+              "trusted": false
+            }
+          ],
+          "span_ms": 8.323072,
+          "sum_ms": 7.667712,
+          "trustedSum_ms": 0,
+          "overlap": 0.9212598425196851,
+          "sampledPassCount": 10,
+          "untrustedPassCount": 6
+        }
+      }
+    ]
+  },
+  {
+    "variant": "retina",
+    "records": [
+      {
+        "phase": "raster-pixel-proof",
+        "pending": false,
+        "counts": [
+          0,
+          0,
+          0,
+          1662829,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "phase": "complete",
+        "adapterInfo": {
+          "vendor": "apple",
+          "architecture": "metal-3",
+          "device": "apple-m1-max",
+          "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+        },
+        "depth": 0,
+        "allocated": 176720620,
+        "preparation_ms": 658.1765410000002,
+        "total_ms": 1380.3835,
+        "maintenanceBatches": 1,
+        "frames": 2,
+        "maxBatch_ms": 70.22074999999995,
+        "receipt": [
+          4,
+          14411,
+          0,
+          0,
+          82107,
+          0,
+          0,
+          1,
+          1283,
+          1,
+          1,
+          0,
+          1,
+          1,
+          1636,
+          0
+        ],
+        "validationErrors": []
+      },
+      {
+        "phase": "steady-paused-render",
+        "width": 2000,
+        "height": 1240,
+        "frames": 20,
+        "median_ms": 25.332416999999623,
+        "p95_ms": 26.983416000000034
+      },
+      {
+        "phase": "steady-paused-stages",
+        "reading": {
+          "passes": [
+            {
+              "label": "Voxel surface mesh revision check",
+              "kind": "compute",
+              "begin_ms": 0,
+              "end_ms": 0.065536,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Voxel surface mesh publication",
+              "kind": "compute",
+              "begin_ms": 0.065536,
+              "end_ms": 0.065536,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Voxel surface mesh background and exact planes",
+              "kind": "render",
+              "begin_ms": 0,
+              "end_ms": 0.524288,
+              "duration_ms": 0.524288,
+              "sampled": true,
+              "trusted": false
+            },
+            {
+              "label": "Voxel mesh detail selection",
+              "kind": "compute",
+              "begin_ms": 0.524288,
+              "end_ms": 0.524288,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Voxel mesh back-face, frustum and dirty-box culling",
+              "kind": "compute",
+              "begin_ms": 0.589824,
+              "end_ms": 0.589824,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Voxel surface mesh rasterization",
+              "kind": "render",
+              "begin_ms": 0.65536,
+              "end_ms": 0.917504,
+              "duration_ms": 0.262144,
+              "sampled": true,
+              "trusted": false
+            },
+            {
+              "label": "Sparse voxel analytic rigid primary discovery",
+              "kind": "render",
+              "begin_ms": 0.65536,
+              "end_ms": 1.179648,
+              "duration_ms": 0.524288,
+              "sampled": true,
+              "trusted": false
+            },
+            {
+              "label": "Sparse voxel raster-rigid certificate bridge",
+              "kind": "render",
+              "begin_ms": 0.720896,
+              "end_ms": 1.245184,
+              "duration_ms": 0.524288,
+              "sampled": true,
+              "trusted": false
+            },
+            {
+              "label": "Sparse voxel deferred sky lighting",
+              "kind": "render",
+              "begin_ms": 0.720896,
+              "end_ms": 1.31072,
+              "duration_ms": 0.589824,
+              "sampled": true,
+              "trusted": false
+            },
+            {
+              "label": "Sparse voxel deferred dry lighting",
+              "kind": "render",
+              "begin_ms": 0.720896,
+              "end_ms": 23.724032,
+              "duration_ms": 23.003136,
+              "sampled": true,
+              "trusted": false
+            }
+          ],
+          "span_ms": 23.724032,
+          "sum_ms": 25.493504,
+          "trustedSum_ms": 0.065536,
+          "overlap": 1.074585635359116,
+          "sampledPassCount": 10,
+          "untrustedPassCount": 6
+        }
+      }
+    ]
+  },
+  {
+    "variant": "main-retina",
+    "records": [
+      {
+        "phase": "raster-pixel-proof",
+        "pending": false,
+        "counts": [
+          0,
+          0,
+          0,
+          1662829,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "phase": "complete",
+        "adapterInfo": {
+          "vendor": "apple",
+          "architecture": "metal-3",
+          "device": "apple-m1-max",
+          "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+        },
+        "depth": 0,
+        "allocated": 176720620,
+        "preparation_ms": 2960.6410000000005,
+        "total_ms": 15965.365958000002,
+        "maintenanceBatches": 1,
+        "frames": 2,
+        "maxBatch_ms": 77.3035000000018,
+        "receipt": [
+          4,
+          14411,
+          0,
+          0,
+          82107,
+          0,
+          0,
+          1,
+          1283,
+          1,
+          1,
+          0,
+          1,
+          1,
+          1636,
+          0
+        ],
+        "validationErrors": []
+      },
+      {
+        "phase": "steady-paused-render",
+        "width": 2000,
+        "height": 1240,
+        "frames": 20,
+        "median_ms": 25.299333999999362,
+        "p95_ms": 27.978290999999444
+      },
+      {
+        "phase": "steady-paused-stages",
+        "reading": {
+          "passes": [
+            {
+              "label": "Voxel surface mesh revision check",
+              "kind": "compute",
+              "begin_ms": 0,
+              "end_ms": 0,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Voxel surface mesh publication",
+              "kind": "compute",
+              "begin_ms": 0.065536,
+              "end_ms": 0.065536,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Voxel surface mesh background and exact planes",
+              "kind": "render",
+              "begin_ms": 0,
+              "end_ms": 0.458752,
+              "duration_ms": 0.458752,
+              "sampled": true,
+              "trusted": false
+            },
+            {
+              "label": "Voxel mesh detail selection",
+              "kind": "compute",
+              "begin_ms": 0.458752,
+              "end_ms": 0.524288,
+              "duration_ms": 0.065536,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Voxel mesh back-face, frustum and dirty-box culling",
+              "kind": "compute",
+              "begin_ms": 0.524288,
+              "end_ms": 0.524288,
+              "duration_ms": 0,
+              "sampled": true,
+              "trusted": true
+            },
+            {
+              "label": "Voxel surface mesh rasterization",
+              "kind": "render",
+              "begin_ms": 0.589824,
+              "end_ms": 0.917504,
+              "duration_ms": 0.32768,
+              "sampled": true,
+              "trusted": false
+            },
+            {
+              "label": "Sparse voxel analytic rigid primary discovery",
+              "kind": "render",
+              "begin_ms": 0.589824,
+              "end_ms": 1.179648,
+              "duration_ms": 0.589824,
+              "sampled": true,
+              "trusted": false
+            },
+            {
+              "label": "Sparse voxel raster-rigid certificate bridge",
+              "kind": "render",
+              "begin_ms": 0.65536,
+              "end_ms": 1.179648,
+              "duration_ms": 0.524288,
+              "sampled": true,
+              "trusted": false
+            },
+            {
+              "label": "Sparse voxel deferred sky lighting",
+              "kind": "render",
+              "begin_ms": 0.65536,
+              "end_ms": 1.245184,
+              "duration_ms": 0.589824,
+              "sampled": true,
+              "trusted": false
+            },
+            {
+              "label": "Sparse voxel deferred dry lighting",
+              "kind": "render",
+              "begin_ms": 0.720896,
+              "end_ms": 25.755648,
+              "duration_ms": 25.034752,
+              "sampled": true,
+              "trusted": false
+            }
+          ],
+          "span_ms": 25.755648,
+          "sum_ms": 27.590656000000003,
+          "trustedSum_ms": 0.065536,
+          "overlap": 1.0712468193384224,
+          "sampledPassCount": 10,
+          "untrustedPassCount": 6
+        }
+      }
+    ]
+  }
+]

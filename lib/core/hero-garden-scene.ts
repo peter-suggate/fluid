@@ -1,4 +1,6 @@
 import { cloneScene, defaultScene, DEFAULT_FINEST_CELL_SIZE_M, type CameraState, type SceneDescription } from "./model";
+import { sceneCellSizes_m, sceneLatticeDimensions } from "./scene-lattice-dimensions";
+import { SOLID_WORLD_TERRAIN_MATERIAL_ID, type SolidWorldVoxelPatch } from "./solid-world";
 import { heroGardenCloudTree } from "./hero-garden-tree";
 import { applyHeroGardenNodeOverrides, HERO_GARDEN_OVERRIDES } from "./hero-garden-overrides";
 import type { SceneryGraph, SceneryNode } from "./scenery-graph";
@@ -841,8 +843,8 @@ function heroGardenAuthoredScenery(waterline_m: number): SceneryGraph {
         params: { waterline_m, families: ["beds"] },
       },
       // The wading path stays one entity too: its polyline is solved against the
-      // vessel every rebuild, and its treads are mirrored as the rigid bodies
-      // the water parts around — see `stoneSetSteppingBodies` below.
+      // vessel every rebuild. Its stationary colliders are baked into SolidWorld
+      // on the fluid lattice by `heroGardenSteppingVoxels`.
       {
         kind: "generator", id: "stone-path", generator: "pond-stone-set", vessel: "pond",
         seed: HERO_GARDEN_SET_SEED,
@@ -1049,26 +1051,10 @@ export function createHeroGardenHoseScene(options: HeroGardenHoseOptions = {}): 
     absorption_mInv: [2.6, 0.42, 0.62],
     scatter: [0.038, 0.165, 0.145],
   };
-  /**
-   * The stepping discs, as solids the water has to part around.
-   *
-   * The path is scenery too — the drawn plate is a tapered footing, a tread and
-   * a crown that softens its edge, and that silhouette is what stops five discs
-   * reading as five drums — but scenery has no solver term, so a disc that is
-   * *only* scenery is a disc the jet pours straight through. These are the same
-   * five stones, solved once by `heroSteppingPath` and published twice: the
-   * generator node draws them, and this collides them. Neither derives the
-   * contour again, which is the only way the two can be guaranteed to agree.
-   *
-   * The collider is a single static cylinder inscribed in the drawn solid — see
-   * `steppingStoneBodies` for why one, and why inscribed rather than at the
-   * tread's own radius.
-   */
-  scene.rigidBodies = stoneSetSteppingBodies({
-    vessel: HERO_GARDEN_VESSEL,
-    waterline_m,
-    seed: HERO_GARDEN_SET_SEED,
-  });
+  // Bake the stationary stepping stones into the same voxel authority as the
+  // vessel. Analytic rigid bodies would repeat shape tests in every fluid stage.
+  scene.rigidBodies = [];
+  scene.solidVoxels = heroGardenSteppingVoxels(scene, waterline_m);
   // Lighting is not scene data on the fluid-free SVO path. Every dry scene
   // resolves the same defaults at the renderer boundary; see
   // `svo-dry-scene-lighting.ts`.
@@ -1080,4 +1066,38 @@ export function createHeroGardenHoseScene(options: HeroGardenHoseOptions = {}): 
   // assigned above.
   scene.scenery = heroGardenScenery(waterline_m);
   return scene;
+}
+
+/** Voxelize the existing inscribed stone colliders once at document creation.
+ * Contiguous X runs keep the authored patch list compact. Cell centres define
+ * binary occupancy, exactly as the solver's static SolidWorld lookup expects.
+ */
+function heroGardenSteppingVoxels(scene: SceneDescription, waterline_m: number): SolidWorldVoxelPatch[] {
+  const [hx, hy, hz] = sceneCellSizes_m(scene);
+  const [nx, ny, nz] = sceneLatticeDimensions(scene);
+  const left = -scene.container.width_m / 2, back = -scene.container.depth_m / 2;
+  const patches: SolidWorldVoxelPatch[] = [];
+  for (const stone of stoneSetSteppingBodies({vessel: HERO_GARDEN_VESSEL, waterline_m, seed: HERO_GARDEN_SET_SEED})) {
+    const {x: cx, y: cy, z: cz} = stone.position_m;
+    const radius = stone.dimensions_m.x, halfHeight = stone.dimensions_m.y / 2;
+    const x0 = Math.max(0, Math.ceil((cx - radius - left) / hx - .5));
+    const x1 = Math.min(nx, Math.floor((cx + radius - left) / hx - .5) + 1);
+    const y0 = Math.max(0, Math.ceil((cy - halfHeight) / hy - .5));
+    const y1 = Math.min(ny, Math.floor((cy + halfHeight) / hy - .5) + 1);
+    const z0 = Math.max(0, Math.ceil((cz - radius - back) / hz - .5));
+    const z1 = Math.min(nz, Math.floor((cz + radius - back) / hz - .5) + 1);
+    for (let z = z0; z < z1; z++) {
+      let start = -1, end = -1;
+      for (let x = x0; x < x1; x++) {
+        const dx = left + (x + .5) * hx - cx, dz = back + (z + .5) * hz - cz;
+        if (dx * dx + dz * dz <= radius * radius) {
+          if (start < 0) start = x;
+          end = x + 1;
+        }
+      }
+      if (start >= 0 && y1 > y0) patches.push({operation: "fill", minimum: [start, y0, z],
+        maximumExclusive: [end, y1, z + 1], materialId: SOLID_WORLD_TERRAIN_MATERIAL_ID});
+    }
+  }
+  return patches;
 }

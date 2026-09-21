@@ -10,6 +10,7 @@ import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
+import { initializeRigidBodies } from "../lib/core/rigid-body";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { solidVoxelShellForScene } from "../lib/core/scene-lattice";
 import { getSceneDefinition } from "../lib/core/scenes";
@@ -64,6 +65,8 @@ try{
    scene.container.fillFraction=0.25;scene.fluid.initialLiquidVolumes=[];
    scene.solidVoxels=[...solidVoxelShellForScene(scene)];
   }
+  const bodies=process.env.OMIT_BODIES_FOR_QA==="1"?[]:initializeRigidBodies(scene.rigidBodies);
+  assert.ok(scene.rigidBodies.every(body=>body.motion==="static") || bodies.length===0,"This benchmark currently supports static scene bodies only");
   const arms:{mode:string;full:number[];stages:Record<string,number[]>;pages:number|undefined}[]=[];
   for(const mode of (process.env.ARMS??"production").split(",")){
    const solver=await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,
@@ -98,7 +101,7 @@ try{
 
    try{
     for(let frame=1;frame<=frames;frame++){
-     const start=performance.now();(solver as any).lastPhysicsTraceAt_ms=-Infinity;assert.ok(solver.advanceTo(frame/30));await (solver as any).awaitFrameCompletion?.();await device.queue.onSubmittedWorkDone();
+     const start=performance.now();(solver as any).lastPhysicsTraceAt_ms=-Infinity;assert.ok(solver.advanceTo(frame/30,bodies));await (solver as any).awaitFrameCompletion?.();await device.queue.onSubmittedWorkDone();
      if(frame>4)full.push(performance.now()-start);
      if(phiQueries){
       const e=device.createCommandEncoder();e.resolveQuerySet(phiQueries,0,4,phiResolve!,0);e.copyBufferToBuffer(phiResolve!,0,phiReadback!,0,32);
@@ -125,7 +128,7 @@ try{
      passesEncoded:solver.info.uniformPressurePassesEncoded,pages:solver.info.uniformVolumePagesActive,transportTiles:solver.info.uniformVolumeTransportWorkgroups,sharpenTiles:solver.info.uniformVolumeSharpenWorkgroups};arms.push(arm);console.log(JSON.stringify({sceneId,fixture:process.env.TILE_EDGE?`single-tile-${process.env.TILE_EDGE}-dam`:sceneId,mode,full_ms:median(full),stages:Object.fromEntries(Object.entries(stages).map(([k,v])=>[k,median(v)])),pages:arm.pages,pressure:solver.info.pressureSolver}));
    }finally{phiQueries?.destroy();phiResolve?.destroy();phiReadback?.destroy();solver.destroy();}
   }
-  results.push({revision,sourceHashes,adapter:adapter.info,timing:process.env.TIMING??"stages",dustThreshold:process.env.DUST_THRESHOLD??"default",fieldStorage:process.env.FIELD_STORAGE??"production",phiLiteral:process.env.PHI_LITERAL===undefined?"production":process.env.PHI_LITERAL==='1',phiStorage:process.env.PHI_STORAGE??"native",phiAudit:!!process.env.PHI_AUDIT,phiTiming:!!process.env.PHI_TIMING,pressureStorage:process.env.PRESSURE_STORAGE??"native",asyncDemand:process.env.ASYNC_DEMAND==='1',frames,warmup:4,tileEdge:process.env.TILE_EDGE?Number(process.env.TILE_EDGE):undefined,oneCycle:process.env.ONE_CYCLE==='1',fullDomain:process.env.FULL_DOMAIN==='1',sceneId,fixture:process.env.TILE_EDGE?`single-tile-${process.env.TILE_EDGE}-dam`:sceneId,scope:"Queue-fenced simulation, rendering excluded. Readbacks after timed interval. Production defaults, balanced quality, one advance per 1/30 second.",arms});
+  results.push({revision,sourceHashes,sceneSourceHash:createHash("sha256").update(readFileSync("lib/core/hero-garden-scene.ts")).digest("hex"),bodyCount:bodies.length,bodyIds:bodies.map(body=>body.description.id),bodiesOmittedForQA:process.env.OMIT_BODIES_FOR_QA==="1",adapter:adapter.info,timing:process.env.TIMING??"stages",dustThreshold:process.env.DUST_THRESHOLD??"default",fieldStorage:process.env.FIELD_STORAGE??"production",phiLiteral:process.env.PHI_LITERAL===undefined?"production":process.env.PHI_LITERAL==='1',phiStorage:process.env.PHI_STORAGE??"native",phiAudit:!!process.env.PHI_AUDIT,phiTiming:!!process.env.PHI_TIMING,pressureStorage:process.env.PRESSURE_STORAGE??"native",asyncDemand:process.env.ASYNC_DEMAND==='1',frames,warmup:4,tileEdge:process.env.TILE_EDGE?Number(process.env.TILE_EDGE):undefined,oneCycle:process.env.ONE_CYCLE==='1',fullDomain:process.env.FULL_DOMAIN==='1',sceneId,fixture:process.env.TILE_EDGE?`single-tile-${process.env.TILE_EDGE}-dam`:sceneId,scope:"Queue-fenced simulation, rendering excluded. Readbacks after timed interval. Production defaults, balanced quality, one advance per 1/30 second.",arms});
  }
  assert.deepEqual(errors,[]);
  writeFileSync(process.env.UNIFORM_BENCH_OUTPUT??"/tmp/uniform-long-dam-paging.json",JSON.stringify(results,null,2)+"\n");
