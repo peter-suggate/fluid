@@ -89,7 +89,9 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
     device=managedGPUDevice(await adapter.requestDevice({requiredLimits:requiredFluidDeviceLimits(adapter.limits)}),{requireWorkerRealm:false});
     const errors:string[]=[];device.addEventListener("uncapturederror",e=>{e.preventDefault();errors.push(e.error.message);});
     const scene=sceneDocument(getSceneDefinition("hero-garden-hose"));
-    for(const storage of ["dense","pages32"])solvers.push(await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,uniformGeometricSolverOptions({volumeStorage:storage,pressureWindow:"domain"},scene),()=>{}));
+    for(const pageSize of ["32","16"])solvers.push(await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,uniformGeometricSolverOptions({pageSize,pressureWindow:"domain"},scene),()=>{}));
+    assert.equal(solvers[0]!.info.uniformDomainPages,45);
+    assert.equal(solvers[1]!.info.uniformDomainPages,324);
     for(let frame=1;frame<=12;frame++) {
       for(const solver of solvers) {
         if(frame===5)solver.applyRuntimeValues({sharpeningWorkMap:"off",transportWorkMap:"dense"});
@@ -112,4 +114,35 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
     }
     assert.deepEqual(errors,[]);
   } finally {for(const s of solvers)s.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
+});
+
+
+(modulePath?test:test.skip)("page size switches Mini32 between single and multiple pages without material field drift",{timeout:120000},async()=>{
+ await acquireWebGPUExclusiveLock("dawn-test","Uniform page-size single-page boundary");
+ let device:GPUDevice|undefined;const solvers:WebGPUUniformReferenceSolver[]=[];
+ try {
+  const dawn=await import(pathToFileURL(modulePath!).href);Object.assign(globalThis,dawn.globals);
+  const gpu=createProcessRetainedDawnGPU(dawn,[`backend=${process.env.FLUID_WEBGPU_BACKEND??"metal"}`]);
+  const adapter=await gpu.requestAdapter();assert.ok(adapter);
+  device=managedGPUDevice(await adapter.requestDevice({requiredLimits:requiredFluidDeviceLimits(adapter.limits)}),{requireWorkerRealm:false});
+  const errors:string[]=[];device.addEventListener("uncapturederror",e=>{e.preventDefault();errors.push(e.error.message);});
+  const scene=sceneDocument(getSceneDefinition("minimal-power-dam-break-32"));
+  for(const pageSize of ["32","16"])solvers.push(await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,uniformGeometricSolverOptions({pageSize},scene),()=>{}));
+  assert.equal(solvers[0]!.info.uniformDomainPages,1);assert.equal(solvers[1]!.info.uniformDomainPages,8);
+  const maxima={volumeTexture:0,vertexPhiTexture:0};
+  for(let frame=1;frame<=5;frame++){
+   for(const solver of solvers){assert.ok(solver.advanceTo(frame/30));await solver.awaitFrameCompletion();await solver.readStats();}
+   for(const field of ["volumeTexture","vertexPhiTexture"] as const){
+    const a=await readTexture(device,solvers[0]![field]!),b=await readTexture(device,solvers[1]![field]!);
+    for(let i=0;i<a.length;i++){assert.ok(Number.isFinite(a[i])&&Number.isFinite(b[i]));maxima[field]=Math.max(maxima[field],Math.abs(a[i]!-b[i]!));}
+   }
+  }
+  // Single-page and native multi-page phi kernels compile differently. Bound
+  // accumulated float-rounding drift to < 0.0001 cell and one tenth of the
+  // configured 0.001-cell-volume dust floor. This is a cross-kernel comparison;
+  // the existing same-kernel and Garden checks above remain bit-exact.
+  assert.ok(maxima.vertexPhiTexture < .025*1e-4,JSON.stringify(maxima));
+  assert.ok(maxima.volumeTexture < 1e-4,JSON.stringify(maxima));
+  console.log(JSON.stringify({pageSizeBoundaryMaxima:maxima}));assert.deepEqual(errors,[]);
+ }finally{for(const solver of solvers)solver.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
 });

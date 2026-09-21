@@ -148,7 +148,7 @@ const volumePressureRowsControl = {kind:"param-choice" as const,param:"volumePre
  */
 const transportControls = [
   {kind:"readout" as const,label:"Field storage",value:()=>"Compiled resident fields",
-    hint:"Complete rectangular resident domains use native textures; transport records retain 32³ pages."},
+    hint:"Complete rectangular resident domains use native textures; transport records use the selected domain page size."},
   {kind:"readout" as const,label:"Resident volume pages",
     hint:"Actual last-stage active page count and total reserved arena capacity for the 80-byte records. Reservation is currently domain-sized; compute work follows active tiles.",
     value:(context: FluidPipelineContext)=>{const info=volumeInfo(context);
@@ -279,7 +279,10 @@ export const UNIFORM_VOLUME_PIPELINE: FluidPipelineGraph = {
     // belong beside the sweep budget that produced the field they sample.
     if(stage.id==="velocity-extension")return [{...mapped,
       tip:{...mapped.tip,summary:"Extend nearby velocities with the narrow-band front, then fill missing air velocities from the nearest original source carried through the hierarchy. Keeps distant stationary liquid from slowing falling drops. The final 3D fill also packs the transport field."},
-      controls:[{kind:"readout" as const,label:"Air fallback",value:()=>"Nearest source",
+      controls:[{kind:"param-choice" as const,param:"pageSize",label:"Page size",
+        options:[{value:"16",label:"16³",hint:"16 cells per edge. Rebuilds the solver and resets to time zero."},
+          {value:"32",label:"32³",hint:"32 cells per edge. Rebuilds the solver and resets to time zero."}]},
+        {kind:"readout" as const,label:"Air fallback",value:()=>"Nearest source",
         hint:"Enabled by default. Carries original source locations through coarse levels; the front sweep budget is unchanged."},{kind:"readout" as const,label:"Domain authority",value:(context:FluidPipelineContext)=>`Resident pages · ${context.info?.uniformDomainPages??"—"} pages`},
         {kind:"readout" as const,label:"Page coverage",value:(context:FluidPipelineContext)=>context.info?.uniformDomainMigration?.startsWith("Native")?"Compiled complete coverage":context.info?.uniformPageMissingReads===undefined?"Pause to sample":`${context.info.uniformPageMissingReads} · fields 0x${(context.info.uniformPageMissingReadFields??0).toString(16)}`,hint:"Complete rectangular residency is validated before compiling native kernels. The paged QA path instead counts actual texture reads outside accepted membership, sampled on pause."},
         {kind:"readout" as const,label:"Migration status",value:(context:FluidPipelineContext)=>context.info?.uniformDomainMigration??"Initializing page domain",hint:"Complete rectangular residency compiles to native execution fields. Every authored page remains resident; fluid-driven allocation and retirement remain unfinished."},

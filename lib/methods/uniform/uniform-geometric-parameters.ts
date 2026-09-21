@@ -17,6 +17,9 @@ const params: MethodParamSpec[] = UNIFORM_PARAMS.filter(p => !omitted.has(p.key)
     hint: "Only cells within this distance of phi=0 participate in local volume return." };
   return p;
 });
+params.push({kind:"select",key:"pageSize",label:"Page size",default:"32",tier:"coarse",update:"solver",
+  options:[{value:"16",label:"16³"},{value:"32",label:"32³"}],
+  hint:"Cells along each domain page edge. Changing this rebuilds the solver and resets the simulation to time zero."});
 params.push({kind:"select",key:"redistance",label:"Level-set redistancing",default:"on",tier:"fine",update:"runtime",
   options:[{value:"on",label:"On"},{value:"off",label:"Off"}],hint:"Reconstruct metric distance near phi=0 after transport. Disable to isolate contour drift."});
 params.push({kind:"select",key:"sharpeningWorkMap",label:"Sharpening work map",default:"on",tier:"fine",update:"runtime",
@@ -78,7 +81,7 @@ params.push({kind:"select",key:"surfaceDeficitBalancing",label:"Surface-deficit 
 /** Shared by the studio and scene harnesses. */
 export const UNIFORM_GEOMETRIC_PARAMS: readonly MethodParamSpec[] = Object.freeze(params);
 /** Storage is a WebGPU implementation choice, excluded from the native contract. */
-export const UNIFORM_GEOMETRIC_NATIVE_PARAMS = Object.freeze(params.filter(p => p.key !== "volumeStorage"));
+export const UNIFORM_GEOMETRIC_NATIVE_PARAMS = Object.freeze(params.filter(p => p.key !== "volumeStorage" && p.key !== "pageSize"));
 export const UNIFORM_GEOMETRIC_DEFAULTS: Readonly<MethodParamValues> = Object.freeze(
   Object.fromEntries(params.map(p => [p.key, p.default])),
 );

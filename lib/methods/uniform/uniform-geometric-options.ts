@@ -11,7 +11,7 @@ export function uniformGeometricSolverOptions(overrides: MethodParamValues = {},
   // evidence. Start at one cycle and reserve no speculative tail.
   return {
       ...uniformReferenceSolverOptions(values, scene), geometricVolume: true, pageDomain:true, pressureCycleBudget:"lagged", pressureBudgetHeadroom:0,
-      volumePages: 32,
+      volumePages: values.pageSize === "16" ? 16 : 32,
       sharpeningStrength: Number(values.sharpeningStrength),
       velocityTransport: values.velocityTransport === "maccormack" ? "maccormack" : "semi-lagrangian",
       surfaceDeficitBalancing: values.surfaceDeficitBalancing === "on",

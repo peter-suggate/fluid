@@ -793,7 +793,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const [nx, ny, sourceNz] = sceneLatticeDimensions(scene, this.geometricVolume ? Number.MAX_SAFE_INTEGER : device.limits.maxTextureDimension3D);
     const nz = options.referenceDimension === 2 ? 1 : sourceNz;
     if (this.geometricVolume && options.pageDomain) {
-      this.pageDomain = initialUniformPageDomain([nx, ny, nz]);
+      this.pageDomain = initialUniformPageDomain([nx, ny, nz], options.volumePages === 16 ? 16 : 32);
       this.nativePageCoordinates = uniformPageHasNativeCoordinates(this.pageDomain);
       if (!this.nativePageCoordinates) this.fieldPages = new UniformTexturePages(device,
         options.fieldStorageForQA === "paged" || options.phiStorageForQA === "paged" ||
