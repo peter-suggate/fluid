@@ -1,0 +1,126 @@
+{
+  "suite": "sparse-cm12-dawn-regression",
+  "startedAt": "2026-09-21T03:04:05.178Z",
+  "backend": "metal",
+  "elapsedMs": 400185,
+  "budgetMs": 480000,
+  "withinBudget": true,
+  "passed": false,
+  "receipts": [
+    {
+      "id": "simulation-failure-halt",
+      "kind": "correctness",
+      "passed": true,
+      "elapsedMs": 248.55491700000002
+    },
+    {
+      "id": "symmetric-expansion",
+      "kind": "correctness",
+      "passed": false,
+      "elapsedMs": 12177.649833,
+      "failure": "exited 1"
+    },
+    {
+      "id": "mixed-ratio-topology",
+      "kind": "correctness",
+      "passed": true,
+      "elapsedMs": 363.92312499999935
+    },
+    {
+      "id": "topology-page-budget",
+      "kind": "correctness",
+      "passed": false,
+      "elapsedMs": 17523.129916,
+      "failure": "exited 1"
+    },
+    {
+      "id": "clipped-topology-transfer",
+      "kind": "correctness",
+      "passed": false,
+      "elapsedMs": 17914.270083,
+      "failure": "exited 1"
+    },
+    {
+      "id": "topology-generation-storage",
+      "kind": "correctness",
+      "passed": true,
+      "elapsedMs": 302.18554199999926
+    },
+    {
+      "id": "hydrostatic-adaptivity",
+      "kind": "correctness",
+      "passed": false,
+      "elapsedMs": 45021.477792000005,
+      "failure": "exceeded 45000 ms timeout"
+    },
+    {
+      "id": "mini32-correctness",
+      "kind": "correctness",
+      "passed": false,
+      "elapsedMs": 25031.948166999995,
+      "failure": "exceeded 25000 ms timeout"
+    },
+    {
+      "id": "min8-region-surface",
+      "kind": "correctness",
+      "passed": false,
+      "elapsedMs": 30027.674333999996,
+      "failure": "exceeded 30000 ms timeout"
+    },
+    {
+      "id": "mini32-performance",
+      "kind": "performance",
+      "passed": false,
+      "elapsedMs": 20031.535541999998,
+      "failure": "exceeded 20000 ms timeout"
+    },
+    {
+      "id": "mini64-performance",
+      "kind": "performance",
+      "passed": false,
+      "elapsedMs": 46984.97991600001,
+      "failure": "mini64-performance median 206.7005 ms exceeds 110 ms baseline ceiling"
+    },
+    {
+      "id": "mini64-min8-surface",
+      "kind": "correctness",
+      "passed": true,
+      "elapsedMs": 33424.550791999995
+    },
+    {
+      "id": "long-dam-far-wall",
+      "kind": "correctness",
+      "passed": false,
+      "elapsedMs": 45062.70029200002,
+      "failure": "exited 1"
+    },
+    {
+      "id": "tall-cells-hills-far-wall",
+      "kind": "correctness",
+      "passed": false,
+      "elapsedMs": 45126.83008300001,
+      "failure": "exited 1"
+    },
+    {
+      "id": "live-rigid-body-coupling",
+      "kind": "correctness",
+      "passed": false,
+      "elapsedMs": 25020.676584,
+      "failure": "exceeded 25000 ms timeout"
+    },
+    {
+      "id": "live-liquid-injection",
+      "kind": "correctness",
+      "passed": false,
+      "elapsedMs": 25023.66370799998,
+      "failure": "exceeded 25000 ms timeout"
+    },
+    {
+      "id": "outside-tank-symmetric-collapse",
+      "kind": "correctness",
+      "passed": false,
+      "elapsedMs": 10888.923499999975,
+      "failure": "exited 1"
+    }
+  ]
+}

@@ -27,3 +27,11 @@ test("CM11a page conversion covers nested loads and all hierarchy fields",()=>{
  assert.match(operators,/mgMinimumInLoad\(id\)/);
  assert.match(operators,/let slot=gid.x\/16u/);
 });
+
+test("logical-dispatch oracle retains atlas loads without tile launch decoding",()=>{
+ const shader=uniformPressurePagedShader(uniformPressureMultigridWGSL,true);
+ assert.match(shader,/fn mgActiveId\(gid:vec3u\)->vec3i\{return vec3i\(gid\);\}/);
+ assert.doesNotMatch(shader,/let slot=gid.x\/16u/);
+ assert.match(shader,/mgPressureInLoad/);
+ assert.match(shader,/fn mgPageAddress/);
+});

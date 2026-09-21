@@ -21,7 +21,7 @@ fn mgPageAddress(p:vec3i,d:vec3u,atlas:vec3u)->vec3i{
 `;
 /** Replace only CM11a field accesses, leaving discretization and arithmetic
  * ordering intact. Function-call parsing handles nested coordinate expressions. */
-export function uniformPressurePagedShader(source:string):string{
+export function uniformPressurePagedShader(source:string, logicalDispatch=false):string{
  const declarations=[...source.matchAll(/@group\(1\) @binding\((\d+)\) var (mg\w+): (texture[^;]+);/g)];
  const fields=new Map(declarations.map(m=>[m[2]!,{binding:Number(m[1]),type:m[3]!}]));
  let helpers=uniformPressurePageAddressWGSL;
@@ -37,13 +37,13 @@ export function uniformPressurePagedShader(source:string):string{
   let end=result.indexOf("{",start)+1,depth=1;
   while(depth>0&&end<result.length){if(result[end]==="{")depth++;if(result[end]==="}")depth--;end++;}
   if(depth!==0)throw new Error("Unclosed pressure page dispatch function");
-  result=result.slice(0,start)+`fn mgActiveId(gid:vec3u)->vec3i{
+  result=result.slice(0,start)+(logicalDispatch ? "fn mgActiveId(gid:vec3u)->vec3i{return vec3i(gid);}" : `fn mgActiveId(gid:vec3u)->vec3i{
     let grid=(mg.coarseDims.xyz+vec3u(15u))/16u;
     let slot=gid.x/16u;
     if(slot>=grid.x*grid.y*grid.z){return vec3i(-1);}
     let page=vec3u(slot%grid.x,(slot/grid.x)%grid.y,slot/(grid.x*grid.y));
     return vec3i(page*16u+vec3u(gid.x%16u,gid.y,gid.z));
-  }`+result.slice(end);
+  }`)+result.slice(end);
  }
  return rewritePressureTextureCalls(result,fields)+helpers;
 }

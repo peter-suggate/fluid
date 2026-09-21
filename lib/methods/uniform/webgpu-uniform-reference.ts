@@ -90,6 +90,8 @@ export interface WebGPUUniformReferenceOptions {
   pageDomain?: boolean;
   /** QA oracle: same page operators and shader interface, dense physical backing. */
   fieldStorageForQA?: "dense";
+  /** QA-only former pressure layouts; production uses native execution fields. */
+  pressureStorageForQA?: "paged" | "paged-logical";
   /** Internal scheduling oracle; paged work is the production default. */
   volumePageWork?: boolean;
   /** Scene-parity oracle only: one symmetry-depth cell, with a 2D pressure hierarchy. */
@@ -1054,14 +1056,17 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.pressureInputLayout = this.geometricVolume ? device.createBindGroupLayout({
       entries: mainEntries.filter(e => e.binding !== 32 && e.binding !== 33),
     }) : this.mainLayout;
+    // Residency owns the domain, not the packing of multigrid scratch. Native
+    // fields retain the numerical operators without translating every tap.
+    const pagedPressure = options.pressureStorageForQA !== undefined;
     this.pressureMultigrid = new WebGPUUniformPressureMultigrid(device, [nx, ny, nz], [
       scene.container.width_m / nx,
       scene.container.height_m / ny,
       scene.container.depth_m / nz,
     ], this.pressureSchedule, this.activeRegionEnabled ? this.activeDispatch : undefined,
       undefined, false, options.referenceDimension ?? 3, options.pressureCycleDispatch === "indirect" ||
-        (options.pressureCycleDispatch !== "direct" && this.fieldPages !== undefined),
-      this.fieldPages !== undefined);
+        (options.pressureCycleDispatch !== "direct" && pagedPressure),
+      pagedPressure, options.pressureStorageForQA === "paged-logical");
     this.pressureWindowCapacity = [nx, ny, nz];
     this.pressureDomainKey = this.pressureWindowCapacity.join("x");
     this.pressureInstances.set(this.pressureDomainKey, this.pressureMultigrid);
@@ -1182,7 +1187,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       compressionRatio: 1, activeCompressionRatio: 1, activeSampleCount: count,
       regularLayers: ny, maximumNeighborDelta: 0, gridKind: "uniform",
       cellSize_m: Math.min(scene.container.width_m / nx, scene.container.height_m / ny, scene.container.depth_m / nz),
-      pressureIterations: 0, pressureSolver: `CM11a ${this.nativePageCoordinates ? "native-page" : this.pageDomain ? "paged" : "dense"} LCP multigrid (${this.pressureSchedule.fullCycles} Full-Cycles + ${this.pressureSchedule.vCycles} V-Cycles, ${this.pressureSchedule.preSweeps}/${this.pressureSchedule.postSweeps} pre/post PRBGS)`,
+      pressureIterations: 0, pressureSolver: `CM11a ${pagedPressure ? "paged (QA)" : this.pageDomain ? "native-page" : "dense"} LCP multigrid (${this.pressureSchedule.fullCycles} Full-Cycles + ${this.pressureSchedule.vCycles} V-Cycles, ${this.pressureSchedule.preSweeps}/${this.pressureSchedule.postSweeps} pre/post PRBGS)`,
       allocatedBytes: allocation.allocatedBytes + 8 + pageBytes + (this.volumeWorkDispatch?20:0) + (this.volumePageSharpenFlag?4:0) + this.surfaceDeficitBalanceBytes + this.pressureMultigrid.allocatedBytes
         + (this.geometricVolume ? 8 * (nx+1)*(ny+1)*(nz+1) + count*24 + (this.volumeEdges?.size ?? 0) + 12 : 0)
         + activeRegionBytes * 3 + (this.pageDomain ? this.pageDomain.words.byteLength + 32 + (this.pageDomainView?.size??0) : 0) + activeSummaryBytes + packedSolidVoxels.byteLength
@@ -1194,7 +1199,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       hostSchedulingUsesReadback: this.pressureCycleBudgetLagged && this.pressureMultigrid.residualTolerance > 0,
       ...(this.pageDomain?{uniformDomainAuthority:"pages" as const,uniformDomainPages:this.pageDomain.count,
         ...(this.nativePageCoordinates ? {uniformVolumePageEdge:this.pageDomain.edge,uniformVolumePagesTotal:1,uniformVolumePagesActive:1} : {}),
-        uniformDomainMigration:this.nativePageCoordinates ? "Native single-page coordinates; all-resident domain" : "Paged fluid and pressure fields; all-resident domain"}:{}),
+        uniformDomainMigration:this.nativePageCoordinates ? "Native single-page coordinates; all-resident domain" : pagedPressure ? "Paged fluid and pressure fields (QA); all-resident domain" : "Paged fluid fields; native pressure workspace; all-resident domain"}:{}),
       ...(this.volumePageConfig ? { uniformVolumePageEdge: this.volumePageEdge, uniformVolumePagesTotal: this.volumePageConfig.count, uniformVolumePageBytes: this.volumeEdges!.size } : {}),
     };
     this.volumeTexture = this.present(this.volumeA);

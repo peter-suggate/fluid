@@ -4,6 +4,11 @@ For the subsequent production MiniDam32 pressure-budget change and its A/B
 results, see [MiniDam32 pressure budget](minidam32-pressure-budget.md). The
 coordinate-only measurements below predate that scheduling change.
 
+The subsequent multi-page pressure work is documented in
+[native pressure results](native-pressure-results.md) and the
+[resident execution design](resident-execution-design.md). The pressure-layout
+change is implemented; production demand-only allocation is still outstanding.
+
 ## Contract
 
 Paging is a storage/residency change. It must not change the pressure unknowns,

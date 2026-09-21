@@ -66,6 +66,7 @@ try{
   for(const mode of (process.env.ARMS??"production").split(",")){
    const solver=await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,
     {...uniformGeometricSolverOptions({},scene),
+     ...(process.env.PRESSURE_STORAGE?{pressureStorageForQA:process.env.PRESSURE_STORAGE as "paged"|"paged-logical",pressureCycleDispatch:"direct" as const}:{}),
      ...(process.env.ONE_CYCLE==='1'?{pressureCycleBudget:'fixed' as const,
       pressureSchedule:{fullCycles:1,vCycles:0,preSweeps:6,postSweeps:6,residualTolerance:10}}:{}),
      ...(process.env.FULL_DOMAIN==='1'?{activeRegion:false,pressureWindow:false}:{}),
@@ -91,7 +92,7 @@ try{
      passesEncoded:solver.info.uniformPressurePassesEncoded,pages:solver.info.uniformVolumePagesActive,transportTiles:solver.info.uniformVolumeTransportWorkgroups,sharpenTiles:solver.info.uniformVolumeSharpenWorkgroups};arms.push(arm);console.log(JSON.stringify({sceneId,fixture:process.env.TILE_EDGE?`single-tile-${process.env.TILE_EDGE}-dam`:sceneId,mode,full_ms:median(full),stages:Object.fromEntries(Object.entries(stages).map(([k,v])=>[k,median(v)])),pages:arm.pages,pressure:solver.info.pressureSolver}));
    }finally{solver.destroy();}
   }
-  results.push({revision,sourceHashes,adapter:adapter.info,asyncDemand:process.env.ASYNC_DEMAND==='1',frames,warmup:4,tileEdge:process.env.TILE_EDGE?Number(process.env.TILE_EDGE):undefined,oneCycle:process.env.ONE_CYCLE==='1',fullDomain:process.env.FULL_DOMAIN==='1',sceneId,fixture:process.env.TILE_EDGE?`single-tile-${process.env.TILE_EDGE}-dam`:sceneId,scope:"Queue-fenced simulation, rendering excluded. Readbacks after timed interval. Production defaults, balanced quality, one advance per 1/30 second.",arms});
+  results.push({revision,sourceHashes,adapter:adapter.info,pressureStorage:process.env.PRESSURE_STORAGE??"native",asyncDemand:process.env.ASYNC_DEMAND==='1',frames,warmup:4,tileEdge:process.env.TILE_EDGE?Number(process.env.TILE_EDGE):undefined,oneCycle:process.env.ONE_CYCLE==='1',fullDomain:process.env.FULL_DOMAIN==='1',sceneId,fixture:process.env.TILE_EDGE?`single-tile-${process.env.TILE_EDGE}-dam`:sceneId,scope:"Queue-fenced simulation, rendering excluded. Readbacks after timed interval. Production defaults, balanced quality, one advance per 1/30 second.",arms});
  }
  assert.deepEqual(errors,[]);
  writeFileSync(process.env.UNIFORM_BENCH_OUTPUT??"/tmp/uniform-long-dam-paging.json",JSON.stringify(results,null,2)+"\n");

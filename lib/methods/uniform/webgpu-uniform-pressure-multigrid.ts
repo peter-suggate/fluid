@@ -145,7 +145,7 @@ export interface UniformPressureMultigridPrograms {
 
 export class WebGPUUniformPressureMultigrid {
   readonly levels: readonly UniformPressureMultigridLevel[];
-  get shaderFragment():string {return this.pagedStorage?uniformPressurePagedShader(uniformPressureMultigridWGSL):uniformPressureMultigridWGSL;}
+  get shaderFragment():string {return this.pagedStorage?uniformPressurePagedShader(uniformPressureMultigridWGSL,this.logicalPageDispatch):uniformPressureMultigridWGSL;}
   private readonly logicalDimensions = new Map<GPUTexture,readonly [number,number,number]>();
   private pressurePublication?: GPUTexture;
   private pressurePublicationPipeline?: GPUComputePipeline;
@@ -216,7 +216,9 @@ export class WebGPUUniformPressureMultigrid {
     deferPlan = false,
     referenceDimension: 2 | 3 = 3,
     private readonly gpuCycleDispatch = false,
-    private readonly pagedStorage = false) {
+    private readonly pagedStorage = false,
+    /** QA attribution: atlas storage with exact logical launches. */
+    private readonly logicalPageDispatch = false) {
     const hierarchy = planUniformCM11aHierarchy(
       dimensions as readonly [number, number, number], referenceDimension);
     if (hierarchy.rejection) throw new RangeError(hierarchy.rejection);
@@ -259,7 +261,7 @@ export class WebGPUUniformPressureMultigrid {
     // The final record in each bank is the single-workgroup coarse solve.
     const records = levels.length + 1;
     const cycleWords = new Uint32Array(records * 9);
-    levels.forEach((level, index) => cycleWords.set(this.pagedStorage?uniformPressurePageWorkgroups(level.dimensions):level.dimensions.map(n => Math.ceil(n / 4)), index * 3));
+    levels.forEach((level, index) => cycleWords.set(this.pagedStorage && !this.logicalPageDispatch?uniformPressurePageWorkgroups(level.dimensions):level.dimensions.map(n => Math.ceil(n / 4)), index * 3));
     cycleWords.set([1, 1, 1], levels.length * 3);
     this.cycleDispatch = device.createBuffer({label: "Uniform GPU pressure cycle dispatch", size: cycleWords.byteLength,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST});
@@ -694,7 +696,7 @@ export class WebGPUUniformPressureMultigrid {
         cycleGate: !["mgPublishCycleDispatch", "mgCheckCycleConvergence", "mgSaveAccepted", "mgRestoreRejected", "mgFinishSafety"].includes(entryPoint)
           ? (recovering ? 2 : (planStage === "full-cycle" || planStage === "v-cycle" ? 1 : 0)) : 0,
         residualCheckpoint: entryPoint === "mgMeasureFineResidual" && control[2] === 1,
-        workgroups: this.pagedStorage && dispatchDimensions.some(n=>n>1)
+        workgroups: this.pagedStorage && !this.logicalPageDispatch && dispatchDimensions.some(n=>n>1)
           ? uniformPressurePageWorkgroups(dispatchDimensions)
           : [Math.ceil(dispatchDimensions[0] / 4), Math.ceil(dispatchDimensions[1] / 4), Math.ceil(dispatchDimensions[2] / 4)],
         ...(entryPoint === "mgSolveCoarsest" ? { coarsestCapture: {
