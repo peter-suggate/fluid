@@ -22,9 +22,9 @@ params.push({kind:"select",key:"redistance",label:"Level-set redistancing",defau
 params.push({kind:"select",key:"sharpeningWorkMap",label:"Sharpening work map",default:"on",tier:"fine",update:"runtime",
   options:[{value:"on",label:"On"},{value:"off",label:"Off"}],
   hint:"Skip sharpening work in 4×4×4 tiles with no cell in the admission band. Identical result to the dense schedule; Off retains the dense control for comparison."});
-params.push({kind:"number",key:"volumeDustThreshold",label:"Volume dust floor",default:1e-6,tier:"fine",update:"runtime",
+params.push({kind:"number",key:"volumeDustThreshold",label:"Volume dust floor",default:1e-3,tier:"fine",update:"runtime",
   min:0,max:1e-3,step:1e-7,digits:7,unit:"cell volumes",
-  hint:"Discard |V| below this wherever transport or sharpening writes V, ULP-scale negatives included. On figure 7 the residue is four fifths of the nonzero cells and a ten-millionth of the mass, and it keeps every tile it touches live. Zero is off and stores the untreated sum bit for bit."});
+  hint:"Discard |V| below this wherever transport or sharpening writes V, ULP-scale negatives included. The 1e-3 default removes residue that keeps transport tiles active; the diagnostics report discarded mass. Zero is off and stores the untreated sum bit for bit."});
 params.push({kind:"select",key:"twoLevelVelocity",label:"Two-level velocity sampler",default:"on",tier:"fine",update:"runtime",
   options:[{value:"on",label:"On"},{value:"off",label:"Off"}],
   hint:"Outside the fine tile map, sample velocity from the 4h face table the extension hierarchy publishes instead of the finest lattice, and let the extension, advection and projection skip the far-air tiles. Off is the all-fine dense control."});

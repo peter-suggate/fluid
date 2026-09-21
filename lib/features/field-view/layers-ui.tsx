@@ -67,6 +67,15 @@ export function VisualLayerRows({ state, onChange, plane, hidePages }: VisualLay
     onClick={() => onChange({ ...state, visible: !state.visible })}
     after={<>{menu}<span className="toolstrip-name">{state.enabled.length} {state.enabled.length === 1 ? "layer" : "layers"}</span></>}
   >
+    {state.visible && !hidePages && state.enabled.includes("pages") && <span
+      aria-label="Domain page states"
+      title="Last-step volume work. Resident pages may also support pressure and the interface. Absent pages are hidden."
+      style={{ display: "inline-flex", gap: 8, fontSize: 11 }}
+    >
+      <span style={{ color: "#1fc7a6" }}>● Transport</span>
+      <span style={{ color: "#f29c29" }}>● Sharpen only</span>
+      <span style={{ color: "#9475c2" }}>● Resident</span>
+    </span>}
     {plane && state.visible && <>
       <ToolstripChoice
         ariaLabel="Field view plane"

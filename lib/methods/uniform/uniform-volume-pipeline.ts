@@ -147,8 +147,8 @@ const volumePressureRowsControl = {kind:"param-choice" as const,param:"volumePre
  * pays half again the levels and twice the passes for the same liquid.
  */
 const transportControls = [
-  {kind:"readout" as const,label:"Field storage",value:()=>"Persistent texture pages",
-    hint:"All fluid, extension and pressure fields use page backing. Transport records use 32³ pages. This is the default for every scene."},
+  {kind:"readout" as const,label:"Field storage",value:()=>"Compiled resident fields",
+    hint:"Complete rectangular resident domains use native textures; transport records retain 32³ pages."},
   {kind:"readout" as const,label:"Resident volume pages",
     hint:"Actual last-stage active page count and total reserved arena capacity for the 80-byte records. Reservation is currently domain-sized; compute work follows active tiles.",
     value:(context: FluidPipelineContext)=>{const info=volumeInfo(context);
@@ -267,8 +267,10 @@ export const UNIFORM_VOLUME_PIPELINE: FluidPipelineGraph = {
     if(["gamma-diffusion","interface-sharpening","sharpening-mass-correction","solid-excess"].includes(stage.id))return [];
     if(stage.id==="density-post-process")return [{...stage,label:"Phi surface publication",phaseLabels:[P.surface.label],
       toggle:undefined,controls:undefined,state:()=>"on" as const,chip:()=>"phi = 0",
-      tip:{summary:"Publish the independent vertex level set in the renderer's dense contour encoding."}}];
-    const mapped={...stage,controls:stage.controls?.filter(control=>!("param" in control &&
+      tip:{summary:"Publish the independent vertex level set in the renderer's dense contour encoding. Native execution overlaps this with projection or rigid coupling; its time is included in that combined stage."}}];
+    const mapped={...stage,phaseLabels:[...(stage.phaseLabels??[]),
+      ...(stage.id==="pressure-projection"?["Pressure projection + surface publication"]:
+        stage.id==="rigid-coupling"?["Rigid coupling + surface publication"]:[])],controls:stage.controls?.filter(control=>!("param" in control &&
       ["pressureCycleBudget","pressureBudgetHeadroom","volumeStorage"].includes(control.param))),tip:{...stage.tip,
       summary:stage.tip.summary.replaceAll("surface density","level-set geometry"),
       reads:stage.tip.reads?.replaceAll("surface density","vertex phi and V")}};
@@ -279,8 +281,8 @@ export const UNIFORM_VOLUME_PIPELINE: FluidPipelineGraph = {
       tip:{...mapped.tip,summary:"Extend nearby velocities with the narrow-band front, then fill missing air velocities from the nearest original source carried through the hierarchy. Keeps distant stationary liquid from slowing falling drops. The final 3D fill also packs the transport field."},
       controls:[{kind:"readout" as const,label:"Air fallback",value:()=>"Nearest source",
         hint:"Enabled by default. Carries original source locations through coarse levels; the front sweep budget is unchanged."},{kind:"readout" as const,label:"Domain authority",value:(context:FluidPipelineContext)=>`Resident pages · ${context.info?.uniformDomainPages??"—"} pages`},
-        {kind:"readout" as const,label:"Missing page reads",value:(context:FluidPipelineContext)=>context.info?.uniformPageMissingReads===undefined?"Pause to sample":`${context.info.uniformPageMissingReads} · fields 0x${(context.info.uniformPageMissingReadFields??0).toString(16)}`,hint:"Sampled on pause; running frames never map solver state. Counts actual root-solver texture reads outside accepted page membership, including interpolation taps. GPU diagnostic only: pressure hierarchy and velocity extension coverage and whole-step rollback remain unfinished."},
-        {kind:"readout" as const,label:"Migration status",value:(context:FluidPipelineContext)=>context.info?.uniformDomainMigration??"Initializing page domain",hint:"Fluid, extension and pressure fields use physical pages. Every authored page remains resident to preserve far-air phi; fluid-driven activation and retirement remain unfinished. Dense publication adapters still serve the renderer."},
+        {kind:"readout" as const,label:"Page coverage",value:(context:FluidPipelineContext)=>context.info?.uniformDomainMigration?.startsWith("Native")?"Compiled complete coverage":context.info?.uniformPageMissingReads===undefined?"Pause to sample":`${context.info.uniformPageMissingReads} · fields 0x${(context.info.uniformPageMissingReadFields??0).toString(16)}`,hint:"Complete rectangular residency is validated before compiling native kernels. The paged QA path instead counts actual texture reads outside accepted membership, sampled on pause."},
+        {kind:"readout" as const,label:"Migration status",value:(context:FluidPipelineContext)=>context.info?.uniformDomainMigration??"Initializing page domain",hint:"Complete rectangular residency compiles to native execution fields. Every authored page remains resident; fluid-driven allocation and retirement remain unfinished."},
         ...(mapped.controls ?? []).filter(control=>
           !(control.kind === "param-choice" && control.param === "activeRegion")
           && !(control.kind === "readout" && control.label === "Work box")),
@@ -294,7 +296,7 @@ export const UNIFORM_VOLUME_PIPELINE: FluidPipelineGraph = {
     // Which cells own a pressure row is decided where the topology and RHS
     // are built, so the V claim sits on that stage.
     if(stage.id==="pressure-system")return [{...mapped,
-      controls:[...(mapped.controls ?? []),volumePressureRowsControl,{kind:"param-choice" as const,param:"surfaceDeficitBalancing",label:"Surface-deficit balancing",options:onOff,hint:"Preserve overfill expansion and balance it globally with contraction in underfilled liquid. Reduces persistent sloshing."},{kind:"readout" as const,label:"Pressure backing",value:()=>"Paged coupled hierarchy"}]}];
+      controls:[...(mapped.controls ?? []),volumePressureRowsControl,{kind:"param-choice" as const,param:"surfaceDeficitBalancing",label:"Surface-deficit balancing",options:onOff,hint:"Preserve overfill expansion and balance it globally with contraction in underfilled liquid. Reduces persistent sloshing."},{kind:"readout" as const,label:"Pressure backing",value:()=>"Native coupled hierarchy"}]}];
     // E2b shrinks both of these, off the same fine map, so the one control sits
     // on both stages rather than in a shelf away from the work it prices.
     if(stage.id==="velocity-advection"||stage.id==="pressure-projection")return [{...mapped,

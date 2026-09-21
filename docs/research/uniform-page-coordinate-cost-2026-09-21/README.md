@@ -216,3 +216,13 @@ in `../uniform-persistent-field-pages.md`; this run alone does not establish
 baseline attribution for every failing lane. The full log remains at
 `/tmp/uniform-native-page-sparse-gate.log`.
 
+
+The next stage is implemented and measured in [native-phi-results.md](native-phi-results.md): native persistent input fields, precompiled phi kernels and a separate velocity-padded phi work window. Fresh whole-advance throughput is 92.8% of main; the remaining phi-stage gap and numerical constraints are reported explicitly.
+
+## Remaining native stages and higher dust floor
+
+See [native stage results](native-stages-results.md) for the extension of native
+execution to root cell operators, velocity extension/hierarchy and surface
+correction, plus the selected 1e-3 dust floor. Removing per-tap audit atomics
+also restores GPU overlap; profiling measures projection and overlapping publication together.
+Actual demand-only field allocation remains explicitly unfinished.

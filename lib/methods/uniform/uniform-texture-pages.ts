@@ -15,13 +15,20 @@ export class UniformTexturePages {
  private initialized=false;
  private readonly publishPipelines=new Map<GPUTextureFormat,GPUComputePipeline>();
  constructor(private readonly device:GPUDevice, private readonly pagedStorage=true){}
- createTexture(descriptor:GPUTextureDescriptor):GPUTexture{
+ /** All fields and hierarchy levels have native storage in this generation. */
+ get nativeStorage():boolean{return !this.pagedStorage;}
+ createTexture(descriptor:GPUTextureDescriptor, native=false):GPUTexture{
   const size=descriptor.size as GPUExtent3DDict;
   const dims:Dims='width' in Object(size)?[size.width,size.height??1,size.depthOrArrayLayers??1]:[...descriptor.size as Iterable<number>] as unknown as Dims;
-  const paged=this.pagedStorage && descriptor.dimension==='3d';
+  const paged=this.pagedStorage && !native && descriptor.dimension==='3d';
   const extent=paged?uniformPressurePageExtent(dims):dims;
   if(extent.some(n=>n>this.device.limits.maxTextureDimension3D)&&paged)throw new RangeError(`Uniform page atlas exceeds texture limits: ${extent}`);
   const texture=this.device.createTexture({...descriptor,size:extent});this.fields.set(texture,{dims,paged});return texture;
+ }
+ createTextureLike(reference:GPUTexture,descriptor:GPUTextureDescriptor):GPUTexture{
+  const field=this.fields.get(reference);
+  if(!field)throw new Error("Texture template must be registered");
+  return this.createTexture(descriptor,!field.paged);
  }
  view(texture:GPUTexture):GPUTextureView{
   const view=texture.createView();this.views.set(view,this.fields.get(texture)??{dims:[texture.width,texture.height,texture.depthOrArrayLayers],paged:false});return view;
@@ -37,7 +44,7 @@ export class UniformTexturePages {
   this.device.queue.writeBuffer(buffer,0,data);this.uniforms.push(buffer);
   return this.device.createBindGroup({...descriptor,entries:[...entries,{binding:BINDING,resource:{buffer}}]});
  }
- shader(source:string, fixedFields:ReadonlyMap<number,GPUTexture>=new Map(), auditPageReads=false):string{
+ shader(source:string, fixedFields:ReadonlyMap<number,GPUTexture>=new Map(), auditPageReads=false, literalLoops=false, directNativeFields=false):string{
   const fields=new Map<string,{binding:number;type:string}>();
   for(const m of source.matchAll(/@group\(0\)\s*@binding\((\d+)\)\s*var\s+(\w+):\s*(texture(?:_storage)?_3d[^;]+);/g))fields.set(m[2]!,{binding:Number(m[1]),type:m[3]!});
   const vector=(d:Dims)=>`vec3u(${d.map(n=>`${n}u`).join(',')})`;
@@ -46,7 +53,9 @@ export class UniformTexturePages {
    throw new Error("Page read auditing requires accepted membership and the root diagnostic buffer");
   let code=source;
   for(const [name,{binding}] of fields)code=code.replace(new RegExp(`textureDimensions\\(${name}(?:,\\s*0)?\\)`,'g'),`uniformFieldPages[${binding}].xyz`);
-  code=rewritePressureTextureCalls(code,fields);
+  const translatedFields=(directNativeFields || this.nativeStorage) && !auditPageReads
+    ? new Map([...fields].filter(([,field])=>!this.nativeStorage && fixed(field.binding)?.paged !== false)) : fields;
+  code=rewritePressureTextureCalls(code,translatedFields);
   let helpers=`\n@group(0) @binding(${BINDING}) var<uniform> uniformFieldPages:array<vec4u,36>;\n${uniformPressurePageAddressWGSL.replaceAll('mgPageAddress','uniformFieldPageAddress')+uniformPressurePageAddressWGSL.replaceAll('mgPageAddress','uniformFieldPageAddressUnchecked').replace(' if(any(p<vec3i(0))||any(p>=vec3i(d))){return vec3i(-1);}','')}\n`;
   for(const [name,{binding,type}] of fields){
    const kind=type.includes('u32')||type.includes('uint')?'u':'f';
@@ -67,7 +76,7 @@ export class UniformTexturePages {
     ? `fn ${name}Store(p:vec3i,value:vec4${kind}){${at} if(any(at<vec3i(0))){return;}textureStore(${name},at,value);}\n`
     : `fn ${name}Load(p:vec3i)->vec4${kind}{${audit}${address} ${guard}return textureLoad(${name},at,0);}\n`;
   }
-  return uniformFieldRuntimeLoops(code)+helpers;
+  return (literalLoops?code:uniformFieldRuntimeLoops(code))+helpers;
  }
  upload(texture:GPUTexture,values:Float32Array):void{
   const field=this.fields.get(texture);if(!field)throw new Error('Upload requires a registered field');

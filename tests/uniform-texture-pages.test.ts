@@ -44,3 +44,33 @@ test("nested field loops keep their trip counts in immutable runtime metadata",a
  for(const unchanged of ['for(var i=0u;i<16u;i++){}','for(var i=0u;i<=8u;i++){}','for(var i=0u;j<8u;i++){}','for(var i=0.0;i<8.0;i+=1.0){}'])
   assert.equal(uniformFieldRuntimeLoops(unchanged),unchanged);
 });
+
+test("native persistent fields and correction scratch share a direct layout",()=>{
+ const device={limits:{maxTextureDimension3D:2048},createTexture(descriptor:GPUTextureDescriptor){
+  const [width,height,depthOrArrayLayers]=descriptor.size as number[];
+  return {width,height,depthOrArrayLayers,format:descriptor.format,label:descriptor.label} as GPUTexture;
+ }} as unknown as GPUDevice;
+ const pages=new UniformTexturePages(device);
+ const descriptor:GPUTextureDescriptor={size:[41,21,17],dimension:'3d',format:'r32float',usage:0};
+ const phi=pages.createTexture(descriptor,true),scratch=pages.createTextureLike(phi,descriptor);
+ assert.deepEqual([scratch.width,scratch.height,scratch.depthOrArrayLayers],[41,21,17]);
+ const source='@group(0) @binding(31) var uvPhiIn:texture_3d<f32>; fn sample(p:vec3i)->f32{return textureLoad(uvPhiIn,p,0).x;}';
+ const code=pages.shader(source,new Map([[31,phi]]),false,true);
+ assert.match(code,/fn uvPhiInLoad\(p:vec3i\)->vec4f\{let at=p; return textureLoad\(uvPhiIn,at,0\);\}/);
+ assert.equal(pages.publication(phi),phi,"native phi has no publication copy");
+ const direct=pages.shader(source,new Map([[31,phi]]),false,true,true);
+ assert.match(direct,/fn sample\(p:vec3i\)->f32\{return textureLoad\(uvPhiIn,p,0\).x;\}/);
+});
+
+
+test("native generations remove addressing wrappers even for rebound hierarchy textures",()=>{
+ const pages=new UniformTexturePages({} as GPUDevice,false);
+ for(const source of [createUniformReferenceComputeShader(true),uniformVelocityExtrapolationShader,uniformSurfaceVolumeWGSL]){
+  const result=pages.shader(source),operators=result.slice(0,result.indexOf("@group(0) @binding(34)"));
+  const fields=[...source.matchAll(/var\s+(\w+):\s*texture(?:_storage)?_3d/g)].map(m=>m[1]!);
+  for(const name of fields){
+   assert.doesNotMatch(operators,new RegExp(`\\b${name}(?:Load|Store)\\(`),name);
+  }
+  assert.doesNotMatch(operators,/uniformFieldPageAddress/);
+ }
+});

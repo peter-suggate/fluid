@@ -406,7 +406,7 @@ export class WebGPUUniformVelocityExtrapolator {
   }
 
   private workgroups(dims: Dims3): [number,number,number] {
-    return this.fieldPages ? uniformVelocityPageWorkgroups(dims) : dims.map(n=>Math.ceil(n/4)) as [number,number,number];
+    return this.fieldPages && !this.fieldPages.nativeStorage ? uniformVelocityPageWorkgroups(dims) : dims.map(n=>Math.ceil(n/4)) as [number,number,number];
   }
 
   async initialize(signal?: AbortSignal): Promise<void> {
@@ -414,7 +414,7 @@ export class WebGPUUniformVelocityExtrapolator {
     const compiler = gpuCompilationManagerFor(this.device);
     const shaderModule = compiler.createShaderModule({
       label: "Uniform Sec. 3.3 extrapolation kernels",
-      code: this.fieldPages?.shader(uniformVelocityPagedShader(uniformVelocityExtrapolationShader,this.dims,this.pageDomain)) ?? uniformVelocityExtrapolationShader,
+      code: this.fieldPages?.shader(this.fieldPages.nativeStorage ? uniformVelocityExtrapolationShader : uniformVelocityPagedShader(uniformVelocityExtrapolationShader,this.dims,this.pageDomain),new Map(),false,this.fieldPages.nativeStorage) ?? uniformVelocityExtrapolationShader,
     });
     const compile = (label: string, entryPoint: string) => compiler.compileComputePipeline({
       label, layout: this.pipelineLayout, compute: { module: shaderModule, entryPoint, constants: {

@@ -17,7 +17,7 @@ import { methodViewShaderConstants } from "./grid-overlay-visualizations";
 import {
   SOLVE_WINDOW_BOX_WORD, SOLVE_WINDOW_HOST_GROUPS_WORD, SOLVE_WINDOW_RECORD_WORDS, SOLVE_WINDOW_SEED_WORD,
   TILE_CLASS_FINE, TILE_CLASS_RECORD_CLASS_WORD, TILE_CLASS_RECORD_WORDS, TILE_CLASS_SHELL,
-  type GPUFluidViewRecords,
+  type GPUFluidViewRecords, type GPUFluidVolumePageSource,
 } from "./method-view-records";
 
 /**
@@ -26,8 +26,17 @@ import {
  */
 export const gridOverlayViewRecordsWGSL = /* wgsl */ `
 ${visualLayerPaintWGSL}
-struct LayerUniforms { control:vec4f, opacity:array<vec4f,3>, pressureOrigin:vec4f, }
+struct LayerUniforms { control:vec4f, opacity:array<vec4f,3>, pressureOrigin:vec4f, pageActivity:vec4f, }
 @group(0) @binding(24) var<uniform> layers:LayerUniforms;
+fn pageActivityAt(cell:vec3i,base:u32)->bool {
+  if(base==0u || arrayLength(&viewRecords)<base+8u){return false;}
+  let edge=viewRecords[base];
+  if(edge==0u || any(cell<vec3i(0))){return false;}
+  let pd=vec3u(viewRecords[base+1u],viewRecords[base+2u],viewRecords[base+3u]);
+  let q=vec3u(cell)/edge;
+  if(any(q>=pd)){return false;}
+  return viewRecords[base+8u+q.x+pd.x*(q.y+pd.y*q.z)]!=0u;
+}
 var<private> layerMode:i32;
 var<private> recordComposition:bool;
 var<private> recordWindowPresent:bool;
@@ -1362,13 +1371,17 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
       if(any(q>=pd)){return GridSample(vec3f(0),0.0,0.0,false);}
       let page=q.x+pd.x*(q.y+pd.y*q.z);
       let live=viewRecords[base+8u+page]!=0u;
-      let slot=viewRecords[base+8u+pd.x*pd.y*pd.z+page];
-      fill=sceneColor(mix(vec3f(0.42,0.27,0.72),vec3f(0.72,0.62,0.93),f32(slot%7u)/6.0));
-      alpha=select(0.0,0.35,live);sampleDot=0.0;lineStrength=0.0;
+      if(!live){return GridSample(vec3f(0),0.0,0.0,false);}
+      // Activity grids can use a different edge from the residency catalogue.
+      let transport=pageActivityAt(cell,u32(layers.pageActivity.x));
+      let work=pageActivityAt(cell,u32(layers.pageActivity.y));
+      fill=sceneColor(select(vec3f(0.58,0.46,0.76),
+        select(vec3f(0.95,0.61,0.16),vec3f(0.12,0.78,0.65),transport),transport||work));
+      alpha=select(0.08,0.42,transport||work);sampleDot=0.0;lineStrength=0.0;
       let pageFraction=fract(samplePosition/f32(edge));
       let pageDistance=min(min(pageFraction.x,1.0-pageFraction.x)*f32(edge)/derivative.x,
         min(pageFraction.y,1.0-pageFraction.y)*f32(edge)/derivative.y);
-      viewBoundary=gridLinePaint(pageDistance,1.5)*select(0.15,1.0,live);
+      viewBoundary=gridLinePaint(pageDistance,1.5)*select(0.3,1.0,transport||work);
       liquidContour=sliceZeroContour(vec3f(fineOrigin)+local3,derivative);
     } else if (fieldMode == 22 && !sparseGridEnabled()) {
       // One class per 4^3 tile, from the step just taken. Far air keeps only
@@ -1780,7 +1793,7 @@ fn volumeField(uv:vec2f)->vec4f {
 export class GridOverlayPipeline {
   private readonly layerUniform: GPUBuffer;
   private layerRecords?: GPUBuffer;
-  private layerSources?: { tiles?: GPUFluidViewRecords; window?: GPUFluidViewRecords; boundary?: GPUBufferBinding; boundaryOffset: number; pages?: GPUFluidViewRecords; pageOffset: number };
+  private layerSources?: { tiles?: GPUFluidViewRecords; window?: GPUFluidViewRecords; boundary?: GPUBufferBinding; boundaryOffset: number; pages?: GPUFluidVolumePageSource; pageOffset: number; transportOffset: number; workOffset: number };
   private pipeline?: GPURenderPipeline;
   private bindGroup?: GPUBindGroup;
   private volume?: GPUTexture;
@@ -1806,7 +1819,7 @@ export class GridOverlayPipeline {
     private readonly uniformBuffer: GPUBuffer,
     private readonly bodyBuffer: GPUBuffer
   ) {
-    this.layerUniform = device.createBuffer({ label: "Visual layer selection", size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.layerUniform = device.createBuffer({ label: "Visual layer selection", size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.sparseDummyParams = device.createBuffer({
       label: "Grid overlay empty sparse parameters",
       size: 256,
@@ -1891,8 +1904,8 @@ export class GridOverlayPipeline {
     this.rebuildBindGroup();
   }
 
-  setLayers(state: VisualLayerState | undefined, tiles?: GPUFluidViewRecords, window?: GPUFluidViewRecords, pressureOrigin?: readonly [number, number, number], boundary?: GPUBufferBinding, pages?: GPUFluidViewRecords) {
-    const values = new Float32Array(20);
+  setLayers(state: VisualLayerState | undefined, tiles?: GPUFluidViewRecords, window?: GPUFluidViewRecords, pressureOrigin?: readonly [number, number, number], boundary?: GPUBufferBinding, pages?: GPUFluidVolumePageSource) {
+    const values = new Float32Array(24);
     if (pressureOrigin) values.set(pressureOrigin, 16);
     if (state) {
       tiles = state.visible && state.enabled.includes("tiles") ? tiles : undefined;
@@ -1908,12 +1921,19 @@ export class GridOverlayPipeline {
       const pageOffset = boundaryOffset + boundaryBytes;
       const pageBytes = pages ? (pages.records.size ?? pages.records.buffer.size - (pages.records.offset ?? 0)) : 0;
       values[3] = pages ? pageOffset / 4 : 0;
-      const bytes = pageOffset + pageBytes;
+      const transportOffset = pageOffset + pageBytes;
+      const transport = pages?.transportRecords, work = pages?.workRecords;
+      const transportBytes = transport ? (transport.size ?? transport.buffer.size - (transport.offset ?? 0)) : 0;
+      const workOffset = transportOffset + transportBytes;
+      const workBytes = work ? (work.size ?? work.buffer.size - (work.offset ?? 0)) : 0;
+      values[20] = transport ? transportOffset / 4 : 0;
+      values[21] = work ? workOffset / 4 : 0;
+      const bytes = workOffset + workBytes;
       if (!this.layerRecords || this.layerRecords.size < bytes) {
         this.layerRecords?.destroy();
         this.layerRecords = this.device.createBuffer({ label: "Composed visual records", size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
       }
-      this.layerSources = { tiles, window, boundary, boundaryOffset, pages, pageOffset };
+      this.layerSources = { tiles, window, boundary, boundaryOffset, pages, pageOffset, transportOffset, workOffset };
       this.setViewRecords({ records: { buffer: this.layerRecords } });
     } else this.layerSources = undefined;
     this.device.queue.writeBuffer(this.layerUniform, 0, values);
@@ -2004,8 +2024,11 @@ export class GridOverlayPipeline {
   encode(encoder: GPUCommandEncoder, target: GPUTextureView): boolean {
     if (!this.pipeline || !this.bindGroup) return false;
     if (this.layerSources && this.layerRecords) {
-      const { tiles, window, boundary, boundaryOffset, pages, pageOffset } = this.layerSources;
+      const { tiles, window, boundary, boundaryOffset, pages, pageOffset, transportOffset, workOffset } = this.layerSources;
       if (pages) encoder.copyBufferToBuffer(pages.records.buffer, pages.records.offset ?? 0, this.layerRecords, pageOffset, pages.records.size ?? pages.records.buffer.size - (pages.records.offset ?? 0));
+      for (const [source, offset] of [[pages?.transportRecords, transportOffset], [pages?.workRecords, workOffset]] as const) {
+        if (source) encoder.copyBufferToBuffer(source.buffer, source.offset ?? 0, this.layerRecords, offset, source.size ?? source.buffer.size - (source.offset ?? 0));
+      }
       if (boundary) encoder.copyBufferToBuffer(boundary.buffer, boundary.offset ?? 0, this.layerRecords, boundaryOffset, boundary.size ?? boundary.buffer.size - (boundary.offset ?? 0));
       if (window) encoder.copyBufferToBuffer(window.records.buffer, window.records.offset ?? 0, this.layerRecords, 0, SOLVE_WINDOW_RECORD_WORDS * 4);
       if (tiles) encoder.copyBufferToBuffer(tiles.records.buffer, tiles.records.offset ?? 0, this.layerRecords, 1024, tiles.records.size ?? tiles.records.buffer.size - (tiles.records.offset ?? 0));

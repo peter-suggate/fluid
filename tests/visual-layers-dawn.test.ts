@@ -43,13 +43,15 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
     device.queue.writeBuffer(boundary, 0, new Float32Array(48).fill(0.8));
     const pages = device.createBuffer({ size: 40, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(pages, 0, new Uint32Array([16, 1, 1, 1, 1, 0, 0, 0, 1, 0]));
+    const activity = device.createBuffer({ size: 40, usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(activity, 0, new Uint32Array([16, 1, 1, 1, 1, 0, 0, 0, 1, 0]));
     const pipeline = new GridOverlayPipeline(device, "rgba8unorm", uniform, bodies); await pipeline.initialize();
     pipeline.setVolume(volume, base, cells, velocity, cells, volume, pressure, volume);
     pipeline.setDenseLevelSetVolumeSource({ vertexPhi: phi, openFraction: open, cellSize_m: [1, 1, 1] });
     const target = device.createTexture({ size: [64, 64], format: "rgba8unorm", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
     const readback = device.createBuffer({ size: 64 * 256, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-    async function draw(state: VisualLayerState, withBoundary = true, origin: [number, number, number] = [0, 0, 0], withPages = true) {
-      pipeline.setLayers(state, { records: { buffer: tiles } }, { records: { buffer: window } }, origin, withBoundary ? { buffer: boundary } : undefined, withPages ? { records: { buffer: pages } } : undefined);
+    async function draw(state: VisualLayerState, withBoundary = true, origin: [number, number, number] = [0, 0, 0], withPages = true, activityState: "idle" | "transport" | "sharpen" = "idle") {
+      pipeline.setLayers(state, { records: { buffer: tiles } }, { records: { buffer: window } }, origin, withBoundary ? { buffer: boundary } : undefined, withPages ? { records: { buffer: pages }, transportRecords: activityState === "transport" ? { buffer: activity } : undefined, workRecords: activityState === "sharpen" ? { buffer: activity } : undefined } : undefined);
       const encoder = device!.createCommandEncoder();
       const clear = encoder.beginRenderPass({ colorAttachments: [{ view: target.createView(), loadOp: "clear", storeOp: "store", clearValue: [0, 0, 0, 0] }] }); clear.end();
       assert.equal(pipeline.encode(encoder, target.createView()), true);
@@ -59,6 +61,15 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
     assert.ok((await draw(visualLayers([]))).every(n => n === 0));
     for (const layer of VISUAL_LAYERS) { const pixels = await draw(visualLayers([layer.id])); assert.ok(pixels.some(n => n !== 0), `${layer.id} must draw`); }
     assert.ok((await draw(visualLayers(["pages"]), true, [0, 0, 0], false)).every(n => n === 0), "absent page records must not invent residency");
+    const idle = await draw(visualLayers(["pages"]));
+    const transport = await draw(visualLayers(["pages"]), true, [0,0,0], true, "transport");
+    const sharpen = await draw(visualLayers(["pages"]), true, [0,0,0], true, "sharpen");
+    assert.notDeepEqual(idle, transport, "transport activity differs from idle residency");
+    assert.notDeepEqual(idle, sharpen, "sharpen activity differs from idle residency");
+    assert.notDeepEqual(transport, sharpen, "active states have distinct colours");
+    device.queue.writeBuffer(pages, 8*4, new Uint32Array([0]));
+    assert.ok((await draw(visualLayers(["pages"]), true, [0,0,0], true, "transport")).every(n => n === 0), "nonresident pages draw neither fill, outline nor contour even with stale activity");
+    device.queue.writeBuffer(pages, 8*4, new Uint32Array([1]));
     const combined = await draw(visualLayers(VISUAL_LAYERS.map(l => l.id)));
     assert.notDeepEqual(combined, await draw(visualLayers(["volume"])));
     assert.ok((await draw({ ...visualLayers(["volume"]), visible: false })).every(n => n === 0));

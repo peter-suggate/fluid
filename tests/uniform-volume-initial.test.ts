@@ -56,7 +56,7 @@ test("the sharpening work map is the live default, with the dense schedule retai
 });
 test("the volume dust floor is a live number surfaced on the transport stage",()=>{
   const spec=uniformVolumeMethod.params.find(p=>p.key==="volumeDustThreshold");
-  assert.ok(spec?.kind==="number");assert.equal(spec.default,1e-6);assert.equal(spec.min,0);
+  assert.ok(spec?.kind==="number");assert.equal(spec.default,1e-3);assert.equal(spec.min,0);
   // Zero must remain reachable: it is the bit-identical control arm.
   assert.equal(resolveMethodValues(uniformVolumeMethod,"balanced",{volumeDustThreshold:0}).volumeDustThreshold,0);
   assert.ok(uniformVolumeMethod.runtimeParamKeys?.includes("volumeDustThreshold"));

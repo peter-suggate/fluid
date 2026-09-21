@@ -1,4 +1,4 @@
-import { uniformPageHasNativeCoordinates } from "./uniform-page-execution";
+import { uniformPageHasNativeCoordinates, uniformPageHasRectangularCoverage } from "./uniform-page-execution";
 import { UniformPageDomainPublication } from "./uniform-page-domain-publication";
 import { UniformTexturePages } from "./uniform-texture-pages";
 import {initialUniformPageDomain,type UniformPageDomain} from "./uniform-page-domain";
@@ -88,8 +88,14 @@ export interface WebGPUUniformReferenceOptions {
   volumePages?: 16 | 32 | "auto";
   /** Production Uniform Geometric domain; false exists only for the numerical oracle. */
   pageDomain?: boolean;
-  /** QA oracle: same page operators and shader interface, dense physical backing. */
-  fieldStorageForQA?: "dense";
+  /** QA backing oracle; complete rectangular production residency uses native fields. */
+  fieldStorageForQA?: "dense" | "paged";
+  /** Full-domain oracle for the separately compiled vertex work window. */
+  phiWindowForQA?: false;
+  /** Former field atlas and vertex traversal retained for identical-input QA. */
+  phiStorageForQA?: "paged";
+  phiReadAuditForQA?: boolean;
+  phiLiteralLoopsForQA?: boolean;
   /** QA-only former pressure layouts; production uses native execution fields. */
   pressureStorageForQA?: "paged" | "paged-logical";
   /** Internal scheduling oracle; paged work is the production default. */
@@ -471,9 +477,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private volumeEdges?: GPUBuffer;
   private readonly pageDomain?: UniformPageDomain;
   private readonly nativePageCoordinates: boolean = false;
+  private readonly nativeRootExecution: boolean = false;
   private readonly pageDomainPublication?: UniformPageDomainPublication;
   private readonly pageDomainDispatch?: GPUBuffer;
   private readonly pageDomainView?: GPUBuffer;
+  private readonly volumeTransportPageView?: GPUBuffer;
   private readonly volumePageEdge: 0 | 16 | 32;
   private readonly volumePageConfig?: UniformVolumePageShaderOptions;
   private readonly volumeWorkDispatch?: GPUBuffer;
@@ -484,6 +492,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private volumePipelines: Partial<Record<typeof UNIFORM_VOLUME_ENTRIES[number], GPUComputePipeline>> = {};
   private phiReverseGroup?: GPUBindGroup;
   private readonly shaderSource: string;
+  private readonly phiShaderSource?: string;
+  private readonly phiRedistanceShaderSource?: string;
+  private readonly phiRegion?: GPUBuffer;
+  private readonly phiDispatch?: GPUBuffer;
+  private readonly groupDescriptors = new WeakMap<GPUBindGroup, GPUBindGroupDescriptor>();
+  private readonly phiGroups = new Map<GPUBindGroup, GPUBindGroup>();
   private readonly pressureInputLayout: GPUBindGroupLayout;
   readonly volumeTexture: GPUTexture;
   get surfaceFieldTexture(): GPUTexture {
@@ -781,8 +795,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     if (this.geometricVolume && options.pageDomain) {
       this.pageDomain = initialUniformPageDomain([nx, ny, nz]);
       this.nativePageCoordinates = uniformPageHasNativeCoordinates(this.pageDomain);
-      if (!this.nativePageCoordinates) this.fieldPages = new UniformTexturePages(device, options.fieldStorageForQA !== "dense");
+      if (!this.nativePageCoordinates) this.fieldPages = new UniformTexturePages(device,
+        options.fieldStorageForQA === "paged" || options.phiStorageForQA === "paged" ||
+        (options.fieldStorageForQA !== "dense" && !uniformPageHasRectangularCoverage(this.pageDomain)));
     }
+    this.nativeRootExecution = this.nativePageCoordinates || this.fieldPages?.nativeStorage === true;
     this.volumePageEdge = this.geometricVolume && options.referenceDimension !== 2 && !this.nativePageCoordinates
       ? options.volumePages === "auto" ? (Math.max(nx,ny,nz)>64 ? 32 : 0) : options.volumePages ?? 0
       : 0;
@@ -826,8 +843,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.negativeBoundaryVelocityBytes = allocation.boundaryVelocityBytes;
     const usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING
       | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST;
-    const texture3d = (label: string, format: GPUTextureFormat, size: GPUExtent3D) =>
-      (this.fieldPages ?? device).createTexture({ label, size, dimension: "3d", format, usage });
+    const texture3d = (label: string, format: GPUTextureFormat, size: GPUExtent3D, native=false) =>
+      this.fieldPages ? this.fieldPages.createTexture({ label, size, dimension: "3d", format, usage },native)
+        : device.createTexture({ label, size, dimension: "3d", format, usage });
     const velocity = (label: string) => texture3d(label, "rgba32float", allocation.velocityExtent);
     const scalar = (label: string) => texture3d(label, "r32float", allocation.volumeExtent);
     this.velocityA = velocity("Uniform reference velocity A");
@@ -856,9 +874,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.gammaA = scalar("Uniform reference transport gamma A");
     this.gammaB = scalar("Uniform reference transport gamma B");
     if (this.geometricVolume) {
-      this.vertexPhiField = texture3d("Uniform Geometric vertex phi", "r32float", [nx + 1, ny + 1, nz + 1]);
-      this.vertexPhiScratch = texture3d("Uniform Geometric vertex phi scratch", "r32float", [nx + 1, ny + 1, nz + 1]);
-      const edgeBytes = this.volumePageEdge ? paddedPageCells * UNIFORM_VOLUME_EDGE_BYTES : nx * ny * nz * UNIFORM_VOLUME_EDGE_BYTES;
+      this.vertexPhiField = texture3d("Uniform Geometric vertex phi", "r32float", [nx + 1, ny + 1, nz + 1],options.phiStorageForQA !== "paged");
+      this.vertexPhiScratch = texture3d("Uniform Geometric vertex phi scratch", "r32float", [nx + 1, ny + 1, nz + 1],options.phiStorageForQA !== "paged");
+      const edgeBytes = this.volumePageEdge && !this.nativeRootExecution ? paddedPageCells * UNIFORM_VOLUME_EDGE_BYTES : nx * ny * nz * UNIFORM_VOLUME_EDGE_BYTES;
       if (edgeBytes > device.limits.maxStorageBufferBindingSize || edgeBytes > device.limits.maxBufferSize)
         throw new Error(`Uniform Geometric receiver stencils require ${edgeBytes} bytes, exceeding the device limit`);
       this.denseLevelSetVolumeSource = { vertexPhi: this.present(this.vertexPhiField), openFraction: this.present(this.gammaB),
@@ -893,7 +911,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         pressureProjection: velocity("Uniform audit velocity after pressure projection"),
       });
     }
-    this.params = device.createBuffer({ label: "Uniform reference parameters", size: 208, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.params = device.createBuffer({ label: "Uniform reference parameters", size: 208, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     const packSolidVoxels = (source: SceneDescription): Uint32Array => {
       const world = solidWorldForScene(source);
       const sx = nx + 2, sy = ny + 2, sz = nz + 2;
@@ -916,11 +934,20 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
     });
     const activeSummaryCount = Math.ceil(nx / 4) * Math.ceil(ny / 4) * Math.ceil(nz / 4);
-    const activeSummaryBytes = this.pageDomain ? 0 : activeSummaryCount * UNIFORM_ACTIVE_SUMMARY_BYTES;
+    const phiWindow = this.fieldPages && this.pageDomain && uniformPageHasRectangularCoverage(this.pageDomain)
+      && options.phiStorageForQA !== "paged" && options.phiWindowForQA !== false && options.phiReadAuditForQA !== true && this.volumeDustThreshold > 0;
+    if(phiWindow){
+      this.phiRegion=device.createBuffer({label:"Compiled phi execution region",size:this.activeRegion.size,
+        usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
+      this.phiDispatch=device.createBuffer({label:"Compiled phi vertex dispatch",size:activeRegionBytes,
+        usage:GPUBufferUsage.INDIRECT|GPUBufferUsage.COPY_DST});
+      device.queue.writeBuffer(this.phiRegion,activeRegionBytes,this.pageDomain!.words.buffer);
+    }
+    const activeSummaryBytes = this.pageDomain && !phiWindow ? 0 : activeSummaryCount * UNIFORM_ACTIVE_SUMMARY_BYTES;
     this.solidVoxelScratchOffsetWords = (activeRegionBytes + activeSummaryBytes) / 4;
     this.activeScratch = device.createBuffer({
       label: "Uniform reference active liquid census scratch and summaries",
-      size: activeRegionBytes + activeSummaryBytes + packedSolidVoxels.byteLength,
+      size: activeRegionBytes + (this.volumeTransportPageView?.size ?? 0) + activeSummaryBytes + packedSolidVoxels.byteLength,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
     });
     device.queue.writeBuffer(this.activeScratch, this.solidVoxelScratchOffsetWords * 4,
@@ -933,21 +960,23 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     if(this.pageDomain){
       device.queue.writeBuffer(this.activeRegion,activeRegionBytes,this.pageDomain.words.buffer);
       this.pageDomainPublication=new UniformPageDomainPublication(device,this.pageDomain,this.activeRegion);
-      if (!this.nativePageCoordinates) this.pageDomainDispatch=this.pageDomainPublication.dispatch;
+      if (!this.nativeRootExecution) this.pageDomainDispatch=this.pageDomainPublication.dispatch;
       this.pageDomainView=this.pageDomainPublication.view;
     }
     // Created before the extrapolator: the extension binds it read_write to
     // read the tile classes and to publish the 4h face table the sampler reads.
-    const balanceRecords = this.pageDomain && !this.nativePageCoordinates ? this.pageDomain.capacity * (this.pageDomain.edge / 4) ** 3 : tileRecords;
+    const balanceRecords = this.pageDomain && !this.nativeRootExecution ? this.pageDomain.capacity * (this.pageDomain.edge / 4) ** 3 : tileRecords;
     this.surfaceDeficitBalanceBytes = this.geometricVolume ? (2 + 2 * balanceRecords) * 4 : 0;
     const pageBaseBytes = allocation.conditioningBytes + this.surfaceDeficitBalanceBytes;
     if (this.volumePageEdge) this.volumePageConfig = {
       edge: this.volumePageEdge, base: pageBaseBytes / 4,
+      nativeRecords: this.nativeRootExecution,
       work: Math.max(nx,ny,nz)>64 && options.volumePageWork !== false,
       count: [nx, ny, nz].reduce((n, d) => n * Math.ceil(d / this.volumePageEdge), 1),
     };
     const pageBytes = this.volumePageConfig ? 4 * (8 + 2 * this.volumePageConfig.count + (this.volumePageConfig.work ? 1 + tileRecords : 0)) : 0;
     if(this.volumePageConfig){
+      this.volumeTransportPageView=device.createBuffer({label:"Transport page activity",size:4*(8+2*this.volumePageConfig.count),usage:GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
       this.volumePageSharpenFlag=device.createBuffer({label:"Uniform sharpening phase flag",size:4,usage:GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
       device.queue.writeBuffer(this.volumePageSharpenFlag,0,new Uint32Array([1]));
     }
@@ -956,12 +985,29 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       device.queue.writeBuffer(this.volumeWorkDispatch,0,new Uint32Array([0,1,1]));
       this.volumeWorkCounts=device.createBuffer({label:"Uniform volume work counters",size:8,usage:GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
     }
-    const source = this.geometricVolume ? createUniformReferenceComputeShader(true, options.referenceDimension ?? 3, this.volumePageConfig,this.nativePageCoordinates ? undefined : this.pageDomain) : uniformReferenceComputeShader;
-    this.shaderSource = this.fieldPages?.shader(source,new Map([
+    const source = this.geometricVolume ? createUniformReferenceComputeShader(true, options.referenceDimension ?? 3, this.volumePageConfig,this.nativeRootExecution ? undefined : this.pageDomain) : uniformReferenceComputeShader;
+    const fixedFields = new Map([
       [0,this.velocityA],[1,this.velocityB],[3,this.pressureB],[4,this.volumeA],[5,this.volumeB],
       [12,this.velocityC],[13,this.velocityD],[14,this.transportA],[16,this.surfaceA],
       [20,this.surfaceA],[24,this.gammaA],[25,this.gammaB],[31,this.vertexPhiField!],[32,this.vertexPhiScratch!],
-    ]),!!this.pageDomain) ?? source;
+    ]);
+    this.shaderSource = this.fieldPages?.shader(source,fixedFields,!!this.pageDomain && !this.nativeRootExecution,this.nativeRootExecution) ?? source;
+    if (this.fieldPages && options.phiStorageForQA !== "paged" && this.pageDomain && uniformPageHasRectangularCoverage(this.pageDomain)) {
+      // The accepted catalogue is currently the complete rectangular domain.
+      // Phi owns native persistent fields; no per-step atlas packing is needed.
+      const phiSource = options.phiReadAuditForQA === true
+        ? createUniformReferenceComputeShader(true,options.referenceDimension ?? 3,this.volumePageConfig,this.pageDomain)
+          .replace("return pageDomainVertex(gid);", "return vec3i(gid);")
+        : this.phiRegion
+        ? createUniformReferenceComputeShader(true,options.referenceDimension ?? 3,this.volumePageConfig)
+        : source.replace("return pageDomainVertex(gid);", "return vec3i(gid);");
+      // Native literal interpolation keeps dense throughput. Runtime loops did
+      // not reduce the frozen-input rounding discrepancy at the high dust floor.
+      this.phiShaderSource = this.fieldPages.shader(phiSource,fixedFields,options.phiReadAuditForQA === true,options.phiLiteralLoopsForQA !== false,true);
+      // Preserve the iterative closest-point loop form: full unrolling changes
+      // near-degenerate injected-surface cases under Metal optimization.
+      this.phiRedistanceShaderSource = this.fieldPages.shader(phiSource,fixedFields,options.phiReadAuditForQA === true,false,true);
+    }
     this.conditioningScratch = device.createBuffer({ label: "Uniform reference compatibility scratch", size: pageBaseBytes + pageBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.velocityExtrapolator = new WebGPUUniformVelocityExtrapolator(
       device, [nx, ny, nz], [
@@ -972,7 +1018,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.velocityA, this.velocityC, this.transportA, this.transportB,
       this.activeRegion, this.conditioningScratch,
       this.activeRegionEnabled ? this.activeDispatch : undefined,
-      options.sourceAwareExtension ?? this.geometricVolume, options.fuseExtensionPack, this.fieldPages, this.pageDomain, this.pageDomainDispatch,
+      options.sourceAwareExtension ?? this.geometricVolume, options.fuseExtensionPack, this.fieldPages, this.nativeRootExecution ? undefined : this.pageDomain, this.pageDomainDispatch,
     );
     // Without a ceil(n/4) hierarchy level there is no 4h field to sample.
     if (!this.velocityExtrapolator.coarseVelocityTableAvailable) this.twoLevelTileCount = 0;
@@ -1181,6 +1227,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB,
       this.heightB, this.heightA, this.velocityA, this.velocityA, this.transportA, this.volumeA,
       this.gammaA, this.gammaB, this.boundaryVelocityA, this.boundaryVelocityB, this.volumeA, true);
+    if(this.phiRegion)for(const original of [this.densityTraceGroup,this.densityGatherGroup,this.phiReverseGroup!,this.reductionGroup]){
+      const descriptor=this.groupDescriptors.get(original)!;
+      this.phiGroups.set(original,this.createPageAwareGroup({...descriptor,entries:[...descriptor.entries].map(entry=>
+        entry.binding===29?{binding:29,resource:{buffer:this.phiRegion!}}:entry)}));
+    }
+
     const count = nx * ny * nz;
     this.info = {
       nx, ny, nz, storedNy: ny, cellCount: count, equivalentUniformCells: count,
@@ -1190,7 +1242,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       pressureIterations: 0, pressureSolver: `CM11a ${pagedPressure ? "paged (QA)" : this.pageDomain ? "native-page" : "dense"} LCP multigrid (${this.pressureSchedule.fullCycles} Full-Cycles + ${this.pressureSchedule.vCycles} V-Cycles, ${this.pressureSchedule.preSweeps}/${this.pressureSchedule.postSweeps} pre/post PRBGS)`,
       allocatedBytes: allocation.allocatedBytes + 8 + pageBytes + (this.volumeWorkDispatch?20:0) + (this.volumePageSharpenFlag?4:0) + this.surfaceDeficitBalanceBytes + this.pressureMultigrid.allocatedBytes
         + (this.geometricVolume ? 8 * (nx+1)*(ny+1)*(nz+1) + count*24 + (this.volumeEdges?.size ?? 0) + 12 : 0)
-        + activeRegionBytes * 3 + (this.pageDomain ? this.pageDomain.words.byteLength + 32 + (this.pageDomainView?.size??0) : 0) + activeSummaryBytes + packedSolidVoxels.byteLength
+        + activeRegionBytes * 3 + (this.phiRegion?.size ?? 0) + (this.phiDispatch?.size ?? 0) + (this.pageDomain ? this.pageDomain.words.byteLength + 32 + (this.pageDomainView?.size??0) : 0) + (this.volumeTransportPageView?.size ?? 0) + activeSummaryBytes + packedSolidVoxels.byteLength
         + (this.symmetryStageAuditMacCormackBuffer ? 0 : 16), quality,
       submittedTime_s: 0, simulatedTime_s: 0, completedTime_s: 0,
       simulationLag_s: 0, encodedSteps: 0, maximumTallCellHeight: 0,
@@ -1199,7 +1251,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       hostSchedulingUsesReadback: this.pressureCycleBudgetLagged && this.pressureMultigrid.residualTolerance > 0,
       ...(this.pageDomain?{uniformDomainAuthority:"pages" as const,uniformDomainPages:this.pageDomain.count,
         ...(this.nativePageCoordinates ? {uniformVolumePageEdge:this.pageDomain.edge,uniformVolumePagesTotal:1,uniformVolumePagesActive:1} : {}),
-        uniformDomainMigration:this.nativePageCoordinates ? "Native single-page coordinates; all-resident domain" : pagedPressure ? "Paged fluid and pressure fields (QA); all-resident domain" : "Paged fluid fields; native pressure workspace; all-resident domain"}:{}),
+        uniformDomainMigration:this.nativePageCoordinates ? "Native single-page coordinates; all-resident domain" : pagedPressure ? "Paged fluid and pressure fields (QA); all-resident domain" : this.phiShaderSource ? "Native rectangular fields; all-resident page catalogue" : "Paged fluid fields; native pressure workspace; all-resident domain"}:{}),
       ...(this.volumePageConfig ? { uniformVolumePageEdge: this.volumePageEdge, uniformVolumePagesTotal: this.volumePageConfig.count, uniformVolumePageBytes: this.volumeEdges!.size } : {}),
     };
     this.volumeTexture = this.present(this.volumeA);
@@ -1246,6 +1298,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const tasks = [...this.rigidSystem.initializationTasks()];
     const compiler = gpuCompilationManagerFor(this.device);
     const shaderModule = compiler.createShaderModule({ label: "Uniform reference kernels", code: this.shaderSource });
+    const phiModule = this.phiShaderSource ? compiler.createShaderModule({ label: "Native vertex phi kernels", code: this.phiShaderSource }) : shaderModule;
+    const phiRedistanceModule = this.phiRedistanceShaderSource ? compiler.createShaderModule({label:"Native phi redistance kernels",code:this.phiRedistanceShaderSource}) : shaderModule;
     const compiled: Partial<UniformReferencePipelines> = {};
     const ids = PIPELINES.map(([key]) => `uniform.pipeline.${key}`);
     PIPELINES.forEach(([key, label, entryPoint], index) => tasks.push({
@@ -1263,7 +1317,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       tasks.push({ id, phase: "solver-pipelines", label: entryPoint, run: async () => {
         this.volumePipelines[entryPoint] = await compiler.compileComputePipeline({
           label: `Uniform Geometric - ${entryPoint}`, layout: this.mainPipelineLayout,
-          compute: { module: shaderModule, entryPoint },
+          compute: { module: entryPoint === "uvAdvectPhi" ? phiModule : entryPoint === "uvRedistancePhi" ? phiRedistanceModule : shaderModule, entryPoint },
         }, { priority: "visible", signal });
       } });
     }
@@ -1603,6 +1657,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       words.set(level, base + 6);
     });
     this.device.queue.writeBuffer(this.activeRegion, 0, words);
+    if(this.phiRegion)this.device.queue.writeBuffer(this.phiRegion,0,words);
     this.device.queue.writeBuffer(this.activeScratch, 0, words);
     this.device.queue.writeBuffer(this.activeDispatch, 0, words);
     // A reset re-seeds the box, so every lagged host count is stale: the next
@@ -1692,8 +1747,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private runVertex(encoder: GPUCommandEncoder, label: string, pipeline: GPUComputePipeline,
     group: GPUBindGroup): void {
     const pass = encoder.beginComputePass({ label });
-    pass.setPipeline(pipeline); pass.setBindGroup(0, group);
-    if(this.pageDomainDispatch){pass.dispatchWorkgroupsIndirect(this.pageDomainDispatch,16);}
+    pass.setPipeline(pipeline); pass.setBindGroup(0, this.phiGroups.get(group) ?? group);
+    if(this.phiDispatch){pass.dispatchWorkgroupsIndirect(this.phiDispatch,UNIFORM_ACTIVE_VERTEX_DISPATCH_OFFSET);}
+    else if(this.phiShaderSource){pass.dispatchWorkgroups(Math.ceil((this.info.nx+1)/4),Math.ceil((this.info.ny+1)/4),Math.ceil((this.info.nz+1)/4));}
+    else if(this.pageDomainDispatch){pass.dispatchWorkgroupsIndirect(this.pageDomainDispatch,16);}
     else if (this.windowVertexGroups) {
       pass.dispatchWorkgroups(...this.windowVertexGroups);
     } else if (this.activeRegionEnabled) {
@@ -2134,6 +2191,25 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     }).catch(() => { this.windowReadbackPending = false; });
   }
 
+  private encodePhiRegion(encoder: GPUCommandEncoder): void {
+    if(this.phiRegion){
+      // Live dust-floor changes invalidate the zero-volume-outside predicate.
+      // The page-domain header is the prebuilt full-domain fallback.
+      if(this.volumeDustThreshold<=0){
+        encoder.copyBufferToBuffer(this.activeRegion,0,this.phiRegion,0,UNIFORM_ACTIVE_HEADER_WORDS*4);
+        encoder.copyBufferToBuffer(this.activeRegion,0,this.phiDispatch!,0,UNIFORM_ACTIVE_HEADER_WORDS*4);
+        return;
+      }
+      const group=this.phiGroups.get(this.reductionGroup)!;
+      this.runDirect(encoder,"Phi support census",this.pipelines!.scanExternalActiveSources,group,
+        [Math.ceil(this.info.nx/4),Math.ceil(this.info.ny/4),Math.ceil(this.info.nz/4)]);
+      this.runDirect(encoder,"Phi support reduction",this.pipelines!.reduceExternalActiveRegionSummaries,group,[1,1,1]);
+      this.runDirect(encoder,"Phi support closure",this.pipelines!.finalizeActiveRegion,group,[1,1,1]);
+      encoder.copyBufferToBuffer(this.activeScratch,0,this.phiRegion,0,UNIFORM_ACTIVE_HEADER_WORDS*4);
+      encoder.copyBufferToBuffer(this.activeScratch,0,this.phiDispatch!,0,UNIFORM_ACTIVE_HEADER_WORDS*4);
+    }
+  }
+
   private encodeActiveRegion(encoder: GPUCommandEncoder, externalSources: boolean): void {
     if (!this.pipelines) throw new Error("Uniform reference pipelines are not initialized");
     if (!this.activeRegionEnabled) return;
@@ -2337,13 +2413,16 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
 
   private createPageAwareGroup(descriptor: GPUBindGroupDescriptor): GPUBindGroup {
     const group = (this.fieldPages ?? this.device).createBindGroup(descriptor);
+    this.groupDescriptors.set(group,descriptor);
     return group;
   }
 
   get volumePageSource(): GPUFluidVolumePageSource | undefined {
-    if(this.pageDomainView)return {records:{buffer:this.pageDomainView}};
     const p = this.volumePageConfig;
-    return p ? { records: { buffer: this.conditioningScratch, offset: p.base * 4, size: (8 + 2 * p.count) * 4 } } : undefined;
+    const workRecords = p ? { buffer: this.conditioningScratch, offset: p.base * 4, size: (8 + 2 * p.count) * 4 } : undefined;
+    const records = this.pageDomainView ? {buffer:this.pageDomainView} : workRecords;
+    return records ? { records, workRecords,
+      transportRecords: this.volumeTransportPageView ? {buffer:this.volumeTransportPageView} : undefined } : undefined;
   }
 
   /** GPU-only page assignment and compact work lists. The backing arena is
@@ -2365,6 +2444,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       encoder.copyBufferToBuffer(this.conditioningScratch,4*(p.base+6),this.volumeWorkDispatch!,0,8);
       encoder.copyBufferToBuffer(this.conditioningScratch,4*(p.base+8+2*p.count),this.volumeWorkCounts!,sharpen?4:0,4);
     }
+    // Preserve the transport set before sharpening reuses its flags. Metadata
+    // only: no field copies, readback or additional numerical dispatch.
+    if (!sharpen) encoder.copyBufferToBuffer(this.conditioningScratch,4*p.base,this.volumeTransportPageView!,0,4*(8+2*p.count));
     this.info.uniformVolumePageStage=sharpen?"sharpening":"transport";
   }
 
@@ -2558,7 +2640,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // Preserve Sec. 3.6 unplaceable-excess telemetry written during the step.
     encoder.clearBuffer(this.reductions);
     encoder.clearBuffer(this.rigidExchange);
-    if (!this.nativePageCoordinates) this.pageDomainPublication?.encode(encoder);
+    if (!this.nativeRootExecution) this.pageDomainPublication?.encode(encoder);
+    this.encodePhiRegion(encoder);
     if(!this.pageDomain){
     // A continuing inlet is retained by the GPU window seed at full strength.
     // Its support only needs rediscovery on activation, a larger swept extent,
@@ -2777,7 +2860,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       { texture: this.velocityA }, { texture: this.symmetryStageAuditFields.pressureProjection },
       [this.info.nx, this.info.ny, this.info.nz],
     );
-    seam?.(UNIFORM_ADVANCE_PHASE.pressureProjection);
+    const combinedPublication = this.nativeRootExecution && this.geometricVolume;
+    const coupledRigid = this.rigidCoupling && activeBodies.length > 0;
+    if(!combinedPublication || coupledRigid)seam?.(UNIFORM_ADVANCE_PHASE.pressureProjection);
     if (this.rigidCoupling && activeBodies.length > 0) {
       this.run(encoder, "Uniform rigid-body coupling", this.pipelines.coupleRigid, this.rigidGroup);
       this.copyField(encoder,{ texture: this.volumeB }, { texture: this.volumeA }, [this.info.nx, this.info.ny, this.info.nz]);
@@ -2785,12 +2870,15 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       encoder.copyBufferToBuffer(this.boundaryVelocityB, 0, this.boundaryVelocityA, 0, this.negativeBoundaryVelocityBytes);
       const cellVolume = c.width_m * c.height_m * c.depth_m / (this.info.nx * this.info.ny * this.info.nz);
       this.rigidSystem.encode(encoder, dt, cellVolume, 1, c.height_m / this.info.ny);
-      seam?.(UNIFORM_ADVANCE_PHASE.rigidCoupling);
+      if(!combinedPublication)seam?.(UNIFORM_ADVANCE_PHASE.rigidCoupling);
     }
     // Sec. 3.8 remains the optional global reconstruction. Container geometry
     // is not selected here; it is already present in SolidWorld.
     if (this.geometricVolume) {
-      this.run(encoder, "Uniform Geometric surface publication", this.volumePipelines.uvPublish!, this.wallFilmResolveGroup);
+      // This independent pass may finish before projection. Bypass the chain
+      // boundary here and close their combined interval on diagnostics, which
+      // consumes the projected fields. No artificial numerical dependency.
+      this.run(combinedPublication ? rawEncoder : encoder, "Uniform Geometric surface publication", this.volumePipelines.uvPublish!, this.wallFilmResolveGroup);
     } else if (this.densityPostProcessing) {
       this.run(encoder, "Uniform post-process blur x", this.pipelines.postprocessBlurX, this.postprocessBlurXGroup);
       this.run(encoder, "Uniform post-process blur y", this.pipelines.postprocessBlurY, this.postprocessBlurYGroup);
@@ -2800,7 +2888,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.run(encoder, "Uniform wall-film resolve", this.pipelines.wallFilmResolve, this.wallFilmResolveGroup);
     }
     this.fieldPages?.encodePublications(encoder);
-    seam?.(this.geometricVolume ? UNIFORM_VOLUME_PHASE.surface : UNIFORM_ADVANCE_PHASE.densityPostProcess);
+    seam?.(combinedPublication
+      ? coupledRigid ? {...UNIFORM_ADVANCE_PHASE.rigidCoupling,label:"Rigid coupling + surface publication"}
+        : {...UNIFORM_ADVANCE_PHASE.pressureProjection,label:"Pressure projection + surface publication"}
+      : this.geometricVolume ? UNIFORM_VOLUME_PHASE.surface : UNIFORM_ADVANCE_PHASE.densityPostProcess);
     // The final phase closes on the reduction pass itself (its end-of-pass
     // counter) rather than on a synthetic marker pass after it: a marker
     // touches no frame resource, so Metal is free to schedule it early and its
@@ -3088,11 +3179,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.activeRegion.destroy();
     this.activeScratch.destroy();
     this.activeDispatch.destroy();
+    this.phiRegion?.destroy();this.phiDispatch?.destroy();
     this.fieldPages?.destroy();
     this.pageDomainPublication?.destroy();
     this.volumeWorkDispatch?.destroy();
     this.volumeWorkCounts?.destroy();
     this.volumePageSharpenFlag?.destroy();
+    this.volumeTransportPageView?.destroy();
     this.rigidSystem.destroy();
     this.rigidExchange.destroy();
     this.statsReadback?.destroy();

@@ -19,10 +19,12 @@ import { uniformGeometricSolverOptions } from "../lib/methods/uniform/uniform-ge
 async function workCensus(solver: WebGPUUniformReferenceSolver) {
  const internal=solver as any, pressure=internal.pressureMultigrid;
  const device=internal.device as GPUDevice;
- const staging=device.createBuffer({size:1024,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+ const staging=device.createBuffer({size:2048,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
  const encoder=device.createCommandEncoder();encoder.copyBufferToBuffer(internal.activeRegion,0,staging,0,1024);
+ if(internal.phiRegion)encoder.copyBufferToBuffer(internal.phiRegion,0,staging,1024,1024);
  device.queue.submit([encoder.finish()]);await staging.mapAsync(GPUMapMode.READ);
- const activeRegion=Array.from(new Uint32Array(staging.getMappedRange()));staging.unmap();staging.destroy();
+ const words=new Uint32Array(staging.getMappedRange());
+ const activeRegion=Array.from(words.subarray(0,256)),phiRegion=internal.phiRegion?Array.from(words.subarray(256,512)):undefined;staging.unmap();staging.destroy();
  const plan:Record<string,{passes:number;workgroups:number}>= {};
  for(const pass of pressure.plan??[]) {
   const key=`${pass.stage}/L${pass.activeLevel}/${pass.entryPoint}/gate${pass.cycleGate}`;
@@ -31,7 +33,7 @@ async function workCensus(solver: WebGPUUniformReferenceSolver) {
  }
  const describe=(t:GPUTexture,dims?:readonly number[])=>({label:t.label,format:t.format,
   logical:dims,physical:[t.width,t.height,t.depthOrArrayLayers]});
- return {activeRegion,pressureWindowLevelGroups:pressure.windowLevelGroups,dimensions:[solver.info.nx,solver.info.ny,solver.info.nz],
+ return {activeRegion,phiRegion,pressureWindowLevelGroups:pressure.windowLevelGroups,dimensions:[solver.info.nx,solver.info.ny,solver.info.nz],
   pageDomain:internal.pageDomain?{edge:internal.pageDomain.edge,count:internal.pageDomain.count,capacity:internal.pageDomain.capacity}:null,
   pressureLevels:pressure.levels.map((l:any)=>describe(l.pressure[0],l.dimensions)),pressurePlan:plan,
   fields:internal.fieldPages?[...internal.fieldPages.fields].map(([t,f]:any)=>describe(t,f.dims)):[],
@@ -50,7 +52,7 @@ try{
  const dawn=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);Object.assign(globalThis,dawn.globals);
  const gpu=createProcessRetainedDawnGPU(dawn,["backend=metal"]);const adapter=await gpu.requestAdapter();assert.ok(adapter);
  device=managedGPUDevice(await adapter.requestDevice({requiredFeatures:["timestamp-query"],requiredLimits:requiredFluidDeviceLimits(adapter.limits)}),{requireWorkerRealm:false});
- usePerformanceInstrumentationStore.getState().setEnabled(true);
+ usePerformanceInstrumentationStore.getState().setEnabled(process.env.PHI_TIMING!=="1" && process.env.TIMING!=="none");
  const errors:string[]=[];device.addEventListener("uncapturederror",e=>{e.preventDefault();errors.push(e.error.message);});
  for(const sceneId of (process.env.UNIFORM_BENCH_SCENE?[process.env.UNIFORM_BENCH_SCENE]:["sparse-cm12-long-dam-break"])){
   const scene=structuredClone(sceneDocument(getSceneDefinition(sceneId)));
@@ -65,21 +67,52 @@ try{
   const arms:{mode:string;full:number[];stages:Record<string,number[]>;pages:number|undefined}[]=[];
   for(const mode of (process.env.ARMS??"production").split(",")){
    const solver=await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,
-    {...uniformGeometricSolverOptions({},scene),
+    {...uniformGeometricSolverOptions(process.env.DUST_THRESHOLD?{volumeDustThreshold:Number(process.env.DUST_THRESHOLD)}:{},scene),
+     ...(process.env.PHI_LITERAL!==undefined?{phiLiteralLoopsForQA:process.env.PHI_LITERAL==='1'}:{}),
+     ...(process.env.FIELD_STORAGE?{fieldStorageForQA:process.env.FIELD_STORAGE as "dense"|"paged"}:{}),
+     ...(process.env.FULL_DOMAIN==='1'?{phiWindowForQA:false as const}:{}),
+     ...(process.env.PHI_AUDIT?{phiReadAuditForQA:true}:{}),
+     ...(process.env.PHI_STORAGE?{phiStorageForQA:process.env.PHI_STORAGE as "paged"}:{}),
      ...(process.env.PRESSURE_STORAGE?{pressureStorageForQA:process.env.PRESSURE_STORAGE as "paged"|"paged-logical",pressureCycleDispatch:"direct" as const}:{}),
      ...(process.env.ONE_CYCLE==='1'?{pressureCycleBudget:'fixed' as const,
       pressureSchedule:{fullCycles:1,vCycles:0,preSweeps:6,postSweeps:6,residualTolerance:10}}:{}),
      ...(process.env.FULL_DOMAIN==='1'?{activeRegion:false,pressureWindow:false}:{}),
     },()=>{});
    const full:number[]=[],stages:Record<string,number[]>={},pressureEvidence:unknown[]=[];let priorSample=-1;
+   // Optional per-kernel timestamps; outside production and reported separately.
+   const phiQueries=process.env.PHI_TIMING==='1'?device.createQuerySet({type:'timestamp',count:4}):undefined;
+   const phiResolve=phiQueries?device.createBuffer({size:32,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC}):undefined;
+   const phiReadback=phiQueries?device.createBuffer({size:32,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ}):undefined;
+   if(phiQueries){
+    const original=(solver as any).runVertex.bind(solver);
+    (solver as any).runVertex=(encoder:GPUCommandEncoder,label:string,...rest:unknown[])=>{
+     const offset=label.startsWith('Advect')?0:2;
+     const wrapped=new Proxy(encoder,{get(target,key){
+      if(key==='beginComputePass')return (descriptor:GPUComputePassDescriptor)=>target.beginComputePass({...descriptor,
+       timestampWrites:{querySet:phiQueries,beginningOfPassWriteIndex:offset,endOfPassWriteIndex:offset+1}});
+      const value=Reflect.get(target,key);return typeof value==='function'?value.bind(target):value;
+     }});
+     return original(wrapped,label,...rest);
+    };
+   }
+
    try{
     for(let frame=1;frame<=frames;frame++){
      const start=performance.now();(solver as any).lastPhysicsTraceAt_ms=-Infinity;assert.ok(solver.advanceTo(frame/30));await (solver as any).awaitFrameCompletion?.();await device.queue.onSubmittedWorkDone();
      if(frame>4)full.push(performance.now()-start);
+     if(phiQueries){
+      const e=device.createCommandEncoder();e.resolveQuerySet(phiQueries,0,4,phiResolve!,0);e.copyBufferToBuffer(phiResolve!,0,phiReadback!,0,32);
+      device.queue.submit([e.finish()]);await phiReadback!.mapAsync(GPUMapMode.READ);
+      const times=new BigUint64Array(phiReadback!.getMappedRange());
+      if(frame>4)for(const [index,name] of ['Phi advection kernel','Phi redistance kernel'].entries())
+       (stages[name]??=[]).push(Number(times[2*index+1]!-times[2*index]!)/1e6);
+      phiReadback!.unmap();
+     }
+
      if(process.env.ASYNC_DEMAND!=="1") await solver.readStats();
      pressureEvidence.push({frame,encoded:solver.info.uniformPressureCyclesEncoded,executed:solver.info.uniformPressureCyclesExecuted,converged:solver.info.uniformPressureCyclesConverged,passes:solver.info.uniformPressurePassesEncoded});
      const trace=solver.info.physicsTrace;
-     if(frame>4&&trace?.measurementSource==="gpu-hardware-timestamp"&&trace.sampleId!==priorSample){
+     if(frame>4&&(trace?.measurementSource==="gpu-hardware-timestamp"||trace?.measurementSource==="gpu-pass-timestamp")&&trace.sampleId!==priorSample){
       for(const phase of trace.phases)(stages[phase.label]??=[]).push(phase.duration_ms);
       priorSample=trace.sampleId;
      }
@@ -90,9 +123,9 @@ try{
     const arm={mode,full,stages,pressureEvidence,census:await workCensus(solver),finalInfo:solver.info,allocatedBytes:solver.info.allocatedBytes,
      cyclesEncoded:solver.info.uniformPressureCyclesEncoded,cyclesExecuted:solver.info.uniformPressureCyclesExecuted,
      passesEncoded:solver.info.uniformPressurePassesEncoded,pages:solver.info.uniformVolumePagesActive,transportTiles:solver.info.uniformVolumeTransportWorkgroups,sharpenTiles:solver.info.uniformVolumeSharpenWorkgroups};arms.push(arm);console.log(JSON.stringify({sceneId,fixture:process.env.TILE_EDGE?`single-tile-${process.env.TILE_EDGE}-dam`:sceneId,mode,full_ms:median(full),stages:Object.fromEntries(Object.entries(stages).map(([k,v])=>[k,median(v)])),pages:arm.pages,pressure:solver.info.pressureSolver}));
-   }finally{solver.destroy();}
+   }finally{phiQueries?.destroy();phiResolve?.destroy();phiReadback?.destroy();solver.destroy();}
   }
-  results.push({revision,sourceHashes,adapter:adapter.info,pressureStorage:process.env.PRESSURE_STORAGE??"native",asyncDemand:process.env.ASYNC_DEMAND==='1',frames,warmup:4,tileEdge:process.env.TILE_EDGE?Number(process.env.TILE_EDGE):undefined,oneCycle:process.env.ONE_CYCLE==='1',fullDomain:process.env.FULL_DOMAIN==='1',sceneId,fixture:process.env.TILE_EDGE?`single-tile-${process.env.TILE_EDGE}-dam`:sceneId,scope:"Queue-fenced simulation, rendering excluded. Readbacks after timed interval. Production defaults, balanced quality, one advance per 1/30 second.",arms});
+  results.push({revision,sourceHashes,adapter:adapter.info,timing:process.env.TIMING??"stages",dustThreshold:process.env.DUST_THRESHOLD??"default",fieldStorage:process.env.FIELD_STORAGE??"production",phiLiteral:process.env.PHI_LITERAL===undefined?"production":process.env.PHI_LITERAL==='1',phiStorage:process.env.PHI_STORAGE??"native",phiAudit:!!process.env.PHI_AUDIT,phiTiming:!!process.env.PHI_TIMING,pressureStorage:process.env.PRESSURE_STORAGE??"native",asyncDemand:process.env.ASYNC_DEMAND==='1',frames,warmup:4,tileEdge:process.env.TILE_EDGE?Number(process.env.TILE_EDGE):undefined,oneCycle:process.env.ONE_CYCLE==='1',fullDomain:process.env.FULL_DOMAIN==='1',sceneId,fixture:process.env.TILE_EDGE?`single-tile-${process.env.TILE_EDGE}-dam`:sceneId,scope:"Queue-fenced simulation, rendering excluded. Readbacks after timed interval. Production defaults, balanced quality, one advance per 1/30 second.",arms});
  }
  assert.deepEqual(errors,[]);
  writeFileSync(process.env.UNIFORM_BENCH_OUTPUT??"/tmp/uniform-long-dam-paging.json",JSON.stringify(results,null,2)+"\n");

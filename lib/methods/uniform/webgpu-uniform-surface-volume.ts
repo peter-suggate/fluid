@@ -28,7 +28,7 @@ export class UniformSurfaceVolumeCorrection {
   async initialize(signal?: AbortSignal) {
     this.allocate();
     const compiler = gpuCompilationManagerFor(this.device);
-    const module = compiler.createShaderModule({label:"Total surface volume",code:this.fieldPages?.shader(uniformSurfaceVolumeWGSL,new Map([[1,this.phi],[2,this.volume],[3,this.capacity],[4,this.output!]])) ?? uniformSurfaceVolumeWGSL});
+    const module = compiler.createShaderModule({label:"Total surface volume",code:this.fieldPages?.shader(uniformSurfaceVolumeWGSL,new Map([[1,this.phi],[2,this.volume],[3,this.capacity],[4,this.output!]]),false,this.fieldPages.nativeStorage) ?? uniformSurfaceVolumeWGSL});
     const layout = this.device.createPipelineLayout({bindGroupLayouts:[this.layout]});
     for (const entryPoint of entries) this.pipelines[entryPoint] = await compiler.compileComputePipeline({
       label:`Surface volume ${entryPoint}`,layout,compute:{module,entryPoint},
@@ -37,8 +37,9 @@ export class UniformSurfaceVolumeCorrection {
   private allocate() {
     if(this.buffers) return;
     const device=this.device;
-    this.output=(this.fieldPages ?? device).createTexture({label:"Total surface volume corrected phi",dimension:"3d",format:"r32float",
-      size:this.dims.map(n=>n+1),usage:GPUTextureUsage.STORAGE_BINDING|GPUTextureUsage.COPY_SRC});
+    const descriptor:GPUTextureDescriptor={label:"Total surface volume corrected phi",dimension:"3d",format:"r32float",
+      size:this.dims.map(n=>n+1),usage:GPUTextureUsage.STORAGE_BINDING|GPUTextureUsage.COPY_SRC};
+    this.output=this.fieldPages?this.fieldPages.createTextureLike(this.phi,descriptor):device.createTexture(descriptor);
     const buffer=(label:string,size:number,uniform=false)=>device.createBuffer({label,size,
       usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC|(uniform?GPUBufferUsage.UNIFORM:GPUBufferUsage.STORAGE)});
     const params=buffer("Surface volume params",32,true);

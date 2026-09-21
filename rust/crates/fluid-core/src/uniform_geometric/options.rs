@@ -96,7 +96,7 @@ impl Default for UniformGeometricOptions {
             pressure_sweeps: 6_f32,
             redistance: "on".into(),
             sharpening_work_map: "on".into(),
-            volume_dust_threshold: 0.000001_f32,
+            volume_dust_threshold: 0.001_f32,
             two_level_velocity: "on".into(),
             two_level_fine_reach: 2_f32,
             two_level_extension: "tiles".into(),

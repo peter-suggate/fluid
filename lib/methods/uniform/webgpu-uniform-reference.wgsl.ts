@@ -1985,8 +1985,10 @@ ${geometric ? `
   activeScratch[13]=groups.x;activeScratch[14]=groups.y;activeScratch[15]=groups.z;
   // The (n+1)^3 vertex lattice the geometric phi passes run on. Vertices
   // minimum..maximum inclusive belong to the window's cells, so the dispatch
-  // is one vertex wider than the cell box on every axis and shares its origin.
-  let vertexGroups=(maximum-minimum+vec3u(1u)+vec3u(3u))/4u;
+  // includes the same read margin as activeVertexId, on both sides.
+  let vertexLow=minimum-min(minimum,vec3u(VERTEX_PHI_REACH));
+  let vertexHigh=min(d,maximum+vec3u(VERTEX_PHI_REACH));
+  let vertexGroups=(vertexHigh-vertexLow+vec3u(1u)+vec3u(3u))/4u;
   activeScratch[ACTIVE_VERTEX_DISPATCH_WORD]=vertexGroups.x;
   activeScratch[ACTIVE_VERTEX_DISPATCH_WORD+1u]=vertexGroups.y;
   activeScratch[ACTIVE_VERTEX_DISPATCH_WORD+2u]=vertexGroups.z;
