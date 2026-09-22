@@ -24,6 +24,10 @@ test("sparse water waits for the entire deferred chain, starting it only once", 
   state.polygoniseGlobalFineEmitPipeline = {};
   assert.equal(pipeline.prepareSurfacePipelines(), false, "classifier must also finish");
   state.extractGlobalFinePipeline = {};
+  for (const stage of ["prepareClassifyPipeline", "prepareSurfaceScanPipeline", "countSurfaceBlocksPipeline", "addSurfaceBlockOffsetsPipeline"]) {
+    assert.equal(pipeline.prepareSurfacePipelines(), false, `${stage} must finish before presentation`);
+    state[stage] = {};
+  }
   complete();
   await state.extractGlobalFinePipelinePromise;
   assert.equal(pipeline.prepareSurfacePipelines(), true);

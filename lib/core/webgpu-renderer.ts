@@ -31,7 +31,8 @@ import { FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE, requiredFluidDeviceLimits 
 import { RasterWaterPipeline, type WaterRenderDiagnostics, type WaterSurfacePresentationDiagnostics } from "./webgpu-water-pipeline";
 import { environmentIndex, type EnvironmentId, defaultEnvironmentId } from "./environments";
 import type { ScenePresentationMode } from "./scene-definition";
-import { sceneHasTerrain } from "./terrain";
+import { sceneHasTerrain, terrainContentStamp } from "./terrain";
+import { solidVoxelPatchesKey } from "./solid-world";
 import { SecondaryParticleRenderPipeline } from "./webgpu-secondary-particles";
 import type { SparseVoxelSceneRenderSource } from "./webgpu-voxel-debug";
 import { cameraTanHalfFov, viewportAspect, viewportRayForPixel } from "./webgpu-camera";
@@ -578,7 +579,7 @@ export function gpuSceneStructuralKey(scene: SceneDescription, config: Simulatio
 export function gpuSceneSeedKey(scene: SceneDescription, methodId?: string): string {
   const c = scene.container;
   const geometry = (methodId === "adaptive-mass" || methodId === "adaptive-volume") ? "live-fluid" : authoredFluidGeometryKey(scene);
-  return `${c.width_m}:${c.height_m}:${c.depth_m}:${c.shape ?? "box"}:${geometry}:${JSON.stringify(scene.fluid.initialVelocity_m_s ?? null)}:${JSON.stringify(scene.fluid.initialHeightField ?? null)}:${JSON.stringify(scene.fluid.refinementKeyframes ?? null)}:${JSON.stringify(scene.terrain ?? null)}:${inflowBudgetKey(scene.fluid.inflow)}`;
+  return `${c.width_m}:${c.height_m}:${c.depth_m}:${c.shape ?? "box"}:${geometry}:${JSON.stringify(scene.fluid.initialVelocity_m_s ?? null)}:${JSON.stringify(scene.fluid.initialHeightField ?? null)}:${JSON.stringify(scene.fluid.refinementKeyframes ?? null)}:${terrainContentStamp(scene.terrain)}:${inflowBudgetKey(scene.fluid.inflow)}`;
 }
 
 /**
@@ -686,7 +687,7 @@ function inflowAimKey(inflow: SceneDescription["fluid"]["inflow"]): string {
  * the GPU as params rather than as geometry.
  */
 export function gpuSceneUniformKey(scene: SceneDescription): string {
-  return `${authoredFluidGeometryKey(scene)}:${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.x}:${scene.fluid.gravity_m_s2.y}:${scene.fluid.gravity_m_s2.z}:${scene.numerics.fixedDt_s}:${scene.numerics.maxDt_s}:${inflowAimKey(scene.fluid.inflow)}:${rigidBodyRosterKey(scene.rigidBodies)}:${refinementRegionKey(scene)}:${JSON.stringify(scene.solidVoxels)}`;
+  return `${authoredFluidGeometryKey(scene)}:${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.x}:${scene.fluid.gravity_m_s2.y}:${scene.fluid.gravity_m_s2.z}:${scene.numerics.fixedDt_s}:${scene.numerics.maxDt_s}:${inflowAimKey(scene.fluid.inflow)}:${rigidBodyRosterKey(scene.rigidBodies)}:${refinementRegionKey(scene)}:${solidVoxelPatchesKey(scene.solidVoxels)}`;
 }
 
 /**
@@ -760,6 +761,10 @@ export interface RendererFrameMetrics {
   presentation?: PerformanceTrace;
   /** Exclusive GPU completion-frontier partition grouped by stage plug-ins. */
   presentationStages?: PerformanceTrace;
+  /** Queue submission through completion, including backlog and callback delivery. */
+  presentationQueue?: PerformanceTrace;
+  surfaceExtractionCount?: number;
+  surfaceExtractionReason?: string;
   context: string;
   methodId: string;
   /** True only when this draw encoded and submitted a presentation command buffer. */
@@ -1049,6 +1054,7 @@ export class FluidLabRenderer {
   private presentationTraceFrameCounter = 0;
   private latestPresentationTrace?: PerformanceTrace;
   private latestPresentationStageTrace?: PerformanceTrace;
+  private latestPresentationQueueTrace?: PerformanceTrace;
   /** Polled by the paused viewport; each successful transactional source attach requests one repaint. */
   private pausedPresentationRevision = 0;
   private runtimeFailure?: string;
@@ -2282,6 +2288,7 @@ export class FluidLabRenderer {
   private resetPresentationTrace() {
     this.latestPresentationTrace = undefined;
     this.latestPresentationStageTrace = undefined;
+    this.latestPresentationQueueTrace = undefined;
   }
 
   private currentFrameMetrics(
@@ -2307,6 +2314,10 @@ export class FluidLabRenderer {
       cpu,
       presentation,
       presentationStages,
+      surfaceExtractionCount: this.waterPipeline?.surfaceExtractionCount,
+      surfaceExtractionReason: this.waterPipeline?.surfaceExtractionReason,
+      presentationQueue: presentation && this.latestPresentationQueueTrace?.sampleId === presentation.sampleId
+        ? this.latestPresentationQueueTrace : undefined,
       context,
       methodId,
       presentationSubmitted,
@@ -2526,7 +2537,7 @@ export class FluidLabRenderer {
     }
     if (planSceneRuntime(scene).fluidSolver) {
       if (!solver?.validateLiveSolidEdit || !solver.applySceneUniforms) {
-        throw new Error("Live voxel editing needs a ready sparse fluid scene.");
+        throw new Error("This fluid method cannot take live voxel edits.");
       }
       solver.validateLiveSolidEdit(scene);
     }
@@ -2546,9 +2557,9 @@ export class FluidLabRenderer {
     const solver = this.gpuFluid, display = this.svoSceneSidecar ?? solver;
     let committed = false;
     if (planSceneRuntime(scene).fluidSolver) {
-      if (!solver?.prepareLiveSolidEdit) throw new Error("Live solid edit acceptance is unavailable.");
       if (!stillCurrent()) throw new Error("Scene changed before submitting this solid edit.");
-      committed = await solver.prepareLiveSolidEdit(scene) === true;
+      // The proof is an optional refinement; `applySceneUniforms` below is the acceptance.
+      committed = await solver?.prepareLiveSolidEdit?.(scene) === true;
     }
     if (!stillCurrent() || this.disposed || this.gpuFluid !== solver
       || (this.svoSceneSidecar ?? this.gpuFluid) !== display
@@ -3824,7 +3835,6 @@ export class FluidLabRenderer {
     closeStage("present");
     const presentationTraceResolved = presentationTrace?.resolve(encoder) ?? false;
     if (presentationTrace && !presentationTraceResolved) presentationTrace.destroy();
-    presentationQueueTrace?.begin();
     // Every admitted advance precedes this presentation in the same WebGPU
     // queue. One end-of-presentation completion therefore retires both without
     // an extra queue-wide promise between simulation and rendering.
@@ -3833,7 +3843,9 @@ export class FluidLabRenderer {
     // later standalone checkpoint waits behind newly queued frames and holds
     // this presentation's throughput slot for an unnecessary second submission.
     const readPresentationHealth = this.gpuFluid?.captureSimulationHealth?.(encoder);
-    this.device.queue.submit([encoder.finish()]);
+    const presentationCommands = encoder.finish();
+    presentationQueueTrace?.begin();
+    this.device.queue.submit([presentationCommands]);
     const presentationHealth = readPresentationHealth?.();
     // Mapping can overlap completion. Always drain the receipt, even if a
     // solver rebuild makes the presentation callback below obsolete.
@@ -3855,7 +3867,7 @@ export class FluidLabRenderer {
         return;
       }
       if (presentationHealth) await presentationHealth;
-      else await validatedFluid?.assertSimulationHealthy?.();
+      else await validatedFluid?.assertSimulationHealthy?.(presentationCompletion);
       retirePresentation();
       if(!this.disposed&&!this.runtimeFailure&&!this.deviceLost&&this.device===completedPresentationDevice&&this.gpuFluid===validatedFluid){
         this.completedPresentations+=1;
@@ -3871,7 +3883,7 @@ export class FluidLabRenderer {
     if (poseStaging) this.publishRigidBodyPoses(poseStaging, bodies.slice(0, 12).map((body) => body.description.id));
     if (pixelTraceProbing) this.pumpPixelTraceReadback();
     if (fluidCellTrace) this.pumpFluidCellTraceReadback();
-    const presentationQueueTraceRead = presentationQueueTrace?.read(this.device.queue);
+    const presentationQueueTraceRead = presentationQueueTrace?.read({ onSubmittedWorkDone: () => presentationCompletion });
     const presentationStageTraceRead = presentationTraceResolved && presentationTrace
       ? presentationTrace.readSemanticFrontierTrace({
         sampleId: presentationTraceSampleId,
@@ -3886,12 +3898,13 @@ export class FluidLabRenderer {
     if (presentationTraceRead) {
       this.presentationTracePending = true;
       const sampledContext = presentationContext;
-      void Promise.all([presentationTraceRead, presentationStageTraceRead]).then(([trace, stages]) => {
+      void Promise.all([presentationTraceRead, presentationStageTraceRead, presentationQueueTraceRead]).then(([trace, stages, queue]) => {
         const instrumentation = usePerformanceInstrumentationStore.getState();
         if (!trace || this.disposed || this.runtimeFailure || this.deviceLost || this.presentationContext !== sampledContext
           || !instrumentation.enabled || instrumentation.enabledAt_ms > traceRequestedAt_ms) return;
         this.latestPresentationTrace = trace;
         this.latestPresentationStageTrace = stages;
+        this.latestPresentationQueueTrace = queue;
         if (!this.simulationRunning) this.pausedPresentationRevision += 1;
       }).catch(() => {
         presentationTrace?.destroy();

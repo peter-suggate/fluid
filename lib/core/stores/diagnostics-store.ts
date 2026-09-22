@@ -29,6 +29,10 @@ export interface PerformanceReport {
   presentation?: PerformanceTrace;
   /** GPU pass spans grouped by the colocated render-stage plug-ins. */
   presentationStages?: PerformanceTrace;
+  /** Submission-to-completion wall time; overlaps GPU execution, not additive. */
+  presentationQueue?: PerformanceTrace;
+  surfaceExtractionCount?: number;
+  surfaceExtractionReason?: string;
 }
 
 export const emptyPerformanceReport: PerformanceReport = {

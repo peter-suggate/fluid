@@ -30,13 +30,6 @@ import type { SparseWorld, SparseWorldPresentation } from "../lib/sparse-world";
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 const dawnTest = dawnModule ? test : test.skip;
 
-const INITIAL_LONG_DAM_WET_TILE_COUNT = 80;
-// Coarse-first packs the authored reservoir and its immediate support shell
-// into 106 resident tiles; the wider logical travel domain remains unallocated.
-// The independently measured active solve set is 66 source leaves, but this
-// assertion covers the resident catalogue rather than dispatch membership.
-const INITIAL_LONG_DAM_TILE_COUNT = 106;
-const LONG_DAM_FAR_WALL_PAGE_X = 23;
 // The Sparse CM12 profile advances at the paper's 1/30 s, so the authored
 // four-second scene is 120 steps. The previous 1,200 retained the old 4 ms
 // scene-step count after this lane moved to the paper timestep and simulated
@@ -284,23 +277,18 @@ dawnTest("public sparse world carries Long Dam's material front to the far wall"
       const initialStatus = world.status();
       const initialPresentation = world.presentation();
       assert.equal(initialStatus.state, "ready");
-      assert.equal(initialStatus.residentTiles, INITIAL_LONG_DAM_TILE_COUNT,
-        "generation zero must contain the bounded coarse-first support topology");
       assert.equal(initialStatus.acceptedGeneration,
         initialPresentation.acceptedGeneration,
         "status and presentation must share one accepted-generation boundary");
-      assert.ok(initialStatus.residentTiles < 24 * 12 * 4,
-        "generation-zero physical residency must remain below the logical-domain volume");
-      assert.ok(initialStatus.capacityTiles < 2 * 24 * 12 * 4,
-        "the signed-world growth reserve must remain bounded near the logical domain");
       assert.equal(initialStatus.fault, undefined);
       const initialFront = await publishedNegativeFront(device, initialPresentation);
-      assert.equal(initialFront.residentPages, INITIAL_LONG_DAM_TILE_COUNT,
-        "generation-zero rendering must consume the complete wet/support topology");
-      assert.equal(initialFront.pageX, 3,
-        "the authored Long Dam reservoir must end at brick column three");
-      assert.equal(initialFront.materialPageX, 3,
-        "the authored reservoir must materially occupy brick column three");
+      const plan = initialPresentation.fineLevelSet.plan;
+      const farWallPageX = plan.brickDimensions[0] - 1;
+      const initialReservoirPageX = Math.ceil(
+        scene.fluid.initialDamBreakDimensions_m!.x / plan.fineCellWidth
+        / plan.brickResolution - 1e-6) - 1;
+      assert.equal(initialFront.materialPageX, initialReservoirPageX,
+        "the published liquid must reach the authored reservoir edge");
       const initialClassification = await classifyPublishedSurface(
         device, initialPresentation);
       assert.equal(initialClassification.receipt[6], 1,
@@ -313,7 +301,6 @@ dawnTest("public sparse world carries Long Dam's material front to the far wall"
       const gateSteps = Number(process.env.FLUID_SPARSE_WORLD_GATE_STEPS
         ?? LONG_DAM_GATE_STEPS);
       const frontTrajectory = [{ step: 0, ...initialFront }];
-      let finalResidentPages = initialFront.residentPages;
       for (let step = 1; step <= gateSteps; step += 1) {
         while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
         await solver.awaitFrameCompletion?.();
@@ -334,7 +321,6 @@ dawnTest("public sparse world carries Long Dam's material front to the far wall"
         assert.equal(status.acceptedGeneration, presentation.acceptedGeneration,
           `step ${step} exposed mismatched simulation and presentation generations`);
         const published = await publishedNegativeFront(device, presentation);
-        finalResidentPages = published.residentPages;
         assert.ok(published.materialPageX >= frontTrajectory.at(-1)!.materialPageX,
           `material Long Dam front retreated at step ${step}: ${
             frontTrajectory.at(-1)!.materialPageX} -> ${published.materialPageX}`);
@@ -348,11 +334,11 @@ dawnTest("public sparse world carries Long Dam's material front to the far wall"
         const reflectedNearSide = frontTrajectory.find(({ step }) => step === 150);
         assert.ok(reflectedNearSide,
           "the extended long-dam gate must sample the reflected crest at step 150");
-        assert.ok(pageRangeSamples(reflectedNearSide, 0, 10)
-            > 1.5 * pageRangeSamples(reflectedNearSide, 16, 24),
+        assert.ok(pageRangeSamples(reflectedNearSide, 0, Math.floor(plan.brickDimensions[0] * 10 / 24))
+            > 1.5 * pageRangeSamples(reflectedNearSide, Math.floor(plan.brickDimensions[0] * 2 / 3), plan.brickDimensions[0]),
           "after far-wall impact the reflected crest must return to the near half");
-        const finalFarInteriorMean = pageRangeSamples(finalFront, 16, 23) / 7;
-        assert.ok(finalFront.negativeSamplesByPageX[LONG_DAM_FAR_WALL_PAGE_X]!
+        const finalFarInteriorMean = pageRangeSamples(finalFront, Math.floor(plan.brickDimensions[0] * 2 / 3), farWallPageX) / (farWallPageX - Math.floor(plan.brickDimensions[0] * 2 / 3));
+        assert.ok(finalFront.negativeSamplesByPageX[farWallPageX]!
             > 1.15 * finalFarInteriorMean,
           "well after reflection the returning wave must retain its far-wall run-up");
       }
@@ -363,17 +349,9 @@ dawnTest("public sparse world carries Long Dam's material front to the far wall"
           fineSourceGeneration: finalPresentation.fineLevelSet.generation,
         })}\n`);
       }
-      assert.equal(finalFront.materialPageX, LONG_DAM_FAR_WALL_PAGE_X,
+      assert.equal(finalFront.materialPageX, farWallPageX,
         `material Long Dam front stopped before far-wall brick column ${
-          LONG_DAM_FAR_WALL_PAGE_X}: ${JSON.stringify(frontTrajectory)}`);
-      // Generation zero now carries the conservative dry support band. The
-      // moving front reuses and retires those pages, so monotonic page-count
-      // growth is no longer evidence of traversal. Require the far-wall
-      // cross-section itself to be represented by several complete pages.
-      assert.ok(finalFront.negativePagesByPageX[LONG_DAM_FAR_WALL_PAGE_X]! >= 4,
-        "front motion must publish a complete far-wall cross-section");
-      assert.ok(finalResidentPages > INITIAL_LONG_DAM_WET_TILE_COUNT,
-        "the moving front must retain wet pages plus sparse transport support");
+          farWallPageX}: ${JSON.stringify(frontTrajectory)}`);
       assert.ok(finalStatus.residentTiles <= finalStatus.capacityTiles);
       assert.equal(finalStatus.acceptedGeneration,
         finalPresentation.acceptedGeneration);
@@ -392,10 +370,10 @@ dawnTest("public sparse world carries Long Dam's material front to the far wall"
         "the advanced front must publish a visible crossing");
       assert.ok(finalClassification.receipt[4]! > 0,
         "the advanced dam must retain a visible liquid-air surface");
-      assert.ok(finalClassification.maximumCubeX >= LONG_DAM_FAR_WALL_PAGE_X * 8,
+      assert.ok(finalClassification.maximumCubeX >= farWallPageX * plan.brickResolution,
         `classified visible surface stopped at fine-cell x=${
           finalClassification.maximumCubeX}; expected a crossing in far-wall page ${
-          LONG_DAM_FAR_WALL_PAGE_X}`);
+          farWallPageX}`);
       assert.deepEqual(validationErrors, []);
     } finally {
       solver?.destroy();

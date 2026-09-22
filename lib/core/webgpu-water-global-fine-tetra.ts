@@ -34,7 +34,7 @@ const TETS = [
  * unchanged by every D4 transform.
  */
 export const GLOBAL_FINE_SURFACE_EMIT_LANES = 6;
-const GLOBAL_FINE_SURFACE_TRIANGLES_PER_LANE = 6;
+export const GLOBAL_FINE_SURFACE_TRIANGLES_PER_LANE = 6;
 export const globalFineCubeContourWGSL = /* wgsl */ `
 const CONTOUR_INVALID:u32=0xffffffffu;
 const CONTOUR_QUANTIZER:f32=65536.;
@@ -224,10 +224,15 @@ export function cubeContourEdgeLoops(values: readonly number[]): readonly (reado
   return visited.size === crossing.length ? loops : [];
 }
 
-export const globalFineClassifiedScanShader = /* wgsl */ `
+export const globalFineScanBindingsWGSL = /* wgsl */ `
 struct V{position:vec4f,normal:vec4f}struct A{vertexCount:atomic<u32>,instanceCount:u32,firstVertex:u32,firstInstance:u32,activeCubeCount:atomic<u32>,vertexAllocator:atomic<u32>,globalFineAuthorityLatch:atomic<u32>,meshPublicationGeneration:atomic<u32>}struct P{sample:vec4u,bricks:vec4u,table:vec4u,settings:vec4f,cell:vec4f,sizing:vec4f,physical:vec4f}
 @group(0)@binding(3)var<storage,read_write>out:array<V>;@group(0)@binding(4)var<storage,read_write>args:A;@group(0)@binding(5)var<storage,read>cubes:array<vec2u>;@group(0)@binding(6)var<storage,read>values:array<vec4f>;@group(0)@binding(7)var<storage,read_write>offsets:array<u32>;@group(0)@binding(10)var<uniform>p:P;
 ${globalFineCubeContourWGSL}
+`;
+
+/** Original scan retained as the GPU equivalence oracle. */
+export const globalFineClassifiedScanShader = /* wgsl */ `
+${globalFineScanBindingsWGSL}
 var<workgroup>laneOffsets:array<u32,256>;
 @compute @workgroup_size(256)fn scanGlobalFineTriangles(@builtin(local_invocation_index)lid:u32){
   let published=atomicLoad(&args.vertexAllocator)!=0xffffffffu;

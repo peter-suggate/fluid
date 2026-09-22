@@ -5,7 +5,10 @@ export interface GPUAdvancePlan {
 }
 
 export function planGPUAdvance(requestedTime_s: number, currentTime_s: number, maximumDt_s: number): GPUAdvancePlan | undefined {
-  if (requestedTime_s < currentTime_s) return undefined;
+  // Repainting a paused scene may ask an asynchronous solver to settle at its
+  // current time. That is not a physics step: even dt=0 runs projection and
+  // surface conditioning, submits GPU work, and invalidates the retained mesh.
+  if (requestedTime_s <= currentTime_s) return undefined;
   const dt_s = Math.min(maximumDt_s, requestedTime_s - currentTime_s);
   const nextTime_s = currentTime_s + dt_s;
   return { dt_s, nextTime_s, lag_s: Math.max(0, requestedTime_s - nextTime_s) };

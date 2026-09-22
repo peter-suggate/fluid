@@ -11,6 +11,8 @@ const uniformMacCormackAuditEnabled = typeof process !== "undefined"
 const uniformAbBaseline = !uniformAbOn("opentest");
 const uniformAbFaceBaseline = !uniformAbOn("facetest");
 const uniformAbOpenLocalBaseline = !uniformAbOn("openlocal");
+const uniformAbSolidHeaderBaseline = !uniformAbOn("solidheader");
+const uniformAbDeadGroups = uniformAbOn("deadgroups");
 
 /**
  * Dense uniform-grid reference kernels.
@@ -19,7 +21,15 @@ const uniformAbOpenLocalBaseline = !uniformAbOn("openlocal");
  * It provides a matched-lattice GPU baseline for transport and projection
  * comparisons without octree topology, sparse residency, or backend cutovers.
  */
-export function createUniformReferenceComputeShader(geometric = false, referenceDimension: 2 | 3 = 3, pages?: UniformVolumePageShaderOptions, domain?:UniformPageDomain): string { return /* wgsl */ `
+/**
+ * fullLattice: the solver runs with no active window, so the header the host
+ * seeds (origin 0, maximum = the lattice, window-lattice mode off) is never
+ * rewritten. Every thread of every kernel was reading it back to add zero.
+ */
+export function createUniformReferenceComputeShader(geometric = false, referenceDimension: 2 | 3 = 3, pages?: UniformVolumePageShaderOptions, domain?:UniformPageDomain, fullLattice = false): string {
+  const windowMaximum = fullLattice ? "vec3u(dims())" : "vec3u(activeRegion[10],activeRegion[11],activeRegion[12])";
+  const volumeWGSL = fullLattice ? specializeFullLattice(uniformVolumeWGSL) : uniformVolumeWGSL;
+  return /* wgsl */ `
 // The dimensional oracle suppresses the absent derivative; symmetry walls alone
 // do not prevent roundoff from creating a transverse level-set gradient.
 const UNIFORM_REFERENCE_DIMENSION: u32 = ${referenceDimension}u;
@@ -156,9 +166,9 @@ fn activeUnpackExtent(packed:u32)->vec3u{
   if((packed&0x40000000u)==0u){return vec3u(0xffffffffu);}
   return vec3u(packed&1023u,(packed>>10u)&1023u,(packed>>20u)&1023u);
 }
-fn activeWindowOrigin()->vec3u{return vec3u(activeRegion[7],activeRegion[8],activeRegion[9]);}
+fn activeWindowOrigin()->vec3u{return ${fullLattice ? "vec3u(0u)" : "vec3u(activeRegion[7],activeRegion[8],activeRegion[9])"};}
 fn activeWindowExtent()->vec3u{
-  return vec3u(activeRegion[10],activeRegion[11],activeRegion[12])-activeWindowOrigin();
+  return ${windowMaximum}-activeWindowOrigin();
 }
 // The host sizes this dispatch from a box a couple of steps old, so its last
 // workgroups overrun the exact window. Those threads exit here, at
@@ -211,7 +221,7 @@ fn activeVertexId(gid:vec3u)->vec3i{
   ${domain ? "return pageDomainVertex(gid);" : `
   let low=activeVertexLow();
   let high=min(vec3u(dims()),
-    vec3u(activeRegion[10],activeRegion[11],activeRegion[12])+vec3u(VERTEX_PHI_REACH));
+    ${windowMaximum}+vec3u(VERTEX_PHI_REACH));
   if(any(gid>high-low)){return vec3i(-1);}
   return vec3i(low+gid);
   `}
@@ -222,7 +232,7 @@ fn activeVertexId(gid:vec3u)->vec3i{
 // id maps to simulation id - 1 + origin, and every pressure dispatch covers
 // the whole capacity lattice with a static plan, so the level records are not
 // consulted at all.
-fn pressureWindowLattice()->bool{return activeRegion[ACTIVE_PRESSURE_MODE_WORD]==1u;}
+fn pressureWindowLattice()->bool{return ${fullLattice ? "false" : "activeRegion[ACTIVE_PRESSURE_MODE_WORD]==1u"};}
 fn pressureWindowOrigin()->vec3i{
   if(!pressureWindowLattice()){return vec3i(0);}
   return vec3i(vec3u(activeRegion[ACTIVE_PRESSURE_ORIGIN_WORD],
@@ -255,9 +265,12 @@ fn solidVoxelWord(index:u32)->u32{
   return activeScratch[u32(round(params.dropExtent.z))+index];
 }
 fn staticSolidVoxelOccupied(p:vec3i)->bool{
-  if(solidVoxelWord(0u)!=0x53565731u){return false;}
+  ${uniformAbSolidHeaderBaseline ? `if(solidVoxelWord(0u)!=0x53565731u){return false;}
   let shape=vec3i(i32(solidVoxelWord(1u)),i32(solidVoxelWord(2u)),
-    i32(solidVoxelWord(3u)));
+    i32(solidVoxelWord(3u)));` : `// The header is the host's own constant: the solver always packs the field
+  // and always over the lattice plus a one-cell halo. Reading it back cost four
+  // dependent loads through a read_write binding on every occupancy test.
+  let shape=vec3i(params.dimsDt.xyz)+vec3i(2);`}
   let q=p+vec3i(1);
   if(any(q<vec3i(0))||any(q>=shape)){return false;}
   let index=u32(q.x+shape.x*(q.y+shape.y*q.z));
@@ -815,6 +828,15 @@ fn storeExtrapolationAuthority(id:vec3i){if(!valid(id)){return;}
 fn buildExtrapolationAuthority(@builtin(global_invocation_id) gid:vec3u){storeExtrapolationAuthority(activeId(gid));}
 @compute @workgroup_size(4,4,4)
 fn buildDenseExtrapolationAuthority(@builtin(global_invocation_id) gid:vec3u){storeExtrapolationAuthority(vec3i(gid));}
+// V_face is a function of the solid mask, terrain, rigid bodies and run
+// constants. On a step where none of them can have changed since the last full
+// store, velocityOut already holds it and only rho' is rebuilt: one phi load a
+// cell instead of three eight-sample face queries.
+@compute @workgroup_size(4,4,4)
+fn buildExtrapolationDensityAuthority(@builtin(global_invocation_id) gid:vec3u){
+  let id=activeId(gid);if(!valid(id)){return;}
+  textureStore(volumeOut,id,vec4f(${geometric ? "0.5-pressurePhi(id)/min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z))" : "pressureDensity(id)"}));
+}
 // Projection enforces body velocity on interior faces, so that value cannot be
 // used as the undisturbed fluid velocity for form drag. Sample six wet, open
 // points just beyond the body's bounding sphere instead.
@@ -1724,6 +1746,23 @@ fn activeTravelCells(id:vec3i,positive:bool)->vec3u{
   let directed=max(select(-v,v,positive),vec3f(0.0));
   return vec3u(ceil(directed*params.dimsDt.w/params.cellGravity.xyz));
 }
+var<workgroup> activeAnyWet:atomic<u32>;
+/** Lane 0 only: publish this workgroup's reduced lane-0 values. */
+fn writeActiveSummaryRecord(workgroupId:vec3u,groupCount:vec3u){
+  if(all(workgroupId==vec3u(0u))){
+    activeScratch[ACTIVE_SCAN_GROUPS_WORD]=groupCount.x;
+    activeScratch[ACTIVE_SCAN_GROUPS_WORD+1u]=groupCount.y;
+    activeScratch[ACTIVE_SCAN_GROUPS_WORD+2u]=groupCount.z;
+  }
+  let summaryIndex=workgroupId.x+groupCount.x*(workgroupId.y+groupCount.y*workgroupId.z);
+  let base=ACTIVE_SUMMARY_BASE+12u*summaryIndex;
+  activeScratch[base]=activeMinimumLanes[0].x;activeScratch[base+1u]=activeMinimumLanes[0].y;
+  activeScratch[base+2u]=activeMinimumLanes[0].z;activeScratch[base+3u]=activeSpeedLanes[0];
+  activeScratch[base+4u]=activeMaximumLanes[0].x;activeScratch[base+5u]=activeMaximumLanes[0].y;
+  activeScratch[base+6u]=activeMaximumLanes[0].z;activeScratch[base+7u]=0u;
+  activeScratch[base+8u]=activeTravelPlusLanes[0];activeScratch[base+9u]=activeTravelMinusLanes[0];
+  activeScratch[base+10u]=0u;activeScratch[base+11u]=0u;
+}
 fn writeActiveWorkgroupSummary(
   id:vec3i, wet:bool, localIndex:u32, workgroupId:vec3u, groupCount:vec3u,
 ){
@@ -1739,6 +1778,18 @@ fn writeActiveWorkgroupSummary(
     travelPlus=activePackTravel(activeTravelCells(id,true));
     travelMinus=activePackTravel(activeTravelCells(id,false));
   }
+  ${uniformAbDeadGroups ? `// A workgroup with no wet lane reduces 64 identities to the identity through
+  // seven barriers. One uniform load of an any-wet flag lets it skip the tree;
+  // lane 0 then publishes the identity the tree would have produced.
+  if(wet){atomicStore(&activeAnyWet,1u);}
+  if(workgroupUniformLoad(&activeAnyWet)==0u){
+    if(localIndex==0u){
+      activeMinimumLanes[0]=d;activeMaximumLanes[0]=vec3u(0u);activeSpeedLanes[0]=0u;
+      activeTravelPlusLanes[0]=0u;activeTravelMinusLanes[0]=0u;
+      writeActiveSummaryRecord(workgroupId,groupCount);
+    }
+    return;
+  }` : ""}
   activeMinimumLanes[localIndex]=minimum;
   activeMaximumLanes[localIndex]=maximum;
   activeSpeedLanes[localIndex]=speedBits;
@@ -1757,21 +1808,7 @@ fn writeActiveWorkgroupSummary(
     workgroupBarrier();
     if(stride==1u){break;}stride/=2u;
   }
-  if(localIndex==0u){
-    if(all(workgroupId==vec3u(0u))){
-      activeScratch[ACTIVE_SCAN_GROUPS_WORD]=groupCount.x;
-      activeScratch[ACTIVE_SCAN_GROUPS_WORD+1u]=groupCount.y;
-      activeScratch[ACTIVE_SCAN_GROUPS_WORD+2u]=groupCount.z;
-    }
-    let summaryIndex=workgroupId.x+groupCount.x*(workgroupId.y+groupCount.y*workgroupId.z);
-    let base=ACTIVE_SUMMARY_BASE+12u*summaryIndex;
-    activeScratch[base]=activeMinimumLanes[0].x;activeScratch[base+1u]=activeMinimumLanes[0].y;
-    activeScratch[base+2u]=activeMinimumLanes[0].z;activeScratch[base+3u]=activeSpeedLanes[0];
-    activeScratch[base+4u]=activeMaximumLanes[0].x;activeScratch[base+5u]=activeMaximumLanes[0].y;
-    activeScratch[base+6u]=activeMaximumLanes[0].z;activeScratch[base+7u]=0u;
-    activeScratch[base+8u]=activeTravelPlusLanes[0];activeScratch[base+9u]=activeTravelMinusLanes[0];
-    activeScratch[base+10u]=0u;activeScratch[base+11u]=0u;
-  }
+  if(localIndex==0u){writeActiveSummaryRecord(workgroupId,groupCount);}
 }
 // Conservative full-strength swept inlet footprint. Retain this seed while
 // the inlet runs even if its current ramp injects no measurable liquid yet.
@@ -2062,7 +2099,18 @@ ${geometric ? `
 @compute @workgroup_size(4,4,4)
 fn reduceDiagnostics(@builtin(global_invocation_id) gid:vec3u){let id=activeId(gid);if(!valid(id)){return;}let represented=surfaceOccupancy(id);let conservative=volume(id);atomicAdd(&reductions[0],u32(represented*2048.0+0.5));if(surfaceLiquid(id)){atomicMax(&reductions[1],u32(id.x+1));}let speed=length(faceVelocity(id));atomicMax(&reductions[2],bitcast<u32>(speed));atomicAdd(&reductions[3],u32(${geometric ? "max(conservative,0.0)" : "clamp(conservative,0.0,8.0)"}*2048.0+0.5));}
 ${uniformPageDomainWGSL(domain)}
-${geometric ? `fn uvDonorId(g:vec3u)->vec3i{return ${domain ? "pageDomainCell(g)" : "vec3i(g)"};}\n` + uniformVolumePagesWGSL(pages) + uniformVolumeWGSL : ""}
+${geometric ? `fn uvDonorId(g:vec3u)->vec3i{return ${domain ? "pageDomainCell(g)" : "vec3i(g)"};}\n` + uniformVolumePagesWGSL(pages) + volumeWGSL : ""}
 `; }
+
+function specializeFullLattice(source: string): string {
+  const windows: [string, string][] = [
+    ["fn uvWindowMin()->vec3i{return vec3i(vec3u(activeRegion[7],activeRegion[8],activeRegion[9]));}", "fn uvWindowMin()->vec3i{return vec3i(0);}"],
+    ["fn uvWindowMax()->vec3i{return vec3i(vec3u(activeRegion[10],activeRegion[11],activeRegion[12]));}", "fn uvWindowMax()->vec3i{return dims();}"],
+  ];
+  return windows.reduce((text, [dynamic, fixed]) => {
+    if (!text.includes(dynamic)) throw new Error(`Full-lattice specialisation lost its anchor: ${dynamic}`);
+    return text.replace(dynamic, fixed);
+  }, source);
+}
 
 export const uniformReferenceComputeShader = createUniformReferenceComputeShader();

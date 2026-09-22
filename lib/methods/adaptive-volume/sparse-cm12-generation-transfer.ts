@@ -901,7 +901,7 @@ export class PreparedSparseCM12GenerationTransfer {
           : channels.filter(([bit]) => (failure & bit) !== 0).map(([, name]) => name).join(", ")
             || "unknown channel";
         throw new Error(`CM12 generation transfer rejected invalid accepted fields: ${detail}`
-          + ` (fault 0x${failure.toString(16).padStart(8, "0")})`);
+          + ` (fault 0x${failure.toString(16).padStart(8, "0")}, owner=${words[1]}, amount=${values[2]}, capacity=${values[3]})`);
       }
       let sourceVolume=0,targetVolume=0,sourceAbsoluteVolume=0,targetAbsoluteVolume=0;
       for(let group=0;group<this.auditGroups;group++){

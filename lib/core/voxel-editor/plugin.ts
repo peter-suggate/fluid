@@ -21,6 +21,8 @@ export interface ToolContext {
   readonly scene: SceneDescription;
   readonly ray: EditorRay;
   readonly values: ToolValues;
+  /** The reader held the "do the opposite" modifier at the press: a build carves, a carve builds. */
+  readonly invert?: boolean;
 }
 export type ToolAction = { readonly kind: "fluid"; readonly edit: LiveFluidEdit };
 export interface ToolUpdate {
@@ -34,6 +36,12 @@ export interface ToolUpdate {
 }
 export interface ToolGesture {
   update(ray: EditorRay): ToolUpdate | undefined;
+  /**
+   * Asked once, when the pointer is released. True means the gesture has a
+   * further phase that follows the bare pointer (push/pull's extrusion after
+   * its footprint); the host keeps the stroke open and the next press commits.
+   */
+  advance?(): boolean;
 }
 /**
  * A capability owner's declaration and behavior, composed in a static catalog
@@ -44,7 +52,12 @@ export interface ToolGesture {
 export interface VoxelToolPlugin {
   readonly id: string;
   readonly version: 1;
-  readonly execution?: "live" | "release";
+  /**
+   * What release does. `"author"` (the default) appends the previewed patches
+   * to the scene document once; `"release"` executes the previewed transient
+   * action and authors nothing. Neither touches the document during the drag.
+   */
+  readonly execution?: "author" | "release";
   readonly ui: {
     readonly label: string;
     readonly hint: string;
@@ -74,7 +87,7 @@ export function createVoxelToolRegistry(plugins: readonly VoxelToolPlugin[]) {
   for (const plugin of plugins) {
     if (!plugin.id || ids.has(plugin.id)) throw new Error(`Duplicate or empty voxel tool id: ${plugin.id}`);
     ids.add(plugin.id);
-    if ((plugin.execution !== undefined && plugin.execution !== "live" && plugin.execution !== "release")
+    if ((plugin.execution !== undefined && plugin.execution !== "author" && plugin.execution !== "release")
       || plugin.version !== 1 || !plugin.ui.label.trim() || !plugin.ui.group.trim()
       || !plugin.ui.icon.trim() || !Number.isFinite(plugin.ui.order)
       || (plugin.defaults !== undefined && typeof plugin.defaults !== "function")

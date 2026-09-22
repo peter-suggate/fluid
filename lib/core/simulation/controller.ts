@@ -29,7 +29,7 @@ import { useShellStore } from "../stores/shell-store";
 import { defaultSession, type PaneId, type PaneSession } from "../session/session";
 import type { EditorHistorySnapshot } from "../stores/history-store";
 import type { GPUQuality } from "../gpu-quality";
-import type { MethodParamValue } from "../method-contract";
+import { takesLiveSolidEdits, type MethodParamValue } from "../method-contract";
 import { emptyPerformanceReport } from "../stores/diagnostics-store";
 import {
   gpuPhysicsPerformanceActivityFrameId,
@@ -1231,7 +1231,7 @@ class SimulationController {
     // and much cheaper than `canonicalScene` over a sculpted terrain grid.
     if (committed === previous) return false;
     const session = this.session(paneId);
-    if ((session.method.getState().methodId === "adaptive-mass" || session.method.getState().methodId === "adaptive-volume")
+    if (takesLiveSolidEdits(session.method.getState().methodId)
       && JSON.stringify(previous.solidVoxels) !== JSON.stringify(committed.solidVoxels)
       && !sceneEditRequiresReset(previous, committed, session.method.getState().methodId)) {
       // Compare mirroring writes the store first. Restore the accepted document
@@ -1281,7 +1281,7 @@ class SimulationController {
     const next = cloneScene(entry.scene);
     const voxelOnly = sceneEqualExcept(current, next, ["solidVoxels"]);
     const sceneryOnly = sceneEqualExcept(current, next, ["scenery"]);
-    if (sceneryOnly || (voxelOnly && (this.session(paneId).method.getState().methodId === "adaptive-mass" || this.session(paneId).method.getState().methodId === "adaptive-volume"))) {
+    if (sceneryOnly || (voxelOnly && takesLiveSolidEdits(this.session(paneId).method.getState().methodId))) {
       this.session(paneId).scene.getState().setScene(next, entry.presetId);
       const ui = this.session(paneId).ui.getState();
       if (ui.selection?.kind === "scenery") {
@@ -1312,7 +1312,7 @@ class SimulationController {
     const solidChanged = JSON.stringify(current.solidVoxels) !== JSON.stringify(next.solidVoxels);
     const verb = direction === "undo" ? "Undid" : "Redid";
     this.runtime(paneId).pendingEdit = undefined;
-    if (voxelOnly && solidChanged && (session.method.getState().methodId === "adaptive-mass" || session.method.getState().methodId === "adaptive-volume")) {
+    if (voxelOnly && solidChanged && takesLiveSolidEdits(session.method.getState().methodId)) {
       const accept = this.runtime(paneId).acceptLiveSolidEdit;
       if (!accept) { session.runtime.getState().setNotice("Wait for the scene to be ready before changing voxel history.", "warn"); return false; }
       session.ui.setState({ voxelStrokePending: true });
@@ -1562,6 +1562,10 @@ class SimulationController {
       cpu,
       physics,
       presentation,
+      surfaceExtractionCount: metrics.surfaceExtractionCount,
+      surfaceExtractionReason: metrics.surfaceExtractionReason,
+      presentationQueue: presentation && metrics.presentationQueue?.sampleId === presentation.sampleId
+        ? metrics.presentationQueue : undefined,
       presentationStages: metrics.presentationStages
         && metrics.presentationStages.capturedAt_ms >= instrumentation.enabledAt_ms
         && performanceTraceMatchesLane(metrics.presentationStages, "gpu", "presentation")

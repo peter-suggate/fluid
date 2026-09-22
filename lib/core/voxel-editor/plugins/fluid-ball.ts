@@ -7,6 +7,6 @@ export const fluidBallTool: VoxelToolPlugin = {
     icon: "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M6 14c3-3 9 3 12-1",
     controls: [fluidSizeControl, fluidRemoveControl, fluidHeightControl] },
   defaults: (scene, values) => fluidToolDefaults(scene, values, "ball"),
-  unavailable: fluidToolUnavailable,
+  unavailable: context => fluidToolUnavailable(context, "ball"),
   begin: context => beginFluidShapeGesture(context, "ball"),
 };

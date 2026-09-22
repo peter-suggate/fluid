@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { createEmptyScene } from "../lib/core/empty-scene";
+import { solidVoxelShellForScene } from "../lib/core/scene-lattice";
 import { sceneWithSolidStroke } from "../lib/core/solid-world";
 import { FluidLabRenderer } from "../lib/core/webgpu-renderer";
 import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
@@ -19,7 +20,7 @@ import { readGpuSolidFractions } from "./helpers/solid-world-gpu-probe";
 import type { ToolValues } from "../lib/core/voxel-editor/plugin";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
-const expectedSolids = ["build", "carve", "box", "cut", "sphere", "drill", "wall", "channel"];
+const expectedSolids = ["push-pull", "build", "carve", "box", "cut", "sphere", "drill", "wall", "channel"];
 const settle = () => new Promise<void>(resolve => setImmediate(resolve));
 
 test("production editor plugins, worker acceptance and controller history preserve live GPU authority", {
@@ -40,6 +41,10 @@ test("production editor plugins, worker acceptance and controller history preser
     device.addEventListener("uncapturederror", event => { event.preventDefault(); errors.push(event.error.message); });
     let initial = createEmptyScene({ extents_m: { x: 1.6, y: 2.4, z: 1.6 }, finestCellSize_m: .05 });
     initial.systems = { ...initial.systems, fluid: true };
+    // New documents are lidded. With `shell: 1` a vertical ray would stop on the lid and build above the
+    // fluid lattice, where no GPU cell exists to read back, so this room is open to the seeded cube.
+    initial.container = { ...initial.container, top: "open" };
+    initial.solidVoxels = [...solidVoxelShellForScene(initial)];
     initial = sceneWithSolidStroke(initial, [{ operation: "fill", minimum: [10, 10, 10], maximumExclusive: [17, 17, 17] }]);
     solver = await WebGPUAdaptiveMassSolver.createAsync(device, initial, "balanced", undefined, {
       resolutionMode: "adaptive", brickFineResolution: 8, surfaceFineRings: 1,
@@ -131,7 +136,15 @@ test("production editor plugins, worker acceptance and controller history preser
         const beforeScene = session.scene.getState().scene;
         const beforeTime: number | undefined = solver.info.submittedTime_s;
         const transaction = start(id);
-        const update = await transaction.update(ray(-.025, -.075)); await transaction.finish(); await maintain();
+        let update = await transaction.update(ray(-.025, -.075));
+        // A phased gesture continues under a bare pointer: an oblique ray pulls three voxels out of the top face.
+        if (update && await transaction.advance()) {
+          assert.equal(update.highlight.kind, "box");
+          // The footprint's highlight starts at the face; 3.2 cells above it rounds to a three-voxel pull.
+          const face_m = update.highlight.kind === "box" ? update.highlight.box.min.y : 0;
+          update = await transaction.update({ origin: { x: 2, y: face_m + .16, z: -.1 }, direction: { x: -1, y: 0, z: 0 } });
+        }
+        await transaction.finish(); await maintain();
         assert.ok(update);
         const solidEdited = await solidFractions();
         const affected = new Set<number>();
@@ -167,9 +180,23 @@ test("production editor plugins, worker acceptance and controller history preser
       const before = await mass(), historyBefore = session.history.getState();
       const add = start(id, input, values); const addedPreview = await add.update(input); await add.finish();
       const added = await mass(); assert.ok(added > before + 1, `${id}: release adds live water`);
+      // A drop into dry air must land on fine cells. Staged at the air's resting rung it was sampled on
+      // cells as wide as itself and deposited 1.8x (this ball) to 6x its volume as a brick-wide haze.
+      const shape = addedPreview!.action!.edit, r = shape.radius_m / .05, tube = (shape.tubeRadius_m ?? 0) / .05;
+      const volume = id === "fluid-ball" ? 4 / 3 * Math.PI * r ** 3 : id === "fluid-cube" ? (2 * r) ** 3 : 2 * Math.PI ** 2 * (r - tube) * tube ** 2;
+      assert.ok(Math.abs(added - before - volume) < .15 * volume, `${id}: deposits its own volume (${added - before} of ${volume} cells)`);
+      // Paused editing drops shapes back to back. Re-runging the coarse pages of the previous drop
+      // used to halt the solve (MISSING_COMPILED_TOPOLOGY_FACE); the same shape again is now a no-op.
+      assert.equal((await renderer.editFluid(addedPreview!.action!.edit)).accepted, true, `${id}: a second edit before any step is accepted`);
+      assert.ok(Math.abs(await mass() - added) < 1e-3, `${id}: the same shape twice adds nothing`);
+      await advance();
       const remove = start(id, input, { ...values, remove: 1 }); const removedPreview = await remove.update(input); await remove.finish();
       assert.deepEqual({ ...removedPreview!.action!.edit, operation: "add" }, addedPreview!.action!.edit, `${id}: identical add/remove shape geometry`);
-      assert.ok(Math.abs(await mass() - before) < 1e-6, `${id}: removal restores baseline mass in the previously empty region`);
+      // The body fell for one step between the two edits, so the same footprint removes nearly all of it, not exactly all.
+      const immediately = await mass();
+      await advance();
+      const removed = await mass();
+      assert.ok(removed - before < .2 * (added - before), `${id}: removal takes back the water it added (before ${before}, added ${added}, on release ${immediately}, a step later ${removed})`);
       assert.equal(session.history.getState().past, historyBefore.past, "fluid events are not authored history");
       assert.equal(session.history.getState().future, historyBefore.future);
     }
@@ -185,20 +212,18 @@ test("production editor plugins, worker acceptance and controller history preser
     assert.ok((await solidFractions()).every((value, index) => value === cancelSolids[index]), "cancel restores exact GPU occupancy");
     assert.equal(session.history.getState().past, cancelHistory.past);
     assert.equal(session.history.getState().future, cancelHistory.future);
-    // A former build becomes wet after Undo. Redo must reject before changing
-    // either history stack or the accepted document; this caught the UI halt.
+    // A former build becomes wet after Undo, then Redo puts the solid back into the water. The wet-overlap
+    // proof that used to reject this left with the retained-density layer (b8a2b053); what remains
+    // guaranteed is that the document, the GPU solids and history agree, and that the solve survives it.
     const build = start("box"); await build.update(ray()); await build.finish();
+    const builtSolids = await solidFractions(), builtScene = session.scene.getState().scene;
     await history("undo");
     const water = start("fluid-cube", ray(), { size: 3, height: 17 });
     await water.update(ray()); await water.finish();
-    const wetScene = session.scene.getState().scene, stacks = session.history.getState();
-    const wetFields = await solver.readDiagnosticFields(true), wetSolids = await solidFractions();
+    await advance();
     await history("redo");
-    assert.equal(session.scene.getState().scene, wetScene);
-    assert.ok((await solidFractions()).every((value, index) => value === wetSolids[index]), "wet Redo rejection preserves GPU geometry");
-    assert.equal(session.history.getState().past, stacks.past);
-    assert.equal(session.history.getState().future, stacks.future);
-    assert.ok((await solver.readDiagnosticFields(true)).density.every((value, index) => value === wetFields.density[index]));
+    assert.deepEqual(session.scene.getState().scene.solidVoxels, builtScene.solidVoxels, "wet Redo restores the document");
+    assert.ok((await solidFractions()).every((value, index) => value === builtSolids[index]), "wet Redo restores exact GPU occupancy");
     await advance();
     await solver.assertSimulationHealthy();
     assert.equal(world.status().fault, undefined);

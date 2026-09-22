@@ -250,7 +250,7 @@
     "check:module-boundaries": "node --import tsx tools/check-module-boundaries.ts",
     "check:import-partition": "node --import tsx tools/import-partition.ts",
     "check:method-install": "node --import tsx tools/check-method-install.ts --strict",
-    "test:dawn:voxel-editor": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_WEBGPU_BACKEND=${WEBGPU_BACKEND:-metal} node --import tsx --test --test-concurrency=1 tests/voxel-editor-production-dawn.test.ts tests/live-fluid-shapes-dawn.test.ts tests/sparse-cm12-empty-presentation-dawn.test.ts tests/live-terrain-overlay-dawn.test.ts tests/voxel-editor-new-room-dawn.test.ts",
+    "test:dawn:voxel-editor": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_WEBGPU_BACKEND=${WEBGPU_BACKEND:-metal} node --import tsx --test --test-concurrency=1 tests/voxel-editor-production-dawn.test.ts tests/live-fluid-shapes-dawn.test.ts tests/sparse-cm12-empty-presentation-dawn.test.ts tests/live-terrain-overlay-dawn.test.ts tests/voxel-editor-new-room-dawn.test.ts tests/uniform-live-solid-edit-dawn.test.ts",
     "test:physics-wasm:world": "node --import tsx --test tools/wasm/full-world-flow.test.ts",
     "test:physics-wasm:world3d": "node --import tsx tools/wasm/node-world3d-flow.ts",
     "test:physics-wasm:world3d:sustained": "node --import tsx tools/wasm/node-world3d-flow.ts --ui-default-frames=60",

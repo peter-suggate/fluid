@@ -53,6 +53,7 @@ export function VoxelToolShelf() {
       <details className="voxel-context-more"><summary>More</summary>
         {advanced.map(controlInput)}
         <p>Shift-drag to navigate. Escape or Ctrl/⌘ Z cancels the stroke. Water keeps moving.</p>
+        <p>[ and ] or Alt-wheel size the tool; add Shift for depth. Hold Alt as you press to do the opposite: a build carves, a carve builds.</p>
       </details>
       {plugin.ui.notice && <p>{plugin.ui.notice}</p>}
     </section>}

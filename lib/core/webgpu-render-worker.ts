@@ -147,6 +147,12 @@ scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest
       terrainContentStamp: message.terrainContentStamp,
     };
     runtime.setRenderSceneTerrainContentStamp(message.terrainContentStamp);
+  } else if (message.type === "adopt-render-scene") {
+    // The accepted document is already `renderScene`; a draw naming any other
+    // revision fails loudly below rather than presenting the wrong scene.
+    if (renderScene && renderScene.document === solidEditAcceptance.acceptedDocument) {
+      renderScene = { ...renderScene, revision: message.revision };
+    }
   } else if (message.type === "draw") {
     try {
       if (!renderScene || renderScene.revision !== message.sceneRevision) {

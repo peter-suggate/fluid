@@ -90,6 +90,10 @@ function costExplanation(cost: RenderPipelineMeasurement): string {
 function usePresentationTiming(): {
   readonly total?: PerformanceTrace;
   readonly stages?: PerformanceTrace;
+  readonly cpu_ms?: number;
+  readonly queue_ms?: number;
+  readonly extractionCount?: number;
+  readonly extractionReason?: string;
 } {
   const session = useSession();
   const reports = session.diagnostics((state) => state.performanceReports);
@@ -111,7 +115,10 @@ function usePresentationTiming(): {
       .map((report) => report.presentationStages)
       .filter((trace): trace is PerformanceTrace => trace !== undefined
         && trace.measurementSource === "gpu-pass-timestamp");
-    return { total: mean, stages: averagePerformanceTraces(stageSamples) };
+    const cpuSamples = recent.flatMap(report => report.cpu ? [report.cpu.total_ms] : []);
+    const queueSamples = recent.flatMap(report => report.presentationQueue ? [report.presentationQueue.total_ms] : []);
+    const average = (values: number[]) => values.length ? values.reduce((a, b) => a + b, 0) / values.length : undefined;
+    return { total: mean, stages: averagePerformanceTraces(stageSamples), cpu_ms: average(cpuSamples), queue_ms: average(queueSamples), extractionReason: newest.surfaceExtractionReason, extractionCount: newest.surfaceExtractionCount };
   }, [reports]);
 }
 
@@ -420,6 +427,11 @@ export function RenderPipelineOverlay() {
         {effectiveRendererStatus.terminalCounts.planarBoundary} planar · {effectiveRendererStatus.terminalCounts.voxel} voxel
       </code>}
     </div>
+    {liveTiming && timing.queue_ms !== undefined && <div className="render-status-line" data-testid="render-wall-timing"
+      title="CPU is measured host frame work. Queue is submission-to-completion wall time, including queued GPU work and callback delivery. These overlap GPU execution and must not be added to the GPU total above.">
+      <code>CPU {timing.cpu_ms?.toFixed(2) ?? "—"} ms · Queue {timing.queue_ms.toFixed(2)} ms</code>
+      <code title="Cumulative water mesh extractions since this pipeline was created. A paused unchanged surface should retain its mesh.">Mesh builds {timing.extractionCount ?? "—"} ({timing.extractionReason})</code>
+    </div>}
 
     {/* The profile rung is the question asked before any node is opened — how
         expensive is this frame allowed to be — so it stays above the graph

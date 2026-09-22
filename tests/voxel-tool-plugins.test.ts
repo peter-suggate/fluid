@@ -9,7 +9,8 @@ import { voxelTools } from "../lib/core/voxel-editor/registry";
 import { beginToolTransaction } from "../lib/core/voxel-editor/transaction";
 import { createWebgpuSolidWorldPageLayout, writeWebgpuSolidWorldPages } from "../lib/core/webgpu-solid-world-pages";
 
-const solidTools = voxelTools.tools.filter(plugin => plugin.execution !== "release");
+// The one-drag family. Push/pull authors nothing until its second phase and is exercised by its own test.
+const solidTools = voxelTools.tools.filter(plugin => plugin.execution !== "release" && plugin.id !== "push-pull");
 
 function empty() {
   const scene = cloneScene(defaultScene);
@@ -79,27 +80,66 @@ test("box retraction restores its base, freehand accumulates, and both persist",
   }
 });
 
-test("a transaction publishes before release, records once, cancels live and rejects atomically", async () => {
+test("a real tool's stroke previews without publishing, commits once, cancels free and rejects atomically", async () => {
   let scene = empty(); const base = scene;
-  let begins = 0, commits = 0, cancels = 0, reject = false;
+  let begins = 0, commits = 0, cancels = 0, publishes = 0, reject = false;
   const transaction = () => beginToolTransaction(voxelTools.get("build")!, {
     scene: () => scene,
-    async publish(next) { if (reject) throw new Error("capacity"); scene = next; },
+    async publish(next) { publishes++; if (reject) throw new Error("capacity"); scene = next; },
     begin() { begins++; }, finish() { commits++; }, cancel() { cancels++; },
   }, ray(scene, 0, 0))!;
   const stroke = transaction();
-  await stroke.update(ray(scene, 0, 0));
-  assert.notEqual(scene, base); assert.equal(commits, 0);
-  const accepted = scene;
-  reject = true;
-  await assert.rejects(stroke.update(ray(scene, 2, 0)), /capacity/);
-  assert.equal(scene, accepted);
-  reject = false;
+  assert.ok(await stroke.update(ray(scene, 0, 0)));
+  assert.ok(await stroke.update(ray(scene, 2, 0)));
+  assert.equal(scene, base); assert.equal(publishes, 0);
   await stroke.finish(true);
-  assert.equal(scene, base); assert.equal(cancels, 1); assert.equal(commits, 0);
+  assert.equal(scene, base); assert.equal(cancels, 1); assert.equal(commits, 0); assert.equal(publishes, 0);
+  reject = true;
+  const rejected = transaction();
+  await rejected.update(ray(scene, 1, 0));
+  await assert.rejects(rejected.finish(), /capacity/);
+  assert.equal(scene, base); assert.equal(cancels, 2); assert.equal(commits, 0);
+  reject = false;
   const second = transaction();
   await second.update(ray(scene, 1, 0)); await second.finish(); await second.finish();
-  assert.equal(commits, 1); assert.equal(begins, 2);
+  assert.notEqual(scene, base); assert.equal(commits, 1); assert.equal(begins, 3); assert.equal(publishes, 2);
+});
+
+test("push/pull takes its footprint from the drag and its depth from the bare pointer", async () => {
+  const scene = sceneWithSolidStroke(empty(), shapePatches([0, 0, 0], [8, 4, 8], "fill", "box"));
+  const h = sceneCellSizes_m(scene);
+  const origin = [-scene.container.width_m / 2, 0, -scene.container.depth_m / 2];
+  // A horizontal ray at a chosen height: where it passes the footprint's normal is the depth it asks for.
+  const level = (y: number) => ({ origin: { x: origin[0]! + 40 * h[0], y: y * h[1], z: origin[2]! + 3 * h[2] }, direction: { x: -1, y: 0, z: 0 } });
+  const plugin = voxelTools.get("push-pull")!;
+  for (const [height, operation, y] of [[6.6, "fill", [4, 7]], [1.4, "clear", [1, 4]]] as const) {
+    const gesture = plugin.begin({ scene, ray: ray(scene, 2, 2), values: toolValues(plugin) })!;
+    assert.deepEqual(gesture.update(ray(scene, 4, 3))?.patches, [], "a footprint alone authors nothing");
+    assert.equal(gesture.advance?.(), true); assert.equal(gesture.advance?.(), false);
+    assert.deepEqual(gesture.update(level(height))?.patches, [{ operation, minimum: [2, y[0], 2], maximumExclusive: [5, y[1], 4],
+      ...(operation === "fill" ? { materialId: 2 } : {}) }]);
+    // Straight down the normal says nothing about depth, so the last answer stands.
+    assert.equal(gesture.update(ray(scene, 3, 3))?.patches.length, 1);
+    assert.deepEqual(gesture.update(level(4))?.patches, [], "back at the face there is nothing to commit");
+  }
+  let document = scene, commits = 0;
+  const stroke = beginToolTransaction(plugin, { scene: () => document, async publish(next) { document = next; },
+    begin() {}, finish() { commits++; }, cancel() {} }, ray(scene, 2, 2))!;
+  await stroke.update(ray(scene, 4, 3));
+  assert.equal(await stroke.advance(), true);
+  await stroke.update(level(6.6)); await stroke.finish();
+  assert.equal(commits, 1);
+  assert.equal(sampleSolidWorld(solidWorldForScene(document), [3, 6, 3]).solidFraction, 1);
+  assert.equal(sampleSolidWorld(solidWorldForScene(document), [3, 7, 3]).solidFraction, 0);
+});
+
+test("the opposite modifier turns a build into a carve at the same face", () => {
+  const scene = sceneWithSolidStroke(empty(), shapePatches([0, 0, 0], [8, 4, 8], "fill", "box"));
+  const build = voxelTools.get("build")!;
+  const normal = build.begin({ scene, ray: ray(scene, 2, 2), values: toolValues(build) })!.update(ray(scene, 2, 2))!;
+  const inverted = build.begin({ scene, ray: ray(scene, 2, 2), values: toolValues(build), invert: true })!.update(ray(scene, 2, 2))!;
+  assert.deepEqual(normal.patches.map(p => [p.operation, p.minimum[1]]), [["fill", 4]]);
+  assert.deepEqual(inverted.patches.map(p => [p.operation, p.minimum[1]]), [["clear", 3]]);
 });
 
 test("small edits copy and upload only changed page payloads", () => {
@@ -214,7 +254,8 @@ test("brush and line interpolation stay connected across diagonal pointer jumps"
 });
 
 test("size and stroke caps reject atomically, allowing subsequent smaller updates", () => {
-  assert.throws(() => shapePatches([0, 0, 0], [33, 33, 33], "fill", "box"), /smaller region/);
+  assert.doesNotThrow(() => shapePatches([0, 0, 0], [128, 128, 128], "fill", "box"));
+  assert.throws(() => shapePatches([0, 0, 0], [129, 129, 129], "fill", "box"), /smaller region/);
   assert.throws(() => shapePatches([0, 0, 0], [0, 1, 1], "fill", "sphere"), /smaller region/);
   const scene = empty();
   for (const id of ["box", "cut", "build", "carve", "wall", "channel"]) {
@@ -242,7 +283,7 @@ test("shell picking passes through tank walls by default, can target walls, and 
 test("stroke work caps account for mirrored and overlapping stamp workloads", () => {
   const scene = empty(); const plugin = voxelTools.get("build")!;
   const input = ray(scene, -30, -30);
-  const gesture = plugin.begin({ scene, ray: input, values: toolValues(plugin, { size: 16, depth: 32, mirror: 1 }) })!;
+  const gesture = plugin.begin({ scene, ray: input, values: toolValues(plugin, { size: 64, depth: 128, mirror: 1 }) })!;
   const accepted = gesture.update(input)!;
   assert.throws(() => gesture.update(ray(scene, -28, -30)), /Stroke is full/);
   assert.deepEqual(gesture.update(input)!.patches, accepted.patches);

@@ -1,5 +1,5 @@
 import { correctionOptions } from "./correction-controls";
-import type { LiveFluidEdit, LiveFluidEditResult } from "../../core/live-fluid-edit";
+import { liveFluidEditRefusal, liveFluidEditVolume, type LiveFluidEdit, type LiveFluidEditResult } from "../../core/live-fluid-edit";
 import { SimulationFailureError } from "../../core/simulation-failure";
 import { SparseCM12GenerationBudgetDeferred, SparseCM12GenerationStale } from "./sparse-cm12-generation-budget";
 import { planSparseCM12ResidentGeneration } from "./sparse-cm12-generation-policy";
@@ -840,8 +840,19 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   }
 
   async editFluid(edit: LiveFluidEdit): Promise<LiveFluidEditResult> {
-    if (this.disposed || !this.sparseWorld.editFluidVolume) return { accepted: false, reason: "Live fluid editing is unavailable." };
-    return this.sparseWorld.editFluidVolume(edit);
+    if (this.disposed) return { accepted: false, reason: "Live fluid editing is unavailable." };
+    if (this.sparseWorld.editFluidVolume) return this.sparseWorld.editFluidVolume(edit);
+    let volume;
+    // A malformed shape is the caller's error; only a valid one may reach the world, which faults on a bad edit.
+    try {
+      const refusal = liveFluidEditRefusal(edit, this.fluidDomain);
+      if (refusal) return { accepted: false, reason: refusal };
+      volume = liveFluidEditVolume(edit);
+    } catch (error) { return { accepted: false, reason: error instanceof Error ? error.message : "Fluid edit was rejected." }; }
+    const receipt = this.sparseWorld.edit({ kind: "liquid-volume", operation: edit.operation, volume });
+    if (receipt.disposition !== "applied") return { accepted: false, reason: receipt.reason ?? "Fluid edit was rejected." };
+    if (this.sparseRuntime.pendingLiquidInteractions) this.scheduleTopologyGeneration();
+    return { accepted: true };
   }
 
   /** Add a semantic liquid interaction through the public sparse-world API. */
@@ -867,7 +878,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
    * and discard the timeline.
    */
   async prepareLiveSolidEdit(scene: SceneDescription): Promise<boolean> {
-    if (!this.sparseWorld.prepareSceneEdit) throw new Error("Live solid edit acceptance is unavailable.");
+    // A world without a wet-overlap proof accepts through `applySceneUniforms`, as undo and redo do.
+    if (!this.sparseWorld.prepareSceneEdit) return false;
     return this.sparseWorld.prepareSceneEdit(scene);
   }
 

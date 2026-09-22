@@ -45,6 +45,8 @@ export type WebGPURenderWorkerRequest =
   | { type: "attach"; canvas: OffscreenCanvas }
   | { type: "initialize"; requestId: number }
   | { type: "set-render-scene"; revision: number; scene: SceneDescription; needsSceneryCatalog?: boolean; terrainContentStamp: string }
+  /** The worker already holds this document: it accepted it as a solid edit. Only the revision crosses. */
+  | { type: "adopt-render-scene"; revision: number }
   | { type: "draw"; frameId: number; sceneRevision: number; args: DrawArgumentsWithoutScene; viewport: { width: number; height: number; devicePixelRatio: number }; instrumentationMode: PerformanceInstrumentationMode }
   | { type: "set-simulation-scene"; scene: DrawArguments[1] | undefined }
   | { type: "set-hover-highlight"; range: { first: number; last: number } | undefined }
@@ -267,11 +269,13 @@ export class WebGPURenderWorkerClient {
    * better one than nothing happening.
    */
   private solidEditBase?: SceneDescription;
+  /** The document the worker last accepted as a solid edit, until anything else is published. */
+  private acceptedSolidEditDocument?: SceneDescription;
   validateLiveSolidEdit(scene: SceneDescription, base: SceneDescription): Promise<void> {
     const sendBase = this.solidEditBase !== base;
     this.solidEditBase = base;
     return this.request<void>({ type: "validate-solid-edit", requestId: this.nextRequestId(), scene,
-      ...(sendBase ? { base } : {}) });
+      ...(sendBase ? { base } : {}) }).then(() => { this.acceptedSolidEditDocument = scene; });
   }
 
   editFluid(edit: LiveFluidEdit): Promise<LiveFluidEditResult> {
@@ -313,6 +317,12 @@ export class WebGPURenderWorkerClient {
     if (this.publishedRenderDocument) reuseEnvironmentProxyCatalog(this.publishedRenderDocument, scene);
     this.publishedRenderDocument = scene;
     markEnvironmentCatalogRemote(scene);
+    // Acceptance already cloned this exact document into the worker and both
+    // GPU consumers adopted it there. Sending it again would clone the scene a
+    // second time and republish it under a second worker-side identity.
+    const accepted = this.acceptedSolidEditDocument === scene;
+    this.acceptedSolidEditDocument = undefined;
+    if (accepted) { this.post({ type: "adopt-render-scene", revision }); return revision; }
     const terrain = scene.terrain;
     let stamp = terrain && this.terrainStampByDocument.get(terrain);
     if (stamp === undefined) {

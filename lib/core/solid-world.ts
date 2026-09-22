@@ -276,6 +276,43 @@ export interface SolidWorld {
  * ordered. Physical extents and realized lattice dimensions are included so a
  * scale change cannot reuse pages under a stale metre mapping.
  */
+interface PatchFold { readonly length: number; readonly low: number; readonly high: number }
+const patchFolds = new WeakMap<readonly SolidWorldVoxelPatch[], PatchFold>();
+/**
+ * Order-sensitive fold of an authored patch list, kept per array.
+ *
+ * A stroke appends to an immutable list, so the fold of the longer list is the
+ * fold of the shorter one continued (`from`): stamping an edited scene costs
+ * the stroke, not the scene's whole editing history.
+ */
+function solidVoxelPatchFold(patches: readonly SolidWorldVoxelPatch[], from?: PatchFold): PatchFold {
+  const cached = patchFolds.get(patches);
+  if (cached && cached.length === patches.length) return cached;
+  const resume = cached && cached.length < patches.length ? cached
+    : from && from.length <= patches.length ? from : undefined;
+  let low = resume?.low ?? 0x811c_9dc5, high = resume?.high ?? 0x9e37_79b9;
+  const foldWord = (word: number) => {
+    low = Math.imul(low ^ word, 0x0100_0193) >>> 0;
+    high = Math.imul(high ^ (word >>> 16 | word << 16), 0x85eb_ca6b) >>> 0;
+  };
+  for (let index = resume?.length ?? 0; index < patches.length; index += 1) {
+    const patch = patches[index]!;
+    foldWord(patch.operation === "fill" ? 1 : 2);
+    for (const value of patch.minimum) foldWord(value | 0);
+    for (const value of patch.maximumExclusive) foldWord(value | 0);
+    foldWord(patch.materialId ?? 1);
+  }
+  const result = { length: patches.length, low, high };
+  patchFolds.set(patches, result);
+  return result;
+}
+
+/** Compact identity of an authored patch list, for keys that are compared every frame. */
+export function solidVoxelPatchesKey(patches: readonly SolidWorldVoxelPatch[]): string {
+  const fold = solidVoxelPatchFold(patches);
+  return `${fold.length}:${fold.high.toString(16)}:${fold.low.toString(16)}`;
+}
+
 export function solidWorldContentStamp(scene: SceneDescription): string {
   let low = 0x811c_9dc5, high = 0x9e37_79b9;
   const foldWord = (word: number) => {
@@ -292,10 +329,8 @@ export function solidWorldContentStamp(scene: SceneDescription): string {
   foldString(terrainContentStamp(scene.terrain));
   foldString(`${scene.container.width_m}:${scene.container.height_m}:`
     + `${scene.container.depth_m}:${dimensions.join(":")}`);
-  for (const patch of scene.solidVoxels) {
-    foldString(`${patch.operation}:${patch.minimum.join(":")}:`
-      + `${patch.maximumExclusive.join(":")}:${patch.materialId ?? 1}`);
-  }
+  const patches = solidVoxelPatchFold(scene.solidVoxels);
+  foldWord(patches.length); foldWord(patches.low); foldWord(patches.high);
   return `solid-world-v1:${high.toString(16).padStart(8, "0")}`
     + low.toString(16).padStart(8, "0");
 }
@@ -320,32 +355,47 @@ function applySolidWorldPatches(
       && (!Number.isSafeInteger(materialId) || materialId < 1 || materialId > 0xffff)) {
       throw new RangeError("SolidWorld material ID must fit non-zero u16");
     }
-    for (let z = patch.minimum[2]; z < patch.maximumExclusive[2]; z += 1)
-      for (let y = patch.minimum[1]; y < patch.maximumExclusive[1]; y += 1)
-        for (let x = patch.minimum[0]; x < patch.maximumExclusive[0]; x += 1) {
-          const address = solidWorldPageAddress([x, y, z]);
-          let page = pages.get(key(address.page));
-          if (!page && patch.operation === "clear") continue;
+    if (![...patch.minimum, ...patch.maximumExclusive].every((value) =>
+      value >= -0x8000_0000 && value <= 0x7fff_ffff)) {
+      throw new RangeError("SolidWorld voxel coordinate must fit signed i32");
+    }
+    // Whole rows per page: the cost of a large box is its pages, not its voxels.
+    const fill = patch.operation === "fill";
+    const B = SOLID_WORLD_BRICK_CELLS;
+    const first = patch.minimum.map((value) => floorDiv(value, B));
+    const last = patch.maximumExclusive.map((value) => floorDiv(value - 1, B));
+    for (let pz = first[2]!; pz <= last[2]!; pz += 1)
+      for (let py = first[1]!; py <= last[1]!; py += 1)
+        for (let px = first[0]!; px <= last[0]!; px += 1) {
+          const coordinate: SolidWorldCoordinate = [px, py, pz];
+          const pageKey = key(coordinate);
+          let page = pages.get(pageKey);
+          if (!page && !fill) continue;
           if (!page) {
-            page = emptyPage(address.page, 1);
-            pages.set(key(address.page), page);
-          }
-          const pageKey = key(address.page);
-          if (cloneBase && !owned.has(pageKey)) {
+            // A page born inside a copy-on-write edit carries the edit's revision, as a cloned one does.
+            page = emptyPage(coordinate, cloneBase ? 2 : 1);
+            pages.set(pageKey, page);
+          } else if (cloneBase && !owned.has(pageKey)) {
             page = { ...page, solidFraction: page.solidFraction.slice(),
               signedDistanceQ8: page.signedDistanceQ8.slice(),
               materialId: page.materialId.slice(), revision: page.revision + 1 };
             pages.set(pageKey, page);
-            owned.add(pageKey);
           }
-          const fill = patch.operation === "fill";
-          page.solidFraction[address.localIndex] = fill ? 255 : 0;
-          page.signedDistanceQ8[address.localIndex] = fill ? -128 : 0x7fff;
-          page.materialId[address.localIndex] = fill ? materialId : 0;
+          owned.add(pageKey);
+          const lo = coordinate.map((p, axis) => Math.max(0, patch.minimum[axis]! - p * B));
+          const hi = coordinate.map((p, axis) => Math.min(B, patch.maximumExclusive[axis]! - p * B));
+          for (let z = lo[2]!; z < hi[2]!; z += 1)
+            for (let y = lo[1]!; y < hi[1]!; y += 1) {
+              const row = B * (y + B * z);
+              page.solidFraction.fill(fill ? 255 : 0, row + lo[0]!, row + hi[0]!);
+              page.signedDistanceQ8.fill(fill ? -128 : 0x7fff, row + lo[0]!, row + hi[0]!);
+              page.materialId.fill(fill ? materialId : 0, row + lo[0]!, row + hi[0]!);
+            }
         }
   }
-  const ordered = [...pages.values()].filter((page) =>
-    page.solidFraction.some((fraction) => fraction > 0)).sort((left, right) =>
+  // Only a page this call wrote can have become empty; the base never holds one.
+  const ordered = [...pages.entries()].filter(([pageKey, page]) => (cloneBase && !owned.has(pageKey))
+    || page.solidFraction.some((fraction) => fraction > 0)).map(([, page]) => page).sort((left, right) =>
     left.coordinate[2] - right.coordinate[2]
     || left.coordinate[1] - right.coordinate[1]
     || left.coordinate[0] - right.coordinate[0]);
@@ -560,6 +610,7 @@ export function sampleSolidWorld(
 export function sceneWithSolidStroke(base: SceneDescription,
   patches: readonly SolidWorldVoxelPatch[]): SceneDescription {
   const scene = { ...base, solidVoxels: [...base.solidVoxels, ...patches] };
+  solidVoxelPatchFold(scene.solidVoxels, solidVoxelPatchFold(base.solidVoxels));
   // A browser input transaction may have no compiled terrain image; authoring
   // a descriptor must not synchronously bake the entire domain on that thread.
   // Runtime owners already holding the base image retain the incremental path.

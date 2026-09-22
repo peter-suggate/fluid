@@ -265,6 +265,28 @@ export function terrainSampleShape(terrain: TerrainDescription | undefined): Ter
  * containing hundreds of thousands of samples. Grid samples are folded as
  * f32 words because that is the precision ultimately uploaded to WebGPU.
  */
+const heightsFolds = new WeakMap<readonly number[], { length: number; low: number; high: number }>();
+/**
+ * The samples are the only part of a stamp that scales with the ground, and a
+ * sculpt replaces the array rather than writing into it, so their fold is kept
+ * per array. Keys that are read every frame can then afford to include terrain.
+ */
+function gridHeightsFold(heights_m: readonly number[]) {
+  const cached = heightsFolds.get(heights_m);
+  if (cached && cached.length === heights_m.length) return cached;
+  let low = 0x811c_9dc5, high = 0x9e37_79b9;
+  const sample = new Float32Array(1);
+  const word = new Uint32Array(sample.buffer);
+  for (const height of heights_m) {
+    sample[0] = height;
+    low = Math.imul(low ^ word[0]!, 0x0100_0193) >>> 0;
+    high = Math.imul(high ^ (word[0]! >>> 16 | word[0]! << 16), 0x85eb_ca6b) >>> 0;
+  }
+  const result = { length: heights_m.length, low, high };
+  heightsFolds.set(heights_m, result);
+  return result;
+}
+
 export function terrainContentStamp(terrain: TerrainDescription | undefined): string {
   if (!terrain) return "terrain-v1:none";
   let low = 0x811c_9dc5, high = 0x9e37_79b9;
@@ -296,12 +318,8 @@ export function terrainContentStamp(terrain: TerrainDescription | undefined): st
   });
   for (let index = 0; index < descriptor.length; index += 1) fold(descriptor.charCodeAt(index));
   if (terrain.grid) {
-    const sample = new Float32Array(1);
-    const word = new Uint32Array(sample.buffer);
-    for (const height of terrain.grid.heights_m) {
-      sample[0] = height;
-      fold(word[0]);
-    }
+    const heights = gridHeightsFold(terrain.grid.heights_m);
+    fold(heights.low); fold(heights.high);
   }
   return `terrain-v1:${high.toString(16).padStart(8, "0")}${low.toString(16).padStart(8, "0")}`;
 }

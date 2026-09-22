@@ -369,6 +369,324 @@ It is temporary and should go once the program's changes are accepted.
 Isolated xctrace captures should pass `FLUID_UNIFORM_AB_OFF=batch`, or set
 `FLUID_UNIFORM_MG_LEVEL_LABELS=1`, to keep one labelled pass per kernel.
 
-Next, in order: the V_i field and the static solid-free tile bit (WP1 steps 3
-and 4), which attack the remaining 185 open-fraction evaluations per cell; then
-`Total surface volume: measure`; then the L0 smoother (WP4 items 1 and 2).
+## 8. Second round (2026-09-21, after commit 84a0c558)
+
+Same protocol, plus a third scene with real solids and terrain:
+`hero-garden-hose` (144×96×96). Each row is one switch flipped against
+everything else on; min of 2–3 interleaved reps.
+
+| change | switch | mini64 | fig7 128³ | garden | exact | kept |
+|---|---|--:|--:|--:|---|---|
+| solid-bitfield header from host constants, not read back | `solidheader` | −0.57 (−2.7%) | −1.06 (−2.2%) | −0.97 (−3.1%) | see below | yes |
+| `measure`: all-zero band corners ⇒ one phi load | `measurelean` | −0.03 | −0.75 (−1.6%) | n/m | bit-identical | yes |
+| `measure`: K cells per thread ahead of the tree (K=4/8/32) | — | +0.3/+1.0/+1.8 | −0.3/+0.2/+1.8 | | rounding-level | **no, reverted** |
+| multigrid `mgActiveId` compiled to `gid` on a full lattice | `mgstaticid` | −0.66 (−3.2%) | −0.90 (−1.9%) | n/m | bit-identical | yes |
+| main shader window header compiled out on a full lattice | `staticid` | −0.30 (−1.5%) | −0.24 (−0.5%) | n/m | bit-identical | yes |
+| in-place red-black smoother over half the lattice | `inplace` | −0.06 | −2.68 (−5.8%) | −1.88 (−6.5%) | bit-identical | yes |
+| **everything, vs HEAD (`all`)** | | **23.52 → 19.41 (−17.5%)** | **55.05 → 43.27 (−21.4%)** | **36.14 → 27.22 (−24.7%)** | | |
+
+What changed in the picture:
+
+- **The V_i texture (WP1 step 3) is withdrawn.** In a body-free scene
+  `cellOpenFraction` is a bounds test and one bit out of a packed word. The
+  cost was never the evaluation, it was `staticSolidVoxelOccupied` re-reading
+  its own four-word header (magic, three shape words) through a `read_write`
+  binding on every call: five dependent loads where one is needed. The header
+  is the host's constant (the solver always packs the field over the lattice
+  plus a one-cell halo), so it now comes from `params.dimsDt`. A 4-byte-per-cell
+  texture would have been 32× the bytes of the bitfield it replaced. A cached
+  field is still the right answer for rigid-body scenes (eight corner tests per
+  body per call, no broad phase), and only there.
+- **With the header fix in, the whole set is bit-identical to HEAD again** on
+  mini64 (120 steps: volume 94032.829, max speed 3.0352, residual, FIM count
+  all equal) and on fig7 (60 steps). The "rounding-level" drift recorded in
+  section 7 came from the `cellOpenFraction` edit interacting with those header
+  loads; it is gone. Garden, which exercises the solid and V_face paths for
+  real, still differs from HEAD at rounding level (max speed 2.13 vs 1.99 at 60
+  steps) and passes its gate.
+- **`measure` is latency-bound, not traffic-bound.** Folding K cells into each
+  thread cuts the 80-byte-per-leaf workgroup tree by K and made the pass
+  slower at every K. The pass is 2M short threads whose cost is the serial
+  chain inside each one; lengthening the chain loses more than thinning the
+  tree gains. The remaining lever is not visiting the 97% of cells outside the
+  band at all, which needs the WP3 band list.
+- **Header read-back is a pattern, not an instance.** `mgActiveId` read five
+  storage words per thread, in every level kernel, to add an origin the host
+  seeds at zero and nothing rewrites when the active region is off (always,
+  under paged domains). The main shader's `activeId`/`activeVertexId`/
+  `uvWindowMin/Max`/`pressureWindowLattice` did the same. Both are now compiled
+  out for full-lattice solvers. The phi kernels are deliberately left alone:
+  `phiRegion` rebinds slot 29 to a census-driven window of its own.
+- **The smoother no longer copies.** A six-neighbour update of one colour reads
+  only the other colour, so both colours share one `read_write` r32float
+  texture and each pass dispatches only its own colour (x spans half the
+  lattice). `mgSmoothColour` visited all cells of both colours twice per sweep
+  just to carry the ping-pong. Every sweep-exit value is unchanged. Guarded to
+  full-lattice, dense-storage, 3D scenes without depth symmetry (its colouring
+  ignores z, so z-neighbours would race); a live edit that introduces depth
+  symmetry rebuilds the plan on the ping-pong smoother.
+
+Gates with everything on: unchanged from HEAD's known-red set (section 7);
+boundaries 7/7, native stages 1/1, garden 1/1.
+
+Switches added: `solidheader`, `measurelean`, `mgstaticid`, `staticid`,
+`inplace`.
+
+### 8.1 Third round: a fresh capture, then the pressure launches and loads
+
+Fresh xctrace capture of fig7 with everything above on
+(`artifacts/xctrace-uniform-geometric-fig7-after/`, isolated regime, 41.12 ms
+attributed per advance):
+
+| task | ms/advance | note |
+|---|--:|---|
+| pressure, all levels | 16.46 | 832 calls. L0 9.25, L1 1.58, L2 1.07, L3 1.45, L4 1.63, L5 1.22, L6 0.25 |
+| of which smoothers | 11.23 | L0 alone 5.70 = 152 × 38 µs at 47% occupancy |
+| of which `mgBuildFinestTopology` / `mgBuildFinestRhs` | 0.46 / 0.42 | were 3.4 / 1.1 before `facecache` |
+| `Total surface volume: measure` | 2.63 | |
+| advect page vertex phi | 2.54 | |
+| `uvNormalizeRows` | 1.87 | |
+| semi-Lagrangian advection | 1.64 | |
+| rho-prime and face authority | 1.52 | |
+| phi support census | 1.36 | |
+| `uvFinishDonorSums` | 1.25 | |
+| refresh corrected surface targets | 1.16 | |
+| `uvNormalizeDonors` | 1.01 | |
+
+Pressure is 40% of the frame and L1–L6 together cost 7.2 ms for a few percent
+of the cells: those levels are launch-bound. Two changes followed, same
+protocol:
+
+| change | switch | mini64 | fig7 128³ | garden | exact | kept |
+|---|---|--:|--:|--:|---|---|
+| one dispatch per coarse smoothing visit (12 colour passes in one workgroup, `textureBarrier` between colours) | `fusevisit` | 19.43 → 18.92 (−2.6%) | 43.36 → 42.75 (−1.4%) | n/m | bit-identical | yes |
+| six neighbour liquid flags packed into the baked coefficient `w` | `liquidmask` | 18.79 → 18.26 (−2.8%) | −0.4 to −1.8% | 0 to −1.1% | bit-identical | yes |
+
+- **The fused visit wins only where a lane is short.** `mgSmoothVisitInPlace`
+  runs a level's whole visit (`2 × sweeps` colour passes) as one workgroup of
+  1024 lanes striding the colour's cells, with `textureBarrier()` where the
+  pass boundaries were and the skip flag read once through
+  `workgroupUniformLoad`. It replaces 12 launches by one, but each lane then
+  runs its cells serially. At a 8192-cell cap with 256 lanes it *lost* 7.7% on
+  mini64; it pays at ≤ ~25 serial updates per lane, hence the 1000-cell cap
+  (`FLUID_UNIFORM_FUSED_VISIT_CELLS`) with 1024 lanes. That bounds what
+  launch-fusing can ever return here: the shipping frame's launch floor is
+  about 6 µs of GPU time, not the 7–13 µs the isolated capture shows, and one
+  serial cell update costs ~0.25 µs. CPU encode drops ~1 ms (387 pressure
+  passes on mini64). Not used under indirect cycle dispatch, which would launch
+  it once per tile record.
+- **The flag mask pays on the small scene only.** With the mask an update
+  reads four coefficient texels, not seven, in both smoothers and in `mgApply`
+  (every residual kernel). mini64 −2.8%; the two large scenes move by about
+  their noise. Independent texel loads are not what bounds the L0 smoother: its
+  cost is the dependent chain (coefficient → pressure → divide → store) per
+  thread, the same regime-B shape as the rest of the frame.
+- **Value-identical is not bit-identical.** The first mask version also
+  selected the coefficient by hand (`n` odd ⇒ this cell's texel, else the
+  neighbour's). Same values in, and mini64 looked 5.4% faster, but Metal
+  reassociated the two six-term sums, the native fields stopped matching the
+  paged arms bit for bit (`uniform-pressure-layout-dawn`, native-stages
+  1.9e-5), and max speed was 7.16 vs 6.47 m/s after 16 steps. Bisected by
+  swapping halves of the expression: the flag source is free to change, the
+  coefficient must keep coming through `mgCoefficient`. Any future edit to the
+  smoother or `mgApply` should be fingerprinted at 16 steps before it is timed.
+- WGSL traps met on the way: `pass` is a reserved word (silent "Invalid
+  ShaderModule"); `textureBarrier()` and `read_write` storage textures work in
+  Dawn/Metal.
+
+### 8.2 Dead launches: the recovery finish
+
+Histogramming the L0 smoother's 152 dispatches per advance in the capture gave
+two populations: ~24 at ~128 µs (the work) and **~128 at 17–20 µs that do
+nothing**. Those are the recovery finish: 8 batches × 8 sweeps × 2 colours,
+always encoded, gated on the GPU by a flag that only a rejected cycle sets. A
+census over 150 steps each of mini64, fig7 and the garden found recovery live
+in **0 of 450** steps. Each dead launch still spawns 1.1M threads to read the
+gate and return (~11 µs above the ~6 µs launch floor), and each batch's
+`mgSaveAccepted` re-copies a field onto an identical copy (33 µs of real
+traffic, 8 times). About 3 ms of fig7's 41.
+
+The lagged cycle budget already exists because "a skipped pass still costs its
+launch floor"; the finish was the part it never reached. Not encoding it would
+change results on exactly the frames that need it, so instead the finish gets a
+second launch shape with identical arithmetic:
+
+- `mgSmoothRowInPlace`: one thread per run of 8 same-colour cells along x
+  (`MG_ROW_SEGMENT`), calling the same `mgSmoothCellInPlace`.
+- `mgSaveAcceptedQuiet` / `mgRestoreRejectedQuiet`: the two commits, same
+  segmenting, returning before any copy while word 22 (recovery entered) is
+  clear. Until a cycle is rejected the accepted copy already equals the working
+  field, so both are value no-ops there.
+- The host picks per step from the lagged readback (now 28 bytes, word 22
+  included): per-cell launches when the last observed step entered recovery or
+  no sample has landed (HEAD's behaviour), segmented launches otherwise. The
+  choice is between two launches of the same arithmetic, so a stale answer
+  costs time and nothing else. Fixed-budget mode has no readback and keeps the
+  per-cell launches.
+
+| quiet finish | mini64 | fig7 128³ | garden | exact |
+|---|--:|--:|--:|---|
+| segment 8 (kept) | 18.25 → 18.09 (−0.9%) | 42.00 → 40.13 (−4.4%) | 26.72 → 25.60 (−4.2%) | bit-identical |
+| whole rows (65 cells/thread) | | 40.36 | | bit-identical |
+| segment 8 on *live* sweeps (experiment) | +3.2 ms | +4.0 ms (live sweep ≈ 2.3×) | | |
+| whole rows on live sweeps (experiment) | +6.4 ms | +11.5 ms (live sweep ≈ 4–5×) | | |
+
+Whole rows are 0.2 ms cheaper dead and twice as slow live. With segment 8 a
+surprise recovery costs its first one or two frames ~2.3× on the finish
+(≈ +20 ms on fig7) before the readback flips the launch back; with whole rows
+that hitch would be ≈ +60 ms, on an impact frame. The same experiment is the
+reason this shape is *only* for launches expected dead: serial cells per thread
+lose on live work here, as they did in `measure`.
+
+Live-path proof: `tests/uniform-pressure-safety-dawn.test.ts` injects faults
+that force recovery (64 sweeps, exhausted). A scratch copy printing the
+pressure stats per layout × fault × frame was identical in all 24 cases with
+the quiet launches forced and off, and a pipeline counter confirmed 1024 quiet
+sweep launches and 64 of each quiet commit actually ran.
+
+Not done, needs a decision: not encoding the finish at all when the last
+sample was clean would return a further ~1 ms per advance on mini64 (160
+launches × the floor), but a frame where recovery first becomes necessary would
+go without it. That weakens a safety net, so it is left alone.
+
+### 8.3 Withdrawn: one class load per sample point
+
+`sampleVelocity(p)` calls `sampleVelocityComponent` three times and each opens
+with the same atomic two-level class load for the same `p` (section 2 listed
+this). Loading it once is value-identical and was measured two ways:
+
+| variant | mini64 | fig7 128³ | garden | exact |
+|---|--:|--:|--:|---|
+| load once, branch once around all three components | −2.8% | −1.2% | −2.7% | no: mini64 and garden diverge by step 16 |
+| load once, branch kept inside each component | −1.6% | −1.1% | −2.1% | bit-identical on all three scenes for 60 steps, **but `uniform-native-stages` goes red** |
+
+The second variant looked exact and is not. That gate compares the native
+stages against a domain-free arm compiled from different source; the two sit
+2.6e-6 apart at HEAD against a 1e-5 tolerance, and the hoist moved one arm's
+rounding enough for `long-dam` frame 7 to reach 1.9e-5. Confirmed by flipping
+only this switch (green off, red on). Keeping it would have meant widening that
+tolerance for ~1.5%, so it is reverted, and the sampler is byte-for-byte HEAD.
+
+What this adds to the rule from 8.1: a 16-step fingerprint on the three probe
+scenes is necessary, not sufficient. **Any edit to a kernel both arms compile
+has to pass `test:dawn:uniform-native-stages` and the layout oracle before its
+timing means anything.**
+
+### 8.4 Dead workgroups: skip the reduction tree, not the launch
+
+Three dense passes end every 4×4×4 workgroup in a 64-lane reduction tree of six
+or seven `workgroupBarrier()`s: the phi support census
+(`writeActiveWorkgroupSummary`), `measure` in the surface-volume correction, and
+`uvBalanceMeasure`. Over air every lane contributes the identity, and the tree
+still runs: seven barriers where 64 threads rendezvous to add zeros.
+
+Each lane now raises one `var<workgroup>` atomic flag if its contribution is
+live (tested on **bits**, so a −0 takes the tree), and a single
+`workgroupUniformLoad` of that flag lets a dead workgroup publish the identity
+from lane 0 and return. The load is one barrier instead of seven, and it is
+uniform control flow, so the tree's own barriers stay legal inside the branch.
+Live workgroups run exactly the code they ran before.
+
+| `deadgroups` | mini64 | fig7 128³ | garden |
+|---|--:|--:|--:|
+| off → on | 18.09 → 18.07 (−0.1%) | 39.16 → 37.92 (−3.2%) | 25.03 → 24.18 (−3.4%) |
+
+Bit-identical on all three scenes; native stages and the layout oracle green.
+
+### 8.5 Donor tiles: the decode only where a row can look
+
+`uvFinishDonorSums` decodes the six-limb exact column sums into one float per
+cell. It runs four times a step and was the one transport pass still dense:
+six planar limb loads and a store per cell over the whole lattice, 1.25 ms on
+fig7, while every other transport pass already runs on the TRANSPORT tile list.
+
+Its output has two readers. `uvFallback` reads a built row's own word;
+`uvNormalizeDonors` reads the words of the donors a built row samples. Rows are
+built on TRANSPORT (seeds dilated by m tiles) and a donor lies within ⌈D⌉+1
+cells of its row, which is the predicate's own m₀ = ⌈(⌈D⌉+1)/4⌉ tiles. So the
+separated dilation now carries a fourth bit, DONORS = transport seeds dilated
+by m + m₀ + 1, and the decode returns outside it. The extra tile is margin: a
+short TRANSPORT set only stalls a front, a short DONORS set would read a stale
+sum. A displacement past the transport cap makes DONORS the whole lattice. The
+bit travels in the scan planes and lands in the x plane, which is dead once the
+y scan has read it, so the class word keeps exactly the three bits the sampler
+and the overlay read.
+
+| `donortiles` | mini64 | fig7 128³ | garden |
+|---|--:|--:|--:|
+| off → on | 18.06 → 18.07 (0) | 38.77 → 37.92 (−2.2%) | 24.70 → 24.18 (−2.1%) |
+
+Bit-identical on all three scenes.
+
+### 8.6 V_face compiled once per geometry change (WP1, exact)
+
+`storeExtrapolationAuthority` writes rho' and the three V_face values of every
+cell each step. V_face is three eight-sample face queries over the solid mask,
+terrain and rigid bodies; in a step with no body and no edit it is the value
+already sitting in `velocityD`, which nothing else writes outside MacCormack
+and the stage audit. So the host keeps one bit, "velocityD holds V_face for the
+geometry as it stands", and on such a step launches a second entry point that
+stores rho' alone: one phi load a cell.
+
+The bit is dropped by `applySceneUniforms` (the live voxel-stroke path and any
+scene change), by `applyRuntimeValues`, by any step that carries a rigid body,
+and by any store that did not cover the whole lattice (a windowed store leaves
+cells outside it holding whatever geometry they last saw).
+
+| `authoritystatic` | mini64 | fig7 128³ | garden |
+|---|--:|--:|--:|
+| off → on | 17.98 → 17.89 (−0.5%) | 37.92 → 36.51 (−3.7%) | 24.20 → 23.28 (−3.8%) |
+
+Bit-identical on the three probe scenes. Invalidation was checked on
+`tests/uniform-live-solid-edit-dawn.test.ts` (a wall drawn ahead of the front,
+then undone, 92 steps): passes on both arms, and a scratch copy hashing the
+final V texture gives the same hash with the switch on and off.
+
+### 8.7 The diagnostics reduction is owed, not encoded
+
+`Uniform diagnostics reduction` is a dense pass of contended `atomicAdd`s at the
+tail of every step. No kernel loads the words it writes; its one reader is
+`readStats`, and the app calls that only on pause ("live frames never map
+solver state"). The step now records the pass as owed and `readStats` encodes
+it, once, ahead of its copies; the bind group is parity-free, so it reads the
+same fields the step left. A paused presentation refresh pays the debt first,
+because it rewrites the represented surface the reduction reads. A traced step
+keeps the pass, since the final phase closes on it.
+
+| `lazystats` | mini64 | fig7 128³ | garden |
+|---|--:|--:|--:|
+| off → on | 17.89 → 17.86 (−0.2%) | 36.47 → 36.14 (−0.9%) | 23.31 → 23.16 (−0.6%) |
+
+Looked at and left: **`Refresh corrected surface targets`** (1.16 ms on fig7)
+is dense and evaluates `uvTarget`'s 64 phi loads per cell over air, where the
+answer is zero. `uvGather` already skips it outside TRANSPORT, but the refresh
+runs after the volume correction has shifted phi by up to
+0.2·band·h·|∇φ|, and nothing bounds |∇φ| of un-redistanced far phi. The skip
+is right in practice and not provable, so it needs a min-phi census to be
+exact; not taken. **`Advect page vertex phi`** has no closed form over air
+either: far phi is a transported value, not a clamp.
+
+**Everything kept, vs HEAD:** mini64 23.52 → 17.86 (−24%), fig7 55.05 → 36.14
+(−34%), garden 36.14 → 23.16 (−36%) GPU-bound ms per advance.
+
+`tests/uniform-pressure-layout-dawn.test.ts` changed: its launch-shape equality
+between the native and paged-logical plans now exempts `mgSmooth*` entries
+(the native plan halves x and fuses visits; the paged plans do neither) and
+asserts the native plan contains `mgSmoothVisitInPlace`. The bit-for-bit field
+comparison over 12 frames × 2 fixtures that follows it is untouched and is the
+oracle that caught the reassociation above.
+
+Gates with everything on: HEAD's known-red set and nothing else (Figure 9 in
+`uniform-pressure`, 22 pass; mini32 far-wall conservation, its parent and the
+slice overlay in `uniform-volume`, 10 pass); native stages 1/1, boundaries 7/7,
+garden 1/1.
+
+Switches added this round: `fusevisit`, `liquidmask`, `rowsweep`, `deadgroups`,
+`donortiles`, `authoritystatic`, `lazystats`
+(`FLUID_UNIFORM_ROW_SWEEP=force` for measurement, `FLUID_UNIFORM_ROW_SEGMENT`).
+
+Next, in order: the resident coarse sub-hierarchy (L3–L6 are 4.5 ms of pure
+launch floor on fig7; one dispatch per V-cycle leg would remove most of it and
+is the natural extension of the fused visit); then the WP3 band/tile list,
+the only route left into `measure`, the censuses and the dense volume passes;
+then a broad phase for rigid bodies in `bodySolidFractionAt`.

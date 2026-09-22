@@ -1,4 +1,5 @@
 import { uniformVolumeDonorSumWGSL } from "./uniform-volume-donor-sum.wgsl";
+import { uniformAbOn } from "./uniform-ab-switch";
 import { geometricPlaneBoxWGSL } from "../../core/geometric-plane-box.wgsl";
 /** Dense vertex phi and fixed receiver stencils; all positions are lattice units. */
 export const UNIFORM_VOLUME_ENTRIES = [
@@ -36,6 +37,7 @@ export const UNIFORM_VOLUME_TILE_WORK_OVERRIDE = "UV_SHARPEN_TILE_WORK";
 export const UNIFORM_VOLUME_SHARPEN_TILE_COUNT_WORD = 7;
 export const UNIFORM_VOLUME_SHARPEN_TILE_MAP_WORD = 8;
 export const UNIFORM_VOLUME_EDGE_BYTES = 80;
+const donorTiles = uniformAbOn("donortiles");
 export const uniformVolumeWGSL = /* wgsl */ `
 ${geometricPlaneBoxWGSL}
 @group(0) @binding(31) var uvPhiIn:texture_3d<f32>;
@@ -329,6 +331,18 @@ fn uvTransportSkip(id:vec3i)->bool{
   if(!uvTransportTiles()){return false;}
   return !uvTransportTileAt(id);
 }
+${donorTiles ? `// The decoded sums have two readers: uvFallback reads a built row's own word
+// and uvNormalizeDonors reads the words of the donors a built row samples. A
+// built row lies in a TRANSPORT tile and its donors within ceil(D)+1 cells of
+// it, so every word either reads is inside DONORS (uvTwoLevelDonorReach) and
+// the decode is skipped everywhere else: six limb loads and a store per cell,
+// four times a step, over air nothing addresses. Words outside DONORS keep
+// whatever they held; nothing in this method reads them.
+fn uvDonorSkip(id:vec3i)->bool{
+  if(!uvTransportTiles()){return false;}
+  let t=clamp(id/4,vec3i(0),uvCoarseDims()-vec3i(1));
+  return atomicLoad(&sharpenDeposits[uvCoarsePlane(0u)+uvCoarseIndex(t)])==0;
+}` : ""}
 @compute @workgroup_size(4,4,4)
 fn uvBuildEdges(@builtin(global_invocation_id)gid:vec3u){
   let id=uvWorkId(gid);if(uvTransportSkip(id)){return;}
@@ -345,6 +359,7 @@ fn uvBuildEdges(@builtin(global_invocation_id)gid:vec3u){
 @compute @workgroup_size(4,4,4)
 fn uvFinishDonorSums(@builtin(global_invocation_id)gid:vec3u){
   let id=uvDonorId(gid);if(!valid(id)){return;}
+  ${donorTiles ? "if(uvDonorSkip(id)){return;}" : ""}
   let i=linearIndex(id);atomicStore(&sharpenDeposits[i],bitcast<i32>(uvDonorSum(i)));
 }
 @compute @workgroup_size(4,4,4)
@@ -718,14 +733,32 @@ fn uvTwoLevelClassIn(plane:u32,q:vec3i)->i32{
   if(plane==2u){return atomicLoad(&sharpenDeposits[uvCoarseBase()+4u*uvCoarseIndex(q)+3u]);}
   return atomicLoad(&sharpenDeposits[uvCoarsePlane(plane)+uvCoarseIndex(q)]);
 }
+${donorTiles ? `/**
+ * DONORS (bit 8, scan planes only): every tile a built row or one of its donors
+ * can lie in. Rows are built on TRANSPORT = seeds dilated by m, and a donor is
+ * within ceil(D)+1 cells of its row, which is the predicate's own m0 tiles; one
+ * more tile is margin, because a short DONORS set reads a stale sum where a
+ * short TRANSPORT set only stalls a front. Chebyshev balls compose, so the bit
+ * is the transport seed dilated by m+m0+1 in the same scan. A displacement
+ * past the transport cap makes the set the whole lattice.
+ */
+fn uvTwoLevelDonorReach()->i32{
+  if(params.twoLevel.w<0.0){return 0;}
+  let d=bitcast<f32>(atomicLoad(&sharpenDeposits[uvCoarsePlane(2u)+2u]));
+  let required=i32(ceil((ceil(max(d,0.0))+1.0)/4.0));
+  if(!(required<=16)){return 1<<20;}
+  return uvTwoLevelTransportReach()+required+1;
+}` : ""}
 fn uvTwoLevelDilate(previous:u32,axis:u32,t:vec3i)->i32{
   let c=uvCoarseDims();let k=uvTwoLevelFineReach();let s=uvTwoLevelShellReach();
-  let m=uvTwoLevelTransportReach();let r=max(s,m);var hit=0;
+  let m=uvTwoLevelTransportReach();${donorTiles ? `let g=uvTwoLevelDonorReach();
+  let r=min(max(max(s,m),g),max(c.x,max(c.y,c.z)));` : "let r=max(s,m);"}var hit=0;
   for(var d=-r;d<=r;d++){var q=t;q[axis]+=d;if(q[axis]<0||q[axis]>=c[axis]){continue;}
     let value=uvTwoLevelClassIn(previous,q);if(value==0){continue;}
     if((value&1)!=0&&d>=-k&&d<=k){hit|=1;}
     if((value&2)!=0&&d>=-s&&d<=s){hit|=2;}
-    if((value&4)!=0&&d>=-m&&d<=m){hit|=4;}}
+    if((value&4)!=0&&d>=-m&&d<=m){hit|=4;}${donorTiles ? `
+    if((value&select(8,4,previous==2u))!=0&&d>=-g&&d<=g){hit|=8;}` : ""}}
   return hit;
 }
 @compute @workgroup_size(4,4,4)
@@ -741,7 +774,10 @@ fn uvTwoLevelDilateY(@builtin(global_invocation_id)gid:vec3u){
 @compute @workgroup_size(4,4,4)
 fn uvTwoLevelDilateZ(@builtin(global_invocation_id)gid:vec3u){
   let t=vec3i(gid);if(any(t>=uvCoarseDims())){return;}
-  let hit=uvTwoLevelDilate(1u,2u,t);
+  ${donorTiles ? `// The x plane is dead once the y scan has read it, so DONORS lands there and
+  // the class word keeps exactly the three bits its other readers know.
+  let scanned=uvTwoLevelDilate(1u,2u,t);let hit=scanned&7;
+  atomicStore(&sharpenDeposits[uvCoarsePlane(0u)+uvCoarseIndex(t)],scanned&8);` : "let hit=uvTwoLevelDilate(1u,2u,t);"}
   atomicStore(&sharpenDeposits[uvCoarseBase()+4u*uvCoarseIndex(t)+3u],hit);
   if((hit&1)!=0){atomicAdd(&reductions[7],1u);}
   if((hit&2)!=0){atomicAdd(&sharpenDeposits[uvCoarsePlane(2u)],1);}
@@ -765,6 +801,7 @@ fn uvSurfaceDeficit(id:vec3i)->f32{
   return max(0.0,textureLoad(gammaIn,id,0).x-v);
 }
 var<workgroup> uvBalanceSums:array<vec2f,64>;
+var<workgroup> uvBalanceLive:atomic<u32>;
 fn uvBalanceSum(l:u32){
   workgroupBarrier();
   for(var stride=32u;stride>0u;stride/=2u){
@@ -782,7 +819,13 @@ fn uvBalanceMeasure(@builtin(global_invocation_id)gid:vec3u,
       sums=vec2f(min(0.5*max(0.0,volume(id)-cap),cap),uvSurfaceDeficit(id));
     }
   }
-  uvBalanceSums[l]=sums;uvBalanceSum(l);
+  ${uniformAbOn("deadgroups") ? `// A tile with no surplus and no deficit reduces sixty-four +0 pairs to +0
+  // through seven barriers; one uniform load lets it publish that directly.
+  // Bits, not values: a -0 anywhere takes the tree.
+  let live=bitcast<vec2u>(sums);if((live.x|live.y)!=0u){atomicStore(&uvBalanceLive,1u);}
+  if(workgroupUniformLoad(&uvBalanceLive)==0u){
+    if(l==0u){uvBalanceSums[0]=vec2f(0);}
+  }else{uvBalanceSums[l]=sums;uvBalanceSum(l);}` : "uvBalanceSums[l]=sums;uvBalanceSum(l);"}
   if(l==0u){
     let index=w.x+groups.x*(w.y+groups.y*w.z);let base=uvBalanceBase();
     atomicStore(&sharpenDeposits[base+2u+2u*index],bitcast<i32>(uvBalanceSums[0].x));

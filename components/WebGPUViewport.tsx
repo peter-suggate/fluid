@@ -2966,6 +2966,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
           updateCarry(pointerRay(event), event.timeStamp);
           return;
         }
+        if (voxelGesture.wheel(event)) { event.preventDefault(); return; }
         if (!cameraInteractive) return;
         event.preventDefault();
         // Zoom to cursor: the surface under the pointer stays under the

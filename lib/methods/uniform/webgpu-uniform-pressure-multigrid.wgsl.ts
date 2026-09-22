@@ -8,7 +8,120 @@ import { uniformCoarseSolverWGSL, uniformPressureStateWGSL } from "./uniform-coa
  * solid or free-surface discretization.
  */
 import { UNIFORM_CM11A_RECOVERY_SWEEPS, UNIFORM_CM11A_RECOVERY_REDUCTION } from "./pressure-policy";
+import { uniformAbOn } from "./uniform-ab-switch";
+
+/**
+ * Baked coefficient w: bit 0 is this cell's liquid flag, bits 1..6 those of its
+ * -x,+x,-y,+y,-z,+z neighbours. A smoother update then needs four coefficient
+ * texels rather than seven (three were read for one flag each). Small integers
+ * are exact in f32.
+ */
+const neighbourMask = uniformAbOn("liquidmask");
 export { UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE } from "./pressure-policy";
+
+/**
+ * In-place red-black PRBGS. A six-neighbour update of one colour reads only the
+ * other colour, so both colours can share one read_write texture: the pass
+ * visits only its own colour's cells (x spans half the lattice) and nothing is
+ * copied through. mgSmoothColour visits every cell of both colours twice per
+ * sweep to carry the ping-pong; every sweep-exit value here is the same one --
+ * each cell still receives exactly its update-or-projection, once.
+ *
+ * Only sound where the colouring separates ALL six neighbours, i.e. not under
+ * depth symmetry (colour ignores z there), and only addressed for a full
+ * lattice (no window origin). The host enforces both.
+ */
+export const uniformPressureInPlaceSmootherWGSL = /* wgsl */ `
+@group(1) @binding(16) var mgPressureRW: texture_storage_3d<r32float,read_write>;
+fn mgPRW(p:vec3i)->f32{return textureLoad(mgPressureRW,mgClamp(p,mg.levelDims.xyz)).x;}
+// One cell's update-or-projection, shared by both in-place kernels so the two
+// spell the arithmetic once.
+fn mgSmoothCellInPlace(id:vec3i){
+  let minimum=textureLoad(mgMinimumIn,id,0).x;
+  let coarseDone=(mg.control.w&2u)!=0u&&atomicLoad(&mgState.convergence[1])!=0u;
+  ${neighbourMask ? `let mask=mgLiquidMask(id);
+  if(coarseDone||(mask&1u)==0u){` : `if(coarseDone||!mgBakedLiquid(id)){`}
+    let old=mgPRW(id);if(old<minimum){textureStore(mgPressureRW,id,vec4f(minimum));}return;
+  }
+  let e=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
+  var diagonalTerms:array<f32,6>;var sumTerms:array<f32,6>;
+  ${neighbourMask ? `for(var n=0;n<6;n+=1){
+    // The coefficient still comes through mgCoefficient: selecting it by hand
+    // here is value-identical but lets Metal reassociate the two sums, and the
+    // native fields stop matching the paged arms bit for bit.
+    let q=id+e[n];let a=mgCoefficient(id,q,u32(n/2));
+    diagonalTerms[n]=a;sumTerms[n]=select(0.0,a*mgPRW(q),((mask>>u32(n+1))&1u)!=0u);
+  }` : `for(var n=0;n<6;n+=1){let q=id+e[n];let a=mgCoefficient(id,q,u32(n/2));diagonalTerms[n]=a;sumTerms[n]=select(0.0,a*mgPRW(q),mgBakedLiquid(q));}`}
+  let diagonal=mgD4Sum6(diagonalTerms);let sum=mgD4Sum6(sumTerms);
+  let p=select(0.0,(sum+textureLoad(mgRhsIn,id,0).x)/diagonal,diagonal>0.0);
+  textureStore(mgPressureRW,id,vec4f(max(p,minimum)));
+}
+@compute @workgroup_size(4,4,4)
+fn mgSmoothColourInPlace(@builtin(global_invocation_id) gid:vec3u){
+  if(mgSkipCycle()){return;}
+  let id=vec3i(i32(2u*gid.x+((mg.control.z+gid.y+gid.z)&1u)),i32(gid.y),i32(gid.z));
+  if(!mgValid(id,mg.levelDims.xyz)){return;}
+  mgSmoothCellInPlace(id);
+}
+// One thread per run of MG_ROW_SEGMENT same-colour cells along x. Same update,
+// same colour separation; a launch whose cycle gate is closed spawns 1/SEGMENT
+// of the threads to find that out.
+override MG_ROW_SEGMENT:u32=8u;
+@compute @workgroup_size(4,4,4)
+fn mgSmoothRowInPlace(@builtin(global_invocation_id) gid:vec3u){
+  if(mgSkipCycle()){return;}
+  let d=mg.levelDims.xyz;if(gid.y>=d.y||gid.z>=d.z){return;}
+  let parity=(mg.control.z+gid.y+gid.z)&1u;
+  for(var k=0u;k<MG_ROW_SEGMENT;k+=1u){
+    let x=2u*(gid.x*MG_ROW_SEGMENT+k)+parity;
+    if(x<d.x){mgSmoothCellInPlace(vec3i(i32(x),i32(gid.y),i32(gid.z)));}
+  }
+}
+// The recovery finish's two commits, launched the same way. Word 22 is set only
+// by a rejected cycle, and until one happens the accepted copy already equals
+// the working field (the last main-cycle checkpoint wrote it and nothing has
+// run since), so both are value no-ops there and return before touching it.
+@compute @workgroup_size(4,4,4)
+fn mgSaveAcceptedQuiet(@builtin(global_invocation_id) gid:vec3u){
+  if(atomicLoad(&mgState.convergence[22])==0u||atomicLoad(&mgState.convergence[23])!=0u){return;}
+  let d=mg.levelDims.xyz;if(gid.y>=d.y||gid.z>=d.z){return;}
+  for(var k=0u;k<MG_ROW_SEGMENT;k+=1u){
+    let id=vec3i(i32(gid.x*MG_ROW_SEGMENT+k),i32(gid.y),i32(gid.z));
+    if(id.x<i32(d.x)){textureStore(mgPressureOut,id,vec4f(mgP(id)));}
+  }
+}
+@compute @workgroup_size(4,4,4)
+fn mgRestoreRejectedQuiet(@builtin(global_invocation_id) gid:vec3u){
+  if(atomicLoad(&mgState.convergence[22])==0u||atomicLoad(&mgState.convergence[23])==0u){return;}
+  if(mg.levelDims.w==2u&&atomicLoad(&mgState.convergence[15])<0x7f800000u){return;}
+  let d=mg.levelDims.xyz;if(gid.y>=d.y||gid.z>=d.z){return;}
+  for(var k=0u;k<MG_ROW_SEGMENT;k+=1u){
+    let id=vec3i(i32(gid.x*MG_ROW_SEGMENT+k),i32(gid.y),i32(gid.z));
+    if(id.x<i32(d.x)){textureStore(mgPressureOut,id,textureLoad(mgResidualIn,id,0));}
+  }
+}
+// A whole smoothing visit -- mg.control.z sweeps, both colours each -- in one
+// dispatch of one workgroup. On the coarse levels a colour pass is a few
+// thousand cells at most and its cost was the launch, twelve times per visit;
+// here the workgroup's lanes share the level and textureBarrier separates the colours
+// exactly where the pass boundaries were.
+override MG_VISIT_LANES:u32=256u;
+@compute @workgroup_size(MG_VISIT_LANES)
+fn mgSmoothVisitInPlace(@builtin(local_invocation_index) lane:u32){
+  if(lane==0u){mgCycleStopped=select(0u,1u,mgSkipCycle());}
+  if(workgroupUniformLoad(&mgCycleStopped)!=0u){return;}
+  let d=mg.levelDims.xyz;let half=(d.x+1u)/2u;let count=half*d.y*d.z;
+  for(var colourPass=0u;colourPass<2u*mg.control.z;colourPass+=1u){
+    let colour=colourPass&1u;
+    for(var j=lane;j<count;j+=MG_VISIT_LANES){
+      let y=(j/half)%d.y;let z=j/(half*d.y);
+      let id=vec3i(i32(2u*(j%half)+((colour+y+z)&1u)),i32(y),i32(z));
+      if(id.x<i32(d.x)){mgSmoothCellInPlace(id);}
+    }
+    textureBarrier();
+  }
+}
+`;
 
 export const uniformPressureMultigridWGSL = /* wgsl */ `
 struct UniformMGParams {
@@ -208,8 +321,10 @@ fn mgCoefficientRaw(id:vec3i,q:vec3i,axis:u32)->f32{
   return vf/(h*h*theta);
 }
 fn mgBakedLiquid(p:vec3i)->bool{
-  return mgValid(p,mg.levelDims.xyz)&&textureLoad(mgCoefficientsIn,p,0).w>0.5;
+  return mgValid(p,mg.levelDims.xyz)&&${neighbourMask ? "(u32(textureLoad(mgCoefficientsIn,p,0).w)&1u)!=0u" : "textureLoad(mgCoefficientsIn,p,0).w>0.5"};
 }
+// Bit 0 is p's own liquid flag, bits 1..6 its -x,+x,-y,+y,-z,+z neighbours'.
+fn mgLiquidMask(p:vec3i)->u32{return u32(textureLoad(mgCoefficientsIn,p,0).w);}
 fn mgCoefficient(id:vec3i,q:vec3i,axis:u32)->f32{
   if(!mgValid(q,mg.levelDims.xyz)){
     if(q[axis]>id[axis]){return textureLoad(mgCoefficientsIn,id,0)[axis];}
@@ -219,10 +334,10 @@ fn mgCoefficient(id:vec3i,q:vec3i,axis:u32)->f32{
   return textureLoad(mgCoefficientsIn,q,0)[axis];
 }
 fn mgApply(id:vec3i)->f32{
-  if(!mgBakedLiquid(id)){return 0.0;}
+  ${neighbourMask ? "let mask=mgLiquidMask(id);if((mask&1u)==0u){return 0.0;}" : "if(!mgBakedLiquid(id)){return 0.0;}"}
   let e=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
   var terms:array<f32,6>;let centre=mgP(id);
-  for(var n=0;n<6;n+=1){let q=id+e[n];let axis=u32(n/2);let a=mgCoefficient(id,q,axis);let neighbor=select(0.0,mgP(q),mgBakedLiquid(q));terms[n]=a*(centre-neighbor);}
+  for(var n=0;n<6;n+=1){let q=id+e[n];let axis=u32(n/2);let a=mgCoefficient(id,q,axis);let neighbor=select(0.0,mgP(q),${neighbourMask ? "((mask>>u32(n+1))&1u)!=0u" : "mgBakedLiquid(q)"});terms[n]=a*(centre-neighbor);}
   return mgD4Sum6(terms);
 }
 
@@ -424,7 +539,10 @@ fn mgBakeCoefficients(@builtin(global_invocation_id) gid:vec3u){
     mgCoefficientRaw(id,id+vec3i(1,0,0),0u),
     mgCoefficientRaw(id,id+vec3i(0,1,0),1u),
     mgCoefficientRaw(id,id+vec3i(0,0,1),2u));
-  textureStore(mgCoefficientsOut,id,vec4f(coefficients,select(0.0,1.0,mgLiquid(id))));
+  ${neighbourMask ? `var mask=select(0u,1u,mgLiquid(id));
+  let e=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
+  for(var n=0u;n<6u;n+=1u){if(mgLiquid(id+e[n])){mask|=2u<<n;}}
+  textureStore(mgCoefficientsOut,id,vec4f(coefficients,f32(mask)));` : `textureStore(mgCoefficientsOut,id,vec4f(coefficients,select(0.0,1.0,mgLiquid(id))));`}
 }
 
 // CM11a Eq. 19-20. mgMinimumIn and mgPressureIn are the fine p_min and
@@ -456,10 +574,11 @@ fn mgSmoothColour(@builtin(global_invocation_id) gid:vec3u){
   // value), so projecting here leaves every sweep-exit value identical to the
   // former trailing mgProjectMinimum pass while deleting that pass outright.
   let colour=u32((id.x+id.y+select(id.z,0,depthSymmetry()))&1);
-  if(coarseDone||!mgBakedLiquid(id)||colour!=mg.control.z){textureStore(mgPressureOut,id,vec4f(max(old,textureLoad(mgMinimumIn,id,0).x)));return;}
+  ${neighbourMask ? "let mask=mgLiquidMask(id);" : ""}
+  if(coarseDone||${neighbourMask ? "(mask&1u)==0u" : "!mgBakedLiquid(id)"}||colour!=mg.control.z){textureStore(mgPressureOut,id,vec4f(max(old,textureLoad(mgMinimumIn,id,0).x)));return;}
   let e=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
   var diagonalTerms:array<f32,6>;var sumTerms:array<f32,6>;
-  for(var n=0;n<6;n+=1){let q=id+e[n];let a=mgCoefficient(id,q,u32(n/2));diagonalTerms[n]=a;sumTerms[n]=select(0.0,a*mgP(q),mgBakedLiquid(q));}
+  for(var n=0;n<6;n+=1){let q=id+e[n];let a=mgCoefficient(id,q,u32(n/2));diagonalTerms[n]=a;sumTerms[n]=select(0.0,a*mgP(q),${neighbourMask ? "((mask>>u32(n+1))&1u)!=0u" : "mgBakedLiquid(q)"});}
   let diagonal=mgD4Sum6(diagonalTerms);let sum=mgD4Sum6(sumTerms);
   let p=select(0.0,(sum+textureLoad(mgRhsIn,id,0).x)/diagonal,diagonal>0.0);
   // CM11a Eq. 18 says that p_min is enforced while smoothing. Project the

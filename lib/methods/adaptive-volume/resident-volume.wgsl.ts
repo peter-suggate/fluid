@@ -209,7 +209,10 @@ fn markProjectedGeometricTransportReceivers(@builtin(global_invocation_id)gid:ve
   let axis=rowAxis(row);var offset=vec3i(0);
   offset[axis]=select(-1,1,isNegative);
   let sourceBrick=cellBrick(cell);
-  let sourceCoordinate=cm12WorldLeafCoordinate(sourceBrick);
+  // A macro leaf spans multiple world pages. Test the page touching this
+  // physical face, not the leaf's origin (which may be deep inside it).
+  let sourceCoordinate=vec3i(floor((rowCenter(row)-0.5*vec3f(offset))
+    /f32(BRICK_FINE_RESOLUTION)));
   if(!cm12FluidNeighborReachable(sourceCoordinate,offset)){return;}
   let receiver=cm12WorldOwnerAt(sourceCoordinate+offset);
   if(receiver!=INVALID&&brickActive(receiver)){return;}
@@ -806,14 +809,15 @@ fn addWholeFrameUncoveredDonorFallbacks(@builtin(global_invocation_id)gid:vec3u)
     // their stored velocity outward.
     var outwardOffset=vec3i(0);
     outwardOffset[rowAxis(gvRow(face))]=select(-1,1,isNegative);
-    if(!cm12FluidNeighborReachable(
-      cm12WorldLeafCoordinate(cellBrick(donor)),outwardOffset)){continue;}
+    let sourcePage=vec3i(floor((rowCenter(gvRow(face))-0.5*vec3f(outwardOffset))
+      /f32(BRICK_FINE_RESOLUTION)));
+    if(!cm12FluidNeighborReachable(sourcePage,outwardOffset)){continue;}
     let signedSweep=gvRate(face)*p.frame.x;
     let outward=select(-signedSweep,signedSweep,isNegative);
     if(outward>0.0){
-      let receiverPage=cm12WorldLeafCoordinate(cellBrick(donor))+outwardOffset;
+      let receiverPage=sourcePage+outwardOffset;
       let inside=all(receiverPage>=vec3i(0))
-        &&all(receiverPage*8<vec3i(p.dimensions.xyz));
+        &&all(receiverPage*i32(BRICK_FINE_RESOLUTION)<vec3i(p.dimensions.xyz));
       if(inside){
         // Allocation failure is not a physical drain. Roundoff-sized face
         // sweeps retain their donor; a material sweep requires the receiver

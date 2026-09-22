@@ -1,4 +1,5 @@
 import { createVoxelToolRegistry } from "./plugin";
+import { pushPullTool } from "./plugins/push-pull";
 import { buildTool } from "./plugins/build";
 import { carveTool } from "./plugins/carve";
 import { boxTool } from "./plugins/box";
@@ -12,4 +13,4 @@ import { fluidBallTool } from "./plugins/fluid-ball";
 import { fluidCubeTool } from "./plugins/fluid-cube";
 import { fluidTorusTool } from "./plugins/fluid-torus";
 
-export const voxelTools = createVoxelToolRegistry([buildTool, carveTool, boxTool, cutTool, sphereTool, drillTool, wallTool, channelTool, fluidBallTool, fluidCubeTool, fluidTorusTool]);
+export const voxelTools = createVoxelToolRegistry([pushPullTool, buildTool, carveTool, boxTool, cutTool, sphereTool, drillTool, wallTool, channelTool, fluidBallTool, fluidCubeTool, fluidTorusTool]);

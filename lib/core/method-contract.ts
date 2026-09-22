@@ -202,6 +202,14 @@ export type OverlayPipelineFactory = (
  * the run the user is adding water to. A solver that implements the injection
  * below can take the ball where the clock already is instead.
  */
+/**
+ * Methods whose running solver adopts a voxel stroke in place, through
+ * `validateLiveSolidEdit` and `applySceneUniforms`. Any other method answers a
+ * stroke with a reset, so the editor does not offer it solid tools over water.
+ */
+const LIVE_SOLID_EDIT_METHODS: ReadonlySet<string> = new Set(["adaptive-mass", "adaptive-volume", "uniform", "uniform-volume"]);
+export const takesLiveSolidEdits = (methodId: string): boolean => LIVE_SOLID_EDIT_METHODS.has(methodId);
+
 export interface InjectedLiquidBall {
   readonly centre_m: Vec3;
   readonly radius_m: number;
@@ -255,8 +263,11 @@ export interface GPUSolverInstance {
   readonly framePending?: boolean;
   /** Await the complete physical frame, including any later transport submissions. */
   awaitFrameCompletion?(): Promise<void>;
-  /** Mandatory completed-frame invariant receipt; rejects on a latched failure. */
-  assertSimulationHealthy?(): Promise<void>;
+  /** Mandatory completed-frame invariant receipt; rejects on a latched failure.
+   * A caller that already fenced this frame may supply that completion. Queue-
+   * only implementations must not fence again behind subsequently submitted work.
+   */
+  assertSimulationHealthy?(completion?: Promise<void>): Promise<void>;
   /** Capture a health receipt in the caller's submission; read only after submitting it. */
   captureSimulationHealth?(encoder: GPUCommandEncoder): () => Promise<void>;
   readonly denseLevelSetVolumeSource?: DenseLevelSetVolumeConsumerSource;

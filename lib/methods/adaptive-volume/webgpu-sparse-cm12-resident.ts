@@ -8266,6 +8266,16 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
     injectionPass.dispatchWorkgroups(bricks);
     injectionPass.end();
     if (publishPresentation) {
+      // A drop can wet leaves no frame has presented. Without a page the packet
+      // omits them and fails closed, so paused water stayed invisible until a
+      // step ran the frame's allocator; give them one here, as that stage does.
+      const allocate = encoder.beginComputePass({ label: "Sparse CM12 injection presentation pages" });
+      allocate.setBindGroup(0, this.presentationAllocatorBindGroup);
+      allocate.setPipeline(this.pipelines.allocateSparseCM12PresentationPages!);
+      allocate.dispatchWorkgroups(Math.ceil(leafCapacity / WORKGROUP_SIZE));
+      allocate.setPipeline(this.pipelines.sortSparseCM12PresentationPageDirectory!);
+      allocate.dispatchWorkgroups(1);
+      allocate.end();
       this.encodeFramePlanPresentation(encoder, "Sparse CM12 injection presentation");
     }
   }
@@ -9076,7 +9086,8 @@ fn lsvAuthoredPhi(positionFine:vec3f)->f32{
         density: new Float64Array(resolution ** 3).fill(record.active ? record.meanDensity : 0),
         gamma: new Float64Array(resolution ** 3).fill(1) });
       if (authored) {
-        const range = this.templateWords[11]! + 2 * (4 * record.leafId + Math.log2(resolution));
+        const levels = sparseCM12TemplateLevels(this.brickFineResolution);
+        const range = this.templateWords[11]! + 2 * (levels.length * record.leafId + levels.indexOf(resolution));
         sourceFirst.set(key, this.templateWords[range]!);
       } else {
         if (record.topologyPage === undefined) throw new Error("CM12 active world leaf has no topology page");

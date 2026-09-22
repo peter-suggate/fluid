@@ -15,8 +15,11 @@ export function createWorkerSolidEditAcceptance<T extends { document: SceneDescr
   const scenes = createSolidEditSceneCache();
   let base: SceneDescription | undefined;
   let prepared: SceneDescription | undefined;
+  let accepted: SceneDescription | undefined;
   return {
     get preparedScene() { return prepared; },
+    /** The revision-marked document this boundary last wrote to the host. */
+    get acceptedDocument() { return accepted; },
     async accept(request: { scene: SceneDescription; base?: SceneDescription }): Promise<void> {
       const current = host.readScene();
       if (request.base) {
@@ -32,7 +35,10 @@ export function createWorkerSolidEditAcceptance<T extends { document: SceneDescr
       reuseEnvironmentProxyCatalog(base, request.scene);
       await host.accept(request.scene, () => host.readScene() === current);
       if (host.readScene() !== current) throw new Error("Scene changed while the solid edit was accepted; the newer scene remains active.");
-      if (current) host.writeScene({ ...current, document: markSceneRevision(request.scene) });
+      if (current) {
+        accepted = markSceneRevision(request.scene);
+        host.writeScene({ ...current, document: accepted });
+      }
       prepared = request.scene;
     },
   };

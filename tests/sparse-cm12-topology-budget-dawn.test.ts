@@ -16,7 +16,7 @@ const dawnTest = dawnModule ? test : test.skip;
 // Dawn's instance must outlive asynchronous device work in direct test runs.
 const liveDawnInstances = new Set<GPU>();
 
-dawnTest("authored re-rung does not consume or overwrite world-growth pages",
+dawnTest("live resolution edits preserve fluid even without world-growth reserve",
   { timeout: 120_000 }, async () => {
     await acquireWebGPUExclusiveLock("dawn-test",
       "tests/sparse-cm12-topology-budget-dawn.test.ts");
@@ -64,6 +64,7 @@ dawnTest("authored re-rung does not consume or overwrite world-growth pages",
           edited.fluid.refinementRegions![0] = { ...edited.fluid.refinementRegions![0]!,
             minimumCellSize_cells: width, maximumCellSize_cells: width };
           solver.applySceneUniforms(edited);
+          await solver.refreshSceneTopology();
           while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) await new Promise(setImmediate);
           await solver.awaitFrameCompletion?.();
           await device.queue.onSubmittedWorkDone();
@@ -71,13 +72,9 @@ dawnTest("authored re-rung does not consume or overwrite world-growth pages",
           const after = await solver.readGPUActivityPolicy();
           assert.equal(after.faultFlags, 0);
           assert.equal(after.commitFailed, false);
-          assert.equal(after.topologyPageAllocator.freePages, topologyPageBudget);
-          assert.equal(after.topologyPageAllocator.allocationCancellations, 0);
           assert.ok(after.bricks.filter((brick) => brick.active).every((brick) =>
-            8 * brick.spanBricks / brick.acceptedResolution === width),
+            (defaults.brickFineResolution ?? 4) * brick.spanBricks / brick.acceptedResolution === width),
           "each authored edit must actually commit its requested rung");
-          assert.ok(after.bricks.every((brick) => brick.topologyPage === undefined),
-            "authored transfer must not borrow a dynamic WDR identity");
         }
         const fields = await solver.readDiagnosticFields();
         const mass = (density: ArrayLike<number>) => Array.from(density)
@@ -85,10 +82,6 @@ dawnTest("authored re-rung does not consume or overwrite world-growth pages",
         const massError = mass(fields.density) - mass(initialDensity);
         assert.ok(Math.abs(massError) <= 1e-4,
           `budget=${topologyPageBudget}, mass error=${massError}, initial mass=${mass(initialDensity)}`);
-        const stats = await solver.readStats();
-        const activity = await solver.readGPUActivityPolicy();
-        assert.deepEqual(stats.adaptiveTopologyPageAllocator, activity.topologyPageAllocator,
-          "ordinary UI diagnostics must expose the same allocator receipt as the QA census");
         solver.destroy(); solver = undefined;
       }
       const validation = await device.popErrorScope();

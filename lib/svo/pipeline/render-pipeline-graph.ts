@@ -589,10 +589,10 @@ const NODES: readonly RenderPipelineNodeDefinition[] = [
     taps: [],
     toggleable: true,
     tip: {
-      summary: "Classifies the level set, sizes the indirect dispatch and emits the water isosurface triangles — the largest compute block in a wet frame, throttled to the solver revision. Off freezes the mesh at its last extraction: the interfaces keep drawing the retained surface, so the delta is classify + scan + emit and nothing downstream. The t=0 startup capture overrides the withhold so a fresh scene can still admit its first frame.",
+      summary: "Classifies the level set, sizes the indirect dispatch and emits the water isosurface triangles on solver revision changes. Off freezes the mesh at its last extraction: the interfaces keep drawing the retained surface, so the delta is classify + scan + emit and nothing downstream. The t=0 startup capture overrides the withhold so a fresh scene can still admit its first frame.",
       writes: "surface vertex buffer · indirect draw args",
       feeds: "water interfaces · caustic map",
-      gate: "a scene with fluid, on solver revision change under a 250 ms throttle",
+      gate: "a scene with fluid, on solver revision change at the presentation cadence",
     },
     state: (context) => (context.disabledStages.has("surface-extraction") ? "off"
       : context.sceneHasFluid ? "on" : "unavailable"),

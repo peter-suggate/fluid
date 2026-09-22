@@ -22,10 +22,13 @@ export function fluidToolDefaults(scene: SceneDescription, values: ToolValues, s
   return { height: Math.max(0, Math.min(128, desired, highestBottom)) };
 }
 
-export function fluidToolUnavailable({ scene, methodId }: { scene: SceneDescription; methodId: string }): string | undefined {
+export function fluidToolUnavailable({ scene, methodId }: { scene: SceneDescription; methodId: string },
+  shape: LiveFluidEdit["shape"] = "cube"): string | undefined {
   if (scene.systems?.fluid === false) return "Enable water from Scene to use fluid tools.";
-  if (methodId !== "adaptive-mass" && methodId !== "adaptive-volume") return "Choose Sparse Geometric to edit moving water.";
-  return undefined;
+  if (methodId === "adaptive-mass" || methodId === "adaptive-volume") return undefined;
+  // The uniform solvers own one water source shape, a ball dropped on the next step.
+  if ((methodId === "uniform" || methodId === "uniform-volume") && shape === "ball") return undefined;
+  return "Choose Sparse Geometric to edit moving water with this shape.";
 }
 
 /** The descriptor is shared by preview and the live command, never rasterized twice by the UI. */

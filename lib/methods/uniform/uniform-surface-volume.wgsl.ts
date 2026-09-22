@@ -1,3 +1,7 @@
+import { uniformAbOn } from "./uniform-ab-switch";
+
+const leanMeasure = uniformAbOn("measurelean");
+const deadGroups = uniformAbOn("deadgroups");
 /** Experimental global surface-volume constraint. No cellwise reconstruction. */
 export const uniformSurfaceVolumeWGSL = /* wgsl */ `
 struct Params { dims:vec4u, h:vec4f }
@@ -13,6 +17,7 @@ struct Params { dims:vec4u, h:vec4f }
 // centre, half-range, desired V, surface volume before correction; iteration.
 @group(0) @binding(9) var<storage,read_write> state:array<vec4f>;
 var<workgroup> sums:array<vec4f,320>;
+var<workgroup> liveLanes:atomic<u32>;
 fn groupIndex(w:vec3u)->u32{return w.x+w.y*65535u;}
 fn cells()->u32{return p.dims.x*p.dims.y*p.dims.z;}
 fn vertices()->u32{return (p.dims.x+1u)*(p.dims.y+1u)*(p.dims.z+1u);}
@@ -67,7 +72,28 @@ fn sumGroup(l:u32){
   let q=point(i,p.dims.xyz);let cap=textureLoad(capacity,q,0).x;
   result[4].y=textureLoad(volume,q,0).x;
   if(cap>0.0){
-   var raw:array<f32,8>;var scale:array<f32,8>;var lo=1e30;var hi=-1e30;
+   ${leanMeasure ? `// seed marks all eight corners of every crossing cell, so a cell whose band
+   // corners are all zero has one strict sign and no shift can move it: one
+   // phi load decides all 17 samples. That is ~97% of a 128^3 lattice.
+   var scale:array<f32,8>;var banded=0u;
+   for(var k=0u;k<8u;k++){let bits=atomicLoad(&band[index(q+corner(k),p.dims.xyz+vec3u(1))]);banded|=bits;scale[k]=bitcast<f32>(bits);}
+   if(banded==0u){
+    let filled=select(0.0,cap,value(q)<0.0);
+    for(var sample=0u;sample<17u;sample++){result[sample/4u][sample%4u]=filled;}
+   }else{
+   let centre=state[0].x;let width=state[0].y;
+   var raw:array<f32,8>;var lo=1e30;var hi=-1e30;
+   for(var k=0u;k<8u;k++){raw[k]=value(q+corner(k));
+    lo=min(lo,raw[k]-(centre+width)*scale[k]);hi=max(hi,raw[k]-(centre-width)*scale[k]);}
+   for(var sample=0u;sample<17u;sample++){
+    var fraction=0.0;
+    if(hi<0.0){fraction=1.0;}else if(lo<0.0){
+     let shift=centre+(f32(sample)/8.0-1.0)*width;var v:array<f32,8>;
+     for(var k=0u;k<8u;k++){v[k]=raw[k]-shift*scale[k];}fraction=fill(v);
+    }
+    result[sample/4u][sample%4u]=fraction*cap;
+   }
+   }` : `var raw:array<f32,8>;var scale:array<f32,8>;var lo=1e30;var hi=-1e30;
    for(var k=0u;k<8u;k++){let v=q+corner(k);raw[k]=value(v);scale[k]=bitcast<f32>(atomicLoad(&band[index(v,p.dims.xyz+vec3u(1))]));
     lo=min(lo,raw[k]-(state[0].x+state[0].y)*scale[k]);hi=max(hi,raw[k]-(state[0].x-state[0].y)*scale[k]);}
    for(var sample=0u;sample<17u;sample++){
@@ -77,9 +103,17 @@ fn sumGroup(l:u32){
      for(var k=0u;k<8u;k++){v[k]=raw[k]-shift*scale[k];}fraction=fill(v);
     }
     result[sample/4u][sample%4u]=fraction*cap;
-   }
+   }`}
   }
  }
+ ${deadGroups ? `// Air, and any 64-cell run with nothing in it, reduces sixty-four +0 records to
+ // +0 through six barriers. Bits, not values: a -0 anywhere takes the tree.
+ var bits=0u;for(var k=0u;k<5u;k++){let b=bitcast<vec4u>(result[k]);bits|=b.x|b.y|b.z|b.w;}
+ if(bits!=0u){atomicStore(&liveLanes,1u);}
+ if(workgroupUniformLoad(&liveLanes)==0u){
+  if(l==0u){for(var k=0u;k<5u;k++){partial[group*5u+k]=vec4f(0);}}
+  return;
+ }` : ""}
  for(var k=0u;k<5u;k++){sums[l*5u+k]=result[k];}sumGroup(l);
  if(l==0u){for(var k=0u;k<5u;k++){partial[group*5u+k]=sums[k];}}
 }

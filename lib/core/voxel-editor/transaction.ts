@@ -13,50 +13,50 @@ export interface ToolHost {
   finish(): void;
   cancel(): void;
 }
-/** Generic transaction lifecycle, independent of both UI and the chosen plugin. */
+/**
+ * Generic transaction lifecycle, independent of both UI and the chosen plugin.
+ *
+ * A stroke is a proposal until release. Samples only recompute the plugin's
+ * preview; the scene document — which is the runtime's publication identity —
+ * is written exactly once, when the pointer lets go. Cancelling therefore has
+ * nothing to roll back, and a drag costs no worker round trips.
+ */
 export function beginToolTransaction(plugin: VoxelToolPlugin, host: ToolHost,
-  ray: EditorRay, values: ToolValues = {}) {
+  ray: EditorRay, values: ToolValues = {}, invert = false) {
   const base = host.scene();
-  const gesture = plugin.begin({ scene: base, ray, values: toolValues(plugin, values, base) });
+  const gesture = plugin.begin({ scene: base, ray, values: toolValues(plugin, values, base), invert });
   if (!gesture) return undefined;
   let closed = false;
   let finishing = false;
   let cancellationRequested = false;
-  let accepted = base;
-  let key = "";
   let preview: ToolUpdate | undefined;
-  // Release/cancel can arrive while an asynchronous preflight is outstanding.
-  // Serialize lifecycle work so rollback always sees the last accepted sample.
+  // Release/cancel can arrive while a sample is queued. Serialize lifecycle
+  // work so release always commits the last accepted sample.
   let pending: Promise<unknown> = Promise.resolve();
   let completion: Promise<void> | undefined;
-  const ownsDocument = () => host.scene() === accepted;
+  const ownsDocument = () => host.scene() === base;
   const abandon = () => { if (!closed) { closed = true; host.cancel(); } };
   host.begin(plugin.ui.label);
   return {
     update(input: EditorRay): Promise<ToolUpdate | undefined> {
       if (closed || finishing) return Promise.resolve(undefined);
-      const operation = pending.then(async () => {
+      const operation = pending.then(() => {
         if (closed) return undefined;
         if (!ownsDocument()) { abandon(); return undefined; }
+        // A transient action must never execute a shape the pointer has left;
+        // an authored stroke keeps the geometry it had already been shown.
         if (plugin.execution === "release") preview = undefined;
         const result = gesture.update(input);
-        if (!result) return undefined;
-        if (plugin.execution === "release") {
-          preview = result;
-          return result;
-        }
-        const nextKey = JSON.stringify(result.patches);
-        if (nextKey !== key) {
-          const next = sceneWithSolidStroke(base, result.patches);
-          await host.publish(next, base);
-          // A host must reject stale preflights rather than overwrite another
-          // editor's document. Never retain history ownership after such a change.
-          if (host.scene() !== next) { abandon(); return undefined; }
-          accepted = next;
-          key = nextKey;
-        }
+        if (result) preview = result;
         return result;
       });
+      pending = operation.catch(() => {});
+      return operation;
+    },
+    /** The pointer was released: does the gesture continue under a bare pointer? */
+    advance(): Promise<boolean> {
+      if (closed || finishing) return Promise.resolve(false);
+      const operation = pending.then(() => !closed && !finishing && gesture.advance?.() === true);
       pending = operation.catch(() => {});
       return operation;
     },
@@ -80,17 +80,13 @@ export function beginToolTransaction(plugin: VoxelToolPlugin, host: ToolHost,
           }
           return;
         }
-        if (cancellationRequested) {
-          try {
-            if (accepted !== base) await host.publish(base, base);
-            host.cancel();
-          } catch (error) {
-            // A failed rollback must still leave the accepted stroke undoable,
-            // but must never record history against an external replacement.
-            if (ownsDocument()) host.finish(); else host.cancel();
-            throw error;
-          }
-        } else host.finish();
+        if (cancellationRequested || !preview || preview.patches.length === 0) { host.cancel(); return; }
+        const next = sceneWithSolidStroke(base, preview.patches);
+        try { await host.publish(next, base); }
+        catch (error) { host.cancel(); throw error; }
+        // A host must reject stale preflights rather than overwrite another
+        // editor's document. Never record history against such a replacement.
+        if (host.scene() === next) host.finish(); else host.cancel();
       });
       return completion;
     },

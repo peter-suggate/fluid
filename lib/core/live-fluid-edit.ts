@@ -1,4 +1,4 @@
-import type { Vec3 } from "./model";
+import type { InitialLiquidVolume, Vec3 } from "./model";
 
 /** Transient current-field operation. This never authors or rewinds scene history. */
 export interface LiveFluidEdit {
@@ -22,6 +22,37 @@ export function validateLiveFluidEdit(edit: LiveFluidEdit): LiveFluidEdit {
   }
   return Object.freeze({ ...edit, center_m: Object.freeze({ ...edit.center_m }),
     ...(edit.shape === "torus" ? { tubeRadius_m: tube } : {}) });
+}
+
+/** The same shape as an authored volume, so a live drop and a scene edit share one world edit. */
+export function liveFluidEditVolume(input: LiveFluidEdit): InitialLiquidVolume {
+  const edit = validateLiveFluidEdit(input), c = edit.center_m, r = edit.radius_m;
+  if (edit.shape === "ball") return { shape: "sphere", center_m: { ...c }, radius_m: r };
+  if (edit.shape === "cube") return { shape: "box", min_m: { x: c.x - r, y: c.y - r, z: c.z - r },
+    max_m: { x: c.x + r, y: c.y + r, z: c.z + r } };
+  // The authored torus measures to the tube centreline; a live edit measures its outer radius.
+  return { shape: "torus", center_m: { ...c }, radius_m: r - edit.tubeRadius_m!, tubeRadius_m: edit.tubeRadius_m! };
+}
+
+/** The most cells one live shape's bounding box may span: a 32-cube, four 8-cell pages a side. */
+export const LIVE_FLUID_EDIT_CELL_BUDGET = 32768;
+
+/** Why this world cannot take the shape, before anything is encoded: a refused drop must change nothing. */
+export function liveFluidEditRefusal(input: LiveFluidEdit, domain: {
+  readonly origin_m: readonly [number, number, number];
+  readonly cellSize_m: readonly [number, number, number];
+  readonly dimensions: readonly [number, number, number];
+}): string | undefined {
+  const edit = validateLiveFluidEdit(input), c = [edit.center_m.x, edit.center_m.y, edit.center_m.z];
+  const half = [edit.radius_m, edit.shape === "torus" ? edit.tubeRadius_m! : edit.radius_m, edit.radius_m];
+  let cells = 1;
+  for (let axis = 0; axis < 3; axis++) {
+    const low = domain.origin_m[axis]!, high = low + domain.dimensions[axis]! * domain.cellSize_m[axis]!;
+    if (c[axis]! + half[axis]! <= low || c[axis]! - half[axis]! >= high) return "The shape lies outside the fluid domain bounds.";
+    cells *= Math.ceil(2 * half[axis]! / domain.cellSize_m[axis]! - 1e-9);
+  }
+  return cells > LIVE_FLUID_EDIT_CELL_BUDGET
+    ? `The shape spans ${cells} cells, over the ${LIVE_FLUID_EDIT_CELL_BUDGET}-cell live edit budget; use a smaller shape.` : undefined;
 }
 
 export function liveFluidEditMode(edit: Pick<LiveFluidEdit, "operation" | "shape">): 1 | 3 | 4 | 5 | 6 | 7 {

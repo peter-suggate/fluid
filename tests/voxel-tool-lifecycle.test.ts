@@ -21,7 +21,7 @@ function deferred() {
   const promise = new Promise<void>((done) => { resolve = done; });
   return { promise, resolve };
 }
-function fixture(publish?: (next: SceneDescription, before: SceneDescription) => Promise<void>) {
+function fixture(publish?: (next: SceneDescription, before: SceneDescription) => Promise<void>, tool: VoxelToolPlugin = plugin) {
   const base = cloneScene(defaultScene);
   let scene = base;
   let pending = false;
@@ -41,83 +41,80 @@ function fixture(publish?: (next: SceneDescription, before: SceneDescription) =>
     cancel: () => { pending = false; events.push("cancel"); },
   };
   return { base, events, pending: () => pending, scene: () => scene, replace: (next: SceneDescription) => { scene = next; },
-    transaction: beginToolTransaction(plugin, host, ray())! };
+    transaction: beginToolTransaction(tool, host, ray())! };
 }
 
-test("cancel waits for an outstanding preflight and rolls back exactly once", async () => {
-  const gate = deferred();
-  const f = fixture(() => gate.promise);
-  const update = f.transaction.update(ray());
-  await Promise.resolve();
-  const finish = f.transaction.finish(true);
-  assert.equal(f.transaction.finish(), finish);
-  assert.equal(await f.transaction.update(ray(3)), undefined);
+test("samples never touch the document, and cancel has nothing to roll back", async () => {
+  const f = fixture();
+  assert.ok(await f.transaction.update(ray()));
+  assert.ok(await f.transaction.update(ray(3)));
   assert.equal(f.scene(), f.base);
   assert.equal(f.pending(), true);
-  gate.resolve();
-  await Promise.all([update, finish]);
+  const finish = f.transaction.finish(true);
+  assert.equal(f.transaction.finish(), finish);
+  assert.equal(await f.transaction.update(ray(5)), undefined);
+  await finish;
   assert.equal(f.pending(), false);
   assert.equal(f.scene(), f.base);
-  assert.deepEqual(f.events, ["begin", "preflight", "publish", "preflight", "rollback", "cancel"]);
+  assert.deepEqual(f.events, ["begin", "cancel"]);
 });
 
-test("queued updates and release publish in order before one history entry", async () => {
+test("release publishes the latest sample once, before one history entry", async () => {
   const gate = deferred();
   const f = fixture(() => gate.promise);
   const first = f.transaction.update(ray());
   const second = f.transaction.update(ray(3));
   const finish = f.transaction.finish();
+  await Promise.all([first, second]);
   await Promise.resolve();
   assert.deepEqual(f.events, ["begin", "preflight"]);
+  assert.equal(f.pending(), true);
   gate.resolve();
-  await Promise.all([first, second, finish]);
-  assert.deepEqual(f.events, ["begin", "preflight", "publish", "preflight", "publish", "finish"]);
-  assert.equal(f.scene().solidVoxels?.at(-1)?.minimum[0], 3);
-});
-
-test("external undo or import during preflight cannot be overwritten or recorded as this stroke", async () => {
-  const gate = deferred();
-  const f = fixture(() => gate.promise);
-  const update = f.transaction.update(ray());
-  await Promise.resolve();
-  const external = cloneScene(defaultScene);
-  f.replace(external);
-  const finish = f.transaction.finish(true);
-  gate.resolve();
-  await assert.rejects(update, /Scene changed/);
   await finish;
-  assert.equal(f.scene(), external);
-  assert.deepEqual(f.events, ["begin", "preflight", "cancel"]);
+  assert.deepEqual(f.events, ["begin", "preflight", "publish", "finish"]);
+  assert.equal(f.scene().solidVoxels.length, f.base.solidVoxels.length + 1);
+  assert.equal(f.scene().solidVoxels.at(-1)?.minimum[0], 3);
 });
 
-test("a rejected final sample retains the accepted stroke as one undo entry", async () => {
-  let reject = false;
-  const f = fixture(async () => { if (reject) throw new Error("capacity"); });
-  await f.transaction.update(ray());
-  const accepted = f.scene();
-  reject = true;
-  const update = f.transaction.update(ray(3));
-  const finish = f.transaction.finish();
-  await assert.rejects(update, /capacity/);
-  await finish;
-  assert.equal(f.scene(), accepted);
-  assert.equal(f.events.filter((event) => event === "finish").length, 1);
-});
-
-test("failed rollback keeps accepted geometry undoable, without taking ownership of an external scene", async () => {
-  for (const replace of [false, true]) {
-    let reject = false;
-    const external = cloneScene(defaultScene);
-    const f = fixture(async () => {
-      if (reject) { if (replace) f.replace(external); throw new Error("rollback rejected"); }
-    });
+test("external undo or import during the stroke cannot be overwritten or recorded as this stroke", async () => {
+  for (const when of ["drag", "preflight"] as const) {
+    const gate = deferred();
+    const f = fixture(() => gate.promise);
     await f.transaction.update(ray());
-    const accepted = f.scene();
-    reject = true;
-    await assert.rejects(f.transaction.finish(true), /rollback rejected/);
-    assert.equal(f.scene(), replace ? external : accepted);
-    assert.equal(f.events.at(-1), replace ? "cancel" : "finish");
+    const external = cloneScene(defaultScene);
+    if (when === "drag") f.replace(external);
+    const finish = f.transaction.finish();
+    await Promise.resolve();
+    if (when === "preflight") f.replace(external);
+    gate.resolve();
+    if (when === "preflight") await assert.rejects(finish, /Scene changed/); else await finish;
+    assert.equal(f.scene(), external);
+    assert.deepEqual(f.events, when === "drag" ? ["begin", "cancel"] : ["begin", "preflight", "cancel"]);
   }
+});
+
+test("a rejected final sample commits the geometry the reader was last shown", async () => {
+  let reject = false;
+  const rejecting: VoxelToolPlugin = { ...plugin, begin: () => {
+    const gesture = plugin.begin({} as never)!;
+    return { update: (input) => { if (reject) throw new Error("Stroke is full"); return gesture.update(input); } };
+  } };
+  const f = fixture(undefined, rejecting);
+  await f.transaction.update(ray());
+  reject = true;
+  await assert.rejects(f.transaction.update(ray(3)), /full/);
+  await f.transaction.finish();
+  assert.equal(f.scene().solidVoxels.at(-1)?.minimum[0], 0);
+  assert.deepEqual(f.events, ["begin", "preflight", "publish", "finish"]);
+});
+
+test("a release the runtime rejects leaves the document and history untouched", async () => {
+  const f = fixture(async () => { throw new Error("capacity"); });
+  await f.transaction.update(ray());
+  await assert.rejects(f.transaction.finish(), /capacity/);
+  assert.equal(f.scene(), f.base);
+  assert.equal(f.pending(), false);
+  assert.deepEqual(f.events, ["begin", "preflight", "cancel"]);
 });
 
 

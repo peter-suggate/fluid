@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useEffectEvent, useRef, type PointerEvent } from "react";
+import { useEffect, useEffectEvent, useRef, type PointerEvent, type WheelEvent } from "react";
 import type { EditorRay } from "../lib/core/editor-entity";
 import { toolValues, type ToolAction, type ToolUpdate } from "../lib/core/voxel-editor/plugin";
 import { beginToolTransaction } from "../lib/core/voxel-editor/transaction";
@@ -16,7 +16,11 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
   const viewportMode = session.ui((state) => state.viewportMode);
   const gpuState = session.diagnostics((state) => state.gpuStatus.state);
   const active = useRef<{ id: number; transaction: Transaction; queued?: EditorRay;
-    busy: boolean; releaseOnly: boolean; ending?: boolean; cancelled: boolean; frame?: number; element: HTMLCanvasElement } | undefined>(undefined);
+    busy: boolean; releaseOnly: boolean; ending?: boolean; cancelled: boolean; frame?: number; element: HTMLCanvasElement;
+    /** The pointer came up and the gesture has not yet said whether it continues. */
+    releasing?: boolean;
+    /** A later phase follows the bare pointer; the next press commits it. */
+    hovering?: boolean } | undefined>(undefined);
   const mounted = useRef(true);
   const showPreview = (update: ToolUpdate | null) => { if (mounted.current) preview(update); };
   const release = (stroke: NonNullable<typeof active.current>) => {
@@ -36,6 +40,11 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
         const result = await stroke.transaction.update(sample);
         if (!stroke.cancelled && (result || stroke.releaseOnly)) showPreview(result ?? null);
       }
+      if (stroke.releasing && !stroke.queued) {
+        stroke.releasing = false;
+        if (!stroke.ending && await stroke.transaction.advance()) stroke.hovering = true;
+        else stroke.ending = true;
+      }
       if (stroke.ending && !stroke.queued) {
         await stroke.transaction.finish(stroke.cancelled);
         release(stroke);
@@ -51,7 +60,7 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
       }
     } finally {
       stroke.busy = false;
-      if (active.current && (stroke.queued || stroke.ending)) schedule();
+      if (active.current && (stroke.queued || stroke.ending || stroke.releasing)) schedule();
     }
   };
   const schedule = () => {
@@ -67,6 +76,27 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
     if (cancelled) stroke.queued = undefined;
     schedule();
   };
+  /** Step the armed tool's width, or its depth, by whole voxels within the control's own range. */
+  const resize = (controlId: "size" | "depth", steps: number): boolean => {
+    const ui = session.ui.getState();
+    const plugin = ui.viewportMode === "interact" ? voxelTools.get(ui.voxelToolId) : undefined;
+    const control = plugin?.ui.controls.find((candidate) => candidate.id === controlId);
+    if (!plugin || !control || !steps) return false;
+    const current = toolValues(plugin, ui.voxelToolValues[plugin.id], session.scene.getState().scene)[control.id]!;
+    ui.setVoxelToolValue(plugin.id, control.id, Math.max(control.min, Math.min(control.max, current + steps * control.step)));
+    return true;
+  };
+  const resizeFromKey = (event: KeyboardEvent): boolean => {
+    // `[` and `]` size the brush, as in every paint program; Shift sizes its depth.
+    if (event.code !== "BracketLeft" && event.code !== "BracketRight") return false;
+    if (event.metaKey || event.ctrlKey || event.altKey) return false;
+    const target = event.target as HTMLElement | null;
+    if (target?.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target?.tagName ?? "")) return false;
+    if (!resize(event.shiftKey ? "depth" : "size", event.code === "BracketRight" ? 1 : -1)) return false;
+    event.preventDefault();
+    return true;
+  };
+  const resizeFromEffect = useEffectEvent(resizeFromKey);
   const endFromEffect = useEffectEvent(endStroke);
   const clearFromEffect = useEffectEvent(() => showPreview(null));
   const noticeFromEffect = useEffectEvent(notice);
@@ -85,6 +115,7 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
   useEffect(() => {
     mounted.current = true;
     const cancel = (event: KeyboardEvent) => {
+      if (resizeFromEffect(event)) return;
       if (!active.current && !session.ui.getState().voxelStrokePending) return;
       const modified = event.metaKey || event.ctrlKey;
       const blocked = modified && ["s", "y"].includes(event.key.toLowerCase());
@@ -98,7 +129,8 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
     };
     const lost = (event: globalThis.PointerEvent) => {
       const stroke = active.current;
-      if (stroke && stroke.id === event.pointerId && !stroke.ending) endFromEffect(true);
+      // The browser drops capture at every release; only losing it mid-drag abandons the stroke.
+      if (stroke && stroke.id === event.pointerId && !stroke.ending && !stroke.releasing && !stroke.hovering) endFromEffect(true);
     };
     const blur = () => endFromEffect(true);
     window.addEventListener("keydown", cancel, true);
@@ -123,6 +155,13 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
   }, [session]);
   return {
     down(event: PointerEvent<HTMLCanvasElement>): boolean {
+      const hovering = active.current;
+      if (hovering?.hovering && !hovering.ending) {
+        // The press that ends a bare-pointer phase: primary commits what is shown, anything else abandons it.
+        if (event.button === 0) { hovering.queued = ray(event); hovering.ending = true; schedule(); }
+        else endStroke(true);
+        return true;
+      }
       if (active.current || session.ui.getState().voxelStrokePending) return true;
       const ui = session.ui.getState();
       const plugin = ui.viewportMode === "interact" ? voxelTools.get(ui.voxelToolId) : undefined;
@@ -150,7 +189,7 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
             } finally { session.ui.setState({ voxelStrokePending: false }); }
           },
           cancel: () => session.ui.setState({ voxelStrokePending: false }),
-        }, initial, ui.voxelToolValues[plugin.id]);
+        }, initial, ui.voxelToolValues[plugin.id], event.altKey);
         if (transaction) {
           try { event.currentTarget.setPointerCapture(event.pointerId); }
           catch (error) { void transaction.finish(true).catch(notice); throw error; }
@@ -163,7 +202,7 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
     move(event: PointerEvent<HTMLCanvasElement>): boolean {
       const stroke = active.current;
       if (stroke) {
-        if (stroke.id === event.pointerId && !stroke.ending) { stroke.queued = ray(event); schedule(); }
+        if ((stroke.hovering || stroke.id === event.pointerId) && !stroke.ending) { stroke.queued = ray(event); schedule(); }
         return true;
       }
       const ui = session.ui.getState();
@@ -173,7 +212,7 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
         // Hover uses the exact plugin targeting and geometry without publishing.
         const sample = ray(event);
         const gesture = plugin.begin({ scene: session.scene.getState().scene, ray: sample,
-          values: toolValues(plugin, ui.voxelToolValues[plugin.id], session.scene.getState().scene) });
+          values: toolValues(plugin, ui.voxelToolValues[plugin.id], session.scene.getState().scene), invert: event.altKey });
         showPreview(gesture?.update(sample) ?? null);
       } catch { showPreview(null); }
       return true;
@@ -181,10 +220,18 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
     up(event: PointerEvent<HTMLCanvasElement>): boolean {
       const stroke = active.current;
       if (!stroke || stroke.id !== event.pointerId) return false;
-      if (stroke.ending) return true;
+      if (stroke.ending || stroke.hovering) return true;
       stroke.cancelled ||= event.type === "pointercancel";
       stroke.queued = stroke.cancelled ? undefined : ray(event);
-      stroke.ending = true; schedule(); return true;
+      // A cancelled pointer ends the stroke; a released one first asks the gesture whether it continues.
+      if (stroke.cancelled) stroke.ending = true; else stroke.releasing = true;
+      schedule(); return true;
+    },
+    /** Alt + wheel sizes the armed tool where the pointer is; Shift sizes its depth. The bare wheel stays the camera's. */
+    wheel(event: WheelEvent<HTMLCanvasElement>): boolean {
+      if (!event.altKey) return false;
+      const delta = event.deltaY || event.deltaX;
+      return resize(event.shiftKey ? "depth" : "size", delta < 0 ? 1 : delta > 0 ? -1 : 0);
     },
   };
 }

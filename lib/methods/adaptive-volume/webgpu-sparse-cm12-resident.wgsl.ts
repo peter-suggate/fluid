@@ -9627,6 +9627,14 @@ fn geometricTransportMaterialDemand(brick:u32)->bool{
 fn activateInjectionFrontierPages(@builtin(global_invocation_id)gid:vec3u){
   let brick=gid.x;if(brick>=p.dispatch.w||brickActive(brick)){return;}
   if(!injectionReachesBrick(brick)){return;}
+  // An editor drop writes its whole shape in this same transaction. Staged at the
+  // face-grading rung a dry page samples it on cells as wide as the shape and
+  // deposits several times its volume, so a drop alone keeps the fine floor.
+  if(p.injectionCenter.w!=2.0){
+    revokeCM12SourceTopologyLease();
+    stageFrontierPageAtRung(brick,BRICK_FINE_RESOLUTION);
+    return;
+  }
   stageDemandedFrontierPage(brick);
 }
 

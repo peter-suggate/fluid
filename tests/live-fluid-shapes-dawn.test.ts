@@ -10,6 +10,7 @@ import type { LiveFluidEdit } from "../lib/core/live-fluid-edit";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-adaptive-mass-solver";
+import { readGpuSolidFractions } from "./helpers/solid-world-gpu-probe";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 const mass = (values: Float32Array) => values.reduce((sum, value) => sum + value, 0);
@@ -83,6 +84,10 @@ const mass = (values: Float32Array) => values.reduce((sum, value) => sum + value
           info: solver.info, activity }, (_key, value) => value instanceof Float32Array ? { length: value.length } : value));
       }
       assert.ok(addedMass > beforeMass + 1, `${shape} must increase current liquid mass`);
+      // Dry air rests at the coarsest rung. A drop sampled there deposits several times its volume.
+      const cells = edit.radius_m / hx, tube = (edit.tubeRadius_m ?? 0) / hx;
+      const volume = shape === "ball" ? 4 / 3 * Math.PI * cells ** 3 : shape === "cube" ? (2 * cells) ** 3 : 2 * Math.PI ** 2 * (cells - tube) * tube ** 2;
+      assert.ok(Math.abs(addedMass - beforeMass - volume) < .15 * volume, `${shape} deposits its own volume (${addedMass - beforeMass} of ${volume} cells)`);
       assert.ok(added.density.every(value => Number.isFinite(value) && value >= 0));
       if (shape === "torus") {
         assert.equal(sample(added.density, x, 1.2, 0), 0, "the torus center stays empty before any motion");
@@ -97,7 +102,7 @@ const mass = (values: Float32Array) => values.reduce((sum, value) => sum + value
       assert.equal(removedResult.accepted, true, `${shape} remove: ${removedResult.reason ?? "rejected"}`);
       const removed = await solver.readDiagnosticFields(true);
       const removedMass = mass(removed.density);
-      assert.ok(removedMass < addedMass, `${shape} removal reduces current liquid`);
+      assert.ok(Math.abs(removedMass - beforeMass) < 1e-3, `${shape} removal takes back exactly what it added (${beforeMass} -> ${addedMass} -> ${removedMass})`);
       assert.ok(removed.density.every(value => Number.isFinite(value) && value >= 0));
       assert.equal(solver.sparseWorld, world);
       assert.equal(solver.info.submittedTime_s, initialTime);
@@ -151,9 +156,11 @@ const mass = (values: Float32Array) => values.reduce((sum, value) => sum + value
     const massBeforeSolid = await representedMass();
     const generationBeforeSolid = world.status().acceptedGeneration;
     console.log("fluid-shape phase: wet overlap query");
-    await assert.rejects(solver.prepareLiveSolidEdit(blocked), /overlaps moving water/);
+    // The wet-overlap proof left with the retained-density layer (b8a2b053). What is still owed is that
+    // asking commits nothing: acceptance is `applySceneUniforms`, and only the caller decides to run it.
+    assert.equal(await solver.prepareLiveSolidEdit(blocked), false, "no proof is offered, so nothing is pre-committed");
     assert.equal(world.status().acceptedGeneration, generationBeforeSolid,
-      "wet rejection must not advance the authored topology generation");
+      "asking must not advance the authored topology generation");
     assert.equal(await representedMass(), massBeforeSolid);
     const rejectedFields = await solver.readDiagnosticFields(true);
     assert.deepEqual(rejectedFields.density, wet.density);
@@ -179,9 +186,17 @@ const mass = (values: Float32Array) => values.reduce((sum, value) => sum + value
     const editElapsed_ms = performance.now() - editStarted;
     const massAfterSolidPublication = await representedMass();
     console.log("fluid-shape phase: post-publication mass read", massAfterSolidPublication);
-    const blockedFields = await solver.readDiagnosticFields(true);
-    assert.equal(sample(blockedFields.solidOpenFraction, .225, .6, 0), 0,
+    // This solver's diagnostic `solidOpenFraction` is never populated (it reads 1 inside the seeded
+    // cube too), so the occupancy the fluid actually consults is read from the world instead.
+    const dims = [solver.info.nx, solver.info.ny, solver.info.nz] as const;
+    const solids = await readGpuSolidFractions(device, world, [...dims]);
+    assert.equal(solids[20 + dims[0] * (12 + dims[1] * 16)], 1,
       "live solids must close dry injected-runtime cells before the next update");
+    assert.equal(solids[21 + dims[0] * (12 + dims[1] * 16)], 0, "and only those cells");
+    // The page was injected before this solid existed; its own apertures must have been refreshed.
+    const inSolid = await solver.editFluid({ operation: "add", shape: "cube", center_m: { x: .225, y: .625, z: .025 }, radius_m: .025 });
+    assert.equal(inSolid.accepted, true, inSolid.reason);
+    assert.ok(Math.abs(await representedMass() - massAfterSolidPublication) < 1e-4, "water cannot enter a cell a live edit just closed");
     await advance(3 / 30);
     const massAfterSolidStep = await representedMass();
     console.log(JSON.stringify({ massBeforeSolid, massAfterSolidPublication, massAfterSolidStep,
