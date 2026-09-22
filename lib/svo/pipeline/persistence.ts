@@ -4,8 +4,9 @@ import { primaryQuery, primaryTuningQuery, type PrimaryQueryState } from "../fea
 import { diagnosticQuery, type DiagnosticQueryState } from "../features/diagnostics/persistence";
 import { constructionTuningQuery } from "../features/construction/persistence";
 import { radianceTuningQuery } from "../features/radiance/persistence";
+import { presentationTuningQuery } from "../features/presentation/persistence";
 import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning, type SvoRenderTuning } from "./svo-render-tuning";
-const tuning = combineQueryCodecs<Partial<SvoRenderTuning>>([constructionTuningQuery, radianceTuningQuery, primaryTuningQuery]);
+const tuning = combineQueryCodecs<Partial<SvoRenderTuning>>([constructionTuningQuery, radianceTuningQuery, primaryTuningQuery, presentationTuningQuery]);
 const tuningQuery: QueryCodec<{ svoRenderTuning: SvoRenderTuning }> = {
   keys: tuning.keys,
   read: query => ({ svoRenderTuning: normalizeSvoRenderTuning({ ...DEFAULT_SVO_RENDER_TUNING, ...tuning.read(query) }) }),

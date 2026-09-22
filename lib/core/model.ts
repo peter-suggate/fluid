@@ -64,6 +64,12 @@ export interface SceneDescription {
   environment?: EnvironmentId;
   /** How occupied SVO cells reconstruct their visible surface. Omitted defaults to voxel-flat. */
   surfaceStyle?: "smooth" | "voxel-flat";
+  /**
+   * Draw opaque solid voxels that stand between the camera and the water
+   * see-through, so a closed voxel vessel does not hide what it holds. The
+   * renderer's `occluderGhosting` tuning follows this in its `auto` position.
+   */
+  seeThroughSolids?: boolean;
   /** Optional image-free lighting grade consumed by the SVO renderer. */
   lighting?: {
     /** Scene-linear directional key. Omitted fields retain the environment defaults. */

@@ -211,6 +211,8 @@ export const SVO_SURFACE_TERRAIN_GRADIENT_CELLS = 1;
 
 /** Runtime-adjustable sparse-presentation controls. Shader loops retain hard caps;
  * these values only lower work or adjust quality inside those audited bounds. */
+export type SvoOccluderGhosting = "auto" | "on" | "off";
+
 export interface SvoRenderTuning {
   readonly resolutionScale: number;
   readonly environmentBrickRefinementLevels: number;
@@ -270,6 +272,14 @@ export interface SvoRenderTuning {
   readonly surfaceMeshLodHysteresis: number;
   readonly surfaceMeshNormalAgreement: number;
   readonly surfaceMeshPreserveCloseNormals: boolean;
+  /**
+   * Whether an opaque voxel standing between the camera and the water is drawn
+   * see-through. `auto` follows the scene document (`seeThroughSolids`), so a
+   * closed voxel trough opens up while a porcelain basin keeps its rim.
+   */
+  readonly occluderGhosting: SvoOccluderGhosting;
+  /** How much of the ghosted voxel remains over what it hides. Zero is a clean cut. */
+  readonly occluderGhostOpacity: number;
   readonly primaryLeafVisits: number;
   readonly coneStepBudget: number;
   readonly maximumShadedLights: number;
@@ -390,6 +400,8 @@ const balancedTuning: SvoRenderTuning = Object.freeze({
   surfaceMeshing: "voxels",
   surfaceMeshContourInflation: 0,
   surfaceMeshPreserveCloseNormals: true,
+  occluderGhosting: "auto",
+  occluderGhostOpacity: 0.35,
   primaryLeafVisits: 48,
   coneStepBudget: 48,
   maximumShadedLights: 8,
@@ -600,6 +612,8 @@ export function normalizeSvoRenderTuning(value: SvoRenderTuning): SvoRenderTunin
     surfaceMeshContours: (value.surfaceMeshing ?? (value.surfaceMeshContours ? "contours" : "voxels")) === "contours",
     surfaceMeshContourInflation: Math.round(bounded(value.surfaceMeshContourInflation ?? 0, 0, 0.5) * 100) / 100,
     surfaceMeshPreserveCloseNormals: value.surfaceMeshPreserveCloseNormals ?? true,
+    occluderGhosting: value.occluderGhosting === "on" || value.occluderGhosting === "off" ? value.occluderGhosting : "auto",
+    occluderGhostOpacity: bounded(value.occluderGhostOpacity ?? DEFAULT_SVO_RENDER_TUNING.occluderGhostOpacity, 0, 0.9),
     primaryLeafVisits: integer(value.primaryLeafVisits, 1, SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT),
     coneStepBudget: integer(value.coneStepBudget, 1, 48),
     maximumShadedLights: integer(value.maximumShadedLights, 1, 8),

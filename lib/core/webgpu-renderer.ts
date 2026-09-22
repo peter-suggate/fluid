@@ -1933,17 +1933,27 @@ export class FluidLabRenderer {
       publication = undefined;
     }
     const info = solver?.info;
-    if (!publication || !info || !device) {
+    // The dense fill reads a signed distance in METRES. Two fields qualify:
+    // a brick publisher's contoured level set (surfaceFieldTexture, else
+    // volumeTexture — the field globalCoarsePhi already reads), and the uniform
+    // geometric solver's vertex phi, which it publishes for the grid overlay.
+    // The uniform solver's volumeTexture is NOT one of them: it is a liquid
+    // volume fraction, 0..1, and read as metres it puts every liquid cell
+    // outside the band (fraction 1 is twenty diagonals of air) and every air
+    // cell at half coverage — a volume that reports valid, samples, and
+    // answers backwards. Without the vertex phi the uniform scenes had no
+    // coverage volume at all: water cast no shadow, and nothing could ask
+    // whether liquid stood behind a voxel.
+    const dense = solver?.denseLevelSetVolumeSource?.vertexPhi
+      ?? (publication ? solver?.surfaceFieldTexture ?? solver?.volumeTexture : undefined);
+    const spansLattice = Boolean(dense) && Boolean(info) && dense!.width >= info!.nx
+      && dense!.height >= info!.ny && dense!.depthOrArrayLayers >= info!.nz;
+    if ((!publication && !spansLattice) || !info || !device) {
       this.svoFluidCoverage?.destroy();
       this.svoFluidCoverage = undefined;
       this.svoFluidCoverageKey = undefined;
       return undefined;
     }
-    // surfaceFieldTexture is the contoured level set when the solver keeps one
-    // apart from volumeTexture; it is the field globalCoarsePhi already reads.
-    const dense = solver?.surfaceFieldTexture ?? solver?.volumeTexture;
-    const spansLattice = Boolean(dense) && dense!.width >= info.nx
-      && dense!.height >= info.ny && dense!.depthOrArrayLayers >= info.nz;
     const container = scene.container;
     const fluidDomain = solver.fluidDomain;
     // Both arms span the same physical world box. Usually that is the authored
@@ -1959,8 +1969,10 @@ export class FluidLabRenderer {
     // even refuses a non-zero origin outright. Taking them for metres puts the
     // volume at the world origin with one-metre texels: a box in the wrong
     // place, at the wrong scale, that still samples and still reports valid.
+    // The guard above admits a missing publication only on the dense arm, so
+    // every compact-arm read below is of a publication that exists.
     const lattice: SvoFluidCoverageTriple = spansLattice
-      ? [info.nx, info.ny, info.nz] : publication.sampleDimensions;
+      ? [info.nx, info.ny, info.nz] : publication!.sampleDimensions;
     const field: WebGpuSvoFluidCoverageOptions = {
       fieldDimensions: lattice,
       worldOrigin_m: fluidDomain?.origin_m
@@ -1972,7 +1984,7 @@ export class FluidLabRenderer {
     // texel per two cells" would ask for gigabytes on a large scene. Coarsen
     // until the volume fits, and decline rather than build one that does not.
     const cellsPerTexel = planSvoFluidCoverageRatio(
-      field.fieldDimensions, spansLattice ? undefined : publication.brickResolution,
+      field.fieldDimensions, spansLattice ? undefined : publication!.brickResolution,
     );
     if (cellsPerTexel === undefined) {
       this.svoFluidCoverage?.destroy();
@@ -1986,7 +1998,7 @@ export class FluidLabRenderer {
     // The page set is republished every step, so a live owner still has to take
     // this frame's generation; only a shape or buffer change forces a rebuild.
     if (this.svoFluidCoverage && this.svoFluidCoverageKey === key
-      && (spansLattice || this.svoFluidCoverage.adoptPublication({ ...publication, kind: "compact" }))) {
+      && (spansLattice || this.svoFluidCoverage.adoptPublication({ ...publication!, kind: "compact" }))) {
       return this.svoFluidCoverage;
     }
     this.svoFluidCoverage?.destroy();
@@ -1994,7 +2006,7 @@ export class FluidLabRenderer {
     try {
       const source: WebGpuSvoFluidCoverageSource = spansLattice
         ? { kind: "dense", coarsePhi: dense!.createView({ dimension: "3d" }) }
-        : { ...publication, kind: "compact" };
+        : { ...publication!, kind: "compact" };
       this.svoFluidCoverage = new WebGpuSvoFluidCoverage(device, options, source);
       void this.svoFluidCoverage.initializePipelines();
     } catch {
@@ -3433,6 +3445,7 @@ export class FluidLabRenderer {
     if (sparsePresentationRequired) {
       this.svoDryScenePipeline?.setLightingOptions({ ...svoLightingOptions, coneLightingScale: activeSvoTuning.coneLightingScale });
       this.svoDryScenePipeline?.setRenderTuning(activeSvoTuning, readyGPUFluid === undefined);
+      this.svoDryScenePipeline?.setSceneSeeThroughSolids(scene.seeThroughSolids === true);
     }
     // Its own channel, taken every frame: a withheld stage is an encode-time
     // decision and must never reach the code that rebuilds shaders or bundles.

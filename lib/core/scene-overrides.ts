@@ -102,6 +102,8 @@ const UI_OVERRIDES: Readonly<Record<string, UIOverrideSpec>> = {
   svoStage: { label: "Stage view", group: "render", hint: "Debug stage isolation, not a product frame" },
   svoFlatExempt: { label: "Planar refinement exemption", group: "render", boolean: true },
   svoLodPixels: { label: "LOD threshold", group: "render", hint: "Screen-space pixels before a finer leaf is descended into" },
+  svoGhost: { label: "See-through solids", group: "render", hint: "Opaque voxels between the camera and the water are drawn translucent" },
+  svoGhostOpacity: { label: "See-through opacity", group: "render" },
   // Listed but never counted, on the camera's contract: an open instrument is
   // in the link so a shared link reopens the view that was shared, not because
   // anything about the scene has been overridden.
@@ -365,6 +367,8 @@ export function sceneOverrideClearPlan(
       case "svoMeshHysteresis": svoRenderTuning.surfaceMeshLodHysteresis = initialUI.svoRenderTuning.surfaceMeshLodHysteresis; break;
       case "svoMeshNormalAgreement": svoRenderTuning.surfaceMeshNormalAgreement = initialUI.svoRenderTuning.surfaceMeshNormalAgreement; break;
       case "svoMeshCloseNormals": svoRenderTuning.surfaceMeshPreserveCloseNormals = initialUI.svoRenderTuning.surfaceMeshPreserveCloseNormals; break;
+      case "svoGhost": svoRenderTuning.occluderGhosting = initialUI.svoRenderTuning.occluderGhosting; break;
+      case "svoGhostOpacity": svoRenderTuning.occluderGhostOpacity = initialUI.svoRenderTuning.occluderGhostOpacity; break;
       case "svoMeshLodPixels":
         svoRenderTuning.surfaceMeshLodPixels = initialUI.svoRenderTuning.surfaceMeshLodPixels;
         break;
