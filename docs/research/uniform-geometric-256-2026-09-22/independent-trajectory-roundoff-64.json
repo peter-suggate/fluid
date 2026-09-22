@@ -1,0 +1,845 @@
+{
+  "scope": "Independent 40-step trajectories, without synchronizing physical inputs. Shows accumulated f32 rounding differences; not a bitwise-equivalence claim.",
+  "rows": [
+    {
+      "frame": 1,
+      "field": "volumeTexture",
+      "arm": 1,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 1,
+      "field": "volumeTexture",
+      "arm": 2,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 1,
+      "field": "velocityTexture",
+      "arm": 1,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 1,
+      "field": "velocityTexture",
+      "arm": 2,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 1,
+      "field": "gridPressureTexture",
+      "arm": 1,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 1,
+      "field": "gridPressureTexture",
+      "arm": 2,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 1,
+      "field": "extrapolatedVelocityTexture",
+      "arm": 1,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 1,
+      "field": "extrapolatedVelocityTexture",
+      "arm": 2,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 1,
+      "field": "vertexPhiTexture",
+      "arm": 1,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 1,
+      "field": "vertexPhiTexture",
+      "arm": 2,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 1,
+      "field": "surfaceFieldTexture",
+      "arm": 1,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 1,
+      "field": "surfaceFieldTexture",
+      "arm": 2,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 1,
+      "field": "preProjectionVelocityTexture",
+      "arm": 1,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 1,
+      "field": "extrapolationActiveStateTexture",
+      "arm": 1,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 1,
+      "field": "advectedVertexPhiTexture",
+      "arm": 1,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 2,
+      "field": "volumeTexture",
+      "arm": 1,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 2,
+      "field": "volumeTexture",
+      "arm": 2,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 2,
+      "field": "velocityTexture",
+      "arm": 1,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 2,
+      "field": "velocityTexture",
+      "arm": 2,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 2,
+      "field": "gridPressureTexture",
+      "arm": 1,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 2,
+      "field": "gridPressureTexture",
+      "arm": 2,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 2,
+      "field": "extrapolatedVelocityTexture",
+      "arm": 1,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 2,
+      "field": "extrapolatedVelocityTexture",
+      "arm": 2,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 2,
+      "field": "vertexPhiTexture",
+      "arm": 1,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 2,
+      "field": "vertexPhiTexture",
+      "arm": 2,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 2,
+      "field": "surfaceFieldTexture",
+      "arm": 1,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 2,
+      "field": "surfaceFieldTexture",
+      "arm": 2,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 2,
+      "field": "preProjectionVelocityTexture",
+      "arm": 1,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 2,
+      "field": "extrapolationActiveStateTexture",
+      "arm": 1,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 2,
+      "field": "advectedVertexPhiTexture",
+      "arm": 1,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 3,
+      "field": "volumeTexture",
+      "arm": 1,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 3,
+      "field": "volumeTexture",
+      "arm": 2,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 3,
+      "field": "velocityTexture",
+      "arm": 1,
+      "maxError": 2.2737367544323206e-13,
+      "relativeL2": 6.9155788702196635e-15
+    },
+    {
+      "frame": 3,
+      "field": "velocityTexture",
+      "arm": 2,
+      "maxError": 2.2737367544323206e-13,
+      "relativeL2": 6.9155788702196635e-15
+    },
+    {
+      "frame": 3,
+      "field": "gridPressureTexture",
+      "arm": 1,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 3,
+      "field": "gridPressureTexture",
+      "arm": 2,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 3,
+      "field": "extrapolatedVelocityTexture",
+      "arm": 1,
+      "maxError": 1.1920928955078125e-07,
+      "relativeL2": 8.623749152627315e-11
+    },
+    {
+      "frame": 3,
+      "field": "extrapolatedVelocityTexture",
+      "arm": 2,
+      "maxError": 1.1920928955078125e-07,
+      "relativeL2": 8.623749152627315e-11
+    },
+    {
+      "frame": 3,
+      "field": "vertexPhiTexture",
+      "arm": 1,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 3,
+      "field": "vertexPhiTexture",
+      "arm": 2,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 3,
+      "field": "surfaceFieldTexture",
+      "arm": 1,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 3,
+      "field": "surfaceFieldTexture",
+      "arm": 2,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 3,
+      "field": "preProjectionVelocityTexture",
+      "arm": 1,
+      "maxError": 1.1920928955078125e-07,
+      "relativeL2": 1.0092451627269242e-08
+    },
+    {
+      "frame": 3,
+      "field": "extrapolationActiveStateTexture",
+      "arm": 1,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 3,
+      "field": "advectedVertexPhiTexture",
+      "arm": 1,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 4,
+      "field": "volumeTexture",
+      "arm": 1,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 4,
+      "field": "volumeTexture",
+      "arm": 2,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 4,
+      "field": "velocityTexture",
+      "arm": 1,
+      "maxError": 1.1920928955078125e-07,
+      "relativeL2": 7.604673383907889e-09
+    },
+    {
+      "frame": 4,
+      "field": "velocityTexture",
+      "arm": 2,
+      "maxError": 1.1920928955078125e-07,
+      "relativeL2": 7.604673383907889e-09
+    },
+    {
+      "frame": 4,
+      "field": "gridPressureTexture",
+      "arm": 1,
+      "maxError": 2.057640813291073e-05,
+      "relativeL2": 0.0004736345803370167
+    },
+    {
+      "frame": 4,
+      "field": "gridPressureTexture",
+      "arm": 2,
+      "maxError": 2.057640813291073e-05,
+      "relativeL2": 0.0004736345803370167
+    },
+    {
+      "frame": 4,
+      "field": "extrapolatedVelocityTexture",
+      "arm": 1,
+      "maxError": 2.384185791015625e-07,
+      "relativeL2": 3.5861795727156104e-10
+    },
+    {
+      "frame": 4,
+      "field": "extrapolatedVelocityTexture",
+      "arm": 2,
+      "maxError": 2.384185791015625e-07,
+      "relativeL2": 3.5861795727156104e-10
+    },
+    {
+      "frame": 4,
+      "field": "vertexPhiTexture",
+      "arm": 1,
+      "maxError": 1.1920928955078125e-07,
+      "relativeL2": 1.2586390273076502e-10
+    },
+    {
+      "frame": 4,
+      "field": "vertexPhiTexture",
+      "arm": 2,
+      "maxError": 1.1920928955078125e-07,
+      "relativeL2": 1.2586390273076502e-10
+    },
+    {
+      "frame": 4,
+      "field": "surfaceFieldTexture",
+      "arm": 1,
+      "maxError": 1.9073486328125e-06,
+      "relativeL2": 2.3891846064373507e-10
+    },
+    {
+      "frame": 4,
+      "field": "surfaceFieldTexture",
+      "arm": 2,
+      "maxError": 1.9073486328125e-06,
+      "relativeL2": 2.3891846064373507e-10
+    },
+    {
+      "frame": 4,
+      "field": "preProjectionVelocityTexture",
+      "arm": 1,
+      "maxError": 2.384185791015625e-07,
+      "relativeL2": 2.6272417697238118e-08
+    },
+    {
+      "frame": 4,
+      "field": "extrapolationActiveStateTexture",
+      "arm": 1,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 4,
+      "field": "advectedVertexPhiTexture",
+      "arm": 1,
+      "maxError": 1.1920928955078125e-07,
+      "relativeL2": 1.2586389837873522e-10
+    },
+    {
+      "frame": 5,
+      "field": "volumeTexture",
+      "arm": 1,
+      "maxError": 1.043081283569336e-07,
+      "relativeL2": 2.7012417323272567e-09
+    },
+    {
+      "frame": 5,
+      "field": "volumeTexture",
+      "arm": 2,
+      "maxError": 1.043081283569336e-07,
+      "relativeL2": 2.7012417323272567e-09
+    },
+    {
+      "frame": 5,
+      "field": "velocityTexture",
+      "arm": 1,
+      "maxError": 1.1920928955078125e-07,
+      "relativeL2": 9.211541425481225e-09
+    },
+    {
+      "frame": 5,
+      "field": "velocityTexture",
+      "arm": 2,
+      "maxError": 1.1920928955078125e-07,
+      "relativeL2": 9.211541425481225e-09
+    },
+    {
+      "frame": 5,
+      "field": "gridPressureTexture",
+      "arm": 1,
+      "maxError": 0.00013659195974469185,
+      "relativeL2": 0.002003121225816347
+    },
+    {
+      "frame": 5,
+      "field": "gridPressureTexture",
+      "arm": 2,
+      "maxError": 0.00013659195974469185,
+      "relativeL2": 0.002003121225816347
+    },
+    {
+      "frame": 5,
+      "field": "extrapolatedVelocityTexture",
+      "arm": 1,
+      "maxError": 4.76837158203125e-07,
+      "relativeL2": 1.2211855049188103e-09
+    },
+    {
+      "frame": 5,
+      "field": "extrapolatedVelocityTexture",
+      "arm": 2,
+      "maxError": 4.76837158203125e-07,
+      "relativeL2": 1.2211855049188103e-09
+    },
+    {
+      "frame": 5,
+      "field": "vertexPhiTexture",
+      "arm": 1,
+      "maxError": 3.5762786865234375e-07,
+      "relativeL2": 2.0716714080686102e-09
+    },
+    {
+      "frame": 5,
+      "field": "vertexPhiTexture",
+      "arm": 2,
+      "maxError": 3.5762786865234375e-07,
+      "relativeL2": 2.0716714080686102e-09
+    },
+    {
+      "frame": 5,
+      "field": "surfaceFieldTexture",
+      "arm": 1,
+      "maxError": 7.62939453125e-06,
+      "relativeL2": 2.0731395659175267e-09
+    },
+    {
+      "frame": 5,
+      "field": "surfaceFieldTexture",
+      "arm": 2,
+      "maxError": 7.62939453125e-06,
+      "relativeL2": 2.0731395659175267e-09
+    },
+    {
+      "frame": 5,
+      "field": "preProjectionVelocityTexture",
+      "arm": 1,
+      "maxError": 4.76837158203125e-07,
+      "relativeL2": 5.26376538005651e-08
+    },
+    {
+      "frame": 5,
+      "field": "extrapolationActiveStateTexture",
+      "arm": 1,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 5,
+      "field": "advectedVertexPhiTexture",
+      "arm": 1,
+      "maxError": 3.427267074584961e-07,
+      "relativeL2": 2.006136568375605e-09
+    },
+    {
+      "frame": 24,
+      "field": "volumeTexture",
+      "arm": 1,
+      "maxError": 3.516674041748047e-06,
+      "relativeL2": 5.337815027970294e-07
+    },
+    {
+      "frame": 24,
+      "field": "volumeTexture",
+      "arm": 2,
+      "maxError": 3.516674041748047e-06,
+      "relativeL2": 5.337815027970294e-07
+    },
+    {
+      "frame": 24,
+      "field": "velocityTexture",
+      "arm": 1,
+      "maxError": 2.384185791015625e-06,
+      "relativeL2": 6.245503377715314e-08
+    },
+    {
+      "frame": 24,
+      "field": "velocityTexture",
+      "arm": 2,
+      "maxError": 2.384185791015625e-06,
+      "relativeL2": 6.245503377715314e-08
+    },
+    {
+      "frame": 24,
+      "field": "gridPressureTexture",
+      "arm": 1,
+      "maxError": 0.0022642016410827637,
+      "relativeL2": 0.0015160568172066227
+    },
+    {
+      "frame": 24,
+      "field": "gridPressureTexture",
+      "arm": 2,
+      "maxError": 0.0022642016410827637,
+      "relativeL2": 0.0015160568172066227
+    },
+    {
+      "frame": 24,
+      "field": "extrapolatedVelocityTexture",
+      "arm": 1,
+      "maxError": 2.384185791015625e-06,
+      "relativeL2": 5.532278603481604e-09
+    },
+    {
+      "frame": 24,
+      "field": "extrapolatedVelocityTexture",
+      "arm": 2,
+      "maxError": 2.384185791015625e-06,
+      "relativeL2": 5.532278603481604e-09
+    },
+    {
+      "frame": 24,
+      "field": "vertexPhiTexture",
+      "arm": 1,
+      "maxError": 9.5367431640625e-07,
+      "relativeL2": 3.85304978310393e-08
+    },
+    {
+      "frame": 24,
+      "field": "vertexPhiTexture",
+      "arm": 2,
+      "maxError": 9.5367431640625e-07,
+      "relativeL2": 3.85304978310393e-08
+    },
+    {
+      "frame": 24,
+      "field": "surfaceFieldTexture",
+      "arm": 1,
+      "maxError": 7.62939453125e-06,
+      "relativeL2": 4.1059981451552095e-08
+    },
+    {
+      "frame": 24,
+      "field": "surfaceFieldTexture",
+      "arm": 2,
+      "maxError": 7.62939453125e-06,
+      "relativeL2": 4.1059981451552095e-08
+    },
+    {
+      "frame": 24,
+      "field": "preProjectionVelocityTexture",
+      "arm": 1,
+      "maxError": 2.384185791015625e-06,
+      "relativeL2": 4.6722006853730875e-08
+    },
+    {
+      "frame": 24,
+      "field": "extrapolationActiveStateTexture",
+      "arm": 1,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 24,
+      "field": "advectedVertexPhiTexture",
+      "arm": 1,
+      "maxError": 9.5367431640625e-07,
+      "relativeL2": 3.8132712767074535e-08
+    },
+    {
+      "frame": 30,
+      "field": "volumeTexture",
+      "arm": 1,
+      "maxError": 6.270408630371094e-05,
+      "relativeL2": 1.55838028271733e-06
+    },
+    {
+      "frame": 30,
+      "field": "volumeTexture",
+      "arm": 2,
+      "maxError": 6.270408630371094e-05,
+      "relativeL2": 1.55838028271733e-06
+    },
+    {
+      "frame": 30,
+      "field": "velocityTexture",
+      "arm": 1,
+      "maxError": 0.0001468658447265625,
+      "relativeL2": 9.440761740471675e-07
+    },
+    {
+      "frame": 30,
+      "field": "velocityTexture",
+      "arm": 2,
+      "maxError": 0.0001468658447265625,
+      "relativeL2": 9.440761740471675e-07
+    },
+    {
+      "frame": 30,
+      "field": "gridPressureTexture",
+      "arm": 1,
+      "maxError": 0.10986328125,
+      "relativeL2": 6.760490195193339e-07
+    },
+    {
+      "frame": 30,
+      "field": "gridPressureTexture",
+      "arm": 2,
+      "maxError": 0.10986328125,
+      "relativeL2": 6.760490195193339e-07
+    },
+    {
+      "frame": 30,
+      "field": "extrapolatedVelocityTexture",
+      "arm": 1,
+      "maxError": 6.580352783203125e-05,
+      "relativeL2": 9.39181993395141e-08
+    },
+    {
+      "frame": 30,
+      "field": "extrapolatedVelocityTexture",
+      "arm": 2,
+      "maxError": 6.580352783203125e-05,
+      "relativeL2": 9.39181993395141e-08
+    },
+    {
+      "frame": 30,
+      "field": "vertexPhiTexture",
+      "arm": 1,
+      "maxError": 0.00020956993103027344,
+      "relativeL2": 2.6888819892071586e-07
+    },
+    {
+      "frame": 30,
+      "field": "vertexPhiTexture",
+      "arm": 2,
+      "maxError": 0.00020956993103027344,
+      "relativeL2": 2.6888819892071586e-07
+    },
+    {
+      "frame": 30,
+      "field": "surfaceFieldTexture",
+      "arm": 1,
+      "maxError": 0.0004267692565917969,
+      "relativeL2": 1.2033310749644168e-07
+    },
+    {
+      "frame": 30,
+      "field": "surfaceFieldTexture",
+      "arm": 2,
+      "maxError": 0.0004267692565917969,
+      "relativeL2": 1.2033310749644168e-07
+    },
+    {
+      "frame": 30,
+      "field": "preProjectionVelocityTexture",
+      "arm": 1,
+      "maxError": 5.6743621826171875e-05,
+      "relativeL2": 9.98398519529287e-07
+    },
+    {
+      "frame": 30,
+      "field": "extrapolationActiveStateTexture",
+      "arm": 1,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 30,
+      "field": "advectedVertexPhiTexture",
+      "arm": 1,
+      "maxError": 8.103251457214355e-05,
+      "relativeL2": 1.6952181360234266e-07
+    },
+    {
+      "frame": 40,
+      "field": "volumeTexture",
+      "arm": 1,
+      "maxError": 0.012584537267684937,
+      "relativeL2": 0.0003957466410233279
+    },
+    {
+      "frame": 40,
+      "field": "volumeTexture",
+      "arm": 2,
+      "maxError": 0.012584537267684937,
+      "relativeL2": 0.0003957466410233279
+    },
+    {
+      "frame": 40,
+      "field": "velocityTexture",
+      "arm": 1,
+      "maxError": 0.0013131797313690186,
+      "relativeL2": 9.35993829867573e-06
+    },
+    {
+      "frame": 40,
+      "field": "velocityTexture",
+      "arm": 2,
+      "maxError": 0.0013131797313690186,
+      "relativeL2": 9.35993829867573e-06
+    },
+    {
+      "frame": 40,
+      "field": "gridPressureTexture",
+      "arm": 1,
+      "maxError": 1.2998046875,
+      "relativeL2": 1.883219269775673e-05
+    },
+    {
+      "frame": 40,
+      "field": "gridPressureTexture",
+      "arm": 2,
+      "maxError": 1.2998046875,
+      "relativeL2": 1.883219269775673e-05
+    },
+    {
+      "frame": 40,
+      "field": "extrapolatedVelocityTexture",
+      "arm": 1,
+      "maxError": 0.001202225685119629,
+      "relativeL2": 1.7928687538066585e-07
+    },
+    {
+      "frame": 40,
+      "field": "extrapolatedVelocityTexture",
+      "arm": 2,
+      "maxError": 0.001202225685119629,
+      "relativeL2": 1.7928687538066585e-07
+    },
+    {
+      "frame": 40,
+      "field": "vertexPhiTexture",
+      "arm": 1,
+      "maxError": 7.826089859008789e-05,
+      "relativeL2": 3.553738560676957e-07
+    },
+    {
+      "frame": 40,
+      "field": "vertexPhiTexture",
+      "arm": 2,
+      "maxError": 7.826089859008789e-05,
+      "relativeL2": 3.553738560676957e-07
+    },
+    {
+      "frame": 40,
+      "field": "surfaceFieldTexture",
+      "arm": 1,
+      "maxError": 0.0003139972686767578,
+      "relativeL2": 2.750305465150678e-07
+    },
+    {
+      "frame": 40,
+      "field": "surfaceFieldTexture",
+      "arm": 2,
+      "maxError": 0.0003139972686767578,
+      "relativeL2": 2.750305465150678e-07
+    },
+    {
+      "frame": 40,
+      "field": "preProjectionVelocityTexture",
+      "arm": 1,
+      "maxError": 0.0007906556129455566,
+      "relativeL2": 3.7994731150157533e-06
+    },
+    {
+      "frame": 40,
+      "field": "extrapolationActiveStateTexture",
+      "arm": 1,
+      "maxError": 0,
+      "relativeL2": 0
+    },
+    {
+      "frame": 40,
+      "field": "advectedVertexPhiTexture",
+      "arm": 1,
+      "maxError": 7.641315460205078e-05,
+      "relativeL2": 3.743869361712083e-07
+    }
+  ]
+}

@@ -55,7 +55,10 @@ try {
    const bytes=await readBufferBinding(device,{buffer:edges},edges.size);
    if(arg("dump-edges","off")==="on")await writeFile(`${out}/${frame}-edges.bin`,bytes);
    const donors=new Uint32Array(bytes.buffer);const weights=new Float32Array(bytes.buffer);const counts=new Uint32Array(solver.info.nx*solver.info.ny*solver.info.nz);
-   let nonzero=0;for(let i=0;i<counts.length;i++)for(let k=0;k<9;k++)if(weights[20*i+9+k]!>0){counts[donors[20*i+k]!]!++;nonzero++;}
+   let nonzero=0;for(let i=0;i<counts.length;i++)for(let k=0;k<9;k++)if(weights[10*i+1+k]!>0){
+    const donor=k===8?i:(donors[10*i]!+(k&1)+solver.info.nx*(((k>>1)&1)+solver.info.ny*((k>>2)&1)))>>>0;
+    counts[donor]!++;nonzero++;
+   }
    let maximum=0,pairs=0,used=0;const top:{index:number,count:number}[]=[];
    for(let i=0;i<counts.length;i++){const count=counts[i]!;if(count>0)used++;maximum=Math.max(maximum,count);pairs+=count*(count-1)/2;if(count>100)top.push({index:i,count});}
    top.sort((a,b)=>b.count-a.count);donorFanIn={nonzero,used,maximum,pairs,top:top.slice(0,10)};

@@ -10,6 +10,7 @@ export class UniformSurfaceVolumeCorrection {
   private buffers?: GPUBuffer[];
   private groups?: [GPUBindGroup, GPUBindGroup];
   private output?: GPUTexture;
+  private reverseParams?: GPUBuffer;
   private readonly cellCount: number;
   private readonly vertexCount: number;
   constructor(private readonly device: GPUDevice, private readonly dims: readonly [number, number, number],
@@ -28,7 +29,12 @@ export class UniformSurfaceVolumeCorrection {
   async initialize(signal?: AbortSignal) {
     this.allocate();
     const compiler = gpuCompilationManagerFor(this.device);
-    const module = compiler.createShaderModule({label:"Total surface volume",code:this.fieldPages?.shader(uniformSurfaceVolumeWGSL,new Map([[1,this.phi],[2,this.volume],[3,this.capacity],[4,this.output!]]),false,this.fieldPages.nativeStorage) ?? uniformSurfaceVolumeWGSL});
+    const bandWords=Math.ceil(this.vertexCount/4)*4;
+    const source=this.fieldPages?.scratch ? uniformSurfaceVolumeWGSL
+      .replace(/&band\[([^\]]+)\]/g,`&uniformScratch[select(${bandWords}u,0u,p.dims.w!=0u)+($1)]`)
+      .replace(/&nextBand\[([^\]]+)\]/g,`&uniformScratch[select(0u,${bandWords}u,p.dims.w!=0u)+($1)]`)
+      : uniformSurfaceVolumeWGSL;
+    const module = compiler.createShaderModule({label:"Total surface volume",code:this.fieldPages?.shader(source,new Map([[1,this.phi],[2,this.volume],[3,this.capacity],[4,this.output!]]),false,this.fieldPages.nativeStorage,false,new Set([1,2,3])) ?? source});
     const layout = this.device.createPipelineLayout({bindGroupLayouts:[this.layout]});
     for (const entryPoint of entries) this.pipelines[entryPoint] = await compiler.compileComputePipeline({
       label:`Surface volume ${entryPoint}`,layout,compute:{module,entryPoint},
@@ -43,29 +49,40 @@ export class UniformSurfaceVolumeCorrection {
     const buffer=(label:string,size:number,uniform=false)=>device.createBuffer({label,size,
       usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC|(uniform?GPUBufferUsage.UNIFORM:GPUBufferUsage.STORAGE)});
     const params=buffer("Surface volume params",32,true);
-    const band=buffer("Surface geometric band",this.vertexCount*4);
-    const next=buffer("Surface geometric band scratch",this.vertexCount*4);
-    const partial=buffer("Surface volume partial sums",Math.ceil(this.cellCount/64)*80);
+    const band=buffer("Surface geometric band",this.fieldPages?.scratch?16:this.vertexCount*4);
+    const next=buffer("Surface geometric band scratch",this.fieldPages?.scratch?16:this.vertexCount*4);
+    const partialBytes=Math.ceil(this.cellCount/64)*80;
+    const partialOffset=Math.ceil(Math.ceil(this.vertexCount/4)*32/256)*256;
+    const partial=buffer("Surface volume partial sums",this.fieldPages?.scratch?16:partialBytes);
     const reduced=buffer("Surface volume reduced sums",Math.ceil(this.cellCount/4096)*80);
     const state=buffer("Surface volume shift and receipt",32);
     this.buffers=[params,band,next,partial,reduced,state];
     const data=new ArrayBuffer(32);new Uint32Array(data).set(this.dims);new Float32Array(data).set([...this.h,Math.min(...this.h)],4);
     device.queue.writeBuffer(params,0,data);
+    if(this.fieldPages?.scratch){
+      this.reverseParams=buffer("Surface volume reverse parity params",32,true);
+      new Uint32Array(data)[3]=1;device.queue.writeBuffer(this.reverseParams,0,data);
+    }
     const view=(t:GPUTexture)=>this.fieldPages?.view(t) ?? t.createView();
-    const group=(a:GPUBuffer,b:GPUBuffer)=>(this.fieldPages ?? device).createBindGroup({layout:this.layout,entries:[
-      {binding:0,resource:{buffer:params}},{binding:1,resource:view(this.phi)},
+    const group=(a:GPUBuffer,b:GPUBuffer,parameters=params)=>{
+     const descriptor:GPUBindGroupDescriptor={layout:this.layout,entries:[
+      {binding:0,resource:{buffer:parameters}},{binding:1,resource:view(this.phi)},
       {binding:2,resource:view(this.volume)},{binding:3,resource:view(this.capacity)},
       {binding:4,resource:view(this.output!)},
-      ...[a,b,partial,reduced,state].map((buffer,i)=>({binding:i+5,resource:{buffer}})),
-    ]});
-    this.groups=[group(band,next),group(next,band)];
+      ...[a,b,partial,reduced,state].map((buffer,i)=>({binding:i+5,resource:i===2&&this.fieldPages?.scratch
+       ? {buffer:this.fieldPages.scratch.buffer,offset:partialOffset,size:partialBytes} : {buffer}})),
+     ]};
+     return this.fieldPages?.createBindGroup(descriptor,true,partialOffset) ?? device.createBindGroup(descriptor);
+    };
+    this.groups=[group(band,next),group(next,band,this.reverseParams??params)];
   }
-  get allocatedBytes(): number { return (this.buffers?.reduce((sum,b)=>sum+b.size,0)??0)+(this.output?this.vertexCount*4:0); }
+  get allocatedBytes(): number { return (this.buffers?.reduce((sum,b)=>sum+b.size,0)??0)+(this.output?this.vertexCount*4:0)+(this.reverseParams?.size??0); }
   /** Read-only diagnostic buffer: [shift, search range, target V, prior surface V]. */
   get diagnostics(): GPUBuffer | undefined { return this.buffers?.[5]; }
   encode(encoder: GPUCommandEncoder) {
     if(!this.buffers) throw new Error("Surface correction is not initialized");
-    encoder.clearBuffer(this.buffers![1]!);
+    if(this.fieldPages?.scratch)encoder.clearBuffer(this.fieldPages.scratch.buffer,Math.ceil(this.vertexCount/4)*16,this.vertexCount*4);
+    else encoder.clearBuffer(this.buffers![1]!);
     const run=(entry:typeof entries[number],count:number,group=0)=>{
       const pass=encoder.beginComputePass({label:`Total surface volume: ${entry}`});
       pass.setPipeline(this.pipelines[entry]!);pass.setBindGroup(0,this.groups![group]!);
@@ -83,5 +100,5 @@ export class UniformSurfaceVolumeCorrection {
     if(this.fieldPages) this.fieldPages.copy(encoder,this.output!,this.phi);
     else encoder.copyTextureToTexture({texture:this.output!},{texture:this.phi},this.dims.map(n=>n+1));
   }
-  destroy() { this.output?.destroy(); for(const buffer of this.buffers??[]) buffer.destroy(); }
+  destroy() { this.output?.destroy();this.reverseParams?.destroy(); for(const buffer of this.buffers??[]) buffer.destroy(); }
 }

@@ -414,7 +414,7 @@ export class WebGPUUniformVelocityExtrapolator {
     const compiler = gpuCompilationManagerFor(this.device);
     const shaderModule = compiler.createShaderModule({
       label: "Uniform Sec. 3.3 extrapolation kernels",
-      code: this.fieldPages?.shader(this.fieldPages.nativeStorage ? uniformVelocityExtrapolationShader : uniformVelocityPagedShader(uniformVelocityExtrapolationShader,this.dims,this.pageDomain),new Map(),false,this.fieldPages.nativeStorage) ?? uniformVelocityExtrapolationShader,
+      code: this.fieldPages?.shader(this.fieldPages.nativeStorage ? uniformVelocityExtrapolationShader : uniformVelocityPagedShader(uniformVelocityExtrapolationShader,this.dims,this.pageDomain),new Map(),false,this.fieldPages.nativeStorage,false,new Set([0,8,13,14,15])) ?? uniformVelocityExtrapolationShader,
     });
     const compile = (label: string, entryPoint: string) => compiler.compileComputePipeline({
       label, layout: this.pipelineLayout, compute: { module: shaderModule, entryPoint, constants: {

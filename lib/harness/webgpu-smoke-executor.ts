@@ -2258,6 +2258,8 @@ async function runGPU(
   for (const [name, value] of Object.entries(constructionEnvironment)) {
     process.env[name] = value;
   }
+  const constructionValues=method.id==="uniform-volume" && (includeFinalFieldStats || comparisonMetricsRequested || energyEverySteps>0)
+    ? {...values,retainStageDiagnosticsForQA:true} : values;
   let solver: GPUSolverInstance;
   try {
     solver = method.createSolverAsync
@@ -2265,11 +2267,11 @@ async function runGPU(
         // browser. For octree this includes the power catalog and fenced sparse
         // t=0 authority; for uniform it includes the complete async pipeline
         // task graph rather than relying on synchronous invalid-pipeline shells.
-        ? await method.createSolverAsync(instrumentedDevice, scene, solverQuality, values, undefined, (progress) => {
+        ? await method.createSolverAsync(instrumentedDevice, scene, solverQuality, constructionValues, undefined, (progress) => {
           console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
             record: "solver-initialization", ...progress }));
         })
-        : method.createSolver!(instrumentedDevice, scene, solverQuality, values);
+        : method.createSolver!(instrumentedDevice, scene, solverQuality, constructionValues);
   } finally {
     for (const name of Object.keys(constructionEnvironment)) delete process.env[name];
   }
@@ -2278,6 +2280,8 @@ async function runGPU(
   // structural options, but runtime solve/extension/cadence dials are adopted
   // only through this call. Dawn must cross the same initial boundary.
   solver.applyRuntimeValues?.(values);
+  if(includeFinalFieldStats || comparisonMetricsRequested || energyEverySteps>0)
+    (solver as GPUSolverInstance & {enableStageDiagnosticsForQA?:()=>void}).enableStageDiagnosticsForQA?.();
   // Some sparse methods intentionally return once generation zero can be
   // presented while the larger recurring physics family continues compiling.
   // A smoke/profile loop has no UI idle period in which to poll readiness, so

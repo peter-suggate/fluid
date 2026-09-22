@@ -1,3 +1,4 @@
+import { UniformScratchArena } from "./uniform-scratch-arena";
 import { uniformPageHasNativeCoordinates, uniformPageHasRectangularCoverage } from "./uniform-page-execution";
 import { UniformPageDomainPublication } from "./uniform-page-domain-publication";
 import { UniformTexturePages } from "./uniform-texture-pages";
@@ -108,6 +109,10 @@ export interface WebGPUUniformReferenceOptions {
   /** Independent dense vertex level set and conservative cell volume. */
   geometricVolume?: boolean;
   geometricRedistance?: boolean;
+  /** Separate backing is the exact numerical/performance control. */
+  scratchStorageForQA?: "separate";
+  /** Retain stage fields, including inactive cells, for full-field diagnostics. */
+  retainStageDiagnosticsForQA?: boolean;
   /** Global surface-volume constraint; defaults on for 3D geometric volume. */
   totalSurfaceVolume?: boolean;
   surfaceDeficitBalancing?: boolean;
@@ -474,6 +479,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly vertexPhiField?: GPUTexture;
   get vertexPhiTexture(): GPUTexture | undefined { return this.vertexPhiField && this.present(this.vertexPhiField); }
   private readonly fieldPages?: UniformTexturePages;
+  private readonly scratchArena?: UniformScratchArena;
   private present(field: GPUTexture): GPUTexture { return this.fieldPages?.publication(field) ?? field; }
   readonly denseLevelSetVolumeSource?: DenseLevelSetVolumeConsumerSource;
   private readonly vertexPhiScratch?: GPUTexture;
@@ -511,11 +517,22 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   readonly columnBaseTexture: GPUTexture;
   readonly velocityTexture: GPUTexture;
   /** Velocity after advection/forces and before the pressure projection. */
-  readonly preProjectionVelocityTexture: GPUTexture;
+  get preProjectionVelocityTexture(): GPUTexture { return this.present(this.velocityB); }
   /** Padded float32 velocity extension retained for opt-in comparison diagnostics. */
   readonly extrapolatedVelocityTexture: GPUTexture;
   /** FIM xyz distances plus the 3-bit active mask in w, for Dawn conformance diagnostics. */
-  readonly extrapolationActiveStateTexture: GPUTexture;
+  get extrapolationActiveStateTexture(): GPUTexture {
+    this.enableStageDiagnosticsForQA();
+    return this.present(this.velocityExtrapolator.activeStateTexture);
+  }
+  private stageDiagnosticsRequested = false;
+  private readonly retainStageDiagnosticsForQA: boolean;
+  /** Full FIM diagnostics must be retained when constructing the solver. */
+  enableStageDiagnosticsForQA(): void {
+    if(this.stageDiagnosticsRequested || !this.scratchArena)return;
+    if(!this.retainStageDiagnosticsForQA)throw new Error("Construct the solver with retainStageDiagnosticsForQA to inspect intermediate fields");
+    this.stageDiagnosticsRequested=true;
+  }
   readonly extrapolationActiveFrontPassCeiling: number;
   private readonly symmetryStageAuditFields?: WebGPUUniformReferenceSolver["symmetryStageAuditTextures"];
   readonly symmetryStageAuditTextures?: Readonly<{
@@ -786,6 +803,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // reduction sums V over the box, which equals the domain sum only while
     // every cell outside the box holds exactly zero, and that is what the
     // floor guarantees. With the floor off the dense schedule is forced.
+    this.retainStageDiagnosticsForQA=options.retainStageDiagnosticsForQA===true;
     this.activeRegionEnabled = options.pageDomain !== true && options.activeRegion === true
       && (!this.geometricVolume || this.volumeDustThreshold > 0)
       && (typeof process === "undefined" || process.env.FLUID_UNIFORM_ACTIVE_REGION !== "0");
@@ -826,9 +844,14 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     if (this.geometricVolume && options.pageDomain) {
       this.pageDomain = initialUniformPageDomain([nx, ny, nz], options.volumePages === 16 ? 16 : 32);
       this.nativePageCoordinates = uniformPageHasNativeCoordinates(this.pageDomain);
-      if (!this.nativePageCoordinates) this.fieldPages = new UniformTexturePages(device,
-        options.fieldStorageForQA === "paged" || options.phiStorageForQA === "paged" ||
-        (options.fieldStorageForQA !== "dense" && !uniformPageHasRectangularCoverage(this.pageDomain)));
+      if (!this.nativePageCoordinates) {
+        const paged = options.fieldStorageForQA === "paged" || options.phiStorageForQA === "paged" ||
+          (options.fieldStorageForQA !== "dense" && !uniformPageHasRectangularCoverage(this.pageDomain));
+        // Field-layout QA changes only the atlas layout, keeping its independent storage oracle.
+        if (!paged && options.fieldStorageForQA === undefined && options.referenceDimension !== 2 && options.scratchStorageForQA !== "separate")
+          this.scratchArena = new UniformScratchArena(device, [nx, ny, nz], nx*ny*nz*UNIFORM_VOLUME_EDGE_BYTES,options.retainStageDiagnosticsForQA);
+        this.fieldPages = new UniformTexturePages(device, paged, this.scratchArena);
+      }
     }
     this.nativeRootExecution = this.nativePageCoordinates || this.fieldPages?.nativeStorage === true;
     this.volumePageEdge = this.geometricVolume && options.referenceDimension !== 2 && !this.nativePageCoordinates
@@ -881,7 +904,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const scalar = (label: string) => texture3d(label, "r32float", allocation.volumeExtent);
     this.velocityA = velocity("Uniform reference velocity A");
     this.velocityB = velocity("Uniform reference velocity B");
-    this.velocityC = velocity("Uniform reference velocity C");
+    const lazyMac = !!this.scratchArena && this.velocityTransport !== "maccormack"
+      && !(typeof process !== "undefined" && process.env.FLUID_UNIFORM_SYMMETRY_STAGE_AUDIT === "1");
+    this.velocityC = lazyMac ? texture3d("Uniform reference unused velocity C", "rgba32float", [1,1,1]) : velocity("Uniform reference velocity C");
     this.velocityD = velocity("Uniform reference velocity D");
     const boundaryVelocity = (label: string) => device.createBuffer({ label, size: allocation.boundaryVelocityBytes,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
@@ -896,8 +921,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
       });
     }
-    this.pressureA = scalar("Uniform reference pressure A");
-    this.pressureB = scalar("Uniform reference pressure B");
+    // Geometric uses CM11a's own pressure hierarchy. Legacy density diffusion
+    // is disabled, so the compatibility pressure slots need only valid views.
+    const pressure=(label:string)=>this.geometricVolume ? texture3d(label,"r32float",[1,1,1]) : scalar(label);
+    this.pressureA = pressure("Uniform reference pressure A");
+    this.pressureB = pressure("Uniform reference pressure B");
     this.volumeA = scalar("Uniform reference volume A");
     this.volumeB = scalar("Uniform reference volume B");
     this.surfaceA = scalar("Uniform reference smoothed surface A");
@@ -913,9 +941,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.denseLevelSetVolumeSource = { vertexPhi: this.present(this.vertexPhiField), openFraction: this.present(this.gammaB),
         cellSize_m: [scene.container.width_m/nx, scene.container.height_m/ny, scene.container.depth_m/nz] };
       // Smaller than the edge buffer checked above: six 32-bit limbs/cell.
-      this.volumeDonorSums = device.createBuffer({ label: "Uniform Geometric exact donor sums", size: nx*ny*nz*24,
+      this.volumeDonorSums = this.scratchArena?.buffer ?? device.createBuffer({ label: "Uniform Geometric exact donor sums", size: nx*ny*nz*24,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-      this.volumeEdges = device.createBuffer({ label: "Uniform Geometric nine-donor stencils", size: edgeBytes,
+      this.volumeEdges = this.scratchArena?.buffer ?? device.createBuffer({ label: "Uniform Geometric nine-donor stencils", size: edgeBytes,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     }
     this.heightA = device.createTexture({ label: "Uniform reference column base", size: [nx, nz], format: "rg32float", usage });
@@ -924,7 +952,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const transportUsage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING
       | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST;
     this.transportA = (this.fieldPages ?? device).createTexture({ label: "Uniform reference transport A", size: allocation.transportExtent, dimension: "3d", format: "rgba32float", usage: transportUsage });
-    this.transportB = (this.fieldPages ?? device).createTexture({ label: "Uniform reference transport B", size: allocation.transportExtent, dimension: "3d", format: "rgba32float", usage: transportUsage });
+    this.transportB = (this.fieldPages ?? device).createTexture({ label: "Uniform reference transport B", size: lazyMac ? [1,1,1] : allocation.transportExtent, dimension: "3d", format: "rgba32float", usage: transportUsage });
     if (typeof process !== "undefined" && process.env.FLUID_UNIFORM_SYMMETRY_STAGE_AUDIT === "1") {
       this.symmetryStageAuditFields = Object.freeze({
         preExtrapolationVelocity: velocity("Uniform audit velocity before current Sec. 3.3"),
@@ -987,7 +1015,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // read the tile classes and to publish the 4h face table the sampler reads.
     const balanceRecords = this.pageDomain && !this.nativeRootExecution ? this.pageDomain.capacity * (this.pageDomain.edge / 4) ** 3 : tileRecords;
     this.surfaceDeficitBalanceBytes = this.geometricVolume ? (2 + 2 * balanceRecords) * 4 : 0;
-    const pageBaseBytes = allocation.conditioningBytes + this.surfaceDeficitBalanceBytes;
+    const pageBaseBytes = (this.scratchArena?.conditioningBytes ?? allocation.conditioningBytes) + this.surfaceDeficitBalanceBytes;
     if (this.volumePageEdge) this.volumePageConfig = {
       edge: this.volumePageEdge, base: pageBaseBytes / 4,
       nativeRecords: this.nativeRootExecution,
@@ -1012,7 +1040,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       [12,this.velocityC],[13,this.velocityD],[14,this.transportA],[16,this.surfaceA],
       [20,this.surfaceA],[24,this.gammaA],[25,this.gammaB],[31,this.vertexPhiField!],[32,this.vertexPhiScratch!],
     ]);
-    this.shaderSource = this.fieldPages?.shader(source,fixedFields,!!this.pageDomain && !this.nativeRootExecution,this.nativeRootExecution) ?? source;
+    // These bindings always hold retained native textures, even when ping-pong
+    // groups change. Keep their interpolation free of scratch address branches.
+    const nativeBindings = new Set([0,1,2,3,4,5,12,13,14,16,20,21,24,25,31,32]);
+    this.shaderSource = this.fieldPages?.shader(source,fixedFields,!!this.pageDomain && !this.nativeRootExecution,this.nativeRootExecution,false,nativeBindings) ?? source;
     if (this.fieldPages && options.phiStorageForQA !== "paged" && this.pageDomain && uniformPageHasRectangularCoverage(this.pageDomain)) {
       // The accepted catalogue is currently the complete rectangular domain.
       // Phi owns native persistent fields; no per-step atlas packing is needed.
@@ -1026,10 +1057,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         : source.replace("return pageDomainVertex(gid);", "return vec3i(gid);");
       // Native literal interpolation keeps dense throughput. Runtime loops did
       // not reduce the frozen-input rounding discrepancy at the high dust floor.
-      this.phiShaderSource = this.fieldPages.shader(phiSource,fixedFields,options.phiReadAuditForQA === true,options.phiLiteralLoopsForQA !== false,true);
+      this.phiShaderSource = this.fieldPages.shader(phiSource,fixedFields,options.phiReadAuditForQA === true,options.phiLiteralLoopsForQA !== false,true,nativeBindings);
       // Preserve the iterative closest-point loop form: full unrolling changes
       // near-degenerate injected-surface cases under Metal optimization.
-      this.phiRedistanceShaderSource = this.fieldPages.shader(phiSource,fixedFields,options.phiReadAuditForQA === true,false,true);
+      this.phiRedistanceShaderSource = this.fieldPages.shader(phiSource,fixedFields,options.phiReadAuditForQA === true,false,true,nativeBindings);
     }
     this.conditioningScratch = device.createBuffer({ label: "Uniform reference compatibility scratch", size: pageBaseBytes + pageBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.velocityExtrapolator = new WebGPUUniformVelocityExtrapolator(
@@ -1050,9 +1081,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // the class word the fine-tiles view reads. N*4 bytes is a multiple of 256,
     // the storage offset alignment, because every axis is a multiple of four.
     if (this.twoLevelTileCount > 0) this.tileClassRecords = { records: {
-      buffer: this.conditioningScratch, offset: 4 * nx * ny * nz, size: 16 * this.twoLevelTileCount,
+      buffer: this.conditioningScratch, offset: this.scratchArena ? 0 : 4 * nx * ny * nz, size: 16 * this.twoLevelTileCount,
     } };
-    this.extrapolationActiveStateTexture = this.present(this.velocityExtrapolator.activeStateTexture);
     this.extrapolationActiveFrontPassCeiling = this.velocityExtrapolator.activeFrontPassCeiling;
     if (options.extensionFrontSweeps !== undefined) this.velocityExtrapolator.setFrontPasses(options.extensionFrontSweeps);
     this.reductions = device.createBuffer({ label: "Uniform reference diagnostics and volume control", size: 40, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
@@ -1088,7 +1118,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const geometricLayout: GPUBindGroupLayoutEntry[] = this.geometricVolume ? [
       { binding: 31, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
       { binding: 32, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "r32float", viewDimension: "3d" } },
-      { binding: 33, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+      ...(!this.scratchArena ? [{ binding: 33, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" as const } }] : []),
     ] : [];
     const mainEntries: GPUBindGroupLayoutEntry[] = [
       ...geometricLayout,
@@ -1123,7 +1153,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     if(this.fieldPages) mainEntries.push(...this.fieldPages.layout([]));
     this.mainLayout = device.createBindGroupLayout({ entries: mainEntries });
     this.pressureInputLayout = this.geometricVolume ? device.createBindGroupLayout({
-      entries: mainEntries.filter(e => e.binding !== 32 && e.binding !== 33),
+      entries: mainEntries.filter(e => e.binding !== 32 && e.binding !== 33 && (!this.scratchArena || e.binding !== 28)),
     }) : this.mainLayout;
     // Residency owns the domain, not the packing of multigrid scratch. Native
     // fields retain the numerical operators without translating every tap.
@@ -1137,7 +1167,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         (options.pressureCycleDispatch !== "direct" && pagedPressure),
       pagedPressure, options.pressureStorageForQA === "paged-logical",
       uniformAbOn("inplace") && (options.referenceDimension ?? 3) === 3
-        && scene.container.depthBoundary !== "symmetry");
+        && scene.container.depthBoundary !== "symmetry", this.scratchArena && !pagedPressure ? this.fieldPages : undefined);
     this.pressureWindowCapacity = [nx, ny, nz];
     this.pressureDomainKey = this.pressureWindowCapacity.join("x");
     this.pressureInstances.set(this.pressureDomainKey, this.pressureMultigrid);
@@ -1157,14 +1187,14 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
           ...(this.geometricVolume ? [
             { binding: 31, resource: view((reversePhi ? this.vertexPhiScratch! : this.vertexPhiField!)) },
             { binding: 32, resource: view((reversePhi ? this.vertexPhiField! : this.vertexPhiScratch!)) },
-            { binding: 33, resource: { buffer: this.volumeEdges! } },
+            ...(!this.scratchArena ? [{ binding: 33, resource: { buffer: this.volumeEdges! } }] : []),
           ] : []),
           { binding: 0, resource: view(velocityIn) }, { binding: 1, resource: view(velocityOut) },
           { binding: 2, resource: view(pressureIn) }, { binding: 3, resource: view(pressureOut) },
           { binding: 4, resource: view(volumeIn) }, { binding: 5, resource: view(volumeOut) },
           { binding: 6, resource: { buffer: this.params } }, { binding: 7, resource: view(heightIn) },
           { binding: 8, resource: view(heightOut) }, { binding: 9, resource: { buffer: this.reductions } },
-          { binding: 10, resource: { buffer: this.rigidSystem.stateBuffer } }, { binding: 11, resource: { buffer: donorSums ? this.volumeDonorSums! : this.rigidExchange } },
+          { binding: 10, resource: { buffer: this.rigidSystem.stateBuffer } }, { binding: 11, resource: { buffer: donorSums ? this.volumeDonorSums! : this.rigidExchange, ...(donorSums && this.scratchArena ? {offset:this.scratchArena.donorOffset,size:this.scratchArena.donorBytes}: {}) } },
           { binding: 12, resource: view(predicted) }, { binding: 13, resource: view(reversed) },
           { binding: 14, resource: view(transport) }, { binding: 15, resource: sampler },
           { binding: 16, resource: view(velocityPhase) },
@@ -1175,8 +1205,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
           { binding: 28, resource: { buffer: this.macCormackAuditBinding } },
           { binding: 29, resource: { buffer: this.activeRegion } },
           { binding: 30, resource: { buffer: this.activeScratch } },
-        ] as GPUBindGroupEntry[]).filter(e => !pressureOnly || (e.binding !== 32 && e.binding !== 33)),
-      });
+        ] as GPUBindGroupEntry[]).filter(e => !pressureOnly || (e.binding !== 32 && e.binding !== 33 && (!this.scratchArena || e.binding !== 28))),
+      },donorSums?this.scratchArena?.edgeBytes:undefined);
     // Pressure setup and projection never read the reverse-advection slot, so
     // under Geometric it carries this advance's V_face authority instead.
     const sharedFaceOpen = this.geometricVolume ? this.velocityD : this.velocityB;
@@ -1262,16 +1292,21 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     }
 
     const count = nx * ny * nz;
+    // The legacy host plan reserves nine scalars; this owner has eight. Add
+    // the extension hierarchy/origins and the two RG columns plus terrain,
+    // which that plan does not include. Scratch backing is reconciled below.
+    const hostAuxiliaryBytes = this.velocityExtrapolator.scratchBytes
+      - (nx+2)*(ny+2)*(nz+2)*6*16 - count*4 + nx*nz*20;
     this.info = {
       nx, ny, nz, storedNy: ny, cellCount: count, equivalentUniformCells: count,
       compressionRatio: 1, activeCompressionRatio: 1, activeSampleCount: count,
       regularLayers: ny, maximumNeighborDelta: 0, gridKind: "uniform",
       cellSize_m: Math.min(scene.container.width_m / nx, scene.container.height_m / ny, scene.container.depth_m / nz),
       pressureIterations: 0, pressureSolver: `CM11a ${pagedPressure ? "paged (QA)" : this.pageDomain ? "native-page" : "dense"} LCP multigrid (${this.pressureSchedule.fullCycles} Full-Cycles + ${this.pressureSchedule.vCycles} V-Cycles, ${this.pressureSchedule.preSweeps}/${this.pressureSchedule.postSweeps} pre/post PRBGS)`,
-      allocatedBytes: allocation.allocatedBytes + 8 + pageBytes + (this.volumeWorkDispatch?20:0) + (this.volumePageSharpenFlag?4:0) + this.surfaceDeficitBalanceBytes + this.pressureMultigrid.allocatedBytes
-        + (this.geometricVolume ? 8 * (nx+1)*(ny+1)*(nz+1) + count*24 + (this.volumeEdges?.size ?? 0) + 12 : 0)
+      allocatedBytes: allocation.allocatedBytes - (this.geometricVolume ? count*8-8 : 0) - (this.scratchArena ? allocation.conditioningBytes-this.scratchArena.conditioningBytes : 0) - (lazyMac ? nx*ny*nz*16+(nx+2)*(ny+2)*(nz+2)*16-32 : 0) + 8 + pageBytes + (this.volumeWorkDispatch?20:0) + (this.volumePageSharpenFlag?4:0) + this.surfaceDeficitBalanceBytes + this.pressureMultigrid.allocatedBytes
+        + (this.geometricVolume ? 8 * (nx+1)*(ny+1)*(nz+1) + (this.scratchArena ? 0 : count*24 + (this.volumeEdges?.size ?? 0)) + 12 : 0)
         + activeRegionBytes * 3 + (this.phiRegion?.size ?? 0) + (this.phiDispatch?.size ?? 0) + (this.pageDomain ? this.pageDomain.words.byteLength + 32 + (this.pageDomainView?.size??0) : 0) + (this.volumeTransportPageView?.size ?? 0) + activeSummaryBytes + packedSolidVoxels.byteLength
-        + (this.symmetryStageAuditMacCormackBuffer ? 0 : 16), quality,
+        + hostAuxiliaryBytes + (this.symmetryStageAuditMacCormackBuffer ? 0 : 16), quality,
       submittedTime_s: 0, simulatedTime_s: 0, completedTime_s: 0,
       simulationLag_s: 0, encodedSteps: 0, maximumTallCellHeight: 0,
       volumeControl: true,
@@ -1280,19 +1315,22 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       ...(this.pageDomain?{uniformDomainAuthority:"pages" as const,uniformDomainPages:this.pageDomain.count,
         ...(this.nativePageCoordinates ? {uniformVolumePageEdge:this.pageDomain.edge,uniformVolumePagesTotal:1,uniformVolumePagesActive:1} : {}),
         uniformDomainMigration:this.nativePageCoordinates ? "Native single-page coordinates; all-resident domain" : pagedPressure ? "Paged fluid and pressure fields (QA); all-resident domain" : this.phiShaderSource ? "Native rectangular fields; all-resident page catalogue" : "Paged fluid fields; native pressure workspace; all-resident domain"}:{}),
-      ...(this.volumePageConfig ? { uniformVolumePageEdge: this.volumePageEdge, uniformVolumePagesTotal: this.volumePageConfig.count, uniformVolumePageBytes: this.volumeEdges!.size } : {}),
+      ...(this.volumePageConfig ? { uniformVolumePageEdge: this.volumePageEdge, uniformVolumePagesTotal: this.volumePageConfig.count, uniformVolumePageBytes: this.scratchArena?.edgeBytes ?? this.volumeEdges!.size } : {}),
     };
     this.volumeTexture = this.present(this.volumeA);
     this.columnBaseTexture = this.heightA;
     this.velocityTexture = this.present(this.velocityA);
-    this.preProjectionVelocityTexture = this.present(this.velocityB);
     this.extrapolatedVelocityTexture = this.present(this.transportA);
+    if(!this.scratchArena){
+      this.present(this.velocityB);
+      this.present(this.velocityExtrapolator.activeStateTexture);
+    }
     if (this.geometricVolume && (options.referenceDimension ?? 3) === 3) {
       this.surfaceVolumeCorrection = new UniformSurfaceVolumeCorrection(device, [nx,ny,nz],
         [scene.container.width_m/nx,scene.container.height_m/ny,scene.container.depth_m/nz],
         this.vertexPhiField!,this.volumeB,this.gammaB,this.fieldPages);
     }
-    if(this.fieldPages) { this.present(this.surfaceB); this.present(this.vertexPhiScratch!); this.present(this.gammaA); }
+    if(this.fieldPages) { this.present(this.surfaceB); if(!this.scratchArena)this.present(this.vertexPhiScratch!); this.present(this.gammaA); }
     if(this.symmetryStageAuditFields)this.symmetryStageAuditTextures=Object.freeze(Object.fromEntries(
       Object.entries(this.symmetryStageAuditFields).map(([name,field])=>[name,this.present(field)]),
     )) as NonNullable<WebGPUUniformReferenceSolver["symmetryStageAuditTextures"]>;
@@ -1574,6 +1612,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.solidExcessCorrection = values.solidExcessCorrection !== "off";
     this.rigidCoupling = values.rigidCoupling !== "off";
     this.paperTimeStep = values.timeStep !== "scene";
+    if(values.velocityTransport === "maccormack" && this.velocityC.width===1 && this.info.nx>1)
+      throw new Error("Changing velocity transport requires rebuilding the Uniform Geometric solver");
     this.velocityTransport = values.velocityTransport === "maccormack"
       ? "maccormack" : "semi-lagrangian";
     this.liquidOnlyVelocityAdvection = values.liquidOnlyVelocityAdvection === "on";
@@ -2475,17 +2515,17 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
 
   /** Byte offset of the shell-tile counter, above the two dilation planes. */
   private get twoLevelShellCountOffset(): number {
-    return (this.info.nx * this.info.ny * this.info.nz + 6 * this.twoLevelTileCount) * 4;
+    return ((this.scratchArena ? 0 : this.info.nx * this.info.ny * this.info.nz) + 6 * this.twoLevelTileCount) * 4;
   }
 
   /** Byte offset of the classify dispatch's active-tile counter. */
   private get sharpenTileCountWordOffset(): number {
-    return (2 * this.info.nx * this.info.ny * this.info.nz
+    return ((this.scratchArena?.sharpenBaseWords ?? 2 * this.info.nx * this.info.ny * this.info.nz)
       + UNIFORM_VOLUME_SHARPEN_TILE_COUNT_WORD) * 4;
   }
 
-  private createPageAwareGroup(descriptor: GPUBindGroupDescriptor): GPUBindGroup {
-    const group = (this.fieldPages ?? this.device).createBindGroup(descriptor);
+  private createPageAwareGroup(descriptor: GPUBindGroupDescriptor, scratchBytes?: number): GPUBindGroup {
+    const group = this.fieldPages ? this.fieldPages.createBindGroup(descriptor,true,scratchBytes) : this.device.createBindGroup(descriptor);
     this.groupDescriptors.set(group,descriptor);
     return group;
   }
@@ -2540,12 +2580,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     if (!this.geometricVolume) return;
     if (!this.surfaceDeficitBalancing) {
       // Clear the previous rate when toggled off; never reuse a stale source.
-      encoder.clearBuffer(this.conditioningScratch, this.info.cellCount * 12, 4);
+      encoder.clearBuffer(this.conditioningScratch, (this.scratchArena?.conditioningBytes ?? this.info.cellCount * 12), 4);
       return;
     }
     // Clear the count even for an empty accepted generation. Partial records
     // follow page traversal, including padded lanes of partial boundary pages.
-    encoder.clearBuffer(this.conditioningScratch, this.info.cellCount * 12 + 4, 4);
+    encoder.clearBuffer(this.conditioningScratch, (this.scratchArena?.conditioningBytes ?? this.info.cellCount * 12) + 4, 4);
     if (this.pageDomain) this.run(encoder, "Surface-deficit page sums",
       this.volumePipelines.uvBalanceMeasure!, this.sharpenComputeGroup);
     else this.runDirect(encoder, "Surface-deficit partial sums", this.volumePipelines.uvBalanceMeasure!,
@@ -2559,7 +2599,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         if(this.pageDomain) this.run(encoder,entry,this.volumePipelines[entry]!,this.volumeDonorGroup);
         else this.runDirect(encoder,entry,this.volumePipelines[entry]!,this.volumeDonorGroup,[Math.ceil(this.info.nx/4),Math.ceil(this.info.ny/4),Math.ceil(this.info.nz/4)]);
       } else if(entry==="uvBuildEdges"||entry==="uvFallback"||entry==="uvNormalizeRows"||entry==="uvNormalizeDonors")
-        this.runVolumeWork(encoder,entry,this.volumePipelines[entry]!, (entry==="uvBuildEdges"||entry==="uvNormalizeRows")?this.volumeDonorGroup:group);
+        this.runVolumeWork(encoder,entry,this.volumePipelines[entry]!, (this.scratchArena || entry==="uvBuildEdges"||entry==="uvNormalizeRows")?this.volumeDonorGroup:group);
       else this.run(encoder,entry,this.volumePipelines[entry]!,group);
     };
 
@@ -2576,10 +2616,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // accumulation is exact and order independent, so this saves four full
     // edge-table scans without changing the transport normalization scheme.
     if (this.volumePageConfig) this.prepareVolumePages(encoder,false);
-    encoder.clearBuffer(this.volumeDonorSums!);
+    encoder.clearBuffer(this.volumeDonorSums!,this.scratchArena?.donorOffset ?? 0,this.scratchArena?.donorBytes);
     run("uvBuildEdges"); run("uvFinishDonorSums"); run("uvFallback");
     for (let round = 0; round < 3; round++) {
-      encoder.clearBuffer(this.volumeDonorSums!);
+      encoder.clearBuffer(this.volumeDonorSums!,this.scratchArena?.donorOffset ?? 0,this.scratchArena?.donorBytes);
       run("uvNormalizeRows"); run("uvFinishDonorSums"); run("uvNormalizeDonors");
     }
     seam?.(UNIFORM_VOLUME_PHASE.coupling);
@@ -3242,7 +3282,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.transportA, this.transportB,
     ])) texture.destroy();
     this.surfaceVolumeCorrection?.destroy();
-    this.vertexPhiField?.destroy(); this.vertexPhiScratch?.destroy(); this.volumeEdges?.destroy(); this.volumeDonorSums?.destroy();
+    this.vertexPhiField?.destroy(); this.vertexPhiScratch?.destroy();
+    if(this.scratchArena)this.scratchArena.destroy();
+    else { this.volumeEdges?.destroy(); this.volumeDonorSums?.destroy(); }
     this.boundaryVelocityA.destroy(); this.boundaryVelocityB.destroy();
     this.boundaryVelocityC.destroy(); this.boundaryVelocityD.destroy();
     this.symmetryStageAuditNegativeBoundaryVelocity?.destroy();

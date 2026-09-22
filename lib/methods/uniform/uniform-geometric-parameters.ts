@@ -3,7 +3,7 @@ import { numberValue, type MethodParamSpec, type MethodParamValues } from "../..
 
 const omitted = new Set(["gammaDiffusion", "gammaDiffusionIterations", "sharpeningMassCorrection", "solidExcessCorrection", "densityPostProcessing", "activeRegion", "pressureCycleBudget", "pressureBudgetHeadroom"]);
 const params: MethodParamSpec[] = UNIFORM_PARAMS.filter(p => !omitted.has(p.key)).map(p => {
-  if (p.key === "velocityTransport" && p.kind === "select") return { ...p, default: "semi-lagrangian" };
+  if (p.key === "velocityTransport" && p.kind === "select") return { ...p, default: "semi-lagrangian", update: "solver" as const };
   // Two sweeps: the front only needs to carry the band one cell per step, and the
   // hierarchy fill covers what it does not reach (docs/benchmarks/uniform-extension-front-sweeps-2026-09-19.md
   // measured eight within 0.01 cell of sixteen; Peter set two 2026-09-19). The paper method keeps sixteen.

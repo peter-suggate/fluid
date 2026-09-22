@@ -1,3 +1,5 @@
+import { uniformPressureScratchShader } from "./uniform-scratch-arena";
+import type { UniformTexturePages } from "./uniform-texture-pages";
 import {uniformPressurePageExtent,uniformPressurePageWorkgroups,uniformPressurePagedShader,uniformPressurePageAddressWGSL} from "./uniform-pressure-pages";
 import { gpuCompilationManagerFor } from "../../core/gpu-compilation-manager";
 import { uniformPressureInPlaceSmootherWGSL, uniformPressureMultigridWGSL } from "./webgpu-uniform-pressure-multigrid.wgsl";
@@ -204,9 +206,10 @@ export class WebGPUUniformPressureMultigrid {
     if(!this.activeDispatch&&uniformAbOn("mgstaticid")){
       const dynamic="fn mgActiveId(gid:vec3u)->vec3i{";
       if(!uniformPressureMultigridWGSL.includes(dynamic)) throw new Error("mgActiveId specialisation lost its anchor");
-      return uniformPressureMultigridWGSL.replace(dynamic,`${dynamic}\n  if(true){return vec3i(gid);}`)+smoother;
+      const source=uniformPressureMultigridWGSL.replace(dynamic,`${dynamic}\n  if(true){return vec3i(gid);}`)+smoother;
+      return this.scratchFields?uniformPressureScratchShader(source):source;
     }
-    return uniformPressureMultigridWGSL+smoother;
+    return this.scratchFields?uniformPressureScratchShader(uniformPressureMultigridWGSL+smoother):uniformPressureMultigridWGSL+smoother;
   }
   private readonly logicalDimensions = new Map<GPUTexture,readonly [number,number,number]>();
   private pressurePublication?: GPUTexture;
@@ -290,7 +293,7 @@ export class WebGPUUniformPressureMultigrid {
      * that the scene has no depth symmetry; the full-lattice and dense-storage
      * conditions are checked here.
      */
-    inPlaceSmoothing = false) {
+    inPlaceSmoothing = false, private readonly scratchFields?: UniformTexturePages) {
     this.inPlaceCapable = inPlaceSmoothing && !activeDispatch && !pagedStorage && programs === undefined;
     this.inPlaceSmoothing = this.inPlaceCapable;
     this.visitLanes = Math.min(FUSED_VISIT_LANES, device.limits.maxComputeInvocationsPerWorkgroup,
@@ -315,7 +318,7 @@ export class WebGPUUniformPressureMultigrid {
     const texture = (label: string, format: GPUTextureFormat,
       size: readonly [number, number, number]) => {
       const extent=this.pagedStorage?uniformPressurePageExtent(size):size;
-      const result = device.createTexture({ label, size: [...extent], dimension: "3d", format, usage });
+      const result = (this.scratchFields ?? device).createTexture({ label, size: [...extent], dimension: "3d", format, usage });
       this.logicalDimensions.set(result,size);
       allocatedBytes += extent[0] * extent[1] * extent[2] * (format === "rgba32float" ? 16 : 4);
       return result;
@@ -328,8 +331,15 @@ export class WebGPUUniformPressureMultigrid {
         texture(`Uniform CM11a L${index} ${field} A`, format, size),
         texture(`Uniform CM11a L${index} ${field} B`, format, size),
       ];
+      // These fields never ping-pong: the plan always addresses slot zero.
+      // Keep the pair-shaped resource interface without allocating an unused
+      // second volume or residual field at every level.
+      const single = (field: string, format: GPUTextureFormat = "r32float"): TexturePair => {
+        const value = texture(`Uniform CM11a L${index} ${field} A`, format, size);
+        return [value, value];
+      };
       levels.push(Object.freeze({ dimensions: size, pressure: pair("pressure"), rhs: pair("rhs"),
-        phi: pair("phi"), volume: pair("V", "rgba32float"), residual: pair("residual"),
+        phi: pair("phi"), volume: single("V", "rgba32float"), residual: single("residual"),
         minimum: pair("p-min"), coefficients: texture(`Uniform CM11a L${index} coefficients`, "rgba32float", size) }));
     }
     this.levels = Object.freeze(levels);
@@ -600,11 +610,12 @@ export class WebGPUUniformPressureMultigrid {
             encoder.copyBufferToBuffer(operation.staging,0,operation.target,0,buffers.byteLength);
           }
         }else{
-        encoder.copyTextureToBuffer({ texture: capture.pressure }, destination(buffers.pressure), capture.dimensions);
-        encoder.copyTextureToBuffer({ texture: capture.rhs }, destination(buffers.rhs), capture.dimensions);
-        encoder.copyTextureToBuffer({ texture: capture.minimum }, destination(buffers.minimum), capture.dimensions);
-        encoder.copyTextureToBuffer({ texture: capture.phi }, destination(buffers.phi), capture.dimensions);
-        encoder.copyTextureToBuffer({ texture: capture.topology }, destination(buffers.topology), capture.dimensions);
+          for(const name of ["pressure","rhs","minimum","phi","topology"] as const){
+            const field=capture[name];
+            const texture=this.scratchFields?.snapshotTexture(field) ?? field;
+            this.scratchFields?.encodeSnapshot(encoder,field);
+            encoder.copyTextureToBuffer({texture},destination(buffers[name]),capture.dimensions);
+          }
         }
       }
     }
@@ -900,7 +911,7 @@ export class WebGPUUniformPressureMultigrid {
     };
     const fullCycle = () => {
       // Algorithm 3 requires p_tmp to survive every nested V-cycle. Both
-      // finest residual[1] and rhs[1] are selected as residual scratch by
+      // finest residual[0] and rhs[1] are selected as residual scratch by
       // vCycle(), so the backup must have dedicated storage.
       const backup = this.fullCycleBackup;
       emit("mgCopyPressure", 0, 0, { pressureOut: backup });
@@ -1015,7 +1026,7 @@ export class WebGPUUniformPressureMultigrid {
   private parameterBuffer(level: readonly [number, number, number], coarse: readonly [number, number, number],
     activeLevel: number, control: readonly [number, number, number, number],
     gated: number, texturesByBinding: readonly (GPUTexture|undefined)[]): [GPUBuffer, string] {
-    const bytes = new ArrayBuffer(this.pagedStorage?336:80); const u = new Uint32Array(bytes); const f = new Float32Array(bytes);
+    const bytes = new ArrayBuffer(this.scratchFields?352:this.pagedStorage?336:80); const u = new Uint32Array(bytes); const f = new Float32Array(bytes);
     u.set(this.levels[0]!.dimensions, 0); u.set(level, 4); u.set(coarse, 8);
     // Each axis has coarsened by however many times *it* was halved, which is
     // no longer one shared 2**levelIndex once a hierarchy is semi-coarsened.
@@ -1026,10 +1037,10 @@ export class WebGPUUniformPressureMultigrid {
     u.set(control, 16);
     u[3] = activeLevel;
     u[7] = gated;
-    if(this.pagedStorage)texturesByBinding.forEach((texture,binding)=>{
-      if(texture)u.set(this.logicalDimensions.get(texture)!,20+4*binding);
+    if(this.pagedStorage||this.scratchFields)texturesByBinding.forEach((texture,binding)=>{
+      if(texture){u.set(this.logicalDimensions.get(texture)!,20+4*binding);u[23+4*binding]=this.scratchFields?.scratchMetadata(texture)??0;}
     });
-    const dimensionsKey=this.pagedStorage?Array.from(u.subarray(20)).join(","):"";
+    const dimensionsKey=this.pagedStorage||this.scratchFields?Array.from(u.subarray(20)).join(","):"";
     const key = `${dimensionsKey}|${level.join(",")}|${coarse.join(",")}|${activeLevel}|${control.join(",")}|${gated}`;
     const cached = this.paramCache.get(key);
     if (cached) return [cached, key];
@@ -1042,7 +1053,9 @@ export class WebGPUUniformPressureMultigrid {
 
   destroy(): void { if (this.isDestroyed) return; this.isDestroyed = true;
     for (const level of this.levels) for (const pair of [level.pressure, level.rhs, level.phi,
-      level.volume, level.residual, level.minimum]) { pair[0].destroy(); pair[1].destroy(); }
+      level.volume, level.residual, level.minimum]) {
+      for (const texture of new Set(pair)) texture.destroy();
+    }
     for (const level of this.levels) level.coefficients.destroy();
     for(const buffer of this.pageCaptureBuffers)buffer.destroy();
     this.pressurePublication?.destroy();

@@ -36,13 +36,17 @@ export const UNIFORM_VOLUME_TILE_WORK_OVERRIDE = "UV_SHARPEN_TILE_WORK";
 /** The first seven words remain reserved for work counters and layout stability. */
 export const UNIFORM_VOLUME_SHARPEN_TILE_COUNT_WORD = 7;
 export const UNIFORM_VOLUME_SHARPEN_TILE_MAP_WORD = 8;
-export const UNIFORM_VOLUME_EDGE_BYTES = 80;
+export const UNIFORM_VOLUME_EDGE_BYTES = 40;
 const donorTiles = uniformAbOn("donortiles");
 export const uniformVolumeWGSL = /* wgsl */ `
 ${geometricPlaneBoxWGSL}
 @group(0) @binding(31) var uvPhiIn:texture_3d<f32>;
 @group(0) @binding(32) var uvPhiOut:texture_storage_3d<r32float,write>;
-struct UVEdges { donor:array<u32,9>, weight:array<f32,9>, padding:vec2f }
+// Eight interpolation donors are corners of one cell; the ninth is the
+// receiver itself. Store the base index instead of nine redundant indices.
+// After gather, base holds three 5-bit sharpening face flags plus one open
+// bit, and weights 7/8 hold the two limiter factors. No float is quantized.
+struct UVEdges { base:u32, weight:array<f32,9> }
 @group(0) @binding(33) var<storage,read_write> uvEdges:array<UVEdges>;
 ${uniformVolumeDonorSumWGSL}
 @compute @workgroup_size(4,4,4)
@@ -55,6 +59,14 @@ fn uvCorrectionTargets(@builtin(global_invocation_id)gid:vec3u){
 }
 
 fn uvCorner(i:u32)->vec3i{return vec3i(i32(i&1u),i32((i>>1u)&1u),i32((i>>2u)&1u));}
+fn uvDonor(i:u32,k:u32)->u32{
+  // Zero-weight corners can lie outside the lattice. The old representation
+  // used the receiver for those slots; preserve that behavior, including the
+  // normalization and gather's zero contributions.
+  if(k==8u||uvEdges[uvEdgeAddress(i)].weight[k]==0.0){return i;}
+  let d=vec3u(params.dimsDt.xyz);let o=vec3u(uvCorner(k));
+  return uvEdges[uvEdgeAddress(i)].base+o.x+d.x*(o.y+d.y*o.z);
+}
 // THE SOLVE WINDOW. Words 7..12 of the active-region header are the union of
 // this step's padded seed box with the previous one -- the box every windowed
 // dispatch runs on, and therefore the box outside which nothing is written
@@ -349,10 +361,11 @@ fn uvBuildEdges(@builtin(global_invocation_id)gid:vec3u){
   if(!valid(id)){return;}let index=linearIndex(id);
   let departure=uvTrace(vec3f(id)+vec3f(0.5),params.dimsDt.w)-vec3f(0.5);
   let base=vec3i(floor(departure));let f=fract(departure);
-  for(var k=0u;k<9u;k++){uvEdges[uvEdgeAddress(index)].donor[k]=index;uvEdges[uvEdgeAddress(index)].weight[k]=0.0;}
+  uvEdges[uvEdgeAddress(index)].base=linearIndex(base);
+  for(var k=0u;k<9u;k++){uvEdges[uvEdgeAddress(index)].weight[k]=0.0;}
   for(var k=0u;k<8u;k++){let o=uvCorner(k);let q=base+o;
     let w=select(vec3f(1)-f,f,o==vec3i(1));
-    if(valid(q)&&uvOpen(id)>0.0){uvEdges[uvEdgeAddress(index)].donor[k]=linearIndex(q);
+    if(valid(q)&&uvOpen(id)>0.0){
       let weight=w.x*w.y*w.z*min(uvOpen(id),uvOpen(q));
       uvEdges[uvEdgeAddress(index)].weight[k]=weight;uvAddDonor(linearIndex(q),weight);}}
 }
@@ -375,13 +388,13 @@ fn uvNormalizeRows(@builtin(global_invocation_id)gid:vec3u){
   for(var k=0u;k<9u;k++){sum+=uvEdges[uvEdgeAddress(i)].weight[k];}
   let scale=uvOpen(id)/max(sum,1e-20);
   for(var k=0u;k<9u;k++){let weight=uvEdges[uvEdgeAddress(i)].weight[k]*scale;
-    uvEdges[uvEdgeAddress(i)].weight[k]=weight;uvAddDonor(uvEdges[uvEdgeAddress(i)].donor[k],weight);}
+    uvEdges[uvEdgeAddress(i)].weight[k]=weight;uvAddDonor(uvDonor(i,k),weight);}
 }
 @compute @workgroup_size(4,4,4)
 fn uvNormalizeDonors(@builtin(global_invocation_id)gid:vec3u){
   let id=uvWorkId(gid);if(uvTransportSkip(id)){return;}
   if(!valid(id)){return;}let i=linearIndex(id);
-  for(var k=0u;k<9u;k++){let donor=uvEdges[uvEdgeAddress(i)].donor[k];
+  for(var k=0u;k<9u;k++){let donor=uvDonor(i,k);
     let sum=bitcast<f32>(atomicLoad(&sharpenDeposits[donor]));
     uvEdges[uvEdgeAddress(i)].weight[k]/=max(sum,1e-20);}
 }
@@ -414,7 +427,7 @@ fn uvGather(@builtin(global_invocation_id)gid:vec3u){
     textureStore(volumeOut,id,vec4f(0.0));textureStore(gammaOut,id,vec4f(0.0));return;
   }
   let i=linearIndex(id);var value=0.0;
-  for(var k=0u;k<9u;k++){value+=uvEdges[uvEdgeAddress(i)].weight[k]*volume(uvCell(uvEdges[uvEdgeAddress(i)].donor[k]));}
+  for(var k=0u;k<9u;k++){value+=uvEdges[uvEdgeAddress(i)].weight[k]*volume(uvCell(uvDonor(i,k)));}
   value+=min(dropSource(id),max(0.0,uvOpen(id)-value));
   if(uvOpen(id)>0.0){value+=inflowSweptPlugSource(id,params.dimsDt.w);}
   textureStore(volumeOut,id,vec4f(uvDustFloor(value)));
@@ -495,14 +508,14 @@ fn uvCacheSharpenCells(@builtin(global_invocation_id)gid:vec3u){
  let i=uvEdgeAddress(linearIndex(id));
  uvEdges[i].weight[5]=uvPhi(vec3f(id)+vec3f(0.5));
  uvEdges[i].weight[6]=textureLoad(gammaIn,id,0).x;
- uvEdges[i].donor[4]=select(0u,1u,uvOpen(id)>0.99999);
+ uvEdges[i].base=select(0u,1u<<15u,uvOpen(id)>0.99999);
 }
 @compute @workgroup_size(4,4,4)
 fn uvCacheSharpenFaces(@builtin(global_invocation_id)gid:vec3u){
  let id=uvWorkId(gid);if(!valid(id)||!uvSharpenTileActive(id)){return;}
  let i=uvEdgeAddress(linearIndex(id));let phiA=uvEdges[i].weight[5];
  for(var axis=0u;axis<3u;axis++){
-  uvEdges[i].donor[axis]=0u;var e=vec3i(0);e[axis]=1;let q=id+e;
+  uvEdges[i].base&=~(31u<<(5u*axis));var e=vec3i(0);e[axis]=1;let q=id+e;
   if(!valid(q)||!uvSharpenTileActive(q)||uvOpen(id)<0.99999||uvOpen(q)<0.99999||faceOpenFraction(id,axis)<0.99999){continue;}
   let j=uvEdgeAddress(linearIndex(q));let phiB=uvEdges[j].weight[5];
   let middle=uvPhi(vec3f(id)+vec3f(0.5)+0.5*vec3f(e));let epsilon=1e-6;
@@ -510,11 +523,11 @@ fn uvCacheSharpenFaces(@builtin(global_invocation_id)gid:vec3u){
   let inwardB=phiB>=0.0&&phiA<phiB-epsilon&&middle<=phiB+epsilon&&middle>=phiA-epsilon;
   let relayA=phiA>0.0&&uvEdges[i].weight[6]<=1e-6;
   let relayB=phiB>0.0&&uvEdges[j].weight[6]<=1e-6;
-  uvEdges[i].donor[axis]=1u
+  uvEdges[i].base|=(1u
    |select(0u,2u,(middle<=epsilon&&!relayB)||inwardA)
    |select(0u,4u,(middle<=epsilon&&!relayA)||inwardB)
    |select(0u,8u,phiA<0.0&&phiB<phiA-epsilon)
-   |select(0u,16u,phiB<0.0&&phiA<phiB-epsilon);
+   |select(0u,16u,phiB<0.0&&phiA<phiB-epsilon))<<(5u*axis);
  }
 }
 @compute @workgroup_size(4,4,4)
@@ -524,7 +537,7 @@ fn uvPrepareSharpen(@builtin(global_invocation_id)gid:vec3u){
   var phi:f32;var desired:f32;var open:bool;
   if(uvPageWorkEnabled()){
     phi=uvEdges[uvEdgeAddress(i)].weight[5];desired=uvEdges[uvEdgeAddress(i)].weight[6];
-    open=uvEdges[uvEdgeAddress(i)].donor[4]!=0u;
+    open=(uvEdges[uvEdgeAddress(i)].base&(1u<<15u))!=0u;
   }else{phi=uvPhi(vec3f(id)+vec3f(0.5));desired=textureLoad(gammaIn,id,0).x;open=uvOpen(id)>0.99999;}
   let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
   let dose=clamp(params.tuning.x,0.0,1.0);let own=volume(id);
@@ -549,7 +562,7 @@ fn uvProposeSharpen(@builtin(global_invocation_id)gid:vec3u){
   for(var axis=0u;axis<3u;axis++){
     uvEdges[uvEdgeAddress(i)].weight[axis]=0.0;var e=vec3i(0);e[axis]=1;let q=id+e;
     if(uvPageWorkEnabled()){
-      let flags=uvEdges[uvEdgeAddress(i)].donor[axis];if((flags&1u)==0u){continue;}
+      let flags=((uvEdges[uvEdgeAddress(i)].base>>(5u*axis))&31u);if((flags&1u)==0u){continue;}
       let j=uvEdgeAddress(linearIndex(q));let own=uvEdgeAddress(i);
       var capA=uvEdges[own].weight[3];var capB=uvEdges[j].weight[3];
       if(params.agreement.x>0.5){let dose=clamp(params.tuning.x,0.0,1.0);
@@ -587,12 +600,12 @@ fn uvLimitSharpen(@builtin(global_invocation_id)gid:vec3u){
     let positive=uvEdges[uvEdgeAddress(i)].weight[axis];var negative=0.0;
     if(valid(id-e)&&uvSharpenTileActive(id-e)){negative=uvEdges[uvEdgeAddress(linearIndex(id-e))].weight[axis];}
     outgoing+=max(positive,0.0)+max(-negative,0.0);incoming+=max(-positive,0.0)+max(negative,0.0);}
-  uvEdges[uvEdgeAddress(i)].padding=vec2f(min(1.0,uvEdges[uvEdgeAddress(i)].weight[3]/max(outgoing,1e-20)),
-    min(1.0,uvEdges[uvEdgeAddress(i)].weight[4]/max(incoming,1e-20)));
+  uvEdges[uvEdgeAddress(i)].weight[7]=min(1.0,uvEdges[uvEdgeAddress(i)].weight[3]/max(outgoing,1e-20));
+  uvEdges[uvEdgeAddress(i)].weight[8]=min(1.0,uvEdges[uvEdgeAddress(i)].weight[4]/max(incoming,1e-20));
 }
 fn uvLimitedFlux(i:u32,j:u32,axis:u32)->f32{
   if(!uvSharpenTileActive(uvCell(i))||!uvSharpenTileActive(uvCell(j))){return 0.0;}
-  let raw=uvEdges[uvEdgeAddress(i)].weight[axis];let a=uvEdges[uvEdgeAddress(i)].padding;let b=uvEdges[uvEdgeAddress(j)].padding;
+  let raw=uvEdges[uvEdgeAddress(i)].weight[axis];let a=vec2f(uvEdges[uvEdgeAddress(i)].weight[7],uvEdges[uvEdgeAddress(i)].weight[8]);let b=vec2f(uvEdges[uvEdgeAddress(j)].weight[7],uvEdges[uvEdgeAddress(j)].weight[8]);
   return raw*select(min(a.y,b.x),min(a.x,b.y),raw>=0.0);
 }
 @compute @workgroup_size(4,4,4)

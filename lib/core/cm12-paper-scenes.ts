@@ -549,6 +549,15 @@ export function createCm12Figure7(): SceneDescription {
   return scene;
 }
 
+/** Figure 7 at twice the linear resolution, with identical physical geometry. */
+export function createCm12Figure7_256(): SceneDescription {
+  const scene = createCm12Figure7();
+  scene.sceneId = "cm12-figure-7-256";
+  scene.voxelDomain.finestCellSize_m /= 2;
+  scene.nominalResolution.length_m /= 2;
+  return scene;
+}
+
 /**
  * Figure 8 — a dam break inside a spherical container.
  *

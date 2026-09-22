@@ -1169,10 +1169,9 @@ fn semiLagrangianAdvection(@builtin(global_invocation_id) gid:vec3u){
   // liquid, a solid or a source, so the projection below rewrites every
   // component of this cell: a face keeps its advected value only when it or its +axis
   // neighbour owns a pressure row. The three backward traces and the force term
-  // are therefore dead work. V and the pressure seed are still carried, exactly
-  // as the dense path does.
+  // are therefore dead work. Carry V; CM11a initializes its own pressure seed.
   if(params.twoLevel.z>0.5&&!uvTwoLevelFineAt(vec3f(id)+vec3f(0.5))){
-    textureStore(velocityOut,id,vec4f(0.0));textureStore(volumeOut,id,vec4f(volume(id),0.0,0.0,0.0));textureStore(pressureOut,id,vec4f(0.0));return;
+    textureStore(velocityOut,id,vec4f(0.0));textureStore(volumeOut,id,vec4f(volume(id),0.0,0.0,0.0));return;
   }` : ""}let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let cell=vec3f(id);
   var v=vec3f(advectVelocityComponent(cell+vec3f(1.0,0.5,0.5),0u,dt,h),advectVelocityComponent(cell+vec3f(0.5,1.0,0.5),1u,dt,h),advectVelocityComponent(cell+vec3f(0.5,0.5,1.0),2u,dt,h));
   // A closed-face sample uses the solid-side zero extension. Preserve an old
@@ -1184,7 +1183,7 @@ fn semiLagrangianAdvection(@builtin(global_invocation_id) gid:vec3u){
   if(id.z==d.z-1){v.z=min(v.z,faceVelocity(id).z);}
   v=applyVelocityForces(id,v,dt,h);
   // Surface density is advanced by the dedicated Sec. 3.4 gamma/beta passes.
-  textureStore(velocityOut,id,vec4f(v,0.0));textureStore(volumeOut,id,vec4f(volume(id),0.0,0.0,0.0));textureStore(pressureOut,id,vec4f(0.0));
+  textureStore(velocityOut,id,vec4f(v,0.0));textureStore(volumeOut,id,vec4f(volume(id),0.0,0.0,0.0));${geometric ? "" : "textureStore(pressureOut,id,vec4f(0.0));"}
 }
 
 @compute @workgroup_size(4,4,4)
@@ -1199,7 +1198,7 @@ fn advect(@builtin(global_invocation_id) gid: vec3u) {
   if (id.z==d.z-1) { v.z=faceVelocity(id).z; }
   textureStore(velocityOut,id,vec4f(v,0.0));
   textureStore(volumeOut,id,vec4f(advected,0.0,0.0,0.0));
-  textureStore(pressureOut,id,vec4f(0.0));
+  ${geometric ? "" : "textureStore(pressureOut,id,vec4f(0.0));"}
 }
 
 @compute @workgroup_size(4,4,4)

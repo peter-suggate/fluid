@@ -59,9 +59,9 @@ export function rewritePressureTextureCalls(result:string,fields:ReadonlyMap<str
    else if(c===')'){if(depth===0)break;depth--;}
    else if(c===','&&depth===0)split=at;
   }
-  if(split<0||at===result.length)throw new Error(`Cannot parse ${field} access`);
-  const coordinate=rewritePressureTextureCalls(result.slice(pattern.lastIndex,split).trim(),fields);
-  const value=rewritePressureTextureCalls(result.slice(split+1,at).trim(),fields);
+  if((split<0&&match[1]==='Store')||at===result.length)throw new Error(`Cannot parse ${field} access`);
+  const coordinate=rewritePressureTextureCalls(result.slice(pattern.lastIndex,split<0?at:split).trim(),fields);
+  const value=match[1]==='Store'?rewritePressureTextureCalls(result.slice(split+1,at).trim(),fields):'';
   output+=result.slice(cursor,match.index)+`${field}${match[1]}(${coordinate}${match[1]==='Store'?`,${value}`:''})`;
   cursor=at+1;pattern.lastIndex=cursor;
  }

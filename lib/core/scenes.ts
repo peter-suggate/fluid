@@ -1,7 +1,7 @@
 import { cloneScene, defaultCamera, defaultScene, type CameraState, type SceneDescription } from "./model";
 import { applyHeroGardenNodeOverrides } from "./hero-garden-overrides";
 import { createMassConservingFigure9DamBreak, createPaperScenario } from "./paper-scenarios";
-import { CM12_FIGURES, CM12_SLAB_DEPTH_CELLS, cm12Camera, cm12Grid, cm12MethodProfile, cm12Scene } from "./cm12-paper-scenes";
+import { CM12_FIGURES, CM12_SLAB_DEPTH_CELLS, cm12Camera, cm12Grid, cm12MethodProfile, cm12Scene, createCm12Figure7_256 } from "./cm12-paper-scenes";
 import { applyGardenPool, GARDEN_DAM_BRICK_SEED_M, GARDEN_WATERLINE_M, gardenPoolTerrain } from "./garden-scene";
 import {
   createHeroGardenHoseScene,
@@ -2449,6 +2449,17 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
       build: () => cm12Scene(figure.id),
       camera: cm12Camera(cm12Scene(figure.id)),
     });
+  }),
+  defineScene({
+    id: "cm12-figure-7-256",
+    name: "CM12 Figure 7 · Ball drop into an empty tank · 256³",
+    blurb: "Figure 7 at twice the linear resolution: the same 6.4 m tank and 1 m radius ball on 256³ cells at dx=0.025 m, dt=1/30 s and g=10 m/s². Uniform Geometric performance scene; the paper uses 128³.",
+    audience: "study",
+    shelf: "Method comparisons",
+    environment: "stage",
+    methodProfile: { methodId: "uniform-volume", quality: "balanced", overrides: {} },
+    build: createCm12Figure7_256,
+    camera: cm12Camera(createCm12Figure7_256()),
   }),
   defineScene({
     id: "deep-water-ab",
