@@ -64,6 +64,7 @@ import {
   environmentProxyFeatureSize_m,
   SVO_ENVIRONMENT_FEATURE_VOXELS,
   solidWorldTerrainSurfaceCoarseningRegions,
+  solidWorldVoxelPatchCoarseningRegions,
   svoEnvironmentCoarseningPower,
 } from "./svo-environment-coarsening";
 import { svoPrimitiveForRigidBody, type SvoPrimitiveDescriptor } from "../../contracts/svo-primitive-abi";
@@ -1621,7 +1622,10 @@ export class OctreeSparseBrickWorld {
      * predicate and its own gate, and `minimumEnvironmentLevel` can only carry
      * one meaning at a time.
      */
-    const coarseningRegions = !dryWorld ? solidWorldTerrainSurfaceCoarseningRegions(scene, initialSolidWorld) : [];
+    const coarseningRegions = !dryWorld ? [
+      ...solidWorldTerrainSurfaceCoarseningRegions(scene, initialSolidWorld),
+      ...solidWorldVoxelPatchCoarseningRegions(scene, residualSolidWorld.patches),
+    ] : [];
     const environmentCoarsening = !dryWorld
       ? createSvoEnvironmentCoarsening({
         primitives: environmentPrimitives,

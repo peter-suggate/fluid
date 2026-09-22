@@ -142,6 +142,8 @@ export interface SceneDefinition {
   readonly environment: EnvironmentId;
   /** Defaults to `full-scene`; see {@link presentationModeForScene}. */
   readonly presentationMode?: ScenePresentationMode;
+  /** Omit the generated glass shell when the scene authors its own voxel vessel. */
+  readonly containerShell?: "generated" | "authored";
   readonly camera?: Partial<CameraState>;
   /** Exact solver profile a numerical comparison requires. */
   readonly methodProfile?: MethodProfile;
@@ -315,6 +317,8 @@ function finishSceneDocument(
     scene.solidVoxels = authoredEdits.filter((patch) => patch.operation !== "fill"
       || (patch.materialId ?? VOXEL_MATERIAL_IDS.containerGlass)
         !== VOXEL_MATERIAL_IDS.containerGlass);
+  } else if (definition.containerShell === "authored") {
+    scene.solidVoxels = authoredEdits;
   } else {
     // Preset factories carry only generic extra voxel edits. Compile the
     // ordinary shell once on the final lattice.

@@ -64,6 +64,7 @@
  */
 import type { EnvironmentProxyPrimitive } from "../../../core/voxel-environments";
 import type { SceneDescription } from "../../../core/model";
+import { solidWorldVoxelPatchBounds_m, type SolidWorldVoxelPatch } from "../../../core/solid-world";
 import { sceneCellSizes_m } from "../../../core/scene-lattice";
 import {
   SOLID_WORLD_BRICK_CELLS,
@@ -147,6 +148,22 @@ export interface SvoEnvironmentCoarseningRegion {
   readonly maximum_m: readonly [number, number, number];
   /** Zero pins the region's nodes at the finest level. */
   readonly feature_m: number;
+}
+
+/** Editable voxel surfaces have no analytic fallback: preserve their lattice. */
+export function solidWorldVoxelPatchCoarseningRegions(
+  scene: SceneDescription,
+  patches: readonly SolidWorldVoxelPatch[],
+): SvoEnvironmentCoarseningRegion[] {
+  const cell = sceneCellSizes_m(scene);
+  return patches.filter(patch => patch.operation === "fill").map(patch => {
+    const bounds = solidWorldVoxelPatchBounds_m(scene, patch);
+    return {
+      minimum_m: bounds.minimum.map((value, axis) => value + 0.25 * cell[axis]!) as [number, number, number],
+      maximum_m: bounds.maximum.map((value, axis) => value - 0.25 * cell[axis]!) as [number, number, number],
+      feature_m: 0,
+    };
+  });
 }
 
 /**

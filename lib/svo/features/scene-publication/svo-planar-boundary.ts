@@ -204,6 +204,7 @@ export function buildSvoSolidWorldPlanarBoundaryCatalog(
     candidate: SolidWorldVoxelPatch | undefined) => authored !== undefined
       && candidate !== undefined
       && authored.operation === candidate.operation
+      && (authored.materialId ?? 1) === (candidate.materialId ?? 1)
       && sameCoordinate(authored.minimum, candidate.minimum)
       && sameCoordinate(authored.maximumExclusive, candidate.maximumExclusive);
   const overlapsVolume = (left: SolidWorldVoxelPatch, right: SolidWorldVoxelPatch) =>

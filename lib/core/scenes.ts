@@ -17,6 +17,7 @@ import { createAnalyticMotionScene, createRerungFreeFallScene, createStandingWav
 import { createGeometricUniformTranslationScene } from "./geometric-translation-scene";
 import { createGentleMovingBlobScene } from "./gentle-moving-blob-scene";
 import { createStationaryBowlScene } from "./stationary-bowl-scene";
+import { createUniformTroughScene } from "./uniform-trough-scenes";
 import { withHeroLayout } from "./voxel-scenery/hero-layout";
 import { terrainHeightAt, type TerrainDescription, type TerrainGrid } from "./terrain";
 import type { EnvironmentId } from "./environments";
@@ -2119,6 +2120,24 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     },
     camera: studioStageCamera,
   }),
+  ...(["dam-break", "settled-tank", "hose-fill"] as const).map(mode => defineScene({
+    id: `uniform-trough-${mode}`,
+    name: `Voxel trough · ${mode === "dam-break" ? "dam break" : mode === "settled-tank" ? "settled tank" : "hose fill"}`,
+    blurb: mode === "dam-break"
+      ? "A full-width reservoir collapses into an open voxel trough. Uniform geometric transport on a 64×24×24 grid, for 3D stability and performance studies."
+      : mode === "settled-tank"
+        ? "The same voxel trough and water volume at rest, with a flat 20 cm waterline. A matched uniform-geometric hydrostatic stability scene."
+        : "The same voxel trough starts completely empty. A horizontal hose runs for 12 seconds, followed by eight seconds of settling, using uniform-geometric.",
+    audience: "explore",
+    shelf: "Uniform geometric · 3D",
+    environment: "stage",
+    presentationMode: "full-scene",
+    containerShell: "authored",
+    methodProfile: { methodId: "uniform-volume", quality: "balanced", overrides: {} },
+    build: () => createUniformTroughScene(mode),
+    buildAt: lattice => createUniformTroughScene(mode, lattice.cellSize_m),
+    camera: { distance_m: 5.4, target_m: { x: 0, y: 0.4, z: 0 }, elevation_rad: 0.8, azimuth_rad: 0.65 },
+  })),
   defineScene({
     id: "gentle-moving-blob",
     name: "Gentle moving blob",

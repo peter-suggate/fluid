@@ -94,6 +94,7 @@ export function buildVesselOutlineGeometry(
       left.every((value, axis) => value === right[axis]);
     const sameFill = (left: SolidWorldVoxelPatch, right: SolidWorldVoxelPatch) =>
       left.operation === "fill"
+        && (left.materialId ?? 1) === (right.materialId ?? 1)
         && sameCoordinate(left.minimum, right.minimum)
         && sameCoordinate(left.maximumExclusive, right.maximumExclusive);
     const overlapsVolume = (left: SolidWorldVoxelPatch, right: SolidWorldVoxelPatch) =>
