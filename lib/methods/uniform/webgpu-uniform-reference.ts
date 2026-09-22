@@ -24,6 +24,7 @@ import {
   UNIFORM_VOLUME_TWO_LEVEL_COUNTER_WORDS,
   UNIFORM_VOLUME_TWO_LEVEL_ENTRIES,
   UNIFORM_VOLUME_TWO_LEVEL_WORDS_PER_TILE,
+  uniformVolumeTargetWGSL,
 } from "./uniform-volume.wgsl";
 import { createUniformReferenceComputeShader } from "./webgpu-uniform-reference.wgsl";
 import { uniformAbOn } from "./uniform-ab-switch";
@@ -98,6 +99,18 @@ export interface WebGPUUniformReferenceOptions {
   phiWindowForQA?: false;
   /** Full-lattice pressure smoothing control for the work-list regression. */
   pressureSmoothingForQA?: "dense";
+  /** Recompute finest RHS interface/capacity instead of consuming built topology. */
+  pressureAuthorityForQA?: "raw";
+  /** Original coefficient bake and single-workgroup surface balance. */
+  systemBuildForQA?: "baseline";
+  /** Dense extension launches and repeated neighbor convergence queries. */
+  extensionWorkForQA?: "baseline";
+  /** Original serial cell/vertex census per tile. */
+  tileSeedForQA?: "serial";
+  /** Full-domain correction passes, preserving the original reduction order. */
+  surfaceCorrectionForQA?: "dense";
+  /** Original eight independent trilinear probes per surface target. */
+  targetInterpolationForQA?: "uncached";
   /** Former field atlas and vertex traversal retained for identical-input QA. */
   phiStorageForQA?: "paged";
   phiReadAuditForQA?: boolean;
@@ -466,6 +479,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private totalSurfaceVolume: boolean;
   private surfaceDeficitBalancing: boolean;
   private readonly surfaceDeficitBalanceBytes: number;
+  private readonly balanceChunks: number;
   private surfaceVolumeCorrection?: UniformSurfaceVolumeCorrection;
   private phiAgreementGain: number;
   private phiAgreementClamp: number;
@@ -720,6 +734,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * (MacCormack's reverse trace, the stage audit).
    */
   private faceAuthorityStored = false;
+  private readonly cooperativeTileSeed: boolean;
   /**
    * The diagnostics reduction is a dense pass whose only reader is readStats:
    * no kernel loads the words it adds. A live frame never maps solver state,
@@ -1016,7 +1031,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // Created before the extrapolator: the extension binds it read_write to
     // read the tile classes and to publish the 4h face table the sampler reads.
     const balanceRecords = this.pageDomain && !this.nativeRootExecution ? this.pageDomain.capacity * (this.pageDomain.edge / 4) ** 3 : tileRecords;
-    this.surfaceDeficitBalanceBytes = this.geometricVolume ? (2 + 2 * balanceRecords) * 4 : 0;
+    this.balanceChunks = this.geometricVolume && balanceRecords > 1024
+      && options.systemBuildForQA !== "baseline" && uniformAbOn("balancetree")
+      ? Math.ceil(balanceRecords / 1024) : 0;
+    this.surfaceDeficitBalanceBytes = this.geometricVolume ? (2 + 2 * balanceRecords + 2 * this.balanceChunks) * 4 : 0;
     const pageBaseBytes = (this.scratchArena?.conditioningBytes ?? allocation.conditioningBytes) + this.surfaceDeficitBalanceBytes;
     if (this.volumePageEdge) this.volumePageConfig = {
       edge: this.volumePageEdge, base: pageBaseBytes / 4,
@@ -1036,7 +1054,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.volumeWorkCounts=device.createBuffer({label:"Uniform volume work counters",size:8,usage:GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
     }
     const fullLattice = !this.activeRegionEnabled && uniformAbOn("staticid");
-    const source = this.geometricVolume ? createUniformReferenceComputeShader(true, options.referenceDimension ?? 3, this.volumePageConfig,this.nativeRootExecution ? undefined : this.pageDomain, fullLattice) : uniformReferenceComputeShader;
+    let source = this.geometricVolume ? createUniformReferenceComputeShader(true, options.referenceDimension ?? 3, this.volumePageConfig,this.nativeRootExecution ? undefined : this.pageDomain, fullLattice) : uniformReferenceComputeShader;
+    this.cooperativeTileSeed = options.tileSeedForQA !== "serial" && uniformAbOn("tileseed");
+    if(this.geometricVolume && options.targetInterpolationForQA === "uncached"){
+      const original=uniformVolumeTargetWGSL(uniformAbOn("targetcache"));
+      if(!source.includes(original))throw new Error("Surface target QA specialization lost its anchor");
+      source=source.replace(original,uniformVolumeTargetWGSL(false));
+    }
     const fixedFields = new Map([
       [0,this.velocityA],[1,this.velocityB],[3,this.pressureB],[4,this.volumeA],[5,this.volumeB],
       [12,this.velocityC],[13,this.velocityD],[14,this.transportA],[16,this.surfaceA],
@@ -1074,7 +1098,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.velocityA, this.velocityC, this.transportA, this.transportB,
       this.activeRegion, this.conditioningScratch,
       this.activeRegionEnabled ? this.activeDispatch : undefined,
-      options.sourceAwareExtension ?? this.geometricVolume, options.fuseExtensionPack, this.fieldPages, this.nativeRootExecution ? undefined : this.pageDomain, this.pageDomainDispatch,
+      options.sourceAwareExtension ?? this.geometricVolume, options.fuseExtensionPack, this.fieldPages, this.nativeRootExecution ? undefined : this.pageDomain, this.pageDomainDispatch, options.extensionWorkForQA === "baseline",
     );
     // Without a ceil(n/4) hierarchy level there is no 4h field to sample.
     if (!this.velocityExtrapolator.coarseVelocityTableAvailable) this.twoLevelTileCount = 0;
@@ -1169,7 +1193,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         (options.pressureCycleDispatch !== "direct" && pagedPressure),
       pagedPressure, options.pressureStorageForQA === "paged-logical",
       uniformAbOn("inplace") && (options.referenceDimension ?? 3) === 3
-        && scene.container.depthBoundary !== "symmetry", this.scratchArena && !pagedPressure ? this.fieldPages : undefined, this.geometricVolume && options.pressureSmoothingForQA !== "dense");
+        && scene.container.depthBoundary !== "symmetry", this.scratchArena && !pagedPressure ? this.fieldPages : undefined, this.geometricVolume && options.pressureSmoothingForQA !== "dense", options.pressureAuthorityForQA !== "raw", options.systemBuildForQA !== "baseline");
     this.pressureWindowCapacity = [nx, ny, nz];
     this.pressureDomainKey = this.pressureWindowCapacity.join("x");
     this.pressureInstances.set(this.pressureDomainKey, this.pressureMultigrid);
@@ -1330,7 +1354,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     if (this.geometricVolume && (options.referenceDimension ?? 3) === 3) {
       this.surfaceVolumeCorrection = new UniformSurfaceVolumeCorrection(device, [nx,ny,nz],
         [scene.container.width_m/nx,scene.container.height_m/ny,scene.container.depth_m/nz],
-        this.vertexPhiField!,this.volumeB,this.gammaB,this.fieldPages);
+        this.vertexPhiField!,this.volumeB,this.gammaB,this.fieldPages,options.surfaceCorrectionForQA !== "dense" && uniformAbOn("surfacewindow"));
     }
     if(this.fieldPages) { this.present(this.surfaceB); if(!this.scratchArena)this.present(this.vertexPhiScratch!); this.present(this.gammaA); }
     if(this.symmetryStageAuditFields)this.symmetryStageAuditTextures=Object.freeze(Object.fromEntries(
@@ -1385,7 +1409,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       tasks.push({ id, phase: "solver-pipelines", label: entryPoint, run: async () => {
         this.volumePipelines[entryPoint] = await compiler.compileComputePipeline({
           label: `Uniform Geometric - ${entryPoint}`, layout: this.mainPipelineLayout,
-          compute: { module: entryPoint === "uvAdvectPhi" ? phiModule : entryPoint === "uvRedistancePhi" ? phiRedistanceModule : shaderModule, entryPoint },
+          compute: { module: entryPoint === "uvAdvectPhi" ? phiModule : entryPoint === "uvRedistancePhi" ? phiRedistanceModule : shaderModule, entryPoint,
+            ...(entryPoint==="uvBalanceReduce" ? {constants:{UV_BALANCE_TREE:Number(this.balanceChunks>0)}} : {}) },
         }, { priority: "visible", signal });
       } });
     }
@@ -2373,7 +2398,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.velocityExtrapolator.encode(encoder, predicted, !predicted && seam ? ((stage) => seam(
       stage === "narrow-band-front" ? UNIFORM_ADVANCE_PHASE.extensionFront
         : UNIFORM_ADVANCE_PHASE.extensionHierarchy,
-    )) : undefined, this.twoLevelEncoded);
+    )) : undefined, this.twoLevelEncoded, this.twoLevelExtensionEnabled);
   }
 
   /**
@@ -2592,6 +2617,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.volumePipelines.uvBalanceMeasure!, this.sharpenComputeGroup);
     else this.runDirect(encoder, "Surface-deficit partial sums", this.volumePipelines.uvBalanceMeasure!,
       this.sharpenComputeGroup, [Math.ceil(this.info.nx / 4), Math.ceil(this.info.ny / 4), Math.ceil(this.info.nz / 4)]);
+    if (this.balanceChunks) this.runDirect(encoder, "Surface-deficit parallel reduction",
+      this.volumePipelines.uvBalanceReduceChunks!, this.sharpenComputeGroup, [this.balanceChunks, 1, 1]);
     this.runDirect(encoder, "Surface-deficit global balance", this.volumePipelines.uvBalanceReduce!, this.sharpenComputeGroup, [1, 1, 1]);
   }
 
@@ -2661,6 +2688,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     }
     if (this.densitySharpening) seam?.(UNIFORM_VOLUME_PHASE.sharpen);
   }
+
+  get surfaceCorrectionWorkSourceForQA() { return this.surfaceVolumeCorrection?.workSourceForQA; }
 
   get pressureSmoothingWorkSourceForQA() { return this.pressureMultigrid.smoothingWorkSource; }
 
@@ -2806,7 +2835,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       encoder.clearBuffer(this.conditioningScratch, this.twoLevelShellCountOffset,
         UNIFORM_VOLUME_TWO_LEVEL_COUNTER_WORDS * 4);
       for (const entry of UNIFORM_VOLUME_TWO_LEVEL_ENTRIES) {
-        this.runDirect(encoder, `Uniform Geometric two-level ${entry}`, this.twoLevelPipelines[entry]!, this.densityTraceGroup, grid);
+        const cooperative=entry==="uvTwoLevelSeed"&&this.cooperativeTileSeed;
+        this.runDirect(encoder, `Uniform Geometric two-level ${entry}`,
+          cooperative ? this.volumePipelines.uvTwoLevelSeedCooperative! : this.twoLevelPipelines[entry]!,
+          this.densityTraceGroup, cooperative ? tiles : grid);
       }
     }
     this.encodeVelocityExtrapolation(encoder, false, seam);

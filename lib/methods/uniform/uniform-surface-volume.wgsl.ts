@@ -3,7 +3,7 @@ import { uniformAbOn } from "./uniform-ab-switch";
 const leanMeasure = uniformAbOn("measurelean");
 const deadGroups = uniformAbOn("deadgroups");
 /** Experimental global surface-volume constraint. No cellwise reconstruction. */
-export const uniformSurfaceVolumeWGSL = /* wgsl */ `
+export function createUniformSurfaceVolumeWGSL(compact: boolean): string { return /* wgsl */ `
 struct Params { dims:vec4u, h:vec4f }
 @group(0) @binding(0) var<uniform> p:Params;
 @group(0) @binding(1) var phi:texture_3d<f32>;
@@ -16,6 +16,36 @@ struct Params { dims:vec4u, h:vec4f }
 @group(0) @binding(8) var<storage,read_write> reduced:array<vec4f>;
 // centre, half-range, desired V, surface volume before correction; iteration.
 @group(0) @binding(9) var<storage,read_write> state:array<vec4f>;
+${compact ? `// Bounds include every target-volume contribution and every cell with a
+// non-positive phi corner. Five cells of padding enclose the four-step band
+// dilation, including crossing cells' upper vertices. No liquid is omitted
+// from the global constraint, even if it is disconnected or sleeping.
+@group(0) @binding(10) var<storage,read_write> work:array<atomic<u32>>;
+var<workgroup> bounds:array<atomic<u32>,6>;
+fn workCells()->u32{return atomicLoad(&work[11]);}
+fn workVertices()->u32{return atomicLoad(&work[15]);}
+fn workDims()->vec3u{return vec3u(atomicLoad(&work[12]),atomicLoad(&work[13]),atomicLoad(&work[14]));}
+fn workOrigin()->vec3i{return vec3i(i32(atomicLoad(&work[8])),i32(atomicLoad(&work[9])),i32(atomicLoad(&work[10])));}
+fn cellPoint(i:u32)->vec3i{return workOrigin()+point(i,workDims());}
+fn vertexPoint(i:u32)->vec3i{return workOrigin()+point(i,workDims()+vec3u(1));}
+@compute @workgroup_size(1) fn finishWork(){
+ var lo=vec3u(0);var d=vec3u(0);var nc=0u;var nv=0u;
+ if(atomicLoad(&work[4])>0u){
+  for(var a=0u;a<3u;a++){
+   lo[a]=u32(max(0,i32(atomicLoad(&work[a]))-5));
+   d[a]=min(p.dims[a],atomicLoad(&work[4u+a])+5u)-lo[a];
+  }
+  nc=d.x*d.y*d.z;nv=(d.x+1u)*(d.y+1u)*(d.z+1u);
+ }
+ for(var a=0u;a<3u;a++){atomicStore(&work[8u+a],lo[a]);atomicStore(&work[12u+a],d[a]);}
+ atomicStore(&work[11],nc);atomicStore(&work[15],nv);
+ let counts=array<u32,3>((nc+63u)/64u,(nv+63u)/64u,(nc+4095u)/4096u);
+ for(var k=0u;k<3u;k++){
+  atomicStore(&work[16u+4u*k],min(counts[k],65535u));
+  atomicStore(&work[17u+4u*k],(counts[k]+65534u)/65535u);
+  atomicStore(&work[18u+4u*k],1u);
+ }
+}` : ""}
 var<workgroup> sums:array<vec4f,320>;
 var<workgroup> liveLanes:atomic<u32>;
 fn groupIndex(w:vec3u)->u32{return w.x+w.y*65535u;}
@@ -25,23 +55,45 @@ fn point(i:u32,d:vec3u)->vec3i{return vec3i(vec3u(i%d.x,(i/d.x)%d.y,i/(d.x*d.y))
 fn index(q:vec3i,d:vec3u)->u32{return u32(q.x)+d.x*(u32(q.y)+d.y*u32(q.z));}
 fn corner(k:u32)->vec3i{return vec3i(i32(k&1u),i32((k>>1u)&1u),i32((k>>2u)&1u));}
 fn value(q:vec3i)->f32{return textureLoad(phi,clamp(q,vec3i(0),vec3i(p.dims.xyz)),0).x;}
-@compute @workgroup_size(1) fn begin(){state[0]=vec4f(0,p.h.w,0,0);state[1]=vec4f(0);}
+@compute @workgroup_size(1) fn begin(){state[0]=vec4f(0,p.h.w,0,0);state[1]=vec4f(0);
+ ${compact ? `for(var a=0u;a<3u;a++){atomicStore(&work[a],p.dims[a]);atomicStore(&work[4u+a],0u);}` : ""}
+}
 @compute @workgroup_size(64) fn seed(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)l:u32){
- let i=groupIndex(w)*64u+l;if(i>=cells()){return;}let q=point(i,p.dims.xyz);
+ ${compact ? `if(l<3u){atomicStore(&bounds[l],p.dims[l]);}workgroupBarrier();
+ let i=groupIndex(w)*64u+l;
+ if(i<cells()){
+  let q=point(i,p.dims.xyz);var live=textureLoad(volume,q,0).x!=0.0;
+  if(textureLoad(capacity,q,0).x>0.0){
+   var lo=1e30;var hi=-1e30;
+   for(var k=0u;k<8u;k++){let v=value(q+corner(k));lo=min(lo,v);hi=max(hi,v);}
+   live=live||lo<=0.0;
+   if(lo<=0.0&&hi>=0.0){for(var k=0u;k<8u;k++){atomicMax(&band[index(q+corner(k),p.dims.xyz+vec3u(1))],5u);}}
+  }
+  if(live){for(var a=0u;a<3u;a++){atomicMin(&bounds[a],u32(q[a]));atomicMax(&bounds[3u+a],u32(q[a])+1u);}}
+ }
+ workgroupBarrier();
+ if(l<3u&&atomicLoad(&bounds[3])>0u){
+  atomicMin(&work[l],atomicLoad(&bounds[l]));atomicMax(&work[4u+l],atomicLoad(&bounds[3u+l]));
+ }` : `let i=groupIndex(w)*64u+l;if(i>=cells()){return;}let q=point(i,p.dims.xyz);
  if(textureLoad(capacity,q,0).x<=0.0){return;}
  var lo=1e30;var hi=-1e30;
  for(var k=0u;k<8u;k++){let v=value(q+corner(k));lo=min(lo,v);hi=max(hi,v);}
- if(lo<=0.0&&hi>=0.0){for(var k=0u;k<8u;k++){atomicMax(&band[index(q+corner(k),p.dims.xyz+vec3u(1))],5u);}}
+ if(lo<=0.0&&hi>=0.0){for(var k=0u;k<8u;k++){atomicMax(&band[index(q+corner(k),p.dims.xyz+vec3u(1))],5u);}}`}
 }
 @compute @workgroup_size(64) fn dilate(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)l:u32){
- let i=groupIndex(w)*64u+l;if(i>=vertices()){return;}let d=p.dims.xyz+vec3u(1);let q=point(i,d);
+ ${compact ? `let logical=groupIndex(w)*64u+l;if(logical>=workVertices()){return;}
+ let d=p.dims.xyz+vec3u(1);let q=vertexPoint(logical);let i=index(q,d);`
+ : `let i=groupIndex(w)*64u+l;if(i>=vertices()){return;}let d=p.dims.xyz+vec3u(1);let q=point(i,d);`}
  var b=atomicLoad(&band[i]);
  for(var a=0u;a<3u;a++){for(var s=-1;s<=1;s+=2){var n=q;n[a]+=s;
   if(all(n>=vec3i(0))&&all(n<vec3i(d))){let v=atomicLoad(&band[index(n,d)]);b=max(b,select(0u,v-1u,v>0u));}
  }}atomicStore(&nextBand[i],b);
 }
 @compute @workgroup_size(64) fn metric(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)l:u32){
- let i=groupIndex(w)*64u+l;if(i>=vertices()){return;}let q=point(i,p.dims.xyz+vec3u(1));var gradient=vec3f(0);
+ ${compact ? `let logical=groupIndex(w)*64u+l;if(logical>=workVertices()){return;}
+ let q=vertexPoint(logical);let i=index(q,p.dims.xyz+vec3u(1));`
+ : `let i=groupIndex(w)*64u+l;if(i>=vertices()){return;}let q=point(i,p.dims.xyz+vec3u(1));`}
+ var gradient=vec3f(0);
  for(var a=0u;a<3u;a++){var lo=q;var hi=q;lo[a]=max(0,q[a]-1);hi[a]=min(i32(p.dims[a]),q[a]+1);
   gradient[a]=(value(hi)-value(lo))/(f32(hi[a]-lo[a])*p.h[a]);}
  atomicStore(&band[i],bitcast<u32>(f32(atomicLoad(&band[i]))*0.2*max(0.1,length(gradient))));
@@ -68,8 +120,8 @@ fn sumGroup(l:u32){
 }
 @compute @workgroup_size(64) fn measure(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)l:u32){
  let group=groupIndex(w);let i=group*64u+l;var result:array<vec4f,5>;
- if(i<cells()){
-  let q=point(i,p.dims.xyz);let cap=textureLoad(capacity,q,0).x;
+ if(i<${compact ? "workCells()" : "cells()"}){
+  let q=${compact ? "cellPoint(i)" : "point(i,p.dims.xyz)"};let cap=textureLoad(capacity,q,0).x;
   result[4].y=textureLoad(volume,q,0).x;
   if(cap>0.0){
    ${leanMeasure ? `// seed marks all eight corners of every crossing cell, so a cell whose band
@@ -118,12 +170,12 @@ fn sumGroup(l:u32){
  if(l==0u){for(var k=0u;k<5u;k++){partial[group*5u+k]=sums[k];}}
 }
 @compute @workgroup_size(64) fn reduce(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)l:u32){
- let group=groupIndex(w);let i=group*64u+l;let count=(cells()+63u)/64u;
+ let group=groupIndex(w);let i=group*64u+l;let count=(${compact ? "workCells()" : "cells()"}+63u)/64u;
  for(var k=0u;k<5u;k++){sums[l*5u+k]=vec4f(0);if(i<count){sums[l*5u+k]=partial[i*5u+k];}}sumGroup(l);
  if(l==0u){for(var k=0u;k<5u;k++){reduced[group*5u+k]=sums[k];}}
 }
 @compute @workgroup_size(64) fn solve(@builtin(local_invocation_index)l:u32){
- let count=(cells()+4095u)/4096u;
+ let count=(${compact ? "workCells()" : "cells()"}+4095u)/4096u;
  for(var k=0u;k<5u;k++){var sum=vec4f(0);for(var i=l;i<count;i+=64u){sum+=reduced[i*5u+k];}sums[l*5u+k]=sum;}sumGroup(l);
  if(l==0u){
   let desired=sums[4].y;var shift=state[0].x;let width=state[0].y;
@@ -141,3 +193,7 @@ fn sumGroup(l:u32){
  textureStore(output,q,vec4f(value(q)-state[0].x*bitcast<f32>(atomicLoad(&band[i]))));
 }
 `;
+}
+
+/** Dense control, also usable as a standalone shader fixture. */
+export const uniformSurfaceVolumeWGSL = createUniformSurfaceVolumeWGSL(false);

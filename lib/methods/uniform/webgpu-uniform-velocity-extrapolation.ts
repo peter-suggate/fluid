@@ -1,3 +1,4 @@
+import { uniformAbOn } from "./uniform-ab-switch";
 import type { UniformPageDomain } from "./uniform-page-domain";
 import { uniformVelocityPagedShader, uniformVelocityPageWorkgroups } from "./uniform-velocity-pages";
 import { UniformTexturePages } from "./uniform-texture-pages";
@@ -7,6 +8,8 @@ import { uniformVelocityExtrapolationShader } from "./webgpu-uniform-velocity-ex
 type Dims3 = readonly [number, number, number];
 
 interface ExtrapolationPipelines {
+  readonly buildShell: GPUComputePipeline;
+  readonly publishShell: GPUComputePipeline;
   readonly clear: GPUComputePipeline;
   readonly seed: GPUComputePipeline;
   readonly update: GPUComputePipeline;
@@ -64,6 +67,11 @@ export class WebGPUUniformVelocityExtrapolator {
   private readonly distancesB: GPUTexture;
   private readonly resolvedValues: GPUTexture;
   private readonly resolvedDistances: GPUTexture;
+  private readonly compactShell: boolean;
+  private shellListEncoded = false;
+  private readonly reuseConvergenceDistance: boolean;
+  private readonly shellTiles: GPUBuffer;
+  private readonly shellDispatch: GPUBuffer;
   private readonly convergence: GPUBuffer;
   private readonly dispatchArgs: GPUBuffer;
   private readonly unusedDispatchStorage: GPUBuffer;
@@ -121,7 +129,23 @@ export class WebGPUUniformVelocityExtrapolator {
     private readonly fieldPages?: UniformTexturePages,
     private readonly pageDomain?: UniformPageDomain,
     private readonly pageDomainDispatch?: GPUBuffer,
+    baselineForQA = false,
   ) {
+    // Page and window schedules keep their existing coordinate adapters.
+    const nativeFullGrid = !activeDispatch && !pageDomainDispatch && !pageDomain
+      && fieldPages?.nativeStorage !== false;
+    this.reuseConvergenceDistance = !baselineForQA && uniformAbOn("frontreuse") && nativeFullGrid;
+    this.compactShell = sourceAwareHierarchy && dims.every(d => d % 4 === 0)
+      && !baselineForQA && uniformAbOn("shelllist") && nativeFullGrid;
+    this.shellTiles = device.createBuffer({
+      label: "Uniform extension shell list",
+      size: this.compactShell ? 16 + 4 * dims.reduce((n, d) => n * Math.ceil(d / 4), 1) : 16,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+    });
+    this.shellDispatch = device.createBuffer({
+      label: "Uniform extension shell dispatch", size: 12,
+      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+    });
     const view = (texture: GPUTexture) => fieldPages?.view(texture) ?? texture.createView();
     const [nx, ny, nz] = dims;
     const extent: Dims3 = [nx + 2, ny + 2, nz + 2];
@@ -174,6 +198,7 @@ export class WebGPUUniformVelocityExtrapolator {
       { binding: 13, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "uint", viewDimension: "3d" } },
       { binding: 14, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "uint", viewDimension: "3d" } },
       { binding: 15, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rgba32uint", viewDimension: "3d" } },
+      { binding: 16, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       ...(fieldPages?.layout([]) ?? []),
     ] });
     this.pipelineLayout = device.createPipelineLayout({ label: "Uniform Sec. 3.3 extrapolation pipeline layout", bindGroupLayouts: [this.layout] });
@@ -227,6 +252,7 @@ export class WebGPUUniformVelocityExtrapolator {
       { binding: 13, resource: view(originsIn) },
       { binding: 14, resource: view(existingOrigins) },
       { binding: 15, resource: view(originsOut) },
+      { binding: 16, resource: { buffer: this.shellTiles } },
     ] });
 
     this.seedCurrentGroup = group(currentVelocity, this.resolvedValues, this.resolvedDistances, this.valuesA, this.distancesA);
@@ -256,6 +282,7 @@ export class WebGPUUniformVelocityExtrapolator {
       { binding: 13, resource: view(this.dummyOrigins) },
       { binding: 14, resource: view(this.dummyOrigins) },
       { binding: 15, resource: view(this.dummyOriginsOut) },
+      { binding: 16, resource: { buffer: this.shellTiles } },
     ] });
     this.activeStateTexture = this.resolvedDistances;
 
@@ -369,7 +396,7 @@ export class WebGPUUniformVelocityExtrapolator {
       (sum, level) => sum + level.dims[0] * level.dims[1] * level.dims[2] * (this.sourceAwareHierarchy ? 4 : 2) * 16,
       0,
     );
-    return baseBytes + hierarchyBytes + 32;
+    return baseBytes + hierarchyBytes + 32 + this.shellTiles.size + this.shellDispatch.size;
   }
 
   /** Hard wavefront ceiling; `frontPasses` is what an encode actually issues. */
@@ -395,7 +422,7 @@ export class WebGPUUniformVelocityExtrapolator {
   get encodedPassCount(): number {
     // seed + initial prepare + (update + prepare) per sweep + resolve + pack,
     // plus one restrict and one prolong per hierarchy traversal step.
-    return 4 + 2 * this.activeFrontPasses
+    return 4 + 2 * this.activeFrontPasses + (this.shellListEncoded ? 2 : 0)
       + this.hierarchyDownGroups.length + this.hierarchyUpGroups.length
       - (this.fuseTransportPack && this.fusedGroups.length ? 1 : 0);
   }
@@ -418,11 +445,15 @@ export class WebGPUUniformVelocityExtrapolator {
     });
     const compile = (label: string, entryPoint: string) => compiler.compileComputePipeline({
       label, layout: this.pipelineLayout, compute: { module: shaderModule, entryPoint, constants: {
+        REUSE_CONVERGED_DISTANCE: Number(this.reuseConvergenceDistance),
+        COMPACT_SHELL: Number(this.compactShell),
         SOURCE_AWARE_HIERARCHY: Number(this.sourceAwareHierarchy),
         ROOT_NX: this.dims[0], ROOT_NY: this.dims[1], ROOT_NZ: this.dims[2],
       } },
     }, { priority: "critical", signal });
-    const [clear, seed, update, prepare, resolve, restrict, prolong, pack, coarseTable, prolongPack] = await Promise.all([
+    const [buildShell, publishShell, clear, seed, update, prepare, resolve, restrict, prolong, pack, coarseTable, prolongPack] = await Promise.all([
+      compile("Uniform extension build shell list", "buildShellList"),
+      compile("Uniform extension publish shell list", "publishShellList"),
       compile("Uniform Sec. 3.3 clear sparse state", "clearExtrapolationState"),
       compile("Uniform Sec. 3.3 seed active front", "seedActiveFront"),
       compile("Uniform Sec. 3.3 update active front", "updateActiveFront"),
@@ -434,7 +465,7 @@ export class WebGPUUniformVelocityExtrapolator {
       compile("Uniform Sec. 3.3 publish 4h face table", "publishCoarseVelocityTable"),
       compile("Uniform nearest hierarchy and transport shell", "prolongAndPack"),
     ]);
-    this.pipelines = { clear, seed, update, prepare, resolve, restrict, prolong, pack, coarseTable, prolongPack };
+    this.pipelines = { buildShell, publishShell, clear, seed, update, prepare, resolve, restrict, prolong, pack, coarseTable, prolongPack };
     const encoder = this.device.createCommandEncoder({ label: "Uniform Sec. 3.3 initialize sparse state" });
     for (const [label, group] of [["A", this.seedCurrentGroup], ["B", this.updateABGroup],
       ["resolved", this.resolveGroup]] as const) {
@@ -468,15 +499,33 @@ export class WebGPUUniformVelocityExtrapolator {
     predicted: boolean,
     boundary?: (stage: UniformExtrapolationTraceStage) => void,
     publishCoarseTable = false,
+    // Must match params.twoLevel.y used by the coordinate and shell predicates.
+    tiledExtension = false,
   ): void {
     const pipelines = this.pipelines;
     if (!pipelines) throw new Error("Uniform Sec. 3.3 extrapolation pipelines are not initialized");
+    const compact = this.compactShell && tiledExtension;
+    this.shellListEncoded = compact;
+    if (compact) {
+      encoder.clearBuffer(this.shellTiles, 0, 16);
+      const tileCount = this.dims.reduce((n, d) => n * Math.ceil(d / 4), 1);
+      for (const [pipeline, groups] of [
+        [pipelines.buildShell, Math.ceil(tileCount / 64)], [pipelines.publishShell, 1],
+      ] as const) {
+        const pass = encoder.beginComputePass({ label: pipeline.label });
+        pass.setPipeline(pipeline); pass.setBindGroup(0, this.seedCurrentGroup);
+        pass.dispatchWorkgroups(groups); pass.end();
+      }
+      // A writable storage buffer cannot also be this pass's indirect source.
+      encoder.copyBufferToBuffer(this.shellTiles, 4, this.shellDispatch, 0, 12);
+    }
     encoder.clearBuffer(this.convergence);
     encoder.clearBuffer(this.dispatchArgs);
     const dispatchBase = (label: string, pipeline: GPUComputePipeline, group: GPUBindGroup) => {
       const pass = encoder.beginComputePass({ label });
       pass.setPipeline(pipeline); pass.setBindGroup(0, group);
-      if (this.activeDispatch && this.windowBaseGroups) pass.dispatchWorkgroups(...this.windowBaseGroups);
+      if (compact) pass.dispatchWorkgroupsIndirect(this.shellDispatch, 0);
+      else if (this.activeDispatch && this.windowBaseGroups) pass.dispatchWorkgroups(...this.windowBaseGroups);
       else if (this.activeDispatch) pass.dispatchWorkgroupsIndirect(this.activeDispatch, 13 * 4);
       else this.dispatchBasePages(pass);
       pass.end();
@@ -521,7 +570,8 @@ export class WebGPUUniformVelocityExtrapolator {
       pass.setBindGroup(0, fused ? this.fusedGroups[predicted ? 1 : 0] : this.hierarchyUpGroups[passIndex]);
       const prolongGroups = levelIndex < 0 ? this.windowBaseGroups
         : this.windowLevelGroups?.[levelIndex + 1];
-      if (this.activeDispatch && (levelIndex < 0 || Math.min(...targetDims) > 1) && prolongGroups) {
+      if (compact && levelIndex < 0) pass.dispatchWorkgroupsIndirect(this.shellDispatch, 0);
+      else if (this.activeDispatch && (levelIndex < 0 || Math.min(...targetDims) > 1) && prolongGroups) {
         pass.dispatchWorkgroups(...prolongGroups);
       } else if (this.activeDispatch && !this.windowBaseGroups
         && (levelIndex < 0 || Math.min(...targetDims) > 1)) {
@@ -537,7 +587,8 @@ export class WebGPUUniformVelocityExtrapolator {
       const pass = encoder.beginComputePass({ label: `${prefix} pack transport shell` });
       pass.setPipeline(pipelines.pack);
       pass.setBindGroup(0, predicted ? this.packPredictedGroup : this.packCurrentGroup);
-      if (this.activeDispatch && this.windowBaseGroups) pass.dispatchWorkgroups(...this.windowBaseGroups);
+      if (compact) pass.dispatchWorkgroupsIndirect(this.shellDispatch, 0);
+      else if (this.activeDispatch && this.windowBaseGroups) pass.dispatchWorkgroups(...this.windowBaseGroups);
       else if (this.activeDispatch) pass.dispatchWorkgroupsIndirect(this.activeDispatch, 13 * 4);
       else if(this.fieldPages)this.dispatchBasePages(pass);
       else pass.dispatchWorkgroups(
@@ -573,6 +624,7 @@ export class WebGPUUniformVelocityExtrapolator {
     this.valuesA.destroy(); this.valuesB.destroy();
     this.distancesA.destroy(); this.distancesB.destroy();
     this.resolvedValues.destroy(); this.resolvedDistances.destroy();
+    this.shellTiles.destroy(); this.shellDispatch.destroy();
     this.convergence.destroy();
     this.dispatchArgs.destroy();
     this.unusedDispatchStorage.destroy();

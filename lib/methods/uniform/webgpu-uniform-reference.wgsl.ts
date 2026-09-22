@@ -1274,11 +1274,11 @@ fn domainFaceSolidVelocity(id:vec3i,axis:u32,checkSolid:bool)->f32{
   if(!valid(id)||!valid(neighbor)||(!checkSolid&&!hasTerrain())){return 0.0;}
   return pressureFaceData(id,axis)[axis];
 }
-fn divergenceAt(id: vec3i, checkSolid: bool) -> f32 {
+fn divergenceAtWithCapacity(id: vec3i, checkSolid: bool, vi:f32) -> f32 {
   // CM11a Eqs. 8-10. Vi is the non-solid cell fraction; V+/- are the
   // corresponding face fractions. This is not the common blended-flux
   // shortcut V u + (1-V) us, whose solid terms are algebraically different.
-  let h=params.cellGravity.xyz;let vi=cellOpenFraction(id);var terms:array<f32,6>;
+  let h=params.cellGravity.xyz;var terms:array<f32,6>;
   for(var axis=0u;axis<3u;axis+=1u){
     var minus=id;minus[axis]-=1;
     let vp=pressureFaceVolumeFractionShared(id,axis);let vm=pressureFaceVolumeFractionShared(minus,axis);
@@ -1288,6 +1288,18 @@ fn divergenceAt(id: vec3i, checkSolid: bool) -> f32 {
     terms[2u*axis+1u]=-(vm*um)/h[axis]-(vm-vi)*usm;
   }
   return d4Sum6(terms);
+}
+fn divergenceAt(id:vec3i,checkSolid:bool)->f32{
+  return divergenceAtWithCapacity(id,checkSolid,cellOpenFraction(id));
+}
+// RHS can consume the exact interface/capacity already built for its finest
+// pressure row. No field changes between topology construction and RHS.
+fn volumeCorrectionDivergenceFromAuthority(id:vec3i,cap:f32,phi:f32)->f32{
+  ${geometric ? `let v=volume(id);let positive=min(0.5*max(0.0,v-cap),cap);
+  ${referenceDimension === 3 ? `var deficit=0.0;
+  if(cap>1e-5&&v<=cap&&phi<0.0){deficit=max(0.0,textureLoad(gammaIn,id,0).x-v);}
+  let rate=bitcast<f32>(atomicLoad(&sharpenDeposits[uvBalanceBase()]));
+  return (positive-rate*deficit)/max(params.dimsDt.w,1e-12);` : "return positive/max(params.dimsDt.w,1e-12);"}` : "return volumeCorrectionDivergence(id);"}
 }
 // Mass-Conserving Eulerian Liquid Simulation Sec 3.7: cells holding more
 // density than they represent add min(lambda (rho'-1), eta) artificial

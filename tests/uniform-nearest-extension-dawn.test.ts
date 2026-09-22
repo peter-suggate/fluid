@@ -8,6 +8,12 @@ import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/h
 import { readRgbaTexture3D } from "../lib/harness/webgpu-smoke-readbacks";
 import { WebGPUUniformVelocityExtrapolator } from "../lib/methods/uniform/webgpu-uniform-velocity-extrapolation";
 
+function equalFields(actual: Float32Array, expected: Float32Array, message: string): void {
+  assert.equal(actual.length, expected.length);
+  const first=actual.findIndex((value,i)=>value!==expected[i]);
+  assert.equal(first,-1,`${message}: first difference at ${first}: ${actual[first]} vs ${expected[first]}`);
+}
+
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 (modulePath ? test : test.skip)("nearest source extension isolates a falling drop from a remote pool with two sweeps", { timeout: 120_000 }, async () => {
   await acquireWebGPUExclusiveLock("dawn-test", "nearest source extension");
@@ -21,7 +27,7 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
     device.addEventListener("uncapturederror", e => { e.preventDefault(); errors.push(e.error.message); });
     const d = device;
     const dims = [64, 64, 8] as const, padded = [66, 66, 10] as const;
-    async function run(pool: boolean, nearest: boolean, fused: boolean, predicted = false, varying = false) {
+    async function run(pool: boolean, nearest: boolean, fused: boolean, predicted = false, varying = false, shell: "dense" | "full" | "empty" = "dense") {
       const textures: GPUTexture[] = [], buffers: GPUBuffer[] = [];
       const texture = (size: readonly number[], format: GPUTextureFormat) => {
         const t = d.createTexture({ size: [...size], dimension: "3d", format,
@@ -48,14 +54,20 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
       write(density,rho,1);write(open,faces,4);write(velocity,speeds,4);
       write(predictedVelocity,Float32Array.from(speeds,v=>v*2),4);
       const params = buffer(208,GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST), values = new Float32Array(52);
-      values.set([64,64,8,1/30, .05,.05,.05,0]);d.queue.writeBuffer(params,0,values);
+      values.set([64,64,8,1/30, .05,.05,.05,0]);/* twoLevel.y */ values[45]=shell==="dense"?0:1;d.queue.writeBuffer(params,0,values);
       const active = buffer(64,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST), region = new Uint32Array(16);
       region.set(dims,10);region.set([16,16,2],13);d.queue.writeBuffer(active,0,region);
-      const scratch = buffer(4,GPUBufferUsage.STORAGE);
+      const tileCount=16*16*2;
+      const scratch = buffer(shell==="dense"?4:4*(rho.length+4*tileCount),GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST);
+      if(shell!=="dense") {
+        const classes=new Uint32Array(4*tileCount);
+        if(shell==="full")for(let i=0;i<tileCount;i++)classes[4*i+3]=2;
+        d.queue.writeBuffer(scratch,4*rho.length,classes);
+      }
       const extension = new WebGPUUniformVelocityExtrapolator(d,dims,[.05,.05,.05],params,density,open,velocity,predictedVelocity,transport,predictedTransport,active,scratch,undefined,nearest,fused);
       try {
         extension.setFrontPasses(2);await extension.initialize();
-        const encoder=d.createCommandEncoder();extension.encode(encoder,predicted);d.queue.submit([encoder.finish()]);
+        const encoder=d.createCommandEncoder();extension.encode(encoder,predicted,undefined,false,shell!=="dense");d.queue.submit([encoder.finish()]);
         const field=await readRgbaTexture3D(d,predicted?predictedTransport:transport,...padded);
         return {field,passes:extension.encodedPassCount};
       } finally { extension.destroy();textures.forEach(t=>t.destroy());buffers.forEach(b=>b.destroy()); }
@@ -69,12 +81,14 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
       assert.equal(at(fixed.field,y),at(alone.field,y));
     }
     assert.equal(at(fixed.field,4),0,"pool source stays stationary");
-    assert.deepEqual(fixed.field,unfused.field,"fused packing preserves every value and known/open bit");
+    equalFields(fixed.field,unfused.field,"fused packing preserves every value and known/open bit");
     assert.equal(fixed.passes,unfused.passes-1);
-    const predicted=await run(true,true,true,true), predictedUnfused=await run(true,true,false,true);
-    assert.deepEqual(predicted.field,predictedUnfused.field);assert.equal(at(predicted.field,36),-8);
-    const varying=await run(true,true,true,false,true), varyingUnfused=await run(true,true,false,false,true);
-    assert.deepEqual(varying.field,varyingUnfused.field,"packing also agrees for varying three-component velocities");
+    const predicted=await run(true,true,true,true), predictedUnfused=await run(true,true,false,true,false,"full");
+    equalFields(predicted.field,predictedUnfused.field,"predicted compact shell");assert.equal(at(predicted.field,36),-8);
+    const varying=await run(true,true,true,false,true), varyingUnfused=await run(true,true,false,false,true,"full");
+    equalFields(varying.field,varyingUnfused.field,"packing also agrees for varying three-component velocities");
+    const empty=await run(false,true,true,false,false,"empty");
+    assert.ok(empty.field.every(v=>v===0),"empty shell issues zero finest work without publishing stale transport");
     assert.deepEqual(errors,[]);
     console.log(JSON.stringify({prior:at(prior.field,36),fixed:at(fixed.field,36),passes:fixed.passes}));
   } finally {device?.destroy();await releaseWebGPUExclusiveLock();}

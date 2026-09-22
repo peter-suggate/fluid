@@ -62,7 +62,7 @@ const ENTRY_POINTS = [
 type EntryPoint = typeof ENTRY_POINTS[number];
 
 const ENTRY_BINDINGS: Readonly<Record<EntryPoint, readonly number[]>> = Object.freeze({
-  mgBuildFinestTopology: [0, 6, 8], mgBuildFinestRhs: [0, 2, 4, 12],
+  mgBuildFinestTopology: [0, 6, 8], mgBuildFinestRhs: [0, 2, 4, 5, 7, 12],
   mgDownsampleTopology: [0, 5, 6, 7, 8], mgExtrapolatePhiOneCell: [0, 5, 6, 7],
   mgBakeCoefficients: [0, 5, 7, 15],
   mgBuildSmoothTiles: [0, 14, 18], mgPublishSmoothTiles: [0, 18],
@@ -307,7 +307,7 @@ export class WebGPUUniformPressureMultigrid {
      * that the scene has no depth symmetry; the full-lattice and dense-storage
      * conditions are checked here.
      */
-    inPlaceSmoothing = false, private readonly scratchFields?: UniformTexturePages, compactSmoothing = true) {
+    inPlaceSmoothing = false, private readonly scratchFields?: UniformTexturePages, compactSmoothing = true, private readonly reuseFinestAuthority = true, private readonly maskFirst = true) {
     this.inPlaceCapable = inPlaceSmoothing && !activeDispatch && !pagedStorage && programs === undefined;
     this.inPlaceSmoothing = this.inPlaceCapable;
     this.visitLanes = Math.min(FUSED_VISIT_LANES, device.limits.maxComputeInvocationsPerWorkgroup,
@@ -512,6 +512,8 @@ export class WebGPUUniformPressureMultigrid {
         layout: this.device.createPipelineLayout({ label: `Uniform CM11a layout - ${entryPoint}`,
           bindGroupLayouts: [this.tileEntry(entryPoint) ? this.smoothTileInputLayout! : entryPoint === "mgPublishCycleDispatch" ? emptyUniformLayout : input.uniformBindGroupLayout, this.groupLayouts[entryPoint]] }),
         compute: { module: shaderModule, entryPoint,
+          ...(entryPoint === "mgBakeCoefficients" ? {constants:{MG_MASK_FIRST:Number(this.maskFirst && uniformAbOn("maskfirst"))}} : {}),
+          ...(entryPoint === "mgBuildFinestRhs" ? {constants:{MG_REUSE_FINEST_AUTHORITY:Number(this.reuseFinestAuthority && uniformAbOn("pressureauthority"))}} : {}),
           ...(entryPoint === "mgSmoothVisitInPlace" ? { constants: { MG_VISIT_LANES: this.visitLanes } } : {}),
           ...(entryPoint === "mgSmoothRowInPlace" || /Quiet$/.test(entryPoint)
             ? { constants: { MG_ROW_SEGMENT: ROW_SEGMENT } } : {}) } },

@@ -14,6 +14,7 @@ import { resolveMethodValues } from "../lib/core/method-contract";
 import { uniformVolumeMethod } from "../lib/methods/uniform/uniform-volume-method";
 import type { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
 const arg=(key:string,fallback:string)=>process.argv.find(a=>a.startsWith(`--${key}=`))?.slice(key.length+3)??fallback;
+const passFilter=new RegExp(arg("passes","^(uv|Advect dense|Redistance dense)"));
 const out=arg("out","/tmp/figure9-transport"),steps=Number(arg("steps","120"));
 await acquireWebGPUExclusiveLock("dawn-probe","uniform geometric transport cost");
 let device:GPUDevice|undefined,solver:WebGPUUniformReferenceSolver|undefined;
@@ -30,7 +31,7 @@ try {
   return new Proxy(encoder,{get(enc,field){
    if(field==="beginComputePass")return (desc?:GPUComputePassDescriptor)=>{
     const label=desc?.label??"";
-    if(active&&(/^(uv|Advect dense|Redistance dense)/.test(label))){
+    if(active&&passFilter.test(label)){
      const index=labels.length*2;assert.ok(index+1<512);labels.push(label);sampled=true;
      return enc.beginComputePass({...desc,timestampWrites:{querySet:queries,beginningOfPassWriteIndex:index,endOfPassWriteIndex:index+1}});
     }

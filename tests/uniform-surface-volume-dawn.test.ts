@@ -10,7 +10,7 @@ import { uniformSurfaceVolumeWGSL } from "../lib/methods/uniform/uniform-surface
 const modulePath=process.env.WEBGPU_NODE_MODULE;
 (modulePath?test:test.skip)("3D total surface volume constraint",{timeout:120000},async t=>{
   await acquireWebGPUExclusiveLock("dawn-test","3D total surface volume");
-  let device:GPUDevice|undefined;let correction:UniformSurfaceVolumeCorrection|undefined;
+  let device:GPUDevice|undefined;let correction:UniformSurfaceVolumeCorrection|undefined;let denseCorrection:UniformSurfaceVolumeCorrection|undefined;
   const textures:GPUTexture[]=[];
   try {
     const dawn=await import(pathToFileURL(modulePath!).href);Object.assign(globalThis,dawn.globals);
@@ -23,6 +23,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
     const dims=[20,18,16] as const,h=[.05,.06,.07] as const;
     const n=dims[0]*dims[1]*dims[2],vd=dims.map(x=>x+1),nv=vd[0]!*vd[1]!*vd[2]!;
     const texture=(size:readonly number[])=>{const texture=device!.createTexture({size:[...size],format:"r32float",dimension:"3d",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING|GPUTextureUsage.COPY_SRC|GPUTextureUsage.COPY_DST});textures.push(texture);return texture;};
+    const densePhi=texture(vd);
     const phi=texture(vd),volume=texture(dims),capacity=texture(dims);
     const write=(texture:GPUTexture,data:Float32Array)=>device!.queue.writeTexture({texture},data as Float32Array<ArrayBuffer>,{bytesPerRow:texture.width*4,rowsPerImage:texture.height},[texture.width,texture.height,texture.depthOrArrayLayers]);
     const read=async(texture:GPUTexture)=>{
@@ -34,7 +35,19 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
       } finally {b.unmap();b.destroy();}
     };
     correction=new UniformSurfaceVolumeCorrection(device,dims,h,phi,volume,capacity);await correction.initialize();
-    const run=async()=>{const e=device!.createCommandEncoder();correction!.encode(e);device!.queue.submit([e.finish()]);await device!.queue.onSubmittedWorkDone();return read(phi);};
+    denseCorrection=new UniformSurfaceVolumeCorrection(device,dims,h,densePhi,volume,capacity,undefined,false);
+    await denseCorrection.initialize();
+    const run=async()=>{
+      const e=device!.createCommandEncoder();
+      e.copyTextureToTexture({texture:phi},{texture:densePhi},vd);
+      correction!.encode(e);denseCorrection!.encode(e);
+      device!.queue.submit([e.finish()]);await device!.queue.onSubmittedWorkDone();
+      const result=await read(phi),control=await read(densePhi);
+      // Compact reduction changes summation order; compare physical phi in m.
+      for(let i=0;i<result.length;i++)assert.ok(Number.isFinite(result[i])&&Math.abs(result[i]!-control[i]!)<2e-5*Math.min(...h),
+        `bounded correction at ${i}: ${result[i]} vs dense ${control[i]}`);
+      return result;
+    };
     const coordinate=(i:number,d:readonly number[])=>[i%d[0]!,Math.floor(i/d[0]!)%d[1]!,Math.floor(i/(d[0]!*d[1]!))];
     write(capacity,new Float32Array(n).fill(1));
     for(const axis of [0,1,2]) await t.test(`fractional plane on axis ${axis}, stretched phi`,async()=>{
@@ -78,6 +91,26 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
       const original=new Float32Array(nv).fill(.5);write(phi,original);write(volume,new Float32Array(n).fill(.2));
       assert.deepEqual(await run(),original);
     });
+    await t.test("zero work after a nonempty surface clears reused band scratch",async()=>{
+      const original=new Float32Array(nv).fill(.5);
+      write(phi,original);write(volume,new Float32Array(n));write(capacity,new Float32Array(n).fill(1));
+      assert.deepEqual(await run(),original);
+    });
+    await t.test("full liquid with no interface retains bulk contributions",async()=>{
+      const original=new Float32Array(nv).fill(-.5);
+      write(phi,original);write(volume,new Float32Array(n).fill(1));
+      assert.deepEqual(await run(),original);
+    });
+    await t.test("remote volume and disconnected boundary surfaces enter the global constraint",async()=>{
+      const original=Float32Array.from({length:nv},(_,i)=>{
+        const q=coordinate(i,vd);
+        return Math.min(Math.hypot(...q.map((v,a)=>(v-2)*h[a]!))-.07,
+          Math.hypot(...q.map((v,a)=>(v-(dims[a]!-2))*h[a]!))-.08);
+      });
+      const values=new Float32Array(n);values[n/2]=.25;values[0]=.3;values[n-1]=.4;
+      write(phi,original);write(volume,values);await run();
+      assert.deepEqual(await read(volume),values);
+    });
     assert.deepEqual(errors,[]);
-  } finally {correction?.destroy();for(const texture of textures)texture.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
+  } finally {denseCorrection?.destroy();correction?.destroy();for(const texture of textures)texture.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
 });

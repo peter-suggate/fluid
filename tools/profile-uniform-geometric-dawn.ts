@@ -36,6 +36,7 @@ const stats = (values: number[]) => {
 const rows: { frame: number; time_s: number; wall_ms: number; trace: NonNullable<WebGPUUniformReferenceSolver["info"]["physicsTrace"]>; cpuTrace: unknown; work: Record<string,unknown> }[] = [];
 await acquireWebGPUExclusiveLock("dawn-probe", `Uniform Geometric stage profile: ${sceneId}`);
 let device: GPUDevice | undefined, solver: WebGPUUniformReferenceSolver | undefined;
+let surfaceWorkReadback: GPUBuffer | undefined;
 let pressureWorkReadback: GPUBuffer | undefined;
 let allocationAudit: ReturnType<typeof auditUniformGPUAllocations> | undefined;
 try {
@@ -65,6 +66,9 @@ try {
   unsubscribe();
   const pressureWork=solver.pressureSmoothingWorkSourceForQA;
   if(pressureWork.length)pressureWorkReadback=device.createBuffer({label:"Pressure tile profile readback",size:4*pressureWork.length,
+    usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+  const surfaceWork=solver.surfaceCorrectionWorkSourceForQA;
+  if(surfaceWork)surfaceWorkReadback=device.createBuffer({label:"Surface window profile readback",size:surfaceWork.size,
     usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
   await device.queue.onSubmittedWorkDone();
   const setup_ms = performance.now()-start;
@@ -97,6 +101,13 @@ try {
       work.uniformPressureSmoothingTiles=Array.from(new Uint32Array(pressureWorkReadback.getMappedRange()),(active,i)=>({level:i,active,capacity:pressureWork[i]!.capacity}));
       pressureWorkReadback.unmap();
     }
+    if(surfaceWorkReadback && surfaceWork){
+      const encoder=device.createCommandEncoder();encoder.copyBufferToBuffer(surfaceWork,0,surfaceWorkReadback,0,surfaceWork.size);
+      device.queue.submit([encoder.finish()]);await surfaceWorkReadback.mapAsync(GPUMapMode.READ);
+      const words=new Uint32Array(surfaceWorkReadback.getMappedRange());
+      work.uniformSurfaceCorrectionWork={origin:Array.from(words.slice(8,11)),dimensions:Array.from(words.slice(12,15)),cells:words[11],vertices:words[15]};
+      surfaceWorkReadback.unmap();
+    }
     rows.push({frame,time_s:frame/30,wall_ms,trace,cpuTrace:info.physicsCPUTrace,work});
     assert.deepEqual(errors,[]);
     if(frame%10===0) console.log(JSON.stringify({frame,wall_ms,gpu_ms:trace.total_ms,volumeCellSum:info.volumeCellSum}));
@@ -107,10 +118,10 @@ try {
     return {frames:[selected[0]!.frame,selected.at(-1)!.frame],wall_ms:stats(selected.map(r=>r.wall_ms)),gpu_ms:stats(selected.map(r=>r.trace.total_ms)),stages:labels.map(label=>({label,...stats(selected.map(r=>r.trace.phases.filter(p=>p.label===label).reduce((s,p)=>s+p.duration_ms,0)))})).sort((a,b)=>b.mean-a.mean)};
   };
   const windows = Object.fromEntries(Object.entries({all:rows.filter(r=>r.frame>4),freeFall:rows.filter(r=>r.frame>4&&r.frame<=24),impactAndSpread:rows.filter(r=>r.frame>=25)}).filter(([,rs])=>rs.length>0).map(([name,rs])=>[name,summarize(rs)]));
-  const report={capturedAt:new Date().toISOString(),sceneId,method:uniformVolumeMethod.id,backend:"Dawn/Metal",adapter:{vendor:adapter.info.vendor,architecture:adapter.info.architecture,device:adapter.info.device,description:adapter.info.description},scope:"Instrumented, queue-fenced simulation. Rendering, 115 ms trace-cadence gaps and stats readbacks excluded from wall timings. First four frames excluded from summaries. GPU stages are seam intervals, not isolated kernel durations.",lattice,setup_ms,values,scene,windows,rows,validationErrors:errors};
+  const report={abOff:process.env.FLUID_UNIFORM_AB_OFF ?? "",capturedAt:new Date().toISOString(),sceneId,method:uniformVolumeMethod.id,backend:"Dawn/Metal",adapter:{vendor:adapter.info.vendor,architecture:adapter.info.architecture,device:adapter.info.device,description:adapter.info.description},scope:"Instrumented, queue-fenced simulation. Rendering, 115 ms trace-cadence gaps, stats and work-count readbacks excluded from wall timings. First four frames excluded from summaries. GPU stages are seam intervals, not isolated kernel durations.",lattice,setup_ms,values,scene,windows,rows,validationErrors:errors};
   const allocationSnapshot=allocationAudit?.snapshot();
   writeFileSync(out,JSON.stringify({...report,allocationAudit:allocationSnapshot},null,2)+"\n");
   if(maxGPUBytes>0)assert.ok(allocationSnapshot!.peakBytes<=maxGPUBytes,
     `Peak live GPU resources ${allocationSnapshot!.peakBytes} exceed budget ${maxGPUBytes}`);
   console.log(JSON.stringify({out,windows},null,2));
-} finally { pressureWorkReadback?.destroy(); solver?.destroy(); device?.destroy(); await releaseWebGPUExclusiveLock(); }
+} finally { surfaceWorkReadback?.destroy(); pressureWorkReadback?.destroy(); solver?.destroy(); device?.destroy(); await releaseWebGPUExclusiveLock(); }

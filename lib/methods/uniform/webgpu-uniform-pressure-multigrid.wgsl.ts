@@ -403,6 +403,7 @@ fn mgBuildFinestTopology(@builtin(global_invocation_id) gid:vec3u){
   textureStore(mgPhiOut,id,vec4f(0.5*min(h.x,min(h.y,h.z))));textureStore(mgVolumeOut,id,topology);
 }
 
+override MG_REUSE_FINEST_AUTHORITY:bool=true;
 @compute @workgroup_size(4,4,4)
 fn mgBuildFinestRhs(@builtin(global_invocation_id) gid:vec3u){
   if(mgSkipCycle()){return;}
@@ -411,8 +412,17 @@ fn mgBuildFinestRhs(@builtin(global_invocation_id) gid:vec3u){
   var rhs=0.0;var minimum=-3.402823e38;
   if(mgSimulationCell(id,mg.levelDims.xyz,simulation)){
     minimum=select(-3.402823e38,0.0,cellInsideSolid(simulation)||cellInsideTerrain(simulation));
-    if(pressureLiquid(simulation)){
-      let checkSolid=nearAnyBody(worldCell(simulation));rhs=params.physical.x*(divergenceAt(simulation,checkSolid)-volumeCorrectionDivergence(simulation))/params.dimsDt.w;
+    var liquid=false;var phi=0.0;
+    if(MG_REUSE_FINEST_AUTHORITY&&geometricVolumeEnabled()){
+      phi=mgPhi(id);liquid=phi<0.0;
+    }else{liquid=pressureLiquid(simulation);}
+    if(liquid){
+      let checkSolid=nearAnyBody(worldCell(simulation));
+      if(MG_REUSE_FINEST_AUTHORITY&&geometricVolumeEnabled()){
+        let capacity=mgTopology(id).x;
+        rhs=params.physical.x*(divergenceAtWithCapacity(simulation,checkSolid,capacity)
+          -volumeCorrectionDivergenceFromAuthority(simulation,capacity,phi))/params.dimsDt.w;
+      }else{rhs=params.physical.x*(divergenceAt(simulation,checkSolid)-volumeCorrectionDivergence(simulation))/params.dimsDt.w;}
     }
   }else if(!mgOpenTopHalo(id,mg.levelDims.xyz)){
     minimum=0.0;
@@ -566,18 +576,26 @@ fn mgExtrapolatePhiOneCell(@builtin(global_invocation_id) gid:vec3u){
   textureStore(mgPhiOut,id,vec4f(select(mgPhi(id),sum/max(weight,1e-9),weight>0.0)));
 }
 
+override MG_MASK_FIRST:bool=true;
 @compute @workgroup_size(4,4,4)
 fn mgBakeCoefficients(@builtin(global_invocation_id) gid:vec3u){
   if(mgSkipCycle()){return;}
   let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
+  ${neighbourMask ? `var mask=select(0u,1u,mgLiquid(id));
+  let e=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
+  for(var n=0u;n<6u;n+=1u){if(mgLiquid(id+e[n])){mask|=2u<<n;}}
+  // No liquid row can read any face owned here when all seven flags are zero.
+  // Clear the record as well: shared scratch may still contain transport data.
+  if(MG_MASK_FIRST&&mask==0u){textureStore(mgCoefficientsOut,id,vec4f(0.0));return;}
   let coefficients=vec3f(
     mgCoefficientRaw(id,id+vec3i(1,0,0),0u),
     mgCoefficientRaw(id,id+vec3i(0,1,0),1u),
     mgCoefficientRaw(id,id+vec3i(0,0,1),2u));
-  ${neighbourMask ? `var mask=select(0u,1u,mgLiquid(id));
-  let e=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
-  for(var n=0u;n<6u;n+=1u){if(mgLiquid(id+e[n])){mask|=2u<<n;}}
-  textureStore(mgCoefficientsOut,id,vec4f(coefficients,f32(mask)));` : `textureStore(mgCoefficientsOut,id,vec4f(coefficients,select(0.0,1.0,mgLiquid(id))));`}
+  textureStore(mgCoefficientsOut,id,vec4f(coefficients,f32(mask)));` : `  let coefficients=vec3f(
+    mgCoefficientRaw(id,id+vec3i(1,0,0),0u),
+    mgCoefficientRaw(id,id+vec3i(0,1,0),1u),
+    mgCoefficientRaw(id,id+vec3i(0,0,1),2u));
+textureStore(mgCoefficientsOut,id,vec4f(coefficients,select(0.0,1.0,mgLiquid(id))));`}
 }
 
 // CM11a Eq. 19-20. mgMinimumIn and mgPressureIn are the fine p_min and

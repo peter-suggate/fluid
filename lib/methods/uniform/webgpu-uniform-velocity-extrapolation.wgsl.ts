@@ -74,6 +74,25 @@ struct DispatchArgs {
 @group(0) @binding(13) var sourceOrigins: texture_3d<u32>;
 @group(0) @binding(14) var existingOrigins: texture_3d<u32>;
 @group(0) @binding(15) var outputOrigins: texture_storage_3d<rgba32uint, write>;
+// Separate storage from the indirect buffer to avoid read/write usage aliasing.
+@group(0) @binding(16) var<storage, read_write> shellTiles: array<atomic<u32>>;
+override COMPACT_SHELL: bool = false;
+override REUSE_CONVERGED_DISTANCE: bool = false;
+@compute @workgroup_size(64)
+fn buildShellList(@builtin(global_invocation_id) gid:vec3u) {
+  let c=vec3u(coarseDims()); let i=gid.x;
+  if(i>=c.x*c.y*c.z){return;}
+  if((tileScratch[tileTableBase()+4u*i+3u]&2u)==0u){return;}
+  let slot=atomicAdd(&shellTiles[0],1u);atomicStore(&shellTiles[4u+slot],i);
+}
+@compute @workgroup_size(1)
+fn publishShellList() {
+  // Two dispatch axes cover the full tile capacity without a 65535-group limit.
+  let count=atomicLoad(&shellTiles[0]);let width=min(count,256u);
+  atomicStore(&shellTiles[1],width);
+  atomicStore(&shellTiles[2],(count+max(width,1u)-1u)/max(width,1u));
+  atomicStore(&shellTiles[3],1u);
+}
 override SOURCE_AWARE_HIERARCHY: bool = false;
 // Pipeline constants make provenance index decoding shifts/multiplies instead
 // of per-candidate dynamic integer divisions, especially on power-of-two grids.
@@ -122,13 +141,19 @@ fn activeUnpackExtent(packed:u32)->vec3u{
   return vec3u(packed&1023u,(packed>>10u)&1023u,(packed>>20u)&1023u);
 }
 fn activeBaseId(gid:vec3u)->vec3i{
+  if(COMPACT_SHELL && tiledExtension()) {
+    let slot=gid.x/4u+(gid.y/4u)*atomicLoad(&shellTiles[1]);
+    if(slot>=atomicLoad(&shellTiles[0])){return vec3i(-1);}
+    let tile=atomicLoad(&shellTiles[4u+slot]);let c=vec3u(coarseDims());
+    return vec3i(vec3u(tile%c.x,(tile/c.x)%c.y,tile/(c.x*c.y))*4u+gid%vec3u(4));
+  }
   let origin=vec3u(activeRegion[7],activeRegion[8],activeRegion[9]);
   if(any(gid>=vec3u(activeRegion[10],activeRegion[11],activeRegion[12])-origin)){return vec3i(-1);}
   return vec3i(gid)+vec3i(origin);
 }
 fn hierarchyActiveId(gid:vec3u)->vec3i{
-  if(frontParams.activeLevel==0xffffffffu){return vec3i(gid);}
   if(frontParams.hierarchyTargetUsesBaseDims!=0u){return activeBaseId(gid);}
+  if(frontParams.activeLevel==0xffffffffu){return vec3i(gid);}
   let base=16u+10u*frontParams.activeLevel;
   if(any(gid>=activeUnpackExtent(activeRegion[base+9u]))){return vec3i(-1);}
   // Pressure hierarchy coordinates carry a one-cell domain halo; velocity
@@ -328,6 +353,15 @@ fn activeNodeConverges(p: vec3i, component: u32) -> bool {
   let epsilon = fimConvergenceEpsilon(oldDistance);
   return abs(updatedDistance - oldDistance) <= epsilon;
 }
+// Return convergence and its solved distance together; callers need both.
+fn convergedDistance(p:vec3i,component:u32)->f32 {
+  if(!openBaseFace(p,component)||sourceFace(p,component)||!shellAt(p)){return DISTANCE_INFINITY;}
+  let state=textureLoad(secondaryIn,p,0);let old=state[component];
+  if(!isActive(state,component)||old>=0.5*DISTANCE_INFINITY){return DISTANCE_INFINITY;}
+  let updated=min(old,godunovDistance(p,component));
+  if(updated>accurateBandDistance()||abs(updated-old)>fimConvergenceEpsilon(old)){return DISTANCE_INFINITY;}
+  return updated;
+}
 fn activatedByConvergedUpwindNeighbor(p: vec3i, component: u32) -> bool {
   let d = baseDims();
   let candidate = godunovDistance(p, component);
@@ -337,6 +371,11 @@ fn activatedByConvergedUpwindNeighbor(p: vec3i, component: u32) -> bool {
   for (var axis = 0u; axis < 3u; axis += 1u) {
     var step = vec3i(0); step[axis] = 1;
     let low = p - step; let high = p + step;
+    if(REUSE_CONVERGED_DISTANCE) {
+      if(ownDistance>convergedDistance(low,component)+epsilon
+        ||ownDistance>convergedDistance(high,component)+epsilon){return true;}
+      continue;
+    }
     if (activeNodeConverges(low, component)) {
       let updatedNeighborDistance = min(neighborDistance(low, component), godunovDistance(low, component));
       if (ownDistance > updatedNeighborDistance + epsilon) { return true; }
@@ -418,6 +457,11 @@ fn prepareActiveDispatch(@builtin(global_invocation_id) gid: vec3u) {
     clearActiveCounter(source);
   }
   let activeCount = loadActiveCounter(targetIndex);
+  if(COMPACT_SHELL && tiledExtension()) {
+    atomicStore(&dispatchArgs.x,select(0u,atomicLoad(&shellTiles[1]),activeCount>0u));
+    atomicStore(&dispatchArgs.y,select(0u,atomicLoad(&shellTiles[2]),activeCount>0u));
+    atomicStore(&dispatchArgs.z,select(0u,1u,activeCount>0u));return;
+  }
   atomicStore(&dispatchArgs.x, select(0u, activeRegion[13], activeCount > 0u));
   atomicStore(&dispatchArgs.y, select(0u, activeRegion[14], activeCount > 0u));
   atomicStore(&dispatchArgs.z, select(0u, activeRegion[15], activeCount > 0u));

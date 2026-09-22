@@ -7,7 +7,7 @@ export const UNIFORM_VOLUME_ENTRIES = [
   "uvFinishDonorSums", "uvFallback", "uvNormalizeRows", "uvNormalizeDonors", "uvGather",
   "uvPrepareSharpen", "uvProposeSharpen", "uvLimitSharpen", "uvCommitSharpen", "uvPublish",
   "uvCacheSharpenCells", "uvCacheSharpenFaces",
-  "uvBalanceMeasure", "uvBalanceReduce",
+  "uvBalanceMeasure", "uvBalanceReduce", "uvBalanceReduceChunks", "uvTwoLevelSeedCooperative",
   "uvAgreementResidual", "uvCorrectionCapacity", "uvCorrectionTargets",
 ] as const;
 /** The four Sec. 3.5 sweeps that exist in a dense and a 4h work-map variant. */
@@ -38,6 +38,33 @@ export const UNIFORM_VOLUME_SHARPEN_TILE_COUNT_WORD = 7;
 export const UNIFORM_VOLUME_SHARPEN_TILE_MAP_WORD = 8;
 export const UNIFORM_VOLUME_EDGE_BYTES = 40;
 const donorTiles = uniformAbOn("donortiles");
+/** Same reconstruction; cached mode reuses the cell's eight vertex loads. */
+export function uniformVolumeTargetWGSL(cached: boolean): string {
+  return /* wgsl */ `fn uvTarget(id:vec3i)->f32{
+  var samples:array<f32,8>;var centre=0.0;var fill=0.0;var magnitude=0.0;
+  ${cached ? `// All eight quarter-cell probes interpolate the same eight vertices.
+  // uvTarget is called only for valid cells, so each probe's clamped base is
+  // exactly id and its fractions are exactly 1/4 or 3/4 in binary FP32.
+  var vertices:array<f32,8>;
+  for(var j=0u;j<8u;j++){vertices[j]=textureLoad(uvPhiIn,id+uvCorner(j),0).x;}
+  for(var k=0u;k<8u;k++){
+    let f=vec3f(0.25)+0.5*vec3f(uvCorner(k));var weighted:array<f32,8>;
+    for(var j=0u;j<8u;j++){let w=select(vec3f(1)-f,f,uvCorner(j)==vec3i(1));
+      weighted[j]=vertices[j]*w.x*w.y*w.z;}
+    let value=d4Sum8(weighted);` : `for(var k=0u;k<8u;k++){let p=vec3f(id)+vec3f(0.25)+0.5*vec3f(uvCorner(k));
+    let value=uvPhi(p);`}
+    samples[k]=value;centre+=0.125*value;
+    magnitude=max(magnitude,abs(value));fill+=select(select(0.0,1.0,value<0.0),0.5,value==0.0);}
+  var gradient=vec3f(0);
+  for(var k=0u;k<8u;k++){gradient+=(2.0*vec3f(uvCorner(k))-vec3f(1))*samples[k]/2.0;}
+  var residual=0.0;
+  for(var k=0u;k<8u;k++){let sign=2.0*vec3f(uvCorner(k))-vec3f(1);
+    residual=max(residual,abs(samples[k]-(centre+dot(gradient,0.25*sign))));}
+  let fraction=select(fill/8.0,geometricPlaneBoxFraction(gradient,-centre,vec3f(1)),residual<=1e-4*(1.0+magnitude));
+  return fraction*uvOpen(id);
+}`;
+}
+
 export const uniformVolumeWGSL = /* wgsl */ `
 ${geometricPlaneBoxWGSL}
 @group(0) @binding(31) var uvPhiIn:texture_3d<f32>;
@@ -433,19 +460,7 @@ fn uvGather(@builtin(global_invocation_id)gid:vec3u){
   textureStore(volumeOut,id,vec4f(uvDustFloor(value)));
   textureStore(gammaOut,id,vec4f(uvTarget(id)));
 }
-fn uvTarget(id:vec3i)->f32{
-  var samples:array<f32,8>;var centre=0.0;var fill=0.0;var magnitude=0.0;
-  for(var k=0u;k<8u;k++){let p=vec3f(id)+vec3f(0.25)+0.5*vec3f(uvCorner(k));
-    let value=uvPhi(p);samples[k]=value;centre+=0.125*value;
-    magnitude=max(magnitude,abs(value));fill+=select(select(0.0,1.0,value<0.0),0.5,value==0.0);}
-  var gradient=vec3f(0);
-  for(var k=0u;k<8u;k++){gradient+=(2.0*vec3f(uvCorner(k))-vec3f(1))*samples[k]/2.0;}
-  var residual=0.0;
-  for(var k=0u;k<8u;k++){let sign=2.0*vec3f(uvCorner(k))-vec3f(1);
-    residual=max(residual,abs(samples[k]-(centre+dot(gradient,0.25*sign))));}
-  let fraction=select(fill/8.0,geometricPlaneBoxFraction(gradient,-centre,vec3f(1)),residual<=1e-4*(1.0+magnitude));
-  return fraction*uvOpen(id);
-}
+${uniformVolumeTargetWGSL(uniformAbOn("targetcache"))}
 // After transport the fixed stencil arena is scratch for face proposals and
 // cell budgets: three positive-face fluxes, surplus, need, phi, and two limits.
 // 4h work map for the eight sharpening sweeps. Phi is fixed throughout them, so
@@ -712,6 +727,44 @@ fn uvTwoLevelSeed(@builtin(global_invocation_id)gid:vec3u){
     if(textureLoad(uvPhiIn,vec3i(x,y,z),0).x<band){seed=true;transportSeed=true;}}}}
   atomicStore(&sharpenDeposits[slot+3u],select(0,3,seed)|select(0,4,transportSeed));
 }
+// Same census as uvTwoLevelSeed, with one 4x4x4 workgroup per tile.
+// Adjacent lanes read adjacent cells/vertices instead of each lane serially
+// scanning 64 cells and 125 vertices. Only OR and nonnegative max reductions
+// are used, preserving the exact classes and travel bound.
+var<workgroup> uvSeedFlags:atomic<u32>;
+var<workgroup> uvSeedTravel:atomic<u32>;
+@compute @workgroup_size(4,4,4)
+fn uvTwoLevelSeedCooperative(@builtin(workgroup_id)group:vec3u,
+ @builtin(local_invocation_id)local:vec3u,@builtin(local_invocation_index)lane:u32){
+  let t=vec3i(group);if(any(t>=uvCoarseDims())){return;}
+  let slot=uvCoarseBase()+4u*uvCoarseIndex(t);
+  let included=uvTileInWindow(t)||uvStepHasExternalSource();
+  if(lane==0u){atomicStore(&uvSeedFlags,0u);atomicStore(&uvSeedTravel,0u);}
+  workgroupBarrier();
+  let id=4*t+vec3i(local);var flags=0u;
+  if(included&&valid(id)){
+    let dust=select(params.tuning.z,1e-6,params.tuning.z<=0.0);
+    if(abs(volume(id))>=dust||dropSource(id)>0.0||inflowSweptPlugSource(id,params.dimsDt.w)>0.0){flags=7u;}
+    if(uvOpen(id)<0.99999){flags|=3u;}
+    let step=abs(velocity(id))*params.dimsDt.w/params.cellGravity.xyz;
+    atomicMax(&uvSeedTravel,bitcast<u32>(max(step.x,max(step.y,step.z))));
+  }
+  let extent=vec3u(min(vec3i(5),dims()-4*t+vec3i(1)));
+  let count=extent.x*extent.y*extent.z;
+  let h=params.cellGravity.xyz;let band=4.0*max(h.x,max(h.y,h.z));
+  if(included){
+    for(var index=lane;index<count;index+=64u){
+      let p=4*t+vec3i(i32(index%extent.x),i32((index/extent.x)%extent.y),i32(index/(extent.x*extent.y)));
+      if(textureLoad(uvPhiIn,p,0).x<band){flags|=7u;}
+    }
+  }
+  if(flags!=0u){atomicOr(&uvSeedFlags,flags);}
+  workgroupBarrier();
+  if(lane==0u){
+    atomicStore(&sharpenDeposits[slot+3u],i32(atomicLoad(&uvSeedFlags)));
+    atomicMax(&sharpenDeposits[uvCoarsePlane(2u)+2u],i32(atomicLoad(&uvSeedTravel)));
+  }
+}
 // Chebyshev dilation, separated into three axis scans. Each scan preserves
 // FINE, SHELL and TRANSPORT bits with their independent support radii. Chebyshev
 // balls compose, so SHELL is exactly FINE dilated by s. The pair of single-word
@@ -846,12 +899,30 @@ fn uvBalanceMeasure(@builtin(global_invocation_id)gid:vec3u,
     if(index==0u){atomicStore(&sharpenDeposits[base+1u],i32(groups.x*groups.y*groups.z));}
   }
 }
+// A parallel first level replaces thousands of serial additions per lane in
+// the single-workgroup reduction. Its outputs follow the live input records,
+// so no workgroup can overwrite another workgroup's unread input.
+override UV_BALANCE_TREE:bool=false;
 @compute @workgroup_size(64)
-fn uvBalanceReduce(@builtin(local_invocation_index)l:u32){
-  let base=uvBalanceBase();let count=u32(atomicLoad(&sharpenDeposits[base+1u]));var sums=vec2f(0);
-  for(var i=l;i<count;i+=64u){sums+=vec2f(
+fn uvBalanceReduceChunks(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)l:u32){
+  let base=uvBalanceBase();let count=u32(atomicLoad(&sharpenDeposits[base+1u]));
+  var sums=vec2f(0);let end=min(count,(w.x+1u)*1024u);
+  for(var i=w.x*1024u+l;i<end;i+=64u){sums+=vec2f(
     bitcast<f32>(atomicLoad(&sharpenDeposits[base+2u+2u*i])),
     bitcast<f32>(atomicLoad(&sharpenDeposits[base+3u+2u*i])));}
+  uvBalanceSums[l]=sums;uvBalanceSum(l);
+  if(l==0u){let output=base+2u+2u*count+2u*w.x;
+    atomicStore(&sharpenDeposits[output],bitcast<i32>(uvBalanceSums[0].x));
+    atomicStore(&sharpenDeposits[output+1u],bitcast<i32>(uvBalanceSums[0].y));}
+}
+@compute @workgroup_size(64)
+fn uvBalanceReduce(@builtin(local_invocation_index)l:u32){
+  let base=uvBalanceBase();let records=u32(atomicLoad(&sharpenDeposits[base+1u]));
+  let count=select(records,(records+1023u)/1024u,UV_BALANCE_TREE);
+  let input=base+2u+select(0u,2u*records,UV_BALANCE_TREE);var sums=vec2f(0);
+  for(var i=l;i<count;i+=64u){sums+=vec2f(
+    bitcast<f32>(atomicLoad(&sharpenDeposits[input+2u*i])),
+    bitcast<f32>(atomicLoad(&sharpenDeposits[input+1u+2u*i])));}
   uvBalanceSums[l]=sums;uvBalanceSum(l);
   if(l==0u){var rate=0.0;if(uvBalanceSums[0].y>0.0){rate=min(1.0,uvBalanceSums[0].x/uvBalanceSums[0].y);}
     atomicStore(&sharpenDeposits[base],bitcast<i32>(rate));}
