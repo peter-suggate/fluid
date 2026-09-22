@@ -1,0 +1,16 @@
+TAP version 13
+# Subtest: liquid-tile pressure smoothing matches dense sweeps through 64³ impact
+ok 1 - liquid-tile pressure smoothing matches dense sweeps through 64³ impact
+  ---
+  duration_ms: 14072.901375
+  type: 'test'
+  ...
+1..1
+# tests 1
+# suites 0
+# pass 1
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 14354.97125

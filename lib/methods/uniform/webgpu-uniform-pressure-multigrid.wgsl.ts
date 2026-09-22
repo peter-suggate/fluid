@@ -63,6 +63,41 @@ fn mgSmoothColourInPlace(@builtin(global_invocation_id) gid:vec3u){
   if(!mgValid(id,mg.levelDims.xyz)){return;}
   mgSmoothCellInPlace(id);
 }
+// Coefficients are immutable for a pressure solve. Compact 4^3 tiles with
+// at least one liquid row once, then share the list across all colour passes.
+// Binding 18 holds this level's work list in these entry points, independently
+// of the cycle-dispatch buffer used by mgPublishCycleDispatch.
+var<workgroup> mgTileLive:atomic<u32>;
+@compute @workgroup_size(4,4,4)
+fn mgBuildSmoothTiles(@builtin(global_invocation_id) gid:vec3u,
+ @builtin(workgroup_id) tile:vec3u,@builtin(local_invocation_index) lane:u32){
+  if(mgBakedLiquid(vec3i(gid))){atomicStore(&mgTileLive,1u);}
+  let live=workgroupUniformLoad(&mgTileLive);
+  if(lane==0u&&live!=0u){
+    let slot=atomicAdd(&mgCycleDispatch[0],1u);
+    let d=(mg.levelDims.xyz+vec3u(3))/4u;
+    atomicStore(&mgCycleDispatch[4u+slot],tile.x+d.x*(tile.y+d.y*tile.z));
+  }
+}
+@compute @workgroup_size(1)
+fn mgPublishSmoothTiles(){
+  let count=atomicLoad(&mgCycleDispatch[0]);
+  atomicStore(&mgCycleDispatch[1],min(count,65535u));
+  atomicStore(&mgCycleDispatch[2],(count+65534u)/65535u);
+  atomicStore(&mgCycleDispatch[3],1u);
+}
+@compute @workgroup_size(32)
+fn mgSmoothTilesInPlace(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+  if(mgSkipCycle()){return;}
+  let at=group.x+65535u*group.y;
+  if(at>=atomicLoad(&mgCycleDispatch[0])){return;}
+  let tile=atomicLoad(&mgCycleDispatch[4u+at]);
+  let d=(mg.levelDims.xyz+vec3u(3))/4u;
+  let origin=4u*vec3u(tile%d.x,(tile/d.x)%d.y,tile/(d.x*d.y));
+  let y=origin.y+(lane/2u)%4u;let z=origin.z+lane/8u;
+  let id=vec3i(i32(origin.x+2u*(lane%2u)+((mg.control.z+y+z)&1u)),i32(y),i32(z));
+  if(mgValid(id,mg.levelDims.xyz)){mgSmoothCellInPlace(id);}
+}
 // One thread per run of MG_ROW_SEGMENT same-colour cells along x. Same update,
 // same colour separation; a launch whose cycle gate is closed spawns 1/SEGMENT
 // of the threads to find that out.
@@ -174,7 +209,7 @@ fn mgSkipCycle()->bool{
 // Published only after accepted/rejected pressure has been committed. A
 // converged solve launches zero workgroups for all subsequent cycle kernels.
 // Save/restore and final diagnostics remain unconditional.
-@group(1) @binding(18) var<storage,read_write> mgCycleDispatch:array<u32>;
+@group(1) @binding(18) var<storage,read_write> mgCycleDispatch:array<atomic<u32>>;
 @compute @workgroup_size(1)
 fn mgPublishCycleDispatch(){
   let records=mg.control.z;
@@ -183,7 +218,7 @@ fn mgPublishCycleDispatch(){
   for(var gate=1u;gate<=2u;gate++){
     let enabled=!stopped&&select(!recovery,recovery,gate==2u);
     for(var i=0u;i<records*3u;i++){
-      mgCycleDispatch[gate*records*3u+i]=select(0u,mgCycleDispatch[i],enabled);
+      atomicStore(&mgCycleDispatch[gate*records*3u+i],select(0u,atomicLoad(&mgCycleDispatch[i]),enabled));
     }
   }
 }

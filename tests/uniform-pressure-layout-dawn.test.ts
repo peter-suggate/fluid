@@ -51,7 +51,13 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
     assert.equal(native.pressurePublication,undefined,"projection directly consumes the native solve result");
     assert.doesNotMatch(native.shaderFragment,/mgPageAddress/);
     assert.ok(native.allocatedBytes<tiled.allocatedBytes);
-    /* The native smoother runs in place: one colour per launch over half the lattice, and a whole visit per launch on the smallest levels. Every other launch is identical, and the field comparison below is what proves the smoothers agree. */const smoother=(p:any)=>/^mgSmooth/.test(p.entryPoint);assert.deepEqual(native.plan.filter((p:any)=>!smoother(p)).map((p:any)=>[p.entryPoint,p.workgroups]),logical.plan.filter((p:any)=>!smoother(p)).map((p:any)=>[p.entryPoint,p.workgroups]));assert.ok(native.plan.some((p:any)=>p.entryPoint==='mgSmoothVisitInPlace'),'the fixture exercises the fused visit');
+    // Native smoothing visits compact liquid tiles after the first dense
+    // constraint sweep. Ignore its work-list setup when comparing schedules;
+    // all pressure operators outside smoothing must retain the same launches.
+    const smoother=(p:any)=>/^mg(Smooth|BuildSmooth|PublishSmooth)/.test(p.entryPoint);
+    assert.deepEqual(native.plan.filter((p:any)=>!smoother(p)).map((p:any)=>[p.entryPoint,p.workgroups]),
+      logical.plan.filter((p:any)=>!smoother(p)).map((p:any)=>[p.entryPoint,p.workgroups]));
+    assert.ok(native.plan.some((p:any)=>p.entryPoint==='mgSmoothVisitInPlace'),'the fixture exercises the fused visit');
     for(let frame=1;frame<=12;frame++){
      for(const solver of solvers){
       if(frame===7)solver.injectLiquidBall({centre_m:{x:0,y:.3,z:0},radius_m:.05});

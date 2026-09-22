@@ -36,6 +36,7 @@ const stats = (values: number[]) => {
 const rows: { frame: number; time_s: number; wall_ms: number; trace: NonNullable<WebGPUUniformReferenceSolver["info"]["physicsTrace"]>; cpuTrace: unknown; work: Record<string,unknown> }[] = [];
 await acquireWebGPUExclusiveLock("dawn-probe", `Uniform Geometric stage profile: ${sceneId}`);
 let device: GPUDevice | undefined, solver: WebGPUUniformReferenceSolver | undefined;
+let pressureWorkReadback: GPUBuffer | undefined;
 let allocationAudit: ReturnType<typeof auditUniformGPUAllocations> | undefined;
 try {
   const dawn = await import(pathToFileURL(resolve(process.env.WEBGPU_NODE_MODULE ?? "node_modules/webgpu/index.js")).href) as NodeDawnProvider;
@@ -62,6 +63,9 @@ try {
       { ...uniformGeometricSolverOptions(values, scene), scratchStorageForQA: "separate" }, () => {})
     : await uniformVolumeMethod.createSolverAsync!(device, scene, "balanced", values, undefined, () => {}) as WebGPUUniformReferenceSolver;
   unsubscribe();
+  const pressureWork=solver.pressureSmoothingWorkSourceForQA;
+  if(pressureWork.length)pressureWorkReadback=device.createBuffer({label:"Pressure tile profile readback",size:4*pressureWork.length,
+    usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
   await device.queue.onSubmittedWorkDone();
   const setup_ms = performance.now()-start;
   const lattice = { nx: solver.info.nx, ny: solver.info.ny, nz: solver.info.nz, cellSize_m: solver.info.cellSize_m };
@@ -86,6 +90,13 @@ try {
     assert.equal(trace.measurementSource,"gpu-hardware-timestamp");
     lastSample=trace.sampleId;
     const work=Object.fromEntries(Object.entries(info).filter(([key]) => /^(allocatedBytes|lastSubsteps|encodedSteps|volumeCellSum|pressureSolver|maxSpeed_m_s|uniformPressure|uniformCM11a|uniformVolumePages|uniformVolumeTransportWorkgroups|uniformVolumeSharpenWorkgroups)/.test(key)));
+    if(pressureWorkReadback){
+      const encoder=device.createCommandEncoder();
+      pressureWork.forEach(({buffer},i)=>encoder.copyBufferToBuffer(buffer,0,pressureWorkReadback!,4*i,4));
+      device.queue.submit([encoder.finish()]);await pressureWorkReadback.mapAsync(GPUMapMode.READ);
+      work.uniformPressureSmoothingTiles=Array.from(new Uint32Array(pressureWorkReadback.getMappedRange()),(active,i)=>({level:i,active,capacity:pressureWork[i]!.capacity}));
+      pressureWorkReadback.unmap();
+    }
     rows.push({frame,time_s:frame/30,wall_ms,trace,cpuTrace:info.physicsCPUTrace,work});
     assert.deepEqual(errors,[]);
     if(frame%10===0) console.log(JSON.stringify({frame,wall_ms,gpu_ms:trace.total_ms,volumeCellSum:info.volumeCellSum}));
@@ -102,4 +113,4 @@ try {
   if(maxGPUBytes>0)assert.ok(allocationSnapshot!.peakBytes<=maxGPUBytes,
     `Peak live GPU resources ${allocationSnapshot!.peakBytes} exceed budget ${maxGPUBytes}`);
   console.log(JSON.stringify({out,windows},null,2));
-} finally { solver?.destroy(); device?.destroy(); await releaseWebGPUExclusiveLock(); }
+} finally { pressureWorkReadback?.destroy(); solver?.destroy(); device?.destroy(); await releaseWebGPUExclusiveLock(); }

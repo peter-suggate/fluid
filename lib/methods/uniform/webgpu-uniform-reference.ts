@@ -96,6 +96,8 @@ export interface WebGPUUniformReferenceOptions {
   fieldStorageForQA?: "dense" | "paged";
   /** Full-domain oracle for the separately compiled vertex work window. */
   phiWindowForQA?: false;
+  /** Full-lattice pressure smoothing control for the work-list regression. */
+  pressureSmoothingForQA?: "dense";
   /** Former field atlas and vertex traversal retained for identical-input QA. */
   phiStorageForQA?: "paged";
   phiReadAuditForQA?: boolean;
@@ -1167,7 +1169,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         (options.pressureCycleDispatch !== "direct" && pagedPressure),
       pagedPressure, options.pressureStorageForQA === "paged-logical",
       uniformAbOn("inplace") && (options.referenceDimension ?? 3) === 3
-        && scene.container.depthBoundary !== "symmetry", this.scratchArena && !pagedPressure ? this.fieldPages : undefined);
+        && scene.container.depthBoundary !== "symmetry", this.scratchArena && !pagedPressure ? this.fieldPages : undefined, this.geometricVolume && options.pressureSmoothingForQA !== "dense");
     this.pressureWindowCapacity = [nx, ny, nz];
     this.pressureDomainKey = this.pressureWindowCapacity.join("x");
     this.pressureInstances.set(this.pressureDomainKey, this.pressureMultigrid);
@@ -2659,6 +2661,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     }
     if (this.densitySharpening) seam?.(UNIFORM_VOLUME_PHASE.sharpen);
   }
+
+  get pressureSmoothingWorkSourceForQA() { return this.pressureMultigrid.smoothingWorkSource; }
 
   get framePending(): boolean { return false; }
   async awaitFrameCompletion(): Promise<void> { await this.device.queue.onSubmittedWorkDone(); }
