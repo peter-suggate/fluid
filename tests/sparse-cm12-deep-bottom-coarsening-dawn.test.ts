@@ -217,7 +217,7 @@ dawnTest("Sparse CM12 hydrostatic ladders stay within the accepted baseline", {
 
     const failures: string[] = [];
     let deepFineSamples = 0, deepMaximumResolution = 0;
-    for (let brick = 0; brick < 6; brick += 1) {
+    for (let brick = 0; brick < samples[0]!.bricks.length; brick += 1) {
       const history = samples.map((entry) => ({
         step: entry.step,
         generation: entry.topologyGeneration,

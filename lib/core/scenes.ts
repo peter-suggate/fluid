@@ -2122,18 +2122,22 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   }),
   ...(["dam-break", "settled-tank", "hose-fill"] as const).map(mode => defineScene({
     id: `uniform-trough-${mode}`,
-    name: `Voxel trough · ${mode === "dam-break" ? "dam break" : mode === "settled-tank" ? "settled tank" : "hose fill"}`,
+    name: `Voxel bath · ${mode === "dam-break" ? "dam break" : mode === "settled-tank" ? "settled tank" : "hose fill"}`,
     blurb: mode === "dam-break"
-      ? "A full-width reservoir collapses into an open voxel trough. Uniform geometric transport on a 64×24×24 grid, for 3D stability and performance studies."
+      ? "A reservoir collapses inside a voxel bath with rounded corners and curved, tapered sides. Uniform geometric transport on a 128×48×48 grid at 2.5 cm spacing."
       : mode === "settled-tank"
-        ? "The same voxel trough and water volume at rest, with a flat 20 cm waterline. A matched uniform-geometric hydrostatic stability scene."
-        : "The same voxel trough starts completely empty. A horizontal hose runs for 12 seconds, followed by eight seconds of settling, using uniform-geometric.",
+        ? "The same curved voxel bath and dam-break water volume at rest, with a flat waterline. A uniform-geometric hydrostatic stability scene on a 256×96×96 grid at 1.25 cm spacing."
+        : "The same curved voxel bath starts completely empty on a 128×48×48 grid. A horizontal hose runs for 12 seconds, followed by eight seconds of settling, using uniform-geometric.",
     audience: "explore",
     shelf: "Uniform geometric · 3D",
     environment: "stage",
     presentationMode: "full-scene",
     containerShell: "authored",
-    methodProfile: { methodId: "uniform-volume", quality: "balanced", overrides: {} },
+    // The default tolerance is an absolute 10 s⁻¹ of divergence: at 1.25 cm a
+    // resting pool's first cycle already lands under it with ~0.1 m/s of
+    // unprojected velocity left in every step, and the tank never settles.
+    // These scenes exist to hold still against voxel walls, so they project.
+    methodProfile: { methodId: "uniform-volume", quality: "balanced", overrides: { pressureResidualTolerance: 0.05 } },
     build: () => createUniformTroughScene(mode),
     buildAt: lattice => createUniformTroughScene(mode, lattice.cellSize_m),
     camera: { distance_m: 5.4, target_m: { x: 0, y: 0.4, z: 0 }, elevation_rad: 0.8, azimuth_rad: 0.65 },

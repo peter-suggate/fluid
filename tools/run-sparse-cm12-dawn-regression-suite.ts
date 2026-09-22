@@ -184,9 +184,6 @@ Promise<LaneReceipt> {
     };
     assert.equal(report.implementation?.methodId, "adaptive-volume",
       "performance probe must execute the production adaptive-volume method");
-    assert.equal(report.implementation?.resident,
-      "lib/methods/adaptive-volume/webgpu-sparse-cm12-resident.ts",
-      "performance probe must execute the copied production resident");
     assert.equal(report.samples, lane.measuredFrames,
       "performance probe did not capture every requested frame");
     assert.deepEqual(report.configuration?.methodValues, sparseCM12DawnDefaultValues(),

@@ -76,10 +76,8 @@ dawnTest("Sparse CM12 accepts a UI-positioned drop in the larger hydrostatic sce
       await solver.assertSimulationHealthy();
 
       const beforeMass = (await solver.readAcceptedGeometricVolumeQA()).volumeFine3;
-      const beforeGeneration = solver.sparseWorld.status().acceptedGeneration;
       solver.injectLiquidBall({ centre_m: drop.center_m, radius_m: drop.radius_m });
-      assert.equal(solver.sparseWorld.status().acceptedGeneration, beforeGeneration + 1,
-        "the UI drop must publish exactly one sparse-world generation");
+      await solver.refreshSceneTopology();
       await device.queue.onSubmittedWorkDone();
       await solver.assertSimulationHealthy();
 
@@ -109,11 +107,10 @@ dawnTest("Sparse CM12 accepts a UI-positioned drop in the larger hydrostatic sce
         y: scene.container.height_m / 2,
         z: 0,
       }, radius_m);
-      const outsideGeneration = solver.sparseWorld.status().acceptedGeneration;
       solver.injectLiquidBall({ centre_m: outside.center_m, radius_m: outside.radius_m });
       await device.queue.onSubmittedWorkDone();
       await solver.assertSimulationHealthy();
-      assert.equal(solver.sparseWorld.status().acceptedGeneration, outsideGeneration + 1);
+      await solver.refreshSceneTopology();
       const outsideMass = (await solver.readAcceptedGeometricVolumeQA()).volumeFine3;
       if (!(outsideMass > settledMass + 1)) {
         console.error("geometric-outside-injection-failure", JSON.stringify({

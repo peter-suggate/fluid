@@ -34,7 +34,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
   const errors:string[]=[];device.addEventListener("uncapturederror",e=>{e.preventDefault();errors.push(e.error.message);});
   const scene=sceneDocument(getSceneDefinition("hero-garden-hose"));
   for(const pressureWindow of ["domain","domain","window"])
-   solvers.push(await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,uniformGeometricSolverOptions({volumeStorage:"pages32",pressureWindow,pressureCycleBudget:"fixed"},scene),()=>{}));
+   solvers.push(await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,uniformGeometricSolverOptions({volumeStorage:"pages32",pressureWindow},scene),()=>{}));
   // Retain the old every-frame external-source path as a scheduling oracle.
   const oracle=solvers[1] as any;
   const oldPlan=oracle.planWindowDispatch.bind(oracle),oldScan=oracle.encodeActiveRegion.bind(oracle);

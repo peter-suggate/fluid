@@ -89,7 +89,7 @@ export const SPARSE_CM12_DAWN_LANES: readonly SparseCM12DawnLane[] = [
     id: "topology-page-budget",
     coverage: "topology-page-budget",
     kind: "correctness",
-    description: "backed authored re-rung preserves world pages under zero, one and ordinary growth budgets",
+    description: "live resolution edits preserve fluid with zero spare world-growth pages",
     testFile: "tests/sparse-cm12-topology-budget-dawn.test.ts",
     timeoutMs: 30_000,
   },
@@ -99,7 +99,8 @@ export const SPARSE_CM12_DAWN_LANES: readonly SparseCM12DawnLane[] = [
     kind: "correctness",
     description: "clipped domain leaves conservatively coarsen and refine through live scene edits",
     testFile: "tests/sparse-cm12-clipped-transfer-dawn.test.ts",
-    timeoutMs: 20_000,
+    // Cold compilation plus a complete coarse/fine publication took 73 s.
+    timeoutMs: 90_000,
   },
   {
     id: "topology-generation-storage",
@@ -189,7 +190,7 @@ export const SPARSE_CM12_DAWN_LANES: readonly SparseCM12DawnLane[] = [
     id: "long-dam-far-wall",
     coverage: "long-dam-far-wall",
     kind: "correctness",
-    description: "public sparse presentation carries material to far-wall page 23",
+    description: "public sparse presentation carries material to the authored far wall",
     testFile: "tests/sparse-world-long-dam-dawn.test.ts",
     timeoutMs: 60_000,
   },

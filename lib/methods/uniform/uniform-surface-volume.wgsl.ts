@@ -10,6 +10,12 @@ struct Params { dims:vec4u, h:vec4f }
 @group(0) @binding(2) var volume:texture_3d<f32>;
 @group(0) @binding(3) var capacity:texture_3d<f32>;
 @group(0) @binding(4) var output:texture_storage_3d<r32float,write>;
+// The band lives on cells with capacity, never on vertices: seed and the four
+// dilations index cells, and metric folds the eight incident cells into one
+// per-vertex scale in the other parity buffer. A solid cell neither carries nor
+// passes the band, so the shift can only reach vertices some measured cell
+// reads. Dilating the vertex lattice let a surface deficit push the contour
+// through a voxel wall, where it added no measured fill and never converged.
 @group(0) @binding(5) var<storage,read_write> band:array<atomic<u32>>;
 @group(0) @binding(6) var<storage,read_write> nextBand:array<atomic<u32>>;
 @group(0) @binding(7) var<storage,read_write> partial:array<vec4f>;
@@ -67,7 +73,7 @@ fn value(q:vec3i)->f32{return textureLoad(phi,clamp(q,vec3i(0),vec3i(p.dims.xyz)
    var lo=1e30;var hi=-1e30;
    for(var k=0u;k<8u;k++){let v=value(q+corner(k));lo=min(lo,v);hi=max(hi,v);}
    live=live||lo<=0.0;
-   if(lo<=0.0&&hi>=0.0){for(var k=0u;k<8u;k++){atomicMax(&band[index(q+corner(k),p.dims.xyz+vec3u(1))],5u);}}
+   if(lo<=0.0&&hi>=0.0){atomicStore(&band[i],5u);}
   }
   if(live){for(var a=0u;a<3u;a++){atomicMin(&bounds[a],u32(q[a]));atomicMax(&bounds[3u+a],u32(q[a])+1u);}}
  }
@@ -78,25 +84,40 @@ fn value(q:vec3i)->f32{return textureLoad(phi,clamp(q,vec3i(0),vec3i(p.dims.xyz)
  if(textureLoad(capacity,q,0).x<=0.0){return;}
  var lo=1e30;var hi=-1e30;
  for(var k=0u;k<8u;k++){let v=value(q+corner(k));lo=min(lo,v);hi=max(hi,v);}
- if(lo<=0.0&&hi>=0.0){for(var k=0u;k<8u;k++){atomicMax(&band[index(q+corner(k),p.dims.xyz+vec3u(1))],5u);}}`}
+ if(lo<=0.0&&hi>=0.0){atomicStore(&band[i],5u);}`}
 }
 @compute @workgroup_size(64) fn dilate(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)l:u32){
- ${compact ? `let logical=groupIndex(w)*64u+l;if(logical>=workVertices()){return;}
- let d=p.dims.xyz+vec3u(1);let q=vertexPoint(logical);let i=index(q,d);`
- : `let i=groupIndex(w)*64u+l;if(i>=vertices()){return;}let d=p.dims.xyz+vec3u(1);let q=point(i,d);`}
- var b=atomicLoad(&band[i]);
- for(var a=0u;a<3u;a++){for(var s=-1;s<=1;s+=2){var n=q;n[a]+=s;
-  if(all(n>=vec3i(0))&&all(n<vec3i(d))){let v=atomicLoad(&band[index(n,d)]);b=max(b,select(0u,v-1u,v>0u));}
- }}atomicStore(&nextBand[i],b);
+ ${compact ? `let logical=groupIndex(w)*64u+l;if(logical>=workCells()){return;}
+ let q=cellPoint(logical);let i=index(q,p.dims.xyz);`
+ : `let i=groupIndex(w)*64u+l;if(i>=cells()){return;}let q=point(i,p.dims.xyz);`}
+ var b=0u;
+ if(textureLoad(capacity,q,0).x>0.0){
+  b=atomicLoad(&band[i]);
+  for(var a=0u;a<3u;a++){for(var s=-1;s<=1;s+=2){var n=q;n[a]+=s;
+   if(all(n>=vec3i(0))&&all(n<vec3i(p.dims.xyz))){let v=atomicLoad(&band[index(n,p.dims.xyz)]);b=max(b,select(0u,v-1u,v>0u));}
+  }}
+ }
+ atomicStore(&nextBand[i],b);
 }
+// Per-vertex shift scale, written to the other parity buffer: the cell band it
+// reads and the vertex scale it writes do not share an index space.
 @compute @workgroup_size(64) fn metric(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)l:u32){
  ${compact ? `let logical=groupIndex(w)*64u+l;if(logical>=workVertices()){return;}
  let q=vertexPoint(logical);let i=index(q,p.dims.xyz+vec3u(1));`
  : `let i=groupIndex(w)*64u+l;if(i>=vertices()){return;}let q=point(i,p.dims.xyz+vec3u(1));`}
+ var b=0u;var open=array<bool,6>(false,false,false,false,false,false);
+ for(var k=0u;k<8u;k++){let c=q-vec3i(1)+corner(k);
+  if(all(c>=vec3i(0))&&all(c<vec3i(p.dims.xyz))){b=max(b,atomicLoad(&band[index(c,p.dims.xyz)]));
+   if(textureLoad(capacity,c,0).x>0.0){for(var a=0u;a<3u;a++){open[2u*a+((k>>a)&1u)]=true;}}}}
+ // The slope is read by centred differences along axes whose edges are both
+ // open. A vertex buried in a solid keeps its construction fill, metres above
+ // the redistance band, and differenced raw it scaled a wall vertex's shift by
+ // that fill over one cell. No one-sided fallback: that reads the vertex's own
+ // value, so its scale would grow with every shift it received.
  var gradient=vec3f(0);
  for(var a=0u;a<3u;a++){var lo=q;var hi=q;lo[a]=max(0,q[a]-1);hi[a]=min(i32(p.dims[a]),q[a]+1);
-  gradient[a]=(value(hi)-value(lo))/(f32(hi[a]-lo[a])*p.h[a]);}
- atomicStore(&band[i],bitcast<u32>(f32(atomicLoad(&band[i]))*0.2*max(0.1,length(gradient))));
+  if(open[2u*a]&&open[2u*a+1u]){gradient[a]=(value(hi)-value(lo))/(f32(hi[a]-lo[a])*p.h[a]);}}
+ atomicStore(&nextBand[i],bitcast<u32>(f32(b)*0.2*max(0.1,length(gradient))));
 }
 // Exact negative volume of a linear scalar on a tetrahedron, normalized by
 // tetrahedron volume. Crossing-edge ratios avoid repeated-value singularities.
@@ -124,9 +145,10 @@ fn sumGroup(l:u32){
   let q=${compact ? "cellPoint(i)" : "point(i,p.dims.xyz)"};let cap=textureLoad(capacity,q,0).x;
   result[4].y=textureLoad(volume,q,0).x;
   if(cap>0.0){
-   ${leanMeasure ? `// seed marks all eight corners of every crossing cell, so a cell whose band
-   // corners are all zero has one strict sign and no shift can move it: one
-   // phi load decides all 17 samples. That is ~97% of a 128^3 lattice.
+   ${leanMeasure ? `// A crossing cell carries the band itself, so all eight of its corners scale
+   // above zero; a cell whose corners are all zero has one strict sign and no
+   // shift can move it: one phi load decides all 17 samples. That is ~97% of a
+   // 128^3 lattice.
    var scale:array<f32,8>;var banded=0u;
    for(var k=0u;k<8u;k++){let bits=atomicLoad(&band[index(q+corner(k),p.dims.xyz+vec3u(1))]);banded|=bits;scale[k]=bitcast<f32>(bits);}
    if(banded==0u){

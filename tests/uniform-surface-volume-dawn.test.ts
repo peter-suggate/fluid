@@ -64,28 +64,38 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
       assert.equal(fixed[nv-1],original[nv-1],"far air is untouched");
       const again=await run();for(let i=0;i<nv;i++)assert.ok(Math.abs(again[i]!-fixed[i]!)<2e-5,"matching volume stays still");
     });
-    for (const solid of [false,true]) await t.test(`curved surface matches independent quadrature${solid ? " with solid capacity" : ""}`,async()=>{
-      const reference=Float32Array.from({length:nv},(_,i)=>{
-        const q=coordinate(i,vd);return Math.hypot(...q.map((x,a)=>(x-dims[a]!/2)*h[a]!))-.28;
-      });
-      const caps=Float32Array.from({length:n},(_,i)=>solid && coordinate(i,dims)[0]!<10 ? 0 : 1);
-      const occupancy=(field:Float32Array)=>Float32Array.from({length:n},(_,i)=>{
-        if(!caps[i])return 0;const q=coordinate(i,dims);
-        const c=Array.from({length:8},(_,k)=>field[q[0]!+(k&1)+vd[0]!*(q[1]!+((k>>1)&1)+vd[1]!*(q[2]!+(k>>2)))]!);
-        if(c.every(v=>v<0))return 1;if(c.every(v=>v>=0))return 0;
-        let count=0;
-        for(let z=0;z<8;z++)for(let y=0;y<8;y++)for(let x=0;x<8;x++){
-          const f=[(x+.5)/8,(y+.5)/8,(z+.5)/8];let v=0;
-          for(let k=0;k<8;k++)v+=c[k]!*((k&1)?f[0]!:1-f[0]!)*((k&2)?f[1]!:1-f[1]!)*((k&4)?f[2]!:1-f[2]!);
-          if(v<0)count++;
-        }return count/512;
-      });
-      const values=occupancy(reference),desired=values.reduce((a,b)=>a+b,0);
-      const shrunken=Float32Array.from(reference,v=>(v+.015)*4);
+    // Sphere of radius .28 about the lattice centre: its x extent is cells 4.4..15.6.
+    const sphere=Float32Array.from({length:nv},(_,i)=>{
+      const q=coordinate(i,vd);return Math.hypot(...q.map((x,a)=>(x-dims[a]!/2)*h[a]!))-.28;
+    });
+    const occupancy=(field:Float32Array,caps:Float32Array)=>Float32Array.from({length:n},(_,i)=>{
+      if(!caps[i])return 0;const q=coordinate(i,dims);
+      const c=Array.from({length:8},(_,k)=>field[q[0]!+(k&1)+vd[0]!*(q[1]!+((k>>1)&1)+vd[1]!*(q[2]!+(k>>2)))]!);
+      if(c.every(v=>v<0))return 1;if(c.every(v=>v>=0))return 0;
+      let count=0;
+      for(let z=0;z<8;z++)for(let y=0;y<8;y++)for(let x=0;x<8;x++){
+        const f=[(x+.5)/8,(y+.5)/8,(z+.5)/8];let v=0;
+        for(let k=0;k<8;k++)v+=c[k]!*((k&1)?f[0]!:1-f[0]!)*((k&2)?f[1]!:1-f[1]!)*((k&4)?f[2]!:1-f[2]!);
+        if(v<0)count++;
+      }return count/512;
+    });
+    const shrunkenSphere=async(caps:Float32Array)=>{
+      const values=occupancy(sphere,caps),desired=values.reduce((a,b)=>a+b,0);
+      const shrunken=Float32Array.from(sphere,v=>(v+.015)*4);
       write(phi,shrunken);write(volume,values);write(capacity,caps);
-      const fixed=await run();const measured=occupancy(fixed).reduce((a,b)=>a+b,0);
+      const fixed=await run();const measured=occupancy(fixed,caps).reduce((a,b)=>a+b,0);
       assert.ok(Math.abs(measured-desired)/desired<.02,`${measured} vs ${desired}`);
       assert.deepEqual(await read(volume),values);
+      return {shrunken,fixed};
+    };
+    for (const solid of [false,true]) await t.test(`curved surface matches independent quadrature${solid ? " with solid capacity" : ""}`,async()=>{
+      await shrunkenSphere(Float32Array.from({length:n},(_,i)=>solid && coordinate(i,dims)[0]!<10 ? 0 : 1));
+    });
+    await t.test("the band never crosses a one-cell solid slab",async()=>{
+      // The sphere ends at x=15.6, inside the open cells next to a slab at x=16.
+      // The shift may reach the slab's near face; nothing beyond it may move.
+      const {shrunken,fixed}=await shrunkenSphere(Float32Array.from({length:n},(_,i)=>coordinate(i,dims)[0]===16 ? 0 : 1));
+      for(let i=0;i<nv;i++) if(coordinate(i,vd)[0]!>=17) assert.equal(fixed[i],shrunken[i],`vertex ${coordinate(i,vd)} beyond the slab moved`);
     });
     await t.test("empty surface cannot seed liquid from V",async()=>{
       const original=new Float32Array(nv).fill(.5);write(phi,original);write(volume,new Float32Array(n).fill(.2));

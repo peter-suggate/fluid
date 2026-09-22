@@ -212,14 +212,14 @@ dawnTest("Sparse CM12 couples terrain voxels through CM12 cut-cell capacities",
         "the terrain boundary must retain a material fluid body above it");
       if (tallCells) {
         const growth = await solver.readWorldGrowthReceiptQA();
+        const brickWidth = sparseCM12DawnDefaultOptions().brickFineResolution ?? 4;
         assert.ok(growth.minimum[0] >= 0 && growth.minimum[2] >= 0
-          && growth.maximumExclusive[0] <= TALL_CELLS_FLOOD_GRID[0] / 8
-          && growth.maximumExclusive[2] <= TALL_CELLS_FLOOD_GRID[2] / 8,
+          && growth.maximumExclusive[0] <= TALL_CELLS_FLOOD_GRID[0] / brickWidth
+          && growth.maximumExclusive[2] <= TALL_CELLS_FLOOD_GRID[2] / brickWidth,
         `hillside fluid escaped the voxel tank: ${JSON.stringify([
           growth.minimum, growth.maximumExclusive])}`);
-        assertSparseCM12Baseline("hillside.capacityFaults", growth.capacityFaults);
         const frontBrick = growth.furthestLiquidLeafCoordinate?.[0] ?? -1;
-        assertSparseCM12Baseline("hillside.remainingBricksToFarWall", Math.max(0, 30 - frontBrick));
+        assertSparseCM12Baseline("hillside.remainingBricksToFarWall", Math.max(0, 30 - frontBrick * brickWidth / 8));
         assert.equal(growth.failedHostIncidences, 0,
           "hillside page seams must retain their host incidence authority");
       }

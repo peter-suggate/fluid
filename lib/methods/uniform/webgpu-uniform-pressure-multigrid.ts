@@ -54,6 +54,9 @@ const MG_LEVEL_LABELS = typeof process !== "undefined"
 const ENTRY_POINTS = [
   "mgBuildFinestTopology", "mgBuildFinestRhs", "mgDownsampleTopology", "mgExtrapolatePhiOneCell",
   "mgBakeCoefficients", "mgBuildSmoothTiles", "mgPublishSmoothTiles", "mgSmoothTilesInPlace",
+  "mgBuildCycleTiles", "mgResidualTiles", "mgProlongateAddTiles", "mgProlongateAssignTiles",
+  "mgCopyPressureTiles", "mgShiftMinimumTiles", "mgAddPressureTiles",
+  "mgSaveAcceptedTiles", "mgRestoreRejectedTiles",
   "mgResidual", "mgRestrictResidual", "mgProlongateAdd", "mgProlongateAssign",
   "mgDownsampleSubtract", "mgDownsampleMinimum", "mgSmoothColour", "mgSmoothColourInPlace", "mgSmoothRowInPlace", "mgSmoothVisitInPlace", "mgSaveAcceptedQuiet", "mgRestoreRejectedQuiet",
   "mgCopyPressure", "mgClearPressure", "mgClearMinimum",
@@ -65,8 +68,13 @@ const ENTRY_BINDINGS: Readonly<Record<EntryPoint, readonly number[]>> = Object.f
   mgBuildFinestTopology: [0, 6, 8], mgBuildFinestRhs: [0, 2, 4, 5, 7, 12],
   mgDownsampleTopology: [0, 5, 6, 7, 8], mgExtrapolatePhiOneCell: [0, 5, 6, 7],
   mgBakeCoefficients: [0, 5, 7, 15],
-  mgBuildSmoothTiles: [0, 14, 18], mgPublishSmoothTiles: [0, 18],
+  mgBuildSmoothTiles: [0, 11, 14, 18], mgPublishSmoothTiles: [0, 18],
   mgSmoothTilesInPlace: [0, 3, 11, 13, 14, 16, 18],
+  mgBuildCycleTiles: [0, 18, 19],
+  mgResidualTiles: [0, 1, 3, 10, 14, 18], mgProlongateAddTiles: [0, 1, 2, 9, 18],
+  mgProlongateAssignTiles: [0, 1, 2, 18], mgCopyPressureTiles: [0, 1, 2, 18],
+  mgShiftMinimumTiles: [0, 1, 11, 12, 18], mgAddPressureTiles: [0, 1, 2, 9, 18],
+  mgSaveAcceptedTiles: [0, 1, 2, 18], mgRestoreRejectedTiles: [0, 2, 9, 18],
   mgResidual: [0, 1, 3, 10, 14], mgRestrictResidual: [0, 4, 9],
   mgProlongateAdd: [0, 1, 2, 9], mgProlongateAssign: [0, 1, 2],
   mgDownsampleSubtract: [0, 1, 11, 12], mgDownsampleMinimum: [0, 11, 12],
@@ -89,6 +97,17 @@ const ENTRY_BINDINGS: Readonly<Record<EntryPoint, readonly number[]>> = Object.f
  * test thousands of times and rebuilding the sets and filtered lists inside it
  * was a measurable share of a re-plan.
  */
+/**
+ * The per-cycle operators that run from the cycle work list. Each is the dense
+ * kernel of the same name reached from a compacted 4^3-tile list instead of
+ * the whole level, with the arithmetic shared verbatim in the WGSL.
+ */
+const CYCLE_TILE_ENTRIES: ReadonlySet<EntryPoint> = new Set<EntryPoint>([
+  "mgBuildCycleTiles", "mgResidualTiles", "mgProlongateAddTiles", "mgProlongateAssignTiles",
+  "mgCopyPressureTiles", "mgShiftMinimumTiles", "mgAddPressureTiles",
+  "mgSaveAcceptedTiles", "mgRestoreRejectedTiles",
+]);
+
 const SAMPLED_BINDINGS: readonly number[] = [1, 3, 5, 7, 9, 11, 14];
 const WRITABLE_BINDINGS: readonly number[] = [2, 4, 6, 8, 10, 12, 15, 16];
 const entryBindingsWhere = (keep: readonly number[]): Readonly<Record<EntryPoint, readonly number[]>> =>
@@ -130,6 +149,16 @@ interface PlannedDispatch {
   readonly activeLevel: number;
   readonly residualCheckpoint: boolean;
   readonly cycleGate: number;
+  /** Which work list binding 18 carries, for the publish copy's destination. */
+  readonly tileList?: "liquid" | "cycle";
+  /** Byte offset of this dispatch's indirect record, when it takes one. */
+  readonly tileDispatch?: number;
+  /**
+   * A dense setup pass that exists only because the finest per-cycle
+   * operators run from the cycle list. It seeds the far field the list skips;
+   * an arm without the list has no such pass and needs none.
+   */
+  cycleSetup?: boolean;
   /**
    * The same update launched one thread per row instead of one per cell. It is
    * several times slower when the gate is open and costs a launch floor rather
@@ -199,16 +228,26 @@ export interface UniformPressureMultigridPrograms {
 export class WebGPUUniformPressureMultigrid {
   readonly levels: readonly UniformPressureMultigridLevel[];
   private readonly smoothTileBuffers: GPUBuffer[] = [];
+  /**
+   * Liquid (+) one tile, plus every constrained tile, per level. The sweeps
+   * keep the tighter liquid list; everything else in a cycle runs from this.
+   */
+  private readonly cycleTileBuffers: GPUBuffer[] = [];
+  private readonly tileCounts: number[] = [];
   private smoothTileDispatch?: GPUBuffer;
   private smoothTileInputLayout?: GPUBindGroupLayout;
   private smoothTileInputGroup?: GPUBindGroup;
   private get tileSmoothing(): boolean { return this.inPlaceSmoothing && this.smoothTileBuffers.length > 0; }
+  private get cycleTiling(): boolean { return this.tileSmoothing && this.cycleTileBuffers.length > 0; }
+  private cycleEntry(entry: EntryPoint): boolean { return CYCLE_TILE_ENTRIES.has(entry); }
   private tileEntry(entry: EntryPoint): boolean {
-    return entry === "mgBuildSmoothTiles" || entry === "mgPublishSmoothTiles" || entry === "mgSmoothTilesInPlace";
+    return entry === "mgBuildSmoothTiles" || entry === "mgPublishSmoothTiles" || entry === "mgSmoothTilesInPlace"
+      || this.cycleEntry(entry);
   }
   /** GPU-produced counts for stage profiling; never read back for scheduling. */
-  get smoothingWorkSource(): readonly {buffer:GPUBuffer; capacity:number}[] {
-    return this.smoothTileBuffers.map(buffer=>({buffer,capacity:(buffer.size-16)/4}));
+  get smoothingWorkSource(): readonly {buffer:GPUBuffer; capacity:number; list:"liquid"|"cycle"; level:number}[] {
+    return [...this.smoothTileBuffers.map((buffer,level)=>({buffer,capacity:this.tileCounts[level]!,list:"liquid" as const,level})),
+      ...this.cycleTileBuffers.map((buffer,level)=>({buffer,capacity:this.tileCounts[level]!,list:"cycle" as const,level}))];
   }
   get shaderFragment():string {
     if(this.pagedStorage) return uniformPressurePagedShader(uniformPressureMultigridWGSL,this.logicalPageDispatch);
@@ -358,13 +397,24 @@ export class WebGPUUniformPressureMultigrid {
     }
     this.levels = Object.freeze(levels);
     if(this.inPlaceCapable && !this.gpuCycleDispatch && compactSmoothing && uniformAbOn("pressuretiles")) {
+      const cycleTiles=uniformAbOn("cycletiles");
       for(const level of levels){
         const count=level.dimensions.reduce((n,d)=>n*Math.ceil(d/4),1);
-        const buffer=device.createBuffer({label:"Uniform pressure liquid tile list",size:16+4*count,
+        this.tileCounts.push(count);
+        // The liquid list is followed by one classification word per tile, so
+        // the dilation pass can read a tile's neighbours without rescanning
+        // their cells.
+        const buffer=device.createBuffer({label:"Uniform pressure liquid tile list",size:16+4*count*(cycleTiles?2:1),
           usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
         this.smoothTileBuffers.push(buffer);allocatedBytes+=buffer.size;
+        if(cycleTiles){
+          const cycle=device.createBuffer({label:"Uniform pressure cycle tile list",size:16+4*count,
+            usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
+          this.cycleTileBuffers.push(cycle);allocatedBytes+=cycle.size;
+        }
       }
-      this.smoothTileDispatch=device.createBuffer({label:"Uniform pressure liquid tile dispatch",size:12*levels.length,
+      // Two indirect records per level: the liquid list, then the cycle list.
+      this.smoothTileDispatch=device.createBuffer({label:"Uniform pressure liquid tile dispatch",size:24*levels.length,
         usage:GPUBufferUsage.INDIRECT|GPUBufferUsage.COPY_DST});
       allocatedBytes+=this.smoothTileDispatch.size;
       // These kernels need only pressure fields and, for shared storage, the
@@ -402,6 +452,7 @@ export class WebGPUUniformPressureMultigrid {
     const scalarStorage = { access: "write-only", format: "r32float", viewDimension: "3d" } as const;
     const allEntries: GPUBindGroupLayoutEntry[] = [
       { binding: 18, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+      { binding: 19, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 17, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
       ...[1, 3, 5, 7, 9, 11].map((binding) => ({ binding, visibility: GPUShaderStage.COMPUTE, texture: textureBinding })),
@@ -507,12 +558,14 @@ export class WebGPUUniformPressureMultigrid {
     this.shaderModule = shaderModule;
     const emptyUniformLayout = this.device.createBindGroupLayout({entries: []});
     const entries = await Promise.all(ENTRY_POINTS.filter((entryPoint) =>
-      (!/InPlace$|Quiet$/.test(entryPoint) || this.inPlaceCapable) && (!this.tileEntry(entryPoint) || this.tileSmoothing)).map(async (entryPoint) => [entryPoint,
+      (!/InPlace$|Quiet$/.test(entryPoint) || this.inPlaceCapable) && (!this.tileEntry(entryPoint) || this.tileSmoothing)
+      && (!this.cycleEntry(entryPoint) || this.cycleTiling)).map(async (entryPoint) => [entryPoint,
       await compiler.compileComputePipeline({ label: `Uniform CM11a - ${entryPoint}`,
         layout: this.device.createPipelineLayout({ label: `Uniform CM11a layout - ${entryPoint}`,
           bindGroupLayouts: [this.tileEntry(entryPoint) ? this.smoothTileInputLayout! : entryPoint === "mgPublishCycleDispatch" ? emptyUniformLayout : input.uniformBindGroupLayout, this.groupLayouts[entryPoint]] }),
         compute: { module: shaderModule, entryPoint,
           ...(entryPoint === "mgBakeCoefficients" ? {constants:{MG_MASK_FIRST:Number(this.maskFirst && uniformAbOn("maskfirst"))}} : {}),
+          ...(entryPoint === "mgBuildSmoothTiles" ? {constants:{MG_CYCLE_TILES:Number(this.cycleTiling)}} : {}),
           ...(entryPoint === "mgBuildFinestRhs" ? {constants:{MG_REUSE_FINEST_AUTHORITY:Number(this.reuseFinestAuthority && uniformAbOn("pressureauthority"))}} : {}),
           ...(entryPoint === "mgSmoothVisitInPlace" ? { constants: { MG_VISIT_LANES: this.visitLanes } } : {}),
           ...(entryPoint === "mgSmoothRowInPlace" || /Quiet$/.test(entryPoint)
@@ -573,6 +626,7 @@ export class WebGPUUniformPressureMultigrid {
     this.assertLive(); if (!this.plan) throw new Error("Uniform CM11a hierarchy is not initialized");
     encoder.clearBuffer(this.diagnostics, 0, 104);
     for(const buffer of this.smoothTileBuffers) encoder.clearBuffer(buffer,0,4);
+    for(const buffer of this.cycleTileBuffers) encoder.clearBuffer(buffer,0,4);
     const prefixEnd = this.cycleBoundaries?.[this.clampCycleBudget(cycleBudget)] ?? this.plan.length;
     let openStage: UniformCM11aPlanStage | undefined;
     // A WebGPU usage scope is one dispatch, not one compute pass, so a storage
@@ -610,8 +664,8 @@ export class WebGPUUniformPressureMultigrid {
       } else if (dispatch.entryPoint !== "mgPublishCycleDispatch" && !sharedHasGroup0) {
         pass.setBindGroup(0, uniformGroup); sharedHasGroup0 = batch;
       }
-      if(dispatch.entryPoint === "mgSmoothTilesInPlace"){
-        pass.dispatchWorkgroupsIndirect(this.smoothTileDispatch!,12*dispatch.activeLevel);
+      if(dispatch.tileDispatch !== undefined){
+        pass.dispatchWorkgroupsIndirect(this.smoothTileDispatch!,dispatch.tileDispatch);
       } else if (this.gpuCycleDispatch && dispatch.cycleGate !== 0) {
         const record = dispatch.entryPoint === "mgSolveCoarsest" ? this.levels.length : dispatch.activeLevel;
         pass.dispatchWorkgroupsIndirect(this.cycleDispatch,
@@ -635,7 +689,9 @@ export class WebGPUUniformPressureMultigrid {
       else if (dispatch.entryPoint === "mgPublishCycleDispatch") sharedHasGroup0 = false;
       if(dispatch.entryPoint === "mgPublishSmoothTiles"){
         closeShared();
-        encoder.copyBufferToBuffer(this.smoothTileBuffers[dispatch.activeLevel]!,4,this.smoothTileDispatch!,12*dispatch.activeLevel,12);
+        const cycle = dispatch.tileList === "cycle";
+        encoder.copyBufferToBuffer((cycle ? this.cycleTileBuffers : this.smoothTileBuffers)[dispatch.activeLevel]!,4,
+          this.smoothTileDispatch!,24*dispatch.activeLevel+(cycle?12:0),12);
       }
       if (dispatch.coarsestCapture && this.coarsestCaptureBuffers
         && dispatch.coarsestCapture.invocation === this.coarsestCaptureBuffers.invocation) {
@@ -792,7 +848,13 @@ export class WebGPUUniformPressureMultigrid {
     const originalRhs = this.levels[0]!.rhs[0];
     const emit = (entryPoint: EntryPoint, sourceIndex: number, destinationIndex = sourceIndex,
       overrides: Partial<GroupResources> = {}, control: readonly [number, number, number, number] = [0, 0, 0, 0],
-      dispatchDimensions = this.levels[destinationIndex]!.dimensions) => {
+      dispatchDimensions = this.levels[destinationIndex]!.dimensions,
+      /**
+       * Which work list binding 18 carries. The list is always the
+       * DESTINATION level's: prolongation is planned coarse-to-fine and
+       * writes the fine lattice it is listed against.
+       */
+      tiles?: "liquid" | "cycle") => {
       const source = this.levels[sourceIndex]!, destination = this.levels[destinationIndex]!;
       const defaults: GroupResources = {
         pressureIn: source.pressure[p[sourceIndex]!]!, pressureOut: destination.pressure[p[destinationIndex]! ^ 1]!,
@@ -832,7 +894,9 @@ export class WebGPUUniformPressureMultigrid {
       // key is that filtered list -- two entry points that read the same
       // texture through different bindings must not share a group.
       const bindings = ENTRY_BINDINGS[entryPoint];
-      let groupKey = `${entryPoint}|${paramsKey}`;
+      const tileBuffer = tiles === "cycle" ? this.cycleTileBuffers[destinationIndex]
+        : tiles === "liquid" ? this.smoothTileBuffers[destinationIndex] : undefined;
+      let groupKey = `${entryPoint}|${paramsKey}|${tiles ?? ""}${tiles ? destinationIndex : ""}`;
       for (const binding of bindings) {
         const texture = texturesByBinding[binding];
         if (texture !== undefined) groupKey += `|${binding}:${this.textureId(texture)}`;
@@ -840,7 +904,8 @@ export class WebGPUUniformPressureMultigrid {
       let group = this.groupCache.get(groupKey);
       if (!group) {
         const allEntries: GPUBindGroupEntry[] = [
-          { binding: 18, resource: { buffer: this.tileEntry(entryPoint) ? this.smoothTileBuffers[sourceIndex]! : this.cycleDispatch } },
+          { binding: 18, resource: { buffer: tileBuffer ?? this.cycleDispatch } },
+          { binding: 19, resource: { buffer: this.cycleTileBuffers[destinationIndex] ?? this.cycleDispatch } },
           { binding: 17, resource: { buffer: this.toleranceBuffer } },
           { binding: 0, resource: { buffer: params } },
           { binding: 1, resource: this.viewOf(resources.pressureIn) }, { binding: 2, resource: this.viewOf(resources.pressureOut) },
@@ -866,6 +931,12 @@ export class WebGPUUniformPressureMultigrid {
         cycleGate: !["mgPublishCycleDispatch", "mgCheckCycleConvergence", "mgSaveAccepted", "mgRestoreRejected", "mgFinishSafety"].includes(entryPoint)
           ? (recovering ? 2 : (planStage === "full-cycle" || planStage === "v-cycle" ? 1 : 0)) : 0,
         residualCheckpoint: entryPoint === "mgMeasureFineResidual" && control[2] === 1,
+        ...(tiles ? { tileList: tiles } : {}),
+        // The builders and the one-thread publish keep their planned launch;
+        // every operator dispatch takes the count the publish wrote.
+        ...(tiles && entryPoint !== "mgPublishSmoothTiles" && entryPoint !== "mgBuildSmoothTiles"
+          && entryPoint !== "mgBuildCycleTiles"
+          ? { tileDispatch: 24 * destinationIndex + (tiles === "cycle" ? 12 : 0) } : {}),
         workgroups: this.pagedStorage && !this.logicalPageDispatch && dispatchDimensions.some(n=>n>1)
           ? uniformPressurePageWorkgroups(dispatchDimensions)
           : [Math.ceil(dispatchDimensions[0] / 4), Math.ceil(dispatchDimensions[1] / 4), Math.ceil(dispatchDimensions[2] / 4)],
@@ -878,6 +949,30 @@ export class WebGPUUniformPressureMultigrid {
     };
     const flipPressure = (level: number) => { p[level] ^= 1; };
     const flipMinimum = (level: number) => { min[level] ^= 1; };
+    /**
+     * Whether this level's per-cycle operators run from the cycle work list.
+     *
+     * Only the finest. It carries 8x the cells of L1 and 4096x the coarsest,
+     * and it is the only level whose skipped far field is provably dead: a
+     * coarse restriction, minimum downsample or trilinear tap reads children
+     * of ITS level, so a coarse level compacted the same way would need the
+     * next-finer one defined everywhere anyway. L1 and below stay dense.
+     */
+    const cycleList = (level: number): "cycle" | undefined =>
+      // The finish section keeps its dense row kernels. They are gated off
+      // whenever the solve was accepted, which is nearly always, so a list
+      // would only add 8x8 indirect launches that return immediately -- and
+      // every one of them is a commit, whose dense form is what keeps the
+      // accepted-pressure field defined everywhere for a dense restore.
+      this.cycleTiling && !recovering && level === 0
+        && this.levels[level]!.dimensions.reduce((n, d) => n * d, 1) > FUSED_VISIT_MAX_CELLS ? "cycle" : undefined;
+    /** A per-cycle operator, from the work list wherever the level has one. */
+    const emitOperator = (entryPoint: EntryPoint, sourceIndex: number, destinationIndex = sourceIndex,
+      overrides: Partial<GroupResources> = {}, control: readonly [number, number, number, number] = [0, 0, 0, 0]) => {
+      const list = cycleList(destinationIndex);
+      emit(list ? `${entryPoint}Tiles` as EntryPoint : entryPoint, sourceIndex, destinationIndex,
+        overrides, control, this.levels[destinationIndex]!.dimensions, list);
+    };
     emit("mgBuildFinestTopology", 0, 0, { phiOut: this.levels[0]!.phi[0],
       volumeOut: this.levels[0]!.volume[0] });
     emit("mgBuildFinestRhs", 0, 0, { pressureOut: this.levels[0]!.pressure[0],
@@ -898,14 +993,48 @@ export class WebGPUUniformPressureMultigrid {
         phiIn: this.levels[level]!.phi[1], coefficientsOut: this.levels[level]!.coefficients,
       });
       if(this.tileSmoothing && this.levels[level]!.dimensions.reduce((n,d)=>n*d,1)>FUSED_VISIT_MAX_CELLS){
-        emit("mgBuildSmoothTiles",level);
-        emit("mgPublishSmoothTiles",level,level,{},[0,0,0,0],[1,1,1]);
+        emit("mgBuildSmoothTiles",level,level,{},[0,0,0,0],undefined,"liquid");
+        emit("mgPublishSmoothTiles",level,level,{},[0,0,0,0],[1,1,1],"liquid");
+        if(cycleList(level)){
+          // One thread per tile, reading the 27 classification words its
+          // neighbourhood wrote. Coefficients are immutable for the solve, so
+          // both lists are built once and shared by every cycle.
+          const tiles=this.tileCounts[level]!;
+          emit("mgBuildCycleTiles",level,level,{},[0,0,0,0],[4*Math.ceil(tiles/64),1,1],"liquid");
+          emit("mgPublishSmoothTiles",level,level,{},[0,0,0,0],[1,1,1],"cycle");
+        }
       }
+    }
+    // Every per-cycle write outside the cycle list is missing, so the fields
+    // a DENSE pass still reads over the far field are seeded once per solve,
+    // to exactly what the dense operators would have left there.
+    //
+    // p_min's other parity: mgShiftMinimum writes p_min - p, and outside the
+    // list p is the zero mgBuildFinestRhs stored and p_min is -FLT_MAX, so
+    // -FLT_MAX IS that value. The dense L1 minimum downsamples read it at
+    // every child.
+    //
+    // The two finest residual destinations: mgRestrictResidual averages all
+    // eight children unmasked, and a Full-Cycle restricts its correction rhs
+    // straight to the coarsest solve without recomputing a residual on the
+    // way, so a coarse row over the far field must see the zero mgResidual
+    // writes at air rows. A tile that has left the list since the last solve
+    // would otherwise hand that chain its stale residual.
+    //
+    // These run after the bake, not beside mgBuildFinestRhs: the shared
+    // scratch arena lays the finest V over pressure B, rhs B, residual A and
+    // p-min B, and V is only dead once the coefficients are baked.
+    if (cycleList(0)) {
+      emit("mgClearMinimum", 0, 0, { minimumOut: this.levels[0]!.minimum[1] });
+      for (const scratch of [this.levels[0]!.residual[0], this.levels[0]!.rhs[1]]) {
+        emit("mgClearPressure", 0, 0, { pressureOut: scratch });
+      }
+      for (const seed of result.slice(-3)) seed.cycleSetup = true;
     }
     // CM11a summarizes PRBGS as two colour passes plus a projection, but the
     // smoother projects at write time on both its update and pass-through
     // paths, so each sweep exits already-projected and the third pass is gone.
-    const sweep = (level: number, rhs: GPUTexture, quietRows = false, tiles = false) => {
+    const sweep = (level: number, rhs: GPUTexture, quietRows = false, tiles?: "liquid" | "cycle") => {
       for (let colour = 0; colour < 2; colour += 1) {
         if (this.inPlaceSmoothing) {
           // Two ping-pong flips are the identity, so leaving the parity alone
@@ -913,9 +1042,9 @@ export class WebGPUUniformPressureMultigrid {
           const [nx, ny, nz] = this.levels[level]!.dimensions;
           emit(tiles ? "mgSmoothTilesInPlace" : "mgSmoothColourInPlace", level, level,
             { rhsIn: rhs, pressureRW: this.levels[level]!.pressure[p[level]!]! }, [0, 0, colour, 0],
-            [Math.ceil(nx / 2), ny, nz]);
+            [Math.ceil(nx / 2), ny, nz], tiles);
           // Same bindings, equivalent layout: the group serves either pipeline.
-          if (quietRows && this.inPlaceSmoothing) result[result.length - 1]!.quiet = { pipeline: this.pipelines!.mgSmoothRowInPlace,
+          if (quietRows && this.inPlaceSmoothing && !tiles) result[result.length - 1]!.quiet = { pipeline: this.pipelines!.mgSmoothRowInPlace,
             workgroups: [Math.ceil(Math.ceil(nx / 2) / ROW_SEGMENT / 4), Math.ceil(ny / 4), Math.ceil(nz / 4)] };
         } else {
           emit("mgSmoothColour", level, level, { rhsIn: rhs }, [0, 0, colour, 0]); flipPressure(level);
@@ -932,10 +1061,15 @@ export class WebGPUUniformPressureMultigrid {
         emit("mgSmoothVisitInPlace", level, level,
           { rhsIn: rhs, pressureRW: this.levels[level]!.pressure[p[level]!]! }, [0, 0, sweeps, 0], [1, 1, 1]);
       } else for (let i = 0; i < sweeps; i += 1) {
-        // Prolongation may leave air below its constraint. The first dense
-        // sweep projects every row. With fixed minima, later sweeps cannot
-        // change air again: only tiles containing liquid need revisiting.
-        sweep(level,rhs,false,this.tileSmoothing && i>0 && nx*ny*nz>FUSED_VISIT_MAX_CELLS);
+        // Prolongation may leave air below its constraint, and the first sweep
+        // of a visit is what projects it back. Only a CONSTRAINED row can be
+        // below its minimum -- unconstrained air carries p_min = -FLT_MAX --
+        // and the cycle list holds every constrained tile, so running that
+        // sweep from it is exactly the dense sweep restricted to the rows the
+        // dense one could move. With fixed minima, later sweeps cannot change
+        // air again: only tiles containing liquid need revisiting.
+        const tiled = this.tileSmoothing && nx*ny*nz>FUSED_VISIT_MAX_CELLS;
+        sweep(level,rhs,false,!tiled?undefined:i>0?"liquid":cycleList(level));
       }
     };
     let coarseInvocation = 0;
@@ -951,13 +1085,13 @@ export class WebGPUUniformPressureMultigrid {
       smooth(level, rhs, this.schedule.preSweeps);
       const residualOut = rhs === this.levels[level]!.residual[0]
         ? this.levels[level]!.rhs[1] : this.levels[level]!.residual[0];
-      emit("mgResidual", level, level, { rhsIn: rhs, residualOut });
+      emitOperator("mgResidual", level, level, { rhsIn: rhs, residualOut });
       emit("mgRestrictResidual", level, level + 1, { residualIn: residualOut, rhsOut: this.levels[level + 1]!.rhs[0] });
       emit("mgClearPressure", level + 1); flipPressure(level + 1);
       // Bound-active residuals must not enter an unconstrained coarse solve.
       emit("mgDownsampleSubtract", level, level + 1); flipMinimum(level + 1);
       vCycle(level + 1, this.levels[level + 1]!.rhs[0]);
-      emit("mgProlongateAdd", level + 1, level, { residualIn: this.levels[level]!.pressure[p[level]] }); flipPressure(level);
+      emitOperator("mgProlongateAdd", level + 1, level, { residualIn: this.levels[level]!.pressure[p[level]] }); flipPressure(level);
       smooth(level, rhs, this.schedule.postSweeps);
     };
     const fullCycle = () => {
@@ -965,9 +1099,9 @@ export class WebGPUUniformPressureMultigrid {
       // finest residual[0] and rhs[1] are selected as residual scratch by
       // vCycle(), so the backup must have dedicated storage.
       const backup = this.fullCycleBackup;
-      emit("mgCopyPressure", 0, 0, { pressureOut: backup });
-      emit("mgShiftMinimum", 0); flipMinimum(0);
-      emit("mgResidual", 0, 0, { rhsIn: originalRhs, residualOut: this.levels[0]!.residual[0] });
+      emitOperator("mgCopyPressure", 0, 0, { pressureOut: backup });
+      emitOperator("mgShiftMinimum", 0); flipMinimum(0);
+      emitOperator("mgResidual", 0, 0, { rhsIn: originalRhs, residualOut: this.levels[0]!.residual[0] });
       const correctionRhs: GPUTexture[] = [this.levels[0]!.residual[0]];
       for (let level = 0; level + 1 < this.levels.length; level += 1) {
         const nextRhs = this.levels[level + 1]!.rhs[1]; correctionRhs.push(nextRhs);
@@ -977,17 +1111,17 @@ export class WebGPUUniformPressureMultigrid {
       const coarse = this.levels.length - 1; emit("mgClearPressure", coarse); flipPressure(coarse);
       coarseSolve(correctionRhs[coarse]!);
       for (let level = coarse - 1; level >= 0; level -= 1) {
-        emit("mgProlongateAssign", level + 1, level); flipPressure(level);
+        emitOperator("mgProlongateAssign", level + 1, level); flipPressure(level);
         vCycle(level, correctionRhs[level]!);
       }
-      emit("mgAddPressure", 0, 0, { residualIn: backup }); flipPressure(0);
+      emitOperator("mgAddPressure", 0, 0, { residualIn: backup }); flipPressure(0);
       min[0] = 0;
     };
     const checkpoint = () => {
       // Canonicalize before deciding to stop. All later cycle writes are gated,
       // so the final projection always sees the last completed cycle in A.
       if (p[0] !== 0) {
-        emit("mgCopyPressure", 0, 0, { pressureOut: this.levels[0]!.pressure[0] }); p[0] = 0;
+        emitOperator("mgCopyPressure", 0, 0, { pressureOut: this.levels[0]!.pressure[0] }); p[0] = 0;
       }
       emit("mgMeasureFineResidual", 0, 0, { rhsIn: originalRhs }, [0, 0, 1, 0]);
       emit("mgCheckCycleConvergence", 0, 0, {}, [0, 0, recovering ? 4 : planStage === "full-cycle" ? 2 : 3, 0], [1, 1, 1]);
@@ -995,12 +1129,12 @@ export class WebGPUUniformPressureMultigrid {
       // Dedicated storage cannot alias Full-Cycle or V-cycle scratch.
       const [nx, ny, nz] = this.levels[0]!.dimensions;
       const quietCommit = (pipeline: GPUComputePipeline) => {
-        if (recovering && this.inPlaceSmoothing && ROW_SWEEP !== "off") result[result.length - 1]!.quiet = { pipeline,
+        if (recovering && this.inPlaceSmoothing && ROW_SWEEP !== "off" && !cycleList(0)) result[result.length - 1]!.quiet = { pipeline,
           workgroups: [Math.ceil(nx / ROW_SEGMENT / 4), Math.ceil(ny / 4), Math.ceil(nz / 4)] };
       };
-      emit("mgSaveAccepted", 0, 0, { pressureOut: this.acceptedPressure });
+      emitOperator("mgSaveAccepted", 0, 0, { pressureOut: this.acceptedPressure });
       quietCommit(this.pipelines!.mgSaveAcceptedQuiet);
-      emit("mgRestoreRejected", 0, 0, { pressureOut: this.levels[0]!.pressure[0], residualIn: this.acceptedPressure });
+      emitOperator("mgRestoreRejected", 0, 0, { pressureOut: this.levels[0]!.pressure[0], residualIn: this.acceptedPressure });
       quietCommit(this.pipelines!.mgRestoreRejectedQuiet);
       if (this.gpuCycleDispatch) emit("mgPublishCycleDispatch", 0, 0, {}, [0, 0, this.levels.length + 1, 0], [1, 1, 1]);
     };
@@ -1008,6 +1142,9 @@ export class WebGPUUniformPressureMultigrid {
     // the end of cycle k, which is always a checkpoint.
     emit("mgMeasureFineResidual", 0, 0, { rhsIn: originalRhs }, [0, 0, 1, 0]);
     emit("mgCheckCycleConvergence", 0, 0, {}, [0, 0, 0, 0], [1, 1, 1]);
+    // Dense: the finish section restores from this field with a dense kernel,
+    // so its far field has to hold the zero the finest pressure carries there
+    // rather than whatever the last solve's list left.
     emit("mgCopyPressure", 0, 0, { pressureOut: this.acceptedPressure });
     if (this.gpuCycleDispatch) emit("mgPublishCycleDispatch", 0, 0, {}, [0, 0, this.levels.length + 1, 0], [1, 1, 1]);
     const cycleBoundaries: number[] = [result.length];
@@ -1026,13 +1163,13 @@ export class WebGPUUniformPressureMultigrid {
     this.finishStart = result.length;
     recovering = true;
     for (let batch = 0; batch < UNIFORM_CM11A_RECOVERY_BATCHES; batch += 1) {
-      for (let i = 0; i < UNIFORM_CM11A_RECOVERY_SWEEPS; i += 1) sweep(0, originalRhs, ROW_SWEEP !== "off");
+      for (let i = 0; i < UNIFORM_CM11A_RECOVERY_SWEEPS; i += 1) sweep(0, originalRhs, ROW_SWEEP !== "off", cycleList(0));
       checkpoint();
     }
     recovering = false;
-    emit("mgRestoreRejected", 0, 0, { pressureOut: this.levels[0]!.pressure[0], residualIn: this.acceptedPressure }, [0, 0, 0, 1]);
+    emitOperator("mgRestoreRejected", 0, 0, { pressureOut: this.levels[0]!.pressure[0], residualIn: this.acceptedPressure }, [0, 0, 0, 1]);
     emit("mgFinishSafety", 0, 0, {}, [0, 0, 0, 0], [1, 1, 1]);
-    if (p[0] !== 0) { emit("mgCopyPressure", 0, 0, { pressureOut: this.levels[0]!.pressure[0] }); p[0] = 0; }
+    if (p[0] !== 0) { emitOperator("mgCopyPressure", 0, 0, { pressureOut: this.levels[0]!.pressure[0] }); p[0] = 0; }
     emit("mgMeasureFineResidual", 0, 0, {
       pressureIn: this.levels[0]!.pressure[0], rhsIn: originalRhs,
       phiIn: this.levels[0]!.phi[phi[0]], volumeIn: this.levels[0]!.volume[0],
@@ -1111,7 +1248,7 @@ export class WebGPUUniformPressureMultigrid {
     for(const buffer of this.pageCaptureBuffers)buffer.destroy();
     this.pressurePublication?.destroy();
     this.cycleDispatch.destroy();
-    this.smoothTileDispatch?.destroy();for(const buffer of this.smoothTileBuffers)buffer.destroy();
+    this.smoothTileDispatch?.destroy();for(const buffer of [...this.smoothTileBuffers,...this.cycleTileBuffers])buffer.destroy();
     this.fullCycleBackup.destroy();
     this.acceptedPressure.destroy();
     this.toleranceBuffer.destroy();

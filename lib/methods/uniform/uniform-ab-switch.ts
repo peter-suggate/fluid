@@ -8,5 +8,5 @@
  */
 const off = new Set((typeof process !== "undefined" ? process.env?.FLUID_UNIFORM_AB_OFF ?? "" : "")
   .split(",").map((name) => name.trim()).filter(Boolean));
-export type UniformAbFeature = "opentest" | "facetest" | "openlocal" | "philoops" | "batch" | "facecache" | "solidheader" | "measurelean" | "mgstaticid" | "staticid" | "inplace" | "fusevisit" | "liquidmask" | "rowsweep" | "deadgroups" | "donortiles" | "authoritystatic" | "lazystats" | "pressuretiles" | "surfacewindow" | "targetcache" | "pressureauthority" | "tileseed" | "maskfirst" | "balancetree" | "shelllist" | "frontreuse";
+export type UniformAbFeature = "opentest" | "facetest" | "openlocal" | "philoops" | "batch" | "facecache" | "solidheader" | "measurelean" | "mgstaticid" | "staticid" | "inplace" | "fusevisit" | "liquidmask" | "rowsweep" | "deadgroups" | "donortiles" | "authoritystatic" | "lazystats" | "pressuretiles" | "surfacewindow" | "targetcache" | "pressureauthority" | "tileseed" | "maskfirst" | "balancetree" | "shelllist" | "frontreuse" | "solidfreetrace" | "philean" | "phicensuswindow" | "tilereach" | "cycletiles";
 export const uniformAbOn = (feature: UniformAbFeature): boolean => !off.has(feature) && !off.has("all");

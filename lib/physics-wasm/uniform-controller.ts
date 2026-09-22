@@ -19,7 +19,7 @@ import { scenerySliceFraction, uniformLabSlice } from "./scenery-slice";
 
 /** 2D owns its balancing toggle separately; window scheduling is deferred. */
 export const UNIFORM_LAB_VALUES = Object.freeze(
-  Object.fromEntries(Object.entries(resolveUniformGeometricValues({ activeRegion: "off", surfaceDeficitBalancing: "off" })).filter(([key]) => key !== "volumeStorage")),
+  Object.fromEntries(Object.entries(resolveUniformGeometricValues({ surfaceDeficitBalancing: "off" })).filter(([key]) => key !== "volumeStorage")),
 );
 
 export function uniformLabSceneLimitation(

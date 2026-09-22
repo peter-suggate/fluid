@@ -41,7 +41,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
   const errors:string[]=[];device.addEventListener("uncapturederror",e=>{e.preventDefault();errors.push(e.error.message); console.error(e.error.message);});
   const scene=sceneDocument(getSceneDefinition("hero-garden-hose"));
   for(const volumePageWork of [true,false])
-   solvers.push(await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,{...uniformGeometricSolverOptions({volumeStorage:"pages32",pressureWindow:"domain",pressureCycleBudget:"fixed"},scene),volumePageWork,pageDomain:volumePageWork},()=>{}));
+   solvers.push(await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,{...uniformGeometricSolverOptions({volumeStorage:"pages32",pressureWindow:"domain"},scene),volumePageWork,pageDomain:volumePageWork},()=>{}));
   // A saved legacy setting must not re-enable readback-driven page scheduling.
   solvers[0]!.applyRuntimeValues({pressureCycleBudget:"lagged"});
   solvers[1]!.applyRuntimeValues({pressureCycleBudget:"fixed"});

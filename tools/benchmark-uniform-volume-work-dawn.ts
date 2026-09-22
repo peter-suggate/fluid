@@ -26,7 +26,7 @@ try{
   const arms:{mode:string;full:number[];stages:Record<string,number[]>;pages:number|undefined}[]=[];
   for(const mode of ["window","pages","pages","window"]){
    const solver=await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,
-    {...uniformGeometricSolverOptions({volumeStorage:sceneId==="minimal-power-dam-break-64"?(mode==="window"?"dense":"auto"):"pages32",pressureWindow:"domain",pressureCycleBudget:"fixed"},scene),volumePageWork:mode==="pages",pageDomain:mode==="pages",activeRegion:mode==="window",pressureWindow:false},()=>{});
+    {...uniformGeometricSolverOptions({volumeStorage:sceneId==="minimal-power-dam-break-64"?(mode==="window"?"dense":"auto"):"pages32",pressureWindow:"domain"},scene),volumePageWork:mode==="pages",pageDomain:mode==="pages",activeRegion:mode==="window",pressureWindow:false},()=>{});
    const full:number[]=[],stages:Record<string,number[]>={};let priorSample=-1;
    try{
     for(let frame=1;frame<=24;frame++){

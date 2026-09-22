@@ -65,7 +65,7 @@ try {
     scene.voxelDomain.finestCellSize_m=0.05;scene.fluid.initialCondition="tank-fill";scene.fluid.initialLiquidVolumes=[];scene.fluid.gravity_m_s2={x:0,y:name==="stationary-pool"?0:-9.81,z:0};scene.fluid.dynamicViscosity_Pa_s=0;scene.fluid.surfaceTension_N_m=0;scene.rigidBodies=[];scene.fluid.inflow=undefined;
     scene.solidVoxels=[...boxSolidVoxelShell([expectedNx,expectedNy,1],{top:scene.container.top})];
     if(name==="embedded-ceiling")scene.solidVoxels.push({operation:"fill",minimum:[0,12,0],maximumExclusive:[expectedNx,13,1]});
-    const values=resolveUniformGeometricValues({activeRegion:"off",twoLevelVelocity:"off",pressureCycleBudget:"fixed",volumeDustThreshold:0,...JSON.parse(process.env.FLUID_UNIFORM_PARITY_VALUES??"{}")});
+    const values=resolveUniformGeometricValues({twoLevelVelocity:"off",volumeDustThreshold:0,...JSON.parse(process.env.FLUID_UNIFORM_PARITY_VALUES??"{}")});
     const solver=await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,{...uniformGeometricSolverOptions(values,scene),totalSurfaceVolume:false,referenceDimension:2},()=>{});
     try {
       const {nx,ny,nz}=solver.info;assert.deepEqual([nx,ny,nz],[expectedNx,expectedNy,1]);

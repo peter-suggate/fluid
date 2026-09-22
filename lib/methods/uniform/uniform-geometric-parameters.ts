@@ -87,6 +87,15 @@ export const UNIFORM_GEOMETRIC_DEFAULTS: Readonly<MethodParamValues> = Object.fr
 );
 /** Removed experimental controls never survive a saved configuration reload. */
 export function resolveUniformGeometricValues(values: MethodParamValues = {}): MethodParamValues {
+  // An omitted key is a control this method fixes, not one it forgot: dropping
+  // such an override quietly let callers believe they had changed the solve
+  // (pressureCycleBudget above all) while the adapter hard-coded it back. Keys
+  // this method never declared are still ignored -- that is the reload contract.
+  for (const key of Object.keys(values)) {
+    if (!omitted.has(key)) continue;
+    throw new Error(`Uniform Geometric fixes "${key}" and cannot take it as an override; `
+      + `see uniformGeometricSolverOptions. Drop the override or change the method.`);
+  }
   return Object.fromEntries(params.map(spec => {
     const raw = values[spec.key];
     const numeric = spec.kind === "number" ? numberValue(values, params, spec.key) : 0;

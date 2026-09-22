@@ -60,6 +60,18 @@ struct Params {
   // x: inward compaction of V. y: seed phi from V where phi has no surface.
   // z: gain of the slow normal shift (0 is off). w: its clamp in cells a step.
   agreement: vec4f,
+  // Host certificates the geometric phi stage folds into constant branches.
+  // x: not one cell in this domain is cut this step -- the packed static solid
+  // voxel mask is empty, the scene has no terrain and no rigid body is live --
+  // so cellOpenFraction is exactly one everywhere and every solid walk, every
+  // embedded-wall term and every solid-donor exclusion is identity.
+  // y: the phi census may skip what lies outside the box it last published.
+  // z: the vertex phi advect may take its far-air arm outside SHELL.
+  // w: E3's transport reach is measured per tile rather than domain-wide.
+  // Each is zero when its certificate does not hold, when its experiment is
+  // off, or when a QA arm has asked for the unconditional path, and every
+  // consumer folds to the original instruction stream at zero.
+  lean: vec4f,
 }
 @group(0) @binding(0) var velocityIn: texture_3d<f32>;
 @group(0) @binding(1) var velocityOut: texture_storage_3d<rgba32float, write>;
@@ -1845,6 +1857,38 @@ fn scanActiveRegion(
   let wet=${geometric ? "source||geometricActiveSeed(id)" : "source||(valid(id)&&volume(id)>1e-5)"};
   writeActiveWorkgroupSummary(id,wet,localIndex,workgroupId,groupCount);
 }
+${geometric ? `
+// E6. The phi census, restricted to the box the last one published.
+//
+// Uniform Geometric runs this dense whole-lattice scan at the HEAD of every
+// step, purely to size the phi execution region, and it reads V, velocity and
+// phi over the domain to do it -- 6.9 ms a step on figure 7 at 256^3, flat,
+// whether the liquid is a ball in free fall or a sheet on the floor.
+//
+// A cell outside the previous box cannot seed this one:
+//   - V. Only uvGather writes V, and only where a row was built. A cell with
+//     |V| above the dust floor is its own seed by the first test below, so it
+//     was inside the observed box, and the padding covers a step of travel.
+//   - phi. Only the vertex phi passes write phi, over the published box
+//     widened by VERTEX_PHI_REACH on each side; everywhere else phi is
+//     whatever it was, which was at or above the 4h band because the box was
+//     the bounding box of every cell that failed that test.
+// Eight cells of margin is therefore enough: it covers the reach the phi
+// passes write past the box (6, plus the cell a vertex belongs to), and the
+// padding finalizeActiveRegion already applies is at least twelve.
+//
+// The one thing that breaks the induction is liquid appearing somewhere the
+// box says nothing about -- a drop, an inlet, a scene edit -- and each of
+// those is a host-uniform condition, so the host simply does not set this flag
+// on those steps or on the step after one. The source terms below are scanned
+// densely either way.
+fn geometricCensusWindowed()->bool{return params.lean.y>0.5;}
+fn geometricCensusInWindow(id:vec3i)->bool{
+  let low=vec3i(vec3u(activeRegion[7],activeRegion[8],activeRegion[9]))-vec3i(8);
+  let high=vec3i(vec3u(activeRegion[10],activeRegion[11],activeRegion[12]))+vec3i(8);
+  return all(id>=low)&&all(id<high);
+}
+` : ""}
 @compute @workgroup_size(4,4,4)
 fn scanExternalActiveSources(
   @builtin(global_invocation_id) gid:vec3u,
@@ -1854,7 +1898,7 @@ fn scanExternalActiveSources(
 ){
   let id=vec3i(gid);let inDomain=valid(id);
   let source=uniformInflowWindowSeed(id)||(inDomain&&dropSource(id)>0.0);
-  let wet=${geometric ? "source||geometricActiveSeed(id)" : "inDomain&&(volume(id)>1e-5||source)"};
+  let wet=${geometric ? "source||((!geometricCensusWindowed()||geometricCensusInWindow(id))&&geometricActiveSeed(id))" : "inDomain&&(volume(id)>1e-5||source)"};
   writeActiveWorkgroupSummary(id,wet,localIndex,workgroupId,groupCount);
 }
 fn reduceActiveSummaryRange(groupCount:vec3u,lane:u32){

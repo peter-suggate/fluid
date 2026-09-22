@@ -22,6 +22,8 @@ import {
   UNIFORM_VOLUME_TILE_CLASSIFY_ENTRY,
   UNIFORM_VOLUME_TILE_WORK_OVERRIDE,
   UNIFORM_VOLUME_TWO_LEVEL_COUNTER_WORDS,
+  UNIFORM_VOLUME_TRANSPORT_REACH_COMPILED,
+  UNIFORM_VOLUME_TRANSPORT_REACH_ENTRIES,
   UNIFORM_VOLUME_TWO_LEVEL_ENTRIES,
   UNIFORM_VOLUME_TWO_LEVEL_WORDS_PER_TILE,
   uniformVolumeTargetWGSL,
@@ -83,7 +85,7 @@ import { UNIFORM_GAMMA_DIFFUSION_DEFAULT_ITERATIONS, UNIFORM_GAMMA_DIFFUSION_MAX
 export { UNIFORM_GAMMA_DIFFUSION_DEFAULT_ITERATIONS, UNIFORM_GAMMA_DIFFUSION_MAX_ITERATIONS } from "./parameters";
 import { UNIFORM_PAPER_DT_S, uniformPaperAdvanceReady } from "./uniform-paper";
 import { liveFluidEditRefusal, type LiveFluidEdit, type LiveFluidEditResult } from "../../core/live-fluid-edit";
-import { SolidOccupancyMask } from "../../core/solid-occupancy-mask";
+import { SOLID_OCCUPANCY_MASK_HEADER_WORDS, SolidOccupancyMask } from "../../core/solid-occupancy-mask";
 import { solidWorldForScene } from "../../core/solid-world";
 
 export { UNIFORM_PAPER_DT_S } from "./uniform-paper";
@@ -107,6 +109,15 @@ export interface WebGPUUniformReferenceOptions {
   extensionWorkForQA?: "baseline";
   /** Original serial cell/vertex census per tile. */
   tileSeedForQA?: "serial";
+  /** Unconditional solid walks, dense phi census, full vertex phi arm and
+   * domain-wide transport reach: the four host certificates of E4-E7, refused
+   * so one process can run both arms of the geometric phi stage. */
+  leanPhiArmsForQA?: "unconditional";
+  /** E7 alone, independent of the other three certificates: the per-tile
+   * transport reach. Unset follows `leanPhiArmsForQA` and the A/B switch, so
+   * one process can hold a control arm and a narrowed arm that differ in
+   * nothing else. */
+  transportReachPerTileForQA?: boolean;
   /** Full-domain correction passes, preserving the original reduction order. */
   surfaceCorrectionForQA?: "dense";
   /** Original eight independent trilinear probes per surface target. */
@@ -259,6 +270,21 @@ export interface WebGPUUniformReferenceOptions {
 // repetitions remain available explicitly, but are not a neutral robustness
 // setting: they apply more physical/numerical diffusion per simulation step.
 
+
+/**
+ * No cell of this lattice is covered by a static solid voxel.
+ *
+ * The mask is one bit per cell plus a one-cell halo, so the certificate is an
+ * OR over its words. It is recomputed only when `update` reports a dirty
+ * range -- a voxel stroke or a scene load -- never per step.
+ */
+function uniformSolidMaskEmpty(mask: SolidOccupancyMask): boolean {
+  const words = mask.words;
+  for (let index = SOLID_OCCUPANCY_MASK_HEADER_WORDS; index < words.length; index += 1) {
+    if (words[index] !== 0) return false;
+  }
+  return true;
+}
 
 interface UniformReferencePipelines {
   scanActiveRegion: GPUComputePipeline;
@@ -488,6 +514,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   /** Coarse cells whose E1 tables fit the conditioning plane; 0 disables E1. */
   private twoLevelTileCount: number;
   private twoLevelPipelines: Partial<Record<typeof UNIFORM_VOLUME_TWO_LEVEL_ENTRIES[number], GPUComputePipeline>> = {};
+  /** E7's post-extension reach passes; see UNIFORM_VOLUME_TRANSPORT_REACH_ENTRIES. */
+  private transportReachPipelines: Partial<Record<typeof UNIFORM_VOLUME_TRANSPORT_REACH_ENTRIES[number], GPUComputePipeline>> = {};
   /** The E1 map was built in the most recent encoded step. */
   private twoLevelEncoded = false;
   /** The E1 records, as the fine-tiles view binds them; see `tileClassSource`. */
@@ -744,6 +772,17 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    */
   private diagnosticsReductionOwed = false;
   private stepBodyCount = 0;
+  /** No bit set in the packed static solid voxel mask; see uvSolidFree. */
+  private solidVoxelsEmpty = true;
+  /** Steps the phi census must still scan the whole lattice; see E6. */
+  private phiCensusDenseSteps = 2;
+  /** E4-E7's host certificates are published; a QA arm refuses them all. */
+  private readonly leanPhiArms: boolean;
+  /** E7's own gate; see `transportReachPerTileForQA`. */
+  private readonly transportReachPerTile: boolean;
+  /** A scene edit the phi census has not rediscovered yet. Separate from
+   * `activeRegionRescanPending`, which the page-domain path never consumes. */
+  private phiCensusRescan = true;
   private paperTimeStep: boolean;
   private velocityTransport: GPUVelocityTransport;
   private liquidOnlyVelocityAdvection: boolean;
@@ -808,6 +847,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // be a restriction at all (the front stalls; nothing is created or lost).
     this.transportReach = Number.isFinite(options.transportReach)
       ? Math.round(Math.min(8, Math.max(-8, options.transportReach!))) : 1;
+    this.leanPhiArms = options.leanPhiArmsForQA !== "unconditional";
+    this.transportReachPerTile = options.transportReachPerTileForQA
+      ?? (this.leanPhiArms && uniformAbOn("tilereach"));
     this.volumePressureRows = options.volumePressureRows === "all" ? 2 : options.volumePressureRows === true || options.volumePressureRows === "abandoned" ? 1 : 0;
     this.volumeCompaction = options.volumeCompaction === true;
     this.phiSeedFromVolume = options.phiSeedFromVolume === true;
@@ -987,9 +1029,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         pressureProjection: velocity("Uniform audit velocity after pressure projection"),
       });
     }
-    this.params = device.createBuffer({ label: "Uniform reference parameters", size: 208, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+    this.params = device.createBuffer({ label: "Uniform reference parameters", size: 224, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.solidMask = new SolidOccupancyMask([nx, ny, nz]);
     this.solidMask.update(solidWorldForScene(scene));
+    this.solidVoxelsEmpty = uniformSolidMaskEmpty(this.solidMask);
     const packedSolidVoxels = this.solidMask.words;
     const activeRegionBytes = UNIFORM_ACTIVE_HEADER_WORDS * 4;
     this.activeRegion = device.createBuffer({
@@ -1454,6 +1497,18 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         }, { priority: "visible", signal });
       } });
     }
+    // E7's four passes, resident whenever the experiment is compiled in so the
+    // per-tile reach stays a live toggle; with it off they are never encoded.
+    if (this.twoLevelTileCount > 0 && UNIFORM_VOLUME_TRANSPORT_REACH_COMPILED)
+      for (const entryPoint of UNIFORM_VOLUME_TRANSPORT_REACH_ENTRIES) {
+        const id = `uniform.volume.transportreach.${entryPoint}`; ids.push(id);
+        tasks.push({ id, phase: "solver-pipelines", label: entryPoint, run: async () => {
+          this.transportReachPipelines[entryPoint] = await compiler.compileComputePipeline({
+            label: `Uniform Geometric E7 - ${entryPoint}`, layout: this.mainPipelineLayout,
+            compute: { module: shaderModule, entryPoint },
+          }, { priority: "visible", signal });
+        } });
+      }
     if (this.surfaceVolumeCorrection) {
       const id="uniform.volume.total-surface"; ids.push(id);
       tasks.push({id,phase:"solver-pipelines",label:"Total surface volume correction",
@@ -1524,6 +1579,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
 
   private writeParams(dt: number, activeBodyCount: number, inflowStrength: number, drop?: InjectedLiquidBall): void {
     const c = this.scene.container;
+    if (inflowStrength > 0 || drop !== undefined || this.phiCensusRescan) this.phiCensusDenseSteps = 2;
+    this.phiCensusRescan = false;
+    const lean = this.leanPhiArms;
+    const censusWindowed = lean && uniformAbOn("phicensuswindow") && this.geometricVolume
+      && this.phiRegion !== undefined && this.volumeDustThreshold > 0 && this.phiCensusDenseSteps <= 0;
+    if (this.phiCensusDenseSteps > 0) this.phiCensusDenseSteps -= 1;
     const inflow = this.scene.fluid.inflow;
     const outlet = this.inflowBoundary?.outletCenter_m;
     this.device.queue.writeBuffer(this.params, 0, new Float32Array([
@@ -1562,6 +1623,21 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       // agreement: compaction, phi seed, shift gain and clamp. Geometric only.
       this.geometricVolume && this.volumeCompaction ? 1 : 0, this.geometricVolume && this.phiSeedFromVolume ? 1 : 0,
       this.geometricVolume ? this.phiAgreementGain : 0, this.phiAgreementClamp,
+      // lean.x: the no-cut-cell certificate. All three sources of a cut cell
+      // are host state -- the packed voxel mask, the terrain heightfield and
+      // the live body list -- so this is decided here once a step rather than
+      // probed per sample. See uvSolidFree.
+      lean && uniformAbOn("solidfreetrace") && this.solidVoxelsEmpty
+        && !sceneHasTerrain(this.scene) && activeBodyCount === 0 ? 1 : 0,
+      // lean.y: the phi census may skip cells outside the box it published
+      // last step. Held off on any step that introduces liquid the box knows
+      // nothing about, and on the step after one, since the census that
+      // rediscovers it must be the dense one. See geometricCensusWindowed.
+      censusWindowed ? 1 : 0,
+      // lean.z / lean.w: the vertex phi advect's far-air arm and E3's per-tile
+      // transport reach. Both are decided by the tile classes on the GPU; the
+      // host only says whether the arm exists this step.
+      lean && uniformAbOn("philean") ? 1 : 0, this.transportReachPerTile ? 1 : 0,
     ]));
   }
 
@@ -2622,7 +2698,42 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.runDirect(encoder, "Surface-deficit global balance", this.volumePipelines.uvBalanceReduce!, this.sharpenComputeGroup, [1, 1, 1]);
   }
 
+  /**
+   * E7. The live transport set, decided from the field the trace samples.
+   *
+   * The head-of-step dilation published the control's domain-wide bit 4 (the
+   * extension and the DONORS decode both run on it) plus, in the spare bits of
+   * the DONORS plane word, each tile's Chebyshev distance to a transport seed.
+   * These four passes measure this step's post-extension displacement per tile,
+   * take its maximum over a ball wide enough to contain any characteristic,
+   * and clear bit 4 wherever the tile's distance exceeds the reach that
+   * maximum asks for. Everything that consumes the live set -- the transport
+   * page marking and work list, uvTransportSkip, the telemetry -- runs after.
+   */
+  private encodeTransportReach(encoder: GPUCommandEncoder): void {
+    const tiles: [number, number, number] = [Math.ceil(this.info.nx/4), Math.ceil(this.info.ny/4), Math.ceil(this.info.nz/4)];
+    const grid: [number, number, number] = [Math.ceil(tiles[0]/4), Math.ceil(tiles[1]/4), Math.ceil(tiles[2]/4)];
+    // The dilation already counted its own set into this word. The number the
+    // panel and the lanes read must be the set the work list is built from.
+    encoder.clearBuffer(this.conditioningScratch, this.twoLevelShellCountOffset + 4, 4);
+    this.runDirect(encoder, "Uniform Geometric transport reach measure",
+      this.transportReachPipelines.uvTransportReachMeasure!, this.densityTraceGroup, tiles);
+    for (const entry of ["uvTransportReachX", "uvTransportReachY", "uvTransportReachZ"] as const)
+      this.runDirect(encoder, `Uniform Geometric transport reach ${entry}`,
+        this.transportReachPipelines[entry]!, this.densityTraceGroup, grid);
+  }
+
+  /** E7 is encoded this step: compiled in, gated on, and E3's live set is on. */
+  private get transportReachEncoded(): boolean {
+    return this.transportReachPerTile && this.transportTilesEncoded
+      && this.transportReachPipelines.uvTransportReachZ !== undefined;
+  }
+
   private encodeGeometricVolume(encoder: GPUCommandEncoder, seam?: (phase: GPUTimestampPhase) => void): void {
+    if (this.transportReachEncoded) {
+      this.encodeTransportReach(encoder);
+      seam?.(UNIFORM_VOLUME_PHASE.transportReach);
+    }
     const run = (entry: typeof UNIFORM_VOLUME_ENTRIES[number], group = this.densityTraceGroup) => {
       if(entry === "uvFinishDonorSums") {
         if(this.pageDomain) this.run(encoder,entry,this.volumePipelines[entry]!,this.volumeDonorGroup);
@@ -3290,6 +3401,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.scene = scene;
     this.faceAuthorityStored = false;
     const dirty = this.solidMask.update(solidWorldForScene(scene));
+    if (dirty) this.solidVoxelsEmpty = uniformSolidMaskEmpty(this.solidMask);
     if (dirty) this.device.queue.writeBuffer(this.activeScratch,
       (this.solidVoxelScratchOffsetWords + dirty.firstWord) * 4, this.solidMask.words.buffer as ArrayBuffer,
       dirty.firstWord * 4, dirty.wordCount * 4);
@@ -3298,6 +3410,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       : undefined;
     this.pressureMultigrid.setDepthSymmetry(scene.container.depthBoundary === "symmetry");
     this.activeRegionRescanPending = true;
+    this.phiCensusRescan = true;
   }
 
   get rigidRenderBuffer(): GPUBuffer { return this.rigidSystem.renderBuffer; }

@@ -94,18 +94,19 @@ export class UniformSurfaceVolumeCorrection {
   get workSourceForQA(): GPUBuffer | undefined { return this.work; }
   encode(encoder: GPUCommandEncoder) {
     if(!this.buffers) throw new Error("Surface correction is not initialized");
+    const clearNext=()=>{
+      if(this.fieldPages?.scratch)encoder.clearBuffer(this.fieldPages.scratch.buffer,0,this.vertexCount*4);
+      else encoder.clearBuffer(this.buffers![2]!);
+    };
     if(this.fieldPages?.scratch)encoder.clearBuffer(this.fieldPages.scratch.buffer,Math.ceil(this.vertexCount/4)*16,this.vertexCount*4);
     else encoder.clearBuffer(this.buffers![1]!);
     // Dilation only rewrites the bounded region. Both parity buffers must be
     // zero outside it; the shared arena held unrelated stage data beforehand.
-    if(this.compactWork){
-      if(this.fieldPages?.scratch)encoder.clearBuffer(this.fieldPages.scratch.buffer,0,this.vertexCount*4);
-      else encoder.clearBuffer(this.buffers[2]!);
-    }
+    if(this.compactWork)clearNext();
     const run=(entry:typeof entries[number],count:number,group=0)=>{
       const pass=encoder.beginComputePass({label:`Total surface volume: ${entry}`});
       pass.setPipeline(this.pipelines[entry]!);pass.setBindGroup(0,this.groups![group]!);
-      const offset=entry==="measure"?0:entry==="dilate"||entry==="metric"?12:entry==="reduce"?24:undefined;
+      const offset=entry==="measure"||entry==="dilate"?0:entry==="metric"?12:entry==="reduce"?24:undefined;
       if(this.workDispatch && offset!==undefined)pass.dispatchWorkgroupsIndirect(this.workDispatch,offset);
       else pass.dispatchWorkgroups(Math.min(count,65535),Math.ceil(count/65535));
       pass.end();
@@ -115,14 +116,19 @@ export class UniformSurfaceVolumeCorrection {
       run("finishWork",1);
       for(let k=0;k<3;k++)encoder.copyBufferToBuffer(this.work,64+16*k,this.workDispatch!,12*k,12);
     }
-    for(let i=0;i<4;i++) run("dilate",Math.ceil(this.vertexCount/64),i%2);
+    // The cell band ping-pongs and ends in the primary buffer. Metric writes
+    // the per-vertex scale into the other buffer, which the bounded dilation
+    // left holding cell values at indices the bounded metric never rewrites,
+    // so it is cleared first; measure and apply then read it as `band`.
+    for(let i=0;i<4;i++) run("dilate",Math.ceil(this.cellCount/64),i%2);
+    if(this.compactWork)clearNext();
     run("metric",Math.ceil(this.vertexCount/64));
     // Two 17-sample monotone volume curves refine the scalar root, using
     // deterministic reductions. No per-step CPU readback or iterative solve.
     for(let i=0;i<2;i++) {
-      run("measure",Math.ceil(this.cellCount/64));run("reduce",Math.ceil(this.cellCount/4096));run("solve",1);
+      run("measure",Math.ceil(this.cellCount/64),1);run("reduce",Math.ceil(this.cellCount/4096));run("solve",1);
     }
-    run("apply",Math.ceil(this.vertexCount/64));
+    run("apply",Math.ceil(this.vertexCount/64),1);
     if(this.fieldPages) this.fieldPages.copy(encoder,this.output!,this.phi);
     else encoder.copyTextureToTexture({texture:this.output!},{texture:this.phi},this.dims.map(n=>n+1));
   }

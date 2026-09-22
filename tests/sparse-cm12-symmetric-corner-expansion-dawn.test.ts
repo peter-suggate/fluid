@@ -119,7 +119,8 @@ dawnTest("symmetric expansion allocates and wets sparse corner tiles",
         await solver.awaitFrameCompletion?.();
         await device.queue.onSubmittedWorkDone();
         await solver.assertSimulationHealthy();
-        const transport = await solver.readGeometricVolumeTransportReceiptQA();
+        const transport: Awaited<ReturnType<WebGPUAdaptiveMassSolver["readGeometricVolumeTransportReceiptQA"]>> =
+          await solver.readGeometricVolumeTransportReceiptQA();
         assert.equal(transport.algorithm, "adaptive-levelset-volume");
         assert.equal(transport.fault, 0, "shared volume transport must complete without a bound fault");
         assert.equal(transport.transportCompleted, true);
@@ -136,7 +137,6 @@ dawnTest("symmetric expansion allocates and wets sparse corner tiles",
           ...(transport.outflowFineCells3 > 0 ? { transport } : {}),
           substeps: transport.executedSubsteps,
         });
-
       }
 
       const [fields, finalActivity] = await Promise.all([

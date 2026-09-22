@@ -34,19 +34,24 @@ test("mini64 uses the same page traversal as large scenes",()=>{
 test("geometric pages use the evidence budget independently of legacy saved controls",async()=>{
  const {uniformGeometricSolverOptions}=await import("../lib/methods/uniform/uniform-geometric-options");
  const {resolveUniformGeometricValues}=await import("../lib/methods/uniform/uniform-geometric-parameters");
+ // The budget is fixed by the method, so naming it is a caller error, not a
+ // value to drop: silence let probes believe they had switched the schedule.
  const saved={pressureCycleBudget:"fixed",pressureBudgetHeadroom:4};
- const values=resolveUniformGeometricValues(saved);
- assert.equal(values.pressureCycleBudget,undefined);
- assert.equal(values.pressureBudgetHeadroom,undefined);
- assert.equal(uniformGeometricSolverOptions(saved).pressureCycleBudget,"lagged");
- assert.equal(uniformGeometricSolverOptions(saved).pressureBudgetHeadroom,0);
+ assert.throws(()=>resolveUniformGeometricValues(saved),/pressureCycleBudget/);
+ assert.throws(()=>uniformGeometricSolverOptions(saved),/pressureCycleBudget/);
+ assert.equal(uniformGeometricSolverOptions({}).pressureCycleBudget,"lagged");
+ assert.equal(uniformGeometricSolverOptions({}).pressureBudgetHeadroom,0);
+ // A control this method never declared is still ignored: saved configurations
+ // from an older build must keep loading.
+ assert.equal(resolveUniformGeometricValues({retiredControl:"on"}).retiredControl,undefined);
 });
 
 test("every geometric scene uses pages regardless of saved dense storage",async()=>{
  const {uniformGeometricSolverOptions}=await import("../lib/methods/uniform/uniform-geometric-options");
  const {UNIFORM_GEOMETRIC_PARAMS,resolveUniformGeometricValues}=await import("../lib/methods/uniform/uniform-geometric-parameters");
  for(const volumeStorage of ["auto","dense","pages16","pages32"]){
-  const options=uniformGeometricSolverOptions({volumeStorage,activeRegion:"on",pressureWindow:"window"});
+  const options=uniformGeometricSolverOptions({volumeStorage,pressureWindow:"window"});
+  assert.throws(()=>uniformGeometricSolverOptions({volumeStorage,activeRegion:"on"}),/activeRegion/);
   assert.equal(options.pageDomain,true);assert.equal(options.volumePages,32);
   assert.equal(options.activeRegion,false);assert.equal(options.pressureWindow,false);
   assert.equal(resolveUniformGeometricValues({volumeStorage}).volumeStorage,undefined);

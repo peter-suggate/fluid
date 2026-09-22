@@ -19,6 +19,15 @@ export const UNIFORM_VOLUME_TILE_CLASSIFY_ENTRY = "uvClassifySharpenTiles";
 export const UNIFORM_VOLUME_TWO_LEVEL_ENTRIES = [
   "uvTwoLevelSeed", "uvTwoLevelDilateX", "uvTwoLevelDilateY", "uvTwoLevelDilateZ",
 ] as const;
+/**
+ * E7: the four passes that decide TRANSPORT from the post-extension field, run
+ * between the extension and the first transport pass. Resident only while the
+ * experiment is compiled in; never encoded while its host gate is off.
+ */
+export const UNIFORM_VOLUME_TRANSPORT_REACH_ENTRIES = [
+  "uvTransportReachMeasure", "uvTransportReachX", "uvTransportReachY", "uvTransportReachZ",
+] as const;
+export const UNIFORM_VOLUME_TRANSPORT_REACH_COMPILED = uniformAbOn("tilereach");
 /** Words the E1 tables occupy above the N-word donor-sum region, per coarse cell. */
 export const UNIFORM_VOLUME_TWO_LEVEL_WORDS_PER_TILE = 6;
 /**
@@ -38,6 +47,13 @@ export const UNIFORM_VOLUME_SHARPEN_TILE_COUNT_WORD = 7;
 export const UNIFORM_VOLUME_SHARPEN_TILE_MAP_WORD = 8;
 export const UNIFORM_VOLUME_EDGE_BYTES = 40;
 const donorTiles = uniformAbOn("donortiles");
+/** E4: the half-cell solid walk and the embedded-wall terms, skipped as a
+ * host-uniform condition when the scene has no cut cell anywhere. */
+const solidFreeTrace = uniformAbOn("solidfreetrace");
+/** E5: the far-air arm of the vertex phi advect (outside SHELL). */
+const phiLean = uniformAbOn("philean");
+/** E7: E3's transport reach measured per tile instead of domain-wide. */
+const tileReach = uniformAbOn("tilereach");
 /** Same reconstruction; cached mode reuses the cell's eight vertex loads. */
 export function uniformVolumeTargetWGSL(cached: boolean): string {
   return /* wgsl */ `fn uvTarget(id:vec3i)->f32{
@@ -131,6 +147,15 @@ fn uvTrace(p:vec3f,dt:f32)->vec3f{
   let h=params.cellGravity.xyz;
   let mid=clamp(p-0.5*dt*sampleVelocity(p)/h,vec3f(0),vec3f(dims()));
   let end=clamp(p-dt*sampleVelocity(mid)/h,vec3f(0),vec3f(dims()));
+  ${solidFreeTrace ? `// E4. The walk exists to stop a characteristic tunnelling through a thin
+  // voxel wall. Where the host has certified that no cell in the domain is
+  // cut -- no static solid voxel, no rigid body, no terrain -- every
+  // cellOpenFraction on the segment is exactly one, the early return can
+  // never be taken, and the loop's only effect is to return the RK2 endpoint. That is
+  // the value returned here, bit for bit, at ceil(2D) fewer loads a vertex:
+  // at the figure-7 impact D is sixty-one cells, so this is 122 dependent
+  // texture probes per vertex that cannot change the answer.
+  if(uvSolidFree()){return end;}` : ""}
   let steps=max(1u,u32(ceil(2.0*max(abs(end.x-p.x),max(abs(end.y-p.y),abs(end.z-p.z))))));
   var previous=p;
   for(var s=1u;s<=steps;s++){let q=mix(p,end,f32(s)/f32(steps));
@@ -212,6 +237,8 @@ fn uvClosedWallPhi(p:vec3f,advected:f32)->f32{
 // Follow the characteristic to its first solid hit; this reaches a wall even
 // when one step sweeps several cells. Scalar mass transport still stops there.
 fn uvEmbeddedAir(p:vec3f,advected:f32)->f32{
+  ${solidFreeTrace ? `// Identity with no cut cell: the walk's only exit is a solid hit.
+  if(uvSolidFree()){return advected;}` : ""}
   let h=params.cellGravity.xyz;let dt=params.dimsDt.w;
   let mid=clamp(p-0.5*dt*sampleVelocity(p)/h,vec3f(0),vec3f(dims()));
   let end=clamp(p-dt*sampleVelocity(mid)/h,vec3f(0),vec3f(dims()));
@@ -237,18 +264,32 @@ fn uvEmbeddedAir(p:vec3f,advected:f32)->f32{
   }
   return result;
 }
-// Continue arriving liquid onto voxel wall vertices. The air update runs last
-// so solved separation always wins over contact continuation at edges/corners.
+// Continue liquid onto voxel wall vertices -- in both directions. A wall-face
+// vertex has no normal velocity, so uvTrace returns it to itself: a min-only
+// contact term is a fixed point, and one splash over a stair tread leaves phi<0
+// there for the rest of the run with no V behind it, owning a false pressure
+// row whose |phi| the volume correction then amplifies through its own wall
+// gradient. A wall face is not an independent store of phi. It is ASSIGNED the
+// continuation of the open cells it touches -- the arriving ones when the
+// interior moves into the wall, otherwise all of them -- so it wets when liquid
+// reaches it and dries the step after the cell beside it turns to air. Only a
+// vertex buried in solid, with no open incident cell, keeps its own value. The
+// air update runs last so solved separation still wins at edges/corners.
 fn uvEmbeddedContact(p:vec3f,advected:f32)->f32{
-  var result=advected;var air=-1e20;
+  ${solidFreeTrace ? `// Identity with no cut cell: every branch below needs a closed neighbour,
+  // and max(advected,-1e20) is advected for every representable phi.
+  if(uvSolidFree()){return advected;}` : ""}
+  var arriving=1e20;var continued=1e20;var air=-1e20;
   for(var k=0u;k<8u;k++){
     let fluid=vec3i(p)-vec3i(1)+uvCorner(k);if(cellOpenFraction(fluid)<=1e-5){continue;}
     for(var axis=0u;axis<3u;axis++){
       let side=select(-1,1,fluid[axis]<i32(p[axis]));var solid=fluid;solid[axis]+=side;
       if(!valid(solid)||cellOpenFraction(solid)>1e-5){continue;}
       var interior=p;interior[axis]-=f32(side);
-      if(advected<0.0||f32(side)*sampleVelocity(interior)[axis]>1e-6){
-        result=min(result,uvPhi(uvTrace(interior,params.dimsDt.w)));
+      let into=f32(side)*sampleVelocity(interior)[axis]>1e-6;
+      if(advected<0.0||into){
+        let value=uvPhi(uvTrace(interior,params.dimsDt.w));
+        continued=min(continued,value);if(into){arriving=min(arriving,value);}
       }
       let face=select(solid,fluid,side>0);let data=pressureFaceData(face,axis);
       let away=-f32(side)*(domainFaceFluidVelocity(face,axis)-data[axis]);
@@ -257,6 +298,8 @@ fn uvEmbeddedContact(p:vec3f,advected:f32)->f32{
       if(uvContactReleased(face,axis)&&travel>1e-4*params.cellGravity[axis]){air=max(air,travel);}
     }
   }
+  var result=advected;
+  if(arriving<1e20){result=arriving;}else if(continued<1e20){result=continued;}
   return max(result,air);
 }
 // phi/V agreement (docs/uniform-geometric-phi-volume-agreement-handoff.md). V knows
@@ -310,10 +353,66 @@ fn uvSeedPhi(p:vec3f,phi:f32)->f32{
     if(valid(c)&&uvPhi(vec3f(c)+vec3f(0.5))<0.0){return phi;}}}}
   return min(phi,h*(0.5-sum/n));
 }
+// E4. Host certificate: no cell in this domain is cut this step. The host
+// owns all three sources of a cut cell -- the packed static solid voxel mask,
+// the terrain heightfield and the live rigid bodies -- so this is a uniform
+// condition, not a field, and every consumer of it folds to a constant branch.
+// Zero with the experiment off, so every test below reads false.
+fn uvSolidFree()->bool{return params.lean.x>0.5;}
+// E5. SHELL membership of the tile a VERTEX sits in. SHELL is FINE dilated by
+// at least one tile, and a vertex's eight incident cells lie in tiles t-1..t,
+// so "t is not SHELL" implies none of those cells is in a FINE tile.
+fn uvShellTileAt(id:vec3i)->bool{
+  let t=clamp(id/4,vec3i(0),uvCoarseDims()-vec3i(1));
+  return (atomicLoad(&sharpenDeposits[uvCoarseBase()+4u*uvCoarseIndex(t)+3u])&2)!=0;
+}
+/**
+ * E5's FAR AIR arm of the vertex phi advect.
+ *
+ * Outside SHELL the four post-advect corrections are identity and are not
+ * evaluated. Each is a theorem about the FINE seed, which marks every tile
+ * holding liquid at or above the dust floor, any partially open cell
+ * (solid/terrain/body), any source this step, or any vertex with phi below the
+ * 4h band; SHELL is that set dilated by at least one tile.
+ *
+ *  - uvEmbeddedContact / uvEmbeddedAir need a cell with open fraction <= 1e-5
+ *    among the vertex's own incident cells, or on its characteristic. Such a
+ *    cell is a FINE seed, and the incident ones lie in tiles t-1..t, so the
+ *    vertex is in SHELL. (The characteristic case is covered too: the walk
+ *    stops at the FIRST solid crossed, and reaching one from outside SHELL
+ *    needs the departure point inside the solid's own tile.)
+ *  - uvSourcePhi is identity on a step with no drop and no inflow, which is a
+ *    host-uniform condition and is tested directly.
+ *  - uvAgreementShift gathers the packed residual over base+[-4,4). The
+ *    residual is nonzero only where |phi| < 1.5h and gamma or V is nonzero,
+ *    which is inside FINE; outside SHELL every tap is +0, A stays below one
+ *    and the function returns exactly zero.
+ *  - uvSeedPhi returns phi unless the eight incident cells average more than a
+ *    quarter full. Those cells are in tiles t-1..t, none of them FINE, so each
+ *    holds |V| < the dust floor and the average cannot reach 0.25.
+ *
+ * The one term NOT covered by a theorem is uvReleasedWalls, whose ambient-air
+ * source sits on the six DOMAIN planes rather than on any tile class. Its
+ * contribution is max(phi, dt*away - distance*h): it can only raise phi, and
+ * only within dt*away/h cells of a plane. The far-air arm is therefore refused
+ * within one 4h tile of every plane, which is exact for every wall whose
+ * per-step ambient travel is under four cells -- including every static wall,
+ * since the lower planes read the prescribed boundary velocity and an upper
+ * plane needs a released contact face or an open lid with inflow on its own
+ * cell row. A wall driven harder than that loses the term between four cells
+ * and dt*away/h from the plane, where it would have added air.
+ */
+fn uvPhiFarAir(vertex:vec3i)->bool{
+  if(params.lean.z<=0.5||params.physical.z<0.0){return false;}
+  if(uvStepHasExternalSource()){return false;}
+  if(any(vertex<vec3i(4))||any(vertex>dims()-vec3i(4))){return false;}
+  return !uvShellTileAt(vertex);
+}
 @compute @workgroup_size(4,4,4)
 fn uvAdvectPhi(@builtin(global_invocation_id)gid:vec3u){
   let vertex=activeVertexId(gid);if(any(vertex<vec3i(0))||any(vertex>dims())){return;}let p=vec3f(vertex);
   let advected=uvPhi(uvTrace(p,params.dimsDt.w));
+  ${phiLean ? `if(uvPhiFarAir(vertex)){textureStore(uvPhiOut,vertex,vec4f(advected));return;}` : ""}
   let contact=uvEmbeddedContact(p,uvClosedWallPhi(p,advected));
   let released=uvReleasedWalls(p,uvEmbeddedAir(p,contact));
   var value=uvSourcePhi(p,released);
@@ -380,7 +479,7 @@ ${donorTiles ? `// The decoded sums have two readers: uvFallback reads a built r
 fn uvDonorSkip(id:vec3i)->bool{
   if(!uvTransportTiles()){return false;}
   let t=clamp(id/4,vec3i(0),uvCoarseDims()-vec3i(1));
-  return atomicLoad(&sharpenDeposits[uvCoarsePlane(0u)+uvCoarseIndex(t)])==0;
+  return (atomicLoad(&sharpenDeposits[uvCoarsePlane(0u)+uvCoarseIndex(t)])${tileReach ? "&8" : ""})==0;
 }` : ""}
 @compute @workgroup_size(4,4,4)
 fn uvBuildEdges(@builtin(global_invocation_id)gid:vec3u){
@@ -652,6 +751,52 @@ fn uvCoarseCount()->u32{let c=uvCoarseDims();return u32(c.x*c.y*c.z);}
 fn uvCoarseIndex(t:vec3i)->u32{let c=uvCoarseDims();return u32(t.x+c.x*(t.y+c.y*t.z));}
 fn uvCoarseBase()->u32{return cellCount();}
 fn uvCoarsePlane(plane:u32)->u32{return cellCount()+4u*uvCoarseCount()+plane*uvCoarseCount();}
+${tileReach ? `/**
+ * E7. The per-tile transport reach, measured AFTER Sec. 3.3's extension.
+ *
+ * Why per-tile. E3's reach is derived from the largest backward displacement
+ * anywhere in the DOMAIN, so on figure 7 one splash cell at 61 cells a step
+ * dilates the whole live set by sixteen tiles: 92,880 of 262,144 tiles at the
+ * impact step, for 9,244 tiles of actual liquid. The predicate it is standing
+ * in for is local -- a receiver's trace departs at most as far as the velocity
+ * it actually samples -- so the domain maximum is only ever needed where the
+ * domain maximum is.
+ *
+ * Why it cannot be measured here. The first attempt measured each tile's
+ * start-of-step fine velocity and decided TRANSPORT in the same scan. That is
+ * the wrong field at the wrong time: outside the FINE tiles uvTrace samples
+ * uvCoarseVelocityComponent, the 4h face table the extension publishes from
+ * its own ceil(n/4) level, and inside them it samples the post-extension fine
+ * field. The extension is a narrow-band front plus a CM11b down/up pyramid, so
+ * a far-air cell's traced velocity is a block AVERAGE that can come from
+ * anywhere in the domain; no ball of start-of-step fine velocities bounds it.
+ * At 256^3 that arm diverged from the dense control at frame 13.
+ *
+ * What these scans carry instead. The head-of-step dilation keeps the control's
+ * classes exactly -- bit 4 is still the domain-wide dilation the extension and
+ * DONORS are entitled to -- and computes ONE extra field alongside them: a
+ * separable Chebyshev DISTANCE, in tiles, to the nearest transport SEED. It is
+ * a six-bit saturating integer above the four class bits while the scan runs,
+ * and uvTwoLevelDilateZ parks it in the spare bits of the DONORS plane word so
+ * it survives the extension. Every other reader still sees three class bits.
+ * The decision itself is made after the extension, by the four passes at the
+ * end of this module.
+ */
+const UV_TILE_FAR:i32=63;
+fn uvTilePack(cls:i32,dist:i32)->i32{return (cls&15)|((clamp(dist,0,63))<<4);}
+fn uvTileDist(value:i32)->i32{return (value>>4)&63;}
+/** E3's own m(D): the whole tiles a ceil(D)+1 cell departure can cross, plus
+ * the configured margin, biased by eight so negative w can mean "off". */
+fn uvTileRequiredReach(displacement:f32)->i32{
+  if(params.twoLevel.w<0.0){return 0;}
+  let required=i32(ceil((ceil(max(displacement,0.0))+1.0)/4.0));
+  return clamp(required+i32(params.twoLevel.w)-8,0,16);
+}
+/** DONORS plane word while E7 runs: bit 3 is DONORS itself, bits 4..9 the
+ * head-of-step distance to the nearest transport seed, bits 16..21 the x scan
+ * of the post-extension displacement. */
+fn uvPlaneScan(value:i32)->i32{return (value>>16)&63;}
+` : ""}
 fn uvTwoLevelFineAt(p:vec3f)->bool{
   let cell=clamp(vec3i(floor(p)),vec3i(0),dims()-vec3i(1));
   return (atomicLoad(&sharpenDeposits[uvCoarseBase()+4u*uvCoarseIndex(cell/4)+3u])&1)!=0;
@@ -702,7 +847,7 @@ fn uvTwoLevelSeed(@builtin(global_invocation_id)gid:vec3u){
   // so V is zero and every vertex is outside the 4h band. Only a source can
   // break that, and a source step is a host-known uniform condition.
   if(!uvTileInWindow(t)&&!uvStepHasExternalSource()){
-    atomicStore(&sharpenDeposits[slot+3u],0);return;
+    atomicStore(&sharpenDeposits[slot+3u],${tileReach ? "uvTilePack(0,UV_TILE_FAR)" : "0"});return;
   }
   let dust=select(params.tuning.z,1e-6,params.tuning.z<=0.0);
   let spacing=params.cellGravity.xyz;
@@ -725,7 +870,8 @@ fn uvTwoLevelSeed(@builtin(global_invocation_id)gid:vec3u){
   let last=min(4*t+vec3i(4),dims());
   for(var z=4*t.z;z<=last.z;z++){for(var y=4*t.y;y<=last.y;y++){for(var x=4*t.x;x<=last.x;x++){
     if(textureLoad(uvPhiIn,vec3i(x,y,z),0).x<band){seed=true;transportSeed=true;}}}}
-  atomicStore(&sharpenDeposits[slot+3u],select(0,3,seed)|select(0,4,transportSeed));
+  ${tileReach ? `atomicStore(&sharpenDeposits[slot+3u],uvTilePack(select(0,3,seed)|select(0,4,transportSeed),
+    select(UV_TILE_FAR,0,transportSeed)));` : `atomicStore(&sharpenDeposits[slot+3u],select(0,3,seed)|select(0,4,transportSeed));`}
 }
 // Same census as uvTwoLevelSeed, with one 4x4x4 workgroup per tile.
 // Adjacent lanes read adjacent cells/vertices instead of each lane serially
@@ -761,8 +907,11 @@ fn uvTwoLevelSeedCooperative(@builtin(workgroup_id)group:vec3u,
   if(flags!=0u){atomicOr(&uvSeedFlags,flags);}
   workgroupBarrier();
   if(lane==0u){
-    atomicStore(&sharpenDeposits[slot+3u],i32(atomicLoad(&uvSeedFlags)));
-    atomicMax(&sharpenDeposits[uvCoarsePlane(2u)+2u],i32(atomicLoad(&uvSeedTravel)));
+    let cls=i32(atomicLoad(&uvSeedFlags));
+    let travel=atomicLoad(&uvSeedTravel);
+    ${tileReach ? `atomicStore(&sharpenDeposits[slot+3u],uvTilePack(cls,
+      select(UV_TILE_FAR,0,(cls&4)!=0)));` : `atomicStore(&sharpenDeposits[slot+3u],cls);`}
+    atomicMax(&sharpenDeposits[uvCoarsePlane(2u)+2u],i32(travel));
   }
 }
 // Chebyshev dilation, separated into three axis scans. Each scan preserves
@@ -819,13 +968,20 @@ fn uvTwoLevelDilate(previous:u32,axis:u32,t:vec3i)->i32{
   let c=uvCoarseDims();let k=uvTwoLevelFineReach();let s=uvTwoLevelShellReach();
   let m=uvTwoLevelTransportReach();${donorTiles ? `let g=uvTwoLevelDonorReach();
   let r=min(max(max(s,m),g),max(c.x,max(c.y,c.z)));` : "let r=max(s,m);"}var hit=0;
+  ${tileReach ? "var dist=UV_TILE_FAR;" : ""}
   for(var d=-r;d<=r;d++){var q=t;q[axis]+=d;if(q[axis]<0||q[axis]>=c[axis]){continue;}
-    let value=uvTwoLevelClassIn(previous,q);if(value==0){continue;}
+    let value=uvTwoLevelClassIn(previous,q);${tileReach ? `
+    // Separated Chebyshev distance transform: min over this axis of the
+    // partial distance already accumulated against the offset walked to get
+    // it. Chebyshev balls compose exactly the way the class bits do. Saturates
+    // at UV_TILE_FAR outside the scan radius r, which is never below m, so a
+    // saturated distance is always past any reach the post pass can ask for.` : "if(value==0){continue;}"}${tileReach ? `
+    dist=min(dist,max(uvTileDist(value),abs(d)));` : ""}
     if((value&1)!=0&&d>=-k&&d<=k){hit|=1;}
     if((value&2)!=0&&d>=-s&&d<=s){hit|=2;}
     if((value&4)!=0&&d>=-m&&d<=m){hit|=4;}${donorTiles ? `
     if((value&select(8,4,previous==2u))!=0&&d>=-g&&d<=g){hit|=8;}` : ""}}
-  return hit;
+  return ${tileReach ? "uvTilePack(hit,dist)" : "hit"};
 }
 @compute @workgroup_size(4,4,4)
 fn uvTwoLevelDilateX(@builtin(global_invocation_id)gid:vec3u){
@@ -840,15 +996,162 @@ fn uvTwoLevelDilateY(@builtin(global_invocation_id)gid:vec3u){
 @compute @workgroup_size(4,4,4)
 fn uvTwoLevelDilateZ(@builtin(global_invocation_id)gid:vec3u){
   let t=vec3i(gid);if(any(t>=uvCoarseDims())){return;}
-  ${donorTiles ? `// The x plane is dead once the y scan has read it, so DONORS lands there and
-  // the class word keeps exactly the three bits its other readers know.
-  let scanned=uvTwoLevelDilate(1u,2u,t);let hit=scanned&7;
-  atomicStore(&sharpenDeposits[uvCoarsePlane(0u)+uvCoarseIndex(t)],scanned&8);` : "let hit=uvTwoLevelDilate(1u,2u,t);"}
+  let scanned=uvTwoLevelDilate(1u,2u,t);
+  // E7 does NOT decide TRANSPORT here. The bit published is the control's
+  // domain-wide dilation, because the extension and DONORS both run on it and
+  // the field the transport trace samples does not exist yet. The narrowing
+  // happens in uvTransportReachZ, after the extension has published it.
+  let hit=scanned&7;
+  ${donorTiles||tileReach ? `// The x plane is dead once the y scan has read it, so DONORS lands there and
+  // the class word keeps exactly the three bits its other readers know. E7
+  // parks its Chebyshev seed distance in the same word's bits 4..9: the only
+  // reader of this plane is uvDonorSkip, which masks the DONORS bit.
+  atomicStore(&sharpenDeposits[uvCoarsePlane(0u)+uvCoarseIndex(t)],${donorTiles ? "(scanned&8)" : "0"}${tileReach ? "|(uvTileDist(scanned)<<4)" : ""});` : ""}
   atomicStore(&sharpenDeposits[uvCoarseBase()+4u*uvCoarseIndex(t)+3u],hit);
   if((hit&1)!=0){atomicAdd(&reductions[7],1u);}
   if((hit&2)!=0){atomicAdd(&sharpenDeposits[uvCoarsePlane(2u)],1);}
   if((hit&4)!=0){atomicAdd(&sharpenDeposits[uvCoarsePlane(2u)+1u],1);}
 }
+${tileReach ? `
+/**
+ * E7's decision, taken AFTER Sec. 3.3's extension has published the field
+ * uvTrace actually samples, and before anything builds a transport row.
+ *
+ * uvTransportReachMeasure prices one tile: the largest |v|*dt/h, over
+ * components, among the MAC faces the trilinear samplers read for a point
+ * inside it -- the post-extension fine faces transportIn holds, and the 4h
+ * faces uvCoarseFace holds for the arm outside FINE. It is rounded UP to whole
+ * cells (max and ceil commute, so the scans below stay exact on six-bit
+ * integers) and clamped to E3's own domain maximum, which is the premise the
+ * control already runs on: the start-of-step maximum bounds every backward
+ * displacement this step. Three separable MAX scans then dilate it over a ball
+ * of m0+1 tiles, where m0 = ceil((ceil(D)+1)/4) is E3's required reach for the
+ * domain maximum D, and uvTransportReachZ finally clears class bit 4 wherever
+ * the tile's own distance to a transport seed exceeds m(that ball maximum).
+ *
+ * EXACTNESS. Write A(t) for the ball maximum at tile t, in cells, and take any
+ * receiver cell p in t.
+ *
+ *  - The first sample is at p itself. sampleVelocityComponent reads faces
+ *    within one cell of p either way, so its footprint lies in tiles t-1..t+1;
+ *    the coarse arm reads uvCoarseFace over base..base+1 with base in
+ *    t-1..t, so it lies there too. The ball has radius m0+1 >= 1, so both are
+ *    inside it: |v(p)|*dt/h <= A(t), componentwise.
+ *  - The RK2 midpoint is therefore at most A(t)/2 cells from p, so its tile is
+ *    within ceil(ceil(A/2)/4) <= m0 tiles of t and its own sampling footprint
+ *    within m0+1. Hence |v(mid)|*dt/h <= A(t) as well, and the endpoint is at
+ *    most ceil(A(t)) cells from p. uvTrace's half-cell solid walk only returns
+ *    a point on that same segment, and both clamps only shorten it.
+ *  - uvBuildEdges takes base = floor(end - 1/2) and donors base..base+1, so a
+ *    donor cell is within ceil(A(t))+1 cells of p, i.e. within
+ *    ceil((ceil(A(t))+1)/4) = m(A(t)) TILES of t. That is exactly the reach
+ *    uvTileRequiredReach returns (plus the configured margin, which only
+ *    enlarges it).
+ *  - The clamp to the domain maximum gives A(t) <= ceil(D) for every t, which
+ *    is what makes m0+1 a sufficient ball radius rather than a circular one.
+ *
+ * So if dist(t) > m(A(t)), no donor of any row in t lies in a transport-seed
+ * tile. Every cell outside a seed tile holds |V| below the dust floor, and the
+ * floor stores exact zero, so the nine-term gather would sum to zero -- which
+ * is what uvGather stores for a skipped tile. Gamma is zero there for the same
+ * reason: a vertex of t with phi < 0 after advection had phi < 4h before it, at
+ * a point at most ceil(A(t)) cells away, so that point's tile is a transport
+ * seed and dist(t) <= m(A(t)). The post-advect corrections cannot break that:
+ * every reach is at least ceil(1/4) = 1 tile, uvSeedPhi needs incident cells
+ * averaging a quarter full (which are liquid, hence seeds, one tile away),
+ * uvAgreementShift needs |phi| < 2h at a vertex whose phi is at least 4h, and
+ * a drop or inflow cell seeds its own tile at distance zero.
+ *
+ * Why DONORS stays global. uvNormalizeDonors reads the accumulated column sum
+ * of every donor a BUILT row samples, and the built set only shrinks here, so
+ * the domain-wide DONORS set published at the head of the step is a superset
+ * of what the narrowed rows address. A wider decode is redundant work, never a
+ * stale read; a narrower one would be a stale read.
+ */
+fn uvPostTraceReach()->i32{
+  let d=bitcast<f32>(atomicLoad(&sharpenDeposits[uvCoarsePlane(2u)+2u]));
+  return i32(ceil((ceil(max(d,0.0))+1.0)/4.0));
+}
+/** Whole cells of E3's domain maximum: the cap every tile's own measurement is
+ * held to, so the ball radius above is not self-referential. */
+fn uvPostTravelCap()->i32{
+  let d=bitcast<f32>(atomicLoad(&sharpenDeposits[uvCoarsePlane(2u)+2u]));
+  return i32(clamp(ceil(max(d,0.0)),0.0,63.0));
+}
+var<workgroup> uvPostTravel:atomic<u32>;
+@compute @workgroup_size(4,4,4)
+fn uvTransportReachMeasure(@builtin(workgroup_id)group:vec3u,
+ @builtin(local_invocation_id)local:vec3u,@builtin(local_invocation_index)lane:u32){
+  let t=vec3i(group);if(any(t>=uvCoarseDims())){return;}
+  if(lane==0u){atomicStore(&uvPostTravel,0u);}
+  workgroupBarrier();
+  let spacing=params.cellGravity.xyz;let id=4*t+vec3i(local);
+  var travel=0.0;
+  // The post-extension fine faces, which sampleVelocityComponent interpolates
+  // inside a FINE tile. The padded ring outside the lattice is never written
+  // and therefore reads zero, so it cannot raise any maximum.
+  if(valid(id)){
+    let v=abs(textureLoad(transportIn,id+vec3i(1),0).xyz)*params.dimsDt.w/spacing;
+    travel=max(v.x,max(v.y,v.z));
+  }
+  // ...and the 4h faces it interpolates outside one.
+  if(lane<3u){travel=max(travel,abs(uvCoarseFace(t,lane))*params.dimsDt.w/spacing[lane]);}
+  atomicMax(&uvPostTravel,u32(clamp(ceil(travel),0.0,63.0)));
+  workgroupBarrier();
+  if(lane==0u){
+    atomicStore(&sharpenDeposits[uvCoarsePlane(1u)+uvCoarseIndex(t)],
+      min(i32(atomicLoad(&uvPostTravel)),uvPostTravelCap()));
+  }
+}
+fn uvTransportReachIn(plane:u32,q:vec3i)->i32{
+  let value=atomicLoad(&sharpenDeposits[uvCoarsePlane(plane)+uvCoarseIndex(q)]);
+  return select(value,uvPlaneScan(value),plane==0u);
+}
+/** One axis of the ball maximum. Chebyshev balls compose, so three of these
+ * are the max over the cube of radius m0+1 tiles. */
+fn uvTransportReachScan(previous:u32,axis:u32,t:vec3i)->i32{
+  let c=uvCoarseDims();
+  let r=min(uvPostTraceReach()+1,max(c.x,max(c.y,c.z)));
+  var travel=0;
+  for(var d=-r;d<=r;d++){var q=t;q[axis]+=d;if(q[axis]<0||q[axis]>=c[axis]){continue;}
+    travel=max(travel,uvTransportReachIn(previous,q));}
+  return travel;
+}
+@compute @workgroup_size(4,4,4)
+fn uvTransportReachX(@builtin(global_invocation_id)gid:vec3u){
+  let t=vec3i(gid);if(any(t>=uvCoarseDims())){return;}
+  let slot=uvCoarsePlane(0u)+uvCoarseIndex(t);
+  let travel=uvTransportReachScan(1u,0u,t);
+  // One writer per word, one dispatch apart: preserve DONORS and the seed
+  // distance already parked in the low ten bits.
+  atomicStore(&sharpenDeposits[slot],
+    (atomicLoad(&sharpenDeposits[slot])&1023)|(clamp(travel,0,63)<<16));
+}
+@compute @workgroup_size(4,4,4)
+fn uvTransportReachY(@builtin(global_invocation_id)gid:vec3u){
+  let t=vec3i(gid);if(any(t>=uvCoarseDims())){return;}
+  atomicStore(&sharpenDeposits[uvCoarsePlane(1u)+uvCoarseIndex(t)],uvTransportReachScan(0u,1u,t));
+}
+@compute @workgroup_size(4,4,4)
+fn uvTransportReachZ(@builtin(global_invocation_id)gid:vec3u){
+  let t=vec3i(gid);if(any(t>=uvCoarseDims())){return;}
+  let index=uvCoarseIndex(t);
+  let travel=uvTransportReachScan(1u,2u,t);
+  let word=atomicLoad(&sharpenDeposits[uvCoarseBase()+4u*index+3u]);
+  var hit=word;
+  // Only ever CLEARS bit 4, so the live set is a subset of the control's. It
+  // stands down entirely once E3's own reach is capped, because the control is
+  // then short of its own predicate and there is nothing to be exact to.
+  if((word&4)!=0&&uvPostTraceReach()<=16
+    &&uvTileDist(atomicLoad(&sharpenDeposits[uvCoarsePlane(0u)+index]))>uvTileRequiredReach(f32(travel))){
+    hit=word&3;
+  }
+  atomicStore(&sharpenDeposits[uvCoarseBase()+4u*index+3u],hit);
+  // The host cleared this counter again before the measure pass: the live-set
+  // telemetry must price the set the transport work list is built from.
+  if((hit&4)!=0){atomicAdd(&sharpenDeposits[uvCoarsePlane(2u)+1u],1);}
+}
+` : ""}
 @compute @workgroup_size(4,4,4)
 fn uvPublish(@builtin(global_invocation_id)gid:vec3u){
   let id=activeId(gid);if(!valid(id)){return;}

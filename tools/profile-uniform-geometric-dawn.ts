@@ -98,7 +98,7 @@ try {
       const encoder=device.createCommandEncoder();
       pressureWork.forEach(({buffer},i)=>encoder.copyBufferToBuffer(buffer,0,pressureWorkReadback!,4*i,4));
       device.queue.submit([encoder.finish()]);await pressureWorkReadback.mapAsync(GPUMapMode.READ);
-      work.uniformPressureSmoothingTiles=Array.from(new Uint32Array(pressureWorkReadback.getMappedRange()),(active,i)=>({level:i,active,capacity:pressureWork[i]!.capacity}));
+      work.uniformPressureSmoothingTiles=Array.from(new Uint32Array(pressureWorkReadback.getMappedRange()),(active,i)=>({level:pressureWork[i]!.level,list:pressureWork[i]!.list,active,capacity:pressureWork[i]!.capacity}));
       pressureWorkReadback.unmap();
     }
     if(surfaceWorkReadback && surfaceWork){
