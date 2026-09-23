@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useShallow } from "zustand/react/shallow";
 import {
   COMPARE_ACTIVE_KEY,
   COMPARE_KEY_PREFIX,
@@ -22,7 +23,9 @@ import {
 import type { PaneSession } from "../lib/core/session/session";
 import { useSession } from "../lib/core/session/session-context";
 import { useShellStore } from "../lib/core/stores/shell-store";
-import { createSceneQueryLayerCache, replaceQueryStateUrl, serializeQueryState } from "../lib/core/url-state";
+import { cameraForPreset, getScenePreset } from "../lib/core/scenes";
+import type { UIStoreHook } from "../lib/core/stores/ui-store";
+import { createSceneQueryLayerCache, linkCarriesCamera, replaceQueryStateUrl, serializeQueryState } from "../lib/core/url-state";
 import { ResetButton } from "./ui";
 
 /**
@@ -31,6 +34,9 @@ import { ResetButton } from "./ui";
  * for a camera orbit would re-serialize a sculpted terrain at pointer rate.
  */
 const cachedSceneLayer = createSceneQueryLayerCache();
+
+/** Every UI field but the camera, which moves at pointer rate. */
+const uiWithoutCamera = ({ camera: _camera, ...rest }: ReturnType<UIStoreHook["getState"]>) => rest;
 
 /** Hydration, as an external store: the client snapshot is true, the server's false. */
 const subscribeNever = () => () => {};
@@ -117,10 +123,17 @@ export function SceneOverridesChip() {
   const scene = session.scene((state) => state.scene);
   const presetId = session.scene((state) => state.presetId);
   const methodState = session.method();
-  const uiState = session.ui();
+  const [open, setOpen] = useState(false);
+  // The camera is listed but never counted, so a closed chip asks only whether
+  // the link carries one. Subscribing to its value re-serialized the query and
+  // re-rendered this chip on every orbit step; the open list still follows it.
+  const uiState = session.ui(useShallow(uiWithoutCamera));
+  const cameraInLink = session.ui((state) => linkCarriesCamera(state.camera, presetId));
+  const liveCamera = session.ui((state) => (open ? state.camera : undefined));
+  const camera = liveCamera
+    ?? (cameraInLink ? session.ui.getState().camera : cameraForPreset(getScenePreset(presetId)));
   const shellView = useShellStore((state) => state.view);
   const compare = useShellStore((state) => state.compare);
-  const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   // The query is only canonical in the browser, and the studio's first paint is
   // hydrated: read the address after mount so the server and the client agree
@@ -147,7 +160,7 @@ export function SceneOverridesChip() {
     window.location.search,
     { presetId, scene },
     methodState,
-    uiState,
+    { ...uiState, camera },
     { view: shellView, compare },
     cachedSceneLayer({ presetId, scene }),
   );

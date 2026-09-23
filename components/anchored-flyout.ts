@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
+import { useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
 
 /**
  * How far a flyout stays clear of the viewport's own edges. The viewport shell
@@ -74,6 +74,9 @@ export function resolveFlyoutPlacement({
   };
 }
 
+/** The measured half of `FlyoutGeometry`: what content and layout decide, not the camera. */
+type FlyoutBoxes = Pick<FlyoutGeometry, "panelWidth" | "panelHeight" | "containerWidth" | "containerHeight">;
+
 export type AnchoredFlyoutOptions = {
   leftFraction: number;
   topFraction: number;
@@ -94,7 +97,7 @@ export type AnchoredFlyoutOptions = {
  * Measured rather than declared because the size is content: the selection
  * panel is a chip until it is expanded, and the field picker grows a row per
  * view the method registers. A `ResizeObserver` on the panel and on the shell
- * catches both of those, and re-placing after every render catches the camera.
+ * catches both of those; the camera only moves the anchor, which is arithmetic.
  */
 export function useAnchoredFlyout<T extends HTMLElement>({
   leftFraction,
@@ -104,51 +107,47 @@ export function useAnchoredFlyout<T extends HTMLElement>({
   offsetY = 0,
 }: AnchoredFlyoutOptions): { ref: RefObject<T | null>; style: CSSProperties } {
   const ref = useRef<T>(null);
-  const [placement, setPlacement] = useState<FlyoutPlacement>();
+  const [boxes, setBoxes] = useState<FlyoutBoxes>();
 
-  const place = () => {
-    const element = ref.current;
-    const container = element?.offsetParent;
-    if (!element || !(container instanceof HTMLElement)) return;
-    const next = resolveFlyoutPlacement({
-      leftFraction, topFraction, gap, originY, offsetY,
-      panelWidth: element.offsetWidth,
-      panelHeight: element.offsetHeight,
-      containerWidth: container.clientWidth,
-      containerHeight: container.clientHeight,
-    });
-    // Guarded because this runs after every render: an unconditional set would
-    // be a render loop rather than a placement.
-    setPlacement((previous) => (previous
-      && previous.left === next.left
-      && previous.top === next.top
-      && previous.maxHeight === next.maxHeight
-      ? previous
-      : next));
-  };
-
-  // No dependency list: the anchor moves with the camera, which is a new render
-  // and not a new effect. Before paint, so the first frame is already placed.
-  const latest = useRef(place);
+  // The two boxes are read when either one changes size, never per render. The
+  // anchor moves with the camera, and a layout read after every commit forced a
+  // synchronous reflow of the page — plus a second render to apply what it
+  // found — on every orbit step, on the thread that also encodes the frame.
+  // Mounting measures before paint, so the first frame is already placed; a
+  // later content resize lands one frame after it, when the observer reports.
   useLayoutEffect(() => {
-    latest.current = place;
-    place();
-  });
-
-  useEffect(() => {
     const element = ref.current;
     const container = element?.offsetParent;
     if (!element || !(container instanceof HTMLElement)) return;
-    const observer = new ResizeObserver(() => latest.current());
+    const measure = () => {
+      const next: FlyoutBoxes = {
+        panelWidth: element.offsetWidth,
+        panelHeight: element.offsetHeight,
+        containerWidth: container.clientWidth,
+        containerHeight: container.clientHeight,
+      };
+      setBoxes((previous) => (previous
+        && previous.panelWidth === next.panelWidth
+        && previous.panelHeight === next.panelHeight
+        && previous.containerWidth === next.containerWidth
+        && previous.containerHeight === next.containerHeight
+        ? previous
+        : next));
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
     observer.observe(element);
     observer.observe(container);
     return () => observer.disconnect();
   }, []);
 
+  // Pure arithmetic on the measured boxes, so following the camera is one
+  // render and one ordinary layout.
+  const placement = boxes && resolveFlyoutPlacement({ leftFraction, topFraction, gap, originY, offsetY, ...boxes });
   return {
     ref,
     // The fallback is the pre-measurement position, which never paints: the
-    // layout effect above has already replaced it by the time the browser draws.
+    // layout effect above has already measured by the time the browser draws.
     style: placement
       ? { left: placement.left, top: placement.top, maxHeight: placement.maxHeight }
       : { left: `${leftFraction * 100}%`, top: `${topFraction * 100}%` },

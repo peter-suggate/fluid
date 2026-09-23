@@ -932,9 +932,14 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
   // scene write invalidates the solver's seed key — writing per pointer-move
   // asked the renderer to re-seed dozens of times a second, which is exactly the
   // hitch that made the gesture unusable. Preview here, simulate on release.
-  const entityContext: EditorEntityContext = { scene, pickingAvailable: pickingInteractive,
-    bodies: editorBodyPoses(mergeDrawnPoses(bodies, bodyPoses)) };
-  const entities = surfacedEntities(entityContext, selection);
+  // Memoized on what they describe rather than rebuilt per render: this
+  // component re-renders on every orbit step, and a fresh entity each time
+  // would re-render the selected object's whole toolstrip at pointer rate.
+  const entities = useMemo(() => {
+    const entityContext: EditorEntityContext = { scene, pickingAvailable: pickingInteractive,
+      bodies: editorBodyPoses(mergeDrawnPoses(bodies, bodyPoses)) };
+    return surfacedEntities(entityContext, selection);
+  }, [scene, pickingInteractive, bodies, bodyPoses, selection]);
   const heldEntity = entities[0];
   const entityGizmos = entities.map((entity) => ({
     entity,

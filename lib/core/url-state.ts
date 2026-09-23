@@ -745,6 +745,24 @@ const isManagedKey = managedQueryKey(
   { matches: [isCompareQueryKey] },
 );
 
+/** Each camera key beside the preset's own value; a key equal to it stays out of the address. */
+function cameraQueryValues(camera: CameraState, presetId: string): ReadonlyArray<[string, number, number]> {
+  const presetCamera = cameraForPreset(getScenePreset(presetId));
+  return [
+    ["camera.azimuth", camera.azimuth_rad, presetCamera.azimuth_rad],
+    ["camera.elevation", camera.elevation_rad, presetCamera.elevation_rad],
+    ["camera.distance", camera.distance_m, presetCamera.distance_m],
+    ["camera.targetX", camera.target_m.x, presetCamera.target_m.x],
+    ["camera.targetY", camera.target_m.y, presetCamera.target_m.y],
+    ["camera.targetZ", camera.target_m.z, presetCamera.target_m.z],
+  ];
+}
+
+/** Whether the address carries any camera key for this camera: whether it has left the preset's. */
+export function linkCarriesCamera(camera: CameraState, presetId: string): boolean {
+  return cameraQueryValues(camera, presetId).some(([, value, base]) => value !== base);
+}
+
 /** Build a canonical query string from the stores, preserving unrelated keys. */
 export function serializeQueryState(
   search: string,
@@ -792,16 +810,9 @@ export function serializeQueryState(
     query.set("lensPhase", String(uiState.gridOverlayLensPhase));
   }
 
-  const presetCamera = cameraForPreset(getScenePreset(sceneState.presetId));
-  const cameraValues: ReadonlyArray<[string, number, number]> = [
-    ["camera.azimuth", uiState.camera.azimuth_rad, presetCamera.azimuth_rad],
-    ["camera.elevation", uiState.camera.elevation_rad, presetCamera.elevation_rad],
-    ["camera.distance", uiState.camera.distance_m, presetCamera.distance_m],
-    ["camera.targetX", uiState.camera.target_m.x, presetCamera.target_m.x],
-    ["camera.targetY", uiState.camera.target_m.y, presetCamera.target_m.y],
-    ["camera.targetZ", uiState.camera.target_m.z, presetCamera.target_m.z]
-  ];
-  for (const [key, value, base] of cameraValues) if (value !== base) query.set(key, String(value));
+  for (const [key, value, base] of cameraQueryValues(uiState.camera, sceneState.presetId)) {
+    if (value !== base) query.set(key, String(value));
+  }
 
   for (const [key, value] of preparedSceneEntries ?? sceneQueryEntries(sceneState)) query.set(key, value);
 
@@ -876,6 +887,28 @@ export function currentScenePageUrl(session: PaneSession = resolveSession()): st
   return `/scene${search ? `?${search}` : ""}`;
 }
 
+/**
+ * How long the camera rests before the address takes it.
+ *
+ * An orbit writes the camera on every pointer move, and mirroring each one was
+ * a `history.replaceState` per frame: browser IPC on the thread that encodes
+ * the frame. Past Chrome's navigation rate limit (200 per 10 s, crossed within
+ * two seconds of orbiting) the calls are also dropped, so a drag could end with
+ * the address holding a camera from the middle of it. Every other change still
+ * writes on the microtask, and carries the current camera with it; readers of
+ * `location.search` force a write first either way.
+ */
+export const CAMERA_ADDRESS_SETTLE_MS = 250;
+
+/** True when the camera is the only field that changed between two UI states. */
+function onlyCameraChanged<S extends { readonly camera: unknown }>(state: S, previous: S): boolean {
+  if (state.camera === previous.camera) return false;
+  for (const key of Object.keys(state) as (keyof S)[]) {
+    if (key !== "camera" && state[key] !== previous[key]) return false;
+  }
+  return true;
+}
+
 export interface QueryStateSyncOptions {
   /** False when a client navigation or Fast Refresh already retained the document stores. */
   readonly hydrateFromUrl?: boolean;
@@ -926,7 +959,16 @@ export function startQueryStateSync(onHydrated: (presetId: string) => void, opti
     sources: [
       (onChange) => session.method.subscribe(onChange),
       (onChange) => session.scene.subscribe(onChange),
-      (onChange) => session.ui.subscribe(onChange),
+      (onChange) => {
+        // The camera waits for the gesture to rest; see CAMERA_ADDRESS_SETTLE_MS.
+        let settle: ReturnType<typeof setTimeout> | undefined;
+        const unsubscribe = session.ui.subscribe((state, previous) => {
+          if (!onlyCameraChanged(state, previous)) { onChange(); return; }
+          clearTimeout(settle);
+          settle = setTimeout(() => { settle = undefined; onChange(); }, CAMERA_ADDRESS_SETTLE_MS);
+        });
+        return () => { clearTimeout(settle); unsubscribe(); };
+      },
       (onChange) => session.runtime.subscribe((state, previous) => {
         if (runtimeFeaturesChanged(previous, state)) onChange();
       }),

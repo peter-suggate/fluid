@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { memo, useState } from "react";
 import { Cuboid, Sigma } from "lucide-react";
 import type { EditorEntity, EditorField } from "../lib/core/editor-entity";
 import { sceneryIdFromSelection } from "../lib/core/editor-scenery";
@@ -233,6 +233,25 @@ export function ContainerToolstrip({
   /** The tank, when it is selected. Its own settings join the column. */
   entity?: EditorEntity;
 }) {
+  return <Toolstrip
+    leftFraction={leftFraction}
+    topFraction={topFraction}
+    ariaLabel="Scene"
+    testId="field-quick-bar"
+  >
+    <ContainerToolstripRows entity={entity} />
+  </Toolstrip>;
+}
+
+/**
+ * The container column's rows, apart from its anchor.
+ *
+ * The anchor is a projected corner, so it moves on every orbit step; the rows
+ * do not. Memoized apart so a camera drag re-places one div instead of
+ * re-rendering every row in the column at pointer rate, on the thread that
+ * also encodes the frame.
+ */
+const ContainerToolstripRows = memo(function ContainerToolstripRows({ entity }: { entity?: EditorEntity }) {
   const session = useSession();
   const scene = session.scene((state) => state.scene);
   const methodId = session.method((state) => state.methodId);
@@ -241,12 +260,7 @@ export function ContainerToolstrip({
   // switch — the same flag the tank declares as `offersFluidMethod`.
   const hasSolver = scene.systems?.fluid !== false;
 
-  return <Toolstrip
-    leftFraction={leftFraction}
-    topFraction={topFraction}
-    ariaLabel="Scene"
-    testId="field-quick-bar"
-  >
+  return <>
     {hasFields && <FieldViewRows />}
     <FeatureSlot slot="scene.visibility" />
     {/* The high-priority readings first, in the order a reader changes them:
@@ -303,8 +317,8 @@ export function ContainerToolstrip({
           leadingTabs={methodSetupTabs(methodId)}
         />
       </>}
-  </Toolstrip>;
-}
+  </>;
+});
 
 /**
  * The strip at any other selected thing's own corner.
@@ -324,6 +338,19 @@ export function EntityToolstrip({
   topFraction: number;
   entity: EditorEntity;
 }) {
+  return <Toolstrip
+    leftFraction={leftFraction}
+    topFraction={topFraction}
+    ariaLabel={`${entity.label} options`}
+    narrow
+    testId="entity-toolstrip"
+  >
+    <EntityToolstripRows entity={entity} />
+  </Toolstrip>;
+}
+
+/** The selected object's rows, apart from its anchor; see `ContainerToolstripRows`. */
+const EntityToolstripRows = memo(function EntityToolstripRows({ entity }: { entity: EditorEntity }) {
   const session = useSession();
   const scene = session.scene((state) => state.scene);
   const selection = entity.selection;
@@ -340,13 +367,7 @@ export function EntityToolstrip({
   const stoneId = sceneryId !== undefined && sceneStoneNode(scene, sceneryId) !== undefined
     ? sceneryId : undefined;
 
-  return <Toolstrip
-    leftFraction={leftFraction}
-    topFraction={topFraction}
-    ariaLabel={`${entity.label} options`}
-    narrow
-    testId="entity-toolstrip"
-  >
+  return <>
     <ToolstripTitle>{entity.label}</ToolstripTitle>
     {oakId !== undefined && <OakTreeEditor key={`tree:${oakId}`} contextual />}
     {canopyId !== undefined && <CanopyDialRows nodeId={canopyId} />}
@@ -361,5 +382,5 @@ export function EntityToolstrip({
         ends the object, so it is where the object's own list ends. */}
     <EntityDeleteRow key={`delete:${selection.id}`} entity={entity} />
     <EntityMoreRow key={`more:${selection.id}`} entity={placementEntity} />
-  </Toolstrip>;
-}
+  </>;
+});
