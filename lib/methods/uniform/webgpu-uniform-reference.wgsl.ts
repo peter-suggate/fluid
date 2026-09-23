@@ -732,13 +732,14 @@ fn worldInsideTerrain(world:vec3f)->bool{
   let z=clamp(i32(floor((world.z+0.5*params.container.z)/h.z)),0,dims().z-1);
   return world.y<terrainHeightCells(x,z)*h.y;
 }
-fn solidVelocityAtWorld(world:vec3f)->vec4f{
+fn solidVelocitySample(world:vec3f,velocityPoint:vec3f)->vec4f{
   if(staticSolidVoxelAtWorld(world)){return vec4f(0.0,0.0,0.0,1.0);}
   if(worldInsideTerrain(world)){return vec4f(0.0,0.0,0.0,1.0);}
   let body=rigidBodyIndexAt(world);
-  if(body>=0){return vec4f(rigidVelocityAt(body,world),1.0);}
+  if(body>=0){return vec4f(rigidVelocityAt(body,velocityPoint),1.0);}
   return vec4f(0.0);
 }
+fn solidVelocityAtWorld(world:vec3f)->vec4f{return solidVelocitySample(world,world);}
 // Four transverse quadrature points approximate the non-solid area V^f of a
 // MAC face.  Sampling the oriented primitives in world space makes this the
 // same fractional variational boundary for static, translating, rotating,
@@ -809,7 +810,11 @@ fn pressureFaceData(id:vec3i,axis:u32)->vec4f{
   let world=faceWorld(id,axis);let h=params.cellGravity.xyz;var solid=0.0;var solidVelocity=vec3f(0.0);
   for(var sampleIndex=0u;sampleIndex<8u;sampleIndex+=1u){
     let sampleWorld=world+vec3f(select(-0.4,0.4,(sampleIndex&1u)!=0u)*h.x,select(-0.4,0.4,(sampleIndex&2u)!=0u)*h.y,select(-0.4,0.4,(sampleIndex&4u)!=0u)*h.z);
-    let sample=solidVelocityAtWorld(sampleWorld);solid+=sample.w;solidVelocity+=sample.w*sample.xyz;
+    // Quadrature classifies dual volume and body ownership. Evaluate each
+    // owner's velocity at the MAC DOF, just like fluid velocity. Averaging
+    // velocities at the covered quadrature points instead shifts us toward
+    // the solid centroid and creates divergence in co-rotating flow.
+    let sample=solidVelocitySample(sampleWorld,world);solid+=sample.w;solidVelocity+=sample.w*sample.xyz;
   }
   // CM11a explicitly requires us on nearby liquid faces. For analytic rigid
   // bodies, the nearest body within one cell supplies its rigid velocity at
@@ -1287,17 +1292,18 @@ fn domainFaceSolidVelocity(id:vec3i,axis:u32,checkSolid:bool)->f32{
   return pressureFaceData(id,axis)[axis];
 }
 fn divergenceAtWithCapacity(id: vec3i, checkSolid: bool, vi:f32) -> f32 {
-  // CM11a Eqs. 8-10. Vi is the non-solid cell fraction; V+/- are the
-  // corresponding face fractions. This is not the common blended-flux
-  // shortcut V u + (1-V) us, whose solid terms are algebraically different.
+  // Divergence of wall-relative flux, plus Vi * div(us). The latter
+  // vanishes for rigid motion. BBB07's prescribed-solid variational RHS
+  // requires u == us to be a null mode at every cut cell. CM11a's printed
+  // Eq. 10 has a misleading sign/scale: both terms here have units s^-1.
   let h=params.cellGravity.xyz;var terms:array<f32,6>;
   for(var axis=0u;axis<3u;axis+=1u){
     var minus=id;minus[axis]-=1;
     let vp=pressureFaceVolumeFractionShared(id,axis);let vm=pressureFaceVolumeFractionShared(minus,axis);
     let up=domainFaceFluidVelocity(id,axis);let um=domainFaceFluidVelocity(minus,axis);
     let usp=domainFaceSolidVelocity(id,axis,checkSolid);let usm=domainFaceSolidVelocity(minus,axis,checkSolid);
-    terms[2u*axis]=(vp*up)/h[axis]+(vp-vi)*usp;
-    terms[2u*axis+1u]=-(vm*um)/h[axis]-(vm-vi)*usm;
+    terms[2u*axis]=(vp*up+(vi-vp)*usp)/h[axis];
+    terms[2u*axis+1u]=-(vm*um+(vi-vm)*usm)/h[axis];
   }
   return d4Sum6(terms);
 }
@@ -1630,6 +1636,36 @@ fn scatterSolidExcess(@builtin(global_invocation_id) gid:vec3u){
   if(open>=1.0-1e-6){textureStore(volumeOut,id,vec4f(rho));return;}
   let excess=max(0.0,rho-open);
   textureStore(volumeOut,id,vec4f(rho-excess));if(excess<=0.0){return;}
+  ${geometric ? `
+  // Live voxel fills can cover several cells at once and have no analytic
+  // SDF. Find the nearest open axial shell, splitting ties symmetrically.
+  // This bounded GPU remap also handles rigid entry; ordinary free cells
+  // return above, so the searches run only on displaced liquid.
+  let offsets=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
+  let d=dims();let reach=max(d.x,max(d.y,d.z));
+  for(var step=1;step<reach;step++){
+    var weights:array<f32,6>;var total=0.0;
+    for(var n=0u;n<6u;n++){
+      let q=id+step*offsets[n];weights[n]=cellOpenFraction(q);total+=weights[n];
+    }
+    if(total<=1e-6){continue;}
+    // Integer remainder assignment conserves the rounded donor exactly.
+    let units=i32(round(excess*CM12_TRANSPORT_FIXED));var remaining=units;var remainingWeight=total;
+    for(var n=0u;n<6u;n++){
+      if(weights[n]<=0.0){continue;}
+      // Several rounded shares can exceed a tiny donor by a few units.
+      // Never turn the final remainder into a negative water deposit.
+      let amount=min(remaining,select(i32(round(f32(units)*weights[n]/total)),remaining,remainingWeight-weights[n]<1e-6));
+      atomicAdd(&sharpenDeposits[linearIndex(id+step*offsets[n])],amount);
+      remaining-=amount;remainingWeight-=weights[n];
+    }
+    return;
+  }
+  // An entirely sealed edit has no incompressible solution. Retain its
+  // conserved reservoir and report it instead of silently deleting water.
+  textureStore(volumeOut,id,vec4f(rho));
+  atomicAdd(&reductions[4],u32(round(excess*2048.0)));return;
+  ` : `
   let h=params.cellGravity.xyz;let dx=min(h.x,min(h.y,h.z));
   let gradient=solidSignedDistanceGradient(worldCell(id));var p=vec3f(id)+vec3f(0.5);
   if(length(gradient)>1e-6){p+=normalize(gradient)*dx/h;}
@@ -1672,6 +1708,7 @@ fn scatterSolidExcess(@builtin(global_invocation_id) gid:vec3u){
     return;
   }
   for(var corner=0u;corner<8u;corner+=1u){if(weights[corner]>0.0){atomicAdd(&sharpenDeposits[indices[corner]],i32(round(excess*weights[corner]/total*CM12_TRANSPORT_FIXED)));}}
+  `}
 }
 @compute @workgroup_size(4,4,4)
 fn resolveSolidExcess(@builtin(global_invocation_id) gid:vec3u){

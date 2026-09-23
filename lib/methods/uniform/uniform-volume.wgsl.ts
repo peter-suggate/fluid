@@ -552,6 +552,9 @@ fn uvGather(@builtin(global_invocation_id)gid:vec3u){
   if(uvTransportSkip(id)){
     textureStore(volumeOut,id,vec4f(0.0));textureStore(gammaOut,id,vec4f(0.0));return;
   }
+  // Only an unplaceable sealed-solid reservoir can remain after geometry
+  // reconciliation. Preserve it until a later edit creates an outlet.
+  if(uvOpen(id)<=0.0){textureStore(volumeOut,id,vec4f(volume(id)));textureStore(gammaOut,id,vec4f(0.0));return;}
   let i=linearIndex(id);var value=0.0;
   for(var k=0u;k<9u;k++){value+=uvEdges[uvEdgeAddress(i)].weight[k]*volume(uvCell(uvDonor(i,k)));}
   value+=min(dropSource(id),max(0.0,uvOpen(id)-value));

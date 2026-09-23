@@ -35,6 +35,7 @@ import { averageInflowStrength, createInflowGridBoundary, type InflowGridBoundar
 import type { SceneDescription } from "../../core/model";
 import { planUniformHostAllocation } from "./uniform-host-allocation";
 import { initializeRigidBodies, type RigidBodyState } from "../../core/rigid-body";
+import { UniformPrescribedSolidMotion } from "./uniform-prescribed-solid-motion";
 import { sceneLatticeDimensions } from "../../core/scene-lattice";
 import { planGPUAdvance } from "../../core/tall-cell-diagnostics";
 import type { GPUQuality } from "../../core/gpu-quality";
@@ -774,6 +775,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private stepBodyCount = 0;
   /** No bit set in the packed static solid voxel mask; see uvSolidFree. */
   private solidVoxelsEmpty = true;
+  private solidEditPending = false;
+  private readonly prescribedSolidMotion = new UniformPrescribedSolidMotion();
   /** Steps the phi census must still scan the whole lattice; see E6. */
   private phiCensusDenseSteps = 2;
   /** E4-E7's host certificates are published; a QA arm refuses them all. */
@@ -1180,7 +1183,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.rigidExchange = device.createBuffer({ label: "Uniform reference rigid exchange", size: GPU_RIGID_EXCHANGE_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.rigidSystem = new WebGPURigidBodySystem(device, scene, this.rigidExchange,
       this.terrainTexture);
-    this.rigidSystem.syncBodies(initializeRigidBodies(scene.rigidBodies));
+    const initialRigidBodies = initializeRigidBodies(scene.rigidBodies);
+    this.prescribedSolidMotion.sample(initialRigidBodies, 0);
+    this.rigidSystem.syncBodies(initialRigidBodies);
     this.inflowBoundary = scene.fluid.inflow
       ? createInflowGridBoundary(scene.fluid.inflow, scene.container, [nx, ny, nz]) : undefined;
 
@@ -2835,7 +2840,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.info.lastDt_s = dt;
     this.info.lastSubsteps = 1;
     this.info.encodedSteps = (this.info.encodedSteps ?? 0) + 1;
-    const activeBodies = bodies.slice(0, 12);
+    const roster = bodies.slice(0, 12);
+    const activeBodies = this.geometricVolume ? this.prescribedSolidMotion.sample(roster, dt) : roster;
     this.stepBodyCount = activeBodies.length;
     this.rigidSystem.syncBodies(activeBodies);
     const c = this.scene.container;
@@ -2930,6 +2936,15 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.boundaryVelocityA, 0, this.symmetryStageAuditNegativeBoundaryVelocity, 0,
       this.negativeBoundaryVelocityBytes,
     );
+    // Reconcile geometry before classifying work: a thick voxel fill can
+    // move water beyond the old transport tiles. Both extension and transport
+    // must see the relocated conserved volume in this same advance.
+    if (this.geometricVolume && (activeBodies.length > 0 || this.solidEditPending)) {
+      encoder.clearBuffer(this.conditioningScratch, 0, this.info.nx * this.info.ny * this.info.nz * 4);
+      this.run(encoder, "Uniform geometric solid displacement scatter", this.pipelines.scatterSolidExcess, this.solidEntryScatterGroup);
+      this.run(encoder, "Uniform geometric solid displacement resolve", this.pipelines.resolveSolidExcess, this.solidEntryResolveGroup);
+      this.solidEditPending = false;
+    }
     this.twoLevelEncoded = this.twoLevelEnabled;
     this.transportTilesEncoded = this.transportTilesEnabled;
     // The tile classes, at the HEAD of the step and before the extension that
@@ -2959,11 +2974,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // moving body is skipped by beta construction and then overwritten with
     // zero by the gather, so the supposedly conservative operator loses the
     // displaced liquid before the historical post-sharpening cleanup runs.
-    if (this.solidExcessCorrection && (activeBodies.length > 0 || sceneHasTerrain(this.scene))) {
+    if (!this.geometricVolume && this.solidExcessCorrection && (activeBodies.length > 0 || sceneHasTerrain(this.scene))) {
       // Ranged to the donor-sum region for the same reason the transport
       // clears are: the scatter/resolve pair only addresses [0,N), and words
-      // [N,2N) carry the 4h classes for the rest of the step. (Uniform
-      // Geometric forces this stage off; the range keeps it safe if it returns.)
+      // [N,2N) carry the 4h classes for the rest of the step. Geometric mode
+      // has already reconciled covered water before classifying those tiles.
       encoder.clearBuffer(this.conditioningScratch, 0, this.info.nx * this.info.ny * this.info.nz * 4);
       this.run(encoder, "Uniform moving-solid entry excess scatter",
         this.pipelines.scatterSolidExcess, this.solidEntryScatterGroup);
@@ -3050,7 +3065,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       { texture: this.volumeB }, { texture: this.symmetryStageAuditFields.densitySharpening },
       [this.info.nx, this.info.ny, this.info.nz],
     );
-    if (this.solidExcessCorrection && (activeBodies.length > 0 || sceneHasTerrain(this.scene))) {
+    if (!this.geometricVolume && this.solidExcessCorrection && (activeBodies.length > 0 || sceneHasTerrain(this.scene))) {
       encoder.clearBuffer(this.conditioningScratch);
       this.run(encoder, "Uniform partial-solid excess scatter", this.pipelines.scatterSolidExcess, this.solidExcessScatterGroup);
       this.run(encoder, "Uniform partial-solid excess resolve", this.pipelines.resolveSolidExcess, this.solidExcessResolveGroup);
@@ -3401,7 +3416,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.scene = scene;
     this.faceAuthorityStored = false;
     const dirty = this.solidMask.update(solidWorldForScene(scene));
-    if (dirty) this.solidVoxelsEmpty = uniformSolidMaskEmpty(this.solidMask);
+    if (dirty) { this.solidVoxelsEmpty = uniformSolidMaskEmpty(this.solidMask); this.solidEditPending = true; }
     if (dirty) this.device.queue.writeBuffer(this.activeScratch,
       (this.solidVoxelScratchOffsetWords + dirty.firstWord) * 4, this.solidMask.words.buffer as ArrayBuffer,
       dirty.firstWord * 4, dirty.wordCount * 4);
