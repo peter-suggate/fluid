@@ -258,6 +258,8 @@ interface UIStore {
   svoGlobalIlluminationEnabled: boolean;
   /** Whether the persistent world-space GI cache pass is encoded. Off by default. */
   svoWorldGiCacheEnabled: boolean;
+  /** Reduced cone visibility on each face's half-voxel lattice rather than per screen texel. On by default. */
+  svoLatticeVisibilityEnabled: boolean;
   /** Primary visibility: cached voxel surfaces, SVO rays, or the diagnostic proxy path. */
   svoPrimaryTraversal: SvoPrimaryTraversalMode;
   /**
@@ -355,6 +357,7 @@ interface UIStore {
   setSvoConeTracingMode: (mode: SvoConeTracingMode) => void;
   setSvoGlobalIlluminationEnabled: (enabled: boolean) => void;
   setSvoWorldGiCacheEnabled: (enabled: boolean) => void;
+  setSvoLatticeVisibilityEnabled: (enabled: boolean) => void;
   setRenderStageDisabled: (stage: RenderStageSwitchId, disabled: boolean) => void;
   setSvoPrimaryTraversal: (mode: SvoPrimaryTraversalMode) => void;
   setSvoStageView: (view: SvoRenderStageView) => void;
@@ -560,6 +563,7 @@ export const createUIStore = () => create<UIStore>((set) => ({
   }),
   setSvoGlobalIlluminationEnabled: (svoGlobalIlluminationEnabled) => set({ svoGlobalIlluminationEnabled }),
   setSvoWorldGiCacheEnabled: (svoWorldGiCacheEnabled) => set({ svoWorldGiCacheEnabled }),
+  setSvoLatticeVisibilityEnabled: (svoLatticeVisibilityEnabled) => set({ svoLatticeVisibilityEnabled }),
   // Kept in the canonical stage order rather than click order, so the set has
   // one spelling: it is the identity the renderer keys frame reuse and the
   // trace context by, and two orders would be two pipelines to the averager.

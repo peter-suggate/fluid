@@ -79,6 +79,8 @@ export interface RenderPipelineContext {
   readonly seamClosureEnabled: boolean;
   readonly globalIlluminationEnabled: boolean;
   readonly worldGiCacheEnabled: boolean;
+  /** Requested reduced-visibility source; omitted means the lattice. */
+  readonly latticeVisibilityEnabled?: boolean;
   readonly tuning: SvoRenderTuning;
   readonly sceneHasFluid: boolean;
   readonly refinementDepth: number;
@@ -190,6 +192,11 @@ export const isRelightReconstruction = (mode: SvoConeRadianceReconstruction) =>
 
 const coneRateLabel = (scale: number) =>
   scale === 1 ? "full rate" : `${1 / scale}×${1 / scale}`;
+
+/** The configurations the renderer serves from the face lattice rather than the screen fan-out. */
+const latticeVisibilityServes = (context: RenderPipelineContext) => context.latticeVisibilityEnabled !== false
+  && context.tuning.coneLightingScale !== 1 && !context.globalIlluminationEnabled
+  && context.tuning.coneRadianceReconstruction === "full-res-relight";
 
 /**
  * The three visibility tiers that exist only on the rasterized brick-proxy
@@ -456,7 +463,7 @@ const NODES: readonly RenderPipelineNodeDefinition[] = [
     },
     state: (context) => (context.coneTracingMode === "cones" ? "on" : context.coneTracingMode === "exact" ? "armed" : "off"),
     chip: (context) => context.coneTracingMode === "cones"
-      ? `cones · ${coneRateLabel(context.tuning.coneLightingScale)} · 8 slots`
+      ? `cones · ${coneRateLabel(context.tuning.coneLightingScale)} · ${latticeVisibilityServes(context) ? "face lattice" : "8 slots"}`
       : context.coneTracingMode === "exact" ? "exact rays · no cone stage" : "no visibility work",
   },
   {
@@ -525,17 +532,22 @@ const NODES: readonly RenderPipelineNodeDefinition[] = [
     side: "right",
     label: "Sky lighting",
     stage: "sky-lighting",
+    // A draw inside the deferred lighting pass, not a pass of its own: a
+    // separate pass stored and reloaded the whole HDR attachment to put a
+    // seam around what is mostly the clear. It keeps its switch and reports
+    // the pass it runs inside.
+    costInsideNode: "deferred-lighting",
     taps: [],
     toggleable: true,
     tip: {
-      summary: "The miss half of the depth partition: its own pass resolves sky and thin glass over open sky at every pixel primary visibility left empty. Off keeps the pass and its clear, so the miss pixels go black and the delta is exactly what the sky resolve was worth.",
+      summary: "The miss half of the depth partition: the first draw of the deferred lighting pass resolves sky and thin glass over open sky at every pixel primary visibility left empty. Off withholds the draw and keeps the pass's clear, so the miss pixels go black; its cost is read inside deferred lighting.",
       reads: "primary depth · environment · thin-glass key plane",
       writes: "dry scene HDR (miss pixels)",
-      feeds: "deferred lighting · optical composite",
+      feeds: "optical composite",
     },
     state: (context) => (context.disabledStages.has("sky-lighting") ? "off" : "on"),
     chip: (context) => (context.disabledStages.has("sky-lighting")
-      ? "withheld · clear only" : "miss pixels · own pass"),
+      ? "withheld · clear only" : "miss pixels · first draw"),
   },
   {
     id: "deferred-lighting",
@@ -546,14 +558,14 @@ const NODES: readonly RenderPipelineNodeDefinition[] = [
     taps: ["dry-radiance", "lighting-partition"],
     toggleable: true,
     tip: {
-      summary: "The surface half of the depth partition, in its own pass since the sky split out: the full deferred shader (and the reconstruction draw at reduced cone rates) shades every pixel the depth buffer resolved to a surface. Off keeps the pass, which loads the sky pass's result, so geometry goes black while the sky stays and the delta is the whole cost of deferred shading.",
+      summary: "The surface half of the depth partition: after the sky draw, the full deferred shader (and the reconstruction draw at reduced cone rates) shades every pixel the depth buffer resolved to a surface, in the same pass. Off withholds the surface draws, so geometry goes black while the sky stays and the delta is the whole cost of deferred shading. The row's time includes the sky draw.",
       reads: "primary G-buffer · cone visibility · GI cache",
       writes: "dry scene HDR",
       feeds: "optical composite",
     },
     state: (context) => (context.disabledStages.has("deferred-lighting") ? "off" : "on"),
     chip: (context) => (context.disabledStages.has("deferred-lighting")
-      ? "withheld · sky retained" : "surface pixels · own pass"),
+      ? "withheld · sky retained" : "surface pixels · with sky"),
   },
   {
     id: "gi-composition",
@@ -704,9 +716,8 @@ export const RENDER_PIPELINE_NODES: readonly RenderPipelineNode[] = Object.freez
 /** The raster backend owns exclusive intervals under primary visibility. */
 export const SURFACE_MESH_TIMING_STAGES = [
   { stage: "surface-mesh-update", label: "Mesh update", detail: "Revision check, extraction when dirty, and publication. Cached frames retain the check and publication cost." },
-  { stage: "surface-mesh-background", label: "Exact planes", detail: "Exact planar boundaries after complete raster publication. Incomplete or invalid meshes withhold geometry." },
-  { stage: "surface-mesh-cull", label: "Mesh culling", detail: "Rejects back-facing and out-of-frustum quads before vertex processing. No subpixel or occlusion approximation." },
-  { stage: "surface-mesh-draw", label: "Mesh draw", detail: "Cached quad rasterization and the periodic diagnostic copy. A withheld primary only clears the surface buffer." },
+  { stage: "surface-mesh-cull", label: "Mesh culling", detail: "Detail selection, then rejects back-facing and out-of-frustum quads before vertex processing. No subpixel or occlusion approximation." },
+  { stage: "surface-mesh-draw", label: "Exact planes + mesh draw", detail: "One pass: exact planar boundaries (incomplete or invalid meshes withhold geometry and trace instead), then cached quad rasterization, and the periodic diagnostic copy. A withheld primary only clears the surface buffer." },
 ] as const satisfies readonly { stage: RenderFrameStageId; label: string; detail: string }[];
 
 /** Keep one primary visibility switch and set of plane taps across backends. */
@@ -727,7 +738,7 @@ export function renderPipelineNodeForContext(
     stages: node.stages.filter((stage) => meshStages.has(stage)),
     tip: {
       ...node.tip,
-      summary: "Primary rasterization fills the surface buffer using cached voxel faces. Its timing is the sum of mesh update, exact planes, mesh culling, and mesh drawing. Mesh update includes revision checks on cached frames and, on a changed publication, re-extraction of the bricks that publication rewrote into the cached mesh in place. While that runs the cached mesh stays drawn and only the pixels whose rays cross the edited bricks are traced; before the first build, exact traversal shows the whole current voxel scene. Off clears the surface buffer to sky.",
+      summary: "Primary rasterization fills the surface buffer using cached voxel faces. Its timing is the sum of mesh update, mesh culling, and one pass that draws the exact planes and then the mesh. Mesh update includes revision checks on cached frames and, on a changed publication, re-extraction of the bricks that publication rewrote into the cached mesh in place. While that runs the cached mesh stays drawn and only the pixels whose rays cross the edited bricks are traced; before the first build, exact traversal shows the whole current voxel scene. Off clears the surface buffer to sky.",
     },
     chip: (current) => current.disabledStages.has("primary-traversal") ? "withheld · clears only"
       : current.surfaceMeshStatus?.state === "pending" && current.surfaceMeshStatus.drawn ? "mesh updating · edited bricks traced"

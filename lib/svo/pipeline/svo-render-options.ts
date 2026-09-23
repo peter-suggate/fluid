@@ -191,6 +191,17 @@ export type SvoLightingOptions = Readonly<{
    * the machinery stays compiled so turning it on costs a frame, not a rebuild.
    */
   worldGiCacheEnabled?: boolean;
+  /**
+   * Where reduced cone visibility is sampled. Omitted means yes.
+   *
+   * On, the same shadow and AO cones are marched once per half-voxel lattice
+   * point of each receiving face, deduplicated per frame, and every pixel
+   * interpolates its four points. Off, they are marched per half-resolution
+   * screen texel. It serves only where that screen fan-out would: cones at a
+   * reduced rate, full-resolution relight, GI off. A flip compiles the other
+   * lighting variant while the current one keeps rendering.
+   */
+  latticeVisibilityEnabled?: boolean;
   /** Omitted means `mesh`. Switching it rebuilds the dry-scene pipeline. */
   primaryTraversal?: SvoPrimaryTraversalMode;
   /**
@@ -214,5 +225,6 @@ export const DEFAULT_SVO_LIGHTING_OPTIONS = Object.freeze({
   coneTracingMode: "cones",
   globalIlluminationEnabled: false,
   worldGiCacheEnabled: false,
+  latticeVisibilityEnabled: true,
   primaryTraversal: "mesh",
 } satisfies SvoLightingOptions);

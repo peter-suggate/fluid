@@ -3092,7 +3092,7 @@ export class FluidLabRenderer {
     // withheld would pool into one mean and the panel would report the cost of
     // neither pipeline.
     const disabledStages = disabledRenderStagesFrom(svoLightingOptions.disabledStages);
-    const presentationContext = `${config.methodId}:${config.quality}:${presentationMode}:fluid-${fluidSurfaceRenderMode}:shadow-${svoLightingOptions.shadowsEnabled ? "on" : "off"}:ao-${svoLightingOptions.ambientOcclusionEnabled ? "on" : "off"}:cones-${svoLightingOptions.coneTracingMode ?? "cones"}:gicache-${svoLightingOptions.worldGiCacheEnabled === true ? "on" : "off"}:primary-${svoLightingOptions.primaryTraversal ?? DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal}:primary-work-${primaryWorkMapRequested ? "on" : "off"}:tuning-${tuningKey}:without-${disabledRenderStagesKey(disabledStages) || "nothing"}:${this.simulationRunning ? "running" : "paused"}`;
+    const presentationContext = `${config.methodId}:${config.quality}:${presentationMode}:fluid-${fluidSurfaceRenderMode}:shadow-${svoLightingOptions.shadowsEnabled ? "on" : "off"}:ao-${svoLightingOptions.ambientOcclusionEnabled ? "on" : "off"}:cones-${svoLightingOptions.coneTracingMode ?? "cones"}:gicache-${svoLightingOptions.worldGiCacheEnabled === true ? "on" : "off"}:lattice-${svoLightingOptions.latticeVisibilityEnabled === false ? "off" : "on"}:primary-${svoLightingOptions.primaryTraversal ?? DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal}:primary-work-${primaryWorkMapRequested ? "on" : "off"}:tuning-${tuningKey}:without-${disabledRenderStagesKey(disabledStages) || "nothing"}:${this.simulationRunning ? "running" : "paused"}`;
     if (presentationContext !== this.presentationContext) {
       this.presentationContext = presentationContext;
       this.resetPresentationTrace();
@@ -3437,6 +3437,10 @@ export class FluidLabRenderer {
     // Its own channel, taken every frame: a withheld stage is an encode-time
     // decision and must never reach the code that rebuilds shaders or bundles.
     this.svoDryScenePipeline?.setDisabledStages(disabledStages);
+    // The stage overlay is the one reader of the packed-surface and
+    // identity-media planes besides rigid picking; without it the mesh pass
+    // keeps them in tile memory.
+    this.svoDryScenePipeline?.setIdentityPlanesInspected(activeSvoDiagnostics.stageView !== "off");
     this.waterPipeline.setDisabledStages(disabledStages);
     cpuTrace?.transition({ id: "command-encoding", label: "Presentation command encoding" });
     const traceRequestedAt_ms = measurementInstrumentationEnabled ? performance.now() : 0;

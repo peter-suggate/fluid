@@ -17,7 +17,7 @@ export async function benchmarkShadingChain(device:GPUDevice,renderer:SparseVoxe
  const resolve=device.createBuffer({size:4096,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC});
  const read=device.createBuffer({size:4096,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
  const shade=(label:string)=>/cone|directional-light cache|deferred|radiance reconstruction/i.test(label);
- const scopes:Record<string,(label:string)=>boolean>={frame:()=>true,shading:shade,raster:l=>!shade(l),mesh:l=>l==='Voxel surface mesh rasterization',deferred:l=>l==='Sparse voxel deferred dry lighting',cones:l=>/cone|directional-light cache/i.test(l),sky:l=>l==='Sparse voxel deferred sky lighting'};
+ const scopes:Record<string,(label:string)=>boolean>={frame:()=>true,shading:shade,raster:l=>!shade(l),mesh:l=>l==='Voxel surface mesh rasterization',deferred:l=>l==='Sparse voxel deferred dry lighting',cones:l=>/cone|directional-light cache/i.test(l)};
  const results:unknown[]=[];
  async function run(scope:string){
   const selected=device.createCommandEncoder(),discarded=device.createCommandEncoder();let count=0;const labels:string[]=[];

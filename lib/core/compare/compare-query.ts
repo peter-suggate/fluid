@@ -108,7 +108,7 @@ const CUT_KEYS: Readonly<Record<string, true>> = {
 
 const LOOK_KEYS: Readonly<Record<string, true>> = {
   svoStage: true, svoShadows: true, svoAO: true, svoPrimarySeamClosure: true,
-  svoCones: true, svoPrimary: true, svoFlatExempt: true, svoLodPixels: true,
+  svoCones: true, svoLattice: true, svoPrimary: true, svoFlatExempt: true, svoLodPixels: true,
   quality: true,
 };
 

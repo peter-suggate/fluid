@@ -361,8 +361,11 @@ const assertRenderReport = (report: FrameReport): void => {
   // form satisfies the gate; requiring both would fail whichever did not run.
   const expectedLabels: readonly (string | readonly string[])[] = split
     ? (traversal === "raster-primary"
-      ? [["Sparse voxel exact live-scene primitive visibility",
-        "Sparse voxel conservative live-scene primitive resolve"], "Sparse voxel deferred dry lighting"]
+      ? [process.env.FLUID_SVO_DRY_FRAME_SURFACE_MESH === "1"
+        // The production mesh primary replaces the live-scene primitive stage.
+        ? ["Voxel surface mesh rasterization"]
+        : ["Sparse voxel exact live-scene primitive visibility",
+          "Sparse voxel conservative live-scene primitive resolve"], "Sparse voxel deferred dry lighting"]
       : ["Sparse voxel primary visibility", "Sparse voxel deferred dry lighting"])
     : coneTracing === "cones"
       ? ["Sparse voxel cone-lighting prepass", "Sparse voxel dry scene"]
@@ -587,7 +590,12 @@ export FLUID_SVO_DRY_FRAME_TRAVERSAL=${JSON.stringify(traversal)}
 export FLUID_SVO_DRY_FRAME_SHADING=${JSON.stringify(shading)}
 export FLUID_SVO_DRY_FRAME_PROFILE_SECONDS=${counterSeconds + 9}
 export FLUID_SVO_DRY_FRAME_ISOLATE_PASS_ENCODERS=${timingOnly ? 0 : 1}
-# xctrace does not reliably forward the launched process's stdout, so the
+${Object.entries(process.env)
+  // Forward any other worker switch from the caller (surface mesh, light cache, ...):
+  // the flags above only cover the canonical-parametric lanes.
+  .filter(([key, value]) => key.startsWith("FLUID_SVO_DRY_FRAME_") && value !== undefined
+    && !/^FLUID_SVO_DRY_FRAME_(SCENE|SCENE_MODULE|ENVIRONMENT_REFINEMENT|SCREEN_SPACE_PIXELS|CONE_FANOUT|WIDTH|HEIGHT|WARMUPS|CONE_SCALE|CONE_TRACING|RADIANCE_RECONSTRUCTION|TRAVERSAL|SHADING|PROFILE_SECONDS|ISOLATE_PASS_ENCODERS)$/.test(key))
+  .map(([key, value]) => `export ${key}=${JSON.stringify(value)}\n`).join("")}# xctrace does not reliably forward the launched process's stdout, so the
 # worker's own result JSON is recovered from this log after the capture.
 exec ${JSON.stringify(process.execPath)} --import tsx ${JSON.stringify(worker)} > ${JSON.stringify(logPath)} 2>&1
 `, { mode: 0o755 });

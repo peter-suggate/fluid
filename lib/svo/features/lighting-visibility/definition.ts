@@ -23,10 +23,13 @@ export const SVO_LIGHTING_VISIBILITY_FEATURE = {
     { id: "mode", label: "Visibility source", kind: "choice", setting: "svoConeTracingMode", options: SVO_LIGHTING_VISIBILITY_OPTIONS, update: "live" },
     { id: "shadows", label: "Shadows", kind: "toggle", setting: "svoShadowsEnabled", update: "live" },
     { id: "ambient-occlusion", label: "AO", kind: "toggle", setting: "svoAmbientOcclusionEnabled", update: "live" },
+    { id: "lattice", label: "Lattice visibility", kind: "toggle", setting: "svoLatticeVisibilityEnabled", update: "live",
+      hint: "On samples the shadow and AO cones on the half-voxel lattice of each lit face, once per point, and interpolates between points. Off samples them per half-resolution screen texel. Serves reduced-rate cones with full-resolution relight and GI off." },
   ],
   placements: [
     { slot: "frame.lighting", control: "mode", presentation: "expanded" },
     { slot: "frame.lighting", control: "shadows", presentation: "expanded" },
     { slot: "frame.lighting", control: "ambient-occlusion", presentation: "expanded" },
+    { slot: "frame.lighting", control: "lattice", presentation: "expanded" },
   ],
 } as const satisfies FeatureDefinition;

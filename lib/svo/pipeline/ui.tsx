@@ -145,6 +145,7 @@ export function RenderPipelineOverlay() {
   const svoGlobalIlluminationEnabled = session.ui((state) => state.svoGlobalIlluminationEnabled);
   const setSvoGlobalIlluminationEnabled = session.ui((state) => state.setSvoGlobalIlluminationEnabled);
   const svoWorldGiCacheEnabled = session.ui((state) => state.svoWorldGiCacheEnabled);
+  const svoLatticeVisibilityEnabled = session.ui((state) => state.svoLatticeVisibilityEnabled);
   const setSvoWorldGiCacheEnabled = session.ui((state) => state.setSvoWorldGiCacheEnabled);
   const disabledRenderStages = session.ui((state) => state.disabledRenderStages);
   const setRenderStageDisabled = session.ui((state) => state.setRenderStageDisabled);
@@ -256,6 +257,7 @@ export function RenderPipelineOverlay() {
     seamClosureEnabled: silhouetteRefinementEnabled,
     globalIlluminationEnabled: svoGlobalIlluminationEnabled,
     worldGiCacheEnabled: svoWorldGiCacheEnabled,
+    latticeVisibilityEnabled: svoLatticeVisibilityEnabled,
     tuning,
     sceneHasFluid: !sceneIsDry,
     refinementDepth: renderRefinementDepth,

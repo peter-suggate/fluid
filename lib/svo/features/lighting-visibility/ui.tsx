@@ -27,3 +27,14 @@ export function SvoAmbientOcclusionControlRow() {
   const disabled = session.ui((state) => state.svoConeTracingMode === "off");
   return <SwitchField label={SVO_LIGHTING_VISIBILITY_FEATURE.controls[2].label} checked={checked} onChange={onChange} disabled={disabled} />;
 }
+
+export function SvoLatticeVisibilityControlRow() {
+  const session = useSession();
+  const checked = session.ui((state) => state.svoLatticeVisibilityEnabled);
+  const onChange = session.ui((state) => state.setSvoLatticeVisibilityEnabled);
+  // Only the cone arm samples reduced visibility; EXACT and OFF have no source to choose.
+  const disabled = session.ui((state) => state.svoConeTracingMode !== "cones");
+  const control = SVO_LIGHTING_VISIBILITY_FEATURE.controls[3];
+  return <SwitchField label={control.label} hint={control.hint} checked={checked} onChange={onChange} disabled={disabled}
+    testId="svo-lattice-visibility" />;
+}

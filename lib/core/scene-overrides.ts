@@ -98,6 +98,7 @@ const UI_OVERRIDES: Readonly<Record<string, UIOverrideSpec>> = {
   svoAO: { label: "Ambient occlusion", group: "render", boolean: true },
   svoPrimarySeamClosure: { label: "Silhouette refinement", group: "render", boolean: true },
   svoCones: { label: "Cone tracing", group: "render" },
+  svoLattice: { label: "Lattice visibility", group: "render", boolean: true },
   svoPrimary: { label: "Primary traversal", group: "render" },
   svoStage: { label: "Stage view", group: "render", hint: "Debug stage isolation, not a product frame" },
   svoFlatExempt: { label: "Planar refinement exemption", group: "render", boolean: true },
@@ -349,6 +350,7 @@ export function sceneOverrideClearPlan(
       case "svoAO": ui.svoAmbientOcclusionEnabled = initialUI.svoAmbientOcclusionEnabled; break;
       case "svoPrimarySeamClosure": ui.silhouetteRefinementEnabled = initialUI.silhouetteRefinementEnabled; break;
       case "svoCones": ui.svoConeTracingMode = initialUI.svoConeTracingMode; break;
+      case "svoLattice": ui.svoLatticeVisibilityEnabled = initialUI.svoLatticeVisibilityEnabled; break;
       case "svoPrimary": ui.svoPrimaryTraversal = initialUI.svoPrimaryTraversal; break;
       case "svoStage": ui.svoStageView = initialUI.svoStageView; break;
       case "svoFlatExempt":

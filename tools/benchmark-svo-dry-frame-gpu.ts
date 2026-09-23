@@ -56,6 +56,9 @@ import { censusSvoCellContours } from "../lib/harness/svo-cell-contour-census";
  *      FLUID_SVO_DRY_FRAME_RASTER_RIGID_FORCE (1 forces the raster arm below its adaptive body-count crossover),
  *      FLUID_SVO_DRY_FRAME_LIGHT_ATTRIBUTION (1 measures cumulative authored-light shadow cost),
  *      FLUID_SVO_DRY_FRAME_CONE_FANOUT (1 enables deterministic one-cone-per-lane fan-out),
+ *      FLUID_SVO_DRY_FRAME_LATTICE_VISIBILITY (0 samples cone visibility per reduced screen texel
+ *      instead of on the half-voxel face lattice; serves only with _CONE_FANOUT=1,
+ *      _VOXEL_LIGHT_CACHE=0, a reduced cone scale, full-res-relight and GI off),
  *      FLUID_SVO_DRY_FRAME_STRIP_DIAGNOSTICS / _INLINE_CONE_BOUNDARIES /
  *      _CLEAR_CONE_QUEUE_BLIT / _F16 / _DROP_GI_PAGE_CACHE
  *      / _EDGE_RECEIVER_RECOVERY (0 disables the bounded exact-identity edge tier)
@@ -206,6 +209,9 @@ const globalIlluminationEnabled = process.env.FLUID_SVO_DRY_FRAME_GI !== "0";
 // encode the pass at all, and "what does the world-GI cache cost" stops being
 // a question this benchmark can answer.
 const worldGiCacheEnabled = process.env.FLUID_SVO_DRY_FRAME_WORLD_GI_CACHE === "1";
+// On unless "0", like the product. It only takes effect where the renderer can
+// serve it (see the header); elsewhere the JSON reports it inactive.
+const latticeVisibilityEnabled = process.env.FLUID_SVO_DRY_FRAME_LATTICE_VISIBILITY !== "0";
 const radianceFeedbackEnabled = process.env.FLUID_SVO_DRY_FRAME_RADIANCE_FEEDBACK === "1";
 const silhouetteRefinementRaw = process.env.FLUID_SVO_DRY_FRAME_PRIMARY_SEAM_CLOSURE ?? "0";
 const silhouetteRefinementEnabled = silhouetteRefinementRaw === "1";
@@ -295,6 +301,8 @@ const optimizationExperiments: SvoDryOptimizationExperiments = {
   surfaceMeshCulling: process.env.FLUID_SVO_DRY_FRAME_SURFACE_MESH_CULLING !== "0",
   surfaceMeshMaxBytes: process.env.FLUID_SVO_DRY_FRAME_SURFACE_MESH_BYTES ? Number(process.env.FLUID_SVO_DRY_FRAME_SURFACE_MESH_BYTES) : undefined,
   voxelLightCache: process.env.FLUID_SVO_DRY_FRAME_VOXEL_LIGHT_CACHE !== "0",
+  // Production builds the opaque single-directional deferred shader (webgpu-renderer.ts).
+  specializedDeferredLighting: process.env.FLUID_SVO_DRY_FRAME_SPECIALIZED_LIGHTING === "1",
   edgeReceiverRecovery: process.env.FLUID_SVO_DRY_FRAME_EDGE_RECEIVER_RECOVERY !== "0",
   inlineConeBoundaries: process.env.FLUID_SVO_DRY_FRAME_INLINE_CONE_BOUNDARIES === "1",
   clearConeQueueWithBlit: process.env.FLUID_SVO_DRY_FRAME_CLEAR_CONE_QUEUE_BLIT === "1",
@@ -609,7 +617,7 @@ if (recordScaleMultipliers) {
       coneRadianceReconstruction: radianceReconstruction, maximumShadedLights });
     armRenderer.setLightingOptions({
       shadowsEnabled, ambientOcclusionEnabled, silhouetteRefinementEnabled,
-      coneLightingScale: coneScale, coneTracingMode,
+      coneLightingScale: coneScale, coneTracingMode, latticeVisibilityEnabled,
     });
     if (coneTracingMode === "cones" && coneScale !== 1) await armRenderer.ensureConeLightingPrepass();
     armRenderer.setSource(armSource);
@@ -1072,6 +1080,7 @@ function applyLighting(
     coneLightingScale: scale,
     coneTracingMode,
     worldGiCacheEnabled,
+    latticeVisibilityEnabled,
   });
 }
 applyLighting(coneScale);
@@ -1620,6 +1629,31 @@ if (readVoxelLightCounters) {
     "distinct voxel demand must remain below the pixel count");
 }
 
+// Read whenever the arm serves lattice visibility: the entry count is the
+// march count the arm pays, and overflow or probe exhaustion is a sizing
+// fault whose pixels silently moved to the exact edge tier.
+let latticeVisibilityCounters: { entries: number; overflow: number; exhausted: number; prepassTexels: number } | undefined;
+// Sampled with the counters, on the configured arm, not at report time.
+const latticeVisibilityActive = renderer.latticeVisibilityActive;
+if (latticeVisibilityActive) {
+  const readback = device.createBuffer({ label: "Bench lattice visibility counters", size: 12,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const encoder = device.createCommandEncoder({ label: "Bench lattice visibility counters" });
+  encodeFrame(encoder);
+  assert.ok(renderer.copyLatticeVisibilityCounters(encoder, readback), "lattice visibility counters unavailable");
+  device.queue.submit([encoder.finish()]);
+  await readback.mapAsync(GPUMapMode.READ);
+  const words = new Uint32Array(readback.getMappedRange());
+  latticeVisibilityCounters = {
+    entries: words[0], overflow: words[1], exhausted: words[2],
+    prepassTexels: svoConePrepassSize(width, height, coneScale).reduce((product, value) => product * value, 1),
+  };
+  readback.unmap();
+  readback.destroy();
+  log(`Lattice visibility: ${latticeVisibilityCounters.entries} entries for ${latticeVisibilityCounters.prepassTexels} prepass texels`
+    + ` (overflow ${latticeVisibilityCounters.overflow}, probe-exhausted ${latticeVisibilityCounters.exhausted})`);
+}
+
 // ---------------------------------------------------------------------------
 // Frame capture: packed rgba16float rows for hashing and decoded floats for
 // quality statistics and PNGs.
@@ -1683,6 +1717,10 @@ function relativeLuminance(pixels: Float32Array, pixelIndex: number): number {
 writeViewUniforms(false);
 renderer.setVoxelLightCacheEnabled(false);
 applyLighting(1);
+// The fingerprint hashes the packed-surface and identity-media planes, which a
+// production frame without bodies or an overlay leaves in tile memory; timed
+// frames above ran without them, as the product does.
+renderer.setIdentityPlanesInspected(true);
 const referenceRows = await captureFrame("Bench fingerprint frame");
 let surfaceMeshDiagnostics: Record<string, number> | undefined;
 if (optimizationExperiments.surfaceMesh) {
@@ -2241,6 +2279,7 @@ const result = {
     images,
   },
   voxelLightCache: voxelLightCacheCounters,
+  latticeVisibility: { requested: latticeVisibilityEnabled, active: latticeVisibilityActive, counters: latticeVisibilityCounters },
   orbitStability,
   movingTier,
   rigidMotionTransition_ms,

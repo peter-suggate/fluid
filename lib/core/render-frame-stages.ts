@@ -62,7 +62,6 @@ export const RENDER_FRAME_STAGES = Object.freeze([
   "caustics",
   // PRIMARY VISIBILITY — who is in front of whom.
   "surface-mesh-update",
-  "surface-mesh-background",
   "surface-mesh-cull",
   "surface-mesh-draw",
   "scene-primitive-visibility",
@@ -76,12 +75,14 @@ export const RENDER_FRAME_STAGES = Object.freeze([
   "seam-closure",
   // LIGHTING VISIBILITY — what can see which light.
   "voxel-light-cache",
+  "lattice-visibility-keys",
+  "lattice-visibility-cones",
   "compact-cone-lighting",
   "cone-fanout",
   "world-gi-cache",
   "reduced-shade",
-  // SHADING — the depth partition's two halves, and the inline arm's fusion.
-  "sky-lighting",
+  // SHADING — the depth partition's two halves (one pass), and the inline
+  // arm's fusion.
   "deferred-lighting",
   "inline-traversal-shading",
   // OUTPUT — the fluid-only fallbacks, the interfaces, the composite, present.
@@ -147,7 +148,7 @@ export interface RenderFrameStagePlugin {
  * live frame still speak the same language — but nothing matches on it any
  * more.
  *
- * Several stages share a `PaperPhaseId`: five share `svo-primary` and four
+ * Several stages share a `PaperPhaseId`: five share `svo-primary` and six
  * share `svo-cone-lighting`, which is exactly why an id-keyed lookup was never
  * the finest grain available and why the stage id is a separate thing.
  */
@@ -222,11 +223,6 @@ export const RENDER_FRAME_STAGE_PLUGINS = Object.freeze({
     node: "primary-traversal",
     phase: { id: "svo-primary", label: "Voxel surface mesh update" },
   },
-  "surface-mesh-background": {
-    owner: "svo",
-    node: "primary-traversal",
-    phase: { id: "svo-primary", label: "Voxel surface exact planes" },
-  },
   "surface-mesh-cull": {
     owner: "svo",
     node: "primary-traversal",
@@ -262,6 +258,18 @@ export const RENDER_FRAME_STAGE_PLUGINS = Object.freeze({
     node: "voxel-light-cache",
     phase: { id: "svo-voxel-light", label: "SVO voxel light cache" },
   },
+  // The lattice arm replaces the compact march, fan-out and reduction; a
+  // frame closes either these two or those, never both.
+  "lattice-visibility-keys": {
+    owner: "svo",
+    node: "cone-visibility",
+    phase: { id: "svo-cone-lighting", label: "SVO lattice visibility keys" },
+  },
+  "lattice-visibility-cones": {
+    owner: "svo",
+    node: "cone-visibility",
+    phase: { id: "svo-cone-lighting", label: "SVO lattice cone visibility" },
+  },
   "compact-cone-lighting": {
     owner: "svo",
     node: "cone-visibility",
@@ -281,11 +289,6 @@ export const RENDER_FRAME_STAGE_PLUGINS = Object.freeze({
     owner: "svo",
     node: "reduced-shade",
     phase: { id: "svo-cone-lighting", label: "SVO reduced-rate opaque shading" },
-  },
-  "sky-lighting": {
-    owner: "svo",
-    node: "sky-lighting",
-    phase: { id: "dry-scene", label: "SVO deferred sky lighting" },
   },
   "deferred-lighting": {
     owner: "svo",
