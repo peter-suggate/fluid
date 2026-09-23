@@ -1358,6 +1358,7 @@ fn recordPhysicsPhaseBoundary(
   }
 
   get volumeTexture() { return this.octreeProjection?.levelSetTexture; }
+  syncRigidBodies(bodies: readonly RigidBodyState[]): void { this.rigidSystem.syncBodies(bodies); }
   get rigidRenderBuffer() { return this.rigidSystem.renderBuffer; }
   get rigidMotionBuffer() { return this.rigidSystem.motionBuffer; }
   get rigidCouplingDebug() { return {

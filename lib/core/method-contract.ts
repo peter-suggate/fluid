@@ -384,6 +384,8 @@ export interface GPUSolverInstance {
   readonly rigidRenderBuffer?: GPUBuffer;
   /** GPU-authored 128-byte primitive-motion sidecars, including conservative swept bounds. */
   readonly rigidMotionBuffer?: GPUBuffer;
+  /** Publish roster and explicit pose edits without advancing physics; retain unchanged GPU poses. */
+  syncRigidBodies?(bodies: readonly RigidBodyState[]): void;
   /** Updates selection metadata without mirroring dynamic poses through CPU memory. */
   setSelectedRigidBody?(index: number): void;
   /**

@@ -1642,6 +1642,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     return this.sparseWorldTrace.readPressureCanonicalMembershipQA();
   }
 
+  syncRigidBodies(bodies: readonly RigidBodyState[]): void { this.rigidSystem?.syncBodies(bodies); }
   get rigidRenderBuffer(): GPUBuffer | undefined { return this.rigidSystem?.renderBuffer; }
   get rigidMotionBuffer(): GPUBuffer | undefined { return this.rigidSystem?.motionBuffer; }
   setSelectedRigidBody(index: number): void { this.rigidSystem?.setSelectedIndex(index); }

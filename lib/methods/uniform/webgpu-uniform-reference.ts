@@ -3428,6 +3428,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.phiCensusRescan = true;
   }
 
+  syncRigidBodies(bodies: readonly RigidBodyState[]): void { this.rigidSystem.syncBodies(bodies); }
   get rigidRenderBuffer(): GPUBuffer { return this.rigidSystem.renderBuffer; }
   get rigidMotionBuffer(): GPUBuffer { return this.rigidSystem.motionBuffer; }
   setSelectedRigidBody(index: number): void { this.rigidSystem.setSelectedIndex(index); }

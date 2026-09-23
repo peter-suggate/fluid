@@ -15,7 +15,12 @@ export class UniformScratchArena {
   constructor(device: GPUDevice, readonly dims: readonly [number,number,number], edgeBytes: number, retainDiagnostics=false) {
     const tiles=dims.reduce((n,d)=>n*Math.ceil(d/4),1);
     this.sharpenBaseWords=Math.ceil((6*tiles+3)/4)*4;
-    this.conditioningBytes=Math.ceil((this.sharpenBaseWords+8+tiles)/4)*16;
+    // Solid displacement scatters one deposit per cell before tile classes
+    // are seeded. Reserve that full range even for scenes initially without
+    // bodies: live insertion can activate it on any advance. The later tile
+    // stages reuse this prefix; balance/page records must remain beyond it.
+    const solidDepositBytes=dims.reduce((n,d)=>n*d,1)*4;
+    this.conditioningBytes=Math.max(solidDepositBytes,Math.ceil((this.sharpenBaseWords+8+tiles)/4)*16);
     const words = dims.reduce((n,d) => n*(d+2),1)*4;
     ["FIM values A","FIM values B","FIM distances A","FIM distances B"].forEach((name,i) =>
       this.offsets.set(`Uniform Sec. 3.3 ${name}`,i*words));

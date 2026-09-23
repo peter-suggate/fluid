@@ -152,18 +152,14 @@ export const EDITOR_GESTURES: readonly EditorGestureDefinition[] = Object.freeze
     hint: "drag a box over the water to cap how finely it is solved there · pick its meaning and its smallest cell in the flyout · drag its faces, edges and corners to reshape it",
     claims: everything,
   },
-  // Playing with the water. A press on a body already throws it without this
-  // being armed; what the mode adds is that a press on *anything else* drops the
-  // current shape there and grabs it in the same motion, which is how "what
-  // happens if I push this through the water" gets asked in one gesture instead
-  // of six. It deliberately does not wait for the GPU pick — a play gesture has
-  // to start on the frame the pointer went down.
+  // Existing bodies can be swept through the water. On empty space the armed
+  // tool previews a new body, sizes it while dragging, and places it on release.
   {
     id: "body-drag",
     label: "DRAG",
     shortcut: "d",
     armable: true,
-    hint: "click a body to grab it and sweep it through the water · click anywhere else to drop the current shape and grab that · release to hand it back to gravity and buoyancy",
+    hint: "click and drag to size a new body · release to place it, or click for the current size · drag an existing body to move it",
     claims: everything,
   },
   // ---- implicit ----------------------------------------------------------

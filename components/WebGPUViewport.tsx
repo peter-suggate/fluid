@@ -29,7 +29,7 @@ import { getMethod } from "@/lib/core/method-registry";
 import { canonicalScene, type CameraState, type RunState } from "../lib/core/model";
 import { add, cameraBasis, dot, length, orbitAbout, pan, scale, sub, zoomToward } from "../lib/core/math";
 import { boundingRadius, type RigidBodyState } from "../lib/core/rigid-body";
-import { placementBodyDescription } from "../lib/core/editor-placement";
+import { placementBodyDescription, placementDimensionsForRadius } from "../lib/core/editor-placement";
 import type { RigidBodyDescription } from "../lib/core/model";
 import { resourceInteractionGates } from "../lib/core/resource-readiness";
 import { PRIMARY_PANE_ID, simulation } from "../lib/core/simulation/controller";
@@ -880,7 +880,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     // press origin too: selecting on the press would drop a bounding box around
     // everything the user only meant to fling, and only the release knows which
     // gesture this was.
-    | { id: number; action: "body"; bodyId: string; downX: number; downY: number; planePoint: Vec3; planeNormal: Vec3; grabOffset: Vec3; lastPosition: Vec3; lastTime: number }
+    | { id: number; action: "body"; bodyId: string; dragging: boolean; orientation?: RigidBodyState["orientation"]; downX: number; downY: number; planePoint: Vec3; planeNormal: Vec3; grabOffset: Vec3; lastPosition: Vec3; lastTime: number }
     | { id: number; action: "terrain-handle"; index: number; kind: TerrainHandleKind; anchor: Vec3 }
     | { id: number; action: "fluid-paint"; erase: boolean; lastBrickKey?: string }
     // A face-locked box swept across solids. It carries no `baseSolids`: the
@@ -904,6 +904,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     // grows instead of sinking into the floor it was dropped on. `moved` is
     // what separates the two gestures this tool has: a click drops a default
     // ball, a drag sizes one.
+    | { id: number; action: "body-place"; anchor: Vec3; ray: { origin: Vec3; direction: Vec3 }; hover?: EditorHover; downX: number; downY: number; moved: boolean; template: RigidBodyDescription; dimensions_m: Vec3; position: Vec3 }
     | { id: number; action: "fluid-ball"; anchor: Vec3; ray: { origin: Vec3; direction: Vec3 }; hover?: EditorHover; downX: number; downY: number; moved: boolean; radius_m: number; selectionId: string }
     | { id: number; action: "fill-level" }
     // One arm for every editable thing. `entity` is the entity as it stood when
@@ -1603,16 +1604,11 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
    * The selection is deliberately not moved here. See `pointerUp`.
    */
   const beginBodyDrag = (pointerId: number, timeStamp: number, downX: number, downY: number, ray: { origin: Vec3; direction: Vec3 }, body: RigidBodyState, position: Vec3, orientation?: RigidBodyState["orientation"], surfacePosition = position) => {
-    // The press that starts a drag also selects, and a selection means "in
-    // hand" — so without this the gesture would be racing a carry for the same
-    // body, and the first pointer move would go to whichever won. The drag owns
-    // it now; its release re-selects and the carry starts cleanly from there,
-    // unless the release was a throw, which is a putting-down of its own.
-    session.ui.getState().endCarry();
+    // Record the press without issuing a kinematic command. A click selects;
+    // only crossing the drag threshold may hold or move the body.
     const basis = cameraBasis(session.ui.getState().camera);
     const dragPoint = planeHit(ray.origin, ray.direction, surfacePosition, basis.forward), grabOffset = sub(position, dragPoint);
-    pointerRef.current = { id: pointerId, action: "body", bodyId: body.description.id, downX, downY, planePoint: surfacePosition, planeNormal: basis.forward, grabOffset, lastPosition: position, lastTime: timeStamp };
-    simulation.dragBody(body.description.id, position, { x: 0, y: 0, z: 0 }, "start", orientation, paneId);
+    pointerRef.current = { id: pointerId, action: "body", bodyId: body.description.id, dragging: false, orientation, downX, downY, planePoint: surfacePosition, planeNormal: basis.forward, grabOffset, lastPosition: position, lastTime: timeStamp };
   };
 
   /**
@@ -2328,7 +2324,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
    * the anchor, so its surface passes through both the anchor and, at exactly
    * this radius, the point being dragged to.
    */
-  const fluidBallDragRadius = (active: { anchor: Vec3 }, ray: { origin: Vec3; direction: Vec3 }) => {
+  const dropDragRadius = (active: { anchor: Vec3 }, ray: { origin: Vec3; direction: Vec3 }) => {
     const point = planeHit(ray.origin, ray.direction, active.anchor,
       cameraBasis(session.ui.getState().camera).forward);
     const reach = length(sub(point, active.anchor));
@@ -2345,11 +2341,8 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
    * A body big enough to stir water with is big enough for a bounding sphere
    * to find.
    *
-   * A miss spawns the armed shape at the cursor and grabs that instead, which
-   * is what makes the mode one click rather than six. The spawn rests on
-   * whatever surface is under the cursor when there is one — the water, the
-   * ground, a prop — and otherwise lands on the camera-facing plane through
-   * the container centre, the same fallback the tray drop uses.
+   * A miss opens a placement preview. Dragging sizes the new body on the same
+   * camera-facing plane as a liquid ball; releasing commits it once.
    */
   const beginBodySweep = (event: React.PointerEvent<HTMLCanvasElement>, ray: { origin: Vec3; direction: Vec3 }) => {
     const ui = session.ui.getState();
@@ -2372,15 +2365,12 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       ui.placementShape, ui.placementDimensions, 1, scene.container.height_m);
     const position = restInContainer(scene, ray, surface, boundingRadius(template));
     if (!position) return;
-    // autoRun false: the clock starts on the drag itself, so a spawn that the
-    // user never moves does not quietly begin the simulation under them.
-    const created = simulation.addBodyAt(ui.placementShape, position,
-      { autoRun: false, dimensions_m: template.dimensions_m }, paneId);
-    if (!created) return;
-    const spawned = drawnBodies(session.diagnostics).find((candidate) => candidate.description.id === created.id);
-    if (!spawned) return;
-    beginBodyDrag(event.pointerId, event.timeStamp, event.clientX, event.clientY, ray, spawned,
-      spawned.position_m, spawned.orientation);
+    pointerRef.current = {
+      id: event.pointerId, action: "body-place", anchor: position, ray, hover: surface,
+      downX: event.clientX, downY: event.clientY, moved: false,
+      template, dimensions_m: template.dimensions_m, position,
+    };
+    setCursorDrop({ centre_m: position, radius_m: boundingRadius(template), tone: "body" });
   };
 
   useEffect(() => simulation.registerLiveSolidEditAcceptance(session.id, async (next, base) => {
@@ -2711,11 +2701,27 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       if (drawn && !active.drawn) pointerRef.current = { ...active, drawn };
       return;
     }
+    if (active.action === "body-place") {
+      const moved = active.moved
+        || Math.hypot(event.clientX - active.downX, event.clientY - active.downY) > CLICK_SLOP_PX;
+      if (!moved) return;
+      const radius = dropDragRadius(active, pointerRay(event));
+      if (radius === undefined) return;
+      const scene = session.scene.getState().scene;
+      const maximumRadius = Math.min(scene.container.width_m, scene.container.depth_m) / 2;
+      const dimensions_m = placementDimensionsForRadius(active.template, Math.min(radius, maximumRadius));
+      const radius_m = boundingRadius({ ...active.template, dimensions_m });
+      const position = restInContainer(scene, active.ray, active.hover, radius_m);
+      if (!position) return;
+      pointerRef.current = { ...active, moved, dimensions_m, position };
+      setCursorDrop({ centre_m: position, radius_m, tone: "body" });
+      return;
+    }
     if (active.action === "fluid-ball") {
       const moved = active.moved
         || Math.hypot(event.clientX - active.downX, event.clientY - active.downY) > CLICK_SLOP_PX;
       if (!moved) return;
-      const radius_m = fluidBallDragRadius(active, pointerRay(event));
+      const radius_m = dropDragRadius(active, pointerRay(event));
       pointerRef.current = { ...active, moved, radius_m: radius_m ?? active.radius_m };
       if (radius_m !== undefined) updateFluidBallDraft(active.ray, active.hover, radius_m);
       return;
@@ -2771,9 +2777,14 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       return;
     }
     if (active.action === "body") {
+      if (!active.dragging) {
+        if (pointerStayedWithinClickSlop(event.clientX - active.downX, event.clientY - active.downY)) return;
+        session.ui.getState().endCarry();
+        simulation.dragBody(active.bodyId, active.lastPosition, { x: 0, y: 0, z: 0 }, "start", active.orientation, paneId);
+      }
       const ray = pointerRay(event), position = add(planeHit(ray.origin, ray.direction, active.planePoint, active.planeNormal), active.grabOffset);
       const dt = Math.max((event.timeStamp - active.lastTime) / 1000, 1 / 240), rawVelocity = scale(sub(position, active.lastPosition), 1 / dt), speed = length(rawVelocity), velocity = speed > 6 ? scale(rawVelocity, 6 / speed) : rawVelocity;
-      pointerRef.current = { ...active, lastPosition: position, lastTime: event.timeStamp };
+      pointerRef.current = { ...active, dragging: true, lastPosition: position, lastTime: event.timeStamp };
       simulation.dragBody(active.bodyId, position, velocity, "move", undefined, paneId); return;
     }
     const dx = event.clientX - active.x;
@@ -2825,8 +2836,8 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     // with it. Same slop as the background click, so the two agree on what
     // "moved" means.
     if (active.action === "body") {
-      simulation.dragBody(active.bodyId, active.lastPosition, { x: 0, y: 0, z: 0 }, "end", undefined, paneId);
-      if (!cancelled && pointerStayedWithinClickSlop(event.clientX - active.downX, event.clientY - active.downY)) {
+      if (active.dragging) simulation.dragBody(active.bodyId, active.lastPosition, { x: 0, y: 0, z: 0 }, "end", undefined, paneId);
+      if (!cancelled && !active.dragging && pointerStayedWithinClickSlop(event.clientX - active.downX, event.clientY - active.downY)) {
         session.ui.getState().selectBody(active.bodyId);
       }
       return;
@@ -2893,6 +2904,13 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
         return;
       }
       session.ui.getState().selectVoxelRegion(active.region);
+      return;
+    }
+    if (active.action === "body-place") {
+      setCursorDrop(null);
+      if (cancelled) return;
+      simulation.addBodyAt(active.template.shape, active.position,
+        { autoRun: false, dimensions_m: active.dimensions_m }, paneId);
       return;
     }
     if (active.action === "fluid-ball") {

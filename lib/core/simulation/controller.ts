@@ -1476,14 +1476,15 @@ class SimulationController {
   dragBody(bodyId: string, position: RigidBodyState["position_m"], velocity: RigidBodyState["linearVelocity_m_s"], phase: BodyDragPhase, orientation?: RigidBodyState["orientation"], paneId: PaneId = PRIMARY_PANE_ID) {
     this.applyBodyManipulation(bodyId, position, velocity, phase, orientation, paneId);
     const runtime = this.session(paneId).runtime.getState();
-    // The carry starts the host clock, not this pane's: see `addBodyAt`.
-    if (phase === "start") { this.setRunState("running"); runtime.setNotice("Kinematic drag active · GPU immersed boundary coupling"); }
+    // Preserve the transport state so explicitly carrying or dragging a body
+    // while paused does not advance the simulation.
+    if (phase === "start") runtime.setNotice("Kinematic drag active · GPU immersed boundary coupling");
     if (phase === "end") runtime.setNotice("Body released to buoyancy, drag, and collision response");
   }
 
   /**
-   * Gizmo manipulation. Same kinematic constraint as `dragBody`, but authoring
-   * never starts the clock: placing geometry is an edit, not a throw. The pose
+   * Gizmo manipulation. Same kinematic constraint and transport behavior as
+   * `dragBody`, with no imposed velocity. The pose
    * lives in runtime state only until `commitEdit` writes the document.
    */
   manipulateBody(bodyId: string, position: RigidBodyState["position_m"], phase: BodyDragPhase, orientation?: RigidBodyState["orientation"], paneId: PaneId = PRIMARY_PANE_ID) {

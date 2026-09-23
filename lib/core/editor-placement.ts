@@ -121,3 +121,16 @@ export function placementFields(
       apply: (value: number) => ({ ...dimensions, [axis]: value }),
     }));
 }
+
+/** Scale a placement from its initial proportions to the radius drawn by the pointer. */
+export function placementDimensionsForRadius(body: RigidBodyDescription, radius_m: number): Vec3 {
+  const shape = sceneShape(body.shape);
+  const dimensions = body.dimensions_m;
+  const axes = (["x", "y", "z"] as const).filter((_, i) => shape.dimensionLabels[i] !== UNUSED_DIMENSION);
+  const minimumScale = Math.max(...axes.map(axis => RIGID_MINIMUM_HALF_SIZE_M / dimensions[axis]));
+  const scale = Math.max(minimumScale, radius_m / shape.boundingRadius_m(dimensions));
+  if (!Number.isFinite(scale)) return dimensions;
+  const result = { ...dimensions };
+  for (const axis of axes) result[axis] *= scale;
+  return result;
+}

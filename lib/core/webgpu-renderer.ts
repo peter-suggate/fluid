@@ -3410,6 +3410,10 @@ export class FluidLabRenderer {
     // shader's view of this buffer is byte-identical.
     if (this.hoverHighlight) packed.set([this.hoverHighlight.first, this.hoverHighlight.last, .45, 2.6], 100);
     this.device.queue.writeBuffer(this.uniformBuffer, 0, packed);
+    // A paused placement or carry still needs fresh render records. The rigid
+    // system uploads only changed commands/roster entries, preserving GPU-owned
+    // poses for all other bodies without spending a simulation step.
+    if (!this.simulationRunning) this.gpuFluid?.syncRigidBodies?.(bodies);
     const residentRigidBuffer = this.gpuFluid?.rigidRenderBuffer;
     if (residentRigidBuffer) {
       this.gpuFluid?.setSelectedRigidBody?.(bodies.findIndex((body) => body.description.id === selectedBodyId));

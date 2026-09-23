@@ -74,24 +74,9 @@ export interface CarrySession {
   readonly tiltDegrees: number;
 }
 
-/**
- * The carry a selection implies.
- *
- * Selecting a body *is* picking it up. That is the whole editing model here:
- * you point at a thing, it comes to the cursor and stays there — gravity
- * refused, contacts refused — until you put it down. Anything else makes
- * "selected" a state you have to then act on, and a body that keeps falling
- * while its handles are up is a body you cannot aim.
- *
- * Re-selecting the same body keeps the session it already has, so a tilt
- * survives a click that changes nothing. Selecting something else, or nothing,
- * puts down whatever was in hand — the release is implicit in aiming elsewhere.
- * A deliberate drop clears the carry without clearing the selection, and the
- * next click on the same body picks it up again.
- */
+/** Selection can retain an explicit carry, but never starts one. */
 function carryForSelection(current: CarrySession | undefined, bodyId: string | undefined): CarrySession | undefined {
-  if (!bodyId) return undefined;
-  return current?.bodyId === bodyId ? current : { bodyId, tiltDegrees: 0 };
+  return current?.bodyId === bodyId ? current : undefined;
 }
 
 /**
