@@ -398,6 +398,7 @@ struct SparseParams {
 @group(0) @binding(10) var<uniform> sparseParams: SparseParams;
 @group(0) @binding(11) var<storage, read> sparseControl: array<u32>;
 @group(0) @binding(12) var<storage, read> sparseStates: array<u32>;
+@group(0) @binding(13) var denseVertexPhi: texture_3d<f32>;
 override countOnly = false;
 override sparseField = false;
 ${marchingCubesLookupWGSL}
@@ -519,6 +520,38 @@ fn surfaceNormal(lattice: vec3f, cubeBase: vec3f, cubeScale: f32, value: ptr<fun
   return vec3f(0.0, 1.0, 0.0);
 }
 
+// Uniform Geometric publishes an (n+1)^3 nodal signed distance. Reconstruct
+// its gradient at the world-space crossing, rather than differentiating each
+// cube's eight contour values independently. Adjacent cubes then give a shared
+// crossing the same optical normal, including in the caustic projection.
+fn uniformPhiNormal(lattice:vec3f, fallback:vec3f) -> vec3f {
+  let dimensions=vec3i(u.gridInfo.xyz);
+  if(u.gridInfo.w>=1.5 || any(vec3i(textureDimensions(denseVertexPhi))!=dimensions+vec3i(1))){return fallback;}
+  // The x/z halo closes liquid against the tank. Those triangles are boundary
+  // faces, not phi's free surface: its gradient can point upward while their
+  // geometric normal must point into the wall. Retain the contour normal in
+  // this half-cell closure strip and at the floor contact.
+  if(lattice.x<=1.0 || lattice.z<=1.0 || lattice.x>=f32(dimensions.x)
+    || lattice.z>=f32(dimensions.z) || lattice.y<=1.0){return fallback;}
+  let x=lattice-vec3f(0.5);
+  let center=vec3i(round(x));
+  var weightSum=0.0;var phiSum=0.0;
+  var derivativeWeightSum=vec3f(0.0);var phiDerivativeSum=vec3f(0.0);
+  for(var oz=-1;oz<=1;oz+=1){for(var oy=-1;oy<=1;oy+=1){for(var ox=-1;ox<=1;ox+=1){
+    let q=clamp(center+vec3i(ox,oy,oz),vec3i(0),dimensions);
+    let delta=vec3f(q)-x;
+    let weight=exp(-0.5*dot(delta,delta)/(.85*.85));
+    let phi=textureLoad(denseVertexPhi,q,0).x;
+    if(!(abs(phi)<1e10)){return fallback;}
+    weightSum+=weight;phiSum+=weight*phi;
+    derivativeWeightSum+=weight*delta;phiDerivativeSum+=weight*phi*delta;
+  }}}
+  let derivative=phiDerivativeSum*weightSum-phiSum*derivativeWeightSum;
+  let cell=u.container.xyz/max(u.gridInfo.xyz,vec3f(1.0));
+  let gradient=derivative/max(cell,vec3f(1e-6));
+  return select(fallback,normalize(gradient),weightSum>1e-8&&length(gradient)>1e-8);
+}
+
 // The cube's corner values travel by pointer because WGSL passes arrays by
 // value. Lorensen--Cline interpolation is the unmodified linear 0.5 crossing;
 // in particular, crossings at cube corners must not be displaced inward.
@@ -528,7 +561,7 @@ fn crossing(a: vec3f, b: vec3f, va: f32, vb: f32, cubeBase: vec3f, cubeScale: f3
   if (abs(denominator) > 1e-20) { t = clamp((0.5 - va) / denominator, 0.0, 1.0); }
   let lattice = mix(a, b, t);
   return SurfaceVertex(vec4f(latticeWorld(lattice,dims), 1.0),
-    vec4f(surfaceNormal(lattice, cubeBase, cubeScale, cubeValue,dims), 0.0));
+    vec4f(uniformPhiNormal(lattice,surfaceNormal(lattice, cubeBase, cubeScale, cubeValue,dims)), 0.0));
 }
 
 // Slots for the current thread's reserved vertex block. Reservation happens
@@ -1419,6 +1452,7 @@ export class RasterWaterPipeline {
   private globalCubeOffsets?: GPUBuffer;
   private polygoniseDispatchBuffer?: GPUBuffer;
   private extractBindGroup?: GPUBindGroup;
+  private denseNormalPhi?: GPUTexture;
   private globalExtractBindGroup?: GPUBindGroup;
   private globalPolygoniseBindGroup?: GPUBindGroup;
   private globalPolygoniseEmitBindGroup?: GPUBindGroup;
@@ -1641,6 +1675,7 @@ export class RasterWaterPipeline {
       ,{ binding: 10, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } }
       ,{ binding: 11, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
       ,{ binding: 12, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
+      ,{ binding: 13, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } }
     ] });
     this.globalExtractLayout = this.device.createBindGroupLayout({ label: "Global fine water classification bindings", entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
@@ -1869,9 +1904,12 @@ export class RasterWaterPipeline {
     this.ensureGlobalCoarsePipeline();
   }
 
-  setVolume(texture: GPUTexture, columnBases: GPUTexture) {
-    if (this.volume === texture && this.columnBases === columnBases) return;
-    this.volume = texture; this.columnBases = columnBases; this.extractedRevision = -1; this.surfaceExtractionReason = "volume binding changed"; this.lastExtractionAt_ms = -Infinity; this.causticsValid = false; this.rebuildBindGroups();
+  setVolume(texture: GPUTexture, columnBases: GPUTexture, denseNormalPhi?: GPUTexture) {
+    if (this.volume === texture && this.columnBases === columnBases && this.denseNormalPhi === denseNormalPhi) return;
+    const volumeChanged = this.volume !== texture || this.columnBases !== columnBases;
+    this.volume = texture; this.columnBases = columnBases; this.denseNormalPhi = denseNormalPhi;
+    this.extractedRevision = -1; this.surfaceExtractionReason = volumeChanged ? "volume binding changed" : "normal phi binding changed";
+    this.lastExtractionAt_ms = -Infinity; this.causticsValid = false; this.rebuildBindGroups();
   }
 
   setFluidDomain(domain: FluidDomain | undefined) {
@@ -2241,7 +2279,8 @@ export class RasterWaterPipeline {
       { binding: 9, resource: globalFine?.samples ?? { buffer: this.fallbackSparsePhi } },
       { binding: 10, resource: globalFine ? { buffer: this.globalFineRenderParams! } : { buffer: this.fallbackSparseParams } },
       { binding: 11, resource: globalFine?.samples ?? { buffer: this.fallbackSparseControl } },
-      { binding: 12, resource: globalFine?.metadata ?? { buffer: this.fallbackSparseControl } }
+      { binding: 12, resource: globalFine?.metadata ?? { buffer: this.fallbackSparseControl } },
+      { binding: 13, resource: (this.denseNormalPhi ?? this.volume).createView({ dimension: "3d" }) }
     ] });
     if (this.globalExtractLayout && this.indirectBuffer && this.activeCubeBuffer && this.globalCubeValues && this.globalFineRenderParams && this.fallbackSparsePageTable && this.fallbackSparseActivePages && this.fallbackSparsePhi && this.fallbackSparseControl) this.globalExtractBindGroup = this.device.createBindGroup({ layout: this.globalExtractLayout, entries: [
       { binding: 0, resource: { buffer: this.uniformBuffer } },

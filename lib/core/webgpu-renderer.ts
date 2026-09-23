@@ -2008,7 +2008,7 @@ export class FluidLabRenderer {
     const columnBases = columnSource ?? this.columnBaseTexture;
     if (!this.device || this.disposed || this.runtimeFailure || this.deviceLost || !texture || !columnBases || !gridCells || !velocity || !pressureSamples || !divergence || !pressure || !density) return;
     this.attachedSurfaceTexture = texture;
-    this.waterPipeline?.setVolume(texture, columnBases);
+    this.waterPipeline?.setVolume(texture, columnBases, this.gpuFluid?.denseLevelSetVolumeSource?.vertexPhi);
     this.waterPipeline?.setFluidDomain(this.gpuFluid?.fluidDomain);
     const sparsePresentation = this.sparseWorldPresentation(this.gpuFluid);
     const globalFineLevelSet = sparsePresentation?.fineLevelSet
