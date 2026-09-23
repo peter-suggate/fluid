@@ -129,6 +129,7 @@ import { LabSceneSelector } from "./LabSceneSelector";
 import { STEP_SIZES } from "./lab-step";
 import { ThemeSwitch } from "../components/ThemeSwitch";
 import { ViewportModeToggle } from "../components/ViewportModeToggle";
+import { Choice, Select, ToggleButton } from "../components/ui";
 import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
 import type { EditorActionEffect } from "../lib/core/editor-action";
 import { getEditorGesture } from "../lib/core/editor-gesture-catalog";
@@ -290,6 +291,11 @@ const CELL_STATE: readonly (readonly [string, string, string])[] = [
 ];
 
 type Metric = "workgroups" | "dispatches";
+/** What a stage's bar is the height of: the work the GPU did, or the launches that asked for it. */
+const METRIC_OPTIONS: readonly { readonly value: Metric; readonly label: string }[] = [
+  { value: "workgroups", label: "workgroups executed" },
+  { value: "dispatches", label: "dispatches encoded" },
+];
 /**
  * The sidebar's three faces, in the order the tabs stand.
  *
@@ -1716,10 +1722,10 @@ function AdvanceSlice({ session, lab }: {
       </div>
 
       <div className={styles.transport}>
-        <button type="button" aria-pressed={playing}
+        <ToggleButton pressed={playing}
           disabled={Boolean(readings.fault || levelSetCapability)}
-          onClick={() => setPlaying(v => !v)}>
-          {playing ? "Pause" : "Play"}</button>
+          onChange={setPlaying}>
+          {playing ? "Pause" : "Play"}</ToggleButton>
         <button type="button" disabled={Boolean(readings.fault || levelSetCapability)} onClick={() => {
           const active = controller.current;
           if (!active || advanceBusy.current) return;
@@ -1757,21 +1763,20 @@ function AdvanceSlice({ session, lab }: {
             control's `update: "reset"` says.
 
             The two header classes are on this wrapper rather than inside the
-            row, because a *page's* stylesheet is the page's: `.iters select`
-            is a descendant rule, so the control it renders is styled exactly as
-            the two readings beside it, and `lib`-side code never imports a CSS
-            module belonging to one route. */}
+            row, because a *page's* stylesheet is the page's: `.iters` and the
+            bar's control tokens reach it as descendants, so the control it
+            renders is styled exactly as the Δt beside it, and `lib`-side code
+            never imports a CSS module belonging to one route. */}
         <div className={`${styles.iters} ${styles.experiment}`}>
           <LabFeatureSlot slot="sim.transport" />
         </div>
-        <label className={styles.iters} htmlFor="advance-step">Δt
-        <select id="advance-step" value={String(dt)}
-          title="Seconds of physics per advance. 1/30 s is CM12's paper regime; the lab holds every scene to it whatever its own document asks for."
-          onChange={event => retime(Number(event.target.value))}>
-          {STEP_SIZES.map(size =>
-            <option key={size.label} value={size.dt}>{size.label}</option>)}
-        </select>
-          <b>{(dt * 1000).toFixed(1)} ms</b></label>
+        <span className={styles.iters}>Δt
+        <Select ariaLabel="Δt" value={String(dt)}
+          hint="Seconds of physics per advance. 1/30 s is CM12's paper regime; the lab holds every scene to it whatever its own document asks for."
+          options={STEP_SIZES.map(size => ({ value: String(size.dt), label: size.label }))}
+          customLabel={`${dt.toPrecision(4)} s`}
+          onChange={value => retime(Number(value))} />
+          <b>{(dt * 1000).toFixed(1)} ms</b></span>
         {/* The clock's price, beside the clock: what this machine spends to
             move the water Δt forward, median of the last few advances so a
             collection pause does not read as a regression. */}
@@ -2151,12 +2156,8 @@ function AdvanceSlice({ session, lab }: {
             })}
           </div>
           <div className={styles.axis}>
-            <span>bar height · {metric === "workgroups"
-              ? "workgroups executed" : "dispatches encoded"}</span>
-            <button type="button" onClick={() =>
-              setMetric(m => m === "workgroups" ? "dispatches" : "workgroups")}>
-              {metric === "workgroups" ? "show encoded dispatches" : "show executed workgroups"}
-            </button>
+            <span>bar height</span>
+            <Choice ariaLabel="Bar height" value={metric} onChange={setMetric} options={METRIC_OPTIONS} />
           </div>
         </div>
       </section>

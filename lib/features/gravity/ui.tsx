@@ -1,7 +1,8 @@
 "use client";
 
 import { ArrowDown } from "lucide-react";
-import { ToolstripNumber, ToolstripRow } from "../../../components/toolstrip";
+import { ToolstripRow } from "../../../components/toolstrip";
+import { NumberInput, Select, ToggleButton } from "../../../components/ui";
 import { useSession } from "../../core/session/session-context";
 import { simulation } from "../../core/simulation/controller";
 import { gravityFeature } from "./definition";
@@ -22,14 +23,12 @@ export function GravityRow() {
     name={control.label}
     hint={control.hint}
     testId="scene-gravity-row"
-    after={<div className="toolstrip-choice">
-      <button type="button" className={enabled ? "active" : ""}
-        aria-label={control.label} aria-pressed={enabled}
-        title={enabled ? "Disable gravity" : "Enable gravity"}
-        data-testid="scene-gravity-toggle" onClick={toggle}
-      >Gravity {enabled ? "on" : "off"}</button>
+    after={<>
+      <ToggleButton pressed={enabled} onChange={toggle} ariaLabel={control.label}
+        hint={enabled ? "Disable gravity" : "Enable gravity"} testId="scene-gravity-toggle"
+      >Gravity {enabled ? "on" : "off"}</ToggleButton>
       <GravityDirectionControl />
-    </div>}
+    </>}
   />;
 }
 
@@ -40,9 +39,9 @@ export function GravityYRow() {
   const control = gravityFeature.controls[1];
   return <ToolstripRow icon={<ArrowDown width={14} height={14} aria-hidden />}
     name={control.label} hint="Vertical acceleration shared by every simulation method."
-    after={<ToolstripNumber value={gravity.y} min={control.min} max={control.max}
+    after={<NumberInput value={gravity.y} min={control.min} max={control.max}
       step={control.step} ariaLabel={`${control.label} (${control.unit})`}
-      onCommit={value => {
+      onChange={value => {
         const fluid = session.scene.getState().scene.fluid;
         if (value === fluid.gravity_m_s2.y) return;
         simulation.beginEdit(`Set ${control.label}`, session.id);
@@ -58,13 +57,15 @@ function GravityDirectionControl() {
   const methodId = session.method(state => state.methodId);
   if (methodId !== "adaptive-mass" && methodId !== "adaptive-volume") return null;
   const direction = gravityDirection(fluid);
-  return <select className="toolstrip-gravity-direction" aria-label="Gravity direction" title="World direction; keeps gravity strength and remembers the choice while off" value={direction}
-      data-testid="scene-gravity-direction" onChange={event => {
-        const current = session.scene.getState().scene.fluid;
-        simulation.beginEdit("Change gravity direction", session.id);
-        simulation.commitEdit({ fluid: setGravityDirection(current, event.target.value) }, { reseed: true }, session.id);
-      }}>
-      {direction === "custom" && <option value="custom" disabled>Custom direction</option>}
-      {GRAVITY_DIRECTIONS.map(choice => <option key={choice.id} value={choice.id}>{choice.label}</option>)}
-    </select>;
+  // A vector no listed direction matches reads as "Custom direction", disabled:
+  // it can be kept but not chosen, since there is no one vector it would mean.
+  return <Select<string> ariaLabel="Gravity direction"
+    hint="World direction; keeps gravity strength and remembers the choice while off" value={direction}
+    customLabel="Custom direction" testId="scene-gravity-direction"
+    options={GRAVITY_DIRECTIONS.map(choice => ({ value: choice.id, label: choice.label }))}
+    onChange={value => {
+      const current = session.scene.getState().scene.fluid;
+      simulation.beginEdit("Change gravity direction", session.id);
+      simulation.commitEdit({ fluid: setGravityDirection(current, value) }, { reseed: true }, session.id);
+    }} />;
 }

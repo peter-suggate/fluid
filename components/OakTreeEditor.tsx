@@ -7,6 +7,7 @@ import { sceneryIdFromSelection, scenerySelectionId } from "../lib/core/editor-s
 import { useSession } from "../lib/core/session/session-context";
 import { simulation } from "../lib/core/simulation/controller";
 import { terrainHeightAt } from "../lib/core/terrain";
+import { Field, Select } from "./ui";
 
 // The tree editor also works with sessions predating asynchronous voxel strokes.
 const voxelStrokePending = (state: object) => "voxelStrokePending" in state && state.voxelStrokePending === true;
@@ -30,14 +31,14 @@ export function OakTreeEditor({ contextual = false }: { contextual?: boolean }) 
       }}>Add oak</button>
     </div>
     <p className="voxel-tool-help">Add at the view centre, then move with the object handles. Use Prop → Fractal oak to plant at a picked surface.</p>
-    {trees.length > 0 && <label>Tree<select aria-label="Tree to edit" value={selected?.id ?? ""} disabled={pending}
-      onChange={event => {
-        session.ui.getState().setVoxelTool(undefined);
-        session.ui.getState().select(event.target.value ? { kind: "scenery", id: scenerySelectionId(event.target.value) } : undefined);
-      }}>
-      <option value="">Select an oak…</option>
-      {trees.map(tree => <option key={tree.id} value={tree.id}>{tree.id}</option>)}
-    </select></label>}</>}
+    {trees.length > 0 && <Field label="Tree" disabled={pending}>
+      <Select ariaLabel="Tree to edit" value={selected?.id ?? ""} disabled={pending}
+        options={[{ value: "", label: "Select an oak…" }, ...trees.map(tree => ({ value: tree.id, label: tree.id }))]}
+        onChange={value => {
+          session.ui.getState().setVoxelTool(undefined);
+          session.ui.getState().select(value ? { kind: "scenery", id: scenerySelectionId(value) } : undefined);
+        }} />
+    </Field>}</>}
     {selected && <EditorControlGroupRows key={selected.id} groups={groups} entityLabel="Oak" />}
   </section>;
 }

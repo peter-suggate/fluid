@@ -1,0 +1,240 @@
+/* ---------------------------------------------------------------------------
+   Control primitives (components/ui).
+
+   One skin per control, sized by the surface it sits on. Nothing here states a
+   height, inline padding or type size of its own: each reads the three tokens
+   every surface already states — the studio's form floor, a pipeline card
+   (`.ui-fields`, 22px), the toolstrip (20px) and a toolstrip pane (22px) —
+   so the same slider is a form field in a flyout and a strip control in a row.
+
+   Imported after globals.css. Selectors that must beat the global
+   `input[type="range"]` rule and the lab-shell form floor carry the element
+   name for the extra specificity rather than `!important`.
+
+   Two more tokens, defaulted here:
+     --ui-name   the name column's share of a field list (a fixed share, so a
+                 list of facts under a list of settings shares its value edge)
+     --ui-hair   the hairline a chip or box is drawn with: the studio's line on
+                 a form, the instrument's fainter hair inside an instrument pane
+   --------------------------------------------------------------------------- */
+
+:root { --ui-name: 38%; --ui-hair: var(--line); }
+/* The instrument hair is only defined on the surfaces that draw with it. */
+.scene-instrument, .ui-fields { --ui-hair: var(--instrument-hair, var(--line)); }
+
+/* ---- field rows ---------------------------------------------------------- */
+
+/* A field alone sizes its own three columns; inside a list it takes the list's
+   (subgrid), which is what lines every control in a card up on one edge. */
+.ui-field { min-height: var(--control-height); display: grid; grid-template-columns: minmax(0,var(--ui-name)) minmax(0,1fr) auto; align-items: center; gap: 0 8px; }
+.ui-fields { --control-height: 22px; --control-inline-padding: 5px; --control-font-size: var(--size-2);
+  display: grid; grid-template-columns: var(--ui-name) minmax(0,1fr) max-content; gap: 4px 8px; align-items: center; }
+.ui-fields > * { grid-column: 1 / -1; }
+.ui-fields > .ui-field { grid-template-columns: subgrid; }
+.ui-fields.is-section { margin-top: 5px; padding-top: 7px; border-top: 1px solid var(--ui-hair); }
+/* Narrow, a figure-bearing row stacks: name and value on one line, the track
+   full width under them. Three columns in a 236px toolstrip pane left a track
+   the width of its thumb. A choice or a select stays on the rail, where the
+   control column is still most of the row. */
+.ui-fields { container-type: inline-size; }
+@container (max-width: 260px) {
+  .ui-fields > .ui-field:has(> .ui-field-value) { grid-template-columns: minmax(0,1fr) auto; grid-template-areas: "label value" "control control"; row-gap: 0; }
+  .ui-fields > .ui-field:has(> .ui-field-value) > .ui-field-label { grid-area: label; }
+  .ui-fields > .ui-field:has(> .ui-field-value) > .ui-field-value { grid-area: value; }
+  .ui-fields > .ui-field:has(> .ui-field-value) > .ui-field-control { grid-area: control; }
+}
+
+.ui-field-label { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; color: var(--micro); font: 400 var(--size-2)/1.35 var(--sans); }
+.ui-field-control { min-width: 0; display: flex; align-items: center; }
+.ui-field-control.is-wide { grid-column: 2 / -1; }
+.ui-field-value { display: flex; align-items: center; justify-content: flex-end; gap: 3px; white-space: nowrap; }
+.ui-field.is-disabled { opacity: .45; }
+.ui-field.is-disabled :is(input, select, button) { cursor: not-allowed; }
+.ui-field.is-readout .ui-field-control { justify-content: flex-end; }
+.ui-field.is-readout .ui-value { white-space: normal; text-align: right; }
+
+.ui-actions { display: flex; justify-content: flex-end; gap: 4px; padding-top: 2px; }
+.ui-note { margin: 0; color: var(--dim); font: 400 var(--size-2)/1.4 var(--sans); }
+.ui-row { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; }
+
+/* ---- facts --------------------------------------------------------------- */
+
+.ui-facts { margin: 0; display: grid; grid-template-columns: var(--ui-name) minmax(0,1fr); gap: 4px 8px; }
+.ui-fields + .ui-facts { margin-top: 3px; padding-top: 7px; border-top: 1px solid var(--ui-hair); }
+.ui-facts > div { grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; align-items: baseline; }
+.ui-facts dt { color: var(--micro); font: 400 var(--size-2)/1.35 var(--sans); }
+.ui-facts dd { margin: 0; min-width: 0; color: var(--label); font: 400 var(--size-2)/1.35 var(--sans); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; text-wrap: pretty; }
+
+/* ---- value --------------------------------------------------------------- */
+
+.ui-value { display: inline-flex; align-items: baseline; gap: 3px; color: var(--ink); font: var(--text-micro); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ui-value small { color: var(--dim); font: 500 var(--size-1)/1.3 var(--mono); }
+
+/* ---- slider -------------------------------------------------------------- */
+
+/* A track is never as tall as a form field: the floor's 38px is a hit target
+   for a box, and a 38px-tall range is a band of dead pixels above and below
+   the line. It takes the surface height up to 24px. `accent-color` covers
+   the browsers that still paint their own track under this one. */
+input.ui-slider[type="range"] { width: 100%; min-width: 0; min-height: 0; height: min(var(--control-height), 24px); margin: 0; padding: 0;
+  appearance: none; accent-color: var(--accent); background: linear-gradient(90deg, var(--accent-line), var(--accent-wash)) center / 100% 3px no-repeat; cursor: ew-resize; }
+input.ui-slider[type="range"]::-webkit-slider-thumb { appearance: none; width: 11px; height: 11px; border: 1px solid var(--accent); border-radius: 50%; background: var(--well); box-shadow: 0 0 0 3px var(--accent-wash); }
+input.ui-slider[type="range"]::-moz-range-thumb { width: 9px; height: 9px; border: 1px solid var(--accent); border-radius: 50%; background: var(--well); box-shadow: 0 0 0 3px var(--accent-wash); }
+input.ui-slider[type="range"]:focus-visible { outline: none; }
+input.ui-slider[type="range"]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px var(--accent-line); }
+input.ui-slider[type="range"]:disabled { cursor: not-allowed; opacity: .45; }
+
+/* ---- number -------------------------------------------------------------- */
+
+.ui-number { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+.ui-number b { flex: none; color: var(--dim); font: var(--text-tag); letter-spacing: var(--track-wide); }
+.ui-number small { color: var(--dim); font: 500 var(--size-1)/1.3 var(--mono); white-space: nowrap; }
+.ui-number > input[type="number"] {
+  width: var(--ui-number-width, 60px); min-width: 0; height: var(--control-height); min-height: var(--control-height);
+  padding: 0 var(--control-inline-padding); border: 1px solid var(--ui-hair); border-radius: var(--radius-s);
+  background: transparent; color: var(--ink); font: var(--text-micro); font-size: var(--control-font-size); font-variant-numeric: tabular-nums; text-align: right;
+  appearance: textfield; -moz-appearance: textfield; }
+.ui-number > input::-webkit-inner-spin-button, .ui-number > input::-webkit-outer-spin-button { margin: 0; appearance: none; }
+.ui-number > input:hover:not(:disabled) { border-color: var(--line-strong); }
+.ui-number > input:focus-visible { outline: none; border-color: var(--accent-line); color: var(--accent-strong); }
+.ui-number.is-disabled { opacity: .45; }
+/* A typed value in a field's value column keeps the column's width. */
+.ui-number.is-inline { --ui-number-width: 50px; }
+.ui-field-control > .ui-number:only-child { flex: 1; }
+.ui-field-control > .ui-number:only-child > input { --ui-number-width: 100%; }
+
+/* ---- stepper ------------------------------------------------------------- */
+
+.ui-stepper { display: inline-flex; align-items: center; gap: 2px; }
+.ui-stepper > button { width: var(--control-height); height: var(--control-height); min-height: 0; padding: 0; border: 1px solid var(--ui-hair); border-radius: var(--radius-s);
+  background: transparent; color: var(--micro); font: 500 var(--size-3)/1 var(--sans); cursor: pointer; }
+.ui-stepper > button:hover:not(:disabled) { border-color: var(--line-strong); color: var(--ink); }
+.ui-stepper > button:disabled { opacity: .4; cursor: not-allowed; }
+.ui-stepper > .ui-value { min-width: 38px; justify-content: center; }
+.ui-stepper .ui-number { --ui-number-width: 46px; }
+.ui-stepper.is-disabled { opacity: .45; }
+
+/* ---- select -------------------------------------------------------------- */
+
+select.ui-select { width: 100%; min-width: 0; height: var(--control-height); min-height: var(--control-height); padding: 0 var(--control-inline-padding);
+  border: 1px solid var(--ui-hair); border-radius: var(--radius-s); background-color: var(--overlay); color: var(--ink);
+  font: 400 var(--control-font-size)/1.2 var(--sans); cursor: pointer; }
+select.ui-select:hover:not(:disabled) { border-color: var(--line-strong); }
+select.ui-select:focus-visible { outline: none; border-color: var(--accent-line); }
+select.ui-select:disabled { opacity: .45; cursor: not-allowed; }
+
+/* ---- choice and toggle chips -------------------------------------------- */
+
+.ui-choice { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; min-width: 0; }
+.ui-choice > button, .ui-toggle {
+  min-height: min(var(--control-height), 22px); padding: 0 7px; display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  border: 1px solid var(--ui-hair); border-radius: var(--radius-s); background: transparent; color: var(--micro);
+  font: 500 var(--size-2)/1.3 var(--sans); white-space: nowrap; cursor: pointer;
+  transition: border-color .14s ease, color .14s ease, background .14s ease; }
+.ui-choice > button:hover:not(:disabled), .ui-toggle:hover:not(:disabled) { border-color: var(--line-strong); color: var(--ink); }
+.ui-choice > button.active, .ui-toggle.active { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); }
+.ui-choice > button:disabled, .ui-toggle:disabled { opacity: .45; cursor: not-allowed; }
+
+/* ---- switch -------------------------------------------------------------- */
+
+.ui-switch { min-height: min(var(--control-height), 22px); padding: 0; display: inline-flex; align-items: center; gap: 6px; border: 0; background: transparent; color: var(--micro); font: 500 var(--size-2)/1.3 var(--sans); cursor: pointer; }
+.ui-switch i { position: relative; width: 18px; height: 10px; flex: none; border: 1px solid var(--line-strong); border-radius: 6px; background: transparent; transition: border-color .12s ease, background .12s ease; }
+.ui-switch i::after { content: ""; position: absolute; top: 2px; left: 2px; width: 4px; height: 4px; border-radius: 50%; background: var(--dim); transition: transform .12s ease, background .12s ease; }
+.ui-switch[aria-checked="true"] { color: var(--accent-strong); }
+.ui-switch[aria-checked="true"] i { border-color: var(--accent-line); background: var(--accent-wash); }
+.ui-switch[aria-checked="true"] i::after { transform: translateX(8px); background: var(--accent); }
+.ui-switch:hover:not(:disabled) i { border-color: var(--accent-line); }
+.ui-switch:disabled { opacity: .45; cursor: not-allowed; }
+.ui-switch:focus-visible { outline: 1px solid var(--accent-line); outline-offset: 2px; }
+/* With its name inside, a switch is a pill: the row of them is the row. */
+.ui-switch.is-pill { padding: 0 8px 0 6px; border: 1px solid var(--ui-hair); border-radius: var(--radius-s); }
+.ui-switch.is-pill:hover:not(:disabled) { border-color: var(--line-strong); color: var(--ink); }
+.ui-switch.is-pill[aria-checked="true"] { border-color: var(--accent-line); }
+
+/* ---- button and reset ---------------------------------------------------- */
+
+.ui-button { min-height: min(var(--control-height), 24px); padding: 0 9px; display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  border: 1px solid var(--ui-hair); border-radius: var(--radius-s); background: transparent; color: var(--micro);
+  font: 500 var(--size-2)/1.3 var(--sans); white-space: nowrap; cursor: pointer; transition: border-color .14s ease, color .14s ease, background .14s ease; }
+.ui-button:hover:not(:disabled) { border-color: var(--line-strong); color: var(--ink); }
+.ui-button.is-accent { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); }
+.ui-button.is-danger:hover:not(:disabled) { border-color: var(--amber); color: var(--amber-ink); }
+.ui-button:disabled { opacity: .45; cursor: not-allowed; }
+.ui-reset { padding: 0 2px; border: 0; background: transparent; color: var(--amber-ink); font: 500 var(--size-3)/1 var(--sans); cursor: pointer; }
+.ui-reset:hover { color: var(--amber); }
+
+/* ---- surfaces ------------------------------------------------------------ */
+
+/* The toolstrip column ignores the pointer except over its controls. */
+.toolstrip :is(.ui-slider, .ui-number, .ui-stepper, .ui-select, .ui-choice, .ui-toggle, .ui-switch, .ui-button, .ui-field) { pointer-events: auto; }
+/* A strip row carries a short track beside its mark, not a full-width one. */
+.toolstrip .toolstrip-row input.ui-slider[type="range"] { width: 76px; flex: none; }
+.toolstrip .toolstrip-row .ui-choice > button { border-color: transparent; }
+.toolstrip .toolstrip-row .ui-choice > button:hover:not(:disabled), .toolstrip .toolstrip-row .ui-choice > button.active { border-color: var(--accent-line); }
+.toolstrip-pane .ui-choice { justify-content: flex-end; margin-left: auto; }
+
+/* ---- studio components ---- */
+
+/* A whole stepper disabled is one dimmed thing. Its end buttons and its typed
+   box each dim themselves too, and nested inside the dimmed group they came out
+   at a fifth of full ink — a control that read as absent rather than locked. */
+.ui-stepper.is-disabled > :is(button:disabled, .ui-number.is-disabled) { opacity: 1; }
+
+/* The transport's dt: glyph-sized chrome on the image, not a form field, so it
+   states the strip's small height rather than inheriting the studio's floor
+   (the floor's 38px is what clipped the readout to "16.6"). The typed figure
+   turns amber while a method pins the clock, since the number is then the
+   method's and not the scene's. */
+.transport-step { --control-height: 22px; --control-inline-padding: 4px; --control-font-size: var(--size-3); }
+.transport-step .ui-stepper { gap: 3px; }
+.transport-step .ui-number { --ui-number-width: 44px; }
+.transport-step[data-pinned="true"] .ui-number > input { color: var(--amber); }
+
+/* The scale rows keep one column per part across all three rows — label, ÷2,
+   the readout, ×2 — so their buttons stack in two tidy columns. */
+.scene-scale-overlay { --control-height: 20px; }
+.scene-scale-row > .ui-stepper { display: grid; grid-template-columns: 22px minmax(0,1fr) 22px; gap: 3px; }
+.scene-scale-row > .ui-stepper > button { width: auto; font: var(--text-tag); }
+
+/* The sculpt card's controls. Its blanket `button` rule is for the card's
+   verbs; a switch is a knob, not a boxed button. A primary control fills its
+   half of the card. */
+.voxel-context-card { --control-height: 26px; --control-inline-padding: 5px; --control-font-size: 12px; }
+.voxel-context .ui-switch { min-height: 0; padding: 0; border: 0; background: transparent; }
+.voxel-context-primary .ui-number { width: 100%; --ui-number-width: 100%; }
+
+/* The theme picker is a pill of round glyphs rather than a row of chips. */
+.ui-choice.theme-switch { flex-wrap: nowrap; gap: 2px; }
+.ui-choice.theme-switch > button { width: 30px; height: 30px; min-height: 0; padding: 0; display: grid; place-items: center;
+  border: 0; border-radius: 999px; background: transparent; color: var(--dim); transition: color .18s ease, background .18s ease; }
+.ui-choice.theme-switch > button:hover:not(:disabled) { color: var(--ink); }
+.ui-choice.theme-switch > button.active { background: var(--accent-wash); color: var(--accent-strong); }
+
+/* ---- toolstrip controls ---- */
+
+/* An open row states its value once. A number field and a segmented strip each
+   show the current setting inside the control itself, so the row's copy of it
+   would be the same fact twice, 6px apart. A scrub is the exception: the row's
+   value is what it is scrubbing. */
+.toolstrip-row.is-open:has(.ui-number, .ui-choice) .toolstrip-value { display: none; }
+/* A number typed straight onto the image sits in a well rather than on the
+   pane's material, so it reads as something to type in and not as a filled
+   pill. Narrower in a row of extents: W/H/D is a shape read across, and at the
+   lone field's width the three and their mark outran everything else in the
+   column. */
+.toolstrip .toolstrip-row > .ui-number { --ui-number-width: 66px; }
+.toolstrip :is(.toolstrip-row, .toolstrip-dimensions) > .ui-number > input[type="number"] { background: var(--well); }
+.toolstrip .toolstrip-dimensions > .ui-number { --ui-number-width: 52px; gap: 3px; }
+/* A toggle standing on the bare strip wears the key's material, like the
+   strip's chips: transparent until hovered, washed only when on. */
+.toolstrip .toolstrip-row > .ui-toggle { border-color: transparent; }
+.toolstrip .toolstrip-row > .ui-toggle:hover:not(:disabled), .toolstrip .toolstrip-row > .ui-toggle.active { border-color: var(--accent-line); }
+/* A dropdown on a strip row is as wide as its answer, not the row. */
+.toolstrip .toolstrip-row > select.ui-select { width: auto; max-width: 130px; flex: none; }
+/* A scrub's readout is quieter than the value on the key beside it. */
+.toolstrip .toolstrip-row .ui-slider ~ .ui-value { color: var(--muted); }
+.toolstrip .ui-row > .ui-slider + .ui-value { margin-left: 4px; }
+/* Inside a pane's field list the track fills its column: the strip row's
+   short 76px track is for a line beside a mark, and in a 236px pane it left a
+   track the width of its thumb. */
+.toolstrip .toolstrip-pane .ui-field-control > input.ui-slider[type="range"] { width: 100%; flex: 1 1 auto; }

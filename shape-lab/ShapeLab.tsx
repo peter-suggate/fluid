@@ -50,6 +50,7 @@ import {
 import { shapeLabBounds, type ShapeLabCamera, type ShapeLabShading } from "./trace";
 import { ShapeLabPool, shapeLabPoolSize, type ShapeLabProgress, type ShapeLabTilePaint } from "./pool";
 import { SHAPE_LAB_STYLES } from "./shape-lab-styles";
+import { Button, Choice, Field, FieldList, NumberInput, RangeField, Switch, SwitchField } from "../components/ui";
 
 type Json = number | string | boolean | null | Json[] | { [key: string]: Json };
 
@@ -100,6 +101,16 @@ const prettyLabel = (key: string): string => key
 // The auto-generated form
 // ---------------------------------------------------------------------------
 
+/**
+ * One number: a live track, a typed figure, and ↺ back to the pristine value.
+ *
+ * The track redraws the shape on every move (`onInput`), because watching the
+ * form answer the thumb is what the lab is for. The single commit at the end of
+ * the drag lands where the preview already put the value, so it is dropped:
+ * every edit rebuilds the document, and a second identical rebuild is a second
+ * wait for nothing. The typed figure may go past the track's ends, which are a
+ * guess made from the pristine value and not the parameter's limits.
+ */
 function NumberRow({ label, path, value, pristine, onChange }: {
   label: string;
   path: readonly (string | number)[];
@@ -110,33 +121,17 @@ function NumberRow({ label, path, value, pristine, onChange }: {
   const key = String(path[path.length - 1] ?? "");
   const range = useMemo(() => sliderRange(pristine, key), [pristine, key]);
   const seedish = /seed|salt/i.test(key);
-  const changed = value !== pristine;
-  return <label className={`sl-row${changed ? " sl-row-changed" : ""}`}>
-    <span className="sl-row-label" title={String(path.join("."))}>{label}</span>
-    {seedish
-      ? <button type="button" className="sl-seed" onClick={() => onChange(path, (Math.random() * 0xffff_ffff) >>> 0)}>
-        re-seed
-      </button>
-      : <input
-        className="sl-slider"
-        type="range"
-        min={range.min}
-        max={range.max}
-        step={range.step}
-        value={Math.min(range.max, Math.max(range.min, value))}
-        onChange={(event) => onChange(path, Number(event.target.value))}
-      />}
-    <input
-      className="sl-number"
-      type="number"
-      value={value}
-      step={range.step}
-      onChange={(event) => {
-        const next = Number(event.target.value);
-        if (Number.isFinite(next)) onChange(path, next);
-      }}
-    />
-  </label>;
+  const name = <span title={String(path.join("."))}>{label}</span>;
+  const commit = (next: number) => { if (next !== value) onChange(path, next); };
+  if (seedish) {
+    return <Field label={name} modified={value !== pristine} onReset={() => onChange(path, pristine)}
+      value={<NumberInput value={value} step={range.step} onChange={commit} className="is-inline" />}>
+      <Button onClick={() => onChange(path, (Math.random() * 0xffff_ffff) >>> 0)}>re-seed</Button>
+    </Field>;
+  }
+  return <RangeField label={name} value={value} min={range.min} max={range.max} step={range.step}
+    editable overrange defaultValue={pristine}
+    onInput={(next) => onChange(path, next)} onChange={commit} />;
 }
 
 function ParamTree({ value, pristine, path, onChange, depth = 0 }: {
@@ -157,16 +152,13 @@ function ParamTree({ value, pristine, path, onChange, depth = 0 }: {
     />;
   }
   if (typeof value === "boolean") {
-    return <label className="sl-row">
-      <span className="sl-row-label">{prettyLabel(key)}</span>
-      <input type="checkbox" checked={value} onChange={(event) => onChange(path, event.target.checked)} />
-    </label>;
+    return <SwitchField label={prettyLabel(key)} checked={value} onChange={(checked) => onChange(path, checked)} />;
   }
   if (typeof value === "string") {
-    return <label className="sl-row">
-      <span className="sl-row-label">{prettyLabel(key)}</span>
-      <input className="sl-text" type="text" value={value} onChange={(event) => onChange(path, event.target.value)} />
-    </label>;
+    return <Field label={prettyLabel(key)}>
+      <input className="sl-text" type="text" aria-label={prettyLabel(key)} value={value}
+        onChange={(event) => onChange(path, event.target.value)} />
+    </Field>;
   }
   if (value === null || typeof value !== "object") return null;
   const entries: [string | number, Json][] = Array.isArray(value)
@@ -183,10 +175,10 @@ function ParamTree({ value, pristine, path, onChange, depth = 0 }: {
     onChange={onChange}
     depth={depth + 1}
   />);
-  if (depth === 0) return <>{children}</>;
+  if (depth === 0) return <FieldList>{children}</FieldList>;
   return <details className="sl-group" open={depth <= 1}>
     <summary>{prettyLabel(key)}{Array.isArray(value) ? ` [${value.length}]` : ""}</summary>
-    <div className="sl-group-body">{children}</div>
+    <FieldList className="sl-group-body">{children}</FieldList>
   </details>;
 }
 
@@ -235,6 +227,13 @@ interface ShapeLabSelection {
 
 const SHAPE_LAB_SHADINGS: readonly ShapeLabShading[] = ["clay", "material", "normal"];
 const SHAPE_LAB_MODES = ["voxel", "exact"] as const;
+
+const CONTEXT_OPTIONS = (["isolated", "parent", "assembled"] as const).map((value) => ({ value, label: value }));
+const MODE_OPTIONS = [
+  { value: "voxel", label: "Voxels" },
+  { value: "exact", label: "Exact" },
+] as const;
+const SHADING_OPTIONS = SHAPE_LAB_SHADINGS.map((value) => ({ value, label: value }));
 
 /**
  * Where the lab opens.
@@ -734,36 +733,26 @@ function ShapeLabWorkbench() {
 
       {specimen && specimen.depth > 0 && <div className="sl-field">
         <span className="sl-legend">Context</span>
-        <div className="sl-segments">
-          {(["isolated", "parent", "assembled"] as const).map((option) => <button
-            key={option}
-            type="button"
-            className={`sl-segment${contextMode === option ? " sl-segment-on" : ""}`}
-            onClick={() => setContextMode(option)}
-          >{option}</button>)}
-        </div>
+        <Choice ariaLabel="Context" value={contextMode} options={CONTEXT_OPTIONS} onChange={setContextMode} />
       </div>}
 
       <div className="sl-field">
         <span className="sl-legend">Refinement depth</span>
-        <div className="sl-segments">
-          {SHAPE_LAB_DEPTHS.map((rung) => {
+        <Choice ariaLabel="Refinement depth" value={String(depth)} onChange={(rung) => setDepth(Number(rung))}
+          options={SHAPE_LAB_DEPTHS.map((rung) => {
             const census = ladder?.find((entry) => entry.depth === rung);
-            return <button
-              key={rung}
-              type="button"
-              className={`sl-segment sl-depth${rung === depth ? " sl-segment-on" : ""}`}
-              onClick={() => setDepth(rung)}
-              title={census
+            return {
+              value: String(rung),
+              hint: census
                 ? `${(shapeLabLeaf_m(rung) * 1e3).toFixed(3)} mm leaf · ${census.records} records`
                   + `${census.moved ? " · geometry re-derived at this rung" : rung === 0 ? "" : " · same geometry as the rung above"}`
-                : `${(shapeLabLeaf_m(rung) * 1e3).toFixed(3)} mm leaf`}
-            >
-              <span className="sl-depth-rung">{rung}</span>
-              <span className="sl-depth-census">{census ? `${census.records}${census.moved ? "≠" : ""}` : "·"}</span>
-            </button>;
-          })}
-        </div>
+                : `${(shapeLabLeaf_m(rung) * 1e3).toFixed(3)} mm leaf`,
+              label: <span className="sl-depth">
+                <span className="sl-depth-rung">{rung}</span>
+                <span className="sl-depth-census">{census ? `${census.records}${census.moved ? "≠" : ""}` : "·"}</span>
+              </span>,
+            };
+          })} />
         <p className="sl-note">
           {leafMm.toFixed(3)} mm leaf — <strong>{leafPx < 0.9 ? `${leafPx.toFixed(2)}` : leafPx.toFixed(1)} px</strong> at this
           zoom. Production renders at 3.
@@ -783,22 +772,10 @@ function ShapeLabWorkbench() {
 
       <div className="sl-field">
         <span className="sl-legend">Surface</span>
-        <div className="sl-segments">
-          <button type="button" className={`sl-segment${mode === "voxel" ? " sl-segment-on" : ""}`} onClick={() => setMode("voxel")}>Voxels</button>
-          <button type="button" className={`sl-segment${mode === "exact" ? " sl-segment-on" : ""}`} onClick={() => setMode("exact")}>Exact</button>
-        </div>
-        <div className="sl-segments">
-          {(["clay", "material", "normal"] as const).map((option) => <button
-            key={option}
-            type="button"
-            className={`sl-segment${shading === option ? " sl-segment-on" : ""}`}
-            onClick={() => setShading(option)}
-          >{option}</button>)}
-        </div>
-        <label className="sl-check">
-          <input type="checkbox" checked={showGround} disabled={isVessel} onChange={(event) => setShowGround(event.target.checked)} />
-          <span>Ground {isVessel ? "(always, this is it)" : ""}</span>
-        </label>
+        <Choice ariaLabel="Surface" value={mode} options={MODE_OPTIONS} onChange={setMode} />
+        <Choice ariaLabel="Shading" value={shading} options={SHADING_OPTIONS} onChange={setShading} />
+        <Switch className="sl-check" checked={showGround} disabled={isVessel} onChange={setShowGround}
+          label={isVessel ? "Ground (always, this is it)" : "Ground"} />
       </div>
 
       <dl className="sl-metrics">
@@ -837,16 +814,16 @@ function ShapeLabWorkbench() {
       <div className="sl-params-head">
         <span className="sl-legend">Parameters{edited ? " · edited" : ""}</span>
         <div className="sl-actions">
-          <button type="button" onClick={copyJson} disabled={!anyEdit}>{copied ? "copied" : "copy JSON"}</button>
-          <button type="button" onClick={reset} disabled={!edited}>reset</button>
+          <Button onClick={copyJson} disabled={!anyEdit}>{copied ? "copied" : "copy JSON"}</Button>
+          <Button onClick={reset} disabled={!edited}>reset</Button>
         </div>
       </div>
       {!isVessel && specimen?.depth !== 0 && <div className="sl-actions" style={{ padding: "0 14px 10px", flexWrap: "wrap" }}>
-        {recursiveNode && !recursiveNode.children?.length && <button type="button" onClick={refineSelected}>refine</button>}
-        {recursiveNode?.children?.length && <button type="button" onClick={collapseSelected}>collapse</button>}
-        {recursiveNode && <button type="button" onClick={regenerateSelected}>regenerate children</button>}
-        <button type="button" onClick={duplicateSelected}>duplicate</button>
-        <button type="button" onClick={deleteSelected}>delete</button>
+        {recursiveNode && !recursiveNode.children?.length && <Button onClick={refineSelected}>refine</Button>}
+        {recursiveNode?.children?.length && <Button onClick={collapseSelected}>collapse</Button>}
+        {recursiveNode && <Button onClick={regenerateSelected}>regenerate children</Button>}
+        <Button onClick={duplicateSelected}>duplicate</Button>
+        <Button tone="danger" onClick={deleteSelected}>delete</Button>
       </div>}
       {anyEdit && <p className="sl-export">
         <code>copy JSON</code> gives the whole session as <code>HeroGardenOverrides</code>.

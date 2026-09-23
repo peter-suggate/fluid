@@ -23,6 +23,7 @@ import type { PaneSession } from "../lib/core/session/session";
 import { useSession } from "../lib/core/session/session-context";
 import { useShellStore } from "../lib/core/stores/shell-store";
 import { createSceneQueryLayerCache, replaceQueryStateUrl, serializeQueryState } from "../lib/core/url-state";
+import { ResetButton } from "./ui";
 
 /**
  * One cache for the process, matching `startQueryStateSync`'s own: the scene
@@ -83,15 +84,13 @@ function OverrideRow({ override, onClear }: { override: SceneOverride; onClear: 
     <li data-group={override.group} data-counted={override.counted}>
       <span className="override-label" title={override.hint}>{override.label}</span>
       <span className="override-value" title={override.value}>{override.value}</span>
-      <button
-        type="button"
-        className="reset-chip"
-        onClick={onClear}
-        title={override.clearedBy === "reload"
+      <ResetButton
+        onReset={onClear}
+        hint={override.clearedBy === "reload"
           ? `Remove ${override.keys.join(", ")} and reload`
           : "Restore the authored value"}
-        aria-label={`Clear ${override.label}`}
-      >↺</button>
+        ariaLabel={`Clear ${override.label}`}
+      />
     </li>
   );
 }

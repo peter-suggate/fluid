@@ -1,7 +1,9 @@
 "use client";
 
-import { useEffect, useId, useState, type ReactNode } from "react";
-import { formatNumber } from "./controls";
+import { useEffect, useId, useState } from "react";
+import {
+  Choice, ChoiceField, Field, FieldList, FieldNote, NumberInput, Slider, Value, formatNumber,
+} from "./ui";
 import { simulation } from "../lib/core/simulation/controller";
 import { length } from "../lib/core/math";
 import { HERO_GARDEN_SOLVER_CELL_M } from "../lib/core/hero-garden-scene";
@@ -22,12 +24,9 @@ import type {
 } from "../lib/core/editor-entity";
 import {
   ToolstripActionRow,
-  ToolstripChoice,
   ToolstripMoreRow,
-  ToolstripNumber,
   ToolstripPane,
   ToolstripRow,
-  ToolstripScrub,
   ToolstripTabbedPane,
   useToolstripSection,
   type ToolstripTab,
@@ -105,8 +104,8 @@ function SceneRebuildControls() {
         a dry hero garden opens four times finer than its solver rung, so
         enabling fluid on a document already open would otherwise hand the
         solver a lattice it overruns. */}
-    <PaneRow label="Water">
-      <ToolstripChoice
+    <Field label="Water">
+      <Choice
         ariaLabel="Fluid system"
         value={fluidEnabled ? "on" : "off"}
         options={[{ value: "off", label: "Off" }, { value: "on", label: "On" }]}
@@ -117,13 +116,13 @@ function SceneRebuildControls() {
           simulation.setFluidSystem(value === "on", session.id);
         }}
       />
-    </PaneRow>
-    <p className="toolstrip-pane-note">{fluidEnabled
+    </Field>
+    <FieldNote>{fluidEnabled
       ? "The solver owns this scene. Off renders the set alone, with nothing waiting on fluid."
-      : "Renderer only: the set draws from the live sparse scene. The settings below stay authored."}</p>
-    {rebuildable && <div className="toolstrip-pane-block" data-testid="scene-lattice-rebuild">
-      <PaneRow label="Re-author at">
-        <ToolstripChoice
+      : "Renderer only: the set draws from the live sparse scene. The settings below stay authored."}</FieldNote>
+    {rebuildable && <FieldList testId="scene-lattice-rebuild">
+      <Field label="Re-author at">
+        <Choice
           ariaLabel="Set detail lattice"
           value={String(Math.min(SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM,
             Math.max(SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM, authoredDepth)))}
@@ -131,19 +130,19 @@ function SceneRebuildControls() {
             value: String(depth),
             label: depth < 0 ? `×${2 ** -depth}` : depth === 0 ? "Cell" : `÷${2 ** depth}`,
             disabled: fluidEnabled,
-            title: fluidEnabled
+            hint: fluidEnabled
               ? "A solver brick pins its node, so a wet document cannot move on this environment-only ladder. Turn water off first."
               : `Rebuild with the set drawn at ${(zeroRungCell_m * 1000) / 2 ** depth} mm`,
           }))}
           onChange={(value) => simulation.rebuildSceneAtLattice({ environmentRefinementDepth: Number(value) }, session.id)}
         />
-      </PaneRow>
-      <p className="toolstrip-pane-note">
+      </Field>
+      <FieldNote>
         Regenerates {definition.name} through its own factory, so the heightfield is re-baked and every
         generator re-resolves its legibility floors — which patching the cell above cannot do. It reloads
         the preset, so edits made since it was opened do not survive it; that is why it is undoable.
-      </p>
-    </div>}
+      </FieldNote>
+    </FieldList>}
   </>;
 }
 
@@ -190,44 +189,44 @@ function BodyStateReadout({ bodyId }: { bodyId: string }) {
 }
 
 /** One enumeration, committed as a single history entry. */
-/**
- * One setting inside a pane: its name, and its control to the right of it.
- *
- * The same two-column line the strip's own rows are — name left, answer right —
- * rather than the studio's form controls, which stack a label above a
- * full-width widget. A pane hangs off a strip row and is read as a continuation
- * of that column; a stack of headings and 32px fields inside it reads as a
- * different application in a box, which is exactly what the strip replaced.
- */
-function PaneRow({ label, children }: { label: string; children: ReactNode }) {
-  return <div className="toolstrip-pane-row">
-    <b className="toolstrip-tag">{label}</b>
-    {children}
-  </div>;
-}
-
 function ChoiceRow<Patch>({ group, entityLabel }: {
   group: EditorChoiceGroup<Patch>; entityLabel: string;
 }) {
   const session = useSession();
   const commit = patchCommitter(useEditorHost<unknown, Patch>());
-  return <PaneRow label={group.label}>
-    <ToolstripChoice
-      ariaLabel={group.label}
-      value={group.value}
-      options={group.options.map((option) => ({
-        value: option.id,
-        label: option.label,
-        title: option.hint,
-        disabled: option.enabled === false,
-      }))}
-      onChange={(value) => {
-        const option = group.options.find((candidate) => candidate.id === value);
-        if (!option || option.enabled === false || session.ui.getState().voxelStrokePending) return;
-        commit(entityCommitLabel(entityLabel, group.label), option.apply(), { reseed: true });
-      }}
-    />
-  </PaneRow>;
+  return <ChoiceField
+    label={group.label}
+    value={group.value}
+    options={choiceOptions(group)}
+    onChange={(value) => {
+      const option = group.options.find((candidate) => candidate.id === value);
+      if (!option || option.enabled === false || session.ui.getState().voxelStrokePending) return;
+      commit(entityCommitLabel(entityLabel, group.label), option.apply(), { reseed: true });
+    }}
+  />;
+}
+
+/** A declared enumeration's options, as the chips that offer them. */
+function choiceOptions<Patch>(group: EditorChoiceGroup<Patch>) {
+  return group.options.map((option) => ({
+    value: option.id,
+    label: option.label,
+    hint: option.hint,
+    disabled: option.enabled === false,
+  }));
+}
+
+/**
+ * What a scrub reads mid-drag, for the readout beside it.
+ *
+ * Held against the value the drag started from, so it stands down by itself
+ * once the commit lands — or once anything else moves the value, such as an
+ * undo after a drag that came back to where it began and so committed nothing.
+ */
+interface ScrubPreview { readonly id: string; readonly base: number; readonly value: number }
+
+function previewed(preview: ScrubPreview | undefined, field: { readonly id: string; readonly value: number }): number {
+  return preview?.id === field.id && preview.base === field.value ? preview.value : field.value;
 }
 
 /** One quantity, committed as a single history entry. */
@@ -236,38 +235,28 @@ function FieldRow<Patch>({ field, entityLabel }: {
 }) {
   const session = useSession();
   const commitPatch = patchCommitter(useEditorHost<unknown, Patch>());
-  // Previewed locally and written once on release, for the same reason the
-  // strip's own scrubs are: a commit is a history entry and a re-seed.
-  const [preview, setPreview] = useState<number | undefined>(undefined);
+  // The slider commits once, on release, for the same reason the strip's own
+  // scrubs do: a commit is a history entry and a re-seed. The readout follows
+  // the thumb in between.
+  const [preview, setPreview] = useState<ScrubPreview | undefined>(undefined);
   const commit = (value: number) => {
     setPreview(undefined);
     if (value === field.value || session.ui.getState().voxelStrokePending) return;
     commitPatch(entityCommitLabel(entityLabel, field.label), field.apply(value), { reseed: true });
   };
   const bounded = field.min !== undefined && field.max !== undefined;
-  const shown = preview ?? field.value;
-  return <PaneRow label={field.label}>
-    {bounded
-      ? <ToolstripScrub
-        min={field.min!}
-        max={field.max!}
-        step={field.step}
-        value={shown}
-        readout={`${formatNumber(shown, fieldDecimals(field.step))}${field.unit ? ` ${field.unit}` : ""}`}
-        ariaLabel={`${entityLabel} ${field.label}`}
-        onChange={setPreview}
-        onCommit={commit}
-      />
-      : <ToolstripNumber
-        value={field.value}
-        step={field.step}
-        min={field.min}
-        max={field.max}
-        unit={field.unit}
-        ariaLabel={`${entityLabel} ${field.label}`}
-        onCommit={commit}
-      />}
-  </PaneRow>;
+  const ariaLabel = `${entityLabel} ${field.label}`;
+  if (!bounded) {
+    return <Field label={field.label}>
+      <NumberInput value={field.value} step={field.step} min={field.min} max={field.max} unit={field.unit}
+        ariaLabel={ariaLabel} onChange={commit} />
+    </Field>;
+  }
+  return <Field label={field.label}
+    value={<Value value={previewed(preview, field)} digits={fieldDecimals(field.step)} unit={field.unit} />}>
+    <Slider min={field.min!} max={field.max!} step={field.step} value={field.value} ariaLabel={ariaLabel}
+      onInput={(value) => setPreview({ id: field.id, base: field.value, value })} onChange={commit} />
+  </Field>;
 }
 
 /**
@@ -350,7 +339,7 @@ export function EntityOptionRows<Patch, Doc>({ entity }: { entity: EditorEntity<
   // keys this component by selection so neither survives a click on something
   // else.
   const [open, setOpen] = useState<string | undefined>(undefined);
-  const [preview, setPreview] = useState<{ id: string; value: number } | undefined>(undefined);
+  const [preview, setPreview] = useState<ScrubPreview | undefined>(undefined);
   // One row open across the whole strip, not one per section: the sections all
   // hang their cards off the same corner, so two open at once overlap.
   const { claim } = useToolstripSection("entity", () => setOpen(undefined));
@@ -385,15 +374,10 @@ export function EntityOptionRows<Patch, Doc>({ entity }: { entity: EditorEntity<
         testId={`entity-option-${group.id}`}
         onClick={() => toggle(group.id)}
       >
-        {open === group.id && <ToolstripChoice
+        {open === group.id && <Choice
           ariaLabel={group.label}
           value={group.value}
-          options={group.options.map((option) => ({
-            value: option.id,
-            label: option.label,
-            title: option.hint,
-            disabled: option.enabled === false,
-          }))}
+          options={choiceOptions(group)}
           onChange={(value) => {
             const option = group.options.find((candidate) => candidate.id === value);
             if (option && option.enabled !== false) commitChoice(group, option);
@@ -413,8 +397,7 @@ export function EntityOptionRows<Patch, Doc>({ entity }: { entity: EditorEntity<
           key={entry.id}
           tag={row.tag}
           value={entry.members
-            .map((field) => formatNumber(
-              preview?.id === field.id ? preview.value : field.value, fieldDecimals(field.step)))
+            .map((field) => formatNumber(previewed(preview, field), fieldDecimals(field.step)))
             .join(" ")}
           name={row.label}
           hint={row.hint}
@@ -423,9 +406,11 @@ export function EntityOptionRows<Patch, Doc>({ entity }: { entity: EditorEntity<
           onClick={() => toggle(entry.id)}
         >
           {open === entry.id && <ToolstripPane label={row.label} onClose={() => setOpen(undefined)}>
-            {entry.members.map((field) => (
-              <FieldRow key={field.id} field={field} entityLabel={entity.label} />
-            ))}
+            <FieldList>
+              {entry.members.map((field) => (
+                <FieldRow key={field.id} field={field} entityLabel={entity.label} />
+              ))}
+            </FieldList>
           </ToolstripPane>}
         </ToolstripRow>;
       }
@@ -434,7 +419,7 @@ export function EntityOptionRows<Patch, Doc>({ entity }: { entity: EditorEntity<
       // neither, so it gets exact entry instead of a slider that would have to
       // invent its own range and then lie about where the value sits in it.
       const bounded = field.min !== undefined && field.max !== undefined;
-      const shown = preview?.id === field.id ? preview.value : field.value;
+      const shown = previewed(preview, field);
       const readout = `${formatNumber(shown, fieldDecimals(field.step))}${field.unit ? ` ${field.unit}` : ""}`;
       return <ToolstripRow
         key={field.id}
@@ -446,26 +431,27 @@ export function EntityOptionRows<Patch, Doc>({ entity }: { entity: EditorEntity<
         onClick={() => toggle(field.id)}
       >
         {open === field.id && (bounded
-          ? <ToolstripScrub
+          ? <Slider
             min={field.min!}
             max={field.max!}
             step={field.step}
-            value={shown}
+            value={field.value}
             ariaLabel={`${entity.label} ${field.label}`}
-            // Previewed locally and written once, on release: every commit is a
-            // history entry and a re-seed of the solver, so a scrub that wrote
-            // per pointer-move would rebuild the run dozens of times a second.
-            onChange={(value) => setPreview({ id: field.id, value })}
-            onCommit={(value) => commitField(field, value)}
+            // Previewed on the row's readout and written once, on release: every
+            // commit is a history entry and a re-seed of the solver, so a scrub
+            // that wrote per pointer-move would rebuild the run dozens of times a
+            // second.
+            onInput={(value) => setPreview({ id: field.id, base: field.value, value })}
+            onChange={(value) => commitField(field, value)}
           />
-          : <ToolstripNumber
+          : <NumberInput
             value={field.value}
             step={field.step}
             min={field.min}
             max={field.max}
             unit={field.unit}
             ariaLabel={`${entity.label} ${field.label}`}
-            onCommit={(value) => commitField(field, value)}
+            onChange={(value) => commitField(field, value)}
           />)}
       </ToolstripRow>;
     })}
@@ -497,13 +483,15 @@ export function EditorControlGroupRows<Patch>({ groups, entityLabel }: {
       onClick={() => toggle(group.id)}
     >
       {open === group.id && <ToolstripPane label={group.label} onClose={() => setOpen(undefined)}>
-        {group.choices?.map((choice) => (
-          <ChoiceRow key={choice.id} group={choice} entityLabel={entityLabel} />
-        ))}
-        {group.fields?.map((field) => (
-          <FieldRow key={field.id} field={field} entityLabel={entityLabel} />
-        ))}
-        {group.summary && <p className="toolstrip-pane-note">{group.summary}</p>}
+        <FieldList>
+          {group.choices?.map((choice) => (
+            <ChoiceRow key={choice.id} group={choice} entityLabel={entityLabel} />
+          ))}
+          {group.fields?.map((field) => (
+            <FieldRow key={field.id} field={field} entityLabel={entityLabel} />
+          ))}
+          {group.summary && <FieldNote>{group.summary}</FieldNote>}
+        </FieldList>
       </ToolstripPane>}
     </ToolstripRow>)}
   </>;
@@ -557,10 +545,10 @@ export function EntityDeleteRow<Patch, Doc>({ entity }: { entity: EditorEntity<P
 
 /** What the object's settings add up to, and the switches that rebuild its world. */
 function EntitySceneTab({ entity }: { entity: EditorEntity<unknown, unknown> }) {
-  return <>
-    {entity.summary && <p className="toolstrip-pane-note">{entity.summary}</p>}
+  return <FieldList>
+    {entity.summary && <FieldNote>{entity.summary}</FieldNote>}
     {entity.offersSceneRebuild && <SceneRebuildControls />}
-  </>;
+  </FieldList>;
 }
 
 /**

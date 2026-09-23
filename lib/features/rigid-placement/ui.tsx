@@ -8,10 +8,10 @@ import { EditorActionGlyph } from "../../../components/EditorActionIcon";
 import {
   ToolstripMenuButton,
   ToolstripMenuItem,
-  ToolstripNumber,
   ToolstripRow,
   useToolstripSection,
 } from "../../../components/toolstrip";
+import { NumberInput } from "../../../components/ui";
 
 /** Shape, sizing and arm state are one shared row in the studio and both labs. */
 export function RigidDropRow() {
@@ -70,14 +70,14 @@ export function RigidDropRow() {
           </ToolstripMenuButton>
           <div className="toolstrip-dimensions">
             {fields.map((field) => (
-              <ToolstripNumber
+              <NumberInput
                 key={field.axis}
                 tag={field.tag}
                 value={field.value}
                 step={field.step}
                 min={field.min}
                 ariaLabel={`${kind.label} ${field.label}`}
-                onCommit={(value) =>
+                onChange={(value) =>
                   setPlacementDimensions(shape, field.apply(value))
                 }
               />

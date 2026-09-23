@@ -14,14 +14,13 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import {
-  ToolstripChoice,
   ToolstripMenuButton,
   ToolstripMenuItem,
   ToolstripMenuRule,
   ToolstripRow,
-  ToolstripScrub,
   useToolstripSection,
 } from "../../../components/toolstrip";
+import { Choice, Slider, Value } from "../../../components/ui";
 import {
   pickFieldOverlay, type FieldOverlayAxis, type FieldOverlayView,
 } from "../../core/field-overlay-pick";
@@ -246,7 +245,7 @@ export function FieldViewRows({ views, catalog, state, volumeCapable }: {
   // method cannot draw it, disabled and saying why — a button that vanishes
   // teaches the reader nothing about why it is gone. There is no HIDE here
   // because the lit glyph is it.
-  const planes = adjustable && drawing !== undefined && !drawing.planeless && <ToolstripChoice
+  const planes = adjustable && drawing !== undefined && !drawing.planeless && <Choice<FieldViewAxis>
     ariaLabel="Field view plane"
     value={state.axis}
     options={[
@@ -257,12 +256,12 @@ export function FieldViewRows({ views, catalog, state, volumeCapable }: {
         value: "volume",
         label: "VOL",
         disabled: !volumeCapable || drawing.sliceOnly,
-        title: drawing.sliceOnly
+        hint: drawing.sliceOnly
           ? "This diagnostic is drawn on an X, Y, or Z slice"
           : volumeCapable ? undefined : "Volume views need an adaptive octree method",
       },
     ]}
-    onChange={(value) => state.setAxis(value as FieldViewAxis)}
+    onChange={state.setAxis}
   />;
 
   // The plane depth on a sliced view, the opacity on a volume or planeless one.
@@ -272,15 +271,17 @@ export function FieldViewRows({ views, catalog, state, volumeCapable }: {
   // with it rather than standing here detached from its own curve.
   const volumetric = drawing !== undefined && (drawing.planeless || state.axis === "volume");
   const scrub = adjustable && drawing && !isPressureJournalOverlayMode(drawing.mode)
-    && <ToolstripScrub
-      min={volumetric ? 0.05 : 0}
-      max={1}
-      step={volumetric ? 0.01 : 0.005}
-      value={state.slice}
-      readout={`${Math.round(state.slice * 100)}%`}
-      ariaLabel={volumetric ? `${drawing.label} opacity` : `Field ${state.axis} slice position`}
-      onChange={state.setSlice}
-    />;
+    && <>
+      <Slider
+        min={volumetric ? 0.05 : 0}
+        max={1}
+        step={volumetric ? 0.01 : 0.005}
+        value={state.slice}
+        ariaLabel={volumetric ? `${drawing.label} opacity` : `Field ${state.axis} slice position`}
+        onInput={state.setSlice}
+      />
+      <Value value={`${Math.round(state.slice * 100)}%`} />
+    </>;
 
   const item = (view: FieldVisualization, glyph: boolean) => <ToolstripMenuItem
     key={view.id}

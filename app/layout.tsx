@@ -7,6 +7,9 @@ import { headers } from "next/headers";
 import "@/lib/methods";
 import { AppShell } from "@/components/AppShell";
 import "./globals.css";
+// After globals: the primitives' skins must outrank the global range rule and
+// the lab-shell form floor at equal specificity.
+import "./ui-controls.css";
 
 export async function generateMetadata(): Promise<Metadata> {
   const incoming = await headers();

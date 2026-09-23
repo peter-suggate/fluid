@@ -1,6 +1,6 @@
 "use client";
 
-import { PipeChoice } from "../../../../components/PipeControls";
+import { ChoiceField } from "../../../../components/ui";
 import { SVO_PRIMARY_VISIBILITY_FEATURE, SVO_PRIMARY_VISIBILITY_OPTIONS } from "./definition";
 import { useState, type ComponentType } from "react";
 import { Activity, Boxes, Eye, Grid3X3, Network, ScanLine } from "lucide-react";
@@ -109,7 +109,7 @@ export function SvoPrimaryVisibilityControlRow() {
   const session = useSession();
   const value = session.ui((state) => state.svoPrimaryTraversal);
   const onChange = session.ui((state) => state.setSvoPrimaryTraversal);
-  return <PipeChoice label={SVO_PRIMARY_VISIBILITY_FEATURE.controls[0].label}
+  return <ChoiceField label={SVO_PRIMARY_VISIBILITY_FEATURE.controls[0].label}
     value={value === "raster" ? "mesh" : value} onChange={onChange}
     options={SVO_PRIMARY_VISIBILITY_OPTIONS} />;
 }

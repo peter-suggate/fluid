@@ -4,7 +4,8 @@ import { useSession } from "../../core/session/session-context";
 import { getMethod } from "../../core/method-registry";
 import { resolvedMethodValues } from "../../core/stores/method-store";
 import { simulation } from "../../core/simulation/controller";
-import { ToolstripRow, ToolstripPane, ToolstripScrub, useToolstripSection } from "../../../components/toolstrip";
+import { ToolstripRow, ToolstripPane, useToolstripSection } from "../../../components/toolstrip";
+import { ControlRow, Slider, Value } from "../../../components/ui";
 import { isPressureJournalOverlayMode } from "./gpu/overlay";
 import { PressureFilmStrip } from "./film-strip";
 
@@ -30,8 +31,11 @@ export function PressureInspectionRow() {
     hint="The pressure solve this scrub replays, iteration by iteration." active={open} testId="fluid-field-row-film"
     onClick={() => { claim(!open); setSubject(open ? undefined : identity); }}>
     {open && <ToolstripPane label="Film" onClose={close}>
-      {reserved && <ToolstripScrub min={0} max={1} step={schedule.length > 1 ? 1 / (schedule.length - 1) : 1}
-        value={slice} readout={schedule.length ? `iter ${schedule[slot]}` : "—"} ariaLabel="Film iteration" onChange={setSlice} />}
+      {reserved && <ControlRow>
+        <Slider min={0} max={1} step={schedule.length > 1 ? 1 / (schedule.length - 1) : 1}
+          value={slice} ariaLabel="Film iteration" onInput={setSlice} />
+        <Value value={schedule.length ? `iter ${schedule[slot]}` : "—"} />
+      </ControlRow>}
       {reserved ? <PressureFilmStrip slot={slot} onSelectSlot={slot => setSlice(schedule.length > 1 ? slot / (schedule.length - 1) : 0)} />
         : <p className="fluid-field-film" data-testid="fluid-field-film-off">
           <span>No film reserved — this view has nothing to replay.</span>

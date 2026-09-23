@@ -1,6 +1,11 @@
 .root {
   height: 100%;
   grid-template-rows: auto minmax(0, 1fr);
+  /* The shared controls' size (`components/ui` states none of its own): the
+     sidebar is an instrument pane, so the pipeline card's 22px. */
+  --control-height: 22px;
+  --control-inline-padding: 6px;
+  --control-font-size: var(--size-2);
 }
 .bar {
   display: flex;
@@ -12,6 +17,10 @@
   background: var(--panel);
   font-size: 12px;
   flex-wrap: wrap;
+  /* The bar's own buttons are 12px type in a 28px box; its select matches. */
+  --control-height: 28px;
+  --control-inline-padding: 9px;
+  --control-font-size: 12px;
 }
 .bar label {
   display: flex;
@@ -19,7 +28,8 @@
   gap: 8px;
   min-width: 0;
 }
-.bar select {
+.bar :global(.ui-select) {
+  width: auto;
   max-width: 300px;
 }
 .bar output {
@@ -29,8 +39,12 @@
   display: flex;
   gap: 6px;
 }
-.root button,
-.root select {
+/* The page's own buttons. A shared control is skinned by `app/ui-controls.css`
+   and is left out here: this rule is a class and an element, and would
+   otherwise outrank or tie every one of those skins. The exclusion is a
+   `:where`, so it adds no weight of its own to the buttons it does match. */
+.root button:not(:where(:global(.ui-switch), :global(.ui-toggle), :global(.ui-button), :global(.ui-reset),
+  :global(.ui-choice) > button, :global(.ui-stepper) > button)) {
   border: 1px solid var(--line);
   background: var(--panel);
   color: var(--ink);
@@ -46,7 +60,6 @@
   cursor: default;
 }
 .root button:focus-visible,
-.root select:focus-visible,
 .root canvas:focus-visible {
   outline: 2px solid var(--slice-liquid);
   outline-offset: -2px;
@@ -119,9 +132,11 @@
   gap: 7px;
   margin-top: 16px;
 }
-.sidebar > label select {
-  width: 100%;
-  min-width: 0;
+.sidebar > label :global(.ui-number) {
+  --ui-number-width: 100%;
+}
+.option {
+  margin-top: 16px;
 }
 .sidebar h1 {
   font-size: 18px;
@@ -137,22 +152,8 @@
 .muted {
   color: var(--slice-muted);
 }
-.sidebar dl {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 7px 12px;
-  line-height: 1.5;
-}
-.sidebar dl > div {
-  display: contents;
-}
-.sidebar dt {
-  color: var(--slice-muted);
-}
-.sidebar dd {
-  margin: 0;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
+.sidebar .facts {
+  margin: 12px 0;
 }
 .sidebar details {
   margin-top: 16px;
@@ -163,18 +164,17 @@
   cursor: pointer;
   font-weight: 600;
 }
-.stages {
+/* The stage choice is a column of names, not a row of chips: a stage's name
+   is a phrase, and the list is read top to bottom as the pipeline runs. */
+.sidebar .stages {
   display: grid;
   gap: 4px;
 }
-.stages button {
+.sidebar .stages > button {
+  justify-content: flex-start;
+  padding: 5px 8px;
   text-align: left;
-  font-size: 11px;
-  padding: 7px 8px;
-}
-.stages button[aria-pressed="true"] {
-  border-color: var(--slice-liquid);
-  color: var(--slice-liquid);
+  white-space: normal;
 }
 @media (max-width: 800px) {
   .layout {
@@ -183,7 +183,7 @@
   .bar {
     gap: 8px;
   }
-  .bar select {
+  .bar :global(.ui-select) {
     max-width: 190px;
   }
   .caption span {
@@ -202,7 +202,7 @@
   .bar output {
     width: 100%;
   }
-  .stages {
+  .sidebar .stages {
     grid-template-columns: 1fr 1fr;
   }
   .tools {

@@ -10,6 +10,7 @@ import { resourceInteractionGates } from "../lib/core/resource-readiness";
 import { transportLockReason, transportReadiness } from "../lib/core/transport-status";
 import { effectiveSimulationStep_s, methodPinsSimulationStep } from "../lib/core/simulation-step";
 import { useSession } from "../lib/core/session/session-context";
+import { Stepper } from "./ui";
 
 /** How long the pointer has to be still before the cluster recedes. */
 const POINTER_IDLE_MS = 2600;
@@ -39,19 +40,11 @@ function StepSizeControl({ disabled }: { readonly disabled: boolean }) {
   const method = { methodId, quality, overrides };
   const step_ms = effectiveSimulationStep_s(scene, method) * 1000;
   const pinned = methodPinsSimulationStep(scene, method);
-  const [draft, setDraft] = useState<string | null>(null);
-  const commit = (value_ms: number) => {
-    if (!Number.isFinite(value_ms)) return;
-    const clamped = Math.min(STEP_MAX_MS, Math.max(STEP_MIN_MS, value_ms));
-    simulation.setStepSize(clamped / 1000, session.id);
-  };
   // Halve and double rather than ±1 ms: the step is a log-scale knob — 4, 8,
   // 16, 33 ms are the settings a reader actually moves between, and reaching
-  // 4 ms from 33 one millisecond at a time is not a control.
-  const nudge = (factor: number) => commit(step_ms * factor);
-  // One decimal at most: the control moves in halvings and doublings, so a
-  // second decimal is noise, and it was the character that clipped the field.
-  const shown = draft ?? (Number.isInteger(+step_ms.toFixed(1)) ? String(Math.round(step_ms)) : step_ms.toFixed(1));
+  // 4 ms from 33 one millisecond at a time is not a control. Printed to a tenth
+  // at most: the control moves in halvings and doublings, so a second decimal
+  // is noise, and it was the character that clipped the field.
   return (
     <span
       className="transport-step"
@@ -64,24 +57,18 @@ function StepSizeControl({ disabled }: { readonly disabled: boolean }) {
       data-testid="transport-step"
     >
       <small>dt</small>
-      <button type="button" disabled={disabled || step_ms <= STEP_MIN_MS}
-        onClick={() => nudge(0.5)} aria-label="Halve the simulation step">−</button>
-      <input
-        type="number" inputMode="decimal"
-        min={STEP_MIN_MS} max={STEP_MAX_MS} step={0.5}
-        value={shown}
+      <Stepper
+        value={step_ms}
+        onChange={(value_ms) => simulation.setStepSize(value_ms / 1000, session.id)}
+        min={STEP_MIN_MS} max={STEP_MAX_MS}
+        factor={2} grain={0.1}
+        unit="ms"
+        editable
         disabled={disabled}
-        aria-label="Simulation step in milliseconds"
-        onChange={(event) => setDraft(event.target.value)}
-        onBlur={() => { if (draft !== null) commit(parseFloat(draft)); setDraft(null); }}
-        onKeyDown={(event) => {
-          if (event.key === "Enter") { event.currentTarget.blur(); }
-          else if (event.key === "Escape") { setDraft(null); event.currentTarget.blur(); }
-        }}
+        ariaLabel="Simulation step in milliseconds"
+        decreaseHint="Halve the simulation step"
+        increaseHint="Double the simulation step"
       />
-      <small>ms</small>
-      <button type="button" disabled={disabled || step_ms >= STEP_MAX_MS}
-        onClick={() => nudge(2)} aria-label="Double the simulation step">+</button>
     </span>
   );
 }

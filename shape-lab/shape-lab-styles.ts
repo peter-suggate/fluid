@@ -17,6 +17,11 @@ export const SHAPE_LAB_STYLES = `
   color: var(--ink);
   background: var(--bg);
   font: 13px/1.45 var(--font-sans, system-ui, sans-serif);
+  /* The shared controls take their size from the surface; this is the lab's.
+     The parameter lists are field lists, which state their own 22px. */
+  --control-height: 24px;
+  --control-inline-padding: 8px;
+  --control-font-size: var(--size-3);
 }
 @media (max-width: 1100px) {
   .sl-root { grid-template-columns: 1fr; height: auto; }
@@ -50,19 +55,15 @@ export const SHAPE_LAB_STYLES = `
 .sl-item-name { font-weight: 600; }
 .sl-item-detail { font-size: 11px; color: var(--muted); }
 
-.sl-segments { display: flex; gap: 4px; flex-wrap: wrap; }
-.sl-segment {
-  flex: 1 1 auto; min-width: 34px; padding: 5px 8px; cursor: pointer;
-  border-radius: var(--radius-s, 9px); border: 1px solid var(--line);
-  background: var(--panel); color: inherit; font: inherit; font-size: 12px;
-}
-.sl-segment:hover { border-color: var(--line-strong); }
-.sl-segment-on { background: var(--accent-wash); border-color: var(--accent-line); color: var(--accent-strong); font-weight: 600; }
-.sl-check { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); }
-.sl-depth { display: flex; flex-direction: column; align-items: center; gap: 1px; padding: 4px 6px; }
+/* A choice here is a segmented bar across the column, not a row of chips: the
+   options share the width, so a rung or a shading is one press wherever the
+   pointer lands. */
+.sl-side .ui-choice > button { flex: 1 1 auto; min-width: 34px; font-size: var(--size-3); }
+.sl-check { align-self: flex-start; }
+.sl-depth { display: flex; flex-direction: column; align-items: center; gap: 1px; padding: 3px 0; }
 .sl-depth-rung { font-size: 13px; font-weight: 600; line-height: 1.1; }
 .sl-depth-census { font-size: 9.5px; color: var(--dim); font-variant-numeric: tabular-nums; line-height: 1.1; }
-.sl-segment-on .sl-depth-census { color: var(--accent-strong); }
+.ui-choice > button.active .sl-depth-census { color: var(--accent-strong); }
 .sl-warn { color: var(--amber-ink); }
 
 .sl-metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 0; }
@@ -91,12 +92,6 @@ export const SHAPE_LAB_STYLES = `
 
 .sl-params-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .sl-actions { display: flex; gap: 6px; }
-.sl-actions button {
-  padding: 4px 9px; font-size: 11px; cursor: pointer;
-  border-radius: var(--radius-s, 9px); border: 1px solid var(--line);
-  background: var(--panel); color: inherit;
-}
-.sl-actions button:disabled { opacity: 0.45; cursor: default; }
 .sl-export {
   margin: 0; padding: 7px 9px; font-size: 11px; line-height: 1.5;
   color: var(--muted); background: var(--accent-wash);
@@ -107,26 +102,13 @@ export const SHAPE_LAB_STYLES = `
 .sl-node { display: flex; flex-direction: column; gap: 4px; }
 .sl-node-title { margin: 0; font-size: 12px; font-weight: 600; color: var(--accent-strong); }
 
-.sl-row {
-  display: grid; grid-template-columns: minmax(90px, 1.1fr) minmax(60px, 1.3fr) 74px;
-  align-items: center; gap: 7px; padding: 2px 0;
-}
-.sl-row-label {
-  font-size: 11px; color: var(--muted); overflow: hidden;
-  text-overflow: ellipsis; white-space: nowrap;
-}
-.sl-row-changed .sl-row-label { color: var(--accent-strong); font-weight: 600; }
-.sl-slider { width: 100%; accent-color: var(--accent); }
-.sl-number, .sl-text {
+/* A figure typed past a derived track can be long ("0.00372", "12.3456"). */
+.sl-params .ui-number.is-inline { --ui-number-width: 64px; }
+.sl-text {
   width: 100%; box-sizing: border-box; padding: 3px 5px; font: inherit; font-size: 11px;
   border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: inherit;
-  font-variant-numeric: tabular-nums;
-}
-.sl-seed {
-  padding: 3px 6px; font-size: 11px; cursor: pointer; border-radius: 6px;
-  border: 1px solid var(--line); background: var(--panel); color: inherit;
 }
 .sl-group { border-left: 1px solid var(--line); padding-left: 8px; margin: 3px 0; }
 .sl-group > summary { cursor: pointer; font-size: 11px; color: var(--label); font-weight: 600; }
-.sl-group-body { display: flex; flex-direction: column; padding-top: 3px; }
+.sl-group-body { padding-top: 3px; }
 `;

@@ -2,6 +2,7 @@
 
 import { useEffect } from "react";
 import { useThemeStore, type ThemePreference } from "../lib/core/stores/theme-store";
+import { Choice } from "./ui";
 
 /**
  * System, light, dark — in that order, because the default is first.
@@ -23,20 +24,14 @@ export function ThemeSwitch() {
 
   useEffect(() => hydrateTheme(), [hydrateTheme]);
 
-  return (
-    <div className="theme-switch" role="group" aria-label="Colour theme">
-      {THEMES.map(({ id, label, icon }) => (
-        <button
-          key={id}
-          type="button"
-          title={label}
-          aria-label={label}
-          aria-pressed={theme === id}
-          onClick={() => setTheme(id)}
-        >
-          <svg viewBox="0 0 16 16" aria-hidden="true">{icon}</svg>
-        </button>
-      ))}
-    </div>
-  );
+  return <Choice
+    className="theme-switch"
+    ariaLabel="Colour theme"
+    value={theme}
+    options={THEMES.map(({ id, label, icon }) => ({
+      value: id, hint: label, ariaLabel: label,
+      label: <svg viewBox="0 0 16 16" aria-hidden="true">{icon}</svg>,
+    }))}
+    onChange={setTheme}
+  />;
 }

@@ -30,13 +30,13 @@ import {
   ToolstripMenuButton,
   ToolstripMenuItem,
   ToolstripMoreRow,
-  ToolstripNumber,
   ToolstripRow,
   ToolstripRule,
   ToolstripTitle,
   useToolstripSection,
 } from "./toolstrip";
 import { useSession } from "../lib/core/session/session-context";
+import { NumberInput } from "./ui";
 
 /**
  * The tank's three extents, laid along one line beside its mark.
@@ -53,7 +53,7 @@ import { useSession } from "../lib/core/session/session-context";
  * looks like one invites the click it will not answer.
  *
  * Every commit is a history entry and a re-seed of the solver, which is why
- * `ToolstripNumber` writes on Enter or on leaving the field rather than per
+ * `NumberInput` writes on Enter or on leaving the field rather than per
  * keystroke.
  */
 function TankRow() {
@@ -79,7 +79,7 @@ function TankRow() {
           x-positions read as three unrelated widgets. */}
       <span className="toolstrip-gutter" aria-hidden />
       <div className="toolstrip-dimensions">
-        {fields.map((field) => <ToolstripNumber
+        {fields.map((field) => <NumberInput
           key={field.id}
           tag={field.tag}
           value={field.value}
@@ -87,7 +87,7 @@ function TankRow() {
           min={field.min}
           max={field.max}
           ariaLabel={`Tank ${field.label}`}
-          onCommit={(value) => commit(field, value)}
+          onChange={(value) => commit(field, value)}
         />)}
         <span>{fields[0]?.unit}</span>
       </div>

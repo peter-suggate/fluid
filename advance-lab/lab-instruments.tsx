@@ -1,11 +1,8 @@
 "use client";
 
 import type { FeatureControlViewProps } from "../lib/framework/ui/slot";
-import {
-  ToolstripChoice,
-  ToolstripNumber,
-  ToolstripRow,
-} from "../components/toolstrip";
+import { ToolstripRow } from "../components/toolstrip";
+import { Choice, NumberInput, Select } from "../components/ui";
 import {
   FieldOverlayRows, FieldViewRows,
 } from "../lib/features/field-view/ui";
@@ -164,15 +161,11 @@ export function LabSurfaceRow({ control }: FeatureControlViewProps) {
     testId="slice-surface-row"
     after={<>
       <span className="toolstrip-gutter" aria-hidden />
-      <ToolstripChoice
+      <Choice
         ariaLabel="Which surface the picture reconstructs"
         value={typeof surface.value === "string" ? surface.value : ""}
-        options={options.map((option) => ({
-          value: option.value,
-          label: option.label,
-          title: option.hint,
-          disabled: imposed,
-        }))}
+        options={options}
+        disabled={imposed}
         onChange={(value) => surface.set(value as AdvanceSurfaceViewId)}
       />
     </>}
@@ -185,8 +178,8 @@ export function LabSurfaceRow({ control }: FeatureControlViewProps) {
  * The pressure budget, as a number found by sliding it and watching.
  *
  * Its range is the declaration's — `min`, `max` and `step` on the control —
- * which is what keeps the clamp here and the bound a host enforces from being
- * two numbers.
+ * which is what keeps the field's clamp and the bound a host enforces from
+ * being two numbers. An iteration count is whole, so the entry is rounded too.
  */
 export function LabBudgetRow({ control }: FeatureControlViewProps) {
   const budget = useParam(ADVANCE_SLICE_SETTINGS.budget);
@@ -202,14 +195,13 @@ export function LabBudgetRow({ control }: FeatureControlViewProps) {
     after={<>
       <span className="toolstrip-gutter" aria-hidden />
       <div className="toolstrip-dimensions">
-        <ToolstripNumber
+        <NumberInput
           value={iterations}
           step={control.step ?? ADVANCE_PRESSURE_BUDGET_RANGE.step}
           min={minimum}
           max={maximum}
           ariaLabel="Pressure iterations one advance may spend"
-          onCommit={(next) => budget.set(
-            Math.max(minimum, Math.min(maximum, Math.round(next))))}
+          onChange={(next) => budget.set(Math.round(next))}
         />
       </div>
     </>}
@@ -236,18 +228,15 @@ export function LabTransportRow({ control }: FeatureControlViewProps) {
   const transport = useParam(ADVANCE_SLICE_SETTINGS.transport);
   return <>
     <label htmlFor="advance-transport">{control.label}</label>
-    <select id="advance-transport" data-testid="advance-transport"
+    <Select id="advance-transport" testId="advance-transport"
       value={typeof transport.value === "string"
         ? transport.value : ADVANCE_TRANSPORT_EXPERIMENT_ORDER[0]}
-      title={control.hint}
-      onChange={(event) => transport.set(event.target.value)}>
-      {(control.options ?? ADVANCE_TRANSPORT_EXPERIMENT_ORDER.map((id) => ({
+      hint={control.hint}
+      options={control.options ?? ADVANCE_TRANSPORT_EXPERIMENT_ORDER.map((id) => ({
         value: id, label: ADVANCE_TRANSPORT_EXPERIMENTS[id].label,
         hint: ADVANCE_TRANSPORT_EXPERIMENTS[id].hint,
-      }))).map((option) =>
-        <option key={option.value} value={option.value} title={option.hint}>
-          {option.label}</option>)}
-    </select>
+      }))}
+      onChange={(value) => transport.set(value)} />
   </>;
 }
 

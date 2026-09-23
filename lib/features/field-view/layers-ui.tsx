@@ -3,9 +3,9 @@
 import { useState } from "react";
 import { Eye } from "lucide-react";
 import {
-  ToolstripRow, ToolstripMenuButton, ToolstripMenuItem,
-  ToolstripChoice, ToolstripScrub, useToolstripSection,
+  ToolstripRow, ToolstripMenuButton, ToolstripMenuItem, useToolstripSection,
 } from "../../../components/toolstrip";
+import { Choice, ControlRow, Slider, Value } from "../../../components/ui";
 import {
   VISUAL_LAYERS, layerOpacity, toggleVisualLayer, type VisualLayerState,
 } from "../../core/visual-layers";
@@ -45,15 +45,17 @@ export function VisualLayerRows({ state, onChange, plane, hidePages }: VisualLay
           onClick={() => onChange(toggleVisualLayer(state, layer.id))}
           testId={`visual-layer-${layer.id}`}
         />
-        {selected && <ToolstripScrub
-          min={0} max={1} step={0.05}
-          value={layerOpacity(state, layer.id)}
-          ariaLabel={`${layer.label} opacity`}
-          readout={`${Math.round(layerOpacity(state, layer.id) * 100)}%`}
-          onChange={value => onChange({
-            ...state, opacity: { ...state.opacity, [layer.id]: value },
-          })}
-        />}
+        {selected && <ControlRow>
+          <Slider
+            min={0} max={1} step={0.05}
+            value={layerOpacity(state, layer.id)}
+            ariaLabel={`${layer.label} opacity`}
+            onInput={value => onChange({
+              ...state, opacity: { ...state.opacity, [layer.id]: value },
+            })}
+          />
+          <Value value={`${Math.round(layerOpacity(state, layer.id) * 100)}%`} />
+        </ControlRow>}
       </div>;
     })}
   </ToolstripMenuButton>;
@@ -77,21 +79,21 @@ export function VisualLayerRows({ state, onChange, plane, hidePages }: VisualLay
       <span style={{ color: "#9475c2" }}>● Resident</span>
     </span>}
     {plane && state.visible && <>
-      <ToolstripChoice
+      <Choice<"x" | "y" | "z">
         ariaLabel="Field view plane"
-        value={plane.axis === "off" || plane.axis === "volume" ? "z" : plane.axis}
+        value={plane.axis === "off" || plane.axis === "volume" ? "z" : plane.axis as "x" | "y" | "z"}
         options={[
           { value: "x", label: "X" }, { value: "y", label: "Y" }, { value: "z", label: "Z" },
         ]}
-        onChange={value => plane.setAxis(value as "x" | "y" | "z")}
+        onChange={plane.setAxis}
       />
-      <ToolstripScrub
+      <Slider
         min={0} max={1} step={0.005}
         value={plane.slice}
         ariaLabel="Field slice"
-        readout={`${Math.round(plane.slice * 100)}%`}
-        onChange={plane.setSlice}
+        onInput={plane.setSlice}
       />
+      <Value value={`${Math.round(plane.slice * 100)}%`} />
     </>}
   </ToolstripRow>;
 }

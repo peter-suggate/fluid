@@ -2,17 +2,16 @@
 import { Snowflake } from "lucide-react";
 import { useSession } from "../../core/session/session-context";
 import { ToolstripRow } from "../../../components/toolstrip";
+import { ToggleButton } from "../../../components/ui";
 import { topologyFreezeFeature } from "./definition";
 export function TopologyFreezeButton() {
   const session = useSession();
   const frozen = session.runtime(state => state.topologyFrozen);
   const setFrozen = session.runtime(state => state.setTopologyFrozen);
   const control = topologyFreezeFeature.controls[0];
-  return <div className="toolstrip-choice"><button type="button" className={frozen ? "active" : ""}
-    style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
-    aria-label={control.label} aria-pressed={frozen} data-testid="freeze-topology-toggle"
-    title={`${control.hint}${frozen ? " Click to resume adaptivity." : ""}`}
-    onClick={() => setFrozen(!frozen)}><Snowflake width={13} height={13} />{frozen ? "Frozen" : "Freeze"}</button></div>;
+  return <ToggleButton pressed={frozen} onChange={setFrozen} ariaLabel={control.label}
+    hint={`${control.hint}${frozen ? " Click to resume adaptivity." : ""}`} testId="freeze-topology-toggle"
+  ><Snowflake width={13} height={13} />{frozen ? "Frozen" : "Freeze"}</ToggleButton>;
 }
 
 export function TopologyFreezeRow() {

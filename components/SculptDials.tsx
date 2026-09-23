@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { ToolstripRow, ToolstripScrub, useToolstripSection } from "./toolstrip";
+import { Slider } from "./ui";
+import { ToolstripRow, useToolstripSection } from "./toolstrip";
 
 /**
  * The sculpting dials — canopy, stone, coping — as rows on the strip at the
@@ -16,7 +17,9 @@ import { ToolstripRow, ToolstripScrub, useToolstripSection } from "./toolstrip";
  * A held slider is one gesture: the document is patched live for preview — a
  * scenery edit revoxelizes only its own dirty region — while the caller's
  * `beginEdit`/`commitEdit` bracket the drag so undo gets one entry per
- * adjustment rather than one per pointer-move.
+ * adjustment rather than one per pointer-move. The slider's `onGestureEnd`
+ * closes that bracket however the gesture ends, including a drag brought back
+ * to where it started, which commits no value but did open an edit.
  */
 export function SculptDialRows<Id extends string>({
   dials,
@@ -50,7 +53,7 @@ export function SculptDialRows<Id extends string>({
       testId={`${testPrefix}-${dial.id}`}
       onClick={() => toggle(dial.id)}
     >
-      {open === dial.id && <ToolstripScrub
+      {open === dial.id && <Slider
         min={0}
         max={1}
         step={0.01}
@@ -58,8 +61,8 @@ export function SculptDialRows<Id extends string>({
         // No readout: the row's own value is this number, live, and two copies
         // of one percentage a centimetre apart is noise.
         ariaLabel={dial.hint}
-        onChange={(value) => onSet(dial.id, value)}
-        onCommit={onEndGesture}
+        onInput={(value) => onSet(dial.id, value)}
+        onGestureEnd={onEndGesture}
       />}
     </ToolstripRow>)}
   </>;

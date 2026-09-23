@@ -7,7 +7,7 @@ import { renderFilteredDetailControls,renderPrimaryTraversalControls,renderSeamC
 import { renderGiCompositionControls,renderReducedShadeControls } from "../features/radiance/controls";
 
 import { useEffect,useMemo,useState,type ReactNode } from "react";
-import { PipeToggle } from "../../../components/PipeControls";
+import { Button, Choice, Switch } from "../../../components/ui";
 import {
 PipelineGraph,
 formatPipelineDuration,
@@ -419,7 +419,7 @@ export function RenderPipelineOverlay() {
           : lightingVisibilityStatus.state === "exact" ? "SVO exact" : "SVO direct"
         : effectiveRendererStatus.state === "not-required" ? "SVO not required"
         : effectiveRendererStatus.state === "pending" ? "SVO pending" : "SVO failed closed"}</strong>
-      <PipeToggle label="Live" checked={liveTiming} onChange={setLiveTiming}
+      <Switch label="Live" checked={liveTiming} onChange={setLiveTiming}
         hint={`Samples the renderer while this panel is open. Measurement stops when this is off or the panel closes.\n\n${timingHint}`} />
       <code data-testid="render-frame-cost" title={timingHint}>{timingLabel}</code>
       {effectiveRendererStatus.terminalCounts && <code data-testid="svo-terminal-counts"
@@ -438,30 +438,31 @@ export function RenderPipelineOverlay() {
         rather than inside a node that can be collapsed over it. */}
     <div className="render-preset-strip" role="group" aria-label="Render performance profile">
       <span>Profile</span>
-      {(Object.keys(SVO_RENDER_QUALITY_PRESETS) as SvoRenderQualityPreset[]).map((preset) =>
-        <button key={preset} type="button" className={activePreset === preset ? "active" : ""} onClick={() => {
+      <Choice value={activePreset ?? ""} ariaLabel="Render performance profile"
+        options={(Object.keys(SVO_RENDER_QUALITY_PRESETS) as SvoRenderQualityPreset[]).map((preset) => ({ value: preset, label: preset }))}
+        onChange={(preset) => {
+          if (!preset) return;
           // One click, both halves. The visibility mode has its own buttons on
           // the cone node and stays reachable there; what this strip guarantees
           // is that a named rung is never half-applied.
           setTuning(SVO_RENDER_QUALITY_PRESETS[preset].tuning);
           setSvoConeTracingMode(SVO_RENDER_QUALITY_PRESETS[preset].coneTracingMode);
-        }}>{preset}</button>)}
+        }} />
       {!activePreset && <output>custom</output>}
       {/* A withheld stage is easy to forget and looks like a bug from the
           viewport, so the count is always visible once there is one and the way
           back is one click from where it is stated. */}
-      {disabledRenderStages.length > 0 && <button type="button" className="render-withheld-reset"
-        data-testid="withheld-stage-count"
-        title={`Withheld from the encode:\n${disabledRenderStages.map((stage) => `· ${stage.replace(/-/g, " ")}`).join("\n")}\n\nRestore all of them.`}
+      {disabledRenderStages.length > 0 && <Button className="render-withheld-reset" testId="withheld-stage-count"
+        hint={`Withheld from the encode:\n${disabledRenderStages.map((stage) => `· ${stage.replace(/-/g, " ")}`).join("\n")}\n\nRestore all of them.`}
         onClick={() => { for (const stage of disabledRenderStages) setRenderStageDisabled(stage, false); }}>
         {disabledRenderStages.length} withheld ↺
-      </button>}
+      </Button>}
     </div>
 
     <div className="render-frame-options" role="group" aria-label="Frame surface options">
       <SvoFeatureSlot slot="frame.options" />
       <span>Surface</span>
-      <PipeToggle label="Smooth surface" checked={smoothSurfaceEnabled}
+      <Switch label="Smooth surface" checked={smoothSurfaceEnabled}
         onChange={(enabled) => patchScene({ surfaceStyle: enabled ? "smooth" : "voxel-flat" })}
         hint="Reconstruct a sub-voxel tangent surface from each cell's coverage and baked normal, changing both surface depth and orientation. Off draws the entered axis-aligned voxel face." />
     </div>

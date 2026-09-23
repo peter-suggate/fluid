@@ -5,6 +5,7 @@ import { useSession } from "../lib/core/session/session-context";
 import { useDisplayScene } from "../lib/core/stores/scene-draft-store";
 import { sceneScaleOption, sceneScaleSummary, type SceneScaleAxis, type SceneScaleFactor } from "../lib/core/scene-scale";
 import { fluidBodyBox, fluidWaterVolume_m3 } from "../lib/core/editor-fluid-body";
+import { Stepper } from "./ui";
 
 /**
  * Scale and water-volume controls, over the scene rather than inside the
@@ -28,16 +29,19 @@ import { fluidBodyBox, fluidWaterVolume_m3 } from "../lib/core/editor-fluid-body
 const AXES: ReadonlyArray<{
   axis: SceneScaleAxis;
   label: string;
+  name: string;
   hint: string;
 }> = [
   {
     axis: "world",
     label: "WORLD",
+    name: "World scale",
     hint: "Container extents, fluid, and cell size together — lattice dimensions hold and the live solver re-seeds at the new metre scale.",
   },
   {
     axis: "detail",
     label: "DETAIL",
+    name: "Detail scale",
     hint: "Cell size at a fixed world size — eight times the cells per step, so the arenas are rebuilt. Pipelines are cached, so no shaders recompile.",
   },
 ];
@@ -61,55 +65,56 @@ export function SceneScaleOverlay() {
   const [nx, ny, nz] = summary.dimensions;
   if (!shapeMode) return null;
 
-  const step = (axis: SceneScaleAxis, factor: SceneScaleFactor) => {
+  // Each row is a stepper on the scale *relative to now*: 1 is the scene as it
+  // stands, one press is ÷2 or ×2, and an end is closed exactly when that step
+  // is unavailable — so the value a press lands on is the factor to apply.
+  const stepFor = (axis: SceneScaleAxis, factor: SceneScaleFactor) => {
     const option = sceneScaleOption(summary, axis, factor);
     const [ax, ay, az] = option.dimensions;
-    return (
-      <button
-        key={`${axis}-${factor}`}
-        type="button"
-        disabled={!option.available}
-        data-testid={`scene-scale-${axis}-${factor === 2 ? "up" : "down"}`}
-        title={option.available
-          ? `${factor === 2 ? "Double" : "Halve"} the ${axis === "world" ? "world and fluid size" : "cell size"} · ${ax}×${ay}×${az} cells`
-          : `Unavailable — ${option.blocked}`}
-        onClick={() => simulation.scaleScene(axis, factor, session.id)}
-      >{factor === 2 ? "×2" : "÷2"}</button>
-    );
+    return {
+      available: option.available,
+      hint: option.available
+        ? `${factor === 2 ? "Double" : "Halve"} the ${axis === "world" ? "world and fluid size" : "cell size"} · ${ax}×${ay}×${az} cells`
+        : `Unavailable — ${option.blocked}`,
+    };
   };
 
   return (
     <div className="scene-scale-overlay" data-testid="scene-scale-overlay">
-      {AXES.map((entry) => (
-        <div className="scene-scale-row" key={entry.axis} title={entry.hint}>
+      {AXES.map((entry) => {
+        const down = stepFor(entry.axis, 0.5);
+        const up = stepFor(entry.axis, 2);
+        return <div className="scene-scale-row" key={entry.axis} title={entry.hint}>
           <span className="scene-scale-label">{entry.label}</span>
-          {step(entry.axis, 0.5)}
-          <output>{entry.axis === "world"
-            ? summary.extents_m.map((extent) => extent.toFixed(2)).join(" × ")
-            : `${nx}×${ny}×${nz}`}</output>
-          {step(entry.axis, 2)}
-        </div>
-      ))}
+          <Stepper
+            value={1} factor={2}
+            min={down.available ? 0.5 : 1} max={up.available ? 2 : 1}
+            onChange={(factor) => simulation.scaleScene(entry.axis, factor as SceneScaleFactor, session.id)}
+            ariaLabel={entry.name}
+            readout={entry.axis === "world"
+              ? summary.extents_m.map((extent) => extent.toFixed(2)).join(" × ")
+              : `${nx}×${ny}×${nz}`}
+            decreaseLabel="÷2" increaseLabel="×2"
+            decreaseHint={down.hint} increaseHint={up.hint}
+            decreaseTestId={`scene-scale-${entry.axis}-down`} increaseTestId={`scene-scale-${entry.axis}-up`}
+          />
+        </div>;
+      })}
       {fluidEnabled && <div
         className="scene-scale-row"
         title="Grow or shrink the initial water body about its own centre. Drag the box handles in the scene to reshape it instead."
       >
         <span className="scene-scale-label">WATER</span>
-        <button
-          type="button"
-          disabled={!body}
-          data-testid="fluid-body-shrink"
-          title="Halve the water body"
-          onClick={() => simulation.scaleFluidBody(0.5, session.id)}
-        >÷2</button>
-        <output>{water_m3 > 0 ? `${(water_m3 * 1000).toFixed(1)} L` : "none"}</output>
-        <button
-          type="button"
-          disabled={!body}
-          data-testid="fluid-body-grow"
-          title="Double the water body"
-          onClick={() => simulation.scaleFluidBody(2, session.id)}
-        >×2</button>
+        <Stepper
+          value={1} factor={2}
+          min={body ? 0.5 : 1} max={body ? 2 : 1}
+          onChange={(factor) => simulation.scaleFluidBody(factor, session.id)}
+          ariaLabel="Water body scale"
+          readout={water_m3 > 0 ? `${(water_m3 * 1000).toFixed(1)} L` : "none"}
+          decreaseLabel="÷2" increaseLabel="×2"
+          decreaseHint="Halve the water body" increaseHint="Double the water body"
+          decreaseTestId="fluid-body-shrink" increaseTestId="fluid-body-grow"
+        />
       </div>}
     </div>
   );

@@ -21,6 +21,7 @@ import { liquidWedge, liquidBallWedge } from "../lib/features/liquid-drop/ring";
 import { rigidPlacementWedge } from "../lib/features/rigid-placement/ring";
 import { entityDeleteWedge } from "../lib/core/editor-entity-wedges";
 import { ViewportModeToggle } from "../components/ViewportModeToggle";
+import { Choice, Facts, NumberInput, Select, Switch } from "../components/ui";
 import { DockedToolstrip } from "../components/toolstrip";
 import { LiquidDropRow } from "../lib/features/liquid-drop/ui";
 import { RigidDropRow } from "../lib/features/rigid-placement/ui";
@@ -53,6 +54,14 @@ import base from "./AdvanceLab.module.css";
 import css from "./UniformLab.module.css";
 
 const stages = UNIFORM_VOLUME_PIPELINE.stages;
+const STAGE_OPTIONS = stages.map((s) => ({ value: s.id, label: s.label }));
+const STEP_OPTIONS = STEP_SIZES.map((step) => ({ value: String(step.dt), label: step.label }));
+const SURFACE_OPTIONS: readonly { readonly value: SurfaceExperiment; readonly label: string }[] = [
+  { value: "off", label: "Baseline" },
+  { value: "regional", label: "Smooth regional correction" },
+  { value: "regional-area", label: "Regional + total area" },
+  { value: "area-only", label: "Total area (default)" },
+];
 interface Camera {
   zoom: number;
   x: number;
@@ -574,20 +583,13 @@ function UniformRun({ session }: { session: PaneSession }) {
         />
         <label>
           Δt{" "}
-          <select
-            aria-label="Step size"
-            value={dt}
-            onChange={(e) => store.setState({ dt: Number(e.target.value) })}
-          >
-            {!STEP_SIZES.some((step) => step.dt === dt) && (
-              <option value={dt}>{dt.toPrecision(4)} s</option>
-            )}
-            {STEP_SIZES.map((step) => (
-              <option key={step.dt} value={step.dt}>
-                {step.label}
-              </option>
-            ))}
-          </select>
+          <Select
+            ariaLabel="Step size"
+            value={String(dt)}
+            options={STEP_OPTIONS}
+            customLabel={`${dt.toPrecision(4)} s`}
+            onChange={(value) => store.setState({ dt: Number(value) })}
+          />
         </label>
         <div className={css.playback}>
           <button
@@ -940,16 +942,12 @@ function UniformRun({ session }: { session: PaneSession }) {
           <p className={css.muted}>Shared 3D defaults · whole-domain solve</p>
           <label>
             Slice depth (m)
-            <input type="number" aria-label="Slice depth (m)"
+            <NumberInput ariaLabel="Slice depth (m)"
               min={-scene.container.depth_m / 2} max={scene.container.depth_m / 2}
               step={scene.container.depth_m / nz}
-              key={`${sceneId}:${sliceDepth_m}`}
-              defaultValue={sliceDepth_m ?? Number(slice.z_m.toFixed(6))}
+              value={sliceDepth_m ?? slice.z_m}
               disabled={loading}
-              onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }}
-              onBlur={(event) => {
-                const value = event.currentTarget.valueAsNumber;
-                if (!Number.isFinite(value) || value === sliceDepth_m) return;
+              onChange={(value) => {
                 setPlaying(false);
                 beginLoad();
                 store.setState({ sliceDepth_m: value });
@@ -958,72 +956,63 @@ function UniformRun({ session }: { session: PaneSession }) {
           <p className={css.muted}>Changing depth restarts the run. Scenery blocks water; rigid bodies and the nozzle retain their XY projection.</p>
           <label>
             2D surface correction
-            <select
-              aria-label="2D surface correction"
+            <Select
+              ariaLabel="2D surface correction"
               value={surfaceExperiment}
+              options={SURFACE_OPTIONS}
               disabled={loading}
-              onChange={(event) => {
+              onChange={(value) => {
                 setPlaying(false);
                 beginLoad();
-                store.setState({ surfaceExperiment: event.target.value as SurfaceExperiment });
+                store.setState({ surfaceExperiment: value });
               }}
-            >
-              <option value="off">Baseline</option>
-              <option value="regional">Smooth regional correction</option>
-              <option value="regional-area">Regional + total area</option>
-              <option value="area-only">Total area (default)</option>
-            </select>
+            />
           </label>
           <p className={css.muted}>
             {surfaceExperiment === "off" ? "Original surface advection." : surfaceExperiment === "area-only" ? "Bounded surface shift to match total V." : "Smooth displacements of the advected surface from regional V/phi error."}
             {surfaceExperiment === "regional-area" ? " Includes a total-area constraint." : ""}
             {" "}Changing the correction resets and pauses the scene.
           </p>
-          <label>
-            <input
-              type="checkbox"
-              aria-label="Surface-deficit balancing"
+          <div className={css.option}>
+            <Switch
+              ariaLabel="Surface-deficit balancing"
+              label="Surface-deficit balancing (2D experiment)"
               checked={surfaceDeficitBalancing}
               disabled={loading}
-              onChange={(event) => {
+              onChange={(checked) => {
                 setPlaying(false);
                 beginLoad();
-                store.setState({ surfaceDeficitBalancing: event.target.checked });
+                store.setState({ surfaceDeficitBalancing: checked });
               }}
-            />{" "}
-            Surface-deficit balancing (2D experiment)
-          </label>
+            />
+          </div>
           <p className={css.muted}>
             Preserves overfill expansion and balances it with contraction in underfilled liquid to reduce persistent sloshing.
             {" "}Changing this resets and pauses the scene.
           </p>
-          <dl>
-            <dt>Liquid area</dt>
-            <dd>
-              {view
-                ? (total * view.cellSize[0] * view.cellSize[1]).toFixed(5)
-                : "—"}{" "}
-              m²
-            </dd>
-            <dt>Volume change</dt>
-            <dd>{initial ? ((total / initial - 1) * 100).toFixed(5) : "0"}%</dd>
-            <dt>Surface / V area</dt>
-            <dd data-testid="uniform-surface-ratio">{view?.revision.frame && total ? ((surfaceStats?.contourArea ?? 0) / total * 100).toFixed(2) + "%" : "—"}</dd>
-            <dt>V/phi mismatch</dt>
-            <dd title="Sum of cellwise absolute V minus surface occupancy, divided by total V.">{view?.revision.frame && total ? ((surfaceStats?.contourL1 ?? 0) / total * 100).toFixed(2) + "%" : "—"}</dd>
-            <dt>Pressure residual</dt>
-            <dd>
-              {view?.revision.frame
-                ? pressure?.residual?.toExponential(2)
-                : "—"}
-            </dd>
-            <dt>Pressure cycles</dt>
-            <dd>
-              {view?.revision.frame
+          <Facts className={css.facts} items={[
+            {
+              label: "Liquid area",
+              value: `${view ? (total * view.cellSize[0] * view.cellSize[1]).toFixed(5) : "—"} m²`,
+            },
+            { label: "Volume change", value: `${initial ? ((total / initial - 1) * 100).toFixed(5) : "0"}%` },
+            {
+              label: "Surface / V area",
+              value: <span data-testid="uniform-surface-ratio">{view?.revision.frame && total ? ((surfaceStats?.contourArea ?? 0) / total * 100).toFixed(2) + "%" : "—"}</span>,
+            },
+            {
+              label: "V/phi mismatch",
+              hint: "Sum of cellwise absolute V minus surface occupancy, divided by total V.",
+              value: view?.revision.frame && total ? ((surfaceStats?.contourL1 ?? 0) / total * 100).toFixed(2) + "%" : "—",
+            },
+            { label: "Pressure residual", value: view?.revision.frame ? pressure?.residual?.toExponential(2) : "—" },
+            {
+              label: "Pressure cycles",
+              value: view?.revision.frame
                 ? `${pressure?.cycles ?? 0} · ${pressure?.converged ? "converged" : "budget reached"}`
-                : "—"}
-            </dd>
-          </dl>
+                : "—",
+            },
+          ]} />
           {mode === "interact" && (
             <DockedToolstrip ariaLabel="Scene tools" testId="uniform-toolstrip">
               <LiquidDropRow />
@@ -1035,35 +1024,24 @@ function UniformRun({ session }: { session: PaneSession }) {
             Field views show the last completed advance. Stage descriptions and
             defaults are shared with 3D.
           </p>
-          <nav className={css.stages} aria-label="Uniform stages">
-            {stages.map((s) => (
-              <button
-                key={s.id}
-                aria-pressed={s.id === stageId}
-                onClick={() => setStageId(s.id)}
-              >
-                {s.label}
-              </button>
-            ))}
-          </nav>
+          <Choice
+            className={css.stages}
+            ariaLabel="Uniform stages"
+            value={stageId}
+            options={STAGE_OPTIONS}
+            onChange={setStageId}
+          />
           <details open key={stageId}>
             <summary>{stage.label}</summary>
             <p>{stage.tip.summary}</p>
             {parameters.length > 0 && (
-              <dl>
-                {parameters.map((p) => (
-                  <div key={p.key}>
-                    <dt title={p.hint}>{p.label}</dt>
-                    <dd>
-                      {p.kind === "select"
-                        ? p.options.find(
-                            (o) => o.value === UNIFORM_LAB_VALUES[p.key],
-                          )?.label
-                        : `${UNIFORM_LAB_VALUES[p.key]} ${p.unit ?? ""}`}
-                    </dd>
-                  </div>
-                ))}
-              </dl>
+              <Facts className={css.facts} items={parameters.map((p) => ({
+                label: p.label,
+                hint: p.hint,
+                value: p.kind === "select"
+                  ? p.options.find((o) => o.value === UNIFORM_LAB_VALUES[p.key])?.label
+                  : `${UNIFORM_LAB_VALUES[p.key]} ${p.unit ?? ""}`,
+              }))} />
             )}
           </details>
           {probe !== undefined && view && (
@@ -1072,22 +1050,18 @@ function UniformRun({ session }: { session: PaneSession }) {
                 Cell {probe % view.nx}, {Math.floor(probe / view.nx)}
                 {pinned ? " · pinned" : ""}
               </h2>
-              <dl>
-                <dt>V / capacity</dt>
-                <dd>
-                  {view.volume[probe]!.toFixed(5)} /{" "}
-                  {view.capacity[probe]!.toFixed(3)}
-                </dd>
-                <dt>Pressure</dt>
-                <dd>{view.pressure[probe]!.toPrecision(5)} Pa</dd>
-                <dt>+X / +Y velocity</dt>
-                <dd>
-                  {view.velocity[2 * probe]!.toFixed(4)} /{" "}
-                  {view.velocity[2 * probe + 1]!.toFixed(4)} m/s
-                </dd>
-                <dt>Release mask</dt>
-                <dd>{view.released[probe]}</dd>
-              </dl>
+              <Facts className={css.facts} items={[
+                {
+                  label: "V / capacity",
+                  value: `${view.volume[probe]!.toFixed(5)} / ${view.capacity[probe]!.toFixed(3)}`,
+                },
+                { label: "Pressure", value: `${view.pressure[probe]!.toPrecision(5)} Pa` },
+                {
+                  label: "+X / +Y velocity",
+                  value: `${view.velocity[2 * probe]!.toFixed(4)} / ${view.velocity[2 * probe + 1]!.toFixed(4)} m/s`,
+                },
+                { label: "Release mask", value: view.released[probe] },
+              ]} />
             </section>
           )}
           {layers.visible && layers.enabled.includes("tiles") && (

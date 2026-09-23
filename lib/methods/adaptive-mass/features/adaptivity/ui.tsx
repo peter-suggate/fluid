@@ -6,8 +6,9 @@ import { ADAPTIVITY_PARAMS, ADAPTIVITY_MODES, adaptivityPrimaryControls, adaptiv
 import { useSession } from "../../../../core/session/session-context";
 import { resolvedMethodValues } from "../../../../core/stores/method-store";
 import { simulation } from "../../../../core/simulation/controller";
-import { ToolstripMenuButton, ToolstripMenuItem, ToolstripNumber, ToolstripRow,
+import { ToolstripMenuButton, ToolstripMenuItem, ToolstripRow,
   useToolstripSection } from "../../../../../components/toolstrip";
+import { NumberInput, Select } from "../../../../../components/ui";
 
 /** The criterion and its primary live dials belong beside the solver. */
 export function AdaptiveMassToolstripRow() {
@@ -42,10 +43,10 @@ export function AdaptiveMassToolstripRow() {
         {primary.map(({ key, tag }) => {
           const spec = ADAPTIVITY_PARAMS.find(param => param.key === key);
           if (spec?.kind !== "number") return null;
-          return <ToolstripNumber key={key} tag={tag} value={Number(values[key])}
+          return <NumberInput key={key} tag={tag} value={Number(values[key])}
             min={spec.min} max={spec.max} step={spec.step ?? 0.01}
             ariaLabel={`${spec.label}${spec.unit ? ` (${spec.unit})` : ""}`}
-            onCommit={value => simulation.setMethodParam("adaptive-mass", key, value, session.id)} />;
+            onChange={value => simulation.setMethodParam("adaptive-mass", key, value, session.id)} />;
         })}
       </div>
     </>}
@@ -63,11 +64,10 @@ export function AdaptiveMassControlRow({control}: {control: import("../../../../
   const commit = (value: string | number) => simulation.setMethodParam("adaptive-mass", key, value, session.id);
   return <label className="toolstrip-row" title={control.hint}>
     <span>{control.label}</span>
-    {control.kind === "choice" ? <select aria-label={control.label} value={String(values[key])}
-      onChange={event => commit(event.currentTarget.value)}>
-      {control.options?.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
-    </select> : <ToolstripNumber tag={control.unit ?? ""} value={Number(values[key])}
-      min={control.min} max={control.max} step={control.step ?? 0.01}
-      ariaLabel={control.label} onCommit={commit} />}
+    {control.kind === "choice" ? <Select ariaLabel={control.label} value={String(values[key])}
+      options={control.options ?? []} onChange={commit} />
+      : <NumberInput unit={control.unit} value={Number(values[key])}
+        min={control.min} max={control.max} step={control.step ?? 0.01}
+        ariaLabel={control.label} onChange={commit} />}
   </label>;
 }

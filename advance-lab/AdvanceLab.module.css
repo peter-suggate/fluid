@@ -9,6 +9,11 @@
    theme as plain colours because `syncPalette` reads them back out and a canvas
    cannot fill with a `light-dark()`. */
 .lab{height:100dvh;display:grid;grid-template-rows:auto minmax(0,1fr);background:var(--bg);color:var(--ink);font-family:var(--sans);overflow:hidden}
+/* The shared controls (`components/ui`) state no size of their own; these are
+   the lab's. The sidebar is an instrument pane, so it is the pipeline card's
+   22px; the bar's are the height of the Play and Step beside them. */
+.lab{--control-height:22px;--control-inline-padding:6px;--control-font-size:var(--size-2)}
+.bar{--control-height:26px;--control-inline-padding:8px;--control-font-size:var(--size-3)}
 
 /* ---- the drawn palette, per theme ----------------------------------- */
 /* Declared on the page, not the canvas: the strip's cost bars and the sidebar's
@@ -90,16 +95,20 @@
 .caveat{flex:none;border:1px solid var(--amber-line);background:var(--amber-wash);color:var(--amber-ink);border-radius:999px;padding:4px 10px;font:var(--text-micro);letter-spacing:var(--track-wide);text-transform:uppercase;cursor:pointer}
 .caveat:hover{border-color:var(--amber)}
 .transport{display:flex;gap:5px;flex:none;justify-self:center}
-.bar button,.axis button,.mini{border:1px solid var(--line-strong);background:var(--panel-soft);color:var(--muted);cursor:pointer;border-radius:var(--radius-s);font:var(--text-label);padding:6px 11px}
-.bar button:hover,.axis button:hover,.mini:hover{border-color:var(--accent-line);color:var(--ink)}
-.bar button[aria-pressed=true]{background:var(--accent-wash);border-color:var(--accent-line);color:var(--accent-strong)}
-.bar button:disabled{opacity:.45;cursor:not-allowed}
+/* The bar's own buttons. A shared chip, switch or stepper in the bar (the
+   theme switch is a `Choice`) is skinned by `app/ui-controls.css` and is left
+   out; the `:where` adds no weight to the buttons this does match. Play is a
+   `ToggleButton` and is deliberately kept in: it is one of Play, Step, Reset,
+   and the three are one row of one size. */
+.bar button:not(:where(:global(.ui-choice)>button,:global(.ui-switch),:global(.ui-stepper)>button,:global(.ui-reset))),.mini{border:1px solid var(--line-strong);background:var(--panel-soft);color:var(--muted);cursor:pointer;border-radius:var(--radius-s);font:var(--text-label);padding:6px 11px}
+.bar button:not(:where(:global(.ui-choice)>button,:global(.ui-switch),:global(.ui-stepper)>button,:global(.ui-reset))):hover,.mini:hover{border-color:var(--accent-line);color:var(--ink)}
+.bar button[aria-pressed=true]:not(:where(:global(.ui-choice)>button)){background:var(--accent-wash);border-color:var(--accent-line);color:var(--accent-strong)}
+.bar button:not(:where(:global(.ui-choice)>button,:global(.ui-switch),:global(.ui-stepper)>button,:global(.ui-reset))):disabled{opacity:.45;cursor:not-allowed}
 .iters{flex:none;display:flex;align-items:center;gap:8px;font:var(--text-micro);color:var(--dim);text-transform:uppercase;letter-spacing:var(--track-wide)}
-.iters input[type=range]{width:84px;accent-color:var(--accent);height:5px}
 .iters b{color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums;min-width:2ch}
-.iters select{appearance:none;border:1px solid var(--line-strong);background:var(--panel-soft);color:var(--ink);border-radius:var(--radius-s);padding:5px 8px;font:var(--text-label);cursor:pointer}
-.iters select:hover{border-color:var(--accent-line)}
-.iters select:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+/* Δt and the transport arm are shared selects, as wide as their options here
+   rather than as their row; the bar's tokens above give them its height. */
+.iters :global(.ui-select){width:auto}
 .cost{min-width:6ch;text-align:right}
 .themeSlot{flex:none;display:flex;align-items:center}
 
@@ -210,7 +219,8 @@ g[data-selected] .regionBox{fill-opacity:.14;stroke-width:2}
 .tick[aria-pressed=true] .index{color:var(--ink);font-weight:700}
 .tick.dim{opacity:.26}
 .axis{display:flex;justify-content:space-between;align-items:center;margin-top:7px;font:var(--text-micro);color:var(--dim);letter-spacing:var(--track-wide);text-transform:uppercase;gap:10px}
-.axis button{font:var(--text-micro);letter-spacing:var(--track-wide);text-transform:uppercase;padding:3px 8px}
+/* The metric choice speaks in the axis's own voice. */
+.axis :global(.ui-choice)>button{font:var(--text-micro);letter-spacing:var(--track-wide);text-transform:uppercase}
 
 /* ---- sidebar -------------------------------------------------------- */
 /* Three faces behind one row of names. The tabs stay put and only the face

@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useId, useState, type ReactNode } from "react";
 
 /**
  * One instrument, two pipelines.
@@ -122,6 +122,20 @@ export interface PipelineRow {
    * budgets belong in a drawer somebody can predict the contents of.
    */
   readonly controls?: ReactNode;
+  /**
+   * Fold the controls behind the card's name.
+   *
+   * A card that shows every field it owns at all times turns the pipeline into
+   * a form: eleven stages of sliders and status prose bury the one thing the
+   * diagram is for, which is reading the stages in encode order against their
+   * costs. Folded, a card is its head and its chip; the name opens it, and the
+   * summary on the closed card says how much is inside. Opt-in, because a
+   * caller whose cards carry two related sliders is better served open.
+   */
+  readonly fold?: {
+    /** What is inside, read on the closed card: "4 settings · 3 readouts". */
+    readonly summary: string;
+  };
 }
 
 export interface PipelineBand {
@@ -219,8 +233,8 @@ function TapButton({ tap, variant }: { tap: PipelineTap; variant: "head" | "plan
 }
 
 /** Everything under a row's head: its published planes, then its controls. */
-function RowControls({ row }: { row: PipelineRow }) {
-  return <div className="rp-node-controls">
+function RowControls({ row, id }: { row: PipelineRow; id?: string }) {
+  return <div className="rp-node-controls" id={id}>
     {(row.planes?.length ?? 0) > 0 && <div className="rp-planes" role="group"
       aria-label={`${row.label} published planes`}>
       {row.planes?.map((plane) => <TapButton key={plane.label} tap={plane} variant="plane" />)}
@@ -230,16 +244,45 @@ function RowControls({ row }: { row: PipelineRow }) {
 }
 
 /**
+ * Which folded cards are open, per diagram, for the life of the page.
+ *
+ * The overlay unmounts whenever its pane closes; a reader who opened the stage
+ * they are tuning should find it open when they come back, not re-find it among
+ * eleven closed cards. Page-lifetime only: it is a reading position, not a
+ * preference worth persisting.
+ */
+const openCards = new Map<string, Set<string>>();
+
+function useCardOpen(graphId: string, rowId: string): [boolean, () => void] {
+  const [open, setOpen] = useState(() => openCards.get(graphId)?.has(rowId) ?? false);
+  const toggle = () => {
+    const next = !open;
+    const ids = openCards.get(graphId) ?? new Set<string>();
+    if (next) ids.add(rowId); else ids.delete(rowId);
+    openCards.set(graphId, ids);
+    setOpen(next);
+  };
+  return [open, toggle];
+}
+
+/**
  * One card.
  *
- * Nothing folds. The head is one line — lamp, name, tap — and every
- * control the row owns sits under it at all times. The cost is deliberately not
- * here: it reads on the trunk at this row's junction.
+ * The head is one line — lamp, name, tap. A card without `fold` shows every
+ * control it owns under the head at all times; a folded card shows only its chip
+ * until its name is pressed. The cost is deliberately not here: it reads on the
+ * trunk at this row's junction.
  */
-function RowCard({ row }: { row: PipelineRow }) {
+function RowCard({ row, graphId }: { row: PipelineRow; graphId: string }) {
   const { lamp } = row;
   const toggleable = lamp.kind === "switch";
-  return <div className={`rp-node is-${row.state}`} data-node={row.id}>
+  const [open, toggleOpen] = useCardOpen(graphId, row.id);
+  const panelId = useId();
+  const hasControls = Boolean(row.controls) || (row.planes?.length ?? 0) > 0;
+  const folded = Boolean(row.fold) && hasControls;
+  const name = <strong title={row.tip}>{row.label}</strong>;
+  return <div className={`rp-node is-${row.state}${folded ? ` is-foldable${open ? " is-open" : ""}` : ""}`}
+    data-node={row.id}>
     <div className="rp-node-head">
       <button
         type="button"
@@ -251,11 +294,18 @@ function RowCard({ row }: { row: PipelineRow }) {
         title={lamp.title}
         onClick={toggleable ? lamp.onToggle : undefined}
       />
-      <strong title={row.tip}>{row.label}</strong>
-      {row.tap && <TapButton tap={row.tap} variant="head" />}
+      {folded
+        ? <button type="button" className="rp-node-disclose" aria-expanded={open} aria-controls={panelId}
+            title={`${open ? "Hide" : "Show"} ${row.fold?.summary}`} onClick={toggleOpen}>
+            {name}
+            {!open && <small>{row.fold?.summary}</small>}
+            <i aria-hidden="true" />
+          </button>
+        : name}
+      {row.tap ? <TapButton tap={row.tap} variant="head" /> : folded && <span className="rp-tap-slot" />}
     </div>
     {row.chip && <small className="rp-node-chip" title={row.tip}>{row.chip}</small>}
-    {(row.controls || (row.planes?.length ?? 0) > 0) && <RowControls row={row} />}
+    {hasControls && (!folded || open) && <RowControls row={row} id={folded ? panelId : undefined} />}
   </div>;
 }
 
@@ -285,7 +335,7 @@ export function PipelineGraph({ bands, testId }: {
       </div>
       {band.rows.map((row) => <div key={row.id} className="rp-row rp-row-node">
         <Trunk tapped state={row.state} cost={row.cost} />
-        <RowCard row={row} />
+        <RowCard row={row} graphId={testId} />
       </div>)}
     </div>)}
     <div className="rp-row rp-row-cap"><Trunk cap="end" /><div className="rp-slot" /></div>

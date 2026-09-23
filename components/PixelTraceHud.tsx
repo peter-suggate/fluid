@@ -17,6 +17,7 @@ import {
   type SvoPixelTraceLayer,
 } from "../lib/svo/features/diagnostics/svo-pixel-trace";
 import type { PixelTraceStatus } from "../lib/core/webgpu-renderer";
+import { ToggleButton } from "./ui";
 
 interface PixelTraceHudProps {
   readonly trace: SvoPixelTrace | undefined;
@@ -128,14 +129,13 @@ export function PixelTraceHud({
           <h3>{trace ? `pixel ${trace.pixel[0]}, ${trace.pixel[1]}` : blocked?.headline ?? "no trace"}</h3>
         </div>
         <div className="pixel-trace-actions">
-          <button
-            type="button"
-            aria-pressed={pinned}
-            onClick={onTogglePinned}
-            title={pinned ? "Follow the pointer again" : "Freeze this ray and orbit around it — clicking the viewport does the same"}
+          <ToggleButton
+            pressed={pinned}
+            onChange={onTogglePinned}
+            hint={pinned ? "Follow the pointer again" : "Freeze this ray and orbit around it — clicking the viewport does the same"}
           >
             {pinned ? "Unpin" : "Pin ray"}
-          </button>
+          </ToggleButton>
           <button type="button" onClick={onClose} title="Close the ray-work diagnostic">Close</button>
         </div>
       </header>

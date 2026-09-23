@@ -3,6 +3,7 @@
 import { useSession } from "../lib/core/session/session-context";
 import { toolValues, type ToolControl } from "../lib/core/voxel-editor/plugin";
 import { voxelTools } from "../lib/core/voxel-editor/registry";
+import { NumberInput, Switch } from "./ui";
 
 /**
  * The armed sculpt tool's card, and nothing else.
@@ -30,15 +31,18 @@ export function VoxelToolShelf() {
   const plugin = voxelTools.get(id);
   const unavailableReason = plugin?.unavailable({ scene, methodId: method });
   const values = plugin ? toolValues(plugin, stored[plugin.id], scene) : {};
-  const controlInput = (control: ToolControl) => <label key={control.id} className="voxel-context-control">
-    <span>{control.label}</span>
-    {control.kind === "toggle" ? <input type="checkbox" checked={values[control.id] === 1}
-      onChange={(event) => session.ui.getState().setVoxelToolValue(plugin!.id, control.id, event.target.checked ? 1 : 0)} />
-      : <input type="number" min={control.min} max={control.max} step={control.step} value={values[control.id]}
-        onChange={(event) => {
-          if (Number.isFinite(event.target.valueAsNumber)) session.ui.getState().setVoxelToolValue(plugin!.id, control.id, event.target.valueAsNumber);
-        }} />}
-  </label>;
+  // Committed on Enter or leaving the box, not per keystroke: typing "12"
+  // through "1" would otherwise arm a one-voxel brush on the way.
+  const controlInput = (control: ToolControl) => {
+    const set = (value: number) => session.ui.getState().setVoxelToolValue(plugin!.id, control.id, value);
+    return <label key={control.id} className="voxel-context-control">
+      <span>{control.label}</span>
+      {control.kind === "toggle"
+        ? <Switch checked={values[control.id] === 1} ariaLabel={control.label} onChange={(on) => set(on ? 1 : 0)} />
+        : <NumberInput value={values[control.id] ?? control.initial} min={control.min} max={control.max} step={control.step}
+            ariaLabel={control.label} onChange={set} />}
+    </label>;
+  };
   const advanced = plugin?.ui.controls.filter(control => control.presentation === "advanced") ?? [];
   const changedAdvanced = advanced.filter(control => values[control.id] !== control.initial);
   if (!plugin && !pending) return null;

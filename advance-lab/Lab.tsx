@@ -3,6 +3,7 @@ import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { ThemeSwitch } from "../components/ThemeSwitch";
+import { Select } from "../components/ui";
 import { labMethodFromSearch, type LabMethod as Method } from "./lab-method";
 import { replaceLocationSearch } from "../lib/core/query-state-sync";
 import css from "./Lab.module.css";
@@ -14,6 +15,10 @@ const Adaptive = dynamic(
   () => import("./AdvanceLab").then((m) => m.AdvanceLab),
   { ssr: false, loading: () => <p>Loading Adaptive Geometric…</p> },
 );
+const METHOD_OPTIONS: readonly { readonly value: Method; readonly label: string }[] = [
+  { value: "uniform-volume", label: "Uniform Geometric" },
+  { value: "adaptive-volume", label: "Adaptive Geometric" },
+];
 export function Lab() {
   const [method, setMethod] = useState<Method>();
   useEffect(() => {
@@ -34,14 +39,12 @@ export function Lab() {
         <Link href="/">Fluid Lab</Link>
         <label>
           2D advance{" "}
-          <select
-            aria-label="Method"
+          <Select
+            ariaLabel="Method"
             value={method ?? "uniform-volume"}
-            onChange={(e) => select(e.target.value as Method)}
-          >
-            <option value="uniform-volume">Uniform Geometric</option>
-            <option value="adaptive-volume">Adaptive Geometric</option>
-          </select>
+            options={METHOD_OPTIONS}
+            onChange={select}
+          />
         </label>
         <ThemeSwitch />
       </header>

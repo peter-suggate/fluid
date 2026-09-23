@@ -26,9 +26,8 @@ import { PHYSICS_EXECUTION_BACKEND_KEY } from "@/lib/core/physics-execution-back
 import type { MethodParamSpec, SelectParamSpec } from "@/lib/core/method-contract";
 import { simulation } from "../lib/core/simulation/controller";
 import { sceneHasTerrain } from "../lib/core/terrain";
-import { NumberField } from "./controls";
 import { PipelineGraph, formatPipelineDuration, type PipelineBand } from "./PipelineGraph";
-import { PipeChoice, PipeRange, PipeToggle } from "./PipeControls";
+import { ChoiceField, Facts, FieldList, NumberField, RangeField, Switch, SwitchField } from "./ui";
 
 /** Advances the live readout averages over. */
 const TRACE_WINDOW = 12;
@@ -137,7 +136,7 @@ function NumericsSection({ cpuPhysics }: { readonly cpuPhysics: boolean }) {
   // is named, and it is the last thing in the pane.
   return <details className="scene-instrument-section instrument-drawer" aria-label="Timing and numerics">
     <summary><span>Numerics</span><small>rates &amp; budgets</small></summary>
-    <div className="field-grid">
+    <FieldList>
       <NumberField label="Shared simulation step" unit="ms"
         value={Math.round(scene.numerics.fixedDt_s * 1000)} step={1} min={1} max={50}
         onChange={(value) => simulation.setStepSize(value / 1000, session.id)} />
@@ -147,7 +146,7 @@ function NumericsSection({ cpuPhysics }: { readonly cpuPhysics: boolean }) {
       {!cpuPhysics && <NumberField label="PCG budget" unit="iterations"
         value={scene.numerics.pressureMaxIterations} step={20} min={8} max={1000}
         onChange={(value) => patchNumerics({ pressureMaxIterations: Math.round(value) })} />}
-    </div>
+    </FieldList>
     <small className="control-hint">Rigid bodies and fluid advance on the same fixed step. Changes apply to the live simulation without resetting its clock.</small>
   </details>;
 }
@@ -183,15 +182,18 @@ function CPUPhysicsParam({ spec, methodId, value }: {
   const session = useSession();
   const copy = CPU_PARAM_COPY[spec.key];
   if (spec.kind === "select") {
-    return <PipeChoice label={copy?.label ?? spec.label} value={String(value)}
+    return <ChoiceField label={copy?.label ?? spec.label} value={String(value)}
       options={spec.options.map((option) => ({ ...option }))}
       onChange={(next) => simulation.setMethodParam(methodId, spec.key, next, session.id)} />;
   }
-  return <PipeRange label={copy?.label ?? spec.label} unit={spec.unit}
+  return <RangeField label={copy?.label ?? spec.label} unit={spec.unit}
     value={Number(value)} min={spec.min} max={spec.max} step={spec.step}
     digits={spec.digits ?? 0} hint={copy?.hint ?? spec.hint} editable
     onChange={(next) => simulation.setMethodParam(methodId, spec.key, next, session.id)} />;
 }
+
+type StageReadout = Extract<FluidStageControl, { kind: "readout" }>;
+type StageSetting = Exclude<FluidStageControl, StageReadout>;
 
 /**
  * The advance pipeline, as an instrument over the scene.
@@ -290,36 +292,61 @@ export function SimPipelineOverlay({ lenses: override }: {
   // free of React. `param-*` route through the method store exactly as the
   // method panel would. Runtime-safe parameters reach the attached solver on
   // the next frame; structural controls take the controller's rebuild path.
+  //
+  // Settings and readouts are two different things and are drawn as two: the
+  // settings on one aligned rail (name | control | value), then the readouts
+  // as a key/value list whose values get the card's width. A readout is often a
+  // sentence ("Native rectangular fields; all-resident page catalogue"), and in
+  // a slider's 72px value slot it stacked into a column one word wide.
   const controls = (() => {
     if (!graph) return {};
-    const rendered: Record<string, ReactNode> = {};
-    const renderControl = (control: FluidStageControl, key: number): ReactNode => {
+    const rendered: Record<string, { node: ReactNode; summary: string }> = {};
+    const setParam = (param: string, value: string | number) =>
+      simulation.setMethodParam(methodId, param, value, session.id);
+    const renderSetting = (control: StageSetting, key: number): ReactNode => {
+      const disabled = control.enabled ? !control.enabled(context) : false;
       switch (control.kind) {
-        case "param-choice":
-          return <PipeChoice key={key} label={control.label}
-            value={String(values[control.param] ?? "")}
+        case "param-choice": {
+          const value = String(values[control.param] ?? "");
+          // A two-way On/Off choice is a switch, and reads as one: a pair of
+          // pills per boolean made every card look like a row of radio groups.
+          const on = control.options.find((option) => option.label === "On");
+          const off = control.options.find((option) => option.label === "Off");
+          if (control.options.length === 2 && on && off) {
+            return <SwitchField key={key} label={control.label} checked={value === on.value}
+              disabled={disabled} hint={[control.hint, value === on.value ? on.hint : off.hint].filter(Boolean).join("\n\n") || undefined}
+              onChange={(checked) => setParam(control.param, checked ? on.value : off.value)} />;
+          }
+          return <ChoiceField key={key} label={control.label} value={value}
             options={control.options.map((option) => ({ ...option }))}
-            disabled={control.enabled ? !control.enabled(context) : false}
-            onChange={(value) => simulation.setMethodParam(methodId, control.param, value, session.id)} />;
+            disabled={disabled} onChange={(next) => setParam(control.param, next)} />;
+        }
         case "param-range":
-          return <PipeRange key={key} label={control.label} unit={control.unit}
+          return <RangeField key={key} label={control.label} unit={control.unit}
             value={Number(values[control.param] ?? control.min)}
             min={control.min} max={control.max} step={control.step} digits={control.digits ?? 0}
-            hint={control.hint} editable={control.editable}
-            disabled={control.enabled ? !control.enabled(context) : false}
-            onChange={(value) => simulation.setMethodParam(methodId, control.param, value, session.id)} />;
-        case "readout":
-          return <label key={key} className="pipe-field" title={control.hint}>
-            <span>{control.label}</span>
-            <output>{control.value(context)}</output>
-          </label>;
+            hint={control.hint} editable={control.editable} disabled={disabled}
+            onChange={(next) => setParam(control.param, next)} />;
       }
     };
     for (const stage of graph.stages) {
       if (!stage.controls?.length) continue;
-      rendered[stage.id] = <div className="pipe-fields">
-        {stage.controls.map(renderControl)}
-      </div>;
+      const settings = stage.controls.filter((control): control is StageSetting => control.kind !== "readout");
+      const readouts = stage.controls.filter((control): control is StageReadout => control.kind === "readout");
+      const count = (n: number, noun: string) => `${n} ${noun}${n === 1 ? "" : "s"}`;
+      rendered[stage.id] = {
+        summary: [
+          settings.length ? count(settings.length, "setting") : "",
+          readouts.length ? count(readouts.length, "readout") : "",
+        ].filter(Boolean).join(" · "),
+        node: <>
+          {settings.length > 0 && <FieldList>
+            {settings.map(renderSetting)}
+          </FieldList>}
+          {readouts.length > 0 && <Facts items={readouts.map((readout) =>
+            ({ label: readout.label, value: readout.value(context), hint: readout.hint }))} />}
+        </>,
+      };
     }
     return rendered;
   })();
@@ -400,7 +427,8 @@ export function SimPipelineOverlay({ lenses: override }: {
               active: lensOpen,
               onToggle: () => openLens(stage.id, !lensOpen),
             } : undefined,
-            controls: controls[stage.id],
+            controls: controls[stage.id]?.node,
+            fold: controls[stage.id] ? { summary: controls[stage.id].summary } : undefined,
           };
         }),
       };
@@ -438,13 +466,13 @@ export function SimPipelineOverlay({ lenses: override }: {
     <div className="render-status-line">
       <span className={running && info ? "online" : ""} />
       <strong data-testid="fluid-pipeline-method">{method.badge ?? method.label}</strong>
-      <PipeToggle label="Live" checked={liveTiming} onChange={setLiveTiming}
+      <Switch label="Live" checked={liveTiming} onChange={setLiveTiming}
         hint={`Samples the method-owned advance boundary chain on a cadence without changing its algorithmic schedule.\n\n${sourceLabel}`} />
       <code data-testid="fluid-advance-cost" title={sourceLabel}>{advanceLabel}</code>
     </div>
 
     {backend && <div className="scene-instrument-section" data-testid="physics-backend-control">
-      <PipeChoice label={backend.label}
+      <ChoiceField label={backend.label}
         value={String(values[backend.key])}
         options={backend.options.map((option) => ({ ...option }))}
         onChange={(value) => simulation.setMethodParam(methodId, backend.key, value, session.id)} />
@@ -470,13 +498,13 @@ export function SimPipelineOverlay({ lenses: override }: {
             : "Loading the sparse CPU world"}</span>
         </div>
         <small className="control-hint">Rust owns fluid and rigid-body evolution. Completed immutable density, surface, velocity and pose publications are uploaded for GPU rendering.</small>
-        <div className="pipe-fields pipe-fields--cpu" data-testid="cpu-physics-controls">
+        <FieldList data-testid="cpu-physics-controls">
           {cpuParams.map((spec) => <CPUPhysicsParam key={spec.key} spec={spec}
             methodId={methodId} value={values[spec.key]} />)}
-          <PipeToggle label="Freeze topology" checked={topologyFrozen} field
+          <SwitchField label="Freeze topology" checked={topologyFrozen}
             hint="Holds the accepted sparse topology while fluid and rigid bodies continue to advance."
             onChange={setTopologyFrozen} />
-        </div>
+        </FieldList>
       </div>
       : graph
       ? <PipelineGraph bands={bands} testId="fluid-pipeline" />

@@ -27,6 +27,7 @@ import {
 } from "../lib/core/fluid-cell-trace";
 import { FLUID_CELL_TRACE_FINE_PROBES } from "../lib/core/webgpu-fluid-cell-trace";
 import { VisualizationLegend } from "./VisualizationLegend";
+import { ToggleButton } from "./ui";
 
 export type FluidCellTraceStatusHint =
   | "unavailable" | "compiling" | "waiting" | "ready";
@@ -382,14 +383,13 @@ export function FluidCellTraceHud({
                 : "No leaf along this ray holds the interface"}
             >≈</button>
           </span>}
-          <button
-            type="button"
-            aria-pressed={pinned}
-            onClick={onTogglePinned}
-            title={pinned ? "Follow the pointer again" : "Freeze this cell and orbit around it — clicking the viewport does the same"}
+          <ToggleButton
+            pressed={pinned}
+            onChange={onTogglePinned}
+            hint={pinned ? "Follow the pointer again" : "Freeze this cell and orbit around it — clicking the viewport does the same"}
           >
             {pinned ? "Unpin" : "Pin cell"}
-          </button>
+          </ToggleButton>
           <button type="button" onClick={onClose} title="Close the cell-work diagnostic">Close</button>
         </div>
       </header>

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { realTimePlaybackRate, sourceDurationForPlayback } from "../lib/core/recording-timing";
 import { simulationRecording } from "../lib/core/simulation/recording";
 import { useSession } from "../lib/core/session/session-context";
+import { Choice } from "./ui";
 
 type PlaybackMode = "real-time" | "source";
 
@@ -116,11 +117,19 @@ export function RecordingPlaybackModal() {
           <span className="recording-time-badge">1 VIDEO SECOND = 1 SIMULATION SECOND</span>
         </div>
         <div className="recording-playback-controls">
-          <div className="segmented" aria-label="Playback timing">
-            {simulationPaced
-              ? <button className="active">Real time · {recording.frameRate} fps · ×1</button>
-              : <><button className={mode === "real-time" ? "active" : ""} onClick={() => setMode("real-time")}>Real time · ×{playbackRate.toFixed(2)}</button><button className={mode === "source" ? "active" : ""} onClick={() => setMode("source")}>Original capture · ×1</button></>}
-          </div>
+          {/* A simulation-paced capture has one timing, so its chooser is a single
+              chosen option: still the same control, stating which timing plays. */}
+          <Choice<PlaybackMode>
+            ariaLabel="Playback timing"
+            value={simulationPaced ? "real-time" : mode}
+            options={simulationPaced
+              ? [{ value: "real-time", label: `Real time · ${recording.frameRate} fps · ×1` }]
+              : [
+                { value: "real-time", label: `Real time · ×${playbackRate.toFixed(2)}` },
+                { value: "source", label: "Original capture · ×1" },
+              ]}
+            onChange={setMode}
+          />
           <button className="quiet-button" onClick={() => simulationRecording.download()} title={simulationPaced ? "Download the simulation-time MP4" : "Download the original wall-clock-paced WebM"}>Download {simulationPaced ? "MP4" : "source"}</button>
         </div>
         <dl className="recording-stats">

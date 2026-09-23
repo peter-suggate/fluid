@@ -7,6 +7,10 @@
   font-family: var(--sans);
 }
 .header {
+  /* The shared controls' size here: the header's own scale, not a form's. */
+  --control-height: 24px;
+  --control-inline-padding: 7px;
+  --control-font-size: 12px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -25,13 +29,9 @@
   align-items: center;
   gap: 9px;
 }
-.header select {
-  background: var(--panel);
-  color: var(--ink);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  padding: 4px 7px;
-  font: inherit;
+/* As wide as its options, not as the row. */
+.header :global(.ui-select) {
+  width: auto;
 }
 .body {
   min-height: 0;
