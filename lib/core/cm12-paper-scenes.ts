@@ -1,7 +1,7 @@
 import { cloneScene, defaultScene, type CameraState, type InitialLiquidCylinder, type InitialLiquidSphere, type RigidBodyDescription, type SceneDescription } from "./model";
 import type { MethodProfile } from "./method-contract";
 import type { TerrainDescription } from "./terrain";
-import type { SceneryGraph, SceneryNode } from "./scenery-graph";
+import { studioStageSceneryGraph } from "./studio-stage-scene";
 
 /**
  * The scenes of Chentanez & Müller, *Mass-Conserving Eulerian Liquid
@@ -252,62 +252,6 @@ function cm12Domain(figure: Cm12Figure): SceneDescription {
   return scene;
 }
 
-/**
- * A bare white enclosure sized to the figure, and one overhead source.
- *
- * The catalog's authored environments are sets built at about a metre — a lab
- * bench, a stool, a pot shelf — and a CM12 domain is 6.4 m or 12.8 m across. A
- * paper figure staged in one of them would be a six-metre tank standing on a
- * desk. So these scenes carry their own graph: the studio's plain room with its
- * extents left to the scene rather than authored at the studio's size, and a
- * key light placed off the container instead of off a fixed height.
- *
- * The spherical figures use the renderer's analytic glass vessel. Their room
- * remains deliberately plain so the curved silhouette, caustics and water
- * motion read as clearly as they do in the paper plates.
- */
-export function cm12SceneryGraph(scene: SceneDescription): SceneryGraph {
-  const c = scene.container;
-  return {
-    palettes: { white: { tint: [1, 1, 1] }, daylight: { tint: [1, 1, 1] } },
-    nodes: [
-      {
-          kind: "room-shell", id: "shell", materialModel: "room",
-          floor: { palette: "white", value: .9 },
-          wall: { colorLinear: [1, 1, 1] },
-          ceiling: { palette: "white", value: .9 },
-        },
-      softbox(c),
-    ],
-  };
-}
-
-/**
- * The overhead panel that lights every paper figure.
- *
- * The light ABI reads a box emitter's normal off its *thinnest* axis and
- * refuses a proxy whose authored `emits-` tag disagrees. A panel sized as a
- * fraction of each container axis independently does not guarantee that: in a
- * domain much shallower than it is wide, 2% of the height can exceed 28% of the
- * depth and the emitter silently resolves to -z against a -y tag. Thinness in y
- * is therefore derived from the face the panel lights, so the tag holds for any
- * domain shape rather than for the ones that happen to be roughly cubic.
- */
-function softbox(c: SceneDescription["container"]): SceneryNode {
-  const halfX = 0.28 * c.width_m;
-  const halfZ = 0.28 * c.depth_m;
-  return {
-    kind: "box", id: "light/softbox", group: "softbox",
-    tags: ["softbox", "light", "emits-negative-y"],
-    place: { position: { x: 0, y: 1.15 * c.height_m, z: -0.1 * c.depth_m }, anchor: "floor" },
-    halfSize: {
-      x: halfX,
-      y: Math.min(0.02 * c.height_m, 0.25 * Math.min(halfX, halfZ)),
-      z: halfZ,
-    },
-    material: { palette: "daylight", value: 1, emission: 1 },
-  };
-}
 /**
  * A ball of liquid, authored in whole cells so a plate reading stays legible.
  *
@@ -648,15 +592,15 @@ export function createCm12Figure12(): SceneDescription {
 }
 
 /**
- * The document a catalog entry publishes: the figure, then its enclosure.
+ * The document a catalog entry publishes: the figure on the shared stage.
  *
  * Separate from the factories because two of them assign `terrain` after the
- * domain is built, and the shell a scene needs is decided by whether it has
- * one. Running the graph last is what lets both facts be stated once.
+ * domain is built. Running the graph last sizes the floor and spotlight to the
+ * finished container.
  */
 export function cm12Scene(id: string): SceneDescription {
   const scene = CM12_SCENE_FACTORIES[id]!();
-  scene.scenery = cm12SceneryGraph(scene);
+  scene.scenery = studioStageSceneryGraph(scene);
   return scene;
 }
 
