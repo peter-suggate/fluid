@@ -214,6 +214,38 @@ export interface WebGPUUniformReferenceOptions {
   phiSeedFromVolume?: boolean;
   phiAgreementGain?: number;
   phiAgreementClamp?: number;
+  /**
+   * Geometric only: the splash-survival experiments
+   * (docs/uniform-geometric-splash-dissipation-plan.md). phiCubicAdvection,
+   * phiDrain and airborneMomentum default on; the rest default off.
+   *  - redistanceSurface: "preserve" keeps every vertex of a cell the surface
+   *    crosses at its advected value, clamping edge neighbours of the surface
+   *    to one cell (CM11b Sec. 3.4); "sparse" also redistances only every
+   *    tenth step.
+   *  - phiCubicAdvection: clamped Catmull-Rom instead of trilinear for the
+   *    advected phi of band vertices.
+   *  - orphanVolume: "local" stops sharpening relaying V across empty air into
+   *    another body; "compact" also pours V that phi has lost up its own V
+   *    gradient, so it gathers into cells rather than smearing.
+   *  - orphanVolumeRender: publish V where phi has no surface nearby, as CM12
+   *    Sec. 3.8 density or as equal-volume spheres. Presentation only.
+   *  - isolatedBodyVolume: a band vertex whose 16^3 cell window has an empty
+   *    one-cell shell (so the 14^3 interior holds a whole body) shifts phi
+   *    toward that body's own V. Replaces the tent shift.
+   *  - phiSeedCells: seed phi from the fullest incident cell (V > 1/2) at the
+   *    departure point, so a V core owns a liquid centre.
+   *  - phiDrain: raise phi-liquid vertices with no V anywhere around them.
+   *  - airborneMomentum: V far from phi and solids keeps its advected velocity
+   *    and gravity instead of the extension's.
+   */
+  redistanceSurface?: "rebuild" | "preserve" | "sparse";
+  phiCubicAdvection?: boolean;
+  orphanVolume?: "relay" | "local" | "compact";
+  orphanVolumeRender?: "off" | "density" | "spheres";
+  isolatedBodyVolume?: boolean;
+  phiSeedCells?: boolean;
+  phiDrain?: boolean;
+  airborneMomentum?: boolean;
   /** GPU-resident sparse work boxes; false retains the original dense control. */
   activeRegion?: boolean;
   /**
@@ -510,6 +542,15 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private surfaceVolumeCorrection?: UniformSurfaceVolumeCorrection;
   private phiAgreementGain: number;
   private phiAgreementClamp: number;
+  /** Splash-survival experiments; see the option docs. */
+  private redistanceSurface: "rebuild" | "preserve" | "sparse";
+  private phiCubicAdvection: boolean;
+  private orphanVolume: "relay" | "local" | "compact";
+  private orphanVolumeRender: "off" | "density" | "spheres";
+  private isolatedBodyVolume: boolean;
+  private phiSeedCells: boolean;
+  private phiDrain: boolean;
+  private airborneMomentum: boolean;
   /** The transport restriction was encoded in the most recent step. */
   private transportTilesEncoded = false;
   /** Coarse cells whose E1 tables fit the conditioning plane; 0 disables E1. */
@@ -862,6 +903,14 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.totalSurfaceVolume = this.geometricVolume && options.totalSurfaceVolume !== false;
     this.phiAgreementGain = Number.isFinite(options.phiAgreementGain) ? Math.min(1, Math.max(0, options.phiAgreementGain!)) : 0;
     this.phiAgreementClamp = Number.isFinite(options.phiAgreementClamp) ? Math.min(0.5, Math.max(0, options.phiAgreementClamp!)) : 0.02;
+    this.redistanceSurface = options.redistanceSurface === "preserve" || options.redistanceSurface === "sparse" ? options.redistanceSurface : "rebuild";
+    this.phiCubicAdvection = options.phiCubicAdvection !== false;
+    this.orphanVolume = options.orphanVolume === "local" || options.orphanVolume === "compact" ? options.orphanVolume : "relay";
+    this.orphanVolumeRender = options.orphanVolumeRender === "density" || options.orphanVolumeRender === "spheres" ? options.orphanVolumeRender : "off";
+    this.isolatedBodyVolume = options.isolatedBodyVolume === true;
+    this.phiSeedCells = options.phiSeedCells === true;
+    this.phiDrain = options.phiDrain !== false;
+    this.airborneMomentum = options.airborneMomentum !== false;
     // Uniform Geometric calls this the SOLVE WINDOW. It needs a positive dust
     // floor for the same reason E3's live set does: the window's diagnostics
     // reduction sums V over the box, which equals the domain sum only while
@@ -1034,7 +1083,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         pressureProjection: velocity("Uniform audit velocity after pressure projection"),
       });
     }
-    this.params = device.createBuffer({ label: "Uniform reference parameters", size: 224, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+    this.params = device.createBuffer({ label: "Uniform reference parameters", size: 256, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.solidMask = new SolidOccupancyMask([nx, ny, nz]);
     this.solidMask.update(solidWorldForScene(scene));
     this.solidVoxelsEmpty = uniformSolidMaskEmpty(this.solidMask);
@@ -1628,8 +1677,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.twoLevelAdvectionEnabled ? 1 : 0,
       this.transportTilesEnabled ? this.transportReach + 8 : -1,
       // agreement: compaction, phi seed, shift gain and clamp. Geometric only.
+      // The isolated-body shift reads true gamma in the advect, so while it is
+      // on the tent shift, which rebinds gamma to its packed residual, is not run.
       this.geometricVolume && this.volumeCompaction ? 1 : 0, this.geometricVolume && this.phiSeedFromVolume ? 1 : 0,
-      this.geometricVolume ? this.phiAgreementGain : 0, this.phiAgreementClamp,
+      this.geometricVolume && !this.isolatedBodyVolume ? this.phiAgreementGain : 0, this.phiAgreementClamp,
       // lean.x: the no-cut-cell certificate. All three sources of a cut cell
       // are host state -- the packed voxel mask, the terrain heightfield and
       // the live body list -- so this is decided here once a step rather than
@@ -1645,6 +1696,16 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       // transport reach. Both are decided by the tile classes on the GPU; the
       // host only says whether the arm exists this step.
       lean && uniformAbOn("philean") ? 1 : 0, this.transportReachPerTile ? 1 : 0,
+      // splash / splashB: the splash-survival experiments, geometric only;
+      // zero whenever a stage is off. See the option docs.
+      ...(this.geometricVolume ? [
+        this.redistanceSurface !== "rebuild" ? 1 : 0,
+        this.orphanVolume === "compact" ? 2 : this.orphanVolume === "local" ? 1 : 0,
+        this.orphanVolumeRender === "spheres" ? 2 : this.orphanVolumeRender === "density" ? 1 : 0,
+        this.isolatedBodyVolume ? 1 : 0,
+        this.phiCubicAdvection ? 1 : 0, this.phiSeedCells ? 1 : 0, this.phiDrain ? 1 : 0,
+        this.airborneMomentum ? 1 : 0,
+      ] : [0, 0, 0, 0, 0, 0, 0, 0]),
     ]));
   }
 
@@ -1709,7 +1770,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       values.densityPostProcessing,
       this.scene.sceneId,
     );
-    const refreshPresentation = postProcessing !== this.densityPostProcessing;
+    let refreshPresentation = postProcessing !== this.densityPostProcessing;
     this.densityPostProcessing = postProcessing;
     this.densitySharpening = values.densitySharpening !== "off";
     this.sharpeningMassCorrection = values.sharpeningMassCorrection !== "off";
@@ -1767,6 +1828,19 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       if (values.phiSeedFromVolume !== undefined) this.phiSeedFromVolume = values.phiSeedFromVolume === "on";
       if (values.phiAgreement !== undefined) this.phiAgreementGain = values.phiAgreement === "on" ? finite("phiAgreementGain", 0.05, 0, 1) : 0;
       if (values.phiAgreementClamp !== undefined) this.phiAgreementClamp = finite("phiAgreementClamp", 0.02, 0, 0.5);
+      if (values.redistanceSurface !== undefined) this.redistanceSurface = values.redistanceSurface === "preserve" || values.redistanceSurface === "sparse" ? values.redistanceSurface : "rebuild";
+      if (values.phiCubicAdvection !== undefined) this.phiCubicAdvection = values.phiCubicAdvection === "on";
+      if (values.orphanVolume !== undefined) this.orphanVolume = values.orphanVolume === "local" || values.orphanVolume === "compact" ? values.orphanVolume : "relay";
+      if (values.orphanVolumeRender !== undefined) {
+        const render = values.orphanVolumeRender === "density" || values.orphanVolumeRender === "spheres" ? values.orphanVolumeRender : "off";
+        // Presentation only: republish the paused frame so the choice shows.
+        if (render !== this.orphanVolumeRender) refreshPresentation = true;
+        this.orphanVolumeRender = render;
+      }
+      if (values.isolatedBodyVolume !== undefined) this.isolatedBodyVolume = values.isolatedBodyVolume === "on";
+      if (values.phiSeedCells !== undefined) this.phiSeedCells = values.phiSeedCells === "on";
+      if (values.phiDrain !== undefined) this.phiDrain = values.phiDrain === "on";
+      if (values.airborneMomentum !== undefined) this.airborneMomentum = values.airborneMomentum === "on";
       this.geometricRedistance = values.redistance !== "off";
       this.solidExcessCorrection = false;
       this.densityPostProcessing = false;
@@ -2753,10 +2827,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // The shift's residual is packed into the gamma scratch half from
     // start-of-step V, gamma and phi, and the advect then binds that half as
     // its gamma input. uvGather and uvPublish both rewrite it later this step.
-    const shift = this.phiAgreementGain > 0;
+    const shift = this.phiAgreementGain > 0 && !this.isolatedBodyVolume;
     if (shift) run("uvAgreementResidual");
     this.runVertex(encoder, "Advect page vertex phi", this.volumePipelines.uvAdvectPhi!, shift ? this.densityGatherGroup : this.densityTraceGroup);
-    if (this.geometricRedistance) this.runVertex(encoder, "Redistance page vertex phi", this.volumePipelines.uvRedistancePhi!, this.phiReverseGroup!);
+    // CM11b Sec. 3.4 reinitializes only every tenth frame; the sparse mode is
+    // that schedule over the surface-preserving pass.
+    const redistanceStep = this.redistanceSurface !== "sparse" || (this.info.encodedSteps ?? 0) % 10 === 0;
+    if (this.geometricRedistance && redistanceStep) this.runVertex(encoder, "Redistance page vertex phi", this.volumePipelines.uvRedistancePhi!, this.phiReverseGroup!);
     else this.copyField(encoder,{texture:this.vertexPhiScratch!},{texture:this.vertexPhiField!},[this.info.nx+1,this.info.ny+1,this.info.nz+1]);
     seam?.(UNIFORM_VOLUME_PHASE.phi);
     // Deposit donor weights while each row is already in registers. Integer

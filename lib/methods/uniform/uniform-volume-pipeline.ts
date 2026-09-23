@@ -1,6 +1,7 @@
 import type { FluidPipelineGraph, FluidPipelineStage, FluidPipelineContext } from "../../core/fluid-pipeline";
 import { UNIFORM_FLUID_PIPELINE } from "./uniform-pipeline";
 import { UNIFORM_VOLUME_PHASE as P } from "./uniform-volume-stages";
+import { UNIFORM_GEOMETRIC_SPLASH_HINTS } from "./uniform-geometric-parameters";
 
 /** The solver's published tile-map counts, when the map ran and diagnostics arrived. */
 const workMap = (context: FluidPipelineContext) => {
@@ -212,10 +213,28 @@ const phiAgreementControls = [
   {kind:"param-range" as const,param:"phiAgreementClamp",label:"Clamp",unit:"cells / step",
     min:0,max:0.5,step:0.005,digits:3,hint:"Largest shift in one step. The dam break is indifferent from 0.01 to 0.05 at gain 0.05; the thin film needs at least 0.02 to keep up with its own erosion.",
     enabled:(context: FluidPipelineContext)=>context.values.phiAgreement === "on"},
+  // Splash survival (docs/uniform-geometric-splash-dissipation-plan.md).
+  {kind:"param-choice" as const,param:"redistanceSurface",label:"Redistance surface",
+    options:[{value:"rebuild",label:"Rebuild",hint:"Re-measure every band vertex against the trilinear contour each step."},
+      {value:"preserve",label:"Preserve",hint:"Keep every vertex of a crossed cell at its advected value (CM11b Sec. 3.4)."},
+      {value:"sparse",label:"Every 10th",hint:"Preserve, and redistance only one step in ten."}],
+    hint:"Rebuilding moves a curved surface inward by up to h²/4r every step, even at rest; flat pools do not notice, drops do.",
+    enabled:(context: FluidPipelineContext)=>context.values.redistance !== "off"},
+  {kind:"param-choice" as const,param:"phiCubicAdvection",label:"Cubic advection",options:onOff,
+    hint:UNIFORM_GEOMETRIC_SPLASH_HINTS.phiCubicAdvection},
+  {kind:"param-choice" as const,param:"isolatedBodyVolume",label:"Isolated volume",options:onOff,
+    hint:"A body wholly inside a vertex's 12³ window shifts phi toward its own V, at most a quarter cell a step. Pools never qualify. Replaces Follow V while on."},
+  {kind:"param-choice" as const,param:"phiSeedCells",label:"Seed from V cells",options:onOff,
+    hint:"Seed from the fullest incident cell over half full, read at the departure point, so a single compacted cell owns a liquid centre."},
+  {kind:"param-choice" as const,param:"phiDrain",label:"Drain ghost phi",options:onOff,
+    hint:UNIFORM_GEOMETRIC_SPLASH_HINTS.phiDrain},
 ];
 const phiChip = (context: FluidPipelineContext) => {
   const parts=[context.values.totalSurfaceVolume === "on" ? "total volume constrained" : "",context.values.phiSeedFromVolume === "on" ? "seeded from V" : "",
-    context.values.phiAgreement === "on" ? "follows V" : ""].filter(Boolean);
+    context.values.phiAgreement === "on" ? "follows V" : "",
+    context.values.redistanceSurface === "preserve" || context.values.redistanceSurface === "sparse" ? "surface preserved" : "",
+    context.values.phiCubicAdvection === "on" ? "cubic" : "", context.values.isolatedBodyVolume === "on" ? "isolated V" : "",
+    context.values.phiSeedCells === "on" ? "cell seed" : "", context.values.phiDrain === "on" ? "drained" : ""].filter(Boolean);
   return parts.length ? `page domain · ${parts.join(" · ")}` : "page domain";
 };
 const volumeStages: FluidPipelineStage[] = [
@@ -254,6 +273,12 @@ const volumeStages: FluidPipelineStage[] = [
       {kind:"param-choice" as const,param:"volumeCompaction",label:"Compaction",options:onOff,
       hint:"A liquid cell may pour all of its V into a deeper liquid neighbour, at any depth, so voids inside the liquid refill. Off, only the 2.1h band is admitted and only surplus over phi's fill moves. The work map admits the extra tiles only while they are under-full.",
       enabled:(context: FluidPipelineContext)=>context.values.densitySharpening !== "off"},
+      {kind:"param-choice" as const,param:"orphanVolume",label:"Orphan V",
+      options:[{value:"relay",label:"Relay",hint:"Pour lost V down phi's gradient into the nearest surface within 2.1h."},
+        {value:"local",label:"Local",hint:"An air cell receives only if it holds V or is within a cell of the surface."},
+        {value:"compact",label:"Compact",hint:"Local, and V far from any surface gathers up its own gradient into full cells."}],
+      hint:"What sharpening does with V phi no longer carries. Relay is the MMTD07 transfer CM12 Fig. 3 criticises: a drop phi has lost pours into the pool beside it.",
+      enabled:(context: FluidPipelineContext)=>context.values.densitySharpening !== "off"},
       {kind:"readout" as const,label:"Active tiles",
       hint:"4×4×4 tiles holding a cell inside the admission band, in the latest diagnostics sample. Phi is fixed across the eight sweeps, so one classification schedules them all.",
       value:context=>{const map=workMap(context);return map?`${map.active} / ${map.total} (${map.percent}%)`:"—";}}],
@@ -266,7 +291,14 @@ export const UNIFORM_VOLUME_PIPELINE: FluidPipelineGraph = {
     if(stage.id==="density-advection")return volumeStages;
     if(["gamma-diffusion","interface-sharpening","sharpening-mass-correction","solid-excess"].includes(stage.id))return [];
     if(stage.id==="density-post-process")return [{...stage,label:"Phi surface publication",phaseLabels:[P.surface.label],
-      toggle:undefined,controls:undefined,state:()=>"on" as const,chip:()=>"phi = 0",
+      toggle:undefined,state:()=>"on" as const,
+      controls:[{kind:"param-choice" as const,param:"orphanVolumeRender",label:"Show orphan V",
+        options:[{value:"off",label:"Off",hint:"Publish phi only."},
+          {value:"density",label:"Density",hint:"CM12 Sec. 3.8: rho over its 3³ gamma, so sparse V is amplified to a visible size."},
+          {value:"spheres",label:"Spheres",hint:"Each 3³ cluster drawn as a sphere of its own volume."}],
+        hint:"Draw V lying more than 1.5 cells from any phi surface. Presentation only; the solver never reads it."}],
+      chip:context=>context.values.orphanVolumeRender === "density" ? "phi = 0 · orphan V density"
+        : context.values.orphanVolumeRender === "spheres" ? "phi = 0 · orphan V spheres" : "phi = 0",
       tip:{summary:"Publish the independent vertex level set in the renderer's dense contour encoding. Native execution overlaps this with projection or rigid coupling; its time is included in that combined stage."}}];
     const mapped={...stage,phaseLabels:[...(stage.phaseLabels??[]),
       ...(stage.id==="pressure-projection"?["Pressure projection + surface publication"]:
@@ -289,7 +321,9 @@ export const UNIFORM_VOLUME_PIPELINE: FluidPipelineGraph = {
         ...(mapped.controls ?? []).filter(control=>
           !(control.kind === "param-choice" && control.param === "activeRegion")
           && !(control.kind === "readout" && control.label === "Work box")),
-        ...twoLevelControls],
+        ...twoLevelControls,
+        {kind:"param-choice" as const,param:"airborneMomentum",label:"Airborne momentum",options:onOff,
+        hint:UNIFORM_GEOMETRIC_SPLASH_HINTS.airborneMomentum}],
       chip:context=>{const extra=["page domain",twoLevelChip(context)].filter(Boolean).join(" · ");
         const base=mapped.chip?.(context);
         return extra?(base?`${base} · ${extra}`:extra):base;}}];

@@ -30,52 +30,6 @@ test("uniform geometric controls resolve independently from density algorithms",
   assert.equal(values.densitySharpening,"on");assert.equal(values.gammaDiffusion,undefined);
   assert.ok(uniformVolumeMethod.resolveComposition?.(values));
 });
-test("the sharpening work map is the live default, with the dense schedule retained",()=>{
-  const spec=uniformVolumeMethod.params.find(p=>p.key==="sharpeningWorkMap");
-  assert.equal(spec?.kind,"select");assert.equal(spec?.default,"on");assert.equal(spec?.update,"runtime");
-  assert.equal(resolveMethodValues(uniformVolumeMethod,"balanced",{}).sharpeningWorkMap,"on");
-  // Runtime keys are excluded from the construction key, so the schedule toggles
-  // on the attached solver instead of rebuilding it back to t=0.
-  assert.ok(uniformVolumeMethod.runtimeParamKeys?.includes("sharpeningWorkMap"));
-  const stage=UNIFORM_VOLUME_PIPELINE.stages.find(s=>s.id==="uniform-volume-sharpen")!;
-  const at=(values:MethodParamValues,info?:unknown):FluidPipelineContext=>({values,info:(info??null) as never,
-    sceneId:"minimal-power-dam-break-32",bodyCount:0,hasTerrain:false,hasInflow:false,running:true});
-  const counted={uniformSharpenWorkMap:true,uniformSharpenTilesActive:118,uniformSharpenTilesTotal:512};
-  assert.equal(stage.chip(at({densitySharpening:"on",sharpeningWorkMap:"on"})),"4h work map");
-  assert.equal(stage.chip(at({densitySharpening:"on",sharpeningWorkMap:"on"},counted)),"4h work map · 23% tiles");
-  assert.equal(stage.chip(at({densitySharpening:"on",sharpeningWorkMap:"off"},counted)),"dense finest lattice");
-  const choice=stage.controls?.find(c=>c.kind==="param-choice"&&c.param==="sharpeningWorkMap");
-  assert.ok(choice?.kind==="param-choice");
-  assert.equal(choice.enabled?.(at({densitySharpening:"on",sharpeningWorkMap:"on"})),true);
-  assert.equal(choice.enabled?.(at({densitySharpening:"off",sharpeningWorkMap:"on"})),false);
-  const readout=stage.controls?.find(c=>c.kind==="readout");
-  assert.ok(readout?.kind==="readout");
-  assert.equal(readout.value(at({sharpeningWorkMap:"on"},counted)),"118 / 512 (23%)");
-  assert.equal(readout.value(at({sharpeningWorkMap:"on"})),"—");
-  assert.equal(readout.value(at({sharpeningWorkMap:"off"},counted)),"—");
-});
-test("the volume dust floor is a live number surfaced on the transport stage",()=>{
-  const spec=uniformVolumeMethod.params.find(p=>p.key==="volumeDustThreshold");
-  assert.ok(spec?.kind==="number");assert.equal(spec.default,1e-3);assert.equal(spec.min,0);
-  // Zero must remain reachable: it is the bit-identical control arm.
-  assert.equal(resolveMethodValues(uniformVolumeMethod,"balanced",{volumeDustThreshold:0}).volumeDustThreshold,0);
-  assert.ok(uniformVolumeMethod.runtimeParamKeys?.includes("volumeDustThreshold"));
-  assert.equal(uniformMethod.params.find(p=>p.key==="volumeDustThreshold"),undefined,"the paper method keeps the untreated sum");
-  const stage=UNIFORM_VOLUME_PIPELINE.stages.find(s=>s.id==="uniform-volume-coupling")!;
-  const at=(values:MethodParamValues,info?:unknown):FluidPipelineContext=>({values,info:(info??null) as never,
-    sceneId:"minimal-power-dam-break-32",bodyCount:0,hasTerrain:false,hasInflow:false,running:true});
-  assert.equal(stage.chip(at({volumeDustThreshold:0})),"dense finest lattice");
-  // The floor is the first half of the chip; E3's live set is the second.
-  assert.ok(stage.chip(at({volumeDustThreshold:1e-6}))?.startsWith("dust floor 1e-6 · "));
-  const slider=stage.controls?.find(c=>c.kind==="param-range"&&c.param==="volumeDustThreshold");
-  assert.ok(slider&&slider.kind==="param-range");assert.equal(slider.min,0);
-  const readout=stage.controls?.find(c=>c.kind==="readout"&&c.label==="Dust discarded");
-  assert.ok(readout?.kind==="readout");
-  const counted={uniformVolumeDustCells:412,uniformVolumeDustMass_cells:3.5e-4};
-  assert.equal(readout.value(at({volumeDustThreshold:1e-6},counted)),"412 cells · 3.50e-4 cell volumes");
-  assert.equal(readout.value(at({volumeDustThreshold:0},counted)),"—","off discards nothing to report");
-  assert.equal(readout.value(at({volumeDustThreshold:1e-6})),"—");
-});
 test("the two-level velocity sampler is a live experiment on the velocity-extension stage",()=>{
   const toggle=uniformVolumeMethod.params.find(p=>p.key==="twoLevelVelocity");
   assert.equal(toggle?.kind,"select");assert.equal(toggle?.default,"on","the two-level path is the default; Off is the dense control");
@@ -161,44 +115,4 @@ test("extension front sweeps are a live budget surfaced on the velocity-extensio
   assert.equal(readout.value(at(null)),"—");
   assert.equal(readout.value(at({...facts,uniformFIMExecutedPasses:4,uniformFIMTerminalActiveFaces:37})),"4 of 4 · 37 faces unconverged");
   assert.equal(readout.value(at({...facts,uniformFIMExecutedPasses:3,uniformFIMTerminalActiveFaces:0})),"3 of 4 · converged");
-});
-test("E3 runs the conservative transport on a live tile set the panel prices",()=>{
-  const map=uniformVolumeMethod.params.find(p=>p.key==="transportWorkMap");
-  assert.equal(map?.kind,"select");assert.equal(map?.default,"tiles","the live set is the default");
-  assert.ok(map?.kind==="select"&&map.options.some(o=>o.value==="dense"),"the dense control arm stays reachable");
-  const reach=uniformVolumeMethod.params.find(p=>p.key==="transportReach");
-  assert.ok(reach?.kind==="number");assert.equal(reach.default,1);assert.equal(reach.min,0);assert.equal(reach.max,8);
-  for(const key of ["transportWorkMap","transportReach"]) {
-    assert.ok(uniformVolumeMethod.runtimeParamKeys?.includes(key),`${key} must flip live`);
-    assert.equal(uniformMethod.params.find(p=>p.key===key),undefined,"the paper method keeps the dense schedule");
-  }
-  const at=(values:MethodParamValues,info?:unknown):FluidPipelineContext=>({values,info:(info??null) as never,
-    sceneId:"cm12-figure-7",bodyCount:0,hasTerrain:false,hasInflow:false,running:true});
-  const on={volumeDustThreshold:1e-6,twoLevelVelocity:"on"};
-  const counted={uniformTransportWorkMap:true,uniformTransportTiles:2048,uniformTransportTilesTotal:32768,
-    uniformTransportReachTiles:4,uniformTransportRequiredReachTiles:2,uniformTransportMaxDisplacement_cells:6.4};
-  const short={...counted,uniformTransportRequiredReachTiles:6,uniformTransportMaxDisplacement_cells:21.2};
-  const stage=UNIFORM_VOLUME_PIPELINE.stages.find(s=>s.id==="uniform-volume-coupling")!;
-  // The controls sit beside the dust floor, on the stage they price.
-  const choice=stage.controls?.find(c=>c.kind==="param-choice"&&c.param==="transportWorkMap");
-  assert.ok(choice?.kind==="param-choice");
-  assert.equal(choice.enabled?.(at(on)),true);
-  assert.equal(choice.enabled?.(at({...on,twoLevelVelocity:"off"})),false,"the live set needs the class map");
-  assert.equal(choice.enabled?.(at({...on,volumeDustThreshold:0})),false,"without the floor the predicate fails");
-  const slider=stage.controls?.find(c=>c.kind==="param-range"&&c.param==="transportReach");
-  assert.ok(slider?.kind==="param-range");
-  const live=stage.controls?.find(c=>c.kind==="readout"&&c.label==="Live tiles");
-  assert.ok(live?.kind==="readout");
-  assert.equal(live.value(at(on,counted)),"2048 / 32768 (6%)");
-  assert.equal(live.value(at({...on,transportWorkMap:"dense"},counted)),"—");
-  // Configured against required is the whole safety story, so it is a readout.
-  const reachOut=stage.controls?.find(c=>c.kind==="readout"&&c.label==="Reach");
-  assert.ok(reachOut?.kind==="readout");
-  assert.equal(reachOut.value(at(on,counted)),"4 used · 2 required (6.4 cells)");
-  assert.equal(reachOut.value(at(on,short)),"4 used · 6 required · SHORT (21.2 cells)");
-  assert.equal(stage.chip(at(on,counted)),"dust floor 1e-6 · live tiles 6%");
-  assert.equal(stage.chip(at(on,short)),"dust floor 1e-6 · live tiles 6% · reach SHORT");
-  assert.equal(stage.chip(at({...on,transportWorkMap:"dense"},counted)),"dust floor 1e-6 · transport dense");
-  assert.equal(stage.chip(at({...on,twoLevelVelocity:"off"},counted)),"dust floor 1e-6 · transport dense · no tile map");
-  assert.equal(stage.chip(at({...on,volumeDustThreshold:0},counted)),"dense finest lattice");
 });

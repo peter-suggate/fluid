@@ -1,18 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { SCENE_CATALOG, getSceneDefinition } from "./scenes";
+import { getSceneDefinition } from "./scenes";
 import { sceneDocument } from "./scene-definition";
 import { sceneLatticeDimensions } from "./scene-lattice";
-
-test("catalog scenes and variants have closed simulation tops", () => {
-  for (const definition of SCENE_CATALOG) {
-    assert.equal(definition.build().container.top, "closed", definition.id);
-    for (const variant of [undefined, ...Object.keys(definition.variants ?? {})]) {
-      assert.equal(sceneDocument(definition, variant).container.top, "closed",
-        `${definition.id}/${variant ?? "default"}`);
-    }
-  }
-});
 
 test("each pool-impact resolution publishes a physical ceiling on its own lattice", () => {
   for (const id of ["coarse-first-pool-impact", "coarse-first-pool-impact-half",

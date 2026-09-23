@@ -414,17 +414,120 @@ fn uvPhiFarAir(vertex:vec3i)->bool{
   if(nearWall.x||nearWall.y||(UNIFORM_REFERENCE_DIMENSION==3u&&nearWall.z)){return false;}
   return !uvShellTileAt(vertex);
 }
+// SPLASH SURVIVAL (docs/uniform-geometric-splash-dissipation-plan.md). Each
+// experiment reads its own params.splash/splashB lane, which the host writes
+// as zero with the toggle off, so the default arm evaluates none of them.
+//
+// The V-reading terms of the phi advect sample at the DEPARTURE point q: this
+// pass runs before transport, so V is start-of-step V, and the liquid that
+// reaches the vertex by the end of the step is the V around q now. Reading
+// around the vertex instead would trail V by a step and drain every moving front.
+fn uvSplashAdvect()->bool{
+  return params.splash.w>0.5||params.splashB.x>0.5||params.splashB.y>0.5||params.splashB.z>0.5;
+}
+// G. Trilinear interpolation overestimates a convex distance field by up to
+// h^2/4r, so every resample moves a drop's surface inward by that much.
+// Catmull-Rom reproduces quadratics; clamping to the eight enclosing vertices
+// keeps it monotone, so it cannot overshoot a sign across a thin sheet.
+fn uvCatmullRom(t:f32)->vec4f{
+  let t2=t*t;let t3=t2*t;
+  return 0.5*vec4f(2.0*t2-t3-t,3.0*t3-5.0*t2+2.0,4.0*t2-3.0*t3+t,t3-t2);
+}
+fn uvPhiCubic(position:vec3f)->f32{
+  let p=clamp(position,vec3f(0),vec3f(dims()));
+  let base=min(vec3i(floor(p)),dims()-vec3i(1));let f=p-vec3f(base);
+  let wx=uvCatmullRom(f.x);let wy=uvCatmullRom(f.y);let wz=uvCatmullRom(f.z);
+  var value=0.0;var lo=1e30;var hi=-1e30;
+  for(var dz=-1;dz<3;dz++){var plane=0.0;
+    for(var dy=-1;dy<3;dy++){var row=0.0;
+      for(var dx=-1;dx<3;dx++){let o=vec3i(dx,dy,dz);
+        let s=textureLoad(uvPhiIn,clamp(base+o,vec3i(0),dims()),0).x;row+=wx[dx+1]*s;
+        if(all(o>=vec3i(0))&&all(o<=vec3i(1))){lo=min(lo,s);hi=max(hi,s);}}
+      plane+=wy[dy+1]*row;}
+    value+=wz[dz+1]*plane;}
+  return clamp(value,lo,hi);
+}
+// V above this is liquid to the splash stages; below it is the transport and
+// sharpening tail every surface carries (about 5e-3 at 1.5h over a resting
+// pool, 1e-5 at 2.5h), which neither keeps phi-liquid alive nor flies.
+const UV_LIQUID_EVIDENCE:f32=0.05;
+// E, drain. Phi-liquid with no cell in the 4^3 around q holding liquid evidence
+// is a ghost: V left it or never came. It rises half a cell a step, to +h/2.
+fn uvDrainGhost(q:vec3f,phi:f32)->f32{
+  let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));if(phi>=0.5*h){return phi;}
+  let centre=vec3i(floor(q+vec3f(0.5)));
+  for(var dz=-2;dz<2;dz++){for(var dy=-2;dy<2;dy++){for(var dx=-2;dx<2;dx++){let c=centre+vec3i(dx,dy,dz);
+    if(valid(c)&&volume(c)>UV_LIQUID_EVIDENCE){return phi;}}}}
+  return min(phi+0.5*h,0.5*h);
+}
+// E, seed. uvSeedPhi writes h(1/2 - mean V) over eight cells, which is liquid
+// only above a half-full MEAN: a one-cell drop means 1/8 and never qualifies.
+// Here the fullest incident cell of q over half its capacity owns the vertex,
+// so a single compacted cell yields a liquid centre. Same guard: no phi-liquid
+// centre in the 4^3 cells around q, so a healthy surface is never re-seeded.
+fn uvSeedPhiCells(q:vec3f,phi:f32)->f32{
+  let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
+  let base=vec3i(floor(q-vec3f(0.5)));var seed=phi;
+  for(var k=0u;k<8u;k++){let c=base+uvCorner(k);if(!valid(c)){continue;}let open=uvOpen(c);
+    if(open>=0.99999){seed=min(seed,h*(0.5-volume(c)/open));}}
+  if(seed>=phi||seed>=0.0){return phi;}
+  let centre=vec3i(floor(q+vec3f(0.5)));
+  for(var dz=-2;dz<2;dz++){for(var dy=-2;dy<2;dy++){for(var dx=-2;dx<2;dx++){let c=centre+vec3i(dx,dy,dz);
+    if(valid(c)&&uvPhi(vec3f(c)+vec3f(0.5))<0.0){return phi;}}}}
+  return seed;
+}
+// D. Local volume for a small isolated body. W is the 16^3 cells around q. If
+// W's outer layer holds no V and no phi fill, every body this vertex touches
+// lies wholly inside W, so the interior's sum of V - gamma is those bodies'
+// own residual: shift phi by it over their cut cells at full gain, at most a
+// quarter cell a step. A pool, or a drop beside one, never has an empty outer
+// layer, and leaves on the first wet cell of it. gamma is start-of-step
+// uvTarget(phi): with this on the host binds the trace group, never the
+// agreement's packed residual.
+fn uvIsolatedShift(q:vec3f)->f32{
+  let base=vec3i(floor(q+vec3f(0.5)));let empty=max(params.tuning.z,1e-5);
+  for(var dz=-8;dz<8;dz++){for(var dy=-8;dy<8;dy++){
+    let inner=dz>-8&&dz<7&&dy>-8&&dy<7;var dx=-8;
+    loop{if(dx>=8){break;}let c=base+vec3i(dx,dy,dz);
+      if(valid(c)&&(volume(c)>empty||textureLoad(gammaIn,c,0).x>0.0)){return 0.0;}
+      dx=select(dx+1,select(dx+1,7,dx==-8),inner);}}}
+  var R=0.0;var A=0.0;
+  for(var dz=-7;dz<7;dz++){for(var dy=-7;dy<7;dy++){for(var dx=-7;dx<7;dx++){
+    let c=base+vec3i(dx,dy,dz);if(!valid(c)){continue;}
+    let g=textureLoad(gammaIn,c,0).x;R+=volume(c)-g;if(g>0.0&&g<uvOpen(c)){A+=1.0;}}}}
+  if(A<1.0){return 0.0;}
+  return min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z))*clamp(R/A,-0.25,0.25);
+}
+// A. CM11b Sec. 3.4: redistance without moving the surface. A vertex with an
+// opposite-sign vertex among its 26 neighbours is a corner of a crossed cell,
+// and the trilinear zero set is defined by those corners alone, so keeping
+// their advected values -- clamped to one cell, as CM11b does -- leaves the
+// surface where advection put it. Newton measures the rest of the band
+// against that contour.
+fn uvSurfaceVertex(vertex:vec3i,value:f32)->bool{
+  for(var dz=-1;dz<=1;dz++){for(var dy=-1;dy<=1;dy++){for(var dx=-1;dx<=1;dx++){
+    let n=clamp(vertex+vec3i(dx,dy,dz),vec3i(0),dims());
+    if((textureLoad(uvPhiIn,n,0).x<0.0)!=(value<0.0)){return true;}}}}
+  return false;
+}
 @compute @workgroup_size(4,4,4)
 fn uvAdvectPhi(@builtin(global_invocation_id)gid:vec3u){
   let vertex=activeVertexId(gid);if(any(vertex<vec3i(0))||any(vertex>dims())){return;}let p=vec3f(vertex);
-  let advected=uvPhi(uvTrace(p,params.dimsDt.w));
-  ${phiLean ? `if(uvPhiFarAir(vertex)){textureStore(uvPhiOut,vertex,vec4f(advected));return;}` : ""}
-  let contact=uvEmbeddedContact(p,uvClosedWallPhi(p,advected));
-  let released=uvReleasedWalls(p,uvEmbeddedAir(p,contact));
-  var value=uvSourcePhi(p,released);
+  let departure=uvTrace(p,params.dimsDt.w);
+  var advected=uvPhi(departure);
+  // The far-air theorems below hold at the departure point too unless q lies
+  // in a SHELL tile, where a splash term may fire; see uvSplashAdvect.
+  ${phiLean ? `if(uvPhiFarAir(vertex)&&!(uvSplashAdvect()&&uvShellTileAt(vec3i(departure)))){textureStore(uvPhiOut,vertex,vec4f(advected));return;}` : ""}
   let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
+  if(params.splashB.x>0.5&&abs(advected)<2.0*h){advected=uvPhiCubic(departure);}
+  let contact=uvEmbeddedContact(p,uvClosedWallPhi(p,advected));
+  var released=uvReleasedWalls(p,uvEmbeddedAir(p,contact));
+  if(params.splashB.z>0.5){released=uvDrainGhost(departure,released);}
+  var value=uvSourcePhi(p,released);
   if(params.agreement.z>0.0&&abs(value)<2.0*h){value-=uvAgreementShift(p);}
+  if(params.splash.w>0.5&&abs(value)<2.0*h){value-=uvIsolatedShift(departure);}
   if(params.agreement.y>0.5){value=uvSeedPhi(p,value);}
+  if(params.splashB.y>0.5){value=uvSeedPhiCells(departure,value);}
   textureStore(uvPhiOut,vertex,vec4f(value));
 }
 @compute @workgroup_size(4,4,4)
@@ -432,11 +535,13 @@ fn uvRedistancePhi(@builtin(global_invocation_id)gid:vec3u){
   let vertex=activeVertexId(gid);if(any(vertex<vec3i(0))||any(vertex>dims())){return;}let p=vec3f(vertex);let initial=uvPhi(p);
   let h=params.cellGravity.xyz;let band=4.0*max(h.x,max(h.y,h.z));
   var value=initial;
-  if(abs(initial)>1e-8&&abs(initial)<band){var q=p;
+  if(abs(initial)>1e-8&&abs(initial)<band){
+    if(params.splash.x>0.5&&uvSurfaceVertex(vertex,initial)){let cell=min(h.x,min(h.y,h.z));value=clamp(initial,-cell,cell);}
+    else{var q=p;
     for(var i=0u;i<8u;i++){let g=uvGradient(q);let norm=dot(g/h,g/h);if(norm<1e-16){break;}
       q=clamp(q-clamp(uvPhi(q)*g/(h*h*norm),vec3f(-2),vec3f(2)),
         max(vec3f(0),p-vec3f(4)),min(vec3f(dims()),p+vec3f(4)));}
-    if(abs(uvPhi(q))<0.005*min(h.x,min(h.y,h.z))){value=sign(initial)*length((p-q)*h);}}
+    if(abs(uvPhi(q))<0.005*min(h.x,min(h.y,h.z))){value=sign(initial)*length((p-q)*h);}}}
   textureStore(uvPhiOut,vertex,vec4f(value));
 }
 fn uvOpen(id:vec3i)->f32{if(!valid(id)){return 0.0;}return cellOpenFraction(id);}
@@ -617,6 +722,8 @@ fn uvClassifySharpenTiles(@builtin(global_invocation_id)gid:vec3u,
         var n=id;n[axis]+=side;if(valid(n)&&uvOpen(n)>0.99999&&volume(n)<uvOpen(n)-1e-4
           &&uvPhi(vec3f(n)+vec3f(0.5))<0.0){live=true;}}}
       if(live){atomicStore(&uvTileAdmission,1u);}}
+    // B2: orphan V beyond the band compacts in place, so its tile must run.
+    else if(params.splash.y>1.5&&phi>0.0&&volume(cell)>0.0){atomicStore(&uvTileAdmission,1u);}
   }
   workgroupBarrier();
   if(lane==0u){let admission=atomicLoad(&uvTileAdmission);
@@ -673,8 +780,19 @@ fn uvPrepareSharpen(@builtin(global_invocation_id)gid:vec3u){
   let compact=params.agreement.x>0.5;
   let admitted=open&&select(abs(phi)<params.tuning.y*h,phi<params.tuning.y*h,compact);
   let relay=phi>0.0&&desired<=1e-6;
-  uvEdges[uvEdgeAddress(i)].weight[3]=select(0.0,dose*select(max(own-desired,0.0),own,compact&&phi<0.0),admitted);
-  uvEdges[uvEdgeAddress(i)].weight[4]=select(0.0,dose*max(select(desired,1.0,relay)-own,0.0),admitted);
+  // Orphan V (splash.y, docs/uniform-geometric-splash-dissipation-plan.md B).
+  // A relay pours whatever reaches it down phi's gradient into the nearest
+  // body -- CM12 Fig. 3's objection to MMTD07 -- so a drop phi has lost drains
+  // into the pool beside it. B1: a relay receives only if it already holds V
+  // or lies within a cell of phi's surface, which the bulk's contiguous skirt
+  // always does and an empty gap never does. B2 also admits V beyond the band:
+  // a cell under half full offers all of it, and uvProposeSharpen lets it flow
+  // only to a face neighbour holding more (CM12 Eq. 17 and Alg. 2's trace up
+  // grad rho, reduced to face fluxes), so orphan V gathers into full cells.
+  let orphan=params.splash.y>1.5&&open&&phi>=params.tuning.y*h;
+  let receptive=params.splash.y<0.5||own>1e-4||phi<h;
+  uvEdges[uvEdgeAddress(i)].weight[3]=select(0.0,dose*select(select(max(own-desired,0.0),own,compact&&phi<0.0),select(0.0,own,own<0.5),orphan),admitted||orphan);
+  uvEdges[uvEdgeAddress(i)].weight[4]=select(0.0,dose*max(select(desired,select(0.0,1.0,receptive),relay)-own,0.0),admitted||orphan);
   uvEdges[uvEdgeAddress(i)].weight[5]=phi;
 }
 @compute @workgroup_size(4,4,4)
@@ -687,6 +805,12 @@ fn uvProposeSharpen(@builtin(global_invocation_id)gid:vec3u){
     if(uvPageWorkEnabled()){
       let flags=((uvEdges[uvEdgeAddress(i)].base>>(5u*axis))&31u);if((flags&1u)==0u){continue;}
       let j=uvEdgeAddress(linearIndex(q));let own=uvEdgeAddress(i);
+      if(params.splash.y>1.5){let band=params.tuning.y*min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
+        let phiB=uvEdges[j].weight[5];
+        if(phiA>=band||phiB>=band){let vA=volume(id);let vB=volume(q);
+          let ab=select(0.0,min(uvEdges[own].weight[3],uvEdges[j].weight[4]),phiA>=band&&vB>vA);
+          let ba=select(0.0,min(uvEdges[j].weight[3],uvEdges[own].weight[4]),phiB>=band&&vA>vB);
+          uvEdges[own].weight[axis]=ab-ba;continue;}}
       var capA=uvEdges[own].weight[3];var capB=uvEdges[j].weight[3];
       if(params.agreement.x>0.5){let dose=clamp(params.tuning.x,0.0,1.0);
         if((flags&8u)==0u){capA=min(capA,dose*max(volume(id)-uvEdges[own].weight[6],0.0));}
@@ -697,6 +821,12 @@ fn uvProposeSharpen(@builtin(global_invocation_id)gid:vec3u){
     }
     if(!valid(q)||!uvSharpenTileActive(q)||uvOpen(id)<0.99999||uvOpen(q)<0.99999||faceOpenFraction(id,axis)<0.99999){continue;}
     let j=linearIndex(q);let phiB=uvEdges[uvEdgeAddress(j)].weight[5];
+    // B2: a face with an orphan side moves orphan V only toward more V.
+    if(params.splash.y>1.5){let band=params.tuning.y*min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
+      if(phiA>=band||phiB>=band){let vA=volume(id);let vB=volume(q);
+        let ab=select(0.0,min(uvEdges[uvEdgeAddress(i)].weight[3],uvEdges[uvEdgeAddress(j)].weight[4]),phiA>=band&&vB>vA);
+        let ba=select(0.0,min(uvEdges[uvEdgeAddress(j)].weight[3],uvEdges[uvEdgeAddress(i)].weight[4]),phiB>=band&&vA>vB);
+        uvEdges[uvEdgeAddress(i)].weight[axis]=ab-ba;continue;}}
     let middle=uvPhi(vec3f(id)+vec3f(0.5)+0.5*vec3f(e));let epsilon=1e-6;
     let inwardA=phiA>=0.0&&phiB<phiA-epsilon&&middle<=phiA+epsilon&&middle>=phiB-epsilon;
     let inwardB=phiB>=0.0&&phiA<phiB-epsilon&&middle<=phiB+epsilon&&middle>=phiA-epsilon;
@@ -1161,11 +1291,80 @@ fn uvTransportReachZ(@builtin(global_invocation_id)gid:vec3u){
   if((hit&4)!=0){atomicAdd(&sharpenDeposits[uvCoarsePlane(2u)+1u],1);}
 }
 ` : ""}
+// C. Show V where phi offers none: CM12 Sec. 3.8, restricted to cells more
+// than 1.5 cells from phi's surface so the published field is bit-identical
+// wherever phi describes the liquid. Presentation only: the solver never reads
+// the published half. A 3^3 cluster under a quarter cell is dust, not drawn.
+// Density mode is Sec. 3.8's rho'' = V / min(max(gamma,theta),1) with gamma the
+// 3^3 box mean of 2 min(V,1/2) (the paper blurs with sigma = 2h) and theta =
+// 0.01, capped at one. A uniform smear under 1/2 maps to exactly 0.5 there --
+// the paper's flicker, and on a crown splash a haze of some 30k cells -- so
+// only V standing a fifth above its box mean (rho'' >= 0.6) is drawn: a sheet
+// up to two cells thick shows, a haze does not. Sphere mode draws each cell's
+// 3^3 cluster as a ball of the cluster's own volume about its V centroid, so
+// what is seen is what is held, and only where the cluster is as compact as a
+// ball: its V-weighted second moment about the centroid may exceed a ball's
+// 3r^2/5 by at most 3/4 cell^2 (a drop spread over a 2^3 block passes, a
+// smear under half full fails). It also writes a dry cell beside V, whose
+// value places the 0.5 crossing. Only orphan cells (centre phi > 1.5h) join a
+// cluster: V smears a cell or two past any healthy surface, and a cell just
+// outside that skin would otherwise gather the body's own V and draw a bump.
+fn uvOrphanRender(id:vec3i,spheres:bool)->f32{
+  var near=volume(id)>0.0;
+  if(spheres){for(var axis=0u;axis<3u&&!near;axis++){for(var side=-1;side<=1;side+=2){
+    var n=id;n[axis]+=side;if(volume(n)>0.0){near=true;}}}}
+  if(!near){return -1e30;}
+  let far=1.5*min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
+  var corners:array<f32,64>;
+  for(var k=0u;k<64u;k++){let o=vec3i(i32(k&3u),i32((k>>2u)&3u),i32(k>>4u))-vec3i(1);
+    corners[k]=textureLoad(uvPhiIn,clamp(id+o,vec3i(0),dims()),0).x;}
+  var mass=0.0;var gamma=0.0;var centroid=vec3f(0);var moment=0.0;
+  for(var dz=-1;dz<=1;dz++){for(var dy=-1;dy<=1;dy++){for(var dx=-1;dx<=1;dx++){
+    let c=id+vec3i(dx,dy,dz);if(!valid(c)){continue;}
+    var centre=0.0;for(var k=0u;k<8u;k++){let o=vec3i(dx,dy,dz)+vec3i(1)+uvCorner(k);centre+=corners[o.x+4*o.y+16*o.z];}
+    if(centre<=8.0*far){continue;}
+    let v=volume(c);let d=vec3f(f32(dx),f32(dy),f32(dz));
+    mass+=v;gamma+=2.0*min(v,0.5);centroid+=v*d;moment+=v*dot(d,d);}}}
+  if(mass<0.25){return -1e30;}
+  if(spheres){let flat=UNIFORM_REFERENCE_DIMENSION==2u;
+    let r=select(pow(0.75*mass/3.14159265,1.0/3.0),sqrt(mass/3.14159265),flat);
+    let c=centroid/mass;let spread=moment/mass-dot(c,c);
+    if(spread>select(0.6,0.5,flat)*r*r+0.75){return -1e30;}
+    return 0.5+r-length(c);}
+  let rho=volume(id)/min(max(gamma/select(27.0,9.0,UNIFORM_REFERENCE_DIMENSION==2u),0.01),1.0);
+  if(rho<0.6){return -1e30;}
+  return min(rho,1.0);
+}
+// F. Airborne V keeps its own motion. A cell is airborne when it holds liquid
+// evidence (the tail of a resting surface would otherwise free-fall at g), lies
+// more than 1.5 cells from phi's surface -- so it owns no pressure row and is
+// no extension source -- and has no solid or domain wall within two cells. Its
+// faces are extension sources, the projection keeps their predicted value and
+// gravity acts on them without the 2h occupancy gate. keepab tore films
+// because ballistic faces on a CONTACT film are not divergence free; free
+// flight is the physically correct model for liquid in the air.
+fn uvAirborneCell(id:vec3i)->bool{
+  if(params.splashB.w<0.5||!valid(id)||volume(id)<=max(params.tuning.z,UV_LIQUID_EVIDENCE)){return false;}
+  let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
+  if(uvPhi(vec3f(id)+vec3f(0.5))<=1.5*h){return false;}
+  var lo=id-vec3i(2);var hi=id+vec3i(2);
+  if(UNIFORM_REFERENCE_DIMENSION==2u){lo.z=id.z;hi.z=id.z;}
+  if(any(lo<vec3i(0))||any(hi>=dims())){return false;}
+  if(uvSolidFree()){return true;}
+  for(var z=lo.z;z<=hi.z;z++){for(var y=lo.y;y<=hi.y;y++){for(var x=lo.x;x<=hi.x;x++){
+    if(cellOpenFraction(vec3i(x,y,z))<0.99999){return false;}}}}
+  return true;
+}
+fn uvAirborneAuthority(id:vec3i,rho:f32)->f32{
+  return select(rho,max(rho,CM12_LIQUID_ISOVALUE+1e-3),uvAirborneCell(id));
+}
 @compute @workgroup_size(4,4,4)
 fn uvPublish(@builtin(global_invocation_id)gid:vec3u){
   let id=activeId(gid);if(!valid(id)){return;}
   let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
-  textureStore(volumeOut,id,vec4f(0.5-uvPhi(vec3f(id)+vec3f(0.5))/h));
+  var value=0.5-uvPhi(vec3f(id)+vec3f(0.5))/h;
+  if(params.splash.z>0.5&&value<-1.0){value=max(value,uvOrphanRender(id,params.splash.z>1.5));}
+  textureStore(volumeOut,id,vec4f(value));
   textureStore(gammaOut,id,vec4f(uvOpen(id)));
 }
 

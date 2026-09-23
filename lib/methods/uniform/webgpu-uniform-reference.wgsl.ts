@@ -72,6 +72,17 @@ struct Params {
   // off, or when a QA arm has asked for the unconditional path, and every
   // consumer folds to the original instruction stream at zero.
   lean: vec4f,
+  // Geometric only: the splash-survival experiments
+  // (docs/uniform-geometric-splash-dissipation-plan.md), all inert at zero.
+  // x: redistance keeps the vertices beside the surface (CM11b Sec. 3.4).
+  // y: orphan V in sharpening: 1 stays local, 2 also compacts in place.
+  // z: publish orphan V: 1 CM12 Sec. 3.8 density, 2 equal-volume spheres.
+  // w: small isolated bodies shift phi to their own volume.
+  splash: vec4f,
+  // x: clamped Catmull-Rom phi advection in the band. y: per-cell phi seed
+  // from V. z: drain phi-liquid with no V behind it. w: airborne V keeps
+  // its own momentum.
+  splashB: vec4f,
 }
 @group(0) @binding(0) var velocityIn: texture_3d<f32>;
 @group(0) @binding(1) var velocityOut: texture_storage_3d<rgba32float, write>;
@@ -837,7 +848,7 @@ fn pressureFaceVolumeFractionShared(id:vec3i,axis:u32)->f32{
 // positive-MAC face fractions used by projection; it never reclassifies raw
 // surface density or approximates a second solid boundary.
 fn storeExtrapolationAuthority(id:vec3i){if(!valid(id)){return;}
-  textureStore(volumeOut,id,vec4f(${geometric ? "0.5-pressurePhi(id)/min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z))" : "pressureDensity(id)"}));
+  textureStore(volumeOut,id,vec4f(${geometric ? "uvAirborneAuthority(id,0.5-pressurePhi(id)/min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z)))" : "pressureDensity(id)"}));
   textureStore(velocityOut,id,vec4f(
     ${geometric ? "pressureFaceVolumeFraction(id,0u),pressureFaceVolumeFraction(id,1u),pressureFaceVolumeFraction(id,2u)" : "faceOpenFraction(id,0u),faceOpenFraction(id,1u),faceOpenFraction(id,2u)"},0.0));
 }
@@ -852,7 +863,7 @@ fn buildDenseExtrapolationAuthority(@builtin(global_invocation_id) gid:vec3u){st
 @compute @workgroup_size(4,4,4)
 fn buildExtrapolationDensityAuthority(@builtin(global_invocation_id) gid:vec3u){
   let id=activeId(gid);if(!valid(id)){return;}
-  textureStore(volumeOut,id,vec4f(${geometric ? "0.5-pressurePhi(id)/min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z))" : "pressureDensity(id)"}));
+  textureStore(volumeOut,id,vec4f(${geometric ? "uvAirborneAuthority(id,0.5-pressurePhi(id)/min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z)))" : "pressureDensity(id)"}));
 }
 // Projection enforces body velocity on interior faces, so that value cannot be
 // used as the undisturbed fluid velocity for form drag. Sample six wet, open
@@ -1152,7 +1163,7 @@ fn applyVelocityForces(id:vec3i,inputVelocity:vec3f,dt:f32,h:vec3f)->vec3f{
   // leaves a thin sheet with no way to separate from a ceiling.
   let centerLiquid=occupancy>1e-5;
   let yLiquid=yOccupancy>1e-5;
-  if(centerLiquid||yLiquid){v.y+=params.cellGravity.w*dt;}
+  if(centerLiquid||yLiquid${geometric ? "||uvAirborneCell(id)||uvAirborneCell(qy)" : ""}){v.y+=params.cellGravity.w*dt;}
   let qx=id+vec3i(1,0,0);let qz=id+vec3i(0,0,1);
   let xOccupancy=surfaceOccupancy(qx);let zOccupancy=surfaceOccupancy(qz);
   // Balanced-force CSF: pressure and capillary acceleration use the same
@@ -1359,7 +1370,8 @@ fn geometricProjectedFace(id:vec3i,axis:u32,predicted:f32)->f32{
   var q=id;q[axis]+=1;
   if(pressureFaceVolumeFractionShared(id,axis)<=1e-6){return pressureFaceData(id,axis)[axis];}
   let a=pressurePhi(id)<0.0;let b=pressurePhi(q)<0.0;
-  if(!a&&!b){return 0.0;}
+  // An airborne face keeps its own momentum: see uvAirborneCell.
+  if(!a&&!b){return select(0.0,predicted,uvAirborneCell(id)||uvAirborneCell(q));}
   var theta=1.0;
   if(a&&!b){theta=ghostFluidFraction(id,q);}
   if(!a&&b){theta=ghostFluidFraction(q,id);}

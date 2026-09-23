@@ -70,6 +70,68 @@ params.push({kind:"number",key:"phiAgreementClamp",label:"Agreement clamp",defau
   min:0,max:0.5,step:0.005,digits:3,unit:"cells / step",
   hint:"Largest shift in one step. At gain 0.05 the dam break does not care (0.01 to 0.05 all read the same roughness); the thin film does: 0.002 cannot keep up with its erosion, 0.02 and 0.05 hold phi within 6-14% of V."});
 
+// Splash survival (docs/uniform-geometric-splash-dissipation-plan.md): independent
+// stages for comparing in the app. Cubic advection, the ghost drain and airborne
+// momentum ship on; the rest are off. 3D only -- not in the native contract.
+/** The long-form tooltips, shared by the parameter and its SIM panel switch. */
+export const UNIFORM_GEOMETRIC_SPLASH_HINTS = Object.freeze({
+  phiCubicAdvection: [
+    "Moves the level set with a cubic resample instead of a trilinear one, so curved surfaces -- drops, sheet rims, a splash crown -- stop shrinking a little on every step they move.",
+    "Why: each step, every vertex traces back along the velocity (RK2) and reads phi at its departure point. A signed distance field is convex outside a convex body, and trilinear interpolation overestimates a convex function, so each resample pushes the zero contour inward by up to h²/4r. Flat pools (r infinite) do not notice; small, fast, curved features erode fastest, which is why only splashes look dissipative.",
+    "How: a vertex whose trilinear read is within 2 cells of the surface re-reads phi with a separable Catmull-Rom cubic over the 4×4×4 vertices around its departure point. Catmull-Rom reproduces quadratics exactly, so the curvature bias drops from second to third order. The result is clamped to the lowest and highest of the 8 vertices enclosing the departure point, so it adds no new extrema: no overshoot or ringing at a crease or a thin sheet.",
+    "Scope and cost: 64 taps instead of 8, on band vertices only; deep liquid and far air keep the trilinear read. A far-air vertex the lean path would skip is still advected when it traces back into a two-level shell tile, so airborne drops get the cubic read too. Frame time within run-to-run noise on the crown splash.",
+    "Measured (cm12-figure-6, frame 90, this toggle alone): V inside phi 80,425 → 84,409 of about 94,000 cell volumes; V stranded in the relay band 7,303 → 4,794. No effect on a drop at rest: it does not move, so nothing is resampled. The resting shrink comes from redistancing (see Redistance surface).",
+    "Off: the trilinear resample.",
+  ].join("\n\n"),
+  phiDrain: [
+    "Removes ghost liquid: level set that still says liquid where no volume is left behind it. The surface stops drawing water that has already gone, and V and phi agree about where the liquid is.",
+    "Why: V (the conservative per-cell volume) decides how much liquid there is; phi only decides where it is, and phi is merely advected. It can keep a liquid region after V has left it: a sheet whose V was sharpened into the pool, a drop whose V was relayed away, a sliver trailing a fast front. Nothing else in the step removes it except the global total-volume shift, which takes the difference off every surface at once, drops and pool alike.",
+    "How: during phi advection, a vertex whose advected phi is below half a cell (liquid, or just outside the surface) checks the 4×4×4 cells around its departure point, using the start-of-step V. If none holds more than 5% of a cell, phi rises by half a cell this step, capped at +h/2, just outside the surface. A ghost two cells deep is air after four steps and settles at +h/2 on the fifth; redistancing then rebuilds a proper distance around what remains.",
+    "Safety: any cell with real V nearby leaves the vertex alone, so a genuine surface -- even a film holding 5% of a cell -- is never drained, and resting drops and pools are untouched (every liquid vertex has V beneath it).",
+    "Scope and cost: a 64-cell read, only for band vertices below h/2.",
+    "Off: ghost phi stays until the total-volume shift or a merge absorbs it.",
+  ].join("\n\n"),
+  airborneMomentum: [
+    "Liquid volume flying through the air keeps its own velocity and falls under gravity, instead of hanging in place or being dragged along by the pool's surface velocity. Spray and drops that phi has lost keep a ballistic path, land where they should, and are picked up again by the surface they hit.",
+    "Why: only cells phi calls liquid own pressure rows and velocity. V more than about a cell from phi's surface has neither. Gravity is gated on surface occupancy (phi under 2 cells), the projection zeroes faces between two rowless cells, and velocity extension then overwrites those faces with the nearest phi-liquid's velocity. So airborne V floats, or slides with the pool, until sharpening pours it into the nearest body.",
+    "Which cells: a cell is airborne when it holds more than 5% of a cell of V (the same liquid threshold the ghost-phi drain uses), its centre phi is more than 1.5 cells outside the surface (it has no pressure row and is not already an extension source), and the 5×5×5 box around it (5×5 in 2D) lies inside the domain and is fully open, with no solid or wall within two cells.",
+    "What changes for them: (1) Extension: their authority is raised just above the 0.5 liquid isovalue, so their faces are extension sources, copied outward rather than overwritten, and they count as momentum donors in advection. (2) Gravity: applied to their vertical faces without the 2-cell occupancy gate. (3) Projection: their predicted face velocity is kept rather than zeroed. No pressure acts on them, which is free flight.",
+    "The 5% floor is deliberate: transport and sharpening leave a thin V tail above every surface, about 0.5% of a cell 1.5 cells up over a resting pool and 0.001% a cell higher. With the dust floor alone that tail qualified and fell at g, putting 0.65 m/s into a still pool's air. Thinner V near a real drop still moves with it, as an extension target of the drop's faces.",
+    "The wall and solid clearance is deliberate: ballistic faces on a film touching a wall are not divergence free, and an earlier version (keepab) tore contact films.",
+    "Cost: a 125-cell open-fraction check per candidate cell, skipped when the scene has no solids. One run on the crown splash: 51.4 ms against 48.4 ms (+6%).",
+    "Measured (cm12-figure-6, frame 90, this toggle alone): V inside phi 80,425 → 90,782 of about 94,000 cell volumes; relay band 7,303 → 1,191; far orphan V 6,061 → 2,123. The largest single gain of the splash toggles. With the dust floor in place of the 5% floor it reached 92,003, but it also set a still pool's air moving.",
+    "Off: airborne V has no velocity of its own.",
+  ].join("\n\n"),
+});
+const splash: MethodParamSpec[] = [
+  {kind:"select",key:"redistanceSurface",label:"Redistance surface",default:"rebuild",tier:"fine",update:"runtime",
+    options:[{value:"rebuild",label:"Rebuild"},{value:"preserve",label:"Preserve"},{value:"sparse",label:"Preserve, every 10th"}],
+    hint:"Rebuild re-measures every band vertex against the trilinear contour each step, which moves a curved surface inward by up to h²/4r a step even at rest. Preserve leaves every vertex of a cell the surface crosses at its advected value and clamps the surface's edge neighbours to one cell (CM11b Sec. 3.4). Every 10th also redistances only one step in ten, as that paper does."},
+  {kind:"select",key:"phiCubicAdvection",label:"Cubic phi advection",default:"on",tier:"fine",update:"runtime",
+    options:[{value:"on",label:"On"},{value:"off",label:"Off"}],
+    hint:UNIFORM_GEOMETRIC_SPLASH_HINTS.phiCubicAdvection},
+  {kind:"select",key:"orphanVolume",label:"Orphan volume",default:"relay",tier:"fine",update:"runtime",
+    options:[{value:"relay",label:"Relay"},{value:"local",label:"Local"},{value:"compact",label:"Compact"}],
+    hint:"What sharpening does with V that phi has lost. Relay pours it down phi's gradient into the nearest surface within 2.1h, across empty air if need be. Local lets an air cell receive only if it already holds V or sits within a cell of the surface, so V cannot jump a gap into another body. Compact also gathers V far from any surface up its own gradient, into full cells."},
+  {kind:"select",key:"orphanVolumeRender",label:"Show orphan volume",default:"off",tier:"fine",update:"runtime",
+    options:[{value:"off",label:"Off"},{value:"density",label:"Density"},{value:"spheres",label:"Spheres"}],
+    hint:"Publish V more than 1.5 cells from any phi surface, which phi alone draws as nothing. Density is CM12 Sec. 3.8's rho/gamma amplification over 3³ cells; Spheres draws each 3³ cluster as a sphere of its own volume. Presentation only: no solver stage reads it."},
+  {kind:"select",key:"isolatedBodyVolume",label:"Isolated body volume",default:"off",tier:"fine",update:"runtime",
+    options:[{value:"on",label:"On"},{value:"off",label:"Off"}],
+    hint:"A vertex within a cell of the surface whose 12³ window holds a whole body -- nothing in the window's outer shell -- moves phi along its normal by that body's own V minus fill, at most a quarter cell a step. A pool never qualifies, so it cannot pump. Replaces Follow V while on."},
+  {kind:"select",key:"phiSeedCells",label:"Seed phi from V cells",default:"off",tier:"fine",update:"runtime",
+    options:[{value:"on",label:"On"},{value:"off",label:"Off"}],
+    hint:"Where no cell centre nearby is phi-liquid, write the implied depth of the fullest incident cell holding over half its capacity, read at the vertex's departure point. Unlike the averaged seed this fires for a single full cell, so a compacted drop owns a pressure row."},
+  {kind:"select",key:"phiDrain",label:"Drain ghost phi",default:"on",tier:"fine",update:"runtime",
+    options:[{value:"on",label:"On"},{value:"off",label:"Off"}],
+    hint:UNIFORM_GEOMETRIC_SPLASH_HINTS.phiDrain},
+  {kind:"select",key:"airborneMomentum",label:"Airborne momentum",default:"on",tier:"fine",update:"runtime",
+    options:[{value:"on",label:"On"},{value:"off",label:"Off"}],
+    hint:UNIFORM_GEOMETRIC_SPLASH_HINTS.airborneMomentum},
+];
+params.push(...splash);
+export const UNIFORM_GEOMETRIC_SPLASH_KEYS: ReadonlySet<string> = new Set(splash.map(p => p.key));
+
 params.push({kind:"select",key:"totalSurfaceVolume",label:"Total surface volume",default:"on",tier:"coarse",update:"runtime",
   options:[{value:"off",label:"Off"},{value:"on",label:"On"}],
   hint:"Shift the existing surface uniformly along its normals to match total conservative V. Bounded to one cell per step; no regional correction or phi seeding. One global constraint across all liquid bodies. Includes continuous inflow."});
@@ -81,7 +143,7 @@ params.push({kind:"select",key:"surfaceDeficitBalancing",label:"Surface-deficit 
 /** Shared by the studio and scene harnesses. */
 export const UNIFORM_GEOMETRIC_PARAMS: readonly MethodParamSpec[] = Object.freeze(params);
 /** Storage is a WebGPU implementation choice, excluded from the native contract. */
-export const UNIFORM_GEOMETRIC_NATIVE_PARAMS = Object.freeze(params.filter(p => p.key !== "volumeStorage" && p.key !== "pageSize"));
+export const UNIFORM_GEOMETRIC_NATIVE_PARAMS = Object.freeze(params.filter(p => p.key !== "volumeStorage" && p.key !== "pageSize" && !UNIFORM_GEOMETRIC_SPLASH_KEYS.has(p.key)));
 export const UNIFORM_GEOMETRIC_DEFAULTS: Readonly<MethodParamValues> = Object.freeze(
   Object.fromEntries(params.map(p => [p.key, p.default])),
 );

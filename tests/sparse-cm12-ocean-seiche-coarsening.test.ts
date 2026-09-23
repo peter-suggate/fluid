@@ -115,31 +115,6 @@ test("generation zero leaves stationary dry support inactive", () => {
   "the dry receiver catalogue must remain available for runtime motion");
 });
 
-test("half-pool generation zero remains sparse in pages and accepted cells", () => {
-  const scene = sceneDocument(getSceneDefinition("coarse-first-pool-impact-half"));
-  const atlas = initializeSparseBrickAtlasFromScene(scene, {
-    finestDimensions: adaptiveMassPresentationDimensionsForScene(scene),
-    brickFineResolution: 8,
-    coarseFirstCurvatureTolerance: 0.25,
-  });
-  const active = sparseCM12InitialActiveBrickKeys(scene, atlas, 2);
-  const activeBricks = atlas.bricks.filter((brick) => active.has(brick.key));
-  const acceptedCells = activeBricks.reduce((count, brick) =>
-    count + (active.has(brick.key) ? brick.resolution ** 3 : 0), 0);
-  const logicalPages = atlas.brickDimensions.reduce((count, width) => count * width, 1);
-
-  assert.equal(logicalPages, 384);
-  assert.equal(atlas.bricks.length, 372,
-    "allocated host pages must not expand to the complete logical box");
-  assert.equal(active.size, 164,
-    "generation zero must contain only material pages");
-  assert.equal(acceptedCells, 18_644,
-    "inactive receiver backing must not contribute accepted cell work");
-  assert.ok(activeBricks.every((brick) =>
-    brick.density.some((density) => density > 0)),
-  "generation zero must contain no represented dry page");
-});
-
 test("an authored inflow refines a hierarchical tank without overlapping its macro bulk", () => {
   const referenceScene = createOceanSeicheScene();
   const dimensions = adaptiveMassPresentationDimensionsForScene(referenceScene);

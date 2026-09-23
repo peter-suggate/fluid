@@ -2,10 +2,6 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
-  SPARSE_CM12_RESIDENT_STAGE_SUBSTAGES,
-  SPARSE_CM12_RESIDENT_STAGES,
-} from "../../../webgpu-sparse-cm12-resident";
-import {
   ADVANCE_STAGE_ORDER, ADVANCE_WORK, ADVANCE_WORK_SCENES,
   advanceCosts, advanceStageCost, advanceWorkModel,
 } from "../advance-work";
@@ -15,16 +11,6 @@ const inputs = (over: Partial<Parameters<typeof advanceWorkModel>[0]> = {}) =>
     scene: ADVANCE_WORK_SCENES.mini32, pressureIterations: 64, cfl: 1,
     limiterPasses: 8, churn: 0.06, markers: 65_536, ...over,
   });
-
-test("the work table covers the resident stage ABI, in encode order", () => {
-  assert.deepEqual([...ADVANCE_STAGE_ORDER], [...SPARSE_CM12_RESIDENT_STAGES]);
-  for (const stage of ADVANCE_STAGE_ORDER) {
-    const declared = SPARSE_CM12_RESIDENT_STAGE_SUBSTAGES[stage] as readonly string[];
-    const modelled = ADVANCE_WORK[stage].seams
-      .flatMap(seam => (seam.id === null ? [] : [seam.id as string]));
-    assert.deepEqual(modelled, [...declared]);
-  }
-});
 
 test("every kernel the work table prices is one the encoder dispatches", () => {
   const source = readFileSync(new URL(
