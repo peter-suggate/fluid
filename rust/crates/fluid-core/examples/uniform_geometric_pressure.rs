@@ -30,7 +30,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fine.topology = r.topology;
     fine.minimum = r.minimum;
     fine.rhs = r.rhs;
-    solver.solve(&r.options, r.dt, r.rho, false);
+    let budget = (r.options.pressure_full_cycles + r.options.pressure_v_cycles) as usize;
+    solver.solve(&r.options, r.dt, r.rho, false, budget);
     println!(
         "{}",
         serde_json::json!({"receipt":solver.receipt,"pressure":solver.levels[0].p})

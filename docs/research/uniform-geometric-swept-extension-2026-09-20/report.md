@@ -1,5 +1,7 @@
 # 2D surface / conservative-volume experiment
 
+> **Retired 2026-09-23.** The 2D Uniform Geometric method now runs the 3D default algorithm (see `docs/research/uniform-geometric-2d-2026-09-20/implementation-status.md`). The Rust-only experiment recorded here was removed together with its driver script; the committed data and plots remain as the record.
+
 Status: the user preferred the total-area-only control over regional correction. Total area is now the default in 2D, and its total-volume counterpart is the default in 3D. The regional variants remain opt-in experiments. The following records the original experiment and review candidate.
 
 Open `/advance-lab?method=uniform-volume&scene=sparse-cm12-ladder-long-dam&surfaceExperiment=regional-area` on the local development server. The **2D surface experiment** selector offers Baseline, Smooth regional correction, Regional + total area, and Total area only (control). Switching resets and pauses. Use 1/30 s and watch the first two seconds; the baseline has its deepest collapse around 1.5 s. The sidebar reports contour area / V and cellwise absolute V/contour disagreement / V.

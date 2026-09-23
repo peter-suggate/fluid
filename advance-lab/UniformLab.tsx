@@ -44,7 +44,6 @@ import {
   UNIFORM_LAB_VALUES,
   uniformLabSceneLimitation,
   type UniformView,
-  type SurfaceExperiment,
 } from "../lib/physics-wasm/uniform-controller";
 import {
   advanceRdfTriangles,
@@ -56,12 +55,6 @@ import css from "./UniformLab.module.css";
 const stages = UNIFORM_VOLUME_PIPELINE.stages;
 const STAGE_OPTIONS = stages.map((s) => ({ value: s.id, label: s.label }));
 const STEP_OPTIONS = STEP_SIZES.map((step) => ({ value: String(step.dt), label: step.label }));
-const SURFACE_OPTIONS: readonly { readonly value: SurfaceExperiment; readonly label: string }[] = [
-  { value: "off", label: "Baseline" },
-  { value: "regional", label: "Smooth regional correction" },
-  { value: "regional-area", label: "Regional + total area" },
-  { value: "area-only", label: "Total area (default)" },
-];
 interface Camera {
   zoom: number;
   x: number;
@@ -304,7 +297,7 @@ export function UniformLab() {
 }
 function UniformRun({ session }: { session: PaneSession }) {
   const [store] = useState(() => createUniformLabStore(location.search));
-  const { sceneId, dt, layers, surfaceExperiment, surfaceDeficitBalancing, sliceDepth_m, sliceView: camera } = useStore(store);
+  const { sceneId, dt, layers, totalSurfaceVolume, surfaceDeficitBalancing, sliceDepth_m, sliceView: camera } = useStore(store);
   const scene = useStore(session.scene, (state) => state.scene);
   const nz = sceneLatticeDimensions(scene, Number.MAX_SAFE_INTEGER)[2];
   const slice = uniformLabSlice(scene, nz, sliceDepth_m);
@@ -383,7 +376,7 @@ function UniformRun({ session }: { session: PaneSession }) {
           return;
         }
         controller.current = owner;
-        const initial = await owner.load(scene, surfaceExperiment, surfaceDeficitBalancing, sliceDepth_m);
+        const initial = await owner.load(scene, { totalSurfaceVolume, surfaceDeficitBalancing }, sliceDepth_m);
         if (alive) {
           setView(initial);
           setLoading(false);
@@ -401,7 +394,7 @@ function UniformRun({ session }: { session: PaneSession }) {
       if (controller.current === owner) controller.current = undefined;
       if (owner) void owner.destroy().catch(() => {});
     };
-  }, [sceneId, surfaceExperiment, surfaceDeficitBalancing, sliceDepth_m, restart, session.scene]);
+  }, [sceneId, totalSurfaceVolume, surfaceDeficitBalancing, sliceDepth_m, restart, session.scene]);
   const edit = (
     operation: (owner: UniformLabController) => Promise<UniformView>,
   ) => {
@@ -506,10 +499,13 @@ function UniformRun({ session }: { session: PaneSession }) {
   const keys = new Set(
     (stage.controls ?? []).flatMap((c) => ("param" in c ? [c.param] : [])),
   );
+  const values: Readonly<Record<string, unknown>> = {
+    ...UNIFORM_LAB_VALUES,
+    totalSurfaceVolume: totalSurfaceVolume ? "on" : "off",
+    surfaceDeficitBalancing: surfaceDeficitBalancing ? "on" : "off",
+  };
   const parameters = UNIFORM_GEOMETRIC_PARAMS.filter(
-    (p) =>
-      keys.has(p.key) &&
-      !["activeRegion", "pressureWindow", "sharpeningWorkMap", "volumeStorage"].includes(p.key),
+    (p) => keys.has(p.key) && p.key in values && p.key !== "sharpeningWorkMap",
   );
   const total = view?.volume.reduce((a, b) => a + b, 0) ?? 0,
     initial =
@@ -954,29 +950,26 @@ function UniformRun({ session }: { session: PaneSession }) {
               }} />
           </label>
           <p className={css.muted}>Changing depth restarts the run. Scenery blocks water; rigid bodies and the nozzle retain their XY projection.</p>
-          <label>
-            2D surface correction
-            <Select
-              ariaLabel="2D surface correction"
-              value={surfaceExperiment}
-              options={SURFACE_OPTIONS}
+          <div className={css.option}>
+            <Switch
+              ariaLabel="Total surface volume"
+              label="Total surface volume"
+              checked={totalSurfaceVolume}
               disabled={loading}
-              onChange={(value) => {
+              onChange={(checked) => {
                 setPlaying(false);
                 beginLoad();
-                store.setState({ surfaceExperiment: value });
+                store.setState({ totalSurfaceVolume: checked });
               }}
             />
-          </label>
+          </div>
           <p className={css.muted}>
-            {surfaceExperiment === "off" ? "Original surface advection." : surfaceExperiment === "area-only" ? "Bounded surface shift to match total V." : "Smooth displacements of the advected surface from regional V/phi error."}
-            {surfaceExperiment === "regional-area" ? " Includes a total-area constraint." : ""}
-            {" "}Changing the correction resets and pauses the scene.
+            Shifts the surface along its normals, at most one cell per step, to match total V.
           </p>
           <div className={css.option}>
             <Switch
               ariaLabel="Surface-deficit balancing"
-              label="Surface-deficit balancing (2D experiment)"
+              label="Surface-deficit balancing"
               checked={surfaceDeficitBalancing}
               disabled={loading}
               onChange={(checked) => {
@@ -988,7 +981,7 @@ function UniformRun({ session }: { session: PaneSession }) {
           </div>
           <p className={css.muted}>
             Preserves overfill expansion and balances it with contraction in underfilled liquid to reduce persistent sloshing.
-            {" "}Changing this resets and pauses the scene.
+            {" "}Both are on in 3D; changing either resets and pauses the scene.
           </p>
           <Facts className={css.facts} items={[
             {
@@ -1039,8 +1032,8 @@ function UniformRun({ session }: { session: PaneSession }) {
                 label: p.label,
                 hint: p.hint,
                 value: p.kind === "select"
-                  ? p.options.find((o) => o.value === UNIFORM_LAB_VALUES[p.key])?.label
-                  : `${UNIFORM_LAB_VALUES[p.key]} ${p.unit ?? ""}`,
+                  ? p.options.find((o) => o.value === values[p.key])?.label
+                  : `${values[p.key]} ${p.unit ?? ""}`,
               }))} />
             )}
           </details>

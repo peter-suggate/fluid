@@ -856,8 +856,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.volumePressureRows = options.volumePressureRows === "all" ? 2 : options.volumePressureRows === true || options.volumePressureRows === "abandoned" ? 1 : 0;
     this.volumeCompaction = options.volumeCompaction === true;
     this.phiSeedFromVolume = options.phiSeedFromVolume === true;
-    this.surfaceDeficitBalancing = this.geometricVolume && (options.referenceDimension ?? 3) === 3 && options.surfaceDeficitBalancing !== false;
-    this.totalSurfaceVolume = this.geometricVolume && (options.referenceDimension ?? 3) === 3 && options.totalSurfaceVolume !== false;
+    this.surfaceDeficitBalancing = this.geometricVolume && options.surfaceDeficitBalancing !== false;
+    // The 2D reference runs the same correction: with one cell layer its band,
+    // metric and six-tetrahedron fill reduce exactly to the planar algorithm.
+    this.totalSurfaceVolume = this.geometricVolume && options.totalSurfaceVolume !== false;
     this.phiAgreementGain = Number.isFinite(options.phiAgreementGain) ? Math.min(1, Math.max(0, options.phiAgreementGain!)) : 0;
     this.phiAgreementClamp = Number.isFinite(options.phiAgreementClamp) ? Math.min(0.5, Math.max(0, options.phiAgreementClamp!)) : 0.02;
     // Uniform Geometric calls this the SOLVE WINDOW. It needs a positive dust
@@ -1399,7 +1401,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.present(this.velocityB);
       this.present(this.velocityExtrapolator.activeStateTexture);
     }
-    if (this.geometricVolume && (options.referenceDimension ?? 3) === 3) {
+    if (this.geometricVolume) {
       this.surfaceVolumeCorrection = new UniformSurfaceVolumeCorrection(device, [nx,ny,nz],
         [scene.container.width_m/nx,scene.container.height_m/ny,scene.container.depth_m/nz],
         this.vertexPhiField!,this.volumeB,this.gammaB,this.fieldPages,options.surfaceCorrectionForQA !== "dense" && uniformAbOn("surfacewindow"));

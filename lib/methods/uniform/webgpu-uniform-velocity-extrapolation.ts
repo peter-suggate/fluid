@@ -376,8 +376,10 @@ export class WebGPUUniformVelocityExtrapolator {
     // The 4h level the parent's two-level sampler reads. Its prolong-filled
     // `up` texture is the complete field; when it is also the coarsest level
     // nothing prolongs into it, and its restricted `down` is the whole result.
+    // The 2D reference's single cell layer is a collapsed axis at every level;
+    // its sampler clamps to that one coarse layer, so the table still applies.
     const coarse = this.hierarchyLevels[1];
-    if (coarse && dims.every((value, axis) => value === 4 * coarse.dims[axis]!)) {
+    if (coarse && dims.every((value, axis) => value === 4 * coarse.dims[axis]! || (value === 1 && coarse.dims[axis] === 1))) {
       this.coarseVelocityLevel = this.hierarchyLevels.length > 2 ? coarse.up : coarse.down;
       // The two storage-texture outputs are inert here but must still be
       // distinct subresources: one dispatch may not write the same texture

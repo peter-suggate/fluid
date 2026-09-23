@@ -1,5 +1,7 @@
 # Preserve overfill, compensate globally
 
+> **Retired 2026-09-23.** The 2D Uniform Geometric method now runs the 3D default algorithm (see `docs/research/uniform-geometric-2d-2026-09-20/implementation-status.md`). The Rust-only experiment recorded here was removed together with its driver script; the committed data and plots remain as the record.
+
 Follow-up to [the late-energy investigation](../uniform-geometric-late-energy-2026-09-20/README.md). All experiments retain the original positive overfill divergence, including its strength and cap. They are opt-in native 2D diagnostics; no shared/UI default changes.
 
 **Best tested compromise: balance the expansion against genuine volume deficits elsewhere in the represented liquid.** Mean kinetic energy over 90–120 s falls from **1,812 to 422 J/m**, while the initial impact peak changes by **+0.37%**. It uses one pressure solve and avoids an arbitrary velocity damping coefficient. It improves decay rather than guaranteeing rest or energy monotonicity.

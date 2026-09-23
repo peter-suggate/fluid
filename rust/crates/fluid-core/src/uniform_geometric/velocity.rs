@@ -1,12 +1,25 @@
-//! CM11b velocity transport, including bounded MacCormack and liquid-only gathers.
-use super::{extension::Extension, grid::Grid, options::UniformGeometricOptions};
+//! CM11b semi-Lagrangian velocity transport: reference.wgsl semiLagrangianAdvection.
+use super::{
+    extension::{Extension, FINE},
+    grid::Grid,
+    options::UniformGeometricOptions,
+};
 
-pub fn phase(g: &Grid, o: &UniformGeometricOptions) -> Vec<bool> {
-    (0..g.volume.len())
-        .map(|i| g.capacity[i] > 1e-5 && g.pressure_phi(g.point(i), &o.volume_pressure_rows) < 0.0)
-        .collect()
+/// Static solid voxel occupancy with the one-cell halo the GPU packs. The 2D
+/// domain walls are the voxel shell the parity scenes author
+/// (solid-world.ts boxSolidVoxelShell with the container's top); cells inside
+/// the domain use the capacity field as their voxel proxy.
+pub(super) fn solid_voxel(g: &Grid, c: [i32; 2]) -> bool {
+    if let Some(i) = g.index(c) {
+        return g.capacity[i] <= 1e-5;
+    }
+    let n = g.dims.map(|v| v as i32);
+    let inside = |a: usize| c[a] >= 0 && c[a] < n[a];
+    (inside(1) && (c[0] == -1 || c[0] == n[0]))
+        || (inside(0) && (c[1] == -1 || (c[1] == n[1] && !g.open_top)))
 }
 
+// reference.wgsl clampVelocityTraceToDomain.
 fn clamp(g: &Grid, mut p: [f32; 2]) -> [f32; 2] {
     p[0] = p[0].clamp(0.0, g.dims[0] as f32);
     p[1] = p[1].max(0.0);
@@ -16,10 +29,23 @@ fn clamp(g: &Grid, mut p: [f32; 2]) -> [f32; 2] {
     p
 }
 
+// reference.wgsl staticSolidVoxelAtWorld(traceWorld(p)), including the world
+// round trip that decides which voxel an endpoint on a cell edge lands in.
+fn trace_solid(g: &Grid, p: [f32; 2]) -> bool {
+    let width = g.dims[0] as f32 * g.h[0];
+    let world = [-0.5 * width + p[0] * g.h[0], p[1] * g.h[1]];
+    let cell = [
+        ((world[0] + 0.5 * width) / g.h[0]).floor() as i32,
+        (world[1] / g.h[1]).floor() as i32,
+    ];
+    solid_voxel(g, cell)
+}
+
+// reference.wgsl departurePoint then clipDepartureAtSolid.
 fn departure(g: &Grid, e: &Extension, start: [f32; 2], dt: f32) -> [f32; 2] {
     let mut q = start;
     let mut remaining = dt.abs();
-    let direction = dt.signum();
+    let direction = if dt >= 0.0 { 1.0 } else { -1.0 };
     for _ in 0..32 {
         if remaining <= 1e-7 {
             break;
@@ -39,175 +65,75 @@ fn departure(g: &Grid, e: &Extension, start: [f32; 2], dt: f32) -> [f32; 2] {
         );
         remaining -= step;
     }
-    // Velocity uses the source's endpoint test and eight bisections. The phi
-    // characteristic deliberately has a different, half-cell chord walk.
-    let solid = |p: [f32; 2]| {
-        let cell = p.map(|v| v.floor() as i32);
-        g.index(cell).is_some_and(|i| g.capacity[i] <= 1e-5)
-    };
-    if solid(q) {
-        let mut lo = 0.0;
-        let mut hi = 1.0;
-        for _ in 0..8 {
-            let mid = 0.5 * (lo + hi);
-            if solid(std::array::from_fn(|a| start[a] + mid * (q[a] - start[a]))) {
-                hi = mid;
-            } else {
-                lo = mid;
-            }
-        }
-        q = std::array::from_fn(|a| start[a] + lo * (q[a] - start[a]));
+    if !trace_solid(g, q) {
+        return q;
     }
-    q
-}
-
-fn stencil(g: &Grid, p: [f32; 2], a: usize) -> [([i32; 2], f32); 4] {
-    let q: [f32; 2] = std::array::from_fn(|b| {
-        (p[b] - if a == b { 1.0 } else { 0.5 })
-            .clamp(if a == b { -1.0 } else { 0.0 }, g.dims[b] as f32 - 1.0)
-    });
-    let base = q.map(|v| v.floor() as i32);
-    let f = q.map(|v| v - v.floor());
-    std::array::from_fn(|k| {
-        (
-            [base[0] + (k & 1) as i32, base[1] + (k >> 1) as i32],
-            (if k & 1 == 0 { 1.0 - f[0] } else { f[0] })
-                * (if k & 2 == 0 { 1.0 - f[1] } else { f[1] }),
-        )
-    })
-}
-
-fn physical(g: &Grid, phase: &[bool], p: [f32; 2], a: usize) -> Option<f32> {
-    let mut terms = [[0.0; 2]; 4];
-    for (k, (donor, w)) in stencil(g, p, a).into_iter().enumerate() {
-        let mut neighbor = donor;
-        neighbor[a] += 1;
-        if g.index(donor).is_some_and(|i| phase[i]) || g.index(neighbor).is_some_and(|i| phase[i]) {
-            terms[k] = [w * g.face(donor, a), w];
+    // MSL mix(x, y, t) is x + (y - x) * t.
+    let mix = |t: f32| -> [f32; 2] { std::array::from_fn(|a| start[a] + (q[a] - start[a]) * t) };
+    let mut lo = 0.0;
+    let mut hi = 1.0;
+    for _ in 0..8 {
+        let mid = 0.5 * (lo + hi);
+        if trace_solid(g, mix(mid)) {
+            hi = mid;
+        } else {
+            lo = mid;
         }
     }
-    let sum: [f32; 2] =
-        std::array::from_fn(|a| (terms[0][a] + terms[1][a]) + (terms[2][a] + terms[3][a]));
-    (sum[1] > 0.0).then(|| sum[0] / sum[1])
+    mix(lo)
 }
 
-fn component(
+/// E2b's work set: every cell, or with tiled advection only the cells of FINE
+/// tiles (uvTwoLevelFineAt), in raster order within each row.
+pub(super) fn for_each_fine(
     g: &Grid,
     e: &Extension,
-    phase: &[bool],
     o: &UniformGeometricOptions,
-    start: [f32; 2],
-    p: [i32; 2],
-    a: usize,
-    dt: f32,
-) -> f32 {
-    let q = departure(g, e, start, dt);
-    let mut neighbor = p;
-    neighbor[a] += 1;
-    let wet = |p| g.index(p).is_some_and(|i| g.volume[i] > 1e-5);
-    if o.liquid_only_velocity_advection != "on" || !(wet(p) || wet(neighbor)) {
-        return e.sample(q)[a];
+    mut f: impl FnMut(usize, [i32; 2]),
+) {
+    let [nx, ny] = g.dims;
+    if !(o.two_level_advection == "tiles" && e.two_level.enabled) {
+        for i in 0..nx * ny {
+            f(i, [(i % nx) as i32, (i / nx) as i32]);
+        }
+        return;
     }
-    if let Some(v) = physical(g, phase, q, a) {
-        return v;
-    }
-    for probe in 1..=16 {
-        let t = probe as f32 / 16.0;
-        if let Some(v) = physical(
-            g,
-            phase,
-            std::array::from_fn(|b| q[b] + t * (start[b] - q[b])),
-            a,
-        ) {
-            return v;
+    let tiles = nx.div_ceil(4);
+    for y in 0..ny {
+        for tx in 0..tiles {
+            if e.classes[tx + tiles * (y / 4)] & FINE == 0 {
+                continue;
+            }
+            for x in 4 * tx..(4 * tx + 4).min(nx) {
+                f(x + nx * y, [x as i32, y as i32]);
+            }
         }
     }
-    0.0
 }
 
-fn pass(
-    g: &Grid,
-    e: &Extension,
-    phase: &[bool],
-    o: &UniformGeometricOptions,
-    dt: f32,
-    maccormack: bool,
-) -> Vec<[f32; 2]> {
-    (0..g.volume.len())
-        .map(|i| {
-            let p = g.point(i);
-            if !maccormack
-                && o.two_level_advection == "tiles"
-                && !e.fine_at(p.map(|v| v as f32 + 0.5))
-            {
-                return [0.0; 2];
-            }
-            std::array::from_fn(|a| {
-                let mut start = p.map(|v| v as f32 + 0.5);
-                start[a] += 0.5;
-                let mut v = component(g, e, phase, o, start, p, a, dt);
-                if p[a] == g.dims[a] as i32 - 1 && !(a == 1 && g.open_top) {
-                    v = if maccormack {
-                        g.velocity[i][a]
-                    } else {
-                        v.min(g.velocity[i][a])
-                    };
-                }
-                v
-            })
-        })
-        .collect()
-}
-
-/// Returns the advected field. The caller applies body forces exactly once.
+/// Writes the advected field into `out`. The caller applies body forces
+/// exactly once. E2b: a cell outside the fine tiles carries zero velocity and
+/// no forces.
 pub fn advect(
     g: &Grid,
     e: &Extension,
-    prior_phase: &[bool],
     o: &UniformGeometricOptions,
     dt: f32,
-) -> Vec<[f32; 2]> {
-    if o.velocity_transport != "maccormack" {
-        return pass(g, e, prior_phase, o, dt, false);
-    }
-    let predicted = pass(g, e, prior_phase, o, dt, true);
-    let mut prediction = g.clone();
-    prediction.velocity = predicted.clone();
-    let predicted_extension = Extension::build_prediction(&prediction, o, dt, e);
-    let reversed = pass(
-        &prediction,
-        &predicted_extension,
-        &phase(g, o),
-        o,
-        -dt,
-        true,
-    );
-    // The GPU's shared coarse table is republished by prediction extension;
-    // correction still binds the original fine transport field.
-    let correction_extension = e.with_coarse_from(&predicted_extension);
-    (0..g.volume.len())
-        .map(|i| {
-            let p = g.point(i);
-            std::array::from_fn(|a| {
-                let mut start = p.map(|v| v as f32 + 0.5);
-                start[a] += 0.5;
-                let q = departure(g, &correction_extension, start, dt);
-                let mut lower = f32::INFINITY;
-                let mut upper = f32::NEG_INFINITY;
-                for (donor, w) in stencil(g, q, a) {
-                    if w > 0.0 {
-                        let v = e.fine_face(donor, a);
-                        lower = lower.min(v);
-                        upper = upper.max(v);
-                    }
-                }
-                let corrected = predicted[i][a] + 0.5 * (g.velocity[i][a] - reversed[i][a]);
-                if corrected < lower || corrected > upper {
-                    predicted[i][a]
-                } else {
-                    corrected
-                }
-            })
-        })
-        .collect()
+    out: &mut Vec<[f32; 2]>,
+) {
+    out.clear();
+    out.resize(g.volume.len(), [0.0; 2]);
+    for_each_fine(g, e, o, |i, p| {
+        out[i] = std::array::from_fn(|a| {
+            let mut start = p.map(|v| v as f32 + 0.5);
+            start[a] += 0.5;
+            let v = e.sample(departure(g, e, start, dt))[a];
+            // Keep an old velocity directed away from a positive wall.
+            if p[a] == g.dims[a] as i32 - 1 && !(a == 1 && g.open_top) {
+                v.min(g.velocity[i][a])
+            } else {
+                v
+            }
+        });
+    });
 }

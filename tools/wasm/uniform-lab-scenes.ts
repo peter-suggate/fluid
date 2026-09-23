@@ -17,7 +17,7 @@ import {
   uniformLabSeed,
   UNIFORM_LAB_VALUES,
 } from "../../lib/physics-wasm/uniform-controller";
-import { UNIFORM_GEOMETRIC_DEFAULTS } from "../../lib/methods/uniform/uniform-geometric-parameters";
+import { UNIFORM_GEOMETRIC_DEFAULTS, UNIFORM_GEOMETRIC_NATIVE_PARAMS } from "../../lib/methods/uniform/uniform-geometric-parameters";
 import { PhysicsWasmWorkerRuntime } from "../../lib/physics-wasm/worker-runtime";
 import type { WorkerPort } from "../../lib/physics-wasm/client";
 import type {
@@ -25,23 +25,20 @@ import type {
   PhysicsWorkerRequest,
 } from "../../lib/physics-wasm/protocol";
 import type { FluidWasmModule } from "../../lib/physics-wasm/module";
-assert.equal(uniformLabQuery.read(new URLSearchParams()).surfaceExperiment,"area-only");
-assert.equal(uniformLabQuery.read(new URLSearchParams("surfaceExperiment=off")).surfaceExperiment,"off");
-for (const profile of ["off","area-only"] as const) {
+for (const key of ["totalSurfaceVolume","surfaceDeficitBalancing"] as const) {
+  assert.equal(uniformLabQuery.read(new URLSearchParams())[key],true,`${key} defaults on, as in 3D`);
   const query=new URLSearchParams();
-  uniformLabQuery.write(query,{...uniformLabQuery.read(query),surfaceExperiment:profile});
-  assert.equal(uniformLabQuery.read(query).surfaceExperiment,profile);
-  assert.equal(query.has("surfaceExperiment"),profile==="off");
+  uniformLabQuery.write(query,{...uniformLabQuery.read(query),[key]:false});
+  assert.equal(query.get(key),"0");
+  assert.equal(uniformLabQuery.read(query)[key],false);
 }
-assert.equal(uniformLabQuery.read(new URLSearchParams()).surfaceDeficitBalancing, false);
-assert.equal(uniformLabQuery.read(new URLSearchParams("surfaceDeficitBalancing=1")).surfaceDeficitBalancing, true);
 const summaries: unknown[] = [];
 const baseline = new Map<string, unknown>();
-assert.deepEqual(UNIFORM_LAB_VALUES, {
-  ...UNIFORM_GEOMETRIC_DEFAULTS,
-  activeRegion: "off",
-  surfaceDeficitBalancing: "off",
-});
+assert.deepEqual(
+  UNIFORM_LAB_VALUES,
+  Object.fromEntries(UNIFORM_GEOMETRIC_NATIVE_PARAMS.map((p) => [p.key, UNIFORM_GEOMETRIC_DEFAULTS[p.key]])),
+  "the lab runs the 3D defaults",
+);
 for (const artifact of ["scalar", "simd"] as const) {
   const root = new URL(
     `../../public/wasm/fluid-wasm/${artifact}/`,
@@ -98,7 +95,7 @@ for (const artifact of ["scalar", "simd"] as const) {
       material: { colorLinear: [1, 1, 1] },
     }] };
     const scenerySeed = uniformLabSeed(sceneryScene, 0);
-    let sceneryView = await controller.load(sceneryScene, "area-only", false, 0);
+    let sceneryView = await controller.load(sceneryScene, undefined, 0);
     const wallCells = scenerySeed.capacity.flatMap((capacity, i) => {
       const x = (i % sceneryView.nx + 0.5) * sceneryView.cellSize[0] - sceneryScene.container.width_m / 2;
       return Math.abs(x) < sceneryScene.voxelDomain.finestCellSize_m && capacity === 0 ? [i] : [];
@@ -113,13 +110,12 @@ for (const artifact of ["scalar", "simd"] as const) {
       assert.ok(sceneryView.volume.every(Number.isFinite));
     }
     const balancedScene = sceneDocument(findSceneDefinition("coarse-first-pool-impact-half")!);
-    let balancedView = await controller.load(balancedScene, "area-only", true);
-    assert.equal(balancedView.surfaceDeficitBalancing, true);
+    let balancedView = await controller.load(balancedScene);
+    assert.equal(balancedView.receipt.surfaceDeficitBalancing, true, "on by default, as in 3D");
     balancedView = await controller.advance(1 / 30);
-    assert.equal(balancedView.surfaceDeficitBalancing, true);
     assert.ok(balancedView.velocity.every(Number.isFinite));
-    const baselineView = await controller.load(balancedScene);
-    assert.equal(baselineView.surfaceDeficitBalancing, false, "reloading without the toggle restores baseline");
+    const baselineView = await controller.load(balancedScene, { totalSurfaceVolume: true, surfaceDeficitBalancing: false });
+    assert.equal(baselineView.receipt.surfaceDeficitBalancing, false, "the viewer's opt-out reaches the solver");
     assert.equal(baselineView.revision.frame, 0);
     for (const sceneId of [
       "water-box-dam-break",
@@ -207,29 +203,17 @@ for (const artifact of ["scalar", "simd"] as const) {
       summaries.push(summary);
       console.log(JSON.stringify(summary));
     }
-    for (const profile of ["regional", "regional-area", "area-only"] as const) {
+    for (const totalSurfaceVolume of [true, false]) {
       const scene = sceneDocument(findSceneDefinition("water-box-dam-break")!);
-      let view = await controller.load(scene, profile);
-      assert.equal((view.receipt.surfaceExperiment as {mode:string}).mode, "regional-volume");
+      let view = await controller.load(scene, { totalSurfaceVolume, surfaceDeficitBalancing: true });
+      assert.equal(view.receipt.totalSurfaceVolume, totalSurfaceVolume);
       for (let frame=0; frame<12; frame++) view=await controller.advance(1/30);
-      const receipt=view.receipt.uniform as {contourArea:number; volume:number; sweptExtension:{surface:unknown}};
-      assert.ok(receipt.sweptExtension.surface);
-      if (profile!=="regional") assert.ok(Math.abs(receipt.contourArea-receipt.volume)<0.03);
+      const receipt=view.receipt.uniform as {contourArea:number; volume:number};
+      if (totalSurfaceVolume) assert.ok(Math.abs(receipt.contourArea-receipt.volume)<0.03);
       const fields={volume:[...view.volume], phi:[...view.phi], velocity:[...view.velocity]};
-      if (artifact==="scalar") baseline.set(profile,fields);
-      else assert.deepEqual(fields,baseline.get(profile), `${profile}: scalar/SIMD parity`);
-      if (profile==="regional-area") {
-        await controller.injectLiquid([0.9,0.65],0.08);
-        view=await controller.advance(1/30);
-        const injected=view.receipt.uniform as {injectedVolume:number;sweptExtension:{surface:unknown}};
-        assert.ok(injected.injectedVolume>0);
-        assert.equal(injected.sweptExtension.surface,null,"source frame skips feedback");
-      }
-      const reset=await controller.load(scene);
-      const config=reset.receipt.surfaceExperiment as {mode:string;areaGuard:boolean;agreementIterations:number};
-      assert.equal(config.mode,"regional-volume");assert.equal(config.areaGuard,true);assert.equal(config.agreementIterations,0);
-      const disabled=await controller.load(scene,"off");
-      assert.equal((disabled.receipt.surfaceExperiment as {mode:string}).mode,"off");
+      const key=`tsv-${totalSurfaceVolume}`;
+      if (artifact==="scalar") baseline.set(key,fields);
+      else assert.deepEqual(fields,baseline.get(key), `${key}: scalar/SIMD parity`);
     }
     const scene = sceneDocument(findSceneDefinition("water-box-dam-break")!);
     let edited = await controller.load(scene);
@@ -355,8 +339,8 @@ for (const artifact of ["scalar", "simd"] as const) {
       }).map(([k, v]) => [k, v]),
     );
     const ui = {
-      surfaceExperiment: "regional-area" as const,
-      surfaceDeficitBalancing: true,
+      totalSurfaceVolume: false,
+      surfaceDeficitBalancing: false,
       sliceDepth_m: -0.15,
       sceneId: "water-box-dam-break",
       dt: 1 / 60,

@@ -216,7 +216,7 @@ fn uvReleasedWalls(p:vec3f,advected:f32)->f32{
 fn uvClosedWallPhi(p:vec3f,advected:f32)->f32{
   if(params.dimsDt.w<=0.0){return advected;}
   var interior=p;var contact=false;
-  for(var axis=0u;axis<3u;axis++){
+  for(var axis=0u;axis<UNIFORM_REFERENCE_DIMENSION;axis++){
     for(var side=0u;side<2u;side++){
       let upper=side==1u;let inward=select(1.0,-1.0,upper);
       let plane=select(0.0,f32(dims()[axis]),upper);
@@ -245,7 +245,10 @@ fn uvEmbeddedAir(p:vec3f,advected:f32)->f32{
   let steps=max(1u,u32(ceil(2.0*max(abs(end.x-p.x),max(abs(end.y-p.y),abs(end.z-p.z))))));
   var previous=p;var result=advected;
   for(var step=1u;step<=steps;step++){
-    let q=mix(p,end,f32(step)/f32(steps));let solid=vec3i(floor(q));
+    let q=mix(p,end,f32(step)/f32(steps));var solid=vec3i(floor(q));
+    // Both vertex planes of the 2D reference sit on its one cell layer; the
+    // upper plane's floor would otherwise leave the lattice and never see a wall.
+    if(UNIFORM_REFERENCE_DIMENSION==2u){solid.z=0;}
     if(valid(solid)&&cellOpenFraction(solid)<=1e-5){
       for(var axis=0u;axis<3u;axis++){for(var side=-1;side<=1;side+=2){
         var fluid=solid;fluid[axis]+=side;if(cellOpenFraction(fluid)<=1e-5){continue;}
@@ -405,7 +408,10 @@ fn uvShellTileAt(id:vec3i)->bool{
 fn uvPhiFarAir(vertex:vec3i)->bool{
   if(params.lean.z<=0.5||params.physical.z<0.0){return false;}
   if(uvStepHasExternalSource()){return false;}
-  if(any(vertex<vec3i(4))||any(vertex>dims()-vec3i(4))){return false;}
+  // The 2D reference has no z planes to refuse: its single cell layer is a
+  // symmetry slab, and the plane test would otherwise refuse every vertex.
+  let nearWall=(vertex<vec3i(4))|(vertex>dims()-vec3i(4));
+  if(nearWall.x||nearWall.y||(UNIFORM_REFERENCE_DIMENSION==3u&&nearWall.z)){return false;}
   return !uvShellTileAt(vertex);
 }
 @compute @workgroup_size(4,4,4)

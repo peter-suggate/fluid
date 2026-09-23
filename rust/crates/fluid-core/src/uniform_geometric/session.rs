@@ -124,32 +124,6 @@ impl Session {
         self.ordered(sequence, epoch)?;
         match command.get("type").and_then(|v| v.as_str()) {
             Some("snapshot") => {}
-            Some("set-surface-experiment") => {
-                let profile = command
-                    .get("profile")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| ValidationError("Missing surface experiment profile".into()))?;
-                self.world.swept_extension = super::swept_extension::Config::lab_profile(profile)?;
-            }
-            Some("set-surface-deficit-balancing") => {
-                let enabled = command
-                    .get("enabled")
-                    .and_then(|v| v.as_bool())
-                    .ok_or_else(|| {
-                        ValidationError("Missing surface-deficit balancing state".into())
-                    })?;
-                self.world.energy_experiment = super::energy_experiment::Config {
-                    mode: if enabled {
-                        "balance-surface-deficit"
-                    } else {
-                        "off"
-                    }
-                    .into(),
-                    audit_receipt: false,
-                    ..Default::default()
-                };
-                self.world.energy_receipt = Default::default();
-            }
             Some("inject-liquid") => {
                 let drop: super::grid::LiquidDrop = serde_json::from_value(
                     command
@@ -254,9 +228,10 @@ impl Session {
         value["method"] = serde_json::json!("uniform-volume");
         value["uniform"] =
             serde_json::to_value(&self.world.receipt).expect("uniform receipt is serializable");
-        value["surfaceExperiment"] = serde_json::json!(self.world.swept_extension);
+        value["totalSurfaceVolume"] =
+            serde_json::json!(self.world.options.total_surface_volume == "on");
         value["surfaceDeficitBalancing"] =
-            serde_json::json!(self.world.energy_experiment.mode == "balance-surface-deficit");
+            serde_json::json!(self.world.options.surface_deficit_balancing == "on");
         value["initialVolume"] = serde_json::json!(self.initial_volume);
         value["injectedVolume"] = serde_json::json!(self.injected_volume);
         value["rigidBodies"] = serde_json::json!(self.physical.bodies);

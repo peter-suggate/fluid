@@ -1,250 +1,390 @@
 //! Planar projection of the authored nozzle. Like planar rigid bodies, sources
 //! retain XY position and velocity regardless of their authored Z position.
-//! The emitted area is 2 * radius * planar speed * integrated strength.
 use super::grid::Grid;
 use crate::scene_model::FluidInflow;
 
-pub struct Step {
-    outlet: [f32; 2],
-    direction: [f32; 2],
-    velocity: [f32; 2],
-    length: f32,
-    nozzle_length: f32,
-    radius: f32,
-}
-
-fn strength(i: &FluidInflow, t: f64) -> f64 {
-    if t < i.start_s || t > i.end_s {
+// initial-fluid.ts inflowStrength.
+fn boundary_strength(i: &FluidInflow, t: f64) -> f64 {
+    if t < i.start_s || t >= i.end_s {
         return 0.0;
     }
-    if i.ramp_s == 0.0 {
+    if i.ramp_s <= 0.0 {
         return 1.0;
     }
     1.0_f64
         .min((t - i.start_s) / i.ramp_s)
         .min((i.end_s - t) / i.ramp_s)
-        .max(0.0)
 }
 
-impl Step {
+// inflow-boundary.ts averageInflowStrength.
+fn average_strength(i: &FluidInflow, from: f64, to: f64) -> f64 {
+    if to.partial_cmp(&from) != Some(std::cmp::Ordering::Greater) {
+        return 0.0;
+    }
+    let mut cuts = vec![
+        from,
+        to,
+        i.start_s,
+        i.end_s,
+        i.start_s + i.ramp_s,
+        i.end_s - i.ramp_s,
+        0.5 * (i.start_s + i.end_s),
+    ];
+    cuts.retain(|&t| t >= from && t <= to);
+    cuts.sort_by(f64::total_cmp);
+    cuts.dedup();
+    let integral: f64 = cuts
+        .windows(2)
+        .map(|w| 0.5 * (boundary_strength(i, w[0]) + boundary_strength(i, w[1])) * (w[1] - w[0]))
+        .sum();
+    integral / (to - from)
+}
+
+// WGSL length.
+fn length(v: [f32; 2]) -> f32 {
+    (v[0] * v[0] + v[1] * v[1]).sqrt()
+}
+
+fn smooth_coverage(radius: f32, radial: f32, edge: f32) -> f32 {
+    let c = (0.5 + 0.5 * (radius - radial) / edge).clamp(0.0, 1.0);
+    c * c * (3.0 - 2.0 * c)
+}
+
+/// The nozzle's axis-face velocity boundary: inflow-boundary.ts
+/// applyInflowVelocity and applyInflowSweptVelocity. The 2D reduction keeps
+/// the planar velocity; the aperture is a segment of width 2r across the
+/// dominant-axis face instead of a disk, so its edge width is half a tangent
+/// cell and its target projected width is 2r / |direction[axis]|.
+pub struct Velocity {
+    axis: usize,
+    receiver: i32,
+    donor: i32,
+    face_coordinate: f32,
+    minimum: [f32; 2],
+    h: [f32; 2],
+    outlet: [f32; 2],
+    velocity: [f32; 2],
+    radius: f32,
+    edge: f32,
+    strength: f32,
+    aperture_scale: f32,
+    desired: [f32; 2],
+    dt: f32,
+}
+
+impl Velocity {
     pub fn new(i: &FluidInflow, time: f64, dt: f32, g: &Grid) -> Option<Self> {
-        let end = time + dt as f64;
-        let mut cuts = vec![
-            time,
-            end,
-            i.start_s,
-            i.end_s,
-            i.start_s + i.ramp_s,
-            i.end_s - i.ramp_s,
-            0.5 * (i.start_s + i.end_s),
-        ];
-        cuts.retain(|&t| t >= time && t <= end);
-        cuts.sort_by(f64::total_cmp);
-        cuts.dedup();
-        let integral: f64 = cuts
-            .windows(2)
-            .map(|w| {
-                // Midpoints also handle discontinuous start/end when ramp is zero.
-                strength(i, 0.5 * (w[0] + w[1])) * (w[1] - w[0])
-            })
-            .sum();
-        let speed = i.velocity_m_s.x.hypot(i.velocity_m_s.y);
-        if integral <= 0.0 || speed <= 1e-9 {
+        let strength = (average_strength(i, time, time + dt as f64) as f32).clamp(0.0, 1.0);
+        let planar = [i.velocity_m_s.x, i.velocity_m_s.y];
+        let speed = planar[0].hypot(planar[1]);
+        if strength <= 0.0 || speed <= 1e-6 {
             return None;
         }
-        let direction = [
-            (i.velocity_m_s.x / speed) as f32,
-            (i.velocity_m_s.y / speed) as f32,
+        // inflow-boundary.ts inflowOutletCenter uses the authored 3D speed.
+        let half_length_over_speed = 0.5 * i.length_m / speed.hypot(i.velocity_m_s.z);
+        let outlet64 = [
+            i.center_m.x + planar[0] * half_length_over_speed,
+            i.center_m.y + planar[1] * half_length_over_speed,
         ];
-        let full_speed = speed.hypot(i.velocity_m_s.z);
+        let direction64 = planar.map(|v| v / speed);
+        let axis = if direction64[1].abs() > direction64[0].abs() {
+            1
+        } else {
+            0
+        };
+        let tangent = 1 - axis;
+        let width = g.dims[0] as f64 * g.h[0] as f64;
+        let minimum64 = [-0.5 * width, 0.0];
+        let cell = g.h.map(|v| v as f64);
+        // Host createInflowGridBoundary: f64 aperture normalization.
+        let host_face = ((outlet64[axis] - minimum64[axis]) / cell[axis]).round() - 1.0;
+        let host_face = host_face.min(g.dims[axis] as f64 - 2.0).max(0.0);
+        let edge64 = 0.5 * cell[tangent];
+        let mut weight = 0.0;
+        for k in 0..g.dims[tangent] {
+            let mut point = [0.0; 2];
+            point[axis] = minimum64[axis] + (host_face + 1.0) * cell[axis];
+            point[tangent] = minimum64[tangent] + (k as f64 + 0.5) * cell[tangent];
+            let relative = [point[0] - outlet64[0], point[1] - outlet64[1]];
+            let axial = relative[0] * direction64[0] + relative[1] * direction64[1];
+            let radial =
+                (relative[0] - axial * direction64[0]).hypot(relative[1] - axial * direction64[1]);
+            let c = (0.5 + 0.5 * (i.radius_m - radial) / edge64.max(1e-6)).clamp(0.0, 1.0);
+            weight += c * c * (3.0 - 2.0 * c);
+        }
+        let raw = weight * cell[tangent];
+        let target = 2.0 * i.radius_m / direction64[axis].abs().max(1e-6);
+        let aperture_scale = if raw > 0.0 {
+            (target / raw) as f32
+        } else {
+            0.0
+        };
+        // Shader inflowFaceIndex, in f32 with round-half-even.
+        let minimum = [-0.5 * (g.dims[0] as f32 * g.h[0]), 0.0];
+        let outlet = outlet64.map(|v| v as f32);
+        let velocity = planar.map(|v| v as f32);
+        let face = (((outlet[axis] - minimum[axis]) / g.h[axis]).round_ties_even() as i32 - 1)
+            .clamp(0, g.dims[axis] as i32 - 2);
+        let receiver = if velocity[axis] >= 0.0 {
+            face + 1
+        } else {
+            face
+        };
+        let donor = if velocity[axis] >= 0.0 {
+            receiver - 1
+        } else {
+            receiver + 1
+        };
+        let mut desired = velocity.map(|v| v * strength);
+        desired[axis] *= aperture_scale;
         Some(Self {
-            outlet: [
-                i.center_m.x as f32
-                    + 0.5 * g.dims[0] as f32 * g.h[0]
-                    + (0.5 * i.length_m * i.velocity_m_s.x / full_speed) as f32,
-                i.center_m.y as f32 + (0.5 * i.length_m * i.velocity_m_s.y / full_speed) as f32,
-            ],
-            direction,
-            velocity: [
-                (i.velocity_m_s.x * integral / dt as f64) as f32,
-                (i.velocity_m_s.y * integral / dt as f64) as f32,
-            ],
-            length: (speed * integral) as f32,
-            nozzle_length: (i.length_m * speed / full_speed) as f32,
+            axis,
+            receiver,
+            donor,
+            face_coordinate: minimum[axis] + (face + 1) as f32 * g.h[axis],
+            minimum,
+            h: g.h,
+            outlet,
+            velocity,
             radius: i.radius_m as f32,
+            edge: (0.5 * g.h[tangent]).max(1e-6),
+            strength,
+            aperture_scale,
+            desired,
+            dt,
         })
     }
 
-    fn coordinates(&self, p: [f32; 2]) -> [f32; 2] {
-        let q = [p[0] - self.outlet[0], p[1] - self.outlet[1]];
-        [
-            q[0] * self.direction[0] + q[1] * self.direction[1],
-            -q[0] * self.direction[1] + q[1] * self.direction[0],
-        ]
+    fn speed(&self) -> f32 {
+        length(self.velocity)
     }
 
-    // Clip a cell against the swept rectangular jet. Exact area keeps small
-    // nozzles alive even when no cell centre lies inside the source.
-    fn fraction(&self, g: &Grid, p: [i32; 2]) -> f32 {
-        let center = self.coordinates([(p[0] as f32 + 0.5) * g.h[0], (p[1] as f32 + 0.5) * g.h[1]]);
-        let axial_half =
-            0.5 * (self.direction[0].abs() * g.h[0] + self.direction[1].abs() * g.h[1]);
-        let radial_half =
-            0.5 * (self.direction[1].abs() * g.h[0] + self.direction[0].abs() * g.h[1]);
-        if center[0] + axial_half <= 0.
-            || center[0] - axial_half >= self.length
-            || center[1].abs() - radial_half >= self.radius
-        {
-            return 0.;
-        }
-        let mut polygon: Vec<_> = [[0., 0.], [1., 0.], [1., 1.], [0., 1.]]
-            .map(|v| {
-                self.coordinates([(p[0] as f32 + v[0]) * g.h[0], (p[1] as f32 + v[1]) * g.h[1]])
-            })
-            .to_vec();
-        for (axis, sign, bound) in [
-            (0, -1., 0.),
-            (0, 1., self.length),
-            (1, -1., self.radius),
-            (1, 1., self.radius),
-        ] {
-            let mut clipped = Vec::new();
-            for j in 0..polygon.len() {
-                let a = polygon[j];
-                let b = polygon[(j + 1) % polygon.len()];
-                let da = sign * a[axis] - bound;
-                let db = sign * b[axis] - bound;
-                if da <= 0. {
-                    clipped.push(a);
-                }
-                if (da <= 0.) != (db <= 0.) {
-                    let t = da / (da - db);
-                    clipped.push([a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])]);
-                }
-            }
-            polygon = clipped;
-        }
-        let area: f32 = (0..polygon.len())
-            .map(|j| {
-                let a = polygon[j];
-                let b = polygon[(j + 1) % polygon.len()];
-                a[0] * b[1] - a[1] * b[0]
-            })
-            .sum();
-        (0.5 * area.abs() / (g.h[0] * g.h[1])).clamp(0., 1.)
+    // inflow-boundary.ts inflowApertureFraction.
+    fn aperture(&self, q: [i32; 2]) -> f32 {
+        let speed = self.speed();
+        let direction = self.velocity.map(|v| v / speed);
+        let tangent = 1 - self.axis;
+        let mut point = [0.0; 2];
+        point[self.axis] = self.face_coordinate;
+        point[tangent] = self.minimum[tangent] + (q[tangent] as f32 + 0.5) * self.h[tangent];
+        let relative = [point[0] - self.outlet[0], point[1] - self.outlet[1]];
+        let axial = relative[0] * direction[0] + relative[1] * direction[1];
+        let radial = length([
+            relative[0] - axial * direction[0],
+            relative[1] - axial * direction[1],
+        ]);
+        smooth_coverage(self.radius, radial, self.edge)
     }
 
-    pub fn inject(&self, g: &mut Grid) -> f64 {
-        let mut added = 0.0;
-        for i in 0..g.volume.len() {
-            let amount = self
-                .fraction(g, g.point(i))
-                .min((g.capacity[i] - g.volume[i]).max(0.));
-            g.volume[i] += amount;
-            added += amount as f64;
+    // inflow-boundary.ts inflowSweptPlugSource, positivity only: the injected
+    // amount belongs to the volume source.
+    fn swept_plug(&self, q: [i32; 2]) -> bool {
+        let magnitude = self.speed();
+        let speed = magnitude * self.strength;
+        if speed <= 1e-6 || self.dt <= 0.0 {
+            return false;
         }
-        if added > 0.0 {
-            for y in 0..=g.dims[1] {
-                for x in 0..=g.dims[0] {
-                    let p = self.coordinates([x as f32 * g.h[0], y as f32 * g.h[1]]);
-                    let q = [
-                        // Include the wetted nozzle in the surface boundary.
-                        // A short per-frame plug alone can miss every vertex,
-                        // leaving newly emitted liquid without a signed surface.
-                        (p[0] - 0.5 * (self.length - self.nozzle_length)).abs()
-                            - 0.5 * (self.length + self.nozzle_length),
-                        p[1].abs() - self.radius,
-                    ];
-                    let phi = q[0].max(0.).hypot(q[1].max(0.)) + q[0].max(q[1]).min(0.);
-                    let j = x + (g.dims[0] + 1) * y;
-                    g.phi[j] = g.phi[j].min(phi);
-                }
-            }
+        let direction = self.velocity.map(|v| v / magnitude.max(1e-6));
+        let centre: [f32; 2] =
+            std::array::from_fn(|a| self.minimum[a] + (q[a] as f32 + 0.5) * self.h[a]);
+        let relative = [centre[0] - self.outlet[0], centre[1] - self.outlet[1]];
+        let axial = relative[0] * direction[0] + relative[1] * direction[1];
+        let half_axial = 0.5 * (direction[0].abs() * self.h[0] + direction[1].abs() * self.h[1]);
+        let overlap =
+            ((axial + half_axial).min(speed * self.dt) - (axial - half_axial).max(0.0)).max(0.0);
+        if overlap <= 0.0 {
+            return false;
         }
-        added
+        let radial = length([
+            relative[0] - axial * direction[0],
+            relative[1] - axial * direction[1],
+        ]);
+        smooth_coverage(self.radius, radial, self.edge) > 0.0 && self.aperture_scale > 0.0
     }
 
-    pub fn enforce_velocity(&self, g: &mut Grid) {
-        for i in 0..g.volume.len() {
-            let p = g.point(i);
-            if g.capacity[i] <= 1e-5 || self.fraction(g, p) <= 0. {
-                continue;
-            }
-            for axis in 0..2 {
-                let mut neighbor = p;
-                neighbor[axis] += 1;
-                if g.open(neighbor) > 1e-5 {
-                    g.velocity[i][axis] = self.velocity[axis];
-                }
-                neighbor[axis] -= 2;
-                if let Some(j) = g.index(neighbor).filter(|&j| g.capacity[j] > 1e-5) {
-                    g.velocity[j][axis] = self.velocity[axis];
-                }
-            }
+    /// applyInflowVelocity, after projection.
+    pub fn apply(&self, q: [i32; 2], mut v: [f32; 2]) -> [f32; 2] {
+        let a = self.axis;
+        if (q[a] != self.receiver && q[a] != self.donor) || self.aperture(q) <= 0.0 {
+            return v;
+        }
+        if q[a] == self.receiver {
+            v = self.desired;
+        }
+        v[a] = self.desired[a];
+        v
+    }
+
+    /// applyInflowSweptVelocity, the last body force.
+    pub fn apply_swept(&self, q: [i32; 2], v: [f32; 2]) -> [f32; 2] {
+        let upstream = q[self.axis] == self.donor && self.aperture(q) > 0.0;
+        if upstream || self.swept_plug(q) {
+            self.desired
+        } else {
+            v
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::scene_model::Vec3;
-    fn source() -> FluidInflow {
-        FluidInflow {
-            center_m: Vec3 {
-                x: 0.,
-                y: 0.5,
-                z: 0.2,
+/// The nozzle as a volume source: inflow-boundary.ts inflowSweptPlugSource,
+/// the plug arm of uvSourcePhi, uniformInflowWindowSeed, and the authored
+/// velocity finalizeActiveRegion pads with. Planar reduction: the aperture is a
+/// segment of width 2r across the dominant-axis face, so its edge width is half
+/// a tangent cell and its target projected width is 2r / |direction[axis]|.
+/// Positions are world metres with the container centred on x = 0.
+pub struct Plug {
+    minimum: [f32; 2],
+    h: [f32; 2],
+    outlet: [f32; 2],
+    /// inflowVelocityLength.xyz: the authored velocity, whatever the strength.
+    pub velocity: [f32; 2],
+    radius: f32,
+    edge: f32,
+    strength: f32,
+    aperture_scale: f32,
+    dt: f32,
+}
+
+impl Plug {
+    pub fn new(i: &FluidInflow, time: f64, dt: f32, g: &Grid) -> Self {
+        let strength = (average_strength(i, time, time + dt as f64) as f32).clamp(0.0, 1.0);
+        let planar = [i.velocity_m_s.x, i.velocity_m_s.y];
+        let speed = planar[0].hypot(planar[1]);
+        let full = speed.hypot(i.velocity_m_s.z);
+        // inflow-boundary.ts inflowOutletCenter uses the authored 3D speed.
+        let half_length_over_speed = if full > 0.0 {
+            0.5 * i.length_m / full
+        } else {
+            0.0
+        };
+        let outlet64 = [
+            i.center_m.x + planar[0] * half_length_over_speed,
+            i.center_m.y + planar[1] * half_length_over_speed,
+        ];
+        let direction64 = if speed > 0.0 {
+            planar.map(|v| v / speed)
+        } else {
+            [1.0, 0.0]
+        };
+        let axis = if direction64[1].abs() > direction64[0].abs() {
+            1
+        } else {
+            0
+        };
+        let tangent = 1 - axis;
+        let width = g.dims[0] as f64 * g.h[0] as f64;
+        let minimum64 = [-0.5 * width, 0.0];
+        let cell = g.h.map(|v| v as f64);
+        // Host createInflowGridBoundary: f64 aperture normalization.
+        let host_face = ((outlet64[axis] - minimum64[axis]) / cell[axis]).round() - 1.0;
+        let host_face = host_face.min(g.dims[axis] as f64 - 2.0).max(0.0);
+        let edge64 = 0.5 * cell[tangent];
+        let mut weight = 0.0;
+        for k in 0..g.dims[tangent] {
+            let mut point = [0.0; 2];
+            point[axis] = minimum64[axis] + (host_face + 1.0) * cell[axis];
+            point[tangent] = minimum64[tangent] + (k as f64 + 0.5) * cell[tangent];
+            let relative = [point[0] - outlet64[0], point[1] - outlet64[1]];
+            let axial = relative[0] * direction64[0] + relative[1] * direction64[1];
+            let radial =
+                (relative[0] - axial * direction64[0]).hypot(relative[1] - axial * direction64[1]);
+            let c = (0.5 + 0.5 * (i.radius_m - radial) / edge64.max(1e-6)).clamp(0.0, 1.0);
+            weight += c * c * (3.0 - 2.0 * c);
+        }
+        let raw = weight * cell[tangent];
+        let target = if speed > 0.0 {
+            2.0 * i.radius_m / direction64[axis].abs().max(1e-6)
+        } else {
+            0.0
+        };
+        Self {
+            minimum: [-0.5 * (g.dims[0] as f32 * g.h[0]), 0.0],
+            h: g.h,
+            outlet: outlet64.map(|v| v as f32),
+            velocity: planar.map(|v| v as f32),
+            radius: i.radius_m as f32,
+            edge: (0.5 * g.h[tangent]).max(1e-6),
+            strength,
+            aperture_scale: if raw > 0.0 {
+                (target / raw) as f32
+            } else {
+                0.0
             },
-            velocity_m_s: Vec3 {
-                x: 0.8,
-                y: -0.6,
-                z: 0.,
-            },
-            radius_m: 0.013,
-            length_m: 0.05,
-            start_s: 0.,
-            end_s: 1.,
-            ramp_s: 0.,
+            dt,
         }
     }
-    #[test]
-    fn subcell_diagonal_jet_has_exact_planar_area_and_velocity() {
-        let mut g = Grid::new([20, 20], [0.05, 0.05], true).unwrap();
-        let s = source();
-        let step = Step::new(&s, 0., 0.01, &g).unwrap();
-        let added = step.inject(&mut g);
-        assert!((added * 0.0025 - 2. * s.radius_m * 0.01).abs() < 1e-8);
-        step.enforce_velocity(&mut g);
-        assert!(g.velocity.iter().any(|v| v[0] == 0.8));
-        assert!(g.velocity.iter().any(|v| v[1] == -0.6));
-        assert!(g.phi.iter().any(|&v| v < 0.05));
+
+    /// The plug's advance speed this step, |u| * strength.
+    fn speed(&self) -> f32 {
+        length(self.velocity) * self.strength
     }
-    #[test]
-    fn timing_integrates_ramps_and_start_stop_crossings() {
-        let g = Grid::new([20, 20], [0.05, 0.05], true).unwrap();
-        let mut s = source();
-        s.start_s = 1.;
-        s.end_s = 3.;
-        s.ramp_s = 0.5;
-        assert!(Step::new(&s, 0., 0.5, &g).is_none());
-        assert!(Step::new(&s, 3., 0.5, &g).is_none());
-        assert!((Step::new(&s, 0.5, 1., &g).unwrap().length - 0.25).abs() < 1e-6);
-        assert!((Step::new(&s, 2.5, 1., &g).unwrap().length - 0.25).abs() < 1e-6);
-        s.ramp_s = 0.;
-        assert!((Step::new(&s, 0.5, 1., &g).unwrap().length - 0.5).abs() < 1e-6);
+
+    /// The time-averaged strength over this step.
+    pub fn strength(&self) -> f32 {
+        self.strength
     }
-    #[test]
-    fn solids_and_full_cells_do_not_accept_water() {
-        let mut g = Grid::new([20, 20], [0.05, 0.05], true).unwrap();
-        let step = Step::new(&source(), 0., 0.1, &g).unwrap();
-        g.capacity.fill(0.);
-        assert_eq!(step.inject(&mut g), 0.);
-        step.enforce_velocity(&mut g);
-        assert!(g.velocity.iter().all(|v| *v == [0., 0.]));
-        assert!(g.phi.iter().all(|&v| v == 1.));
-        g.capacity.fill(1.);
-        g.volume.fill(1.);
-        assert_eq!(step.inject(&mut g), 0.);
+
+    /// The inflow arm of uvStepHasExternalSource.
+    pub fn active(&self) -> bool {
+        self.speed() > 1e-6
+    }
+
+    /// inflowSweptPlugSource: the cell's share of the plug swept this step.
+    pub fn amount(&self, q: [i32; 2]) -> f32 {
+        let magnitude = length(self.velocity);
+        let speed = magnitude * self.strength;
+        if speed <= 1e-6 || self.dt <= 0.0 {
+            return 0.0;
+        }
+        let direction = self.velocity.map(|v| v / magnitude.max(1e-6));
+        let centre: [f32; 2] =
+            std::array::from_fn(|a| self.minimum[a] + (q[a] as f32 + 0.5) * self.h[a]);
+        let relative = [centre[0] - self.outlet[0], centre[1] - self.outlet[1]];
+        let axial = relative[0] * direction[0] + relative[1] * direction[1];
+        let half_axial = 0.5 * (direction[0].abs() * self.h[0] + direction[1].abs() * self.h[1]);
+        let overlap =
+            ((axial + half_axial).min(speed * self.dt) - (axial - half_axial).max(0.0)).max(0.0);
+        if overlap <= 0.0 {
+            return 0.0;
+        }
+        let radial = length([
+            relative[0] - axial * direction[0],
+            relative[1] - axial * direction[1],
+        ]);
+        overlap / (2.0 * half_axial).max(1e-6)
+            * smooth_coverage(self.radius, radial, self.edge)
+            * self.aperture_scale
+    }
+
+    /// The plug arm of uvSourcePhi at trace position p (lattice units).
+    pub fn phi(&self, p: [f32; 2], phi: f32) -> f32 {
+        let speed = self.speed();
+        if speed <= 1e-6 {
+            return phi;
+        }
+        let magnitude = length(self.velocity);
+        let direction = self.velocity.map(|v| v / magnitude);
+        let delta: [f32; 2] =
+            std::array::from_fn(|a| self.minimum[a] + p[a] * self.h[a] - self.outlet[a]);
+        let axial = delta[0] * direction[0] + delta[1] * direction[1];
+        let plug = (length([
+            delta[0] - axial * direction[0],
+            delta[1] - axial * direction[1],
+        ]) - self.radius)
+            .max((-axial).max(axial - speed * self.dt));
+        phi.min(plug)
+    }
+
+    /// uniformInflowWindowSeed: the conservative swept-inlet footprint.
+    pub fn window_seed(&self, q: [i32; 2]) -> bool {
+        if self.strength <= 0.0 {
+            return false;
+        }
+        let end: [f32; 2] = std::array::from_fn(|a| self.outlet[a] + self.velocity[a] * self.dt);
+        let pad = self.radius + length(self.h);
+        (0..2).all(|a| {
+            let world = self.minimum[a] + (q[a] as f32 + 0.5) * self.h[a];
+            world >= self.outlet[a].min(end[a]) - pad && world <= self.outlet[a].max(end[a]) + pad
+        })
     }
 }

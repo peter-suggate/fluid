@@ -1,11 +1,13 @@
 //! Uniform numerical advance. No adaptive graph participates in the solve.
 use super::{
-    extension::Extension,
+    extension::{Extension, TwoLevel},
     grid::Grid,
+    inflow::Plug,
     options::UniformGeometricOptions,
-    pressure::{theta, Pressure},
-    surface,
-    transport::{Transport, TransportReceipt},
+    pages::Window,
+    pressure::{cycle_budget, theta, Pressure, Scratch, FREE},
+    surface, surface_volume,
+    transport::{Sources, Transport, TransportReceipt},
 };
 use crate::{
     initial_liquid::{
@@ -31,10 +33,12 @@ pub struct Receipt {
     pub contour_l1: f64,
     pub max_speed: f32,
     pub injected_volume: f64,
-    pub swept_extension: super::swept_extension::Receipt,
+    /// uv.wgsl uvBalanceReduce surface-deficit rate for this step.
+    pub balance_rate: f32,
+    /// Total surface volume state: [shift, half-range, target V, prior surface V].
+    pub surface_volume: [f32; 4],
 }
 pub struct World {
-    pub swept_extension: super::swept_extension::Config,
     pub grid: Grid,
     pub options: UniformGeometricOptions,
     pub pressure: Pressure,
@@ -42,12 +46,26 @@ pub struct World {
     /// Allocated only by diagnostic scene runners.
     pub advected_phi_audit: Option<Vec<f32>>,
     pub tile_classes: Vec<u8>,
-    /// Opt-in pressure-source ablation for the diagnostic runner; never a lab default.
-    pub diagnostic_disable_overfill_correction: bool,
-    pub energy_experiment: super::energy_experiment::Config,
-    pub energy_receipt: super::energy_experiment::Receipt,
+    /// Lagged pressure demand (executed cycles, converged) of the last solve.
+    pressure_demand: Option<(usize, bool)>,
+    /// Diagnostic replay of a GPU-encoded cycle budget for the next solve only.
+    pub pressure_budget_override: Option<usize>,
     transport: Transport,
     pub inflow: Option<crate::scene_model::FluidInflow>,
+    /// The phi solve window and its dense-census schedule.
+    pub window: Window,
+    /// A published phi region header for the next step only (a GPU oracle's).
+    pub phi_region_override: Option<Vec<u32>>,
+    /// The post-step surface targets (gammaA).
+    pub gamma: Vec<f32>,
+    /// Persistent GPU intermediates: the packed extension field (stale outside
+    /// SHELL) and the advected-phi scratch (stale outside the window).
+    packed: Vec<[f32; 2]>,
+    advected: Vec<f32>,
+    /// Transport scratch: live receivers, their departures, the gathered V.
+    cells: Vec<u32>,
+    departures: Vec<[f32; 2]>,
+    gathered: Vec<f32>,
     pub(super) gravity: [f32; 2],
     pub(super) rho: f32,
     viscosity: f32,
@@ -63,6 +81,7 @@ impl World {
         sigma: f32,
     ) -> Result<Self, ValidationError> {
         options.validate()?;
+        super::validate_supported(&options)?;
         if grid.h.iter().any(|h| !h.is_finite() || *h <= 0.0) || !rho.is_finite() || rho <= 0.0 {
             return Err(ValidationError("invalid uniform physical scale".into()));
         }
@@ -114,11 +133,14 @@ impl World {
         let pressure = Pressure::new(grid.dims, grid.h)?;
         let transport = Transport::new(grid.volume.len());
         Ok(Self {
-            swept_extension: if options.total_surface_volume == "on" {
-                super::swept_extension::Config::lab_profile("area-only")?
-            } else {
-                super::swept_extension::Config::default()
-            },
+            window: Window::new(grid.dims, &options),
+            phi_region_override: None,
+            gamma: vec![0.0; count],
+            packed: vec![[0.0; 2]; count],
+            advected: grid.phi.clone(),
+            cells: Vec::new(),
+            departures: Vec::new(),
+            gathered: vec![0.0; count],
             grid,
             options,
             pressure,
@@ -130,9 +152,8 @@ impl World {
             sigma,
             receipt: Receipt::default(),
             advected_phi_audit: None,
-            diagnostic_disable_overfill_correction: false,
-            energy_experiment: Default::default(),
-            energy_receipt: Default::default(),
+            pressure_demand: None,
+            pressure_budget_override: None,
             tile_classes: Vec::new(),
         })
     }
@@ -172,8 +193,29 @@ impl World {
                 grid.velocity[i] = [v.x as f32, v.y as f32];
             }
         }
+        // uniform-volume-initial.ts buriedVertices: a vertex whose every incident
+        // cell is closed (any solid fraction) is air by construction.
+        let closed: Vec<bool> = (0..grid.volume.len())
+            .map(|i| {
+                let p = grid.point(i);
+                solid.sample([p[0], p[1], z]).solid_fraction > 0.0
+            })
+            .collect();
+        let empty = scene
+            .container
+            .width_m
+            .max(scene.container.height_m)
+            .max(scene.container.depth_m) as f32;
         for y in 0..=grid.dims[1] {
             for x in 0..=grid.dims[0] {
+                let buried = (0..4).all(|k| {
+                    grid.index([x as i32 - 1 + (k & 1), y as i32 - 1 + (k >> 1)])
+                        .is_none_or(|i| closed[i])
+                });
+                if buried {
+                    grid.phi[x + (grid.dims[0] + 1) * y] = empty;
+                    continue;
+                }
                 let point = Vec3 {
                     x: (x as f64 / dims[0] as f64 - 0.5) * scene.container.width_m,
                     y: y as f64 / dims[1] as f64 * scene.container.height_m,
@@ -212,141 +254,147 @@ impl World {
         if !dt.is_finite() || dt <= 0.0 {
             return Err(ValidationError("invalid uniform timestep".into()));
         }
-        let inflow = self
+        let plug = self
             .inflow
             .as_ref()
-            .and_then(|source| super::inflow::Step::new(source, self.receipt.time, dt, &self.grid));
+            .map(|source| Plug::new(source, self.receipt.time, dt, &self.grid));
         observe("start", &self.grid);
-        let previous_energy = if self.energy_experiment.mode == "energy-cap" {
-            super::energy_experiment::energy(&self.grid, self.rho, self.gravity)
-        } else {
-            (0.0, 0.0)
-        };
-        let phi_reference = (self.swept_extension.mode
-            == super::swept_extension::Mode::TransportAgreement)
-            .then(|| {
-                (0..self.grid.volume.len())
-                    .map(|i| super::swept_extension::contour_fill(&self.grid, i, 0.0))
-                    .collect::<Vec<_>>()
-            });
-        let prior_phase = super::velocity::phase(&self.grid, &self.options);
-        let (extension, correction) =
-            super::swept_extension::build(&self.grid, &self.options, dt, &self.swept_extension);
-        self.receipt.swept_extension = correction;
+        let n = self.grid.volume.len();
+        let mut sources = Sources::default();
+        if !self.grid.drops.is_empty() {
+            sources.drop = (0..n)
+                .map(|i| self.grid.drop_fraction(self.grid.point(i)))
+                .collect();
+        }
+        if let Some(source) = plug.as_ref().filter(|s| s.active()) {
+            sources.plug = (0..n).map(|i| source.amount(self.grid.point(i))).collect();
+        }
+        // Head of step: phi census, then the tile classes and extension.
+        let two_level = TwoLevel::new(self.grid.dims, &self.options);
+        let published = self.phi_region_override.take();
+        let window = self.window.census(
+            &self.grid,
+            &self.options,
+            dt,
+            self.gravity[1],
+            two_level.shell_reach,
+            two_level.enabled.then_some(two_level.fine_reach),
+            &sources,
+            plug.as_ref(),
+            published.as_deref(),
+        );
+        let extension = Extension::build_with(
+            &self.grid,
+            &self.options,
+            dt,
+            &sources,
+            std::mem::take(&mut self.packed),
+            None,
+        );
+        self.packed.clone_from(&extension.values);
         self.tile_classes.clone_from(&extension.classes);
-        let active: Vec<_> = (0..self.grid.volume.len())
-            .map(|i| extension.transport_at(self.grid.point(i), &self.options))
-            .collect();
-        let departures: Vec<_> = (0..self.grid.volume.len())
-            .map(|i| {
-                if !active[i] {
-                    return [0.0; 2];
-                }
-                let p = self.grid.point(i);
-                extension.trace(&self.grid, [p[0] as f32 + 0.5, p[1] as f32 + 0.5], dt)
-            })
-            .collect();
-        surface::advect(&mut self.grid, &extension, &self.options, dt);
+        extension.transport_cells(&mut self.cells);
+        self.departures.clear();
+        self.departures.extend(self.cells.iter().map(|&i| {
+            let p = self.grid.point(i as usize);
+            extension.trace(&self.grid, [p[0] as f32 + 0.5, p[1] as f32 + 0.5], dt)
+        }));
+        surface::advect_window(
+            &self.grid,
+            &extension,
+            dt,
+            window,
+            plug.as_ref(),
+            &mut self.advected,
+        );
+        std::mem::swap(&mut self.grid.phi, &mut self.advected);
         observe("advected", &self.grid);
         if let Some(audit) = &mut self.advected_phi_audit {
             audit.clone_from(&self.grid.phi);
         }
+        std::mem::swap(&mut self.grid.phi, &mut self.advected);
         if self.options.redistance == "on" {
-            surface::redistance(&mut self.grid);
+            surface::redistance_window(&mut self.grid, &self.advected, window);
+        } else {
+            self.grid.phi.copy_from_slice(&self.advected);
         }
         observe("redistanced", &self.grid);
-        let mut next = vec![0.0; self.grid.volume.len()];
         self.receipt.transport = self.transport.advance(
             self.grid.dims,
-            &departures,
+            &self.departures,
             &self.grid.capacity,
             &self.grid.volume,
             self.options.volume_dust_threshold,
-            &active,
-            &mut next,
+            &self.cells,
+            &sources,
+            &mut self.gathered,
         )?;
-        self.receipt.injected_volume = 0.0;
-        if !self.grid.drops.is_empty() {
-            for i in 0..next.len() {
-                let added = self
-                    .grid
-                    .drop_fraction(self.grid.point(i))
-                    .min((self.grid.capacity[i] - next[i]).max(0.0));
-                next[i] += added;
-                self.receipt.injected_volume += added as f64;
+        self.receipt.injected_volume = self.receipt.transport.injected_volume;
+        self.grid.drops.clear();
+        std::mem::swap(&mut self.grid.volume, &mut self.gathered);
+        let corrected = self.options.total_surface_volume == "on";
+        // uvGather's gamma: zero outside the live set and in sealed cells.
+        // TSV rewrites every gammaA before any read.
+        if !corrected {
+            self.gamma.fill(0.0);
+            for &i in &self.cells {
+                let i = i as usize;
+                if self.grid.capacity[i] > 0.0 {
+                    self.gamma[i] = self.grid.target(self.grid.point(i));
+                }
             }
-            self.grid.drops.clear();
-        }
-        self.grid.volume = next;
-        if let Some(source) = &inflow {
-            self.receipt.injected_volume += source.inject(&mut self.grid);
         }
         observe("transported", &self.grid);
-        if let Some(reference) = phi_reference.filter(|_| self.receipt.injected_volume == 0.0) {
-            let transported: Vec<f32> = self
-                .transport
-                .edges
-                .iter()
-                .enumerate()
-                .map(|(i, edge)| {
-                    if !active[i] {
-                        return 0.0;
-                    }
-                    (0..5)
-                        .map(|k| edge.weights[k] * reference[edge.donors[k]])
-                        .sum()
-                })
-                .collect();
-            self.receipt.swept_extension.surface = Some(super::swept_extension::correct_surface(
-                &mut self.grid,
-                &transported,
-                &self.swept_extension,
-            ));
-            self.receipt.swept_extension.accepted = true;
-        }
-        if self.swept_extension.mode == super::swept_extension::Mode::RegionalVolume
-            && self.receipt.injected_volume == 0.0
-        {
-            let reference = self.grid.volume.clone();
-            self.receipt.swept_extension.surface = Some(super::swept_extension::correct_surface(
-                &mut self.grid,
-                &reference,
-                &self.swept_extension,
-            ));
-            self.receipt.swept_extension.accepted = true;
-        }
-        if self.receipt.swept_extension.surface.is_some() {
+        if corrected {
+            self.receipt.surface_volume = surface_volume::correct(&mut self.grid);
+            for (y, row) in self.gamma.chunks_mut(self.grid.dims[0]).enumerate() {
+                for (x, gamma) in row.iter_mut().enumerate() {
+                    *gamma = self.grid.target([x as i32, y as i32]);
+                }
+            }
             observe("corrected", &self.grid);
         }
-        self.receipt.sharpening_dust =
-            surface::sharpen_rounds(&mut self.grid, &self.options, sharpening_rounds);
+        self.receipt.sharpening_dust = surface::sharpen(
+            &mut self.grid,
+            &self.options,
+            &self.gamma,
+            sharpening_rounds,
+        );
         observe("sharpened", &self.grid);
-        self.advect_velocity(&extension, &prior_phase, dt, &mut observe);
-        if let Some(source) = &inflow {
-            source.enforce_velocity(&mut self.grid);
-        }
+        let nozzle = self.inflow.as_ref().and_then(|source| {
+            super::inflow::Velocity::new(source, self.receipt.time, dt, &self.grid)
+        });
+        self.advect_velocity(&extension, nozzle.as_ref(), dt, &mut observe);
         observe("forced", &self.grid);
-        if self.energy_experiment.mode == "off" {
-            self.project(dt);
-        } else {
-            super::energy_experiment::project(self, dt, previous_energy);
-        }
-        if let Some(source) = &inflow {
-            source.enforce_velocity(&mut self.grid);
-        }
+        self.project(&extension, nozzle.as_ref(), dt);
         observe("projected", &self.grid);
         self.receipt.frame += 1;
         self.receipt.time += dt as f64;
         self.receipt.volume = self.grid.volume.iter().map(|&v| v as f64).sum();
-        self.receipt.phi_area = (0..self.grid.volume.len())
-            .map(|i| self.grid.target(self.grid.point(i)) as f64)
-            .sum();
+        // Nothing after TSV moves phi or capacity: gammaA is this state's target.
+        self.receipt.phi_area = if corrected {
+            self.gamma.iter().map(|&v| v as f64).sum()
+        } else {
+            (0..self.grid.volume.len())
+                .map(|i| self.grid.target(self.grid.point(i)) as f64)
+                .sum()
+        };
         self.receipt.contour_area = 0.0;
         self.receipt.contour_l1 = 0.0;
-        for i in 0..self.grid.volume.len() {
-            let area = super::swept_extension::contour_fill(&self.grid, i, 0.0) as f64;
-            self.receipt.contour_area += area;
-            self.receipt.contour_l1 += (area - self.grid.volume[i] as f64).abs();
+        // A cell with no V and every corner outside adds exactly zero to both.
+        let (dims, phi) = (self.grid.dims, &self.grid.phi);
+        for (y, row) in self.grid.volume.chunks(dims[0]).enumerate() {
+            for (x, &volume) in row.iter().enumerate() {
+                let j = x + (dims[0] + 1) * y;
+                let corners = [j, j + 1, j + dims[0] + 1, j + dims[0] + 2];
+                if volume == 0.0 && corners.iter().all(|&k| phi[k] > 0.0) {
+                    continue;
+                }
+                let i = x + dims[0] * y;
+                let area = super::diagnostics::contour_fill(&self.grid, i, 0.0) as f64;
+                self.receipt.contour_area += area;
+                self.receipt.contour_l1 += (area - volume as f64).abs();
+            }
         }
         self.receipt.max_speed = self
             .grid
@@ -355,18 +403,14 @@ impl World {
             .map(|v| (v[0] * v[0] + v[1] * v[1]).sqrt())
             .fold(0.0_f32, f32::max);
         self.receipt.pressure = self.pressure.receipt.clone();
-        if self
-            .grid
-            .volume
-            .iter()
-            .chain(&self.grid.phi)
-            .chain(self.grid.velocity.iter().flatten())
-            .any(|v| !v.is_finite())
-        {
+        let finite = |s: &[f32]| s.iter().fold(true, |ok, v| ok & v.is_finite());
+        let g = &self.grid;
+        if !(finite(&g.volume) && finite(&g.phi) && finite(g.velocity.as_flattened())) {
             return Err(ValidationError("non-finite uniform state".into()));
         }
         Ok(())
     }
+    // reference.wgsl surfaceOccupancy.
     fn occupancy(&self, p: [i32; 2]) -> f32 {
         self.grid.index(p).map_or(0.0, |_| {
             (0.5 - self.grid.phi_at([p[0] as f32 + 0.5, p[1] as f32 + 0.5])
@@ -374,187 +418,243 @@ impl World {
                 .clamp(0.0, 1.0)
         })
     }
-    fn normal(&self, p: [i32; 2]) -> [f32; 2] {
+    // reference.wgsl normalSurfaceOccupancy.
+    fn normal_occupancy(&self, p: [i32; 2]) -> f32 {
         let g = &self.grid;
-        let mut n = [0.0; 2];
-        for a in 0..2 {
-            let mut lo = p;
-            let mut hi = p;
-            lo[a] -= 1;
-            hi[a] += 1;
-            let sample = |q| {
-                if g.index(q).is_some() {
-                    self.occupancy(q)
-                } else {
-                    self.occupancy(g.clamp_cell(q))
-                }
-            };
-            n[a] = (sample(hi) - sample(lo)) / (2.0 * g.h[a]);
-        }
-        let norm = (n[0] * n[0] + n[1] * n[1]).sqrt();
-        if norm > 1e-9 {
-            [n[0] / norm, n[1] / norm]
+        if g.index(p).is_some() {
+            self.occupancy(p)
+        } else if super::velocity::solid_voxel(g, p) {
+            self.occupancy(g.clamp_cell(p))
         } else {
-            [0.0; 2]
+            0.0
         }
     }
-    fn curvature(&self, p: [i32; 2]) -> f32 {
-        let mut value = 0.0;
-        for a in 0..2 {
+    // reference.wgsl interfaceNormal.
+    fn normal(&self, p: [i32; 2]) -> [f32; 2] {
+        let gradient: [f32; 2] = std::array::from_fn(|a| {
             let mut lo = p;
             let mut hi = p;
             lo[a] -= 1;
             hi[a] += 1;
-            value -= (self.normal(hi)[a] - self.normal(lo)[a]) / (2.0 * self.grid.h[a]);
-        }
-        value
+            (self.normal_occupancy(hi) - self.normal_occupancy(lo)) / (2.0 * self.grid.h[a])
+        });
+        let length = (gradient[0] * gradient[0] + gradient[1] * gradient[1])
+            .sqrt()
+            .max(1e-6);
+        gradient.map(|v| v / length)
+    }
+    // reference.wgsl curvatureAt.
+    fn curvature(&self, p: [i32; 2]) -> f32 {
+        let terms: [f32; 2] = std::array::from_fn(|a| {
+            let mut lo = p;
+            let mut hi = p;
+            lo[a] -= 1;
+            hi[a] += 1;
+            (self.normal(hi)[a] - self.normal(lo)[a]) / (2.0 * self.grid.h[a])
+        });
+        -(terms[0] + terms[1])
     }
     fn advect_velocity(
         &mut self,
         e: &Extension,
-        prior_phase: &[bool],
+        nozzle: Option<&super::inflow::Velocity>,
         dt: f32,
         observe: &mut impl FnMut(&str, &Grid),
     ) {
-        let g = &self.grid;
-        let mut next = super::velocity::advect(g, e, prior_phase, &self.options, dt);
+        let mut next = std::mem::take(&mut self.pressure.scratch.velocity);
+        super::velocity::advect(&self.grid, e, &self.options, dt, &mut next);
         std::mem::swap(&mut self.grid.velocity, &mut next);
         observe("velocityAdvected", &self.grid);
         std::mem::swap(&mut self.grid.velocity, &mut next);
         let g = &self.grid;
-        for i in 0..next.len() {
-            let p = g.point(i);
-            if self.options.velocity_transport != "maccormack"
-                && self.options.two_level_advection == "tiles"
-                && !e.fine_at(p.map(|v| v as f32 + 0.5))
-            {
-                continue;
-            }
-            let own = self.occupancy(p);
-            for a in 0..2 {
-                let mut v = next[i][a];
-                let mut neighbor = p;
-                neighbor[a] += 1;
-                let other = self.occupancy(neighbor);
-                if a == 1 && (own > 1e-5 || other > 1e-5) {
-                    v += self.gravity[a] * dt;
-                }
-                if own > 0.0 && self.viscosity > 0.0 {
-                    let mut lap = 0.0;
-                    for axis in 0..2 {
-                        let mut lo = p;
-                        let mut hi = p;
-                        lo[axis] -= 1;
-                        hi[axis] += 1;
-                        let sample = |r| g.velocity[g.index(g.clamp_cell(r)).unwrap()][a];
-                        lap += (sample(lo) - 2.0 * g.velocity[i][a] + sample(hi))
-                            / (g.h[axis] * g.h[axis]);
-                    }
-                    v += dt * self.viscosity / self.rho * lap;
-                }
-                if self.sigma > 0.0 && g.index(neighbor).is_some() && own != other {
-                    v += dt * self.sigma / self.rho
-                        * 0.5
-                        * (self.curvature(p) + self.curvature(neighbor))
-                        * (other - own)
-                        / g.h[a];
-                }
-                next[i][a] = v;
-            }
-        }
-        self.grid.velocity = next;
-    }
-    pub(super) fn project(&mut self, dt: f32) {
-        let g = &self.grid;
-        let balance = self
-            .energy_experiment
-            .mode
-            .starts_with("balance-")
-            .then(|| {
-                super::energy_experiment::balance(
-                    g,
-                    &self.options.volume_pressure_rows,
-                    dt,
-                    &self.energy_experiment,
-                )
-            });
-        let fine = &mut self.pressure.levels[0];
-        for y in 0..fine.dims[1] {
-            for x in 0..fine.dims[0] {
-                let i = x + fine.dims[0] * y;
-                let p = [x as i32 - 1, y as i32 - 1];
-                let open = g.open(p);
-                let ambient =
-                    g.open_top && p[1] == g.dims[1] as i32 && p[0] >= 0 && p[0] < g.dims[0] as i32;
-                fine.phi[i] = g.pressure_phi(p, &self.options.volume_pressure_rows);
-                fine.topology[i] = [
-                    if ambient { 1.0 } else { open },
-                    g.pressure_face(p, 0),
-                    g.pressure_face(p, 1),
-                ];
-                fine.minimum[i] = if (open <= 1e-5
-                    || g.index(p)
-                        .is_some_and(|j| g.rigid_centres.as_ref().is_some_and(|v| v[j])))
-                    && !ambient
-                {
-                    0.0
-                } else {
-                    -3.402823e38
-                };
-                let mut divergence = 0.0;
-                for a in 0..2 {
-                    let mut q = p;
-                    q[a] -= 1;
-                    divergence += (g.pressure_face(p, a) * g.face(p, a)
-                        - g.pressure_face(q, a) * g.face(q, a))
-                        / g.h[a];
-                    if g.rigid_speeds.is_some() {
-                        divergence += (g.pressure_face(p, a) - open) * g.solid_speed(p, a)
-                            - (g.pressure_face(q, a) - open) * g.solid_speed(q, a);
-                    }
-                }
-                let correction = if self.diagnostic_disable_overfill_correction {
-                    0.0
-                } else {
-                    g.index(p).map_or(0.0, |j| {
-                        (0.5 * (g.volume[j] - open).max(0.0)).min(open) / dt.max(1e-12)
-                            + balance.as_ref().map_or(0.0, |v| v[j])
+        let molecular = self.viscosity / self.rho;
+        let sigma_over_rho = self.sigma / self.rho;
+        super::velocity::for_each_fine(g, e, &self.options, |i, p| {
+            let v = &mut next[i];
+            // reference.wgsl applyVelocityForces. The walls are free-slip.
+            let occupancy = self.occupancy(p);
+            if occupancy > 0.0 && molecular > 0.0 {
+                let sample = |q: [i32; 2]| g.velocity[g.index(g.clamp_cell(q)).unwrap()];
+                let centre = g.velocity[i];
+                let terms: [[f32; 2]; 2] = std::array::from_fn(|a| {
+                    let mut lo = p;
+                    let mut hi = p;
+                    lo[a] -= 1;
+                    hi[a] += 1;
+                    std::array::from_fn(|c| {
+                        ((sample(hi)[c] - 2.0 * centre[c]) + sample(lo)[c]) / (g.h[a] * g.h[a])
                     })
-                };
-                fine.rhs[i] = if fine.phi[i] < 0.0 {
-                    -self.rho * (divergence - correction) / dt
-                } else {
-                    0.0
-                };
+                });
+                for c in 0..2 {
+                    v[c] += dt * molecular * (terms[0][c] + terms[1][c]);
+                }
+            }
+            let above = [p[0], p[1] + 1];
+            if occupancy > 1e-5 || self.occupancy(above) > 1e-5 {
+                v[1] += self.gravity[1] * dt;
+            }
+            if sigma_over_rho > 0.0 {
+                let difference: [f32; 2] = std::array::from_fn(|a| {
+                    let mut q = p;
+                    q[a] += 1;
+                    if g.index(q).is_some() {
+                        self.occupancy(q) - occupancy
+                    } else {
+                        0.0
+                    }
+                });
+                if difference[0] != 0.0 || difference[1] != 0.0 {
+                    let centre = self.curvature(p);
+                    for a in 0..2 {
+                        if difference[a] != 0.0 {
+                            let mut q = p;
+                            q[a] += 1;
+                            v[a] += dt
+                                * sigma_over_rho
+                                * 0.5
+                                * (centre + self.curvature(q))
+                                * difference[a]
+                                / g.h[a];
+                        }
+                    }
+                }
+            }
+            if let Some(nozzle) = nozzle {
+                *v = nozzle.apply_swept(p, *v);
+            }
+        });
+        std::mem::swap(&mut self.grid.velocity, &mut next);
+        self.pressure.scratch.velocity = next;
+    }
+    pub(super) fn project(
+        &mut self,
+        e: &Extension,
+        nozzle: Option<&super::inflow::Velocity>,
+        dt: f32,
+    ) {
+        let mut s = std::mem::take(&mut self.pressure.scratch);
+        let g = &self.grid;
+        let rows = self.options.volume_pressure_rows.as_str();
+        let dims = self.pressure.levels[0].dims;
+        let halo = |p: [i32; 2]| (p[0] + 1) as usize + dims[0] * (p[1] + 1) as usize;
+        // Pressure phi once per haloed cell, and uvTarget once per open
+        // liquid cell for the balance and the volume correction.
+        s.pressure_phi.clear();
+        for y in 0..dims[1] as i32 {
+            for x in 0..dims[0] as i32 {
+                s.pressure_phi.push(g.pressure_phi([x - 1, y - 1], rows));
             }
         }
-        self.pressure.solve(&self.options, dt, self.rho, g.open_top);
-        let fine = &self.pressure.levels[0];
-        let pressure = |p: [i32; 2]| -> f32 {
-            if g.pressure_phi(p, &self.options.volume_pressure_rows) >= 0.0 {
-                return 0.0;
+        s.target.clear();
+        s.target.resize(g.volume.len(), 0.0);
+        for (i, target) in s.target.iter_mut().enumerate() {
+            let p = g.point(i);
+            if g.capacity[i] > 1e-5 && s.pressure_phi[halo(p)] < 0.0 {
+                *target = g.target(p);
             }
-            fine.index([p[0] + 1, p[1] + 1]).map_or(0.0, |i| fine.p[i])
+        }
+        let rate = if self.options.surface_deficit_balancing == "on" {
+            balance_rate(g, &mut s)
+        } else {
+            0.0
         };
+        self.receipt.balance_rate = rate;
+        let check_solid = g.rigid_speeds.is_some();
+        let fine = &mut self.pressure.levels[0];
+        let interior = |a: usize, v: usize| v > 0 && v < dims[a] - 1;
+        for y in 0..dims[1] {
+            for x in 0..dims[0] {
+                // mg.wgsl mgBuildFinestTopology and mgBuildFinestRhs. The coarse
+                // pyramid downsamples this raw phi before any continuation.
+                let i = x + dims[0] * y;
+                let p = [x as i32 - 1, y as i32 - 1];
+                let mut rhs = 0.0;
+                if let Some(j) = g.index(p) {
+                    let open = g.capacity[j];
+                    let phi = s.pressure_phi[i];
+                    fine.phi[i] = phi;
+                    fine.topology[i] = [open, g.pressure_face(p, 0), g.pressure_face(p, 1)];
+                    // Cell-centre solid proxy for cellInsideSolid.
+                    let inside_solid =
+                        open <= 1e-5 || g.rigid_centres.as_ref().is_some_and(|v| v[j]);
+                    fine.minimum[i] = if inside_solid { 0.0 } else { FREE };
+                    if phi < 0.0 {
+                        rhs = self.rho
+                            * (divergence(g, p, check_solid, open)
+                                - volume_correction(g, &s.target, j, open, phi, rate, dt))
+                            / dt;
+                    }
+                } else {
+                    let open_top = g.open_top && y == dims[1] - 1 && interior(0, x);
+                    let mut topology = [if open_top { 1.0 } else { 0.0 }; 3];
+                    // Low-side halo cells own the missing negative dual faces.
+                    if x == 0 && interior(1, y) {
+                        topology[1] = g.pressure_face(p, 0);
+                    }
+                    if y == 0 && interior(0, x) {
+                        topology[2] = g.pressure_face(p, 1);
+                    }
+                    fine.phi[i] = 0.5 * g.h[0].min(g.h[1]);
+                    fine.topology[i] = topology;
+                    fine.minimum[i] = if open_top { FREE } else { 0.0 };
+                    // The solid halo is a constrained row: its wall flux enters b.
+                    if !open_top && s.pressure_phi[i] < 0.0 {
+                        rhs = self.rho * divergence(g, p, false, g.open(p)) / dt;
+                    }
+                }
+                fine.rhs[i] = -rhs;
+                fine.p[i] = 0.0;
+            }
+        }
+        let budget = self
+            .pressure_budget_override
+            .take()
+            .unwrap_or_else(|| cycle_budget(&self.options, self.pressure_demand));
+        self.pressure
+            .solve(&self.options, dt, self.rho, g.open_top, budget);
+        self.pressure_demand = Some((
+            self.pressure.receipt.cycles,
+            self.pressure.receipt.converged,
+        ));
+        let fine = &self.pressure.levels[0];
+        let pressure_phi = &s.pressure_phi;
+        let pressure = |p: [i32; 2]| -> f32 {
+            let i = halo(p);
+            if pressure_phi[i] >= 0.0 {
+                0.0
+            } else {
+                fine.p[i]
+            }
+        };
+        // reference.wgsl geometricProjectedFace.
         let project = |p: [i32; 2], a: usize, v: f32| {
             let mut q = p;
             q[a] += 1;
             if g.pressure_face(p, a) <= 1e-6 {
                 return g.solid_speed(p, a);
             }
-            let pa = g.pressure_phi(p, &self.options.volume_pressure_rows);
-            let pb = g.pressure_phi(q, &self.options.volume_pressure_rows);
+            let pa = pressure_phi[halo(p)];
+            let pb = pressure_phi[halo(q)];
             if pa >= 0.0 && pb >= 0.0 {
                 return 0.0;
             }
             v - dt / self.rho * (pressure(q) - pressure(p)) / (g.h[a] * theta(pa, pb))
         };
-        let mut velocities = g.velocity.clone();
-        let mut low_x = g.low_x.clone();
-        let mut low_y = g.low_y.clone();
-        let mut released = vec![0_u8; g.volume.len()];
-        for i in 0..velocities.len() {
-            let p = g.point(i);
+        // E2b: a cell outside the fine tiles has no row and no liquid.
+        let n = g.volume.len();
+        let velocities = &mut s.velocity;
+        let low_x = &mut s.low_x;
+        let low_y = &mut s.low_y;
+        let released = &mut s.released;
+        velocities.clear();
+        velocities.resize(n, [0.0; 2]);
+        low_x.clear();
+        low_x.resize(g.dims[1], 0.0);
+        low_y.clear();
+        low_y.resize(g.dims[0], 0.0);
+        released.clear();
+        released.resize(n, 0);
+        super::velocity::for_each_fine(g, e, &self.options, |i, p| {
             for a in 0..2 {
                 let v = project(p, a, g.velocity[i][a]);
                 velocities[i][a] = v;
@@ -597,10 +697,133 @@ impl World {
                     }
                 }
             }
+            if let Some(nozzle) = nozzle {
+                velocities[i] = nozzle.apply(p, velocities[i]);
+            }
+        });
+        std::mem::swap(&mut self.grid.velocity, &mut s.velocity);
+        std::mem::swap(&mut self.grid.low_x, &mut s.low_x);
+        std::mem::swap(&mut self.grid.low_y, &mut s.low_y);
+        std::mem::swap(&mut self.grid.released, &mut s.released);
+        self.pressure.scratch = s;
+    }
+}
+
+// reference.wgsl divergenceAtWithCapacity: wall-relative flux plus
+// vi * div(u_s), both in s^-1.
+fn divergence(g: &Grid, p: [i32; 2], check_solid: bool, vi: f32) -> f32 {
+    let solid = |q: [i32; 2], a: usize| {
+        let mut r = q;
+        r[a] += 1;
+        if check_solid && g.index(q).is_some() && g.index(r).is_some() {
+            g.solid_speed(q, a)
+        } else {
+            0.0
         }
-        self.grid.velocity = velocities;
-        self.grid.low_x = low_x;
-        self.grid.low_y = low_y;
-        self.grid.released = released;
+    };
+    let mut terms = [0.0; 4];
+    for a in 0..2 {
+        let mut m = p;
+        m[a] -= 1;
+        let vp = g.pressure_face(p, a);
+        let vm = g.pressure_face(m, a);
+        terms[2 * a] = (vp * g.face(p, a) + (vi - vp) * solid(p, a)) / g.h[a];
+        terms[2 * a + 1] = -(vm * g.face(m, a) + (vi - vm) * solid(m, a)) / g.h[a];
+    }
+    (terms[0] + terms[1]) + (terms[2] + terms[3])
+}
+
+// reference.wgsl volumeCorrectionDivergenceFromAuthority. The deficit target
+// is the sharpened surface fraction gammaA.
+fn volume_correction(
+    g: &Grid,
+    target: &[f32],
+    i: usize,
+    cap: f32,
+    phi: f32,
+    rate: f32,
+    dt: f32,
+) -> f32 {
+    let v = g.volume[i];
+    let positive = (0.5 * (v - cap).max(0.0)).min(cap);
+    let deficit = if cap > 1e-5 && v <= cap && phi < 0.0 {
+        (target[i] - v).max(0.0)
+    } else {
+        0.0
+    };
+    (positive - rate * deficit) / dt.max(1e-12)
+}
+
+// uv.wgsl uvBalanceSum: a 64-lane workgroup tree.
+fn workgroup_sum(mut lanes: [[f32; 2]; 64]) -> [f32; 2] {
+    let mut stride = 32;
+    while stride > 0 {
+        for l in 0..stride {
+            let upper = lanes[l + stride];
+            for (value, add) in lanes[l].iter_mut().zip(upper) {
+                *value += add;
+            }
+        }
+        stride /= 2;
+    }
+    lanes[0]
+}
+
+// uv.wgsl uvBalanceReduce: lane l accumulates records l, l+64, ... in order.
+fn lane_reduce(records: &[[f32; 2]]) -> [f32; 2] {
+    let mut lanes = [[0.0_f32; 2]; 64];
+    for (i, record) in records.iter().enumerate() {
+        for c in 0..2 {
+            lanes[i % 64][c] += record[c];
+        }
+    }
+    workgroup_sum(lanes)
+}
+
+// uv.wgsl uvBalanceMeasure with its reductions. One record per 4x4 tile, lane
+// x + 4y; above 1024 records the chunk pass reduces each 1024 first. A tile
+// with no liquid lane sums zeros.
+fn balance_rate(g: &Grid, s: &mut Scratch) -> f32 {
+    let tiles = g.dims.map(|n| n.div_ceil(4));
+    let halo = g.dims[0] + 2;
+    s.records.clear();
+    for ty in 0..tiles[1] {
+        for tx in 0..tiles[0] {
+            let mut lanes = [[0.0_f32; 2]; 64];
+            let mut live = false;
+            for (l, lane) in lanes.iter_mut().enumerate().take(16) {
+                let p = [(4 * tx + l % 4) as i32, (4 * ty + l / 4) as i32];
+                let Some(i) = g.index(p) else { continue };
+                let cap = g.capacity[i];
+                if cap > 1e-5
+                    && s.pressure_phi[(p[0] + 1) as usize + halo * (p[1] + 1) as usize] < 0.0
+                {
+                    let v = g.volume[i];
+                    // uv.wgsl uvSurfaceDeficit.
+                    let deficit = if v > cap {
+                        0.0
+                    } else {
+                        (s.target[i] - v).max(0.0)
+                    };
+                    *lane = [(0.5 * (v - cap).max(0.0)).min(cap), deficit];
+                    live = true;
+                }
+            }
+            s.records
+                .push(if live { workgroup_sum(lanes) } else { [0.0; 2] });
+        }
+    }
+    let total = if s.records.len() > 1024 {
+        s.chunks.clear();
+        s.chunks.extend(s.records.chunks(1024).map(lane_reduce));
+        lane_reduce(&s.chunks)
+    } else {
+        lane_reduce(&s.records)
+    };
+    // The Metal build divides by multiplying with the reciprocal.
+    if total[1] > 0.0 {
+        (total[0] * (1.0 / total[1])).min(1.0)
+    } else {
+        0.0
     }
 }

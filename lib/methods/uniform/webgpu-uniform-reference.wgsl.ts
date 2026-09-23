@@ -1314,10 +1314,10 @@ fn divergenceAt(id:vec3i,checkSolid:bool)->f32{
 // pressure row. No field changes between topology construction and RHS.
 fn volumeCorrectionDivergenceFromAuthority(id:vec3i,cap:f32,phi:f32)->f32{
   ${geometric ? `let v=volume(id);let positive=min(0.5*max(0.0,v-cap),cap);
-  ${referenceDimension === 3 ? `var deficit=0.0;
+  var deficit=0.0;
   if(cap>1e-5&&v<=cap&&phi<0.0){deficit=max(0.0,textureLoad(gammaIn,id,0).x-v);}
   let rate=bitcast<f32>(atomicLoad(&sharpenDeposits[uvBalanceBase()]));
-  return (positive-rate*deficit)/max(params.dimsDt.w,1e-12);` : "return positive/max(params.dimsDt.w,1e-12);"}` : "return volumeCorrectionDivergence(id);"}
+  return (positive-rate*deficit)/max(params.dimsDt.w,1e-12);` : "return volumeCorrectionDivergence(id);"}
 }
 // Mass-Conserving Eulerian Liquid Simulation Sec 3.7: cells holding more
 // density than they represent add min(lambda (rho'-1), eta) artificial
@@ -1325,7 +1325,7 @@ fn volumeCorrectionDivergenceFromAuthority(id:vec3i,cap:f32,phi:f32)->f32{
 // pressure solve pushes the excess out.
 fn volumeCorrectionDivergence(id: vec3i) -> f32 {
   ${geometric ? `let positive=min(0.5*max(0.0,volume(id)-cellOpenFraction(id)),cellOpenFraction(id));
-  ${referenceDimension === 3 ? "let rate=bitcast<f32>(atomicLoad(&sharpenDeposits[uvBalanceBase()]));return (positive-rate*uvSurfaceDeficit(id))/max(params.dimsDt.w,1e-12);" : "return positive/max(params.dimsDt.w,1e-12);"}` : `
+  let rate=bitcast<f32>(atomicLoad(&sharpenDeposits[uvBalanceBase()]));return (positive-rate*uvSurfaceDeficit(id))/max(params.dimsDt.w,1e-12);` : `
   // Preserve CM12's calibrated small-excess slope exactly:
   // min(lambda * (rho' - 1), eta) / dx with lambda=0.5 and eta=1.
   // Replacing this by excess/dt makes the correction three times stronger at

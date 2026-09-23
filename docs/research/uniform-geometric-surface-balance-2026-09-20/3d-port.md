@@ -1,8 +1,8 @@
 # 3D Uniform Geometric surface-deficit balancing
 
 Enabled by default in the 3D constructor and shared method parameters. The live
-On/Off control is in Advance pipeline → Pressure → System build. The 2D lab
-retains its separate experimental checkbox and prior default.
+On/Off control is in Advance pipeline → Pressure → System build. Since
+2026-09-23 the 2D lab runs the same default and reduction order.
 
 Before pressure setup, sum over pressure-liquid cells with positive capacity:
 

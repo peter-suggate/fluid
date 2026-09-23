@@ -14,13 +14,19 @@ import {
   uniformInitialVolume,
   uniformVolumeInitialPhi,
 } from "../methods/uniform/uniform-volume-initial";
-import { resolveUniformGeometricValues } from "../methods/uniform/uniform-geometric-parameters";
+import { resolveUniformGeometricValues, UNIFORM_GEOMETRIC_NATIVE_PARAMS } from "../methods/uniform/uniform-geometric-parameters";
 import { scenerySliceFraction, uniformLabSlice } from "./scenery-slice";
 
-/** 2D owns its balancing toggle separately; window scheduling is deferred. */
+const NATIVE_KEYS = new Set(UNIFORM_GEOMETRIC_NATIVE_PARAMS.map((p) => p.key));
+/** The 3D defaults restricted to the native contract; 2D runs the same algorithm. */
 export const UNIFORM_LAB_VALUES = Object.freeze(
-  Object.fromEntries(Object.entries(resolveUniformGeometricValues({ surfaceDeficitBalancing: "off" })).filter(([key]) => key !== "volumeStorage")),
+  Object.fromEntries(Object.entries(resolveUniformGeometricValues()).filter(([key]) => NATIVE_KEYS.has(key))),
 );
+/** The two surface-volume stages the lab lets a viewer switch off. */
+export interface UniformLabSurface {
+  readonly totalSurfaceVolume: boolean;
+  readonly surfaceDeficitBalancing: boolean;
+}
 
 export function uniformLabSceneLimitation(
   scene: SceneDescription,
@@ -82,7 +88,6 @@ export interface UniformView {
   readonly released: Uint8Array;
   readonly tiles: Uint8Array;
   readonly receipt: Readonly<Record<string, unknown>>;
-  readonly surfaceDeficitBalancing: boolean;
 }
 export function createUniformView(source: PhysicsPublication): UniformView {
   const publication = decodePhysicsPublication(source);
@@ -138,13 +143,11 @@ export function createUniformView(source: PhysicsPublication): UniformView {
       released: u8(PhysicsPlane.UniformReleased, nx * ny),
       tiles: u8(PhysicsPlane.UniformTiles),
       receipt: m.receipt as Record<string, unknown>,
-      surfaceDeficitBalancing: (m.receipt as Record<string, unknown>)?.surfaceDeficitBalancing === true,
     };
   } finally {
     publication.release();
   }
 }
-export type SurfaceExperiment = "off" | "regional" | "regional-area" | "area-only";
 export class UniformLabController {
   private constructor(private readonly client: PhysicsWasmClient) {}
   static async create(options: PhysicsWasmClientOptions = {}) {
@@ -155,15 +158,17 @@ export class UniformLabController {
       }),
     );
   }
-  async load(scene: SceneDescription, experiment: SurfaceExperiment = "area-only", surfaceDeficitBalancing = false, sliceDepth_m?: number) {
+  async load(scene: SceneDescription, surface: UniformLabSurface = { totalSurfaceVolume: true, surfaceDeficitBalancing: true }, sliceDepth_m?: number) {
     await this.client.load(scene, {
       method: "uniform-volume",
       dimension: 2,
-      methodValues: UNIFORM_LAB_VALUES,
+      methodValues: {
+        ...UNIFORM_LAB_VALUES,
+        totalSurfaceVolume: surface.totalSurfaceVolume ? "on" : "off",
+        surfaceDeficitBalancing: surface.surfaceDeficitBalancing ? "on" : "off",
+      },
       uniformSeed: uniformLabSeed(scene, sliceDepth_m),
     });
-    if (experiment !== "area-only") await this.command({ type: "set-surface-experiment", profile: experiment });
-    if (surfaceDeficitBalancing) return this.command({ type: "set-surface-deficit-balancing", enabled: true });
     return createUniformView(await this.client.snapshot());
   }
   async advance(dt: number) {

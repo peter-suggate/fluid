@@ -1,5 +1,7 @@
 # Uniform Geometric: late energy in the 2D pool impact
 
+> **Retired 2026-09-23.** The 2D Uniform Geometric method now runs the 3D default algorithm (see `docs/research/uniform-geometric-2d-2026-09-20/implementation-status.md`). The Rust-only experiment recorded here was removed together with its driver script; the committed data and plots remain as the record.
+
 The default simulation loses energy initially, but develops a sustained energy floor. The dominant identified numerical driver is the **overfill-to-pressure feedback loop**: conservative volume transport permits local overfill, the independently transported surface disagrees with that volume, and pressure converts overfill into expansion velocity. Global surface-area correction keeps the visible area fixed while this forcing continues.
 
 Disabling only the overfill pressure source reduces mean surface-weighted kinetic energy over 90–120 seconds from **1,812 to 81 J/m** (95.5%). This is a diagnostic ablation, **not a proposed fix**: it leaves substantially more overfill unresolved.

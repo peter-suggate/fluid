@@ -1,24 +1,20 @@
 {
   "profile": {
-    "activeRegion": "off",
     "densitySharpening": "on",
     "rigidCoupling": "on",
     "velocityTransport": "semi-lagrangian",
     "liquidOnlyVelocityAdvection": "off",
     "timeStep": "paper",
     "pressureResidualTolerance": 10,
-    "pressureCycleBudget": "lagged",
-    "pressureBudgetHeadroom": 1,
     "extensionFrontSweeps": 2,
     "sharpeningStrength": 1,
     "sharpeningDistance": 2.1,
     "pressureFullCycles": 3,
     "pressureVCycles": 4,
     "pressureSweeps": 6,
-    "pressureWindow": "window",
     "redistance": "on",
     "sharpeningWorkMap": "on",
-    "volumeDustThreshold": 0.000001,
+    "volumeDustThreshold": 0.001,
     "twoLevelVelocity": "on",
     "twoLevelFineReach": 2,
     "twoLevelExtension": "tiles",
@@ -33,7 +29,7 @@
     "phiAgreementGain": 0.05,
     "phiAgreementClamp": 0.02,
     "totalSurfaceVolume": "on",
-    "surfaceDeficitBalancing": "off"
+    "surfaceDeficitBalancing": "on"
   },
   "scenes": [
     {
@@ -45,10 +41,10 @@
         16
       ],
       "initialMass": 168,
-      "finalMass": 167.99991063328696,
-      "dust": 0.00009770332125314321,
-      "medianMs": 1.552417000000105,
-      "p95Ms": 1.7634579999999005
+      "finalMass": 167.8512032730505,
+      "dust": 0.14880809027363284,
+      "medianMs": 1.0315409999999474,
+      "p95Ms": 1.1912499999999682
     },
     {
       "artifact": "scalar",
@@ -59,10 +55,10 @@
         32
       ],
       "initialMass": 588.7999999523163,
-      "finalMass": 588.799536055583,
-      "dust": 0.0004598559620396653,
-      "medianMs": 3.280583000000206,
-      "p95Ms": 3.51495900000009
+      "finalMass": 588.1599000230199,
+      "dust": 0.6401005198434255,
+      "medianMs": 1.8896660000000338,
+      "p95Ms": 2.0169579999999314
     },
     {
       "artifact": "scalar",
@@ -73,19 +69,19 @@
         16
       ],
       "initialMass": 64,
-      "finalMass": 63.99974917627901,
-      "dust": 0.0002589916619891836,
-      "medianMs": 1.3274169999999685,
-      "p95Ms": 1.5053330000000642
+      "finalMass": 63.57846346264705,
+      "dust": 0.4215364118596705,
+      "medianMs": 0.7631669999999531,
+      "p95Ms": 0.8480839999999716
     },
     {
       "artifact": "scalar",
       "scene": "live-liquid-and-rigid-tools",
       "frames": 36,
-      "bodyY": 0.31173017621040344,
+      "bodyY": 0.29860448837280273,
       "injectedVolume": 13,
-      "liquidVolume": 180.28394585835395,
-      "volumeChange": -0.7160541416460546
+      "liquidVolume": 180.8617666515056,
+      "volumeChange": -0.1382333484943956
     },
     {
       "artifact": "scalar",
@@ -96,7 +92,7 @@
       "artifact": "scalar",
       "scene": "planar-rigid-buoyancy",
       "frames": 30,
-      "bodyY": 0.3212490677833557
+      "bodyY": 0.34602007269859314
     },
     {
       "artifact": "scalar",
@@ -113,10 +109,10 @@
         16
       ],
       "initialMass": 168,
-      "finalMass": 167.99991063328696,
-      "dust": 0.00009770332125314321,
-      "medianMs": 1.4190000000000964,
-      "p95Ms": 1.63474999999994
+      "finalMass": 167.8512032730505,
+      "dust": 0.14880809027363284,
+      "medianMs": 1.0097920000000613,
+      "p95Ms": 1.1023329999998168
     },
     {
       "artifact": "simd",
@@ -127,10 +123,10 @@
         32
       ],
       "initialMass": 588.7999999523163,
-      "finalMass": 588.799536055583,
-      "dust": 0.0004598559620396653,
-      "medianMs": 3.193916000000172,
-      "p95Ms": 4.042999999999665
+      "finalMass": 588.1599000230199,
+      "dust": 0.6401005198434255,
+      "medianMs": 1.8564580000002024,
+      "p95Ms": 1.9589590000000499
     },
     {
       "artifact": "simd",
@@ -141,19 +137,19 @@
         16
       ],
       "initialMass": 64,
-      "finalMass": 63.99974917627901,
-      "dust": 0.0002589916619891836,
-      "medianMs": 1.3136250000002292,
-      "p95Ms": 1.5910420000000158
+      "finalMass": 63.57846346264705,
+      "dust": 0.4215364118596705,
+      "medianMs": 0.7630409999999301,
+      "p95Ms": 0.8441660000000866
     },
     {
       "artifact": "simd",
       "scene": "live-liquid-and-rigid-tools",
       "frames": 36,
-      "bodyY": 0.31173017621040344,
+      "bodyY": 0.29860448837280273,
       "injectedVolume": 13,
-      "liquidVolume": 180.28394585835395,
-      "volumeChange": -0.7160541416460546
+      "liquidVolume": 180.8617666515056,
+      "volumeChange": -0.1382333484943956
     },
     {
       "artifact": "simd",
@@ -164,7 +160,7 @@
       "artifact": "simd",
       "scene": "planar-rigid-buoyancy",
       "frames": 30,
-      "bodyY": 0.3212490677833557
+      "bodyY": 0.34602007269859314
     },
     {
       "artifact": "simd",

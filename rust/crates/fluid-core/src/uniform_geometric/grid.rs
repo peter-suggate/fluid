@@ -67,11 +67,13 @@ impl Grid {
         value
     }
     pub fn source_phi(&self, p: [f32; 2], mut phi: f32) -> f32 {
+        // uvSourcePhi's drop arm; WGSL length, not hypot.
         for drop in &self.drops {
-            phi = phi.min(
-                (p[0] * self.h[0] - drop.centre_m[0]).hypot(p[1] * self.h[1] - drop.centre_m[1])
-                    - drop.radius_m,
-            );
+            let d = [
+                p[0] * self.h[0] - drop.centre_m[0],
+                p[1] * self.h[1] - drop.centre_m[1],
+            ];
+            phi = phi.min((d[0] * d[0] + d[1] * d[1]).sqrt() - drop.radius_m);
         }
         phi
     }
@@ -117,6 +119,17 @@ impl Grid {
     pub fn phi_at(&self, p: [f32; 2]) -> f32 {
         self.scalar(&self.phi, p)
     }
+    /// uvPhi(cell + 0.5) as Metal compiles it into the pressure build: the
+    /// depth-symmetric corners k and k+4 are one plane vertex, and each
+    /// x row's four eighths are summed in sequence. Verified bitwise against
+    /// the GPU CM11a finest level; the source's pairwise d4Sum8 is not.
+    pub fn phi_centre(&self, cell: [i32; 2]) -> f32 {
+        let row = self.dims[0] + 1;
+        let base = cell[0] as usize + row * cell[1] as usize;
+        let v = |k: usize| self.phi[k] * 0.125;
+        let [a, b, c, d] = [v(base), v(base + 1), v(base + row), v(base + row + 1)];
+        (((a + b) + a) + b) + (((c + d) + c) + d)
+    }
     pub fn gradient(&self, field: &[f32], p: [f32; 2]) -> [f32; 2] {
         std::array::from_fn(|a| {
             let mut lo = p;
@@ -131,7 +144,7 @@ impl Grid {
     pub fn pressure_phi(&self, p: [i32; 2], rows: &str) -> f32 {
         let h = self.h[0].min(self.h[1]);
         if let Some(i) = self.index(p).filter(|&i| self.capacity[i] > 1e-5) {
-            let phi = self.phi_at([p[0] as f32 + 0.5, p[1] as f32 + 0.5]);
+            let phi = self.phi_centre(p);
             if rows == "off" {
                 return phi;
             }
@@ -144,8 +157,7 @@ impl Grid {
             }
             let isolated = OFFSETS.iter().all(|e| {
                 let q = [p[0] + e[0], p[1] + e[1]];
-                self.index(q).is_none()
-                    || self.phi_at([q[0] as f32 + 0.5, q[1] as f32 + 0.5]) >= 0.0
+                self.index(q).is_none() || self.phi_centre(q) >= 0.0
             });
             return if isolated {
                 volume_phi.max(-0.5 * h)
@@ -235,68 +247,128 @@ impl Grid {
         self.index(q)
             .is_some_and(|i| self.released[i] & (1 << bit) != 0)
     }
+    /// No cut cell anywhere (uvSolidFree): the host's static-solid, terrain and body certificate.
+    pub fn solid_free(&self) -> bool {
+        self.capacity.iter().all(|&c| c == 1.0)
+            && self.rigid_faces.is_none()
+            && self.rigid_centres.is_none()
+    }
+    /// uvBuried: no incident cell of the vertex is open. Its phi is not state.
+    pub fn buried(&self, v: [i32; 2]) -> bool {
+        (0..4).all(|k| {
+            let c = [v[0] - 1 + (k & 1), v[1] - 1 + (k >> 1)];
+            self.index(c).is_none_or(|i| self.capacity[i] <= 1e-5)
+        })
+    }
+    /// uvTarget, cached arm (uniform-volume.wgsl.ts): eight quarter-cell probes
+    /// of the z-duplicated vertex octet, each a d4Sum8 of ((v*wx)*wy)*wz.
     pub fn target(&self, p: [i32; 2]) -> f32 {
-        let mut samples = [0.0; 4];
-        let mut centre = 0.0;
-        let mut fill = 0.0;
-        let mut magnitude = 0.0_f32;
-        let mut gradient = [0.0; 2];
-        for k in 0..4 {
-            let c = [(k & 1) as f32, ((k >> 1) & 1) as f32];
-            let v = self.phi_at([
-                p[0] as f32 + 0.25 + 0.5 * c[0],
-                p[1] as f32 + 0.25 + 0.5 * c[1],
-            ]);
-            samples[k] = v;
-            centre += 0.25 * v;
-            magnitude = magnitude.max(v.abs());
-            fill += if v < 0.0 {
-                1.0
-            } else if v == 0.0 {
-                0.5
-            } else {
-                0.0
-            };
-            for a in 0..2 {
-                gradient[a] += (2.0 * c[a] - 1.0) * v;
-            }
-        }
-        let mut residual = 0.0_f32;
-        for k in 0..4 {
-            let signs = [
-                2.0 * (k & 1) as f32 - 1.0,
-                2.0 * ((k >> 1) & 1) as f32 - 1.0,
-            ];
-            residual = residual.max(
-                (samples[k] - (centre + 0.25 * (gradient[0] * signs[0] + gradient[1] * signs[1])))
-                    .abs(),
-            );
-        }
-        let fraction = if residual <= 1e-4 * (1.0 + magnitude) {
-            plane_fraction(gradient, -centre)
-        } else {
-            fill * 0.25
-        };
-        fraction * self.open(p)
+        target_of(&self.phi, self.dims, p) * self.open(p)
     }
 }
+fn corner3(k: usize) -> [usize; 3] {
+    [k & 1, (k >> 1) & 1, (k >> 2) & 1]
+}
+/// uvTarget of an arbitrary vertex field, before the open-fraction factor.
+pub fn target_of(phi: &[f32], dims: [usize; 2], p: [i32; 2]) -> f32 {
+    let nxv = dims[0] + 1;
+    let base = p[0] as usize + nxv * p[1] as usize;
+    if let Some(settled) = settled_target([
+        phi[base],
+        phi[base + 1],
+        phi[base + nxv],
+        phi[base + nxv + 1],
+    ]) {
+        return settled;
+    }
+    let vertices: [f32; 8] = std::array::from_fn(|j| {
+        let c = corner3(j);
+        phi[base + c[0] + nxv * c[1]]
+    });
+    let mut samples = [0.0_f32; 8];
+    let mut centre = 0.0_f32;
+    let mut fill = 0.0_f32;
+    let mut magnitude = 0.0_f32;
+    for (k, sample) in samples.iter_mut().enumerate() {
+        let f = corner3(k).map(|c| 0.25 + 0.5 * c as f32);
+        let weighted: [f32; 8] = std::array::from_fn(|j| {
+            let c = corner3(j);
+            let w: [f32; 3] = std::array::from_fn(|a| if c[a] == 1 { f[a] } else { 1.0 - f[a] });
+            ((vertices[j] * w[0]) * w[1]) * w[2]
+        });
+        let value = d4_sum8(weighted);
+        *sample = value;
+        centre += 0.125 * value;
+        magnitude = magnitude.max(value.abs());
+        fill += if value < 0.0 {
+            1.0
+        } else if value == 0.0 {
+            0.5
+        } else {
+            0.0
+        };
+    }
+    let mut gradient = [0.0_f32; 3];
+    for (k, &s) in samples.iter().enumerate() {
+        let c = corner3(k);
+        for a in 0..3 {
+            gradient[a] += ((2.0 * c[a] as f32 - 1.0) * s) / 2.0;
+        }
+    }
+    let mut residual = 0.0_f32;
+    for (k, &s) in samples.iter().enumerate() {
+        let sign = corner3(k).map(|c| 2.0 * c as f32 - 1.0);
+        let dot = (gradient[0] * (0.25 * sign[0]) + gradient[1] * (0.25 * sign[1]))
+            + gradient[2] * (0.25 * sign[2]);
+        residual = residual.max((s - (centre + dot)).abs());
+    }
+    if residual <= 1e-4 * (1.0 + magnitude) {
+        plane_box_fraction(gradient, -centre)
+    } else {
+        fill / 8.0
+    }
+}
+/// uvTarget's value, without evaluating it, for a cell whose four vertices
+/// share one sign and lie within a factor 1.9 of each other. Every sample then
+/// has that sign, and the fitted plane's half-cell swing (at most max - min)
+/// stays at least a tenth of |centre| short of the cell's corners, far beyond
+/// f32 rounding: both arms of uvTarget return exactly 0 (air) or 1 (liquid).
+fn settled_target(v: [f32; 4]) -> Option<f32> {
+    let lo = v[0].min(v[1]).min(v[2].min(v[3]));
+    let hi = v[0].max(v[1]).max(v[2].max(v[3]));
+    if !v.iter().all(|x| x.abs() <= 1e30) {
+        return None;
+    }
+    if lo > 1e-30 && hi <= 1.9 * lo {
+        Some(0.0)
+    } else if hi < -1e-30 && lo >= 1.9 * hi {
+        Some(1.0)
+    } else {
+        None
+    }
+}
+/// d4Sum8 (webgpu-uniform-reference.wgsl.ts).
+pub fn d4_sum8(v: [f32; 8]) -> f32 {
+    ((v[0] + v[5]) + (v[1] + v[4])) + ((v[2] + v[7]) + (v[3] + v[6]))
+}
 pub const OFFSETS: [[i32; 2]; 4] = [[-1, 0], [1, 0], [0, -1], [0, 1]];
-/// Exact area of n·x <= offset in the centred unit square.
-pub fn plane_fraction(n: [f32; 2], offset: f32) -> f32 {
-    let dominant = n[0].abs().max(n[1].abs());
+/// geometricPlaneBoxFraction with unit widths (geometric-plane-box.wgsl.ts).
+pub fn plane_box_fraction(normal: [f32; 3], offset: f32) -> f32 {
+    let projected = normal.map(f32::abs);
+    let dominant = projected[0].max(projected[1].max(projected[2]));
     if dominant <= 1e-20 {
         return if offset >= 0.0 { 1.0 } else { 0.0 };
     }
-    let mut spans = [0.0; 2];
+    let mut spans = [0.0_f32; 3];
     let mut dimensions = 0;
-    for value in n {
-        let span = value.abs() / dominant;
+    for value in projected {
+        let span = value / dominant;
         if span >= 1e-6 {
             spans[dimensions] = span;
             dimensions += 1;
         }
     }
-    let total = spans[0] + spans[1];
+    let total = spans[0] + spans[1] + spans[2];
     let shifted = offset / dominant + 0.5 * total;
     if shifted <= 0.0 {
         return 0.0;
@@ -306,23 +378,47 @@ pub fn plane_fraction(n: [f32; 2], offset: f32) -> f32 {
     }
     let complement = shifted > 0.5 * total;
     let x = if complement { total - shifted } else { shifted };
-    let f = if dimensions == 1 {
+    let fraction = if dimensions == 1 {
         x / spans[0]
-    } else {
+    } else if dimensions == 2 {
         let a = spans[0].min(spans[1]);
         let b = spans[0].max(spans[1]);
         if x < a {
-            0.5 * (x / a) * (x / b)
+            (0.5 * (x / a)) * (x / b)
         } else {
             (x - 0.5 * a) / b
         }
+    } else {
+        let a = spans[0].min(spans[1].min(spans[2]));
+        let c = spans[0].max(spans[1].max(spans[2]));
+        let b = spans[0]
+            .min(spans[1])
+            .max(spans[0].max(spans[1]).min(spans[2]));
+        (uniform_sum_primitive(x, a, b) - uniform_sum_primitive(x - c, a, b)) / c
     }
     .clamp(0.0, 1.0);
     if complement {
-        1.0 - f
+        1.0 - fraction
     } else {
-        f
+        fraction
     }
+}
+/// geometricUniformSumPrimitive.
+fn uniform_sum_primitive(x: f32, a: f32, b: f32) -> f32 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    if x < a {
+        return ((x * (x / a)) * (x / b)) / 6.0;
+    }
+    if x <= b {
+        return ((0.5 * x) * (x - a) + (a * a) / 6.0) / b;
+    }
+    if x < a + b {
+        let tail = a + b - x;
+        return (x - 0.5 * (a + b)) + ((tail * (tail / a)) * (tail / b)) / 6.0;
+    }
+    x - 0.5 * (a + b)
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]

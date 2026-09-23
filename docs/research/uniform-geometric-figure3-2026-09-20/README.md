@@ -1,5 +1,7 @@
 # Figure 3: falling drops disappearing above a pool
 
+> **Retired 2026-09-23.** The 2D Uniform Geometric method now runs the 3D default algorithm (see `docs/research/uniform-geometric-2d-2026-09-20/implementation-status.md`). The Rust-only experiment recorded here was removed together with its driver script; the committed data and plots remain as the record.
+
 ## Finding
 
 The conserved volume does not disappear. The level-set surface collapses while

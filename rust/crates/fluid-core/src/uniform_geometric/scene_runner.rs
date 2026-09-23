@@ -4,7 +4,7 @@ use super::{grid::Grid, world::World, UniformGeometricOptions};
 use crate::types::ValidationError;
 use serde::Deserialize;
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Request {
     #[serde(default)]
     scene: Option<crate::initial_scene::SceneDocument>,
@@ -34,22 +34,33 @@ pub struct Request {
     open_top: bool,
     #[serde(default = "rho")]
     density: f32,
+    /// The owned session's seed constants; applyVelocityForces reads both.
+    #[serde(default)]
+    viscosity: f32,
+    #[serde(default)]
+    surface_tension: f32,
     #[serde(default = "dt")]
     dt: f32,
     #[serde(default = "frames")]
     frames: u32,
+    /// The cycle budget of the first step; later steps follow the lagged
+    /// policy. Replays one GPU step's encoded schedule.
+    #[serde(default)]
+    pressure_cycle_budget: Option<u32>,
+    /// One GPU-encoded cycle budget per frame.
+    #[serde(default)]
+    gpu_pressure_cycle_budgets: Vec<u32>,
     #[serde(default)]
     audit_surface: bool,
     #[serde(default)]
     redistance_only: bool,
+    /// Publish the last solve's CM11a pyramid for comparison with the GPU's.
+    #[serde(default)]
+    audit_pressure: bool,
     #[serde(default)]
     audit_stages: bool,
     #[serde(default)]
     audit_energy: bool,
-    #[serde(default)]
-    disable_overfill_correction: bool,
-    #[serde(default)]
-    energy_experiment: super::energy_experiment::Config,
     #[serde(default)]
     energy_snapshot_frames: Vec<u32>,
     #[serde(default)]
@@ -62,8 +73,9 @@ pub struct Request {
     audit_replay_frames: Vec<u32>,
     #[serde(default)]
     audit_trace_frames: Vec<u32>,
-    #[serde(default)]
-    swept_extension: Option<super::swept_extension::Config>,
+    /// A GPU oracle's published phi region header for the first step.
+    #[serde(default, rename = "phiRegionHeader")]
+    phi_region_header: Option<Vec<u32>>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -119,12 +131,21 @@ pub fn run(r: Request) -> Result<serde_json::Value, ValidationError> {
         if !r.released.is_empty() {
             g.released = r.released;
         }
-        World::from_grid(g, r.options, r.gravity, r.density, 0.0, 0.0)?
+        World::from_grid(
+            g,
+            r.options,
+            r.gravity,
+            r.density,
+            r.viscosity,
+            r.surface_tension,
+        )?
     };
-    r.energy_experiment.validate()?;
-    if r.disable_overfill_correction && r.energy_experiment.mode != "off" {
+    if !r.gpu_pressure_cycle_budgets.is_empty()
+        && (r.pressure_cycle_budget.is_some()
+            || r.gpu_pressure_cycle_budgets.len() != r.frames as usize)
+    {
         return Err(ValidationError(
-            "compensation must preserve the overfill source".into(),
+            "pressure cycle budgets need one entry per frame, or one first-step budget".into(),
         ));
     }
     for injection in &r.liquid_injections {
@@ -144,11 +165,13 @@ pub fn run(r: Request) -> Result<serde_json::Value, ValidationError> {
             ));
         }
     }
-    world.energy_experiment = r.energy_experiment;
-    world.diagnostic_disable_overfill_correction = r.disable_overfill_correction;
-    if let Some(config) = r.swept_extension {
-        config.validate()?;
-        world.swept_extension = config;
+    if let Some(header) = r.phi_region_header {
+        if header.len() != super::pages::HEADER_WORDS {
+            return Err(ValidationError(
+                "phiRegionHeader must hold 256 words".into(),
+            ));
+        }
+        world.phi_region_override = Some(header);
     }
     if r.redistance_only {
         super::surface::redistance(&mut world.grid);
@@ -162,7 +185,6 @@ pub fn run(r: Request) -> Result<serde_json::Value, ValidationError> {
     let mut stages = Vec::new();
     let mut energy = Vec::new();
     let mut energy_snapshots = Vec::new();
-    let mut compensation = Vec::new();
     let mut replays = Vec::new();
     let mut trace_replays = Vec::new();
     let rounds = r.sharpening_rounds.unwrap_or(8);
@@ -172,6 +194,14 @@ pub fn run(r: Request) -> Result<serde_json::Value, ValidationError> {
         ));
     }
     for frame in 1..=r.frames {
+        world.pressure_budget_override = match r.gpu_pressure_cycle_budgets.get(frame as usize - 1)
+        {
+            Some(&budget) => Some(budget as usize),
+            None => r
+                .pressure_cycle_budget
+                .filter(|_| frame == 1)
+                .map(|v| v as usize),
+        };
         for injection in r.liquid_injections.iter().filter(|x| x.frame == frame) {
             world.grid.drops.push(injection.drop.clone());
         }
@@ -183,7 +213,6 @@ pub fn run(r: Request) -> Result<serde_json::Value, ValidationError> {
             || !r.audit_trace_frames.is_empty()
         {
             let options = world.options.clone();
-            let compensation_config = world.energy_experiment.clone();
             world.advance_observed(r.dt, rounds, |stage, grid| {
                 if stage == "start" && r.audit_trace_frames.contains(&frame) {
                     trace_replays.push(serde_json::json!({"frame":frame,
@@ -191,9 +220,6 @@ pub fn run(r: Request) -> Result<serde_json::Value, ValidationError> {
                         "traces":super::diagnostics::trace_replays(grid,&options,r.dt)}));
                 }
                 if r.energy_snapshot_frames.contains(&frame) && (r.energy_snapshot_stages.is_empty() || r.energy_snapshot_stages.iter().any(|s| s == stage)) {
-                    if stage == "sharpened" && compensation_config.mode.starts_with("balance-") {
-                        energy_snapshots.push(serde_json::json!({"frame":frame,"stage":"balanceSources","fields":super::energy_experiment::balance_fields(grid,&options.volume_pressure_rows,r.dt,&compensation_config)}));
-                    }
                     energy_snapshots.push(serde_json::json!({"frame":frame,"stage":stage,"volume":grid.volume,"phi":grid.phi,"velocity":grid.velocity,"lowX":grid.low_x,"lowY":grid.low_y,"released":grid.released}));
                 }
                 if r.audit_energy {
@@ -218,16 +244,24 @@ pub fn run(r: Request) -> Result<serde_json::Value, ValidationError> {
             world.advance(r.dt)?;
         }
         receipts.push(world.receipt.clone());
-        if world.energy_experiment.mode != "off" && world.energy_experiment.audit_receipt {
-            compensation.push(world.energy_receipt.clone());
-        }
     }
-    let mut result = serde_json::json!({"initialVolume":initial,"receipts":receipts,"volume":world.grid.volume,"phi":world.grid.phi,"velocity":world.grid.velocity,"lowX":world.grid.low_x,"lowY":world.grid.low_y,"pressure":world.pressure.levels[0].p,"released":world.grid.released,"tileClasses":world.tile_classes});
+    let mut result = serde_json::json!({"initialVolume":initial,"receipts":receipts,"volume":world.grid.volume,"phi":world.grid.phi,"velocity":world.grid.velocity,"lowX":world.grid.low_x,"lowY":world.grid.low_y,"pressure":world.pressure.levels[0].p,"pressurePhi":world.pressure.levels[0].phi,"released":world.grid.released,"tileClasses":world.tile_classes,"gamma":world.gamma,"phiRegion":world.window.header});
+    if r.audit_pressure {
+        // Per level: raw and continued phi (the GPU's slots A and B), rhs
+        // slot A and the +x/+y coefficients the GPU bakes into .xy.
+        let levels: Vec<_> = world
+            .pressure
+            .levels
+            .iter()
+            .map(|l| {
+                let owned: Vec<[f32; 2]> = l.coefficients.iter().map(|c| [c[1], c[3]]).collect();
+                serde_json::json!({"dims":l.dims,"phi":[l.raw_phi,l.phi],"rhs":l.rhs,"coefficients":owned,"pressure":l.p})
+            })
+            .collect();
+        result["multigrid"] = serde_json::json!(levels);
+    }
     if let Some(phi) = world.advected_phi_audit {
         result["advectedPhi"] = serde_json::json!(phi);
-    }
-    if !compensation.is_empty() {
-        result["energyCompensation"] = serde_json::json!(compensation);
     }
     if !energy_snapshots.is_empty() {
         result["energySnapshots"] = serde_json::json!(energy_snapshots);
@@ -277,7 +311,7 @@ fn energy_metrics(g: &Grid, rho: f32, gravity: [f32; 2]) -> serde_json::Value {
         }
         kinetic += 0.5 * m * g.volume[i] as f64 * speed2;
         mac += 0.5 * m * g.volume[i] as f64 * faces2;
-        let fill = super::swept_extension::contour_fill(g, i, 0.0) as f64;
+        let fill = super::diagnostics::contour_fill(g, i, 0.0) as f64;
         phi_area += fill;
         phi_potential -= m
             * fill

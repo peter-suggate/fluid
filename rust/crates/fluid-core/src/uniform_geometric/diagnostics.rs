@@ -1,6 +1,17 @@
 //! Read-only measurements for native scene experiments. Areas are in cell units.
 use super::{extension::Extension, grid::Grid, UniformGeometricOptions};
 
+/// The open-weighted bilinear contour fill of cell i with phi shifted by `shift`.
+pub fn contour_fill(g: &Grid, i: usize, shift: f32) -> f32 {
+    let nxv = g.dims[0] + 1;
+    let j = i % g.dims[0] + nxv * (i / g.dims[0]);
+    bilinear_fill(
+        [j, j + 1, j + nxv, j + nxv + 1].map(|k| (g.phi[k] + shift) as f64),
+        8,
+    ) as f32
+        * g.capacity[i]
+}
+
 /// Integrate the negative part of a bilinear cell. Each horizontal slice is
 /// linear and integrated exactly; split at edge roots before midpoint quadrature.
 /// Corner order: bottom-left, bottom-right, top-left, top-right.
@@ -126,7 +137,7 @@ pub fn trace_replays(g: &Grid, options: &UniformGeometricOptions, dt: f32) -> se
         let e = Extension::build(g, &o, dt);
         let flux = liquid_divergence(g, &e);
         let mut production = g.clone();
-        super::surface::advect(&mut production, &e, &o, dt);
+        super::surface::advect(&mut production, &e, dt);
         let production_area = measure(&production, dt, 32).contour_area;
         for steps in [1, 4, 16, 64] {
             let mut replay = g.clone();

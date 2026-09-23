@@ -1,15 +1,205 @@
 # Uniform Geometric 2D migration — implementation status
 
-The first interactive integration is complete: bare `/advance-lab` now runs
-Uniform Geometric through Rust/Wasm. The user explicitly deferred solve-window
-scheduling and the full set of stage options to prioritize a usable default UI.
-The lab resolves the shared 3D defaults with exactly one override,
-`activeRegion: "off"`, and identifies this as a whole-domain solve.
-The production 3D method retains its numerical defaults, except that the
-unused optional liquid-capacity-balancing feature has been removed.
+**Current state (2026-09-23).** Rust 2D runs the 3D method's default algorithm.
+The lab resolves the shared defaults with no overrides. The earlier
+`activeRegion: "off"` scoping is gone because 3D replaced its active region
+with pages and a phi window.
+[Algorithm parity at the 3D defaults](#algorithm-parity-at-the-3d-defaults-2026-09-23)
+is the current account. The sections after it record the first integration
+(2026-09-20/21) as history; where the two disagree, the parity section wins.
 
-This is acceptance of the scoped UI integration, not a claim that every 3D
-option, source, material-force profile or live-edit operation has exact parity.
+## Algorithm parity at the 3D defaults (2026-09-23)
+
+The oracle is WebGPU `referenceDimension: 2` running the 3D defaults: one
+physical Z cell, symmetry depth, and every default stage. Three 3D changes were
+needed for it:
+
+- Total surface volume and surface-deficit balancing are no longer gated to
+  dimension 3.
+- `uvPhiFarAir`, `uvClosedWallPhi` and `uvEmbeddedAir` are plane-symmetric.
+- The coarse velocity table accepts a collapsed Z axis.
+
+Ordinary 3D runs are unaffected.
+
+### What 2D runs
+
+- **Phi window** (`pages.rs`): the census, dense-census countdown and
+  256-word header come from `scanExternalActiveSources` and
+  `finalizeActiveRegion`. As in 3D, the window exists only for a lattice of
+  more than one 32-cell page with a positive dust floor. It bounds the two
+  vertex phi passes and the released-wall pass. Paged *storage* is a WebGPU
+  memory layout and is outside the native contract; Rust keeps dense arrays up
+  to the unchanged 4,194,304-cell cap.
+- **Extension**: tile classes, the fast iterative method and the two-level
+  hierarchy. Metal fuses `dot()` into an fma, so Rust uses `mul_add` in the
+  nearest-hierarchy sample.
+- **Phi advection and redistance** on the window.
+- **Transport**, with liquid drops and the inflow plug entering as sources, as
+  `uvSources` and `uvSourcePhi` do.
+- **Total surface volume** (`surface_volume.rs`): the surface shifts along its
+  normals, at most one cell per step, to match total conservative V.
+- **Surface-deficit balancing**, on by default, with the 3D reduction order.
+- **Sharpening**: 8 rounds, strength 1, distance 2.1h.
+- **Pressure**, with the arithmetic Metal actually executes:
+  - division as reciprocal-multiply;
+  - `mgApply` as an fma fold;
+  - sequential sums over depth-duplicated corners;
+  - a plain-f32 coarsest solve. Fast math reduces `mgTwoSum`'s error term to
+    zero, so the compensated pair the WGSL spells out is not what the GPU runs.
+
+### Outside the native contract
+
+- **The splash-survival group** (`UNIFORM_GEOMETRIC_SPLASH_KEYS`) is 3D-only:
+  - `phiCubicAdvection`, `phiDrain` and `airborneMomentum` became 3D defaults
+    on 2026-09-23. They are not ported, and the parity probe pins them off.
+    Porting them is a separate decision.
+  - `redistanceSurface` defaults to `rebuild` and `orphanVolume` to `relay`.
+    Rust's behaviour is what those defaults select.
+  - `orphanVolumeRender`, `isolatedBodyVolume` and `phiSeedCells` default off.
+- **`volumeStorage` and `pageSize`** are WebGPU storage choices.
+- **Rejected by `validate_supported`**: non-default values of
+  `velocityTransport`, `liquidOnlyVelocityAdvection`, `volumeCompaction`,
+  `phiSeedFromVolume` and `phiAgreement`. The option file is still generated
+  from the TS contract.
+
+### Retired
+
+- The swept-extension and late-energy experiments.
+- The lab's regional surface profiles.
+- The `set-surface-experiment` and `set-surface-deficit-balancing` session
+  commands.
+- Rust's own planar inflow injection (`inflow::Step`), replaced by the 3D
+  source plug.
+- The driver tools that sent the removed request fields:
+  - `uniform-geometric-compensation.ts`
+  - `uniform-geometric-energy-audit.ts`
+  - `uniform-figure3-regression.ts`
+  - `uniform-geometric-swept-experiment.ts`
+  - `uniform-geometric-surface-balance.py`
+
+The dated reports that used these carry a retirement note. The scene runner's
+request now rejects unknown fields. The unit tests of `inflow::Step` were
+deleted with it. They checked:
+
+- the exact planar area of a sub-cell diagonal jet;
+- the start/end ramp schedule;
+- that full cells refuse water.
+
+The lab shows total surface volume and surface-deficit balancing as switches,
+both on. Turning one off writes `=0` to the URL and resets the scene.
+
+### Evidence
+
+- **One-step fixtures: 36 of 36 pass** (12 scenes at frames 1, 5 and 30) at
+  the unchanged bounds. The scenes include `wide-dam`, 96×48 across 3×2 pages,
+  so the phi window is exercised.
+  - The worst matched differences are V `4.8e-6`, phi `7.7e-7 m` and velocity
+    `3.1e-6 m/s`.
+  - Release bits and tile classes are exact.
+  - Rust's own window regions match the GPU header exactly. The recorded
+    max-speed word differs by at most one ulp.
+  - `probe:uniform-geometric:parity -- --wasm --verify` exits 0, with native,
+    scalar and SIMD agreement.
+- **Free runs** from the frame-1 input stay within about `1e-5` of the GPU
+  over 30 frames on most scenes. The two exceptions come from arithmetic, not
+  from the algorithm:
+  - *Dam scenes.* Apple's hardware reciprocal is not always correctly rounded.
+    About one smoother row in 70 differs by an ulp, and a breaking dam amplifies
+    that chaotically. `dam-collapse` reaches about `1e-3`; `wide-dam` reaches
+    V 1.3 in one cell.
+  - *Resting pools* (`hydrostatic-pool`, `open-top`). A 0.075-V packet
+    stranded in an air-side corner cell above the surface is walked by the
+    8 sharpening rounds up to 8 cells in one step. Whether the walk starts is
+    a near-tie, and 7e-6 of accumulated drift flips it at step 21.
+  - From the GPU's own state, Rust reproduces every step 5–30 of
+    `hydrostatic-pool` to `1.2e-7`. In 3D the ghost drain would deal with
+    these packets, but the probe pins it off.
+- **Lab**: `npm run test:uniform-lab:scenes` passes with scalar and SIMD
+  artifacts, including a 12-frame run and a scalar/SIMD check with each surface
+  switch off.
+
+### Cost
+
+The CPU schedule follows the GPU's work maps:
+
+- Transport traces departures only for TRANSPORT cells, and its exact donor
+  sums touch only live receivers.
+- The extension restricts and prolongs only the faces its readers want.
+- Sharpening runs from its work map, and the census scans only the previous
+  window grown by 8 cells.
+- The pressure smoother, residual and norm visit liquid rows. Prolongation
+  skips cells whose coarse taps are all zero.
+- Velocity advection and forces visit FINE tiles only.
+
+Every one of these is pure scheduling. Across 9 scenes and 12 option variants
+(audit dumps, dense two-level, dense advection, balancing off, pressure-row
+variants, zero tolerance, one sweep), the output is bitwise identical to the
+dense solver it replaced. The exact donor sum is now three u64 limbs. A
+brute-force check of 122 million adds matched the GPU's six u32 words at every
+prefix.
+
+Native release build, ms per step over 30 frames. Both arms were measured back
+to back on the same machine. "Dense" is the parity-complete solver before this
+scheduling work.
+
+| scene | cells | dense | scheduled | speed-up |
+|---|---|---|---|---|
+| fig7-256 | 256×256 | 38.8 | 18.0 | 2.2× |
+| seiche | 320×96 | 38.1 | 21.5 | 1.8× |
+| hillside | 256×112 | 20.3 | 8.7 | 2.3× |
+| tank | 256×96 | 22.9 | 12.4 | 1.8× |
+| boxes | 60×45 | 52.1 | 10.6 | 4.9× |
+| long-dam | 192×96 | 11.6 | 5.6 | 2.1× |
+
+The Rust path the lab ran before this work took 95 ms on fig7-256 and 43 ms on
+hillside. On the scheduled solver, fig7-256's largest stages are:
+
+| stage | ms |
+|---|---|
+| velocity advection | 6.4 |
+| phi advection | 4.7 |
+| projection | 3.2 |
+
+Most of the rest of boxes' projection is the coarsest solve: 1,500–3,000
+iterations per call. 3D runs the same iterations in `mgSolveCoarsest`.
+
+### Known failure
+
+`npm run test:uniform-lab:inflow` fails "water moves" on
+`water-box-dam-break`. The nozzle radius (0.04 m) is smaller than a cell:
+
+- 3D writes inflow phi only through `uvSourcePhi`.
+- A plug thinner than the vertex spacing never brings a vertex below zero.
+- So the injected V, up to 1.2 in a cell of capacity 1, has no pressure row
+  and does not move.
+
+3D behaves the same way. The splash stages do not rescue it: airborne momentum
+needs cell phi above 1.5h, and the drain only turns phi-liquid into air. The old
+Rust injection hid this by writing the nozzle body into phi. The test is left
+red. The choice is to fix `uvSourcePhi` in 3D or delete the test.
+
+`npm run test:uniform-pressure:2d`, the Figure 9 stability harness, is also
+red, for two reasons:
+
+- **Frozen matrix, red before this work.**
+  `frame-104-pressure.json.gz` still carries `activeRegion`, `pressureWindow`,
+  `pressureCycleBudget` and `pressureBudgetHeadroom`. The paging work retired
+  all four, and the generated options reject them.
+- **Exact conservation.** The harness asserts `|V/V0 - 1| < 1e-5`, which the
+  3D default dust floor (`1e-3`) cannot hold. Over 180 frames Fig 9 loses
+  13.64 cell areas, 0.36%. The receipts' transport dust (10.67) and sharpening
+  dust (2.96) account for all of it.
+
+The harness passes with native, scalar and SIMD when two things change: the
+four retired keys are dropped from the frozen request, and conservation counts
+the reported dust, as `test:uniform-lab:scenes` does. The run peaks at
+25.7 m/s, phi area stays at or above 0.996 of V0, and the frozen matrix
+converges to residual 0.40 with no rejected cycles. The harness itself is
+unchanged. Repairing or deleting it is still to be decided.
+
+The diagnostic scene runner now also takes the seed's `viscosity` and
+`surfaceTension`, as the owned session does; both default to zero. It used to
+drop them silently and run inviscid.
 
 ## Implemented
 
@@ -220,35 +410,41 @@ projected into XY, preserving its XY position and velocity and discarding its
 Z offset, like the planar rigid adapter. Static scenery remains the central XY
 slice. A purely Z-directed nozzle has no planar flow.
 
-Each step integrates the authored start/end/ramp schedule and emits a swept
-rectangular jet from the nozzle outlet. Its area is `2 * radius * planar speed *
-integrated strength`; this is planar area, not the 3D circular volume rate.
-Exact cell clipping preserves subcell jets. Emission respects available cell
-capacity, updates the surface, and enforces jet velocity around receiving cells
-before and after pressure projection. Blocked or full cells reject emission;
-the receipt counts only accepted liquid. Source frames skip surface feedback,
-as existing live liquid drops do. Reset clears the source clock and counters.
+Since 2026-09-23 the nozzle is the 3D source plug (`inflow.rs` `Plug`, from
+`inflow-boundary.ts`):
 
-Run `npm run test:uniform-lab:inflow` after rebuilding the scalar and SIMD
-artifacts to check the garden hose and a timed jet through the production worker
-and publication decoder, including conservation, finite fields, reset and parity.
+- **Volume.** Each cell receives its share of the plug swept this step
+  (`inflowSweptPlugSource`). That share enters at transport as a source.
+- **Phi.** The plug arm of `uvSourcePhi` writes it into phi.
+- **Velocity.** The axis-face velocity boundary is applied after projection
+  and again as the last body force.
+
+In the planar reduction the aperture is a segment of width 2r across the
+dominant-axis face, instead of a disk. The earlier Rust-only swept-rectangle
+emission (`inflow::Step`) has been retired. So has its capacity clipping: the
+plug does not refuse water at full cells, and neither does 3D.
+
+`npm run test:uniform-lab:inflow` checks the garden hose and a timed jet
+through the production worker. It currently fails on a sub-cell nozzle; see
+[Known failure](#known-failure).
 
 ## Deferred work
 
-1. Solve-window and pressure-window scheduling. `activeRegion: on` still fails
-   explicitly in Rust; the UI's sole documented override is `off`.
-2. Editable stage controls, intermediate-stage capture and live parameter
-   changes. Current controls display the shared defaults and completed fields.
-3. Voxel sculpting. Continuous planar inflow, live liquid
-   ball and rigid tools are implemented, but arbitrary 3D rigid
-   trajectories and moving-solid conservation do not yet have GPU parity evidence.
-4. Broader stage parity for anisotropic/high-CFL scenes and material forces,
-   sharpening work-map scheduling, and the GPU's asynchronous lagged-budget
-   observation timing. The existing strict numerical receipts remain evidence
-   for their recorded profiles, not proof of these deferred cases.
-5. Large-scene memory/performance comparison with adaptive Rust. The current
-   grid limit is 4,194,304 cells; small-scene timings do not establish an overall
-   speed advantage over the adaptive method.
+1. Editable stage controls, intermediate-stage capture and live parameter
+   changes. The lab exposes only the total-surface-volume and
+   surface-deficit-balancing switches; the other controls display the shared
+   defaults.
+2. The 3D splash-survival stages (see [Outside the native contract](#outside-the-native-contract)).
+3. Voxel sculpting. Continuous planar inflow, the live liquid ball and the
+   rigid tools are implemented. Arbitrary 3D rigid trajectories and
+   moving-solid conservation still have no GPU parity evidence.
+4. Broader stage parity for anisotropic/high-CFL scenes and material forces.
+   The strict numerical receipts are evidence only for the profiles they
+   record.
+5. Publication view masks. The owned session publishes every plane on every
+   snapshot, whatever mask it is given.
+6. Large-scene memory/performance comparison with adaptive Rust. The grid
+   limit is still 4,194,304 cells.
 
 ## Commands
 
