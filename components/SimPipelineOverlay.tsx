@@ -26,7 +26,7 @@ import { PHYSICS_EXECUTION_BACKEND_KEY } from "@/lib/core/physics-execution-back
 import type { MethodParamSpec, SelectParamSpec } from "@/lib/core/method-contract";
 import { simulation } from "../lib/core/simulation/controller";
 import { sceneHasTerrain } from "../lib/core/terrain";
-import { PipelineGraph, formatPipelineDuration, type PipelineBand } from "./PipelineGraph";
+import { PipelineGraph, formatPipelineDuration, pipelineFoldSummary, type PipelineBand } from "./PipelineGraph";
 import { ChoiceField, Facts, FieldList, NumberField, RangeField, Switch, SwitchField } from "./ui";
 
 /** Advances the live readout averages over. */
@@ -333,12 +333,8 @@ export function SimPipelineOverlay({ lenses: override }: {
       if (!stage.controls?.length) continue;
       const settings = stage.controls.filter((control): control is StageSetting => control.kind !== "readout");
       const readouts = stage.controls.filter((control): control is StageReadout => control.kind === "readout");
-      const count = (n: number, noun: string) => `${n} ${noun}${n === 1 ? "" : "s"}`;
       rendered[stage.id] = {
-        summary: [
-          settings.length ? count(settings.length, "setting") : "",
-          readouts.length ? count(readouts.length, "readout") : "",
-        ].filter(Boolean).join(" · "),
+        summary: pipelineFoldSummary({ settings: settings.length, readouts: readouts.length }),
         node: <>
           {settings.length > 0 && <FieldList>
             {settings.map(renderSetting)}

@@ -960,7 +960,7 @@ button.card[data-active] { border-color: var(--accent); }
 
 /* The quality rung. A row of quiet words, not a segmented control: nothing here
    is pressed often enough to earn four filled buttons. */
-.render-preset-strip { min-height: 30px; padding: 4px 10px 4px 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 2px; border-bottom: 1px solid var(--instrument-hair-soft); }
+.render-preset-strip { min-height: 30px; padding: 4px 14px; display: flex; flex-wrap: wrap; align-items: center; gap: 2px; border-bottom: 1px solid var(--instrument-hair-soft); }
 .render-preset-strip > span { margin-right: 5px; color: var(--dim); font: 500 var(--size-2)/1.3 var(--sans); }
 /* The rungs are a `Choice`, drawn borderless until chosen: a strip of named
    profiles reads as a scale, not as four boxed buttons. */
@@ -969,8 +969,7 @@ button.card[data-active] { border-color: var(--accent); }
 .render-preset-strip .ui-choice > button.active { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); }
 .render-preset-strip output { margin-left: auto; color: var(--micro); font: var(--text-micro); }
 .render-withheld-reset { margin-left: auto; border-color: var(--amber-line) !important; color: var(--amber-ink) !important; }
-.render-frame-options { min-height: 30px; padding: 4px 10px 4px 12px; display: flex; align-items: center; gap: 7px; border-bottom: 1px solid var(--instrument-hair-soft); }
-.render-frame-options > span { margin-right: 3px; color: var(--dim); font: 500 var(--size-2)/1.3 var(--sans); }
+.render-frame-options { border-bottom: 1px solid var(--instrument-hair-soft); }
 
 /* What the configuration actually allocated: a fact line, not a boxed readout. */
 .grid-readout { display: flex; align-items: baseline; gap: 8px; border-bottom: 1px solid var(--instrument-hair-soft); }
@@ -1224,10 +1223,18 @@ button.card[data-active] { border-color: var(--accent); }
    pipeline sits in one column. */
 .rp-tap-slot { width: 16px; }
 .rp-node.is-open { padding-bottom: 8px; border-color: var(--instrument-hair); }
+/* A card's notice speaks at the chip's size: it is a status of this stage, not
+   a banner over the pane. The warning keeps its amber, the status its quiet. */
+.rp-node > .render-inline-status, .rp-node > .render-inline-warning { margin: 4px 0 0 16px; font: 400 var(--size-2)/1.4 var(--sans); letter-spacing: 0; text-transform: none; }
+.rp-node > .render-inline-warning { padding: 4px 7px; }
 .rp-node.is-open .rp-node-controls { margin-top: 6px; padding-top: 7px; gap: 6px; border-top: 1px solid var(--instrument-hair-soft); }
-.rp-planes { display: flex; flex-wrap: wrap; gap: 3px; }
-.rp-planes button { min-height: 18px; padding: 0 7px; border: 1px solid var(--instrument-hair); background: transparent; color: var(--micro); font: 500 var(--size-2)/1.3 var(--sans); cursor: pointer; transition: border-color .14s ease, color .14s ease, background .14s ease; }
-.rp-planes button:hover { border-color: var(--line-strong); color: var(--ink); }
+/* The planes a stage can present, as a run of words rather than a wall of
+   boxes: nine bordered chips read as nine controls competing with the fields
+   under them, when they are one choice of what to look at. Borderless until
+   pointed at or chosen, like the profile rungs. */
+.rp-planes { display: flex; flex-wrap: wrap; gap: 1px 2px; margin-left: -6px; }
+.rp-planes button { min-height: 18px; padding: 0 6px; border: 1px solid transparent; border-radius: var(--radius-s); background: transparent; color: var(--micro); font: 500 var(--size-2)/1.3 var(--sans); cursor: pointer; transition: border-color .14s ease, color .14s ease, background .14s ease; }
+.rp-planes button:hover { background: var(--hover); color: var(--ink); }
 .rp-planes button.active { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); }
 
 .render-inline-warning { margin: 8px 0 0; padding: 8px 10px; border: 1px solid var(--amber-line); color: var(--amber-ink); background: var(--amber-wash); font: var(--text-note); }

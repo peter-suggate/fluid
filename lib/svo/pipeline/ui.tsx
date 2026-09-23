@@ -6,11 +6,12 @@ import { renderPresentControls } from "../features/presentation/controls";
 import { renderFilteredDetailControls,renderPrimaryTraversalControls,renderSeamClosureControls } from "../features/primary-visibility/controls";
 import { renderGiCompositionControls,renderReducedShadeControls } from "../features/radiance/controls";
 
-import { useEffect,useMemo,useState,type ReactNode } from "react";
-import { Button, Choice, Switch } from "../../../components/ui";
+import { useEffect,useMemo,useState } from "react";
+import { Button, Choice, FieldList, Switch, SwitchField } from "../../../components/ui";
 import {
 PipelineGraph,
 formatPipelineDuration,
+pipelineFoldSummary,
 type PipelineBand,
 type PipelineRow,
 } from "../../../components/PipelineGraph";
@@ -38,6 +39,7 @@ renderPipelineUnownedPhases,
 type RenderPipelineContext,
 type RenderPipelineMeasurement,
 } from "./render-pipeline-graph";
+import type { SvoStageControls } from "./control-context";
 import { disabledRenderStagesFrom } from "./render-stage-switches";
 import { resolveSvoPrimaryTraversal } from "./svo-render-options";
 import {
@@ -134,9 +136,7 @@ export function RenderPipelineOverlay() {
   const session = useSession();
   const effectiveRendererStatus = session.diagnostics((state) => state.effectiveRendererStatus);
   const svoShadowsEnabled = session.ui((state) => state.svoShadowsEnabled);
-  const setSvoShadowsEnabled = session.ui((state) => state.setSvoShadowsEnabled);
   const svoAmbientOcclusionEnabled = session.ui((state) => state.svoAmbientOcclusionEnabled);
-  const setSvoAmbientOcclusionEnabled = session.ui((state) => state.setSvoAmbientOcclusionEnabled);
   const silhouetteRefinementEnabled = session.ui((state) => state.silhouetteRefinementEnabled);
   const setSilhouetteRefinementEnabled = session.ui((state) => state.setSilhouetteRefinementEnabled);
   const svoPrimaryTraversal = session.ui((state) => state.svoPrimaryTraversal);
@@ -206,6 +206,7 @@ export function RenderPipelineOverlay() {
     if (unowned.length > 0) console.warn("Render trace phases owned by no pipeline stage:", unowned);
   }, [unowned]);
   const measured = liveTiming && trace !== undefined;
+  const wallTimed = liveTiming && timing.queue_ms !== undefined;
   const total_ms = trace?.total_ms ?? 0;
 
   const updateTuning = <K extends keyof SvoRenderTuning>(key: K, value: SvoRenderTuning[K]) =>
@@ -292,15 +293,16 @@ export function RenderPipelineOverlay() {
     else if (id === "world-gi-cache") setSvoWorldGiCacheEnabled(!svoWorldGiCacheEnabled);
   };
 
-  // Named drawers, shut by default.
+  // Every card folds behind its name.
   //
   // Every control a node owns still lives on that node — that is the whole
-  // point of the graph — but a node with twenty cone budgets under it made the
-  // instrument four screens tall over a scene it is supposed to be read
-  // against. So a cluster that is *tuning* folds behind its own name, and the
-  // controls that decide what the frame IS — the visibility source, the
-  // shadow/AO switches — stay on the card where they were.
-  const controls: Readonly<Record<string, ReactNode>> = {
+  // point of the graph — but eleven open cards made the instrument four screens
+  // tall over a scene it is supposed to be read against, and buried the one
+  // thing the diagram is for: the stages in encode order against their costs.
+  // Closed, a card is its head, its chip and a count of what is inside; a
+  // failure it has to report shows either way. A cluster that is *calibration*
+  // (twenty cone budgets) folds once more inside the open card.
+  const controls: Readonly<Record<string, SvoStageControls>> = {
     "sparse-world-build": renderSparseWorldBuildControls({ renderRefinementDepth, sceneIsDry, updateTuning, modified, resetTuning, leafVoxel_mm, finestCellSize_m, tuning }),
 
     "filtered-detail": renderFilteredDetailControls({ resolvedPrimary, smoothSurfaceEnabled, tuning, updateTuning, effectiveRendererStatus, svoStageView, setSvoStageView }),
@@ -309,7 +311,7 @@ export function RenderPipelineOverlay() {
 
     "seam-closure": renderSeamClosureControls({ silhouetteRefinementStatus }),
 
-    "cone-visibility": renderConeVisibilityControls({ svoConeTracingMode, setSvoConeTracingMode, svoShadowsEnabled, setSvoShadowsEnabled, svoAmbientOcclusionEnabled, setSvoAmbientOcclusionEnabled, tuning, updateTuning, modified, resetTuning, svoStageView, svoStageLightSlot, setSvoStageLightSlot, lightingVisibilityStatus }),
+    "cone-visibility": renderConeVisibilityControls({ svoConeTracingMode, tuning, updateTuning, modified, resetTuning, svoStageView, svoStageLightSlot, setSvoStageLightSlot, lightingVisibilityStatus }),
 
     "reduced-shade": renderReducedShadeControls(),
 
@@ -361,6 +363,9 @@ export function RenderPipelineOverlay() {
       const unavailable = state === "unavailable";
       const activeTap = node.taps.find((view) => view === svoStageView);
       const primaryTap = node.taps[0];
+      const stage = controls[node.id];
+      const views = node.taps.length > 1 ? node.taps.length : 0;
+      const summary = pipelineFoldSummary({ settings: stage?.settings, readouts: stage?.readouts, views });
       rows.push({
         id: node.id,
         label: node.label,
@@ -396,7 +401,9 @@ export function RenderPipelineOverlay() {
             onToggle: () => setSvoStageView(svoStageView === view ? "off" : view),
           };
         }) : undefined,
-        controls: controls[node.id],
+        controls: stage?.node,
+        notice: stage?.notice,
+        fold: summary ? { summary } : undefined,
       });
     }
     return {
@@ -422,15 +429,19 @@ export function RenderPipelineOverlay() {
       <Switch label="Live" checked={liveTiming} onChange={setLiveTiming}
         hint={`Samples the renderer while this panel is open. Measurement stops when this is off or the panel closes.\n\n${timingHint}`} />
       <code data-testid="render-frame-cost" title={timingHint}>{timingLabel}</code>
-      {effectiveRendererStatus.terminalCounts && <code data-testid="svo-terminal-counts"
-        title="Accepted unified SVO leaf terminals. Planar terminals keep exact thin slab geometry without voxel payload traversal.">
-        {effectiveRendererStatus.terminalCounts.planarBoundary} planar · {effectiveRendererStatus.terminalCounts.voxel} voxel
-      </code>}
     </div>
-    {liveTiming && timing.queue_ms !== undefined && <div className="render-status-line" data-testid="render-wall-timing"
-      title="CPU is measured host frame work. Queue is submission-to-completion wall time, including queued GPU work and callback delivery. These overlap GPU execution and must not be added to the GPU total above.">
-      <code>CPU {timing.cpu_ms?.toFixed(2) ?? "—"} ms · Queue {timing.queue_ms.toFixed(2)} ms</code>
-      <code title="Cumulative water mesh extractions since this pipeline was created. A paused unchanged surface should retain its mesh.">Mesh builds {timing.extractionCount ?? "—"} ({timing.extractionReason})</code>
+    {/* The frame's other figures on one fact line under the cost they sit
+        beside: host and queue time, then what the frame is made of. They were
+        a second status band and a code chip crowding the first. */}
+    {(wallTimed || effectiveRendererStatus.terminalCounts) && <div className="grid-readout"
+      data-testid={wallTimed ? "render-wall-timing" : undefined}>
+      {wallTimed && <strong title="CPU is measured host frame work. Queue is submission-to-completion wall time, including queued GPU work and callback delivery. These overlap GPU execution and must not be added to the GPU total above.">
+        CPU {timing.cpu_ms?.toFixed(2) ?? "—"} · Queue {timing.queue_ms?.toFixed(2)} ms</strong>}
+      {effectiveRendererStatus.terminalCounts && <span data-testid="svo-terminal-counts"
+        title="Accepted unified SVO leaf terminals. Planar terminals keep exact thin slab geometry without voxel payload traversal.">
+        {effectiveRendererStatus.terminalCounts.planarBoundary} planar · {effectiveRendererStatus.terminalCounts.voxel} voxel</span>}
+      {wallTimed && <span title="Cumulative water mesh extractions since this pipeline was created. A paused unchanged surface should retain its mesh.">
+        {timing.extractionCount ?? "—"} mesh builds{timing.extractionReason ? ` (${timing.extractionReason})` : ""}</span>}
     </div>}
 
     {/* The profile rung is the question asked before any node is opened — how
@@ -459,13 +470,14 @@ export function RenderPipelineOverlay() {
       </Button>}
     </div>
 
-    <div className="render-frame-options" role="group" aria-label="Frame surface options">
+    {/* How the frame finds its surface, on the same rail as every card's
+        fields: which primary answers visibility, and what surface it shades. */}
+    <FieldList className="scene-instrument-section render-frame-options" role="group" aria-label="Frame surface options">
       <SvoFeatureSlot slot="frame.options" />
-      <span>Surface</span>
-      <Switch label="Smooth surface" checked={smoothSurfaceEnabled}
+      <SwitchField label="Smooth surface" checked={smoothSurfaceEnabled}
         onChange={(enabled) => patchScene({ surfaceStyle: enabled ? "smooth" : "voxel-flat" })}
         hint="Reconstruct a sub-voxel tangent surface from each cell's coverage and baked normal, changing both surface depth and orientation. Off draws the entered axis-aligned voxel face." />
-    </div>
+    </FieldList>
 
     {svoPrimaryTraversal === "mesh" && smoothSurfaceEnabled && <p className="render-inline-status">
       Rasterized visibility uses voxel faces. Turn off Smooth surface to use the mesh; geometry is withheld while Smooth surface is enabled.

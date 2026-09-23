@@ -1,7 +1,7 @@
 "use client";
 
 import { useSession } from "../../../core/session/session-context";
-import { ChoiceField, Switch } from "../../../../components/ui";
+import { ChoiceField, SwitchField } from "../../../../components/ui";
 import { SVO_LIGHTING_VISIBILITY_FEATURE, SVO_LIGHTING_VISIBILITY_OPTIONS } from "./definition";
 
 export function SvoLightingVisibilityControlRow() {
@@ -17,7 +17,7 @@ export function SvoShadowsControlRow() {
   const checked = session.ui((state) => state.svoShadowsEnabled);
   const onChange = session.ui((state) => state.setSvoShadowsEnabled);
   const disabled = session.ui((state) => state.svoConeTracingMode === "off");
-  return <Switch label={SVO_LIGHTING_VISIBILITY_FEATURE.controls[1].label} checked={checked} onChange={onChange} disabled={disabled} />;
+  return <SwitchField label={SVO_LIGHTING_VISIBILITY_FEATURE.controls[1].label} checked={checked} onChange={onChange} disabled={disabled} />;
 }
 
 export function SvoAmbientOcclusionControlRow() {
@@ -25,5 +25,5 @@ export function SvoAmbientOcclusionControlRow() {
   const checked = session.ui((state) => state.svoAmbientOcclusionEnabled);
   const onChange = session.ui((state) => state.setSvoAmbientOcclusionEnabled);
   const disabled = session.ui((state) => state.svoConeTracingMode === "off");
-  return <Switch label={SVO_LIGHTING_VISIBILITY_FEATURE.controls[2].label} checked={checked} onChange={onChange} disabled={disabled} />;
+  return <SwitchField label={SVO_LIGHTING_VISIBILITY_FEATURE.controls[2].label} checked={checked} onChange={onChange} disabled={disabled} />;
 }

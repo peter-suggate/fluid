@@ -136,6 +136,29 @@ export interface PipelineRow {
     /** What is inside, read on the closed card: "4 settings · 3 readouts". */
     readonly summary: string;
   };
+  /**
+   * A status the reader must see without opening anything: a pass that failed
+   * to compile, a visibility mode running on its fallback. Drawn under the
+   * chip whether or not the card is folded — a fold hides what the card is set
+   * to, never that it is broken.
+   */
+  readonly notice?: ReactNode;
+}
+
+/**
+ * The closed card's line: how much is inside, counted, never described.
+ *
+ * Counts rather than names because the name is already on the card and the
+ * question a closed card answers is "is there anything in here worth opening".
+ */
+export function pipelineFoldSummary({ settings = 0, readouts = 0, views = 0 }: {
+  settings?: number;
+  readouts?: number;
+  views?: number;
+}): string {
+  const count = (n: number, noun: string) => n > 0 ? `${n} ${noun}${n === 1 ? "" : "s"}` : "";
+  return [count(settings, "setting"), count(readouts, "readout"), count(views, "view")]
+    .filter(Boolean).join(" · ");
 }
 
 export interface PipelineBand {
@@ -305,6 +328,7 @@ function RowCard({ row, graphId }: { row: PipelineRow; graphId: string }) {
       {row.tap ? <TapButton tap={row.tap} variant="head" /> : folded && <span className="rp-tap-slot" />}
     </div>
     {row.chip && <small className="rp-node-chip" title={row.tip}>{row.chip}</small>}
+    {row.notice}
     {hasControls && (!folded || open) && <RowControls row={row} id={folded ? panelId : undefined} />}
   </div>;
 }

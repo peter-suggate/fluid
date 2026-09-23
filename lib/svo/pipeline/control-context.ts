@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import type { UIStoreHook } from "../../core/stores/ui-store";
 import type { EffectiveRendererStatus } from "../../core/renderer-status";
 import type { SvoRenderTuning } from "./svo-render-tuning";
@@ -34,3 +35,17 @@ export type SvoFeatureControlContext = Pick<UIState,
   readonly silhouetteRefinementStatus: SvoSilhouetteRefinementStatus;
   readonly lightingVisibilityStatus: SvoLightingVisibilityStatus;
 };
+
+/**
+ * What a stage hands its card: the controls behind the fold, the count read on
+ * the closed card, and any status that must show whether or not it is open.
+ *
+ * `settings` and `readouts` are counted by the stage that renders them — only
+ * it knows which of its fields this scene and this arm actually draw.
+ */
+export interface SvoStageControls {
+  readonly node?: ReactNode;
+  readonly settings?: number;
+  readonly readouts?: number;
+  readonly notice?: ReactNode;
+}

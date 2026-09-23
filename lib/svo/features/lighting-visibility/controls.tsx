@@ -1,17 +1,31 @@
 "use client";
 
-import { ChoiceField, ControlRow, FieldList, RangeField } from "../../../../components/ui";
-import type { SvoFeatureControlContext } from "../../pipeline/control-context";
+import { ChoiceField, FieldList, RangeField } from "../../../../components/ui";
+import type { SvoFeatureControlContext, SvoStageControls } from "../../pipeline/control-context";
 import { type SvoRenderTuning } from "../../pipeline/svo-render-tuning";
 import { SvoFeatureSlot } from "../../pipeline/ui-slots";
 import { SVO_RENDER_STAGE_MAXIMUM_LIGHT_SLOT,svoRenderStageUsesLightSlot } from "../diagnostics/svo-render-diagnostics";
 
-export function renderConeVisibilityControls({ svoConeTracingMode, setSvoConeTracingMode, svoShadowsEnabled, setSvoShadowsEnabled, svoAmbientOcclusionEnabled, setSvoAmbientOcclusionEnabled, tuning, updateTuning, modified, resetTuning, svoStageView, svoStageLightSlot, setSvoStageLightSlot, lightingVisibilityStatus }: Pick<SvoFeatureControlContext, "svoConeTracingMode" | "setSvoConeTracingMode" | "svoShadowsEnabled" | "setSvoShadowsEnabled" | "svoAmbientOcclusionEnabled" | "setSvoAmbientOcclusionEnabled" | "tuning" | "updateTuning" | "modified" | "resetTuning" | "svoStageView" | "svoStageLightSlot" | "setSvoStageLightSlot" | "lightingVisibilityStatus">) {
-  return (<>
-      <ControlRow ariaLabel="SVO lighting effects"><SvoFeatureSlot slot="frame.lighting" /></ControlRow>
+export function renderConeVisibilityControls({ svoConeTracingMode, tuning, updateTuning, modified, resetTuning, svoStageView, svoStageLightSlot, setSvoStageLightSlot, lightingVisibilityStatus }: Pick<SvoFeatureControlContext, "svoConeTracingMode" | "tuning" | "updateTuning" | "modified" | "resetTuning" | "svoStageView" | "svoStageLightSlot" | "setSvoStageLightSlot" | "lightingVisibilityStatus">): SvoStageControls {
+  const exactBudgets = svoConeTracingMode === "exact";
+  const lightSlot = svoRenderStageUsesLightSlot(svoStageView);
+  return {
+    // Source, shadows, AO and rate on the rail; ten calibrations, two
+    // sample counts, and the arm- and plane-specific budgets in the drawer.
+    settings: 4 + 12 + (exactBudgets ? 4 : 0) + (lightSlot ? 1 : 0),
+    notice: (lightingVisibilityStatus.fallback || lightingVisibilityStatus.detail)
+      && <p data-testid="lighting-visibility-status" aria-live="polite" className="render-inline-warning">
+        Lighting visibility: {lightingVisibilityStatus.state.toUpperCase()}
+        {lightingVisibilityStatus.fallback ? " FALLBACK" : ""}
+        {lightingVisibilityStatus.detail ? ` · ${lightingVisibilityStatus.detail}` : ""}
+      </p>,
+    node: <>
+      <FieldList aria-label="SVO lighting effects">
+      <SvoFeatureSlot slot="frame.lighting" />
       <ChoiceField label="Cone prepass rate" value={String(tuning.coneLightingScale)} disabled={svoConeTracingMode !== "cones"}
         onChange={(value) => updateTuning("coneLightingScale", Number(value) as SvoRenderTuning["coneLightingScale"])}
         options={[{ value: "1", label: "FULL" }, { value: "0.5", label: "2×2" }, { value: "0.25", label: "4×4" }, { value: "0.125", label: "8×8" }]} />
+      </FieldList>
       {/* What the frame *is* stays on the card above; what it is *calibrated
           to* folds. Twenty budgets is a session's worth of tuning, not
           something read at a glance beside the picture they change. */}
@@ -45,7 +59,7 @@ export function renderConeVisibilityControls({ svoConeTracingMode, setSvoConeTra
           budget and the exact traversal is never reached. They appear with the
           arm that spends them rather than sitting in a drawer that claims to
           govern the frame everyone actually renders. */}
-      {svoConeTracingMode === "exact" && <FieldList data-testid="exact-visibility-budgets">
+      {exactBudgets && <FieldList data-testid="exact-visibility-budgets">
         <RangeField label="Visibility nodes" unit="nodes" value={tuning.visibilityNodeVisits} min={1} max={128} step={1} digits={0}
           onChange={(value) => updateTuning("visibilityNodeVisits", value)} modified={modified("visibilityNodeVisits")} onReset={resetTuning("visibilityNodeVisits")} />
         <RangeField label="Visibility leaves" unit="bricks" value={tuning.visibilityLeafVisits} min={1} max={32} step={1} digits={0}
@@ -63,18 +77,13 @@ export function renderConeVisibilityControls({ svoConeTracingMode, setSvoConeTra
       </FieldList>
       {/* Only the per-light plane consults the slot, so it appears with that
           plane rather than sitting inert beside the others. */}
-      {svoRenderStageUsesLightSlot(svoStageView) && <FieldList>
+      {lightSlot && <FieldList>
         <RangeField label="Cached light slot" unit="slot" value={svoStageLightSlot}
           min={0} max={SVO_RENDER_STAGE_MAXIMUM_LIGHT_SLOT} step={1} digits={0}
           onChange={setSvoStageLightSlot}
           hint="Which of the eight cached per-light visibilities the prepass plane is decoded for." />
       </FieldList>}
       </details>
-      {(lightingVisibilityStatus.fallback || lightingVisibilityStatus.detail)
-        && <p data-testid="lighting-visibility-status" aria-live="polite" className="render-inline-warning">
-          Lighting visibility: {lightingVisibilityStatus.state.toUpperCase()}
-          {lightingVisibilityStatus.fallback ? " FALLBACK" : ""}
-          {lightingVisibilityStatus.detail ? ` · ${lightingVisibilityStatus.detail}` : ""}
-        </p>}
-    </> );
+    </>,
+  };
 }

@@ -1,16 +1,15 @@
 "use client";
 
 import { FieldList, RangeField } from "../../../../components/ui";
-import type { SvoFeatureControlContext } from "../../pipeline/control-context";
+import type { SvoFeatureControlContext, SvoStageControls } from "../../pipeline/control-context";
 import { SvoFeatureSlot } from "../../pipeline/ui-slots";
 
-export function renderReducedShadeControls() {
-  return <SvoFeatureSlot slot="frame.reconstruction" />;
+export function renderReducedShadeControls(): SvoStageControls {
+  return { settings: 1, node: <FieldList><SvoFeatureSlot slot="frame.reconstruction" /></FieldList> };
 }
 
-export function renderGiCompositionControls({ svoGlobalIlluminationEnabled, tuning, updateTuning, modified, resetTuning }: Pick<SvoFeatureControlContext, "svoGlobalIlluminationEnabled" | "tuning" | "updateTuning" | "modified" | "resetTuning">) {
-  return (<details className="rp-tune"><summary>Bounce tuning</summary>
-      <FieldList data-testid="gi-composition-controls"
+export function renderGiCompositionControls({ svoGlobalIlluminationEnabled, tuning, updateTuning, modified, resetTuning }: Pick<SvoFeatureControlContext, "svoGlobalIlluminationEnabled" | "tuning" | "updateTuning" | "modified" | "resetTuning">): SvoStageControls {
+  return { settings: 5, node: <FieldList data-testid="gi-composition-controls"
       data-withheld={svoGlobalIlluminationEnabled ? undefined : "true"}>
       <RangeField label="GI bounce" unit="%" disabled={!svoGlobalIlluminationEnabled} value={tuning.giBounceStrength * 100} min={0} max={400} step={5} digits={0}
         onChange={(value) => updateTuning("giBounceStrength", value / 100)} modified={modified("giBounceStrength")} onReset={resetTuning("giBounceStrength")}
@@ -27,6 +26,5 @@ export function renderGiCompositionControls({ svoGlobalIlluminationEnabled, tuni
       <RangeField label="GI cones" unit="cones" disabled={!svoGlobalIlluminationEnabled} value={tuning.giConeCount} min={3} max={4} step={1} digits={0}
         onChange={(value) => updateTuning("giConeCount", value)} modified={modified("giConeCount")} onReset={resetTuning("giConeCount")}
         hint="Four cones give the best hemispherical coverage; three trades the normal cone for longer marches at the same total budget." />
-      </FieldList>
-    </details> );
+      </FieldList> };
 }

@@ -1,14 +1,13 @@
 "use client";
 
-import { ControlRow, FieldList, RangeField, Switch } from "../../../../components/ui";
-import type { SvoFeatureControlContext } from "../../pipeline/control-context";
+import { FieldList, RangeField, SwitchField } from "../../../../components/ui";
+import type { SvoFeatureControlContext, SvoStageControls } from "../../pipeline/control-context";
 import { SVO_ENVIRONMENT_BRICK_REFINEMENT_MAXIMUM,SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM } from "../../pipeline/svo-render-tuning";
 
 const trimmed = (value: number) => value.toFixed(5).replace(/\.?0+$/, "");
 
-export function renderSparseWorldBuildControls({ renderRefinementDepth, sceneIsDry, updateTuning, modified, resetTuning, leafVoxel_mm, finestCellSize_m, tuning }: Pick<SvoFeatureControlContext, "renderRefinementDepth" | "sceneIsDry" | "updateTuning" | "modified" | "resetTuning" | "leafVoxel_mm" | "finestCellSize_m" | "tuning">) {
-  return (<details className="rp-tune"><summary>Refinement</summary>
-      <FieldList>
+export function renderSparseWorldBuildControls({ renderRefinementDepth, sceneIsDry, updateTuning, modified, resetTuning, leafVoxel_mm, finestCellSize_m, tuning }: Pick<SvoFeatureControlContext, "renderRefinementDepth" | "sceneIsDry" | "updateTuning" | "modified" | "resetTuning" | "leafVoxel_mm" | "finestCellSize_m" | "tuning">): SvoStageControls {
+  return { settings: 3, node: <FieldList>
       <RangeField
         label="Environment refinement depth · REBUILD"
         unit="levels" value={renderRefinementDepth}
@@ -24,11 +23,8 @@ export function renderSparseWorldBuildControls({ renderRefinementDepth, sceneIsD
         onChange={(value) => updateTuning("environmentBrickRefinementLevels", value)}
         modified={modified("environmentBrickRefinementLevels")} onReset={resetTuning("environmentBrickRefinementLevels")}
         hint="Additional SVO subdivision for authored scenery outside the simulation lattice. Already at its ceiling by default, so the only move is down; changing it rebuilds the sparse world." />
-      <ControlRow ariaLabel="Environment refinement exemptions">
-        <Switch label="Flat-node exemption · REBUILD" checked={tuning.environmentPlanarRefinementExemption}
-          hint="Let the refinement rule stop at a node its surface crosses flatly instead of spending the depth above. The test is second order, so it declines depth exactly where curvature is lowest — which is also where a coarse leaf shows, because the primary shades a leaf as one of six axis-aligned voxel faces. On, the tree is smaller and builds faster, at that cost."
-          onChange={(value) => updateTuning("environmentPlanarRefinementExemption", value)} />
-      </ControlRow>
-      </FieldList>
-    </details> );
+      <SwitchField label="Flat-node exemption · REBUILD" checked={tuning.environmentPlanarRefinementExemption}
+        hint="Let the refinement rule stop at a node its surface crosses flatly instead of spending the depth above. The test is second order, so it declines depth exactly where curvature is lowest — which is also where a coarse leaf shows, because the primary shades a leaf as one of six axis-aligned voxel faces. On, the tree is smaller and builds faster, at that cost."
+        onChange={(value) => updateTuning("environmentPlanarRefinementExemption", value)} />
+    </FieldList> };
 }
