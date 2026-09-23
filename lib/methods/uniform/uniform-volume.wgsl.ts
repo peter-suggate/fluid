@@ -539,8 +539,12 @@ fn uvRedistancePhi(@builtin(global_invocation_id)gid:vec3u){
     if(params.splash.x>0.5&&uvSurfaceVertex(vertex,initial)){let cell=min(h.x,min(h.y,h.z));value=clamp(initial,-cell,cell);}
     else{var q=p;
     for(var i=0u;i<8u;i++){let g=uvGradient(q);let norm=dot(g/h,g/h);if(norm<1e-16){break;}
-      q=clamp(q-clamp(uvPhi(q)*g/(h*h*norm),vec3f(-2),vec3f(2)),
-        max(vec3f(0),p-vec3f(4)),min(vec3f(dims()),p+vec3f(4)));}
+      let next=clamp(q-clamp(uvPhi(q)*g/(h*h*norm),vec3f(-2),vec3f(2)),
+        max(vec3f(0),p-vec3f(4)),min(vec3f(dims()),p+vec3f(4)));
+      // A clamped Newton step can cross a distance ridge and walk away
+      // from the contour. Reject it before roundoff picks a different root.
+      if(abs(uvPhi(next))>=abs(uvPhi(q))){break;}
+      q=next;}
     if(abs(uvPhi(q))<0.005*min(h.x,min(h.y,h.z))){value=sign(initial)*length((p-q)*h);}}}
   textureStore(uvPhiOut,vertex,vec4f(value));
 }

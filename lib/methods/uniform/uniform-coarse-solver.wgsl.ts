@@ -21,6 +21,8 @@ struct UniformPressureState {
 
 // Scratch shares the convergence binding; no extra storage-buffer slot is needed.
 export const uniformCoarseSolverWGSL = /* wgsl */ `
+// Specialised per solver; the reference CM11a path retains red/black updates.
+const MG_SIMULTANEOUS:bool=false;
 var<workgroup> mgCoarseResidualBits:atomic<u32>;
 var<workgroup> mgCoarseMaxBBits:atomic<u32>;
 var<workgroup> mgCoarseMaxDiagPBits:atomic<u32>;
@@ -32,6 +34,7 @@ var<workgroup> mgCoarseWorstLane:atomic<u32>;
 
 
 var<workgroup> mgCoarseConvergedFlag:u32;
+
 
 fn mgTwoSum(a:f32,b:f32)->vec2f{
   let s=a+b;let bb=s-a;return vec2f(s,(a-(s-bb))+(b-bb));
@@ -51,6 +54,10 @@ fn mgD4Sum6DS(value:array<vec2f,6>)->vec2f{
   return mgDSAdd(mgDSAdd(mgDSAdd(value[0],value[1]),mgDSAdd(value[4],value[5])),mgDSAdd(value[2],value[3]));
 }
 fn mgCoarsePressure(index:u32)->vec2f{return vec2f(mgState.rows[index].p,mgState.rows[index].low);}
+fn mgCoarseIterationPressure(index:u32)->vec2f{
+  if(MG_SIMULTANEOUS){return vec2f(mgState.rows[index].residual,bitcast<f32>(mgState.rows[index].padding));}
+  return mgCoarsePressure(index);
+}
 
 fn mgCoarseIndex(p:vec3i)->u32{let d=vec3i(mg.levelDims.xyz);return u32(p.x+d.x*(p.y+d.y*p.z));}
 fn mgCoarseCoefficient(id:vec3i,q:vec3i,axis:u32)->f32{
@@ -91,11 +98,17 @@ fn mgSolveCoarsest(@builtin(local_invocation_index) localLane:u32){
   for(var iteration=0u;iteration<mg.control.w;iteration+=1u){
     if(!converged){iterations=iteration+1u;}
     for(var color=0u;color<2u;color+=1u){
+      // Residual and padding are idle during smoothing. Snapshot every row,
+      // including strided coarse grids larger than one workgroup's lane count.
+      if(MG_SIMULTANEOUS){for(var lane=localLane;lane<count;lane+=256u){
+        mgState.rows[lane].residual=mgState.rows[lane].p;
+        mgState.rows[lane].padding=bitcast<u32>(mgState.rows[lane].low);
+      }storageBarrier();workgroupBarrier();}
       for(var lane=localLane;lane<count;lane+=256u){
     let id=vec3i(i32(lane%d.x),i32((lane/d.x)%d.y),i32(lane/(d.x*d.y)));
-      if(!converged&&mgState.rows[lane].phi<0.0&&u32((id.x+id.y+id.z)&1)==color){
+      if(!converged&&mgState.rows[lane].phi<0.0&&(MG_SIMULTANEOUS||u32((id.x+id.y+id.z)&1)==color)){
         var diagonalTerms:array<f32,6>;var sumTerms:array<vec2f,6>;
-        for(var n=0;n<6;n+=1){let q=id+e[n];let a=mgCoarseCoefficient(id,q,u32(n/2));diagonalTerms[n]=a;sumTerms[n]=vec2f(0.0);if(all(q>=vec3i(0))&&all(q<vec3i(d))){let qi=mgCoarseIndex(q);if(mgState.rows[qi].phi<0.0){sumTerms[n]=mgDSScale(mgCoarsePressure(qi),a);}}}
+        for(var n=0;n<6;n+=1){let q=id+e[n];let a=mgCoarseCoefficient(id,q,u32(n/2));diagonalTerms[n]=a;sumTerms[n]=vec2f(0.0);if(all(q>=vec3i(0))&&all(q<vec3i(d))){let qi=mgCoarseIndex(q);if(mgState.rows[qi].phi<0.0){sumTerms[n]=mgDSScale(mgCoarseIterationPressure(qi),a);}}}
         let diagonal=mgD4Sum6(diagonalTerms);let sum=mgD4Sum6DS(sumTerms);
         if(diagonal>0.0){let next=mgDSDivide(mgDSAdd(sum,vec2f(mgState.rows[lane].rhs,0.0)),diagonal);
           if(next.x+next.y<mgState.rows[lane].minimum){mgState.rows[lane].p=mgState.rows[lane].minimum;mgState.rows[lane].low=0.0;}

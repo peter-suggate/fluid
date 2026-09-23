@@ -54,6 +54,7 @@ const MG_LEVEL_LABELS = typeof process !== "undefined"
 const ENTRY_POINTS = [
   "mgBuildFinestTopology", "mgBuildFinestRhs", "mgDownsampleTopology", "mgExtrapolatePhiOneCell",
   "mgBakeCoefficients", "mgBuildSmoothTiles", "mgPublishSmoothTiles", "mgSmoothTilesInPlace",
+  "mgSmoothTilesJacobi",
   "mgBuildCycleTiles", "mgResidualTiles", "mgProlongateAddTiles", "mgProlongateAssignTiles",
   "mgCopyPressureTiles", "mgShiftMinimumTiles", "mgAddPressureTiles",
   "mgSaveAcceptedTiles", "mgRestoreRejectedTiles",
@@ -70,6 +71,7 @@ const ENTRY_BINDINGS: Readonly<Record<EntryPoint, readonly number[]>> = Object.f
   mgBakeCoefficients: [0, 5, 7, 15],
   mgBuildSmoothTiles: [0, 11, 14, 18], mgPublishSmoothTiles: [0, 18],
   mgSmoothTilesInPlace: [0, 3, 11, 13, 14, 16, 18],
+  mgSmoothTilesJacobi: [0, 1, 2, 3, 11, 13, 14, 18],
   mgBuildCycleTiles: [0, 18, 19],
   mgResidualTiles: [0, 1, 3, 10, 14, 18], mgProlongateAddTiles: [0, 1, 2, 9, 18],
   mgProlongateAssignTiles: [0, 1, 2, 18], mgCopyPressureTiles: [0, 1, 2, 18],
@@ -219,6 +221,7 @@ interface GroupResources {
  * nothing to await.
  */
 export interface UniformPressureMultigridPrograms {
+  readonly simultaneousSmoothing?: boolean;
   readonly pagedStorage: boolean;
   readonly module: GPUShaderModule;
   readonly groupLayouts: Readonly<Record<string, GPUBindGroupLayout>>;
@@ -241,7 +244,7 @@ export class WebGPUUniformPressureMultigrid {
   private get cycleTiling(): boolean { return this.tileSmoothing && this.cycleTileBuffers.length > 0; }
   private cycleEntry(entry: EntryPoint): boolean { return CYCLE_TILE_ENTRIES.has(entry); }
   private tileEntry(entry: EntryPoint): boolean {
-    return entry === "mgBuildSmoothTiles" || entry === "mgPublishSmoothTiles" || entry === "mgSmoothTilesInPlace"
+    return entry === "mgBuildSmoothTiles" || entry === "mgPublishSmoothTiles" || entry === "mgSmoothTilesInPlace" || entry === "mgSmoothTilesJacobi"
       || this.cycleEntry(entry);
   }
   /** GPU-produced counts for stage profiling; never read back for scheduling. */
@@ -250,6 +253,10 @@ export class WebGPUUniformPressureMultigrid {
       ...this.cycleTileBuffers.map((buffer,level)=>({buffer,capacity:this.tileCounts[level]!,list:"cycle" as const,level}))];
   }
   get shaderFragment():string {
+    return this.baseShaderFragment.replace("const MG_SIMULTANEOUS:bool=false;",
+      `const MG_SIMULTANEOUS:bool=${this.simultaneousSmoothing};`);
+  }
+  private get baseShaderFragment():string {
     if(this.pagedStorage) return uniformPressurePagedShader(uniformPressureMultigridWGSL,this.logicalPageDispatch);
     // Without an active-region dispatch buffer there is no window and no level
     // origin: the host seeds every level record at zero with no clip extent and
@@ -272,6 +279,8 @@ export class WebGPUUniformPressureMultigrid {
   private readonly pageCaptureBuffers:GPUBuffer[]=[];
   private readonly pageCaptureOperations=new Map<GPUTexture,{group:GPUBindGroup;staging:GPUBuffer;target:GPUBuffer}>();
   readonly diagnostics: GPUBuffer;
+  /** Diagnostic-only setup snapshots; no simulation stage reads these. */
+  readonly setupRhsSnapshot?: readonly [GPUTexture, GPUTexture];
   private readonly toleranceBuffer: GPUBuffer;
   private readonly cycleDispatch: GPUBuffer;
   readonly allocatedBytes: number;
@@ -346,7 +355,7 @@ export class WebGPUUniformPressureMultigrid {
      * that the scene has no depth symmetry; the full-lattice and dense-storage
      * conditions are checked here.
      */
-    inPlaceSmoothing = false, private readonly scratchFields?: UniformTexturePages, compactSmoothing = true, private readonly reuseFinestAuthority = true, private readonly maskFirst = true) {
+    inPlaceSmoothing = false, private readonly scratchFields?: UniformTexturePages, compactSmoothing = true, private readonly reuseFinestAuthority = true, private readonly maskFirst = true, private readonly simultaneousSmoothing = programs?.simultaneousSmoothing ?? false) {
     this.inPlaceCapable = inPlaceSmoothing && !activeDispatch && !pagedStorage && programs === undefined;
     this.inPlaceSmoothing = this.inPlaceCapable;
     this.visitLanes = Math.min(FUSED_VISIT_LANES, device.limits.maxComputeInvocationsPerWorkgroup,
@@ -396,6 +405,14 @@ export class WebGPUUniformPressureMultigrid {
         minimum: pair("p-min"), coefficients: texture(`Uniform CM11a L${index} coefficients`, "rgba32float", size) }));
     }
     this.levels = Object.freeze(levels);
+    if (typeof process !== "undefined" && process.env.FLUID_UNIFORM_PRESSURE_SETUP_AUDIT === "1"
+      && !this.pagedStorage && !this.scratchFields) {
+      const size = levels[0]!.dimensions;
+      this.setupRhsSnapshot = [0, 1].map(index => device.createTexture({
+        label: `Uniform CM11a setup RHS ${index} QA`, size: [...size], dimension: "3d",
+        format: "r32float", usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC,
+      })) as [GPUTexture, GPUTexture];
+    }
     if(this.inPlaceCapable && !this.gpuCycleDispatch && compactSmoothing && uniformAbOn("pressuretiles")) {
       const cycleTiles=uniformAbOn("cycletiles");
       for(const level of levels){
@@ -487,7 +504,7 @@ export class WebGPUUniformPressureMultigrid {
     // Paged instances own dimension-specific publication resources; only the
     // legacy window backend supports synchronous program reuse.
     if (this.pagedStorage || !this.shaderModule || !this.pipelines) return undefined;
-    return { module: this.shaderModule, groupLayouts: this.groupLayouts, pipelines: this.pipelines, pagedStorage: this.pagedStorage };
+    return { module: this.shaderModule, groupLayouts: this.groupLayouts, pipelines: this.pipelines, pagedStorage: this.pagedStorage, simultaneousSmoothing: this.simultaneousSmoothing };
   }
 
   setResidualTolerance(value: number): void {
@@ -641,7 +658,15 @@ export class WebGPUUniformPressureMultigrid {
     const closeShared = () => { shared?.end(); shared = undefined; sharedHasGroup0 = false; };
     for (let index = 0; index < this.plan.length; index += 1) {
       const dispatch = this.plan[index]!;
-      if (openStage !== undefined && dispatch.stage !== openStage) { closeShared(); boundary?.(openStage); }
+      if (openStage !== undefined && dispatch.stage !== openStage) {
+        closeShared();
+        if (openStage === "setup" && this.setupRhsSnapshot) {
+          for (let slot = 0; slot < 2; slot++) encoder.copyTextureToTexture(
+            { texture: this.levels[0]!.rhs[slot]! }, { texture: this.setupRhsSnapshot[slot]! },
+            this.levels[0]!.dimensions);
+        }
+        boundary?.(openStage);
+      }
       openStage = dispatch.stage;
       // A truncated cycle encodes nothing at all. Its stage seam is still
       // reported above, in order, so the advance's phase partition keeps all
@@ -1036,7 +1061,11 @@ export class WebGPUUniformPressureMultigrid {
     // paths, so each sweep exits already-projected and the third pass is gone.
     const sweep = (level: number, rhs: GPUTexture, quietRows = false, tiles?: "liquid" | "cycle") => {
       for (let colour = 0; colour < 2; colour += 1) {
-        if (this.inPlaceSmoothing) {
+        if (this.simultaneousSmoothing) {
+          emit(tiles ? "mgSmoothTilesJacobi" : "mgSmoothColour", level, level,
+            { rhsIn: rhs }, [0, 0, colour, 0], this.levels[level]!.dimensions, tiles);
+          flipPressure(level);
+        } else if (this.inPlaceSmoothing) {
           // Two ping-pong flips are the identity, so leaving the parity alone
           // keeps every later dispatch bound exactly as it was.
           const [nx, ny, nz] = this.levels[level]!.dimensions;
@@ -1057,7 +1086,8 @@ export class WebGPUUniformPressureMultigrid {
       const [nx, ny, nz] = this.levels[level]!.dimensions;
       // Indirect cycle dispatch sizes every launch from the level's tile record.
       if (this.inPlaceSmoothing && FUSE_VISITS && !this.gpuCycleDispatch && sweeps > 0
-        && nx * ny * nz <= FUSED_VISIT_MAX_CELLS) {
+        && nx * ny * nz <= FUSED_VISIT_MAX_CELLS
+        && (!this.simultaneousSmoothing || nx * ny * nz <= 4096)) {
         emit("mgSmoothVisitInPlace", level, level,
           { rhsIn: rhs, pressureRW: this.levels[level]!.pressure[p[level]!]! }, [0, 0, sweeps, 0], [1, 1, 1]);
       } else for (let i = 0; i < sweeps; i += 1) {
@@ -1246,6 +1276,7 @@ export class WebGPUUniformPressureMultigrid {
     }
     for (const level of this.levels) level.coefficients.destroy();
     for(const buffer of this.pageCaptureBuffers)buffer.destroy();
+    for(const texture of this.setupRhsSnapshot ?? [])texture.destroy();
     this.pressurePublication?.destroy();
     this.cycleDispatch.destroy();
     this.smoothTileDispatch?.destroy();for(const buffer of [...this.smoothTileBuffers,...this.cycleTileBuffers])buffer.destroy();

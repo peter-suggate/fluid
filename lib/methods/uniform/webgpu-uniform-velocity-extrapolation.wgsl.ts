@@ -187,6 +187,10 @@ fn validFace(p: vec3i, component: u32, d: vec3i) -> bool {
   return inBounds(p, d);
 }
 fn openBaseFace(p: vec3i, component: u32) -> bool {
+  // The pressure dual cell is half open at a closed tank wall; the MAC
+  // transport face is closed. Do not extend a moving source onto that wall.
+  let d=baseDims();
+  if(p[component]+1==d[component] && !(component==1u && params.boundary.w>0.5)){return false;}
   return validFace(p, component, baseDims()) && textureLoad(faceOpenIn, p, 0)[component] > 1e-5;
 }
 fn bitFor(component: u32) -> u32 { return 1u << component; }
@@ -571,10 +575,13 @@ fn hierarchyCorrespondingCellSample(
   );
 }
 
-// Carry original fine-face provenance rather than promoting filled coarse air
-// to a new source. Otherwise a distant stationary pool repeatedly averages
-// into the extension under a falling drop. Fine FIM values remain untouched.
-struct NearestSample { value: f32, weight: f32, origin: u32 }
+// Carry the support bounds of original fine faces, not one arbitrary ID
+// from a tie. The velocity already interpolates those tied contributors;
+// attaching it to the first corner gave that corner a false distance advantage
+// at the next level. Bounds preserve the represented source patch through
+// restriction and prolongation. No filled coarse air becomes a fresh source.
+// Two Z slabs of the integer texture store lower and upper source indices.
+struct NearestSample { value: f32, weight: f32, lower: u32, upper: u32 }
 fn faceLocation(p: vec3i, dims: vec3i, component: u32) -> vec3f {
   var point = (vec3f(p) + vec3f(0.5)) * vec3f(baseDims()) / vec3f(dims);
   point[component] = f32(p[component]+1) * f32(baseDims()[component]) / f32(dims[component]);
@@ -589,37 +596,52 @@ fn nearestHierarchySample(p: vec3i, sd: vec3i, td: vec3i, component: u32, footpr
   var sourcePosition = (vec3f(p)+vec3f(0.5))*vec3f(sd)/vec3f(td)-vec3f(0.5);
   sourcePosition[component] = f32(p[component]+1)*f32(sd[component])/f32(td[component])-1.0;
   let lower = select(vec3i(floor(sourcePosition)), 2*p, footprint);
-  let h = params.cellGravity.xyz;
-  let epsilon = 1e-6 * min(h.x,min(h.y,h.z)) * min(h.x,min(h.y,h.z));
+  // Cubic-lattice distances are exact in cell units; metre scaling used to
+  // turn equal-distance sources into different floating-point distances.
+  let spacing=params.cellGravity.xyz;let h=spacing/min(spacing.x,min(spacing.y,spacing.z));
   var best = 1e30;
   var distances: array<f32,8>;
-  var origins: array<u32,8>;
+  var lowers: array<u32,8>;var uppers: array<u32,8>;
   var values: array<f32,8>;
   for (var k=0u; k<8u; k++) {
     let q = clamp(lower + vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u)),vec3i(0),sd-vec3i(1));
     let state = textureLoad(primaryIn,q,0);
     distances[k] = 1e30;
-    if (!componentKnown(state,component) || !sourceKnownAt(q)) { continue; }
-    var origin: u32;
+    let offset=vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));
+    let fraction=fract(sourcePosition);
+    let weights=select(vec3f(1.0)-fraction,fraction,offset==vec3i(1));
+    // Aligned MAC faces have no support on the extra positive plane.
+    if ((!footprint && any(weights<=vec3f(0.0))) || !componentKnown(state,component) || !sourceKnownAt(q)) { continue; }
+    var lower: u32;var upper:u32;
     if (frontParams.hierarchySourceUsesBaseDims != 0u) {
-      let d = baseDims(); origin = u32(q.x+d.x*(q.y+d.y*q.z))+1u;
-    } else { origin = textureLoad(sourceOrigins,q,0)[component]; }
-    if (origin == 0u) { continue; }
-    let delta = (faceLocation(originalFace(origin),baseDims(),component)-location)*h;
-    let distance = dot(delta,delta);
-    distances[k] = distance; origins[k] = origin; values[k] = state[component];
-    best = min(best,distance);
+      let d = baseDims();lower = u32(q.x+d.x*(q.y+d.y*q.z))+1u;upper=lower;
+    } else {
+      lower=textureLoad(sourceOrigins,q,0)[component];
+      upper=textureLoad(sourceOrigins,q+vec3i(0,0,sd.z),0)[component];
+    }
+    if (lower == 0u) { continue; }
+    let lo=faceLocation(originalFace(lower),baseDims(),component);
+    let hi=faceLocation(originalFace(upper),baseDims(),component);
+    let delta=(location-clamp(location,lo,hi))*h;
+    let distance=(delta.x*delta.x+delta.z*delta.z)+delta.y*delta.y;
+    distances[k]=distance;lowers[k]=lower;uppers[k]=upper;values[k]=state[component];
+    best=min(best,distance);
   }
-  var contributions: array<vec2f,8>; var origin = 0u;
-  for (var k=0u; k<8u; k++) {
-    contributions[k] = vec2f(0.0);
-    if (origins[k] != 0u && abs(distances[k]-best) <= epsilon) {
-      contributions[k] = vec2f(values[k],1.0);
-      if (origin == 0u) { origin = origins[k]; }
+  var contributions:array<vec2f,8>;
+  var supportLower=baseDims();var supportUpper=vec3i(-1);
+  let epsilon=1e-6*max(1.0,best);
+  for(var k=0u;k<8u;k++){
+    contributions[k]=vec2f(0.0);
+    if(lowers[k]!=0u && abs(distances[k]-best)<=epsilon){
+      contributions[k]=vec2f(values[k],1.0);
+      supportLower=min(supportLower,originalFace(lowers[k]));supportUpper=max(supportUpper,originalFace(uppers[k]));
     }
   }
   let sum = d4Sum8Vec2(contributions);
-  return NearestSample(select(0.0,sum.x/sum.y,sum.y>0.0),sum.y,origin);
+  let d=baseDims();
+  let lo=select(0u,u32(supportLower.x+d.x*(supportLower.y+d.y*supportLower.z))+1u,sum.y>0.0);
+  let hi=select(0u,u32(supportUpper.x+d.x*(supportUpper.y+d.y*supportUpper.z))+1u,sum.y>0.0);
+  return NearestSample(select(0.0,sum.x/sum.y,sum.y>0.0),sum.y,lo,hi);
 }
 
 @compute @workgroup_size(4, 4, 4)
@@ -630,13 +652,13 @@ fn restrictKnownVelocity(@builtin(global_invocation_id) gid: vec3u) {
   if (!inBounds(p, targetDims)) { return; }
   var values = vec3f(0.0);
   var knownMask = 0u;
-  var origins = vec3u(0u);
+  var origins=vec3u(0u);var upperOrigins=vec3u(0u);
   for (var component = 0u; component < 3u; component += 1u) {
     if (SOURCE_AWARE_HIERARCHY) {
       var result = nearestHierarchySample(p,sourceDims,targetDims,component,false);
-      if (result.weight <= 0.0) { result = nearestHierarchySample(p,sourceDims,targetDims,component,true); }
+      if (result.weight <= 0.0 && component == 1u) { result = nearestHierarchySample(p,sourceDims,targetDims,component,true); }
       if (result.weight > 0.0) {
-        values[component] = result.value; origins[component] = result.origin;
+        values[component] = result.value; origins[component]=result.lower;upperOrigins[component]=result.upper;
         knownMask |= bitFor(component);
       }
       continue;
@@ -655,7 +677,8 @@ fn restrictKnownVelocity(@builtin(global_invocation_id) gid: vec3u) {
       knownMask |= bitFor(component);
     }
   }
-  if (SOURCE_AWARE_HIERARCHY) { textureStore(outputOrigins,p,vec4u(origins,0u)); }
+  if(SOURCE_AWARE_HIERARCHY){textureStore(outputOrigins,p,vec4u(origins,0u));
+    textureStore(outputOrigins,p+vec3i(0,0,targetDims.z),vec4u(upperOrigins,0u));}
   textureStore(primaryOut, p, vec4f(values, f32(knownMask)));
 }
 
@@ -663,16 +686,17 @@ fn prolongValue(p: vec3i) -> vec4f {
   let existing = textureLoad(secondaryIn, p, 0);
   var values = existing.xyz;
   var knownMask = u32(round(existing.w));
-  var origins = vec3u(0u);
+  var origins=vec3u(0u);var upperOrigins=vec3u(0u);
   if (SOURCE_AWARE_HIERARCHY && frontParams.hierarchyTargetUsesBaseDims == 0u) {
-    origins = textureLoad(existingOrigins,p,0).xyz;
+    origins=textureLoad(existingOrigins,p,0).xyz;
+    upperOrigins=textureLoad(existingOrigins,p+vec3i(0,0,hierarchyTargetDims().z),0).xyz;
   }
   for (var component = 0u; component < 3u; component += 1u) {
     if (componentKnown(existing, component)) { continue; }
     if (SOURCE_AWARE_HIERARCHY) {
       let result = nearestHierarchySample(p,hierarchySourceDims(),hierarchyTargetDims(),component,false);
       if (result.weight > 0.0) {
-        values[component] = result.value; origins[component] = result.origin;
+        values[component] = result.value; origins[component]=result.lower;upperOrigins[component]=result.upper;
         knownMask |= bitFor(component);
       }
     } else {
@@ -682,6 +706,7 @@ fn prolongValue(p: vec3i) -> vec4f {
   }
   if (SOURCE_AWARE_HIERARCHY && frontParams.hierarchyTargetUsesBaseDims == 0u) {
     textureStore(outputOrigins,p,vec4u(origins,0u));
+    textureStore(outputOrigins,p+vec3i(0,0,hierarchyTargetDims().z),vec4u(upperOrigins,0u));
   }
   return vec4f(values,f32(knownMask));
 }

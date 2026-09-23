@@ -50,7 +50,7 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
     const module = device.createShaderModule({ code: fixtureWGSL + uniformCoarseSolverWGSL });
     const compilation = await module.getCompilationInfo();
     assert.deepEqual(compilation.messages.filter(m => m.type === "error"), []);
-    const pipeline = await device.createComputePipelineAsync({ layout: "auto", compute: { module, entryPoint: "mgSolveCoarsest" } });
+    let pipeline = await device.createComputePipelineAsync({ layout: "auto", compute: { module, entryPoint: "mgSolveCoarsest" } });
 
     async function solve(dims: [number,number,number], cap = 4096) {
       const gpuDevice = device!;
@@ -123,10 +123,16 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
       } finally {owned.forEach(resource=>resource.destroy());}
     }
 
-    for(const dims of [[4,4,4],[5,5,5],[11,5,5],[21,9,7],[81,5,5]] as [number,number,number][]) {
-      await t.test(`manufactured constrained pressure ${dims.join("x")}`,async()=>{
-        await solve(dims);await solve(dims,1);
-      });
+    const simultaneousModule=device.createShaderModule({code:fixtureWGSL+uniformCoarseSolverWGSL.replace(
+      "const MG_SIMULTANEOUS:bool=false;","const MG_SIMULTANEOUS:bool=true;")});
+    const simultaneous=await device.createComputePipelineAsync({layout:"auto",compute:{module:simultaneousModule,entryPoint:"mgSolveCoarsest"}});
+    for(const [name,kernel] of [["red/black",pipeline],["simultaneous",simultaneous]] as const){
+      pipeline=kernel;
+      for(const dims of [[4,4,4],[5,5,5],[11,5,5],[21,9,7],[81,5,5]] as [number,number,number][]) {
+        await t.test(`${name}: manufactured constrained pressure ${dims.join("x")}`,async()=>{
+          await solve(dims);await solve(dims,1);
+        });
+      }
     }
     await t.test("authored wet garden constructs and advances with default geometric pages",async()=>{
       const scene=createHeroGardenHoseScene({water:true});

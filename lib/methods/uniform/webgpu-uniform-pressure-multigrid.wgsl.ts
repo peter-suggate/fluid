@@ -82,6 +82,26 @@ ${body}
  */
 export const uniformPressureInPlaceSmootherWGSL = /* wgsl */ `
 @group(1) @binding(16) var mgPressureRW: texture_storage_3d<r32float,read_write>;
+var<workgroup> mgJacobiOld:array<f32,4096>;
+fn mgJacobiP(p:vec3i)->f32{
+  let q=mgClamp(p,mg.levelDims.xyz);let d=mg.levelDims.xyz;
+  return mgJacobiOld[u32(q.x)+d.x*(u32(q.y)+d.y*u32(q.z))];
+}
+fn mgSmoothCellJacobi(id:vec3i){
+  let minimum=textureLoad(mgMinimumIn,id,0).x;
+  let coarseDone=(mg.control.w&2u)!=0u&&atomicLoad(&mgState.convergence[1])!=0u;
+  ${neighbourMask ? `let mask=mgLiquidMask(id);
+  if(coarseDone||(mask&1u)==0u){` : `if(coarseDone||!mgBakedLiquid(id)){`}
+    textureStore(mgPressureRW,id,vec4f(max(mgJacobiP(id),minimum)));return;
+  }
+  let e=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
+  var diagonalTerms:array<f32,6>;var sumTerms:array<f32,6>;
+  for(var n=0;n<6;n+=1){let q=id+e[n];let a=mgCoefficient(id,q,u32(n/2));
+    diagonalTerms[n]=a;sumTerms[n]=select(0.0,a*mgJacobiP(q),${neighbourMask ? "((mask>>u32(n+1))&1u)!=0u" : "mgBakedLiquid(q)"});}
+  let diagonal=mgD4Sum6(diagonalTerms);let sum=mgD4Sum6(sumTerms);
+  let p=select(0.0,(sum+textureLoad(mgRhsIn,id,0).x)/diagonal,diagonal>0.0);
+  textureStore(mgPressureRW,id,vec4f(max(p,minimum)));
+}
 fn mgPRW(p:vec3i)->f32{return textureLoad(mgPressureRW,mgClamp(p,mg.levelDims.xyz)).x;}
 // One cell's update-or-projection, shared by both in-place kernels so the two
 // spell the arithmetic once.
@@ -240,13 +260,19 @@ override MG_VISIT_LANES:u32=256u;
 fn mgSmoothVisitInPlace(@builtin(local_invocation_index) lane:u32){
   if(lane==0u){mgCycleStopped=select(0u,1u,mgSkipCycle());}
   if(workgroupUniformLoad(&mgCycleStopped)!=0u){return;}
-  let d=mg.levelDims.xyz;let half=(d.x+1u)/2u;let count=half*d.y*d.z;
+  let d=mg.levelDims.xyz;let half=(d.x+1u)/2u;let count=select(half*d.y*d.z,d.x*d.y*d.z,MG_SIMULTANEOUS);
   for(var colourPass=0u;colourPass<2u*mg.control.z;colourPass+=1u){
+    if(MG_SIMULTANEOUS){for(var j=lane;j<count;j+=MG_VISIT_LANES){
+      let id=vec3i(i32(j%d.x),i32((j/d.x)%d.y),i32(j/(d.x*d.y)));
+      mgJacobiOld[j]=mgPRW(id);
+    }
+    workgroupBarrier();}
     let colour=colourPass&1u;
     for(var j=lane;j<count;j+=MG_VISIT_LANES){
-      let y=(j/half)%d.y;let z=j/(half*d.y);
+      if(MG_SIMULTANEOUS){let id=vec3i(i32(j%d.x),i32((j/d.x)%d.y),i32(j/(d.x*d.y)));
+      mgSmoothCellJacobi(id);}else{let y=(j/half)%d.y;let z=j/(half*d.y);
       let id=vec3i(i32(2u*(j%half)+((colour+y+z)&1u)),i32(y),i32(z));
-      if(id.x<i32(d.x)){mgSmoothCellInPlace(id);}
+      if(id.x<i32(d.x)){mgSmoothCellInPlace(id);}}
     }
     textureBarrier();
   }
@@ -752,7 +778,7 @@ fn mgSmoothColour(@builtin(global_invocation_id) gid:vec3u){
   // former trailing mgProjectMinimum pass while deleting that pass outright.
   let colour=u32((id.x+id.y+select(id.z,0,depthSymmetry()))&1);
   ${neighbourMask ? "let mask=mgLiquidMask(id);" : ""}
-  if(coarseDone||${neighbourMask ? "(mask&1u)==0u" : "!mgBakedLiquid(id)"}||colour!=mg.control.z){textureStore(mgPressureOut,id,vec4f(max(old,textureLoad(mgMinimumIn,id,0).x)));return;}
+  if(coarseDone||${neighbourMask ? "(mask&1u)==0u" : "!mgBakedLiquid(id)"}||(!MG_SIMULTANEOUS&&colour!=mg.control.z)){textureStore(mgPressureOut,id,vec4f(max(old,textureLoad(mgMinimumIn,id,0).x)));return;}
   let e=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
   var diagonalTerms:array<f32,6>;var sumTerms:array<f32,6>;
   for(var n=0;n<6;n+=1){let q=id+e[n];let a=mgCoefficient(id,q,u32(n/2));diagonalTerms[n]=a;sumTerms[n]=select(0.0,a*mgP(q),${neighbourMask ? "((mask>>u32(n+1))&1u)!=0u" : "mgBakedLiquid(q)"});}
@@ -761,6 +787,27 @@ fn mgSmoothColour(@builtin(global_invocation_id) gid:vec3u){
   // CM11a Eq. 18 says that p_min is enforced while smoothing. Project the
   // newly updated colour before the opposite colour consumes it.
   textureStore(mgPressureOut,id,vec4f(max(p,textureLoad(mgMinimumIn,id,0).x)));
+}
+@compute @workgroup_size(64)
+fn mgSmoothTilesJacobi(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+  if(mgSkipCycle()){return;}
+  let at=group.x+65535u*group.y;if(at>=atomicLoad(&mgCycleDispatch[0])){return;}
+  let d=(mg.levelDims.xyz+vec3u(3))/4u;let tile=atomicLoad(&mgCycleDispatch[4u+at]);
+  let origin=4u*vec3u(tile%d.x,(tile/d.x)%d.y,tile/(d.x*d.y));
+  let id=vec3i(origin+vec3u(lane%4u,(lane/4u)%4u,lane/16u));
+  if(!mgValid(id,mg.levelDims.xyz)){return;}
+  let old=mgP(id);let minimum=textureLoad(mgMinimumIn,id,0).x;
+  let coarseDone=(mg.control.w&2u)!=0u&&atomicLoad(&mgState.convergence[1])!=0u;
+  ${neighbourMask ? `let mask=mgLiquidMask(id);
+  if(coarseDone||(mask&1u)==0u){` : `if(coarseDone||!mgBakedLiquid(id)){`}
+    textureStore(mgPressureOut,id,vec4f(max(old,minimum)));return;}
+  let e=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
+  var diagonalTerms:array<f32,6>;var sumTerms:array<f32,6>;
+  for(var n=0;n<6;n+=1){let q=id+e[n];let a=mgCoefficient(id,q,u32(n/2));
+    diagonalTerms[n]=a;sumTerms[n]=select(0.0,a*mgP(q),${neighbourMask ? "((mask>>u32(n+1))&1u)!=0u" : "mgBakedLiquid(q)"});}
+  let diagonal=mgD4Sum6(diagonalTerms);let sum=mgD4Sum6(sumTerms);
+  let p=select(0.0,(sum+textureLoad(mgRhsIn,id,0).x)/diagonal,diagonal>0.0);
+  textureStore(mgPressureOut,id,vec4f(max(p,minimum)));
 }
 
 ${uniformCoarseSolverWGSL}

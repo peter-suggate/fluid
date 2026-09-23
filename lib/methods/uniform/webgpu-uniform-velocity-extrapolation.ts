@@ -314,7 +314,7 @@ export class WebGPUUniformVelocityExtrapolator {
       });
       const origins = () => sourceAwareHierarchy ? (fieldPages ?? device).createTexture({
         label: `Uniform nearest-source origins ${levelDims.join("x")}`,
-        size: levelDims, dimension: "3d", format: "rgba32uint", usage,
+        size: [levelDims[0],levelDims[1],2*levelDims[2]], dimension: "3d", format: "rgba32uint", usage,
       }) : undefined;
       this.hierarchyLevels.push({ dims: levelDims, down: levelTexture("down"), up: levelTexture("up"),
         originsDown: origins(), originsUp: origins() });
@@ -395,7 +395,7 @@ export class WebGPUUniformVelocityExtrapolator {
     const [nx, ny, nz] = this.dims;
     const baseBytes = (nx + 2) * (ny + 2) * (nz + 2) * 6 * 16 + 40;
     const hierarchyBytes = this.hierarchyLevels.reduce(
-      (sum, level) => sum + level.dims[0] * level.dims[1] * level.dims[2] * (this.sourceAwareHierarchy ? 4 : 2) * 16,
+      (sum, level) => sum + level.dims[0] * level.dims[1] * level.dims[2] * (this.sourceAwareHierarchy ? 6 : 2) * 16,
       0,
     );
     return baseBytes + hierarchyBytes + 32 + this.shellTiles.size + this.shellDispatch.size;
