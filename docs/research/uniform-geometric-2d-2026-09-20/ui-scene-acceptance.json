@@ -28,6 +28,11 @@
     "phiAgreement": "off",
     "phiAgreementGain": 0.05,
     "phiAgreementClamp": 0.02,
+    "phiCubicAdvection": "on",
+    "isolatedBodyVolume": "off",
+    "phiSeedCells": "off",
+    "phiDrain": "on",
+    "airborneMomentum": "on",
     "totalSurfaceVolume": "on",
     "surfaceDeficitBalancing": "on"
   },
@@ -41,10 +46,10 @@
         16
       ],
       "initialMass": 168,
-      "finalMass": 167.8512032730505,
-      "dust": 0.14880809027363284,
-      "medianMs": 1.0315409999999474,
-      "p95Ms": 1.1912499999999682
+      "finalMass": 167.8149584159255,
+      "dust": 0.18503977909920533,
+      "medianMs": 1.0793749999999136,
+      "p95Ms": 1.3016249999999445
     },
     {
       "artifact": "scalar",
@@ -55,10 +60,10 @@
         32
       ],
       "initialMass": 588.7999999523163,
-      "finalMass": 588.1599000230199,
-      "dust": 0.6401005198434255,
-      "medianMs": 1.8896660000000338,
-      "p95Ms": 2.0169579999999314
+      "finalMass": 588.5109803476371,
+      "dust": 0.28902229235812027,
+      "medianMs": 2.033083999999917,
+      "p95Ms": 2.4152919999999085
     },
     {
       "artifact": "scalar",
@@ -69,19 +74,19 @@
         16
       ],
       "initialMass": 64,
-      "finalMass": 63.57846346264705,
-      "dust": 0.4215364118596705,
-      "medianMs": 0.7631669999999531,
-      "p95Ms": 0.8480839999999716
+      "finalMass": 63.740303854690865,
+      "dust": 0.25969250780543973,
+      "medianMs": 0.7976670000000468,
+      "p95Ms": 1.0281660000000556
     },
     {
       "artifact": "scalar",
       "scene": "live-liquid-and-rigid-tools",
       "frames": 36,
-      "bodyY": 0.29860448837280273,
+      "bodyY": 0.29470357298851013,
       "injectedVolume": 13,
-      "liquidVolume": 180.8617666515056,
-      "volumeChange": -0.1382333484943956
+      "liquidVolume": 180.86812511575408,
+      "volumeChange": -0.1318748842459172
     },
     {
       "artifact": "scalar",
@@ -92,7 +97,7 @@
       "artifact": "scalar",
       "scene": "planar-rigid-buoyancy",
       "frames": 30,
-      "bodyY": 0.34602007269859314
+      "bodyY": 0.3458491861820221
     },
     {
       "artifact": "scalar",
@@ -109,10 +114,10 @@
         16
       ],
       "initialMass": 168,
-      "finalMass": 167.8512032730505,
-      "dust": 0.14880809027363284,
-      "medianMs": 1.0097920000000613,
-      "p95Ms": 1.1023329999998168
+      "finalMass": 167.8149584159255,
+      "dust": 0.18503977909920533,
+      "medianMs": 1.0705419999999322,
+      "p95Ms": 1.326291000000083
     },
     {
       "artifact": "simd",
@@ -123,10 +128,10 @@
         32
       ],
       "initialMass": 588.7999999523163,
-      "finalMass": 588.1599000230199,
-      "dust": 0.6401005198434255,
-      "medianMs": 1.8564580000002024,
-      "p95Ms": 1.9589590000000499
+      "finalMass": 588.5109803476371,
+      "dust": 0.28902229235812027,
+      "medianMs": 1.992666999999983,
+      "p95Ms": 2.463417000000163
     },
     {
       "artifact": "simd",
@@ -137,19 +142,19 @@
         16
       ],
       "initialMass": 64,
-      "finalMass": 63.57846346264705,
-      "dust": 0.4215364118596705,
-      "medianMs": 0.7630409999999301,
-      "p95Ms": 0.8441660000000866
+      "finalMass": 63.740303854690865,
+      "dust": 0.25969250780543973,
+      "medianMs": 0.7924580000001242,
+      "p95Ms": 0.9736659999998665
     },
     {
       "artifact": "simd",
       "scene": "live-liquid-and-rigid-tools",
       "frames": 36,
-      "bodyY": 0.29860448837280273,
+      "bodyY": 0.29470357298851013,
       "injectedVolume": 13,
-      "liquidVolume": 180.8617666515056,
-      "volumeChange": -0.1382333484943956
+      "liquidVolume": 180.86812511575408,
+      "volumeChange": -0.1318748842459172
     },
     {
       "artifact": "simd",
@@ -160,7 +165,7 @@
       "artifact": "simd",
       "scene": "planar-rigid-buoyancy",
       "frames": 30,
-      "bodyY": 0.34602007269859314
+      "bodyY": 0.3458491861820221
     },
     {
       "artifact": "simd",

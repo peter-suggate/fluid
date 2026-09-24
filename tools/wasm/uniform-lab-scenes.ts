@@ -341,6 +341,11 @@ for (const artifact of ["scalar", "simd"] as const) {
     const ui = {
       totalSurfaceVolume: false,
       surfaceDeficitBalancing: false,
+      phiCubicAdvection: true,
+      phiDrain: true,
+      airborneMomentum: true,
+      isolatedBodyVolume: false,
+      phiSeedCells: false,
       sliceDepth_m: -0.15,
       sceneId: "water-box-dam-break",
       dt: 1 / 60,

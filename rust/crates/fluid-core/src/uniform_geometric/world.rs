@@ -305,6 +305,7 @@ impl World {
             dt,
             window,
             plug.as_ref(),
+            &self.options,
             &mut self.advected,
         );
         std::mem::swap(&mut self.grid.phi, &mut self.advected);
@@ -490,7 +491,19 @@ impl World {
                 }
             }
             let above = [p[0], p[1] + 1];
-            if occupancy > 1e-5 || self.occupancy(above) > 1e-5 {
+            if occupancy > 1e-5
+                || self.occupancy(above) > 1e-5
+                || g.airborne(
+                    p,
+                    self.options.airborne_momentum == "on",
+                    self.options.volume_dust_threshold,
+                )
+                || g.airborne(
+                    above,
+                    self.options.airborne_momentum == "on",
+                    self.options.volume_dust_threshold,
+                )
+            {
                 v[1] += self.gravity[1] * dt;
             }
             if sigma_over_rho > 0.0 {
@@ -636,7 +649,19 @@ impl World {
             let pa = pressure_phi[halo(p)];
             let pb = pressure_phi[halo(q)];
             if pa >= 0.0 && pb >= 0.0 {
-                return 0.0;
+                return if g.airborne(
+                    p,
+                    self.options.airborne_momentum == "on",
+                    self.options.volume_dust_threshold,
+                ) || g.airborne(
+                    q,
+                    self.options.airborne_momentum == "on",
+                    self.options.volume_dust_threshold,
+                ) {
+                    v
+                } else {
+                    0.0
+                };
             }
             v - dt / self.rho * (pressure(q) - pressure(p)) / (g.h[a] * theta(pa, pb))
         };

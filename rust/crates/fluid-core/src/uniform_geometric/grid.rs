@@ -119,6 +119,71 @@ impl Grid {
     pub fn phi_at(&self, p: [f32; 2]) -> f32 {
         self.scalar(&self.phi, p)
     }
+    /// Catmull-Rom phi sample with the enclosing four vertices as a monotonic
+    /// bound, matching uvPhiCubic on the physical 2D slice.
+    pub fn phi_cubic(&self, p: [f32; 2]) -> f32 {
+        let p = self.clamp(p);
+        let base = [
+            (p[0].floor() as usize).min(self.dims[0] - 1),
+            (p[1].floor() as usize).min(self.dims[1] - 1),
+        ];
+        let weights = base.map(|_| [0.0_f32; 4]);
+        let mut weights = weights;
+        for a in 0..2 {
+            let t = p[a] - base[a] as f32;
+            let t2 = t * t;
+            let t3 = t2 * t;
+            weights[a] = [
+                0.5 * (2.0 * t2 - t3 - t),
+                0.5 * (3.0 * t3 - 5.0 * t2 + 2.0),
+                0.5 * (4.0 * t2 - 3.0 * t3 + t),
+                0.5 * (t3 - t2),
+            ];
+        }
+        let mut value = 0.0;
+        let mut lo = f32::INFINITY;
+        let mut hi = f32::NEG_INFINITY;
+        for dy in -1..3 {
+            let mut row = 0.0;
+            for dx in -1..3 {
+                let x = (base[0] as i32 + dx).clamp(0, self.dims[0] as i32) as usize;
+                let y = (base[1] as i32 + dy).clamp(0, self.dims[1] as i32) as usize;
+                let sample = self.phi[x + (self.dims[0] + 1) * y];
+                row += weights[0][(dx + 1) as usize] * sample;
+                if (0..=1).contains(&dx) && (0..=1).contains(&dy) {
+                    lo = lo.min(sample);
+                    hi = hi.max(sample);
+                }
+            }
+            value += weights[1][(dy + 1) as usize] * row;
+        }
+        value.clamp(lo, hi)
+    }
+    /// Ballistic V has neither a phi pressure row nor a nearby solid or wall.
+    pub fn airborne(&self, p: [i32; 2], enabled: bool, dust: f32) -> bool {
+        if !enabled
+            || self
+                .index(p)
+                .is_none_or(|i| self.volume[i] <= dust.max(0.05))
+        {
+            return false;
+        }
+        let h = self.h[0].min(self.h[1]);
+        if self.phi_at([p[0] as f32 + 0.5, p[1] as f32 + 0.5]) <= 1.5 * h {
+            return false;
+        }
+        for y in p[1] - 2..=p[1] + 2 {
+            for x in p[0] - 2..=p[0] + 2 {
+                if self
+                    .index([x, y])
+                    .is_none_or(|i| self.capacity[i] < 0.99999)
+                {
+                    return false;
+                }
+            }
+        }
+        true
+    }
     /// uvPhi(cell + 0.5) as Metal compiles it into the pressure build: the
     /// depth-symmetric corners k and k+4 are one plane vertex, and each
     /// x row's four eighths are summed in sequence. Verified bitwise against

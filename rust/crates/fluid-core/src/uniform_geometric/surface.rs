@@ -8,6 +8,7 @@ struct Advect<'a> {
     g: &'a Grid,
     e: &'a Extension,
     dt: f32,
+    options: &'a UniformGeometricOptions,
     plug: Option<&'a Plug>,
     window: Region,
     solid_free: bool,
@@ -205,21 +206,127 @@ impl Advect<'_> {
         self.plug.map_or(phi, |s| s.phi(p, phi))
     }
 
+    fn drain(&self, q: [f32; 2], phi: f32) -> f32 {
+        let h = self.g.h[0].min(self.g.h[1]);
+        if phi >= 0.5 * h {
+            return phi;
+        }
+        let centre = q.map(|v| (v + 0.5).floor() as i32);
+        for y in centre[1] - 2..centre[1] + 2 {
+            for x in centre[0] - 2..centre[0] + 2 {
+                if self
+                    .g
+                    .index([x, y])
+                    .is_some_and(|i| self.g.volume[i] > 0.05)
+                {
+                    return phi;
+                }
+            }
+        }
+        (phi + 0.5 * h).min(0.5 * h)
+    }
+
+    fn seed_cells(&self, q: [f32; 2], phi: f32) -> f32 {
+        let g = self.g;
+        let h = g.h[0].min(g.h[1]);
+        let base = q.map(|v| (v - 0.5).floor() as i32);
+        let mut seed = phi;
+        for dy in 0..2 {
+            for dx in 0..2 {
+                if let Some(i) = g.index([base[0] + dx, base[1] + dy]) {
+                    if g.capacity[i] >= 0.99999 {
+                        seed = seed.min(h * (0.5 - g.volume[i] / g.capacity[i]));
+                    }
+                }
+            }
+        }
+        if seed >= phi || seed >= 0.0 {
+            return phi;
+        }
+        let centre = q.map(|v| (v + 0.5).floor() as i32);
+        for y in centre[1] - 2..centre[1] + 2 {
+            for x in centre[0] - 2..centre[0] + 2 {
+                let c = [x, y];
+                if g.index(c).is_some() && g.phi_at([x as f32 + 0.5, y as f32 + 0.5]) < 0.0 {
+                    return phi;
+                }
+            }
+        }
+        seed
+    }
+
+    fn isolated_shift(&self, q: [f32; 2]) -> f32 {
+        let g = self.g;
+        let base = q.map(|v| (v + 0.5).floor() as i32);
+        let empty = self.options.volume_dust_threshold.max(1e-5);
+        for dy in -8..8 {
+            for dx in -8..8 {
+                if dx != -8 && dx != 7 && dy != -8 && dy != 7 {
+                    continue;
+                }
+                let c = [base[0] + dx, base[1] + dy];
+                if let Some(i) = g.index(c) {
+                    if g.volume[i] > empty || g.target(c) > 0.0 {
+                        return 0.0;
+                    }
+                }
+            }
+        }
+        let mut residual = 0.0;
+        let mut area = 0.0_f32;
+        for dy in -7..7 {
+            for dx in -7..7 {
+                let c = [base[0] + dx, base[1] + dy];
+                if let Some(i) = g.index(c) {
+                    let gamma = g.target(c);
+                    residual += g.volume[i] - gamma;
+                    if gamma > 0.0 && gamma < g.capacity[i] {
+                        area += 1.0;
+                    }
+                }
+            }
+        }
+        if area < 1.0 {
+            return 0.0;
+        }
+        g.h[0].min(g.h[1]) * (residual / area).clamp(-0.25, 0.25)
+    }
+
     fn vertex(&self, x: usize, y: usize) -> f32 {
         let g = self.g;
         let vertex = [x as i32, y as i32];
         let p = [x as f32, y as f32];
         let end = self.e.rk2(g, p, self.dt);
-        let advected = g.phi_at(self.e.walk(g, p, end));
-        if self.far_air(vertex) {
+        let departure = self.e.walk(g, p, end);
+        let mut advected = g.phi_at(departure);
+        let splash = self.options.phi_cubic_advection == "on"
+            || self.options.phi_drain == "on"
+            || self.options.phi_seed_cells == "on"
+            || self.options.isolated_body_volume == "on";
+        if self.far_air(vertex) && !(splash && self.e.shell_at(departure.map(|v| v.floor() as i32)))
+        {
             return advected;
         }
         if !self.solid_free && g.buried(vertex) {
             return g.phi[x + (g.dims[0] + 1) * y];
         }
+        let h = g.h[0].min(g.h[1]);
+        if self.options.phi_cubic_advection == "on" && advected.abs() < 2.0 * h {
+            advected = g.phi_cubic(departure);
+        }
         let contact = self.embedded_contact(p, vertex, self.closed_wall(p, advected));
-        let released = self.released_walls(p, self.embedded_air(p, end, contact));
-        self.source(p, released)
+        let mut released = self.released_walls(p, self.embedded_air(p, end, contact));
+        if self.options.phi_drain == "on" {
+            released = self.drain(departure, released);
+        }
+        let mut value = self.source(p, released);
+        if self.options.isolated_body_volume == "on" && value.abs() < 2.0 * h {
+            value -= self.isolated_shift(departure);
+        }
+        if self.options.phi_seed_cells == "on" {
+            value = self.seed_cells(departure, value);
+        }
+        value
     }
 }
 
@@ -231,12 +338,14 @@ pub fn advect_window(
     dt: f32,
     window: Region,
     plug: Option<&Plug>,
+    options: &UniformGeometricOptions,
     scratch: &mut [f32],
 ) {
     let pass = Advect {
         g,
         e,
         dt,
+        options,
         plug,
         window,
         solid_free: g.solid_free(),
@@ -309,7 +418,15 @@ pub fn redistance_window(g: &mut Grid, scratch: &[f32], window: Region) {
 /// Whole-domain advect for diagnostics: no inflow plug, result in `g.phi`.
 pub fn advect(g: &mut Grid, e: &Extension, dt: f32) {
     let mut scratch = g.phi.clone();
-    advect_window(g, e, dt, Region::whole(g.dims), None, &mut scratch);
+    advect_window(
+        g,
+        e,
+        dt,
+        Region::whole(g.dims),
+        None,
+        &UniformGeometricOptions::default(),
+        &mut scratch,
+    );
     g.phi = scratch;
 }
 

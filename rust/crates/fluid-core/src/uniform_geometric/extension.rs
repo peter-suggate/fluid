@@ -543,7 +543,8 @@ impl Extension {
                     open[i] |= 1 << a;
                 }
             }
-            liquid[i] = 0.5 - g.pressure_phi(p, &o.volume_pressure_rows) / minh > 0.5;
+            liquid[i] = 0.5 - g.pressure_phi(p, &o.volume_pressure_rows) / minh > 0.5
+                || g.airborne(p, o.airborne_momentum == "on", o.volume_dust_threshold);
         }
         let index = |p: [i32; 2]| -> Option<usize> {
             (p[0] >= 0 && p[1] >= 0 && p[0] < dims[0] as i32 && p[1] < dims[1] as i32)

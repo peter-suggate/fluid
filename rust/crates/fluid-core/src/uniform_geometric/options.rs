@@ -74,6 +74,16 @@ pub struct UniformGeometricOptions {
     pub phi_agreement_gain: f32,
     #[serde(rename = "phiAgreementClamp")]
     pub phi_agreement_clamp: f32,
+    #[serde(rename = "phiCubicAdvection")]
+    pub phi_cubic_advection: String,
+    #[serde(rename = "isolatedBodyVolume")]
+    pub isolated_body_volume: String,
+    #[serde(rename = "phiSeedCells")]
+    pub phi_seed_cells: String,
+    #[serde(rename = "phiDrain")]
+    pub phi_drain: String,
+    #[serde(rename = "airborneMomentum")]
+    pub airborne_momentum: String,
     #[serde(rename = "totalSurfaceVolume")]
     pub total_surface_volume: String,
     #[serde(rename = "surfaceDeficitBalancing")]
@@ -110,6 +120,11 @@ impl Default for UniformGeometricOptions {
             phi_agreement: "off".into(),
             phi_agreement_gain: 0.05_f32,
             phi_agreement_clamp: 0.02_f32,
+            phi_cubic_advection: "on".into(),
+            isolated_body_volume: "off".into(),
+            phi_seed_cells: "off".into(),
+            phi_drain: "on".into(),
+            airborne_momentum: "on".into(),
             total_surface_volume: "on".into(),
             surface_deficit_balancing: "on".into(),
         }
@@ -286,6 +301,29 @@ impl UniformGeometricOptions {
         {
             return Err(ValidationError(
                 "Invalid uniform parameter phiAgreementClamp".into(),
+            ));
+        }
+        if !["on", "off"].contains(&self.phi_cubic_advection.as_str()) {
+            return Err(ValidationError(
+                "Invalid uniform parameter phiCubicAdvection".into(),
+            ));
+        }
+        if !["on", "off"].contains(&self.isolated_body_volume.as_str()) {
+            return Err(ValidationError(
+                "Invalid uniform parameter isolatedBodyVolume".into(),
+            ));
+        }
+        if !["on", "off"].contains(&self.phi_seed_cells.as_str()) {
+            return Err(ValidationError(
+                "Invalid uniform parameter phiSeedCells".into(),
+            ));
+        }
+        if !["on", "off"].contains(&self.phi_drain.as_str()) {
+            return Err(ValidationError("Invalid uniform parameter phiDrain".into()));
+        }
+        if !["on", "off"].contains(&self.airborne_momentum.as_str()) {
+            return Err(ValidationError(
+                "Invalid uniform parameter airborneMomentum".into(),
             ));
         }
         if !["off", "on"].contains(&self.total_surface_volume.as_str()) {

@@ -17,19 +17,25 @@ export interface UniformLabState {
   sceneId: string;
   totalSurfaceVolume: boolean;
   surfaceDeficitBalancing: boolean;
+  phiCubicAdvection: boolean;
+  phiDrain: boolean;
+  airborneMomentum: boolean;
+  isolatedBodyVolume: boolean;
+  phiSeedCells: boolean;
   dt: number;
   layers: VisualLayerState;
   sliceView: SliceViewFraction;
   sliceDepth_m?: number;
 }
 /** The 3D default is on; only a viewer's opt-out reaches the URL. */
-function defaultOnQuery(key: "totalSurfaceVolume" | "surfaceDeficitBalancing") {
+type Toggle = "totalSurfaceVolume" | "surfaceDeficitBalancing" | "phiCubicAdvection" | "phiDrain" | "airborneMomentum" | "isolatedBodyVolume" | "phiSeedCells";
+function toggleQuery(key: Toggle, defaultValue: boolean) {
   return {
     keys: [key],
-    read: (query: URLSearchParams) => ({ [key]: query.get(key) !== "0" }),
+    read: (query: URLSearchParams) => ({ [key]: query.get(key) === null ? defaultValue : query.get(key) === "1" }),
     write: (query: URLSearchParams, state: UniformLabState) => {
-      if (state[key]) query.delete(key);
-      else query.set(key, "0");
+      if (state[key] === defaultValue) query.delete(key);
+      else query.set(key, state[key] ? "1" : "0");
     },
   };
 }
@@ -48,8 +54,13 @@ export const uniformLabQuery = combineQueryCodecs<UniformLabState>([
       else query.set("sliceDepth", String(state.sliceDepth_m));
     },
   },
-  defaultOnQuery("totalSurfaceVolume"),
-  defaultOnQuery("surfaceDeficitBalancing"),
+  toggleQuery("totalSurfaceVolume", true),
+  toggleQuery("surfaceDeficitBalancing", true),
+  toggleQuery("phiCubicAdvection", true),
+  toggleQuery("phiDrain", true),
+  toggleQuery("airborneMomentum", true),
+  toggleQuery("isolatedBodyVolume", false),
+  toggleQuery("phiSeedCells", false),
   {
     keys: ["layers", "field", "grid"],
     read: (query: URLSearchParams) => ({
@@ -92,6 +103,11 @@ export function startUniformLabQuerySync(
           next.sliceDepth_m !== store.getState().sliceDepth_m ||
           next.totalSurfaceVolume !== store.getState().totalSurfaceVolume ||
           next.surfaceDeficitBalancing !== store.getState().surfaceDeficitBalancing ||
+          next.phiCubicAdvection !== store.getState().phiCubicAdvection ||
+          next.phiDrain !== store.getState().phiDrain ||
+          next.airborneMomentum !== store.getState().airborneMomentum ||
+          next.isolatedBodyVolume !== store.getState().isolatedBodyVolume ||
+          next.phiSeedCells !== store.getState().phiSeedCells ||
           JSON.stringify(parsed.scene) !==
             JSON.stringify(session.scene.getState().scene))
       )

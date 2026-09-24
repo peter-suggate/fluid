@@ -297,7 +297,7 @@ export function UniformLab() {
 }
 function UniformRun({ session }: { session: PaneSession }) {
   const [store] = useState(() => createUniformLabStore(location.search));
-  const { sceneId, dt, layers, totalSurfaceVolume, surfaceDeficitBalancing, sliceDepth_m, sliceView: camera } = useStore(store);
+  const { sceneId, dt, layers, totalSurfaceVolume, surfaceDeficitBalancing, phiCubicAdvection, phiDrain, airborneMomentum, isolatedBodyVolume, phiSeedCells, sliceDepth_m, sliceView: camera } = useStore(store);
   const scene = useStore(session.scene, (state) => state.scene);
   const nz = sceneLatticeDimensions(scene, Number.MAX_SAFE_INTEGER)[2];
   const slice = uniformLabSlice(scene, nz, sliceDepth_m);
@@ -376,7 +376,7 @@ function UniformRun({ session }: { session: PaneSession }) {
           return;
         }
         controller.current = owner;
-        const initial = await owner.load(scene, { totalSurfaceVolume, surfaceDeficitBalancing }, sliceDepth_m);
+        const initial = await owner.load(scene, { totalSurfaceVolume, surfaceDeficitBalancing, phiCubicAdvection, phiDrain, airborneMomentum, isolatedBodyVolume, phiSeedCells }, sliceDepth_m);
         if (alive) {
           setView(initial);
           setLoading(false);
@@ -394,7 +394,7 @@ function UniformRun({ session }: { session: PaneSession }) {
       if (controller.current === owner) controller.current = undefined;
       if (owner) void owner.destroy().catch(() => {});
     };
-  }, [sceneId, totalSurfaceVolume, surfaceDeficitBalancing, sliceDepth_m, restart, session.scene]);
+  }, [sceneId, totalSurfaceVolume, surfaceDeficitBalancing, phiCubicAdvection, phiDrain, airborneMomentum, isolatedBodyVolume, phiSeedCells, sliceDepth_m, restart, session.scene]);
   const edit = (
     operation: (owner: UniformLabController) => Promise<UniformView>,
   ) => {
@@ -503,6 +503,11 @@ function UniformRun({ session }: { session: PaneSession }) {
     ...UNIFORM_LAB_VALUES,
     totalSurfaceVolume: totalSurfaceVolume ? "on" : "off",
     surfaceDeficitBalancing: surfaceDeficitBalancing ? "on" : "off",
+    phiCubicAdvection: phiCubicAdvection ? "on" : "off",
+    phiDrain: phiDrain ? "on" : "off",
+    airborneMomentum: airborneMomentum ? "on" : "off",
+    isolatedBodyVolume: isolatedBodyVolume ? "on" : "off",
+    phiSeedCells: phiSeedCells ? "on" : "off",
   };
   const parameters = UNIFORM_GEOMETRIC_PARAMS.filter(
     (p) => keys.has(p.key) && p.key in values && p.key !== "sharpeningWorkMap",
@@ -983,6 +988,17 @@ function UniformRun({ session }: { session: PaneSession }) {
             Preserves overfill expansion and balances it with contraction in underfilled liquid to reduce persistent sloshing.
             {" "}Both are on in 3D; changing either resets and pauses the scene.
           </p>
+          {(["phiCubicAdvection", "phiDrain", "airborneMomentum", "isolatedBodyVolume", "phiSeedCells"] as const).map((key) => {
+            const spec = UNIFORM_GEOMETRIC_PARAMS.find((p) => p.key === key)!;
+            return <div className={css.option} key={key}>
+              <Switch ariaLabel={spec.label} label={spec.label} checked={store.getState()[key]}
+                disabled={loading} onChange={(checked) => {
+                  setPlaying(false);
+                  beginLoad();
+                  store.setState({ [key]: checked });
+                }} />
+            </div>;
+          })}
           <Facts className={css.facts} items={[
             {
               label: "Liquid area",

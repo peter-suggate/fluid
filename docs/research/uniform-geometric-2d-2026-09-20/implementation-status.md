@@ -49,13 +49,19 @@ Ordinary 3D runs are unaffected.
 
 ### Outside the native contract
 
-- **The splash-survival group** (`UNIFORM_GEOMETRIC_SPLASH_KEYS`) is 3D-only:
-  - `phiCubicAdvection`, `phiDrain` and `airborneMomentum` became 3D defaults
-    on 2026-09-23. They are not ported, and the parity probe pins them off.
-    Porting them is a separate decision.
+- **Five splash-survival controls are now available in 2D**:
+  `phiCubicAdvection`, `phiDrain` and `airborneMomentum` default on;
+  `isolatedBodyVolume` and `phiSeedCells` default off. The 2D lab exposes
+  all five switches. The native parity probe can exercise them through
+  `FLUID_UNIFORM_PARITY_VALUES`; its current baseline pins the three default-on
+  switches off.
+  The Rust solver applies phi sampling, drainage, isolated correction and
+  V-cell seeding at the departure point, and carries airborne V through
+  extension, gravity and pressure projection.
+  The remaining splash controls are 3D-only:
   - `redistanceSurface` defaults to `rebuild` and `orphanVolume` to `relay`.
     Rust's behaviour is what those defaults select.
-  - `orphanVolumeRender`, `isolatedBodyVolume` and `phiSeedCells` default off.
+  - `orphanVolumeRender` defaults off.
 - **`volumeStorage` and `pageSize`** are WebGPU storage choices.
 - **Rejected by `validate_supported`**: non-default values of
   `velocityTransport`, `liquidOnlyVelocityAdvection`, `volumeCompaction`,

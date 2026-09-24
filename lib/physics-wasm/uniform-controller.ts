@@ -26,6 +26,11 @@ export const UNIFORM_LAB_VALUES = Object.freeze(
 export interface UniformLabSurface {
   readonly totalSurfaceVolume: boolean;
   readonly surfaceDeficitBalancing: boolean;
+  readonly phiCubicAdvection?: boolean;
+  readonly phiDrain?: boolean;
+  readonly airborneMomentum?: boolean;
+  readonly isolatedBodyVolume?: boolean;
+  readonly phiSeedCells?: boolean;
 }
 
 export function uniformLabSceneLimitation(
@@ -166,6 +171,11 @@ export class UniformLabController {
         ...UNIFORM_LAB_VALUES,
         totalSurfaceVolume: surface.totalSurfaceVolume ? "on" : "off",
         surfaceDeficitBalancing: surface.surfaceDeficitBalancing ? "on" : "off",
+        phiCubicAdvection: surface.phiCubicAdvection === false ? "off" : "on",
+        phiDrain: surface.phiDrain === false ? "off" : "on",
+        airborneMomentum: surface.airborneMomentum === false ? "off" : "on",
+        isolatedBodyVolume: surface.isolatedBodyVolume ? "on" : "off",
+        phiSeedCells: surface.phiSeedCells ? "on" : "off",
       },
       uniformSeed: uniformLabSeed(scene, sliceDepth_m),
     });

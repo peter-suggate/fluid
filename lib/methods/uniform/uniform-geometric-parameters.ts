@@ -72,7 +72,7 @@ params.push({kind:"number",key:"phiAgreementClamp",label:"Agreement clamp",defau
 
 // Splash survival (docs/uniform-geometric-splash-dissipation-plan.md): independent
 // stages for comparing in the app. Cubic advection, the ghost drain and airborne
-// momentum ship on; the rest are off. 3D only -- not in the native contract.
+// momentum ship on; the rest are off. Five numerical stages also run in 2D.
 /** The long-form tooltips, shared by the parameter and its SIM panel switch. */
 export const UNIFORM_GEOMETRIC_SPLASH_HINTS = Object.freeze({
   phiCubicAdvection: [
@@ -118,7 +118,7 @@ const splash: MethodParamSpec[] = [
     hint:"Publish V more than 1.5 cells from any phi surface, which phi alone draws as nothing. Density is CM12 Sec. 3.8's rho/gamma amplification over 3³ cells; Spheres draws each 3³ cluster as a sphere of its own volume. Presentation only: no solver stage reads it."},
   {kind:"select",key:"isolatedBodyVolume",label:"Isolated body volume",default:"off",tier:"fine",update:"runtime",
     options:[{value:"on",label:"On"},{value:"off",label:"Off"}],
-    hint:"A vertex within a cell of the surface whose 12³ window holds a whole body -- nothing in the window's outer shell -- moves phi along its normal by that body's own V minus fill, at most a quarter cell a step. A pool never qualifies, so it cannot pump. Replaces Follow V while on."},
+    hint:"A vertex near the surface whose 16³ window (16² in 2D) holds a whole body -- nothing in the window's outer shell -- moves phi along its normal by that body's own V minus fill, at most a quarter cell a step. A pool never qualifies, so it cannot pump. Replaces Follow V while on."},
   {kind:"select",key:"phiSeedCells",label:"Seed phi from V cells",default:"off",tier:"fine",update:"runtime",
     options:[{value:"on",label:"On"},{value:"off",label:"Off"}],
     hint:"Where no cell centre nearby is phi-liquid, write the implied depth of the fullest incident cell holding over half its capacity, read at the vertex's departure point. Unlike the averaged seed this fires for a single full cell, so a compacted drop owns a pressure row."},
@@ -143,7 +143,8 @@ params.push({kind:"select",key:"surfaceDeficitBalancing",label:"Surface-deficit 
 /** Shared by the studio and scene harnesses. */
 export const UNIFORM_GEOMETRIC_PARAMS: readonly MethodParamSpec[] = Object.freeze(params);
 /** Storage is a WebGPU implementation choice, excluded from the native contract. */
-export const UNIFORM_GEOMETRIC_NATIVE_PARAMS = Object.freeze(params.filter(p => p.key !== "volumeStorage" && p.key !== "pageSize" && !UNIFORM_GEOMETRIC_SPLASH_KEYS.has(p.key)));
+const nativeSplashKeys = new Set(["phiCubicAdvection", "phiDrain", "airborneMomentum", "isolatedBodyVolume", "phiSeedCells"]);
+export const UNIFORM_GEOMETRIC_NATIVE_PARAMS = Object.freeze(params.filter(p => p.key !== "volumeStorage" && p.key !== "pageSize" && (!UNIFORM_GEOMETRIC_SPLASH_KEYS.has(p.key) || nativeSplashKeys.has(p.key))));
 export const UNIFORM_GEOMETRIC_DEFAULTS: Readonly<MethodParamValues> = Object.freeze(
   Object.fromEntries(params.map(p => [p.key, p.default])),
 );
