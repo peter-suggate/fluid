@@ -86,7 +86,7 @@ const ENTRY_BINDINGS: Readonly<Record<EntryPoint, readonly number[]>> = Object.f
   mgSmoothVisitInPlace: [0, 3, 11, 13, 14, 16],
   mgCopyPressure: [0, 1, 2], mgClearPressure: [0, 2], mgClearMinimum: [0, 12],
   mgShiftMinimum: [0, 1, 11, 12], mgAddPressure: [0, 1, 2, 9],
-  mgSolveCoarsest: [0, 1, 2, 3, 5, 7, 11, 13],
+  mgSolveCoarsest: [0, 1, 2, 3, 5, 7, 11, 13, 17],
   mgMeasureFineResidual: [0, 1, 3, 11, 13, 14, 17],
   mgCheckCycleConvergence: [0, 17],
   mgPublishCycleDispatch: [0, 18],
@@ -323,6 +323,8 @@ export class WebGPUUniformPressureMultigrid {
   private cycleBoundaries?: readonly number[];
   /** First plan index of the always-encoded finish section. */
   private finishStart = 0;
+  private finalStart = 0;
+  private coarseAccuracyScale = 1;
   private activeResidualTolerance = 0;
   private coarsestCaptureBuffers?: CoarsestCaptureBuffers;
   private windowLevelGroups?: readonly (readonly [number, number, number])[];
@@ -355,7 +357,8 @@ export class WebGPUUniformPressureMultigrid {
      * that the scene has no depth symmetry; the full-lattice and dense-storage
      * conditions are checked here.
      */
-    inPlaceSmoothing = false, private readonly scratchFields?: UniformTexturePages, compactSmoothing = true, private readonly reuseFinestAuthority = true, private readonly maskFirst = true, private readonly simultaneousSmoothing = programs?.simultaneousSmoothing ?? false) {
+    inPlaceSmoothing = false, private readonly scratchFields?: UniformTexturePages, compactSmoothing = true, private readonly reuseFinestAuthority = true, private readonly maskFirst = true, private readonly simultaneousSmoothing = programs?.simultaneousSmoothing ?? false,
+    private readonly adaptiveSolve = false) {
     this.inPlaceCapable = inPlaceSmoothing && !activeDispatch && !pagedStorage && programs === undefined;
     this.inPlaceSmoothing = this.inPlaceCapable;
     this.visitLanes = Math.min(FUSED_VISIT_LANES, device.limits.maxComputeInvocationsPerWorkgroup,
@@ -510,7 +513,14 @@ export class WebGPUUniformPressureMultigrid {
   setResidualTolerance(value: number): void {
     const tolerance = Number.isFinite(value) ? Math.max(0, value) : 0;
     this.activeResidualTolerance = tolerance;
-    this.device.queue.writeBuffer(this.toleranceBuffer, 0, new Float32Array([tolerance, 0, 0, 0]));
+    this.device.queue.writeBuffer(this.toleranceBuffer, 0, new Float32Array([tolerance, this.adaptiveSolve && tolerance > 0 ? 1 : 0,
+      0.1 * this.coarseAccuracyScale, tolerance * 0.1 * this.coarseAccuracyScale]));
+  }
+
+  /** Tighten the inner solve after poor outer progress; zero selects strict accuracy. */
+  setCoarseAccuracy(scale: number): void {
+    this.coarseAccuracyScale = Math.max(0, Math.min(1, scale));
+    this.setResidualTolerance(this.activeResidualTolerance);
   }
 
   /**
@@ -639,11 +649,14 @@ export class WebGPUUniformPressureMultigrid {
     cycleBudget?: number,
     /** The last observed step entered recovery; launch its sweeps per cell. */
     recoveryExpected = true,
+    selection?: { start: number; end: number; initialize: boolean; publish: boolean },
   ): void {
     this.assertLive(); if (!this.plan) throw new Error("Uniform CM11a hierarchy is not initialized");
-    encoder.clearBuffer(this.diagnostics, 0, 104);
-    for(const buffer of this.smoothTileBuffers) encoder.clearBuffer(buffer,0,4);
-    for(const buffer of this.cycleTileBuffers) encoder.clearBuffer(buffer,0,4);
+    if (!selection || selection.initialize) {
+      encoder.clearBuffer(this.diagnostics, 0, 112);
+      for(const buffer of this.smoothTileBuffers) encoder.clearBuffer(buffer,0,4);
+      for(const buffer of this.cycleTileBuffers) encoder.clearBuffer(buffer,0,4);
+    }
     const prefixEnd = this.cycleBoundaries?.[this.clampCycleBudget(cycleBudget)] ?? this.plan.length;
     let openStage: UniformCM11aPlanStage | undefined;
     // A WebGPU usage scope is one dispatch, not one compute pass, so a storage
@@ -656,7 +669,7 @@ export class WebGPUUniformPressureMultigrid {
     const batch = BATCH_PASSES && !MG_LEVEL_LABELS;
     let shared: GPUComputePassEncoder | undefined, sharedHasGroup0 = false;
     const closeShared = () => { shared?.end(); shared = undefined; sharedHasGroup0 = false; };
-    for (let index = 0; index < this.plan.length; index += 1) {
+    for (let index = selection?.start ?? 0; index < (selection?.end ?? this.plan.length); index += 1) {
       const dispatch = this.plan[index]!;
       if (openStage !== undefined && dispatch.stage !== openStage) {
         closeShared();
@@ -672,7 +685,7 @@ export class WebGPUUniformPressureMultigrid {
       // reported above, in order, so the advance's phase partition keeps all
       // four sections and a section with no passes reads as zero-length
       // instead of vanishing from the trace.
-      if (index >= prefixEnd && index < this.finishStart) continue;
+      if (!selection && index >= prefixEnd && index < this.finishStart) continue;
       if (dispatch.residualCheckpoint) {
         closeShared();
         encoder.clearBuffer(this.diagnostics, 60, 4);
@@ -743,12 +756,26 @@ export class WebGPUUniformPressureMultigrid {
       }
     }
     closeShared();
-    if(this.pressurePublicationPipeline){
+    if(this.pressurePublicationPipeline && (!selection || selection.publish)){
       const pass=encoder.beginComputePass({label:"Publish paged pressure for projection"});
       pass.setPipeline(this.pressurePublicationPipeline);pass.setBindGroup(0,this.pressurePublicationGroup!);
       pass.dispatchWorkgroups(...this.levels[0]!.dimensions.map(n=>Math.ceil(n/4)) as [number,number,number]);pass.end();
     }
     if (openStage !== undefined) boundary?.(openStage);
+  }
+
+  /** Encode only a dependency-complete piece of the same prebuilt solve. */
+  encodeAdaptiveChunk(encoder: GPUCommandEncoder, group: GPUBindGroup,
+    chunk: number | "recovery" | "finish",
+    boundary?: (stage: UniformCM11aPlanStage) => void): number {
+    if (!this.cycleBoundaries) throw new Error("Pressure plan is not initialized");
+    const start = chunk === "recovery" ? this.finishStart : chunk === "finish" ? this.finalStart
+      : chunk === 0 ? 0 : this.cycleBoundaries[chunk]!;
+    const end = chunk === "recovery" ? this.finalStart : chunk === "finish" ? this.plan!.length
+      : this.cycleBoundaries[chunk + 1] ?? this.cycleBoundaries[0]!;
+    this.encode(encoder, group, boundary, undefined, true,
+      { start, end, initialize: chunk === 0, publish: chunk === "finish" });
+    return end - start + Number(chunk === "finish" && this.pagedStorage);
   }
 
   get levelCount(): number { return this.levels.length; }
@@ -1178,13 +1205,20 @@ export class WebGPUUniformPressureMultigrid {
     emit("mgCopyPressure", 0, 0, { pressureOut: this.acceptedPressure });
     if (this.gpuCycleDispatch) emit("mgPublishCycleDispatch", 0, 0, {}, [0, 0, this.levels.length + 1, 0], [1, 1, 1]);
     const cycleBoundaries: number[] = [result.length];
+    // Checkpoints canonicalize fine pressure; coarser scratch is rebuilt by
+    // each cycle. The host can skip remaining V-cycles after stalled progress.
+    for (let cycle = 0; this.adaptiveSolve && cycle < this.schedule.vCycles; cycle += 1) {
+      planStage = "v-cycle";
+      vCycle(0, originalRhs); checkpoint(); cycleBoundaries.push(result.length);
+      yield;
+    }
     planStage = "full-cycle";
     for (let cycle = 0; cycle < this.schedule.fullCycles; cycle += 1) {
       fullCycle(); checkpoint(); cycleBoundaries.push(result.length);
       yield;
     }
     planStage = "v-cycle";
-    for (let cycle = 0; cycle < this.schedule.vCycles; cycle += 1) {
+    for (let cycle = this.adaptiveSolve ? this.schedule.vCycles : 0; cycle < this.schedule.vCycles; cycle += 1) {
       vCycle(0, originalRhs); checkpoint(); cycleBoundaries.push(result.length);
       yield;
     }
@@ -1197,6 +1231,7 @@ export class WebGPUUniformPressureMultigrid {
       checkpoint();
     }
     recovering = false;
+    this.finalStart = result.length;
     emitOperator("mgRestoreRejected", 0, 0, { pressureOut: this.levels[0]!.pressure[0], residualIn: this.acceptedPressure }, [0, 0, 0, 1]);
     emit("mgFinishSafety", 0, 0, {}, [0, 0, 0, 0], [1, 1, 1]);
     if (p[0] !== 0) { emitOperator("mgCopyPressure", 0, 0, { pressureOut: this.levels[0]!.pressure[0] }); p[0] = 0; }

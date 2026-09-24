@@ -59,9 +59,11 @@ try {
   const start = performance.now();
   const unsubscribe = process.argv.includes("--compile-progress")
     ? gpuCompilationManagerFor(device).subscribe(s => { if(s.progress) console.log(JSON.stringify(s.progress)); }) : () => {};
-  solver = arg("scratch-storage", "shared") === "separate"
+  solver = arg("scratch-storage", "shared") === "separate" || arg("pressure-mode", "adaptive") === "legacy"
     ? await WebGPUUniformReferenceSolver.createAsync(device, scene, "balanced", undefined,
-      { ...uniformGeometricSolverOptions(values, scene), scratchStorageForQA: "separate" }, () => {})
+      { ...uniformGeometricSolverOptions(values, scene),
+        scratchStorageForQA: arg("scratch-storage", "shared") === "separate" ? "separate" : undefined,
+        adaptivePressure: arg("pressure-mode", "adaptive") !== "legacy" }, () => {})
     : await uniformVolumeMethod.createSolverAsync!(device, scene, "balanced", values, undefined, () => {}) as WebGPUUniformReferenceSolver;
   unsubscribe();
   const pressureWork=solver.pressureSmoothingWorkSourceForQA;
@@ -118,7 +120,7 @@ try {
     return {frames:[selected[0]!.frame,selected.at(-1)!.frame],wall_ms:stats(selected.map(r=>r.wall_ms)),gpu_ms:stats(selected.map(r=>r.trace.total_ms)),stages:labels.map(label=>({label,...stats(selected.map(r=>r.trace.phases.filter(p=>p.label===label).reduce((s,p)=>s+p.duration_ms,0)))})).sort((a,b)=>b.mean-a.mean)};
   };
   const windows = Object.fromEntries(Object.entries({all:rows.filter(r=>r.frame>4),freeFall:rows.filter(r=>r.frame>4&&r.frame<=24),impactAndSpread:rows.filter(r=>r.frame>=25)}).filter(([,rs])=>rs.length>0).map(([name,rs])=>[name,summarize(rs)]));
-  const report={abOff:process.env.FLUID_UNIFORM_AB_OFF ?? "",capturedAt:new Date().toISOString(),sceneId,method:uniformVolumeMethod.id,backend:"Dawn/Metal",adapter:{vendor:adapter.info.vendor,architecture:adapter.info.architecture,device:adapter.info.device,description:adapter.info.description},scope:"Instrumented, queue-fenced simulation. Rendering, 115 ms trace-cadence gaps, stats and work-count readbacks excluded from wall timings. First four frames excluded from summaries. GPU stages are seam intervals, not isolated kernel durations.",lattice,setup_ms,values,scene,windows,rows,validationErrors:errors};
+  const report={pressureMode:arg("pressure-mode","adaptive"),abOff:process.env.FLUID_UNIFORM_AB_OFF ?? "",capturedAt:new Date().toISOString(),sceneId,method:uniformVolumeMethod.id,backend:"Dawn/Metal",adapter:{vendor:adapter.info.vendor,architecture:adapter.info.architecture,device:adapter.info.device,description:adapter.info.description},scope:"Instrumented, queue-fenced simulation. Rendering, 115 ms trace-cadence gaps, stats and work-count readbacks excluded from wall timings. First four frames excluded from summaries. GPU stages are seam intervals, not isolated kernel durations.",lattice,setup_ms,values,scene,windows,rows,validationErrors:errors};
   const allocationSnapshot=allocationAudit?.snapshot();
   writeFileSync(out,JSON.stringify({...report,allocationAudit:allocationSnapshot},null,2)+"\n");
   if(maxGPUBytes>0)assert.ok(allocationSnapshot!.peakBytes<=maxGPUBytes,

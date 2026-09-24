@@ -235,6 +235,12 @@ export function submitNextPreparedGPUAdvance(fluid: GPUSolverInstance, time_s: n
   return { previousSubmittedTime, submittedTime };
 }
 
+/** A deferred-publication solver gets one presentation before another advance. */
+export function completedFrameAwaitsPresentation(fluid: Pick<GPUSolverInstance, "deferredFramePublication" | "info"> | undefined,
+  lastPresentedTime_s: number): boolean {
+  return Boolean(fluid?.deferredFramePublication && (fluid.info.completedTime_s ?? 0) > lastPresentedTime_s);
+}
+
 /** Bound physics queue depth to the fixed throughput window. */
 export function canQueuePreparedGPUAdvance(pendingAdvances: number, maximumPendingAdvances: number) {
   return pendingAdvances < Math.max(1, maximumPendingAdvances);
@@ -966,6 +972,7 @@ export class FluidLabRenderer {
   private pressureSamplesFallbackTexture?: GPUTexture;
   private scalarFallbackTexture?: GPUTexture;
   private gpuFluid?: GPUSolverInstance;
+  private readonly deferredPresentedTimes = new WeakMap<GPUSolverInstance, number>();
   private topologyFreezeSolver?: GPUSolverInstance;
   private topologyFrozen = false;
   /** Renderer-owned sparse source for fluid methods that do not publish one. */
@@ -3256,7 +3263,9 @@ export class FluidLabRenderer {
     // the one thing that can make a split-submission solver's frame pending
     // between the draw's entry gate above and the presentation below.
     const accountedSubmittedTime_s = this.gpuAccountedSubmittedTime_s;
-    if (readyGPUFluid) {
+    const completedAwaitingPresentation = completedFrameAwaitsPresentation(readyGPUFluid,
+      readyGPUFluid ? this.deferredPresentedTimes.get(readyGPUFluid) ?? 0 : 0);
+    if (readyGPUFluid && !completedAwaitingPresentation) {
       gpuInfo = this.submitPreparedGPUFluid(
         readyGPUFluid, time_s, bodies,
         this.simulationRunning ? config.inFlightDepth ?? BROWSER_GPU_THROUGHPUT_DEPTH : 1,
@@ -3264,7 +3273,8 @@ export class FluidLabRenderer {
       );
     }
     const advanceSubmitted = this.gpuAccountedSubmittedTime_s > accountedSubmittedTime_s;
-    if (presentationHeldByPendingFrame(Boolean(readyGPUFluid?.framePending), advanceSubmitted)) {
+    if (readyGPUFluid?.presentationPending
+      || presentationHeldByPendingFrame(Boolean(readyGPUFluid?.framePending), advanceSubmitted)) {
       return this.currentFrameMetrics(config.methodId, presentationContext, false, cpuTrace?.finish());
     }
     // The global fine narrow band double-buffers generations. Refresh its
@@ -3854,6 +3864,9 @@ export class FluidLabRenderer {
     const presentationCommands = encoder.finish();
     presentationQueueTrace?.begin();
     this.device.queue.submit([presentationCommands]);
+    if (readyGPUFluid?.deferredFramePublication) {
+      this.deferredPresentedTimes.set(readyGPUFluid, readyGPUFluid.info.completedTime_s ?? 0);
+    }
     const presentationHealth = readPresentationHealth?.();
     // Mapping can overlap completion. Always drain the receipt, even if a
     // solver rebuild makes the presentation callback below obsolete.

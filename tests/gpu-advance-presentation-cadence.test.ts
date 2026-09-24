@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   canQueuePreparedGPUAdvance,
+  completedFrameAwaitsPresentation,
   presentationHeldByPendingFrame,
   submitNextPreparedGPUAdvance,
 } from "../lib/core/webgpu-renderer";
@@ -138,4 +139,23 @@ test("holding the presentation for the advance it just made shows every second s
     "the regression batches the whole throughput window into one presentation");
   assert.ok(presented.every((frame) => Math.abs(frame.publishedStep_s - DEPTH * DT) < 1e-9),
     "and publishes the host clock in two-step jumps");
+});
+
+// Unlike the sparse solver above, adaptive pressure has not submitted its
+// publication on return from advanceTo. A completed step must be shown before
+// another advance can make its fields mutable again.
+test("deferred pressure publication presents every completed step without starvation", () => {
+  const fluid = {deferredFramePublication:true, info:{completedTime_s:0}} as GPUSolverInstance;
+  let submitted = 0, presented = 0, remaining = 0;
+  const shown: number[] = [];
+  for (let draw=0; draw<40; draw++) {
+    if (remaining > 0) { if (--remaining === 0) fluid.info.completedTime_s = submitted; continue; }
+    if (completedFrameAwaitsPresentation(fluid, presented)) {
+      shown.push(fluid.info.completedTime_s!); presented = fluid.info.completedTime_s!;
+    } else { submitted += DT; remaining = 2; }
+  }
+  assert.ok(shown.length >= 9);
+  shown.forEach((time,i) => assert.ok(Math.abs(time-(i+1)*DT)<1e-9));
+  assert.equal(completedFrameAwaitsPresentation({...fluid,deferredFramePublication:false},0),false,
+    "existing immediately-published solvers retain their cadence");
 });

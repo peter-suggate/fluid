@@ -24,6 +24,7 @@ struct MG { fineDims:vec4u, levelDims:vec4u, coarseDims:vec4u, spacing:vec4f, co
 @group(1) @binding(11) var mgMinimumIn:texture_3d<f32>;
 ${uniformPressureStateWGSL}
 struct Params { dimsDt:vec4f, physical:vec4f, boundary:vec4f };
+const mgTolerance=vec4f(0.0);
 const params=Params(vec4f(0,0,0,1),vec4f(1,0,0,0),vec4f(0));
 var<workgroup> mgCycleStopped:u32;
 fn mgSkipCycle()->bool{return false;}

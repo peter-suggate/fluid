@@ -375,9 +375,13 @@ const UNIFORM_FLUID_STAGES: readonly FluidPipelineStage[] = [
       const cyclePasses = facts
         ? facts.multigridPasses["full-cycle"] + facts.multigridPasses["v-cycle"] : undefined;
       const info = context.info as unknown as {
-        uniformPressureCycleBudget?: "lagged" | "fixed";
+        uniformPressureCycleBudget?: "lagged" | "fixed" | "adaptive";
         uniformPressureCyclesEncoded?: number; uniformPressureCyclesConfigured?: number;
         uniformPressurePassesEncoded?: number } | null;
+      if (info?.uniformPressureCycleBudget === "adaptive") {
+        return `V-first adaptive · ${info.uniformPressureCyclesEncoded ?? 0} of ${info.uniformPressureCyclesConfigured ?? fullCycles + vCycles} cycles`
+          + ` · ${info.uniformPressurePassesEncoded ?? 0} total dispatches`;
+      }
       const lagged = (info?.uniformPressureCycleBudget
         ?? (context.values.pressureCycleBudget === "fixed" ? "fixed" : "lagged")) === "lagged";
       const encodedCycles = info?.uniformPressureCyclesEncoded;
@@ -412,6 +416,8 @@ const UNIFORM_FLUID_STAGES: readonly FluidPipelineStage[] = [
     state: () => "on",
     chip: (context) => {
       const facts = uniformFacts(context);
+      const info = context.info as unknown as {uniformPressureCycleBudget?: string; uniformPressureFinishPassesEncoded?: number} | null;
+      if (info?.uniformPressureCycleBudget === "adaptive") return `${info.uniformPressureFinishPassesEncoded ?? 0} dispatches · recovery on demand`;
       return facts ? `${facts.multigridPasses.finish} passes` : "parity copy + residual";
     },
   },

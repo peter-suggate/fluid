@@ -328,8 +328,19 @@ export const UNIFORM_VOLUME_PIPELINE: FluidPipelineGraph = {
         const base=mapped.chip?.(context);
         return extra?(base?`${base} · ${extra}`:extra):base;}}];
     if(stage.id==="pressure-cycles")return [{...mapped,
-      tip:{...mapped.tip,summary:"One coupled CM11a pressure solve across page seams. Full cycles build the solution from coarse to fine, then V-cycles refine it. The configured counts are fixed GPU schedule caps; convergence and recovery gate their indirect dispatches on the GPU."},
-      chip:context=>mapped.chip?.({...context,values:{...context.values,pressureCycleBudget:"fixed"}})??"GPU cycle gate"}];
+      tip:{...mapped.tip,summary:"One coupled pressure solve across page seams. Repeat V-cycles with loose inner accuracy while residual reduction is good. Switch to Full-Cycles when progress stalls or the V-cycle budget runs out. Continue the current frame until its fine residual meets tolerance; recovery runs after a rejected correction. Projected Jacobi updates preserve reflection symmetry."},
+      controls:[...(mapped.controls ?? []).map(control => control.kind === "param-range" && control.param === "pressureSweeps"
+        ? {...control,hint:"Projected Jacobi sweeps before and after each coarse correction. Changing this rebuilds the plan and resets time."}
+        : control.kind === "param-range" && control.param === "pressureVCycles"
+          ? {...control,hint:"Available cheap corrections. Repeat while residual reduction is good; skip the remaining V-cycles for Full-Cycles when progress stalls. Encode only what the current frame needs."}
+          : control),
+        {kind:"readout" as const,label:"Coarse work",hint:"Coarse solves actually executed and total inner sweeps across those solves in the current frame.",
+          value:(context: FluidPipelineContext)=>{
+            const info=context.info as unknown as {uniformPressureCoarseSolvesExecuted?:number;uniformPressureCoarseSweepsTotal?:number}|null;
+            return info?.uniformPressureCoarseSolvesExecuted === undefined ? "—"
+              : `${info.uniformPressureCoarseSolvesExecuted} solves · ${info.uniformPressureCoarseSweepsTotal} sweeps`;
+          }}],
+      chip:context=>mapped.chip?.(context)??"V-first adaptive"}];
     // Which cells own a pressure row is decided where the topology and RHS
     // are built, so the V claim sits on that stage.
     if(stage.id==="pressure-system")return [{...mapped,

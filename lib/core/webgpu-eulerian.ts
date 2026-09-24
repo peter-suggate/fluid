@@ -426,14 +426,25 @@ export interface GPUEulerianInfo {
    * launch floor and CPU encode are never paid. Encoded counts are host facts
    * known at encode time; executed counts arrive with the readback.
    */
-  uniformPressureCycleBudget?: "lagged" | "fixed";
+  uniformPressureCycleBudget?: "lagged" | "fixed" | "adaptive";
   uniformPressureBudgetHeadroom?: number;
   uniformPressureCyclesEncoded?: number;
   uniformPressureCyclesConfigured?: number;
   uniformPressurePassesEncoded?: number;
+  uniformPressureFinishPassesEncoded?: number;
+  /** Actual coarse work in the current adaptive frame, summed across invocations. */
+  uniformPressureCoarseSweepsTotal?: number;
+  uniformPressureCoarseSolvesExecuted?: number;
   uniformPressurePassesConfigured?: number;
   uniformPressureCyclesExecuted?: number;
   uniformPressureCyclesConverged?: boolean;
+  uniformCM11aFullCyclesExecuted?: number;
+  uniformCM11aVCyclesExecuted?: number;
+  uniformPressureAcceptedResidual?: number;
+  uniformPressureInitialResidual?: number;
+  uniformPressureRejectedCycles?: number;
+  uniformPressureRecoverySweeps?: number;
+  uniformPressureRecoveryExhausted?: boolean;
   /** Sec. 3.3 FIM must terminate with an empty active list. */
   uniformFIMTerminalActiveFaces?: number;
   uniformFIMConverged?: boolean;

@@ -1,0 +1,2053 @@
+{
+  "scope": "Serial Dawn/Metal, no browser, default scene settings, first 4 frames excluded; 150 mini64 frames, 30 each slab and Figure9. Stage seam timings include submission gaps.",
+  "sourceSha256": {
+    "lib/methods/uniform/uniform-pressure-continuation.ts": "505f09fa282dcc8fbe9f54dab93215b2a477536a5b7c46e92594fa3bf0fdaea4",
+    "lib/methods/uniform/webgpu-uniform-pressure-multigrid.ts": "33a77f591e3a518dc4398c8550adeb1ddc605a0da4b4cfd40f48cec19971bd78",
+    "lib/methods/uniform/webgpu-uniform-reference.ts": "fbb2eadab19e21d348015377f29c234def9bf8cbcd9ed86dda3e3ed3ae4f3328"
+  },
+  "runs": [
+    {
+      "scene": "minimal-power-dam-break-64",
+      "capturedAt": "2026-09-24T02:26:53.815Z",
+      "values": {
+        "densitySharpening": "on",
+        "rigidCoupling": "on",
+        "velocityTransport": "semi-lagrangian",
+        "liquidOnlyVelocityAdvection": "off",
+        "timeStep": "paper",
+        "pressureResidualTolerance": 10,
+        "extensionFrontSweeps": 2,
+        "sharpeningStrength": 1,
+        "sharpeningDistance": 2.1,
+        "pressureFullCycles": 3,
+        "pressureVCycles": 4,
+        "pressureSweeps": 6,
+        "pageSize": "32",
+        "redistance": "on",
+        "sharpeningWorkMap": "on",
+        "volumeDustThreshold": 0.001,
+        "twoLevelVelocity": "on",
+        "twoLevelFineReach": 2,
+        "twoLevelExtension": "tiles",
+        "twoLevelShellReach": 1,
+        "twoLevelAdvection": "tiles",
+        "transportWorkMap": "tiles",
+        "transportReach": 1,
+        "volumePressureRows": "off",
+        "volumeCompaction": "off",
+        "phiSeedFromVolume": "off",
+        "phiAgreement": "off",
+        "phiAgreementGain": 0.05,
+        "phiAgreementClamp": 0.02,
+        "redistanceSurface": "auto",
+        "phiCubicAdvection": "on",
+        "orphanVolume": "relay",
+        "orphanVolumeRender": "off",
+        "isolatedBodyVolume": "off",
+        "phiSeedCells": "off",
+        "phiDrain": "on",
+        "airborneMomentum": "on",
+        "totalSurfaceVolume": "on",
+        "surfaceDeficitBalancing": "on"
+      },
+      "cycleMedianMs": 6.88128,
+      "wallMedianMs": 31.984645999998975,
+      "maxResidual": 9.279745101928711,
+      "fullCycleFrames": 0,
+      "rows": [
+        {
+          "frame": 1,
+          "wallMs": 73.4415839999997,
+          "cyclesMs": 30.670848,
+          "residual": 2.9758639335632324,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 2,
+          "wallMs": 23.500209000000268,
+          "cyclesMs": 3.211263999999998,
+          "residual": 2.2389907836914062,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 3,
+          "wallMs": 32.19429100000025,
+          "cyclesMs": 3.735552000000002,
+          "residual": 3.3395941257476807,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 4,
+          "wallMs": 27.16020800000024,
+          "cyclesMs": 3.2768000000000015,
+          "residual": 4.129566192626953,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 5,
+          "wallMs": 27.497749999999996,
+          "cyclesMs": 3.2768000000000015,
+          "residual": 4.952315330505371,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 6,
+          "wallMs": 27.090291999999863,
+          "cyclesMs": 3.211264,
+          "residual": 8.068768501281738,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 7,
+          "wallMs": 30.286875000000236,
+          "cyclesMs": 7.1434239999999996,
+          "residual": 2.1262481212615967,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 8,
+          "wallMs": 32.44316600000002,
+          "cyclesMs": 6.815744000000002,
+          "residual": 2.1785483360290527,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 9,
+          "wallMs": 32.62162499999977,
+          "cyclesMs": 6.684671999999999,
+          "residual": 6.12777853012085,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 10,
+          "wallMs": 27.22887499999979,
+          "cyclesMs": 6.684672000000003,
+          "residual": 5.267764091491699,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 11,
+          "wallMs": 31.184416000000056,
+          "cyclesMs": 6.684671999999999,
+          "residual": 3.858964681625366,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 12,
+          "wallMs": 27.28933300000017,
+          "cyclesMs": 6.88128,
+          "residual": 6.8310956954956055,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 13,
+          "wallMs": 26.328333999999813,
+          "cyclesMs": 6.684672000000001,
+          "residual": 3.2328732013702393,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 14,
+          "wallMs": 31.49958400000014,
+          "cyclesMs": 7.1434239999999996,
+          "residual": 6.02211856842041,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 15,
+          "wallMs": 27.870208999999704,
+          "cyclesMs": 7.1434239999999996,
+          "residual": 3.829960346221924,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 16,
+          "wallMs": 26.537999999999556,
+          "cyclesMs": 7.143424000000001,
+          "residual": 2.1652326583862305,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 17,
+          "wallMs": 31.278041999999914,
+          "cyclesMs": 7.208959999999998,
+          "residual": 2.312952756881714,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 18,
+          "wallMs": 31.003459000000475,
+          "cyclesMs": 7.208960000000001,
+          "residual": 2.335333824157715,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 19,
+          "wallMs": 32.71349999999984,
+          "cyclesMs": 7.1434239999999996,
+          "residual": 3.31567645072937,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 20,
+          "wallMs": 28.03779200000008,
+          "cyclesMs": 6.88128,
+          "residual": 5.010365962982178,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 21,
+          "wallMs": 31.27441699999963,
+          "cyclesMs": 7.012352,
+          "residual": 2.5102698802948,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 22,
+          "wallMs": 26.797417000000678,
+          "cyclesMs": 6.815743999999999,
+          "residual": 2.352855920791626,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 23,
+          "wallMs": 31.285083000000668,
+          "cyclesMs": 6.815744000000002,
+          "residual": 2.1233224868774414,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 24,
+          "wallMs": 27.823750000000473,
+          "cyclesMs": 6.815744000000002,
+          "residual": 1.693377137184143,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 25,
+          "wallMs": 25.799332999999933,
+          "cyclesMs": 7.012351999999998,
+          "residual": 2.8041775226593018,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 26,
+          "wallMs": 30.785499999999956,
+          "cyclesMs": 6.88128,
+          "residual": 2.4665825366973877,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 27,
+          "wallMs": 27.412709000000177,
+          "cyclesMs": 6.815744000000002,
+          "residual": 2.0159339904785156,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 28,
+          "wallMs": 30.915125000000444,
+          "cyclesMs": 6.88128,
+          "residual": 1.8047223091125488,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 29,
+          "wallMs": 27.32825000000048,
+          "cyclesMs": 6.88128,
+          "residual": 1.6038566827774048,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 30,
+          "wallMs": 32.1512500000008,
+          "cyclesMs": 7.405567999999999,
+          "residual": 2.1724746227264404,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 31,
+          "wallMs": 32.69795900000008,
+          "cyclesMs": 6.946816000000002,
+          "residual": 2.403021812438965,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 32,
+          "wallMs": 31.98816699999952,
+          "cyclesMs": 6.815743999999999,
+          "residual": 3.008253812789917,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 33,
+          "wallMs": 33.54054199999973,
+          "cyclesMs": 7.143424000000003,
+          "residual": 6.879680633544922,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 34,
+          "wallMs": 33.7617909999999,
+          "cyclesMs": 7.274495999999999,
+          "residual": 7.169741630554199,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 35,
+          "wallMs": 32.78983299999982,
+          "cyclesMs": 6.946815999999998,
+          "residual": 6.434538841247559,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 36,
+          "wallMs": 32.02641700000004,
+          "cyclesMs": 6.88128,
+          "residual": 4.871328830718994,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 37,
+          "wallMs": 32.15812499999993,
+          "cyclesMs": 6.815744000000002,
+          "residual": 9.154836654663086,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 38,
+          "wallMs": 33.125082999999904,
+          "cyclesMs": 7.012352,
+          "residual": 2.4712064266204834,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 39,
+          "wallMs": 33.34662500000013,
+          "cyclesMs": 7.077887999999998,
+          "residual": 5.820459842681885,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 40,
+          "wallMs": 32.408166999999594,
+          "cyclesMs": 7.012352,
+          "residual": 2.796696424484253,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 41,
+          "wallMs": 31.64079099999981,
+          "cyclesMs": 7.012352,
+          "residual": 2.5495808124542236,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 42,
+          "wallMs": 32.35437499999989,
+          "cyclesMs": 7.0778880000000015,
+          "residual": 2.302582025527954,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 43,
+          "wallMs": 27.885333000000173,
+          "cyclesMs": 3.4078719999999976,
+          "residual": 8.783047676086426,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 44,
+          "wallMs": 30.499582999998893,
+          "cyclesMs": 3.3423359999999995,
+          "residual": 6.034152984619141,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 45,
+          "wallMs": 36.03279199999997,
+          "cyclesMs": 7.012352,
+          "residual": 1.6455285549163818,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 46,
+          "wallMs": 34.794832999999926,
+          "cyclesMs": 8.323072,
+          "residual": 1.733705997467041,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 47,
+          "wallMs": 31.178625000000466,
+          "cyclesMs": 6.815744000000002,
+          "residual": 1.6522656679153442,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 48,
+          "wallMs": 32.69116600000052,
+          "cyclesMs": 7.012352,
+          "residual": 2.025759220123291,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 49,
+          "wallMs": 34.132791,
+          "cyclesMs": 7.864320000000003,
+          "residual": 3.9664254188537598,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 50,
+          "wallMs": 31.46729199999936,
+          "cyclesMs": 7.208960000000001,
+          "residual": 3.7528512477874756,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 51,
+          "wallMs": 31.36566700000003,
+          "cyclesMs": 6.88128,
+          "residual": 5.320986270904541,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 52,
+          "wallMs": 32.231958000000304,
+          "cyclesMs": 6.88128,
+          "residual": 6.302121639251709,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 53,
+          "wallMs": 32.82929200000035,
+          "cyclesMs": 6.88128,
+          "residual": 8.792379379272461,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 54,
+          "wallMs": 32.657374999998865,
+          "cyclesMs": 7.0778880000000015,
+          "residual": 8.329183578491211,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 55,
+          "wallMs": 33.06524999999965,
+          "cyclesMs": 7.340032000000001,
+          "residual": 6.253535270690918,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 56,
+          "wallMs": 32.24266700000044,
+          "cyclesMs": 6.750208000000001,
+          "residual": 5.013453006744385,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 57,
+          "wallMs": 28.03758299999936,
+          "cyclesMs": 7.274496000000003,
+          "residual": 4.681819915771484,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 58,
+          "wallMs": 30.220291999999972,
+          "cyclesMs": 6.88128,
+          "residual": 4.972551345825195,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 59,
+          "wallMs": 25.852457999999388,
+          "cyclesMs": 6.8157440000000005,
+          "residual": 5.990042686462402,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 60,
+          "wallMs": 27.244249999999738,
+          "cyclesMs": 6.88128,
+          "residual": 3.661649227142334,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 61,
+          "wallMs": 28.81575000000157,
+          "cyclesMs": 6.750208000000001,
+          "residual": 3.038438081741333,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 62,
+          "wallMs": 26.191791000001103,
+          "cyclesMs": 6.8157440000000005,
+          "residual": 2.2093684673309326,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 63,
+          "wallMs": 35.62508400000115,
+          "cyclesMs": 7.340032000000001,
+          "residual": 2.278142213821411,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 64,
+          "wallMs": 26.968542000000525,
+          "cyclesMs": 7.143424000000001,
+          "residual": 2.0841805934906006,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 65,
+          "wallMs": 33.1449160000011,
+          "cyclesMs": 6.815743999999999,
+          "residual": 2.0789504051208496,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 66,
+          "wallMs": 33.03837500000009,
+          "cyclesMs": 6.684672000000003,
+          "residual": 4.935122489929199,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 67,
+          "wallMs": 33.39579100000083,
+          "cyclesMs": 6.88128,
+          "residual": 3.98559832572937,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 68,
+          "wallMs": 54.827792000000045,
+          "cyclesMs": 25.952256,
+          "residual": 4.275245189666748,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 69,
+          "wallMs": 29.193208000000595,
+          "cyclesMs": 6.946816000000002,
+          "residual": 5.665622234344482,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 70,
+          "wallMs": 36.17779100000007,
+          "cyclesMs": 7.1434239999999996,
+          "residual": 7.718820571899414,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 71,
+          "wallMs": 41.14741700000013,
+          "cyclesMs": 10.354688,
+          "residual": 6.938151836395264,
+          "vCycles": 3,
+          "fullCycles": 0,
+          "coarseSweeps": 3
+        },
+        {
+          "frame": 72,
+          "wallMs": 32.64133299999958,
+          "cyclesMs": 6.684672000000003,
+          "residual": 6.326530933380127,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 73,
+          "wallMs": 31.98112499999843,
+          "cyclesMs": 6.815743999999999,
+          "residual": 5.932772636413574,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 74,
+          "wallMs": 33.8979589999999,
+          "cyclesMs": 6.946816000000002,
+          "residual": 5.26149320602417,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 75,
+          "wallMs": 35.32224999999926,
+          "cyclesMs": 6.750208000000001,
+          "residual": 3.7888453006744385,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 76,
+          "wallMs": 32.76995800000077,
+          "cyclesMs": 7.208960000000001,
+          "residual": 3.3450825214385986,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 77,
+          "wallMs": 32.79320800000096,
+          "cyclesMs": 7.077887999999998,
+          "residual": 2.5592613220214844,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 78,
+          "wallMs": 31.550333000001046,
+          "cyclesMs": 7.0778880000000015,
+          "residual": 2.5081727504730225,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 79,
+          "wallMs": 32.071500000000015,
+          "cyclesMs": 7.208959999999998,
+          "residual": 2.133140802383423,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 80,
+          "wallMs": 77.65470900000037,
+          "cyclesMs": 51.970048000000006,
+          "residual": 2.312628746032715,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 81,
+          "wallMs": 34.78116600000067,
+          "cyclesMs": 6.88128,
+          "residual": 3.363842248916626,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 82,
+          "wallMs": 33.84116600000016,
+          "cyclesMs": 7.208959999999998,
+          "residual": 2.812720537185669,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 83,
+          "wallMs": 32.836083000000144,
+          "cyclesMs": 6.88128,
+          "residual": 2.8268418312072754,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 84,
+          "wallMs": 32.00354200000038,
+          "cyclesMs": 6.815743999999999,
+          "residual": 2.529172658920288,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 85,
+          "wallMs": 31.95454200000131,
+          "cyclesMs": 6.88128,
+          "residual": 3.461977958679199,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 86,
+          "wallMs": 31.94787500000166,
+          "cyclesMs": 6.946816000000002,
+          "residual": 3.2210819721221924,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 87,
+          "wallMs": 31.505166000000827,
+          "cyclesMs": 6.684671999999999,
+          "residual": 3.3761560916900635,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 88,
+          "wallMs": 32.14045900000019,
+          "cyclesMs": 6.684671999999999,
+          "residual": 4.396546363830566,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 89,
+          "wallMs": 32.20333399999981,
+          "cyclesMs": 6.750208000000001,
+          "residual": 9.279745101928711,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 90,
+          "wallMs": 32.06787500000064,
+          "cyclesMs": 6.684671999999999,
+          "residual": 9.096085548400879,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 91,
+          "wallMs": 32.39637500000026,
+          "cyclesMs": 6.750208000000001,
+          "residual": 7.229165077209473,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 92,
+          "wallMs": 62.13879199999974,
+          "cyclesMs": 36.569087999999994,
+          "residual": 6.170557498931885,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 93,
+          "wallMs": 29.021208000000115,
+          "cyclesMs": 6.815744000000002,
+          "residual": 6.452816963195801,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 94,
+          "wallMs": 32.710832999999184,
+          "cyclesMs": 8.126464000000002,
+          "residual": 3.687981367111206,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 95,
+          "wallMs": 30.417708999999377,
+          "cyclesMs": 6.815744000000002,
+          "residual": 5.0717854499816895,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 96,
+          "wallMs": 31.23358300000109,
+          "cyclesMs": 6.88128,
+          "residual": 3.2318155765533447,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 97,
+          "wallMs": 31.416791999999987,
+          "cyclesMs": 6.750208000000001,
+          "residual": 3.3054771423339844,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 98,
+          "wallMs": 32.393707999999606,
+          "cyclesMs": 6.815743999999999,
+          "residual": 3.2674262523651123,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 99,
+          "wallMs": 32.51900000000023,
+          "cyclesMs": 6.750208000000001,
+          "residual": 3.3753297328948975,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 100,
+          "wallMs": 32.50816699999996,
+          "cyclesMs": 6.815743999999999,
+          "residual": 3.0112061500549316,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 101,
+          "wallMs": 31.96741699999984,
+          "cyclesMs": 6.88128,
+          "residual": 2.518765926361084,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 102,
+          "wallMs": 31.883417000000918,
+          "cyclesMs": 6.684671999999999,
+          "residual": 2.733504056930542,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 103,
+          "wallMs": 31.879250000001775,
+          "cyclesMs": 6.750208000000001,
+          "residual": 3.3120338916778564,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 104,
+          "wallMs": 71.88870899999893,
+          "cyclesMs": 46.399488,
+          "residual": 3.753979444503784,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 105,
+          "wallMs": 33.44512500000201,
+          "cyclesMs": 6.88128,
+          "residual": 5.879725933074951,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 106,
+          "wallMs": 31.695541000000958,
+          "cyclesMs": 7.012352,
+          "residual": 7.3529558181762695,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 107,
+          "wallMs": 31.38875000000189,
+          "cyclesMs": 6.815744000000002,
+          "residual": 8.057848930358887,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 108,
+          "wallMs": 31.534499999997934,
+          "cyclesMs": 6.881279999999997,
+          "residual": 7.2312541007995605,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 109,
+          "wallMs": 31.184583999998722,
+          "cyclesMs": 6.553599999999999,
+          "residual": 6.5799102783203125,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 110,
+          "wallMs": 31.837999999999738,
+          "cyclesMs": 6.619136000000001,
+          "residual": 4.891934394836426,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 111,
+          "wallMs": 32.71799999999712,
+          "cyclesMs": 7.0778880000000015,
+          "residual": 5.012885570526123,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 112,
+          "wallMs": 31.89916699999958,
+          "cyclesMs": 6.815744000000002,
+          "residual": 6.396944046020508,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 113,
+          "wallMs": 29.50891700000284,
+          "cyclesMs": 6.881279999999997,
+          "residual": 4.145532131195068,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 114,
+          "wallMs": 30.51929200000086,
+          "cyclesMs": 6.946816000000002,
+          "residual": 4.218057155609131,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 115,
+          "wallMs": 30.15625,
+          "cyclesMs": 6.750208000000001,
+          "residual": 3.7036616802215576,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 116,
+          "wallMs": 71.78858300000138,
+          "cyclesMs": 48.037888,
+          "residual": 2.6970832347869873,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 117,
+          "wallMs": 36.386124999997264,
+          "cyclesMs": 6.750208000000001,
+          "residual": 2.609323024749756,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 118,
+          "wallMs": 32.68537500000093,
+          "cyclesMs": 6.750208000000001,
+          "residual": 2.617663860321045,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 119,
+          "wallMs": 30.32170799999949,
+          "cyclesMs": 6.815743999999999,
+          "residual": 3.8959500789642334,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 120,
+          "wallMs": 30.17145800000071,
+          "cyclesMs": 6.619136000000001,
+          "residual": 2.675435781478882,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 121,
+          "wallMs": 30.193707999998878,
+          "cyclesMs": 6.684671999999999,
+          "residual": 2.620427370071411,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 122,
+          "wallMs": 30.098582999999053,
+          "cyclesMs": 6.6191359999999975,
+          "residual": 3.5921568870544434,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 123,
+          "wallMs": 31.464083999999275,
+          "cyclesMs": 7.012352,
+          "residual": 4.46929407119751,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 124,
+          "wallMs": 34.6585419999974,
+          "cyclesMs": 6.684671999999999,
+          "residual": 7.139770030975342,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 125,
+          "wallMs": 32.63666599999851,
+          "cyclesMs": 7.1434239999999996,
+          "residual": 9.234479904174805,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 126,
+          "wallMs": 35.140957999999955,
+          "cyclesMs": 10.027007999999999,
+          "residual": 6.635360240936279,
+          "vCycles": 3,
+          "fullCycles": 0,
+          "coarseSweeps": 3
+        },
+        {
+          "frame": 127,
+          "wallMs": 30.90612500000134,
+          "cyclesMs": 7.1434239999999996,
+          "residual": 4.502823829650879,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 128,
+          "wallMs": 61.59437500000058,
+          "cyclesMs": 36.896768,
+          "residual": 5.70124626159668,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 129,
+          "wallMs": 28.02020900000207,
+          "cyclesMs": 6.684671999999999,
+          "residual": 5.287522792816162,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 130,
+          "wallMs": 35.75541599999997,
+          "cyclesMs": 6.881279999999997,
+          "residual": 3.879460096359253,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 131,
+          "wallMs": 36.68412499999977,
+          "cyclesMs": 7.1434239999999996,
+          "residual": 3.952138662338257,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 132,
+          "wallMs": 34.421707999998034,
+          "cyclesMs": 6.750208000000001,
+          "residual": 3.7884345054626465,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 133,
+          "wallMs": 34.810833999999886,
+          "cyclesMs": 7.929856000000001,
+          "residual": 2.641559600830078,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 134,
+          "wallMs": 30.436291999998502,
+          "cyclesMs": 6.815744000000002,
+          "residual": 4.583433151245117,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 135,
+          "wallMs": 31.674417000001995,
+          "cyclesMs": 7.0778880000000015,
+          "residual": 3.5973730087280273,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 136,
+          "wallMs": 35.529875000000175,
+          "cyclesMs": 6.750207999999997,
+          "residual": 3.7969489097595215,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 137,
+          "wallMs": 38.41345899999942,
+          "cyclesMs": 8.323072,
+          "residual": 3.398012161254883,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 138,
+          "wallMs": 34.49037500000122,
+          "cyclesMs": 6.815744000000002,
+          "residual": 2.445323944091797,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 139,
+          "wallMs": 32.44291700000031,
+          "cyclesMs": 6.750208000000001,
+          "residual": 3.230578899383545,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 140,
+          "wallMs": 65.58124999999927,
+          "cyclesMs": 40.435712,
+          "residual": 4.052860260009766,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 141,
+          "wallMs": 36.195291,
+          "cyclesMs": 6.88128,
+          "residual": 4.741146564483643,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 142,
+          "wallMs": 32.786958000000595,
+          "cyclesMs": 6.815743999999999,
+          "residual": 5.471378803253174,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 143,
+          "wallMs": 34.59654199999932,
+          "cyclesMs": 10.027007999999999,
+          "residual": 5.170694351196289,
+          "vCycles": 3,
+          "fullCycles": 0,
+          "coarseSweeps": 3
+        },
+        {
+          "frame": 144,
+          "wallMs": 29.26770900000338,
+          "cyclesMs": 6.684671999999999,
+          "residual": 7.839012145996094,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 145,
+          "wallMs": 31.133417000000918,
+          "cyclesMs": 7.1434239999999996,
+          "residual": 7.0727858543396,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 146,
+          "wallMs": 30.80004199999894,
+          "cyclesMs": 6.684671999999999,
+          "residual": 6.253361225128174,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 147,
+          "wallMs": 31.102500000000873,
+          "cyclesMs": 6.750208000000001,
+          "residual": 5.205225467681885,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 148,
+          "wallMs": 31.508166999999958,
+          "cyclesMs": 7.208960000000001,
+          "residual": 4.413705825805664,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 149,
+          "wallMs": 30.521874999998545,
+          "cyclesMs": 6.750208000000001,
+          "residual": 3.7041256427764893,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 150,
+          "wallMs": 30.642041999999492,
+          "cyclesMs": 6.750208000000001,
+          "residual": 3.097588062286377,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        }
+      ]
+    },
+    {
+      "scene": "coarse-first-pool-impact-half-slab",
+      "capturedAt": "2026-09-24T02:26:59.544Z",
+      "values": {
+        "densitySharpening": "on",
+        "rigidCoupling": "on",
+        "velocityTransport": "semi-lagrangian",
+        "liquidOnlyVelocityAdvection": "off",
+        "timeStep": "paper",
+        "pressureResidualTolerance": 10,
+        "extensionFrontSweeps": 2,
+        "sharpeningStrength": 1,
+        "sharpeningDistance": 2.1,
+        "pressureFullCycles": 3,
+        "pressureVCycles": 4,
+        "pressureSweeps": 6,
+        "pageSize": "32",
+        "redistance": "on",
+        "sharpeningWorkMap": "on",
+        "volumeDustThreshold": 0.001,
+        "twoLevelVelocity": "on",
+        "twoLevelFineReach": 2,
+        "twoLevelExtension": "tiles",
+        "twoLevelShellReach": 1,
+        "twoLevelAdvection": "tiles",
+        "transportWorkMap": "tiles",
+        "transportReach": 1,
+        "volumePressureRows": "off",
+        "volumeCompaction": "off",
+        "phiSeedFromVolume": "off",
+        "phiAgreement": "off",
+        "phiAgreementGain": 0.05,
+        "phiAgreementClamp": 0.02,
+        "redistanceSurface": "auto",
+        "phiCubicAdvection": "on",
+        "orphanVolume": "relay",
+        "orphanVolumeRender": "off",
+        "isolatedBodyVolume": "off",
+        "phiSeedCells": "off",
+        "phiDrain": "on",
+        "airborneMomentum": "on",
+        "totalSurfaceVolume": "on",
+        "surfaceDeficitBalancing": "on"
+      },
+      "cycleMedianMs": 3.6372480000000005,
+      "wallMedianMs": 16.832270999999764,
+      "maxResidual": 2.1159861087799072,
+      "fullCycleFrames": 0,
+      "rows": [
+        {
+          "frame": 1,
+          "wallMs": 55.464082999999846,
+          "cyclesMs": 17.104896,
+          "residual": 0.252914160490036,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 2,
+          "wallMs": 16.30533300000002,
+          "cyclesMs": 3.211264,
+          "residual": 0.11345438659191132,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 3,
+          "wallMs": 16.621333999999933,
+          "cyclesMs": 3.5389440000000008,
+          "residual": 0.23498080670833588,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 4,
+          "wallMs": 13.28491699999995,
+          "cyclesMs": 2.883584,
+          "residual": 0.131348118185997,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 5,
+          "wallMs": 15.767042000000401,
+          "cyclesMs": 3.145728,
+          "residual": 0.21837855875492096,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 6,
+          "wallMs": 16.075792000000092,
+          "cyclesMs": 3.0146560000000004,
+          "residual": 0.1459330916404724,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 7,
+          "wallMs": 17.602041999999983,
+          "cyclesMs": 3.866624,
+          "residual": 0.20716817677021027,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 8,
+          "wallMs": 16.43399999999974,
+          "cyclesMs": 3.145728,
+          "residual": 0.15078191459178925,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 9,
+          "wallMs": 17.4670000000001,
+          "cyclesMs": 3.6700160000000004,
+          "residual": 0.20046450197696686,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 10,
+          "wallMs": 16.835833000000093,
+          "cyclesMs": 3.473407999999999,
+          "residual": 0.15659596025943756,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 11,
+          "wallMs": 16.921957999999904,
+          "cyclesMs": 3.538943999999999,
+          "residual": 0.2668497562408447,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 12,
+          "wallMs": 14.95008400000006,
+          "cyclesMs": 3.0801920000000003,
+          "residual": 0.18762002885341644,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 13,
+          "wallMs": 15.963334000000032,
+          "cyclesMs": 3.0146559999999987,
+          "residual": 0.2314109057188034,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 14,
+          "wallMs": 17.31070899999986,
+          "cyclesMs": 3.473407999999999,
+          "residual": 0.3876275420188904,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 15,
+          "wallMs": 17.020250000000033,
+          "cyclesMs": 3.735552,
+          "residual": 0.9878703355789185,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 16,
+          "wallMs": 16.729874999999993,
+          "cyclesMs": 3.735552,
+          "residual": 2.1159861087799072,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 17,
+          "wallMs": 17.28654200000028,
+          "cyclesMs": 3.9321599999999997,
+          "residual": 1.2840299606323242,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 18,
+          "wallMs": 17.448165999999674,
+          "cyclesMs": 4.390912,
+          "residual": 0.7266538143157959,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 19,
+          "wallMs": 16.828708999999435,
+          "cyclesMs": 3.866624,
+          "residual": 0.7888146042823792,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 20,
+          "wallMs": 18.123333000000457,
+          "cyclesMs": 4.587520000000001,
+          "residual": 0.6299102306365967,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 21,
+          "wallMs": 16.805083000000195,
+          "cyclesMs": 3.6044800000000006,
+          "residual": 0.9043413400650024,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 22,
+          "wallMs": 15.58849999999984,
+          "cyclesMs": 3.0146560000000004,
+          "residual": 0.40035805106163025,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 23,
+          "wallMs": 16.300083000000086,
+          "cyclesMs": 3.211264,
+          "residual": 0.5331957340240479,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 24,
+          "wallMs": 16.04437499999949,
+          "cyclesMs": 3.2767999999999997,
+          "residual": 0.41389912366867065,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 25,
+          "wallMs": 17.146708000000217,
+          "cyclesMs": 4.194303999999999,
+          "residual": 0.4729642868041992,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 26,
+          "wallMs": 16.504084000000148,
+          "cyclesMs": 3.4078719999999993,
+          "residual": 0.5595938563346863,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 27,
+          "wallMs": 17.018083999999362,
+          "cyclesMs": 4.063231999999999,
+          "residual": 0.46178510785102844,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 28,
+          "wallMs": 17.63933300000008,
+          "cyclesMs": 4.063231999999999,
+          "residual": 0.5261470675468445,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 29,
+          "wallMs": 16.06458300000031,
+          "cyclesMs": 4.58752,
+          "residual": 1.8491867780685425,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 30,
+          "wallMs": 17.358540999999605,
+          "cyclesMs": 4.390912,
+          "residual": 0.6483680605888367,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        }
+      ]
+    },
+    {
+      "scene": "cm12-figure-9",
+      "capturedAt": "2026-09-24T02:27:07.467Z",
+      "values": {
+        "densitySharpening": "on",
+        "rigidCoupling": "on",
+        "velocityTransport": "semi-lagrangian",
+        "liquidOnlyVelocityAdvection": "off",
+        "timeStep": "paper",
+        "pressureResidualTolerance": 10,
+        "extensionFrontSweeps": 2,
+        "sharpeningStrength": 1,
+        "sharpeningDistance": 2.1,
+        "pressureFullCycles": 3,
+        "pressureVCycles": 4,
+        "pressureSweeps": 6,
+        "pageSize": "32",
+        "redistance": "on",
+        "sharpeningWorkMap": "on",
+        "volumeDustThreshold": 0.001,
+        "twoLevelVelocity": "on",
+        "twoLevelFineReach": 2,
+        "twoLevelExtension": "tiles",
+        "twoLevelShellReach": 1,
+        "twoLevelAdvection": "tiles",
+        "transportWorkMap": "tiles",
+        "transportReach": 1,
+        "volumePressureRows": "off",
+        "volumeCompaction": "off",
+        "phiSeedFromVolume": "off",
+        "phiAgreement": "off",
+        "phiAgreementGain": 0.05,
+        "phiAgreementClamp": 0.02,
+        "redistanceSurface": "auto",
+        "phiCubicAdvection": "on",
+        "orphanVolume": "relay",
+        "orphanVolumeRender": "off",
+        "isolatedBodyVolume": "off",
+        "phiSeedCells": "off",
+        "phiDrain": "on",
+        "airborneMomentum": "on",
+        "totalSurfaceVolume": "on",
+        "surfaceDeficitBalancing": "on"
+      },
+      "cycleMedianMs": 5.931008000000002,
+      "wallMedianMs": 45.49124999999958,
+      "maxResidual": 6.848287105560303,
+      "fullCycleFrames": 0,
+      "rows": [
+        {
+          "frame": 1,
+          "wallMs": 73.63595799999985,
+          "cyclesMs": 17.498112,
+          "residual": 0.9444293975830078,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 2,
+          "wallMs": 44.55549999999994,
+          "cyclesMs": 5.898240000000001,
+          "residual": 0.5767553448677063,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 3,
+          "wallMs": 43.61504100000002,
+          "cyclesMs": 5.898239999999998,
+          "residual": 1.2997819185256958,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 4,
+          "wallMs": 42.85912499999995,
+          "cyclesMs": 6.0948480000000025,
+          "residual": 1.6092174053192139,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 5,
+          "wallMs": 41.804375000000164,
+          "cyclesMs": 5.963776000000003,
+          "residual": 1.0891622304916382,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 6,
+          "wallMs": 70.18508299999985,
+          "cyclesMs": 31.195135999999998,
+          "residual": 1.6348605155944824,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 7,
+          "wallMs": 45.45720799999981,
+          "cyclesMs": 5.898240000000001,
+          "residual": 1.9856762886047363,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 8,
+          "wallMs": 44.34312500000033,
+          "cyclesMs": 5.898240000000001,
+          "residual": 1.6996091604232788,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 9,
+          "wallMs": 45.314542000000074,
+          "cyclesMs": 5.898240000000001,
+          "residual": 1.720414638519287,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 10,
+          "wallMs": 46.51733299999978,
+          "cyclesMs": 5.963776000000003,
+          "residual": 1.7177600860595703,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 11,
+          "wallMs": 43.36962500000027,
+          "cyclesMs": 5.832704000000003,
+          "residual": 1.9267001152038574,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 12,
+          "wallMs": 47.87504199999967,
+          "cyclesMs": 5.963776000000003,
+          "residual": 1.845887303352356,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 13,
+          "wallMs": 44.207249999999476,
+          "cyclesMs": 5.832704,
+          "residual": 1.8279578685760498,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 14,
+          "wallMs": 42.800624999999854,
+          "cyclesMs": 5.767168000000002,
+          "residual": 1.7536612749099731,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 15,
+          "wallMs": 43.54504100000031,
+          "cyclesMs": 5.898239999999998,
+          "residual": 2.4278852939605713,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 16,
+          "wallMs": 42.28612500000054,
+          "cyclesMs": 5.767167999999998,
+          "residual": 3.049109697341919,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 17,
+          "wallMs": 48.18266700000004,
+          "cyclesMs": 5.767167999999998,
+          "residual": 2.6061348915100098,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 18,
+          "wallMs": 43.18720899999971,
+          "cyclesMs": 5.7016319999999965,
+          "residual": 3.1709859371185303,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 19,
+          "wallMs": 47.50354199999947,
+          "cyclesMs": 5.701632000000004,
+          "residual": 4.82339334487915,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 20,
+          "wallMs": 43.32683399999951,
+          "cyclesMs": 5.701632000000004,
+          "residual": 6.848287105560303,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 21,
+          "wallMs": 42.0029169999998,
+          "cyclesMs": 5.7016319999999965,
+          "residual": 6.749366283416748,
+          "vCycles": 1,
+          "fullCycles": 0,
+          "coarseSweeps": 1
+        },
+        {
+          "frame": 22,
+          "wallMs": 48.053499999999985,
+          "cyclesMs": 11.927551999999995,
+          "residual": 2.8029675483703613,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 23,
+          "wallMs": 49.25329200000033,
+          "cyclesMs": 11.796479999999999,
+          "residual": 3.3097240924835205,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 24,
+          "wallMs": 49.07216700000026,
+          "cyclesMs": 11.730943999999997,
+          "residual": 2.302661418914795,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 25,
+          "wallMs": 47.80262500000026,
+          "cyclesMs": 11.993088,
+          "residual": 2.497459888458252,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 26,
+          "wallMs": 43.31379199999992,
+          "cyclesMs": 11.927551999999999,
+          "residual": 5.182419776916504,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 27,
+          "wallMs": 45.525291999999354,
+          "cyclesMs": 11.993088,
+          "residual": 4.834216117858887,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 28,
+          "wallMs": 47.51362499999959,
+          "cyclesMs": 11.862016000000004,
+          "residual": 5.116513729095459,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 29,
+          "wallMs": 85.08741699999973,
+          "cyclesMs": 48.49664,
+          "residual": 4.267968654632568,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        },
+        {
+          "frame": 30,
+          "wallMs": 45.944666999999754,
+          "cyclesMs": 11.927551999999999,
+          "residual": 1.5956846475601196,
+          "vCycles": 2,
+          "fullCycles": 0,
+          "coarseSweeps": 2
+        }
+      ]
+    }
+  ]
+}

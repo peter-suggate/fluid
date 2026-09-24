@@ -12,8 +12,7 @@ struct UniformCoarseRow {
   topology: vec4f,
 };
 struct UniformPressureState {
-  convergence: array<atomic<u32>,26>,
-  padding: vec2u,
+  convergence: array<atomic<u32>,28>,
   rows: array<UniformCoarseRow>,
 };
 @group(1) @binding(13) var<storage,read_write> mgState: UniformPressureState;
@@ -34,6 +33,7 @@ var<workgroup> mgCoarseWorstLane:atomic<u32>;
 
 
 var<workgroup> mgCoarseConvergedFlag:u32;
+var<workgroup> mgCoarseTarget:f32;
 
 
 fn mgTwoSum(a:f32,b:f32)->vec2f{
@@ -94,6 +94,21 @@ fn mgSolveCoarsest(@builtin(local_invocation_index) localLane:u32){
     mgState.rows[lane].topology=mgTopology(id);
   }storageBarrier();workgroupBarrier();
   let e=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
+  // Size inner accuracy from this correction's RHS, with an outer-error budget
+  // floor so tiny correction RHSs are not solved needlessly accurately. Capped by the requested
+  // outer tolerance. Strict reference solves keep their original threshold.
+  if(localLane==0u){atomicStore(&mgCoarseMaxBBits,0u);}
+  workgroupBarrier();
+  for(var lane=localLane;lane<count;lane+=256u){
+    if(mgState.rows[lane].phi<0.0){atomicMax(&mgCoarseMaxBBits,
+      bitcast<u32>(abs(mgState.rows[lane].rhs)*params.dimsDt.w/params.physical.x));}
+  }
+  workgroupBarrier();
+  if(localLane==0u){mgCoarseTarget=${UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE};
+    if(mgTolerance.y>0.0){mgCoarseTarget=max(mgCoarseTarget,
+      min(10.0*mgTolerance.w,max(mgTolerance.w,
+        mgTolerance.z*bitcast<f32>(atomicLoad(&mgCoarseMaxBBits)))));}}
+  workgroupBarrier();
   var converged=false;var iterations=0u;
   for(var iteration=0u;iteration<mg.control.w;iteration+=1u){
     if(!converged){iterations=iteration+1u;}
@@ -161,14 +176,14 @@ fn mgSolveCoarsest(@builtin(local_invocation_index) localLane:u32){
     // break formally uniform. Post-convergence iterations computed nothing
     // (every phase above is gated on !converged), so leaving the loop early
     // is bit-identical; it avoids the remaining capped iterations and barriers.
-    if(localLane==0u){mgCoarseConvergedFlag=select(0u,1u,bitcast<f32>(atomicLoad(&mgCoarseResidualBits))<=${UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE});}
+    if(localLane==0u){mgCoarseConvergedFlag=select(0u,1u,bitcast<f32>(atomicLoad(&mgCoarseResidualBits))<=mgCoarseTarget);}
     if(workgroupUniformLoad(&mgCoarseConvergedFlag)==1u){converged=true;break;}
   }
   for(var lane=localLane;lane<count;lane+=256u){
     let id=vec3i(i32(lane%d.x),i32((lane/d.x)%d.y),i32(lane/(d.x*d.y)));
   textureStore(mgPressureOut,id,vec4f(mgState.rows[lane].p+mgState.rows[lane].low));
   }
-  if(localLane==0u){atomicMax(&mgState.convergence[0],atomicLoad(&mgCoarseResidualBits));atomicStore(&mgState.convergence[1],select(0u,1u,converged));atomicMax(&mgState.convergence[2],iterations);atomicMax(&mgState.convergence[3],select(1u,0u,converged));
+  if(localLane==0u){atomicAdd(&mgState.convergence[26],iterations);atomicAdd(&mgState.convergence[27],1u);atomicMax(&mgState.convergence[0],atomicLoad(&mgCoarseResidualBits));atomicStore(&mgState.convergence[1],select(0u,1u,converged));atomicMax(&mgState.convergence[2],iterations);atomicMax(&mgState.convergence[3],select(1u,0u,converged));
     if(!converged){let claimed=atomicCompareExchangeWeak(&mgState.convergence[4],0u,mg.control.z);if(claimed.exchanged){let maxB=bitcast<f32>(atomicLoad(&mgCoarseMaxBBits));let maxDiagP=bitcast<f32>(atomicLoad(&mgCoarseMaxDiagPBits));
       atomicStore(&mgState.convergence[5],atomicLoad(&mgCoarseMaxBBits));atomicStore(&mgState.convergence[6],atomicLoad(&mgCoarseMaxDiagPBits));atomicStore(&mgState.convergence[7],atomicLoad(&mgCoarseMaxPBits));atomicStore(&mgState.convergence[8],atomicLoad(&mgCoarseMaxGapBits));
       let rawResidual=bitcast<f32>(atomicLoad(&mgCoarseResidualBits))*params.physical.x/max(params.dimsDt.w,1e-20);

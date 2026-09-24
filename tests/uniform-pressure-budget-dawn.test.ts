@@ -28,7 +28,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
   device=managedGPUDevice(await adapter.requestDevice({requiredLimits:requiredFluidDeviceLimits(adapter.limits)}),{requireWorkerRealm:false});
   const errors:string[]=[];device.addEventListener("uncapturederror",e=>{e.preventDefault();errors.push(e.error.message);});
   const scene=sceneDocument(getSceneDefinition("minimal-power-dam-break-32"));
-  const options=uniformGeometricSolverOptions({},scene);
+  const options={...uniformGeometricSolverOptions({},scene),adaptivePressure:false};
   const adaptive=await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,options,()=>{});
   const fixed=await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,{...options,pressureCycleBudget:"fixed"},()=>{});
   // Synchronize only the dedicated asynchronous demand readback, never readStats.

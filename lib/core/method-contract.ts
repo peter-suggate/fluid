@@ -261,6 +261,10 @@ export interface GPUSolverInstance {
   waitForSimulationReady?(): Promise<void>;
   /** A split submission is still completing one physical frame; defer presentation and edits. */
   readonly framePending?: boolean;
+  /** Publication is submitted only after a current-frame solve receipt. */
+  readonly deferredFramePublication?: boolean;
+  /** Never present mutable fields until their final submission is complete. */
+  readonly presentationPending?: boolean;
   /** Await the complete physical frame, including any later transport submissions. */
   awaitFrameCompletion?(): Promise<void>;
   /** Mandatory completed-frame invariant receipt; rejects on a latched failure.
