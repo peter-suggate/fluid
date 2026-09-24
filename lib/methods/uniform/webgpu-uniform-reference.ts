@@ -349,7 +349,9 @@ interface UniformReferencePipelines {
   scanExternalActiveSources: GPUComputePipeline;
   reduceActiveRegionSummaries: GPUComputePipeline;
   reduceExternalActiveRegionSummaries: GPUComputePipeline;
+  reducePhiSupportSummaries: GPUComputePipeline;
   finalizeActiveRegion: GPUComputePipeline;
+  finalizePhiRegion: GPUComputePipeline;
   semiLagrangian: GPUComputePipeline;
   advect: GPUComputePipeline;
   reverse: GPUComputePipeline;
@@ -383,7 +385,9 @@ const PIPELINES = [
   ["scanExternalActiveSources", "Scan external active sources", "scanExternalActiveSources", false],
   ["reduceActiveRegionSummaries", "Reduce active liquid summaries", "reduceActiveRegionSummaries", false],
   ["reduceExternalActiveRegionSummaries", "Reduce external-source summaries", "reduceExternalActiveRegionSummaries", false],
+  ["reducePhiSupportSummaries", "Reduce tile-padded phi support summaries", "reducePhiSupportSummaries", false],
   ["finalizeActiveRegion", "Finalize active liquid dispatches", "finalizeActiveRegion", false],
+  ["finalizePhiRegion", "Finalize tile-padded phi region", "finalizePhiRegion", false],
   ["semiLagrangian", "Semi-Lagrangian velocity advection and body forces", "semiLagrangianAdvection", false],
   ["advect", "Bounded MacCormack velocity prediction", "advect", false],
   ["reverse", "Bounded MacCormack reverse advection", "reverseAdvection", false],
@@ -2526,8 +2530,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       const group=this.phiGroups.get(this.reductionGroup)!;
       this.runDirect(encoder,"Phi support census",this.pipelines!.scanExternalActiveSources,group,
         [Math.ceil(this.info.nx/4),Math.ceil(this.info.ny/4),Math.ceil(this.info.nz/4)]);
-      this.runDirect(encoder,"Phi support reduction",this.pipelines!.reduceExternalActiveRegionSummaries,group,[1,1,1]);
-      this.runDirect(encoder,"Phi support closure",this.pipelines!.finalizeActiveRegion,group,[1,1,1]);
+      // tilewindow: each tile padded by its own travel, not the union box by the fastest one's.
+      const tilePadded=uniformAbOn("tilewindow");
+      this.runDirect(encoder,"Phi support reduction",tilePadded?this.pipelines!.reducePhiSupportSummaries:this.pipelines!.reduceExternalActiveRegionSummaries,group,[1,1,1]);
+      this.runDirect(encoder,"Phi support closure",tilePadded?this.pipelines!.finalizePhiRegion:this.pipelines!.finalizeActiveRegion,group,[1,1,1]);
       encoder.copyBufferToBuffer(this.activeScratch,0,this.phiRegion,0,UNIFORM_ACTIVE_HEADER_WORDS*4);
       encoder.copyBufferToBuffer(this.activeScratch,0,this.phiDispatch!,0,UNIFORM_ACTIVE_HEADER_WORDS*4);
     }

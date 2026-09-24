@@ -31,6 +31,9 @@ const uniformActiveScanLanes = uniformAbOn("scanlanes") ? 64 : 256;
 export function createUniformReferenceComputeShader(geometric = false, referenceDimension: 2 | 3 = 3, pages?: UniformVolumePageShaderOptions, domain?:UniformPageDomain, fullLattice = false): string {
   const windowMaximum = fullLattice ? "vec3u(dims())" : "vec3u(activeRegion[10],activeRegion[11],activeRegion[12])";
   const volumeWGSL = fullLattice ? specializeFullLattice(uniformVolumeWGSL) : uniformVolumeWGSL;
+  // The symmetry audit publishes the pre-projection velocity over the domain.
+  const slFarSkip = geometric && uniformAbOn("slfarskip") && !uniformMacCormackAuditEnabled;
+  const slFaces = geometric && uniformAbOn("slfaces") && !uniformMacCormackAuditEnabled;
   return /* wgsl */ `
 // The dimensional oracle suppresses the absent derivative; symmetry walls alone
 // do not prevent roundoff from creating a transverse level-set gradient.
@@ -1209,18 +1212,44 @@ fn applyVelocityForces(id:vec3i,inputVelocity:vec3f,dt:f32,h:vec3f)->vec3f{
   return applyInflowSweptVelocity(id,v);
 }
 
-@compute @workgroup_size(4,4,4)
+${slFaces ? `// A superset of pressureLiquid() || uvAirborneCell(): pressurePhi is negative
+// only where the centre phi is, or where V claims the row (V > 1, or V > half
+// the open capacity), and an airborne cell holds V. Solid cells continue the
+// interface from their neighbours and domain-edge faces own wall terms, so
+// both stay live unconditionally.
+fn uvPredictionCellLive(p:vec3i)->bool{
+  if(!valid(p)||cellOpenFraction(p)<=1e-5){return true;}
+  return volume(p)>0.0||uvPhi(vec3f(p)+vec3f(0.5))<0.0;
+}
+fn uvPredictionLive(id:vec3i,axis:u32)->bool{
+  var q=id;q[axis]+=1;
+  return uvPredictionCellLive(id)||uvPredictionCellLive(q);
+}
+` : ""}@compute @workgroup_size(4,4,4)
 fn semiLagrangianAdvection(@builtin(global_invocation_id) gid:vec3u){
-  let id=activeId(gid);if(!valid(id)){return;}carryBoundaryVelocity(id);${geometric ? `
+  let id=activeId(gid);if(!valid(id)){return;}${slFarSkip ? "" : "carryBoundaryVelocity(id);"}${geometric ? `
   // Experiment E2b. Outside the fine tiles no cell within eight cells carries
   // liquid, a solid or a source, so the projection below rewrites every
   // component of this cell: a face keeps its advected value only when it or its +axis
   // neighbour owns a pressure row. The three backward traces and the force term
   // are therefore dead work. Carry V; CM11a initializes its own pressure seed.
   if(params.twoLevel.z>0.5&&!uvTwoLevelFineAt(vec3f(id)+vec3f(0.5))){
-    textureStore(velocityOut,id,vec4f(0.0));textureStore(volumeOut,id,vec4f(volume(id),0.0,0.0,0.0));return;
-  }` : ""}let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let cell=vec3f(id);
-  var v=vec3f(advectVelocityComponent(cell+vec3f(1.0,0.5,0.5),0u,dt,h),advectVelocityComponent(cell+vec3f(0.5,1.0,0.5),1u,dt,h),advectVelocityComponent(cell+vec3f(0.5,0.5,1.0),2u,dt,h));
+    ${slFarSkip ? `// slfarskip: nothing downstream reads these. The projection's far arm
+    // writes zero velocity and boundary velocity without reading either,
+    // CM11a reads the prediction only at liquid rows, and volumeOut already
+    // holds volumeIn from the copy the host encodes just before this pass.
+    return;` : "textureStore(velocityOut,id,vec4f(0.0));textureStore(volumeOut,id,vec4f(volume(id),0.0,0.0,0.0));return;"}
+  }${slFarSkip ? "carryBoundaryVelocity(id);" : ""}` : ""}let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let cell=vec3f(id);
+  ${slFaces ? `// slfaces: the projection keeps an open face's prediction only where a
+  // side is a pressure row or airborne (geometricProjectedFace), and CM11a's
+  // right-hand side reads it only at rows. Both sides certified empty here
+  // means the face is rewritten to zero whatever this pass stores.
+  let live=vec3<bool>(uvPredictionLive(id,0u),uvPredictionLive(id,1u),uvPredictionLive(id,2u));
+  if(!any(live)){textureStore(velocityOut,id,vec4f(0.0));return;}
+  var v=vec3f(0.0);
+  if(live.x){v.x=advectVelocityComponent(cell+vec3f(1.0,0.5,0.5),0u,dt,h);}
+  if(live.y){v.y=advectVelocityComponent(cell+vec3f(0.5,1.0,0.5),1u,dt,h);}
+  if(live.z){v.z=advectVelocityComponent(cell+vec3f(0.5,0.5,1.0),2u,dt,h);}` : `var v=vec3f(advectVelocityComponent(cell+vec3f(1.0,0.5,0.5),0u,dt,h),advectVelocityComponent(cell+vec3f(0.5,1.0,0.5),1u,dt,h),advectVelocityComponent(cell+vec3f(0.5,0.5,1.0),2u,dt,h));`}
   // A closed-face sample uses the solid-side zero extension. Preserve an old
   // velocity directed away from a positive wall before adding this step's
   // forces; projection below will clamp only the into-wall sign.
@@ -1230,7 +1259,7 @@ fn semiLagrangianAdvection(@builtin(global_invocation_id) gid:vec3u){
   if(id.z==d.z-1){v.z=min(v.z,faceVelocity(id).z);}
   v=applyVelocityForces(id,v,dt,h);
   // Surface density is advanced by the dedicated Sec. 3.4 gamma/beta passes.
-  textureStore(velocityOut,id,vec4f(v,0.0));textureStore(volumeOut,id,vec4f(volume(id),0.0,0.0,0.0));${geometric ? "" : "textureStore(pressureOut,id,vec4f(0.0));"}
+  textureStore(velocityOut,id,vec4f(v,0.0));${slFarSkip ? "" : "textureStore(volumeOut,id,vec4f(volume(id),0.0,0.0,0.0));"}${geometric ? "" : "textureStore(pressureOut,id,vec4f(0.0));"}
 }
 
 @compute @workgroup_size(4,4,4)
@@ -1837,6 +1866,36 @@ fn activeTravelCells(id:vec3i,positive:bool)->vec3u{
   let directed=max(select(-v,v,positive),vec3f(0.0));
   return vec3u(ceil(directed*params.dimsDt.w/params.cellGravity.xyz));
 }
+// The two one-step terms the scan cannot see, each charged only to the
+// direction it actually pushes: this step's gravity kick (the scan reads the
+// velocity BEFORE the kick, so liquid falls g*dt*dt/h further than it
+// measured) and any authored inflow, whose liquid does not exist yet.
+fn activeAccelerationCells(positive:bool)->vec3u{
+  let stepDt=params.dimsDt.w;
+  let gravityCells=abs(params.cellGravity.w)*stepDt*stepDt/params.cellGravity.y;
+  var acceleration=vec3f(0.0);
+  acceleration.y=select(0.0,gravityCells,select((params.cellGravity.w<0.0),(params.cellGravity.w>0.0),positive));
+  let inflowCells=abs(params.inflowVelocityLength.xyz)*stepDt/params.cellGravity.xyz;
+  acceleration+=select(vec3f(0.0),inflowCells,
+    select((params.inflowVelocityLength.xyz<vec3f(0.0)),(params.inflowVelocityLength.xyz>vec3f(0.0)),positive));
+  return vec3u(ceil(acceleration));
+}
+${geometric ? `
+// The standing and post-motion stencil reaches of finalizeActiveRegion's
+// solve-window padding; see the table there.
+fn activeStandingReach()->vec3u{
+  let fineTiles=u32(max(params.physical.z,0.0));
+  let shellTiles=fineTiles+u32(max(params.twoLevel.x,1.0));
+  return vec3u(max(4u*shellTiles,8u));
+}
+fn activeStencilReach()->vec3u{return vec3u(max(6u,u32(ceil(params.tuning.y))+1u));}
+/** One tile's padding on one side: its own packed travel on that side plus the
+ * step's acceleration, then the stencil, floored at the standing reach. */
+fn activeTilePadding(packedTravel:u32,positive:bool)->vec3u{
+  let travel=activeUnpackTravel(packedTravel)+activeAccelerationCells(positive);
+  return max(activeStandingReach(),travel+activeStencilReach());
+}
+` : ""}
 var<workgroup> activeAnyWet:atomic<u32>;
 // The 4^3 scan kernels' own reduction lanes. They reduce 64 cells, and sharing
 // the 256-lane reducer's arrays gave every census workgroup 11 KB of
@@ -1980,14 +2039,20 @@ fn scanExternalActiveSources(
   let wet=${geometric ? "source||((!geometricCensusWindowed()||geometricCensusInWindow(id))&&geometricActiveSeed(id))" : "inDomain&&(volume(id)>1e-5||source)"};
   writeActiveWorkgroupSummary(id,wet,localIndex,workgroupId,groupCount);
 }
-fn reduceActiveSummaryRange(groupCount:vec3u,lane:u32){
+fn reduceActiveSummaryRange(groupCount:vec3u,lane:u32,dilate:bool){
   let d=vec3u(dims());let summaryCount=groupCount.x*groupCount.y*groupCount.z;
   var minimum=d;var maximum=vec3u(0u);var speedBits=0u;
   var travelPlus=0u;var travelMinus=0u;
   for(var summaryIndex=lane;summaryIndex<summaryCount;summaryIndex+=256u){
     let base=ACTIVE_SUMMARY_BASE+12u*summaryIndex;
-    minimum=min(minimum,vec3u(activeScratch[base],activeScratch[base+1u],activeScratch[base+2u]));
-    maximum=max(maximum,vec3u(activeScratch[base+4u],activeScratch[base+5u],activeScratch[base+6u]));
+    var low=vec3u(activeScratch[base],activeScratch[base+1u],activeScratch[base+2u]);
+    var high=vec3u(activeScratch[base+4u],activeScratch[base+5u],activeScratch[base+6u]);
+    ${geometric ? `if(dilate&&all(high>low)){
+      low-=min(low,activeTilePadding(activeScratch[base+9u],false));
+      high=min(d,high+activeTilePadding(activeScratch[base+8u],true));
+    }` : ""}
+    minimum=min(minimum,low);
+    maximum=max(maximum,high);
     speedBits=max(speedBits,activeScratch[base+3u]);
     travelPlus=activeMaxPacked(travelPlus,activeScratch[base+8u]);
     travelMinus=activeMaxPacked(travelMinus,activeScratch[base+9u]);
@@ -2023,37 +2088,34 @@ fn reduceActiveRegionSummaries(@builtin(local_invocation_index) lane:u32){
   // Direct launches deliberately over-cover the exact GPU window. Indexing
   // their summaries with the smaller exact dimensions aliases empty overrun
   // groups onto valid groups, making the census depend on GPU scheduling.
-  reduceActiveSummaryRange(vec3u(activeScratch[ACTIVE_SCAN_GROUPS_WORD],activeScratch[ACTIVE_SCAN_GROUPS_WORD+1u],activeScratch[ACTIVE_SCAN_GROUPS_WORD+2u]),lane);
+  reduceActiveSummaryRange(vec3u(activeScratch[ACTIVE_SCAN_GROUPS_WORD],activeScratch[ACTIVE_SCAN_GROUPS_WORD+1u],activeScratch[ACTIVE_SCAN_GROUPS_WORD+2u]),lane,false);
 }
 @compute @workgroup_size(256)
 fn reduceExternalActiveRegionSummaries(@builtin(local_invocation_index) lane:u32){
-  reduceActiveSummaryRange((vec3u(dims())+vec3u(3u))/4u,lane);
+  reduceActiveSummaryRange((vec3u(dims())+vec3u(3u))/4u,lane,false);
+}
+// The phi census, padded tile by tile: each 4h tile's wet box is widened by
+// its OWN per-side travel before the union, so one fast jet pads only the
+// sky it can reach instead of every face of the liquid's bounding box.
+@compute @workgroup_size(256)
+fn reducePhiSupportSummaries(@builtin(local_invocation_index) lane:u32){
+  reduceActiveSummaryRange((vec3u(dims())+vec3u(3u))/4u,lane,${geometric});
 }
 fn activeCeilDiv(value:u32,divisor:u32)->u32{return (value+divisor-1u)/divisor;}
 @compute @workgroup_size(1)
-fn finalizeActiveRegion(){
+fn finalizeActiveRegion(){finalizeActiveRegionBody(false);}
+@compute @workgroup_size(1)
+fn finalizePhiRegion(){finalizeActiveRegionBody(${geometric});}
+fn finalizeActiveRegionBody(predilated:bool){
   let d=vec3u(dims());
   let observedMin=vec3u(activeScratch[0],activeScratch[1],activeScratch[2]);
   let observedMax=vec3u(activeScratch[3],activeScratch[4],activeScratch[5]);
   let speed=max(bitcast<f32>(activeScratch[6]),length(params.inflowVelocityLength.xyz));
   let travel=vec3u(ceil(vec3f(speed*params.dimsDt.w)/params.cellGravity.xyz));
-  // The two one-step terms the scan cannot see, each charged only to the
-  // direction it actually pushes: this step's gravity kick (the scan reads the
-  // velocity BEFORE the kick, so liquid falls g*dt*dt/h further than it
-  // measured) and any authored inflow, whose liquid does not exist yet.
-  let stepDt=params.dimsDt.w;
-  let gravityCells=abs(params.cellGravity.w)*stepDt*stepDt/params.cellGravity.y;
-  var accelerationPlus=vec3f(0.0);
-  var accelerationMinus=vec3f(0.0);
-  accelerationPlus.y=select(0.0,gravityCells,params.cellGravity.w>0.0);
-  accelerationMinus.y=select(0.0,gravityCells,params.cellGravity.w<0.0);
-  let inflowCells=abs(params.inflowVelocityLength.xyz)*stepDt/params.cellGravity.xyz;
-  accelerationPlus+=select(vec3f(0.0),inflowCells,params.inflowVelocityLength.xyz>vec3f(0.0));
-  accelerationMinus+=select(vec3f(0.0),inflowCells,params.inflowVelocityLength.xyz<vec3f(0.0));
   let travelPlus=activeUnpackTravel(activeScratch[ACTIVE_TRAVEL_PLUS_WORD])
-    +vec3u(ceil(accelerationPlus));
+    +activeAccelerationCells(true);
   let travelMinus=activeUnpackTravel(activeScratch[ACTIVE_TRAVEL_MINUS_WORD])
-    +vec3u(ceil(accelerationMinus));
+    +activeAccelerationCells(false);
   // What the host pads its lagged box with: how much further each SIDE can
   // move in one step, per axis, and their sum for the dispatch extent.
   activeScratch[ACTIVE_TRAVEL_PLUS_WORD]=activePackTravel(travelPlus);
@@ -2100,10 +2162,8 @@ ${geometric ? `
   // wherever liquid can actually arrive, which is exactly travel_side.
   // Alignment to the 4h tile lattice happens below, after the union with the
   // previous box.
-  let fineTiles=u32(max(params.physical.z,0.0));
-  let shellTiles=fineTiles+u32(max(params.twoLevel.x,1.0));
-  let standingReach=vec3u(max(4u*shellTiles,8u));
-  let stencilReach=vec3u(max(6u,u32(ceil(params.tuning.y))+1u));
+  let standingReach=activeStandingReach();
+  let stencilReach=activeStencilReach();
   // REDIRECTION, the third travel term, and the reason a purely per-direction
   // padding is not safe. Gravity is not the only acceleration a step applies:
   // where a stream meets a wall, the floor or another stream, the pressure
@@ -2137,17 +2197,30 @@ ${geometric ? `
   let redirect=travel+(travel+vec3u(1u))/vec3u(2u);
   let paddingLow=max(standingReach,max(travelMinus,redirect)+stencilReach);
   let paddingHigh=max(standingReach,max(travelPlus,redirect)+stencilReach);
+  // THE PHI REGION needs neither redirection term. Everything it gates -- the
+  // vertex phi passes, transport rows, sharpening -- runs BEFORE this step's
+  // velocity advection and projection, on the very velocity the census just
+  // measured (and its extension), and the next step censuses again before any
+  // of it runs. Its box therefore arrives from reducePhiSupportSummaries with
+  // every tile already padded by its own travel_side + stencil, floored at the
+  // standing reach; only the wall snap below still needs a distance.
+  let boxLow=select(paddingLow,vec3u(0u),vec3<bool>(predilated));
+  let boxHigh=select(paddingHigh,vec3u(0u),vec3<bool>(predilated));
+  let snapLow=select(paddingLow,standingReach,vec3<bool>(predilated));
+  let snapHigh=select(paddingHigh,standingReach,vec3<bool>(predilated));
 ` : `
   let paddingLow=travel+vec3u(u32(ceil(params.tuning.y))+4u);
   let paddingHigh=paddingLow;
+  let boxLow=paddingLow;
+  let boxHigh=paddingHigh;
 `}
   let previousMinimum=vec3u(activeRegion[0],activeRegion[1],activeRegion[2]);
   let previousMaximum=vec3u(activeRegion[3],activeRegion[4],activeRegion[5]);
   var currentMinimum=previousMinimum;
   var currentMaximum=previousMaximum;
   if(all(observedMax>observedMin)){
-    currentMinimum=observedMin-min(observedMin,paddingLow);
-    currentMaximum=min(d,observedMax+paddingHigh);
+    currentMinimum=observedMin-min(observedMin,boxLow);
+    currentMaximum=min(d,observedMax+boxHigh);
   }
 ${geometric ? `
   // A 4x4x4 workgroup must still coincide with one 4h tile: the sharpening
@@ -2161,8 +2234,8 @@ ${geometric ? `
   // processes; the term only reaches vertices within dt*|v|/h of the plane,
   // so with the wall inside the window whenever the liquid is within padding
   // + travel of it, a windowed vertex never reads a stale plane.
-  currentMinimum=select(currentMinimum,vec3u(0u),currentMinimum<=paddingLow);
-  currentMaximum=select(currentMaximum,d,currentMaximum+paddingHigh>=d);
+  currentMinimum=select(currentMinimum,vec3u(0u),currentMinimum<=snapLow);
+  currentMaximum=select(currentMaximum,d,currentMaximum+snapHigh>=d);
 ` : ""}
   let minimum=min(previousMinimum,currentMinimum);
   let maximum=max(previousMaximum,currentMaximum);
