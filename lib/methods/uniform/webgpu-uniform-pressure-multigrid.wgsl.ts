@@ -17,6 +17,12 @@ import { uniformAbOn } from "./uniform-ab-switch";
  * are exact in f32.
  */
 const neighbourMask = uniformAbOn("liquidmask");
+/**
+ * Wall-halo entries on the finest cycle list; see mgBuildCycleTiles. The
+ * switch only adds code: the cycle list holds none until the host sets
+ * MG_HALO_ENTRIES on the builder.
+ */
+const wallHalo = uniformAbOn("wallhalo");
 export { UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE } from "./pressure-policy";
 
 /**
@@ -38,6 +44,31 @@ const MG_SHIFT_MINIMUM_BODY = `  textureStore(mgMinimumOut,id,vec4f(textureLoad(
 const MG_ADD_PRESSURE_BODY = `  textureStore(mgPressureOut,id,vec4f(mgP(id)+textureLoad(mgResidualIn,id,0).x));`;
 const MG_RESTORE_REJECTED_BODY = `  textureStore(mgPressureOut,id,textureLoad(mgResidualIn,id,0));`;
 const MG_SAVE_ACCEPTED_GATE = `  if(atomicLoad(&mgState.convergence[23])!=0u){return;}`;
+/**
+ * The fine residual norm. Every contribution is an order-free atomicMax, so a
+ * tile list that holds every row this body can act on measures the same bits.
+ */
+const MG_MEASURE_BODY = `  // Air values also participate in prolongation: never accept NaN/Inf there.
+  let pressure=mgP(id);
+  if((bitcast<u32>(pressure)&0x7f800000u)==0x7f800000u){
+    if(mg.control.z==1u){atomicMax(&mgState.convergence[15],0x7f800000u);}
+    else{atomicMax(&mgState.convergence[10],0x7f800000u);}return;
+  }
+  if(!mgBakedLiquid(id)){return;}
+  let e=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
+  var diagonalTerms:array<f32,6>;for(var n=0;n<6;n+=1){diagonalTerms[n]=mgCoefficient(id,id+e[n],u32(n/2));}let diagonal=mgD4Sum6(diagonalTerms);
+  if(diagonal<=0.0){return;}let residual=textureLoad(mgRhsIn,id,0).x-mgApply(id);let minimum=textureLoad(mgMinimumIn,id,0).x;let gap=max(0.0,pressure-minimum);
+  let projectsToMinimum=residual<0.0&&-residual>=gap*diagonal;let projected=max(select(abs(residual),gap*diagonal,projectsToMinimum),max(0.0,minimum-pressure)*diagonal);
+  if(mg.control.z==1u){
+    let norm=projected*params.dimsDt.w/params.physical.x;
+    // Non-finite values must never be mistaken for convergence.
+    atomicMax(&mgState.convergence[15u+0],select(0x7f800000u,bitcast<u32>(norm),norm>=0.0&&(bitcast<u32>(norm)&0x7f800000u)!=0x7f800000u&&(bitcast<u32>(residual)&0x7f800000u)!=0x7f800000u));
+    return;
+  }
+  atomicMax(&mgState.convergence[10],bitcast<u32>(projected*params.dimsDt.w/params.physical.x));atomicMax(&mgState.convergence[11],bitcast<u32>(projected/diagonal));
+`;
+/** The measure at a certified air row: the non-finite check alone. */
+const MG_MEASURE_AIR_BODY = MG_MEASURE_BODY.slice(0, MG_MEASURE_BODY.indexOf("  if(!mgBakedLiquid(id)){return;}"));
 const MG_RESTORE_REJECTED_GATE = `  if(mg.control.w==0u){
     if(atomicLoad(&mgState.convergence[23])==0u){return;}
     // Smoothing may transiently worsen the infinity norm. Continue its finite
@@ -54,7 +85,25 @@ const MG_RESTORE_REJECTED_GATE = `  if(mg.control.w==0u){
  * lattice. The list is 4^3 tiles of that lattice, one workgroup each.
  */
 const mgTiledKernel = (name: string, dims: "levelDims" | "coarseDims",
-  gate: string, body: string) => /* wgsl */ `
+  gate: string, body: string, haloBody?: string) => haloBody !== undefined && wallHalo ? /* wgsl */ `
+@compute @workgroup_size(64)
+fn ${name}Tiles(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+${gate}
+  let at=group.x+65535u*group.y;
+  let tiles=atomicLoad(&mgCycleDispatch[0]);
+  if(at>=tiles){
+    let id=mgHaloCell(at-tiles,lane,mg.${dims}.xyz);
+    if(!mgValid(id,mg.${dims}.xyz)){return;}
+${haloBody}
+    return;
+  }
+  let d=(mg.${dims}.xyz+vec3u(3))/4u;
+  let tile=atomicLoad(&mgCycleDispatch[4u+at]);
+  let origin=4u*vec3u(tile%d.x,(tile/d.x)%d.y,tile/(d.x*d.y));
+  let id=vec3i(origin+vec3u(lane%4u,(lane/4u)%4u,lane/16u));
+  if(!mgValid(id,mg.${dims}.xyz)){return;}
+${body}
+}` : /* wgsl */ `
 @compute @workgroup_size(64)
 fn ${name}Tiles(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
 ${gate}
@@ -66,6 +115,119 @@ ${gate}
   let id=vec3i(origin+vec3u(lane%4u,(lane/4u)%4u,lane/16u));
   if(!mgValid(id,mg.${dims}.xyz)){return;}
 ${body}
+}`;
+
+/**
+ * The finest tile classifier, optionally carrying the solve's far-field seeds
+ * (see the host): the same three stores the dense seed passes make, at the
+ * same non-FAR cells, one dispatch instead of four. Only the finest level's V
+ * aliases those fields, and it is dead once its coefficients are baked.
+ */
+const mgBuildSmoothTilesEntry = (name: string, seeds: string) => /* wgsl */ `
+@compute @workgroup_size(4,4,4)
+fn ${name}(@builtin(global_invocation_id) gid:vec3u,
+ @builtin(workgroup_id) tile:vec3u,@builtin(local_invocation_index) lane:u32){
+  let far=mgFarL0(vec3i(gid));
+${seeds}  if(!far&&mgBakedLiquid(vec3i(gid))){atomicStore(&mgTileLive,1u);}
+  if(MG_CYCLE_TILES&&!far&&mgValid(vec3i(gid),mg.levelDims.xyz)&&textureLoad(mgMinimumIn,vec3i(gid),0).x> -3.0e38){${wallHalo
+    ? "atomicOr(&mgTileConstrained,select(1u,2u,mgInterior(vec3i(gid),mg.levelDims.xyz)));"
+    : "atomicStore(&mgTileConstrained,1u);"}}
+  let live=workgroupUniformLoad(&mgTileLive);
+  let d=(mg.levelDims.xyz+vec3u(3))/4u;
+  let index=tile.x+d.x*(tile.y+d.y*tile.z);
+  if(lane==0u&&live!=0u){
+    let slot=atomicAdd(&mgCycleDispatch[0],1u);
+    atomicStore(&mgCycleDispatch[4u+slot],index);
+  }
+  // Per-tile classification for the dilation pass, one word per tile after the
+  // list. Every tile's workgroup writes its own word, so nothing needs clearing.
+  if(MG_CYCLE_TILES){
+    let constrained=workgroupUniformLoad(&mgTileConstrained);
+    if(lane==0u){atomicStore(&mgCycleDispatch[4u+d.x*d.y*d.z+index],select(0u,1u,live!=0u)|select(0u,2u,constrained!=0u)${wallHalo ? "|select(0u,4u,(constrained&2u)!=0u)" : ""});}
+  }
+}
+`;
+
+/**
+ * The cycle list with wall-halo entries.
+ *
+ * A listed tile that is constrained only through halo cells and has no liquid
+ * row within one tile (itself included) is a WALL tile. Its halo cells still
+ * carry work every cycle: prolongation writes them from coarse cells that are
+ * not zero far from liquid (measured on fig7-256: up to 3.4e3 at impact), the
+ * first sweep projects them onto p_min = 0, and mgDownsampleSubtract turns
+ * them into the coarse halo's bound. Its remaining cells are inert: they are
+ * air (no liquid row, so no stencil reads them and their residual is the zero
+ * the setup seeds) and unconstrained (p_min is -FLT_MAX, which absorbs any
+ * finite p in mgDownsampleSubtract and in mgShiftMinimum), exactly like the
+ * air tiles the list already leaves out. So a wall tile is listed as one
+ * entry per halo face it touches -- 16 cells, four entries per workgroup,
+ * after the tiles -- instead of as a whole tile. A cell on a halo edge or
+ * corner belongs to the entry of its lowest halo axis.
+ *
+ * Layout after the tile list, at word 4 + n (n = tiles of the level): the
+ * entry count, then entries tile * 8 + axis * 2 + side. The host clears the
+ * count every solve; nothing else persists.
+ */
+const MG_BUILD_CYCLE_TILES_HALO = /* wgsl */ `
+override MG_HALO_ENTRIES:bool=false;
+@compute @workgroup_size(64)
+fn mgBuildCycleTiles(@builtin(global_invocation_id) gid:vec3u){
+  let d=(mg.levelDims.xyz+vec3u(3))/4u;let n=d.x*d.y*d.z;
+  let at=gid.x;if(at>=n){return;}
+  let t=vec3i(i32(at%d.x),i32((at/d.x)%d.y),i32(at/(d.x*d.y)));
+  let own=atomicLoad(&mgCycleDispatch[4u+n+at]);
+  var near=false;
+  for(var k=0u;k<27u;k+=1u){
+    if(near){break;}
+    let q=t+vec3i(i32(k%3u)-1,i32((k/3u)%3u)-1,i32(k/9u)-1);
+    if(any(q<vec3i(0))||any(q>=vec3i(d))){continue;}
+    let j=u32(q.x)+d.x*(u32(q.y)+d.y*u32(q.z));
+    if((atomicLoad(&mgCycleDispatch[4u+n+j])&1u)!=0u){near=true;}
+  }
+  if(!near&&(own&2u)==0u){return;}
+  // Every consumer skips FAR tiles; one in the list is a broken certificate.
+  // Poison the final residual so the step reports a failed solve.
+  if(mgFarTile(at)){atomicMax(&mgState.convergence[10],0x7f800000u);}
+  if(MG_HALO_ENTRIES&&!near&&(own&4u)==0u){
+    for(var a=0u;a<3u;a+=1u){
+      if(t[a]==0){let slot=atomicAdd(&mgCycleTiles[4u+n],1u);atomicStore(&mgCycleTiles[5u+n+slot],8u*at+2u*a);}
+      if(t[a]==i32(d[a])-1){let slot=atomicAdd(&mgCycleTiles[4u+n],1u);atomicStore(&mgCycleTiles[5u+n+slot],8u*at+2u*a+1u);}
+    }
+    return;
+  }
+  let slot=atomicAdd(&mgCycleTiles[0],1u);
+  atomicStore(&mgCycleTiles[4u+slot],at);
+}
+// The launch record: every tile, then the halo entries four to a workgroup.
+@compute @workgroup_size(1)
+fn mgPublishSmoothCycleTiles(){
+  let d=(mg.levelDims.xyz+vec3u(3))/4u;let n=d.x*d.y*d.z;
+  let count=atomicLoad(&mgCycleDispatch[0])+(atomicLoad(&mgCycleDispatch[4u+n])+3u)/4u;
+  atomicStore(&mgCycleDispatch[1],min(count,65535u));
+  atomicStore(&mgCycleDispatch[2],(count+65534u)/65535u);
+  atomicStore(&mgCycleDispatch[3],1u);
+}`;
+
+/**
+ * The finest cell a halo entry's lane owns, or -1: entry slot 4 * group + lane
+ * / 16 past the tiles, 4 x 4 cells on the entry's face. Plain selects, no
+ * dynamic component indexing: this runs inside the Jacobi sweep.
+ */
+const MG_HALO_CELL = /* wgsl */ `
+fn mgHaloCell(group:u32,lane:u32,dims:vec3u)->vec3i{
+  let d=(dims+vec3u(3u))/4u;let n=d.x*d.y*d.z;
+  let k=4u*group+lane/16u;
+  if(k>=atomicLoad(&mgCycleDispatch[4u+n])){return vec3i(-1);}
+  let entry=atomicLoad(&mgCycleDispatch[5u+n+k]);let tile=entry>>3u;let a=(entry>>1u)&3u;
+  let o=vec3i(4u*vec3u(tile%d.x,(tile/d.x)%d.y,tile/(d.x*d.y)));
+  let u=i32(lane%4u);let v=i32((lane/4u)%4u);
+  let side=select(vec3i(0),vec3i(dims)-vec3i(1),(entry&1u)!=0u);
+  let id=select(select(vec3i(o.x+u,o.y+v,side.z),vec3i(o.x+u,side.y,o.z+v),a==1u),vec3i(side.x,o.y+u,o.z+v),a==0u);
+  // Edge and corner cells belong to the entry of their lowest halo axis.
+  let xHalo=id.x==0||id.x==i32(dims.x)-1;let yHalo=id.y==0||id.y==i32(dims.y)-1;
+  if((a>=1u&&xHalo)||(a==2u&&yHalo)){return vec3i(-1);}
+  return id;
 }`;
 
 /**
@@ -129,7 +291,7 @@ fn mgSmoothCellInPlace(id:vec3i){
 fn mgSmoothColourInPlace(@builtin(global_invocation_id) gid:vec3u){
   if(mgSkipCycle()){return;}
   let id=vec3i(i32(2u*gid.x+((mg.control.z+gid.y+gid.z)&1u)),i32(gid.y),i32(gid.z));
-  if(!mgValid(id,mg.levelDims.xyz)){return;}
+  if(!mgValid(id,mg.levelDims.xyz)||mgFarL0(id)){return;}
   mgSmoothCellInPlace(id);
 }
 // Coefficients are immutable for a pressure solve. Compact 4^3 tiles with
@@ -145,25 +307,13 @@ var<workgroup> mgTileLive:atomic<u32>;
 // lets that bound drift positive and the hierarchy stops converging, so the
 // cycle list carries every constrained tile even far from liquid.
 var<workgroup> mgTileConstrained:atomic<u32>;
-@compute @workgroup_size(4,4,4)
-fn mgBuildSmoothTiles(@builtin(global_invocation_id) gid:vec3u,
- @builtin(workgroup_id) tile:vec3u,@builtin(local_invocation_index) lane:u32){
-  if(mgBakedLiquid(vec3i(gid))){atomicStore(&mgTileLive,1u);}
-  if(MG_CYCLE_TILES&&mgValid(vec3i(gid),mg.levelDims.xyz)&&textureLoad(mgMinimumIn,vec3i(gid),0).x> -3.0e38){atomicStore(&mgTileConstrained,1u);}
-  let live=workgroupUniformLoad(&mgTileLive);
-  let d=(mg.levelDims.xyz+vec3u(3))/4u;
-  let index=tile.x+d.x*(tile.y+d.y*tile.z);
-  if(lane==0u&&live!=0u){
-    let slot=atomicAdd(&mgCycleDispatch[0],1u);
-    atomicStore(&mgCycleDispatch[4u+slot],index);
+${mgBuildSmoothTilesEntry("mgBuildSmoothTiles","")}
+${mgBuildSmoothTilesEntry("mgBuildSmoothTilesSeeded",`  if(mgValid(vec3i(gid),mg.levelDims.xyz)&&!far){
+    textureStore(mgMinimumOut,vec3i(gid),vec4f(-3.402823e38));
+    textureStore(mgResidualOut,vec3i(gid),vec4f(0.0));
+    textureStore(mgRhsOut,vec3i(gid),vec4f(0.0));
   }
-  // Per-tile classification for the dilation pass, one word per tile after the
-  // list. Every tile's workgroup writes its own word, so nothing needs clearing.
-  if(MG_CYCLE_TILES){
-    let constrained=workgroupUniformLoad(&mgTileConstrained);
-    if(lane==0u){atomicStore(&mgCycleDispatch[4u+d.x*d.y*d.z+index],select(0u,1u,live!=0u)|select(0u,2u,constrained!=0u));}
-  }
-}
+`)}
 // The per-cycle work list: liquid tiles dilated by one tile, plus every
 // constrained tile.
 //
@@ -176,7 +326,7 @@ fn mgBuildSmoothTiles(@builtin(global_invocation_id) gid:vec3u,
 // the zero the setup seeds, and its p_min is -FLT_MAX, so skipping it changes
 // no liquid row.
 @group(1) @binding(19) var<storage,read_write> mgCycleTiles:array<atomic<u32>>;
-@compute @workgroup_size(64)
+${wallHalo ? MG_BUILD_CYCLE_TILES_HALO : `@compute @workgroup_size(64)
 fn mgBuildCycleTiles(@builtin(global_invocation_id) gid:vec3u){
   let d=(mg.levelDims.xyz+vec3u(3))/4u;let n=d.x*d.y*d.z;
   let at=gid.x;if(at>=n){return;}
@@ -190,10 +340,14 @@ fn mgBuildCycleTiles(@builtin(global_invocation_id) gid:vec3u){
     if((atomicLoad(&mgCycleDispatch[4u+n+j])&1u)!=0u){live=true;}
   }
   if(live){
+    // Every consumer skips FAR tiles; one in the list is a broken certificate.
+    // Poison the final residual so the step reports a failed solve.
+    if(mgFarTile(at)){atomicMax(&mgState.convergence[10],0x7f800000u);}
     let slot=atomicAdd(&mgCycleTiles[0],1u);
     atomicStore(&mgCycleTiles[4u+slot],at);
   }
 }
+`}
 @compute @workgroup_size(1)
 fn mgPublishSmoothTiles(){
   let count=atomicLoad(&mgCycleDispatch[0]);
@@ -224,7 +378,7 @@ fn mgSmoothRowInPlace(@builtin(global_invocation_id) gid:vec3u){
   let parity=(mg.control.z+gid.y+gid.z)&1u;
   for(var k=0u;k<MG_ROW_SEGMENT;k+=1u){
     let x=2u*(gid.x*MG_ROW_SEGMENT+k)+parity;
-    if(x<d.x){mgSmoothCellInPlace(vec3i(i32(x),i32(gid.y),i32(gid.z)));}
+    if(x<d.x&&!mgFarL0(vec3i(i32(x),i32(gid.y),i32(gid.z)))){mgSmoothCellInPlace(vec3i(i32(x),i32(gid.y),i32(gid.z)));}
   }
 }
 // The recovery finish's two commits, launched the same way. Word 22 is set only
@@ -237,7 +391,7 @@ fn mgSaveAcceptedQuiet(@builtin(global_invocation_id) gid:vec3u){
   let d=mg.levelDims.xyz;if(gid.y>=d.y||gid.z>=d.z){return;}
   for(var k=0u;k<MG_ROW_SEGMENT;k+=1u){
     let id=vec3i(i32(gid.x*MG_ROW_SEGMENT+k),i32(gid.y),i32(gid.z));
-    if(id.x<i32(d.x)){textureStore(mgPressureOut,id,vec4f(mgP(id)));}
+    if(id.x<i32(d.x)&&!mgFarL0(id)){textureStore(mgPressureOut,id,vec4f(mgP(id)));}
   }
 }
 @compute @workgroup_size(4,4,4)
@@ -247,7 +401,7 @@ fn mgRestoreRejectedQuiet(@builtin(global_invocation_id) gid:vec3u){
   let d=mg.levelDims.xyz;if(gid.y>=d.y||gid.z>=d.z){return;}
   for(var k=0u;k<MG_ROW_SEGMENT;k+=1u){
     let id=vec3i(i32(gid.x*MG_ROW_SEGMENT+k),i32(gid.y),i32(gid.z));
-    if(id.x<i32(d.x)){textureStore(mgPressureOut,id,textureLoad(mgResidualIn,id,0));}
+    if(id.x<i32(d.x)&&!mgFarL0(id)){textureStore(mgPressureOut,id,textureLoad(mgResidualIn,id,0));}
   }
 }
 // A whole smoothing visit -- mg.control.z sweeps, both colours each -- in one
@@ -282,13 +436,32 @@ fn mgSmoothVisitInPlace(@builtin(local_invocation_index) lane:u32){
 // the CM11a group is at the device's per-stage budget), so none of them may
 // reach for the main shader's params: the bodies above only touch group 1.
 ${mgTiledKernel("mgResidual", "levelDims", "  if(mgSkipCycle()){return;}", MG_RESIDUAL_BODY)}
-${mgTiledKernel("mgProlongateAdd", "coarseDims", "  if(mgSkipCycle()){return;}", MG_PROLONGATE_ADD_BODY)}
-${mgTiledKernel("mgProlongateAssign", "coarseDims", "  if(mgSkipCycle()){return;}", MG_PROLONGATE_ASSIGN_BODY)}
-${mgTiledKernel("mgCopyPressure", "levelDims", "  if(mgSkipCycle()){return;}", MG_COPY_PRESSURE_BODY)}
-${mgTiledKernel("mgShiftMinimum", "levelDims", "  if(mgSkipCycle()){return;}", MG_SHIFT_MINIMUM_BODY)}
-${mgTiledKernel("mgAddPressure", "levelDims", "  if(mgSkipCycle()){return;}", MG_ADD_PRESSURE_BODY)}
-${mgTiledKernel("mgSaveAccepted", "levelDims", MG_SAVE_ACCEPTED_GATE, MG_COPY_PRESSURE_BODY)}
-${mgTiledKernel("mgRestoreRejected", "levelDims", MG_RESTORE_REJECTED_GATE, MG_RESTORE_REJECTED_BODY)}
+${mgTiledKernel("mgProlongateAdd", "coarseDims", "  if(mgSkipCycle()){return;}", MG_PROLONGATE_ADD_BODY, MG_PROLONGATE_ADD_BODY)}
+${mgTiledKernel("mgProlongateAssign", "coarseDims", "  if(mgSkipCycle()){return;}", MG_PROLONGATE_ASSIGN_BODY, MG_PROLONGATE_ASSIGN_BODY)}
+${mgTiledKernel("mgCopyPressure", "levelDims", "  if(mgSkipCycle()){return;}", MG_COPY_PRESSURE_BODY, MG_COPY_PRESSURE_BODY)}
+${mgTiledKernel("mgShiftMinimum", "levelDims", "  if(mgSkipCycle()){return;}", MG_SHIFT_MINIMUM_BODY, MG_SHIFT_MINIMUM_BODY)}
+${mgTiledKernel("mgAddPressure", "levelDims", "  if(mgSkipCycle()){return;}", MG_ADD_PRESSURE_BODY, MG_ADD_PRESSURE_BODY)}
+${mgTiledKernel("mgSaveAccepted", "levelDims", MG_SAVE_ACCEPTED_GATE, MG_COPY_PRESSURE_BODY, MG_COPY_PRESSURE_BODY)}
+${mgTiledKernel("mgRestoreRejected", "levelDims", MG_RESTORE_REJECTED_GATE, MG_RESTORE_REJECTED_BODY, MG_RESTORE_REJECTED_BODY)}
+// Outside the cycle list the finest pressure is the zero mgBuildFinestRhs
+// stored and no row is liquid, so the dense measure finds nothing there. This
+// one reads the main shader's params and so keeps the full group 0.
+${mgTiledKernel("mgMeasureFineResidual", "levelDims", "  if(mgSkipCycle()){return;}", MG_MEASURE_BODY, MG_MEASURE_AIR_BODY)}
+`;
+
+/** One Jacobi update or pass-through per listed cell; see mgSmoothTilesJacobi. */
+const MG_JACOBI_TILE_BODY = `  let old=mgP(id);let minimum=textureLoad(mgMinimumIn,id,0).x;
+  let coarseDone=(mg.control.w&2u)!=0u&&atomicLoad(&mgState.convergence[1])!=0u;
+  ${neighbourMask ? `let mask=mgLiquidMask(id);
+  if(coarseDone||(mask&1u)==0u){` : `if(coarseDone||!mgBakedLiquid(id)){`}
+    textureStore(mgPressureOut,id,vec4f(max(old,minimum)));return;}
+  let e=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
+  var diagonalTerms:array<f32,6>;var sumTerms:array<f32,6>;
+  for(var n=0;n<6;n+=1){let q=id+e[n];let a=mgCoefficient(id,q,u32(n/2));
+    diagonalTerms[n]=a;sumTerms[n]=select(0.0,a*mgP(q),${neighbourMask ? "((mask>>u32(n+1))&1u)!=0u" : "mgBakedLiquid(q)"});}
+  let diagonal=mgD4Sum6(diagonalTerms);let sum=mgD4Sum6(sumTerms);
+  let p=select(0.0,(sum+textureLoad(mgRhsIn,id,0).x)/diagonal,diagonal>0.0);
+  textureStore(mgPressureOut,id,vec4f(max(p,minimum)));
 `;
 
 export const uniformPressureMultigridWGSL = /* wgsl */ `
@@ -343,6 +516,7 @@ fn mgSkipCycle()->bool{
 // converged solve launches zero workgroups for all subsequent cycle kernels.
 // Save/restore and final diagnostics remain unconditional.
 @group(1) @binding(18) var<storage,read_write> mgCycleDispatch:array<atomic<u32>>;
+${wallHalo ? MG_HALO_CELL : ""}
 @compute @workgroup_size(1)
 fn mgPublishCycleDispatch(){
   let records=mg.control.z;
@@ -384,13 +558,13 @@ fn mgCheckCycleConvergence(){
 @compute @workgroup_size(4,4,4)
 fn mgSaveAccepted(@builtin(global_invocation_id) gid:vec3u){
 ${MG_SAVE_ACCEPTED_GATE}
-  let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
+  let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}if(mgFarL0(id)){return;}
 ${MG_COPY_PRESSURE_BODY}
 }
 @compute @workgroup_size(4,4,4)
 fn mgRestoreRejected(@builtin(global_invocation_id) gid:vec3u){
 ${MG_RESTORE_REJECTED_GATE}
-  let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
+  let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}if(mgFarL0(id)){return;}
 ${MG_RESTORE_REJECTED_BODY}
 }
 @compute @workgroup_size(1)
@@ -398,6 +572,27 @@ fn mgFinishSafety(){
   atomicStore(&mgState.convergence[25],select(0u,1u,atomicLoad(&mgState.convergence[22])!=0u&&atomicLoad(&mgState.convergence[16])==0u));
 }
 
+// FAR finest tiles (see uniformPressureFarTilesWGSL). The host replaces this
+// stub with the arena lookup when the certificate is built; otherwise every
+// test below folds to false and each kernel keeps its dense arm.
+fn mgFarTile(t:u32)->bool{return false;}
+fn mgFarAt(p:vec3i)->bool{
+  let d=(mg.fineDims.xyz+vec3u(3u))/4u;
+  let t=vec3u(clamp(p,vec3i(0),vec3i(mg.fineDims.xyz)-vec3i(1)))/4u;
+  return mgFarTile(t.x+d.x*(t.y+d.y*t.z));
+}
+// A finest-level cell a kernel writing level 0 must leave alone.
+fn mgFarL0(p:vec3i)->bool{return mg.fineDims.w==0u&&mgFarAt(p);}
+// A finest-level child an L0 -> L1 kernel must not load.
+fn mgFarChild(q:vec3i)->bool{return mg.fineDims.w==1u&&mgFarAt(q);}
+// pressurePhi at an open, V = 0 cell whose centre phi is at least h, with the
+// airborne over-capacity rule on: min(phi, h) = h, then the V-row rule.
+fn mgFarPhi()->f32{
+  let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
+  if(params.physical.w>1.5){return min(h,h*(0.5-0.0/1.0));}
+  return h;
+}
+fn mgPhiNear(p:vec3i)->f32{if(mgFarL0(p)){return mgFarPhi();}return mgPhi(p);}
 fn mgValid(p:vec3i,d:vec3u)->bool{return all(p>=vec3i(0))&&all(p<vec3i(d));}
 fn mgClamp(p:vec3i,d:vec3u)->vec3i{return clamp(p,vec3i(0),vec3i(d)-vec3i(1));}
 fn mgD4Sum6(value:array<f32,6>)->f32{return ((value[0]+value[1])+(value[4]+value[5]))+(value[2]+value[3]);}
@@ -441,7 +636,7 @@ fn mgFineChild(coarse:vec3i,o:vec3i)->vec3i{
 fn mgTopology(p:vec3i)->vec4f{return textureLoad(mgVolumeIn,mgClamp(p,mg.levelDims.xyz),0);}
 fn mgPhi(p:vec3i)->f32{return textureLoad(mgPhiIn,mgClamp(p,mg.levelDims.xyz),0).x;}
 fn mgP(p:vec3i)->f32{return textureLoad(mgPressureIn,mgClamp(p,mg.levelDims.xyz),0).x;}
-fn mgLiquid(p:vec3i)->bool{return mgValid(p,mg.levelDims.xyz)&&mgPhi(p)<0.0;}
+fn mgLiquid(p:vec3i)->bool{return mgValid(p,mg.levelDims.xyz)&&mgPhiNear(p)<0.0;}
 fn mgInterior(p:vec3i,d:vec3u)->bool{return all(p>=vec3i(1))&&all(p<vec3i(d)-vec3i(1));}
 fn mgOpenTopHalo(p:vec3i,d:vec3u)->bool{
   return params.boundary.w>0.5&&p.y==i32(d.y)-1&&p.x>0&&p.x<i32(d.x)-1&&p.z>0&&p.z<i32(d.z)-1;
@@ -457,7 +652,7 @@ fn mgFaceV(id:vec3i,neighbor:vec3i,axis:u32)->f32{
   return select(mgTopology(neighbor)[axis+1u],mgTopology(id)[axis+1u],positive);
 }
 fn mgTheta(liquidCell:vec3i,airCell:vec3i)->f32{
-  let a=mgPhi(liquidCell);let b=mgPhi(airCell);
+  let a=mgPhiNear(liquidCell);let b=mgPhiNear(airCell);
   return cm12GhostFluidTheta(a,b,1e-9);
 }
 fn mgCoefficientRaw(id:vec3i,q:vec3i,axis:u32)->f32{
@@ -508,6 +703,7 @@ fn mgApply(id:vec3i)->f32{
 fn mgBuildFinestTopology(@builtin(global_invocation_id) gid:vec3u){
   if(mgSkipCycle()){return;}
   let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
+  if(mgFarL0(id)){return;}
   let simulation=id-vec3i(1)+pressureWindowOrigin();
   let h=mg.spacing.xyz;
   // A halo cell whose SIMULATION coordinate is still inside the domain is not
@@ -540,6 +736,8 @@ override MG_REUSE_FINEST_AUTHORITY:bool=true;
 fn mgBuildFinestRhs(@builtin(global_invocation_id) gid:vec3u){
   if(mgSkipCycle()){return;}
   let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
+  // Projection and presentation read this texture across the whole lattice.
+  if(mgFarL0(id)){textureStore(mgPressureOut,id,vec4f(0.0));return;}
   let simulation=id-vec3i(1)+pressureWindowOrigin();
   var rhs=0.0;var minimum=-3.402823e38;
   if(mgSimulationCell(id,mg.levelDims.xyz,simulation)){
@@ -581,7 +779,10 @@ fn mgDownsampleTopology(@builtin(global_invocation_id) gid:vec3u){
   for(var corner=0u;corner<8u;corner+=1u){
     let o=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
     let q=mgFineChild(id,o);
-    topologyTerms[corner]=mgTopology(q);let phi=mgPhi(q);phiTerms[corner]=phi;
+    var phi=0.0;
+    if(mgFarChild(q)){topologyTerms[corner]=vec4f(1.0);phi=mgFarPhi();}
+    else{topologyTerms[corner]=mgTopology(q);phi=mgPhi(q);}
+    phiTerms[corner]=phi;
     // A closed child carries no interface. pressurePhi hands back the +h/2
     // sentinel wherever a solid has no open liquid neighbour to continue from,
     // so letting it vote turns a wall into coarse air: a p=0 Dirichlet row
@@ -618,7 +819,7 @@ fn mgDownsampleTopology(@builtin(global_invocation_id) gid:vec3u){
 @compute @workgroup_size(4,4,4)
 fn mgResidual(@builtin(global_invocation_id) gid:vec3u){
   if(mgSkipCycle()){return;}
-  let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
+  let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}if(mgFarL0(id)){return;}
   // CM11a defines b only on pressure unknowns. Air rows have no diagonal in
   // A, so carrying their velocity divergence as b-Ap would inject arbitrary
   // forcing into restriction and eventually the coarsest solve.
@@ -632,7 +833,8 @@ ${MG_RESIDUAL_BODY}
 fn mgRestrictResidual(@builtin(global_invocation_id) gid:vec3u){
   if(mgSkipCycle()){return;}
   let id=mgActiveId(gid);if(!mgValid(id,mg.coarseDims.xyz)){return;}var terms:array<f32,8>;
-  for(var corner=0u;corner<8u;corner+=1u){let o=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));terms[corner]=textureLoad(mgResidualIn,mgFineChild(id,o),0).x;}
+  for(var corner=0u;corner<8u;corner+=1u){let o=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let q=mgFineChild(id,o);
+    if(mgFarChild(q)){terms[corner]=0.0;}else{terms[corner]=textureLoad(mgResidualIn,q,0).x;}}
   textureStore(mgRhsOut,id,vec4f(mgD4Sum8(terms)/8.0));
 }
 
@@ -665,49 +867,49 @@ fn mgTrilinearPressure(fineId:vec3i)->f32{
 @compute @workgroup_size(4,4,4)
 fn mgProlongateAdd(@builtin(global_invocation_id) gid:vec3u){
   if(mgSkipCycle()){return;}
-  let id=mgActiveId(gid);if(!mgValid(id,mg.coarseDims.xyz)){return;}
+  let id=mgActiveId(gid);if(!mgValid(id,mg.coarseDims.xyz)){return;}if(mgFarL0(id)){return;}
 ${MG_PROLONGATE_ADD_BODY}
 }
 
 @compute @workgroup_size(4,4,4)
 fn mgProlongateAssign(@builtin(global_invocation_id) gid:vec3u){
   if(mgSkipCycle()){return;}
-  let id=mgActiveId(gid);if(!mgValid(id,mg.coarseDims.xyz)){return;}
+  let id=mgActiveId(gid);if(!mgValid(id,mg.coarseDims.xyz)){return;}if(mgFarL0(id)){return;}
 ${MG_PROLONGATE_ASSIGN_BODY}
 }
 
 @compute @workgroup_size(4,4,4)
 fn mgCopyPressure(@builtin(global_invocation_id) gid:vec3u){
   if(mgSkipCycle()){return;}
-  let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
+  let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}if(mgFarL0(id)){return;}
 ${MG_COPY_PRESSURE_BODY}
 }
 
 @compute @workgroup_size(4,4,4)
 fn mgClearPressure(@builtin(global_invocation_id) gid:vec3u){
   if(mgSkipCycle()){return;}
-  let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
+  let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}if(mgFarL0(id)){return;}
   textureStore(mgPressureOut,id,vec4f(0.0));
 }
 
 @compute @workgroup_size(4,4,4)
 fn mgClearMinimum(@builtin(global_invocation_id) gid:vec3u){
   if(mgSkipCycle()){return;}
-  let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
+  let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}if(mgFarL0(id)){return;}
   textureStore(mgMinimumOut,id,vec4f(-3.402823e38));
 }
 
 @compute @workgroup_size(4,4,4)
 fn mgShiftMinimum(@builtin(global_invocation_id) gid:vec3u){
   if(mgSkipCycle()){return;}
-  let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
+  let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}if(mgFarL0(id)){return;}
 ${MG_SHIFT_MINIMUM_BODY}
 }
 
 @compute @workgroup_size(4,4,4)
 fn mgAddPressure(@builtin(global_invocation_id) gid:vec3u){
   if(mgSkipCycle()){return;}
-  let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
+  let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}if(mgFarL0(id)){return;}
 ${MG_ADD_PRESSURE_BODY}
 }
 
@@ -718,10 +920,11 @@ ${MG_ADD_PRESSURE_BODY}
 fn mgExtrapolatePhiOneCell(@builtin(global_invocation_id) gid:vec3u){
   if(mgSkipCycle()){return;}
   let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
+  if(mgFarL0(id)){return;}
   if(mgTopology(id).x>1e-5){textureStore(mgPhiOut,id,vec4f(mgPhi(id)));return;}
   let e=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
   var terms:array<f32,6>;var weights:array<f32,6>;
-  for(var n=0;n<6;n+=1){let q=id+e[n];terms[n]=0.0;weights[n]=0.0;if(!mgValid(q,mg.levelDims.xyz)){continue;}let v=mgTopology(q).x;if(v>1e-5&&mgPhi(q)<0.0){terms[n]=v*mgPhi(q);weights[n]=v;}}
+  for(var n=0;n<6;n+=1){let q=id+e[n];terms[n]=0.0;weights[n]=0.0;if(!mgValid(q,mg.levelDims.xyz)||mgFarL0(q)){continue;}let v=mgTopology(q).x;if(v>1e-5&&mgPhi(q)<0.0){terms[n]=v*mgPhi(q);weights[n]=v;}}
   let sum=mgD4Sum6(terms);let weight=mgD4Sum6(weights);
   textureStore(mgPhiOut,id,vec4f(select(mgPhi(id),sum/max(weight,1e-9),weight>0.0)));
 }
@@ -730,7 +933,7 @@ override MG_MASK_FIRST:bool=true;
 @compute @workgroup_size(4,4,4)
 fn mgBakeCoefficients(@builtin(global_invocation_id) gid:vec3u){
   if(mgSkipCycle()){return;}
-  let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
+  let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}if(mgFarL0(id)){return;}
   ${neighbourMask ? `var mask=select(0u,1u,mgLiquid(id));
   let e=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
   for(var n=0u;n<6u;n+=1u){if(mgLiquid(id+e[n])){mask|=2u<<n;}}
@@ -754,7 +957,13 @@ textureStore(mgCoefficientsOut,id,vec4f(coefficients,select(0.0,1.0,mgLiquid(id)
 fn mgDownsampleSubtract(@builtin(global_invocation_id) gid:vec3u){
   if(mgSkipCycle()){return;}
   let id=mgActiveId(gid);if(!mgValid(id,mg.coarseDims.xyz)){return;}var lower=-3.402823e38;
-  for(var corner=0u;corner<8u;corner+=1u){let o=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let q=mgFineChild(id,o);lower=max(lower,textureLoad(mgMinimumIn,q,0).x-mgP(q));}
+  for(var corner=0u;corner<8u;corner+=1u){let o=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let q=mgFineChild(id,o);if(mgFarChild(q)){continue;}${wallHalo ? `
+    // Cycle lists leave unconstrained air rows unwritten, so their p is
+    // whatever that texel last held. That is sound only while p_min = -FLT_MAX
+    // absorbs it; fail the solve loudly the moment one does not.
+    let minimum=textureLoad(mgMinimumIn,q,0).x;let bound=minimum-mgP(q);
+    if(minimum<=-3.0e38&&bound>-3.0e38){atomicMax(&mgState.convergence[10],0x7f800000u);}
+    lower=max(lower,bound);}` : `lower=max(lower,textureLoad(mgMinimumIn,q,0).x-mgP(q));}`}
   textureStore(mgMinimumOut,id,vec4f(lower));
 }
 
@@ -762,14 +971,14 @@ fn mgDownsampleSubtract(@builtin(global_invocation_id) gid:vec3u){
 fn mgDownsampleMinimum(@builtin(global_invocation_id) gid:vec3u){
   if(mgSkipCycle()){return;}
   let id=mgActiveId(gid);if(!mgValid(id,mg.coarseDims.xyz)){return;}var lower=-3.402823e38;
-  for(var corner=0u;corner<8u;corner+=1u){let o=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let q=mgFineChild(id,o);lower=max(lower,textureLoad(mgMinimumIn,q,0).x);}
+  for(var corner=0u;corner<8u;corner+=1u){let o=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let q=mgFineChild(id,o);if(mgFarChild(q)){continue;}lower=max(lower,textureLoad(mgMinimumIn,q,0).x);}
   textureStore(mgMinimumOut,id,vec4f(lower));
 }
 
 @compute @workgroup_size(4,4,4)
 fn mgSmoothColour(@builtin(global_invocation_id) gid:vec3u){
   if(mgSkipCycle()){return;}
-  let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
+  let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}if(mgFarL0(id)){return;}
   let old=mgP(id);let coarseDone=(mg.control.w&2u)!=0u&&atomicLoad(&mgState.convergence[1])!=0u;
   // Pass-through cells carry the CM11a Eq. 18 projection with them. Nothing
   // reads a wrong-colour or non-liquid cell between the two colour passes
@@ -796,43 +1005,184 @@ fn mgSmoothTilesJacobi(@builtin(workgroup_id) group:vec3u,@builtin(local_invocat
   let origin=4u*vec3u(tile%d.x,(tile/d.x)%d.y,tile/(d.x*d.y));
   let id=vec3i(origin+vec3u(lane%4u,(lane/4u)%4u,lane/16u));
   if(!mgValid(id,mg.levelDims.xyz)){return;}
-  let old=mgP(id);let minimum=textureLoad(mgMinimumIn,id,0).x;
-  let coarseDone=(mg.control.w&2u)!=0u&&atomicLoad(&mgState.convergence[1])!=0u;
-  ${neighbourMask ? `let mask=mgLiquidMask(id);
-  if(coarseDone||(mask&1u)==0u){` : `if(coarseDone||!mgBakedLiquid(id)){`}
-    textureStore(mgPressureOut,id,vec4f(max(old,minimum)));return;}
-  let e=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
-  var diagonalTerms:array<f32,6>;var sumTerms:array<f32,6>;
-  for(var n=0;n<6;n+=1){let q=id+e[n];let a=mgCoefficient(id,q,u32(n/2));
-    diagonalTerms[n]=a;sumTerms[n]=select(0.0,a*mgP(q),${neighbourMask ? "((mask>>u32(n+1))&1u)!=0u" : "mgBakedLiquid(q)"});}
-  let diagonal=mgD4Sum6(diagonalTerms);let sum=mgD4Sum6(sumTerms);
-  let p=select(0.0,(sum+textureLoad(mgRhsIn,id,0).x)/diagonal,diagonal>0.0);
-  textureStore(mgPressureOut,id,vec4f(max(p,minimum)));
-}
+${MG_JACOBI_TILE_BODY}}
+${wallHalo ? `
+// The first sweep of a visit, from the cycle list with its wall-halo entries.
+@compute @workgroup_size(64)
+fn mgSmoothTilesJacobiCycle(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+  if(mgSkipCycle()){return;}
+  let at=group.x+65535u*group.y;let tiles=atomicLoad(&mgCycleDispatch[0]);
+  if(at>=tiles){
+    // A halo entry's cells are certified air rows (no liquid in the tile's
+    // neighbourhood), so the update is the pass-through projection alone and
+    // needs neither coefficients nor neighbours.
+    let id=mgHaloCell(at-tiles,lane,mg.levelDims.xyz);
+    if(!mgValid(id,mg.levelDims.xyz)){return;}
+    textureStore(mgPressureOut,id,vec4f(max(mgP(id),textureLoad(mgMinimumIn,id,0).x)));return;
+  }
+  let d=(mg.levelDims.xyz+vec3u(3))/4u;let tile=atomicLoad(&mgCycleDispatch[4u+at]);
+  let origin=4u*vec3u(tile%d.x,(tile/d.x)%d.y,tile/(d.x*d.y));
+  let id=vec3i(origin+vec3u(lane%4u,(lane/4u)%4u,lane/16u));
+  if(!mgValid(id,mg.levelDims.xyz)){return;}
+${MG_JACOBI_TILE_BODY}}` : ""}
 
 ${uniformCoarseSolverWGSL}
 
 @compute @workgroup_size(4,4,4)
 fn mgMeasureFineResidual(@builtin(global_invocation_id) gid:vec3u){
   if(mgSkipCycle()){return;}
-  let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
-  // Air values also participate in prolongation: never accept NaN/Inf there.
-  let pressure=mgP(id);
-  if((bitcast<u32>(pressure)&0x7f800000u)==0x7f800000u){
-    if(mg.control.z==1u){atomicMax(&mgState.convergence[15],0x7f800000u);}
-    else{atomicMax(&mgState.convergence[10],0x7f800000u);}return;
-  }
-  if(!mgBakedLiquid(id)){return;}
-  let e=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
-  var diagonalTerms:array<f32,6>;for(var n=0;n<6;n+=1){diagonalTerms[n]=mgCoefficient(id,id+e[n],u32(n/2));}let diagonal=mgD4Sum6(diagonalTerms);
-  if(diagonal<=0.0){return;}let residual=textureLoad(mgRhsIn,id,0).x-mgApply(id);let minimum=textureLoad(mgMinimumIn,id,0).x;let gap=max(0.0,pressure-minimum);
-  let projectsToMinimum=residual<0.0&&-residual>=gap*diagonal;let projected=max(select(abs(residual),gap*diagonal,projectsToMinimum),max(0.0,minimum-pressure)*diagonal);
-  if(mg.control.z==1u){
-    let norm=projected*params.dimsDt.w/params.physical.x;
-    // Non-finite values must never be mistaken for convergence.
-    atomicMax(&mgState.convergence[15u+0],select(0x7f800000u,bitcast<u32>(norm),norm>=0.0&&(bitcast<u32>(norm)&0x7f800000u)!=0x7f800000u&&(bitcast<u32>(residual)&0x7f800000u)!=0x7f800000u));
-    return;
-  }
-  atomicMax(&mgState.convergence[10],bitcast<u32>(projected*params.dimsDt.w/params.physical.x));atomicMax(&mgState.convergence[11],bitcast<u32>(projected/diagonal));
+  let id=mgActiveId(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}if(mgFarL0(id)){return;}
+${MG_MEASURE_BODY}
 }
 `;
+
+/**
+ * The finest-level far-field certificate, built at the start of every solve.
+ *
+ * A finest tile is QUIET when every interior cell in it has V = 0 exactly and
+ * centre phi >= h, on a step with no cut cell
+ * anywhere (lean.x) and the airborne over-capacity rule on (splashB.w). Such a
+ * cell's setup is fully determined: pressurePhi = mgFarPhi() (min(phi, h) = h),
+ * topology (1,1,1,1), extrapolated phi the same, no liquid row, no constraint,
+ * rhs 0 and p_min -FLT_MAX. A quiet tile that also touches no halo cell is
+ * CLEAN. A quiet tile holds no liquid row: its interior cells are air at +h,
+ * and a wall halo cell only turns liquid by continuing phi from a liquid open
+ * face neighbour, which is an interior cell of the same tile. A tile is FAR
+ * when it is clean and all 26 neighbours are quiet: then no liquid tile is its
+ * neighbour and it is unconstrained, so the cycle list never holds it, and
+ * every level-0 kernel skips it while every reader substitutes those
+ * values. Only the finest pressure itself, which projection reads everywhere,
+ * is still written there (zero: by mgBuildFinestRhs, or by the classifier when
+ * the rhs pass is launched over the non-FAR list).
+ *
+ * Nothing persists: the flags live in the shared arena and are rebuilt from
+ * this step's V and phi, so edits, sources and bodies need no invalidation.
+ */
+export const uniformPressureFarTilesWGSL = (cleanBase: number, farBase: number, quietHalo = true,
+  vertexTest = false, listBase?: number, zeroPressure = false): string => /* wgsl */ `
+${vertexTest ? `
+// The same certificate from the vertices: phi at a cell centre is the
+// trilinear mean of its 8 vertices, each weighted by exactly 1/8, so when
+// every vertex is >= h the rounded sum is >= h too. The converse can fail,
+// which only leaves a tile unclassified. One thread takes a 2^3 block, one
+// workgroup 2^3 tiles, and each vertex is loaded once per block.
+var<workgroup> mgFarDirtyBlock:array<atomic<u32>,8>;
+@compute @workgroup_size(4,4,4)
+fn mgClassifyFarTiles(@builtin(local_invocation_id) local:vec3u,
+ @builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+  let td=(mg.levelDims.xyz+vec3u(3u))/4u;
+  let eligible=geometricVolumeEnabled()&&params.lean.x>0.5&&params.splashB.w>0.5&&!pressureWindowLattice();
+  let block=8u*group+2u*local;let slot=(local.x/2u)+2u*((local.y/2u)+2u*(local.z/2u));
+  let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
+  if(eligible){
+    var dirty=false;
+    var vertices:array<f32,27>;
+    for(var k=0u;k<27u;k+=1u){
+      let v=vec3i(block)-vec3i(1)+vec3i(i32(k%3u),i32((k/3u)%3u),i32(k/9u));
+      vertices[k]=textureLoad(uvPhiIn,clamp(v,vec3i(0),dims()),0).x;
+    }
+    for(var c=0u;c<8u;c+=1u){
+      let o=vec3u(c&1u,(c>>1u)&1u,c>>2u);let cell=vec3i(block+o);
+      if(!mgInterior(cell,mg.levelDims.xyz)){continue;}
+      if(volume(cell-vec3i(1))!=0.0){dirty=true;}
+      for(var j=0u;j<8u;j+=1u){
+        let q=o+vec3u(j&1u,(j>>1u)&1u,j>>2u);
+        if(!(vertices[q.x+3u*(q.y+3u*q.z)]>=h)){dirty=true;}
+      }
+    }
+    if(dirty){atomicStore(&mgFarDirtyBlock[slot],1u);}
+  }${zeroPressure ? `
+  // mgBuildFinestRhs stores p = 0 on every cell. This pass already walks the
+  // whole lattice, so it takes those stores and the rhs pass runs listed.
+  for(var c=0u;c<8u;c+=1u){
+    let cell=vec3i(block+vec3u(c&1u,(c>>1u)&1u,c>>2u));
+    if(mgValid(cell,mg.levelDims.xyz)){textureStore(mgPressureOut,cell,vec4f(0.0));}
+  }` : ""}
+  workgroupBarrier();
+  if(lane<8u){
+    let tile=2u*group+vec3u(lane&1u,(lane>>1u)&1u,lane>>2u);
+    if(all(tile<td)){
+      let quiet=eligible&&atomicLoad(&mgFarDirtyBlock[lane])==0u;
+      let interiorTile=all(tile>=vec3u(1u))&&all(tile+vec3u(2u)<=td);
+      uniformScratch[${cleanBase}u+tile.x+td.x*(tile.y+td.y*tile.z)]=select(0u,1u,quiet&&interiorTile)|select(0u,2u,quiet);
+    }
+  }
+}` : `
+var<workgroup> mgFarDirty:atomic<u32>;
+@compute @workgroup_size(4,4,4)
+fn mgClassifyFarTiles(@builtin(global_invocation_id) gid:vec3u,
+ @builtin(workgroup_id) tile:vec3u,@builtin(local_invocation_index) lane:u32){
+  let td=(mg.levelDims.xyz+vec3u(3u))/4u;
+  let eligible=geometricVolumeEnabled()&&params.lean.x>0.5&&params.splashB.w>0.5&&!pressureWindowLattice();
+  let interiorTile=all(tile>=vec3u(1u))&&all(tile+vec3u(2u)<=td);
+  // Halo cells carry no test of their own: see QUIET above.
+  if(eligible&&mgInterior(vec3i(gid),mg.levelDims.xyz)){
+    let simulation=vec3i(gid)-vec3i(1);
+    let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
+    if(!(volume(simulation)==0.0&&uvPhi(vec3f(simulation)+vec3f(0.5))>=h)){atomicStore(&mgFarDirty,1u);}
+  }
+  let dirty=workgroupUniformLoad(&mgFarDirty);
+  let quiet=eligible&&dirty==0u;
+  if(lane==0u){uniformScratch[${cleanBase}u+tile.x+td.x*(tile.y+td.y*tile.z)]=select(0u,1u,quiet&&interiorTile)|select(0u,2u,quiet);}
+}`}
+@compute @workgroup_size(64)
+fn mgDilateFarTiles(@builtin(global_invocation_id) gid:vec3u){
+  let d=(mg.levelDims.xyz+vec3u(3u))/4u;let n=d.x*d.y*d.z;
+  let at=gid.x;if(at>=n){return;}
+  let t=vec3i(i32(at%d.x),i32((at/d.x)%d.y),i32(at/(d.x*d.y)));
+  var far=true;
+  for(var k=0u;k<27u;k+=1u){
+    let q=t+vec3i(i32(k%3u)-1,i32((k/3u)%3u)-1,i32(k/9u)-1);
+    if(any(q<vec3i(0))||any(q>=vec3i(d))){far=false;break;}
+    let word=uniformScratch[${cleanBase}u+u32(q.x)+d.x*(u32(q.y)+d.y*u32(q.z))];
+    if((word&${quietHalo ? "select(2u,1u,k==13u)" : "1u"})==0u){far=false;break;}
+  }
+  uniformScratch[${farBase}u+at]=select(0u,1u,far);${listBase === undefined ? "" : `
+  if(!far){let slot=atomicAdd(&mgCycleTiles[0],1u);uniformScratch[${listBase + 1}u+slot]=at;}`}
+}
+${listBase === undefined ? "" : `
+// The non-FAR list's launch. The count is kept in the arena for the listed
+// setup kernels, which cannot bind the list buffer; the host copies the launch
+// record out and clears the counter for mgBuildCycleTiles.
+@compute @workgroup_size(1)
+fn mgPublishFarList(){
+  let count=atomicLoad(&mgCycleTiles[0]);
+  uniformScratch[${listBase}u]=count;
+  atomicStore(&mgCycleTiles[1],min(count,65535u));
+  atomicStore(&mgCycleTiles[2],(count+65534u)/65535u);
+  atomicStore(&mgCycleTiles[3],1u);
+}
+fn mgFarListTile(slot:u32)->vec3u{
+  let d=(mg.levelDims.xyz+vec3u(3u))/4u;let t=uniformScratch[${listBase + 1}u+slot];
+  return vec3u(t%d.x,(t/d.x)%d.y,t/(d.x*d.y));
+}`}
+`;
+
+/**
+ * Finest setup kernels launched over the non-FAR tile list instead of the
+ * lattice: the same body per cell, one 4^3 workgroup per listed tile. Every
+ * skipped workgroup was one whose cells all returned at their FAR test.
+ */
+export function uniformPressureFarListWGSL(source: string, listBase: number, rhs = false): string {
+  const entry = (name: string) => {
+    const header = source.indexOf(`fn ${name}(`);
+    if (header < 0) throw new Error(`Listed setup lost ${name}`);
+    const open = source.indexOf("{", source.indexOf(")", header));
+    let depth = 0, close = open;
+    for (; close < source.length; close += 1) {
+      if (source[close] === "{") depth += 1;
+      else if (source[close] === "}" && --depth === 0) break;
+    }
+    const body = source.slice(open + 1, close);
+    const params = source.slice(header, open);
+    if (params !== `fn ${name}(@builtin(global_invocation_id) gid:vec3u)`) throw new Error(`Listed setup: ${name} is not lattice-addressed`);
+    return body;
+  };
+  return ["mgBuildFinestTopology", "mgExtrapolatePhiOneCell", "mgBakeCoefficients", ...(rhs ? ["mgBuildFinestRhs"] : [])].map((name) => `
+@compute @workgroup_size(4,4,4)
+fn ${name}Tiles(@builtin(workgroup_id) mgListGroup:vec3u,@builtin(local_invocation_id) mgListLocal:vec3u){
+  let slot=mgListGroup.x+65535u*mgListGroup.y;
+  if(slot>=uniformScratch[${listBase}u]){return;}
+  let gid=4u*mgFarListTile(slot)+mgListLocal;
+${entry(name)}}`).join("\n");
+}

@@ -8,9 +8,11 @@ export const UNIFORM_VOLUME_ENTRIES = [
   "uvRowsFallback", "uvRowsDivide",
   "uvPrepareSharpen", "uvProposeSharpen", "uvLimitSharpen", "uvCommitSharpen", "uvPublish",
   "uvCacheSharpenCells", "uvCacheSharpenFaces",
-  "uvBalanceMeasure", "uvBalanceReduce", "uvBalanceReduceChunks", "uvTwoLevelSeedCooperative",
+  "uvBalanceMeasure", "uvBalanceMeasureBox", "uvBalanceMeasureList", "uvBalanceReduce", "uvBalanceReduceChunks", "uvTwoLevelSeedCooperative", "uvTwoLevelSeedWindowed", "uvSolidTiles",
   "uvAgreementResidual", "uvCorrectionCapacity", "uvCorrectionTargets",
   "uvCullOrphanDust",
+  "uvClearDonorSums", "uvFinishAndClearDonorSums",
+  "uvClearSampled", "uvBuildEdgesSampled",
 ] as const;
 /** The four Sec. 3.5 sweeps that exist in a dense and a 4h work-map variant. */
 export const UNIFORM_VOLUME_SHARPEN_ENTRIES = [
@@ -50,6 +52,8 @@ export const UNIFORM_VOLUME_SHARPEN_TILE_MAP_WORD = 8;
 export const UNIFORM_VOLUME_EDGE_BYTES = 40;
 const donorTiles = uniformAbOn("donortiles");
 const donorFuse = uniformAbOn("donorfuse");
+const clearNonzero = uniformAbOn("clearnonzero");
+const gatherDry = uniformAbOn("gatherdry");
 /** E4: the half-cell solid walk and the embedded-wall terms, skipped as a
  * host-uniform condition when the scene has no cut cell anywhere. */
 const solidFreeTrace = uniformAbOn("solidfreetrace");
@@ -57,6 +61,8 @@ const solidFreeTrace = uniformAbOn("solidfreetrace");
 const phiLean = uniformAbOn("philean");
 /** E7: E3's transport reach measured per tile instead of domain-wide. */
 const tileReach = uniformAbOn("tilereach");
+/** Static solids and terrain mark SOLID instead of seeding FINE/SHELL. */
+const drySolids = uniformAbOn("drysolids");
 /** Same reconstruction; cached mode reuses the cell's eight vertex loads. */
 export function uniformVolumeTargetWGSL(cached: boolean): string {
   return /* wgsl */ `fn uvTarget(id:vec3i)->f32{
@@ -101,9 +107,15 @@ fn uvCorrectionCapacity(@builtin(global_invocation_id)gid:vec3u){
 }
 @compute @workgroup_size(4,4,4)
 fn uvCorrectionTargets(@builtin(global_invocation_id)gid:vec3u){
- let id=vec3i(gid);if(!valid(id)){return;}textureStore(gammaOut,id,vec4f(uvTarget(id)));
+ var id=vec3i(gid);if(params.cleanup.y>0.5){id=uvWorkId(gid);}if(!valid(id)){return;}textureStore(gammaOut,id,vec4f(uvTarget(id)));
 }
 
+// Once a dense step has established zero outside support, the receiver list
+// is shared by gather, orphan cleanup and target refresh. A changed dust floor
+// or scene edit forces a dense step before reusing this zero-outside invariant.
+fn uvReceiverId(g:vec3u)->vec3i{
+ if(params.cleanup.y>0.5){return uvWorkId(g);}return activeId(g);
+}
 fn uvCorner(i:u32)->vec3i{return vec3i(i32(i&1u),i32((i>>1u)&1u),i32((i>>2u)&1u));}
 fn uvDonor(i:u32,k:u32)->u32{
   // Zero-weight corners can lie outside the lattice. The old representation
@@ -372,6 +384,17 @@ fn uvShellTileAt(id:vec3i)->bool{
   let t=clamp(id/4,vec3i(0),uvCoarseDims()-vec3i(1));
   return (atomicLoad(&sharpenDeposits[uvCoarseBase()+4u*uvCoarseIndex(t)+3u])&2)!=0;
 }
+// Class bit, above the transport distance: the tile holds a cut cell of the
+// static voxel mask or terrain. Static solids do not seed FINE/SHELL (they
+// have zero face velocity, which is what the far-air arms write), so a dry
+// garden bed or tree canopy costs no extension work. The bit is dilated by one
+// tile so a vertex reads the solids among its eight incident cells in its own
+// tile's word.
+const UV_TILE_SOLID:i32=4096;
+fn uvSolidTileAt(id:vec3i)->bool{
+  ${drySolids ? `let t=clamp(id/4,vec3i(0),uvCoarseDims()-vec3i(1));
+  return (atomicLoad(&sharpenDeposits[uvCoarseBase()+4u*uvCoarseIndex(t)+3u])&UV_TILE_SOLID)!=0;` : "return false;"}
+}
 /**
  * E5's FAR AIR arm of the vertex phi advect.
  *
@@ -382,11 +405,14 @@ fn uvShellTileAt(id:vec3i)->bool{
  * 4h band; SHELL is that set dilated by at least one tile.
  *
  *  - uvEmbeddedContact / uvEmbeddedAir need a cell with open fraction <= 1e-5
- *    among the vertex's own incident cells, or on its characteristic. Such a
+ *    among the vertex's own incident cells, or on its characteristic. A body
  *    cell is a FINE seed, and the incident ones lie in tiles t-1..t, so the
- *    vertex is in SHELL. (The characteristic case is covered too: the walk
- *    stops at the FIRST solid crossed, and reaching one from outside SHELL
- *    needs the departure point inside the solid's own tile.)
+ *    vertex is in SHELL; a static one sets SOLID, dilated by one tile, which
+ *    refuses the arm directly (uvSolidTileAt). That also keeps uvBuried's
+ *    frozen vertices off this arm. The characteristic case: the air term needs
+ *    a released contact face, and release is set only by the projection's
+ *    near arm at a pressure row or airborne cell, both inside FINE; the
+ *    contact term is the incident case.
  *  - uvSourcePhi is identity on a step with no drop and no inflow, which is a
  *    host-uniform condition and is tested directly.
  *  - uvAgreementShift gathers the packed residual over base+[-4,4). The
@@ -415,7 +441,7 @@ fn uvPhiFarAir(vertex:vec3i)->bool{
   // symmetry slab, and the plane test would otherwise refuse every vertex.
   let nearWall=(vertex<vec3i(4))|(vertex>dims()-vec3i(4));
   if(nearWall.x||nearWall.y||(UNIFORM_REFERENCE_DIMENSION==3u&&nearWall.z)){return false;}
-  return !uvShellTileAt(vertex);
+  return !uvShellTileAt(vertex)&&!uvSolidTileAt(vertex);
 }
 // A vertex with no open incident cell is inside a solid, and phi there is not
 // state: no liquid can arrive, no source can be placed there and the pressure
@@ -655,11 +681,69 @@ fn uvBuildEdges(@builtin(global_invocation_id)gid:vec3u){
       let weight=w.x*w.y*w.z*min(uvOpen(id),uvOpen(q));
       uvEdges[uvEdgeAddress(index)].weight[k]=weight;uvAddDonor(linearIndex(q),weight);}}
 }
+// donorsampled. Round 0 reads the Build sums only through the fallback's
+// zero test on the receiver's own word, and a sum of positive weights is zero
+// exactly when nothing deposited. So Build stores a SAMPLED flag in that
+// decoded word instead of scattering exact limbs, and marks every tile holding
+// one of its donors (the receiver's own tile included: zero-weight corners and
+// the fallback address it). That tile list is the whole support the three
+// accumulation rounds, their decodes and the limb clear can touch; the
+// receiver list's own words are zeroed before Build sets any flag.
+fn uvStoreDecoded(i:u32,bits:i32){atomicStore(&sharpenDeposits[i],bits);}
+const UV_DONOR_TILE_MARK:i32=1<<24;
+fn uvMarkDonorTile(q:vec3i){
+  let t=clamp(q/4,vec3i(0),uvCoarseDims()-vec3i(1));let w=uvCoarsePlane(0u)+uvCoarseIndex(t);
+  if((atomicLoad(&sharpenDeposits[w])&UV_DONOR_TILE_MARK)!=0){return;}
+  if((atomicOr(&sharpenDeposits[w],UV_DONOR_TILE_MARK)&UV_DONOR_TILE_MARK)==0){uvAppendDonorWork(t);}
+}
+@compute @workgroup_size(4,4,4)
+fn uvClearSampled(@builtin(global_invocation_id)gid:vec3u){
+  let id=uvWorkId(gid);if(uvTransportSkip(id)){return;}
+  if(!valid(id)){return;}uvStoreDecoded(linearIndex(id),0);
+}
+@compute @workgroup_size(4,4,4)
+fn uvBuildEdgesSampled(@builtin(global_invocation_id)gid:vec3u){
+  let id=uvWorkId(gid);if(uvTransportSkip(id)){return;}
+  if(!valid(id)){return;}let index=linearIndex(id);
+  if(all((id&vec3i(3))==vec3i(0))){uvMarkDonorTile(id);}
+  let departure=uvTrace(vec3f(id)+vec3f(0.5),params.dimsDt.w)-vec3f(0.5);
+  let base=vec3i(floor(departure));let f=fract(departure);
+  uvEdges[uvEdgeAddress(index)].base=linearIndex(base);
+  for(var k=0u;k<9u;k++){uvEdges[uvEdgeAddress(index)].weight[k]=0.0;}
+  for(var k=0u;k<8u;k++){let o=uvCorner(k);let q=base+o;
+    let w=select(vec3f(1)-f,f,o==vec3i(1));
+    if(valid(q)&&uvOpen(id)>0.0){
+      let weight=w.x*w.y*w.z*min(uvOpen(id),uvOpen(q));
+      uvEdges[uvEdgeAddress(index)].weight[k]=weight;
+      if(bitcast<u32>(weight)!=0u){uvStoreDecoded(linearIndex(q),1);uvMarkDonorTile(q);}}}
+}
 @compute @workgroup_size(4,4,4)
 fn uvFinishDonorSums(@builtin(global_invocation_id)gid:vec3u){
   let id=uvDonorId(gid);if(!valid(id)){return;}
   ${donorTiles ? "if(uvDonorSkip(id)){return;}" : ""}
   let i=linearIndex(id);atomicStore(&sharpenDeposits[i],bitcast<i32>(uvDonorSum(i)));
+}
+// Each invocation owns one donor. Publish its sum before clearing its limbs
+// for the next scatter; the decoded plane is separate from all six limbs.
+@compute @workgroup_size(4,4,4)
+fn uvFinishAndClearDonorSums(@builtin(global_invocation_id)gid:vec3u){
+  let id=uvDonorId(gid);if(!valid(id)){return;}
+  ${donorTiles ? "if(uvDonorSkip(id)){return;}" : ""}
+  let i=linearIndex(id);atomicStore(&sharpenDeposits[i],bitcast<i32>(uvDonorSum(i)));
+  // clearnonzero: after a decode most limbs are already zero (a sum near one
+  // spans two words; air sums are zero), so store only the words that are not.
+  for(var limb=0u;limb<6u;limb++){let at=uvLimb(limb,i);
+    if(!${clearNonzero}||atomicLoad(&rigidExchange[at])!=0){atomicStore(&rigidExchange[at],0);}}
+}
+// The same support closure used by decoding contains every scatter target.
+// Scratch outside it can remain stale; newly admitted donors are cleared
+// before any deposit, including after sources, fast motion, or a scene edit.
+@compute @workgroup_size(4,4,4)
+fn uvClearDonorSums(@builtin(global_invocation_id)gid:vec3u){
+  let id=uvDonorId(gid);if(!valid(id)){return;}
+  ${donorTiles ? "if(uvDonorSkip(id)){return;}" : ""}
+  let i=linearIndex(id);
+  for(var limb=0u;limb<6u;limb++){atomicStore(&rigidExchange[uvLimb(limb,i)],0);}
 }
 @compute @workgroup_size(4,4,4)
 fn uvFallback(@builtin(global_invocation_id)gid:vec3u){
@@ -757,12 +841,12 @@ fn uvOrphanDust(id:vec3i,value:f32)->f32{
 }
 @compute @workgroup_size(4,4,4)
 fn uvCullOrphanDust(@builtin(global_invocation_id)gid:vec3u){
-  let id=activeId(gid);if(!valid(id)){return;}
+  let id=uvReceiverId(gid);if(!valid(id)){return;}
   textureStore(volumeOut,id,vec4f(uvOrphanDust(id,volume(id))));
 }
 @compute @workgroup_size(4,4,4)
 fn uvGather(@builtin(global_invocation_id)gid:vec3u){
-  let id=activeId(gid);if(!valid(id)){return;}
+  let id=uvReceiverId(gid);if(!valid(id)){return;}
   // Outside the live set both outputs are known in closed form, so neither the
   // nine-term gather nor uvTarget's eight trilinear phi probes are evaluated.
   // V is zero there by the predicate above. Gamma is zero because TRANSPORT
@@ -779,8 +863,13 @@ fn uvGather(@builtin(global_invocation_id)gid:vec3u){
   let i=linearIndex(id);var value=0.0;
   ${donorFuse ? `let a=uvEdgeAddress(i);let base=uvEdges[a].base;
   for(var k=0u;k<9u;k++){let raw=uvEdges[a].weight[k];let donor=uvDonorFrom(i,base,k,raw);
+    ${gatherDry ? `// gatherdry: a dry donor adds a signed zero, which leaves value (never -0)
+    // unchanged; the same holds when the quotient underflows and the term
+    // reads the receiver instead. Only wet donors need their decoded sum.
+    let v=volume(uvCell(donor));if(v==0.0){continue;}
     let weight=raw/max(bitcast<f32>(uvDecodedBits(donor)),1e-20);
-    value+=weight*volume(uvCell(uvDonorFrom(i,base,k,weight)));}` : `for(var k=0u;k<9u;k++){value+=uvEdges[uvEdgeAddress(i)].weight[k]*volume(uvCell(uvDonor(i,k)));}`}
+    value+=weight*select(volume(id),v,weight!=0.0);` : `let weight=raw/max(bitcast<f32>(uvDecodedBits(donor)),1e-20);
+    value+=weight*volume(uvCell(uvDonorFrom(i,base,k,weight)));`}}` : `for(var k=0u;k<9u;k++){value+=uvEdges[uvEdgeAddress(i)].weight[k]*volume(uvCell(uvDonor(i,k)));}`}
   value+=min(dropSource(id),max(0.0,uvOpen(id)-value));
   if(uvOpen(id)>0.0){value+=inflowSweptPlugSource(id,params.dimsDt.w);}
   textureStore(volumeOut,id,vec4f(uvDustFloor(value)));
@@ -816,12 +905,9 @@ fn uvSharpenTileActive(id:vec3i)->bool{
   return atomicLoad(&sharpenDeposits[uvSharpenTileIndex(id)])!=0;
 }
 var<workgroup> uvTileAdmission:atomic<u32>;
-@compute @workgroup_size(4,4,4)
-fn uvClassifySharpenTiles(@builtin(global_invocation_id)gid:vec3u,
-  @builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)tile:vec3u){
-  let cell=activeId(gid);
+fn uvClassifyTile(cell:vec3i,lane:u32,mapCell:vec3i,store:bool){
   if(lane==0u){atomicStore(&uvTileAdmission,0u);}workgroupBarrier();
-  if(valid(cell)){
+  if(store&&valid(cell)){
     let phi=uvPhi(vec3f(cell)+vec3f(0.5));
     let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
     // Negated comparison conservatively retains non-finite input as active.
@@ -839,9 +925,29 @@ fn uvClassifySharpenTiles(@builtin(global_invocation_id)gid:vec3u,
     else if(params.splash.y>1.5&&phi>0.0&&volume(cell)>0.0){atomicStore(&uvTileAdmission,1u);}
   }
   workgroupBarrier();
-  if(lane==0u){let admission=atomicLoad(&uvTileAdmission);
-    atomicStore(&sharpenDeposits[uvSharpenTileIndex(activeId(tile*4u))],i32(admission));
+  if(lane==0u&&store){let admission=atomicLoad(&uvTileAdmission);
+    atomicStore(&sharpenDeposits[uvSharpenTileIndex(mapCell)],i32(admission));
     if(admission!=0u){atomicAdd(&sharpenDeposits[2u*cellCount()+UV_SHARPEN_TILE_COUNT_WORD],1);}}
+}
+@compute @workgroup_size(4,4,4)
+fn uvClassifySharpenTiles(@builtin(global_invocation_id)gid:vec3u,
+  @builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)tile:vec3u){
+  uvClassifyTile(activeId(gid),lane,activeId(tile*4u),true);
+}
+// classifysupport. Admission needs |phi| < tuning.y*h <= 3.1h at a cell centre,
+// phi < 0, or V > 0. Before sharpening, V != 0 lies in the surface
+// correction's bounds, and a phi corner below the census's 4h band lies in the
+// phi window or among the vertices the correction moved. The host clears the
+// map, and this box -- the union of the window's cells and the correction's
+// grown box, in 4³ tiles -- visits each tile once, so the count is exact.
+@compute @workgroup_size(4,4,4)
+fn uvClassifySharpenTilesBox(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)lane:u32,@builtin(local_invocation_id)local:vec3u){
+  let b=uvBalanceWindowBase()+6u;
+  let o=vec3u(u32(atomicLoad(&sharpenDeposits[b])),u32(atomicLoad(&sharpenDeposits[b+1u])),u32(atomicLoad(&sharpenDeposits[b+2u])));
+  let e=vec3u(u32(atomicLoad(&sharpenDeposits[b+3u])),u32(atomicLoad(&sharpenDeposits[b+4u])),u32(atomicLoad(&sharpenDeposits[b+5u])));
+  let n=w.x+65535u*w.y;let count=e.x*e.y*e.z;let k=select(0u,n,n<count);let d=max(e,vec3u(1u));
+  let tile=o+vec3u(k%d.x,(k/d.x)%d.y,k/(d.x*d.y));
+  uvClassifyTile(vec3i(tile*4u+local),lane,vec3i(tile*4u),n<count);
 }
 // Geometry and the target surface are fixed throughout the eight sweeps.
 // Reuse the transport donor words as a per-page sharpening geometry cache.
@@ -1042,7 +1148,7 @@ ${tileReach ? `/**
  * end of this module.
  */
 const UV_TILE_FAR:i32=63;
-fn uvTilePack(cls:i32,dist:i32)->i32{return (cls&15)|((clamp(dist,0,63))<<4);}
+fn uvTilePack(cls:i32,dist:i32)->i32{return (cls&(15|UV_TILE_SOLID))|((clamp(dist,0,63))<<4);}
 fn uvTileDist(value:i32)->i32{return (value>>4)&63;}
 /** E3's own m(D): the whole tiles a ceil(D)+1 cell departure can cross, plus
  * the configured margin, biased by eight so negative w can mean "off". */
@@ -1084,9 +1190,12 @@ fn uvCoarseVelocityComponent(p:vec3f,component:u32)->f32{
   }
   return d4Sum8(terms);
 }
-// FINE/SHELL seeds: liquid at or above the dust floor, any solid/terrain share,
-// a source this step, or a vertex on the liquid side of the 4h band. TRANSPORT
-// excludes solid-only seeds: static boundaries do not create fluid or gamma.
+// FINE/SHELL seeds: liquid at or above the dust floor, any rigid body share,
+// a source this step, or a vertex on the liquid side of the 4h band. A static
+// voxel/terrain share sets only UV_TILE_SOLID: a solid within the fine reach of
+// liquid is FINE through the liquid's own dilation, and one farther away has
+// zero face velocity, which is exactly what the projection's far arm writes.
+// TRANSPORT excludes solid-only seeds: boundaries do not create fluid or gamma.
 // Both sets retain phi support because gather also computes uvTarget. Partial
 // open fraction covers rigid bodies and terrain without disabling the map.
 // The vertex test is ONE-SIDED (phi < band, not |phi| < band) so that every cell
@@ -1110,14 +1219,14 @@ fn uvTwoLevelSeed(@builtin(global_invocation_id)gid:vec3u){
   }
   let dust=select(params.tuning.z,1e-6,params.tuning.z<=0.0);
   let spacing=params.cellGravity.xyz;
-  var seed=false;var transportSeed=false;var displacement=0.0;
+  var seed=false;var transportSeed=false;var solid=false;var displacement=0.0;
   for(var z=0;z<4;z++){for(var y=0;y<4;y++){for(var x=0;x<4;x++){
     let id=4*t+vec3i(x,y,z);if(!valid(id)){continue;}
     // Include threshold equality: uvDustFloor discards strictly smaller values.
     let liquid=abs(volume(id))>=dust;
     let source=dropSource(id)>0.0||inflowSweptPlugSource(id,params.dimsDt.w)>0.0;
     if(liquid||source){seed=true;transportSeed=true;}
-    if(uvOpen(id)<0.99999){seed=true;}
+    if(uvOpen(id)<0.99999){${drySolids ? "if(bodySolidFractionAt(id)>0.0){seed=true;}else{solid=true;}" : "seed=true;"}}
     // E3's required reach, in cells, along the axis that moves furthest. This
     // is the start-of-step velocity, which the extension then propagates into
     // the air as copies before transport traces it, so the domain maximum taken
@@ -1129,8 +1238,8 @@ fn uvTwoLevelSeed(@builtin(global_invocation_id)gid:vec3u){
   let last=min(4*t+vec3i(4),dims());
   for(var z=4*t.z;z<=last.z;z++){for(var y=4*t.y;y<=last.y;y++){for(var x=4*t.x;x<=last.x;x++){
     if(textureLoad(uvPhiIn,vec3i(x,y,z),0).x<band){seed=true;transportSeed=true;}}}}
-  ${tileReach ? `atomicStore(&sharpenDeposits[slot+3u],uvTilePack(select(0,3,seed)|select(0,4,transportSeed),
-    select(UV_TILE_FAR,0,transportSeed)));` : `atomicStore(&sharpenDeposits[slot+3u],select(0,3,seed)|select(0,4,transportSeed));`}
+  let cls=select(0,3,seed)|select(0,4,transportSeed)|select(0,UV_TILE_SOLID,solid);
+  ${tileReach ? `atomicStore(&sharpenDeposits[slot+3u],uvTilePack(cls,select(UV_TILE_FAR,0,transportSeed)));` : `atomicStore(&sharpenDeposits[slot+3u],cls);`}
 }
 // Same census as uvTwoLevelSeed, with one 4x4x4 workgroup per tile.
 // Adjacent lanes read adjacent cells/vertices instead of each lane serially
@@ -1138,19 +1247,15 @@ fn uvTwoLevelSeed(@builtin(global_invocation_id)gid:vec3u){
 // are used, preserving the exact classes and travel bound.
 var<workgroup> uvSeedFlags:atomic<u32>;
 var<workgroup> uvSeedTravel:atomic<u32>;
-@compute @workgroup_size(4,4,4)
-fn uvTwoLevelSeedCooperative(@builtin(workgroup_id)group:vec3u,
- @builtin(local_invocation_id)local:vec3u,@builtin(local_invocation_index)lane:u32){
-  let t=vec3i(group);if(any(t>=uvCoarseDims())){return;}
+fn uvSeedTile(t:vec3i,local:vec3u,lane:u32,included:bool,outside:u32){
   let slot=uvCoarseBase()+4u*uvCoarseIndex(t);
-  let included=uvTileInWindow(t)||uvStepHasExternalSource();
-  if(lane==0u){atomicStore(&uvSeedFlags,0u);atomicStore(&uvSeedTravel,0u);}
+  if(lane==0u){atomicStore(&uvSeedFlags,outside);atomicStore(&uvSeedTravel,0u);}
   workgroupBarrier();
   let id=4*t+vec3i(local);var flags=0u;
   if(included&&valid(id)){
     let dust=select(params.tuning.z,1e-6,params.tuning.z<=0.0);
     if(abs(volume(id))>=dust||dropSource(id)>0.0||inflowSweptPlugSource(id,params.dimsDt.w)>0.0){flags=7u;}
-    if(uvOpen(id)<0.99999){flags|=3u;}
+    if(uvOpen(id)<0.99999){${drySolids ? "flags|=select(u32(UV_TILE_SOLID),3u,bodySolidFractionAt(id)>0.0);" : "flags|=3u;"}}
     let step=abs(velocity(id))*params.dimsDt.w/params.cellGravity.xyz;
     atomicMax(&uvSeedTravel,bitcast<u32>(max(step.x,max(step.y,step.z))));
   }
@@ -1170,8 +1275,49 @@ fn uvTwoLevelSeedCooperative(@builtin(workgroup_id)group:vec3u,
     let travel=atomicLoad(&uvSeedTravel);
     ${tileReach ? `atomicStore(&sharpenDeposits[slot+3u],uvTilePack(cls,
       select(UV_TILE_FAR,0,(cls&4)!=0)));` : `atomicStore(&sharpenDeposits[slot+3u],cls);`}
-    atomicMax(&sharpenDeposits[uvCoarsePlane(2u)+2u],i32(travel));
+    // Empty tiles must not contend on the single global displacement word.
+    if(travel!=0u){atomicMax(&sharpenDeposits[uvCoarsePlane(2u)+2u],i32(travel));}
   }
+}
+@compute @workgroup_size(4,4,4)
+fn uvTwoLevelSeedCooperative(@builtin(workgroup_id)group:vec3u,
+ @builtin(local_invocation_id)local:vec3u,@builtin(local_invocation_index)lane:u32){
+  let t=vec3i(group);if(any(t>=uvCoarseDims())){return;}
+  uvSeedTile(t,local,lane,uvTileInWindow(t)||uvStepHasExternalSource(),0u);
+}
+// seedwindow. Outside the phi census box, padded by the tile uvTileInWindow
+// pads by, a tile has V = 0 (every |V| >= dust is in the box), every vertex it
+// reads at or above the 4h band (nothing wrote phi there since the box's cells
+// last passed that test), and zero start-of-step velocity: the projection
+// writes zero on every face with no pressure row or airborne cell beside it,
+// and those cells are in the box. The one term left is the static solid share,
+// which uvSolidTiles caches while geometry cannot change.
+fn uvSeedWindowBase()->u32{return uvBalanceWindowBase()+12u;}
+fn uvSolidTileWord(t:vec3i)->u32{return uvSeedWindowBase()+6u+uvCoarseIndex(t);}
+@compute @workgroup_size(4,4,4)
+fn uvTwoLevelSeedWindowed(@builtin(workgroup_id)group:vec3u,
+ @builtin(local_invocation_id)local:vec3u,@builtin(local_invocation_index)lane:u32){
+  let t=vec3i(group);if(any(t>=uvCoarseDims())){return;}
+  let b=uvSeedWindowBase();
+  let lo=vec3i(atomicLoad(&sharpenDeposits[b]),atomicLoad(&sharpenDeposits[b+1u]),atomicLoad(&sharpenDeposits[b+2u]));
+  let hi=vec3i(atomicLoad(&sharpenDeposits[b+3u]),atomicLoad(&sharpenDeposits[b+4u]),atomicLoad(&sharpenDeposits[b+5u]));
+  let inPhi=all(t>=lo/4-vec3i(1))&&all(t<(hi+vec3i(3))/4+vec3i(1));
+  let window=uvTileInWindow(t);let source=uvStepHasExternalSource();
+  let outside=select(0u,u32(atomicLoad(&sharpenDeposits[uvSolidTileWord(t)])),window&&!inPhi&&!source);
+  uvSeedTile(t,local,lane,(window&&inPhi)||source,outside);
+}
+var<workgroup> uvSolidTileFlag:atomic<u32>;
+@compute @workgroup_size(4,4,4)
+fn uvSolidTiles(@builtin(workgroup_id)group:vec3u,
+ @builtin(local_invocation_id)local:vec3u,@builtin(local_invocation_index)lane:u32){
+  let t=vec3i(group);if(any(t>=uvCoarseDims())){return;}
+  if(lane==0u){atomicStore(&uvSolidTileFlag,0u);}
+  workgroupBarrier();
+  let id=4*t+vec3i(local);
+  // Bodies disable the cache, so every share here is static.
+  if(valid(id)&&uvOpen(id)<0.99999){atomicStore(&uvSolidTileFlag,${drySolids ? "u32(UV_TILE_SOLID)" : "3u"});}
+  workgroupBarrier();
+  if(lane==0u){atomicStore(&sharpenDeposits[uvSolidTileWord(t)],i32(atomicLoad(&uvSolidTileFlag)));}
 }
 // Chebyshev dilation, separated into three axis scans. Each scan preserves
 // FINE, SHELL and TRANSPORT bits with their independent support radii. Chebyshev
@@ -1238,7 +1384,8 @@ fn uvTwoLevelDilate(previous:u32,axis:u32,t:vec3i)->i32{
     dist=min(dist,max(uvTileDist(value),abs(d)));` : ""}
     if((value&1)!=0&&d>=-k&&d<=k){hit|=1;}
     if((value&2)!=0&&d>=-s&&d<=s){hit|=2;}
-    if((value&4)!=0&&d>=-m&&d<=m){hit|=4;}${donorTiles ? `
+    if((value&4)!=0&&d>=-m&&d<=m){hit|=4;}
+    if((value&UV_TILE_SOLID)!=0&&d>=-1&&d<=1){hit|=UV_TILE_SOLID;}${donorTiles ? `
     if((value&select(8,4,previous==2u))!=0&&d>=-g&&d<=g){hit|=8;}` : ""}}
   return ${tileReach ? "uvTilePack(hit,dist)" : "hit"};
 }
@@ -1260,7 +1407,8 @@ fn uvTwoLevelDilateZ(@builtin(global_invocation_id)gid:vec3u){
   // domain-wide dilation, because the extension and DONORS both run on it and
   // the field the transport trace samples does not exist yet. The narrowing
   // happens in uvTransportReachZ, after the extension has published it.
-  let hit=scanned&7;
+  let hit=scanned&(7|UV_TILE_SOLID);
+  if((scanned&8)!=0){uvAppendDonorWork(t);}
   ${donorTiles||tileReach ? `// The x plane is dead once the y scan has read it, so DONORS lands there and
   // the class word keeps exactly the three bits its other readers know. E7
   // parks its Chebyshev seed distance in the same word's bits 4..9: the only
@@ -1403,7 +1551,7 @@ fn uvTransportReachZ(@builtin(global_invocation_id)gid:vec3u){
   // then short of its own predicate and there is nothing to be exact to.
   if((word&4)!=0&&uvPostTraceReach()<=16
     &&uvTileDist(atomicLoad(&sharpenDeposits[uvCoarsePlane(0u)+index]))>uvTileRequiredReach(f32(travel))){
-    hit=word&3;
+    hit=word&~4;
   }
   atomicStore(&sharpenDeposits[uvCoarseBase()+4u*index+3u],hit);
   // The host cleared this counter again before the measure pass: the live-set
@@ -1505,6 +1653,18 @@ fn uvPublish(@builtin(global_invocation_id)gid:vec3u){
   textureStore(gammaOut,id,vec4f(open));
 }
 
+// Relax half the excess in 1/30 s, independent of how time is subdivided.
+// tau = (1/30)/ln(2). The small-x expansion avoids cancellation in 1-exp(-x).
+fn uvVolumeCorrectionFraction()->f32{
+  let steps=max(params.dimsDt.w,0.0)*30.0;
+  let x=steps*0.6931471805599453;
+  if(x<0.01){return x*(1.0-x*(0.5-x/6.0));}
+  return 1.0-exp2(-steps);
+}
+fn uvVolumeCorrectionAmount(v:f32,cap:f32)->f32{
+  // Keep the existing one-capacity-per-step ceiling for extreme overfill.
+  return min(uvVolumeCorrectionFraction()*max(0.0,v-cap),cap);
+}
 // A dedicated tail of the existing scratch buffer avoids another storage
 // binding. [rate, partial-count, (positive volume, deficit volume)...].
 // Rate is dimensionless and capped at one; RHS divides it by this step's dt.
@@ -1530,7 +1690,7 @@ fn uvBalanceMeasure(@builtin(global_invocation_id)gid:vec3u,
   if(valid(id)){
     let cap=cellOpenFraction(id);
     if(cap>1e-5&&pressurePhi(id)<0.0){
-      sums=vec2f(min(0.5*max(0.0,volume(id)-cap),cap),uvSurfaceDeficit(id));
+      sums=vec2f(uvVolumeCorrectionAmount(volume(id),cap),uvSurfaceDeficit(id));
     }
   }
   ${uniformAbOn("deadgroups") ? `// A tile with no surplus and no deficit reduces sixty-four +0 pairs to +0
@@ -1546,6 +1706,45 @@ fn uvBalanceMeasure(@builtin(global_invocation_id)gid:vec3u,
     atomicStore(&sharpenDeposits[base+3u+2u*index],bitcast<i32>(uvBalanceSums[0].y));
     if(index==0u){atomicStore(&sharpenDeposits[base+1u],i32(groups.x*groups.y*groups.z));}
   }
+}
+// balancesupport. One 4³ tile's surplus/deficit record at its dense tile
+// index, the same record uvBalanceMeasure writes for that workgroup. A record
+// is nonzero only where pressurePhi < 0 with open capacity: V != 0 or a phi
+// corner below zero. After the surface correction both lie in its padded work
+// box (grown one cell for the vertices apply may move), except V the
+// sharpening sweeps wrote, which lies on the sharpening list. The host clears
+// every record to +0 and writes the dense count first; a tile visited by both
+// entries writes the same record twice.
+fn uvBalanceTile(tile:vec3u,local:vec3u,l:u32,store:bool){
+  let id=vec3i(tile*4u+local);var sums=vec2f(0);
+  if(store&&valid(id)){
+    let cap=cellOpenFraction(id);
+    if(cap>1e-5&&pressurePhi(id)<0.0){
+      sums=vec2f(uvVolumeCorrectionAmount(volume(id),cap),uvSurfaceDeficit(id));
+    }
+  }
+  ${uniformAbOn("deadgroups") ? `let live=bitcast<vec2u>(sums);if((live.x|live.y)!=0u){atomicStore(&uvBalanceLive,1u);}
+  if(workgroupUniformLoad(&uvBalanceLive)==0u){
+    if(l==0u){uvBalanceSums[0]=vec2f(0);}
+  }else{uvBalanceSums[l]=sums;uvBalanceSum(l);}` : "uvBalanceSums[l]=sums;uvBalanceSum(l);"}
+  if(l==0u&&store){
+    let d=(vec3u(dims())+vec3u(3u))/4u;let index=tile.x+d.x*(tile.y+d.y*tile.z);let base=uvBalanceBase();
+    atomicStore(&sharpenDeposits[base+2u+2u*index],bitcast<i32>(uvBalanceSums[0].x));
+    atomicStore(&sharpenDeposits[base+3u+2u*index],bitcast<i32>(uvBalanceSums[0].y));
+  }
+}
+@compute @workgroup_size(4,4,4)
+fn uvBalanceMeasureBox(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)l:u32,@builtin(local_invocation_id)local:vec3u){
+  let b=uvBalanceWindowBase();
+  let o=vec3u(u32(atomicLoad(&sharpenDeposits[b])),u32(atomicLoad(&sharpenDeposits[b+1u])),u32(atomicLoad(&sharpenDeposits[b+2u])));
+  let e=vec3u(u32(atomicLoad(&sharpenDeposits[b+3u])),u32(atomicLoad(&sharpenDeposits[b+4u])),u32(atomicLoad(&sharpenDeposits[b+5u])));
+  let n=w.x+65535u*w.y;let count=e.x*e.y*e.z;let k=select(0u,n,n<count);let d=max(e,vec3u(1u));
+  uvBalanceTile(o+vec3u(k%d.x,(k/d.x)%d.y,k/(d.x*d.y)),local,l,n<count);
+}
+@compute @workgroup_size(4,4,4)
+fn uvBalanceMeasureList(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)l:u32,@builtin(local_invocation_id)local:vec3u){
+  let t=uvWorkListTile(w.x+65535u*w.y);let d=(vec3u(dims())+vec3u(3u))/4u;let tile=select(0u,t,t!=0xffffffffu);
+  uvBalanceTile(vec3u(tile%d.x,(tile/d.x)%d.y,tile/(d.x*d.y)),local,l,t!=0xffffffffu);
 }
 // A parallel first level replaces thousands of serial additions per lane in
 // the single-workgroup reduction. Its outputs follow the live input records,

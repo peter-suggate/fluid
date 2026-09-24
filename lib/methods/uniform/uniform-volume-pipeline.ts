@@ -97,7 +97,7 @@ const advectionControls = [
       {value:"dense",label:"Dense",hint:"The full-lattice schedule, retained so the shrink can be measured on its own."}],
     enabled:(context: FluidPipelineContext)=>context.values.twoLevelVelocity === "on"},
   {kind:"readout" as const,label:"Fine tiles",
-    hint:"4×4×4 tiles carrying liquid, a solid or a source within the fine reach. Only these run the full advection and projection.",
+    hint:"4×4×4 tiles carrying liquid, a rigid body or a source within the fine reach. Dry static solids and terrain do not count. Only these run the full advection and projection.",
     value:(context: FluidPipelineContext)=>{const map=fineMap(context);return map?`${map.fine} / ${map.total} (${map.percent}%)`:"—";}},
 ];
 const advectionChip = (context: FluidPipelineContext) => {

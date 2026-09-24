@@ -742,13 +742,43 @@ fn shellProlongNeeded(p: vec3i, targetDims: vec3i) -> bool {
   return shellTileAny(p / 2 - vec3i(1), p / 2 + vec3i(1));
 }
 
+${uniformAbOn("shellgroups") ? `// shellgroups. On a dense level dispatch a 4x4x4 workgroup covers level cells
+// 4w..4w+3, so the union of its threads' tile ranges is one box; one tile read
+// per lane decides it. No shell tile in the union means every thread would
+// take its unreachable/unneeded branch, which is what they then take.
+var<workgroup> shellGroupHit:atomic<u32>;
+fn shellGroupAny(w:vec3i,lane:u32,restriction:bool)->bool{
+  if(lane==0u){atomicStore(&shellGroupHit,0u);}
+  workgroupBarrier();
+  let base=baseDims();let sourceLevel=hierarchySourceDims();let targetLevel=hierarchyTargetDims();
+  var applicable=SHELL_HIERARCHY&&tiledExtension()&&frontParams.activeLevel==0xffffffffu;
+  var lo=vec3i(0);var hi=vec3i(0);
+  if(restriction){
+    if(frontParams.hierarchySourceUsesBaseDims!=0u){applicable=applicable&&all(base==2*targetLevel);lo=(8*w)/4;hi=(8*w+vec3i(8))/4;}
+    else{applicable=applicable&&all(base==2*sourceLevel)&&all(sourceLevel==2*targetLevel);lo=4*w;hi=4*w+vec3i(4);}
+  }else{
+    applicable=applicable&&frontParams.hierarchyTargetUsesBaseDims==0u&&all(base==2*targetLevel);
+    lo=(4*w)/2-vec3i(1);hi=(4*w+vec3i(3))/2+vec3i(1);
+  }
+  if(!applicable){if(lane==0u){atomicStore(&shellGroupHit,1u);}}
+  else{
+    let top=coarseDims()-vec3i(1);let a=clamp(lo,vec3i(0),top);let e=clamp(hi,vec3i(0),top)-a+vec3i(1);
+    for(var i=lane;i<u32(e.x*e.y*e.z);i+=64u){
+      let t=a+vec3i(i32(i%u32(e.x)),i32((i/u32(e.x))%u32(e.y)),i32(i/u32(e.x*e.y)));
+      if((tileScratch[tileTableBase()+4u*coarseIndex(t)+3u]&2u)!=0u){atomicStore(&shellGroupHit,1u);}
+    }
+  }
+  workgroupBarrier();
+  return atomicLoad(&shellGroupHit)!=0u;
+}` : ""}
 @compute @workgroup_size(4, 4, 4)
-fn restrictKnownVelocity(@builtin(global_invocation_id) gid: vec3u) {
+fn restrictKnownVelocity(@builtin(global_invocation_id) gid: vec3u${uniformAbOn("shellgroups") ? ",@builtin(workgroup_id) wid: vec3u,@builtin(local_invocation_index) lane: u32" : ""}) {
+  ${uniformAbOn("shellgroups") ? "let groupShell=shellGroupAny(vec3i(wid),lane,true);" : "let groupShell=true;"}
   let p = hierarchyActiveId(gid);
   let sourceDims = hierarchySourceDims();
   let targetDims = hierarchyTargetDims();
   if (!inBounds(p, targetDims)) { return; }
-  if(!shellRestrictReachable(p,sourceDims,targetDims)){
+  if(!groupShell||!shellRestrictReachable(p,sourceDims,targetDims)){
     if(SOURCE_AWARE_HIERARCHY){
       textureStore(outputOrigins,p,vec4u(0u));
       textureStore(outputOrigins,p+vec3i(0,0,targetDims.z),vec4u(0u));
@@ -816,7 +846,8 @@ fn prolongValue(p: vec3i) -> vec4f {
   return vec4f(values,f32(knownMask));
 }
 @compute @workgroup_size(4,4,4)
-fn prolongUnknownVelocity(@builtin(global_invocation_id) gid: vec3u) {
+fn prolongUnknownVelocity(@builtin(global_invocation_id) gid: vec3u${uniformAbOn("shellgroups") ? ",@builtin(workgroup_id) wid: vec3u,@builtin(local_invocation_index) lane: u32" : ""}) {
+  ${uniformAbOn("shellgroups") ? "if(!shellGroupAny(vec3i(wid),lane,false)){return;}" : ""}
   let p = hierarchyActiveId(gid);
   if (!inBounds(p,hierarchyTargetDims())) { return; }
   if (frontParams.hierarchyTargetUsesBaseDims != 0u && !shellAt(p)) { return; }
@@ -877,9 +908,11 @@ fn packTransportShell(@builtin(global_invocation_id) gid: vec3u) {
  * face. And the last coarse layer on the component axis maps onto the outer
  * domain wall, where the fine pack writes zero unless the wall is open (an
  * authored atmospheric +Y face); the hierarchy would otherwise publish the
- * prolonged interior value there. Interior closed faces need no such test:
- * every tile holding a partially open cell seeds, so solids are always inside
- * the fine set and their faces are never read from this table.
+ * prolonged interior value there. Interior closed faces get no such test.
+ * Moving bodies seed FINE, so their faces are never read from this table. A
+ * static voxel or terrain face is inside FINE whenever liquid is within the
+ * fine reach; farther out it is read only by a characteristic that already
+ * left the fine reach, exactly like the open air around it.
  */
 @compute @workgroup_size(4,4,4)
 fn publishCoarseVelocityTable(@builtin(global_invocation_id) gid: vec3u) {

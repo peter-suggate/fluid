@@ -1,6 +1,7 @@
 /** Production Figure 9 stage medians and final-field hashes, under the GPU lease.
  * Compare separate processes with FLUID_UNIFORM_AB_OFF=sharpenflux,edgeplanes.
- * UNIFORM_BENCH_STAGE=extension selects velocity extension.
+ * UNIFORM_BENCH_STAGE=extension selects velocity extension; census and topology
+ * isolate support discovery and tile classification.
  * UNIFORM_BENCH_PASSES=on measures individual kernels instead of stages:
  * the two timestamp modes must not overwrite one another's pass descriptors.
  */
@@ -47,7 +48,7 @@ try{
    const read=device.createBuffer({size:2048,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
    let labels:string[]=[];
    const access=solver as any;
-   const method=process.env.UNIFORM_BENCH_STAGE==="extension"?"encodeVelocityExtrapolation":"encodeGeometricVolume";
+   const method=process.env.UNIFORM_BENCH_STAGE==="topology"?"encodeSupportTopology":process.env.UNIFORM_BENCH_STAGE==="census"?"encodePhiRegion":process.env.UNIFORM_BENCH_STAGE==="extension"?"encodeVelocityExtrapolation":"encodeGeometricVolume";
    const original=access[method].bind(solver);
    access[method]=(encoder:GPUCommandEncoder,...args:unknown[])=>{
     labels=[];

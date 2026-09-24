@@ -2,7 +2,7 @@ import { uniformPressureScratchShader } from "./uniform-scratch-arena";
 import type { UniformTexturePages } from "./uniform-texture-pages";
 import {uniformPressurePageExtent,uniformPressurePageWorkgroups,uniformPressurePagedShader,uniformPressurePageAddressWGSL} from "./uniform-pressure-pages";
 import { gpuCompilationManagerFor } from "../../core/gpu-compilation-manager";
-import { uniformPressureInPlaceSmootherWGSL, uniformPressureMultigridWGSL } from "./webgpu-uniform-pressure-multigrid.wgsl";
+import { uniformPressureFarListWGSL, uniformPressureFarTilesWGSL, uniformPressureInPlaceSmootherWGSL, uniformPressureMultigridWGSL } from "./webgpu-uniform-pressure-multigrid.wgsl";
 
 import {
   UNIFORM_CM11A_RECOVERY_BATCHES, UNIFORM_CM11A_RECOVERY_SWEEPS, UNIFORM_CM11A_PHI_PRESERVATION_LEVELS,
@@ -48,20 +48,33 @@ const FUSED_VISIT_LANES = Math.max(1, Number((typeof process !== "undefined"
  */
 const FUSED_VISIT_MAX_CELLS = Math.max(0, Number((typeof process !== "undefined"
   ? process.env?.FLUID_UNIFORM_FUSED_VISIT_CELLS : undefined) ?? 1000));
+/** Measure the fine residual from the finest cycle list instead of densely. */
+const MEASURE_TILES = uniformAbOn("measuretiles");
+/** Skip the finest setup and seeds over certified far-field tiles. */
+const FAR_TILES = uniformAbOn("fartiles");
+const FAR_VERTEX = uniformAbOn("farvertex");
+const SEED_FUSE = uniformAbOn("seedfuse");
+const FAR_LIST = uniformAbOn("farlist");
+const RHS_LIST = FAR_LIST && FAR_VERTEX && uniformAbOn("rhslist");
+/** Wall tiles enter the finest cycle list as halo-face entries; see the WGSL. */
+const WALL_HALO = uniformAbOn("wallhalo");
 const MG_LEVEL_LABELS = typeof process !== "undefined"
   && process.env?.FLUID_UNIFORM_MG_LEVEL_LABELS === "1";
 
 const ENTRY_POINTS = [
   "mgBuildFinestTopology", "mgBuildFinestRhs", "mgDownsampleTopology", "mgExtrapolatePhiOneCell",
-  "mgBakeCoefficients", "mgBuildSmoothTiles", "mgPublishSmoothTiles", "mgSmoothTilesInPlace",
+  "mgBakeCoefficients", "mgBuildSmoothTiles", "mgBuildSmoothTilesSeeded", "mgPublishSmoothTiles", "mgSmoothTilesInPlace",
   "mgSmoothTilesJacobi",
   "mgBuildCycleTiles", "mgResidualTiles", "mgProlongateAddTiles", "mgProlongateAssignTiles",
   "mgCopyPressureTiles", "mgShiftMinimumTiles", "mgAddPressureTiles",
-  "mgSaveAcceptedTiles", "mgRestoreRejectedTiles",
+  "mgSaveAcceptedTiles", "mgRestoreRejectedTiles", "mgMeasureFineResidualTiles",
   "mgResidual", "mgRestrictResidual", "mgProlongateAdd", "mgProlongateAssign",
   "mgDownsampleSubtract", "mgDownsampleMinimum", "mgSmoothColour", "mgSmoothColourInPlace", "mgSmoothRowInPlace", "mgSmoothVisitInPlace", "mgSaveAcceptedQuiet", "mgRestoreRejectedQuiet",
   "mgCopyPressure", "mgClearPressure", "mgClearMinimum",
   "mgPublishCycleDispatch", "mgShiftMinimum", "mgAddPressure", "mgSolveCoarsest", "mgMeasureFineResidual", "mgCheckCycleConvergence", "mgSaveAccepted", "mgRestoreRejected", "mgFinishSafety",
+  "mgClassifyFarTiles", "mgDilateFarTiles", "mgPublishFarList",
+  "mgBuildFinestTopologyTiles", "mgExtrapolatePhiOneCellTiles", "mgBakeCoefficientsTiles", "mgBuildFinestRhsTiles",
+  "mgSmoothTilesJacobiCycle", "mgPublishSmoothCycleTiles",
 ] as const;
 type EntryPoint = typeof ENTRY_POINTS[number];
 
@@ -69,7 +82,7 @@ const ENTRY_BINDINGS: Readonly<Record<EntryPoint, readonly number[]>> = Object.f
   mgBuildFinestTopology: [0, 6, 8], mgBuildFinestRhs: [0, 2, 4, 5, 7, 12],
   mgDownsampleTopology: [0, 5, 6, 7, 8], mgExtrapolatePhiOneCell: [0, 5, 6, 7],
   mgBakeCoefficients: [0, 5, 7, 15],
-  mgBuildSmoothTiles: [0, 11, 14, 18], mgPublishSmoothTiles: [0, 18],
+  mgBuildSmoothTiles: [0, 11, 14, 18], mgBuildSmoothTilesSeeded: [0, 4, 10, 11, 12, 14, 18], mgPublishSmoothTiles: [0, 18],
   mgSmoothTilesInPlace: [0, 3, 11, 13, 14, 16, 18],
   mgSmoothTilesJacobi: [0, 1, 2, 3, 11, 13, 14, 18],
   mgBuildCycleTiles: [0, 18, 19],
@@ -77,6 +90,7 @@ const ENTRY_BINDINGS: Readonly<Record<EntryPoint, readonly number[]>> = Object.f
   mgProlongateAssignTiles: [0, 1, 2, 18], mgCopyPressureTiles: [0, 1, 2, 18],
   mgShiftMinimumTiles: [0, 1, 11, 12, 18], mgAddPressureTiles: [0, 1, 2, 9, 18],
   mgSaveAcceptedTiles: [0, 1, 2, 18], mgRestoreRejectedTiles: [0, 2, 9, 18],
+  mgMeasureFineResidualTiles: [0, 1, 3, 11, 13, 14, 17, 18],
   mgResidual: [0, 1, 3, 10, 14], mgRestrictResidual: [0, 4, 9],
   mgProlongateAdd: [0, 1, 2, 9], mgProlongateAssign: [0, 1, 2],
   mgDownsampleSubtract: [0, 1, 11, 12], mgDownsampleMinimum: [0, 11, 12],
@@ -92,6 +106,10 @@ const ENTRY_BINDINGS: Readonly<Record<EntryPoint, readonly number[]>> = Object.f
   mgPublishCycleDispatch: [0, 18],
   mgSaveAccepted: [0, 1, 2], mgRestoreRejected: [0, 2, 9],
   mgSaveAcceptedQuiet: [0, 1, 2], mgRestoreRejectedQuiet: [0, 2, 9], mgFinishSafety: [0],
+  mgClassifyFarTiles: [0, 2], mgDilateFarTiles: [0, 19], mgPublishFarList: [0, 19],
+  mgBuildFinestTopologyTiles: [0, 6, 8], mgExtrapolatePhiOneCellTiles: [0, 5, 6, 7], mgBakeCoefficientsTiles: [0, 5, 7, 15],
+  mgBuildFinestRhsTiles: [0, 2, 4, 5, 7, 12],
+  mgSmoothTilesJacobiCycle: [0, 1, 2, 3, 11, 13, 14, 18], mgPublishSmoothCycleTiles: [0, 18],
 });
 
 /**
@@ -107,7 +125,7 @@ const ENTRY_BINDINGS: Readonly<Record<EntryPoint, readonly number[]>> = Object.f
 const CYCLE_TILE_ENTRIES: ReadonlySet<EntryPoint> = new Set<EntryPoint>([
   "mgBuildCycleTiles", "mgResidualTiles", "mgProlongateAddTiles", "mgProlongateAssignTiles",
   "mgCopyPressureTiles", "mgShiftMinimumTiles", "mgAddPressureTiles",
-  "mgSaveAcceptedTiles", "mgRestoreRejectedTiles",
+  "mgSaveAcceptedTiles", "mgRestoreRejectedTiles", "mgMeasureFineResidualTiles",
 ]);
 
 const SAMPLED_BINDINGS: readonly number[] = [1, 3, 5, 7, 9, 11, 14];
@@ -243,8 +261,13 @@ export class WebGPUUniformPressureMultigrid {
   private get tileSmoothing(): boolean { return this.inPlaceSmoothing && this.smoothTileBuffers.length > 0; }
   private get cycleTiling(): boolean { return this.tileSmoothing && this.cycleTileBuffers.length > 0; }
   private cycleEntry(entry: EntryPoint): boolean { return CYCLE_TILE_ENTRIES.has(entry); }
+  /** Whether the finest cycle list carries wall-halo entries (Jacobi sweeps only). */
+  private get haloEntries(): boolean { return WALL_HALO && this.cycleTiling && this.simultaneousSmoothing; }
+
   private tileEntry(entry: EntryPoint): boolean {
-    return entry === "mgBuildSmoothTiles" || entry === "mgPublishSmoothTiles" || entry === "mgSmoothTilesInPlace" || entry === "mgSmoothTilesJacobi"
+    return entry === "mgBuildSmoothTiles" || entry === "mgBuildSmoothTilesSeeded"
+      || entry === "mgDilateFarTiles" || entry === "mgPublishFarList" || entry === "mgPublishSmoothTiles" || entry === "mgSmoothTilesInPlace" || entry === "mgSmoothTilesJacobi"
+      || entry === "mgSmoothTilesJacobiCycle" || entry === "mgPublishSmoothCycleTiles"
       || this.cycleEntry(entry);
   }
   /** GPU-produced counts for stage profiling; never read back for scheduling. */
@@ -262,14 +285,26 @@ export class WebGPUUniformPressureMultigrid {
     // origin: the host seeds every level record at zero with no clip extent and
     // the GPU finalize that would move them never runs. Every thread of every
     // level kernel was still reading five storage words to add that zero.
+    const stub="fn mgFarTile(t:u32)->bool{return false;}";
+    if(this.farTileBase!==undefined&&!uniformPressureMultigridWGSL.includes(stub)) throw new Error("mgFarTile specialisation lost its anchor");
+    const multigrid=this.farTileBase===undefined?uniformPressureMultigridWGSL:uniformPressureMultigridWGSL.replace(stub,
+      `fn mgFarTile(t:u32)->bool{return uniformScratch[${this.farTileBase+this.tileCounts[0]!}u+t]!=0u;}`)
+      +uniformPressureFarTilesWGSL(this.farTileBase,this.farTileBase+this.tileCounts[0]!,uniformAbOn("farquiet"),FAR_VERTEX,this.farListBase,this.farListBase!==undefined&&RHS_LIST);
     const smoother=this.inPlaceCapable?uniformPressureInPlaceSmootherWGSL:"";
+    if(this.farListBase!==undefined){
+      const dynamic="fn mgActiveId(gid:vec3u)->vec3i{";
+      if(!multigrid.includes(dynamic)) throw new Error("mgActiveId specialisation lost its anchor");
+      const source=multigrid.replace(dynamic,`${dynamic}\n  if(true){return vec3i(gid);}`)+smoother;
+      const listed=source+uniformPressureFarListWGSL(source,this.farListBase,RHS_LIST);
+      return this.scratchFields?uniformPressureScratchShader(listed):listed;
+    }
     if(!this.activeDispatch&&uniformAbOn("mgstaticid")){
       const dynamic="fn mgActiveId(gid:vec3u)->vec3i{";
       if(!uniformPressureMultigridWGSL.includes(dynamic)) throw new Error("mgActiveId specialisation lost its anchor");
-      const source=uniformPressureMultigridWGSL.replace(dynamic,`${dynamic}\n  if(true){return vec3i(gid);}`)+smoother;
+      const source=multigrid.replace(dynamic,`${dynamic}\n  if(true){return vec3i(gid);}`)+smoother;
       return this.scratchFields?uniformPressureScratchShader(source):source;
     }
-    return this.scratchFields?uniformPressureScratchShader(uniformPressureMultigridWGSL+smoother):uniformPressureMultigridWGSL+smoother;
+    return this.scratchFields?uniformPressureScratchShader(multigrid+smoother):multigrid+smoother;
   }
   private readonly logicalDimensions = new Map<GPUTexture,readonly [number,number,number]>();
   private pressurePublication?: GPUTexture;
@@ -334,6 +369,13 @@ export class WebGPUUniformPressureMultigrid {
   /** Lanes of the fused smoothing visit: as wide as one workgroup may be. */
   private readonly visitLanes: number;
   private inPlaceSmoothing: boolean;
+  /**
+   * Arena word offset of the finest tiles' clean flags (FAR flags follow),
+   * when the far-field certificate runs; see uniformPressureFarTilesWGSL.
+   */
+  private readonly farTileBase?: number;
+  /** Arena word of the non-FAR tile list's count; the list follows it. */
+  private readonly farListBase?: number;
 
   constructor(private readonly device: GPUDevice,
     dimensions: readonly [number, number, number],
@@ -358,7 +400,12 @@ export class WebGPUUniformPressureMultigrid {
      * conditions are checked here.
      */
     inPlaceSmoothing = false, private readonly scratchFields?: UniformTexturePages, compactSmoothing = true, private readonly reuseFinestAuthority = true, private readonly maskFirst = true, private readonly simultaneousSmoothing = programs?.simultaneousSmoothing ?? false,
-    private readonly adaptiveSolve = false) {
+    private readonly adaptiveSolve = false,
+    /**
+     * The main shader's params uniform. The list-driven measure scales its norm
+     * by dt/rho, and the full group 0 would exceed the storage-buffer budget.
+     */
+    mainParams?: GPUBuffer) {
     this.inPlaceCapable = inPlaceSmoothing && !activeDispatch && !pagedStorage && programs === undefined;
     this.inPlaceSmoothing = this.inPlaceCapable;
     this.visitLanes = Math.min(FUSED_VISIT_LANES, device.limits.maxComputeInvocationsPerWorkgroup,
@@ -428,7 +475,11 @@ export class WebGPUUniformPressureMultigrid {
           usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
         this.smoothTileBuffers.push(buffer);allocatedBytes+=buffer.size;
         if(cycleTiles){
-          const cycle=device.createBuffer({label:"Uniform pressure cycle tile list",size:16+4*count,
+          // With wall-halo entries: their count, then at most one per halo
+          // face of every boundary tile.
+          const tiles=level.dimensions.map(n=>Math.ceil(n/4));
+          const halo=WALL_HALO?4+8*(tiles[0]!*tiles[1]!+tiles[1]!*tiles[2]!+tiles[0]!*tiles[2]!):0;
+          const cycle=device.createBuffer({label:"Uniform pressure cycle tile list",size:16+4*count+halo,
             usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
           this.cycleTileBuffers.push(cycle);allocatedBytes+=cycle.size;
         }
@@ -439,10 +490,23 @@ export class WebGPUUniformPressureMultigrid {
       allocatedBytes+=this.smoothTileDispatch.size;
       // These kernels need only pressure fields and, for shared storage, the
       // arena. A minimal group 0 keeps the extra work list within device limits.
-      this.smoothTileInputLayout=device.createBindGroupLayout({entries:scratchFields?.scratch
-        ? [{binding:35,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}] : []});
-      this.smoothTileInputGroup=device.createBindGroup({layout:this.smoothTileInputLayout,entries:scratchFields?.scratch
-        ? [{binding:35,resource:{buffer:scratchFields.scratch.buffer}}] : []});
+      // The list-driven measure also reads the main params uniform (binding 6).
+      if(cycleTiles&&MEASURE_TILES&&!mainParams)throw new Error("List-driven residual measure needs the main params uniform");
+      const measureParams=cycleTiles&&MEASURE_TILES?mainParams:undefined;
+      this.smoothTileInputLayout=device.createBindGroupLayout({entries:[
+        ...(scratchFields?.scratch ? [{binding:35,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}}] : []),
+        ...(measureParams ? [{binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}] : [])]});
+      // The certificate reads and writes the shared arena, and every kernel it
+      // touches runs with the finest level on the cycle list.
+      if(cycleTiles&&FAR_TILES&&scratchFields?.scratch?.farTileOffset!==undefined){
+        this.farTileBase=scratchFields.scratch.farTileOffset;
+        // Listed launches address the lattice by tile, which needs identity
+        // ids (no level origin) and the smoother's list declarations.
+        if(FAR_LIST&&!activeDispatch&&this.inPlaceCapable&&uniformAbOn("mgstaticid")) this.farListBase=this.farTileBase+2*this.tileCounts[0]!;
+      }
+      this.smoothTileInputGroup=device.createBindGroup({layout:this.smoothTileInputLayout,entries:[
+        ...(scratchFields?.scratch ? [{binding:35,resource:{buffer:scratchFields.scratch.buffer}}] : []),
+        ...(measureParams ? [{binding:6,resource:{buffer:measureParams}}] : [])]});
     }
     // Three banks: immutable launch geometry, normal cycles, recovery cycles.
     // The final record in each bank is the single-workgroup coarse solve.
@@ -586,14 +650,23 @@ export class WebGPUUniformPressureMultigrid {
     const emptyUniformLayout = this.device.createBindGroupLayout({entries: []});
     const entries = await Promise.all(ENTRY_POINTS.filter((entryPoint) =>
       (!/InPlace$|Quiet$/.test(entryPoint) || this.inPlaceCapable) && (!this.tileEntry(entryPoint) || this.tileSmoothing)
-      && (!this.cycleEntry(entryPoint) || this.cycleTiling)).map(async (entryPoint) => [entryPoint,
+      && (!this.cycleEntry(entryPoint) || this.cycleTiling)
+      && (entryPoint !== "mgMeasureFineResidualTiles" || MEASURE_TILES)
+      && (!/FarTiles$/.test(entryPoint) || this.farTileBase !== undefined)
+      && (entryPoint !== "mgBuildSmoothTilesSeeded" || (SEED_FUSE && this.cycleTiling))
+      && (!/^mgPublishFarList$|^mg(BuildFinestTopology|ExtrapolatePhiOneCell|BakeCoefficients)Tiles$/.test(entryPoint) || this.farListBase !== undefined)
+      && (entryPoint !== "mgBuildFinestRhsTiles" || (this.farListBase !== undefined && RHS_LIST))
+      && (entryPoint !== "mgPublishSmoothCycleTiles" || (WALL_HALO && this.cycleTiling))
+      && (entryPoint !== "mgSmoothTilesJacobiCycle" || this.haloEntries)).map(async (entryPoint) => [entryPoint,
       await compiler.compileComputePipeline({ label: `Uniform CM11a - ${entryPoint}`,
         layout: this.device.createPipelineLayout({ label: `Uniform CM11a layout - ${entryPoint}`,
           bindGroupLayouts: [this.tileEntry(entryPoint) ? this.smoothTileInputLayout! : entryPoint === "mgPublishCycleDispatch" ? emptyUniformLayout : input.uniformBindGroupLayout, this.groupLayouts[entryPoint]] }),
         compute: { module: shaderModule, entryPoint,
-          ...(entryPoint === "mgBakeCoefficients" ? {constants:{MG_MASK_FIRST:Number(this.maskFirst && uniformAbOn("maskfirst"))}} : {}),
+          ...(entryPoint === "mgBakeCoefficients" || entryPoint === "mgBakeCoefficientsTiles" ? {constants:{MG_MASK_FIRST:Number(this.maskFirst && uniformAbOn("maskfirst"))}} : {}),
           ...(entryPoint === "mgBuildSmoothTiles" ? {constants:{MG_CYCLE_TILES:Number(this.cycleTiling)}} : {}),
-          ...(entryPoint === "mgBuildFinestRhs" ? {constants:{MG_REUSE_FINEST_AUTHORITY:Number(this.reuseFinestAuthority && uniformAbOn("pressureauthority"))}} : {}),
+          ...(entryPoint === "mgBuildCycleTiles" && WALL_HALO ? {constants:{MG_HALO_ENTRIES:Number(this.haloEntries)}} : {}),
+          ...(entryPoint === "mgBuildSmoothTilesSeeded" ? {constants:{MG_CYCLE_TILES:Number(this.cycleTiling)}} : {}),
+          ...(entryPoint === "mgBuildFinestRhs" || entryPoint === "mgBuildFinestRhsTiles" ? {constants:{MG_REUSE_FINEST_AUTHORITY:Number(this.reuseFinestAuthority && uniformAbOn("pressureauthority"))}} : {}),
           ...(entryPoint === "mgSmoothVisitInPlace" ? { constants: { MG_VISIT_LANES: this.visitLanes } } : {}),
           ...(entryPoint === "mgSmoothRowInPlace" || /Quiet$/.test(entryPoint)
             ? { constants: { MG_ROW_SEGMENT: ROW_SEGMENT } } : {}) } },
@@ -656,6 +729,7 @@ export class WebGPUUniformPressureMultigrid {
       encoder.clearBuffer(this.diagnostics, 0, 112);
       for(const buffer of this.smoothTileBuffers) encoder.clearBuffer(buffer,0,4);
       for(const buffer of this.cycleTileBuffers) encoder.clearBuffer(buffer,0,4);
+      if(WALL_HALO) this.cycleTileBuffers.forEach((buffer,level)=>encoder.clearBuffer(buffer,16+4*this.tileCounts[level]!,4));
     }
     const prefixEnd = this.cycleBoundaries?.[this.clampCycleBudget(cycleBudget)] ?? this.plan.length;
     let openStage: UniformCM11aPlanStage | undefined;
@@ -725,11 +799,18 @@ export class WebGPUUniformPressureMultigrid {
       if (!batch) pass.end();
       // This kernel's layout carries no group 0; rebind for whatever follows.
       else if (dispatch.entryPoint === "mgPublishCycleDispatch") sharedHasGroup0 = false;
-      if(dispatch.entryPoint === "mgPublishSmoothTiles"){
+      if(dispatch.entryPoint === "mgPublishSmoothTiles" || dispatch.entryPoint === "mgPublishSmoothCycleTiles"){
         closeShared();
         const cycle = dispatch.tileList === "cycle";
         encoder.copyBufferToBuffer((cycle ? this.cycleTileBuffers : this.smoothTileBuffers)[dispatch.activeLevel]!,4,
           this.smoothTileDispatch!,24*dispatch.activeLevel+(cycle?12:0),12);
+      }
+      if(dispatch.entryPoint === "mgPublishFarList"){
+        // The finest cycle slot carries the non-FAR launch until
+        // mgBuildCycleTiles, which counts its own list from zero.
+        closeShared();
+        encoder.copyBufferToBuffer(this.cycleTileBuffers[0]!,4,this.smoothTileDispatch!,12,12);
+        encoder.clearBuffer(this.cycleTileBuffers[0]!,0,4);
       }
       if (dispatch.coarsestCapture && this.coarsestCaptureBuffers
         && dispatch.coarsestCapture.invocation === this.coarsestCaptureBuffers.invocation) {
@@ -982,12 +1063,12 @@ export class WebGPUUniformPressureMultigrid {
         activeLevel: destinationIndex,
         cycleGate: !["mgPublishCycleDispatch", "mgCheckCycleConvergence", "mgSaveAccepted", "mgRestoreRejected", "mgFinishSafety"].includes(entryPoint)
           ? (recovering ? 2 : (planStage === "full-cycle" || planStage === "v-cycle" ? 1 : 0)) : 0,
-        residualCheckpoint: entryPoint === "mgMeasureFineResidual" && control[2] === 1,
+        residualCheckpoint: (entryPoint === "mgMeasureFineResidual" || entryPoint === "mgMeasureFineResidualTiles") && control[2] === 1,
         ...(tiles ? { tileList: tiles } : {}),
         // The builders and the one-thread publish keep their planned launch;
         // every operator dispatch takes the count the publish wrote.
-        ...(tiles && entryPoint !== "mgPublishSmoothTiles" && entryPoint !== "mgBuildSmoothTiles"
-          && entryPoint !== "mgBuildCycleTiles"
+        ...(tiles && entryPoint !== "mgPublishSmoothTiles" && entryPoint !== "mgBuildSmoothTiles" && entryPoint !== "mgBuildSmoothTilesSeeded"
+          && entryPoint !== "mgBuildCycleTiles" && entryPoint !== "mgPublishSmoothCycleTiles"
           ? { tileDispatch: 24 * destinationIndex + (tiles === "cycle" ? 12 : 0) } : {}),
         workgroups: this.pagedStorage && !this.logicalPageDispatch && dispatchDimensions.some(n=>n>1)
           ? uniformPressurePageWorkgroups(dispatchDimensions)
@@ -1025,9 +1106,31 @@ export class WebGPUUniformPressureMultigrid {
       emit(list ? `${entryPoint}Tiles` as EntryPoint : entryPoint, sourceIndex, destinationIndex,
         overrides, control, this.levels[destinationIndex]!.dimensions, list);
     };
-    emit("mgBuildFinestTopology", 0, 0, { phiOut: this.levels[0]!.phi[0],
+    // The far-field certificate for this solve, before anything reads it.
+    if (this.farTileBase !== undefined && cycleList(0)) {
+      const fine = this.levels[0]!.dimensions;
+      emit("mgClassifyFarTiles", 0, 0, { pressureOut: this.levels[0]!.pressure[0] }, [0, 0, 0, 0],
+        FAR_VERTEX ? [Math.ceil(fine[0] / 2), Math.ceil(fine[1] / 2), Math.ceil(fine[2] / 2)] : fine);
+      emit("mgDilateFarTiles", 0, 0, {}, [0, 0, 0, 0], [4 * Math.ceil(this.tileCounts[0]! / 64), 1, 1]);
+      for (const pass of result.slice(-2)) pass.cycleSetup = true;
+      if (this.farListBase !== undefined) {
+        emit("mgPublishFarList", 0, 0, {}, [0, 0, 0, 0], [1, 1, 1]);
+        result[result.length - 1]!.cycleSetup = true;
+      }
+    }
+    // Finest setup kernels over the non-FAR list: the record mgPublishFarList
+    // wrote into the finest cycle slot, which mgBuildCycleTiles republishes.
+    const farListed = this.farListBase !== undefined && cycleList(0) !== undefined;
+    const emitSetup = (entryPoint: "mgBuildFinestTopology" | "mgExtrapolatePhiOneCell" | "mgBakeCoefficients" | "mgBuildFinestRhs",
+      level: number, overrides: Partial<GroupResources>) => {
+      const listed = farListed && level === 0 && (entryPoint !== "mgBuildFinestRhs" || RHS_LIST);
+      emit(listed ? `${entryPoint}Tiles` : entryPoint, level, level, overrides);
+      // Launched from the finest cycle slot; the tag records that it runs listed.
+      if (listed) result[result.length - 1] = { ...result[result.length - 1]!, tileDispatch: 12, tileList: "cycle" };
+    };
+    emitSetup("mgBuildFinestTopology", 0, { phiOut: this.levels[0]!.phi[0],
       volumeOut: this.levels[0]!.volume[0] });
-    emit("mgBuildFinestRhs", 0, 0, { pressureOut: this.levels[0]!.pressure[0],
+    emitSetup("mgBuildFinestRhs", 0, { pressureOut: this.levels[0]!.pressure[0],
       rhsOut: originalRhs, minimumOut: this.levels[0]!.minimum[0] });
     // CM11a Algorithm 1 builds the complete raw phi/V pyramid first. Phi
     // continuation is a separate per-level operation and must never feed the
@@ -1038,14 +1141,17 @@ export class WebGPUUniformPressureMultigrid {
         volumeOut: this.levels[level + 1]!.volume[0] });
     }
     for (let level = 0; level < this.levels.length; level += 1) {
-      emit("mgExtrapolatePhiOneCell", level, level,
+      emitSetup("mgExtrapolatePhiOneCell", level,
         { phiIn: this.levels[level]!.phi[0], phiOut: this.levels[level]!.phi[1] });
       phi[level] = 1;
-      emit("mgBakeCoefficients", level, level, {
+      emitSetup("mgBakeCoefficients", level, {
         phiIn: this.levels[level]!.phi[1], coefficientsOut: this.levels[level]!.coefficients,
       });
       if(this.tileSmoothing && this.levels[level]!.dimensions.reduce((n,d)=>n*d,1)>FUSED_VISIT_MAX_CELLS){
-        emit("mgBuildSmoothTiles",level,level,{},[0,0,0,0],undefined,"liquid");
+        // The finest level's far-field seeds (below) ride on its classifier.
+        const seeded=SEED_FUSE&&level===0&&cycleList(0)!==undefined;
+        emit(seeded?"mgBuildSmoothTilesSeeded":"mgBuildSmoothTiles",level,level,seeded?{rhsOut:this.levels[0]!.rhs[1],
+          residualOut:this.levels[0]!.residual[0],minimumOut:this.levels[0]!.minimum[1] }:{},[0,0,0,0],undefined,"liquid");
         emit("mgPublishSmoothTiles",level,level,{},[0,0,0,0],[1,1,1],"liquid");
         if(cycleList(level)){
           // One thread per tile, reading the 27 classification words its
@@ -1053,7 +1159,7 @@ export class WebGPUUniformPressureMultigrid {
           // both lists are built once and shared by every cycle.
           const tiles=this.tileCounts[level]!;
           emit("mgBuildCycleTiles",level,level,{},[0,0,0,0],[4*Math.ceil(tiles/64),1,1],"liquid");
-          emit("mgPublishSmoothTiles",level,level,{},[0,0,0,0],[1,1,1],"cycle");
+          emit(WALL_HALO?"mgPublishSmoothCycleTiles":"mgPublishSmoothTiles",level,level,{},[0,0,0,0],[1,1,1],"cycle");
         }
       }
     }
@@ -1076,7 +1182,8 @@ export class WebGPUUniformPressureMultigrid {
     // These run after the bake, not beside mgBuildFinestRhs: the shared
     // scratch arena lays the finest V over pressure B, rhs B, residual A and
     // p-min B, and V is only dead once the coefficients are baked.
-    if (cycleList(0)) {
+    if (cycleList(0) && !(SEED_FUSE && this.tileSmoothing
+      && this.levels[0]!.dimensions.reduce((n,d)=>n*d,1)>FUSED_VISIT_MAX_CELLS)) {
       emit("mgClearMinimum", 0, 0, { minimumOut: this.levels[0]!.minimum[1] });
       for (const scratch of [this.levels[0]!.residual[0], this.levels[0]!.rhs[1]]) {
         emit("mgClearPressure", 0, 0, { pressureOut: scratch });
@@ -1089,7 +1196,7 @@ export class WebGPUUniformPressureMultigrid {
     const sweep = (level: number, rhs: GPUTexture, quietRows = false, tiles?: "liquid" | "cycle") => {
       for (let colour = 0; colour < 2; colour += 1) {
         if (this.simultaneousSmoothing) {
-          emit(tiles ? "mgSmoothTilesJacobi" : "mgSmoothColour", level, level,
+          emit(tiles ? (tiles === "cycle" && this.haloEntries ? "mgSmoothTilesJacobiCycle" : "mgSmoothTilesJacobi") : "mgSmoothColour", level, level,
             { rhsIn: rhs }, [0, 0, colour, 0], this.levels[level]!.dimensions, tiles);
           flipPressure(level);
         } else if (this.inPlaceSmoothing) {
@@ -1174,13 +1281,24 @@ export class WebGPUUniformPressureMultigrid {
       emitOperator("mgAddPressure", 0, 0, { residualIn: backup }); flipPressure(0);
       min[0] = 0;
     };
+    /**
+     * The fine residual norm, from the cycle list wherever the finest level
+     * has one: outside it pressure is the zero the setup stored and no row is
+     * liquid, and every contribution is an order-free atomicMax.
+     */
+    const measureTiles = MEASURE_TILES;
+    const emitMeasure = (overrides: Partial<GroupResources>, control: readonly [number, number, number, number] = [0, 0, 0, 0]) => {
+      const list = measureTiles ? cycleList(0) : undefined;
+      emit(list ? "mgMeasureFineResidualTiles" : "mgMeasureFineResidual", 0, 0, overrides, control,
+        this.levels[0]!.dimensions, list);
+    };
     const checkpoint = () => {
       // Canonicalize before deciding to stop. All later cycle writes are gated,
       // so the final projection always sees the last completed cycle in A.
       if (p[0] !== 0) {
         emitOperator("mgCopyPressure", 0, 0, { pressureOut: this.levels[0]!.pressure[0] }); p[0] = 0;
       }
-      emit("mgMeasureFineResidual", 0, 0, { rhsIn: originalRhs }, [0, 0, 1, 0]);
+      emitMeasure({ rhsIn: originalRhs }, [0, 0, 1, 0]);
       emit("mgCheckCycleConvergence", 0, 0, {}, [0, 0, recovering ? 4 : planStage === "full-cycle" ? 2 : 3, 0], [1, 1, 1]);
       // These commits run even when the decision has just stopped the solver.
       // Dedicated storage cannot alias Full-Cycle or V-cycle scratch.
@@ -1197,7 +1315,7 @@ export class WebGPUUniformPressureMultigrid {
     };
     // Where a lagged budget may cut. Entry 0 is the end of setup; entry k is
     // the end of cycle k, which is always a checkpoint.
-    emit("mgMeasureFineResidual", 0, 0, { rhsIn: originalRhs }, [0, 0, 1, 0]);
+    emitMeasure({ rhsIn: originalRhs }, [0, 0, 1, 0]);
     emit("mgCheckCycleConvergence", 0, 0, {}, [0, 0, 0, 0], [1, 1, 1]);
     // Dense: the finish section restores from this field with a dense kernel,
     // so its far field has to hold the zero the finest pressure carries there
@@ -1235,7 +1353,7 @@ export class WebGPUUniformPressureMultigrid {
     emitOperator("mgRestoreRejected", 0, 0, { pressureOut: this.levels[0]!.pressure[0], residualIn: this.acceptedPressure }, [0, 0, 0, 1]);
     emit("mgFinishSafety", 0, 0, {}, [0, 0, 0, 0], [1, 1, 1]);
     if (p[0] !== 0) { emitOperator("mgCopyPressure", 0, 0, { pressureOut: this.levels[0]!.pressure[0] }); p[0] = 0; }
-    emit("mgMeasureFineResidual", 0, 0, {
+    emitMeasure({
       pressureIn: this.levels[0]!.pressure[0], rhsIn: originalRhs,
       phiIn: this.levels[0]!.phi[phi[0]], volumeIn: this.levels[0]!.volume[0],
       minimumIn: this.levels[0]!.minimum[min[0]],

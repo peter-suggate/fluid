@@ -29,6 +29,7 @@ impl Advect<'_> {
             && !self.external
             && (0..2).all(|a| vertex[a] >= 4 && vertex[a] <= self.g.dims[a] as i32 - 4)
             && !self.e.shell_at(vertex)
+            && !self.e.solid_at(vertex)
     }
 
     /// uvClosedWallPhi.

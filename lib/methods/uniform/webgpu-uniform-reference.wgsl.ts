@@ -89,6 +89,7 @@ struct Params {
   // its own momentum.
   splashB: vec4f,
   // x: extra dilute orphan floor; zero disables cleanup.
+  // y: certified receiver-list dispatch for gather, cleanup and targets.
   cleanup: vec4f,
 }
 @group(0) @binding(0) var velocityIn: texture_3d<f32>;
@@ -872,7 +873,7 @@ fn pressureFaceVolumeFractionShared(id:vec3i,axis:u32)->f32{
 fn storeExtrapolationAuthority(id:vec3i){if(!valid(id)){return;}
   textureStore(volumeOut,id,vec4f(${geometric ? "uvAirborneAuthority(id,0.5-pressurePhi(id)/min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z)))" : "pressureDensity(id)"}));
   textureStore(velocityOut,id,vec4f(
-    ${geometric ? "pressureFaceVolumeFraction(id,0u),pressureFaceVolumeFraction(id,1u),pressureFaceVolumeFraction(id,2u)" : "faceOpenFraction(id,0u),faceOpenFraction(id,1u),faceOpenFraction(id,2u)"},0.0));
+    ${geometric ? "pressureFaceVolumeFraction(id,0u),pressureFaceVolumeFraction(id,1u),pressureFaceVolumeFraction(id,2u)" : "faceOpenFraction(id,0u),faceOpenFraction(id,1u),faceOpenFraction(id,2u)"},${geometric ? "cellOpenFraction(id)" : "0.0"}));
 }
 @compute @workgroup_size(4,4,4)
 fn buildExtrapolationAuthority(@builtin(global_invocation_id) gid:vec3u){storeExtrapolationAuthority(activeId(gid));}
@@ -1232,7 +1233,7 @@ fn uvPredictionLive(id:vec3i,axis:u32)->bool{
 fn semiLagrangianAdvection(@builtin(global_invocation_id) gid:vec3u){
   let id=activeId(gid);if(!valid(id)){return;}${slFarSkip ? "" : "carryBoundaryVelocity(id);"}${geometric ? `
   // Experiment E2b. Outside the fine tiles no cell within eight cells carries
-  // liquid, a solid or a source, so the projection below rewrites every
+  // liquid, a rigid body or a source, so the projection below rewrites every
   // component of this cell: a face keeps its advected value only when it or its +axis
   // neighbour owns a pressure row. The three backward traces and the force term
   // are therefore dead work. Carry V; CM11a initializes its own pressure seed.
@@ -1375,7 +1376,7 @@ fn divergenceAt(id:vec3i,checkSolid:bool)->f32{
 // RHS can consume the exact interface/capacity already built for its finest
 // pressure row. No field changes between topology construction and RHS.
 fn volumeCorrectionDivergenceFromAuthority(id:vec3i,cap:f32,phi:f32)->f32{
-  ${geometric ? `let v=volume(id);let positive=min(0.5*max(0.0,v-cap),cap);
+  ${geometric ? `let v=volume(id);let positive=uvVolumeCorrectionAmount(v,cap);
   var deficit=0.0;
   if(cap>1e-5&&v<=cap&&phi<0.0){deficit=max(0.0,textureLoad(gammaIn,id,0).x-v);}
   let rate=bitcast<f32>(atomicLoad(&sharpenDeposits[uvBalanceBase()]));
@@ -1386,7 +1387,7 @@ fn volumeCorrectionDivergenceFromAuthority(id:vec3i,cap:f32,phi:f32)->f32{
 // divergence (lambda = 0.5, eta = 1 per the paper), divided by dx, so the
 // pressure solve pushes the excess out.
 fn volumeCorrectionDivergence(id: vec3i) -> f32 {
-  ${geometric ? `let positive=min(0.5*max(0.0,volume(id)-cellOpenFraction(id)),cellOpenFraction(id));
+  ${geometric ? `let positive=uvVolumeCorrectionAmount(volume(id),cellOpenFraction(id));
   let rate=bitcast<f32>(atomicLoad(&sharpenDeposits[uvBalanceBase()]));return (positive-rate*uvSurfaceDeficit(id))/max(params.dimsDt.w,1e-12);` : `
   // Preserve CM12's calibrated small-excess slope exactly:
   // min(lambda * (rho' - 1), eta) / dx with lambda=0.5 and eta=1.
@@ -1435,9 +1436,11 @@ fn geometricProjectedFace(id:vec3i,axis:u32,predicted:f32)->f32{
 fn project(@builtin(global_invocation_id) gid: vec3u) {
   let id=activeId(gid); if (!valid(id)) { return; }${geometric ? `
   // Experiment E2b, the same tile set. A cell outside the fine tiles has no
-  // pressure row and no liquid or solid neighbour, so every branch below lands
+  // pressure row and no liquid or body neighbour, so every branch below lands
   // on the far-air arm: each open face is set to zero, and a boundary face of a
-  // cell with no row is set to zero too. Write that result directly and skip
+  // cell with no row is set to zero too. A static voxel or terrain face may be
+  // out here (it no longer seeds FINE); its face data is zero velocity, the
+  // same value. Write that result directly and skip
   // the face data, the pressure taps and the ghost-fluid fractions.
   if(params.twoLevel.z>0.5&&!uvTwoLevelFineAt(vec3f(id)+vec3f(0.5))){
     textureStore(velocityOut,id,vec4f(0.0));storeBoundaryVelocity(id,vec3f(0.0));
@@ -2030,6 +2033,36 @@ fn geometricCensusInWindow(id:vec3i)->bool{
   return all(id>=low)&&all(id<high);
 }
 ` : ""}
+// Dispatch only the previous certified support plus the existing 8-cell
+// census margin. Sources and edits disable geometricCensusWindowed, restoring
+// the dense scan. Align to 4 cells so summary tiles retain identical padding.
+fn phiCensusLow()->vec3i{
+  ${geometric ? `if(geometricCensusWindowed()){
+    return max(vec3i(0),vec3i(vec3u(activeRegion[7],activeRegion[8],activeRegion[9]))-vec3i(8))/4*4;
+  }` : ""}
+  return vec3i(0);
+}
+@compute @workgroup_size(1)
+fn planPhiCensus(){
+  var high=dims();
+  ${geometric ? `if(geometricCensusWindowed()){
+    high=min(high,vec3i(vec3u(activeRegion[10],activeRegion[11],activeRegion[12]))+vec3i(8));
+  }` : ""}
+  let groups=vec3u(max(vec3i(1),(high-phiCensusLow()+vec3i(3))/4));
+  activeScratch[0]=groups.x;activeScratch[1]=groups.y;activeScratch[2]=groups.z;
+}
+@compute @workgroup_size(4,4,4)
+fn scanPhiSupport(
+  @builtin(global_invocation_id) gid:vec3u,
+  @builtin(local_invocation_index) localIndex:u32,
+  @builtin(workgroup_id) workgroupId:vec3u,
+  @builtin(num_workgroups) groupCount:vec3u,
+){
+  let id=vec3i(gid)+phiCensusLow();let inDomain=valid(id);
+  let source=uniformInflowWindowSeed(id)||(inDomain&&dropSource(id)>0.0);
+  let wet=${geometric ? "source||((!geometricCensusWindowed()||geometricCensusInWindow(id))&&geometricActiveSeed(id))" : "inDomain&&(volume(id)>1e-5||source)"};
+  writeActiveWorkgroupSummary(id,wet,localIndex,workgroupId,groupCount);
+}
 @compute @workgroup_size(4,4,4)
 fn scanExternalActiveSources(
   @builtin(global_invocation_id) gid:vec3u,
@@ -2095,14 +2128,14 @@ fn reduceActiveRegionSummaries(@builtin(local_invocation_index) lane:u32){
 }
 @compute @workgroup_size(256)
 fn reduceExternalActiveRegionSummaries(@builtin(local_invocation_index) lane:u32){
-  reduceActiveSummaryRange((vec3u(dims())+vec3u(3u))/4u,lane,false);
+  reduceActiveSummaryRange(vec3u(activeScratch[ACTIVE_SCAN_GROUPS_WORD],activeScratch[ACTIVE_SCAN_GROUPS_WORD+1u],activeScratch[ACTIVE_SCAN_GROUPS_WORD+2u]),lane,false);
 }
 // The phi census, padded tile by tile: each 4h tile's wet box is widened by
 // its OWN per-side travel before the union, so one fast jet pads only the
 // sky it can reach instead of every face of the liquid's bounding box.
 @compute @workgroup_size(256)
 fn reducePhiSupportSummaries(@builtin(local_invocation_index) lane:u32){
-  reduceActiveSummaryRange((vec3u(dims())+vec3u(3u))/4u,lane,${geometric});
+  reduceActiveSummaryRange(vec3u(activeScratch[ACTIVE_SCAN_GROUPS_WORD],activeScratch[ACTIVE_SCAN_GROUPS_WORD+1u],activeScratch[ACTIVE_SCAN_GROUPS_WORD+2u]),lane,${geometric});
 }
 fn activeCeilDiv(value:u32,divisor:u32)->u32{return (value+divisor-1u)/divisor;}
 @compute @workgroup_size(1)
@@ -2306,10 +2339,30 @@ ${geometric ? `
     +select(0u,1u,violationAxes!=0u);
   activeScratch[ACTIVE_VIOLATION_AXES_WORD]=violationAxes;
 }
+// Reduce integer receipts per workgroup before touching the four global
+// counters. Integer sums and maxima preserve the previous quantization exactly.
+var<workgroup> diagnosticLanes:array<vec4u,64>;
 @compute @workgroup_size(4,4,4)
-fn reduceDiagnostics(@builtin(global_invocation_id) gid:vec3u){let id=activeId(gid);if(!valid(id)){return;}let represented=surfaceOccupancy(id);let conservative=volume(id);atomicAdd(&reductions[0],u32(represented*2048.0+0.5));if(surfaceLiquid(id)){atomicMax(&reductions[1],u32(id.x+1));}let speed=length(faceVelocity(id));atomicMax(&reductions[2],bitcast<u32>(speed));atomicAdd(&reductions[3],u32(${geometric ? "max(conservative,0.0)" : "clamp(conservative,0.0,8.0)"}*2048.0+0.5));}
+fn reduceDiagnostics(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
+ let id=activeId(gid);var receipt=vec4u(0);
+ if(valid(id)){
+  let represented=surfaceOccupancy(id);let conservative=volume(id);
+  receipt=vec4u(u32(represented*2048.0+0.5),select(0u,u32(id.x+1),surfaceLiquid(id)),
+    bitcast<u32>(length(faceVelocity(id))),u32(${geometric ? "max(conservative,0.0)" : "clamp(conservative,0.0,8.0)"}*2048.0+0.5));
+ }
+ diagnosticLanes[lane]=receipt;workgroupBarrier();
+ for(var stride=32u;stride>0u;stride/=2u){
+  if(lane<stride){let a=diagnosticLanes[lane];let b=diagnosticLanes[lane+stride];
+   diagnosticLanes[lane]=vec4u(a.x+b.x,max(a.y,b.y),max(a.z,b.z),a.w+b.w);
+  }workgroupBarrier();
+ }
+ if(lane==0u){let r=diagnosticLanes[0];
+  if(r.x!=0u){atomicAdd(&reductions[0],r.x);}if(r.y!=0u){atomicMax(&reductions[1],r.y);}
+  if(r.z!=0u){atomicMax(&reductions[2],r.z);}if(r.w!=0u){atomicAdd(&reductions[3],r.w);}
+ }
+}
 ${uniformPageDomainWGSL(domain)}
-${geometric ? `fn uvDonorId(g:vec3u)->vec3i{return ${domain ? "pageDomainCell(g)" : "vec3i(g)"};}\n` + uniformVolumePagesWGSL(pages) + volumeWGSL : ""}
+${geometric ? `fn uvDonorId(g:vec3u)->vec3i{return ${domain ? "pageDomainCell(g)" : pages?.work && pages.nativeRecords && uniformAbOn("donortiles") ? "uvDonorWorkId(g)" : "vec3i(g)"};}\n` + uniformVolumePagesWGSL(pages) + volumeWGSL : ""}
 `; }
 
 function specializeFullLattice(source: string): string {

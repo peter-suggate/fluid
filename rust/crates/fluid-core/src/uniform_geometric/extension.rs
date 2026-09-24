@@ -9,6 +9,10 @@ const INF: f32 = 65504.0;
 pub const FINE: u8 = 1;
 pub const SHELL: u8 = 2;
 pub const TRANSPORT: u8 = 4;
+/// UV_TILE_SOLID, dilated by one tile: a static cut cell touches the tile.
+pub const SOLID: u8 = 8;
+/// UV_TILE_SOLID in the packed scan word, above the transport distance.
+const SOLID_WORD: i32 = 4096;
 const TILE_FAR: i32 = 63;
 
 /// Host gates and reaches (webgpu-uniform-reference.ts writeParams).
@@ -70,7 +74,7 @@ fn m0(d: f32) -> i32 {
     ((d.max(0.0).ceil() + 1.0) / 4.0).ceil() as i32
 }
 fn pack(cls: i32, dist: i32) -> i32 {
-    (cls & 15) | (dist.clamp(0, 63) << 4)
+    (cls & (15 | SOLID_WORD)) | (dist.clamp(0, 63) << 4)
 }
 fn tile_dist(value: i32) -> i32 {
     (value >> 4) & 63
@@ -148,8 +152,9 @@ fn seed_and_dilate(
                 if v.abs() >= dust || (with_sources && sources.at(d[0] * y + 4 * tx + k)) {
                     f |= 7;
                 }
+                // A static cut cell marks SOLID only; see uvTwoLevelSeed.
                 if c < 0.99999 {
-                    f |= 3;
+                    f |= SOLID_WORD;
                 }
             }
             row[tx] |= f;
@@ -195,24 +200,24 @@ fn seed_and_dilate(
         let mut out = vec![0; source.len()];
         let len = cd[axis];
         let (step, line_step) = if axis == 0 { (1, cd[0]) } else { (cd[0], 1) };
-        let masks = [1, 2, 4, if first { 4 } else { 8 }];
-        let reach = [k, s, m, reach_g].map(|v| v.min(r));
+        let masks = [1, 2, 4, if first { 4 } else { 8 }, SOLID_WORD];
+        let reach = [k, s, m, reach_g, 1].map(|v| v.min(r));
         let ring = r.min(TILE_FAR) as usize;
-        let mut nearest = vec![[i32::MAX; 4]; len];
+        let mut nearest = vec![[i32::MAX; 5]; len];
         for line in 0..cd[1 - axis] {
             let at = |x: usize| source[line * line_step + x * step];
-            let mut last = [None; 4];
+            let mut last = [None; 5];
             for (x, nearest) in nearest.iter_mut().enumerate() {
-                for b in 0..4 {
+                for b in 0..5 {
                     if at(x) & masks[b] != 0 {
                         last[b] = Some(x);
                     }
                     nearest[b] = last[b].map_or(i32::MAX, |q| (x - q) as i32);
                 }
             }
-            let mut next = [None; 4];
+            let mut next = [None; 5];
             for (x, nearest) in nearest.iter_mut().enumerate().rev() {
-                for b in 0..4 {
+                for b in 0..5 {
                     if at(x) & masks[b] != 0 {
                         next[b] = Some(x);
                     }
@@ -222,7 +227,10 @@ fn seed_and_dilate(
                 }
             }
             for (x, nearest) in nearest.iter().enumerate() {
-                let hit = (0..4).fold(0, |hit, b| hit | (((nearest[b] <= reach[b]) as i32) << b));
+                let hit = (0..5).fold(0, |hit, b| {
+                    let bit = if b == 4 { SOLID_WORD } else { 1 << b };
+                    hit | if nearest[b] <= reach[b] { bit } else { 0 }
+                });
                 let mut dist = TILE_FAR;
                 let mut a = 0;
                 while a <= ring && (a as i32) < dist {
@@ -242,7 +250,10 @@ fn seed_and_dilate(
     // The z scan of a one-layer lattice is the identity.
     let scanned = scan(&scan(&seed, 0, true), 1, false);
     Tiles {
-        classes: scanned.iter().map(|&w| (w & 7) as u8).collect(),
+        classes: scanned
+            .iter()
+            .map(|&w| (w & 7) as u8 | if w & SOLID_WORD != 0 { SOLID } else { 0 })
+            .collect(),
         distance: scanned.iter().map(|&w| tile_dist(w) as u8).collect(),
         displacement,
     }
@@ -971,7 +982,7 @@ impl Extension {
                     if classes[i] & TRANSPORT != 0
                         && tiles.distance[i] as i32 > t.required_reach(reach[i] as f32)
                     {
-                        classes[i] &= 3;
+                        classes[i] &= !TRANSPORT;
                     }
                 }
             }
@@ -1017,6 +1028,10 @@ impl Extension {
     /// uvTwoLevelFineAt, true everywhere with the sampler off.
     pub fn fine_at(&self, p: [f32; 2]) -> bool {
         !self.two_level.enabled || self.classes[self.tile_of(p)] & FINE != 0
+    }
+    /// uvSolidTileAt.
+    pub fn solid_at(&self, p: [i32; 2]) -> bool {
+        self.two_level.enabled && self.classes[self.tile_of(p.map(|v| v as f32))] & SOLID != 0
     }
     pub fn shell_at(&self, p: [i32; 2]) -> bool {
         !self.two_level.enabled || self.classes[self.tile_of(p.map(|v| v as f32))] & SHELL != 0

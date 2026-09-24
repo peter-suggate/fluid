@@ -567,7 +567,7 @@ impl World {
             }
         }
         let rate = if self.options.surface_deficit_balancing == "on" {
-            balance_rate(g, &mut s)
+            balance_rate(g, &mut s, dt)
         } else {
             0.0
         };
@@ -758,6 +758,21 @@ fn divergence(g: &Grid, p: [i32; 2], check_solid: bool, vi: f32) -> f32 {
     (terms[0] + terms[1]) + (terms[2] + terms[3])
 }
 
+// Match uvVolumeCorrectionFraction: half the excess relaxes in 1/30 s.
+fn volume_correction_fraction(dt: f32) -> f32 {
+    let steps = dt.max(0.0) * 30.0;
+    let x = steps * std::f32::consts::LN_2;
+    if x < 0.01 {
+        x * (1.0 - x * (0.5 - x / 6.0))
+    } else {
+        1.0 - (-steps).exp2()
+    }
+}
+
+fn volume_correction_amount(v: f32, cap: f32, dt: f32) -> f32 {
+    (volume_correction_fraction(dt) * (v - cap).max(0.0)).min(cap)
+}
+
 // reference.wgsl volumeCorrectionDivergenceFromAuthority. The deficit target
 // is the sharpened surface fraction gammaA.
 fn volume_correction(
@@ -770,7 +785,7 @@ fn volume_correction(
     dt: f32,
 ) -> f32 {
     let v = g.volume[i];
-    let positive = (0.5 * (v - cap).max(0.0)).min(cap);
+    let positive = volume_correction_amount(v, cap, dt);
     let deficit = if cap > 1e-5 && v <= cap && phi < 0.0 {
         (target[i] - v).max(0.0)
     } else {
@@ -808,7 +823,7 @@ fn lane_reduce(records: &[[f32; 2]]) -> [f32; 2] {
 // uv.wgsl uvBalanceMeasure with its reductions. One record per 4x4 tile, lane
 // x + 4y; above 1024 records the chunk pass reduces each 1024 first. A tile
 // with no liquid lane sums zeros.
-fn balance_rate(g: &Grid, s: &mut Scratch) -> f32 {
+fn balance_rate(g: &Grid, s: &mut Scratch, dt: f32) -> f32 {
     let tiles = g.dims.map(|n| n.div_ceil(4));
     let halo = g.dims[0] + 2;
     s.records.clear();
@@ -830,7 +845,7 @@ fn balance_rate(g: &Grid, s: &mut Scratch) -> f32 {
                     } else {
                         (s.target[i] - v).max(0.0)
                     };
-                    *lane = [(0.5 * (v - cap).max(0.0)).min(cap), deficit];
+                    *lane = [volume_correction_amount(v, cap, dt), deficit];
                     live = true;
                 }
             }
@@ -850,5 +865,34 @@ fn balance_rate(g: &Grid, s: &mut Scratch) -> f32 {
         (total[0] * (1.0 / total[1])).min(1.0)
     } else {
         0.0
+    }
+}
+
+#[cfg(test)]
+mod correction_time_tests {
+    use super::*;
+
+    #[test]
+    fn correction_half_life_is_independent_of_subdivision() {
+        assert_eq!(volume_correction_fraction(1.0 / 30.0), 0.5);
+        for count in [1, 2, 8, 32, 240] {
+            let dt = (1.0 / 30.0) / count as f32;
+            let mut excess = 1.0;
+            for _ in 0..count {
+                excess -= volume_correction_amount(1.0 + excess, 1.0, dt);
+            }
+            assert!((excess - 0.5).abs() < 1e-5, "{count}: {excess}");
+        }
+    }
+
+    #[test]
+    fn tiny_step_rate_is_finite_and_large_errors_are_capped() {
+        let dt = 1e-8;
+        let rate = volume_correction_fraction(dt) / dt;
+        assert!((rate - 30.0 * std::f32::consts::LN_2).abs() < 1e-4);
+        for dt in [1.0 / 240.0, 1.0 / 30.0, 1.0 / 15.0] {
+            assert_eq!(volume_correction_amount(100.0, 1.0, dt), 1.0);
+            assert_eq!(volume_correction_amount(0.5, 1.0, dt), 0.0);
+        }
     }
 }

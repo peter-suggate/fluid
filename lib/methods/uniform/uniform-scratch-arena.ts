@@ -13,6 +13,8 @@ export class UniformScratchArena {
   readonly donorBytes: number;
   readonly sharpenBaseWords: number;
   readonly conditioningBytes: number;
+  /** Word offset of the finest pressure tiles' clean/FAR flags, when enabled. */
+  readonly farTileOffset?: number;
   private readonly offsets = new Map<string, number>();
   constructor(device: GPUDevice, readonly dims: readonly [number,number,number], edgeBytes: number, retainDiagnostics=false) {
     const tiles=dims.reduce((n,d)=>n*Math.ceil(d/4),1);
@@ -55,7 +57,13 @@ export class UniformScratchArena {
     this.edgeBytes=edgeBytes;
     this.donorOffset=Math.ceil(edgeBytes/256)*256;
     this.donorBytes=uniformDonorSliceWords(dims)*4;
-    this.buffer=device.createBuffer({label:"Uniform shared stage scratch",size:Math.max(extensionEnd*4,pressureWords*4,this.donorOffset+this.donorBytes),
+    // Pressure far-tile certificate: one clean and one FAR word per finest
+    // 4^3 pressure tile, written and read inside the pressure stage only. It
+    // sits past every other range so no stage's live data can overlap it.
+    const end=Math.max(extensionEnd*4,pressureWords*4,this.donorOffset+this.donorBytes);
+    const pressureTiles=dims.reduce((n,d)=>n*Math.ceil((d+2)/4),1);
+    this.farTileOffset=uniformAbOn("fartiles")?Math.ceil(end/16)*4:undefined;
+    this.buffer=device.createBuffer({label:"Uniform shared stage scratch",size:this.farTileOffset===undefined?end:4*this.farTileOffset+12*pressureTiles+16,
       usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
   }
   offset(label:string):number|undefined{return this.offsets.get(label);}
@@ -107,11 +115,12 @@ export function uniformPressureScratchShader(source:string):string {
 export function uniformVolumeScratchShader(source:string,sharpenBaseWords:number,conditioningBytes:number):string {
   // Once decoding finishes, no pass needs the exact limbs again until the
   // next clear. Store each rounded sum in its own low limb, in place.
-  let result=source.replace("atomicStore(&sharpenDeposits[i],bitcast<i32>(uvDonorSum(i)))",
+  let result=source.replaceAll("atomicStore(&sharpenDeposits[i],bitcast<i32>(uvDonorSum(i)))",
       "atomicStore(&rigidExchange[uvDecodedAt(i)],bitcast<i32>(uvDonorSum(i)))")
     .replace("if(atomicLoad(&sharpenDeposits[i])==0){uvEdges", "if(atomicLoad(&rigidExchange[uvDecodedAt(i)])==0){uvEdges")
     .replace("let sum=bitcast<f32>(atomicLoad(&sharpenDeposits[donor]));", "let sum=bitcast<f32>(atomicLoad(&rigidExchange[uvDecodedAt(donor)]));")
     .replace("fn uvDecodedBits(i:u32)->u32{return bitcast<u32>(atomicLoad(&sharpenDeposits[i]));}", "fn uvDecodedBits(i:u32)->u32{return bitcast<u32>(atomicLoad(&rigidExchange[uvDecodedAt(i)]));}")
+    .replace("fn uvStoreDecoded(i:u32,bits:i32){atomicStore(&sharpenDeposits[i],bits);}", "fn uvStoreDecoded(i:u32,bits:i32){atomicStore(&rigidExchange[uvDecodedAt(i)],bits);}")
     .replace("fn uvCoarseBase()->u32{return cellCount();}","fn uvCoarseBase()->u32{return 0u;}")
     .replace("return cellCount()+4u*uvCoarseCount()+plane*uvCoarseCount();", "return 4u*uvCoarseCount()+plane*uvCoarseCount();")
     .replaceAll('2u*cellCount()+UV_SHARPEN',`${sharpenBaseWords}u+UV_SHARPEN`)

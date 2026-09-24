@@ -21,3 +21,4 @@ artifacts/*
 !artifacts/sparse-cm12-early-transport-confirmation.json
 .openai/deploy/
 rust/target/
+docs/research/

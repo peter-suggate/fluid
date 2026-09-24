@@ -142,7 +142,9 @@ try {
         assert.equal(isolated.status,0,isolated.stderr);
         const redistance:{phi:number[]}=JSON.parse(isolated.stdout);
         const tileSource=solver.tileClassSource?.records;
-        const gpuTileClasses=tileSource?[...new Uint32Array(new Float32Array(await readBuffer(device,tileSource.buffer,tileSource.size!,tileSource.offset??0)).buffer)].filter((_,i)=>i%4===3):undefined;
+        const gpuTileClasses=tileSource?[...new Uint32Array(new Float32Array(await readBuffer(device,tileSource.buffer,tileSource.size!,tileSource.offset??0)).buffer)].filter((_,i)=>i%4===3)
+          // Rust packs UV_TILE_SOLID (4096) into its u8 class as 8.
+          .map(value=>(value&7)|(value&4096?8:0)):undefined;
         console.log(JSON.stringify({scene:name,frame,surfaceStages:{advectionMaxError:diff(advectedPhi,one.advectedPhi),redistanceMatchedInputMaxError:diff(phi,redistance.phi)}}));
         writeFileSync(`${process.env.FLUID_UNIFORM_PARITY_DUMP_DIR??"/tmp"}/fluid-uniform-${name}-${frame}.json`,JSON.stringify({input:matchedInput,gpu:{volume,phi,velocity,released,advectedPhi,advectedPhi3d,tileClasses:gpuTileClasses,...gpuSchedule},rust:one,redistance}));
         for(const wasm of wasmRunners){

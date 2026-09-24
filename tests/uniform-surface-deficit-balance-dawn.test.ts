@@ -47,16 +47,20 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
   const module=device.createShaderModule({code:createUniformReferenceComputeShader(true)+`
     @compute @workgroup_size(4,4,4) fn auditBalance(@builtin(global_invocation_id)gid:vec3u){
       let id=vec3i(gid);if(valid(id)){textureStore(volumeOut,id,vec4f(volumeCorrectionDivergence(id)));}}
+    @compute @workgroup_size(4,4,4) fn auditAuthority(@builtin(global_invocation_id)gid:vec3u){
+      let id=vec3i(gid);if(valid(id)){textureStore(volumeOut,id,vec4f(volumeCorrectionDivergenceFromAuthority(id,cellOpenFraction(id),-1.0)));}}
   `});
   assert.deepEqual((await module.getCompilationInfo()).messages.filter(m=>m.type==="error"),[]);
   const pipeline=await device.createComputePipelineAsync({layout:a.mainPipelineLayout,compute:{module,entryPoint:"auditBalance"}});
+  const authorityPipeline=await device.createComputePipelineAsync({layout:a.mainPipelineLayout,compute:{module,entryPoint:"auditAuthority"}});
   const phi=new Float32Array((nx+1)*(ny+1)*(nz+1)).fill(-1);
   write(device,solver.vertexPhiTexture!,phi);
   const source=2+nx*(2+ny*2),sink=3+nx*(2+ny*2);
-  const run=async(v:Float32Array,target:Float32Array)=>{
+  const run=async(v:Float32Array,target:Float32Array,step=dt,authority=false)=>{
+    a.writeParams(step,0,0);
     write(device!,a.volumeB,v);write(device!,a.gammaA,target);
     const e=device!.createCommandEncoder();a.encodeSurfaceDeficitBalance(e);
-    const pass=e.beginComputePass();pass.setPipeline(pipeline);pass.setBindGroup(0,a.sharpenComputeGroup);
+    const pass=e.beginComputePass();pass.setPipeline(authority?authorityPipeline:pipeline);pass.setBindGroup(0,a.sharpenComputeGroup);
     pass.dispatchWorkgroups(Math.ceil(nx/4),Math.ceil(ny/4),Math.ceil(nz/4));pass.end();device!.queue.submit([e.finish()]);
     return read(device!,a.volumeA);
   };
@@ -86,6 +90,35 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
     const result=await run(v,new Float32Array(n).fill(1));close(result[source]!,15);close(result[sink]!,0);
     solver!.applyRuntimeValues({surfaceDeficitBalancing:"on"});
     close((await run(v,new Float32Array(n).fill(1)))[sink]!,-15);
+  });
+  await t.test("correction has a physical half-life across timestep subdivisions",async()=>{
+    for(const subdivisions of [1,2,8,32]){
+      const step=dt/subdivisions;
+      let excess=1;
+      for(let i=0;i<subdivisions;i++){
+        const v=new Float32Array(n).fill(1);v[source]=1+excess;v[sink]=1-excess;
+        const target=new Float32Array(n).fill(1);
+        const result=await run(v,target,step);
+        close(result.reduce((sum,value)=>sum+value,0),0);
+        const authority=await run(v,target,step,true);
+        close(authority[source]!,result[source]!);close(authority[sink]!,result[sink]!);
+        excess-=result[source]!*step;
+      }
+      close(excess,0.5);
+    }
+  });
+  await t.test("tiny timesteps retain a finite correction rate; severe overfill stays capped",async()=>{
+    const v=new Float32Array(n).fill(1);v[source]=2;v[sink]=0;
+    const target=new Float32Array(n).fill(1);
+    const tiny=await run(v,target,1e-8);
+    close(tiny[source]!,30*Math.LN2);close(tiny[sink]!,-30*Math.LN2);
+    const small=await run(v,target,1/240);
+    assert.ok(small[source]!>15&&small[source]!<30*Math.LN2,"bounded rate instead of old 120/s");
+    v[source]=100;
+    for(const step of [1/240,1/30,1/15]){
+      const result=await run(v,target,step);
+      close(result[source]!*step,1);close(result[sink]!*step,-1);
+    }
   });
   assert.deepEqual(errors,[]);
  }finally{solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}

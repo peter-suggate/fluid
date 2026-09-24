@@ -2,8 +2,13 @@ import { uniformAbOn } from "./uniform-ab-switch";
 
 const leanMeasure = uniformAbOn("measurelean");
 const deadGroups = uniformAbOn("deadgroups");
+const measureSamples = uniformAbOn("measuresamples");
 /** Experimental global surface-volume constraint. No cellwise reconstruction. */
-export function createUniformSurfaceVolumeWGSL(compact: boolean): string { return /* wgsl */ `
+/** `receiverBase` (compact only): word of the transport receiver list's count
+ * inside binding 11. Given, the seed runs over the phi window and those tiles. */
+export function createUniformSurfaceVolumeWGSL(compact: boolean, capacityComponent: "x" | "w" = "x", receiverBase?: number): string {
+ const windowed = compact && receiverBase !== undefined;
+ return /* wgsl */ `
 struct Params { dims:vec4u, h:vec4f }
 @group(0) @binding(0) var<uniform> p:Params;
 @group(0) @binding(1) var phi:texture_3d<f32>;
@@ -34,6 +39,28 @@ fn workDims()->vec3u{return vec3u(atomicLoad(&work[12]),atomicLoad(&work[13]),at
 fn workOrigin()->vec3i{return vec3i(i32(atomicLoad(&work[8])),i32(atomicLoad(&work[9])),i32(atomicLoad(&work[10])));}
 fn cellPoint(i:u32)->vec3i{return workOrigin()+point(i,workDims());}
 fn vertexPoint(i:u32)->vec3i{return workOrigin()+point(i,workDims()+vec3u(1));}
+${windowed ? `// surfaceseed. A seed-live cell has V != 0 or a phi corner <= 0. Outside the
+// receiver tiles V is start-of-step V, zero outside the phi census box
+// (work[28..33], copied from the phi region). Phi is written only on the
+// census box's vertex window (VERTEX_PHI_REACH = 6) and was at or above the 4h
+// band everywhere else. So every live cell is in a receiver tile or touches the
+// window with a corner; the tiles pass only visits cells the box pass did not.
+@group(0) @binding(11) var<storage,read> receivers:array<u32>;
+const RECEIVER_BASE:u32=${receiverBase}u;
+fn seedBoxOrigin()->vec3u{return vec3u(atomicLoad(&work[34]),atomicLoad(&work[35]),atomicLoad(&work[36]));}
+fn seedBoxDims()->vec3u{return vec3u(atomicLoad(&work[37]),atomicLoad(&work[38]),atomicLoad(&work[39]));}
+fn planSeedBox(){
+ let o=vec3u(atomicLoad(&work[28]),atomicLoad(&work[29]),atomicLoad(&work[30]));
+ let m=vec3u(atomicLoad(&work[31]),atomicLoad(&work[32]),atomicLoad(&work[33]));
+ var lo=vec3u(0);var hi=p.dims.xyz;
+ if(all(m>o)&&all(m<=p.dims.xyz)){
+  let low=o-min(o,vec3u(6u));let high=min(p.dims.xyz,m+vec3u(6u));
+  lo=low-min(low,vec3u(1u));hi=min(p.dims.xyz,high+vec3u(1u));
+ }
+ let d=hi-lo;let n=d.x*d.y*d.z;let groups=(n+63u)/64u;
+ for(var a=0u;a<3u;a++){atomicStore(&work[34u+a],lo[a]);atomicStore(&work[37u+a],d[a]);}
+ atomicStore(&work[40],n);atomicStore(&work[41],min(groups,65535u));atomicStore(&work[42],(groups+65534u)/65535u);atomicStore(&work[43],1u);
+}` : ""}
 @compute @workgroup_size(1) fn finishWork(){
  var lo=vec3u(0);var d=vec3u(0);var nc=0u;var nv=0u;
  if(atomicLoad(&work[4])>0u){
@@ -45,6 +72,23 @@ fn vertexPoint(i:u32)->vec3i{return workOrigin()+point(i,workDims()+vec3u(1));}
  }
  for(var a=0u;a<3u;a++){atomicStore(&work[8u+a],lo[a]);atomicStore(&work[12u+a],d[a]);}
  atomicStore(&work[11],nc);atomicStore(&work[15],nv);
+ // balancesupport: the 4³ tiles of this box grown one cell, the cells whose
+ // corners apply may move, as origin, dims and an indirect dispatch.
+ var to=vec3u(0);var te=vec3u(0);
+ if(nc>0u){for(var a=0u;a<3u;a++){
+  let c0=lo[a]-min(lo[a],1u);let c1=min(p.dims[a],lo[a]+d[a]+1u);to[a]=c0/4u;te[a]=(c1+3u)/4u-to[a];
+ }}
+ let tiles=te.x*te.y*te.z;
+ for(var a=0u;a<3u;a++){atomicStore(&work[44u+a],to[a]);atomicStore(&work[47u+a],te[a]);}
+ atomicStore(&work[50],min(tiles,65535u));atomicStore(&work[51],(tiles+65534u)/65535u);atomicStore(&work[52],1u);
+ ${windowed ? `// classifysupport: that box joined with the seed box (cells touching the phi
+ // window), in 4³ tiles, at work[53..58] with its dispatch at work[59..61].
+ var u0=seedBoxOrigin();var u1=u0+seedBoxDims();
+ if(nc>0u){for(var a=0u;a<3u;a++){u0[a]=min(u0[a],lo[a]-min(lo[a],1u));u1[a]=max(u1[a],min(p.dims[a],lo[a]+d[a]+1u));}}
+ var unionTiles=1u;
+ for(var a=0u;a<3u;a++){let t0=u0[a]/4u;let t1=select(t0,(u1[a]+3u)/4u,u1[a]>u0[a]);
+  atomicStore(&work[53u+a],t0);atomicStore(&work[56u+a],t1-t0);unionTiles*=t1-t0;}
+ atomicStore(&work[59],min(unionTiles,65535u));atomicStore(&work[60],(unionTiles+65534u)/65535u);atomicStore(&work[61],1u);` : ""}
  let counts=array<u32,3>((nc+63u)/64u,(nv+63u)/64u,(nc+4095u)/4096u);
  for(var k=0u;k<3u;k++){
   atomicStore(&work[16u+4u*k],min(counts[k],65535u));
@@ -63,13 +107,13 @@ fn corner(k:u32)->vec3i{return vec3i(i32(k&1u),i32((k>>1u)&1u),i32((k>>2u)&1u));
 fn value(q:vec3i)->f32{return textureLoad(phi,clamp(q,vec3i(0),vec3i(p.dims.xyz)),0).x;}
 @compute @workgroup_size(1) fn begin(){state[0]=vec4f(0,p.h.w,0,0);state[1]=vec4f(0);
  ${compact ? `for(var a=0u;a<3u;a++){atomicStore(&work[a],p.dims[a]);atomicStore(&work[4u+a],0u);}` : ""}
+ ${windowed ? "planSeedBox();" : ""}
 }
-@compute @workgroup_size(64) fn seed(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)l:u32){
- ${compact ? `if(l<3u){atomicStore(&bounds[l],p.dims[l]);}workgroupBarrier();
- let i=groupIndex(w)*64u+l;
- if(i<cells()){
-  let q=point(i,p.dims.xyz);var live=textureLoad(volume,q,0).x!=0.0;
-  if(textureLoad(capacity,q,0).x>0.0){
+${compact ? `fn seedCell(q:vec3i,valid:bool,l:u32){
+ if(l<3u){atomicStore(&bounds[l],p.dims[l]);}workgroupBarrier();
+ if(valid){
+  let i=index(q,p.dims.xyz);var live=textureLoad(volume,q,0).x!=0.0;
+  if(textureLoad(capacity,q,0).${capacityComponent}>0.0){
    var lo=1e30;var hi=-1e30;
    for(var k=0u;k<8u;k++){let v=value(q+corner(k));lo=min(lo,v);hi=max(hi,v);}
    live=live||lo<=0.0;
@@ -80,8 +124,22 @@ fn value(q:vec3i)->f32{return textureLoad(phi,clamp(q,vec3i(0),vec3i(p.dims.xyz)
  workgroupBarrier();
  if(l<3u&&atomicLoad(&bounds[3])>0u){
   atomicMin(&work[l],atomicLoad(&bounds[l]));atomicMax(&work[4u+l],atomicLoad(&bounds[3u+l]));
- }` : `let i=groupIndex(w)*64u+l;if(i>=cells()){return;}let q=point(i,p.dims.xyz);
- if(textureLoad(capacity,q,0).x<=0.0){return;}
+ }
+}` : ""}
+${windowed ? `@compute @workgroup_size(64) fn seedBox(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)l:u32){
+ let i=groupIndex(w)*64u+l;let valid=i<atomicLoad(&work[40]);
+ seedCell(vec3i(seedBoxOrigin())+point(select(0u,i,valid),max(seedBoxDims(),vec3u(1))),valid,l);
+}
+@compute @workgroup_size(64) fn seedTiles(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)l:u32){
+ let n=groupIndex(w);var valid=n<receivers[RECEIVER_BASE];
+ let tile=select(0u,receivers[RECEIVER_BASE+1u+n],valid);let d=(p.dims.xyz+vec3u(3u))/4u;
+ let q=vec3u(tile%d.x,(tile/d.x)%d.y,tile/(d.x*d.y))*4u+vec3u(l%4u,(l/4u)%4u,l/16u);
+ let lo=seedBoxOrigin();valid=valid&&all(q<p.dims.xyz)&&!(all(q>=lo)&&all(q<lo+seedBoxDims()));
+ seedCell(vec3i(q),valid,l);
+}` : ""}
+@compute @workgroup_size(64) fn seed(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)l:u32){
+ ${compact ? `let i=groupIndex(w)*64u+l;seedCell(point(select(0u,i,i<cells()),p.dims.xyz),i<cells(),l);` : `let i=groupIndex(w)*64u+l;if(i>=cells()){return;}let q=point(i,p.dims.xyz);
+ if(textureLoad(capacity,q,0).${capacityComponent}<=0.0){return;}
  var lo=1e30;var hi=-1e30;
  for(var k=0u;k<8u;k++){let v=value(q+corner(k));lo=min(lo,v);hi=max(hi,v);}
  if(lo<=0.0&&hi>=0.0){atomicStore(&band[i],5u);}`}
@@ -91,7 +149,7 @@ fn value(q:vec3i)->f32{return textureLoad(phi,clamp(q,vec3i(0),vec3i(p.dims.xyz)
  let q=cellPoint(logical);let i=index(q,p.dims.xyz);`
  : `let i=groupIndex(w)*64u+l;if(i>=cells()){return;}let q=point(i,p.dims.xyz);`}
  var b=0u;
- if(textureLoad(capacity,q,0).x>0.0){
+ if(textureLoad(capacity,q,0).${capacityComponent}>0.0){
   b=atomicLoad(&band[i]);
   for(var a=0u;a<3u;a++){for(var s=-1;s<=1;s+=2){var n=q;n[a]+=s;
    if(all(n>=vec3i(0))&&all(n<vec3i(p.dims.xyz))){let v=atomicLoad(&band[index(n,p.dims.xyz)]);b=max(b,select(0u,v-1u,v>0u));}
@@ -108,7 +166,7 @@ fn value(q:vec3i)->f32{return textureLoad(phi,clamp(q,vec3i(0),vec3i(p.dims.xyz)
  var b=0u;var open=array<bool,6>(false,false,false,false,false,false);
  for(var k=0u;k<8u;k++){let c=q-vec3i(1)+corner(k);
   if(all(c>=vec3i(0))&&all(c<vec3i(p.dims.xyz))){b=max(b,atomicLoad(&band[index(c,p.dims.xyz)]));
-   if(textureLoad(capacity,c,0).x>0.0){for(var a=0u;a<3u;a++){open[2u*a+((k>>a)&1u)]=true;}}}}
+   if(textureLoad(capacity,c,0).${capacityComponent}>0.0){for(var a=0u;a<3u;a++){open[2u*a+((k>>a)&1u)]=true;}}}}
  // The slope is read by centred differences along axes whose edges are both
  // open. A vertex buried in a solid keeps its construction fill, metres above
  // the redistance band, and differenced raw it scaled a wall vertex's shift by
@@ -142,7 +200,7 @@ fn sumGroup(l:u32){
 @compute @workgroup_size(64) fn measure(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)l:u32){
  let group=groupIndex(w);let i=group*64u+l;var result:array<vec4f,5>;
  if(i<${compact ? "workCells()" : "cells()"}){
-  let q=${compact ? "cellPoint(i)" : "point(i,p.dims.xyz)"};let cap=textureLoad(capacity,q,0).x;
+  let q=${compact ? "cellPoint(i)" : "point(i,p.dims.xyz)"};let cap=textureLoad(capacity,q,0).${capacityComponent};
   result[4].y=textureLoad(volume,q,0).x;
   if(cap>0.0){
    ${leanMeasure ? `// A crossing cell carries the band itself, so all eight of its corners scale
@@ -163,7 +221,11 @@ fn sumGroup(l:u32){
     var fraction=0.0;
     if(hi<0.0){fraction=1.0;}else if(lo<0.0){
      let shift=centre+(f32(sample)/8.0-1.0)*width;var v:array<f32,8>;
-     for(var k=0u;k<8u;k++){v[k]=raw[k]-shift*scale[k];}fraction=fill(v);
+     ${measureSamples ? `// One strict sign across this sample's eight corners is what fill() returns
+     // anyway: six whole tetrahedra sum to exactly 6/6, none to 0.
+     var negative=0u;
+     for(var k=0u;k<8u;k++){v[k]=raw[k]-shift*scale[k];negative+=select(0u,1u,v[k]<0.0);}
+     if(negative==8u){fraction=1.0;}else if(negative!=0u){fraction=fill(v);}` : `for(var k=0u;k<8u;k++){v[k]=raw[k]-shift*scale[k];}fraction=fill(v);`}
     }
     result[sample/4u][sample%4u]=fraction*cap;
    }
