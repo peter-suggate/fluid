@@ -20,6 +20,7 @@ import {
 averagePerformanceTraces,
 type PerformanceTrace,
 } from "../../core/performance-trace";
+import { svoRenderRefinementPermitted } from "../../core/method-registry";
 import { useSession } from "../../core/session/session-context";
 import { usePerformanceInstrumentationStore } from "../../core/stores/performance-instrumentation-store";
 import {
@@ -170,7 +171,10 @@ export function RenderPipelineOverlay() {
   const surfaceStyle = session.scene((state) => state.scene.surfaceStyle);
   const patchScene = session.scene((state) => state.patchScene);
   const smoothSurfaceEnabled = !sceneUsesFlatVoxelNormals({ surfaceStyle });
-  const renderRefinementDepth = sceneIsDry ? tuning.environmentRefinementDepth : 0;
+  const methodId = session.method((state) => state.methodId);
+  const renderRefinementPermitted = svoRenderRefinementPermitted(
+    { systems: sceneIsDry ? { fluid: false } : undefined }, methodId);
+  const renderRefinementDepth = renderRefinementPermitted ? tuning.environmentRefinementDepth : 0;
   const leafVoxel_mm = finestCellSize_m * 1000 / 2 ** renderRefinementDepth;
 
   const [liveTiming, setLiveTiming] = useState(true);
@@ -305,7 +309,7 @@ export function RenderPipelineOverlay() {
   // failure it has to report shows either way. A cluster that is *calibration*
   // (twenty cone budgets) folds once more inside the open card.
   const controls: Readonly<Record<string, SvoStageControls>> = {
-    "sparse-world-build": renderSparseWorldBuildControls({ renderRefinementDepth, sceneIsDry, updateTuning, modified, resetTuning, leafVoxel_mm, finestCellSize_m, tuning }),
+    "sparse-world-build": renderSparseWorldBuildControls({ renderRefinementDepth, renderRefinementPermitted, sceneIsDry, updateTuning, modified, resetTuning, leafVoxel_mm, finestCellSize_m, tuning }),
 
     "filtered-detail": renderFilteredDetailControls({ resolvedPrimary, smoothSurfaceEnabled, tuning, updateTuning, effectiveRendererStatus, svoStageView, setSvoStageView }),
 

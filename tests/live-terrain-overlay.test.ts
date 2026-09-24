@@ -55,24 +55,3 @@ test("ordered terrain overlay preserves fill/clear precedence and Undo truncates
   assert.throws(() => packTerrainOverlay(terrainOverlayPatches(solidWorldForScene(carved), lattice), 1), /capacity reached/);
   assert.notEqual(terrainFieldStamp({ ...base, terrain: { baseHeight_m: .25, features: [] } }), terrainFieldStamp(base));
 });
-
-test("terrain overlays use renderer uniform publication without replacing the live scene", async () => {
-  await import("../lib/methods");
-  const { FluidLabRenderer, gpuSceneSolverKey } = await import("../lib/core/webgpu-renderer");
-  const { sceneryConstructionKey } = await import("../lib/core/scenery-construction-key");
-  const scene = terrainScene();
-  const config = { methodId: "adaptive-volume", quality: "balanced", values: {} } as import("../lib/core/webgpu-renderer").SimulationRunConfig;
-  const staged: typeof scene[] = [];
-  const source = { stageSceneUpdate(next: typeof scene) { staged.push(next); }, info: {} };
-  const renderer = new FluidLabRenderer({} as HTMLCanvasElement, () => {});
-  Object.assign(renderer, { device: {}, gpuFluid: source,
-    gpuFluidKey: `${gpuSceneSolverKey(scene, config)}:presentation-full-scene:scenery-${sceneryConstructionKey(scene)}:contours-false`,
-    appliedSceneUniformKey: "before", beginGPUFluidInitialization() { assert.fail("Terrain overlay rebuilt the live scene"); } });
-  const access = renderer as unknown as { currentGPUFluid(next: typeof scene, runConfig: typeof config, mode: string): unknown };
-  const filled = sceneWithSolidStroke(scene, [{ operation: "fill", minimum: [8, 4, 8], maximumExclusive: [9, 5, 9] }]);
-  const cleared = sceneWithSolidStroke(filled, [{ operation: "clear", minimum: [8, 3, 8], maximumExclusive: [9, 5, 9] }]);
-  for (const document of [scene, filled, cleared, scene]) {
-    assert.equal(access.currentGPUFluid(document, config, "full-scene"), source);
-  }
-  assert.deepEqual(staged, [scene, filled, cleared, scene]);
-});

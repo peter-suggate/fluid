@@ -6,18 +6,18 @@ import { SVO_ENVIRONMENT_BRICK_REFINEMENT_MAXIMUM,SVO_ENVIRONMENT_REFINEMENT_DEP
 
 const trimmed = (value: number) => value.toFixed(5).replace(/\.?0+$/, "");
 
-export function renderSparseWorldBuildControls({ renderRefinementDepth, sceneIsDry, updateTuning, modified, resetTuning, leafVoxel_mm, finestCellSize_m, tuning }: Pick<SvoFeatureControlContext, "renderRefinementDepth" | "sceneIsDry" | "updateTuning" | "modified" | "resetTuning" | "leafVoxel_mm" | "finestCellSize_m" | "tuning">): SvoStageControls {
+export function renderSparseWorldBuildControls({ renderRefinementDepth, renderRefinementPermitted, sceneIsDry, updateTuning, modified, resetTuning, leafVoxel_mm, finestCellSize_m, tuning }: Pick<SvoFeatureControlContext, "renderRefinementDepth" | "renderRefinementPermitted" | "sceneIsDry" | "updateTuning" | "modified" | "resetTuning" | "leafVoxel_mm" | "finestCellSize_m" | "tuning">): SvoStageControls {
   return { settings: 3, node: <FieldList>
       <RangeField
         label="Environment refinement depth · REBUILD"
         unit="levels" value={renderRefinementDepth}
         min={0} max={SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM}
-        step={1} digits={0} disabled={!sceneIsDry}
+        step={1} digits={0} disabled={!renderRefinementPermitted}
         onChange={(value) => updateTuning("environmentRefinementDepth", value)}
         modified={modified("environmentRefinementDepth")} onReset={resetTuning("environmentRefinementDepth")}
-        hint={sceneIsDry
-          ? `Render leaf ${trimmed(leafVoxel_mm)} mm · ${renderRefinementDepth} level${renderRefinementDepth === 1 ? "" : "s"} below the ${trimmed(finestCellSize_m * 1000)} mm simulation lattice.\n\nThis rebuilds only the renderer-owned SVO derivative. The scene lattice, SolidWorld, and simulation state do not change. Scenery and terrain are sampled at the render leaf.\n\nEach level also adds one to the cone hierarchy; past the runtime's twelve, derived lighting withdraws and the cone node reads EXACT FALLBACK.`
-          : `Zero on this scene whatever the slider says: the fluid solver claims every brick of the container and a solver brick pins its node, so the leaf stays the ${trimmed(finestCellSize_m * 1000)} mm lattice. Turn water off under the tank's Water setting to move on this environment-only ladder.`} />
+        hint={renderRefinementPermitted
+          ? `Render leaf ${trimmed(leafVoxel_mm)} mm · ${renderRefinementDepth} level${renderRefinementDepth === 1 ? "" : "s"} below the ${trimmed(finestCellSize_m * 1000)} mm simulation lattice.\n\nThis rebuilds only the renderer-owned SVO derivative. The scene lattice, SolidWorld, and simulation state do not change. Scenery and terrain are sampled at the render leaf.${sceneIsDry ? "" : " The water keeps running: solids meet the fluid on the simulation lattice, so a waterline may sit up to one simulation cell off the finer surface drawn here."}\n\nEach level also adds one to the cone hierarchy; past the runtime's twelve, derived lighting withdraws and the cone node reads EXACT FALLBACK.`
+          : `Zero on this scene whatever the slider says: this method's solver draws the scene from its own sparse world, and a solver brick pins its node, so the leaf stays the ${trimmed(finestCellSize_m * 1000)} mm lattice. Turn water off under the tank's Water setting, or switch to Uniform Geometric, to move on this environment-only ladder.`} />
       <RangeField label="Environment brick refinement" unit="levels" value={tuning.environmentBrickRefinementLevels}
         min={0} max={SVO_ENVIRONMENT_BRICK_REFINEMENT_MAXIMUM} step={1} digits={0}
         onChange={(value) => updateTuning("environmentBrickRefinementLevels", value)}

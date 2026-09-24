@@ -535,6 +535,17 @@ export interface SimulationMethod {
    * hydration and scene-profile application as one valid configuration.
    */
   normalizeValues?(values: MethodParamValues): MethodParamValues;
+  /**
+   * The scene's SVO may refine below this method's solver lattice.
+   *
+   * True only for a method whose solver keeps no sparse world of its own, so
+   * the renderer draws a wet scene from its own sidecar tree. Every extra level
+   * lives in that disposable derivative; the solver, its SolidWorld and every
+   * solid/fluid interaction stay on the coarse lattice. A method whose solver
+   * owns the presentation world pins each brick at its solver level and must
+   * leave this unset.
+   */
+  renderRefinementBelowSolver?: boolean;
   /** Keys omitted from the structural solver fingerprint and applied directly
    * to the active/candidate solver instead. */
   runtimeParamKeys?: readonly string[];

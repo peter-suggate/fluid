@@ -24,6 +24,8 @@ export type SvoFeatureControlContext = Pick<UIState,
   readonly resetTuning: <K extends keyof SvoRenderTuning>(key: K) => () => void;
   readonly renderRefinementDepth: number;
   readonly sceneIsDry: boolean;
+  /** The render tree may descend below the simulation lattice (see `svoRenderRefinementPermitted`). */
+  readonly renderRefinementPermitted: boolean;
   readonly leafVoxel_mm: number;
   readonly finestCellSize_m: number;
   readonly resolvedPrimary: SvoPrimaryTraversalMode;

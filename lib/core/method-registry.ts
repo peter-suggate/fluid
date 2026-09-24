@@ -1,4 +1,5 @@
 import type { SimulationMethod } from "./method-contract";
+import type { SceneDescription } from "./model";
 
 /**
  * Where core code looks up a simulation method without knowing which ones
@@ -95,4 +96,19 @@ export function getMethod(id: string): SimulationMethod {
   const fallback = methods.find((method) => method.id === defaultId);
   if (!fallback) throw new Error(`Unknown simulation method "${id}" and no default is installed.`);
   return fallback;
+}
+
+/**
+ * Whether the scene's SVO may descend below the simulation lattice.
+ *
+ * A dry scene always may. A wet one may only when its method's solver keeps no
+ * sparse world, so the renderer's sidecar is the tree being refined and the
+ * solver never sees the extra levels. See
+ * `SimulationMethod.renderRefinementBelowSolver`.
+ */
+export function svoRenderRefinementPermitted(
+  scene: Pick<SceneDescription, "systems">,
+  methodId: string,
+): boolean {
+  return scene.systems?.fluid === false || getMethod(methodId).renderRefinementBelowSolver === true;
 }

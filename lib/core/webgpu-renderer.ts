@@ -24,7 +24,7 @@ import { boundingRadius, type RigidBodyState } from "./rigid-body";
 import { decodeGPURigidBodyPoses, GPU_RIGID_RENDER_BYTES, SCENE_ENVIRONMENT_OWNER_BASE, type DrawnRigidBodyPose } from "./webgpu-rigid-body";
 import type { GPUEulerianInfo, GPURigidLoad } from "./webgpu-eulerian";
 import type { GPUQuality } from "./gpu-quality";
-import { getMethod } from "./method-registry";
+import { getMethod, svoRenderRefinementPermitted } from "./method-registry";
 import type { GPUSolverInstance, InjectedLiquidBall, MethodParamValues, OverlayPipeline } from "./method-contract";
 import { GridOverlayPipeline } from "./webgpu-grid-overlay";
 import { FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE, requiredFluidDeviceLimits } from "./webgpu-device-limits";
@@ -504,11 +504,19 @@ export interface SimulationRunConfig {
   inFlightDepth?: number;
 }
 
+/** Run values that shape only the SVO presentation source, never the solver. */
+const RENDER_SOURCE_VALUE_KEYS: ReadonlySet<string> = new Set([
+  "svoMeshContours", "svoMeshDualContouring", "svoMeshDualMarchingCubes",
+  "svoEnvironmentRefinementDepth", "svoEnvironmentBrickRefinementLevels",
+  "svoEnvironmentPlanarRefinementExemption",
+]);
+
 export function structuralMethodValues(config: SimulationRunConfig): MethodParamValues {
   const runtime = new Set(getMethod(config.methodId).runtimeParamKeys ?? []);
-  // Contour geometry rebuilds only the render source, keyed by solverKey below.
-  // Keeping it out of the physical key lets a wet scene retain its solver.
-  return Object.fromEntries(Object.entries(config.values).filter(([key]) => !runtime.has(key) && key !== "svoMeshContours" && key !== "svoMeshDualContouring" && key !== "svoMeshDualMarchingCubes"));
+  // Render-source construction (contours, refinement) rebuilds only the
+  // sidecar, keyed by solverKey below. Keeping it out of the physical key lets
+  // a wet scene retain its solver.
+  return Object.fromEntries(Object.entries(config.values).filter(([key]) => !runtime.has(key) && !RENDER_SOURCE_VALUE_KEYS.has(key)));
 }
 
 /** Renderer-only worlds are method-independent; fluid worlds require a GPU solver factory. */
@@ -2037,7 +2045,8 @@ export class FluidLabRenderer {
 
   private solverKey(scene:SceneDescription,config:SimulationRunConfig,presentationMode:ScenePresentationMode){
     return `${gpuSceneSolverKey(scene,config)}:presentation-${presentationMode}`
-      + (presentationMode === "full-scene" ? `:scenery-${sceneryConstructionKey(scene)}:contours-${config.values.svoMeshContours === true}${config.values.svoMeshDualContouring === true ? ":dual-contouring" : ""}${config.values.svoMeshDualMarchingCubes === true ? ":dual-marching-cubes" : ""}` : "");
+      + (presentationMode === "full-scene" ? `:scenery-${sceneryConstructionKey(scene)}:contours-${config.values.svoMeshContours === true}${config.values.svoMeshDualContouring === true ? ":dual-contouring" : ""}${config.values.svoMeshDualMarchingCubes === true ? ":dual-marching-cubes" : ""}`
+        + `:refinement-${String(config.values.svoEnvironmentRefinementDepth ?? 0)}/${String(config.values.svoEnvironmentBrickRefinementLevels ?? "")}/${config.values.svoEnvironmentPlanarRefinementExemption === true}` : "");
   }
   private attachedSolverDocumentKey = "";
   /** Presentation policy used to construct the attached solver/sidecar pair. */
@@ -2482,7 +2491,9 @@ export class FluidLabRenderer {
         this.attachSparsePresentationSource(solver, generation, startedAt_ms, sidecar.sparseVoxelSceneSource);
         this.pausedPresentationRevision += 1;
         if (previousSidecar) this.retireGPUFluid(previousSidecar);
-        this.onStatus({ state: "ready", label: "Scenery rebuilt; fluid state retained", adapter: this.adapterName, resource: initializationResource });
+        const degraded = sidecar.builtRefinementDepth !== sidecar.requestedRefinementDepth
+          ? ` at refinement depth ${sidecar.builtRefinementDepth}; depth ${sidecar.requestedRefinementDepth} could not be allocated` : "";
+        this.onStatus({ state: "ready", label: `Scenery rebuilt${degraded}; fluid state retained`, adapter: this.adapterName, resource: initializationResource });
         return;
       }
       if(requiresFencedInitialRasterPresentation(config.methodId)&&!this.sparseAuthorityReady(solver)){solver.destroy();sidecar?.destroy();throw new Error(`${method.label} solver returned before fenced sparse t=0 authority`);}
@@ -2502,7 +2513,8 @@ export class FluidLabRenderer {
       // status a user reads to the end, because "the leaf is 3.125 mm, not the
       // 1.5625 mm you asked for" is otherwise indistinguishable from a depth
       // control that did nothing. The unchanged case keeps the plain label.
-      const degradedDepth=solver instanceof WebGPULiveSvoScene&&solver.builtRefinementDepth!==solver.requestedRefinementDepth?solver:undefined;
+      const depthSource=sidecar??(solver instanceof WebGPULiveSvoScene?solver:undefined);
+      const degradedDepth=depthSource&&depthSource.builtRefinementDepth!==depthSource.requestedRefinementDepth?depthSource:undefined;
       if(rendererOnlyScene&&degradedDepth)
         this.onStatus({state:"ready",label:`Live sparse scene source ready at refinement depth ${degradedDepth.builtRefinementDepth}; depth ${degradedDepth.requestedRefinementDepth} could not be allocated`,adapter:this.adapterName,resource:liveSvoSceneResourcePlugin});
       else if(rendererOnlyScene)
@@ -3153,8 +3165,10 @@ export class FluidLabRenderer {
     // Presentation depth is renderer-owned. The simulation document and its
     // SolidWorld lattice remain unchanged; the live SVO build receives this as
     // the resolution of its disposable derivative only.
-    const environmentRefinementDepth = sceneRuntime.fluidSolver
-      ? 0 : activeSvoTuning.environmentRefinementDepth;
+    // A wet scene refines only when its method draws from the renderer's own
+    // sidecar; a solver-owned world pins every brick at the solver level.
+    const environmentRefinementDepth = svoRenderRefinementPermitted(scene, config.methodId)
+      ? activeSvoTuning.environmentRefinementDepth : 0;
     const sceneConfig: SimulationRunConfig = sparsePresentationRequired ? {
       ...config,
       values: {

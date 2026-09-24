@@ -29,6 +29,9 @@ export const uniformVolumeMethod: SimulationMethod = {
   normalizeValues: resolveUniformGeometricValues,
   composition: resolveComposition(),
   resolveComposition,
+  // The uniform solver has no sparse world; the scene is drawn from the
+  // renderer's sidecar, which can spend depth the solver never sees.
+  renderRefinementBelowSolver: true,
   runtimeParamKeys: params.filter(p=>p.update==="runtime").map(p=>p.key),
   pipelineGraph: async () => (await import("./uniform-volume-pipeline")).UNIFORM_VOLUME_PIPELINE,
   harness: async () => ({ ...(await import("./harness")).uniformHarnessPlugin, methodId: "uniform-volume" }),

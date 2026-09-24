@@ -1403,7 +1403,10 @@ export class OctreeSparseBrickWorld {
     this.surfaceModel = sceneTerrainSurfaceModel(scene);
     const dryWorld = scene.systems?.fluid === false;
     const rendererOnly = options.rendererOnly === true;
-    const refinementDepth = dryWorld
+    // A renderer-only world is a disposable sidecar: the solver beside it
+    // keeps its own lattice and SolidWorld, so the sidecar may descend below
+    // it. A world the solver itself draws from cannot (see `maximumDepth`).
+    const refinementDepth = dryWorld || rendererOnly
       ? Math.max(0, Math.trunc(options.environmentRefinementDepth ?? 0))
       : 0;
     const refineScale = 2 ** refinementDepth;
@@ -1447,13 +1450,13 @@ export class OctreeSparseBrickWorld {
     /**
      * Extra octree levels the *environment* may use, below the solver's own.
      *
-     * Only on a scene the solver does not own. `planSparseSceneDomain` claims
+     * Only on a tree the solver does not own. `planSparseSceneDomain` claims
      * every brick of the container as a solver brick while a solver is present,
-     * and a solver brick pins its node at `solverLevel` — so while the
-     * simulation is there, there is nowhere for environment geometry to descend
-     * into, and the only resolution knob is `finestCellSize_m` applied to the
-     * whole domain. On a dry scene there is no such claim, and the render tree
-     * is free to spend depth where the geometry actually is.
+     * and a solver brick pins its node at `solverLevel` — so a world the
+     * simulation draws from has nowhere for environment geometry to descend
+     * into. A dry scene makes no such claim, and a renderer-only sidecar drops
+     * it below (`pinnedBricks`, `plannedSolverBricks`), so either is free to
+     * spend depth where the geometry actually is.
      */
     const maximumDepth = solverLevel + refinementDepth;
     const refinedBrickDimensions = sceneDomain.brickDimensions.map((value) => value * refineScale) as [number, number, number];
@@ -1488,7 +1491,7 @@ export class OctreeSparseBrickWorld {
       nodeEdge_m.push(refinedBrickEdge.map((value) => value * scale));
     }
     let renderTerrain: import("../scene-publication/svo-render-solid-field").SvoRenderTerrainField | undefined;
-    if (dryWorld && (refinementDepth > 0 || options.surfaceContours === true || (options.surfaceDualContouring === true || options.surfaceDualMarchingCubes === true))) {
+    if (refinementDepth > 0 || (dryWorld && (options.surfaceContours === true || options.surfaceDualContouring === true || options.surfaceDualMarchingCubes === true))) {
       if (options.buildRenderTerrainGpu) yield options.buildRenderTerrainGpu(renderCellSize, SOLID_WORLD_TERRAIN_MATERIAL_ID)
         .then(field => { renderTerrain = field; });
       renderTerrain ??= yield* buildSvoRenderTerrainFieldSteps(scene, renderCellSize, SOLID_WORLD_TERRAIN_MATERIAL_ID);
@@ -1617,16 +1620,18 @@ export class OctreeSparseBrickWorld {
      * `lib/svo/features/construction/svo-environment-coarsening.ts` for the rule and for why the
      * ceiling is `log2(brickSize)`; it is offered here and taken per node.
      *
-     * Wet only. A solverless world already has `environmentRefinementDepth`
-     * below the lattice and buried-ground coarsening above it, each with its own
-     * predicate and its own gate, and `minimumEnvironmentLevel` can only carry
-     * one meaning at a time.
+     * Wet and unrefined only. A solverless world already has
+     * `environmentRefinementDepth` below the lattice and buried-ground
+     * coarsening above it, each with its own predicate and its own gate, and
+     * `minimumEnvironmentLevel` can only carry one meaning at a time — so a
+     * refined sidecar takes the refinement and gives up the coarsening.
      */
-    const coarseningRegions = !dryWorld ? [
+    const wetCoarsening = !dryWorld && refinementDepth === 0;
+    const coarseningRegions = wetCoarsening ? [
       ...solidWorldTerrainSurfaceCoarseningRegions(scene, initialSolidWorld),
       ...solidWorldVoxelPatchCoarseningRegions(scene, residualSolidWorld.patches),
     ] : [];
-    const environmentCoarsening = !dryWorld
+    const environmentCoarsening = wetCoarsening
       ? createSvoEnvironmentCoarsening({
         primitives: environmentPrimitives,
         regions: coarseningRegions,
@@ -1733,7 +1738,7 @@ export class OctreeSparseBrickWorld {
       classifyEnvironmentBatch: gpuNodeClassification ? (level, coordinates) => gpuNodeClassification({
         planar: planarLeafOptions, candidateCount: environmentPrimitives.length,
         candidateLimit: OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET, level, coordinates,
-        coarsening: !dryWorld ? {
+        coarsening: wetCoarsening ? {
           resolves_m: Math.max(...nodeEdge_m[level]) / brickSize * SVO_ENVIRONMENT_FEATURE_VOXELS,
           features_m: environmentPrimitives.map(environmentProxyFeatureSize_m),
           regions: coarseningRegions,
