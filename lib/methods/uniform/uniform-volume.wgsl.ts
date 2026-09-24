@@ -876,6 +876,9 @@ fn uvProposeSharpen(@builtin(global_invocation_id)gid:vec3u){
     if(uvPageWorkEnabled()){
       let flags=((uvEdges[uvEdgeAddress(i)].base>>(5u*axis))&31u);if((flags&1u)==0u){continue;}
       let j=uvEdgeAddress(linearIndex(q));let own=uvEdgeAddress(i);
+      ${uniformAbOn("sharpenflux") ? `// Neither endpoint can receive: this face has exactly zero flux.
+      // Avoid loading volume/target fields for full liquid and empty air.
+      if(uvEdges[own].weight[4]==0.0&&uvEdges[j].weight[4]==0.0){continue;}` : ""}
       if(params.splash.y>1.5){let band=params.tuning.y*min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
         let phiB=uvEdges[j].weight[5];
         if(phiA>=band||phiB>=band){let vA=volume(id);let vB=volume(q);
@@ -928,8 +931,10 @@ fn uvLimitSharpen(@builtin(global_invocation_id)gid:vec3u){
   uvEdges[uvEdgeAddress(i)].weight[8]=min(1.0,uvEdges[uvEdgeAddress(i)].weight[4]/max(incoming,1e-20));
 }
 fn uvLimitedFlux(i:u32,j:u32,axis:u32)->f32{
-  if(!uvSharpenTileActive(uvCell(i))||!uvSharpenTileActive(uvCell(j))){return 0.0;}
-  let raw=uvEdges[uvEdgeAddress(i)].weight[axis];let a=vec2f(uvEdges[uvEdgeAddress(i)].weight[7],uvEdges[uvEdgeAddress(i)].weight[8]);let b=vec2f(uvEdges[uvEdgeAddress(j)].weight[7],uvEdges[uvEdgeAddress(j)].weight[8]);
+  ${uniformAbOn("sharpenflux") ? "" : `if(!uvSharpenTileActive(uvCell(i))||!uvSharpenTileActive(uvCell(j))){return 0.0;}`}
+  let raw=uvEdges[uvEdgeAddress(i)].weight[axis];
+  ${uniformAbOn("sharpenflux") ? `if(raw==0.0){return 0.0;}` : ""}
+  let a=vec2f(uvEdges[uvEdgeAddress(i)].weight[7],uvEdges[uvEdgeAddress(i)].weight[8]);let b=vec2f(uvEdges[uvEdgeAddress(j)].weight[7],uvEdges[uvEdgeAddress(j)].weight[8]);
   return raw*select(min(a.y,b.x),min(a.x,b.y),raw>=0.0);
 }
 @compute @workgroup_size(4,4,4)
@@ -940,8 +945,10 @@ fn uvCommitSharpen(@builtin(global_invocation_id)gid:vec3u){
   }
   if(!valid(id)){return;}let i=linearIndex(id);var terms:array<f32,6>;
   for(var axis=0u;axis<3u;axis++){var e=vec3i(0);e[axis]=1;terms[2u*axis]=0.0;terms[2u*axis+1u]=0.0;
-    if(valid(id+e)){terms[2u*axis]=-uvLimitedFlux(i,linearIndex(id+e),axis);}
-    if(valid(id-e)){terms[2u*axis+1u]=uvLimitedFlux(linearIndex(id-e),i,axis);}}
+    // This cell is active. A cached positive-face flag certifies its neighbour;
+    // the negative owner still needs a map check before reading its scratch.
+    if(valid(id+e)${uniformAbOn("sharpenflux") ? `&&select(uvSharpenTileActive(id+e),(uvEdges[uvEdgeAddress(i)].base&(1u<<(5u*axis)))!=0u,uvPageWorkEnabled())` : ""}){terms[2u*axis]=-uvLimitedFlux(i,linearIndex(id+e),axis);}
+    if(valid(id-e)${uniformAbOn("sharpenflux") ? "&&uvSharpenTileActive(id-e)" : ""}){terms[2u*axis+1u]=uvLimitedFlux(linearIndex(id-e),i,axis);}}
   textureStore(volumeOut,id,vec4f(uvDustFloor(volume(id)+d4Sum6(terms))));
 }
 // The two-level velocity sampler and the tile classes the shrunk velocity

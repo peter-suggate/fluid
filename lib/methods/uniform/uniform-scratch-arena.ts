@@ -1,6 +1,7 @@
 /** Shared f32 scratch backing. Extension, conservative transport and pressure
  * execute in that order; none of their temporary fields survives its stage.
  * Persistent/published textures remain ordinary textures. */
+import { uniformAbOn } from "./uniform-ab-switch";
 import { planUniformCM11aHierarchy } from "./pressure-plan";
 import { rewritePressureTextureCalls } from "./uniform-pressure-pages";
 import { uniformDonorSliceWords } from "./uniform-volume-donor-sum.wgsl";
@@ -124,9 +125,12 @@ export function uniformVolumeScratchShader(source:string,sharpenBaseWords:number
   result=result.replace(weight,(_m,i,k)=>`uvWeight(${i},${k})`)
     .replace(/uvEdges\[([^\]]+)\]\.base/g,(_m,i)=>`uvBase(${i})`);
   return result+`
-fn uvBase(i:u32)->u32{return uniformScratch[10u*i];}
-fn uvSetBase(i:u32,value:u32){uniformScratch[10u*i]=value;}
-fn uvWeight(i:u32,k:u32)->f32{return bitcast<f32>(uniformScratch[10u*i+1u+k]);}
-fn uvSetWeight(i:u32,k:u32,value:f32){uniformScratch[10u*i+1u+k]=bitcast<u32>(value);}
+// Planar members within a padded 64-cell brick: adjacent SIMD lanes now
+// load adjacent words instead of a 40-byte stride. Same 10 words per cell.
+fn uvEdgeWord(i:u32,k:u32)->u32{return ${uniformAbOn("edgeplanes") && uniformAbOn("edgebricks") ? "(i/64u)*640u+k*64u+i%64u" : "10u*i+k"};}
+fn uvBase(i:u32)->u32{return uniformScratch[uvEdgeWord(i,0u)];}
+fn uvSetBase(i:u32,value:u32){uniformScratch[uvEdgeWord(i,0u)]=value;}
+fn uvWeight(i:u32,k:u32)->f32{return bitcast<f32>(uniformScratch[uvEdgeWord(i,1u+k)]);}
+fn uvSetWeight(i:u32,k:u32,value:f32){uniformScratch[uvEdgeWord(i,1u+k)]=bitcast<u32>(value);}
 `;
 }
