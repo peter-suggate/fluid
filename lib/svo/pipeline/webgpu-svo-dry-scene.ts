@@ -590,20 +590,10 @@ export function svoDrySceneClusterResolver(packed: Uint32Array | undefined): Svo
   };
 }
 
-/**
- * Liquid coverage along the continuation ray above which an opaque voxel is
- * drawn see-through. Coverage is a fraction per coarse texel, so the water's
- * own boundary texel reads about 0.5 and a texel one step into the vessel wall
- * reads well under this: the ghost begins at the water, not half a texel out.
- */
-export const SVO_OCCLUDER_GHOST_COVERAGE_THRESHOLD = 0.3;
-
 /** Packed dry-scene parameters. */
 export const SVO_DRY_SCENE_PARAMS_LAYOUT = Object.freeze({
-  sizeBytes: 688,
+  sizeBytes: 672,
   meshFilterWordOffset: 160,
-  /** enabled, ghost opacity, coverage threshold, reserved. */
-  occluderGhostWordOffset: 168,
   glassWordOffset: 24,
   /** count, generation, stride bytes, reserved for accepted planar terminals. */
   planarBoundaryWordOffset: 28,
@@ -1422,8 +1412,6 @@ export class SparseVoxelDrySceneRenderer {
   private readonly fluidCoverageFallback: GPUTexture;
   private readonly fluidCoverageFallbackView: GPUTextureView;
   private fluidCoverage?: WebGpuSvoFluidCoverage;
-  /** The coverage view the live bind groups were built with; see refreshFluidCoverageFrame. */
-  private boundFluidCoverageView?: GPUTextureView;
   private rigidMotionSource?: GPUBuffer;
   /** xyz centre, w radius of one sphere over every body; negative radius = none. */
   private rigidBounds: [number, number, number, number] = [0, 0, 0, -1];
@@ -1440,8 +1428,6 @@ export class SparseVoxelDrySceneRenderer {
   private lightingOptions: SvoLightingOptions = DEFAULT_SVO_LIGHTING_OPTIONS;
   private silhouetteRefinementEnabled = false;
   private renderTuning: SvoRenderTuning = DEFAULT_SVO_RENDER_TUNING;
-  /** The scene document's own answer, taken when the tuning says `auto`. */
-  private sceneSeeThroughSolids = false;
   /** Pixel-trace probe: compiled on first request, never during normal startup. */
   private probePipeline?: GPURenderPipeline;
   private probeLayout?: GPUBindGroupLayout;
@@ -5128,7 +5114,7 @@ export class SparseVoxelDrySceneRenderer {
     // deep the primary descends and nothing else. It adds no pass, moves no
     // march shape, and lighting never reads it — so a slider drag must cost one
     // 16-byte write, not a world-GI rebuild and a discarded primary.
-    const lodKeys = ["lodMode", "lodScreenSpacePixels", "lodFixedLevel", "surfaceMeshLodPixels", "surfaceMeshFilteringEnabled", "surfaceMeshNormalSmoothing", "surfaceMeshNormalStrength", "surfaceMeshMaxCoarsening", "surfaceMeshLodHysteresis", "surfaceMeshNormalAgreement", "surfaceMeshPreserveCloseNormals", "occluderGhosting", "occluderGhostOpacity"] as const;
+    const lodKeys = ["lodMode", "lodScreenSpacePixels", "lodFixedLevel", "surfaceMeshLodPixels", "surfaceMeshFilteringEnabled", "surfaceMeshNormalSmoothing", "surfaceMeshNormalStrength", "surfaceMeshMaxCoarsening", "surfaceMeshLodHysteresis", "surfaceMeshNormalAgreement", "surfaceMeshPreserveCloseNormals"] as const;
     const lodOnly = (Object.keys(normalized) as (keyof SvoRenderTuning)[])
       .every((key) => normalized[key] === this.renderTuning[key] || (lodKeys as readonly string[]).includes(key));
     if (lodOnly) {
@@ -5175,15 +5161,6 @@ export class SparseVoxelDrySceneRenderer {
    */
   private refreshFluidCoverageFrame(): void {
     if (!this.fluidCoverage) return;
-    // The renderer attaches the owner before it encodes the first fill, so the
-    // bind groups built at attach time hold the 1x1x1 fallback view; the
-    // volume's own view only exists once that fill has run. A sparse scene
-    // rebuilt them anyway on its next topology change. A scene whose world
-    // never changes after load — the uniform troughs — kept the fallback for
-    // the whole session: a frame that says valid over a texture that says
-    // nothing, so no water shadow and nothing ever see-through.
-    const view = this.fluidCoverage.visibleGeneration()?.view ?? this.fluidCoverageFallbackView;
-    if (this.bindGroup && view !== this.boundFluidCoverageView) this.rebuild();
     this.device.queue.writeBuffer(this.paramsBuffer, SVO_DRY_SCENE_PARAMS_LAYOUT.fluidCoverageWordOffset * 4, this.fluidCoverage.frame());
   }
 
@@ -5330,7 +5307,6 @@ export class SparseVoxelDrySceneRenderer {
     }
     this.packLodParams(floats, words, SVO_DRY_SCENE_PARAMS_LAYOUT.lodWordOffset);
     this.packMeshFilterParams(floats, SVO_DRY_SCENE_PARAMS_LAYOUT.meshFilterWordOffset);
-    this.packOccluderGhostParams(floats, SVO_DRY_SCENE_PARAMS_LAYOUT.occluderGhostWordOffset);
     if (this.paramsWords?.length === words.length && words.every((word, index) => word === this.paramsWords![index])) return;
     this.device.queue.writeBuffer(this.paramsBuffer, 0, buffer);
     this.paramsWords = Uint32Array.from(words);
@@ -5402,35 +5378,6 @@ export class SparseVoxelDrySceneRenderer {
     this.packMeshFilterParams(filtering, 0);
     this.device.queue.writeBuffer(this.paramsBuffer, SVO_DRY_SCENE_PARAMS_LAYOUT.meshFilterWordOffset * 4, filtering);
     this.paramsWords?.set(new Uint32Array(filtering.buffer), SVO_DRY_SCENE_PARAMS_LAYOUT.meshFilterWordOffset);
-    this.writeOccluderGhostParams();
-  }
-
-  /**
-   * See-through occluders are a shading decision read from one uniform lane,
-   * so the scene flag and the tuning both land as a 16-byte write and never a
-   * bundle rebuild: `packOccluderGhostParams` is the only reader of either.
-   */
-  setSceneSeeThroughSolids(enabled: boolean): void {
-    if (this.sceneSeeThroughSolids === enabled) return;
-    this.sceneSeeThroughSolids = enabled;
-    this.writeOccluderGhostParams();
-  }
-
-  private packOccluderGhostParams(floats: Float32Array, offset: number): void {
-    const t = this.renderTuning;
-    const enabled = t.occluderGhosting === "on" || (t.occluderGhosting === "auto" && this.sceneSeeThroughSolids);
-    // Coverage above this along the continuation ray is "water behind". A
-    // coarse texel bleeds half a texel past the surface, so the threshold sits
-    // above the boundary value rather than at zero.
-    floats.set([Number(enabled), t.occluderGhostOpacity, SVO_OCCLUDER_GHOST_COVERAGE_THRESHOLD, 0], offset);
-  }
-
-  private writeOccluderGhostParams(): void {
-    if (!this.paramsWords) return;
-    const ghost = new Float32Array(4);
-    this.packOccluderGhostParams(ghost, 0);
-    this.device.queue.writeBuffer(this.paramsBuffer, SVO_DRY_SCENE_PARAMS_LAYOUT.occluderGhostWordOffset * 4, ghost);
-    this.paramsWords.set(new Uint32Array(ghost.buffer), SVO_DRY_SCENE_PARAMS_LAYOUT.occluderGhostWordOffset);
   }
 
   /**
@@ -5499,8 +5446,6 @@ export class SparseVoxelDrySceneRenderer {
       this.coneFanoutSceneBindGroup = undefined;
       return;
     }
-    const fluidCoverageView = this.fluidCoverage?.visibleGeneration()?.view ?? this.fluidCoverageFallbackView;
-    this.boundFluidCoverageView = fluidCoverageView;
     this.bindGroup = this.device.createBindGroup({ layout: this.layout, entries: [
       { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: { buffer: this.bodyBuffer } },
       { binding: 2, resource: structural.structure },
@@ -5515,7 +5460,7 @@ export class SparseVoxelDrySceneRenderer {
       { binding: 16, resource: nodeMip?.view ?? this.nodeMipFallbackAtlasView },
       { binding: 17, resource: nodeMip?.sampler ?? this.nodeMipFallbackSampler },
       { binding: 18, resource: nodeMip?.directoryView ?? this.nodeMipFallbackDirectoryView },
-      { binding: 19, resource: fluidCoverageView },
+      { binding: 19, resource: this.fluidCoverage?.visibleGeneration()?.view ?? this.fluidCoverageFallbackView },
       { binding: 20, resource: nodeMip?.directPageTableView ?? this.nodeMipFallbackDirectPageTableView },
       { binding: 21, resource: tetrahedralRadiance?.views[0] ?? this.tetrahedralRadianceFallbackViews[0] },
       { binding: 22, resource: tetrahedralRadiance?.views[1] ?? this.tetrahedralRadianceFallbackViews[1] },
@@ -5537,7 +5482,7 @@ export class SparseVoxelDrySceneRenderer {
           { binding: 4, resource: nodeMip?.view ?? this.nodeMipFallbackAtlasView },
           { binding: 5, resource: nodeMip?.sampler ?? this.nodeMipFallbackSampler },
           { binding: 6, resource: nodeMip?.directoryView ?? this.nodeMipFallbackDirectoryView },
-          { binding: 7, resource: fluidCoverageView },
+          { binding: 7, resource: this.fluidCoverage?.visibleGeneration()?.view ?? this.fluidCoverageFallbackView },
           { binding: 8, resource: nodeMip?.directPageTableView ?? this.nodeMipFallbackDirectPageTableView },
           { binding: 9, resource: nodeMipPageValidity ?? this.nodeMipPageValidityFallbackView },
         ],

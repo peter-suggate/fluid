@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   canQueuePreparedGPUAdvance,
   completedFrameAwaitsPresentation,
+  FluidLabRenderer,
   presentationHeldByPendingFrame,
   submitNextPreparedGPUAdvance,
 } from "../lib/core/webgpu-renderer";
@@ -158,4 +159,59 @@ test("deferred pressure publication presents every completed step without starva
   shown.forEach((time,i) => assert.ok(Math.abs(time-(i+1)*DT)<1e-9));
   assert.equal(completedFrameAwaitsPresentation({...fluid,deferredFramePublication:false},0),false,
     "existing immediately-published solvers retain their cadence");
+});
+
+function deferredPresentationFixture() {
+  let complete!: () => void;
+  const receipt = new Promise<void>(resolve => { complete = resolve; });
+  const solver = {
+    deferredFramePublication: true, framePending: true,
+    info: { completedTime_s: 0 }, awaitFrameCompletion: () => receipt,
+  };
+  let draws = 0;
+  const renderer = Object.assign(Object.create(FluidLabRenderer.prototype), {
+    gpuFluid: solver, gpuFluidGeneration: 1, deferredPresentedTimes: new WeakMap(),
+    draw: () => ({ context: "test", methodId: "uniform-geometric", presentationSubmitted: ++draws > 1 }),
+  }) as FluidLabRenderer;
+  return {
+    renderer, solver, draws: () => draws,
+    args: [] as unknown as Parameters<FluidLabRenderer["draw"]>,
+    complete: () => { solver.framePending = false; solver.info.completedTime_s = DT; complete(); },
+  };
+}
+
+test("a deferred frame presents on its receipt without another animation-frame request", async () => {
+  const f = deferredPresentationFixture();
+  const request = f.renderer.drawWithDeferredPresentation(f.args);
+  assert.equal(f.draws(), 1, "mutable simulation fields must not be presented");
+  f.complete();
+  assert.equal((await request).presentationSubmitted, true);
+  assert.equal(f.draws(), 2, "the original worker request must submit the completed frame exactly once");
+});
+
+test("a replaced scene cannot be redrawn by an old pressure receipt", async () => {
+  const f = deferredPresentationFixture();
+  let current = true;
+  const request = f.renderer.drawWithDeferredPresentation(f.args, () => current);
+  current = false;
+  f.complete();
+  assert.equal((await request).presentationSubmitted, false);
+  assert.equal(f.draws(), 1);
+});
+
+test("a solver reset invalidates an outstanding deferred presentation", async () => {
+  const f = deferredPresentationFixture();
+  const request = f.renderer.drawWithDeferredPresentation(f.args);
+  Object.assign(f.renderer, { gpuFluidGeneration: 2 });
+  f.complete();
+  assert.equal((await request).presentationSubmitted, false);
+  assert.equal(f.draws(), 1);
+});
+
+test("a failed pressure receipt rejects the request without presenting it", async () => {
+  const f = deferredPresentationFixture();
+  const failure = new Error("pressure failed to converge");
+  f.solver.awaitFrameCompletion = () => Promise.reject(failure);
+  await assert.rejects(f.renderer.drawWithDeferredPresentation(f.args), failure);
+  assert.equal(f.draws(), 1);
 });

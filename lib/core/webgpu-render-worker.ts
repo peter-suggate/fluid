@@ -154,7 +154,7 @@ scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest
       renderScene = { ...renderScene, revision: message.revision };
     }
   } else if (message.type === "draw") {
-    try {
+    void (async () => {
       if (!renderScene || renderScene.revision !== message.sceneRevision) {
         throw new Error(`Render scene revision ${message.sceneRevision} has not been published`);
       }
@@ -164,16 +164,26 @@ scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest
       usePerformanceInstrumentationStore.getState().setMode(message.instrumentationMode);
       runtime.setViewportSize(message.viewport.width, message.viewport.height, message.viewport.devicePixelRatio);
       const [time_s, ...args] = message.args;
-      const metrics = runtime.draw(time_s, renderScene.document, ...args);
+      const metrics = await runtime.drawWithDeferredPresentation(
+        [time_s, renderScene.document, ...args],
+        () => renderer === runtime && renderScene?.revision === message.sceneRevision,
+      );
+      if (renderer !== runtime) return;
+      // A scene edit can be accepted while the pressure receipt is pending.
+      // The next queued request owns that document; this one only retires.
+      if (!renderScene || renderScene.revision !== message.sceneRevision) {
+        post({ type: "frame", frameId: message.frameId, metrics, snapshot: snapshot(runtime) });
+        return;
+      }
       const catalog = cachedEnvironmentProxyCatalog(renderScene.document);
       if (catalog && needsSceneryCatalog) {
         post({ type: "scenery-catalog", sceneRevision: renderScene.revision, catalog });
         needsSceneryCatalog = false;
       }
       post({ type: "frame", frameId: message.frameId, metrics, snapshot: snapshot(runtime) });
-    } catch (error) {
+    })().catch((error: unknown) => {
       runtime.stopAfterFailure(error instanceof Error ? `GPU runtime stopped: ${error.message}` : "GPU runtime stopped");
-    }
+    });
   } else if (message.type === "set-simulation-scene") {
     runtime.setSimulationScene(message.scene ? markSceneRevision(message.scene) : undefined);
   }

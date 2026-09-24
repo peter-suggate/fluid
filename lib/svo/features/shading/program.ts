@@ -2555,7 +2555,7 @@ fn dryVoxelLightReject(pageIndex:u32,local:vec3u){
 ` : "";
   const voxelLightCacheShortcutWGSL = voxelLightCache ? /* wgsl */ `let cachedVoxelVisibility=dryVoxelLightVisibility(position,geometricNormal);if(cachedVoxelVisibility.y>0.0){let rigidBlocker=nearestBodyIgnoring(ray.origin_m,towardLight,ownerId);let raw=select(cachedVoxelVisibility.x,0.0,rigidBlocker.t<ray.tMax_m);return vec3f(mix(1.0,raw,dry.tuningRays0.y));}if(dryCurrentLightSlot==0u&&(dryVoxelLight.control.w&2u)!=0u){dryCurrentLightSlot=0xffffffffu;}` : "";
   const prepassResolveCallWGSL = reduced
-    ? /* wgsl */ `dryPrepassData0=vec4f(1.0);dryPrepassData1=vec4f(1.0);dryPrepassData2=vec4f(1.0);dryPrepassRadiance=vec4f(0.0);dryPrepassGi=vec4f(0.0,0.0,0.0,1.0);dryPrepassState=0u;dryPrepassRadianceState=0u;dryPrepassGiState=0u;dryPrepassExactEdgeState=0u;dryCurrentLightSlot=0xffffffffu;if(opaque.t<DRY_MISS&&!dryHitThinDielectric(opaque)&&dryGhostOccluderOnce(opaque,ro,rd).valid==0u&&(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)!=0u){if(dryNodeMipReady()){dryPrepassResolve(input.position.xy,opaque.t,opaque.normal,opaque);}else{dryDerivedPageFailure|=${SVO_DRY_DERIVED_FAILURE.reducedReconstruction}u;}}${voxelLightCache ? "if((dryVoxelLight.control.w&2u)!=0u){dryPrepassRadianceState=0u;dryPrepassGiState=0u;}" : ""}`
+    ? /* wgsl */ `dryPrepassData0=vec4f(1.0);dryPrepassData1=vec4f(1.0);dryPrepassData2=vec4f(1.0);dryPrepassRadiance=vec4f(0.0);dryPrepassGi=vec4f(0.0,0.0,0.0,1.0);dryPrepassState=0u;dryPrepassRadianceState=0u;dryPrepassGiState=0u;dryPrepassExactEdgeState=0u;dryCurrentLightSlot=0xffffffffu;if(opaque.t<DRY_MISS&&!dryHitThinDielectric(opaque)&&(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)!=0u){if(dryNodeMipReady()){dryPrepassResolve(input.position.xy,opaque.t,opaque.normal,opaque);}else{dryDerivedPageFailure|=${SVO_DRY_DERIVED_FAILURE.reducedReconstruction}u;}}${voxelLightCache ? "if((dryVoxelLight.control.w&2u)!=0u){dryPrepassRadianceState=0u;dryPrepassGiState=0u;}" : ""}`
     : "";
   // The lattice arm keeps every guard and failure of the screen resolve and
   // swaps only where the receiver's visibility comes from. It reads the same
@@ -3424,10 +3424,6 @@ fn dryPrepassShadeNoGi(opaque:DryHit,ro:vec3f,rd:vec3f)->vec3f{
   // Until GLOBAL data is ready, rigid opaque radiance remains exact at full
   // rate, so avoid doing an unusable complete material evaluation here.
   if(opaque.motionKind!=DRY_GBUFFER_MOTION_STATIC){return vec4f(0.0);}
-  // A see-through wall shades two surfaces, and everything this prepass would
-  // cache describes only the near one. Withhold the sample; the full-rate pass
-  // rejects the negative alpha and shades the pixel exactly.
-  if(dryGhostOccluderOnce(opaque,ro,rd).valid!=0u){return vec4f(0.0,0.0,0.0,-1.0);}
   let packed=textureLoad(dryPrepassVisibilityKeyTexture,coordinate,0);let packedValid=!all(packed.xy==DRY_PREPASS_INVALID_PACKED);dryPrepassData0=dryPrepassUnpack0(packed);dryPrepassData1=dryPrepassUnpack1(packed);dryPrepassData2=dryPrepassUnpack2(packed);
   dryPrepassState=select(0u,1u,packedValid);dryPrepassRadianceState=0u;dryPrepassGiState=0u;if(!packedValid){dryDerivedPageFailure|=${SVO_DRY_DERIVED_FAILURE.reducedReconstruction}u;return vec4f(0.0,0.0,0.0,-1.0);}dryCurrentLightSlot=0xffffffffu;dryVisibilityIgnoredBody=DRY_OWNER_NONE;dryThickGlassEnabled=0u;
   // Full-res relight stores only the expensive GI closure and evaluates the
@@ -3509,10 +3505,6 @@ ${reduced ? `@fragment fn dryReconstructedLightingMain(input:VertexOut)->@locati
   let coordinate=vec2i(input.position.xy);let geometry=drySplitGeometryAt(coordinate);if(!(geometry.w<DRY_MISS)){discard;}
   let opaqueIdentity=drySplitIdentityAt(coordinate);let packedOpaqueMaterial=opaqueIdentity.x;${splitOpaqueMaterialDecodeWGSL}let metadata=opaqueIdentity.y;let opaque=DryHit(geometry.w,geometry.xyz,opaqueMaterial,dryOpaqueOwner(metadata),(metadata>>16u)&15u,(metadata>>20u)&15u,(metadata>>24u)&3u,(metadata>>26u)&1u,0.0,vec3u(0u,metadata,0u));
   dryPrepassData0=vec4f(1.0);dryPrepassData1=vec4f(1.0);dryPrepassData2=vec4f(1.0);dryPrepassRadiance=vec4f(0.0);dryPrepassGi=vec4f(0.0,0.0,0.0,1.0);dryPrepassState=0u;dryPrepassRadianceState=0u;dryPrepassGiState=0u;dryPrepassExactEdgeState=0u;dryCurrentLightSlot=0xffffffffu;
-  // A see-through wall is never reconstructed from its neighbours: the cached
-  // texels around it describe the wall alone, and this pixel shows what is
-  // behind it. It falls through to the exact full-rate pass.
-  {let ghostNdc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ghostNdc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ghostNdc.y*cameraTanHalfFov());if(dryGhostOccluderOnce(opaque,ro,rd).valid!=0u){discard;}}
   if(dryNodeMipReady()){dryPrepassResolve(input.position.xy,opaque.t,opaque.normal,opaque);}if(dryPrepassRadianceState!=1u){discard;}
   ${rasterGlassDiscovery ? "let glassKey=textureLoad(drySplitGlassKeyRead,coordinate,0).x;" : "let glassKey=(packedOpaqueMaterial>>16u)&0x1ffu;"}if(glassKey>0u){discard;}
   // Radiance and its water-sort depth are a single cached result. In
@@ -3971,8 +3963,6 @@ struct DryParams {
   meshFilter:vec4f,
   // smooth normals enabled, minimum normal agreement, preserve close normals, reserved.
   meshFilterNormals:vec4f,
-  // See-through occluders: enabled, ghost opacity, liquid coverage threshold, reserved.
-  occluderGhost:vec4f,
 }
 struct DryLightingArena {
   // x: light count; y: light revision; z: environment revision; w: environment ABI version.
@@ -5296,99 +5286,9 @@ fn shadeDryThinDielectric(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f{
   drySurfaceOcclusionDepth_m=0.0;
   return max(color+throughput*dryEnvironment(rd,0.0),vec3f(0.0));
 }
-// See-through occluders.
-//
-// An authored voxel vessel is opaque, and from every side view it hides the
-// water it was built to hold. The question a pixel on such a wall has to answer
-// is not "what is this voxel made of" but "is there liquid behind it along my
-// view ray" — and the fluid coverage volume the shadow cones already march
-// answers exactly that, at full rate, for evolving water. A wall pixel with
-// water behind it is then shaded twice: once as itself and once as whatever the
-// ray reaches past the contiguous run of solid it entered, and it publishes the
-// *behind* depth as its occlusion depth — the glass continuation's contract —
-// so the water composite sorts the water in front of the far wall rather than
-// throwing it away behind the near one. The wall's own radiance stays over the
-// result at the ghost opacity: the vessel is still there, it just no longer
-// hides its contents.
-//
-// Only static authored voxels are candidates. Rigid bodies keep their own
-// motion-owned shading, and glass already has a continuation of its own.
-fn dryHitGhostCandidate(hit:DryHit)->bool{
-  if(hit.t>=DRY_MISS||hit.motionKind!=DRY_GBUFFER_MOTION_STATIC||(hit.materialId&0x80000000u)!=0u){return false;}
-  let materialId=hit.materialId;if(materialId>=dry.materialPublication.x){return false;}
-  let material=dryMaterial(materialId);
-  return dryPublishedMaterialValid(material,materialId)&&!dryMaterialThinDielectric(material,materialId);
-}
-// Peak liquid coverage along the ray from \`origin\`, through the coverage
-// volume's box. Texel-sized steps at the finest mip, stretched only when the
-// box is longer than the step budget can cover: the answer is a threshold test,
-// so a blurred level would only widen the halo around the water.
-fn dryLiquidCoverageAlong(origin:vec3f,direction:vec3f)->f32{
-  if(!svoFluidCoverageReady(dry.fluidCoverage)){return 0.0;}
-  let texel_m=max(dry.fluidCoverage.texelSize_m.x,max(dry.fluidCoverage.texelSize_m.y,dry.fluidCoverage.texelSize_m.z));
-  if(!(texel_m>0.0)){return 0.0;}
-  let slab=dryFluidCoverageSlab(origin,direction,DRY_MISS);
-  if(!(slab.y>slab.x)){return 0.0;}
-  let stepWidth=max(texel_m,(slab.y-slab.x)/f32(${SVO_DRY_FLUID_MARCH_STEPS}u));
-  let lod=svoFluidCoverageLod(stepWidth,texel_m);
-  var distance=slab.x;var peak=0.0;
-  for(var stepIndex=0u;stepIndex<${SVO_DRY_FLUID_MARCH_STEPS}u;stepIndex+=1u){
-    if(distance>=slab.y||peak>=dry.occluderGhost.z){break;}
-    let width=min(stepWidth,slab.y-distance);
-    peak=max(peak,svoFluidCoverageAt(fluidCoverageVolume,nodeMipSampler,dry.fluidCoverage,origin+direction*(distance+width*.5),lod));
-    distance+=width;
-  }
-  return peak;
-}
-// The first surface past the contiguous run of solid the ray entered at \`hit\`.
-// A run is walked voxel by voxel, as the glass continuation does, and ends at
-// the first hit that does not begin where the previous voxel ended: that gap is
-// the water (or air) the ghost exists to reveal, and the surface after it is
-// the far wall, which must stay opaque. A run longer than the walk allows is
-// left as it was found; a thick hillside is not a vessel wall.
-struct DryGhostContinuation{behind:DryHit,valid:u32}
-fn dryTraceBeyondOccluder(hit:DryHit,ro:vec3f,rd:vec3f)->DryGhostContinuation{
-  let cell=max(dry.mapping.cellSize,vec3f(1e-9));let contiguous_m=.5*min(cell.x,min(cell.y,cell.z));
-  var cursor=hit.t+dryVoxelExit_m(ro+rd*hit.t,rd);var behind=traceDrySolidSceneFrom(ro,rd,cursor);
-  for(var layer=0u;layer<16u;layer+=1u){
-    if(behind.t>=DRY_MISS||behind.t>cursor+contiguous_m||!dryHitGhostCandidate(behind)){return DryGhostContinuation(behind,1u);}
-    cursor=behind.t+dryVoxelExit_m(ro+rd*behind.t,rd);behind=traceDrySolidSceneFrom(ro,rd,cursor);
-  }
-  return DryGhostContinuation(behind,0u);
-}
-// Whether \`hit\` should be drawn see-through, and what lies behind it if so.
-fn dryGhostOccluder(hit:DryHit,ro:vec3f,rd:vec3f)->DryGhostContinuation{
-  if(!(dry.occluderGhost.x>0.0)||!dryHitGhostCandidate(hit)){return DryGhostContinuation(missHit(),0u);}
-  let exit=hit.t+dryVoxelExit_m(ro+rd*hit.t,rd);
-  if(dryLiquidCoverageAlong(ro+rd*exit,rd)<dry.occluderGhost.z){return DryGhostContinuation(missHit(),0u);}
-  return dryTraceBeyondOccluder(hit,ro,rd);
-}
-// One answer per pixel. The reduced-rate resolve asks first, so that a ghost
-// pixel never borrows a neighbouring wall texel's cached radiance, and the
-// shading asks again for the same hit; the march and the continuation trace
-// run once. Keyed on the hit distance so a second, different hit in the same
-// invocation is never handed the first one's answer.
-var<private> dryGhostResolvedT:f32=-1.0;
-var<private> dryGhostResolved:DryGhostContinuation;
-fn dryGhostOccluderOnce(hit:DryHit,ro:vec3f,rd:vec3f)->DryGhostContinuation{
-  if(dryGhostResolvedT!=hit.t){dryGhostResolved=dryGhostOccluder(hit,ro,rd);dryGhostResolvedT=hit.t;}
-  return dryGhostResolved;
-}
-fn shadeDryGhostedOccluder(hit:DryHit,behind:DryHit,ro:vec3f,rd:vec3f)->vec3f{
-  // Both surfaces shade exactly. The reduced-rate prepass cached the near
-  // wall's visibility, radiance and GI, none of which describe the surface
-  // behind it — and the ghost pixel was withheld from that cache anyway.
-  ${reduced ? "dryPrepassState=0u;dryPrepassRadianceState=0u;dryPrepassGiState=0u;" : ""}
-  let front=shadeDryOpaque(hit,ro,rd);
-  let back=shadeDryOpaque(behind,ro,rd);
-  drySurfaceOcclusionDepth_m=select(0.0,behind.t,behind.t<DRY_MISS);
-  return mix(back,front,clamp(dry.occluderGhost.y,0.0,1.0));
-}
 fn shadeDrySurface(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f{
   drySurfaceOcclusionDepth_m=select(0.0,hit.t,hit.t<DRY_MISS);
   ${fastDeferred ? "" : "if(dryHitThinDielectric(hit)){return shadeDryThinDielectric(hit,ro,rd);}"}
-  let ghost=dryGhostOccluderOnce(hit,ro,rd);
-  if(ghost.valid!=0u){return shadeDryGhostedOccluder(hit,ghost.behind,ro,rd);}
   return shadeDryOpaque(hit,ro,rd);
 }
 struct DryGlassSurface{color:vec3f,depth:f32,materialId:u32,ownerId:u32,paneId:u32,_padding:u32}
