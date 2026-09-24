@@ -10,6 +10,7 @@ export const UNIFORM_VOLUME_ENTRIES = [
   "uvCacheSharpenCells", "uvCacheSharpenFaces",
   "uvBalanceMeasure", "uvBalanceReduce", "uvBalanceReduceChunks", "uvTwoLevelSeedCooperative",
   "uvAgreementResidual", "uvCorrectionCapacity", "uvCorrectionTargets",
+  "uvCullOrphanDust",
 ] as const;
 /** The four Sec. 3.5 sweeps that exist in a dense and a 4h work-map variant. */
 export const UNIFORM_VOLUME_SHARPEN_ENTRIES = [
@@ -528,6 +529,21 @@ fn uvSurfaceVertex(vertex:vec3i,value:f32)->bool{
     if((textureLoad(uvPhiIn,n,0).x<0.0)!=(value<0.0)){return true;}}}}
   return false;
 }
+// A failed Newton search is not a distance certificate. In particular, a
+// drained ghost can leave a positive h/2 plateau with zero gradient forever.
+// Only discard its near-surface distance when the entire 4h neighbourhood
+// contains no nonpositive vertex. Trilinear interpolation cannot hide a zero
+// in an all-positive cell. Include the outer vertex plane and physical walls;
+// V is independent and still seeds transport/airborne work after phi retires.
+fn uvNoNearbySurface(vertex:vec3i,band:f32)->bool{
+  var reach=vec3i(ceil(vec3f(band)/params.cellGravity.xyz));
+  if(UNIFORM_REFERENCE_DIMENSION==2u){reach.z=1;}
+  let lo=max(vec3i(0),vertex-reach);let hi=min(dims(),vertex+reach);
+  for(var z=lo.z;z<=hi.z;z++){for(var y=lo.y;y<=hi.y;y++){for(var x=lo.x;x<=hi.x;x++){
+    if(!(textureLoad(uvPhiIn,vec3i(x,y,z),0).x>0.0)){return false;}
+  }}}
+  return true;
+}
 @compute @workgroup_size(4,4,4)
 fn uvAdvectPhi(@builtin(global_invocation_id)gid:vec3u){
   let vertex=activeVertexId(gid);if(any(vertex<vec3i(0))||any(vertex>dims())){return;}let p=vec3f(vertex);
@@ -571,7 +587,10 @@ fn uvRedistancePhi(@builtin(global_invocation_id)gid:vec3u){
     // Reuse the last Newton gradient: no additional texture reads or steps.
     if(params.splash.x>0.5&&lastNorm>1e-16){let root=q-uvPhi(q)*lastGradient/(h*h*lastNorm);
       value=sign(initial)*min(band,length((p-root)*h));}
-    else if(abs(uvPhi(q))<0.005*min(h.x,min(h.y,h.z))){value=sign(initial)*length((p-q)*h);}}}
+    else if(abs(uvPhi(q))<0.005*min(h.x,min(h.y,h.z))){value=sign(initial)*length((p-q)*h);}
+    if(${uniformAbOn("phiretire") ? "true" : "false"}&&params.splashB.z>0.5&&initial>0.0&&value<band
+      &&abs(uvPhi(q))>=0.005*min(h.x,min(h.y,h.z))&&uvNoNearbySurface(vertex,band)){value=band;}
+  }}
   textureStore(uvPhiOut,vertex,vec4f(value));
 }
 fn uvOpen(id:vec3i)->f32{if(!valid(id)){return 0.0;}return cellOpenFraction(id);}
@@ -717,6 +736,29 @@ fn uvDustFloor(value:f32)->f32{
   atomicAdd(&reductions[5],1u);
   atomicAdd(&reductions[6],min(u32(abs(value)/params.tuning.z*64.0),64u));
   return 0.0;
+}
+fn uvOrphanDust(id:vec3i,value:f32)->f32{
+  if(value<=0.0||value>=params.cleanup.x||uvOpen(id)<0.99999){return value;}
+  let band=4.0*max(params.cellGravity.x,max(params.cellGravity.y,params.cellGravity.z));
+  // Protect surface neighbours, including incoming sheets and resting tails.
+  for(var z=-1;z<=2;z++){for(var y=-1;y<=2;y++){for(var x=-1;x<=2;x++){
+    if(textureLoad(uvPhiIn,clamp(id+vec3i(x,y,z),vec3i(0),dims()),0).x<band){return value;}
+  }}}
+  var mass=0.0;
+  for(var z=-1;z<=1;z++){for(var y=-1;y<=1;y++){for(var x=-1;x<=1;x++){
+    let n=id+vec3i(x,y,z);if(!valid(n)){continue;}
+    let v=volume(n);if(v>=UV_LIQUID_EVIDENCE){return value;}mass+=max(v,0.0);
+  }}}
+  if(mass>=0.25){return value;}
+  atomicAdd(&reductions[10],1u);
+  // Separate units keep a tiny regular floor from overflowing this counter.
+  atomicAdd(&reductions[11],u32(value/params.cleanup.x*64.0));
+  return 0.0;
+}
+@compute @workgroup_size(4,4,4)
+fn uvCullOrphanDust(@builtin(global_invocation_id)gid:vec3u){
+  let id=activeId(gid);if(!valid(id)){return;}
+  textureStore(volumeOut,id,vec4f(uvOrphanDust(id,volume(id))));
 }
 @compute @workgroup_size(4,4,4)
 fn uvGather(@builtin(global_invocation_id)gid:vec3u){

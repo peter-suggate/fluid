@@ -43,6 +43,7 @@
     "test:physics-wasm:threaded": "node --import tsx tools/wasm/threaded-parity.ts",
     "check:types": "tsc --noEmit",
     "benchmark:uniform-volume-pages": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx tools/benchmark-uniform-volume-pages-dawn.ts",
+    "test:dawn:uniform-splash-retirement": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx tools/probe-uniform-splash-retirement-dawn.ts --frames=180 --verify",
     "test:dawn:uniform-inflow": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx --test --test-concurrency=1 tests/uniform-inflow-window-dawn.test.ts",
     "test:dawn:uniform-pages": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx --test --test-concurrency=1 tests/uniform-volume-pages-dawn.test.ts tests/visual-layers-dawn.test.ts",
     "test:uniform-pages": "node --import tsx --test tests/uniform-page-layout.test.ts",

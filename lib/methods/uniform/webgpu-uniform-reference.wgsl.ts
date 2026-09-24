@@ -88,6 +88,8 @@ struct Params {
   // from V. z: drain phi-liquid with no V behind it. w: airborne V keeps
   // its own momentum.
   splashB: vec4f,
+  // x: extra dilute orphan floor; zero disables cleanup.
+  cleanup: vec4f,
 }
 @group(0) @binding(0) var velocityIn: texture_3d<f32>;
 @group(0) @binding(1) var velocityOut: texture_storage_3d<rgba32float, write>;
@@ -101,7 +103,8 @@ struct Params {
 // 0..4 are published diagnostics. The geometric method adds 5 and 6 for the
 // volume dust floor (cells zeroed, discarded mass in sixty-fourths of the
 // threshold) and 7 for the count of fine tiles in the E1 two-level map.
-@group(0) @binding(9) var<storage,read_write> reductions:array<atomic<u32>,10>;
+// 8/9 audit page reads; 10/11 count orphan discards in orphan-floor units.
+@group(0) @binding(9) var<storage,read_write> reductions:array<atomic<u32>,12>;
 struct RigidBody {
   positionShape: vec4f,
   dimensions: vec4f,
@@ -278,7 +281,7 @@ ${geometric ? `
 fn geometricActiveSeed(id:vec3i)->bool{
   if(!valid(id)){return false;}
   let dust=select(params.tuning.z,1e-6,params.tuning.z<=0.0);
-  if(abs(volume(id))>dust){return true;}
+  if(abs(volume(id))>=dust){return true;}
   let band=4.0*max(params.cellGravity.x,max(params.cellGravity.y,params.cellGravity.z));
   for(var k=0u;k<8u;k++){
     if(textureLoad(uvPhiIn,id+uvCorner(k),0).x<band){return true;}

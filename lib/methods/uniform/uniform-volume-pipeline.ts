@@ -258,8 +258,11 @@ const volumeStages: FluidPipelineStage[] = [
     controls:[{kind:"param-range" as const,param:"volumeDustThreshold",label:"Dust floor",unit:"cell volumes",
       min:0,max:1e-3,step:1e-7,digits:7,
       hint:"Discard |V| below this wherever transport or sharpening writes V, ULP-scale negatives included. Zero is off and stores the untreated sum bit for bit."},
+      {kind:"param-range" as const,param:"orphanDustThreshold",label:"Orphan dust floor",unit:"cell volumes",
+        min:0,max:0.05,step:0.001,digits:3,
+        hint:"Extra floor outside the surface band, with local droplet protection. Zero disables it. Discarded mass is not restored by surface correction."},
       {kind:"readout" as const,label:"Dust discarded",
-      hint:"Cells zeroed by the floor across the gather and the eight commit sweeps of the latest step, and the mass that went with them.",
+      hint:"Cells zeroed by regular and orphan cleanup in the latest step, and the mass that went with them.",
       value:(context: FluidPipelineContext)=>{
         const info=volumeInfo(context);const cells=info?.uniformVolumeDustCells;
         if(dustThreshold(context)<=0||cells===undefined)return "—";

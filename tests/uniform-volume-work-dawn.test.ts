@@ -38,7 +38,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
   // Both arms compile the same numerical operators. Only the physical field
   // backing differs; legacy source compilation is tracked by the trajectory probe.
   for(const pagedFields of [true,false])
-   solvers.push(await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,{...uniformGeometricSolverOptions({volumeStorage:"pages32",pressureWindow:"domain",pressureCycleBudget:"fixed"},scene),pressureCycleBudget:"fixed",fieldStorageForQA:pagedFields?undefined:"dense",volumePageWork:true,pageDomain:true},()=>{}));
+   solvers.push(await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,{...uniformGeometricSolverOptions({volumeStorage:"pages32",pressureWindow:"domain"},scene),pressureCycleBudget:"fixed",fieldStorageForQA:pagedFields?undefined:"dense",volumePageWork:true,pageDomain:true},()=>{}));
   // Keep pressure encoding identical to isolate field backing in this oracle.
   for (const solver of solvers) solver.applyRuntimeValues({pressureCycleBudget:"fixed"});
   for(let frame=1;frame<=64;frame++){

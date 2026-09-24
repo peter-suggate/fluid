@@ -82,6 +82,71 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
         }
       }finally{solver.destroy();}
     });
+    await t.test("drained positive phi plateau retires without requiring volume",async()=>{
+      const solver=await fixture(0,0,0,true,10,{phiDrain:true,volumeDustThreshold:.001});
+      try{
+        write(device!,solver.vertexPhiTexture!,new Float32Array(33*17*33).fill(.025));
+        assert.ok(solver.advanceTo(1/30));
+        const phi=await read(device!,solver.vertexPhiTexture!);
+        for(const value of phi)assert.ok(value>=.2-1e-6,"unsupported positive plateau must leave the 4h seed band");
+        assert.equal((await read(device!,solver.volumeTexture)).reduce((a,b)=>a+b,0),0);
+      }finally{solver.destroy();}
+    });
+    await t.test("positive plateau beside a real contour retains its zero crossings",async()=>{
+      const solver=await fixture(1,0,0,true,10,{phiDrain:true,volumeDustThreshold:.001});
+      try{
+        // A clipped distance field exercises zero-gradient air beside a body.
+        const phi=Float32Array.from({length:33*17*33},(_,i)=>Math.min(.025,
+          .05*(Math.max(Math.abs(i%33-12),Math.abs(Math.floor(i/33)%17-10),Math.abs(Math.floor(i/(33*17))-16))-1.5)));
+        write(device!,solver.vertexPhiTexture!,phi);
+        assert.ok(solver.advanceTo(1/30));
+        const actual=await read(device!,solver.vertexPhiTexture!);
+        let crossings=0;
+        for(let z=0;z<32;z++)for(let y=0;y<16;y++)for(let x=0;x<32;x++){
+          const i=x+33*(y+17*z);
+          for(const stride of [1,33,33*17])if((phi[i]!<0)!==(phi[i+stride]!<0)){
+            assert.ok(Math.abs(-phi[i]!/(phi[i+stride]!-phi[i]!)+actual[i]!/(actual[i+stride]!-actual[i]!))<1e-5,"cleanup preserves contour");crossings++;
+          }
+        }
+        assert.ok(crossings>20);
+      }finally{solver.destroy();}
+    });
+    for(const originX of [1,10])await t.test(`dilute orphan dust clears at x=${originX}`,async()=>{
+      const solver=await fixture(.005,0,0,true,originX,{phiDrain:false,volumeDustThreshold:.001,orphanDustThreshold:.01});
+      try{
+        assert.ok(solver.advanceTo(1/30));
+        const volume=await read(device!,solver.volumeTexture);
+        assert.equal(volume.reduce((a,b)=>a+b,0),0,"remote sub-threshold haze is removed, including wall residue");
+        const stats=await solver.readStats();
+        assert.equal(stats.uniformVolumeOrphanDustCells,64);
+        assert.ok(stats.uniformVolumeOrphanDustMass_cells!>=.31&&stats.uniformVolumeOrphanDustMass_cells!<=.32,
+          "orphan mass diagnostics use their own threshold units");
+      }finally{solver.destroy();}
+    });
+    await t.test("orphan cleanup preserves compact sub-cell droplets",async()=>{
+      const solver=await fixture(.04,0,0,true,10,{phiDrain:false,volumeDustThreshold:.001,orphanDustThreshold:.05});
+      try{
+        assert.ok(solver.advanceTo(1/30));
+        const volume=await read(device!,solver.volumeTexture);
+        assert.ok(Math.abs(volume.reduce((a,b)=>a+b,0)-64*.04)<1e-5,"quarter-cell neighbourhood protects droplets below airborne threshold");
+      }finally{solver.destroy();}
+    });
+    await t.test("orphan floor leaves a resting surface tail unchanged",async()=>{
+      const outputs:Float32Array[]=[];
+      for(const orphanDustThreshold of [0,.01]){
+        const solver=await fixture(0,0,0,true,10,{phiDrain:false,volumeDustThreshold:.001,orphanDustThreshold});
+        try{
+          const phi=Float32Array.from({length:33*17*33},(_,i)=>.05*((Math.floor(i/33)%17)-7));
+          const volume=Float32Array.from({length:32*16*32},(_,i)=>{
+            const y=Math.floor(i/32)%16;return y<7?1:y===8?.005:0;
+          });
+          write(device!,solver.vertexPhiTexture!,phi);write(device!,solver.volumeTexture,volume);
+          for(let frame=1;frame<=3;frame++)assert.ok(solver.advanceTo(frame/30));
+          outputs.push(await read(device!,solver.volumeTexture));
+        }finally{solver.destroy();}
+      }
+      assert.deepEqual(outputs[1],outputs[0],"stronger floor must not erode a resting interface or its near-surface tail");
+    });
     await t.test("gravity accelerates the cloud once per step",async()=>{
       const solver=await fixture(.5,-9.80665,0);
       try {

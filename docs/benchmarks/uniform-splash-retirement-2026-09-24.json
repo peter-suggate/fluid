@@ -1,0 +1,237 @@
+{
+  "scene": "cm12-figure-9",
+  "dimensions": [
+    128,
+    128,
+    64
+  ],
+  "backend": "Dawn/Metal",
+  "scope": "One sequential run per arm. Queue-fenced wall time; census and stats readbacks excluded. Each sample reports median over preceding 30 steps. No rendering.",
+  "runs": {
+    "baseline": [
+      {
+        "frame": 0,
+        "mass": 335902,
+        "upperMass": 172062,
+        "upperPhiOnlyTiles": 876,
+        "fineTiles": null,
+        "transportWorkgroups": 0,
+        "sharpeningPages": 0,
+        "medianStep_ms": null
+      },
+      {
+        "frame": 30,
+        "mass": 335845.4631126018,
+        "upperMass": 0,
+        "upperPhiOnlyTiles": 0,
+        "fineTiles": 7348,
+        "transportWorkgroups": 9124,
+        "sharpeningPages": 12,
+        "medianStep_ms": 30.87683399999878
+      },
+      {
+        "frame": 60,
+        "mass": 335702.01952501805,
+        "upperMass": 71419.86950627412,
+        "upperPhiOnlyTiles": 31,
+        "fineTiles": 14088,
+        "transportWorkgroups": 14990,
+        "sharpeningPages": 30,
+        "medianStep_ms": 34.63991700000042
+      },
+      {
+        "frame": 90,
+        "mass": 335323.913518336,
+        "upperMass": 80.15582417382393,
+        "upperPhiOnlyTiles": 6696,
+        "fineTiles": 16371,
+        "transportWorkgroups": 16384,
+        "sharpeningPages": 32,
+        "medianStep_ms": 46.176416999998764
+      },
+      {
+        "frame": 120,
+        "mass": 335266.80288872286,
+        "upperMass": 8331.26675169915,
+        "upperPhiOnlyTiles": 6805,
+        "fineTiles": 16372,
+        "transportWorkgroups": 16372,
+        "sharpeningPages": 32,
+        "medianStep_ms": 42.66033400000015
+      },
+      {
+        "frame": 150,
+        "mass": 335110.89576115855,
+        "upperMass": 67.52564354462083,
+        "upperPhiOnlyTiles": 7462,
+        "fineTiles": 16350,
+        "transportWorkgroups": 16384,
+        "sharpeningPages": 32,
+        "medianStep_ms": 44.35887499999808
+      },
+      {
+        "frame": 180,
+        "mass": 335045.4350214498,
+        "upperMass": 3009.6411702767946,
+        "upperPhiOnlyTiles": 7063,
+        "fineTiles": 16372,
+        "transportWorkgroups": 16372,
+        "sharpeningPages": 32,
+        "medianStep_ms": 43.694917000000714
+      }
+    ],
+    "phiRetirement": [
+      {
+        "frame": 0,
+        "mass": 335902,
+        "upperMass": 172062,
+        "upperPhiOnlyTiles": 876,
+        "fineTiles": null,
+        "transportWorkgroups": 0,
+        "sharpeningPages": 0,
+        "medianStep_ms": null
+      },
+      {
+        "frame": 30,
+        "mass": 335845.502323156,
+        "upperMass": 0,
+        "upperPhiOnlyTiles": 0,
+        "fineTiles": 7339,
+        "transportWorkgroups": 8782,
+        "sharpeningPages": 12,
+        "medianStep_ms": 31.02212499999996
+      },
+      {
+        "frame": 60,
+        "mass": 335695.1912528451,
+        "upperMass": 71280.41332996171,
+        "upperPhiOnlyTiles": 37,
+        "fineTiles": 14171,
+        "transportWorkgroups": 14986,
+        "sharpeningPages": 30,
+        "medianStep_ms": 34.792084000000614
+      },
+      {
+        "frame": 90,
+        "mass": 335324.66601850896,
+        "upperMass": 314.1122220880352,
+        "upperPhiOnlyTiles": 362,
+        "fineTiles": 10241,
+        "transportWorkgroups": 12567,
+        "sharpeningPages": 22,
+        "medianStep_ms": 44.94108299999971
+      },
+      {
+        "frame": 120,
+        "mass": 335271.32893944124,
+        "upperMass": 6647.255148633034,
+        "upperPhiOnlyTiles": 311,
+        "fineTiles": 9566,
+        "transportWorkgroups": 11099,
+        "sharpeningPages": 20,
+        "medianStep_ms": 32.661958000000595
+      },
+      {
+        "frame": 150,
+        "mass": 335168.5726041107,
+        "upperMass": 27.819937807158567,
+        "upperPhiOnlyTiles": 25,
+        "fineTiles": 8416,
+        "transportWorkgroups": 9770,
+        "sharpeningPages": 18,
+        "medianStep_ms": 33.47712499999943
+      },
+      {
+        "frame": 180,
+        "mass": 335124.7791620281,
+        "upperMass": 580.3931407850469,
+        "upperPhiOnlyTiles": 210,
+        "fineTiles": 8521,
+        "transportWorkgroups": 9481,
+        "sharpeningPages": 18,
+        "medianStep_ms": 30.653000000000247
+      }
+    ],
+    "phiAndOrphanDust": [
+      {
+        "frame": 0,
+        "mass": 335902,
+        "upperMass": 172062,
+        "upperPhiOnlyTiles": 876,
+        "fineTiles": null,
+        "transportWorkgroups": 0,
+        "sharpeningPages": 0,
+        "medianStep_ms": null
+      },
+      {
+        "frame": 30,
+        "mass": 335845.2150955009,
+        "upperMass": 0,
+        "upperPhiOnlyTiles": 0,
+        "fineTiles": 7338,
+        "transportWorkgroups": 8748,
+        "sharpeningPages": 12,
+        "medianStep_ms": 31.725916999999754
+      },
+      {
+        "frame": 60,
+        "mass": 335552.3374079552,
+        "upperMass": 70722.18418825243,
+        "upperPhiOnlyTiles": 47,
+        "fineTiles": 13881,
+        "transportWorkgroups": 14870,
+        "sharpeningPages": 31,
+        "medianStep_ms": 35.36383299999943
+      },
+      {
+        "frame": 90,
+        "mass": 334884.81442247285,
+        "upperMass": 78.9990948792547,
+        "upperPhiOnlyTiles": 89,
+        "fineTiles": 9150,
+        "transportWorkgroups": 11039,
+        "sharpeningPages": 19,
+        "medianStep_ms": 44.02995799999917
+      },
+      {
+        "frame": 120,
+        "mass": 334805.6115950766,
+        "upperMass": 5989.915730347391,
+        "upperPhiOnlyTiles": 682,
+        "fineTiles": 10272,
+        "transportWorkgroups": 11723,
+        "sharpeningPages": 23,
+        "medianStep_ms": 35.66454199999862
+      },
+      {
+        "frame": 150,
+        "mass": 334677.5574380754,
+        "upperMass": 10.750584073946811,
+        "upperPhiOnlyTiles": 138,
+        "fineTiles": 9548,
+        "transportWorkgroups": 10490,
+        "sharpeningPages": 22,
+        "medianStep_ms": 36.99316700000054
+      },
+      {
+        "frame": 180,
+        "mass": 334603.9113928885,
+        "upperMass": 2809.855927144992,
+        "upperPhiOnlyTiles": 270,
+        "fineTiles": 8936,
+        "transportWorkgroups": 10166,
+        "sharpeningPages": 20,
+        "medianStep_ms": 33.330958999998984
+      }
+    ]
+  },
+  "extendedSettling": {
+    "frame": 360,
+    "time_s": 12,
+    "mass": 334325.5902688068,
+    "massLostFraction": 0.004693064439012629,
+    "upperPhiOnlyTiles": 125,
+    "fineTiles": 7981,
+    "medianStep_ms": 31.86725000000297
+  }
+}

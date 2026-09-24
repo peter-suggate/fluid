@@ -28,6 +28,9 @@ params.push({kind:"select",key:"sharpeningWorkMap",label:"Sharpening work map",d
 params.push({kind:"number",key:"volumeDustThreshold",label:"Volume dust floor",default:1e-3,tier:"fine",update:"runtime",
   min:0,max:1e-3,step:1e-7,digits:7,unit:"cell volumes",
   hint:"Discard |V| below this wherever transport or sharpening writes V, ULP-scale negatives included. The 1e-3 default removes residue that keeps transport tiles active; the diagnostics report discarded mass. Zero is off and stores the untreated sum bit for bit."});
+params.push({kind:"number",key:"orphanDustThreshold",label:"Orphan dust floor",default:0.01,tier:"fine",update:"runtime",
+  min:0,max:0.05,step:0.001,digits:3,unit:"cell volumes",
+  hint:"Extra cleanup once per step for dilute volume beyond the 4h surface band. Preserves clusters holding a quarter cell or containing a cell above 5%, cut cells, and surface neighbours. Requires the regular dust floor. Discarded mass is reported; total surface correction matches remaining V and does not replace it. Zero disables extra cleanup."});
 params.push({kind:"select",key:"twoLevelVelocity",label:"Two-level velocity sampler",default:"on",tier:"fine",update:"runtime",
   options:[{value:"on",label:"On"},{value:"off",label:"Off"}],
   hint:"Outside the fine tile map, sample velocity from the 4h face table the extension hierarchy publishes instead of the finest lattice, and let the extension, advection and projection skip the far-air tiles. Off is the all-fine dense control."});
@@ -87,7 +90,7 @@ export const UNIFORM_GEOMETRIC_SPLASH_HINTS = Object.freeze({
   phiDrain: [
     "Removes ghost liquid: level set that still says liquid where no volume is left behind it. The surface stops drawing water that has already gone, and V and phi agree about where the liquid is.",
     "Why: V (the conservative per-cell volume) decides how much liquid there is; phi only decides where it is, and phi is merely advected. It can keep a liquid region after V has left it: a sheet whose V was sharpened into the pool, a drop whose V was relayed away, a sliver trailing a fast front. Nothing else in the step removes it except the global total-volume shift, which takes the difference off every surface at once, drops and pool alike.",
-    "How: during phi advection, a vertex whose advected phi is below half a cell (liquid, or just outside the surface) checks the 4×4×4 cells around its departure point, using the start-of-step V. If none holds more than 5% of a cell, phi rises by half a cell this step, capped at +h/2, just outside the surface. A ghost two cells deep is air after four steps and settles at +h/2 on the fifth; redistancing then rebuilds a proper distance around what remains.",
+    "How: during phi advection, a vertex whose advected phi is below half a cell (liquid, or just outside the surface) checks the 4×4×4 cells around its departure point, using the start-of-step V. If none holds more than 5% of a cell, phi rises by half a cell this step, capped at +h/2, just outside the surface. A ghost two cells deep is air after four steps and settles at +h/2 on the fifth; redistancing retires unsupported positive plateaus to the 4h band edge only after checking that no zero crossing remains within that band.",
     "Safety: any cell with real V nearby leaves the vertex alone, so a genuine surface -- even a film holding 5% of a cell -- is never drained, and resting drops and pools are untouched (every liquid vertex has V beneath it).",
     "Scope and cost: a 64-cell read, only for band vertices below h/2.",
     "Off: ghost phi stays until the total-volume shift or a merge absorbs it.",
@@ -145,7 +148,7 @@ params.push({kind:"select",key:"surfaceDeficitBalancing",label:"Surface-deficit 
 export const UNIFORM_GEOMETRIC_PARAMS: readonly MethodParamSpec[] = Object.freeze(params);
 /** Storage is a WebGPU implementation choice, excluded from the native contract. */
 const nativeSplashKeys = new Set(["phiCubicAdvection", "phiDrain", "airborneMomentum", "isolatedBodyVolume", "phiSeedCells"]);
-export const UNIFORM_GEOMETRIC_NATIVE_PARAMS = Object.freeze(params.filter(p => p.key !== "volumeStorage" && p.key !== "pageSize" && (!UNIFORM_GEOMETRIC_SPLASH_KEYS.has(p.key) || nativeSplashKeys.has(p.key))));
+export const UNIFORM_GEOMETRIC_NATIVE_PARAMS = Object.freeze(params.filter(p => p.key !== "volumeStorage" && p.key !== "pageSize" && p.key !== "orphanDustThreshold" && (!UNIFORM_GEOMETRIC_SPLASH_KEYS.has(p.key) || nativeSplashKeys.has(p.key))));
 export const UNIFORM_GEOMETRIC_DEFAULTS: Readonly<MethodParamValues> = Object.freeze(
   Object.fromEntries(params.map(p => [p.key, p.default])),
 );

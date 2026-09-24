@@ -456,6 +456,9 @@ export interface GPUEulerianInfo {
   uniformSharpenTilesTotal?: number;
   /** Volume dust floor: the live threshold, and what it discarded this step. */
   uniformVolumeDustThreshold?: number;
+  uniformVolumeOrphanDustThreshold?: number;
+  uniformVolumeOrphanDustCells?: number;
+  uniformVolumeOrphanDustMass_cells?: number;
   uniformVolumeDustCells?: number;
   uniformVolumeDustMass_cells?: number;
   /** Experiment E1's two-level velocity sampler and its 4h fine map. */

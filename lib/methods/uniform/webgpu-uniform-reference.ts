@@ -164,6 +164,8 @@ export interface WebGPUUniformReferenceOptions {
    * untreated sum bit for bit.
    */
   volumeDustThreshold?: number;
+  /** Extra floor for dilute orphan V only; zero disables it. */
+  orphanDustThreshold?: number;
   /**
    * Experiment E1: sample velocity from the restricted 4h level outside the
    * fine tile map. Numerics only -- every lattice and every dispatch is the
@@ -546,6 +548,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private geometricRedistance: boolean;
   /** Sec. 3.4/3.5 rounding-residue floor in cell volumes; 0 is off. */
   private volumeDustThreshold: number;
+  private orphanDustThreshold: number;
   /** Experiment E1 live toggle and its Chebyshev fine reach, in 4h tiles. */
   private twoLevelVelocity: boolean;
   private twoLevelFineReach: number;
@@ -911,6 +914,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.geometricRedistance = options.geometricRedistance !== false;
     this.volumeDustThreshold = Number.isFinite(options.volumeDustThreshold)
       ? Math.min(1, Math.max(0, options.volumeDustThreshold!)) : 0;
+    this.orphanDustThreshold = Number.isFinite(options.orphanDustThreshold)
+      ? Math.min(0.05, Math.max(0, options.orphanDustThreshold!)) : 0;
     this.twoLevelVelocity = this.geometricVolume && options.twoLevelVelocity === true;
     this.twoLevelFineReach = Number.isFinite(options.twoLevelFineReach)
       ? Math.round(Math.min(8, Math.max(0, options.twoLevelFineReach!))) : 2;
@@ -1120,7 +1125,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         pressureProjection: velocity("Uniform audit velocity after pressure projection"),
       });
     }
-    this.params = device.createBuffer({ label: "Uniform reference parameters", size: 256, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+    this.params = device.createBuffer({ label: "Uniform reference parameters", size: 272, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.solidMask = new SolidOccupancyMask([nx, ny, nz]);
     this.solidMask.update(solidWorldForScene(scene));
     this.solidVoxelsEmpty = uniformSolidMaskEmpty(this.solidMask);
@@ -1245,7 +1250,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     } };
     this.extrapolationActiveFrontPassCeiling = this.velocityExtrapolator.activeFrontPassCeiling;
     if (options.extensionFrontSweeps !== undefined) this.velocityExtrapolator.setFrontPasses(options.extensionFrontSweeps);
-    this.reductions = device.createBuffer({ label: "Uniform reference diagnostics and volume control", size: 40, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    this.reductions = device.createBuffer({ label: "Uniform reference diagnostics and volume control", size: 48, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     if (typeof process !== "undefined" && process.env.FLUID_UNIFORM_SYMMETRY_STAGE_AUDIT === "1") {
       this.symmetryStageAuditBetaBuffer = device.createBuffer({
         label: "Uniform audit Sec. 3.4 beta",
@@ -1745,6 +1750,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         this.phiCubicAdvection ? 1 : 0, this.phiSeedCells ? 1 : 0, this.phiDrain ? 1 : 0,
         this.airborneMomentum ? 1 : 0,
       ] : [0, 0, 0, 0, 0, 0, 0, 0]),
+      this.geometricVolume ? this.orphanDustThreshold : 0, 0, 0, 0,
     ]));
   }
 
@@ -1854,6 +1860,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       // silently switch a dense-constructed solver onto the work map.
       if (values.sharpeningWorkMap !== undefined) this.geometricTileWork = values.sharpeningWorkMap !== "off";
       if (values.volumeDustThreshold !== undefined) this.volumeDustThreshold = finite("volumeDustThreshold", 0, 0, 1);
+      if (values.orphanDustThreshold !== undefined) this.orphanDustThreshold = finite("orphanDustThreshold", 0, 0, 0.05);
       if (values.twoLevelVelocity !== undefined) this.twoLevelVelocity = this.twoLevelTileCount > 0 && values.twoLevelVelocity === "on";
       if (values.twoLevelFineReach !== undefined) this.twoLevelFineReach = Math.round(finite("twoLevelFineReach", 2, 0, 8));
       if (values.twoLevelExtension !== undefined) this.twoLevelExtensionTiles = values.twoLevelExtension !== "dense";
@@ -2897,6 +2904,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     seam?.(UNIFORM_VOLUME_PHASE.coupling);
     // Fused, the gather divides by the decoded sums bound in the donor slot.
     run("uvGather", fuse && this.scratchArena ? this.volumeDonorGroup : this.densityTraceGroup);
+    // One immutable post-transport neighbourhood, before surface correction.
+    // Repeating this in sharpening sweeps would progressively erode droplets.
+    if (this.orphanDustThreshold > this.volumeDustThreshold && this.volumeDustThreshold > 0) {
+      run("uvCullOrphanDust", this.sharpenComputeGroup);
+      this.copyField(encoder,{texture:this.volumeA},{texture:this.volumeB},[this.info.nx,this.info.ny,this.info.nz]);
+    }
     // Whole-domain reduction: a window-local total would silently lose the
     // contribution of sleeping liquid. Capacity and target refreshes are dense.
     // Gather has already added hose/drop volume, so its current V is the
@@ -3464,11 +3477,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     await this.awaitFrameCompletion();
     if (this.disposed || this.readbackPending) return this.info;
     this.readbackPending = true;
-    this.statsReadback ??= this.device.createBuffer({ label: "Uniform reference diagnostics readback", size: 256, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    this.statsReadback ??= this.device.createBuffer({ label: "Uniform reference diagnostics readback", size: 264, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = this.device.createCommandEncoder({ label: "Uniform reference diagnostics readback" });
     this.encodeOwedDiagnosticsReduction(encoder);
     encoder.copyBufferToBuffer(this.reductions, 0, this.statsReadback, 0, 32);
     encoder.copyBufferToBuffer(this.reductions, 32, this.statsReadback, 248, 8);
+    encoder.copyBufferToBuffer(this.reductions, 40, this.statsReadback, 256, 8);
     if (this.volumePageConfig) encoder.copyBufferToBuffer(this.conditioningScratch, 4 * (this.volumePageConfig.base + 4), this.statsReadback, 236, 4);
     if(this.volumeWorkCounts)encoder.copyBufferToBuffer(this.volumeWorkCounts,0,this.statsReadback,240,8);
     // Only the step that ran the classify dispatch leaves a meaningful count.
@@ -3578,14 +3592,16 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.info.uniformSharpenWorkMap = tileMap;
       this.info.uniformSharpenTilesActive = tileMap ? words[48]! : undefined;
       this.info.uniformSharpenTilesTotal = tileMap ? this.sharpenTileCount : undefined;
-      // The floor's own price: cells zeroed across the gather and the eight
-      // commit sweeps, and the mass that went with them in sixty-fourths of
-      // the threshold. Off, both are structurally zero.
+      // Per-step discard totals. Each floor uses its own 1/64-threshold units;
+      // sum physical mass only after decoding, not the differently scaled words.
       const dust = this.geometricVolume && this.volumeDustThreshold > 0;
       Object.assign(this.info, {
         uniformVolumeDustThreshold: this.geometricVolume ? this.volumeDustThreshold : undefined,
-        uniformVolumeDustCells: dust ? words[5]! : undefined,
-        uniformVolumeDustMass_cells: dust ? words[6]! * this.volumeDustThreshold / 64 : undefined,
+        uniformVolumeDustCells: dust ? words[5]! + words[64]! : undefined,
+        uniformVolumeDustMass_cells: dust ? (words[6]! * this.volumeDustThreshold + words[65]! * this.orphanDustThreshold) / 64 : undefined,
+        uniformVolumeOrphanDustThreshold: this.geometricVolume ? this.orphanDustThreshold : undefined,
+        uniformVolumeOrphanDustCells: dust ? words[64]! : undefined,
+        uniformVolumeOrphanDustMass_cells: dust ? words[65]! * this.orphanDustThreshold / 64 : undefined,
         uniformTwoLevelVelocity: this.geometricVolume ? this.twoLevelEncoded : undefined,
         uniformTwoLevelFineReach: this.geometricVolume ? this.twoLevelFineReach : undefined,
         uniformTwoLevelFineTiles: this.twoLevelEncoded ? words[7]! : undefined,
