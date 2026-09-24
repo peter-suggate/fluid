@@ -1,6 +1,7 @@
 /** Production Figure 9 stage medians and final-field hashes, under the GPU lease.
  * Compare separate processes with FLUID_UNIFORM_AB_OFF=sharpenflux,edgeplanes.
- * UNIFORM_BENCH_PASSES=on measures individual volume kernels instead of stages:
+ * UNIFORM_BENCH_STAGE=extension selects velocity extension.
+ * UNIFORM_BENCH_PASSES=on measures individual kernels instead of stages:
  * the two timestamp modes must not overwrite one another's pass descriptors.
  */
 import {usePerformanceInstrumentationStore} from "../lib/core/stores/performance-instrumentation-store";
@@ -20,13 +21,17 @@ const median=(v:number[])=>{const s=[...v].sort((a,b)=>a-b);return (s[Math.floor
 const frames=Number(process.env.UNIFORM_BENCH_FRAMES??180);
 const warmup=Number(process.env.UNIFORM_BENCH_WARMUP??120);
 assert.ok(Number.isSafeInteger(frames)&&Number.isSafeInteger(warmup)&&warmup>=0&&frames>warmup);
-await acquireWebGPUExclusiveLock("dawn-probe","Uniform sharpening benchmark");
+await acquireWebGPUExclusiveLock("dawn-probe",`Uniform ${process.env.UNIFORM_BENCH_STAGE??"sharpening"} benchmark`);
 let device:GPUDevice|undefined;
 const results:unknown[]=[];
 try{
  const dawn=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);Object.assign(globalThis,dawn.globals);
  const gpu=createProcessRetainedDawnGPU(dawn,["backend=metal"]);const adapter=await gpu.requestAdapter();assert.ok(adapter);
  const rawDevice=await adapter.requestDevice({requiredFeatures:["timestamp-query"],requiredLimits:requiredFluidDeviceLimits(adapter.limits)});
+ if(process.env.UNIFORM_BENCH_SHADER_ERRORS){
+  const create=rawDevice.createShaderModule.bind(rawDevice);
+  rawDevice.createShaderModule=(descriptor)=>{const module=create(descriptor);void module.getCompilationInfo().then(info=>{for(const m of info.messages)if(m.type==="error")console.error(descriptor.label,m.lineNum,m.message,descriptor.code.split("\n").slice(m.lineNum-2,m.lineNum+1).join("\n"));});return module;};
+ }
  device=managedGPUDevice(rawDevice,{requireWorkerRealm:false});
  usePerformanceInstrumentationStore.getState().setEnabled(process.env.UNIFORM_BENCH_PASSES!=="on");
  const errors:string[]=[];device.addEventListener("uncapturederror",e=>{e.preventDefault();errors.push(e.error.message);});
@@ -42,12 +47,13 @@ try{
    const read=device.createBuffer({size:2048,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
    let labels:string[]=[];
    const access=solver as any;
-   const original=access.encodeGeometricVolume.bind(solver);
-   access.encodeGeometricVolume=(encoder:GPUCommandEncoder,seam:unknown)=>{
+   const method=process.env.UNIFORM_BENCH_STAGE==="extension"?"encodeVelocityExtrapolation":"encodeGeometricVolume";
+   const original=access[method].bind(solver);
+   access[method]=(encoder:GPUCommandEncoder,...args:unknown[])=>{
     labels=[];
     const proxy=new Proxy(encoder,{get(target,key){
      if(key==="beginComputePass")return (desc:GPUComputePassDescriptor)=>{
-      if(process.env.UNIFORM_BENCH_PASSES==="on"&&/Sharpen|sharpen|phi|Phi|uv|Surface volume|surface targets/.test(desc.label??"")){
+      if(process.env.UNIFORM_BENCH_PASSES==="on"){
        assert.equal(desc.timestampWrites,undefined,"per-pass and stage timestamp modes must be separate");
        const index=labels.length*2;assert.ok(index+1<256,"timestamp query capacity");labels.push(desc.label!);
        return target.beginComputePass({...desc,timestampWrites:{querySet:query,beginningOfPassWriteIndex:index,endOfPassWriteIndex:index+1}});
@@ -56,7 +62,7 @@ try{
      };
      const value=Reflect.get(target,key,target);return typeof value==="function"?value.bind(target):value;
     }});
-    original(proxy,seam);
+    original(proxy,...args);
     if(labels.length)encoder.resolveQuerySet(query,0,labels.length*2,resolved,0);
     encoder.copyBufferToBuffer(resolved,0,read,0,labels.length*16);
    };
@@ -84,11 +90,11 @@ try{
      const encoder=device.createCommandEncoder();encoder.copyTextureToBuffer({texture},{buffer,bytesPerRow:row,rowsPerImage:texture.height},[texture.width,texture.height,texture.depthOrArrayLayers]);device.queue.submit([encoder.finish()]);
      await buffer.mapAsync(GPUMapMode.READ);hashes[name]=createHash("sha256").update(new Uint8Array(buffer.getMappedRange())).digest("hex");buffer.unmap();buffer.destroy();
     }
-    const arm={hashes,mode,full,stages,pages:solver.info.uniformVolumePagesActive,transportTiles:solver.info.uniformVolumeTransportWorkgroups,sharpenTiles:solver.info.uniformVolumeSharpenWorkgroups};arms.push(arm);console.log(JSON.stringify({sceneId,mode,full_ms:median(full),stages:Object.fromEntries(Object.entries(stages).map(([k,v])=>[k,median(v)])),pages:arm.pages,hashes}));
+    const arm={hashes,volumeDrift:solver.info.volumeDrift,representedVolumeDrift:solver.info.representedVolumeDrift,mode,full,stages,pages:solver.info.uniformVolumePagesActive,transportTiles:solver.info.uniformVolumeTransportWorkgroups,sharpenTiles:solver.info.uniformVolumeSharpenWorkgroups};arms.push(arm);console.log(JSON.stringify({sceneId,mode,full_ms:median(full),stages:Object.fromEntries(Object.entries(stages).map(([k,v])=>[k,median(v)])),pages:arm.pages,hashes}));
    }finally{solver.destroy();query.destroy();resolved.destroy();read.destroy();}
   }
   
-  const result={sceneId,scope:"queue-fenced production simulation excluding rendering",timestampMode:process.env.UNIFORM_BENCH_PASSES==="on"?"passes":"stages",frames,warmup,disabledOptimizations:process.env.FLUID_UNIFORM_AB_OFF??"",arms};
+  const result={sceneId,scope:"queue-fenced production simulation excluding rendering",profiledStage:process.env.UNIFORM_BENCH_STAGE??"volume",timestampMode:process.env.UNIFORM_BENCH_PASSES==="on"?"passes":"stages",frames,warmup,disabledOptimizations:process.env.FLUID_UNIFORM_AB_OFF??"",arms};
   results.push(result);console.log(JSON.stringify({...result,arms:undefined}));
  }
  assert.deepEqual(errors,[]);

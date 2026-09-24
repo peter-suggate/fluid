@@ -44,7 +44,8 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
     const rho = new Float32Array(count), faces = new Float32Array(4*count), speeds = new Float32Array(4*count);
     const at = (x:number,y:number,z:number) => x+32*(y+16*z);
     const write = (t:GPUTexture,data:Float32Array,c:number) => d.queue.writeTexture({texture:t},data as Float32Array<ArrayBuffer>,{bytesPerRow:32*c*4,rowsPerImage:16},dims);
-    for (const inset of [8,1]) {
+    for (const inset of [8,1]) for (const sweeps of [1,2,4]) {
+      extension.setFrontPasses(sweeps);
       for(let z=0;z<32;z++)for(let y=0;y<16;y++)for(let x=0;x<32;x++) {
         const i=at(x,y,z);
         rho[i]=x>=inset&&x<32-inset&&z>=inset&&z<32-inset&&y<4?1:0;
@@ -72,7 +73,7 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
         }
       }
       assert.ok(worst<1e-6,`inset ${inset}: reflection/transpose error ${worst}`);
-      assert.equal(extension.encodedPassCount,17,"source lookup uses the existing restriction/prolongation passes");
+      assert.equal(extension.encodedPassCount,13+3*sweeps,"each extra sweep includes a shared convergence pass");
     }
     assert.deepEqual(errors,[]);
   } finally {

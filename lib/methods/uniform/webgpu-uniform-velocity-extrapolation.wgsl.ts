@@ -9,6 +9,7 @@
  * The geometric method instead carries nearest original-source provenance to
  * keep separate fluid bodies from diluting each other's air extension.
  */
+import { uniformAbOn } from "./uniform-ab-switch";
 import { createCm12NumericsWGSL } from "../../core/cm12-numerics";
 
 export const uniformVelocityExtrapolationShader = /* wgsl */ `
@@ -76,6 +77,26 @@ struct DispatchArgs {
 @group(0) @binding(15) var outputOrigins: texture_storage_3d<rgba32uint, write>;
 // Separate storage from the indirect buffer to avoid read/write usage aliasing.
 @group(0) @binding(16) var<storage, read_write> shellTiles: array<atomic<u32>>;
+@group(0) @binding(17) var<storage,read_write> frontReceipts:array<vec4f>;
+override FRONT_RECEIPTS:bool=false;
+override CACHE_FINE_HIERARCHY:bool=false;
+var<workgroup> hierarchyValues:array<vec4f,64>;
+var<workgroup> hierarchyLower:array<vec4u,64>;
+var<workgroup> hierarchyUpper:array<vec4u,64>;
+var<workgroup> hierarchyCacheBase:vec3i;
+fn hierarchyCacheIndex(q:vec3i)->u32{let p=vec3u(q-hierarchyCacheBase);return p.x+4u*(p.y+4u*p.z);}
+fn hierarchyInput(q:vec3i)->vec4f{
+  if(CACHE_FINE_HIERARCHY){return hierarchyValues[hierarchyCacheIndex(q)];}
+  return textureLoad(primaryIn,q,0);
+}
+fn hierarchyOrigin(q:vec3i,sd:vec3i,upper:bool)->vec4u{
+  if(CACHE_FINE_HIERARCHY){let i=hierarchyCacheIndex(q);return select(hierarchyLower[i],hierarchyUpper[i],upper);}
+  return textureLoad(sourceOrigins,q+select(vec3i(0),vec3i(0,0,sd.z),upper),0);
+}
+// All active seed distances are infinite, hence none can converge and wake
+// an inactive neighbor during the first update.
+override FRONT_INITIAL_SWEEP:bool=false;
+fn frontReceiptIndex(p:vec3i)->u32{let d=baseDims();return u32(p.x+d.x*(p.y+d.y*p.z));}
 override COMPACT_SHELL: bool = false;
 override REUSE_CONVERGED_DISTANCE: bool = false;
 @compute @workgroup_size(64)
@@ -223,12 +244,26 @@ fn fimConvergenceEpsilon(referenceDistance: f32) -> f32 {
   return clamp(abs(referenceDistance), minimumScale, domainDiagonal) * 1.1920929e-7;
 }
 
+fn cachedSourceFace(p:vec3i,component:u32)->bool {
+  if(!FRONT_RECEIPTS){return sourceFace(p,component);}
+  if(!inBounds(p,baseDims())||!shellAt(p)){return false;}
+  return (u32(frontReceipts[frontReceiptIndex(p)].w)&bitFor(component))!=0u;
+}
+@compute @workgroup_size(4,4,4)
+fn classifyFrontSources(@builtin(global_invocation_id)gid:vec3u){
+  let p=activeBaseId(gid);if(!inBounds(p,baseDims())||!shellAt(p)){return;}
+  var mask=0u;
+  for(var c=0u;c<3u;c++){
+    if(openBaseFace(p,c)){mask|=bitFor(c)<<3u;if(sourceFace(p,c)){mask|=bitFor(c);}}
+  }
+  frontReceipts[frontReceiptIndex(p)]=vec4f(0.0,0.0,0.0,f32(mask));
+}
 fn oneNeighborTouchesSource(p: vec3i, component: u32) -> bool {
   let d = baseDims();
   for (var axis = 0u; axis < 3u; axis += 1u) {
     var step = vec3i(0); step[axis] = 1;
-    if (validFace(p - step, component, d) && sourceFace(p - step, component)) { return true; }
-    if (validFace(p + step, component, d) && sourceFace(p + step, component)) { return true; }
+    if (validFace(p - step, component, d) && cachedSourceFace(p - step, component)) { return true; }
+    if (validFace(p + step, component, d) && cachedSourceFace(p + step, component)) { return true; }
   }
   return false;
 }
@@ -250,8 +285,10 @@ fn seedActiveFront(@builtin(global_invocation_id) gid: vec3u) {
   var knownMask = 0u;
   var activeMask = 0u;
   for (var component = 0u; component < 3u; component += 1u) {
-    if (!openBaseFace(p, component)) { continue; }
-    if (sourceFace(p, component)) {
+    if(FRONT_RECEIPTS){
+      if((u32(frontReceipts[frontReceiptIndex(p)].w)&(bitFor(component)<<3u))==0u){continue;}
+    }else if(!openBaseFace(p,component)){continue;}
+    if (cachedSourceFace(p, component)) {
       values[component] = inputVelocity[component];
       distances[component] = 0.0;
       knownMask |= bitFor(component);
@@ -264,14 +301,17 @@ fn seedActiveFront(@builtin(global_invocation_id) gid: vec3u) {
   if (activeMask != 0u) { atomicAdd(&convergence.activeA, countOneBits(activeMask & 7u)); }
 }
 
+// Seeded closed faces remain infinity/unknown for the entire invocation.
+// Source geometry does not change between sweeps, so distance/value neighbors
+// can use those authoritative states instead of reloading density and openness.
 fn neighborDistance(p: vec3i, component: u32) -> f32 {
   let d = baseDims();
-  if (!openBaseFace(p, component) || !shellAt(p)) { return DISTANCE_INFINITY; }
+  ${uniformAbOn("frontstate") ? "if (!inBounds(p, d) || !shellAt(p)) { return DISTANCE_INFINITY; }" : "if (!openBaseFace(p, component) || !shellAt(p)) { return DISTANCE_INFINITY; }"}
   return faceDistance(textureLoad(secondaryIn, p, 0), component);
 }
 fn neighborValue(p: vec3i, component: u32) -> f32 {
   let d = baseDims();
-  if (!openBaseFace(p, component) || !shellAt(p)) { return 0.0; }
+  ${uniformAbOn("frontstate") ? "if (!inBounds(p, d) || !shellAt(p)) { return 0.0; }" : "if (!openBaseFace(p, component) || !shellAt(p)) { return 0.0; }"}
   let state = textureLoad(primaryIn, p, 0);
   return select(0.0, faceValue(state, component), componentKnown(state, component));
 }
@@ -360,6 +400,11 @@ fn activeNodeConverges(p: vec3i, component: u32) -> bool {
 }
 // Return convergence and its solved distance together; callers need both.
 fn convergedDistance(p:vec3i,component:u32)->f32 {
+  if(FRONT_RECEIPTS){
+    if(!inBounds(p,baseDims())||!shellAt(p)){return DISTANCE_INFINITY;}
+    let receipt=frontReceipts[frontReceiptIndex(p)];
+    return select(DISTANCE_INFINITY,receipt[component],(u32(receipt.w)&bitFor(component))!=0u);
+  }
   if(!openBaseFace(p,component)||sourceFace(p,component)||!shellAt(p)){return DISTANCE_INFINITY;}
   let state=textureLoad(secondaryIn,p,0);let old=state[component];
   if(!isActive(state,component)||old>=0.5*DISTANCE_INFINITY){return DISTANCE_INFINITY;}
@@ -369,8 +414,9 @@ fn convergedDistance(p:vec3i,component:u32)->f32 {
 }
 fn activatedByConvergedUpwindNeighbor(p: vec3i, component: u32) -> bool {
   let d = baseDims();
-  let candidate = godunovDistance(p, component);
-  if (!openBaseFace(p, component) || candidate > accurateBandDistance()) { return false; }
+  ${uniformAbOn("frontactivate") ? `// Only solve the recipient after a converged upwind neighbour admits it.
+  if (!openBaseFace(p, component)) { return false; }` : `let candidate = godunovDistance(p, component);
+  if (!openBaseFace(p, component) || candidate > accurateBandDistance()) { return false; }`}
   let ownDistance = faceDistance(textureLoad(secondaryIn, p, 0), component);
   let epsilon = fimConvergenceEpsilon(ownDistance);
   for (var axis = 0u; axis < 3u; axis += 1u) {
@@ -378,21 +424,35 @@ fn activatedByConvergedUpwindNeighbor(p: vec3i, component: u32) -> bool {
     let low = p - step; let high = p + step;
     if(REUSE_CONVERGED_DISTANCE) {
       if(ownDistance>convergedDistance(low,component)+epsilon
-        ||ownDistance>convergedDistance(high,component)+epsilon){return true;}
+        ||ownDistance>convergedDistance(high,component)+epsilon){return ${uniformAbOn("frontactivate") ? "godunovDistance(p, component) <= accurateBandDistance()" : "true"};}
       continue;
     }
     if (activeNodeConverges(low, component)) {
       let updatedNeighborDistance = min(neighborDistance(low, component), godunovDistance(low, component));
-      if (ownDistance > updatedNeighborDistance + epsilon) { return true; }
+      if (ownDistance > updatedNeighborDistance + epsilon) { return ${uniformAbOn("frontactivate") ? "godunovDistance(p, component) <= accurateBandDistance()" : "true"}; }
     }
     if (activeNodeConverges(high, component)) {
       let updatedNeighborDistance = min(neighborDistance(high, component), godunovDistance(high, component));
-      if (ownDistance > updatedNeighborDistance + epsilon) { return true; }
+      if (ownDistance > updatedNeighborDistance + epsilon) { return ${uniformAbOn("frontactivate") ? "godunovDistance(p, component) <= accurateBandDistance()" : "true"}; }
     }
   }
   return false;
 }
 
+// Evaluate each active node once. Adjacent inactive nodes consume its
+// convergence receipt instead of recursively repeating this distance solve.
+@compute @workgroup_size(4,4,4)
+fn evaluateFrontConvergence(@builtin(global_invocation_id)gid:vec3u){
+  let p=activeBaseId(gid);if(!inBounds(p,baseDims())||!shellAt(p)){return;}
+  let state=textureLoad(secondaryIn,p,0);var updated=vec3f(DISTANCE_INFINITY);var mask=0u;
+  for(var c=0u;c<3u;c++){
+    if(!isActive(state,c)){continue;}
+    let old=state[c];updated[c]=min(old,godunovDistance(p,c));
+    if(old<0.5*DISTANCE_INFINITY&&updated[c]<=accurateBandDistance()
+      &&abs(updated[c]-old)<=fimConvergenceEpsilon(old)){mask|=bitFor(c);}
+  }
+  frontReceipts[frontReceiptIndex(p)]=vec4f(updated,f32(mask));
+}
 @compute @workgroup_size(4, 4, 4)
 fn updateActiveFront(@builtin(global_invocation_id) gid: vec3u) {
   let p = activeBaseId(gid); let d = baseDims();
@@ -404,11 +464,13 @@ fn updateActiveFront(@builtin(global_invocation_id) gid: vec3u) {
   var knownMask = u32(round(oldValues.w));
   var activeMask = u32(round(oldDistances.w));
   for (var component = 0u; component < 3u; component += 1u) {
-    if (!openBaseFace(p, component) || sourceFace(p, component)) { continue; }
+    ${uniformAbOn("frontstate") ? "if (oldDistances[component] == 0.0) { continue; }" : "if (!openBaseFace(p, component) || sourceFace(p, component)) { continue; }"}
     if (isActive(oldDistances, component)) {
       let oldDistance = distances[component];
       let epsilon = fimConvergenceEpsilon(oldDistance);
-      let candidate = godunovDistance(p, component);
+      var candidate:f32;
+      if(FRONT_RECEIPTS&&!FRONT_INITIAL_SWEEP){candidate=frontReceipts[frontReceiptIndex(p)][component];}
+      else{candidate=godunovDistance(p,component);}
       let updatedDistance = min(oldDistance, candidate);
       if (updatedDistance <= accurateBandDistance()) {
         distances[component] = updatedDistance;
@@ -418,7 +480,7 @@ fn updateActiveFront(@builtin(global_invocation_id) gid: vec3u) {
       let converged = oldDistance < 0.5 * DISTANCE_INFINITY
         && abs(updatedDistance - oldDistance) <= epsilon;
       activeMask = withKnown(activeMask, component, !converged && updatedDistance <= accurateBandDistance());
-    } else if (activatedByConvergedUpwindNeighbor(p, component)) {
+    } else if (!FRONT_INITIAL_SWEEP && activatedByConvergedUpwindNeighbor(p, component)) {
       // JRW07: a newly added point is not updated until the next iteration.
       activeMask = withKnown(activeMask, component, true);
     }
@@ -604,9 +666,9 @@ fn nearestHierarchySample(p: vec3i, sd: vec3i, td: vec3i, component: u32, footpr
   var distances: array<f32,8>;
   var lowers: array<u32,8>;var uppers: array<u32,8>;
   var values: array<f32,8>;
-  for (var k=0u; k<8u; k++) {
+  for(var k=0u;k<8u;k++){
     let q = clamp(lower + vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u)),vec3i(0),sd-vec3i(1));
-    let state = textureLoad(primaryIn,q,0);
+    let state = hierarchyInput(q);
     distances[k] = 1e30;
     let offset=vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));
     let fraction=fract(sourcePosition);
@@ -617,8 +679,8 @@ fn nearestHierarchySample(p: vec3i, sd: vec3i, td: vec3i, component: u32, footpr
     if (frontParams.hierarchySourceUsesBaseDims != 0u) {
       let d = baseDims();lower = u32(q.x+d.x*(q.y+d.y*q.z))+1u;upper=lower;
     } else {
-      lower=textureLoad(sourceOrigins,q,0)[component];
-      upper=textureLoad(sourceOrigins,q+vec3i(0,0,sd.z),0)[component];
+      lower=hierarchyOrigin(q,sd,false)[component];
+      upper=hierarchyOrigin(q,sd,true)[component];
     }
     if (lower == 0u) { continue; }
     let lo=faceLocation(originalFace(lower),baseDims(),component);
@@ -774,8 +836,20 @@ fn packValue(p: vec3i, state: vec4f) {
   textureStore(primaryOut,p+vec3i(1),vec4f(values,f32(knownMask | (openMask << 3u))));
 }
 @compute @workgroup_size(4,4,4)
-fn prolongAndPack(@builtin(global_invocation_id) gid: vec3u) {
+fn prolongAndPack(@builtin(global_invocation_id) gid: vec3u,@builtin(local_invocation_id) lid:vec3u) {
   let p = hierarchyActiveId(gid);
+  if(CACHE_FINE_HIERARCHY){
+    // All lanes preload before any bounds/shell return. Both MAC and centered
+    // coordinates of this 4³ fine tile lie in the same 4³ coarse stencil.
+    let base=activeBaseId(gid-lid)/2-vec3i(1);
+    let i=lid.x+4u*(lid.y+4u*lid.z);
+    if(i==0u){hierarchyCacheBase=base;}
+    let sd=hierarchySourceDims();let q=clamp(base+vec3i(lid),vec3i(0),sd-vec3i(1));
+    hierarchyValues[i]=textureLoad(primaryIn,q,0);
+    hierarchyLower[i]=textureLoad(sourceOrigins,q,0);
+    hierarchyUpper[i]=textureLoad(sourceOrigins,q+vec3i(0,0,sd.z),0);
+    workgroupBarrier();
+  }
   if (!inBounds(p,baseDims()) || !shellAt(p)) { return; }
   packValue(p,prolongValue(p));
 }

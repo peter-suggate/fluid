@@ -13,6 +13,9 @@ interface ExtrapolationPipelines {
   readonly clear: GPUComputePipeline;
   readonly seed: GPUComputePipeline;
   readonly update: GPUComputePipeline;
+  readonly classify: GPUComputePipeline;
+  readonly initialUpdate: GPUComputePipeline;
+  readonly evaluate: GPUComputePipeline;
   readonly prepare: GPUComputePipeline;
   readonly resolve: GPUComputePipeline;
   readonly restrict: GPUComputePipeline;
@@ -71,6 +74,9 @@ export class WebGPUUniformVelocityExtrapolator {
   private readonly shellHierarchy: boolean;
   private shellListEncoded = false;
   private readonly reuseConvergenceDistance: boolean;
+  private readonly frontReceipts: GPUBuffer;
+  private readonly cacheConvergence: boolean;
+  private readonly cacheFineHierarchy: boolean;
   private readonly shellTiles: GPUBuffer;
   private readonly shellDispatch: GPUBuffer;
   private readonly convergence: GPUBuffer;
@@ -135,6 +141,18 @@ export class WebGPUUniformVelocityExtrapolator {
     // Page and window schedules keep their existing coordinate adapters.
     const nativeFullGrid = !activeDispatch && !pageDomainDispatch && !pageDomain
       && fieldPages?.nativeStorage !== false;
+    // A 4³ fine workgroup samples a 4³ coarse stencil only for an exact 2:1
+    // transfer. Window/page adapters retain their existing sampling path.
+    this.cacheFineHierarchy = !baselineForQA && uniformAbOn("extensioncache")
+      && nativeFullGrid && sourceAwareHierarchy && dims.every(d => d % 4 === 0);
+    this.cacheConvergence = !baselineForQA && uniformAbOn("frontreceipts") && nativeFullGrid;
+    // Reused within each encode: source/open bits during seeding, then updated
+    // distances and convergence bits before each subsequent FIM sweep.
+    this.frontReceipts = device.createBuffer({
+      label: "Uniform front convergence receipts",
+      size: this.cacheConvergence ? dims.reduce((n, d) => n * d, 16) : 16,
+      usage: GPUBufferUsage.STORAGE,
+    });
     this.reuseConvergenceDistance = !baselineForQA && uniformAbOn("frontreuse") && nativeFullGrid;
     this.compactShell = sourceAwareHierarchy && dims.every(d => d % 4 === 0)
       && !baselineForQA && uniformAbOn("shelllist") && nativeFullGrid;
@@ -201,6 +219,7 @@ export class WebGPUUniformVelocityExtrapolator {
       { binding: 14, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "uint", viewDimension: "3d" } },
       { binding: 15, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rgba32uint", viewDimension: "3d" } },
       { binding: 16, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+      { binding: 17, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       ...(fieldPages?.layout([]) ?? []),
     ] });
     this.pipelineLayout = device.createPipelineLayout({ label: "Uniform Sec. 3.3 extrapolation pipeline layout", bindGroupLayouts: [this.layout] });
@@ -255,6 +274,7 @@ export class WebGPUUniformVelocityExtrapolator {
       { binding: 14, resource: view(existingOrigins) },
       { binding: 15, resource: view(originsOut) },
       { binding: 16, resource: { buffer: this.shellTiles } },
+      { binding: 17, resource: { buffer: this.frontReceipts } },
     ] });
 
     this.seedCurrentGroup = group(currentVelocity, this.resolvedValues, this.resolvedDistances, this.valuesA, this.distancesA);
@@ -285,6 +305,7 @@ export class WebGPUUniformVelocityExtrapolator {
       { binding: 14, resource: view(this.dummyOrigins) },
       { binding: 15, resource: view(this.dummyOriginsOut) },
       { binding: 16, resource: { buffer: this.shellTiles } },
+      { binding: 17, resource: { buffer: this.frontReceipts } },
     ] });
     this.activeStateTexture = this.resolvedDistances;
 
@@ -400,7 +421,7 @@ export class WebGPUUniformVelocityExtrapolator {
       (sum, level) => sum + level.dims[0] * level.dims[1] * level.dims[2] * (this.sourceAwareHierarchy ? 6 : 2) * 16,
       0,
     );
-    return baseBytes + hierarchyBytes + 32 + this.shellTiles.size + this.shellDispatch.size;
+    return baseBytes + hierarchyBytes + 32 + this.shellTiles.size + this.shellDispatch.size + this.frontReceipts.size;
   }
 
   /** Hard wavefront ceiling; `frontPasses` is what an encode actually issues. */
@@ -425,8 +446,9 @@ export class WebGPUUniformVelocityExtrapolator {
    * construction; only the indirect front's workgroup counts are data-driven. */
   get encodedPassCount(): number {
     // seed + initial prepare + (update + prepare) per sweep + resolve + pack,
-    // plus one restrict and one prolong per hierarchy traversal step.
-    return 4 + 2 * this.activeFrontPasses + (this.shellListEncoded ? 2 : 0)
+    // plus one restrict and one prolong per hierarchy traversal step. The cache
+    // adds one source classification and one convergence pass per later sweep.
+    return 4 + 2 * this.activeFrontPasses + (this.shellListEncoded ? 2 : 0) + (this.cacheConvergence ? this.activeFrontPasses : 0)
       + this.hierarchyDownGroups.length + this.hierarchyUpGroups.length
       - (this.fuseTransportPack && this.fusedGroups.length ? 1 : 0);
   }
@@ -447,8 +469,11 @@ export class WebGPUUniformVelocityExtrapolator {
       label: "Uniform Sec. 3.3 extrapolation kernels",
       code: this.fieldPages?.shader(this.fieldPages.nativeStorage ? uniformVelocityExtrapolationShader : uniformVelocityPagedShader(uniformVelocityExtrapolationShader,this.dims,this.pageDomain),new Map(),false,this.fieldPages.nativeStorage,false,new Set([0,8,13,14,15])) ?? uniformVelocityExtrapolationShader,
     });
-    const compile = (label: string, entryPoint: string) => compiler.compileComputePipeline({
+    const compile = (label: string, entryPoint: string, initial = false) => compiler.compileComputePipeline({
       label, layout: this.pipelineLayout, compute: { module: shaderModule, entryPoint, constants: {
+        FRONT_RECEIPTS: Number(this.cacheConvergence),
+        CACHE_FINE_HIERARCHY: Number(this.cacheFineHierarchy && entryPoint === "prolongAndPack"),
+        FRONT_INITIAL_SWEEP: Number(this.cacheConvergence && initial),
         REUSE_CONVERGED_DISTANCE: Number(this.reuseConvergenceDistance),
         COMPACT_SHELL: Number(this.compactShell),
         SOURCE_AWARE_HIERARCHY: Number(this.sourceAwareHierarchy),
@@ -456,12 +481,15 @@ export class WebGPUUniformVelocityExtrapolator {
         ROOT_NX: this.dims[0], ROOT_NY: this.dims[1], ROOT_NZ: this.dims[2],
       } },
     }, { priority: "critical", signal });
-    const [buildShell, publishShell, clear, seed, update, prepare, resolve, restrict, prolong, pack, coarseTable, prolongPack] = await Promise.all([
+    const [buildShell, publishShell, clear, seed, update, initialUpdate, evaluate, classify, prepare, resolve, restrict, prolong, pack, coarseTable, prolongPack] = await Promise.all([
       compile("Uniform extension build shell list", "buildShellList"),
       compile("Uniform extension publish shell list", "publishShellList"),
       compile("Uniform Sec. 3.3 clear sparse state", "clearExtrapolationState"),
       compile("Uniform Sec. 3.3 seed active front", "seedActiveFront"),
       compile("Uniform Sec. 3.3 update active front", "updateActiveFront"),
+      compile("Uniform Sec. 3.3 initial front update", "updateActiveFront",true),
+      compile("Uniform Sec. 3.3 evaluate front convergence", "evaluateFrontConvergence"),
+      compile("Uniform Sec. 3.3 classify sources", "classifyFrontSources"),
       compile("Uniform Sec. 3.3 prepare active dispatch", "prepareActiveDispatch"),
       compile("Uniform Sec. 3.3 resolve converged front", "resolveConvergedFront"),
       compile("Uniform Sec. 3.3 hierarchy restrict", "restrictKnownVelocity"),
@@ -470,7 +498,7 @@ export class WebGPUUniformVelocityExtrapolator {
       compile("Uniform Sec. 3.3 publish 4h face table", "publishCoarseVelocityTable"),
       compile("Uniform nearest hierarchy and transport shell", "prolongAndPack"),
     ]);
-    this.pipelines = { buildShell, publishShell, clear, seed, update, prepare, resolve, restrict, prolong, pack, coarseTable, prolongPack };
+    this.pipelines = { buildShell, publishShell, clear, seed, update, initialUpdate, evaluate, classify, prepare, resolve, restrict, prolong, pack, coarseTable, prolongPack };
     const encoder = this.device.createCommandEncoder({ label: "Uniform Sec. 3.3 initialize sparse state" });
     for (const [label, group] of [["A", this.seedCurrentGroup], ["B", this.updateABGroup],
       ["resolved", this.resolveGroup]] as const) {
@@ -536,6 +564,9 @@ export class WebGPUUniformVelocityExtrapolator {
       pass.end();
     };
     const prefix = predicted ? "Uniform predicted Sec. 3.3" : "Uniform Sec. 3.3";
+    if (this.cacheConvergence) {
+      dispatchBase(`${prefix} classify sources`, pipelines.classify, this.seedCurrentGroup);
+    }
     dispatchBase(`${prefix} seed active front`, pipelines.seed,
       predicted ? this.seedPredictedGroup : this.seedCurrentGroup);
     const prepare = (label: string, group: GPUBindGroup) => {
@@ -546,8 +577,13 @@ export class WebGPUUniformVelocityExtrapolator {
       predicted ? this.prepareSeedPredictedGroup : this.prepareSeedCurrentGroup);
     for (let iteration = 0; iteration < this.activeFrontPasses; iteration += 1) {
       const group = iteration % 2 === 0 ? this.updateABGroup : this.updateBAGroup;
+      if (this.cacheConvergence && iteration > 0) {
+        const evaluate = encoder.beginComputePass({ label: `${prefix} evaluate convergence ${iteration + 1}` });
+        evaluate.setPipeline(pipelines.evaluate); evaluate.setBindGroup(0, group);
+        evaluate.dispatchWorkgroupsIndirect(this.dispatchArgs, 0); evaluate.end();
+      }
       const pass = encoder.beginComputePass({ label: `${prefix} FIM indirect update ${iteration + 1}` });
-      pass.setPipeline(pipelines.update); pass.setBindGroup(0, group);
+      pass.setPipeline(iteration === 0 ? pipelines.initialUpdate : pipelines.update); pass.setBindGroup(0, group);
       pass.dispatchWorkgroupsIndirect(this.dispatchArgs, 0); pass.end();
       prepare(`${prefix} prepare active dispatch ${iteration + 2}`,
         iteration % 2 === 0 ? this.prepareABGroup : this.prepareBAGroup);
@@ -629,7 +665,7 @@ export class WebGPUUniformVelocityExtrapolator {
     this.valuesA.destroy(); this.valuesB.destroy();
     this.distancesA.destroy(); this.distancesB.destroy();
     this.resolvedValues.destroy(); this.resolvedDistances.destroy();
-    this.shellTiles.destroy(); this.shellDispatch.destroy();
+    this.shellTiles.destroy(); this.shellDispatch.destroy(); this.frontReceipts.destroy();
     this.convergence.destroy();
     this.dispatchArgs.destroy();
     this.unusedDispatchStorage.destroy();
