@@ -1,5 +1,6 @@
 import { UniformScratchArena } from "./uniform-scratch-arena";
 import { nextUniformPressureCorrection } from "./uniform-pressure-continuation";
+import { uniformBrickCells, uniformDonorLimbCells } from "./uniform-volume-donor-sum.wgsl";
 import { uniformPageHasNativeCoordinates, uniformPageHasRectangularCoverage } from "./uniform-page-execution";
 import { UniformPageDomainPublication } from "./uniform-page-domain-publication";
 import { UniformTexturePages } from "./uniform-texture-pages";
@@ -218,8 +219,11 @@ export interface WebGPUUniformReferenceOptions {
   /**
    * Geometric only: the splash-survival experiments
    * (docs/uniform-geometric-splash-dissipation-plan.md). phiCubicAdvection,
-   * phiDrain and airborneMomentum default on; the rest default off.
-   *  - redistanceSurface: "preserve" keeps every vertex of a cell the surface
+   * phiDrain and airborneMomentum default on; redistanceSurface defaults to
+   * automatic; the remaining splash experiments default off.
+   *  - redistanceSurface: "auto" (default) preserves the surface with airborne
+   *    momentum and retains rebuild otherwise. "preserve" keeps every vertex
+   *    of a cell the surface
    *    crosses at its advected value, clamping edge neighbours of the surface
    *    to one cell (CM11b Sec. 3.4); "sparse" also redistances only every
    *    tenth step.
@@ -239,7 +243,7 @@ export interface WebGPUUniformReferenceOptions {
    *  - airborneMomentum: V far from phi and solids keeps its advected velocity
    *    and gravity instead of the extension's.
    */
-  redistanceSurface?: "rebuild" | "preserve" | "sparse";
+  redistanceSurface?: "auto" | "rebuild" | "preserve" | "sparse";
   phiCubicAdvection?: boolean;
   orphanVolume?: "relay" | "local" | "compact";
   orphanVolumeRender?: "off" | "density" | "spheres";
@@ -310,14 +314,32 @@ export interface WebGPUUniformReferenceOptions {
 /**
  * No cell of this lattice is covered by a static solid voxel.
  *
- * The mask is one bit per cell plus a one-cell halo, so the certificate is an
- * OR over its words. It is recomputed only when `update` reports a dirty
- * range -- a voxel stroke or a scene load -- never per step.
+ * Only the lattice's own cells count. The mask also carries a one-cell halo,
+ * and every box scene's container is compiled into that halo as a one-voxel
+ * shell (solidVoxelShellForScene), so an OR over all its words refused the
+ * certificate to every tank. No consumer can see the halo: cellOpenFraction
+ * returns zero for any cell outside the lattice before it reads the mask, and
+ * each E4 site either clamps into the lattice or skips invalid cells. The test
+ * is one masked run of nx bits per interior (y, z) row. It is recomputed only
+ * when `update` reports a dirty range -- a voxel stroke or a scene load --
+ * never per step.
  */
 function uniformSolidMaskEmpty(mask: SolidOccupancyMask): boolean {
   const words = mask.words;
-  for (let index = SOLID_OCCUPANCY_MASK_HEADER_WORDS; index < words.length; index += 1) {
-    if (words[index] !== 0) return false;
+  if (!uniformAbOn("solidinterior")) {
+    for (let index = SOLID_OCCUPANCY_MASK_HEADER_WORDS; index < words.length; index += 1) {
+      if (words[index] !== 0) return false;
+    }
+    return true;
+  }
+  const sx = words[1]!, sy = words[2]!, sz = words[3]!;
+  for (let z = 1; z < sz - 1; z += 1) for (let y = 1; y < sy - 1; y += 1) {
+    const first = sx * (y + sy * z) + 1, last = first + sx - 3;
+    for (let word = first >>> 5; word <= last >>> 5; word += 1) {
+      const low = Math.max(first, word << 5) & 31, high = Math.min(last, (word << 5) + 31) & 31;
+      const bits = (0xffffffff >>> (31 - high + low)) << low;
+      if ((words[SOLID_OCCUPANCY_MASK_HEADER_WORDS + word]! & bits) !== 0) return false;
+    }
   }
   return true;
 }
@@ -546,7 +568,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private phiAgreementGain: number;
   private phiAgreementClamp: number;
   /** Splash-survival experiments; see the option docs. */
-  private redistanceSurface: "rebuild" | "preserve" | "sparse";
+  private redistanceSurface: "auto" | "rebuild" | "preserve" | "sparse";
   private phiCubicAdvection: boolean;
   private orphanVolume: "relay" | "local" | "compact";
   private orphanVolumeRender: "off" | "density" | "spheres";
@@ -824,7 +846,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    */
   private diagnosticsReductionOwed = false;
   private stepBodyCount = 0;
-  /** No bit set in the packed static solid voxel mask; see uvSolidFree. */
+  /** No lattice cell (halo excluded) set in the static solid voxel mask; see uvSolidFree. */
   private solidVoxelsEmpty = true;
   private solidEditPending = false;
   private readonly prescribedSolidMotion = new UniformPrescribedSolidMotion();
@@ -913,7 +935,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.totalSurfaceVolume = this.geometricVolume && options.totalSurfaceVolume !== false;
     this.phiAgreementGain = Number.isFinite(options.phiAgreementGain) ? Math.min(1, Math.max(0, options.phiAgreementGain!)) : 0;
     this.phiAgreementClamp = Number.isFinite(options.phiAgreementClamp) ? Math.min(0.5, Math.max(0, options.phiAgreementClamp!)) : 0.02;
-    this.redistanceSurface = options.redistanceSurface === "preserve" || options.redistanceSurface === "sparse" ? options.redistanceSurface : "rebuild";
+    this.redistanceSurface = options.redistanceSurface ?? "auto";
     this.phiCubicAdvection = options.phiCubicAdvection !== false;
     this.orphanVolume = options.orphanVolume === "local" || options.orphanVolume === "compact" ? options.orphanVolume : "relay";
     this.orphanVolumeRender = options.orphanVolumeRender === "density" || options.orphanVolumeRender === "spheres" ? options.orphanVolumeRender : "off";
@@ -973,7 +995,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
           (options.fieldStorageForQA !== "dense" && !uniformPageHasRectangularCoverage(this.pageDomain));
         // Field-layout QA changes only the atlas layout, keeping its independent storage oracle.
         if (!paged && options.fieldStorageForQA === undefined && options.referenceDimension !== 2 && options.scratchStorageForQA !== "separate")
-          this.scratchArena = new UniformScratchArena(device, [nx, ny, nz], nx*ny*nz*UNIFORM_VOLUME_EDGE_BYTES,options.retainStageDiagnosticsForQA);
+          this.scratchArena = new UniformScratchArena(device, [nx, ny, nz], (uniformAbOn("edgebricks") ? uniformBrickCells([nx,ny,nz]) : nx*ny*nz)*UNIFORM_VOLUME_EDGE_BYTES,options.retainStageDiagnosticsForQA);
         this.fieldPages = new UniformTexturePages(device, paged, this.scratchArena);
       }
     }
@@ -1059,13 +1081,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     if (this.geometricVolume) {
       this.vertexPhiField = texture3d("Uniform Geometric vertex phi", "r32float", [nx + 1, ny + 1, nz + 1],options.phiStorageForQA !== "paged");
       this.vertexPhiScratch = texture3d("Uniform Geometric vertex phi scratch", "r32float", [nx + 1, ny + 1, nz + 1],options.phiStorageForQA !== "paged");
-      const edgeBytes = this.volumePageEdge && !this.nativeRootExecution ? paddedPageCells * UNIFORM_VOLUME_EDGE_BYTES : nx * ny * nz * UNIFORM_VOLUME_EDGE_BYTES;
+      const edgeBytes = this.volumePageEdge && !this.nativeRootExecution ? paddedPageCells * UNIFORM_VOLUME_EDGE_BYTES : (uniformAbOn("edgebricks") ? uniformBrickCells([nx,ny,nz]) : nx * ny * nz) * UNIFORM_VOLUME_EDGE_BYTES;
       if (edgeBytes > device.limits.maxStorageBufferBindingSize || edgeBytes > device.limits.maxBufferSize)
         throw new Error(`Uniform Geometric receiver stencils require ${edgeBytes} bytes, exceeding the device limit`);
       this.denseLevelSetVolumeSource = { vertexPhi: this.present(this.vertexPhiField), openFraction: this.present(this.gammaB),
         cellSize_m: [scene.container.width_m/nx, scene.container.height_m/ny, scene.container.depth_m/nz] };
       // Smaller than the edge buffer checked above: six 32-bit limbs/cell.
-      this.volumeDonorSums = this.scratchArena?.buffer ?? device.createBuffer({ label: "Uniform Geometric exact donor sums", size: nx*ny*nz*24,
+      this.volumeDonorSums = this.scratchArena?.buffer ?? device.createBuffer({ label: "Uniform Geometric exact donor sums", size: uniformDonorLimbCells([nx,ny,nz])*24,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
       this.volumeEdges = this.scratchArena?.buffer ?? device.createBuffer({ label: "Uniform Geometric nine-donor stencils", size: edgeBytes,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
@@ -1711,7 +1733,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       // splash / splashB: the splash-survival experiments, geometric only;
       // zero whenever a stage is off. See the option docs.
       ...(this.geometricVolume ? [
-        this.redistanceSurface !== "rebuild" ? 1 : 0,
+        this.redistanceSurface === "preserve" || this.redistanceSurface === "sparse"
+          || (this.redistanceSurface === "auto" && this.airborneMomentum) ? 1 : 0,
         this.orphanVolume === "compact" ? 2 : this.orphanVolume === "local" ? 1 : 0,
         this.orphanVolumeRender === "spheres" ? 2 : this.orphanVolumeRender === "density" ? 1 : 0,
         this.isolatedBodyVolume ? 1 : 0,
@@ -1841,7 +1864,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       if (values.phiSeedFromVolume !== undefined) this.phiSeedFromVolume = values.phiSeedFromVolume === "on";
       if (values.phiAgreement !== undefined) this.phiAgreementGain = values.phiAgreement === "on" ? finite("phiAgreementGain", 0.05, 0, 1) : 0;
       if (values.phiAgreementClamp !== undefined) this.phiAgreementClamp = finite("phiAgreementClamp", 0.02, 0, 0.5);
-      if (values.redistanceSurface !== undefined) this.redistanceSurface = values.redistanceSurface === "preserve" || values.redistanceSurface === "sparse" ? values.redistanceSurface : "rebuild";
+      if (values.redistanceSurface !== undefined) this.redistanceSurface = values.redistanceSurface === "preserve" || values.redistanceSurface === "sparse" || values.redistanceSurface === "rebuild" ? values.redistanceSurface : "auto";
       if (values.phiCubicAdvection !== undefined) this.phiCubicAdvection = values.phiCubicAdvection === "on";
       if (values.orphanVolume !== undefined) this.orphanVolume = values.orphanVolume === "local" || values.orphanVolume === "compact" ? values.orphanVolume : "relay";
       if (values.orphanVolumeRender !== undefined) {
@@ -2832,8 +2855,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       if(entry === "uvFinishDonorSums") {
         if(this.pageDomain) this.run(encoder,entry,this.volumePipelines[entry]!,this.volumeDonorGroup);
         else this.runDirect(encoder,entry,this.volumePipelines[entry]!,this.volumeDonorGroup,[Math.ceil(this.info.nx/4),Math.ceil(this.info.ny/4),Math.ceil(this.info.nz/4)]);
-      } else if(entry==="uvBuildEdges"||entry==="uvFallback"||entry==="uvNormalizeRows"||entry==="uvNormalizeDonors")
-        this.runVolumeWork(encoder,entry,this.volumePipelines[entry]!, (this.scratchArena || entry==="uvBuildEdges"||entry==="uvNormalizeRows")?this.volumeDonorGroup:group);
+      } else if(entry==="uvBuildEdges"||entry==="uvFallback"||entry==="uvNormalizeRows"||entry==="uvNormalizeDonors"||entry==="uvRowsFallback"||entry==="uvRowsDivide")
+        this.runVolumeWork(encoder,entry,this.volumePipelines[entry]!, (this.scratchArena || entry==="uvBuildEdges"||entry==="uvNormalizeRows"||entry==="uvRowsFallback"||entry==="uvRowsDivide")?this.volumeDonorGroup:group);
       else this.run(encoder,entry,this.volumePipelines[entry]!,group);
     };
 
@@ -2853,14 +2876,21 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // accumulation is exact and order independent, so this saves four full
     // edge-table scans without changing the transport normalization scheme.
     if (this.volumePageConfig) this.prepareVolumePages(encoder,false);
-    encoder.clearBuffer(this.volumeDonorSums!,this.scratchArena?.donorOffset ?? 0,this.scratchArena?.donorBytes);
-    run("uvBuildEdges"); run("uvFinishDonorSums"); run("uvFallback");
+    // donorfuse: the fallback joins round 0's rows and each donor division
+    // joins the next reader (uvFusedRow, uvGather). The clears stop at the six
+    // limbs: every decoded sum a reader addresses is rewritten by each decode.
+    const fuse = uniformAbOn("donorfuse");
+    encoder.clearBuffer(this.volumeDonorSums!,this.scratchArena?.donorOffset ?? 0,fuse ? uniformDonorLimbCells([this.info.nx,this.info.ny,this.info.nz])*24 : this.scratchArena?.donorBytes);
+    run("uvBuildEdges"); run("uvFinishDonorSums");
+    if (!fuse) run("uvFallback");
     for (let round = 0; round < 3; round++) {
-      encoder.clearBuffer(this.volumeDonorSums!,this.scratchArena?.donorOffset ?? 0,this.scratchArena?.donorBytes);
-      run("uvNormalizeRows"); run("uvFinishDonorSums"); run("uvNormalizeDonors");
+      encoder.clearBuffer(this.volumeDonorSums!,this.scratchArena?.donorOffset ?? 0,fuse ? uniformDonorLimbCells([this.info.nx,this.info.ny,this.info.nz])*24 : this.scratchArena?.donorBytes);
+      if (fuse) { run(round === 0 ? "uvRowsFallback" : "uvRowsDivide"); run("uvFinishDonorSums"); }
+      else { run("uvNormalizeRows"); run("uvFinishDonorSums"); run("uvNormalizeDonors"); }
     }
     seam?.(UNIFORM_VOLUME_PHASE.coupling);
-    run("uvGather");
+    // Fused, the gather divides by the decoded sums bound in the donor slot.
+    run("uvGather", fuse && this.scratchArena ? this.volumeDonorGroup : this.densityTraceGroup);
     // Whole-domain reduction: a window-local total would silently lose the
     // contribution of sleeping liquid. Capacity and target refreshes are dense.
     // Gather has already added hose/drop volume, so its current V is the

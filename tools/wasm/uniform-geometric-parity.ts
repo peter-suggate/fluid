@@ -68,7 +68,8 @@ try {
     scene.solidVoxels=[...boxSolidVoxelShell([expectedNx,expectedNy,1],{top:scene.container.top})];
     if(name==="embedded-ceiling")scene.solidVoxels.push({operation:"fill",minimum:[0,12,0],maximumExclusive:[expectedNx,13,1]});
     // The oracle is the 3D default algorithm; overrides are for diagnosis only.
-    const values=resolveUniformGeometricValues(JSON.parse(process.env.FLUID_UNIFORM_PARITY_VALUES??"{}"));
+    // Splash-survival stages are 3D-only and outside the native contract.
+    const values=resolveUniformGeometricValues({phiCubicAdvection:"off",phiDrain:"off",airborneMomentum:"off",...JSON.parse(process.env.FLUID_UNIFORM_PARITY_VALUES??"{}")});
     // pageSize is a WebGPU storage choice outside the native contract.
     const nativeValues=Object.fromEntries(UNIFORM_GEOMETRIC_NATIVE_PARAMS.map(p=>[p.key,values[p.key]]));
     const solver=await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,{...uniformGeometricSolverOptions(values,scene),referenceDimension:2},()=>{});

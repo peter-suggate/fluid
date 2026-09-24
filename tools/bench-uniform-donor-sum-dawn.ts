@@ -18,6 +18,7 @@ struct Edge {donor:array<u32,9>,weight:array<f32,9>,padding:vec2u}
 @group(0) @binding(1) var<storage,read_write> rigidExchange:array<atomic<i32>>;
 @group(0) @binding(2) var<storage,read_write> output:array<f32>;
 fn cellCount()->u32{return arrayLength(&rigidExchange)/6u;}
+fn dims()->vec3i{return vec3i(64,64,i32(cellCount()/4096u));}
 ${uniformVolumeDonorSumWGSL}
 @compute @workgroup_size(64)
 fn deposit(@builtin(global_invocation_id) id:vec3u){

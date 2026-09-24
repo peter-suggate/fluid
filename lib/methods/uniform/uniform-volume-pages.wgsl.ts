@@ -1,3 +1,4 @@
+import { uniformAbOn } from "./uniform-ab-switch";
 /** Page table for transient geometric transport / sharpening records. It lives
  * after the existing conditioning planes so no extra storage binding is needed.
  * Donor IDs remain logical cell IDs: paging must not change the transport graph.
@@ -5,7 +6,11 @@
 export interface UniformVolumePageShaderOptions { edge: 16 | 32; base: number; count: number; work?: boolean; nativeRecords?: boolean; }
 export const UNIFORM_VOLUME_PAGE_ENTRIES = ["uvMarkTransportPages", "uvMarkSharpenPages", "uvCompactPages"] as const;
 export function uniformVolumePagesWGSL(options?: UniformVolumePageShaderOptions): string {
-  if (!options) return "fn uvEdgeAddress(i:u32)->u32{return i;} fn uvWorkId(g:vec3u)->vec3i{return activeId(g);} fn uvPageWorkEnabled()->bool{return false;}";
+  // Native records in brick order (uvBrickOrder): the 32 lanes of a 4x4x2
+  // receiver block then address 32 consecutive records instead of eight
+  // four-record row fragments.
+  const native = uniformAbOn("edgebricks") ? "return uvBrickOrder(i);" : "return i;";
+  if (!options) return "fn uvEdgeAddress(i:u32)->u32{" + native + "} fn uvWorkId(g:vec3u)->vec3i{return activeId(g);} fn uvPageWorkEnabled()->bool{return false;}";
   const {edge,base,count,work,nativeRecords}=options;
   return /* wgsl */ `
 fn uvPageWorkEnabled()->bool{return ${work ? "true" : "false"};}
@@ -32,7 +37,7 @@ fn uvPageIndex(id:vec3i)->u32{
  let q=vec3u(id)/UV_PAGE_EDGE;return q.x+d.x*(q.y+d.y*q.z);
 }
 fn uvEdgeAddress(i:u32)->u32{
- ${nativeRecords ? "return i;" : `let id=uvCell(i);let page=uvPageIndex(id);
+ ${nativeRecords ? native : `let id=uvCell(i);let page=uvPageIndex(id);
  let slot=u32(atomicLoad(&sharpenDeposits[UV_PAGE_BASE+8u+UV_PAGE_COUNT+page]));
  let q=vec3u(id)%UV_PAGE_EDGE;
  return slot*UV_PAGE_EDGE*UV_PAGE_EDGE*UV_PAGE_EDGE+q.x+UV_PAGE_EDGE*(q.y+UV_PAGE_EDGE*q.z);`}

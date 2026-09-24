@@ -5,6 +5,7 @@ import { geometricPlaneBoxWGSL } from "../../core/geometric-plane-box.wgsl";
 export const UNIFORM_VOLUME_ENTRIES = [
   "uvAdvectPhi", "uvRedistancePhi", "uvBuildEdges",
   "uvFinishDonorSums", "uvFallback", "uvNormalizeRows", "uvNormalizeDonors", "uvGather",
+  "uvRowsFallback", "uvRowsDivide",
   "uvPrepareSharpen", "uvProposeSharpen", "uvLimitSharpen", "uvCommitSharpen", "uvPublish",
   "uvCacheSharpenCells", "uvCacheSharpenFaces",
   "uvBalanceMeasure", "uvBalanceReduce", "uvBalanceReduceChunks", "uvTwoLevelSeedCooperative",
@@ -47,6 +48,7 @@ export const UNIFORM_VOLUME_SHARPEN_TILE_COUNT_WORD = 7;
 export const UNIFORM_VOLUME_SHARPEN_TILE_MAP_WORD = 8;
 export const UNIFORM_VOLUME_EDGE_BYTES = 40;
 const donorTiles = uniformAbOn("donortiles");
+const donorFuse = uniformAbOn("donorfuse");
 /** E4: the half-cell solid walk and the embedded-wall terms, skipped as a
  * host-uniform condition when the scene has no cut cell anywhere. */
 const solidFreeTrace = uniformAbOn("solidfreetrace");
@@ -414,6 +416,22 @@ fn uvPhiFarAir(vertex:vec3i)->bool{
   if(nearWall.x||nearWall.y||(UNIFORM_REFERENCE_DIMENSION==3u&&nearWall.z)){return false;}
   return !uvShellTileAt(vertex);
 }
+// A vertex with no open incident cell is inside a solid, and phi there is not
+// state: no liquid can arrive, no source can be placed there and the pressure
+// stencil continues the interface from open neighbours on the fly
+// (pressurePhi). Such a vertex keeps its construction fill, metres above the
+// redistance band. Before this guard the source plug and the redistance wrote
+// buried vertices freely: under the hero-garden hose the plug pulled the
+// terrain's buried planes into the 4h band, the redistance then measured them
+// against a contour sitting inside the top terrain cell, and that contour sank
+// one lattice plane per step. The published surface crossed 0.5 inside closed
+// cells and the water was drawn below the pond floor.
+fn uvBuried(p:vec3f)->bool{
+  ${solidFreeTrace ? `if(uvSolidFree()){return false;}` : ""}
+  let base=vec3i(p)-vec3i(1);
+  for(var k=0u;k<8u;k++){let c=base+uvCorner(k);if(valid(c)&&cellOpenFraction(c)>1e-5){return false;}}
+  return true;
+}
 // SPLASH SURVIVAL (docs/uniform-geometric-splash-dissipation-plan.md). Each
 // experiment reads its own params.splash/splashB lane, which the host writes
 // as zero with the toggle off, so the default arm evaluates none of them.
@@ -518,6 +536,7 @@ fn uvAdvectPhi(@builtin(global_invocation_id)gid:vec3u){
   // The far-air theorems below hold at the departure point too unless q lies
   // in a SHELL tile, where a splash term may fire; see uvSplashAdvect.
   ${phiLean ? `if(uvPhiFarAir(vertex)&&!(uvSplashAdvect()&&uvShellTileAt(vec3i(departure)))){textureStore(uvPhiOut,vertex,vec4f(advected));return;}` : ""}
+  if(uvBuried(p)){textureStore(uvPhiOut,vertex,vec4f(textureLoad(uvPhiIn,vertex,0).x));return;}
   let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
   if(params.splashB.x>0.5&&abs(advected)<2.0*h){advected=uvPhiCubic(departure);}
   let contact=uvEmbeddedContact(p,uvClosedWallPhi(p,advected));
@@ -535,17 +554,24 @@ fn uvRedistancePhi(@builtin(global_invocation_id)gid:vec3u){
   let vertex=activeVertexId(gid);if(any(vertex<vec3i(0))||any(vertex>dims())){return;}let p=vec3f(vertex);let initial=uvPhi(p);
   let h=params.cellGravity.xyz;let band=4.0*max(h.x,max(h.y,h.z));
   var value=initial;
-  if(abs(initial)>1e-8&&abs(initial)<band){
+  // A buried vertex is never measured against a contour: see uvBuried.
+  if(abs(initial)>1e-8&&abs(initial)<band&&!uvBuried(p)){
     if(params.splash.x>0.5&&uvSurfaceVertex(vertex,initial)){let cell=min(h.x,min(h.y,h.z));value=clamp(initial,-cell,cell);}
-    else{var q=p;
-    for(var i=0u;i<8u;i++){let g=uvGradient(q);let norm=dot(g/h,g/h);if(norm<1e-16){break;}
+    else{var q=p;var lastGradient=vec3f(0);var lastNorm=0.0;
+    for(var i=0u;i<8u;i++){let g=uvGradient(q);let norm=dot(g/h,g/h);if(norm<1e-16){break;}lastGradient=g;lastNorm=norm;
       let next=clamp(q-clamp(uvPhi(q)*g/(h*h*norm),vec3f(-2),vec3f(2)),
         max(vec3f(0),p-vec3f(4)),min(vec3f(dims()),p+vec3f(4)));
       // A clamped Newton step can cross a distance ridge and walk away
       // from the contour. Reject it before roundoff picks a different root.
       if(abs(uvPhi(next))>=abs(uvPhi(q))){break;}
       q=next;}
-    if(abs(uvPhi(q))<0.005*min(h.x,min(h.y,h.z))){value=sign(initial)*length((p-q)*h);}}}
+    // Preserve mode continues the last local tangent plane to zero. A binary
+    // residual cutoff otherwise switches between the advected phi and the
+    // measured distance, amplifying tiny mirrored residual differences.
+    // Reuse the last Newton gradient: no additional texture reads or steps.
+    if(params.splash.x>0.5&&lastNorm>1e-16){let root=q-uvPhi(q)*lastGradient/(h*h*lastNorm);
+      value=sign(initial)*min(band,length((p-root)*h));}
+    else if(abs(uvPhi(q))<0.005*min(h.x,min(h.y,h.z))){value=sign(initial)*length((p-q)*h);}}}
   textureStore(uvPhiOut,vertex,vec4f(value));
 }
 fn uvOpen(id:vec3i)->f32{if(!valid(id)){return 0.0;}return cellOpenFraction(id);}
@@ -631,6 +657,44 @@ fn uvNormalizeRows(@builtin(global_invocation_id)gid:vec3u){
   for(var k=0u;k<9u;k++){let weight=uvEdges[uvEdgeAddress(i)].weight[k]*scale;
     uvEdges[uvEdgeAddress(i)].weight[k]=weight;uvAddDonor(uvDonor(i,k),weight);}
 }
+// FUSED NORMALIZATION (donorfuse). uvNormalizeDonors divides each weight by
+// its donor's decoded sum and does nothing else, so the division is applied by
+// the next reader of the row instead: the next round's uvNormalizeRows, and
+// after the last round uvGather. uvFallback reads the receiver's own sum and
+// joins round 0. The arithmetic per weight is unchanged -- the same quotient,
+// rounded once, then the same sum and scale -- so only the three edge sweeps
+// and the fallback pass disappear. Rows deposit while they read the previous
+// round's sums, so the decoded sums get their own plane (uvDecodedAt) rather
+// than the low limb the donor passes accumulate into.
+fn uvDecodedBits(i:u32)->u32{return bitcast<u32>(atomicLoad(&sharpenDeposits[i]));}
+fn uvDonorFrom(i:u32,base:u32,k:u32,weight:f32)->u32{
+  if(k==8u||weight==0.0){return i;}
+  let d=vec3u(params.dimsDt.xyz);let o=vec3u(uvCorner(k));
+  return base+o.x+d.x*(o.y+d.y*o.z);
+}
+fn uvFusedRow(id:vec3i,fallback:bool,divide:bool){
+  let i=linearIndex(id);let a=uvEdgeAddress(i);let base=uvEdges[a].base;
+  var w:array<f32,9>;
+  for(var k=0u;k<9u;k++){w[k]=uvEdges[a].weight[k];}
+  if(fallback&&uvDecodedBits(i)==0u){w[8]=max(uvOpen(id),1e-6);}
+  if(divide){for(var k=0u;k<9u;k++){
+    w[k]=w[k]/max(bitcast<f32>(uvDecodedBits(uvDonorFrom(i,base,k,w[k]))),1e-20);}}
+  var sum=0.0;
+  for(var k=0u;k<9u;k++){sum+=w[k];}
+  let scale=uvOpen(id)/max(sum,1e-20);
+  for(var k=0u;k<9u;k++){let weight=w[k]*scale;
+    uvEdges[a].weight[k]=weight;uvAddDonor(uvDonorFrom(i,base,k,weight),weight);}
+}
+@compute @workgroup_size(4,4,4)
+fn uvRowsFallback(@builtin(global_invocation_id)gid:vec3u){
+  let id=uvWorkId(gid);if(uvTransportSkip(id)){return;}
+  if(!valid(id)){return;}uvFusedRow(id,true,false);
+}
+@compute @workgroup_size(4,4,4)
+fn uvRowsDivide(@builtin(global_invocation_id)gid:vec3u){
+  let id=uvWorkId(gid);if(uvTransportSkip(id)){return;}
+  if(!valid(id)){return;}uvFusedRow(id,false,true);
+}
 @compute @workgroup_size(4,4,4)
 fn uvNormalizeDonors(@builtin(global_invocation_id)gid:vec3u){
   let id=uvWorkId(gid);if(uvTransportSkip(id)){return;}
@@ -671,7 +735,10 @@ fn uvGather(@builtin(global_invocation_id)gid:vec3u){
   // reconciliation. Preserve it until a later edit creates an outlet.
   if(uvOpen(id)<=0.0){textureStore(volumeOut,id,vec4f(volume(id)));textureStore(gammaOut,id,vec4f(0.0));return;}
   let i=linearIndex(id);var value=0.0;
-  for(var k=0u;k<9u;k++){value+=uvEdges[uvEdgeAddress(i)].weight[k]*volume(uvCell(uvDonor(i,k)));}
+  ${donorFuse ? `let a=uvEdgeAddress(i);let base=uvEdges[a].base;
+  for(var k=0u;k<9u;k++){let raw=uvEdges[a].weight[k];let donor=uvDonorFrom(i,base,k,raw);
+    let weight=raw/max(bitcast<f32>(uvDecodedBits(donor)),1e-20);
+    value+=weight*volume(uvCell(uvDonorFrom(i,base,k,weight)));}` : `for(var k=0u;k<9u;k++){value+=uvEdges[uvEdgeAddress(i)].weight[k]*volume(uvCell(uvDonor(i,k)));}`}
   value+=min(dropSource(id),max(0.0,uvOpen(id)-value));
   if(uvOpen(id)>0.0){value+=inflowSweptPlugSource(id,params.dimsDt.w);}
   textureStore(volumeOut,id,vec4f(uvDustFloor(value)));
@@ -1366,10 +1433,27 @@ fn uvAirborneAuthority(id:vec3i,rho:f32)->f32{
 fn uvPublish(@builtin(global_invocation_id)gid:vec3u){
   let id=activeId(gid);if(!valid(id)){return;}
   let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
+  let open=uvOpen(id);
   var value=0.5-uvPhi(vec3f(id)+vec3f(0.5))/h;
-  if(params.splash.z>0.5&&value<-1.0){value=max(value,uvOrphanRender(id,params.splash.z>1.5));}
+  if(open<=1e-5){
+    // A closed cell holds no liquid, so it never publishes liquid. Its centre
+    // is the mean of its eight corners, and where every corner is a wet wall
+    // vertex -- a one-cell terrain sliver, a submerged voxel stone -- that mean
+    // is liquid and the cell-centred contour would cut through the solid. Where
+    // an open face neighbour is wet the cell publishes that neighbour's mirror
+    // about 0.5, which puts the linear 0.5 crossing exactly on the shared
+    // face; otherwise it publishes air. The wall vertices themselves keep
+    // their continuation values: this is a presentation boundary condition,
+    // not a change of state.
+    var wettest=-1e30;
+    for(var axis=0u;axis<3u;axis++){for(var side=-1;side<=1;side+=2){
+      var n=id;n[axis]+=side;if(uvOpen(n)<=1e-5){continue;}
+      wettest=max(wettest,0.5-uvPhi(vec3f(n)+vec3f(0.5))/h);}}
+    value=min(select(value,1.0-wettest,wettest>=0.5),0.5-1e-3);
+  }
+  else if(params.splash.z>0.5&&value<-1.0){value=max(value,uvOrphanRender(id,params.splash.z>1.5));}
   textureStore(volumeOut,id,vec4f(value));
-  textureStore(gammaOut,id,vec4f(uvOpen(id)));
+  textureStore(gammaOut,id,vec4f(open));
 }
 
 // A dedicated tail of the existing scratch buffer avoids another storage

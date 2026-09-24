@@ -262,7 +262,7 @@
     "test:uniform-lab:inflow": "node --import tsx tools/wasm/uniform-lab-inflow.ts",
     "test:uniform-lab:scenes": "node --import tsx tools/wasm/uniform-lab-scenes.ts",
     "test:uniform-pressure:2d": "node --import tsx tools/wasm/uniform-pressure-stability.ts",
-    "test:dawn:uniform-garden": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx --test --test-concurrency=1 tests/uniform-garden-transport-dawn.test.ts",
+    "test:dawn:uniform-garden": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx --test --test-concurrency=1 tests/uniform-garden-transport-dawn.test.ts tests/uniform-buried-phi-dawn.test.ts",
     "test:dawn:uniform-transport-reach": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_WEBGPU_BACKEND=${WEBGPU_BACKEND:-metal} node --import tsx --test --test-concurrency=1 tests/uniform-phi-far-air-dawn.test.ts tests/uniform-transport-reach-dawn.test.ts",
     "test:dawn:uniform-native-stages": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx --test --test-concurrency=1 tests/uniform-native-stages-dawn.test.ts",
     "test:dawn:uniform-phi": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx --test --test-concurrency=1 tests/uniform-phi-layout-dawn.test.ts",

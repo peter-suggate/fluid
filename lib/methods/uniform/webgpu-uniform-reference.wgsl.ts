@@ -13,6 +13,8 @@ const uniformAbFaceBaseline = !uniformAbOn("facetest");
 const uniformAbOpenLocalBaseline = !uniformAbOn("openlocal");
 const uniformAbSolidHeaderBaseline = !uniformAbOn("solidheader");
 const uniformAbDeadGroups = uniformAbOn("deadgroups");
+// Lane count of the 4^3 scan kernels' shared reduction arrays; see activeScanMinimum.
+const uniformActiveScanLanes = uniformAbOn("scanlanes") ? 64 : 256;
 
 /**
  * Dense uniform-grid reference kernels.
@@ -449,9 +451,23 @@ fn pressureSurfacePhi(p:vec3i)->f32{
   // (V near 0.9 where phi's fill reads 0.15), so letting it place the free
   // surface there makes random columns a full cell taller than their
   // neighbours: rho*g*h across one face, every step, which is the bubbling.
-  // A cell beside phi-liquid already has a projected face, so phi keeps it.
+  // A cell beside phi-liquid already has a projected face, so phi keeps it
+  // unless the airborne over-capacity rule below supplies pressure support.
   // w=2 is that unrestricted rule, min(phi, V distance) everywhere.
-  let q=clampCell(p);let phi=uvPhi(vec3f(q)+vec3f(0.5));
+  let q=clampCell(p);var phi=uvPhi(vec3f(q)+vec3f(0.5));
+  // Ballistic advection can pile several cell volumes into phi-air.
+  // Without pressure support that compressed material has no pressure row;
+  // the neighbouring liquid then sees a vacuum face inside that compressed
+  // material and its excess-volume correction launches a spurious jet.
+  // Give the excess pressure support, using the same interface for topology,
+  // ghost fractions, projection and extension. Continue the distance on BOTH
+  // sides of capacity: a V>1 branch jumps from raw positive phi to zero, so
+  // V=1 and V=1+one-ulp see different vacuum distances and launch different
+  // jets. The positive continuation changes no air cell into a pressure row.
+  if(params.splashB.w>0.5){let v=volume(q);
+    let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
+    phi=min(phi,max(h*(1.0-v),-0.5*h));}
+
   ${uniformAbOpenLocalBaseline ? `let open=cellOpenFraction(q);
   if(params.physical.w<0.5||open<=1e-5){return phi;}` : `if(params.physical.w<0.5){return phi;}
   let open=cellOpenFraction(q);if(open<=1e-5){return phi;}`}
@@ -1163,7 +1179,10 @@ fn applyVelocityForces(id:vec3i,inputVelocity:vec3f,dt:f32,h:vec3f)->vec3f{
   // leaves a thin sheet with no way to separate from a ceiling.
   let centerLiquid=occupancy>1e-5;
   let yLiquid=yOccupancy>1e-5;
-  if(centerLiquid||yLiquid${geometric ? "||uvAirborneCell(id)||uvAirborneCell(qy)" : ""}){v.y+=params.cellGravity.w*dt;}
+  // Compressed airborne volume now owns pressure even near walls, where the
+  // ballistic clearance test is deliberately false. It still carries mass
+  // and receives the same single body-force impulse as phi-owned liquid.
+  if(centerLiquid||yLiquid${geometric ? "||uvAirborneCell(id)||uvAirborneCell(qy)||(params.splashB.w>0.5&&(volume(id)>1.0||volume(qy)>1.0))" : ""}){v.y+=params.cellGravity.w*dt;}
   let qx=id+vec3i(1,0,0);let qz=id+vec3i(0,0,1);
   let xOccupancy=surfaceOccupancy(qx);let zOccupancy=surfaceOccupancy(qz);
   // Balanced-force CSF: pressure and capillary acceleration use the same
@@ -1819,6 +1838,17 @@ fn activeTravelCells(id:vec3i,positive:bool)->vec3u{
   return vec3u(ceil(directed*params.dimsDt.w/params.cellGravity.xyz));
 }
 var<workgroup> activeAnyWet:atomic<u32>;
+// The 4^3 scan kernels' own reduction lanes. They reduce 64 cells, and sharing
+// the 256-lane reducer's arrays gave every census workgroup 11 KB of
+// threadgroup memory: two 64-thread workgroups per M1 core, a 262k-group
+// whole-lattice census running at a sliver of occupancy. WGSL allocates a
+// module-scope workgroup variable only to entry points that use it, so each
+// kind of kernel now carries exactly its own footprint.
+var<workgroup> activeScanMinimum:array<vec3u,${uniformActiveScanLanes}>;
+var<workgroup> activeScanMaximum:array<vec3u,${uniformActiveScanLanes}>;
+var<workgroup> activeScanSpeed:array<u32,${uniformActiveScanLanes}>;
+var<workgroup> activeScanTravelPlus:array<u32,${uniformActiveScanLanes}>;
+var<workgroup> activeScanTravelMinus:array<u32,${uniformActiveScanLanes}>;
 /** Lane 0 only: publish this workgroup's reduced lane-0 values. */
 fn writeActiveSummaryRecord(workgroupId:vec3u,groupCount:vec3u){
   if(all(workgroupId==vec3u(0u))){
@@ -1828,11 +1858,11 @@ fn writeActiveSummaryRecord(workgroupId:vec3u,groupCount:vec3u){
   }
   let summaryIndex=workgroupId.x+groupCount.x*(workgroupId.y+groupCount.y*workgroupId.z);
   let base=ACTIVE_SUMMARY_BASE+12u*summaryIndex;
-  activeScratch[base]=activeMinimumLanes[0].x;activeScratch[base+1u]=activeMinimumLanes[0].y;
-  activeScratch[base+2u]=activeMinimumLanes[0].z;activeScratch[base+3u]=activeSpeedLanes[0];
-  activeScratch[base+4u]=activeMaximumLanes[0].x;activeScratch[base+5u]=activeMaximumLanes[0].y;
-  activeScratch[base+6u]=activeMaximumLanes[0].z;activeScratch[base+7u]=0u;
-  activeScratch[base+8u]=activeTravelPlusLanes[0];activeScratch[base+9u]=activeTravelMinusLanes[0];
+  activeScratch[base]=activeScanMinimum[0].x;activeScratch[base+1u]=activeScanMinimum[0].y;
+  activeScratch[base+2u]=activeScanMinimum[0].z;activeScratch[base+3u]=activeScanSpeed[0];
+  activeScratch[base+4u]=activeScanMaximum[0].x;activeScratch[base+5u]=activeScanMaximum[0].y;
+  activeScratch[base+6u]=activeScanMaximum[0].z;activeScratch[base+7u]=0u;
+  activeScratch[base+8u]=activeScanTravelPlus[0];activeScratch[base+9u]=activeScanTravelMinus[0];
   activeScratch[base+10u]=0u;activeScratch[base+11u]=0u;
 }
 fn writeActiveWorkgroupSummary(
@@ -1856,26 +1886,26 @@ fn writeActiveWorkgroupSummary(
   if(wet){atomicStore(&activeAnyWet,1u);}
   if(workgroupUniformLoad(&activeAnyWet)==0u){
     if(localIndex==0u){
-      activeMinimumLanes[0]=d;activeMaximumLanes[0]=vec3u(0u);activeSpeedLanes[0]=0u;
-      activeTravelPlusLanes[0]=0u;activeTravelMinusLanes[0]=0u;
+      activeScanMinimum[0]=d;activeScanMaximum[0]=vec3u(0u);activeScanSpeed[0]=0u;
+      activeScanTravelPlus[0]=0u;activeScanTravelMinus[0]=0u;
       writeActiveSummaryRecord(workgroupId,groupCount);
     }
     return;
   }` : ""}
-  activeMinimumLanes[localIndex]=minimum;
-  activeMaximumLanes[localIndex]=maximum;
-  activeSpeedLanes[localIndex]=speedBits;
-  activeTravelPlusLanes[localIndex]=travelPlus;
-  activeTravelMinusLanes[localIndex]=travelMinus;
+  activeScanMinimum[localIndex]=minimum;
+  activeScanMaximum[localIndex]=maximum;
+  activeScanSpeed[localIndex]=speedBits;
+  activeScanTravelPlus[localIndex]=travelPlus;
+  activeScanTravelMinus[localIndex]=travelMinus;
   workgroupBarrier();
   var stride=32u;
   loop{
     if(localIndex<stride){
-      activeMinimumLanes[localIndex]=min(activeMinimumLanes[localIndex],activeMinimumLanes[localIndex+stride]);
-      activeMaximumLanes[localIndex]=max(activeMaximumLanes[localIndex],activeMaximumLanes[localIndex+stride]);
-      activeSpeedLanes[localIndex]=max(activeSpeedLanes[localIndex],activeSpeedLanes[localIndex+stride]);
-      activeTravelPlusLanes[localIndex]=activeMaxPacked(activeTravelPlusLanes[localIndex],activeTravelPlusLanes[localIndex+stride]);
-      activeTravelMinusLanes[localIndex]=activeMaxPacked(activeTravelMinusLanes[localIndex],activeTravelMinusLanes[localIndex+stride]);
+      activeScanMinimum[localIndex]=min(activeScanMinimum[localIndex],activeScanMinimum[localIndex+stride]);
+      activeScanMaximum[localIndex]=max(activeScanMaximum[localIndex],activeScanMaximum[localIndex+stride]);
+      activeScanSpeed[localIndex]=max(activeScanSpeed[localIndex],activeScanSpeed[localIndex+stride]);
+      activeScanTravelPlus[localIndex]=activeMaxPacked(activeScanTravelPlus[localIndex],activeScanTravelPlus[localIndex+stride]);
+      activeScanTravelMinus[localIndex]=activeMaxPacked(activeScanTravelMinus[localIndex],activeScanTravelMinus[localIndex+stride]);
     }
     workgroupBarrier();
     if(stride==1u){break;}stride/=2u;

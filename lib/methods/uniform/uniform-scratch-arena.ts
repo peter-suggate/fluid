@@ -3,6 +3,7 @@
  * Persistent/published textures remain ordinary textures. */
 import { planUniformCM11aHierarchy } from "./pressure-plan";
 import { rewritePressureTextureCalls } from "./uniform-pressure-pages";
+import { uniformDonorSliceWords } from "./uniform-volume-donor-sum.wgsl";
 
 export class UniformScratchArena {
   readonly buffer: GPUBuffer;
@@ -52,7 +53,7 @@ export class UniformScratchArena {
     if(retainDiagnostics)this.offsets.delete("Uniform Sec. 3.3 resolved FIM distances");
     this.edgeBytes=edgeBytes;
     this.donorOffset=Math.ceil(edgeBytes/256)*256;
-    this.donorBytes=dims.reduce((n,d)=>n*d,1)*24;
+    this.donorBytes=uniformDonorSliceWords(dims)*4;
     this.buffer=device.createBuffer({label:"Uniform shared stage scratch",size:Math.max(extensionEnd*4,pressureWords*4,this.donorOffset+this.donorBytes),
       usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
   }
@@ -106,9 +107,10 @@ export function uniformVolumeScratchShader(source:string,sharpenBaseWords:number
   // Once decoding finishes, no pass needs the exact limbs again until the
   // next clear. Store each rounded sum in its own low limb, in place.
   let result=source.replace("atomicStore(&sharpenDeposits[i],bitcast<i32>(uvDonorSum(i)))",
-      "atomicStore(&rigidExchange[i],bitcast<i32>(uvDonorSum(i)))")
-    .replace("if(atomicLoad(&sharpenDeposits[i])==0){uvEdges", "if(atomicLoad(&rigidExchange[i])==0){uvEdges")
-    .replace("let sum=bitcast<f32>(atomicLoad(&sharpenDeposits[donor]));", "let sum=bitcast<f32>(atomicLoad(&rigidExchange[donor]));")
+      "atomicStore(&rigidExchange[uvDecodedAt(i)],bitcast<i32>(uvDonorSum(i)))")
+    .replace("if(atomicLoad(&sharpenDeposits[i])==0){uvEdges", "if(atomicLoad(&rigidExchange[uvDecodedAt(i)])==0){uvEdges")
+    .replace("let sum=bitcast<f32>(atomicLoad(&sharpenDeposits[donor]));", "let sum=bitcast<f32>(atomicLoad(&rigidExchange[uvDecodedAt(donor)]));")
+    .replace("fn uvDecodedBits(i:u32)->u32{return bitcast<u32>(atomicLoad(&sharpenDeposits[i]));}", "fn uvDecodedBits(i:u32)->u32{return bitcast<u32>(atomicLoad(&rigidExchange[uvDecodedAt(i)]));}")
     .replace("fn uvCoarseBase()->u32{return cellCount();}","fn uvCoarseBase()->u32{return 0u;}")
     .replace("return cellCount()+4u*uvCoarseCount()+plane*uvCoarseCount();", "return 4u*uvCoarseCount()+plane*uvCoarseCount();")
     .replaceAll('2u*cellCount()+UV_SHARPEN',`${sharpenBaseWords}u+UV_SHARPEN`)

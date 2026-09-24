@@ -72,7 +72,8 @@ params.push({kind:"number",key:"phiAgreementClamp",label:"Agreement clamp",defau
 
 // Splash survival (docs/uniform-geometric-splash-dissipation-plan.md): independent
 // stages for comparing in the app. Cubic advection, the ghost drain and airborne
-// momentum ship on; the rest are off. Five numerical stages also run in 2D.
+// momentum ship on; redistance follows momentum in automatic mode; the other
+// splash experiments are off. Five numerical stages also run in 2D.
 /** The long-form tooltips, shared by the parameter and its SIM panel switch. */
 export const UNIFORM_GEOMETRIC_SPLASH_HINTS = Object.freeze({
   phiCubicAdvection: [
@@ -104,9 +105,9 @@ export const UNIFORM_GEOMETRIC_SPLASH_HINTS = Object.freeze({
   ].join("\n\n"),
 });
 const splash: MethodParamSpec[] = [
-  {kind:"select",key:"redistanceSurface",label:"Redistance surface",default:"rebuild",tier:"fine",update:"runtime",
-    options:[{value:"rebuild",label:"Rebuild"},{value:"preserve",label:"Preserve"},{value:"sparse",label:"Preserve, every 10th"}],
-    hint:"Rebuild re-measures every band vertex against the trilinear contour each step, which moves a curved surface inward by up to h²/4r a step even at rest. Preserve leaves every vertex of a cell the surface crosses at its advected value and clamps the surface's edge neighbours to one cell (CM11b Sec. 3.4). Every 10th also redistances only one step in ten, as that paper does."},
+  {kind:"select",key:"redistanceSurface",label:"Redistance surface",default:"auto",tier:"fine",update:"runtime",
+    options:[{value:"auto",label:"Automatic"},{value:"rebuild",label:"Rebuild"},{value:"preserve",label:"Preserve"},{value:"sparse",label:"Preserve, every 10th"}],
+    hint:"Automatic preserves the advected surface when airborne momentum is on and retains Rebuild when it is off. Rebuild re-measures every band vertex against the trilinear contour each step, which moves a curved surface inward by up to h²/4r a step even at rest. Preserve leaves every vertex of a cell the surface crosses at its advected value and clamps the surface's edge neighbours to one cell (CM11b Sec. 3.4). Every 10th also redistances only one step in ten, as that paper does."},
   {kind:"select",key:"phiCubicAdvection",label:"Cubic phi advection",default:"on",tier:"fine",update:"runtime",
     options:[{value:"on",label:"On"},{value:"off",label:"Off"}],
     hint:UNIFORM_GEOMETRIC_SPLASH_HINTS.phiCubicAdvection},

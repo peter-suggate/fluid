@@ -2,6 +2,7 @@
  * node --import tsx tools/profile-uniform-geometric-dawn.ts
  * Options: --scene=cm12-figure-7-256 --frames=60 --out=/tmp/profile.json
  * --allocation-audit --max-gpu-bytes=3000000000 --scratch-storage=separate
+ * --values='{"airborneMomentum":"on","redistanceSurface":"rebuild"}'
  */
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -55,7 +56,7 @@ try {
   usePerformanceInstrumentationStore.getState().setMode("timeline");
   await GPUStageTimestampRecorder.prepare(device);
   const scene = sceneDocument(getSceneDefinition(sceneId));
-  const values = resolveMethodValues(uniformVolumeMethod, "balanced", {});
+  const values = resolveMethodValues(uniformVolumeMethod, "balanced", JSON.parse(arg("values", "{}")));
   const start = performance.now();
   const unsubscribe = process.argv.includes("--compile-progress")
     ? gpuCompilationManagerFor(device).subscribe(s => { if(s.progress) console.log(JSON.stringify(s.progress)); }) : () => {};

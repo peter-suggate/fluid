@@ -126,6 +126,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
         assert.ok(blocked.length>1000,"exercise the vessel/domain overlap");
         for(let frame=1;frame<=60;frame++){
           assert.ok(solver.advanceTo(frame/30));
+          await solver.awaitFrameCompletion();
           if(frame<26)continue;
           const bytes=await readBufferBinding(device!,{buffer:solver.negativeBoundaryVelocityBuffer},solver.negativeBoundaryVelocityBytes);
           const boundary=new Float32Array(bytes.buffer,bytes.byteOffset,bytes.byteLength/4);

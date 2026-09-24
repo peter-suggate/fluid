@@ -94,6 +94,7 @@ fn publishShellList() {
   atomicStore(&shellTiles[3],1u);
 }
 override SOURCE_AWARE_HIERARCHY: bool = false;
+override SHELL_HIERARCHY: bool = false;
 // Pipeline constants make provenance index decoding shifts/multiplies instead
 // of per-candidate dynamic integer divisions, especially on power-of-two grids.
 override ROOT_NX: u32 = 1u;
@@ -644,12 +645,54 @@ fn nearestHierarchySample(p: vec3i, sd: vec3i, td: vec3i, component: u32, footpr
   return NearestSample(select(0.0,sum.x/sum.y,sum.y>0.0),sum.y,lo,hi);
 }
 
+/**
+ * SHELL reach of the two capacity-sized hierarchy levels. Only SHELL fine
+ * faces are known sources, so a level-0 cell q (fine footprint 2q..2q+2) can be
+ * known only when fine tile q/2 or (q+1)/2 is SHELL, and a level-1 cell r
+ * (level-0 footprint 2r..2r+2) only when tile r or r+1 is. Restricting such a
+ * cell stores exactly the all-unknown zero it would have computed. Level 0's
+ * prolong-filled up texture is read solely by the prolong to base, whose SHELL
+ * targets tap level-0 cells whose tile lies within one tile of SHELL.
+ */
+fn shellTileAny(lo: vec3i, hi: vec3i) -> bool {
+  let top = coarseDims() - vec3i(1);
+  let a = clamp(lo, vec3i(0), top); let b = clamp(hi, vec3i(0), top);
+  for (var z = a.z; z <= b.z; z++) { for (var y = a.y; y <= b.y; y++) { for (var x = a.x; x <= b.x; x++) {
+    if ((tileScratch[tileTableBase() + 4u * coarseIndex(vec3i(x, y, z)) + 3u] & 2u) != 0u) { return true; }
+  } } }
+  return false;
+}
+// Tile reach of hierarchy cell p on a level exactly base/scale, or false when
+// the level is not an exact power-of-two restriction of the tile lattice.
+fn shellRestrictReachable(p: vec3i, sourceDims: vec3i, targetDims: vec3i) -> bool {
+  if (!SHELL_HIERARCHY || !tiledExtension()) { return true; }
+  let base = baseDims();
+  if (frontParams.hierarchySourceUsesBaseDims != 0u) {
+    if (any(base != 2 * targetDims)) { return true; }
+    return shellTileAny((2 * p) / 4, (2 * p + vec3i(2)) / 4);
+  }
+  if (any(base != 2 * sourceDims) || any(sourceDims != 2 * targetDims)) { return true; }
+  return shellTileAny(p, p + vec3i(1));
+}
+fn shellProlongNeeded(p: vec3i, targetDims: vec3i) -> bool {
+  if (!SHELL_HIERARCHY || !tiledExtension() || frontParams.hierarchyTargetUsesBaseDims != 0u) { return true; }
+  if (any(baseDims() != 2 * targetDims)) { return true; }
+  return shellTileAny(p / 2 - vec3i(1), p / 2 + vec3i(1));
+}
+
 @compute @workgroup_size(4, 4, 4)
 fn restrictKnownVelocity(@builtin(global_invocation_id) gid: vec3u) {
   let p = hierarchyActiveId(gid);
   let sourceDims = hierarchySourceDims();
   let targetDims = hierarchyTargetDims();
   if (!inBounds(p, targetDims)) { return; }
+  if(!shellRestrictReachable(p,sourceDims,targetDims)){
+    if(SOURCE_AWARE_HIERARCHY){
+      textureStore(outputOrigins,p,vec4u(0u));
+      textureStore(outputOrigins,p+vec3i(0,0,targetDims.z),vec4u(0u));
+    }
+    textureStore(primaryOut,p,vec4f(0.0));return;
+  }
   var values = vec3f(0.0);
   var knownMask = 0u;
   var origins=vec3u(0u);var upperOrigins=vec3u(0u);
@@ -715,6 +758,7 @@ fn prolongUnknownVelocity(@builtin(global_invocation_id) gid: vec3u) {
   let p = hierarchyActiveId(gid);
   if (!inBounds(p,hierarchyTargetDims())) { return; }
   if (frontParams.hierarchyTargetUsesBaseDims != 0u && !shellAt(p)) { return; }
+  if(!shellProlongNeeded(p,hierarchyTargetDims())){return;}
   textureStore(primaryOut,p,prolongValue(p));
 }
 fn packValue(p: vec3i, state: vec4f) {

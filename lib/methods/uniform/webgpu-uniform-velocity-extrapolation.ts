@@ -68,6 +68,7 @@ export class WebGPUUniformVelocityExtrapolator {
   private readonly resolvedValues: GPUTexture;
   private readonly resolvedDistances: GPUTexture;
   private readonly compactShell: boolean;
+  private readonly shellHierarchy: boolean;
   private shellListEncoded = false;
   private readonly reuseConvergenceDistance: boolean;
   private readonly shellTiles: GPUBuffer;
@@ -137,6 +138,7 @@ export class WebGPUUniformVelocityExtrapolator {
     this.reuseConvergenceDistance = !baselineForQA && uniformAbOn("frontreuse") && nativeFullGrid;
     this.compactShell = sourceAwareHierarchy && dims.every(d => d % 4 === 0)
       && !baselineForQA && uniformAbOn("shelllist") && nativeFullGrid;
+    this.shellHierarchy = !baselineForQA && uniformAbOn("shellhierarchy") && nativeFullGrid;
     this.shellTiles = device.createBuffer({
       label: "Uniform extension shell list",
       size: this.compactShell ? 16 + 4 * dims.reduce((n, d) => n * Math.ceil(d / 4), 1) : 16,
@@ -450,6 +452,7 @@ export class WebGPUUniformVelocityExtrapolator {
         REUSE_CONVERGED_DISTANCE: Number(this.reuseConvergenceDistance),
         COMPACT_SHELL: Number(this.compactShell),
         SOURCE_AWARE_HIERARCHY: Number(this.sourceAwareHierarchy),
+        SHELL_HIERARCHY: Number(this.shellHierarchy),
         ROOT_NX: this.dims[0], ROOT_NY: this.dims[1], ROOT_NZ: this.dims[2],
       } },
     }, { priority: "critical", signal });

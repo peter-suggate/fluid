@@ -215,7 +215,8 @@ const phiAgreementControls = [
     enabled:(context: FluidPipelineContext)=>context.values.phiAgreement === "on"},
   // Splash survival (docs/uniform-geometric-splash-dissipation-plan.md).
   {kind:"param-choice" as const,param:"redistanceSurface",label:"Redistance surface",
-    options:[{value:"rebuild",label:"Rebuild",hint:"Re-measure every band vertex against the trilinear contour each step."},
+    options:[{value:"auto",label:"Automatic",hint:"Preserve the surface with airborne momentum on; retain Rebuild with it off."},
+      {value:"rebuild",label:"Rebuild",hint:"Re-measure every band vertex against the trilinear contour each step."},
       {value:"preserve",label:"Preserve",hint:"Keep every vertex of a crossed cell at its advected value (CM11b Sec. 3.4)."},
       {value:"sparse",label:"Every 10th",hint:"Preserve, and redistance only one step in ten."}],
     hint:"Rebuilding moves a curved surface inward by up to h²/4r every step, even at rest; flat pools do not notice, drops do.",
@@ -232,7 +233,8 @@ const phiAgreementControls = [
 const phiChip = (context: FluidPipelineContext) => {
   const parts=[context.values.totalSurfaceVolume === "on" ? "total volume constrained" : "",context.values.phiSeedFromVolume === "on" ? "seeded from V" : "",
     context.values.phiAgreement === "on" ? "follows V" : "",
-    context.values.redistanceSurface === "preserve" || context.values.redistanceSurface === "sparse" ? "surface preserved" : "",
+    context.values.redistanceSurface === "preserve" || context.values.redistanceSurface === "sparse"
+      || (context.values.redistanceSurface === "auto" && context.values.airborneMomentum === "on") ? "surface preserved" : "",
     context.values.phiCubicAdvection === "on" ? "cubic" : "", context.values.isolatedBodyVolume === "on" ? "isolated V" : "",
     context.values.phiSeedCells === "on" ? "cell seed" : "", context.values.phiDrain === "on" ? "drained" : ""].filter(Boolean);
   return parts.length ? `page domain · ${parts.join(" · ")}` : "page domain";
