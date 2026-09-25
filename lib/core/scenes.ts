@@ -5,6 +5,7 @@ import { CM12_FIGURES, CM12_SLAB_DEPTH_CELLS, cm12Camera, cm12Grid, cm12MethodPr
 import { applyGardenPool, GARDEN_DAM_BRICK_SEED_M, GARDEN_WATERLINE_M, gardenPoolTerrain } from "./garden-scene";
 import {
   createHeroGardenHoseScene,
+  HERO_GARDEN_CELL_M,
   heroGardenCamera,
   type HeroGardenHoseOptions,
 } from "./hero-garden-scene";
@@ -2311,20 +2312,14 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   defineScene({
     id: "hero-garden-hose-x10",
     name: "Porcelain pond · ten times the set",
-    blurb: "The same pond, the same camera, and ten times as many authored records standing on its banks. The acceptance scene for raster visibility: the hero frame spends 85 % of itself on a pass whose cost tracks record count, and this is where that stops being an argument.",
-    // Disclosed rather than offered: it is a measurement rig, and it opens at
-    // ~5 000 records on a path that is currently 405 ms at 501.
-    //
-    // It also does not open *yet*, and that is the point of registering it. The
-    // live sparse world refuses 5 039 records at construction — its PBR material
-    // table holds 32 + 4 096 (`webgpu-octree-sparse-bricks.ts:229`) — so the
-    // acceptance scene names a capacity that has to be raised rather than
-    // quietly sitting under it. 8x is the largest rung that draws today; the
-    // smoke lane's FLUID_SVO_DRY_SMOKE_RECORD_MULTIPLIER walks the sweep.
+    blurb: "The same pond, already filled to its waterline, with ten times as many authored records standing on its banks.",
+    // The catalog presents the filled pond; dry render measurements use the
+    // same stress factory with its default water-off setting.
     audience: "validation",
     shelf: "Garden",
     environment: "garden",
-    // The dry world is the measurement, so it has to be constructed and drawn.
+    // Present the authored pond water from the first frame. The stress factory
+    // remains dry by default for render-only benchmark lanes.
     presentationMode: "full-scene",
     // `heroGardenCamera`, unchanged and deliberately so — W3's gate is stated
     // against an *unchanged camera*, and a stress scene that reframed itself
@@ -2332,10 +2327,14 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     // so unlike the hero above there is nothing to append here.
     build: () => createHeroGardenHoseStressScene({
       recordMultiplier: HERO_GARDEN_STRESS_MAXIMUM_MULTIPLIER,
+      detailCellSize_m: HERO_GARDEN_CELL_M,
+      water: true,
     }),
     buildAt: (lattice: SceneLattice) => createHeroGardenHoseStressScene({
       recordMultiplier: HERO_GARDEN_STRESS_MAXIMUM_MULTIPLIER,
       ...lattice,
+      detailCellSize_m: lattice.detailCellSize_m ?? Math.min(lattice.cellSize_m, HERO_GARDEN_CELL_M),
+      water: true,
     }),
     camera: heroGardenCamera,
   }),

@@ -267,9 +267,8 @@ export function heroGardenStressStandCount(recordMultiplier: number): number {
 /**
  * The hero garden, densified.
  *
- * `systems.fluid` stays off exactly as the hero's does: this is the dry render
- * path's acceptance scene, and turning the solver on would put a t=0 pressure
- * gate between a measurement and the thing being measured.
+ * The factory defaults to a dry render scene for benchmark lanes. The catalog
+ * explicitly requests water so its pond starts filled and visible.
  */
 export function createHeroGardenHoseStressScene(options: HeroGardenStressOptions = {}): SceneDescription {
   const recordMultiplier = options.recordMultiplier ?? 10;

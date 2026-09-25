@@ -3,6 +3,9 @@ import test from "node:test";
 import { createEmptyScene } from "../lib/core/empty-scene";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
+import { initialFluidLayout } from "../lib/core/initial-fluid-layout";
+import { createHeroGardenHoseStressScene } from "../lib/core/hero-garden-stress-scene";
+import { planSceneRuntime } from "../lib/core/scene-runtime";
 import { sampleSolidWorld, sceneWithSolidStroke, solidWorldForScene } from "../lib/core/solid-world";
 import { packTerrainOverlay, terrainFieldStamp, terrainOverlayPatches } from "../lib/core/live-terrain-overlay";
 import { voxelTools } from "../lib/core/voxel-editor/registry";
@@ -13,14 +16,21 @@ function terrainScene() {
   scene.terrain = { baseHeight_m: .2, features: [] };
   return scene;
 }
-test("hero-garden-hose-x10 offers all solid plugins and explains its intentionally disabled fluid", () => {
+test("hero-garden-hose-x10 starts with fluid and offers solid editing", () => {
   const scene = sceneDocument(getSceneDefinition("hero-garden-hose-x10"));
   assert.ok(scene.terrain);
-  assert.equal(scene.systems?.fluid, false);
+  assert.equal(scene.systems?.fluid, true);
+  assert.equal(scene.fluid.initialCondition, "tank-fill");
+  assert.ok(scene.container.fillFraction > 0);
+  assert.equal(scene.voxelDomain.finestCellSize_m, 0.0125);
+  assert.equal(scene.voxelDomain.detailCellSize_m, 0.00625);
+  assert.equal(getSceneDefinition("hero-garden-hose-x10").buildAt?.({ cellSize_m: 0.0125 }).voxelDomain.detailCellSize_m, 0.00625);
+  assert.ok(initialFluidLayout(scene).regions.some(region => region.codec === "tank-fill"));
+  assert.equal(planSceneRuntime(scene).waterPresentation, true);
+  assert.equal(createHeroGardenHoseStressScene().systems?.fluid, false);
   for (const plugin of voxelTools.tools) {
     const unavailable = plugin.unavailable({ scene, methodId: "adaptive-volume" });
-    if (plugin.execution === "release") assert.match(unavailable ?? "", /Enable water from Scene/);
-    else assert.equal(unavailable, undefined, plugin.id);
+    assert.equal(unavailable, undefined, plugin.id);
   }
 });
 test("terrain targeting edits its authoritative surface and preserves untouched pages and terrain recipe", () => {

@@ -16,10 +16,9 @@
  * This is deliberately *not* an entry in `lib/scene-webgpu-smoke-catalog.ts`.
  * That catalog's `SceneWebGPUSmokeLane` requires `stop.simulatedTime_s > 0` and
  * `oracle.matchedSteps >= 1` (`lib/scene-webgpu-smoke.ts:190-196`): every lane
- * in it steps a solver and reads diagnostic packs off the fluid state. The hero
- * scene opens with `systems.fluid: false` and its whole subject is the dry
- * render path, so joining that catalog would mean either turning fluid on —
- * testing a scene nobody ships — or inventing a zero-step lane the suite
+ * in it steps a solver and reads diagnostic packs off the fluid state. This
+ * lane explicitly builds the dry hero and x10 stress scenes, so joining that
+ * catalog would require a zero-step lane the suite
  * validator rejects by construction. It is a sibling lane instead, and borrows
  * the catalog's conventions rather than its machinery: a frozen per-scene
  * expectation table, named checks with explicit limits, and one JSON report.
@@ -162,7 +161,8 @@ import {
   HERO_GARDEN_STRESS_MAXIMUM_MULTIPLIER,
 } from "../lib/core/hero-garden-stress-scene";
 import { defaultCamera, type CameraState, type SceneDescription } from "../lib/core/model";
-import { createHeroGardenHoseSceneWithSet, getScenePreset } from "../lib/core/scenes";
+import { createHeroGardenHoseSceneWithSet, getSceneDefinition, getScenePreset } from "../lib/core/scenes";
+import { sceneDocument } from "../lib/core/scene-definition";
 import { SVO_PRIMITIVE_RECORD_STRIDE_BYTES } from "../lib/svo/contracts/svo-primitive-abi";
 import { SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES } from "../lib/svo/features/scene-publication/svo-primitive-candidates";
 import { SVO_BRICK_CONTOUR, decodeSvoBrickContour, fitSvoBrickContour } from "../lib/svo/features/construction/svo-brick-contour";
@@ -562,7 +562,13 @@ const latticeOptions = heroLatticeOverridden
   : {};
 const buildSmokeScene = (): SceneDescription => {
   if (recordMultiplier !== undefined) return createHeroGardenHoseStressScene({ recordMultiplier, ...latticeOptions });
-  if (!heroLatticeOverridden) return preset.create();
+  if (!heroLatticeOverridden) return scenePresetId === "hero-garden-hose-x10"
+    ? sceneDocument({
+      ...getSceneDefinition(scenePresetId),
+      build: () => createHeroGardenHoseStressScene({ recordMultiplier: HERO_GARDEN_STRESS_MAXIMUM_MULTIPLIER }),
+      buildAt: lattice => createHeroGardenHoseStressScene({ recordMultiplier: HERO_GARDEN_STRESS_MAXIMUM_MULTIPLIER, ...lattice }),
+    })
+    : preset.create();
   return scenePresetId === "hero-garden-hose"
     ? createHeroGardenHoseSceneWithSet(latticeOptions)
     : createHeroGardenHoseStressScene({ recordMultiplier: HERO_GARDEN_STRESS_MAXIMUM_MULTIPLIER, ...latticeOptions });
