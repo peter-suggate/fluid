@@ -283,3 +283,61 @@ comparison also passed. The first attempt at the latter was blocked by
 another task's GPU lease and was rerun after that task finished; no numerical
 assertion was relaxed. Type checking still reports existing errors outside
 these changed files.
+
+## Follow-up: the authored UI was still using tolerance 5
+
+The user's paused UI at t=1.6667 s showed Uniform Geometric, tolerance 5,
+3 maximum Full-Cycles, 4 maximum V-Cycles, six sweeps, and an accepted residual
+of 3.09 s^-1 after one V-cycle. The earlier full-solve regression was not a
+validation of these actual UI defaults. Dawn reproduces the visible motion
+with that configuration, independently of the browser's separate React error.
+
+Sequential native Metal comparisons, hose off, 300 steps / ten seconds:
+
+| Stopping target | Interior RMS at 10 s | Whole-surface max | Fenced step median |
+| --- | ---: | ---: | ---: |
+| Former UI 5 | 4.1989 mm | 18.5237 mm | 20.00 ms |
+| Full seven-cycle control, 0 | 0.04957 mm | 0.76138 mm | 57.38 ms |
+| Adaptive 1e-4 | 0.06387 mm | 0.58518 mm | 39.85 ms |
+| Adaptive 1e-3 | 0.05551 mm | 0.61397 mm | 39.38 ms |
+
+These are local fenced CPU-to-GPU completion timings, excluding the first five
+steps and probe readbacks; they are not general hardware performance claims.
+Artifacts are `artifacts/pond-rest/adaptive-ui-5.json`, `full-10s.json`,
+`adaptive-1e-4.json`, and `adaptive-1e-3.json`.
+
+The 1e-4 target was rejected as an authored setting: sustained hose inflow
+exhausted all seven cycles at residual 0.000110616 and correctly withheld
+projection. At 1e-3 the ten-second hose-on run completed, increasing from five
+to six cycles as needed. Its final residual was 0.000523077. The same target
+uses five cycles at rest, with relative mass drift below 1e-6 over ten seconds.
+
+`hero-garden-hose-x10` now authors Uniform Geometric with target 1e-3 through its
+normal method profile. There is no scene-name special case in the solver and
+no change to the global target or the pressure acceptance/safety contract.
+This uses the existing adaptive solver, rather than forcing a fixed seven-cycle
+schedule. Explicit user parameter overrides retain precedence.
+
+The probe's new `--pressure=scene` mode resolves the authored profile; its
+historical default remains the full-solve control. The regression now tests
+both actual scene configurations, hose off and hose on, for ten seconds, in
+addition to the unchanged reference tests. It checks surface/mass quality at
+rest, successful sustained inflow, and that adaptive work stays below the full
+schedule and responds to the changing demand. The expanded Dawn pond gate
+passes all four tests.
+
+Tighter pressure does not remove every numerical current. The thirty-second
+1e-4 comparison ended at 0.1693 mm interior RMS / 1.2322 mm maximum, rather than
+remaining perfectly still. This follow-up fixes the large early-exit error;
+it does not establish indefinite hydrostatic equilibrium.
+
+The final authored 1e-3 profile also completed a thirty-second hose-off run
+(`scene-adaptive-30s.json`): interior RMS 0.16214 mm, maximum surface error
+1.22390 mm, residual 0.000077915, and five cycles on the final step. All sampled
+surface columns remained present. Small numerical currents and longer-term
+mass drift remain; this should not be described as perfect hydrostatic balance.
+
+Browser verification loaded the authored profile without a pressure URL override.
+After turning the hose off through its tap control and running to nine seconds,
+the panel showed target 0.001, five of seven cycles (one Full + four V), and
+residual 7.75e-5. The scene was left paused with that panel visible.

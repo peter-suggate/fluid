@@ -41,7 +41,8 @@ try {
   const gpu = createProcessRetainedDawnGPU(dawn, ["backend=metal"]), adapter = await gpu.requestAdapter(); assert.ok(adapter);
   device = managedGPUDevice(await adapter.requestDevice({ requiredLimits: requiredFluidDeviceLimits(adapter.limits) }), { requireWorkerRealm: false });
   const errors: string[] = []; device.addEventListener("uncapturederror", e => { e.preventDefault(); errors.push(e.error.message); });
-  const scene = sceneDocument(getSceneDefinition("hero-garden-hose-x10"));
+  const definition = getSceneDefinition("hero-garden-hose-x10");
+  const scene = sceneDocument(definition);
   scene.fluid.inflow = { ...scene.fluid.inflow!, enabled: arg("hose", "off")==="on" };
   const cell = scene.voxelDomain.finestCellSize_m;
   scene.container.fillFraction += Number(arg("waterline-shift-cells", "0")) * cell / scene.container.height_m;
@@ -54,7 +55,14 @@ try {
   }
   if (arg("sigma", "scene") !== "scene") scene.fluid.surfaceTension_N_m = Number(arg("sigma", "0"));
   if (arg("gravity", "scene") !== "scene") scene.fluid.gravity_m_s2 = { x: 0, y: Number(arg("gravity", "0")), z: 0 };
-  const values = resolveMethodValues(uniformVolumeMethod, "balanced", { pressureResidualTolerance: 0, ...overrides });
+  // Keep the historical full-solve control, but also exercise the authored UI
+  // profile so a passing reference solve cannot hide an overly loose default.
+  const pressureMode = arg("pressure", "full");
+  assert.ok(pressureMode === "full" || pressureMode === "scene");
+  const values = resolveMethodValues(uniformVolumeMethod, "balanced", {
+    ...definition.methodProfile?.overrides,
+    ...(pressureMode === "full" ? { pressureResidualTolerance: 0 } : {}), ...overrides,
+  });
   const weightOverride=arg("jacobi-weight", "production");
   const weight = weightOverride==="production" ? 0.6666667 : Number(weightOverride);
   let dampingReplacements=0;

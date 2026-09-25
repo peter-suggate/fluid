@@ -8,7 +8,7 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 const dawnTest = process.env.WEBGPU_NODE_MODULE ? test : test.skip;
 interface Sample {
   frame: number; missing: number; maxSpeed: number; sum: number; excess: number;
-  residual:number; recovery:number;
+  residual:number; recovery:number; full:number; vcycles:number;
   surface: Record<"all" | "interior", { mean_mm: number; rms_mm: number; max_mm: number; range_mm: number }>;
 }
 
@@ -38,6 +38,40 @@ dawnTest("filled hero pond stays visually at rest with the hose disabled", { tim
       assert.ok(Math.abs(sample.sum / initial.sum - 1) < 1e-6, `frame ${sample.frame}: dust must not drain the pond`);
       assert.ok(sample.surface.interior.rms_mm < .025, `frame ${sample.frame}: interior RMS ${sample.surface.interior.rms_mm} mm`);
       assert.ok(sample.surface.all.max_mm < .5, `frame ${sample.frame}: shoreline error ${sample.surface.all.max_mm} mm`);
+    }
+  }
+});
+
+// This must follow the authored profile, with no test-only tolerance override.
+// The full-solve oracle above did not catch the UI's former tolerance of 5.
+dawnTest("authored hero pressure target adapts through rest and hose inflow", { timeout: 360_000 }, () => {
+  for (const hose of ["off", "on"] as const) {
+    const arm = `regression-scene-${hose}`;
+    const out = `artifacts/pond-rest/${arm}.json`;
+    const run = spawnSync(process.execPath, ["--import", "tsx", "tools/probe-uniform-pond-rest-dawn.ts",
+      `--arm=${arm}`, "--pressure=scene", "--frames=300", `--hose=${hose}`, `--out=${out}`],
+    { cwd: root, env: process.env, encoding: "utf8", timeout: 170_000, maxBuffer: 8 * 1024 * 1024 });
+    assert.equal(run.status, 0, `${arm}: ${run.error ?? ""}\n${run.stdout}\n${run.stderr}`);
+    const result = JSON.parse(readFileSync(`${root}/${out}`, "utf8")) as {
+      values: { pressureResidualTolerance: number }; samples: Sample[];
+    };
+    const target = result.values.pressureResidualTolerance;
+    assert.ok(target > 0, "authored scene must use adaptive early exit, not the full-solve control");
+    const initial = result.samples[0]!;
+    for (const sample of result.samples) {
+      assert.ok(sample.residual <= target, `frame ${sample.frame}: meet the authored pressure target`);
+      if (hose === "off") {
+        assert.equal(sample.missing, 0);
+        assert.ok(Math.abs(sample.sum / initial.sum - 1) < 1e-6, "resting pond conserves mass for ten seconds");
+        assert.ok(sample.surface.interior.rms_mm < .1, `frame ${sample.frame}: calm interior surface`);
+        assert.ok(sample.surface.all.max_mm < 1, `frame ${sample.frame}: bounded shoreline motion`);
+      }
+    }
+    const work = result.samples.slice(1).map(s => s.full + s.vcycles);
+    assert.ok(work.reduce((a, b) => a + b, 0) / work.length < 7, "save work versus forcing all seven cycles");
+    if (hose === "on") {
+      assert.ok(result.samples.at(-1)!.sum > initial.sum * 1.1, "exercise sustained inflow");
+      assert.ok(Math.max(...work) > Math.min(...work), "pressure work responds to changing inflow demand");
     }
   }
 });

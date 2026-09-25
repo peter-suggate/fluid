@@ -2313,6 +2313,10 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     id: "hero-garden-hose-x10",
     name: "Porcelain pond · ten times the set",
     blurb: "The same pond, already filled to its waterline, with ten times as many authored records standing on its banks.",
+    // The global loose pressure target visibly excites this shallow resting
+    // pond. Keep adaptive early exit, with accuracy validated both at rest and
+    // under hose inflow; zero would unnecessarily force every cycle.
+    methodProfile: { methodId: "uniform-volume", quality: "balanced", overrides: { pressureResidualTolerance: 1e-3 } },
     // The catalog presents the filled pond; dry render measurements use the
     // same stress factory with its default water-off setting.
     audience: "validation",
