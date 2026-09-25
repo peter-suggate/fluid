@@ -3421,6 +3421,10 @@ fn dryPrepassShadeNoGi(opaque:DryHit,ro:vec3f,rd:vec3f)->vec3f{
   let identity=textureLoad(dryPrepassIdentityTexture,coordinate,0).x;let metadata=u32(round(geometry.w));
   let opaque=dryPrepassUnpackHit(geometry,identity);
   let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());
+  // A slab wall the ground plane stands in front of is cached as the plane, so
+  // the reduced-rate reconstruction and the exact relight agree about it. Its
+  // water-sort depth stays the voxel's, as every other consumer's does.
+  if(dryGroundPlaneReplaces(opaque,ro,rd)){return vec4f(dryGroundOrSky(ro,rd),opaque.t);}
   // Until GLOBAL data is ready, rigid opaque radiance remains exact at full
   // rate, so avoid doing an unusable complete material evaluation here.
   if(opaque.motionKind!=DRY_GBUFFER_MOTION_STATIC){return vec4f(0.0);}
@@ -3963,6 +3967,11 @@ struct DryParams {
   meshFilter:vec4f,
   // smooth normals enabled, minimum normal agreement, preserve close normals, reserved.
   meshFilterNormals:vec4f,
+  // Analytic ground beyond a terrain shell: enabled, height, haze e-folding
+  // distance (all metres), reserved. See dryGroundOrSky.
+  groundPlane:vec4f,
+  // The shell's plan footprint: minX, minZ, maxX, maxZ.
+  groundFootprint:vec4f,
 }
 struct DryLightingArena {
   // x: light count; y: light revision; z: environment revision; w: environment ABI version.
@@ -5201,11 +5210,69 @@ fn dryEvaluateSurfaceMaterial(hit:DryHit,position:vec3f)->DrySurfaceMaterial {
   base=select(vec3f(0.8),baseOverride,useBaseOverride);roughness=0.65;` : ""}
   return DrySurfaceMaterial(base,roughness,material.emissiveRoughness.xyz+selectedEmission,material.surface.x,vec3f(svoMaterialDielectricF0(material)),material.surface.y,regionId,variationFlags,1u,0u);
 }
+// The ground beyond the set.
+//
+// A terrain shell is a voxel slab over the container's footprint, and past its
+// edge the only thing a ray used to find was the sky gradient — a set floating
+// in a studio sweep with its side walls on show. This is the plane that slab
+// stands in, evaluated at shading time: one ray/plane intersection, no G-buffer
+// surface, no material record of its own, no visibility, so it is O(1) a pixel
+// at any distance and there is nothing to cache or reproject.
+//
+// It is one-sided (only a camera above it looking down sees it) and it stands
+// in for voxels only where it crosses the ray *outside* the footprint: that is
+// what hides the slab's walls, while a ray that dips below ground level inside
+// the footprint — into the pond — never reaches the test.
+fn dryGroundPlaneT(ro:vec3f,rd:vec3f)->f32{
+  if(dry.groundPlane.x<=.5||!(rd.y<-1e-6)||!(ro.y>dry.groundPlane.y)){return DRY_MISS;}
+  return (dry.groundPlane.y-ro.y)/rd.y;
+}
+fn dryGroundFootprintDistance(planar:vec2f)->f32{return length(max(max(dry.groundFootprint.xy-planar,planar-dry.groundFootprint.zw),vec2f(0.0)));}
+fn dryGroundPlaneReplaces(hit:DryHit,ro:vec3f,rd:vec3f)->bool{
+  let t=dryGroundPlaneT(ro,rd);if(t>=DRY_MISS){return false;}if(hit.t>=DRY_MISS){return true;}
+  return t<hit.t&&dryGroundFootprintDistance((ro+rd*t).xz)>0.0;
+}
+// Every primary miss becomes final colour here, and so does every voxel hit the
+// plane stands in front of. The plane wears the terrain's own published
+// material record through dryEvaluateSurfaceMaterial, so the seam at the slab's
+// edge meets the same albedo and roughness, and the same closure lit the same
+// way as shadeDryOpaque: the directional key through shadeUnifiedSurface, then
+// the environment's diffuse irradiance and prefiltered specular. What it does
+// not get is anything a voxel would have to trace for — shadows, contact
+// occlusion, GI — so the slab's top reads slightly darker than the plane where
+// those terms darken it, and slightly brighter where GI bounces into it.
+//
+// Beyond the footprint the plane fades into the sky at the horizon along the
+// view's own azimuth, exponentially with distance from the footprint's edge.
+// The e-folding distance is published in footprints, not metres, so a set
+// scaled up keeps the same atmosphere; and because that fog colour is the sky
+// exactly at the horizon, the plane's vanishing line has no seam against it.
+fn dryGroundOrSky(ro:vec3f,rd:vec3f)->vec3f{
+  let t=dryGroundPlaneT(ro,rd);if(t>=DRY_MISS){return dryEnvironment(rd,0.0);}
+  let position=ro+rd*t;let normal=vec3f(0.0,1.0,0.0);
+  let surface=dryEvaluateSurfaceMaterial(DryHit(t,normal,${VOXEL_MATERIAL_IDS.terrain}u,DRY_OWNER_NONE,SVO_FEATURE_SMOOTH,0u,DRY_GBUFFER_MOTION_STATIC,0u,0.0,vec3u(0u)),position);
+  if(surface.valid==0u){return vec3f(0.0);}
+  let closure=unifiedPbrMaterial(surface.baseColor,surface.metallic,surface.roughness,vec3f(0.0),0.0,surface.specularF0,surface.specularWeight,vec3f(0.0),0.0);var direct=vec3f(0.0);
+  let lightCount=min(dryLighting.metadata.x,${SVO_LIGHT_MAXIMUM_RECORDS}u);
+  for(var lightIndex=0u;lightIndex<${SVO_LIGHT_MAXIMUM_RECORDS}u;lightIndex+=1u){
+    if(lightIndex>=lightCount){break;}let light=dryLighting.lights[lightIndex];if(light.identity.w!=dryLighting.metadata.y||light.identity.x!=SVO_LIGHT_DIRECTIONAL){continue;}
+    let sample=dryLightSample(light,0u,position);if(sample.valid==0u||sample.towardLight.y<=0.0){continue;}
+    direct+=shadeUnifiedSurface(closure,unifiedLightingInputWithGeometry(normal,normal,-rd,sample.towardLight,sample.radiance));
+  }
+  let viewDirection=normalize(-rd);let diffuseColor=surface.baseColor*(1.0-surface.metallic);let f0=mix(surface.specularF0*surface.specularWeight,surface.baseColor,surface.metallic);let environmentBrdf=unifiedEnvironmentBrdf(max(dot(normal,viewDirection),0.0),surface.roughness,f0);let diffuseEnergy=max(vec3f(0.0),vec3f(1.0)-environmentBrdf);
+  let diffuseEnvironmentScale=select(1.0,dry.giLighting.z,(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIllumination}u)!=0u);
+  let diffuseEnvironment=diffuseColor*diffuseEnergy*svoEnvironmentDiffuseIrradiance(dryLighting.environment,normal)*diffuseEnvironmentScale/UNIFIED_PI;let specularEnvironment=dryEnvironment(reflect(rd,normal),surface.roughness)*environmentBrdf;
+  let ground=max(surface.emissive+diffuseEnvironment+specularEnvironment+direct*dry.giLighting.w,vec3f(0.0));
+  let level=vec3f(rd.x,0.0,rd.z);let levelLengthSquared=dot(level,level);
+  let horizon=dryEnvironment(select(vec3f(1.0,0.0,0.0),level*inverseSqrt(max(levelLengthSquared,1e-24)),levelLengthSquared>1e-12),0.0);
+  let haze=1.0-exp(-dryGroundFootprintDistance(position.xz)/max(dry.groundPlane.z,1e-6));
+  return mix(ground,horizon,haze);
+}
 // The hover outline used to be applied here, and it is gone with the owner id
 // it keyed off: a voxel no longer names the object it belongs to, so there is
 // nothing for a cursor to select. uniforms.highlight is unread by this module.
 fn shadeDryOpaque(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f {
-  if(hit.t>=DRY_MISS){return dryEnvironment(rd,0.0);}${screenSpaceProxyShadeWGSL}${prepassRadianceShortcutWGSL}${voxelLightCache ? "dryVoxelLightConsumerEligible=select(0u,1u,hit.motionKind==DRY_GBUFFER_MOTION_STATIC&&!dryReconstructedReceiver(hit));" : ""}let position=ro+rd*hit.t;let surface=dryEvaluateSurfaceMaterial(hit,position);
+  if(hit.t>=DRY_MISS||dryGroundPlaneReplaces(hit,ro,rd)){return dryGroundOrSky(ro,rd);}${screenSpaceProxyShadeWGSL}${prepassRadianceShortcutWGSL}${voxelLightCache ? "dryVoxelLightConsumerEligible=select(0u,1u,hit.motionKind==DRY_GBUFFER_MOTION_STATIC&&!dryReconstructedReceiver(hit));" : ""}let position=ro+rd*hit.t;let surface=dryEvaluateSurfaceMaterial(hit,position);
   if(surface.valid==0u){return vec3f(0.0);}
   // What the pixel shades with and what a ray leaves along are two questions.
   // Every closure below keeps \`hit.normal\`; only the ray origins move to the
@@ -5284,7 +5351,7 @@ fn shadeDryThinDielectric(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f{
     surface=behind;
   }
   drySurfaceOcclusionDepth_m=0.0;
-  return max(color+throughput*dryEnvironment(rd,0.0),vec3f(0.0));
+  return max(color+throughput*dryGroundOrSky(ro,rd),vec3f(0.0));
 }
 fn shadeDrySurface(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f{
   drySurfaceOcclusionDepth_m=select(0.0,hit.t,hit.t<DRY_MISS);

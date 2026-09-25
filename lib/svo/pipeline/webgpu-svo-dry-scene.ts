@@ -592,7 +592,7 @@ export function svoDrySceneClusterResolver(packed: Uint32Array | undefined): Svo
 
 /** Packed dry-scene parameters. */
 export const SVO_DRY_SCENE_PARAMS_LAYOUT = Object.freeze({
-  sizeBytes: 672,
+  sizeBytes: 704,
   meshFilterWordOffset: 160,
   glassWordOffset: 24,
   /** count, generation, stride bytes, reserved for accepted planar terminals. */
@@ -686,6 +686,16 @@ export const SVO_DRY_SCENE_PARAMS_LAYOUT = Object.freeze({
    * yzw reserved.
    */
   primaryEntryWordOffset: 156,
+  /**
+   * The analytic ground beyond a terrain shell (`SvoGroundPlane`), two lanes
+   * appended after `meshFilterNormals` so every shorter mirror of `DryParams`
+   * (cone fanout, brick raster, the entry prepass) keeps its prefix.
+   *
+   * x: enabled (1) or not (0); y: plane height in metres; z: haze e-folding
+   * distance in metres; w reserved. The next lane is the footprint AABB in
+   * plan: minX, minZ, maxX, maxZ.
+   */
+  groundPlaneWordOffset: 168,
 } as const);
 
 /** Low-byte `dry.payloadLanes1.w` codes. Mirrors `SparseBrickLeafPayloadMode`. */
@@ -5307,6 +5317,9 @@ export class SparseVoxelDrySceneRenderer {
     }
     this.packLodParams(floats, words, SVO_DRY_SCENE_PARAMS_LAYOUT.lodWordOffset);
     this.packMeshFilterParams(floats, SVO_DRY_SCENE_PARAMS_LAYOUT.meshFilterWordOffset);
+    const ground = scene.groundPlane;
+    floats.set(ground ? [1, ground.height_m, ground.hazeDistance_m, 0, ...ground.footprint_m] : [0, 0, 0, 0, 0, 0, 0, 0],
+      SVO_DRY_SCENE_PARAMS_LAYOUT.groundPlaneWordOffset);
     if (this.paramsWords?.length === words.length && words.every((word, index) => word === this.paramsWords![index])) return;
     this.device.queue.writeBuffer(this.paramsBuffer, 0, buffer);
     this.paramsWords = Uint32Array.from(words);

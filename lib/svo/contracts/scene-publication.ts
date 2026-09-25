@@ -1,5 +1,6 @@
 /** Accepted scene payload shared by construction and renderer hosts. */
 import type { SvoPrimitiveCandidatePublication } from "../features/scene-publication/svo-primitive-candidates";
+import type { SvoGroundPlane } from "../features/materials/svo-terrain-material";
 
 export interface SparseVoxelDrySceneData {
   /** Monotonic renderer publication, independent of the solver generation. */
@@ -57,4 +58,10 @@ export interface SparseVoxelDrySceneData {
   flatVoxelNormals?: boolean;
   lightDirection?: readonly [number, number, number];
   lightColor?: readonly [number, number, number];
+  /**
+   * Analytic ground beyond a terrain shell's footprint (`sceneSvoGroundPlane`).
+   * Omission keeps the sky behind every miss, which is every scene without a
+   * terrain shell.
+   */
+  groundPlane?: SvoGroundPlane;
 }

@@ -54,7 +54,7 @@ import { svoPrimitiveCandidateBounds } from "../lib/svo/features/scene-publicati
 import { buildSvoSceneGlass } from "../lib/svo/features/materials/svo-scene-glass";
 import { buildSvoScenePrimitives, type SvoScenePrimitiveBuild } from "../lib/svo/features/scene-publication/svo-scene-primitives";
 import { buildSvoSceneThickGlass } from "../lib/svo/features/materials/svo-scene-thick-glass";
-import { sceneTerrainSurfaceModel } from "../lib/svo/features/materials/svo-terrain-material";
+import { sceneSvoGroundPlane, sceneTerrainSurfaceModel } from "../lib/svo/features/materials/svo-terrain-material";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { SVO_CAMERA_CHANGING_FRAME } from "../lib/core/webgpu-renderer";
 import {
@@ -306,6 +306,10 @@ export function buildSvoDrySceneAssembly(
     // fidelity frame silently exercise the default baked analytic normals even
     // when the product document requested voxel-flat surfaces.
     flatVoxelNormals: sceneUsesFlatVoxelNormals(scene),
+    // And the ground beyond the set, for the same reason: a headless frame of a
+    // terrain-shell scene without it is the floating-slab picture the product
+    // no longer draws.
+    groundPlane: sceneSvoGroundPlane(scene),
   };
   drySceneData.opaqueSurfaceOnly = publishOpaqueSurfaceCapability(scene, drySceneData.materialRecords, drySceneData.primitiveRecords);
   return { drySceneData, scenePrimitives, sceneGlass, sceneThickGlass, terrainSurface };

@@ -60,8 +60,10 @@ const PALETTES: Readonly<Record<EnvironmentId, EnvironmentPalette>> = Object.fre
   // `svo-dry-scene-lighting.ts` — a cold, very low fill under one warm key.
   stage: { lower: [0.008, 0.010, 0.014], upper: [0.016, 0.020, 0.028], accent: [0.012, 0.015, 0.022], keyColor: [1, 0.96, 0.9], keyDirection: [-0.22, 0.94, 0.26] },
   // The lower value is the existing misty pale ground line after the garden
-  // horizon mix; the upper value is its existing cloud-free pale zenith.
-  garden: { lower: [0.60, 0.61, 0.59], upper: [0.52, 0.60, 0.72], accent: [0.48, 0.50, 0.53], keyColor: [1, 0.97, 0.90], keyDirection: [-0.42, 0.72, 0.38] },
+  // horizon mix; the upper value is its existing cloud-free pale zenith. The
+  // key matches PORCELAIN_GARDEN_DRY_SCENE_LIGHTING's sun, so the specular
+  // sun lobe and the shaded key come from the same place.
+  garden: { lower: [0.60, 0.61, 0.59], upper: [0.52, 0.60, 0.72], accent: [0.48, 0.50, 0.53], keyColor: [1, 0.93, 0.82], keyDirection: [-0.12507, 0.64279, -0.75575] },
 });
 
 function finite(value: number, label: string): number {

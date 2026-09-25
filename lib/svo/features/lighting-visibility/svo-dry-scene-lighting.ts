@@ -37,6 +37,55 @@ export const DEFAULT_SVO_DRY_SCENE_LIGHTING = Object.freeze({
 type SceneLighting = NonNullable<SceneDescription["lighting"]>;
 
 /**
+ * The porcelain garden's own rig: white clay under a low, warm sun and a pale,
+ * slightly cool sky, graded with a mild warm cast so the set reads as white clay.
+ *
+ * The shared rig above cannot be that. Its hemisphere is amber at twice unit
+ * scale, its key is amber, and its white balance warms a third time, so red
+ * reaches the display at about 2.4x blue; at 0.145 exposure that is a dim
+ * orange-white, which is to say brown. It also buries the key: ambient at 2.0
+ * outweighs a 72-degree sun on the floor, so nothing models the form.
+ *
+ * The reference plate (`output/imagegen/garden-pond-hose-fill-simplified.png`)
+ * is the opposite balance. Only the sun is warm; the shade is a neutral-to-cool
+ * grey lifted by bounce off a white floor; lit porcelain sits near sRGB 180-190 and
+ * its shade distinctly darker. So:
+ *
+ * - The key is 40 degrees up, from behind and to the camera's left: its
+ *   horizontal is half the view's forward minus 0.866 of its right at
+ *   `HERO_GARDEN_AZIMUTH_RAD` 5.4, which rakes the coping and throws shadows
+ *   toward the viewer the way the plate's do.
+ * - The hemisphere is pale sky above and warm floor bounce below. A first cut
+ *   at unit scale under a 2.2 key rendered flat (scene-linear peak 0.70 against
+ *   a 0.41 mean: the key barely separated lit from shade), so the key is 3.3
+ *   over a 0.8 hemisphere.
+ * - The grade is measured against the plate, not assumed: its floor is a warm
+ *   light grey, sRGB about (178, 168, 159), not paper white. Graded offline
+ *   from a scene-linear dump of the first cut, exposure 0.9 with a 1.10/0.90
+ *   balance landed within a few levels of that; 0.95 with a gentler 1.06/0.94
+ *   allows for the stronger key while keeping the cast mild.
+ */
+export const PORCELAIN_GARDEN_DRY_SCENE_LIGHTING = Object.freeze({
+  directional: Object.freeze({
+    colorLinear: Object.freeze([1, 0.93, 0.82] as const),
+    intensity: 3.3,
+    direction: Object.freeze([-0.12507, 0.64279, -0.75575] as const),
+  }),
+  environment: Object.freeze({
+    diffuseScale: 0.8,
+    specularScale: 1.0,
+    lowerRadianceLinear: Object.freeze([0.78, 0.76, 0.72] as const),
+    upperRadianceLinear: Object.freeze([0.62, 0.68, 0.78] as const),
+    accentRadianceLinear: Object.freeze([0.70, 0.70, 0.70] as const),
+  }),
+  grade: Object.freeze({
+    toneCurve: "aces" as const,
+    exposure: 0.95,
+    whiteBalance: Object.freeze([1.06, 1.0, 0.94] as const),
+  }),
+}) satisfies NonNullable<SceneDescription["lighting"]>;
+
+/**
  * The rig the stage is lit by, and the reason a base rig is a per-environment
  * choice rather than one constant.
  *
@@ -94,18 +143,19 @@ export const STUDIO_STAGE_DRY_SCENE_LIGHTING = Object.freeze({
 /**
  * The rig an environment is lit by before its document says anything.
  *
- * Only the stage names its own rig: every other environment — the white room
+ * Two environments name their own rig: the stage, because its subject *is* its
+ * lighting, and the porcelain garden, because a white set under the shared
+ * amber balance renders brown. Every other environment — the white room
  * included, and a scene that names no environment at all — is a set standing
  * in the shared daylight balance, which is what
- * `DEFAULT_SVO_DRY_SCENE_LIGHTING` is, and none of them has asked to differ.
- * The stage is the exception because its subject *is* its lighting, and it is
- * an opt-in rather than the default for the same reason: a scene that never
- * asked for a dark stage should not open on one.
+ * `DEFAULT_SVO_DRY_SCENE_LIGHTING` is. Both exceptions are opt-ins by
+ * environment rather than the default: a scene that never asked for a dark
+ * stage should not open on one.
  */
 function baseLightingForEnvironment(environmentId: EnvironmentId | undefined): SceneLighting {
-  return environmentId === "stage"
-    ? STUDIO_STAGE_DRY_SCENE_LIGHTING
-    : DEFAULT_SVO_DRY_SCENE_LIGHTING;
+  if (environmentId === "stage") return STUDIO_STAGE_DRY_SCENE_LIGHTING;
+  if (environmentId === "garden") return PORCELAIN_GARDEN_DRY_SCENE_LIGHTING;
+  return DEFAULT_SVO_DRY_SCENE_LIGHTING;
 }
 
 /**

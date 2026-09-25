@@ -1,5 +1,6 @@
 import type { SceneDescription } from "../../../core/model";
 import { walkSceneryNodes } from "../../../core/scenery-graph";
+import { terrainHeightAt } from "../../../core/terrain";
 import { VOXEL_MATERIAL_IDS, type LinearRgb } from "../../../core/voxel-scene";
 import type { SvoVec3 } from "../primary-visibility/webgpu-svo-traversal";
 
@@ -54,6 +55,79 @@ export function sceneTerrainSurfaceModel(
     if (node.kind === "terrain-shell") return node.materialModel === "porcelain" ? "porcelain" : "garden-terrain";
   }
   return "garden-terrain";
+}
+
+/**
+ * The ground beyond the set, as the dry-scene shader needs it.
+ *
+ * A terrain shell is a voxelised slab over the container's footprint, and past
+ * its edge there used to be nothing but the sky gradient: the set read as a
+ * tile floating in a studio sweep, its side walls in plain view. The plane is a
+ * shading-time answer to that — one ray/plane intersection per pixel, no
+ * geometry, no G-buffer surface, no visibility — so it costs the same at any
+ * distance and cannot drift from a camera that moves every frame.
+ *
+ * `height_m` is where the slab's top meets its edge, so the two surfaces are
+ * flush at the seam. `footprint_m` is the slab's plan AABB (minX, minZ, maxX,
+ * maxZ); the plane only overrides a voxel hit when it crosses outside it, which
+ * is what hides the side walls without touching the pond. `hazeDistance_m` is
+ * the e-folding distance of the fade into the horizon, measured from the
+ * footprint's edge and stated in footprints rather than metres so a set scaled
+ * up keeps the same atmosphere.
+ */
+export interface SvoGroundPlane {
+  height_m: number;
+  footprint_m: readonly [number, number, number, number];
+  hazeDistance_m: number;
+}
+
+/** Haze e-folding distance, in multiples of the footprint's larger plan extent. */
+export const SVO_GROUND_PLANE_HAZE_FOOTPRINTS = 1.25;
+const GROUND_PLANE_PERIMETER_SAMPLES_PER_SIDE = 32;
+
+/**
+ * The analytic ground plane for a garden scene with a terrain shell, or undefined.
+ *
+ * The height is the median of the slab's own top sampled round the footprint's
+ * perimeter — the same clamp `buildSvoRenderTerrainFieldSteps` applies, at the
+ * same container-centred coordinates — rather than `baseHeight_m`, because a
+ * sculpted or generated ground supersedes that number and only the perimeter
+ * decides where the seam is. The median rather than the mean so that a mound or
+ * a pond that reaches the edge in one place does not lift or sink the whole
+ * horizon.
+ */
+export function sceneSvoGroundPlane(
+  scene: Pick<SceneDescription, "scenery" | "terrain" | "container" | "environment">,
+): SvoGroundPlane | undefined {
+  // The open-air garden is the one set whose ground is meant to run to the
+  // horizon. A sculpted slab elsewhere (the hillside dam) has an uneven edge
+  // that a single level plane would half-bury.
+  if (scene.environment !== "garden") return undefined;
+  const terrain = scene.terrain;
+  if (!terrain) return undefined;
+  let shell = false;
+  for (const { node } of walkSceneryNodes(scene.scenery?.nodes ?? [])) if (node.kind === "terrain-shell") { shell = true; break; }
+  if (!shell) return undefined;
+  const { width_m, depth_m, height_m } = scene.container;
+  const minX = -0.5 * width_m, minZ = -0.5 * depth_m, maxX = 0.5 * width_m, maxZ = 0.5 * depth_m;
+  const heights: number[] = [];
+  const top = (x: number, z: number) => heights.push(Math.min(height_m, Math.max(0, terrainHeightAt(terrain, x, z))));
+  // Half a sample in from every corner, so no sample sits exactly on an edge the
+  // voxeliser's cell centres never reach.
+  for (let index = 0; index < GROUND_PLANE_PERIMETER_SAMPLES_PER_SIDE; index += 1) {
+    const f = (index + 0.5) / GROUND_PLANE_PERIMETER_SAMPLES_PER_SIDE;
+    const x = minX + f * width_m, z = minZ + f * depth_m;
+    top(x, minZ); top(x, maxZ); top(minX, z); top(maxX, z);
+  }
+  heights.sort((a, b) => a - b);
+  const middle = heights.length >> 1;
+  const plane_m = heights.length % 2 === 0 ? 0.5 * (heights[middle - 1] + heights[middle]) : heights[middle];
+  if (!Number.isFinite(plane_m)) throw new RangeError("Terrain shell ground-plane height is not finite");
+  return {
+    height_m: plane_m,
+    footprint_m: [minX, minZ, maxX, maxZ],
+    hazeDistance_m: SVO_GROUND_PLANE_HAZE_FOOTPRINTS * Math.max(width_m, depth_m),
+  };
 }
 
 /** Version of the binding-free garden terrain material contract. */

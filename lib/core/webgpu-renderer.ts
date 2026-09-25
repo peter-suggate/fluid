@@ -91,7 +91,7 @@ import {
 } from "../svo/contracts/svo-material-abi";
 import { buildSvoSceneGlass } from "../svo/features/materials/svo-scene-glass";
 import { buildSvoSceneThickGlass } from "../svo/features/materials/svo-scene-thick-glass";
-import { sceneTerrainSurfaceModel } from "../svo/features/materials/svo-terrain-material";
+import { sceneSvoGroundPlane, sceneTerrainSurfaceModel } from "../svo/features/materials/svo-terrain-material";
 import {
   DEFAULT_SVO_LIGHTING_OPTIONS,
   resolveSvoPrimaryTraversal,
@@ -2710,6 +2710,7 @@ export class FluidLabRenderer {
       thickGlassReplacedThinPaneId: thickReplacedPaneId,
       ...lightingMirrors,
       flatVoxelNormals: sceneUsesFlatVoxelNormals(scene),
+      groundPlane: sceneSvoGroundPlane(scene),
     };
     const thickGlassBound = resolveSparseVoxelThickGlassBinderStatus(publication) === "bound";
     const replacedPaneKeys = new Set(sceneThickGlass.metadata.flatMap(({ replacesThinPaneKey }) => replacesThinPaneKey ? [replacesThinPaneKey] : []));

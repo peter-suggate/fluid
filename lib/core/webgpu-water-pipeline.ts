@@ -1244,6 +1244,34 @@ fn causticModulation(textureUV:vec2f)->vec3f{
   let modulation=mix(vec3f(1.0),deposited,coverage);
   return mix(vec3f(1.0),modulation,strength);
 }
+// A back face that lies on the dry scene's own solid is a liquid/basin contact,
+// not a water-to-air interface. The mesh is extracted at solver-cell pitch, so
+// refracting out through its facets displaced and tinted the refined floor per
+// coarse facet (concentric terraces in a pond), and light does not leave an
+// opaque basin anyway. No extraction path receives solid occupancy, so the
+// contact is recognised here: the refined dry surface along the exit pixel's
+// ray lies no more than ~a solver cell behind the back face, measured along the
+// back normal so grazing views of a flat floor classify like head-on ones. A
+// dry surface in front of the back face (a coarse contact buried in the solid)
+// is a contact too; a sky miss never is.
+fn backIsSolidContact(back:vec3f,exitN:vec3f,exitUV:vec2f,cellSize:f32)->bool{
+  let dry=resolvedDrySceneDepth(safeSample(sceneTexture,exitUV).a);if(dry>60000.0){return false;}
+  let ray=back-u.cameraPosition.xyz;let backDistance=length(ray);
+  return (dry-backDistance)*abs(dot(ray/max(backDistance,1e-6),exitN))<=1.25*cellSize;
+}
+// Screen-space march of the refracted ray against the refined dry depth, as in
+// SSR: eight linear steps over reach, then four bisections of the bracketing
+// step; twelve dry-scene taps in all. Returns (uv, path length, valid). A
+// crossing whose overshoot survives bisection is the ray passing behind a
+// foreground occluder's silhouette rather than landing on a surface, and is
+// refused like a march that leaves the screen or never crosses.
+fn solidTerminatedHit(origin:vec3f,direction:vec3f,reach:f32)->vec4f{
+  let ro=u.cameraPosition.xyz;let step=reach/8.0;var lo=0.0;var hi=-1.0;var overshoot=0.0;
+  for(var i=1;i<=8;i+=1){let t=step*f32(i);let p=origin+direction*t;let uv=project(p);if(any(uv<vec2f(0.0))||any(uv>vec2f(1.0))){break;}let behind=length(p-ro)-resolvedDrySceneDepth(safeSample(sceneTexture,uv).a);if(behind>=0.0){hi=t;overshoot=behind;break;}lo=t;}
+  if(hi<0.0){return vec4f(0.0);}
+  for(var i=0;i<4;i+=1){let mid=.5*(lo+hi);let p=origin+direction*mid;let behind=length(p-ro)-resolvedDrySceneDepth(safeSample(sceneTexture,project(p)).a);if(behind>=0.0){hi=mid;overshoot=behind;}else{lo=mid;}}
+  return vec4f(project(origin+direction*hi),hi,select(0.0,1.0,overshoot<=step));
+}
 // The first depth-tested pair describes only the nearest connected water
 // interval. A breaking sheet can leave another interval behind it, so the
 // interface raster peels one more front/back pair after the first exit. Shade
@@ -1262,8 +1290,13 @@ fn compositeRearWater(textureUV:vec2f,dryColor:vec3f)->vec3f{
   let refinedBack=safePositionSample(rearBackPosition,exitUV);let refinedBackNormal=safeInterfaceSample(rearBackNormal,exitUV);if(refinedBack.a<.5){return dryColor;}back=refinedBack;exitN=normalize(refinedBackNormal.xyz);
   var thickness=length(back.xyz-front.xyz);if(thickness<1e-4){return dryColor;}
   let thinBoundaryFilm=filmDensity>1e-4;
-  if(dot(exitN,inside)<0.0){exitN=-exitN;}var outgoing=refract(inside,-exitN,waterIndexOfRefraction());let tir=length(outgoing)<1e-5;if(tir){outgoing=reflect(inside,-exitN);}
-  let backgroundUV=project(back.xyz+outgoing*(.55+.45*thickness));let transmitted=safeSample(sceneTexture,backgroundUV).rgb*causticModulation(backgroundUV);
+  var outgoing=inside;var tir=false;var transmitted=dryColor;
+  // A basin contact ends the light at the refined solid (backIsSolidContact).
+  // Fail-safe when the march finds no surface: the unrefracted pixel, i.e.
+  // dryColor, over its own dry depth, bounded by the march reach.
+  if(backIsSolidContact(back.xyz,exitN,exitUV,cellSize)){let reach=1.5*thickness+4.0*cellSize;let hit=solidTerminatedHit(front.xyz,inside,reach);if(hit.w>.5){thickness=hit.z;transmitted=safeSample(sceneTexture,hit.xy).rgb*causticModulation(hit.xy);}else{thickness=clamp(resolvedDrySceneDepth(scene.a)-frontDepth,1e-4,reach);}}
+  else{if(dot(exitN,inside)<0.0){exitN=-exitN;}outgoing=refract(inside,-exitN,waterIndexOfRefraction());tir=length(outgoing)<1e-5;if(tir){outgoing=reflect(inside,-exitN);}
+  let backgroundUV=project(back.xyz+outgoing*(.55+.45*thickness));transmitted=safeSample(sceneTexture,backgroundUV).rgb*causticModulation(backgroundUV);}
   let refracted=unifiedAbsorbingTransmission(transmitted,waterAbsorption(),waterScatter(),thickness);
   let reflectedDir=reflect(rd,n);var reflected=environmentLight(reflectedDir);let ssr=safeSample(sceneTexture,project(front.xyz+reflectedDir*.8));reflected=mix(reflected,ssr.rgb,select(0.0,.32,ssr.a>0.0&&ssr.a<60000.0));
   let cosine=clamp(dot(-rd,n),0.0,1.0);let fresnel=unifiedDielectricFresnel(cosine,waterFresnelF0());var water=mix(refracted,reflected,fresnel);if(tir){water=mix(water,environmentLight(outgoing),.88);}
@@ -1319,13 +1352,24 @@ fn finish(color:vec3f,ndc:vec2f)->vec4f{let c=color*(1.0-.08*dot(ndc*.55,ndc*.55
     // water back face is conservatively limited to one fluid cell.
     thickness=max(.002,cellSize);exitPoint=innerOrigin+inside*thickness;exitN=-inside;
   }
-  var outgoing=inside;var tir=false;var backgroundUV=project(exitPoint);
+  var outgoing=inside;var tir=false;var backgroundUV=project(exitPoint);var transmittedScene=vec3f(0.0);
+  // A liquid/basin back face (backIsSolidContact) is not refracted out: the
+  // refracted ray ends where it meets the refined dry solid, and its path
+  // length is the absorbing thickness. Nothing lies behind that opaque exit, so
+  // no rear water interval is composited. Fail-safe when the march leaves the
+  // screen or never crosses: the unrefracted pixel's colour over its own dry
+  // depth, bounded by the march reach.
+  if(!opaqueSolidExit&&meshExitValid&&backIsSolidContact(back.xyz,exitN,exitUV,cellSize)){
+    let reach=1.5*thickness+4.0*cellSize;let hit=solidTerminatedHit(front.xyz,inside,reach);
+    if(hit.w>.5){backgroundUV=hit.xy;thickness=hit.z;}else{backgroundUV=textureUV;thickness=clamp(resolvedDrySceneDepth(scene.a)-frontDepth,1e-4,reach);}
+    transmittedScene=safeSample(sceneTexture,backgroundUV).rgb*causticModulation(backgroundUV);
+  }else{
   if(!opaqueSolidExit){if(dot(exitN,inside)<0.0){exitN=-exitN;}outgoing=refract(inside,-exitN,waterIndexOfRefraction());tir=length(outgoing)<1e-5;if(tir){outgoing=reflect(inside,-exitN);}backgroundUV=project(exitPoint+outgoing*(.55+.45*thickness));}
   // The modulation goes on the *dry* term rather than on what comes back:
   // where a rear water interval exists it shades its own receiver and applies
   // its own caustic, and multiplying that result again would count the floor's
   // concentration twice through two layers of water.
-  let transmittedScene=compositeRearWater(backgroundUV,safeSample(sceneTexture,backgroundUV).rgb*causticModulation(backgroundUV));
+  transmittedScene=compositeRearWater(backgroundUV,safeSample(sceneTexture,backgroundUV).rgb*causticModulation(backgroundUV));}
   // Absorption is the scene's, not the renderer's: the same clean-water rate
   // that turns a metre of water blue leaves a hand's breadth colourless.
   // A small in-scattering term keeps thick regions luminous instead of turning

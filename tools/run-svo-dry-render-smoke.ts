@@ -209,6 +209,7 @@ import { SVO_GBUFFER_RENDER_TARGET_CONTRACT } from "../lib/svo/features/primary-
 import { SVO_GBUFFER_FIELD_SOURCES } from "../lib/svo/contracts/svo-gbuffer";
 import { FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE } from "../lib/core/webgpu-device-limits";
 import { resolveDisplayGrade } from "../lib/core/webgpu-lighting";
+import { svoSceneLighting } from "../lib/svo/features/lighting-visibility/svo-dry-scene-lighting";
 import { SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "../lib/svo/features/lighting-visibility/svo-screen-space-termination";
 import { frameRadianceRange, writeFramePng } from "./write-frame-png";
 import {
@@ -1421,7 +1422,7 @@ if (requiredPlanarOwner) {
 if (pngPath) {
   // Graded with the scene's own curve, so the file matches what the app shows
   // rather than a raw HDR readback that would look black on an ACES scene.
-  const grade = resolveDisplayGrade(scene.lighting?.grade);
+  const grade = resolveDisplayGrade(svoSceneLighting(scene).grade);
   const range = frameRadianceRange(firstRows);
   writeFramePng(pngPath, {
     width, height, packedRows: firstRows, grade,
@@ -1501,7 +1502,7 @@ if (lightSweepPath) {
   }>;
   const sweepDirectory = process.env.FLUID_SVO_DRY_SMOKE_LIGHT_SWEEP_DIR
     ?? path.join(path.dirname(pngPath ?? outPath ?? "artifacts/hero-light-sweep/x"), "light-sweep");
-  const grade = resolveDisplayGrade(scene.lighting?.grade);
+  const grade = resolveDisplayGrade(svoSceneLighting(scene).grade);
   log(`Light sweep: ${entries.length} keys into ${sweepDirectory}`);
   for (const entry of entries) {
     const lit = {
@@ -1541,7 +1542,7 @@ if (sweepPath) {
   }>;
   const sweepDirectory = process.env.FLUID_SVO_DRY_SMOKE_CAMERA_SWEEP_DIR
     ?? path.join(path.dirname(pngPath ?? outPath ?? "artifacts/hero-camera-sweep/x"), "sweep");
-  const grade = resolveDisplayGrade(scene.lighting?.grade);
+  const grade = resolveDisplayGrade(svoSceneLighting(scene).grade);
   log(`Camera sweep: ${entries.length} framings into ${sweepDirectory}`);
   for (const entry of entries) {
     const candidate: CameraState = {
@@ -1623,7 +1624,7 @@ if (pairRenderer) {
   // canopy, a pond rim and a silhouette are four different bugs. Written as the
   // paired frame plus a mask so the two can be flipped between.
   if (pngPath) {
-    const grade = resolveDisplayGrade(scene.lighting?.grade);
+    const grade = resolveDisplayGrade(svoSceneLighting(scene).grade);
     const pairPngPath = pngPath.replace(/\.png$/, "-pair.png");
     writeFramePng(pairPngPath, { width, height, packedRows: pairRows, grade });
     const maskRows = new Uint32Array(firstRows.length);
