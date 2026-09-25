@@ -97,7 +97,7 @@ impl Default for UniformGeometricOptions {
             velocity_transport: "semi-lagrangian".into(),
             liquid_only_velocity_advection: "off".into(),
             time_step: "paper".into(),
-            pressure_residual_tolerance: 20_f32,
+            pressure_residual_tolerance: 5_f32,
             extension_front_sweeps: 2_f32,
             sharpening_strength: 1_f32,
             sharpening_distance: 2.1_f32,
