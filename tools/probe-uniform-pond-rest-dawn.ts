@@ -4,13 +4,15 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createProcessRetainedDawnGPU, type NodeDawnProvider } from "../lib/harness/node-dawn-provider";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
-import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
+import { managedGPUDevice, gpuCompilationManagerFor } from "../lib/core/gpu-compilation-manager";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { uniformVolumeMethod } from "../lib/methods/uniform/uniform-volume-method";
 import { resolveMethodValues } from "../lib/core/method-contract";
 import type { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
+import type { WebGPUUniformPressureMultigrid } from "../lib/methods/uniform/webgpu-uniform-pressure-multigrid";
+import type { UniformTexturePages } from "../lib/methods/uniform/uniform-texture-pages";
 
 const arg = (key: string, fallback: string) => process.argv.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3) ?? fallback;
 const arm = arg("arm", "baseline");
@@ -40,11 +42,30 @@ try {
   device = managedGPUDevice(await adapter.requestDevice({ requiredLimits: requiredFluidDeviceLimits(adapter.limits) }), { requireWorkerRealm: false });
   const errors: string[] = []; device.addEventListener("uncapturederror", e => { e.preventDefault(); errors.push(e.error.message); });
   const scene = sceneDocument(getSceneDefinition("hero-garden-hose-x10"));
-  scene.fluid.inflow = { ...scene.fluid.inflow!, enabled: false };
+  scene.fluid.inflow = { ...scene.fluid.inflow!, enabled: arg("hose", "off")==="on" };
+  const cell = scene.voxelDomain.finestCellSize_m;
+  scene.container.fillFraction += Number(arg("waterline-shift-cells", "0")) * cell / scene.container.height_m;
+  if (arg("basin", "pond") === "flat") {
+    // Same domain, resolution and waterline; floor chosen for the pond's
+    // median 5.6-cell depth. Footprint differs, so this isolates a group of
+    // geometric effects, not curvature alone.
+    scene.terrain = { baseHeight_m: 15 * cell, features: [] };
+    scene.solidVoxels = []; scene.rigidBodies = []; scene.scenery = undefined;
+  }
   if (arg("sigma", "scene") !== "scene") scene.fluid.surfaceTension_N_m = Number(arg("sigma", "0"));
   if (arg("gravity", "scene") !== "scene") scene.fluid.gravity_m_s2 = { x: 0, y: Number(arg("gravity", "0")), z: 0 };
   const values = resolveMethodValues(uniformVolumeMethod, "balanced", { pressureResidualTolerance: 0, ...overrides });
+  const weight = Number(arg("jacobi-weight", "1"));
+  let dampingReplacements=0;
+  if (weight !== 1) {
+    assert.ok(weight > 0 && weight < 1);
+    const compiler=gpuCompilationManagerFor(device), create=compiler.createShaderModule.bind(compiler);
+    compiler.createShaderModule = descriptor => create({...descriptor,code:descriptor.code
+      .replace(/(mgPressureOutStore\(id,|textureStore\(mgPressureOut,id,)vec4f\(max\(p,minimum\)\)\);/g,(_,prefix) => {dampingReplacements++;return `${prefix}vec4f(max(mix(mgP(id),p,${weight}),minimum)));`;})
+      .replace(/(mgPressureRWStore\(id,|textureStore\(mgPressureRW,id,)vec4f\(max\(p,minimum\)\)\);/g,(_,prefix) => {dampingReplacements++;return `${prefix}vec4f(max(mix(mgJacobiP(id),p,${weight}),minimum)));`;})});
+  }
   solver = await uniformVolumeMethod.createSolverAsync!(device, scene, "balanced", values, undefined, () => {}) as WebGPUUniformReferenceSolver;
+  if(weight!==1)assert.ok(dampingReplacements>0,"experimental damping must patch the compiled shader");
   const { nx, ny, nz } = solver.info, h = scene.container.height_m / ny;
   const open = await read(device, solver.denseLevelSetVolumeSource!.openFraction);
   const level = scene.container.height_m * scene.container.fillFraction / h;
@@ -57,10 +78,72 @@ try {
     columns.push({ x, z, interior });
   }
   assert.ok(columns.some(c => c.interior));
+  const mg = (solver as unknown as { pressureMultigrid: WebGPUUniformPressureMultigrid }).pressureMultigrid;
+  const snapshots = new Map<GPUTexture,GPUTexture>();
+  const noRecovery=arg("recovery", "on")==="off";
+  if (arg("pressure-dump", "off") === "on" || noRecovery) {
+    const fields = (mg as unknown as {scratchFields: UniformTexturePages}).scratchFields;
+    if(arg("pressure-dump", "off") === "on")for (const l of mg.levels) for (const t of [l.volume[0],l.coefficients,l.pressure[0],l.rhs[0],l.minimum[0]]) snapshots.set(t,fields.snapshotTexture(t));
+    const encode = mg.encode.bind(mg);
+    mg.encode = (...args: Parameters<typeof mg.encode>) => {
+      if(noRecovery){
+        assert.equal(values.pressureResidualTolerance,0,"no-recovery control requires the fixed schedule");
+        const plan=mg as unknown as {finishStart:number;finalStart:number;plan:unknown[]};
+        encode(args[0],args[1],args[2],args[3],args[4],{start:0,end:plan.finishStart,initialize:true,publish:false});
+        encode(args[0],args[1],args[2],args[3],args[4],{start:plan.finalStart,end:plan.plan.length,initialize:false,publish:true});
+      }else encode(...args);
+      // Scratch is reused by later fluid stages. Capture while pressure still
+      // owns it, rather than reading the placeholder texture after the frame.
+      for (const t of snapshots.keys()) fields.encodeSnapshot(args[0],t);
+    };
+  }
+  const readPressure = (t:GPUTexture) => read(device!, snapshots.get(t) ?? t);
   const samples: unknown[] = [];
+  let pressureDiagnostic: unknown;
   for (let frame = 0; frame <= frames; frame++) {
     if (frame) { assert.ok(solver.advanceTo(frame / 30, [])); await solver.awaitFrameCompletion(); }
     const stats = await solver.readStats();
+    if (frame === 1 && arg("pressure-dump", "off") === "on") {
+      // Diagnostic-only access: inspect the actual solver hierarchy, without
+      // adding a production readback or changing any pressure dispatch.
+      const hierarchy = [];
+      for (const l of mg.levels) {
+        const topology = await readPressure(l.volume[0]), coefficients = await readPressure(l.coefficients);
+        let liquid = 0, openLiquid = 0, mixedLiquid = 0, solidLiquid = 0;
+        for (let i = 0; i < coefficients.length / 4; i++) if ((coefficients[4*i+3]! & 1) !== 0) {
+          liquid++;
+          const [wx,wy] = l.dimensions, x=i%wx-1, y=Math.floor(i/wx)%wy-1, z=Math.floor(i/wx/wy)-1;
+          // Finest topology aliases cycle scratch after coefficient baking.
+          const capacity = l===mg.levels[0] ? (x>=0&&x<nx&&y>=0&&y<ny&&z>=0&&z<nz ? open[x+nx*(y+ny*z)]! : 0) : topology[4*i]!;
+          if (capacity <= 1e-5) solidLiquid++; else { openLiquid++; if (capacity < 0.99999) mixedLiquid++; }
+        }
+        hierarchy.push({ dimensions: l.dimensions.map(v => v-2), liquid, openLiquid, mixedLiquid, solidLiquid });
+      }
+      const l = mg.levels[0]!, [wx,wy,wz] = l.dimensions;
+      const p = await readPressure(l.pressure[0]), rhs = await readPressure(l.rhs[0]), minimum = await readPressure(l.minimum[0]);
+      const c = await readPressure(l.coefficients);
+      const worst: { cell: number[]; residual: number; open: number; pressure: number; rhs: number; diagonal: number }[] = [];
+      const liquid = (i: number) => i >= 0 && i < p.length && (c[4*i+3]! & 1) !== 0;
+      for (let z=1; z<wz-1; z++) for (let y=1; y<wy-1; y++) for (let x=1; x<wx-1; x++) {
+        const i=x+wx*(y+wy*z); if (!liquid(i)) continue;
+        let ap=0, diagonal=0;
+        for (const [axis,stride] of [1,wx,wx*wy].entries()) for (const sign of [-1,1]) {
+          const j=i+sign*stride, a=c[4*(sign>0?i:j)+axis]!;
+          diagonal+=a; ap+=a*(p[i]!-(liquid(j)?p[j]!:0));
+        }
+        const r=rhs[i]!-ap, gap=Math.max(0,p[i]!-minimum[i]!);
+        const projected=Math.max(r<0 && -r>=gap*diagonal ? gap*diagonal : Math.abs(r), Math.max(0,minimum[i]!-p[i]!)*diagonal);
+        const residual=projected/30/scene.fluid.density_kg_m3;
+        if (worst.length<20 || residual>worst.at(-1)!.residual) {
+          worst.push({cell:[x-1,y-1,z-1],residual,open:open[x-1+nx*(y-1+ny*(z-1))]!,pressure:p[i]!,rhs:rhs[i]!,diagonal});
+          worst.sort((a,b)=>b.residual-a.residual); worst.length=Math.min(20,worst.length);
+        }
+      }
+      pressureDiagnostic={hierarchy,worst,cpuResidualNote:"Double precision reconstruction from GPU fields; compare with GPU f32 residual, not bitwise.",gpuResidual:stats.uniformCM11aFineResidualInfinity};
+      assert.ok(worst.length>0,"capture populated pressure rows before scratch reuse");
+      assert.ok(Math.abs(worst[0]!.residual-stats.uniformCM11aFineResidualInfinity!)<1e-4,"CPU reconstruction agrees with the GPU residual");
+      console.log(JSON.stringify({arm,pressureDiagnostic}));
+    }
     if (frame > 3 && frame % 10 && frame !== frames) continue;
     const phi = await read(device, solver.vertexPhiTexture!), velocity = await read(device, solver.velocityTexture), volume = await read(device, solver.volumeTexture);
     const regions = { all: [] as number[], interior: [] as number[] };
@@ -91,5 +174,5 @@ try {
   }
   assert.deepEqual(errors, []);
   mkdirSync(resolve(out, ".."), { recursive: true });
-  writeFileSync(out, JSON.stringify({ arm, dimensions: [nx, ny, nz], level, h, values, sigma: scene.fluid.surfaceTension_N_m, gravity: scene.fluid.gravity_m_s2, samples }, null, 2));
+  writeFileSync(out, JSON.stringify({ arm, dimensions: [nx, ny, nz], level, h, values, hose:scene.fluid.inflow.enabled, jacobiWeight: weight, dampingReplacements, noRecovery, sigma: scene.fluid.surfaceTension_N_m, gravity: scene.fluid.gravity_m_s2, samples, pressureDiagnostic }, null, 2));
 } finally { solver?.destroy(); device?.destroy(); await releaseWebGPUExclusiveLock(); }

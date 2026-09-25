@@ -145,3 +145,102 @@ and the much worse default-5 run establish that accuracy matters here; they
 do not establish where the worst rows lie. The most useful next diagnostic
 is to record those locations and residual after each cycle, then compare
 the authored basin with a flat basin at matched depth and waterline offset.
+
+### Pressure readback and controls
+
+The probe's `--pressure-dump=on` captures fields immediately after pressure
+encoding, before subsequent stages reuse the scratch arena. Post-frame reads
+of the placeholder textures are not valid pressure diagnostics. The CPU
+projected-residual reconstruction agrees with Dawn to about 1e-6 s⁻¹.
+
+All these controls use one 1/30 s step and the same 3+4 cycle schedule:
+
+| Geometry | Maximum projected residual (s⁻¹) | Worst cell |
+|---|---:|---|
+| Authored pond | 0.0351159 | (53,14,42) |
+| Flat floor at the pond's median depth | 0.00371085 | (1,15,1) |
+| Pond, waterline raised 0.4h | 0.0424713 | (53,14,42) |
+
+The flat control preserves domain, resolution and waterline but changes the
+footprint and liquid quantity, so it is a geometry-group control rather than
+a pure curvature comparison. Its residual is about 9.5 times smaller despite
+more liquid. Moving the surface from theta=0.1 to theta=0.5 does not improve
+the pond result; that coefficient contrast is not the dominant first-step
+limitation in this comparison.
+
+The pond's hierarchy contains respectively 15,340, 1,866, 295, 73, 11 and 4
+open pressure cells. On the last grid, all four are mixed solid/open cells;
+another four solid contact rows participate. Fine-level counts additionally
+include 3,248 solid contact rows. Coarsening therefore represents very little
+of the detailed basin.
+
+More revealingly, the worst residual is in ordinary submerged cells with
+the regular six-neighbour stencil. At y=14, exact hydrostatic pressure is
+746.4111 Pa. Adjacent values include 746.4239, 746.3962 and 746.3966 Pa:
+an alternating error of roughly ±0.014 Pa. The geometric smoother uses
+undamped projected Jacobi. In a regular interior stencil, a checkerboard
+error is replaced by its negative on each sweep, and averaging restriction
+cancels it. This supplies a specific mechanism for a small pressure error
+to survive many multigrid cycles and set the maximum residual.
+
+The evidence now points more strongly to the interaction of basin geometry
+and this poorly damped error mode than to the free-surface coefficient alone.
+The experimental `--jacobi-weight=0.6666667` shader control now confirms the
+smoother hypothesis. It changes the geometric Jacobi updates only in the
+probe's compiled shader; production sources and defaults remain unchanged.
+
+### Damping comparison
+
+The first-step damped run leaves 0.0000584385 s⁻¹, versus 0.0351159 undamped:
+about 601 times less residual. It initially reported 64 recovery sweeps.
+Repeating with `--recovery=off` gives the identical residual and velocity,
+with zero recovery sweeps and the same three Full-Cycles, four V-Cycles and
+six pre/post sweeps. The improvement therefore does not depend on extra
+recovery work. The diagnostic checks that its shader patch actually matched
+and that the captured CPU residual agrees with Dawn.
+
+| Control | Undamped | Damped (weight 2/3) |
+|---|---:|---:|
+| First-step residual, recovery disabled for damped (s⁻¹) | 0.0351159 | 0.0000584385 |
+| Ten-second hose-off residual (s⁻¹) | 0.0377755 | 0.0000587508 |
+| Ten-second interior surface RMS (mm) | 0.0626587 | 0.0378815 |
+| Ten-second maximum sampled surface error (mm) | 0.841828 | 0.403315 |
+| Ten-second peak liquid-cell speed (m/s) | 0.0487593 | 0.0283302 |
+| Ten-second relative volume drift | 7.48e-7 | 3.47e-7 |
+| Three-second hose-on residual (s⁻¹) | 0.0542325 | 0.0000991368 |
+| Three-second hose-on total volume (cell volumes) | 16654.1081 | 16654.0152 |
+
+All four longer runs completed with finite volume fields, no uncaptured GPU
+errors and no missing sampled surface crossings. The hose-on surface is
+expected to move; its height error is not a still-water accuracy metric.
+These controls support dynamic viability in this pond, not correctness
+across arbitrary impact/separation scenes or performance neutrality.
+
+Longer damped runs retain the normal recovery policy and repeatedly execute
+64 recovery sweeps; undamped runs execute zero. Thus only the first-step
+no-recovery arm is a strict equal-sweep comparison. The next production
+question is how to avoid redundant recovery near the attained residual,
+followed by separation/impact and performance validation. A much smaller
+pressure residual does not eliminate all interface motion.
+
+```sh
+node --import tsx tools/probe-uniform-pond-rest-dawn.ts --arm=pressure-damped-no-recovery --frames=1 --pressure-dump=on --jacobi-weight=0.6666667 --recovery=off
+node --import tsx tools/probe-uniform-pond-rest-dawn.ts --arm=pressure-damped-long --frames=300 --jacobi-weight=0.6666667
+node --import tsx tools/probe-uniform-pond-rest-dawn.ts --arm=pressure-undamped-long --frames=300
+node --import tsx tools/probe-uniform-pond-rest-dawn.ts --arm=pressure-damped-hose --frames=90 --hose=on --jacobi-weight=0.6666667
+node --import tsx tools/probe-uniform-pond-rest-dawn.ts --arm=pressure-undamped-hose --frames=90 --hose=on
+```
+
+### Validation status at checkpoint
+
+The dedicated pond and analytic-curvature checks passed, together with the
+geometric boundary, airborne-momentum and adaptive-pressure tests. The wider
+uniform-volume run failed its existing mini32 advance loop, which omits
+waiting for each asynchronous frame; it then crashed during cleanup.
+
+The required full Sparse CM12 gate was run without changing any thresholds.
+It failed: multiple lane timeouts, mini64 median 209.912 ms against a 110 ms
+ceiling, a Tall Cells Hills exit failure, and exhaustion of the 480-second
+suite budget. These failures remain unresolved; this checkpoint is not a
+clean full-regression result. Receipts are in
+`artifacts/pond-rest/sparse-gate.log`.
