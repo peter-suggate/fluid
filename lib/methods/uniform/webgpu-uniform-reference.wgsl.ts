@@ -912,7 +912,15 @@ fn surfaceGradient(id:vec3i)->vec3f{
   return vec3f(normalSurfaceOccupancy(id+vec3i(1,0,0))-normalSurfaceOccupancy(id-vec3i(1,0,0)),normalSurfaceOccupancy(id+vec3i(0,1,0))-normalSurfaceOccupancy(id-vec3i(0,1,0)),normalSurfaceOccupancy(id+vec3i(0,0,1))-normalSurfaceOccupancy(id-vec3i(0,0,1)))/(2.0*h);
 }
 fn interfaceNormal(id:vec3i)->vec3f{
-  let gradient=surfaceGradient(id);
+  ${geometric ? `// All corners of an open cell are live phi vertices. In contrast,
+  // differencing neighbouring occupancies reads buried solid vertices whose
+  // air sentinel is not a free surface, inventing curvature at a flat shore.
+  // Differentiate this cell's trilinear phi at its centre instead.
+  var gradient=vec3f(0);
+  for(var k=0u;k<8u;k++){
+    let corner=uvCorner(k);
+    gradient-=(2.0*vec3f(corner)-vec3f(1))*textureLoad(uvPhiIn,id+corner,0).x/(4.0*params.cellGravity.xyz);
+  }` : "let gradient=surfaceGradient(id);"}
   return gradient/max(length(gradient),1e-6);
 }
 // The diagnostic/emergency VOF still sharpens along its own density gradient;
@@ -1200,9 +1208,9 @@ fn applyVelocityForces(id:vec3i,inputVelocity:vec3f,dt:f32,h:vec3f)->vec3f{
   // every bulk cell even though the final multiplication was exactly zero.
   let sigmaOverRho=params.boundary.x/params.physical.x;
   if(sigmaOverRho>0.0){
-    let dx=select(0.0,xOccupancy-occupancy,valid(qx));
-    let dy=select(0.0,yOccupancy-occupancy,valid(qy));
-    let dz=select(0.0,zOccupancy-occupancy,valid(qz));
+    let dx=select(0.0,xOccupancy-occupancy,valid(qx)${geometric ? "&&cellOpenFraction(id)>1e-5&&cellOpenFraction(qx)>1e-5" : ""});
+    let dy=select(0.0,yOccupancy-occupancy,valid(qy)${geometric ? "&&cellOpenFraction(id)>1e-5&&cellOpenFraction(qy)>1e-5" : ""});
+    let dz=select(0.0,zOccupancy-occupancy,valid(qz)${geometric ? "&&cellOpenFraction(id)>1e-5&&cellOpenFraction(qz)>1e-5" : ""});
     if(dx!=0.0||dy!=0.0||dz!=0.0){
       let centreCurvature=curvatureAt(id);
       if(dx!=0.0){v.x+=dt*sigmaOverRho*0.5*(centreCurvature+curvatureAt(qx))*dx/h.x;}
@@ -1405,10 +1413,21 @@ fn volumeCorrectionDivergence(id: vec3i) -> f32 {
 
 fn curvatureAt(id:vec3i)->f32{
   let h=params.cellGravity.xyz;
+  ${geometric ? `// Use one-sided derivatives at solids/domain walls. A buried normal
+  // is undefined; it must not turn the liquid/solid boundary into capillarity.
+  let centre=interfaceNormal(id);var divergence=vec3f(0);
+  for(var axis=0u;axis<3u;axis++){
+    var low=id;low[axis]-=1;var high=id;high[axis]+=1;
+    let a=cellOpenFraction(low)>1e-5;let b=cellOpenFraction(high)>1e-5;
+    var na=centre;var nb=centre;
+    if(a){na=interfaceNormal(low);}if(b){nb=interfaceNormal(high);}
+    divergence[axis]=(nb[axis]-na[axis])/(h[axis]*max(f32(u32(a)+u32(b)),1.0));
+  }
+  return -((divergence.x+divergence.z)+divergence.y);` : `
   let x=(interfaceNormal(id+vec3i(1,0,0)).x-interfaceNormal(id-vec3i(1,0,0)).x)/(2.0*h.x);
   let y=(interfaceNormal(id+vec3i(0,1,0)).y-interfaceNormal(id-vec3i(0,1,0)).y)/(2.0*h.y);
   let z=(interfaceNormal(id+vec3i(0,0,1)).z-interfaceNormal(id-vec3i(0,0,1)).z)/(2.0*h.z);
-  return -((x+z)+y);
+  return -((x+z)+y);`}
 }
 
 ${geometric ? `

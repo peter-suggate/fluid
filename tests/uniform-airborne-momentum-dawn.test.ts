@@ -138,11 +138,14 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
         try{
           const phi=Float32Array.from({length:33*17*33},(_,i)=>.05*((Math.floor(i/33)%17)-7));
           const volume=Float32Array.from({length:32*16*32},(_,i)=>{
-            const y=Math.floor(i/32)%16;return y<7?1:y===8?.005:0;
+            const y=Math.floor(i/32)%16;return y<7?1:y===8?.0005:0;
           });
           write(device!,solver.vertexPhiTexture!,phi);write(device!,solver.volumeTexture,volume);
           for(let frame=1;frame<=3;frame++)assert.ok(solver.advanceTo(frame/30));
-          outputs.push(await read(device!,solver.volumeTexture));
+          const result=await read(device!,solver.volumeTexture);
+          assert.ok(Math.abs(result[16+32*(8+16*16)]!-.0005)<1e-7,
+            "regular dust floor must preserve sub-threshold mass in the surface band");
+          outputs.push(result);
         }finally{solver.destroy();}
       }
       assert.deepEqual(outputs[1],outputs[0],"stronger floor must not erode a resting interface or its near-surface tail");

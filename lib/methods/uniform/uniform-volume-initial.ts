@@ -73,7 +73,13 @@ export function uniformInitialVolume(scene: SceneDescription, dimensions: readon
   for(let outputZ=0;outputZ<(sliceZ === undefined ? nz : 1);outputZ++)for(let y=0;y<ny;y++)for(let x=0;x<nx;x++) {
     const z=sliceZ ?? outputZ;
     const aboveGround=(y+0.5)*cellHeight>terrain[x+nx*z];
-    const solidOpen=1-sampleSolidWorld(solidWorld,[x,y,z]).solidFraction;
+    const solidFraction=sampleSolidWorld(solidWorld,[x,y,z]).solidFraction;
+    // The geometric solver's SolidOccupancyMask closes any cell touched by
+    // the static solid world, including fractional terrain voxels. Seeding
+    // their fractional remainder creates immobile liquid inside closed cells;
+    // the global surface-volume constraint then raises the free surface to
+    // represent that inaccessible mass. Use the same capacity as the solver.
+    const solidOpen=geometric ? Number(solidFraction===0) : 1-solidFraction;
     const base=geometric?baseInitialLiquidFractionAtCell(scene,x,y,z,dimensions):scene.fluid.initialCondition==="dam-break"
       ?damBreakBoxContains(dam,(x+0.5)/nx,(y+0.5)/ny,(z+0.5)/nz):(y+0.5)/ny<=c.fillFraction;
     const liquidFraction=aboveGround?initialLiquidFractionAtCell(scene,x,y,z,dimensions,base):0;

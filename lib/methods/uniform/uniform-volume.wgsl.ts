@@ -317,7 +317,11 @@ fn uvEmbeddedContact(p:vec3f,advected:f32)->f32{
     }
   }
   var result=advected;
-  if(arriving<1e20){result=arriving;}else if(continued<1e20){result=continued;}
+  // Contact continuation may wet a wall, but it cannot erase water already
+  // there. In a resting pool a floor-facing vertex samples one cell upward;
+  // replacing its value with that air sample cuts a hole below the waterline.
+  // Match uvClosedWallPhi: separation is owned by the explicit air term.
+  if(arriving<1e20){result=min(result,arriving);}else if(continued<1e20){result=min(result,continued);}
   return max(result,air);
 }
 // phi/V agreement (docs/uniform-geometric-phi-volume-agreement-handoff.md). V knows
@@ -486,7 +490,13 @@ fn uvPhiCubic(position:vec3f)->f32{
   for(var dz=-1;dz<3;dz++){var plane=0.0;
     for(var dy=-1;dy<3;dy++){var row=0.0;
       for(var dx=-1;dx<3;dx++){let o=vec3i(dx,dy,dz);
-        let s=textureLoad(uvPhiIn,clamp(base+o,vec3i(0),dims()),0).x;row+=wx[dx+1]*s;
+        let vertex=clamp(base+o,vec3i(0),dims());
+        let s=textureLoad(uvPhiIn,vertex,0).x;
+        // Buried phi is an air sentinel, not an interpolation sample. The
+        // wider cubic stencil can reach it even when the departure cell is
+        // open. Fall back to the enclosing trilinear cell at that boundary.
+        if(wx[dx+1]*wy[dy+1]*wz[dz+1]!=0.0&&uvBuried(vec3f(vertex))){return uvPhi(p);}
+        row+=wx[dx+1]*s;
         if(all(o>=vec3i(0))&&all(o<=vec3i(1))){lo=min(lo,s);hi=max(hi,s);}}
       plane+=wy[dy+1]*row;}
     value+=wz[dz+1]*plane;}
@@ -815,8 +825,14 @@ fn uvNormalizeDonors(@builtin(global_invocation_id)gid:vec3u){
 // control arm stores the untreated sum bit for bit. Words 5 and 6 of the
 // diagnostics buffer price it: cells zeroed, and the discarded mass in
 // sixty-fourths of the threshold.
-fn uvDustFloor(value:f32)->f32{
+fn uvDustFloor(id:vec3i,value:f32)->f32{
   if(value==0.0||!(abs(value)<params.tuning.z)){return value;}
+  // Small deposits beside a resolved interface are transported water, not
+  // abandoned far-air residue. Deleting them every step drains a resting
+  // pool and makes total-volume correction lower its otherwise flat surface.
+  // These cells already have phi support, so retaining V adds no live tiles.
+  let band=4.0*max(params.cellGravity.x,max(params.cellGravity.y,params.cellGravity.z));
+  if(value>0.0&&uvPhi(vec3f(id)+vec3f(0.5))<band){return value;}
   atomicAdd(&reductions[5],1u);
   atomicAdd(&reductions[6],min(u32(abs(value)/params.tuning.z*64.0),64u));
   return 0.0;
@@ -872,7 +888,7 @@ fn uvGather(@builtin(global_invocation_id)gid:vec3u){
     value+=weight*volume(uvCell(uvDonorFrom(i,base,k,weight)));`}}` : `for(var k=0u;k<9u;k++){value+=uvEdges[uvEdgeAddress(i)].weight[k]*volume(uvCell(uvDonor(i,k)));}`}
   value+=min(dropSource(id),max(0.0,uvOpen(id)-value));
   if(uvOpen(id)>0.0){value+=inflowSweptPlugSource(id,params.dimsDt.w);}
-  textureStore(volumeOut,id,vec4f(uvDustFloor(value)));
+  textureStore(volumeOut,id,vec4f(uvDustFloor(id,value)));
   textureStore(gammaOut,id,vec4f(uvTarget(id)));
 }
 ${uniformVolumeTargetWGSL(uniformAbOn("targetcache"))}
@@ -1089,7 +1105,7 @@ fn uvLimitedFlux(i:u32,j:u32,axis:u32)->f32{
 fn uvCommitSharpen(@builtin(global_invocation_id)gid:vec3u){
   let id=uvWorkId(gid);
   if(valid(id)&&!uvSharpenTileActive(id)){
-    textureStore(volumeOut,id,vec4f(uvDustFloor(volume(id))));return;
+    textureStore(volumeOut,id,vec4f(uvDustFloor(id,volume(id))));return;
   }
   if(!valid(id)){return;}let i=linearIndex(id);var terms:array<f32,6>;
   for(var axis=0u;axis<3u;axis++){var e=vec3i(0);e[axis]=1;terms[2u*axis]=0.0;terms[2u*axis+1u]=0.0;
@@ -1097,7 +1113,7 @@ fn uvCommitSharpen(@builtin(global_invocation_id)gid:vec3u){
     // the negative owner still needs a map check before reading its scratch.
     if(valid(id+e)${uniformAbOn("sharpenflux") ? `&&select(uvSharpenTileActive(id+e),(uvEdges[uvEdgeAddress(i)].base&(1u<<(5u*axis)))!=0u,uvPageWorkEnabled())` : ""}){terms[2u*axis]=-uvLimitedFlux(i,linearIndex(id+e),axis);}
     if(valid(id-e)${uniformAbOn("sharpenflux") ? "&&uvSharpenTileActive(id-e)" : ""}){terms[2u*axis+1u]=uvLimitedFlux(linearIndex(id-e),i,axis);}}
-  textureStore(volumeOut,id,vec4f(uvDustFloor(volume(id)+d4Sum6(terms))));
+  textureStore(volumeOut,id,vec4f(uvDustFloor(id,volume(id)+d4Sum6(terms))));
 }
 // The two-level velocity sampler and the tile classes the shrunk velocity
 // extension runs on: one classification per step on the ceil(n/4)^3 tile grid,

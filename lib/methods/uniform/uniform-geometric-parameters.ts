@@ -27,7 +27,7 @@ params.push({kind:"select",key:"sharpeningWorkMap",label:"Sharpening work map",d
   hint:"Skip sharpening work in 4×4×4 tiles with no cell in the admission band. Identical result to the dense schedule; Off retains the dense control for comparison."});
 params.push({kind:"number",key:"volumeDustThreshold",label:"Volume dust floor",default:1e-3,tier:"fine",update:"runtime",
   min:0,max:1e-3,step:1e-7,digits:7,unit:"cell volumes",
-  hint:"Discard |V| below this wherever transport or sharpening writes V, ULP-scale negatives included. The 1e-3 default removes residue that keeps transport tiles active; the diagnostics report discarded mass. Zero is off and stores the untreated sum bit for bit."});
+  hint:"Discard |V| below this outside the 4h surface band, plus ULP-scale negatives. Positive deposits near the surface are preserved. The 1e-3 default removes far-air residue that keeps transport tiles active; the diagnostics report discarded mass. Zero is off and stores the untreated sum bit for bit."});
 params.push({kind:"number",key:"orphanDustThreshold",label:"Orphan dust floor",default:0.01,tier:"fine",update:"runtime",
   min:0,max:0.05,step:0.001,digits:3,unit:"cell volumes",
   hint:"Extra cleanup once per step for dilute volume beyond the 4h surface band. Preserves clusters holding a quarter cell or containing a cell above 5%, cut cells, and surface neighbours. Requires the regular dust floor. Discarded mass is reported; total surface correction matches remaining V and does not replace it. Zero disables extra cleanup."});
