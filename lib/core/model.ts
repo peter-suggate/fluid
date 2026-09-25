@@ -338,6 +338,13 @@ export interface FluidInflow {
   start_s: number;
   end_s: number;
   ramp_s: number;
+  /**
+   * The tap. False shuts the nozzle off without forgetting where it is aimed or
+   * when it is scheduled; absent means on. Only the injected strength reads it —
+   * the allocation budget still sizes for the whole schedule, so flipping the
+   * tap mid-run is a live edit rather than a restart.
+   */
+  enabled?: boolean;
 }
 
 export interface CameraState {

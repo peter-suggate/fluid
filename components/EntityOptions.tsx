@@ -364,15 +364,18 @@ export function EntityOptionRows<Patch, Doc>({ entity }: { entity: EditorEntity<
   return <>
     {choices.map((group) => {
       const current = group.options.find((option) => option.id === group.value);
+      const other = group.toggle
+        ? group.options.find((option) => option.id !== group.value && option.enabled !== false)
+        : undefined;
       return <ToolstripRow
         key={group.id}
         tag={group.tag ?? group.label}
         value={current?.label ?? group.value}
         name={group.label}
-        hint={current?.hint}
+        hint={other ? other.hint : current?.hint}
         active={open === group.id}
         testId={`entity-option-${group.id}`}
-        onClick={() => toggle(group.id)}
+        onClick={() => other ? commitChoice(group, other) : toggle(group.id)}
       >
         {open === group.id && <Choice
           ariaLabel={group.label}

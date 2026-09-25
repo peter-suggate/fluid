@@ -218,6 +218,8 @@ export type EditorActionIcon =
   | "erase"
   | "region"
   | "hose"
+  | "tap-open"
+  | "tap-close"
   | "prop"
   | "carry"
   | "drop"

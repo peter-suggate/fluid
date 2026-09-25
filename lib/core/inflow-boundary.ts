@@ -175,7 +175,7 @@ export function integratedInflowVolume(inflow: FluidInflow, from_s: number, to_s
 }
 
 export function averageInflowStrength(inflow: FluidInflow, from_s: number, to_s: number) {
-  if (!(to_s > from_s)) return 0;
+  if (!(to_s > from_s) || inflow.enabled === false) return 0;
   const breakpoints = [from_s, to_s, inflow.start_s, inflow.end_s, inflow.start_s + inflow.ramp_s, inflow.end_s - inflow.ramp_s, 0.5 * (inflow.start_s + inflow.end_s)]
     .filter((time) => time >= from_s && time <= to_s)
     .sort((a, b) => a - b)

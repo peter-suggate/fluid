@@ -687,12 +687,12 @@ export function sceneEditRequiresReset(before: SceneDescription, after: SceneDes
     || rigidAllocationKey(before, methodId) !== rigidAllocationKey(after, methodId);
 }
 
-/** Where the nozzle is, which way it points, and how far it reaches. */
+/** Where the nozzle is, which way it points, how far it reaches, and whether its tap is open. */
 function inflowAimKey(inflow: SceneDescription["fluid"]["inflow"]): string {
   if (!inflow) return "none";
   const { center_m: c, velocity_m_s: v } = inflow;
   const speed = Math.hypot(v.x, v.y, v.z) || 1;
-  return `${c.x},${c.y},${c.z}:${v.x / speed},${v.y / speed},${v.z / speed}:${inflow.length_m}`;
+  return `${c.x},${c.y},${c.z}:${v.x / speed},${v.y / speed},${v.z / speed}:${inflow.length_m}:${inflow.enabled !== false}`;
 }
 
 /**

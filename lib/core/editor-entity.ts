@@ -303,6 +303,11 @@ export interface EditorChoiceGroup<Patch = Partial<SceneDescription>> {
   /** The `EditorChoice.id` currently in force. */
   readonly value: string;
   readonly options: readonly EditorChoice<Patch>[];
+  /**
+   * A two-option switch: a click on its row commits the other option instead of
+   * opening a picker, because a picker for on/off is one click too many.
+   */
+  readonly toggle?: boolean;
 }
 
 /**

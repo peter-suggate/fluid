@@ -15,6 +15,7 @@ import {
   type EditorFrame,
   type EditorHandle,
 } from "./editor-entity";
+import type { EditorAction } from "./editor-action";
 import type { FluidInflow, Quaternion, SceneDescription, Vec3 } from "./model";
 
 /**
@@ -83,6 +84,38 @@ export function createInflowAt(
     start_s: 0,
     end_s: Math.max(1, scene.duration_s),
     ramp_s: 0.1,
+  };
+}
+
+export function inflowIsOn(inflow: FluidInflow): boolean {
+  return inflow.enabled !== false;
+}
+
+/**
+ * Open or shut the tap. Nothing else about the hose changes, so shutting it and
+ * opening it again puts back exactly the jet that was running.
+ */
+export function setInflowOn(inflow: FluidInflow, on: boolean): FluidInflow {
+  const { enabled: _enabled, ...rest } = inflow;
+  void _enabled;
+  return on ? rest : { ...rest, enabled: false };
+}
+
+/** The ring's one hose verb: flip the tap from wherever the hose is clicked. */
+function inflowTapAction(scene: SceneDescription, inflow: FluidInflow): EditorAction {
+  const on = inflowIsOn(inflow);
+  return {
+    id: "inflow-tap",
+    label: on ? "Turn off" : "Turn on",
+    icon: on ? "tap-close" : "tap-open",
+    tone: "inflow",
+    hint: on ? "Shut the hose's tap; the jet keeps its aim and schedule" : "Open the hose's tap",
+    effect: {
+      kind: "scene",
+      label: on ? "Turned the hose off" : "Turned the hose on",
+      scene: { ...scene, fluid: { ...scene.fluid, inflow: setInflowOn(inflow, !on) } },
+      reseed: true,
+    },
   };
 }
 
@@ -198,7 +231,9 @@ function inflowEntityFor(context: EditorEntityContext): EditorEntity | undefined
     tone: "inflow",
     frame,
     box,
-    sizeLabel: `⌀${(2 * inflow.radius_m).toFixed(3)} m · ${speed.toFixed(2)} m/s · ${inflowFlowRate_L_s(inflow).toFixed(1)} L/s`,
+    sizeLabel: inflowIsOn(inflow)
+      ? `⌀${(2 * inflow.radius_m).toFixed(3)} m · ${speed.toFixed(2)} m/s · ${inflowFlowRate_L_s(inflow).toFixed(1)} L/s`
+      : `⌀${(2 * inflow.radius_m).toFixed(3)} m · tap off`,
     handles: [
       ...boxHandles(box, {
         drag: (sides, point_m) => {
@@ -218,6 +253,17 @@ function inflowEntityFor(context: EditorEntityContext): EditorEntity | undefined
     draftSubject: "inflow",
     editLabel: (handle) => handle.kind === "tip" ? "Aimed the hose"
       : handle.space === "world" ? "Moved the hose" : "Resized the hose",
+    // First, and a single click: the tap is the thing reached for most.
+    choices: [{
+      id: "tap",
+      label: "Tap",
+      value: inflowIsOn(inflow) ? "on" : "off",
+      toggle: true,
+      options: [
+        { id: "on", label: "On", hint: "Open the tap", apply: () => patch(setInflowOn(inflow, true)) },
+        { id: "off", label: "Off", hint: "Shut the tap", apply: () => patch(setInflowOn(inflow, false)) },
+      ],
+    }],
     fields: [
       ...positionFields(inflow.center_m,
         (center_m) => patch(moveInflow(inflow, center_m, scene.container))),
@@ -312,6 +358,10 @@ export const inflowEntity: EditorEntityDefinition = {
     return entity ? [entity] : [];
   },
   find: (context, id) => id === INFLOW_SELECTION_ID ? inflowEntityFor(context) : undefined,
+  actions: (context) => {
+    const inflow = context.scene.fluid.inflow;
+    return inflow ? [inflowTapAction(context.scene, inflow)] : [];
+  },
   pick: (context, ray, exclude) => {
     if (pickExcluded(exclude, "inflow", INFLOW_SELECTION_ID)) return undefined;
     const entity = inflowEntityFor(context);
