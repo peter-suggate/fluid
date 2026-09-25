@@ -1,0 +1,134 @@
+[
+  {
+    "size": 128,
+    "pressureCycleBudget": "fixed",
+    "pressureTolerance": 5,
+    "transitionResidual": 0.5105799436569214,
+    "fineBytes": 430328112,
+    "preparedBytes": 435088888,
+    "actualAdditionalBytes": 4760776,
+    "actualMemoryOverhead": 0.011063130358539067,
+    "fineTimes": [
+      117.16937500000495,
+      81.41045800000575,
+      83.77162500000122,
+      86.03041700000176,
+      89.89349999999831,
+      92.62350000000151
+    ],
+    "coarseTimes": [
+      30.350709000005736,
+      22.63812499999767,
+      21.993207999999868,
+      20.79287500000646,
+      19.189832999996725,
+      19.999874999994063
+    ],
+    "transitionMs": 67.13145800000348,
+    "maxRestrictionError": 6.919726729393005e-07,
+    "restrictionMassRelative": 1.5626446704334619e-09,
+    "coarseEvolutionMassRelative": 3.06247681909409e-07,
+    "allocatedBytes": 434934504,
+    "coarseAdditionalBytes": 4701272,
+    "startupTransferWarmup": false
+  },
+  {
+    "size": 128,
+    "pressureCycleBudget": "lagged",
+    "pressureTolerance": 5,
+    "transitionResidual": 0.5105799436569214,
+    "fineBytes": 430328112,
+    "preparedBytes": 435088888,
+    "actualAdditionalBytes": 4760776,
+    "actualMemoryOverhead": 0.011063130358539067,
+    "fineTimes": [
+      80.5188330000019,
+      57.483791999999085,
+      59.49470899999869,
+      62.66195800000423,
+      66.2457080000022,
+      69.16929099999834
+    ],
+    "coarseTimes": [
+      9.516834000001836,
+      11.227833000004466,
+      11.498916000004101,
+      11.808124999995925,
+      11.456333000001905,
+      11.39904199999728
+    ],
+    "transitionMs": 16.96375000000262,
+    "maxRestrictionError": 6.919726729393005e-07,
+    "restrictionMassRelative": 1.5626446704334619e-09,
+    "coarseEvolutionMassRelative": 3.06247681909409e-07,
+    "allocatedBytes": 434934504,
+    "coarseAdditionalBytes": 4701272,
+    "startupTransferWarmup": false
+  },
+  {
+    "size": 128,
+    "pressureCycleBudget": "fixed",
+    "pressureTolerance": 5,
+    "transitionResidual": 0.5105799436569214,
+    "fineBytes": 430328112,
+    "preparedBytes": 435088888,
+    "actualAdditionalBytes": 4760776,
+    "actualMemoryOverhead": 0.011063130358539067,
+    "fineTimes": [
+      90.13937499999884,
+      81.0278330000001,
+      84.88620800000353,
+      87.41883300000336,
+      89.68766699999833,
+      91.16533300000447
+    ],
+    "coarseTimes": [
+      49.92466599999898,
+      21.439083000004757,
+      20.048083000001498,
+      19.21933299999364,
+      20.765041999999085,
+      19.492541999999958
+    ],
+    "transitionMs": 15.543249999995169,
+    "maxRestrictionError": 6.919726729393005e-07,
+    "restrictionMassRelative": 1.5626446704334619e-09,
+    "coarseEvolutionMassRelative": 3.06247681909409e-07,
+    "allocatedBytes": 434934504,
+    "coarseAdditionalBytes": 4701272,
+    "startupTransferWarmup": true
+  },
+  {
+    "size": 128,
+    "pressureCycleBudget": "lagged",
+    "pressureTolerance": 5,
+    "transitionResidual": 0.5105799436569214,
+    "fineBytes": 430328112,
+    "preparedBytes": 435088888,
+    "actualAdditionalBytes": 4760776,
+    "actualMemoryOverhead": 0.011063130358539067,
+    "fineTimes": [
+      59.06070900000486,
+      58.50999999999476,
+      59.23149999999441,
+      63.71612499999901,
+      68.22491699999955,
+      69.23808399999689
+    ],
+    "coarseTimes": [
+      9.5,
+      12.037292000000889,
+      11.539707999996608,
+      10.967375000000175,
+      11.857791999995243,
+      11.926625000000058
+    ],
+    "transitionMs": 15.65887500000099,
+    "maxRestrictionError": 6.919726729393005e-07,
+    "restrictionMassRelative": 1.5626446704334619e-09,
+    "coarseEvolutionMassRelative": 3.06247681909409e-07,
+    "allocatedBytes": 434934504,
+    "coarseAdditionalBytes": 4701272,
+    "startupTransferWarmup": true
+  }
+]

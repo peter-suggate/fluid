@@ -17,6 +17,12 @@ const params: MethodParamSpec[] = UNIFORM_PARAMS.filter(p => !omitted.has(p.key)
     hint: "Only cells within this distance of phi=0 participate in local volume return." };
   return p;
 });
+params.push({kind:"select",key:"prepareCoarseSimulation",label:"Prepare coarse simulation",default:"off",tier:"coarse",update:"solver",
+  options:[{value:"off",label:"Off"},{value:"on",label:"On"}],
+  hint:"Prepare a live switch to cells four times wider. Restarts the scene; adds a small amount of GPU memory."});
+params.push({kind:"select",key:"coarseSimulation",label:"Simulation resolution",default:"off",tier:"coarse",update:"runtime",
+  options:[{value:"off",label:"Fine"},{value:"on",label:"Coarse"}],
+  hint:"Switch to the prepared coarse grid without resetting time. Switch either way without restarting; lost fine detail is reconstructed."});
 params.push({kind:"select",key:"pageSize",label:"Page size",default:"32",tier:"coarse",update:"solver",
   options:[{value:"16",label:"16³"},{value:"32",label:"32³"}],
   hint:"Cells along each domain page edge. Changing this rebuilds the solver and resets the simulation to time zero."});
@@ -148,7 +154,7 @@ params.push({kind:"select",key:"surfaceDeficitBalancing",label:"Surface-deficit 
 export const UNIFORM_GEOMETRIC_PARAMS: readonly MethodParamSpec[] = Object.freeze(params);
 /** Storage is a WebGPU implementation choice, excluded from the native contract. */
 const nativeSplashKeys = new Set(["phiCubicAdvection", "phiDrain", "airborneMomentum", "isolatedBodyVolume", "phiSeedCells"]);
-export const UNIFORM_GEOMETRIC_NATIVE_PARAMS = Object.freeze(params.filter(p => p.key !== "volumeStorage" && p.key !== "pageSize" && p.key !== "orphanDustThreshold" && (!UNIFORM_GEOMETRIC_SPLASH_KEYS.has(p.key) || nativeSplashKeys.has(p.key))));
+export const UNIFORM_GEOMETRIC_NATIVE_PARAMS = Object.freeze(params.filter(p => p.key !== "prepareCoarseSimulation" && p.key !== "coarseSimulation" && p.key !== "volumeStorage" && p.key !== "pageSize" && p.key !== "orphanDustThreshold" && (!UNIFORM_GEOMETRIC_SPLASH_KEYS.has(p.key) || nativeSplashKeys.has(p.key))));
 export const UNIFORM_GEOMETRIC_DEFAULTS: Readonly<MethodParamValues> = Object.freeze(
   Object.fromEntries(params.map(p => [p.key, p.default])),
 );
@@ -164,7 +170,7 @@ export function resolveUniformGeometricValues(values: MethodParamValues = {}): M
       + `see uniformGeometricSolverOptions. Drop the override or change the method.`);
   }
   return Object.fromEntries(params.map(spec => {
-    const raw = values[spec.key];
+    const raw = spec.key === "coarseSimulation" && values.prepareCoarseSimulation !== "on" ? "off" : values[spec.key];
     const numeric = spec.kind === "number" ? numberValue(values, params, spec.key) : 0;
     const value = spec.kind === "number" ? (spec.step === 1 ? Math.round(numeric) : numeric)
       : spec.options.some(option => option.value === raw) ? raw! : spec.default;

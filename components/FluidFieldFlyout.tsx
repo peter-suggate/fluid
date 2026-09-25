@@ -1,5 +1,6 @@
 "use client";
 
+import { UniformCoarseControl } from "./UniformCoarseControl";
 import { useState, type KeyboardEvent } from "react";
 import { getMethod } from "@/lib/core/method-registry";
 import type { MethodParamSpec, SelectParamSpec } from "@/lib/core/method-contract";
@@ -437,7 +438,8 @@ export function MethodSetupTab() {
   const method = getMethod(methodId);
   const values = resolvedMethodValues(methodState);
   const selects = method.params.filter((spec): spec is SelectParamSpec =>
-    spec.tier === "coarse" && spec.kind === "select");
+    spec.tier === "coarse" && spec.kind === "select"
+      && spec.key !== "prepareCoarseSimulation" && spec.key !== "coarseSimulation");
   const dials = method.params.filter((spec) => spec.tier === "coarse" && spec.kind !== "select");
   return <div className="fluid-field-settings" role="group" aria-label="Solver setup">
     <FieldList>
@@ -451,6 +453,7 @@ export function MethodSetupTab() {
           onChange={(level) => simulation.setQuality(level, session.id)}
         />
       </Field>}
+      <UniformCoarseControl />
       {selects.map((spec) => <MethodSelect key={spec.key} spec={spec} value={String(values[spec.key])}
         onChange={(value) => simulation.setMethodParam(methodId, spec.key, value, session.id)} />)}
       {dials.map((spec) => <MethodParamControl key={spec.key} spec={spec} methodId={methodId} />)}

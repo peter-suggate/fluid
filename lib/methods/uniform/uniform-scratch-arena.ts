@@ -6,8 +6,10 @@ import { planUniformCM11aHierarchy } from "./pressure-plan";
 import { rewritePressureTextureCalls } from "./uniform-pressure-pages";
 import { uniformDonorSliceWords } from "./uniform-volume-donor-sum.wgsl";
 
-export class UniformScratchArena {
-  readonly buffer: GPUBuffer;
+/** Allocation-free layout; different resolutions can share backing when their
+ * stages are serialized. No field in this layout is persistent simulation state. */
+export class UniformScratchLayout {
+  readonly byteLength: number;
   readonly donorOffset: number;
   readonly edgeBytes: number;
   readonly donorBytes: number;
@@ -16,7 +18,11 @@ export class UniformScratchArena {
   /** Word offset of the finest pressure tiles' clean/FAR flags, when enabled. */
   readonly farTileOffset?: number;
   private readonly offsets = new Map<string, number>();
-  constructor(device: GPUDevice, readonly dims: readonly [number,number,number], edgeBytes: number, retainDiagnostics=false) {
+  constructor(readonly dims: readonly [number,number,number], edgeBytes: number, retainDiagnostics=false, farTiles=uniformAbOn("fartiles")) {
+    if (!dims.every(d => Number.isSafeInteger(d) && d > 0))
+      throw new RangeError("Uniform scratch dimensions must be positive safe integers");
+    if (!Number.isSafeInteger(edgeBytes) || edgeBytes < 0 || edgeBytes % 4 !== 0)
+      throw new RangeError("Uniform scratch edge bytes must be a nonnegative multiple of four");
     const tiles=dims.reduce((n,d)=>n*Math.ceil(d/4),1);
     this.sharpenBaseWords=Math.ceil((6*tiles+3)/4)*4;
     // Solid displacement scatters one deposit per cell before tile classes
@@ -62,12 +68,30 @@ export class UniformScratchArena {
     // sits past every other range so no stage's live data can overlap it.
     const end=Math.max(extensionEnd*4,pressureWords*4,this.donorOffset+this.donorBytes);
     const pressureTiles=dims.reduce((n,d)=>n*Math.ceil((d+2)/4),1);
-    this.farTileOffset=uniformAbOn("fartiles")?Math.ceil(end/16)*4:undefined;
-    this.buffer=device.createBuffer({label:"Uniform shared stage scratch",size:this.farTileOffset===undefined?end:4*this.farTileOffset+12*pressureTiles+16,
-      usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
+    this.farTileOffset=farTiles?Math.ceil(end/16)*4:undefined;
+    this.byteLength=this.farTileOffset===undefined?end:4*this.farTileOffset+12*pressureTiles+16;
+    if (!Number.isSafeInteger(this.byteLength))
+      throw new RangeError("Uniform scratch layout exceeds safe integer addressing");
   }
   offset(label:string):number|undefined{return this.offsets.get(label);}
-  destroy():void{this.buffer.destroy();}
+}
+
+/** A layout plus owned or borrowed backing. Borrowed views are valid only while
+ * their owner is alive, and must never execute concurrently with another view.
+ * Every stage must initialize its own scratch after changing layouts. */
+export class UniformScratchArena extends UniformScratchLayout {
+  readonly buffer: GPUBuffer;
+  private readonly ownsBuffer: boolean;
+  constructor(device: GPUDevice, dims: readonly [number,number,number], edgeBytes: number,
+    retainDiagnostics=false, backing?: GPUBuffer) {
+    super(dims, edgeBytes, retainDiagnostics);
+    const usage=GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST;
+    if (backing && (backing.size < this.byteLength || (backing.usage & usage) !== usage))
+      throw new RangeError("Shared uniform scratch backing has insufficient capacity or usage");
+    this.ownsBuffer=backing===undefined;
+    this.buffer=backing ?? device.createBuffer({label:"Uniform shared stage scratch",size:this.byteLength,usage});
+  }
+  destroy():void{if(this.ownsBuffer)this.buffer.destroy();}
 }
 
 /** Keep the original f32 loads/stores and bounds behavior; only their backing

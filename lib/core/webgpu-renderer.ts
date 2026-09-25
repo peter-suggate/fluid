@@ -2888,7 +2888,14 @@ export class FluidLabRenderer {
         return undefined;
       } else this.appliedSceneUniformKey = sceneUniformKey;
     }
+    const previousResolution = this.gpuFluid.info.uniformSimulationCellScale;
     this.gpuFluid.applyRuntimeValues?.(config.values);
+    if (this.gpuFluid.info.uniformSimulationCellScale !== previousResolution) {
+      // A paused resolution transfer consumes no physics step, so the usual
+      // advance receipt will not publish its new grid to the controls.
+      this.gpuInfoCallback?.({ ...this.gpuFluid.info });
+      this.pausedPresentationRevision += 1;
+    }
     const topologyFrozen = config.topologyFrozen === true;
     if (this.topologyFreezeSolver !== this.gpuFluid || this.topologyFrozen !== topologyFrozen) {
       this.gpuFluid.setTopologyFrozen?.(topologyFrozen);

@@ -1,0 +1,138 @@
+[
+  {
+    "size": 64,
+    "pressureCycleBudget": "fixed",
+    "pressureTolerance": 5,
+    "transitionResidual": 0.14075589179992676,
+    "fineBytes": 54891244,
+    "preparedBytes": 55594756,
+    "actualAdditionalBytes": 703512,
+    "actualMemoryOverhead": 0.01281647032812738,
+    "fineTimes": [
+      39.03004099999998,
+      30.894290999999612,
+      28.745499999999993,
+      33.060583999999835,
+      33.37787500000013,
+      33.804582999999184
+    ],
+    "coarseTimes": [
+      13.314416000000165,
+      12.42370800000026,
+      12.683708999999908,
+      13.137458000000152,
+      13.014792000000853,
+      13.354957999999897
+    ],
+    "transitionMs": 11.036208999999872,
+    "maxRestrictionError": 3.627501428127289e-07,
+    "restrictionMassRelative": 3.7919006215895446e-09,
+    "coarseEvolutionMassRelative": 1.1310843276981578e-07,
+    "allocatedBytes": 55465844,
+    "coarseAdditionalBytes": 656744,
+    "startupTransferWarmup": true,
+    "baseCommit": "46a6842f"
+  },
+  {
+    "size": 64,
+    "pressureCycleBudget": "lagged",
+    "pressureTolerance": 5,
+    "transitionResidual": 0.14075589179992676,
+    "fineBytes": 54891244,
+    "preparedBytes": 55594756,
+    "actualAdditionalBytes": 703512,
+    "actualMemoryOverhead": 0.01281647032812738,
+    "fineTimes": [
+      19.57325000000037,
+      15.309584000000541,
+      15.870416999999179,
+      18.766332999999577,
+      19.20812500000011,
+      19.91912499999944
+    ],
+    "coarseTimes": [
+      7.378333999999995,
+      6.856541999999536,
+      7.0176250000004075,
+      6.7338330000002316,
+      6.303666999999223,
+      7.017959000000701
+    ],
+    "transitionMs": 10.840041999999812,
+    "maxRestrictionError": 3.627501428127289e-07,
+    "restrictionMassRelative": 3.7919006215895446e-09,
+    "coarseEvolutionMassRelative": 1.1310843276981578e-07,
+    "allocatedBytes": 55465844,
+    "coarseAdditionalBytes": 656744,
+    "startupTransferWarmup": true,
+    "baseCommit": "46a6842f"
+  },
+  {
+    "size": 128,
+    "pressureCycleBudget": "fixed",
+    "pressureTolerance": 5,
+    "transitionResidual": 1.5023678541183472,
+    "fineBytes": 430328112,
+    "preparedBytes": 435088888,
+    "actualAdditionalBytes": 4760776,
+    "actualMemoryOverhead": 0.011063130358539067,
+    "fineTimes": [
+      89.5096659999981,
+      81.6894159999938,
+      81.42333299999882,
+      84.2042500000025,
+      88.22487499999988,
+      89.85820899999817
+    ],
+    "coarseTimes": [
+      17.808666999997513,
+      18.516457999998238,
+      19.114207999999053,
+      18.896459000003233,
+      19.045165999996243,
+      20.48591600000509
+    ],
+    "transitionMs": 14.696374999999534,
+    "maxRestrictionError": 7.57281668484211e-07,
+    "restrictionMassRelative": 1.3610350900655002e-09,
+    "coarseEvolutionMassRelative": 4.673718254221215e-07,
+    "allocatedBytes": 434934504,
+    "coarseAdditionalBytes": 4701272,
+    "startupTransferWarmup": true,
+    "baseCommit": "46a6842f"
+  },
+  {
+    "size": 128,
+    "pressureCycleBudget": "lagged",
+    "pressureTolerance": 5,
+    "transitionResidual": 1.5023678541183472,
+    "fineBytes": 430328112,
+    "preparedBytes": 435088888,
+    "actualAdditionalBytes": 4760776,
+    "actualMemoryOverhead": 0.011063130358539067,
+    "fineTimes": [
+      65.21641600000294,
+      56.23633400000108,
+      57.80933299999742,
+      61.59137500000361,
+      66.08929100000387,
+      67.89066599999933
+    ],
+    "coarseTimes": [
+      9.227666999999201,
+      11.17608399999881,
+      11.32312500000262,
+      11.100250000003143,
+      13.60566700000345,
+      10.700958000001265
+    ],
+    "transitionMs": 14.83299999999872,
+    "maxRestrictionError": 7.57281668484211e-07,
+    "restrictionMassRelative": 1.3610350900655002e-09,
+    "coarseEvolutionMassRelative": 4.673718254221215e-07,
+    "allocatedBytes": 434934504,
+    "coarseAdditionalBytes": 4701272,
+    "startupTransferWarmup": true,
+    "baseCommit": "46a6842f"
+  }
+]

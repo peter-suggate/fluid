@@ -1,5 +1,6 @@
 "use client";
 
+import { UniformCoarseControl } from "./UniformCoarseControl";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { stageLensOverlayMode, type AnyStageLens } from "../lib/core/stage-lens";
 import { useSession } from "../lib/core/session/session-context";
@@ -466,6 +467,8 @@ export function SimPipelineOverlay({ lenses: override }: {
         hint={`Samples the method-owned advance boundary chain on a cadence without changing its algorithmic schedule.\n\n${sourceLabel}`} />
       <code data-testid="fluid-advance-cost" title={sourceLabel}>{advanceLabel}</code>
     </div>
+
+    {methodId === "uniform-volume" && <div className="scene-instrument-section"><UniformCoarseControl /></div>}
 
     {backend && <div className="scene-instrument-section" data-testid="physics-backend-control">
       <ChoiceField label={backend.label}

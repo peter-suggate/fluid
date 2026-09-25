@@ -13,6 +13,8 @@ export interface GPUFieldLocation {
 }
 
 export interface GPUEulerianInfo {
+  uniformCoarsePrepared?: boolean;
+  uniformSimulationCellScale?: 1 | 4;
   /** Root solver field-load audit; not yet extension/pressure hierarchy coverage. */
   uniformPageMissingReadFields?: number;
   uniformPageMissingReads?: number;

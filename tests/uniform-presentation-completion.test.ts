@@ -7,7 +7,7 @@ test("paused uniform presentations never submit zero-duration physics or change 
   for (const lastTime of [0, 0.017, 1]) {
     const info = { encodedSteps: 7, submittedTime_s: lastTime };
     const solver = Object.assign(Object.create(WebGPUUniformReferenceSolver.prototype), {
-      disposed: false, paperTimeStep: false, lastTime, info,
+      disposed: false, paperTimeStep: false, lastTime, executionInfo: info,
       scene: { numerics: { maxDt_s: 0.017 } },
       // There is intentionally no GPU device: a paused advance must return
       // before touching pipelines, queue submissions, or field resources.
@@ -51,4 +51,36 @@ test("uniform health retains its standalone fence and propagates failed supplied
   finish(); await standalone; assert.equal(retired, true);
   const failure = new Error("device lost before frame completed");
   await assert.rejects(solver.assertSimulationHealthy(Promise.reject(failure)), error => error === failure);
+});
+
+test("coarse activation waits while a fine pressure frame owns shared scratch", () => {
+  const solver=Object.assign(Object.create(WebGPUUniformReferenceSolver.prototype),{
+    coarseExecution:{},restriction:{},pendingFrame:Promise.resolve(),coarseRequested:false,
+  }) as WebGPUUniformReferenceSolver;
+  // No GPU device exists on this fixture: activation must not encode transfer
+  // or publish destination fields before the current frame releases the arena.
+  solver.requestCoarseSimulation();
+  assert.equal(solver.activateCoarseSimulation(),false);
+  assert.equal(solver.advanceTo(1),false);
+  assert.equal(solver.simulationCellScale,1);
+  assert.equal(solver.framePending,true);
+  Object.assign(solver,{disposed:true,pendingFrame:undefined});
+  assert.equal(solver.advanceTo(1),false,"a queued request cannot revive a destroyed solver");
+  assert.throws(()=>solver.requestCoarseSimulation(),/destroyed/);
+});
+
+test("fine activation waits for coarse pressure and a newer request can cancel it", () => {
+  const coarse=Object.assign(Object.create(WebGPUUniformReferenceSolver.prototype),{pendingFrame:Promise.resolve()});
+  const solver=Object.assign(Object.create(WebGPUUniformReferenceSolver.prototype),{
+    coarseExecution:coarse,activeCoarse:coarse,restriction:{},prolongation:{},coarseRequested:true,
+  }) as WebGPUUniformReferenceSolver;
+  assert.equal(solver.activateFineSimulation(),false);
+  assert.equal(solver.advanceTo(1),false);
+  assert.equal(solver.simulationCellScale,4);
+  assert.equal(solver.framePending,true);
+  solver.requestCoarseSimulation();
+  assert.equal(solver.advanceTo(1),false);
+  assert.equal(solver.simulationCellScale,4);
+  Object.assign(solver,{disposed:true});
+  assert.throws(()=>solver.requestFineSimulation(),/destroyed/);
 });
