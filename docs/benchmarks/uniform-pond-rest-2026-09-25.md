@@ -244,3 +244,42 @@ ceiling, a Tall Cells Hills exit failure, and exhaustion of the 480-second
 suite budget. These failures remain unresolved; this checkpoint is not a
 clean full-regression result. Receipts are in
 `artifacts/pond-rest/sparse-gate.log`.
+
+### Production candidate: damped Jacobi with bounded recovery admission
+
+Following the controlled comparison, the geometric Jacobi paths now use
+weight 2/3 consistently: tiled updates, fused coarse visits and the dense
+fallback. Red-black updates remain unchanged. Relaxation precedes projection
+onto the pressure lower bound, so separating-contact constraints remain
+enforced.
+
+When a fixed-budget geometric solve rejects a finite candidate and both it
+and the retained pressure already have residual at or below the existing
+1e-4 coarse absolute tolerance, the candidate is still rolled back, but it
+does not trigger recovery. The remaining configured cycles still execute.
+This is not a new acceptance tolerance: positive requested tolerances,
+non-finite candidates and larger regressions retain the original recovery
+and publication rules.
+
+The production pond run completed 90 frames with no recovery at any sampled
+frame, residual 0.0000616239 s⁻¹ at frame 90, and relative volume drift below
+1e-6. The still-pond regression now explicitly requires residual below 1e-4
+and zero recovery, in addition to its unchanged surface/mass checks.
+
+A matched local timing comparison measured fenced physics advances, excluding
+compilation, the first five frames, stats and diagnostic texture readback.
+For frames 6–60 the undamped control median was 57.4904 ms (p95 58.8161),
+and the production candidate median was 56.6796 ms (p95 57.6295). This single
+pair shows no material added cost here; it is not a general speedup claim.
+Raw samples are in `production-before.json` and `production-after.json`
+under `artifacts/pond-rest/`. Use `--jacobi-weight=1` for the undamped control
+now that the production default is damped.
+
+Validation of this candidate passed all six geometric separation/rebound
+cases and all six adaptive-pressure cases, including injected corrupt
+correction recovery and strict-target publication withholding. The
+strengthened pond regression and 40-frame dense-versus-tiled bitwise impact
+comparison also passed. The first attempt at the latter was blocked by
+another task's GPU lease and was rerun after that task finished; no numerical
+assertion was relaxed. Type checking still reports existing errors outside
+these changed files.

@@ -55,17 +55,17 @@ try {
   if (arg("sigma", "scene") !== "scene") scene.fluid.surfaceTension_N_m = Number(arg("sigma", "0"));
   if (arg("gravity", "scene") !== "scene") scene.fluid.gravity_m_s2 = { x: 0, y: Number(arg("gravity", "0")), z: 0 };
   const values = resolveMethodValues(uniformVolumeMethod, "balanced", { pressureResidualTolerance: 0, ...overrides });
-  const weight = Number(arg("jacobi-weight", "1"));
+  const weightOverride=arg("jacobi-weight", "production");
+  const weight = weightOverride==="production" ? 0.6666667 : Number(weightOverride);
   let dampingReplacements=0;
-  if (weight !== 1) {
-    assert.ok(weight > 0 && weight < 1);
+  if (weightOverride !== "production") {
+    assert.ok(weight > 0 && weight <= 1);
     const compiler=gpuCompilationManagerFor(device), create=compiler.createShaderModule.bind(compiler);
     compiler.createShaderModule = descriptor => create({...descriptor,code:descriptor.code
-      .replace(/(mgPressureOutStore\(id,|textureStore\(mgPressureOut,id,)vec4f\(max\(p,minimum\)\)\);/g,(_,prefix) => {dampingReplacements++;return `${prefix}vec4f(max(mix(mgP(id),p,${weight}),minimum)));`;})
-      .replace(/(mgPressureRWStore\(id,|textureStore\(mgPressureRW,id,)vec4f\(max\(p,minimum\)\)\);/g,(_,prefix) => {dampingReplacements++;return `${prefix}vec4f(max(mix(mgJacobiP(id),p,${weight}),minimum)));`;})});
+      .replace(/const MG_JACOBI_WEIGHT:f32=[0-9.]+;/g,() => {dampingReplacements++;return `const MG_JACOBI_WEIGHT:f32=${weight.toFixed(8)};`;})});
   }
   solver = await uniformVolumeMethod.createSolverAsync!(device, scene, "balanced", values, undefined, () => {}) as WebGPUUniformReferenceSolver;
-  if(weight!==1)assert.ok(dampingReplacements>0,"experimental damping must patch the compiled shader");
+  if(weightOverride!=="production")assert.ok(dampingReplacements>0,"experimental damping must patch the compiled shader");
   const { nx, ny, nz } = solver.info, h = scene.container.height_m / ny;
   const open = await read(device, solver.denseLevelSetVolumeSource!.openFraction);
   const level = scene.container.height_m * scene.container.fillFraction / h;
@@ -99,9 +99,10 @@ try {
   }
   const readPressure = (t:GPUTexture) => read(device!, snapshots.get(t) ?? t);
   const samples: unknown[] = [];
+  const stepTimes_ms:number[]=[];
   let pressureDiagnostic: unknown;
   for (let frame = 0; frame <= frames; frame++) {
-    if (frame) { assert.ok(solver.advanceTo(frame / 30, [])); await solver.awaitFrameCompletion(); }
+    if (frame) { const started=performance.now();assert.ok(solver.advanceTo(frame / 30, [])); await solver.awaitFrameCompletion();await device.queue.onSubmittedWorkDone();if(frame>5)stepTimes_ms.push(performance.now()-started); }
     const stats = await solver.readStats();
     if (frame === 1 && arg("pressure-dump", "off") === "on") {
       // Diagnostic-only access: inspect the actual solver hierarchy, without
@@ -174,5 +175,5 @@ try {
   }
   assert.deepEqual(errors, []);
   mkdirSync(resolve(out, ".."), { recursive: true });
-  writeFileSync(out, JSON.stringify({ arm, dimensions: [nx, ny, nz], level, h, values, hose:scene.fluid.inflow.enabled, jacobiWeight: weight, dampingReplacements, noRecovery, sigma: scene.fluid.surfaceTension_N_m, gravity: scene.fluid.gravity_m_s2, samples, pressureDiagnostic }, null, 2));
+  writeFileSync(out, JSON.stringify({ arm, dimensions: [nx, ny, nz], level, h, values, hose:scene.fluid.inflow.enabled, jacobiWeight: weight, dampingReplacements, noRecovery, sigma: scene.fluid.surfaceTension_N_m, gravity: scene.fluid.gravity_m_s2, samples, pressureDiagnostic, stepTimes_ms }, null, 2));
 } finally { solver?.destroy(); device?.destroy(); await releaseWebGPUExclusiveLock(); }

@@ -7,7 +7,7 @@ import { uniformCoarseSolverWGSL, uniformPressureStateWGSL } from "./uniform-coa
  * helpers as projection.  The fragment intentionally contains no alternate
  * solid or free-surface discretization.
  */
-import { UNIFORM_CM11A_RECOVERY_SWEEPS, UNIFORM_CM11A_RECOVERY_REDUCTION } from "./pressure-policy";
+import { UNIFORM_CM11A_RECOVERY_SWEEPS, UNIFORM_CM11A_RECOVERY_REDUCTION, UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE } from "./pressure-policy";
 import { uniformAbOn } from "./uniform-ab-switch";
 
 /**
@@ -262,7 +262,7 @@ fn mgSmoothCellJacobi(id:vec3i){
     diagonalTerms[n]=a;sumTerms[n]=select(0.0,a*mgJacobiP(q),${neighbourMask ? "((mask>>u32(n+1))&1u)!=0u" : "mgBakedLiquid(q)"});}
   let diagonal=mgD4Sum6(diagonalTerms);let sum=mgD4Sum6(sumTerms);
   let p=select(0.0,(sum+textureLoad(mgRhsIn,id,0).x)/diagonal,diagonal>0.0);
-  textureStore(mgPressureRW,id,vec4f(max(p,minimum)));
+  textureStore(mgPressureRW,id,vec4f(max(mix(mgJacobiP(id),p,MG_JACOBI_WEIGHT),minimum)));
 }
 fn mgPRW(p:vec3i)->f32{return textureLoad(mgPressureRW,mgClamp(p,mg.levelDims.xyz)).x;}
 // One cell's update-or-projection, shared by both in-place kernels so the two
@@ -461,10 +461,13 @@ const MG_JACOBI_TILE_BODY = `  let old=mgP(id);let minimum=textureLoad(mgMinimum
     diagonalTerms[n]=a;sumTerms[n]=select(0.0,a*mgP(q),${neighbourMask ? "((mask>>u32(n+1))&1u)!=0u" : "mgBakedLiquid(q)"});}
   let diagonal=mgD4Sum6(diagonalTerms);let sum=mgD4Sum6(sumTerms);
   let p=select(0.0,(sum+textureLoad(mgRhsIn,id,0).x)/diagonal,diagonal>0.0);
-  textureStore(mgPressureOut,id,vec4f(max(p,minimum)));
+  textureStore(mgPressureOut,id,vec4f(max(mix(old,p,MG_JACOBI_WEIGHT),minimum)));
 `;
 
 export const uniformPressureMultigridWGSL = /* wgsl */ `
+// Damping removes the alternating-sign error that unweighted Jacobi merely
+// flips each sweep. Retain simultaneous updates and project after relaxation.
+const MG_JACOBI_WEIGHT:f32=0.6666667;
 struct UniformMGParams {
   fineDims: vec4u,
   levelDims: vec4u,
@@ -546,6 +549,13 @@ fn mgCheckCycleConvergence(){
   if(accepted){atomicStore(&mgState.convergence[19],candidate);}
   else if(mg.control.z!=4u){
     atomicAdd(&mgState.convergence[20],1u);
+    // Fixed-budget solves have no user-requested stopping tolerance. Keep
+    // the better field, but do not invoke recovery for a finite fluctuation
+    // when both iterates already meet the hierarchy's absolute accuracy.
+    // Positive targets, non-finite candidates and larger regressions retain
+    // the ordinary recovery/publication contract.
+    let floor=${UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE};
+    if(MG_SIMULTANEOUS&&mgTolerance.x==0.0&&candidate<0x7f800000u&&bitcast<f32>(candidate)<=floor&&bitcast<f32>(atomicLoad(&mgState.convergence[19]))<=floor){return;}
     atomicStore(&mgState.convergence[22],1u);
     return;
   }
@@ -995,7 +1005,7 @@ fn mgSmoothColour(@builtin(global_invocation_id) gid:vec3u){
   let p=select(0.0,(sum+textureLoad(mgRhsIn,id,0).x)/diagonal,diagonal>0.0);
   // CM11a Eq. 18 says that p_min is enforced while smoothing. Project the
   // newly updated colour before the opposite colour consumes it.
-  textureStore(mgPressureOut,id,vec4f(max(p,textureLoad(mgMinimumIn,id,0).x)));
+  textureStore(mgPressureOut,id,vec4f(max(select(p,mix(old,p,MG_JACOBI_WEIGHT),MG_SIMULTANEOUS),textureLoad(mgMinimumIn,id,0).x)));
 }
 @compute @workgroup_size(64)
 fn mgSmoothTilesJacobi(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
