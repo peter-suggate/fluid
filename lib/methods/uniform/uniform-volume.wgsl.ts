@@ -282,24 +282,20 @@ fn uvEmbeddedAir(p:vec3f,advected:f32)->f32{
   }
   return result;
 }
-// Continue liquid onto voxel wall vertices -- in both directions. A wall-face
-// vertex has no normal velocity, so uvTrace returns it to itself: a min-only
-// contact term is a fixed point, and one splash over a stair tread leaves phi<0
-// there for the rest of the run with no V behind it, owning a false pressure
-// row whose |phi| the volume correction then amplifies through its own wall
-// gradient. A wall face is not an independent store of phi. It is ASSIGNED the
-// continuation of the open cells it touches -- the arriving ones when the
-// interior moves into the wall, otherwise all of them -- so it wets when liquid
-// reaches it and dries the step after the cell beside it turns to air. Only a
-// vertex buried in solid, with no open incident cell, keeps its own value. The
-// air update runs last so solved separation still wins at edges/corners.
+// A closed wall has no normal transport, so its old negative phi can survive
+// after the liquid drains. Continue the interior value onto an unsupported wet
+// vertex so that it can dry. Keep ordinary wetting and liquid-supported contact
+// conservative: sampling upward from a submerged stair tread can reach air even
+// in a perfectly planar resting pool. Explicit solved separation still wins.
 fn uvEmbeddedContact(p:vec3f,advected:f32)->f32{
   ${solidFreeTrace ? `// Identity with no cut cell: every branch below needs a closed neighbour,
   // and max(advected,-1e20) is advected for every representable phi.
   if(uvSolidFree()){return advected;}` : ""}
   var arriving=1e20;var continued=1e20;var air=-1e20;
+  var supported=advected>=0.0;
   for(var k=0u;k<8u;k++){
     let fluid=vec3i(p)-vec3i(1)+uvCorner(k);if(cellOpenFraction(fluid)<=1e-5){continue;}
+    if(valid(fluid)&&volume(fluid)>UV_LIQUID_EVIDENCE){supported=true;}
     for(var axis=0u;axis<3u;axis++){
       let side=select(-1,1,fluid[axis]<i32(p[axis]));var solid=fluid;solid[axis]+=side;
       if(!valid(solid)||cellOpenFraction(solid)>1e-5){continue;}
@@ -317,11 +313,10 @@ fn uvEmbeddedContact(p:vec3f,advected:f32)->f32{
     }
   }
   var result=advected;
-  // Contact continuation may wet a wall, but it cannot erase water already
-  // there. In a resting pool a floor-facing vertex samples one cell upward;
-  // replacing its value with that air sample cuts a hole below the waterline.
-  // Match uvClosedWallPhi: separation is owned by the explicit air term.
-  if(arriving<1e20){result=min(result,arriving);}else if(continued<1e20){result=min(result,continued);}
+  // A wall is not an independent reservoir of liquid surface. Use the same
+  // evidence threshold as ghost draining, but only its incident open cells;
+  // water a cell farther away must not keep a drained wall vertex pinned.
+  if(arriving<1e20){result=select(arriving,min(result,arriving),supported);}else if(continued<1e20){result=select(continued,min(result,continued),supported);}
   return max(result,air);
 }
 // phi/V agreement (docs/uniform-geometric-phi-volume-agreement-handoff.md). V knows
