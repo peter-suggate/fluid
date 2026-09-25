@@ -75,8 +75,8 @@ params.push({kind:"number",key:"phiAgreementClamp",label:"Agreement clamp",defau
 
 // Splash survival (docs/uniform-geometric-splash-dissipation-plan.md): independent
 // stages for comparing in the app. Cubic advection, the ghost drain and airborne
-// momentum ship on; redistance follows momentum in automatic mode; the other
-// splash experiments are off. Five numerical stages also run in 2D.
+// momentum is off by default; redistance follows momentum in automatic mode.
+// The other splash experiments are off. Five numerical stages also run in 2D.
 /** The long-form tooltips, shared by the parameter and its SIM panel switch. */
 export const UNIFORM_GEOMETRIC_SPLASH_HINTS = Object.freeze({
   phiCubicAdvection: [
@@ -129,7 +129,7 @@ const splash: MethodParamSpec[] = [
   {kind:"select",key:"phiDrain",label:"Drain ghost phi",default:"on",tier:"fine",update:"runtime",
     options:[{value:"on",label:"On"},{value:"off",label:"Off"}],
     hint:UNIFORM_GEOMETRIC_SPLASH_HINTS.phiDrain},
-  {kind:"select",key:"airborneMomentum",label:"Airborne momentum",default:"on",tier:"fine",update:"runtime",
+  {kind:"select",key:"airborneMomentum",label:"Airborne momentum",default:"off",tier:"fine",update:"runtime",
     options:[{value:"on",label:"On"},{value:"off",label:"Off"}],
     hint:UNIFORM_GEOMETRIC_SPLASH_HINTS.airborneMomentum},
 ];

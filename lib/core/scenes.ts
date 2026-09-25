@@ -2133,11 +2133,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     environment: "stage",
     presentationMode: "full-scene",
     containerShell: "authored",
-    // The default tolerance is an absolute 10 s⁻¹ of divergence: at 1.25 cm a
-    // resting pool's first cycle already lands under it with ~0.1 m/s of
-    // unprojected velocity left in every step, and the tank never settles.
-    // These scenes exist to hold still against voxel walls, so they project.
-    methodProfile: { methodId: "uniform-volume", quality: "balanced", overrides: { pressureResidualTolerance: 0.05 } },
+    methodProfile: { methodId: "uniform-volume", quality: "balanced", overrides: {} },
     build: () => createUniformTroughScene(mode),
     buildAt: lattice => createUniformTroughScene(mode, lattice.cellSize_m),
     camera: { distance_m: 5.4, target_m: { x: 0, y: 0.4, z: 0 }, elevation_rad: 0.8, azimuth_rad: 0.65 },

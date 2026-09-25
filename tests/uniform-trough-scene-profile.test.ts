@@ -46,8 +46,6 @@ for (const mode of ["dam-break", "settled-tank", "hose-fill"] as const) {
     // Scene selection uses seedProfile, including registry/parameter validation.
     assert.doesNotThrow(() => store.getState().seedProfile(profile));
     assert.equal(profile.methodId, "uniform-volume");
-    // The bath's tighter projection tolerance survives registry validation:
-    // an unknown parameter key would never reach the store.
-    assert.deepEqual(store.getState().overrides["uniform-volume"], { pressureResidualTolerance: 0.05 });
+    assert.deepEqual(store.getState().overrides["uniform-volume"], {});
   });
 }

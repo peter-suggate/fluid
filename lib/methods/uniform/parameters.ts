@@ -1,5 +1,6 @@
 import { ALGORITHM_PARAMS } from "./features/algorithms/definition";
 import type { MethodParamSpec } from "../../core/method-contract";
+import { UNIFORM_PRESSURE_RESIDUAL_TOLERANCE } from "./pressure-policy";
 
 const runtimeUpdate = { update: "runtime" as const };
 
@@ -10,7 +11,7 @@ export const UNIFORM_PARAMS: MethodParamSpec[] = [
   ...ALGORITHM_PARAMS,
   {
     ...runtimeUpdate, kind: "number", key: "pressureResidualTolerance",
-    label: "Pressure residual tolerance", default: 10, tier: "fine",
+    label: "Pressure residual tolerance", default: UNIFORM_PRESSURE_RESIDUAL_TOLERANCE, tier: "fine",
     min: 0, max: 100, step: 0.0001, digits: 4, unit: "s⁻¹",
     hint: "Stop after a complete Full-Cycle or V-Cycle when the projected residual infinity norm is at or below this tolerance. Zero disables tolerance-based early exit; divergent cycles still switch to safeguarded recovery.",
   },

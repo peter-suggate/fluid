@@ -97,7 +97,7 @@ impl Default for UniformGeometricOptions {
             velocity_transport: "semi-lagrangian".into(),
             liquid_only_velocity_advection: "off".into(),
             time_step: "paper".into(),
-            pressure_residual_tolerance: 10_f32,
+            pressure_residual_tolerance: 20_f32,
             extension_front_sweeps: 2_f32,
             sharpening_strength: 1_f32,
             sharpening_distance: 2.1_f32,
@@ -124,7 +124,7 @@ impl Default for UniformGeometricOptions {
             isolated_body_volume: "off".into(),
             phi_seed_cells: "off".into(),
             phi_drain: "on".into(),
-            airborne_momentum: "on".into(),
+            airborne_momentum: "off".into(),
             total_surface_volume: "on".into(),
             surface_deficit_balancing: "on".into(),
         }

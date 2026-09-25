@@ -18,6 +18,7 @@ export const UNIFORM_CM11A_PHI_PRESERVATION_LEVELS = 2;
 // itself fixes the cycle schedule but does not prescribe a residual tolerance.
 export const UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE = 1e-4;
 export const UNIFORM_CM11A_COARSE_SWEEP_CAP = 4096;
+export const UNIFORM_PRESSURE_RESIDUAL_TOLERANCE = 20;
 
 export interface UniformCM11aSchedule {
   readonly fullCycles: number;
@@ -32,7 +33,7 @@ export const DEFAULT_UNIFORM_CM11A_SCHEDULE: UniformCM11aSchedule = Object.freez
   vCycles: UNIFORM_CM11A_V_CYCLES,
   preSweeps: UNIFORM_CM11A_PRE_SWEEPS,
   postSweeps: UNIFORM_CM11A_POST_SWEEPS,
-  residualTolerance: 10,
+  residualTolerance: UNIFORM_PRESSURE_RESIDUAL_TOLERANCE,
 });
 
 /**

@@ -7,6 +7,7 @@ import { uniformPressureFarListWGSL, uniformPressureFarTilesWGSL, uniformPressur
 import {
   UNIFORM_CM11A_RECOVERY_BATCHES, UNIFORM_CM11A_RECOVERY_SWEEPS, UNIFORM_CM11A_PHI_PRESERVATION_LEVELS,
   UNIFORM_CM11A_COARSE_SWEEP_CAP, DEFAULT_UNIFORM_CM11A_SCHEDULE,
+  UNIFORM_PRESSURE_RESIDUAL_TOLERANCE,
   type UniformCM11aSchedule,
 } from "./pressure-policy";
 export * from "./pressure-policy";
@@ -529,7 +530,7 @@ export class WebGPUUniformPressureMultigrid {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.toleranceBuffer = device.createBuffer({ label: "Pressure residual tolerance", size: 16,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.setResidualTolerance(schedule.residualTolerance ?? 10);
+    this.setResidualTolerance(schedule.residualTolerance ?? UNIFORM_PRESSURE_RESIDUAL_TOLERANCE);
     allocatedBytes += stateBytes - 104;
     this.allocatedBytes = allocatedBytes;
     const textureBinding = { sampleType: "unfilterable-float", viewDimension: "3d" } as const;

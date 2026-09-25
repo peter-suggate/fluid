@@ -64,6 +64,7 @@ import {
   UNIFORM_CM11A_MINIMUM_CYCLE_BUDGET,
   UNIFORM_CM11A_POST_SWEEPS,
   UNIFORM_CM11A_PRE_SWEEPS,
+  UNIFORM_PRESSURE_RESIDUAL_TOLERANCE,
   UNIFORM_CM11A_V_CYCLES,
   uniformCM11aCycleBudget,
   WebGPUUniformPressureMultigrid,
@@ -223,7 +224,7 @@ export interface WebGPUUniformReferenceOptions {
   /**
    * Geometric only: the splash-survival experiments
    * (docs/uniform-geometric-splash-dissipation-plan.md). phiCubicAdvection,
-   * phiDrain and airborneMomentum default on; redistanceSurface defaults to
+   * phiDrain defaults on and airborneMomentum defaults off; redistanceSurface defaults to
    * automatic; the remaining splash experiments default off.
    *  - redistanceSurface: "auto" (default) preserves the surface with airborne
    *    momentum and retains rebuild otherwise. "preserve" keeps every vertex
@@ -968,7 +969,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.isolatedBodyVolume = options.isolatedBodyVolume === true;
     this.phiSeedCells = options.phiSeedCells === true;
     this.phiDrain = options.phiDrain !== false;
-    this.airborneMomentum = options.airborneMomentum !== false;
+    this.airborneMomentum = options.airborneMomentum === true;
     // Uniform Geometric calls this the SOLVE WINDOW. It needs a positive dust
     // floor for the same reason E3's live set does: the window's diagnostics
     // reduction sums V over the box, which equals the domain sum only while
@@ -997,7 +998,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       vCycles: UNIFORM_CM11A_V_CYCLES,
       preSweeps: UNIFORM_CM11A_PRE_SWEEPS,
       postSweeps: UNIFORM_CM11A_POST_SWEEPS,
-      residualTolerance: 10,
+      residualTolerance: UNIFORM_PRESSURE_RESIDUAL_TOLERANCE,
     };
     this.pressureCycleBudgetLagged = options.pressureCycleBudget !== "fixed";
     this.pressureBudgetHeadroom = Number.isFinite(options.pressureBudgetHeadroom)
@@ -1855,7 +1856,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       const value = Number(values[key]);
       return Number.isFinite(value) ? Math.min(maximum, Math.max(minimum, value)) : fallback;
     };
-    this.pressureMultigrid.setResidualTolerance(finite("pressureResidualTolerance", 10, 0, 100));
+    this.pressureMultigrid.setResidualTolerance(finite("pressureResidualTolerance", UNIFORM_PRESSURE_RESIDUAL_TOLERANCE, 0, 100));
     // Switching to "fixed" mid-run restores the full encoded schedule on the
     // next step; switching back drops the previous demand sample and uses
     // the startup budget.

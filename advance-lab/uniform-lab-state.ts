@@ -27,7 +27,7 @@ export interface UniformLabState {
   sliceView: SliceViewFraction;
   sliceDepth_m?: number;
 }
-/** The 3D default is on; only a viewer's opt-out reaches the URL. */
+/** Defaults match the shared 3D Uniform Geometric parameter schema. */
 type Toggle = "totalSurfaceVolume" | "surfaceDeficitBalancing" | "phiCubicAdvection" | "phiDrain" | "airborneMomentum" | "isolatedBodyVolume" | "phiSeedCells";
 function toggleQuery(key: Toggle, defaultValue: boolean) {
   return {
@@ -58,7 +58,7 @@ export const uniformLabQuery = combineQueryCodecs<UniformLabState>([
   toggleQuery("surfaceDeficitBalancing", true),
   toggleQuery("phiCubicAdvection", true),
   toggleQuery("phiDrain", true),
-  toggleQuery("airborneMomentum", true),
+  toggleQuery("airborneMomentum", false),
   toggleQuery("isolatedBodyVolume", false),
   toggleQuery("phiSeedCells", false),
   {
