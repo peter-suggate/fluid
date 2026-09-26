@@ -1,3 +1,4 @@
+import { uniformMixedPresentationWGSL } from "../methods/uniform/uniform-mixed-presentation.wgsl";
 import type { FluidSurfaceRenderMode } from "../features/surface-display/definition";
 import { environmentShaderLibrary } from "./webgpu-environments";
 import { advancePresentationClock, frameInterval_ms } from "./frame-pacing";
@@ -399,6 +400,7 @@ struct SparseParams {
 @group(0) @binding(11) var<storage, read> sparseControl: array<u32>;
 @group(0) @binding(12) var<storage, read> sparseStates: array<u32>;
 @group(0) @binding(13) var denseVertexPhi: texture_3d<f32>;
+${uniformMixedPresentationWGSL(14,"denseVertexPhi","textureDimensions(denseVertexPhi)-vec3u(1)")}
 override countOnly = false;
 override sparseField = false;
 ${marchingCubesLookupWGSL}
@@ -461,6 +463,7 @@ fn fieldCell(cell: vec3i) -> f32 {
   let dims = vec3i(u.gridInfo.xyz);
   if (any(cell < vec3i(0)) || any(cell >= dims)) { return 0.0; }
   let mode = u.gridInfo.w;
+  if(umPresentationEnabled()){return 0.5-umSampleVertex(vec3f(cell)+vec3f(0.5))/(u.container.y/u.gridInfo.y);}
   if (mode < 1.5) { return textureLoad(volume, cell, 0).x; }
   if (mode > 2.5) { return occupancyFromPhi(textureLoad(volume, cell, 0).x); }
   let base = i32(round(textureLoad(columnBases, cell.xz, 0).x));
@@ -541,7 +544,8 @@ fn uniformPhiNormal(lattice:vec3f, fallback:vec3f) -> vec3f {
     let q=clamp(center+vec3i(ox,oy,oz),vec3i(0),dimensions);
     let delta=vec3f(q)-x;
     let weight=exp(-0.5*dot(delta,delta)/(.85*.85));
-    let phi=textureLoad(denseVertexPhi,q,0).x;
+    var phi=textureLoad(denseVertexPhi,q,0).x;
+    if(umPresentationEnabled()){phi=umVertexValue(vec3u(q));}
     if(!(abs(phi)<1e10)){return fallback;}
     weightSum+=weight;phiSum+=weight*phi;
     derivativeWeightSum+=weight*delta;phiDerivativeSum+=weight*phi*delta;
@@ -1497,6 +1501,7 @@ export class RasterWaterPipeline {
   private polygoniseDispatchBuffer?: GPUBuffer;
   private extractBindGroup?: GPUBindGroup;
   private denseNormalPhi?: GPUTexture;
+  private mixedOwnership?: GPUBufferBinding;
   private globalExtractBindGroup?: GPUBindGroup;
   private globalPolygoniseBindGroup?: GPUBindGroup;
   private globalPolygoniseEmitBindGroup?: GPUBindGroup;
@@ -1720,6 +1725,7 @@ export class RasterWaterPipeline {
       ,{ binding: 11, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
       ,{ binding: 12, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
       ,{ binding: 13, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } }
+      ,{ binding: 14, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
     ] });
     this.globalExtractLayout = this.device.createBindGroupLayout({ label: "Global fine water classification bindings", entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
@@ -1948,10 +1954,10 @@ export class RasterWaterPipeline {
     this.ensureGlobalCoarsePipeline();
   }
 
-  setVolume(texture: GPUTexture, columnBases: GPUTexture, denseNormalPhi?: GPUTexture) {
-    if (this.volume === texture && this.columnBases === columnBases && this.denseNormalPhi === denseNormalPhi) return;
+  setVolume(texture: GPUTexture, columnBases: GPUTexture, denseNormalPhi?: GPUTexture, mixedOwnership?: GPUBufferBinding) {
+    if (this.volume === texture && this.columnBases === columnBases && this.denseNormalPhi === denseNormalPhi && this.mixedOwnership === mixedOwnership) return;
     const volumeChanged = this.volume !== texture || this.columnBases !== columnBases;
-    this.volume = texture; this.columnBases = columnBases; this.denseNormalPhi = denseNormalPhi;
+    this.volume = texture; this.columnBases = columnBases; this.denseNormalPhi = denseNormalPhi; this.mixedOwnership = mixedOwnership;
     this.extractedRevision = -1; this.surfaceExtractionReason = volumeChanged ? "volume binding changed" : "normal phi binding changed";
     this.lastExtractionAt_ms = -Infinity; this.causticsValid = false; this.rebuildBindGroups();
   }
@@ -2324,7 +2330,8 @@ export class RasterWaterPipeline {
       { binding: 10, resource: globalFine ? { buffer: this.globalFineRenderParams! } : { buffer: this.fallbackSparseParams } },
       { binding: 11, resource: globalFine?.samples ?? { buffer: this.fallbackSparseControl } },
       { binding: 12, resource: globalFine?.metadata ?? { buffer: this.fallbackSparseControl } },
-      { binding: 13, resource: (this.denseNormalPhi ?? this.volume).createView({ dimension: "3d" }) }
+      { binding: 13, resource: (this.denseNormalPhi ?? this.volume).createView({ dimension: "3d" }) },
+      { binding: 14, resource: this.mixedOwnership ?? { buffer: this.fallbackSparseControl, size: 4 } }
     ] });
     if (this.globalExtractLayout && this.indirectBuffer && this.activeCubeBuffer && this.globalCubeValues && this.globalFineRenderParams && this.fallbackSparsePageTable && this.fallbackSparseActivePages && this.fallbackSparsePhi && this.fallbackSparseControl) this.globalExtractBindGroup = this.device.createBindGroup({ layout: this.globalExtractLayout, entries: [
       { binding: 0, resource: { buffer: this.uniformBuffer } },

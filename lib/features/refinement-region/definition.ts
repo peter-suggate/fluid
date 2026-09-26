@@ -68,6 +68,8 @@ export interface RegionSpace<Doc, Patch = Doc> {
   readonly capacity: number;
   /** The ladder this host offers. S: [1,2,4,8,16,32]; L: [1,2,4,8]. */
   readonly cellSizes: readonly number[];
+  /** Fixed two-level methods have a finite ceiling rather than AUTO. */
+  readonly allowAutomaticCeiling?: boolean;
   /**
    * The rung a box drawn here carries while nobody has chosen one.
    *

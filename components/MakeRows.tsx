@@ -4,7 +4,7 @@ import { RigidDropRow } from "../lib/features/rigid-placement/ui";
 import { TopologyFreezeButton } from "../lib/features/topology-freeze/ui";
 import { LiquidDropRow as SharedLiquidDropRow } from "../lib/features/liquid-drop/ui";
 import { RegionRow as SharedRegionRow } from "../lib/features/refinement-region/ui";
-import { studioRegionSpace } from "../lib/core/editor-refinement-region";
+import { studioRegionSpaceForMethod } from "../lib/core/editor-refinement-region";
 import { performEditorAction } from "../lib/core/editor-action-runtime";
 import { voxelToolGroups } from "../lib/core/editor-voxel-tool-actions";
 import { useSession } from "../lib/core/session/session-context";
@@ -53,8 +53,9 @@ import { EditorActionGlyph, EditorActionPathGlyph } from "./EditorActionIcon";
 export function RegionRow() {
   const session = useSession();
   const scene = session.scene((state) => state.scene);
+  const methodId = session.method((state) => state.methodId);
   return <SharedRegionRow
-    space={studioRegionSpace}
+    space={studioRegionSpaceForMethod(methodId)}
     doc={scene}
     after={<TopologyFreezeButton />}
   />;

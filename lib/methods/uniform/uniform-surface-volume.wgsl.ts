@@ -1,3 +1,21 @@
+/** Shared exact tetrahedral volume curve for the global surface constraint. */
+export const uniformSurfaceFillWGSL = /* wgsl */ `
+fn tetra(v:vec4f)->f32{
+ var n:array<f32,4>;var o:array<f32,4>;var count=0u;var outside=0u;
+ for(var k=0u;k<4u;k++){if(v[k]<0.0){n[count]=v[k];count++;}else{o[outside]=v[k];outside++;}}
+ if(count==0u){return 0.0;}if(count==4u){return 1.0;}
+ if(count==1u){return (-n[0]/(o[0]-n[0]))*(-n[0]/(o[1]-n[0]))*(-n[0]/(o[2]-n[0]));}
+ if(count==3u){return 1.0-(o[0]/(o[0]-n[0]))*(o[0]/(o[0]-n[1]))*(o[0]/(o[0]-n[2]));}
+ let a=-n[0]/(o[0]-n[0]);let b=-n[0]/(o[1]-n[0]);let c=-n[1]/(o[0]-n[1]);let d=-n[1]/(o[1]-n[1]);
+ return clamp(a*b+b*c*(1.0-a)+c*d*(1.0-b),0.0,1.0);
+}
+fn fill(v:array<f32,8>)->f32{
+ return (tetra(vec4f(v[0],v[1],v[3],v[7]))+tetra(vec4f(v[0],v[1],v[5],v[7]))
+ +tetra(vec4f(v[0],v[2],v[3],v[7]))+tetra(vec4f(v[0],v[2],v[6],v[7]))
+ +tetra(vec4f(v[0],v[4],v[5],v[7]))+tetra(vec4f(v[0],v[4],v[6],v[7])))/6.0;
+}
+`;
+
 import { uniformAbOn } from "./uniform-ab-switch";
 
 const leanMeasure = uniformAbOn("measurelean");
@@ -179,20 +197,7 @@ ${windowed ? `@compute @workgroup_size(64) fn seedBox(@builtin(workgroup_id)w:ve
 }
 // Exact negative volume of a linear scalar on a tetrahedron, normalized by
 // tetrahedron volume. Crossing-edge ratios avoid repeated-value singularities.
-fn tetra(v:vec4f)->f32{
- var n:array<f32,4>;var o:array<f32,4>;var count=0u;var outside=0u;
- for(var k=0u;k<4u;k++){if(v[k]<0.0){n[count]=v[k];count++;}else{o[outside]=v[k];outside++;}}
- if(count==0u){return 0.0;}if(count==4u){return 1.0;}
- if(count==1u){return (-n[0]/(o[0]-n[0]))*(-n[0]/(o[1]-n[0]))*(-n[0]/(o[2]-n[0]));}
- if(count==3u){return 1.0-(o[0]/(o[0]-n[0]))*(o[0]/(o[0]-n[1]))*(o[0]/(o[0]-n[2]));}
- let a=-n[0]/(o[0]-n[0]);let b=-n[0]/(o[1]-n[0]);let c=-n[1]/(o[0]-n[1]);let d=-n[1]/(o[1]-n[1]);
- return clamp(a*b+b*c*(1.0-a)+c*d*(1.0-b),0.0,1.0);
-}
-fn fill(v:array<f32,8>)->f32{
- return (tetra(vec4f(v[0],v[1],v[3],v[7]))+tetra(vec4f(v[0],v[1],v[5],v[7]))
- +tetra(vec4f(v[0],v[2],v[3],v[7]))+tetra(vec4f(v[0],v[2],v[6],v[7]))
- +tetra(vec4f(v[0],v[4],v[5],v[7]))+tetra(vec4f(v[0],v[4],v[6],v[7])))/6.0;
-}
+${uniformSurfaceFillWGSL}
 fn sumGroup(l:u32){
  workgroupBarrier();
  for(var stride=32u;stride>0u;stride/=2u){if(l<stride){for(var k=0u;k<5u;k++){sums[l*5u+k]+=sums[(l+stride)*5u+k];}}workgroupBarrier();}

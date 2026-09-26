@@ -52,7 +52,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
       const d=device!; const source=solver!.denseLevelSetVolumeSource!;
       const shaderModule=d.createShaderModule({code:`
 @group(0) @binding(9) var densityField:texture_3d<f32>;
-var<private> sparseTopologyArena:array<u32,1>;
+@group(0) @binding(17) var<storage,read> sparseTopologyArena:array<u32>;
 var<private> sparseState:array<f32,1>;
 fn sparseOwner(p:vec3i)->vec2u{return vec2u(0xffffffffu);}
 fn sparseDensityOffset()->u32{return 0u;}
@@ -66,15 +66,17 @@ ${createGridOverlayLevelSetVolumeWGSL(true)}
       d.queue.writeBuffer(params,0,gridOverlayLevelSetVolumeUniform(undefined,source));
       const output=d.createBuffer({size:16,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
       const staging=d.createBuffer({size:16,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
+      const ownership=d.createBuffer({size:4,usage:GPUBufferUsage.STORAGE});
       const group=d.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[
         {binding:9,resource:solver!.volumeTexture.createView()},
+        {binding:17,resource:{buffer:ownership}},
         {binding:20,resource:{buffer:params}}, {binding:21,resource:source.vertexPhi.createView()},
         {binding:22,resource:source.openFraction.createView()}, {binding:23,resource:{buffer:output}},
       ]});
       const e=d.createCommandEncoder();const pass=e.beginComputePass();pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroups(1);pass.end();e.copyBufferToBuffer(output,0,staging,0,16);d.queue.submit([e.finish()]);
       await staging.mapAsync(GPUMapMode.READ);const result=new Float32Array(staging.getMappedRange());
       assert.ok(Math.abs(result[0]!-(3.5-ny/2))<1e-5);assert.equal(result[1],1);assert.equal(result[2],1);assert.equal(result[3],1);
-      staging.unmap();for(const b of [params,output,staging])b.destroy();
+      staging.unmap();for(const b of [params,output,staging,ownership])b.destroy();
     });
     await t.test("zero velocity preserves V and planar phi",async()=>{
       assert.ok(solver!.advanceTo(1/30));await device!.queue.onSubmittedWorkDone();

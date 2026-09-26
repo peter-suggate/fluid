@@ -17,12 +17,6 @@ const params: MethodParamSpec[] = UNIFORM_PARAMS.filter(p => !omitted.has(p.key)
     hint: "Only cells within this distance of phi=0 participate in local volume return." };
   return p;
 });
-params.push({kind:"select",key:"prepareCoarseSimulation",label:"Prepare coarse simulation",default:"off",tier:"coarse",update:"solver",
-  options:[{value:"off",label:"Off"},{value:"on",label:"On"}],
-  hint:"Prepare a live switch to cells four times wider. Restarts the scene; adds a small amount of GPU memory."});
-params.push({kind:"select",key:"coarseSimulation",label:"Simulation resolution",default:"off",tier:"coarse",update:"runtime",
-  options:[{value:"off",label:"Fine"},{value:"on",label:"Coarse"}],
-  hint:"Switch to the prepared coarse grid without resetting time. Switch either way without restarting; lost fine detail is reconstructed."});
 params.push({kind:"select",key:"pageSize",label:"Page size",default:"32",tier:"coarse",update:"solver",
   options:[{value:"16",label:"16³"},{value:"32",label:"32³"}],
   hint:"Cells along each domain page edge. Changing this rebuilds the solver and resets the simulation to time zero."});
@@ -80,8 +74,8 @@ params.push({kind:"number",key:"phiAgreementClamp",label:"Agreement clamp",defau
   hint:"Largest shift in one step. At gain 0.05 the dam break does not care (0.01 to 0.05 all read the same roughness); the thin film does: 0.002 cannot keep up with its erosion, 0.02 and 0.05 hold phi within 6-14% of V."});
 
 // Splash survival (docs/uniform-geometric-splash-dissipation-plan.md): independent
-// stages for comparing in the app. Cubic advection, the ghost drain and airborne
-// momentum is off by default; redistance follows momentum in automatic mode.
+// stages for comparing in the app. Cubic advection and the ghost drain are on
+// by default; airborne momentum is off. Automatic redistance follows momentum.
 // The other splash experiments are off. Five numerical stages also run in 2D.
 /** The long-form tooltips, shared by the parameter and its SIM panel switch. */
 export const UNIFORM_GEOMETRIC_SPLASH_HINTS = Object.freeze({
@@ -170,7 +164,7 @@ export function resolveUniformGeometricValues(values: MethodParamValues = {}): M
       + `see uniformGeometricSolverOptions. Drop the override or change the method.`);
   }
   return Object.fromEntries(params.map(spec => {
-    const raw = spec.key === "coarseSimulation" && values.prepareCoarseSimulation !== "on" ? "off" : values[spec.key];
+    const raw = values[spec.key];
     const numeric = spec.kind === "number" ? numberValue(values, params, spec.key) : 0;
     const value = spec.kind === "number" ? (spec.step === 1 ? Math.round(numeric) : numeric)
       : spec.options.some(option => option.value === raw) ? raw! : spec.default;

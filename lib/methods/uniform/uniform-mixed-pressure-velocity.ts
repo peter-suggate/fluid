@@ -1,0 +1,189 @@
+import {uniformMixedSourceWGSL} from "./uniform-mixed-source.wgsl";
+import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
+import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
+import { uniformMixedFaceAddressWGSL, uniformMixedFaceDispatchWGSL } from "./uniform-mixed-face-dispatch.wgsl";
+import { uniformMixedPressureSurfaceWGSL } from "./uniform-mixed-pressure-surface.wgsl";
+import { uniformMixedPressureReconstructionSource } from "./uniform-mixed-pressure-reconstruction.wgsl";
+import { uniformMixedPressureBoundaryIndexWGSL, uniformMixedPressureBoundaryLoop, uniformMixedPressureStorage } from "./uniform-mixed-pressure-boundary.wgsl";
+
+interface CommonFields {
+ velocity:GPUTexture;
+ negative:GPUBufferBinding;
+ phi:GPUBufferBinding;
+ /** h.xyz, dt; density, openTop, airborne, dust threshold. */
+ params:GPUBuffer;
+}
+export interface UniformMixedPressureRhsFields extends CommonFields {
+ /** Native geometric excess/deficit divergence, already in inverse seconds. */
+ correction:GPUTexture;
+ rhs:GPUBufferBinding;
+ minimum:GPUBufferBinding;
+ pressure:GPUBufferBinding;
+}
+export interface UniformMixedPressureProjectionFields extends CommonFields {
+ pressure:GPUBufferBinding;
+ slopes:GPUBufferBinding;
+ /** Unmodified geometric centre phi, for the native airborne criterion. */
+ centerPhi:GPUTexture;
+ volume:GPUTexture;
+ output:GPUTexture;
+ outputNegative:GPUBufferBinding;
+}
+
+/** Pressure/velocity coupling on exactly the same canonical patches as the
+ * mixed matrix. The caller builds one authoritative pressure phi and freezes
+ * reconstruction slopes after the accepted pressure iterate. No field owns
+ * another simulation; all buffers/textures are borrowed from the native host. */
+export class UniformMixedPressureVelocity {
+ readonly allocatedBytes=0;
+ private readonly rhsLayout:GPUBindGroupLayout;
+ private readonly projectLayout:GPUBindGroupLayout;
+ private rhsPipeline?:GPUComputePipeline;
+ private projectPipeline?:GPUComputePipeline;
+ constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly sourceParams?:GPUBuffer){
+  const texture=(binding:number)=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}});
+  // Read-write buffer views allow disjoint ranges of the shared arena.
+  const storage=(binding:number)=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}});
+  const uniform={binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}};
+  this.rhsLayout=device.createBindGroupLayout({entries:[texture(0),storage(1),storage(2),uniform,texture(4),storage(5),storage(6),storage(7)]});
+  this.projectLayout=device.createBindGroupLayout({entries:[texture(0),storage(1),storage(2),uniform,storage(4),storage(5),texture(6),texture(7),
+   {binding:8,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}},storage(9),...(sourceParams?[{binding:10,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}]:[])]});
+ }
+ private scalar(view:GPUBufferBinding,count:number):GPUBufferBinding{
+  const offset=view.offset??0,size=4*count;
+  if((view.size??view.buffer.size-offset)<size||offset+size>view.buffer.size)throw new Error("Mixed pressure field is too small");
+  return {buffer:view.buffer,offset,size};
+ }
+ private common(f:CommonFields):GPUBindGroupEntry[]{
+  const d=this.ownership.layout.lattice.dimensions;
+  if(f.velocity.format!=="rgba32float"||[f.velocity.width,f.velocity.height,f.velocity.depthOrArrayLayers].some((v,a)=>v!==d[a]))throw new Error("Mixed pressure requires native MAC extent");
+  return [{binding:0,resource:f.velocity.createView()},{binding:1,resource:this.scalar(f.negative,d[0]*d[1]+d[0]*d[2]+d[1]*d[2])},
+   {binding:2,resource:this.scalar(f.phi,this.ownership.layout.cellCount)},{binding:3,resource:{buffer:f.params,size:32}}];
+ }
+ bindRhs(f:UniformMixedPressureRhsFields):GPUBindGroup{
+  const count=uniformMixedPressureStorage(this.ownership.layout).count;
+  return this.device.createBindGroup({layout:this.rhsLayout,entries:[...this.common(f),{binding:4,resource:f.correction.createView()},
+   ...[f.rhs,f.minimum,f.pressure].map((v,i)=>({binding:5+i,resource:this.scalar(v,count)}))]});
+ }
+ bindProjection(f:UniformMixedPressureProjectionFields):GPUBindGroup{
+  if(f.velocity===f.output||f.negative.buffer===f.outputNegative.buffer)throw new Error("Mixed projection requires disjoint velocity output");
+  const d=this.ownership.layout.lattice.dimensions;
+  return this.device.createBindGroup({layout:this.projectLayout,entries:[...this.common(f),
+   {binding:4,resource:this.scalar(f.pressure,uniformMixedPressureStorage(this.ownership.layout).count)},
+   {binding:5,resource:this.scalar(f.slopes,4*this.ownership.layout.cellCount)},
+   {binding:6,resource:f.centerPhi.createView()},{binding:7,resource:f.volume.createView()},{binding:8,resource:f.output.createView()},
+   {binding:9,resource:this.scalar(f.outputNegative,d[0]*d[1]+d[0]*d[2]+d[1]*d[2])},
+   ...(this.sourceParams?[{binding:10,resource:{buffer:this.sourceParams,size:176}}]:[])]});
+ }
+ async initialize():Promise<void>{
+  const ownership=this.ownership,h=ownership.layout.lattice.cellSize_m;
+  const common=uniformMixedTopologyWGSL(ownership.layout,0)+/* wgsl */`
+const UM_H=vec3f(${h.join(",")});
+@group(1) @binding(0) var velocity:texture_3d<f32>;
+@group(1) @binding(1) var<storage,read_write> negative:array<f32>;
+@group(1) @binding(2) var<storage,read_write> phi:array<f32>;
+struct UMProjectionParams {hDt:vec4f,policy:vec4f}
+@group(1) @binding(3) var<uniform> params:UMProjectionParams;
+${uniformMixedFaceAddressWGSL}
+${uniformMixedPressureBoundaryIndexWGSL(ownership.layout)}
+fn umPressurePhi(o:UMOwner)->f32{return phi[o.index];}
+${uniformMixedPressureSurfaceWGSL}
+fn umOpenTop(face:UMFace)->bool{return params.policy.y>0.5&&face.axis==1u&&face.sign>0;}
+fn umFaceVelocity(face:UMFace)->f32 {
+ if(face.anchor[face.axis]<0){return negative[umNegativeBoundaryIndex(vec3u(max(face.anchor,vec3i(0))),face.axis)];}
+ return textureLoad(velocity,face.anchor,0)[face.axis];
+}
+`;
+  const rhsSource=common+/* wgsl */`
+@group(1) @binding(4) var correction:texture_3d<f32>;
+@group(1) @binding(5) var<storage,read_write> rhs:array<f32>;
+@group(1) @binding(6) var<storage,read_write> minimum:array<f32>;
+@group(1) @binding(7) var<storage,read_write> pressures:array<f32>;
+fn umPressure(o:UMOwner)->f32{return pressures[o.index];}
+fn umPressureSlope(o:UMOwner)->vec3f{return vec3f(0);}
+@compute @workgroup_size(64) fn buildRhs(@builtin(global_invocation_id) gid:vec3u){
+ let o=umAllOwner(gid);if(o.width==0u){return;}var terms:array<f32,6>;
+ for(var axis=0u;axis<3u;axis++){for(var side=0u;side<2u;side++){
+  let sign=select(-1,1,side==1u);let first=umFace(o,axis,sign,0u);var flux=0.0;
+  for(var part=0u;part<first.count;part++){
+   let face=umFace(o,axis,sign,part);var fraction=1.0;
+   if(face.neighbor.width==0u&&!umOpenTop(face)){fraction=0.5;}
+   flux+=fraction*umFaceVelocity(face)*f32(face.width*face.width);
+  }
+  terms[2u*axis+side]=f32(sign)*flux/(f32(o.width*o.width*o.width)*UM_H[axis]);
+ }}
+ let divergence=(terms[0]+terms[1])+(terms[4]+terms[5])+(terms[2]+terms[3]);
+ rhs[o.index]=select(0.0,-params.policy.x*(divergence-textureLoad(correction,vec3i(umOrigin(o)),0).x)/params.hDt.w,umPressureLiquid(o));
+ minimum[o.index]=-3.402823e38;pressures[o.index]=0.0;
+ ${uniformMixedPressureBoundaryLoop(`let face=umFace(o,axis,sign,0u);let open=umOpenTop(face);
+  let b=f32(sign)*params.policy.x*0.5*umFaceVelocity(face)/(f32(o.width)*UM_H[axis]*params.hDt.w);
+  rhs[halo]=select(0.0,b,umPressureLiquid(o)&&!open);minimum[halo]=select(0.0,-3.402823e38,open);pressures[halo]=0.0;`)}
+}
+`;
+  const projectSource=common+/* wgsl */`
+@group(1) @binding(4) var<storage,read_write> pressures:array<f32>;
+@group(1) @binding(5) var<storage,read_write> slopes:array<vec4f>;
+@group(1) @binding(6) var centerPhi:texture_3d<f32>;
+@group(1) @binding(7) var volume:texture_3d<f32>;
+@group(1) @binding(8) var output:texture_storage_3d<rgba32float,write>;
+@group(1) @binding(9) var<storage,read_write> boundary:array<f32>;
+fn umPressure(o:UMOwner)->f32{return pressures[o.index];}
+${this.sourceParams?uniformMixedSourceWGSL(10):""}
+fn umPressureSlope(o:UMOwner)->vec3f{return slopes[o.index].xyz;}
+${uniformMixedPressureReconstructionSource(true)}
+fn umAirborne(o:UMOwner)->bool{
+ if(o.width==0u||params.policy.z<0.5){return false;}
+ let origin=umOrigin(o);let v=textureLoad(volume,vec3i(origin),0).x;
+ if(v>1.0){return true;}if(v<=max(params.policy.w,0.05)){return false;}
+ if(any(origin<vec3u(2u*o.width))||any(origin+vec3u(3u*o.width)>UM_D)){return false;}
+ return textureLoad(centerPhi,vec3i(origin),0).x>1.5*f32(o.width)*min(UM_H.x,min(UM_H.y,UM_H.z));
+}
+fn umProject(o:UMOwner,face:UMFace)->f32{
+ let v=umFaceVelocity(face);let liquid=umPressureLiquid(o);let scale=params.hDt.w/params.policy.x;
+ if(face.neighbor.width==0u){
+  if(!liquid){return select(0.0,v,umAirborne(o));}
+  var other=pressures[umBoundaryIndex(o,face.axis,face.sign)];var theta=1.0;
+  if(umOpenTop(face)){other=0.0;theta=cm12GhostFluidTheta(umPressurePhi(o),0.5*f32(o.width)*min(UM_H.x,min(UM_H.y,UM_H.z)),1e-9);}
+  return v-scale*f32(face.sign)*(other-umPressure(o))/(f32(o.width)*UM_H[face.axis]*theta);
+ }
+ if(!liquid&&!umPressureLiquid(face.neighbor)){return select(0.0,v,umAirborne(o)||umAirborne(face.neighbor));}
+ return v-scale*umReconstructedPressureGradient(o,face);
+}
+fn umProjectWithSource(o:UMOwner,face:UMFace)->f32{
+ let value=umProject(o,face);
+ ${this.sourceParams?`if(face.anchor[face.axis]>=0&&umSourceinflowStrength()>0.0){
+  var sum=0.0;let u=(face.axis+1u)%3u;let v=(face.axis+2u)%3u;
+  for(var j=0u;j<face.width;j++){for(var i=0u;i<face.width;i++){
+   var q=face.anchor;q[u]+=i32(i);q[v]+=i32(j);
+   sum+=umSourceapplyInflowVelocity(q,vec3f(value))[face.axis];
+  }}return sum/f32(face.width*face.width);
+ }`:""}
+ return value;
+}
+fn umRelease(o:UMOwner,face:UMFace,v:f32)->bool{
+ if(face.neighbor.width!=0u||umOpenTop(face)){return false;}
+ let pressure=select(0.0,pressures[umBoundaryIndex(o,face.axis,face.sign)],umPressureLiquid(o));
+ return pressure<=0.0&&-f32(face.sign)*v*params.hDt.w>1e-4*f32(o.width)*UM_H[face.axis];
+}
+${uniformMixedFaceDispatchWGSL("project","umProjectWithSource(owner,face)",true,`
+   var released=0u;
+   for(var axis=0u;axis<3u;axis++){
+    let face=umPositiveFaceAtAnchor(owner,axis,ownedFace.anchor);
+    if(face.width!=0u&&umRelease(owner,face,value[axis])){released|=1u<<axis;}
+    if(umOrigin(owner)[axis]==0u){let low=umFace(owner,axis,-1,0u);
+     if(umRelease(owner,low,umProjectWithSource(owner,low))){released|=1u<<(axis+3u);}}
+   }
+   value.w=f32(released);`)}
+`;
+  const compile=async(code:string,entryPoint:string,resources:GPUBindGroupLayout)=>{
+   const module=this.device.createShaderModule({code});const info=await module.getCompilationInfo();
+   const errors=info.messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
+   return this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[ownership.bindLayout,resources]}),compute:{module,entryPoint,constants:{umDispatchX:ownership.dispatchX}}});
+  };
+  this.rhsPipeline=await compile(rhsSource,"buildRhs",this.rhsLayout);this.projectPipeline=await compile(projectSource,"project",this.projectLayout);
+ }
+ encode(encoder:GPUCommandEncoder,entry:"rhs"|"project",group:GPUBindGroup):void{
+  const pipeline=entry==="rhs"?this.rhsPipeline:this.projectPipeline;if(!pipeline)throw new Error("Mixed pressure velocity stage is not initialized");
+  const pass=encoder.beginComputePass({label:`Uniform mixed pressure ${entry}`});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);this.ownership.dispatchAll(pass,pipeline);pass.end();
+ }
+}

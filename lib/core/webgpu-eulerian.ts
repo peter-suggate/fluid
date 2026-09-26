@@ -13,6 +13,13 @@ export interface GPUFieldLocation {
 }
 
 export interface GPUEulerianInfo {
+  uniformMixedGeneration?: number;
+  uniformMixedFineTiles?: number;
+  uniformMixedRegularTiles?: number;
+  uniformMixedGeneralTiles?: number;
+  uniformMixedTransitionTiles?: number;
+  uniformMixedCoarseTiles?: number;
+  uniformMixedOwners?: number;
   uniformCoarsePrepared?: boolean;
   uniformSimulationCellScale?: 1 | 4;
   /** Root solver field-load audit; not yet extension/pressure hierarchy coverage. */
@@ -606,6 +613,7 @@ export interface GPUEulerianInfo {
   };
   /** Latest exhaustive, exclusive GPU physics partition. */
   physicsTrace?: PerformanceTrace;
+  physicsTraceUnavailable?: string;
   /** Main-thread command-encoding partition captured under the exact same
    * sample ID and context as `physicsTrace`. It deliberately excludes the
    * controller/render ticks which merely happen to report the completed GPU

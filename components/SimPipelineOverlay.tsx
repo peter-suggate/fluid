@@ -49,7 +49,9 @@ function usePhysicsTiming(methodId: string): {
 } {
   const session = useSession();
   const reports = session.diagnostics((state) => state.performanceReports);
+  const unavailable=session.diagnostics(state=>state.gpuInfo?.physicsTraceUnavailable);
   return useMemo(() => {
+    if(unavailable)return {};
     const newest = reports.findLast((report) => report.methodId === methodId && report.physics);
     if (!newest) return {};
     const recent = reports
@@ -67,6 +69,10 @@ function usePhysicsTiming(methodId: string): {
     if (physicsMean?.measurementSource === "gpu-hardware-timestamp") {
       return { total: physicsMean, stages: physicsMean };
     }
+
+    // Uniform Geometric only publishes measured GPU stages. Old reports
+    // cannot reintroduce a CPU or queue-wall substitute after a scene edit.
+    if(methodId === "uniform-volume")return {};
 
     // `performanceReportCPUTrace` only admits a CPU trace here when its sample,
     // context and stable capture frame all match this completed physics trace.
@@ -89,7 +95,7 @@ function usePhysicsTiming(methodId: string): {
     return cpuMean
       ? { total: cpuMean, stages: cpuMean }
       : { total: physicsMean, stages: undefined };
-  }, [reports, methodId]);
+  }, [reports, methodId, unavailable]);
 }
 
 /** Why the figure on the pipe is the kind of number it is, in solver terms. */
@@ -108,7 +114,7 @@ function costExplanation(
     case "structural":
       return "A decision, not a dispatch. It spends no advance time either way.";
     case "unmeasured":
-      return "No phase in the advance partition names this stage yet — either no trace has arrived, or the fallback queue-wall observation is too coarse to split the advance.";
+      return "No valid stage measurement is available for this advance.";
     default:
       return `${formatPipelineDuration(cost.duration_ms ?? 0)} ${paged ? "elapsed time" : measurementDomain === "cpu" ? "CPU active time" : "GPU execution time"} between this stage's trace seams, averaged across the trace window.${paged ? " Includes page-submission gaps and receipt waits; this is not pure GPU compute time." : ""}${cost.encodedFraction !== undefined
         ? `\n\nEncoded in ${Math.round(cost.encodedFraction * 100)}% of sampled advances; the figure is the expected cost per advance, not the per-encode mean.`
@@ -404,7 +410,7 @@ export function SimPipelineOverlay({ lenses: override }: {
               kind: cost.kind,
               duration_ms: cost.duration_ms,
               encodedFraction: cost.encodedFraction,
-              explanation: `${stage.label}\n\n${costExplanation(cost, measurementDomain, methodId === "uniform-volume" && values.volumeStorage !== "dense")}`,
+              explanation: `${stage.label}\n\n${costExplanation(cost, measurementDomain, methodId === "uniform-volume" && values.volumeStorage !== "dense" && info?.uniformMixedGeneration === undefined)}`,
             },
             lamp: {
               // A stage the advance always encodes is a status, not a control:
@@ -435,9 +441,9 @@ export function SimPipelineOverlay({ lenses: override }: {
   const liveTuning = Boolean(method.runtimeParamKeys?.length);
   const advanceLabel = totalTrace
     ? `${totalTrace.total_ms.toFixed(2)} ms/advance`
-    : "no trace yet";
+    : info?.physicsTraceUnavailable ? "GPU timing unavailable" : "no trace yet";
   const sourceLabel = !totalTrace
-    ? "Waiting for a sampled advance."
+    ? info?.physicsTraceUnavailable ?? "Waiting for a sampled advance."
     : totalTrace.measurementSource === "gpu-hardware-timestamp"
       ? `Hardware timestamp boundary chain: an exact, exclusive partition of the advance, so the trunk figures sum to the total. ${TRACE_WINDOW}-sample mean.`
       : totalTrace.measurementSource === "cpu-active-wall"

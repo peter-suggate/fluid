@@ -295,7 +295,7 @@ export const UNIFORM_VOLUME_PIPELINE: FluidPipelineGraph = {
   stages:UNIFORM_FLUID_PIPELINE.stages.flatMap(stage=>{
     if(stage.id==="density-advection")return volumeStages;
     if(["gamma-diffusion","interface-sharpening","sharpening-mass-correction","solid-excess"].includes(stage.id))return [];
-    if(stage.id==="density-post-process")return [{...stage,label:"Phi surface publication",phaseLabels:[P.surface.label],
+    if(stage.id==="density-post-process")return [{...stage,label:"Phi surface publication",phaseLabels:[P.surface.label],spendsNoFrameTime:true,
       toggle:undefined,state:()=>"on" as const,
       controls:[{kind:"param-choice" as const,param:"orphanVolumeRender",label:"Show orphan V",
         options:[{value:"off",label:"Off",hint:"Publish phi only."},
@@ -304,7 +304,7 @@ export const UNIFORM_VOLUME_PIPELINE: FluidPipelineGraph = {
         hint:"Draw V lying more than 1.5 cells from any phi surface. Presentation only; the solver never reads it."}],
       chip:context=>context.values.orphanVolumeRender === "density" ? "phi = 0 · orphan V density"
         : context.values.orphanVolumeRender === "spheres" ? "phi = 0 · orphan V spheres" : "phi = 0",
-      tip:{summary:"Publish the independent vertex level set in the renderer's dense contour encoding. Native execution overlaps this with projection or rigid coupling; its time is included in that combined stage."}}];
+      tip:{summary:"The renderer reads canonical level-set vertices through the accepted ownership generation. Publication switches the accepted view after the step completes; no dense expansion pass is required."}}];
     const mapped={...stage,phaseLabels:[...(stage.phaseLabels??[]),
       ...(stage.id==="pressure-projection"?["Pressure projection + surface publication"]:
         stage.id==="rigid-coupling"?["Rigid coupling + surface publication"]:[])],controls:stage.controls?.filter(control=>!("param" in control &&
@@ -330,25 +330,28 @@ export const UNIFORM_VOLUME_PIPELINE: FluidPipelineGraph = {
         {kind:"param-choice" as const,param:"airborneMomentum",label:"Airborne momentum",options:onOff,
         hint:UNIFORM_GEOMETRIC_SPLASH_HINTS.airborneMomentum}],
       chip:context=>{const extra=["page domain",twoLevelChip(context)].filter(Boolean).join(" · ");
-        const base=mapped.chip?.(context);
-        return extra?(base?`${base} · ${extra}`:extra):base;}}];
+        return `shared support · hierarchy fill${extra?` · ${extra}`:""}`;}}];
     if(stage.id==="pressure-cycles")return [{...mapped,
-      tip:{...mapped.tip,summary:"One coupled pressure solve across page seams. Repeat V-cycles with loose inner accuracy while residual reduction is good. Switch to Full-Cycles when progress stalls or the V-cycle budget runs out. Continue the current frame until its fine residual meets tolerance; recovery runs after a rejected correction. Projected Jacobi updates preserve reflection symmetry."},
-      controls:[...(mapped.controls ?? []).map(control => control.kind === "param-range" && control.param === "pressureSweeps"
+      tip:{...mapped.tip,summary:"One coupled pressure solve across page seams. Repeat V-cycles with loose inner accuracy while residual reduction is good. Switch to Full-Cycles when progress stalls or the V-cycle budget runs out. Publish only when the fine residual meets tolerance within the configured cycle budget. A nonfinite or worsening solve stops the frame before projection. Projected Jacobi updates preserve reflection symmetry."},
+      controls:[...(mapped.controls ?? []).filter(control=>control.kind!=="readout").map(control => control.kind === "param-range" && control.param === "pressureSweeps"
         ? {...control,hint:"Projected Jacobi sweeps before and after each coarse correction. Changing this rebuilds the plan and resets time."}
         : control.kind === "param-range" && control.param === "pressureVCycles"
           ? {...control,hint:"Available cheap corrections. Repeat while residual reduction is good; skip the remaining V-cycles for Full-Cycles when progress stalls. Encode only what the current frame needs."}
           : control),
-        {kind:"readout" as const,label:"Coarse work",hint:"Coarse solves actually executed and total inner sweeps across those solves in the current frame.",
-          value:(context: FluidPipelineContext)=>{
-            const info=context.info as unknown as {uniformPressureCoarseSolvesExecuted?:number;uniformPressureCoarseSweepsTotal?:number}|null;
-            return info?.uniformPressureCoarseSolvesExecuted === undefined ? "—"
-              : `${info.uniformPressureCoarseSolvesExecuted} solves · ${info.uniformPressureCoarseSweepsTotal} sweeps`;
-          }}],
-      chip:context=>mapped.chip?.(context)??"V-first adaptive"}];
+        {kind:"readout" as const,label:"Completed cycles",hint:"Coupled cycles in the last successfully completed step.",
+          value:(context:FluidPipelineContext)=>context.info?.uniformPressureCyclesExecuted === undefined ? "—" : String(context.info.uniformPressureCyclesExecuted)},
+        {kind:"readout" as const,label:"Residual ∞-norm",hint:"Accepted finest-level divergence residual. Projection is withheld if the requested tolerance is not met.",
+          value:(context:FluidPipelineContext)=>context.info?.uniformPressureAcceptedResidual === undefined ? "—" : context.info.uniformPressureAcceptedResidual.toExponential(2)}],
+      chip:context=>context.info?.uniformMixedGeneration!==undefined
+        ? `V-first adaptive · ${context.info.uniformPressureCyclesExecuted??0} accepted-step cycles · projected Jacobi`
+        : "V-first adaptive · awaiting first solve"}];
+    if(stage.id==="pressure-finish")return [{...mapped,
+      tip:{...mapped.tip,summary:"Reconstruct pressure gradients from the converged coupled iterate before projection. A failed solve stops before this stage.",writes:"pressure reconstruction and residual diagnostics"},
+      chip:()=>"converged gradient reconstruction"}];
     // Which cells own a pressure row is decided where the topology and RHS
     // are built, so the V claim sits on that stage.
     if(stage.id==="pressure-system")return [{...mapped,
+      chip:()=>"shared ownership · coupled RHS pyramid",
       controls:[...(mapped.controls ?? []),volumePressureRowsControl,{kind:"param-choice" as const,param:"surfaceDeficitBalancing",label:"Surface-deficit balancing",options:onOff,hint:"Preserve overfill expansion and balance it globally with contraction in underfilled liquid. Reduces persistent sloshing."},{kind:"readout" as const,label:"Pressure backing",value:()=>"Native coupled hierarchy"}]}];
     // E2b shrinks both of these, off the same fine map, so the one control sits
     // on both stages rather than in a shelf away from the work it prices.

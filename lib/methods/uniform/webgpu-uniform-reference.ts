@@ -1,3 +1,14 @@
+import {UniformMixedDiagnostics} from "./uniform-mixed-diagnostics";
+import { UniformMixedFrame, type UniformMixedFrameTrace } from "./uniform-mixed-frame";
+import { assertUniformMixedOptions } from "./uniform-mixed-options";
+import { UniformMixedCellProlongation } from "./uniform-mixed-cell-prolongation";
+import { UniformMixedVertexTransfer } from "./uniform-mixed-vertex-transfer";
+import { UniformMixedVelocityRestriction } from "./uniform-mixed-velocity-restriction";
+import { UniformMixedTransportStage } from "./uniform-mixed-transport";
+import { createUniformMixedLayout } from "./uniform-mixed-layout";
+import { uniformMixedNativeTraceWGSL } from "./uniform-mixed-topology.wgsl";
+import type { FluidRefinementRegion } from "../../core/model";
+import { refinementRegionLattice } from "../../core/refinement-regions";
 import { UniformScratchArena } from "./uniform-scratch-arena";
 import { nextUniformPressureCorrection } from "./uniform-pressure-continuation";
 import { uniformBrickCells, uniformDonorLimbCells } from "./uniform-volume-donor-sum.wgsl";
@@ -103,6 +114,8 @@ interface UniformSharedExecutionResources {
 }
 
 export interface WebGPUUniformReferenceOptions {
+  /** Production Uniform Geometric owner-driven architecture. Native callers are stage/reference QA. */
+  mixedOwnership?: boolean;
   /** Reserve h <-> 4h execution configurations and both transfers at startup:
    * aligned 3D box interiors without terrain, bodies or authored solid edits. */
   prepareCoarseSimulation?: boolean;
@@ -632,7 +645,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private present(field: GPUTexture): GPUTexture { return this.fieldPages?.publication(field) ?? field; }
   private readonly executionDenseLevelSetVolumeSource?: DenseLevelSetVolumeConsumerSource;
   get denseLevelSetVolumeSource(): DenseLevelSetVolumeConsumerSource | undefined {
-    return this.activeCoarse ? this.activeCoarse.denseLevelSetVolumeSource : this.executionDenseLevelSetVolumeSource;
+    return this.mixedSource ?? (this.activeCoarse ? this.activeCoarse.denseLevelSetVolumeSource : this.executionDenseLevelSetVolumeSource);
   }
   private readonly vertexPhiScratch?: GPUTexture;
   /** Most recent transported phi, before closest-point redistancing (diagnostics). */
@@ -1045,7 +1058,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const nz = options.referenceDimension === 2 ? 1 : sourceNz;
     if (this.geometricVolume && options.pageDomain) {
       this.pageDomain = initialUniformPageDomain([nx, ny, nz], options.volumePages === 16 ? 16 : 32);
-      this.nativePageCoordinates = !sharedExecution && uniformPageHasNativeCoordinates(this.pageDomain);
+      this.nativePageCoordinates = !options.mixedOwnership && !sharedExecution && uniformPageHasNativeCoordinates(this.pageDomain);
       if (!this.nativePageCoordinates) {
         const paged = !sharedExecution && (options.fieldStorageForQA === "paged" || options.phiStorageForQA === "paged" ||
           (options.fieldStorageForQA !== "dense" && !uniformPageHasRectangularCoverage(this.pageDomain)));
@@ -1583,12 +1596,212 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         solver = new WebGPUUniformReferenceSolver(device, scene, quality, onRigidLoads, { ...options, deferPipelineCompilation: true });
       } }]);
       await runner.run(solver!.initializationTasks(signal));
-      if(options.prepareCoarseSimulation) await solver!.prepareCoarseExecution(options, runner, signal);
+      if(options.mixedOwnership) await runner.run([{id:"uniform.mixed",phase:"solver-pipelines",label:"Prepare shared mixed ownership",run:()=>solver!.initializeMixedFrame()}]);
+      else if(options.prepareCoarseSimulation) await solver!.prepareCoarseExecution(options, runner, signal);
       return solver!;
     } catch (error) {
       solver?.destroy();
       throw error;
     }
+  }
+
+  private mixedFrame?: UniformMixedFrame;
+  private mixedFrameTrace(): UniformMixedFrameTrace | undefined {
+    const instrumentation=usePerformanceInstrumentationStore.getState(),requested=performance.now();
+    if(!instrumentation.enabled||this.physicsTracePending||requested-this.lastPhysicsTraceAt_ms<UNIFORM_PHYSICS_TRACE_CADENCE_MS)return undefined;
+    this.executionInfo.physicsCPUTrace=undefined;
+    if(!GPUStageTimestampRecorder.supported(this.device)||!GPUStageTimestampRecorder.markersReady(this.device)){
+      this.executionInfo.physicsTrace=undefined;
+      this.executionInfo.physicsTraceUnavailable="GPU hardware timing is unavailable. No substitute timing is reported.";
+      return undefined;
+    }
+    const sampleId=++this.physicsTraceSampleId,context=`uniform:sim-${this.lastTime.toFixed(6)}`;
+    // Close each submitted command buffer before awaiting its receipt. A
+    // timestamp chain spanning submissions would charge CPU waits to pressure.
+    const segments:GPUStageTimestampRecorder[]=[];
+    let active:GPUStageTimestampRecorder|undefined;
+    this.physicsTracePending=true;this.lastPhysicsTraceAt_ms=requested;
+    return {
+      instrument:encoder=>{
+        if(active)throw new Error("Mixed timing segment already open");
+        active=new GPUStageTimestampRecorder(this.device,sampleId,"physics",context);active.begin();
+        return active.instrument(encoder);
+      },
+      phase:(encoder,phase)=>active!.completePhase(encoder,phase),
+      submit:(encoder,anchor)=>{
+        active!.anchorFinalBoundary(anchor);active!.resolve(encoder);segments.push(active!);active=undefined;
+      },
+      submitted:()=>{
+        this.executionInfo.physicsCaptureIdentity={sampleId,context,frameId:gpuPhysicsPerformanceActivityFrameId({sampleId,context})};
+        void Promise.all(segments.map(segment=>segment.read())).then(traces=>{
+          const current=usePerformanceInstrumentationStore.getState();
+          if(this.disposed||!current.enabled||current.enabledAt_ms>requested)return;
+          if(traces.some(trace=>!trace)){
+            this.executionInfo.physicsTrace=undefined;
+            this.executionInfo.physicsTraceUnavailable="GPU hardware timing was invalid. No substitute timing is reported.";
+            return;
+          }
+          const complete=traces.map(trace=>trace!);
+          this.executionInfo.physicsTrace={...complete.at(-1)!,total_ms:complete.reduce((sum,trace)=>sum+trace.total_ms,0),phases:complete.flatMap(trace=>trace.phases)};
+          this.executionInfo.physicsTraceUnavailable=undefined;
+        }).catch(error=>{
+          if(!this.disposed){this.executionInfo.physicsTrace=undefined;this.executionInfo.physicsTraceUnavailable=`GPU hardware timing failed: ${String(error)}`;}
+        }).finally(()=>{this.physicsTracePending=false;});
+      },
+      abort:()=>{active?.destroy();segments.forEach(segment=>segment.destroy());this.physicsTracePending=false;},
+    };
+  }
+  private mixedDiagnostics?: UniformMixedDiagnostics;
+  private mixedRegionKey="";
+  private mixedGeneration=0;
+  private mixedSource?: DenseLevelSetVolumeConsumerSource;
+  private async initializeMixedFrame():Promise<void>{
+    this.assertMixedOptions();
+    if(!this.scratchArena||!this.vertexPhiField||!this.vertexPhiScratch)throw new Error("Mixed Uniform requires the shared native field arena");
+    const fine=createUniformMixedLayout(refinementRegionLattice(this.scene),[]);
+    this.mixedFrame=new UniformMixedFrame(this.device,fine,{
+      arena:this.scratchArena,conditioning:this.conditioningScratch,volume:this.volumeA,volumeScratch:this.volumeB,
+      velocity:this.velocityA,velocityScratch:this.velocityB,departure:this.velocityD,
+      negative:this.boundaryVelocityA,negativeScratch:this.boundaryVelocityB,negativeDeparture:this.boundaryVelocityD,
+      phi:this.vertexPhiField,phiScratch:this.vertexPhiScratch,phase:this.surfaceA,centerPhi:this.surfaceB,target:this.gammaB,correction:this.gammaA,
+      pressure:this.pressureMultigrid.prepareMixedContinuation(),extension:this.velocityExtrapolator.prepareMixedContinuation(),uniformGroup:this.pressureMultigridGroup,sourceParams:this.params,
+    },this.scene.container.top==="open",this.pressureSchedule);
+    await this.mixedFrame.initialize();
+    this.mixedDiagnostics=new UniformMixedDiagnostics(this.device,this.mixedFrame.ownership,this.volumeA,this.velocityA,this.vertexPhiField,this.reductions);
+    await this.mixedDiagnostics.initialize();
+    this.executionInfo.allocatedBytes+=this.mixedFrame.allocatedBytes;
+    this.mixedSource={vertexPhi:this.vertexPhiField,openFraction:this.gammaB,cellSize_m:fine.lattice.cellSize_m,mixedOwnership:this.mixedFrame.ownership.presentation,mixedPressure:this.mixedFrame.levels[0]!.pressure,mixedPressurePhi:this.mixedFrame.levels[0]!.phi,mixedSupport:{buffer:this.mixedFrame.ownership.support}};
+    this.updateMixedRegions();
+  }
+  private updateMixedRegions():void{
+    if(!this.mixedFrame)return;
+    const regions=this.scene.fluid.refinementRegions??[],key=JSON.stringify(regions);
+    if(key===this.mixedRegionKey)return;
+    const layout=createUniformMixedLayout(refinementRegionLattice(this.scene),regions);
+    this.mixedFrame.updateLayout(layout);this.mixedRegionKey=key;this.mixedGeneration++;
+    Object.assign(this.executionInfo,{uniformMixedGeneration:this.mixedGeneration,uniformMixedFineTiles:layout.fineTiles.length,
+      uniformMixedTransitionTiles:layout.transitionTiles.length,uniformMixedCoarseTiles:layout.coarseTiles.length,
+      uniformMixedOwners:layout.cellCount,uniformSimulationCellScale:undefined});
+  }
+  private mixedTransportForQA?: UniformMixedTransportStage;
+  private mixedTraceForQA?: GPUComputePipeline[];
+  private mixedVelocityRestrictionForQA?: UniformMixedVelocityRestriction;
+  private mixedCellProlongationForQA?: UniformMixedCellProlongation;
+  private mixedVertexRestrictionForQA?: UniformMixedVertexTransfer;
+  private mixedVertexProlongationForQA?: UniformMixedVertexTransfer;
+  private mixedTransportResultForQA = false;
+  private mixedTraceGroupForQA?: GPUBindGroup;
+  private mixedCaptureConsumed = false;
+
+  private assertMixedOptions(): void {
+    assertUniformMixedOptions({
+      velocityTransport: this.velocityTransport, airborneMomentum: this.airborneMomentum,
+      liquidOnlyVelocityAdvection: this.liquidOnlyVelocityAdvection, volumePressureRows: this.volumePressureRows,
+      volumeCompaction: this.volumeCompaction, phiSeedFromVolume: this.phiSeedFromVolume,
+      phiAgreementGain: this.phiAgreementGain, redistanceSurface: this.redistanceSurface,
+      orphanVolume: this.orphanVolume, orphanVolumeRender: this.orphanVolumeRender,
+      isolatedBodyVolume: this.isolatedBodyVolume, phiSeedCells: this.phiSeedCells,
+    });
+  }
+
+  /** Stage integration gate. This prepares no alternative pressure/surface
+   * solver and does not enable a partially implemented UI simulation mode. */
+  async prepareMixedTransportForQA(regions: readonly FluidRefinementRegion[]): Promise<void> {
+    this.assertMixedOptions();
+    if (this.mixedTransportForQA) throw new Error("Mixed transport already prepared");
+    if (!this.geometricVolume || !this.scratchArena || !this.fieldPages?.nativeStorage
+      || this.activeCoarse || (this.scene.container.shape ?? "box") !== "box" || sceneHasTerrain(this.scene)
+      || this.scene.rigidBodies.length || solidVoxelEditsForScene(this.scene).length
+      || this.scene.fluid.inflow || !this.solidVoxelsEmpty)
+      throw new Error("Mixed transport gate requires native Uniform in an empty solid box without bodies or inlet");
+    const layout = createUniformMixedLayout(refinementRegionLattice(this.scene), regions, true, 4);
+    if (layout.lattice.dimensions.some((n, a) => n !== [this.executionInfo.nx, this.executionInfo.ny, this.executionInfo.nz][a]))
+      throw new Error("Mixed ownership must cover the native simulation lattice");
+    const stage = new UniformMixedTransportStage(this.device, layout, this.scratchArena, this.volumeA, this.volumeB, this.velocityB);
+    try {
+      await stage.initialize();
+      const velocity = new UniformMixedVelocityRestriction(this.device, stage.ownership, this.transportA, this.velocityA, this.boundaryVelocityA);
+      await velocity.initialize();
+      const prolongation = new UniformMixedCellProlongation(this.device, stage.ownership,
+        { volume: this.volumeA, velocity: this.velocityA, negativeFaces: this.boundaryVelocityA },
+        { volume: this.volumeB, velocity: this.velocityB, negativeFaces: this.boundaryVelocityB });
+      await prolongation.initialize();
+      const vertexRestriction = new UniformMixedVertexTransfer(this.device, stage.ownership, this.vertexPhiField!, this.vertexPhiScratch!, "restrict");
+      const vertexProlongation = new UniformMixedVertexTransfer(this.device, stage.ownership, this.vertexPhiScratch!, this.vertexPhiField!, "prolong");
+      await vertexRestriction.initialize();
+      await vertexProlongation.initialize();
+      const module = this.device.createShaderModule({ label: "Uniform native mixed trace", code: this.shaderSource + uniformMixedNativeTraceWGSL(layout) });
+      const errors = (await module.getCompilationInfo()).messages.filter(message => message.type === "error");
+      if (errors.length) throw new Error(errors.map(message => `${message.lineNum}:${message.linePos} ${message.message}`).join("\n"));
+      // Tracing reads no pressure, reductions, exchange or correction buffers.
+      // Reusing the full main layout would exceed the ten-storage-buffer limit
+      // once ownership is bound. Mixed tracing uses the shared native RK2.
+      const traceEntries: GPUBindGroupLayoutEntry[] = [
+        // dims() uses the volume binding's logical field metadata.
+        { binding: 4, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rgba32float", viewDimension: "3d" } },
+        { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+        { binding: 14, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
+        { binding: 26, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      ];
+      const traceLayout = this.device.createBindGroupLayout({ entries: this.fieldPages!.layout(traceEntries) });
+      const needed = new Set(traceEntries.map(entry => entry.binding));
+      this.mixedTraceGroupForQA = this.createPageAwareGroup({ layout: traceLayout,
+        entries: [...this.groupDescriptors.get(this.densityTraceGroup)!.entries].filter(entry => needed.has(entry.binding))
+          .map(entry => entry.binding === 14 ? { ...entry, resource: this.velocityA.createView() } : entry) });
+      const pipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [traceLayout, stage.topologyLayout] });
+      this.mixedTraceForQA = await Promise.all([1, 2, 4].map(umCellWidth => this.device.createComputePipelineAsync({
+        layout: pipelineLayout, compute: { module, entryPoint: "uvMixedTrace", constants: { umCellWidth, umDispatchX: stage.dispatchX } },
+      })));
+      this.mixedCellProlongationForQA = prolongation;
+      this.mixedVertexRestrictionForQA = vertexRestriction;
+      this.mixedVertexProlongationForQA = vertexProlongation;
+      this.mixedVelocityRestrictionForQA = velocity;
+      this.mixedTransportForQA = stage;
+    } catch (error) { stage.destroy(); throw error; }
+  }
+
+  /** Terminal capture on an evolved native state. Volume A/B, velocity A/B
+   * and negative boundary A are borrowed, so a capture deliberately consumes the solver rather than letting
+   * an incomplete mixed step be resumed as a valid simulation. */
+  captureMixedTransportForQA(dt: number, nativeReference = false) {
+    this.assertMixedOptions();
+    const stage = this.mixedTransportForQA;
+    if (!stage || !this.mixedTraceForQA || !this.mixedVelocityRestrictionForQA || this.mixedCaptureConsumed || this.disposed || this.framePending || this.activeCoarse || !(dt > 0) || !Number.isFinite(dt))
+      throw new Error("Mixed transport capture requires preparation, a fresh state and positive finite dt");
+    if (nativeReference && stage.layout.fineTiles.length !== stage.layout.tiles.length)
+      throw new Error("Native transport reference requires the all-fine endpoint");
+    this.mixedCaptureConsumed = true;
+    this.mixedTransportResultForQA = !nativeReference;
+    this.writeParams(dt, 0, 0);
+    this.twoLevelEncoded = this.twoLevelEnabled;
+    this.transportTilesEncoded = this.transportTilesEnabled;
+    const encoder = this.device.createCommandEncoder();
+    this.encodeSupportTopology(encoder);
+    this.encodeVelocityExtrapolation(encoder, false);
+    this.mixedVelocityRestrictionForQA.encode(encoder);
+    const pass = encoder.beginComputePass({ label: "Uniform native RK2 on mixed MAC fields" });
+    pass.setBindGroup(0, this.mixedTraceGroupForQA!); pass.setBindGroup(1, stage.topologyGroup);
+    stage.dispatch(pass, this.mixedTraceForQA); pass.end();
+    if (nativeReference) this.encodeConservativeVolumeTransport(encoder);
+    else { stage.encodeRestriction(encoder); stage.encodeTransport(encoder); this.mixedVertexRestrictionForQA!.encode(encoder); }
+    this.device.queue.submit([encoder.finish()]);
+    return { volume: nativeReference ? this.volumeB : this.volumeA, departures: this.velocityB,
+      velocity: this.velocityA, boundaryVelocity: this.boundaryVelocityA, fineVelocity: this.transportA,
+      phi: nativeReference ? this.vertexPhiField! : this.vertexPhiScratch!,
+      layout: stage.layout, allocatedBytes: stage.allocatedBytes + 36 * 16 };
+  }
+
+  /** Cell and vertex return leg after a terminal mixed capture. This overwrites
+   * the borrowed departure field, so inspect departures before calling it.
+   * Full mixed advancement/pressure remains incomplete; this cannot resume. */
+  captureMixedProlongationForQA() {
+    if (!this.mixedCaptureConsumed || !this.mixedTransportResultForQA || !this.mixedCellProlongationForQA || !this.mixedVertexProlongationForQA || this.disposed || this.framePending)
+      throw new Error("Mixed prolongation requires a terminal mixed transport result");
+    const encoder = this.device.createCommandEncoder();
+    this.mixedCellProlongationForQA.encode(encoder);
+    this.mixedVertexProlongationForQA.encode(encoder); this.device.queue.submit([encoder.finish()]);
+    return { volume: this.volumeB, velocity: this.velocityB, boundaryVelocity: this.boundaryVelocityB, phi: this.vertexPhiField! };
   }
 
   /** Prepared execution capsules share temporary storage and rigid ownership;
@@ -2043,8 +2256,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * work immediately, so reconstruct the current density once for display.
    */
   applyRuntimeValues(values: MethodParamValues): void {
-    if(values.coarseSimulation === "on")this.requestCoarseSimulation();
-    if(values.coarseSimulation === "off")this.requestFineSimulation();
+    if(!this.mixedFrame && values.coarseSimulation === "on")this.requestCoarseSimulation();
+    if(!this.mixedFrame && values.coarseSimulation === "off")this.requestFineSimulation();
     if(this.activeCoarse){
       const {coarseSimulation:_,...rest}=values;
       this.activeCoarse.applyRuntimeValues(rest);
@@ -3180,12 +3393,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       && this.transportReachPipelines.uvTransportReachZ !== undefined;
   }
 
-  private encodeGeometricVolume(encoder: GPUCommandEncoder, seam?: (phase: GPUTimestampPhase) => void): void {
-    if (this.transportReachEncoded) {
-      this.encodeTransportReach(encoder);
-      seam?.(UNIFORM_VOLUME_PHASE.transportReach);
-    }
-    const run = (entry: typeof UNIFORM_VOLUME_ENTRIES[number], group = this.densityTraceGroup) => {
+  private volumeStageEncoder(encoder: GPUCommandEncoder) {
+    return (entry: typeof UNIFORM_VOLUME_ENTRIES[number], group = this.densityTraceGroup) => {
       if(entry === "uvFinishDonorSums" || entry === "uvClearDonorSums" || entry === "uvFinishAndClearDonorSums") {
         if(this.nativeRootExecution && this.volumeWorkDispatch && this.transportTilesEncoded && uniformAbOn("donortiles")) {
           const pass=encoder.beginComputePass({label:entry});pass.setPipeline(this.volumePipelines[entry]!);
@@ -3198,19 +3407,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         this.runVolumeWork(encoder,entry,this.volumePipelines[entry]!, (this.scratchArena || entry==="uvBuildEdges"||entry==="uvNormalizeRows"||entry==="uvRowsFallback"||entry==="uvRowsDivide")?this.volumeDonorGroup:group);
       else this.run(encoder,entry,this.volumePipelines[entry]!,group);
     };
+  }
 
-    // The shift's residual is packed into the gamma scratch half from
-    // start-of-step V, gamma and phi, and the advect then binds that half as
-    // its gamma input. uvGather and uvPublish both rewrite it later this step.
-    const shift = this.phiAgreementGain > 0 && !this.isolatedBodyVolume;
-    if (shift) run("uvAgreementResidual");
-    this.runVertex(encoder, "Advect page vertex phi", this.volumePipelines.uvAdvectPhi!, shift ? this.densityGatherGroup : this.densityTraceGroup);
-    // CM11b Sec. 3.4 reinitializes only every tenth frame; the sparse mode is
-    // that schedule over the surface-preserving pass.
-    const redistanceStep = this.redistanceSurface !== "sparse" || (this.executionInfo.encodedSteps ?? 0) % 10 === 0;
-    if (this.geometricRedistance && redistanceStep) this.runVertex(encoder, "Redistance page vertex phi", this.volumePipelines.uvRedistancePhi!, this.phiReverseGroup!);
-    else this.copyField(encoder,{texture:this.vertexPhiScratch!},{texture:this.vertexPhiField!},[this.executionInfo.nx+1,this.executionInfo.ny+1,this.executionInfo.nz+1]);
-    seam?.(UNIFORM_VOLUME_PHASE.phi);
+  private encodeConservativeVolumeTransport(encoder: GPUCommandEncoder, seam?: (phase: GPUTimestampPhase) => void, run = this.volumeStageEncoder(encoder)): void {
     // Deposit donor weights while each row is already in registers. Integer
     // accumulation is exact and order independent, so this saves four full
     // edge-table scans without changing the transport normalization scheme.
@@ -3249,6 +3448,28 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     seam?.(UNIFORM_VOLUME_PHASE.coupling);
     // Fused, the gather divides by the decoded sums bound in the donor slot.
     run("uvGather", fuse && this.scratchArena ? this.volumeDonorGroup : this.densityTraceGroup);
+  }
+
+  private encodeGeometricVolume(encoder: GPUCommandEncoder, seam?: (phase: GPUTimestampPhase) => void): void {
+    if (this.transportReachEncoded) {
+      this.encodeTransportReach(encoder);
+      seam?.(UNIFORM_VOLUME_PHASE.transportReach);
+    }
+    const run = this.volumeStageEncoder(encoder);
+
+    // The shift's residual is packed into the gamma scratch half from
+    // start-of-step V, gamma and phi, and the advect then binds that half as
+    // its gamma input. uvGather and uvPublish both rewrite it later this step.
+    const shift = this.phiAgreementGain > 0 && !this.isolatedBodyVolume;
+    if (shift) run("uvAgreementResidual");
+    this.runVertex(encoder, "Advect page vertex phi", this.volumePipelines.uvAdvectPhi!, shift ? this.densityGatherGroup : this.densityTraceGroup);
+    // CM11b Sec. 3.4 reinitializes only every tenth frame; the sparse mode is
+    // that schedule over the surface-preserving pass.
+    const redistanceStep = this.redistanceSurface !== "sparse" || (this.executionInfo.encodedSteps ?? 0) % 10 === 0;
+    if (this.geometricRedistance && redistanceStep) this.runVertex(encoder, "Redistance page vertex phi", this.volumePipelines.uvRedistancePhi!, this.phiReverseGroup!);
+    else this.copyField(encoder,{texture:this.vertexPhiScratch!},{texture:this.vertexPhiField!},[this.executionInfo.nx+1,this.executionInfo.ny+1,this.executionInfo.nz+1]);
+    seam?.(UNIFORM_VOLUME_PHASE.phi);
+    this.encodeConservativeVolumeTransport(encoder, seam, run);
     // One immutable post-transport neighbourhood, before surface correction.
     // Repeating this in sharpening sweeps would progressively erode droplets.
     if (this.orphanDustThreshold > this.volumeDustThreshold && this.volumeDustThreshold > 0) {
@@ -3315,7 +3536,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
 
   get framePending(): boolean { if(this.activeCoarse)return this.activeCoarse.framePending; return this.pendingFrame !== undefined; }
   get deferredFramePublication(): boolean { if(this.activeCoarse)return this.activeCoarse.deferredFramePublication;
-    return this.adaptivePressure && this.pressureCycleBudgetLagged && this.pressureMultigrid.residualTolerance > 0;
+    return !!this.mixedFrame || this.adaptivePressure && this.pressureCycleBudgetLagged && this.pressureMultigrid.residualTolerance > 0;
   }
   get presentationPending(): boolean { if(this.activeCoarse)return this.activeCoarse.presentationPending; return this.framePending || this.pressureFrameFailure !== undefined; }
   async awaitFrameCompletion(): Promise<void> {
@@ -3331,6 +3552,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   }
 
   advanceTo(time_s: number, bodies: RigidBodyState[] = []): boolean {
+    if (this.mixedCaptureConsumed) throw new Error("A terminal mixed transport capture cannot resume simulation");
     if(this.disposed)return false;
     if(this.coarseExecution && bodies.length)throw new Error("Prepared coarse simulation does not yet support rigid bodies");
     this.commitResolutionRequest();
@@ -3339,6 +3561,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       return this.activeCoarse.advanceTo(time_s,bodies);
     }
     if (this.framePending || this.pressureFrameFailure) return false;
+    if(this.mixedFrame){
+      this.assertMixedOptions();
+      // Reject unsupported geometry before advancing the clock or consuming a
+      // queued liquid edit. The last accepted frame remains usable for edits.
+      if(bodies.length||this.scene.rigidBodies.length||!this.solidVoxelsEmpty||sceneHasTerrain(this.scene)||(this.scene.container.shape??"box")!=="box")
+        throw new Error("Mixed Uniform solid coupling is not yet initialized for this scene");
+    }
     // The paper's method is calibrated for its own large-step regime (dt=1/30
     // in every Sec. 4 example): sharpening opposes per-resample transport
     // blur, so far smaller scene steps structurally out-diffuse it.
@@ -3391,6 +3620,31 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     }
     this.executionInfo.referenceLiquidVolume_cells = this.referenceVolumeCells;
     this.writeParams(dt, activeBodies.length, strength, drop);
+    if(this.mixedFrame){
+      const frame=this.mixedFrame;
+      this.pendingFrame=frame.advance({dt,gravity:this.scene.fluid.gravity_m_s2.y,density:this.scene.fluid.density_kg_m3,
+        viscosity:this.scene.fluid.dynamicViscosity_Pa_s,surfaceTension:this.scene.fluid.surfaceTension_N_m,
+        openTop:this.scene.container.top==="open",noSlip:this.scene.container.fluidWallMode==="no-slip",cubic:this.phiCubicAdvection,drain:this.phiDrain,
+        dust:this.volumeDustThreshold,orphanDust:this.orphanDustThreshold,sharpeningStrength:this.densitySharpening?this.sharpeningStrength:0,
+        sharpeningDistance:this.sharpeningDistance,pressureTolerance:this.pressureMultigrid.residualTolerance,
+        totalSurfaceVolume:this.totalSurfaceVolume,redistance:this.geometricRedistance,sharpening:this.densitySharpening,
+        surfaceDeficitBalancing:this.surfaceDeficitBalancing,extensionSweeps:this.velocityExtrapolator.frontPasses,
+        supportPolicy:{fineReach:this.twoLevelFineReach,shellReach:this.twoLevelShellReach,twoLevel:this.twoLevelEnabled,shellOnly:this.twoLevelExtensionEnabled},
+      },this.mixedFrameTrace()).then(receipt=>{
+        if(this.disposed)return;
+        Object.assign(this.executionInfo,{simulatedTime_s:advance.nextTime_s,completedTime_s:advance.nextTime_s,
+          uniformPressureAcceptedResidual:receipt.residual,uniformPressureCyclesExecuted:receipt.cycles,uniformPressureCyclesConverged:true,
+          uniformPressureCyclesEncoded:receipt.cycles,uniformPressureCyclesConfigured:this.pressureSchedule.fullCycles+this.pressureSchedule.vCycles,
+          uniformVolumeDustCells:receipt.dustOwners,uniformVolumeDustMass_cells:receipt.dustMass_cells,
+          uniformVolumeOrphanDustCells:receipt.orphanDustOwners,uniformVolumeOrphanDustMass_cells:receipt.orphanDustMass_cells});
+        this.pendingFrame=undefined;
+        const scene=this.deferredFrameScene,values=this.deferredFrameValues,bodies=this.deferredFrameBodies;
+        this.deferredFrameScene=undefined;this.deferredFrameValues=undefined;this.deferredFrameBodies=undefined;
+        if(scene)this.applySceneUniforms(scene);if(values)this.applyRuntimeValues(values);if(bodies)this.syncRigidBodies(bodies);
+      }).catch(error=>{if(!this.disposed){this.pressureFrameFailure=error instanceof Error?error:new Error(String(error));this.executionInfo.simulationPipelineError=this.pressureFrameFailure.message;}}).finally(()=>{this.pendingFrame=undefined;});
+      return true;
+    }
+
     // The advance-pipeline trace: a hardware-timestamp boundary chain over the
     // whole step, sampled on a cadence while the instrumentation store asks for
     // it. Boundaries splice into the next real pass's timestampWrites, so an
@@ -3835,6 +4089,28 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   async readStats(): Promise<GPUEulerianInfo> {
     if(this.activeCoarse)return this.activeCoarse.readStats();
     await this.awaitFrameCompletion();
+    if(this.mixedFrame){
+      if(this.disposed||this.readbackPending)return this.executionInfo;
+      this.readbackPending=true;
+      this.statsReadback??=this.device.createBuffer({label:"Uniform diagnostics readback",size:264,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+      try{
+        const encoder=this.device.createCommandEncoder();this.mixedDiagnostics!.encode(encoder);
+        encoder.copyBufferToBuffer(this.reductions,0,this.statsReadback,0,24);
+        encoder.copyBufferToBuffer(this.mixedFrame.ownership.support,this.mixedFrame.ownership.layout.tiles.length*16,this.statsReadback,24,16);
+        this.device.queue.submit([encoder.finish()]);
+        await this.statsReadback.mapAsync(GPUMapMode.READ);const words=new Uint32Array(this.statsReadback.getMappedRange(),0,10).slice();
+        const represented=words[0]!/2048,volume=words[3]!/2048,reference=Math.max(1,this.referenceVolumeCells);
+        Object.assign(this.executionInfo,{representedVolumeCellSum:represented,volumeCellSum:volume,
+          representedVolumeDrift:(represented-reference)/reference,rawVolumeDrift:(volume-reference)/reference,volumeDrift:(volume-reference)/reference,
+          volumeTelemetrySource:"dense-volume",frontTelemetrySource:"dense-volume",
+          front_m:-this.scene.container.width_m/2+words[1]!*this.scene.container.width_m/this.executionInfo.nx,
+          maxSpeed_m_s:new Float32Array(words.buffer)[2],uniformTwoLevelVelocity:this.twoLevelEnabled,
+          uniformTwoLevelFineReach:this.twoLevelFineReach,uniformTwoLevelShellReach:this.twoLevelShellReach,
+          uniformTwoLevelFineTiles:words[4],uniformTwoLevelShellTiles:words[5],uniformTwoLevelTilesTotal:this.mixedFrame.ownership.layout.tiles.length,
+          uniformTwoLevelExtensionTiles:this.twoLevelExtensionTiles,uniformMixedRegularTiles:words[7],uniformMixedGeneralTiles:words[8]});
+        return this.executionInfo;
+      }finally{if(this.statsReadback.mapState==="mapped")this.statsReadback.unmap();this.readbackPending=false;}
+    }
     if(this.simulationCellScale===4)return this.coarseExecution!.readStats();
     if (this.disposed || this.readbackPending) return this.executionInfo;
     this.readbackPending = true;
@@ -4014,6 +4290,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     if (nx !== this.executionInfo.nx || ny !== this.executionInfo.ny) throw new Error("This voxel edit changes the fluid lattice; reset the scene to apply it.");
   }
 
+  /** Fence paused remapping so the renderer invalidates its retained surface
+   * and publishes resolution status without advancing simulation time. */
+  async refreshSceneTopology():Promise<void>{
+    if(!this.mixedFrame)return;
+    await this.awaitFrameCompletion();await this.device.queue.onSubmittedWorkDone();
+  }
+
   applySceneUniforms(scene: SceneDescription): void {
     if(this.coarseExecution) {
       if(scene!==this.scene)throw new Error("Prepared coarse simulation does not yet support scene edits");
@@ -4023,6 +4306,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.receiverWorkReady = false;
     if (this.framePending) { this.deferredFrameScene = scene; return; }
     this.scene = scene;
+    this.updateMixedRegions();
     this.faceAuthorityStored = false;
     this.solidTilesStored = false;
     const dirty = this.solidMask.update(solidWorldForScene(scene));
@@ -4053,6 +4337,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     if (this.disposed) return;
     this.disposed = true;
     this.coarseExecution?.destroy();
+    this.mixedFrame?.destroy();
+    this.mixedTransportForQA?.destroy();
     this.pressureReceipt?.destroy();
     for (const texture of new Set([
       this.velocityA, this.velocityB, this.velocityC, this.velocityD,

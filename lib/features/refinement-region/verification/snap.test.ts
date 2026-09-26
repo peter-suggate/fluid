@@ -14,6 +14,22 @@ import { cloneScene, defaultScene, type FluidRefinementRegion, type SceneDescrip
 import { refinementRegionLattice, sceneRefinementRegions } from "../../../core/refinement-regions";
 import { sceneContainerBox, type BoxExtent } from "../../../core/editor-entity";
 import { BRICK_FINE_CELLS } from "../definition";
+import { snapRegionBox } from "../policy";
+
+test("off-tank region drags retain valid bounds at either wall", () => {
+  for (const step of [4, 8, 32]) {
+    const lattice = { dimensions: [32, 32, 24] };
+    for (const corners of [[-40, -20], [40, 60], [-2, 2], [22, 40]]) {
+      const box = snapRegionBox(Array(3).fill(corners[0]), Array(3).fill(corners[1]), step, lattice);
+      for (let axis = 0; axis < 3; axis++) {
+        assert.ok(box.min[axis]! >= 0);
+        assert.ok(box.max[axis]! <= lattice.dimensions[axis]!);
+        assert.ok(box.max[axis]! > box.min[axis]!);
+      }
+      assert.deepEqual(snapRegionBox(box.min, box.max, step, lattice), box);
+    }
+  }
+});
 
 /**
  * The 3-D adapter, held to the two things it is allowed to be.

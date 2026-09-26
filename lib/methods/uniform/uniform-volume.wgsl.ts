@@ -1,3 +1,9 @@
+import {uniformSourcePhiWGSL} from "./uniform-source.wgsl";
+import { uniformVolumeCorrectionWGSL } from "./uniform-volume-correction.wgsl";
+import { uniformSharpenBudgetWGSL } from "./uniform-sharpen-budget.wgsl";
+import { uniformMidpointTraceWGSL } from "./uniform-midpoint-trace.wgsl";
+import { uniformVolumeStencilBytes } from "./uniform-volume-stencil";
+import { volumeNormalizeRowsWGSL, volumeNormalizeDonorsWGSL } from "./uniform-volume-normalization.wgsl";
 import { uniformVolumeDonorSumWGSL } from "./uniform-volume-donor-sum.wgsl";
 import { uniformAbOn } from "./uniform-ab-switch";
 import { geometricPlaneBoxWGSL } from "../../core/geometric-plane-box.wgsl";
@@ -49,7 +55,7 @@ export const UNIFORM_VOLUME_TILE_WORK_OVERRIDE = "UV_SHARPEN_TILE_WORK";
 /** The first seven words remain reserved for work counters and layout stability. */
 export const UNIFORM_VOLUME_SHARPEN_TILE_COUNT_WORD = 7;
 export const UNIFORM_VOLUME_SHARPEN_TILE_MAP_WORD = 8;
-export const UNIFORM_VOLUME_EDGE_BYTES = 40;
+export const UNIFORM_VOLUME_EDGE_BYTES = uniformVolumeStencilBytes(1);
 const donorTiles = uniformAbOn("donortiles");
 const donorFuse = uniformAbOn("donorfuse");
 const clearNonzero = uniformAbOn("clearnonzero");
@@ -64,20 +70,20 @@ const tileReach = uniformAbOn("tilereach");
 /** Static solids and terrain mark SOLID instead of seeding FINE/SHELL. */
 const drySolids = uniformAbOn("drysolids");
 /** Same reconstruction; cached mode reuses the cell's eight vertex loads. */
-export function uniformVolumeTargetWGSL(cached: boolean): string {
-  return /* wgsl */ `fn uvTarget(id:vec3i)->f32{
+export function uniformVolumeTargetWGSL(cached: boolean, mixed = false): string {
+  return /* wgsl */ `${mixed ? "fn umSurfaceTarget(owner:UMOwner)->f32" : "fn uvTarget(id:vec3i)->f32"}{
   var samples:array<f32,8>;var centre=0.0;var fill=0.0;var magnitude=0.0;
   ${cached ? `// All eight quarter-cell probes interpolate the same eight vertices.
   // uvTarget is called only for valid cells, so each probe's clamped base is
   // exactly id and its fractions are exactly 1/4 or 3/4 in binary FP32.
   var vertices:array<f32,8>;
-  for(var j=0u;j<8u;j++){vertices[j]=textureLoad(uvPhiIn,id+uvCorner(j),0).x;}
+  for(var j=0u;j<8u;j++){vertices[j]=${mixed ? "umVertexValue(umOrigin(owner)+vec3u(uvCorner(j))*owner.width)" : "textureLoad(uvPhiIn,id+uvCorner(j),0).x"};}
   for(var k=0u;k<8u;k++){
     let f=vec3f(0.25)+0.5*vec3f(uvCorner(k));var weighted:array<f32,8>;
     for(var j=0u;j<8u;j++){let w=select(vec3f(1)-f,f,uvCorner(j)==vec3i(1));
       weighted[j]=vertices[j]*w.x*w.y*w.z;}
-    let value=d4Sum8(weighted);` : `for(var k=0u;k<8u;k++){let p=vec3f(id)+vec3f(0.25)+0.5*vec3f(uvCorner(k));
-    let value=uvPhi(p);`}
+    let value=d4Sum8(weighted);` : `for(var k=0u;k<8u;k++){let p=${mixed ? "vec3f(umOrigin(owner))+f32(owner.width)*(vec3f(0.25)+0.5*vec3f(uvCorner(k)))" : "vec3f(id)+vec3f(0.25)+0.5*vec3f(uvCorner(k))"};
+    let value=${mixed ? "umSampleVertex(p)" : "uvPhi(p)"};`}
     samples[k]=value;centre+=0.125*value;
     magnitude=max(magnitude,abs(value));fill+=select(select(0.0,1.0,value<0.0),0.5,value==0.0);}
   var gradient=vec3f(0);
@@ -86,11 +92,17 @@ export function uniformVolumeTargetWGSL(cached: boolean): string {
   for(var k=0u;k<8u;k++){let sign=2.0*vec3f(uvCorner(k))-vec3f(1);
     residual=max(residual,abs(samples[k]-(centre+dot(gradient,0.25*sign))));}
   let fraction=select(fill/8.0,geometricPlaneBoxFraction(gradient,-centre,vec3f(1)),residual<=1e-4*(1.0+magnitude));
-  return fraction*uvOpen(id);
+  return ${mixed ? "fraction" : "fraction*uvOpen(id)"};
 }`;
 }
 
+const uniformRow = {
+  count: "9u", weight: "uvEdges[uvEdgeAddress(i)].weight[k]",
+  donor: "uvDonor(i,k)", target: "uvOpen(id)",
+};
+
 export const uniformVolumeWGSL = /* wgsl */ `
+${uniformSharpenBudgetWGSL}
 ${geometricPlaneBoxWGSL}
 @group(0) @binding(31) var uvPhiIn:texture_3d<f32>;
 @group(0) @binding(32) var uvPhiOut:texture_storage_3d<r32float,write>;
@@ -159,9 +171,7 @@ fn uvGradient(p:vec3f)->vec3f{
 // Walk every crossed half-cell so a long characteristic cannot tunnel through
 // a thin voxel wall merely because its endpoint is in open fluid.
 fn uvTrace(p:vec3f,dt:f32)->vec3f{
-  let h=params.cellGravity.xyz;
-  let mid=clamp(p-0.5*dt*sampleVelocity(p)/h,vec3f(0),vec3f(dims()));
-  let end=clamp(p-dt*sampleVelocity(mid)/h,vec3f(0),vec3f(dims()));
+${uniformMidpointTraceWGSL("sampleVelocity")}
   ${solidFreeTrace ? `// E4. The walk exists to stop a characteristic tunnelling through a thin
   // voxel wall. Where the host has certified that no cell in the domain is
   // cut -- no static solid voxel, no rigid body, no terrain -- every
@@ -177,19 +187,7 @@ fn uvTrace(p:vec3f,dt:f32)->vec3f{
     if(cellOpenFraction(clampCell(vec3i(floor(q))))<=1e-5){return previous;}previous=q;}
   return end;
 }
-fn uvSourcePhi(p:vec3f,phi:f32)->f32{
-  var result=phi;
-  if(params.drop.w>0.0){let delta=traceWorld(p)-params.drop.xyz;
-    let ball=select(length(delta)-params.drop.w,
-      max(length(delta.xy)-params.drop.w,abs(delta.z)-params.dropExtent.x),params.dropExtent.x>0.0);
-    result=min(result,ball);}
-  let speed=length(params.inflowVelocityLength.xyz)*inflowStrength();
-  if(speed>1e-6){let direction=normalize(params.inflowVelocityLength.xyz);
-    let delta=traceWorld(p)-params.inflowPositionRadius.xyz;let axial=dot(delta,direction);
-    let plug=max(length(delta-axial*direction)-params.inflowPositionRadius.w,
-      max(-axial,axial-speed*params.dimsDt.w));result=min(result,plug);}
-  return result;
-}
+${uniformSourcePhiWGSL}
 // Bits published by projection: positive faces 0..2, negative domain faces 3..5.
 fn uvContactReleased(face:vec3i,axis:u32)->bool{
   var cell=face;var bit=axis;if(face[axis]<0){cell[axis]=0;bit+=3u;}
@@ -759,11 +757,8 @@ fn uvFallback(@builtin(global_invocation_id)gid:vec3u){
 @compute @workgroup_size(4,4,4)
 fn uvNormalizeRows(@builtin(global_invocation_id)gid:vec3u){
   let id=uvWorkId(gid);if(uvTransportSkip(id)){return;}
-  if(!valid(id)){return;}let i=linearIndex(id);var sum=0.0;
-  for(var k=0u;k<9u;k++){sum+=uvEdges[uvEdgeAddress(i)].weight[k];}
-  let scale=uvOpen(id)/max(sum,1e-20);
-  for(var k=0u;k<9u;k++){let weight=uvEdges[uvEdgeAddress(i)].weight[k]*scale;
-    uvEdges[uvEdgeAddress(i)].weight[k]=weight;uvAddDonor(uvDonor(i,k),weight);}
+  if(!valid(id)){return;}let i=linearIndex(id);
+  ${volumeNormalizeRowsWGSL(uniformRow)}
 }
 // FUSED NORMALIZATION (donorfuse). uvNormalizeDonors divides each weight by
 // its donor's decoded sum and does nothing else, so the division is applied by
@@ -807,9 +802,7 @@ fn uvRowsDivide(@builtin(global_invocation_id)gid:vec3u){
 fn uvNormalizeDonors(@builtin(global_invocation_id)gid:vec3u){
   let id=uvWorkId(gid);if(uvTransportSkip(id)){return;}
   if(!valid(id)){return;}let i=linearIndex(id);
-  for(var k=0u;k<9u;k++){let donor=uvDonor(i,k);
-    let sum=bitcast<f32>(atomicLoad(&sharpenDeposits[donor]));
-    uvEdges[uvEdgeAddress(i)].weight[k]/=max(sum,1e-20);}
+  ${volumeNormalizeDonorsWGSL(uniformRow, "bitcast<f32>(atomicLoad(&sharpenDeposits[donor]))")}
 }
 // Sec. 3.4 and Sec. 3.5 both write V as a sum with cancellation, so a cell the
 // characteristic barely reached keeps float32 rounding residue: on figure 7 at
@@ -1001,28 +994,9 @@ fn uvPrepareSharpen(@builtin(global_invocation_id)gid:vec3u){
   }else{phi=uvPhi(vec3f(id)+vec3f(0.5));desired=textureLoad(gammaIn,id,0).x;open=uvOpen(id)>0.99999;}
   let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
   let dose=clamp(params.tuning.x,0.0,1.0);let own=volume(id);
-  // Compaction admits every phi-liquid cell, and a liquid cell offers ALL of
-  // its V: uvProposeSharpen only lets the part above phi's fill go anywhere but
-  // to a deeper neighbour. Without it nothing refills a void inside the liquid
-  // (entrained air the level set deleted but V kept): the band is 2.1h wide,
-  // Sec. 3.7 only expels excess, and the dam break's deep interior sits at a
-  // third full while its displaced volume piles on the surface.
-  let compact=params.agreement.x>0.5;
-  let admitted=open&&select(abs(phi)<params.tuning.y*h,phi<params.tuning.y*h,compact);
-  let relay=phi>0.0&&desired<=1e-6;
-  // Orphan V (splash.y, docs/uniform-geometric-splash-dissipation-plan.md B).
-  // A relay pours whatever reaches it down phi's gradient into the nearest
-  // body -- CM12 Fig. 3's objection to MMTD07 -- so a drop phi has lost drains
-  // into the pool beside it. B1: a relay receives only if it already holds V
-  // or lies within a cell of phi's surface, which the bulk's contiguous skirt
-  // always does and an empty gap never does. B2 also admits V beyond the band:
-  // a cell under half full offers all of it, and uvProposeSharpen lets it flow
-  // only to a face neighbour holding more (CM12 Eq. 17 and Alg. 2's trace up
-  // grad rho, reduced to face fluxes), so orphan V gathers into full cells.
-  let orphan=params.splash.y>1.5&&open&&phi>=params.tuning.y*h;
-  let receptive=params.splash.y<0.5||own>1e-4||phi<h;
-  uvEdges[uvEdgeAddress(i)].weight[3]=select(0.0,dose*select(select(max(own-desired,0.0),own,compact&&phi<0.0),select(0.0,own,own<0.5),orphan),admitted||orphan);
-  uvEdges[uvEdgeAddress(i)].weight[4]=select(0.0,dose*max(select(desired,select(0.0,1.0,receptive),relay)-own,0.0),admitted||orphan);
+  let budget=uvSharpenBudgets(own,desired,phi,h,dose,params.tuning.y,params.agreement.x>0.5,params.splash.y,open);
+  uvEdges[uvEdgeAddress(i)].weight[3]=budget.x;
+  uvEdges[uvEdgeAddress(i)].weight[4]=budget.y;
   uvEdges[uvEdgeAddress(i)].weight[5]=phi;
 }
 @compute @workgroup_size(4,4,4)
@@ -1664,18 +1638,8 @@ fn uvPublish(@builtin(global_invocation_id)gid:vec3u){
   textureStore(gammaOut,id,vec4f(open));
 }
 
-// Relax half the excess in 1/30 s, independent of how time is subdivided.
-// tau = (1/30)/ln(2). The small-x expansion avoids cancellation in 1-exp(-x).
-fn uvVolumeCorrectionFraction()->f32{
-  let steps=max(params.dimsDt.w,0.0)*30.0;
-  let x=steps*0.6931471805599453;
-  if(x<0.01){return x*(1.0-x*(0.5-x/6.0));}
-  return 1.0-exp2(-steps);
-}
-fn uvVolumeCorrectionAmount(v:f32,cap:f32)->f32{
-  // Keep the existing one-capacity-per-step ceiling for extreme overfill.
-  return min(uvVolumeCorrectionFraction()*max(0.0,v-cap),cap);
-}
+${uniformVolumeCorrectionWGSL}
+fn uvVolumeCorrectionAmount(v:f32,cap:f32)->f32{return uvVolumeCorrectionAmountAt(v,cap,params.dimsDt.w);}
 // A dedicated tail of the existing scratch buffer avoids another storage
 // binding. [rate, partial-count, (positive volume, deficit volume)...].
 // Rate is dimensionless and capped at one; RHS divides it by this step's dt.

@@ -135,7 +135,7 @@ export function RegionDraftMenu<Doc, Patch>({ space }: {
         checkbox would name only one of them. */}
     <ToolstripMenuItem
       label="Floor only"
-      title="Contained bricks may not be coarser than the chosen size, and may be finer."
+      title="Contained bricks may not be finer than the chosen size, and may be coarser."
       active={!draft.holdAtOneTier}
       testId="region-draft-floor"
       onClick={() => {

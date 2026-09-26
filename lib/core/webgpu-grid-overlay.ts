@@ -1,3 +1,4 @@
+import {uniformMixedPresentationVelocityWGSL} from "../methods/uniform/uniform-mixed-presentation.wgsl";
 import { VISUAL_LAYERS, visualLayerPaintWGSL, layerOpacity, type VisualLayerState } from "./visual-layers";
 /**
  * Solver-grid cross-section rendered as an independent presentation layer.
@@ -47,6 +48,10 @@ const TILE_CLASS_SHELL:u32=${TILE_CLASS_SHELL}u;
 // The class of the tile holding a cell of a dense dims lattice. A binding
 // shorter than the tile count stands for a lattice sampled fine everywhere.
 fn tileClassAt(cell:vec3i,dims:vec3i)->u32{
+  if(sliceLsvP.global.x==2u&&umPresentationEnabled()){
+   let t=umTileAt(vec3u(clamp(cell,vec3i(0),dims-1))/4u);
+   return sparseFineMetadata[3u*umTileCount()+t];
+  }
   let tiles=(dims+vec3i(3))/4;
   let count=u32(tiles.x*tiles.y*tiles.z);
   let offset=select(0u,256u,recordComposition);
@@ -812,6 +817,9 @@ fn sparseFramePlanColor(q:vec3i,fieldMode:i32)->vec4f{
 }
 
 fn fluidSample(cell: vec3i) -> f32 {
+  if(sliceLsvP.global.x==2u&&umPresentationEnabled()){
+   let h=u.container.y/max(u.gridInfo.y,1.0);return clamp(0.5-umSampleVertex(vec3f(cell)+vec3f(0.5))/h,0.0,1.0);
+  }
   let dims = vec3i(u.gridInfo.xyz);
   if(sparseGridEnabled()){return sparseDensityAt(cell);}
   let q = clamp(cell, vec3i(0), dims - vec3i(1));
@@ -837,12 +845,18 @@ fn levelSetSample(cell: vec3i) -> f32 {
 }
 
 fn densitySample(cell: vec3i) -> f32 {
+  if(sliceLsvP.global.x==2u&&umPresentationEnabled()){
+    let o=umOwnerAt(clamp(cell,vec3i(0),vec3i(umDimensions())-1));return textureLoad(densityField,vec3i(umOrigin(o)),0).x;
+  }
   let dims = vec3i(u.gridInfo.xyz);
   if(sparseGridEnabled()){return sparseDensityAt(cell);}
   return textureLoad(densityField, clamp(cell, vec3i(0), dims - vec3i(1)), 0).x;
 }
 
 fn hasLiquidPressureDof(cell: vec3i) -> bool {
+  if(sliceLsvP.global.x==2u&&umPresentationEnabled()){
+   let owner=umOwnerAt(cell);return owner.width!=0u&&bitcast<f32>(sparseActivity[owner.index])<0.0;
+  }
   if(sparseGridEnabled()){let owner=sparseOwner(cell);return owner.x!=SPARSE_INVALID
     &&sparseState[sparseP.stateOffsets2.w+owner.x]>0.5;}
   let samples = textureLoad(pressureSamples, cell, 0);
@@ -886,7 +900,17 @@ fn isOpticalCube(cell: vec3i, dims: vec3i) -> bool {
 // tall-cell interior uses the solver's piecewise reconstruction (top world
 // cell = top endpoint dof, the rest = bottom dof) so the displayed field is
 // the one the projection actually controls.
+fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32{
+ if(anchor[axis]>=0){return textureLoad(velocityField,anchor,0)[axis];}
+ if(layers.control.z<=0.0){return 0.0;}
+ let q=vec3u(max(anchor,vec3i(0)));let dims=umDimensions();var index=q.y+dims.y*q.z;
+ if(axis==1u){index=dims.y*dims.z+q.x+dims.x*q.z;}
+ if(axis==2u){index=dims.y*dims.z+dims.x*dims.z+q.x+dims.x*q.y;}
+ return bitcast<f32>(viewRecords[u32(layers.control.z)+index]);
+}
+${uniformMixedPresentationVelocityWGSL()}
 fn velocitySample(cell: vec3i) -> vec3f {
+  if(sliceLsvP.global.x==2u&&umPresentationEnabled()){return umSampleVelocity(vec3f(cell)+vec3f(0.5));}
   let dims = vec3i(u.gridInfo.xyz);
   if(sparseGridEnabled()){let owner=sparseOwner(cell);if(owner.x==SPARSE_INVALID){return vec3f(0.0);}
     let at=sparseVelocityOffset()+4u*owner.x;return sparseP.frame.y
@@ -920,11 +944,27 @@ fn velocitySample(cell: vec3i) -> vec3f {
 }
 
 fn divergenceSample(cell:vec3i)->f32{
+  if(sliceLsvP.global.x==2u&&umPresentationEnabled()){
+   let owner=umOwnerAt(cell);if(owner.width==0u){return 0.0;}
+   let h=u.container.xyz/u.gridInfo.xyz;var divergence=0.0;
+   for(var axis=0u;axis<3u;axis++){for(var side=0u;side<2u;side++){
+    let sign=select(-1,1,side!=0u);let first=umFace(owner,axis,sign,0u);
+    for(var part=0u;part<first.count;part++){
+     let face=umFace(owner,axis,sign,part);
+     divergence+=f32(sign)*umLoadMixedFace(face.anchor,axis)*f32(face.width*face.width)
+       /(f32(owner.width*owner.width*owner.width)*h[axis]);
+    }
+   }}return divergence;
+  }
   if(sparseGridEnabled()){let owner=sparseOwner(cell);if(owner.x==SPARSE_INVALID){return 0.0;}
     return sparseState[sparseP.stateOffsets4.y+owner.x];}
   return textureLoad(divergenceField,cell,0).x;
 }
 fn mappedPressureSample(cell:vec3i)->f32{
+  if(sliceLsvP.global.x==2u&&umPresentationEnabled()){
+   let owner=umOwnerAt(cell);if(owner.width==0u||bitcast<f32>(sparseActivity[owner.index])>=0.0){return 0.0;}
+   return sparseState[owner.index];
+  }
   if(layers.control.x>0.5){
     if(levelSetSample(cell)>=0.0){return 0.0;}
     let q=cell-vec3i(layers.pressureOrigin.xyz)+vec3i(1);
@@ -1515,13 +1555,23 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
       alpha=max(select(0.0,0.22,levelSetSample(cell)<0.0),contour);
     }
     if(fieldMode==25){
-      let bits=u32(round(textureLoad(velocityField,cell,0).w));
-      let f=fract(samplePosition);
+      var bits=u32(round(textureLoad(velocityField,cell,0).w));
+      var width=1.0;var f=fract(samplePosition);
+      if(sliceLsvP.global.x==2u&&umPresentationEnabled()){
+       let owner=umOwnerAt(cell);let origin=umOrigin(owner);bits=0u;width=f32(owner.width);
+       f=fract(samplePosition/width);
+       for(var axis=0u;axis<3u;axis++){
+        let first=umFace(owner,axis,1,0u);let local=vec3u(cell)-origin;
+        let u=(axis+1u)%3u;let v=(axis+2u)%3u;
+        let ownedFace=umFace(owner,axis,1,local[u]/first.width+(owner.width/first.width)*(local[v]/first.width));
+        bits|=u32(round(textureLoad(velocityField,ownedFace.anchor,0).w))&((1u<<axis)|(1u<<(axis+3u)));
+       }
+      }
       var face=0.0;
-      if((bits & (1u<<u32(firstPlaneAxis)))!=0u){face=max(face,gridLinePaint((1.0-f.x)/derivative.x,1.2));}
-      if((bits & (1u<<u32(secondPlaneAxis)))!=0u){face=max(face,gridLinePaint((1.0-f.y)/derivative.y,1.2));}
-      if((bits & (1u<<u32(firstPlaneAxis+3)))!=0u){face=max(face,gridLinePaint(f.x/derivative.x,1.2));}
-      if((bits & (1u<<u32(secondPlaneAxis+3)))!=0u){face=max(face,gridLinePaint(f.y/derivative.y,1.2));}
+      if((bits & (1u<<u32(firstPlaneAxis)))!=0u){face=max(face,gridLinePaint((1.0-f.x)*width/derivative.x,1.2));}
+      if((bits & (1u<<u32(secondPlaneAxis)))!=0u){face=max(face,gridLinePaint((1.0-f.y)*width/derivative.y,1.2));}
+      if((bits & (1u<<u32(firstPlaneAxis+3)))!=0u){face=max(face,gridLinePaint(f.x*width/derivative.x,1.2));}
+      if((bits & (1u<<u32(secondPlaneAxis+3)))!=0u){face=max(face,gridLinePaint(f.y*width/derivative.y,1.2));}
       fill=vec3f(0.95,0.65,0.2);alpha=face;
     }
     if(fieldMode==26){
@@ -1998,17 +2048,17 @@ export class GridOverlayPipeline {
           ?? { buffer: this.sparseDummyParams } },
         { binding: 11, resource: this.sparseSource?.topology
           ?? { buffer: this.sparseDummyStorage } },
-        { binding: 12, resource: this.sparseSource?.state
+        { binding: 12, resource: this.denseLevelSetVolumeSource?.mixedPressure ?? this.sparseSource?.state
           ?? { buffer: this.sparseDummyStorage } },
-        { binding: 13, resource: this.sparseSource?.activity
+        { binding: 13, resource: this.denseLevelSetVolumeSource?.mixedPressurePhi ?? this.sparseSource?.activity
           ?? { buffer: this.sparseDummyStorage } },
-        { binding: 14, resource: this.sparseSource?.fineMetadata
+        { binding: 14, resource: this.denseLevelSetVolumeSource?.mixedSupport ?? this.sparseSource?.fineMetadata
           ?? { buffer: this.sparseDummyStorage } },
         { binding: 15, resource: this.sparseSource?.fineWorklist
           ?? { buffer: this.sparseDummyStorage } },
         { binding: 16, resource: this.sparseSource?.fineSamples
           ?? { buffer: this.sparseDummyStorage } },
-        { binding: 17, resource: this.sparseSource?.topologyArena
+        { binding: 17, resource: this.denseLevelSetVolumeSource?.mixedOwnership ?? this.sparseSource?.topologyArena
           ?? { buffer: this.sparseDummyStorage } },
         { binding: 18, resource: { buffer: this.sparseOverlayParams } },
         { binding: 19, resource: framePlanResource },

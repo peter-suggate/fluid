@@ -109,9 +109,10 @@ export function refinementRegionCellExtent_m(
 export function refinementRegionResizePolicy(
   scene: SceneDescription,
   region: FluidRefinementRegion,
+  methodId?: string,
 ): BoxResizePolicy {
   const step = refinementRegionCellExtent_m(scene,
-    regionSnapStep_cells(region, BRICK_FINE_CELLS));
+    regionSnapStep_cells(region, studioRegionSpaceForMethod(methodId).brick_cells));
   return {
     snap_m: [step[0]!, step[1]!, step[2]!],
     limits: sceneContainerBox(scene),
@@ -164,13 +165,14 @@ export function snapRefinementRegionBox(
   scene: SceneDescription,
   box: BoxExtent,
   cells: number,
+  methodId?: string,
 ): BoxExtent {
   // `cells` names the region's floor, and the *step* is the brick or that floor,
   // whichever is coarser. Callers keep passing the floor because that is what a
   // region carries; deciding what it means is the package's job.
   const snapped = snapRegionBox(
     boxToCells(scene, box.min), boxToCells(scene, box.max),
-    regionSnapStep_cells({ minimumCellSize_cells: cells }, BRICK_FINE_CELLS),
+    regionSnapStep_cells({ minimumCellSize_cells: cells }, studioRegionSpaceForMethod(methodId).brick_cells),
     { dimensions: refinementRegionLattice(scene).dimensions });
   return { min: cellsToMetres(scene, snapped.min), max: cellsToMetres(scene, snapped.max) };
 }
@@ -251,6 +253,14 @@ export const studioRegionSpace: RegionSpace<SceneDescription, Partial<SceneDescr
   cellEdge_mm: (scene) => refinementRegionLattice(scene).cellSize_m[0]! * 1000,
 };
 
+/** Uniform uses whole 4³ tiles and only the fine/coarse cell widths. */
+const uniformRegionSpace: RegionSpace<SceneDescription, Partial<SceneDescription>> = {
+  ...studioRegionSpace, cellSizes: [1,4], defaultCellSize_cells: 1, brick_cells: 4, allowAutomaticCeiling: false,
+};
+export function studioRegionSpaceForMethod(methodId?: string) {
+  return methodId === "uniform-volume" ? uniformRegionSpace : studioRegionSpace;
+}
+
 /**
  * The region a rubber-band drag describes.
  *
@@ -271,6 +281,7 @@ export function refinementRegionFromDrag(
   drag_m: Vec3,
   options: {
     readonly id?: string;
+    readonly methodId?: string;
     /**
      * What the reader chose for the next box, from the shared ui-store draft.
      *
@@ -287,12 +298,13 @@ export function refinementRegionFromDrag(
   // A click, not a drag: the horizontal plane is where this gesture names its
   // area, so that is where the question is asked. See `regionDrawIsDegenerate`.
   if (regionDrawIsDegenerate([anchor_m.x, anchor_m.z], [drag_m.x, drag_m.z])) return undefined;
+  const space = studioRegionSpaceForMethod(options.methodId);
   const draft = options.draft ?? DEFAULT_REGION_DRAFT;
   const cells = clampRefinementRegionCellSize(options.minimumCellSize_cells
-    ?? regionDraftCellSize(studioRegionSpace, draft));
+    ?? regionDraftCellSize(space, draft));
   const maximumCells = options.maximumCellSize_cells !== undefined
     ? Math.max(cells, clampRefinementRegionCellSize(options.maximumCellSize_cells))
-    : draft.holdAtOneTier ? cells : undefined;
+    : draft.holdAtOneTier ? cells : space.allowAutomaticCeiling === false ? 4 : undefined;
   const limits = sceneContainerBox(scene);
   const footprint = {
     x: Math.abs(drag_m.x - anchor_m.x),
@@ -303,7 +315,7 @@ export function refinementRegionFromDrag(
   // behaviour by accident; naming the step here says what the minimum is.
   const height = Math.max(
     refinementRegionCellExtent_m(scene,
-      regionSnapStep_cells({ minimumCellSize_cells: cells }, BRICK_FINE_CELLS))[1]!,
+      regionSnapStep_cells({ minimumCellSize_cells: cells }, space.brick_cells))[1]!,
     Math.min(footprint.x, footprint.z, limits.max.y - anchor_m.y));
   const drawn: BoxExtent = {
     min: {
@@ -321,7 +333,7 @@ export function refinementRegionFromDrag(
   // is what the lab's release calls too, so a box drawn in either host lands on
   // the same lattice by the same arithmetic rather than by two transcriptions
   // of it. Only the metres on either side of this call are the studio's.
-  const record = regionFromDraw(studioRegionSpace, scene,
+  const record = regionFromDraw(space, scene,
     boxToCells(scene, drawn.min), boxToCells(scene, drawn.max),
     { cellSize_cells: cells, rule: draft.rule, holdAtOneTier: maximumCells !== undefined },
     { id: options.id });
@@ -368,8 +380,9 @@ export function refinementRegionsToQuery(scene: SceneDescription): string {
 export function refinementRegionsFromQuery(
   scene: SceneDescription,
   raw: string,
+  methodId?: string,
 ): FluidRefinementRegion[] {
-  return regionsFromQuery(studioRegionSpace, scene, raw)
+  return regionsFromQuery({ ...studioRegionSpace, brick_cells: studioRegionSpaceForMethod(methodId).brick_cells }, scene, raw)
     .map((record) => refinementRegionFromRecord(scene, record));
 }
 
@@ -377,8 +390,9 @@ export function refinementRegionsFromQuery(
 export function withRefinementRegionsFromQuery(
   scene: SceneDescription,
   raw: string,
+  methodId?: string,
 ): SceneDescription {
-  const regions = refinementRegionsFromQuery(scene, raw);
+  const regions = refinementRegionsFromQuery(scene, raw, methodId);
   const { refinementRegions: _dropped, ...fluid } = scene.fluid;
   return {
     ...scene,
@@ -400,8 +414,9 @@ export function withRefinementRegionsFromQuery(
 export function refinementRegionChoices(
   scene: SceneDescription,
   region: FluidRefinementRegion,
+  methodId?: string,
 ): EditorChoiceGroup[] {
-  return regionChoices(studioRegionSpace, scene, refinementRegionRecord(scene, region));
+  return regionChoices(studioRegionSpaceForMethod(methodId), scene, refinementRegionRecord(scene, region));
 }
 
 function refinementRegionEntityFor(
@@ -419,7 +434,7 @@ function refinementRegionEntityFor(
     withRefinementRegion(scene, region.id, { ...region, ...next });
   const move = (centre_m: Vec3) => {
     const moved = moveBoxWithinLimits(box, centre_m, sceneContainerBox(scene));
-    const snapped = snapRefinementRegionBox(scene, moved, cells);
+    const snapped = snapRefinementRegionBox(scene, moved, cells, context.methodId);
     return write({ min_m: snapped.min, max_m: snapped.max });
   };
   // The rows, the label, the tone, the summary and the removal are the shared
@@ -429,14 +444,14 @@ function refinementRegionEntityFor(
   // in canvas cells could use. Spread rather than duplicated, so a row added to
   // the region appears in both hosts without this file changing.
   return {
-    ...regionEntity(studioRegionSpace, scene, record),
+    ...regionEntity(studioRegionSpaceForMethod(context.methodId), scene, record),
     box,
     sizeLabel: `${[size.x, size.y, size.z].map((value) => value.toFixed(2)).join(" \u00d7 ")} m \u00b7 ${maximumCells === undefined
       ? `\u2265 ${cells}\u00b3 cells`
       : cells === maximumCells ? `${cells}\u00b3 cells` : `${cells}\u00b3\u2013${maximumCells}\u00b3 cells`}`,
     handles: [
       ...boxHandles(box, {
-        drag: boxResizeDrag(box, refinementRegionResizePolicy(scene, region),
+        drag: boxResizeDrag(box, refinementRegionResizePolicy(scene, region, context.methodId),
           (next) => write({ min_m: next.min, max_m: next.max })),
       }),
       ...moveHandles(boxCenter(box), move),

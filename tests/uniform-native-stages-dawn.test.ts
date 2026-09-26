@@ -59,6 +59,14 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
        const source=a[key] as GPUTexture|undefined,target=b[key] as GPUTexture|undefined;
        if(source && target && typeof source.createView==='function' && typeof target.createView==='function'
          && (source.usage&GPUTextureUsage.COPY_SRC) && (target.usage&GPUTextureUsage.COPY_DST)){
+        // Semi-Lagrangian execution never reads the MacCormack prediction
+        // and reverse-extension scratch. Native storage reserves placeholders
+        // for these; copying the dense oracle's dead scratch is invalid.
+        if ((key === 'velocityC' || key === 'transportB') && target.width === 1) {
+         assert.equal(b.velocityTransport, 'semi-lagrangian');
+         assert.deepEqual([target.width,target.height,target.depthOrArrayLayers],[1,1,1]);
+         continue;
+        }
         assert.deepEqual([target.width,target.height,target.depthOrArrayLayers],[source.width,source.height,source.depthOrArrayLayers],key);
         e.copyTextureToTexture({texture:source},{texture:target},[source.width,source.height,source.depthOrArrayLayers]);
        }

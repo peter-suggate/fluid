@@ -413,6 +413,32 @@ export class WebGPUUniformVelocityExtrapolator {
     }
   }
 
+  /** Continue the one extension hierarchy from canonical 4h support. Mixed
+   * owners provide the accurate band and its source bounds; this never visits
+   * or reconstructs the finest lattice. */
+  prepareMixedContinuation() {
+    const root=this.hierarchyLevels[1];
+    if(!this.pipelines || !root?.originsDown || !root.originsUp
+      || root.dims.some((n,a)=>n*4!==this.dims[a])
+      || [root.down,root.up].some(t=>t.width!==root.dims[0]||t.height!==root.dims[1]||t.depthOrArrayLayers!==root.dims[2]))
+      throw new Error("Mixed extension requires the resident 4h nearest-source hierarchy");
+    const hasLower=this.hierarchyLevels.length>2;
+    return {input:root.down,inputOrigins:root.originsDown,
+      output:hasLower?root.up:root.down,outputOrigins:hasLower?root.originsUp:root.originsDown,
+      encode:(encoder:GPUCommandEncoder)=>{
+        for(let level=2;level<this.hierarchyLevels.length;level++){
+          const pass=encoder.beginComputePass({label:"Uniform mixed extension hierarchy restriction"});
+          pass.setPipeline(this.pipelines!.restrict);pass.setBindGroup(0,this.hierarchyDownGroups[level]!);
+          pass.dispatchWorkgroups(...this.workgroups(this.hierarchyLevels[level]!.dims));pass.end();
+        }
+        for(let level=this.hierarchyLevels.length-2;level>=1;level--){
+          const pass=encoder.beginComputePass({label:"Uniform mixed extension hierarchy prolongation"});
+          pass.setPipeline(this.pipelines!.prolong);pass.setBindGroup(0,this.hierarchyUpGroups[this.hierarchyLevels.length-2-level]!);
+          pass.dispatchWorkgroups(...this.workgroups(this.hierarchyLevels[level]!.dims));pass.end();
+        }
+      }};
+  }
+
   /** FIM scratch plus the explicit CM11b down/up velocity hierarchy. */
   get scratchBytes(): number {
     const [nx, ny, nz] = this.dims;

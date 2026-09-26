@@ -275,6 +275,12 @@ export interface OctreeTechniqueDebugSource {
 
 /** Stable dense authority for the combined V/K fill and independent phi contour. */
 export interface DenseLevelSetVolumeConsumerSource {
+  /** Optional canonical h/2h/4h ownership; no materialized fine expansion. */
+  readonly mixedOwnership?: GPUBufferBinding;
+  /** Accepted canonical pressure and its liquid authority, indexed by owner. */
+  readonly mixedPressure?: GPUBufferBinding;
+  readonly mixedPressurePhi?: GPUBufferBinding;
+  readonly mixedSupport?: GPUBufferBinding;
   /** Shared vertices; dimensions are cell dimensions plus one on every axis. */
   readonly vertexPhi: GPUTexture;
   /** Final open cell fraction K/|cell|, including static and moving solids. */

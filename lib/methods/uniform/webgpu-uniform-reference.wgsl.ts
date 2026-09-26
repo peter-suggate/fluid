@@ -1,3 +1,5 @@
+import {uniformDropSourceWGSL} from "./uniform-source.wgsl";
+import { uniformVelocityDepartureWGSL } from "./uniform-velocity-departure.wgsl";
 import {uniformPageDomainWGSL,type UniformPageDomain} from "./uniform-page-domain";
 import { uniformVolumePagesWGSL, type UniformVolumePageShaderOptions } from "./uniform-volume-pages.wgsl";
 import { uniformVolumeWGSL } from "./uniform-volume.wgsl";
@@ -341,22 +343,7 @@ ${inflowBoundaryWGSL}
  * cheaper (a centre-in-sphere test) would make a small ball's mass depend on
  * where it happened to land relative to the lattice.
  */
-fn dropSource(q:vec3i)->f32{
-  let radius=params.drop.w;if(radius<=0.0){return 0.0;}
-  let h=params.cellGravity.xyz;
-  let minimum=vec3f(-0.5*params.container.x,0.0,-0.5*params.container.z);
-  var covered=0.0;
-  for(var sample=0u;sample<8u;sample+=1u){
-    let offset=vec3f(f32(sample&1u),f32((sample>>1u)&1u),f32((sample>>2u)&1u))*0.5+vec3f(0.25);
-    let point=minimum+(vec3f(q)+offset)*h;
-    let d=point-params.drop.xyz;
-    let inside=select(length(d)<=radius,
-      length(d.xy)<=radius&&abs(d.z)<=params.dropExtent.x,
-      params.dropExtent.x>0.0);
-    if(inside){covered+=0.125;}
-  }
-  return covered;
-}
+${uniformDropSourceWGSL}
 fn volume(p: vec3i) -> f32 { if (!valid(p)) { return 0.0; } return textureLoad(volumeIn,p,0).x; }
 fn levelSetAuthority() -> bool { return ${geometric ? "true" : "params.physical.w > 0.5"}; }
 fn surfaceValue(p: vec3i) -> f32 {
@@ -591,15 +578,7 @@ fn clampVelocityTraceToDomain(p:vec3f)->vec3f{
 // characteristic map; samplePhysicalVelocityComponent owns transported
 // momentum below.
 fn departurePoint(position:vec3f,dt:f32,h:vec3f)->vec3f{
-  var point=position;var remaining=abs(dt);let direction=select(-1.0,1.0,dt>=0.0);
-  for(var step=0;step<32;step+=1){
-    if(remaining<=1e-7){break;}
-    let first=sampleVelocity(point);let rate=max(abs(first.x)/h.x,max(abs(first.y)/h.y,abs(first.z)/h.z));
-    let stepSeconds=min(remaining,1.5/max(rate,1e-6));let signedStep=direction*stepSeconds;
-    let midpoint=clampVelocityTraceToDomain(point-0.5*first*signedStep/h);
-    point=clampVelocityTraceToDomain(point-sampleVelocity(midpoint)*signedStep/h);remaining-=stepSeconds;
-  }
-  return point;
+${uniformVelocityDepartureWGSL("sampleVelocity", "clampVelocityTraceToDomain")}
 }
 // advectVelocityComponent follows rigidBodyIndexAt below: it clips the
 // characteristic against the bodies, and WGSL requires declaration before use.

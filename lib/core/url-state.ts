@@ -613,7 +613,7 @@ export function parseQueryState(search: string): QueryState {
   const regionsQuery = query.get(REGIONS_QUERY_KEY);
   const withRegions = regionsQuery === null
     ? withSeeds
-    : withRefinementRegionsFromQuery(withSeeds, regionsQuery);
+    : withRefinementRegionsFromQuery(withSeeds, regionsQuery, query.get("method") ?? undefined);
   // After the lattice re-author above, deliberately: the dials are applied to
   // whatever document the link's lattice actually built, which is what lets an
   // environment-level change and a tree edit travel in the same URL.

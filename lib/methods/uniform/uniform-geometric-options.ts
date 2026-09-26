@@ -10,7 +10,7 @@ export function uniformGeometricSolverOptions(overrides: MethodParamValues = {},
   // Plans are prebuilt; only the encoded prefix follows asynchronous residual
   // evidence. Start at one cycle and reserve no speculative tail.
   return {
-      prepareCoarseSimulation: values.prepareCoarseSimulation === "on",
+
       retainStageDiagnosticsForQA: overrides.retainStageDiagnosticsForQA === true,
       ...uniformReferenceSolverOptions(values, scene), geometricVolume: true, pageDomain:true, adaptivePressure:true, pressureCycleBudget:"lagged", pressureBudgetHeadroom:0,
       volumePages: values.pageSize === "16" ? 16 : 32,

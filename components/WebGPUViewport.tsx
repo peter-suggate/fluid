@@ -2100,7 +2100,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     // every pointer sample rather than latched at the press, because the draft
     // is a live store value and the preview has to be the box that will land.
     const region = refinementRegionFromDrag(committed, anchor, drag,
-      { id: regionId, draft: session.ui.getState().regionDraft });
+      { id: regionId, draft: session.ui.getState().regionDraft, methodId: session.method.getState().methodId });
     // A press that has not travelled names no box, so nothing previews and
     // nothing is written — see `regionDrawIsDegenerate`. The press still opens
     // the draft, because the very next pointer sample usually fills it.

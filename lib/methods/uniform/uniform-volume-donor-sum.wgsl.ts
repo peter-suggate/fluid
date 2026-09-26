@@ -15,29 +15,13 @@ export const uniformDonorLimbCells = (dims: readonly number[]): number =>
  * Six planar u32 limbs encode integer multiples of 2^-149. Each contribution
  * needs at most six native integer additions, with no compare/exchange retry.
  * Binding 11 is scratch in donor passes, rigid exchange in coupling passes.
- * Weights are at most one (up to f32 rounding); 9*N terms fit 192 bits for
- * every supported stencil-buffer size. Decode rounds once, ties to even.
+ * Native weights are at most one; graded Uniform weights are at most 64.
+ * Their total is bounded by finest-domain volume (plus initial self fallback),
+ * which fits 192 bits at every supported index/arena size. Decode rounds once,
+ * ties to even.
+ * The arithmetic is shared across storage address specializations.
  */
-export const uniformVolumeDonorSumWGSL = /* wgsl */ `
-// Limb l of donor i is word l*uvLimbPlane()+uvLimbBase(i). The GPU coalesces
-// across lanes, not within a thread: the 32 lanes of a 4x4x2 receiver block
-// deposit into donors a few cells apart, which planar x-major planes scatter
-// over eight row fragments of four words each. Each plane is ordered by 4^3
-// bricks instead, 64 words (two cache lines) per brick, so those deposits and
-// the decode of one tile each touch one or two bricks. The in-place decoded
-// sum of the scratch arena is limb 0 either way.
-fn uvLimbPlane()->u32{${bricks ? "let t=(vec3u(dims())+vec3u(3u))/4u;return 64u*t.x*t.y*t.z;" : "return cellCount();"}}
-fn uvLimbBase(i:u32)->u32{return ${bricks ? "uvBrickOrder(i)" : "i"};}
-// Position of linear cell i when a field is stored in 4^3 bricks of 64 words,
-// each axis padded to a multiple of four (uniformBrickCells).
-fn uvBrickOrder(i:u32)->u32{
-  let d=vec3u(dims());let x=i%d.x;let r=i/d.x;let y=r%d.y;let z=r/d.y;let t=(d+vec3u(3u))/4u;
-  return 64u*((x>>2u)+t.x*((y>>2u)+t.y*(z>>2u)))+(x&3u)+4u*(y&3u)+16u*(z&3u);
-}
-fn uvLimb(l:u32,i:u32)->u32{return l*uvLimbPlane()+uvLimbBase(i);}
-// Word of donor i's decoded sum in the scratch arena: the low limb, in place,
-// unless donorfuse keeps it in a seventh plane past the six limbs.
-fn uvDecodedAt(i:u32)->u32{return ${fuse ? "6u*uvLimbPlane()+uvLimbBase(i)" : "uvLimb(0u,i)"};}
+export const uniformVolumeDonorArithmeticWGSL = /* wgsl */ `
 fn uvAddDonor(donor:u32,value:f32){
   let bits=bitcast<u32>(value);if(bits==0u){return;}
   let at=uvLimbBase(donor);let plane=uvLimbPlane();
@@ -85,4 +69,27 @@ fn uvDonorSum(i:u32)->f32{
   }
   return bitcast<f32>((exponent<<23u)|(mantissa&0x7fffffu));
 }
+`;
+
+export const uniformVolumeDonorSumWGSL = /* wgsl */ `
+// Limb l of donor i is word l*uvLimbPlane()+uvLimbBase(i). The GPU coalesces
+// across lanes, not within a thread: the 32 lanes of a 4x4x2 receiver block
+// deposit into donors a few cells apart, which planar x-major planes scatter
+// over eight row fragments of four words each. Each plane is ordered by 4^3
+// bricks instead, 64 words (two cache lines) per brick, so those deposits and
+// the decode of one tile each touch one or two bricks. The in-place decoded
+// sum of the scratch arena is limb 0 either way.
+fn uvLimbPlane()->u32{${bricks ? "let t=(vec3u(dims())+vec3u(3u))/4u;return 64u*t.x*t.y*t.z;" : "return cellCount();"}}
+fn uvLimbBase(i:u32)->u32{return ${bricks ? "uvBrickOrder(i)" : "i"};}
+// Position of linear cell i when a field is stored in 4^3 bricks of 64 words,
+// each axis padded to a multiple of four (uniformBrickCells).
+fn uvBrickOrder(i:u32)->u32{
+  let d=vec3u(dims());let x=i%d.x;let r=i/d.x;let y=r%d.y;let z=r/d.y;let t=(d+vec3u(3u))/4u;
+  return 64u*((x>>2u)+t.x*((y>>2u)+t.y*(z>>2u)))+(x&3u)+4u*(y&3u)+16u*(z&3u);
+}
+fn uvLimb(l:u32,i:u32)->u32{return l*uvLimbPlane()+uvLimbBase(i);}
+// Word of donor i's decoded sum in the scratch arena: the low limb, in place,
+// unless donorfuse keeps it in a seventh plane past the six limbs.
+fn uvDecodedAt(i:u32)->u32{return ${fuse ? "6u*uvLimbPlane()+uvLimbBase(i)" : "uvLimb(0u,i)"};}
+${uniformVolumeDonorArithmeticWGSL}
 `;

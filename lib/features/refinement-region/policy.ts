@@ -100,7 +100,10 @@ export function snapRegionBox(
     const snappedLow = Math.floor(lo / step + TOLERANCE) * step;
     const snappedHigh = Math.ceil(hi / step - TOLERANCE) * step;
     let low = Math.max(0, snappedLow);
-    const high = Math.min(limit, Math.max(snappedHigh, snappedLow + step));
+    // A ground-plane drag can land entirely outside either wall. Clamp both
+    // ends, retaining one step of thickness instead of producing an inverted
+    // box below zero (or an empty box beyond the far wall).
+    const high = Math.min(limit, Math.max(step, snappedHigh, snappedLow + step));
     if (high - low < step) low = Math.max(0, high - step);
     outMin.push(low);
     outMax.push(high);
@@ -316,15 +319,15 @@ export function regionChoices<Doc, Patch>(
       id: "maximumCellSize",
       label: "Largest cell",
       tag: "Max",
-      value: ceiling === undefined ? "auto" : String(ceiling),
+      value: ceiling === undefined ? (space.allowAutomaticCeiling === false ? String(space.cellSizes.at(-1)) : "auto") : String(ceiling),
       options: [
-        {
+        ...(space.allowAutomaticCeiling === false ? [] : [{
           id: "auto",
           label: "AUTO",
           hint: "Evidence decides how far quiet fluid may coarsen",
           enabled: true,
           apply: () => write(regionWithCeiling(record, undefined)),
-        },
+        }]),
         ...space.cellSizes.map((cells) => ({
           id: String(cells),
           label: `${cells}³`,

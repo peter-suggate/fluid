@@ -14,7 +14,7 @@ const resolveComposition = (values: MethodParamValues = {}) => composeFeatures({
   selections: parameterVariantSelections(point, choices, values),
 });
 
-/** Fixed-resolution page-domain method; dense backing is a migration adapter. */
+/** One ownership-driven geometric pipeline for fine and mixed layouts. */
 export const uniformVolumeMethod: SimulationMethod = {
   ...uniformMethod,
   id: "uniform-volume",
@@ -22,8 +22,8 @@ export const uniformVolumeMethod: SimulationMethod = {
   shortLabel: "Uniform Geometric",
   badge: "UNIFORM GEOMETRIC",
   supportedFieldModes: [...uniformMethod.supportedFieldModes!.filter(mode=>mode!=="solve-window"), "volume-levelset", "fine-tiles"],
-  description: "All-fine vertex level set and conservative liquid volume.",
-  detail: "Fixed-resolution page-domain migration: page-owned cell and vertex execution, conservative volume transport and phi surface geometry. Persistent fields and pressure currently retain dense backing while their sparse replacements are implemented.",
+  description: "Vertex level set and conservative liquid volume with live resolution regions.",
+  detail: "One coupled simulation uses fine cells outside manual coarse regions, with graded interfaces and conservative live remapping.",
   resource: { ...uniformMethod.resource!, id: "fluid.uniform-volume", label: "Uniform Geometric fluid" },
   params,
   normalizeValues: resolveUniformGeometricValues,
@@ -37,5 +37,5 @@ export const uniformVolumeMethod: SimulationMethod = {
   harness: async () => ({ ...(await import("./harness")).uniformHarnessPlugin, methodId: "uniform-volume" }),
   createSolverAsync: (device, scene, quality, values, loads, progress, signal) =>
     WebGPUUniformReferenceSolver.createAsync(device, scene, quality, loads,
-      uniformGeometricSolverOptions(values, scene), progress, signal),
+      {...uniformGeometricSolverOptions(values, scene),mixedOwnership:true}, progress, signal),
 };
