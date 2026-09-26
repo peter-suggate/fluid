@@ -5,6 +5,7 @@ import { uniformMixedFaceAddressWGSL, uniformMixedFaceDispatchWGSL } from "./uni
 import { uniformMixedPressureSurfaceWGSL } from "./uniform-mixed-pressure-surface.wgsl";
 import { uniformMixedPressureReconstructionSource } from "./uniform-mixed-pressure-reconstruction.wgsl";
 import { uniformMixedPressureBoundaryIndexWGSL, uniformMixedPressureBoundaryLoop, uniformMixedPressureStorage } from "./uniform-mixed-pressure-boundary.wgsl";
+import { uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 
 interface CommonFields {
  velocity:GPUTexture;
@@ -19,6 +20,8 @@ export interface UniformMixedPressureRhsFields extends CommonFields {
  rhs:GPUBufferBinding;
  minimum:GPUBufferBinding;
  pressure:GPUBufferBinding;
+ /** Static solids: level-0 CM11a (open, V+x, V+y, V+z) at each owner origin. */
+ topology?:GPUTexture;
 }
 export interface UniformMixedPressureProjectionFields extends CommonFields {
  pressure:GPUBufferBinding;
@@ -28,10 +31,13 @@ export interface UniformMixedPressureProjectionFields extends CommonFields {
  volume:GPUTexture;
  output:GPUTexture;
  outputNegative:GPUBufferBinding;
+ topology?:GPUTexture;
 }
 
 /** Pressure/velocity coupling on exactly the same canonical patches as the
- * mixed matrix. The caller builds one authoritative pressure phi and freezes
+ * mixed matrix. With static solids, fine owners use the native CM11a face V,
+ * p_min=0 solid rows and embedded contact release; the RHS pass publishes the
+ * level-0 topology that the smoother and projection read. The caller builds one authoritative pressure phi and freezes
  * reconstruction slopes after the accepted pressure iterate. No field owns
  * another simulation; all buffers/textures are borrowed from the native host. */
 export class UniformMixedPressureVelocity {
@@ -40,14 +46,15 @@ export class UniformMixedPressureVelocity {
  private readonly projectLayout:GPUBindGroupLayout;
  private rhsPipeline?:GPUComputePipeline;
  private projectPipeline?:GPUComputePipeline;
- constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly sourceParams?:GPUBuffer){
+ constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid){
   const texture=(binding:number)=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}});
   // Read-write buffer views allow disjoint ranges of the shared arena.
   const storage=(binding:number)=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}});
   const uniform={binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}};
-  this.rhsLayout=device.createBindGroupLayout({entries:[texture(0),storage(1),storage(2),uniform,texture(4),storage(5),storage(6),storage(7)]});
+  const topology=solid?[{binding:8,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only" as const,format:"rgba32float" as const,viewDimension:"3d" as const}}]:[];
+  this.rhsLayout=device.createBindGroupLayout({entries:[texture(0),storage(1),storage(2),uniform,texture(4),storage(5),storage(6),storage(7),...topology]});
   this.projectLayout=device.createBindGroupLayout({entries:[texture(0),storage(1),storage(2),uniform,storage(4),storage(5),texture(6),texture(7),
-   {binding:8,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}},storage(9),...(sourceParams?[{binding:10,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}]:[])]});
+   {binding:8,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}},storage(9),...(sourceParams?[{binding:10,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}]:[]),...(solid?[texture(11)]:[])]});
  }
  private scalar(view:GPUBufferBinding,count:number):GPUBufferBinding{
   const offset=view.offset??0,size=4*count;
@@ -60,10 +67,15 @@ export class UniformMixedPressureVelocity {
   return [{binding:0,resource:f.velocity.createView()},{binding:1,resource:this.scalar(f.negative,d[0]*d[1]+d[0]*d[2]+d[1]*d[2])},
    {binding:2,resource:this.scalar(f.phi,this.ownership.layout.cellCount)},{binding:3,resource:{buffer:f.params,size:32}}];
  }
+ private topology(t:GPUTexture|undefined):GPUTexture|undefined{
+  if(!!t!==!!this.solid)throw new Error("Mixed solid topology binding does not match stage mode");
+  if(t&&(t.format!=="rgba32float"||[t.width,t.height,t.depthOrArrayLayers].some((v,a)=>v!==this.ownership.layout.lattice.dimensions[a])))throw new Error("Mixed solid topology requires the native lattice extent");
+  return t;
+ }
  bindRhs(f:UniformMixedPressureRhsFields):GPUBindGroup{
-  const count=uniformMixedPressureStorage(this.ownership.layout).count;
+  const count=uniformMixedPressureStorage(this.ownership.layout).count,topology=this.topology(f.topology);
   return this.device.createBindGroup({layout:this.rhsLayout,entries:[...this.common(f),{binding:4,resource:f.correction.createView()},
-   ...[f.rhs,f.minimum,f.pressure].map((v,i)=>({binding:5+i,resource:this.scalar(v,count)}))]});
+   ...[f.rhs,f.minimum,f.pressure].map((v,i)=>({binding:5+i,resource:this.scalar(v,count)})),...(topology?[{binding:8,resource:topology.createView()}]:[])]});
  }
  bindProjection(f:UniformMixedPressureProjectionFields):GPUBindGroup{
   if(f.velocity===f.output||f.negative.buffer===f.outputNegative.buffer)throw new Error("Mixed projection requires disjoint velocity output");
@@ -73,7 +85,8 @@ export class UniformMixedPressureVelocity {
    {binding:5,resource:this.scalar(f.slopes,4*this.ownership.layout.cellCount)},
    {binding:6,resource:f.centerPhi.createView()},{binding:7,resource:f.volume.createView()},{binding:8,resource:f.output.createView()},
    {binding:9,resource:this.scalar(f.outputNegative,d[0]*d[1]+d[0]*d[2]+d[1]*d[2])},
-   ...(this.sourceParams?[{binding:10,resource:{buffer:this.sourceParams,size:176}}]:[])]});
+   ...(this.sourceParams?[{binding:10,resource:{buffer:this.sourceParams,size:176}}]:[]),
+   ...(this.topology(f.topology)?[{binding:11,resource:f.topology!.createView()}]:[])]});
  }
  async initialize():Promise<void>{
   const ownership=this.ownership,h=ownership.layout.lattice.cellSize_m;
@@ -88,6 +101,7 @@ ${uniformMixedFaceAddressWGSL}
 ${uniformMixedPressureBoundaryIndexWGSL(ownership.layout)}
 fn umPressurePhi(o:UMOwner)->f32{return phi[o.index];}
 ${uniformMixedPressureSurfaceWGSL}
+${uniformMixedSolidWGSL(this.solid?2:undefined)}
 fn umOpenTop(face:UMFace)->bool{return params.policy.y>0.5&&face.axis==1u&&face.sign>0;}
 fn umFaceVelocity(face:UMFace)->f32 {
  if(face.anchor[face.axis]<0){return negative[umNegativeBoundaryIndex(vec3u(max(face.anchor,vec3i(0))),face.axis)];}
@@ -101,22 +115,39 @@ fn umFaceVelocity(face:UMFace)->f32 {
 @group(1) @binding(7) var<storage,read_write> pressures:array<f32>;
 fn umPressure(o:UMOwner)->f32{return pressures[o.index];}
 fn umPressureSlope(o:UMOwner)->vec3f{return vec3f(0);}
+${this.solid?`@group(1) @binding(8) var topologyOut:texture_storage_3d<rgba32float,write>;
+// mgBuildFinestTopology on fine owners. Coarse owners never touch a solid
+// (promotion certificate): open 1, interior V 1, walls 1/2, ambient lid 1.
+fn umOwnerTopology(o:UMOwner)->vec4f{
+ let p=vec3i(umOrigin(o));
+ if(o.width==1u){return vec4f(umCellOpen(p),umPressureFaceV(p,0u),umPressureFaceV(p,1u),umPressureFaceV(p,2u));}
+ var t=vec4f(1.0);
+ for(var axis=0u;axis<3u;axis++){if(umOrigin(o)[axis]+o.width==UM_D[axis]&&!(axis==1u&&params.policy.y>0.5)){t[axis+1u]=0.5;}}
+ return t;
+}
+// Low faces of a fine owner: the neighbour's positive V, or the wall's.
+fn umLowFaceV(o:UMOwner,t:vec4f,axis:u32)->f32{
+ if(o.width!=1u){return select(1.0,0.5*t.x,umOrigin(o)[axis]==0u);}
+ var q=vec3i(umOrigin(o));q[axis]-=1;return umPressureFaceV(q,axis);
+}`:""}
 @compute @workgroup_size(64) fn buildRhs(@builtin(global_invocation_id) gid:vec3u){
  let o=umAllOwner(gid);if(o.width==0u){return;}var terms:array<f32,6>;
+ ${this.solid?"let topology=umOwnerTopology(o);textureStore(topologyOut,vec3i(umOrigin(o)),topology);":""}
  for(var axis=0u;axis<3u;axis++){for(var side=0u;side<2u;side++){
   let sign=select(-1,1,side==1u);let first=umFace(o,axis,sign,0u);var flux=0.0;
   for(var part=0u;part<first.count;part++){
    let face=umFace(o,axis,sign,part);var fraction=1.0;
    if(face.neighbor.width==0u&&!umOpenTop(face)){fraction=0.5;}
+   ${this.solid?"if(o.width==1u){fraction=select(umLowFaceV(o,topology,axis),topology[axis+1u],sign>0);}":""}
    flux+=fraction*umFaceVelocity(face)*f32(face.width*face.width);
   }
   terms[2u*axis+side]=f32(sign)*flux/(f32(o.width*o.width*o.width)*UM_H[axis]);
  }}
  let divergence=(terms[0]+terms[1])+(terms[4]+terms[5])+(terms[2]+terms[3]);
  rhs[o.index]=select(0.0,-params.policy.x*(divergence-textureLoad(correction,vec3i(umOrigin(o)),0).x)/params.hDt.w,umPressureLiquid(o));
- minimum[o.index]=-3.402823e38;pressures[o.index]=0.0;
+ minimum[o.index]=${this.solid?"select(-3.402823e38,0.0,o.width==1u&&umCellInsideSolid(vec3i(umOrigin(o))))":"-3.402823e38"};pressures[o.index]=0.0;
  ${uniformMixedPressureBoundaryLoop(`let face=umFace(o,axis,sign,0u);let open=umOpenTop(face);
-  let b=f32(sign)*params.policy.x*0.5*umFaceVelocity(face)/(f32(o.width)*UM_H[axis]*params.hDt.w);
+  let b=f32(sign)*params.policy.x*${this.solid?"select(umLowFaceV(o,topology,axis),topology[axis+1u],sign>0)":"0.5"}*umFaceVelocity(face)/(f32(o.width)*UM_H[axis]*params.hDt.w);
   rhs[halo]=select(0.0,b,umPressureLiquid(o)&&!open);minimum[halo]=select(0.0,-3.402823e38,open);pressures[halo]=0.0;`)}
 }
 `;
@@ -131,15 +162,28 @@ fn umPressure(o:UMOwner)->f32{return pressures[o.index];}
 ${this.sourceParams?uniformMixedSourceWGSL(10):""}
 fn umPressureSlope(o:UMOwner)->vec3f{return slopes[o.index].xyz;}
 ${uniformMixedPressureReconstructionSource(true)}
+${this.solid?`@group(1) @binding(11) var topology:texture_3d<f32>;
+// Face V of a fine owner's face (seams and coarse faces are solid-free).
+fn umProjectV(o:UMOwner,face:UMFace)->f32{
+ if(o.width!=1u||(face.neighbor.width!=0u&&face.neighbor.width!=1u)){return 1.0;}
+ if(face.anchor[face.axis]<0){return 0.5*textureLoad(topology,vec3i(umOrigin(o)),0).x;}
+ return textureLoad(topology,face.anchor,0)[face.axis+1u];
+}
+fn umSolidPressure(o:UMOwner)->f32{return select(0.0,umPressure(o),umPressureLiquid(o));}`:""}
 fn umAirborne(o:UMOwner)->bool{
  if(o.width==0u||params.policy.z<0.5){return false;}
  let origin=umOrigin(o);let v=textureLoad(volume,vec3i(origin),0).x;
  if(v>1.0){return true;}if(v<=max(params.policy.w,0.05)){return false;}
  if(any(origin<vec3u(2u*o.width))||any(origin+vec3u(3u*o.width)>UM_D)){return false;}
- return textureLoad(centerPhi,vec3i(origin),0).x>1.5*f32(o.width)*min(UM_H.x,min(UM_H.y,UM_H.z));
+ if(textureLoad(centerPhi,vec3i(origin),0).x<=1.5*f32(o.width)*min(UM_H.x,min(UM_H.y,UM_H.z))){return false;}
+ ${this.solid?`// uvAirborneCell: the whole 5^3 neighbourhood must be uncut.
+ if(o.width==1u){for(var z=-2;z<=2;z++){for(var y=-2;y<=2;y++){for(var x=-2;x<=2;x++){
+  if(umCellOpen(vec3i(origin)+vec3i(x,y,z))<0.99999){return false;}}}}}`:""}
+ return true;
 }
 fn umProject(o:UMOwner,face:UMFace)->f32{
  let v=umFaceVelocity(face);let liquid=umPressureLiquid(o);let scale=params.hDt.w/params.policy.x;
+ ${this.solid?"if(umProjectV(o,face)<=1e-6){return 0.0;}":""}
  if(face.neighbor.width==0u){
   if(!liquid){return select(0.0,v,umAirborne(o));}
   var other=pressures[umBoundaryIndex(o,face.axis,face.sign)];var theta=1.0;
@@ -162,6 +206,7 @@ fn umProjectWithSource(o:UMOwner,face:UMFace)->f32{
 }
 fn umRelease(o:UMOwner,face:UMFace,v:f32)->bool{
  if(face.neighbor.width!=0u||umOpenTop(face)){return false;}
+ ${this.solid?"if(o.width==1u&&(umCellOpen(vec3i(umOrigin(o)))<=1e-5||umProjectV(o,face)<=1e-6)){return false;}":""}
  let pressure=select(0.0,pressures[umBoundaryIndex(o,face.axis,face.sign)],umPressureLiquid(o));
  return pressure<=0.0&&-f32(face.sign)*v*params.hDt.w>1e-4*f32(o.width)*UM_H[face.axis];
 }
@@ -169,7 +214,17 @@ ${uniformMixedFaceDispatchWGSL("project","umProjectWithSource(owner,face)",true,
    var released=0u;
    for(var axis=0u;axis<3u;axis++){
     let face=umPositiveFaceAtAnchor(owner,axis,ownedFace.anchor);
-    if(face.width!=0u&&umRelease(owner,face,value[axis])){released|=1u<<axis;}
+    ${this.solid?`if(owner.width==1u){
+     // Native embedded/wall contact: the solved active set where open and
+     // closed cells meet, on the separating side's pressure.
+     let p=vec3i(umOrigin(owner));var q=p;q[axis]+=1;let own=umCellOpen(p)>1e-5;
+     if(own!=(umCellOpen(q)>1e-5)&&umProjectV(owner,face)>1e-6){
+      var solidPressure=0.0;
+      if(q[axis]>=i32(UM_D[axis])){solidPressure=select(0.0,pressures[umBoundaryIndex(owner,axis,1)],umPressureLiquid(owner)&&!(axis==1u&&params.policy.y>0.5));}
+      else if(own){solidPressure=umSolidPressure(umOwnerAt(q));}else{solidPressure=umSolidPressure(owner);}
+      if(solidPressure<=0.0&&select(1.0,-1.0,own)*value[axis]*params.hDt.w>1e-4*UM_H[axis]){released|=1u<<axis;}
+     }
+    }else `:""}if(face.width!=0u&&umRelease(owner,face,value[axis])){released|=1u<<axis;}
     if(umOrigin(owner)[axis]==0u){let low=umFace(owner,axis,-1,0u);
      if(umRelease(owner,low,umProjectWithSource(owner,low))){released|=1u<<(axis+3u);}}
    }
@@ -178,12 +233,12 @@ ${uniformMixedFaceDispatchWGSL("project","umProjectWithSource(owner,face)",true,
   const compile=async(code:string,entryPoint:string,resources:GPUBindGroupLayout)=>{
    const module=this.device.createShaderModule({code});const info=await module.getCompilationInfo();
    const errors=info.messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
-   return this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[ownership.bindLayout,resources]}),compute:{module,entryPoint,constants:{umDispatchX:ownership.dispatchX}}});
+   return this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[ownership.bindLayout,resources,...(this.solid?[this.solid.bindLayout]:[])]}),compute:{module,entryPoint,constants:{umDispatchX:ownership.dispatchX}}});
   };
   this.rhsPipeline=await compile(rhsSource,"buildRhs",this.rhsLayout);this.projectPipeline=await compile(projectSource,"project",this.projectLayout);
  }
  encode(encoder:GPUCommandEncoder,entry:"rhs"|"project",group:GPUBindGroup):void{
   const pipeline=entry==="rhs"?this.rhsPipeline:this.projectPipeline;if(!pipeline)throw new Error("Mixed pressure velocity stage is not initialized");
-  const pass=encoder.beginComputePass({label:`Uniform mixed pressure ${entry}`});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);this.ownership.dispatchAll(pass,pipeline);pass.end();
+  const pass=encoder.beginComputePass({label:`Uniform mixed pressure ${entry}`});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);this.ownership.dispatchAll(pass,pipeline);pass.end();
  }
 }

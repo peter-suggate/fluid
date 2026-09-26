@@ -1,6 +1,7 @@
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedFaceAddressWGSL } from "./uniform-mixed-face-dispatch.wgsl";
+import { UNIFORM_MIXED_HANGING_RECORD, uniformMixedHangingTapWGSL, uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sampling.wgsl";
 
 export interface UniformMixedMomentumCacheFields {
   extended:GPUTexture;
@@ -79,5 +80,79 @@ fn umCachePayload(anchor:vec3i,axis:u32)->vec3f {
     if(!this.pipeline)throw new Error("Mixed momentum cache is not initialized");
     const pass=encoder.beginComputePass({label:"Uniform mixed 4h sampling cache"});pass.setPipeline(this.pipeline);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);
     pass.dispatchWorkgroups(...this.ownership.layout.lattice.dimensions.map(n=>Math.ceil((n/4+2)/4)) as [number,number,number]);pass.end();
+  }
+}
+
+export interface UniformMixedHangingTapFields {
+  extended:GPUTexture;
+  negative:GPUBuffer;
+  /** Current 4h sampling cache (coarseExtended). */
+  coarse:GPUTexture;
+}
+/** Every fine MAC tap whose cell lies in a 2h tile resolves through nested 2h
+ * and 4h interpolation. Surface and momentum characteristics revisit those
+ * taps many times per frame, so evaluate each once here with the unchanged
+ * sampler and store it in ownership.hangingGroup. Valid from this encode until
+ * velocity/negative/coarse inputs change (forces); the frame orders that. */
+export class UniformMixedHangingTaps {
+  readonly allocatedBytes=0;
+  private pipeline?:GPUComputePipeline;
+  private readonly resources:GPUBindGroupLayout;
+  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership){
+    this.resources=device.createBindGroupLayout({entries:[
+      {binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
+      {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
+      {binding:2,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
+    ]});
+  }
+  bind(f:UniformMixedHangingTapFields):GPUBindGroup{
+    const d=this.ownership.layout.lattice.dimensions;
+    for(const [i,t] of [f.extended,f.coarse].entries())
+      if([t.width,t.height,t.depthOrArrayLayers].some((n,a)=>n!==(i===0?d[a]:d[a]!/4+2))||t.format!=="rgba32float")throw new Error("Hanging taps require native velocity and the 4h sampling cache");
+    return this.device.createBindGroup({layout:this.resources,entries:[
+      {binding:0,resource:f.extended.createView()},{binding:1,resource:{buffer:f.negative}},{binding:2,resource:f.coarse.createView()},
+    ]});
+  }
+  async initialize():Promise<void>{
+    const module=this.device.createShaderModule({code:uniformMixedTopologyWGSL(this.ownership.layout,0)+/* wgsl */`
+@group(1) @binding(0) var extended:texture_3d<f32>;
+@group(1) @binding(1) var<storage,read> negative:array<f32>;
+@group(1) @binding(2) var coarse:texture_3d<f32>;
+${uniformMixedFaceAddressWGSL}
+fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32{
+ if(anchor[axis]<0){return negative[umNegativeBoundaryIndex(vec3u(max(anchor,vec3i(0))),axis)];}
+ return textureLoad(extended,anchor,0)[axis];
+}
+fn umLoadCoarseFace(index:vec3i,axis:u32)->f32{return textureLoad(coarse,index+vec3i(1),0)[axis];}
+${uniformMixedHangingTapWGSL(2)}
+${uniformMixedVelocitySamplingSource(false,true)}
+@compute @workgroup_size(${UNIFORM_MIXED_HANGING_RECORD}) fn hanging(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ let slot=group.x+umDispatchX*group.y;if(slot>=UM_TILES){return;}
+ let tile=umHanging[UM_TILES+slot];if(tile==UM_NO_SLOT){return;}
+ if(lane<192u){
+  let cell=lane%64u;let axis=lane/64u;let local=vec3u(cell%4u,(cell/4u)%4u,cell/16u);
+  umHanging[umHangingAddress(slot,local,axis)]=bitcast<u32>(umVelocityTap1(vec3i(umTileCoord(tile)*4u+local),axis));
+ }else if(lane<216u){
+  let cell=(lane-192u)%8u;let axis=(lane-192u)/8u;let local=vec3u(cell%2u,(cell/2u)%2u,cell/4u);
+  umHanging[umHangingAddress2(slot,local,axis)]=bitcast<u32>(umVelocityTap2(vec3i(umTileCoord(tile)*2u+local),axis));
+ }else{
+  // Native negative boundary plane taps, for tiles on that plane.
+  let fine=lane<264u;let width=select(2u,1u,fine);let side=4u/width;
+  let offset=select(lane-264u,lane-216u,fine);let axis=offset/(side*side);let cell=offset%(side*side);
+  if(umTileCoord(tile)[axis]!=0u){return;}
+  var local=vec3u(0);local[(axis+1u)%3u]=cell%side;local[(axis+2u)%3u]=cell/side;
+  var index=vec3i(umTileCoord(tile)*side+local);index[axis]=-1;
+  var value=0.0;if(fine){value=umVelocityTap1(index,axis);}else{value=umVelocityTap2(index,axis);}
+  umHanging[umHangingPlaneAddress(slot,local,axis,width)]=bitcast<u32>(value);
+ }
+}`});
+    const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
+    this.pipeline=await this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.ownership.hangingLayout]}),compute:{module,entryPoint:"hanging",constants:{umDispatchX:this.ownership.dispatchX}}});
+  }
+  encode(encoder:GPUCommandEncoder,group:GPUBindGroup):void{
+    if(!this.pipeline)throw new Error("Mixed hanging taps are not initialized");
+    const groups=this.ownership.hangingSlots;if(!groups)return;
+    const pass=encoder.beginComputePass({label:"Uniform mixed hanging fine taps"});pass.setPipeline(this.pipeline);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);pass.setBindGroup(2,this.ownership.hangingGroup);
+    pass.dispatchWorkgroups(Math.min(groups,this.ownership.dispatchX),Math.ceil(groups/this.ownership.dispatchX));pass.end();
   }
 }

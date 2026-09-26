@@ -3,6 +3,9 @@ import { uniformMixedVelocitySamplingWGSL } from "./uniform-mixed-velocity-sampl
 import { uniformMixedFacesWGSL } from "./uniform-mixed-faces.wgsl";
 import type { UniformMixedLayout } from "./uniform-mixed-layout";
 
+/** Regular tiers with at most this many tiles join the fused interface launch. */
+export const UNIFORM_MIXED_FUSED_REGULAR_TILES=64;
+
 /** One packed topology buffer: tile records, h/2h/4h worklists, then frozen stencil masks.
  * Ownership and tracing share this ABI. A 64-lane group visits one h tile,
  * eight 2h tiles, or 64 coarse tiles; coarse dispatch never pays 63 idle lanes.
@@ -19,6 +22,9 @@ override umRegularFine:bool=false;
 override umPlannedFine:u32=0u;
 override umInterfaceTiles:bool=false;
 override umRegularTiles:bool=false;
+override umMergedTiles:bool=false;
+// With umMergedTiles, take the fused jobs (every seam tile, then small regular tiers) instead.
+override umFusedJobs:bool=false;
 const UM_D=vec3u(${layout.lattice.dimensions.map(n => `${n}u`).join(',')});const UM_T=UM_D/4u;
 const UM_TILES:u32=${layout.tiles.length}u;
 fn umTileWidth(t:u32)->u32{let word=umTopology[t];if((word&0x80000000u)!=0u){return 1u;}if((word&0x40000000u)!=0u){return 2u;}return 4u;}
@@ -40,7 +46,14 @@ fn umAllOwner(gid:vec3u)->UMOwner {
  return UMOwner(tile,lane,width,(umTopology[tile]&0x3fffffffu)+lane);
 }
 fn umOwner(gid:vec3u)->UMOwner {
- let slot=gid.x+umDispatchX*64u*gid.y;let cells=64u/(umCellWidth*umCellWidth*umCellWidth);
+ let slot=gid.x+umDispatchX*64u*gid.y;
+ if(umMergedTiles){
+  // 64 slots per merged tile job (see umTileJobOwner).
+  var owner=umMergedTileJob(slot/64u);let lane=slot%64u;
+  if(owner.width==0u||lane>=64u/(owner.width*owner.width*owner.width)){return UMOwner();}
+  owner.lane=lane;owner.index+=lane;return owner;
+ }
+ let cells=64u/(umCellWidth*umCellWidth*umCellWidth);
  let job=slot/cells;var offset=0u;var count=umCounts.x;
  if(umInterfaceTiles){
   let header=7u*UM_TILES+16u;var tier=0u;var start=0u;
@@ -61,6 +74,49 @@ fn umOwner(gid:vec3u)->UMOwner {
  let tile=umTopology[UM_TILES+offset+job];let lane=slot%cells;
  if(umRegularTiles&&umTileMaximumWidth(tile)!=umTileMinimumWidth(tile)){return UMOwner();}
  return UMOwner(tile,lane,umCellWidth,(umTopology[tile]&0x3fffffffu)+lane);
+}
+// One workgroup per interface tile of every tier, then every tile of each
+// small regular tier (UNIFORM_MIXED_FUSED_REGULAR_TILES). The owner carries
+// its runtime width, so a single launch replaces the tiny per-tier launches.
+fn umFusedRegularTier(tier:u32)->bool{
+ let count=umCounts[tier];return count>umSupport[7u*UM_TILES+16u+tier]&&count<=${UNIFORM_MIXED_FUSED_REGULAR_TILES}u;
+}
+fn umFusedOwner(group:vec3u,lane:u32,regular:bool)->UMOwner {
+ let header=7u*UM_TILES+16u;var job=group.x+umDispatchX*group.y;
+ let seams=umSupport[header]+umSupport[header+1u]+umSupport[header+2u];
+ var tile=0u;
+ if(job<seams){tile=umSupport[header+4u+job];}
+ else{
+  if(!regular){return UMOwner();}
+  job-=seams;var offset=0u;var found=false;
+  for(var tier=0u;tier<3u;tier++){
+   let count=umCounts[tier];
+   if(!found&&umFusedRegularTier(tier)){if(job<count){tile=umTopology[UM_TILES+offset+job];found=true;}else{job-=count;}}
+   offset+=count;
+  }
+  if(!found||umTileMaximumWidth(tile)!=umTileMinimumWidth(tile)){return UMOwner();}
+ }
+ let width=umTileWidth(tile);let side=4u/width;if(lane>=side*side*side){return UMOwner();}
+ return UMOwner(tile,lane,width,(umTopology[tile]&0x3fffffffu)+lane);
+}
+// One workgroup per tile. Merged launches take the certificate's general h
+// list, then every 2h and 4h tile, so their serial latencies overlap instead
+// of paying three dependent launches; otherwise the umCellWidth tier.
+fn umMergedTileJob(index:u32)->UMOwner {
+ if(umFusedJobs){return umFusedOwner(vec3u(index,0u,0u),0u,true);}
+ var job=index;var tile=0u;var width=1u;let general=umSupport[4u*UM_TILES+2u];
+ if(job<general){tile=umSupport[6u*UM_TILES+16u+job];}
+ else{
+  job-=general;width=2u;
+  if(job<umCounts.y){tile=umTopology[UM_TILES+umCounts.x+job];}
+  else{job-=umCounts.y;width=4u;if(job>=umCounts.z){return UMOwner();}tile=umTopology[UM_TILES+umCounts.x+umCounts.y+job];}
+ }
+ return UMOwner(tile,0u,width,umTopology[tile]&0x3fffffffu);
+}
+fn umTileJobOwner(group:vec3u)->UMOwner {
+ let job=group.x+umDispatchX*group.y;
+ if(umMergedTiles){return umMergedTileJob(job);}
+ let cells=64u/(umCellWidth*umCellWidth*umCellWidth);return umOwner(vec3u(job*cells,0u,0u));
 }
 fn umOrigin(o:UMOwner)->vec3u{return umTileCoord(o.tile)*4u+umCorner(o.lane,4u/o.width)*o.width;}
 ${uniformMixedFacesWGSL}

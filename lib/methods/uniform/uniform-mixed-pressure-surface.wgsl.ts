@@ -16,6 +16,8 @@ fn umPressureGhostSlopeSample(owner:UMOwner,neighbor:UMOwner)->f32 {
  return umPressure(owner)*(1.0-1.0/umPressureTheta(owner,neighbor));
 }
 fn umPressureGhostCorrection(owner:UMOwner,face:UMFace)->f32 {
+ // Equal widths have no tangential offset. Slopes exist only for seam rows.
+ if(owner.width==face.neighbor.width){return 0.0;}
  var liquid=owner;if(!umPressureLiquid(owner)){liquid=face.neighbor;}
  var delta=(vec3f(umOrigin(face.neighbor))+vec3f(0.5*f32(face.neighbor.width))
   -vec3f(umOrigin(owner))-vec3f(0.5*f32(owner.width)))*UM_H;

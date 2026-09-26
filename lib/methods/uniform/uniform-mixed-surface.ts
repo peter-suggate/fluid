@@ -4,6 +4,7 @@ import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedVertexSamplingWGSL } from "./uniform-mixed-vertex-sampling.wgsl";
 import { uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sampling.wgsl";
 import { uniformMixedFaceAddressWGSL } from "./uniform-mixed-face-dispatch.wgsl";
+import { uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 
 export interface UniformMixedSurfaceFields {
   phi: GPUTexture;
@@ -21,13 +22,15 @@ export interface UniformMixedSurfaceFields {
 
 /** Native RK2 vertex/volume characteristics and surface rebuilding on canonical
  * vertices. Hanging values are sampled from their authority, never expanded.
- * Embedded solids and optional phi experiments are rejected by the host. */
+ * Static solids port the native walked trace, buried-vertex freeze and the
+ * embedded contact/air continuations; they live near fine owners only.
+ * Optional phi experiments are rejected by the host. */
 export class UniformMixedSurface {
   readonly allocatedBytes = 0;
   private readonly resources: GPUBindGroupLayout;
-  private readonly pipelines = new Map<string, GPUComputePipeline[]>();
+  private readonly pipelines = new Map<string, GPUComputePipeline>();
   private readonly regularPipelines=new Map<string,GPUComputePipeline>();
-  constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership,private readonly sourceParams?:GPUBuffer) {
+  constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly hanging=false) {
     this.resources = device.createBindGroupLayout({entries:[
       ...[0,2,3,4].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
       {binding:1,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"r32float",viewDimension:"3d"}},
@@ -77,12 +80,90 @@ fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32{
  return textureLoad(velocity,anchor,0)[axis];
 }
 fn umLoadCoarseFace(index:vec3i,axis:u32)->f32{return textureLoad(coarseVelocity,index+vec3i(1),0)[axis];}
-${uniformMixedVelocitySamplingSource(false,true)}
+${uniformMixedVelocitySamplingSource(false,true,undefined,this.hanging?(this.solid?3:2):undefined)}
 fn umSurfaceTrace(p:vec3f)->vec3f{
  let h=params.hDt.xyz;let dt=params.hDt.w;
  let mid=clamp(p-0.5*dt*umSampleVelocity(p)/h,vec3f(0),vec3f(UM_D));
  return clamp(p-dt*umSampleVelocity(mid)/h,vec3f(0),vec3f(UM_D));
 }
+${uniformMixedSolidWGSL(this.solid?2:undefined)}
+${this.solid?/* wgsl */`
+fn umOpenAt(q:vec3f)->f32{return umCellOpen(clamp(vec3i(floor(q)),vec3i(0),vec3i(UM_D)-vec3i(1)));}
+// uvTrace: walk every crossed half-cell so no characteristic tunnels a wall.
+fn umTrace(p:vec3f)->vec3f{
+ let end=umSurfaceTrace(p);
+ let steps=max(1u,u32(ceil(2.0*max(abs(end.x-p.x),max(abs(end.y-p.y),abs(end.z-p.z))))));
+ var previous=p;
+ for(var s=1u;s<=steps;s++){let q=mix(p,end,f32(s)/f32(steps));if(umOpenAt(q)<=1e-5){return previous;}previous=q;}
+ return end;
+}
+// uvBuried: phi at a vertex with no open incident cell is not state.
+fn umBuried(p:vec3f)->bool{
+ let base=vec3i(p)-vec3i(1);
+ for(var k=0u;k<8u;k++){if(umCellOpen(base+vec3i(umCorner(k,2u)))>1e-5){return false;}}
+ return true;
+}
+fn umFluidFace(face:vec3i,axis:u32)->f32{
+ if(umSolidValid(face)){return textureLoad(velocity,face,0)[axis];}
+ var n=face;n[axis]+=1;
+ if(umSolidValid(n)&&face[axis]==-1){return negative[umNegativeBoundaryIndex(vec3u(n),axis)];}
+ return 0.0;
+}
+fn umContactReleased(face:vec3i,axis:u32)->bool{
+ var cell=face;var bit=axis;if(face[axis]<0){cell[axis]=0;bit+=3u;}
+ if(!umSolidValid(cell)){return false;}
+ return (u32(round(textureLoad(velocity,cell,0).w))&(1u<<bit))!=0u;
+}
+// uvEmbeddedAir: a released embedded wall supplies air at its first hit.
+fn umEmbeddedAir(p:vec3f,advected:f32)->f32{
+ let h=params.hDt.xyz;let dt=params.hDt.w;
+ let mid=clamp(p-0.5*dt*umSampleVelocity(p)/h,vec3f(0),vec3f(UM_D));
+ let end=clamp(p-dt*umSampleVelocity(mid)/h,vec3f(0),vec3f(UM_D));
+ let steps=max(1u,u32(ceil(2.0*max(abs(end.x-p.x),max(abs(end.y-p.y),abs(end.z-p.z))))));
+ var previous=p;var result=advected;
+ for(var step=1u;step<=steps;step++){
+  let q=mix(p,end,f32(step)/f32(steps));let solid=vec3i(floor(q));
+  if(umSolidValid(solid)&&umCellOpen(solid)<=1e-5){
+   for(var axis=0u;axis<3u;axis++){for(var side=-1;side<=1;side+=2){
+    var fluid=solid;fluid[axis]+=side;if(umCellOpen(fluid)<=1e-5){continue;}
+    let inward=f32(side);let plane=f32(solid[axis])+select(0.0,1.0,side>0);
+    let distance=inward*(p[axis]-plane);if(distance< -1e-5||inward*(end[axis]-p[axis])>=0.0){continue;}
+    let a=inward*(previous[axis]-plane);let b=inward*(q[axis]-plane);
+    if(a< -1e-5||b>1e-5){continue;}
+    let face=select(fluid,solid,side>0);let away=inward*umFluidFace(face,axis);
+    if(umContactReleased(face,axis)&&dt*away>1e-4*h[axis]){result=max(result,dt*away-distance*h[axis]);}
+   }}
+   return result;
+  }
+  previous=q;
+ }
+ return result;
+}
+// uvEmbeddedContact: arriving/continued liquid and released air at a vertex
+// incident to an embedded wall.
+fn umEmbeddedContact(p:vec3f,advected:f32)->f32{
+ var arriving=1e20;var continued=1e20;var air=-1e20;var supported=advected>=0.0;
+ for(var k=0u;k<8u;k++){
+  let fluid=vec3i(p)-vec3i(1)+vec3i(umCorner(k,2u));if(umCellOpen(fluid)<=1e-5){continue;}
+  if(textureLoad(volume,fluid,0).x>0.05){supported=true;}
+  for(var axis=0u;axis<3u;axis++){
+   let side=select(-1,1,fluid[axis]<i32(p[axis]));var solid=fluid;solid[axis]+=side;
+   if(!umSolidValid(solid)||umCellOpen(solid)>1e-5){continue;}
+   var interior=p;interior[axis]-=f32(side);
+   let into=f32(side)*umSampleVelocity(interior)[axis]>1e-6;
+   if(advected<0.0||into){
+    let value=umSampleVertex(umTrace(interior));
+    continued=min(continued,value);if(into){arriving=min(arriving,value);}
+   }
+   let face=select(solid,fluid,side>0);
+   let travel=params.hDt.w*(-f32(side)*umFluidFace(face,axis));
+   if(umContactReleased(face,axis)&&travel>1e-4*params.hDt[axis]){air=max(air,travel);}
+  }
+ }
+ var result=advected;
+ if(arriving<1e20){result=select(arriving,min(result,arriving),supported);}else if(continued<1e20){result=select(continued,min(result,continued),supported);}
+ return max(result,air);
+}`:/* wgsl */`fn umTrace(p:vec3f)->vec3f{return umSurfaceTrace(p);}`}
 fn umCatmull(t:f32)->vec4f{
  let t2=t*t;let t3=t2*t;return 0.5*vec4f(2.0*t2-t3-t,3.0*t3-5.0*t2+2.0,4.0*t2-3.0*t3+t,t3-t2);
 }
@@ -100,6 +181,7 @@ fn umCubicPhi(q:vec3f)->f32{
     // the trilinear sampler to reconstruct these integer taps repeats the
     // same authority search inside every one of the 64 cubic taps.
     var s=0.0;if(regularFine){s=umLoadVertex(vec3u(vertex));}else{s=umVertexValue(vec3u(vertex));}row+=wx[x]*s;
+    ${this.solid?"if(wx[x]*wy[y]*wz[z]!=0.0&&umBuried(vec3f(vertex))){return umSampleVertex(q);}":""}
     if(all(offset>=vec3i(0))&&all(offset<=vec3i(1))){low=min(low,s);high=max(high,s);}
    }plane+=wy[y]*row;
   }value+=wz[z]*plane;
@@ -131,7 +213,7 @@ fn umWallContact(p:vec3f,value:f32,width:u32)->f32{
   if(value>=0.0&&inward*umSampleVelocity(probe)[axis]>=-1e-6){continue;}
   interior[axis]+=inward*f32(width);contact=true;
  }}
- if(!contact){return value;}let continued=umSampleVertex(umSurfaceTrace(interior));
+ if(!contact${this.solid?"||umOpenAt(interior)<=1e-5":""}){return value;}let continued=umSampleVertex(umTrace(interior));
  return select(value,min(value,continued),continued<0.0);
 }
 fn umReleasedWalls(p:vec3f,value:f32)->f32{
@@ -162,10 +244,11 @@ fn umReleasedWalls(p:vec3f,value:f32)->f32{
  }}return result;
 }
 fn umAdvected(p:vec3f,width:u32)->f32{
- let q=umSurfaceTrace(p);var value=umSampleVertex(q);
+ ${this.solid?"if(umBuried(p)){return umLoadVertex(vec3u(p));}":""}
+ let q=umTrace(p);var value=umSampleVertex(q);
  let h=f32(width)*min(params.hDt.x,min(params.hDt.y,params.hDt.z));
  if(params.flags.y!=0u&&abs(value)<2.0*h){value=umCubicPhi(q);}
- value=umReleasedWalls(p,umWallContact(p,value,width));
+ value=umReleasedWalls(p,${this.solid?"umEmbeddedAir(p,umEmbeddedContact(p,umWallContact(p,value,width)))":"umWallContact(p,value,width)"});
  if(params.flags.z!=0u){value=umDrain(q,value,width);}return ${this.sourceParams?"umSourceuvSourcePhi(p,value)":"value"};
 }
 fn umSurfaceGradient(p:vec3f,width:f32)->vec3f{
@@ -212,7 +295,7 @@ fn umNoNearbySurface(p:vec3f,band:f32)->bool{
 fn umRebuilt(p:vec3f,width:u32)->f32{
  let initial=umSampleVertex(p);let h=params.hDt.xyz;let w=f32(width);let band=4.0*w*max(h.x,max(h.y,h.z));
  var value=initial;
- if(abs(initial)>1e-8&&abs(initial)<band){
+ if(abs(initial)>1e-8&&abs(initial)<band${this.solid?"&&!umBuried(p)":""}){
   var q=p;
   for(var i=0u;i<umCounts.w;i++){
    let g=umSurfaceGradient(q,w);let norm=dot(g/h,g/h);if(norm<1e-16){break;}
@@ -226,7 +309,16 @@ fn umRebuilt(p:vec3f,width:u32)->f32{
  return value;
 }
 ${["advect","redistance"].map(entry=>/* wgsl */`
-@compute @workgroup_size(64) fn ${entry}(@builtin(global_invocation_id) gid:vec3u){
+// A tile has at most 5^3 candidate vertices. Give each canonical vertex
+// its own lane instead of tracing up to eight corners serially per owner.
+@compute @workgroup_size(125) fn ${entry}(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ let first=umTileJobOwner(group);if(first.width==0u){return;}let width=first.width;
+ let local=umCorner(lane,5u);if(any(local%width!=vec3u(0))){return;}
+ let vertex=umTileCoord(first.tile)*4u+local;let owner=umVertexAuthority(vertex);
+ if(owner.tile!=first.tile||!umVertexIsCanonical(vertex,owner)){return;}
+ textureStore(outputPhi,vec3i(vertex),vec4f(${entry==="advect"?"umAdvected":"umRebuilt"}(vec3f(vertex),width)));
+}
+@compute @workgroup_size(64) fn ${entry}Owners(@builtin(global_invocation_id) gid:vec3u){
  let owner=umOwner(gid);if(owner.width==0u){return;}
  let origin=umOrigin(owner);let regular=umRegularFine||(umTileMaximumWidth(owner.tile)==owner.width&&umTileMinimumWidth(owner.tile)==owner.width);
  // Every regular interior owner writes exactly its positive corner. Keep the
@@ -246,24 +338,27 @@ ${["advect","redistance"].map(entry=>/* wgsl */`
   if(owned){textureStore(outputPhi,vec3i(vertex),vec4f(${entry==="advect"?"umAdvected":"umRebuilt"}(vec3f(vertex),owner.width)));}
  }
 }`).join("\n")}
+fn umTraceCell(owner:UMOwner){
+ let origin=umOrigin(owner);textureStore(departures,vec3i(origin),vec4f(umTrace(vec3f(origin)+vec3f(0.5*f32(owner.width))),0));
+}
 @compute @workgroup_size(64) fn traceCells(@builtin(global_invocation_id) gid:vec3u){
- let owner=umOwner(gid);if(owner.width==0u){return;}
- let origin=umOrigin(owner);textureStore(departures,vec3i(origin),vec4f(umSurfaceTrace(vec3f(origin)+vec3f(0.5*f32(owner.width))),0));
+ let owner=umOwner(gid);if(owner.width!=0u){umTraceCell(owner);}
 }
 `});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
     if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
-    const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]});
-    for(const entryPoint of ["advect","redistance","traceCells","retirementEvidence"])
-      this.pipelines.set(entryPoint,await Promise.all((entryPoint==="retirementEvidence"?[1]:[1,2,4]).map(umCellWidth=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umCellWidth,umPlannedFine:2,umDispatchX:this.ownership.dispatchX}}}))));
-    for(const entryPoint of ["advect","redistance","traceCells"])this.regularPipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umCellWidth:1,umPlannedFine:1,umRegularFine:1,umDispatchX:this.ownership.dispatchX}}}));
+    const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.bindLayout]:[]),...(this.hanging?[this.ownership.hangingLayout]:[])]});
+    this.pipelines.set("retirementEvidence",await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"retirementEvidence",constants:{umDispatchX:this.ownership.dispatchX}}}));
+    for(const entry of ["advect","redistance","traceCells"])
+      this.pipelines.set(entry,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:entry,constants:{umMergedTiles:1,umDispatchX:this.ownership.dispatchX}}}));
+    for(const entryPoint of ["advect","redistance","traceCells"])this.regularPipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:entryPoint==="traceCells"?entryPoint:`${entryPoint}Owners`,constants:{umCellWidth:1,umPlannedFine:1,umRegularFine:1,umDispatchX:this.ownership.dispatchX}}}));
   }
   encode(encoder:GPUCommandEncoder,entry:"advect"|"redistance"|"traceCells",group:GPUBindGroup):void{
     const pipeline=this.pipelines.get(entry);if(!pipeline)throw new Error("Mixed surface stage is not initialized");
-    const pass=encoder.beginComputePass({label:`Uniform mixed surface ${entry}`});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);
+    const pass=encoder.beginComputePass({label:`Uniform mixed surface ${entry}`});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);if(this.hanging)pass.setBindGroup(this.solid?3:2,this.ownership.hangingGroup);
     if(entry==="redistance"){
       const groups=Math.ceil(this.ownership.layout.tiles.length/64);
-      pass.setPipeline(this.pipelines.get("retirementEvidence")![0]!);
+      pass.setPipeline(this.pipelines.get("retirementEvidence")!);
       pass.dispatchWorkgroups(Math.min(groups,this.ownership.dispatchX),Math.ceil(groups/this.ownership.dispatchX));
     }
     this.ownership.dispatchCertified(pass,pipeline,this.regularPipelines.get(entry)!);pass.end();

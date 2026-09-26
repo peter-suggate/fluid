@@ -1,10 +1,11 @@
 import {uniformMixedSourceWGSL} from "./uniform-mixed-source.wgsl";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
-import { uniformMixedFaceAddressWGSL, uniformMixedFaceDispatchWGSL } from "./uniform-mixed-face-dispatch.wgsl";
-import { uniformMixedVelocitySamplingWGSL } from "./uniform-mixed-velocity-sampling.wgsl";
+import { uniformMixedFaceAddressWGSL, uniformMixedFaceDispatchWGSL, uniformMixedFaceTileDispatchWGSL } from "./uniform-mixed-face-dispatch.wgsl";
+import { uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sampling.wgsl";
 import { uniformMixedVertexSamplingWGSL } from "./uniform-mixed-vertex-sampling.wgsl";
 import { uniformMixedPressureReconstructionWGSL } from "./uniform-mixed-pressure-reconstruction.wgsl";
+import { uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 
 export interface UniformMixedForceFields {
   velocity: GPUTexture;
@@ -12,6 +13,8 @@ export interface UniformMixedForceFields {
   phi: GPUTexture;
   volume: GPUTexture;
   centerPhi?: GPUTexture;
+  /** 4h sampling cache of velocity+negative, required with cachedSampling. */
+  coarseVelocity?: GPUTexture;
   negative: GPUBuffer;
   output: GPUTexture;
   outputNegative: GPUBuffer;
@@ -22,13 +25,19 @@ export interface UniformMixedForceFields {
 
 /** Apply native force terms once, after SL or MacCormack resampling. The
  * certified domain has no interior solids. Capillarity uses the same seam
- * reconstruction as pressure; viscosity uses physical local MAC spacing. */
+ * reconstruction as pressure; viscosity uses physical local MAC spacing.
+ * Static solids touch unit owners only: capillarity skips faces with a
+ * closed cell, curvature is one-sided at closed cells and airborne needs an
+ * open 5^3 neighbourhood, as natively. */
 export class UniformMixedForces {
   readonly allocatedBytes = 0;
-  private pipelines: GPUComputePipeline[]=[];
+  private pipeline?: GPUComputePipeline;
   private regularPipelines: GPUComputePipeline[]=[];
   private readonly resources: GPUBindGroupLayout;
-  constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership, private readonly cachedGeometry=false,private readonly sourceParams?:GPUBuffer) {
+  constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership, private readonly cachedGeometry=false,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,
+    /** Viscosity samples through the 4h cache and ownership.hangingGroup,
+     * both filled from velocity and negative after their last other reader. */
+    private readonly cachedSampling=false) {
     this.resources = device.createBindGroupLayout({ entries: [
       ...[0,1,2,3].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
       {binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
@@ -37,10 +46,13 @@ export class UniformMixedForces {
       {binding:8,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
       {binding:7,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
       ...(sourceParams?[{binding:9,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}]:[]),
+      ...(cachedSampling?[{binding:10,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}}]:[]),
     ] });
   }
   bind(f: UniformMixedForceFields): GPUBindGroup {
     if(this.cachedGeometry&&!f.centerPhi)throw new Error("Mixed forces require current center phi for cached geometry");
+    const coarse=f.coarseVelocity;
+    if(this.cachedSampling&&(!coarse||coarse.format!=="rgba32float"||[coarse.width,coarse.height,coarse.depthOrArrayLayers].some((n,a)=>n!==this.ownership.layout.lattice.dimensions[a]!/4+2)))throw new Error("Cached mixed force sampling requires a 4h velocity cache");
     const d=this.ownership.layout.lattice.dimensions;
     for(const [i,t] of [f.velocity,f.advected,f.phi,f.volume,f.output].entries()){
       if([t.width,t.height,t.depthOrArrayLayers].some((n,a)=>n!==d[a]!+(i===2?1:0)) || t.format!==(i===2||i===3?"r32float":"rgba32float"))
@@ -54,6 +66,7 @@ export class UniformMixedForces {
       {binding:4,resource:{buffer:f.negative}},{binding:5,resource:f.output.createView()},
       {binding:6,resource:{buffer:f.outputNegative}},{binding:7,resource:{buffer:f.params,size:48}},
       {binding:8,resource:(f.centerPhi??f.volume).createView()},
+      ...(this.cachedSampling?[{binding:10,resource:coarse!.createView()}]:[]),
       ...(this.sourceParams?[{binding:9,resource:{buffer:this.sourceParams,size:176}}]:[]),
     ]});
   }
@@ -76,11 +89,14 @@ ${this.sourceParams?uniformMixedSourceWGSL(9):""}
 ${uniformMixedFaceAddressWGSL}
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
 ${uniformMixedVertexSamplingWGSL}
+${uniformMixedSolidWGSL(this.solid?2:undefined)}
+fn umUnitClosed(owner:UMOwner)->bool{return umSolidEnabled()&&owner.width==1u&&umCellOpen(vec3i(umOrigin(owner)))<=1e-5;}
 fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32 {
  if(anchor[axis]<0){return negative[umNegativeBoundaryIndex(vec3u(max(anchor,vec3i(0))),axis)];}
  return textureLoad(velocity,anchor,0)[axis];
 }
-${uniformMixedVelocitySamplingWGSL}
+${this.cachedSampling?"@group(1) @binding(10) var coarseVelocity:texture_3d<f32>;\nfn umLoadCoarseFace(index:vec3i,axis:u32)->f32{return textureLoad(coarseVelocity,index+vec3i(1),0)[axis];}":""}
+${uniformMixedVelocitySamplingSource(false,this.cachedSampling,undefined,this.cachedSampling?(this.solid?3:2):undefined)}
 fn umCellPhi(owner:UMOwner)->f32{if(umCachedGeometry){return textureLoad(centerPhi,vec3i(umOrigin(owner)),0).x;}return umSampleVertex(vec3f(umOrigin(owner))+vec3f(0.5*f32(owner.width)));}
 fn umOccupancy(owner:UMOwner)->f32 {
  if(owner.width==0u){return 0.0;}
@@ -93,7 +109,11 @@ fn umAirborne(owner:UMOwner)->bool {
  if(v<=max(force.controls.w,0.05)){return false;}
  let origin=vec3i(umOrigin(owner));let w=i32(owner.width);
  if(any(origin-vec3i(2*w)<vec3i(0))||any(origin+vec3i(3*w)>vec3i(UM_D))){return false;}
- return umCellPhi(owner)>1.5*f32(w)*min(UM_H.x,min(UM_H.y,UM_H.z));
+ if(umCellPhi(owner)<=1.5*f32(w)*min(UM_H.x,min(UM_H.y,UM_H.z))){return false;}
+ if(umSolidEnabled()&&owner.width==1u){
+  for(var z=-2;z<=2;z++){for(var y=-2;y<=2;y++){for(var x=-2;x<=2;x++){if(umCellOpen(origin+vec3i(x,y,z))<0.99999){return false;}}}}
+ }
+ return true;
 }
 fn umNormal(owner:UMOwner)->vec3f {
  let origin=umOrigin(owner);var gradient=vec3f(0);
@@ -109,7 +129,7 @@ fn umCurvature(owner:UMOwner)->f32 {
   var delta=0.0;var span=0.0;
   for(var side=0u;side<2u;side++){
    let sign=select(-1,1,side==1u);let first=umFace(owner,axis,sign,0u);
-   if(first.neighbor.width==0u){continue;}
+   if(first.neighbor.width==0u||umUnitClosed(first.neighbor)){continue;}
    var average=0.0;
    for(var part=0u;part<first.count;part++){average+=umNormal(umFace(owner,axis,sign,part).neighbor)[axis];}
    delta+=f32(sign)*(average/f32(first.count)-center[axis]);
@@ -147,7 +167,7 @@ fn umForcedVelocity(owner:UMOwner,face:UMFace)->f32 {
  let occupancy=umOccupancy(owner);let neighborOccupancy=umOccupancy(face.neighbor);
  if(occupancy>0.0&&force.physical.z>0.0){value+=dt*(force.physical.z/force.physical.y)*umLaplacian(face);}
  if(face.axis==1u&&(occupancy>1e-5||neighborOccupancy>1e-5||umAirborne(owner)||umAirborne(face.neighbor))){value+=dt*force.physical.x;}
- if(force.physical.w>0.0&&face.neighbor.width!=0u){
+ if(force.physical.w>0.0&&face.neighbor.width!=0u&&!umUnitClosed(owner)&&!umUnitClosed(face.neighbor)){
   let gradient=umReconstructedPressureGradient(owner,face);
   if(gradient!=0.0){value+=dt*(force.physical.w/force.physical.y)*0.5*(umCurvature(owner)+umCurvature(face.neighbor))*gradient;}
  }
@@ -160,7 +180,7 @@ fn umForcedVelocity(owner:UMOwner,face:UMFace)->f32 {
  }`:""}
  return value;
 }
-${uniformMixedFaceDispatchWGSL("forces","umForcedVelocity(owner,face)").replace(" let origin=umOrigin(owner);",` let origin=umOrigin(owner);
+${uniformMixedFaceDispatchWGSL("forcesRegular","umForcedVelocity(owner,face)").replace(" let origin=umOrigin(owner);",` let origin=umOrigin(owner);
  if(umRegularFine){
   for(var axis=0u;axis<3u;axis++){
    if(origin[axis]==0u){let face=umFace(owner,axis,-1,0u);boundary[umNegativeBoundaryIndex(origin,axis)]=umForcedVelocity(owner,face);}
@@ -168,17 +188,20 @@ ${uniformMixedFaceDispatchWGSL("forces","umForcedVelocity(owner,face)").replace(
   textureStore(output,vec3i(origin),vec4f(umForcedVelocity(owner,umFace(owner,0u,1,0u)),umForcedVelocity(owner,umFace(owner,1u,1,0u)),umForcedVelocity(owner,umFace(owner,2u,1,0u)),0));
   return;
  }`)}
+${uniformMixedFaceTileDispatchWGSL("forces","umForcedVelocity(owner,face)")}
 `});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
-    const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]});
-    const compile=(width:number,regular:boolean)=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"forces",constants:{
+    const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.bindLayout]:[]),...(this.cachedSampling?[this.ownership.hangingLayout]:[])]});
+    const compile=(width:number,regular:boolean)=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:regular?"forcesRegular":"forces",constants:{
       umDispatchX:this.ownership.dispatchX,umCellWidth:width,umCachedGeometry:+this.cachedGeometry,
-      umInterfaceTiles:+!regular,umRegularTiles:+regular,umRegularFine:+(regular&&width===1)}}});
-    this.pipelines=await Promise.all([1,2,4].map(width=>compile(width,false)));
+      ...(regular?{umRegularTiles:1,umRegularFine:+(width===1)}:{umMergedTiles:1,umFusedJobs:1})}}});
+    // Seam tiles of every tier and the small regular tiers share one launch,
+    // so their serial per-tile latencies overlap.
+    this.pipeline=await compile(1,false);
     this.regularPipelines=await Promise.all([1,2,4].map(width=>compile(width,true)));
   }
   encode(encoder:GPUCommandEncoder,group:GPUBindGroup):void{
-    if(this.pipelines.length!==3)throw new Error("Mixed forces are not initialized");
-    const pass=encoder.beginComputePass({label:"Uniform mixed body forces"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);this.ownership.dispatchRegular(pass,this.regularPipelines);this.ownership.dispatchSeams(pass,this.pipelines);pass.end();
+    if(!this.pipeline)throw new Error("Mixed forces are not initialized");
+    const pass=encoder.beginComputePass({label:"Uniform mixed body forces"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);if(this.cachedSampling)pass.setBindGroup(this.solid?3:2,this.ownership.hangingGroup);this.ownership.dispatchRegular(pass,this.regularPipelines,true);this.ownership.dispatchFused(pass,this.pipeline,true);pass.end();
   }
 }

@@ -1,4 +1,5 @@
 import { cm12GhostFluidTheta } from "../lib/core/cm12-numerics";
+import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
@@ -14,7 +15,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
   try {
     const dawn=await import(pathToFileURL(modulePath!).href);Object.assign(globalThis,dawn.globals);
     const gpu=createProcessRetainedDawnGPU(dawn,["backend=metal"]),adapter=await gpu.requestAdapter();assert.ok(adapter);
-    device=await adapter.requestDevice();
+    device=await adapter.requestDevice({requiredLimits:requiredFluidDeviceLimits(adapter.limits)});
     const errors:string[]=[];device.addEventListener("uncapturederror",e=>{e.preventDefault();errors.push(e.error.message);});
     for(const [index,layout] of mixedPressureLayouts().entries()) {
       const cycle=new MixedPressureCycleDawn(device,layout,false,true);

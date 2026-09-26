@@ -31,7 +31,10 @@ export class MixedMultigridOracle {
   private readonly rows: readonly { core: Rows; full: Rows }[];
   private readonly colours: readonly Uint8Array[];
   private readonly solveBottom: (rhs: ArrayLike<number>) => Float64Array;
-  constructor(layout: UniformMixedLayout, private readonly schedule: UniformCM11aSchedule = DEFAULT_UNIFORM_CM11A_SCHEDULE) {
+  /** "native-jacobi" is the production smoother: two simultaneous projected
+   * updates per sweep at the native 2/3 weight, reconstruction frozen once. */
+  constructor(layout: UniformMixedLayout, private readonly schedule: UniformCM11aSchedule = DEFAULT_UNIFORM_CM11A_SCHEDULE,
+    private readonly smoother: "gauss-seidel" | "native-jacobi" = "gauss-seidel") {
     this.layouts = [layout, uniformMixedPressureLevel(layout, 2), uniformMixedPressureLevel(layout, 4)];
     this.fixtures = this.layouts.map(mixedPressureFixture); this.rows = this.fixtures.map(operators);
     const h = layout.lattice.cellSize_m;
@@ -81,6 +84,18 @@ export class MixedMultigridOracle {
       // Freeze only reconstruction. Six tier/parity colours separate every
       // direct core edge; wider reconstruction edges are never read in-place.
       const correctedRhs = coreP.map((v, i) => rhs[i]! + v - fullP[i]!);
+      if (this.smoother === "native-jacobi") {
+        for (let half = 0; half < 2; half++) {
+          const old = Float64Array.from(pressure);
+          for (let i = 0; i < pressure.length; i++) {
+            let sum = 0;
+            for (const [j, w] of core[i]!) if (i !== j) sum += w * old[j]!;
+            const diagonal = core[i]!.get(i) ?? 0;
+            pressure[i] = diagonal > 0 ? old[i]! + (2 / 3) * ((correctedRhs[i]! - sum) / diagonal - old[i]!) : 0;
+          }
+        }
+        continue;
+      }
       for (let colour = 0; colour < 6; colour++) for (let i = 0; i < pressure.length; i++) {
         if (this.colours[level]![i] !== colour) continue;
         let sum = 0;

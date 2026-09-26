@@ -70,7 +70,7 @@ const ENTRY_POINTS = [
   "mgCopyPressureTiles", "mgShiftMinimumTiles", "mgAddPressureTiles",
   "mgSaveAcceptedTiles", "mgRestoreRejectedTiles", "mgMeasureFineResidualTiles",
   "mgResidual", "mgRestrictResidual", "mgProlongateAdd", "mgProlongateAssign",
-  "mgDownsampleSubtract", "mgDownsampleMinimum", "mgSmoothColour", "mgSmoothColourInPlace", "mgSmoothRowInPlace", "mgSmoothVisitInPlace", "mgSaveAcceptedQuiet", "mgRestoreRejectedQuiet",
+  "mgDownsampleSubtract", "mgDownsampleMinimum", "mgSmoothColour", "mgSmoothColourInPlace", "mgSmoothRowInPlace", "mgSmoothVisitInPlace", "mgSmoothVisitLocalInPlace", "mgSaveAcceptedQuiet", "mgRestoreRejectedQuiet",
   "mgCopyPressure", "mgClearPressure", "mgClearMinimum",
   "mgPublishCycleDispatch", "mgShiftMinimum", "mgAddPressure", "mgSolveCoarsest", "mgMeasureFineResidual", "mgCheckCycleConvergence", "mgSaveAccepted", "mgRestoreRejected", "mgFinishSafety",
   "mgClassifyFarTiles", "mgDilateFarTiles", "mgPublishFarList",
@@ -99,6 +99,7 @@ const ENTRY_BINDINGS: Readonly<Record<EntryPoint, readonly number[]>> = Object.f
   mgSmoothColourInPlace: [0, 3, 11, 13, 14, 16],
   mgSmoothRowInPlace: [0, 3, 11, 13, 14, 16],
   mgSmoothVisitInPlace: [0, 3, 11, 13, 14, 16],
+  mgSmoothVisitLocalInPlace: [0, 3, 11, 13, 14, 16],
   mgCopyPressure: [0, 1, 2], mgClearPressure: [0, 2], mgClearMinimum: [0, 12],
   mgShiftMinimum: [0, 1, 11, 12], mgAddPressure: [0, 1, 2, 9],
   mgSolveCoarsest: [0, 1, 2, 3, 5, 7, 11, 13, 17],
@@ -669,7 +670,7 @@ export class WebGPUUniformPressureMultigrid {
           ...(entryPoint === "mgBuildCycleTiles" && WALL_HALO ? {constants:{MG_HALO_ENTRIES:Number(this.haloEntries)}} : {}),
           ...(entryPoint === "mgBuildSmoothTilesSeeded" ? {constants:{MG_CYCLE_TILES:Number(this.cycleTiling)}} : {}),
           ...(entryPoint === "mgBuildFinestRhs" || entryPoint === "mgBuildFinestRhsTiles" ? {constants:{MG_REUSE_FINEST_AUTHORITY:Number(this.reuseFinestAuthority && uniformAbOn("pressureauthority"))}} : {}),
-          ...(entryPoint === "mgSmoothVisitInPlace" ? { constants: { MG_VISIT_LANES: this.visitLanes } } : {}),
+          ...(/^(mgSmoothVisitInPlace|mgSmoothVisitLocalInPlace)$/.test(entryPoint) ? { constants: { MG_VISIT_LANES: this.visitLanes } } : {}),
           ...(entryPoint === "mgSmoothRowInPlace" || /Quiet$/.test(entryPoint)
             ? { constants: { MG_ROW_SEGMENT: ROW_SEGMENT } } : {}) } },
         { priority: "visible", signal: input.signal })] as const));
@@ -1276,7 +1277,9 @@ export class WebGPUUniformPressureMultigrid {
       if (this.inPlaceSmoothing && FUSE_VISITS && !this.gpuCycleDispatch && sweeps > 0
         && nx * ny * nz <= FUSED_VISIT_MAX_CELLS
         && (!this.simultaneousSmoothing || nx * ny * nz <= 4096)) {
-        emit("mgSmoothVisitInPlace", level, level,
+        const entry = this.simultaneousSmoothing && nx * ny * nz <= this.visitLanes
+          ? "mgSmoothVisitLocalInPlace" : "mgSmoothVisitInPlace";
+        emit(entry, level, level,
           { rhsIn: rhs, pressureRW: this.levels[level]!.pressure[p[level]!]! }, [0, 0, sweeps, 0], [1, 1, 1]);
       } else for (let i = 0; i < sweeps; i += 1) {
         // Prolongation may leave air below its constraint, and the first sweep

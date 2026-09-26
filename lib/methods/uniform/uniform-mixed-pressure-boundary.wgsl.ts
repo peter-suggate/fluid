@@ -9,7 +9,9 @@ export function uniformMixedPressureStorage(layout:UniformMixedLayout){
   return {width, count:layout.cellCount+2*(d[0]!*d[1]!+d[0]!*d[2]!+d[1]!*d[2]!)};
 }
 
-export function uniformMixedPressureBoundaryWGSL(layout:UniformMixedLayout,openTop:boolean,surface:boolean):string{
+/** With `solid`, the caller defines umPressureWallV(o,axis,sign): the wall's
+ * dual-cell V (native 0.5*open, or 0.5*(1+open) at the atmosphere). */
+export function uniformMixedPressureBoundaryWGSL(layout:UniformMixedLayout,openTop:boolean,surface:boolean,solid=false):string{
  return /* wgsl */ `
 ${uniformMixedPressureBoundaryIndexWGSL(layout)}
 fn umBoundaryOpen(axis:u32,sign:i32)->bool{return ${openTop ? "axis==1u&&sign>0" : "false"};}
@@ -20,6 +22,7 @@ fn umBoundaryCoefficient(o:UMOwner,axis:u32,sign:i32)->f32 {
   fraction=1.0;
   ${surface ? "theta=cm12GhostFluidTheta(umPressurePhi(o),0.5*f32(o.width)*min(UM_H.x,min(UM_H.y,UM_H.z)),1e-9);" : ""}
  }
+ ${solid ? "fraction=umPressureWallV(o,axis,sign);if(fraction<=1e-6){return 0.0;}" : ""}
  return fraction/(distance*distance*theta);
 }
 fn umBoundaryCoreTerms(o:UMOwner,face:UMFace)->vec2f {

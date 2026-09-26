@@ -103,7 +103,7 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
         const sum = (a: Float32Array) => a.reduce((n, v) => n + v, 0);
         assert.ok(Math.abs(sum(actual) - sum(mass)) < 2e-6 * sum(mass), `${mode} conserved volume`);
         t.diagnostic(`${mode}: ${cells.length} owners, max volume error ${Math.max(...actual.map((v, i) => Math.abs(v - expected[i]!)))}, relative mass error ${Math.abs(sum(actual) - sum(mass)) / sum(mass)}, added buffers ${capture.allocatedBytes} bytes`);
-        assert.equal(capture.allocatedBytes, capture.layout.tiles.length * 12 + 16 + 36 * 16);
+        assert.equal(capture.allocatedBytes, capture.layout.metadataBytes + 16 + (capture.layout.tiles.length * 8 + 20) * 4 + 32 + capture.layout.tiles.length * 4 + 36 * 16);
         assert.ok(capture.allocatedBytes < solver.info.allocatedBytes * .03);
         if (mode === "native") fineResult = output;
         if (mode === "fine") for (let i = 0; i < output.length; i++) assert.ok(Math.abs(output[i]! - fineResult![i]!) < 3e-5, `native endpoint cell ${i}`);

@@ -1,7 +1,7 @@
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sampling.wgsl";
-import { uniformMixedFaceAddressWGSL, uniformMixedFaceDispatchWGSL } from "./uniform-mixed-face-dispatch.wgsl";
+import { uniformMixedFaceAddressWGSL, uniformMixedFaceTileDispatchWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { uniformVelocityDepartureWGSL } from "./uniform-velocity-departure.wgsl";
 
 export interface UniformMixedMomentumFields {
@@ -37,10 +37,11 @@ export const UNIFORM_MIXED_MOMENTUM_LIMITS = 32 | (16 << 8);
 export class UniformMixedMomentum {
   readonly allocatedBytes = 0;
   private readonly resources: GPUBindGroupLayout;
-  private pipeline?: GPUComputePipeline[];
+  private pipeline?: GPUComputePipeline;
   private regularPipeline?:GPUComputePipeline;
   constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership,
-    private readonly defaultOptions = false, private readonly cullAir = false) {
+    private readonly defaultOptions = false, private readonly cullAir = false, private readonly hanging = false) {
+    if(hanging&&!defaultOptions)throw new Error("Hanging fine taps serve scalar default momentum only");
     this.resources = device.createBindGroupLayout({ entries: [
       ...[0, 1, 2, 3, 4, 5].map(binding => ({ binding, visibility: GPUShaderStage.COMPUTE,
         texture: { sampleType: "unfilterable-float" as const, viewDimension: "3d" as const } })),
@@ -97,10 +98,13 @@ override umCullAir:bool=false;
 // Numerical-option specialization, independent of ownership. The unified
 // frame supports SL without liquid-only filtering; remove unused optional
 // sampler payloads at compilation rather than branching per texture tap.
+// Scalar interpolation must also have scalar arrays and reductions: merely
+// returning vec3(value,0,0) retained substantial cost on Metal.
 override umDefaultMomentum:bool=false;
 ${uniformMixedFaceAddressWGSL}
-fn umLoadCoarseFace(index:vec3i,axis:u32)->vec3f {
- let p=index+vec3i(1);if(umDefaultMomentum){return vec3f(textureLoad(coarseExtended,p,0)[axis],0,0);}return vec3f(textureLoad(coarseExtended,p,0)[axis],textureLoad(coarsePhysical,p,0)[axis],textureLoad(coarseWeight,p,0)[axis]);
+fn umLoadCoarseFace(index:vec3i,axis:u32)->${this.defaultOptions?"f32":"vec3f"} {
+ ${this.defaultOptions?"return textureLoad(coarseExtended,index+vec3i(1),0)[axis];":`
+ let p=index+vec3i(1);return vec3f(textureLoad(coarseExtended,p,0)[axis],textureLoad(coarsePhysical,p,0)[axis],textureLoad(coarseWeight,p,0)[axis]);`}
 }
 fn umFacePhase(anchor:vec3i,axis:u32)->f32 {
  var next=anchor;next[axis]+=1;let left=umOwnerAt(anchor);let right=umOwnerAt(next);
@@ -109,17 +113,14 @@ fn umFacePhase(anchor:vec3i,axis:u32)->f32 {
  if(right.width!=0u){known=known||textureLoad(phase,vec3i(umOrigin(right)),0).x>0.5;}
  return select(0.0,1.0,known);
 }
-fn umLoadMixedFace(anchor:vec3i,axis:u32)->vec3f {
- if(umDefaultMomentum){
-  if(anchor[axis]<0){return vec3f(negative[umNegativeBoundaryIndex(vec3u(max(anchor,vec3i(0))),axis)],0,0);}
-  return vec3f(textureLoad(extended,anchor,0)[axis],0,0);
- }
+fn umLoadMixedFace(anchor:vec3i,axis:u32)->${this.defaultOptions?"f32":"vec3f"} {
+ ${this.defaultOptions?`if(anchor[axis]<0){return negative[umNegativeBoundaryIndex(vec3u(max(anchor,vec3i(0))),axis)];}return textureLoad(extended,anchor,0)[axis];`:`
  let weight=umFacePhase(anchor,axis);var extendedValue=0.0;var physicalValue=0.0;
  if(anchor[axis]<0){extendedValue=negative[umNegativeBoundaryIndex(vec3u(max(anchor,vec3i(0))),axis)];if(weight>0.0){physicalValue=extendedValue;}}
  else {extendedValue=textureLoad(extended,anchor,0)[axis];if(weight>0.0){physicalValue=textureLoad(physical,anchor,0)[axis];}}
- return vec3f(extendedValue,physicalValue,weight);
+ return vec3f(extendedValue,physicalValue,weight);`}
 }
-${uniformMixedVelocitySamplingSource(true,true)}
+${uniformMixedVelocitySamplingSource(!this.defaultOptions,true,this.defaultOptions?"extended":undefined,this.hanging?2:undefined)}
 ${[1,2,4].map(width => /* wgsl */ `
 fn umMomentumBounds${width}(p:vec3f,axis:u32)->vec2f {
  var offset=vec3f(0.5);offset[axis]=1.0;var lower=vec3f(0);lower[axis]=-1.0;
@@ -127,7 +128,7 @@ fn umMomentumBounds${width}(p:vec3f,axis:u32)->vec2f {
  var bounds=vec2f(1e30,-1e30);
  for(var k=0u;k<select(umCounts.w,8u,umRegularFine);k++){
   let bit=vec3i(umCorner(k,2u));let weights=select(vec3f(1)-fraction,fraction,bit==vec3i(1));
-  if(weights.x*weights.y*weights.z>0.0){let at=base+bit;var value=0.0;if(at[axis]>=0){value=umVelocityTap${width}(at,axis).x;}bounds=vec2f(min(bounds.x,value),max(bounds.y,value));}
+  if(weights.x*weights.y*weights.z>0.0){let at=base+bit;var value=0.0;if(at[axis]>=0){value=umVelocityTap${width}(at,axis)${this.defaultOptions?"":".x"};}bounds=vec2f(min(bounds.x,value),max(bounds.y,value));}
  }
  return bounds;
 }`).join("\n")}
@@ -143,11 +144,11 @@ fn umClampMomentum(p:vec3f)->vec3f {
  if(momentum.flags.x==0u){q.y=min(q.y,f32(UM_D.y));}return q;
 }
 fn umMomentumDeparture(position:vec3f,dt:f32,h:vec3f)->vec3f {
-${uniformVelocityDepartureWGSL("umSampleVelocity", "umClampMomentum", "select(f32(umOwnerAt(clamp(vec3i(floor(point)),vec3i(0),vec3i(UM_D)-vec3i(1))).width),1.0,umRegularFine)", "i32(momentum.flags.w&255u)")}
+${uniformVelocityDepartureWGSL("umSampleVelocity", "umClampMomentum", "select(f32(umOwnerAt(clamp(vec3i(floor(point)),vec3i(0),vec3i(UM_D)-vec3i(1))).width),1.0,umRegularFine)", "select(i32(momentum.flags.w&255u),32,umDefaultMomentum)")}
 }
 fn umSamplePhysical(p:vec3f,axis:u32)->vec2f {
- let sample=umSampleVelocityComponent(p,axis);
- return vec2f(select(0.0,sample.y/max(sample.z,1e-30),sample.z>0.0),sample.z);
+ ${this.defaultOptions?"return vec2f(umSampleVelocityComponent(p,axis),0);":`let sample=umSampleVelocityComponent(p,axis);
+ return vec2f(select(0.0,sample.y/max(sample.z,1e-30),sample.z>0.0),sample.z);`}
 }
 fn umMomentumLiquid(owner:UMOwner,face:UMFace)->bool {
  if(textureLoad(volume,vec3i(umOrigin(owner)),0).x>1e-5){return true;}
@@ -163,7 +164,7 @@ fn umClosedPositive(face:UMFace)->bool {
 fn umAdvectedMomentum(owner:UMOwner,face:UMFace,dt:f32)->f32 {
  let position=umFaceCenter(face);
  let departure=umMomentumDeparture(position,dt,momentum.hDt.xyz);
- if(umDefaultMomentum||momentum.flags.y==0u||!umMomentumLiquid(owner,face)){return umSampleVelocityComponent(departure,face.axis).x;}
+ if(umDefaultMomentum||momentum.flags.y==0u||!umMomentumLiquid(owner,face)){return umSampleVelocityComponent(departure,face.axis)${this.defaultOptions?"":".x"};}
  let supported=umSamplePhysical(departure,face.axis);if(supported.y>0.0){return supported.x;}
  for(var probe=1u;probe<=(momentum.flags.w>>8u);probe++){
   let recovered=umSamplePhysical(mix(departure,position,f32(probe)/16.0),face.axis);
@@ -200,25 +201,42 @@ fn umMomentum(owner:UMOwner,face:UMFace)->f32 {
  let value=umAdvectedMomentum(owner,face,dt);
  if((umDefaultMomentum||momentum.flags.z==0u) && umClosedPositive(face)){return min(value,umOriginalMomentum(face));}return value;
 }
-${uniformMixedFaceDispatchWGSL("momentumStep", "umMomentum(owner,face)", false).replace(" let origin=umOrigin(owner);", ` let origin=umOrigin(owner);
- if(umRegularFine){
-  for(var axis=0u;axis<3u;axis++){
-   if(origin[axis]==0u){let face=umFace(owner,axis,-1,0u);boundary[umNegativeBoundaryIndex(origin,axis)]=umMomentum(owner,face);}
-  }
-  textureStore(output,vec3i(origin),vec4f(umMomentum(owner,umFace(owner,0u,1,0u)),umMomentum(owner,umFace(owner,1u,1,0u)),umMomentum(owner,umFace(owner,2u,1,0u)),0));
-  return;
- }`)}
+// A certified unit stencil has one MAC patch per face. Keep its geometry
+// constant through the characteristic sampler; generic neighbour widths would
+// otherwise make the face position and wall logic dynamically sized.
+fn umRegularMomentumFace(owner:UMOwner,axis:u32,sign:i32)->UMFace {
+ let origin=vec3i(umOrigin(owner));var probe=origin;probe[axis]+=sign;
+ var anchor=origin;if(sign<0){anchor[axis]-=1;}
+ return UMFace(umOwnerAt(probe),anchor,1u,1u,axis,sign);
+}
+// Each lane traces one component. The tile shares only the final packed
+// store; each invocation evaluates only one characteristic. No additional
+// persistent field is needed.
+var<workgroup> umMomentumComponents:array<f32,192>;
+@compute @workgroup_size(192) fn momentumRegularStep(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ let cell=lane%64u;let axis=lane/64u;
+ let owner=umOwner(vec3u(group.x*64u+cell,group.y,0));
+ var value=0.0;
+ if(owner.width!=0u){
+  let origin=umOrigin(owner);
+  if(origin[axis]==0u){let face=umRegularMomentumFace(owner,axis,-1);boundary[umNegativeBoundaryIndex(origin,axis)]=umMomentum(owner,face);}
+  value=umMomentum(owner,umRegularMomentumFace(owner,axis,1));
+ }
+ umMomentumComponents[lane]=value;workgroupBarrier();
+ if(lane<64u&&owner.width!=0u){textureStore(output,vec3i(umOrigin(owner)),vec4f(umMomentumComponents[cell],umMomentumComponents[cell+64u],umMomentumComponents[cell+128u],0));}
+}
+${uniformMixedFaceTileDispatchWGSL("momentumStep", "umMomentum(owner,face)")}
 ` });
     const errors = (await module.getCompilationInfo()).messages.filter(m => m.type === "error");
     if (errors.length) throw new Error(errors.map(m => `${m.lineNum}: ${m.message}`).join("\n"));
-    const layout = this.device.createPipelineLayout({ bindGroupLayouts: [this.ownership.bindLayout, this.resources] });
-    this.pipeline = await Promise.all([1,2,4].map(umCellWidth=>this.device.createComputePipelineAsync({ layout,
-      compute: { module, entryPoint: "momentumStep", constants: { umCellWidth,umPlannedFine:2, umDispatchX: this.ownership.dispatchX, umDefaultMomentum: +this.defaultOptions, umCullAir:+this.cullAir } } })));
-    this.regularPipeline=await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"momentumStep",constants:{umCellWidth:1,umPlannedFine:1,umRegularFine:1,umDispatchX:this.ownership.dispatchX,umDefaultMomentum:+this.defaultOptions,umCullAir:+this.cullAir}}});
+    const layout = this.device.createPipelineLayout({ bindGroupLayouts: [this.ownership.bindLayout, this.resources, ...(this.hanging ? [this.ownership.hangingLayout] : [])] });
+    this.pipeline = await this.device.createComputePipelineAsync({ layout,
+      compute: { module, entryPoint: "momentumStep", constants: { umMergedTiles:1, umDispatchX: this.ownership.dispatchX, umDefaultMomentum: +this.defaultOptions, umCullAir:+this.cullAir } } });
+    this.regularPipeline=await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"momentumRegularStep",constants:{umCellWidth:1,umPlannedFine:1,umRegularFine:1,umDispatchX:this.ownership.dispatchX,umDefaultMomentum:+this.defaultOptions,umCullAir:+this.cullAir}}});
   }
   encode(encoder: GPUCommandEncoder, group: GPUBindGroup): void {
     if (!this.pipeline) throw new Error("Mixed momentum is not initialized");
     const pass = encoder.beginComputePass({ label: "Uniform mixed momentum" });
-    pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1, group); this.ownership.dispatchCertified(pass, this.pipeline,this.regularPipeline!); pass.end();
+    pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1, group); if (this.hanging) pass.setBindGroup(2, this.ownership.hangingGroup); this.ownership.dispatchCertified(pass, this.pipeline,this.regularPipeline!); pass.end();
   }
 }

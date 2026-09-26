@@ -10,7 +10,7 @@ import type {WebGPUUniformVelocityExtrapolator} from "./webgpu-uniform-velocity-
 import {UniformMixedTransportStage} from "./uniform-mixed-transport";
 import {UniformMixedOwnership} from "./uniform-mixed-ownership";
 import {UniformMixedExtension} from "./uniform-mixed-extension";
-import {UniformMixedMomentumCache} from "./uniform-mixed-momentum-cache";
+import {UniformMixedHangingTaps, UniformMixedMomentumCache} from "./uniform-mixed-momentum-cache";
 import {UniformMixedSurface} from "./uniform-mixed-surface";
 import {UniformMixedSurfaceVolume} from "./uniform-mixed-surface-volume";
 import {UniformMixedVertexTransfer} from "./uniform-mixed-vertex-transfer";
@@ -28,6 +28,7 @@ import {DEFAULT_UNIFORM_CM11A_SCHEDULE,type UniformCM11aSchedule} from "./pressu
 import type {GPUTimestampPhase} from "../../core/performance-trace";
 import {UNIFORM_ADVANCE_PHASE as A} from "./uniform-stages";
 import {UNIFORM_VOLUME_PHASE as V} from "./uniform-volume-stages";
+import {UniformMixedSolid,type UniformMixedSolidResources} from "./uniform-mixed-solid.wgsl";
 
 export interface UniformMixedFrameTrace {
  instrument(encoder:GPUCommandEncoder):GPUCommandEncoder;
@@ -48,6 +49,9 @@ export interface UniformMixedFrameFields {
  extension:ReturnType<WebGPUUniformVelocityExtrapolator["prepareMixedContinuation"]>;
  uniformGroup:GPUBindGroup;
  sourceParams?:GPUBuffer;
+ /** Static voxel/terrain/vessel solids, fixed for this frame's lifetime.
+  * The host must keep every coarse owner a full tile away from a cut cell. */
+ solid?:UniformMixedSolidResources;
 }
 export interface UniformMixedFrameParameters {
  dt:number;gravity:number;density:number;viscosity:number;surfaceTension:number;
@@ -72,6 +76,10 @@ export class UniformMixedFrame {
  private readonly remap:UniformMixedRemap;
  private readonly extension:UniformMixedExtension;
  private readonly cache:UniformMixedMomentumCache;
+ private readonly hanging:UniformMixedHangingTaps;
+ private readonly hangingGroup:GPUBindGroup;
+ private readonly forceCacheGroup:GPUBindGroup;
+ private readonly forceHangingGroup:GPUBindGroup;
  private readonly surface:UniformMixedSurface;
  private readonly surfaceVolume:UniformMixedSurfaceVolume;
  private readonly copyPhi:UniformMixedVertexTransfer;
@@ -115,47 +123,59 @@ export class UniformMixedFrame {
   this.readback=buffer("Uniform pressure receipt and mass accounting",80,GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ);
   this.reductions=buffer("Uniform dust accounting",48,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC);
   const caches=Array.from({length:3},(_,i)=>{const t=device.createTexture({label:`Uniform 4h sampling cache ${i}`,size:layout.lattice.dimensions.map(n=>n/4+2),dimension:"3d",format:"rgba32float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING});this.owned.push(t);return t;});
-  this.transport=new UniformMixedTransportStage(device,layout,f.arena,f.volume,f.volumeScratch,f.departure,f.sourceParams);
+  const solid=f.solid?new UniformMixedSolid(device,f.solid):undefined;
+  this.transport=new UniformMixedTransportStage(device,layout,f.arena,f.volume,f.volumeScratch,f.departure,f.sourceParams,solid);
   const o=this.ownership;
-  this.plan=new UniformMixedFramePlan(device,o,f.volume,f.phi,f.velocity,f.negative);
-  this.cleanup=new UniformMixedCleanup(device,o);
+  this.plan=new UniformMixedFramePlan(device,o,f.volume,f.phi,f.velocity,f.negative,f.velocityScratch,f.negativeScratch);
+  this.cleanup=new UniformMixedCleanup(device,o,solid);
   this.cleanupGroups=[this.cleanup.bind(f.volume,f.volumeScratch,f.phi,this.params.sharpen,this.reductions),this.cleanup.bind(f.volumeScratch,f.volume,f.phi,this.params.sharpen,this.reductions)];
   this.remap=new UniformMixedRemap(device,o,{volume:f.volume,velocity:f.velocity,phi:f.phi,negative:f.negative},{volume:f.volumeScratch,velocity:f.velocityScratch,phi:f.phiScratch,negative:f.negativeScratch});
   const prefix=Math.min(...[f.pressure.pressure,f.pressure.rhs,f.pressure.minimum,f.pressure.phi,f.pressure.topology].map(v=>v.buffer!.offset??0));
-  const memory=planUniformMixedPressureMemory(layout,prefix,f.conditioning.size);
+  const memory=planUniformMixedPressureMemory(layout,prefix,f.conditioning.size,!!f.solid);
   const view=(r:{offset:number;size:number},external=false):GPUBufferBinding=>({buffer:external?f.conditioning:f.arena.buffer,...r});
-  this.levels=memory.levels.map((r,i)=>({ownership:i===0?o:new UniformMixedOwnership(device,memory.layouts[i]!),pressure:view(r.pressure),rhs:[view(r.rhs[0]),view(r.rhs[1])],minimum:r.minimum.map(v=>view(v)),phi:view(r.phi,i===0),slopes:view(r.slopes),frozen:view(r.frozen),residual:view(r.residual)}));
+  this.levels=memory.levels.map((r,i)=>({ownership:i===0?o:new UniformMixedOwnership(device,memory.layouts[i]!),pressure:view(r.pressure),rhs:[view(r.rhs[0]),view(r.rhs[1])],minimum:r.minimum.map(v=>view(v)),phi:view(r.phi,i===0),slopes:view(r.slopes),frozen:view(r.frozen),residual:view(r.residual),
+   topology:!f.solid?undefined:i===0?{texture:f.departure}:{buffer:view(r.topology!)}}));
   const root=this.levels[0]!,last=this.levels[2]!;
   this.extension=new UniformMixedExtension(device,o,f.extension);
   this.extensionGroups=this.extension.bind({physical:f.velocity,phase:f.phase,negative:f.negative,output:f.velocityScratch,outputNegative:f.negativeScratch,scratch:{buffer:f.arena.buffer},params:this.params.extension});
   this.cache=new UniformMixedMomentumCache(device,o);
   const cacheFields={coarseExtended:caches[0]!,coarsePhysical:caches[1]!,coarseWeight:caches[2]!};
   this.cacheGroup=this.cache.bind({extended:f.velocityScratch,physical:f.velocity,phase:f.phase,negative:f.negativeScratch,...cacheFields});
-  this.surface=new UniformMixedSurface(device,o,f.sourceParams);
+  // Surface and momentum share hanging taps of velocityScratch: nothing
+  // between the cache and forces writes it, negativeScratch or cache 0.
+  this.hanging=new UniformMixedHangingTaps(device,o);this.hangingGroup=this.hanging.bind({extended:f.velocityScratch,negative:f.negativeScratch,coarse:caches[0]!});
+  this.surface=new UniformMixedSurface(device,o,f.sourceParams,solid,true);
   const surfaceFields={velocity:f.velocityScratch,coarseVelocity:caches[0]!,volume:f.volume,negative:f.negativeScratch,departures:f.departure,params:this.params.surface,evidence:{buffer:f.arena.buffer}};
   this.surfaceGroups=[this.surface.bind({...surfaceFields,phi:f.phi,outputPhi:f.phiScratch}),this.surface.bind({...surfaceFields,phi:f.phiScratch,outputPhi:f.phi})];
-  this.surfaceVolume=new UniformMixedSurfaceVolume(device,o);
+  this.surfaceVolume=new UniformMixedSurfaceVolume(device,o,solid);
   this.surfaceVolumeGroup=this.surfaceVolume.bind(f.phi,f.volume,f.phiScratch,{buffer:f.arena.buffer});
   this.copyPhi=new UniformMixedVertexTransfer(device,o,f.phiScratch,f.phi,"restrict");
-  this.geometry=new UniformMixedSurfaceGeometry(device,o);this.geometryGroup=this.geometry.bind(f.phi,f.target,f.centerPhi);
-  this.sharpen=new UniformMixedSharpening(device,o);
+  this.geometry=new UniformMixedSurfaceGeometry(device,o,solid);this.geometryGroup=this.geometry.bind(f.phi,f.target,f.centerPhi);
+  this.sharpen=new UniformMixedSharpening(device,o,solid);
   this.sharpenGroups=[this.sharpen.bind(f.volume,f.volumeScratch,f.phi,f.target,f.centerPhi,{buffer:f.arena.buffer,offset:0,size:f.arena.edgeBytes},this.params.sharpen,this.reductions),this.sharpen.bind(f.volumeScratch,f.volume,f.phi,f.target,f.centerPhi,{buffer:f.arena.buffer,offset:0,size:f.arena.edgeBytes},this.params.sharpen,this.reductions)];
-  this.momentum=new UniformMixedMomentum(device,o,true,true);
+  this.momentum=new UniformMixedMomentum(device,o,true,true,true);
   this.momentumGroup=this.momentum.bind({extended:f.velocityScratch,physical:f.velocity,phase:f.phase,volume:f.volume,centerPhi:f.centerPhi,predicted:f.velocity,reversed:f.velocity,negative:f.negativeScratch,predictedNegative:f.negative,reversedNegative:f.negative,output:f.departure,outputNegative:f.negativeDeparture,params:this.params.momentum,...cacheFields});
-  this.forces=new UniformMixedForces(device,o,true,f.sourceParams);this.forceGroup=this.forces.bind({velocity:f.velocity,advected:f.departure,phi:f.phi,volume:f.volume,centerPhi:f.centerPhi,negative:f.negativeDeparture,output:f.velocityScratch,outputNegative:f.negativeScratch,params:this.params.forces});
-  this.authority=new UniformMixedPressureAuthority(device,o);this.authorityGroup=this.authority.bind({centerPhi:f.centerPhi,volume:f.volume,targetFill:f.target,phi:root.phi!,phase:f.phase,correction:f.correction,scratch:root.frozen,params:this.params.authority});
-  this.projection=new UniformMixedPressureVelocity(device,o,f.sourceParams);
+  // Momentum is the last reader of both sampling caches. Refill them from the
+  // field viscosity samples (velocity with the advected negative planes).
+  this.forceCacheGroup=this.cache.bind({extended:f.velocity,physical:f.velocity,phase:f.phase,negative:f.negativeDeparture,...cacheFields});
+  this.forceHangingGroup=this.hanging.bind({extended:f.velocity,negative:f.negativeDeparture,coarse:caches[0]!});
+  this.forces=new UniformMixedForces(device,o,true,f.sourceParams,solid,true);this.forceGroup=this.forces.bind({velocity:f.velocity,advected:f.departure,phi:f.phi,volume:f.volume,centerPhi:f.centerPhi,coarseVelocity:caches[0]!,negative:f.negativeDeparture,output:f.velocityScratch,outputNegative:f.negativeScratch,params:this.params.forces});
+  this.authority=new UniformMixedPressureAuthority(device,o,solid);this.authorityGroup=this.authority.bind({centerPhi:f.centerPhi,volume:f.volume,targetFill:f.target,phi:root.phi!,phase:f.phase,correction:f.correction,scratch:root.frozen,params:this.params.authority});
+  this.projection=new UniformMixedPressureVelocity(device,o,f.sourceParams,solid);
+  // Level-0 pressure topology borrows the departure texture: free between
+  // forces (its last reader) and projection.
+  const topology=solid?f.departure:undefined;
   const common={velocity:f.velocityScratch,negative:{buffer:f.negativeScratch},phi:root.phi!,params:this.params.projection};
-  this.rhsGroup=this.projection.bindRhs({...common,correction:f.correction,rhs:root.rhs[0],minimum:root.minimum![0]!,pressure:root.pressure});
-  this.projectionGroup=this.projection.bindProjection({...common,pressure:root.pressure,slopes:root.slopes,centerPhi:f.centerPhi,volume:f.volume,output:f.velocity,outputNegative:{buffer:f.negative}});
-  this.continuation=new UniformMixedPressureContinuation(device,last.ownership,f.pressure,openTop);
-  const continuationGroups=last.rhs.map(rhs=>this.continuation.bind({pressure:last.pressure,rhs,minimum:last.minimum![0]!,phi:last.phi!}));
+  this.rhsGroup=this.projection.bindRhs({...common,correction:f.correction,rhs:root.rhs[0],minimum:root.minimum![0]!,pressure:root.pressure,topology});
+  this.projectionGroup=this.projection.bindProjection({...common,pressure:root.pressure,slopes:root.slopes,centerPhi:f.centerPhi,volume:f.volume,output:f.velocity,outputNegative:{buffer:f.negative},topology});
+  this.continuation=new UniformMixedPressureContinuation(device,last.ownership,f.pressure,openTop,!!f.solid);
+  const continuationGroups=last.rhs.map(rhs=>this.continuation.bind({pressure:last.pressure,rhs,minimum:last.minimum![0]!,phi:last.phi!,topology:last.topology&&"buffer" in last.topology?last.topology.buffer:undefined}));
   this.cycles=new UniformMixedPressureCycles(device,this.levels,view(memory.backup),(encoder,rhs,kind)=>{this.continuation.encode(encoder,continuationGroups[rhs===last.rhs[0]?0:1]!,f.uniformGroup,kind,!this.continuationReady);this.continuationReady=true;},[true,true],this.schedule,{openTop});
   this.acceptance=new UniformMixedPressureAcceptance(device,o);
   this.acceptanceGroup=this.acceptance.bind({residual:root.residual,state:this.state,params:this.params.acceptance});
  }
  async initialize():Promise<void>{
-  for(const stage of [this.transport,this.plan,this.cleanup,this.remap,this.extension,this.cache,this.surface,this.surfaceVolume,this.copyPhi,this.geometry,this.sharpen,this.momentum,this.forces,this.authority,this.projection,this.continuation,this.cycles,this.acceptance])await stage.initialize();
+  for(const stage of [this.transport,this.plan,this.cleanup,this.remap,this.extension,this.cache,this.hanging,this.surface,this.surfaceVolume,this.copyPhi,this.geometry,this.sharpen,this.momentum,this.forces,this.authority,this.projection,this.continuation,this.cycles,this.acceptance])await stage.initialize();
   this.ready=true;
  }
  private write(p:UniformMixedFrameParameters):void{
@@ -186,7 +206,7 @@ export class UniformMixedFrame {
    encoder.clearBuffer(this.reductions);
    this.plan.encode(encoder,p.supportPolicy,p.dt);this.geometry.encode(encoder,this.geometryGroup);this.authority.encode(encoder,this.authorityGroup);
    trace?.phase(encoder,A.extensionAuthority);
-   this.extension.encode(encoder,this.extensionGroups,p.extensionSweeps??2);this.cache.encode(encoder,this.cacheGroup);
+   this.extension.encode(encoder,this.extensionGroups,p.extensionSweeps??2);this.plan.encodeCertificate(encoder);this.cache.encode(encoder,this.cacheGroup);this.hanging.encode(encoder,this.hangingGroup);
    trace?.phase(encoder,A.extensionHierarchy);
    this.surface.encode(encoder,"advect",this.surfaceGroups[0]);this.surface.encode(encoder,"traceCells",this.surfaceGroups[0]);
    if(p.redistance!==false)this.surface.encode(encoder,"redistance",this.surfaceGroups[1]);else this.copyPhi.encode(encoder);
@@ -199,7 +219,8 @@ export class UniformMixedFrame {
    trace?.phase(encoder,V.gather);
    if(p.sharpening!==false){this.sharpen.encodeGeometry(encoder,this.sharpenGroups[0]);for(let i=0;i<8;i++)this.sharpen.encodeSweep(encoder,this.sharpenGroups[i%2]!,false);}
    trace?.phase(encoder,V.sharpen);
-   this.momentum.encode(encoder,this.momentumGroup);this.forces.encode(encoder,this.forceGroup);
+   this.momentum.encode(encoder,this.momentumGroup);
+   this.cache.encode(encoder,this.forceCacheGroup);this.hanging.encode(encoder,this.forceHangingGroup);this.forces.encode(encoder,this.forceGroup);
    trace?.phase(encoder,A.advectionCorrection);
    this.continuationReady=false;
    this.authority.encode(encoder,this.authorityGroup);this.projection.encode(encoder,"rhs",this.rhsGroup);this.cycles.encodeSurfaceRestriction(encoder);

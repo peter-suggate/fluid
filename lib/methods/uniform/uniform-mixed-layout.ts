@@ -29,6 +29,10 @@ export interface UniformMixedLayout {
  * Disabling grading is reserved for direct 4:1 numerical stress tests. */
 export function createUniformMixedLayout(
   lattice: RefinementRegionLattice, regions: readonly FluidRefinementRegion[], stronglyBalanced = true, backgroundWidth: 1 | 4 = 1,
+  /** Tiles that must be h, from uniformMixedSolidTiles. Solids override
+   * region cell-size bounds: forced tiles are h whatever a region says, and
+   * a 4h-only region tile beside one is graded to 2h. */
+  forcedFine?: Uint8Array,
 ): UniformMixedLayout {
   const axes = ["x", "y", "z"] as const;
   for (let a = 0; a < 3; a++) {
@@ -43,6 +47,8 @@ export function createUniformMixedLayout(
   if (!Number.isSafeInteger(count) || count * 64 > MIXED_CELL_MASK) throw new Error("Mixed cell index capacity exceeded");
   // Temporary two-bit allowed-scale mask; discarded after topology construction.
   const allowed = new Uint8Array(count).fill(3);
+  if (forcedFine && forcedFine.length !== count) throw new Error("Solid promotion mask does not match the tile lattice");
+  if (forcedFine) for (let key = 0; key < count; key++) if (forcedFine[key]) allowed[key] = 1;
   const ids = new Set<string>();
   const snapped: { id: string; min: Triple; max: Triple }[] = [];
   for (const r of regions) {
@@ -68,6 +74,7 @@ export function createUniformMixedLayout(
     const max = bounds.max.map(v => Math.ceil(tileCoordinate(v))) as unknown as Triple;
     for (let z = min[2]; z < max[2]; z++) for (let y = min[1]; y < max[1]; y++) for (let x = min[0]; x < max[0]; x++) {
       const key = x + dimensions[0] * (y + dimensions[1] * z);
+      if (forcedFine?.[key]) continue;
       allowed[key] = allowed[key]! & mask;
       if (!allowed[key]) throw new Error(`Conflicting snapped region constraints at tile ${x},${y},${z} while applying ${r.id}`);
     }
@@ -83,13 +90,73 @@ export function createUniformMixedLayout(
         if (q.some((v, a) => v < 0 || v >= dimensions[a]!)) continue;
         const neighbor = q[0]! + dimensions[0] * (q[1]! + dimensions[1] * q[2]!);
         if (widths[neighbor] !== 4 || widths[key] !== 1) continue;
-        if (allowed[neighbor] !== 2) widths[neighbor] = 2;
+        if (allowed[neighbor] !== 2 || forcedFine?.[key]) widths[neighbor] = 2;
         else if (allowed[key] !== 1) widths[key] = 2;
         else throw new Error(`Forced 4h tile ${q} conflicts with 2:1 grading around ${t}`);
       }
     }
   }
   return packUniformMixedLayout(lattice, widths, snapped);
+}
+
+/** Solid promotion. A cut cell has open fraction below one: a voxel of the
+ * interior lattice or a terrain column cell below its height. Every tile with
+ * a cell within one cell (26-neighbourhood) of a cut cell is solid-coupled;
+ * those and their 26 neighbour tiles are forced to h. Fine-owner stencils of
+ * one cell (faces, dual cells, phi contact, pressure continuation) therefore
+ * never meet solid in a 2h/4h owner or in an interface (seam) tile. The box
+ * shell lives in the mask's halo; domain walls are owned by every width. */
+export function uniformMixedSolidTiles(dimensions: Triple, mask: Uint32Array, maskHeaderWords: number,
+  terrainCells?: Float32Array): { forced: Uint8Array; coupled: Uint8Array; cutCells: number } {
+  const [nx, ny, nz] = dimensions, t = dimensions.map(n => n / 4) as unknown as Triple;
+  if (dimensions.some(n => !Number.isSafeInteger(n) || n % 4 !== 0)) throw new Error("Solid promotion requires dimensions divisible by four");
+  const sx = nx + 2, sy = ny + 2, sz = nz + 2;
+  if (mask[1] !== sx || mask[2] !== sy || mask[3] !== sz) throw new Error("Solid promotion mask does not match the lattice");
+  const coupled = new Uint8Array(t[0] * t[1] * t[2]);let cutCells = 0;
+  const mark = (x: number, y: number, z: number) => {
+    cutCells++;
+    for (let tz = Math.max(0, (z - 1) >> 2); tz <= Math.min(t[2] - 1, (z + 1) >> 2); tz++)
+      for (let ty = Math.max(0, (y - 1) >> 2); ty <= Math.min(t[1] - 1, (y + 1) >> 2); ty++)
+        for (let tx = Math.max(0, (x - 1) >> 2); tx <= Math.min(t[0] - 1, (x + 1) >> 2); tx++) coupled[tx + t[0] * (ty + t[1] * tz)] = 1;
+  };
+  for (let word = 0; word < mask.length - maskHeaderWords; word++) {
+    let bits = mask[maskHeaderWords + word]!;
+    while (bits) {
+      const bit = 31 - Math.clz32(bits & -bits);bits &= bits - 1;
+      const index = word * 32 + bit, qx = index % sx, qy = Math.floor(index / sx) % sy, qz = Math.floor(index / (sx * sy));
+      const x = qx - 1, y = qy - 1, z = qz - 1;
+      if (x >= 0 && y >= 0 && z >= 0 && x < nx && y < ny && z < nz) mark(x, y, z);
+    }
+  }
+  if (terrainCells) {
+    if (terrainCells.length !== nx * nz) throw new Error("Solid promotion terrain does not match the lattice");
+    for (let z = 0; z < nz; z++) for (let x = 0; x < nx; x++) {
+      const height = terrainCells[x + nx * z]!;
+      if (!Number.isFinite(height)) throw new Error("Solid promotion requires finite terrain heights");
+      // clamp(height-y,0,1)>0 exactly when y<height: cells 0..top are cut.
+      if (!(height > 0)) continue;
+      const top = Math.min(ny - 1, Math.ceil(height) - 1);cutCells += top + 1;
+      for (let tz = Math.max(0, (z - 1) >> 2); tz <= Math.min(t[2] - 1, (z + 1) >> 2); tz++)
+        for (let ty = 0; ty <= Math.min(t[1] - 1, (top + 1) >> 2); ty++)
+          for (let tx = Math.max(0, (x - 1) >> 2); tx <= Math.min(t[0] - 1, (x + 1) >> 2); tx++) coupled[tx + t[0] * (ty + t[1] * tz)] = 1;
+    }
+  }
+  const forced = new Uint8Array(coupled.length);
+  for (let tz = 0; tz < t[2]; tz++) for (let ty = 0; ty < t[1]; ty++) for (let tx = 0; tx < t[0]; tx++) {
+    if (!coupled[tx + t[0] * (ty + t[1] * tz)]) continue;
+    for (let z = Math.max(0, tz - 1); z <= Math.min(t[2] - 1, tz + 1); z++) for (let y = Math.max(0, ty - 1); y <= Math.min(t[1] - 1, ty + 1); y++)
+      for (let x = Math.max(0, tx - 1); x <= Math.min(t[0] - 1, tx + 1); x++) forced[x + t[0] * (y + t[1] * z)] = 1;
+  }
+  return { forced, coupled, cutCells };
+}
+
+/** Loud ownership certificate: no 2h/4h owner may cover a promoted tile. */
+export function assertUniformMixedSolidPromotion(layout: UniformMixedLayout, forced: Uint8Array): void {
+  if (forced.length !== layout.tiles.length) throw new Error("Solid promotion mask does not match the ownership layout");
+  for (let key = 0; key < forced.length; key++) if (forced[key] && mixedCellWidth(layout.tiles[key]!) !== 1) {
+    const d = layout.tileDimensions;
+    throw new Error(`Mixed ownership places a ${mixedCellWidth(layout.tiles[key]!)}h owner on solid-coupled tile ${key % d[0]},${Math.floor(key / d[0]) % d[1]},${Math.floor(key / (d[0] * d[1]))}`);
+  }
 }
 
 /** The two mixed multigrid levels keep existing coarse owners intact while

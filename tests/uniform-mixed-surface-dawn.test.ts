@@ -29,6 +29,12 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
    try{
     const borrowed:GPUDevice=new Proxy(device,{get(target,key){if(key==="createBuffer"||key==="createTexture")return()=>{throw new Error("surface allocated a field");};const value=Reflect.get(target,key,target);return typeof value==="function"?value.bind(target):value;}});
     const stage:UniformMixedSurface=new UniformMixedSurface(borrowed,ownership);await stage.initialize();assert.equal(stage.allocatedBytes,0);
+    const serialDevice=new Proxy(borrowed,{get(target,key){
+     if(key==="createComputePipelineAsync")return(desc:GPUComputePipelineDescriptor)=>target.createComputePipelineAsync({...desc,compute:{...desc.compute,
+      entryPoint:desc.compute.entryPoint==="redistance"?"redistanceOwners":desc.compute.entryPoint}});
+     const value=Reflect.get(target,key,target);return typeof value==="function"?value.bind(target):value;
+    }});
+    const serial=new UniformMixedSurface(serialDevice,ownership);await serial.initialize();
     const group=stage.bind({phi,outputPhi,velocity,coarseVelocity,volume,negative,params,departures,evidence:{buffer:buffer(layout.tiles.length*4)}});
     const speed=.03,dt=.1;
     upload(velocity,Float32Array.from({length:n*4},(_,i)=>i%4===1?speed:0));
@@ -75,7 +81,21 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
     // Zero-velocity rebuild of an affine signed distance is an identity.
     upload(phi,values);const e=device.createCommandEncoder();stage.encode(e,"redistance",group);device.queue.submit([e.finish()]);
     const rebuilt=await readMixedTexture(device,outputPhi);
+    const rebuildReference=device.createCommandEncoder();serial.encode(rebuildReference,"redistance",group);device.queue.submit([rebuildReference.finish()]);
+    assert.deepEqual(rebuilt,await readMixedTexture(device,outputPhi),"vertex-parallel redistance changed canonical or inactive vertices");
     for(let i=0;i<points.length;i++)if(canonicalFlags[i])assert.ok(Math.abs(rebuilt[i]!-values[i]!)<2e-5,"planar redistance changed the contour");
+    // A curved interface exercises interpolation and Newton rebuilding
+    // across every canonical tier and domain boundary, beyond the plane oracle.
+    upload(phi,Float32Array.from(points,(p,i)=>canonicalFlags[i]?Math.hypot(...p.map((v,a)=>(v-d[a]!*.43)*h[a]!))-.3:NaN));
+    {
+     const entry="redistance";
+     upload(outputPhi,new Float32Array(nv).fill(NaN));
+     const parallel=device.createCommandEncoder();stage.encode(parallel,entry,group);device.queue.submit([parallel.finish()]);
+     const parallelValues=await readMixedTexture(device,outputPhi);
+     upload(outputPhi,new Float32Array(nv).fill(NaN));
+     const reference=device.createCommandEncoder();serial.encode(reference,entry,group);device.queue.submit([reference.finish()]);
+     assert.deepEqual(parallelValues,await readMixedTexture(device,outputPhi),`${entry}: vertex scheduling changed a curved interface`);
+    }
     // A drained positive plateau has no contour for Newton to find. It
     // retires to the physical band only with draining enabled.
     const plateau=Float32Array.from(points,(_,i)=>canonicalFlags[i]?.5*Math.min(...h):NaN);

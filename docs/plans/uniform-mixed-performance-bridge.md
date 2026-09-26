@@ -1,5 +1,42 @@
 # Uniform mixed architecture: minimum performance bridge
 
+## 2026-09-26: Pressure gates are native-relative
+
+The two hydrostatic cycle fixtures and the strict separating-wall fixture were
+not seam defects. Native Uniform itself misses their absolute limits within the
+same fixed budget:
+
+- The GPU cycle uses native's damped simultaneous Jacobi (weight 2/3, two
+  updates per sweep); the CPU oracle still modelled 6-colour Gauss-Seidel.
+  Given native Jacobi (`"native-jacobi"`), the oracle reproduces the GPU
+  histories to three digits (fixture 0: 1.40 ... 0.00133 vs GPU 0.001382).
+- All-fine ownership of the same lattices misses 1e-3 on every hydrostatic
+  fixture (2.2e-3 to 6.9e-3 on GPU); mixed ownership beats it on seven of eight,
+  often by 10-80x. Fixture 1 was 2.1% behind at native's 1e-4 coarse stop,
+  0.8% ahead at 1e-5 and within 0.14% at 1e-6: coarse-stop noise, not a seam.
+- On the wall fixture, all-fine ownership through the unified traversal matches
+  a pure native outer traversal on the same 32^3 lattice to 1.2e-6 per cell;
+  both end at pressure error 2.503 / residual 279 after 3 Full + 4 V cycles.
+  Mixed reaches 0.0016 / 0.023. Native at 8^3 reaches 0.0146 error.
+- The smoother, including separating-wall halos, is sound on h, 2h and 4h: the
+  manufactured solution is a fixed point (drift 1.2e-7) and residuals fall
+  monotonically. Mixed transfers match native's clamped-child restriction and
+  its halo-skipping trilinear prolongation.
+
+User decision: gates are native-relative. The original absolute limits bind
+wherever native meets them; otherwise mixed must not be worse than native.
+`tests/uniform-mixed-pressure-cycle-dawn.test.ts` runs an all-fine arm through
+the same harness for the hydrostatic field, with a stated 5% allowance for
+native's coarse-stop noise; the face-indexed random field keeps absolute limits.
+`tests/uniform-mixed-pressure-continuation-dawn.test.ts` runs mixed and all-fine
+ownership, pins all-fine to a real native h/4 host (drift < 1e-4), then gates
+mixed against it. The surface-cycle suite now requests the fluid device limits;
+it had failed at pipeline creation, not numerically. Cycle 26/0, surface cycle
+161/0, continuation and operators pass.
+
+Native's own non-convergence on separating walls at 32^3 (error 2.5 after
+seven cycles) is a native pressure weakness outside this mixed program.
+
 ## 2026-09-26: Water box investigation and fail-closed contract
 
 The latest product requirement supersedes earlier recovery discussion below:
@@ -430,3 +467,104 @@ strict pressure convergence, live browser interaction verification, and the
 ABBA-ordered, accepted-completion timing for fine, one-air-tile and half-domain
 ownership; normal runs assert the original targets, `--diagnostic` reports
 failures without claiming acceptance. Rendering time is explicitly excluded.
+
+## 2026-09-26: Solid coupling (fine near solids)
+
+Mixed ownership now runs scenes with static voxel solids, terrain and non-box
+(voxel-shell) containers instead of throwing "Mixed Uniform solid coupling is
+not yet initialized". The approach is "fine near solids": every 4h tile with a
+cell within one cell of a cut cell is solid-coupled, and it and its 26
+neighbour tiles are forced to h (`uniformMixedSolidTiles`). Forced tiles
+override region cell-size bounds, and a 4h-only region tile beside one is
+graded to 2h. Ownership is decided at completed-frame boundaries in
+`updateMixedRegions`. `assertUniformMixedSolidPromotion` is the loud CPU
+certificate that no 2h/4h owner covers a promoted tile. Coarse stages keep
+their solid-free code: they are never compiled with solid terms.
+
+Fine-owner solid semantics are transcriptions of the native helpers
+(`uniform-mixed-solid.wgsl.ts`: packed voxel mask plus halo shell, terrain
+heightfield, cellOpenFraction, faceOpenFraction, dual-cell pressure V). The
+library compiles only for a scene with cut cells or terrain; every other scene
+gets inert stubs and is bit-identical. Stages ported:
+
+- transport: open-capacity rows and edges; sealed cells keep V
+- surface, geometry and surface-volume capacity: seed, dilate, metric, measure
+- sharpening: closed cells and faces take no flux
+- cleanup: cut cells are exempt from orphan removal, as in native
+- forces: one-sided curvature, CSF gated on closed cells, airborne 5^3 test
+- pressure: face V, embedded rows, capacity RHS, p_min = 0 in solid
+
+`gammaB` aliasing was checked; it matches native behaviour and is unchanged.
+
+The pressure hierarchy is solid-aware:
+
+- L0 topology borrows the departure texture, written by the RHS.
+- L1 and L2 carry arena (open, V+) records, plus a wall-V slot per halo face.
+- Restriction follows `mgDownsampleTopology` exactly: open mean, 2/8
+  on-plane faces, the open-child phi vote and the C=2 positive preference.
+- L1 phi is continued one cell after the raw pyramid is built.
+- The native 4h continuation receives the raw L2 phi and coarsened topology,
+  and continues it itself, as the native setup does.
+- A levels probe confirmed L1 extended phi within 9e-8, L2 raw phi within
+  6e-8, and exact topology at both levels (sphere).
+
+Oracle: `tests/uniform-mixed-solid-parity-dawn.test.ts` runs the 32^3 dam at
+0.8 m. Cases compare mixed ownership with no regions against native after one
+frame. Frame 2 is chaotic even in the plain box: V 0.023, u 2.2e-3 from
+last-bit pressure differences.
+
+| case | V | u (m/s) | phi (m) | accepted residual native / mixed |
+|---|---|---|---|---|
+| box | 0 | 7.0e-7 | 3.0e-8 | 0.50177 / 0.50177 |
+| voxel blocks (submerged + floor) | 0 | 6.6e-7 | 3.0e-8 | 0.50138 / 0.50138 |
+| terrain mound (partial cells) | 0 | 6.7e-7 | 3.0e-8 | 0.54951 / 0.54951 |
+| sphere shell, pressure tolerance 1e-3 | 0 | 1.1e-6 | 4.1e-8 | 1.8e-4 / 1.5e-4 |
+| rigid body | refuses loudly | | | |
+
+The gate is V 1e-4, u 1e-4 and phi 1e-5, against the box FP32 reassociation
+baseline. The all-fine lane passes.
+
+Open gaps:
+
+- **Sphere at default tolerance.** Both solvers accept after one Full-Cycle,
+  but the iterates differ by 2.2e-3 m/s. The accepted residual is 0.556 native
+  and 0.460 mixed. The difference is smooth and global across the pool. Things
+  excluded so far:
+  - the restricted phi/V pyramid (it matches)
+  - native far tiles (`FLUID_UNIFORM_AB_OFF=fartiles` leaves native unchanged)
+  - the operator coefficients and theta
+  - the p_min restriction (read, not measured)
+
+  Converged solves agree to 1.1e-6. Something in the coarse traversal around
+  fully closed 2h/4h cells is still unidentified, so the lane converges the
+  solve and records this as a gap.
+- **Region mass is not conserved.** The region lane is red. After 4 frames:
+  - voxel-coarse: 6256.8 against native 6080.0 (+2.9%)
+  - terrain-coarse: 5960.6 against 5376.0 (+10.9%)
+
+  Frame 1 conserves exactly, and promotion works: voxel has 126 fine, 146
+  transition and 240 coarse tiles; terrain has 158/90/264. A solid-free control
+  with a 4h floor band under h liquid (`box-floor-coarse`) loses 11.8% in the
+  same 4 frames. The all-4h box conserves (1e-6), and a half-x-coarse box
+  conserves at frame 2. The voxel gain sits in coarse dam-top tiles two or more
+  tiles from any solid. So this looks like a pre-existing seam-conservation
+  defect with y-normal seams, not solid coupling. It was not bisected against
+  HEAD: momentum, extension and velocity sampling were being edited
+  concurrently in the shared tree.
+- **Momentum phase weights.** `velocityPhaseWeight` open > 1e-5 gating and
+  `clipDepartureAtSolid` are not ported to the mixed momentum SL. That file was
+  under concurrent edit.
+- **Extension face mask.** The V <= 1e-5 openBaseFace mask is not ported to
+  mixed extension (also under concurrent edit). Frame-1 parity does not
+  exercise these; they are plausible contributors to the frame-2 voxel/terrain
+  drift beyond the box baseline.
+- **Still refused with loud errors:**
+  - rigid bodies
+  - pending live voxel edits (`solidEditPending`)
+  - a depth symmetry plane combined with solids
+
+Regression, run serially after the change: all 27 other
+`tests/uniform-mixed-*-dawn.test.ts` files and
+`tests/uniform-geometric-seam-dawn.test.ts` pass (28 files, 0 failures). Type
+checking reports no Uniform errors. The Sparse CM12 gate was not run: nothing
+under Sparse, sparse topology or presentation changed.

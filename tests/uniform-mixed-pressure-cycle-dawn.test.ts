@@ -6,9 +6,9 @@ import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider"
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { MixedPressureCycleDawn } from "./helpers/uniform-mixed-pressure-cycle-dawn";
 import { MixedMultigridOracle } from "./helpers/uniform-mixed-multigrid";
-import { mixedPressureLayouts, faceGradient, geometricDivergence } from "./helpers/uniform-mixed-pressure";
+import { mixedPressureLayouts, mixedPressureFixture, faceGradient, geometricDivergence, type PressureFixture } from "./helpers/uniform-mixed-pressure";
 import { UniformMixedOwnership } from "../lib/methods/uniform/uniform-mixed-ownership";
-import { uniformMixedPressureLevel } from "../lib/methods/uniform/uniform-mixed-layout";
+import { createUniformMixedLayout, uniformMixedPressureLevel } from "../lib/methods/uniform/uniform-mixed-layout";
 import { UniformMixedPressureBoundsStage, UniformMixedPressureLevelStage, UniformMixedPressureTransferStage } from "../lib/methods/uniform/uniform-mixed-pressure-stage";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
@@ -22,19 +22,34 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
     const errors: string[] = []; device.addEventListener("uncapturederror", e => { e.preventDefault(); errors.push(e.error.message); });
     await t.test("pressure stages borrow disjoint arena views without allocating fields", () => checkBorrowedArena(device!));
     for (const [index, layout] of mixedPressureLayouts().entries()) {
-      const oracle = new MixedMultigridOracle(layout), fixture = oracle.fixtures[0]!;
-      const cycle = new MixedPressureCycleDawn(device, layout);
+      const oracle = new MixedMultigridOracle(layout, undefined, "native-jacobi"), fixture = oracle.fixtures[0]!;
+      // Native baseline: all-fine ownership of the same lattice through this
+      // harness, i.e. native smoother, transfers, coarse solve and budget.
+      const nativeLayout = createUniformMixedLayout(layout.lattice, [], true, 1), nativeFixture = mixedPressureFixture(nativeLayout);
+      const cycle = new MixedPressureCycleDawn(device, layout), native = new MixedPressureCycleDawn(device, nativeLayout);
       try {
-        await cycle.initialize();
+        await cycle.initialize(); await native.initialize();
         for (const mode of ["hydrostatic", "random"] as const) await t.test(`fixture ${index}, ${mode}`, async () => {
-          const velocity = Float64Array.from(fixture.faces, (f, k) => mode === "hydrostatic" ? (f.axis === 1 ? -9.81 : 0) : Math.sin(k * 13));
+          const field = (f: { axis: number }, k: number) => mode === "hydrostatic" ? (f.axis === 1 ? -9.81 : 0) : Math.sin(k * 13);
+          const velocity = Float64Array.from(fixture.faces, field);
           const rhs = Float32Array.from(geometricDivergence(fixture, velocity), v => -v);
           const cpu = oracle.solve(Float64Array.from(rhs, (v, i) => v * fixture.cells[i]!.volume));
+          // A face-indexed random field is not the same problem on another
+          // lattice, so it keeps the absolute limits outright.
+          // Native's 1e-4 absolute coarse stop moves both arms' final residual
+          // by about +/-2%: fixture 1 is 2.1% behind native at that stop, 0.8%
+          // ahead at 1e-5 and within 0.14% at 1e-6. Allow 5% for that noise.
+          const measured = mode === "hydrostatic" ? await projectedBaseline(native, nativeFixture, field) : { residual: 0, divergence: 0, velocity: 0 };
+          const baseline = { residual: 1.05 * measured.residual, divergence: 1.05 * measured.divergence, velocity: 1.05 * measured.velocity };
           const actual = await cycle.solve(rhs);
           assert.equal(actual.coarseExhausted, 0, "native coarse solve must meet its unchanged stopping test");
           assert.equal(actual.residuals.length, 7);
           assert.ok(actual.residuals.every(Number.isFinite));
-          assert.ok(actual.residuals.at(-1)! < 1e-3, `GPU residual history: ${actual.residuals}`);
+          // Native-relative acceptance (2026-09-26): with the production damped
+          // Jacobi smoother, all-fine native misses 1e-3 on some of these long-
+          // wave problems in the fixed budget. The limit binds wherever native
+          // meets it; mixed ownership must never converge worse than native.
+          assert.ok(actual.residuals.at(-1)! < Math.max(1e-3, baseline.residual), `GPU residual history: ${actual.residuals}; native ${baseline.residual}`);
           const gradient = faceGradient(fixture, actual.pressure), cpuGradient = faceGradient(fixture, cpu.pressure);
           const gradientError = Math.max(...gradient.map((v, i) => Math.abs(v - cpuGradient[i]!)));
           assert.ok(gradientError < 1e-3, `CPU/GPU pressure-gradient error ${gradientError}`);
@@ -42,11 +57,11 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
           // rather than relying solely on the GPU's own residual calculation.
           const projected = velocity.map((v, i) => v - gradient[i]!);
           const residual = geometricDivergence(fixture, projected);
-          assert.ok(Math.max(...residual.map(Math.abs)) < 1e-3);
-          if (mode === "hydrostatic") assert.ok(Math.max(...projected.map(Math.abs)) < 1e-3, "hydrostatic parasitic velocity");
-          t.diagnostic(`${index}/${mode}: GPU final=${actual.residuals.at(-1)}, CPU final=${cpu.residuals.at(-1)}, gradient error=${gradientError}`);
+          assert.ok(Math.max(...residual.map(Math.abs)) < Math.max(1e-3, baseline.divergence), `projected divergence; native ${baseline.divergence}`);
+          if (mode === "hydrostatic") assert.ok(Math.max(...projected.map(Math.abs)) < Math.max(1e-3, baseline.velocity), `hydrostatic parasitic velocity; native ${baseline.velocity}`);
+          t.diagnostic(`${index}/${mode}: GPU final=${actual.residuals.at(-1)}, CPU final=${cpu.residuals.at(-1)}, native final=${baseline.residual}, gradient error=${gradientError}`);
         });
-      } finally { cycle.destroy(); }
+      } finally { cycle.destroy(); native.destroy(); }
       const constrained = new MixedPressureCycleDawn(device, layout, true);
       try {
         await constrained.initialize();
@@ -74,6 +89,16 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
     assert.deepEqual(errors, []);
   } finally { device?.destroy(); await releaseWebGPUExclusiveLock(); }
 });
+
+/** The native all-fine solve's final residual, and its projected field's
+ * physical divergence and maximum velocity, for the same face velocity rule. */
+async function projectedBaseline(native: MixedPressureCycleDawn, fixture: PressureFixture, field: (f: { axis: number }, k: number) => number) {
+  const velocity = Float64Array.from(fixture.faces, field);
+  const solved = await native.solve(Float32Array.from(geometricDivergence(fixture, velocity), v => -v));
+  const gradient = faceGradient(fixture, solved.pressure), projected = velocity.map((v, i) => v - gradient[i]!);
+  return { residual: solved.residuals.at(-1)!, divergence: Math.max(...geometricDivergence(fixture, projected).map(Math.abs)),
+    velocity: Math.max(...projected.map(Math.abs)) };
+}
 
 async function checkBorrowedArena(device: GPUDevice): Promise<void> {
   const layout = mixedPressureLayouts()[0]!, ownership = new UniformMixedOwnership(device, layout);

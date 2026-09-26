@@ -28,7 +28,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
   const copy=device.createBuffer({size:ownership.support.size,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
   const copyGroup=device.createBindGroup({layout:copyPipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:ownership.support}},{binding:1,resource:{buffer:copy}}]});
   const guarded=new Proxy(device,{get(target,key){if(key==="createTexture")return()=>{throw new Error("frame plan allocated a field");};if(key==="createBuffer")return(desc:GPUBufferDescriptor)=>{assert.ok(desc.size<=32,"only bounded parameter storage is allowed");return target.createBuffer(desc);};const value=Reflect.get(target,key,target);return typeof value==="function"?value.bind(target):value;}});
-  const plan=new UniformMixedFramePlan(guarded,ownership,volume,phi,velocity,negative);await plan.initialize();
+  const plan=new UniformMixedFramePlan(guarded,ownership,volume,phi,velocity,negative,velocity,negative);await plan.initialize();
   try{
    const release=ownership.acquireFrame();
    assert.throws(()=>ownership.update(createUniformMixedLayout(lattice,[])),/immutable/);
@@ -42,7 +42,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
     device.queue.writeTexture({texture:phi},p,{bytesPerRow:132,rowsPerImage:33},[33,33,33]);
     const velocities=new Float32Array(32**3*4);if(scenario==="fast-moving")for(let i=0;i<velocities.length;i+=4)velocities[i]=16;
     device.queue.writeTexture({texture:velocity},velocities,{bytesPerRow:512,rowsPerImage:32},[32,32,32]);
-    const encoder=device.createCommandEncoder();plan.encode(encoder,undefined,1);const pass=encoder.beginComputePass();pass.setPipeline(copyPipeline);pass.setBindGroup(0,copyGroup);pass.dispatchWorkgroups(Math.ceil(copy.size/256));pass.end();encoder.copyBufferToBuffer(copy,0,readback,0,copy.size);device.queue.submit([encoder.finish()]);
+    const encoder=device.createCommandEncoder();plan.encode(encoder,undefined,1);plan.encodeCertificate(encoder);const pass=encoder.beginComputePass();pass.setPipeline(copyPipeline);pass.setBindGroup(0,copyGroup);pass.dispatchWorkgroups(Math.ceil(copy.size/256));pass.end();encoder.copyBufferToBuffer(copy,0,readback,0,copy.size);device.queue.submit([encoder.finish()]);
     await readback.mapAsync(GPUMapMode.READ);const words=new Uint32Array(readback.getMappedRange()).slice();readback.unmap();
     for(let z=0;z<8;z++)for(let y=0;y<8;y++)for(let x=0;x<8;x++){
      const distance=Math.max(Math.abs(x-3),Math.abs(y-3),Math.abs(z-3));

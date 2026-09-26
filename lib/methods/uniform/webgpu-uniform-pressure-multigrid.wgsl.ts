@@ -249,12 +249,12 @@ fn mgJacobiP(p:vec3i)->f32{
   let q=mgClamp(p,mg.levelDims.xyz);let d=mg.levelDims.xyz;
   return mgJacobiOld[u32(q.x)+d.x*(u32(q.y)+d.y*u32(q.z))];
 }
-fn mgSmoothCellJacobi(id:vec3i){
+fn mgSmoothJacobiValue(id:vec3i)->f32{
   let minimum=textureLoad(mgMinimumIn,id,0).x;
   let coarseDone=(mg.control.w&2u)!=0u&&atomicLoad(&mgState.convergence[1])!=0u;
   ${neighbourMask ? `let mask=mgLiquidMask(id);
   if(coarseDone||(mask&1u)==0u){` : `if(coarseDone||!mgBakedLiquid(id)){`}
-    textureStore(mgPressureRW,id,vec4f(max(mgJacobiP(id),minimum)));return;
+    return max(mgJacobiP(id),minimum);
   }
   let e=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
   var diagonalTerms:array<f32,6>;var sumTerms:array<f32,6>;
@@ -262,7 +262,10 @@ fn mgSmoothCellJacobi(id:vec3i){
     diagonalTerms[n]=a;sumTerms[n]=select(0.0,a*mgJacobiP(q),${neighbourMask ? "((mask>>u32(n+1))&1u)!=0u" : "mgBakedLiquid(q)"});}
   let diagonal=mgD4Sum6(diagonalTerms);let sum=mgD4Sum6(sumTerms);
   let p=select(0.0,(sum+textureLoad(mgRhsIn,id,0).x)/diagonal,diagonal>0.0);
-  textureStore(mgPressureRW,id,vec4f(max(mix(mgJacobiP(id),p,MG_JACOBI_WEIGHT),minimum)));
+  return max(mix(mgJacobiP(id),p,MG_JACOBI_WEIGHT),minimum);
+}
+fn mgSmoothCellJacobi(id:vec3i){
+  textureStore(mgPressureRW,id,vec4f(mgSmoothJacobiValue(id)));
 }
 fn mgPRW(p:vec3i)->f32{return textureLoad(mgPressureRW,mgClamp(p,mg.levelDims.xyz)).x;}
 // One cell's update-or-projection, shared by both in-place kernels so the two
@@ -430,6 +433,26 @@ fn mgSmoothVisitInPlace(@builtin(local_invocation_index) lane:u32){
     }
     textureBarrier();
   }
+}
+// One cell per lane: retain the current iterate privately between shared
+// snapshots. The two barriers protect snapshot publication and consumption.
+// This performs the same Jacobi updates as mgSmoothVisitInPlace, with only
+// one global read and write per cell for the entire visit.
+@compute @workgroup_size(MG_VISIT_LANES)
+fn mgSmoothVisitLocalInPlace(@builtin(local_invocation_index) lane:u32){
+  if(lane==0u){mgCycleStopped=select(0u,1u,mgSkipCycle());}
+  if(workgroupUniformLoad(&mgCycleStopped)!=0u){return;}
+  let d=mg.levelDims.xyz;let count=d.x*d.y*d.z;
+  let id=vec3i(i32(lane%d.x),i32((lane/d.x)%d.y),i32(lane/(d.x*d.y)));
+  var value=0.0;
+  if(lane<count){value=mgPRW(id);}
+  for(var sweep=0u;sweep<2u*mg.control.z;sweep+=1u){
+    if(lane<count){mgJacobiOld[lane]=value;}
+    workgroupBarrier();
+    if(lane<count){value=mgSmoothJacobiValue(id);}
+    workgroupBarrier();
+  }
+  if(lane<count){textureStore(mgPressureRW,id,vec4f(value));}
 }
 // Every remaining per-cycle finest-level operator, from the same list. These
 // carry the minimal group 0 (the work list already costs a storage binding and

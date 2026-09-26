@@ -5,10 +5,15 @@ import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedPressureBoundaryIndexWGSL, uniformMixedPressureStorage } from "./uniform-mixed-pressure-boundary.wgsl";
 
 type Continuation=ReturnType<WebGPUUniformPressureMultigrid["prepareMixedContinuation"]>;
-interface Fields {pressure:GPUBufferBinding;rhs:GPUBufferBinding;minimum:GPUBufferBinding;phi:GPUBufferBinding}
+interface Fields {pressure:GPUBufferBinding;rhs:GPUBufferBinding;minimum:GPUBufferBinding;phi:GPUBufferBinding;
+ /** Static solids: coarsened (open, V+) records of owners then halo slots. */
+ topology?:GPUBufferBinding}
 /** Reorder the uniform 4h owners and six wall planes into the existing native
  * pressure halo. Only D/4+2 is traversed. Fine cells are never expanded, and
- * both sides borrow their fields. Native hierarchy scratch remains in place. */
+ * both sides borrow their fields. Native hierarchy scratch remains in place.
+ * With static solids the native 4h topology is the mixed coarsened record
+ * (low halo V from its wall slot) and phi is the raw restricted pyramid; the
+ * native setup extends phi one cell exactly as it does after downsampling. */
 export class UniformMixedPressureContinuation {
  readonly allocatedBytes=0;
  private readonly resources:GPUBindGroupLayout;
@@ -18,7 +23,7 @@ export class UniformMixedPressureContinuation {
  private readonly offsets:number[];
  private readonly nativeRange:GPUBufferBinding;
  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,
-  readonly native:Continuation,private readonly openTop=false){
+  readonly native:Continuation,private readonly openTop=false,private readonly solid=false){
   if(ownership.layout.tiles.some(word=>mixedCellWidth(word)!==4))throw new Error("Native pressure continuation requires uniform 4h ownership");
   const fields=[native.pressure,native.rhs,native.minimum,native.phi,native.topology];
   const arena=fields[0]!.buffer?.buffer;if(!arena||fields.some(f=>f.buffer?.buffer!==arena))throw new Error("Mixed pressure continuation requires the shared native scratch arena");
@@ -30,12 +35,13 @@ export class UniformMixedPressureContinuation {
   const end=Math.max(...fields.map(f=>(f.buffer!.offset??0)+f.buffer!.size!));
   this.nativeRange={buffer:arena,offset,size:end-offset};
   this.offsets=fields.map(f=>((f.buffer!.offset??0)-offset)/4);
-  this.resources=device.createBindGroupLayout({entries:[0,1,2,3,4].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}}))});
+  this.resources=device.createBindGroupLayout({entries:[0,1,2,3,4,...(solid?[5]:[])].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}}))});
  }
  bind(fields:Fields):GPUBindGroup{
   const n=this.ownership.layout.cellCount,count=uniformMixedPressureStorage(this.ownership.layout).count;
-  const views=[fields.pressure,fields.rhs,fields.minimum,fields.phi].map((field,i)=>{
-   const offset=field.offset??0,size=4*(i===3?n:count);
+  if(!!fields.topology!==this.solid)throw new Error("Mixed continuation topology binding does not match stage mode");
+  const views=[fields.pressure,fields.rhs,fields.minimum,fields.phi,...(fields.topology?[fields.topology]:[])].map((field,i)=>{
+   const offset=field.offset??0,size=i===4?16*count:4*(i===3?n:count);
    if((field.size??field.buffer.size-offset)<size)throw new Error("Mixed continuation input field is too small");
    if(field.buffer===this.arena){
     for(const native of [this.native.pressure,this.native.rhs,this.native.minimum,this.native.phi,this.native.topology]){
@@ -45,7 +51,7 @@ export class UniformMixedPressureContinuation {
    }
    return {buffer:field.buffer,offset,size};
   });
-  return this.device.createBindGroup({layout:this.resources,entries:[...views.map((resource,binding)=>({binding,resource})),{binding:4,resource:this.nativeRange}]});
+  return this.device.createBindGroup({layout:this.resources,entries:[...views.map((resource,i)=>({binding:i===4?5:i,resource})),{binding:4,resource:this.nativeRange}]});
  }
  async initialize():Promise<void>{
   const h=this.ownership.layout.lattice.cellSize_m;
@@ -55,6 +61,7 @@ export class UniformMixedPressureContinuation {
 @group(1) @binding(2) var<storage,read_write> minimum:array<f32>;
 @group(1) @binding(3) var<storage,read_write> phi:array<f32>;
 @group(1) @binding(4) var<storage,read_write> arena:array<f32>;
+${this.solid?"@group(1) @binding(5) var<storage,read_write> topologies:array<vec4f>;":""}
 ${uniformMixedPressureBoundaryIndexWGSL(this.ownership.layout)}
 const UM_NATIVE_D=UM_D/4u+vec3u(2);
 const UM_P=${this.offsets[0]}u;const UM_B=${this.offsets[1]}u;const UM_MIN=${this.offsets[2]}u;
@@ -74,10 +81,10 @@ fn umNativeMixedIndex(p:vec3u)->vec2u {
  var pressureValue=0.0;var rhsValue=0.0;var lower=0.0;var distance=${2*Math.min(...h)};var topology=vec4f(0);
  if(mixed.y!=0u){pressureValue=pressure[mixed.x];rhsValue=rhs[mixed.x];lower=minimum[mixed.x];}
  if(mixed.y==1u){
-  distance=phi[mixed.x];topology=vec4f(1);
-  for(var axis=0u;axis<3u;axis++){if(p[axis]==UM_NATIVE_D[axis]-2u){topology[axis+1u]=select(0.5,1.0,${this.openTop?"axis==1u":"false"});}}
+  distance=phi[mixed.x];${this.solid?"topology=topologies[mixed.x];":`topology=vec4f(1);
+  for(var axis=0u;axis<3u;axis++){if(p[axis]==UM_NATIVE_D[axis]-2u){topology[axis+1u]=select(0.5,1.0,${this.openTop?"axis==1u":"false"});}}`}
  }else if(mixed.y==2u){
-  for(var axis=0u;axis<3u;axis++){if(p[axis]==0u){topology[axis+1u]=0.5;}}
+  for(var axis=0u;axis<3u;axis++){if(p[axis]==0u){topology[axis+1u]=${this.solid?"topologies[mixed.x].x":"0.5"};}}
   if(${this.openTop?"p.y==UM_NATIVE_D.y-1u":"false"}){topology.x=1.0;}
  }
  arena[UM_P+at]=pressureValue;arena[UM_B+at]=rhsValue;arena[UM_MIN+at]=lower;arena[UM_PHI+at]=distance;

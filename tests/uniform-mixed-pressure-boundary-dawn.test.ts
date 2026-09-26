@@ -1,3 +1,4 @@
+import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
@@ -14,7 +15,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
  await acquireWebGPUExclusiveLock("dawn-test","Uniform mixed pressure walls");let device:GPUDevice|undefined;
  try{
   const dawn=await import(pathToFileURL(modulePath!).href);Object.assign(globalThis,dawn.globals);
-  const gpu=createProcessRetainedDawnGPU(dawn,["backend=metal"]),adapter=await gpu.requestAdapter();assert.ok(adapter);device=await adapter.requestDevice();
+  const gpu=createProcessRetainedDawnGPU(dawn,["backend=metal"]),adapter=await gpu.requestAdapter();assert.ok(adapter);device=await adapter.requestDevice({requiredLimits:requiredFluidDeviceLimits(adapter.limits)});
   const errors:string[]=[];device.addEventListener("uncapturederror",e=>{e.preventDefault();errors.push(e.error.message);});
   for(const layout of [seamLayout(0,"fine"),seamLayout(0,"coarse"),mixedPressureLayouts()[0]!])for(const openTop of [false,true]){
    const ownership=new UniformMixedOwnership(device,layout),storage=uniformMixedPressureStorage(layout),n=layout.cellCount,owned:GPUBuffer[]=[];

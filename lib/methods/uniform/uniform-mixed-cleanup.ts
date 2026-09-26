@@ -1,16 +1,18 @@
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedVertexSamplingWGSL } from "./uniform-mixed-vertex-sampling.wgsl";
+import { uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 
 /** Native post-transport floors on canonical owners. The immutable input is
  * retained for the entire orphan census; one discarded neighbour must not
  * make the next neighbour eligible. All fields and accounting are borrowed.
- * Embedded solids must be excluded by the host until open fractions are bound. */
+ * With static solids a partly open unit owner is exempt from the orphan
+ * census, the native uvOpen < 0.99999 rule. */
 export class UniformMixedCleanup {
  readonly allocatedBytes=0;
  private readonly resources:GPUBindGroupLayout;
  private readonly pipelines=new Map<string,GPUComputePipeline>();
- constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership){
+ constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid?:UniformMixedSolid){
   this.resources=device.createBindGroupLayout({entries:[
    ...[0,1].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
    {binding:2,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"r32float",viewDimension:"3d"}},
@@ -39,6 +41,7 @@ export class UniformMixedCleanup {
 @group(1) @binding(4) var<storage,read_write> reductions:array<atomic<u32>>;
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
 ${uniformMixedVertexSamplingWGSL}
+${uniformMixedSolidWGSL(this.solid?2:undefined)}
 fn umVolume(o:UMOwner)->f32{return textureLoad(volume,vec3i(umOrigin(o)),0).x;}
 fn umDiscard(o:UMOwner,value:f32,threshold:f32,word:u32)->f32{
  atomicAdd(&reductions[word],1u);
@@ -56,6 +59,7 @@ fn umClean(o:UMOwner)->f32{
   }
  }
  if(!umOrphan||!(floor>0.0&&orphan>floor&&value>0.0&&value<orphan)){return value;}
+ if(o.width==1u&&umCellOpen(origin)<0.99999){return value;}
  // Protect the complete neighbouring footprint, including fine surface
  // vertices inside a coarse owner's neighbourhood and hanging samples.
  for(var z=-w;z<=2*w;z++){for(var y=-w;y<=2*w;y++){for(var x=-w;x<=2*w;x++){
@@ -77,13 +81,13 @@ fn umClean(o:UMOwner)->f32{
 }
 `});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
-  const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]});
+  const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.bindLayout]:[])]});
   for(const entry of ["floor","orphan"])this.pipelines.set(entry,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"clean",constants:{umDispatchX:this.ownership.dispatchX,umOrphan:Number(entry==="orphan")}}}));
  }
  encode(encoder:GPUCommandEncoder,groups:readonly [GPUBindGroup,GPUBindGroup]):void{
   for(const [i,entry] of ["floor","orphan"].entries()){
    const pipeline=this.pipelines.get(entry);if(!pipeline)throw new Error("Mixed cleanup is not initialized");
-   const pass=encoder.beginComputePass({label:`Uniform mixed cleanup ${entry}`});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,groups[i]!);
+   const pass=encoder.beginComputePass({label:`Uniform mixed cleanup ${entry}`});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,groups[i]!);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);
    this.ownership.dispatchAll(pass,pipeline);pass.end();
   }
  }

@@ -2,9 +2,12 @@ import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
 import {uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
 import {uniformMixedVertexSamplingWGSL} from "./uniform-mixed-vertex-sampling.wgsl";
 import {uniformSurfaceFillWGSL} from "./uniform-surface-volume.wgsl";
+import {uniformMixedSolidWGSL,type UniformMixedSolid} from "./uniform-mixed-solid.wgsl";
 
 /** Native four-cell band and two 17-sample global normal-shift refinements,
- * reduced with physical owner volumes. Every field is borrowed. */
+ * reduced with physical owner volumes. Every field is borrowed. With static
+ * solids a unit owner's capacity is its native open fraction: closed cells
+ * neither seed nor carry the band, and slopes use only open-sided axes. */
 export class UniformMixedSurfaceVolume {
  readonly allocatedBytes=0;
  readonly scratchBytes:number;
@@ -14,7 +17,7 @@ export class UniformMixedSurfaceVolume {
  private readonly chunks:number;
  private readonly resources:GPUBindGroupLayout;
  private readonly pipelines=new Map<string,GPUComputePipeline>();
- constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership){
+ constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid?:UniformMixedSolid){
   this.cells=ownership.layout.lattice.dimensions.reduce((n,d)=>n*d,1);
   this.vertices=ownership.layout.lattice.dimensions.reduce((n,d)=>n*(d+1),1);
   this.groups=Math.ceil(this.cells/64);this.chunks=Math.ceil(this.groups/64);
@@ -47,11 +50,14 @@ fn umVertexIndex(p:vec3u)->u32{let d=UM_D+vec3u(1);return p.x+d.x*(p.y+d.y*p.z);
 fn umScaleLoadVertex(p:vec3u)->f32{return scratch[${2*N}u+umVertexIndex(p)];}
 ${sourceScale}
 ${uniformSurfaceFillWGSL}
+${uniformMixedSolidWGSL(this.solid?2:undefined)}
+fn umCapacity(o:UMOwner)->f32{return select(1.0,umCellOpen(vec3i(umOrigin(o))),umSolidEnabled()&&o.width==1u);}
 fn umLiveCells()->u32{return umCounts.x*64u+umCounts.y*8u+umCounts.z;}
 fn umShiftLimit()->f32{return min(UM_H.x,min(UM_H.y,UM_H.z))*f32(select(select(4u,2u,umCounts.y>0u),1u,umCounts.x>0u));}
 @compute @workgroup_size(1) fn begin(){scratch[${S}u]=0.0;scratch[${S+1}u]=umShiftLimit();}
 @compute @workgroup_size(64) fn seed(@builtin(global_invocation_id) gid:vec3u){
  let o=umAllOwner(gid);if(o.width==0u){return;}var low=1e30;var high=-1e30;
+ if(umCapacity(o)<=0.0){scratch[o.index]=0.0;return;}
  for(var k=0u;k<umCounts.w;k++){let v=umVertexValue(umOrigin(o)+umCorner(k,2u)*o.width);low=min(low,v);high=max(high,v);}
  scratch[o.index]=select(0.0,5.0,low<=0.0&&high>=0.0);
 }
@@ -60,7 +66,7 @@ fn umShiftLimit()->f32{return min(UM_H.x,min(UM_H.y,UM_H.z))*f32(select(select(4
  for(var axis=0u;axis<3u;axis++){for(var side=0u;side<2u;side++){
   let sign=select(-1,1,side==1u);let first=umFace(o,axis,sign,0u);
   for(var part=0u;part<first.count;part++){let other=umFace(o,axis,sign,part).neighbor;if(other.width!=0u){band=max(band,scratch[input+other.index]-1.0);}}
- }}scratch[out+o.index]=max(0.0,band);
+ }}scratch[out+o.index]=select(0.0,max(0.0,band),umCapacity(o)>0.0);
 }
 @compute @workgroup_size(64) fn metric(@builtin(global_invocation_id) gid:vec3u){
  let o=umAllOwner(gid);if(o.width==0u){return;}
@@ -69,8 +75,13 @@ fn umShiftLimit()->f32{return min(UM_H.x,min(UM_H.y,UM_H.z))*f32(select(select(4
   var band=0.0;
   for(var j=0u;j<umCounts.w;j++){let c=umOwnerAt(vec3i(p)+vec3i(umCorner(j,2u))-vec3i(1));if(c.width!=0u){band=max(band,scratch[c.index]);}}
   var gradient=vec3f(0);
+  ${this.solid?`// Native centred slopes need an open incident cell on both sides.
+  var openLow=vec3<bool>(false);var openHigh=vec3<bool>(false);
+  for(var j=0u;j<8u;j++){let corner=umCorner(j,2u);if(umCellOpen(vec3i(p)+vec3i(corner)-vec3i(1))>0.0){
+   for(var a=0u;a<3u;a++){if(corner[a]==0u){openLow[a]=true;}else{openHigh[a]=true;}}}}`:""}
   if(band>0.0){for(var axis=0u;axis<3u;axis++){
    if(p[axis]==0u||p[axis]==UM_D[axis]){continue;}
+   ${this.solid?"if(o.width==1u&&!(openLow[axis]&&openHigh[axis])){continue;}":""}
    var lo=vec3f(p);var hi=lo;lo[axis]=max(0.0,lo[axis]-f32(o.width));hi[axis]=min(f32(UM_D[axis]),hi[axis]+f32(o.width));
    gradient[axis]=(umSampleVertex(hi)-umSampleVertex(lo))/((hi[axis]-lo[axis])*UM_H[axis]);
   }}scratch[${2*N}u+umVertexIndex(p)]=band*0.2*max(0.1,length(gradient));
@@ -83,7 +94,7 @@ fn loadSum(at:u32,k:u32)->vec4f{return vec4f(scratch[at+4u*k],scratch[at+4u*k+1u
 @compute @workgroup_size(64) fn measure(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) l:u32,@builtin(workgroup_id) group:vec3u){
  let o=umAllOwner(gid);var result:array<vec4f,5>;
  if(o.width!=0u){
-  let origin=umOrigin(o);let mass=f32(o.width*o.width*o.width);result[4].y=textureLoad(volume,vec3i(origin),0).x*mass;
+  let origin=umOrigin(o);let mass=f32(o.width*o.width*o.width)*umCapacity(o);result[4].y=textureLoad(volume,vec3i(origin),0).x*f32(o.width*o.width*o.width);
   var raw:array<f32,8>;var scale:array<f32,8>;var low=1e30;var high=-1e30;
   let centre=scratch[${S}u];let radius=scratch[${S+1}u];
   for(var k=0u;k<umCounts.w;k++){let vertex=origin+umCorner(k,2u)*o.width;raw[k]=umVertexValue(vertex);scale[k]=umScaleVertexValue(vertex);
@@ -123,14 +134,14 @@ fn loadSum(at:u32,k:u32)->vec4f{return vec4f(scratch[at+4u*k],scratch[at+4u*k+1u
 }
 `});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
-  const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]});
+  const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.bindLayout]:[])]});
   for(const entryPoint of ["begin","seed","metric","measure","reduce","solve","apply","dilate"]){
    for(const parity of entryPoint==="dilate"?[0,1]:[0])this.pipelines.set(entryPoint+parity,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{parity,umDispatchX:this.ownership.dispatchX}}}));
   }
  }
  encode(encoder:GPUCommandEncoder,group:GPUBindGroup):void{
   if(this.pipelines.size!==9)throw new Error("Mixed surface constraint is not initialized");
-  const pass=encoder.beginComputePass({label:"Uniform mixed global surface volume"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);
+  const pass=encoder.beginComputePass({label:"Uniform mixed global surface volume"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);
   const run=(entry:string,parity=0)=>{const pipeline=this.pipelines.get(entry+parity)!;pass.setPipeline(pipeline);
    if(entry==="begin"||entry==="solve")pass.dispatchWorkgroups(1);
    else if(entry==="reduce")pass.dispatchWorkgroups(Math.ceil(this.ownership.layout.cellCount/4096));

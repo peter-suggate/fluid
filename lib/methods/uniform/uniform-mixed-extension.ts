@@ -16,7 +16,9 @@ export class UniformMixedExtension {
  readonly allocatedBytes=0;
  readonly scratchBytes:number;
  private readonly resources:GPUBindGroupLayout;
- private readonly pipelines=new Map<string,GPUComputePipeline>();
+ private readonly pipelines=new Map<string,GPUComputePipeline[]>();
+ private readonly regularPipelines=new Map<string,GPUComputePipeline[]>();
+ private restrictPipeline?:GPUComputePipeline;
  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,readonly hierarchy:Hierarchy){
   this.scratchBytes=4*Math.ceil(16*ownership.layout.lattice.dimensions.reduce((n,d)=>n*(d+2),1)/256)*256;
   this.resources=device.createBindGroupLayout({entries:[
@@ -79,7 +81,7 @@ struct UMNeighbor {value:f32,distance:f32,spacing:f32}
 fn umNeighbor(point:vec3f,center:vec3f,component:u32,step:u32)->UMNeighbor{
  if(any(point<vec3f(0))||any(point>vec3f(UM_D))){return UMNeighbor(0,UM_INF,1);}
  let tile=umTileAt(min(vec3u(point),UM_D-vec3u(1))/4u);
- if(umTileMaximumWidth(tile)==1u){
+ if(umRegularFine||umTileMaximumWidth(tile)==1u){
   var offset=vec3f(0.5);offset[component]=1.0;
   let anchor=vec3i(round(point-offset));let at=umSlot(anchor);
   return UMNeighbor(valuesIn[at][component],distancesIn[at][component],h[step]);
@@ -136,9 +138,25 @@ fn umExtended(face:UMFace,owner:UMOwner)->vec2f{
  }
  return vec2f(select(0.0,weighted/total,total>0.0),root);
 }
+// Frozen equal-width stencils certify one unit patch at every fine face.
+fn umUnitExtensionFace(owner:UMOwner,axis:u32,sign:i32)->UMFace{
+ let origin=vec3i(umOrigin(owner));var neighbor=origin;neighbor[axis]+=sign;
+ var anchor=origin;if(sign<0){anchor[axis]-=1;}
+ return UMFace(umOwnerAt(neighbor),anchor,1u,1u,axis,sign);
+}
 ${["seed","sweep"].map(entry=>/* wgsl */`
 @compute @workgroup_size(64) fn ${entry}(@builtin(global_invocation_id) gid:vec3u){
- let owner=umAllOwner(gid);if(owner.width==0u){return;}let origin=umOrigin(owner);
+ let owner=umOwner(gid);if(owner.width==0u){return;}let origin=umOrigin(owner);
+ if(umRegularFine){
+  var values=vec4f(0);var distances=vec4f(UM_INF);
+  for(var axis=0u;axis<3u;axis++){
+   if(origin[axis]==0u){let face=umUnitExtensionFace(owner,axis,-1);var v=vec4f(0);var d=vec4f(UM_INF);
+    v[axis]=umPhysical(face);d[axis]=select(UM_INF,0.0,umSource(face,owner));valuesOut[umSlot(face.anchor)]=v;distancesOut[umSlot(face.anchor)]=d;}
+   let face=umUnitExtensionFace(owner,axis,1);
+   ${entry==="seed"?`if(umSource(face,owner)){values[axis]=umPhysical(face);distances[axis]=0.0;}`:`let result=umExtended(face,owner);values[axis]=result.x;distances[axis]=result.y;`}
+  }
+  valuesOut[umSlot(vec3i(origin))]=values;distancesOut[umSlot(vec3i(origin))]=distances;return;
+ }
  for(var axis=0u;axis<3u;axis++){
   if(origin[axis]==0u){let face=umFace(owner,axis,-1,0u);var value=vec4f(0);var distance=vec4f(UM_INF);
    value[axis]=umPhysical(face);distance[axis]=select(UM_INF,0.0,umSource(face,owner));valuesOut[umSlot(face.anchor)]=value;distancesOut[umSlot(face.anchor)]=distance;}
@@ -202,19 +220,32 @@ fn umPublished(face:UMFace)->f32{
  let at=umSlot(face.anchor);if(distancesIn[at][face.axis]<0.5*UM_INF){return valuesIn[at][face.axis];}
  return umFarValue(face);
 }
-${uniformMixedFaceDispatchWGSL("publish","umPublished(face)",true,"value.w=textureLoad(physical,ownedFace.anchor,0).w;")}
+${uniformMixedFaceDispatchWGSL("publish","umPublished(face)",false,"value.w=textureLoad(physical,ownedFace.anchor,0).w;").replace(" let origin=umOrigin(owner);",` let origin=umOrigin(owner);
+ if(umRegularFine){
+  var value=vec4f(0);
+  for(var axis=0u;axis<3u;axis++){
+   if(origin[axis]==0u){let face=umUnitExtensionFace(owner,axis,-1);boundary[umNegativeBoundaryIndex(origin,axis)]=umPublished(face);}
+   value[axis]=umPublished(umUnitExtensionFace(owner,axis,1));
+  }
+  value.w=textureLoad(physical,vec3i(origin),0).w;textureStore(output,vec3i(origin),value);return;
+ }`)}
 `});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]});
-  for(const entryPoint of ["seed","sweep","restrictBand","publish"])this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX}}}));
+  this.restrictPipeline=await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"restrictBand",constants:{umDispatchX:this.ownership.dispatchX}}});
+  for(const entryPoint of ["seed","sweep","publish"]){
+   const compile=(width:number,regular:boolean)=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umCellWidth:width,umRegularTiles:+regular,umInterfaceTiles:+!regular,umRegularFine:+(regular&&width===1)}}});
+   this.pipelines.set(entryPoint,await Promise.all([1,2,4].map(w=>compile(w,false))));
+   this.regularPipelines.set(entryPoint,await Promise.all([1,2,4].map(w=>compile(w,true))));
+  }
  }
  encode(encoder:GPUCommandEncoder,groups:readonly [GPUBindGroup,GPUBindGroup],sweeps=2):void{
-  if(this.pipelines.size!==4)throw new Error("Mixed extension is not initialized");
+  if(this.pipelines.size!==3||!this.restrictPipeline)throw new Error("Mixed extension is not initialized");
   const run=(entry:string,group:GPUBindGroup)=>{
-   const pass=encoder.beginComputePass({label:`Uniform mixed extension ${entry}`});const pipeline=this.pipelines.get(entry)!;
-   pass.setPipeline(pipeline);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);
-   if(entry==="restrictBand")pass.dispatchWorkgroups(...this.ownership.layout.tileDimensions.map(n=>Math.ceil(n/4)) as [number,number,number]);
-   else this.ownership.dispatchAll(pass,pipeline);pass.end();
+   const pass=encoder.beginComputePass({label:`Uniform mixed extension ${entry}`});
+   pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);
+   if(entry==="restrictBand"){pass.setPipeline(this.restrictPipeline!);pass.dispatchWorkgroups(...this.ownership.layout.tileDimensions.map(n=>Math.ceil(n/4)) as [number,number,number]);}
+   else {this.ownership.dispatchRegular(pass,this.regularPipelines.get(entry)!);this.ownership.dispatchSeams(pass,this.pipelines.get(entry)!);}pass.end();
   };
   if(!Number.isSafeInteger(sweeps)||sweeps<0)throw new Error("Invalid mixed extension sweep count");
   run("seed",groups[1]);for(let i=0;i<sweeps;i++)run("sweep",groups[i%2]!);

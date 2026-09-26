@@ -7,7 +7,9 @@ export interface UniformMixedMemoryRange {offset:number;size:number}
  * returning from a child solve, so every level shares those three workspaces.
  * All live pressure/RHS/minimum/phi fields remain disjoint. Finest phi uses
  * the idle native conditioning buffer; the native 4h hierarchy stays intact. */
-export function planUniformMixedPressureMemory(layout:UniformMixedLayout,arenaPrefixBytes:number,conditioningBytes:number){
+/** With static solids, 2h and 4h also carry one vec4 (open, V+) record per
+ * owner and halo slot: the coarsened native pressure topology. */
+export function planUniformMixedPressureMemory(layout:UniformMixedLayout,arenaPrefixBytes:number,conditioningBytes:number,solid=false){
  const layouts=[layout,uniformMixedPressureLevel(layout,2),uniformMixedPressureLevel(layout,4)];
  let cursor=0;
  const allocate=(size:number):UniformMixedMemoryRange=>{cursor=Math.ceil(cursor/256)*256;const range={offset:cursor,size};cursor+=size;return range;};
@@ -18,7 +20,8 @@ export function planUniformMixedPressureMemory(layout:UniformMixedLayout,arenaPr
   return {pressure:allocate(count*4),rhs:[allocate(count*4),allocate(count*4)] as const,
    minimum:Array.from({length:i===0?2:1},()=>allocate(count*4)),
    phi:i===0?{offset:0,size:layout.cellCount*4}:allocate(l.cellCount*4),
-   slopes:{...slopes,size:l.cellCount*16},frozen:{...frozen,size:count*4},residual:{...residual,size:count*4}};
+   slopes:{...slopes,size:l.cellCount*16},frozen:{...frozen,size:count*4},residual:{...residual,size:count*4},
+   topology:solid&&i>0?allocate(count*16):undefined};
  });
  const backup=allocate(rootCount*4);
  if(levels[0]!.phi.size>conditioningBytes||cursor>arenaPrefixBytes)

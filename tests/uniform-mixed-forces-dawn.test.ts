@@ -1,3 +1,4 @@
+import { uniformMixedFaceDispatchWGSL, uniformMixedFaceTileDispatchWGSL } from "../lib/methods/uniform/uniform-mixed-face-dispatch.wgsl";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
@@ -33,13 +34,21 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
    try{
     const borrowed:GPUDevice=new Proxy(device,{get(target,key){if(key==="createBuffer"||key==="createTexture")return()=>{throw new Error("force stage allocated fields");};const v=Reflect.get(target,key,target);return typeof v==="function"?v.bind(target):v;}});
     const stage:UniformMixedForces=new UniformMixedForces(borrowed,ownership);await stage.initialize();assert.equal(stage.allocatedBytes,0);
+    const serialDevice=new Proxy(borrowed,{get(target,key){
+     if(key==="createShaderModule")return(desc:GPUShaderModuleDescriptor)=>{
+      const parallel=uniformMixedFaceTileDispatchWGSL("forces","umForcedVelocity(owner,face)");assert.ok(desc.code.includes(parallel),"serial oracle must replace the parallel kernel");
+      return target.createShaderModule({...desc,code:desc.code.replace(parallel,uniformMixedFaceDispatchWGSL("forces","umForcedVelocity(owner,face)"))});
+     };
+     const value=Reflect.get(target,key,target);return typeof value==="function"?value.bind(target):value;
+    }});
+    const serial=new UniformMixedForces(serialDevice,ownership);await serial.initialize();
     const cached=new UniformMixedForces(borrowed,ownership,true);await cached.initialize();
     const geometry=new UniformMixedSurfaceGeometry(borrowed,ownership);await geometry.initialize();
     const geometryGroup=geometry.bind(phi,targetFill,centerPhi);
     const cachedGroup=cached.bind({velocity,advected,phi,volume,negative,output,outputNegative,params,centerPhi});
     const group=stage.bind({velocity,advected,phi,volume,negative,output,outputNegative,params});
     for(const mode of ["gravity","viscosity","capillary","airborne","compressed"] as const){
-     if(mode==="viscosity"&&li>1)continue;
+
      const dt=.03,nu=.001,gravity=mode==="gravity"||mode==="airborne"||mode==="compressed"?-9.81:0;
      device.queue.writeBuffer(params,0,new Float32Array([...h,dt,gravity,1000,mode==="viscosity"?1000*nu:0,mode==="capillary"?.072:0,0,0,1,0]));
      const data=new Float32Array(d[0]*d[1]*d[2]*4).fill(NaN),zero=new Float32Array(data.length).fill(NaN),density=new Float32Array(data.length/4).fill(NaN);
@@ -55,6 +64,10 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
      device.queue.writeTexture({texture:phi},pv,{bytesPerRow:(d[0]+1)*4,rowsPerImage:d[1]+1},d.map(n=>n+1));
      const encoder=device.createCommandEncoder();stage.encode(encoder,group);device.queue.submit([encoder.finish()]);
      const actual=await readMixedTexture(device,output),boundary=await readMixedBuffer(device,outputNegative);
+     const reference=device.createCommandEncoder();serial.encode(reference,group);device.queue.submit([reference.finish()]);
+     const serialValues=await readMixedTexture(device,output),serialBoundary=await readMixedBuffer(device,outputNegative);
+     for(const f of faces)if(f.anchor[f.axis]!>=0){const at=4*index(f.anchor)+f.axis;assert.equal(actual[at],serialValues[at],`${li}/${mode}: face-parallel forces changed canonical value`);}
+     assert.deepEqual(boundary,serialBoundary,"face-parallel forces changed negative boundary");
      const optimized=device.createCommandEncoder();geometry.encode(optimized,geometryGroup);cached.encode(optimized,cachedGroup);device.queue.submit([optimized.finish()]);
      const cachedValues=await readMixedTexture(device,output);
      for(const f of faces)if(f.anchor[f.axis]!>=0){const at=4*index(f.anchor)+f.axis;assert.ok(Math.abs(cachedValues[at]!-actual[at]!)<1e-6,"cached force geometry changed canonical velocity");}
@@ -69,6 +82,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
        expected=f.axis===1&&(airborne(f.left)||other&&airborne(other))?gravity*dt:0;
       }
       if(mode==="viscosity"){
+       if(li>1)continue; // Mixed interpolation is compared to the serial GPU oracle above.
        if(f.p.some((v,a)=>v<2*f.width||v>d[a]!-2*f.width))continue;
        expected=dt*nu*.002/(h[f.axis]!**2);
       }

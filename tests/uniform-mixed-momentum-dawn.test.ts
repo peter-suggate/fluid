@@ -1,3 +1,4 @@
+import { uniformMixedFaceDispatchWGSL, uniformMixedFaceTileDispatchWGSL } from "../lib/methods/uniform/uniform-mixed-face-dispatch.wgsl";
 import { UniformMixedMomentumCache } from "../lib/methods/uniform/uniform-mixed-momentum-cache";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -11,13 +12,13 @@ import { seamLayout } from "./helpers/uniform-geometric-seam";
 import { readMixedBuffer, readMixedTexture } from "./helpers/uniform-mixed-native-fields";
 
 const modulePath=process.env.WEBGPU_NODE_MODULE;
-(modulePath?test:test.skip)("mixed momentum retains native characteristic, phase filtering, wall carry and bounded correction",{timeout:240000},async()=>{
+for(const [layoutIndex,layout] of [seamLayout(0,"fine"),seamLayout(0,"coarse"),...mixedPressureLayouts().slice(0,5)].entries())
+(modulePath?test:test.skip)(`mixed momentum layout ${layoutIndex} retains native characteristic, phase filtering, wall carry and bounded correction`,{timeout:240000},async()=>{
  await acquireWebGPUExclusiveLock("dawn-test","Uniform mixed momentum");let device:GPUDevice|undefined;
  try{
   const dawn=await import(pathToFileURL(modulePath!).href);Object.assign(globalThis,dawn.globals);
   const gpu=createProcessRetainedDawnGPU(dawn,["backend=metal"]),adapter=await gpu.requestAdapter();assert.ok(adapter);device=await adapter.requestDevice();
   const errors:string[]=[];device.addEventListener("uncapturederror",e=>{e.preventDefault();errors.push(e.error.message);});
-  for(const [layoutIndex,layout] of [seamLayout(0,"fine"),seamLayout(0,"coarse"),...mixedPressureLayouts().slice(0,5)].entries()){
    console.log(`momentum layout ${layoutIndex} starting`);
    const d=layout.lattice.dimensions,h=layout.lattice.cellSize_m,n=d[0]*d[1]*d[2],fixture=mixedPressureFixture(layout);
    const ownership=new UniformMixedOwnership(device,layout),textures:GPUTexture[]=[],buffers:GPUBuffer[]=[];
@@ -42,23 +43,40 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
    try{
     const borrowed:GPUDevice=new Proxy(device,{get(target,key){if(key==="createBuffer"||key==="createTexture")return()=>{throw new Error("momentum allocated fields");};const v=Reflect.get(target,key,target);return typeof v==="function"?v.bind(target):v;}});
     const stage:UniformMixedMomentum=new UniformMixedMomentum(borrowed,ownership);await stage.initialize();console.log(`momentum layout ${layoutIndex} compiled`);assert.equal(stage.allocatedBytes,0);
+    // Retain the owner-serial traversal as an independent GPU oracle. The
+    // larger tile launch only adds guarded idle work to that reference.
+    const serialDevice=new Proxy(borrowed,{get(target,key){
+     if(key==="createShaderModule")return(desc:GPUShaderModuleDescriptor)=>{
+      const parallel=uniformMixedFaceTileDispatchWGSL("momentumStep","umMomentum(owner,face)");assert.ok(desc.code.includes(parallel),"serial oracle must replace the parallel kernel");
+      return target.createShaderModule({...desc,code:desc.code.replace(parallel,uniformMixedFaceDispatchWGSL("momentumStep","umMomentum(owner,face)"))});
+     };
+     const value=Reflect.get(target,key,target);return typeof value==="function"?value.bind(target):value;
+    }});
+    const serial=new UniformMixedMomentum(serialDevice,ownership);await serial.initialize();
     const defaults:UniformMixedMomentum=new UniformMixedMomentum(borrowed,ownership,true);await defaults.initialize();
     const cache:UniformMixedMomentumCache=new UniformMixedMomentumCache(borrowed,ownership);await cache.initialize();
     const cacheGroup=cache.bind({extended,physical,phase,negative,coarseExtended,coarsePhysical,coarseWeight});
     const group=stage.bind({coarseExtended,coarsePhysical,coarseWeight,extended,physical,phase,volume,predicted,reversed,negative,predictedNegative,reversedNegative,output,outputNegative,params});
     const value=(p:readonly number[],a:number)=>.6+.2*a+.03*p[(a+1)%3]!;
-    for(const mode of ["endpoint","default","phase","empty","limiter"] as const){
+    for(const mode of ["endpoint","varying","default","phase","empty","limiter"] as const){
      if(mode==="endpoint"&&layoutIndex>1)continue;
      const dt=.4,flags=new Uint32Array(8);flags[7]=UNIFORM_MIXED_MOMENTUM_LIMITS;flags[5]=mode==="phase"||mode==="empty"?1:0;
      device.queue.writeBuffer(params,0,flags);device.queue.writeBuffer(params,0,new Float32Array([...h,dt]));
-     writeFaces(extended,negative,mode==="endpoint"?value:()=>.75);
-     writeFaces(physical,negative,mode==="phase"?()=>3:mode==="empty"?()=>0:mode==="endpoint"?value:()=>.75);
+     writeFaces(extended,negative,(mode==="endpoint"||mode==="varying")?value:()=>.75);
+     writeFaces(physical,negative,mode==="phase"?()=>3:mode==="empty"?()=>0:(mode==="endpoint"||mode==="varying")?value:()=>.75);
      writeFaces(predicted,predictedNegative,()=>.75);writeFaces(reversed,reversedNegative,()=>100);
      scalar(phase,mode==="empty"?0:1);scalar(volume,1);
      for(const entry of mode==="limiter"?["correct"] as const:["semiLagrangian","predict","reverse"] as const){
       device.queue.writeBuffer(params,24,new Uint32Array([{semiLagrangian:0,predict:1,reverse:2,correct:3}[entry]]));
       const encoder=device.createCommandEncoder();cache.encode(encoder,cacheGroup);stage.encode(encoder,group);device.queue.submit([encoder.finish()]);
       const actual=await readMixedTexture(device,output),boundary=await readMixedBuffer(device,outputNegative);
+      const reference=device.createCommandEncoder();serial.encode(reference,group);device.queue.submit([reference.finish()]);
+      const serialValues=await readMixedTexture(device,output),serialBoundary=await readMixedBuffer(device,outputNegative);
+      for(const f of patches){
+       const original=f.anchor[f.axis]!<0?serialBoundary[boundaryAt(f.anchor,f.axis)]!:serialValues[4*at(f.anchor)+f.axis]!;
+       const parallel=f.anchor[f.axis]!<0?boundary[boundaryAt(f.anchor,f.axis)]!:actual[4*at(f.anchor)+f.axis]!;
+       assert.equal(parallel,original,`${layoutIndex}/${mode}/${entry}: face-parallel momentum changed canonical value`);
+      }
       if(layout.fineTiles.length===layout.tiles.length){
        const count=layout.tiles.length,header=new Uint32Array(16);header[1]=count;header.set([count,1,1],4);
        device.queue.writeBuffer(ownership.support,count*16,header);
@@ -73,16 +91,31 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
        }
        ownership.update(layout);
       }
-      if((mode==="endpoint"||mode==="default")&&entry==="semiLagrangian"){
+      if((mode==="endpoint"||mode==="varying"||mode==="default")&&entry==="semiLagrangian"){
        const optimized=device.createCommandEncoder();defaults.encode(optimized,group);device.queue.submit([optimized.finish()]);
        const optimizedValues=await readMixedTexture(device,output),optimizedBoundary=await readMixedBuffer(device,outputNegative);
        for(const f of patches){const original=f.anchor[f.axis]!<0?boundary[boundaryAt(f.anchor,f.axis)]!:actual[4*at(f.anchor)+f.axis]!;
         const specialized=f.anchor[f.axis]!<0?optimizedBoundary[boundaryAt(f.anchor,f.axis)]!:optimizedValues[4*at(f.anchor)+f.axis]!;
         assert.ok(Math.abs(original-specialized)<1e-6,"default specialization changed canonical momentum");}
       }
+      if((mode==="endpoint"||mode==="varying"||mode==="default")&&entry==="semiLagrangian"&&layout.fineTiles.length===layout.tiles.length){
+       const count=layout.tiles.length,header=new Uint32Array(16);header[1]=count;header.set([count,1,1],4);
+       device.queue.writeBuffer(ownership.support,count*16,header);
+       device.queue.writeBuffer(ownership.support,(5*count+16)*4,layout.fineTiles);
+       device.queue.writeBuffer(ownership.certifiedDispatch,0,header.subarray(4,12));
+       const optimized=device.createCommandEncoder();defaults.encode(optimized,group);device.queue.submit([optimized.finish()]);
+       const optimizedValues=await readMixedTexture(device,output),optimizedBoundary=await readMixedBuffer(device,outputNegative);
+       for(const f of patches){
+        const original=f.anchor[f.axis]!<0?boundary[boundaryAt(f.anchor,f.axis)]!:actual[4*at(f.anchor)+f.axis]!;
+        const specialized=f.anchor[f.axis]!<0?optimizedBoundary[boundaryAt(f.anchor,f.axis)]!:optimizedValues[4*at(f.anchor)+f.axis]!;
+        assert.ok(Math.abs(original-specialized)<1e-6,`${mode}: certified scalar momentum ${original}/${specialized}`);
+       }
+       ownership.update(layout);
+      }
       for(const f of patches){
        const observed=f.anchor[f.axis]!<0?boundary[boundaryAt(f.anchor,f.axis)]!:actual[4*at(f.anchor)+f.axis]!;
        assert.ok(Number.isFinite(observed),`${layoutIndex}/${mode}/${entry}: stale face ${f.anchor}/${f.axis}`);
+       if(mode==="varying")continue;
        let expected=mode==="phase"?3:mode==="empty"?0:.75;
        if(mode==="endpoint"){
         const width=layoutIndex===0?1:4;
@@ -102,7 +135,6 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
      }
     }
    }finally{textures.forEach(t=>t.destroy());buffers.forEach(b=>b.destroy());ownership.destroy();}
-  }
   assert.deepEqual(errors,[]);
  }finally{device?.destroy();await releaseWebGPUExclusiveLock();}
 });

@@ -2,6 +2,7 @@ import { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import type { UniformMixedLayout } from "./uniform-mixed-layout";
 import type { UniformScratchArena } from "./uniform-scratch-arena";
 import { uniformMixedTransportWGSL } from "./uniform-mixed-transport.wgsl";
+import type { UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 
 const widths = [1, 2, 4] as const;
 const entries = ["clear", "build", "decode", "rowsFallback", "rowsDivide", "gather", "restrictVolume", "copyVolume"] as const;
@@ -28,7 +29,7 @@ export class UniformMixedTransportStage {
 
   constructor(private readonly device: GPUDevice, layout: UniformMixedLayout,
     arena: UniformScratchArena, fineVolume: GPUTexture,
-    restrictedVolume: GPUTexture, departures: GPUTexture,private readonly sourceParams?:GPUBuffer) {
+    restrictedVolume: GPUTexture, departures: GPUTexture,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid) {
     this.cells = layout.tiles.length * 64;
     // Fine indexing keeps the borrowed slice ABI stable across ownership changes.
     if (arena.edgeBytes < this.cells * 40 || arena.donorOffset + this.cells * 28 > arena.byteLength)
@@ -58,8 +59,8 @@ export class UniformMixedTransportStage {
   }
 
   async initialize(): Promise<void> {
-    const module = this.device.createShaderModule({ label: "Uniform graded conservative transport", code: uniformMixedTransportWGSL(this.layout,!!this.sourceParams) });
-    const layout = this.device.createPipelineLayout({ bindGroupLayouts: [this.topologyLayout, this.resourcesLayout] });
+    const module = this.device.createShaderModule({ label: "Uniform graded conservative transport", code: uniformMixedTransportWGSL(this.layout,!!this.sourceParams,!!this.solid) });
+    const layout = this.device.createPipelineLayout({ bindGroupLayouts: [this.topologyLayout, this.resourcesLayout, ...(this.solid?[this.solid.bindLayout]:[])] });
     for (const entryPoint of entries) this.pipelines.set(entryPoint, await Promise.all(widths.map(umCellWidth =>
       this.device.createComputePipelineAsync({ layout, compute: { module, entryPoint, constants: { umCellWidth, umDispatchX: this.dispatchX } } }))));
   }
@@ -75,6 +76,7 @@ export class UniformMixedTransportStage {
     const pass = encoder.beginComputePass({ label: `Uniform mixed ${entry}` });
     pass.setBindGroup(0, this.topologyGroup);
     pass.setBindGroup(1, entry === "restrictVolume" || entry === "copyVolume" ? this.restrictGroup : this.transportGroup);
+    if (this.solid) pass.setBindGroup(2, this.solid.bindGroup);
     this.dispatch(pass, pipelines); pass.end();
   }
 

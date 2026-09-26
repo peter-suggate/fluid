@@ -12,11 +12,18 @@ export class UniformMixedFramePlan {
   private readonly params:GPUBuffer;
   private readonly resources:GPUBindGroupLayout;
   private readonly group:GPUBindGroup;
+  private readonly extendedResources:GPUBindGroupLayout;
+  private readonly extendedGroup:GPUBindGroup;
   private readonly pipelines=new Map<string,GPUComputePipeline>();
-  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,volume:GPUTexture,phi:GPUTexture,velocity:GPUTexture,negative:GPUBuffer){
+  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,volume:GPUTexture,phi:GPUTexture,velocity:GPUTexture,negative:GPUBuffer,
+    /** The extended field every characteristic samples, valid at encodeCertificate. */
+    extended:GPUTexture,extendedNegative:GPUBuffer){
     this.params=device.createBuffer({label:"Uniform shared support policy",size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
     this.resources=device.createBindGroupLayout({entries:[...[0,1,3].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),{binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},{binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}}]});
     this.group=device.createBindGroup({layout:this.resources,entries:[...[volume,phi].map((t,binding)=>({binding,resource:t.createView()})),{binding:2,resource:{buffer:this.params}},{binding:3,resource:velocity.createView()},{binding:4,resource:{buffer:negative}}]});
+    this.extendedResources=device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
+      {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},{binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]});
+    this.extendedGroup=device.createBindGroup({layout:this.extendedResources,entries:[{binding:0,resource:extended.createView()},{binding:1,resource:{buffer:extendedNegative}},{binding:2,resource:{buffer:ownership.speeds}}]});
   }
   async initialize():Promise<void>{
     const h=this.ownership.layout.lattice.cellSize_m;
@@ -28,7 +35,21 @@ struct PlanPolicy {settings:vec4u,step:vec4f}
 @group(1) @binding(2) var<uniform> policy:PlanPolicy;
 @group(1) @binding(3) var velocity:texture_3d<f32>;
 @group(1) @binding(4) var<storage,read> negative:array<f32>;
+@group(2) @binding(0) var extended:texture_3d<f32>;
+@group(2) @binding(1) var<storage,read> extendedNegative:array<f32>;
+@group(2) @binding(2) var<storage,read_write> speeds:array<f32>;
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
+fn umNegativeIndex(origin:vec3u,axis:u32)->u32{
+ if(axis==0u){return origin.y+UM_D.y*origin.z;}
+ if(axis==1u){return UM_D.y*UM_D.z+origin.x+UM_D.x*origin.z;}
+ return UM_D.y*UM_D.z+UM_D.x*UM_D.z+origin.x+UM_D.x*origin.y;
+}
+// Tiles, in Chebyshev tile distance, that any characteristic of this frame
+// can reach, including cubic taps, wall continuation and the Newton search.
+fn umCertificateRadius(speed:f32)->u32{
+ let travel=speed*policy.step.x/${Math.min(...h)};
+ return u32(min(ceil(travel*1.00001/4.0)+2.0,1e8));
+}
 ${uniformMixedVertexSamplingWGSL}
 var<workgroup> seeded:atomic<u32>;
 @compute @workgroup_size(64) fn seed(@builtin(workgroup_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
@@ -41,12 +62,7 @@ var<workgroup> seeded:atomic<u32>;
   for(var axis=0u;axis<3u;axis++){
    let first=umFace(owner,axis,1,0u);
    for(var part=0u;part<first.count;part++){let f=umFace(owner,axis,1,part);speed=max(speed,abs(textureLoad(velocity,f.anchor,0)[axis]));}
-   if(origin[axis]==0u){
-    var index=origin.y+UM_D.y*origin.z;
-    if(axis==1u){index=UM_D.y*UM_D.z+origin.x+UM_D.x*origin.z;}
-    if(axis==2u){index=UM_D.y*UM_D.z+UM_D.x*UM_D.z+origin.x+UM_D.x*origin.y;}
-    speed=max(speed,abs(negative[index]));
-   }
+   if(origin[axis]==0u){speed=max(speed,abs(negative[umNegativeIndex(origin,axis)]));}
   }
   atomicMax(&umSupport[4u*UM_TILES],bitcast<u32>(speed));
   var occupied=textureLoad(volume,vec3i(origin),0).x!=0.0;
@@ -69,13 +85,43 @@ ${[0,1,2].map(axis=>/* wgsl */`
  }
  atomicStore(&umSupport[${axis+1}u*UM_TILES+tile],flags|policy.settings.z);
 }`).join("\n")}
+// Largest extended canonical face speed owned by each tile.
+var<workgroup> tileSpeed:atomic<u32>;
+@compute @workgroup_size(64) fn localSpeed(@builtin(workgroup_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
+ let tile=gid.x+umDispatchX*gid.y;if(tile>=UM_TILES){return;}
+ if(lane==0u){atomicStore(&tileSpeed,0u);}workgroupBarrier();
+ let width=umTileWidth(tile);let side=4u/width;
+ if(lane<side*side*side){
+  let origin=umTileCoord(tile)*4u+umCorner(lane,side)*width;
+  let owner=umOwnerAt(vec3i(origin));var speed=0.0;
+  for(var axis=0u;axis<3u;axis++){
+   let first=umFace(owner,axis,1,0u);
+   for(var part=0u;part<first.count;part++){let f=umFace(owner,axis,1,part);speed=max(speed,abs(textureLoad(extended,f.anchor,0)[axis]));}
+   if(origin[axis]==0u){speed=max(speed,abs(extendedNegative[umNegativeIndex(origin,axis)]));}
+  }
+  // A non-finite speed must certify nothing: saturate to the float maximum.
+  atomicMax(&tileSpeed,select(0x7f7fffffu,bitcast<u32>(speed),speed<=3.402823e38));
+ }
+ workgroupBarrier();if(lane==0u){speeds[tile]=bitcast<f32>(atomicLoad(&tileSpeed));}
+}
+// Separable box maximum over the global reach: a characteristic from tile t
+// never leaves that box, so its speed is bounded by the box maximum.
+${[0,1,2].map(axis=>/* wgsl */`
+@compute @workgroup_size(64) fn spread${axis}(@builtin(global_invocation_id) gid:vec3u){
+ let tile=gid.x+umDispatchX*64u*gid.y;if(tile>=UM_TILES){return;}
+ let base=${axis===1?"UM_TILES":"0u"};let into=${axis===1?"0u":"UM_TILES"};
+ let reach=i32(umCertificateRadius(bitcast<f32>(atomicLoad(&umSupport[4u*UM_TILES]))));
+ let p=vec3i(umTileCoord(tile));var speed=0.0;
+ for(var q=max(p.${"xyz"[axis]}-reach,0);q<=min(p.${"xyz"[axis]}+reach,i32(UM_T.${"xyz"[axis]})-1);q++){
+  var r=p;r.${"xyz"[axis]}=q;speed=max(speed,speeds[base+umTileAt(vec3u(r))]);
+ }
+ speeds[into+tile]=speed;
+}`).join("\n")}
 @compute @workgroup_size(64) fn certify(@builtin(global_invocation_id) gid:vec3u){
  let tile=gid.x+umDispatchX*64u*gid.y;if(tile>=UM_TILES||umTileWidth(tile)!=1u){return;}
- // Convex extension/interpolation cannot exceed this physical face bound.
- // Include cubic taps, wall continuation, and the four-cell Newton search.
- let speed=bitcast<f32>(atomicLoad(&umSupport[4u*UM_TILES]));
- let travel=speed*policy.step.x/${Math.min(...h)};
- let radius=u32(min(ceil(travel*1.00001/4.0)+2.0,1e8));
+ // Convex extension/interpolation cannot exceed the extended speeds in the
+ // global-reach box around this tile (localSpeed + spread).
+ let radius=umCertificateRadius(speeds[UM_TILES+tile]);
  let distance=atomicLoad(&umSupport[4u*UM_TILES+16u+tile]);
  let list=select(2u,1u,distance>radius);
  let slot=atomicAdd(&umSupport[4u*UM_TILES+list],1u);
@@ -87,26 +133,40 @@ ${[0,1,2].map(axis=>/* wgsl */`
   let count=atomicLoad(&umSupport[4u*UM_TILES+list]);let base=4u*UM_TILES+list*4u;
   atomicStore(&umSupport[base],min(count,umDispatchX));atomicStore(&umSupport[base+1u],(count+umDispatchX-1u)/umDispatchX);atomicStore(&umSupport[base+2u],1u);
  }
+ // umTileJobOwner's merged general-h/2h/4h tile launch.
+ let merged=atomicLoad(&umSupport[4u*UM_TILES+2u])+umCounts.y+umCounts.z;let base=4u*UM_TILES+12u;
+ atomicStore(&umSupport[base],min(merged,umDispatchX));atomicStore(&umSupport[base+1u],(merged+umDispatchX-1u)/umDispatchX);atomicStore(&umSupport[base+2u],1u);
 }
 `});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
     if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
-    const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]});
-    for(const entryPoint of ["seed","dilate0","dilate1","dilate2","certify","publishWork"])this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX}}}));
+    const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.extendedResources]});
+    for(const entryPoint of ["seed","dilate0","dilate1","dilate2","localSpeed","spread0","spread1","spread2","certify","publishWork"])this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX}}}));
   }
   encode(encoder:GPUCommandEncoder,policy={fineReach:2,shellReach:1,twoLevel:true,shellOnly:true},dt=0):void{
-    if(this.pipelines.size!==6)throw new Error("Mixed frame plan is not initialized");
+    if(this.pipelines.size!==10)throw new Error("Mixed frame plan is not initialized");
     this.device.queue.writeBuffer(this.params,0,new Uint32Array([policy.fineReach,policy.shellReach,!policy.twoLevel?3:!policy.shellOnly?2:0,0]));
     this.device.queue.writeBuffer(this.params,16,new Float32Array([dt,0,0,0]));
     encoder.clearBuffer(this.ownership.support,this.ownership.layout.tiles.length*16,64);
     const pass=encoder.beginComputePass({label:"Uniform shared frame plan"});
-    pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group);
-    for(const entry of ["seed","dilate0","dilate1","dilate2","certify","publishWork"]){
-      const groups=entry==="publishWork"?1:entry==="seed"?this.ownership.layout.tiles.length:Math.ceil(this.ownership.layout.tiles.length/64);
+    pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group);pass.setBindGroup(2,this.extendedGroup);
+    this.dispatch(pass,["seed","dilate0","dilate1","dilate2"]);
+    pass.end();
+  }
+  /** Fine-tile certificate from the extended field. Encode after extension
+   * and before any certified/merged consumer (surface, momentum). */
+  encodeCertificate(encoder:GPUCommandEncoder):void{
+    const pass=encoder.beginComputePass({label:"Uniform local speed certificate"});
+    pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group);pass.setBindGroup(2,this.extendedGroup);
+    this.dispatch(pass,["localSpeed","spread0","spread1","spread2","certify","publishWork"]);
+    pass.end();
+    encoder.copyBufferToBuffer(this.ownership.support,this.ownership.layout.tiles.length*16+16,this.ownership.certifiedDispatch,0,48);
+  }
+  private dispatch(pass:GPUComputePassEncoder,entries:readonly string[]):void{
+    for(const entry of entries){
+      const groups=entry==="publishWork"?1:entry==="seed"||entry==="localSpeed"?this.ownership.layout.tiles.length:Math.ceil(this.ownership.layout.tiles.length/64);
       pass.setPipeline(this.pipelines.get(entry)!);pass.dispatchWorkgroups(Math.min(groups,this.ownership.dispatchX),Math.ceil(groups/this.ownership.dispatchX));
     }
-    pass.end();
-    encoder.copyBufferToBuffer(this.ownership.support,this.ownership.layout.tiles.length*16+16,this.ownership.certifiedDispatch,0,32);
   }
   destroy():void{this.params.destroy();}
 }

@@ -3,7 +3,9 @@
  * remain host integration work. Reconstruction is frozen per
  * smoothing sweep; only the direct core is read in place.
  */
-export function uniformMixedPressureOperatorSource(surface = false, boundary = false): string { return /* wgsl */ `
+export function uniformMixedPressureOperatorSource(surface = false, boundary = false,
+  /** Caller defines umPressureRegularV(owner,axis,sign), the CM11a dual-cell V of a regular face. */
+  solid = false): string { return /* wgsl */ `
 fn umPressureSum6(v:array<f32,6>)->f32{return ((v[0]+v[1])+(v[4]+v[5]))+(v[2]+v[3]);}
 fn umPressureColour(owner:UMOwner)->u32 {
  let q=umOrigin(owner)/owner.width;
@@ -35,11 +37,23 @@ fn umPressureRegularTerms(owner:UMOwner,applied:bool)->vec2f{
    ${boundary?"let wall=umBoundaryCoreTerms(owner,umFace(owner,axis,sign,0u));diagonal[at]=wall.x;values[at]=select(wall.y,wall.x*umPressure(owner)-wall.y,applied);":""}
   }else{
    let distance=f32(owner.width)*UM_H[axis];
-   let coefficient=1.0/(distance*distance${surface?"*umPressureTheta(owner,neighbor)":""});
+   ${solid?`let volume=umPressureRegularV(owner,axis,sign);
+   let coefficient=select(volume/(distance*distance${surface?"*umPressureTheta(owner,neighbor)":""}),0.0,volume<=1e-6);`:`let coefficient=1.0/(distance*distance${surface?"*umPressureTheta(owner,neighbor)":""});`}
    let other=${surface?"select(0.0,umPressure(neighbor),umPressureLiquid(neighbor))":"umPressure(neighbor)"};
    diagonal[at]=coefficient;values[at]=coefficient*select(other,umPressure(owner)-other,applied);
   }
  }}return vec2f(umPressureSum6(diagonal),umPressureSum6(values));
+}
+// Interface rows need the patch loop; everything else takes a direct path.
+fn umPressureInterfaceRow(owner:UMOwner)->bool{
+ return ${surface ? "umPressureLiquid(owner)&&" : ""}!umPressureRegular(owner);
+}
+// One canonical patch's (diagonal, neighbour) contribution to an interface row.
+fn umPressureCoreFace(owner:UMOwner,face:UMFace)->vec2f {
+ if(face.neighbor.width==0u){return ${boundary ? "umBoundaryCoreTerms(owner,face)" : "vec2f(0.0)"};}
+ let distance=0.5*f32(owner.width+face.neighbor.width)*UM_H[face.axis];
+ let weight=umPressureFaceAreaOverVolume(owner,face)/(distance${surface ? "*umPressureTheta(owner,face.neighbor)" : ""});
+ return vec2f(weight,weight*${surface ? "select(0.0,umPressure(face.neighbor),umPressureLiquid(face.neighbor))" : "umPressure(face.neighbor)"});
 }
 fn umPressureCoreTerms(owner:UMOwner)->vec2f {
 ${surface ? " if(!umPressureLiquid(owner)){return vec2f(0.0);}" : ""}
@@ -47,15 +61,9 @@ ${surface ? " if(!umPressureLiquid(owner)){return vec2f(0.0);}" : ""}
  var diagonalTerms:array<f32,6>;var neighborTerms:array<f32,6>;
  for(var axis=0u;axis<3u;axis++){for(var side=0u;side<2u;side++){
   let sign=select(-1,1,side==1u);let first=umFace(owner,axis,sign,0u);
-  var diagonal=0.0;var neighbors=0.0;
-  for(var part=0u;part<first.count;part++){
-   let face=umFace(owner,axis,sign,part);if(face.neighbor.width==0u){
-    ${boundary ? "let wall=umBoundaryCoreTerms(owner,face);diagonal+=wall.x;neighbors+=wall.y;" : ""}continue;}
-   let distance=0.5*f32(owner.width+face.neighbor.width)*UM_H[axis];
-   let weight=umPressureFaceAreaOverVolume(owner,face)/(distance${surface ? "*umPressureTheta(owner,face.neighbor)" : ""});
-   diagonal+=weight;neighbors+=weight*${surface ? "select(0.0,umPressure(face.neighbor),umPressureLiquid(face.neighbor))" : "umPressure(face.neighbor)"};
-  }
-  diagonalTerms[2u*axis+side]=diagonal;neighborTerms[2u*axis+side]=neighbors;
+  var terms=vec2f(0.0);
+  for(var part=0u;part<first.count;part++){terms+=umPressureCoreFace(owner,umFace(owner,axis,sign,part));}
+  diagonalTerms[2u*axis+side]=terms.x;neighborTerms[2u*axis+side]=terms.y;
  }}
  return vec2f(umPressureSum6(diagonalTerms),umPressureSum6(neighborTerms));
 }
@@ -76,6 +84,9 @@ ${surface ? " if(!umPressureLiquid(owner)){return 0.0;}" : ""}
 }
 // Freeze reconstruction for the two simultaneous updates in this sweep.
 // A nested coarse solve must not reuse this RHS without refreshing it.
+fn umPressureCorrectionFace(owner:UMOwner,face:UMFace)->f32 {
+ return f32(face.sign)*umPressureFaceAreaOverVolume(owner,face)*umPressureFaceCorrection(owner,face);
+}
 fn umPressureCorrectedRhs(owner:UMOwner,rhs:f32)->f32 {
 ${surface ? " if(!umPressureLiquid(owner)){return 0.0;}" : ""}
  let stencil=umTileStencil(owner.tile);
@@ -84,10 +95,7 @@ ${surface ? " if(!umPressureLiquid(owner)){return 0.0;}" : ""}
  for(var axis=0u;axis<3u;axis++){for(var side=0u;side<2u;side++){
   let sign=select(-1,1,side==1u);let first=umFace(owner,axis,sign,0u);
   if(first.neighbor.width==0u||first.neighbor.width==owner.width){continue;}
-  for(var part=0u;part<first.count;part++){
-   let face=umFace(owner,axis,sign,part);
-   correction+=f32(sign)*umPressureFaceAreaOverVolume(owner,face)*umPressureFaceCorrection(owner,face);
-  }
+  for(var part=0u;part<first.count;part++){correction+=umPressureCorrectionFace(owner,umFace(owner,axis,sign,part));}
  }}
  // Evaluate the seam term directly: subtracting full/core Laplacians would
  // introduce cancellation noise even in uniform regions where it is zero.

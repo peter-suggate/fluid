@@ -1,3 +1,4 @@
+import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
@@ -27,7 +28,8 @@ async function run(device: GPUDevice, layout: UniformMixedLayout, input: Float32
   const stage = new UniformMixedTransportStage(device, layout, arena, a, b, departures);
   try {
     await stage.initialize();
-    assert.equal(stage.allocatedBytes, layout.tiles.length * 12 + 16);
+    // Owners + counts + shared support + certified dispatch + sampling widths.
+    assert.equal(stage.allocatedBytes, layout.metadataBytes + 16 + (layout.tiles.length * 8 + 20) * 4 + 32 + layout.tiles.length * 4);
     const cells = geometricSeamRows(layout, () => [0, 0, 0]).cells;
     const dense = new Float32Array(n), traces = new Float32Array(n * 4);
     const index = (x: number, y: number, z: number) => x + nx * (y + ny * z);
@@ -54,7 +56,7 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
   try {
     const dawn = await import(pathToFileURL(modulePath!).href); Object.assign(globalThis, dawn.globals);
     const gpu = createProcessRetainedDawnGPU(dawn, [`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
-    const adapter = await gpu.requestAdapter(); assert.ok(adapter); device = await adapter.requestDevice();
+    const adapter = await gpu.requestAdapter(); assert.ok(adapter); device=await adapter.requestDevice({requiredLimits:requiredFluidDeviceLimits(adapter.limits)});
     const errors: string[] = []; device.addEventListener("uncapturederror", e => { e.preventDefault(); errors.push(e.error.message); });
     for (const mode of ["fine", "coarse", "mixed", "graded"] as const) for (let axis = 0; axis < 3; axis++) {
       const displacements: Triple[] = [-6.25, -.25, 0, .25, 6.25].map(distance => {

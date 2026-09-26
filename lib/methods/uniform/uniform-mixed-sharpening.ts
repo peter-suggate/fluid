@@ -3,16 +3,20 @@ import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedVertexSamplingWGSL } from "./uniform-mixed-vertex-sampling.wgsl";
 import { uniformSharpenBudgetWGSL } from "./uniform-sharpen-budget.wgsl";
+import { uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 
 /** Native geometric prepare/propose/limit/commit sweeps on physical mixed
  * face patches. Budgets and fluxes use fine-cell mass units, with area shares
  * splitting a coarse cell's offer across its subfaces. Borrows <=40N bytes
- * from the 40N-byte native transport edge slice after transport completes. */
+ * from the 40N-byte native transport edge slice after transport completes.
+ * With static solids a unit owner is admitted only when fully open, and a
+ * unit-unit face only when both cells and its aperture are fully open, the
+ * native uvOpen/faceOpenFraction >= 0.99999 gates. */
 export class UniformMixedSharpening {
   readonly allocatedBytes=0;
   private readonly resources:GPUBindGroupLayout;
   private readonly pipelines=new Map<string,GPUComputePipeline[]>();
-  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership){
+  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid?:UniformMixedSolid){
     this.resources=device.createBindGroupLayout({entries:[
       ...[0,1,2,3].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
       {binding:4,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"r32float",viewDimension:"3d"}},
@@ -50,13 +54,19 @@ fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
 ${uniformMixedVertexSamplingWGSL}
 ${uniformMixedFaceAddressWGSL}
 ${uniformSharpenBudgetWGSL}
+${uniformMixedSolidWGSL(this.solid?2:undefined)}
+fn umSharpenOpen(o:UMOwner)->bool{return o.width!=1u||!umSolidEnabled()||umCellOpen(vec3i(umOrigin(o)))>0.99999;}
+fn umSharpenFaceOpen(a:UMOwner,f:UMFace)->bool{
+ if(!umSolidEnabled()||a.width!=1u||f.neighbor.width!=1u){return true;}
+ return umSharpenOpen(a)&&umSharpenOpen(f.neighbor)&&umFaceOpen(f.anchor,f.axis)>0.99999;
+}
 fn umMassScale(o:UMOwner)->f32{return f32(o.width*o.width*o.width);}
 fn umV(o:UMOwner)->f32{return textureLoad(volume,vec3i(umOrigin(o)),0).x;}
 fn umBudgetAt(o:UMOwner)->u32{return ${3*n}u+6u*o.index;}
 fn umRawAt(f:UMFace)->u32{return 3u*(u32(f.anchor.x)+UM_D.x*(u32(f.anchor.y)+UM_D.y*u32(f.anchor.z)))+f.axis;}
 fn umCacheAt(anchor:vec3i)->u32{return ${3*n}u+6u*(umCounts.x*64u+umCounts.y*8u+umCounts.z)+u32(anchor.x)+UM_D.x*(u32(anchor.y)+UM_D.y*u32(anchor.z));}
 fn umFaceFlags(a:UMOwner,f:UMFace)->u32 {
- if(f.neighbor.width==0u){return 0u;}
+ if(f.neighbor.width==0u||!umSharpenFaceOpen(a,f)){return 0u;}
  let pa=vec3i(umOrigin(a));let pb=vec3i(umOrigin(f.neighbor));
  let phiA=textureLoad(centerPhi,pa,0).x;let phiB=textureLoad(centerPhi,pb,0).x;
  if(sharpen.policy.x==0.0&&sharpen.policy.y<1.5
@@ -90,11 +100,12 @@ fn umFaceFlags(a:UMOwner,f:UMFace)->u32 {
 @compute @workgroup_size(64) fn prepare(@builtin(global_invocation_id) gid:vec3u){
  let o=umAllOwner(gid);if(o.width==0u){return;}let p=vec3i(umOrigin(o));let at=umBudgetAt(o);
  let distance=textureLoad(centerPhi,p,0).x;let desired=textureLoad(targetFill,p,0).x;
- let budget=uvSharpenBudgets(umV(o),desired,distance,UM_MIN_H*f32(o.width),clamp(sharpen.tuning.x,0.0,1.0),sharpen.tuning.y,sharpen.policy.x>0.5,sharpen.policy.y,true)*umMassScale(o);
+ let budget=uvSharpenBudgets(umV(o),desired,distance,UM_MIN_H*f32(o.width),clamp(sharpen.tuning.x,0.0,1.0),sharpen.tuning.y,sharpen.policy.x>0.5,sharpen.policy.y,umSharpenOpen(o))*umMassScale(o);
  scratch[at]=budget.x;scratch[at+1u]=budget.y;scratch[at+2u]=distance;scratch[at+3u]=desired;
 }
 fn umProposal(a:UMOwner,f:UMFace)->f32 {
  let b=f.neighbor;let i=umBudgetAt(a);let j=umBudgetAt(b);
+ if(!umSharpenFaceOpen(a,f)){return 0.0;}
  let phiA=scratch[i+2u];let phiB=scratch[j+2u];let dose=clamp(sharpen.tuning.x,0.0,1.0);
  let area=f32(f.width*f.width);let shareA=area/f32(a.width*a.width);let shareB=area/f32(b.width*b.width);
  let giveA=scratch[i]*shareA;let giveB=scratch[j]*shareB;let takeA=scratch[i+1u]*shareA;let takeB=scratch[j+1u]*shareB;
@@ -145,18 +156,18 @@ fn umProposal(a:UMOwner,f:UMFace)->f32 {
  textureStore(output,vec3i(umOrigin(o)),vec4f(value));
 }`.replaceAll('umAllOwner(gid)','umOwner(gid)')});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
-    const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]});
+    const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.bindLayout]:[])]});
     for(const entryPoint of ["cacheGeometry","prepare","propose","limit","commit"])this.pipelines.set(entryPoint,await Promise.all([1,2,4].map(umCellWidth=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umCellWidth,umDispatchX:this.ownership.dispatchX}}}))));
   }
   encodeGeometry(encoder:GPUCommandEncoder,group:GPUBindGroup):void{
     if(this.pipelines.size!==5)throw new Error("Mixed sharpening is not initialized");
-    const pass=encoder.beginComputePass({label:"Uniform mixed sharpening geometry"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);
+    const pass=encoder.beginComputePass({label:"Uniform mixed sharpening geometry"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);
     this.ownership.dispatch(pass,this.pipelines.get("cacheGeometry")!);pass.end();
   }
   encodeSweep(encoder:GPUCommandEncoder,group:GPUBindGroup,refreshGeometry=true):void{
     if(refreshGeometry)this.encodeGeometry(encoder,group);
     if(this.pipelines.size!==5)throw new Error("Mixed sharpening is not initialized");
-    const pass=encoder.beginComputePass({label:"Uniform mixed geometric sharpening"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);
+    const pass=encoder.beginComputePass({label:"Uniform mixed geometric sharpening"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);
     for(const entry of ["prepare","propose","limit","commit"])this.ownership.dispatch(pass,this.pipelines.get(entry)!);pass.end();
   }
 }

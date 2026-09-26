@@ -5,15 +5,19 @@
  * This adds no topology tables and does not change geometric divergence.
  */
 export function uniformMixedPressureReconstructionSource(surface = false): string { return /* wgsl */ `
+// The pressure a finer or equal neighbour contributes to the owner's slope.
+fn umReconstructSample(owner:UMOwner,neighbor:UMOwner)->f32 {return ${surface ? "umPressureGhostSlopeSample(owner,neighbor)" : "umPressure(neighbor)"};}
+// A slope is needed beside a finer neighbour${surface ? " or an unequal air neighbour" : ""}.
+fn umReconstructNeeds(owner:UMOwner,neighbor:UMOwner)->bool {
+ return (neighbor.width!=0u&&neighbor.width<owner.width)${surface ? "||(neighbor.width!=0u&&neighbor.width!=owner.width&&!umPressureLiquid(neighbor))" : ""};
+}
 fn umReconstructPressureSlope(owner:UMOwner)->vec3f {
  let stencil=umTileStencil(owner.tile);
  if((stencil.x>>27u)==(stencil.y>>27u)){return vec3f(0);}
 ${surface ? " if(!umPressureLiquid(owner)){return vec3f(0.0);}" : " if(owner.width==1u){return vec3f(0.0);}"}
  var needed=false;
  for(var axis=0u;axis<3u;axis++){for(var side=0u;side<2u;side++){
-  let f=umFace(owner,axis,select(-1,1,side==1u),0u);
-  needed=needed||(f.neighbor.width!=0u&&f.neighbor.width<owner.width);
-${surface ? "  needed=needed||(f.neighbor.width!=0u&&f.neighbor.width!=owner.width&&!umPressureLiquid(f.neighbor));" : ""}
+  needed=needed||umReconstructNeeds(owner,umFace(owner,axis,select(-1,1,side==1u),0u).neighbor);
  }}
  if(!needed){return vec3f(0.0);}
  let p=umPressure(owner);var gradient=vec3f(0.0);
@@ -23,7 +27,7 @@ ${surface ? "  needed=needed||(f.neighbor.width!=0u&&f.neighbor.width!=owner.wid
    let sign=select(-1,1,side==1u);let first=umFace(owner,axis,sign,0u);
    if(first.neighbor.width==0u||first.neighbor.width>owner.width){continue;}
    var average=0.0;
-   for(var part=0u;part<first.count;part++){average+=${surface ? "umPressureGhostSlopeSample(owner,umFace(owner,axis,sign,part).neighbor)" : "umPressure(umFace(owner,axis,sign,part).neighbor)"};}
+   for(var part=0u;part<first.count;part++){average+=umReconstructSample(owner,umFace(owner,axis,sign,part).neighbor);}
    average/=f32(first.count);
    numerator+=f32(sign)*(average-p);
    span+=0.5*f32(owner.width+first.neighbor.width)*UM_H[axis];

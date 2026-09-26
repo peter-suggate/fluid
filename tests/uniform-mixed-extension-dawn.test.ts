@@ -68,6 +68,23 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
    for(const face of faces){const observed=actual[4*at(face.anchor)+face.axis]!;assert.ok(Number.isFinite(observed),`invalid ${face.anchor}/${face.axis}`);if(face.source||face.axis===1)assert.ok(Math.abs(observed-value[face.axis]!)<2e-5,`supported/vertical extension ${observed} != ${value[face.axis]} at ${face.anchor}/${face.axis}`);
     else assert.ok(observed>=Math.min(0,value[face.axis]!)-2e-5&&observed<=Math.max(0,value[face.axis]!)+2e-5,"far extension introduced an extremum");}
    assert.deepEqual(errors,[]);
+   // Compare the fixed-stencil dispatch with the unchanged general evaluator
+   // on the same non-constant source field, including graded interfaces.
+   for(const face of faces)if(face.source){const u=(face.axis+1)%3,v=(face.axis+2)%3;
+    velocity[4*at(face.anchor)+face.axis]=value[face.axis]!+.005*face.anchor[u]!-.003*face.anchor[v]!;
+   }
+   device.queue.writeTexture({texture:physical},velocity,{bytesPerRow:d[0]*16,rowsPerImage:d[1]},[...d]);
+   const optimized=device.createCommandEncoder();stage.encode(optimized,groups);device.queue.submit([optimized.finish()]);
+   const regularValues=await readMixedTexture(device,output);
+   const allLists=[layout.fineTiles,layout.transitionTiles,layout.coarseTiles],counts=allLists.map(a=>a.length);
+   (ownership as unknown as {seamCounts:number[]}).seamCounts=counts;
+   device.queue.writeBuffer(ownership.support,(7*layout.tiles.length+16)*4,new Uint32Array([...counts,0,...allLists.flatMap(a=>[...a])]));
+   const general=device.createCommandEncoder();stage.encode(general,groups);device.queue.submit([general.finish()]);
+   const generalValues=await readMixedTexture(device,output);
+   for(const face of faces){const i=4*at(face.anchor)+face.axis;
+    assert.ok(Math.abs(regularValues[i]!-generalValues[i]!)<1e-6,`regular/general extension mismatch at ${face.anchor}/${face.axis}: ${regularValues[i]}/${generalValues[i]}`);
+   }
+   assert.deepEqual(errors,[]);
   }
  }finally{ownership?.destroy();owned.forEach(r=>r.destroy());solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}
 });

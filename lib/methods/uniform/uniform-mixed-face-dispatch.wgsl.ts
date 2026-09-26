@@ -44,3 +44,36 @@ export function uniformMixedFaceDispatchWGSL(entry: string, evaluate: string, al
  }
 }`;
 }
+
+/** One group per topology tile, one lane per fine anchor and component.
+ * Only canonical face anchors evaluate the supplied expression. Packing after
+ * the barrier retains exactly one writer per RGBA texel without serializing
+ * every patch and component of a coarse owner through one expensive sampler.
+ * Dispatch with tileGroups=true; the owner/worklist ABI itself is unchanged. */
+export function uniformMixedFaceTileDispatchWGSL(entry: string, evaluate: string): string {
+  return /* wgsl */ `
+var<workgroup> ${entry}Components:array<vec2f,192>;
+@compute @workgroup_size(192) fn ${entry}(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ let cell=lane%64u;let axis=lane/64u;let local=umCorner(cell,4u);
+ let cells=64u/(umCellWidth*umCellWidth*umCellWidth);
+ let firstOwner=umOwner(vec3u((group.x+umDispatchX*group.y)*cells,0,0));
+ var owner=firstOwner;var anchor=vec3i(0);var result=vec2f(0);
+ if(firstOwner.width!=0u){
+  // Merged launches (umCellWidth 1, 64 slots per job) carry a runtime width.
+  let width=select(umCellWidth,firstOwner.width,umMergedTiles);let q=local/width;let side=4u/width;
+  owner.lane=q.x+side*(q.y+side*q.z);owner.index+=owner.lane;
+  anchor=vec3i(umTileCoord(owner.tile)*4u+local);
+  let origin=umOrigin(owner);
+  if(origin[axis]==0u&&all(vec3u(anchor)==origin)){
+   let face=umFace(owner,axis,-1,0u);boundary[umNegativeBoundaryIndex(origin,axis)]=${evaluate};
+  }
+  let face=umPositiveFaceAtAnchor(owner,axis,anchor);
+  if(face.width!=0u){result=vec2f(${evaluate},1);}
+ }
+ ${entry}Components[lane]=result;workgroupBarrier();
+ if(lane<64u){
+  let x=${entry}Components[cell];let y=${entry}Components[cell+64u];let z=${entry}Components[cell+128u];
+  if(x.y+y.y+z.y>0.0){textureStore(output,anchor,vec4f(x.x,y.x,z.x,0));}
+ }
+}`;
+}

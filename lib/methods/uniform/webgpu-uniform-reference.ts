@@ -5,7 +5,7 @@ import { UniformMixedCellProlongation } from "./uniform-mixed-cell-prolongation"
 import { UniformMixedVertexTransfer } from "./uniform-mixed-vertex-transfer";
 import { UniformMixedVelocityRestriction } from "./uniform-mixed-velocity-restriction";
 import { UniformMixedTransportStage } from "./uniform-mixed-transport";
-import { createUniformMixedLayout } from "./uniform-mixed-layout";
+import { assertUniformMixedSolidPromotion, createUniformMixedLayout, uniformMixedSolidTiles } from "./uniform-mixed-layout";
 import { uniformMixedNativeTraceWGSL } from "./uniform-mixed-topology.wgsl";
 import type { FluidRefinementRegion } from "../../core/model";
 import { refinementRegionLattice } from "../../core/refinement-regions";
@@ -1654,17 +1654,29 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private mixedDiagnostics?: UniformMixedDiagnostics;
   private mixedRegionKey="";
   private mixedGeneration=0;
+  /** Terrain heights in cells, retained for solid promotion. */
+  private mixedTerrainCells?: Float32Array;
+  private mixedSolidMaskStamp=0;
+  /** The scene has cut cells (interior voxels or terrain); fixed at frame construction. */
+  private mixedStaticSolid=false;
+  private mixedSolidPromotion(){
+    return uniformMixedSolidTiles(refinementRegionLattice(this.scene).dimensions as [number,number,number],this.solidMask.words,SOLID_OCCUPANCY_MASK_HEADER_WORDS,
+      sceneHasTerrain(this.scene)?this.mixedTerrainCells:undefined);
+  }
   private mixedSource?: DenseLevelSetVolumeConsumerSource;
   private async initializeMixedFrame():Promise<void>{
     this.assertMixedOptions();
     if(!this.scratchArena||!this.vertexPhiField||!this.vertexPhiScratch)throw new Error("Mixed Uniform requires the shared native field arena");
     const fine=createUniformMixedLayout(refinementRegionLattice(this.scene),[]);
+    const promotion=this.mixedSolidPromotion();
+    this.mixedStaticSolid=promotion.cutCells>0||sceneHasTerrain(this.scene);
     this.mixedFrame=new UniformMixedFrame(this.device,fine,{
       arena:this.scratchArena,conditioning:this.conditioningScratch,volume:this.volumeA,volumeScratch:this.volumeB,
       velocity:this.velocityA,velocityScratch:this.velocityB,departure:this.velocityD,
       negative:this.boundaryVelocityA,negativeScratch:this.boundaryVelocityB,negativeDeparture:this.boundaryVelocityD,
       phi:this.vertexPhiField,phiScratch:this.vertexPhiScratch,phase:this.surfaceA,centerPhi:this.surfaceB,target:this.gammaB,correction:this.gammaA,
       pressure:this.pressureMultigrid.prepareMixedContinuation(),extension:this.velocityExtrapolator.prepareMixedContinuation(),uniformGroup:this.pressureMultigridGroup,sourceParams:this.params,
+      solid:this.mixedStaticSolid?{params:this.params,scratch:this.activeScratch,terrain:this.terrainTexture}:undefined,
     },this.scene.container.top==="open",this.pressureSchedule);
     await this.mixedFrame.initialize();
     this.mixedDiagnostics=new UniformMixedDiagnostics(this.device,this.mixedFrame.ownership,this.volumeA,this.velocityA,this.vertexPhiField,this.reductions);
@@ -1675,9 +1687,15 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   }
   private updateMixedRegions():void{
     if(!this.mixedFrame)return;
-    const regions=this.scene.fluid.refinementRegions??[],key=JSON.stringify(regions);
+    const regions=this.scene.fluid.refinementRegions??[],key=`${this.mixedSolidMaskStamp}:${JSON.stringify(regions)}`;
     if(key===this.mixedRegionKey)return;
-    const layout=createUniformMixedLayout(refinementRegionLattice(this.scene),regions);
+    // Fine near solids: every tile within one cell of a cut cell, and its
+    // neighbour tiles, is h. Coarse owners carry no solid terms at all.
+    const solid=this.mixedSolidPromotion();
+    // Solid kernels are compiled with the frame; a live voxel edit is refused
+    // loudly at the next advance (solidEditPending).
+    const layout=createUniformMixedLayout(refinementRegionLattice(this.scene),regions,true,1,solid.forced);
+    assertUniformMixedSolidPromotion(layout,solid.forced);
     this.mixedFrame.updateLayout(layout);this.mixedRegionKey=key;this.mixedGeneration++;
     Object.assign(this.executionInfo,{uniformMixedGeneration:this.mixedGeneration,uniformMixedFineTiles:layout.fineTiles.length,
       uniformMixedTransitionTiles:layout.transitionTiles.length,uniformMixedCoarseTiles:layout.coarseTiles.length,
@@ -2413,6 +2431,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.referenceVolumeCells = initial;
     const terrainCells = Float32Array.from(terrain, (height) => height / cellHeight);
     this.upload2DF32(this.terrainTexture, terrainCells, nx, nz);
+    this.mixedTerrainCells = terrainCells;
     this.initializeActiveRegion(wetMinimum, wetMaximum);
     Object.assign(this.executionInfo, {
       initialVolumeCellSum: initial, volumeCellSum: initial,
@@ -3565,8 +3584,16 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.assertMixedOptions();
       // Reject unsupported geometry before advancing the clock or consuming a
       // queued liquid edit. The last accepted frame remains usable for edits.
-      if(bodies.length||this.scene.rigidBodies.length||!this.solidVoxelsEmpty||sceneHasTerrain(this.scene)||(this.scene.container.shape??"box")!=="box")
-        throw new Error("Mixed Uniform solid coupling is not yet initialized for this scene");
+      // Static voxels, terrain and non-box vessels are fine-owner solids.
+      // Moving solids and live voxel edits have no mixed port yet.
+      if(bodies.length||this.scene.rigidBodies.length)
+        throw new Error("Mixed Uniform does not yet couple rigid bodies; static voxel, terrain and vessel solids only");
+      if(this.solidEditPending)
+        throw new Error("Mixed Uniform does not yet support live solid voxel edits (native scatterSolidExcess has no mixed port)");
+      // Fine solid owners read the native wall V (0 at a symmetry plane);
+      // coarse owners and the pressure halo assume closed walls (1/2).
+      if(this.mixedStaticSolid&&this.scene.container.depthBoundary==="symmetry")
+        throw new Error("Mixed Uniform solid coupling does not support a depth symmetry plane");
     }
     // The paper's method is calibrated for its own large-step regime (dt=1/30
     // in every Sec. 4 example): sharpening opposes per-resample transport
@@ -4306,11 +4333,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.receiverWorkReady = false;
     if (this.framePending) { this.deferredFrameScene = scene; return; }
     this.scene = scene;
-    this.updateMixedRegions();
     this.faceAuthorityStored = false;
     this.solidTilesStored = false;
     const dirty = this.solidMask.update(solidWorldForScene(scene));
-    if (dirty) { this.solidVoxelsEmpty = uniformSolidMaskEmpty(this.solidMask); this.solidEditPending = true; }
+    if (dirty) { this.solidVoxelsEmpty = uniformSolidMaskEmpty(this.solidMask); this.solidEditPending = true; this.mixedSolidMaskStamp++; }
+    this.updateMixedRegions();
     if (dirty) this.device.queue.writeBuffer(this.activeScratch,
       (this.solidVoxelScratchOffsetWords + dirty.firstWord) * 4, this.solidMask.words.buffer as ArrayBuffer,
       dirty.firstWord * 4, dirty.wordCount * 4);
