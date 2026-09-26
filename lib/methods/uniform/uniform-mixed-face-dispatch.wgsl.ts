@@ -17,10 +17,12 @@ fn umPositiveFaceAtAnchor(owner:UMOwner,axis:u32,anchor:vec3i)->UMFace {
 }
 `;
 
-export function uniformMixedFaceDispatchWGSL(entry: string, evaluate: string, allWidths = false, metadata = ""): string {
+/** `owner` names a caller-defined fn(gid:vec3u)->UMOwner that replaces the
+ * tier or all-width traversal (the live remap visits a changed-tile list). */
+export function uniformMixedFaceDispatchWGSL(entry: string, evaluate: string, allWidths = false, metadata = "", owner?: string): string {
   return /* wgsl */ `
 @compute @workgroup_size(64) fn ${entry}(@builtin(global_invocation_id) gid:vec3u){
- let owner=${allWidths ? "umAllOwner" : "umOwner"}(gid);if(owner.width==0u){return;}
+ let owner=${owner ?? (allWidths ? "umAllOwner" : "umOwner")}(gid);if(owner.width==0u){return;}
  let origin=umOrigin(owner);
  for(var axis=0u;axis<3u;axis++){
   if(origin[axis]==0u){let face=umFace(owner,axis,-1,0u);boundary[umNegativeBoundaryIndex(origin,axis)]=${evaluate};}

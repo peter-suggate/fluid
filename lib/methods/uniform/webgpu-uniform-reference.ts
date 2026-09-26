@@ -1125,8 +1125,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       ? Math.round(Math.min(8, Math.max(0, options.twoLevelShellReach!)))
       : Math.max(1, Math.ceil(0.5 * Math.max(...spacing) / Math.min(...spacing)));
     this.mixedCoarsening = options.mixedCoarsening === "dynamic" ? "dynamic" : "regions";
-    this.mixedCoarseningReach = Number.isFinite(options.mixedCoarseningReach) ? Math.round(Math.min(8, Math.max(0, options.mixedCoarseningReach!))) : 2;
-    this.mixedCoarseningHysteresis = Number.isFinite(options.mixedCoarseningHysteresis) ? Math.round(Math.min(4, Math.max(0, options.mixedCoarseningHysteresis!))) : 1;
+    this.mixedCoarseningReach = Number.isFinite(options.mixedCoarseningReach) ? Math.round(Math.min(8, Math.max(0, options.mixedCoarseningReach!))) : 0;
+    this.mixedCoarseningHysteresis = Number.isFinite(options.mixedCoarseningHysteresis) ? Math.round(Math.min(4, Math.max(0, options.mixedCoarseningHysteresis!))) : 0;
     const allocation = planUniformHostAllocation(nx, ny, nz, "maccormack");
     this.executionNegativeBoundaryVelocityBytes = allocation.boundaryVelocityBytes;
     const usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING
@@ -1700,7 +1700,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     await this.mixedFrame.initialize();
     this.mixedDiagnostics=new UniformMixedDiagnostics(this.device,this.mixedFrame.ownership,this.volumeA,this.velocityA,this.vertexPhiField,this.reductions);
     await this.mixedDiagnostics.initialize();
-    this.mixedDynamic=new UniformMixedDynamicClassifier(this.device,this.mixedFrame.ownership,this.volumeA,this.vertexPhiField);
+    this.mixedDynamic=new UniformMixedDynamicClassifier(this.device,this.mixedFrame.ownership,this.volumeA,this.vertexPhiField,this.velocityB);
     await this.mixedDynamic.initialize();
     this.mixedBuilder=new UniformMixedLayoutBuilder(this.device,this.mixedDynamic.bandBits,[this.mixedFrame.ownership,this.mixedFrame.levels[1]!.ownership]);
     await this.mixedBuilder.initialize();
@@ -1761,6 +1761,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.mixedBuilderStaticKey=staticKey;
     }
     const encoder=this.device.createCommandEncoder({label:"Uniform dynamic ownership census"});
+    this.mixedFrame.encodeExtension(encoder);
     this.mixedDynamic.encode(encoder,{dt,reach:this.mixedCoarseningReach,hysteresis:this.mixedCoarseningHysteresis,
       fullTolerance:UNIFORM_MIXED_DYNAMIC_FULL_TOLERANCE,emptyTolerance:Math.max(this.volumeDustThreshold,1e-6)});
     builder?.encode(encoder);
@@ -1772,8 +1773,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       uniformMixedDynamicCoarsePartialVolume:census.coarsePartialVolume,uniformMixedDynamicCoarsePhiCrossing:census.coarsePhiCrossing,uniformMixedDynamicCoarseDryLiquidPhi:census.coarseDryLiquidPhi,
       uniformMixedDynamicInteriorDeficit:census.interiorDeficit,uniformMixedDynamicAirVolume:census.airVolume});
     if(this.mixedDynamicLive&&census.violations>0)
-      throw new Error(`Uniform dynamic coarsening: the phi surface reached 2h/4h ownership in ${census.violations} tile(s) within one frame; `
-        +`raise coarseningReach (now ${this.mixedCoarseningReach}) or investigate the travel bound`);
+      throw new Error(`Uniform dynamic coarsening: the phi surface reached 2h/4h ownership in ${census.violations} tile(s) within one frame `
+        +`(tiles ${census.violationTiles.map(t=>{const n=this.mixedFrame!.ownership.layout.lattice.dimensions.map(d=>d/4);return `[${t%n[0]!},${Math.floor(t/n[0]!)%n[1]!},${Math.floor(t/(n[0]!*n[1]!))}]`;}).join(" ")}); `
+        +`raise coarseningReach (now ${this.mixedCoarseningReach}) or investigate the departure-box prediction`);
     if(censusOnly||!built)return;
     this.mixedDynamicFine=census.fine;
     const started=performance.now();
@@ -2458,8 +2460,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         this.mixedDynamicFine = undefined;
         this.updateMixedRegions();
       }
-      if (values.coarseningReach !== undefined) this.mixedCoarseningReach = Math.round(finite("coarseningReach", 2, 0, 8));
-      if (values.coarseningHysteresis !== undefined) this.mixedCoarseningHysteresis = Math.round(finite("coarseningHysteresis", 1, 0, 4));
+      if (values.coarseningReach !== undefined) this.mixedCoarseningReach = Math.round(finite("coarseningReach", 0, 0, 8));
+      if (values.coarseningHysteresis !== undefined) this.mixedCoarseningHysteresis = Math.round(finite("coarseningHysteresis", 0, 0, 4));
       if (values.transportWorkMap !== undefined) this.transportTiles = values.transportWorkMap !== "dense";
       if (values.transportReach !== undefined) this.transportReach = Math.round(finite("transportReach", 1, -8, 8));
       if (values.volumePressureRows !== undefined) this.volumePressureRows = values.volumePressureRows === "all" ? 2 : values.volumePressureRows === "off" ? 0 : 1;

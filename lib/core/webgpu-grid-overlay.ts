@@ -1762,49 +1762,6 @@ fn volumeComposite(accumulated:vec4f,color:vec3f,alpha:f32)->vec4f {
   return vec4f(accumulated.rgb+color*contribution,accumulated.a+contribution);
 }
 
-fn volumeField(uv:vec2f)->vec4f {
-  let ndc=uv*2.0-1.0;
-  let origin=u.cameraPosition.xyz;
-  let forward=normalize(u.cameraTarget.xyz-origin);
-  var right=cross(forward,vec3f(0.0,1.0,0.0));
-  if(length(right)<1e-5){right=vec3f(1.0,0.0,0.0);}
-  right=normalize(right);
-  let up=normalize(cross(right,forward));
-  let direction=normalize(forward+right*ndc.x*u.viewport.x/max(u.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());
-  let frame=overlayGridFrame();let size=frame.size;let boundsMin=frame.boundsMin;
-  let interval=boxIntersection(origin,direction,boundsMin,boundsMin+size);
-  if(interval.y<=max(interval.x,0.0)){discard;}
-  let start=max(interval.x,0.0);
-  let dims=vec3f(frame.dimensions);
-  let fineTravel=abs(direction*(interval.y-start))*dims/max(size,vec3f(1e-9));
-  let steps=u32(clamp(ceil(fineTravel.x+fineTravel.y+fineTravel.z+1.0),1.0,512.0));
-  let stepLength=(interval.y-start)/f32(steps);
-  let footprint=max(stepLength*0.20,1e-5);
-  let opacity=clamp(u.debug.y,0.05,1.0);
-  let adaptiveGrid=u.debug.z>0.5;
-  var accumulated=vec4f(0.0);
-  var previous=vec2u(0xffffffffu);
-  for(var index=0u;index<512u;index+=1u){
-    if(index>=steps||accumulated.a>0.985){break;}
-    let point=origin+direction*(start+(f32(index)+0.5)*stepLength);
-    let local=clamp((point-boundsMin)/size,vec3f(0.0),vec3f(0.99999))*dims;
-    let localCell=clamp(vec3i(floor(local)),vec3i(0),frame.dimensions-vec3i(1));
-    let cell=frame.minimumFine+localCell;
-    let linear=u32(localCell.x)+u32(dims.x)
-      *(u32(localCell.y)+u32(dims.y)*u32(localCell.z));
-    var key=vec2u(linear,0u);
-    if(adaptiveGrid){key=adaptiveCellKey(cell,vec3i(dims));}
-    if(all(key==previous)){continue;}
-    previous=key;
-    let sample=gridSample(point,boundsMin,size,frame.minimumFine,
-      frame.dimensions,1,footprint);
-    let alpha=sample.alpha*opacity*0.16;
-    accumulated=volumeComposite(accumulated,sample.color,alpha);
-  }
-  if(accumulated.a<=0.001){discard;}
-  return vec4f(displayColor(accumulated.rgb/max(accumulated.a,1e-6)),accumulated.a);
-}
-
 @fragment fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
   recordComposition=layers.control.x>0.5;
   recordWindowPresent=layers.control.y>0.5;
@@ -1815,59 +1772,97 @@ fn volumeField(uv:vec2f)->vec4f {
   let sliceOnlyMode = i32(round(u.debug.w)) >= 21 && i32(round(u.debug.w)) <= 23;
   let axis = select(requestedAxis, 1, requestedAxis == 4 && sliceOnlyMode);
   if (axis <= 0 || u.gridInfo.w <= 0.5) { discard; }
-  if (axis == 4) { return volumeField(input.uv); }
+  let volume = axis == 4;
   let ndc = input.uv * 2.0 - 1.0;
   let origin = u.cameraPosition.xyz;
   let forward = normalize(u.cameraTarget.xyz - origin);
-  let right = normalize(cross(forward, vec3f(0.0, 1.0, 0.0)));
+  var right = cross(forward, vec3f(0.0, 1.0, 0.0));
+  if (length(right) < 1e-5) { right = vec3f(1.0, 0.0, 0.0); }
+  right = normalize(right);
   let up = normalize(cross(right, forward));
   let direction = normalize(forward + right * ndc.x * u.viewport.x / max(u.viewport.y, 1.0) * cameraTanHalfFov() + up * ndc.y * cameraTanHalfFov());
   let frame=overlayGridFrame();let size=frame.size;let boundsMin=frame.boundsMin;
   let boundsMax = boundsMin + size;
   let dims = vec3f(frame.dimensions);
-  var denominator = direction.z;
-  var rayOrigin = origin.z;
-  var planeCoordinate = 0.0;
-  if (axis == 1) {
-    let layer = clamp(floor(u.debug.y * dims.z), 0.0, dims.z - 1.0);
-    planeCoordinate = boundsMin.z + (layer + 0.5) * size.z / dims.z;
-  } else if (axis == 2) {
-    let layer = clamp(floor(u.debug.y * dims.x), 0.0, dims.x - 1.0);
-    planeCoordinate = boundsMin.x + (layer + 0.5) * size.x / dims.x;
-    denominator = direction.x;
-    rayOrigin = origin.x;
+  // A slice samples one plane point; the volume view marches the box.
+  var point = vec3f(0.0);
+  var distance = 0.0;
+  var footprint = 0.0;
+  var marchStart = 0.0;
+  var marchStep = 0.0;
+  var marchSteps = 0u;
+  if (volume) {
+    let interval=boxIntersection(origin,direction,boundsMin,boundsMax);
+    if(interval.y<=max(interval.x,0.0)){discard;}
+    marchStart=max(interval.x,0.0);
+    let fineTravel=abs(direction*(interval.y-marchStart))*dims/max(size,vec3f(1e-9));
+    marchSteps=u32(clamp(ceil(fineTravel.x+fineTravel.y+fineTravel.z+1.0),1.0,512.0));
+    marchStep=(interval.y-marchStart)/f32(marchSteps);
+    footprint=max(marchStep*0.20,1e-5);
   } else {
-    let layer = clamp(floor(u.debug.y * dims.y), 0.0, dims.y - 1.0);
-    planeCoordinate = boundsMin.y + (layer + 0.5) * size.y / dims.y;
-    denominator = direction.y;
-    rayOrigin = origin.y;
+    var denominator = direction.z;
+    var rayOrigin = origin.z;
+    var planeCoordinate = 0.0;
+    if (axis == 1) {
+      let layer = clamp(floor(u.debug.y * dims.z), 0.0, dims.z - 1.0);
+      planeCoordinate = boundsMin.z + (layer + 0.5) * size.z / dims.z;
+    } else if (axis == 2) {
+      let layer = clamp(floor(u.debug.y * dims.x), 0.0, dims.x - 1.0);
+      planeCoordinate = boundsMin.x + (layer + 0.5) * size.x / dims.x;
+      denominator = direction.x;
+      rayOrigin = origin.x;
+    } else {
+      let layer = clamp(floor(u.debug.y * dims.y), 0.0, dims.y - 1.0);
+      planeCoordinate = boundsMin.y + (layer + 0.5) * size.y / dims.y;
+      denominator = direction.y;
+      rayOrigin = origin.y;
+    }
+    if (abs(denominator) <= 1e-5) { discard; }
+    distance = (planeCoordinate - rayOrigin) / denominator;
+    point = origin + direction * distance;
+    let inside = all(point >= boundsMin - vec3f(1e-4)) && all(point <= boundsMax + vec3f(1e-4));
+    if (distance <= 0.0 || !inside) { discard; }
+    footprint = distance * 1.44 / max(u.viewport.y, 1.0);
+    sliceHatchFootprint = dot(point - origin, forward) * 1.44 / max(u.viewport.y, 1.0);
   }
-  if (abs(denominator) <= 1e-5) { discard; }
-  let distance = (planeCoordinate - rayOrigin) / denominator;
-  let point = origin + direction * distance;
-  let inside = all(point >= boundsMin - vec3f(1e-4)) && all(point <= boundsMax + vec3f(1e-4));
-  if (distance <= 0.0 || !inside) { discard; }
-  let footprint = distance * 1.44 / max(u.viewport.y, 1.0);
-  sliceHatchFootprint = dot(point - origin, forward) * 1.44 / max(u.viewport.y, 1.0);
   var overlay=GridSample(vec3f(0),0.0,0.0,false);
-  // One gridSample site for composed layers and the single legacy view, and
-  // a pass count the compiler cannot see: gridSample is large, and each
-  // inlined or unrolled copy of it is compiled in full.
-  let layered=layers.control.x>0.5;
+  // One gridSample site serves the volume march, the composed layers and the
+  // single legacy view, with a pass count the compiler cannot see. gridSample
+  // is large and Metal compiles every inlined or unrolled copy in full: a
+  // second site for the march alone more than doubled pipeline creation.
+  let layered=layers.control.x>0.5 && !volume;
   var accumulated=vec4f(0.0);
   let modes=array<i32,${VISUAL_LAYERS.length}>(${VISUAL_LAYERS.map(l => l.mode).join(",")});
-  let passes=select(1u,${VISUAL_LAYERS.length}u,layered);
+  let volumeOpacity=clamp(u.debug.y,0.05,1.0);
+  let adaptiveGrid=u.debug.z>0.5;
+  var previous=vec2u(0xffffffffu);
+  let passes=select(select(1u,${VISUAL_LAYERS.length}u,layered),marchSteps,volume);
   for(var index=0u;index<passes;index+=1u){
-    var opacity=1.0;
-    if(layered){
+    var samplePoint=point;var sampleAxis=axis;var opacity=1.0;
+    if(volume){
+      if(accumulated.a>0.985){break;}
+      samplePoint=origin+direction*(marchStart+(f32(index)+0.5)*marchStep);
+      let local=clamp((samplePoint-boundsMin)/size,vec3f(0.0),vec3f(0.99999))*dims;
+      let localCell=clamp(vec3i(floor(local)),vec3i(0),frame.dimensions-vec3i(1));
+      let linear=u32(localCell.x)+u32(dims.x)*(u32(localCell.y)+u32(dims.y)*u32(localCell.z));
+      var key=vec2u(linear,0u);
+      if(adaptiveGrid){key=adaptiveCellKey(frame.minimumFine+localCell,vec3i(dims));}
+      if(all(key==previous)){continue;}
+      previous=key;sampleAxis=1;
+    } else if(layered){
       opacity=layers.opacity[index/4u][index%4u];
       if(opacity<=0.0){continue;}
       layerMode=modes[index];
     }
-    let sample=gridSample(point,boundsMin,size,frame.minimumFine,frame.dimensions,axis,footprint);
+    let sample=gridSample(samplePoint,boundsMin,size,frame.minimumFine,frame.dimensions,sampleAxis,footprint);
+    if(volume){accumulated=volumeComposite(accumulated,sample.color,sample.alpha*volumeOpacity*0.16);continue;}
     if(!layered){overlay=sample;break;}
     let a=clamp(sample.alpha*opacity,0.0,1.0);
     accumulated=vec4f(sample.color*a+accumulated.rgb*(1.0-a),a+accumulated.a*(1.0-a));
+  }
+  if(volume){
+    if(accumulated.a<=0.001){discard;}
+    return vec4f(displayColor(accumulated.rgb/max(accumulated.a,1e-6)),accumulated.a);
   }
   if(layered){
     if(accumulated.a<=0.001 || distance>=nearestBodyDistance(origin,direction)){discard;}

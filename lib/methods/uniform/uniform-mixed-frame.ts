@@ -179,7 +179,16 @@ export class UniformMixedFrame {
   for(const stage of [this.transport,this.plan,this.cleanup,this.remap,this.extension,this.cache,this.hanging,this.surface,this.surfaceVolume,this.copyPhi,this.geometry,this.sharpen,this.momentum,this.forces,this.authority,this.projection,this.continuation,this.cycles,this.acceptance])await stage.initialize();
   this.ready=true;
  }
+ private lastParameters?:UniformMixedFrameParameters;
+ /** Re-run the last advance's plan and extension into velocityScratch on
+  * the live layout: the field the next advance's surface trace samples.
+  * The dynamic census bounds departures from it between frames. */
+ encodeExtension(encoder:GPUCommandEncoder):void{
+  const p=this.lastParameters;if(!this.ready||this.busy||this.failed||!p)throw new Error("Mixed extension needs a completed advance");
+  this.plan.encode(encoder,p.supportPolicy,p.dt);this.extension.encode(encoder,this.extensionGroups,p.extensionSweeps??2);
+ }
  private write(p:UniformMixedFrameParameters):void{
+  this.lastParameters=p;
   const h=this.ownership.layout.lattice.cellSize_m;
   const floats=(b:GPUBuffer,v:number[])=>this.device.queue.writeBuffer(b,0,new Float32Array(v));
   const flags=(b:GPUBuffer,v:number[])=>this.device.queue.writeBuffer(b,16,new Uint32Array(v));

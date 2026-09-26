@@ -263,6 +263,59 @@ Incorporate its changes as they land:
     changes.
   - **Next:** phase 2 (changed-tile remap: 3.5–6.4 ms per relayout now) and
     phase 3 (tile-stable addressing), then the Dawn lane (phase 5).
+- 2026-09-27: phase 2 and phase 5 landed. Phase 3 is not needed.
+  - Phase 2, changed-tile remap (`uniform-mixed-remap.ts`). `markChanged`
+    lists every tile whose 3×3×3 neighbourhood changed width, comparing the
+    live and target tile words. The remap and publish passes then dispatch
+    one group per listed tile, indirectly. Every other owner's remap is the
+    identity, so its live value stays in place. Region edits (CPU `apply`)
+    and GPU-built generations (`applyBuilt`) share the path.
+  - A/B against the HEAD full remap on identical canonical fields, 64×48×80,
+    4 random layout pairs with 1.7k–2.8k of 3840 tiles changing width:
+    - phi is bitwise equal;
+    - volume, velocity and the negative boundary differ by ≤ 2.2e-7
+      relative (≤ 1 ulp). The full remap re-averaged unchanged coarse owners
+      (64 equal values / 64), adding those ulps; the worklist no longer does.
+  - 30-step 128³ probe: remap median 4.8 → 3.4 ms. The trajectory diverges
+    after the step 9–12 splash (the ulps above), so pass sums are not
+    comparable step by step.
+  - Phase 3 (tile-stable addressing) is not needed. Fields are dense
+    position-indexed textures, and pressure and records are rebuilt every
+    frame, so renumbering owners costs nothing beyond the adopt copies.
+    Pressure needs no remap either: the cold start costs no extra cycles
+    (dynamic 3–4 against all-fine 2–6).
+  - Phase 5 lane: `npm run test:dawn:uniform-dynamic-coarsening`
+    (`tests/uniform-dynamic-coarsening-dawn.test.ts`). It runs the app's
+    method with `coarsening:"dynamic"` on the 128³ dam break for 30 steps
+    (`UNIFORM_DYNAMIC_LANE_STEPS`) and asserts:
+    - per step: tile counts, zero phi crossings in coarse owners,
+      |volume drift| < 1e-4;
+    - relayouts ≥ half the steps, and fine tiles that start under half and
+      then grow;
+    - no shader or pipeline creation after frame 2, and no uncaptured errors.
+    It passes with 29 relayouts and no allocations after frame 2.
+  - Open lead, the band cap at steps 9–15. The splash drives max speed to
+    about 25 m/s in both the dynamic and the unified all-fine arms. That is
+    a solver property, not coarsening. The census radius is the tile's
+    `speeds[UM_TILES+t]`, a box maximum over the *global* certificate
+    radius, times the frame dt. It exceeds `UNIFORM_MIXED_DYNAMIC_DISTANCE_CAP`,
+    so every tile goes fine (32768/0/0) until the spike decays. The sound
+    local form:
+    - each interface tile emits its own radius;
+    - a tile is fine iff it lies in some interface tile's Chebyshev cube;
+    - this is separable: x takes the max radius among row candidates with
+      |dx| ≤ r, then y and z the same;
+    - each radius comes from a local speed box grown to its fixed point, not
+      the global box.
+    This only pays off if the fast speeds are localized.
+  - Pre-existing failures in the mixed suite, not caused by this work:
+    - `uniform-mixed-remap-dawn` trips its no-allocation guard, because the
+      tap cache grows on a live edit (a32e2ad9);
+    - `uniform-mixed-solid-parity-dawn` coarse-region mass (the same
+      5420.98 vs 6144 in logs from 2026-09-26 18:58);
+    - `uniform-mixed-native-transport-dawn` has a stale byte formula.
+  - Default stays Regions. Dynamic wins wall time after about step 16, but
+    loses over the whole 30 steps (early GPU seam work, performance program).
 - 2026-09-27: visual layers follow the live ownership. The grid-overlay slice
   draws the represented cell per owner: the grid lattice, sample dots, density
   bars, velocity arrows (one per owner, sampled at its centre), body occupancy,
@@ -271,3 +324,67 @@ Incorporate its changes as they land:
   volume, pressure, velocity and released faces already resolved through the
   shared presentation topology, which `updateLayout` rewrites in place, so a
   relayout reaches every layer with no rebind.
+- 2026-09-27 overlay compile hang: the grid-overlay render pipeline never
+  finished building on Metal (>200 s, also at HEAD), so no visual layer ever
+  appeared (`createRenderPipelineAsync` just never resolved). Metal inlines
+  every call, and the mixed presentation samplers were inlined at dozens of
+  sites (per field mode, per layer iteration, per volume-march step). Fix:
+  each fragment samples fluid/phi/velocity/zero-contour once, and
+  `fragmentMain` has a single `gridSample` call site shared by the legacy
+  slice, the layered composition and the volume march; presentation loop
+  bounds are runtime (`umPresentationLoopBound`). Build is now ~11 s cold.
+- 2026-09-27 surface-only census (predicted surface tiles). Reach and
+  hysteresis now default to 0: tile t is fine iff it is a current interface
+  tile or its RK2 departure box, cells `[4p - hi·s, 4p + 4 - lo·s]`, holds one
+  (3D prefix sum over interface flags). Signed per-axis velocity bounds come
+  from a separable min/max pyramid over radii 0,1,2,3,4,5,6,8,10,12,16 tiles.
+  Each tile uses the smallest level that covers its own RK2 midpoints,
+  `1 + ceil(travel/8)`. Three escapes shaped the rule:
+  - Bounds must come from the field the next trace samples. Air faces at
+    census time are stale, and the extension's hierarchy fills far faces
+    from band tiles many tiles away (bounding by the nearest source, even
+    widened by sqrt(3), missed a far-wall run-up and doubled the band). The
+    host now calls `UniformMixedFrame.encodeExtension` (the last advance's
+    plan and extension into velocityScratch) before the census, and every
+    owner's extended faces feed the pyramid.
+  - Zero joins every bound. Sampling near a wall or solid blends in the
+    zero face, and the trace stops short at a solid or the domain clamp.
+  - A current interface tile stays fine. Residual sheets behind a falling
+    surface (the alternating -0.008/-0.036 wall-vertex pattern) do not move
+    with the flow.
+  Result, dam break with tolerance 5 over 30 steps: no violations, and 5-11k
+  fine tiles against 24-27k for the old band. The lane passes (30
+  relayouts, no allocations after frame 2). Medians over steps 16-30,
+  against all-fine:
+  - Wall 157 vs 153 ms; pass sum 132 vs 109 ms.
+  - Census 4.3 ms, of which classify 3.3 and prefix/pyramid 1.0.
+  - Remap 7.3 ms.
+  - The census's second plan+extension run costs about 4 + 4 ms.
+  - Seam-heavy surface stages lose about 40 ms: momentum +8.3, global
+    surface volume +6.8, body forces +5.2, advect +4.3, redistance +4.1,
+    fill +2.7, hanging taps +2.1.
+  - Pressure and sharpening win about 28 ms: sweep -9.5, sharpening -6.4,
+    mg smooth -3.0, rowsDivide -2.4.
+  Next leads:
+  - Reuse the census extension in the next frame instead of running it
+    twice. The remap must then carry velocityScratch.
+  - Cheaper remap under per-frame churn.
+  - The seam-path cost in the performance program's stages. In a 1-2 tile
+    band almost every fine tile is a seam tile.
+- 2026-09-27 h/4h exploration (a temporary switch relaid out with
+  `createUniformMixedLayout(..., stronglyBalanced=false)`; since removed).
+  - Dam break, surface-only, same fine tiles: the pass sum was 74/89/92 ms
+    against 91/103/117 ms graded at steps 2-4. Removing 2h seams cut
+    momentum by 4.7, surface volume 4.7, advect 2.7, redistance 2.1 and
+    forces 2.0 ms. At step 5 pressure failed ("did not converge", 18.8
+    against tolerance 5 within the 4-cycle budget).
+  - Still tank (tank-fill, 4h region x < 50%, y < 25%, 30 steps,
+    tolerance 5): maximum spurious speed was 0.015-0.023 m/s for all-fine
+    and for graded 2:1 alike. Ungraded 4:1 reached 0.61 m/s at step 1
+    (residual stalled at 2.3), then pressure diverged at step 2 (non-improving
+    cycle, candidate 60).
+  - Verdict: the mixed pressure operator and multigrid are 2:1 only. The
+    ungraded mode is not a usable 4:1 discretization. h/4h needs a
+    different pressure coupling, such as a 4h global solve plus a
+    flux-constrained fine band correction, before anything else can move.
+    The hydrostatic split cannot be judged until then.

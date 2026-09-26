@@ -146,11 +146,11 @@ params.push({kind:"select",key:"surfaceDeficitBalancing",label:"Surface-deficit 
 
 params.push({kind:"select",key:"coarsening",label:"Coarsening",default:"regions",tier:"coarse",update:"runtime",
   options:[{value:"regions",label:"Regions"},{value:"dynamic",label:"Dynamic"}],
-  hint:"Regions: authored refinement regions choose coarse tiles. Dynamic: after every frame, tiles near the free surface stay fine and submerged or far-air tiles coarsen to 4h, with a 2h collar. Authored regions can then only force fine. See docs/plans/uniform-dynamic-coarsening.md."});
-params.push({kind:"number",key:"coarseningReach",label:"Coarsening band reach",default:2,tier:"coarse",update:"runtime",
+  hint:"Regions: authored refinement regions choose coarse tiles. Dynamic: after every frame, only the tiles the surface can occupy during the next step (the RK2 departure boxes of their points hold the current surface) are fine; everything else coarsens to 4h, with a 2h collar. Authored regions can then only force fine. See docs/plans/uniform-dynamic-coarsening.md."});
+params.push({kind:"number",key:"coarseningReach",label:"Coarsening band reach",default:0,tier:"coarse",update:"runtime",
   min:0,max:8,step:1,digits:0,unit:"tiles",
-  hint:"Tiles added to each tile's one-step travel bound when deciding whether the surface can reach it. It must cover the sampling, extension and sharpening stencils; a surface found in a coarse tile is a fatal diagnostic."});
-params.push({kind:"number",key:"coarseningHysteresis",label:"Coarsening hysteresis",default:1,tier:"coarse",update:"runtime",
+  hint:"Tiles added around each tile's predicted departure box. 0 keeps exactly the tiles the surface can occupy next step; a surface found in a coarse tile is a fatal diagnostic."});
+params.push({kind:"number",key:"coarseningHysteresis",label:"Coarsening hysteresis",default:0,tier:"coarse",update:"runtime",
   min:0,max:4,step:1,digits:0,unit:"tiles",
   hint:"Extra distance a fine tile keeps before it may coarsen. Each coarsen/refine round trip averages velocity, so this limits churn."});
 
