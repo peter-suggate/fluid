@@ -7,7 +7,8 @@
  * for how a surface sizes them.
  */
 export {
-  Button, Choice, Metric, NumberInput, ResetButton, Select, Slider, Stepper, Switch, ToggleButton, Value,
+  Button, Choice, ColorInput, Metric, NumberInput, ResetButton, Select, Slider, Stepper, Swatch, Switch, ToggleButton,
+  Value,
   type ControlOption,
 } from "./controls";
 export {

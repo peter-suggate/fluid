@@ -132,7 +132,7 @@ export interface SvoNodeMipAddressPlan {
    * The scalar above is a maximum over levels, and the derived worklist arena
    * used to lay every section out at it — so the coarsest level, which holds one
    * page, got the base level's capacity at 48 B a record. A level's own bound is
-   * its own domain grid (`levelDimensions[level]`, which the planner's direct
+   * its own domain grid (`levelDimensions[level]`, which the plan's
    * page table cannot address past) capped by what the reserve could still add
    * to it, and both of those are exact rather than conservative: the plan's
    * total headroom is `reservePages`, so a level holding `p` pages today can
@@ -229,41 +229,6 @@ export function svoNodeMipAtlasPagesForCapacity(capacity: number): readonly [num
   const x = Math.ceil(Math.cbrt(capacity));
   const y = Math.ceil(Math.sqrt(capacity / x));
   return [x, y, Math.ceil(capacity / (x * y))];
-}
-
-/**
- * Direct page-table volume that addresses every page of the domain.
- *
- * The table is one Z slab per virtual level, so its extent is the domain's page
- * grid in X and Y and the sum of the per-level depths in Z. Allocating it at
- * domain size rather than at the first plan's size is what lets a re-plan
- * publish new coordinates without reallocating a texture the planner and the
- * builder already hold views of. A plan smaller than the allocation writes into
- * the same texture with its own level offsets, so an over-sized table is always
- * safe.
- *
- * `floorLevel` drops the slabs the opacity floor removed. It is worth doing
- * rather than leaving as harmless slack: the table is *dense* over the page
- * grid while the pages in it are sparse, so the base level alone is 95.3 MB of
- * the hero garden's 95.5 MB table at refinement depth 3, against 12.0 MB for
- * every level above it. The shader indexes its slabs by absolute level and
- * reads each level's depth as the gap between consecutive offsets, so a level
- * below the floor is simply a zero-depth slab and every lookup into it answers
- * "not resident" — which is exactly what a floored plan means.
- */
-export function svoNodeMipDomainDirectPageTableDimensions(
-  basePageDimensions: readonly [number, number, number],
-  levelCount: number,
-  floorLevel = 0,
-): readonly [number, number, number] {
-  if (!Number.isSafeInteger(floorLevel) || floorLevel < 0) throw new RangeError("Node-mip opacity floor level must be a non-negative safe integer");
-  const levels = svoNodeMipLevelPageDimensions(basePageDimensions, levelCount);
-  const base = levels[Math.min(floorLevel, levels.length - 1)];
-  return [
-    base[0],
-    base[1],
-    levels.reduce((depth, dimensions, level) => depth + (level < floorLevel ? 0 : dimensions[2]), 0),
-  ];
 }
 
 function levelPageCounts(plan: SvoNodeMipPyramidPlan, levelCount: number): number[] {
@@ -379,7 +344,7 @@ export function* planSvoNodeMipAddressesSteps(
   const atlasPages = svoNodeMipAtlasPagesForCapacity(pageCapacity);
   const plan = yield* buildPlanSteps(basePages, levelCount, pageCapacity, atlasPages, generation);
   // Pages a level's own grid can hold. Zero below the floor, where no page
-  // exists; the direct page table rejects every coordinate outside it, so this
+  // exists; growth refuses every coordinate outside it, so this
   // is a hard ceiling on that level and not an estimate.
   const denseLevelCounts = levelDimensions.map((dimensions, level) => (level < opacityFloorLevel
     ? 0 : dimensions[0] * dimensions[1] * dimensions[2]));
@@ -396,7 +361,7 @@ export function* planSvoNodeMipAddressesSteps(
   // The radiance atlas is sized from the *domain* above the floor rather than
   // from today's occupancy: a later growth can add pages at any level, and the
   // atlas is fixed for the lifetime of the world. A level can never hold more
-  // pages than the domain has at that level, because the planner's direct page
+  // pages than the domain has at that level, because the plan's page
   // table rejects coordinates outside the domain grid, so the domain sum is a
   // bound — though not the only one; see `radiancePageCapacity` below.
   // Never below the opacity floor: the radiance atlas rides the opacity
@@ -474,7 +439,7 @@ export interface SvoNodeMipAddressPlanGrowth {
    *
    * Always true today. Slots are handed out in level-major Morton order because
    * the sampled directory is binary-searched in exactly that order whenever the
-   * direct page table is unavailable, and there is no way to append a page in
+   * page table is unavailable, and there is no way to append a page in
    * the middle of that order without moving the pages after it.
    */
   rebuildRequired: boolean;
@@ -499,7 +464,7 @@ export function growSvoNodeMipAddressPlan(
     // Domain membership is asked of the *finest* coordinate the caller named,
     // before the floor collapses it: a page one step outside the base grid maps
     // inside the floor's grid, and accepting it would address geometry the
-    // planner's direct table cannot reach.
+    // plan cannot address.
     if (page.some((component, axis) => !Number.isSafeInteger(component) || component < 0
       || component >= current.basePageDimensions[axis])) {
       // Outside the declared domain: no plan of any size addresses it, and

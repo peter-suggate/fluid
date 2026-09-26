@@ -208,7 +208,7 @@ export function svoConeFanoutSceneBindGroupLayoutEntries(): GPUBindGroupLayoutEn
     { binding: 5, visibility: GPUShaderStage.COMPUTE, sampler: { type: "filtering" } },
     { binding: 6, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "uint", viewDimension: "2d" } },
     { binding: 7, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "float", viewDimension: "3d" } },
-    { binding: 8, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "uint", viewDimension: "3d" } },
+    { binding: 8, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "uint", viewDimension: "2d" } },
     { binding: 9, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "uint", viewDimension: "2d" } },
   ];
 }
@@ -357,7 +357,7 @@ struct DryParams {
   tuningRays0:vec4f,
   tuningRays1:vec4f,
   nodeMipDirect:vec4u,
-  nodeMipDirectLevelZ:array<vec4u,3>,
+  nodeMipReserved:array<vec4u,3>,
   tetrahedralRadiance:vec4u,
   nodeMipExtent:vec4f,
   giLighting:vec4f,
@@ -382,7 +382,7 @@ ${cameraApertureShaderLibrary()}
 @group(0) @binding(5) var nodeMipSampler:sampler;
 @group(0) @binding(6) var nodeMipDirectory:texture_2d<u32>;
 @group(0) @binding(7) var fluidCoverageVolume:texture_3d<f32>;
-@group(0) @binding(8) var nodeMipPageTable:texture_3d<u32>;
+@group(0) @binding(8) var nodeMipPageTable:texture_2d<u32>;
 @group(0) @binding(9) var nodeMipPageValidity:texture_2d<u32>;
 @group(1) @binding(0) var<uniform> fanout:FanoutFrame;
 @group(1) @binding(1) var fanoutReceiver:texture_2d<f32>;

@@ -79,10 +79,37 @@ export interface SvoGroundPlane {
   height_m: number;
   footprint_m: readonly [number, number, number, number];
   hazeDistance_m: number;
+  /**
+   * For a scene with `scene.backdrop`: the footprint distance out to which the
+   * renderer traces the backdrop ground (`svoBackdropContentRadius`). Positive,
+   * it retires the plane: the ground is the tiled terrain walk
+   * (`backdrop-terrain-tiles.ts`), terrain beyond the footprint takes the
+   * haze, and a ray that misses the ground below the horizon sees the horizon
+   * colour. Absent on every other scene, which keeps the plane exactly as it was.
+   */
+  backdropContentRadius_m?: number;
 }
 
 /** Haze e-folding distance, in multiples of the footprint's larger plan extent. */
 export const SVO_GROUND_PLANE_HAZE_FOOTPRINTS = 1.25;
+
+/**
+ * Haze transmittance at which the backdrop ground stops being traced.
+ *
+ * The hills fade into the horizon colour as `1 - exp(-d / hazeDistance)`, with
+ * d the distance from the footprint. Past the distance where the transmittance
+ * drops below 1/256, the ground is the horizon colour to within an 8-bit step,
+ * so a ray that has not met it by then is drawn as the horizon. The terrain
+ * tiles reach exactly that far (`backdropTerrainReach`); the outer radius only
+ * ends the valley's rise, never the ground.
+ */
+export const SVO_BACKDROP_HAZE_CUTOFF_TRANSMITTANCE = 1 / 256;
+
+/** Footprint distance out to which the backdrop ground is traced: where its haze leaves 1/256 of it. */
+export function svoBackdropContentRadius(hazeDistance_m: number): number {
+  if (!(hazeDistance_m > 0)) throw new RangeError("Backdrop terrain reach needs a positive haze distance");
+  return hazeDistance_m * Math.log(1 / SVO_BACKDROP_HAZE_CUTOFF_TRANSMITTANCE);
+}
 const GROUND_PLANE_PERIMETER_SAMPLES_PER_SIDE = 32;
 
 /**
@@ -97,7 +124,7 @@ const GROUND_PLANE_PERIMETER_SAMPLES_PER_SIDE = 32;
  * horizon.
  */
 export function sceneSvoGroundPlane(
-  scene: Pick<SceneDescription, "scenery" | "terrain" | "container" | "environment">,
+  scene: Pick<SceneDescription, "scenery" | "terrain" | "container" | "environment"> & Partial<Pick<SceneDescription, "backdrop">>,
 ): SvoGroundPlane | undefined {
   // The open-air garden is the one set whose ground is meant to run to the
   // horizon. A sculpted slab elsewhere (the hillside dam) has an uneven edge
@@ -123,10 +150,17 @@ export function sceneSvoGroundPlane(
   const middle = heights.length >> 1;
   const plane_m = heights.length % 2 === 0 ? 0.5 * (heights[middle - 1] + heights[middle]) : heights[middle];
   if (!Number.isFinite(plane_m)) throw new RangeError("Terrain shell ground-plane height is not finite");
+  // A backdrop owns the atmosphere: its ground and the horizon past it fade
+  // with one haze, so the horizon is continuous where the traced ground ends.
+  const hazeDistance_m = scene.backdrop
+    ? scene.backdrop.hazeDistance_m
+    : SVO_GROUND_PLANE_HAZE_FOOTPRINTS * Math.max(width_m, depth_m);
+  if (!(hazeDistance_m > 0)) throw new RangeError("Ground-plane haze distance must be positive");
   return {
     height_m: plane_m,
     footprint_m: [minX, minZ, maxX, maxZ],
-    hazeDistance_m: SVO_GROUND_PLANE_HAZE_FOOTPRINTS * Math.max(width_m, depth_m),
+    hazeDistance_m,
+    ...(scene.backdrop ? { backdropContentRadius_m: svoBackdropContentRadius(hazeDistance_m) } : {}),
   };
 }
 

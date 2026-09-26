@@ -6,7 +6,10 @@ import { validateTerrain, type TerrainDescription } from "./terrain";
 import type { SolidWorldVoxelPatch } from "./solid-world";
 import type { EnvironmentId } from "./environments";
 import { validateSceneryGraph, type SceneryGraph } from "./scenery-graph";
+import { validateBackdrop, type BackdropDescription } from "./backdrop";
 import type { DisplayGradeAuthoring, WaterOpticsAuthoring } from "./webgpu-lighting";
+
+export type { BackdropDescription } from "./backdrop";
 
 export type RunState = "paused" | "running";
 
@@ -181,6 +184,14 @@ export interface SceneDescription {
    * is an ordinary edit to these nodes. See lib/scenery-graph.ts.
    */
   scenery?: SceneryGraph;
+  /**
+   * Rolling hills and sparse vegetation *around* the set, drawn by a second,
+   * distance-LOD octree. Beside `scenery` and deliberately not in it: no
+   * solver, solid-world bake, collider scan, solver key or URL state
+   * enumerates this field, and the fluid never enters it. See
+   * lib/core/backdrop.ts and docs/backdrop-svo-plan.md.
+   */
+  backdrop?: BackdropDescription;
   fluid: {
     density_kg_m3: number;
     dynamicViscosity_Pa_s: number;
@@ -713,6 +724,7 @@ export function validateScene(scene: SceneDescription): string[] {
   }
   if (scene.terrain && c) errors.push(...validateTerrain(scene.terrain, c));
   if (scene.scenery) errors.push(...validateSceneryGraph(scene.scenery));
+  if (scene.backdrop !== undefined) errors.push(...validateBackdrop(scene.backdrop));
   if (!scene.nominalResolution || !(scene.nominalResolution.length_m > 0)) errors.push("Nominal resolution must be positive");
   if (!scene.numerics || !(scene.numerics.fixedDt_s > 0) || !(scene.numerics.maxDt_s > 0)) errors.push("Time steps must be positive");
   if (scene.numerics && scene.numerics.fixedDt_s > scene.numerics.maxDt_s) errors.push("Fixed time step exceeds maximum time step");

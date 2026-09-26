@@ -242,7 +242,10 @@ export type EditorActionIcon =
   | "compare"
   | "compare-close"
   | "compare-keep"
-  | "compare-swap";
+  | "compare-swap"
+  | "light"
+  | "sun"
+  | "lamp";
 
 export interface EditorAction {
   /** Unique within the ring it appears in. */

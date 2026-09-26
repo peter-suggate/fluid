@@ -1,4 +1,5 @@
 import { cloneScene, defaultScene, DEFAULT_FINEST_CELL_SIZE_M, type CameraState, type SceneDescription } from "./model";
+import type { BackdropDescription } from "./backdrop";
 import { sceneCellSizes_m, sceneLatticeDimensions } from "./scene-lattice-dimensions";
 import { SOLID_WORLD_TERRAIN_MATERIAL_ID, type SolidWorldVoxelPatch } from "./solid-world";
 import { heroGardenCloudTree } from "./hero-garden-tree";
@@ -688,6 +689,53 @@ function hoseNodes(): SceneryNode[] {
 export const HERO_GARDEN_SET_SEED = 0x5701_e5;
 
 /**
+ * The land around the set: gentle porcelain meadow hills, sparsely planted.
+ *
+ * Proportioned against a 1.8 x 1.2 m set seen from 1.9 m, and drawn as the
+ * set's own voxel terrain continued outward. The flat ring is 0.25 m of level
+ * ground at the seam, so the slab edge meets level voxels, and the waves ease
+ * in over the next 3 m. The relief is deliberately low (Peter: taller and
+ * steeper read wrong): 0.05-0.25 m up 2 m out, 0.15-0.45 m by 5 m, and no
+ * slope past about 0.2 anywhere, so the voxels step up in shallow terraces. The
+ * broadest wavelength (9 m, five set-widths) keeps them rolling. The mean
+ * ground rises about 1 m by the outer radius, where the valley's rise is
+ * complete; the ground itself runs on to the haze horizon, and the haze
+ * distance (30 m) fades it into the sky there.
+ *
+ * Vegetation is sparse on purpose: the set is the subject. About forty cloud
+ * trees start 9 m out (most, by area, far beyond that, and larger the farther
+ * they stand), about 150 shrubs from 3 m, a few hundred tufts inside 28 m, and a
+ * scatter of pebbles within 5 m, where they are the only thing large enough to
+ * notice next to the set.
+ *
+ * The seam height is deliberately absent — it is the set's ground, derived at
+ * build time by `backdropSeamForScene`.
+ */
+export const HERO_GARDEN_BACKDROP: BackdropDescription = Object.freeze({
+  kind: "rolling-hills",
+  seed: 0xb4c6_d201,
+  outerRadius_m: 72,
+  hazeDistance_m: 30,
+  hills: Object.freeze({
+    amplitude_m: 0.5,
+    wavelength_m: 9,
+    octaves: 3,
+    flatRing_m: 0.25,
+    rampWidth_m: 3,
+    valleyRise_m: 0.8,
+  }),
+  // Stored voxel terrain and scatter out to 14.4 m (cells 12.5 / 25 / 50 /
+  // 100 mm), lit like the set; the walked height field only beyond.
+  detailRings: 4,
+  vegetation: Object.freeze({
+    trees: Object.freeze({ density_m2: 0.003, radius_m: [9, 66] as const, size_m: [1, 4] as const }),
+    shrubs: Object.freeze({ density_m2: 0.02, radius_m: [3, 50] as const, size_m: [0.3, 0.9] as const }),
+    tufts: Object.freeze({ density_m2: 0.15, radius_m: [2, 28] as const, size_m: [0.08, 0.28] as const }),
+    pebbles: Object.freeze({ density_m2: 1.2, radius_m: [1.2, 5] as const, size_m: [0.03, 0.12] as const }),
+  }),
+}) as BackdropDescription;
+
+/**
  * The set, as a description of itself.
  *
  * This used to be a *composition step*: a function that took a ground query,
@@ -1065,6 +1113,9 @@ export function createHeroGardenHoseScene(options: HeroGardenHoseOptions = {}): 
   // a closure captured here — it samples `scene.terrain`, which is the grid
   // assigned above.
   scene.scenery = heroGardenScenery(waterline_m);
+  // Beside the scenery, never in it: see lib/core/backdrop.ts. A fresh copy,
+  // because documents are cloned and edited while the constant is frozen.
+  scene.backdrop = JSON.parse(JSON.stringify(HERO_GARDEN_BACKDROP)) as BackdropDescription;
   return scene;
 }
 

@@ -1280,7 +1280,10 @@ class SimulationController {
     const current = this.session(paneId).scene.getState().scene;
     const next = cloneScene(entry.scene);
     const voxelOnly = sceneEqualExcept(current, next, ["solidVoxels"]);
-    const sceneryOnly = sceneEqualExcept(current, next, ["scenery"]);
+    // The backdrop is render-only document data (no solver reads it), so an
+    // undo that touches only it, the scenery, the lights, or any mix keeps the
+    // running water.
+    const sceneryOnly = sceneEqualExcept(current, next, ["scenery", "backdrop", "lighting"]);
     if (sceneryOnly || (voxelOnly && takesLiveSolidEdits(this.session(paneId).method.getState().methodId))) {
       this.session(paneId).scene.getState().setScene(next, entry.presetId);
       const ui = this.session(paneId).ui.getState();

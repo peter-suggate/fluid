@@ -111,6 +111,10 @@
  *                                         the acceptance scene's authored record count
  *   FLUID_SVO_DRY_SMOKE_CELL_MM           hero-garden only; rebuilds the scene at this
  *                                         lattice, so the ground and the set follow it
+ *   FLUID_SVO_WIDE_SPAN_M                 adds two far scenery blocks this many metres out
+ *                                         (`withSvoWideSpanProxies`), widening the sparse
+ *                                         world so derived lighting is exercised past the
+ *                                         old twelve-level / dense page-table ceiling
  *   FLUID_SVO_DRY_SMOKE_REFINEMENT        extra octree levels under that lattice, which
  *                                         is what the *set* is voxelized at
  *   FLUID_SVO_DRY_SMOKE_WIDTH / _HEIGHT   render size (default 800 x 460)
@@ -219,6 +223,7 @@ import {
   packSvoDryViewUniforms,
   svoScenePrimitiveBrickDensity,
   SVO_VIEW_UNIFORM_FLOATS,
+  withSvoWideSpanProxies,
 } from "./svo-dry-frame-harness";
 
 // ---------------------------------------------------------------------------
@@ -574,7 +579,8 @@ const buildSmokeScene = (): SceneDescription => {
     ? createHeroGardenHoseSceneWithSet(latticeOptions)
     : createHeroGardenHoseStressScene({ recordMultiplier: HERO_GARDEN_STRESS_MAXIMUM_MULTIPLIER, ...latticeOptions });
 };
-const scene = buildSmokeScene();
+const wideSpan_m = Number(process.env.FLUID_SVO_WIDE_SPAN_M ?? 0);
+const scene = wideSpan_m > 0 ? withSvoWideSpanProxies(buildSmokeScene(), wideSpan_m) : buildSmokeScene();
 if (heroLatticeOverridden) {
   const groundShape = terrainSampleShape(scene.terrain);
   log(`Lattice ${scene.voxelDomain.finestCellSize_m * 1000} mm, set drawn at ${detailCell_m * 1000} mm`

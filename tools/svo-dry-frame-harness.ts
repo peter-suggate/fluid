@@ -39,6 +39,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { environmentIndex, type EnvironmentId } from "../lib/core/environments";
 import { cameraPosition } from "../lib/core/math";
+import { sceneryGraphForEnvironment } from "../lib/core/scenery-presets";
 import { sceneUsesFlatVoxelNormals, type CameraState, type SceneDescription } from "../lib/core/model";
 import { cameraTanHalfFov } from "../lib/core/webgpu-camera";
 import { boundingRadius, initializeRigidBodies } from "../lib/core/rigid-body";
@@ -390,5 +391,37 @@ export function svoScenePrimitiveBrickDensity(
     maximumPerBrick: maximum,
     overflowedBricks: overflowed,
     brickEdge_m: cellSize[0] * brickSize,
+  };
+}
+
+/**
+ * A synthetic *wide-span* world: the scene plus a few small scenery blocks far
+ * outside the set, so the sparse domain spans `2 * distance_m` in plan while the
+ * set itself is unchanged. Test-only; it exists to prove the dry world's derived
+ * lighting (node-mip pyramid, page table, radiance atlas) costs what the world
+ * holds rather than what it spans — the gate for Step 1 of
+ * `docs/backdrop-svo-plan.md`. Knob: `FLUID_SVO_WIDE_SPAN_M` on the smoke lane
+ * and on `tools/svo-fine-voxel-capacity.ts`.
+ */
+export function withSvoWideSpanProxies(scene: SceneDescription, distance_m: number): SceneDescription {
+  assert.ok(Number.isFinite(distance_m) && distance_m > 0, "wide-span proxy distance must be a positive number of metres");
+  const graph = scene.scenery ?? sceneryGraphForEnvironment(scene, scene.environment ?? "default");
+  const block = (id: string, x: number, z: number, halfSize: number) => ({
+    id: `wide-span-${id}`,
+    kind: "box" as const,
+    halfSize: { x: halfSize, y: halfSize, z: halfSize },
+    material: { colorLinear: [0.62, 0.6, 0.56] as const, surface: "stone" as const },
+    place: { position: { x, y: halfSize, z }, units: "metres" as const, anchor: "world" as const },
+  });
+  return {
+    ...scene,
+    scenery: {
+      ...graph,
+      nodes: [
+        ...graph.nodes,
+        block("east", distance_m, 0.35 * distance_m, 0.4),
+        block("west", -0.8 * distance_m, -distance_m, 0.6),
+      ],
+    },
   };
 }

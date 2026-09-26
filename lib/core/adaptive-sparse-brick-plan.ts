@@ -51,6 +51,14 @@ export interface AdaptiveSparseBrickPlanOptions {
    * their size.
    */
   refineEnvironmentLeaf?: (level: number, coordinate: SparseBrickCoordinate) => boolean;
+  /**
+   * Content the set's own claim does not reach (a backdrop's stored detail
+   * rings), planned after the set by a descent from the root: a node under a
+   * set leaf is skipped, a node above set leaves splits, and anywhere else this
+   * answers empty (0), leaf (1) or split (2). The set's plan is unchanged;
+   * these leaves take the voxel terminal.
+   */
+  classifySupplementalNode?: (level: number, coordinate: SparseBrickCoordinate) => 0 | 1 | 2;
   /** Representation selected after topology has admitted an environment leaf. */
   classifyEnvironmentLeaf?: (
     level: number,
@@ -115,16 +123,32 @@ function assertSolverLevel(value: number, maximumDepth: number): number {
  * this is a de-interleave rather than a lookup.
  */
 function coordinateForKey(key: bigint, level: number): SparseBrickCoordinate {
+  // Ten levels (30 bits) per chunk, de-interleaved in 32-bit integer
+  // arithmetic: three BigInt operations per key instead of nine per level.
   let x = 0;
   let y = 0;
   let z = 0;
-  for (let bit = 0; bit < level; bit += 1) {
-    x += Number((key >> BigInt(3 * bit)) & 1n) * 2 ** bit;
-    y += Number((key >> BigInt(3 * bit + 1)) & 1n) * 2 ** bit;
-    z += Number((key >> BigInt(3 * bit + 2)) & 1n) * 2 ** bit;
+  let remaining = key & ((1n << BigInt(3 * level)) - 1n);
+  for (let shift = 0; remaining !== 0n; shift += 10, remaining >>= 30n) {
+    const chunk = Number(remaining & 0x3fff_ffffn);
+    x += compactEveryThirdBit(chunk) * 2 ** shift;
+    y += compactEveryThirdBit(chunk >>> 1) * 2 ** shift;
+    z += compactEveryThirdBit(chunk >>> 2) * 2 ** shift;
   }
   return { x, y, z };
 }
+
+/** Bits 0, 3, 6, ... 27 of a 30-bit integer, packed into bits 0..9. */
+function compactEveryThirdBit(value: number): number {
+  let v = value & 0x0924_9249;
+  v = (v ^ (v >>> 2)) & 0x030c_30c3;
+  v = (v ^ (v >>> 4)) & 0x0300_f00f;
+  v = (v ^ (v >>> 8)) & 0x0300_00ff;
+  v = (v ^ (v >>> 16)) & 0x0000_03ff;
+  return v;
+}
+
+const OCTANT_BIGINTS: readonly bigint[] = [0n, 1n, 2n, 3n, 4n, 5n, 6n, 7n];
 
 function canonicalCoordinate(
   coordinate: SparseBrickCoordinate,
@@ -259,10 +283,14 @@ export function* planAdaptiveSparseBrickOctreeSteps(
     ? solverPrefixes[level].has(key)
     : solverPrefixes[solverLevel].has(key >> BigInt(3 * (level - solverLevel))));
 
-  // `${level}:${morton}` is unambiguous because each level has its own Morton domain.
-  const leafKeys = new Set<string>();
-  const batchTerminals = new Map<string, SparseBrickLeafTerminal>();
-  for (const key of inputs.solver.keys()) leafKeys.add(`${solverLevel}:${key}`);
+  // One key set per level, because each level has its own Morton domain. Kept
+  // as BigInt sets rather than `${level}:${morton}` strings: the string form
+  // printed every key in decimal and hashed the result, and on a backdrop's
+  // million-leaf plan that was most of the planner.
+  const perLevel = <T>(make: () => T): T[] => Array.from({ length: maximumDepth + 1 }, make);
+  const leafKeys = perLevel(() => new Set<bigint>());
+  const batchTerminals = perLevel(() => new Map<bigint, SparseBrickLeafTerminal>());
+  for (const key of inputs.solver.keys()) leafKeys[solverLevel].add(key);
 
   /**
    * The descent, as a generator so a yield offer reaches the driver from any
@@ -294,7 +322,7 @@ export function* planAdaptiveSparseBrickOctreeSteps(
       yield* descend();
       return;
     }
-    leafKeys.add(`${level}:${key}`);
+    leafKeys[level].add(key);
   }
   const proxyRoots = new Set(proxyPrefixes[minimumEnvironmentLevel]);
   if (options.proxyOccupancy) for (const key of options.proxyOccupancy.keys(minimumEnvironmentLevel)) proxyRoots.add(key);
@@ -316,8 +344,7 @@ export function* planAdaptiveSparseBrickOctreeSteps(
               || options.proxyOccupancy?.has(level + 1, coordinateForKey(child, level + 1))) next.push(child);
           }
         } else {
-          const leafKey = `${level}:${key}`;
-          leafKeys.add(leafKey);batchTerminals.set(leafKey, classification[index].terminal);
+          leafKeys[level].add(key);batchTerminals[level].set(key, classification[index].terminal);
         }
         if ((visited += 1) % PLAN_YIELD_BATCH === 0) yield;
       }
@@ -327,22 +354,54 @@ export function* planAdaptiveSparseBrickOctreeSteps(
     for (const key of [...proxyRoots].sort(compareMorton)) yield* addProxyLeaves(minimumEnvironmentLevel, key);
   }
 
-  const nodesByLevel = Array.from({ length: maximumDepth + 1 }, () => new Map<bigint, SparseBrickCoordinate>());
-  visited = 0;
-  for (const leafKey of leafKeys) {
-    const separator = leafKey.indexOf(":");
-    const leafLevel = Number(leafKey.slice(0, separator));
-    let key = BigInt(leafKey.slice(separator + 1));
-    for (let level = leafLevel; level >= 0; level -= 1) {
-      if (!nodesByLevel[level].has(key)) nodesByLevel[level].set(key, coordinateForKey(key, level));
-      key >>= 3n;
+  if (options.classifySupplementalNode) {
+    const classify = options.classifySupplementalNode;
+    // Strict ancestors of the set's leaves: a supplemental leaf there would
+    // overlap the set, so they split instead.
+    const ancestors = perLevel(() => new Set<bigint>());
+    for (let leafLevel = 1; leafLevel <= maximumDepth; leafLevel += 1) {
+      for (const leaf of leafKeys[leafLevel]) {
+        let key = leaf >> 3n;
+        for (let level = leafLevel - 1; level >= 0 && !ancestors[level].has(key); level -= 1) {
+          ancestors[level].add(key);
+          key >>= 3n;
+        }
+      }
+      yield;
     }
-    if ((visited += 1) % PLAN_YIELD_BATCH === 0) yield;
+    // Top-down, so a node is only reached through ancestors that are not
+    // leaves: a set leaf *at* the node is the one coverage left to test.
+    const stack: [number, bigint][] = [[0, 0n]];
+    while (stack.length > 0) {
+      const [level, key] = stack.pop()!;
+      if ((visited += 1) % PLAN_YIELD_BATCH === 0) yield;
+      if (leafKeys[level].has(key) || (solverCovers(level, key) && level >= solverLevel)) continue;
+      const verdict = ancestors[level].has(key) || solverCovers(level, key) ? 2 : classify(level, coordinateForKey(key, level));
+      if (verdict === 1 || (verdict === 2 && level === maximumDepth)) {
+        leafKeys[level].add(key);
+        batchTerminals[level].set(key, SPARSE_BRICK_VOXEL_TERMINAL);
+      } else if (verdict === 2) {
+        for (let octant = 7; octant >= 0; octant -= 1) stack.push([level + 1, mortonChild(key, octant)]);
+      }
+    }
+  }
+
+  const nodesByLevel = perLevel(() => new Map<bigint, SparseBrickCoordinate>());
+  visited = 0;
+  for (let leafLevel = 0; leafLevel <= maximumDepth; leafLevel += 1) {
+    for (let key of leafKeys[leafLevel]) {
+      for (let level = leafLevel; level >= 0; level -= 1) {
+        if (nodesByLevel[level].has(key)) break;
+        nodesByLevel[level].set(key, coordinateForKey(key, level));
+        key >>= 3n;
+      }
+      if ((visited += 1) % PLAN_YIELD_BATCH === 0) yield;
+    }
   }
 
   const levelOffsets: number[] = [];
   const nodes: SparseBrickNodePlan[] = [];
-  const nodeIndex = new Map<string, number>();
+  const nodeIndex = perLevel(() => new Map<bigint, number>());
   visited = 0;
   for (let level = 0; level <= maximumDepth; level += 1) {
     levelOffsets.push(nodes.length);
@@ -353,7 +412,7 @@ export function* planAdaptiveSparseBrickOctreeSteps(
     for (const [morton, coordinate] of ordered) {
       if ((visited += 1) % PLAN_YIELD_BATCH === 0) yield;
       const index = nodes.length;
-      nodeIndex.set(`${level}:${morton}`, index);
+      nodeIndex[level].set(morton, index);
       nodes.push({
         index,
         level,
@@ -375,8 +434,10 @@ export function* planAdaptiveSparseBrickOctreeSteps(
       const node = nodes[index];
       let firstChild = SPARSE_BRICK_INVALID_INDEX;
       let childMask = 0;
+      const children = nodeIndex[level + 1];
+      const shifted = node.morton << 3n;
       for (let octant = 0; octant < 8; octant += 1) {
-        const childIndex = nodeIndex.get(`${level + 1}:${mortonChild(node.morton, octant)}`);
+        const childIndex = children.get(shifted | OCTANT_BIGINTS[octant]!);
         if (childIndex === undefined) continue;
         firstChild = Math.min(firstChild, childIndex);
         childMask |= 1 << octant;
@@ -425,10 +486,10 @@ export function* planAdaptiveSparseBrickOctreeSteps(
   visited = 0;
   for (const node of nodes) {
     if ((visited += 1) % PLAN_YIELD_BATCH === 0) yield;
-    if (!leafKeys.has(`${node.level}:${node.morton}`)) continue;
+    if (!leafKeys[node.level].has(node.morton)) continue;
     const index: number = leaves.length;
     const terminal = !solverCovers(node.level, node.morton)
-      ? batchTerminals.get(`${node.level}:${node.morton}`) ?? options.classifyEnvironmentLeaf?.(node.level, node.coordinate)
+      ? batchTerminals[node.level].get(node.morton) ?? options.classifyEnvironmentLeaf?.(node.level, node.coordinate)
         ?? SPARSE_BRICK_VOXEL_TERMINAL
       : SPARSE_BRICK_VOXEL_TERMINAL;
     if (terminal.kind !== SPARSE_BRICK_LEAF_TERMINAL.voxels

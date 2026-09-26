@@ -1557,6 +1557,12 @@ export interface SparseBrickOctreeGPUOptions {
   bandedRecordCapacityFraction?: number;
   /** Dense scene lanes a banded world keeps. See {@link SparseBrickPayloadLayoutOptions.retainDenseLanes}. */
   retainDenseLanes?: readonly SparseBrickDenseSceneLane[];
+  /**
+   * Words appended to every per-voxel lane past `voxelCapacity`. The backdrop's
+   * terrain table (`backdrop-terrain-tiles.ts`) lives at owner-lane index
+   * `voxelCapacity`.
+   */
+  voxelLaneTailWords?: number;
 }
 
 /** One resolved lane: where it starts, how wide a voxel is, and its channels. */
@@ -2198,6 +2204,8 @@ export class SparseBrickOctreeGPU {
     this.nodeCapacity = positiveCapacity(options.nodeCapacity, "Node capacity");
     this.leafCapacity = positiveCapacity(options.leafCapacity, "Leaf capacity");
     this.voxelCapacity = this.leafCapacity * this.brickSize ** 3;
+    const tailWords = options.voxelLaneTailWords ?? 0;
+    if (!Number.isSafeInteger(tailWords) || tailWords < 0) throw new RangeError("Voxel lane tail must be a non-negative integer");
     const label = options.label ?? "Sparse brick octree";
     this.label = label;
     const storageUsage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
@@ -2213,8 +2221,9 @@ export class SparseBrickOctreeGPU {
     // rather than by throwing at a caller that only knows the world's lever.
     this.sceneGeometryFormat = this.payloadProfile === "dry" ? options.sceneGeometryFormat ?? "f32x2" : "f32x2";
     this.leafPayloadMode = this.payloadProfile === "dry" ? options.leafPayloadMode ?? "dense" : "dense";
+    if (tailWords > 0 && this.leafPayloadMode !== "dense") throw new RangeError("A voxel lane tail requires the dense leaf payload");
     const layout = resolveSparseBrickPayloadLayout(
-      this.payloadProfile, this.voxelCapacity, this.sceneGeometryFormat, {
+      this.payloadProfile, this.voxelCapacity + tailWords, this.sceneGeometryFormat, {
         leafPayloadMode: this.leafPayloadMode,
         voxelsPerLeaf: this.brickSize ** 3,
         bandedRecordCapacityFraction: options.bandedRecordCapacityFraction,

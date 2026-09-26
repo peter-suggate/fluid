@@ -238,9 +238,10 @@ export const SVO_DRY_SCENE_BINDING_CONTRACT = Object.freeze([
   // Evolving fluid coverage. Sampled, like the node-mip atlas, so water shadows
   // cost the fragment stage a texture unit rather than another storage buffer.
   { binding: 19, type: "texture-3d-float" as const },
-  // Direct node-mip page table. A sampled r32uint texture preserves the
-  // fragment-stage storage-buffer ceiling while replacing directory searches.
-  { binding: 20, type: "texture-3d-uint" as const },
+  // Node-mip page table: an occupancy-sized (level, page) -> slot hash in a
+  // sampled rgba32uint texture, which preserves the fragment-stage
+  // storage-buffer ceiling while replacing directory searches.
+  { binding: 20, type: "texture-2d-uint" as const },
   ...[21, 22, 23, 24].map((binding) => ({ binding, type: "texture-3d-float" as const })),
   // Exact zero-radiance certificate by physical page slot. Keeping this in a
   // sampled uint texture avoids another fragment-stage storage buffer.
@@ -270,7 +271,6 @@ export function sparseVoxelDrySceneBindGroupLayoutEntries(
       | (computeBindings.has(binding) ? GPUShaderStage.COMPUTE : 0)
       | (vertexBindings.has(binding) ? GPUShaderStage.VERTEX : 0);
     if (type === "texture-3d-float") return { binding, visibility, texture: { sampleType: "float", viewDimension: "3d" } };
-    if (type === "texture-3d-uint") return { binding, visibility, texture: { sampleType: "uint", viewDimension: "3d" } };
     if (type === "texture-2d-uint") return { binding, visibility, texture: { sampleType: "uint", viewDimension: "2d" } };
     if (type === "filtering-sampler") return { binding, visibility, sampler: { type: "filtering" } };
     return { binding, visibility, buffer: { type } };
@@ -607,10 +607,10 @@ export const SVO_DRY_SCENE_PARAMS_LAYOUT = Object.freeze({
   fluidCoverageWordOffset: 64,
   /** Five vec4 lanes of bounded runtime rendering controls. */
   tuningWordOffset: 76,
-  /** xyz: packed direct-table extent; w: published/usable. */
+  /** x: page-table hash entries; w: published/usable. */
   nodeMipDirectWordOffset: 96,
-  /** Twelve constant-indexed Z-slab offsets, one per supported node-mip level. */
-  nodeMipDirectLevelZWordOffset: 100,
+  /** Twelve reserved words; the retired dense page table's Z-slab offsets lived here. */
+  nodeMipReservedWordOffset: 100,
   /**
    * x: matching radiance generation; y: complete and usable;
    * z: finest level with a radiance page; w: the slot its atlas begins at.
@@ -1564,8 +1564,8 @@ export class SparseVoxelDrySceneRenderer {
     this.nodeMipFallbackAtlasView = this.nodeMipFallbackAtlas.createView({ dimension: "3d" });
     this.nodeMipFallbackDirectory = device.createTexture({ label: "Sparse voxel node-mip fallback directory", size: [2, 1], format: "rgba32uint", usage: GPUTextureUsage.TEXTURE_BINDING });
     this.nodeMipFallbackDirectoryView = this.nodeMipFallbackDirectory.createView();
-    this.nodeMipFallbackDirectPageTable = device.createTexture({ label: "Sparse voxel node-mip fallback direct page table", size: [1, 1, 1], dimension: "3d", format: "r32uint", usage: GPUTextureUsage.TEXTURE_BINDING });
-    this.nodeMipFallbackDirectPageTableView = this.nodeMipFallbackDirectPageTable.createView({ dimension: "3d" });
+    this.nodeMipFallbackDirectPageTable = device.createTexture({ label: "Sparse voxel node-mip fallback page table", size: [1, 1, 1], format: "rgba32uint", usage: GPUTextureUsage.TEXTURE_BINDING });
+    this.nodeMipFallbackDirectPageTableView = this.nodeMipFallbackDirectPageTable.createView();
     this.nodeMipPageValidityFallback = device.createTexture({
       label: "Sparse voxel node-mip page-validity fallback",
       size: [1, 1],
@@ -4712,7 +4712,7 @@ export class SparseVoxelDrySceneRenderer {
     // switch). Ineligible already means a 1x1x1 texture, four minimum buffers,
     // a zero page count, and `voxelLightActive == false` — the whole cost, gone,
     // with every binding still valid and no pipeline change.
-    const eligible = Boolean(this.voxelLightUserEnabled && nodeMip?.plan.complete && nodeMip.directPageTableReady
+    const eligible = Boolean(this.voxelLightUserEnabled && nodeMip?.plan.complete && nodeMip.pageTableReady
       && nodeMip.plan.pages.length > 0 && firstKind === SVO_LIGHT_KINDS.directional);
     this.voxelLightEpoch = this.voxelLightEpoch >= 0xffff ? 1 : this.voxelLightEpoch + 1;
     this.voxelLightPageCount = eligible ? nodeMip!.plan.pages.length : 0;
@@ -5297,9 +5297,8 @@ export class SparseVoxelDrySceneRenderer {
       for (const page of nodeMip.plan.pages) if (page.key.level < 11) levelStart[page.key.level + 1] += 1;
       for (let boundary = 1; boundary < levelStart.length; boundary += 1) levelStart[boundary] += levelStart[boundary - 1];
       words.set(levelStart, SVO_DRY_SCENE_PARAMS_LAYOUT.nodeMipLevelStartWordOffset);
-      if (nodeMip.directPageTableReady) {
-        words.set([...nodeMip.directPageTableDimensions, 1], SVO_DRY_SCENE_PARAMS_LAYOUT.nodeMipDirectWordOffset);
-        words.set(nodeMip.directPageTableLevelZOffsets, SVO_DRY_SCENE_PARAMS_LAYOUT.nodeMipDirectLevelZWordOffset);
+      if (nodeMip.pageTableReady) {
+        words.set([nodeMip.pageTableShape.capacity, 0, 0, 1], SVO_DRY_SCENE_PARAMS_LAYOUT.nodeMipDirectWordOffset);
       }
     }
     if (giReady) {
@@ -5318,7 +5317,7 @@ export class SparseVoxelDrySceneRenderer {
     this.packLodParams(floats, words, SVO_DRY_SCENE_PARAMS_LAYOUT.lodWordOffset);
     this.packMeshFilterParams(floats, SVO_DRY_SCENE_PARAMS_LAYOUT.meshFilterWordOffset);
     const ground = scene.groundPlane;
-    floats.set(ground ? [1, ground.height_m, ground.hazeDistance_m, 0, ...ground.footprint_m] : [0, 0, 0, 0, 0, 0, 0, 0],
+    floats.set(ground ? [1, ground.height_m, ground.hazeDistance_m, ground.backdropContentRadius_m ?? 0, ...ground.footprint_m] : [0, 0, 0, 0, 0, 0, 0, 0],
       SVO_DRY_SCENE_PARAMS_LAYOUT.groundPlaneWordOffset);
     if (this.paramsWords?.length === words.length && words.every((word, index) => word === this.paramsWords![index])) return;
     this.device.queue.writeBuffer(this.paramsBuffer, 0, buffer);
@@ -5474,7 +5473,7 @@ export class SparseVoxelDrySceneRenderer {
       { binding: 17, resource: nodeMip?.sampler ?? this.nodeMipFallbackSampler },
       { binding: 18, resource: nodeMip?.directoryView ?? this.nodeMipFallbackDirectoryView },
       { binding: 19, resource: this.fluidCoverage?.visibleGeneration()?.view ?? this.fluidCoverageFallbackView },
-      { binding: 20, resource: nodeMip?.directPageTableView ?? this.nodeMipFallbackDirectPageTableView },
+      { binding: 20, resource: nodeMip?.pageTableView ?? this.nodeMipFallbackDirectPageTableView },
       { binding: 21, resource: tetrahedralRadiance?.views[0] ?? this.tetrahedralRadianceFallbackViews[0] },
       { binding: 22, resource: tetrahedralRadiance?.views[1] ?? this.tetrahedralRadianceFallbackViews[1] },
       { binding: 23, resource: tetrahedralRadiance?.views[2] ?? this.tetrahedralRadianceFallbackViews[2] },
@@ -5496,7 +5495,7 @@ export class SparseVoxelDrySceneRenderer {
           { binding: 5, resource: nodeMip?.sampler ?? this.nodeMipFallbackSampler },
           { binding: 6, resource: nodeMip?.directoryView ?? this.nodeMipFallbackDirectoryView },
           { binding: 7, resource: this.fluidCoverage?.visibleGeneration()?.view ?? this.fluidCoverageFallbackView },
-          { binding: 8, resource: nodeMip?.directPageTableView ?? this.nodeMipFallbackDirectPageTableView },
+          { binding: 8, resource: nodeMip?.pageTableView ?? this.nodeMipFallbackDirectPageTableView },
           { binding: 9, resource: nodeMipPageValidity ?? this.nodeMipPageValidityFallbackView },
         ],
       })

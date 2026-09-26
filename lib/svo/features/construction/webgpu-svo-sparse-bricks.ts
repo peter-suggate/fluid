@@ -87,15 +87,13 @@ import {
   growSvoNodeMipAddressPlan,
   pagesOutsideSvoNodeMipAddressPlan,
   planSvoNodeMipAddressesSteps,
-  svoNodeMipDomainDirectPageTableDimensions,
   type SvoNodeMipAddressPlan,
 } from "../radiance/svo-node-mip-address-plan";
 import {
-  WEBGPU_SVO_NODE_MIP_LAYOUT,
   WebGpuLiveSvoNodeMipPyramid,
-  createWebGpuSvoNodeMipDirectPageTable,
   webGpuSvoNodeMipMaximumPages,
 } from "../radiance/webgpu-svo-node-mip-pyramid";
+import { SVO_NODE_MIP_MAXIMUM_LEVELS, svoNodeMipPageHashShape } from "../radiance/svo-node-mip-page-hash";
 import { WebGpuLiveSvoTetrahedralRadiance } from "../radiance/webgpu-svo-tetrahedral-radiance";
 import {
   LIVE_SVO_RADIANCE_FEEDBACK,
@@ -144,6 +142,15 @@ import {
   type CooperativeBuildOptions,
 } from "../../../core/cooperative-build";
 import { PassBroker } from "../../../core/webgpu-pass-broker";
+import { backdropSeamForScene, compileBackdropField } from "../backdrop/backdrop-field";
+import { BACKDROP_CONTENT_CEILING_HEADER_WORDS, BACKDROP_TERRAIN_HEADER_WORDS, BACKDROP_TERRAIN_TABLE, createBackdropContentCeiling, packBackdropTerrainTable, planBackdropTiles, raiseBackdropContentCeiling, type BackdropContentCeiling } from "../backdrop/backdrop-terrain-tiles";
+import {
+  backdropDetailCentreLattice,
+  backdropDetailFromPlan,
+  backdropDetailVoxelizerWGSL,
+  backdropDetailWorldBounds,
+  createBackdropDetailClassifier,
+} from "../backdrop/backdrop-detail";
 import {
   packPlanarBoundaryPatches,
   PLANAR_BOUNDARY_PATCH_BYTES,
@@ -1274,6 +1281,12 @@ export class OctreeSparseBrickWorld {
   private readonly coveredSceneBrickNodes = new Set<string>();
   private readonly planarSceneBrickNodes = new Set<string>();
   private readonly sampledTerrainNodes = new Map<string, SparseSceneAxisAlignedBounds>();
+  /** The stored backdrop rings' box, voxelized by the initial publication. */
+  private backdropDetailBounds?: SparseSceneAxisAlignedBounds;
+  /** The sun cones' content ceiling, kept on the CPU so an edit can raise its columns in place. */
+  private backdropContentCeiling?: BackdropContentCeiling;
+  /** The ceiling section's word index within the terrain table. */
+  private backdropContentCeilingWord = 0;
   private readonly reservedTopologyCoordinates = new Set<string>();
   private remainingTopologyLeafReserve = 0;
   private readonly reservedTopologySplits = new Set<string>();
@@ -1420,6 +1433,33 @@ export class OctreeSparseBrickWorld {
     this.solidWorldStamp = solidWorldContentStamp(scene);
     this.terrainFieldStamp = terrainFieldStamp(scene);
     const solidWorldBounds = solidWorldPageBounds(scene, initialSolidWorld);
+    /**
+     * The backdrop ground (`scene.backdrop`): render-only terrain beyond the
+     * set's footprint, out to the haze horizon. It is not octree content: the
+     * renderer walks it as a tiled height field (`backdrop-terrain-tiles.ts`)
+     * whose table sits past the dense owner lane. Only on a world the solver
+     * does not own, so no solver lattice, SolidWorld or collider ever sees it,
+     * and the set's domain is not widened.
+     */
+    const backdropField = scene.backdrop && (dryWorld || rendererOnly)
+      ? compileBackdropField(scene.backdrop, backdropSeamForScene(scene)) : undefined;
+    /**
+     * The backdrop's stored detail rings (`backdrop-detail.ts`): the walk's
+     * inner levels as real octree voxels, so they are lit like the set. The
+     * domain widens to hold them — bounds only, no bricks enumerated — padded
+     * by one outermost-ring brick, which is how far the centre can move when
+     * it snaps to the final origin below.
+     */
+    const backdropDetailRings = backdropField ? scene.backdrop?.detailRings ?? 0 : 0;
+    const backdropCell_m = sceneCellSizes_m(scene)[0];
+    const backdropDetailLattice_m = backdropDetailRings > 0
+      ? backdropDetailCentreLattice(backdropCell_m, backdropDetailRings, brickSize) : undefined;
+    const backdropDetailDomain = backdropField && backdropDetailRings > 0 ? backdropDetailWorldBounds(backdropField,
+      backdropDetailFromPlan(backdropField, planBackdropTiles(backdropField, {
+        origin_m: [-0.5 * scene.container.width_m, 0, -0.5 * scene.container.depth_m],
+        cellSize_m: backdropCell_m, firstLevel: backdropDetailRings,
+      }), backdropDetailRings), backdropDetailLattice_m) : undefined;
+    const authoredWorldBounds = scene.voxelDomain.bounds_m;
     // This tree is a sparse presentation consumer, not the fluid solver's
     // address space. Fluid residency claims wet pages as they appear; static
     // geometry claims only the exact voxel boxes compiled from SolidWorld.
@@ -1438,7 +1478,14 @@ export class OctreeSparseBrickWorld {
       ],
       {
         conservativePaddingCells: 1,
-        worldBounds_m: scene.voxelDomain.bounds_m,
+        worldBounds_m: backdropDetailDomain ? {
+          min: { x: Math.min(backdropDetailDomain.min.x, authoredWorldBounds?.min.x ?? Infinity),
+            y: Math.min(backdropDetailDomain.min.y, authoredWorldBounds?.min.y ?? Infinity),
+            z: Math.min(backdropDetailDomain.min.z, authoredWorldBounds?.min.z ?? Infinity) },
+          max: { x: Math.max(backdropDetailDomain.max.x, authoredWorldBounds?.max.x ?? -Infinity),
+            y: Math.max(backdropDetailDomain.max.y, authoredWorldBounds?.max.y ?? -Infinity),
+            z: Math.max(backdropDetailDomain.max.z, authoredWorldBounds?.max.z ?? -Infinity) },
+        } : authoredWorldBounds,
         solverClaim: "none",
         enumerateProxyBricks: !(options.selectPrimitiveBricksGpu && options.sceneSolids?.length && octreeLiveSceneBrickClaim() === "reachable" && (dryWorld || rendererOnly)),
       }
@@ -1727,6 +1774,30 @@ export class OctreeSparseBrickWorld {
         Math.min(sceneDomain.brickDimensions.reduce((a, b) => a * b, 1),
           options.sceneMutationBrickCapacity ?? OCTREE_LIVE_SCENE_MUTATION_BRICK_CAPACITY));
     }
+    // The backdrop's tile plan, on the final origin. With detail rings its
+    // centre snaps to the outermost ring's bricks, so every ring boundary is a
+    // node boundary of that ring's leaf level and stored columns are walked
+    // columns; the walk starts at the first level not stored.
+    if (backdropField && Math.abs(sceneDomain.cellSize_m[0] - backdropCell_m) > 1e-12) {
+      throw new RangeError("Backdrop detail lattice does not match the scene domain's cell");
+    }
+    const backdropTilePlan = backdropField ? planBackdropTiles(backdropField, {
+      origin_m: worldOrigin, cellSize_m: sceneDomain.cellSize_m[0],
+      firstLevel: backdropDetailRings, centreLattice_m: backdropDetailLattice_m,
+    }) : undefined;
+    const backdropDetail = backdropField && backdropTilePlan && backdropDetailRings > 0
+      ? backdropDetailFromPlan(backdropField, backdropTilePlan, backdropDetailRings) : undefined;
+    const backdropDetailClassifier = backdropField && backdropDetail ? createBackdropDetailClassifier({
+      field: backdropField, detail: backdropDetail, worldOrigin_m: worldOrigin, nodeEdge_m,
+      // The level whose voxel is the scene cell: the solver's, a refinement
+      // depth above the finest.
+      solverLevel: maximumDepth - refinementDepth,
+    }) : undefined;
+    const backdropDetailNodes = new Set<string>();
+    if (backdropField && backdropDetail) {
+      const box = backdropDetailWorldBounds(backdropField, backdropDetail);
+      this.backdropDetailBounds = { minimum: [box.min.x, box.min.y, box.min.z], maximum: [box.max.x, box.max.y, box.max.z] };
+    }
     reportStage("Plan the adaptive octree");
     yield;
     // The interruptible form of the same plan. This is the longest block in a
@@ -1789,7 +1860,32 @@ export class OctreeSparseBrickWorld {
               > OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET
             : environmentCoarsening?.refineEnvironmentLeaf(level, coordinate) ?? false))),
       classifyEnvironmentLeaf: (options.surfaceDualContouring || options.surfaceDualMarchingCubes) ? undefined : planarLeafClassifier,
+      classifySupplementalNode: backdropDetailClassifier ? (level, coordinate) => {
+        const verdict = backdropDetailClassifier.classify(level, coordinate);
+        if (verdict === 1) backdropDetailNodes.add(`${level}:${brickCoordinateKey(coordinate)}`);
+        return verdict;
+      } : undefined,
     });
+    // The backdrop's level-0 voxels continue the set's own terrain lattice
+    // (the scene cell, before any environment refinement) from the same origin.
+    // Every node-mip page lies under a leaf, so the leaf boxes bound the
+    // content each column can hold (see `BackdropContentCeiling`).
+    if (backdropField && backdropTilePlan) {
+      const worldEdge = refinedBrickDimensions.map((count, axis) => count * refinedBrickEdge[axis]!);
+      const ceiling = createBackdropContentCeiling([worldOrigin[0], worldOrigin[2]], [worldEdge[0]!, worldEdge[2]!]);
+      for (const leaf of plan.leaves) {
+        const node = plan.nodes[leaf.nodeIndex]!;
+        const scale = 2 ** (maximumDepth - node.level);
+        const coordinate = [node.coordinate.x, node.coordinate.y, node.coordinate.z];
+        raiseBackdropContentCeiling(ceiling,
+          coordinate.map((value, axis) => worldOrigin[axis]! + value * refinedBrickEdge[axis]! * scale),
+          coordinate.map((value, axis) => worldOrigin[axis]! + (value + 1) * refinedBrickEdge[axis]! * scale));
+      }
+      this.backdropContentCeiling = ceiling;
+    }
+    const backdropTerrainTable = backdropField && backdropTilePlan
+      ? packBackdropTerrainTable(backdropField, SOLID_WORLD_TERRAIN_MATERIAL_ID, backdropTilePlan, this.backdropContentCeiling) : undefined;
+    if (backdropTerrainTable) this.backdropContentCeilingWord = backdropTerrainTable[BACKDROP_TERRAIN_TABLE.ceilingWord]!;
     this.finestLevel = plan.maximumDepth;
     this.sceneBrickDimensions = refinedBrickDimensions;
     reportStage("Pack the octree and allocate its arenas");
@@ -1800,7 +1896,8 @@ export class OctreeSparseBrickWorld {
       const key = `${node.level}:${brickCoordinateKey(node.coordinate)}`;
       this.coveredSceneBrickNodes.add(key);
       if (leaf.terminalKind === SPARSE_BRICK_LEAF_TERMINAL.planarBoundary) this.planarSceneBrickNodes.add(key);
-      if (scene.terrain && node.level < maximumDepth && leaf.terminalKind === 0) {
+      // Stored backdrop rings are neither resampled terrain nor split on edit.
+      if (scene.terrain && node.level < maximumDepth && leaf.terminalKind === 0 && !backdropDetailNodes.has(key)) {
         const edge = renderCellSize.map(value => value * brickSize * 2 ** (maximumDepth - node.level));
         this.sampledTerrainNodes.set(key, {
           minimum: edge.map((value, axis) => worldOrigin[axis]! + [node.coordinate.x, node.coordinate.y, node.coordinate.z][axis]! * value) as [number, number, number],
@@ -1838,8 +1935,15 @@ export class OctreeSparseBrickWorld {
       payloadProfile === "dry" ? (options.surfaceContours ? "f16-unorm8" : octreeLiveSceneSceneGeometryFormat()) : "f32x2";
     const leafPayloadMode: SparseBrickLeafPayloadMode =
       payloadProfile === "dry" ? octreeLiveSceneLeafPayloadMode() : "dense";
+    if (backdropTerrainTable && leafPayloadMode !== "dense") {
+      throw new RangeError("A backdrop's terrain table requires the dense leaf payload");
+    }
     this.tree = new SparseBrickOctreeGPU(device, {
       brickSize, nodeCapacity, leafCapacity, label: "Octree unified live sparse-brick world",
+      // The terrain table's header is always there on a dense world, zeroed
+      // when there is no backdrop, so a reader can ask for its level count.
+      voxelLaneTailWords: leafPayloadMode === "dense"
+        ? Math.max(backdropTerrainTable?.length ?? 0, BACKDROP_TERRAIN_HEADER_WORDS) : 0,
       payloadProfile, sceneGeometryFormat, leafPayloadMode,
       // Every *reader* of scene identity is banded now. Both dense lanes stay
       // anyway, and for reasons that have nothing to do with the renderer:
@@ -1852,6 +1956,10 @@ export class OctreeSparseBrickWorld {
       retainDenseLanes: leafPayloadMode === "banded"
         ? SPARSE_BRICK_BANDED_PRODUCER_DENSE_LANES : undefined,
     });
+    if (backdropTerrainTable) {
+      device.queue.writeBuffer(this.tree.payload,
+        this.tree.sceneMaterialOwnerOffsetBytes + this.tree.voxelCapacity * Uint32Array.BYTES_PER_ELEMENT, backdropTerrainTable);
+    }
     yield;
     this.brickOccupancyBuilder = new WebGpuSvoBrickOccupancyBuilder(
       device, payloadProfile, this.tree.scenePayloadLanes);
@@ -2024,6 +2132,8 @@ export class OctreeSparseBrickWorld {
         cellSize_m: sceneCellSizes_m(scene),
       },
       renderTerrain,
+      backdropDetail: backdropDetail && backdropTerrainTable
+        ? backdropDetailVoxelizerWGSL(backdropTerrainTable, backdropDetail) : undefined,
       // The coarse record index and the per-frame budget. Both are what turn
       // maintenance from "cheap because the scene is small" into something that
       // survives ten times the records: binning stops reading every record, and
@@ -2083,11 +2193,11 @@ export class OctreeSparseBrickWorld {
     let derivedLighting: NonNullable<SparseVoxelSceneRenderSource["derivedLighting"]> = {
       state: "unavailable",
       reason: "unsupported-level-count",
-      detail: `Live SVO derived lighting needs ${liveDerivedLevelCount} mip levels; the runtime supports at most 12`,
+      detail: `Live SVO derived lighting needs ${liveDerivedLevelCount} mip levels; the runtime supports at most ${SVO_NODE_MIP_MAXIMUM_LEVELS}`,
       requiredPages: 0,
       capacity: maximumDerivedPages,
     };
-    if (liveDerivedLevelCount <= 12) {
+    if (liveDerivedLevelCount <= SVO_NODE_MIP_MAXIMUM_LEVELS) {
       try {
         reportStage("Plan the node-mip pyramid");
         // Where the opacity pyramid's base sits. Anchored to a world size, so
@@ -2125,26 +2235,17 @@ export class OctreeSparseBrickWorld {
           requiredPages: mipPlan.requestedPageCount,
           capacity: maximumDerivedPages,
         };
-        const direct = createWebGpuSvoNodeMipDirectPageTable(mipPlan, device.limits.maxTextureDimension3D);
         const atlasFits = mipPlan.atlas.texels.every((value) => value <= device.limits.maxTextureDimension3D);
-        if (!mipPlan.complete || !direct.ready || !atlasFits || mipPlan.pages.length === 0) {
+        if (!mipPlan.complete || !atlasFits || mipPlan.pages.length === 0) {
           throw new RangeError("Live SVO derived-page capacity cannot cover the declared editable domain");
         }
-        // Size the direct table for the domain where that is affordable, so a
-        // grown plan writes new coordinates into the texture the planner and
-        // builder already bind. Where it is not, the plan's own extent is used
-        // and a growth that outruns it degrades to the sorted directory — which
-        // stays correct, because a re-plan is in the Morton order it searches.
-        const domainDirect = svoNodeMipDomainDirectPageTableDimensions(
-          liveDerivedBasePageDimensions, liveDerivedLevelCount, opacityFloorLevel);
-        const domainDirectFits = domainDirect.every((value) => value <= device.limits.maxTextureDimension3D)
-          && domainDirect.reduce((product, value) => product * value, 4) <= WEBGPU_SVO_NODE_MIP_LAYOUT.directPageTableMaximumBytes;
-        const directPageTableDimensions = (domainDirectFits
-          ? domainDirect.map((value, axis) => Math.max(value, direct.dimensions[axis]))
-          : direct.dimensions) as [number, number, number];
+        // The page table is a hash sized from the address plan's page capacity
+        // — occupancy plus the growth reserve — not from the domain's page grid,
+        // so a wide world costs what it holds. Throws past the device's 2D limit.
+        svoNodeMipPageHashShape(addressPlan.pageCapacity, device.limits.maxTextureDimension2D);
         /**
          * The wall. Everything above it in this block — the opacity floor, the
-         * base-page seeds, the address plan and the direct page table — is pure
+         * base-page seeds, the address plan and the page-hash shape — is pure
          * CPU and owns nothing, which is why it can be sliced. Everything below
          * creates device resources that stay locals until the four assignments
          * at the end of the block, so a build abandoned past this point would
@@ -2154,7 +2255,6 @@ export class OctreeSparseBrickWorld {
         nodeMipPyramid = new WebGpuLiveSvoNodeMipPyramid(device, {
           pageCapacity: addressPlan.pageCapacity,
           atlasTexels: addressPlan.atlasTexels as [number, number, number],
-          directPageTableDimensions,
           // The page follows the payload profile, exactly as the derived
           // builder's lane expansion does: a `dry` tree writes a literal zero
           // into both fluid lanes at every level, so the page that carries them
@@ -2663,6 +2763,7 @@ export class OctreeSparseBrickWorld {
       })) : []),
       ...dirtySolidBounds,
       ...renderChanges.dirtyBounds,
+      ...(initialPublication && this.backdropDetailBounds ? [this.backdropDetailBounds] : []),
     ];
     const newBounds: SparseSceneAxisAlignedBounds[] = [...nextSolidBounds,
       ...renderChanges.addedBounds];
@@ -2815,6 +2916,7 @@ export class OctreeSparseBrickWorld {
       budgeted: !initialPublication,
     };
     if (!initialPublication) {
+      this.raiseBackdropContentCeiling(newBounds);
       const activatedPages: SvoNodeMipCoordinate[] = [];
       const coordinates = liveSceneMissingBrickCoordinates(
         newBounds, this.sceneWorldOrigin, this.cellSize, this.brickSize,
@@ -2851,6 +2953,28 @@ export class OctreeSparseBrickWorld {
     // Only a topology-changing transaction invalidates topology-keyed wide,
     // compact, and renderer caches. Covered primitive motion leaves it stable.
     this.sceneSource.revision = revision;
+  }
+
+  /**
+   * Raise the content ceiling over an edit's new boxes and upload only the
+   * rows it touched (plus the highest-top word). The initial publication needs
+   * none: the plan's leaves already cover it.
+   */
+  private raiseBackdropContentCeiling(bounds: readonly SparseSceneAxisAlignedBounds[]): void {
+    const ceiling = this.backdropContentCeiling;
+    if (!ceiling || bounds.length === 0) return;
+    let first = Infinity, last = -Infinity;
+    for (const bound of bounds) {
+      const rows = raiseBackdropContentCeiling(ceiling, bound.minimum, bound.maximum);
+      if (rows) { first = Math.min(first, rows[0]); last = Math.max(last, rows[1]); }
+    }
+    if (first > last) return;
+    const tableBytes = this.tree.sceneMaterialOwnerOffsetBytes + this.tree.voxelCapacity * Uint32Array.BYTES_PER_ELEMENT;
+    const sectionWord = this.backdropContentCeilingWord;
+    this.device.queue.writeBuffer(this.tree.payload, tableBytes + (sectionWord + 3) * 4, new Float32Array([ceiling.highest_m]));
+    this.device.queue.writeBuffer(this.tree.payload,
+      tableBytes + (sectionWord + BACKDROP_CONTENT_CEILING_HEADER_WORDS + first * ceiling.cells) * 4,
+      ceiling.tops.slice(first * ceiling.cells, (last + 1) * ceiling.cells));
   }
 
   /**

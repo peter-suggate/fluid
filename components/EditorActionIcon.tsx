@@ -34,6 +34,9 @@ import {
   Trash2,
   ArrowLeftRight,
   Workflow,
+  Lightbulb,
+  Sun,
+  Lamp,
   type LucideIcon,
 } from "lucide-react";
 import type { EditorActionIcon as EditorActionIconName } from "../lib/core/editor-action";
@@ -90,6 +93,10 @@ const ICONS = {
   "compare-close": PanelLeftClose,
   "compare-keep": Check,
   "compare-swap": ArrowLeftRight,
+  // The lights: the category is a bulb, its two members the sun and a lamp.
+  light: Lightbulb,
+  sun: Sun,
+  lamp: Lamp,
 } satisfies Record<EditorActionIconName, LucideIcon>;
 
 /**

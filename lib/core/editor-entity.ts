@@ -174,6 +174,11 @@ export interface EditorEntity<
    */
   readonly choices?: readonly EditorChoiceGroup<Patch>[];
   /**
+   * Colours, shown between the choices and the numbers: a light's colour is
+   * what it is before it is how bright it is.
+   */
+  readonly colors?: readonly EditorColorField<Patch>[];
+  /**
    * Settings that belong to this entity but are not what a gesture on it moves,
    * as named clusters the flyout folds away.
    *
@@ -269,6 +274,26 @@ export interface EditorField<Patch = Partial<SceneDescription>> extends ControlM
   readonly row?: EditorFieldRow;
   /** The scene this field's new value describes. */
   readonly apply: (value: number) => Patch;
+}
+
+/**
+ * A colour an entity carries — today, a light's.
+ *
+ * Its own kind rather than three number fields, because nobody thinks of a lamp
+ * as a red, a green and a blue: they think of it as warm or cold, or they point
+ * at a swatch. The row offers exactly those (see `EntityOptions`); the entity
+ * only states the value and what a new one does.
+ *
+ * `value` is a scene-linear chromaticity with its brightest channel at 1, and
+ * `apply` is handed one: brightness belongs to the strength beside it.
+ */
+export interface EditorColorField<Patch = Partial<SceneDescription>> {
+  readonly id: string;
+  readonly label: string;
+  readonly tag?: string;
+  readonly hint?: string;
+  readonly value: readonly [number, number, number];
+  readonly apply: (colorLinear: readonly [number, number, number]) => Patch;
 }
 
 /**

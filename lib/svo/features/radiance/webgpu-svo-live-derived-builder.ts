@@ -27,6 +27,7 @@ import {
   type SvoNodeMipSeedPage,
 } from "./svo-node-mip-pyramid";
 import { svoTetrahedralRadianceWGSL } from "./svo-tetrahedral-radiance";
+import { SVO_NODE_MIP_MAXIMUM_LEVELS, svoNodeMipPageHashWGSL } from "./svo-node-mip-page-hash";
 import { VOXEL_MATERIAL_IDS } from "../../../core/voxel-scene";
 import {
   svoBandedReconstructionEnabled,
@@ -366,36 +367,42 @@ export function* liveSvoPlanBasePagesSteps(
 }
 
 /**
- * `Params` below: 3 vec4u, two 12-word tables, then 12 per-level capacities.
- * Stated once so the host write and the struct cannot drift apart.
+ * `Params` below: 3 vec4u, then per-level section offsets and capacities, each
+ * `SVO_NODE_MIP_MAXIMUM_LEVELS` words packed four to a vec4u. Stated once so the
+ * host write and the struct cannot drift apart.
  */
-export const LIVE_SVO_DERIVED_PLANNER_PARAMS_BYTES = (4 * 3 + 12 + 12 + 12) * 4;
+const LIVE_SVO_DERIVED_PLANNER_LEVEL_VECTORS = Math.ceil(SVO_NODE_MIP_MAXIMUM_LEVELS / 4);
+export const LIVE_SVO_DERIVED_PLANNER_PARAMS_BYTES = (4 * 3 + 2 * 4 * LIVE_SVO_DERIVED_PLANNER_LEVEL_VECTORS) * 4;
 
 export const liveSvoDerivedWorklistWGSL = /* wgsl */ `
 // \`capacities\` is per level, because the arena's sections are: a level holds at
 // most its own grid's pages, so laying every section out at the deepest level's
 // depth spent 48 B a record on capacity the coarse levels can never reach.
-// vec4u rather than array<u32,12> so the element alignment is unambiguously
-// legal in the uniform address space.
-struct Params{source:vec4u,domain:vec4u,limits:vec4u,zOffsets:array<u32,12>,sections:array<u32,12>,capacities:array<vec4u,3>}
+// vec4u rather than array<u32,N> so the element alignment is unambiguously
+// legal in the uniform address space. The page table is a hash keyed by level,
+// so no per-level table offsets are needed and the level count is bounded only
+// by these two arrays.
+struct Params{source:vec4u,domain:vec4u,limits:vec4u,sections:array<vec4u,${LIVE_SVO_DERIVED_PLANNER_LEVEL_VECTORS}>,capacities:array<vec4u,${LIVE_SVO_DERIVED_PLANNER_LEVEL_VECTORS}>}
 @group(0) @binding(0) var<storage,read> source:array<u32>;
 @group(0) @binding(1) var<storage,read> control:array<u32>;
 @group(0) @binding(2) var<storage,read> topology:array<u32>;
-@group(0) @binding(3) var directTable:texture_3d<u32>;
+@group(0) @binding(3) var pageTable:texture_2d<u32>;
 @group(0) @binding(4) var<storage,read_write> claims:array<atomic<u32>>;
 @group(0) @binding(5) var<storage,read_write> output:array<atomic<u32>>;
 @group(0) @binding(6) var<uniform> params:Params;
 @group(0) @binding(7) var<storage,read> generationState:array<u32>;
 const INVALID:u32=0xffffffffu;const ACTIVE:u32=${SVO_BRICK_LIFECYCLE.activeBit}u;const RECORD_WORDS:u32=${LIVE_SVO_DERIVED_WORKLIST.recordWords}u;
 fn levelCapacity(level:u32)->u32{return params.capacities[level/4u][level%4u];}
+fn levelSection(level:u32)->u32{return params.sections[level/4u][level%4u];}
+${svoNodeMipPageHashWGSL}
 fn keyBit(lo:u32,hi:u32,bit:u32)->u32{if(bit>=32u){return(hi>>(bit-32u))&1u;}return(lo>>bit)&1u;}
 fn morton(lo:u32,hi:u32,level:u32)->vec3u{var p=vec3u(0u);for(var bit=0u;bit<level;bit+=1u){let s=1u<<bit;p+=vec3u(keyBit(lo,hi,3u*bit),keyBit(lo,hi,3u*bit+1u),keyBit(lo,hi,3u*bit+2u))*s;}return p;}
-fn tableSlot(level:u32,p:vec3u)->u32{if(level>=params.domain.y||p.x>=params.domain.z||p.y>=params.domain.w){return INVALID;}let dims=textureDimensions(directTable);let levelStart=params.zOffsets[level];var levelEnd=dims.z;if(level+1u<params.domain.y){levelEnd=params.zOffsets[level+1u];}if(p.z>=levelEnd-levelStart){return INVALID;}let z=levelStart+p.z;let value=textureLoad(directTable,vec3i(i32(p.x),i32(p.y),i32(z)),0).x;return select(INVALID,value-1u,value>0u);}
+fn tableSlot(level:u32,p:vec3u)->u32{if(level>=params.domain.y){return INVALID;}return svoNodeMipPageHashFind(pageTable,level,p);}
 fn deepestLeaf(globalCell:vec3u)->u32{let brickSize=control[11];if(brickSize==0u||control[0]==0u){return INVALID;}let brick=globalCell/brickSize;var node=0u;var selected=INVALID;
  for(var level=0u;level<=params.domain.x&&node<control[0];level+=1u){let nodeBase=node*8u;let leaf=topology[nodeBase+6u];if(leaf<control[1]&&(topology[nodeBase+7u]&ACTIVE)!=0u){selected=leaf;}if(level==params.domain.x){break;}let bit=params.domain.x-level-1u;let octant=((brick.x>>bit)&1u)|(((brick.y>>bit)&1u)<<1u)|(((brick.z>>bit)&1u)<<2u);let mask=topology[nodeBase+3u]&0xffu;if((mask&(1u<<octant))==0u){break;}node=topology[nodeBase+4u]+countOneBits(mask&((1u<<octant)-1u));}
  return selected;}
 fn emitPage(level:u32,page:vec3u,generation:u32){let slot=tableSlot(level,page);if(slot==INVALID||slot>=arrayLength(&claims)){return;}if(atomicExchange(&claims[slot],generation)==generation){return;}
- let section=params.sections[level];let recordIndex=atomicAdd(&output[section],1u);if(recordIndex>=levelCapacity(level)){return;}let record=section+${LIVE_SVO_DERIVED_WORKLIST.headerWords}u+recordIndex*RECORD_WORDS;atomicStore(&output[record],slot);
+ let section=levelSection(level);let recordIndex=atomicAdd(&output[section],1u);if(recordIndex>=levelCapacity(level)){return;}let record=section+${LIVE_SVO_DERIVED_WORKLIST.headerWords}u+recordIndex*RECORD_WORDS;atomicStore(&output[record],slot);
  // One layout at every level now: slot, page coordinate, eight children.
  atomicStore(&output[record+1u],page.x);atomicStore(&output[record+2u],page.y);atomicStore(&output[record+3u],page.z);
  if(level==0u){for(var octant=0u;octant<8u;octant+=1u){let bit=vec3u(octant&1u,(octant>>1u)&1u,(octant>>2u)&1u);atomicStore(&output[record+4u+octant],deepestLeaf(page*${SVO_NODE_MIP_LAYOUT.interiorSize}u+bit*4u));}}
@@ -426,7 +433,7 @@ ${COARSE_LEAF_PAGES === "extent" ? /* wgsl */ ` let cellMaximum=(brickOrigin+vec
  var page=cellMinimum/(${SVO_NODE_MIP_LAYOUT.interiorSize}u<<seedLevel);
  for(var level=seedLevel;level<params.domain.y;level+=1u){emitPage(level,page,generation);page>>=vec3u(1u);}`}
 }
-@compute @workgroup_size(1) fn finalize(@builtin(global_invocation_id) gid:vec3u){let level=gid.x;if(level>=params.domain.y){return;}let section=params.sections[level];let count=min(atomicLoad(&output[section]),levelCapacity(level));atomicStore(&output[section+1u],generationState[params.source.y]);atomicStore(&output[section+2u],level);atomicStore(&output[section+3u],${LIVE_SVO_DERIVED_WORKLIST.headerWords}u);let groups=(count*${SVO_NODE_MIP_LAYOUT.physicalSize ** 3}u+255u)/256u;let x=min(groups,65535u);atomicStore(&output[section+4u],x);atomicStore(&output[section+5u],select(0u,(groups+x-1u)/x,x>0u));atomicStore(&output[section+6u],1u);}
+@compute @workgroup_size(1) fn finalize(@builtin(global_invocation_id) gid:vec3u){let level=gid.x;if(level>=params.domain.y){return;}let section=levelSection(level);let count=min(atomicLoad(&output[section]),levelCapacity(level));atomicStore(&output[section+1u],generationState[params.source.y]);atomicStore(&output[section+2u],level);atomicStore(&output[section+3u],${LIVE_SVO_DERIVED_WORKLIST.headerWords}u);let groups=(count*${SVO_NODE_MIP_LAYOUT.physicalSize ** 3}u+255u)/256u;let x=min(groups,65535u);atomicStore(&output[section+4u],x);atomicStore(&output[section+5u],select(0u,(groups+x-1u)/x,x>0u));atomicStore(&output[section+6u],1u);}
 `;
 
 /**
@@ -612,6 +619,12 @@ function derivedLaneAccess(
     recordsBase: "0u",
     load: (index) => `payload[${index}]`, mode, records: false,
   })}`;
+  const storedSolidDistance = dry
+    ? format === "f32x2" ? `bitcast<f32>(${scene("0u")})` : narrowedDistance
+    : `min(bitcast<f32>(payload[voxel*4u+1u]),bitcast<f32>(${scene("1u")}))`;
+  const storedSceneCoverage = format === "f32x2"
+    ? `clamp(bitcast<f32>(${scene(dry ? "1u" : "2u")}),0.,1.)`
+    : narrowedCoverage;
   return {
     /** Helper declarations the narrowed formats and the identity decode need in scope. */
     codec: `${sparseBrickSceneGeometryCodecWGSL(format)}${identityCodec}
@@ -619,16 +632,12 @@ ${sparseBrickSceneIdentityCodecWGSL({
       mode, materialOwnerBase: "params.laneOffsets.w", load: (index) => `payload[${index}]`,
     })}`,
     /** The gradient of this is the only smooth normal the world can offer. */
-    solidDistance: dry
-      ? format === "f32x2" ? `bitcast<f32>(${scene("0u")})` : narrowedDistance
-      : `min(bitcast<f32>(payload[voxel*4u+1u]),bitcast<f32>(${scene("1u")}))`,
+    solidDistance: storedSolidDistance,
     // `>>> 0` because `0xffff << 16` is -65536 in JS's signed shift, and WGSL has
     // no unary minus on `u32` — the dry expansion failed to compile without it.
     dynamicIdentity: dry ? `${(SPARSE_BRICK_NO_OWNER << 16) >>> 0}u` : "payload[params.laneOffsets.y+voxel]",
     dynamicCoverage: dry ? "0." : "clamp(bitcast<f32>(payload[voxel*4u+2u]),0.,1.)",
-    sceneCoverage: format === "f32x2"
-      ? `clamp(bitcast<f32>(${scene(dry ? "1u" : "2u")}),0.,1.)`
-      : narrowedCoverage,
+    sceneCoverage: storedSceneCoverage,
     fluidFraction: dry ? "0." : "clamp(bitcast<f32>(payload[params.laneOffsets.x+voxel*4u+3u]),0.,1.)",
   };
 }
@@ -981,7 +990,7 @@ ${svoMaterialWGSL}
 ${svoEnvironmentLightingWGSL}
 ${svoLightWGSL}
 ${svoTetrahedralRadianceWGSL}
-struct Params{targetAtlasPages:vec4u,scratchAtlasPages:vec4u,limits:vec4u,laneOffsets:vec4u,direct:vec4u,zOffsets:array<u32,12>,mappingOrigin:vec4f,mappingCellSize:vec4f,${LIVE_SVO_RADIANCE_PARAMS_FIELDS},bandedLanes:vec4u}
+struct Params{targetAtlasPages:vec4u,scratchAtlasPages:vec4u,limits:vec4u,laneOffsets:vec4u,direct:vec4u,reserved:array<vec4u,3>,mappingOrigin:vec4f,mappingCellSize:vec4f,${LIVE_SVO_RADIANCE_PARAMS_FIELDS},bandedLanes:vec4u}
 @group(0) @binding(0) var<storage,read> control:array<u32>;
 @group(0) @binding(1) var<storage,read> topology:array<u32>;
 @group(0) @binding(2) var<storage,read> payload:array<u32>;
@@ -993,7 +1002,7 @@ struct Params{targetAtlasPages:vec4u,scratchAtlasPages:vec4u,limits:vec4u,laneOf
 @group(0) @binding(8) var radianceSource3:texture_3d<f32>;
 @group(0) @binding(9) var radianceScratch:texture_storage_3d<${radianceFormat},write>;
 @group(0) @binding(10) var<uniform> params:Params;
-@group(0) @binding(11) var directTable:texture_3d<u32>;
+@group(0) @binding(11) var pageTable:texture_2d<u32>;
 @group(0) @binding(12) var<storage,read> materials:array<SvoMaterialRecord>;
 @group(0) @binding(13) var<storage,read> environment:array<SvoEnvironmentLightingRecord>;
 @group(0) @binding(14) var opacityValidity:texture_2d<u32>;
@@ -1028,7 +1037,8 @@ fn safeNormal(leafIndex:u32,local:vec3u)->vec3f{let lo=max(local,vec3u(1u))-1u;l
 fn writeRadiance(coordinate:vec3u,a:vec3f,b:vec3f,c:vec3f,d:vec3f){let depth=radianceLobeDepth();
  textureStore(radianceScratch,coordinate,vec4f(a,1.));textureStore(radianceScratch,coordinate+vec3u(0u,0u,depth),vec4f(b,1.));
  textureStore(radianceScratch,coordinate+vec3u(0u,0u,depth*2u),vec4f(c,1.));textureStore(radianceScratch,coordinate+vec3u(0u,0u,depth*3u),vec4f(d,1.));}
-fn tableSlot(level:u32,page:vec3u)->u32{if(level>=params.direct.x||page.x>=params.direct.y||page.y>=params.direct.z){return INVALID;}let dims=textureDimensions(directTable);let start=params.zOffsets[level];var end=dims.z;if(level+1u<params.direct.x){end=params.zOffsets[level+1u];}if(page.z>=end-start){return INVALID;}let encoded=textureLoad(directTable,vec3i(i32(page.x),i32(page.y),i32(start+page.z)),0).x;return select(INVALID,encoded-1u,encoded>0u);}
+${svoNodeMipPageHashWGSL}
+fn tableSlot(level:u32,page:vec3u)->u32{if(level>=params.direct.x){return INVALID;}return svoNodeMipPageHashFind(pageTable,level,page);}
 struct SceneSample{coverage:f32,radiance:SvoTetraRadiance,valid:u32}
 // Callers must pass a level at or above the radiance floor; below it there is no
 // radiance page to gather from, and the opacity there is finer than this solve
@@ -1292,9 +1302,9 @@ export class WebGpuLiveSvoDerivedBuilder {
         options.generationSource.offsetBytes / 4, options.plannedPageCount], 8);
       feedbackWords.set([options.tree.velocityOffsetBytes / 4, options.tree.materialOwnerOffsetBytes / 4,
         options.tree.sceneGeometryOffsetBytes / 4, options.tree.scenePayloadLanes.materialOwnerWords], 12);
-      feedbackWords.set([options.worklists.length, options.nodeMips.directPageTableDimensions[0],
-        options.nodeMips.directPageTableDimensions[1], options.lightCount ?? 0], 16);
-      feedbackWords.set(options.nodeMips.directPageTableLevelZOffsets.slice(0, 12), 20);
+      // Words 20-31 held the dense table's twelve level slabs; the page hash
+      // carries its own shape, so they are reserved zeros.
+      feedbackWords.set([options.worklists.length, 0, 0, options.lightCount ?? 0], 16);
       feedbackFloats.set([...(options.worldOrigin_m ?? [0, 0, 0]), 0], 32);
       feedbackFloats.set([...(options.cellSize_m ?? [1, 1, 1]), 0], 36);
       feedbackWords.set([...options.radiance.atlasPages, options.radiance.slotOffset ?? 0], 40);
@@ -1425,7 +1435,7 @@ export class WebGpuLiveSvoDerivedBuilder {
           { binding: 4, resource: options.nodeMips.texture.createView({ dimension: "3d" }) },
           ...targetRadianceViews.map((resource, index) => ({ binding: 5 + index, resource })),
           { binding: 9, resource: radianceScratchView }, { binding: 10, resource: { buffer: feedbackParams } },
-          { binding: 11, resource: options.nodeMips.directPageTableTexture.createView({ dimension: "3d" }) },
+          { binding: 11, resource: options.nodeMips.pageTableTexture.createView() },
           { binding: 12, resource: { buffer: materialPbr } }, { binding: 13, resource: { buffer: environmentLighting } },
           { binding: 14, resource: options.nodeMips.pageValidity.view }, { binding: 15, resource: options.radiance.pageValidity.view },
           { binding: 16, resource: { buffer: this.scratchValidity } }, { binding: 17, resource: { buffer: lights } },
@@ -1537,7 +1547,9 @@ export class WebGpuLiveSvoDerivedWorklistPlanner {
   private destroyed = false;
 
   constructor(private readonly device: GPUDevice, private readonly options: WebGpuLiveSvoDerivedWorklistPlannerOptions) {
-    if (!Number.isInteger(options.levelCount) || options.levelCount < 1 || options.levelCount > 12) throw new RangeError("Live derived level count must be in [1, 12]");
+    if (!Number.isInteger(options.levelCount) || options.levelCount < 1 || options.levelCount > SVO_NODE_MIP_MAXIMUM_LEVELS) {
+      throw new RangeError(`Live derived level count must be in [1, ${SVO_NODE_MIP_MAXIMUM_LEVELS}]`);
+    }
     const requestedCapacity = options.pageCapacityPerLevel;
     const capacities = typeof requestedCapacity === "number"
       ? Array.from({ length: options.levelCount }, () => requestedCapacity)
@@ -1620,7 +1632,7 @@ export class WebGpuLiveSvoDerivedWorklistPlanner {
         { binding: 0, resource: { buffer: source.buffer } },
         { binding: 1, resource: { buffer: options.tree.control, size: SPARSE_BRICK_GPU_LAYOUT.controlStrideBytes } },
         { binding: 2, resource: { buffer: options.tree.topology, offset: options.tree.topologyOffsetBytes } },
-        { binding: 3, resource: options.nodeMips.directPageTableTexture.createView({ dimension: "3d" }) },
+        { binding: 3, resource: options.nodeMips.pageTableTexture.createView() },
         { binding: 4, resource: { buffer: this.claims } }, { binding: 5, resource: { buffer: this.arena } },
         { binding: 6, resource: { buffer: params } }, { binding: 7, resource: { buffer: options.generationSource.buffer } },
       ] }),
@@ -1645,16 +1657,15 @@ export class WebGpuLiveSvoDerivedWorklistPlanner {
       words.set([source.countOffsetBytes / 4, this.options.generationSource.offsetBytes / 4,
         allLiveMode === 2 ? phase : source.recordOffsetBytes / 4,
         allLiveMode === 2 ? phaseCount : source.recordStrideWords], 0);
-      words.set([finestLevel, levelCount, target.directPageTableDimensions[0], target.directPageTableDimensions[1]], 4);
+      words.set([finestLevel, levelCount, 0, 0], 4);
       // `limits.z` carried `target.pageCapacity`, which no entry point ever read;
       // it now names the radiance floor level, which `emitPage` does read.
       // `limits.y` is the deepest section's depth; the bound both entry points
       // test against is `capacities[level]`, because the sections differ.
       words.set([source.capacity, Math.max(...this.pageCapacityByLevel),
         this.options.radianceFloorLevel ?? 0, allLiveMode], 8);
-      words.set(target.directPageTableLevelZOffsets.slice(0, 12), 12);
-      words.set(this.sectionOffsetsBytes.map((offset) => offset / 4), 24);
-      words.set(this.pageCapacityByLevel, 36);
+      words.set(this.sectionOffsetsBytes.map((offset) => offset / 4), 12);
+      words.set(this.pageCapacityByLevel, 12 + 4 * LIVE_SVO_DERIVED_PLANNER_LEVEL_VECTORS);
       this.device.queue.writeBuffer(params, 0, words);
     };
     this.options.dirtyLeafSources.forEach((source, index) => write(this.sources[index].params, source, 0));

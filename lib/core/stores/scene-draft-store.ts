@@ -50,7 +50,8 @@ export type SceneDraftSubject =
   | "fill-level"
   | "inflow"
   | "terrain"
-  | "refinement-region";
+  | "refinement-region"
+  | "lighting";
 
 interface SceneDraftStore {
   draft?: SceneDraft;

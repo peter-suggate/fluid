@@ -29,6 +29,9 @@ export type EditorSelectionKind =
   | "fluid-body"
   | "vessel-rim"
   | "refinement-region"
+  // The directional key. Not a thing with a surface: it is reached from the
+  // ring and drawn as a marker in the sky while selected. See `editor-sun.ts`.
+  | "sun"
   // The one selection kind that is not a thing in the document: a box of solid
   // voxels a drag swept out. It is an entity anyway — it has extents, a label
   // and a ring — because being an entity is what makes it act like everything

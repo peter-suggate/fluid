@@ -237,7 +237,7 @@ const PIXEL_TRACE_POINTER_SETTLE_MS = 100;
  *
  * A terrain proposal redraws the ground immediately; it cannot move the lattice,
  * so presenting it against the committed solver is safe. A prop is safer still —
- * it is render-only and outside the solver's keys entirely. Every other draft is
+ * it is render-only and outside the solver's keys entirely, and so is the sun. Every other draft is
  * overlay-only: reshaping the tank or the water does change the geometry the
  * solver owns, and drawing the fluid at a size it was not allocated for would
  * tear. Those wait for the release, and preview as the wireframe box instead.
@@ -246,7 +246,7 @@ const PIXEL_TRACE_POINTER_SETTLE_MS = 100;
  * each subject, and the next entity has to state its own rather than being
  * folded into somebody else's boolean.
  */
-const PRESENTED_DRAFT_SUBJECTS: ReadonlySet<SceneDraftSubject> = new Set<SceneDraftSubject>(["terrain", "scenery"]);
+const PRESENTED_DRAFT_SUBJECTS: ReadonlySet<SceneDraftSubject> = new Set<SceneDraftSubject>(["terrain", "scenery", "lighting"]);
 
 /**
  * Where a panel about a box hangs: its rightmost visible top corner.

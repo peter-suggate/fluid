@@ -2,8 +2,19 @@
 
 import { useEffect, useId, useState } from "react";
 import {
-  Choice, ChoiceField, Field, FieldList, FieldNote, NumberInput, Slider, Value, formatNumber,
+  Choice, ChoiceField, ColorInput, Field, FieldList, FieldNote, NumberInput, Slider, Swatch, Value, formatNumber,
 } from "./ui";
+import {
+  describeLightColor,
+  hexToLinear,
+  kelvinToLinear,
+  linearToHex,
+  linearToKelvin,
+  LIGHT_TEMPERATURE_MAX_K,
+  LIGHT_TEMPERATURE_MIN_K,
+  LIGHT_TEMPERATURE_PRESETS,
+  type LinearRgb,
+} from "../lib/core/light-color";
 import { simulation } from "../lib/core/simulation/controller";
 import { length } from "../lib/core/math";
 import { HERO_GARDEN_SOLVER_CELL_M } from "../lib/core/hero-garden-scene";
@@ -18,6 +29,7 @@ import type {
   EditorControlGroup,
   EditorChoice,
   EditorChoiceGroup,
+  EditorColorField,
   EditorEntity,
   EditorField,
   EditorFieldRow,
@@ -350,6 +362,7 @@ export function EntityOptionRows<Patch, Doc>({ entity }: { entity: EditorEntity<
   });
   const fields = foldFieldRows(entity.fields ?? []);
   const choices = entity.choices ?? [];
+  const colors = entity.colors ?? [];
   const groups = entity.groups ?? [];
 
   const commitChoice = (group: EditorChoiceGroup<Patch>, option: EditorChoice<Patch>) => {
@@ -388,6 +401,20 @@ export function EntityOptionRows<Patch, Doc>({ entity }: { entity: EditorEntity<
         />}
       </ToolstripRow>;
     })}
+    {colors.map((color) => <ToolstripRow
+      key={color.id}
+      tag={color.tag ?? color.label}
+      value={<><Swatch color={linearToHex(color.value)} /> {describeLightColor(color.value)}</>}
+      name={color.label}
+      hint={color.hint}
+      active={open === color.id}
+      testId={`entity-option-${color.id}`}
+      onClick={() => toggle(color.id)}
+    >
+      {open === color.id && <ToolstripPane label={color.label} onClose={() => setOpen(undefined)}>
+        <ColorPane color={color} entityLabel={entity.label} />
+      </ToolstripPane>}
+    </ToolstripRow>)}
     {fields.map((entry) => {
       // A folded row: the members' readouts side by side on the column, and the
       // members themselves in what it opens. It borrows the pane rather than
@@ -460,6 +487,61 @@ export function EntityOptionRows<Patch, Doc>({ entity }: { entity: EditorEntity<
     })}
     <EditorControlGroupRows groups={groups} entityLabel={entity.label} />
   </>;
+}
+
+/**
+ * A colour, offered the two ways lighting tools offer one.
+ *
+ * Warmth first, because it is how real sources differ and how a reader thinks
+ * about a lamp: named stops from candle to blue sky, and the Kelvin slider
+ * between them. Then a free pick through the platform's own picker, for a gel
+ * or a screen. All three commit once — a chip on click, the slider on release,
+ * the picker when it closes — and file the same history entry.
+ */
+function ColorPane<Patch>({ color, entityLabel }: { color: EditorColorField<Patch>; entityLabel: string }) {
+  const session = useSession();
+  const commitPatch = patchCommitter(useEditorHost<unknown, Patch>());
+  const [previewKelvin, setPreviewKelvin] = useState<number | undefined>(undefined);
+  const kelvin = linearToKelvin(color.value);
+  const commit = (next: LinearRgb) => {
+    setPreviewKelvin(undefined);
+    if (session.ui.getState().voxelStrokePending) return;
+    if (next.every((channel, index) => Math.abs(channel - color.value[index]!) < 1e-4)) return;
+    commitPatch(entityCommitLabel(entityLabel, color.label), color.apply(next), { reseed: true });
+  };
+  const preset = kelvin === undefined ? undefined
+    : LIGHT_TEMPERATURE_PRESETS.find((candidate) => Math.abs(candidate.kelvin - kelvin) <= 100);
+  const shownKelvin = previewKelvin ?? kelvin;
+  return <FieldList>
+    <Field label="Warmth">
+      <Choice
+        ariaLabel={`${entityLabel} ${color.label} preset`}
+        value={preset?.id ?? ""}
+        options={LIGHT_TEMPERATURE_PRESETS.map((candidate) => ({
+          value: candidate.id,
+          label: <Swatch color={linearToHex(kelvinToLinear(candidate.kelvin))} />,
+          ariaLabel: candidate.label,
+          hint: `${candidate.label} · ${candidate.kelvin} K`,
+        }))}
+        onChange={(id) => {
+          const chosen = LIGHT_TEMPERATURE_PRESETS.find((candidate) => candidate.id === id);
+          if (chosen) commit(kelvinToLinear(chosen.kelvin));
+        }}
+      />
+    </Field>
+    <Field label="Temperature"
+      value={shownKelvin === undefined ? "custom" : <Value value={shownKelvin} digits={0} unit="K" />}>
+      <Slider min={LIGHT_TEMPERATURE_MIN_K} max={LIGHT_TEMPERATURE_MAX_K} step={50}
+        value={kelvin ?? 6500} ariaLabel={`${entityLabel} ${color.label} temperature`}
+        onInput={setPreviewKelvin}
+        onChange={(value) => commit(kelvinToLinear(value))} />
+    </Field>
+    <Field label="Custom">
+      <ColorInput value={linearToHex(color.value)} ariaLabel={`${entityLabel} ${color.label}`}
+        hint="Any colour, for a gel or a screen"
+        onChange={(hex) => { const next = hexToLinear(hex); if (next) commit(next); }} />
+    </Field>
+  </FieldList>;
 }
 
 /** Plugin-declared groups use the same folded rows and scrubs as the tank. */

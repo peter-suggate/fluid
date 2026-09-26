@@ -28,7 +28,10 @@ import type { SceneDescription } from "../lib/core/model";
 import { getScenePreset } from "../lib/core/scenes";
 import { planSparseSceneDomain } from "../lib/core/sparse-scene-domain";
 import { SPARSE_BRICK_GPU_LAYOUT } from "../lib/svo/features/construction/sparse-brick-octree";
-import { planSvoNodeMipPyramid } from "../lib/svo/features/radiance/svo-node-mip-pyramid";
+import { planSvoNodeMipPyramid, svoOpacityLevelFloor } from "../lib/svo/features/radiance/svo-node-mip-pyramid";
+import { planSvoNodeMipAddresses, svoNodeMipLevelPageDimensions } from "../lib/svo/features/radiance/svo-node-mip-address-plan";
+import { SVO_NODE_MIP_MAXIMUM_LEVELS } from "../lib/svo/features/radiance/svo-node-mip-page-hash";
+import { createWebGpuSvoNodeMipPageTable, webGpuSvoNodeMipMaximumPages } from "../lib/svo/features/radiance/webgpu-svo-node-mip-pyramid";
 import { SVO_PRIMITIVE_RECORD_STRIDE_BYTES } from "../lib/svo/contracts/svo-primitive-abi";
 import { SVO_PRIMITIVE_CANDIDATE_ARENA_SIZE_BYTES } from "../lib/svo/features/scene-publication/svo-primitive-candidates";
 import { svoTetrahedralRadianceAtlasBytes } from "../lib/svo/features/radiance/svo-tetrahedral-radiance";
@@ -52,7 +55,7 @@ import {
   sparseSceneOctreeMaximumDepth,
 } from "../lib/svo/features/construction/webgpu-svo-sparse-bricks";
 import { liveSvoPlanBasePages } from "../lib/svo/features/radiance/webgpu-svo-live-derived-builder";
-import { svoScenePrimitiveBrickDensity } from "./svo-dry-frame-harness";
+import { svoScenePrimitiveBrickDensity, withSvoWideSpanProxies } from "./svo-dry-frame-harness";
 
 /** This machine's Dawn/Metal adapter, as reported by `adapter.limits`. */
 const M1_MAX_LIMITS = {
@@ -166,7 +169,21 @@ function primitivesPerBrick(scene: SceneDescription, cells: readonly [number, nu
   return { primitives, maximumPerBrick, overflowedBricks, brickEdge_m };
 }
 
-function sweep(cellSize_m: number, sceneFactory: () => SceneDescription = () => getScenePreset("hero-garden-hose").create()) {
+/**
+ * `FLUID_SVO_CAPACITY_SCENE` picks the preset (default `hero-garden-hose`) and
+ * `FLUID_SVO_WIDE_SPAN_M` adds the far scenery blocks of
+ * `withSvoWideSpanProxies`, so the node-mip rows can price a wide-span world.
+ */
+const sweepSceneId = process.env.FLUID_SVO_CAPACITY_SCENE ?? "hero-garden-hose";
+const wideSpan_m = Number(process.env.FLUID_SVO_WIDE_SPAN_M ?? 0);
+const defaultSweepScene = (): SceneDescription => {
+  const scene = sweepSceneId === "hero-garden-hose-x10"
+    ? createHeroGardenHoseStressScene({ recordMultiplier: 10 })
+    : getScenePreset(sweepSceneId).create();
+  return wideSpan_m > 0 ? withSvoWideSpanProxies(scene, wideSpan_m) : scene;
+};
+
+function sweep(cellSize_m: number, sceneFactory: () => SceneDescription = defaultSweepScene) {
   // Through the catalog, not the factory: the environment is attached on the
   // way out, and it is the environment's proxy AABBs that decide how far the
   // sparse address space extends past the container.
@@ -255,30 +272,51 @@ function sweep(cellSize_m: number, sceneFactory: () => SceneDescription = () => 
   const basePageDimensions = liveSvoBasePageDimensions(domain.brickDimensions, brickSize);
   const levelCount = sparseSceneOctreeMaximumDepth(basePageDimensions, []) + 1;
   result.mipLevelCount = levelCount;
-  if (levelCount > 12) {
+  // What the retired dense direct page table would have cost: one r32uint per
+  // page of the domain grid from the opacity floor up, whatever is occupied.
+  const cellEdge_m = Math.max(...dimensions.map((cells, axis) => [scene.container.width_m, scene.container.height_m,
+    scene.container.depth_m][axis] / cells));
+  const opacityFloorLevel = svoOpacityLevelFloor({ levelCount, cellSize_m: cellEdge_m });
+  const levelGrids = svoNodeMipLevelPageDimensions(basePageDimensions, Math.min(levelCount, 32));
+  const floorGrid = levelGrids[Math.min(opacityFloorLevel, levelGrids.length - 1)];
+  result.denseDirectTableMiB = mib(4 * floorGrid[0] * floorGrid[1]
+    * levelGrids.reduce((depth, grid, level) => depth + (level < opacityFloorLevel ? 0 : grid[2]), 0));
+  result.denseDirectTableFits = levelCount <= 12 && floorGrid.every((value) => value <= M1_MAX_LIMITS.maxTextureDimension3D)
+    && Number(result.denseDirectTableMiB) <= 192;
+  if (levelCount > SVO_NODE_MIP_MAXIMUM_LEVELS) {
     result.mipState = "unsupported-level-count";
   } else {
     const pageStart = performance.now();
-    const mipPlan = planSvoNodeMipPyramid({
-      generation: 1,
-      occupiedPages: liveSvoPlanBasePages(plan),
+    // The production address plan, as `OctreeSparseBrickWorld` asks for it.
+    const addressPlan = planSvoNodeMipAddresses({
+      occupiedBasePages: liveSvoPlanBasePages(plan, undefined, opacityFloorLevel),
+      basePageDimensions,
       levelCount,
-      capacity: M1_MAX_LIMITS.maxTextureDimension2D,
+      addressCapacity: webGpuSvoNodeMipMaximumPages({ limits: M1_MAX_LIMITS } as never),
+      generation: 1,
+      cellSize_m: cellEdge_m,
+      opacityFloorLevel,
     });
+    const mipPlan = addressPlan.plan;
+    const table = createWebGpuSvoNodeMipPageTable(mipPlan, M1_MAX_LIMITS.maxTextureDimension2D, addressPlan.pageCapacity);
     result.mip_ms = performance.now() - pageStart;
-    result.mipPagesRequested = mipPlan.requestedPageCount;
-    result.mipAtlasTexels = mipPlan.atlas.texels;
-    result.mipAtlasMiB = mib(mipPlan.allocatedBytes);
-    // The tetrahedral radiance atlas shares the pyramid's page plan and its
-    // capacity, at 10^3 x 16 B = 16,000 B a physical page. It is a separate
-    // allocation of comparable size and section 8 of the handoff names it
-    // explicitly, so it is reported beside the pyramid rather than folded in.
-    result.radianceAtlasMiB = mib(svoTetrahedralRadianceAtlasBytes(mipPlan));
-    result.mipAllocatedBytes = mipPlan.allocatedBytes;
-    result.radianceAllocatedBytes = svoTetrahedralRadianceAtlasBytes(mipPlan);
+    result.opacityFloorLevel = opacityFloorLevel;
+    result.mipPagesPlanned = mipPlan.pages.length;
+    result.mipPageCapacity = addressPlan.pageCapacity;
+    result.mipAddressTotal = addressPlan.total;
+    result.mipDomainPyramidPages = addressPlan.domainPyramidPageCount;
+    result.mipAtlasTexels = addressPlan.atlasTexels;
+    result.mipAtlasMiB = mib(addressPlan.atlasTexels.reduce((product, value) => product * value, 1) * 2);
+    result.radianceAtlasMiB = mib(addressPlan.radianceAtlasTexels.reduce((product, value) => product * value, 1) * 4 * 4);
+    result.pageHashEntries = table.shape.capacity;
+    result.pageHashMiB = mib(table.shape.bytes);
+    result.pageHashLongestProbe = table.longestProbe;
+    result.mipAllocatedBytes = addressPlan.atlasTexels.reduce((product, value) => product * value, 1) * 2 + table.shape.bytes;
+    result.radianceAllocatedBytes = addressPlan.radianceAtlasTexels.reduce((product, value) => product * value, 1) * 16;
     result.mipState = !mipPlan.complete ? "capacity"
-      : mipPlan.atlas.texels.some((value) => value > M1_MAX_LIMITS.maxTextureDimension3D) ? "atlas-texture-limit"
+      : addressPlan.atlasTexels.some((value) => value > M1_MAX_LIMITS.maxTextureDimension3D) ? "atlas-texture-limit"
       : "ready";
+    void planSvoNodeMipPyramid;
   }
   return result;
 }

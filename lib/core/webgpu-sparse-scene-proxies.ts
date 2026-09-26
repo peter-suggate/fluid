@@ -511,6 +511,8 @@ export interface SparseSceneProxyVoxelizerOptions {
   }>;
   /** Maximum topology level. */
   finestLevel?: number;
+  /** WGSL defining `sampleBackdropDetail` (`backdropDetailVoxelizerWGSL`), unioned into static solids. */
+  backdropDetail?: string;
   /** Fixed live primitive arena capacity. */
   primitiveCapacity: number;
   /** Maximum old/new world-space regions coalesced into one scene publication. */
@@ -1529,7 +1531,20 @@ fn sampleRenderTerrain(world:vec3f,cellExtent:vec3f)->SolidWorldSample{
 function solidWorldProxyWGSL(
   layout?: WebgpuSolidWorldPageLayout,
   renderTerrainLayout?: RenderTerrainShaderLayout,
+  backdropDetail?: string,
 ): string {
+  // A backdrop's stored detail rings (backdrop-detail.ts) are unioned into
+  // every static-solid sample; they lie outside the set's footprint, so the
+  // union never changes a voxel the set owns.
+  if (backdropDetail) return solidWorldProxyWGSL(layout, renderTerrainLayout)
+    .replace("fn sampleSolidWorld(", "fn sampleSolidWorldBase(") + /* wgsl */ `
+${backdropDetail}
+fn sampleSolidWorld(world:vec3f,cellExtent:vec3f)->SolidWorldSample{
+  let base=sampleSolidWorldBase(world,cellExtent);
+  if(base.fraction>=1.0){return base;}
+  let detail=sampleBackdropDetail(world,cellExtent);
+  if(detail.fraction>base.fraction){return detail;}
+  return base;}`;
   if (renderTerrainLayout) return /* wgsl */ `
 struct SolidWorldSample{fraction:f32,distance:f32,material:u32,normal:vec3f}
 ${renderTerrainProxyWGSL(renderTerrainLayout)}
@@ -1612,6 +1627,7 @@ export function sparseSceneProxyVoxelizationShaderFor(
   surfaceContours = false,
   dualOffsetWords = 0,
   dualMarchingCubes = false,
+  backdropDetail?: string,
 ): string {
   const dry = profile === "dry";
   const format = dry ? sceneGeometryFormat : "f32x2";
@@ -1714,7 +1730,7 @@ ${SVO_GBUFFER_NORMAL_OCT8_WGSL}
 ${sparseBrickSceneIdentityWordCodecWGSL()}
 ${bandedCodec}
 ${bandedEncoder}
-${solidWorldProxyWGSL(solidWorldLayout, renderTerrainLayout)}
+${solidWorldProxyWGSL(solidWorldLayout, renderTerrainLayout, backdropDetail)}
 
 const BRICK_ACTIVE:u32=${SVO_BRICK_LIFECYCLE.activeBit}u;
 const BRICK_DIRTY:u32=${SVO_BRICK_LIFECYCLE.dirtyBit}u;
@@ -3164,7 +3180,8 @@ export class SparseSceneProxyVoxelizer {
       code: sparseSceneProxyVoxelizationShaderFor(
         this.tree.payloadProfile, this.tree.sceneGeometryFormat,
         this.tree.leafPayloadMode, this.solidWorldLayout,
-        this.renderTerrainLayout, this.options.surfaceContours === true, this.dualOffsetWords, this.options.surfaceDualMarchingCubes === true),
+        this.renderTerrainLayout, this.options.surfaceContours === true, this.dualOffsetWords, this.options.surfaceDualMarchingCubes === true,
+        this.options.backdropDetail),
     });
     const pipeline = (entryPoint: string, stage: string) => this.device.createComputePipelineAsync({
       label: `${this.label} ${stage} pipeline`, layout: this.pipelineLayout,

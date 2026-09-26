@@ -135,6 +135,19 @@ select.ui-select:disabled { opacity: .45; cursor: not-allowed; }
 .ui-choice > button.active, .ui-toggle.active { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); }
 .ui-choice > button:disabled, .ui-toggle:disabled { opacity: .45; cursor: not-allowed; }
 
+/* ---- colour -------------------------------------------------------------- */
+
+.ui-swatch { display: inline-block; width: 10px; height: 10px; flex: none; border-radius: 50%;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ink) 22%, transparent); vertical-align: -1px; }
+.ui-color { position: relative; min-height: min(var(--control-height), 22px); padding: 0 7px; display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--ui-hair); border-radius: var(--radius-s); color: var(--micro); font: 500 var(--size-2)/1.3 var(--mono, var(--sans)); cursor: pointer; }
+.ui-color:hover:not(.is-disabled) { border-color: var(--line-strong); color: var(--ink); }
+.ui-color .ui-swatch { width: 12px; height: 12px; }
+/* The native well is the click target, stretched invisible over the label so
+   the whole chip opens the platform picker. */
+.ui-color input[type="color"] { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; border: 0; padding: 0; }
+.ui-color.is-disabled { opacity: .45; cursor: not-allowed; }
+
 /* ---- switch -------------------------------------------------------------- */
 
 .ui-switch { min-height: min(var(--control-height), 22px); padding: 0; display: inline-flex; align-items: center; gap: 6px; border: 0; background: transparent; color: var(--micro); font: 500 var(--size-2)/1.3 var(--sans); cursor: pointer; }
@@ -166,7 +179,7 @@ select.ui-select:disabled { opacity: .45; cursor: not-allowed; }
 /* ---- surfaces ------------------------------------------------------------ */
 
 /* The toolstrip column ignores the pointer except over its controls. */
-.toolstrip :is(.ui-slider, .ui-number, .ui-stepper, .ui-select, .ui-choice, .ui-toggle, .ui-switch, .ui-button, .ui-field) { pointer-events: auto; }
+.toolstrip :is(.ui-slider, .ui-number, .ui-stepper, .ui-select, .ui-choice, .ui-toggle, .ui-switch, .ui-button, .ui-field, .ui-color) { pointer-events: auto; }
 /* A strip row carries a short track beside its mark, not a full-width one. */
 .toolstrip .toolstrip-row input.ui-slider[type="range"] { width: 76px; flex: none; }
 .toolstrip .toolstrip-row .ui-choice > button { border-color: transparent; }

@@ -4,6 +4,7 @@ import { voxelSculptActions } from "./editor-voxel-tool-actions";
 import { inflowEntity } from "./editor-inflow";
 import { refinementRegionEntity } from "./editor-refinement-region";
 import { sceneryEntity } from "./editor-scenery";
+import { SUN_SELECTION, sunEntity } from "./editor-sun";
 import { rigidBodyEntity } from "./editor-rigid-body";
 import { tankEntity } from "./editor-tank";
 import { vesselRimEntity } from "./editor-vessel-rim";
@@ -99,6 +100,8 @@ export const EDITOR_ENTITIES: readonly EditorEntityDefinition[] = Object.freeze(
   // themselves the pick targets, so it never competes for a ray; it is here to
   // be found by id, to describe itself, and to offer its one verb.
   voxelRegionEntity,
+  // Pickless too: the sun has no surface. The ring's Light wedge selects it.
+  sunEntity,
 ]);
 
 /**
@@ -301,7 +304,8 @@ export function sceneActionsAt(
   options: { readonly placement?: boolean; readonly methodId?: string } = {},
 ): readonly EditorAction[] {
   const placement = options.placement !== false
-    ? [...fluidPlayActions(scene, point_m, normal), ...voxelSculptActions(scene, options.methodId)]
+    ? [...fluidPlayActions(scene, point_m, normal), ...voxelSculptActions(scene, options.methodId),
+      lightWedge(point_m, normal)]
     : [];
   return [...placement, sceneWedge(scene), sceneInstrumentWedge(scene), compareWedge()];
 }
@@ -332,6 +336,43 @@ function sceneWedge(scene: SceneDescription): EditorAction {
   };
 }
 
+
+/**
+ * The scene's lights, on the ring that belongs to no object.
+ *
+ * The sun is here because it has no surface to right-click: a directional light
+ * is everywhere at once, and "a click on nothing" is the honest place for it.
+ * Selecting it puts its aim handle in the sky and its strength and colour on
+ * the strip. A lamp is placed at the click, like any prop, and is then edited as
+ * the scenery it is — its own ring and strip carry the same strength and colour.
+ */
+function lightWedge(point_m: Vec3, normal: Vec3): EditorAction {
+  return {
+    id: "light",
+    label: "Light",
+    icon: "light",
+    tone: "prop",
+    hint: "Aim the sun, or hang a lamp here",
+    children: [
+      {
+        id: "sun",
+        label: "Sun",
+        icon: "sun",
+        tone: "prop",
+        hint: "Select the sun: drag its marker to aim it, set strength and colour on the strip",
+        effect: { kind: "select", selection: SUN_SELECTION },
+      },
+      {
+        id: "lamp",
+        label: "Lamp",
+        icon: "lamp",
+        tone: "prop",
+        hint: "Hang a warm point light above this spot",
+        effect: { kind: "place-prop", prop: "lamp", point_m, normal },
+      },
+    ],
+  };
+}
 
 /**
  * A/B compare, on the ring that belongs to no object.

@@ -28,6 +28,8 @@ import {
   withoutSceneryNode,
 } from "./scenery-edit";
 import type { SceneryNode, SceneryPlacement } from "./scenery-graph";
+import { sceneryLightFixture, withSceneryLightColor, withSceneryLightStrength } from "./scenery-lights";
+import { kelvinToLinear } from "./light-color";
 import { intersectSvoPrimitive, type SvoFinitePrimitiveDescriptor } from "../svo/contracts/svo-primitive-abi";
 import { svoDescriptorForEnvironmentProxy, svoOwnerIdForEnvironmentProxy } from "../svo/features/scene-publication/svo-scene-primitives";
 import type { SceneryPropKind } from "./stores/ui-store";
@@ -63,6 +65,8 @@ import {
  */
 
 export const SCENERY_SELECTION_PREFIX = "scenery-";
+/** The strength a lamp's slider reaches: well past the brightest authored fixture (3.4). */
+export const SCENERY_LIGHT_STRENGTH_MAX = 10;
 /** Half a centimetre: below this an object is smaller than the handles that move it. */
 export const SCENERY_MINIMUM_HALF_SIZE_M = 0.005;
 
@@ -183,6 +187,9 @@ function sceneryEntityFor(
   const label = node.id;
   const move = (position_m: Vec3) =>
     withSceneryPlacement(scene, node.id, placementFor(scene, node, centre, position_m));
+  // A lamp is scenery with two more numbers; see `scenery-lights.ts`. They lead
+  // the column because they are why anyone selects a lamp.
+  const fixture = sceneryLightFixture(scene, node.id);
   return {
     selection: { kind: "scenery", id: scenerySelectionId(node.id) },
     label,
@@ -203,7 +210,23 @@ function sceneryEntityFor(
     ],
     draftSubject: "scenery",
     editLabel: (handle) => handle.space === "world" ? `Moved ${label}` : `Resized ${label}`,
+    colors: fixture && [{
+      id: "light-color",
+      label: "Colour",
+      hint: "The light's colour; its strength is set separately",
+      value: fixture.colorLinear,
+      apply: (colorLinear) => withSceneryLightColor(scene, node.id, colorLinear),
+    }],
     fields: [
+      ...(fixture ? [{
+        id: "light-strength",
+        label: "Strength",
+        value: fixture.intensity,
+        step: 0.05,
+        min: 0,
+        max: SCENERY_LIGHT_STRENGTH_MAX,
+        apply: (value: number) => withSceneryLightStrength(scene, node.id, value),
+      }] : []),
       ...positionFields(centre, move),
       {
         id: "scale",
@@ -244,6 +267,21 @@ export function createSceneryNodeAt(
     return { ...node, place: { units: "metres", position: { ...point_m } } };
   }
   const extent = Math.max(SCENERY_MINIMUM_HALF_SIZE_M, 0.07 * span);
+  if (kind === "lamp") {
+    // A bulb, not a block: small, warm, and held up off the surface, because a
+    // point light sitting on the floor lights half a room and a floor.
+    const radius = 0.3 * extent;
+    const id = nextSceneryNodeId(scene, "lamp");
+    const lift = normal.y > 0.1 ? { x: 0, y: 1, z: 0 } : normal;
+    const height = radius + 1.5 * extent;
+    return {
+      kind: "ellipsoid", id, group: id,
+      tags: ["prop", "authored", "fixture", "light", "point-light"],
+      place: { units: "metres", position: add(point_m, { x: lift.x * height, y: lift.y * height, z: lift.z * height }) },
+      radius: { x: radius, y: radius, z: radius },
+      material: { colorLinear: kelvinToLinear(2700), emission: 2 },
+    };
+  }
   const lift = normal.y > 0.1 ? { x: 0, y: 1, z: 0 } : normal;
   const height = kind === "cylinder" ? extent : extent;
   const place: SceneryPlacement = {
@@ -373,6 +411,7 @@ const PROP_ACTION_SHAPES: ReadonlyArray<{
   { kind: "box", label: "Box", icon: "box" },
   { kind: "cylinder", label: "Post", icon: "cylinder" },
   { kind: "ellipsoid", label: "Blob", icon: "ellipsoid" },
+  { kind: "lamp", label: "Lamp", icon: "lamp" },
   { kind: "oak-v2", label: "Fractal oak", icon: "prop" },
 ]);
 

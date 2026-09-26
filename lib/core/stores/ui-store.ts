@@ -20,7 +20,7 @@ import { defaultCamera, type CameraState, type RigidShape } from "../model";
  * authored by its run or its ring, which a single click on a surface has no way
  * to say. These three are the ones a point and a size fully determine.
  */
-export type SceneryPropKind = "box" | "cylinder" | "ellipsoid" | "oak-v2";
+export type SceneryPropKind = "box" | "cylinder" | "ellipsoid" | "oak-v2" | "lamp";
 
 /**
  * The instrument currently drawn over the scene.

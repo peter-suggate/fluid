@@ -1247,6 +1247,12 @@ fn meshRayCrossesDirtyBox(origin:vec3f,direction:vec3f)->bool{
   if(undrawn||masked){
     let current=traceStatic(camera[0],rd);
     if(current.t<hit.t){hit=current;producer=SVO_GBUFFER_PRODUCER_BRICK;}
+  }else{
+    // The backdrop ground is not octree content, so it is never meshed: the
+    // tiled terrain walk answers it here with its first voxel, and the depth
+    // this writes hides the set's quads that sit under it.
+    let backdrop=dryBackdropTrace(camera[0],rd,hit.t);
+    if(backdrop.t<hit.t){hit=backdrop;producer=SVO_GBUFFER_PRODUCER_BRICK;}
   }
   if(hit.t>=DRY_MISS){return dryRasterPrimaryMiss();}
   return dryRasterPrimarySurface(hit,camera[0],rd,camera[1],producer);

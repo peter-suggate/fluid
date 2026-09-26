@@ -1,5 +1,6 @@
 /** Fused SVO shading program and its packing ABI. The pipeline host owns
  * scheduling and resources; feature extraction must not add GPU dispatches. */
+import { backdropTerrainWGSL } from "../backdrop/backdrop-terrain-tiles";
 import { PLANAR_BOUNDARY_PATCH_BYTES,planarBoundaryWGSL } from "../../../core/planar-boundary";
 import { VOXEL_MATERIAL_IDS } from "../../../core/voxel-scene";
 import { cameraApertureShaderLibrary } from "../../../core/webgpu-camera";
@@ -34,6 +35,7 @@ import { SVO_CONE_RADIANCE_RECONSTRUCTION_CODES } from "../radiance/definition";
 import { svoEnvironmentLightingWGSL } from "../radiance/svo-environment-lighting";
 import { SVO_NODE_MIP_LAYOUT } from "../radiance/svo-node-mip-pyramid";
 import { svoNodeMipSamplingWGSL } from "../radiance/svo-node-mip-sampling";
+import { svoNodeMipPageHashWGSL } from "../radiance/svo-node-mip-page-hash";
 import { svoTetrahedralRadianceWGSL } from "../radiance/svo-tetrahedral-radiance";
 import { svoTetrahedralRadianceConeCoreWGSL } from "../radiance/svo-tetrahedral-radiance-cone";
 import { liveSvoDerivedPageValidityWGSL } from "../radiance/webgpu-svo-live-derived-cache";
@@ -320,6 +322,20 @@ export interface SvoDryConeMarcherOptions {
   fluidCoverage?: boolean;
   /** Resolve a virtual page with one r32uint texture load before directory fallback. */
   directPageTable?: boolean;
+  /**
+   * Floor each cone sample's footprint at the stored voxel there
+   * (`backdropStoredVoxelWidth`, from the backdrop terrain library the host
+   * shader must include). Backdrop detail rings are coarse leaves that own
+   * pyramid pages only at their own level, so a finer sample reads them as air.
+   */
+  storedVoxelFloor?: boolean;
+  /**
+   * Stop each directional shadow cone once its ray has cleared the world's
+   * content ceiling (`backdropContentCeilingEnd`, from the backdrop terrain
+   * library the host shader must include) instead of marching on to the
+   * world-box exit. The step schedule is unchanged, so the result is too.
+   */
+  contentCeilingClip?: boolean;
 }
 
 
@@ -366,19 +382,12 @@ fn dryNodeMipMorton(coordinate:vec3u)->vec2u{
   const searchRange = options.rangedDirectorySearch
     ? /* wgsl */ `var low=dryNodeMipLevelStart(level);var high=select(dry.nodeMip.y,dryNodeMipLevelStart(level+1u),level<11u);`
     : /* wgsl */ `var low=0u;var high=dry.nodeMip.y;`;
-  const directPageTable = options.directPageTable ? /* wgsl */ `fn dryNodeMipDirectLevelZ(level:u32)->u32{
-  let clamped=min(level,11u);
-  let word=select(select(dry.nodeMipDirectLevelZ[0],dry.nodeMipDirectLevelZ[1],clamped>=4u),dry.nodeMipDirectLevelZ[2],clamped>=8u);
-  let lane=clamped&3u;
-  return select(select(select(word.x,word.y,lane==1u),word.z,lane==2u),word.w,lane==3u);
-}
+  // The page table is an occupancy-sized hash keyed by (level, page), so it has
+  // no per-level slabs and no span-sized extent; see svo-node-mip-page-hash.ts.
+  const directPageTable = options.directPageTable ? /* wgsl */ `${svoNodeMipPageHashWGSL}
 fn dryNodeMipDirectFind(level:u32,coordinate:vec3u)->u32{
   if(dry.nodeMipDirect.w==0u||level>=dry.nodeMip.z){return 0xffffffffu;}
-  let zStart=dryNodeMipDirectLevelZ(level);
-  let zEnd=select(dry.nodeMipDirect.z,dryNodeMipDirectLevelZ(level+1u),level+1u<dry.nodeMip.z);
-  if(coordinate.x>=dry.nodeMipDirect.x||coordinate.y>=dry.nodeMipDirect.y||coordinate.z>=zEnd-zStart){return 0xffffffffu;}
-  let encoded=textureLoad(nodeMipPageTable,vec3i(vec3u(coordinate.x,coordinate.y,zStart+coordinate.z)),0).x;
-  return select(0xffffffffu,encoded-1u,encoded!=0u);
+  return svoNodeMipPageHashFind(nodeMipPageTable,level,coordinate);
 }
 ` : "";
   const directFind = options.directPageTable
@@ -468,7 +477,38 @@ fn dryConeZeroRegionAt(position_m:vec3f,level:u32,pageCache:ptr<function,DryNode
     ? "struct DryConeVisibility{transmittance:f32,valid:u32,fluidDepth_m:f32}"
     : "struct DryConeVisibility{transmittance:f32,valid:u32}";
   const stepWidthExpression = /* wgsl */ `let remaining=maximumDistance_m-distance;let stepWidth=min(diameter,remaining);`;
-  const selfCoverageWeight = /* wgsl */ `var selfWeight=1.0;if(shadowCone){selfWeight=max(clamp(dot(position-origin_m,surfaceNormal)/(1.5*diameter)-1.0,0.0,1.0),clamp((distance-12.0*minimumVoxel)/(12.0*minimumVoxel),0.0,1.0))*clamp(remaining/(1.5*diameter),0.0,1.0);}`;
+  const selfCoverageWeight = /* wgsl */ `var selfWeight=1.0;if(shadowCone){selfWeight=max(clamp(dot(position-origin_m,surfaceNormal)/(1.5*diameter)-1.0,0.0,1.0),clamp((distance-12.0*receiverVoxel)/(12.0*receiverVoxel),0.0,1.0))*clamp(remaining/(1.5*diameter),0.0,1.0);}`;
+  // What a cone's footprint may not be finer than, beyond its aperture:
+  // - the stored voxel where it samples (see storedVoxelFloor), and
+  // - the step its remaining budget can afford. A cone that runs out of steps
+  //   short of its end reports the unmarched rest as clear: with the default
+  //   48 steps and a 0.065 rad aperture a sun cone reached ~126 finest cells
+  //   (0.79 m at 6.25 mm), so taller blockers cast nothing and the reach
+  //   shrank with the lattice. Growing the footprint geometrically so the
+  //   remaining steps end exactly at the end keeps every cone's reach its
+  //   whole segment, widening only as much as the budget forces. Anchored
+  //   cones keep the half-way split their emitter ladder shares the budget
+  //   with.
+  const receiverVoxelExpression = options.storedVoxelFloor
+    ? /* wgsl */ `let storedLattice=backdropStoredLattice();let receiverVoxel=max(minimumVoxel,backdropStoredVoxelWidth(storedLattice,origin_m));`
+    : /* wgsl */ `let receiverVoxel=minimumVoxel;`;
+  const sampleFloorExpression = options.storedVoxelFloor
+    ? /* wgsl */ `backdropStoredVoxelWidth(storedLattice,origin_m+direction*distance)`
+    : "0.0";
+  const coneDiameterExpression = /* wgsl */ `let reachStep=select(distance*(pow(max(phaseSplit/distance,1.0),1.0/f32(budget+1u))-1.0),0.0,anchored);let diameter=max(max(minimumVoxel,2.0*distance*tangent),max(${sampleFloorExpression},reachStep));`;
+  // A directional shadow cone (unanchored, with a receiver normal) stops once
+  // its ray has cleared the content ceiling for good. The footprint schedule is
+  // untouched (the reach floor still spreads the budget over the whole segment
+  // to the world-box exit), so every sample before the stop is the sample the
+  // full march takes; only the tail, which can no longer reach any content,
+  // is not marched. The margin above each column is what a skipped sample's
+  // footprint could still reach: two footprints (the larger of the aperture
+  // and the reach step, both proportional to distance) plus four receiver
+  // voxels.
+  const coneEndClip = options.contentCeilingClip
+    ? /* wgsl */ `var coneEnd_m=maximumDistance_m;if(!anchored&&dot(surfaceNormal,surfaceNormal)>.25){let reachGrowth=pow(max(maximumDistance_m/(receiverVoxel*.75),1.0),1.0/f32(clamp(dry.tuningCounts0.y,1u,48u)+1u))-1.0;coneEnd_m=backdropContentCeilingEnd(origin_m,direction,maximumDistance_m,4.0*receiverVoxel,2.0*max(2.0*tangent,reachGrowth));}`
+    : "";
+  const coneEndCondition = options.contentCeilingClip ? "&&distance<coneEnd_m" : "";
   const bandStart = 1 - SVO_DRY_CONE_LOD_BLEND_BAND_WIDTH;
   const blendWeightExpression = /* wgsl */ `let blendWeight=clamp((fract(lod)-${bandStart})*${(1 / SVO_DRY_CONE_LOD_BLEND_BAND_WIDTH).toFixed(8)},0.0,1.0);`;
   const coarseBlendedCoverage = /* wgsl */ `var coverage=max(lookup.sample.solidMean,lookup.sample.solidMaximum*.15);if(blendWeight>0.0){let lookupCoarse=dryNodeMipAt(position,lod+1.0,&pageCacheCoarse);if(lookupCoarse.valid==0u){return ${coneMiss};}coverage=mix(coverage,max(lookupCoarse.sample.solidMean,lookupCoarse.sample.solidMaximum*.15),blendWeight);}`;
@@ -497,9 +537,9 @@ fn dryConeZeroRegionAt(position_m:vec3f,level:u32,pageCache:ptr<function,DryNode
   // nothing to the blend.
   const visibility = options.emptySpaceElision
     ? /* wgsl */ `fn dryConeVisibility(origin_m:vec3f,direction:vec3f,aperture:f32,maximumDistance_m:f32,surfaceNormal:vec3f,anchored:bool)->DryConeVisibility{
-  if(!dryNodeMipReady()){return ${coneMiss};}let minimumVoxel=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let tangent=tan(aperture*.5);var distance=minimumVoxel*.75;var transmittance=1.0;${fluidPrologue}var pageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);var pageCacheCoarse=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);let shadowCone=dot(surfaceNormal,surfaceNormal)>.25;var budget=clamp(dry.tuningCounts0.y,1u,48u);let phaseSplit=select(maximumDistance_m,maximumDistance_m*.5,anchored);
+  if(!dryNodeMipReady()){return ${coneMiss};}let minimumVoxel=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));${receiverVoxelExpression}let tangent=tan(aperture*.5);${coneEndClip}var distance=receiverVoxel*.75;var transmittance=1.0;${fluidPrologue}var pageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);var pageCacheCoarse=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);let shadowCone=dot(surfaceNormal,surfaceNormal)>.25;var budget=clamp(dry.tuningCounts0.y,1u,48u);let phaseSplit=select(maximumDistance_m,maximumDistance_m*.5,anchored);
   var zeroRegion=DryConeZeroRegion(vec3f(0.0),vec3f(0.0),0u);
-  for(var stepIndex=0u;stepIndex<48u&&budget>0u&&distance<phaseSplit&&transmittance>.005;stepIndex+=1u){budget-=1u;let diameter=max(minimumVoxel,2.0*distance*tangent);let lod=svoNodeMipLod(diameter,minimumVoxel);${stepWidthExpression}
+  for(var stepIndex=0u;stepIndex<48u&&budget>0u&&distance<phaseSplit${coneEndCondition}&&transmittance>.005;stepIndex+=1u){budget-=1u;${coneDiameterExpression}let lod=svoNodeMipLod(diameter,minimumVoxel);${stepWidthExpression}
     let position=origin_m+direction*distance;let level=min(u32(max(floor(lod),0.0)),dry.nodeMip.z-1u);
     // Tap texels lie within 1.5 level-voxels of the sample position, so the
     // whole trilinear support footprint sits inside this conservative box.
@@ -522,8 +562,8 @@ fn dryConeZeroRegionAt(position_m:vec3f,level:u32,pageCache:ptr<function,DryNode
   return ${coneResult};
 }`
     : /* wgsl */ `fn dryConeVisibility(origin_m:vec3f,direction:vec3f,aperture:f32,maximumDistance_m:f32,surfaceNormal:vec3f,anchored:bool)->DryConeVisibility{
-  if(!dryNodeMipReady()){return ${coneMiss};}let minimumVoxel=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let tangent=tan(aperture*.5);var distance=minimumVoxel*.75;var transmittance=1.0;${fluidPrologue}var pageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);var pageCacheCoarse=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);let shadowCone=dot(surfaceNormal,surfaceNormal)>.25;var budget=clamp(dry.tuningCounts0.y,1u,48u);let phaseSplit=select(maximumDistance_m,maximumDistance_m*.5,anchored);
-  for(var stepIndex=0u;stepIndex<48u&&budget>0u&&distance<phaseSplit&&transmittance>.005;stepIndex+=1u){budget-=1u;let diameter=max(minimumVoxel,2.0*distance*tangent);let lod=svoNodeMipLod(diameter,minimumVoxel);${stepWidthExpression}let position=origin_m+direction*distance;let lookup=dryNodeMipAt(position,lod,&pageCache);if(lookup.valid==0u){return ${coneMiss};}${selfCoverageWeight}${blendWeightExpression}${coarseBlendedCoverage}${blendedCoverage}distance+=max(stepWidth,minimumVoxel*.25);}${emitterLadderWGSL}
+  if(!dryNodeMipReady()){return ${coneMiss};}let minimumVoxel=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));${receiverVoxelExpression}let tangent=tan(aperture*.5);${coneEndClip}var distance=receiverVoxel*.75;var transmittance=1.0;${fluidPrologue}var pageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);var pageCacheCoarse=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);let shadowCone=dot(surfaceNormal,surfaceNormal)>.25;var budget=clamp(dry.tuningCounts0.y,1u,48u);let phaseSplit=select(maximumDistance_m,maximumDistance_m*.5,anchored);
+  for(var stepIndex=0u;stepIndex<48u&&budget>0u&&distance<phaseSplit${coneEndCondition}&&transmittance>.005;stepIndex+=1u){budget-=1u;${coneDiameterExpression}let lod=svoNodeMipLod(diameter,minimumVoxel);${stepWidthExpression}let position=origin_m+direction*distance;let lookup=dryNodeMipAt(position,lod,&pageCache);if(lookup.valid==0u){return ${coneMiss};}${selfCoverageWeight}${blendWeightExpression}${coarseBlendedCoverage}${blendedCoverage}distance+=max(stepWidth,minimumVoxel*.25);}${emitterLadderWGSL}
   return ${coneResult};
 }`;
   return /* wgsl */ `${liveSvoDerivedPageValidityWGSL}
@@ -554,9 +594,13 @@ fn dryNodeMipAt(position_m:vec3f,lodIn:f32,pageCache:ptr<function,DryNodeMipPage
   if((*pageCache).generation!=dry.nodeMip.x||(*pageCache).level!=level||any((*pageCache).coordinate!=pageCoordinate)){
     *pageCache=DryNodeMipPageCache(pageCoordinate,level,vec3u(0u),dry.nodeMip.x,0u,0xffffffffu,0u);let pageIndex=dryNodeMipFind(level,pageCoordinate);
     if(pageIndex!=0xffffffffu){${pageOrigin}}
+    // Validity is read once per page switch, not once per sample: it cannot
+    // change during a pass, and a cone takes several samples per page.
+    // resident: 0 not resident (reads zero), 1 resident, 2 resident but invalid.
+    if((*pageCache).resident!=0u&&!dryNodeMipPageValid((*pageCache).pageIndex)){(*pageCache).resident=2u;}
   }
   if((*pageCache).resident==0u){return DryNodeMipLookup(SvoNodeMipSample(0.0,0.0,0.0,0.0),1u);}
-  if(!dryNodeMipPageValid((*pageCache).pageIndex)){return DryNodeMipLookup(SvoNodeMipSample(0.0,0.0,0.0,0.0),0u);}
+  if((*pageCache).resident==2u){return DryNodeMipLookup(SvoNodeMipSample(0.0,0.0,0.0,0.0),0u);}
   let local=virtualVoxel-vec3f(pageCoordinate)*f32(SVO_NODE_MIP_INTERIOR_SIZE)-vec3f(.5);return DryNodeMipLookup(svoNodeMipSamplePage(nodeMipAtlas,nodeMipSampler,(*pageCache).pageOrigin,local),1u);
 }
 ${zeroRegion}${coneStruct}
@@ -1133,12 +1177,32 @@ export function createSvoDrySceneFragmentWGSL(
   // `records: false` — smooth primary reconstruction reads the retained dense
   // geometry lane. Compact records cannot cover every first-hit voxel at leaf
   // boundaries, so they remain outside this identity-only codec.
+  // The backdrop ground is not octree content: it is a tiled height field
+  // (backdrop-terrain-tiles.ts) whose table sits past the dense owner lane, and
+  // the traversal entry points below consult it beside the octree. Only the
+  // dense arm has that lane tail, so only it carries the table.
+  const backdropTerrain = leafPayloadMode === "dense";
+  const backdropTerrainLibraryWGSL = backdropTerrain ? backdropTerrainWGSL({
+    load: (index) => `scenePayload[${index}]`, tableBase: "dry.payloadLanes1.y+dry.payloadLanes1.z",
+  }) + /* wgsl */ `
+// The first backdrop voxel in [tMin, tMax], as a voxel hit like the set's
+// terrain: the face the ray entered is the normal, and shading gives it the
+// set's face presentation (cell seams on the voxel's own lattice).
+fn dryBackdropTerrainHit(ro:vec3f,rd:vec3f,tMin:f32,tMax:f32)->DryHit{
+  let trace=backdropTerrainTrace(ro,rd,tMin,tMax);
+  if(trace.t<0.0){return missHit();}
+  let side=-sign(rd);
+  let normal=select(select(vec3f(0.0,0.0,side.z),vec3f(0.0,1.0,0.0),trace.face==1u),vec3f(side.x,0.0,0.0),trace.face==0u);
+  return DryHit(trace.t,normal,backdropTerrainMaterial(),DRY_OWNER_NONE,
+    SVO_FEATURE_SMOOTH,DRY_GBUFFER_FIELD_VOXEL,DRY_GBUFFER_MOTION_STATIC,0u,0.0,vec3u(0u));
+}` : "";
   const sceneIdentityWGSL = /* wgsl */ `${leafPayloadMode === "dense" ? "" : sparseBrickBandedLeafCodecWGSL({
     occupancyBase: "dry.payloadLanes.x", recordMaskBase: "dry.payloadLanes.y",
     headerBase: "dry.payloadLanes.z", blobBase: "dry.payloadLanes.w",
     recordsBase: "0u",
     load: (index) => `scenePayload[${index}]`, mode: leafPayloadMode, records: false,
   })}
+${backdropTerrainLibraryWGSL}
 ${sparseBrickSceneIdentityCodecWGSL({
     mode: leafPayloadMode, materialOwnerBase: "dry.payloadLanes1.y",
     load: (index) => `scenePayload[${index}]`,
@@ -1150,7 +1214,13 @@ ${sparseBrickSceneIdentityWordCodecWGSL()}
 // length the moment binding 3 became the whole arena — and which a banded world
 // has no lane to measure at all. Published rather than derived so the dense and
 // banded arms reject exactly the same voxel indices.
-fn dryVoxelCapacity()->u32{return dry.payloadLanes1.z;}`;
+fn dryVoxelCapacity()->u32{return dry.payloadLanes1.z;}
+// A voxel whose identity can be read.
+fn dryVoxelReadable(voxel:u32)->bool{return voxel<dryVoxelCapacity();}
+// The receiver's own voxel edge where it is coarser than the set's cell (a
+// backdrop detail ring), so a cone's normal escape clears the receiver's own
+// coverage at every ring as it does on the set; zero elsewhere.
+fn dryStoredVoxelWidthAt(position:vec3f)->f32{return ${backdropTerrain ? "backdropStoredVoxelWidth(backdropStoredLattice(),position)" : "0.0"};}`;
   // Coverage and the baked normal are the two halves of the sub-voxel surface
   // sample. The normal supplies orientation; coverage inverts the voxelizer's
   // planar coverage law to recover the plane's signed offset from cell centre.
@@ -1470,6 +1540,18 @@ fn dryPresentationHit(hitIn:DryHit)->DryHit{
  * coarsen occupancy, alter silhouettes, or reopen the coping gaps caused by a
  * coarse geometry bake.
  */
+// The lattice a voxel face's seams are drawn on: the set's render cells, or,
+// for a voxel face outside the footprint of a world with backdrop terrain (only
+// backdrop voxels live there), that voxel's own cell, coarser with each tile
+// level.
+struct DryFaceLattice{origin:vec3f,cell:vec3f}
+fn dryFaceLattice(position:vec3f,faceNormal:vec3f,fieldSource:u32)->DryFaceLattice{
+  ${backdropTerrain ? `if(fieldSource==DRY_GBUFFER_FIELD_VOXEL&&backdropTerrainLevels()>0u&&backdropFootprintDistance(position.xz)>0.0){
+    let voxel=backdropTerrainVoxelAt(position,faceNormal);
+    return DryFaceLattice(vec3f(voxel.x-0.5*voxel.z,voxel.w,voxel.y-0.5*voxel.z),vec3f(voxel.z));
+  }` : ""}
+  return DryFaceLattice(dry.nodeMipOrigin.xyz,dry.mapping.cellSize);
+}
 fn dryVoxelFaceEdgeFactor(position:vec3f,faceNormal:vec3f,depth_m:f32,fieldSource:u32)->f32{
   if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.flatVoxelNormals}u)==0u){return 1.0;}
   // The seam is a presentation of individually articulated *voxel* faces. An
@@ -1478,11 +1560,12 @@ fn dryVoxelFaceEdgeFactor(position:vec3f,faceNormal:vec3f,depth_m:f32,fieldSourc
   // that hit would throw away the visual half of the planar cutover while the
   // traversal still paid for the exact answer.
   if(fieldSource==DRY_GBUFFER_FIELD_ANALYTIC){return 1.0;}
-  let cellCoordinate=(position-dry.nodeMipOrigin.xyz)/max(dry.mapping.cellSize,vec3f(1e-6));
+  let lattice=dryFaceLattice(position,faceNormal,fieldSource);
+  let cellCoordinate=(position-lattice.origin)/max(lattice.cell,vec3f(1e-6));
   let phase=abs(fract(cellCoordinate)-vec3f(.5));
   let edgeDistance=vec3f(.5)-phase;
   let worldPixel=max(2.0*depth_m*cameraTanHalfFov()/max(uniforms.viewport.y,1.0),1e-6);
-  let footprint=max(vec3f(worldPixel)/max(dry.mapping.cellSize,vec3f(1e-6)),vec3f(1e-4));
+  let footprint=max(vec3f(worldPixel)/max(lattice.cell,vec3f(1e-6)),vec3f(1e-4));
   let tangentMask=vec3f(1.0)-abs(faceNormal);
   var edge=1.0;var maximumFootprint=0.0;
   for(var axis=0u;axis<3u;axis+=1u){
@@ -1686,7 +1769,7 @@ fn dryLodBrickRepresentativeIdentity(voxelOffset:u32,occupancy:SvoBrickOccupancy
       let local=origin+vec3u(index&3u,(index>>2u)&3u,(index>>4u)&3u);
       if(any(local>=vec3u(brickSize))){continue;}
       let address=svoBrickVoxelIndex(voxelOffset,local,brickSize);
-      if(address<dryVoxelCapacity()){
+      if(dryVoxelReadable(address)){
         ${cellSolidGateWGSL("address", "if(dryLodCellSolid(identity)){return identity;}")}
       }
     }
@@ -1709,7 +1792,7 @@ fn dryLodAggregateIdentity(ro:vec3f,rd:vec3f,brickMinimum:vec3f,extent:vec3f,vox
   for(var iteration=0u;iteration<24u;iteration+=1u){
     if(any(cell<vec3i(cellMinimum))||any(cell>=limit)||entry>tExit){break;}
     let index=svoBrickVoxelIndex(voxelOffset,vec3u(cell),brickSize);
-    if(index<dryVoxelCapacity()){
+    if(dryVoxelReadable(index)){
       ${cellSolidGateWGSL("index", "if(dryLodCellSolid(identity)){return identity;}")}
     }
     let advance=min(nextT.x,min(nextT.y,nextT.z));if(nextT.x<=advance+1e-6){cell.x+=step.x;nextT.x+=deltaT.x;}if(nextT.y<=advance+1e-6){cell.y+=step.y;nextT.y+=deltaT.y;}if(nextT.z<=advance+1e-6){cell.z+=step.z;nextT.z+=deltaT.z;}entry=advance;
@@ -3342,7 +3425,7 @@ fn dryPrepassTraceVisibility(opaque:DryHit,ro:vec3f,rd:vec3f)->vec2u{
         // clearance: the reduced-rate texel must hold the same visibility the
         // full-rate edge band computes inline.
         let coneCell_m=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));
-        let coneEscape_m=coneCell_m*dry.tuningRays1.z;
+        let coneEscape_m=max(coneCell_m,dryStoredVoxelWidthAt(position))*dry.tuningRays1.z;
         let coneMaxRaw_m=max(0.0,ray.tMax_m-coneEscape_m*dot(geometricNormal,sample.towardLight));
         let coneMax_m=coneMaxRaw_m-select(0.0,dry.tuningRays1.w*coneCell_m,sample.finiteDistance_m>0.0);
         let cone=dryConeVisibility(ray.origin_m+geometricNormal*coneEscape_m,sample.towardLight,dry.tuningRays1.y,coneMax_m,geometricNormal,sample.finiteDistance_m>0.0);
@@ -3413,7 +3496,7 @@ fn dryPrepassShadeNoGi(opaque:DryHit,ro:vec3f,rd:vec3f)->vec3f{
   }
   let viewDirection=normalize(-rd);let reflected=reflect(rd,opaque.normal);let diffuseColor=surface.baseColor*(1.0-surface.metallic);let f0=mix(surface.specularF0*surface.specularWeight,surface.baseColor,surface.metallic);let environmentBrdf=unifiedEnvironmentBrdf(max(dot(opaque.normal,viewDirection),0.0),surface.roughness,f0);let diffuseEnergy=max(vec3f(0.0),vec3f(1.0)-environmentBrdf);
   let diffuseVisibility=dryDiffuseMultiBounceVisibility(dryPrepassData0.x,diffuseColor);let diffuseEnvironment=diffuseColor*diffuseEnergy*svoEnvironmentDiffuseIrradiance(dryLighting.environment,opaque.normal)*diffuseVisibility/UNIFIED_PI;let specularEnvironment=dryEnvironment(reflected,surface.roughness)*environmentBrdf;
-  return max(surface.emissive+diffuseEnvironment+specularEnvironment+direct*dry.giLighting.w,vec3f(0.0));
+  return dryBackdropHaze(opaque,position,rd,max(surface.emissive+diffuseEnvironment+specularEnvironment+direct*dry.giLighting.w,vec3f(0.0)));
 }
 @fragment fn dryPrepassShadeMain(input:VertexOut)->@location(0) vec4f{
   let coordinate=vec2i(input.position.xy);let geometry=textureLoad(dryPrepassGeometryTexture,coordinate,0);
@@ -3935,9 +4018,10 @@ struct DryParams {
   tuningRays0:vec4f,
   // AO aperture, shadow aperture, normal escape, emitter clearance.
   tuningRays1:vec4f,
-  // Packed Z slabs in nodeMipPageTable. w=0 retains sorted-directory fallback.
+  // w: the nodeMipPageTable hash is published; w=0 retains sorted-directory fallback.
   nodeMipDirect:vec4u,
-  nodeMipDirectLevelZ:array<vec4u,3>,
+  // Reserved: the twelve Z-slab offsets of the retired dense page table.
+  nodeMipReserved:array<vec4u,3>,
   // x: tetrahedral-radiance generation; y: complete and generation-matched.
   tetrahedralRadiance:vec4u,
   nodeMipExtent:vec4f,
@@ -3968,7 +4052,8 @@ struct DryParams {
   // smooth normals enabled, minimum normal agreement, preserve close normals, reserved.
   meshFilterNormals:vec4f,
   // Analytic ground beyond a terrain shell: enabled, height, haze e-folding
-  // distance (all metres), reserved. See dryGroundOrSky.
+  // distance, backdrop content radius (all metres; zero radius = no backdrop).
+  // See dryGroundOrSky.
   groundPlane:vec4f,
   // The shell's plan footprint: minX, minZ, maxX, maxZ.
   groundFootprint:vec4f,
@@ -4025,7 +4110,7 @@ ${cameraApertureShaderLibrary()}
 @group(0) @binding(17) var nodeMipSampler:sampler;
 @group(0) @binding(18) var nodeMipDirectory:texture_2d<u32>;
 @group(0) @binding(19) var fluidCoverageVolume:texture_3d<f32>;
-@group(0) @binding(20) var nodeMipPageTable:texture_3d<u32>;
+@group(0) @binding(20) var nodeMipPageTable:texture_2d<u32>;
 @group(0) @binding(21) var tetraRadianceLobe0:texture_3d<f32>;
 @group(0) @binding(22) var tetraRadianceLobe1:texture_3d<f32>;
 @group(0) @binding(23) var tetraRadianceLobe2:texture_3d<f32>;
@@ -4112,7 +4197,7 @@ var<private> dryDerivedPageFailure:u32=0u;
 ${canonicalTraversalWGSL}${screenSpaceTraversalWGSL}${lodDescentWGSL}${lodUniformWGSL}${screenSpacePrimaryProxyWGSL}${tieredComputeResolveDeclarationsWGSL}
 ${wideTraversalWGSL}${compactTraversalWGSL}${brickOccupancyHelpersWGSL}
 ${liveLeafLifecycleWGSL}
-${createSvoDryConeMarcherWGSL({ branchlessMorton: true, rangedDirectorySearch: true, directPageTable: true })}
+${createSvoDryConeMarcherWGSL({ branchlessMorton: true, rangedDirectorySearch: true, directPageTable: true, storedVoxelFloor: backdropTerrain, contentCeilingClip: backdropTerrain })}
 var<private> dryGiPageCache:DryNodeMipPageCache;
 /** The ancestor page a sub-floor radiance sample redirects to; coarser, so it changes far less often. */
 var<private> dryGiRadiancePageCache:DryNodeMipPageCache;
@@ -4385,8 +4470,11 @@ fn dryBoundsInterval(minimum:vec3f,maximum:vec3f,ro:vec3f,rd:vec3f,tMin:f32,tMax
 fn directionalLightSceneExitDistance(position:vec3f,directionToLightIn:vec3f)->f32 {
   // dryLightSample returns a unit direction for every valid light sample.
   let directionToLight=directionToLightIn;
-  let minimum=vec3f(-0.5*uniforms.container.x,0.0,-0.5*uniforms.container.z);
-  let maximum=vec3f(0.5*uniforms.container.x,uniforms.container.y,0.5*uniforms.container.z);
+  // The world box the octree covers (the one the cones march), not the
+  // container: stored content beyond it — a backdrop's detail rings — casts
+  // and receives voxel shadows too.
+  let minimum=dry.nodeMipOrigin.xyz;
+  let maximum=minimum+dry.nodeMipExtent.xyz;
   var enter=0.0;var exit=DRY_MISS;
   for(var axis=0u;axis<3u;axis+=1u){
     if(abs(directionToLight[axis])<=1e-9){if(position[axis]<minimum[axis]||position[axis]>maximum[axis]){return 0.0;}}
@@ -4696,7 +4784,7 @@ ${primaryEntrySeedLibraryWGSL}
 // Measured on the hero at 800x460, cone scale 0.5, all arms interleaved in one
 // process (serialized submit-to-fence): 292.5 -> 222.0 ms at 501 records and
 // 1564.4 -> 546.3 ms at 5 039. It is the single largest term in the 10x gap.
-fn traceStaticFrom(ro:vec3f,rd:vec3f,initialMinimum:f32)->DryHit {
+fn traceStaticVoxelFrom(ro:vec3f,rd:vec3f,initialMinimum:f32)->DryHit {
   // An unpublished scene has no voxels, and voxels are the only surface. Drawing
   // it analytically here would hide exactly the failure worth seeing: a frame
   // that looks perfect because the voxel path never ran. Miss instead and let
@@ -4778,7 +4866,25 @@ fn traceStaticFrom(ro:vec3f,rd:vec3f,initialMinimum:f32)->DryHit {
   if(!traversalFinished){}
   if(voxel.t<seeded.t){return voxel;}return seeded;
 }
+// The one static world: the set's octree, then the backdrop ground in front
+// of whatever the set answered. The terrain walk is bounded by the set's hit,
+// so a pixel on the set pays only the tiles between the camera and it, and a
+// world without a backdrop reads a zero level count and returns at once. The
+// wrap is outside the voxel walk because that walk returns early on an empty
+// entry seed (DRY_PRIMARY_ENTRY_EMPTY), which says nothing about the ground.
+fn traceStaticFrom(ro:vec3f,rd:vec3f,initialMinimum:f32)->DryHit{
+  let voxelWorld=traceStaticVoxelFrom(ro,rd,initialMinimum);
+  ${backdropTerrain ? `let ground=dryBackdropTerrainHit(ro,rd,max(initialMinimum,0.0),voxelWorld.t);
+  if(ground.t<voxelWorld.t){return ground;}` : ""}
+  return voxelWorld;
+}
 fn traceStatic(ro:vec3f,rd:vec3f)->DryHit{return traceStaticFrom(ro,rd,0.0);}
+// The backdrop's share of the primary walk, for the voxel mesh background:
+// only the ground, bounded by tMax (the exact planes). Every set leaf is drawn
+// by the mesh quads the depth test lays over this pass.
+fn dryBackdropTrace(ro:vec3f,rd:vec3f,tMax:f32)->DryHit{
+  ${backdropTerrain ? "return dryBackdropTerrainHit(ro,rd,0.0,tMax);" : "return missHit();"}
+}
 
 struct DryGlassHit{hit:SvoThinGlassHit,recordIndex:u32}
 fn dryGlassMiss()->DryGlassHit{return DryGlassHit(svoThinGlassMiss(),0u);}
@@ -5044,10 +5150,23 @@ fn dryLightVisibility(position:vec3f,geometricNormal:vec3f,ownerId:u32,towardLig
   return solid*mix(vec3f(1.0),dryFluidTransmittance(depth_m),dry.tuningRays0.y);
 }
 
-fn dryLightVisibilitySolid(position:vec3f,geometricNormal:vec3f,ownerId:u32,towardLight:vec3f,finiteDistance_m:f32)->vec3f {
+${backdropTerrain ? `// Whether the ground stands between a receiver and its light. The ray leaves
+// along the geometric normal by a distance that outgrows f32 position error
+// at the receiver's range, so a voxel face never shadows itself.
+fn dryBackdropOccludes(position:vec3f,geometricNormal:vec3f,towardLight:vec3f,finiteDistance_m:f32)->bool{
+  if(backdropTerrainLevels()==0u){return false;}
+  let range=length(position-uniforms.cameraPosition.xyz);
+  let origin=position+geometricNormal*(1e-3+2e-4*range);
+  let tMax=select(3.0e38,finiteDistance_m,finiteDistance_m>0.0);
+  return backdropTerrainTrace(origin,towardLight,0.0,tMax).t>=0.0;
+}
+` : ""}fn dryLightVisibilitySolid(position:vec3f,geometricNormal:vec3f,ownerId:u32,towardLight:vec3f,finiteDistance_m:f32)->vec3f {
   if(dot(geometricNormal,towardLight)<=0.0){return vec3f(0.0);}
   if((dry.materialPublication.w&2u)==0u){return vec3f(1.0);}
   if((dryDerivedPageFailure&${SVO_DRY_DERIVED_FAILURE.reducedReconstruction}u)!=0u){dryDerivedPageFailure|=${SVO_DRY_DERIVED_FAILURE.directVisibilityPage}u;return vec3f(0.0);}
+  // The backdrop ground occludes set and ground alike, before the set's own
+  // visibility, whose rays are bounded by the container and never reach it.
+  ${backdropTerrain ? "if(dryBackdropOccludes(position,geometricNormal,towardLight,finiteDistance_m)){return vec3f(0.0);}" : ""}
   let maximumDistance=select(directionalLightSceneExitDistance(position,towardLight),finiteDistance_m,finiteDistance_m>0.0);if(dryDirectionalRayLeavesDomain(maximumDistance)){return vec3f(1.0);}
   let ray=dryBiasedVisibilityRayUnit(position,geometricNormal,towardLight,maximumDistance,dry.mapping.cellSize,dry.tuningRays0.x);
   ${voxelLightCacheShortcutWGSL}
@@ -5070,7 +5189,7 @@ fn dryLightVisibilitySolid(position:vec3f,geometricNormal:vec3f,ownerId:u32,towa
     // trilinear/mip support, and the amount aliases with the receiver's
     // distance modulo the step size as concentric rings around the light.
     let coneCell_m=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));
-    let coneEscape_m=coneCell_m*dry.tuningRays1.z;
+    let coneEscape_m=max(coneCell_m,dryStoredVoxelWidthAt(position))*dry.tuningRays1.z;
     let coneMaxRaw_m=max(0.0,ray.tMax_m-coneEscape_m*dot(geometricNormal,towardLight));
     let coneMax_m=coneMaxRaw_m-select(0.0,dry.tuningRays1.w*coneCell_m,finiteDistance_m>0.0);
     let cone=dryConeVisibility(ray.origin_m+geometricNormal*coneEscape_m,towardLight,dry.tuningRays1.y,coneMax_m,geometricNormal,finiteDistance_m>0.0);
@@ -5223,14 +5342,43 @@ fn dryEvaluateSurfaceMaterial(hit:DryHit,position:vec3f)->DrySurfaceMaterial {
 // in for voxels only where it crosses the ray *outside* the footprint: that is
 // what hides the slab's walls, while a ray that dips below ground level inside
 // the footprint — into the pond — never reaches the test.
+//
+// A scene with a backdrop (groundPlane.w > 0) has no plane: the backdrop
+// ground is traced to the haze horizon (backdrop-terrain-tiles.ts), and a ray
+// that misses it below the horizon has gone past where the haze leaves 1/256
+// of the ground, so dryGroundOrSky answers it with the horizon colour.
 fn dryGroundPlaneT(ro:vec3f,rd:vec3f)->f32{
-  if(dry.groundPlane.x<=.5||!(rd.y<-1e-6)||!(ro.y>dry.groundPlane.y)){return DRY_MISS;}
+  if(dry.groundPlane.x<=.5||dry.groundPlane.w>0.0||!(rd.y<-1e-6)||!(ro.y>dry.groundPlane.y)){return DRY_MISS;}
   return (dry.groundPlane.y-ro.y)/rd.y;
 }
 fn dryGroundFootprintDistance(planar:vec2f)->f32{return length(max(max(dry.groundFootprint.xy-planar,planar-dry.groundFootprint.zw),vec2f(0.0)));}
 fn dryGroundPlaneReplaces(hit:DryHit,ro:vec3f,rd:vec3f)->bool{
+  if(dry.groundPlane.w>0.0){return false;}
   let t=dryGroundPlaneT(ro,rd);if(t>=DRY_MISS){return false;}if(hit.t>=DRY_MISS){return true;}
   return t<hit.t&&dryGroundFootprintDistance((ro+rd*t).xz)>0.0;
+}
+// The sky exactly at the horizon along the view's azimuth: the colour the
+// ground plane and the backdrop hills both fade into.
+fn dryHorizonColor(rd:vec3f)->vec3f{
+  let level=vec3f(rd.x,0.0,rd.z);let levelLengthSquared=dot(level,level);
+  return dryEnvironment(select(vec3f(1.0,0.0,0.0),level*inverseSqrt(max(levelLengthSquared,1e-24)),levelLengthSquared>1e-12),0.0);
+}
+// The plane's haze, applied to backdrop ground: a terrain voxel hit outside the
+// footprint of a backdrop scene fades toward the horizon exactly as the plane
+// did there, 1-exp(-d/hazeDistance) with d the distance from the footprint.
+// Only terrain: set scenery beyond the footprint was never hazed. Applied at
+// the end of each radiance path, before the reduced-rate cache stores it, so
+// the cached and the exact radiance agree and neither is hazed twice.
+//
+// Haze is the only thing distance does to the ground. The hills used to be
+// multiplied by a tone of their own as well (a warm albedo and an analytic
+// cavity term easing in with the ramp), which dimmed the key light on every
+// ring past the flat one by up to half: stored rings have real shadows, AO
+// and GI now, and the same porcelain as the set.
+fn dryBackdropHaze(hit:DryHit,position:vec3f,rd:vec3f,color:vec3f)->vec3f{
+  if(dry.groundPlane.w<=0.0||dryResolvedMaterialId(hit)!=${VOXEL_MATERIAL_IDS.terrain}u){return color;}
+  let d=dryGroundFootprintDistance(position.xz);if(d<=0.0){return color;}
+  return mix(color,dryHorizonColor(rd),1.0-exp(-d/max(dry.groundPlane.z,1e-6)));
 }
 // Every primary miss becomes final colour here, and so does every voxel hit the
 // plane stands in front of. The plane wears the terrain's own published
@@ -5244,10 +5392,14 @@ fn dryGroundPlaneReplaces(hit:DryHit,ro:vec3f,rd:vec3f)->bool{
 //
 // Beyond the footprint the plane fades into the sky at the horizon along the
 // view's own azimuth, exponentially with distance from the footprint's edge.
-// The e-folding distance is published in footprints, not metres, so a set
-// scaled up keeps the same atmosphere; and because that fog colour is the sky
-// exactly at the horizon, the plane's vanishing line has no seam against it.
+// The e-folding distance is the backdrop's own hazeDistance_m when the scene
+// has one, so backdrop ground and this plane fade identically and the horizon
+// is continuous; otherwise it is published in footprints, so a set scaled up
+// keeps the same atmosphere. Because that fog colour is the sky exactly at the
+// horizon, the plane's vanishing line has no seam against it.
 fn dryGroundOrSky(ro:vec3f,rd:vec3f)->vec3f{
+  // Past the backdrop's traced ground: the sky, clamped to the horizon below it.
+  if(dry.groundPlane.w>0.0){return select(dryEnvironment(rd,0.0),dryHorizonColor(rd),rd.y<0.0);}
   let t=dryGroundPlaneT(ro,rd);if(t>=DRY_MISS){return dryEnvironment(rd,0.0);}
   let position=ro+rd*t;let normal=vec3f(0.0,1.0,0.0);
   let surface=dryEvaluateSurfaceMaterial(DryHit(t,normal,${VOXEL_MATERIAL_IDS.terrain}u,DRY_OWNER_NONE,SVO_FEATURE_SMOOTH,0u,DRY_GBUFFER_MOTION_STATIC,0u,0.0,vec3u(0u)),position);
@@ -5263,8 +5415,7 @@ fn dryGroundOrSky(ro:vec3f,rd:vec3f)->vec3f{
   let diffuseEnvironmentScale=select(1.0,dry.giLighting.z,(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIllumination}u)!=0u);
   let diffuseEnvironment=diffuseColor*diffuseEnergy*svoEnvironmentDiffuseIrradiance(dryLighting.environment,normal)*diffuseEnvironmentScale/UNIFIED_PI;let specularEnvironment=dryEnvironment(reflect(rd,normal),surface.roughness)*environmentBrdf;
   let ground=max(surface.emissive+diffuseEnvironment+specularEnvironment+direct*dry.giLighting.w,vec3f(0.0));
-  let level=vec3f(rd.x,0.0,rd.z);let levelLengthSquared=dot(level,level);
-  let horizon=dryEnvironment(select(vec3f(1.0,0.0,0.0),level*inverseSqrt(max(levelLengthSquared,1e-24)),levelLengthSquared>1e-12),0.0);
+  let horizon=dryHorizonColor(rd);
   let haze=1.0-exp(-dryGroundFootprintDistance(position.xz)/max(dry.groundPlane.z,1e-6));
   return mix(ground,horizon,haze);
 }
@@ -5294,7 +5445,7 @@ fn shadeDryOpaque(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f {
   let viewDirection=normalize(-rd);let reflected=reflect(rd,hit.normal);let diffuseColor=surface.baseColor*(1.0-surface.metallic);let f0=mix(surface.specularF0*surface.specularWeight,surface.baseColor,surface.metallic);let environmentBrdf=unifiedEnvironmentBrdf(max(dot(hit.normal,viewDirection),0.0),surface.roughness,f0);let diffuseEnergy=max(vec3f(0.0),vec3f(1.0)-environmentBrdf);let contactVisibility=dryContactVisibility(position,geometricNormal,hit.featureId,hit.ownerId);let ignoredBodyOwner=select(DRY_OWNER_NONE,hit.ownerId,hit.motionKind==DRY_GBUFFER_MOTION_RIGID);let gi=dryGlobalIlluminationFaced(position,hit.normal,geometricNormal,ignoredBodyOwner);let diffuseVisibility=dryDiffuseMultiBounceVisibility(gi.visibility,diffuseColor);let diffuseEnvironmentScale=select(1.0,dry.giLighting.z,globalIllumination);let directScale=dry.giLighting.w;let diffuseEnvironment=diffuseColor*diffuseEnergy*svoEnvironmentDiffuseIrradiance(dryLighting.environment,hit.normal)*contactVisibility*diffuseVisibility*diffuseEnvironmentScale/UNIFIED_PI;let specularEnvironment=dryEnvironment(reflected,surface.roughness)*environmentBrdf;let indirectDiffuse=diffuseColor*gi.radiance;
   var shaded=max(surface.emissive+diffuseEnvironment+specularEnvironment+direct*directScale+indirectDiffuse,vec3f(0.0));
   shaded*=dryVoxelFaceEdgeFactor(position,hit.normal,hit.t,hit.fieldSource);
-  return shaded;
+  return dryBackdropHaze(hit,position,rd,shaded);
 }
 // Where the ray leaves the render voxel it just entered.
 //

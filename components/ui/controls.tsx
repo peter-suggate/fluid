@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useRef, type ReactNode } from "react";
 import { useNumberEntry, useSliderGesture } from "./gestures";
 import { clampNumber, formatNumber, printNumber } from "./number";
 
@@ -322,4 +322,48 @@ export function Metric({ label, value, unit, tone = "neutral", testId }: {
   testId?: string;
 }) {
   return <div className={`metric-card tone-${tone}`} data-testid={testId}><span>{label}</span><strong>{value}</strong>{unit && <small>{unit}</small>}</div>;
+}
+
+/**
+ * A filled dot of one colour, for a readout or an option that *is* a colour.
+ * `color` is any CSS colour; the ring keeps a near-white swatch visible on a
+ * light surface.
+ */
+export function Swatch({ color, className }: { color: string; className?: string }) {
+  return <span className={cx("ui-swatch", className)} style={{ background: color }} aria-hidden="true" />;
+}
+
+/**
+ * A free colour pick, committed once per gesture.
+ *
+ * The platform's own picker, because it is the one every reader already knows
+ * how to use. It reports every move through `input` and the landed colour
+ * through `change` — React folds both into its `onChange`, which would commit
+ * per pointer-move — so the landed colour is heard from the native event, and
+ * the per-move one only through `onInput` for an owner that previews.
+ */
+export function ColorInput({ value, onChange, onInput, disabled = false, ariaLabel, hint, className }: {
+  /** `#rrggbb`. */
+  value: string;
+  onChange: (value: string) => void;
+  onInput?: (value: string) => void;
+  disabled?: boolean;
+  ariaLabel?: string;
+  hint?: string;
+  className?: string;
+}) {
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const input = ref.current;
+    if (!input) return;
+    const change = () => { if (input.value.toLowerCase() !== value.toLowerCase()) onChange(input.value); };
+    input.addEventListener("change", change);
+    return () => input.removeEventListener("change", change);
+  }, [value, onChange]);
+  return <label className={cx("ui-color", disabled && "is-disabled", className)} title={hint}>
+    <Swatch color={value} />
+    <input ref={ref} type="color" defaultValue={value} key={value} disabled={disabled} {...useName(ariaLabel)}
+      onInput={(event) => onInput?.(event.currentTarget.value)} />
+    <span className="ui-color-hex">{value}</span>
+  </label>;
 }
