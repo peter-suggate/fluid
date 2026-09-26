@@ -3,6 +3,7 @@ import { cameraApertureShaderLibrary } from "../../../core/webgpu-camera";
 import { SVO_CONTACT_VISIBILITY_CONTRACT } from "./svo-contact-visibility";
 import { svoFluidCoverageWGSL } from "../scene-publication/svo-fluid-coverage";
 import { svoNodeMipSamplingWGSL } from "../radiance/svo-node-mip-sampling";
+import { backdropTerrainWGSL } from "../backdrop/backdrop-terrain-tiles";
 
 /**
  * Current-frame cone work is fanned out by deterministic sample, never by
@@ -210,6 +211,7 @@ export function svoConeFanoutSceneBindGroupLayoutEntries(): GPUBindGroupLayoutEn
     { binding: 7, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "float", viewDimension: "3d" } },
     { binding: 8, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "uint", viewDimension: "2d" } },
     { binding: 9, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "uint", viewDimension: "2d" } },
+    { binding: 10, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
   ];
 }
 
@@ -362,6 +364,13 @@ struct DryParams {
   nodeMipExtent:vec4f,
   giLighting:vec4f,
   giCones:vec4f,
+  rigidBounds:vec4f,
+  primitiveCandidates:vec4u,
+  structureOffsets:vec4u,
+  derivedTraversal:vec4u,
+  lod:vec4f,
+  payloadLanes:vec4u,
+  payloadLanes1:vec4u,
 }
 struct SvoEnvironmentLightingRecord{lowerDiffuse:vec4f,upperSpecular:vec4f,accentPower:vec4f,keyColorIntensity:vec4f,keyDirectionSharpness:vec4f,identity:vec4u}
 struct DryLightingArena {
@@ -384,6 +393,7 @@ ${cameraApertureShaderLibrary()}
 @group(0) @binding(7) var fluidCoverageVolume:texture_3d<f32>;
 @group(0) @binding(8) var nodeMipPageTable:texture_2d<u32>;
 @group(0) @binding(9) var nodeMipPageValidity:texture_2d<u32>;
+@group(0) @binding(10) var<storage,read> scenePayload:array<u32>;
 @group(1) @binding(0) var<uniform> fanout:FanoutFrame;
 @group(1) @binding(1) var fanoutReceiver:texture_2d<f32>;
 @group(1) @binding(2) var fanoutTemporary:texture_storage_2d_array<r32float,write>;
@@ -394,6 +404,13 @@ var<private> dryMipSteps:u32;
 // Keep the marcher's publication helper identical at the call site while
 // mapping its indices onto that direct binding here.
 fn dryPublicationWord(index:u32)->u32{return publicationState[index];}
+// Only dense payloads carry the backdrop table tail. Other layouts and older
+// publications without a tail describe an empty backdrop to this worker.
+fn fanoutBackdropWord(index:u32)->u32{
+  if((dry.payloadLanes1.w&255u)!=0u||index>=arrayLength(&scenePayload)){return 0u;}
+  return scenePayload[index];
+}
+${backdropTerrainWGSL({ load: (index) => `fanoutBackdropWord(${index})`, tableBase: "dry.payloadLanes1.y+dry.payloadLanes1.z" })}
 ${options.coneMarcherWGSL}
 fn fanoutDecodeNormal(octIn:vec2f)->vec3f{
   var normal=vec3f(octIn,1.0-abs(octIn.x)-abs(octIn.y));
@@ -456,8 +473,8 @@ fn fanoutLightSample(light:SvoLightRecord,sampleIndex:u32,position:vec3f)->Fanou
   return FanoutLightSample(towardLight,visibilityDistance,1u);
 }
 fn fanoutDirectionalExit(position:vec3f,direction:vec3f)->f32{
-  let minimum=vec3f(-.5*uniforms.container.x,0.0,-.5*uniforms.container.z);
-  let maximum=vec3f(.5*uniforms.container.x,uniforms.container.y,.5*uniforms.container.z);
+  let minimum=dry.nodeMipOrigin.xyz;
+  let maximum=minimum+dry.nodeMipExtent.xyz;
   var enter=0.0;var exit=DRY_MISS;
   for(var axis=0u;axis<3u;axis+=1u){
     if(abs(direction[axis])<=1e-9){if(position[axis]<minimum[axis]||position[axis]>maximum[axis]){return 0.0;}}
@@ -500,11 +517,11 @@ fn fanoutConeSample(position:vec3f,normal:vec3f,featureId:u32,layer:u32)->f32{
   let sample=fanoutLightSample(light,sampleIndex,position);
   if(sample.valid==0u||dot(normal,sample.towardLight)<=0.0){return 0.0;}
   let maximumDistance=select(fanoutDirectionalExit(position,sample.towardLight),sample.finiteDistance_m,sample.finiteDistance_m>0.0);
-  if(maximumDistance<=0.0){return 0.0;}
+  if(maximumDistance<=0.0){return 1.0;}
   let biased=fanoutBiasedOrigin(position,normal,sample.towardLight);
   let rayMaximum=max(0.0,maximumDistance-dot(biased.xyz-position,sample.towardLight));
   let coneCell=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));
-  let coneEscape=coneCell*dry.tuningRays1.z;
+  let coneEscape=max(coneCell,backdropStoredVoxelWidth(backdropStoredLattice(),position))*dry.tuningRays1.z;
   let coneMaxRaw=max(0.0,rayMaximum-coneEscape*dot(normal,sample.towardLight));
   let coneMax=coneMaxRaw-select(0.0,dry.tuningRays1.w*coneCell,sample.finiteDistance_m>0.0);
   let cone=dryConeVisibility(biased.xyz+normal*coneEscape,sample.towardLight,dry.tuningRays1.y,coneMax,normal,sample.finiteDistance_m>0.0);

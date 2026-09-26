@@ -1690,6 +1690,8 @@ export class SparseVoxelDrySceneRenderer {
           branchlessMorton: true,
           rangedDirectorySearch: true,
           directPageTable: true,
+          storedVoxelFloor: true,
+          contentCeilingClip: true,
         }),
         visibilityFlags: {
           ambientOcclusion: SVO_DRY_VISIBILITY_FLAGS.ambientOcclusion,
@@ -4669,7 +4671,10 @@ export class SparseVoxelDrySceneRenderer {
   private writeVoxelLightCacheParams(): void {
     if (!this.voxelLightParamsBuffer || !this.source?.nodeMipPyramid) return;
     const nodeMip = this.source.nodeMipPyramid;
-    const active = this.voxelLightUserEnabled && this.voxelLightPageCount > 0 && !this.fluidCoverage
+    // This cache stores only static solid visibility. dryLightVisibility
+    // composes current-frame fluid optical depth after every solid exit,
+    // including a cache hit, so attaching water must not disable reuse.
+    const active = this.voxelLightUserEnabled && this.voxelLightPageCount > 0
       && (this.lightingOptions.coneTracingMode ?? "cones") === "cones"
       && this.lightingOptions.shadowsEnabled;
     const exclusive = active && this.renderTuning.maximumShadedLights === 1
@@ -5497,6 +5502,7 @@ export class SparseVoxelDrySceneRenderer {
           { binding: 7, resource: this.fluidCoverage?.visibleGeneration()?.view ?? this.fluidCoverageFallbackView },
           { binding: 8, resource: nodeMip?.pageTableView ?? this.nodeMipFallbackDirectPageTableView },
           { binding: 9, resource: nodeMipPageValidity ?? this.nodeMipPageValidityFallbackView },
+          { binding: 10, resource: structural.scenePayload },
         ],
       })
       : undefined;

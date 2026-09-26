@@ -98,6 +98,7 @@
     "test:webgpu:svo-capacity-sweep": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx tools/run-webgpu-exclusive.ts --import tsx tools/run-svo-capacity-sweep-smoke.ts",
     "test:webgpu:hero-garden-hose": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_SVO_DRY_SMOKE_SCENE=hero-garden-hose FLUID_SVO_DRY_SMOKE_WIDTH=800 FLUID_SVO_DRY_SMOKE_HEIGHT=460 node --import tsx tools/run-webgpu-exclusive.ts --import tsx tools/run-svo-dry-render-smoke.ts",
     "test:webgpu:hero-garden-hose-x10": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_SVO_DRY_SMOKE_SCENE=hero-garden-hose-x10 FLUID_SVO_DRY_SMOKE_WIDTH=800 FLUID_SVO_DRY_SMOKE_HEIGHT=460 node --import tsx tools/run-webgpu-exclusive.ts --import tsx tools/run-svo-dry-render-smoke.ts",
+    "test:dawn:sunlight": "FLUID_SVO_SUNLIGHT_COMPARISON_DIR=artifacts/backdrop-svo/sunlight-check FLUID_SVO_DRY_SMOKE_CONE_SCALE=1 npm run test:webgpu:hero-garden-hose-x10 && node --import tsx tools/check-svo-sunlight-captures.ts artifacts/backdrop-svo/sunlight-check",
     "gate:hero-fidelity": "node --import tsx tools/hero-fidelity-gate.ts",
     "gate:hero-fidelity:overlay": "FLUID_HERO_FIDELITY_MODE=overlay node --import tsx tools/hero-fidelity-gate.ts",
     "plate:crops": "node --import tsx tools/crop-hero-plate.ts",

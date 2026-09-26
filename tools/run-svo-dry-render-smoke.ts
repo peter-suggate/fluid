@@ -1573,6 +1573,52 @@ if (sweepPath) {
   }));
   log(`Camera sweep wrote ${entries.length} frames`);
 }
+// Explicit comparison captures the selected arm, unlike the canonical
+// fingerprint/sweep above, which intentionally always uses full-rate cones.
+if (process.env.FLUID_SVO_SUNLIGHT_COMPARISON_DIR) {
+  const { compareSvoSunlight } = await import("./svo-sunlight-comparison");
+  const { createSunlightFluidFixture } = await import("./svo-sunlight-fluid-fixture");
+  const fluidFixture = await createSunlightFluidFixture(device, renderer);
+  let comparisonHasGeometryEdit = false;
+  try {
+    await compareSvoSunlight({
+      directory: process.env.FLUID_SVO_SUNLIGHT_COMPARISON_DIR,
+      renderer, camera, scene, configure: applyLighting, log,
+      fluid: fluidFixture.update, cacheCounters: fluidFixture.counters,
+      view: (candidate) => device.queue.writeBuffer(uniformBuffer, 0, packSvoDryViewUniforms({
+        scene, camera: candidate, environmentId, info: solver.info, bodyCount: bodies.count, width, height,
+      })),
+      publish: async (candidate, geometry) => {
+        if (geometry) {
+          comparisonHasGeometryEdit = true;
+          solver.stageSceneUpdate(candidate);
+          const encoder = device.createCommandEncoder({ label: "Sunlight comparison edit publication" });
+          solver.encodeSceneMaintenance(encoder);
+          device.queue.submit([encoder.finish()]);
+          await device.queue.onSubmittedWorkDone();
+          renderer.setSource(solver.sparseVoxelSceneSource);
+        }
+        assert.ok(renderer.publishScene(buildSvoDrySceneAssembly(candidate, solver.sparseVoxelSceneSource!).drySceneData));
+      },
+      frame: async () => {
+        const encoder = device.createCommandEncoder({ label: "Sunlight comparison frame" });
+        // Live edits may spread derived publication over several presentations.
+        // Match production's maintenance-before-consumer ordering on every frame.
+        if (comparisonHasGeometryEdit) solver.encodeSceneMaintenance(encoder);
+        encodeDeclined = false;
+        encodeFrame(encoder);
+        assert.ok(!encodeDeclined, "sunlight comparison frame declined");
+        const started = performance.now();
+        device.queue.submit([encoder.finish()]);
+        await device.queue.onSubmittedWorkDone();
+        return performance.now() - started;
+      },
+      capture: captureFrame,
+      save: (name, rows) => { writeFramePng(name, { width, height, packedRows: rows,
+        grade: resolveDisplayGrade(svoSceneLighting(scene).grade) }); },
+    });
+  } finally { fluidFixture.destroy(); }
+}
 const imageHash = fnv1a32(firstRows);
 const repeatHash = fnv1a32(secondRows);
 record("frame-determinism", imageHash === repeatHash,

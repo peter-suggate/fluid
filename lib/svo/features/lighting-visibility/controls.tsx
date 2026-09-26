@@ -1,6 +1,6 @@
 "use client";
 
-import { ChoiceField, FieldList, RangeField } from "../../../../components/ui";
+import { ChoiceField, FieldList, RangeField, SwitchField } from "../../../../components/ui";
 import type { SvoFeatureControlContext, SvoStageControls } from "../../pipeline/control-context";
 import { type SvoRenderTuning } from "../../pipeline/svo-render-tuning";
 import { SvoFeatureSlot } from "../../pipeline/ui-slots";
@@ -12,7 +12,7 @@ export function renderConeVisibilityControls({ svoConeTracingMode, tuning, updat
   return {
     // Source, shadows, AO, lattice and rate on the rail; ten calibrations, two
     // sample counts, and the arm- and plane-specific budgets in the drawer.
-    settings: 5 + 12 + (exactBudgets ? 4 : 0) + (lightSlot ? 1 : 0),
+    settings: 6 + 12 + (exactBudgets ? 4 : 0) + (lightSlot ? 1 : 0),
     notice: (lightingVisibilityStatus.fallback || lightingVisibilityStatus.detail)
       && <p data-testid="lighting-visibility-status" aria-live="polite" className="render-inline-warning">
         Lighting visibility: {lightingVisibilityStatus.state.toUpperCase()}
@@ -22,6 +22,9 @@ export function renderConeVisibilityControls({ svoConeTracingMode, tuning, updat
     node: <>
       <FieldList aria-label="SVO lighting effects">
       <SvoFeatureSlot slot="frame.lighting" />
+      <SwitchField label="Cache sunlight" checked={tuning.sunlightCacheEnabled} disabled={svoConeTracingMode !== "cones"}
+        onChange={(value) => updateTuning("sunlightCacheEnabled", value)}
+        hint="Reuse shadows on static scenery while water shadows stay live. Uses additional GPU memory; most useful with full-rate lighting." />
       <ChoiceField label="Cone prepass rate" value={String(tuning.coneLightingScale)} disabled={svoConeTracingMode !== "cones"}
         onChange={(value) => updateTuning("coneLightingScale", Number(value) as SvoRenderTuning["coneLightingScale"])}
         options={[{ value: "1", label: "FULL" }, { value: "0.5", label: "2×2" }, { value: "0.25", label: "4×4" }, { value: "0.125", label: "8×8" }]} />

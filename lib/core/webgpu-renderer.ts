@@ -851,6 +851,7 @@ export function createProductionSparseVoxelDrySceneRenderer(
   bodyBuffer: GPUBuffer,
   primaryTraversal: SvoPrimaryTraversalMode,
   primaryWorkMap = false,
+  sunlightCacheEnabled = false,
 ): SparseVoxelDrySceneRenderer {
   if ((primaryTraversal === "raster" || primaryTraversal === "mesh")
     && device.limits.maxColorAttachmentBytesPerSample < FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE) {
@@ -873,7 +874,7 @@ export function createProductionSparseVoxelDrySceneRenderer(
     rasterArms,
     rasterArms,
     true,
-    { primaryWorkMap, surfaceMesh: primaryTraversal === "mesh", voxelLightCache: false, specializedDeferredLighting: true },
+    { primaryWorkMap, surfaceMesh: primaryTraversal === "mesh", voxelLightCache: sunlightCacheEnabled, specializedDeferredLighting: true },
   );
 }
 
@@ -964,6 +965,7 @@ export class FluidLabRenderer {
     DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal ?? "mesh";
   /** Whether the rebuilt traced-primary shader publishes its per-pixel counter plane. */
   private requestedPrimaryWorkMap = false;
+  private requestedSunlightCache = false;
   private presentationTexture?: GPUTexture;
   private presentationTextureKey = "";
   private activeRenderScale = 1;
@@ -1160,15 +1162,22 @@ export class FluidLabRenderer {
     requested: SvoPrimaryTraversalMode,
     scale: SvoPrimaryTraversalScale,
     primaryWorkMap = false,
+    sunlightCacheEnabled = false,
   ): void {
     // A primary-work view describes ray traversal, so it cannot silently show
     // an all-zero plane from the proxy-raster primary. The view is an explicit
     // request for the traced diagnostic arm regardless of the normal adaptive
     // traversal choice.
     const resolved = primaryWorkMap ? "traced" : resolveSvoPrimaryTraversal(requested, scale);
-    if (resolved === this.requestedPrimaryTraversal && primaryWorkMap === this.requestedPrimaryWorkMap) return;
+    // Let the in-flight factory publish the request it captured. Keeping its
+    // key unchanged makes the next frame retire it if a control changed while
+    // compilation was pending, rather than accepting the old bundle as new.
+    if (this.optionalPipelineTasks.has("svo-dry-scene")) return;
+    if (resolved === this.requestedPrimaryTraversal && primaryWorkMap === this.requestedPrimaryWorkMap
+      && sunlightCacheEnabled === this.requestedSunlightCache) return;
     this.requestedPrimaryTraversal = resolved;
     this.requestedPrimaryWorkMap = primaryWorkMap;
+    this.requestedSunlightCache = sunlightCacheEnabled;
     this.failedOptionalPipelines.delete("svo-dry-scene");
     this.optionalPipelineFailures.delete("svo-dry-scene");
     const retired = this.svoDryScenePipeline;
@@ -1367,7 +1376,7 @@ export class FluidLabRenderer {
       // emits more proxies than the target has pixels.
       (device) => createProductionSparseVoxelDrySceneRenderer(
         device, this.uniformBuffer!, this.bodyBuffer!, this.requestedPrimaryTraversal,
-        this.requestedPrimaryWorkMap,
+        this.requestedPrimaryWorkMap, this.requestedSunlightCache,
       ),
       (pipeline) => pipeline.initialize((label, completed, total) => this.reportSvoPipelineProgress(label, completed, total)),
       (pipeline) => {
@@ -3224,7 +3233,7 @@ export class FluidLabRenderer {
         leafBricks: this.svoDrySceneSource?.structural?.capacities.leaves,
         targetPixels: this.presentationTexture.width * this.presentationTexture.height,
         environmentRefinementDepth,
-      }, primaryWorkMapRequested);
+      }, primaryWorkMapRequested, activeSvoTuning.sunlightCacheEnabled);
     }
     this.ensureRequestedOptionalPipelines(optionalRendererPipelineRequests(
       gridOverlay, this.simulationRunning,

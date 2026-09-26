@@ -2566,14 +2566,13 @@ fn dryVoxelLightUnpackNormal(packed:u32)->vec3f{
   let oct=vec2f(f32(packed&255u),f32((packed>>8u)&255u))/255.0*2.0-1.0;
   var normal=vec3f(oct,1.0-abs(oct.x)-abs(oct.y));if(normal.z<0.0){let folded=(vec2f(1.0)-abs(normal.yx))*select(vec2f(-1.0),vec2f(1.0),normal.xy>=vec2f(0.0));normal=vec3f(folded,normal.z);}return normalize(normal);
 }
-// The cache is one entry per texel of a *base* page, and the base is the
-// opacity floor — the pyramid's finest resident level, not level zero. Under a
-// floor of one its entries cover 2^3 finest voxels each, which is the same
-// coarsening the opacity field it caches visibility against already took. At
-// floor zero every line below is the arithmetic that shipped.
+// One entry per stored surface voxel. Coarse backdrop leaves have no pages
+// below their own level, so the global opacity floor alone cannot address them.
 fn dryVoxelLightAddress(position:vec3f)->DryVoxelLightAddress{
   if((dryVoxelLight.control.w&1u)==0u||dry.nodeMipDirect.w==0u){return DryVoxelLightAddress(vec3u(0u),0u,0u);}
-  let baseLevel=dryNodeMipOpacityLevelFloor();
+  let finestCell=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));
+  let storedLevel=u32(round(log2(max(1.0,dryStoredVoxelWidthAt(position)/finestCell))));
+  let baseLevel=max(dryNodeMipOpacityLevelFloor(),storedLevel);
   let virtualVoxelFloor=floor((position-dry.nodeMipOrigin.xyz)/max(dry.mapping.cellSize*exp2(f32(baseLevel)),vec3f(1e-6)));
   if(any(virtualVoxelFloor<vec3f(0.0))){return DryVoxelLightAddress(vec3u(0u),0u,0u);}
   let voxel=vec3u(virtualVoxelFloor);let pageCoordinate=voxel/${SVO_NODE_MIP_LAYOUT.interiorSize}u;let pageIndex=dryNodeMipFind(baseLevel,pageCoordinate);
@@ -2621,16 +2620,16 @@ fn dryVoxelLightReject(pageIndex:u32,local:vec3u){
   let entry=dryVoxelLightQueue.entries[id.x];let pageIndex=entry.x/${SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT.voxelsPerPage}u;
   let localIndex=entry.x-pageIndex*${SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT.voxelsPerPage}u;if(pageIndex>=dryVoxelLight.control.x){return;}
   let local=vec3u(localIndex%${SVO_NODE_MIP_LAYOUT.interiorSize}u,(localIndex/${SVO_NODE_MIP_LAYOUT.interiorSize}u)%${SVO_NODE_MIP_LAYOUT.interiorSize}u,localIndex/${SVO_NODE_MIP_LAYOUT.interiorSize ** 2}u);
-  // Only base-level pages carry cache entries, and the base is the opacity
-  // floor; a coarser page's texels are not the lattice the addresses above use.
-  let baseLevel=dryNodeMipOpacityLevelFloor();
-  let page=dryVoxelLightPages[pageIndex];if(page.w!=baseLevel){return;}let worldVoxel=page.xyz*${SVO_NODE_MIP_LAYOUT.interiorSize}u+local;
+  // Demand addresses the receiver's stored level; reconstruct on that same
+  // lattice rather than rejecting the coarse rings' own-level pages.
+  let page=dryVoxelLightPages[pageIndex];let baseLevel=page.w;
+  let worldVoxel=page.xyz*${SVO_NODE_MIP_LAYOUT.interiorSize}u+local;
   let position=dry.nodeMipOrigin.xyz+(vec3f(worldVoxel)+vec3f(.5))*dry.mapping.cellSize*exp2(f32(baseLevel));let normal=dryVoxelLightUnpackNormal(entry.y);
-  var pageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);let coverage=dryNodeMipAt(position,0.0,&pageCache);
+  var pageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);let coverage=dryNodeMipAt(position,f32(baseLevel),&pageCache);
   if(coverage.valid==0u||(coverage.sample.solidMaximum>.85&&coverage.sample.solidMean<.08)){dryVoxelLightReject(pageIndex,local);return;}
   let light=dryLighting.lights[0];if(dryLighting.metadata.x==0u||light.identity.x!=SVO_LIGHT_DIRECTIONAL||light.identity.w!=dryLighting.metadata.y){return;}
   let sample=dryLightSample(light,0u,position);var visibility=0.0;
-  if(sample.valid!=0u&&dot(normal,sample.towardLight)>0.0){let maximumDistance=directionalLightSceneExitDistance(position,sample.towardLight);let ray=dryBiasedVisibilityRayUnit(position,normal,sample.towardLight,maximumDistance,dry.mapping.cellSize,dry.tuningRays0.x);let cell=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let escape=cell*dry.tuningRays1.z;let coneMaximum=max(0.0,ray.tMax_m-escape*dot(normal,sample.towardLight));let cone=dryConeVisibility(ray.origin_m+normal*escape,sample.towardLight,dry.tuningRays1.y,coneMaximum,normal,false);if(cone.valid==0u){dryVoxelLightReject(pageIndex,local);return;}visibility=cone.transmittance;}
+  if(sample.valid!=0u&&dot(normal,sample.towardLight)>0.0){let maximumDistance=directionalLightSceneExitDistance(position,sample.towardLight);let ray=dryBiasedVisibilityRayUnit(position,normal,sample.towardLight,maximumDistance,dry.mapping.cellSize,dry.tuningRays0.x);let cell=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let escape=max(cell,dryStoredVoxelWidthAt(position))*dry.tuningRays1.z;let coneMaximum=max(0.0,ray.tMax_m-escape*dot(normal,sample.towardLight));let cone=dryConeVisibility(ray.origin_m+normal*escape,sample.towardLight,dry.tuningRays1.y,coneMaximum,normal,false);if(cone.valid==0u){dryVoxelLightReject(pageIndex,local);return;}visibility=cone.transmittance;}
   let atlasPages=max(dryVoxelLight.atlasPages.xyz,vec3u(1u));let atlasPage=vec3u(pageIndex%atlasPages.x,(pageIndex/atlasPages.x)%atlasPages.y,pageIndex/(atlasPages.x*atlasPages.y));
   let atlas=atlasPage*${SVO_NODE_MIP_LAYOUT.physicalSize}u+vec3u(${SVO_NODE_MIP_LAYOUT.apron}u)+local;let packed=u32(round(clamp(visibility,0.0,1.0)*65534.0))+1u;
   textureStore(dryVoxelLightCacheWrite,vec3i(atlas),vec4u(packed,((dryVoxelLight.control.z&0xffffu)<<16u)|(entry.y&0xffffu),0u,0u));atomicAdd(&dryVoxelLightQueue.populated,1u);
