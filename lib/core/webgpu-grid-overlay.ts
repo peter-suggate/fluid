@@ -910,7 +910,10 @@ fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32{
 }
 ${uniformMixedPresentationVelocityWGSL()}
 fn velocitySample(cell: vec3i) -> vec3f {
-  if(sliceLsvP.global.x==2u&&umPresentationEnabled()){return umSampleVelocity(vec3f(cell)+vec3f(0.5));}
+  // Mixed ownership: the velocity at the represented cell's centre.
+  if(sliceLsvP.global.x==2u&&umPresentationEnabled()){
+   let owner=umOwnerAt(cell);return umSampleVelocity(vec3f(umOrigin(owner))+vec3f(0.5*f32(max(owner.width,1u))));
+  }
   let dims = vec3i(u.gridInfo.xyz);
   if(sparseGridEnabled()){let owner=sparseOwner(cell);if(owner.x==SPARSE_INVALID){return vec3f(0.0);}
     let at=sparseVelocityOffset()+4u*owner.x;return sparseP.frame.y
@@ -960,13 +963,14 @@ fn divergenceSample(cell:vec3i)->f32{
     return sparseState[sparseP.stateOffsets4.y+owner.x];}
   return textureLoad(divergenceField,cell,0).x;
 }
-fn mappedPressureSample(cell:vec3i)->f32{
+// phi is the caller's levelSetSample(cell).
+fn mappedPressureSample(cell:vec3i,phi:f32)->f32{
   if(sliceLsvP.global.x==2u&&umPresentationEnabled()){
    let owner=umOwnerAt(cell);if(owner.width==0u||bitcast<f32>(sparseActivity[owner.index])>=0.0){return 0.0;}
    return sparseState[owner.index];
   }
   if(layers.control.x>0.5){
-    if(levelSetSample(cell)>=0.0){return 0.0;}
+    if(phi>=0.0){return 0.0;}
     let q=cell-vec3i(layers.pressureOrigin.xyz)+vec3i(1);
     if(any(q<vec3i(0))||any(q>=vec3i(textureDimensions(mappedPressureField)))){return 0.0;}
     return textureLoad(mappedPressureField,q,0).x;
@@ -995,7 +999,11 @@ fn representedCell(cell: vec3i, dims: vec3i, fineOrigin:vec3i,
   boundsMin: vec3f, size: vec3f, adaptiveGrid: bool, tallGrid: bool) -> RepresentedCell {
   var lower = cell;
   var upper = cell + vec3i(1);
-  if (adaptiveGrid) {
+  if (sliceLsvP.global.x == 2u && umPresentationEnabled()) {
+    let owner = umOwnerAt(cell);
+    lower = vec3i(umOrigin(owner));
+    upper = lower + vec3i(i32(max(owner.width, 1u)));
+  } else if (adaptiveGrid) {
     var owner=vec4i(0,0,0,1);
     if(sparseGridEnabled()){owner=sparseOwnerOriginScale(cell);}
     else{owner=adaptiveCellOriginScale(adaptiveCellKey(cell,dims));}
@@ -1157,21 +1165,51 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
   }
   let derivative = max(cellPerPixel, vec2f(1e-5));
   let pixelsPerCell = 1.0 / max(derivative.x, derivative.y);
-  let dotFade = smoothstep(9.0, 18.0, pixelsPerCell);
+  // The represented cell. Mixed Uniform owns h, 2h or 4h cells per 4^3 tile,
+  // from whichever ownership is live, so the lattice, sample dots and level
+  // bars are drawn per owner; everywhere else the represented cell is the
+  // fine cell.
+  let mixedLattice = sliceLsvP.global.x == 2u && umPresentationEnabled();
+  var latticeFraction = fract(samplePosition);
+  var latticeWidth = 1.0;
+  if (mixedLattice) {
+    let owner = umOwnerAt(cell);
+    let ownerOrigin = vec3f(umOrigin(owner));
+    latticeWidth = f32(max(owner.width, 1u));
+    let planePoint = samplePosition + vec2f(f32(fineOrigin[firstPlaneAxis]), f32(fineOrigin[secondPlaneAxis]));
+    latticeFraction = clamp((planePoint - vec2f(ownerOrigin[firstPlaneAxis], ownerOrigin[secondPlaneAxis])) / latticeWidth,
+      vec2f(0.0), vec2f(1.0));
+  }
+  let latticeDerivative = derivative / latticeWidth;
+  let pixelsPerLatticeCell = pixelsPerCell * latticeWidth;
+  let dotFade = smoothstep(9.0, 18.0, pixelsPerLatticeCell);
   let adaptiveGrid = u.debug.z > 0.5;
   let fieldMode = select(i32(round(u.debug.w)),layerMode,layers.control.x>0.5);
   // Structure is the one view whose subject is the lattice, so it holds its
   // lines further into the distance than the field views, where the grid is
   // only a reference frame and a bolder one would eat the content.
   let structureView = fieldMode == 0;
-  let lineFade = select(smoothstep(2.5, 6.0, pixelsPerCell),
-    smoothstep(1.8, 4.2, pixelsPerCell), structureView);
+  // Each field is sampled at exactly one site, and only for the modes that
+  // read it. Metal inlines every call, and the mixed-ownership samplers are
+  // large: repeating a sample per branch made this pipeline too big to
+  // compile, so the overlay never appeared.
+  let wetSample = fluidSample(cell) > 0.5;
+  var cellPhi = 0.0;
+  if (fieldMode == 3 || fieldMode == 5 || fieldMode == 24) { cellPhi = levelSetSample(cell); }
+  var zeroContour = 0.0;
+  if ((fieldMode >= 21 && fieldMode <= 24) || fieldMode == 27) {
+    zeroContour = sliceZeroContour(vec3f(fineOrigin) + local3, derivative);
+  }
+  var cellVelocity = vec3f(0.0);
+  if (fieldMode == 1 || fieldMode == 2 || fieldMode == 26) { cellVelocity = velocitySample(cell); }
+  let lineFade = select(smoothstep(2.5, 6.0, pixelsPerLatticeCell),
+    smoothstep(1.8, 4.2, pixelsPerLatticeCell), structureView);
   // Half-width of a grid line in pixels, clamped so a line never takes more
   // than about two fifths of the cell it bounds. A fixed pixel width is what
   // carries the lattice to a distant camera; the clamp is what stops it
   // closing into a flat wash once the cells are themselves a few pixels wide.
   let lineHalfWidth = min(select(0.8, 1.5, structureView),
-    max(pixelsPerCell * 0.2, 0.32));
+    max(pixelsPerLatticeCell * 0.2, 0.32));
   // SparseWorld keeps non-occupied B8 pages around a surface as transport and
   // presentation halo capacity. They are not liquid pressure topology, so the
   // structure view must not paint their internal fine graph over a coarsened
@@ -1187,8 +1225,8 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
   let stored = vec3i(textureDimensions(fluidField));
   let bandLayers = select(dims.y, stored.y - 2, tallGrid);
   let bandTop = min(i32(base) + bandLayers, dims.y);
-  let firstGridLine = gridLinePaint((0.5 - abs(fract(samplePosition.x) - 0.5)) / derivative.x, lineHalfWidth);
-  let secondGridLine = gridLinePaint((0.5 - abs(fract(samplePosition.y) - 0.5)) / derivative.y, lineHalfWidth);
+  let firstGridLine = gridLinePaint((0.5 - abs(latticeFraction.x - 0.5)) / latticeDerivative.x, lineHalfWidth);
+  let secondGridLine = gridLinePaint((0.5 - abs(latticeFraction.y - 0.5)) / latticeDerivative.y, lineHalfWidth);
   var fill = vec3f(0.0);
   var alpha = 0.0;
   var line = 0.0;
@@ -1245,7 +1283,7 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
     if (!lowerYEdge) { lowerYEdge = any(adaptiveCellKey(below, dims) != own); }
     if (!upperYEdge) { upperYEdge = any(adaptiveCellKey(above, dims) != own); }
     let isTall = !lowerYEdge || !upperYEdge;
-    let wet = fluidSample(cell) > 0.5;
+    let wet = wetSample;
     fill = select(select(vec3f(0.85, 0.91, 0.89), vec3f(0.20, 0.50, 0.74), wet), select(vec3f(0.10, 0.23, 0.22), vec3f(0.03, 0.52, 0.47), wet), isTall);
     // The octree deliberately refines several dry cells around phi=0. Filling
     // those cells makes the valid air-side refinement band read as a milky
@@ -1255,15 +1293,15 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
     let wetAlpha = select(0.34, 0.50, isTall);
     alpha = select(dryAlpha, wetAlpha, wet);
   } else if (axis == 3) {
-    let wet = fluidSample(cell) > 0.5;
+    let wet = wetSample;
     if (cell.y < i32(base)) {
       fill = select(vec3f(0.10, 0.23, 0.22), vec3f(0.03, 0.52, 0.47), wet);
       alpha = select(0.24, 0.50, wet);
     } else if (cell.y < bandTop) {
       fill = select(vec3f(0.85, 0.91, 0.89), vec3f(0.20, 0.50, 0.74), wet);
       alpha = select(0.11, 0.34, wet);
-      let distance = length(fract(samplePosition) - vec2f(0.5));
-      sampleDot = (1.0 - smoothstep(0.17, 0.17 + max(derivative.x, derivative.y) * 1.6, distance)) * dotFade;
+      let distance = length(latticeFraction - vec2f(0.5));
+      sampleDot = (1.0 - smoothstep(0.17, 0.17 + max(latticeDerivative.x, latticeDerivative.y) * 1.6, distance)) * dotFade;
     } else {
       let stripe = smoothstep(0.38, 0.5, abs(fract((samplePosition.x + samplePosition.y) * 0.25) - 0.5));
       fill = vec3f(0.62, 0.24, 0.22);
@@ -1271,7 +1309,7 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
     }
     line = max(firstGridLine, secondGridLine);
   } else if (cell.y < i32(base)) {
-    let wet = fluidSample(cell) > 0.5;
+    let wet = wetSample;
     fill = select(vec3f(0.10, 0.23, 0.22), vec3f(0.03, 0.52, 0.47), wet);
     alpha = select(0.24, 0.50, wet);
     let baseEdge = gridLinePaint(min(samplePosition.y, abs(base - samplePosition.y)) / derivative.y, lineHalfWidth);
@@ -1280,12 +1318,12 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
     let distance = length(vec2f(fract(samplePosition.x) - 0.5, dy));
     sampleDot = (1.0 - smoothstep(0.17, 0.17 + max(derivative.x, derivative.y) * 1.6, distance)) * dotFade;
   } else if (cell.y < bandTop) {
-    let wet = fluidSample(cell) > 0.5;
+    let wet = wetSample;
     fill = select(vec3f(0.85, 0.91, 0.89), vec3f(0.20, 0.50, 0.74), wet);
     alpha = select(0.11, 0.34, wet);
     line = max(firstGridLine, secondGridLine);
-    let distance = length(fract(samplePosition.xy) - vec2f(0.5));
-    sampleDot = (1.0 - smoothstep(0.17, 0.17 + max(derivative.x, derivative.y) * 1.6, distance)) * dotFade;
+    let distance = length(latticeFraction - vec2f(0.5));
+    sampleDot = (1.0 - smoothstep(0.17, 0.17 + max(latticeDerivative.x, latticeDerivative.y) * 1.6, distance)) * dotFade;
   } else {
     let stripe = smoothstep(0.38, 0.5, abs(fract((samplePosition.x + samplePosition.y) * 0.25) - 0.5));
     fill = vec3f(0.62, 0.24, 0.22);
@@ -1308,8 +1346,8 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
   // structural lines, sample dots, the above-band hatch, and rigid-body
   // occupancy all stay so the heatmap keeps its spatial reference frame.
   if (fieldMode > 0 && (adaptiveGrid || cell.y < bandTop)) {
-    let velocity = velocitySample(cell);
-    let wet = fluidSample(cell) > 0.5;
+    let velocity = cellVelocity;
+    let wet = wetSample;
     if (fieldMode >= 11 && fieldMode <= 20) {
       let dirtyDisplay=sparseFramePlanColor(cell,fieldMode);
       fill=dirtyDisplay.rgb;alpha=dirtyDisplay.a;lineStrength=0.24;sampleDot=0.0;
@@ -1327,7 +1365,7 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
       fill = heatColor(speed / max(u.environment.z, 1e-4));
       alpha = select(0.30, 0.85, wet);
     } else if (fieldMode == 3) {
-      let phi = levelSetSample(cell); let h = min(size.x / f32(dims.x), min(size.y / f32(dims.y), size.z / f32(dims.z)));
+      let phi = cellPhi; let h = min(size.x / f32(dims.x), min(size.y / f32(dims.y), size.z / f32(dims.z)));
       let resident=phi<1e19;let signed=clamp(select(4.0*h,phi,resident)/max(4.0*h,1e-6),-1.0,1.0);
       fill = select(mix(vec3f(0.96, 0.96, 0.90), vec3f(0.93, 0.47, 0.16), signed), mix(vec3f(0.96, 0.96, 0.90), vec3f(0.10, 0.45, 0.92), -signed), signed < 0.0);
       alpha = select(0.10,0.80,resident);line=max(line,select(0.0,1.0-smoothstep(0.04*h,0.22*h,abs(phi)),resident));
@@ -1336,7 +1374,7 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
       fill = select(mix(vec3f(0.96), vec3f(0.88, 0.10, 0.08), scaled), mix(vec3f(0.96), vec3f(0.08, 0.28, 0.88), -scaled), scaled < 0.0);
       alpha = select(0.28, 0.92, wet || abs(scaled) > 0.05);
     } else if (fieldMode == 5) {
-      let pressure = mappedPressureSample(cell); let scale = max(1.0, 10000.0 * u.container.y);
+      let pressure = mappedPressureSample(cell, cellPhi); let scale = max(1.0, 10000.0 * u.container.y);
       fill = heatColor(clamp(0.5 + 0.5 * pressure / scale, 0.0, 1.0)); alpha = select(0.22, 0.88, wet);
     } else if (fieldMode == 6) {
       let unrepresented = adaptiveGrid && wet && !hasLiquidPressureDof(cell);
@@ -1396,7 +1434,7 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
       alpha = select(0.0, 0.94, volume.y > 0.0);
       sampleDot = 0.0;
       lineStrength = 0.55;
-      liquidContour = sliceZeroContour(vec3f(fineOrigin) + local3, derivative);
+      liquidContour = zeroContour;
       // Screen-sized diagonal stripes identify V > K without changing the
       // liquid colour scale. No density threshold is used to classify phi.
       excessHatch = select(0.0, sliceScreenHatch(samplePosition, derivative, footprint),
@@ -1422,7 +1460,7 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
       let pageDistance=min(min(pageFraction.x,1.0-pageFraction.x)*f32(edge)/derivative.x,
         min(pageFraction.y,1.0-pageFraction.y)*f32(edge)/derivative.y);
       viewBoundary=gridLinePaint(pageDistance,1.5)*select(0.3,1.0,transport||work);
-      liquidContour=sliceZeroContour(vec3f(fineOrigin)+local3,derivative);
+      liquidContour=zeroContour;
     } else if (fieldMode == 22 && !sparseGridEnabled()) {
       // One class per 4^3 tile, from the step just taken. Far air keeps only
       // the tile lattice: it is the part of the domain the view is about
@@ -1435,7 +1473,9 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
       sampleDot = 0.0;
       // The finest lattice is drawn only where the sampler reads it. Outside a
       // fine tile the tile itself is the cell, so its boundary is the grid.
-      lineStrength = select(0.0, 0.4, fine);
+      // Mixed ownership draws its own cells instead: 4x4 in h tiles, 2x2 in
+      // the 2h collar, and none in a 4h tile, which is one cell.
+      lineStrength = select(select(0.0, 0.4, fine), select(0.0, 0.4, latticeWidth < 4.0), mixedLattice);
       // The tile lattice is the subject, cased like the structure view's cell
       // lattice. It holds until a tile is a few pixels across rather than a
       // cell, since that is the scale it is read at. Far air draws it quieter,
@@ -1446,7 +1486,7 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
       viewBoundary = gridLinePaint(tileDistance, 1.0) * smoothstep(4.0, 9.0, 4.0 * pixelsPerCell)
         * select(0.75, 1.0, fine || shell);
       // The level set locates the liquid the classes were seeded from.
-      liquidContour = sliceZeroContour(vec3f(fineOrigin) + local3, derivative);
+      liquidContour = zeroContour;
     } else if (fieldMode == 23 && !sparseGridEnabled()) {
       // Where the step ran. Cells the launch never reached are the point of
       // the window, so they are veiled; the window itself stays clear over
@@ -1472,7 +1512,7 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
       viewAccent = gridLinePaint(sliceBoxEdgePixels(planePoint, derivative, cell,
         window.seedMinimum, window.seedMaximum, firstPlaneAxis, secondPlaneAxis), 0.75);
       viewAccentColor = sceneColor(WINDOW_SEED_DISPLAY);
-      liquidContour = sliceZeroContour(vec3f(fineOrigin) + local3, derivative);
+      liquidContour = zeroContour;
     } else if (fieldMode == 10) {
       // Chentanez--Mueller surface density rho: the mass a cell holds, in cell
       // volumes. Its two thresholds are physical rather than cosmetic, so they
@@ -1526,8 +1566,8 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
       // precisely the residue the ramp above just went to some trouble to show.
       if (axis != 3 && rho > DENSITY_FLOOR) {
         let barHeight = clamp(rho, 0.0, 1.0);
-        let barFade = smoothstep(7.0, 14.0, pixelsPerCell) * smoothstep(0.5, 2.0, barHeight * pixelsPerCell);
-        let below = 1.0 - smoothstep(-derivative.y, derivative.y, fract(samplePosition.y) - barHeight);
+        let barFade = smoothstep(7.0, 14.0, pixelsPerLatticeCell) * smoothstep(0.5, 2.0, barHeight * pixelsPerLatticeCell);
+        let below = 1.0 - smoothstep(-latticeDerivative.y, latticeDerivative.y, latticeFraction.y - barHeight);
         fill = mix(fill, mix(fill * 0.30, fill, below), barFade);
         alpha = mix(alpha, mix(alpha * 0.28, max(alpha, 0.88), below), barFade);
       }
@@ -1540,19 +1580,19 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
     // Atomic layers never inherit another view's grid, dots or contour.
     sampleDot=0.0; liquidContour=0.0;
     var scalar=0.0;
-    if(fieldMode==3){scalar=levelSetSample(cell)/max(min(size.x/f32(dims.x),min(size.y/f32(dims.y),size.z/f32(dims.z))),1e-9);}
-    if(fieldMode==5){scalar=mappedPressureSample(cell);}
+    if(fieldMode==3){scalar=cellPhi/max(min(size.x/f32(dims.x),min(size.y/f32(dims.y),size.z/f32(dims.z))),1e-9);}
+    if(fieldMode==5){scalar=mappedPressureSample(cell,cellPhi);}
     if(fieldMode==10){scalar=densitySample(cell);}
     if(fieldMode==21){scalar=sliceVolumeFill(cell).x;}
     if(fieldMode==22){scalar=f32(tileClassAt(cell,dims));}
     if(fieldMode==3||fieldMode==5||fieldMode==10||fieldMode==21||fieldMode==22){let paint=scalarLayerPaint(fieldMode,scalar);fill=sceneColor(paint.rgb);alpha=paint.a;}
 
-    line=select(0.0,max(firstGridLine,secondGridLine),fieldMode==0);
+    line=select(0.0,max(firstGridLine,secondGridLine),fieldMode==0||(fieldMode==22&&mixedLattice));
     if(fieldMode==0){fill=vec3f(0.55,0.72,0.8);alpha=0.0;}
     if(fieldMode==24){
-      let contour=sliceZeroContour(vec3f(fineOrigin)+local3,derivative);
+      let contour=zeroContour;
       fill=mix(sceneColor(FRACTION_LIQUID_DISPLAY),sceneColor(FRACTION_EXCESS_DISPLAY),contour);
-      alpha=max(select(0.0,0.22,levelSetSample(cell)<0.0),contour);
+      alpha=max(select(0.0,0.22,cellPhi<0.0),contour);
     }
     if(fieldMode==25){
       var bits=u32(round(textureLoad(velocityField,cell,0).w));
@@ -1575,11 +1615,12 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
       fill=vec3f(0.95,0.65,0.2);alpha=face;
     }
     if(fieldMode==26){
-      let v=velocitySample(cell);let scale=1.0;
+      // One arrow per represented cell, sampled at its centre.
+      let v=cellVelocity;let scale=1.0;
       let vector=vec2f(v[firstPlaneAxis],v[secondPlaneAxis])/scale*0.4;
-      let p=fract(samplePosition)-vec2f(0.5);
+      let p=latticeFraction-vec2f(0.5);
       let t=clamp(dot(p,vector)/max(dot(vector,vector),1e-8),0.0,1.0);
-      let stroke=(1.0-smoothstep(0.6,1.6,length((p-vector*t)/derivative)))*smoothstep(5.0,10.0,pixelsPerCell);
+      let stroke=(1.0-smoothstep(0.6,1.6,length((p-vector*t)/latticeDerivative)))*smoothstep(5.0,10.0,pixelsPerLatticeCell);
       fill=mix(sceneColor(FRACTION_LIQUID_DISPLAY),vec3f(0.9),stroke);
       alpha=max(clamp(length(v)/scale,0.0,1.0)*0.25,stroke*select(0.0,1.0,length(v)>1e-7));
     }
@@ -1686,11 +1727,19 @@ fn volumeLevelSetReadout(pixel:vec2f,point:vec3f,frame:OverlayGridFrame,axis:i32
   let glyphs=fractionReadoutGlyphs(volume.x);
   if(volume.y<=0.0||glyphs.y==0u){return vec3f(0.0);}
   // The plane runs through cell centres, so this is the cell's own centre;
-  // the two half-edges span it in the plane.
-  let centreWorld=frame.boundsMin+(vec3f(localCell)+vec3f(0.5))*cellSize;
-  var first=vec3f(0.5*cellSize.x,0.0,0.0);var second=vec3f(0.0,0.5*cellSize.y,0.0);
-  if(axis==2){first=vec3f(0.0,0.0,0.5*cellSize.z);}
-  else if(axis==3){second=vec3f(0.0,0.0,0.5*cellSize.z);}
+  // the two half-edges span it in the plane. A mixed owner is the cell: one
+  // number at its in-plane centre, the plane's own depth kept.
+  var centreCell=vec3f(localCell)+vec3f(0.5);var width=1.0;
+  if(umPresentationEnabled()){
+    let owner=umOwnerAt(frame.minimumFine+localCell);width=f32(max(owner.width,1u));
+    let normal=select(select(1,0,axis==2),2,axis==1);
+    let ownerCentre=vec3f(vec3i(umOrigin(owner))-frame.minimumFine)+vec3f(0.5*width);
+    centreCell=ownerCentre;centreCell[normal]=f32(localCell[normal])+0.5;
+  }
+  let centreWorld=frame.boundsMin+centreCell*cellSize;
+  var first=vec3f(0.5*width*cellSize.x,0.0,0.0);var second=vec3f(0.0,0.5*width*cellSize.y,0.0);
+  if(axis==2){first=vec3f(0.0,0.0,0.5*width*cellSize.z);}
+  else if(axis==3){second=vec3f(0.0,0.0,0.5*width*cellSize.z);}
   let centre=overlayFramebufferPixel(centreWorld,origin,forward,right,up);
   if(centre.z<=0.0){return vec3f(0.0);}
   let a=overlayFramebufferPixel(centreWorld+first,origin,forward,right,up).xy-centre.xy;
@@ -1801,21 +1850,29 @@ fn volumeField(uv:vec2f)->vec4f {
   let footprint = distance * 1.44 / max(u.viewport.y, 1.0);
   sliceHatchFootprint = dot(point - origin, forward) * 1.44 / max(u.viewport.y, 1.0);
   var overlay=GridSample(vec3f(0),0.0,0.0,false);
-  if(layers.control.x>0.5){
-    var accumulated=vec4f(0.0);
-    let modes=array<i32,${VISUAL_LAYERS.length}>(${VISUAL_LAYERS.map(l => l.mode).join(",")});
-    for(var index=0u;index<${VISUAL_LAYERS.length}u;index+=1u){
-      let opacity=layers.opacity[index/4u][index%4u];
+  // One gridSample site for composed layers and the single legacy view, and
+  // a pass count the compiler cannot see: gridSample is large, and each
+  // inlined or unrolled copy of it is compiled in full.
+  let layered=layers.control.x>0.5;
+  var accumulated=vec4f(0.0);
+  let modes=array<i32,${VISUAL_LAYERS.length}>(${VISUAL_LAYERS.map(l => l.mode).join(",")});
+  let passes=select(1u,${VISUAL_LAYERS.length}u,layered);
+  for(var index=0u;index<passes;index+=1u){
+    var opacity=1.0;
+    if(layered){
+      opacity=layers.opacity[index/4u][index%4u];
       if(opacity<=0.0){continue;}
       layerMode=modes[index];
-      let sample=gridSample(point,boundsMin,size,frame.minimumFine,frame.dimensions,axis,footprint);
-      let a=clamp(sample.alpha*opacity,0.0,1.0);
-      accumulated=vec4f(sample.color*a+accumulated.rgb*(1.0-a),a+accumulated.a*(1.0-a));
     }
+    let sample=gridSample(point,boundsMin,size,frame.minimumFine,frame.dimensions,axis,footprint);
+    if(!layered){overlay=sample;break;}
+    let a=clamp(sample.alpha*opacity,0.0,1.0);
+    accumulated=vec4f(sample.color*a+accumulated.rgb*(1.0-a),a+accumulated.a*(1.0-a));
+  }
+  if(layered){
     if(accumulated.a<=0.001 || distance>=nearestBodyDistance(origin,direction)){discard;}
     return vec4f(displayColor(accumulated.rgb/accumulated.a),accumulated.a);
   }
-  overlay=gridSample(point,boundsMin,size,frame.minimumFine,frame.dimensions,axis,footprint);
   if (distance >= nearestBodyDistance(origin, direction) && !overlay.solid) { discard; }
   let horizontalEdgeDistance = min(min(point.x - boundsMin.x, boundsMax.x - point.x), min(point.z - boundsMin.z, boundsMax.z - point.z));
   let grip = select(clamp(1.0 - (boundsMax.y - point.y) / (0.03 * size.y), 0.0, 1.0), clamp(1.0 - horizontalEdgeDistance / (0.035 * min(size.x, size.z)), 0.0, 1.0), axis == 3) * 0.8;

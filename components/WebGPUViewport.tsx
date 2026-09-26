@@ -937,10 +937,10 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
   // component re-renders on every orbit step, and a fresh entity each time
   // would re-render the selected object's whole toolstrip at pointer rate.
   const entities = useMemo(() => {
-    const entityContext: EditorEntityContext = { scene, pickingAvailable: pickingInteractive,
+    const entityContext: EditorEntityContext = { scene, methodId, pickingAvailable: pickingInteractive,
       bodies: editorBodyPoses(mergeDrawnPoses(bodies, bodyPoses)) };
     return surfacedEntities(entityContext, selection);
-  }, [scene, pickingInteractive, bodies, bodyPoses, selection]);
+  }, [scene, methodId, pickingInteractive, bodies, bodyPoses, selection]);
   const heldEntity = entities[0];
   const entityGizmos = entities.map((entity) => ({
     entity,

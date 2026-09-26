@@ -3,6 +3,7 @@ import test from "node:test";
 import { defaultScene } from "../lib/core/model";
 import { WebGPURenderWorkerClient, type WebGPURenderWorkerRequest, type WebGPURenderWorkerResponse } from "../lib/core/webgpu-render-worker-client";
 import { webGPUPlatformResourcePlugin } from "../lib/core/webgpu-platform-resource";
+import type { GPUStatus } from "../lib/core/gpu-status";
 
 class FakeWorker extends EventTarget {
   static latest: FakeWorker;
@@ -18,18 +19,39 @@ class FakeWorker extends EventTarget {
     this.emit({ type: "shutdown-complete", requestId: request.requestId });
   }
 }
-async function withClient(run: (client: WebGPURenderWorkerClient, worker: FakeWorker) => Promise<void>) {
+async function withClient(
+  run: (client: WebGPURenderWorkerClient, worker: FakeWorker) => Promise<void>,
+  onStatus: (status: GPUStatus) => void = () => {},
+) {
   const descriptor = Object.getOwnPropertyDescriptor(globalThis, "Worker");
   Object.defineProperty(globalThis, "Worker", { configurable: true, value: FakeWorker });
   try {
     const canvas = { transferControlToOffscreen: () => ({}) } as HTMLCanvasElement;
-    const client = new WebGPURenderWorkerClient(canvas, { onStatus() {} });
+    const client = new WebGPURenderWorkerClient(canvas, { onStatus });
     await run(client, FakeWorker.latest);
   } finally {
     if (descriptor) Object.defineProperty(globalThis, "Worker", descriptor);
     else Reflect.deleteProperty(globalThis, "Worker");
   }
 }
+
+test("worker progress keeps one document-clock start time for an activity", async () => {
+  const statuses: GPUStatus[] = [];
+  await withClient(async (_client, worker) => {
+    for (const workerNow_ms of [1_000, 1_100]) {
+      worker.emit({ type: "status", workerNow_ms, status: {
+        state: "initializing", label: "Building scene", startedAt_ms: 900,
+        resource: webGPUPlatformResourcePlugin,
+      } });
+    }
+  }, (status) => statuses.push(status));
+  assert.equal(statuses.length, 2);
+  assert.equal(statuses[0].state, "initializing");
+  assert.equal(statuses[1].state, "initializing");
+  if (statuses[0].state === "initializing" && statuses[1].state === "initializing") {
+    assert.equal(statuses[0].startedAt_ms, statuses[1].startedAt_ms);
+  }
+});
 
 test("shutdown rejects outstanding validation and rejects any later edit immediately", async () => {
   await withClient(async (client, worker) => {

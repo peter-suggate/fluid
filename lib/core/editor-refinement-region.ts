@@ -23,6 +23,7 @@ import {
   regionDrawIsDegenerate,
   regionEntity,
   regionFromDraw,
+  regionHeldTier,
   regionSnapStep_cells,
   snapRegionBox,
 } from "../features/refinement-region/policy";
@@ -253,9 +254,17 @@ export const studioRegionSpace: RegionSpace<SceneDescription, Partial<SceneDescr
   cellEdge_mm: (scene) => refinementRegionLattice(scene).cellSize_m[0]! * 1000,
 };
 
-/** Uniform uses whole 4³ tiles and only the fine/coarse cell widths. */
+/**
+ * Mixed Uniform snaps boxes to whole 4³ tiles and enforces one of two widths
+ * per tile (`createUniformMixedLayout`): all h or all 4h. Bounds of 1…4 allow
+ * both and enforce nothing, so a box here holds one tier and never a range.
+ */
 const uniformRegionSpace: RegionSpace<SceneDescription, Partial<SceneDescription>> = {
-  ...studioRegionSpace, cellSizes: [1,4], defaultCellSize_cells: 1, brick_cells: 4, allowAutomaticCeiling: false,
+  ...studioRegionSpace, cellSizes: [1, 4], defaultCellSize_cells: 1, brick_cells: 4, allowAutomaticCeiling: false,
+  heldTiers: [
+    { cells: 1, label: "Fine", hint: "Covered tiles are solved at the finest cell (1³)." },
+    { cells: 4, label: "Coarse", hint: "Covered tiles are one 4³ cell each; tiles touching solids stay fine and tiles beside fine ones grade to 2³." },
+  ],
 };
 export function studioRegionSpaceForMethod(methodId?: string) {
   return methodId === "uniform-volume" ? uniformRegionSpace : studioRegionSpace;
@@ -304,7 +313,7 @@ export function refinementRegionFromDrag(
     ?? regionDraftCellSize(space, draft));
   const maximumCells = options.maximumCellSize_cells !== undefined
     ? Math.max(cells, clampRefinementRegionCellSize(options.maximumCellSize_cells))
-    : draft.holdAtOneTier ? cells : space.allowAutomaticCeiling === false ? 4 : undefined;
+    : draft.holdAtOneTier || space.heldTiers ? cells : space.allowAutomaticCeiling === false ? 4 : undefined;
   const limits = sceneContainerBox(scene);
   const footprint = {
     x: Math.abs(drag_m.x - anchor_m.x),
@@ -443,10 +452,14 @@ function refinementRegionEntityFor(
   // and the position fields behind them, none of which the lab's SVG rectangles
   // in canvas cells could use. Spread rather than duplicated, so a row added to
   // the region appears in both hosts without this file changing.
+  const space = studioRegionSpaceForMethod(context.methodId);
+  const tier = space.heldTiers && regionHeldTier(space.heldTiers, record);
   return {
-    ...regionEntity(studioRegionSpaceForMethod(context.methodId), scene, record),
+    ...regionEntity(space, scene, record),
     box,
-    sizeLabel: `${[size.x, size.y, size.z].map((value) => value.toFixed(2)).join(" \u00d7 ")} m \u00b7 ${maximumCells === undefined
+    sizeLabel: `${[size.x, size.y, size.z].map((value) => value.toFixed(2)).join(" \u00d7 ")} m \u00b7 ${space.heldTiers
+      ? tier ? `${tier.label} ${tier.cells}\u00b3` : "no tier"
+      : maximumCells === undefined
       ? `\u2265 ${cells}\u00b3 cells`
       : cells === maximumCells ? `${cells}\u00b3 cells` : `${cells}\u00b3\u2013${maximumCells}\u00b3 cells`}`,
     handles: [

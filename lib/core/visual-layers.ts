@@ -4,11 +4,11 @@ export const VISUAL_LAYERS = [
   { id: "density", requires: ["volume"], label: "Surface density", color: "#23a186", opacity: 0.65, mode: 10, description: "Transported volume per cell volume, including dilute residue and overfull cells." },
   { id: "volume", requires: ["volume", "capacity"], label: "Conserved volume", color: "#4f9ae0", opacity: 0.7, mode: 21, description: "Conserved volume divided by open cell capacity; amber marks overcapacity." },
   { id: "pressure", requires: ["pressure"], label: "Pressure", color: "#7e9ee5", opacity: 0.65, mode: 5, description: "Signed pressure: blue positive, amber negative; full intensity at 10 kPa." },
-  { id: "tiles", requires: ["tiles"], label: "Work tiles", color: "#3fae8f", opacity: 0.45, mode: 22, description: "Fine velocity tiles, extension shell, and transport reach where published." },
+  { id: "tiles", requires: ["tiles"], label: "Work tiles", color: "#3fae8f", opacity: 0.45, mode: 22, description: "Fine velocity tiles, extension shell, and transport reach where published. Mixed Uniform also draws each tile's live h, 2h or 4h cells." },
   { id: "pages", requires: ["pages"], label: "Domain pages", color: "#b39bea", opacity: 0.65, mode: 27, description: "Page states from the last step: teal = transport active; amber = sharpening only; faint purple = resident without volume work. Absent pages are hidden. Residency can include pressure/interface support; authored pages currently remain allocated." },
   { id: "window", requires: ["window"], label: "Working window", color: "#5fb4e6", opacity: 0.8, mode: 23, description: "Actual dispatched window, seed box, launch slack and clipping. Dense scheduling uses the whole domain." },
   { id: "surface", requires: ["phi"], label: "Liquid surface · φ = 0", color: "#ef9f35", opacity: 0.9, mode: 24, description: "Reconstructed liquid and its zero level-set interface." },
-  { id: "grid", requires: ["dimensions"], label: "Grid", color: "#a8c7d8", opacity: 0.7, mode: 0, description: "Cell boundaries, independently of field fills." },
+  { id: "grid", requires: ["dimensions"], label: "Grid", color: "#a8c7d8", opacity: 0.7, mode: 0, description: "Represented cell boundaries, independently of field fills. Mixed Uniform draws its live h, 2h and 4h owners." },
   { id: "velocity", requires: ["velocity"], label: "Velocity", color: "#dce9ee", opacity: 0.9, mode: 26, description: "Cell velocity magnitude and in-plane direction; full scale at 1 m/s." },
   { id: "release", requires: ["releasedFaces"], label: "Released faces", color: "#f5be52", opacity: 1, mode: 25, description: "Solid faces released by the pressure projection." },
 ] as const;

@@ -111,6 +111,28 @@ export function RegionDraftMenu<Doc, Patch>({ space }: {
     setOpen(next);
   };
   const chosen = regionDraftCellSize(space, draft);
+  // A held-tier host has nothing to say about floors and ceilings: the next box
+  // is one tier or the other, so the chooser is the tiers and nothing else.
+  if (space.heldTiers) return <ToolstripMenuButton
+    label="What a drawn box holds"
+    hint="The tier the next box drawn will hold. A box already on the water carries its own."
+    open={open}
+    testId="region-draft"
+    onOpen={raise}
+  >
+    {space.heldTiers.map((tier) => <ToolstripMenuItem
+      key={tier.cells}
+      label={tier.label}
+      note={`${tier.cells}\u00b3`}
+      title={tier.hint}
+      active={chosen === tier.cells}
+      testId={`region-draft-cells-${tier.cells}`}
+      onClick={() => {
+        setRegionDraft({ cellSize_cells: tier.cells });
+        raise(false);
+      }}
+    />)}
+  </ToolstripMenuButton>;
   return <ToolstripMenuButton
     label="What a drawn box means"
     hint="The bound the next box drawn will carry. A box already on the water carries its own."

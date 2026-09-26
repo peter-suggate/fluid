@@ -9,6 +9,7 @@ import {
   type RegionBox,
   type RegionLattice,
   type RegionSpace,
+  type RegionTier,
 } from "./definition";
 
 /**
@@ -244,7 +245,14 @@ function resnapped(
 export function regionCaption(
   record: RefinementRegionRecord,
   cellEdge_mm?: number,
+  heldTiers?: readonly RegionTier[],
 ): string {
+  if (heldTiers) {
+    const tier = regionHeldTier(heldTiers, record);
+    if (!tier) return `This box enforces nothing — choose ${heldTiers.map((t) => t.label).join(" or ")}.`;
+    return cellEdge_mm === undefined ? tier.hint
+      : `${tier.hint} (${(tier.cells * cellEdge_mm).toFixed(0)} mm cells)`;
+  }
   const floor = record.minimumCellSize_cells;
   const ceiling = record.maximumCellSize_cells;
   if (cellEdge_mm === undefined) {
@@ -260,6 +268,18 @@ export function regionCaption(
   return ceiling === floor
     ? `Fully contained pressure cells are held at ${mm(floor)} mm inside this box.`
     : `Fully contained pressure cells stay between ${mm(floor)} and ${mm(ceiling)} mm inside this box.`;
+}
+
+/**
+ * The tier a box holds on a held-tier host, or nothing for bounds that name a
+ * range — which on such a host enforces no tier at all.
+ */
+export function regionHeldTier(
+  heldTiers: readonly RegionTier[],
+  record: Pick<RefinementRegionRecord, "minimumCellSize_cells" | "maximumCellSize_cells">,
+): RegionTier | undefined {
+  if (record.maximumCellSize_cells !== record.minimumCellSize_cells) return undefined;
+  return heldTiers.find((tier) => tier.cells === record.minimumCellSize_cells);
 }
 
 /**
@@ -284,6 +304,26 @@ export function regionChoices<Doc, Patch>(
   const ceiling = record.maximumCellSize_cells;
   const edgeClause = (cells: number) => edge_mm === undefined
     ? "" : ` · ${(cells * edge_mm).toFixed(0)} mm edge`;
+  // One rule and two tiers: the rule row would offer nothing to choose and the
+  // Min/Max pair would offer three spellings of two instructions plus 1…4,
+  // which enforces nothing. One row, one tier.
+  if (space.heldTiers) {
+    return [{
+      id: "cellSize",
+      label: "Cells",
+      tag: "Cells",
+      value: String(regionHeldTier(space.heldTiers, record)?.cells ?? "none"),
+      options: space.heldTiers.map((tier) => ({
+        id: String(tier.cells),
+        label: tier.label,
+        hint: `${tier.hint}${edgeClause(tier.cells)}`,
+        enabled: true,
+        apply: () => write(resnapped({
+          ...record, minimumCellSize_cells: tier.cells, maximumCellSize_cells: tier.cells,
+        }, lattice, space.brick_cells)),
+      })),
+    }];
+  }
   return [
     {
       id: "rule",
@@ -418,6 +458,7 @@ export function regionFromDraw<Doc, Patch>(
 ): RefinementRegionRecord | undefined {
   if (regionDrawIsDegenerate(anchor_cells, at_cells)) return undefined;
   const cells = regionDraftCellSize(space, draft);
+  const held = draft.holdAtOneTier || space.heldTiers !== undefined;
   const box = snapRegionBox(anchor_cells, at_cells,
     regionSnapStep_cells({ minimumCellSize_cells: cells }, space.brick_cells),
     space.lattice(doc));
@@ -425,7 +466,7 @@ export function regionFromDraw<Doc, Patch>(
     id: options.id ?? space.nextId(doc),
     rule: draft.rule,
     minimumCellSize_cells: cells,
-    ...(draft.holdAtOneTier ? { maximumCellSize_cells: cells } : {}),
+    ...(held ? { maximumCellSize_cells: cells } : {}),
     min_cells: box.min,
     max_cells: box.max,
   };
@@ -462,7 +503,7 @@ export function regionEntity<Doc, Patch>(
     editLabel: (handle) => handle.space === "world"
       ? `Moved ${record.id}` : `Resized ${record.id}`,
     choices: regionChoices(space, doc, record),
-    summary: regionCaption(record, space.cellEdge_mm?.(doc)),
+    summary: regionCaption(record, space.cellEdge_mm?.(doc), space.heldTiers),
     // A whole document rather than a patch, because removal is an absence: the
     // studio's last region leaving drops the `refinementRegions` key, and the
     // lab's list is a whole-list command either way.

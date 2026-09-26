@@ -5,7 +5,7 @@ import { rigidPlacementWedge } from "../features/rigid-placement/ring";
 import type { EditorAction, EditorActionTarget } from "./editor-action";
 import { liquidBallWedge, liquidWedge } from "../features/liquid-drop/ring";
 import { regionDrawWedge } from "../features/refinement-region/ring";
-import { studioRegionSpace } from "./editor-refinement-region";
+import { studioRegionSpaceForMethod } from "./editor-refinement-region";
 import { cellProbeAction } from "./editor-probe-actions";
 import {
   boxCenter,
@@ -654,6 +654,7 @@ export function fluidPlayActions(
   scene: SceneDescription,
   point_m: Vec3,
   normal: Vec3,
+  methodId?: string,
 ): readonly EditorAction[] {
   return [
     liquidWedge([
@@ -691,7 +692,7 @@ export function fluidPlayActions(
     // too. The wedge gained the document's own capacity as it moved: a constant
     // hint promising a box could be drawn was a promise the eighth one does not
     // keep, and the lab already said so.
-    regionDrawWedge(studioRegionSpace, scene),
+    regionDrawWedge(studioRegionSpaceForMethod(methodId), scene),
   ];
 }
 

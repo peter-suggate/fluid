@@ -137,6 +137,8 @@ export class WebGPURenderWorkerClient {
   private stopped = false;
   private failed = false;
   private runtimeUnavailable?: string;
+  /** One fixed translation keeps an activity's start time stable across progress messages. */
+  private workerClockOffset_ms?: number;
   private readonly requests = new Map<number, { kind: WebGPURenderWorkerRequest["type"]; resolve(value: unknown): void; reject(error: Error): void }>();
 
   constructor(
@@ -374,9 +376,11 @@ export class WebGPURenderWorkerClient {
     else if (message.type === "status") {
       const status = message.status.state === "initializing" && message.status.startedAt_ms !== undefined
         ? { ...message.status,
-          // `performance.now()` is realm-relative. Preserve elapsed worker
-          // time while translating its origin into the document's clock.
-          startedAt_ms: performance.now() - Math.max(0, message.workerNow_ms - message.status.startedAt_ms) }
+          // `performance.now()` is realm-relative. Calibrate once: deriving a
+          // fresh offset from each delivery gives the same activity a slightly
+          // different start time on every update, restarting progress effects.
+          startedAt_ms: message.status.startedAt_ms
+            + (this.workerClockOffset_ms ??= performance.now() - message.workerNow_ms) }
         : message.status;
       if (status.state === "unavailable" || status.state === "lost" || status.state === "blocked") {
         this.runtimeUnavailable = status.label;

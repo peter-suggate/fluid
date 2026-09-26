@@ -304,7 +304,7 @@ export function sceneActionsAt(
   options: { readonly placement?: boolean; readonly methodId?: string } = {},
 ): readonly EditorAction[] {
   const placement = options.placement !== false
-    ? [...fluidPlayActions(scene, point_m, normal), ...voxelSculptActions(scene, options.methodId),
+    ? [...fluidPlayActions(scene, point_m, normal, options.methodId), ...voxelSculptActions(scene, options.methodId),
       lightWedge(point_m, normal)]
     : [];
   return [...placement, sceneWedge(scene), sceneInstrumentWedge(scene), compareWedge()];

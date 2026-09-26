@@ -40,6 +40,15 @@ export interface RefinementRegionRecord {
   readonly maximumCellSize_cells?: number;
 }
 
+/** One cell size a held-tier host lets a box enforce. */
+export interface RegionTier {
+  readonly cells: number;
+  /** One word: the value shown beside the row tag and on the draw chooser. */
+  readonly label: string;
+  /** What the solver does inside a box held at this tier. */
+  readonly hint: string;
+}
+
 /** Finest cells across the domain, per axis. */
 export interface RegionLattice {
   readonly dimensions: readonly number[];
@@ -70,6 +79,16 @@ export interface RegionSpace<Doc, Patch = Doc> {
   readonly cellSizes: readonly number[];
   /** Fixed two-level methods have a finite ceiling rather than AUTO. */
   readonly allowAutomaticCeiling?: boolean;
+  /**
+   * Present when a box can only *hold* one cell size, never a range.
+   *
+   * Mixed Uniform Geometric enforces exactly two things per 4³ tile — all h or
+   * all 4h — and a floor/ceiling pair either names one of those or, as 1…4,
+   * enforces nothing at all. So such a host offers the tiers as the only
+   * choice and writes every box with equal bounds. `cells` must match
+   * `cellSizes`.
+   */
+  readonly heldTiers?: readonly RegionTier[];
   /**
    * The rung a box drawn here carries while nobody has chosen one.
    *
