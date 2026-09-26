@@ -184,9 +184,15 @@ function packUniformMixedLayout(lattice: RefinementRegionLattice, widths: Uint8A
     (isFine ? fine : widths[key] === 2 ? transition : coarse).push(key);
     if (isFine) fineBase += 64; else coarseBase += (4 / widths[key]!) ** 3;
   }
-  // Freeze geometric stencil decisions with ownership. Physics stages reuse
-  // these masks for arbitrary sample locations, including long departures.
-  const stencils = new Uint32Array(count * 2);
+  const stencils = mixedStencils(dimensions, widths);
+  return { lattice, tileDimensions: dimensions, tiles, stencils, fineTiles: Uint32Array.from(fine),
+    coarseTiles: Uint32Array.from(coarse), transitionTiles: Uint32Array.from(transition), cellCount, metadataBytes: count * 16, regions };
+}
+
+/** Freeze geometric stencil decisions with ownership. Physics stages reuse
+ * these masks for arbitrary sample locations, including long departures. */
+function mixedStencils(dimensions: Triple, widths: Uint8Array): Uint32Array<ArrayBuffer> {
+  const count = widths.length, stencils = new Uint32Array(count * 2);
   for (let key = 0; key < count; key++) {
     const tx = key % dimensions[0], ty = Math.floor(key / dimensions[0]) % dimensions[1], tz = Math.floor(key / (dimensions[0] * dimensions[1]));
     let maximum = widths[key]!, minimum = widths[key]!;
@@ -200,6 +206,39 @@ function packUniformMixedLayout(lattice: RefinementRegionLattice, widths: Uint8A
     stencils[2 * key]! |= maximum << 27;
     stencils[2 * key + 1]! |= minimum << 27;
   }
-  return { lattice, tileDimensions: dimensions, tiles, stencils, fineTiles: Uint32Array.from(fine),
-    coarseTiles: Uint32Array.from(coarse), transitionTiles: Uint32Array.from(transition), cellCount, metadataBytes: count * 16, regions };
+  return stencils;
+}
+
+/** A layout whose tile words were built elsewhere (the GPU layout builder).
+ * Only the tile words are stored; worklists and stencils are derived from
+ * them on first host access, so an adopted generation costs no per-tile host
+ * work unless a host consumer actually reads those arrays. */
+export function uniformMixedLayoutFromTiles(lattice: RefinementRegionLattice, tiles: Uint32Array<ArrayBuffer>,
+  regions: UniformMixedLayout["regions"]): UniformMixedLayout {
+  const dimensions = lattice.dimensions.map(n => n / 4) as unknown as Triple;
+  const count = dimensions[0] * dimensions[1] * dimensions[2];
+  if (tiles.length !== count) throw new Error("Mixed tile words do not match the lattice");
+  let fine = 0, transition = 0, coarse = 0;
+  for (const word of tiles) { const width = mixedCellWidth(word); if (width === 1) fine++; else if (width === 2) transition++; else coarse++; }
+  let lists: { fine: Uint32Array<ArrayBuffer>; transition: Uint32Array<ArrayBuffer>; coarse: Uint32Array<ArrayBuffer> } | undefined;
+  let stencils: Uint32Array<ArrayBuffer> | undefined;
+  const list = () => {
+    if (!lists) {
+      lists = { fine: new Uint32Array(fine), transition: new Uint32Array(transition), coarse: new Uint32Array(coarse) };
+      let f = 0, t = 0, c = 0;
+      for (let key = 0; key < count; key++) {
+        const width = mixedCellWidth(tiles[key]!);
+        if (width === 1) lists.fine[f++] = key; else if (width === 2) lists.transition[t++] = key; else lists.coarse[c++] = key;
+      }
+    }
+    return lists;
+  };
+  return {
+    lattice, tileDimensions: dimensions, tiles, regions, metadataBytes: count * 16,
+    cellCount: fine * 64 + transition * 8 + coarse,
+    get fineTiles() { return list().fine; },
+    get transitionTiles() { return list().transition; },
+    get coarseTiles() { return list().coarse; },
+    get stencils() { return stencils ??= mixedStencils(dimensions, Uint8Array.from(tiles, mixedCellWidth)); },
+  };
 }

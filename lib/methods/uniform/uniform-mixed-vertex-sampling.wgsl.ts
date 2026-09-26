@@ -6,7 +6,10 @@
 // Keep general nested tap loops runtime-bounded. Expanding all eight taps
 // at every reconstruction depth creates very large Metal kernels; certified
 // fine work still compiles to the ordinary eight direct loads.
-export const uniformMixedVertexSamplingWGSL = /* wgsl */ `
+/** cacheLookup: WGSL run in umVertexValue once p is known to need
+ * reconstruction, with p and its tile in scope; it may return the memoized
+ * value of this same function. */
+export const uniformMixedVertexSamplingSource = (cacheLookup = "") => /* wgsl */ `
 fn umVertexSum8(v:array<f32,8>)->f32{return ((v[0]+v[5])+(v[1]+v[4]))+((v[2]+v[7])+(v[3]+v[6]));}
 fn umVertexAuthority(p:vec3u)->UMOwner {
  if(umRegularFine){return umOwnerAt(clamp(vec3i(p)-vec3i(1),vec3i(0),vec3i(UM_D)-vec3i(1)));}
@@ -49,6 +52,7 @@ fn umVertexValue(p:vec3u)->f32 {
  if(umTileMaximumWidth(tile)==1u){return umLoadVertex(p);}
  let local=p%4u;
  if(all(local==vec3u(0))){return umLoadVertex(p);}
+ ${cacheLookup}
  var stored=true;
  for(var k=0u;k<select(umCounts.w,8u,umRegularFine);k++){
   let back=umCorner(k,2u);
@@ -82,7 +86,8 @@ fn umSampleVertex(p:vec3f)->f32 {
  if(regular){
   // The same direct interpolation and D4 summation as native Uniform. The
   // frame's neighborhood certificate proves all eight vertices are stored.
-  for(var k=0u;k<select(umCounts.w,8u,umRegularFine);k++){
+  // A constant bound unrolls the eight independent width-strided loads.
+  for(var k=0u;k<8u;k++){
    let corner=umCorner(k,2u);let w=select(vec3f(1)-t,t,corner!=vec3u(0));
    values[k]=umLoadVertex(origin+corner*owner.width)*w.x*w.y*w.z;
   }
@@ -98,3 +103,4 @@ fn umSampleVertex(p:vec3f)->f32 {
  return umVertexSum8(values);
 }
 `;
+export const uniformMixedVertexSamplingWGSL = uniformMixedVertexSamplingSource();

@@ -1,7 +1,7 @@
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedFaceAddressWGSL } from "./uniform-mixed-face-dispatch.wgsl";
-import { UNIFORM_MIXED_HANGING_RECORD, uniformMixedHangingTapWGSL, uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sampling.wgsl";
+import { UNIFORM_MIXED_HANGING_TAPS, uniformMixedHangingTapWGSL, uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sampling.wgsl";
 
 export interface UniformMixedMomentumCacheFields {
   extended:GPUTexture;
@@ -96,7 +96,7 @@ export interface UniformMixedHangingTapFields {
  * velocity/negative/coarse inputs change (forces); the frame orders that. */
 export class UniformMixedHangingTaps {
   readonly allocatedBytes=0;
-  private pipeline?:GPUComputePipeline;
+  private pipelines:GPUComputePipeline[]=[];
   private readonly resources:GPUBindGroupLayout;
   constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership){
     this.resources=device.createBindGroupLayout({entries:[
@@ -114,7 +114,10 @@ export class UniformMixedHangingTaps {
     ]});
   }
   async initialize():Promise<void>{
-    const module=this.device.createShaderModule({code:uniformMixedTopologyWGSL(this.ownership.layout,0)+/* wgsl */`
+    // Two phases: every slot's 2h taps, then its fine taps, whose nested 2h
+    // interpolation reads those memoized 2h taps (the same function's values)
+    // instead of re-evaluating eight 2h taps per fine tap.
+    const source=(fine:boolean)=>uniformMixedTopologyWGSL(this.ownership.layout,0)+/* wgsl */`
 @group(1) @binding(0) var extended:texture_3d<f32>;
 @group(1) @binding(1) var<storage,read> negative:array<f32>;
 @group(1) @binding(2) var coarse:texture_3d<f32>;
@@ -124,19 +127,17 @@ fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32{
  return textureLoad(extended,anchor,0)[axis];
 }
 fn umLoadCoarseFace(index:vec3i,axis:u32)->f32{return textureLoad(coarse,index+vec3i(1),0)[axis];}
-${uniformMixedHangingTapWGSL(2)}
-${uniformMixedVelocitySamplingSource(false,true)}
-@compute @workgroup_size(${UNIFORM_MIXED_HANGING_RECORD}) fn hanging(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let slot=group.x+umDispatchX*group.y;if(slot>=UM_TILES){return;}
- let tile=umHanging[UM_TILES+slot];if(tile==UM_NO_SLOT){return;}
+${fine?uniformMixedVelocitySamplingSource(false,true,undefined,2,false):uniformMixedHangingTapWGSL(2)+uniformMixedVelocitySamplingSource(false,true)}
+// Tile-local lanes: 0..191 fine taps, 192..215 2h taps, 216..263 fine and
+// 264..275 2h negative boundary plane taps (for tiles on that plane).
+fn umHangingFill(slot:u32,tile:u32,lane:u32){
  if(lane<192u){
   let cell=lane%64u;let axis=lane/64u;let local=vec3u(cell%4u,(cell/4u)%4u,cell/16u);
   umHanging[umHangingAddress(slot,local,axis)]=bitcast<u32>(umVelocityTap1(vec3i(umTileCoord(tile)*4u+local),axis));
  }else if(lane<216u){
   let cell=(lane-192u)%8u;let axis=(lane-192u)/8u;let local=vec3u(cell%2u,(cell/2u)%2u,cell/4u);
   umHanging[umHangingAddress2(slot,local,axis)]=bitcast<u32>(umVelocityTap2(vec3i(umTileCoord(tile)*2u+local),axis));
- }else{
-  // Native negative boundary plane taps, for tiles on that plane.
+ }else if(lane<${UNIFORM_MIXED_HANGING_TAPS}u){
   let fine=lane<264u;let width=select(2u,1u,fine);let side=4u/width;
   let offset=select(lane-264u,lane-216u,fine);let axis=offset/(side*side);let cell=offset%(side*side);
   if(umTileCoord(tile)[axis]!=0u){return;}
@@ -145,14 +146,24 @@ ${uniformMixedVelocitySamplingSource(false,true)}
   var value=0.0;if(fine){value=umVelocityTap1(index,axis);}else{value=umVelocityTap2(index,axis);}
   umHanging[umHangingPlaneAddress(slot,local,axis,width)]=bitcast<u32>(value);
  }
-}`});
-    const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
-    this.pipeline=await this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.ownership.hangingLayout]}),compute:{module,entryPoint:"hanging",constants:{umDispatchX:this.ownership.dispatchX}}});
+}
+@compute @workgroup_size(${fine?256:64}) fn hanging(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ let slot=group.x+umDispatchX*group.y;if(slot>=UM_TILES){return;}
+ let tile=umHanging[UM_TILES+slot];if(tile==UM_NO_SLOT){return;}
+ ${fine?"if(lane<192u){umHangingFill(slot,tile,lane);}else if(lane<240u){umHangingFill(slot,tile,lane+24u);}":"if(lane<24u){umHangingFill(slot,tile,lane+192u);}else if(lane<36u){umHangingFill(slot,tile,lane+240u);}"}
+}`;
+    const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.ownership.hangingLayout]});
+    this.pipelines=await Promise.all([false,true].map(async fine=>{
+      const module=this.device.createShaderModule({code:source(fine)});
+      const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
+      return this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"hanging",constants:{umDispatchX:this.ownership.dispatchX}}});
+    }));
   }
   encode(encoder:GPUCommandEncoder,group:GPUBindGroup):void{
-    if(!this.pipeline)throw new Error("Mixed hanging taps are not initialized");
+    if(this.pipelines.length!==2)throw new Error("Mixed hanging taps are not initialized");
     const groups=this.ownership.hangingSlots;if(!groups)return;
-    const pass=encoder.beginComputePass({label:"Uniform mixed hanging fine taps"});pass.setPipeline(this.pipeline);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);pass.setBindGroup(2,this.ownership.hangingGroup);
-    pass.dispatchWorkgroups(Math.min(groups,this.ownership.dispatchX),Math.ceil(groups/this.ownership.dispatchX));pass.end();
+    const pass=encoder.beginComputePass({label:"Uniform mixed hanging fine taps"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);pass.setBindGroup(2,this.ownership.hangingGroup);
+    for(const pipeline of this.pipelines){pass.setPipeline(pipeline);pass.dispatchWorkgroups(Math.min(groups,this.ownership.dispatchX),Math.ceil(groups/this.ownership.dispatchX));}
+    pass.end();
   }
 }

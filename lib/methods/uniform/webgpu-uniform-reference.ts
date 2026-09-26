@@ -5,7 +5,9 @@ import { UniformMixedCellProlongation } from "./uniform-mixed-cell-prolongation"
 import { UniformMixedVertexTransfer } from "./uniform-mixed-vertex-transfer";
 import { UniformMixedVelocityRestriction } from "./uniform-mixed-velocity-restriction";
 import { UniformMixedTransportStage } from "./uniform-mixed-transport";
-import { assertUniformMixedSolidPromotion, createUniformMixedLayout, uniformMixedSolidTiles } from "./uniform-mixed-layout";
+import { assertUniformMixedSolidPromotion, createUniformMixedLayout, mixedCellWidth, uniformMixedSolidTiles } from "./uniform-mixed-layout";
+import { UniformMixedLayoutBuilder } from "./uniform-mixed-layout-builder";
+import { UniformMixedDynamicClassifier, UNIFORM_MIXED_DYNAMIC_FULL_TOLERANCE } from "./uniform-mixed-dynamic";
 import { uniformMixedNativeTraceWGSL } from "./uniform-mixed-topology.wgsl";
 import type { FluidRefinementRegion } from "../../core/model";
 import { refinementRegionLattice } from "../../core/refinement-regions";
@@ -209,6 +211,11 @@ export interface WebGPUUniformReferenceOptions {
   twoLevelExtensionTiles?: boolean;
   /** Extra 4h tiles the shell adds past the fine set; absent derives it. */
   twoLevelShellReach?: number;
+  /** Mixed ownership source: authored regions, or the state-driven surface
+   * band (docs/plans/uniform-dynamic-coarsening.md). */
+  mixedCoarsening?: "regions" | "dynamic";
+  mixedCoarseningReach?: number;
+  mixedCoarseningHysteresis?: number;
   /**
    * E2b: velocity advection and the projection take their far-air arm directly
    * in cells outside the fine tiles. Also gated on `twoLevelVelocity`, since the
@@ -353,6 +360,12 @@ export interface WebGPUUniformReferenceOptions {
  * when `update` reports a dirty range -- a voxel stroke or a scene load --
  * never per step.
  */
+/** Layout identity of a per-tile mask: length and a 64-bit FNV-1a pair. */
+function uint8Key(bytes: Uint8Array): string {
+  let a = 0x811c9dc5, b = 0x01000193;
+  for (let i = 0; i < bytes.length; i++) { a = Math.imul(a ^ bytes[i]!, 0x01000193); b = Math.imul(b ^ (bytes[i]! + i), 0x811c9dc5); }
+  return `${bytes.length}:${(a >>> 0).toString(36)}:${(b >>> 0).toString(36)}`;
+}
 function uniformSolidMaskEmpty(mask: SolidOccupancyMask): boolean {
   const words = mask.words;
   if (!uniformAbOn("solidinterior")) {
@@ -602,6 +615,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private twoLevelAdvectionTiles: boolean;
   /** How far past the fine set the extension must still be exact, in 4h tiles. */
   private twoLevelShellReach: number;
+  private mixedCoarsening: "regions" | "dynamic";
+  private mixedCoarseningReach: number;
+  private mixedCoarseningHysteresis: number;
   /** E3: the twelve transport passes run on the live tile set, not densely. */
   private transportTiles: boolean;
   /** Extra 4h tiles the transport set adds past the fine set. */
@@ -1108,6 +1124,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.twoLevelShellReach = Number.isFinite(options.twoLevelShellReach)
       ? Math.round(Math.min(8, Math.max(0, options.twoLevelShellReach!)))
       : Math.max(1, Math.ceil(0.5 * Math.max(...spacing) / Math.min(...spacing)));
+    this.mixedCoarsening = options.mixedCoarsening === "dynamic" ? "dynamic" : "regions";
+    this.mixedCoarseningReach = Number.isFinite(options.mixedCoarseningReach) ? Math.round(Math.min(8, Math.max(0, options.mixedCoarseningReach!))) : 2;
+    this.mixedCoarseningHysteresis = Number.isFinite(options.mixedCoarseningHysteresis) ? Math.round(Math.min(4, Math.max(0, options.mixedCoarseningHysteresis!))) : 1;
     const allocation = planUniformHostAllocation(nx, ny, nz, "maccormack");
     this.executionNegativeBoundaryVelocityBytes = allocation.boundaryVelocityBytes;
     const usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING
@@ -1681,25 +1700,97 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     await this.mixedFrame.initialize();
     this.mixedDiagnostics=new UniformMixedDiagnostics(this.device,this.mixedFrame.ownership,this.volumeA,this.velocityA,this.vertexPhiField,this.reductions);
     await this.mixedDiagnostics.initialize();
-    this.executionInfo.allocatedBytes+=this.mixedFrame.allocatedBytes;
+    this.mixedDynamic=new UniformMixedDynamicClassifier(this.device,this.mixedFrame.ownership,this.volumeA,this.vertexPhiField);
+    await this.mixedDynamic.initialize();
+    this.mixedBuilder=new UniformMixedLayoutBuilder(this.device,this.mixedDynamic.bandBits,[this.mixedFrame.ownership,this.mixedFrame.levels[1]!.ownership]);
+    await this.mixedBuilder.initialize();
+    this.executionInfo.allocatedBytes+=this.mixedFrame.allocatedBytes+this.mixedDynamic.allocatedBytes+this.mixedBuilder.allocatedBytes;
     this.mixedSource={vertexPhi:this.vertexPhiField,openFraction:this.gammaB,cellSize_m:fine.lattice.cellSize_m,mixedOwnership:this.mixedFrame.ownership.presentation,mixedPressure:this.mixedFrame.levels[0]!.pressure,mixedPressurePhi:this.mixedFrame.levels[0]!.phi,mixedSupport:{buffer:this.mixedFrame.ownership.support}};
     this.updateMixedRegions();
   }
+  private mixedDynamic?: UniformMixedDynamicClassifier;
+  /** GPU ownership builder for dynamic relayouts; region edits stay on the CPU path. */
+  private mixedBuilder?: UniformMixedLayoutBuilder;
+  private mixedBuilderStaticKey?: string;
+  /** Last band census, one byte per tile; undefined until the first dynamic census. */
+  private mixedDynamicFine?: Uint8Array;
+  /** The live ownership came from the dynamic band, so its violations are fatal. */
+  private mixedDynamicLive=false;
+  private mixedDynamicRelayouts=0;
   private updateMixedRegions():void{
     if(!this.mixedFrame)return;
-    const regions=this.scene.fluid.refinementRegions??[],key=`${this.mixedSolidMaskStamp}:${JSON.stringify(regions)}`;
+    const regions=this.scene.fluid.refinementRegions??[];
+    const dynamic=this.mixedCoarsening==="dynamic"?this.mixedDynamicFine:undefined;
+    const key=`${this.mixedSolidMaskStamp}:${JSON.stringify(regions)}:${dynamic?"dynamic:"+uint8Key(dynamic):"regions"}`;
     if(key===this.mixedRegionKey)return;
+    const started=performance.now();
     // Fine near solids: every tile within one cell of a cut cell, and its
     // neighbour tiles, is h. Coarse owners carry no solid terms at all.
     const solid=this.mixedSolidPromotion();
     // Solid kernels are compiled with the frame; a live voxel edit is refused
     // loudly at the next advance (solidEditPending).
-    const layout=createUniformMixedLayout(refinementRegionLattice(this.scene),regions,true,1,solid.forced);
+    // Dynamic: the surface band is forced h like a solid, everything else
+    // prefers 4h, and authored regions can only add fine constraints.
+    const forced=dynamic?solid.forced.map((f,t)=>f|dynamic[t]!):solid.forced;
+    const layout=createUniformMixedLayout(refinementRegionLattice(this.scene),regions,true,dynamic?4:1,forced);
     assertUniformMixedSolidPromotion(layout,solid.forced);
-    this.mixedFrame.updateLayout(layout);this.mixedRegionKey=key;this.mixedGeneration++;
+    const built=performance.now();
+    this.mixedFrame.updateLayout(layout);this.mixedRegionKey=key;this.mixedGeneration++;this.mixedDynamicLive=!!dynamic;
+    if(dynamic)this.mixedDynamicRelayouts++;
     Object.assign(this.executionInfo,{uniformMixedGeneration:this.mixedGeneration,uniformMixedFineTiles:layout.fineTiles.length,
       uniformMixedTransitionTiles:layout.transitionTiles.length,uniformMixedCoarseTiles:layout.coarseTiles.length,
-      uniformMixedOwners:layout.cellCount,uniformSimulationCellScale:undefined});
+      uniformMixedOwners:layout.cellCount,uniformSimulationCellScale:undefined,
+      uniformMixedLayoutBuild_ms:built-started,uniformMixedLayoutApply_ms:performance.now()-built,
+      uniformMixedDynamicRelayouts:this.mixedDynamicRelayouts});
+  }
+  /** Classify the completed frame's state and adopt the new band if it moved.
+   * Runs between frames, inside the pending frame, so the next advance waits. */
+  private async updateMixedDynamic(dt:number):Promise<void>{
+    // FLUID_MIXED_DYNAMIC_CENSUS: census authored-region layouts too, adopting nothing.
+    const censusOnly=this.mixedCoarsening!=="dynamic"&&typeof process!=="undefined"&&!!process.env.FLUID_MIXED_DYNAMIC_CENSUS;
+    if(!this.mixedFrame||!this.mixedDynamic||(this.mixedCoarsening!=="dynamic"&&!censusOnly))return;
+    const builder=censusOnly?undefined:this.mixedBuilder;
+    const regions=this.scene.fluid.refinementRegions??[];
+    const staticKey=`${this.mixedSolidMaskStamp}:${JSON.stringify(regions)}`;
+    if(builder&&staticKey!==this.mixedBuilderStaticKey){
+      // Static h tiles: solid promotion and fine-only regions. With a 4h
+      // background nothing else is h; region conflicts throw here, on the CPU.
+      const solid=this.mixedSolidPromotion();
+      const staticLayout=createUniformMixedLayout(refinementRegionLattice(this.scene),regions,true,4,solid.forced);
+      builder.setStatic(Uint8Array.from(staticLayout.tiles,word=>mixedCellWidth(word)===1?1:0),staticLayout.regions);
+      this.mixedBuilderStaticKey=staticKey;
+    }
+    const encoder=this.device.createCommandEncoder({label:"Uniform dynamic ownership census"});
+    this.mixedDynamic.encode(encoder,{dt,reach:this.mixedCoarseningReach,hysteresis:this.mixedCoarseningHysteresis,
+      fullTolerance:UNIFORM_MIXED_DYNAMIC_FULL_TOLERANCE,emptyTolerance:Math.max(this.volumeDustThreshold,1e-6)});
+    builder?.encode(encoder);
+    this.device.queue.submit([encoder.finish()]);
+    const [census,built]=await Promise.all([this.mixedDynamic.read(),builder?.read()]);
+    if(this.disposed)return;
+    Object.assign(this.executionInfo,{uniformMixedDynamicInterfaceTiles:census.interfaceTiles,uniformMixedDynamicBandTiles:census.fineTiles,
+      uniformMixedDynamicRefined:census.refined,uniformMixedDynamicCoarsened:census.coarsened,uniformMixedDynamicViolations:census.violations,
+      uniformMixedDynamicCoarsePartialVolume:census.coarsePartialVolume,uniformMixedDynamicCoarsePhiCrossing:census.coarsePhiCrossing,uniformMixedDynamicCoarseDryLiquidPhi:census.coarseDryLiquidPhi,
+      uniformMixedDynamicInteriorDeficit:census.interiorDeficit,uniformMixedDynamicAirVolume:census.airVolume});
+    if(this.mixedDynamicLive&&census.violations>0)
+      throw new Error(`Uniform dynamic coarsening: the phi surface reached 2h/4h ownership in ${census.violations} tile(s) within one frame; `
+        +`raise coarseningReach (now ${this.mixedCoarseningReach}) or investigate the travel bound`);
+    if(censusOnly||!built)return;
+    this.mixedDynamicFine=census.fine;
+    const started=performance.now();
+    const [fine,two]=built;
+    if(fine.changedTiles||two.changedTiles)this.mixedFrame.adoptBuiltLayout(fine,two);
+    // The built layout is createUniformMixedLayout(regions, background 4,
+    // solid ∪ band): record it under the same key the CPU path would use.
+    const key=`${staticKey}:dynamic:${uint8Key(census.fine)}`;
+    if(key!==this.mixedRegionKey){
+      this.mixedRegionKey=key;this.mixedGeneration++;this.mixedDynamicRelayouts++;this.mixedDynamicLive=true;
+    }
+    const layout=fine.layout;
+    Object.assign(this.executionInfo,{uniformMixedGeneration:this.mixedGeneration,
+      uniformMixedFineTiles:fine.tierCounts[0],uniformMixedTransitionTiles:fine.tierCounts[1],uniformMixedCoarseTiles:fine.tierCounts[2],
+      uniformMixedOwners:layout.cellCount,uniformSimulationCellScale:undefined,
+      uniformMixedLayoutBuild_ms:0,uniformMixedLayoutApply_ms:performance.now()-started,
+      uniformMixedDynamicRelayouts:this.mixedDynamicRelayouts,uniformMixedDynamicChangedTiles:fine.changedTiles});
   }
   private mixedTransportForQA?: UniformMixedTransportStage;
   private mixedTraceForQA?: GPUComputePipeline[];
@@ -2361,6 +2452,14 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       if (values.twoLevelExtension !== undefined) this.twoLevelExtensionTiles = values.twoLevelExtension !== "dense";
       if (values.twoLevelAdvection !== undefined) this.twoLevelAdvectionTiles = values.twoLevelAdvection !== "dense";
       if (values.twoLevelShellReach !== undefined) this.twoLevelShellReach = Math.round(finite("twoLevelShellReach", 1, 0, 8));
+      if (values.coarsening !== undefined && (values.coarsening === "dynamic" ? "dynamic" : "regions") !== this.mixedCoarsening) {
+        this.mixedCoarsening = values.coarsening === "dynamic" ? "dynamic" : "regions";
+        // Regions restores the authored layout now; dynamic waits for its first census.
+        this.mixedDynamicFine = undefined;
+        this.updateMixedRegions();
+      }
+      if (values.coarseningReach !== undefined) this.mixedCoarseningReach = Math.round(finite("coarseningReach", 2, 0, 8));
+      if (values.coarseningHysteresis !== undefined) this.mixedCoarseningHysteresis = Math.round(finite("coarseningHysteresis", 1, 0, 4));
       if (values.transportWorkMap !== undefined) this.transportTiles = values.transportWorkMap !== "dense";
       if (values.transportReach !== undefined) this.transportReach = Math.round(finite("transportReach", 1, -8, 8));
       if (values.volumePressureRows !== undefined) this.volumePressureRows = values.volumePressureRows === "all" ? 2 : values.volumePressureRows === "off" ? 0 : 1;
@@ -3664,6 +3763,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
           uniformPressureCyclesEncoded:receipt.cycles,uniformPressureCyclesConfigured:this.pressureSchedule.fullCycles+this.pressureSchedule.vCycles,
           uniformVolumeDustCells:receipt.dustOwners,uniformVolumeDustMass_cells:receipt.dustMass_cells,
           uniformVolumeOrphanDustCells:receipt.orphanDustOwners,uniformVolumeOrphanDustMass_cells:receipt.orphanDustMass_cells});
+        return this.updateMixedDynamic(dt);
+      }).then(()=>{
+        if(this.disposed)return;
         this.pendingFrame=undefined;
         const scene=this.deferredFrameScene,values=this.deferredFrameValues,bodies=this.deferredFrameBodies;
         this.deferredFrameScene=undefined;this.deferredFrameValues=undefined;this.deferredFrameBodies=undefined;
@@ -4365,6 +4467,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.disposed = true;
     this.coarseExecution?.destroy();
     this.mixedFrame?.destroy();
+    this.mixedDynamic?.destroy();this.mixedBuilder?.destroy();
     this.mixedTransportForQA?.destroy();
     this.pressureReceipt?.destroy();
     for (const texture of new Set([

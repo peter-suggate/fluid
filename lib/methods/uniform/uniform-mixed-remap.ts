@@ -1,4 +1,4 @@
-import {UniformMixedOwnership} from "./uniform-mixed-ownership";
+import {UniformMixedOwnership,type UniformMixedBuiltOwnership} from "./uniform-mixed-ownership";
 import type {UniformMixedLayout} from "./uniform-mixed-layout";
 import {uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
 import {uniformMixedVertexSamplingWGSL} from "./uniform-mixed-vertex-sampling.wgsl";
@@ -111,11 +111,21 @@ ${uniformMixedFaceDispatchWGSL("copyFaces","copyFace(face)",true,"value.w=textur
   this.target.update(layout);
   const encode=(copy:boolean)=>{
    const e=this.device.createCommandEncoder({label:copy?"Uniform publish remapped owners":"Uniform remap changed ownership"});
-   const pass=e.beginComputePass();pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.target.bindGroup);pass.setBindGroup(2,this.groups[copy?1:0]);
-   for(const name of copy?["copyCells","copyFaces"]:["remapCells","remapFaces"])this.target.dispatchAll(pass,this.pipelines.get(name)!);
-   pass.end();this.device.queue.submit([e.finish()]);
+   this.encodePass(e,copy);this.device.queue.submit([e.finish()]);
   };
   encode(false);this.ownership.update(layout);encode(true);
+ }
+ /** The same remap for a GPU-built generation, in one encoder: adopt into
+  * the target, remap, adopt into the live ownership, publish. */
+ applyBuilt(encoder:GPUCommandEncoder,built:UniformMixedBuiltOwnership):void{
+  if(this.pipelines.size!==4)throw new Error("Live remap has not been initialized");
+  this.target.adopt(encoder,built);this.encodePass(encoder,false);
+  this.ownership.adopt(encoder,built);this.encodePass(encoder,true);
+ }
+ private encodePass(e:GPUCommandEncoder,copy:boolean):void{
+  const pass=e.beginComputePass({label:copy?"Uniform mixed remap publish":"Uniform mixed remap"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.target.bindGroup);pass.setBindGroup(2,this.groups[copy?1:0]);
+  for(const name of copy?["copyCells","copyFaces"]:["remapCells","remapFaces"])this.target.dispatchAll(pass,this.pipelines.get(name)!);
+  pass.end();
  }
  destroy():void{this.target.destroy();}
 }

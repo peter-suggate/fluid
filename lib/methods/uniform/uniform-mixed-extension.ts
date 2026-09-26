@@ -78,13 +78,26 @@ fn umPhysical(face:UMFace)->f32{
  return textureLoad(physical,face.anchor,0)[face.axis];
 }
 struct UMNeighbor {value:f32,distance:f32,spacing:f32}
-fn umNeighbor(point:vec3f,center:vec3f,component:u32,step:u32)->UMNeighbor{
+fn umNeighbor(point:vec3f,center:vec3f,component:u32,step:u32,width:u32)->UMNeighbor{
  if(any(point<vec3f(0))||any(point>vec3f(UM_D))){return UMNeighbor(0,UM_INF,1);}
  let tile=umTileAt(min(vec3u(point),UM_D-vec3u(1))/4u);
  if(umRegularFine||umTileMaximumWidth(tile)==1u){
   var offset=vec3f(0.5);offset[component]=1.0;
   let anchor=vec3i(round(point-offset));let at=umSlot(anchor);
   return UMNeighbor(valuesIn[at][component],distancesIn[at][component],h[step]);
+ }
+ // The point is a width-w lattice patch centre (the requesting face has
+ // width w). When the owner below its plane has width w and the one above is
+ // no finer (or the plane is a domain wall), that owner's positive face is
+ // one canonical patch centred here: the search below selects exactly it.
+ var below=vec3i(floor(point));let plane=i32(round(point[component]));below[component]=plane-1;
+ var above=below;above[component]=plane;
+ let lowWidth=select(0u,umTileWidth(umTileAt(vec3u(max(below,vec3i(0)))/4u)),plane>0);
+ let highWidth=select(0u,umTileWidth(umTileAt(min(vec3u(above),UM_D-vec3u(1))/4u)),plane<i32(UM_D[component]));
+ if(select(lowWidth==width&&(highWidth==0u||highWidth>=width),highWidth==width,lowWidth==0u)){
+  var offset=vec3f(0.5*f32(width));offset[component]=1.0;
+  let at=umSlot(vec3i(round(point-offset)));let delta=(point-center)*h.xyz;
+  return UMNeighbor(valuesIn[at][component],distancesIn[at][component],sqrt(dot(delta,delta)));
  }
  let site=umVelocitySite(point,component);
  var best=UMNeighbor(0,UM_INF,1);var nearest=UM_INF;
@@ -112,7 +125,7 @@ fn umExtended(face:UMFace,owner:UMOwner)->vec2f{
  var low:array<UMNeighbor,3>;var high:array<UMNeighbor,3>;var minima:array<f32,3>;var spacing:array<f32,3>;
  for(var axis=0u;axis<3u;axis++){
   var delta=vec3f(0);delta[axis]=width;
-  low[axis]=umNeighbor(center-delta,center,face.axis,axis);high[axis]=umNeighbor(center+delta,center,face.axis,axis);
+  low[axis]=umNeighbor(center-delta,center,face.axis,axis,face.width);high[axis]=umNeighbor(center+delta,center,face.axis,axis,face.width);
   let lower=low[axis].distance<=high[axis].distance;
   minima[axis]=select(high[axis].distance,low[axis].distance,lower);
   spacing[axis]=select(high[axis].spacing,low[axis].spacing,lower);
@@ -147,7 +160,8 @@ fn umUnitExtensionFace(owner:UMOwner,axis:u32,sign:i32)->UMFace{
 ${["seed","sweep"].map(entry=>/* wgsl */`
 @compute @workgroup_size(64) fn ${entry}(@builtin(global_invocation_id) gid:vec3u){
  let owner=umOwner(gid);if(owner.width==0u){return;}let origin=umOrigin(owner);
- if(umRegularFine){
+ // A unit owner's faces are the unit patches whatever its neighbours.
+ if(umRegularFine||owner.width==1u){
   var values=vec4f(0);var distances=vec4f(UM_INF);
   for(var axis=0u;axis<3u;axis++){
    if(origin[axis]==0u){let face=umUnitExtensionFace(owner,axis,-1);var v=vec4f(0);var d=vec4f(UM_INF);
@@ -221,7 +235,8 @@ fn umPublished(face:UMFace)->f32{
  return umFarValue(face);
 }
 ${uniformMixedFaceDispatchWGSL("publish","umPublished(face)",false,"value.w=textureLoad(physical,ownedFace.anchor,0).w;").replace(" let origin=umOrigin(owner);",` let origin=umOrigin(owner);
- if(umRegularFine){
+ // A unit owner's faces are the unit patches whatever its neighbours.
+ if(umRegularFine||owner.width==1u){
   var value=vec4f(0);
   for(var axis=0u;axis<3u;axis++){
    if(origin[axis]==0u){let face=umUnitExtensionFace(owner,axis,-1);boundary[umNegativeBoundaryIndex(origin,axis)]=umPublished(face);}

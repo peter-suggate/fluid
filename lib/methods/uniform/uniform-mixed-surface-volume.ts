@@ -63,10 +63,15 @@ fn umShiftLimit()->f32{return min(UM_H.x,min(UM_H.y,UM_H.z))*f32(select(select(4
 }
 @compute @workgroup_size(64) fn dilate(@builtin(global_invocation_id) gid:vec3u){
  let o=umAllOwner(gid);if(o.width==0u){return;}let input=parity*${N}u;let out=(parity^1u)*${N}u;var band=scratch[input+o.index];
+ if(o.width==1u){
+  // A unit owner's every face is one unit patch onto the adjacent owner.
+  let origin=vec3i(umOrigin(o));
+  for(var k=0u;k<6u;k++){var q=origin;q[k/2u]+=select(-1,1,(k&1u)==1u);let other=umOwnerAt(q);if(other.width!=0u){band=max(band,scratch[input+other.index]-1.0);}}
+ }else{
  for(var axis=0u;axis<3u;axis++){for(var side=0u;side<2u;side++){
   let sign=select(-1,1,side==1u);let first=umFace(o,axis,sign,0u);
   for(var part=0u;part<first.count;part++){let other=umFace(o,axis,sign,part).neighbor;if(other.width!=0u){band=max(band,scratch[input+other.index]-1.0);}}
- }}scratch[out+o.index]=select(0.0,max(0.0,band),umCapacity(o)>0.0);
+ }}}scratch[out+o.index]=select(0.0,max(0.0,band),umCapacity(o)>0.0);
 }
 @compute @workgroup_size(64) fn metric(@builtin(global_invocation_id) gid:vec3u){
  let o=umAllOwner(gid);if(o.width==0u){return;}
@@ -88,27 +93,55 @@ fn umShiftLimit()->f32{return min(UM_H.x,min(UM_H.y,UM_H.z))*f32(select(select(4
  }
 }
 var<workgroup> sums:array<vec4f,320>;
+var<workgroup> measureLive:atomic<u32>;
 fn sumGroup(l:u32){workgroupBarrier();for(var stride=32u;stride>0u;stride/=2u){if(l<stride){for(var k=0u;k<5u;k++){sums[5u*l+k]+=sums[5u*(l+stride)+k];}}workgroupBarrier();}}
 fn storeSum(at:u32,k:u32,value:vec4f){for(var c=0u;c<4u;c++){scratch[at+4u*k+c]=value[c];}}
 fn loadSum(at:u32,k:u32)->vec4f{return vec4f(scratch[at+4u*k],scratch[at+4u*k+1u],scratch[at+4u*k+2u],scratch[at+4u*k+3u]);}
+// Corner values (raw, then scale) of a general owner; runtime-bounded so
+// the reconstruction is not expanded eight times.
+fn umMeasureCorners(o:UMOwner)->array<f32,16>{
+ var corners:array<f32,16>;
+ for(var k=0u;k<umCounts.w;k++){let vertex=umOrigin(o)+umCorner(k,2u)*o.width;corners[k]=umVertexValue(vertex);corners[k+8u]=umScaleVertexValue(vertex);}
+ return corners;
+}
+// Each lane writes its 17 fractions and volume into its own workgroup row;
+// per-lane arrays stay statically indexed.
 @compute @workgroup_size(64) fn measure(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) l:u32,@builtin(workgroup_id) group:vec3u){
- let o=umAllOwner(gid);var result:array<vec4f,5>;
+ let o=umAllOwner(gid);
+ for(var k=0u;k<5u;k++){sums[5u*l+k]=vec4f(0);}
+ if(l==0u){atomicStore(&measureLive,0u);}
  if(o.width!=0u){
-  let origin=umOrigin(o);let mass=f32(o.width*o.width*o.width)*umCapacity(o);result[4].y=textureLoad(volume,vec3i(origin),0).x*f32(o.width*o.width*o.width);
+  let origin=umOrigin(o);let mass=f32(o.width*o.width*o.width)*umCapacity(o);sums[5u*l+4u].y=textureLoad(volume,vec3i(origin),0).x*f32(o.width*o.width*o.width);
   var raw:array<f32,8>;var scale:array<f32,8>;var low=1e30;var high=-1e30;
   let centre=scratch[${S}u];let radius=scratch[${S+1}u];
-  for(var k=0u;k<umCounts.w;k++){let vertex=origin+umCorner(k,2u)*o.width;raw[k]=umVertexValue(vertex);scale[k]=umScaleVertexValue(vertex);
-   low=min(low,raw[k]-(centre+radius)*scale[k]);high=max(high,raw[k]-(centre-radius)*scale[k]);}
-  for(var sample=0u;sample<17u;sample++){
-   var fraction=0.0;if(high<0.0){fraction=1.0;}else if(low<0.0){
+  if(umTileMaximumWidth(o.tile)==1u){
+   // Every corner of a unit owner whose tile stencil is all unit width is a
+   // stored vertex: the same values with eight direct loads.
+   for(var k=0u;k<8u;k++){let vertex=origin+umCorner(k,2u);raw[k]=umLoadVertex(vertex);scale[k]=umScaleLoadVertex(vertex);}
+  }else{
+   let corners=umMeasureCorners(o);for(var k=0u;k<8u;k++){raw[k]=corners[k];scale[k]=corners[k+8u];}
+  }
+  for(var k=0u;k<8u;k++){low=min(low,raw[k]-(centre+radius)*scale[k]);high=max(high,raw[k]-(centre-radius)*scale[k]);}
+  // An owner inside or outside the surface at every trial shift has a
+  // constant fraction; only cut owners evaluate the 17 shifted fills.
+  if(high<0.0){for(var k=0u;k<4u;k++){sums[5u*l+k]=vec4f(mass);}sums[5u*l+4u].x=mass;}
+  else if(low<0.0){
+   for(var sample=0u;sample<17u;sample++){
     let shift=centre+(f32(sample)/8.0-1.0)*radius;var values:array<f32,8>;var negative=0u;
-    for(var k=0u;k<umCounts.w;k++){values[k]=raw[k]-shift*scale[k];negative+=select(0u,1u,values[k]<0.0);}
-    if(negative==8u){fraction=1.0;}else if(negative!=0u){fraction=fill(values);}
-   }result[sample/4u][sample%4u]=fraction*mass;
+    for(var k=0u;k<8u;k++){values[k]=raw[k]-shift*scale[k];negative+=select(0u,1u,values[k]<0.0);}
+    var fraction=0.0;if(negative==8u){fraction=1.0;}else if(negative!=0u){fraction=fill(values);}
+    sums[5u*l+sample/4u][sample%4u]=fraction*mass;
+   }
   }
  }
- for(var k=0u;k<5u;k++){sums[l*5u+k]=result[k];}sumGroup(l);
- if(l==0u){let at=${P}u+20u*(group.x+umDispatchX*group.y);for(var k=0u;k<5u;k++){storeSum(at,k,sums[k]);}}
+ // A group without liquid or volume sums to zero: skip its tree.
+ workgroupBarrier();
+ var live=false;for(var k=0u;k<5u;k++){live=live||any(sums[5u*l+k]!=vec4f(0));}
+ if(live){atomicOr(&measureLive,1u);}
+ let at=${P}u+20u*(group.x+umDispatchX*group.y);
+ if(workgroupUniformLoad(&measureLive)==0u){if(l<20u){scratch[at+l]=0.0;}return;}
+ sumGroup(l);
+ if(l==0u){for(var k=0u;k<5u;k++){storeSum(at,k,sums[k]);}}
 }
 @compute @workgroup_size(64) fn reduce(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) l:u32){
  let i=group.x*64u+l;let count=(umLiveCells()+63u)/64u;

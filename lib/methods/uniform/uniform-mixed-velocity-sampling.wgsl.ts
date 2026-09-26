@@ -3,8 +3,12 @@
  * and the native negative boundary plane taps (3 × 16 fine, 3 × 4 2h; used
  * only by tiles on that plane), in tile-local order. Every 2h tile and every seam tile has a slot.
  * Written once per frame, after extension and the 4h cache, by
- * UniformMixedHangingTaps; a tap without a slot is evaluated in place. */
-export const UNIFORM_MIXED_HANGING_RECORD = 276;
+ * UniformMixedHangingTaps; a tap without a slot is evaluated in place.
+ * The last 125 words of a slot hold the surface stage's vertex values
+ * (umVertexValue at tile-local vertices 0..4 per axis), refilled from the
+ * sampled phi before each vertex pass. */
+export const UNIFORM_MIXED_HANGING_TAPS = 276;
+export const UNIFORM_MIXED_HANGING_RECORD = UNIFORM_MIXED_HANGING_TAPS + 125;
 export const uniformMixedHangingTapWGSL = (group: number) => /* wgsl */ `
 @group(${group}) @binding(0) var<storage,read_write> umHanging:array<u32>;
 const UM_NO_SLOT=0xffffffffu;
@@ -17,6 +21,9 @@ fn umHangingAddress2(slot:u32,local:vec3u,axis:u32)->u32 {
 fn umHangingPlaneAddress(slot:u32,local:vec3u,axis:u32,width:u32)->u32 {
  let side=4u/width;let u=local[(axis+1u)%3u];let v=local[(axis+2u)%3u];
  return 2u*UM_TILES+slot*${UNIFORM_MIXED_HANGING_RECORD}u+select(264u+axis*4u,216u+axis*16u,width==1u)+u+side*v;
+}
+fn umHangingVertexAddress(slot:u32,local:vec3u)->u32 {
+ return 2u*UM_TILES+slot*${UNIFORM_MIXED_HANGING_RECORD}u+${UNIFORM_MIXED_HANGING_TAPS}u+local.x+5u*local.y+25u*local.z;
 }
 // A memoized tap of this tile-local 1h/2h index, or UM_NO_SLOT. Covers the
 // in-domain taps and the negative boundary plane (index[axis]==-1).
@@ -39,7 +46,9 @@ fn umHangingLookup(index:vec3i,axis:u32,width:u32)->u32 {
  * With hanging, a fine tap inside a 2h tile loads the value that
  * UniformMixedHangingTaps evaluated once this frame from the same field.
  */
-export function uniformMixedVelocitySamplingSource(payload = false, coarseCache = false, regularTexture?: string, hangingGroup?: number): string {
+/** hangingFine=false consults only the 2h taps (the hanging fill's second
+ * phase, which is writing the fine taps). */
+export function uniformMixedVelocitySamplingSource(payload = false, coarseCache = false, regularTexture?: string, hangingGroup?: number, hangingFine = true): string {
 const type = payload ? "vec3f" : "f32", zero = payload ? "vec3f(0)" : "0.0";
 if (hangingGroup !== undefined && payload) throw new Error("The hanging fine-tap cache holds scalar samples");
 return (hangingGroup !== undefined ? uniformMixedHangingTapWGSL(hangingGroup) : "") + /* wgsl */ `
@@ -57,6 +66,41 @@ fn umVelocitySite(p:vec3f,axis:u32)->UMVelocitySite {
  let face=umFace(owner,axis,sign,part);return UMVelocitySite(face,face.width,false);
 }
 fn umVelocitySum8(v:array<${type},8>)->${type}{return ((v[0]+v[5])+(v[1]+v[4]))+((v[2]+v[7])+(v[3]+v[6]));}
+// The unit interpolant when every tap is a stored unit face (the sample's
+// tile stencil is all unit width): the eight weighted loads of the general
+// fine sampler below, with a constant bound, as all-fine Uniform samples.
+// Every tap cell of this unit interpolant lies in a unit tile: each tap is
+// then its stored unit face (umVelocityTap1's first case).
+fn umUnitTaps(base:vec3i)->bool {
+ let low=vec3u(clamp(base,vec3i(0),vec3i(UM_D)-1))/4u;let high=vec3u(clamp(base+vec3i(1),vec3i(0),vec3i(UM_D)-1))/4u;
+ for(var k=0u;k<8u;k++){
+  let tile=select(low,high,vec3<bool>((k&1u)!=0u,(k&2u)!=0u,(k&4u)!=0u));
+  if(umTileWidth(umTileAt(tile))!=1u){return false;}
+ }
+ return true;
+}
+fn umSampleVelocityFine(p:vec3f,axis:u32)->${type} {
+ var offset=vec3f(0.5);offset[axis]=1.0;var lower=vec3f(0.0);lower[axis]=-1.0;
+ let q=clamp(p-offset,lower,vec3f(UM_D)-vec3f(1.0));
+ let base=vec3i(floor(q));let fraction=fract(q);var terms:array<${type},8>;
+ ${regularTexture&&!payload?`// Interior samples need no per-tap boundary branch or transverse clamp: a
+ // tap beyond the clamped upper edge has exactly zero interpolation weight.
+ if(base[axis]>=0){
+  for(var k=0u;k<8u;k++){
+   let bit=vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));
+   let weights=select(vec3f(1)-fraction,fraction,bit==vec3i(1));
+   terms[k]=weights.x*weights.y*weights.z*textureLoad(${regularTexture},base+bit,0)[axis];
+  }
+  return umVelocitySum8(terms);
+ }`:""}
+ for(var k=0u;k<8u;k++){
+  let bit=vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));
+  let weights=select(vec3f(1.0)-fraction,fraction,bit==vec3i(1));let weight=weights.x*weights.y*weights.z;
+  var anchor=clamp(base+bit,vec3i(0),vec3i(UM_D)-1);anchor[axis]=(base+bit)[axis];
+  terms[k]=select(${zero},weight*umLoadMixedFace(anchor,axis),weight>0.0);
+ }
+ return umVelocitySum8(terms);
+}
 ` + [4,2,1].map(width => {
   const memo = hangingGroup === undefined ? "" : width === 2 ? /* wgsl */ `
  {let address=umHangingLookup(index,axis,2u);if(address!=UM_NO_SLOT){return bitcast<f32>(umHanging[address]);}}` : "";
@@ -82,7 +126,7 @@ fn umVelocityTap${width}(index:vec3i,axis:u32)->${type} {
  if(tileWidth==1u){
   var faceAnchor=anchor;faceAnchor[axis]=index[axis];
   return umLoadMixedFace(faceAnchor,axis);
- }${hangingGroup !== undefined ? `
+ }${hangingGroup !== undefined && hangingFine ? `
  {let address=umHangingLookup(index,axis,1u);if(address!=UM_NO_SLOT){return bitcast<f32>(umHanging[address]);}}` : ""}` : ""}
  let site=umVelocitySite(p,axis);
  ${coarser ? `if(site.interior||site.width>${width}u){${coarser}}` : ""}
@@ -104,8 +148,11 @@ fn umSampleVelocity${width}(p:vec3f,axis:u32)->${type} {
   }
   return umVelocitySum8(terms);
  }`:""}
- ${width===1?`let regularFine=umRegularFine||umTileMaximumWidth(umTileAt(vec3u(clamp(vec3i(floor(p)),vec3i(0),vec3i(UM_D)-1))/4u))==1u;`:""}
- for(var k=0u;k<select(umCounts.w,8u,umRegularFine);k++){
+ ${width===1?`let regularFine=umRegularFine||umTileMaximumWidth(umTileAt(vec3u(clamp(vec3i(floor(p)),vec3i(0),vec3i(UM_D)-1))/4u))==1u;
+ // Every tap of a sample whose tile stencil is all unit width is a stored
+ // unit face: the same eight weighted loads as below, with a constant bound.
+ if(!umRegularFine&&(regularFine||umUnitTaps(base))){return umSampleVelocityFine(p,axis);}`:""}
+ ${width===4&&coarseCache?"// Each cached 4h tap is one load: unroll the eight independent loads.\n ":""}for(var k=0u;k<${width===4&&coarseCache?"8u":"select(umCounts.w,8u,umRegularFine)"};k++){
   let bit=vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));
   let weights=select(vec3f(1.0)-fraction,fraction,bit==vec3i(1));let weight=weights.x*weights.y*weights.z;
   terms[k]=${zero};if(weight>0.0){
@@ -151,10 +198,21 @@ fn umSampleVelocityWeighted(p:vec3f,axis:u32,weights:vec2f)->${type} {
  if(coarse>0.0){value+=coarse*umSampleVelocity4(p,axis);}
  return value;
 }
+// A sample whose weights are (1,0) and whose fine taps are all stored unit
+// faces: exactly umSampleVelocityWeighted's value, classified once.
+fn umFineStencilSample(p:vec3f)->bool {
+ let q=clamp(p,vec3f(0),vec3f(UM_D));
+ let tile=umTileAt(vec3u(clamp(vec3i(floor(q/4.0)),vec3i(0),vec3i(UM_T)-1)));
+ return ${coarseCache?"(umTileSupport(tile)&1u)!=0u&&":""}umTileMaximumWidth(tile)==1u;
+}
 fn umSampleVelocityComponent(p:vec3f,axis:u32)->${type} {
+ if(!umRegularFine&&umFineStencilSample(p)){return umSampleVelocityFine(p,axis);}
  return umSampleVelocityWeighted(p,axis,umVelocitySamplingWeights(p));
 }
 fn umSampleVelocity(p:vec3f)->vec3f {
+ if(!umRegularFine&&umFineStencilSample(p)){
+  return vec3f(umSampleVelocityFine(p,0u)${payload ? ".x" : ""},umSampleVelocityFine(p,1u)${payload ? ".x" : ""},umSampleVelocityFine(p,2u)${payload ? ".x" : ""});
+ }
  let weights=umVelocitySamplingWeights(p);
  return vec3f(umSampleVelocityWeighted(p,0u,weights)${payload ? ".x" : ""},umSampleVelocityWeighted(p,1u,weights)${payload ? ".x" : ""},umSampleVelocityWeighted(p,2u,weights)${payload ? ".x" : ""});
 }

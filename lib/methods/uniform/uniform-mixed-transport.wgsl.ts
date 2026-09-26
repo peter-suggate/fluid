@@ -84,6 +84,19 @@ fn clearDonor(index:u32){for(var limb=0u;limb<6u;limb++){atomicStore(&rigidExcha
 // The native fused schedule: fallback joins round zero; donor division joins
 // the next row reader. Only the final gather consumes the last decoded sums.
 fn normalizeRow(r:Row,divide:bool){
+ if(r.count==9u){
+  // A two-cell-per-axis row (every unit row, and coarse rows sampled at
+  // their own width): the same three passes on register copies of its nine
+  // weights and donors, instead of re-reading edges and re-resolving owners.
+  var weights:array<f32,9>;var donors:array<u32,9>;var capacities:array<f32,9>;
+  for(var k=0u;k<9u;k++){weights[k]=bitcast<f32>(edges[r.address+1u+k]);let d=donorOf(r,k);donors[k]=d.index;capacities[k]=d.capacity;}
+  if(divide){for(var k=0u;k<9u;k++){weights[k]=weights[k]*capacities[k]/max(sums[donors[k]],1e-20);}}
+  else if(sums[r.index]==0.0){weights[8]=${solid?"select(f32(r.width*r.width*r.width),max(umRowCapacity(r),1e-6),r.width==1u)":"f32(r.width*r.width*r.width)"};}
+  var sum=0.0;for(var k=0u;k<9u;k++){sum+=weights[k];}
+  let scale=umRowCapacity(r)/max(sum,1e-20);
+  for(var k=0u;k<9u;k++){let weight=weights[k]*scale;edges[r.address+1u+k]=bitcast<u32>(weight);uvAddDonor(donors[k],weight);}
+  return;
+ }
  if(divide){${volumeNormalizeDonorsWGSL(expressions, "sums[donor]", "donorOf(r,k).capacity")}}
  else if(sums[r.index]==0.0){edges[r.address+r.count]=bitcast<u32>(${solid?"select(f32(r.width*r.width*r.width),max(umRowCapacity(r),1e-6),r.width==1u)":"f32(r.width*r.width*r.width)"});}
  ${volumeNormalizeRowsWGSL(expressions)}

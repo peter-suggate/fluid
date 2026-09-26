@@ -133,8 +133,10 @@ ${[0,1,2].map(axis=>/* wgsl */`
   let count=atomicLoad(&umSupport[4u*UM_TILES+list]);let base=4u*UM_TILES+list*4u;
   atomicStore(&umSupport[base],min(count,umDispatchX));atomicStore(&umSupport[base+1u],(count+umDispatchX-1u)/umDispatchX);atomicStore(&umSupport[base+2u],1u);
  }
- // umTileJobOwner's merged general-h/2h/4h tile launch.
- let merged=atomicLoad(&umSupport[4u*UM_TILES+2u])+umCounts.y+umCounts.z;let base=4u*UM_TILES+12u;
+ // umTileJobOwner's merged launch: general-h, seam 2h and seam 4h tiles,
+ // then the packed regular coarse owner jobs.
+ let coarse=8u*UM_TILES+20u;
+ let merged=umMergedTileJobs()+(8u*atomicLoad(&umSupport[coarse])+atomicLoad(&umSupport[coarse+1u])+63u)/64u;let base=4u*UM_TILES+12u;
  atomicStore(&umSupport[base],min(merged,umDispatchX));atomicStore(&umSupport[base+1u],(merged+umDispatchX-1u)/umDispatchX);atomicStore(&umSupport[base+2u],1u);
 }
 `});

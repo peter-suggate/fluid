@@ -45,10 +45,21 @@ fn umAllOwner(gid:vec3u)->UMOwner {
  let cells=64u/(width*width*width);let tile=umTopology[UM_TILES+offset+local/cells];let lane=local%cells;
  return UMOwner(tile,lane,width,(umTopology[tile]&0x3fffffffu)+lane);
 }
+// Slot s of the regular 2h owners (eight per tile), then the regular 4h
+// owners: tiles whose 3x3x3 stencil has one width, listed by the ownership.
+fn umRegularCoarseOwner(slot:u32)->UMOwner {
+ let base=8u*UM_TILES+20u;let twos=umSupport[base];
+ if(slot<8u*twos){let tile=umSupport[base+4u+slot/8u];let lane=slot%8u;return UMOwner(tile,lane,2u,(umTopology[tile]&0x3fffffffu)+lane);}
+ let job=slot-8u*twos;if(job>=umSupport[base+1u]){return UMOwner();}
+ let tile=umSupport[base+4u+twos+job];return UMOwner(tile,0u,4u,umTopology[tile]&0x3fffffffu);
+}
 fn umOwner(gid:vec3u)->UMOwner {
  let slot=gid.x+umDispatchX*64u*gid.y;
  if(umMergedTiles){
-  // 64 slots per merged tile job (see umTileJobOwner).
+  // 64 slots per merged tile job (see umTileJobOwner); then 64 regular
+  // coarse owners per packed job.
+  let tiles=umMergedTileJobs();
+  if(!umFusedJobs&&slot/64u>=tiles){return umRegularCoarseOwner(slot-64u*tiles);}
   var owner=umMergedTileJob(slot/64u);let lane=slot%64u;
   if(owner.width==0u||lane>=64u/(owner.width*owner.width*owner.width)){return UMOwner();}
   owner.lane=lane;owner.index+=lane;return owner;
@@ -100,16 +111,22 @@ fn umFusedOwner(group:vec3u,lane:u32,regular:bool)->UMOwner {
  return UMOwner(tile,lane,width,(umTopology[tile]&0x3fffffffu)+lane);
 }
 // One workgroup per tile. Merged launches take the certificate's general h
-// list, then every 2h and 4h tile, so their serial latencies overlap instead
-// of paying three dependent launches; otherwise the umCellWidth tier.
+// list, then every seam 2h and seam 4h tile, so their serial latencies overlap
+// instead of paying three dependent launches; otherwise the umCellWidth tier.
+// Jobs from umMergedTileJobs() on pack 64 regular coarse owners each
+// (umRegularCoarseOwner), one lane per owner as regular fine work runs.
+fn umMergedTileJobs()->u32 {
+ let header=7u*UM_TILES+16u;return umSupport[4u*UM_TILES+2u]+umSupport[header+1u]+umSupport[header+2u];
+}
 fn umMergedTileJob(index:u32)->UMOwner {
  if(umFusedJobs){return umFusedOwner(vec3u(index,0u,0u),0u,true);}
  var job=index;var tile=0u;var width=1u;let general=umSupport[4u*UM_TILES+2u];
+ let header=7u*UM_TILES+16u;let fine=umSupport[header];let two=umSupport[header+1u];
  if(job<general){tile=umSupport[6u*UM_TILES+16u+job];}
  else{
   job-=general;width=2u;
-  if(job<umCounts.y){tile=umTopology[UM_TILES+umCounts.x+job];}
-  else{job-=umCounts.y;width=4u;if(job>=umCounts.z){return UMOwner();}tile=umTopology[UM_TILES+umCounts.x+umCounts.y+job];}
+  if(job<two){tile=umSupport[header+4u+fine+job];}
+  else{job-=two;width=4u;if(job>=umSupport[header+2u]){return UMOwner();}tile=umSupport[header+4u+fine+two+job];}
  }
  return UMOwner(tile,0u,width,umTopology[tile]&0x3fffffffu);
 }

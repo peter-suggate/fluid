@@ -60,19 +60,45 @@ fn umClean(o:UMOwner)->f32{
  }
  if(!umOrphan||!(floor>0.0&&orphan>floor&&value>0.0&&value<orphan)){return value;}
  if(o.width==1u&&umCellOpen(origin)<0.99999){return value;}
+ var mass=0.0;
+ if(o.width==4u){
+  // A 4h footprint is exactly the 27 closed tile cubes around the owner's
+  // tile. Inside a 4h tile every vertex off the 4-lattice (hanging faces
+  // included: a 4h cell is their coarsest incident owner) interpolates that
+  // tile's corners with convex weights, so the minimum over the footprint is
+  // the minimum over 4h tile corners and every vertex of finer tiles.
+  // Clamped out-of-domain vertices land on domain faces these tiles span.
+  let center=vec3i(umTileCoord(o.tile));
+  for(var k=0u;k<27u;k++){
+   let t=center+vec3i(umCorner(k,3u))-vec3i(1);if(any(t<vec3i(0))||any(t>=vec3i(UM_T))){continue;}
+   let step=umTileWidth(umTileAt(vec3u(t)));let side=4u/step;
+   for(var v=0u;v<(side+1u)*(side+1u)*(side+1u);v++){
+    let p=vec3u(t)*4u+umCorner(v,side+1u)*step;
+    if(umVertexValue(p)<band){return value;}
+   }
+  }
+  // Integrate fill over the footprint's owners in fine-cell mass units.
+  for(var k=0u;k<27u;k++){
+   let t=center+vec3i(umCorner(k,3u))-vec3i(1);if(any(t<vec3i(0))||any(t>=vec3i(UM_T))){continue;}
+   let tile=umTileAt(vec3u(t));let step=umTileWidth(tile);let side=4u/step;
+   for(var lane=0u;lane<side*side*side;lane++){
+    let v=umVolume(UMOwner(tile,lane,step,0u));if(v>=0.05){return value;}mass+=f32(step*step*step)*max(v,0.0);
+   }
+  }
+ }else{
  // Protect the complete neighbouring footprint, including fine surface
  // vertices inside a coarse owner's neighbourhood and hanging samples.
  for(var z=-w;z<=2*w;z++){for(var y=-w;y<=2*w;y++){for(var x=-w;x<=2*w;x++){
   let p=clamp(origin+vec3i(x,y,z),vec3i(0),vec3i(UM_D));
   if(umVertexValue(vec3u(p))<band){return value;}
  }}}
- var mass=0.0;
  // Integrate fill over the 3w cubical footprint in fine-cell mass units.
  // Canonical lookup preserves partial overlaps at both kinds of interface.
  for(var z=-w;z<2*w;z++){for(var y=-w;y<2*w;y++){for(var x=-w;x<2*w;x++){
   let donor=umOwnerAt(origin+vec3i(x,y,z));if(donor.width==0u){continue;}
   let v=umVolume(donor);if(v>=0.05){return value;}mass+=max(v,0.0);
  }}}
+ }
  if(mass>=0.25*f32(o.width*o.width*o.width)){return value;}
  return umDiscard(o,value,orphan,10u);
 }

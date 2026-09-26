@@ -2,8 +2,9 @@ import {UniformMixedCleanup} from "./uniform-mixed-cleanup";
 import {nextUniformPressureCorrection} from "./uniform-pressure-continuation";
 import {UniformMixedFramePlan} from "./uniform-mixed-frame-plan";
 import {UniformMixedRemap} from "./uniform-mixed-remap";
-import {uniformMixedPressureLevel} from "./uniform-mixed-layout";
+import {mixedCellWidth,uniformMixedPressureLevel} from "./uniform-mixed-layout";
 import type {UniformMixedLayout} from "./uniform-mixed-layout";
+import type {UniformMixedBuiltLevel} from "./uniform-mixed-layout-builder";
 import type {UniformScratchArena} from "./uniform-scratch-arena";
 import type {WebGPUUniformPressureMultigrid} from "./webgpu-uniform-pressure-multigrid";
 import type {WebGPUUniformVelocityExtrapolator} from "./webgpu-uniform-velocity-extrapolation";
@@ -267,8 +268,24 @@ export class UniformMixedFrame {
   const clear=this.device.createCommandEncoder();
   for(const view of [this.levels[0]!.pressure,this.levels[0]!.phi!])clear.clearBuffer(view.buffer,view.offset??0,view.size);
   this.device.queue.submit([clear.finish()]);
-  this.levels[1]!.ownership.update(uniformMixedPressureLevel(layout,2));
-  this.levels[2]!.ownership.update(uniformMixedPressureLevel(layout,4));
+  // A level whose widths max(w,2) or max(w,4) did not change keeps its
+  // ownership generation; the 4h level never changes after construction.
+  for(const [level,minimum] of [[1,2],[2,4]] as const){
+   const ownership=this.levels[level]!.ownership,tiles=ownership.layout.tiles;
+   if(layout.tiles.some((word,t)=>Math.max(minimum,mixedCellWidth(word))!==mixedCellWidth(tiles[t]!)))ownership.update(uniformMixedPressureLevel(layout,minimum));
+  }
+ }
+ /** Adopt a GPU-built generation (UniformMixedLayoutBuilder): h ownership
+  * and its 2h pressure level. The 4h level never changes. One submit. */
+ adoptBuiltLayout(fine:UniformMixedBuiltLevel,two:UniformMixedBuiltLevel):void{
+  if(!this.ready||this.busy||this.failed)throw new Error("Ownership edits require a completed frame");
+  const encoder=this.device.createCommandEncoder({label:"Uniform adopt built ownership"});
+  if(fine.changedTiles){
+   this.remap.applyBuilt(encoder,fine);
+   for(const view of [this.levels[0]!.pressure,this.levels[0]!.phi!])encoder.clearBuffer(view.buffer,view.offset??0,view.size);
+  }
+  if(two.changedTiles)this.levels[1]!.ownership.adopt(encoder,two);
+  this.device.queue.submit([encoder.finish()]);
  }
  destroy():void{this.plan.destroy();this.remap.destroy();this.transport.destroy();for(const l of this.levels.slice(1))l.ownership.destroy();for(const r of this.owned)r.destroy();}
 }

@@ -11,7 +11,7 @@ import { uniformMixedPressureTransferWGSL, uniformMixedPressureSurfaceTransferWG
 import { uniformMixedPressureTopologyWGSL, type UniformMixedPressureTopology } from "./uniform-mixed-pressure-topology.wgsl";
 import { UNIFORM_MIXED_PRESSURE_RECORD_CHUNK, uniformMixedPressureRecordsSource } from "./uniform-mixed-pressure-records.wgsl";
 
-const recordEntries = ["buildRecords", "reconstructRecords", "freezeRecords", "smoothRecords", "residualRecords", "measureRecords"] as const;
+const recordEntries = ["buildRecords", "linkRecords", "reconstructRecords", "freezeRecords", "residualRecords", "measureRecords"] as const;
 type RecordEntry = typeof recordEntries[number];
 const entries = ["reconstruct", "freezeRhs", "residual", "addBackup", "saveBackup", "measure"] as const;
 export type UniformMixedPressureEntry = typeof entries[number];
@@ -76,7 +76,9 @@ export class UniformMixedPressureLevelStage {
   readonly allocatedBytes = 0;
   private readonly resources: GPUBindGroupLayout;
   private readonly pipelines = new Map<UniformMixedPressureEntry, GPUComputePipeline[]>();
+  /** Per Jacobi half: regular owners of every tier, then record rows (the first half freezes). */
   private regularSmoothPipelines:GPUComputePipeline[]=[];
+  private sweepRecordPipelines:GPUComputePipeline[]=[];
   private readonly recordPipelines=new Map<RecordEntry,GPUComputePipeline>();
   private readonly regularPipelines=new Map<"residual"|"measure",GPUComputePipeline[]>();
   private readonly jacobiGroups = new WeakMap<GPUBindGroup,GPUBindGroup>();
@@ -126,7 +128,6 @@ fn umFreezeOwner(o:UMOwner){if(o.width!=0u){frozen[o.index]=umPressureCorrectedR
 @compute @workgroup_size(64) fn residual(@builtin(global_invocation_id) gid:vec3u){
  let o=umOwner(gid);if(o.width!=0u){result[o.index]=${this.surface ? "select(0.0,rhs[o.index]-umPressureApply(o),umPressureLiquid(o))" : "rhs[o.index]-umPressureApply(o)"};${halo("let coefficient=select(umBoundaryCoefficient(o,axis,sign),0.0,umBoundaryOpen(axis,sign));result[halo]=rhs[halo]-coefficient*(pressures[halo]-umPressure(o));")}}
 }
-@compute @workgroup_size(64) fn smoothJacobi(@builtin(global_invocation_id) gid:vec3u){umSmoothOwner(umOwner(gid));}
 fn umSmoothOwner(o:UMOwner){
  if(o.width==0u){return;}
  let old=umPressure(o);let core=umPressureCoreTerms(o);
@@ -158,6 +159,17 @@ ${this.surface ? ` if(!umPressureLiquid(o)){
  // Float diagnostics use a maximal failure sentinel; WGSL rejects constant Inf.
  result[o.index]=select(3.402823e38,projected,finite&&projected>=0.0);
 }
+// A sweep half: regular owners per tier with the width a compile-time
+// constant (register-light, as throughput-bound grids need), then the fused
+// record rows; the first half's record launch also freezes the right-hand
+// side. All read the same iterate.
+override umSweepFreeze:bool=false;
+@compute @workgroup_size(64) fn smoothJacobi(@builtin(global_invocation_id) gid:vec3u){umSmoothOwner(umOwner(gid));}
+@compute @workgroup_size(64) fn sweepRecords(@builtin(global_invocation_id) gid:vec3u){
+ let at=umFusedRow(gid.x+umDispatchX*64u*gid.y);if(at.x==0xffffffffu){return;}
+ let r=umRecRow(vec3u(at.x,0u,0u),at.y);if(r.x==0xffffffffu){return;}
+ umRecSmooth(r.x,umRecEntries(r.y),umSweepFreeze);
+}
 @compute @workgroup_size(64) fn saveBackup(@builtin(global_invocation_id) gid:vec3u){
  let o=umOwner(gid);if(o.width!=0u){result[o.index]=pressures[o.index];${halo("result[halo]=pressures[halo];")}}
 }
@@ -169,11 +181,13 @@ ${this.surface ? ` if(!umPressureLiquid(o)){
     const compile = (entryPoint: string, width: number, seams = false, regular = false) => this.device.createComputePipelineAsync({ layout,
       compute: { module, entryPoint, constants: { umCellWidth: width, umDispatchX: owner.dispatchX, umInterfaceTiles:+seams,umRegularTiles:+regular } } });
     for (const entry of entries) this.pipelines.set(entry, await Promise.all([1, 2, 4].map(w => compile(entry, w))));
-    this.regularSmoothPipelines=await Promise.all([1,2,4].map(width=>compile("smoothJacobi",width,false,true)));
     for(const entry of ["residual","measure"] as const)this.regularPipelines.set(entry,await Promise.all([1,2,4].map(width=>compile(entry,width,false,true))));
     const recordLayout=this.device.createPipelineLayout({bindGroupLayouts:[owner.bindLayout,this.resources,owner.hangingLayout]});
     for(const entryPoint of recordEntries)this.recordPipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout:recordLayout,
       compute:{module,entryPoint,constants:{umDispatchX:owner.dispatchX}}}));
+    this.regularSmoothPipelines=await Promise.all([1,2,4].map(width=>compile("smoothJacobi",width,false,true)));
+    this.sweepRecordPipelines=await Promise.all([true,false].map(freeze=>this.device.createComputePipelineAsync({layout:recordLayout,
+      compute:{module,entryPoint:"sweepRecords",constants:{umDispatchX:owner.dispatchX,umSweepFreeze:+freeze}}})));
   }
   bind(fields: UniformMixedPressureFields): GPUBindGroup {
     const n = this.ownership.layout.cellCount, count=this.boundary?uniformMixedPressureStorage(this.ownership.layout).count:n;
@@ -213,7 +227,7 @@ ${this.surface ? ` if(!umPressureLiquid(o)){
     this.recordGroup=this.ownership.recordGroup(this.ownership.fusedJobs(true)*UNIFORM_MIXED_PRESSURE_RECORD_CHUNK*4);
     const pass=encoder.beginComputePass({label:"Uniform mixed pressure records"});
     pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);pass.setBindGroup(2,this.recordGroup!);
-    this.ownership.dispatchFused(pass,build,true);pass.end();
+    this.ownership.dispatchFusedRows(pass,build);this.ownership.dispatchFusedRows(pass,this.recordPipelines.get("linkRecords")!);pass.end();
     this.recordsFor=this.ownership.layout;
   }
   /** residual or measure: regular tiles through the regular operator, seam
@@ -236,13 +250,18 @@ ${this.surface ? ` if(!umPressureLiquid(o)){
     // every tier reads the same old iterate, preserving reflection symmetry.
     const pass = encoder.beginComputePass({ label: "Uniform mixed pressure sweep" });
     pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1, group); pass.setBindGroup(2,this.recordGroup!);
-    // Seam rows and small regular tiers gather their frozen linear records:
-    // one launch per step instead of re-walking canonical patches each sweep.
-    const fused=(entry:RecordEntry)=>this.ownership.dispatchFused(pass,this.recordPipelines.get(entry)!,true);
-    fused("reconstructRecords");fused("freezeRecords");
-    this.ownership.dispatchRegular(pass,this.regularSmoothPipelines,true);fused("smoothRecords");
-    pass.setBindGroup(1,this.jacobiGroups.get(group)!);
-    this.ownership.dispatchRegular(pass,this.regularSmoothPipelines,true);fused("smoothRecords");
+    // Seam rows and small regular tiers gather their frozen linear records.
+    // The first half evaluates each row's frozen seam correction from the
+    // old iterate (reconstruction and freeze composed through linked rows)
+    // and keeps it for the second half, so a sweep is two launches.
+    const dispatchX=this.ownership.dispatchX;
+    const launch=(pipeline:GPUComputePipeline,lanes:number)=>{const groups=Math.ceil(lanes/64);if(!groups)return;
+      pass.setPipeline(pipeline);pass.dispatchWorkgroups(Math.min(groups,dispatchX),Math.ceil(groups/dispatchX));};
+    for(const half of [0,1]){
+      if(half)pass.setBindGroup(1,this.jacobiGroups.get(group)!);
+      this.ownership.dispatchRegular(pass,this.regularSmoothPipelines,true);
+      launch(this.sweepRecordPipelines[half]!,this.ownership.fusedRows());
+    }
     pass.end();
   }
 }

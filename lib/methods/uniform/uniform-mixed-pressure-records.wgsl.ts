@@ -10,8 +10,10 @@
  *  0 flags (bit0 slope, bit1 liquid, bits 8.. core, 16.. correction, 24.. halo counts)
  *  1 owner index, 2 diagonal, 3 slope count,
  *  core (index, weight) x E, slope own xyz, slope (index, xyz) x E,
- *  correction own xyz, correction (index, xyz) x E, halo (index, coefficient) x 6.
+ *  correction own xyz, correction (index, xyz, neighbour row) x E, halo (index, coefficient) x 6.
  * E is 6 for h rows (all neighbours equal or coarser) and 24 otherwise.
+ * A correction neighbour lies across a width change, so its tile is a seam
+ * tile with its own row; linkRecords stores that row's base.
  */
 export const UNIFORM_MIXED_PRESSURE_RECORD_ROWS = 5632;
 export const UNIFORM_MIXED_PRESSURE_RECORD_CHUNK = 64 + UNIFORM_MIXED_PRESSURE_RECORD_ROWS;
@@ -35,13 +37,29 @@ fn umRecRow(group:vec3u,lane:u32)->vec2u {
  return vec2u(job*UM_REC_CHUNK+64u+lane*(UM_REC_ROWS/cells),width);
 }
 fn umCellCenter(o:UMOwner)->vec3f{return vec3f(umOrigin(o))+vec3f(0.5*f32(o.width));}
-@compute @workgroup_size(64) fn buildRecords(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let job=group.x+umDispatchX*group.y;if((job+1u)*UM_REC_CHUNK>arrayLength(&records)){return;}
- let o=umFusedOwner(group,lane,true);
+// Row r of the fused job set as (job, lane): jobs keep umFusedOwner's order
+// (seam tiles per tier, then small regular tiers), each with 64/w^3 rows.
+fn umFusedRow(row:u32)->vec2u {
+ let header=7u*UM_TILES+16u;var r=row;var job=0u;
+ for(var segment=0u;segment<6u;segment++){
+  let tier=segment%3u;var count=0u;
+  if(segment<3u){count=umSupport[header+tier];}else if(umFusedRegularTier(tier)){count=umCounts[tier];}
+  let rows=64u>>(3u*tier);
+  if(r<count*rows){return vec2u(job+r/rows,r%rows);}
+  r-=count*rows;job+=count;
+ }
+ return vec2u(0xffffffffu);
+}
+// One lane per record row (UniformMixedOwnership.fusedRows), so coarse jobs
+// do not hold a 64-lane workgroup for one or eight rows.
+@compute @workgroup_size(64) fn buildRecords(@builtin(global_invocation_id) gid:vec3u){
+ let at=umFusedRow(gid.x+umDispatchX*64u*gid.y);let job=at.x;let lane=at.y;
+ if(job==0xffffffffu||(job+1u)*UM_REC_CHUNK>arrayLength(&records)){return;}
+ let o=umFusedOwner(vec3u(job,0u,0u),lane,true);
  if(lane==0u){records[job*UM_REC_CHUNK]=o.width;}
  if(o.width==0u){return;}
  let cells=64u/(o.width*o.width*o.width);let row=job*UM_REC_CHUNK+64u+lane*(UM_REC_ROWS/cells);let E=umRecEntries(o.width);
- let coreAt=row+4u;let slopeOwnAt=coreAt+2u*E;let slopeAt=slopeOwnAt+3u;let correctionOwnAt=slopeAt+4u*E;let correctionAt=correctionOwnAt+3u;let haloAt=correctionAt+4u*E;
+ let coreAt=row+4u;let slopeOwnAt=coreAt+2u*E;let slopeAt=slopeOwnAt+3u;let correctionOwnAt=slopeAt+4u*E;let correctionAt=correctionOwnAt+3u;let haloAt=correctionAt+5u*E;
  let liquid=${liquid("o")};let regular=umPressureRegular(o);
  var diagonal=0.0;var core=0u;var halos=0u;
  ${boundary ? `for(var axis=0u;axis<3u;axis++){for(var side=0u;side<2u;side++){
@@ -122,21 +140,42 @@ fn umCellCenter(o:UMOwner)->vec3f{return vec3f(umOrigin(o))+vec3f(0.5*f32(o.widt
    ${surface ? `if(!umPressureLiquid(n)){var delta=(umCellCenter(n)-umCellCenter(o))*UM_H;delta[axis]=0.0;correctionOwn-=scale*delta;continue;}` : ""}
    if(o.width>n.width){var offset=(umFaceCenter(face)-umCellCenter(o))*UM_H;offset[axis]=0.0;correctionOwn-=scale*offset;}
    else{var offset=(umFaceCenter(face)-umCellCenter(n))*UM_H;offset[axis]=0.0;
-    records[correctionAt+4u*corrections]=n.index;umRecStore3(correctionAt+4u*corrections+1u,scale*offset);corrections++;}
+    records[correctionAt+5u*corrections]=n.index;umRecStore3(correctionAt+5u*corrections+1u,scale*offset);corrections++;}
   }
  }}}
  records[row]=select(0u,1u,needed)|select(0u,2u,liquid)|(core<<8u)|(corrections<<16u)|(halos<<24u);
  records[row+1u]=o.index;umRecStore(row+2u,diagonal);records[row+3u]=slopeCount;
+ // Owner -> row for linkRecords. Slopes are scratch until the next reconstruction.
+ slopes[o.index]=vec4f(0.0,0.0,0.0,bitcast<f32>(row));
  umRecStore3(slopeOwnAt,slopeOwn);umRecStore3(correctionOwnAt,correctionOwn);
 }
-@compute @workgroup_size(64) fn reconstructRecords(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let r=umRecRow(group,lane);if(r.x==0xffffffffu){return;}let row=r.x;let E=umRecEntries(r.y);
- let index=records[row+1u];var slope=vec3f(0.0);
+@compute @workgroup_size(64) fn linkRecords(@builtin(global_invocation_id) gid:vec3u){
+ let at=umFusedRow(gid.x+umDispatchX*64u*gid.y);if(at.x==0xffffffffu){return;}
+ let r=umRecRow(vec3u(at.x,0u,0u),at.y);if(r.x==0xffffffffu){return;}let row=r.x;let E=umRecEntries(r.y);
+ let first=row+10u+6u*E;
+ for(var k=0u;k<((records[row]>>16u)&0xffu);k++){records[first+5u*k+4u]=bitcast<u32>(slopes[records[first+5u*k]].w);}
+}
+// umReconstructPressureSlope of a record row at the pressures binding.
+fn umRecSlope(row:u32,E:u32)->vec3f {
+ var slope=vec3f(0.0);
  if((records[row]&1u)!=0u){
-  let slopeAt=row+7u+2u*E;slope=umRecLoad3(slopeAt-3u)*pressures[index];
+  let slopeAt=row+7u+2u*E;slope=umRecLoad3(slopeAt-3u)*pressures[records[row+1u]];
   for(var k=0u;k<records[row+3u];k++){slope+=umRecLoad3(slopeAt+4u*k+1u)*pressures[records[slopeAt+4u*k]];}
  }
- slopes[index]=vec4f(slope,0.0);
+ return slope;
+}
+fn umRecRowEntries(row:u32)->u32{return umRecEntries(records[(row/UM_REC_CHUNK)*UM_REC_CHUNK]);}
+@compute @workgroup_size(64) fn reconstructRecords(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ let r=umRecRow(group,lane);if(r.x==0xffffffffu){return;}let row=r.x;let E=umRecEntries(r.y);
+ slopes[records[row+1u]]=vec4f(umRecSlope(row,E),0.0);
+}
+// freezeRecords from the rows alone: the seam correction of the slopes
+// reconstructed at the pressures binding, own and neighbour rows alike.
+fn umRecFrozen(row:u32,E:u32,flags:u32,index:u32)->f32 {
+ if((flags&2u)==0u){return 0.0;}
+ let ownAt=row+7u+6u*E;let at=ownAt+3u;var correction=dot(umRecLoad3(ownAt),umRecSlope(row,E));
+ for(var k=0u;k<((flags>>16u)&0xffu);k++){let n=records[at+5u*k+4u];correction+=dot(umRecLoad3(at+5u*k+1u),umRecSlope(n,umRecRowEntries(n)));}
+ return rhs[index]+correction;
 }
 @compute @workgroup_size(64) fn freezeRecords(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let r=umRecRow(group,lane);if(r.x==0xffffffffu){return;}let row=r.x;let E=umRecEntries(r.y);
@@ -144,11 +183,11 @@ fn umCellCenter(o:UMOwner)->vec3f{return vec3f(umOrigin(o))+vec3f(0.5*f32(o.widt
  var b=0.0;
  if((flags&2u)!=0u){
   let ownAt=row+7u+6u*E;let at=ownAt+3u;var correction=dot(umRecLoad3(ownAt),slopes[index].xyz);
-  for(var k=0u;k<((flags>>16u)&0xffu);k++){correction+=dot(umRecLoad3(at+4u*k+1u),slopes[records[at+4u*k]].xyz);}
+  for(var k=0u;k<((flags>>16u)&0xffu);k++){correction+=dot(umRecLoad3(at+5u*k+1u),slopes[records[at+5u*k]].xyz);}
   b=rhs[index]+correction;
  }
  frozen[index]=b;
- let haloAt=row+10u+10u*E;for(var k=0u;k<(flags>>24u);k++){let halo=records[haloAt+2u*k];frozen[halo]=rhs[halo];}
+ let haloAt=row+10u+11u*E;for(var k=0u;k<(flags>>24u);k++){let halo=records[haloAt+2u*k];frozen[halo]=rhs[halo];}
 }
 // rhs - A p for a record row after freezeRecords: A p = diag p - core - seam
 // correction. Neighbour differences keep the near-converged sum well scaled.
@@ -162,7 +201,7 @@ fn umRecResidual(row:u32,flags:u32,index:u32)->f32 {
  let r=umRecRow(group,lane);if(r.x==0xffffffffu){return;}let row=r.x;let E=umRecEntries(r.y);
  let flags=records[row];let index=records[row+1u];
  result[index]=umRecResidual(row,flags,index);
- ${boundary ? `let haloAt=row+10u+10u*E;for(var k=0u;k<(flags>>24u);k++){
+ ${boundary ? `let haloAt=row+10u+11u*E;for(var k=0u;k<(flags>>24u);k++){
   let halo=records[haloAt+2u*k];result[halo]=rhs[halo]-umRecLoad(haloAt+2u*k+1u)*(pressures[halo]-pressures[index]);
  }` : ""}
 }
@@ -175,24 +214,29 @@ fn umRecProjected(r:f32,p:f32,low:f32,diagonal:f32)->f32 {
 @compute @workgroup_size(64) fn measureRecords(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let r=umRecRow(group,lane);if(r.x==0xffffffffu){return;}let row=r.x;let E=umRecEntries(r.y);
  let flags=records[row];let index=records[row+1u];let p=pressures[index];
- ${boundary ? `let haloAt=row+10u+10u*E;for(var k=0u;k<(flags>>24u);k++){
+ ${boundary ? `let haloAt=row+10u+11u*E;for(var k=0u;k<(flags>>24u);k++){
   let halo=records[haloAt+2u*k];let coefficient=umRecLoad(haloAt+2u*k+1u);
   result[halo]=umRecProjected(rhs[halo]-coefficient*(pressures[halo]-p),pressures[halo],minimum[halo],coefficient);
  }` : ""}
  ${surface ? `if((flags&2u)==0u){result[index]=select(0.0,3.402823e38,(bitcast<u32>(p)&0x7f800000u)==0x7f800000u);return;}` : ""}
  result[index]=umRecProjected(umRecResidual(row,flags,index),p,${constrained ? "minimum[index]" : "-3.402823e38"},umRecLoad(row+2u));
 }
-@compute @workgroup_size(64) fn smoothRecords(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let r=umRecRow(group,lane);if(r.x==0xffffffffu){return;}let row=r.x;let E=umRecEntries(r.y);
+// One projected Jacobi update of a record row. With freeze (the first half
+// of a sweep) the frozen right side is evaluated here from the old iterate
+// and kept for the second half.
+fn umRecSmooth(row:u32,E:u32,freeze:bool){
  let flags=records[row];let index=records[row+1u];let diagonal=umRecLoad(row+2u);
  let old=pressures[index];var next=old;
+ var b=0.0;
+ if(freeze){b=umRecFrozen(row,E,flags,index);frozen[index]=b;${boundary ? "let haloAt=row+10u+11u*E;for(var k=0u;k<(flags>>24u);k++){let halo=records[haloAt+2u*k];frozen[halo]=rhs[halo];}" : ""}}
+ else{b=frozen[index];}
  if(diagonal>0.0){
-  var sum=frozen[index];
+  var sum=b;
   for(var k=0u;k<((flags>>8u)&0xffu);k++){sum+=umRecLoad(row+5u+2u*k)*pressures[records[row+4u+2u*k]];}
   next=mix(old,sum/diagonal,0.6666667);
  }
  result[index]=${constrained ? "max(next,minimum[index])" : "next"};
- ${boundary ? `let haloAt=row+10u+10u*E;for(var k=0u;k<(flags>>24u);k++){
+ ${boundary ? `let haloAt=row+10u+11u*E;for(var k=0u;k<(flags>>24u);k++){
   let halo=records[haloAt+2u*k];let coefficient=umRecLoad(haloAt+2u*k+1u);
   let value=select(pressures[halo],mix(pressures[halo],old+rhs[halo]/coefficient,0.6666667),coefficient>0.0);
   result[halo]=max(value,minimum[halo]);

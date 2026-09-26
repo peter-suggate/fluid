@@ -2,6 +2,14 @@ import {uniformMixedFacesWGSL} from "./uniform-mixed-faces.wgsl";
 import {uniformMixedVelocitySamplingWGSL} from "./uniform-mixed-velocity-sampling.wgsl";
 import { uniformMixedVertexSamplingWGSL } from "./uniform-mixed-vertex-sampling.wgsl";
 
+/** Every eight-tap loop in a presentation copy of the samplers runs to an
+ * opaque bound. With literal bounds Metal unrolls the nested reconstruction
+ * at every call site, and a consumer that samples from many sites (the grid
+ * overlay) never finishes compiling its pipeline. */
+function uniformMixedPresentationLoops(source:string):string{
+ return source.replace(/\bumCounts\.w\b/g,"umPresentationLoopBound()").replace(/;k<8u;/g,";k<umPresentationLoopBound();");
+}
+
 /** Read-only consumer of the same packed ownership and canonical vertices as
  * simulation. Dimensions come from the consumer's existing texture/uniform.
  * A one-word dummy disables mixed sampling for other methods. */
@@ -13,6 +21,11 @@ fn umDimensions()->vec3u{return ${dimensions};}
 fn umTileDimensions()->vec3u{return umDimensions()/4u;}
 fn umTileCount()->u32{let d=umTileDimensions();return d.x*d.y*d.z;}
 fn umPresentationEnabled()->bool{return arrayLength(&umTopology)>1u;}
+// The samplers' eight-tap loop bound, opaque to the compiler. A literal 8u
+// lets Metal unroll every nested reconstruction at every call site; the
+// grid overlay, which samples from many sites, then never finishes compiling.
+// Ownership is always longer than eight words when bound, so this is 8.
+fn umPresentationLoopBound()->u32{return min(arrayLength(&umTopology),8u);}
 fn umTileWidth(t:u32)->u32{let word=umTopology[t];return select(select(4u,2u,(word&0x40000000u)!=0u),1u,(word&0x80000000u)!=0u);}
 fn umTileStencil(t:u32)->vec2u{return vec2u(umTopology[2u*umTileCount()+2u*t],umTopology[2u*umTileCount()+2u*t+1u]);}
 fn umTileMaximumWidth(t:u32)->u32{return umTileStencil(t).x>>27u;}
@@ -29,15 +42,17 @@ fn umOwnerAt(p:vec3i)->UMOwner{
 fn umOrigin(o:UMOwner)->vec3u{return umTileCoord(o.tile)*4u+umCorner(o.lane,4u/o.width)*o.width;}
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(${phi},vec3i(p),0).x;}
 `;
- const source=topology+uniformMixedVertexSamplingWGSL.replace(/\bumCounts.w\b/g,"8u").replace(/\bUM_D\b/g,"umDimensions()").replace(/\bUM_T\b/g,"umTileDimensions()");
+ const source=topology+uniformMixedPresentationLoops(uniformMixedVertexSamplingWGSL).replace(/\bUM_D\b/g,"umDimensions()").replace(/\bUM_T\b/g,"umTileDimensions()");
  return existingTopology?source.replace(/@group\(0\) @binding\(\d+\) var<storage,read> umTopology:array<u32>;/,"").replace(/\bumTopology\b/g,existingTopology):source;
 }
 
 /** Uses exactly the simulation interpolation on read-only presentation fields.
- * The consumer supplies umLoadMixedFace, including negative boundary planes. */
+ * The consumer supplies umLoadMixedFace, including negative boundary planes,
+ * and includes uniformMixedPresentationWGSL (for umPresentationLoopBound). */
 export function uniformMixedPresentationVelocityWGSL():string{
  const faces=uniformMixedFacesWGSL.slice(0,uniformMixedFacesWGSL.indexOf("fn umOwnerAt("))
   +uniformMixedFacesWGSL.slice(uniformMixedFacesWGSL.indexOf("fn umFace("));
- return (faces+uniformMixedVelocitySamplingWGSL).replace(/\bUM_D\b/g,"umDimensions()")
-  .replace(/\bUM_T\b/g,"umTileDimensions()").replace(/\bumCounts.w\b/g,"8u");
+ const sampling=(faces+uniformMixedVelocitySamplingWGSL).replace(/\bUM_D\b/g,"umDimensions()")
+  .replace(/\bUM_T\b/g,"umTileDimensions()");
+ return uniformMixedPresentationLoops(sampling);
 }

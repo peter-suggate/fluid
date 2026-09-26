@@ -1,7 +1,7 @@
 import {uniformMixedSourceWGSL} from "./uniform-mixed-source.wgsl";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
-import { uniformMixedVertexSamplingWGSL } from "./uniform-mixed-vertex-sampling.wgsl";
+import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-sampling.wgsl";
 import { uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sampling.wgsl";
 import { uniformMixedFaceAddressWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
@@ -74,7 +74,10 @@ struct Params {hDt:vec4f,flags:vec4u}
 ${this.sourceParams?uniformMixedSourceWGSL(9):""}
 ${uniformMixedFaceAddressWGSL}
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
-${uniformMixedVertexSamplingWGSL}
+${this.hanging?/* wgsl */`// vertexCache fills each slotted tile's reconstructed vertices once per
+// vertex pass from this pass's phi; every other entry reads them back.
+override umVertexCacheFill:bool=false;`:""}
+${uniformMixedVertexSamplingSource(this.hanging?/* wgsl */`if(!umVertexCacheFill){let slot=umHanging[tile];if(slot!=UM_NO_SLOT){return bitcast<f32>(umHanging[umHangingVertexAddress(slot,p-umTileCoord(tile)*4u)]);}}`:"")}
 fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32{
  if(anchor[axis]<0){return negative[umNegativeBoundaryIndex(vec3u(max(anchor,vec3i(0))),axis)];}
  return textureLoad(velocity,anchor,0)[axis];
@@ -251,12 +254,15 @@ fn umAdvected(p:vec3f,width:u32)->f32{
  value=umReleasedWalls(p,${this.solid?"umEmbeddedAir(p,umEmbeddedContact(p,umWallContact(p,value,width)))":"umWallContact(p,value,width)"});
  if(params.flags.z!=0u){value=umDrain(q,value,width);}return ${this.sourceParams?"umSourceuvSourcePhi(p,value)":"value"};
 }
+// Six samples through one sampler call site: low then high per axis. The
+// uniform bound (umCounts.w-2 = 6) keeps Metal from cloning the general sampler.
 fn umSurfaceGradient(p:vec3f,width:f32)->vec3f{
- var g=vec3f(0);
- for(var axis=0u;axis<3u;axis++){
-  var delta=vec3f(0);delta[axis]=0.25*width;
+ var g=vec3f(0);var lowValue=0.0;
+ for(var k=0u;k<select(umCounts.w-2u,6u,umRegularFine);k++){
+  let axis=k/2u;var delta=vec3f(0);delta[axis]=0.25*width;
   let low=clamp(p-delta,vec3f(0),vec3f(UM_D));let high=clamp(p+delta,vec3f(0),vec3f(UM_D));
-  g[axis]=(umSampleVertex(high)-umSampleVertex(low))/max(high[axis]-low[axis],1e-6);
+  let value=umSampleVertex(select(low,high,(k&1u)!=0u));
+  if((k&1u)==0u){lowValue=value;}else{g[axis]=(value-lowValue)/max(high[axis]-low[axis],1e-6);}
  }return g;
 }
 @compute @workgroup_size(64) fn retirementEvidence(@builtin(global_invocation_id) gid:vec3u){
@@ -296,13 +302,16 @@ fn umRebuilt(p:vec3f,width:u32)->f32{
  let initial=umSampleVertex(p);let h=params.hDt.xyz;let w=f32(width);let band=4.0*w*max(h.x,max(h.y,h.z));
  var value=initial;
  if(abs(initial)>1e-8&&abs(initial)<band${this.solid?"&&!umBuried(p)":""}){
-  var q=p;
+  // phi(q) is carried across iterations: the sampler is a pure function of
+  // q, so each accepted step reuses the value that justified it.
+  var q=p;var phiQ=initial;
   for(var i=0u;i<umCounts.w;i++){
    let g=umSurfaceGradient(q,w);let norm=dot(g/h,g/h);if(norm<1e-16){break;}
-   let next=clamp(q-clamp(umSampleVertex(q)*g/(h*h*norm),vec3f(-2.0*w),vec3f(2.0*w)),max(vec3f(0),p-vec3f(4.0*w)),min(vec3f(UM_D),p+vec3f(4.0*w)));
-   if(abs(umSampleVertex(next))>=abs(umSampleVertex(q))){break;}q=next;
+   let next=clamp(q-clamp(phiQ*g/(h*h*norm),vec3f(-2.0*w),vec3f(2.0*w)),max(vec3f(0),p-vec3f(4.0*w)),min(vec3f(UM_D),p+vec3f(4.0*w)));
+   let phiNext=umSampleVertex(next);
+   if(abs(phiNext)>=abs(phiQ)){break;}q=next;phiQ=phiNext;
   }
-  let found=abs(umSampleVertex(q))<0.005*w*min(h.x,min(h.y,h.z));
+  let found=abs(phiQ)<0.005*w*min(h.x,min(h.y,h.z));
   if(found){value=sign(initial)*length((p-q)*h);}
   else if(params.flags.z!=0u&&initial>0.0&&value<band&&umNoNearbySurface(p,band)){value=band;}
  }
@@ -311,12 +320,30 @@ fn umRebuilt(p:vec3f,width:u32)->f32{
 ${["advect","redistance"].map(entry=>/* wgsl */`
 // A tile has at most 5^3 candidate vertices. Give each canonical vertex
 // its own lane instead of tracing up to eight corners serially per owner.
+// Packed merged jobs run 64 regular coarse owners, one lane each, with the
+// vertices ${entry}Owners gives a regular owner. One evaluation call site.
 @compute @workgroup_size(125) fn ${entry}(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let first=umTileJobOwner(group);if(first.width==0u){return;}let width=first.width;
- let local=umCorner(lane,5u);if(any(local%width!=vec3u(0))){return;}
- let vertex=umTileCoord(first.tile)*4u+local;let owner=umVertexAuthority(vertex);
- if(owner.tile!=first.tile||!umVertexIsCanonical(vertex,owner)){return;}
- textureStore(outputPhi,vec3i(vertex),vec4f(${entry==="advect"?"umAdvected":"umRebuilt"}(vec3f(vertex),width)));
+ let job=group.x+umDispatchX*group.y;let tiles=umMergedTileJobs();
+ let packed=umMergedTiles&&!umFusedJobs&&job>=tiles;
+ var owner=UMOwner();var first=7u;var tileVertex=vec3u(0);
+ if(!packed){
+  let tileOwner=umTileJobOwner(group);if(tileOwner.width==0u){return;}
+  let local=umCorner(lane,5u);if(any(local%tileOwner.width!=vec3u(0))){return;}
+  tileVertex=umTileCoord(tileOwner.tile)*4u+local;let authority=umVertexAuthority(tileVertex);
+  if(authority.tile!=tileOwner.tile||!umVertexIsCanonical(tileVertex,authority)){return;}
+  owner=tileOwner;
+ }else{
+  if(lane>=64u){return;}owner=umRegularCoarseOwner((job-tiles)*64u+lane);if(owner.width==0u){return;}
+  // Owners on a negative domain wall also own their corners on that wall.
+  if(any(umOrigin(owner)==vec3u(0))){first=0u;}
+ }
+ let origin=umOrigin(owner);
+ for(var k=first;k<8u;k++){
+  let corner=umCorner(k,2u);
+  if(packed&&!all((corner!=vec3u(0))|(origin==vec3u(0)))){continue;}
+  let vertex=select(tileVertex,origin+corner*owner.width,packed);
+  textureStore(outputPhi,vec3i(vertex),vec4f(${entry==="advect"?"umAdvected":"umRebuilt"}(vec3f(vertex),owner.width)));
+ }
 }
 @compute @workgroup_size(64) fn ${entry}Owners(@builtin(global_invocation_id) gid:vec3u){
  let owner=umOwner(gid);if(owner.width==0u){return;}
@@ -338,6 +365,15 @@ ${["advect","redistance"].map(entry=>/* wgsl */`
   if(owned){textureStore(outputPhi,vec3i(vertex),vec4f(${entry==="advect"?"umAdvected":"umRebuilt"}(vec3f(vertex),owner.width)));}
  }
 }`).join("\n")}
+${this.hanging?/* wgsl */`
+@compute @workgroup_size(125) fn vertexCache(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ let slot=group.x+umDispatchX*group.y;if(slot>=UM_TILES){return;}
+ let tile=umHanging[UM_TILES+slot];if(tile==UM_NO_SLOT){return;}
+ // Local 4 belongs to this tile only on the upper domain face.
+ let local=umCorner(lane,5u);let p=umTileCoord(tile)*4u+local;
+ if(any((local==vec3u(4u))&(p!=UM_D))){return;}
+ umHanging[umHangingVertexAddress(slot,local)]=bitcast<u32>(umVertexValue(p));
+}`:""}
 fn umTraceCell(owner:UMOwner){
  let origin=umOrigin(owner);textureStore(departures,vec3i(origin),vec4f(umTrace(vec3f(origin)+vec3f(0.5*f32(owner.width))),0));
 }
@@ -348,6 +384,7 @@ fn umTraceCell(owner:UMOwner){
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
     if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.bindLayout]:[]),...(this.hanging?[this.ownership.hangingLayout]:[])]});
+    if(this.hanging)this.pipelines.set("vertexCache",await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"vertexCache",constants:{umVertexCacheFill:1,umDispatchX:this.ownership.dispatchX}}}));
     this.pipelines.set("retirementEvidence",await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"retirementEvidence",constants:{umDispatchX:this.ownership.dispatchX}}}));
     for(const entry of ["advect","redistance","traceCells"])
       this.pipelines.set(entry,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:entry,constants:{umMergedTiles:1,umDispatchX:this.ownership.dispatchX}}}));
@@ -356,6 +393,11 @@ fn umTraceCell(owner:UMOwner){
   encode(encoder:GPUCommandEncoder,entry:"advect"|"redistance"|"traceCells",group:GPUBindGroup):void{
     const pipeline=this.pipelines.get(entry);if(!pipeline)throw new Error("Mixed surface stage is not initialized");
     const pass=encoder.beginComputePass({label:`Uniform mixed surface ${entry}`});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);if(this.hanging)pass.setBindGroup(this.solid?3:2,this.ownership.hangingGroup);
+    const slots=this.ownership.hangingSlots;
+    if(this.hanging&&entry!=="traceCells"&&slots){
+      pass.setPipeline(this.pipelines.get("vertexCache")!);
+      pass.dispatchWorkgroups(Math.min(slots,this.ownership.dispatchX),Math.ceil(slots/this.ownership.dispatchX));
+    }
     if(entry==="redistance"){
       const groups=Math.ceil(this.ownership.layout.tiles.length/64);
       pass.setPipeline(this.pipelines.get("retirementEvidence")!);

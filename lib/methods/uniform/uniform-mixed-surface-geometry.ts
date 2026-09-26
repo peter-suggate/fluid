@@ -39,9 +39,13 @@ ${uniformVolumeTargetWGSL(true,true)}
 ${uniformMixedSolidWGSL(this.solid?2:undefined)}
 @compute @workgroup_size(64) fn geometry(@builtin(global_invocation_id) gid:vec3u){
  let owner=umAllOwner(gid);if(owner.width==0u){return;}let origin=umOrigin(owner);
+ var vertices:array<f32,8>;var centre:array<f32,8>;
+ for(var j=0u;j<8u;j++){vertices[j]=umVertexValue(origin+vec3u(uvCorner(j))*owner.width);centre[j]=vertices[j]*0.125;}
  // Native uvTarget scales by the open fraction; coarse owners are uncut.
- textureStore(targetFill,vec3i(origin),vec4f(umSurfaceTarget(owner)*select(1.0,umCellOpen(vec3i(origin)),owner.width==1u)));
- textureStore(centerPhi,vec3i(origin),vec4f(umSampleVertex(vec3f(origin)+vec3f(0.5*f32(owner.width)))));
+ textureStore(targetFill,vec3i(origin),vec4f(umSurfaceTarget(owner,vertices)*select(1.0,umCellOpen(vec3i(origin)),owner.width==1u)));
+ // umSampleVertex at the owner centre: all eight weights are exactly 1/8 of
+ // these same corner values (stored, or reconstructed where hanging).
+ textureStore(centerPhi,vec3i(origin),vec4f(d4Sum8(centre)));
 }`});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     this.pipeline=await this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.bindLayout]:[])]}),compute:{module,entryPoint:"geometry",constants:{umDispatchX:this.ownership.dispatchX}}});

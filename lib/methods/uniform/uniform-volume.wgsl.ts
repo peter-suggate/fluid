@@ -71,13 +71,14 @@ const tileReach = uniformAbOn("tilereach");
 const drySolids = uniformAbOn("drysolids");
 /** Same reconstruction; cached mode reuses the cell's eight vertex loads. */
 export function uniformVolumeTargetWGSL(cached: boolean, mixed = false): string {
-  return /* wgsl */ `${mixed ? "fn umSurfaceTarget(owner:UMOwner)->f32" : "fn uvTarget(id:vec3i)->f32"}{
+  // The mixed variant takes the owner's eight corner values from its caller.
+  return /* wgsl */ `${mixed ? "fn umSurfaceTarget(owner:UMOwner,vertices:array<f32,8>)->f32" : "fn uvTarget(id:vec3i)->f32"}{
   var samples:array<f32,8>;var centre=0.0;var fill=0.0;var magnitude=0.0;
   ${cached ? `// All eight quarter-cell probes interpolate the same eight vertices.
   // uvTarget is called only for valid cells, so each probe's clamped base is
   // exactly id and its fractions are exactly 1/4 or 3/4 in binary FP32.
-  var vertices:array<f32,8>;
-  for(var j=0u;j<8u;j++){vertices[j]=${mixed ? "umVertexValue(umOrigin(owner)+vec3u(uvCorner(j))*owner.width)" : "textureLoad(uvPhiIn,id+uvCorner(j),0).x"};}
+  ${mixed ? "" : `var vertices:array<f32,8>;
+  for(var j=0u;j<8u;j++){vertices[j]=textureLoad(uvPhiIn,id+uvCorner(j),0).x;}`}
   for(var k=0u;k<8u;k++){
     let f=vec3f(0.25)+0.5*vec3f(uvCorner(k));var weighted:array<f32,8>;
     for(var j=0u;j<8u;j++){let w=select(vec3f(1)-f,f,uvCorner(j)==vec3i(1));
