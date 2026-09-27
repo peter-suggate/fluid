@@ -143,7 +143,7 @@ import {
 } from "../../../core/cooperative-build";
 import { PassBroker } from "../../../core/webgpu-pass-broker";
 import { backdropSeamForScene, compileBackdropField } from "../backdrop/backdrop-field";
-import { BACKDROP_CONTENT_CEILING_HEADER_WORDS, BACKDROP_TERRAIN_HEADER_WORDS, BACKDROP_TERRAIN_TABLE, createBackdropContentCeiling, packBackdropTerrainTable, planBackdropTiles, raiseBackdropContentCeiling, type BackdropContentCeiling } from "../backdrop/backdrop-terrain-tiles";
+import { BACKDROP_CONTENT_CEILING_HEADER_WORDS, BACKDROP_CONTENT_CEILING_TILE_CELLS, BACKDROP_CONTENT_CEILING_TILES, BACKDROP_TERRAIN_HEADER_WORDS, BACKDROP_TERRAIN_TABLE, createBackdropContentCeiling, packBackdropTerrainTable, packContentCeilingTable, planBackdropTiles, raiseBackdropContentCeiling, type BackdropContentCeiling } from "../backdrop/backdrop-terrain-tiles";
 import {
   backdropDetailCentreLattice,
   backdropDetailFromPlan,
@@ -1866,26 +1866,36 @@ export class OctreeSparseBrickWorld {
         return verdict;
       } : undefined,
     });
-    // The backdrop's level-0 voxels continue the set's own terrain lattice
-    // (the scene cell, before any environment refinement) from the same origin.
     // Every node-mip page lies under a leaf, so the leaf boxes bound the
-    // content each column can hold (see `BackdropContentCeiling`).
-    if (backdropField && backdropTilePlan) {
+    // content each column can hold (see `BackdropContentCeiling`). Built for
+    // every world: sun cones stop at it whether or not there is a backdrop.
+    {
       const worldEdge = refinedBrickDimensions.map((count, axis) => count * refinedBrickEdge[axis]!);
       const ceiling = createBackdropContentCeiling([worldOrigin[0], worldOrigin[2]], [worldEdge[0]!, worldEdge[2]!]);
+      const planarTops = new Map(planarLeafOptions.sources.map((source) => [source.sourceIndex, source.bounds_m.maximum[1]]));
       for (const leaf of plan.leaves) {
         const node = plan.nodes[leaf.nodeIndex]!;
         const scale = 2 ** (maximumDepth - node.level);
         const coordinate = [node.coordinate.x, node.coordinate.y, node.coordinate.z];
+        const maximum = coordinate.map((value, axis) => worldOrigin[axis]! + (value + 1) * refinedBrickEdge[axis]! * scale);
+        // A planar terminal holds its one source and nothing else, so its
+        // content stops at that source's top, not at the leaf box's: a coarse
+        // floor leaf is most of a metre of empty air over the floor. One of
+        // the leaf's own voxels above that top covers its pages' smear.
+        const planarTop = leaf.terminalKind === SPARSE_BRICK_LEAF_TERMINAL.planarBoundary
+          ? planarTops.get(leaf.terminalIndex) : undefined;
+        if (planarTop !== undefined) {
+          maximum[1] = Math.min(maximum[1]!, planarTop + refinedBrickEdge[1]! * scale / brickSize);
+        }
         raiseBackdropContentCeiling(ceiling,
-          coordinate.map((value, axis) => worldOrigin[axis]! + value * refinedBrickEdge[axis]! * scale),
-          coordinate.map((value, axis) => worldOrigin[axis]! + (value + 1) * refinedBrickEdge[axis]! * scale));
+          coordinate.map((value, axis) => worldOrigin[axis]! + value * refinedBrickEdge[axis]! * scale), maximum);
       }
       this.backdropContentCeiling = ceiling;
     }
+    // The backdrop's level-0 voxels continue the set's own terrain lattice
+    // (the scene cell, before any environment refinement) from the same origin.
     const backdropTerrainTable = backdropField && backdropTilePlan
       ? packBackdropTerrainTable(backdropField, SOLID_WORLD_TERRAIN_MATERIAL_ID, backdropTilePlan, this.backdropContentCeiling) : undefined;
-    if (backdropTerrainTable) this.backdropContentCeilingWord = backdropTerrainTable[BACKDROP_TERRAIN_TABLE.ceilingWord]!;
     this.finestLevel = plan.maximumDepth;
     this.sceneBrickDimensions = refinedBrickDimensions;
     reportStage("Pack the octree and allocate its arenas");
@@ -1938,12 +1948,17 @@ export class OctreeSparseBrickWorld {
     if (backdropTerrainTable && leafPayloadMode !== "dense") {
       throw new RangeError("A backdrop's terrain table requires the dense leaf payload");
     }
+    // A dense world without a backdrop still carries the content ceiling.
+    const terrainTable = backdropTerrainTable
+      ?? (leafPayloadMode === "dense" && this.backdropContentCeiling ? packContentCeilingTable(this.backdropContentCeiling) : undefined);
+    if (terrainTable) this.backdropContentCeilingWord = terrainTable[BACKDROP_TERRAIN_TABLE.ceilingWord]!;
+    else this.backdropContentCeiling = undefined;
     this.tree = new SparseBrickOctreeGPU(device, {
       brickSize, nodeCapacity, leafCapacity, label: "Octree unified live sparse-brick world",
       // The terrain table's header is always there on a dense world, zeroed
       // when there is no backdrop, so a reader can ask for its level count.
       voxelLaneTailWords: leafPayloadMode === "dense"
-        ? Math.max(backdropTerrainTable?.length ?? 0, BACKDROP_TERRAIN_HEADER_WORDS) : 0,
+        ? Math.max(terrainTable?.length ?? 0, BACKDROP_TERRAIN_HEADER_WORDS) : 0,
       payloadProfile, sceneGeometryFormat, leafPayloadMode,
       // Every *reader* of scene identity is banded now. Both dense lanes stay
       // anyway, and for reasons that have nothing to do with the renderer:
@@ -1956,9 +1971,9 @@ export class OctreeSparseBrickWorld {
       retainDenseLanes: leafPayloadMode === "banded"
         ? SPARSE_BRICK_BANDED_PRODUCER_DENSE_LANES : undefined,
     });
-    if (backdropTerrainTable) {
+    if (terrainTable) {
       device.queue.writeBuffer(this.tree.payload,
-        this.tree.sceneMaterialOwnerOffsetBytes + this.tree.voxelCapacity * Uint32Array.BYTES_PER_ELEMENT, backdropTerrainTable);
+        this.tree.sceneMaterialOwnerOffsetBytes + this.tree.voxelCapacity * Uint32Array.BYTES_PER_ELEMENT, terrainTable);
     }
     yield;
     this.brickOccupancyBuilder = new WebGpuSvoBrickOccupancyBuilder(
@@ -2975,6 +2990,10 @@ export class OctreeSparseBrickWorld {
     this.device.queue.writeBuffer(this.tree.payload,
       tableBytes + (sectionWord + BACKDROP_CONTENT_CEILING_HEADER_WORDS + first * ceiling.cells) * 4,
       ceiling.tops.slice(first * ceiling.cells, (last + 1) * ceiling.cells));
+    const tileFirst = Math.floor(first / BACKDROP_CONTENT_CEILING_TILE_CELLS), tileLast = Math.floor(last / BACKDROP_CONTENT_CEILING_TILE_CELLS);
+    this.device.queue.writeBuffer(this.tree.payload,
+      tableBytes + (sectionWord + BACKDROP_CONTENT_CEILING_HEADER_WORDS + ceiling.tops.length + tileFirst * BACKDROP_CONTENT_CEILING_TILES) * 4,
+      ceiling.tiles.slice(tileFirst * BACKDROP_CONTENT_CEILING_TILES, (tileLast + 1) * BACKDROP_CONTENT_CEILING_TILES));
   }
 
   /**

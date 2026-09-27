@@ -226,7 +226,11 @@ export function planBackdropTiles(field: BackdropField, lattice: BackdropTerrain
 
 /** Content-ceiling columns per axis over the world's xz square. */
 export const BACKDROP_CONTENT_CEILING_CELLS = 128;
-/** Section words before the columns: corner x, corner z, column edge, highest ceiling (f32 bits). */
+/** Columns per axis of one ceiling tile: the walk's coarse step (see `BackdropContentCeiling.tiles`). */
+export const BACKDROP_CONTENT_CEILING_TILE_CELLS = 8;
+/** Ceiling tiles per axis. */
+export const BACKDROP_CONTENT_CEILING_TILES = BACKDROP_CONTENT_CEILING_CELLS / BACKDROP_CONTENT_CEILING_TILE_CELLS;
+/** Section words before the columns: corner x, corner z, column edge, highest ceiling (f32 bits). The tile maxima follow the columns. */
 export const BACKDROP_CONTENT_CEILING_HEADER_WORDS = 4;
 
 /**
@@ -243,7 +247,18 @@ export const BACKDROP_CONTENT_CEILING_HEADER_WORDS = 4;
  * node-mip page lies under a leaf, so no sample above a column's value can
  * read anything. Edits only raise columns (`raiseBackdropContentCeiling`);
  * a removed body leaves its old top, which is conservative. It rides after the
- * terrain table, so it exists only on a backdrop world.
+ * terrain table, whose header every dense world allocates, so a world with no
+ * backdrop carries it too (`packContentCeilingTable`): the set around a small
+ * container — a floor and one lamp on a stem running up out of shot — makes
+ * the world box several metres tall over a floor that is almost all empty sky,
+ * and every sun cone would otherwise march to that box's lid.
+ *
+ * The walk is two-level. One tall column (that lamp's stem) holds the highest
+ * top, and a ray only clears the ceiling for good once it clears that, so a
+ * column-by-column walk crosses the whole world for every floor pixel. Each
+ * tile of 8x8 columns therefore also holds its highest column, and the walk
+ * steps tile by tile, reading columns only inside a tile the ray may still be
+ * under.
  */
 export interface BackdropContentCeiling {
   readonly cells: number;
@@ -251,6 +266,8 @@ export interface BackdropContentCeiling {
   readonly cell_m: number;
   /** Highest top per column (dilated), -3e38 where nothing stands. */
   readonly tops: Float32Array<ArrayBuffer>;
+  /** Highest column per tile of `BACKDROP_CONTENT_CEILING_TILE_CELLS`^2 columns. */
+  readonly tiles: Float32Array<ArrayBuffer>;
   highest_m: number;
 }
 
@@ -259,7 +276,9 @@ export function createBackdropContentCeiling(corner_m: readonly [number, number]
   const cells = BACKDROP_CONTENT_CEILING_CELLS;
   const cell_m = Math.max(extent_m[0], extent_m[1]) / cells;
   if (!(cell_m > 0) || !Number.isFinite(cell_m)) throw new RangeError("Content ceiling needs a positive world extent");
-  return { cells, corner_m: [corner_m[0], corner_m[1]], cell_m, tops: new Float32Array(cells * cells).fill(-3e38), highest_m: -3e38 };
+  const tiles = BACKDROP_CONTENT_CEILING_TILES;
+  return { cells, corner_m: [corner_m[0], corner_m[1]], cell_m, tops: new Float32Array(cells * cells).fill(-3e38),
+    tiles: new Float32Array(tiles * tiles).fill(-3e38), highest_m: -3e38 };
 }
 
 /**
@@ -280,17 +299,21 @@ export function raiseBackdropContentCeiling(ceiling: BackdropContentCeiling,
   for (let z = z0; z <= z1; z += 1) for (let x = x0; x <= x1; x += 1) {
     const index = z * n + x;
     if (ceiling.tops[index]! < raised) ceiling.tops[index] = raised;
+    const tile = Math.floor(z / BACKDROP_CONTENT_CEILING_TILE_CELLS) * BACKDROP_CONTENT_CEILING_TILES
+      + Math.floor(x / BACKDROP_CONTENT_CEILING_TILE_CELLS);
+    if (ceiling.tiles[tile]! < raised) ceiling.tiles[tile] = raised;
   }
   ceiling.highest_m = Math.max(ceiling.highest_m, raised);
   return [z0, z1];
 }
 
-/** The ceiling section's words (header, then the columns row by row). */
+/** The ceiling section's words (header, then the columns row by row, then the tiles row by row). */
 export function packBackdropContentCeiling(ceiling: BackdropContentCeiling): Uint32Array<ArrayBuffer> {
-  const words = new Uint32Array(BACKDROP_CONTENT_CEILING_HEADER_WORDS + ceiling.tops.length);
+  const words = new Uint32Array(BACKDROP_CONTENT_CEILING_HEADER_WORDS + ceiling.tops.length + ceiling.tiles.length);
   const floats = new Float32Array(words.buffer);
   floats.set([ceiling.corner_m[0], ceiling.corner_m[1], ceiling.cell_m, ceiling.highest_m], 0);
   floats.set(ceiling.tops, BACKDROP_CONTENT_CEILING_HEADER_WORDS);
+  floats.set(ceiling.tiles, BACKDROP_CONTENT_CEILING_HEADER_WORDS + ceiling.tops.length);
   return words;
 }
 
@@ -338,6 +361,17 @@ export function packBackdropTerrainTable(field: BackdropField, materialId: numbe
     words.set([terrainWords, ceiling!.cells, 0], T.ceilingWord);
   }
   if (!floats.every(Number.isFinite)) throw new RangeError("Backdrop terrain table is not finite");
+  return words;
+}
+
+/** A table with no terrain (zero levels) carrying only the content ceiling: a dense world without a backdrop. */
+export function packContentCeilingTable(ceiling: BackdropContentCeiling): Uint32Array<ArrayBuffer> {
+  const T = BACKDROP_TERRAIN_TABLE;
+  const ceilingWords = packBackdropContentCeiling(ceiling);
+  const words = new Uint32Array(BACKDROP_TERRAIN_HEADER_WORDS + ceilingWords.length);
+  words.set(ceilingWords, BACKDROP_TERRAIN_HEADER_WORDS);
+  words.set([BACKDROP_TERRAIN_HEADER_WORDS, ceiling.cells, 0], T.ceilingWord);
+  if (!new Float32Array(ceilingWords.buffer).every(Number.isFinite)) throw new RangeError("Content ceiling is not finite");
   return words;
 }
 
@@ -595,26 +629,51 @@ fn backdropStoredVoxelWidth(lattice:BackdropStoredLattice,p:vec3f)->f32{
 // Where a rising ray has cleared the content ceiling for good: the end of the
 // last ceiling column whose top (plus lift + slope t, the margin a cone's
 // sampled footprint needs) the ray is still below, capped at tMax. The walk
-// is a 2D DDA over the columns up to where the ray clears the highest column.
-// tMax when there is no ceiling, the ray does not out-climb the margin, or
-// the walk runs out; zero when nothing stands anywhere along the ray.
+// is a 2D DDA over the tiles up to where the ray clears the highest column,
+// descending into a tile's columns only where the ray may be under the tile's
+// highest one. tMax when there is no ceiling, the ray does not out-climb the
+// margin, or the walk runs out; zero when nothing stands anywhere along the ray.
+fn backdropContentCeilingColumnsEnd(origin:vec3f,direction:vec3f,t0:f32,t1:f32,lift:f32,slope:f32,tile:vec2i,lastIn:f32)->f32{
+  let base=backdropTableWord(${T.ceilingWord}u);let n=i32(backdropTableWord(${T.ceilingWord + 1}u));
+  let corner=vec2f(backdropTableFloat(base),backdropTableFloat(base+1u));let cell=backdropTableFloat(base+2u);
+  let p=(origin.xz-corner)/cell;let d=direction.xz/cell;let moving=abs(d)>vec2f(1e-12);
+  let first=tile*${BACKDROP_CONTENT_CEILING_TILE_CELLS}i;
+  // Clamped into the tile: the tile walk already decided the ray is in it.
+  var c=clamp(vec2i(floor(p+d*t0)),first,first+vec2i(${BACKDROP_CONTENT_CEILING_TILE_CELLS - 1}));
+  let advance=select(vec2i(0),select(vec2i(-1),vec2i(1),d>vec2f(0.0)),moving);
+  var last=lastIn;var s0=t0;
+  for(var i=0u;i<${2 * BACKDROP_CONTENT_CEILING_TILE_CELLS}u;i+=1u){
+    let next=select(vec2f(3.0e38),(vec2f(select(c,c+vec2i(1),d>vec2f(0.0)))-p)/d,moving);
+    let s1=clamp(min(next.x,next.y),s0,t1);
+    if(origin.y+direction.y*s0-lift-slope*s1<=backdropTableFloat(base+${BACKDROP_CONTENT_CEILING_HEADER_WORDS}u+u32(c.y*n+c.x))){last=s1;}
+    if(s1>=t1){break;}
+    if(next.x<next.y){c.x+=advance.x;}else{c.y+=advance.y;}
+    if(any(c<first)||any(c>=first+vec2i(${BACKDROP_CONTENT_CEILING_TILE_CELLS}))){break;}
+    s0=s1;
+  }
+  return last;
+}
 fn backdropContentCeilingEnd(origin:vec3f,direction:vec3f,tMax:f32,lift:f32,slope:f32)->f32{
   let base=backdropTableWord(${T.ceilingWord}u);let rise=direction.y-slope;
   if(base==0u||!(rise>0.0)){return tMax;}
-  let n=i32(backdropTableWord(${T.ceilingWord + 1}u));
-  let corner=vec2f(backdropTableFloat(base),backdropTableFloat(base+1u));let cell=backdropTableFloat(base+2u);
+  let n=i32(backdropTableWord(${T.ceilingWord + 1}u));let tiles=n/${BACKDROP_CONTENT_CEILING_TILE_CELLS}i;
+  let corner=vec2f(backdropTableFloat(base),backdropTableFloat(base+1u));
+  let edge=backdropTableFloat(base+2u)*${BACKDROP_CONTENT_CEILING_TILE_CELLS}.0;
+  let tileBase=base+${BACKDROP_CONTENT_CEILING_HEADER_WORDS}u+u32(n*n);
   let end=min(tMax,max((backdropTableFloat(base+3u)+lift-origin.y)/rise,0.0));
-  let p=(origin.xz-corner)/cell;let d=direction.xz/cell;let moving=abs(d)>vec2f(1e-12);
+  let p=(origin.xz-corner)/edge;let d=direction.xz/edge;let moving=abs(d)>vec2f(1e-12);
   var c=vec2i(floor(p));
-  if(any(c<vec2i(0))||any(c>=vec2i(n))){return tMax;}
+  if(any(c<vec2i(0))||any(c>=vec2i(tiles))){return tMax;}
   let advance=select(vec2i(0),select(vec2i(-1),vec2i(1),d>vec2f(0.0)),moving);
   let span=select(vec2f(3.0e38),1.0/abs(d),moving);
   var next=select(vec2f(3.0e38),(select(floor(p),floor(p)+1.0,d>vec2f(0.0))-p)/d,moving);
   var t0=0.0;var last=0.0;
-  for(var i=0u;i<${2 * BACKDROP_CONTENT_CEILING_CELLS + 2}u;i+=1u){
-    if(t0>=end||any(c<vec2i(0))||any(c>=vec2i(n))){return last;}
+  for(var i=0u;i<${2 * BACKDROP_CONTENT_CEILING_TILES + 2}u;i+=1u){
+    if(t0>=end||any(c<vec2i(0))||any(c>=vec2i(tiles))){return last;}
     let t1=min(min(next.x,next.y),end);
-    if(origin.y+direction.y*t0-lift-slope*t1<=backdropTableFloat(base+${BACKDROP_CONTENT_CEILING_HEADER_WORDS}u+u32(c.y*n+c.x))){last=t1;}
+    if(origin.y+direction.y*t0-lift-slope*t1<=backdropTableFloat(tileBase+u32(c.y*tiles+c.x))){
+      last=backdropContentCeilingColumnsEnd(origin,direction,t0,t1,lift,slope,c,last);
+    }
     if(next.x<next.y){c.x+=advance.x;next.x+=span.x;}else{c.y+=advance.y;next.y+=span.y;}
     t0=t1;
   }

@@ -843,6 +843,17 @@ export interface SvoDryOptimizationExperiments {
    */
   readonly globalIlluminationAbsent?: boolean;
   /**
+   * The world carries no backdrop terrain. Dense payloads always reserve the
+   * terrain table (the content ceiling rides in it), so the terrain hooks —
+   * stored-voxel width floor, face lattice, terrain trace and ground
+   * occlusion — used to compile into every dense kernel and price the
+   * deferred pass even when `backdropTerrainLevels()` is 0 (long dam: +1.2 ms
+   * GPU frame for branches never taken). The split-bundle cache keys on
+   * backdrop presence and compiles them out here; the content-ceiling clip
+   * stays, it bounds the sun cones of every dense world.
+   */
+  readonly backdropTerrainAbsent?: boolean;
+  /**
    * Run the analytic candidate-BVH walk of `traceStatic` first and unbounded,
    * as it historically did, instead of seeding it with the voxel-resolved hit.
    *
@@ -1182,6 +1193,7 @@ export function createSvoDrySceneFragmentWGSL(
   // the traversal entry points below consult it beside the octree. Only the
   // dense arm has that lane tail, so only it carries the table.
   const backdropTerrain = leafPayloadMode === "dense";
+  const backdropHooks = backdropTerrain && !experiments.backdropTerrainAbsent;
   const backdropTerrainLibraryWGSL = backdropTerrain ? backdropTerrainWGSL({
     load: (index) => `scenePayload[${index}]`, tableBase: "dry.payloadLanes1.y+dry.payloadLanes1.z",
   }) + /* wgsl */ `
@@ -1220,7 +1232,7 @@ fn dryVoxelReadable(voxel:u32)->bool{return voxel<dryVoxelCapacity();}
 // The receiver's own voxel edge where it is coarser than the set's cell (a
 // backdrop detail ring), so a cone's normal escape clears the receiver's own
 // coverage at every ring as it does on the set; zero elsewhere.
-fn dryStoredVoxelWidthAt(position:vec3f)->f32{return ${backdropTerrain ? "backdropStoredVoxelWidth(backdropStoredLattice(),position)" : "0.0"};}`;
+fn dryStoredVoxelWidthAt(position:vec3f)->f32{return ${backdropHooks ? "backdropStoredVoxelWidth(backdropStoredLattice(),position)" : "0.0"};}`;
   // Coverage and the baked normal are the two halves of the sub-voxel surface
   // sample. The normal supplies orientation; coverage inverts the voxelizer's
   // planar coverage law to recover the plane's signed offset from cell centre.
@@ -1546,7 +1558,7 @@ fn dryPresentationHit(hitIn:DryHit)->DryHit{
 // level.
 struct DryFaceLattice{origin:vec3f,cell:vec3f}
 fn dryFaceLattice(position:vec3f,faceNormal:vec3f,fieldSource:u32)->DryFaceLattice{
-  ${backdropTerrain ? `if(fieldSource==DRY_GBUFFER_FIELD_VOXEL&&backdropTerrainLevels()>0u&&backdropFootprintDistance(position.xz)>0.0){
+  ${backdropHooks ? `if(fieldSource==DRY_GBUFFER_FIELD_VOXEL&&backdropTerrainLevels()>0u&&backdropFootprintDistance(position.xz)>0.0){
     let voxel=backdropTerrainVoxelAt(position,faceNormal);
     return DryFaceLattice(vec3f(voxel.x-0.5*voxel.z,voxel.w,voxel.y-0.5*voxel.z),vec3f(voxel.z));
   }` : ""}
@@ -4196,7 +4208,7 @@ var<private> dryDerivedPageFailure:u32=0u;
 ${canonicalTraversalWGSL}${screenSpaceTraversalWGSL}${lodDescentWGSL}${lodUniformWGSL}${screenSpacePrimaryProxyWGSL}${tieredComputeResolveDeclarationsWGSL}
 ${wideTraversalWGSL}${compactTraversalWGSL}${brickOccupancyHelpersWGSL}
 ${liveLeafLifecycleWGSL}
-${createSvoDryConeMarcherWGSL({ branchlessMorton: true, rangedDirectorySearch: true, directPageTable: true, storedVoxelFloor: backdropTerrain, contentCeilingClip: backdropTerrain })}
+${createSvoDryConeMarcherWGSL({ branchlessMorton: true, rangedDirectorySearch: true, directPageTable: true, storedVoxelFloor: backdropHooks, contentCeilingClip: backdropTerrain })}
 var<private> dryGiPageCache:DryNodeMipPageCache;
 /** The ancestor page a sub-floor radiance sample redirects to; coarser, so it changes far less often. */
 var<private> dryGiRadiancePageCache:DryNodeMipPageCache;
@@ -4873,7 +4885,7 @@ fn traceStaticVoxelFrom(ro:vec3f,rd:vec3f,initialMinimum:f32)->DryHit {
 // entry seed (DRY_PRIMARY_ENTRY_EMPTY), which says nothing about the ground.
 fn traceStaticFrom(ro:vec3f,rd:vec3f,initialMinimum:f32)->DryHit{
   let voxelWorld=traceStaticVoxelFrom(ro,rd,initialMinimum);
-  ${backdropTerrain ? `let ground=dryBackdropTerrainHit(ro,rd,max(initialMinimum,0.0),voxelWorld.t);
+  ${backdropHooks ? `let ground=dryBackdropTerrainHit(ro,rd,max(initialMinimum,0.0),voxelWorld.t);
   if(ground.t<voxelWorld.t){return ground;}` : ""}
   return voxelWorld;
 }
@@ -4882,7 +4894,7 @@ fn traceStatic(ro:vec3f,rd:vec3f)->DryHit{return traceStaticFrom(ro,rd,0.0);}
 // only the ground, bounded by tMax (the exact planes). Every set leaf is drawn
 // by the mesh quads the depth test lays over this pass.
 fn dryBackdropTrace(ro:vec3f,rd:vec3f,tMax:f32)->DryHit{
-  ${backdropTerrain ? "return dryBackdropTerrainHit(ro,rd,0.0,tMax);" : "return missHit();"}
+  ${backdropHooks ? "return dryBackdropTerrainHit(ro,rd,0.0,tMax);" : "return missHit();"}
 }
 
 struct DryGlassHit{hit:SvoThinGlassHit,recordIndex:u32}
@@ -5149,7 +5161,7 @@ fn dryLightVisibility(position:vec3f,geometricNormal:vec3f,ownerId:u32,towardLig
   return solid*mix(vec3f(1.0),dryFluidTransmittance(depth_m),dry.tuningRays0.y);
 }
 
-${backdropTerrain ? `// Whether the ground stands between a receiver and its light. The ray leaves
+${backdropHooks ? `// Whether the ground stands between a receiver and its light. The ray leaves
 // along the geometric normal by a distance that outgrows f32 position error
 // at the receiver's range, so a voxel face never shadows itself.
 fn dryBackdropOccludes(position:vec3f,geometricNormal:vec3f,towardLight:vec3f,finiteDistance_m:f32)->bool{
@@ -5165,7 +5177,7 @@ fn dryBackdropOccludes(position:vec3f,geometricNormal:vec3f,towardLight:vec3f,fi
   if((dryDerivedPageFailure&${SVO_DRY_DERIVED_FAILURE.reducedReconstruction}u)!=0u){dryDerivedPageFailure|=${SVO_DRY_DERIVED_FAILURE.directVisibilityPage}u;return vec3f(0.0);}
   // The backdrop ground occludes set and ground alike, before the set's own
   // visibility, whose rays are bounded by the container and never reach it.
-  ${backdropTerrain ? "if(dryBackdropOccludes(position,geometricNormal,towardLight,finiteDistance_m)){return vec3f(0.0);}" : ""}
+  ${backdropHooks ? "if(dryBackdropOccludes(position,geometricNormal,towardLight,finiteDistance_m)){return vec3f(0.0);}" : ""}
   let maximumDistance=select(directionalLightSceneExitDistance(position,towardLight),finiteDistance_m,finiteDistance_m>0.0);if(dryDirectionalRayLeavesDomain(maximumDistance)){return vec3f(1.0);}
   let ray=dryBiasedVisibilityRayUnit(position,geometricNormal,towardLight,maximumDistance,dry.mapping.cellSize,dry.tuningRays0.x);
   ${voxelLightCacheShortcutWGSL}

@@ -1060,6 +1060,8 @@ interface SvoDrySplitPipelineBundle {
    * use and the visibility the frame feeds them cannot disagree.
    */
   readonly lattice: boolean;
+  /** Whether the backdrop terrain hooks were compiled in (false only for a world without one). */
+  readonly backdropTerrain: boolean;
   readonly latticeKeys?: GPUComputePipeline;
 }
 
@@ -1158,6 +1160,8 @@ export class SparseVoxelDrySceneRenderer {
   private latticePlaceholder?: GPUBuffer;
   /** Whether the active split bundle compiled the lattice lookup; encode follows it. */
   private splitPipelineLattice = false;
+  /** Whether the active split bundle compiled the backdrop terrain hooks; see backdropTerrainRequested. */
+  private splitPipelineBackdropTerrain = true;
   private splitPipelineScale?: SvoConeLightingScale;
   /**
    * Keyed by scale AND global-illumination capability: the GI-off kernel is a
@@ -1790,6 +1794,7 @@ export class SparseVoxelDrySceneRenderer {
     this.scenePrimitiveCoverageOverflowPipeline = bundle.scenePrimitiveCoverageOverflow;
     this.latticeKeyPipeline = bundle.latticeKeys;
     this.splitPipelineLattice = bundle.lattice;
+    this.splitPipelineBackdropTerrain = bundle.backdropTerrain;
     this.splitPipelineScale = scale;
     if (this.requestedBundleFailure?.scale === scale) this.requestedBundleFailure = undefined;
     this.requestedBundleResourceFailure = undefined;
@@ -3374,15 +3379,22 @@ export class SparseVoxelDrySceneRenderer {
     // still the variant the frame wants.
     const globalIlluminationCapable = this.lightingOptions.globalIlluminationEnabled === true;
     const lattice = this.latticeVisibilityRequested(scale, globalIlluminationCapable);
-    const variantKey = this.splitVariantKey(scale, globalIlluminationCapable, lattice);
+    const backdropTerrain = this.backdropTerrainRequested();
+    const variantKey = this.splitVariantKey(scale, globalIlluminationCapable, lattice, backdropTerrain);
     const variantCurrent = () => scale === this.coneScale
       && globalIlluminationCapable === (this.lightingOptions.globalIlluminationEnabled === true)
-      && lattice === this.latticeVisibilityRequested(scale, globalIlluminationCapable);
+      && lattice === this.latticeVisibilityRequested(scale, globalIlluminationCapable)
+      && backdropTerrain === this.backdropTerrainRequested();
     const cached = this.splitPipelineBundles.get(variantKey);
     if (cached) {
       if (variantCurrent()) this.activateSplitPipelineBundle(scale, cached);
       return;
     }
+    // The hooked kernel shades a backdrop-free world exactly, so while the
+    // hookless one compiles it presents in its place (status stays compiling).
+    const hooked = backdropTerrain ? undefined
+      : this.splitPipelineBundles.get(this.splitVariantKey(scale, globalIlluminationCapable, lattice, true));
+    if (hooked && variantCurrent()) this.activateSplitPipelineBundle(scale, hooked);
     const pending = this.splitPipelineCompiles.get(variantKey);
     if (pending) {
       const bundle = await pending;
@@ -3512,9 +3524,15 @@ export class SparseVoxelDrySceneRenderer {
       : { ...shaderExperimentsBase, voxelLightCache: false };
     // The variant this bundle IS: GI disabled compiles the gather out rather
     // than leaving a never-taken branch priced into every deferred pixel.
-    const shaderExperimentsSpecialized = globalIlluminationCapable
+    const shaderExperimentsGi = globalIlluminationCapable
       ? shaderExperimentsPruned
       : { ...shaderExperimentsPruned, globalIlluminationAbsent: true };
+    // And a world without backdrop terrain compiles the terrain hooks out:
+    // dense payloads always carry the table, so gating on payload mode alone
+    // priced them into every floor-only scene.
+    const shaderExperimentsSpecialized = backdropTerrain
+      ? shaderExperimentsGi
+      : { ...shaderExperimentsGi, backdropTerrainAbsent: true };
     // Likewise a lookup variant, not a branch: the lattice arm is priced
     // without the screen resolve and its edge-recovery rings compiled in.
     const shaderExperiments = lattice
@@ -3921,7 +3939,7 @@ export class SparseVoxelDrySceneRenderer {
         brickBackground, brickRaster, brickCoverage, brickCoverageResolve, brickLodResolve, brickExactResolve,
         brickCoverageOverflow, scenePrimitiveRaster,
         scenePrimitiveCoverage, scenePrimitiveLodResolve, scenePrimitiveComputeArgs, scenePrimitiveComputeResolve, scenePrimitiveDepthBridge,
-        scenePrimitiveCoverageResolve, scenePrimitiveCoverageOverflow, lattice, latticeKeys };
+        scenePrimitiveCoverageResolve, scenePrimitiveCoverageOverflow, lattice, backdropTerrain, latticeKeys };
       this.splitPipelineBundles.set(variantKey, bundle);
       return bundle;
     })();
@@ -3936,14 +3954,39 @@ export class SparseVoxelDrySceneRenderer {
     }
   }
 
-  /** The split-bundle cache key: cone scale plus the GI and visibility-source variants the kernel was compiled with. */
-  private splitVariantKey(scale: SvoConeLightingScale, globalIlluminationCapable: boolean, lattice: boolean): string {
-    return `${scale}|${globalIlluminationCapable ? "gi" : "no-gi"}|${lattice ? "lattice" : "screen"}`;
+  /** The split-bundle cache key: cone scale plus the GI, visibility-source and backdrop variants the kernel was compiled with. */
+  private splitVariantKey(scale: SvoConeLightingScale, globalIlluminationCapable: boolean, lattice: boolean, backdropTerrain: boolean): string {
+    return `${scale}|${globalIlluminationCapable ? "gi" : "no-gi"}|${lattice ? "lattice" : "screen"}|${backdropTerrain ? "backdrop" : "no-backdrop"}`;
   }
 
   private currentSplitVariantKey(scale: SvoConeLightingScale): string {
     const globalIlluminationCapable = this.lightingOptions.globalIlluminationEnabled === true;
-    return this.splitVariantKey(scale, globalIlluminationCapable, this.latticeVisibilityRequested(scale, globalIlluminationCapable));
+    return this.splitVariantKey(scale, globalIlluminationCapable, this.latticeVisibilityRequested(scale, globalIlluminationCapable),
+      this.backdropTerrainRequested());
+  }
+
+  /**
+   * Whether the split kernel must carry the backdrop terrain hooks. The
+   * terrain table is built from the same `scene.backdrop` that publishes the
+   * ground plane's content radius, so its absence proves the world has no
+   * terrain. Before any scene is published the hooks stay in: the hooked
+   * kernel is correct for every world, the hookless one only without terrain.
+   */
+  private backdropTerrainRequested(): boolean {
+    return !this.scene || this.scene.groundPlane?.backdropContentRadius_m !== undefined;
+  }
+
+  /** A published scene gained or lost its backdrop: activate or compile the matching split variant. */
+  private requestBackdropSplitVariant(): void {
+    if (!this.layout || !this.vertexModule) return;
+    const scale = this.coneScale;
+    const cached = this.splitPipelineBundles.get(this.currentSplitVariantKey(scale));
+    if (cached) this.activateSplitPipelineBundle(scale, cached);
+    else void this.ensureSplitPipelines(scale).catch((error: unknown) => {
+      if (this.coneScale !== scale) return;
+      const reason = error instanceof Error ? error.message : String(error);
+      this.requestedBundleFailure = { scale, detail: `Requested SVO presentation bundle at scale ${scale} failed: ${reason}` };
+    });
   }
 
   /**
@@ -4290,6 +4333,15 @@ export class SparseVoxelDrySceneRenderer {
 
   /** Exact readiness of the presentation bundle requested by current options. */
   get presentationBundleStatus(): SvoDryPresentationBundleStatus {
+    const status = this.requestedBundleStatus();
+    if (status.state === "ready" && this.shadingPath === "split" && this.splitPipelineBackdropTerrain !== this.backdropTerrainRequested()) {
+      return { state: "compiling", detail: `Compiling the ${this.backdropTerrainRequested() ? "backdrop" : "backdrop-free"} SVO split bundle` };
+    }
+    return status;
+  }
+
+  /** Readiness of the requested scale's bundles, before the backdrop variant is considered. */
+  private requestedBundleStatus(): SvoDryPresentationBundleStatus {
     if (this.requestedBundleFailure?.scale === this.coneScale) {
       return { state: "failed", detail: this.requestedBundleFailure.detail };
     }
@@ -4829,8 +4881,10 @@ export class SparseVoxelDrySceneRenderer {
     this.worldGiCacheDirty = true;
     this.invalidateVoxelLightCache();
     this.primitiveDirtyBounds = [];
+    const backdropTerrainBefore = this.backdropTerrainRequested();
     this.scene = scene;
     this.primitiveCount = primitiveArena.primitiveCount;
+    if (this.shadingPath === "split" && backdropTerrainBefore !== this.backdropTerrainRequested()) this.requestBackdropSplitVariant();
     this.writeScenePrimitiveOverflowPublication();
     this.primitiveCandidateArena = primitiveArena;
     this.ensureVoxelLightCache(source, scene);
@@ -5974,7 +6028,11 @@ export class SparseVoxelDrySceneRenderer {
     const gBufferViews = this.gBufferTargets.views;
     if (!gBufferViews) return false;
     this.requestedBundleResourceFailure = undefined;
-    if (this.presentationBundleStatus.state !== "ready") return false;
+    if (this.requestedBundleStatus().state !== "ready") return false;
+    // A hooked bundle still shading a world that lost its backdrop is correct,
+    // only slower, so it keeps presenting while the hookless one compiles; the
+    // reverse would drop the terrain, so that frame is rejected.
+    if (this.shadingPath === "split" && !this.splitPipelineBackdropTerrain && this.backdropTerrainRequested()) return false;
     const usePrepass = this.coneScale !== 1 && this.conePipelineScale === this.coneScale
       && Boolean(this.conePrepassGeometryPipeline && this.conePrepassVisibilityPipeline
         && this.conePrepassShadePipeline && this.coneReducedPipeline

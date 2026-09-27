@@ -622,6 +622,7 @@ if (recordScaleMultipliers) {
     if (coneTracingMode === "cones" && coneScale !== 1) await armRenderer.ensureConeLightingPrepass();
     armRenderer.setSource(armSource);
     armRenderer.publishScene(armDryScene);
+    await awaitPresentationBundle(armRenderer);
     armRenderer.ensureSize(width, height);
     return {
       multiplier,
@@ -1037,6 +1038,18 @@ device.queue.writeBuffer(bodyBuffer, 0, bodies.data);
 
 const disabledStageIds = (process.env.FLUID_SVO_DRY_FRAME_DISABLE_STAGES ?? "")
   .split(",").map((id) => id.trim()).filter((id) => id.length > 0);
+// Publishing a scene can request a scene-specialised split variant (the
+// backdrop-free kernel); the stale bundle may still present meanwhile, so a
+// timed frame must wait for the requested one rather than price its stand-in.
+async function awaitPresentationBundle(target: SparseVoxelDrySceneRenderer): Promise<void> {
+  const started = performance.now();
+  while (target.presentationBundleStatus.state === "compiling") {
+    assert.ok(performance.now() - started < 120_000, `presentation bundle did not compile: ${target.presentationBundleStatus.detail}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(target.presentationBundleStatus.state, "ready", JSON.stringify(target.presentationBundleStatus));
+}
+
 const renderer = new SparseVoxelDrySceneRenderer(device, uniformBuffer, bodyBuffer, "rgba16float", traversalMode, brickOccupancyMode,
   shadingPath, screenSpaceTerminationPixels, rasterGlassDiscovery, rasterRigidDiscovery, coneFanout,
   optimizationExperiments);
@@ -1090,6 +1103,7 @@ if (coneTracingMode === "cones" && coneScale !== 1) {
 }
 renderer.setSource(source);
 renderer.publishScene(drySceneData);
+await awaitPresentationBundle(renderer);
 renderer.ensureSize(width, height);
 let syntheticRigidMotionBuffer: GPUBuffer | undefined;
 if (syntheticRigidMotion || syntheticRigidTransition) {
