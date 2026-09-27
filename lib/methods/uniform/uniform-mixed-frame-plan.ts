@@ -51,27 +51,41 @@ fn umCertificateRadius(speed:f32)->u32{
  return u32(min(ceil(travel*1.00001/4.0)+2.0,1e8));
 }
 ${uniformMixedVertexSamplingWGSL}
-var<workgroup> seeded:atomic<u32>;
-@compute @workgroup_size(64) fn seed(@builtin(workgroup_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
- let tile=gid.x+umDispatchX*gid.y;if(tile>=UM_TILES){return;}
- if(lane==0u){atomicStore(&seeded,0u);}workgroupBarrier();
- let width=umTileWidth(tile);let side=4u/width;
- if(lane<side*side*side){
-  let origin=umTileCoord(tile)*4u+umCorner(lane,side)*width;
-  let owner=umOwnerAt(vec3i(origin));var speed=0.0;
-  for(var axis=0u;axis<3u;axis++){
-   let first=umFace(owner,axis,1,0u);
-   for(var part=0u;part<first.count;part++){let f=umFace(owner,axis,1,part);speed=max(speed,abs(textureLoad(velocity,f.anchor,0)[axis]));}
-   if(origin[axis]==0u){speed=max(speed,abs(negative[umNegativeIndex(origin,axis)]));}
-  }
-  atomicMax(&umSupport[4u*UM_TILES],bitcast<u32>(speed));
+// An owner's positive-face speeds. In a tile whose stencil is all unit width
+// every positive face is the owner's own unit patch, anchored at its origin.
+fn umPositiveFaceSpeed(field:texture_3d<f32>,unit:bool,origin:vec3u)->f32{
+ if(unit){let v=abs(textureLoad(field,vec3i(origin),0).xyz);return max(v.x,max(v.y,v.z));}
+ let owner=umOwnerAt(vec3i(origin));var speed=0.0;
+ for(var axis=0u;axis<3u;axis++){
+  let first=umFace(owner,axis,1,0u);
+  for(var part=0u;part<first.count;part++){let f=umFace(owner,axis,1,part);speed=max(speed,abs(textureLoad(field,f.anchor,0)[axis]));}
+ }
+ return speed;
+}
+// One lane per owner over every tier (umAllOwner). A tile's owners are
+// contiguous slots, so lane-owner.lane is its first lane: the workgroup slot of
+// its flags. Coarse tiles pack 8 or 64 to a workgroup instead of idling 63 lanes.
+var<workgroup> seeded:array<atomic<u32>,64>;
+var<workgroup> seedSpeed:atomic<u32>;
+@compute @workgroup_size(64) fn seed(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
+ let owner=umAllOwner(gid);let slot=lane-owner.lane;
+ atomicStore(&seeded[lane],0u);if(lane==0u){atomicStore(&seedSpeed,0u);}workgroupBarrier();
+ if(owner.width!=0u){
+  let width=owner.width;let unit=umTileMaximumWidth(owner.tile)==1u;let origin=umOrigin(owner);
+  var speed=umPositiveFaceSpeed(velocity,unit,origin);
+  for(var axis=0u;axis<3u;axis++){if(origin[axis]==0u){speed=max(speed,abs(negative[umNegativeIndex(origin,axis)]));}}
+  atomicMax(&seedSpeed,bitcast<u32>(speed));
   var occupied=textureLoad(volume,vec3i(origin),0).x!=0.0;
   for(var k=0u;k<8u;k++){
-   occupied=occupied||umVertexValue(origin+umCorner(k,2u)*width)<${4*Math.max(...h)}*f32(width);
+   // Every vertex of a unit-stencil tile is stored.
+   let vertex=origin+umCorner(k,2u)*width;
+   occupied=occupied||select(umVertexValue(vertex),umLoadVertex(vertex),unit)<${4*Math.max(...h)}*f32(width);
   }
-  if(occupied){atomicOr(&seeded,3u);}
+  if(occupied){atomicOr(&seeded[slot],3u);}
  }
- workgroupBarrier();if(lane==0u){atomicStore(&umSupport[tile],atomicLoad(&seeded));}
+ workgroupBarrier();
+ if(owner.width!=0u&&owner.lane==0u){atomicStore(&umSupport[owner.tile],atomicLoad(&seeded[slot]));}
+ if(lane==0u){atomicMax(&umSupport[4u*UM_TILES],atomicLoad(&seedSpeed));}
 }
 ${[0,1,2].map(axis=>/* wgsl */`
 @compute @workgroup_size(64) fn dilate${axis}(@builtin(global_invocation_id) gid:vec3u){
@@ -86,23 +100,19 @@ ${[0,1,2].map(axis=>/* wgsl */`
  atomicStore(&umSupport[${axis+1}u*UM_TILES+tile],flags|policy.settings.z);
 }`).join("\n")}
 // Largest extended canonical face speed owned by each tile.
-var<workgroup> tileSpeed:atomic<u32>;
-@compute @workgroup_size(64) fn localSpeed(@builtin(workgroup_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
- let tile=gid.x+umDispatchX*gid.y;if(tile>=UM_TILES){return;}
- if(lane==0u){atomicStore(&tileSpeed,0u);}workgroupBarrier();
- let width=umTileWidth(tile);let side=4u/width;
- if(lane<side*side*side){
-  let origin=umTileCoord(tile)*4u+umCorner(lane,side)*width;
-  let owner=umOwnerAt(vec3i(origin));var speed=0.0;
-  for(var axis=0u;axis<3u;axis++){
-   let first=umFace(owner,axis,1,0u);
-   for(var part=0u;part<first.count;part++){let f=umFace(owner,axis,1,part);speed=max(speed,abs(textureLoad(extended,f.anchor,0)[axis]));}
-   if(origin[axis]==0u){speed=max(speed,abs(extendedNegative[umNegativeIndex(origin,axis)]));}
-  }
+// Owner lanes as in seed.
+var<workgroup> tileSpeed:array<atomic<u32>,64>;
+@compute @workgroup_size(64) fn localSpeed(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
+ let owner=umAllOwner(gid);let slot=lane-owner.lane;
+ atomicStore(&tileSpeed[lane],0u);workgroupBarrier();
+ if(owner.width!=0u){
+  let origin=umOrigin(owner);
+  var speed=umPositiveFaceSpeed(extended,umTileMaximumWidth(owner.tile)==1u,origin);
+  for(var axis=0u;axis<3u;axis++){if(origin[axis]==0u){speed=max(speed,abs(extendedNegative[umNegativeIndex(origin,axis)]));}}
   // A non-finite speed must certify nothing: saturate to the float maximum.
-  atomicMax(&tileSpeed,select(0x7f7fffffu,bitcast<u32>(speed),speed<=3.402823e38));
+  atomicMax(&tileSpeed[slot],select(0x7f7fffffu,bitcast<u32>(speed),speed<=3.402823e38));
  }
- workgroupBarrier();if(lane==0u){speeds[tile]=bitcast<f32>(atomicLoad(&tileSpeed));}
+ workgroupBarrier();if(owner.width!=0u&&owner.lane==0u){speeds[owner.tile]=bitcast<f32>(atomicLoad(&tileSpeed[slot]));}
 }
 // Separable box maximum over the global reach: a characteristic from tile t
 // never leaves that box, so its speed is bounded by the box maximum.
@@ -117,15 +127,24 @@ ${[0,1,2].map(axis=>/* wgsl */`
  }
  speeds[into+tile]=speed;
 }`).join("\n")}
-@compute @workgroup_size(64) fn certify(@builtin(global_invocation_id) gid:vec3u){
- let tile=gid.x+umDispatchX*64u*gid.y;if(tile>=UM_TILES||umTileWidth(tile)!=1u){return;}
+// Appends aggregate per workgroup: one global atomic per list, not per tile.
+var<workgroup> certifyCounts:array<atomic<u32>,2>;
+var<workgroup> certifyBases:array<u32,2>;
+@compute @workgroup_size(64) fn certify(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
+ let tile=gid.x+umDispatchX*64u*gid.y;let fine=tile<UM_TILES&&umTileWidth(min(tile,UM_TILES-1u))==1u;
+ if(lane<2u){atomicStore(&certifyCounts[lane],0u);}workgroupBarrier();
  // Convex extension/interpolation cannot exceed the extended speeds in the
  // global-reach box around this tile (localSpeed + spread).
- let radius=umCertificateRadius(speeds[UM_TILES+tile]);
- let distance=atomicLoad(&umSupport[4u*UM_TILES+16u+tile]);
- let list=select(2u,1u,distance>radius);
- let slot=atomicAdd(&umSupport[4u*UM_TILES+list],1u);
- atomicStore(&umSupport[(4u+list)*UM_TILES+16u+slot],tile);
+ var list=1u;var local=0u;
+ if(fine){
+  let radius=umCertificateRadius(speeds[UM_TILES+tile]);
+  let distance=atomicLoad(&umSupport[4u*UM_TILES+16u+tile]);
+  list=select(2u,1u,distance>radius);local=atomicAdd(&certifyCounts[list-1u],1u);
+ }
+ workgroupBarrier();
+ if(lane<2u){let count=atomicLoad(&certifyCounts[lane]);if(count>0u){certifyBases[lane]=atomicAdd(&umSupport[4u*UM_TILES+lane+1u],count);}}
+ workgroupBarrier();
+ if(fine){atomicStore(&umSupport[(4u+list)*UM_TILES+16u+certifyBases[list-1u]+local],tile);}
 }
 @compute @workgroup_size(1) fn publishWork(){
  atomicStore(&umSupport[4u*UM_TILES+3u],1u);
@@ -166,7 +185,8 @@ ${[0,1,2].map(axis=>/* wgsl */`
   }
   private dispatch(pass:GPUComputePassEncoder,entries:readonly string[]):void{
     for(const entry of entries){
-      const groups=entry==="publishWork"?1:entry==="seed"||entry==="localSpeed"?this.ownership.layout.tiles.length:Math.ceil(this.ownership.layout.tiles.length/64);
+      if(entry==="seed"||entry==="localSpeed"){this.ownership.dispatchAll(pass,this.pipelines.get(entry)!);continue;}
+      const groups=entry==="publishWork"?1:Math.ceil(this.ownership.layout.tiles.length/64);
       pass.setPipeline(this.pipelines.get(entry)!);pass.dispatchWorkgroups(Math.min(groups,this.ownership.dispatchX),Math.ceil(groups/this.ownership.dispatchX));
     }
   }

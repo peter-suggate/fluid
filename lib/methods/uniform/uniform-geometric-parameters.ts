@@ -146,13 +146,22 @@ params.push({kind:"select",key:"surfaceDeficitBalancing",label:"Surface-deficit 
 
 params.push({kind:"select",key:"coarsening",label:"Coarsening",default:"regions",tier:"coarse",update:"runtime",
   options:[{value:"regions",label:"Regions"},{value:"dynamic",label:"Dynamic"}],
-  hint:"Regions: authored refinement regions choose coarse tiles. Dynamic: after every frame, only the tiles the surface can occupy during the next step (the RK2 departure boxes of their points hold the current surface) are fine; everything else coarsens to 4h, with a 2h collar. Authored regions can then only force fine. See docs/plans/uniform-dynamic-coarsening.md."});
+  hint:"Regions: authored refinement regions choose coarse tiles. Dynamic: after every frame, only the tiles the surface can occupy during the next step (the RK2 departure boxes of their points hold the current surface) are fine; everything else coarsens to 4h (pressure alone grades a 2h collar). Authored regions can then only force fine. See docs/plans/uniform-dynamic-coarsening.md."});
 params.push({kind:"number",key:"coarseningReach",label:"Coarsening band reach",default:0,tier:"coarse",update:"runtime",
   min:0,max:8,step:1,digits:0,unit:"tiles",
-  hint:"Tiles added around each tile's predicted departure box. 0 keeps exactly the tiles the surface can occupy next step; a surface found in a coarse tile is a fatal diagnostic."});
+  hint:"Tiles added around each tile's predicted departure box. 0 keeps exactly the tiles the surface can occupy next step."});
 params.push({kind:"number",key:"coarseningHysteresis",label:"Coarsening hysteresis",default:0,tier:"coarse",update:"runtime",
   min:0,max:4,step:1,digits:0,unit:"tiles",
   hint:"Extra distance a fine tile keeps before it may coarsen. Each coarsen/refine round trip averages velocity, so this limits churn."});
+params.push({kind:"number",key:"coarseningSurfaceTolerance",label:"Coarse surface tolerance",default:0.5,tier:"coarse",update:"runtime",
+  min:0,max:4,step:0.05,digits:2,unit:"cells",
+  hint:"How far, in fine cells, the surface may move when its tile runs at 4h. A surface tile coarsens when its 4h corners reproduce the fine surface within this; a 4h surface tile refines when its curvature predicts twice this. Speed never forces fine cells. 0 keeps every surface tile fine."});
+params.push({kind:"number",key:"coarseningFastTravel",label:"Fast surface travel",default:4,tier:"coarse",update:"runtime",
+  min:0,max:64,step:1,digits:0,unit:"cells/step",
+  hint:"A surface tile whose own velocity carries it this many fine cells per step runs at 4h whatever its shape: at 4h the same step has a quarter of the Courant number, so fast fronts resolve better coarse. 0 lets shape alone decide."});
+params.push({kind:"number",key:"coarseningBoundaryTravel",label:"Boundary impact travel",default:1,tier:"coarse",update:"runtime",
+  min:0,max:64,step:0.5,digits:1,unit:"cells/step",
+  hint:"Surface liquid a wall or solid redirects is fine whatever its speed: liquid moving at least this many fine cells per step toward a closed wall or solid it reaches within one 4h cell (impact), or up a closed side wall faster than along it (lift). At 4h such a sheet is thinner than an owner can pressurise, so it piles up instead of climbing. Free fast fronts are unaffected. 0 disables."});
 
 /** Shared by the studio and scene harnesses. */
 export const UNIFORM_GEOMETRIC_PARAMS: readonly MethodParamSpec[] = Object.freeze(params);

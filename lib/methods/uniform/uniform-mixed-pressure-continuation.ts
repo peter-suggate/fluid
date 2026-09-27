@@ -3,6 +3,7 @@ import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { mixedCellWidth } from "./uniform-mixed-layout";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedPressureBoundaryIndexWGSL, uniformMixedPressureStorage } from "./uniform-mixed-pressure-boundary.wgsl";
+import { UniformMixedPressurePasses } from "./uniform-mixed-pressure-stage";
 
 type Continuation=ReturnType<WebGPUUniformPressureMultigrid["prepareMixedContinuation"]>;
 interface Fields {pressure:GPUBufferBinding;rhs:GPUBufferBinding;minimum:GPUBufferBinding;phi:GPUBufferBinding;
@@ -101,10 +102,13 @@ fn umNativeMixedIndex(p:vec3u)->vec2u {
  }
  encode(encoder:GPUCommandEncoder,group:GPUBindGroup,uniformGroup:GPUBindGroup,kind:"v"|"full"="v",initializeTopology=true):void{
   if(!this.upload||!this.download)throw new Error("Mixed pressure continuation is not initialized");
+  // Upload, the native cycle and download share one pass; only the native
+  // setup's tile-list copies (first cycle of a solve) end it.
+  const passes=new UniformMixedPressurePasses(encoder,"Uniform mixed pressure continuation");
   const dispatch=(pipeline:GPUComputePipeline)=>{
-   const pass=encoder.beginComputePass({label:"Uniform mixed/native pressure transfer"});pass.setPipeline(pipeline);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);
-   pass.dispatchWorkgroups(...this.native.phi.dimensions.map(n=>Math.ceil(n/4)) as [number,number,number]);pass.end();
+   const pass=passes.pass;pass.setPipeline(pipeline);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);
+   pass.dispatchWorkgroups(...this.native.phi.dimensions.map(n=>Math.ceil(n/4)) as [number,number,number]);
   };
-  dispatch(this.upload);this.native.encode(encoder,uniformGroup,kind,initializeTopology);dispatch(this.download);
+  dispatch(this.upload);this.native.encode(encoder,uniformGroup,kind,initializeTopology,passes);dispatch(this.download);passes.end();
  }
 }

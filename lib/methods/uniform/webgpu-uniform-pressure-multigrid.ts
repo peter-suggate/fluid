@@ -747,20 +747,24 @@ export class WebGPUUniformPressureMultigrid {
       phi:field(root.phi[0]),topology:field(root.volume[0]),
       /** Clear only continuation work lists. The outer mixed solve owns
        * diagnostics/acceptance; the native coarse solve retains its counters. */
-      encode:(encoder:GPUCommandEncoder,uniformGroup:GPUBindGroup,kind:"v"|"full"="v",initializeTopology=true)=>{
+      /** `shared` batches every dispatch into its open pass (a dispatch is
+       * its own usage scope), ending it only for the tile-list copies. */
+      encode:(encoder:GPUCommandEncoder,uniformGroup:GPUBindGroup,kind:"v"|"full"="v",initializeTopology=true,
+        shared?:{readonly pass:GPUComputePassEncoder;readonly commands:GPUCommandEncoder})=>{
         this.assertLive();
+        const commands=()=>shared?.commands??encoder;
         for(let i=level;initializeTopology&&i<this.levels.length;i++){
-          if(this.smoothTileBuffers[i])encoder.clearBuffer(this.smoothTileBuffers[i]!,0,4);
+          if(this.smoothTileBuffers[i])commands().clearBuffer(this.smoothTileBuffers[i]!,0,4);
         }
         for(const dispatch of plans[kind === "full" ? 1 : 0]!){
           if(dispatch.continuationSetup&&!initializeTopology)continue;
-          const pass=encoder.beginComputePass({label:`Uniform mixed continuation ${dispatch.entryPoint}`});
+          const pass=shared?.pass??encoder.beginComputePass({label:`Uniform mixed continuation ${dispatch.entryPoint}`});
           pass.setPipeline(dispatch.pipeline);pass.setBindGroup(1,dispatch.group);
           pass.setBindGroup(0,this.tileEntry(dispatch.entryPoint)?this.smoothTileInputGroup!:uniformGroup);
           if(dispatch.tileDispatch!==undefined)pass.dispatchWorkgroupsIndirect(this.smoothTileDispatch!,dispatch.tileDispatch);
           else pass.dispatchWorkgroups(...dispatch.workgroups);
-          pass.end();
-          if(dispatch.entryPoint==="mgPublishSmoothTiles")encoder.copyBufferToBuffer(
+          if(!shared)pass.end();
+          if(dispatch.entryPoint==="mgPublishSmoothTiles")commands().copyBufferToBuffer(
             this.smoothTileBuffers[dispatch.activeLevel]!,4,this.smoothTileDispatch!,24*dispatch.activeLevel,12);
         }
       },

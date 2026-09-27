@@ -133,7 +133,9 @@ fn umLowFaceV(o:UMOwner,t:vec4f,axis:u32)->f32{
 @compute @workgroup_size(64) fn buildRhs(@builtin(global_invocation_id) gid:vec3u){
  let o=umAllOwner(gid);if(o.width==0u){return;}var terms:array<f32,6>;
  ${this.solid?"let topology=umOwnerTopology(o);textureStore(topologyOut,vec3i(umOrigin(o)),topology);":""}
- for(var axis=0u;axis<3u;axis++){for(var side=0u;side<2u;side++){
+ // Only a liquid owner keeps its divergence: air skips the face loads.
+ let liquid=umPressureLiquid(o);
+ if(liquid){for(var axis=0u;axis<3u;axis++){for(var side=0u;side<2u;side++){
   let sign=select(-1,1,side==1u);let first=umFace(o,axis,sign,0u);var flux=0.0;
   for(var part=0u;part<first.count;part++){
    let face=umFace(o,axis,sign,part);var fraction=1.0;
@@ -142,13 +144,15 @@ fn umLowFaceV(o:UMOwner,t:vec4f,axis:u32)->f32{
    flux+=fraction*umFaceVelocity(face)*f32(face.width*face.width);
   }
   terms[2u*axis+side]=f32(sign)*flux/(f32(o.width*o.width*o.width)*UM_H[axis]);
- }}
- let divergence=(terms[0]+terms[1])+(terms[4]+terms[5])+(terms[2]+terms[3]);
- rhs[o.index]=select(0.0,-params.policy.x*(divergence-textureLoad(correction,vec3i(umOrigin(o)),0).x)/params.hDt.w,umPressureLiquid(o));
+ }}}
+ var value=0.0;
+ if(liquid){let divergence=(terms[0]+terms[1])+(terms[4]+terms[5])+(terms[2]+terms[3]);
+  value=-params.policy.x*(divergence-textureLoad(correction,vec3i(umOrigin(o)),0).x)/params.hDt.w;}
+ rhs[o.index]=value;
  minimum[o.index]=${this.solid?"select(-3.402823e38,0.0,o.width==1u&&umCellInsideSolid(vec3i(umOrigin(o))))":"-3.402823e38"};pressures[o.index]=0.0;
  ${uniformMixedPressureBoundaryLoop(`let face=umFace(o,axis,sign,0u);let open=umOpenTop(face);
   let b=f32(sign)*params.policy.x*${this.solid?"select(umLowFaceV(o,topology,axis),topology[axis+1u],sign>0)":"0.5"}*umFaceVelocity(face)/(f32(o.width)*UM_H[axis]*params.hDt.w);
-  rhs[halo]=select(0.0,b,umPressureLiquid(o)&&!open);minimum[halo]=select(0.0,-3.402823e38,open);pressures[halo]=0.0;`)}
+  rhs[halo]=select(0.0,b,liquid&&!open);minimum[halo]=select(0.0,-3.402823e38,open);pressures[halo]=0.0;`)}
 }
 `;
   const projectSource=common+/* wgsl */`
@@ -182,15 +186,19 @@ fn umAirborne(o:UMOwner)->bool{
  return true;
 }
 fn umProject(o:UMOwner,face:UMFace)->f32{
- let v=umFaceVelocity(face);let liquid=umPressureLiquid(o);let scale=params.hDt.w/params.policy.x;
+ let liquid=umPressureLiquid(o);let scale=params.hDt.w/params.policy.x;
+ // Air on both sides keeps its velocity only beside an airborne owner. Any
+ // other air face is zero whatever its V: skip the V and velocity loads.
+ if(!liquid&&(face.neighbor.width==0u||!umPressureLiquid(face.neighbor))&&!(umAirborne(o)||umAirborne(face.neighbor))){return 0.0;}
  ${this.solid?"if(umProjectV(o,face)<=1e-6){return 0.0;}":""}
+ let v=umFaceVelocity(face);
  if(face.neighbor.width==0u){
-  if(!liquid){return select(0.0,v,umAirborne(o));}
+  if(!liquid){return v;}
   var other=pressures[umBoundaryIndex(o,face.axis,face.sign)];var theta=1.0;
-  if(umOpenTop(face)){other=0.0;theta=cm12GhostFluidTheta(umPressurePhi(o),0.5*f32(o.width)*min(UM_H.x,min(UM_H.y,UM_H.z)),1e-9);}
+  if(umOpenTop(face)){other=0.0;theta=umPressureSurfaceTheta(umPressurePhi(o),0.5*f32(o.width)*min(UM_H.x,min(UM_H.y,UM_H.z)),f32(o.width)*min(UM_H.x,min(UM_H.y,UM_H.z)));}
   return v-scale*f32(face.sign)*(other-umPressure(o))/(f32(o.width)*UM_H[face.axis]*theta);
  }
- if(!liquid&&!umPressureLiquid(face.neighbor)){return select(0.0,v,umAirborne(o)||umAirborne(face.neighbor));}
+ if(!liquid&&!umPressureLiquid(face.neighbor)){return v;}
  return v-scale*umReconstructedPressureGradient(o,face);
 }
 fn umProjectWithSource(o:UMOwner,face:UMFace)->f32{
@@ -213,6 +221,9 @@ fn umRelease(o:UMOwner,face:UMFace,v:f32)->bool{
 ${uniformMixedFaceDispatchWGSL("project","umProjectWithSource(owner,face)",true,`
    var released=0u;
    for(var axis=0u;axis<3u;axis++){
+    // Every positive release needs a nonzero component (+-0*dt never
+    // exceeds 1e-4 h): a zero one skips its face lookup and contact tests.
+    if(value[axis]!=0.0){
     let face=umPositiveFaceAtAnchor(owner,axis,ownedFace.anchor);
     ${this.solid?`if(owner.width==1u){
      // Native embedded/wall contact: the solved active set where open and
@@ -225,6 +236,7 @@ ${uniformMixedFaceDispatchWGSL("project","umProjectWithSource(owner,face)",true,
       if(solidPressure<=0.0&&select(1.0,-1.0,own)*value[axis]*params.hDt.w>1e-4*UM_H[axis]){released|=1u<<axis;}
      }
     }else `:""}if(face.width!=0u&&umRelease(owner,face,value[axis])){released|=1u<<axis;}
+    }
     if(umOrigin(owner)[axis]==0u){let low=umFace(owner,axis,-1,0u);
      if(umRelease(owner,low,umProjectWithSource(owner,low))){released|=1u<<(axis+3u);}}
    }

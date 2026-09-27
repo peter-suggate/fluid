@@ -388,3 +388,180 @@ Incorporate its changes as they land:
     different pressure coupling, such as a 4h global solve plus a
     flux-constrained fine band correction, before anything else can move.
     The hydrostatic split cannot be judged until then.
+- 2026-09-27 pressure-only transitions (production; the only mode since the
+  graded "all" mode, its UI select and `mixedPressureOnlyTransitions` were
+  retired the same day).
+  - The simulation layout L is ungraded h/4h. Every transport, surface,
+    momentum and force stage runs on it, with no 2h seams.
+  - Pressure level 0 runs on G = `uniformMixedPressureLayout(L)`. G is
+    refine-only: a 4h tile in the 26-neighbourhood of an h tile becomes 2h.
+    Levels 1 and 2 derive from G, so the existing 2:1 operator and
+    multigrid are untouched. This avoids the T-junction problem without a
+    new solver.
+  - `UniformMixedOwnershipTransfer` maps L to G before the pressure
+    stages. It does a whole-texture copy, then the tile-parallel remap over
+    the `markTransfer` worklist: changed tiles plus unchanged coarse +axis
+    neighbours. Volume and phi go to scratch; velocity and negative faces
+    go into the rhs inputs.
+  - Pressure geometry and authority write G's own target and centerPhi,
+    so the renderer keeps L's. G to L remaps faces only. That is
+    flux-exact (a 4h face is the mean of its 2h faces), so the field
+    stays divergence-free on L.
+  - `presentPressure` re-indexes level-0 pressure and phi by L owner for
+    the overlay.
+  - When G == L (no h tiles, or all fine), the direct bindings run and
+    nothing is paid.
+  - The builder emits [L ungraded, G graded, 2h] in one GPU pass.
+  - The remap and transfer kernels are tile-parallel: one workgroup per
+    tile, 64 cell lanes or 192 face lanes. Remap median 6 to 3 ms.
+  - Dam break 128³, dynamic, steps 16-30 medians: pass sum 119.0 against
+    130.6 ms graded, wall 148.8 against 154.6 ms.
+    - Surface stages saved: surface volume 4.6, advect 2.8, momentum 2.5,
+      plan 2.2, forces 2.1, census 1.2, geometry 1.0 and taps 0.9 ms.
+    - Transfers cost 2.4 + 2.7 ms, the extension re-authority about 1 ms
+      and the copies about 1 ms.
+    - Pressure geometry on G costs 1.4 ms against 0.7 on L.
+  - Still tank: 0.01 m/s from step 8, the same as graded. The old 4:1
+    pressure reached 0.61 m/s.
+  - Isolated timings only: Metal pass timestamps include queue waits. The
+    presentation pass read 6.5 ms by timestamp and 0.16 ms in isolation.
+  - Next leads:
+    - Transfer velocity in place rather than copying whole textures.
+    - A cheaper pressure geometry.
+    - The 20-40 m/s splash spike at steps 8-15, which graded shows too.
+- 2026-09-27 4h-first census (P1, P2, P3, P6, fast gate, forward dilation).
+  h is kept only where 4h cannot represent the surface; everything else,
+  including fast fronts, runs at 4h.
+  - P1 face-aware dilation. classify packs, per required tile, six nibbles
+    of cells from each face to the nearest crossing owner. Dilation reaches
+    a neighbour only as far as the surface actually lies from that face.
+  - P2 only phi crossings refine. V/phi disagreement in a coarse owner is
+    counted (`uniformMixedDynamicCoarsePartialVolume`), not refined.
+  - P3 resolvability, `coarseningSurfaceTolerance` tau (default 0.5
+    cells).
+    - An h tile may coarsen when trilinear phi from its 8 tile corners
+      matches its 125 vertices within tau*h near the surface
+      (min(|phi|,|I|) < 2h).
+    - A 4h tile refines when its 4h-lattice second difference / 8 exceeds
+      2*tau*h (the factor 2 is hysteresis).
+  - Fast gate, `coarseningFastTravel` F (default 4 cells/step, one 4h cell;
+    about 0.75 m/s on the dam scene).
+    - A tile whose own face-velocity bounds give max|u|*dt/h >= F (F/2 for
+      a 4h tile, hysteresis) is not required fine.
+    - A fast front runs at 4h. It resolves no worse there: it moves more
+      than one 4h cell per step either way, and 4h is the better-conditioned
+      advection.
+  - Forward dilation (F > 0). Tile p is fine when some required tile q
+    within ceil(F/4)+margin reaches it:
+    gap(q, facing face) + 4*(tile distance - 1) <= travel_q + 4*margin.
+    The backward departure-box test remains only for F = 0.
+  - required = crossing AND NOT fast AND NOT resolvable. The fatal
+    "phi crossing in coarse owner" invariant is retired;
+    `uniformMixedDynamicUnresolvedCoarse` counts 4h tiles the census
+    refined, for information only.
+  - P6. The census's plan and extension are reused by the next advance
+    when the parameters are identical and nothing changed. Layout changes
+    and every host mutator invalidate them (`invalidateExtension`).
+  - Still tank: 0 fine tiles (was 1024), wall 24 ms (was 68.6 ms).
+    Spurious speed 0.33 m/s is the all-4h free-surface problem (0.39 m/s
+    all-4h), under investigation.
+  - Dam, steps 16-30 medians: wall 101 ms against 148.8, h tiles 1970
+    against 11320. Steps 3-15 run all-4h at 24-30 ms. Churn is 500-1200
+    refined tiles per step. Late dust (26-37 cells) and drift -1.2e-4 at
+    step 30 still fail the lane's 1e-4 gate.
+- 2026-09-27 round-trip consistency of ownership changes.
+  - Phi: coarsening samples canonical corners, and refinement fills fine
+    vertices trilinearly from them, so coarse -> fine -> coarse is the
+    identity. Fine -> coarse -> fine loses only detail the census judged
+    below tau.
+  - Faces: refinement interpolates each fine face between the coarse
+    owner's two patches, and boundary fine faces take the patch itself.
+    Coarsening averages the fine faces over the patch. Round trips are
+    exact and each fine cell inherits its parent's divergence.
+  - Volume: refinement used to broadcast the donor's V into every fine
+    cell, a uniform V that contradicts the sharp phi it had just
+    interpolated. The volume-correction/sharpening stages then moved mass
+    to reconcile them, a spurious source at every refinement.
+    - Now each cell takes its new owner's geometric fill (umSurfaceTarget
+      on the remapped phi, the same target the solver compares against).
+    - Fills are scaled so the donor's volume is conserved exactly. Filled
+      fractions shrink when the donor holds less than phi implies, empty
+      fractions shrink when it holds more, and every value stays in
+      [0,1].
+    - Averaging back on re-coarsening returns the donor's V exactly.
+    - Measured with a forced all-fine -> all-4h -> all-fine -> all-4h
+      probe. coarse -> fine -> coarse: dV 7e-7, dP 0, dU 2e-8.
+    - Median |V - fill(phi)| after refinement fell from 0.38 to 0.05 in the
+      tank and from 0.30 to 0.10 in the dam at step 20. The tank's residual
+      is its 4h state's own V/phi disagreement, which the remap conserves
+      rather than reshapes.
+    - Overfull donors (V > 1), and donors whose phi fill is under half a
+      cell or over n - 1/2, keep the uniform broadcast.
+- 2026-09-27 free-surface theta. The all-4h still tank at 0.39 m/s was
+  ghost-fluid theta, not width: an all-fine tank filled through a row of
+  centres boiled the same way.
+  - A liquid centre on the surface discharged its clamped pressure
+    (rho g * 0.05 d) sideways through tangential faces.
+  - The 0.05 clamp made the effective surface jump whenever a centre
+    crossed phi = 0.
+  - Fix: `umPressureSurfaceTheta` floors the liquid depth at
+    theta_min * spacing before the ratio, with
+    `UNIFORM_MIXED_THETA_MIN` = 1e-3. It is the single theta source for
+    the rows, operator, ghost slopes, reconstruction, projection and the
+    open lid.
+  - Result: the all-4h tank runs at 0.03 m/s, and all-fine is
+    bit-identical.
+  - The remaining motion at tolerance 5 comes from cold-start pressure
+    acceptance (the one-cycle residual has the same sign every step).
+    Leads: warm-start pressure, or a width-aware tolerance.
+  - Dam, dynamic, with both fixes: drift at most 7.8e-5 (was 1.24e-4),
+    step-30 dust 8.9 (was 37), wall median steps 16-30 115 ms (h tiles
+    2326 against 1970, a chaotic run with more cycles).
+- 2026-09-27 surface break-up on refinement (4h -> h). The remap worklist
+  skipped tiles that were h in both layouts. When a neighbour refines, an
+  equal-width tie in `umVertexAuthority` hands such a tile the vertices on
+  the neighbour's -x/-y/-z faces. The old layout derived those vertices from
+  the 4h corners and never stored them, so the stale texel (from before the
+  tile coarsened) became the surface.
+  - Measured on the dam break: every refined tile's low faces disagreed with
+    its 4h surface by up to 100 h, with 1-6k sign flips per step. Small
+    liquid components rose from 2 to 260 against about 20 all-fine, and
+    pressure diverged at step 33.
+  - Fix: `markChanged` also lists an h -> h tile beside a refining tile. Its
+    cells and faces remap as the identity, and its vertices are rewritten
+    from the old layout's sampling.
+  - Result: every stored vertex of every refined tile equals its 4h
+    trilinear surface (40 steps). Small components match all-fine, and the
+    run completes.
+  - The lane asserts this on every refined tile.
+- 2026-09-27 boundary rules (far-wall run-up stall). On the long dam
+  (`sparse-cm12-long-dam-break`), the 4h-first census kept the whole
+  impact at 4h: the fast gate exempted it, and the pile's phi is linear
+  enough to pass P3. Arriving liquid sat in 4h owners whose centre phi is
+  air ("hidden V": no pressure row, no momentum of its own). Hidden V in
+  the last 16 columns grew from 1k to 3k cells (all-fine 0.1-0.3k), and the
+  run-up stalled at 9-17 cells for five steps.
+  - The fast 4h run-out also holds 17-20% hidden V and is harmless there,
+    so hidden V alone cannot be the trigger. The trigger is the boundary.
+  - `coarseningBoundaryTravel` (default 1 cell/step; 0 disables). A
+    crossing tile is required h whatever its speed when either rule holds:
+    - Impact: it is within one 4h cell of a closed wall or solid-coupled
+      tile, moving toward it faster than along it.
+    - Lift: it is on a closed vertical wall, moving up faster than along
+      the wall.
+    Floor run-outs and fronts passing a wall meet neither rule.
+  - Boundary tiles dilate by their own directional travel (a second
+    per-tile word, capped at 16 cells/step). Isotropic dilation by their
+    speed made 4-7k h tiles at 128³. Required tiles, not partial-V tiles:
+    refined spray fell under the dust threshold (9 cells in three steps).
+  - Contact, not predicted arrival. Adding the step's travel to the reach
+    refined the toe early and held it at x=180-185 for three steps.
+  - Long dam: the front matches the rule-free arm, reaching the wall at
+    step 23. Run-up is 12, 16, 29, 43, 57, 78 and 96 (the ceiling) at
+    steps 24-34, where the old run stalled at 9-17. H = 0.5 m, so ideal
+    u²/2g is ~80 cells. Whether 96 is physical is open (energy trace).
+  - Cost: the lane passes with drift <1e-4, but its median wall is
+    96.9 ms against 62.5 ms without the rules. h tiles peak at ~4.4k
+    against ~1k at 128³. On the long dam, steps 20-40 cost 43-46 ms
+    against 24 (rules off) and 27 (all-fine). Thresholds 1, 2 and 4
+    cells/step give the same cost: the impact itself is what goes h.

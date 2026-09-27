@@ -7,7 +7,7 @@ import { UniformMixedVelocityRestriction } from "./uniform-mixed-velocity-restri
 import { UniformMixedTransportStage } from "./uniform-mixed-transport";
 import { assertUniformMixedSolidPromotion, createUniformMixedLayout, mixedCellWidth, uniformMixedSolidTiles } from "./uniform-mixed-layout";
 import { UniformMixedLayoutBuilder } from "./uniform-mixed-layout-builder";
-import { UniformMixedDynamicClassifier, UNIFORM_MIXED_DYNAMIC_FULL_TOLERANCE } from "./uniform-mixed-dynamic";
+import { UniformMixedDynamicClassifier, UNIFORM_MIXED_DYNAMIC_FULL_TOLERANCE, UNIFORM_MIXED_DYNAMIC_SURFACE_TOLERANCE, UNIFORM_MIXED_DYNAMIC_FAST_TRAVEL, UNIFORM_MIXED_DYNAMIC_BOUNDARY_TRAVEL } from "./uniform-mixed-dynamic";
 import { uniformMixedNativeTraceWGSL } from "./uniform-mixed-topology.wgsl";
 import type { FluidRefinementRegion } from "../../core/model";
 import { refinementRegionLattice } from "../../core/refinement-regions";
@@ -216,6 +216,14 @@ export interface WebGPUUniformReferenceOptions {
   mixedCoarsening?: "regions" | "dynamic";
   mixedCoarseningReach?: number;
   mixedCoarseningHysteresis?: number;
+  /** Surface error in h a 4h tile may carry (UniformMixedDynamicPolicy.surfaceTolerance). */
+  mixedCoarseningSurfaceTolerance?: number;
+  /** Surface travel in h per step from which a tile runs at 4h (UniformMixedDynamicPolicy.fastTravel). */
+  mixedCoarseningFastTravel?: number;
+  /** Travel in h per step from which boundary-redirected surface liquid is h (UniformMixedDynamicPolicy.boundaryTravel). */
+  mixedCoarseningBoundaryTravel?: number;
+  /** Mixed 2h transition owners exist only in pressure: every other stage runs
+   * on ungraded h/4h ownership. Absent means on. */
   /**
    * E2b: velocity advection and the projection take their far-air arm directly
    * in cells outside the fine tiles. Also gated on `twoLevelVelocity`, since the
@@ -618,6 +626,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private mixedCoarsening: "regions" | "dynamic";
   private mixedCoarseningReach: number;
   private mixedCoarseningHysteresis: number;
+  private mixedCoarseningSurfaceTolerance: number;
+  private mixedCoarseningFastTravel: number;
+  private mixedCoarseningBoundaryTravel: number;
+  /** Split pressure's own surface target and centre phi (UniformMixedFrameFields.pressureGeometry). */
+  private mixedPressureGeometry?: { target: GPUTexture; centerPhi: GPUTexture };
   /** E3: the twelve transport passes run on the live tile set, not densely. */
   private transportTiles: boolean;
   /** Extra 4h tiles the transport set adds past the fine set. */
@@ -1127,6 +1140,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.mixedCoarsening = options.mixedCoarsening === "dynamic" ? "dynamic" : "regions";
     this.mixedCoarseningReach = Number.isFinite(options.mixedCoarseningReach) ? Math.round(Math.min(8, Math.max(0, options.mixedCoarseningReach!))) : 0;
     this.mixedCoarseningHysteresis = Number.isFinite(options.mixedCoarseningHysteresis) ? Math.round(Math.min(4, Math.max(0, options.mixedCoarseningHysteresis!))) : 0;
+    this.mixedCoarseningSurfaceTolerance = Number.isFinite(options.mixedCoarseningSurfaceTolerance) ? Math.min(4, Math.max(0, options.mixedCoarseningSurfaceTolerance!)) : UNIFORM_MIXED_DYNAMIC_SURFACE_TOLERANCE;
+    this.mixedCoarseningFastTravel = Number.isFinite(options.mixedCoarseningFastTravel) ? Math.min(64, Math.max(0, options.mixedCoarseningFastTravel!)) : UNIFORM_MIXED_DYNAMIC_FAST_TRAVEL;
+    this.mixedCoarseningBoundaryTravel = Number.isFinite(options.mixedCoarseningBoundaryTravel) ? Math.min(64, Math.max(0, options.mixedCoarseningBoundaryTravel!)) : UNIFORM_MIXED_DYNAMIC_BOUNDARY_TRAVEL;
     const allocation = planUniformHostAllocation(nx, ny, nz, "maccormack");
     this.executionNegativeBoundaryVelocityBytes = allocation.boundaryVelocityBytes;
     const usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING
@@ -1689,6 +1705,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const fine=createUniformMixedLayout(refinementRegionLattice(this.scene),[]);
     const promotion=this.mixedSolidPromotion();
     this.mixedStaticSolid=promotion.cutCells>0||sceneHasTerrain(this.scene);
+    const scalar=(label:string)=>this.device.createTexture({label,size:[this.gammaB.width,this.gammaB.height,this.gammaB.depthOrArrayLayers],dimension:"3d",format:"r32float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING});
+    const pressureGeometry={target:scalar("Uniform mixed pressure surface target"),centerPhi:scalar("Uniform mixed pressure centre phi")};
+    this.mixedPressureGeometry=pressureGeometry;
+    this.executionInfo.allocatedBytes+=2*this.gammaB.width*this.gammaB.height*this.gammaB.depthOrArrayLayers*4;
     this.mixedFrame=new UniformMixedFrame(this.device,fine,{
       arena:this.scratchArena,conditioning:this.conditioningScratch,volume:this.volumeA,volumeScratch:this.volumeB,
       velocity:this.velocityA,velocityScratch:this.velocityB,departure:this.velocityD,
@@ -1696,16 +1716,17 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       phi:this.vertexPhiField,phiScratch:this.vertexPhiScratch,phase:this.surfaceA,centerPhi:this.surfaceB,target:this.gammaB,correction:this.gammaA,
       pressure:this.pressureMultigrid.prepareMixedContinuation(),extension:this.velocityExtrapolator.prepareMixedContinuation(),uniformGroup:this.pressureMultigridGroup,sourceParams:this.params,
       solid:this.mixedStaticSolid?{params:this.params,scratch:this.activeScratch,terrain:this.terrainTexture}:undefined,
+      pressureGeometry,
     },this.scene.container.top==="open",this.pressureSchedule);
     await this.mixedFrame.initialize();
     this.mixedDiagnostics=new UniformMixedDiagnostics(this.device,this.mixedFrame.ownership,this.volumeA,this.velocityA,this.vertexPhiField,this.reductions);
     await this.mixedDiagnostics.initialize();
     this.mixedDynamic=new UniformMixedDynamicClassifier(this.device,this.mixedFrame.ownership,this.volumeA,this.vertexPhiField,this.velocityB);
     await this.mixedDynamic.initialize();
-    this.mixedBuilder=new UniformMixedLayoutBuilder(this.device,this.mixedDynamic.bandBits,[this.mixedFrame.ownership,this.mixedFrame.levels[1]!.ownership]);
+    this.mixedBuilder=new UniformMixedLayoutBuilder(this.device,this.mixedDynamic.bandBits,this.mixedFrame.builderLevels);
     await this.mixedBuilder.initialize();
     this.executionInfo.allocatedBytes+=this.mixedFrame.allocatedBytes+this.mixedDynamic.allocatedBytes+this.mixedBuilder.allocatedBytes;
-    this.mixedSource={vertexPhi:this.vertexPhiField,openFraction:this.gammaB,cellSize_m:fine.lattice.cellSize_m,mixedOwnership:this.mixedFrame.ownership.presentation,mixedPressure:this.mixedFrame.levels[0]!.pressure,mixedPressurePhi:this.mixedFrame.levels[0]!.phi,mixedSupport:{buffer:this.mixedFrame.ownership.support}};
+    this.mixedSource={vertexPhi:this.vertexPhiField,openFraction:this.gammaB,cellSize_m:fine.lattice.cellSize_m,mixedOwnership:this.mixedFrame.ownership.presentation,mixedPressure:this.mixedFrame.presentation.pressure,mixedPressurePhi:this.mixedFrame.presentation.phi,mixedSupport:{buffer:this.mixedFrame.ownership.support}};
     this.updateMixedRegions();
   }
   private mixedDynamic?: UniformMixedDynamicClassifier;
@@ -1714,8 +1735,6 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private mixedBuilderStaticKey?: string;
   /** Last band census, one byte per tile; undefined until the first dynamic census. */
   private mixedDynamicFine?: Uint8Array;
-  /** The live ownership came from the dynamic band, so its violations are fatal. */
-  private mixedDynamicLive=false;
   private mixedDynamicRelayouts=0;
   private updateMixedRegions():void{
     if(!this.mixedFrame)return;
@@ -1732,16 +1751,37 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // Dynamic: the surface band is forced h like a solid, everything else
     // prefers 4h, and authored regions can only add fine constraints.
     const forced=dynamic?solid.forced.map((f,t)=>f|dynamic[t]!):solid.forced;
-    const layout=createUniformMixedLayout(refinementRegionLattice(this.scene),regions,true,dynamic?4:1,forced);
+    // Pressure-only transitions: the simulation layout is h/4h; the frame
+    // grades its own pressure layout.
+    const layout=createUniformMixedLayout(refinementRegionLattice(this.scene),regions,false,dynamic?4:1,forced);
     assertUniformMixedSolidPromotion(layout,solid.forced);
     const built=performance.now();
-    this.mixedFrame.updateLayout(layout);this.mixedRegionKey=key;this.mixedGeneration++;this.mixedDynamicLive=!!dynamic;
+    this.mixedFrame.updateLayout(layout);this.mixedRegionKey=key;this.mixedGeneration++;
     if(dynamic)this.mixedDynamicRelayouts++;
     Object.assign(this.executionInfo,{uniformMixedGeneration:this.mixedGeneration,uniformMixedFineTiles:layout.fineTiles.length,
       uniformMixedTransitionTiles:layout.transitionTiles.length,uniformMixedCoarseTiles:layout.coarseTiles.length,
+      uniformMixedPressureTransitionTiles:this.mixedFrame.pressureOwnership.layout.transitionTiles.length,
       uniformMixedOwners:layout.cellCount,uniformSimulationCellScale:undefined,
       uniformMixedLayoutBuild_ms:built-started,uniformMixedLayoutApply_ms:performance.now()-built,
       uniformMixedDynamicRelayouts:this.mixedDynamicRelayouts});
+  }
+  /** Dynamic coarsening: a ball dropped into far air would land on 4h owners
+   * and put its phi crossing there, which the next census rejects as fatal.
+   * Refine every tile the ball covers (plus one cell for its vertex phi)
+   * before the step that adds it; the census after that step keeps them fine
+   * as ordinary interface tiles. */
+  private promoteMixedDrop(drop:InjectedLiquidBall):void{
+    if(this.mixedCoarsening!=="dynamic"||!this.mixedDynamicFine)return;
+    const {dimensions,cellSize_m,origin_m}=refinementRegionLattice(this.scene);
+    const n=dimensions.map(d=>d/4);
+    const centre=[drop.centre_m.x-origin_m.x,drop.centre_m.y-origin_m.y,drop.centre_m.z-origin_m.z];
+    const half=[drop.radius_m,drop.radius_m,drop.halfHeight_m??drop.radius_m];
+    const tile=(axis:number,offset:number)=>Math.min(n[axis]!-1,Math.max(0,Math.floor(((centre[axis]!+offset)/cellSize_m[axis]!+Math.sign(offset))/4)));
+    const lo=[0,1,2].map(a=>tile(a,-half[a]!)),hi=[0,1,2].map(a=>tile(a,half[a]!));
+    const fine=this.mixedDynamicFine.slice();
+    for(let z=lo[2]!;z<=hi[2]!;z++)for(let y=lo[1]!;y<=hi[1]!;y++)for(let x=lo[0]!;x<=hi[0]!;x++)fine[x+n[0]!*(y+n[1]!*z)]=1;
+    this.mixedDynamicFine=fine;
+    this.updateMixedRegions();
   }
   /** Classify the completed frame's state and adopt the new band if it moved.
    * Runs between frames, inside the pending frame, so the next advance waits. */
@@ -1756,40 +1796,39 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       // Static h tiles: solid promotion and fine-only regions. With a 4h
       // background nothing else is h; region conflicts throw here, on the CPU.
       const solid=this.mixedSolidPromotion();
-      const staticLayout=createUniformMixedLayout(refinementRegionLattice(this.scene),regions,true,4,solid.forced);
+      const staticLayout=createUniformMixedLayout(refinementRegionLattice(this.scene),regions,false,4,solid.forced);
       builder.setStatic(Uint8Array.from(staticLayout.tiles,word=>mixedCellWidth(word)===1?1:0),staticLayout.regions);
+      this.mixedDynamic.setSolid(solid.coupled);
       this.mixedBuilderStaticKey=staticKey;
     }
     const encoder=this.device.createCommandEncoder({label:"Uniform dynamic ownership census"});
     this.mixedFrame.encodeExtension(encoder);
-    this.mixedDynamic.encode(encoder,{dt,reach:this.mixedCoarseningReach,hysteresis:this.mixedCoarseningHysteresis,
+    this.mixedDynamic.encode(encoder,{dt,reach:this.mixedCoarseningReach,hysteresis:this.mixedCoarseningHysteresis,surfaceTolerance:this.mixedCoarseningSurfaceTolerance,fastTravel:this.mixedCoarseningFastTravel,
+      boundaryTravel:this.mixedCoarseningBoundaryTravel,closedWalls:this.scene.container.top==="open"?0b101111:0b111111,up:Math.sign(-this.scene.fluid.gravity_m_s2.y),
       fullTolerance:UNIFORM_MIXED_DYNAMIC_FULL_TOLERANCE,emptyTolerance:Math.max(this.volumeDustThreshold,1e-6)});
     builder?.encode(encoder);
     this.device.queue.submit([encoder.finish()]);
     const [census,built]=await Promise.all([this.mixedDynamic.read(),builder?.read()]);
     if(this.disposed)return;
     Object.assign(this.executionInfo,{uniformMixedDynamicInterfaceTiles:census.interfaceTiles,uniformMixedDynamicBandTiles:census.fineTiles,
-      uniformMixedDynamicRefined:census.refined,uniformMixedDynamicCoarsened:census.coarsened,uniformMixedDynamicViolations:census.violations,
+      uniformMixedDynamicRefined:census.refined,uniformMixedDynamicCoarsened:census.coarsened,uniformMixedDynamicRequiredTiles:census.requiredTiles,uniformMixedDynamicBoundaryTiles:census.boundaryTiles,uniformMixedDynamicUnresolvedCoarse:census.unresolvedCoarse,
       uniformMixedDynamicCoarsePartialVolume:census.coarsePartialVolume,uniformMixedDynamicCoarsePhiCrossing:census.coarsePhiCrossing,uniformMixedDynamicCoarseDryLiquidPhi:census.coarseDryLiquidPhi,
       uniformMixedDynamicInteriorDeficit:census.interiorDeficit,uniformMixedDynamicAirVolume:census.airVolume});
-    if(this.mixedDynamicLive&&census.violations>0)
-      throw new Error(`Uniform dynamic coarsening: the phi surface reached 2h/4h ownership in ${census.violations} tile(s) within one frame `
-        +`(tiles ${census.violationTiles.map(t=>{const n=this.mixedFrame!.ownership.layout.lattice.dimensions.map(d=>d/4);return `[${t%n[0]!},${Math.floor(t/n[0]!)%n[1]!},${Math.floor(t/(n[0]!*n[1]!))}]`;}).join(" ")}); `
-        +`raise coarseningReach (now ${this.mixedCoarseningReach}) or investigate the departure-box prediction`);
     if(censusOnly||!built)return;
     this.mixedDynamicFine=census.fine;
     const started=performance.now();
-    const [fine,two]=built;
-    if(fine.changedTiles||two.changedTiles)this.mixedFrame.adoptBuiltLayout(fine,two);
+    const fine=built[0]!,pressure=built[built.length-2]!;
+    if(built.some(level=>level.changedTiles))this.mixedFrame.adoptBuiltLayout(built);
     // The built layout is createUniformMixedLayout(regions, background 4,
     // solid ∪ band): record it under the same key the CPU path would use.
     const key=`${staticKey}:dynamic:${uint8Key(census.fine)}`;
     if(key!==this.mixedRegionKey){
-      this.mixedRegionKey=key;this.mixedGeneration++;this.mixedDynamicRelayouts++;this.mixedDynamicLive=true;
+      this.mixedRegionKey=key;this.mixedGeneration++;this.mixedDynamicRelayouts++;
     }
     const layout=fine.layout;
     Object.assign(this.executionInfo,{uniformMixedGeneration:this.mixedGeneration,
       uniformMixedFineTiles:fine.tierCounts[0],uniformMixedTransitionTiles:fine.tierCounts[1],uniformMixedCoarseTiles:fine.tierCounts[2],
+      uniformMixedPressureTransitionTiles:pressure.tierCounts[1],
       uniformMixedOwners:layout.cellCount,uniformSimulationCellScale:undefined,
       uniformMixedLayoutBuild_ms:0,uniformMixedLayoutApply_ms:performance.now()-started,
       uniformMixedDynamicRelayouts:this.mixedDynamicRelayouts,uniformMixedDynamicChangedTiles:fine.changedTiles});
@@ -1818,6 +1857,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   /** Stage integration gate. This prepares no alternative pressure/surface
    * solver and does not enable a partially implemented UI simulation mode. */
   async prepareMixedTransportForQA(regions: readonly FluidRefinementRegion[]): Promise<void> {
+    this.mixedFrame?.invalidateExtension();
     this.assertMixedOptions();
     if (this.mixedTransportForQA) throw new Error("Mixed transport already prepared");
     if (!this.geometricVolume || !this.scratchArena || !this.fieldPages?.nativeStorage
@@ -1976,6 +2016,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   get coarseAdditionalBytes():number { return this.coarseAllocationBytes; }
 
   requestCoarseSimulation():void {
+    this.mixedFrame?.invalidateExtension();
     if(this.disposed)throw new Error("Solver is destroyed");
     if(!this.coarseExecution || !this.restriction)throw new Error("Construct with prepareCoarseSimulation before requesting coarse simulation");
     this.coarseRequested=true;
@@ -1985,6 +2026,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * allocation, compilation, time advancement or reinitialization of liquid.
    * Returns false while an adaptive frame still owns the shared arena. */
   activateCoarseSimulation():boolean {
+    this.mixedFrame?.invalidateExtension();
     if(this.disposed)throw new Error("Solver is destroyed");
     this.requestCoarseSimulation();
     if(this.activeCoarse)return true;
@@ -2015,12 +2057,14 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   }
 
   requestFineSimulation():void {
+    this.mixedFrame?.invalidateExtension();
     if(this.disposed)throw new Error("Solver is destroyed");
     this.coarseRequested=false;
   }
 
   /** Reconstruct current coarse state, never revive the stale fine fields. */
   activateFineSimulation():boolean {
+    this.mixedFrame?.invalidateExtension();
     this.requestFineSimulation();
     const coarse=this.activeCoarse;
     if(!coarse)return true;
@@ -2337,6 +2381,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * paused when it is called — the ball lands when the clock next runs.
    */
   injectLiquidBall(ball: InjectedLiquidBall): void {
+    this.mixedFrame?.invalidateExtension();
     if(this.activeCoarse)return this.activeCoarse.injectLiquidBall(ball);
     if (!(ball.radius_m > 0)) return;
     this.pendingDrop = ball;
@@ -2344,6 +2389,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
 
   /** The editor's water shapes, as far as the one-step drop source reaches: a ball, added. */
   async editFluid(edit: LiveFluidEdit): Promise<LiveFluidEditResult> {
+    this.mixedFrame?.invalidateExtension();
     if(this.activeCoarse)return this.activeCoarse.editFluid(edit);
     if (edit.operation !== "add" || edit.shape !== "ball") {
       return { accepted: false, reason: "This fluid method adds water as balls only; choose Sparse Geometric to remove water or drop other shapes." };
@@ -2367,6 +2413,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * work immediately, so reconstruct the current density once for display.
    */
   applyRuntimeValues(values: MethodParamValues): void {
+    this.mixedFrame?.invalidateExtension();
     if(!this.mixedFrame && values.coarseSimulation === "on")this.requestCoarseSimulation();
     if(!this.mixedFrame && values.coarseSimulation === "off")this.requestFineSimulation();
     if(this.activeCoarse){
@@ -2462,6 +2509,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       }
       if (values.coarseningReach !== undefined) this.mixedCoarseningReach = Math.round(finite("coarseningReach", 0, 0, 8));
       if (values.coarseningHysteresis !== undefined) this.mixedCoarseningHysteresis = Math.round(finite("coarseningHysteresis", 0, 0, 4));
+      if (values.coarseningSurfaceTolerance !== undefined) this.mixedCoarseningSurfaceTolerance = finite("coarseningSurfaceTolerance", UNIFORM_MIXED_DYNAMIC_SURFACE_TOLERANCE, 0, 4);
+      if (values.coarseningFastTravel !== undefined) this.mixedCoarseningFastTravel = finite("coarseningFastTravel", UNIFORM_MIXED_DYNAMIC_FAST_TRAVEL, 0, 64);
+      if (values.coarseningBoundaryTravel !== undefined) this.mixedCoarseningBoundaryTravel = finite("coarseningBoundaryTravel", UNIFORM_MIXED_DYNAMIC_BOUNDARY_TRAVEL, 0, 64);
       if (values.transportWorkMap !== undefined) this.transportTiles = values.transportWorkMap !== "dense";
       if (values.transportReach !== undefined) this.transportReach = Math.round(finite("transportReach", 1, -8, 8));
       if (values.volumePressureRows !== undefined) this.volumePressureRows = values.volumePressureRows === "all" ? 2 : values.volumePressureRows === "off" ? 0 : 1;
@@ -2617,6 +2667,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   /** Initialization hook for manufactured GPU boundary fixtures. Public textures
    * are read-only presentation adapters when fields use page storage. */
   initializeVelocityForQA(values: Float32Array): void {
+    this.mixedFrame?.invalidateExtension();
     if(this.lastTime!==0 || values.length!==4*this.executionInfo.cellCount)throw new Error("Velocity fixture must initialize the complete field at t=0");
     this.upload3DF32(this.velocityA,values,this.executionInfo.nx,this.executionInfo.ny,this.executionInfo.nz);
   }
@@ -3747,6 +3798,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.referenceVolumeCells += dropped / cellVolume;
     }
     this.executionInfo.referenceLiquidVolume_cells = this.referenceVolumeCells;
+    if(drop&&this.mixedFrame)this.promoteMixedDrop(drop);
     this.writeParams(dt, activeBodies.length, strength, drop);
     if(this.mixedFrame){
       const frame=this.mixedFrame;
@@ -4424,11 +4476,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   /** Fence paused remapping so the renderer invalidates its retained surface
    * and publishes resolution status without advancing simulation time. */
   async refreshSceneTopology():Promise<void>{
+    this.mixedFrame?.invalidateExtension();
     if(!this.mixedFrame)return;
     await this.awaitFrameCompletion();await this.device.queue.onSubmittedWorkDone();
   }
 
   applySceneUniforms(scene: SceneDescription): void {
+    this.mixedFrame?.invalidateExtension();
     if(this.coarseExecution) {
       if(scene!==this.scene)throw new Error("Prepared coarse simulation does not yet support scene edits");
       return;
@@ -4454,6 +4508,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   }
 
   syncRigidBodies(bodies: readonly RigidBodyState[]): void {
+    this.mixedFrame?.invalidateExtension();
     if(this.coarseExecution && bodies.length)throw new Error("Prepared coarse simulation does not yet support rigid bodies");
     if (this.framePending) { this.deferredFrameBodies = structuredClone([...bodies]); return; }
     this.rigidSystem.syncBodies(bodies);
@@ -4468,7 +4523,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     if (this.disposed) return;
     this.disposed = true;
     this.coarseExecution?.destroy();
-    this.mixedFrame?.destroy();
+    this.mixedFrame?.destroy();this.mixedPressureGeometry?.target.destroy();this.mixedPressureGeometry?.centerPhi.destroy();
     this.mixedDynamic?.destroy();this.mixedBuilder?.destroy();
     this.mixedTransportForQA?.destroy();
     this.pressureReceipt?.destroy();

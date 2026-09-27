@@ -112,6 +112,8 @@ fn umAirborneOpen(o:UMOwner)->bool{
   if(umCellOpen(vec3i(umOrigin(o))+vec3i(x,y,z))<0.99999){return false;}}}}
  return true;
 }
+// false: the phase-only build (phi and phase; no balance reduction).
+override umAuthorityBalance:bool=true;
 var<workgroup> sums:array<vec2f,64>;
 fn umReduce(l:u32){workgroupBarrier();for(var stride=32u;stride>0u;stride/=2u){if(l<stride){sums[l]+=sums[l+stride];}workgroupBarrier();}}
 @compute @workgroup_size(64) fn build(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) l:u32,@builtin(workgroup_id) group:vec3u){
@@ -121,11 +123,14 @@ fn umReduce(l:u32){workgroupBarrier();for(var stride=32u;stride>0u;stride/=2u){i
   let airborne=params.z>0.5&&v>max(params.w,0.05)&&textureLoad(centerPhi,origin,0).x>${1.5*Math.min(...this.ownership.layout.lattice.cellSize_m)}*f32(o.width)
    &&all(origin>=vec3i(i32(2u*o.width)))&&all(origin+vec3i(i32(3u*o.width))<=vec3i(UM_D))&&umAirborneOpen(o);
   textureStore(phase,origin,vec4f(select(0.0,1.0,distance<0.0||airborne)));
+  if(umAuthorityBalance){
   let cap=umCapacity(o);
   values=vec2f(uvVolumeCorrectionAmountAt(v,cap,params.x),umDeficit(o,v,distance))*f32(o.width*o.width*o.width);
   // Native balance counts open liquid rows only.
   if(umSolidEnabled()&&(cap<=1e-5||distance>=0.0)){values=vec2f(0);}
+  }
  }
+ if(!umAuthorityBalance){return;}
  sums[l]=values;umReduce(l);let index=group.x+umDispatchX*group.y;
  if(l==0u&&index<${this.groups}u){balance[1u+index]=sums[0];}
 }
@@ -146,10 +151,15 @@ fn umReduce(l:u32){workgroupBarrier();for(var stride=32u;stride>0u;stride/=2u){i
   const info=await module.getCompilationInfo(),errors=info.messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.bindLayout]:[])]});
   for(const entryPoint of ["build","chunks","reduce","resolve"])this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX}}}));
+  this.pipelines.set("phase",await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"build",constants:{umDispatchX:this.ownership.dispatchX,umAuthorityBalance:0}}}));
  }
- encode(encoder:GPUCommandEncoder,group:GPUBindGroup):void{
-  if(this.pipelines.size!==4)throw new Error("Mixed pressure authority is not initialized");
-  const pass=encoder.beginComputePass({label:"Uniform mixed pressure authority and volume correction"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);
+ /** balance=false writes phi and phase only: the extension's authority,
+  * when this same stage (same ownership, same origin texels) rebuilds the
+  * correction and its balance scratch before the RHS, their only reader. */
+ encode(encoder:GPUCommandEncoder,group:GPUBindGroup,balance=true):void{
+  if(this.pipelines.size!==5)throw new Error("Mixed pressure authority is not initialized");
+  const pass=encoder.beginComputePass({label:balance?"Uniform mixed pressure authority and volume correction":"Uniform mixed pressure authority phase"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);
+  if(!balance){this.ownership.dispatchAll(pass,this.pipelines.get("phase")!);pass.end();return;}
   for(const entry of ["build","chunks","reduce","resolve"]){const pipeline=this.pipelines.get(entry)!;pass.setPipeline(pipeline);
    if(entry==="chunks")pass.dispatchWorkgroups(this.chunks);else if(entry==="reduce")pass.dispatchWorkgroups(1);else this.ownership.dispatchAll(pass,pipeline);
   }

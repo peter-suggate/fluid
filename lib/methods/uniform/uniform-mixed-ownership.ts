@@ -81,8 +81,11 @@ export class UniformMixedOwnership {
    * Rebuilt when a live edit outgrows it, so consumers read it at encode. */
   readonly hangingLayout: GPUBindGroupLayout;
   private hangingGroupCurrent!: GPUBindGroup;
-  get hangingGroup(): GPUBindGroup { return this.hangingGroupCurrent; }
-  get allocatedBytes(): number { return this.topology.size + this.counts.size + this.support.size+this.speeds.size+this.certifiedDispatch.size+this.hanging!.size+(this.records?.size??0); }
+  get hangingGroup(): GPUBindGroup {
+    if(!this.sampled)throw new Error("This ownership samples no velocity: it has no hanging tap cache");
+    return this.hangingGroupCurrent;
+  }
+  get allocatedBytes(): number { return this.topology.size + this.counts.size + this.support.size+this.speeds.size+this.certifiedDispatch.size+(this.hanging?.size??0)+(this.records?.size??0); }
   readonly dispatchX: number;
   private readonly topology: GPUBuffer;
   /** Stable read-only view for consumers of the accepted ownership generation. */
@@ -108,7 +111,9 @@ export class UniformMixedOwnership {
   private currentLayout: UniformMixedLayout;
   get layout(): UniformMixedLayout { return this.currentLayout; }
 
-  constructor(private readonly device: GPUDevice, layout: UniformMixedLayout) {
+  /** sampled: velocity samplers run on this ownership, so it keeps the
+   * hanging tap cache. Pressure levels and remap targets never sample. */
+  constructor(private readonly device: GPUDevice, layout: UniformMixedLayout, private readonly sampled = true) {
     this.currentLayout = layout;
     this.dispatchX = device.limits.maxComputeWorkgroupsPerDimension;
     this.bindLayout = device.createBindGroupLayout({ entries: [
@@ -144,8 +149,8 @@ export class UniformMixedOwnership {
     const derived=deriveOwnership(layout,this.dispatchX);
     for(const [target,offset,data] of derived.writes)this.device.queue.writeBuffer(this[target],offset,data);
     this.seamCounts=derived.seamCounts;
-    this.reserveHanging(layout.tiles.length,derived.hangingSlots);
-    this.device.queue.writeBuffer(this.hanging!,0,derived.slots);
+    this.hangingSlots=derived.hangingSlots;
+    if(this.sampled){this.reserveHanging(layout.tiles.length,derived.hangingSlots);this.device.queue.writeBuffer(this.hanging!,0,derived.slots);}
     this.currentLayout=layout;
   }
 
@@ -168,8 +173,8 @@ export class UniformMixedOwnership {
     encoder.copyBufferToBuffer(s.support,(6*n+16)*4,this.support,(6*n+16)*4,(3*n+8)*4);
     encoder.copyBufferToBuffer(s.support,(4*n+4)*4,this.certifiedDispatch,0,48);
     this.seamCounts=[...built.seamCounts];
-    this.reserveHanging(n,built.hangingSlots);
-    encoder.copyBufferToBuffer(s.slots,0,this.hanging!,0,2*n*4);
+    this.hangingSlots=built.hangingSlots;
+    if(this.sampled){this.reserveHanging(n,built.hangingSlots);encoder.copyBufferToBuffer(s.slots,0,this.hanging!,0,2*n*4);}
     this.currentLayout=layout;
   }
 
@@ -216,6 +221,13 @@ export class UniformMixedOwnership {
   dispatchRegular(pass:GPUComputePassEncoder,pipelines:readonly GPUComputePipeline[],skipFused=false):void{
     const counts=[this.layout.fineTiles.length,this.layout.transitionTiles.length,this.layout.coarseTiles.length];
     for(const tier of [0,1,2] as const)if(counts[tier]!>this.seamCounts[tier]!&&!(skipFused&&this.fusedRegularTier(tier)))this.dispatchTier(pass,pipelines[tier]!,tier);
+  }
+  /** dispatchRegular's tiers, each sized by `indirect` at tier*12. */
+  dispatchRegularIndirect(pass:GPUComputePassEncoder,pipelines:readonly GPUComputePipeline[],indirect:GPUBuffer,skipFused=false):void{
+    const counts=[this.layout.fineTiles.length,this.layout.transitionTiles.length,this.layout.coarseTiles.length];
+    for(const tier of [0,1,2] as const)if(counts[tier]!>this.seamCounts[tier]!&&!(skipFused&&this.fusedRegularTier(tier))){
+      pass.setPipeline(pipelines[tier]!);pass.dispatchWorkgroupsIndirect(indirect,tier*12);
+    }
   }
   /** Mirrors umFusedRegularTier: small regular tiers ride the fused launch. */
   fusedRegularTier(tier:0|1|2):boolean{

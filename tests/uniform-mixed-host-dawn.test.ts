@@ -40,7 +40,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
   // Add a sphere wholly in coarse air after evolved-state remapping. Count
   // physical volume at canonical addresses, never stale inactive fine texels.
   solver.applySceneUniforms(mixed);
-  const layout=createUniformMixedLayout({dimensions:[32,32,32],cellSize_m:[.025,.025,.025],origin_m:{x:-.4,y:0,z:-.4}},[region]);
+  const layout=createUniformMixedLayout({dimensions:[32,32,32],cellSize_m:[.025,.025,.025],origin_m:{x:-.4,y:0,z:-.4}},[region],false);
   const mass=async()=>{
    const values=await readMixedTexture(device!,solver!.volumeTexture);let sum=0;
    for(let t=0;t<layout.tiles.length;t++){

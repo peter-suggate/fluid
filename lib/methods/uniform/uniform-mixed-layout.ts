@@ -26,7 +26,8 @@ export interface UniformMixedLayout {
 
 /** Manual Uniform ownership, fine outside regions and strongly graded across faces/edges/corners.
  * An explicit coarse background is available for endpoint/numerical QA fixtures.
- * Disabling grading is reserved for direct 4:1 numerical stress tests. */
+ * Without grading the layout is h/4h only: the simulation layout of the
+ * pressure-only transition mode, whose pressure runs on uniformMixedPressureLayout. */
 export function createUniformMixedLayout(
   lattice: RefinementRegionLattice, regions: readonly FluidRefinementRegion[], stronglyBalanced = true, backgroundWidth: 1 | 4 = 1,
   /** Tiles that must be h, from uniformMixedSolidTiles. Solids override
@@ -167,6 +168,25 @@ export function uniformMixedPressureLevel(layout: UniformMixedLayout, minimumWid
   const widths = Uint8Array.from(layout.tiles, word => Math.max(minimumWidth, mixedCellWidth(word)));
   if (widths.every((width, tile) => width === mixedCellWidth(layout.tiles[tile]!))) return layout;
   return packUniformMixedLayout(layout.lattice, widths, layout.regions);
+}
+
+/** The pressure layout of an ungraded h/4h simulation layout: every 4h tile
+ * touching an h tile (26-neighbourhood) becomes 2h. It only refines, so the
+ * projected field restricts back onto the simulation owners flux-exactly:
+ * a 4h owner's faces are sums of its 2h owners' faces. Returns the layout
+ * itself when it is already graded. */
+export function uniformMixedPressureLayout(layout: UniformMixedLayout): UniformMixedLayout {
+  const d = layout.tileDimensions, widths = Uint8Array.from(layout.tiles, mixedCellWidth);
+  let changed = false;
+  for (let key = 0; key < widths.length; key++) {
+    if (widths[key] !== 4) continue;
+    const t = [key % d[0], Math.floor(key / d[0]) % d[1], Math.floor(key / (d[0] * d[1]))];
+    search: for (let z = Math.max(0, t[2]! - 1); z <= Math.min(d[2] - 1, t[2]! + 1); z++)
+      for (let y = Math.max(0, t[1]! - 1); y <= Math.min(d[1] - 1, t[1]! + 1); y++)
+        for (let x = Math.max(0, t[0]! - 1); x <= Math.min(d[0] - 1, t[0]! + 1); x++)
+          if (mixedCellWidth(layout.tiles[x + d[0] * (y + d[1] * z)]!) === 1) { widths[key] = 2; changed = true; break search; }
+  }
+  return changed ? packUniformMixedLayout(layout.lattice, widths, layout.regions) : layout;
 }
 
 function packUniformMixedLayout(lattice: RefinementRegionLattice, widths: Uint8Array,

@@ -1,4 +1,4 @@
-import { cm12GhostFluidTheta } from "../lib/core/cm12-numerics";
+import { UNIFORM_MIXED_THETA_MIN } from "../lib/methods/uniform/uniform-mixed-pressure-surface.wgsl";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -46,7 +46,12 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
               const liquid=l?f.left:f.right,air=l?f.right:f.left;
               let tangential=0;
               for(let a=0;a<3;a++)if(a!==f.axis)tangential+=actual.slopes[4*liquid+a]!*(fine.cells[f.right]!.center[a]!-fine.cells[f.left]!.center[a]!);
-              return ((l?-1:1)*actual.pressure[liquid]!/cm12GhostFluidTheta(phi[0]![liquid]!,phi[0]![air]!,1e-9)-tangential)/f.distance;
+              // The operator's own theta (umPressureSurfaceTheta): liquid
+              // depth floored at theta_min of the centre spacing.
+              const spacing=.5*(fine.cells[liquid]!.width+fine.cells[air]!.width)*Math.min(...layout.lattice.cellSize_m);
+              const depth=Math.max(Math.abs(phi[0]![liquid]!),UNIFORM_MIXED_THETA_MIN*spacing);
+              const theta=Math.min(1,Math.max(UNIFORM_MIXED_THETA_MIN,depth/(depth+Math.abs(phi[0]![air]!))));
+              return ((l?-1:1)*actual.pressure[liquid]!/theta-tangential)/f.distance;
             }
             let difference=actual.pressure[f.right]!-actual.pressure[f.left]!;
             for(const [i,other,sign] of [[f.left,f.right,-1],[f.right,f.left,1]]){

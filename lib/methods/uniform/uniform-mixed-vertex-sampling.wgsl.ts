@@ -1,4 +1,4 @@
-/** Vertex authority for the strongly graded Uniform grid. The coarsest incident
+/** Vertex authority for the mixed Uniform grid. The coarsest incident
  * cell owns a vertex; ties use the compact owner index. Hanging vertices derive
  * from that cell's corners. Callers provide umLoadVertex(p:vec3u)->f32.
  * The two interpolation levels are statically unrolled, with no recursion,

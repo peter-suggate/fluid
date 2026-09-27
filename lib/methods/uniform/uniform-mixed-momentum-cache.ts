@@ -20,7 +20,8 @@ export class UniformMixedMomentumCache {
   readonly allocatedBytes=0;
   private pipeline?:GPUComputePipeline;
   private readonly resources:GPUBindGroupLayout;
-  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership){
+  /** extendedOnly: scalar default momentum reads coarseExtended alone. */
+  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly extendedOnly=false){
     this.resources=device.createBindGroupLayout({entries:[
       ...[0,1,2].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
       {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
@@ -57,6 +58,12 @@ fn umCachePayload(anchor:vec3i,axis:u32)->vec3f {
  else{e=textureLoad(extended,anchor,0)[axis];if(supported){p=textureLoad(physical,anchor,0)[axis];}}
  return vec3f(e,p,select(0.0,1.0,supported));
 }
+// With extendedOnly only the extended average is formed (scalar default
+// momentum and forces read nothing else); the other two caches are untouched.
+fn umCacheExtended(anchor:vec3i,axis:u32)->vec3f {
+ if(anchor[axis]<0){return vec3f(negative[umNegativeBoundaryIndex(vec3u(max(anchor,vec3i(0))),axis)],0,0);}
+ return vec3f(textureLoad(extended,anchor,0)[axis],0,0);
+}
 @compute @workgroup_size(4,4,4) fn cache(@builtin(global_invocation_id) gid:vec3u){
  if(any(gid>=UM_T+vec3u(2))){return;}let id=vec3i(gid)-vec3i(1);
  var e=vec4f(0);var p=vec4f(0);var weight=vec4f(0);
@@ -68,10 +75,10 @@ fn umCachePayload(anchor:vec3i,axis:u32)->vec3f {
   if(owner.width==0u){var next=anchor;next[axis]+=1;owner=umOwnerAt(next);sign=-1;}
   let width=umFace(owner,axis,sign,0u).width;let side=4u/width;var value=vec3f(0);
   for(var y=0u;y<side;y++){for(var x=0u;x<side;x++){
-   var q=anchor;q[u]+=i32(x*width);q[v]+=i32(y*width);value+=umCachePayload(q,axis);
+   var q=anchor;q[u]+=i32(x*width);q[v]+=i32(y*width);value+=${this.extendedOnly?"umCacheExtended":"umCachePayload"}(q,axis);
   }}value/=f32(side*side);e[axis]=value.x;p[axis]=value.y;weight[axis]=value.z;
  }
- textureStore(coarseExtended,vec3i(gid),e);textureStore(coarsePhysical,vec3i(gid),p);textureStore(coarseWeight,vec3i(gid),weight);
+ textureStore(coarseExtended,vec3i(gid),e);${this.extendedOnly?"":"textureStore(coarsePhysical,vec3i(gid),p);textureStore(coarseWeight,vec3i(gid),weight);"}
 }`});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     this.pipeline=await this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]}),compute:{module,entryPoint:"cache"}});

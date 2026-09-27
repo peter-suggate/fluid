@@ -2,7 +2,7 @@ import { uniformMixedPressureStorage } from "./uniform-mixed-pressure-boundary.w
 import { mixedCellWidth } from "./uniform-mixed-layout";
 import { DEFAULT_UNIFORM_CM11A_SCHEDULE, type UniformCM11aSchedule } from "./pressure-policy";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
-import { UniformMixedPressureBoundsStage, UniformMixedPressureLevelStage, UniformMixedPressureTransferStage,
+import { UniformMixedPressureBoundsStage, UniformMixedPressureLevelStage, UniformMixedPressurePasses, UniformMixedPressureTransferStage,
   type UniformMixedPressureEntry, type UniformMixedPressureBoundsEntry, type UniformMixedPressureTransferEntry } from "./uniform-mixed-pressure-stage";
 import type { UniformMixedPressureTopology } from "./uniform-mixed-pressure-topology.wgsl";
 
@@ -75,14 +75,16 @@ export class UniformMixedPressureCycles {
     if(!group){group=this.stages[level]!.bind({pressure:l.pressure,slopes:l.slopes,rhs,frozen:l.frozen,result,minimum,phi:l.phi,topology:l.topology});this.groups.set(key,group);}
     return group;
   }
-  private stage(encoder: GPUCommandEncoder,level: number,entry: UniformMixedPressureEntry,rhs: GPUBufferBinding,result=this.levels[level]!.residual): void {
+  private stage(encoder: UniformMixedPressurePasses,level: number,entry: UniformMixedPressureEntry,rhs: GPUBufferBinding,result=this.levels[level]!.residual): void {
     this.stages[level]!.encode(encoder,entry,this.group(level,rhs,result));
   }
-  private smooth(encoder: GPUCommandEncoder,level: number,rhs: GPUBufferBinding,count: number): void {
+  private smooth(encoder: UniformMixedPressurePasses,level: number,rhs: GPUBufferBinding,count: number): void {
     const group=this.group(level,rhs,this.levels[level]!.residual);
-    for(let i=0;i<count;i++)this.stages[level]!.encodeSweep(encoder,group);
+    // The first sweep of a visit projects every air owner onto p_min; air is
+    // then a fixed point, so later sweeps revisit only liquid tiles.
+    for(let i=0;i<count;i++)this.stages[level]!.encodeSweep(encoder,group,this.surface&&i>0);
   }
-  private transfer(encoder: GPUCommandEncoder,level: number,entry: UniformMixedPressureTransferEntry,source: GPUBufferBinding,destination: GPUBufferBinding): void {
+  private transfer(encoder: UniformMixedPressurePasses,level: number,entry: UniformMixedPressureTransferEntry,source: GPUBufferBinding,destination: GPUBufferBinding): void {
     const key=`transfer:${level}:${entry}:${this.key(source)}:${this.key(destination)}`;
     let group=this.groups.get(key);
     if(!group){group=this.transfers[level]!.bind(entry,source,destination);this.groups.set(key,group);}
@@ -94,16 +96,25 @@ export class UniformMixedPressureCycles {
     }
     this.transfers[level]!.encode(encoder,entry,group,topology);
   }
-  private bound(encoder: GPUCommandEncoder,level: number,entry: UniformMixedPressureBoundsEntry,destination: GPUBufferBinding): void {
+  private bound(encoder: UniformMixedPressurePasses,level: number,entry: UniformMixedPressureBoundsEntry,destination: GPUBufferBinding): void {
     const source=this.minimum(level)!,key=`bound:${level}:${entry}:${this.key(source)}:${this.key(destination)}`;
     let group=this.groups.get(key);
     if(!group){group=this.bounds[level]!.bind(entry,source,this.levels[level]!.pressure,destination);this.groups.set(key,group);}
     this.bounds[level]!.encode(encoder,entry,group);
   }
-  private clearPressure(encoder: GPUCommandEncoder,level: number): void {
-    const l=this.levels[level]!;encoder.clearBuffer(l.pressure.buffer,l.pressure.offset??0,(this.boundary?uniformMixedPressureStorage(l.ownership.layout).count:l.ownership.layout.cellCount)*4);
+  /** Zero a coarse correction. Smoothed levels clear in the shared pass; the
+   * native 4h hierarchy is entered between passes, so its clear splits none. */
+  private clearPressure(encoder: UniformMixedPressurePasses,level: number): void {
+    if(level<2){this.stage(encoder,level,"clearPressure",this.levels[level]!.rhs[0]);return;}
+    const l=this.levels[level]!;encoder.commands.clearBuffer(l.pressure.buffer,l.pressure.offset??0,(this.boundary?uniformMixedPressureStorage(l.ownership.layout).count:l.ownership.layout.cellCount)*4);
   }
-  encodeSurfaceRestriction(encoder: GPUCommandEncoder): void {
+  /** Each public entry batches its dispatches into as few passes as its
+   * encoder commands allow; the label names the whole batch. */
+  private batch(encoder: GPUCommandEncoder,label: string,body:(passes:UniformMixedPressurePasses)=>void): void {
+    const passes=new UniformMixedPressurePasses(encoder,`Uniform mixed pressure ${label}`);body(passes);passes.end();
+  }
+  encodeSurfaceRestriction(encoder: GPUCommandEncoder): void {this.batch(encoder,"setup",passes=>this.surfaceRestriction(passes));}
+  private surfaceRestriction(encoder: UniformMixedPressurePasses): void {
     if(this.surface)for(let level=0;level<2;level++)this.transfer(encoder,level,"restrictSurfacePhi",this.levels[level]!.phi!,this.levels[level+1]!.phi!);
     // Native order: the raw phi/V pyramid first, then one-cell continuation
     // per level. L0 is pressurePhi (already continued) and the native
@@ -113,35 +124,43 @@ export class UniformMixedPressureCycles {
     for(let level=0;level<2;level++)this.stages[level]!.encodeRecords(encoder,this.group(level,this.levels[level]!.rhs[0],this.levels[level]!.residual));
   }
   encodeResidual(encoder: GPUCommandEncoder,level=0,rhs=this.levels[level]!.rhs[0],output=this.levels[level]!.residual): void {
+    this.batch(encoder,"residual",passes=>this.residual(passes,level,rhs,output));
+  }
+  private residual(encoder: UniformMixedPressurePasses,level: number,rhs: GPUBufferBinding,output=this.levels[level]!.residual): void {
     this.stages[level]!.encodeRecordEntry(encoder,"residual",this.group(level,rhs,output));
   }
   encodeMeasure(encoder: GPUCommandEncoder): void {
     this.stages[0]!.encodeRecordEntry(encoder,"measure",this.group(0,this.levels[0]!.rhs[0],this.levels[0]!.residual));
   }
-  encodeVCycle(encoder: GPUCommandEncoder,level=0,rhs=this.levels[level]!.rhs[0]): void {
-    if(level===2){this.encodeUniformHierarchy(encoder,rhs,"v");return;}
+  encodeVCycle(encoder: GPUCommandEncoder): void {this.batch(encoder,"V-cycle",passes=>this.vCycle(passes,0,this.levels[0]!.rhs[0]));}
+  private vCycle(encoder: UniformMixedPressurePasses,level: number,rhs: GPUBufferBinding): void {
+    if(level===2){this.encodeUniformHierarchy(encoder.commands,rhs,"v");return;}
     const l=this.levels[level]!,next=this.levels[level+1]!;
-    this.smooth(encoder,level,rhs,this.schedule.preSweeps);this.encodeResidual(encoder,level,rhs);
-    this.transfer(encoder,level,"restrictValues",l.residual,next.rhs[0]);this.clearPressure(encoder,level+1);
+    this.smooth(encoder,level,rhs,this.schedule.preSweeps);this.residual(encoder,level,rhs);
+    this.transfer(encoder,level,"restrictValues",l.residual,next.rhs[0]);
     if(this.constrained)this.bound(encoder,level,"downsampleSubtract",next.minimum![0]!);
-    this.encodeVCycle(encoder,level+1,next.rhs[0]);this.transfer(encoder,level,"prolongAdd",next.pressure,l.pressure);
+    // Reads neither field above; last, so the native 4h clear ends the pass
+    // the hierarchy would end anyway.
+    this.clearPressure(encoder,level+1);
+    this.vCycle(encoder,level+1,next.rhs[0]);this.transfer(encoder,level,"prolongAdd",next.pressure,l.pressure);
     this.smooth(encoder,level,rhs,this.schedule.postSweeps);
   }
-  encodeFullCycle(encoder: GPUCommandEncoder): void {
+  encodeFullCycle(encoder: GPUCommandEncoder): void {this.batch(encoder,"Full-cycle",passes=>this.fullCycle(passes));}
+  private fullCycle(encoder: UniformMixedPressurePasses): void {
     const fine=this.levels[0]!;
     // A shader copy supports disjoint views of the same arena, unlike a
     // buffer-to-buffer copy whose source and destination must differ.
     this.stage(encoder,0,"saveBackup",fine.rhs[0],this.backup);
     if(this.constrained){this.bound(encoder,0,"shiftMinimum",fine.minimum![1]!);this.shifted=true;}
-    this.encodeResidual(encoder,0,fine.rhs[0],fine.rhs[1]);
+    this.residual(encoder,0,fine.rhs[0],fine.rhs[1]);
     for(let level=0;level<2;level++){
       this.transfer(encoder,level,"restrictValues",this.levels[level]!.rhs[1],this.levels[level+1]!.rhs[1]);
       if(this.constrained)this.bound(encoder,level,"downsampleMinimum",this.levels[level+1]!.minimum![0]!);
     }
-    this.clearPressure(encoder,2);this.encodeUniformHierarchy(encoder,this.levels[2]!.rhs[1],"full");
+    this.clearPressure(encoder,2);this.encodeUniformHierarchy(encoder.commands,this.levels[2]!.rhs[1],"full");
     for(let level=1;level>=0;level--){
       this.transfer(encoder,level,"prolongAssign",this.levels[level+1]!.pressure,this.levels[level]!.pressure);
-      this.encodeVCycle(encoder,level,this.levels[level]!.rhs[1]);
+      this.vCycle(encoder,level,this.levels[level]!.rhs[1]);
     }
     this.stage(encoder,0,"addBackup",this.backup);this.shifted=false;
   }

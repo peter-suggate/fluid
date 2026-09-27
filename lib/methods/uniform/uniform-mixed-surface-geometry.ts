@@ -41,8 +41,22 @@ ${uniformMixedSolidWGSL(this.solid?2:undefined)}
  let owner=umAllOwner(gid);if(owner.width==0u){return;}let origin=umOrigin(owner);
  var vertices:array<f32,8>;var centre:array<f32,8>;
  for(var j=0u;j<8u;j++){vertices[j]=umVertexValue(origin+vec3u(uvCorner(j))*owner.width);centre[j]=vertices[j]*0.125;}
+ // Far air and deep liquid: umSurfaceTarget returns exactly 0.0 (1.0) when
+ // every corner is above 1e-20 (below -1e-20) and the corner spread is at
+ // most a quarter of the smallest magnitude m. Each probe is then a sum of
+ // nonnegative (nonpositive) dyadic-weighted terms, strictly one sign, so
+ // fill is 0 (8); |gradient| <= 2(M-m) <= m/2 < |centre|/1.9 (relative
+ // rounding ~1e-6), so the plane's shifted offset is <= -0.49 (>= total+0.49)
+ // and geometricPlaneBoxFraction returns the same literal. Both arms of its
+ // select agree, whatever the residual. A NaN corner fails every comparison;
+ // an infinite one makes the spread test fail.
+ var low=vertices[0];var high=vertices[0];var positive=true;var negative=true;
+ for(var j=0u;j<8u;j++){let v=vertices[j];low=min(low,v);high=max(high,v);positive=positive&&v>1e-20;negative=negative&&v< -1e-20;}
+ var fraction=0.0;
+ if(negative&&4.0*(high-low)<= -high){fraction=1.0;}
+ else if(!(positive&&4.0*(high-low)<=low)){fraction=umSurfaceTarget(owner,vertices);}
  // Native uvTarget scales by the open fraction; coarse owners are uncut.
- textureStore(targetFill,vec3i(origin),vec4f(umSurfaceTarget(owner,vertices)*select(1.0,umCellOpen(vec3i(origin)),owner.width==1u)));
+ textureStore(targetFill,vec3i(origin),vec4f(fraction*select(1.0,umCellOpen(vec3i(origin)),owner.width==1u)));
  // umSampleVertex at the owner centre: all eight weights are exactly 1/8 of
  // these same corner values (stored, or reconstructed where hanging).
  textureStore(centerPhi,vec3i(origin),vec4f(d4Sum8(centre)));

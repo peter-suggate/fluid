@@ -13,7 +13,7 @@ import { UNIFORM_MIXED_PRESSURE_RECORD_CHUNK, uniformMixedPressureRecordsSource 
 
 const recordEntries = ["buildRecords", "linkRecords", "reconstructRecords", "freezeRecords", "residualRecords", "measureRecords"] as const;
 type RecordEntry = typeof recordEntries[number];
-const entries = ["reconstruct", "freezeRhs", "residual", "addBackup", "saveBackup", "measure"] as const;
+const entries = ["reconstruct", "freezeRhs", "residual", "addBackup", "saveBackup", "measure", "clearPressure"] as const;
 export type UniformMixedPressureEntry = typeof entries[number];
 export type UniformMixedPressureTransferEntry = "restrictValues" | "restrictSurfacePhi" | "prolongAssign" | "prolongAdd" | "extrapolateSurfacePhi";
 export interface UniformMixedPressureFields {
@@ -26,6 +26,26 @@ export interface UniformMixedPressureFields {
   phi?: GPUBufferBinding;
   /** Static-solid scenes: this level's CM11a (open, V) record. */
   topology?: UniformMixedPressureTopology;
+}
+/** One compute pass shared by consecutive mixed pressure dispatches. A
+ * dispatch is its own WebGPU usage scope, so dependent dispatches may share a
+ * pass; encoder commands (copies, clears, foreign passes) end it first. */
+export class UniformMixedPressurePasses {
+  private open?: GPUComputePassEncoder;
+  constructor(private readonly encoder: GPUCommandEncoder, readonly label: string) {}
+  get pass(): GPUComputePassEncoder { return this.open ??= this.encoder.beginComputePass({ label: this.label }); }
+  /** The encoder with no pass open. */
+  get commands(): GPUCommandEncoder { this.end(); return this.encoder; }
+  end(): void { this.open?.end(); this.open = undefined; }
+}
+/** A bare encoder gives each stage call its own labelled pass. */
+export type UniformMixedPressureTarget = GPUCommandEncoder | UniformMixedPressurePasses;
+function beginPass(target: UniformMixedPressureTarget, label: string): { pass: GPUComputePassEncoder; end(): void } {
+  if (target instanceof UniformMixedPressurePasses) return { pass: target.pass, end: () => {} };
+  const pass = target.beginComputePass({ label }); return { pass, end: () => pass.end() };
+}
+function commandsOf(target: UniformMixedPressureTarget): GPUCommandEncoder {
+  return target instanceof UniformMixedPressurePasses ? target.commands : target;
 }
 async function checkedModule(device: GPUDevice, code: string): Promise<GPUShaderModule> {
   const module = device.createShaderModule({ label: "Uniform mixed pressure operators", code });
@@ -83,6 +103,15 @@ export class UniformMixedPressureLevelStage {
   private readonly regularPipelines=new Map<"residual"|"measure",GPUComputePipeline[]>();
   private readonly jacobiGroups = new WeakMap<GPUBindGroup,GPUBindGroup>();
   private recordGroup?:GPUBindGroup;
+  /** Surface levels: per-tier lists of the regular tiles holding a liquid
+   * owner (phi<0), rebuilt with the records from this solve's phi. Words 0-2
+   * count each tier, 4-12 its indirect launch, then from word 16 each tier's
+   * tiles at that tier's worklist offset. After a visit's first dense sweep
+   * an air owner is a fixed point (max(p,p_min), halo included), so later
+   * sweeps revisit only these tiles. */
+  private liquid?:{list:GPUBuffer;dispatch:GPUBuffer;group:GPUBindGroup;layout:GPUBindGroupLayout;
+    reset:GPUComputePipeline;build:GPUComputePipeline;publish:GPUComputePipeline;smooth:GPUComputePipeline[]};
+  private readonly liquidGroups=new WeakMap<GPUBindGroup,GPUBindGroup>();
   /** Buffer topology rides in the phi binding from this f32 index: a separate
    * binding would make the record layout 11 compute storage buffers. */
   private topologyBase?:number;
@@ -165,6 +194,15 @@ ${this.surface ? ` if(!umPressureLiquid(o)){
 // side. All read the same iterate.
 override umSweepFreeze:bool=false;
 @compute @workgroup_size(64) fn smoothJacobi(@builtin(global_invocation_id) gid:vec3u){umSmoothOwner(umOwner(gid));}
+${this.surface?`// Liquid tile list (encodeRecords), bound in place of the records at group 2.
+fn umLiquidOwner(gid:vec3u)->UMOwner {
+ let slot=gid.x+umDispatchX*64u*gid.y;let cells=64u/(umCellWidth*umCellWidth*umCellWidth);let job=slot/cells;
+ var tier=0u;var offset=0u;if(umCellWidth>=2u){tier=1u;offset=umCounts.x;}if(umCellWidth==4u){tier=2u;offset=umCounts.x+umCounts.y;}
+ if(job>=records[tier]){return UMOwner();}
+ let tile=records[16u+offset+job];let lane=slot%cells;
+ return UMOwner(tile,lane,umCellWidth,(umTopology[tile]&0x3fffffffu)+lane);
+}
+@compute @workgroup_size(64) fn smoothJacobiLiquid(@builtin(global_invocation_id) gid:vec3u){umSmoothOwner(umLiquidOwner(gid));}`:""}
 @compute @workgroup_size(64) fn sweepRecords(@builtin(global_invocation_id) gid:vec3u){
  let at=umFusedRow(gid.x+umDispatchX*64u*gid.y);if(at.x==0xffffffffu){return;}
  let r=umRecRow(vec3u(at.x,0u,0u),at.y);if(r.x==0xffffffffu){return;}
@@ -172,6 +210,10 @@ override umSweepFreeze:bool=false;
 }
 @compute @workgroup_size(64) fn saveBackup(@builtin(global_invocation_id) gid:vec3u){
  let o=umOwner(gid);if(o.width!=0u){result[o.index]=pressures[o.index];${halo("result[halo]=pressures[halo];")}}
+}
+// clearBuffer of every slot an owner reads (its own and its halo slots), inside a pass.
+@compute @workgroup_size(64) fn clearPressure(@builtin(global_invocation_id) gid:vec3u){
+ let o=umOwner(gid);if(o.width!=0u){pressures[o.index]=0.0;${halo("pressures[halo]=0.0;")}}
 }
 @compute @workgroup_size(64) fn addBackup(@builtin(global_invocation_id) gid:vec3u){
  let o=umOwner(gid);if(o.width!=0u){pressures[o.index]+=rhs[o.index];${halo("pressures[halo]+=rhs[halo];")}}
@@ -188,6 +230,41 @@ override umSweepFreeze:bool=false;
     this.regularSmoothPipelines=await Promise.all([1,2,4].map(width=>compile("smoothJacobi",width,false,true)));
     this.sweepRecordPipelines=await Promise.all([true,false].map(freeze=>this.device.createComputePipelineAsync({layout:recordLayout,
       compute:{module,entryPoint:"sweepRecords",constants:{umDispatchX:owner.dispatchX,umSweepFreeze:+freeze}}})));
+    if(this.surface)await this.initializeLiquid(module,recordLayout);
+  }
+  private async initializeLiquid(module:GPUShaderModule,recordLayout:GPUPipelineLayout):Promise<void>{
+    const owner=this.ownership,n=owner.layout.tiles.length;
+    const layout=this.device.createBindGroupLayout({entries:[0,1].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}}))});
+    const classify=await checkedModule(this.device,uniformMixedTopologyWGSL(owner.layout,0)+/* wgsl */`
+@group(1) @binding(0) var<storage,read_write> phi:array<f32>;
+@group(1) @binding(1) var<storage,read_write> liquid:array<atomic<u32>>;
+@compute @workgroup_size(1) fn reset(){for(var tier=0u;tier<3u;tier++){atomicStore(&liquid[tier],0u);}}
+// One lane per worklist tile. Seam tiles are record rows, never listed.
+@compute @workgroup_size(64) fn build(@builtin(global_invocation_id) gid:vec3u){
+ let job=gid.x+umDispatchX*64u*gid.y;if(job>=umCounts.x+umCounts.y+umCounts.z){return;}
+ var tier=0u;var offset=0u;if(job>=umCounts.x){tier=1u;offset=umCounts.x;}if(job>=umCounts.x+umCounts.y){tier=2u;offset=umCounts.x+umCounts.y;}
+ let tile=umTopology[UM_TILES+job];if(umTileMaximumWidth(tile)!=umTileMinimumWidth(tile)){return;}
+ let width=1u<<tier;let base=umTopology[tile]&0x3fffffffu;var wet=false;
+ for(var lane=0u;lane<64u/(width*width*width);lane++){wet=wet||phi[base+lane]<0.0;}
+ if(wet){let slot=atomicAdd(&liquid[tier],1u);atomicStore(&liquid[16u+offset+slot],tile);}
+}
+// Owners per group as ownership.dispatchTier: 64 h, eight 2h tiles, 64 4h tiles.
+@compute @workgroup_size(1) fn publish(){
+ for(var tier=0u;tier<3u;tier++){
+  let tiles=atomicLoad(&liquid[tier]);let groups=select(select(tiles,(tiles+7u)/8u,tier==1u),(tiles+63u)/64u,tier==2u);
+  atomicStore(&liquid[4u+3u*tier],min(groups,umDispatchX));atomicStore(&liquid[5u+3u*tier],(groups+umDispatchX-1u)/umDispatchX);atomicStore(&liquid[6u+3u*tier],1u);
+ }
+}`);
+    const classifyLayout=this.device.createPipelineLayout({bindGroupLayouts:[owner.bindLayout,layout]});
+    const [reset,build,publish]=await Promise.all(["reset","build","publish"].map(entryPoint=>this.device.createComputePipelineAsync({layout:classifyLayout,
+      compute:{module:classify,entryPoint,constants:{umDispatchX:owner.dispatchX}}})));
+    const list=this.device.createBuffer({label:"Uniform mixed pressure liquid tiles",size:(16+n)*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
+    const dispatch=this.device.createBuffer({label:"Uniform mixed pressure liquid dispatch",size:36,usage:GPUBufferUsage.INDIRECT|GPUBufferUsage.COPY_DST});
+    // The list sweep binds the list where the sweep binds its records (group 2).
+    const group=this.device.createBindGroup({layout:owner.hangingLayout,entries:[{binding:0,resource:{buffer:list}}]});
+    const smooth=await Promise.all([1,2,4].map(width=>this.device.createComputePipelineAsync({layout:recordLayout,
+      compute:{module,entryPoint:"smoothJacobiLiquid",constants:{umCellWidth:width,umDispatchX:owner.dispatchX,umRegularTiles:1}}})));
+    this.liquid={list,dispatch,group,layout,reset:reset!,build:build!,publish:publish!,smooth};
   }
   bind(fields: UniformMixedPressureFields): GPUBindGroup {
     const n = this.ownership.layout.cellCount, count=this.boundary?uniformMixedPressureStorage(this.ownership.layout).count:n;
@@ -211,44 +288,59 @@ override umSweepFreeze:bool=false;
     const group=this.device.createBindGroup({layout:this.resources,entries});
     const swapped=entries.map(entry=>({...entry,resource:entry.binding===0?resources[4]!:entry.binding===4?resources[0]!:entry.resource}));
     this.jacobiGroups.set(group,this.device.createBindGroup({layout:this.resources,entries:swapped}));
+    if(this.liquid)this.liquidGroups.set(group,this.device.createBindGroup({layout:this.liquid.layout,entries:[
+      {binding:0,resource:{buffer:fields.phi!.buffer,offset:fields.phi!.offset??0,size:4*n}},{binding:1,resource:{buffer:this.liquid.list}}]}));
     return group;
   }
-  encode(encoder: GPUCommandEncoder, entry: UniformMixedPressureEntry, group: GPUBindGroup): void {
+  encode(target: UniformMixedPressureTarget, entry: UniformMixedPressureEntry, group: GPUBindGroup): void {
     const pipelines = this.pipelines.get(entry);
     if (!pipelines) throw new Error("Mixed pressure stage is not initialized");
-    const pass = encoder.beginComputePass({ label: `Uniform mixed pressure ${entry}` });
-    pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1, group); this.ownership.dispatch(pass, pipelines); pass.end();
+    const { pass, end } = beginPass(target, `Uniform mixed pressure ${entry}`);
+    pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1, group); this.ownership.dispatch(pass, pipelines); end();
   }
   /** Rebuild the seam records from this group's phi/solids and the current
    * ownership. Required whenever either changes; sweeps build lazily only
    * for a new ownership generation. */
-  encodeRecords(encoder: GPUCommandEncoder, group: GPUBindGroup): void {
+  encodeRecords(target: UniformMixedPressureTarget, group: GPUBindGroup): void {
     const build=this.recordPipelines.get("buildRecords");if(!build)throw new Error("Mixed pressure stage is not initialized");
     this.recordGroup=this.ownership.recordGroup(this.ownership.fusedJobs(true)*UNIFORM_MIXED_PRESSURE_RECORD_CHUNK*4);
-    const pass=encoder.beginComputePass({label:"Uniform mixed pressure records"});
+    const {pass,end}=beginPass(target,"Uniform mixed pressure records");
     pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);pass.setBindGroup(2,this.recordGroup!);
-    this.ownership.dispatchFusedRows(pass,build);this.ownership.dispatchFusedRows(pass,this.recordPipelines.get("linkRecords")!);pass.end();
+    this.ownership.dispatchFusedRows(pass,build);this.ownership.dispatchFusedRows(pass,this.recordPipelines.get("linkRecords")!);
+    if(this.liquid){
+      const l=this.liquid,tiles=this.ownership.layout.tiles.length,groups=Math.ceil(tiles/64),dispatchX=this.ownership.dispatchX;
+      const classify=this.liquidGroups.get(group);if(!classify)throw new Error("Mixed pressure group was not bound by this stage");
+      pass.setBindGroup(1,classify);
+      pass.setPipeline(l.reset);pass.dispatchWorkgroups(1);
+      pass.setPipeline(l.build);pass.dispatchWorkgroups(Math.min(groups,dispatchX),Math.ceil(groups/dispatchX));
+      pass.setPipeline(l.publish);pass.dispatchWorkgroups(1);
+    }
+    end();
+    if(this.liquid)commandsOf(target).copyBufferToBuffer(this.liquid.list,16,this.liquid.dispatch,0,36);
     this.recordsFor=this.ownership.layout;
   }
   /** residual or measure: regular tiles through the regular operator, seam
    * rows and small regular tiers from their records at the current iterate. */
-  encodeRecordEntry(encoder: GPUCommandEncoder, entry: "residual"|"measure", group: GPUBindGroup): void {
+  encodeRecordEntry(target: UniformMixedPressureTarget, entry: "residual"|"measure", group: GPUBindGroup): void {
     const regular=this.regularPipelines.get(entry);if(!regular||this.recordPipelines.size!==recordEntries.length)throw new Error("Mixed pressure stage is not initialized");
-    if(this.recordsFor!==this.ownership.layout)this.encodeRecords(encoder,group);
-    const pass=encoder.beginComputePass({label:`Uniform mixed pressure ${entry}`});
+    if(this.recordsFor!==this.ownership.layout)this.encodeRecords(target,group);
+    const {pass,end}=beginPass(target,`Uniform mixed pressure ${entry}`);
     pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);pass.setBindGroup(2,this.recordGroup!);
     const fused=(name:RecordEntry)=>this.ownership.dispatchFused(pass,this.recordPipelines.get(name)!,true);
     fused("reconstructRecords");fused("freezeRecords");
     this.ownership.dispatchRegular(pass,regular,true);fused(`${entry}Records`);
-    pass.end();
+    end();
   }
-  encodeSweep(encoder: GPUCommandEncoder, group: GPUBindGroup): void {
+  /** liquidOnly: regular tiles from this solve's liquid lists (surface
+   * levels; never a visit's first sweep, which projects air onto p_min). */
+  encodeSweep(target: UniformMixedPressureTarget, group: GPUBindGroup, liquidOnly = false): void {
+    if(liquidOnly&&!this.liquid)throw new Error("Liquid-only sweeps require a surface pressure level");
     if (this.recordPipelines.size!==recordEntries.length) throw new Error("Mixed pressure stage is not initialized");
-    if(this.recordsFor!==this.ownership.layout)this.encodeRecords(encoder,group);
+    if(this.recordsFor!==this.ownership.layout)this.encodeRecords(target,group);
     // Native Uniform uses two simultaneous projected Jacobi updates per
     // sweep. The residual range is dead here and supplies the ping-pong half;
     // every tier reads the same old iterate, preserving reflection symmetry.
-    const pass = encoder.beginComputePass({ label: "Uniform mixed pressure sweep" });
+    const { pass, end } = beginPass(target, "Uniform mixed pressure sweep");
     pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1, group); pass.setBindGroup(2,this.recordGroup!);
     // Seam rows and small regular tiers gather their frozen linear records.
     // The first half evaluates each row's frozen seam correction from the
@@ -259,10 +351,14 @@ override umSweepFreeze:bool=false;
       pass.setPipeline(pipeline);pass.dispatchWorkgroups(Math.min(groups,dispatchX),Math.ceil(groups/dispatchX));};
     for(const half of [0,1]){
       if(half)pass.setBindGroup(1,this.jacobiGroups.get(group)!);
-      this.ownership.dispatchRegular(pass,this.regularSmoothPipelines,true);
+      if(liquidOnly){
+        pass.setBindGroup(2,this.liquid!.group);
+        this.ownership.dispatchRegularIndirect(pass,this.liquid!.smooth,this.liquid!.dispatch,true);
+        pass.setBindGroup(2,this.recordGroup!);
+      }else this.ownership.dispatchRegular(pass,this.regularSmoothPipelines,true);
       launch(this.sweepRecordPipelines[half]!,this.ownership.fusedRows());
     }
-    pass.end();
+    end();
   }
 }
 
@@ -377,13 +473,13 @@ ${solid}
       return this.device.createBindGroup({ layout: this.topologyResources, entries: input.map((resource, binding) => ({ binding, resource })) }); }
     return this.device.createBindGroup({ layout: this.topologyResources, entries: [{ binding: 0, resource: source.texture.createView() }, { binding: 1, resource: out }] });
   }
-  encode(encoder: GPUCommandEncoder, entry: UniformMixedPressureTransferEntry, group: GPUBindGroup, topology?: GPUBindGroup): void {
+  encode(target: UniformMixedPressureTarget, entry: UniformMixedPressureTransferEntry, group: GPUBindGroup, topology?: GPUBindGroup): void {
     const pipelines = this.pipelines.get(entry);
     if (!pipelines) throw new Error("Mixed pressure transfers are not initialized");
     if (this.solidEntries.includes(entry) !== !!topology) throw new Error(`Mixed pressure ${entry} topology binding does not match stage mode`);
-    const pass = encoder.beginComputePass({ label: `Uniform mixed pressure ${entry}` });
+    const { pass, end } = beginPass(target, `Uniform mixed pressure ${entry}`);
     pass.setBindGroup(0, this.fine.bindGroup); pass.setBindGroup(1, this.coarse.bindGroup); pass.setBindGroup(2, group); if (topology) pass.setBindGroup(3, topology);
-    ((entry === "restrictValues" || entry === "restrictSurfacePhi" || entry === "extrapolateSurfacePhi") ? this.coarse : this.fine).dispatch(pass, pipelines); pass.end();
+    ((entry === "restrictValues" || entry === "restrictSurfacePhi" || entry === "extrapolateSurfacePhi") ? this.coarse : this.fine).dispatch(pass, pipelines); end();
   }
 }
 
@@ -432,10 +528,10 @@ ${uniformMixedPressureBoundsWGSL}
     const resources = views([minimum, pressure, destination], [4*n, 4*n, 4*m]);
     return this.device.createBindGroup({ layout: this.resources, entries: resources.map((resource, binding) => ({ binding, resource })) });
   }
-  encode(encoder: GPUCommandEncoder, entry: UniformMixedPressureBoundsEntry, group: GPUBindGroup): void {
+  encode(target: UniformMixedPressureTarget, entry: UniformMixedPressureBoundsEntry, group: GPUBindGroup): void {
     const pipelines = this.pipelines.get(entry); if (!pipelines) throw new Error("Mixed pressure bounds are not initialized");
-    const pass = encoder.beginComputePass({ label: `Uniform mixed pressure ${entry}` });
+    const { pass, end } = beginPass(target, `Uniform mixed pressure ${entry}`);
     pass.setBindGroup(0, this.fine.bindGroup); pass.setBindGroup(1, this.coarse.bindGroup); pass.setBindGroup(2, group);
-    (entry === "shiftMinimum" ? this.fine : this.coarse).dispatch(pass, pipelines); pass.end();
+    (entry === "shiftMinimum" ? this.fine : this.coarse).dispatch(pass, pipelines); end();
   }
 }

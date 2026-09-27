@@ -5,7 +5,7 @@ import {createProcessRetainedDawnGPU} from "../lib/harness/node-dawn-provider";
 import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {UniformMixedOwnership} from "../lib/methods/uniform/uniform-mixed-ownership";
 import {UniformMixedLayoutBuilder} from "../lib/methods/uniform/uniform-mixed-layout-builder";
-import {createUniformMixedLayout,mixedCellWidth,uniformMixedPressureLevel} from "../lib/methods/uniform/uniform-mixed-layout";
+import {createUniformMixedLayout,mixedCellWidth,uniformMixedPressureLayout,uniformMixedPressureLevel} from "../lib/methods/uniform/uniform-mixed-layout";
 
 // The GPU builder must upload exactly what UniformMixedOwnership.update()
 // uploads for the CPU layout: every writeBuffer range, byte for byte.
@@ -51,9 +51,12 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
    const lattice={dimensions,cellSize_m:[0.01,0.01,0.01] as const,origin_m:{x:0,y:0,z:0}};
    const t=dimensions.map(n=>n/4),n=t[0]!*t[1]!*t[2]!;
    const fine=createUniformMixedLayout(lattice,[]);
-   const current:[UniformMixedOwnership,UniformMixedOwnership]=[new UniformMixedOwnership(real,fine),new UniformMixedOwnership(real,uniformMixedPressureLevel(fine,2))];
+   // The pressure-only transition frame's levels: ungraded h/4h simulation,
+   // graded pressure level 0, and its 2h level.
+   const current=[new UniformMixedOwnership(real,fine),new UniformMixedOwnership(real,fine),new UniformMixedOwnership(real,uniformMixedPressureLevel(fine,2))];
    const bandWords=12+Math.ceil(n/32),bandBuffer=real.createBuffer({size:bandWords*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
-   const builder=new UniformMixedLayoutBuilder(real,{buffer:bandBuffer,wordOffset:12},current);await builder.initialize();
+   const builder=new UniformMixedLayoutBuilder(real,{buffer:bandBuffer,wordOffset:12},
+    current.map((ownership,i)=>({ownership,minimumWidth:i===2?2 as const:1 as const,graded:i!==0})));await builder.initialize();
    for(let round=0;round<3;round++){
     const band=blobs(t,6+4*round,Math.max(...t)/10),statics=blobs(t,3,2);
     const bits=new Uint32Array(bandWords).fill(0xdeadbeef);bits.fill(0,12);
@@ -61,13 +64,15 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
     real.queue.writeBuffer(bandBuffer,0,bits);
     builder.setStatic(statics,[]);
     const expected=createUniformMixedLayout(lattice,[],true,4,band.map((b,k)=>b|statics[k]!));
-    const expectedLevels=[expected,uniformMixedPressureLevel(expected,2)] as const;
+    const ungraded=createUniformMixedLayout(lattice,[],false,4,band.map((b,k)=>b|statics[k]!));
+    assert.deepEqual(uniformMixedPressureLayout(ungraded).tiles,expected.tiles,"pressure layout of the ungraded layout is the graded layout");
+    const expectedLevels=[ungraded,expected,uniformMixedPressureLevel(expected,2)] as const;
     assert.ok(expected.fineTiles.length&&expected.transitionTiles.length&&expected.coarseTiles.length,"fixture must mix all three widths");
     const widths=(layout:typeof expected)=>Array.from(layout.tiles,mixedCellWidth);
     const before=current.map(o=>widths(o.layout));
     const e=real.createCommandEncoder();builder.encode(e);real.queue.submit([e.finish()]);
     const built=await builder.read();
-    for(let level=0;level<2;level++){
+    for(let level=0;level<3;level++){
      const b=built[level]!,x=expectedLevels[level]!,tag=`${dimensions} round ${round} L${level}`;
      assert.equal(b.changedTiles,widths(x).filter((w,k)=>w!==before[level]![k]).length,`${tag}: changed tiles`);
      assert.deepEqual(b.layout.tiles,x.tiles,`${tag}: tile words`);
@@ -93,9 +98,9 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
      reference.destroy();
     }
     // Adopting and rebuilding the same band must report no change.
-    const adopt=real.createCommandEncoder();current[0].adopt(adopt,built[0]);current[1].adopt(adopt,built[1]);real.queue.submit([adopt.finish()]);
+    const adopt=real.createCommandEncoder();current.forEach((o,i)=>o.adopt(adopt,built[i]!));real.queue.submit([adopt.finish()]);
     const again=real.createCommandEncoder();builder.encode(again);real.queue.submit([again.finish()]);
-    assert.deepEqual((await builder.read()).map(l=>l.changedTiles),[0,0],`${dimensions} round ${round}: rebuild after adopt`);
+    assert.deepEqual((await builder.read()).map(l=>l.changedTiles),[0,0,0],`${dimensions} round ${round}: rebuild after adopt`);
    }
    assert.deepEqual(errors,[]);
    builder.destroy();for(const o of current)o.destroy();bandBuffer.destroy();
