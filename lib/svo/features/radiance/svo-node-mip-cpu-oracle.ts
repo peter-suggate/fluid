@@ -31,7 +31,7 @@ export interface SvoNodeMipCpuOracleOptions {
   levelCount?: number;
   /** Defaults to two, or eight occupancy evaluations per base texel. */
   samplesPerAxis?: 1 | 2 | 4;
-  /** Optional final opacity policy; glass and the open presentation wall are excluded by default. */
+  /** Optional final opacity policy; the open presentation wall is excluded by default. */
   includeProxy?: (proxy: EnvironmentProxyPrimitive) => boolean;
 }
 
@@ -69,8 +69,7 @@ export interface SvoNodeMipCpuOraclePublication {
 type Triple = [number, number, number];
 
 function defaultProxyOpacity(proxy: EnvironmentProxyPrimitive): boolean {
-  if (proxy.key.endsWith("/shell/wall-front") && proxy.tags.includes("shell")) return false;
-  return !proxy.tags.includes("glass") && !proxy.group.toLowerCase().includes("glass");
+  return !(proxy.key.endsWith("/shell/wall-front") && proxy.tags.includes("shell"));
 }
 
 function coordinateKey(value: SvoNodeMipCoordinate): string { return `${value[0]},${value[1]},${value[2]}`; }
@@ -160,7 +159,7 @@ function solidWorldDestinationPages(scene: SceneDescription, world: SolidWorld,
     * SVO_NODE_MIP_LAYOUT.interiorSize) as Triple;
   for (const page of world.pages) {
     if (!page.solidFraction.some((fraction, voxel) => fraction > 0
-      && page.materialId[voxel] !== VOXEL_MATERIAL_IDS.containerGlass)) continue;
+      && page.materialId[voxel] !== VOXEL_MATERIAL_IDS.container)) continue;
     const minimum = page.coordinate.map((value, axis) => sourceOrigin[axis]!
       + value * SOLID_WORLD_BRICK_CELLS * cell[axis]!) as Triple;
     const maximum = minimum.map((value, axis) => value
@@ -222,7 +221,9 @@ function buildBaseInterior(
       const solidCoordinate = point.map((value, axis) => Math.floor((value
         - solidWorldOrigin[axis]!) / solidWorldCell[axis]!)) as Triple;
       const solid = sampleSolidWorld(solidWorld, solidCoordinate);
-      const opaqueSolidFraction = solid.materialId === VOXEL_MATERIAL_IDS.containerGlass
+      // The canonical tank shell is solver-only: the render world excludes it
+      // (svo-planar-boundary.ts), so it is no opacity source here either.
+      const opaqueSolidFraction = solid.materialId === VOXEL_MATERIAL_IDS.container
         ? 0 : solid.solidFraction;
       solidCouldIntersect ||= opaqueSolidFraction > 0;
       occupied += Math.max(opaqueSolidFraction,

@@ -5,7 +5,6 @@ import { advancePresentationClock, frameInterval_ms } from "./frame-pacing";
 import type { SecondaryParticleRenderPipeline } from "./webgpu-secondary-particles";
 import type { GPUSolverInstance } from "./method-contract";
 import {
-  GLASS_OPTICS,
   packWaterSceneOptics,
   resolveDisplayGrade,
   resolveWaterKeyLight,

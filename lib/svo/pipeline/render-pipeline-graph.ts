@@ -225,7 +225,7 @@ export const RENDER_PIPELINE_COLLAPSE_GROUPS: Readonly<Record<RenderPipelineColl
   "raster-arm": {
     label: "Raster arm",
     chip: "3 tiers · not reachable",
-    summary: "The rasterized brick-proxy primary's own visibility tiers — thin-glass discovery, the scene-primitive tier, and rigid impostors. The megakernel primary resolves all three inline, so none of these passes can encode; the arm expands into its rows only under FLUID_SVO_PRIMARY_TRAVERSAL=raster.",
+    summary: "The rasterized brick-proxy primary's own visibility tiers — the scene-primitive tier and rigid impostors. The megakernel primary resolves both inline, so neither pass can encode; the arm expands into its rows only under FLUID_SVO_PRIMARY_TRAVERSAL=raster.",
   },
 });
 
@@ -373,30 +373,13 @@ const NODES: readonly RenderPipelineNodeDefinition[] = [
     ],
     toggleable: true,
     tip: {
-      summary: "Primary visibility fills the surface buffer using the selected backend: per-pixel SVO rays or cached exposed voxel triangles. Mesh rasterization retains exact planes, rigid bodies and glass; unsupported, unfinished or failed mesh geometry is withheld. Off clears the surface buffer to sky.",
+      summary: "Primary visibility fills the surface buffer using the selected backend: per-pixel SVO rays or cached exposed voxel triangles. Mesh rasterization retains exact planes and rigid bodies; unsupported, unfinished or failed mesh geometry is withheld. Off clears the surface buffer to sky.",
       writes: "packedSurface · identityMedia · hardwareDepth · splitGeometry",
       feeds: "every lighting and shading pass",
     },
     state: (context) => (context.disabledStages.has("primary-traversal") ? "off" : "on"),
     chip: (context) => (context.disabledStages.has("primary-traversal")
       ? "withheld · clears only" : context.surfaceMeshActive ? "cached voxel triangles" : "megakernel · canonical-parametric"),
-  },
-  {
-    id: "thin-glass",
-    band: "primary",
-    side: "right",
-    label: "Thin-glass discovery",
-    stage: "thin-glass",
-    taps: ["glass-discovery"],
-    toggleable: true,
-    collapseGroup: "raster-arm",
-    tip: {
-      summary: "Records the nearest glass pane per pixel. The megakernel resolves panes inline and packs the winning key into the opaque identity's spare bits, so the separate raster pass only runs on the raster primary.",
-      writes: "splitGlassKey",
-      gate: "raster primary with at least one authored pane",
-    },
-    state: (context) => rasterTierState(context, "thin-glass"),
-    chip: (context) => rasterTierChip(context, "inline · raster arm only"),
   },
   {
     id: "scene-primitive",
@@ -540,8 +523,8 @@ const NODES: readonly RenderPipelineNodeDefinition[] = [
     taps: [],
     toggleable: true,
     tip: {
-      summary: "The miss half of the depth partition: the first draw of the deferred lighting pass resolves sky and thin glass over open sky at every pixel primary visibility left empty. Off withholds the draw and keeps the pass's clear, so the miss pixels go black; its cost is read inside deferred lighting.",
-      reads: "primary depth · environment · thin-glass key plane",
+      summary: "The miss half of the depth partition: the first draw of the deferred lighting pass resolves sky at every pixel primary visibility left empty. Off withholds the draw and keeps the pass's clear, so the miss pixels go black; its cost is read inside deferred lighting.",
+      reads: "primary depth · environment",
       writes: "dry scene HDR (miss pixels)",
       feeds: "optical composite",
     },

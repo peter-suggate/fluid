@@ -3,7 +3,7 @@ import {
   SVO_PORCELAIN_TERRAIN_ROUGHNESS,
   type SvoTerrainSurfaceModel,
 } from "../features/materials/svo-terrain-material";
-import { GLASS_OPTICS, WATER_OPTICS, type LinearRgb } from "../../core/webgpu-lighting";
+import { WATER_OPTICS, type LinearRgb } from "../../core/webgpu-lighting";
 import type { SceneryySurface } from "../../core/scenery-graph";
 import type { EnvironmentProxyMaterial, EnvironmentProxyPrimitive } from "../../core/voxel-environments";
 import { VOXEL_MATERIAL_IDS, VOXEL_MATERIALS, type VoxelMaterial } from "../../core/voxel-scene";
@@ -15,7 +15,6 @@ export const SVO_MATERIAL_RECORD_WORDS = SVO_MATERIAL_RECORD_STRIDE_BYTES / Uint
 export const SVO_MATERIAL_FLAGS = Object.freeze({
   opaque: 1 << 0,
   dielectric: 1 << 1,
-  thinWall: 1 << 2,
 } as const);
 
 /**
@@ -117,7 +116,7 @@ export function svoMaterialFunctionIdForEnvironmentProxy(
   // than a material grain of their own.
   if (/counter|board|panel|target/.test(semantic)) return SVO_MATERIAL_FUNCTION_IDS.architecturalSurface;
   // Everything still here is deliberately flat: calibration wedges (whose
-  // whole job is unmodulated albedo), softboxes, glass, and the
+  // whole job is unmodulated albedo), softboxes, lit screens, and the
   // void behind a porthole. Procedural grain on any of those would be a lie.
   return SVO_MATERIAL_FUNCTION_IDS.none;
 }
@@ -219,7 +218,6 @@ export function svoMaterialFromVoxelMaterial(
   options: SvoVoxelMaterialOptions = {},
 ): SvoMaterialRecord {
   const isWater = material.id === VOXEL_MATERIAL_IDS.fluid;
-  const isThinGlass = material.closure === "thin-dielectric";
   const isTerrain = material.id === VOXEL_MATERIAL_IDS.terrain;
   const isPorcelainTerrain = isTerrain && options.terrainSurface === "porcelain";
   return canonicalSvoMaterialRecord({
@@ -238,9 +236,9 @@ export function svoMaterialFromVoxelMaterial(
         : SVO_MATERIAL_FUNCTION_IDS.gardenTerrain,
     flags: material.closure === "opaque"
       ? SVO_MATERIAL_FLAGS.opaque
-      : SVO_MATERIAL_FLAGS.dielectric | (isThinGlass ? SVO_MATERIAL_FLAGS.thinWall : 0),
+      : SVO_MATERIAL_FLAGS.dielectric,
     baseColorLinear: isPorcelainTerrain ? SVO_PORCELAIN_TERRAIN_BASE_COLOR_LINEAR : material.baseColorLinear,
-    opacity: isThinGlass ? 0.24 : 1,
+    opacity: 1,
     emissiveLinear: material.emissiveLinear,
     roughness: isPorcelainTerrain ? SVO_PORCELAIN_TERRAIN_ROUGHNESS : material.roughness,
     metallic: material.metallic,
@@ -249,7 +247,7 @@ export function svoMaterialFromVoxelMaterial(
     transmission: material.transmission,
     absorption_mInv: isWater ? WATER_OPTICS.absorption : [0, 0, 0],
     scattering_mInv: isWater ? Math.max(...WATER_OPTICS.scatter) : 0,
-    scatteringColorLinear: isWater ? WATER_OPTICS.scatter : (isThinGlass ? GLASS_OPTICS.tint : [0, 0, 0]),
+    scatteringColorLinear: isWater ? WATER_OPTICS.scatter : [0, 0, 0],
     scatteringAnisotropy: 0,
   });
 }
@@ -358,7 +356,6 @@ struct SvoMaterialRecord {
 }
 const SVO_MATERIAL_FLAG_OPAQUE:u32=1u;
 const SVO_MATERIAL_FLAG_DIELECTRIC:u32=2u;
-const SVO_MATERIAL_FLAG_THIN_WALL:u32=4u;
 ${wgslMaterialFunctionConstants}
 fn svoMaterialValid(material:SvoMaterialRecord,index:u32)->bool{
   return material.identity.x==index&&index!=0u&&material.identity.w!=0u;

@@ -59,7 +59,6 @@ import { encodeSvoBrickOccupancy } from "../lib/svo/features/construction/svo-br
 import { SVO_PRIMITIVE_RECORD_STRIDE_BYTES } from "../lib/svo/contracts/svo-primitive-abi";
 import { SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES } from "../lib/svo/features/scene-publication/svo-primitive-candidates";
 import { DEFAULT_SVO_RENDER_TUNING } from "../lib/svo/pipeline/svo-render-tuning";
-import { buildSvoSceneGlass, SVO_SCENE_GLASS_MAXIMUM_PANES } from "../lib/svo/features/materials/svo-scene-glass";
 import { WebGPULiveSvoScene } from "../lib/svo/features/scene-publication/webgpu-live-svo-scene";
 import {
   assertSvoBrickRasterNodeAddressable,
@@ -157,16 +156,7 @@ expectTripwire("tripwire/rigid-body-count", /body overflow[\s\S]*maximumBodies/,
 expectTripwire("tripwire/rigid-body-index", /raise SVO_RIGID_RASTER_CONTRACT.maximumBodies/, () => {
   packSvoRigidRasterSplitIdentity(SVO_RIGID_RASTER_CONTRACT.maximumBodies, 0);
 });
-// The hero garden is the open case — no vessel panes at all — so the pane
-// ceiling is exercised on the default document under the conservatory, which is
-// the environment that actually declares glazing (6 panes plus 5 container).
-expectTripwire("tripwire/glass-pane-limit", /record limit[\s\S]*SVO_SCENE_GLASS_MAXIMUM_PANES/, () => {
-  buildSvoSceneGlass(cloneScene(defaultScene), { environmentId: "conservatory", maximumPanes: 10 });
-});
-expectTripwire("tripwire/glass-pane-override", /integer from 1[\s\S]*SVO_SCENE_GLASS_MAXIMUM_PANES/, () => {
-  buildSvoSceneGlass(cloneScene(defaultScene), { maximumPanes: 0 });
-});
-log(`Glass ceiling ${SVO_SCENE_GLASS_MAXIMUM_PANES} panes; rigid ceiling ${SVO_RIGID_RASTER_CONTRACT.maximumBodies}`
+log(`Rigid ceiling ${SVO_RIGID_RASTER_CONTRACT.maximumBodies}`
   + ` bodies (hard ${SVO_RIGID_RASTER_CONTRACT.maximumAddressableBodies})`);
 
 // ---------------------------------------------------------------------------
@@ -442,7 +432,6 @@ if (!tripwiresOnly) {
       assertSvoBrickRasterNodeAddressable(rung.nodes ?? 0, `x${multiplier} published octree`);
       const bodies = packSvoDryRigidBodies(scene);
       assertSvoRigidRasterBodyCount(bodies.count, `x${multiplier}`);
-      buildSvoSceneGlass(scene);
       assert.ok(rung.recordCount <= SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES,
         `${rung.recordCount} records exceeds SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES ${SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES}`);
       assert.ok(canConsumeSparseVoxelPrimitiveCandidates(drySceneData),
@@ -472,7 +461,7 @@ if (!tripwiresOnly) {
       // overflow rate is the capacity this sweep is most needed for. It also
       // implies both raster arms, which is what production runs on this path.
       const renderer = new SparseVoxelDrySceneRenderer(device, uniformBuffer, bodyBuffer, "rgba16float",
-        "raster-primary", "macro-hdda", "split", 0, true, true, false, {});
+        "raster-primary", "macro-hdda", "split", 0, true, false, {});
       owned.push(renderer);
       await renderer.initialize();
       renderer.setRigidBodyCount(bodies.count);
@@ -598,7 +587,6 @@ const report = {
   ceilings: {
     brickNodeIndex: svoBrickRasterAddressableNodes(),
     primitiveCandidateLeaves: SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES,
-    glassPanes: SVO_SCENE_GLASS_MAXIMUM_PANES,
     rigidBodies: SVO_RIGID_RASTER_CONTRACT.maximumBodies,
     rigidBodiesAddressable: SVO_RIGID_RASTER_CONTRACT.maximumAddressableBodies,
     brickCoverageCandidatesPerPixel: SVO_BRICK_RASTER_CONTRACT.coverageCandidatesPerPixel,

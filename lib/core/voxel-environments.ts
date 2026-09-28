@@ -1,7 +1,7 @@
 import type { EnvironmentId } from "./environments";
 import { environmentIndex } from "./environments";
 import type { SceneDescription, Vec3 } from "./model";
-import { expandSceneryGraph, type SceneryPane, type ScenerySpan } from "./scenery-expand";
+import { expandSceneryGraph, type ScenerySpan } from "./scenery-expand";
 import { sceneryGraphForEnvironment } from "./scenery-presets";
 import {
   aabb,
@@ -38,8 +38,6 @@ export interface EnvironmentProxyCatalog {
    * Selection and the hover outline both resolve a click to one of these.
    */
   readonly spans: readonly ScenerySpan[];
-  /** Declared dielectric panes, keyed like primitives: `<environment>/<node id>`. */
-  readonly panes: readonly SceneryPane[];
 }
 
 export interface EnvironmentProxyCatalogOptions {
@@ -104,11 +102,10 @@ export function buildEnvironmentProxyCatalog(scene: SceneDescription, environmen
   const context = environmentSceneryContext(scene, environmentId, options);
   const graph = scene.scenery ?? sceneryGraphForEnvironment(scene, environmentId);
   const b = new ProxyBuilder(environmentId);
-  const { shell, spans, panes } = expandSceneryGraph(b, graph, context);
+  const { shell, spans } = expandSceneryGraph(b, graph, context);
   return retainCatalog(scene, environmentId, options, {
     environmentId, environmentIndex: environmentIndex(environmentId),
     scale_m: context.s, floorY_m: context.floorY_m, shell, primitives: b.props, spans,
-    panes: panes.map((p) => ({ ...p, id: `${environmentId}/${p.id}` })),
   });
 }
 

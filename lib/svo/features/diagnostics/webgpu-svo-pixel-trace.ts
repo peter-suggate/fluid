@@ -639,7 +639,7 @@ fn probeRecordRigidProxies(ro:vec3f,rd:vec3f,rigid:DryHit){
   probeMaximumDepth=0u;probeShadowNodeVisits=0u;probeShadowLeafVisits=0u;probeShadowWork=0u;
   probeMipSteps=0u;probeFailure=0u;probeShadedLights=0u;
   probeGiState=0u;probeGiConeTaps=0u;probeGiConeCount=0u;probeGiVisibility=1.0;probeGiRadiance=vec3f(0.0);
-  dryVisibilityIgnoredBody=DRY_OWNER_NONE;dryThickGlassEnabled=0u;dryThickGlassFailure=0u;
+  dryVisibilityIgnoredBody=DRY_OWNER_NONE;
 
   // The record texture is write-only, so the request arrives in the uniform.
   if(probeRequest.w==0u){return vec4f(0.0);}

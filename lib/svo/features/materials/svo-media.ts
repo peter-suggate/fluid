@@ -1,13 +1,12 @@
 import {
   beerLambert,
   dielectricFresnel,
-  GLASS_OPTICS,
   WATER_OPTICS,
   type LinearRgb,
 } from "../../../core/webgpu-lighting";
 import type { SvoVec3 } from "../primary-visibility/webgpu-svo-traversal";
 
-export type SvoMediumKind = "air" | "water" | "glass";
+export type SvoMediumKind = "air" | "water";
 
 export const SVO_MEDIA_LIMITS = Object.freeze({
   boundaryQueries: 16,
@@ -19,7 +18,6 @@ export const SVO_MEDIA_LIMITS = Object.freeze({
 export const SVO_MEDIA = Object.freeze({
   air: { indexOfRefraction: 1, absorption_mInv: [0, 0, 0] as LinearRgb },
   water: { indexOfRefraction: WATER_OPTICS.indexOfRefraction, absorption_mInv: WATER_OPTICS.absorption },
-  glass: { indexOfRefraction: GLASS_OPTICS.indexOfRefraction, absorption_mInv: [0, 0, 0] as LinearRgb },
 } as const);
 
 export interface SvoDielectricTransition {
@@ -37,11 +35,6 @@ export interface SvoMediaBoundary {
   medium: SvoMediumKind | "opaque";
   /** Outward from the bounded volume. */
   geometricNormal: SvoVec3;
-  /** Collapsed two-interface glass sheet; it does not alter the medium stack. */
-  thinWall?: boolean;
-  thinWallTint?: LinearRgb;
-  /** Defaults to the canonical glass IOR; authored panes may override it. */
-  thinWallIor?: number;
   boundaryId?: number;
 }
 
@@ -51,7 +44,6 @@ export interface SvoResolvedBoundaryGroup {
   to: SvoMediumKind;
   nextStack: readonly SvoMediumKind[];
   interfaceNormal?: SvoVec3;
-  thinWalls: readonly SvoMediaBoundary[];
 }
 
 export interface SvoMediaRay {
@@ -209,8 +201,8 @@ function canonicalStack(input: readonly SvoMediumKind[]): SvoMediumKind[] {
 
 /**
  * Resolve coincident volume boundaries atomically: opaque first, then all
- * exits, then all entries. Thus a water exit coincident with a glass entry is
- * one water-to-glass interface, not two interfaces separated by fake air.
+ * exits, then all entries. Thus a coincident exit and entry is one interface,
+ * not two interfaces separated by fake air.
  */
 export function resolveSvoMediumBoundaryGroup(
   currentStackInput: readonly SvoMediumKind[],
@@ -231,14 +223,10 @@ export function resolveSvoMediumBoundaryGroup(
       throw new RangeError("Media boundary group exceeds the coincidence epsilon");
     }
     normalize(boundary.geometricNormal, "Media boundary geometric normal");
-    if (boundary.thinWall && boundary.medium !== "glass") {
-      throw new RangeError("Only glass boundaries may use thin-wall media semantics");
-    }
   }
   const opaque = boundaries.find((boundary) => boundary.medium === "opaque");
-  const thinWalls = boundaries.filter((boundary) => boundary.medium === "glass" && boundary.thinWall);
   const volumes = boundaries.filter((boundary): boundary is SvoMediaBoundary & { medium: SvoMediumKind } =>
-    boundary.medium !== "opaque" && !boundary.thinWall);
+    boundary.medium !== "opaque");
   const exits = volumes.filter((boundary) => crossing(boundary, direction) === "exit");
   const entries = volumes.filter((boundary) => crossing(boundary, direction) === "enter");
   if (exits.length + entries.length !== volumes.length) throw new RangeError("Tangent media boundary has no entry/exit ownership");
@@ -264,7 +252,6 @@ export function resolveSvoMediumBoundaryGroup(
     to: nextStack.at(-1) as SvoMediumKind,
     nextStack,
     interfaceNormal: volumes[0]?.geometricNormal,
-    thinWalls,
   };
 }
 
@@ -284,23 +271,6 @@ function failBase(
   direction: SvoVec3,
 ): SvoMediaTraceBase {
   return { throughput, counts, distance_m, mediaStack, direction };
-}
-
-function thinTint(boundary: SvoMediaBoundary): LinearRgb {
-  const tint = boundary.thinWallTint ?? GLASS_OPTICS.tint;
-  if (tint.some((channel) => !Number.isFinite(channel) || channel < 0 || channel > 1)) {
-    throw new RangeError("Thin-wall tint must contain finite channels from zero to one");
-  }
-  return tint;
-}
-
-function thinWallFresnel(boundary: SvoMediaBoundary, direction: SvoVec3, currentMedium: SvoMediumKind): number {
-  const glassIor = boundary.thinWallIor ?? GLASS_OPTICS.indexOfRefraction;
-  if (!Number.isFinite(glassIor) || glassIor <= 0) throw new RangeError("Thin-wall IOR must be finite and positive");
-  const cosine = Math.min(1, Math.max(0, Math.abs(dot(direction, normalize(boundary.geometricNormal, "Thin-wall normal")))));
-  const currentIor = mediumDefinition(currentMedium).indexOfRefraction;
-  const f0 = ((currentIor - glassIor) / (currentIor + glassIor)) ** 2;
-  return dielectricFresnel(cosine, f0);
 }
 
 /**
@@ -374,21 +344,6 @@ export function traceSvoMediaRay(
       };
     }
 
-    for (const wall of resolved.thinWalls) {
-      if (counts.transitions >= limits.transitions) return { status: "exhausted", exhaustedBy: "transitions", ...failBase([0, 0, 0], counts, distance_m, mediaStack, direction) };
-      if (counts.transmissions >= limits.transmissions) return { status: "exhausted", exhaustedBy: "transmissions", ...failBase([0, 0, 0], counts, distance_m, mediaStack, direction) };
-      counts.transitions += 1;
-      counts.transmissions += 1;
-      const sheetTransmission = (1 - thinWallFresnel(wall, direction, currentMedium)) ** 2;
-      const tint = thinTint(wall);
-      throughput = [
-        throughput[0] * sheetTransmission * tint[0],
-        throughput[1] * sheetTransmission * tint[1],
-        throughput[2] * sheetTransmission * tint[2],
-      ];
-      // A collapsed pair of parallel interfaces has no net Snell deflection.
-    }
-
     if (resolved.from !== resolved.to) {
       if (counts.transitions >= limits.transitions) return { status: "exhausted", exhaustedBy: "transitions", ...failBase([0, 0, 0], counts, distance_m, mediaStack, direction) };
       counts.transitions += 1;
@@ -429,17 +384,17 @@ export function traceSvoMediaRay(
  * existing SVO/fluid/primitive visibility helpers.
  */
 export const svoMediaWGSL = /* wgsl */ `
-const SVO_MEDIUM_AIR:u32=0u;const SVO_MEDIUM_WATER:u32=1u;const SVO_MEDIUM_GLASS:u32=2u;const SVO_MEDIUM_OPAQUE:u32=3u;
+const SVO_MEDIUM_AIR:u32=0u;const SVO_MEDIUM_WATER:u32=1u;const SVO_MEDIUM_OPAQUE:u32=3u;
 const SVO_MEDIA_ESCAPED:u32=0u;const SVO_MEDIA_OPAQUE:u32=1u;const SVO_MEDIA_EXHAUSTED:u32=2u;const SVO_MEDIA_INVALID:u32=3u;
 const SVO_MEDIA_STEP_MISS:u32=0u;const SVO_MEDIA_STEP_HIT:u32=1u;const SVO_MEDIA_STEP_EXHAUSTED:u32=2u;const SVO_MEDIA_STEP_INVALID:u32=3u;
-const SVO_MEDIA_THIN_WALL:u32=1u;const SVO_MEDIA_MAX_QUERIES:u32=16u;const SVO_MEDIA_MAX_TRANSITIONS:u32=8u;const SVO_MEDIA_MAX_REFLECTIONS:u32=4u;const SVO_MEDIA_MAX_TRANSMISSIONS:u32=8u;const SVO_MEDIA_MAX_COINCIDENT:u32=4u;
+const SVO_MEDIA_MAX_QUERIES:u32=16u;const SVO_MEDIA_MAX_TRANSITIONS:u32=8u;const SVO_MEDIA_MAX_REFLECTIONS:u32=4u;const SVO_MEDIA_MAX_TRANSMISSIONS:u32=8u;const SVO_MEDIA_MAX_COINCIDENT:u32=4u;
 struct SvoMediaRay{origin_m:vec3f,maximumDistance_m:f32,direction:vec3f,_padding:f32}
-struct SvoMediaBoundary{t_m:f32,medium:u32,flags:u32,_padding:u32,geometricNormal:vec3f,_padding2:f32,tint:vec3f,ior:f32}
+struct SvoMediaBoundary{t_m:f32,medium:u32,flags:u32,_padding:u32,geometricNormal:vec3f,_padding2:f32}
 struct SvoMediaStep{status:u32,count:u32,_padding:vec2u,boundaries:array<SvoMediaBoundary,4>}
 struct SvoMediaBudget{queries:u32,transitions:u32,reflections:u32,transmissions:u32}
 struct SvoMediaResult{status:u32,currentMedium:u32,stackSize:u32,_padding:u32,counts:SvoMediaBudget,throughput:vec3f,distance_m:f32,direction:vec3f,_padding2:f32}
 struct SvoMediaRefraction{reflected:vec3f,refracted:vec3f,fresnel:f32,tir:u32}
-fn svoMediaIor(medium:u32)->f32{if(medium==SVO_MEDIUM_WATER){return ${WATER_OPTICS.indexOfRefraction};}if(medium==SVO_MEDIUM_GLASS){return ${GLASS_OPTICS.indexOfRefraction};}return 1.0;}
+fn svoMediaIor(medium:u32)->f32{if(medium==SVO_MEDIUM_WATER){return ${WATER_OPTICS.indexOfRefraction};}return 1.0;}
 fn svoMediaAbsorption(medium:u32)->vec3f{if(medium==SVO_MEDIUM_WATER){return vec3f(${WATER_OPTICS.absorption.join(",")});}return vec3f(0.0);}
 fn svoMediaBeer(throughput:vec3f,medium:u32,distance_m:f32)->vec3f{return throughput*exp(-svoMediaAbsorption(medium)*max(distance_m,0.0));}
 fn svoMediaRefract(incidentIn:vec3f,normalIn:vec3f,mediumFrom:u32,mediumTo:u32)->SvoMediaRefraction{let incident=normalize(incidentIn);var normal=normalize(normalIn);if(dot(incident,normal)>0.0){normal=-normal;}let eta=svoMediaIor(mediumFrom)/svoMediaIor(mediumTo);let cosine=clamp(-dot(incident,normal),0.0,1.0);let k=1.0-eta*eta*(1.0-cosine*cosine);let reflected=reflect(incident,normal);let ratio=(svoMediaIor(mediumFrom)-svoMediaIor(mediumTo))/(svoMediaIor(mediumFrom)+svoMediaIor(mediumTo));let f0=ratio*ratio;let fresnel=f0+(1.0-f0)*pow(1.0-cosine,5.0);if(k<0.0){return SvoMediaRefraction(reflected,vec3f(0.0),1.0,1u);}return SvoMediaRefraction(reflected,normalize(eta*incident+(eta*cosine-sqrt(max(k,0.0)))*normal),fresnel,0u);}
@@ -448,12 +403,11 @@ fn svoMediaFail(status:u32,medium:u32,stackSize:u32,counts:SvoMediaBudget,distan
 fn svoTraceMedia(rayIn:SvoMediaRay,initialMedium:u32,requested:SvoMediaBudget,coincidentEpsilon_m:f32,continuationEpsilon_m:f32)->SvoMediaResult{
   let limit=SvoMediaBudget(min(max(requested.queries,1u),SVO_MEDIA_MAX_QUERIES),min(max(requested.transitions,1u),SVO_MEDIA_MAX_TRANSITIONS),min(max(requested.reflections,1u),SVO_MEDIA_MAX_REFLECTIONS),min(max(requested.transmissions,1u),SVO_MEDIA_MAX_TRANSMISSIONS));var counts=SvoMediaBudget(0u,0u,0u,0u);var stack:array<u32,4>;stack[0]=SVO_MEDIUM_AIR;var stackSize=1u;if(initialMedium!=SVO_MEDIUM_AIR){stack[1]=initialMedium;stackSize=2u;}var ray=rayIn;var throughput=vec3f(1.0);var distance_m=0.0;
   for(var query=0u;query<SVO_MEDIA_MAX_QUERIES;query+=1u){if(query>=limit.queries){return svoMediaFail(SVO_MEDIA_EXHAUSTED,stack[stackSize-1u],stackSize,counts,distance_m,ray.direction);}counts.queries+=1u;let step=svoMediaNext(ray,stack,stackSize);if(step.status==SVO_MEDIA_STEP_MISS){throughput=svoMediaBeer(throughput,stack[stackSize-1u],ray.maximumDistance_m);return SvoMediaResult(SVO_MEDIA_ESCAPED,stack[stackSize-1u],stackSize,0u,counts,throughput,distance_m+ray.maximumDistance_m,ray.direction,0.0);}if(step.status==SVO_MEDIA_STEP_EXHAUSTED){return svoMediaFail(SVO_MEDIA_EXHAUSTED,stack[stackSize-1u],stackSize,counts,distance_m,ray.direction);}if(step.status!=SVO_MEDIA_STEP_HIT||step.count==0u||step.count>SVO_MEDIA_MAX_COINCIDENT){return svoMediaFail(SVO_MEDIA_INVALID,stack[stackSize-1u],stackSize,counts,distance_m,ray.direction);}var hitT=step.boundaries[0].t_m;for(var i=1u;i<SVO_MEDIA_MAX_COINCIDENT;i+=1u){if(i>=step.count){break;}hitT=min(hitT,step.boundaries[i].t_m);}if(hitT<0.0||hitT>ray.maximumDistance_m){return svoMediaFail(SVO_MEDIA_INVALID,stack[stackSize-1u],stackSize,counts,distance_m,ray.direction);}let incidentDirection=ray.direction;let before=stack[stackSize-1u];throughput=svoMediaBeer(throughput,before,hitT);distance_m+=hitT;
-    for(var i=0u;i<SVO_MEDIA_MAX_COINCIDENT;i+=1u){if(i>=step.count){break;}let boundary=step.boundaries[i];if(abs(boundary.t_m-hitT)>coincidentEpsilon_m||(boundary.flags&SVO_MEDIA_THIN_WALL)!=0u&&boundary.medium!=SVO_MEDIUM_GLASS){return svoMediaFail(SVO_MEDIA_INVALID,before,stackSize,counts,distance_m,ray.direction);}if(boundary.medium<SVO_MEDIUM_OPAQUE&&(boundary.flags&SVO_MEDIA_THIN_WALL)==0u&&abs(dot(ray.direction,boundary.geometricNormal))<=1e-10){return svoMediaFail(SVO_MEDIA_INVALID,before,stackSize,counts,distance_m,ray.direction);}if(boundary.medium==SVO_MEDIUM_OPAQUE){return svoMediaFail(SVO_MEDIA_OPAQUE,before,stackSize,counts,distance_m,ray.direction);}}
+    for(var i=0u;i<SVO_MEDIA_MAX_COINCIDENT;i+=1u){if(i>=step.count){break;}let boundary=step.boundaries[i];if(abs(boundary.t_m-hitT)>coincidentEpsilon_m){return svoMediaFail(SVO_MEDIA_INVALID,before,stackSize,counts,distance_m,ray.direction);}if(boundary.medium<SVO_MEDIUM_OPAQUE&&abs(dot(ray.direction,boundary.geometricNormal))<=1e-10){return svoMediaFail(SVO_MEDIA_INVALID,before,stackSize,counts,distance_m,ray.direction);}if(boundary.medium==SVO_MEDIUM_OPAQUE){return svoMediaFail(SVO_MEDIA_OPAQUE,before,stackSize,counts,distance_m,ray.direction);}}
     var priorStack:array<u32,4>;for(var i=0u;i<4u;i+=1u){priorStack[i]=stack[i];}let priorStackSize=stackSize;var interfaceNormal=vec3f(0.0);var hasInterface=false;
-    // Exits precede entries, preventing a coincident water/glass pair from creating fake air.
-    for(var i=0u;i<SVO_MEDIA_MAX_COINCIDENT;i+=1u){if(i>=step.count){break;}let b=step.boundaries[i];if(b.medium<SVO_MEDIUM_OPAQUE&&(b.flags&SVO_MEDIA_THIN_WALL)==0u&&dot(ray.direction,b.geometricNormal)>1e-10){if(stackSize<=1u||stack[stackSize-1u]!=b.medium){return svoMediaFail(SVO_MEDIA_INVALID,before,stackSize,counts,distance_m,ray.direction);}stackSize-=1u;if(!hasInterface){interfaceNormal=b.geometricNormal;hasInterface=true;}}}
-    for(var i=0u;i<SVO_MEDIA_MAX_COINCIDENT;i+=1u){if(i>=step.count){break;}let b=step.boundaries[i];if(b.medium<SVO_MEDIUM_OPAQUE&&(b.flags&SVO_MEDIA_THIN_WALL)==0u&&dot(ray.direction,b.geometricNormal)<-1e-10){if(stackSize>=4u){return svoMediaFail(SVO_MEDIA_INVALID,before,stackSize,counts,distance_m,ray.direction);}stack[stackSize]=b.medium;stackSize+=1u;if(!hasInterface){interfaceNormal=b.geometricNormal;hasInterface=true;}}}
-    for(var i=0u;i<SVO_MEDIA_MAX_COINCIDENT;i+=1u){if(i>=step.count){break;}let b=step.boundaries[i];if((b.flags&SVO_MEDIA_THIN_WALL)!=0u){if(counts.transitions>=limit.transitions||counts.transmissions>=limit.transmissions){return svoMediaFail(SVO_MEDIA_EXHAUSTED,before,stackSize,counts,distance_m,ray.direction);}counts.transitions+=1u;counts.transmissions+=1u;let glassIor=select(${GLASS_OPTICS.indexOfRefraction},b.ior,b.ior>0.0);let cosine=clamp(abs(dot(normalize(ray.direction),normalize(b.geometricNormal))),0.0,1.0);let ratio=(svoMediaIor(before)-glassIor)/(svoMediaIor(before)+glassIor);let f0=ratio*ratio;let fresnel=f0+(1.0-f0)*pow(1.0-cosine,5.0);throughput*=pow(1.0-fresnel,2.0)*clamp(b.tint,vec3f(0.0),vec3f(1.0));}}
+    // Exits precede entries, preventing a coincident exit/entry pair from creating fake air.
+    for(var i=0u;i<SVO_MEDIA_MAX_COINCIDENT;i+=1u){if(i>=step.count){break;}let b=step.boundaries[i];if(b.medium<SVO_MEDIUM_OPAQUE&&dot(ray.direction,b.geometricNormal)>1e-10){if(stackSize<=1u||stack[stackSize-1u]!=b.medium){return svoMediaFail(SVO_MEDIA_INVALID,before,stackSize,counts,distance_m,ray.direction);}stackSize-=1u;if(!hasInterface){interfaceNormal=b.geometricNormal;hasInterface=true;}}}
+    for(var i=0u;i<SVO_MEDIA_MAX_COINCIDENT;i+=1u){if(i>=step.count){break;}let b=step.boundaries[i];if(b.medium<SVO_MEDIUM_OPAQUE&&dot(ray.direction,b.geometricNormal)<-1e-10){if(stackSize>=4u){return svoMediaFail(SVO_MEDIA_INVALID,before,stackSize,counts,distance_m,ray.direction);}stack[stackSize]=b.medium;stackSize+=1u;if(!hasInterface){interfaceNormal=b.geometricNormal;hasInterface=true;}}}
     let after=stack[stackSize-1u];if(before!=after){if(counts.transitions>=limit.transitions){return svoMediaFail(SVO_MEDIA_EXHAUSTED,before,stackSize,counts,distance_m,ray.direction);}counts.transitions+=1u;let optical=svoMediaRefract(ray.direction,interfaceNormal,before,after);if(optical.tir!=0u){if(counts.reflections>=limit.reflections){return svoMediaFail(SVO_MEDIA_EXHAUSTED,before,stackSize,counts,distance_m,ray.direction);}counts.reflections+=1u;ray.direction=optical.reflected;stackSize=priorStackSize;for(var i=0u;i<4u;i+=1u){stack[i]=priorStack[i];}}else{if(counts.transmissions>=limit.transmissions){return svoMediaFail(SVO_MEDIA_EXHAUSTED,before,stackSize,counts,distance_m,ray.direction);}counts.transmissions+=1u;throughput*=1.0-optical.fresnel;ray.direction=optical.refracted;}}
     let point=ray.origin_m+incidentDirection*hitT;let epsilon=max(continuationEpsilon_m,0.0);ray.origin_m=point+ray.direction*epsilon;ray.maximumDistance_m=max(0.0,ray.maximumDistance_m-hitT-epsilon);
   }return svoMediaFail(SVO_MEDIA_EXHAUSTED,stack[stackSize-1u],stackSize,counts,distance_m,ray.direction);

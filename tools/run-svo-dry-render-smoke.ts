@@ -928,18 +928,16 @@ if (traversalMode !== requestedTraversal) {
     + ` below the ${FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE} raster primary needs;`
     + " falling back to canonical-parametric — this lane is NOT testing what production ships");
 }
-// Where glass and rigid bodies are discovered, which is a property of the
-// traversal and not a capability either one has or lacks.
+// Where rigid bodies are discovered, which is a property of the traversal and
+// not a capability it has or lacks.
 //
-// Raster-primary has no choice: its brick pass replaces the megakernel, so panes
-// and bodies can only reach the G-buffer through separate passes, and the
-// constructor requires both (`webgpu-svo-dry-scene.ts:6843`). The megakernel
-// resolves both inline — `traceOpaqueScene` folds the analytic body loop
-// (`:6049`) and the split visibility fragment traces panes, packing the winning
-// key into the opaque identity's spare bits (`:3765`) — so the raster arms there
+// Raster-primary has no choice: its brick pass replaces the megakernel, so
+// bodies can only reach the G-buffer through a separate pass, and the
+// constructor requires it. The megakernel resolves them inline —
+// `traceOpaqueScene` folds the analytic body loop — so the raster arm there
 // would only duplicate work the primary already did, and `rasterRigidActive` is
-// what blocks stationary primary reuse (`:10469`). `webgpu-renderer.ts` derives
-// them the same way, so the lane and production compile the same graph.
+// what blocks stationary primary reuse. `webgpu-renderer.ts` derives it the same
+// way, so the lane and production compile the same graph.
 const rasterArms = traversalMode === "raster-primary";
 // The visibility candidate-BVH arms are gone with the walk they selected. The
 // lighting path reads voxels for its occluders now, so `bounded`, `unbounded`
@@ -1003,7 +1001,7 @@ log(`Primary traversal ${traversalMode}`
   + ` (${process.env.FLUID_SVO_DRY_SMOKE_TRAVERSAL ? "pinned by FLUID_SVO_DRY_SMOKE_TRAVERSAL" : "selected by the shared rule"}:`
   + ` ${smokeLeafBricks} leaf bricks over ${width * height} pixels`
   + ` = ${(smokeLeafBricks / (width * height)).toFixed(3)} proxies/pixel)`
-  + `${rasterArms ? ", raster glass + rigid discovery on" : ", glass + rigid resolved inline"}`);
+  + `${rasterArms ? ", raster rigid discovery on" : ", rigid resolved inline"}`);
 log("Visibility occluders: voxels (no analytic tier)");
 // In-brick empty-space skip. `off` ships today; `macro` rejects a 4^3 region on
 // one bit of the occupancy word the producer already publishes in the terminal
@@ -1032,7 +1030,7 @@ log(`Brick occupancy: ${occupancyArm}`);
 const renderer = new SparseVoxelDrySceneRenderer(device, uniformBuffer, bodyBuffer, "rgba16float",
   traversalMode, occupancyArm, "split",
   rasterArms ? SVO_SCREEN_SPACE_TERMINATION_CONTRACT.defaultThresholdPixels : 0,
-  rasterArms, rasterArms, true, experiments);
+  rasterArms, true, experiments);
 await renderer.initialize((label, completed, total) => log(`  [pipeline] ${label} (${completed}/${total})`));
 renderer.setRigidBodyCount(bodies.count);
 // Level of detail, swept from the environment rather than by editing a default.
@@ -1181,7 +1179,7 @@ if (pairArm !== "none") {
   pairRenderer = new SparseVoxelDrySceneRenderer(device, uniformBuffer, bodyBuffer, "rgba16float",
     traversalMode, pairOccupancy, "split",
     rasterArms ? SVO_SCREEN_SPACE_TERMINATION_CONTRACT.defaultThresholdPixels : 0,
-    rasterArms, rasterArms, true, pairExperiments);
+    rasterArms, true, pairExperiments);
   await pairRenderer.initialize();
   pairRenderer.setRigidBodyCount(bodies.count);
   pairRenderer.setRenderTuning({

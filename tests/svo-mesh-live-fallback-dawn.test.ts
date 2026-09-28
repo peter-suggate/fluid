@@ -11,7 +11,7 @@ import { SVO_SURFACE_MESH_BOX_UNION_SLOT, SVO_SURFACE_MESH_BOX_WORDS, SVO_SURFAC
     const initialized = await createDawnRenderDevice(); device = initialized.device;
     const { createSvoDrySceneFragmentWGSL, drySceneVertexShader } = await import("../lib/svo/features/shading/program");
     const fullModule = device.createShaderModule({ code: createSvoDrySceneFragmentWGSL(1,
-      "raster-primary", "bounds", "split", 0, false, true, false, false, { surfaceMesh: true }) });
+      "raster-primary", "bounds", "split", 0, false, false, false, { surfaceMesh: true }) });
     const fullVertex = device.createShaderModule({ code: drySceneVertexShader });
     await device.createRenderPipelineAsync({ layout: "auto", vertex: { module: fullVertex, entryPoint: "vertexMain" },
       fragment: { module: fullModule, entryPoint: "surfaceMeshBackground", targets: [

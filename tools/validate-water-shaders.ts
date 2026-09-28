@@ -50,7 +50,6 @@ import {
 import { octreeFineSeedAdapterShader, octreeFineSeedCandidateShader } from "../lib/methods/octree-shared/webgpu-octree-fine-seed-adapter";
 import { sparseSceneProxyVoxelizationShader } from "../lib/core/webgpu-sparse-scene-proxies";
 import { svoDrySceneShader } from "../lib/svo/features/shading/program";
-import { svoThickGlassWGSL } from "../lib/svo/features/materials/svo-thick-glass";
 import { globalFineClassifiedEmitShader, globalFineClassifiedEmitShaders, globalFineClassifiedIndirectScanShader, globalFineClassifiedScanShader } from "../lib/core/webgpu-water-global-fine-tetra";
 import { structuredFineLevelSetTransportWGSL } from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-transport";
 import { fineLevelSetVolumeCorrectionWGSL } from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-volume";
@@ -185,7 +184,6 @@ fn sampleCoarseOctreePhi(position:vec3f)->f32{return coarsePhi[u32(position.x)*0
   "octree-fine-seed-candidates": octreeFineSeedCandidateShader,
   "sparse-scene-proxy-voxelization": sparseSceneProxyVoxelizationShader,
   "sparse-voxel-dry-scene": svoDrySceneShader,
-  "sparse-voxel-thick-glass-library": svoThickGlassWGSL,
   // Every lens program, composed exactly as the overlay composes it. A lens is
   // declaration plus a classifier snippet, so nothing about it is checked until
   // something assembles the module — and the overlay only assembles the one

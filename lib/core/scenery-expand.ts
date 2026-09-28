@@ -82,28 +82,10 @@ export interface ScenerySpan {
   readonly to: number;
 }
 
-/**
- * A dielectric pane the glass path traces, in world metres.
- *
- * Panes leave the catalog by this door rather than as proxies: an opaque
- * primitive standing where the glass is would occlude everything behind it, and
- * the pane's whole job is to be seen through.
- */
-export interface SceneryPane {
-  /** Unprefixed node id; the catalog namespaces it by environment. */
-  readonly id: string;
-  readonly center_m: Vec3;
-  /** Half width and half height in the pane's own plane. */
-  readonly half_m: readonly [number, number];
-  readonly orientation?: Quaternion;
-}
-
 export interface SceneryExpansion {
   readonly shell: EnvironmentProxyShell;
   /** One entry per top-level node, in document order, shell excluded. */
   readonly spans: readonly ScenerySpan[];
-  /** Declared glazing, shell openings first, then document order. */
-  readonly panes: readonly SceneryPane[];
 }
 
 function rotate(orientation: Quaternion | undefined, v: Vec3): Vec3 {
@@ -370,7 +352,6 @@ function emitRoomShell(
   node: SceneryRoomShellNode,
   context: EnvironmentSceneryContext,
   graph: SceneryGraph,
-  panes: SceneryPane[],
 ): EnvironmentProxyShell {
   const { floorY_m: floorY, shellThickness_m: thickness, scene, s } = context;
   const roomHalf = node.halfSize ? V(
@@ -399,8 +380,7 @@ function emitRoomShell(
     // `validateSceneryGraph` refuses to let a document declare separately.
   } else if (node.backWall) {
     // The four boxes around an exact rectangular hole. A single union-only wall
-    // box would conceal the authored thin-glass pane behind it and force the
-    // whole set off the analytic path.
+    // box would conceal the backing behind it.
     const opening = node.backWall;
     const openingHalfWidth = Math.min(opening.halfWidth * s, roomHalf.x - thickness);
     const openingHalfHeight = Math.min(opening.halfHeight * s, roomHalf.y - thickness);
@@ -421,16 +401,8 @@ function emitRoomShell(
     cut(`${frame}-right`, V(sideCentreX, centre.y, -roomHalf.z - t), V(sideHalfWidth, roomHalf.y, t));
     cut(`${frame}-bottom`, V(0, floorY + bottomHalfHeight, -roomHalf.z - t), V(openingHalfWidth, bottomHalfHeight, t));
     cut(`${frame}-top`, V(0, openingTop + topHalfHeight, -roomHalf.z - t), V(openingHalfWidth, topHalfHeight, t));
-    // The pane sits in the wall's inner face, and the backing immediately
-    // outside it. Both are derived from the same opening as the frame, so a
-    // resized room can never leave glass hanging beside its hole.
-    if (opening.glazing) {
-      panes.push({
-        id: opening.glazing,
-        center_m: V(0, openingCentreY, -roomHalf.z),
-        half_m: [openingHalfWidth, openingHalfHeight],
-      });
-    }
+    // The backing sits immediately outside the wall, derived from the same
+    // opening as the frame, so a resized room can never leave it beside its hole.
     if (opening.backing) {
       const { color, emission } = resolveMaterial(opening.backing.material, graph);
       builder.box(opening.backing.id, opening.backing.group ?? "window-backing",
@@ -453,9 +425,8 @@ function emitShell(
   node: SceneryShellNode,
   context: EnvironmentSceneryContext,
   graph: SceneryGraph,
-  panes: SceneryPane[],
 ): EnvironmentProxyShell {
-  if (node.kind === "room-shell") return emitRoomShell(builder, node, context, graph, panes);
+  if (node.kind === "room-shell") return emitRoomShell(builder, node, context, graph);
   // Open-world scenery publishes no inferred floor boxes. Static ground comes
   // from the scene's canonical SolidWorld like every other static solid.
   const { roomHalf_m: roomHalf, floorY_m: floorY, scene } = context;
@@ -571,8 +542,7 @@ export function expandSceneryGraph(
 ): SceneryExpansion {
   const shellNode = graph.nodes.find(isSceneryShellNode);
   if (!shellNode) throw new Error("A scenery graph needs exactly one shell node");
-  const panes: SceneryPane[] = [];
-  const shell = emitShell(builder, shellNode, context, graph, panes);
+  const shell = emitShell(builder, shellNode, context, graph);
   const root: SceneryFrame = {
     origin_m: V(0, 0, 0), unit_m: context.s, scale: 1, units: "scene-scale", group: "scenery",
   };
@@ -588,13 +558,6 @@ export function expandSceneryGraph(
       }
       if (node.kind === "generator") { visit(growGenerator(node, context, graph), frame); continue; }
       if (node.kind === "tree") { emitTree(builder, node, frame, context, graph); continue; }
-      if (node.kind === "glazing") {
-        panes.push({
-          id: node.id, center_m: frame.origin_m, orientation: frame.orientation,
-          half_m: [metres(frame, node.half[0]), metres(frame, node.half[1])],
-        });
-        continue;
-      }
       emitPrimitive(builder, node, frame, graph);
     }
   };
@@ -605,5 +568,5 @@ export function expandSceneryGraph(
     visit([node], root);
     spans.push({ nodeId: node.id, from, to: builder.props.length });
   }
-  return { shell, spans, panes };
+  return { shell, spans };
 }

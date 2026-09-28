@@ -155,14 +155,6 @@ const CONSERVATORY_NODES: readonly SceneryNode[] = [
     wall: { colorLinear: [1, 1, 1] },
     ceiling: { colorLinear: [.78, .785, .79] },
   },
-  // The glass itself: six panes in the mullioned bay, declared beside the frame
-  // that carries them rather than in the glass path's own table.
-  { kind: "glazing", id: "glazing/pane-left-low", place: { position: { x: -.56, y: .2975, z: -1.48 } }, half: [.53, .2975] },
-  { kind: "glazing", id: "glazing/pane-left-middle", place: { position: { x: -.56, y: .94, z: -1.48 } }, half: [.53, .295] },
-  { kind: "glazing", id: "glazing/pane-left-high", place: { position: { x: -.56, y: 1.5625, z: -1.48 } }, half: [.53, .2775] },
-  { kind: "glazing", id: "glazing/pane-right-low", place: { position: { x: .56, y: .2975, z: -1.48 } }, half: [.53, .2975] },
-  { kind: "glazing", id: "glazing/pane-right-middle", place: { position: { x: .56, y: .94, z: -1.48 } }, half: [.53, .295] },
-  { kind: "glazing", id: "glazing/pane-right-high", place: { position: { x: .56, y: 1.5625, z: -1.48 } }, half: [.53, .2775] },
   { kind: "box", id: "glazing/frame-0", group: "glazing-frame", tags: ["fixture", "frame"], place: { position: { x: -1.12, y: 0.9200000000000002, z: -1.48 } }, halfSize: { x: 0.027, y: 0.9200000000000002, z: 0.027 }, material: { palette: "lime", value: 1 } },
   { kind: "box", id: "glazing/frame-1", group: "glazing-frame", tags: ["fixture", "frame"], place: { position: { x: 0, y: 0.9200000000000002, z: -1.48 } }, halfSize: { x: 0.027, y: 0.9200000000000002, z: 0.027 }, material: { palette: "lime", value: 1 } },
   { kind: "box", id: "glazing/frame-2", group: "glazing-frame", tags: ["fixture", "frame"], place: { position: { x: 1.12, y: 0.9200000000000002, z: -1.48 } }, halfSize: { x: 0.027, y: 0.9200000000000002, z: 0.027 }, material: { palette: "lime", value: 1 } },
@@ -273,7 +265,7 @@ export const conservatorySceneryGraph: SceneryGraph = {
  * one warm tungsten source and the cool family it plays against. The back wall
  * carries a city window, declared as an opening so the four boxes around it are
  * derived from the room rather than frozen at one container size — a single
- * union-only wall box would conceal the authored thin-glass pane behind it.
+ * union-only wall box would conceal the lit city behind it.
  */
 const NIGHT_LAB_NODES: readonly SceneryNode[] = [
   {
@@ -281,7 +273,7 @@ const NIGHT_LAB_NODES: readonly SceneryNode[] = [
     floor: { colorLinear: [.172, .178, .186] },
     wall: { colorLinear: [1, 1, 1] },
     ceiling: { colorLinear: [.455, .458, .462] },
-    backWall: { halfWidth: 1.62, halfHeight: .55, centerY: 1.60, glazing: "window/city-glazing" },
+    backWall: { halfWidth: 1.62, halfHeight: .55, centerY: 1.60 },
   },
   { kind: "box", id: "desk/top", group: "lab-bench", tags: ["desk", "bench"], place: { position: { x: 0, y: -0.021, z: 0 } }, halfSize: { x: 0.8, y: 0.019, z: 0.5933333333333334 }, material: { colorLinear: [0.6, 0.6, 0.592] } },
   { kind: "box", id: "desk/apron", group: "lab-bench", tags: ["desk", "bench"], place: { position: { x: 0, y: -0.074, z: 0 } }, halfSize: { x: 0.73, y: 0.034, z: 0.5233333333333333 }, material: { palette: "graphite", value: 1 } },
@@ -616,11 +608,11 @@ function stationNodes(): readonly SceneryNode[] {
       floor: { palette: "hull", value: .48 },
       wall: { colorLinear: [1, 1, 1] },
       ceiling: { palette: "hull", value: .70 },
-      // The observation port: a hole in the hull, the glass in it, and the lit
-      // sea outside. One declaration, so the frame cannot drift off the pane.
+      // The observation port: a hole in the hull and the lit sea outside. One
+      // declaration, so the frame cannot drift off the opening.
       backWall: {
         halfWidth: .66, halfHeight: .39, centerY: 1.55,
-        frame: "observation-port/frame", glazing: "observation-port/glazing",
+        frame: "observation-port/frame",
         backing: {
           id: "observation-port/backing", group: "porthole-water",
           tags: ["light", "emits-positive-z", "window", "backing"],
@@ -632,10 +624,7 @@ function stationNodes(): readonly SceneryNode[] {
     ...Array.from({ length: 16 }, (_unused, index) => gauge(index, .28 + .13 * index)),
     { kind: "box", id: "gauge/rail", group: "instrument-gauge", tags: ["gauge"], place: { position: { x: -2.02, y: 1.26, z: .35 }, anchor: "floor" }, halfSize: { x: .008, y: 1.02, z: .014 }, material: { palette: "paint", value: .84 } },
     // A round porthole in the left wall, beside the rectangular observation
-    // port. Circular transmission is the one glazing shape the finite-pane
-    // path cannot express, so this stays a lit disc rather than real glass —
-    // and lib/svo-scene-glass.ts publishes that as an explicit unsupported
-    // entry rather than letting it pass as a pane.
+    // port: a lit disc.
     { kind: "cylinder", id: "porthole/glass", group: "porthole-glass", tags: ["light"], place: { position: { x: -2.02, y: 1.66, z: -.6 }, anchor: "floor", orientation: wallAxis }, radius: .42, halfHeight: .03, material: { palette: "deep", value: 1, emission: 1.6 } },
     { kind: "torus", id: "porthole/ring", group: "steel-fixture", tags: ["porthole"], place: { position: { x: -2.0, y: 1.66, z: -.6 }, anchor: "floor", orientation: wallAxis }, majorRadius: .44, minorRadius: .045, material: { palette: "hull", value: .66 } },
     { kind: "torus", id: "porthole/bolts", group: "steel-fixture", tags: ["porthole"], place: { position: { x: -1.96, y: 1.66, z: -.6 }, anchor: "floor", orientation: wallAxis }, majorRadius: .52, minorRadius: .018, material: { palette: "hull", value: .52 } },

@@ -117,8 +117,6 @@ export const SVO_PIXEL_TRACE_KINDS = Object.freeze({
   leafBounds: 15,
   /** A rigid impostor proxy covering this pixel, plus its analytic test. */
   rigidProxy: 16,
-  /** The thin-glass pane key the discovery pass wrote at this pixel. */
-  glassPane: 17,
   /** The reduced-rate cone-lighting texel this pixel's visibility came from. */
   prepassTexel: 18,
 } as const);
@@ -285,7 +283,6 @@ export const SVO_PIXEL_TRACE_STAGES = Object.freeze({
   brickRaster: 1 << 1,
   terrain: 1 << 2,
   rigid: 1 << 3,
-  glass: 1 << 4,
   conePrepass: 1 << 5,
   deferredLighting: 1 << 6,
 } as const);
@@ -608,8 +605,8 @@ export function mergeSvoPixelTrace(
     droppedRecords: primary.droppedRecords + lighting.droppedRecords,
     minimumVoxel_m: lighting.minimumVoxel_m ?? primary.minimumVoxel_m,
     primaryParity: {
-      // A raster winner is only one contributor to the pixel: terrain, a rigid
-      // body or a glass pane can legitimately sit in front of every brick, and
+      // A raster winner is only one contributor to the pixel: terrain or a
+      // rigid body can legitimately sit in front of every brick, and
       // the lighting probe sees those. Disagreement is only claimed when the
       // raster probe found a surface the lighting probe does not corroborate.
       agrees: bothMissed || !primary.hit || Math.abs(rasterDistance_m - lightingDistance_m) <= tolerance_m
@@ -744,9 +741,6 @@ export function svoPixelTraceLayerForKind(kind: SvoPixelTraceKind): SvoPixelTrac
     case SVO_PIXEL_TRACE_KINDS.globalIlluminationConeSample: return "gi-cones";
     case SVO_PIXEL_TRACE_KINDS.brickProxy: return "proxies";
     case SVO_PIXEL_TRACE_KINDS.leafBounds: return "winner";
-    // The pane key is an identity the lighting pass reads, not geometry the
-    // primary produced; it is reported in the narrative and drawn by nothing.
-    case SVO_PIXEL_TRACE_KINDS.glassPane: return "exact";
     case SVO_PIXEL_TRACE_KINDS.prepassTexel: return "prepass";
   }
 }
@@ -1405,8 +1399,6 @@ export function buildSvoPixelTraceGeometry(
         });
         break;
       }
-      // Identity the lighting pass reads, not geometry the primary produced.
-      case SVO_PIXEL_TRACE_KINDS.glassPane: break;
       case SVO_PIXEL_TRACE_KINDS.shadowRay: {
         const occluded = (record.flags & SVO_PIXEL_TRACE_FLAGS.hit) !== 0;
         push(record.a, record.b, {

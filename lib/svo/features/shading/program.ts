@@ -23,10 +23,6 @@ import { createSvoScreenSpaceTraversalWGSL,SVO_SCREEN_SPACE_TERMINATION_CONTRACT
 import { SVO_VISIBILITY_LIMITS,svoVisibilityRaysWGSL } from "../lighting-visibility/svo-visibility-rays";
 import { SVO_LATTICE_VISIBILITY_CONTRACT,svoLatticeKeyWGSL } from "../lighting-visibility/webgpu-svo-cone-fanout";
 import { svoProceduralNoiseWGSL } from "../materials/svo-procedural-material";
-import { SVO_SCENE_GLASS_MAXIMUM_PANES } from "../materials/svo-scene-glass";
-import { SVO_SCENE_THICK_GLASS_MAXIMUM_VOLUMES } from "../materials/svo-scene-thick-glass";
-import { svoThickGlassWGSL } from "../materials/svo-thick-glass";
-import { SVO_THIN_GLASS_RECORD_STRIDE_BYTES,SVO_THIN_GLASS_RECORD_WORDS,svoThinGlassWGSL } from "../materials/svo-thin-glass";
 import { svoSurfaceMeshWGSL } from "../primary-visibility/svo-surface-mesh";
 import { SVO_BRICK_RASTER_CONTRACT,svoBrickRasterSharedWGSL,svoRasterCoverageOverflowSignalWGSL } from "../primary-visibility/webgpu-svo-brick-raster";
 import { SVO_PRIMARY_ENTRY_PREPASS_CONTRACT } from "../primary-visibility/webgpu-svo-primary-entry-prepass";
@@ -58,9 +54,6 @@ export const SVO_DRY_SCENE_MATERIAL_CAPACITY = 8_192;
 
 export const SVO_DRY_SCENE_MATERIAL_ARENA_SIZE_BYTES =
   SVO_DRY_SCENE_MATERIAL_CAPACITY * SVO_MATERIAL_RECORD_STRIDE_BYTES;
-
-export const SVO_DRY_SCENE_GLASS_ARENA_SIZE_BYTES =
-  SVO_SCENE_GLASS_MAXIMUM_PANES * SVO_THIN_GLASS_RECORD_STRIDE_BYTES;
 
 export const alignDrySceneArenaBytes = (value: number): number => Math.ceil(value / 256) * 256;
 
@@ -132,11 +125,10 @@ export const drySceneArenaRegions = (() => {
   };
   const materialOffsetBytes = region(SVO_DRY_SCENE_MATERIAL_ARENA_SIZE_BYTES);
   const primitiveOffsetBytes = region(SVO_PRIMITIVE_CANDIDATE_ARENA_SIZE_BYTES);
-  const glassOffsetBytes = region(SVO_DRY_SCENE_GLASS_ARENA_SIZE_BYTES);
   const clusterOffsetBytes = region(SVO_DRY_SCENE_CLUSTER_ARENA_SIZE_BYTES);
   const fieldProgramOffsetBytes = region(SVO_DRY_SCENE_FIELD_PROGRAM_ARENA_SIZE_BYTES);
   return {
-    materialOffsetBytes, primitiveOffsetBytes, glassOffsetBytes, clusterOffsetBytes, fieldProgramOffsetBytes,
+    materialOffsetBytes, primitiveOffsetBytes, clusterOffsetBytes, fieldProgramOffsetBytes,
     sizeBytes: offsetBytes,
   };
 })();
@@ -145,7 +137,6 @@ export const drySceneArenaRegions = (() => {
 export const SVO_DRY_SCENE_ARENA_LAYOUT = Object.freeze({
   materialOffsetBytes: drySceneArenaRegions.materialOffsetBytes,
   primitiveOffsetBytes: drySceneArenaRegions.primitiveOffsetBytes,
-  glassOffsetBytes: drySceneArenaRegions.glassOffsetBytes,
   /** Fixed-capacity aggregate parameter blocks, addressed by a record's word-13 reference. */
   clusterOffsetBytes: drySceneArenaRegions.clusterOffsetBytes,
   /** Fixed-capacity field-program tape blocks, addressed by a record's word-13 reference. */
@@ -282,7 +273,7 @@ export const svoVisibilityTraceWGSL = svoVisibilityRaysWGSL.slice(svoVisibilityT
  * Primary and secondary traversal both refuse to consume the SVO until the
  * producer has published this live-scene field set. A producer that allocates
  * the structural source but never finalizes its current revision renders every
- * accelerated surface as a miss; analytic glass and rigid bodies keep drawing.
+ * accelerated surface as a miss; analytic primitives and rigid bodies keep drawing.
  *
  * The set is the tree, per-voxel identity, and scene geometry. Identity decides
  * solidity and supplies the baked normal; smooth surface reconstruction reads
@@ -663,11 +654,17 @@ export interface SvoDryOptimizationExperiments {
   readonly surfaceMeshMaxBytes?: number;
   /** Persistent level-0 voxel visibility for directional light slot zero. */
   readonly voxelLightCache?: boolean;
+  /**
+   * Compile the water terms into direct-light and contact visibility: the
+   * fluid optical-depth march through the coverage volume. Omitted or false
+   * leaves solid visibility alone and the march out of the module entirely.
+   */
+  readonly waterShadows?: boolean;
   /** Bounded exact-identity receiver search for sub-prepass-pixel surfaces. */
   readonly edgeReceiverRecovery?: boolean;
   /**
    * Internal shader variant: the lighting pass reads fan-out visibility from
-   * the per-frame half-voxel lattice table instead of the reduced screen
+   * the persistent half-voxel lattice store instead of the reduced screen
    * planes, and the module gains the lattice key entry. Reduced split with
    * cone fan-out only; the renderer selects it as a whole pipeline bundle.
    */
@@ -1103,8 +1100,6 @@ export function createSvoDrySceneFragmentWGSL(
    * the frame fingerprint gates on.
   */
   pixelProbe = false,
-  /** Split-only path: pane discovery is rasterized over projected coverage. */
-  rasterGlassDiscovery = false,
   /** Split-only path: moving rigid primary hits are rasterized from live BodyGPU records. */
   rasterRigidDiscovery = false,
   /** Reduced split-only experiment: execute one deterministic cone per compute lane. */
@@ -1113,9 +1108,6 @@ export function createSvoDrySceneFragmentWGSL(
 ): string {
   if (pixelProbe && (coneLightingScale !== 1 || shadingPath !== "inline")) {
     throw new RangeError("The pixel-trace probe requires the inline, full-rate dry-scene composition");
-  }
-  if (rasterGlassDiscovery && shadingPath !== "split") {
-    throw new RangeError("Raster glass discovery requires split shading");
   }
   if (rasterRigidDiscovery && shadingPath !== "split") {
     throw new RangeError("Raster rigid discovery requires split shading");
@@ -1136,12 +1128,8 @@ export function createSvoDrySceneFragmentWGSL(
   // composition has no pass ordered before its fragment to write a seed from.
   const primaryEntrySeed = shadingPath === "split" && traversalMode !== "raster-primary"
     && experiments.primaryEntryPrepass !== false;
-  // The point of the mode is to unfuse the megakernel: panes reach the brick
-  // fragment only as an already-rasterized key, never as a loop. Bodies are
-  // likewise a renderer-level requirement, checked where the passes are wired.
-  if (rasterPrimary && !rasterGlassDiscovery) {
-    throw new RangeError("Raster-primary traversal requires raster glass discovery");
-  }
+  // Rigid bodies are a renderer-level requirement of the mode, checked where
+  // the passes are wired.
   if (brickOccupancyMode !== "off" && brickOccupancyMode !== "bounds"
     && brickOccupancyMode !== "macro" && brickOccupancyMode !== "macro-hdda") {
     throw new RangeError(`Unsupported dry-scene brick occupancy mode: ${brickOccupancyMode}`);
@@ -1402,7 +1390,7 @@ fn drySceneFractionOfVoxel(voxel:u32)->f32{
   //
   // The owner is gone from the returned hit. A voxel has no back-pointer to an
   // authored record any more, so hover, picking and per-owner suppression of
-  // voxel surfaces are gone with it; analytic hits — rigid bodies, glass — still
+  // voxel surfaces are gone with it; analytic hits — rigid bodies, primitives — still
   // carry their own owner and still suppress.
   const primaryVoxelSurfaceWGSL = /* wgsl */ `if(cellSolid){
       let cellBounds=mat2x3f(bounds[0]+vec3f(cell)*extent,bounds[0]+(vec3f(cell)+vec3f(1.0))*extent);
@@ -1605,11 +1593,10 @@ fn dryVoxelFaceEdgeFactor(position:vec3f,faceNormal:vec3f,depth_m:f32,fieldSourc
  * is zero to the bit for a box's baked normal against an axis face. That is the
  * grazing view of a floor, and it is where the baked normal matters most —
  * rejecting it there paints a floor voxel with the orientation of the wall of
- * its own cube, which under a lamp pointing straight down is black. It is the
- * dark skirting seen through the glass at the base of a tank: the studio floor's
- * top row of voxels, entered edge-on through the wall, shading as if each were a
- * vertical face. From outside the glass that side is never entered and the same
- * voxel shades as floor, which is why it read as a glass bug.
+ * its own cube, which under a lamp pointing straight down is black. It was the
+ * dark skirting once seen through the retired glass tank wall: the studio
+ * floor's top row of voxels, entered edge-on through the wall, shading as if
+ * each were a vertical face.
  *
  * The feature id is always smooth. It was the analytic normal's own hard-feature
  * classification and there is nowhere in sixteen bits to keep it; the only thing
@@ -1975,7 +1962,7 @@ struct DryBrickCoverageOut{@location(0) key:u32,@builtin(frag_depth) hardwareDep
   }
 ` : "";
   const screenSpaceBrickResolveWGSL = screenSpaceTerminationPixels > 0 ? /* wgsl */ `
-  let lodKey=textureLoad(drySplitGlassKeyRead,vec2i(position),0).x;
+  let lodKey=textureLoad(drySplitLodKeyRead,vec2i(position),0).x;
   if(lodKey>0u){let instanceIndex=lodKey-1u;if(instanceIndex<arrayLength(&svoBrickInstances)){
     let record=svoBrickInstances[instanceIndex];let proxyBounds=mat2x3f(record.proxyMinimum,record.proxyMaximum);
     let interval=svoRayAabbWithInverse(SvoRay(ro,0.0,rd,DRY_MISS),1.0/rd,proxyBounds);
@@ -2265,7 +2252,7 @@ fn traceLeafPayloadVisibilityFineInterval(ray:SvoVisibilityRay,tMin_m:f32,hit:Sv
   for(var iteration=0u;iteration<32u;iteration+=1u){
     if(any(cell<vec3i(cellMinimum))||any(cell>=vec3i(cellMaximum))||entry>intervalExit||entry>ray.tMax_m){return dryVisibilityStep(SVO_VIS_STEP_MISS,0u,0u,workItems,DRY_MISS);}if(workItems>=workLimit){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,0u,0u,workItems,DRY_MISS);}workItems+=1u;
     let payloadIndex=svoBrickVoxelIndex(hit.voxelOffset,vec3u(cell),dry.mapping.brickSize);if(payloadIndex>=dryVoxelCapacity()){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}
-    ${cellSolidGateWGSL("payloadIndex", "let clipBounds=mat2x3f(bounds[0]+vec3f(cell)*extent,bounds[0]+(vec3f(cell)+vec3f(1.0))*extent);let span=dryCellContourInterval(identity,payloadIndex,clipBounds,ray.origin_m,ray.direction,entry,min(nextT.x,min(nextT.y,nextT.z)));if(span.x<=span.y){let materialId=sceneIdentityMaterial(identity);if(materialId>=dry.materialPublication.x){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}let material=dryMaterial(materialId);if(!dryMaterialPublished(material,materialId)){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}if(dryMaterialThinDielectric(material,materialId)){let cellBounds=mat2x3f(bounds[0]+vec3f(cell)*extent,bounds[0]+(vec3f(cell)+vec3f(1.0))*extent);let normal=dryVoxelFaceNormal(cellBounds,ray.origin_m+ray.direction*entry);let cellExit=min(nextT.x,min(nextT.y,nextT.z));return dryVisibilityTransmissionStep(0u,0u,workItems,min(max(span.y,span.x),ray.tMax_m),dryThinDielectricTransmittance(material,normal,ray.direction));}return dryVisibilityStep(SVO_VIS_STEP_HIT,0u,0u,workItems,span.x);}")}
+    ${cellSolidGateWGSL("payloadIndex", "let clipBounds=mat2x3f(bounds[0]+vec3f(cell)*extent,bounds[0]+(vec3f(cell)+vec3f(1.0))*extent);let span=dryCellContourInterval(identity,payloadIndex,clipBounds,ray.origin_m,ray.direction,entry,min(nextT.x,min(nextT.y,nextT.z)));if(span.x<=span.y){let materialId=sceneIdentityMaterial(identity);if(materialId>=dry.materialPublication.x){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}let material=dryMaterial(materialId);if(!dryMaterialPublished(material,materialId)){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}return dryVisibilityStep(SVO_VIS_STEP_HIT,0u,0u,workItems,span.x);}")}
     let advance=min(nextT.x,min(nextT.y,nextT.z));if(nextT.x<=advance+1e-6){cell.x+=step.x;nextT.x+=deltaT.x;}if(nextT.y<=advance+1e-6){cell.y+=step.y;nextT.y+=deltaT.y;}if(nextT.z<=advance+1e-6){cell.z+=step.z;nextT.z+=deltaT.z;}entry=advance;
   }
   return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,0u,0u,workItems,DRY_MISS);
@@ -2434,8 +2421,10 @@ fn dryPrepassResolve(pixel:vec2f,depth:f32,normalIn:vec3f,hit:DryHit){
   }else if(dry.tuningCounts2.w!=${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["wide-relight"]}u&&dry.tuningCounts2.w!=${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["full-res-relight"]}u&&bestRadianceWeight>0.0){let reconstructed=textureLoad(dryPrepassRadianceTexture,bestRadianceTexel,0);if(reconstructed.a>=0.0){dryPrepassRadiance=reconstructed;dryPrepassRadianceState=1u;}}
 }
 ` : "";
-  const splitGlassKeyDeclarationWGSL = rasterGlassDiscovery
-    ? /* wgsl */ `@group(${splitGroup}) @binding(6) var drySplitGlassKeyRead:texture_2d<u32>;
+  // Raster-primary resolves its brick LOD from an r32uint key plane the brick
+  // raster writes; nothing else reads it.
+  const splitLodKeyDeclarationWGSL = rasterPrimary
+    ? /* wgsl */ `@group(${splitGroup}) @binding(6) var drySplitLodKeyRead:texture_2d<u32>;
 `
     : "";
   const splitRigidReadWGSL = /* wgsl */ `
@@ -2477,8 +2466,8 @@ fn dryPrimaryWorkPublish(coordinate:vec2i,hit:DryHit){
 ` : "";
   // The seed is a *per-ray* fact, not a per-pixel one. The primary fragment
   // loads it for the one ray it owns and `traceStaticFrom` takes it, which
-  // clears it: every later ray from the same invocation — the walk behind a
-  // thin dielectric, a refraction, anything reached through shading — starts
+  // clears it: every later ray from the same invocation — anything reached
+  // through shading — starts
   // somewhere this plane was never asked about, and must fall back to the root.
   const primaryEntrySeedLibraryWGSL = primaryEntrySeed ? /* wgsl */ `
 const DRY_PRIMARY_ENTRY_UNSEEDED:u32=0u;
@@ -2546,7 +2535,7 @@ fn dryPrimaryEntrySeedTake(initialMinimum:f32)->DryPrimaryEntrySeed{
 @group(${splitGroup}) @binding(1) var drySplitGeometryRead:texture_2d<f32>;
 @group(${splitGroup}) @binding(4) var drySplitOpaqueIdentityWrite:texture_storage_2d<rg32uint,write>;
 @group(${splitGroup}) @binding(5) var drySplitOpaqueIdentityRead:texture_2d<u32>;
-${splitGlassKeyDeclarationWGSL}${primaryEntrySeedDeclarationWGSL}${primaryWorkMapWGSL}
+${splitLodKeyDeclarationWGSL}${primaryEntrySeedDeclarationWGSL}${primaryWorkMapWGSL}
 ${splitRigidReadWGSL}
 ` : "";
   const voxelLightCacheGroup = splitGroup + 1;
@@ -2649,7 +2638,7 @@ fn dryVoxelLightReject(pageIndex:u32,local:vec3u){
 ` : "";
   const voxelLightCacheShortcutWGSL = voxelLightCache ? /* wgsl */ `let cachedVoxelVisibility=dryVoxelLightVisibility(position,geometricNormal);if(cachedVoxelVisibility.y>0.0){let rigidBlocker=nearestBodyIgnoring(ray.origin_m,towardLight,ownerId);let raw=select(cachedVoxelVisibility.x,0.0,rigidBlocker.t<ray.tMax_m);return vec3f(mix(1.0,raw,dry.tuningRays0.y));}if(dryCurrentLightSlot==0u&&(dryVoxelLight.control.w&2u)!=0u){dryCurrentLightSlot=0xffffffffu;}` : "";
   const prepassResolveCallWGSL = reduced
-    ? /* wgsl */ `dryPrepassData0=vec4f(1.0);dryPrepassData1=vec4f(1.0);dryPrepassData2=vec4f(1.0);dryPrepassRadiance=vec4f(0.0);dryPrepassGi=vec4f(0.0,0.0,0.0,1.0);dryPrepassState=0u;dryPrepassRadianceState=0u;dryPrepassGiState=0u;dryPrepassExactEdgeState=0u;dryCurrentLightSlot=0xffffffffu;if(opaque.t<DRY_MISS&&!dryHitThinDielectric(opaque)&&(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)!=0u){if(dryNodeMipReady()){dryPrepassResolve(input.position.xy,opaque.t,opaque.normal,opaque);}else{dryDerivedPageFailure|=${SVO_DRY_DERIVED_FAILURE.reducedReconstruction}u;}}${voxelLightCache ? "if((dryVoxelLight.control.w&2u)!=0u){dryPrepassRadianceState=0u;dryPrepassGiState=0u;}" : ""}`
+    ? /* wgsl */ `dryPrepassData0=vec4f(1.0);dryPrepassData1=vec4f(1.0);dryPrepassData2=vec4f(1.0);dryPrepassRadiance=vec4f(0.0);dryPrepassGi=vec4f(0.0,0.0,0.0,1.0);dryPrepassState=0u;dryPrepassRadianceState=0u;dryPrepassGiState=0u;dryPrepassExactEdgeState=0u;dryCurrentLightSlot=0xffffffffu;if(opaque.t<DRY_MISS&&(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)!=0u){if(dryNodeMipReady()){dryPrepassResolve(input.position.xy,opaque.t,opaque.normal,opaque);}else{dryDerivedPageFailure|=${SVO_DRY_DERIVED_FAILURE.reducedReconstruction}u;}}${voxelLightCache ? "if((dryVoxelLight.control.w&2u)!=0u){dryPrepassRadianceState=0u;dryPrepassGiState=0u;}" : ""}`
     : "";
   // The lattice arm keeps every guard and failure of the screen resolve and
   // swaps only where the receiver's visibility comes from. It reads the same
@@ -2686,18 +2675,7 @@ fn dryVoxelLightReject(pageIndex:u32,local:vec3u){
   const prepassGiShortcutWGSL = reduced
     ? /* wgsl */ `if(dryPrepassGiState==1u){if(dryPrepassGi.a<0.0){dryDerivedPageFailure|=${SVO_DRY_DERIVED_FAILURE.globalIlluminationPage}u;return DryGlobalIllumination(vec3f(0.0),1.0,0u);}return DryGlobalIllumination(max(dryPrepassGi.rgb,vec3f(0.0)),clamp(dryPrepassGi.a,0.0,1.0),1u);}`
     : "";
-  const splitVisibilityGlassDiscoveryWGSL = rasterGlassDiscovery
-    ? /* wgsl */ `let coordinate=vec2i(input.position.xy);textureStore(drySplitGeometryWrite,coordinate,vec4f(opaque.normal,opaque.t));let opaqueMetadata=(opaque.ownerId&0xffffu)|((opaque.featureId&15u)<<16u)|((opaque.fieldSource&15u)<<20u)|((opaque.motionKind&3u)<<24u)|((opaque.motionValid&1u)<<26u);textureStore(drySplitOpaqueIdentityWrite,coordinate,vec4u(opaque.materialId,opaqueMetadata,0u,0u));let generation=dryPublicationGeneration();`
-    : /* wgsl */ `let glass=traceGlass(ro,rd,0.0,opaque.t);let glassVisible=glass.hit.valid!=0u&&glass.hit.t_m<opaque.t;let coordinate=vec2i(input.position.xy);textureStore(drySplitGeometryWrite,coordinate,vec4f(opaque.normal,opaque.t));let opaqueMetadata=(opaque.ownerId&0xffffu)|((opaque.featureId&15u)<<16u)|((opaque.fieldSource&15u)<<20u)|((opaque.motionKind&3u)<<24u)|((opaque.motionValid&1u)<<26u);let glassKey=select(0u,glass.recordIndex+1u,glassVisible);let packedOpaqueMaterial=(opaque.materialId&0x8000ffffu)|((glassKey&0x1ffu)<<16u);textureStore(drySplitOpaqueIdentityWrite,coordinate,vec4u(packedOpaqueMaterial,opaqueMetadata,0u,0u));let generation=dryPublicationGeneration();`;
-  const splitVisibilityGlassReturnWGSL = rasterGlassDiscovery
-    ? ""
-    : /* wgsl */ `if(glassVisible){let record=dryGlassPane(glass.recordIndex);let media=dryMediumPair(rd,glass.hit.geometricNormal,DRY_MEDIUM_GLASS);let targets=svoGBufferSurface(vec3f(0.0),glass.hit.t_m,glass.hit.geometricNormal,glass.hit.geometricNormal,vec4u(svoThinGlassMaterialId(record),svoThinGlassOwnerId(record),media.x,media.y),vec3f(0.0),DRY_GBUFFER_MOTION_STATIC,DRY_GBUFFER_FIELD_ANALYTIC,generation,SVO_GBUFFER_MOTION_VALID|svoGBufferProducerFlags(SVO_GBUFFER_PRODUCER_GLASS),SVO_FEATURE_SMOOTH);return drySplitVisibilityOut(targets,dryHardwareDepth(glass.hit.t_m,rd,forward));}`;
-  const splitOpaqueMaterialDecodeWGSL = rasterGlassDiscovery
-    ? /* wgsl */ `let opaqueMaterial=packedOpaqueMaterial;`
-    : /* wgsl */ `let opaqueMaterial=select(packedOpaqueMaterial&0xffffu,0x80000000u|(packedOpaqueMaterial&0xffffu),(packedOpaqueMaterial&0x80000000u)!=0u);`;
-  const splitGlassKeyLoadWGSL = rasterGlassDiscovery
-    ? /* wgsl */ `let glassKey=textureLoad(drySplitGlassKeyRead,coordinate,0).x;`
-    : /* wgsl */ `let glassKey=(packedOpaqueMaterial>>16u)&0x1ffu;`;
+  const splitVisibilityStoreWGSL = /* wgsl */ `let coordinate=vec2i(input.position.xy);textureStore(drySplitGeometryWrite,coordinate,vec4f(opaque.normal,opaque.t));let opaqueMetadata=(opaque.ownerId&0xffffu)|((opaque.featureId&15u)<<16u)|((opaque.fieldSource&15u)<<20u)|((opaque.motionKind&3u)<<24u)|((opaque.motionValid&1u)<<26u);textureStore(drySplitOpaqueIdentityWrite,coordinate,vec4u(opaque.materialId,opaqueMetadata,0u,0u));let generation=dryPublicationGeneration();`;
   const splitPrimaryTraceWGSL = rasterRigidDiscovery ? "traceStatic(ro,rd)" : "traceOpaqueScene(ro,rd)";
   const rasterPrimaryEntryWGSL = rasterPrimary ? /* wgsl */ `
 // Raster-assisted primary visibility. Every plane the deferred lighting pass
@@ -2739,7 +2717,7 @@ struct SvoBrickRasterVertexOut{
   @location(3) @interpolate(flat) voxelOffset:u32,
   @location(4) @interpolate(flat) instanceIndex:u32,
 }
-fn dryRasterPrimaryReset(){dryVisibilityIgnoredBody=DRY_OWNER_NONE;dryThickGlassEnabled=0u;dryThickGlassFailure=0u;}
+fn dryRasterPrimaryReset(){dryVisibilityIgnoredBody=DRY_OWNER_NONE;}
 fn dryRasterPrimaryCamera()->mat4x3f{
   let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);
   let right=normalize(cross(forward,vec3f(0.0,1.0,0.0)));return mat4x3f(ro,forward,right,normalize(cross(right,forward)));
@@ -3123,7 +3101,7 @@ ${screenSpaceTerminationPixels > 0 ? /* wgsl */ `
 // sub-pixel tiles entirely. Entry-point reachability gives each tier its own
 // Metal register budget even though the source module remains shared.
 @fragment fn svoBrickLodResolveFragment(input:VertexOut)->DryRasterPrimaryOut{
-  let position=input.position.xy;let lodKey=textureLoad(drySplitGlassKeyRead,vec2i(position),0).x;
+  let position=input.position.xy;let lodKey=textureLoad(drySplitLodKeyRead,vec2i(position),0).x;
   if(lodKey==0u){discard;}let instanceIndex=lodKey-1u;if(instanceIndex>=arrayLength(&svoBrickInstances)){discard;}
   dryRasterPrimaryReset();let camera=dryRasterPrimaryCamera();let ro=camera[0];let rd=dryRasterPrimaryRay(position,camera);
   let record=svoBrickInstances[instanceIndex];let bounds=mat2x3f(record.proxyMinimum,record.proxyMaximum);
@@ -3314,7 +3292,7 @@ ${screenSpaceTerminationPixels > 0 ? /* wgsl */ `
   textureStore(dryTierDepthWrite,coordinate,vec4f(hardwareDepth,0.0,0.0,0.0));
 }
 @fragment fn svoScenePrimitiveLodResolveFragment(input:VertexOut)->DryRasterPrimaryOut{
-  let position=input.position.xy;let key=textureLoad(drySplitGlassKeyRead,vec2i(position),0).x;
+  let position=input.position.xy;let key=textureLoad(drySplitLodKeyRead,vec2i(position),0).x;
   if(key==0u){discard;}let recordIndex=key-1u;if(recordIndex>=dry.metadata.x){discard;}
   dryRasterPrimaryReset();let camera=dryRasterPrimaryCamera();let ro=camera[0];let rd=dryRasterPrimaryRay(position,camera);
   let record=dryPrimitive(recordIndex);let span=dryScenePrimitiveMarchSpan(record,ro,rd);if(!(span.x<=span.y)){discard;}
@@ -3377,7 +3355,7 @@ fn dryBrickRasterOut(surface:DryRasterPrimaryOut)->DryBrickRasterOut{
   const prepassEntryWGSL = reduced ? /* wgsl */ `struct DryPrepassGeometryOut{@location(0) geometry:vec4f,@location(1) identity:u32}
 @fragment fn dryPrepassGeometryMain(input:VertexOut)->DryPrepassGeometryOut{
   let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());
-  dryVisibilityIgnoredBody=DRY_OWNER_NONE;dryThickGlassEnabled=0u;
+  dryVisibilityIgnoredBody=DRY_OWNER_NONE;
   var output=DryPrepassGeometryOut(vec4f(0.0),0xffffffffu);
   if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)==0u||!dryNodeMipReady()){return output;}
   let opaque=traceOpaqueScene(ro,rd);
@@ -3388,7 +3366,7 @@ fn dryBrickRasterOut(surface:DryRasterPrimaryOut)->DryBrickRasterOut{
   return output;
 }
 fn dryPrepassTraceVisibility(opaque:DryHit,ro:vec3f,rd:vec3f)->vec2u{
-  dryVisibilityIgnoredBody=DRY_OWNER_NONE;dryThickGlassEnabled=0u;
+  dryVisibilityIgnoredBody=DRY_OWNER_NONE;
   ${voxelLightCache ? "dryVoxelLightConsumerEligible=select(0u,1u,opaque.motionKind==DRY_GBUFFER_MOTION_STATIC&&!dryReconstructedReceiver(opaque));" : ""}
   let position=ro+rd*opaque.t;let geometricNormal=dryGeometricNormal(opaque);
   var visibility0=vec4f(1.0);var visibility1=vec4f(1.0);var visibility2=vec4f(1.0);
@@ -3461,7 +3439,7 @@ const DRY_SILHOUETTE_REASON_TRAVERSAL:u32=3u;
 const DRY_SILHOUETTE_REASON_TRACE_CONTRACT:u32=4u;
 struct DrySilhouetteVisibility{packed:vec2u,status:u32,reason:u32}
 fn drySilhouetteTraceVisibilityExact(opaque:DryHit,ro:vec3f,rd:vec3f)->DrySilhouetteVisibility{
-  dryVisibilityIgnoredBody=DRY_OWNER_NONE;dryThickGlassEnabled=0u;
+  dryVisibilityIgnoredBody=DRY_OWNER_NONE;
   let position=ro+rd*opaque.t;let geometricNormal=dryGeometricNormal(opaque);
   // This explicit sparse edge tier is authoritative, so it uses the existing
   // hard visibility caps rather than the lower ordinary-frame quality budget.
@@ -3523,7 +3501,7 @@ fn dryPrepassShadeNoGi(opaque:DryHit,ro:vec3f,rd:vec3f)->vec3f{
   // rate, so avoid doing an unusable complete material evaluation here.
   if(opaque.motionKind!=DRY_GBUFFER_MOTION_STATIC){return vec4f(0.0);}
   let packed=textureLoad(dryPrepassVisibilityKeyTexture,coordinate,0);let packedValid=!all(packed.xy==DRY_PREPASS_INVALID_PACKED);dryPrepassData0=dryPrepassUnpack0(packed);dryPrepassData1=dryPrepassUnpack1(packed);dryPrepassData2=dryPrepassUnpack2(packed);
-  dryPrepassState=select(0u,1u,packedValid);dryPrepassRadianceState=0u;dryPrepassGiState=0u;if(!packedValid){dryDerivedPageFailure|=${SVO_DRY_DERIVED_FAILURE.reducedReconstruction}u;return vec4f(0.0,0.0,0.0,-1.0);}dryCurrentLightSlot=0xffffffffu;dryVisibilityIgnoredBody=DRY_OWNER_NONE;dryThickGlassEnabled=0u;
+  dryPrepassState=select(0u,1u,packedValid);dryPrepassRadianceState=0u;dryPrepassGiState=0u;if(!packedValid){dryDerivedPageFailure|=${SVO_DRY_DERIVED_FAILURE.reducedReconstruction}u;return vec4f(0.0,0.0,0.0,-1.0);}dryCurrentLightSlot=0xffffffffu;dryVisibilityIgnoredBody=DRY_OWNER_NONE;
   // Full-res relight stores only the expensive GI closure and evaluates the
   // material/direct/environment terms at every receiver. Reconstruction modes
   // instead cache the complete reduced-rate radiance: seed the private GI
@@ -3531,12 +3509,7 @@ fn dryPrepassShadeNoGi(opaque:DryHit,ro:vec3f,rd:vec3f)->vec3f{
   // it a second time. Invalid samples carry a negative alpha and are rejected
   // by the full-rate reconstruction, which then falls through to exact relight.
   if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIllumination}u)==0u){
-    var depth=opaque.t;
-    // The no-GI shortcut does not enter shadeDrySurface, so glass still needs
-    // one continuation trace here. Store it beside the cached radiance; the
-    // full-rate reconstruction then consumes this alpha without tracing again.
-    if(dryHitThinDielectric(opaque)){let behind=dryTraceBeyondThinWall(opaque,ro,rd);depth=select(0.0,behind.t,behind.t<DRY_MISS);}
-    return vec4f(dryPrepassShadeNoGi(opaque,ro,rd),depth);
+    return vec4f(dryPrepassShadeNoGi(opaque,ro,rd),opaque.t);
   }
   {let ignoredBodyOwner=select(DRY_OWNER_NONE,opaque.ownerId,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let gi=dryGlobalIlluminationFaced(ro+rd*opaque.t,opaque.normal,dryGeometricNormal(opaque),ignoredBodyOwner);
     if(dry.tuningCounts2.w==${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["wide-relight"]}u
@@ -3581,50 +3554,42 @@ fn dryPrimarySeamSample(coordinate:vec2i)->DryPrimarySeamSample{
   return DryPrimarySeamSample(drySplitGeometryAt(bestCoordinate),drySplitIdentityAt(bestCoordinate).xy,1u);
 }
 fn dryPrimarySeamHit(sample:DryPrimarySeamSample)->DryHit{
-  let packedOpaqueMaterial=sample.identity.x;${splitOpaqueMaterialDecodeWGSL}
+  let opaqueMaterial=sample.identity.x;
   let metadata=sample.identity.y;
   return DryHit(sample.geometry.w,normalize(sample.geometry.xyz),opaqueMaterial,dryOpaqueOwner(metadata),(metadata>>16u)&15u,(metadata>>20u)&15u,(metadata>>24u)&3u,(metadata>>26u)&1u,0.0,vec3u(0u,metadata,0u));
 }
 @fragment fn dryPrimarySeamMain(input:VertexOut)->DryVisibilityOut{
   let coordinate=vec2i(input.position.xy);let seam=dryPrimarySeamSample(coordinate);if(seam.valid==0u){discard;}
   let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());
-  let opaque=dryPrimarySeamHit(seam);let generation=dryPublicationGeneration();let voxelGlass=dryHitThinDielectric(opaque);let media=dryMediumPair(rd,opaque.normal,select(DRY_MEDIUM_OPAQUE,DRY_MEDIUM_GLASS,voxelGlass));let rigidSurface=dryRigidMotionSurface(opaque,ro+rd*opaque.t);let motionVelocity=select(vec3f(0.0),rigidSurface.velocity_m_s,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionGeneration=select(generation,rigidSurface.generation,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionValid=select(opaque.motionValid,rigidSurface.valid,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let producer=select(SVO_GBUFFER_PRODUCER_TRACED,SVO_GBUFFER_PRODUCER_GLASS,voxelGlass);var flags=select(0u,SVO_GBUFFER_MOTION_VALID,motionValid!=0u)|svoGBufferProducerFlags(producer);if(opaque.featureId!=SVO_FEATURE_SMOOTH){flags|=DRY_GBUFFER_HARD_FEATURE;}let targets=svoGBufferSurface(vec3f(0.0),opaque.t,dryGeometricNormal(opaque),opaque.normal,vec4u(dryResolvedMaterialId(opaque),opaque.ownerId,media.x,media.y),motionVelocity,opaque.motionKind,opaque.fieldSource,motionGeneration,flags,opaque.featureId);
+  let opaque=dryPrimarySeamHit(seam);let generation=dryPublicationGeneration();let media=dryMediumPair(rd,opaque.normal,DRY_MEDIUM_OPAQUE);let rigidSurface=dryRigidMotionSurface(opaque,ro+rd*opaque.t);let motionVelocity=select(vec3f(0.0),rigidSurface.velocity_m_s,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionGeneration=select(generation,rigidSurface.generation,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionValid=select(opaque.motionValid,rigidSurface.valid,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);var flags=select(0u,SVO_GBUFFER_MOTION_VALID,motionValid!=0u)|svoGBufferProducerFlags(SVO_GBUFFER_PRODUCER_TRACED);if(opaque.featureId!=SVO_FEATURE_SMOOTH){flags|=DRY_GBUFFER_HARD_FEATURE;}let targets=svoGBufferSurface(vec3f(0.0),opaque.t,dryGeometricNormal(opaque),opaque.normal,vec4u(dryResolvedMaterialId(opaque),opaque.ownerId,media.x,media.y),motionVelocity,opaque.motionKind,opaque.fieldSource,motionGeneration,flags,opaque.featureId);
   return drySplitVisibilityOut(targets,dryHardwareDepth(opaque.t,rd,forward));
 }
 @fragment fn dryVisibilityMain(input:VertexOut)->DryVisibilityOut{
-  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());dryVisibilityIgnoredBody=DRY_OWNER_NONE;dryThickGlassFailure=0u;dryThickGlassEnabled=0u;${primaryWorkMap ? "dryPrimaryWorkReset();" : ""}
+  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());dryVisibilityIgnoredBody=DRY_OWNER_NONE;${primaryWorkMap ? "dryPrimaryWorkReset();" : ""}
   ${primaryEntrySeedLoadWGSL}
-  let opaque=${splitPrimaryTraceWGSL};${primaryWorkMap ? "dryPrimaryWorkPublish(vec2i(input.position.xy),opaque);" : ""}${splitVisibilityGlassDiscoveryWGSL}
-  ${splitVisibilityGlassReturnWGSL}
-  if(opaque.t<DRY_MISS){let voxelGlass=dryHitThinDielectric(opaque);let media=dryMediumPair(rd,opaque.normal,select(DRY_MEDIUM_OPAQUE,DRY_MEDIUM_GLASS,voxelGlass));let rigidSurface=dryRigidMotionSurface(opaque,ro+rd*opaque.t);let motionVelocity=select(vec3f(0.0),rigidSurface.velocity_m_s,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionGeneration=select(generation,rigidSurface.generation,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionValid=select(opaque.motionValid,rigidSurface.valid,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let producer=select(SVO_GBUFFER_PRODUCER_TRACED,SVO_GBUFFER_PRODUCER_GLASS,voxelGlass);var flags=select(0u,SVO_GBUFFER_MOTION_VALID,motionValid!=0u)|svoGBufferProducerFlags(producer);if(opaque.featureId!=SVO_FEATURE_SMOOTH){flags|=DRY_GBUFFER_HARD_FEATURE;}let targets=svoGBufferSurface(vec3f(0.0),opaque.t,opaque.normal,opaque.normal,vec4u(dryResolvedMaterialId(opaque),opaque.ownerId,media.x,media.y),motionVelocity,opaque.motionKind,opaque.fieldSource,motionGeneration,flags,opaque.featureId);return drySplitVisibilityOut(targets,dryHardwareDepth(opaque.t,rd,forward));}
+  let opaque=${splitPrimaryTraceWGSL};${primaryWorkMap ? "dryPrimaryWorkPublish(vec2i(input.position.xy),opaque);" : ""}${splitVisibilityStoreWGSL}
+  if(opaque.t<DRY_MISS){let media=dryMediumPair(rd,opaque.normal,DRY_MEDIUM_OPAQUE);let rigidSurface=dryRigidMotionSurface(opaque,ro+rd*opaque.t);let motionVelocity=select(vec3f(0.0),rigidSurface.velocity_m_s,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionGeneration=select(generation,rigidSurface.generation,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionValid=select(opaque.motionValid,rigidSurface.valid,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);var flags=select(0u,SVO_GBUFFER_MOTION_VALID,motionValid!=0u)|svoGBufferProducerFlags(SVO_GBUFFER_PRODUCER_TRACED);if(opaque.featureId!=SVO_FEATURE_SMOOTH){flags|=DRY_GBUFFER_HARD_FEATURE;}let targets=svoGBufferSurface(vec3f(0.0),opaque.t,opaque.normal,opaque.normal,vec4u(dryResolvedMaterialId(opaque),opaque.ownerId,media.x,media.y),motionVelocity,opaque.motionKind,opaque.fieldSource,motionGeneration,flags,opaque.featureId);return drySplitVisibilityOut(targets,dryHardwareDepth(opaque.t,rd,forward));}
   return drySplitVisibilityOut(svoGBufferMiss(vec3f(0.0),0u,generation,DRY_GBUFFER_NO_INTERSECTION,svoGBufferProducerFlags(SVO_GBUFFER_PRODUCER_TRACED)),0.0);
 }
 ${reduced ? `@fragment fn dryReconstructedLightingMain(input:VertexOut)->@location(0) vec4f{
   let coordinate=vec2i(input.position.xy);let geometry=drySplitGeometryAt(coordinate);if(!(geometry.w<DRY_MISS)){discard;}
-  let opaqueIdentity=drySplitIdentityAt(coordinate);let packedOpaqueMaterial=opaqueIdentity.x;${splitOpaqueMaterialDecodeWGSL}let metadata=opaqueIdentity.y;let opaque=DryHit(geometry.w,geometry.xyz,opaqueMaterial,dryOpaqueOwner(metadata),(metadata>>16u)&15u,(metadata>>20u)&15u,(metadata>>24u)&3u,(metadata>>26u)&1u,0.0,vec3u(0u,metadata,0u));
+  let opaqueIdentity=drySplitIdentityAt(coordinate);let opaqueMaterial=opaqueIdentity.x;let metadata=opaqueIdentity.y;let opaque=DryHit(geometry.w,geometry.xyz,opaqueMaterial,dryOpaqueOwner(metadata),(metadata>>16u)&15u,(metadata>>20u)&15u,(metadata>>24u)&3u,(metadata>>26u)&1u,0.0,vec3u(0u,metadata,0u));
   dryPrepassData0=vec4f(1.0);dryPrepassData1=vec4f(1.0);dryPrepassData2=vec4f(1.0);dryPrepassRadiance=vec4f(0.0);dryPrepassGi=vec4f(0.0,0.0,0.0,1.0);dryPrepassState=0u;dryPrepassRadianceState=0u;dryPrepassGiState=0u;dryPrepassExactEdgeState=0u;dryCurrentLightSlot=0xffffffffu;
   if(dryNodeMipReady()){dryPrepassResolve(input.position.xy,opaque.t,opaque.normal,opaque);}if(dryPrepassRadianceState!=1u){discard;}
-  ${rasterGlassDiscovery ? "let glassKey=textureLoad(drySplitGlassKeyRead,coordinate,0).x;" : "let glassKey=(packedOpaqueMaterial>>16u)&0x1ffu;"}if(glassKey>0u){discard;}
-  // Radiance and its water-sort depth are a single cached result. In
-  // particular, a glass sample's alpha is the opaque surface behind the pane.
+  // Radiance and its water-sort depth are a single cached result.
   let ndc=input.uv*2.0-1.0;let vignette=1.0-.14*dot(ndc*.58,ndc*.58);return vec4f(max(dryPrepassRadiance.rgb,vec3f(0.0))*vignette,dryPrepassRadiance.a);
 }
 ` : ""}@fragment fn dryLightingMain(input:VertexOut)->@location(0) vec4f{
-  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());dryVisibilityIgnoredBody=DRY_OWNER_NONE;dryThickGlassFailure=0u;dryThickGlassEnabled=0u;
+  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());dryVisibilityIgnoredBody=DRY_OWNER_NONE;
   let coordinate=vec2i(input.position.xy);var geometry=drySplitGeometryAt(coordinate);var opaqueIdentity=drySplitIdentityAt(coordinate);if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.silhouetteRefinement}u)!=0u){let seam=dryPrimarySeamSample(coordinate);if(seam.valid!=0u){geometry=seam.geometry;opaqueIdentity=vec4u(seam.identity,0u,0u);}}var opaque=missHit();
-  let packedOpaqueMaterial=opaqueIdentity.x;${splitOpaqueMaterialDecodeWGSL}if(geometry.w<DRY_MISS){let metadata=opaqueIdentity.y;opaque=DryHit(geometry.w,geometry.xyz,opaqueMaterial,dryOpaqueOwner(metadata),(metadata>>16u)&15u,(metadata>>20u)&15u,(metadata>>24u)&3u,(metadata>>26u)&1u,0.0,vec3u(0u,metadata,0u));}
-  ${lightingResolveCallWGSL}var glass=dryGlassMiss();${splitGlassKeyLoadWGSL}${reduced ? `if(dry.tuningCounts2.w!=${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["wide-relight"]}u&&dry.tuningCounts2.w!=${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["full-res-relight"]}u&&dryPrepassRadianceState==1u&&glassKey==0u){${experiments.singlePassReconstruction !== false ? "let vignette=1.0-.14*dot(ndc*.58,ndc*.58);return vec4f(max(dryPrepassRadiance.rgb,vec3f(0.0))*vignette,dryPrepassRadiance.a);" : "discard;"}}` : ""}if(glassKey>0u){let recordIndex=glassKey-1u;if(recordIndex<dry.glass.y){let record=dryGlassPane(recordIndex);let candidate=svoThinGlassIntersect(record,ro,rd,0.0,opaque.t,1e-6,record.extentIorEpsilon.w);if(candidate.valid!=0u){glass=DryGlassHit(candidate,recordIndex);}}}var color=shadeDrySurface(opaque,ro,rd);var depth=drySurfaceOcclusionDepth_m;let glassVisible=glass.hit.valid!=0u&&glass.hit.t_m<opaque.t;if(glassVisible){let glassSurface=shadeThinGlass(glass,opaque,ro,rd);color=glassSurface.color;depth=glassSurface.depth;}
+  let opaqueMaterial=opaqueIdentity.x;if(geometry.w<DRY_MISS){let metadata=opaqueIdentity.y;opaque=DryHit(geometry.w,geometry.xyz,opaqueMaterial,dryOpaqueOwner(metadata),(metadata>>16u)&15u,(metadata>>20u)&15u,(metadata>>24u)&3u,(metadata>>26u)&1u,0.0,vec3u(0u,metadata,0u));}
+  ${lightingResolveCallWGSL}${reduced ? `if(dry.tuningCounts2.w!=${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["wide-relight"]}u&&dry.tuningCounts2.w!=${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["full-res-relight"]}u&&dryPrepassRadianceState==1u){${experiments.singlePassReconstruction !== false ? "let vignette=1.0-.14*dot(ndc*.58,ndc*.58);return vec4f(max(dryPrepassRadiance.rgb,vec3f(0.0))*vignette,dryPrepassRadiance.a);" : "discard;"}}` : ""}let color=shadeDrySurface(opaque,ro,rd);let depth=drySurfaceOcclusionDepth_m;
   let vignette=1.0-.14*dot(ndc*.58,ndc*.58);return vec4f(max(color*vignette,vec3f(0.0)),select(0.0,depth,depth<DRY_MISS));
 }
 @fragment fn drySkyLightingMain(input:VertexOut)->@location(0) vec4f{
-  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());dryVisibilityIgnoredBody=DRY_OWNER_NONE;dryThickGlassFailure=0u;dryThickGlassEnabled=0u;
-  let coordinate=vec2i(input.position.xy);var opaque=missHit();
-  // Skipping the G-buffer identity load is most of what makes this entry cheap,
-  // but without raster glass discovery the glass key is packed into that very
-  // plane, so there it has to be read after all.
-  ${rasterGlassDiscovery ? "" : "let packedOpaqueMaterial=drySplitIdentityAt(coordinate).x;"}
-  var glass=dryGlassMiss();${splitGlassKeyLoadWGSL}if(glassKey>0u){let recordIndex=glassKey-1u;if(recordIndex<dry.glass.y){let record=dryGlassPane(recordIndex);let candidate=svoThinGlassIntersect(record,ro,rd,0.0,opaque.t,1e-6,record.extentIorEpsilon.w);if(candidate.valid!=0u){glass=DryGlassHit(candidate,recordIndex);}}}var color=shadeDrySurface(opaque,ro,rd);var depth=drySurfaceOcclusionDepth_m;
-  if(glass.hit.valid!=0u&&glass.hit.t_m<opaque.t){let glassSurface=shadeThinGlass(glass,opaque,ro,rd);color=glassSurface.color;depth=glassSurface.depth;}
+  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());dryVisibilityIgnoredBody=DRY_OWNER_NONE;
+  // Skipping the G-buffer identity load is what makes this entry cheap.
+  let opaque=missHit();let color=shadeDrySurface(opaque,ro,rd);let depth=drySurfaceOcclusionDepth_m;
   let vignette=1.0-.14*dot(ndc*.58,ndc*.58);return vec4f(max(color*vignette,vec3f(0.0)),select(0.0,depth,depth<DRY_MISS));
 }
 ` : "";
@@ -3632,38 +3597,48 @@ ${reduced ? `@fragment fn dryReconstructedLightingMain(input:VertexOut)->@locati
   // cell through the same functions, from the integer coordinate, the split
   // planes and the camera, so a pixel produces the same key in both passes.
   // The key entry reads the split planes exactly as dryLightingMain does,
-  // including the seam substitution, and inserts only what the lighting pass
+  // including the seam substitution, and requests only what the lighting pass
   // will resolve.
   const latticeKey = SVO_LATTICE_VISIBILITY_CONTRACT.keyBindings;
   const latticeLookup = SVO_LATTICE_VISIBILITY_CONTRACT.lookupBindings;
+  const latticeContract = SVO_LATTICE_VISIBILITY_CONTRACT;
   const [latticeTileWidth, latticeTileHeight] = SVO_LATTICE_VISIBILITY_CONTRACT.keyWorkgroupSize;
   const latticeRow = latticeTileWidth + 1;
   const latticeDataType = experiments.halfPrecisionLighting ? "vec4h" : "vec4f";
-  // Never denser than the reduced prepass pitch it replaces, so the compact
-  // capacity (the prepass texel count) bounds the distinct keys of a frame.
+  // Never denser than the reduced prepass pitch it replaces, so the prepass
+  // texel count bounds the distinct keys of a frame.
   const latticeSpacingPixels = Math.max(SVO_LATTICE_VISIBILITY_CONTRACT.minimumSpacingPixels, 1 / coneLightingScale);
-  const latticeCornerLoadWGSL = (corner: number): string => `let key${corner}=svoLatticeCorner(cell.key,${corner}u);let hash${corner}=svoLatticeHash(key${corner});let slot${corner}=svoLatticeSlot(hash${corner},mask);let stored${corner}=dryLatticeTagsRead[slot${corner}];let record${corner}=dryLatticeRecordsRead[2u*slot${corner}];let payload${corner}=dryLatticeRecordsRead[2u*slot${corner}+1u];`;
-  const latticeCornerAccumulateWGSL = (corner: number): string => `var corner${corner}=vec4u(0u);if(stored${corner}==svoLatticeTag(hash${corner})&&all(record${corner}==key${corner})){corner${corner}=payload${corner};}else if(stored${corner}!=0u){corner${corner}=dryLatticeProbe(key${corner},svoLatticeTag(hash${corner}),(slot${corner}+1u)&mask,mask);}
-  if(corner${corner}.x!=0u&&!all(corner${corner}.yz==DRY_PREPASS_INVALID_PACKED)){let packed=vec4u(corner${corner}.yz,0u,0u);latticeVisibility0+=dryPrepassUnpack0(packed)*weights[${corner}];latticeVisibility1+=dryPrepassUnpack1(packed)*weights[${corner}];latticeVisibility2+=dryPrepassUnpack2(packed)*weights[${corner}];latticeWeight+=weights[${corner}];}`;
+  // Every corner's first bucket is loaded before any is searched, so the common
+  // hit is one round of independent tag loads and one record compare.
+  const latticeCornerLoadWGSL = (corner: number): string => `let key${corner}=svoLatticeCorner(cell.key,${corner}u);let hash${corner}=svoLatticeHash(key${corner});let bucket${corner}=svoLatticeBucket(hash${corner},buckets,0u);let low${corner}=dryLatticeBucketsRead[4u*bucket${corner}];let high${corner}=dryLatticeBucketsRead[4u*bucket${corner}+1u];`;
+  const latticeCornerAccumulateWGSL = (corner: number): string => `let corner${corner}=dryLatticeFind(key${corner},hash${corner},bucket${corner},low${corner},high${corner},buckets,stamp);
+  if(corner${corner}.z!=0u){let packed=vec4u(corner${corner}.xy,0u,0u);latticeVisibility0+=dryPrepassUnpack0(packed)*weights[${corner}];latticeVisibility1+=dryPrepassUnpack1(packed)*weights[${corner}];latticeVisibility2+=dryPrepassUnpack2(packed)*weights[${corner}];latticeWeight+=weights[${corner}];}`;
   const latticeVisibilityWGSL = latticeVisibility ? /* wgsl */ `${svoLatticeKeyWGSL}
-@group(1) @binding(${latticeKey.tags}) var<storage,read_write> dryLatticeTags:array<atomic<u32>>;
+@group(1) @binding(${latticeKey.buckets}) var<storage,read_write> dryLatticeBuckets:array<atomic<u32>>;
 @group(1) @binding(${latticeKey.records}) var<storage,read_write> dryLatticeRecords:array<vec4u>;
 @group(1) @binding(${latticeKey.control}) var<storage,read_write> dryLatticeControl:array<atomic<u32>>;
-@group(${splitGroup}) @binding(${latticeLookup.tags}) var<storage,read> dryLatticeTagsRead:array<u32>;
+@group(${splitGroup}) @binding(${latticeLookup.buckets}) var<storage,read> dryLatticeBucketsRead:array<vec4u>;
 @group(${splitGroup}) @binding(${latticeLookup.records}) var<storage,read> dryLatticeRecordsRead:array<vec4u>;
 var<workgroup> dryLatticeTile:array<vec4u,${latticeRow * (latticeTileHeight + 1)}>;
 fn dryLatticeReceiverHit(coordinate:vec2i)->DryHit{
   var geometry=drySplitGeometryAt(coordinate);var opaqueIdentity=drySplitIdentityAt(coordinate);if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.silhouetteRefinement}u)!=0u){let seam=dryPrimarySeamSample(coordinate);if(seam.valid!=0u){geometry=seam.geometry;opaqueIdentity=vec4u(seam.identity,0u,0u);}}
-  let packedOpaqueMaterial=opaqueIdentity.x;${splitOpaqueMaterialDecodeWGSL}if(!(geometry.w<DRY_MISS)){return missHit();}
+  let opaqueMaterial=opaqueIdentity.x;if(!(geometry.w<DRY_MISS)){return missHit();}
   let metadata=opaqueIdentity.y;return DryHit(geometry.w,geometry.xyz,opaqueMaterial,dryOpaqueOwner(metadata),(metadata>>16u)&15u,(metadata>>20u)&15u,(metadata>>24u)&3u,(metadata>>26u)&1u,0.0,vec3u(0u,metadata,0u));
 }
-fn dryLatticeEligible(hit:DryHit)->bool{return hit.t<DRY_MISS&&!dryHitThinDielectric(hit)&&(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)!=0u&&dryNodeMipReady();}
+fn dryLatticeEligible(hit:DryHit)->bool{return hit.t<DRY_MISS&&(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)!=0u&&dryNodeMipReady();}
 // The level is the smallest whose projected half-cell spacing reaches the
 // pixel floor, ${latticeSpacingPixels.toFixed(1)} px at this rate. Area-preserving: the spacing shrinks
-// by sqrt|n.rd| on a slant.
+// by sqrt|n.rd| on a slant. The footprint is radial, so a point's level
+// depends on its distance and never on where it sits in the frame; a rotating
+// camera keeps its keys, and the persistent store keeps its marches. The
+// constant is the view-axis cosine at the frame's RMS radius,
+// 1/sqrt(1 + tan^2 (aspect^2 + 1) / 3), which matches the old view-depth
+// footprint on average: the floor holds exactly at that radius, a little
+// finer toward the centre and a little coarser toward the corners.
 fn dryLatticePixelCell(coordinate:vec2u,hit:DryHit)->SvoLatticeCell{
   let dimensions=textureDimensions(drySplitGeometryRead);let ray=dryPrepassRay(coordinate,dimensions);let normal=dryGeometricNormal(hit);
-  let forward=normalize(uniforms.cameraTarget.xyz-ray[0]);let pixelWorld=2.0*max(hit.t*dot(ray[1],forward),1e-6)*cameraTanHalfFov()/f32(max(dimensions.y,1u));
+  let tanHalf=cameraTanHalfFov();let aspect=f32(dimensions.x)/f32(max(dimensions.y,1u));
+  let pixelWorld=2.0*max(hit.t,1e-6)*inverseSqrt(1.0+tanHalf*tanHalf*(aspect*aspect+1.0)/3.0)*tanHalf/f32(max(dimensions.y,1u));
   let cell=min(dry.mapping.cellSize.x,min(dry.mapping.cellSize.y,dry.mapping.cellSize.z));
   var spacing=.5*cell*sqrt(max(abs(dot(normalize(normal),ray[1])),${SVO_LATTICE_VISIBILITY_CONTRACT.grazingCosineFloor}))/pixelWorld;var level=0u;
   loop{if(level>=${SVO_LATTICE_VISIBILITY_CONTRACT.maximumLevel}u||spacing>=${latticeSpacingPixels.toFixed(1)}){break;}spacing*=2.0;level+=1u;}
@@ -3674,58 +3649,92 @@ fn dryLatticePixelKey(coordinate:vec2i,dimensions:vec2u)->vec4u{
   let hit=dryLatticeReceiverHit(coordinate);if(!dryLatticeEligible(hit)){return vec4u(0u);}
   return dryLatticePixelCell(vec2u(coordinate),hit).key;
 }
-// Open addressing with linear probing. The claimant alone writes the key and
-// takes a compact index; a reader that sees the tag before the key keeps
-// probing, and the duplicate it may insert is computed like any entry.
-fn dryLatticeInsert(key:vec4u){
-  let hash=svoLatticeHash(key);let tag=svoLatticeTag(hash);let mask=arrayLength(&dryLatticeTags)-1u;
-  let capacity=arrayLength(&dryLatticeControl)-${SVO_LATTICE_VISIBILITY_CONTRACT.headerWords}u;var slot=svoLatticeSlot(hash,mask);
-  for(var probe=0u;probe<${SVO_LATTICE_VISIBILITY_CONTRACT.maximumProbes}u;probe+=1u){
-    let claim=atomicCompareExchangeWeak(&dryLatticeTags[slot],0u,tag);
-    if(claim.exchanged){
-      dryLatticeRecords[2u*slot]=key;let index=atomicAdd(&dryLatticeControl[${SVO_LATTICE_VISIBILITY_CONTRACT.countWord}],1u);
-      if(index<capacity){atomicStore(&dryLatticeControl[${SVO_LATTICE_VISIBILITY_CONTRACT.headerWords}u+index],slot);dryLatticeRecords[2u*slot+1u]=vec4u(index+1u,0u,0u,0u);}
-      else{dryLatticeRecords[2u*slot+1u]=vec4u(0u);atomicAdd(&dryLatticeControl[${SVO_LATTICE_VISIBILITY_CONTRACT.overflowWord}],1u);}
-      return;
-    }
-    // A weak exchange may fail spuriously on an empty slot: retry it in place.
-    if(claim.old_value==0u){continue;}
-    if(claim.old_value==tag&&all(dryLatticeRecords[2u*slot]==key)){return;}
-    slot=(slot+1u)&mask;
-  }
-  atomicAdd(&dryLatticeControl[${SVO_LATTICE_VISIBILITY_CONTRACT.exhaustedWord}],1u);
+// Slot s lives in bucket s/8: its tag at word 16(s/8) + s%8, its use word eight later.
+fn dryLatticeTagWord(slot:u32)->u32{return 2u*slot-(slot&7u);}
+// Each slot is appended at most once a frame, by the request that moved its
+// use word into this frame, so the list, one word per slot, cannot fill.
+fn dryLatticeAppend(slot:u32){
+  let index=atomicAdd(&dryLatticeControl[${latticeContract.missCountWord}],1u);
+  if(index<arrayLength(&dryLatticeControl)-${latticeContract.headerWords}u){atomicStore(&dryLatticeControl[${latticeContract.headerWords}u+index],slot|(${latticeContract.allLanes}u<<${latticeContract.laneShift}u));}
+  else{atomicAdd(&dryLatticeControl[${latticeContract.overflowWord}],1u);}
 }
-// Only the first pixel of a run within its tile, leftward or upward, inserts
+// One scan of both buckets finds the key or the oldest slot no key of this
+// frame holds. Whoever moves a use word into this frame owns that slot for
+// the frame: a hit whose stamp is stale, or a claimed victim, is appended to
+// the miss list exactly once, and no later request this frame can evict it.
+// A use word already in this frame with this key's tag bits means another
+// pixel got there first. Races between distinct keys at worst insert a key
+// twice, which the store ages out; a pair full of this frame's keys, or a
+// request that keeps losing its claims, counts as overflow, which the host
+// reports as fatal.
+fn dryLatticeRequest(key:vec4u,frame:u32,stamp:u32){
+  let hash=svoLatticeHash(key);let tag=svoLatticeTag(hash);let tagBits=(tag>>1u)&127u;let current=(frame<<8u)|tagBits;
+  let buckets=arrayLength(&dryLatticeBuckets)/${SVO_LATTICE_VISIBILITY_CONTRACT.bucketWords}u;
+  let first=svoLatticeBucket(hash,buckets,0u);let second=svoLatticeBucket(hash,buckets,1u);
+  for(var attempt=0u;attempt<${SVO_LATTICE_VISIBILITY_CONTRACT.claimAttempts}u;attempt+=1u){
+    var victim=0xffffffffu;var victimUse=0u;var victimAge=0u;var contended=false;
+    for(var way=0u;way<${2 * SVO_LATTICE_VISIBILITY_CONTRACT.bucketWays}u;way+=1u){
+      let slot=select(second,first,way<${SVO_LATTICE_VISIBILITY_CONTRACT.bucketWays}u)*${SVO_LATTICE_VISIBILITY_CONTRACT.bucketWays}u+(way&7u);let word=dryLatticeTagWord(slot);
+      let stamped=atomicLoad(&dryLatticeBuckets[word+8u]);let useFrame=stamped>>8u;
+      if(atomicLoad(&dryLatticeBuckets[word])==tag&&all(dryLatticeRecords[2u*slot]==key)){
+        if(useFrame==frame){if((stamped&127u)==tagBits){return;}continue;}
+        let claim=atomicCompareExchangeWeak(&dryLatticeBuckets[word+8u],stamped,current);
+        if(claim.exchanged){if(dryLatticeRecords[2u*slot+1u].z!=stamp){dryLatticeRecords[2u*slot+1u].z=0u;dryLatticeAppend(slot);}return;}
+        contended=true;break;
+      }
+      // Empty slots are the oldest; ties keep the first bucket.
+      if(useFrame!=frame){let age=select((frame-useFrame)&0xffffffu,0x1000000u,stamped==0u);if(age>victimAge){victim=slot;victimUse=stamped;victimAge=age;}}
+    }
+    if(contended){continue;}
+    if(victim==0xffffffffu){break;}
+    let word=dryLatticeTagWord(victim);
+    let claim=atomicCompareExchangeWeak(&dryLatticeBuckets[word+8u],victimUse,current|128u);
+    if(claim.exchanged){dryLatticeRecords[2u*victim]=key;dryLatticeRecords[2u*victim+1u]=vec4u(0u);atomicStore(&dryLatticeBuckets[word],tag);dryLatticeAppend(victim);return;}
+    if((claim.old_value>>8u)==frame&&(claim.old_value&127u)==tagBits){return;}
+  }
+  atomicAdd(&dryLatticeControl[${latticeContract.overflowWord}],1u);
+}
+// Only the first pixel of a run within its tile, leftward or upward, requests
 // its cell's four corners. The minimum-row, minimum-column pixel of any key in
-// a tile has neither neighbour, so every key in the frame is inserted at least
+// a tile has neither neighbour, so every key in the frame is requested at least
 // once. The tile border reads as no key rather than recomputing the neighbour
 // tile's edge: that apron made the edge threads of every SIMD group derive two
-// or three keys, and a key straddling tiles is only inserted again, which the
-// table dedupes.
+// or three keys, and a key straddling tiles is only requested again, which the
+// use word dedupes.
 @compute @workgroup_size(${latticeTileWidth},${latticeTileHeight}) fn dryLatticeKeysMain(@builtin(global_invocation_id) globalId:vec3u,@builtin(local_invocation_id) localId:vec3u){
   let dimensions=textureDimensions(drySplitGeometryRead);let coordinate=vec2i(globalId.xy);
+  // The stamp the lookup accepts is the one this pass requested under.
+  if(all(globalId.xy==vec2u(0u))){dryLatticeRecords[arrayLength(&dryLatticeRecords)-1u]=vec4u(svoLatticeStamp(atomicLoad(&dryLatticeControl[${latticeContract.generationWord}]),uniforms.container.xyz),0u,0u,0u);}
   let key=dryLatticePixelKey(coordinate,dimensions);dryLatticeTile[(localId.y+1u)*${latticeRow}u+localId.x+1u]=key;
   if(localId.x==0u){dryLatticeTile[(localId.y+1u)*${latticeRow}u]=vec4u(0u);}
   if(localId.y==0u){dryLatticeTile[localId.x+1u]=vec4u(0u);}
   workgroupBarrier();
   if(key.x==0u||all(dryLatticeTile[(localId.y+1u)*${latticeRow}u+localId.x]==key)||all(dryLatticeTile[localId.y*${latticeRow}u+localId.x+1u]==key)){return;}
-  for(var corner=0u;corner<4u;corner+=1u){dryLatticeInsert(svoLatticeCorner(key,corner));}
+  // The worker advances the frame word after this pass; one is added so no frame is zero.
+  let frame=atomicLoad(&dryLatticeControl[${latticeContract.frameWord}])+1u;
+  let stamp=svoLatticeStamp(atomicLoad(&dryLatticeControl[${latticeContract.generationWord}]),uniforms.container.xyz);
+  for(var corner=0u;corner<4u;corner+=1u){dryLatticeRequest(svoLatticeCorner(key,corner),frame,stamp);}
 }
-fn dryLatticeProbe(key:vec4u,tag:u32,start:u32,mask:u32)->vec4u{
-  var slot=start;
-  for(var probe=1u;probe<${SVO_LATTICE_VISIBILITY_CONTRACT.maximumProbes}u;probe+=1u){
-    let stored=dryLatticeTagsRead[slot];if(stored==0u){break;}
-    if(stored==tag&&all(dryLatticeRecordsRead[2u*slot]==key)){return dryLatticeRecordsRead[2u*slot+1u];}slot=(slot+1u)&mask;
+fn dryLatticeBucketFind(key:vec4u,tag:u32,bucket:u32,low:vec4u,high:vec4u)->vec4u{
+  for(var way=0u;way<${SVO_LATTICE_VISIBILITY_CONTRACT.bucketWays}u;way+=1u){
+    if(select(high,low,way<4u)[way&3u]==tag){let slot=${SVO_LATTICE_VISIBILITY_CONTRACT.bucketWays}u*bucket+way;if(all(dryLatticeRecordsRead[2u*slot]==key)){return dryLatticeRecordsRead[2u*slot+1u];}}
   }
   return vec4u(0u);
 }
-// Bilinear over the pixel's four lattice corners. The first probe of every
-// corner is loaded before any is tested, so the common hit is one round of
-// independent loads. A missing, overflowed or invalid corner drops out and
-// the rest renormalise; with too little left, the pixel takes the existing
-// exact edge tier and its live cone closures.
+// A record counts only when it carries the current stamp, which the key pass
+// publishes after the records and which is never zero. A stale or invalid
+// record (the key pass zeroes a stale one before its march, an invalid march
+// stores zero) and one left from an earlier input generation all read as absent.
+fn dryLatticeFind(key:vec4u,hash:u32,first:u32,low:vec4u,high:vec4u,buckets:u32,stamp:u32)->vec4u{
+  let tag=svoLatticeTag(hash);let found=dryLatticeBucketFind(key,tag,first,low,high);if(found.z==stamp){return found;}
+  let second=svoLatticeBucket(hash,buckets,1u);let other=dryLatticeBucketFind(key,tag,second,dryLatticeBucketsRead[4u*second],dryLatticeBucketsRead[4u*second+1u]);
+  return select(vec4u(0u),other,other.z==stamp);
+}
+// Bilinear over the pixel's four lattice corners. A missing, overflowed or
+// invalid corner drops out and the rest renormalise; with too little left,
+// the pixel takes the existing exact edge tier and its live cone closures.
 fn dryLatticeResolve(coordinate:vec2u,hit:DryHit){
-  let cell=dryLatticePixelCell(coordinate,hit);let mask=arrayLength(&dryLatticeTagsRead)-1u;
+  let cell=dryLatticePixelCell(coordinate,hit);let buckets=arrayLength(&dryLatticeBucketsRead)/${SVO_LATTICE_VISIBILITY_CONTRACT.bucketWords / 4}u;let stamp=dryLatticeRecordsRead[arrayLength(&dryLatticeRecordsRead)-1u].x;
   ${[0, 1, 2, 3].map(latticeCornerLoadWGSL).join("\n  ")}
   let fraction=cell.fraction;let weights=vec4f((1.0-fraction.x)*(1.0-fraction.y),fraction.x*(1.0-fraction.y),(1.0-fraction.x)*fraction.y,fraction.x*fraction.y);
   var latticeVisibility0=vec4f(0.0);var latticeVisibility1=vec4f(0.0);var latticeVisibility2=vec4f(0.0);var latticeWeight=0.0;
@@ -3786,7 +3795,7 @@ fn dryPrepassStore(coordinate:vec2i,opaque:DryHit,ro:vec3f,rd:vec3f){if(!(opaque
   let metadata=referenceIdentity.y;let packedMaterial=referenceIdentity.x;let material=select(packedMaterial&0xffffu,0x80000000u|(packedMaterial&0xffffu),(packedMaterial&0x80000000u)!=0u);let opaque=DryHit(referenceGeometry.w,normalize(referenceGeometry.xyz),material,dryOpaqueOwner(metadata),(metadata>>16u)&15u,(metadata>>20u)&15u,(metadata>>24u)&3u,(metadata>>26u)&1u,0.0,vec3u(0u,metadata,0u));dryPrepassStore(coordinate,opaque,ray[0],ray[1]);
 }
 @compute @workgroup_size(64) fn dryPrepassBoundaryMain(@builtin(global_invocation_id) globalId:vec3u){
-  let queueCount=atomicLoad(&dryPrepassBoundaryQueue.count);if(globalId.x>=queueCount){return;}let dimensions=textureDimensions(dryPrepassGeometryWrite);let packedCoordinate=dryPrepassBoundaryQueue.coordinates[globalId.x];let coordinate=vec2u(packedCoordinate%dimensions.x,packedCoordinate/dimensions.x);let ray=dryPrepassRay(coordinate,dimensions);dryVisibilityIgnoredBody=DRY_OWNER_NONE;dryThickGlassEnabled=0u;let opaque=traceOpaqueScene(ray[0],ray[1]);dryPrepassStore(vec2i(coordinate),opaque,ray[0],ray[1]);
+  let queueCount=atomicLoad(&dryPrepassBoundaryQueue.count);if(globalId.x>=queueCount){return;}let dimensions=textureDimensions(dryPrepassGeometryWrite);let packedCoordinate=dryPrepassBoundaryQueue.coordinates[globalId.x];let coordinate=vec2u(packedCoordinate%dimensions.x,packedCoordinate/dimensions.x);let ray=dryPrepassRay(coordinate,dimensions);dryVisibilityIgnoredBody=DRY_OWNER_NONE;let opaque=traceOpaqueScene(ray[0],ray[1]);dryPrepassStore(vec2i(coordinate),opaque,ray[0],ray[1]);
 }
 @compute @workgroup_size(1) fn drySilhouetteResetMain(){
   atomicStore(&dryPrepassBoundaryQueue.count,0u);atomicStore(&dryPrepassBoundaryQueue.invalidAoPages,0u);atomicStore(&dryPrepassBoundaryQueue.invalidDirectPages,0u);atomicStore(&dryPrepassBoundaryQueue.failedRefinements,0u);for(var reason=0u;reason<${SVO_DRY_SILHOUETTE_FAILURE_REASON_CONTRACT.words}u;reason+=1u){atomicStore(&drySilhouetteFailureReasons[reason],0u);}atomicStore(&drySilhouetteDispatch[0],0u);atomicStore(&drySilhouetteDispatch[1],0u);atomicStore(&drySilhouetteDispatch[2],0u);
@@ -3974,7 +3983,6 @@ fn dryWorldGiFrameRay(coordinate:vec2u,dimensions:vec2u)->mat2x3f{
 ` : "";
   let shader = /* wgsl */ `
 ${svoMaterialWGSL}
-${svoThickGlassWGSL}
 ${svoGBufferWGSL}
 ${svoPrimitiveMotionWGSL}
 // The value noise the field-program tape and the cluster fields are built on.
@@ -4001,8 +4009,8 @@ struct DryParams {
   metadata:vec4u,
   lightDirection:vec4f,
   lightColor:vec4f,
-  // x: reserved; y: environment/SolidWorld face-worklist count; zw: reserved.
-  glass:vec4u,
+  // Reserved: the retired thin-glass lane. Kept so later lanes hold their offsets.
+  reserved24:vec4u,
   // x: record count; y: accepted generation; z: 64-byte record stride.
   planarBoundaries:vec4u,
   // x: dense slot count; y: table revision; z: 96-byte stride; w: bounded contact-visibility gate.
@@ -4031,8 +4039,12 @@ struct DryParams {
   tuningRays1:vec4f,
   // w: the nodeMipPageTable hash is published; w=0 retains sorted-directory fallback.
   nodeMipDirect:vec4u,
-  // Reserved: the twelve Z-slab offsets of the retired dense page table.
-  nodeMipReserved:array<vec4u,3>,
+  // Fluid coverage texel box copied from the fill: xyz (dimensions - minimum),
+  // then xyz (maximum + 1); all zero means no box.
+  fluidClipMinimum:vec4u,
+  fluidClipMaximum:vec4u,
+  // Reserved: the tail of the retired dense page table's Z-slab offsets.
+  nodeMipReserved:vec4u,
   // x: tetrahedral-radiance generation; y: complete and generation-matched.
   tetrahedralRadiance:vec4u,
   nodeMipExtent:vec4f,
@@ -4075,11 +4087,6 @@ struct DryLightingArena {
   lights:array<SvoLightRecord,${SVO_LIGHT_MAXIMUM_RECORDS}>,
   environment:SvoEnvironmentLightingRecord,
 }
-struct DryThickGlassArena {
-  // x: count; y: revision; z: replaced thin-pane ID; w: binder ABI version.
-  metadata:vec4u,
-  records:array<SvoThickGlassRecord,${SVO_SCENE_THICK_GLASS_MAXIMUM_VOLUMES}>,
-}
 struct DryHit {
   t:f32,
   normal:vec3f,
@@ -4116,7 +4123,6 @@ ${cameraApertureShaderLibrary()}
 @group(0) @binding(9) var<uniform> dry:DryParams;
 @group(0) @binding(13) var<uniform> dryLighting:DryLightingArena;
 @group(0) @binding(14) var<uniform> rigidMotion:array<SvoPrimitiveMotionRecord,12>;
-@group(0) @binding(15) var<uniform> thickGlass:DryThickGlassArena;
 @group(0) @binding(16) var nodeMipAtlas:texture_3d<f32>;
 @group(0) @binding(17) var nodeMipSampler:sampler;
 @group(0) @binding(18) var nodeMipDirectory:texture_2d<u32>;
@@ -4133,7 +4139,6 @@ ${sceneIdentityWGSL}
 
 const DRY_SCENE_MATERIAL_WORD_OFFSET:u32=${SVO_DRY_SCENE_ARENA_LAYOUT.materialOffsetBytes / 4}u;
 const DRY_SCENE_PRIMITIVE_WORD_OFFSET:u32=${SVO_DRY_SCENE_ARENA_LAYOUT.primitiveOffsetBytes / 4}u;
-const DRY_SCENE_GLASS_WORD_OFFSET:u32=${SVO_DRY_SCENE_ARENA_LAYOUT.glassOffsetBytes / 4}u;
 const DRY_SCENE_CLUSTER_WORD_OFFSET:u32=${SVO_DRY_SCENE_ARENA_LAYOUT.clusterOffsetBytes / 4}u;
 const DRY_SCENE_CLUSTER_WORD_LIMIT:u32=DRY_SCENE_CLUSTER_WORD_OFFSET+${SVO_DRY_SCENE_CLUSTER_ARENA_SIZE_BYTES / 4}u;
 const DRY_SCENE_FIELD_PROGRAM_WORD_OFFSET:u32=${SVO_DRY_SCENE_ARENA_LAYOUT.fieldProgramOffsetBytes / 4}u;
@@ -4193,11 +4198,6 @@ fn svoFieldProgramReferenceSample(reference:u32,localPoint:vec3f)->SvoFieldValue
   let offset=reference-DRY_SCENE_FIELD_PROGRAM_WORD_OFFSET;
   if(offset%DRY_SCENE_FIELD_PROGRAM_BLOCK_WORDS!=0u){return SvoFieldValue(1e20,1.0);}
   return dryFieldProgramBlock(offset/DRY_SCENE_FIELD_PROGRAM_BLOCK_WORDS,localPoint);
-}
-fn dryGlassPane(index:u32)->SvoThinGlassRecord{
-  let base=DRY_SCENE_GLASS_WORD_OFFSET+index*${SVO_THIN_GLASS_RECORD_WORDS}u;
-  return SvoThinGlassRecord(bitcast<vec4f>(drySceneWords4(base)),bitcast<vec4f>(drySceneWords4(base+4u)),
-    bitcast<vec4f>(drySceneWords4(base+8u)),bitcast<vec4f>(drySceneWords4(base+12u)),drySceneWords4(base+16u));
 }
 fn dryPublicationWord(index:u32)->u32{return svoStructureWord(dry.structureOffsets.y+index);}
 
@@ -4352,13 +4352,12 @@ ${primaryTraversalCursorWGSL}
 ${leafAccessWGSL}
 ${svoPrimitiveWGSL}
 ${unifiedLightingShaderLibrary}
-${svoThinGlassWGSL}
 ${svoVisibilityPreludeWGSL}
 
 const DRY_MISS:f32 = 3.402823e38;
 const REQUIRED_FIELDS:u32 = ${SVO_DRY_SCENE_REQUIRED_VALID_FIELDS}u; // topology | voxel identity
 const DRY_OWNER_NONE:u32=0xffffu;
-const DRY_MEDIUM_GLASS:u32=2u;const DRY_MEDIUM_OPAQUE:u32=3u;
+const DRY_MEDIUM_OPAQUE:u32=3u;
 const DRY_GBUFFER_FIELD_ANALYTIC:u32=4u;
 // SVO_GBUFFER_FIELD_SOURCES.structuralDiscrete — a cell face, not a solved
 // surface. The voxels-only primary reports this for every opaque hit it makes.
@@ -4433,10 +4432,8 @@ const DRY_REVERSED_Z_NEAR_M:f32=${SVO_DRY_SCENE_REVERSED_Z_NEAR_M};
 // any more, so the only thing that ever sets it is a rigid hit, and the two
 // namespaces overlap numerically — body 3 and record 3 are different objects
 // that compared equal. Named for the one meaning it has left.
-var<private> dryVisibilityIgnoredBody:u32;var<private> dryVisibilityStepInvalidReason:u32;var<private> dryThickGlassEnabled:u32;var<private> dryThickGlassFailure:u32;
+var<private> dryVisibilityIgnoredBody:u32;var<private> dryVisibilityStepInvalidReason:u32;
 // The material traversal owns both radiance and the depth used to sort water.
-// Keeping the latter invocation-local lets a thin-dielectric ray publish the
-// opaque hit it already found instead of launching the same traversal twice.
 var<private> drySurfaceOcclusionDepth_m:f32;
 var<private> dryWorldGiIgnoreRigidBodies:u32;
 var<private> dryWorldGiBodyMask:u32=0xffffffffu;
@@ -4446,16 +4443,11 @@ fn dryConfiguredMapping()->SvoMapping{
   mapping.maxVisits=min(mapping.maxVisits,dryDiagnosticMaximumNodeVisits());
   return mapping;
 }
-fn dryBoundThickGlassOwner(owner:u32)->bool{
-  if(dryThickGlassEnabled==0u){return false;}let count=min(thickGlass.metadata.x,${SVO_SCENE_THICK_GLASS_MAXIMUM_VOLUMES}u);
-  for(var index=0u;index<${SVO_SCENE_THICK_GLASS_MAXIMUM_VOLUMES}u;index+=1u){if(index>=count){break;}if(svoThickGlassOwnerId(thickGlass.records[index])==owner){return true;}}
-  return false;
-}
-// Authored records the analytic passes must not draw: the one the editor is
-// previewing, and any record a thick-glass volume has taken over. The visibility
-// ray's own surface used to be a third term and is gone — see
-// dryVisibilityIgnoredBody for why it was never the same kind of number.
-fn dryOpaqueOwnerSuppressed(owner:u32)->bool{return owner==dry.metadata.z||dryBoundThickGlassOwner(owner);}
+// The authored record the analytic passes must not draw: the one the editor is
+// previewing. The visibility ray's own surface used to be a second term and is
+// gone — see dryVisibilityIgnoredBody for why it was never the same kind of
+// number.
+fn dryOpaqueOwnerSuppressed(owner:u32)->bool{return owner==dry.metadata.z;}
 
 fn missHit()->DryHit { return DryHit(DRY_MISS,vec3f(0.0,1.0,0.0),0u,DRY_OWNER_NONE,SVO_FEATURE_SMOOTH,0u,DRY_GBUFFER_MOTION_STATIC,0u,0.0,vec3u(0u)); }
 ${screenSpaceProxyWGSL}
@@ -4897,58 +4889,11 @@ fn dryBackdropTrace(ro:vec3f,rd:vec3f,tMax:f32)->DryHit{
   ${backdropHooks ? "return dryBackdropTerrainHit(ro,rd,0.0,tMax);" : "return missHit();"}
 }
 
-struct DryGlassHit{hit:SvoThinGlassHit,recordIndex:u32}
-fn dryGlassMiss()->DryGlassHit{return DryGlassHit(svoThinGlassMiss(),0u);}
-fn dryGlassBoundingSphereVisible(record:SvoThinGlassRecord,ro:vec3f,rd:vec3f,tMin:f32,tMax:f32)->bool{
-  let offset=record.centerThickness.xyz-ro;let projected=clamp(dot(offset,rd),tMin,tMax);let closest=ro+rd*projected;let radius=length(vec3f(record.extentIorEpsilon.xy,.5*record.centerThickness.w))+record.extentIorEpsilon.w+1e-5;
-  return dot(closest-record.centerThickness.xyz,closest-record.centerThickness.xyz)<=radius*radius;
-}
-fn traceGlass(ro:vec3f,rd:vec3f,tMin_m:f32,tMax_m:f32)->DryGlassHit {
-  var best=dryGlassMiss();var bestT=tMax_m;
-  let paneCount=min(dry.glass.y,${SVO_SCENE_GLASS_MAXIMUM_PANES}u);
-  for(var paneIndex=0u;paneIndex<${SVO_SCENE_GLASS_MAXIMUM_PANES}u;paneIndex+=1u){
-    if(paneIndex>=paneCount){break;}let record=dryGlassPane(paneIndex);let paneId=svoThinGlassPaneId(record);let thickReplaced=dryThickGlassEnabled!=0u&&paneId==thickGlass.metadata.z;if(thickReplaced||!dryGlassBoundingSphereVisible(record,ro,rd,tMin_m,bestT)){continue;}let candidate=svoThinGlassIntersect(record,ro,rd,tMin_m,bestT,1e-6,record.extentIorEpsilon.w);
-    if(candidate.valid!=0u&&candidate.t_m<bestT){best=DryGlassHit(candidate,paneIndex);bestT=candidate.t_m;}
-  }
-  return best;
-}
-
-struct DryThickGlassHit{interval:SvoThickGlassInterval,recordIndex:u32}
-fn dryThickGlassMiss()->DryThickGlassHit{return DryThickGlassHit(svoThickGlassEmpty(SVO_THICK_GLASS_MISS),0u);}
-fn dryThickGlassFirst(interval:SvoThickGlassInterval)->SvoThickGlassSurface{var first=interval.exit;if(interval.hasEntry!=0u){first=interval.entry;}return first;}
-fn traceThickGlass(ro:vec3f,rd:vec3f,tMin_m:f32,tMax_m:f32)->DryThickGlassHit{
-  var best=dryThickGlassMiss();var bestT=tMax_m;if(dryThickGlassEnabled==0u){return best;}
-  let count=min(thickGlass.metadata.x,${SVO_SCENE_THICK_GLASS_MAXIMUM_VOLUMES}u);
-  for(var recordIndex=0u;recordIndex<${SVO_SCENE_THICK_GLASS_MAXIMUM_VOLUMES}u;recordIndex+=1u){
-    if(recordIndex>=count){break;}let candidate=svoThickGlassIntersect(thickGlass.records[recordIndex],ro,rd,tMin_m,bestT,thickGlass.metadata.y);
-    if(candidate.status==SVO_THICK_GLASS_INVALID||candidate.status==SVO_THICK_GLASS_STALE){dryThickGlassFailure=candidate.status;return dryThickGlassMiss();}
-    if(candidate.status==SVO_THICK_GLASS_HIT){let first=dryThickGlassFirst(candidate);if(first.t_m<bestT){best=DryThickGlassHit(candidate,recordIndex);bestT=first.t_m;}}
-  }
-  return best;
-}
-
 fn dryVisibilityStep(status:u32,nodeVisits:u32,leafVisits:u32,workItems:u32,t:f32)->SvoVisibilityStep {
   return SvoVisibilityStep(status,nodeVisits,leafVisits,workItems,t,1u,vec3f(0.0),0u);
 }
-fn dryVisibilityTransmissionStep(nodeVisits:u32,leafVisits:u32,workItems:u32,t:f32,transmittance:vec3f)->SvoVisibilityStep {
-  return SvoVisibilityStep(SVO_VIS_STEP_HIT,nodeVisits,leafVisits,workItems,t,0u,clamp(transmittance,vec3f(0.0),vec3f(1.0)),0u);
-}
 fn dryMaterialPublished(material:SvoMaterialRecord,index:u32)->bool{
   return index<dry.materialPublication.x&&svoMaterialValid(material,index)&&material.identity.y==dry.materialPublication.y;
-}
-fn dryMaterialThinDielectric(material:SvoMaterialRecord,index:u32)->bool{
-  let required=SVO_MATERIAL_FLAG_DIELECTRIC|SVO_MATERIAL_FLAG_THIN_WALL;
-  return dryMaterialPublished(material,index)&&(material.identity.w&required)==required;
-}
-fn dryHitThinDielectric(hit:DryHit)->bool{
-  let materialId=dryResolvedMaterialId(hit);
-  return materialId<dry.materialPublication.x&&dryMaterialThinDielectric(dryMaterial(materialId),materialId);
-}
-fn dryThinDielectricTransmittance(material:SvoMaterialRecord,normal:vec3f,direction:vec3f)->vec3f{
-  let cosine=clamp(abs(dot(normalize(normal),normalize(direction))),0.0,1.0);
-  let f0=svoMaterialDielectricF0(material);let fresnel=f0+(1.0-f0)*pow(1.0-cosine,5.0);
-  let tint=mix(vec3f(1.0),clamp(material.scatteringColorAnisotropy.xyz,vec3f(0.0),vec3f(1.0)),clamp(material.baseColorOpacity.w,0.0,1.0));
-  return tint*clamp(material.surface.w*(1.0-fresnel),0.0,1.0);
 }
 fn dryPlanarTerminalVisibility(ray:SvoVisibilityRay,hit:SvoTraversalHit)->SvoVisibilityStep{
   let candidate=dryPlanarTerminalHit(ray.origin_m,ray.direction,hit.nodeIndex,hit.tEnter,
@@ -4958,10 +4903,6 @@ fn dryPlanarTerminalVisibility(ray:SvoVisibilityRay,hit:SvoTraversalHit)->SvoVis
   if(materialId>=dry.materialPublication.x){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,1u,DRY_MISS);}
   let material=dryMaterial(materialId);
   if(!dryMaterialPublished(material,materialId)){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,1u,DRY_MISS);}
-  if(dryMaterialThinDielectric(material,materialId)){
-    return dryVisibilityTransmissionStep(0u,0u,1u,min(hit.tExit,ray.tMax_m),
-      dryThinDielectricTransmittance(material,candidate.normal,ray.direction));
-  }
   return dryVisibilityStep(SVO_VIS_STEP_HIT,0u,0u,1u,candidate.t);
 }
 
@@ -5007,7 +4948,7 @@ fn traceLeafPayloadVisibility(ray:SvoVisibilityRay,tMin_m:f32,hit:SvoTraversalHi
     ${shadowMacroSkipWGSL}if(workItems>=workLimit){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,0u,0u,workItems,DRY_MISS);}workItems+=1u;
     let payloadIndex=svoBrickVoxelIndex(hit.voxelOffset,vec3u(cell),dry.mapping.brickSize);
     if(payloadIndex>=dryVoxelCapacity()){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}
-    ${cellSolidGateWGSL("payloadIndex", "let clipBounds=mat2x3f(bounds[0]+vec3f(cell)*extent,bounds[0]+(vec3f(cell)+vec3f(1.0))*extent);let span=dryCellContourInterval(identity,payloadIndex,clipBounds,ray.origin_m,ray.direction,entry,min(nextT.x,min(nextT.y,nextT.z)));if(span.x<=span.y){let materialId=sceneIdentityMaterial(identity);if(materialId>=dry.materialPublication.x){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}let material=dryMaterial(materialId);if(!dryMaterialPublished(material,materialId)){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}if(dryMaterialThinDielectric(material,materialId)){let cellBounds=mat2x3f(bounds[0]+vec3f(cell)*extent,bounds[0]+(vec3f(cell)+vec3f(1.0))*extent);let normal=dryVoxelFaceNormal(cellBounds,ray.origin_m+ray.direction*entry);let cellExit=min(nextT.x,min(nextT.y,nextT.z));return dryVisibilityTransmissionStep(0u,0u,workItems,min(max(span.y,span.x),ray.tMax_m),dryThinDielectricTransmittance(material,normal,ray.direction));}return dryVisibilityStep(SVO_VIS_STEP_HIT,0u,0u,workItems,span.x);}")}
+    ${cellSolidGateWGSL("payloadIndex", "let clipBounds=mat2x3f(bounds[0]+vec3f(cell)*extent,bounds[0]+(vec3f(cell)+vec3f(1.0))*extent);let span=dryCellContourInterval(identity,payloadIndex,clipBounds,ray.origin_m,ray.direction,entry,min(nextT.x,min(nextT.y,nextT.z)));if(span.x<=span.y){let materialId=sceneIdentityMaterial(identity);if(materialId>=dry.materialPublication.x){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}let material=dryMaterial(materialId);if(!dryMaterialPublished(material,materialId)){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}return dryVisibilityStep(SVO_VIS_STEP_HIT,0u,0u,workItems,span.x);}")}
     let advance=min(nextT.x,min(nextT.y,nextT.z));if(nextT.x<=advance+1e-6){cell.x+=step.x;nextT.x+=deltaT.x;}if(nextT.y<=advance+1e-6){cell.y+=step.y;nextT.y+=deltaT.y;}if(nextT.z<=advance+1e-6){cell.z+=step.z;nextT.z+=deltaT.z;}entry=advance;
   }
   return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,0u,0u,workItems,DRY_MISS);
@@ -5015,19 +4956,17 @@ fn traceLeafPayloadVisibility(ray:SvoVisibilityRay,tMin_m:f32,hit:SvoTraversalHi
 ${macroHddaShadowWGSL}
 
 const DRY_MEDIUM_AIR:u32=0u;
-fn dryThinGlassIncidentIor()->f32{return 1.0;}
 
-// Adapter required by svoTraceVisibility. It returns the nearest opaque or
-// transmissive candidate and never calls the lighting closure recursively.
+// Adapter required by svoTraceVisibility. It returns the nearest opaque
+// candidate and never calls the lighting closure recursively.
 fn svoVisibilityNext(ray:SvoVisibilityRay,tMin_m:f32,remaining:SvoVisibilityBudget)->SvoVisibilityStep {
   if(dryPublicationWord(0u)==0u||(dryPublicationWord(1u)&REQUIRED_FIELDS)!=REQUIRED_FIELDS){dryVisibilityStepInvalidReason=1u;return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,0u,DRY_MISS);}
-  if(dry.glass.y>${SVO_SCENE_GLASS_MAXIMUM_PANES}u){dryVisibilityStepInvalidReason=2u;return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,0u,DRY_MISS);}
-  var nodeVisits=0u;var leafVisits=0u;var workItems=0u;var bestT=ray.tMax_m;var found=false;var opaque=true;var glassTransmission=vec3f(0.0);
+  var nodeVisits=0u;var leafVisits=0u;var workItems=0u;var bestT=ray.tMax_m;var found=false;
 
   let bodyCount=min(u32(round(max(uniforms.options.z,0.0))),12u);
   for(var bodyIndex=0u;bodyIndex<12u;bodyIndex+=1u){
     if(bodyIndex>=bodyCount){break;}if(bodyIndex==dryVisibilityIgnoredBody){continue;}if(workItems>=remaining.workItems){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,nodeVisits,leafVisits,workItems,DRY_MISS);}workItems+=1u;
-    let body=bodies[bodyIndex];if(!bodyBoundingSphereVisible(ray.origin_m,ray.direction,body,tMin_m,bestT)){continue;}let shape=i32(round(body.halfSizeShape.w));if(shape>=2&&!bodyCandidateVisible(ray.origin_m,ray.direction,body,tMin_m,bestT)){continue;}let candidate=bodyHit(ray.origin_m,ray.direction,body);if(candidate.t>=tMin_m&&candidate.t<bestT){bestT=candidate.t;found=true;opaque=true;}
+    let body=bodies[bodyIndex];if(!bodyBoundingSphereVisible(ray.origin_m,ray.direction,body,tMin_m,bestT)){continue;}let shape=i32(round(body.halfSizeShape.w));if(shape>=2&&!bodyCandidateVisible(ray.origin_m,ray.direction,body,tMin_m,bestT)){continue;}let candidate=bodyHit(ray.origin_m,ray.direction,body);if(candidate.t>=tMin_m&&candidate.t<bestT){bestT=candidate.t;found=true;}
   }
 
   // The voxel-resolved tier, and there is no second tier behind it.
@@ -5055,17 +4994,13 @@ fn svoVisibilityNext(ray:SvoVisibilityRay,tMin_m:f32,remaining:SvoVisibilityBudg
     let payloadRay=SvoVisibilityRay(ray.origin_m,bestT,ray.direction,ray.originBias_m);let payload=${shadowLeafTraceCallWGSL}(payloadRay,tMin_m,leaf,remaining.workItems-workItems);workItems+=payload.workItems;
     // Leaves partition space and are visited front to back, so the first payload
     // hit is the nearest voxel occluder and no later leaf can beat it.
-    if(payload.status==SVO_VIS_STEP_HIT){bestT=payload.t_m;found=true;opaque=payload.opaque!=0u;glassTransmission=payload.transmittance;break;}
+    if(payload.status==SVO_VIS_STEP_HIT){bestT=payload.t_m;found=true;break;}
     if(payload.status!=SVO_VIS_STEP_MISS){if(payload.status==SVO_VIS_STEP_INVALID){dryVisibilityStepInvalidReason=3u;}return dryVisibilityStep(payload.status,nodeVisits,leafVisits,workItems,payload.t_m);}
     cursor=leaf.tExit+max(1e-5,length(dry.mapping.cellSize)*1e-3);
   }
   if(cursor<bestT&&leafVisits>=remaining.leafVisits){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,nodeVisits,leafVisits,workItems,DRY_MISS);}
 
-  let paneCount=dry.glass.y;if(workItems+paneCount>remaining.workItems){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,nodeVisits,leafVisits,workItems,DRY_MISS);}workItems+=paneCount;
-  // Authored environment glazing remains a finite-pane query. SolidWorld glass
-  // was already resolved above from the voxel's published material record.
-  let glass=traceGlass(ray.origin_m,ray.direction,tMin_m,bestT);if(glass.hit.valid!=0u&&glass.hit.t_m<bestT){let optics=svoThinGlassOptics(dryGlassPane(glass.recordIndex),glass.hit,dryThinGlassIncidentIor());bestT=glass.hit.t_m;found=true;opaque=false;glassTransmission=optics.netTransmittance;}
-  if(!found){return dryVisibilityStep(SVO_VIS_STEP_MISS,nodeVisits,leafVisits,workItems,DRY_MISS);}if(opaque){return dryVisibilityStep(SVO_VIS_STEP_HIT,nodeVisits,leafVisits,workItems,bestT);}return dryVisibilityTransmissionStep(nodeVisits,leafVisits,workItems,bestT,glassTransmission);
+  if(!found){return dryVisibilityStep(SVO_VIS_STEP_MISS,nodeVisits,leafVisits,workItems,DRY_MISS);}return dryVisibilityStep(SVO_VIS_STEP_HIT,nodeVisits,leafVisits,workItems,bestT);
 }
 
 ${svoVisibilityTraceWGSL}
@@ -5096,6 +5031,21 @@ fn dryFluidCoverageSlab(origin:vec3f,direction:vec3f,maximumDistance_m:f32)->vec
   return vec2f(max(0.0,max(near.x,max(near.y,near.z))),min(maximumDistance_m,min(far.x,min(far.y,far.z))));
 }
 
+// Far end of the ray inside the last fill's nonzero texel box, grown by
+// margin_m. The frame copies the box from the fill it encoded just before, so
+// under valid coverage an empty box means no liquid anywhere: the ray ends at
+// its start.
+fn dryFluidClipEnd(origin:vec3f,direction:vec3f,start:f32,end:f32,margin_m:f32)->f32 {
+  if(all(dry.fluidClipMaximum.xyz==vec3u(0u))){return start;}
+  let lower=dry.fluidCoverage.origin_m+vec3f(dry.fluidCoverage.dimensions-dry.fluidClipMinimum.xyz)*dry.fluidCoverage.texelSize_m-vec3f(margin_m);
+  let upper=dry.fluidCoverage.origin_m+vec3f(dry.fluidClipMaximum.xyz)*dry.fluidCoverage.texelSize_m+vec3f(margin_m);
+  let inverse=1.0/select(direction,vec3f(1e-20),abs(direction)<vec3f(1e-20));
+  let first=(lower-origin)*inverse;let second=(upper-origin)*inverse;
+  let near=max(start,max(min(first.x,second.x),max(min(first.y,second.y),min(first.z,second.z))));
+  let far=min(max(first.x,second.x),min(max(first.y,second.y),max(first.z,second.z)));
+  return select(min(end,far),start,far<near);
+}
+
 /**
  * Path length through liquid along a cone, in metres.
  *
@@ -5119,9 +5069,14 @@ fn dryFluidOpticalDepth(origin:vec3f,direction:vec3f,maximumDistance_m:f32,apert
   if(!svoFluidCoverageReady(dry.fluidCoverage)||!(maximumDistance_m>0.0)){return 0.0;}
   let texel_m=max(dry.fluidCoverage.texelSize_m.x,max(dry.fluidCoverage.texelSize_m.y,dry.fluidCoverage.texelSize_m.z));
   if(!(texel_m>0.0)){return 0.0;}
-  let slab=dryFluidCoverageSlab(origin,direction,maximumDistance_m);
-  if(!(slab.y>slab.x)){return 0.0;}
+  let volume=dryFluidCoverageSlab(origin,direction,maximumDistance_m);
   let tangent=tan(aperture*.5);
+  // The margin is the fill's one-texel dilation plus the widest footprint the
+  // cone reaches, because a coarse mip tap reads coverage that far outside
+  // the box. Only the far end moves: the steps and their levels are functions
+  // of the distance from the origin, so a later start would move every sample.
+  let slab=vec2f(volume.x,dryFluidClipEnd(origin,direction,volume.x,volume.y,texel_m+max(texel_m,2.0*volume.y*tangent)));
+  if(!(slab.y>slab.x)){return 0.0;}
   var distance=slab.x;var depth_m=0.0;
   for(var stepIndex=0u;stepIndex<${SVO_DRY_FLUID_MARCH_STEPS}u;stepIndex+=1u){
     if(distance>=slab.y){break;}
@@ -5153,12 +5108,13 @@ fn dryFluidOpticalDepth(origin:vec3f,direction:vec3f,maximumDistance_m:f32,apert
  * disables shadows softens or disables the water's shadow with it.
  */
 fn dryLightVisibility(position:vec3f,geometricNormal:vec3f,ownerId:u32,towardLight:vec3f,finiteDistance_m:f32)->vec3f {
-  let solid=dryLightVisibilitySolid(position,geometricNormal,ownerId,towardLight,finiteDistance_m);
+  let solid=dryLightVisibilitySolid(position,geometricNormal,ownerId,towardLight,finiteDistance_m);${experiments.waterShadows === true ? "" : `
+  return solid;`}${experiments.waterShadows === true ? `
   if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.exactShadow}u)==0u
     ||!svoFluidCoverageReady(dry.fluidCoverage)||all(solid<=vec3f(0.0))){return solid;}
   let maximumDistance=select(directionalLightSceneExitDistance(position,towardLight),finiteDistance_m,finiteDistance_m>0.0);
   let depth_m=dryFluidOpticalDepth(position,towardLight,maximumDistance,dry.tuningRays1.y);
-  return solid*mix(vec3f(1.0),dryFluidTransmittance(depth_m),dry.tuningRays0.y);
+  return solid*mix(vec3f(1.0),dryFluidTransmittance(depth_m),dry.tuningRays0.y);` : ""}
 }
 
 ${backdropHooks ? `// Whether the ground stands between a receiver and its light. The ray leaves
@@ -5234,7 +5190,8 @@ fn dryContactVisibilityDirection(geometricNormalIn:vec3f,featureId:u32,sampleInd
  * averages too.
  */
 fn dryContactVisibility(position:vec3f,geometricNormal:vec3f,featureId:u32,ownerId:u32)->vec3f {
-  let solid=dryContactVisibilitySolid(position,geometricNormal,featureId,ownerId);
+  let solid=dryContactVisibilitySolid(position,geometricNormal,featureId,ownerId);${experiments.waterShadows === true ? "" : `
+  return solid;`}${experiments.waterShadows === true ? `
   if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.ambientOcclusion}u)==0u
     ||!svoFluidCoverageReady(dry.fluidCoverage)||all(solid<=vec3f(0.0))){return solid;}
   let radius=dryContactVisibilityRadius();if(radius<=0.0){return solid;}
@@ -5245,7 +5202,7 @@ fn dryContactVisibility(position:vec3f,geometricNormal:vec3f,featureId:u32,owner
     let direction=dryContactVisibilityDirection(geometricNormal,featureId,sampleIndex&1u);
     transmittance+=dryFluidTransmittance(dryFluidOpticalDepth(origin,direction,radius,dry.tuningRays1.x));
   }
-  return solid*mix(vec3f(1.0),transmittance/f32(${SVO_DRY_CONTACT_FLUID_SAMPLES}),dry.tuningRays0.w);
+  return solid*mix(vec3f(1.0),transmittance/f32(${SVO_DRY_CONTACT_FLUID_SAMPLES}),dry.tuningRays0.w);` : ""}
 }
 
 fn dryContactVisibilitySolid(position:vec3f,geometricNormal:vec3f,featureId:u32,ownerId:u32)->vec3f {
@@ -5458,100 +5415,10 @@ fn shadeDryOpaque(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f {
   shaded*=dryVoxelFaceEdgeFactor(position,hit.normal,hit.t,hit.fieldSource);
   return dryBackdropHaze(hit,position,rd,shaded);
 }
-// Where the ray leaves the render voxel it just entered.
-//
-// This used to advance by the *largest* crossing a voxel can take — one whole
-// cell along the ray's dominant axis — which is only the true exit for a ray
-// that entered on that axis' face. Every other ray overshot, and an overshoot
-// at a tank's base steps clean over the entry face of the floor the wall stands
-// on and restarts the trace *inside* that solid, where the entered face is
-// reconstructed from an interior point. The face it picks there is arbitrary,
-// usually points away from the key light, and the wall's whole base shades
-// black. Exiting exactly cannot skip a face, so the surface behind the glass is
-// always entered where it is actually entered.
-fn dryVoxelExit_m(position:vec3f,rd:vec3f)->f32{
-  let cell=max(dry.mapping.cellSize,vec3f(1e-9));
-  let nudge=1e-3*min(cell.x,min(cell.y,cell.z));
-  // The hit sits *on* a voxel face, so name the voxel by a point just inside it
-  // along the ray rather than by the face itself.
-  let interior=position+rd*nudge;
-  let base=dry.nodeMipOrigin.xyz+floor((interior-dry.nodeMipOrigin.xyz)/cell)*cell;
-  let inverse=select(vec3f(DRY_MISS),vec3f(1.0)/rd,abs(rd)>vec3f(1e-9));
-  let far=max((base-position)*inverse,(base+cell-position)*inverse);
-  return max(nudge,min(far.x,min(far.y,far.z))+nudge);
-}
-fn dryTraceBeyondThinWall(hit:DryHit,ro:vec3f,rd:vec3f)->DryHit{
-  var cursor=hit.t+dryVoxelExit_m(ro+rd*hit.t,rd);var behind=traceDrySolidSceneFrom(ro,rd,cursor);
-  // A SolidWorld wall can span more than one render voxel. Treat the contiguous
-  // run as one thin sheet, not as nested panes that multiply Fresnel eight times.
-  for(var layer=0u;layer<16u;layer+=1u){
-    if(!dryHitThinDielectric(behind)){break;}
-    cursor=behind.t+dryVoxelExit_m(ro+rd*behind.t,rd);behind=traceDrySolidSceneFrom(ro,rd,cursor);
-  }
-  return behind;
-}
-fn shadeDryThinDielectric(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f{
-  var surface=hit;var throughput=vec3f(1.0);var color=vec3f(0.0);
-  // A ray may cross both tank walls. Resolve a bounded sequence iteratively;
-  // this is deliberately not recursive shader control flow.
-  for(var sheet=0u;sheet<4u;sheet+=1u){
-    // Invalid glass still behaves as a stopping surface. Once the material is
-    // valid, the continuation below replaces this with the first opaque hit.
-    drySurfaceOcclusionDepth_m=surface.t;
-    let materialId=dryResolvedMaterialId(surface);if(materialId>=dry.materialPublication.x){return vec3f(0.0);}
-    let material=dryMaterial(materialId);if(!dryMaterialThinDielectric(material,materialId)){return vec3f(0.0);}
-    let f0=svoMaterialDielectricF0(material);let cosine=clamp(abs(dot(normalize(surface.normal),normalize(rd))),0.0,1.0);let fresnel=f0+(1.0-f0)*pow(1.0-cosine,5.0);
-    color+=throughput*dryEnvironment(reflect(rd,surface.normal),material.emissiveRoughness.w)*fresnel;
-    throughput*=dryThinDielectricTransmittance(material,surface.normal,rd);
-    let behind=dryTraceBeyondThinWall(surface,ro,rd);
-    if(!dryHitThinDielectric(behind)){
-      // This is the depth at which the scene actually occludes water. A miss
-      // publishes zero, the compact G-buffer's far-sentinel encoding.
-      drySurfaceOcclusionDepth_m=select(0.0,behind.t,behind.t<DRY_MISS);
-      return max(color+throughput*shadeDryOpaque(behind,ro,rd),vec3f(0.0));
-    }
-    surface=behind;
-  }
-  drySurfaceOcclusionDepth_m=0.0;
-  return max(color+throughput*dryGroundOrSky(ro,rd),vec3f(0.0));
-}
 fn shadeDrySurface(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f{
   drySurfaceOcclusionDepth_m=select(0.0,hit.t,hit.t<DRY_MISS);
-  ${fastDeferred ? "" : "if(dryHitThinDielectric(hit)){return shadeDryThinDielectric(hit,ro,rd);}"}
   return shadeDryOpaque(hit,ro,rd);
 }
-struct DryGlassSurface{color:vec3f,depth:f32,materialId:u32,ownerId:u32,paneId:u32,_padding:u32}
-fn shadeThinGlass(glass:DryGlassHit,opaque:DryHit,ro:vec3f,rd:vec3f)->DryGlassSurface {
-  let record=dryGlassPane(glass.recordIndex);let incidentIor=dryThinGlassIncidentIor();let optics=svoThinGlassOptics(record,glass.hit,incidentIor);
-  // A collapsed sheet has no net Snell bend, so the already-resolved collinear
-  // opaque hit is exactly the transmitted scene query; never traverse it twice.
-  let reflected=dryEnvironment(reflect(rd,glass.hit.geometricNormal),.04);let transmitted=shadeDrySurface(opaque,ro,rd);
-  let color=reflected*optics.fresnel+transmitted*optics.netTransmittance;
-  return DryGlassSurface(color,glass.hit.t_m,svoThinGlassMaterialId(record),svoThinGlassOwnerId(record),svoThinGlassPaneId(record),0u);
-}
-
-fn dryThickGlassEmission(materialId:u32)->vec3f{
-  if(materialId>=dry.materialPublication.x){return vec3f(0.0);}let material=dryMaterial(materialId);
-  if(!svoMaterialValid(material,materialId)||material.identity.y!=dry.materialPublication.y){return vec3f(0.0);}return material.emissiveRoughness.xyz;
-}
-fn shadeThickGlass(glass:DryThickGlassHit,ro:vec3f,rd:vec3f)->DryGlassSurface{
-  let record=thickGlass.records[glass.recordIndex];let first=dryThickGlassFirst(glass.interval);let ior=record.radiiYzIorEpsilon.z;
-  let fromIor=select(1.0,ior,glass.interval.insideAtStart!=0u);let toIor=select(ior,1.0,glass.interval.insideAtStart!=0u);
-  let firstOptics=svoThickGlassInterface(record,first,rd,fromIor,toIor,0.0);let reflected=dryEnvironment(firstOptics.reflectedDirection,.04);var transmitted=vec3f(0.0);var transmission=vec3f(0.0);
-  if(firstOptics.totalInternalReflection==0u){
-    if(glass.interval.insideAtStart!=0u){let origin=first.position_m+firstOptics.refractedDirection*record.radiiYzIorEpsilon.w;let opaque=traceOpaqueScene(origin,firstOptics.refractedDirection);transmitted=shadeDrySurface(opaque,origin,firstOptics.refractedDirection);transmission=vec3f(1.0-firstOptics.fresnel);}
-    else if(glass.interval.tangent!=0u){let origin=first.position_m+rd*record.radiiYzIorEpsilon.w;let opaque=traceOpaqueScene(origin,rd);transmitted=shadeDrySurface(opaque,origin,rd);transmission=vec3f(1.0-firstOptics.fresnel);}
-    else{
-      let insideOrigin=first.position_m+firstOptics.refractedDirection*record.radiiYzIorEpsilon.w;let inside=svoThickGlassIntersect(record,insideOrigin,firstOptics.refractedDirection,0.0,record.absorptionPath.w,thickGlass.metadata.y);
-      if(inside.status==SVO_THICK_GLASS_HIT){let exitSurface=inside.exit;let exitOptics=svoThickGlassInterface(record,exitSurface,firstOptics.refractedDirection,ior,1.0,inside.opticalPath_m);
-        if(exitOptics.totalInternalReflection==0u){let outsideOrigin=exitSurface.position_m+exitOptics.refractedDirection*record.radiiYzIorEpsilon.w;let opaque=traceOpaqueScene(outsideOrigin,exitOptics.refractedDirection);transmitted=shadeDrySurface(opaque,outsideOrigin,exitOptics.refractedDirection);transmission=exitOptics.absorptionTint*(1.0-firstOptics.fresnel)*(1.0-exitOptics.fresnel);}
-      }
-    }
-  }
-  let materialId=svoThickGlassMaterialId(record);let color=reflected*firstOptics.fresnel+transmitted*transmission+dryThickGlassEmission(materialId);
-  return DryGlassSurface(max(color,vec3f(0.0)),first.t_m,materialId,svoThickGlassOwnerId(record),svoThickGlassId(record),0u);
-}
-
 struct VertexOut{@builtin(position) position:vec4f,@location(0) uv:vec2f}
 
 struct DryFragmentOut{
@@ -5580,21 +5447,11 @@ fn dryFragmentOut(targets:SvoGBufferTargets,hardwareDepth:f32)->DryFragmentOut{
 }
 
 @fragment fn fragmentMain(input:VertexOut)->DryFragmentOut {
-  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());dryVisibilityIgnoredBody=DRY_OWNER_NONE;dryThickGlassFailure=0u;
-  // Curved thick glass is compiled separately from this Metal-sensitive pass.
-  // Its authored pane therefore remains visible through the exact thin fallback.
-  dryThickGlassEnabled=0u;
-  let opaque=traceOpaqueScene(ro,rd);${prepassResolveCallWGSL}let glass=traceGlass(ro,rd,0.0,opaque.t);var color=shadeDrySurface(opaque,ro,rd);var depth=drySurfaceOcclusionDepth_m;
-  let glassVisible=glass.hit.valid!=0u&&glass.hit.t_m<opaque.t;var glassSurface=DryGlassSurface(vec3f(0.0),DRY_MISS,0u,DRY_OWNER_NONE,0u,0u);
-  if(glassVisible){glassSurface=shadeThinGlass(glass,opaque,ro,rd);color=glassSurface.color;depth=glassSurface.depth;}
+  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());dryVisibilityIgnoredBody=DRY_OWNER_NONE;
+  let opaque=traceOpaqueScene(ro,rd);${prepassResolveCallWGSL}let color=shadeDrySurface(opaque,ro,rd);let depth=drySurfaceOcclusionDepth_m;
   let vignette=1.0-.14*dot(ndc*.58,ndc*.58);let radiance=max(color*vignette,vec3f(0.0));let generation=dryPublicationGeneration();
-  if(glassVisible){
-    let media=dryMediumPair(rd,glass.hit.geometricNormal,DRY_MEDIUM_GLASS);
-    let targets=svoGBufferSurface(radiance,depth,glass.hit.geometricNormal,glass.hit.geometricNormal,vec4u(glassSurface.materialId,glassSurface.ownerId,media.x,media.y),vec3f(0.0),DRY_GBUFFER_MOTION_STATIC,DRY_GBUFFER_FIELD_ANALYTIC,generation,SVO_GBUFFER_MOTION_VALID|svoGBufferProducerFlags(SVO_GBUFFER_PRODUCER_GLASS),SVO_FEATURE_SMOOTH);
-    return dryFragmentOut(targets,dryHardwareDepth(depth,rd,forward));
-  }
   if(opaque.t<DRY_MISS){
-    let voxelGlass=dryHitThinDielectric(opaque);let media=dryMediumPair(rd,opaque.normal,select(DRY_MEDIUM_OPAQUE,DRY_MEDIUM_GLASS,voxelGlass));let rigidSurface=dryRigidMotionSurface(opaque,ro+rd*opaque.t);let motionVelocity=select(vec3f(0.0),rigidSurface.velocity_m_s,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionGeneration=select(generation,rigidSurface.generation,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionValid=select(opaque.motionValid,rigidSurface.valid,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let producer=select(SVO_GBUFFER_PRODUCER_TRACED,SVO_GBUFFER_PRODUCER_GLASS,voxelGlass);var flags=select(0u,SVO_GBUFFER_MOTION_VALID,motionValid!=0u)|svoGBufferProducerFlags(producer);if(opaque.featureId!=SVO_FEATURE_SMOOTH){flags|=DRY_GBUFFER_HARD_FEATURE;}
+    let media=dryMediumPair(rd,opaque.normal,DRY_MEDIUM_OPAQUE);let rigidSurface=dryRigidMotionSurface(opaque,ro+rd*opaque.t);let motionVelocity=select(vec3f(0.0),rigidSurface.velocity_m_s,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionGeneration=select(generation,rigidSurface.generation,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionValid=select(opaque.motionValid,rigidSurface.valid,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);var flags=select(0u,SVO_GBUFFER_MOTION_VALID,motionValid!=0u)|svoGBufferProducerFlags(SVO_GBUFFER_PRODUCER_TRACED);if(opaque.featureId!=SVO_FEATURE_SMOOTH){flags|=DRY_GBUFFER_HARD_FEATURE;}
     let targets=svoGBufferSurface(radiance,depth,opaque.normal,opaque.normal,vec4u(dryResolvedMaterialId(opaque),opaque.ownerId,media.x,media.y),motionVelocity,opaque.motionKind,opaque.fieldSource,motionGeneration,flags,opaque.featureId);
     return dryFragmentOut(targets,dryHardwareDepth(opaque.t,rd,forward));
   }
@@ -5684,57 +5541,6 @@ struct VertexOut{@builtin(position) position:vec4f,@location(0) uv:vec2f}
 @vertex fn vertexMain(@builtin(vertex_index) index:u32)->VertexOut {
   var points=array<vec2f,3>(vec2f(-1,-1),vec2f(3,-1),vec2f(-1,3));
   var output:VertexOut;output.position=vec4f(points[index],0,1);output.uv=points[index]*.5+.5;return output;
-}
-`;
-
-
-/**
- * Coverage-scaled thin-glass discovery for split rendering. Quads are only
- * conservative raster candidates: the fragment stage repeats the canonical
- * analytic finite-pane intersection before writing exact depth and identity.
- */
-export const svoDryRasterGlassShader = /* wgsl */ `
-${svoThinGlassWGSL}
-struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f, environment:vec4f, reservedSceneMeta:vec4f, reservedSceneLanes:array<vec4f,16> }
-struct GlassRasterParams { paneCount:u32, _padding0:u32, _padding1:u32, _padding2:u32 }
-struct GlassRasterVertexOut {
-  @builtin(position) position:vec4f,
-  @location(0) @interpolate(flat) recordIndex:u32,
-}
-struct GlassRasterFragmentOut {
-  @location(0) glassKey:u32,
-  @builtin(frag_depth) hardwareDepth:f32,
-}
-@group(0) @binding(0) var<uniform> uniforms:Uniforms;
-${cameraApertureShaderLibrary()}
-@group(0) @binding(4) var<storage,read> dryRasterSceneArena:array<u32>;
-@group(1) @binding(0) var dryRasterOpaqueGeometry:texture_2d<f32>;
-@group(1) @binding(1) var<uniform> glassRaster:GlassRasterParams;
-const DRY_RASTER_GLASS_NEAR_M:f32=${SVO_DRY_SCENE_REVERSED_Z_NEAR_M};
-const DRY_RASTER_GLASS_WORD_OFFSET:u32=${SVO_DRY_SCENE_ARENA_LAYOUT.glassOffsetBytes / 4}u;
-fn dryRasterGlassWords4(offset:u32)->vec4u{return vec4u(dryRasterSceneArena[offset],dryRasterSceneArena[offset+1u],dryRasterSceneArena[offset+2u],dryRasterSceneArena[offset+3u]);}
-fn dryRasterGlassPane(index:u32)->SvoThinGlassRecord{let base=DRY_RASTER_GLASS_WORD_OFFSET+index*${SVO_THIN_GLASS_RECORD_WORDS}u;return SvoThinGlassRecord(
-  bitcast<vec4f>(dryRasterGlassWords4(base)),bitcast<vec4f>(dryRasterGlassWords4(base+4u)),bitcast<vec4f>(dryRasterGlassWords4(base+8u)),
-  bitcast<vec4f>(dryRasterGlassWords4(base+12u)),dryRasterGlassWords4(base+16u));}
-fn dryRasterGlassCorner(index:u32)->vec2f{
-  var corners=array<vec2f,6>(vec2f(-1.0,-1.0),vec2f(1.0,-1.0),vec2f(1.0,1.0),vec2f(-1.0,-1.0),vec2f(1.0,1.0),vec2f(-1.0,1.0));
-  return corners[index];
-}
-fn dryRasterGlassRay(pixel:vec2f)->mat2x3f{
-  let uv=vec2f(pixel.x/max(uniforms.viewport.x,1.0),1.0-pixel.y/max(uniforms.viewport.y,1.0));let ndc=uv*2.0-1.0;
-  let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0.0,1.0,0.0)));let up=normalize(cross(right,forward));
-  let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());return mat2x3f(ro,rd);
-}
-@vertex fn glassRasterVertex(@builtin(vertex_index) vertexIndex:u32,@builtin(instance_index) recordIndex:u32)->GlassRasterVertexOut{
-  let record=dryRasterGlassPane(recordIndex);let corner=dryRasterGlassCorner(vertexIndex);let padding=max(2.0*record.extentIorEpsilon.w,1e-5);let local=vec3f(corner*(record.extentIorEpsilon.xy+vec2f(padding)),0.0);let world=record.centerThickness.xyz+svoThinGlassRotate(record.orientation,local);
-  let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0.0,1.0,0.0)));let up=normalize(cross(right,forward));let relative=world-ro;let viewDepth=dot(relative,forward);let aspect=uniforms.viewport.x/max(uniforms.viewport.y,1.0);
-  return GlassRasterVertexOut(vec4f(dot(relative,right)/(aspect*cameraTanHalfFov()),dot(relative,up)/cameraTanHalfFov(),.5*viewDepth,viewDepth),recordIndex);
-}
-@fragment fn glassRasterFragment(input:GlassRasterVertexOut)->GlassRasterFragmentOut{
-  if(input.recordIndex>=glassRaster.paneCount){discard;}
-  let record=dryRasterGlassPane(input.recordIndex);
-  let coordinate=vec2i(input.position.xy);let opaqueDepth=textureLoad(dryRasterOpaqueGeometry,coordinate,0).w;let ray=dryRasterGlassRay(input.position.xy);let hit=svoThinGlassIntersect(record,ray[0],ray[1],0.0,opaqueDepth,1e-6,record.extentIorEpsilon.w);if(hit.valid==0u||!(hit.t_m<opaqueDepth)){discard;}
-  let forward=normalize(uniforms.cameraTarget.xyz-uniforms.cameraPosition.xyz);let viewDepth=hit.t_m*max(dot(ray[1],forward),1e-6);let hardwareDepth=clamp(DRY_RASTER_GLASS_NEAR_M/viewDepth,0.0,1.0);return GlassRasterFragmentOut(input.recordIndex+1u,hardwareDepth);
 }
 `;
 

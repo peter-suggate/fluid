@@ -44,7 +44,7 @@ export interface SceneIsoGlyph {
     readonly shape: "box" | "sphere";
     readonly top: "open" | "closed";
     /** Presentation of the physical simulation boundary. */
-    readonly vessel: "outline" | "glass" | "none";
+    readonly vessel: "outline" | "none";
   };
   /** Initial water as merged volumes; absent when the scene has no fluid. */
   readonly water?: readonly IsoBox[];
@@ -293,9 +293,9 @@ export function sceneIsoGlyph(scene: SceneDescription): SceneIsoGlyph {
     tank: {
       shape: c.shape ?? "box",
       top: c.top,
-      // Restated rather than imported from `lib/svo-scene-glass.ts`, which
-      // carries the renderer's pane compositor: the garden's water sits in the
-      // ground, so a pane around it would read as a bug on the card too.
+      // Restated rather than imported from `lib/core/vessel-outline.ts`: the
+      // garden's water sits in the ground, so a tank around it would read as a
+      // bug on the card too.
       vessel: scene.environment === "garden" ? "none" : c.vessel ?? "outline",
     },
     ...(water.length > 0 ? { water } : {}),
@@ -315,10 +315,8 @@ export function sceneIsoGlyphWaterline(glyph: SceneIsoGlyph): number | undefined
 export function sceneIsoGlyphLabel(glyph: SceneIsoGlyph): string {
   const waterline = sceneIsoGlyphWaterline(glyph);
   const vessel = glyph.tank.shape === "sphere"
-    ? glyph.tank.vessel === "glass" ? "Glass sphere"
-      : glyph.tank.vessel === "outline" ? "Outlined sphere" : "Spherical room"
-    : glyph.tank.vessel === "glass" ? "Glass tank"
-      : glyph.tank.vessel === "outline" ? "Outlined tank" : "Room";
+    ? glyph.tank.vessel === "outline" ? "Outlined sphere" : "Spherical room"
+    : glyph.tank.vessel === "outline" ? "Outlined tank" : "Room";
   const parts = [
     glyph.tank.shape === "sphere"
       ? `${vessel}, closed vessel`

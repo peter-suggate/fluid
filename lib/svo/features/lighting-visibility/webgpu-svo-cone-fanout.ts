@@ -33,16 +33,27 @@ export const SVO_CONE_FANOUT_CONTRACT = Object.freeze({
  * surface carries far fewer lattice points than prepass texels, and the
  * cones are wide and trilinear, so the function sampled is smooth there.
  *
- * Every point is a pure function of its 128-bit key. A key pass inserts the
- * four corners around each distinct pixel cell into an open-addressed table
- * rebuilt every frame. The worker marches the compacted entries through the
- * fan-out lanes, and the lighting pass interpolates its four corners. The
- * key is (octahedral normal, feature id, level, plane offset, cell i, cell j).
- * The plane offset is quantised to 1/16 cell, so voxel faces land exactly.
+ * Every point is a pure function of its 128-bit key, and its visibility is a
+ * pure function of the key and the scene, never of the camera. The store is
+ * therefore persistent and world-keyed: a key pass refreshes the four corners
+ * around each distinct pixel cell and appends only the misses, a grid-stride
+ * worker marches exactly those, and the lighting pass interpolates the four
+ * corners. The key is (octahedral normal, feature id, level, plane offset,
+ * cell i, cell j); the plane offset is quantised to 1/16 cell, so voxel faces
+ * land exactly.
+ *
+ * The store is a two-choice hash of eight-way buckets. A bucket is sixteen
+ * words: eight tags, one 32-byte line the lighting lookup reads as two vec4u,
+ * then eight use words (frame << 8 | fresh << 7 | tag bits) the key pass
+ * claims by compare-exchange. A record is the key, then (packed rg32
+ * visibility, stamp, 0). The stamp folds the host's input generation with the
+ * container; zero means "not valid", so an invalid march and a stale record
+ * both read as absent and are marched again when next requested. The record
+ * array ends in one vec4u whose x is the stamp this frame's key pass requested
+ * under; the lighting lookup accepts only a record carrying exactly that stamp,
+ * so a record left from an earlier input generation is never interpolated.
  */
 export const SVO_LATTICE_VISIBILITY_CONTRACT = Object.freeze({
-  /** Linear-probe bound. The table holds twice the capacity, so misses stay short. */
-  maximumProbes: 64,
   maximumLevel: 7,
   /**
    * Smallest projected half-cell spacing, in full-resolution pixels. The
@@ -53,49 +64,71 @@ export const SVO_LATTICE_VISIBILITY_CONTRACT = Object.freeze({
   planeSubdivisions: 16,
   /** Floor on |n·rd| before the area-preserving square root: grazing faces coarsen. */
   grazingCosineFloor: 1 / 64,
-  /** Control words: count, overflow, exhausted, then two indirect argument triples. */
-  headerWords: 16,
-  countWord: 0,
+  bucketWays: 8,
+  /** Words per bucket: eight tags, then eight use words. */
+  bucketWords: 16,
+  /**
+   * Store slots per reduced prepass texel. One frame's distinct keys are
+   * bounded by the texel count, so 2.5x leaves room for the keys a moving
+   * camera is about to revisit without any bucket pair filling with current keys.
+   */
+  slotsPerTexel: 2.5,
+  /** Scan-claim rounds a contended request may take before it counts as overflow. */
+  claimAttempts: 16,
+  /**
+   * Control words: misses this frame (cleared per frame), sticky overflow,
+   * the GPU frame counter the worker advances, and the host input generation;
+   * then the miss list, one word per slot.
+   */
+  headerWords: 4,
+  missCountWord: 0,
   overflowWord: 1,
-  exhaustedWord: 2,
-  workerArgumentsWord: 4,
-  reduceArgumentsWord: 8,
-  /** Two vec4u per slot: the key, then (compact index + 1, packed rg32 visibility, 0). */
+  frameWord: 2,
+  generationWord: 3,
+  /** A miss is slot | lanes << 23: bit 0 the AO group, bit 1 + l light l's samples. */
+  laneShift: 23,
+  allLanes: 0x1ff,
+  maximumSlots: 1 << 23,
+  /** Two vec4u per slot: the key, then (packed rg32 visibility, stamp, 0). */
   recordBytes: 32,
+  /** One trailing vec4u after the records: (current stamp, 0, 0, 0), written by the key pass. */
+  recordHeaderBytes: 16,
+  /** Tag, use, record and miss-list words. */
+  slotBytes: 4 + 4 + 32 + 4,
   keyWorkgroupSize: Object.freeze([16, 16, 1] as const),
-  entryWorkgroupSize: 64,
-  maximumWorkgroupsPerDimension: 65535,
+  marchWorkgroupSize: 64,
+  /** Fixed direct grid: the worker strides over however many misses the key pass appended. */
+  marchWorkgroups: 1024,
   /** Main-module group 1, used by the key entry alone. */
-  keyBindings: Object.freeze({ tags: 14, records: 15, control: 16 } as const),
+  keyBindings: Object.freeze({ buckets: 14, records: 15, control: 16 } as const),
   /** Split lighting group, read by the deferred lighting fragment. */
-  lookupBindings: Object.freeze({ tags: 20, records: 21 } as const),
+  lookupBindings: Object.freeze({ buckets: 20, records: 21 } as const),
 } as const);
 
 export interface SvoLatticeVisibilitySizing {
-  /** Power-of-two table slots; tags are one u32 each, records 32 bytes each. */
+  /** Eight-way buckets; any count, addressed by modulo. */
+  buckets: number;
   slots: number;
-  /** Compact entries the worker can evaluate; never more than the prepass texels. */
-  capacity: number;
+  /** Buckets, records and control together. */
+  bytes: number;
 }
 
 /**
- * The table keeps at most half its slots occupied, so probes stay short. The
- * compact capacity is the reduced prepass texel count, which the shared
- * fan-out temporary array addresses one texel per entry. Where the device's
- * storage-binding ceiling cannot hold twice that, the capacity gives way,
- * not the occupancy: further keys are counted as overflow and their pixels
- * take the exact-edge tier.
+ * Sized from the reduced prepass texel count, which bounds one frame's
+ * distinct keys. The record array is the largest binding; where the device's
+ * ceiling cannot hold the full multiple the store shrinks, but never below
+ * one frame's bound: that configuration throws rather than overflowing live.
  */
 export function svoLatticeVisibilitySizing(prepassTexels: number, bindingLimitBytes: number): SvoLatticeVisibilitySizing {
+  const contract = SVO_LATTICE_VISIBILITY_CONTRACT;
   const texels = boundedInteger(prepassTexels, 0x4000_0000, "Lattice visibility prepass texels");
   if (texels === 0) throw new RangeError("Lattice visibility needs a non-empty prepass");
-  let slots = 1;
-  while (slots < 2 * texels) slots *= 2;
-  while (slots > 2 && slots * SVO_LATTICE_VISIBILITY_CONTRACT.recordBytes > bindingLimitBytes) slots /= 2;
-  if (slots * SVO_LATTICE_VISIBILITY_CONTRACT.recordBytes > bindingLimitBytes) {
-    throw new RangeError("Lattice visibility table exceeds the storage-binding limit");
-  }
-  return { slots, capacity: Math.min(texels, slots / 2) };
+  const buckets = Math.min(Math.ceil(contract.slotsPerTexel * texels / contract.bucketWays),
+    Math.floor((bindingLimitBytes - contract.recordHeaderBytes) / (contract.bucketWays * contract.recordBytes)));
+  const slots = buckets * contract.bucketWays;
+  if (slots < texels) throw new RangeError("Lattice visibility store cannot hold one frame's keys within the storage-binding limit");
+  if (slots > contract.maximumSlots) throw new RangeError("Lattice visibility store exceeds the miss-list slot field");
+  return { buckets, slots, bytes: slots * contract.slotBytes + 4 * contract.headerWords + contract.recordHeaderBytes };
 }
 
 /**
@@ -140,11 +173,19 @@ fn svoLatticeReceiver(key:vec4u,origin:vec3f,cellSize:vec3f)->SvoLatticeReceiver
   return SvoLatticeReceiver(origin+relative,normal,(key.x>>16u)&15u);
 }
 fn svoLatticeMix(value:u32)->u32{var x=value;x^=x>>16u;x*=0x7feb352du;x^=x>>15u;x*=0x846ca68bu;x^=x>>16u;return x;}
-// The tag is never zero, the cleared-slot value. The slot uses a second mix so
-// its low bits are not the tag's own.
+// The tag is never zero, the empty-slot value. Each bucket choice uses its own
+// mix so neither shares the tag's bits; a coinciding second choice moves on.
 fn svoLatticeHash(key:vec4u)->u32{return svoLatticeMix(key.x^svoLatticeMix(key.y^svoLatticeMix(key.z^svoLatticeMix(key.w))));}
 fn svoLatticeTag(hash:u32)->u32{return hash|1u;}
-fn svoLatticeSlot(hash:u32,mask:u32)->u32{return svoLatticeMix(hash^0x68e31da4u)&mask;}
+fn svoLatticeBucket(hash:u32,buckets:u32,choice:u32)->u32{
+  let first=svoLatticeMix(hash^0x68e31da4u)%buckets;if(choice==0u){return first;}
+  let second=svoLatticeMix(hash^0x2c1b3c6du)%buckets;return select(second,(first+1u)%buckets,second==first);
+}
+// Never zero, the not-valid value. The container enters here rather than in
+// the host generation because the AO radius reads it from the frame uniforms.
+fn svoLatticeStamp(generation:u32,container:vec3f)->u32{
+  let bits=bitcast<vec3u>(container);return svoLatticeMix(generation^svoLatticeMix(bits.x^svoLatticeMix(bits.y^svoLatticeMix(bits.z))))|1u;
+}
 `;
 
 export const SVO_CONE_FANOUT_SENTINELS = Object.freeze({
@@ -240,55 +281,79 @@ export function svoConeFanoutReducerBindGroupLayoutEntries(): GPUBindGroupLayout
   ];
 }
 
-/** Key-pass table: claimed tags, key/payload records, then the control header and compact list. */
+/** Key-pass store: buckets, key/visibility records, then the control header and miss list. */
 export function svoLatticeKeyBindGroupLayoutEntries(): GPUBindGroupLayoutEntry[] {
-  const { tags, records, control } = SVO_LATTICE_VISIBILITY_CONTRACT.keyBindings;
-  return [tags, records, control].map((binding) => ({
+  const { buckets, records, control } = SVO_LATTICE_VISIBILITY_CONTRACT.keyBindings;
+  return [buckets, records, control].map((binding) => ({
     binding, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" as const },
   }));
 }
 
-/** Read-only table view appended to the split lighting group. */
+/** Read-only store view appended to the split lighting group. */
 export function svoLatticeLookupBindGroupLayoutEntries(): GPUBindGroupLayoutEntry[] {
-  const { tags, records } = SVO_LATTICE_VISIBILITY_CONTRACT.lookupBindings;
-  return [tags, records].map((binding) => ({
+  const { buckets, records } = SVO_LATTICE_VISIBILITY_CONTRACT.lookupBindings;
+  return [buckets, records].map((binding) => ({
     binding, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage" as const },
   }));
 }
 
 /**
- * The lattice worker shares the fan-out temporary array as [layer][entry];
- * the compact capacity is the prepass texel count, so every entry has a texel.
- * Control is read-only here because the same buffer carries this dispatch's
- * indirect arguments.
+ * The lattice worker reads its misses from control and writes each record's
+ * visibility word in place. It advances the frame counter in control too, so
+ * no dispatch reads its arguments from a buffer the key pass wrote.
  */
 export function svoLatticeWorkerBindGroupLayoutEntries(): GPUBindGroupLayoutEntry[] {
   return [
     { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
-    {
-      binding: 2,
-      visibility: GPUShaderStage.COMPUTE,
-      storageTexture: { access: "write-only", format: SVO_CONE_FANOUT_CONTRACT.temporaryFormat, viewDimension: "2d-array" },
-    },
-    { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-    { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-  ];
-}
-
-export function svoLatticeReducerBindGroupLayoutEntries(): GPUBindGroupLayoutEntry[] {
-  return [
-    { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
-    { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "2d-array" } },
-    { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-    { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-  ];
-}
-
-export function svoLatticeArgumentsBindGroupLayoutEntries(): GPUBindGroupLayoutEntry[] {
-  return [
-    { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+    { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
     { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
   ];
+}
+
+/** Packing shared by the screen reducer and the lattice worker. */
+const svoConeFanoutPackWGSL = /* wgsl */ `
+const FANOUT_INVALID_PACKED:vec2u=vec2u(0xffffffffu,0xfffffffeu);
+fn fanoutQuantize7(value:f32)->u32{return u32(round(clamp(value,0.0,1.0)*127.0));}
+fn fanoutPack(data0:vec4f,data1:vec4f,data2:vec4f)->vec2u{
+  let light3=fanoutQuantize7(data1.x);
+  let word0=u32(round(clamp(data0.x,0.0,1.0)*255.0))|(fanoutQuantize7(data0.y)<<8u)|(fanoutQuantize7(data0.z)<<15u)
+    |(fanoutQuantize7(data0.w)<<22u)|((light3&7u)<<29u);
+  let word1=(light3>>3u)|(fanoutQuantize7(data1.y)<<4u)|(fanoutQuantize7(data1.z)<<11u)
+    |(fanoutQuantize7(data1.w)<<18u)|(fanoutQuantize7(data2.x)<<25u);
+  return vec2u(word0,word1);
+}
+`;
+
+/**
+ * One reduction body for the screen and lattice sources: the geometry-miss
+ * key, the invalid key, or the packed visibility, in the original summation
+ * order. Only where a lane is read from differs.
+ */
+function svoConeFanoutReduceWGSL(signature: string, load: (layer: string) => string): string {
+  // The body's locals must not shadow a name the load expression uses: the
+  // lattice load reads its entry's lane base, so a local called base would
+  // silently index another entry's lanes.
+  return /* wgsl */ `
+fn ${signature}->vec2u{
+  if(${load("0u")}==FANOUT_GEOMETRY_MISS){return vec2u(0xffffffffu);}
+  var visibility0=vec4f(1.0);var visibility1=vec4f(1.0);var visibility2=vec4f(1.0);
+  if(${load("0u")}!=FANOUT_INACTIVE){
+    var ao=0.0;var aoSampleCount=0u;
+    for(var sample=0u;sample<FANOUT_AO_LAYERS;sample+=1u){
+      let value=${load("sample")};if(value==FANOUT_INACTIVE){break;}if(value==FANOUT_INVALID){return FANOUT_INVALID_PACKED;}ao+=value;aoSampleCount+=1u;
+    }
+    if(aoSampleCount>0u){visibility0.x=clamp(ao/f32(aoSampleCount),0.0,1.0);}
+  }
+  for(var light=0u;light<${SVO_CONE_FANOUT_CONTRACT.maximumLights}u;light+=1u){
+    if(light>=fanout.activity.x){break;}let lightLayer=FANOUT_LIGHT_BASE+light;var value=${load("lightLayer")};
+    if(value==FANOUT_INACTIVE){continue;}if(value==FANOUT_INVALID){return FANOUT_INVALID_PACKED;}var sampleCount=1u;
+    if(fanout.activity.y!=0u){let second=${load(`${SVO_CONE_FANOUT_CONTRACT.secondaryLightLayerBase}u+light`)};if(second==FANOUT_INVALID){return FANOUT_INVALID_PACKED;}if(second!=FANOUT_INACTIVE){value+=second;sampleCount=2u;}}
+    let packed=clamp(value/f32(sampleCount),0.0,1.0);
+    if(light<3u){visibility0[1u+light]=packed;}else if(light<7u){visibility1[light-3u]=packed;}else{visibility2.x=packed;}
+  }
+  return fanoutPack(visibility0,visibility1,visibility2);
+}
+`;
 }
 
 export interface SvoConeFanoutWorkerShaderOptions {
@@ -307,7 +372,7 @@ export interface SvoConeFanoutWorkerShaderOptions {
 
 /**
  * Dedicated worker source. The scene layout mirrors existing buffers but
- * deliberately omits traversal, material, glass, rigid-body, and GI resources.
+ * deliberately omits traversal, material, rigid-body, and GI resources.
  * Each invocation calls dryConeVisibility at most once.
  */
 export function createSvoConeFanoutWorkerWGSL(options: SvoConeFanoutWorkerShaderOptions): string {
@@ -359,7 +424,9 @@ struct DryParams {
   tuningRays0:vec4f,
   tuningRays1:vec4f,
   nodeMipDirect:vec4u,
-  nodeMipReserved:array<vec4u,3>,
+  fluidClipMinimum:vec4u,
+  fluidClipMaximum:vec4u,
+  nodeMipReserved:vec4u,
   tetrahedralRadiance:vec4u,
   nodeMipExtent:vec4f,
   giLighting:vec4f,
@@ -537,18 +604,70 @@ fn svoConeFanoutWorker(@builtin(global_invocation_id) gid:vec3u){
   fanoutStore(coordinate,i32(gid.z),fanoutConeSample(position,receiver.yzw,u32(round(geometry.w))&15u,gid.z));
 }
 ${svoLatticeKeyWGSL}
-@group(1) @binding(4) var<storage,read> latticeRecords:array<vec4u>;
-@group(1) @binding(5) var<storage,read> latticeControl:array<u32>;
-// One lane per (compact entry, layer). The sample is rebuilt from the key, so
-// it does not depend on which pixel inserted the entry.
-@compute @workgroup_size(${SVO_LATTICE_VISIBILITY_CONTRACT.entryWorkgroupSize})
-fn svoLatticeConeWorker(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
-  let entry=gid.x+gid.y*groups.x*${SVO_LATTICE_VISIBILITY_CONTRACT.entryWorkgroupSize}u;
-  let entries=min(latticeControl[${SVO_LATTICE_VISIBILITY_CONTRACT.countWord}],arrayLength(&latticeControl)-${SVO_LATTICE_VISIBILITY_CONTRACT.headerWords}u);
-  if(entry>=entries||gid.z>=FANOUT_LAYER_COUNT){return;}
-  let receiver=svoLatticeReceiver(latticeRecords[2u*latticeControl[${SVO_LATTICE_VISIBILITY_CONTRACT.headerWords}u+entry]],dry.mapping.worldOrigin,dry.mapping.cellSize);
-  let texel=vec2i(vec2u(entry%fanout.dimensions.x,entry/fanout.dimensions.x));
-  fanoutStore(texel,i32(gid.z),fanoutConeSample(receiver.position,receiver.normal,receiver.featureId,gid.z));
+${svoConeFanoutPackWGSL}
+@group(1) @binding(4) var<storage,read_write> latticeRecords:array<vec4u>;
+@group(1) @binding(5) var<storage,read_write> latticeControl:array<u32>;
+const LATTICE_HEADER_WORDS:u32=${SVO_LATTICE_VISIBILITY_CONTRACT.headerWords}u;
+const LATTICE_LANE_SHIFT:u32=${SVO_LATTICE_VISIBILITY_CONTRACT.laneShift}u;
+const LATTICE_SLOT_MASK:u32=${(1 << SVO_LATTICE_VISIBILITY_CONTRACT.laneShift) - 1}u;
+const FANOUT_SECONDARY_BASE:u32=${SVO_CONE_FANOUT_CONTRACT.secondaryLightLayerBase}u;
+var<workgroup> latticeLanes:array<f32,${SVO_LATTICE_VISIBILITY_CONTRACT.marchWorkgroupSize}>;
+var<workgroup> latticeMissCount:u32;
+// Lanes are the AO samples, the primary light samples, then the secondary
+// ones when the frame has them: the fan-out layers minus the inactive tail.
+fn latticeLaneLayer(lane:u32)->u32{let primary=FANOUT_AO_LAYERS+fanout.activity.x;return select(FANOUT_SECONDARY_BASE+lane-primary,lane,lane<primary);}
+fn latticeLoad(base:u32,layer:u32)->f32{return latticeLanes[base+select(FANOUT_AO_LAYERS+fanout.activity.x+layer-FANOUT_SECONDARY_BASE,layer,layer<FANOUT_SECONDARY_BASE)];}
+${svoConeFanoutReduceWGSL("latticeReduce(base:u32)", (layer) => `latticeLoad(base,${layer})`)}
+// Bit group 0 is AO, bits 0..7 of the packed pair; group 1 + l is light l, bits 8+7l..14+7l.
+fn latticeLaneGroup(layer:u32)->u32{return select(1u+layer-select(FANOUT_LIGHT_BASE,FANOUT_SECONDARY_BASE,layer>=FANOUT_SECONDARY_BASE),0u,layer<FANOUT_AO_LAYERS);}
+fn latticeWordBits(first:i32,end:i32)->u32{
+  let low=u32(clamp(first,0,32));let high=u32(clamp(end,0,32));if(high<=low){return 0u;}
+  return select((1u<<high)-1u,0xffffffffu,high>=32u)&~((1u<<low)-1u);
+}
+fn latticeGroupBits(group:u32)->vec2u{
+  let first=select(8+7*(i32(group)-1),0,group==0u);let end=first+select(7,8,group==0u);
+  return vec2u(latticeWordBits(first,end),latticeWordBits(first-32,end-32));
+}
+// Every miss the key pass appended is marched this frame, over a fixed direct
+// grid that strides through the list. A workgroup takes floor(64 / lanes)
+// misses at a time, one thread per (miss, lane), and the first lane of each
+// reduces. The sample is rebuilt from the key, so it does not depend on which
+// pixel requested it. Groups outside the miss's mask keep the record's bits.
+// An invalid march stores stamp zero: the lookup reads it as absent and the
+// next frame's request marches it again.
+@compute @workgroup_size(${SVO_LATTICE_VISIBILITY_CONTRACT.marchWorkgroupSize})
+fn svoLatticeConeMarch(@builtin(local_invocation_index) thread:u32,@builtin(workgroup_id) groupId:vec3u){
+  if(thread==0u){
+    latticeMissCount=min(latticeControl[${SVO_LATTICE_VISIBILITY_CONTRACT.missCountWord}],arrayLength(&latticeControl)-LATTICE_HEADER_WORDS);
+    // The key pass is done with this frame's number. The key pass adds one,
+    // so zero stays the empty-slot frame and 24 bits hold every value.
+    if(groupId.x==0u){latticeControl[${SVO_LATTICE_VISIBILITY_CONTRACT.frameWord}]=(latticeControl[${SVO_LATTICE_VISIBILITY_CONTRACT.frameWord}]+1u)%0xfffffeu;}
+  }
+  let misses=workgroupUniformLoad(&latticeMissCount);
+  let lanes=FANOUT_AO_LAYERS+fanout.activity.x*select(1u,2u,fanout.activity.y!=0u);
+  let perBatch=${SVO_LATTICE_VISIBILITY_CONTRACT.marchWorkgroupSize}u/lanes;let entry=thread/lanes;let lane=thread%lanes;
+  let stamp=svoLatticeStamp(latticeControl[${SVO_LATTICE_VISIBILITY_CONTRACT.generationWord}],uniforms.container.xyz);
+  let batches=(misses+perBatch-1u)/perBatch;
+  for(var batch=groupId.x;batch<batches;batch+=${SVO_LATTICE_VISIBILITY_CONTRACT.marchWorkgroups}u){
+    let index=batch*perBatch+entry;let pending=entry<perBatch&&index<misses;var miss=0u;
+    if(pending){
+      miss=latticeControl[LATTICE_HEADER_WORDS+index];let layer=latticeLaneLayer(lane);var value=FANOUT_INACTIVE;
+      if(((miss>>LATTICE_LANE_SHIFT)&(1u<<latticeLaneGroup(layer)))!=0u){
+        let receiver=svoLatticeReceiver(latticeRecords[2u*(miss&LATTICE_SLOT_MASK)],dry.mapping.worldOrigin,dry.mapping.cellSize);
+        value=fanoutConeSample(receiver.position,receiver.normal,receiver.featureId,layer);
+      }
+      latticeLanes[thread]=value;
+    }
+    workgroupBarrier();
+    if(pending&&lane==0u){
+      let slot=miss&LATTICE_SLOT_MASK;var packed=latticeReduce(entry*lanes);let valid=!all(packed==FANOUT_INVALID_PACKED);
+      var keep=vec2u(0u);
+      for(var bits=0u;bits<=${SVO_CONE_FANOUT_CONTRACT.maximumLights}u;bits+=1u){if(((miss>>LATTICE_LANE_SHIFT)&(1u<<bits))==0u){keep|=latticeGroupBits(bits);}}
+      if(valid){packed=(packed&~keep)|(latticeRecords[2u*slot+1u].xy&keep);}
+      latticeRecords[2u*slot+1u]=vec4u(packed,select(0u,stamp,valid),0u);
+    }
+    workgroupBarrier();
+  }
 }
 `;
 }
@@ -558,7 +677,6 @@ export const svoConeFanoutReducerWGSL = /* wgsl */ `
 const FANOUT_GEOMETRY_MISS:f32=${SVO_CONE_FANOUT_SENTINELS.geometryMiss}.0;
 const FANOUT_INACTIVE:f32=${SVO_CONE_FANOUT_SENTINELS.inactive}.0;
 const FANOUT_INVALID:f32=${SVO_CONE_FANOUT_SENTINELS.invalid}.0;
-const FANOUT_INVALID_PACKED:vec2u=vec2u(0xffffffffu,0xfffffffeu);
 const FANOUT_AO_LAYERS:u32=${SVO_CONE_FANOUT_CONTRACT.maximumAoSamples}u;
 const FANOUT_LIGHT_BASE:u32=${SVO_CONE_FANOUT_CONTRACT.lightLayerBase}u;
 struct FanoutFrame {
@@ -569,64 +687,11 @@ struct FanoutFrame {
 @group(0) @binding(1) var fanoutTemporary:texture_2d_array<f32>;
 @group(0) @binding(2) var fanoutVisibility:texture_storage_2d<rg32uint,write>;
 fn fanoutLoad(coordinate:vec2i,layer:u32)->f32{return textureLoad(fanoutTemporary,coordinate,i32(layer),0).x;}
-fn fanoutQuantize7(value:f32)->u32{return u32(round(clamp(value,0.0,1.0)*127.0));}
-fn fanoutPack(data0:vec4f,data1:vec4f,data2:vec4f)->vec2u{
-  let light3=fanoutQuantize7(data1.x);
-  let word0=u32(round(clamp(data0.x,0.0,1.0)*255.0))|(fanoutQuantize7(data0.y)<<8u)|(fanoutQuantize7(data0.z)<<15u)
-    |(fanoutQuantize7(data0.w)<<22u)|((light3&7u)<<29u);
-  let word1=(light3>>3u)|(fanoutQuantize7(data1.y)<<4u)|(fanoutQuantize7(data1.z)<<11u)
-    |(fanoutQuantize7(data1.w)<<18u)|(fanoutQuantize7(data2.x)<<25u);
-  return vec2u(word0,word1);
-}
-// Shared by the screen and lattice reductions: the geometry-miss key, the
-// invalid key, or the packed visibility, in the original summation order.
-fn fanoutReduce(coordinate:vec2i)->vec2u{
-  if(fanoutLoad(coordinate,0u)==FANOUT_GEOMETRY_MISS){return vec2u(0xffffffffu);}
-  var visibility0=vec4f(1.0);var visibility1=vec4f(1.0);var visibility2=vec4f(1.0);
-  if(fanoutLoad(coordinate,0u)!=FANOUT_INACTIVE){
-    var ao=0.0;var aoSampleCount=0u;
-    for(var sample=0u;sample<FANOUT_AO_LAYERS;sample+=1u){
-      let value=fanoutLoad(coordinate,sample);if(value==FANOUT_INACTIVE){break;}if(value==FANOUT_INVALID){return FANOUT_INVALID_PACKED;}ao+=value;aoSampleCount+=1u;
-    }
-    if(aoSampleCount>0u){visibility0.x=clamp(ao/f32(aoSampleCount),0.0,1.0);}
-  }
-  for(var light=0u;light<${SVO_CONE_FANOUT_CONTRACT.maximumLights}u;light+=1u){
-    if(light>=fanout.activity.x){break;}let base=FANOUT_LIGHT_BASE+light;var value=fanoutLoad(coordinate,base);
-    if(value==FANOUT_INACTIVE){continue;}if(value==FANOUT_INVALID){return FANOUT_INVALID_PACKED;}var sampleCount=1u;
-    if(fanout.activity.y!=0u){let second=fanoutLoad(coordinate,${SVO_CONE_FANOUT_CONTRACT.secondaryLightLayerBase}u+light);if(second==FANOUT_INVALID){return FANOUT_INVALID_PACKED;}if(second!=FANOUT_INACTIVE){value+=second;sampleCount=2u;}}
-    let packed=clamp(value/f32(sampleCount),0.0,1.0);
-    if(light<3u){visibility0[1u+light]=packed;}else if(light<7u){visibility1[light-3u]=packed;}else{visibility2.x=packed;}
-  }
-  return fanoutPack(visibility0,visibility1,visibility2);
-}
+${svoConeFanoutPackWGSL}
+${svoConeFanoutReduceWGSL("fanoutReduce(coordinate:vec2i)", (layer) => `fanoutLoad(coordinate,${layer})`)}
 @compute @workgroup_size(${SVO_CONE_FANOUT_CONTRACT.workgroupSize.join(",")})
 fn svoConeFanoutReduce(@builtin(global_invocation_id) gid:vec3u){
   if(any(gid.xy>=fanout.dimensions)){return;}let coordinate=vec2i(gid.xy);
   textureStore(fanoutVisibility,coordinate,vec4u(fanoutReduce(coordinate),0u,0u));
-}
-@group(0) @binding(3) var<storage,read_write> latticeRecords:array<vec4u>;
-@group(0) @binding(4) var<storage,read> latticeControl:array<u32>;
-@group(0) @binding(5) var<storage,read_write> latticeArguments:array<u32>;
-// The packed word lands beside the key; a nonzero compact index marks a
-// computed record, which is what the lighting lookup requires.
-@compute @workgroup_size(${SVO_LATTICE_VISIBILITY_CONTRACT.entryWorkgroupSize})
-fn svoLatticeConeReduce(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
-  let entry=gid.x+gid.y*groups.x*${SVO_LATTICE_VISIBILITY_CONTRACT.entryWorkgroupSize}u;
-  let entries=min(latticeControl[${SVO_LATTICE_VISIBILITY_CONTRACT.countWord}],arrayLength(&latticeControl)-${SVO_LATTICE_VISIBILITY_CONTRACT.headerWords}u);
-  if(entry>=entries){return;}
-  let packed=fanoutReduce(vec2i(vec2u(entry%fanout.dimensions.x,entry/fanout.dimensions.x)));
-  latticeRecords[2u*latticeControl[${SVO_LATTICE_VISIBILITY_CONTRACT.headerWords}u+entry]+1u]=vec4u(entry+1u,packed,0u);
-}
-// Indirect arguments for the worker (entries x active layers) and the reduce.
-// The compact capacity is the control buffer's tail; overflowed inserts were
-// counted by the key pass and only bound the entry count here.
-@compute @workgroup_size(1)
-fn svoLatticeConeArguments(){
-  let entries=min(latticeArguments[${SVO_LATTICE_VISIBILITY_CONTRACT.countWord}],arrayLength(&latticeArguments)-${SVO_LATTICE_VISIBILITY_CONTRACT.headerWords}u);
-  let groups=(entries+${SVO_LATTICE_VISIBILITY_CONTRACT.entryWorkgroupSize - 1}u)/${SVO_LATTICE_VISIBILITY_CONTRACT.entryWorkgroupSize}u;
-  let x=min(groups,${SVO_LATTICE_VISIBILITY_CONTRACT.maximumWorkgroupsPerDimension}u);let y=select(0u,(groups+x-1u)/max(x,1u),x>0u);
-  let layers=select(FANOUT_LIGHT_BASE+fanout.activity.x,${SVO_CONE_FANOUT_CONTRACT.layerCount}u,fanout.activity.y!=0u);
-  latticeArguments[${SVO_LATTICE_VISIBILITY_CONTRACT.workerArgumentsWord}]=x;latticeArguments[${SVO_LATTICE_VISIBILITY_CONTRACT.workerArgumentsWord + 1}]=y;latticeArguments[${SVO_LATTICE_VISIBILITY_CONTRACT.workerArgumentsWord + 2}]=layers;
-  latticeArguments[${SVO_LATTICE_VISIBILITY_CONTRACT.reduceArgumentsWord}]=x;latticeArguments[${SVO_LATTICE_VISIBILITY_CONTRACT.reduceArgumentsWord + 1}]=y;latticeArguments[${SVO_LATTICE_VISIBILITY_CONTRACT.reduceArgumentsWord + 2}]=1u;
 }
 `;

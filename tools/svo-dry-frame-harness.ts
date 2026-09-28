@@ -13,8 +13,8 @@ import type { SparseVoxelDrySceneData } from "../lib/svo/contracts/scene-publica
  *     silently withdraws the opacity pyramid and renders ~15x slow.
  *   - The 416-byte view-uniform packing.
  *   - The CPU rigid-body packing.
- *   - The `SparseVoxelDrySceneData` assembly: primitives, glass, thick glass,
- *     the material table, the terrain heightfield and the lighting mirrors.
+ *   - The `SparseVoxelDrySceneData` assembly: primitives, the material table,
+ *     the terrain heightfield and the lighting mirrors.
  *
  * A second consumer that copied those would not be testing production, it would
  * be testing its copy of production. So they live here, and both the benchmark
@@ -52,9 +52,7 @@ import {
   svoMaterialFunctionIdForEnvironmentProxy,
 } from "../lib/svo/contracts/svo-material-abi";
 import { svoPrimitiveCandidateBounds } from "../lib/svo/features/scene-publication/svo-primitive-candidates";
-import { buildSvoSceneGlass } from "../lib/svo/features/materials/svo-scene-glass";
 import { buildSvoScenePrimitives, type SvoScenePrimitiveBuild } from "../lib/svo/features/scene-publication/svo-scene-primitives";
-import { buildSvoSceneThickGlass } from "../lib/svo/features/materials/svo-scene-thick-glass";
 import { sceneSvoGroundPlane, sceneTerrainSurfaceModel } from "../lib/svo/features/materials/svo-terrain-material";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { SVO_CAMERA_CHANGING_FRAME } from "../lib/core/webgpu-renderer";
@@ -247,25 +245,18 @@ export function packSvoDryRigidBodies(scene: SceneDescription): { data: Float32A
 export interface SvoDrySceneAssembly {
   readonly drySceneData: SparseVoxelDrySceneData;
   readonly scenePrimitives: SvoScenePrimitiveBuild;
-  readonly sceneGlass: ReturnType<typeof buildSvoSceneGlass>;
-  readonly sceneThickGlass: ReturnType<typeof buildSvoSceneThickGlass>;
   readonly terrainSurface: ReturnType<typeof sceneTerrainSurfaceModel>;
 }
 
 /**
  * Exact mirror of the FluidLabRenderer solver-attachment dry-scene data
- * assembly. `source` must already carry a published `structural` domain; the
- * glass builder needs its cell size to decide pane thickness.
+ * assembly. `source` must already carry a published `structural` domain.
  */
 export function buildSvoDrySceneAssembly(
   scene: SceneDescription,
   source: SparseVoxelSceneRenderSource,
 ): SvoDrySceneAssembly {
   const scenePrimitives = buildSvoScenePrimitives(scene);
-  const sceneGlass = buildSvoSceneGlass(scene, { cellSize_m: source.structural!.domain.cellSize_m });
-  const sceneThickGlass = buildSvoSceneThickGlass(scene);
-  const thickReplacedPaneKey = sceneThickGlass.metadata.find(({ replacesThinPaneKey }) => Boolean(replacesThinPaneKey))?.replacesThinPaneKey;
-  const thickReplacedPaneId = sceneGlass.metadata.find(({ key }) => key === thickReplacedPaneKey)?.paneId;
   const terrainSurface = sceneTerrainSurfaceModel(scene);
   const lightingMirrors = buildSparseVoxelDrySceneLightingMirrors(scene, 1);
   const drySceneData: SparseVoxelDrySceneData = {
@@ -296,12 +287,6 @@ export function buildSvoDrySceneAssembly(
     // And the same door for the tape kind, which fails identically without it:
     // every `field-program` record would name a zeroed block and draw nothing.
     fieldProgramBlocks: scenePrimitives.fieldProgramBlocks,
-    glassRecords: sceneGlass.packedRecords,
-    glassCacheKey: sceneGlass.cacheKey,
-    thickGlassRecords: sceneThickGlass.packedRecords,
-    thickGlassRevision: sceneThickGlass.revision,
-    thickGlassCacheKey: sceneThickGlass.cacheKey,
-    thickGlassReplacedThinPaneId: thickReplacedPaneId,
     ...lightingMirrors,
     // Presentation policy is scene data too. Omitting this made every headless
     // fidelity frame silently exercise the default baked analytic normals even
@@ -313,7 +298,7 @@ export function buildSvoDrySceneAssembly(
     groundPlane: sceneSvoGroundPlane(scene),
   };
   drySceneData.opaqueSurfaceOnly = publishOpaqueSurfaceCapability(scene, drySceneData.materialRecords, drySceneData.primitiveRecords);
-  return { drySceneData, scenePrimitives, sceneGlass, sceneThickGlass, terrainSurface };
+  return { drySceneData, scenePrimitives, terrainSurface };
 }
 
 // ---------------------------------------------------------------------------

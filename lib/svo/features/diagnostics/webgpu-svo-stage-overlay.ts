@@ -24,8 +24,7 @@ import { unifiedDisplayTransferShaderLibrary } from "../../../core/webgpu-lighti
  * from traced visibility and therefore describes that diagnostic arm, including
  * its write overhead, rather than claiming to be a free view of shipping work.
  *
- * Planes that a given configuration never allocates (no glass discovery, no
- * rigid bodies, cone lighting at full rate) bind 1x1 fallbacks of the matching
+ * Planes that a given configuration never allocates (no rigid bodies, cone lighting at full rate) bind 1x1 fallbacks of the matching
  * format, so the bind group is complete whatever the frame contains and the
  * views that need a missing plane simply report it as absent.
  */
@@ -40,7 +39,6 @@ export const SVO_RENDER_STAGE_OVERLAY_CONTRACT = Object.freeze({
     hardwareDepth: 3,
     splitGeometry: 4,
     splitOpaqueIdentity: 5,
-    splitGlassKey: 6,
     rigidPrimaryGeometry: 7,
     conePrepassVisibility: 8,
     conePrepassGeometry: 9,
@@ -55,7 +53,6 @@ export const SVO_RENDER_STAGE_OVERLAY_CONTRACT = Object.freeze({
     hardwareDepth: "depth32float" as GPUTextureFormat,
     splitGeometry: "rgba32float" as GPUTextureFormat,
     splitOpaqueIdentity: "rg32uint" as GPUTextureFormat,
-    splitGlassKey: "r32uint" as GPUTextureFormat,
     rigidPrimaryGeometry: "rg32uint" as GPUTextureFormat,
     conePrepassVisibility: "rg32uint" as GPUTextureFormat,
     conePrepassGeometry: "rgba16float" as GPUTextureFormat,
@@ -73,7 +70,6 @@ export interface SvoRenderStagePlanes {
   readonly hardwareDepth?: GPUTextureView;
   readonly splitGeometry?: GPUTextureView;
   readonly splitOpaqueIdentity?: GPUTextureView;
-  readonly splitGlassKey?: GPUTextureView;
   readonly rigidPrimaryGeometry?: GPUTextureView;
   readonly conePrepassVisibility?: GPUTextureView;
   readonly conePrepassGeometry?: GPUTextureView;
@@ -99,7 +95,6 @@ export function svoRenderStageOverlayBindGroupLayoutEntries(): GPUBindGroupLayou
     { binding: bindings.hardwareDepth, visibility, texture: { sampleType: "depth" } },
     { binding: bindings.splitGeometry, visibility, texture: float },
     { binding: bindings.splitOpaqueIdentity, visibility, texture: uint },
-    { binding: bindings.splitGlassKey, visibility, texture: uint },
     { binding: bindings.rigidPrimaryGeometry, visibility, texture: uint },
     { binding: bindings.conePrepassVisibility, visibility, texture: uint },
     { binding: bindings.conePrepassGeometry, visibility, texture: float },
@@ -156,7 +151,6 @@ struct SvoStageParams{
 @group(0) @binding(${bindings.hardwareDepth}) var stageHardwareDepth:texture_depth_2d;
 @group(0) @binding(${bindings.splitGeometry}) var stageSplitGeometry:texture_2d<f32>;
 @group(0) @binding(${bindings.splitOpaqueIdentity}) var stageSplitIdentity:texture_2d<u32>;
-@group(0) @binding(${bindings.splitGlassKey}) var stageGlassKey:texture_2d<u32>;
 @group(0) @binding(${bindings.rigidPrimaryGeometry}) var stageRigidGeometry:texture_2d<u32>;
 @group(0) @binding(${bindings.conePrepassVisibility}) var stageConeVisibility:texture_2d<u32>;
 @group(0) @binding(${bindings.conePrepassGeometry}) var stageConeGeometry:texture_2d<f32>;
@@ -279,9 +273,8 @@ fn svoStagePrimaryClaimant(coordinate:vec2i)->vec3f{
   if(producer==${SVO_GBUFFER_PRODUCERS.brickRaster}u){return svoStageClaimantColor(2u);}
   if(producer==${SVO_GBUFFER_PRODUCERS.scenePrimitiveRaster}u){return svoStageClaimantColor(3u);}
   if(producer==${SVO_GBUFFER_PRODUCERS.rigidImpostorRaster}u){return svoStageClaimantColor(4u);}
-  if(producer==${SVO_GBUFFER_PRODUCERS.glassDiscovery}u){return svoStageClaimantColor(5u);}
-  if(producer==${SVO_GBUFFER_PRODUCERS.tracedPrimary}u){return svoStageClaimantColor(6u);}
-  return svoStageClaimantColor(7u);
+  if(producer==${SVO_GBUFFER_PRODUCERS.tracedPrimary}u){return svoStageClaimantColor(5u);}
+  return svoStageClaimantColor(6u);
 }
 
 fn svoStageFailure(coordinate:vec2i)->vec3f{
@@ -364,9 +357,6 @@ fn svoStageMedia(coordinate:vec2i)->vec3f{
     color=svoStageMedia(coordinate);
   }else if(mode==${view("surface-motion")}){
     color=svoStageMotion(coordinate);
-  }else if(mode==${view("glass-discovery")}){
-    let key=textureLoad(stageGlassKey,coordinate,0).x;
-    color=select(vec3f(.031,.035,.055),svoStageIdentityColor(key),key>0u);
   }else if(mode==${view("rigid-impostor")}){
     let record=textureLoad(stageRigidGeometry,coordinate,0);
     // The impostor pass leaves an all-zero record wherever it claimed nothing,
@@ -539,7 +529,6 @@ export class SparseVoxelRenderStageOverlay {
       [bindings.hardwareDepth, planes.hardwareDepth ?? this.fallback(formats.hardwareDepth, true)],
       [bindings.splitGeometry, planes.splitGeometry ?? this.fallback(formats.splitGeometry)],
       [bindings.splitOpaqueIdentity, planes.splitOpaqueIdentity ?? this.fallback(formats.splitOpaqueIdentity)],
-      [bindings.splitGlassKey, planes.splitGlassKey ?? this.fallback(formats.splitGlassKey)],
       [bindings.rigidPrimaryGeometry, planes.rigidPrimaryGeometry ?? this.fallback(formats.rigidPrimaryGeometry)],
       [bindings.conePrepassVisibility, planes.conePrepassVisibility ?? this.fallback(formats.conePrepassVisibility)],
       [bindings.conePrepassGeometry, planes.conePrepassGeometry ?? this.fallback(formats.conePrepassGeometry)],

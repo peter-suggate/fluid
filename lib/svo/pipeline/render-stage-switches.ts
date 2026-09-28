@@ -27,7 +27,6 @@ export type RenderStageSwitchId =
   | "fluid-coverage"
   | "primary-entry-prepass"
   | "primary-traversal"
-  | "thin-glass"
   | "scene-primitive"
   | "rigid-impostor"
   | "voxel-light-cache"
@@ -46,7 +45,6 @@ export const RENDER_STAGE_SWITCH_IDS: readonly RenderStageSwitchId[] = Object.fr
   "fluid-coverage",
   "primary-entry-prepass",
   "primary-traversal",
-  "thin-glass",
   "scene-primitive",
   "rigid-impostor",
   "voxel-light-cache",

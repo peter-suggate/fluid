@@ -642,7 +642,7 @@ fn packSceneGeometry(signedDistance:f32,fraction:f32,cellRadius:f32)->u32{
  * What is lost with the owner is real and was accepted: hover, picking, per-owner
  * visibility suppression of voxels, and the hard-feature id (a voxel surface now
  * reports `smooth`, which moves only the contact-visibility ray bias, 0.025 vs
- * 0.05 cells). Analytic hits — rigid bodies, glass — keep their own owners.
+ * 0.05 cells). Analytic hits — rigid bodies — keep their own owners.
  *
  * Emitted as WGSL rather than duplicated as hand-matched shifts for the reason
  * {@link sparseBrickSceneGeometryCodecWGSL} is: a producer and a consumer that

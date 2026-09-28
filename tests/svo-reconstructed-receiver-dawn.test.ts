@@ -9,7 +9,7 @@ import { createSvoDrySceneFragmentWGSL } from "../lib/svo/features/shading/progr
   let device: GPUDevice | undefined;
   try {
     device = (await createDawnRenderDevice()).device;
-    const source = createSvoDrySceneFragmentWGSL(0.5, "raster-primary", "bounds", "split", 0, false, true, false, false,
+    const source = createSvoDrySceneFragmentWGSL(0.5, "raster-primary", "bounds", "split", 0, false, false, false,
       { surfaceMesh: true, surfaceMeshCulling: true });
     const module = device.createShaderModule({ code: source + `
 @group(0) @binding(50) var<storage,read_write> receiverResult:array<vec4f>;

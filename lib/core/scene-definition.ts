@@ -142,7 +142,7 @@ export interface SceneDefinition {
   readonly environment: EnvironmentId;
   /** Defaults to `full-scene`; see {@link presentationModeForScene}. */
   readonly presentationMode?: ScenePresentationMode;
-  /** Omit the generated glass shell when the scene authors its own voxel vessel. */
+  /** Omit the generated container shell when the scene authors its own voxel vessel. */
   readonly containerShell?: "generated" | "authored";
   readonly camera?: Partial<CameraState>;
   /** Exact solver profile a numerical comparison requires. */
@@ -310,13 +310,12 @@ function finishSceneDocument(
   const authoredEdits = solidVoxelEditsForScene(scene);
   if (definition.environment === "garden") {
     // The garden's generated terrain is the vessel. An additional rectangular
-    // container is both visually wrong (a glass tank around the set) and, now
-    // that SolidWorld is the renderer's geometry authority, catastrophically
-    // expensive to look through. Keep ordinary opaque/clear edits, but remove
-    // both a factory's legacy shell and any independently authored glass fill.
+    // container is visually wrong (a tank around the set). Keep ordinary
+    // opaque/clear edits, but remove both a factory's legacy shell and any
+    // independently authored container-material fill.
     scene.solidVoxels = authoredEdits.filter((patch) => patch.operation !== "fill"
-      || (patch.materialId ?? VOXEL_MATERIAL_IDS.containerGlass)
-        !== VOXEL_MATERIAL_IDS.containerGlass);
+      || (patch.materialId ?? VOXEL_MATERIAL_IDS.container)
+        !== VOXEL_MATERIAL_IDS.container);
   } else if (definition.containerShell === "authored") {
     scene.solidVoxels = authoredEdits;
   } else {

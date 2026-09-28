@@ -513,7 +513,6 @@ export function createCm12Figure7_256(): SceneDescription {
 export function createCm12Figure8(): SceneDescription {
   const scene = cm12Domain(cm12Figure("cm12-figure-8"));
   scene.container.shape = "sphere";
-  scene.container.vessel = "glass";
   scene.surfaceStyle = "smooth";
   scene.fluid.initialLiquidVolumes = [{
     shape: "hemisphere",
@@ -585,7 +584,6 @@ export function createCm12Figure11(): SceneDescription {
 export function createCm12Figure12(): SceneDescription {
   const scene = cm12Domain(cm12Figure("cm12-figure-12"));
   scene.container.shape = "sphere";
-  scene.container.vessel = "glass";
   scene.surfaceStyle = "smooth";
   scene.fluid.initialLiquidVolumes = [ball([0, 92, 0], 17)];
   return scene;

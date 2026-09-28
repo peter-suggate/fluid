@@ -233,6 +233,13 @@ export interface SvoRenderTuning {
   readonly coneLightingScale: SvoConeLightingScale;
   /** Reuse static sun visibility; evolving fluid attenuation stays live. */
   readonly sunlightCacheEnabled: boolean;
+  /**
+   * Water attenuates direct light and contact occlusion through the fluid
+   * coverage volume. Off by default: off compiles the fluid march out of every
+   * lighting variant (a never-taken branch still costs registers there), and a
+   * flip rebuilds the dry-scene pipeline. Solid shadows are unaffected.
+   */
+  readonly waterShadowsEnabled: boolean;
   readonly coneRadianceReconstruction: SvoConeRadianceReconstruction;
   /** Which predicate stops the descent. See `SvoLodMode`. */
   readonly lodMode: SvoLodMode;
@@ -354,6 +361,7 @@ const balancedTuning: SvoRenderTuning = Object.freeze({
   // relighting preserves material and edge detail at either reduced rate.
   coneLightingScale: 0.5,
   sunlightCacheEnabled: false,
+  waterShadowsEnabled: false,
   coneRadianceReconstruction: "full-res-relight",
   lodMode: "screen-space",
   // Off by default.
@@ -575,6 +583,7 @@ export function normalizeSvoRenderTuning(value: SvoRenderTuning): SvoRenderTunin
     environmentPlanarRefinementExemption: Boolean(value.environmentPlanarRefinementExemption),
     coneLightingScale,
     sunlightCacheEnabled: value.sunlightCacheEnabled === true,
+    waterShadowsEnabled: value.waterShadowsEnabled === true,
     coneRadianceReconstruction,
     lodMode: value.lodMode === "fixed-level" ? "fixed-level" : "screen-space",
     // Not `integer`: the threshold is a continuous angular measure, and rounding

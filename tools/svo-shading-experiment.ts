@@ -2,7 +2,6 @@
 export function shadingExperimentSource(code:string,variant:string):string {
  if(!code.includes('fn dryLightingMain'))return code;
  if(variant.includes('cone-only'))code=code.replaceAll('if((dry.materialPublication.w&4u)!=0u){','if(true){');
- if(variant.includes('opaque'))code=code.replace('if(dryHitThinDielectric(hit)){return shadeDryThinDielectric(hit,ro,rd);}','');
  if(variant.includes('visibility-guide'))code=code.replace('return materialMatches&&metadata==dryPrepassHitMetadata(hit)', 'return (materialMatches||dry.tuningCounts2.w==4u)&&metadata==dryPrepassHitMetadata(hit)');
  if(variant.includes('no-edge'))code=code.replace('shaded*=dryVoxelFaceEdgeFactor(position,hit.normal,hit.t,hit.fieldSource);','');
  if(variant.includes('cheap-guide')){
@@ -17,7 +16,7 @@ export function shadingExperimentSource(code:string,variant:string):string {
  if(variant.includes('one-light')){
   const channelStart=code.indexOf('fn dryPrepassChannel('),channelEnd=code.indexOf('fn dryPrepassReceiverCompatible(',channelStart);
   if(channelStart>=0)code=code.slice(0,channelStart)+'fn dryPrepassChannel(index:u32)->f32{return dryPrepassData0.y;}\n'+code.slice(channelEnd);
-  const start=code.indexOf('fn shadeDryOpaque('),end=code.indexOf('fn dryVoxelExit_m(',start);
+  const start=code.indexOf('fn shadeDryOpaque('),end=code.indexOf('fn shadeDrySurface(',start);
   let body=code.slice(start,end).replace(/lightIndex<\d+u/,'lightIndex<1u').replace(/let sampleCount=select\(select\(1u,max\(dry.tuningCounts1.x,dry.tuningCounts0.w\),area\),1u,globalIllumination\);/,'let sampleCount=1u;');
   body=body.replace('let light=dryLighting.lights[lightIndex];','var light=dryLighting.lights[lightIndex];light.identity.x=SVO_LIGHT_DIRECTIONAL;');
   code=code.slice(0,start)+body+code.slice(end);
@@ -32,12 +31,10 @@ export function shadingExperimentSource(code:string,variant:string):string {
   code='override DRY_FAST:bool=false;override DRY_SLOW:bool=false;\n'+code;
   const start=code.indexOf('@fragment fn dryLightingMain'),end=code.indexOf('@fragment fn drySkyLightingMain',start);
   let entry=code.slice(start,end);
-  entry=entry.replace('if(glassKey>0u){',`if(DRY_FAST&&(dryPrepassState!=1u||dryHitThinDielectric(opaque)||glassKey>0u)){discard;}
-    if(DRY_SLOW&&dryPrepassState==1u&&!dryHitThinDielectric(opaque)&&glassKey==0u){discard;}
-    if(!DRY_FAST&&glassKey>0u){`);
-  entry=entry.replace('if(glassVisible){','if(!DRY_FAST&&glassVisible){');
+  entry=entry.replace('let color=shadeDrySurface(opaque,ro,rd);',`if(DRY_FAST&&dryPrepassState!=1u){discard;}
+    if(DRY_SLOW&&dryPrepassState==1u){discard;}
+    let color=shadeDrySurface(opaque,ro,rd);`);
   code=code.slice(0,start)+entry+code.slice(end);
-  code=code.replace('if(dryHitThinDielectric(hit)){return shadeDryThinDielectric(hit,ro,rd);}','if(!DRY_FAST&&dryHitThinDielectric(hit)){return shadeDryThinDielectric(hit,ro,rd);}');
   code=code.replaceAll('if((dry.materialPublication.w&4u)!=0u){','if(DRY_FAST||(dry.materialPublication.w&4u)!=0u){');
   const light=code.indexOf('fn dryLightVisibilitySolid(');
   code=code.slice(0,light)+code.slice(light).replace('let coneCell_m=max(dry.mapping.cellSize.x,','if(DRY_FAST){return vec3f(0.0);}\n    let coneCell_m=max(dry.mapping.cellSize.x,');

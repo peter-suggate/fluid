@@ -12,7 +12,7 @@ export interface SparseVoxelDrySceneData {
   /** Complete live material table. Binding 6 is renderer-owned and capacity-stable. */
   materialRecords: Uint32Array<ArrayBuffer>;
   materialRevision: number;
-  /** Producer proof that dry primary surfaces cannot select a thin dielectric. Omission keeps the generic closure. */
+  /** Producer proof that dry primary surfaces cannot select a dielectric material. Omission keeps the generic closure. */
   opaqueSurfaceOnly?: boolean;
   /** First owner ID belonging to primitive zero (rigid bodies occupy the ids below it). */
   ownerBase: number;
@@ -32,16 +32,6 @@ export interface SparseVoxelDrySceneData {
    * a new scene's record and grow somebody else's shape.
    */
   fieldProgramBlocks?: Uint32Array<ArrayBuffer>;
-  /** Packed 80-byte finite-pane records. Empty means this scene has no glass. */
-  glassRecords?: Uint32Array<ArrayBuffer>;
-  /** Versioned live content key used to avoid redundant pane uploads. */
-  glassCacheKey?: string;
-  /** Packed analytic sphere/ellipsoid glass records mirrored into a renderer-owned uniform arena. */
-  thickGlassRecords?: Uint32Array<ArrayBuffer>;
-  thickGlassRevision?: number;
-  thickGlassCacheKey?: string;
-  /** Thin pane replaced by a curved volume only while the thick binder is valid. */
-  thickGlassReplacedThinPaneId?: number;
   /** CPU-built mirror of the producer's bounded 112-byte light publication. */
   lightRecords?: Uint32Array<ArrayBuffer>;
   /** CPU-built mirror revision; must equal the authoritative source publication. */

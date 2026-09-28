@@ -24,7 +24,6 @@ export const SVO_RENDER_STAGE_VIEWS = [
   "material-identity",
   "media-stack",
   "surface-motion",
-  "glass-discovery",
   "rigid-impostor",
   "cone-ambient-visibility",
   "cone-light-visibility",
@@ -102,7 +101,7 @@ export interface SvoRenderStageDefinition {
  * the water compositor has already run. Defaulting it to `dry-radiance` (as it
  * briefly was) therefore shipped the pre-composite dry HDR target as the
  * product: correct-looking on a dry set, and on a wet one a tank with no water
- * and no glass in it, because neither had been composited yet. It also drops
+ * in it, because it had not been composited yet. It also drops
  * the scene's own ACES grade, which that view documents itself as omitting.
  */
 export const DEFAULT_SVO_RENDER_DIAGNOSTICS: SvoRenderDiagnostics = Object.freeze({
@@ -127,18 +126,18 @@ export const SVO_RENDER_STAGE_SEQUENTIAL_LEGEND = Object.freeze([
 /**
  * Producing-pass hues, in the exact order the overlay shader indexes them. The
  * shader builds its palette from this array, so a legend swatch and the pixels
- * it names cannot drift apart. Index 0 is the miss flag rather than a producer;
- * every later index is one `SVO_GBUFFER_PRODUCERS` value.
+ * it names cannot drift apart. Index 0 is the miss flag rather than a producer
+ * and the last is untagged; every other index is one `SVO_GBUFFER_PRODUCERS`
+ * value.
  */
 export const SVO_RENDER_STAGE_CLAIMANT_LEGEND = Object.freeze([
-  { at: 0 / 7, color: "#0b1020", label: "Sky / miss" },
-  { at: 1 / 7, color: "#8bd450", label: "Terrain" },
-  { at: 2 / 7, color: "#00d9ff", label: "Brick raster" },
-  { at: 3 / 7, color: "#ffb000", label: "Scene primitive" },
-  { at: 4 / 7, color: "#ff2fd0", label: "Rigid impostor" },
-  { at: 5 / 7, color: "#7dfff0", label: "Glass discovery" },
-  { at: 6 / 7, color: "#9a6bff", label: "Traced primary" },
-  { at: 7 / 7, color: "#4a4a52", label: "Untagged" },
+  { at: 0 / 6, color: "#0b1020", label: "Sky / miss" },
+  { at: 1 / 6, color: "#8bd450", label: "Terrain" },
+  { at: 2 / 6, color: "#00d9ff", label: "Brick raster" },
+  { at: 3 / 6, color: "#ffb000", label: "Scene primitive" },
+  { at: 4 / 6, color: "#ff2fd0", label: "Rigid impostor" },
+  { at: 5 / 6, color: "#9a6bff", label: "Traced primary" },
+  { at: 6 / 6, color: "#4a4a52", label: "Untagged" },
 ] as const satisfies readonly SvoRenderStageLegendStop[]);
 
 const sequential = SVO_RENDER_STAGE_SEQUENTIAL_LEGEND;
@@ -187,7 +186,6 @@ const identity = Object.freeze([
 
 const media = Object.freeze([
   { at: 0, color: "#0b1020", label: "Air" },
-  { at: 0.5, color: "#00e5ff", label: "Glass" },
   { at: 1, color: "#ff8500", label: "Opaque" },
 ] as const satisfies readonly SvoRenderStageLegendStop[]);
 
@@ -289,18 +287,13 @@ const definitions = [
   },
   {
     view: "media-stack", label: "Media stack", group: "Identity", plane: "identityMedia.zw",
-    description: "The medium entered and the medium left at the surface, which is the bookkeeping thick glass depends on.",
+    description: "The medium entered and the medium left at the surface, blended half and half.",
     palette: "categorical", legend: media,
   },
   {
     view: "surface-motion", label: "Surface motion", group: "Identity", plane: "packedSurface.z",
     description: "Published surface velocity: hue carries direction, brightness carries speed, static surfaces stay grey.",
     palette: "categorical", legend: motion,
-  },
-  {
-    view: "glass-discovery", label: "Thin-glass discovery", group: "Discovery", plane: "splitGlassKey",
-    description: "The nearest glass pane the raster discovery pass recorded for each pixel, one colour per pane record.",
-    palette: "identity", legend: identity,
   },
   {
     view: "rigid-impostor", label: "Rigid impostor geometry", group: "Discovery", plane: "rasterRigidPrimaryGeometry",

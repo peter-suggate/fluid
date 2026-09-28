@@ -19,7 +19,7 @@ export function publishOpaqueSurfaceCapability(
     const used = new Set<number>();
     for (const page of world.pages) for (const id of page.materialId) if (id) used.add(id);
     for (const patch of [...world.patches, ...(world.regions ?? [])]) {
-      if (patch.operation === "fill") used.add(patch.materialId ?? VOXEL_MATERIAL_IDS.containerGlass);
+      if (patch.operation === "fill") used.add(patch.materialId ?? VOXEL_MATERIAL_IDS.container);
     }
     ids = used;
     solidMaterials.set(world, ids);
@@ -46,7 +46,6 @@ export function canUseOpaqueDirectionalCones(
   options: { coneMode: string; hierarchyReady: boolean; globalIllumination: boolean; reconstruction: string },
 ): boolean {
   return scene?.opaqueSurfaceOnly === true
-    && !scene.glassRecords?.byteLength && !scene.thickGlassRecords?.byteLength
     && scene.lightRecords?.byteLength === SVO_LIGHT_RECORD_STRIDE_BYTES
     && scene.lightRecords[24] === SVO_LIGHT_KINDS.directional
     && options.coneMode === "cones" && options.hierarchyReady

@@ -7,8 +7,8 @@ export const environmentIds = [
   "research-station",
   "default",
   "garden",
-  // Appended: environment indices are packed into GPU records and glass pane
-  // ids, so an id keeps its position for as long as it exists.
+  // Appended: environment indices are packed into GPU records, so an id keeps
+  // its position for as long as it exists.
   "stage"
 ] as const;
 

@@ -28,7 +28,6 @@ import {
 } from "./svo-node-mip-pyramid";
 import { svoTetrahedralRadianceWGSL } from "./svo-tetrahedral-radiance";
 import { SVO_NODE_MIP_MAXIMUM_LEVELS, svoNodeMipPageHashWGSL } from "./svo-node-mip-page-hash";
-import { VOXEL_MATERIAL_IDS } from "../../../core/voxel-scene";
 import {
   svoBandedReconstructionEnabled,
   svoSolidDirectOcclusionEnabled,
@@ -828,10 +827,7 @@ fn safeNormal(leafIndex:u32,local:vec3u)->vec3f{
  */
 fn leafOpacityAt(leaf:u32,cell:vec3u)->vec4f{
   let sampleLocal=leafLocal(cell,leaf);let voxel=leafVoxel(leaf,sampleLocal);
-  let dynamicIdentity=${lane.dynamicIdentity};let sceneIdentity=sceneIdentityAt(voxel);
-  let dynamicCoverage=${lane.dynamicCoverage};let sceneCoverage=${lane.sceneCoverage};
-  let dynamicSolid=select(dynamicCoverage,0.,(dynamicIdentity&0xffffu)==${VOXEL_MATERIAL_IDS.containerGlass}u);
-  let sceneSolid=select(sceneCoverage,0.,(sceneIdentity&0xffffu)==${VOXEL_MATERIAL_IDS.containerGlass}u);
+  let dynamicSolid=${lane.dynamicCoverage};let sceneSolid=${lane.sceneCoverage};
   let fluid=${lane.fluidFraction};let solid=1.-(1.-dynamicSolid)*(1.-sceneSolid);
   return ${opacity.storeBase};
 }
@@ -908,11 +904,7 @@ fn buildPages(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) 
   if(level==0u){
     if(all(physical==vec3u(0u))){scratchValidity[recordIndex]=worklist[1];}let page=vec3u(worklist[record+1u],worklist[record+2u],worklist[record+3u]);let octant=(local.x/4u)|((local.y/4u)<<1u)|((local.z/4u)<<2u);let leaf=worklist[record+${LIVE_SVO_DERIVED_WORKLIST.sourceLeafWord}u+octant];if(leaf>=control[1]){textureStore(opacityScratch,destination,vec4f(0.));if(floorLevel==0u){writeRadiance(radianceDestination,vec3f(0.),vec3f(0.),vec3f(0.),vec3f(0.));}return;}let sampleLocal=leafLocal(page*INTERIOR+local,leaf);
     let voxel=leafVoxel(leaf,sampleLocal);let dynamicIdentity=${lane.dynamicIdentity};let sceneIdentity=sceneIdentityAt(voxel);
-    let dynamicCoverage=${lane.dynamicCoverage};let sceneCoverage=${lane.sceneCoverage};
-    // Container glass remains structural geometry, but it is not an opacity
-    // source: otherwise the cone hierarchy turns the vessel into a projected
-    // cutout even though the exact/composite paths treat it as dielectric.
-    let dynamicSolid=select(dynamicCoverage,0.,(dynamicIdentity&0xffffu)==${VOXEL_MATERIAL_IDS.containerGlass}u);let sceneSolid=select(sceneCoverage,0.,(sceneIdentity&0xffffu)==${VOXEL_MATERIAL_IDS.containerGlass}u);
+    let dynamicSolid=${lane.dynamicCoverage};let sceneSolid=${lane.sceneCoverage};
     ${opacity.fluid ? `let fluid=${lane.fluidFraction};` : ""}let solid=1.-(1.-dynamicSolid)*(1.-sceneSolid);
     textureStore(opacityScratch,destination,${opacity.storeBase});
     if(floorLevel!=0u){return;}

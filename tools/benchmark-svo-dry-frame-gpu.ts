@@ -51,7 +51,6 @@ import { censusSvoCellContours } from "../lib/harness/svo-cell-contour-census";
  *      FLUID_SVO_DRY_FRAME_SCENE_PRIMITIVE_DIRECT (1 forces the authored-SDF set back onto the
  *      direct proxy fragment; the per-arm control that _DIRECT_BRICK cannot give, since that
  *      one moves the brick arm and this one together),
- *      FLUID_SVO_DRY_FRAME_RASTER_GLASS (1 enables coverage-scaled pane discovery),
  *      FLUID_SVO_DRY_FRAME_RASTER_RIGID (1 enables current-frame rigid impostor discovery),
  *      FLUID_SVO_DRY_FRAME_RASTER_RIGID_FORCE (1 forces the raster arm below its adaptive body-count crossover),
  *      FLUID_SVO_DRY_FRAME_LIGHT_ATTRIBUTION (1 measures cumulative authored-light shadow cost),
@@ -152,7 +151,7 @@ import {
   createPassEncoderIsolationScratch,
   isolateComputePassEncoders,
 } from "../lib/harness/webgpu-pass-encoder-isolation";
-import { canConsumeSparseVoxelPbrMaterials, canEncodeSparseVoxelDryScene, resolveSparseVoxelThickGlassBinderStatus, SVO_DRY_SPLIT_EXTRA_BYTES_PER_PIXEL, SVO_DRY_SPLIT_RESIDENT_BYTES_PER_PIXEL, SparseVoxelDrySceneRenderer, svoConePrepassSize, svoDryRigidPrimaryStrategy } from "../lib/svo/pipeline/webgpu-svo-dry-scene";
+import { canConsumeSparseVoxelPbrMaterials, canEncodeSparseVoxelDryScene, SVO_DRY_SPLIT_EXTRA_BYTES_PER_PIXEL, SVO_DRY_SPLIT_RESIDENT_BYTES_PER_PIXEL, SparseVoxelDrySceneRenderer, svoConePrepassSize, svoDryRigidPrimaryStrategy } from "../lib/svo/pipeline/webgpu-svo-dry-scene";
 import { SVO_DRY_TRAVERSAL_MODES, type SvoBrickOccupancyMode, type SvoConeLightingScale, type SvoDryTraversalMode, type SvoDryShadingPath, type SvoDryOptimizationExperiments } from "../lib/svo/features/shading/program";
 import { SVO_GBUFFER_RENDER_TARGET_CONTRACT } from "../lib/svo/features/primary-visibility/webgpu-svo-gbuffer-targets";
 
@@ -286,10 +285,9 @@ const phaseTraceEnabled = process.env.FLUID_SVO_DRY_FRAME_PHASE_TRACE === "1";
 const traversalModeRaw = process.env.FLUID_SVO_DRY_FRAME_TRAVERSAL ?? "canonical-parametric";
 const brickOccupancyModeRaw = process.env.FLUID_SVO_DRY_FRAME_BRICK_OCCUPANCY ?? "off";
 const shadingPathRaw = process.env.FLUID_SVO_DRY_FRAME_SHADING ?? "split";
-// Raster-assisted primary visibility unfuses panes and bodies out of the
-// primary fragment shader by construction, so it implies both raster arms.
+// Raster-assisted primary visibility unfuses bodies out of the primary
+// fragment shader by construction, so it implies the raster rigid arm.
 const rasterPrimary = (process.env.FLUID_SVO_DRY_FRAME_TRAVERSAL ?? "") === "raster-primary";
-const rasterGlassDiscovery = rasterPrimary || process.env.FLUID_SVO_DRY_FRAME_RASTER_GLASS === "1";
 const rasterRigidDiscovery = rasterPrimary || process.env.FLUID_SVO_DRY_FRAME_RASTER_RIGID === "1";
 const rasterRigidForced = process.env.FLUID_SVO_DRY_FRAME_RASTER_RIGID_FORCE === "1";
 const lightAttributionEnabled = process.env.FLUID_SVO_DRY_FRAME_LIGHT_ATTRIBUTION === "1";
@@ -610,7 +608,7 @@ if (recordScaleMultipliers) {
     device.queue.writeBuffer(armBodyBuffer, 0, armBodies.data);
     const armRenderer = new SparseVoxelDrySceneRenderer(device, armUniforms, armBodyBuffer, "rgba16float",
       traversalMode, brickOccupancyMode, shadingPath, screenSpaceTerminationPixels,
-      rasterGlassDiscovery, rasterRigidDiscovery, coneFanout, optimizationExperiments);
+      rasterRigidDiscovery, coneFanout, optimizationExperiments);
     await armRenderer.initialize();
     armRenderer.setRigidBodyCount(armBodies.count);
     armRenderer.setRenderTuning({ ...DEFAULT_SVO_RENDER_TUNING, coneLightingScale: coneScale,
@@ -1016,7 +1014,7 @@ if (cellContourCensus) log(`Cell contours: ${JSON.stringify(cellContourCensus)}`
 
 // Exact mirror of FluidLabRenderer solver-attachment dry-scene data assembly,
 // shared with tools/run-svo-dry-render-smoke.ts through the harness.
-const { drySceneData, scenePrimitives, sceneGlass } = buildSvoDrySceneAssembly(scene, source);
+const { drySceneData, scenePrimitives } = buildSvoDrySceneAssembly(scene, source);
 assert.ok(canConsumeSparseVoxelPbrMaterials(source), "PBR material publication unavailable");
 assert.ok(canEncodeSparseVoxelDryScene(source, drySceneData), "production dry-scene contract rejected the garden source");
 const nodeMip = source.nodeMipPyramid;
@@ -1051,7 +1049,7 @@ async function awaitPresentationBundle(target: SparseVoxelDrySceneRenderer): Pro
 }
 
 const renderer = new SparseVoxelDrySceneRenderer(device, uniformBuffer, bodyBuffer, "rgba16float", traversalMode, brickOccupancyMode,
-  shadingPath, screenSpaceTerminationPixels, rasterGlassDiscovery, rasterRigidDiscovery, coneFanout,
+  shadingPath, screenSpaceTerminationPixels, rasterRigidDiscovery, coneFanout,
   optimizationExperiments);
 await renderer.initialize((label, completed, total) => log(`  [pipeline] ${label} (${completed}/${total})`));
 renderer.setRigidBodyCount(rasterRigidForced ? 12 : bodies.count);
@@ -1224,7 +1222,6 @@ function classifyDryScenePass(label: string): PaperPhaseId {
   if (text.includes("live-scene primitive")) return "svo-scene-primitive";
   if (text.includes("brick instance cull")) return "svo-brick-cull";
   if (text.includes("rigid")) return "svo-rigid";
-  if (text.includes("glass")) return "svo-glass";
   if (text.includes("gi ") || text.includes("global illumination") || text.includes("environment")) return "svo-environment-gi";
   if (text.includes("cone")) return "svo-cone-lighting";
   if (text.includes("brick") || text.includes("primary") || text.includes("terrain")) return "svo-primary";
@@ -1643,14 +1640,15 @@ if (readVoxelLightCounters) {
     "distinct voxel demand must remain below the pixel count");
 }
 
-// Read whenever the arm serves lattice visibility: the entry count is the
-// march count the arm pays, and overflow or probe exhaustion is a sizing
-// fault whose pixels silently moved to the exact edge tier.
-let latticeVisibilityCounters: { entries: number; overflow: number; exhausted: number; prepassTexels: number } | undefined;
+// Read whenever the arm serves lattice visibility: the miss count is the march
+// count this frame paid (the store is persistent, so a static camera after
+// warm-up marches nothing), and overflow is a sizing fault whose pixels
+// silently moved to the exact edge tier; the renderer also reports it fatal.
+let latticeVisibilityCounters: { misses: number; overflow: number; prepassTexels: number } | undefined;
 // Sampled with the counters, on the configured arm, not at report time.
 const latticeVisibilityActive = renderer.latticeVisibilityActive;
 if (latticeVisibilityActive) {
-  const readback = device.createBuffer({ label: "Bench lattice visibility counters", size: 12,
+  const readback = device.createBuffer({ label: "Bench lattice visibility counters", size: 8,
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const encoder = device.createCommandEncoder({ label: "Bench lattice visibility counters" });
   encodeFrame(encoder);
@@ -1659,13 +1657,13 @@ if (latticeVisibilityActive) {
   await readback.mapAsync(GPUMapMode.READ);
   const words = new Uint32Array(readback.getMappedRange());
   latticeVisibilityCounters = {
-    entries: words[0], overflow: words[1], exhausted: words[2],
+    misses: words[0], overflow: words[1],
     prepassTexels: svoConePrepassSize(width, height, coneScale).reduce((product, value) => product * value, 1),
   };
   readback.unmap();
   readback.destroy();
-  log(`Lattice visibility: ${latticeVisibilityCounters.entries} entries for ${latticeVisibilityCounters.prepassTexels} prepass texels`
-    + ` (overflow ${latticeVisibilityCounters.overflow}, probe-exhausted ${latticeVisibilityCounters.exhausted})`);
+  log(`Lattice visibility: ${latticeVisibilityCounters.misses} misses marched for ${latticeVisibilityCounters.prepassTexels} prepass texels`
+    + ` (overflow ${latticeVisibilityCounters.overflow})`);
 }
 
 // ---------------------------------------------------------------------------
@@ -2311,7 +2309,6 @@ const result = {
     environment: environmentId,
     quality: "balanced",
     surfaceMeshDiagnostics,
-    rasterGlassDiscovery,
     rasterRigidDiscovery,
     rasterRigidForced,
     rigidPrimaryStrategy: svoDryRigidPrimaryStrategy(rasterRigidForced ? 12 : bodies.count, rasterRigidDiscovery),
@@ -2342,8 +2339,6 @@ const result = {
       ),
     },
     primitiveCount: scenePrimitives.packedRecords.byteLength / 64,
-    glassPaneCount: sceneGlass.metadata.length,
-    thickGlassStatus: resolveSparseVoxelThickGlassBinderStatus(drySceneData),
     lightCount: source.lights?.count ?? 0,
     rigidBodyCount: scene.rigidBodies.length,
     syntheticRigidMotion,

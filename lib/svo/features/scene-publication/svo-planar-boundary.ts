@@ -240,10 +240,9 @@ export function buildSvoSolidWorldPlanarBoundaryCatalog(
     && !scene.solidVoxels.some(({ operation }) => operation === "clear"))
     ? canonicalTankShellSources
     : uncutCanonicalTankShellSources;
-  // Tank glass is disabled. Keep the canonical shell as physical SolidWorld
+  // Tank glass is retired. Keep the canonical shell as physical SolidWorld
   // authority, but remove every unedited wall from the render residual. The
-  // vessel outline supplies the cheap visual cue, including for documents that
-  // still request the legacy glass mode.
+  // vessel outline supplies the visual cue.
   const residualExcludedPatchIndices = new Set<number>(canonicalTankShell);
   patches.forEach((voxelPatch, patchIndex) => {
     // The canonical vessel shell is physical SolidWorld authority for the

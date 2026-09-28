@@ -119,11 +119,10 @@ export interface SceneDescription {
      *
      * The container is two things at once: the solver's boundary, and — in
      * every environment except the garden — a tank you can see. Absent means
-     * `outline`: a depth-aware wireframe of the canonical finite voxel shell,
-     * with no dielectric overdraw across the tank interior. `glass` is the
-     * explicit, more expensive presentation.
+     * `outline`: a depth-aware wireframe of the canonical finite voxel shell.
+     * There is no transparent presentation; `none` hides the vessel.
      */
-    vessel?: "outline" | "glass" | "none";
+    vessel?: "outline" | "none";
   };
   /** Authoritative uniform lattice shared by scene geometry, SVO rendering, and fluid when enabled. */
   voxelDomain: {
@@ -533,9 +532,8 @@ export function validateScene(scene: SceneDescription): string[] {
   // Validated rather than defaulted: a default would write the field into every
   // document that round-trips through `parseScene`, and the whole point of the
   // optional form is that an authored scene is unchanged by its existence.
-  if (c?.vessel !== undefined && c.vessel !== "outline"
-    && c.vessel !== "glass" && c.vessel !== "none") {
-    errors.push("Container vessel must be 'outline', 'glass', or 'none'");
+  if (c?.vessel !== undefined && c.vessel !== "outline" && c.vessel !== "none") {
+    errors.push("Container vessel must be 'outline' or 'none'");
   }
   if (c?.shape !== undefined && c.shape !== "box" && c.shape !== "sphere") errors.push("Container shape must be 'box' or 'sphere'");
   if (c?.shape === "sphere" && c.top !== "closed") errors.push("A spherical container must be closed");

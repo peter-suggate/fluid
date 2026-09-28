@@ -71,7 +71,6 @@ export const RENDER_FRAME_STAGES = Object.freeze([
   "primary-entry-prepass",
   "primary-traversal",
   "rigid-discovery",
-  "thin-glass-discovery",
   "seam-closure",
   // LIGHTING VISIBILITY — what can see which light.
   "voxel-light-cache",
@@ -108,7 +107,6 @@ export type RenderPipelineNodeId =
   | "primary-entry-prepass"
   | "filtered-detail"
   | "primary-traversal"
-  | "thin-glass"
   | "scene-primitive"
   | "rigid-impostor"
   | "seam-closure"
@@ -242,11 +240,6 @@ export const RENDER_FRAME_STAGE_PLUGINS = Object.freeze({
     owner: "svo",
     node: "rigid-impostor",
     phase: { id: "svo-rigid", label: "SVO analytic rigid discovery" },
-  },
-  "thin-glass-discovery": {
-    owner: "svo",
-    node: "thin-glass",
-    phase: { id: "svo-glass", label: "SVO raster thin-glass discovery" },
   },
   "seam-closure": {
     owner: "svo",

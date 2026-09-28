@@ -7,7 +7,6 @@ import type {
 export type SvoRendererFailureReason =
   | "missing-source"
   | "unsupported-terrain"
-  | "unsupported-glass-cutout"
   | "missing-pbr-materials"
   | "missing-lighting-publications"
   | "pipeline-compile-failure"
@@ -40,7 +39,6 @@ export interface EffectiveRendererConditions {
   pipelinePending?: string;
   sourceAvailable: boolean;
   terrainSupported: boolean;
-  glassSupported?: boolean;
   materialsSupported?: boolean;
   lightingSupported?: boolean;
   svoEncoded: boolean;
@@ -77,7 +75,6 @@ export function resolveEffectiveRendererStatus(
         });
   }
   if (!conditions.terrainSupported) return status({ state: "failed", failureReason: "unsupported-terrain" });
-  if (conditions.glassSupported === false) return status({ state: "failed", failureReason: "unsupported-glass-cutout" });
   if (conditions.materialsSupported === false) return status({ state: "failed", failureReason: "missing-pbr-materials" });
   if (conditions.lightingSupported === false) return status({ state: "failed", failureReason: "missing-lighting-publications" });
   if (!conditions.sourceAvailable) {

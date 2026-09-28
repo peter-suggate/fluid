@@ -8,7 +8,7 @@ export const VOXEL_SCENE_PLAN_VERSION = "1.0.0" as const;
 export type LinearRgb = readonly [r: number, g: number, b: number];
 
 export const VOXEL_MATERIAL_IDS = {
-  containerGlass: 1,
+  container: 1,
   terrain: 2,
   fluid: 3,
   sphere: 16,
@@ -23,7 +23,7 @@ export interface VoxelMaterial {
   id: number;
   key: keyof typeof VOXEL_MATERIAL_IDS;
   name: string;
-  closure: "opaque" | "dielectric" | "thin-dielectric";
+  closure: "opaque" | "dielectric";
   baseColorLinear: LinearRgb;
   emissiveLinear: LinearRgb;
   metallic: number;
@@ -45,9 +45,12 @@ export interface VoxelMaterial {
  */
 export const VOXEL_MATERIALS: ReadonlyArray<VoxelMaterial> = [
   {
-    id: VOXEL_MATERIAL_IDS.containerGlass, key: "containerGlass", name: "Container glass", closure: "thin-dielectric",
-    baseColorLinear: [0.42, 0.78, 0.72], emissiveLinear: [0, 0, 0], metallic: 0, roughness: 0.04, transmission: 0.985, ior: 1.5,
-    colorProvenance: "webgpu-renderer glass tint"
+    // The canonical tank shell: a solver boundary that the render world
+    // excludes (the vessel is presented as an outline). An edited piece that
+    // does reach render is ordinary opaque geometry.
+    id: VOXEL_MATERIAL_IDS.container, key: "container", name: "Container shell", closure: "opaque",
+    baseColorLinear: [0.42, 0.78, 0.72], emissiveLinear: [0, 0, 0], metallic: 0, roughness: 0.5, transmission: 0, ior: 1.45,
+    colorProvenance: "former container tint"
   },
   {
     id: VOXEL_MATERIAL_IDS.terrain, key: "terrain", name: "Terrain", closure: "opaque",
@@ -246,7 +249,7 @@ export function packVoxelDebugMaterialTable(materials: ReadonlyArray<VoxelMateri
   for (let id = 1; id <= maximumId; id += 1) packed.set([1, 0, 1, 1, 0, 0, 0, 1], id * VOXEL_DEBUG_MATERIAL_FLOATS);
   for (const material of materials) {
     packed.set([
-      ...material.baseColorLinear, material.closure === "thin-dielectric" ? 0.24 : 1,
+      ...material.baseColorLinear, 1,
       ...material.emissiveLinear, material.roughness
     ], material.id * VOXEL_DEBUG_MATERIAL_FLOATS);
   }
@@ -436,7 +439,7 @@ function containerSolidSource(scene: SceneDescription,
     id: "solid:container",
     kind: "solid-voxel-patches" as const,
     updateClass: "scene" as const,
-    materialId: VOXEL_MATERIAL_IDS.containerGlass,
+    materialId: VOXEL_MATERIAL_IDS.container,
     composition: "union" as const,
     voxelOrigin_m: cloneVec3(layout.worldOrigin_m),
     voxelSize_m: layout.voxelSize_m,

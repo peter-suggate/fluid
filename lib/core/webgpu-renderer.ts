@@ -68,7 +68,7 @@ import { buildVesselOutlineGeometry, sceneVesselPresentation } from "./vessel-ou
 import { WebGPUFluidCellTrace } from "./webgpu-fluid-cell-trace";
 import type { FluidCellLattice, FluidCellTrace } from "./fluid-cell-trace";
 import type { FineBandCellContext } from "./fine-band-cell-model";
-import { buildSparseVoxelDrySceneLightingMirrors, canConsumeSparseVoxelLighting, resolveSparseVoxelThickGlassBinderStatus, sparseVoxelDrySceneContractFailure, SparseVoxelDrySceneRenderer, SVO_PRESENTATION_STARTUP_STAGES, svoPresentationResourcePlugin, type SvoDryRigidBounds, type SvoDrySceneDirtyBounds } from "../svo/pipeline/webgpu-svo-dry-scene";
+import { buildSparseVoxelDrySceneLightingMirrors, canConsumeSparseVoxelLighting, sparseVoxelDrySceneContractFailure, SparseVoxelDrySceneRenderer, SVO_PRESENTATION_STARTUP_STAGES, svoPresentationResourcePlugin, type SvoDryRigidBounds, type SvoDrySceneDirtyBounds } from "../svo/pipeline/webgpu-svo-dry-scene";
 import { SVO_DRY_SCENE_REVERSED_Z_NEAR_M } from "../svo/features/shading/program";
 import {
   buildSvoScenePrimitives,
@@ -89,8 +89,6 @@ import {
   svoMaterialFromEnvironmentProxyMaterial,
   svoMaterialFunctionIdForEnvironmentProxy,
 } from "../svo/contracts/svo-material-abi";
-import { buildSvoSceneGlass } from "../svo/features/materials/svo-scene-glass";
-import { buildSvoSceneThickGlass } from "../svo/features/materials/svo-scene-thick-glass";
 import { sceneSvoGroundPlane, sceneTerrainSurfaceModel } from "../svo/features/materials/svo-terrain-material";
 import {
   DEFAULT_SVO_LIGHTING_OPTIONS,
@@ -869,6 +867,7 @@ export function createProductionSparseVoxelDrySceneRenderer(
   primaryTraversal: SvoPrimaryTraversalMode,
   primaryWorkMap = false,
   sunlightCacheEnabled = false,
+  waterShadowsEnabled = false,
 ): SparseVoxelDrySceneRenderer {
   if ((primaryTraversal === "raster" || primaryTraversal === "mesh")
     && device.limits.maxColorAttachmentBytesPerSample < FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE) {
@@ -889,9 +888,9 @@ export function createProductionSparseVoxelDrySceneRenderer(
     "split",
     rasterArms && primaryTraversal !== "mesh" ? SVO_SCREEN_SPACE_TERMINATION_CONTRACT.defaultThresholdPixels : 0,
     rasterArms,
-    rasterArms,
     true,
-    { primaryWorkMap, surfaceMesh: primaryTraversal === "mesh", voxelLightCache: sunlightCacheEnabled, specializedDeferredLighting: true },
+    { primaryWorkMap, surfaceMesh: primaryTraversal === "mesh", voxelLightCache: sunlightCacheEnabled, specializedDeferredLighting: true,
+      waterShadows: waterShadowsEnabled },
   );
 }
 
@@ -983,6 +982,7 @@ export class FluidLabRenderer {
   /** Whether the rebuilt traced-primary shader publishes its per-pixel counter plane. */
   private requestedPrimaryWorkMap = false;
   private requestedSunlightCache = false;
+  private requestedWaterShadows = false;
   private presentationTexture?: GPUTexture;
   private presentationTextureKey = "";
   private activeRenderScale = 1;
@@ -1040,7 +1040,6 @@ export class FluidLabRenderer {
   private latestRigidBodyPoses: readonly DrawnRigidBodyPose[] = [];
   private latestRigidBodyPoseRevision = 0;
   private svoSourceAvailable = false;
-  private svoGlassSupported = true;
   private svoMaterialsSupported = true;
   private svoLightingSupported = true;
   private svoPipelineAvailable = false;
@@ -1180,6 +1179,7 @@ export class FluidLabRenderer {
     scale: SvoPrimaryTraversalScale,
     primaryWorkMap = false,
     sunlightCacheEnabled = false,
+    waterShadowsEnabled = false,
   ): void {
     // A primary-work view describes ray traversal, so it cannot silently show
     // an all-zero plane from the proxy-raster primary. The view is an explicit
@@ -1191,10 +1191,11 @@ export class FluidLabRenderer {
     // compilation was pending, rather than accepting the old bundle as new.
     if (this.optionalPipelineTasks.has("svo-dry-scene")) return;
     if (resolved === this.requestedPrimaryTraversal && primaryWorkMap === this.requestedPrimaryWorkMap
-      && sunlightCacheEnabled === this.requestedSunlightCache) return;
+      && sunlightCacheEnabled === this.requestedSunlightCache && waterShadowsEnabled === this.requestedWaterShadows) return;
     this.requestedPrimaryTraversal = resolved;
     this.requestedPrimaryWorkMap = primaryWorkMap;
     this.requestedSunlightCache = sunlightCacheEnabled;
+    this.requestedWaterShadows = waterShadowsEnabled;
     this.failedOptionalPipelines.delete("svo-dry-scene");
     this.optionalPipelineFailures.delete("svo-dry-scene");
     const retired = this.svoDryScenePipeline;
@@ -1393,7 +1394,7 @@ export class FluidLabRenderer {
       // emits more proxies than the target has pixels.
       (device) => createProductionSparseVoxelDrySceneRenderer(
         device, this.uniformBuffer!, this.bodyBuffer!, this.requestedPrimaryTraversal,
-        this.requestedPrimaryWorkMap, this.requestedSunlightCache,
+        this.requestedPrimaryWorkMap, this.requestedSunlightCache, this.requestedWaterShadows,
       ),
       (pipeline) => pipeline.initialize((label, completed, total) => this.reportSvoPipelineProgress(label, completed, total)),
       (pipeline) => {
@@ -2698,10 +2699,6 @@ export class FluidLabRenderer {
         svoMaterialFunctionIdForEnvironmentProxy(primitive, terrainSurface),
       )),
     ]);
-    const sceneGlass = buildSvoSceneGlass(scene, { cellSize_m: source.structural?.domain.cellSize_m });
-    const sceneThickGlass = buildSvoSceneThickGlass(scene, { revision });
-    const thickReplacedPaneKey = sceneThickGlass.metadata.find(({ replacesThinPaneKey }) => Boolean(replacesThinPaneKey))?.replacesThinPaneKey;
-    const thickReplacedPaneId = sceneGlass.metadata.find(({ key }) => key === thickReplacedPaneKey)?.paneId;
     const lightingMirrors = buildSparseVoxelDrySceneLightingMirrors(scene, revision);
     if (!lightingMirrors) {
       this.svoSourceAvailable = false;
@@ -2728,22 +2725,13 @@ export class FluidLabRenderer {
       // block never arrives resolves to zeroes, which the shader reads as "not
       // resolved" and draws as nothing — the aggregate's failure one level up.
       fieldProgramBlocks: scenePrimitives.fieldProgramBlocks,
-      glassRecords: sceneGlass.packedRecords,
-      glassCacheKey: sceneGlass.cacheKey,
-      thickGlassRecords: sceneThickGlass.packedRecords,
-      thickGlassRevision: sceneThickGlass.revision,
-      thickGlassCacheKey: sceneThickGlass.cacheKey,
-      thickGlassReplacedThinPaneId: thickReplacedPaneId,
       ...lightingMirrors,
       flatVoxelNormals: sceneUsesFlatVoxelNormals(scene),
       groundPlane: sceneSvoGroundPlane(scene),
     };
-    const thickGlassBound = resolveSparseVoxelThickGlassBinderStatus(publication) === "bound";
-    const replacedPaneKeys = new Set(sceneThickGlass.metadata.flatMap(({ replacesThinPaneKey }) => replacesThinPaneKey ? [replacesThinPaneKey] : []));
-    this.svoGlassSupported = !sceneGlass.metadata.some(({ key, opaqueCutoutKey }) => Boolean(opaqueCutoutKey) && (!thickGlassBound || !replacedPaneKeys.has(key)));
     this.svoMaterialsSupported = materialRecords.byteLength > 0;
     this.svoLightingSupported = canConsumeSparseVoxelLighting(publication);
-    const supported = this.svoGlassSupported && this.svoMaterialsSupported && this.svoLightingSupported;
+    const supported = this.svoMaterialsSupported && this.svoLightingSupported;
     const contractFailure = sparseVoxelDrySceneContractFailure(source, publication);
     this.svoSourceAvailable = supported && !contractFailure;
     if (!this.svoSourceAvailable) {
@@ -3250,7 +3238,7 @@ export class FluidLabRenderer {
         leafBricks: this.svoDrySceneSource?.structural?.capacities.leaves,
         targetPixels: this.presentationTexture.width * this.presentationTexture.height,
         environmentRefinementDepth,
-      }, primaryWorkMapRequested, activeSvoTuning.sunlightCacheEnabled);
+      }, primaryWorkMapRequested, activeSvoTuning.sunlightCacheEnabled, activeSvoTuning.waterShadowsEnabled);
     }
     this.ensureRequestedOptionalPipelines(optionalRendererPipelineRequests(
       gridOverlay, this.simulationRunning,
@@ -3721,7 +3709,7 @@ export class FluidLabRenderer {
       // A fenced empty frame does not establish that raster startup has
       // finished. The mesh receipt is copied after the GPU's draw publication.
       // Smooth reconstruction withholds the mesh by policy; traversal is then
-      // the intended primary, including on authored glass spheres (figure 8).
+      // the intended primary, including on spherical vessels (figure 8).
       && surfaceMeshAllowsLiveStartup(this.svoDryScenePipeline?.surfaceMeshStatus)
       ? pendingLiveSvo
       : undefined;
@@ -3750,7 +3738,6 @@ export class FluidLabRenderer {
         : silhouetteRefinementStatus?.state === "compiling" ? silhouetteRefinementStatus.detail : undefined,
       sourceAvailable: this.svoSourceAvailable,
       terrainSupported: true,
-      glassSupported: this.svoGlassSupported,
       materialsSupported: this.svoMaterialsSupported,
       lightingSupported: this.svoLightingSupported,
       svoEncoded,

@@ -334,8 +334,7 @@ export function addSceneryNode(scene: SceneDescription, node: SceneryNode): Scen
 /** Top-level nodes that publish geometry, in document order. */
 function selectableNodes(scene: SceneDescription): readonly SceneryNode[] {
   return sceneSceneryGraph(scene).nodes.filter((node) =>
-    node.kind !== "room-shell" && node.kind !== "terrain-shell"
-    && node.kind !== "glazing");
+    node.kind !== "room-shell" && node.kind !== "terrain-shell");
 }
 
 /**

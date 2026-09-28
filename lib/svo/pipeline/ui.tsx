@@ -58,7 +58,6 @@ const TRACE_WINDOW = 12;
 const rendererFailureLabels = {
   "missing-source": "waiting for structural SVO data",
   "unsupported-terrain": "terrain source could not be represented",
-  "unsupported-glass-cutout": "authored glazing needs an opaque shell cutout",
   "missing-pbr-materials": "production PBR material table is unavailable",
   "missing-lighting-publications": "production light/environment publications are unavailable",
   "pipeline-compile-failure": "SVO pipeline failed to compile",

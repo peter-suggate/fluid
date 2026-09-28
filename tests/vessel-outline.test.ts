@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { cloneScene, defaultScene, validateScene } from "../lib/core/model";
+import { cloneScene, defaultScene } from "../lib/core/model";
 import { sceneLatticeDimensions, solidVoxelShellForScene } from "../lib/core/scene-lattice";
 import {
   buildVesselOutlineGeometry,
@@ -53,22 +53,6 @@ test("an edited shell face is not falsely represented by the volume wireframe", 
   assert.doesNotMatch(outline.key, /yLow:/,
     "the cut floor remains residual voxel geometry instead of receiving a false full-slab cue");
   assert.equal(outline.geometry.segmentCount, 52);
-});
-
-test("legacy glass requests use the cheap outline while hidden vessels stay hidden", () => {
-  const glass = cloneScene(defaultScene);
-  glass.environment = "stage";
-  glass.container.vessel = "glass";
-  assert.equal(sceneVesselPresentation(glass), "outline");
-  assert.ok(buildVesselOutlineGeometry(glass));
-  assert.deepEqual(validateScene(glass), []);
-
-  const hidden = cloneScene(defaultScene);
-  hidden.environment = "stage";
-  hidden.container.vessel = "none";
-  assert.equal(sceneVesselPresentation(hidden), "none");
-  assert.equal(buildVesselOutlineGeometry(hidden), undefined);
-  assert.deepEqual(validateScene(hidden), []);
 });
 
 test("spherical outline is three staircase sections of the canonical voxel cavity", () => {

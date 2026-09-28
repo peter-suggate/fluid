@@ -17,8 +17,8 @@ export type SvoConeTracingMode = "cones" | "exact" | "off";
 /**
  * How *primary* visibility is resolved, as distinct from the lighting visibility
  * `SvoConeTracingMode` selects.
- * - `mesh`: cached opaque voxel boundary triangles; analytic planes, rigid bodies
- *   and glass retain their existing paths. Unsupported or unfinished mesh
+ * - `mesh`: cached opaque voxel boundary triangles; analytic planes and rigid
+ *   bodies retain their existing paths. Unsupported or unfinished mesh
  *   geometry is withheld; this mode never substitutes a primary ray march.
  * - `raster`: hardware-rasterize the resident bricks as depth-tested proxies.
  *   Octree leaves partition space, so the depth test alone is an exact

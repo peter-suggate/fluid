@@ -257,12 +257,6 @@ fn waterReceiverHeight(x: f32, z: f32) -> f32 {
 `;
 }
 
-export const GLASS_OPTICS = Object.freeze({
-  indexOfRefraction: 1.5,
-  fresnelF0: 0.04,
-  tint: [0.30, 0.58, 0.54] as LinearRgb
-});
-
 /** CPU mirror used in tests and tooling that author optical materials. */
 export function dielectricFresnel(cosine: number, f0: number) {
   const c = Math.min(1, Math.max(0, cosine));

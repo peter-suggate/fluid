@@ -87,9 +87,9 @@ const body=device.createBuffer({size:768,usage:GPUBufferUsage.STORAGE|GPUBufferU
 device.queue.writeBuffer(uniforms,0,packSvoDryViewUniforms({scene,camera:{...defaultCamera,...preset.camera},environmentId:scene.environment??'default',info:world.info,bodyCount:bodies.count,width,height}));
 device.queue.writeBuffer(body,0,bodies.data);
 const renderer=process.env.FLUID_SHADING_REFERENCE==='1'
- ? new SparseVoxelDrySceneRenderer(device,uniforms,body,'rgba16float','raster-primary','off','split',0,true,true,true,{surfaceMesh:true})
+ ? new SparseVoxelDrySceneRenderer(device,uniforms,body,'rgba16float','raster-primary','off','split',0,true,true,{surfaceMesh:true})
  : process.env.FLUID_SHADING_DISABLE_CACHE==='1'
- ? new SparseVoxelDrySceneRenderer(device,uniforms,body,'rgba16float','raster-primary','off','split',0,true,true,true,{surfaceMesh:true,voxelLightCache:false})
+ ? new SparseVoxelDrySceneRenderer(device,uniforms,body,'rgba16float','raster-primary','off','split',0,true,true,{surfaceMesh:true,voxelLightCache:false})
  : createProductionSparseVoxelDrySceneRenderer(device,uniforms,body,'mesh');
 const productionLighting=process.env.FLUID_PROBE_LIGHTING==='1';
 renderer.setLightingOptions(productionLighting ? DEFAULT_SVO_LIGHTING_OPTIONS : {globalIlluminationEnabled:false,coneTracingMode:'off',shadowsEnabled:false,ambientOcclusionEnabled:false});

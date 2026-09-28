@@ -67,7 +67,6 @@ export type PaperPhaseId =
   | "svo-band"
   | "svo-brick-cull"
   | "svo-rigid"
-  | "svo-glass"
   | "dry-scene"
   | "water-front-interface"
   | "water-back-interface"
@@ -1332,8 +1331,7 @@ export class GPUPassTimestampRecorder {
    * guessed at.
    *
    * A pass whose counters both come back zero was folded away or ran no stage —
-   * `raster-primary` encodes a thin-glass discovery pass with an instance count
-   * of zero, and that reports nothing on this hardware. Failing the whole frame
+   * a pass with an instance count of zero reports nothing on this hardware. Failing the whole frame
    * on it would mean the raster path could never be measured at all, so an
    * unsampled pass keeps its place in the list at zero. An *inverted* sampled
    * pair still fails the frame, because that is the hardware disagreeing with

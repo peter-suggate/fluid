@@ -20,7 +20,7 @@ export const GPU_RIGID_BODY_CAPACITY = 12;
  *
  * Owner ids 0..GPU_RIGID_BODY_CAPACITY-1 name a slot in the rigid arenas, which
  * are sized at that capacity whether or not the scene fills them; everything
- * else in the scene — scenery proxies, glass, fixture lights — is numbered from
+ * else in the scene — scenery proxies, fixture lights — is numbered from
  * here.
  *
  * It used to be `scene.rigidBodies.length`, which made every scenery object's

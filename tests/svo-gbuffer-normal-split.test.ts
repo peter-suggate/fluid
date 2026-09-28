@@ -47,7 +47,7 @@ test("the mesh fragment is the one producer that publishes a face of its own", (
 
 test("every other producer publishes one normal twice, bit for bit", async () => {
   const { createSvoDrySceneFragmentWGSL } = await import("../lib/svo/features/shading/program");
-  const source = createSvoDrySceneFragmentWGSL(1, "raster-primary", "bounds", "split", 0, false, true, false, false,
+  const source = createSvoDrySceneFragmentWGSL(1, "raster-primary", "bounds", "split", 0, false, false, false,
     { surfaceMesh: true, surfaceMeshCulling: true });
   // The old signature is the new one with the surface's own normal for a face,
   // so nothing but the mesh can move by so much as an oct8 quantum.
@@ -65,7 +65,7 @@ test("every other producer publishes one normal twice, bit for bit", async () =>
 
 test("the deferred lighting biases rays along the face and shades with the normal", async () => {
   const { createSvoDrySceneFragmentWGSL } = await import("../lib/svo/features/shading/program");
-  const source = createSvoDrySceneFragmentWGSL(1, "raster-primary", "bounds", "split", 0, false, true, false, false,
+  const source = createSvoDrySceneFragmentWGSL(1, "raster-primary", "bounds", "split", 0, false, false, false,
     { surfaceMesh: true, surfaceMeshCulling: true });
   // The face travels in the identity plane's free metadata bits, because the
   // packed oct8 plane is not bound to the lighting entry at all.
@@ -74,7 +74,7 @@ test("the deferred lighting biases rays along the face and shades with the norma
   // the lighting entry. The reduced composition adds a third, its cached
   // reconstruction entry.
   assert.equal(source.match(/vec3u\(0u,metadata,0u\)/g)?.length, 2);
-  const reduced = createSvoDrySceneFragmentWGSL(0.5, "raster-primary", "bounds", "split", 0, false, true, false, false,
+  const reduced = createSvoDrySceneFragmentWGSL(0.5, "raster-primary", "bounds", "split", 0, false, false, false,
     { surfaceMesh: true, surfaceMeshCulling: true });
   assert.equal(reduced.match(/vec3u\(0u,metadata,0u\)/g)?.length, 5);
   // Shadow rays and the contact hemisphere leave along the face.

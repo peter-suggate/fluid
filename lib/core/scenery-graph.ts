@@ -590,9 +590,9 @@ export type SceneryGeneratorNode = {
  * would freeze the wall at one container size. Three numbers survive a resize;
  * four boxes do not.
  *
- * The pane and the backing are declared here for the same reason. Glass in the
- * window and a lit city behind it are the hole's own properties, and holding
- * them anywhere else means two files that have to agree about where a wall is.
+ * The backing is declared here for the same reason. A lit city behind the
+ * window is the hole's own property, and holding it anywhere else means two
+ * files that have to agree about where a wall is.
  */
 export interface SceneryWallOpening {
   readonly halfWidth: number;
@@ -600,8 +600,6 @@ export interface SceneryWallOpening {
   readonly centerY: number;
   /** Key prefix for the four derived wall boxes. Defaults to `shell/wall-back`. */
   readonly frame?: string;
-  /** Id of the dielectric pane filling the opening. Absent leaves it open. */
-  readonly glazing?: string;
   /** A lit surface immediately outside the opening: a city, a sea. */
   readonly backing?: {
     readonly id: string;
@@ -609,18 +607,6 @@ export interface SceneryWallOpening {
     readonly group?: string;
     readonly tags?: readonly string[];
   };
-}
-
-/**
- * A thin dielectric pane, in the node's local XY plane with its normal on +Z.
- *
- * Glazing publishes no opaque proxy. It is traced as a transmissive surface by
- * the glass path, which is why it carries a half extent instead of a half size:
- * thickness is a scene-wide constant, not a per-pane decision.
- */
-export interface SceneryGlazingNode extends SceneryNodeBase {
-  readonly kind: "glazing";
-  readonly half: readonly [number, number];
 }
 
 /** The faces a room shell can build, in publication order. */
@@ -697,7 +683,6 @@ export type SceneryShellNode =
 
 export type SceneryNode =
   | SceneryPrimitiveNode
-  | SceneryGlazingNode
   | SceneryGroupNode
   | SceneryRecursiveShapeNode
   | SceneryTreeNode
@@ -777,6 +762,11 @@ export function validateSceneryGraph(graph: SceneryGraph): string[] {
           errors.push(`Scenery ${node.id} oak recipe names unknown palette ${material.palette}`);
         }
       }
+    }
+    // Glass is retired: a pane would publish nothing, and an opening is open.
+    if ((node.kind as string) === "glazing") errors.push(`Scenery node ${node.id}: glazing is no longer supported`);
+    if (node.kind === "room-shell" && node.backWall && "glazing" in node.backWall) {
+      errors.push(`Scenery room shell ${node.id}: back-wall glazing is no longer supported`);
     }
     if (isSceneryShellNode(node)) shells += 1;
     if (node.kind === "room-shell" && node.halfSize

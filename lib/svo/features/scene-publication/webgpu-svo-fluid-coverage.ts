@@ -50,6 +50,7 @@ export const SVO_FLUID_COVERAGE_BINDINGS = Object.freeze({
   coarsePhi: 0,
   params: 1,
   destination: 2,
+  bounds: 3,
 } as const);
 
 /** Compact arm bindings. The destination lane is shared with the dense arm. */
@@ -60,7 +61,42 @@ export const SVO_FLUID_COVERAGE_COMPACT_BINDINGS = Object.freeze({
   publication: 3,
   fill: 4,
   destination: 5,
+  bounds: 6,
 } as const);
+
+/**
+ * Texel box of every nonzero coverage texel of the last fill, eight words:
+ * xyz of (dimensions - minimum), then xyz of (maximum + 1), so a cleared
+ * buffer (all zero) is the empty box and both halves reduce by atomicMax.
+ * The dry scene copies it into its parameters and clips fluid marches to it.
+ */
+export const SVO_FLUID_COVERAGE_BOUNDS_BYTES = 32;
+
+/**
+ * Workgroup-then-global box reduction appended to both fill arms. One global
+ * atomic per axis per workgroup that saw water, never one per texel.
+ */
+function fluidCoverageBoundsWGSL(binding: number, dimensions: string): string {
+  return /* wgsl */ `
+@group(0) @binding(${binding}) var<storage, read_write> coverageBounds: array<atomic<u32>, 8>;
+var<workgroup> tileBounds: array<atomic<u32>, 8>;
+fn accumulateCoverageBounds(local: u32, gid: vec3u, covered: bool) {
+  if (local < 8u) { atomicStore(&tileBounds[local], 0u); }
+  workgroupBarrier();
+  if (covered) {
+    for (var axis = 0u; axis < 3u; axis += 1u) {
+      atomicMax(&tileBounds[axis], ${dimensions}[axis] - gid[axis]);
+      atomicMax(&tileBounds[4u + axis], gid[axis] + 1u);
+    }
+  }
+  workgroupBarrier();
+  if (local < 8u) {
+    let value = atomicLoad(&tileBounds[local]);
+    if (value != 0u) { atomicMax(&coverageBounds[local], value); }
+  }
+}
+`;
+}
 
 /** Dense arm: one filterable-free signed-distance volume over the lattice. */
 export interface WebGpuSvoFluidCoverageDenseSource {
@@ -122,19 +158,24 @@ fn coverageAtCell(cell: vec3u) -> f32 {
   return clamp(0.5 - signedDistance / params.cellDiagonal_m, 0.0, 1.0);
 }
 
+${fluidCoverageBoundsWGSL(SVO_FLUID_COVERAGE_BINDINGS.bounds, "params.dimensions")}
 @compute @workgroup_size(${SVO_FLUID_COVERAGE_LAYOUT.fillWorkgroupSize}, ${SVO_FLUID_COVERAGE_LAYOUT.fillWorkgroupSize}, ${SVO_FLUID_COVERAGE_LAYOUT.fillWorkgroupSize})
-fn fillFluidCoverage(@builtin(global_invocation_id) gid: vec3u) {
-  if (any(gid >= params.dimensions)) { return; }
-  let baseCell = gid * ${cellsPerTexel}u;
+fn fillFluidCoverage(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_index) local: u32) {
+  // No early return: the bounds reduction below has workgroup barriers.
+  let inside = all(gid < params.dimensions);
   var total = 0.0;
-  for (var z = 0u; z < ${cellsPerTexel}u; z += 1u) {
-    for (var y = 0u; y < ${cellsPerTexel}u; y += 1u) {
-      for (var x = 0u; x < ${cellsPerTexel}u; x += 1u) {
-        total += coverageAtCell(baseCell + vec3u(x, y, z));
+  if (inside) {
+    let baseCell = gid * ${cellsPerTexel}u;
+    for (var z = 0u; z < ${cellsPerTexel}u; z += 1u) {
+      for (var y = 0u; y < ${cellsPerTexel}u; y += 1u) {
+        for (var x = 0u; x < ${cellsPerTexel}u; x += 1u) {
+          total += coverageAtCell(baseCell + vec3u(x, y, z));
+        }
       }
     }
+    textureStore(destination, vec3i(gid), vec4f(total / ${(cellsPerTexel ** 3).toFixed(1)}, 0.0, 0.0, 1.0));
   }
-  textureStore(destination, vec3i(gid), vec4f(total / ${(cellsPerTexel ** 3).toFixed(1)}, 0.0, 0.0, 1.0));
+  accumulateCoverageBounds(local, gid, inside && total > 0.0);
 }
 `;
 }
@@ -191,12 +232,14 @@ fn sampleCoverage(index: u32) -> f32 {
   return coverageOf(finePackedPhi(index));
 }
 
+${fluidCoverageBoundsWGSL(SVO_FLUID_COVERAGE_COMPACT_BINDINGS.bounds, "fill.dimensions")}
 @compute @workgroup_size(${SVO_FLUID_COVERAGE_LAYOUT.fillWorkgroupSize}, ${SVO_FLUID_COVERAGE_LAYOUT.fillWorkgroupSize}, ${SVO_FLUID_COVERAGE_LAYOUT.fillWorkgroupSize})
-fn fillFluidCoverage(@builtin(global_invocation_id) gid: vec3u) {
-  if (any(gid >= fill.dimensions)) { return; }
+fn fillFluidCoverage(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_index) local: u32) {
+  // No early return: the bounds reduction below has workgroup barriers.
+  let inside = all(gid < fill.dimensions);
   let baseCell = gid * ${n};
   var total = 0.0;
-  if (all(baseCell < fill.fieldDimensions) && all(baseCell < params.sampleDimensions)) {
+  if (inside && all(baseCell < fill.fieldDimensions) && all(baseCell < params.sampleDimensions)) {
     let resolution = max(1u, params.brickResolution);
     let pageCoordinate = baseCell / resolution;
     let exactKey = pageCoordinate.x + params.brickDimensions.x
@@ -225,7 +268,8 @@ fn fillFluidCoverage(@builtin(global_invocation_id) gid: vec3u) {
       }
     }
   }
-  textureStore(destination, vec3i(gid), vec4f(total / ${(cellsPerTexel ** 3).toFixed(1)}, 0.0, 0.0, 1.0));
+  if (inside) { textureStore(destination, vec3i(gid), vec4f(total / ${(cellsPerTexel ** 3).toFixed(1)}, 0.0, 0.0, 1.0)); }
+  accumulateCoverageBounds(local, gid, inside && total > 0.0);
 }
 `;
 }
@@ -278,6 +322,7 @@ export class WebGpuSvoFluidCoverage {
   private fillBindGroup?: GPUBindGroup;
   private reduceBindGroups: GPUBindGroup[] = [];
   private uniforms?: GPUBuffer;
+  private boundsBuffer?: GPUBuffer;
   /** Compact arm only: the FineParams lane, rewritten when the publication moves. */
   private publication?: GPUBuffer;
   private publishedGeneration = -1;
@@ -329,6 +374,14 @@ export class WebGpuSvoFluidCoverage {
     return { view: this.sampledView, sampler: this.sampler, plan: this.plan, generation: this.generation };
   }
 
+  /**
+   * The last fill's nonzero texel box (SVO_FLUID_COVERAGE_BOUNDS_BYTES), for
+   * a same-frame copy by the dry scene. Undefined with visibleGeneration.
+   */
+  get bounds(): GPUBuffer | undefined {
+    return this.visibleGeneration() ? this.boundsBuffer : undefined;
+  }
+
   async initializePipelines(): Promise<void> {
     if (this.fillPipeline || this.destroyed) return;
     const compact = this.source.kind === "compact";
@@ -352,6 +405,7 @@ export class WebGpuSvoFluidCoverage {
         ...storage,
         { binding: compact ? SVO_FLUID_COVERAGE_COMPACT_BINDINGS.fill : SVO_FLUID_COVERAGE_BINDINGS.params, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
         { binding: compact ? SVO_FLUID_COVERAGE_COMPACT_BINDINGS.destination : SVO_FLUID_COVERAGE_BINDINGS.destination, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: SVO_FLUID_COVERAGE_LAYOUT.format, viewDimension: "3d" } },
+        { binding: compact ? SVO_FLUID_COVERAGE_COMPACT_BINDINGS.bounds : SVO_FLUID_COVERAGE_BINDINGS.bounds, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       ],
     });
     this.fillPipeline = await this.device.createComputePipelineAsync({
@@ -413,7 +467,8 @@ export class WebGpuSvoFluidCoverage {
   encode(encoder: GPUCommandEncoder): boolean {
     if (this.destroyed) return false;
     this.allocate();
-    if (!this.fillPipeline || !this.reducePipeline || !this.fillBindGroup || !this.texture) return false;
+    if (!this.fillPipeline || !this.reducePipeline || !this.fillBindGroup || !this.texture || !this.boundsBuffer) return false;
+    encoder.clearBuffer(this.boundsBuffer);
     const fillPass = encoder.beginComputePass({ label: "Fill SVO fluid coverage volume" });
     fillPass.setPipeline(this.fillPipeline);
     fillPass.setBindGroup(0, this.fillBindGroup);
@@ -447,6 +502,8 @@ export class WebGpuSvoFluidCoverage {
     if (this.destroyed) return;
     this.texture?.destroy();
     this.uniforms?.destroy();
+    this.boundsBuffer?.destroy();
+    this.boundsBuffer = undefined;
     this.publication?.destroy();
     this.publication = undefined;
     this.texture = undefined;
@@ -484,6 +541,11 @@ export class WebGpuSvoFluidCoverage {
     fillWords.set(this.plan.fieldDimensions, 4);
     fillFloats[8] = this.cellDiagonal_m;
     this.device.queue.writeBuffer(this.uniforms, 0, fillParams);
+    this.boundsBuffer = this.device.createBuffer({
+      label: "SVO fluid coverage bounds",
+      size: SVO_FLUID_COVERAGE_BOUNDS_BYTES,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+    });
 
     const destination = this.texture.createView({ dimension: "3d", baseMipLevel: 0, mipLevelCount: 1 });
     const source = this.source;
@@ -504,6 +566,7 @@ export class WebGpuSvoFluidCoverage {
           { binding: SVO_FLUID_COVERAGE_COMPACT_BINDINGS.publication, resource: { buffer: this.publication } },
           { binding: SVO_FLUID_COVERAGE_COMPACT_BINDINGS.fill, resource: { buffer: this.uniforms, offset: 0, size: FILL_PARAM_WORDS * 4 } },
           { binding: SVO_FLUID_COVERAGE_COMPACT_BINDINGS.destination, resource: destination },
+          { binding: SVO_FLUID_COVERAGE_COMPACT_BINDINGS.bounds, resource: { buffer: this.boundsBuffer } },
         ],
       });
     } else {
@@ -514,6 +577,7 @@ export class WebGpuSvoFluidCoverage {
           { binding: SVO_FLUID_COVERAGE_BINDINGS.coarsePhi, resource: source.coarsePhi },
           { binding: SVO_FLUID_COVERAGE_BINDINGS.params, resource: { buffer: this.uniforms, offset: 0, size: FILL_PARAM_WORDS * 4 } },
           { binding: SVO_FLUID_COVERAGE_BINDINGS.destination, resource: destination },
+          { binding: SVO_FLUID_COVERAGE_BINDINGS.bounds, resource: { buffer: this.boundsBuffer } },
         ],
       });
     }

@@ -28,7 +28,7 @@ import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning } from "../lib/svo/
 
     for (const culling of [true, false]) {
       const module: GPUShaderModule = device.createShaderModule({ code: createSvoDrySceneFragmentWGSL(1,
-        "raster-primary", "bounds", "split", 0, false, true, false, false,
+        "raster-primary", "bounds", "split", 0, false, false, false,
         { surfaceMesh: true, surfaceMeshCulling: culling }) });
       const errors = (await module.getCompilationInfo()).messages.filter(message => message.type === "error");
       assert.deepEqual(errors, [], `full shader, culling=${culling}`);
