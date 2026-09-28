@@ -1,5 +1,4 @@
 import { uniformMixedPressureStorage } from "./uniform-mixed-pressure-boundary.wgsl";
-import { DEFAULT_UNIFORM_CM11A_SCHEDULE, type UniformCM11aSchedule } from "./pressure-policy";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { UniformMixedPressureBoundsStage, UniformMixedPressureLevelStage, UniformMixedPressurePasses, UniformMixedPressureTransferStage,
   type UniformMixedPressureEntry, type UniformMixedPressureBoundsEntry, type UniformMixedPressureTransferEntry } from "./uniform-mixed-pressure-stage";
@@ -21,8 +20,11 @@ export interface UniformMixedPressureCycleLevel {
 }
 
 /** Native CM11a cycle traversal through one all-4h level (the band
- * pressure's bulk solve) whose coarse correction the native hierarchy solves
- * from 4h, entered at the second all-4h level. All fields are borrowed. The
+ * pressure's bulk solve) whose correction the native hierarchy solves from
+ * 4h, entered at the second all-4h level. Both levels are the same all-4h
+ * layout, so level transfers are injections; level 0 does no smoothing of
+ * its own (its operator is the native 4h one, consistent theta), only the
+ * residual, the measure and the correction bounds. All fields are borrowed. The
  * callback continues the existing uniform hierarchy at 4h; a large 4h grid
  * must not be dispatched as one coarsest workgroup. Convergence validation
  * and field publication remain the native host's job. */
@@ -40,7 +42,6 @@ export class UniformMixedPressureCycles {
   constructor(private readonly device: GPUDevice, readonly levels: readonly UniformMixedPressureCycleLevel[],
     private readonly backup: GPUBufferBinding,
     private readonly encodeUniformHierarchy: (encoder: GPUCommandEncoder, rhs: GPUBufferBinding, kind: "v" | "full") => void,
-    private readonly schedule: UniformCM11aSchedule = DEFAULT_UNIFORM_CM11A_SCHEDULE,
     private readonly boundary?: {openTop:boolean}) {
     if(levels.length!==2)throw new Error("Mixed pressure traversal requires two all-4h levels");
     this.constrained=!!levels[0]!.minimum; this.surface=!!levels[0]!.phi; this.solid=!!levels[0]!.topology;
@@ -56,8 +57,7 @@ export class UniformMixedPressureCycles {
   async initialize(): Promise<void> {
     const kind=this.solid?"buffer" as const:undefined,[fine,coarse]=this.levels as [UniformMixedPressureCycleLevel,UniformMixedPressureCycleLevel];
     this.stage0=new UniformMixedPressureLevelStage(this.device,fine.ownership,this.constrained,this.surface,this.boundary,kind);await this.stage0.initialize();
-    // Native host's paper-destination >= M-C phi policy.
-    this.transfer0=new UniformMixedPressureTransferStage(this.device,fine.ownership,coarse.ownership,true,!!this.boundary,kind);await this.transfer0.initialize();
+    this.transfer0=new UniformMixedPressureTransferStage(this.device,fine.ownership,coarse.ownership,!!this.boundary,kind);await this.transfer0.initialize();
     if(this.constrained){this.bound0=new UniformMixedPressureBoundsStage(this.device,fine.ownership,coarse.ownership,!!this.boundary);await this.bound0.initialize();}
   }
   private get stage(): UniformMixedPressureLevelStage {if(!this.stage0)throw new Error("Mixed pressure cycles are not initialized");return this.stage0;}
@@ -74,12 +74,6 @@ export class UniformMixedPressureCycles {
   }
   private encodeEntry(encoder: UniformMixedPressurePasses,level: number,entry: UniformMixedPressureEntry,rhs: GPUBufferBinding,result=this.levels[level]!.residual): void {
     this.stage.encode(encoder,entry,this.group(level,rhs,result));
-  }
-  private smooth(encoder: UniformMixedPressurePasses,level: number,rhs: GPUBufferBinding,count: number): void {
-    const group=this.group(level,rhs,this.levels[level]!.residual);
-    // The first sweep of a visit projects every air owner onto p_min; air is
-    // then a fixed point, so later sweeps revisit only liquid tiles.
-    for(let i=0;i<count;i++)this.stage.encodeSweep(encoder,group,this.surface&&i>0);
   }
   private transfer(encoder: UniformMixedPressurePasses,level: number,entry: UniformMixedPressureTransferEntry,source: GPUBufferBinding,destination: GPUBufferBinding): void {
     const key=`transfer:${level}:${entry}:${this.key(source)}:${this.key(destination)}`;
@@ -120,7 +114,7 @@ export class UniformMixedPressureCycles {
   private surfaceRestriction(encoder: UniformMixedPressurePasses): void {
     // The native continuation extends the 4h phi itself.
     if(this.surface)this.transfer(encoder,0,"restrictSurfacePhi",this.ownerPhi(0),this.ownerPhi(1));
-    // Seam records freeze this frame's phi/solid coefficients for every sweep.
+    // Records freeze this frame's phi/solid coefficients for residual and measure.
     this.stage.encodeRecords(encoder,this.group(0,this.levels[0]!.rhs[0],this.levels[0]!.residual));
   }
   private residual(encoder: UniformMixedPressurePasses,level: number,rhs: GPUBufferBinding,output=this.levels[level]!.residual): void {
@@ -132,14 +126,13 @@ export class UniformMixedPressureCycles {
   encodeVCycle(encoder: GPUCommandEncoder): void {this.batch(encoder,"V-cycle",passes=>this.vCycle(passes,this.levels[0]!.rhs[0]));}
   private vCycle(encoder: UniformMixedPressurePasses,rhs: GPUBufferBinding): void {
     const l=this.levels[0]!,next=this.levels[1]!;
-    this.smooth(encoder,0,rhs,this.schedule.preSweeps);this.residual(encoder,0,rhs);
-    this.transfer(encoder,0,"restrictValues",l.residual,next.rhs[0]);
+    // Same layout: the residual is the correction's right side directly.
+    this.residual(encoder,0,rhs,next.rhs[0]);
     if(this.constrained)this.bound(encoder,0,"downsampleSubtract",next.minimum![0]!);
     // Reads neither field above; last, so the native 4h clear ends the pass
     // the hierarchy would end anyway.
     this.clearPressure(encoder);
     this.encodeUniformHierarchy(encoder.commands,next.rhs[0],"v");this.transfer(encoder,0,"prolongAdd",next.pressure,l.pressure);
-    this.smooth(encoder,0,rhs,this.schedule.postSweeps);
   }
   encodeFullCycle(encoder: GPUCommandEncoder): void {this.batch(encoder,"Full-cycle",passes=>this.fullCycle(passes));}
   private fullCycle(encoder: UniformMixedPressurePasses): void {

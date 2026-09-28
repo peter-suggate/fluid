@@ -1,11 +1,11 @@
-/** Per-frame linear records for the rows of the fused sweep launch (seam
- * tiles of every tier plus small regular tiers). Reconstruction, the frozen
- * seam correction and the core Jacobi terms are all linear in pressure, with
- * coefficients fixed by ownership, phi and static solids for a whole solve.
- * One build writes them; every sweep then gathers instead of re-walking
- * canonical patches, ghost thetas and wall coefficients.
+/** Per-frame linear records for the fused rows (seam tiles of every tier
+ * plus small regular tiers). Reconstruction, the frozen seam correction and
+ * the core terms are all linear in pressure, with coefficients fixed by
+ * ownership, phi and static solids for a whole solve. One build writes them;
+ * residual and measure then gather instead of re-walking canonical patches,
+ * ghost thetas and wall coefficients.
  *
- * Buffer: liquid-list prefix (16 + tile count words), then one chunk per fused job. Each chunk's word 0 holds the job's cell width (0 for
+ * Buffer: one chunk per fused job. Each chunk's word 0 holds the job's cell width (0 for
  * an idle job); rows start at word 64 with stride UM_REC_ROWS/cells. A row:
  *  0 flags (bit0 slope, bit1 liquid, bits 8.. core, 16.. correction, 24.. halo counts)
  *  1 owner index, 2 diagonal, 3 slope count,
@@ -23,9 +23,7 @@ export function uniformMixedPressureRecordsSource(surface: boolean, boundary: bo
   return /* wgsl */ `
 @group(2) @binding(0) var<storage,read_write> records:array<u32>;
 const UM_REC_ROWS:u32=${UNIFORM_MIXED_PRESSURE_RECORD_ROWS}u;
-// A once-per-solve copy of the liquid tile list precedes the seam records.
-// Fused sweeps read both through this binding, without another storage buffer.
-const UM_REC_PREFIX:u32=16u+UM_TILES;
+const UM_REC_PREFIX:u32=0u;
 const UM_REC_CHUNK:u32=${UNIFORM_MIXED_PRESSURE_RECORD_CHUNK}u;
 fn umRecEntries(width:u32)->u32{return select(24u,6u,width==1u);}
 fn umRecStore(at:u32,value:f32){records[at]=bitcast<u32>(value);}
@@ -228,27 +226,6 @@ fn umRecProjected(r:f32,p:f32,low:f32,diagonal:f32)->f32 {
  }` : ""}
  ${surface ? `if((flags&2u)==0u){result[index]=select(0.0,3.402823e38,(bitcast<u32>(p)&0x7f800000u)==0x7f800000u);return;}` : ""}
  result[index]=umRecProjected(umRecResidual(row,flags,index),p,${constrained ? "minimum[index]" : "-3.402823e38"},umRecLoad(row+2u));
-}
-// One projected Jacobi update of a record row. With freeze (the first half
-// of a sweep) the frozen right side is evaluated here from the old iterate
-// and kept for the second half.
-fn umRecSmooth(row:u32,E:u32,freeze:bool){
- let flags=records[row];let index=records[row+1u];let diagonal=umRecLoad(row+2u);
- let old=pressures[index];var next=old;
- var b=0.0;
- if(freeze){b=umRecFrozen(row,E,flags,index);frozen[index]=b;${boundary ? "let haloAt=row+10u+11u*E;for(var k=0u;k<(flags>>24u);k++){let halo=records[haloAt+2u*k];frozen[halo]=rhs[halo];}" : ""}}
- else{b=frozen[index];}
- if(diagonal>0.0){
-  var sum=b;
-  for(var k=0u;k<((flags>>8u)&0xffu);k++){sum+=umRecLoad(row+5u+2u*k)*pressures[records[row+4u+2u*k]];}
-  next=mix(old,sum/diagonal,0.6666667);
- }
- result[index]=${constrained ? "max(next,minimum[index])" : "next"};
- ${boundary ? `let haloAt=row+10u+11u*E;for(var k=0u;k<(flags>>24u);k++){
-  let halo=records[haloAt+2u*k];let coefficient=umRecLoad(haloAt+2u*k+1u);
-  let value=select(pressures[halo],mix(pressures[halo],old+rhs[halo]/coefficient,0.6666667),coefficient>0.0);
-  result[halo]=max(value,minimum[halo]);
- }` : ""}
 }
 `;
 }

@@ -105,72 +105,170 @@ export class UniformMixedRemap {
  destroy():void{this.target.destroy();this.worklist.destroy();this.indirect.destroy();}
 }
 
-/** Frame-internal transfer between two fixed, externally owned ownerships
- * of one lattice: the h/4h simulation layout and its graded pressure layout.
- * Neither ownership changes. The source is written into distinct output
- * fields: the caller copies every field whole first, and the remap kernels
- * then overwrite the owners whose values differ (markTransfer). The same
- * worklist serves both directions. */
+/** Frame-internal transfer between the h/4h simulation ownership and the
+ * all-4h pressure ownership of one lattice (the band pressure's split).
+ * Neither ownership changes, and every tile is one 4h pressure owner, so each
+ * direction is one direct launch of one workgroup per tile, addressed by
+ * lattice position alone: no worklist, no owner lookups, no whole-field copy.
+ * Only what the other side reads is written: a 4h owner's origin volume texel,
+ * its three positive-face anchor texels (origin + 3 on the face's axis, the
+ * face in that component, the released-wall bits in w) and its negative
+ * domain-wall entries; every h owner's texel and wall entries. Pressure phi
+ * needs no transfer: the simulation phi is resolved, so its texels at the 4h
+ * corners are the pressure ownership's vertex values.
+ * - To pressure: a 4h face is the mean of the simulation patches on it (a
+ *   4h simulation face with one patch is copied), so each owner's flux is
+ *   preserved exactly; volume is the mean of the h cells; a wall face is
+ *   released only when its whole footprint was.
+ * - To simulation: an h face interpolates the 4h owner's two faces on its
+ *   axis at its plane, a 4h face with one patch is copied, one of sixteen
+ *   patches takes its 4h face. */
 export class UniformMixedOwnershipTransfer {
- get allocatedBytes(){return this.worklist.size+this.indirect.size;}
+ readonly allocatedBytes=0;
  private readonly resources:GPUBindGroupLayout;
  private readonly pipelines=new Map<string,GPUComputePipeline>();
- private readonly worklist:GPUBuffer;
- private readonly indirect:GPUBuffer;
  constructor(private readonly device:GPUDevice,readonly simulation:UniformMixedOwnership,readonly pressure:UniformMixedOwnership){
   if(simulation.layout.tiles.length!==pressure.layout.tiles.length)throw new Error("Ownership transfer requires one tile lattice");
-  this.worklist=device.createBuffer({label:"Uniform mixed transfer worklist",size:(4+simulation.layout.tiles.length)*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
-  this.indirect=device.createBuffer({label:"Uniform mixed transfer dispatch",size:16,usage:GPUBufferUsage.INDIRECT|GPUBufferUsage.COPY_DST});
+  if(pressure.layout.tiles.some(word=>(word&0xc0000000)!==0))throw new Error("Ownership transfer targets the all-4h pressure ownership");
   this.resources=device.createBindGroupLayout({entries:[
-   ...[0,1,2].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
-   {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
-   ...[4,5,6].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only" as const,format:(binding===5?"rgba32float":"r32float") as GPUTextureFormat,viewDimension:"3d" as const}})),
-   {binding:7,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
-   {binding:8,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
+   ...[0,1].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
+   {binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
+   ...[3,4].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only" as const,format:(binding===4?"rgba32float":"r32float") as GPUTextureFormat,viewDimension:"3d" as const}})),
+   {binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
   ]});
  }
- /** Fields read in the source layout and written in the target layout. */
- bind(input:Fields,output:Fields):GPUBindGroup{
+ /** Fields read in the source ownership and written in the target's. The
+  * volume pair is read and written by the transfer to pressure only. */
+ bind(input:{volume:GPUTexture;velocity:GPUTexture;negative:GPUBuffer},output:{volume:GPUTexture;velocity:GPUTexture;negative:GPUBuffer}):GPUBindGroup{
   return this.device.createBindGroup({layout:this.resources,entries:[
-   ...[input.volume,input.velocity,input.phi].map((t,binding)=>({binding,resource:t.createView()})),{binding:3,resource:{buffer:input.negative}},
-   ...[output.volume,output.velocity,output.phi].map((t,i)=>({binding:4+i,resource:t.createView()})),{binding:7,resource:{buffer:output.negative}},
-   {binding:8,resource:{buffer:this.worklist}},
+   {binding:0,resource:input.volume.createView()},{binding:1,resource:input.velocity.createView()},{binding:2,resource:{buffer:input.negative}},
+   {binding:3,resource:output.volume.createView()},{binding:4,resource:output.velocity.createView()},{binding:5,resource:{buffer:output.negative}},
   ]});
  }
  async initialize():Promise<void>{
-  const module=this.device.createShaderModule({label:"Uniform mixed ownership transfer",code:uniformMixedRemapWGSL(this.simulation.layout)});
+  const module=this.device.createShaderModule({label:"Uniform mixed ownership transfer",code:uniformMixedOwnershipTransferWGSL(this.simulation.layout)});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
-  const constants={umDispatchX:this.simulation.dispatchX};
-  const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.simulation.bindLayout,this.pressure.bindLayout,this.resources]});
-  for(const entryPoint of ["markTransfer","publishWorklist","remapCells","remapFaces"])this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants}}));
+  const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.simulation.bindLayout,this.resources]});
+  for(const entryPoint of ["toPressure","toSimulation"])this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.simulation.dispatchX}}}));
  }
- private begin(e:GPUCommandEncoder,label:string,toPressure:boolean,group:GPUBindGroup):GPUComputePassEncoder{
-  const [source,target]=toPressure?[this.simulation,this.pressure]:[this.pressure,this.simulation];
-  const pass=e.beginComputePass({label});pass.setBindGroup(0,source.bindGroup);pass.setBindGroup(1,target.bindGroup);pass.setBindGroup(2,group);return pass;
- }
- /** Simulation to pressure: rebuilds the worklist, then remaps cells (volume,
-  * vertex phi) and faces (velocity, negative boundary planes). */
- encodeToPressure(e:GPUCommandEncoder,group:GPUBindGroup):void{
-  if(this.pipelines.size!==4)throw new Error("Ownership transfer has not been initialized");
-  e.clearBuffer(this.worklist,0,16);
-  const groups=Math.ceil(this.simulation.layout.tiles.length/64),list=this.begin(e,"Uniform mixed transfer worklist",true,group);
-  list.setPipeline(this.pipelines.get("markTransfer")!);list.dispatchWorkgroups(Math.min(groups,this.simulation.dispatchX),Math.ceil(groups/this.simulation.dispatchX));
-  list.setPipeline(this.pipelines.get("publishWorklist")!);list.dispatchWorkgroups(1);
-  list.end();
-  e.copyBufferToBuffer(this.worklist,0,this.indirect,0,12);
-  const pass=this.begin(e,"Uniform mixed transfer to pressure",true,group);
-  for(const name of ["remapCells","remapFaces"]){pass.setPipeline(this.pipelines.get(name)!);pass.dispatchWorkgroupsIndirect(this.indirect,0);}
+ private encode(e:GPUCommandEncoder,entry:"toPressure"|"toSimulation",group:GPUBindGroup):void{
+  const pipeline=this.pipelines.get(entry);if(!pipeline)throw new Error("Ownership transfer has not been initialized");
+  const pass=e.beginComputePass({label:entry==="toPressure"?"Uniform mixed transfer to pressure":"Uniform mixed transfer to simulation"});
+  pass.setBindGroup(0,this.simulation.bindGroup);pass.setBindGroup(1,group);pass.setPipeline(pipeline);
+  const tiles=this.simulation.layout.tiles.length,x=this.simulation.dispatchX;pass.dispatchWorkgroups(Math.min(tiles,x),Math.ceil(tiles/x));
   pass.end();
  }
- /** Pressure to simulation: faces only, on the worklist of the last
-  * encodeToPressure. A 4h face is the mean of its 2h faces, so the
-  * projected flux of every simulation owner is preserved exactly. */
- encodeToSimulation(e:GPUCommandEncoder,group:GPUBindGroup):void{
-  const pass=this.begin(e,"Uniform mixed transfer to simulation",false,group);
-  pass.setPipeline(this.pipelines.get("remapFaces")!);pass.dispatchWorkgroupsIndirect(this.indirect,0);
-  pass.end();
+ /** Simulation to pressure: volume, faces and negative walls. */
+ encodeToPressure(e:GPUCommandEncoder,group:GPUBindGroup):void{this.encode(e,"toPressure",group);}
+ /** Pressure to simulation: faces and negative walls. */
+ encodeToSimulation(e:GPUCommandEncoder,group:GPUBindGroup):void{this.encode(e,"toSimulation",group);}
+ destroy():void{}
+}
+
+/** The transfer's kernels (UniformMixedOwnershipTransfer). Group 0 is the
+ * simulation ownership in both directions; the pressure side is all-4h. */
+function uniformMixedOwnershipTransferWGSL(layout:UniformMixedLayout):string{
+ return uniformMixedTopologyWGSL(layout,0)+uniformMixedFaceAddressWGSL+/* wgsl */`
+@group(1) @binding(0) var volume:texture_3d<f32>;
+@group(1) @binding(1) var velocity:texture_3d<f32>;
+@group(1) @binding(2) var<storage,read> negative:array<f32>;
+@group(1) @binding(3) var outputVolume:texture_storage_3d<r32float,write>;
+@group(1) @binding(4) var output:texture_storage_3d<rgba32float,write>;
+@group(1) @binding(5) var<storage,read_write> boundary:array<f32>;
+fn tBits(texel:vec4f)->u32{return u32(round(texel.w));}
+// The simulation tile at tile coordinate c across the tile's positive face
+// on axis a is h: that 4h face holds sixteen simulation patches.
+fn tSplit(c:vec3u,a:u32)->bool{var q=c;q[a]+=1u;return q[a]<UM_T[a]&&umTileWidth(umTileAt(q))==1u;}
+var<workgroup> tVolume:array<f32,64>;
+// Per axis: the simulation value on the tile's positive plane (positive
+// faces) and on its negative domain plane (wall entries), with the released
+// bit of each, at lane + 64 axis.
+var<workgroup> tPositive:array<vec2f,192>;
+var<workgroup> tNegative:array<vec2f,192>;
+// Sixteen plane samples summed in the order the remap's patch mean uses.
+// wall: the negative domain plane's samples, else the positive plane's.
+fn tMean(wall:bool,a:u32)->vec2f{
+ let u=(a+1u)%3u;let v=(a+2u)%3u;var value=0.0;var released=1.0;
+ for(var y=0u;y<4u;y++){for(var x=0u;x<4u;x++){
+  var q=vec3u(0);q[a]=select(3u,0u,wall);q[u]=x;q[v]=y;let i=q.x+4u*(q.y+4u*q.z)+64u*a;
+  let s=select(tPositive[i],tNegative[i],wall);value+=s.x;released=min(released,s.y);
+ }}return vec2f(value/16.0,released);
+}
+@compute @workgroup_size(64) fn toPressure(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ let tile=group.x+umDispatchX*group.y;if(tile>=UM_TILES){return;}
+ let c=umTileCoord(tile);let local=umCorner(lane,4u);let base=c*4u;let cell=vec3i(base+local);
+ let fine=umTileWidth(tile)==1u;
+ if(fine){
+  tVolume[lane]=textureLoad(volume,cell,0).x;let texel=textureLoad(velocity,cell,0);let bits=tBits(texel);
+  for(var a=0u;a<3u;a++){
+   tPositive[lane+64u*a]=vec2f(texel[a],f32((bits>>a)&1u));
+   if(c[a]==0u&&local[a]==0u){tNegative[lane+64u*a]=vec2f(negative[umNegativeBoundaryIndex(vec3u(cell),a)],f32((bits>>(a+3u))&1u));}
+  }
+ }else{
+  // A 4h tile's split positive faces: its plane cells are the patch anchors.
+  let texel=textureLoad(velocity,cell,0);
+  for(var a=0u;a<3u;a++){if(local[a]==3u&&tSplit(c,a)){tPositive[lane+64u*a]=vec2f(texel[a],0.0);}}
  }
- destroy():void{this.worklist.destroy();this.indirect.destroy();}
+ workgroupBarrier();
+ if(lane==0u){
+  var value=0.0;
+  if(fine){for(var z=0u;z<4u;z++){for(var y=0u;y<4u;y++){for(var x=0u;x<4u;x++){value+=tVolume[x+4u*(y+4u*z)];}}}value/=64.0;}
+  else{value=textureLoad(volume,cell,0).x;}
+  textureStore(outputVolume,cell,vec4f(value));
+ }
+ if(lane>=3u){return;}
+ // Lane a: the owner's negative wall (every lane, for the released bits it
+ // packs), then its positive face on axis a.
+ var negativeBits=0u;
+ for(var b=0u;b<3u;b++){
+  if(c[b]!=0u){continue;}
+  var wall=vec2f(0);
+  if(fine){wall=tMean(true,b);}
+  else{var anchor=vec3i(base);anchor[b]+=3;wall=vec2f(negative[umNegativeBoundaryIndex(base,b)],f32((tBits(textureLoad(velocity,anchor,0))>>(b+3u))&1u));}
+  negativeBits|=u32(wall.y)<<(b+3u);
+  if(b==lane){boundary[umNegativeBoundaryIndex(base,b)]=wall.x;}
+ }
+ let a=lane;var anchor=vec3i(base);anchor[a]+=3;let wall=c[a]+1u==UM_T[a];
+ var face=vec2f(0);
+ if(fine||tSplit(c,a)){face=tMean(false,a);}
+ else{let texel=textureLoad(velocity,anchor,0);face=vec2f(texel[a],f32((tBits(texel)>>a)&1u));}
+ var packed=vec4f(0);packed[a]=face.x;
+ packed.w=f32(select(0u,u32(face.y)<<a,wall)|negativeBits);
+ textureStore(output,anchor,packed);
+}
+@compute @workgroup_size(64) fn toSimulation(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ let tile=group.x+umDispatchX*group.y;if(tile>=UM_TILES){return;}
+ let c=umTileCoord(tile);let local=umCorner(lane,4u);let base=c*4u;let origin=vec3i(base);let cell=vec3i(base+local);
+ // The 4h owner's two faces on each axis, and its wall bits.
+ var low=vec3f(0);var high=vec3f(0);var positiveBits=0u;var negativeBits=0u;
+ for(var a=0u;a<3u;a++){
+  var anchor=origin;anchor[a]+=3;let texel=textureLoad(velocity,anchor,0);let bits=tBits(texel);high[a]=texel[a];
+  if(c[a]+1u==UM_T[a]){positiveBits|=bits&(1u<<a);}
+  if(c[a]==0u){low[a]=negative[umNegativeBoundaryIndex(base,a)];negativeBits|=bits&(1u<<(a+3u));}
+  else{var below=origin;below[a]-=1;low[a]=textureLoad(velocity,below,0)[a];}
+ }
+ if(umTileWidth(tile)==1u){
+  var packed=vec4f(0);var bits=0u;
+  for(var a=0u;a<3u;a++){
+   packed[a]=mix(low[a],high[a],f32(local[a]+1u)/4.0);
+   if(local[a]==3u){bits|=positiveBits&(1u<<a);}
+   if(local[a]==0u&&c[a]==0u){boundary[umNegativeBoundaryIndex(vec3u(cell),a)]=mix(low[a],high[a],0.0);bits|=negativeBits&(1u<<(a+3u));}
+  }
+  packed.w=f32(bits);textureStore(output,cell,packed);
+  return;
+ }
+ // A 4h owner: split positive faces at their plane cells, the others copied
+ // at their anchor, and its negative walls.
+ var packed=vec4f(0);var written=false;
+ for(var a=0u;a<3u;a++){if(local[a]==3u&&tSplit(c,a)){packed[a]=mix(low[a],high[a],1.0);written=true;}}
+ if(written){packed.w=f32(negativeBits);textureStore(output,cell,packed);}
+ if(lane<3u){
+  let a=lane;var anchor=origin;anchor[a]+=3;
+  if(!tSplit(c,a)){textureStore(output,anchor,textureLoad(velocity,anchor,0));}
+  if(c[a]==0u){boundary[umNegativeBoundaryIndex(base,a)]=low[a];}
+ }
+}
+`;
 }
 
 /** Remap kernels between two ownership generations of one lattice. Group 0
@@ -204,23 +302,6 @@ function uniformMixedRemapWGSL(layout:UniformMixedLayout):string{
   let q=umTileAt(vec3u(vec3i(x,y,z)));
   if(select(umTileWidth(q)!=oldumTileWidth(q),umTileWidth(q)<oldumTileWidth(q),fine)){atomicStore(&worklist[4u+atomicAdd(&worklist[3],1u)],tile);return;}
  }}}
-}
-// The frame-internal transfer writes into whole-field copies, so only owners
-// whose own values differ are visited: a tile whose width changed, and a
-// coarse tile whose positive face borders one (its patches there split or
-// merge). An unchanged coarse tile keeps its cells, and every vertex it has
-// authority over is a canonical corner in both layouts, already copied.
-@compute @workgroup_size(64) fn markTransfer(@builtin(global_invocation_id) gid:vec3u){
- let tile=gid.x+umDispatchX*64u*gid.y;if(tile>=UM_TILES){return;}
- let width=umTileWidth(tile);var listed=width!=oldumTileWidth(tile);
- if(!listed&&width!=1u){
-  let p=umTileCoord(tile);
-  for(var axis=0u;axis<3u;axis++){
-   var q=p;q[axis]+=1u;
-   if(q[axis]<UM_T[axis]){let n=umTileAt(q);listed=listed||umTileWidth(n)!=oldumTileWidth(n);}
-  }
- }
- if(listed){atomicStore(&worklist[4u+atomicAdd(&worklist[3],1u)],tile);}
 }
 @compute @workgroup_size(1) fn publishWorklist(){
  let count=atomicLoad(&worklist[3]);

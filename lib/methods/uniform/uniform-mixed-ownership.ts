@@ -1,6 +1,6 @@
 import { UNIFORM_MIXED_HANGING_RECORD } from "./uniform-mixed-velocity-sampling.wgsl";
 import type { UniformMixedLayout } from "./uniform-mixed-layout";
-import { UNIFORM_MIXED_FUSED_REGULAR_TILES, UNIFORM_MIXED_PACKED_REGULAR_OWNERS } from "./uniform-mixed-topology.wgsl";
+import { UNIFORM_MIXED_FUSED_REGULAR_TILES } from "./uniform-mixed-topology.wgsl";
 
 type OwnershipUploadTarget="topology"|"counts"|"support"|"certifiedDispatch";
 interface OwnershipDerivation{
@@ -19,7 +19,7 @@ function deriveOwnership(layout:UniformMixedLayout,dispatchX:number):OwnershipDe
   const cached=derivations.get(layout);
   if(cached&&cached.dispatchX===dispatchX)return cached;
   const writes:[OwnershipUploadTarget,number,Uint32Array<ArrayBuffer>][]=[];
-  // The owner ABI keeps three tiers; the 2h tier (1) is always empty.
+  // The owner ABI keeps three tiers; tier 1 is empty (reserved).
   const none=new Uint32Array(0);
   const words=new Uint32Array(layout.metadataBytes/4);let offset=0;
   for(const part of [layout.tiles,layout.fineTiles,layout.coarseTiles,layout.stencils]){words.set(part,offset);offset+=part.length;}
@@ -46,7 +46,7 @@ function deriveOwnership(layout:UniformMixedLayout,dispatchX:number):OwnershipDe
   const regular=(tile:number)=>(layout.stencils[2*tile]!>>>27)===(layout.stencils[2*tile+1]!>>>27);
   const seamLists=[layout.fineTiles,none,layout.coarseTiles].map(tiles=>[...tiles].filter(tile=>!regular(tile)));
   // Regular 4h tiles run one lane per owner, 64 owners per merged job
-  // (the empty 2h list keeps its ABI slot).
+  // (the empty, reserved tier-1 list keeps its ABI slot).
   const regularLists=[none,layout.coarseTiles].map(tiles=>[...tiles].filter(regular));
   // Merged jobs: general h, the seam 4h tiles, packed owners.
   const merged=layout.fineTiles.length+seamLists[2]!.length+Math.ceil(regularLists[1]!.length/64);
@@ -79,7 +79,7 @@ function quadMergedArgs(general:number,seamFour:number,regularFour:number,dispat
 }
 
 /** Per-tier pipelines for a stage on the ungraded h/4h ownership: tier 0 (h)
- * and tier 2 (4h). The 2h tier slot stays a hole; it is never dispatched
+ * and tier 2 (4h). The tier-1 slot is empty (reserved); it is never dispatched
  * because its count is always zero. */
 export async function compileMixedTiers(compile:(width:1|4)=>Promise<GPUComputePipeline>):Promise<GPUComputePipeline[]>{
   const [fine,coarse]=await Promise.all([compile(1),compile(4)]);
@@ -109,7 +109,7 @@ export class UniformMixedOwnership {
     if(!this.sampled)throw new Error("This ownership samples no velocity: it has no hanging tap cache");
     return this.hangingGroupCurrent;
   }
-  get allocatedBytes(): number { return this.topology.size + this.counts.size + this.support.size+this.speeds.size+this.certifiedDispatch.size+(this.hanging?.size??0)+(this.records?.size??0)+(this.pressureWork?.list.size??0)+(this.pressureWork?.dispatch.size??0); }
+  get allocatedBytes(): number { return this.topology.size + this.counts.size + this.support.size+this.speeds.size+this.certifiedDispatch.size+(this.hanging?.size??0)+(this.records?.size??0); }
   readonly dispatchX: number;
   private readonly topology: GPUBuffer;
   /** Stable read-only view for consumers of the accepted ownership generation. */
@@ -120,24 +120,15 @@ export class UniformMixedOwnership {
   /** Per-tile extended speed and its box maximum (frame plan certificate). */
   readonly speeds: GPUBuffer;
   readonly certifiedDispatch:GPUBuffer;
-  /** Per-frame velocity tap cache (uniformMixedHangingTapWGSL): every 2h
-   * tile and every seam tile owns a slot. */
+  /** Per-frame velocity tap cache (uniformMixedHangingTapWGSL): every seam
+   * tile owns a slot. */
   private hanging?:GPUBuffer;
   /** Slots in the hanging tap cache, filled one workgroup each. */
   hangingSlots=0;
   /** Pressure seam records (uniform-mixed-pressure-records.wgsl), allocated
-   * only for levels that smooth; stages borrow them like any field. */
+   * only for the level whose residual and measure use them. */
   private records?:GPUBuffer;
   private recordGroupCurrent?:GPUBindGroup;
-  private pressureWork?:{list:GPUBuffer;dispatch:GPUBuffer};
-  /** Pressure stages borrow worklists as well as fields. Tile capacity is
-   * fixed for this ownership, so mask changes never allocate in the solve. */
-  pressureWorklists():{list:GPUBuffer;dispatch:GPUBuffer}{
-    return this.pressureWork??={
-      list:this.device.createBuffer({label:"Uniform mixed pressure liquid tiles",size:(16+this.layout.tiles.length)*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC}),
-      dispatch:this.device.createBuffer({label:"Uniform mixed pressure liquid dispatch",size:48,usage:GPUBufferUsage.INDIRECT|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC}),
-    };
-  }
   private seamCounts=[0,0,0];
 
   private frameHeld=false;
@@ -234,7 +225,7 @@ export class UniformMixedOwnership {
     return ()=>{if(!released){released=true;this.frameHeld=false;}};
   }
 
-  /** One workgroup covers 64 h owners, eight 2h tiles, or 64 4h tiles. */
+  /** One workgroup covers 64 h owners or 64 4h tiles (tier 1 is empty, reserved). */
   dispatch(pass: GPUComputePassEncoder, pipelines: readonly GPUComputePipeline[], indirect?: GPUBuffer): void {
     for (const tier of [0, 1, 2] as const) this.dispatchTier(pass, pipelines[tier]!, tier, indirect);
   }
@@ -262,30 +253,13 @@ export class UniformMixedOwnership {
     const counts=[this.layout.fineTiles.length,0,this.layout.coarseTiles.length];
     for(const tier of tiers)if(counts[tier]!>this.seamCounts[tier]!&&!(skipFused&&this.fusedRegularTier(tier)))this.dispatchTier(pass,pipelines[tier]!,tier);
   }
-  /** dispatchRegular's tiers, each sized by `indirect` at tier*12. */
-  dispatchRegularIndirect(pass:GPUComputePassEncoder,pipelines:readonly GPUComputePipeline[],indirect:GPUBuffer,skipFused=false,tiers:readonly (0|1|2)[]=[0,1,2]):void{
-    const counts=[this.layout.fineTiles.length,0,this.layout.coarseTiles.length];
-    for(const tier of tiers)if(counts[tier]!>this.seamCounts[tier]!&&!(skipFused&&this.fusedRegularTier(tier))){
-      pass.setPipeline(pipelines[tier]!);pass.dispatchWorkgroupsIndirect(indirect,tier*12);
-    }
-  }
-  /** Mirrors umPackedRegularTier. */
-  packedRegularTier(tier:0|1|2):boolean{
-    if(tier===0||this.fusedRegularTier(tier))return false;
-    const count=tier===1?0:this.layout.coarseTiles.length;
-    return (count-this.seamCounts[tier]!)*(64>>(3*tier))<=UNIFORM_MIXED_PACKED_REGULAR_OWNERS;
-  }
   /** umRegularCoarseOwner's regular 4h list, one lane per owner, 64 per
-   * group (the empty 2h list precedes it), unless the tier is fused. */
+   * group (the empty, reserved tier-1 list precedes it), unless the tier is fused. */
   dispatchRegularCoarse(pass:GPUComputePassEncoder,pipeline:GPUComputePipeline):void{
     if(this.fusedRegularTier(2))return;
     const groups=Math.ceil((this.layout.coarseTiles.length-this.seamCounts[2]!)/64);
     if(!groups)return;
     pass.setPipeline(pipeline);pass.dispatchWorkgroups(Math.min(groups,this.dispatchX),Math.ceil(groups/this.dispatchX));
-  }
-  /** Lanes of the packed 4h tier in umRegularCoarseOwner's list. */
-  regularCoarseOwners():number{
-    return (this.packedRegularTier(2)?this.layout.coarseTiles.length-this.seamCounts[2]!:0);
   }
   /** Mirrors umFusedRegularTier: small regular tiers ride the fused launch. */
   fusedRegularTier(tier:0|1|2):boolean{
@@ -344,10 +318,6 @@ export class UniformMixedOwnership {
 
   /** A storage group (hangingLayout) holding at least `bytes` of records. */
   /** Refresh the list prefix once per solve; records follow it in the same binding. */
-  copyPressureList(e:GPUCommandEncoder,list:GPUBuffer):void{
-    if(!this.records||list.size>(16+this.layout.tiles.length)*4)throw new Error("Invalid pressure list prefix");
-    e.copyBufferToBuffer(list,0,this.records,0,list.size);
-  }
   recordGroup(bytes:number):GPUBindGroup{
     if(!this.records||this.records.size<bytes){
       this.records?.destroy();
@@ -356,5 +326,5 @@ export class UniformMixedOwnership {
     }
     return this.recordGroupCurrent!;
   }
-  destroy(): void { this.topology.destroy(); this.counts.destroy(); this.support.destroy();this.speeds.destroy();this.certifiedDispatch.destroy();this.hanging?.destroy();this.records?.destroy();this.pressureWork?.list.destroy();this.pressureWork?.dispatch.destroy(); }
+  destroy(): void { this.topology.destroy(); this.counts.destroy(); this.support.destroy();this.speeds.destroy();this.certifiedDispatch.destroy();this.hanging?.destroy();this.records?.destroy(); }
 }

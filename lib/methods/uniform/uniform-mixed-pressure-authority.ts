@@ -28,7 +28,10 @@ export interface UniformMixedPressureAuthorityFields {
  * owner continues its open liquid neighbours, and deficits are of target*cap.
  * A cut 4h owner's phi is native mgDownsampleTopology's open-child vote
  * (h to 2h to 4h, positive preferred) of the h pressurePhi: its 4h centre
- * phi samples vertices buried in the solid, which are not state. */
+ * phi samples vertices buried in the solid, which are not state. The vote
+ * runs first, one workgroup per cut tile (a lane per h cell), into the
+ * scratch after the balance words; build reads it for the owner and for a
+ * closed owner's cut neighbours. */
 export class UniformMixedPressureAuthority {
  readonly allocatedBytes=0;
  readonly scratchBytes:number;
@@ -39,7 +42,8 @@ export class UniformMixedPressureAuthority {
  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid?:UniformMixedSolid,private readonly coarse=false){
   if(coarse&&(!solid?.coarse||ownership.layout.tiles.some(word=>(word&0xc0000000)!==0)))throw new Error("Coarse mixed pressure authority requires the all-4h solid record and all-4h ownership");
   this.groups=Math.ceil(ownership.layout.cellCount/64);this.chunks=Math.ceil(this.groups/1024);
-  this.scratchBytes=8*(1+this.groups+this.chunks);
+  // Coarse: one vec2f cut-vote slot per owner after the balance words.
+  this.scratchBytes=8*(1+this.groups+this.chunks+(coarse?ownership.layout.cellCount:0));
   this.resources=device.createBindGroupLayout({entries:[
    ...[0,1,2].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
    ...[3,6].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),
@@ -119,16 +123,29 @@ fn umOpenVote(values:array<f32,8>,opens:array<f32,8>)->f32{
  let sum=select(umSum8(values),umSum8(open)*8.0/max(openCount,1.0),openCount>0.0);
  return select(sum/8.0,umSum8(positive)/max(positiveCount,1.0),positiveCount>0.0&&umSum8(negativeFlags)>0.0);
 }
-// A cut owner's phi: h pressurePhi voted to 2h, then to 4h.
-fn umCutPhi(o:UMOwner)->f32{
- let origin=vec3i(umOrigin(o));var mid:array<f32,8>;var midOpen:array<f32,8>;
- for(var k=0u;k<8u;k++){
-  let base=origin+2*vec3i(vec3u(k&1u,(k>>1u)&1u,k>>2u));var values:array<f32,8>;var opens:array<f32,8>;
-  for(var j=0u;j<8u;j++){let p=base+vec3i(vec3u(j&1u,(j>>1u)&1u,j>>2u));values[j]=umFinePressurePhiCell(p);opens[j]=umCellOpen(p);}
-  mid[k]=umOpenVote(values,opens);midOpen[k]=umSum8(opens)/8.0;
- }
- return umOpenVote(mid,midOpen);
+const UM_CUT_BASE=${1+this.groups+this.chunks}u;
+var<workgroup> cutTile:u32;
+var<workgroup> cutValues:array<f32,64>;
+var<workgroup> cutOpens:array<f32,64>;
+var<workgroup> cutMid:array<f32,8>;
+var<workgroup> cutMidOpen:array<f32,8>;
+// A cut owner's phi: h pressurePhi voted to 2h, then to 4h. One workgroup
+// per tile; lane 8k+j is h cell j of 2h block k.
+@compute @workgroup_size(64) fn cut(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) l:u32){
+ let t=group.x+umDispatchX*group.y;
+ if(l==0u){cutTile=select(0u,1u,t<UM_TILES&&umSolidCut(min(t,UM_TILES-1u)));}
+ if(workgroupUniformLoad(&cutTile)==0u){return;}
+ let origin=vec3i(4u*umTileCoord(t));let k=l>>3u;let j=l&7u;
+ let p=origin+2*vec3i(vec3u(k&1u,(k>>1u)&1u,k>>2u))+vec3i(vec3u(j&1u,(j>>1u)&1u,j>>2u));
+ cutValues[l]=umFinePressurePhiCell(p);cutOpens[l]=umCellOpen(p);
+ workgroupBarrier();
+ if(l<8u){var values:array<f32,8>;var opens:array<f32,8>;
+  for(var i=0u;i<8u;i++){values[i]=cutValues[8u*l+i];opens[i]=cutOpens[8u*l+i];}
+  cutMid[l]=umOpenVote(values,opens);cutMidOpen[l]=umSum8(opens)/8.0;}
+ workgroupBarrier();
+ if(l==0u){balance[UM_CUT_BASE+(umTopology[t]&0x3fffffffu)]=vec2f(umOpenVote(cutMid,cutMidOpen),0.0);}
 }
+fn umCutPhi(o:UMOwner)->f32{return balance[UM_CUT_BASE+o.index].x;}
 // An open owner's phi: cut owners vote their h cells.
 fn umOpenOwnerPhi(o:UMOwner,v:f32,cap:f32)->f32{
  if(umSolidCut(umTileAt(umOrigin(o)/4u))){return umCutPhi(o);}
@@ -190,15 +207,16 @@ fn umReduce(l:u32){workgroupBarrier();for(var stride=32u;stride>0u;stride/=2u){i
 `});
   const info=await module.getCompilationInfo(),errors=info.messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.coarse?this.solid.coarse!.bindLayout:this.solid.bindLayout]:[])]});
-  for(const entryPoint of ["build","chunks","reduce","resolve"])this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX}}}));
+  for(const entryPoint of ["build","chunks","reduce","resolve",...(this.coarse?["cut"]:[])])this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX}}}));
   this.pipelines.set("phase",await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"build",constants:{umDispatchX:this.ownership.dispatchX,umAuthorityBalance:0}}}));
  }
  /** balance=false writes phi and phase only: the extension's authority,
   * when this same stage (same ownership, same origin texels) rebuilds the
-  * correction and its balance scratch before the RHS, their only reader. */
+  * correction and its balance scratch before their readers (band rows, RHS). */
  encode(encoder:GPUCommandEncoder,group:GPUBindGroup,balance=true):void{
-  if(this.pipelines.size!==5)throw new Error("Mixed pressure authority is not initialized");
+  if(this.pipelines.size!==(this.coarse?6:5))throw new Error("Mixed pressure authority is not initialized");
   const pass=encoder.beginComputePass({label:balance?"Uniform mixed pressure authority and volume correction":"Uniform mixed pressure authority phase"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.coarse?this.solid.coarse!.bindGroup:this.solid.bindGroup);
+  if(this.coarse){const tiles=this.ownership.layout.tiles.length,x=this.ownership.dispatchX;pass.setPipeline(this.pipelines.get("cut")!);pass.dispatchWorkgroups(Math.min(tiles,x),Math.ceil(tiles/x));}
   if(!balance){this.ownership.dispatchAll(pass,this.pipelines.get("phase")!);pass.end();return;}
   for(const entry of ["build","chunks","reduce","resolve"]){const pipeline=this.pipelines.get(entry)!;pass.setPipeline(pipeline);
    if(entry==="chunks")pass.dispatchWorkgroups(this.chunks);else if(entry==="reduce")pass.dispatchWorkgroups(1);else this.ownership.dispatchAll(pass,pipeline);

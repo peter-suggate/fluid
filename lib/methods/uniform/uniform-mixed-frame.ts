@@ -22,6 +22,7 @@ import {UniformMixedSharpening} from "./uniform-mixed-sharpening";
 import {UniformMixedMomentum,UNIFORM_MIXED_MOMENTUM_LIMITS} from "./uniform-mixed-momentum";
 import {UniformMixedForces} from "./uniform-mixed-forces";
 import {UniformMixedPressureAuthority} from "./uniform-mixed-pressure-authority";
+import {uniformMixedPressureStorage} from "./uniform-mixed-pressure-boundary.wgsl";
 import {UniformMixedPressureVelocity} from "./uniform-mixed-pressure-velocity";
 import {UniformMixedPressureContinuation} from "./uniform-mixed-pressure-continuation";
 import {UniformMixedPressureCycles,type UniformMixedPressureCycleLevel} from "./uniform-mixed-pressure-cycles";
@@ -86,6 +87,8 @@ export class UniformMixedFrame {
  readonly levels:readonly UniformMixedPressureCycleLevel[];
  /** Ownership of pressure level 0: the fixed all-4h layout. */
  get pressureOwnership(){return this.levels[0]!.ownership;}
+ /** Level 0's live pressure words: all-4h owners plus boundary slots. */
+ private get pressureWords(){return uniformMixedPressureStorage(this.pressureOwnership.layout).count;}
  /** The grid overlay's view of the last solve: pressure and pressure phi of
   * pressure level 0, indexed by the pressure owners it was solved on. The
   * phi buffer ends with the frame's stage grids (uniform-stage-grids.ts),
@@ -246,21 +249,24 @@ export class UniformMixedFrame {
   const g=f.pressureGeometry;
   {
    // Split: the forced field reaches pressure ownership in velocity/negative
-   // and is projected into the scratch pair, then transferred back. Volume and
-   // phi are copied into their (free) scratch fields in pressure ownership.
+   // and is projected into the scratch pair, then transferred back. Volume
+   // reaches pressure ownership in its (free) scratch field.
    const [rhsGroup,projectionGroup]=bindProjection({velocity:f.velocity,negative:f.negative},{velocity:f.velocityScratch,negative:f.negativeScratch},g.centerPhi,f.volumeScratch);
    const transfer=new UniformMixedOwnershipTransfer(device,o,p);
    const present=(label:string,bytes:number)=>buffer(`Uniform presented ${label}`,bytes,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST);
    // The band's capacity never exceeds the tile count (its all-tile
    // diagnostic included), so the record holds any band this frame builds.
    const n=layout.tiles.length;this.stageBandTiles=n;
-   this.stageBandWord=root.phi!.size!/4;this.stageGridWord=this.stageBandWord+uniformStageBandWords(n,this.stageBandTiles);
-   this.presentation={pressure:{buffer:present("pressure",root.pressure.size!)},phi:{buffer:present("pressure phi and stage grids",4*(this.stageGridWord+uniformStageGridWords(n)))}};
+   // Presented pressure and phi hold the live all-4h words only (level 0
+   // keeps the simulation layout's capacity).
+   this.stageBandWord=p.layout.cellCount;this.stageGridWord=this.stageBandWord+uniformStageBandWords(n,this.stageBandTiles);
+   this.presentation={pressure:{buffer:present("pressure",4*uniformMixedPressureStorage(p.layout).count)},phi:{buffer:present("pressure phi and stage grids",4*(this.stageGridWord+uniformStageGridWords(n)))}};
    const geometry=new UniformMixedSurfaceGeometry(device,p,solid,false),authority=new UniformMixedPressureAuthority(device,p,solid,coarseSolid);
    this.split={transfer,rhsGroup,projectionGroup,
-    toPressure:transfer.bind({volume:f.volume,velocity:f.velocityScratch,phi:f.phi,negative:f.negativeScratch},{volume:f.volumeScratch,velocity:f.velocity,phi:f.phiScratch,negative:f.negative}),
-    toSimulation:transfer.bind({volume:f.volumeScratch,velocity:f.velocityScratch,phi:f.phiScratch,negative:f.negativeScratch},{volume:f.volume,velocity:f.velocity,phi:f.phi,negative:f.negative}),
-    geometry,geometryGroup:geometry.bind(f.phiScratch,g.target,g.centerPhi),
+    toPressure:transfer.bind({volume:f.volume,velocity:f.velocityScratch,negative:f.negativeScratch},{volume:f.volumeScratch,velocity:f.velocity,negative:f.negative}),
+    toSimulation:transfer.bind({volume:f.volume,velocity:f.velocityScratch,negative:f.negativeScratch},{volume:f.volumeScratch,velocity:f.velocity,negative:f.negative}),
+    // The resolved simulation phi holds every 4h corner's vertex value.
+    geometry,geometryGroup:geometry.bind(f.phi,g.target,g.centerPhi),
     authority,authorityGroup:authority.bind({centerPhi:g.centerPhi,volume:f.volumeScratch,targetFill:g.target,phi:root.phi!,phase:f.phase,correction:f.correction,scratch:root.frozen,params:this.params.authority,
      fine:coarseSolid?{centerPhi:f.centerPhi,volume:f.volume}:undefined})};
   }
@@ -273,16 +279,15 @@ export class UniformMixedFrame {
   this.continuation=new UniformMixedPressureContinuation(device,last.ownership,f.pressure,openTop,!!f.solid);
   const continuationGroups=this.continuationGroups=last.rhs.map((rhs,i)=>this.continuation.bind({pressure:last.pressure,rhs,minimum:last.minimum![0]!,phi:last.phi!,topology:last.topology&&"buffer" in last.topology?last.topology.buffer:undefined}));
   // Continuation setup is encoded once per solve, ungated (advance); cycles are pure cycle work.
-  this.cycles=new UniformMixedPressureCycles(device,this.levels,view(memory.backup),(encoder,rhs,kind)=>this.continuation.encode(encoder,continuationGroups[rhs===last.rhs[0]?0:1]!,f.uniformGroup,kind,false),this.schedule,{openTop});
+  this.cycles=new UniformMixedPressureCycles(device,this.levels,view(memory.backup),(encoder,rhs,kind)=>this.continuation.encode(encoder,continuationGroups[rhs===last.rhs[0]?0:1]!,f.uniformGroup,kind,false),{openTop});
   this.acceptance=new UniformMixedPressureAcceptance(device,p);
   this.acceptanceGroup=this.acceptance.bind({residual:root.residual,state:this.state,params:this.params.acceptance});
  }
  async initialize():Promise<void>{
   await this.solid?.initialize();
   for(const stage of [this.transport,this.plan,this.cleanup,this.remap,this.phiResolve,this.extension,this.cache,this.hanging,this.surface,this.surfaceVolume,this.geometry,this.sharpen,this.momentum,this.forces,this.authority,this.projection,this.continuation,this.cycles,this.acceptance,this.split.transfer,this.split.geometry,this.split.authority])await stage.initialize();
-  // Level stages create their liquid worklists in initialize.
   this.pressureSchedule=new UniformMixedPressureSchedule(this.device,this.schedule,this.state,this.fields.pressure.tolerance,
-   [...this.levels.slice(0,2).map(l=>l.ownership.pressureWorklists().dispatch),...(this.fields.pressure.indirect?[this.fields.pressure.indirect]:[])]);
+   this.fields.pressure.indirect?[this.fields.pressure.indirect]:[]);
   await this.pressureSchedule.initialize();
   await this.surfaceBand.initialize();await this.band.initialize();
   this.ready=true;
@@ -310,8 +315,10 @@ export class UniformMixedFrame {
  }
  private encodeExtensionOf(encoder:GPUCommandEncoder,p:UniformMixedFrameParameters):void{
   this.plan.encode(encoder,p.supportPolicy);
-  // Split: the last pressure setup left phase in pressure ownership.
-  if(!this.pressureMatchesSimulation)this.authority.encode(encoder,this.authorityGroup);
+  // Split: the last pressure setup left phase in pressure ownership. Phase
+  // only: the advance's authority rewrites phi, correction and balance
+  // before their readers (band rows, RHS).
+  if(!this.pressureMatchesSimulation)this.authority.encode(encoder,this.authorityGroup,false);
   this.extension.encode(encoder,this.extensionGroups,p.extensionSweeps??2);
   this.reusableExtension=extensionKey(p);
  }
@@ -364,9 +371,10 @@ export class UniformMixedFrame {
    const reuse=this.reusableExtension===extensionKey(p),remapped=reuse&&this.extensionRemapped;this.reusableExtension=undefined;this.extensionRemapped=false;
    if(!reuse||remapped){
     this.plan.encode(encoder,p.supportPolicy);if(!this.geometryCurrent)this.geometry.encode(encoder,this.geometryGroup);
-    // Unsplit, the pressure authority below rewrites every correction texel
-    // and the balance scratch before the RHS reads them: phase only here.
-    this.authority.encode(encoder,this.authorityGroup,!this.pressureMatchesSimulation);
+    // Phase only: the authority below (split: the simulation authority
+    // before the band rows, then the pressure authority) rewrites phi, every
+    // correction texel and the balance scratch before their readers.
+    this.authority.encode(encoder,this.authorityGroup,false);
     trace?.phase(encoder,A.extensionAuthority);
     if(!reuse)this.extension.encode(encoder,this.extensionGroups,p.extensionSweeps??2);
    }
@@ -399,9 +407,6 @@ export class UniformMixedFrame {
    if(!this.pressureMatchesSimulation){this.authority.encode(encoder,this.authorityGroup);this.band.encodePrepare(encoder);}
    const split=this.pressureMatchesSimulation?undefined:this.split;
    if(split){
-    const f=this.fields;
-    this.copyWhole(encoder,f.volume,f.volumeScratch);this.copyWhole(encoder,f.phi,f.phiScratch);this.copyWhole(encoder,f.velocityScratch,f.velocity);
-    encoder.copyBufferToBuffer(f.negativeScratch,0,f.negative,0,f.negative.size);
     split.transfer.encodeToPressure(encoder,split.toPressure);
     split.geometry.encode(encoder,split.geometryGroup);split.authority.encode(encoder,split.authorityGroup);
    }else this.authority.encode(encoder,this.authorityGroup);
@@ -426,13 +431,13 @@ export class UniformMixedFrame {
    this.projection.encode(schedule.gate(encoder,schedule.slots),"project",split?.projectionGroup??this.projectionGroup);
    schedule.end();
    if(split){
-    const f=this.fields;
-    this.copyWhole(encoder,f.velocityScratch,f.velocity);encoder.copyBufferToBuffer(f.negativeScratch,0,f.negative,0,f.negative.size);
     split.transfer.encodeToSimulation(encoder,split.toSimulation);
     this.band.encodeSolve(encoder);
    }
    const root=this.levels[0]!;
-   for(const [from,to] of [[root.pressure,this.presentation.pressure],[root.phi!,this.presentation.phi]] as const)encoder.copyBufferToBuffer(from.buffer,from.offset??0,to.buffer,0,from.size!);
+   // Present the live all-4h words only: level 0 keeps the simulation
+   // layout's capacity, but its owners and boundary slots are all-4h.
+   for(const [from,to,words] of [[root.pressure,this.presentation.pressure,this.pressureWords],[root.phi!,this.presentation.phi,this.pressureOwnership.layout.cellCount]] as const)encoder.copyBufferToBuffer(from.buffer,from.offset??0,to.buffer,0,4*words);
    this.recordStageGrid(encoder,this.pressureOwnership.presentation.buffer,"pressure");
    {
     // The h band re-solved this frame, or none when pressure matched bulk.

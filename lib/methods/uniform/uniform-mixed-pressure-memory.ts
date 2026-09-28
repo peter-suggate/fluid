@@ -8,8 +8,8 @@ export interface UniformMixedMemoryRange {offset:number;size:number}
  * All live pressure/RHS/minimum/phi fields remain disjoint. Level 0's phi uses
  * the idle native conditioning buffer; the native 4h hierarchy stays intact.
  * Both levels are all-4h. Level 0 keeps the capacity of the simulation
- * layout (its phi range also carries the static solid record and the frame's
- * presentation reads it whole). With static solids, level 1 also carries one
+ * layout (its phi range also carries the static solid record); the frame
+ * presents only its live all-4h words. With static solids, level 1 also carries one
  * vec4 (open, V+) record per owner and halo slot. */
 export function planUniformMixedPressureMemory(layout:UniformMixedLayout,arenaPrefixBytes:number,conditioningBytes:number,solid=false){
  const layouts=[layout,uniformMixedAllCoarseLayout(layout)];
