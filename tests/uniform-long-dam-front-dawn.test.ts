@@ -41,7 +41,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
    const toeStart=step===10?88:168;
    for(let z=0;z<d[2];z++)for(let y=0;y<d[1];y++)for(let x=toeStart;x<toeStart+8;x++){
     const tile=Math.floor(x/4)+(d[0]/4)*(Math.floor(y/4)+(d[1]/4)*Math.floor(z/4));
-    const word=fields.mixedFrame.ownership.layout.tiles[tile]!,width=word&0x80000000?1:word&0x40000000?2:4;
+    const word=fields.mixedFrame.ownership.layout.tiles[tile]!,width=word&0x80000000?1:4;
     const p=[x,y,z].map(v=>Math.floor(v/width)*width);
     toeMass+=volume[p[0]!+d[0]*(p[1]!+d[1]*p[2]!)]!;
    }

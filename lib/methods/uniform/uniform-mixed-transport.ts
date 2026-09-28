@@ -45,10 +45,10 @@ export class UniformMixedTransportStage {
     this.sampling = device.createBuffer({ label: "Uniform mixed departure sampling widths", size: layout.tiles.byteLength,
       usage: GPUBufferUsage.STORAGE });
     const tiles = layout.tiles.length;
-    this.live = device.createBuffer({ label: "Uniform mixed transport live set", size: (UNIFORM_MIXED_TRANSPORT_LIVE_HEADER + 9 * tiles) * 4,
+    this.live = device.createBuffer({ label: "Uniform mixed transport live set", size: (UNIFORM_MIXED_TRANSPORT_LIVE_HEADER + 7 * tiles) * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     // Dawn rejects indirect and writable storage use of one buffer in a scope.
-    this.liveDispatch = device.createBuffer({ label: "Uniform mixed transport live dispatch", size: (parallelCoarseRows?21:18) * 4,
+    this.liveDispatch = device.createBuffer({ label: "Uniform mixed transport live dispatch", size: (parallelCoarseRows?15:12) * 4,
       usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST });
     this.workBytes = this.sampling.size + this.live.size + this.liveDispatch.size;
     this.resourcesLayout = device.createBindGroupLayout({ entries: [
@@ -109,11 +109,10 @@ export class UniformMixedTransportStage {
     if (!pipelines) throw new Error("Mixed transport has not been initialized");
     const pass = this.begin(encoder, entry, entry === "restrictVolume" || entry === "copyVolume" ? this.restrictGroup : this.transportGroup);
     const list = liveList[entry];
-    // The ungraded h/4h layout's tier-1 live lists are empty (reserved); each empty
-    // indirect launch still costs ~12 us, so tier 1 is never launched.
-    if (list) for (const tier of [0, 2] as const) {
-      const coarse=tier===2?this.coarseRows.get(entry):undefined;
-      pass.setPipeline(coarse??pipelines[tier]!);pass.dispatchWorkgroupsIndirect(this.liveDispatch,coarse?18*4:((list-1)*3+tier)*12);
+    // One indirect launch per tier (0 = h, 1 = 4h) of the live list.
+    if (list) for (const tier of [0, 1] as const) {
+      const coarse=tier===1?this.coarseRows.get(entry):undefined;
+      pass.setPipeline(coarse??pipelines[tier]!);pass.dispatchWorkgroupsIndirect(this.liveDispatch,coarse?12*4:((list-1)*2+tier)*12);
     }
     else this.dispatch(pass, pipelines);
     pass.end();
@@ -130,8 +129,8 @@ export class UniformMixedTransportStage {
     pass.setPipeline(seed!); pass.dispatchWorkgroups(Math.min(tiles, this.dispatchX), Math.ceil(tiles / this.dispatchX));
     for (const pipeline of this.livePipelines.slice(1, -1)) { pass.setPipeline(pipeline); pass.dispatchWorkgroups(Math.min(groups, this.dispatchX), Math.ceil(groups / this.dispatchX)); }
     pass.setPipeline(publish); pass.dispatchWorkgroups(1); pass.end();
-    encoder.copyBufferToBuffer(this.live, 0, this.liveDispatch, 0, 18 * 4);
-    if(this.parallelCoarseRows)encoder.copyBufferToBuffer(this.live,24*4,this.liveDispatch,18*4,12);
+    encoder.copyBufferToBuffer(this.live, 0, this.liveDispatch, 0, 12 * 4);
+    if(this.parallelCoarseRows)encoder.copyBufferToBuffer(this.live,16*4,this.liveDispatch,12*4,12);
   }
 
   encodeCopy(encoder: GPUCommandEncoder): void { this.run(encoder, "copyVolume"); }

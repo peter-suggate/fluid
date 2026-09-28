@@ -1667,11 +1667,11 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
       // size, and the h surface census tiles outlined.
       let owner=umStageOwner(stage,UM_STAGE_PRESSURE,cell);
       let tint=select(sceneColor(LP_shell),sceneColor(LP_fine),owner.width==1u);
-      let tintAlpha=select(select(0.0,0.14,owner.width==2u),0.26,owner.width==1u);
+      let tintAlpha=select(0.0,0.26,owner.width==1u);
       let pressureAlpha=alpha;
       alpha=pressureAlpha+tintAlpha*(1.0-pressureAlpha);
       fill=select(fill,(fill*pressureAlpha+tint*tintAlpha*(1.0-pressureAlpha))/max(alpha,1e-6),alpha>0.0);
-      lineStrength=select(select(0.3,0.4,owner.width==2u),0.55,owner.width==1u);
+      lineStrength=select(0.3,0.55,owner.width==1u);
       if(umStageBand(stage,owner.tile)){
         let tileFraction=fract(planePoint/4.0);
         let tileDistance=min(min(tileFraction.x,1.0-tileFraction.x)*4.0/derivative.x,

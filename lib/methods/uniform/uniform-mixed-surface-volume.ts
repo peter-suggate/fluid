@@ -101,9 +101,9 @@ ${sourceScale}
 ${uniformSurfaceFillWGSL}
 ${uniformMixedSolidWGSL(this.solid?2:undefined)}
 fn umCapacity(o:UMOwner)->f32{return select(1.0,umCellOpen(vec3i(umOrigin(o))),umSolidEnabled()&&o.width==1u);}
-fn umLiveCells()->u32{return umCounts.x*64u+umCounts.y*8u+umCounts.z;}
+fn umLiveCells()->u32{return umCounts.x*64u+umCounts.y;}
 fn svVolume(origin:vec3u)->f32{return textureLoad(volume,vec3i(origin),0).x;}
-fn umShiftLimit()->f32{return min(UM_H.x,min(UM_H.y,UM_H.z))*f32(select(select(4u,2u,umCounts.y>0u),1u,umCounts.x>0u));}
+fn umShiftLimit()->f32{return min(UM_H.x,min(UM_H.y,UM_H.z))*f32(select(4u,1u,umCounts.x>0u));}
 var<workgroup> sums:array<vec4f,320>;
 var<workgroup> measureLive:atomic<u32>;
 var<workgroup> measureBand:atomic<u32>;
@@ -251,7 +251,7 @@ ${this.resolved?`// Completes the unstored scale texels of mixed-stencil tiles a
 var<workgroup> svResolveWords:array<u32,8>;var<workgroup> svResolveLattice:array<f32,27>;
 @compute @workgroup_size(125) fn resolveScale(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let header=7u*UM_TILES+16u;let job=group.x+umDispatchX*group.y;
- let valid=job<umSupport[header]+umSupport[header+2u];
+ let valid=job<umSupport[header]+umSupport[header+1u];
  let tile=select(0u,umSupport[header+4u+select(0u,job,valid)],valid);let base=vec3i(umTileCoord(tile));
  if(valid&&lane<8u){let t=base+vec3i(umCorner(lane,2u))-vec3i(1);svResolveWords[lane]=select(0x80000000u,umTopology[umTileAt(vec3u(max(t,vec3i(0))))],all(t>=vec3i(0)));}
  else if(valid&&lane>=8u&&lane<35u){let v=(base+vec3i(umCorner(lane-8u,3u))-vec3i(1))*4;if(all(v>=vec3i(0))){svResolveLattice[lane-8u]=umScaleLoadVertex(vec3u(v));}}

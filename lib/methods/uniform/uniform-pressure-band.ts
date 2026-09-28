@@ -374,7 +374,7 @@ var<workgroup> member:atomic<u32>;
   }
  }${S?`
  // A cut tile the simulation holds at 4h breaks the uncut-Neumann certificate.
- for(var j=group.x*64u+lane;j<umCounts.z;j+=${LIST_GROUPS*64}u){if(umSolidCut(umTopology[UM_TILES+umCounts.x+umCounts.y+j])){atomicOr(&index[3],1u);}}`:""}
+ for(var j=group.x*64u+lane;j<umCounts.y;j+=${LIST_GROUPS*64}u){if(umSolidCut(umTopology[UM_TILES+umCounts.x+j])){atomicOr(&index[3],1u);}}`:""}
 }`,
    prep:header+indexed(false)+theta+surface+/* wgsl */`
 @group(1) @binding(9) var<storage,read_write> rows:array<f32>;

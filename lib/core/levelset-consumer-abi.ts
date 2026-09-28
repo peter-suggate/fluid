@@ -275,7 +275,7 @@ export interface OctreeTechniqueDebugSource {
 
 /** Stable dense authority for the combined V/K fill and independent phi contour. */
 export interface DenseLevelSetVolumeConsumerSource {
-  /** Optional canonical h/2h/4h ownership; no materialized fine expansion. */
+  /** Optional canonical h/4h ownership; no materialized fine expansion. */
   readonly mixedOwnership?: GPUBufferBinding;
   /** Accepted pressure and its liquid authority, indexed by the pressure
    * owners the solve ran on. The phi binding ends with the frame's stage

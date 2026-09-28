@@ -13,8 +13,8 @@ export interface UniformMixedBandBits {readonly buffer:GPUBuffer;readonly wordOf
 export interface UniformMixedBuiltLevel extends UniformMixedBuiltOwnership {
  /** Tiles whose width differs from the ownership this level was built against. */
  readonly changedTiles:number;
- /** h, tier-1 and 4h tile counts from the receipt (the tier-1 slot is empty, reserved). */
- readonly tierCounts:readonly [number,number,number];
+ /** h and 4h tile counts from the receipt, indexed by tier. */
+ readonly tierCounts:readonly [number,number];
 }
 
 interface Level {
@@ -155,19 +155,19 @@ fn scanPartial(lane:u32){
  }
  if(lane==0u){
   let f=grand[0];let c=grand[1];
-  // Receipt: [1] h tiles, [3] 4h tiles, [5] seam h, [7] seam 4h; the tier-1
-  // words [2] and [6] are empty (reserved) and stay cleared.
-  atomicStore(&work[1],f);atomicStore(&work[3],c);atomicStore(&work[5],grand[2]);atomicStore(&work[7],grand[3]);
-  // Counts (tier-1 slot empty), then the frame-plan header (update(): header[2], [8..10], [12..14]).
-  atomicStore(&work[12],f);atomicStore(&work[13],0u);atomicStore(&work[14],c);atomicStore(&work[15],8u);
+  // Receipt: [0] changed tiles, [1] h tiles, [2] 4h tiles, [3] seam h,
+  // [4] seam 4h; [5,12) stay cleared.
+  atomicStore(&work[1],f);atomicStore(&work[2],c);atomicStore(&work[3],grand[2]);atomicStore(&work[4],grand[3]);
+  // umCounts (h, 4h, 0, loop bound), then the frame-plan header (update(): header[2], [8..10], [12..14]).
+  atomicStore(&work[12],f);atomicStore(&work[13],c);atomicStore(&work[14],0u);atomicStore(&work[15],8u);
   let merged=f+grand[3]+(grand[4]+63u)/64u;
   let h=4u*N;
   for(var i=0u;i<16u;i++){support[h+i]=0u;}
   support[h+2u]=f;
   support[h+8u]=min(f,X);support[h+9u]=(f+X-1u)/X;support[h+10u]=1u;
   support[h+12u]=min(merged,X);support[h+13u]=(merged+X-1u)/X;support[h+14u]=1u;
-  let seam=7u*N+16u;support[seam]=grand[2];support[seam+1u]=0u;support[seam+2u]=grand[3];support[seam+3u]=0u;
-  let regular=8u*N+20u;support[regular]=0u;support[regular+1u]=grand[4];support[regular+2u]=0u;support[regular+3u]=0u;
+  let seam=7u*N+16u;support[seam]=grand[2];support[seam+1u]=grand[3];support[seam+2u]=0u;support[seam+3u]=0u;
+  let regular=8u*N+20u;support[regular]=grand[4];support[regular+1u]=0u;support[regular+2u]=0u;support[regular+3u]=0u;
  }
 }
 // Owner numbering, worklists and the hanging slot table, in tile key order.
@@ -184,7 +184,7 @@ fn scanPartial(lane:u32){
  }
  if(!valid){return;}
  let f=atomicLoad(&work[1]);
- let seamF=atomicLoad(&work[5]);let seamC=atomicLoad(&work[7]);
+ let seamF=atomicLoad(&work[3]);let seamC=atomicLoad(&work[4]);
  var slot=INF;
  if(w==1u){
   topology[t]=(rank[0]*64u)|0x80000000u;topology[N+rank[0]]=t;support[6u*N+16u+rank[0]]=t;
@@ -256,10 +256,10 @@ fn scanPartial(lane:u32){
   const words=new Uint32Array(this.readback.getMappedRange()).slice();this.readback.unmap();
   const n=this.tiles,level=this.level,lattice=level.current.layout.lattice;
   const r=words.subarray(0,RECEIPT),tiles=words.slice(RECEIPT,RECEIPT+n);
-  if(r[1]!+r[3]!!==n)throw new Error(`Mixed layout builder receipt is inconsistent: ${[...r]}`);
+  if(r[1]!+r[2]!!==n)throw new Error(`Mixed layout builder receipt is inconsistent: ${[...r]}`);
   const layout=uniformMixedLayoutFromTiles(lattice,tiles,this.regions);
-  if(layout.cellCount!==64*r[1]!+r[3]!)throw new Error("Mixed layout builder tile words disagree with its receipt");
-  return {changedTiles:r[0]!,tierCounts:[r[1]!,0,r[3]!],layout,seamCounts:[r[5]!,0,r[7]!],hangingSlots:r[5]!+r[7]!,
+  if(layout.cellCount!==64*r[1]!+r[2]!)throw new Error("Mixed layout builder tile words disagree with its receipt");
+  return {changedTiles:r[0]!,tierCounts:[r[1]!,r[2]!],layout,seamCounts:[r[3]!,r[4]!],hangingSlots:r[3]!+r[4]!,
    source:{topology:level.topology,support:level.support,slots:level.slots,counts:{buffer:level.work,offset:48}}};
  }
  destroy():void{

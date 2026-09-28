@@ -58,7 +58,7 @@ try{
   // V is stored once per owner at its origin texel: weight by the owner's cell count.
   let total=0;
   for(let z=0;z<d[2];z++)for(let y=0;y<d[1];y++)for(let x=0;x<d[0];x++){
-   const word=tiles[(x>>2)+(d[0]>>2)*((y>>2)+(d[1]>>2)*(z>>2))]!,width=word&0x80000000?1:word&0x40000000?2:4;
+   const word=tiles[(x>>2)+(d[0]>>2)*((y>>2)+(d[1]>>2)*(z>>2))]!,width=word&0x80000000?1:4;
    if(x%width===0&&y%width===0&&z%width===0)total+=volume[x+d[0]*(y+d[1]*z)]!*width**3;
   }
   let fine=0;for(const word of tiles)if(word&0x80000000)fine++;
@@ -76,7 +76,7 @@ try{
     encoder.copyBufferToBuffer(buffer,0,staging,0,buffer.size);device.queue.submit([encoder.finish()]);await staging.mapAsync(GPUMapMode.READ);
     writeFileSync(`${out}/band-${name}-${String(step).padStart(4,"0")}.bin`,Buffer.from(staging.getMappedRange().slice(0)));staging.destroy();
    }
-   const fine=new Uint8Array(tiles.length);tiles.forEach((w,i)=>{fine[i]=w&0x80000000?1:w&0x40000000?2:4;});
+   const fine=new Uint8Array(tiles.length);tiles.forEach((w,i)=>{fine[i]=w&0x80000000?1:4;});
    writeFileSync(`${out}/tiles-${String(step).padStart(4,"0")}.u8`,fine);
   }
  }

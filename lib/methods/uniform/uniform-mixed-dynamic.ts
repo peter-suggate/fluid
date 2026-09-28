@@ -341,9 +341,9 @@ fn umFinishTile(tile:u32,width:u32,c:TileClass){
  // A 4h surface the lattice cannot resolve: refined by this census.
  if(required&&width!=1u){let slot=atomicAdd(&census[1],1u);if(slot<3u){atomicStore(&census[13u+slot],tile);}}
 }
-// Tiles with several owners (h, 2h): one workgroup per tile, one lane per owner.
+// h tiles: one workgroup per tile, one lane per owner.
 @compute @workgroup_size(64) fn classify(@builtin(workgroup_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
- let job=gid.x+umDispatchX*gid.y;if(job>=umCounts.x+umCounts.y){return;}
+ let job=gid.x+umDispatchX*gid.y;if(job>=umCounts.x){return;}
  let tile=umTopology[UM_TILES+job];
  if(lane==0u){atomicStore(&mixedTile,0u);for(var a=0u;a<3u;a++){atomicStore(&tileLow[a],0xffffffffu);atomicStore(&tileHigh[a],0u);atomicStore(&tileGap[a],15u);atomicStore(&tileGap[3u+a],15u);atomicStore(&tileReach[a],15u);atomicStore(&tileReach[3u+a],15u);}atomicStore(&tileError,0u);}workgroupBarrier();
  let width=umTileWidth(tile);let side=4u/width;
@@ -367,8 +367,8 @@ fn umFinishTile(tile:u32,width:u32,c:TileClass){
 // Single-owner (4h) tiles: one lane per tile. A workgroup per tile left 63
 // of its 64 lanes idle over most of the domain.
 @compute @workgroup_size(64) fn classifyCoarse(@builtin(global_invocation_id) gid:vec3u){
- let index=gid.x+umDispatchX*64u*gid.y;if(index>=umCounts.z){return;}
- let tile=umTopology[UM_TILES+umCounts.x+umCounts.y+index];
+ let index=gid.x+umDispatchX*64u*gid.y;if(index>=umCounts.y){return;}
+ let tile=umTopology[UM_TILES+umCounts.x+index];
  var c=umEmptyClass();umClassifyOwner(tile,4u,0u,&c);
  if((c.flags&2u)!=0u&&policy.step.y>0.0){var error=0.0;for(var l=0u;l<8u;l++){error=max(error,umResolutionError(tile,l,4u));}c.error=bitcast<u32>(error);}
  umFinishTile(tile,4u,c);

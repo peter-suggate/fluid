@@ -50,8 +50,8 @@ export function uniformMixedPressureBoundaryIndexWGSL(layout:UniformMixedLayout,
  // from the initial region layout.
  const source=/* wgsl */ `
 fn umBoundaryIndex(o:UMOwner,axis:u32,sign:i32)->u32 {
- let width=select(select(4u,2u,umCounts.y>0u),1u,umCounts.x>0u);
- let cells=umCounts.x*64u+umCounts.y*8u+umCounts.z;
+ let width=select(4u,1u,umCounts.x>0u);
+ let cells=umCounts.x*64u+umCounts.y;
  let p=umOrigin(o)/width;let d=UM_D/width;let side=select(0u,1u,sign>0);
  if(axis==0u){return cells+side*d.y*d.z+p.y+d.y*p.z;}
  if(axis==1u){return cells+2u*d.y*d.z+side*d.x*d.z+p.x+d.x*p.z;}

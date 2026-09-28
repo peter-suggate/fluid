@@ -60,7 +60,7 @@ var<workgroup> ${entry}Components:array<vec2f,192>;
  let cells=64u/(umCellWidth*umCellWidth*umCellWidth);
  // Merged jobs past the tile jobs pack 64 regular coarse owners: one lane
  // per owner and axis. Their faces are single patches and no two positive
- // faces of a width-2/4 lattice share an anchor texel.
+ // faces of a 4h lattice share an anchor texel.
  // Seam 4h jobs of merged launches pack four tiles: 48 lanes per tile, one
  // per (patch, axis). A 4h owner has at most 16 patches per positive face, so
  // one tile per group left 144+ of 192 lanes idle behind a serial sampler.
@@ -68,8 +68,8 @@ var<workgroup> ${entry}Components:array<vec2f,192>;
  // (umMergedTileJob; fused: umFusedOwner); later jobs shift down by the
  // difference. Size merged launches by dispatchCertified(...,true) (the
  // frame plan's quad-packed count) and fused ones by dispatchFused(...,true,true).
- let header=7u*UM_TILES+16u;let fours=umSupport[header+2u];let quads=(fours+3u)/4u;
- let seamFour=select(umSupport[4u*UM_TILES+2u],umSupport[header],umFusedJobs)+umSupport[header+1u];
+ let header=7u*UM_TILES+16u;let fours=umSupport[header+1u];let quads=(fours+3u)/4u;
+ let seamFour=select(umSupport[4u*UM_TILES+2u],umSupport[header],umFusedJobs);
  let job=group.x+umDispatchX*group.y;
  let quad=umMergedTiles&&job>=seamFour&&job<seamFour+quads;
  let tileJob=select(job,job+fours-quads,umMergedTiles&&job>=seamFour+quads);
@@ -79,7 +79,7 @@ var<workgroup> ${entry}Components:array<vec2f,192>;
  if(quad){
   let index=4u*(job-seamFour)+slot;
   if(index<fours){
-   let tile=umSupport[header+4u+umSupport[header]+umSupport[header+1u]+index];
+   let tile=umSupport[header+4u+umSupport[header]+index];
    owner=UMOwner(tile,0u,4u,umTopology[tile]&0x3fffffffu);
    let origin=umOrigin(owner);
    if(part==0u&&origin[faceAxis]==0u){

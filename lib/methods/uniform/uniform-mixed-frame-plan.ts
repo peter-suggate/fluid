@@ -71,7 +71,7 @@ fn umPositiveFaceSpeed(field:texture_3d<f32>,unit:bool,origin:vec3u)->f32{
 }
 // One lane per owner over every tier (umAllOwner). A tile's owners are
 // contiguous slots, so lane-owner.lane is its first lane: the workgroup slot of
-// its flags. Coarse tiles pack 8 or 64 to a workgroup instead of idling 63 lanes.
+// its flags. 4h tiles pack 64 to a workgroup instead of idling 63 lanes.
 var<workgroup> seeded:array<atomic<u32>,64>;
 var<workgroup> seedSpeed:atomic<u32>;
 @compute @workgroup_size(64) fn seed(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
@@ -163,9 +163,9 @@ var<workgroup> certifyBases:array<u32,2>;
   // Few coarse tiles: certify the rectangular component-wise trace bound
   // directly against their coordinates. Large mixed layouts keep the cheap
   // distance certificate. Both are conservative and change dispatch only.
-  if(umDirectionalCertificate&&!regular&&umCounts.y+umCounts.z<=64u){
+  if(umDirectionalCertificate&&!regular&&umCounts.y<=64u){
    regular=true;let p=vec3i(umTileCoord(tile));
-   for(var k=0u;k<umCounts.y+umCounts.z;k++){
+   for(var k=0u;k<umCounts.y;k++){
     let q=vec3i(umTileCoord(umTopology[UM_TILES+umCounts.x+k]));
     if(all(vec3u(abs(q-p))<=radii)){regular=false;break;}
    }
@@ -183,15 +183,14 @@ var<workgroup> certifyBases:array<u32,2>;
   let count=atomicLoad(&umSupport[4u*UM_TILES+list]);let base=4u*UM_TILES+list*4u;
   atomicStore(&umSupport[base],min(count,umDispatchX));atomicStore(&umSupport[base+1u],(count+umDispatchX-1u)/umDispatchX);atomicStore(&umSupport[base+2u],1u);
  }
- // umTileJobOwner's merged launch: general-h and seam 4h tiles (the tier-1 seam list is empty),
- // then the packed regular coarse owner jobs.
- let coarse=8u*UM_TILES+20u;
- let packed=(8u*atomicLoad(&umSupport[coarse])+atomicLoad(&umSupport[coarse+1u])+63u)/64u;
+ // umTileJobOwner's merged launch: general-h and seam 4h tiles, then the
+ // packed regular coarse owner jobs.
+ let packed=(atomicLoad(&umSupport[8u*UM_TILES+20u])+63u)/64u;
  let merged=umMergedTileJobs()+packed;let base=4u*UM_TILES+12u;
  atomicStore(&umSupport[base],min(merged,umDispatchX));atomicStore(&umSupport[base+1u],(merged+umDispatchX-1u)/umDispatchX);atomicStore(&umSupport[base+2u],1u);
  // The same launch for uniformMixedFaceTileDispatchWGSL, whose seam 4h tiles
  // pack four per job (ownership.dispatchCertified(...,true)).
- let fours=atomicLoad(&umSupport[7u*UM_TILES+18u]);let quad=merged-fours+(fours+3u)/4u;let quadBase=9u*UM_TILES+24u;
+ let fours=atomicLoad(&umSupport[7u*UM_TILES+17u]);let quad=merged-fours+(fours+3u)/4u;let quadBase=9u*UM_TILES+24u;
  atomicStore(&umSupport[quadBase],min(quad,umDispatchX));atomicStore(&umSupport[quadBase+1u],(quad+umDispatchX-1u)/umDispatchX);atomicStore(&umSupport[quadBase+2u],1u);
 }
 `});

@@ -1,8 +1,8 @@
 /** Which h/4h tiles each stage of the last frame actually ran on, for the
  * grid overlay. The frame appends this record to its pressure-phi
  * presentation buffer, after the pressure phi, so no consumer needs another
- * binding. Tile words use the ownership encoding (bit 31 h, bit 30 the empty
- * reserved tier-1 slot, else 4h; low 30 bits the tile's first owner index).
+ * binding. Tile words use the ownership encoding (bit 31 h, else 4h; low 30
+ * bits the tile's first owner index).
  *
  *   h band       two-stage pressure only (header word 4 = band tile
  *                capacity, else absent): one slot+1 word per tile, then
@@ -53,7 +53,7 @@ fn umStageBase()->u32{
  let band=${buffer}[base+4u];if(band>0u&&base<n+64u*band){return 0xffffffffu;}
  return base;
 }
-fn umWordWidth(word:u32)->u32{return select(select(4u,2u,(word&0x40000000u)!=0u),1u,(word&0x80000000u)!=0u);}
+fn umWordWidth(word:u32)->u32{return select(4u,1u,(word&0x80000000u)!=0u);}
 fn umStageTileWord(base:u32,stage:u32,tile:u32)->u32{return ${buffer}[base+${UNIFORM_STAGE_GRID_HEADER_WORDS}u+stage*umTileCount()+tile];}
 // The h band slot (0 = none) of a tile the two-stage solve re-solved at h.
 fn umStageBandSlot(base:u32,tile:u32)->u32{

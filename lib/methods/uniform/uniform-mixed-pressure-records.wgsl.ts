@@ -42,10 +42,10 @@ fn umCellCenter(o:UMOwner)->vec3f{return vec3f(umOrigin(o))+vec3f(0.5*f32(o.widt
 // (seam tiles per tier, then small regular tiers), each with 64/w^3 rows.
 fn umFusedRow(row:u32)->vec2u {
  let header=7u*UM_TILES+16u;var r=row;var job=0u;
- for(var segment=0u;segment<6u;segment++){
-  let tier=segment%3u;var count=0u;
-  if(segment<3u){count=umSupport[header+tier];}else if(umFusedRegularTier(tier)){count=umCounts[tier];}
-  let rows=64u>>(3u*tier);
+ for(var segment=0u;segment<4u;segment++){
+  let tier=segment%2u;var count=0u;
+  if(segment<2u){count=umSupport[header+tier];}else if(umFusedRegularTier(tier)){count=umCounts[tier];}
+  let rows=64u>>(6u*tier);
   if(r<count*rows){return vec2u(job+r/rows,r%rows);}
   r-=count*rows;job+=count;
  }
@@ -53,7 +53,7 @@ fn umFusedRow(row:u32)->vec2u {
 }
 fn umFusedRowCount()->u32 {
  let header=7u*UM_TILES+16u;var rows=0u;
- for(var tier=0u;tier<3u;tier++){rows+=(umSupport[header+tier]+select(0u,umCounts[tier],umFusedRegularTier(tier)))*(64u>>(3u*tier));}
+ for(var tier=0u;tier<2u;tier++){rows+=(umSupport[header+tier]+select(0u,umCounts[tier],umFusedRegularTier(tier)))*(64u>>(6u*tier));}
  return rows;
 }
 // One lane per record row (UniformMixedOwnership.fusedRows), so coarse jobs

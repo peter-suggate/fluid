@@ -1431,7 +1431,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     }
     const layout=fine.layout;
     Object.assign(this.executionInfo,{uniformMixedGeneration:this.mixedGeneration,
-      uniformMixedFineTiles:fine.tierCounts[0],uniformMixedCoarseTiles:fine.tierCounts[2],
+      uniformMixedFineTiles:fine.tierCounts[0],uniformMixedCoarseTiles:fine.tierCounts[1],
       uniformMixedOwners:layout.cellCount,uniformSimulationCellScale:undefined,
       uniformMixedLayoutBuild_ms:0,uniformMixedLayoutApply_ms:performance.now()-started,
       uniformMixedDynamicRelayouts:this.mixedDynamicRelayouts,uniformMixedDynamicChangedTiles:fine.changedTiles});

@@ -73,10 +73,10 @@ function views(fields: readonly GPUBufferBinding[], sizes: readonly number[]): G
 function assertAllCoarse(owner: UniformMixedOwnership): void {
   if (owner.layout.coarseTiles.length !== owner.layout.tiles.length) throw new Error("Mixed pressure levels must be all-4h");
 }
-/** Pipelines indexed by tier (ownership.dispatch): only the 4h tier exists.
- * The empty h and tier-1 (reserved) tiers never launch (dispatchTier returns on a zero count). */
+/** Pipelines indexed by tier (ownership.dispatch): only the 4h tier (1)
+ * exists. The empty h tier never launches (dispatchTier returns on a zero count). */
 function coarseTier(pipeline: GPUComputePipeline): GPUComputePipeline[] {
-  const tiers: GPUComputePipeline[] = []; tiers[2] = pipeline; return tiers;
+  const tiers: GPUComputePipeline[] = []; tiers[1] = pipeline; return tiers;
 }
 /** Both pressure levels are the same all-4h layout, so every owner (and
  * halo slot) has a same-width twin on the other level: transfers inject. */

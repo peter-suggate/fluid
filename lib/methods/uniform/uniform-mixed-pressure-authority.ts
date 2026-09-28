@@ -192,7 +192,7 @@ fn umReduce(l:u32){workgroupBarrier();for(var stride=32u;stride>0u;stride/=2u){i
  if(l==0u&&index<${this.groups}u){balance[1u+index]=sums[0];}
 }
 @compute @workgroup_size(64) fn chunks(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) l:u32){
- var value=vec2f(0);for(var i=group.x*1024u+l;i<min((umCounts.x*64u+umCounts.y*8u+umCounts.z+63u)/64u,(group.x+1u)*1024u);i+=64u){value+=balance[1u+i];}
+ var value=vec2f(0);for(var i=group.x*1024u+l;i<min((umCounts.x*64u+umCounts.y+63u)/64u,(group.x+1u)*1024u);i+=64u){value+=balance[1u+i];}
  sums[l]=value;umReduce(l);if(l==0u){balance[${1+this.groups}u+group.x]=sums[0];}
 }
 @compute @workgroup_size(64) fn reduce(@builtin(local_invocation_index) l:u32){

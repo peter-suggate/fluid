@@ -26,7 +26,7 @@ fn umPresentationEnabled()->bool{return arrayLength(&umTopology)>1u;}
 // grid overlay, which samples from many sites, then never finishes compiling.
 // Ownership is always longer than eight words when bound, so this is 8.
 fn umPresentationLoopBound()->u32{return min(arrayLength(&umTopology),8u);}
-fn umTileWidth(t:u32)->u32{let word=umTopology[t];return select(select(4u,2u,(word&0x40000000u)!=0u),1u,(word&0x80000000u)!=0u);}
+fn umTileWidth(t:u32)->u32{return select(4u,1u,(umTopology[t]&0x80000000u)!=0u);}
 fn umTileStencil(t:u32)->vec2u{return vec2u(umTopology[2u*umTileCount()+2u*t],umTopology[2u*umTileCount()+2u*t+1u]);}
 fn umTileMaximumWidth(t:u32)->u32{return umTileStencil(t).x>>27u;}
 fn umTileMinimumWidth(t:u32)->u32{return umTileStencil(t).y>>27u;}

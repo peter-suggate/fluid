@@ -2,12 +2,9 @@ import type { FluidRefinementRegion } from "../../core/model";
 import { refinementRegionCellBounds, type RefinementRegionLattice } from "../../core/refinement-regions";
 
 export const MIXED_FINE_TILE = 0x80000000;
-/** The retired 2h tile flag: no layout may carry it. */
-const MIXED_TWO_TILE = 0x40000000;
 export const MIXED_CELL_MASK = 0x3fffffff;
-/** Owner width of a tile word: h or 4h. Ownership is ungraded; a 2h word is fatal. */
+/** Owner width of a tile word: h (MIXED_FINE_TILE set) or 4h. */
 export function mixedCellWidth(word: number): 1 | 4 {
-  if (word & MIXED_TWO_TILE) throw new Error("Mixed ownership is h/4h: a 2h tile word is invalid");
   return word & MIXED_FINE_TILE ? 1 : 4;
 }
 type Triple = readonly [number, number, number];

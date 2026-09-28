@@ -59,7 +59,7 @@ async function ownerMass(device:GPUDevice,solver:WebGPUUniformReferenceSolver):P
  const tiles=(solver as unknown as {mixedFrame:{ownership:{layout:{tiles:Uint32Array}}}}).mixedFrame.ownership.layout.tiles;
  const [nx,ny,nz]=[texture.width,texture.height,texture.depthOrArrayLayers];let sum=0;
  for(let z=0;z<nz;z++)for(let y=0;y<ny;y++)for(let x=0;x<nx;x++){
-  const word=tiles[(x>>2)+(nx>>2)*((y>>2)+(ny>>2)*(z>>2))]!,width=word&0x80000000?1:word&0x40000000?2:4;
+  const word=tiles[(x>>2)+(nx>>2)*((y>>2)+(ny>>2)*(z>>2))]!,width=word&0x80000000?1:4;
   if(x%width===0&&y%width===0&&z%width===0)sum+=volume[x+nx*(y+ny*z)]!*width**3;
  }
  return sum;

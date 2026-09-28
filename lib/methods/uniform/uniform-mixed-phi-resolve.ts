@@ -39,15 +39,14 @@ ${uniformMixedVertexSamplingWGSL}
 var<workgroup> umResolveWords:array<u32,8>;var<workgroup> umResolveLattice:array<f32,27>;
 // One lane per tile-local vertex; local 4 belongs to this tile only on the
 // upper domain face. Incident tile T+c-1 (c in {0,1}^3) may take c=0 only on
-// axes where local is 0. Only 4h tiles own hanging vertices (the 2h tier is
-// empty); a missing tile stages as a unit word. Lattice slot m holds the 4h
+// axes where local is 0. Only 4h tiles own hanging vertices; a missing tile stages as a unit word. Lattice slot m holds the 4h
 // vertex (T+m-1)*4, read only for existing owners; aligned vertices are never
 // written here, so staging them races no store.
 @compute @workgroup_size(125) fn resolve(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  // umSupport is read_write storage, so the job test is not uniform to Tint:
  // every lane reaches the barrier and a spare group leaves after it.
  let header=7u*UM_TILES+16u;let job=group.x+umDispatchX*group.y;
- let valid=job<umSupport[header]+umSupport[header+2u];
+ let valid=job<umSupport[header]+umSupport[header+1u];
  let tile=select(0u,umSupport[header+4u+select(0u,job,valid)],valid);let base=vec3i(umTileCoord(tile));
  if(valid&&lane<8u){let t=base+vec3i(umCorner(lane,2u))-vec3i(1);umResolveWords[lane]=select(0x80000000u,umTopology[umTileAt(vec3u(max(t,vec3i(0))))],all(t>=vec3i(0)));}
  else if(valid&&lane>=8u&&lane<35u){let v=(base+vec3i(umCorner(lane-8u,3u))-vec3i(1))*4;if(all(v>=vec3i(0))){umResolveLattice[lane-8u]=umLoadVertex(vec3u(v));}}

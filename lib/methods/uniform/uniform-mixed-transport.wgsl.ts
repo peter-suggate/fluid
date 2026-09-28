@@ -58,7 +58,7 @@ fn rowBase(r:Row)->vec3u{
 // aligned to their width inside their tile.
 fn donorAt(p:vec3u)->Donor {
  let tile=umTileAt(p/4u);let word=umTopology[tile];
- let shift=select(select(2u,1u,(word&0x40000000u)!=0u),0u,(word&0x80000000u)!=0u);
+ let shift=select(2u,0u,(word&0x80000000u)!=0u);
  let local=(p%4u)>>vec3u(shift);let n=4u>>shift;
  return Donor((word&0x3fffffffu)+local.x+n*(local.y+n*local.z),f32(1u<<(3u*shift)),p&vec3u(~((1u<<shift)-1u)));
 }
@@ -196,7 +196,7 @@ fn normalizeCoarseRow(group:vec3u,lane:u32,divide:bool){
 }
 
 /** Header words of the transport live set (live buffer). */
-export const UNIFORM_MIXED_TRANSPORT_LIVE_HEADER=32;
+export const UNIFORM_MIXED_TRANSPORT_LIVE_HEADER=20;
 /** The transport live set, rebuilt every frame from the current ownership,
  * equal to the dense transport. One hop, row to donors, is bounded per tile by
  * the tiles that tile's rows sample, itself included (its donor box). Sets:
@@ -211,21 +211,21 @@ export const UNIFORM_MIXED_TRANSPORT_LIVE_HEADER=32;
  * so each of those sums is the dense sum. Rows are S, Q1 and Q0; donors are
  * the rows and their donors. Any other tile samples no V and holds none, and
  * the dense transport leaves it at zero, as skipping it does.
- * Words: [0,18) indirect args (rows then donors, per tier), [18,24) counts,
- * 24 unused; then the set bits plane, the donor box low and high planes, and
- * six tier lists. */
+ * Words: [0,12) indirect args (rows then donors; h then 4h), [12,16) their
+ * counts, [16,19) the parallel coarse rows args; then the set bits plane,
+ * the donor box low and high planes, and four tier lists. */
 function uniformMixedTransportLiveWGSL(sources:boolean):string{
  return /* wgsl */`
 const TP_HEADER:u32=${UNIFORM_MIXED_TRANSPORT_LIVE_HEADER}u;
 override umTransportList:u32=0u;
 fn tpPlane(k:u32,t:u32)->u32{return TP_HEADER+k*UM_TILES+t;}
-fn tpList(list:u32,tier:u32)->u32{return TP_HEADER+(3u+3u*(list-1u)+tier)*UM_TILES;}
-fn tpTier(width:u32)->u32{return select(select(2u,1u,width==2u),0u,width==1u);}
+fn tpList(list:u32,tier:u32)->u32{return TP_HEADER+(3u+2u*(list-1u)+tier)*UM_TILES;}
+fn tpTier(width:u32)->u32{return select(1u,0u,width==1u);}
 // Owner of a listed tile (rows 1, donors 2); the full tier lists otherwise.
 fn tpOwner(gid:vec3u)->UMOwner {
  if(umTransportList==0u){return umOwner(gid);}
  let slot=gid.x+umDispatchX*64u*gid.y;let per=64u/(umCellWidth*umCellWidth*umCellWidth);let tier=tpTier(umCellWidth);
- let job=slot/per;if(job>=atomicLoad(&live[18u+3u*(umTransportList-1u)+tier])){return UMOwner();}
+ let job=slot/per;if(job>=atomicLoad(&live[12u+2u*(umTransportList-1u)+tier])){return UMOwner();}
  let tile=atomicLoad(&live[tpList(umTransportList,tier)+job]);let lane=slot%per;
  return UMOwner(tile,lane,umCellWidth,(umTopology[tile]&0x3fffffffu)+lane);
 }
@@ -299,14 +299,14 @@ fn tpBox(tile:u32)->array<vec3i,2>{
  let bits=atomicLoad(&live[tpPlane(0u,tile)]);let tier=tpTier(umTileWidth(tile));
  let rows=(bits&(TP_S|TP_Q1|TP_Q0))!=0u;let donor=rows||(bits&TP_DONOR)!=0u;
  for(var list=1u;list<=2u;list++){
-  if(select(donor,rows,list==1u)){let slot=atomicAdd(&live[18u+3u*(list-1u)+tier],1u);atomicStore(&live[tpList(list,tier)+slot],tile);}
+  if(select(donor,rows,list==1u)){let slot=atomicAdd(&live[12u+2u*(list-1u)+tier],1u);atomicStore(&live[tpList(list,tier)+slot],tile);}
  }
 }
 @compute @workgroup_size(1) fn livePublish(){
- let coarse=atomicLoad(&live[20u]);
- atomicStore(&live[24u],min(coarse,umDispatchX));atomicStore(&live[25u],(coarse+umDispatchX-1u)/umDispatchX);atomicStore(&live[26u],1u);
- for(var k=0u;k<6u;k++){
-  let tier=k%3u;let owners=atomicLoad(&live[18u+k])*(64u>>(3u*tier));let groups=(owners+63u)/64u;
+ let coarse=atomicLoad(&live[13u]);
+ atomicStore(&live[16u],min(coarse,umDispatchX));atomicStore(&live[17u],(coarse+umDispatchX-1u)/umDispatchX);atomicStore(&live[18u],1u);
+ for(var k=0u;k<4u;k++){
+  let tier=k%2u;let owners=atomicLoad(&live[12u+k])*(64u>>(6u*tier));let groups=(owners+63u)/64u;
   atomicStore(&live[3u*k],min(groups,umDispatchX));atomicStore(&live[3u*k+1u],(groups+umDispatchX-1u)/umDispatchX);atomicStore(&live[3u*k+2u],1u);
  }
 }

@@ -24,7 +24,8 @@ import { uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-s
 export class UniformMixedSharpening {
   readonly allocatedBytes=0;
   /** Bytes of the work list: the merged indirect dispatch, four list
-   * counts, the regular group count, a flag per tile, one tier-partitioned
+   * words (three list counts and one unused), the regular group count, a
+   * flag per tile, one tier-partitioned
    * list of regular tiles and one list of coarse seam tiles (4h tiles with a
    * mixed 3x3x3 stencil). */
   static workBytes(tiles:number):number{return 4*(8+3*tiles);}
@@ -83,11 +84,12 @@ fn umSharpenFaceOpen(a:UMOwner,f:UMFace)->bool{
  return umSharpenOpen(a)&&umSharpenOpen(f.neighbor)&&umFaceOpen(f.anchor,f.axis)>0.99999;
 }
 @group(1) @binding(8) var<storage,read_write> work:array<atomic<u32>>;
+// Lists 0 (h) and 1 (regular 4h) are tiers; tier t owners have width 4^t.
 const SH_COUNTS:u32=3u;const SH_REGULAR:u32=7u;const SH_FLAGS:u32=8u;const SH_LIST:u32=${8+tiles}u;
-fn shTier(width:u32)->u32{return select(2u,0u,width==1u);}
-// List 3: coarse seam tiles. Their owners meet finer patches, so one lane
+fn shTier(width:u32)->u32{return select(1u,0u,width==1u);}
+// List 2: coarse seam tiles. Their owners meet finer patches, so one lane
 // per owner would walk up to sixteen patches per face serially.
-fn shListStart(tier:u32)->u32{if(tier==3u){return SH_LIST+UM_TILES;}return SH_LIST+select(0u,umCounts.x,tier>0u);}
+fn shListStart(tier:u32)->u32{if(tier==2u){return SH_LIST+UM_TILES;}return SH_LIST+select(0u,umCounts.x,tier>0u);}
 fn shListed(o:UMOwner)->bool{return o.width==0u||atomicLoad(&work[SH_FLAGS+o.tile])!=0u;}
 // Listed tiers hold h owners and uniform-stencil 4h owners: one patch per
 // face. A constant part count lets the six face chains issue together; a
@@ -97,7 +99,7 @@ fn umMassScale(o:UMOwner)->f32{return f32(o.width*o.width*o.width);}
 fn umV(o:UMOwner)->f32{return textureLoad(volume,vec3i(umOrigin(o)),0).x;}
 fn umBudgetAt(o:UMOwner)->u32{return ${3*n}u+6u*o.index;}
 fn umRawAt(f:UMFace)->u32{return 3u*(u32(f.anchor.x)+UM_D.x*(u32(f.anchor.y)+UM_D.y*u32(f.anchor.z)))+f.axis;}
-fn umCacheAt(anchor:vec3i)->u32{return ${3*n}u+6u*(umCounts.x*64u+umCounts.y*8u+umCounts.z)+u32(anchor.x)+UM_D.x*(u32(anchor.y)+UM_D.y*u32(anchor.z));}
+fn umCacheAt(anchor:vec3i)->u32{return ${3*n}u+6u*(umCounts.x*64u+umCounts.y)+u32(anchor.x)+UM_D.x*(u32(anchor.y)+UM_D.y*u32(anchor.z));}
 fn umFaceFlags(a:UMOwner,f:UMFace)->u32 {
  if(f.neighbor.width==0u||!umSharpenFaceOpen(a,f)){return 0u;}
  let pa=vec3i(umOrigin(a));let pb=vec3i(umOrigin(f.neighbor));
@@ -142,22 +144,22 @@ if(o.width==0u){return;}
 }
 @compute @workgroup_size(64) fn compact(@builtin(global_invocation_id) id:vec3u){
  let tile=id.x+umDispatchX*64u*id.y;if(tile>=UM_TILES||atomicLoad(&work[SH_FLAGS+tile])==0u){return;}
- let width=umTileWidth(tile);let tier=select(shTier(width),3u,width!=1u&&umTileMaximumWidth(tile)!=umTileMinimumWidth(tile));
+ let width=umTileWidth(tile);let tier=select(shTier(width),2u,width!=1u&&umTileMaximumWidth(tile)!=umTileMinimumWidth(tile));
  let slot=atomicAdd(&work[SH_COUNTS+tier],1u);atomicStore(&work[shListStart(tier)+slot],tile);
 }
 // One merged launch per sweep entry: 192 regular owners per group (the
 // tier lists in order), then one group per coarse seam tile. Serial tier
 // launches paid each tier's latency in every entry of every sweep.
 @compute @workgroup_size(1) fn publish(){
- var owners=0u;for(var tier=0u;tier<3u;tier++){owners+=atomicLoad(&work[SH_COUNTS+tier])*(64u>>(3u*tier));}
- let regular=(owners+191u)/192u;let groups=regular+atomicLoad(&work[SH_COUNTS+3u]);atomicStore(&work[SH_REGULAR],regular);
+ var owners=0u;for(var tier=0u;tier<2u;tier++){owners+=atomicLoad(&work[SH_COUNTS+tier])*(64u>>(6u*tier));}
+ let regular=(owners+191u)/192u;let groups=regular+atomicLoad(&work[SH_COUNTS+2u]);atomicStore(&work[SH_REGULAR],regular);
  atomicStore(&work[0],min(groups,umDispatchX));atomicStore(&work[1],(groups+umDispatchX-1u)/umDispatchX);atomicStore(&work[2],1u);
 }
 fn shMergedOwner(job:u32,lane:u32)->UMOwner{
  var slot=job*192u+lane;
- for(var tier=0u;tier<3u;tier++){
-  let per=64u>>(3u*tier);let count=atomicLoad(&work[SH_COUNTS+tier])*per;
-  if(slot<count){let tile=atomicLoad(&work[shListStart(tier)+slot/per]);let l=slot%per;return UMOwner(tile,l,1u<<tier,(umTopology[tile]&0x3fffffffu)+l);}
+ for(var tier=0u;tier<2u;tier++){
+  let per=64u>>(6u*tier);let count=atomicLoad(&work[SH_COUNTS+tier])*per;
+  if(slot<count){let tile=atomicLoad(&work[shListStart(tier)+slot/per]);let l=slot%per;return UMOwner(tile,l,1u<<(2u*tier),(umTopology[tile]&0x3fffffffu)+l);}
   slot-=count;
  }
  return UMOwner();
@@ -167,8 +169,8 @@ fn shMergedOwner(job:u32,lane:u32)->UMOwner{
 // of the tile's (4/w)^3 owners 3w^3 lanes, one per (face side, patch), and
 // sum the staged terms in one lane in the per-owner kernels' order.
 fn shSeamTile(job:u32)->u32{
- if(job>=atomicLoad(&work[SH_COUNTS+3u])){return UM_TILES;}
- return atomicLoad(&work[shListStart(3u)+job]);
+ if(job>=atomicLoad(&work[SH_COUNTS+2u])){return UM_TILES;}
+ return atomicLoad(&work[shListStart(2u)+job]);
 }
 fn shSeamOwner(tile:u32,local:vec3u)->UMOwner{
  if(tile>=UM_TILES){return UMOwner();}

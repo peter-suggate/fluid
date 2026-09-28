@@ -45,7 +45,7 @@ try{
    const volume=await readMixedTexture(device,fields.volumeA),layout=(solver as unknown as {mixedFrame:{ownership:{layout:{tiles:Uint32Array}}}}).mixedFrame.ownership.layout;
    const start=step===10?88:168;toeMass=0;
    for(let z=0;z<d[2];z++)for(let y=0;y<d[1];y++)for(let x=start;x<start+8;x++){
-    const word=layout.tiles[Math.floor(x/4)+(d[0]/4)*(Math.floor(y/4)+(d[1]/4)*Math.floor(z/4))]!,width=word&0x80000000?1:word&0x40000000?2:4;
+    const word=layout.tiles[Math.floor(x/4)+(d[0]/4)*(Math.floor(y/4)+(d[1]/4)*Math.floor(z/4))]!,width=word&0x80000000?1:4;
     const p=[x,y,z].map(v=>Math.floor(v/width)*width);toeMass+=volume[p[0]!+d[0]*(p[1]!+d[1]*p[2]!)]!;
    }
    toeMass=+toeMass.toFixed(1);

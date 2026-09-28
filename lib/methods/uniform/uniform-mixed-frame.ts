@@ -485,7 +485,6 @@ export class UniformMixedFrame {
   * Pressure levels never change. One submit. */
  adoptBuiltLayout(fine:UniformMixedBuiltLevel):void{
   if(!this.ready||this.busy||this.failed)throw new Error("Ownership edits require a completed frame");
-  if(fine.tierCounts[1]!==0)throw new Error("The mixed simulation layout is ungraded h/4h");
   if(!fine.changedTiles)return;
   // A census extension survives the relayout remapped, like velocity.
   const keep=this.reusableExtension!==undefined;this.extensionRemapped=keep;this.geometryCurrent=false;

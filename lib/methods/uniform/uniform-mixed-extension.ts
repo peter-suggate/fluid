@@ -429,7 +429,7 @@ ${uniformMixedFaceDispatchWGSL("publish","umPublished(face)",false,"value.w=text
    const pass=encoder.beginComputePass({label:`Uniform mixed extension ${entry}`});
    pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);
    if(entry==="restrictBand"){pass.setPipeline(this.restrictPipeline!);pass.dispatchWorkgroups(...this.ownership.layout.tileDimensions.map(n=>Math.ceil(n/4)) as [number,number,number]);}
-   else {this.ownership.dispatchRegular(pass,this.regularPipelines.get(entry)!);this.ownership.dispatchSeams(pass,this.seamPipelines.get(entry)!,[false,true,true]);}pass.end();
+   else {this.ownership.dispatchRegular(pass,this.regularPipelines.get(entry)!);this.ownership.dispatchSeams(pass,this.seamPipelines.get(entry)!,[false,true]);}pass.end();
   };
   if(!Number.isSafeInteger(sweeps)||sweeps<0)throw new Error("Invalid mixed extension sweep count");
   // Bulk extension uses only the regular hierarchy. Its restriction reads
