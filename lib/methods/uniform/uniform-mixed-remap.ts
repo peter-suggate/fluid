@@ -15,22 +15,22 @@ interface Fields{volume:GPUTexture;velocity:GPUTexture;phi:GPUTexture;negative:G
  * other owner's remap is the identity, so its live value stays in place. */
 export class UniformMixedRemap {
  readonly target:UniformMixedOwnership;
- get allocatedBytes(){return this.target.allocatedBytes+this.worklist.size+this.indirect.size;}
+ get allocatedBytes(){return this.target.allocatedBytes+this.worklist.size;}
  private readonly resources:GPUBindGroupLayout;
  private readonly groups:readonly [GPUBindGroup,GPUBindGroup];
  /** The census extension (scratch velocity and negative walls) remapped
   * through its own fields, before the velocity remap reuses the scratch. */
  private extensionGroups?:readonly [GPUBindGroup,GPUBindGroup];
  private readonly pipelines=new Map<string,GPUComputePipeline>();
- /** [indirect x,y,z, count, tiles...]: the dilated changed-tile worklist. */
+ /** [three unused words, count, tiles...]: the dilated changed-tile worklist. */
  private readonly worklist:GPUBuffer;
- /** Its indirect arguments: a dispatch may not read a buffer as indirect
-  * arguments while binding it writable. */
- private readonly indirect:GPUBuffer;
+ /** Workgroups of each remap launch: a fixed grid strides over the listed
+  * tiles, bounded by the layout's tiles and capped where the GPU saturates. */
+ private readonly grid:number;
  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,input:Fields,scratch:Fields){
   this.target=new UniformMixedOwnership(device,ownership.layout,false);
   this.worklist=device.createBuffer({label:"Uniform mixed remap worklist",size:(4+ownership.layout.tiles.length)*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
-  this.indirect=device.createBuffer({label:"Uniform mixed remap dispatch",size:16,usage:GPUBufferUsage.INDIRECT|GPUBufferUsage.COPY_DST});
+  this.grid=Math.min(1024,ownership.layout.tiles.length);
   this.resources=device.createBindGroupLayout({entries:[
    ...[0,1,2].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
    {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
@@ -59,10 +59,10 @@ export class UniformMixedRemap {
   const module=this.device.createShaderModule({code:uniformMixedRemapWGSL(this.ownership.layout)});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.target.bindLayout,this.resources]});
-  for(const entryPoint of ["markChanged","publishWorklist","remapCells","remapFaces","copyCells","copyFaces"])this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX}}}));
+  for(const entryPoint of ["markChanged","remapCells","remapFaces","copyCells","copyFaces"])this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX}}}));
  }
  apply(layout:UniformMixedLayout):void{
-  if(this.pipelines.size!==6)throw new Error("Live remap has not been initialized");
+  if(this.pipelines.size!==5)throw new Error("Live remap has not been initialized");
   this.target.update(layout);
   const encode=(copy:boolean)=>{
    const e=this.device.createCommandEncoder({label:copy?"Uniform publish remapped owners":"Uniform remap changed ownership"});
@@ -74,7 +74,7 @@ export class UniformMixedRemap {
   * the target, remap, adopt into the live ownership, publish. With
   * extension, the scratch velocity (the census extension) is remapped too. */
  applyBuilt(encoder:GPUCommandEncoder,built:UniformMixedBuiltOwnership,extension=false):void{
-  if(this.pipelines.size!==6)throw new Error("Live remap has not been initialized");
+  if(this.pipelines.size!==5)throw new Error("Live remap has not been initialized");
   if(extension&&!this.extensionGroups)throw new Error("Remap has no extension fields");
   this.target.adopt(encoder,built);this.encodePass(encoder,false,extension);
   this.ownership.adopt(encoder,built);this.encodePass(encoder,true,extension);
@@ -89,27 +89,27 @@ export class UniformMixedRemap {
    e.clearBuffer(this.worklist,0,16);
    const list=begin("Uniform mixed remap worklist"),groups=Math.ceil(this.target.layout.tiles.length/64);
    list.setPipeline(this.pipelines.get("markChanged")!);list.dispatchWorkgroups(Math.min(groups,this.target.dispatchX),Math.ceil(groups/this.target.dispatchX));
-   list.setPipeline(this.pipelines.get("publishWorklist")!);list.dispatchWorkgroups(1);
    list.end();
-   e.copyBufferToBuffer(this.worklist,0,this.indirect,0,12);
   }
   // The extension leaves the scratch velocity before the velocity remap
   // writes it, and returns after the velocity publish read it.
-  const faces=(label:string,group:GPUBindGroup,name:string)=>{const pass=begin(label);pass.setBindGroup(2,group);pass.setPipeline(this.pipelines.get(name)!);pass.dispatchWorkgroupsIndirect(this.indirect,0);pass.end();};
+  const faces=(label:string,group:GPUBindGroup,name:string)=>{const pass=begin(label);pass.setBindGroup(2,group);pass.setPipeline(this.pipelines.get(name)!);pass.dispatchWorkgroups(this.grid);pass.end();};
   if(extension&&!copy)faces("Uniform mixed remap extension",this.extensionGroups![0],"remapFaces");
   const pass=begin(copy?"Uniform mixed remap publish":"Uniform mixed remap");
-  for(const name of copy?["copyCells","copyFaces"]:["remapCells","remapFaces"]){pass.setPipeline(this.pipelines.get(name)!);pass.dispatchWorkgroupsIndirect(this.indirect,0);}
+  for(const name of copy?["copyCells","copyFaces"]:["remapCells","remapFaces"]){pass.setPipeline(this.pipelines.get(name)!);pass.dispatchWorkgroups(this.grid);}
   pass.end();
   if(extension&&copy)faces("Uniform mixed remap extension publish",this.extensionGroups![1],"copyFaces");
  }
- destroy():void{this.target.destroy();this.worklist.destroy();this.indirect.destroy();}
+ destroy():void{this.target.destroy();this.worklist.destroy();}
 }
 
 /** Frame-internal transfer between the h/4h simulation ownership and the
  * all-4h pressure ownership of one lattice (the band pressure's split).
- * Neither ownership changes, and every tile is one 4h pressure owner, so each
- * direction is one direct launch of one workgroup per tile, addressed by
- * lattice position alone: no worklist, no owner lookups, no whole-field copy.
+ * Neither ownership changes, and every tile is one 4h pressure owner. Each
+ * direction is two fixed direct launches over the simulation ownership's own
+ * tier lists, their live counts read on the GPU (umCounts): one lane per 4h
+ * tile (a regular 4h owner is a handful of texels; a seam one walks its split
+ * planes serially), then one workgroup job per h tile. No whole-field copy.
  * Only what the other side reads is written: a 4h owner's origin volume texel,
  * its three positive-face anchor texels (origin + 3 on the face's axis, the
  * face in that component, the released-wall bits in w) and its negative
@@ -123,12 +123,18 @@ export class UniformMixedRemap {
  * - To simulation: an h face interpolates the 4h owner's two faces on its
  *   axis at its plane, a 4h face with one patch is copied, one of sixteen
  *   patches takes its 4h face. */
+const TRANSFER_GRID=1024;
 export class UniformMixedOwnershipTransfer {
  readonly allocatedBytes=0;
  private readonly resources:GPUBindGroupLayout;
  private readonly pipelines=new Map<string,GPUComputePipeline>();
+ /** Fixed grids: lanes over the 4h list, workgroup jobs over the h list. */
+ private readonly coarseGroups:number;
+ private readonly fineGroups:number;
  constructor(private readonly device:GPUDevice,readonly simulation:UniformMixedOwnership,readonly pressure:UniformMixedOwnership){
   if(simulation.layout.tiles.length!==pressure.layout.tiles.length)throw new Error("Ownership transfer requires one tile lattice");
+  const tiles=simulation.layout.tiles.length;
+  this.coarseGroups=Math.max(1,Math.min(TRANSFER_GRID,Math.ceil(tiles/64)));this.fineGroups=Math.max(1,Math.min(TRANSFER_GRID,tiles));
   if(pressure.layout.tiles.some(word=>(word&0xc0000000)!==0))throw new Error("Ownership transfer targets the all-4h pressure ownership");
   this.resources=device.createBindGroupLayout({entries:[
    ...[0,1].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
@@ -149,13 +155,15 @@ export class UniformMixedOwnershipTransfer {
   const module=this.device.createShaderModule({label:"Uniform mixed ownership transfer",code:uniformMixedOwnershipTransferWGSL(this.simulation.layout)});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.simulation.bindLayout,this.resources]});
-  for(const entryPoint of ["toPressure","toSimulation"])this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.simulation.dispatchX}}}));
+  for(const entryPoint of ["toPressureCoarse","toPressureFine","toSimulationCoarse","toSimulationFine"])this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.simulation.dispatchX}}}));
  }
+ /** Both launches write disjoint tiles and read only the source fields. */
  private encode(e:GPUCommandEncoder,entry:"toPressure"|"toSimulation",group:GPUBindGroup):void{
-  const pipeline=this.pipelines.get(entry);if(!pipeline)throw new Error("Ownership transfer has not been initialized");
+  const coarse=this.pipelines.get(`${entry}Coarse`),fine=this.pipelines.get(`${entry}Fine`);if(!coarse||!fine)throw new Error("Ownership transfer has not been initialized");
   const pass=e.beginComputePass({label:entry==="toPressure"?"Uniform mixed transfer to pressure":"Uniform mixed transfer to simulation"});
-  pass.setBindGroup(0,this.simulation.bindGroup);pass.setBindGroup(1,group);pass.setPipeline(pipeline);
-  const tiles=this.simulation.layout.tiles.length,x=this.simulation.dispatchX;pass.dispatchWorkgroups(Math.min(tiles,x),Math.ceil(tiles/x));
+  pass.setBindGroup(0,this.simulation.bindGroup);pass.setBindGroup(1,group);
+  pass.setPipeline(coarse);pass.dispatchWorkgroups(this.coarseGroups);
+  pass.setPipeline(fine);pass.dispatchWorkgroups(this.fineGroups);
   pass.end();
  }
  /** Simulation to pressure: volume, faces and negative walls. */
@@ -179,6 +187,39 @@ fn tBits(texel:vec4f)->u32{return u32(round(texel.w));}
 // The simulation tile at tile coordinate c across the tile's positive face
 // on axis a is h: that 4h face holds sixteen simulation patches.
 fn tSplit(c:vec3u,a:u32)->bool{var q=c;q[a]+=1u;return q[a]<UM_T[a]&&umTileWidth(umTileAt(q))==1u;}
+// Job j of the simulation ownership's h and 4h tile lists.
+fn tFineTile(j:u32)->u32{return umTopology[UM_TILES+j];}
+fn tCoarseTile(j:u32)->u32{return umTopology[UM_TILES+umCounts.x+j];}
+// A 4h tile, one lane: the origin volume texel, the three positive-face
+// anchor texels (a split face is the mean of its sixteen patch anchors on the
+// plane, summed in tMean's order; never released) and the negative walls.
+fn tCoarseToPressure(tile:u32){
+ let c=umTileCoord(tile);let base=c*4u;let origin=vec3i(base);
+ textureStore(outputVolume,origin,vec4f(textureLoad(volume,origin,0).x));
+ var texels:array<vec4f,3>;
+ for(var a=0u;a<3u;a++){var anchor=origin;anchor[a]+=3;texels[a]=textureLoad(velocity,anchor,0);}
+ var negativeBits=0u;
+ for(var b=0u;b<3u;b++){
+  if(c[b]!=0u){continue;}
+  let index=umNegativeBoundaryIndex(base,b);
+  negativeBits|=((tBits(texels[b])>>(b+3u))&1u)<<(b+3u);
+  boundary[index]=negative[index];
+ }
+ for(var a=0u;a<3u;a++){
+  var anchor=origin;anchor[a]+=3;let texel=texels[a];
+  var face=vec2f(texel[a],f32((tBits(texel)>>a)&1u));
+  if(tSplit(c,a)){
+   let u=(a+1u)%3u;let v=(a+2u)%3u;var value=0.0;
+   for(var y=0u;y<4u;y++){for(var x=0u;x<4u;x++){
+    var q=base;q[a]+=3u;q[u]+=x;q[v]+=y;value+=textureLoad(velocity,vec3i(q),0)[a];
+   }}
+   face=vec2f(value/16.0,0.0);
+  }
+  var packed=vec4f(0);packed[a]=face.x;
+  packed.w=f32(select(0u,u32(face.y)<<a,c[a]+1u==UM_T[a])|negativeBits);
+  textureStore(output,anchor,packed);
+ }
+}
 var<workgroup> tVolume:array<f32,64>;
 // Per axis: the simulation value on the tile's positive plane (positive
 // faces) and on its negative domain plane (wall entries), with the released
@@ -194,27 +235,20 @@ fn tMean(wall:bool,a:u32)->vec2f{
   let s=select(tPositive[i],tNegative[i],wall);value+=s.x;released=min(released,s.y);
  }}return vec2f(value/16.0,released);
 }
-@compute @workgroup_size(64) fn toPressure(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let tile=group.x+umDispatchX*group.y;if(tile>=UM_TILES){return;}
+// An h tile, one workgroup (a lane per cell): volume is the mean of its
+// cells, each 4h face (and negative wall) the mean of its sixteen patches.
+fn tFineToPressure(tile:u32,lane:u32){
  let c=umTileCoord(tile);let local=umCorner(lane,4u);let base=c*4u;let cell=vec3i(base+local);
- let fine=umTileWidth(tile)==1u;
- if(fine){
-  tVolume[lane]=textureLoad(volume,cell,0).x;let texel=textureLoad(velocity,cell,0);let bits=tBits(texel);
-  for(var a=0u;a<3u;a++){
-   tPositive[lane+64u*a]=vec2f(texel[a],f32((bits>>a)&1u));
-   if(c[a]==0u&&local[a]==0u){tNegative[lane+64u*a]=vec2f(negative[umNegativeBoundaryIndex(vec3u(cell),a)],f32((bits>>(a+3u))&1u));}
-  }
- }else{
-  // A 4h tile's split positive faces: its plane cells are the patch anchors.
-  let texel=textureLoad(velocity,cell,0);
-  for(var a=0u;a<3u;a++){if(local[a]==3u&&tSplit(c,a)){tPositive[lane+64u*a]=vec2f(texel[a],0.0);}}
+ tVolume[lane]=textureLoad(volume,cell,0).x;let texel=textureLoad(velocity,cell,0);let bits=tBits(texel);
+ for(var a=0u;a<3u;a++){
+  tPositive[lane+64u*a]=vec2f(texel[a],f32((bits>>a)&1u));
+  if(c[a]==0u&&local[a]==0u){tNegative[lane+64u*a]=vec2f(negative[umNegativeBoundaryIndex(vec3u(cell),a)],f32((bits>>(a+3u))&1u));}
  }
  workgroupBarrier();
  if(lane==0u){
   var value=0.0;
-  if(fine){for(var z=0u;z<4u;z++){for(var y=0u;y<4u;y++){for(var x=0u;x<4u;x++){value+=tVolume[x+4u*(y+4u*z)];}}}value/=64.0;}
-  else{value=textureLoad(volume,cell,0).x;}
-  textureStore(outputVolume,cell,vec4f(value));
+  for(var z=0u;z<4u;z++){for(var y=0u;y<4u;y++){for(var x=0u;x<4u;x++){value+=tVolume[x+4u*(y+4u*z)];}}}
+  textureStore(outputVolume,cell,vec4f(value/64.0));
  }
  if(lane>=3u){return;}
  // Lane a: the owner's negative wall (every lane, for the released bits it
@@ -222,24 +256,48 @@ fn tMean(wall:bool,a:u32)->vec2f{
  var negativeBits=0u;
  for(var b=0u;b<3u;b++){
   if(c[b]!=0u){continue;}
-  var wall=vec2f(0);
-  if(fine){wall=tMean(true,b);}
-  else{var anchor=vec3i(base);anchor[b]+=3;wall=vec2f(negative[umNegativeBoundaryIndex(base,b)],f32((tBits(textureLoad(velocity,anchor,0))>>(b+3u))&1u));}
+  let wall=tMean(true,b);
   negativeBits|=u32(wall.y)<<(b+3u);
   if(b==lane){boundary[umNegativeBoundaryIndex(base,b)]=wall.x;}
  }
- let a=lane;var anchor=vec3i(base);anchor[a]+=3;let wall=c[a]+1u==UM_T[a];
- var face=vec2f(0);
- if(fine||tSplit(c,a)){face=tMean(false,a);}
- else{let texel=textureLoad(velocity,anchor,0);face=vec2f(texel[a],f32((tBits(texel)>>a)&1u));}
+ let a=lane;var anchor=vec3i(base);anchor[a]+=3;let face=tMean(false,a);
  var packed=vec4f(0);packed[a]=face.x;
- packed.w=f32(select(0u,u32(face.y)<<a,wall)|negativeBits);
+ packed.w=f32(select(0u,u32(face.y)<<a,c[a]+1u==UM_T[a])|negativeBits);
  textureStore(output,anchor,packed);
 }
-@compute @workgroup_size(64) fn toSimulation(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let tile=group.x+umDispatchX*group.y;if(tile>=UM_TILES){return;}
+@compute @workgroup_size(64) fn toPressureCoarse(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ for(var j=gid.x;j<umCounts.y;j+=64u*groups.x){tCoarseToPressure(tCoarseTile(j));}
+}
+@compute @workgroup_size(64) fn toPressureFine(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ for(var job=group.x;job<umCounts.x;job+=groups.x){tFineToPressure(tFineTile(job),lane);workgroupBarrier();}
+}
+// A 4h tile, one lane: its non-split positive faces copied at their anchors,
+// split ones written at their plane cells, and its negative walls.
+fn tCoarseToSimulation(tile:u32){
+ let c=umTileCoord(tile);let base=c*4u;let origin=vec3i(base);
+ var low=vec3f(0);var high=vec3f(0);var negativeBits=0u;var splits=0u;
+ for(var a=0u;a<3u;a++){
+  var anchor=origin;anchor[a]+=3;let texel=textureLoad(velocity,anchor,0);high[a]=texel[a];
+  if(c[a]==0u){low[a]=negative[umNegativeBoundaryIndex(base,a)];negativeBits|=tBits(texel)&(1u<<(a+3u));boundary[umNegativeBoundaryIndex(base,a)]=low[a];}
+  else{var below=origin;below[a]-=1;low[a]=textureLoad(velocity,below,0)[a];}
+  if(tSplit(c,a)){splits|=1u<<a;}else{textureStore(output,anchor,texel);}
+ }
+ for(var a=0u;a<3u;a++){
+  if((splits&(1u<<a))==0u){continue;}
+  let u=(a+1u)%3u;let v=(a+2u)%3u;
+  for(var y=0u;y<4u;y++){for(var x=0u;x<4u;x++){
+   var q=vec3u(0);q[a]=3u;q[u]=x;q[v]=y;
+   // A cell on several split planes is written once, by the first.
+   var packed=vec4f(0);var first=true;
+   for(var b=0u;b<3u;b++){if(q[b]==3u&&(splits&(1u<<b))!=0u){packed[b]=mix(low[b],high[b],1.0);if(b<a){first=false;}}}
+   if(first){packed.w=f32(negativeBits);textureStore(output,vec3i(base+q),packed);}
+  }}
+ }
+}
+// An h tile, one workgroup: each h face interpolates the 4h owner's two
+// faces on its axis at its plane.
+fn tFineToSimulation(tile:u32,lane:u32){
  let c=umTileCoord(tile);let local=umCorner(lane,4u);let base=c*4u;let origin=vec3i(base);let cell=vec3i(base+local);
- // The 4h owner's two faces on each axis, and its wall bits.
  var low=vec3f(0);var high=vec3f(0);var positiveBits=0u;var negativeBits=0u;
  for(var a=0u;a<3u;a++){
   var anchor=origin;anchor[a]+=3;let texel=textureLoad(velocity,anchor,0);let bits=tBits(texel);high[a]=texel[a];
@@ -247,26 +305,19 @@ fn tMean(wall:bool,a:u32)->vec2f{
   if(c[a]==0u){low[a]=negative[umNegativeBoundaryIndex(base,a)];negativeBits|=bits&(1u<<(a+3u));}
   else{var below=origin;below[a]-=1;low[a]=textureLoad(velocity,below,0)[a];}
  }
- if(umTileWidth(tile)==1u){
-  var packed=vec4f(0);var bits=0u;
-  for(var a=0u;a<3u;a++){
-   packed[a]=mix(low[a],high[a],f32(local[a]+1u)/4.0);
-   if(local[a]==3u){bits|=positiveBits&(1u<<a);}
-   if(local[a]==0u&&c[a]==0u){boundary[umNegativeBoundaryIndex(vec3u(cell),a)]=mix(low[a],high[a],0.0);bits|=negativeBits&(1u<<(a+3u));}
-  }
-  packed.w=f32(bits);textureStore(output,cell,packed);
-  return;
+ var packed=vec4f(0);var bits=0u;
+ for(var a=0u;a<3u;a++){
+  packed[a]=mix(low[a],high[a],f32(local[a]+1u)/4.0);
+  if(local[a]==3u){bits|=positiveBits&(1u<<a);}
+  if(local[a]==0u&&c[a]==0u){boundary[umNegativeBoundaryIndex(vec3u(cell),a)]=mix(low[a],high[a],0.0);bits|=negativeBits&(1u<<(a+3u));}
  }
- // A 4h owner: split positive faces at their plane cells, the others copied
- // at their anchor, and its negative walls.
- var packed=vec4f(0);var written=false;
- for(var a=0u;a<3u;a++){if(local[a]==3u&&tSplit(c,a)){packed[a]=mix(low[a],high[a],1.0);written=true;}}
- if(written){packed.w=f32(negativeBits);textureStore(output,cell,packed);}
- if(lane<3u){
-  let a=lane;var anchor=origin;anchor[a]+=3;
-  if(!tSplit(c,a)){textureStore(output,anchor,textureLoad(velocity,anchor,0));}
-  if(c[a]==0u){boundary[umNegativeBoundaryIndex(base,a)]=low[a];}
- }
+ packed.w=f32(bits);textureStore(output,cell,packed);
+}
+@compute @workgroup_size(64) fn toSimulationCoarse(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ for(var j=gid.x;j<umCounts.y;j+=64u*groups.x){tCoarseToSimulation(tCoarseTile(j));}
+}
+@compute @workgroup_size(64) fn toSimulationFine(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ for(var job=group.x;job<umCounts.x;job+=groups.x){tFineToSimulation(tFineTile(job),lane);}
 }
 `;
 }
@@ -303,21 +354,22 @@ function uniformMixedRemapWGSL(layout:UniformMixedLayout):string{
   if(select(umTileWidth(q)!=oldumTileWidth(q),umTileWidth(q)<oldumTileWidth(q),fine)){atomicStore(&worklist[4u+atomicAdd(&worklist[3],1u)],tile);return;}
  }}}
 }
-@compute @workgroup_size(1) fn publishWorklist(){
- let count=atomicLoad(&worklist[3]);
- atomicStore(&worklist[0],min(count,umDispatchX));atomicStore(&worklist[1],(count+umDispatchX-1u)/umDispatchX);atomicStore(&worklist[2],1u);
-}
-// One workgroup per listed tile. Lanes are the tile's cells (and, for faces,
+// One workgroup job per listed tile; a fixed grid strides over the list. Lanes are the tile's cells (and, for faces,
 // cell and axis), so a coarse owner's footprint loops run side by side
 // instead of serially on one lane.
 const UM_UNLISTED:u32=0xffffffffu;
 var<workgroup> listedTile:u32;
 fn listed(group:vec3u,lane:u32)->u32 {
  if(lane==0u){
-  let slot=group.x+umDispatchX*group.y;
+  let slot=group.x;
   listedTile=select(UM_UNLISTED,atomicLoad(&worklist[4u+slot]),slot<atomicLoad(&worklist[3]));
  }
  return workgroupUniformLoad(&listedTile);
+}
+var<workgroup> listedJobs:u32;
+fn listedJobCount(lane:u32)->u32 {
+ if(lane==0u){listedJobs=atomicLoad(&worklist[3]);}
+ return workgroupUniformLoad(&listedJobs);
 }
 fn oldumLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
 ${old(vertexSampling)}
@@ -435,8 +487,12 @@ fn remapTileCells(group:vec3u,lane:u32,remap:bool){
   }
  }
 }
-@compute @workgroup_size(64) fn remapCells(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){remapTileCells(group,lane,true);}
-@compute @workgroup_size(64) fn copyCells(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){remapTileCells(group,lane,false);}
+@compute @workgroup_size(64) fn remapCells(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let jobs=listedJobCount(lane);for(var job=group.x;job<jobs;job+=groups.x){remapTileCells(vec3u(job,0u,0u),lane,true);workgroupBarrier();}
+}
+@compute @workgroup_size(64) fn copyCells(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let jobs=listedJobCount(lane);for(var job=group.x;job<jobs;job+=groups.x){remapTileCells(vec3u(job,0u,0u),lane,false);workgroupBarrier();}
+}
 var<workgroup> tileFaces:array<vec2f,192>;
 var<workgroup> tileSamples:array<f32,192>;
 // Faces: one lane per cell and axis evaluates the positive patch anchored at
@@ -485,8 +541,12 @@ fn remapTileFaces(group:vec3u,lane:u32,remap:bool){
  if(remap){packed.w=f32(released);}else{packed.w=textureLoad(velocity,anchor,0).w;}
  textureStore(output,anchor,packed);
 }
-@compute @workgroup_size(192) fn remapFaces(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){remapTileFaces(group,lane,true);}
-@compute @workgroup_size(192) fn copyFaces(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){remapTileFaces(group,lane,false);}
+@compute @workgroup_size(192) fn remapFaces(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let jobs=listedJobCount(lane);for(var job=group.x;job<jobs;job+=groups.x){remapTileFaces(vec3u(job,0u,0u),lane,true);workgroupBarrier();}
+}
+@compute @workgroup_size(192) fn copyFaces(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let jobs=listedJobCount(lane);for(var job=group.x;job<jobs;job+=groups.x){remapTileFaces(vec3u(job,0u,0u),lane,false);workgroupBarrier();}
+}
 
 `;
 }

@@ -6,7 +6,7 @@ import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-samplin
 import { uniformSharpenBudgetWGSL } from "./uniform-sharpen-budget.wgsl";
 import { uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 
-/** Native geometric prepare/propose/limit/commit sweeps on physical mixed
+/** Native geometric propose/limit/commit sweeps on physical mixed
  * face patches. Budgets and fluxes use fine-cell mass units, with area shares
  * splitting a coarse cell's offer across its subfaces. Borrows <=40N bytes
  * from the 40N-byte native transport edge slice after transport completes.
@@ -20,23 +20,33 @@ import { uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-s
  * keeps its volume exactly and has zero budgets, so its faces carry a zero
  * flux: listed owners skip them instead of reading unlisted budgets. Unlisted
  * owners are not rewritten, so the scratch volume holds stale values there
- * after the sweeps; the final (even-sweep) volume is exact. */
+ * after the sweeps; the final (even-sweep) volume is exact.
+ *
+ * Each sweep is three launches: propose, limit, commit. Commit prepares the
+ * next sweep's budgets in place from the owner's new volume, the only budget
+ * input that changes across sweeps (commit reads only its own budget and its
+ * neighbours' limit factors, so the overwrite is race-free). The first
+ * sweep's budgets are prepared with the geometry cache. */
+/** Workgroups of 192 lanes per merged sharpening launch at most. */
+const SHARPEN_GRID=1024;
 export class UniformMixedSharpening {
   readonly allocatedBytes=0;
-  /** Bytes of the work list: the merged indirect dispatch, four list
-   * words (three list counts and one unused), the regular group count, a
-   * flag per tile, one tier-partitioned
+  private readonly grid:number;
+  /** Bytes of the work list: three unused words, four list words (three
+   * list counts and one unused), one unused word, a flag per tile, one tier-partitioned
    * list of regular tiles and one list of coarse seam tiles (4h tiles with a
    * mixed 3x3x3 stencil). */
   static workBytes(tiles:number):number{return 4*(8+3*tiles);}
   private readonly resources:GPUBindGroupLayout;
   private readonly pipelines=new Map<string,GPUComputePipeline[]>();
-  /** work: a STORAGE|COPY_SRC|COPY_DST buffer of workBytes(tiles) and a
-   * separate 12-byte INDIRECT|COPY_DST buffer (Dawn rejects indirect and
-   * writable storage use of one buffer within a pass). resolved: phi's
+  /** work: a STORAGE|COPY_DST buffer of workBytes(tiles). resolved: phi's
    * hanging texels hold umVertexValue (UniformMixedPhiResolve). */
-  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid:UniformMixedSolid|undefined,private readonly work:{list:GPUBuffer;indirect:GPUBuffer},private readonly resolved=false){
-    if((work.list.size<UniformMixedSharpening.workBytes(ownership.layout.tiles.length)||work.indirect.size<12))throw new Error("Mixed sharpening work list is too small");
+  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid:UniformMixedSolid|undefined,private readonly work:{list:GPUBuffer},private readonly resolved=false){
+    if(work.list.size<UniformMixedSharpening.workBytes(ownership.layout.tiles.length))throw new Error("Mixed sharpening work list is too small");
+    // Each merged launch is a fixed grid-stride grid: the layout's job bound
+    // (every tile listed), capped where the GPU is saturated.
+    const tiles=ownership.layout.tiles.length;
+    this.grid=Math.max(1,Math.min(SHARPEN_GRID,Math.ceil(64*tiles/192)+tiles));
     this.resources=device.createBindGroupLayout({entries:[
       ...[0,1,2,3].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
       {binding:4,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"r32float",viewDimension:"3d"}},
@@ -79,13 +89,14 @@ ${uniformMixedFaceAddressWGSL}
 ${uniformSharpenBudgetWGSL}
 ${uniformMixedSolidWGSL(this.solid?2:undefined)}
 fn umSharpenOpen(o:UMOwner)->bool{return o.width!=1u||!umSolidEnabled()||umCellOpen(vec3i(umOrigin(o)))>0.99999;}
-fn umSharpenFaceOpen(a:UMOwner,f:UMFace)->bool{
- if(!umSolidEnabled()||a.width!=1u||f.neighbor.width!=1u){return true;}
- return umSharpenOpen(a)&&umSharpenOpen(f.neighbor)&&umFaceOpen(f.anchor,f.axis)>0.99999;
+fn umSharpenFaceOpenAB(a:UMOwner,b:UMOwner,f:UMFace)->bool{
+ if(!umSolidEnabled()||a.width!=1u||b.width!=1u){return true;}
+ return umSharpenOpen(a)&&umSharpenOpen(b)&&umFaceOpen(f.anchor,f.axis)>0.99999;
 }
+fn umSharpenFaceOpen(a:UMOwner,f:UMFace)->bool{return umSharpenFaceOpenAB(a,f.neighbor,f);}
 @group(1) @binding(8) var<storage,read_write> work:array<atomic<u32>>;
 // Lists 0 (h) and 1 (regular 4h) are tiers; tier t owners have width 4^t.
-const SH_COUNTS:u32=3u;const SH_REGULAR:u32=7u;const SH_FLAGS:u32=8u;const SH_LIST:u32=${8+tiles}u;
+const SH_COUNTS:u32=3u;const SH_FLAGS:u32=8u;const SH_LIST:u32=${8+tiles}u;
 fn shTier(width:u32)->u32{return select(1u,0u,width==1u);}
 // List 2: coarse seam tiles. Their owners meet finer patches, so one lane
 // per owner would walk up to sixteen patches per face serially.
@@ -97,6 +108,8 @@ fn shListed(o:UMOwner)->bool{return o.width==0u||atomicLoad(&work[SH_FLAGS+o.til
 fn shParts(first:UMFace)->u32{return 1u;}
 fn umMassScale(o:UMOwner)->f32{return f32(o.width*o.width*o.width);}
 fn umV(o:UMOwner)->f32{return textureLoad(volume,vec3i(umOrigin(o)),0).x;}
+// Owner record: give, take, distance, desired, outgoing and incoming
+// limit factors.
 fn umBudgetAt(o:UMOwner)->u32{return ${3*n}u+6u*o.index;}
 fn umRawAt(f:UMFace)->u32{return 3u*(u32(f.anchor.x)+UM_D.x*(u32(f.anchor.y)+UM_D.y*u32(f.anchor.z)))+f.axis;}
 fn umCacheAt(anchor:vec3i)->u32{return ${3*n}u+6u*(umCounts.x*64u+umCounts.y)+u32(anchor.x)+UM_D.x*(u32(anchor.y)+UM_D.y*u32(anchor.z));}
@@ -147,14 +160,14 @@ if(o.width==0u){return;}
  let width=umTileWidth(tile);let tier=select(shTier(width),2u,width!=1u&&umTileMaximumWidth(tile)!=umTileMinimumWidth(tile));
  let slot=atomicAdd(&work[SH_COUNTS+tier],1u);atomicStore(&work[shListStart(tier)+slot],tile);
 }
-// One merged launch per sweep entry: 192 regular owners per group (the
-// tier lists in order), then one group per coarse seam tile. Serial tier
-// launches paid each tier's latency in every entry of every sweep.
-@compute @workgroup_size(1) fn publish(){
+// One merged launch per sweep entry: 192 regular owners per job (the tier
+// lists in order), then one job per coarse seam tile. Serial tier launches
+// paid each tier's latency in every entry of every sweep. (regular, all).
+fn shJobs()->vec2u{
  var owners=0u;for(var tier=0u;tier<2u;tier++){owners+=atomicLoad(&work[SH_COUNTS+tier])*(64u>>(6u*tier));}
- let regular=(owners+191u)/192u;let groups=regular+atomicLoad(&work[SH_COUNTS+2u]);atomicStore(&work[SH_REGULAR],regular);
- atomicStore(&work[0],min(groups,umDispatchX));atomicStore(&work[1],(groups+umDispatchX-1u)/umDispatchX);atomicStore(&work[2],1u);
+ let regular=(owners+191u)/192u;return vec2u(regular,regular+atomicLoad(&work[SH_COUNTS+2u]));
 }
+var<workgroup> shJobCount:vec2u;
 fn shMergedOwner(job:u32,lane:u32)->UMOwner{
  var slot=job*192u+lane;
  for(var tier=0u;tier<2u;tier++){
@@ -195,17 +208,18 @@ fn shCacheGeometrySeam(tile:u32,lane:u32){
   if(x.y+y.y+z.y>0.0){scratch[umCacheAt(anchor)]=bitcast<f32>(bitcast<u32>(x.x)|bitcast<u32>(y.x)|bitcast<u32>(z.x));}
  }
 }
+// Budgets from an owner's volume; distance and desired are fixed per frame.
+fn shBudgets(o:UMOwner,value:f32,distance:f32,desired:f32)->vec2f{
+ return uvSharpenBudgets(value,desired,distance,UM_MIN_H*f32(o.width),clamp(sharpen.tuning.x,0.0,1.0),sharpen.tuning.y,sharpen.policy.x>0.5,sharpen.policy.y,umSharpenOpen(o))*umMassScale(o);
+}
 fn shProposeSeam(tile:u32,lane:u32){
  let cell=lane%64u;let axis=lane/64u;let local=umCorner(cell,4u);let o=shSeamOwner(tile,local);if(o.width==0u){return;}
  let face=umPositiveFaceAtAnchor(o,axis,vec3i(umTileCoord(tile)*4u+local));
- if(face.width!=0u&&face.neighbor.width!=0u&&shListed(face.neighbor)){scratch[umRawAt(face)]=umProposal(o,face);}
+ if(face.width!=0u&&face.neighbor.width!=0u&&shListed(face.neighbor)){scratch[umRawAt(face)]=umProposal(o,face.neighbor,face);}
 }
 fn shPrepareSeam(tile:u32,lane:u32){
  if(tile>=UM_TILES){return;}let width=umTileWidth(tile);let side=4u/width;if(lane>=side*side*side){return;}
- let o=shSeamOwner(tile,umCorner(lane,side)*width);let p=vec3i(umOrigin(o));let at=umBudgetAt(o);
- let distance=textureLoad(centerPhi,p,0).x;let desired=textureLoad(targetFill,p,0).x;
- let budget=uvSharpenBudgets(umV(o),desired,distance,UM_MIN_H*f32(o.width),clamp(sharpen.tuning.x,0.0,1.0),sharpen.tuning.y,sharpen.policy.x>0.5,sharpen.policy.y,umSharpenOpen(o))*umMassScale(o);
- scratch[at]=budget.x;scratch[at+1u]=budget.y;scratch[at+2u]=distance;scratch[at+3u]=desired;
+ shPrepare(shSeamOwner(tile,umCorner(lane,side)*width));
 }
 // The owner's face (axis, sign) patch part, when limit/commit would visit it.
 fn shSeamFace(o:UMOwner,side:u32,part:u32)->UMFace{
@@ -237,21 +251,29 @@ fn shCommitSeam(tile:u32,lane:u32){
  if(!l.first){return;}
  let o=l.owner;let at=umBudgetAt(o);let parts=o.width*o.width;var terms:array<f32,6>;
  for(var side=0u;side<6u;side++){var sum=0.0;for(var part=0u;part<parts;part++){let t=shSeamTerms[lane+side*parts+part];if(t.y>0.0){sum-=t.x;}}terms[side]=sum;}
- let delta=((terms[0]+terms[1])+(terms[4]+terms[5]))+(terms[2]+terms[3]);var value=umV(o)+delta/umMassScale(o);
+ let delta=((terms[0]+terms[1])+(terms[4]+terms[5]))+(terms[2]+terms[3]);shFinish(o,umV(o)+delta/umMassScale(o));
+}
+// Store the committed volume (after dust) and prepare the next sweep's
+// budgets from it in place.
+fn shFinish(o:UMOwner,committed:f32){
+ let at=umBudgetAt(o);var value=committed;
  if(value!=0.0&&abs(value)<sharpen.tuning.z && !(value>0.0&&scratch[at+2u]<4.0*UM_MAX_H*f32(o.width))){
   umAccountDust(value,o.width*o.width*o.width,sharpen.tuning.z,5u);value=0.0;
  }
  textureStore(output,vec3i(umOrigin(o)),vec4f(value));
+ let budget=shBudgets(o,value,scratch[at+2u],scratch[at+3u]);
+ scratch[at]=budget.x;scratch[at+1u]=budget.y;
 }
 fn shPrepare(o:UMOwner){
 if(o.width==0u){return;}let p=vec3i(umOrigin(o));let at=umBudgetAt(o);
  let distance=textureLoad(centerPhi,p,0).x;let desired=textureLoad(targetFill,p,0).x;
- let budget=uvSharpenBudgets(umV(o),desired,distance,UM_MIN_H*f32(o.width),clamp(sharpen.tuning.x,0.0,1.0),sharpen.tuning.y,sharpen.policy.x>0.5,sharpen.policy.y,umSharpenOpen(o))*umMassScale(o);
+ let budget=shBudgets(o,umV(o),distance,desired);
  scratch[at]=budget.x;scratch[at+1u]=budget.y;scratch[at+2u]=distance;scratch[at+3u]=desired;
 }
-fn umProposal(a:UMOwner,f:UMFace)->f32 {
- let b=f.neighbor;let i=umBudgetAt(a);let j=umBudgetAt(b);
- if(!umSharpenFaceOpen(a,f)){return 0.0;}
+// The proposal from lower owner a to upper owner b across patch f (f's
+// anchor, axis and width; both incident owners derive the same ones).
+fn umProposal(a:UMOwner,b:UMOwner,f:UMFace)->f32 {
+ let i=umBudgetAt(a);let j=umBudgetAt(b); if(!umSharpenFaceOpenAB(a,b,f)){return 0.0;}
  let phiA=scratch[i+2u];let phiB=scratch[j+2u];let dose=clamp(sharpen.tuning.x,0.0,1.0);
  let area=f32(f.width*f.width);let shareA=area/f32(a.width*a.width);let shareB=area/f32(b.width*b.width);
  let giveA=scratch[i]*shareA;let giveB=scratch[j]*shareB;let takeA=scratch[i+1u]*shareA;let takeB=scratch[j+1u]*shareB;
@@ -272,18 +294,18 @@ fn umProposal(a:UMOwner,f:UMFace)->f32 {
 fn shPropose(o:UMOwner){
 if(o.width==0u){return;}
  for(var axis=0u;axis<3u;axis++){let first=umFace(o,axis,1,0u);if(first.neighbor.width==0u){continue;}
-  for(var part=0u;part<shParts(first);part++){let face=umFace(o,axis,1,part);if(shListed(face.neighbor)){scratch[umRawAt(face)]=umProposal(o,face);}}
+  for(var part=0u;part<shParts(first);part++){let face=umFace(o,axis,1,part);if(shListed(face.neighbor)){scratch[umRawAt(face)]=umProposal(o,face.neighbor,face);}}
  }
 }
 fn shLimit(o:UMOwner){
 if(o.width==0u){return;}var outgoing=0.0;var incoming=0.0;
- let budget=umBudgetAt(o);
- if(scratch[budget]==0.0&&scratch[budget+1u]==0.0){scratch[budget+4u]=1.0;scratch[budget+5u]=1.0;return;}
+ let at=umBudgetAt(o);
+ if(scratch[at]==0.0&&scratch[at+1u]==0.0){scratch[at+4u]=1.0;scratch[at+5u]=1.0;return;}
  for(var axis=0u;axis<3u;axis++){for(var side=0u;side<2u;side++){
   let sign=select(1,-1,side==1u);let first=umFace(o,axis,sign,0u);if(first.neighbor.width==0u){continue;}
   for(var part=0u;part<shParts(first);part++){let face=umFace(o,axis,sign,part);if(!shListed(face.neighbor)){continue;}let value=f32(sign)*scratch[umRawAt(face)];outgoing+=max(value,0.0);incoming+=max(-value,0.0);}
  }}
- let at=umBudgetAt(o);scratch[at+4u]=min(1.0,scratch[at]/max(outgoing,1e-20));scratch[at+5u]=min(1.0,scratch[at+1u]/max(incoming,1e-20));
+ scratch[at+4u]=min(1.0,scratch[at]/max(outgoing,1e-20));scratch[at+5u]=min(1.0,scratch[at+1u]/max(incoming,1e-20));
 }
 fn shCommit(o:UMOwner){
 if(o.width==0u){return;}let at=umBudgetAt(o);var terms:array<f32,6>;
@@ -295,46 +317,50 @@ if(o.width==0u){return;}let at=umBudgetAt(o);var terms:array<f32,6>;
    let factor=select(min(scratch[at+5u],scratch[other+4u]),min(scratch[at+4u],scratch[other+5u]),raw>=0.0);sum-=raw*factor;
   }}terms[2u*axis+side]=sum;
  }}}
- let delta=((terms[0]+terms[1])+(terms[4]+terms[5]))+(terms[2]+terms[3]);var value=umV(o)+delta/umMassScale(o);
- if(value!=0.0&&abs(value)<sharpen.tuning.z && !(value>0.0&&scratch[at+2u]<4.0*UM_MAX_H*f32(o.width))){
-  umAccountDust(value,o.width*o.width*o.width,sharpen.tuning.z,5u);value=0.0;
- }
- textureStore(output,vec3i(umOrigin(o)),vec4f(value));
+ let delta=((terms[0]+terms[1])+(terms[4]+terms[5]))+(terms[2]+terms[3]);shFinish(o,umV(o)+delta/umMassScale(o));
 }
-${["cacheGeometry","prepare","propose","limit","commit"].map(entry=>{const fn=`sh${entry[0]!.toUpperCase()}${entry.slice(1)}`;return /* wgsl */`
-@compute @workgroup_size(192) fn ${entry}(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let job=group.x+umDispatchX*group.y;let regular=atomicLoad(&work[SH_REGULAR]);
- var tile=UM_TILES;if(job>=regular){tile=shSeamTile(job-regular);}
- ${fn}Seam(tile,lane);
- if(job<regular){${fn}(shMergedOwner(job,lane));}
+// The geometry launch also prepares the first sweep's budgets.
+fn shCacheGeometryPrepare(o:UMOwner){shCacheGeometry(o);shPrepare(o);}
+fn shCacheGeometryPrepareSeam(tile:u32,lane:u32){shCacheGeometrySeam(tile,lane);shPrepareSeam(tile,lane);}
+${["cacheGeometryPrepare","propose","limit","commit"].map(entry=>{const fn=`sh${entry[0]!.toUpperCase()}${entry.slice(1)}`;return /* wgsl */`
+@compute @workgroup_size(192) fn ${entry}(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(lane==0u){shJobCount=shJobs();}
+ let jobs=workgroupUniformLoad(&shJobCount);
+ for(var job=group.x;job<jobs.y;job+=groups.x){
+  var tile=UM_TILES;if(job>=jobs.x){tile=shSeamTile(job-jobs.x);}
+  ${fn}Seam(tile,lane);
+  if(job<jobs.x){${fn}(shMergedOwner(job,lane));}
+  // The next job's seam stages its terms in the same workgroup array.
+  workgroupBarrier();
+ }
 }`;}).join("")}`});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.bindLayout]:[])]});
     // One merged pipeline per entry: the listed launch covers every width.
-    for(const entryPoint of ["cacheGeometry","prepare","propose","limit","commit"])this.pipelines.set(entryPoint,[await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umCellWidth:1,umDispatchX:this.ownership.dispatchX}}})]);
-    for(const entryPoint of ["classify","compact","publish"])this.pipelines.set(entryPoint,[await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX}}})]);
+    for(const entryPoint of ["cacheGeometryPrepare","propose","limit","commit"])this.pipelines.set(entryPoint,[await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umCellWidth:1,umDispatchX:this.ownership.dispatchX}}})]);
+    for(const entryPoint of ["classify","compact"])this.pipelines.set(entryPoint,[await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX}}})]);
   }
   encodeGeometry(encoder:GPUCommandEncoder,group:GPUBindGroup):void{
-    if(this.pipelines.size!==8)throw new Error("Mixed sharpening is not initialized");
+    if(this.pipelines.size!==6)throw new Error("Mixed sharpening is not initialized");
     const begin=()=>{const pass=encoder.beginComputePass({label:"Uniform mixed sharpening geometry"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);return pass;};
     {
       const tiles=this.ownership.layout.tiles.length,groups=Math.ceil(tiles/64),dx=this.ownership.dispatchX;
       encoder.clearBuffer(this.work.list,0,4*(8+tiles));
       const list=begin();this.ownership.dispatchAll(list,this.pipelines.get("classify")![0]!);
-      list.setPipeline(this.pipelines.get("compact")![0]!);list.dispatchWorkgroups(Math.min(groups,dx),Math.ceil(groups/dx));
-      list.setPipeline(this.pipelines.get("publish")![0]!);list.dispatchWorkgroups(1);list.end();
-      encoder.copyBufferToBuffer(this.work.list,0,this.work.indirect,0,12);
+      list.setPipeline(this.pipelines.get("compact")![0]!);list.dispatchWorkgroups(Math.min(groups,dx),Math.ceil(groups/dx));list.end();
     }
-    const pass=begin();this.dispatchEntry(pass,"cacheGeometry");pass.end();
+    const pass=begin();this.dispatchEntry(pass,"cacheGeometryPrepare");pass.end();
   }
-  encodeSweep(encoder:GPUCommandEncoder,group:GPUBindGroup,refreshGeometry=true):void{
-    if(refreshGeometry)this.encodeGeometry(encoder,group);
-    if(this.pipelines.size!==8)throw new Error("Mixed sharpening is not initialized");
-    const pass=encoder.beginComputePass({label:"Uniform mixed geometric sharpening"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);
-    for(const entry of ["prepare","propose","limit","commit"])this.dispatchEntry(pass,entry);pass.end();
+  /** `sweeps` sweeps over the geometry encodeGeometry cached, alternating
+   * the ping-pong groups from groups[0], in one pass. */
+  encodeSweeps(encoder:GPUCommandEncoder,groups:readonly [GPUBindGroup,GPUBindGroup],sweeps:number):void{
+    if(this.pipelines.size!==6)throw new Error("Mixed sharpening is not initialized");
+    const pass=encoder.beginComputePass({label:"Uniform mixed geometric sharpening"});pass.setBindGroup(0,this.ownership.bindGroup);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);
+    for(let sweep=0;sweep<sweeps;sweep++){pass.setBindGroup(1,groups[sweep%2]!);for(const entry of ["propose","limit","commit"])this.dispatchEntry(pass,entry);}
+    pass.end();
   }
   /** The merged launch: regular owners, then coarse seam tiles. */
   private dispatchEntry(pass:GPUComputePassEncoder,entry:string):void{
-    pass.setPipeline(this.pipelines.get(entry)![0]!);pass.dispatchWorkgroupsIndirect(this.work.indirect,0);
+    pass.setPipeline(this.pipelines.get(entry)![0]!);pass.dispatchWorkgroups(this.grid);
   }
 }

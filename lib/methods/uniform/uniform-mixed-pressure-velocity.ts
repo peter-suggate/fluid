@@ -29,7 +29,6 @@ export interface UniformMixedPressureRhsFields extends CommonFields {
 }
 export interface UniformMixedPressureProjectionFields extends CommonFields {
  pressure:GPUBufferBinding;
- slopes:GPUBufferBinding;
  /** Geometric centre phi. Unread since airborne momentum was removed; drop with the frame binding. */
  centerPhi:GPUTexture;
  volume:GPUTexture;
@@ -46,8 +45,7 @@ export interface UniformMixedPressureProjectionFields extends CommonFields {
  * topology instead: a cut face (either tile cut) takes the flux of its 16 h
  * faces, sum(V_h u_h), so the 4h divergence is the exact sum of the h ones and
  * the band's pure-Neumann components stay compatible; a closed owner is a
- * p_min=0 row. The caller builds one authoritative pressure phi and freezes
- * reconstruction slopes after the accepted pressure iterate. No field owns
+ * p_min=0 row. The caller builds one authoritative pressure phi. No field owns
  * another simulation; all buffers/textures are borrowed from the native host. */
 export class UniformMixedPressureVelocity {
  readonly allocatedBytes=0;
@@ -63,7 +61,7 @@ export class UniformMixedPressureVelocity {
   const uniform={binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}};
   const topology=coarse?[texture(8),storage(9)]:solid?[{binding:8,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only" as const,format:"rgba32float" as const,viewDimension:"3d" as const}}]:[];
   this.rhsLayout=device.createBindGroupLayout({entries:[texture(0),storage(1),storage(2),uniform,texture(4),storage(5),storage(6),storage(7),...topology]});
-  this.projectLayout=device.createBindGroupLayout({entries:[texture(0),storage(1),storage(2),uniform,storage(4),storage(5),texture(6),texture(7),
+  this.projectLayout=device.createBindGroupLayout({entries:[texture(0),storage(1),storage(2),uniform,storage(4),texture(6),texture(7),
    {binding:8,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}},storage(9),...(sourceParams?[{binding:10,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}]:[]),...(solid&&!coarse?[texture(11)]:[])]});
  }
  private scalar(view:GPUBufferBinding,count:number):GPUBufferBinding{
@@ -95,7 +93,6 @@ export class UniformMixedPressureVelocity {
   const d=this.ownership.layout.lattice.dimensions;
   return this.device.createBindGroup({layout:this.projectLayout,entries:[...this.common(f),
    {binding:4,resource:this.scalar(f.pressure,uniformMixedPressureStorage(this.ownership.layout).count)},
-   {binding:5,resource:this.scalar(f.slopes,4*this.ownership.layout.cellCount)},
    {binding:6,resource:f.centerPhi.createView()},{binding:7,resource:f.volume.createView()},{binding:8,resource:f.output.createView()},
    {binding:9,resource:this.scalar(f.outputNegative,d[0]*d[1]+d[0]*d[2]+d[1]*d[2])},
    ...(this.sourceParams?[{binding:10,resource:{buffer:this.sourceParams,size:176}}]:[]),
@@ -194,14 +191,14 @@ fn umLowFaceV(o:UMOwner,t:vec4f,axis:u32)->f32{
 `;
   const projectSource=common+/* wgsl */`
 @group(1) @binding(4) var<storage,read_write> pressures:array<f32>;
-@group(1) @binding(5) var<storage,read_write> slopes:array<vec4f>;
 @group(1) @binding(6) var centerPhi:texture_3d<f32>;
 @group(1) @binding(7) var volume:texture_3d<f32>;
 @group(1) @binding(8) var output:texture_storage_3d<rgba32float,write>;
 @group(1) @binding(9) var<storage,read_write> boundary:array<f32>;
 fn umPressure(o:UMOwner)->f32{return pressures[o.index];}
 ${this.sourceParams?uniformMixedSourceWGSL(10):""}
-fn umPressureSlope(o:UMOwner)->vec3f{return slopes[o.index].xyz;}
+// The all-4h root has no seams: every reconstruction slope is zero.
+fn umPressureSlope(o:UMOwner)->vec3f{return vec3f(0);}
 ${uniformMixedPressureReconstructionSource(true)}
 ${this.coarse?`// The record V of a 4h face: its low owner's V+, or the wall halo's.
 fn umProjectV(o:UMOwner,face:UMFace)->f32{
@@ -251,6 +248,8 @@ fn umRelease(o:UMOwner,face:UMFace,v:f32)->bool{
  let pressure=select(0.0,pressures[umBoundaryIndex(o,face.axis,face.sign)],umPressureLiquid(o));
  return pressure<=0.0&&-f32(face.sign)*v*params.hDt.w>1e-4*f32(o.width)*UM_H[face.axis];
 }
+// The projection's schedule slot opens only on an accepted solve.
+fn umProjectOwner(gid:vec3u)->UMOwner{if(umSlotClosed()){return UMOwner();}return umAllOwner(gid);}
 ${uniformMixedFaceDispatchWGSL("project","umProjectWithSource(owner,face)",true,`
    var released=0u;
    for(var axis=0u;axis<3u;axis++){
@@ -273,7 +272,7 @@ ${uniformMixedFaceDispatchWGSL("project","umProjectWithSource(owner,face)",true,
     if(umOrigin(owner)[axis]==0u){let low=umFace(owner,axis,-1,0u);
      if(umRelease(owner,low,umProjectWithSource(owner,low))){released|=1u<<(axis+3u);}}
    }
-   value.w=f32(released);`)}
+   value.w=f32(released);`,"umProjectOwner")}
 `;
   const compile=async(code:string,entryPoint:string,resources:GPUBindGroupLayout)=>{
    const module=this.device.createShaderModule({code});const info=await module.getCompilationInfo();

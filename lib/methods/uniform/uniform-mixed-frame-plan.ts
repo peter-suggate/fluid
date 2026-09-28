@@ -177,30 +177,14 @@ var<workgroup> certifyBases:array<u32,2>;
  workgroupBarrier();
  if(fine){atomicStore(&umSupport[(4u+list)*UM_TILES+16u+certifyBases[list-1u]+local],tile);}
 }
-@compute @workgroup_size(1) fn publishWork(){
- atomicStore(&umSupport[4u*UM_TILES+3u],1u);
- for(var list=1u;list<=2u;list++){
-  let count=atomicLoad(&umSupport[4u*UM_TILES+list]);let base=4u*UM_TILES+list*4u;
-  atomicStore(&umSupport[base],min(count,umDispatchX));atomicStore(&umSupport[base+1u],(count+umDispatchX-1u)/umDispatchX);atomicStore(&umSupport[base+2u],1u);
- }
- // umTileJobOwner's merged launch: general-h and seam 4h tiles, then the
- // packed regular coarse owner jobs.
- let packed=(atomicLoad(&umSupport[8u*UM_TILES+20u])+63u)/64u;
- let merged=umMergedTileJobs()+packed;let base=4u*UM_TILES+12u;
- atomicStore(&umSupport[base],min(merged,umDispatchX));atomicStore(&umSupport[base+1u],(merged+umDispatchX-1u)/umDispatchX);atomicStore(&umSupport[base+2u],1u);
- // The same launch for uniformMixedFaceTileDispatchWGSL, whose seam 4h tiles
- // pack four per job (ownership.dispatchCertified(...,true)).
- let fours=atomicLoad(&umSupport[7u*UM_TILES+17u]);let quad=merged-fours+(fours+3u)/4u;let quadBase=9u*UM_TILES+24u;
- atomicStore(&umSupport[quadBase],min(quad,umDispatchX));atomicStore(&umSupport[quadBase+1u],(quad+umDispatchX-1u)/umDispatchX);atomicStore(&umSupport[quadBase+2u],1u);
-}
 `});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
     if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.extendedResources]});
-    for(const entryPoint of ["seed","dilate0","dilate1","dilate2","localSpeed","spread0","spread1","spread2","certify","publishWork"])this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umDirectionalCertificate:+this.directionalCertificate}}}));
+    for(const entryPoint of ["seed","dilate0","dilate1","dilate2","localSpeed","spread0","spread1","spread2","certify"])this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umDirectionalCertificate:+this.directionalCertificate}}}));
   }
   encode(encoder:GPUCommandEncoder,policy={fineReach:2,shellReach:1,twoLevel:true,shellOnly:true}):void{
-    if(this.pipelines.size!==10)throw new Error("Mixed frame plan is not initialized");
+    if(this.pipelines.size!==9)throw new Error("Mixed frame plan is not initialized");
     this.device.queue.writeBuffer(this.params,0,new Uint32Array([policy.fineReach,policy.shellReach,!policy.twoLevel?3:!policy.shellOnly?2:0,0]));
     encoder.clearBuffer(this.ownership.support,this.ownership.layout.tiles.length*16,64);
     const pass=encoder.beginComputePass({label:"Uniform shared frame plan"});
@@ -215,15 +199,14 @@ var<workgroup> certifyBases:array<u32,2>;
     this.device.queue.writeBuffer(this.params,16,new Float32Array([dt,0,0,0]));
     const pass=encoder.beginComputePass({label:"Uniform local speed certificate"});
     pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group);pass.setBindGroup(2,this.extendedGroup);
-    this.dispatch(pass,["localSpeed","spread0","spread1","spread2","certify","publishWork"]);
+    // Certified consumers read the list counts themselves (umCertifiedJobCount).
+    this.dispatch(pass,["localSpeed","spread0","spread1","spread2","certify"]);
     pass.end();
-    encoder.copyBufferToBuffer(this.ownership.support,this.ownership.layout.tiles.length*16+16,this.ownership.certifiedDispatch,0,48);
-    encoder.copyBufferToBuffer(this.ownership.support,(this.ownership.layout.tiles.length*9+24)*4,this.ownership.certifiedDispatch,48,16);
   }
   private dispatch(pass:GPUComputePassEncoder,entries:readonly string[]):void{
     for(const entry of entries){
       if(entry==="seed"||entry==="localSpeed"){this.ownership.dispatchAll(pass,this.pipelines.get(entry)!);continue;}
-      const groups=entry==="publishWork"?1:Math.ceil(this.ownership.layout.tiles.length/64);
+      const groups=Math.ceil(this.ownership.layout.tiles.length/64);
       pass.setPipeline(this.pipelines.get(entry)!);pass.dispatchWorkgroups(Math.min(groups,this.ownership.dispatchX),Math.ceil(groups/this.ownership.dispatchX));
     }
   }

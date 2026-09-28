@@ -67,7 +67,7 @@ fn donorFrom(r:Row,base:vec3u,k:u32)->Donor {
  return donorAt(base+corner(k,r.side)*r.grain);
 }
 fn donorOf(r:Row,k:u32)->Donor {return donorFrom(r,rowBase(r),k);}
-@compute @workgroup_size(64) fn build(@builtin(global_invocation_id) gid:vec3u){
+fn buildAt(gid:vec3u){
  var r=rowAt(gid);if(r.width==0u){return;}
  let origin=umTileCoord(r.tile)*4u+corner(r.lane,4u/r.width)*r.width;
  let lower=textureLoad(departure,vec3i(origin),0).xyz-vec3f(0.5*f32(r.width));
@@ -98,15 +98,15 @@ fn donorOf(r:Row,k:u32)->Donor {return donorFrom(r,rowBase(r),k);}
  edges[r.address+r.count]=0u;
 }
 fn clearDonor(index:u32){for(var limb=0u;limb<6u;limb++){atomicStore(&rigidExchange[index+limb*uvLimbPlane()],0);}}
-@compute @workgroup_size(64) fn clear(@builtin(global_invocation_id) gid:vec3u){
+fn clearAt(gid:vec3u){
  let o=tpOwner(gid);if(o.width==0u){return;}clearDonor(o.index);
  if(o.lane==0u){atomicStore(&sampling[o.tile],0u);}
 }
-@compute @workgroup_size(64) fn decodeSampled(@builtin(global_invocation_id) gid:vec3u){
+fn decodeSampledAt(gid:vec3u){
  let o=tpOwner(gid);if(o.width==0u){return;}let at=uvLimbBase(o.index);
  sums[o.index]=select(0.0,1.0,atomicLoad(&rigidExchange[at])!=0);atomicStore(&rigidExchange[at],0);
 }
-@compute @workgroup_size(64) fn decode(@builtin(global_invocation_id) gid:vec3u){
+fn decodeAt(gid:vec3u){
  let o=tpOwner(gid);if(o.width==0u){return;}sums[o.index]=uvDonorSum(o.index);clearDonor(o.index);
 }
 // The native fused schedule: fallback joins round zero; donor division joins
@@ -129,10 +129,10 @@ fn normalizeRow(r:Row,divide:bool){
  else if(sums[r.index]==0.0){edges[r.address+r.count]=bitcast<u32>(${solid?"select(f32(r.width*r.width*r.width),max(umRowCapacity(r),1e-6),r.width==1u)":"f32(r.width*r.width*r.width)"});}
  ${volumeNormalizeRowsWGSL(expressions)}
 }
-@compute @workgroup_size(64) fn rowsFallback(@builtin(global_invocation_id) gid:vec3u){
+fn rowsFallbackAt(gid:vec3u){
  let r=rowAt(gid);if(r.width==0u){return;}normalizeRow(r,false);
 }
-@compute @workgroup_size(64) fn rowsDivide(@builtin(global_invocation_id) gid:vec3u){
+fn rowsDivideAt(gid:vec3u){
  let r=rowAt(gid);if(r.width==0u){return;}normalizeRow(r,true);
 }
 // One coarse row per workgroup: distribute up to 125 donor overlaps,
@@ -140,8 +140,7 @@ fn normalizeRow(r:Row,divide:bool){
 var<workgroup> coarseWeights:array<f32,126>;
 var<workgroup> coarseDonors:array<u32,126>;
 var<workgroup> coarseScale:f32;
-fn normalizeCoarseRow(group:vec3u,lane:u32,divide:bool){
- let job=group.x+umDispatchX*group.y;
+fn normalizeCoarseRow(job:u32,lane:u32,divide:bool){
  let r=rowAt(vec3u(job,0u,0u));let base=rowBase(r);
  for(var k=lane;k<126u;k+=64u){if(r.width!=0u&&k<r.count){
   let donor=donorFrom(r,base,k);var weight=bitcast<f32>(edges[r.address+1u+k]);
@@ -160,9 +159,16 @@ fn normalizeCoarseRow(group:vec3u,lane:u32,divide:bool){
   edges[r.address+1u+k]=bitcast<u32>(weight);uvAddDonor(coarseDonors[k],weight);
  }}
 }
-@compute @workgroup_size(64) fn rowsFallbackCoarse(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){normalizeCoarseRow(group,lane,false);}
-@compute @workgroup_size(64) fn rowsDivideCoarse(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){normalizeCoarseRow(group,lane,true);}
-@compute @workgroup_size(64) fn gather(@builtin(global_invocation_id) gid:vec3u){
+// Grid-stride over the listed coarse rows, one row per workgroup job.
+var<workgroup> tpCoarseJobs:u32;
+fn normalizeCoarseRows(group:u32,groups:u32,lane:u32,divide:bool){
+ if(lane==0u){tpCoarseJobs=atomicLoad(&live[13u]);}
+ let jobs=workgroupUniformLoad(&tpCoarseJobs);
+ for(var job=group;job<jobs;job+=groups){normalizeCoarseRow(job,lane,divide);workgroupBarrier();}
+}
+@compute @workgroup_size(64) fn rowsFallbackCoarse(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){normalizeCoarseRows(group.x,groups.x,lane,false);}
+@compute @workgroup_size(64) fn rowsDivideCoarse(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){normalizeCoarseRows(group.x,groups.x,lane,true);}
+fn gatherAt(gid:vec3u){
  let r=rowAt(gid);if(r.width==0u){return;}var value=0.0;
  ${solid?`// A sealed cell's V is an unplaceable reservoir; preserve it.
  if(r.width==1u&&umRowCapacity(r)<=0.0){let p=vec3i(umRowOrigin(r));textureStore(output,p,vec4f(textureLoad(volume,p,0).x));return;}`:""}
@@ -181,6 +187,36 @@ fn normalizeCoarseRow(group:vec3u,lane:u32,divide:bool){
   fill+=added/f32(r.width*r.width*r.width);
  }`:""}
  textureStore(output,vec3i(origin),vec4f(fill));
+}
+// Live-list entries: a fixed grid-stride grid over the listed owners (a
+// lane per owner, tiers in separate launches); dense (list 0) otherwise.
+@compute @workgroup_size(64) fn build(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ if(umTransportList==0u){buildAt(gid);return;}
+ let owners=tpLiveOwners();for(var slot=gid.x;slot<owners;slot+=64u*groups.x){buildAt(vec3u(slot,0u,0u));}
+}
+@compute @workgroup_size(64) fn clear(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ if(umTransportList==0u){clearAt(gid);return;}
+ let owners=tpLiveOwners();for(var slot=gid.x;slot<owners;slot+=64u*groups.x){clearAt(vec3u(slot,0u,0u));}
+}
+@compute @workgroup_size(64) fn decodeSampled(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ if(umTransportList==0u){decodeSampledAt(gid);return;}
+ let owners=tpLiveOwners();for(var slot=gid.x;slot<owners;slot+=64u*groups.x){decodeSampledAt(vec3u(slot,0u,0u));}
+}
+@compute @workgroup_size(64) fn decode(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ if(umTransportList==0u){decodeAt(gid);return;}
+ let owners=tpLiveOwners();for(var slot=gid.x;slot<owners;slot+=64u*groups.x){decodeAt(vec3u(slot,0u,0u));}
+}
+@compute @workgroup_size(64) fn rowsFallback(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ if(umTransportList==0u){rowsFallbackAt(gid);return;}
+ let owners=tpLiveOwners();for(var slot=gid.x;slot<owners;slot+=64u*groups.x){rowsFallbackAt(vec3u(slot,0u,0u));}
+}
+@compute @workgroup_size(64) fn rowsDivide(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ if(umTransportList==0u){rowsDivideAt(gid);return;}
+ let owners=tpLiveOwners();for(var slot=gid.x;slot<owners;slot+=64u*groups.x){rowsDivideAt(vec3u(slot,0u,0u));}
+}
+@compute @workgroup_size(64) fn gather(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ if(umTransportList==0u){gatherAt(gid);return;}
+ let owners=tpLiveOwners();for(var slot=gid.x;slot<owners;slot+=64u*groups.x){gatherAt(vec3u(slot,0u,0u));}
 }
 @compute @workgroup_size(64) fn copyVolume(@builtin(global_invocation_id) gid:vec3u){
  let o=umOwner(gid);if(o.width!=0u){let p=vec3i(umOrigin(o));textureStore(output,p,vec4f(textureLoad(volume,p,0).x));}
@@ -211,8 +247,8 @@ export const UNIFORM_MIXED_TRANSPORT_LIVE_HEADER=20;
  * so each of those sums is the dense sum. Rows are S, Q1 and Q0; donors are
  * the rows and their donors. Any other tile samples no V and holds none, and
  * the dense transport leaves it at zero, as skipping it does.
- * Words: [0,12) indirect args (rows then donors; h then 4h), [12,16) their
- * counts, [16,19) the parallel coarse rows args; then the set bits plane,
+ * Words: [0,12) unused, [12,16) the list counts (rows then donors; h then
+ * 4h), [16,20) unused; then the set bits plane,
  * the donor box low and high planes, and four tier lists. */
 function uniformMixedTransportLiveWGSL(sources:boolean):string{
  return /* wgsl */`
@@ -221,6 +257,10 @@ override umTransportList:u32=0u;
 fn tpPlane(k:u32,t:u32)->u32{return TP_HEADER+k*UM_TILES+t;}
 fn tpList(list:u32,tier:u32)->u32{return TP_HEADER+(3u+2u*(list-1u)+tier)*UM_TILES;}
 fn tpTier(width:u32)->u32{return select(1u,0u,width==1u);}
+// Owners of this launch's tier in its live list (rows 1, donors 2).
+fn tpLiveOwners()->u32{
+ let tier=tpTier(umCellWidth);return atomicLoad(&live[12u+2u*(umTransportList-1u)+tier])*(64u/(umCellWidth*umCellWidth*umCellWidth));
+}
 // Owner of a listed tile (rows 1, donors 2); the full tier lists otherwise.
 fn tpOwner(gid:vec3u)->UMOwner {
  if(umTransportList==0u){return umOwner(gid);}
@@ -300,14 +340,6 @@ fn tpBox(tile:u32)->array<vec3i,2>{
  let rows=(bits&(TP_S|TP_Q1|TP_Q0))!=0u;let donor=rows||(bits&TP_DONOR)!=0u;
  for(var list=1u;list<=2u;list++){
   if(select(donor,rows,list==1u)){let slot=atomicAdd(&live[12u+2u*(list-1u)+tier],1u);atomicStore(&live[tpList(list,tier)+slot],tile);}
- }
-}
-@compute @workgroup_size(1) fn livePublish(){
- let coarse=atomicLoad(&live[13u]);
- atomicStore(&live[16u],min(coarse,umDispatchX));atomicStore(&live[17u],(coarse+umDispatchX-1u)/umDispatchX);atomicStore(&live[18u],1u);
- for(var k=0u;k<4u;k++){
-  let tier=k%2u;let owners=atomicLoad(&live[12u+k])*(64u>>(6u*tier));let groups=(owners+63u)/64u;
-  atomicStore(&live[3u*k],min(groups,umDispatchX));atomicStore(&live[3u*k+1u],(groups+umDispatchX-1u)/umDispatchX);atomicStore(&live[3u*k+2u],1u);
  }
 }
 `;

@@ -31,10 +31,17 @@ override umRegularTiles:bool=false;
 override umMergedTiles:bool=false;
 // With umMergedTiles, take the fused jobs (every seam tile, then small regular tiers) instead.
 override umFusedJobs:bool=false;
+// Certified launches (uniformMixedCertifiedEntriesWGSL): 0 none, 1 the
+// umPlannedFine certificate list, 2 the merged tile jobs, 3 the merged jobs
+// with seam 4h tiles packed four per job (uniformMixedFaceTileDispatchWGSL).
+override umCertifiedJobs:u32=0u;
 const UM_D=vec3u(${layout.lattice.dimensions.map(n => `${n}u`).join(',')});const UM_T=UM_D/4u;
 const UM_TILES:u32=${layout.tiles.length}u;
 fn umTileWidth(t:u32)->u32{return select(4u,1u,(umTopology[t]&0x80000000u)!=0u);}
 fn umTileSupport(t:u32)->u32{return umSupport[3u*UM_TILES+t];}
+// The mixed pressure schedule's slot gate (support 9n+24, 0 open): its gate
+// kernel closes a pressure level's launches inside a disabled slot.
+fn umSlotClosed()->bool{return umSupport[9u*UM_TILES+24u]!=0u;}
 fn umTileStencil(t:u32)->vec2u{return vec2u(umTopology[2u*UM_TILES+2u*t],umTopology[2u*UM_TILES+2u*t+1u]);}
 fn umTileMaximumWidth(t:u32)->u32{return umTileStencil(t).x>>27u;}
 fn umTileMinimumWidth(t:u32)->u32{return umTileStencil(t).y>>27u;}
@@ -136,12 +143,58 @@ fn umTileJobOwner(group:vec3u)->UMOwner {
  if(umMergedTiles){return umMergedTileJob(job);}
  let cells=64u/(umCellWidth*umCellWidth*umCellWidth);return umOwner(vec3u(job*cells,0u,0u));
 }
+// Jobs of this certified launch, from the frame plan's lists: tiles of the
+// certificate list, or general h and seam 4h tile jobs then 64 packed regular
+// 4h owners per job.
+fn umCertifiedJobCount()->u32 {
+ if(umCertifiedJobs==1u){return umSupport[4u*UM_TILES+umPlannedFine];}
+ let merged=umMergedTileJobs()+(umSupport[8u*UM_TILES+20u]+63u)/64u;
+ if(umCertifiedJobs==2u){return merged;}
+ let fours=umSupport[7u*UM_TILES+17u];return merged-fours+(fours+3u)/4u;
+}
 fn umOrigin(o:UMOwner)->vec3u{return umTileCoord(o.tile)*4u+umCorner(o.lane,4u/o.width)*o.width;}
 ${uniformMixedFacesWGSL}
 `;
   // Transfers read two ownership levels in one shader. Namespace their entire
   // ABI, retaining the same lookup implementation and buffer representation.
   return prefix ? source.replace(/\b(?:um[A-Z]\w*|UM_\w+|UMOwner|UMFace)\b/g, name => prefix + name) : source;
+}
+
+/** Rewrites each named compute entry of `source` into a fixed grid-stride
+ * launch over its certified jobs (umCertifiedJobCount): the entry's body runs
+ * once per job as if it were workgroup (job,0,0) of a one-row launch, so
+ * every owner lookup keeps its meaning. Compile the entries with
+ * umCertifiedJobs set; launch any grid (ownership.dispatchCertified). The
+ * job count is workgroup-uniform, so bodies may keep their barriers. */
+export function uniformMixedCertifiedEntriesWGSL(source: string, entries: readonly string[]): string {
+  let out = source;
+  for (const entry of entries) {
+    const pattern = new RegExp(`@compute\\s+@workgroup_size\\((\\d+)\\)\\s+fn\\s+${entry}\\s*\\(((?:[^()]|\\([^()]*\\))*)\\)\\s*\\{`);
+    const match = pattern.exec(out);
+    if (!match) throw new Error(`Certified entry ${entry} not found`);
+    const size = Number(match[1]);
+    const args: string[] = [];
+    const params = match[2]!.split(",").map(p => p.trim()).filter(Boolean).map(p => {
+      const m = /^@builtin\((\w+)\)\s*(\w+)\s*:\s*(\w+)$/.exec(p);
+      if (!m) throw new Error(`Certified entry ${entry} has an unsupported parameter ${p}`);
+      const [, builtin, name, type] = m;
+      args.push(builtin === "global_invocation_id" ? `vec3u(umJob*${size}u+umLane,0u,0u)`
+        : builtin === "workgroup_id" ? "vec3u(umJob,0u,0u)"
+        : builtin === "local_invocation_index" ? "umLane"
+        : (() => { throw new Error(`Certified entry ${entry} reads ${builtin}`); })());
+      return `${name}:${type}`;
+    });
+    if (pattern.test(out.slice(match.index + 1))) throw new Error(`Certified entry ${entry} is ambiguous`);
+    out = out.slice(0, match.index) + `fn ${entry}Job(${params.join(",")}){` + out.slice(match.index + match[0].length) + /* wgsl */ `
+var<workgroup> ${entry}Jobs:u32;
+@compute @workgroup_size(${size}) fn ${entry}(@builtin(workgroup_id) umGroup:vec3u,@builtin(num_workgroups) umGroups:vec3u,@builtin(local_invocation_index) umLane:u32){
+ if(umLane==0u){${entry}Jobs=umCertifiedJobCount();}
+ let jobs=workgroupUniformLoad(&${entry}Jobs);
+ for(var umJob=umGroup.x;umJob<jobs;umJob+=umGroups.x){${entry}Job(${args.join(",")});workgroupBarrier();}
+}
+`;
+  }
+  return out;
 }
 
 /** Appended after native storage specialization, for certified boxes

@@ -38,7 +38,7 @@ try {
   const level=frame.levels[i],saved=capture.levels[i];
   assert.deepEqual(Array.from(level.ownership.layout.tiles),saved.tiles,`Pressure level ${i} ownership differs`);
   assert.equal(level.ownership.layout.cellCount,saved.cellCount);
-  for(const view of [level.pressure,level.slopes,level.frozen,level.residual])clear.clearBuffer(view.buffer,view.offset??0,view.size);
+  for(const view of [level.pressure,level.frozen,level.residual])clear.clearBuffer(view.buffer,view.offset??0,view.size);
  }
  device.queue.submit([clear.finish()]);
  for(let i=0;i<frame.levels.length;i++){

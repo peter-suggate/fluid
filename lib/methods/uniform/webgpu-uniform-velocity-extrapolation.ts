@@ -6,6 +6,9 @@ import { gpuCompilationManagerFor } from "../../core/gpu-compilation-manager";
 import { uniformVelocityExtrapolationShader } from "./webgpu-uniform-velocity-extrapolation.wgsl";
 
 type Dims3 = readonly [number, number, number];
+/** mixedHierarchyTail's workgroup storage (MIXED_TAIL_CELLS/LEVELS in the WGSL). */
+const MIXED_TAIL_CELLS = 256;
+const MIXED_TAIL_LEVELS = 16;
 
 interface ExtrapolationPipelines {
   readonly buildShell: GPUComputePipeline;
@@ -116,6 +119,10 @@ export class WebGPUUniformVelocityExtrapolator {
   private readonly coarseTableGroup?: GPUBindGroup;
   private readonly activeFrontPassLimit: number;
   private activeFrontPasses: number;
+  /** Mixed continuation: levels [2, tail) dispatch one lane per (cell,
+   * component); levels [tail, end) run in one workgroup (mixedHierarchyTail). */
+  private readonly mixedTail?: { readonly level: number; readonly group?: GPUBindGroup };
+  private mixedPipelines?: { readonly restrict: GPUComputePipeline; readonly prolong: GPUComputePipeline; readonly tail: GPUComputePipeline };
 
   constructor(
     private readonly device: GPUDevice,
@@ -390,6 +397,23 @@ export class WebGPUUniformVelocityExtrapolator {
       coarserOrigins = this.hierarchyLevels[levelIndex]?.originsUp ?? this.dummyOrigins;
     }
 
+    // The mixed continuation's tail: the coarsest levels (below the 4h root
+    // and its first restriction) whose cells fit one workgroup's storage.
+    if (sourceAwareHierarchy && !activeDispatch && fieldPages?.nativeStorage !== false) {
+      const levels = this.hierarchyLevels, count = levels.length;
+      let tail = count, cells = 0;
+      while (tail > 2 && count - (tail - 1) <= MIXED_TAIL_LEVELS) {
+        const n = levels[tail - 1]!.dims.reduce((a, b) => a * b, 1);
+        if (cells + n > MIXED_TAIL_CELLS) break;
+        cells += n; tail -= 1;
+      }
+      const source = levels[tail - 1], target = levels[tail];
+      this.mixedTail = { level: tail, group: source && target ? group(
+        currentVelocity, source.down, source.down, tail === count - 1 ? target.down : target.up, this.valuesB, dummyLevels, false,
+        source.originsDown, this.dummyOrigins, tail === count - 1 ? target.originsDown : target.originsUp,
+      ) : undefined };
+    }
+
     // If the grid is too small to have a hierarchy, the accurate narrow-band
     // result is already the complete paper-prescribed finest-level result.
     const packedValues = this.hierarchyLevels.length > 0 ? this.valuesA : this.resolvedValues;
@@ -417,25 +441,22 @@ export class WebGPUUniformVelocityExtrapolator {
    * owners provide the accurate band and its source bounds; this never visits
    * or reconstructs the finest lattice. */
   prepareMixedContinuation() {
-    const root=this.hierarchyLevels[1];
-    if(!this.pipelines || !root?.originsDown || !root.originsUp
+    const root=this.hierarchyLevels[1],mixed=this.mixedPipelines,tail=this.mixedTail;
+    if(!this.pipelines || !mixed || !tail || !root?.originsDown || !root.originsUp
       || root.dims.some((n,a)=>n*4!==this.dims[a])
       || [root.down,root.up].some(t=>t.width!==root.dims[0]||t.height!==root.dims[1]||t.depthOrArrayLayers!==root.dims[2]))
       throw new Error("Mixed extension requires the resident 4h nearest-source hierarchy");
     const hasLower=this.hierarchyLevels.length>2;
     return {input:root.down,inputOrigins:root.originsDown,
       output:hasLower?root.up:root.down,outputOrigins:hasLower?root.originsUp:root.originsDown,
-      encode:(encoder:GPUCommandEncoder)=>{
-        for(let level=2;level<this.hierarchyLevels.length;level++){
-          const pass=encoder.beginComputePass({label:"Uniform mixed extension hierarchy restriction"});
-          pass.setPipeline(this.pipelines!.restrict);pass.setBindGroup(0,this.hierarchyDownGroups[level]!);
-          pass.dispatchWorkgroups(...this.workgroups(this.hierarchyLevels[level]!.dims));pass.end();
-        }
-        for(let level=this.hierarchyLevels.length-2;level>=1;level--){
-          const pass=encoder.beginComputePass({label:"Uniform mixed extension hierarchy prolongation"});
-          pass.setPipeline(this.pipelines!.prolong);pass.setBindGroup(0,this.hierarchyUpGroups[this.hierarchyLevels.length-2-level]!);
-          pass.dispatchWorkgroups(...this.workgroups(this.hierarchyLevels[level]!.dims));pass.end();
-        }
+      /** Encodes into the caller's compute pass; its group 0 is left rebound. */
+      encode:(pass:GPUComputePassEncoder)=>{
+        const count=this.hierarchyLevels.length,groups=(level:number)=>this.hierarchyLevels[level]!.dims.map(n=>Math.ceil(n/4)) as [number,number,number];
+        pass.setPipeline(mixed.restrict);
+        for(let level=2;level<tail.level;level++){pass.setBindGroup(0,this.hierarchyDownGroups[level]!);pass.dispatchWorkgroups(...groups(level));}
+        if(tail.group){pass.setPipeline(mixed.tail);pass.setBindGroup(0,tail.group);pass.dispatchWorkgroups(1);}
+        pass.setPipeline(mixed.prolong);
+        for(let level=Math.min(tail.level,count-1)-1;level>=1;level--){pass.setBindGroup(0,this.hierarchyUpGroups[count-2-level]!);pass.dispatchWorkgroups(...groups(level));}
       }};
   }
 
@@ -525,6 +546,14 @@ export class WebGPUUniformVelocityExtrapolator {
       compile("Uniform nearest hierarchy and transport shell", "prolongAndPack"),
     ]);
     this.pipelines = { buildShell, publishShell, clear, seed, update, initialUpdate, evaluate, classify, prepare, resolve, restrict, prolong, pack, coarseTable, prolongPack };
+    if (this.mixedTail) {
+      const [mixedRestrict, mixedProlong, mixedTail] = await Promise.all([
+        compile("Uniform mixed extension hierarchy restrict", "mixedRestrictKnownVelocity"),
+        compile("Uniform mixed extension hierarchy prolong", "mixedProlongUnknownVelocity"),
+        compile("Uniform mixed extension hierarchy tail", "mixedHierarchyTail"),
+      ]);
+      this.mixedPipelines = { restrict: mixedRestrict, prolong: mixedProlong, tail: mixedTail };
+    }
     const encoder = this.device.createCommandEncoder({ label: "Uniform Sec. 3.3 initialize sparse state" });
     for (const [label, group] of [["A", this.seedCurrentGroup], ["B", this.updateABGroup],
       ["resolved", this.resolveGroup]] as const) {

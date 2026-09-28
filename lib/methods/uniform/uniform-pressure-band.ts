@@ -35,6 +35,8 @@ const LIST_GROUPS=512;
  * past the live count exit at once; an indirect launch would cost Dawn a
  * validation pass per dispatch, more than those empty groups. */
 const SLOT_GROUPS=1024,MIDDLE_GROUPS=256,COARSE_GROUPS=64;
+/** The h half sweeps run one colour's 32 cells of a slot per 32-lane group. */
+const CELL_GROUPS=2048;
 /** Lanes of the single-workgroup 4h aggregate solve. */
 const COARSE_SOLVE_LANES=256;
 /** Band rows are field-major over CAP*64 rows: rhs, diagonal, face kinds,
@@ -81,7 +83,7 @@ export interface UniformPressureBandFields {
  * multigrid (h, 2h and 4h aggregates of the band's own tiles, homogeneous
  * Neumann wherever the h rows are) converge it however large the band is.
  * No readback on the advance path: the GPU builds a compact tile list and
- * every solver pass is an indirect launch over it.
+ * every solver pass is a fixed direct launch striding it.
  * With static solids every face carries the native CM11a dual-cell V (the
  * coefficient V/(h^2 theta), the divergence V u; V=0 faces are closed), rows
  * inside a solid are p_min=0 rows, and positive faces take the native
@@ -290,6 +292,31 @@ fn bFollowHalo(cell:u32,p:vec3i,kinds:u32,value:f32){
 // A liquid row's residual; a p_min=0 row at its bound only counts a positive one.
 fn bResidual(cell:u32,p:vec3i,kinds:u32)->f32{
  let r=bRhs(cell)+bOff(cell,p,kinds)-bDiagonal(cell)*solve[cell];
+ return select(r,max(r,0.0),bInside(kinds)&&solve[cell]<=0.0);
+}
+// A slot's six face-neighbour slots (+1), loaded once per slot by lanes 0..5
+// so no tap reloads the tile map.
+var<workgroup> bNear:array<u32,6>;
+fn bLoadNear(s:u32,lane:u32){if(lane<6u){let axis=lane/2u;var c=vec3i(bTile(s));c[axis]+=bSign(lane);bNear[lane]=bSlotAt(c);}}
+// Band cell + 1 across face f of local cell l of slot s, 0 outside the band.
+fn bCellNear(s:u32,l:vec3u,f:u32)->u32{
+ let axis=f/2u;var m=vec3i(l);m[axis]+=bSign(f);var slot=s+1u;
+ if(m[axis]<0||m[axis]>3){slot=bNear[f];m[axis]=(m[axis]+4)%4;}
+ if(slot==0u){return 0u;}
+ return (slot-1u)*64u+u32(m.x+4*(m.y+4*m.z))+1u;
+}
+// bOff and bResidual with the neighbour slots from bNear.
+fn bOffNear(cell:u32,s:u32,l:vec3u,p:vec3i,kinds:u32)->f32{
+ var off=0.0;
+ for(var f=0u;f<6u;f++){
+  let axis=f/2u;let sign=bSign(f);let kind=bFaceKind(kinds,f);
+  if(kind==K_BAND){off+=bCoefficient(cell,f)*solve[bCellNear(s,l,f)-1u];}
+  else if(kind==K_WALL){off+=bCoefficient(cell,f)*solve[bHalo(p,axis,sign)];}
+ }
+ return off;
+}
+fn bResidualNear(cell:u32,s:u32,l:vec3u,p:vec3i,kinds:u32)->f32{
+ let r=bRhs(cell)+bOffNear(cell,s,l,p,kinds)-bDiagonal(cell)*solve[cell];
  return select(r,max(r,0.0),bInside(kinds)&&solve[cell]<=0.0);
 }
 `;
@@ -503,33 +530,45 @@ fn bCoarse(c:vec3i)->vec2f{
 }`,
    sweep:band+/* wgsl */`
 override bColour:u32=0u;
+var<workgroup> bSweepCount:u32;
 // One red-black Gauss-Seidel half sweep at h; the wall halos follow their row.
-@compute @workgroup_size(64) fn main(${slots}){
- for(var s=group.x;s<bCount();s+=groups.x){
-  let p=vec3i(bTile(s)*4u+bLocal(lane));let cell=s*64u+lane;
-  if((u32(p.x+p.y+p.z)&1u)!=bColour){continue;}
+// A 32-lane group relaxes one slot's 32 cells of this colour: tile origins are
+// even, so the colour is the local parity.
+@compute @workgroup_size(32) fn main(${slots}){
+ if(lane==0u){bSweepCount=bCount();}
+ let n=workgroupUniformLoad(&bSweepCount);
+ for(var s=group.x;s<n;s+=groups.x){
+  workgroupBarrier();bLoadNear(s,lane);workgroupBarrier();
+  let y=(lane>>1u)&3u;let z=lane>>3u;let l=vec3u(2u*(lane&1u)+((y+z+bColour)&1u),y,z);
+  let p=vec3i(bTile(s)*4u+l);let cell=s*64u+l.x+4u*(l.y+4u*l.z);
   let kinds=bKinds(cell);let diagonal=bDiagonal(cell);
-  if(!bLiquid(kinds)||diagonal<=0.0){continue;}
-  var next=(bRhs(cell)+bOff(cell,p,kinds))/diagonal;if(bInside(kinds)){next=max(next,0.0);}solve[cell]=next;
-  bFollowHalo(cell,p,kinds,next);
+  if(bLiquid(kinds)&&diagonal>0.0){
+   var next=(bRhs(cell)+bOffNear(cell,s,l,p,kinds))/diagonal;if(bInside(kinds)){next=max(next,0.0);}solve[cell]=next;
+   bFollowHalo(cell,p,kinds,next);
+  }
  }
 }`,
    // h residual into the 2h aggregates (zeroing their correction), and its
    // largest liquid row into the cycle's history word.
    restrict:header+indexed(true)+rows+solve+aggregates+/* wgsl */`
 var<workgroup> worst:atomic<u32>;
+var<workgroup> bRestrictCount:u32;
+var<workgroup> bCellResidual:array<f32,64>;
+// A lane per h cell; lanes 0..7 then sum their 2h aggregate's eight cells.
 @compute @workgroup_size(64) fn main(${slots}){
- if(lane==0u){atomicStore(&worst,0u);}
- workgroupBarrier();
+ if(lane==0u){atomicStore(&worst,0u);bRestrictCount=bCount();}
+ let n=workgroupUniformLoad(&bRestrictCount);
  var largest=0.0;
- for(var c=group.x*64u+lane;c<bCount()*8u;c+=groups.x*64u){
-  let s=c/8u;let a=bMiddleLocal(c%8u);let origin=vec3i(bTile(s)*4u);var sum=0.0;
-  for(var k=0u;k<8u;k++){
-   let l=a*2u+bMiddleLocal(k);let cell=s*64u+l.x+4u*(l.y+4u*l.z);let kinds=bKinds(cell);
-   if(!bLiquid(kinds)||bDiagonal(cell)<=0.0){continue;}
-   let r=bResidual(cell,origin+vec3i(l),kinds);sum+=r;largest=max(largest,abs(r));
+ for(var s=group.x;s<n;s+=groups.x){
+  workgroupBarrier();bLoadNear(s,lane);workgroupBarrier();
+  let l=bLocal(lane);let cell=s*64u+lane;let kinds=bKinds(cell);var r=0.0;
+  if(bLiquid(kinds)&&bDiagonal(cell)>0.0){r=bResidualNear(cell,s,l,vec3i(bTile(s)*4u+l),kinds);largest=max(largest,abs(r));}
+  bCellResidual[lane]=r;workgroupBarrier();
+  if(lane<8u){
+   let a=bMiddleLocal(lane);var sum=0.0;
+   for(var k=0u;k<8u;k++){let q=a*2u+bMiddleLocal(k);sum+=bCellResidual[q.x+4u*(q.y+4u*q.z)];}
+   coarse[bM(1u,8u*s+lane)]=sum;coarse[bM(0u,8u*s+lane)]=0.0;
   }
-  coarse[bM(1u,c)]=sum;coarse[bM(0u,c)]=0.0;
  }
  atomicMax(&worst,bitcast<u32>(largest*params.policy.z));
  workgroupBarrier();
@@ -537,11 +576,32 @@ var<workgroup> worst:atomic<u32>;
 }`,
    middleSweep:band+/* wgsl */`
 override bColour:u32=0u;
+var<workgroup> bMiddleCount:u32;
+// The group's eight slots' face-neighbour slots (+1), loaded once.
+var<workgroup> bMiddleSlots:array<u32,48>;
+// The 2h aggregate + 1 across face f of aggregate c, the i-th slot of the group.
+fn bMiddleNear(i:u32,c:u32,f:u32)->u32{
+ let axis=f/2u;var m=vec3i(bMiddleLocal(c%8u));m[axis]+=bSign(f);var slot=c/8u+1u;
+ if(m[axis]<0||m[axis]>1){slot=bMiddleSlots[6u*i+f];m[axis]=(m[axis]+2)%2;}
+ if(slot==0u){return 0u;}
+ return (slot-1u)*8u+u32(m.x+2*m.y+4*m.z)+1u;
+}
 @compute @workgroup_size(64) fn main(${slots}){
- for(var c=group.x*64u+lane;c<bCount()*8u;c+=groups.x*64u){
-  let g=bTile(c/8u)*2u+bMiddleLocal(c%8u);if(((g.x+g.y+g.z)&1u)!=bColour){continue;}
-  let diagonal=coarse[bM(2u,c)];if(diagonal<=0.0){continue;}
-  coarse[bM(0u,c)]=(coarse[bM(1u,c)]+bMiddleOff(c))/diagonal;
+ if(lane==0u){bMiddleCount=bCount();}
+ let n=workgroupUniformLoad(&bMiddleCount);
+ for(var base=group.x*8u;base<n;base+=groups.x*8u){
+  workgroupBarrier();
+  if(lane<48u){let s=base+lane/6u;var slot=0u;if(s<n){slot=bCoarseNeighbour(s,lane%6u);}bMiddleSlots[lane]=slot;}
+  workgroupBarrier();
+  let c=base*8u+lane;
+  if(c<n*8u){
+   let g=bTile(c/8u)*2u+bMiddleLocal(c%8u);let diagonal=coarse[bM(2u,c)];
+   if(((g.x+g.y+g.z)&1u)==bColour&&diagonal>0.0){
+    var off=0.0;
+    for(var f=0u;f<6u;f++){let m=bMiddleNear(lane/8u,c,f);if(m!=0u){off+=coarse[bM(3u+f,c)]*coarse[bM(0u,m-1u)];}}
+    coarse[bM(0u,c)]=(coarse[bM(1u,c)]+off)/diagonal;
+   }
+  }
  }
 }`,
    // 2h residual into the tile aggregate (zeroing its correction); the
@@ -587,15 +647,16 @@ override bColour:u32=0u;
 }`,
    measure:header+indexed(true)+rows+solve+/* wgsl */`
 var<workgroup> worst:atomic<u32>;
+var<workgroup> bMeasureCount:u32;
 // The largest band row residual, in divergence units (1/s), over liquid rows.
 @compute @workgroup_size(64) fn main(${slots}){
- if(lane==0u){atomicStore(&worst,0u);}
- workgroupBarrier();
+ if(lane==0u){atomicStore(&worst,0u);bMeasureCount=bCount();}
+ let n=workgroupUniformLoad(&bMeasureCount);
  var largest=0.0;
- for(var s=group.x;s<bCount();s+=groups.x){
-  let p=vec3i(bTile(s)*4u+bLocal(lane));let cell=s*64u+lane;
-  let kinds=bKinds(cell);if(!bLiquid(kinds)||bDiagonal(cell)<=0.0){continue;}
-  largest=max(largest,abs(bResidual(cell,p,kinds))*params.policy.z);
+ for(var s=group.x;s<n;s+=groups.x){
+  workgroupBarrier();bLoadNear(s,lane);workgroupBarrier();
+  let l=bLocal(lane);let p=vec3i(bTile(s)*4u+l);let cell=s*64u+lane;
+  let kinds=bKinds(cell);if(bLiquid(kinds)&&bDiagonal(cell)>0.0){largest=max(largest,abs(bResidualNear(cell,s,l,p,kinds))*params.policy.z);}
  }
  atomicMax(&worst,bitcast<u32>(largest));
  workgroupBarrier();
@@ -705,16 +766,27 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
     compute:{module,entryPoint:"main",constants:colour===undefined?{umDispatchX:this.simulation.dispatchX}:{umDispatchX:this.simulation.dispatchX,bColour:colour}}}));
   }
  }
+ /** Pipeline and group 1 of each launch name, resolved on first use. */
+ private readonly launches=new Map<string,{pipeline:GPUComputePipeline;group:GPUBindGroup}>();
+ /** The pass the band's static groups were last bound in, and its group 1. */
+ private boundPass?:GPUComputePassEncoder;
+ private boundGroup?:GPUBindGroup;
  private layoutOf(name:string):string{const base=name.replace(/[01]$/,"");return ["open","list","copy","prep","init","project","present"].includes(base)?base:"solver";}
- /** launch: a fixed group count, or a slot-list stride (one group per slot,
-  * per 8 slots, per 64 slots) capped by the capacity. */
- private dispatch(pass:GPUComputePassEncoder,name:string,launch:number|"slots"|"middle"|"coarse"):void{
-  const pipeline=this.pipelines.get(name);if(!pipeline)throw new Error("Pressure band is not initialized");
-  pass.setPipeline(pipeline);pass.setBindGroup(0,this.simulation.bindGroup);pass.setBindGroup(1,this.groups.get(this.layoutOf(name))!);if(this.solid)pass.setBindGroup(2,this.solid.coarse!.bindGroup);
+ /** launch: a fixed group count, or a slot-list stride (one 32-lane group
+  * per slot colour, one group per slot, per 8 slots, per 64 slots) capped by
+  * the capacity. */
+ private dispatch(pass:GPUComputePassEncoder,name:string,launch:number|"cells"|"slots"|"middle"|"coarse"):void{
+  let bound=this.launches.get(name);
+  if(!bound){const pipeline=this.pipelines.get(name);if(!pipeline)throw new Error("Pressure band is not initialized");
+   bound={pipeline,group:this.groups.get(this.layoutOf(name))!};this.launches.set(name,bound);}
+  // Groups 0 and 2 are the same for every band launch: bind them once per
+  // pass, and group 1 only when the launch's layout changes.
+  if(this.boundPass!==pass){this.boundPass=pass;this.boundGroup=undefined;pass.setBindGroup(0,this.simulation.bindGroup);if(this.solid)pass.setBindGroup(2,this.solid.coarse!.bindGroup);}
+  pass.setPipeline(bound.pipeline);if(this.boundGroup!==bound.group){this.boundGroup=bound.group;pass.setBindGroup(1,bound.group);}
   const c=this.capacity;
-  pass.dispatchWorkgroups(typeof launch==="number"?launch:launch==="slots"?Math.min(c,SLOT_GROUPS):launch==="middle"?Math.min(Math.ceil(c/8),MIDDLE_GROUPS):Math.min(Math.ceil(c/64),COARSE_GROUPS));
+  pass.dispatchWorkgroups(typeof launch==="number"?launch:launch==="cells"?Math.min(c,CELL_GROUPS):launch==="slots"?Math.min(c,SLOT_GROUPS):launch==="middle"?Math.min(Math.ceil(c/8),MIDDLE_GROUPS):Math.min(Math.ceil(c/64),COARSE_GROUPS));
  }
- private sweep(pass:GPUComputePassEncoder,name:string,launch:"slots"|"middle"|"coarse",count:number):void{
+ private sweep(pass:GPUComputePassEncoder,name:string,launch:"cells"|"middle",count:number):void{
   for(let i=0;i<count;i++){this.dispatch(pass,`${name}0`,launch);this.dispatch(pass,`${name}1`,launch);}
  }
  /** Before the split, with the simulation authority's phi and correction and
@@ -732,11 +804,11 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
   const s=this.schedule,pass=encoder.beginComputePass({label:"Uniform pressure band solve"});
   this.dispatch(pass,"init","slots");
   for(let cycle=0;cycle<s.cycles;cycle++){
-   this.sweep(pass,"sweep","slots",s.fineSweeps);
-   this.dispatch(pass,"restrict","middle");this.sweep(pass,"middleSweep","middle",s.middleSweeps);
+   this.sweep(pass,"sweep","cells",s.fineSweeps);
+   this.dispatch(pass,"restrict","slots");this.sweep(pass,"middleSweep","middle",s.middleSweeps);
    this.dispatch(pass,"middleRestrict","coarse");this.dispatch(pass,"coarseSolve",1);
    this.dispatch(pass,"coarseProlong","middle");this.sweep(pass,"middleSweep","middle",s.middleSweeps);
-   this.dispatch(pass,"middleProlong","slots");this.sweep(pass,"sweep","slots",s.fineSweeps);
+   this.dispatch(pass,"middleProlong","slots");this.sweep(pass,"sweep","cells",s.fineSweeps);
   }
   this.dispatch(pass,"measure","slots");
   pass.end();

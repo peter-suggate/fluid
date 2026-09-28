@@ -1,5 +1,5 @@
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
-import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
+import { uniformMixedCertifiedEntriesWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sampling.wgsl";
 import { uniformMixedFaceAddressWGSL, uniformMixedFaceTileDispatchWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { uniformVelocityDepartureWGSL } from "./uniform-velocity-departure.wgsl";
@@ -69,7 +69,7 @@ export class UniformMixedMomentum {
     ] });
   }
   async initialize(): Promise<void> {
-    const module = this.device.createShaderModule({ code: uniformMixedTopologyWGSL(this.ownership.layout, 0) + /* wgsl */ `
+    const module = this.device.createShaderModule({ code: uniformMixedCertifiedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.layout, 0) + /* wgsl */ `
 @group(1) @binding(0) var extended:texture_3d<f32>;
 @group(1) @binding(1) var physical:texture_3d<f32>;
 @group(1) @binding(2) var phase:texture_3d<f32>;
@@ -146,17 +146,17 @@ var<workgroup> umMomentumComponents:array<f32,192>;
  if(lane<64u&&owner.width!=0u){textureStore(output,vec3i(umOrigin(owner)),vec4f(umMomentumComponents[cell],umMomentumComponents[cell+64u],umMomentumComponents[cell+128u],0));}
 }
 ${uniformMixedFaceTileDispatchWGSL("momentumStep", "umMomentum(owner,face)")}
-` });
+`, ["momentumRegularStep", "momentumStep"]) });
     const errors = (await module.getCompilationInfo()).messages.filter(m => m.type === "error");
     if (errors.length) throw new Error(errors.map(m => `${m.lineNum}: ${m.message}`).join("\n"));
     const layout = this.device.createPipelineLayout({ bindGroupLayouts: [this.ownership.bindLayout, this.resources, ...(this.hanging ? [this.ownership.hangingLayout] : [])] });
     this.pipeline = await this.device.createComputePipelineAsync({ layout,
-      compute: { module, entryPoint: "momentumStep", constants: { umMergedTiles:1, umDispatchX: this.ownership.dispatchX, umCullAir:+this.cullAir } } });
-    this.regularPipeline=await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"momentumRegularStep",constants:{umCellWidth:1,umPlannedFine:1,umRegularFine:1,umDispatchX:this.ownership.dispatchX,umCullAir:+this.cullAir}}});
+      compute: { module, entryPoint: "momentumStep", constants: { umMergedTiles:1, umCertifiedJobs:3, umDispatchX: this.ownership.dispatchX, umCullAir:+this.cullAir } } });
+    this.regularPipeline=await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"momentumRegularStep",constants:{umCellWidth:1,umPlannedFine:1,umRegularFine:1,umCertifiedJobs:1,umDispatchX:this.ownership.dispatchX,umCullAir:+this.cullAir}}});
   }
   encode(encoder: GPUCommandEncoder, group: GPUBindGroup): void {
     if (!this.pipeline) throw new Error("Mixed momentum is not initialized");
     const pass = encoder.beginComputePass({ label: "Uniform mixed momentum" });
-    pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1, group); if (this.hanging) pass.setBindGroup(2, this.ownership.hangingGroup); this.ownership.dispatchCertified(pass, this.pipeline,this.regularPipeline!,true); pass.end();
+    pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1, group); if (this.hanging) pass.setBindGroup(2, this.ownership.hangingGroup); this.ownership.dispatchCertified(pass, this.pipeline,this.regularPipeline!); pass.end();
   }
 }

@@ -21,12 +21,17 @@ export const UNIFORM_MIXED_DYNAMIC_BOUNDARY_TRAVEL=1;
 /** Census header words: counters 0-17, 18 = largest tile travel (f32 bits),
  * 19 = tiles liquid-conditional solid promotion added to the band. */
 const HEADER=20;
-/** Velocity-bound pyramid: box min/max over radius 0 (the tile) up to 16
- * tiles, each filtered separably from the tile level, plus one temporary per
- * level above it. Small radii are dense: a radius rounded up widens every box
- * the census tests. */
+/** Velocity-bound boxes: min/max over radius 0 (the tile) up to 16 tiles.
+ * Small radii are dense: a radius rounded up widens every box the census
+ * tests. Level 0 lives in the atomic census; the boxes come from a cube
+ * table in a plain buffer (atomic loads and stores do not coalesce). */
 const BOUND_RADII=[0,1,2,3,4,5,6,8,10,12,16] as const;
-const BOUND_BLOCKS=2*BOUND_RADII.length-1;
+/** Per radius r: the cube side 2^j with 2^j <= 2r+1 < 2^(j+1); eight such
+ * cubes cover the box exactly. */
+const BOUND_CUBES=BOUND_RADII.map(r=>Math.floor(Math.log2(2*r+1)));
+const CUBE_LEVELS=BOUND_CUBES[BOUND_CUBES.length-1]!;
+/** Cube starts run from -CUBE_PAD (the largest radius) per axis. */
+const CUBE_PAD=BOUND_RADII[BOUND_RADII.length-1]!;
 
 export interface UniformMixedDynamicPolicy {
  /** The step the next frame will take; with the tile speed it bounds travel. */
@@ -104,6 +109,8 @@ export interface UniformMixedDynamicCensus {
 export class UniformMixedDynamicClassifier {
  readonly allocatedBytes:number;
  private readonly work:GPUBuffer;
+ /** Cube table levels 1..CUBE_LEVELS, component-major over padded starts. */
+ private readonly bounds:GPUBuffer;
  private readonly readback:GPUBuffer;
  private readonly params:GPUBuffer;
  /** One bit per tile: solid-coupled (uniformMixedSolidTiles().coupled). */
@@ -121,22 +128,25 @@ export class UniformMixedDynamicClassifier {
   const tiles=ownership.layout.tiles.length;
   this.words=Math.ceil(tiles/32);
   const t=ownership.layout.lattice.dimensions.map(n=>n/4);
-  const workBytes=(HEADER+this.words+6*BOUND_BLOCKS*tiles+(t[0]!+1)*(t[1]!+1)*(t[2]!+1)+2*tiles+2*this.words)*4,readBytes=(HEADER+this.words)*4;
+  const workBytes=(HEADER+this.words+6*tiles+(t[0]!+1)*(t[1]!+1)*(t[2]!+1)+2*tiles+2*this.words)*4,readBytes=(HEADER+this.words)*4;
   this.work=device.createBuffer({label:"Uniform dynamic ownership census",size:workBytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
   this.readback=device.createBuffer({label:"Uniform dynamic ownership readback",size:readBytes,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
   this.params=device.createBuffer({label:"Uniform dynamic ownership policy",size:48,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
   this.solidTiles=device.createBuffer({label:"Uniform dynamic ownership solid tiles",size:this.words*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
-  this.allocatedBytes=workBytes+readBytes+48+this.words*4;
+  const boundsBytes=6*CUBE_LEVELS*t.reduce((n,k)=>n*(k+CUBE_PAD),1)*4;
+  this.bounds=device.createBuffer({label:"Uniform dynamic ownership bound cubes",size:boundsBytes,usage:GPUBufferUsage.STORAGE});
+  this.allocatedBytes=workBytes+boundsBytes+readBytes+48+this.words*4;
   this.resources=device.createBindGroupLayout({entries:[
    ...[0,1,2].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
    {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
    {binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
    {binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
+   {binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
   ]});
   this.group=device.createBindGroup({layout:this.resources,entries:[
    {binding:0,resource:volume.createView()},{binding:1,resource:phi.createView()},
    {binding:2,resource:extended.createView()},{binding:3,resource:{buffer:this.work}},{binding:4,resource:{buffer:this.params}},
-   {binding:5,resource:{buffer:this.solidTiles}},
+   {binding:5,resource:{buffer:this.solidTiles}},{binding:6,resource:{buffer:this.bounds}},
   ]});
  }
  async initialize():Promise<void>{
@@ -149,6 +159,7 @@ export class UniformMixedDynamicClassifier {
 struct DynamicPolicy {step:vec4f,reach:vec4u,surface:vec4f}
 @group(1) @binding(4) var<uniform> policy:DynamicPolicy;
 @group(1) @binding(5) var<storage,read> solidTiles:array<u32>;
+@group(1) @binding(6) var<storage,read_write> bounds:array<u32>;
 // The census tail follows the frame's last phi resolve: hanging texels hold
 // umVertexValue, so vertex reads are direct loads.
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
@@ -159,12 +170,17 @@ const BOUNDARY_TRAVEL_CAP:u32=16u;
 const WORDS:u32=${this.words}u;
 const H=vec3f(${h.join(",")});
 // Per tile: ordered keys of the signed minimum and maximum face velocity per axis.
-fn levelIndex(level:u32,t:u32,k:u32)->u32{return ${HEADER}u+WORDS+6u*(level*UM_TILES+t)+k;}
-fn boundIndex(t:u32,k:u32)->u32{return levelIndex(0u,t,k);}
+fn boundIndex(t:u32,k:u32)->u32{return ${HEADER}u+WORDS+6u*t+k;}
 const RADII=array<i32,${BOUND_RADII.length}>(${BOUND_RADII.join(",")});
+const CUBES=array<u32,${BOUND_CUBES.length}>(${BOUND_CUBES.join(",")});
+// Cube table: level j >= 1 holds, per start s (from -CUBE_PAD per axis), the
+// keys of the cube [s, s+2^j)³ clipped to the domain; identity if empty.
+const CUBE_PAD:i32=${CUBE_PAD};
+const PT=UM_T+vec3u(u32(CUBE_PAD));const CUBE:u32=PT.x*PT.y*PT.z;
+fn cubeIndex(j:u32,k:u32,s:vec3i)->u32{let q=vec3u(s+vec3i(CUBE_PAD));return ((j-1u)*6u+k)*CUBE+q.x+PT.x*(q.y+PT.y*q.z);}
 // Inclusive prefix sum of interface flags over tiles, with a zero border plane.
 const PX:u32=UM_T.x+1u;const PY:u32=UM_T.y+1u;const PZ:u32=UM_T.z+1u;
-fn prefixIndex(p:vec3u)->u32{return ${HEADER}u+WORDS+${6*BOUND_BLOCKS}u*UM_TILES+p.x+PX*(p.y+PY*p.z);}
+fn prefixIndex(p:vec3u)->u32{return ${HEADER}u+WORDS+6u*UM_TILES+p.x+PX*(p.y+PY*p.z);}
 // Per required tile: cells between each face and the nearest crossing owner,
 // one nibble per face (-x,-y,-z,+x,+y,+z), and its own travel in whole h
 // cells per step in the top byte; all ones for a tile that is not required.
@@ -323,8 +339,8 @@ fn umFinishTile(tile:u32,width:u32,c:TileClass){
  // Travel of the tile's own extended faces over one step, in h.
  var speed=0.0;
  for(var a=0u;a<3u;a++){speed=max(speed,max(abs(orderValue(c.low[a])),abs(orderValue(c.high[a])))*policy.step.x/H[a]);}
- // Largest travel any pyramid box can hold, in decide's own arithmetic, so
- // the pyramid builds only the levels decide can reach.
+ // Largest travel any bound box can hold, in decide's own arithmetic, so
+ // the cube table builds only the levels decide can reach.
  var reach=0.0;let scale=policy.step.x/H;
  for(var a=0u;a<3u;a++){
   if(c.low[a]!=0xffffffffu){reach=max(reach,abs(orderValue(c.low[a])*scale[a]));}
@@ -394,11 +410,9 @@ ${[0,1,2].map(axis=>{const [a,b]=[0,1,2].filter(k=>k!==axis);return /* wgsl */`
  var p=vec3u(0u);p[${a}]=line%extent[${a}];p[${b}]=line/extent[${a}];var sum=0u;
  for(var i=1u;i<extent[${axis}];i++){p[${axis}]=i;sum+=atomicLoad(&census[prefixIndex(p)]);atomicStore(&census[prefixIndex(p)],sum);}
 }`;}).join("\n")}
-// One axis of the bound pyramid for every level at once: box min (low keys)
-// and max (high keys) of radius r_k. Clamped boxes compose exactly, so level
-// k filters level 0 directly: x from level 0 into k, y from k into its
-// temporary, z back into k. Dry tiles hold the identity keys and drop out.
-override pyramidAxis:u32=0u;
+// Box min (low keys) and max (high keys) of radius r_k, clamped to the
+// domain. Dry tiles hold the identity keys and drop out.
+override cubeLevel:u32=1u;
 const LEVELS:u32=${BOUND_RADII.length}u;
 // decide climbs from level 1 until the radius covers its tile's travel; no
 // box exceeds the largest tile travel (census[18]), so no tile climbs past
@@ -408,18 +422,38 @@ fn topLevel()->u32{
  var level=1u;loop{if(need<=RADII[level]||level+1u>=LEVELS){break;}level++;}
  return level;
 }
-@compute @workgroup_size(64) fn boundPyramid(@builtin(global_invocation_id) gid:vec3u){
- let job=gid.x+umDispatchX*64u*gid.y;if(job>=UM_TILES*(LEVELS-1u)){return;}
- let tile=job%UM_TILES;let level=1u+job/UM_TILES;let temporary=LEVELS-1u+level;
- if(level>topLevel()){return;}
- let source=select(select(temporary,level,pyramidAxis==1u),0u,pyramidAxis==0u);
- let written=select(level,temporary,pyramidAxis==1u);let radius=RADII[level];
- let p=vec3i(umTileCoord(tile));var keys=array<u32,6>(0xffffffffu,0xffffffffu,0xffffffffu,0u,0u,0u);
- for(var d=max(p[pyramidAxis]-radius,0);d<=min(p[pyramidAxis]+radius,i32(UM_T[pyramidAxis])-1);d++){
-  var q=p;q[pyramidAxis]=d;let at=umTileAt(vec3u(q));
-  for(var k=0u;k<3u;k++){keys[k]=min(keys[k],atomicLoad(&census[levelIndex(source,at,k)]));keys[3u+k]=max(keys[3u+k],atomicLoad(&census[levelIndex(source,at,3u+k)]));}
+fn identityKeys()->array<u32,6>{return array<u32,6>(0xffffffffu,0xffffffffu,0xffffffffu,0u,0u,0u);}
+// Cube level j from eight cubes of level j-1 (level 0: the tiles), for the
+// levels decide can reach. One lane per padded start.
+@compute @workgroup_size(64) fn boundCube(@builtin(global_invocation_id) gid:vec3u){
+ let index=gid.x+umDispatchX*64u*gid.y;if(index>=CUBE){return;}
+ if(cubeLevel>CUBES[topLevel()]){return;}
+ let s=vec3i(vec3u(index%PT.x,(index/PT.x)%PT.y,index/(PT.x*PT.y)))-vec3i(CUBE_PAD);
+ let half=i32(1u<<(cubeLevel-1u));var keys=identityKeys();
+ for(var o=0u;o<8u;o++){
+  let q=s+half*vec3i(vec3u(o&1u,(o>>1u)&1u,o>>2u));
+  if(any(q>=vec3i(UM_T))){continue;}
+  if(cubeLevel==1u){
+   if(any(q<vec3i(0))){continue;}
+   let t=umTileAt(vec3u(q));
+   for(var k=0u;k<3u;k++){keys[k]=min(keys[k],atomicLoad(&census[boundIndex(t,k)]));keys[3u+k]=max(keys[3u+k],atomicLoad(&census[boundIndex(t,3u+k)]));}
+  }else{
+   for(var k=0u;k<3u;k++){keys[k]=min(keys[k],bounds[cubeIndex(cubeLevel-1u,k,q)]);keys[3u+k]=max(keys[3u+k],bounds[cubeIndex(cubeLevel-1u,3u+k,q)]);}
+  }
  }
- for(var k=0u;k<6u;k++){atomicStore(&census[levelIndex(written,tile,k)],keys[k]);}
+ for(var k=0u;k<6u;k++){bounds[cubeIndex(cubeLevel,k,s)]=keys[k];}
+}
+// Radius-r box of tile p: the eight cubes of side 2^j starting at p-r or at
+// p+r-2^j+1 per axis cover [p-r, p+r]³ exactly (2^(j+1) > 2r+1).
+fn boxKeys(p:vec3i,level:u32)->array<u32,6>{
+ let r=RADII[level];let j=CUBES[level];
+ let a=p-vec3i(r);let b=p+vec3i(r+1-i32(1u<<j));var keys=identityKeys();
+ for(var o=0u;o<8u;o++){
+  let q=select(a,b,vec3<bool>((o&1u)!=0u,(o&2u)!=0u,(o&4u)!=0u));
+  if(any(q>=vec3i(UM_T))){continue;}
+  for(var k=0u;k<3u;k++){keys[k]=min(keys[k],bounds[cubeIndex(j,k,q)]);keys[3u+k]=max(keys[3u+k],bounds[cubeIndex(j,3u+k,q)]);}
+ }
+ return keys;
 }
 fn interfaceTilesIn(low:vec3i,high:vec3i)->u32 {
  let a=vec3u(clamp(low,vec3i(0),vec3i(UM_T)));let b=vec3u(clamp(high+vec3i(1),vec3i(0),vec3i(UM_T)));
@@ -429,7 +463,7 @@ fn interfaceTilesIn(low:vec3i,high:vec3i)->u32 {
 }
 // Predicted surface tile: the RK2 departure box of t's points (x - dt·u with
 // u sampled at x and at the midpoint) holds an interface tile. The velocity
-// bounds come from the smallest pyramid level that covers the midpoints.
+// bounds come from the smallest box level that covers the midpoints.
 // Forward reach (fastTravel > 0): a required tile's surface moves by at most
 // its own travel (below fastTravel, except for boundary tiles). Tile p is fine if a required tile q
 // within that travel (from q's nearest crossing owner) plus the margin
@@ -473,7 +507,8 @@ fn forwardFine(p:vec3i,margin:i32)->bool{
  loop{
   // Zero joins the bounds: sampling near a wall or solid blends in its
   // zero face, and the trace stops short at a solid or the domain clamp.
-  for(var a=0u;a<3u;a++){low[a]=min(0.0,orderValue(atomicLoad(&census[levelIndex(level,tile,a)])));high[a]=max(0.0,orderValue(atomicLoad(&census[levelIndex(level,tile,3u+a)])));}
+  let keys=boxKeys(p,level);
+  for(var a=0u;a<3u;a++){low[a]=min(0.0,orderValue(keys[a]));high[a]=max(0.0,orderValue(keys[3u+a]));}
   let travel=max(abs(low*scale),abs(high*scale));
   let need=1+i32(ceil(0.5*max(travel.x,max(travel.y,travel.z))/4.0));
   if(need<=RADII[level]){break;}
@@ -551,8 +586,8 @@ fn umBit(base:u32,t:u32)->bool{return (atomicLoad(&census[base+t/32u])&(1u<<(t%3
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]});
   for(const entryPoint of ["classify","classifyCoarse","prefix0","prefix1","prefix2","decide","solidActive","solidPromote"])
    this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX}}}));
-  for(let axis=0;axis<3;axis++)
-   this.pipelines.set(`pyramid${axis}`,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"boundPyramid",constants:{umDispatchX:this.ownership.dispatchX,pyramidAxis:axis}}}));
+  for(let level=1;level<=CUBE_LEVELS;level++)
+   this.pipelines.set(`cube${level}`,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"boundCube",constants:{umDispatchX:this.ownership.dispatchX,cubeLevel:level}}}));
  }
  /** Solid-coupled tiles (uniformMixedSolidTiles().coupled), for the impact rule. */
  setSolid(coupled:Uint8Array):void{
@@ -566,7 +601,7 @@ fn umBit(base:u32,t:u32)->bool{return (atomicLoad(&census[base+t/32u])&(1u<<(t%3
  /** Encode after a completed frame, while its ownership and the local speed
   * velocity (the one the next frame advects with) are still in place. */
  encode(encoder:GPUCommandEncoder,policy:UniformMixedDynamicPolicy):void{
-  if(this.pipelines.size!==11)throw new Error("Dynamic ownership census is not initialized");
+  if(this.pipelines.size!==8+CUBE_LEVELS)throw new Error("Dynamic ownership census is not initialized");
   for(const [name,value] of Object.entries({dt:policy.dt,fullTolerance:policy.fullTolerance,emptyTolerance:policy.emptyTolerance}))
    if(!Number.isFinite(value)||value<0)throw new Error(`Dynamic ownership ${name} must be finite and non-negative: ${value}`);
   for(const [name,value] of Object.entries({reach:policy.reach,hysteresis:policy.hysteresis}))
@@ -579,16 +614,17 @@ fn umBit(base:u32,t:u32)->bool{return (atomicLoad(&census[base+t/32u])&(1u<<(t%3
   for(const [name,value] of Object.entries({fastTravel:policy.fastTravel,boundaryTravel:policy.boundaryTravel}))
    if(!Number.isFinite(value)||value<0)throw new Error(`Dynamic ownership ${name} must be finite and non-negative: ${value}`);
   this.device.queue.writeBuffer(this.params,32,new Float32Array([policy.fastTravel,policy.boundaryTravel,0,0]));
-  // Levels 1.. of the pyramid are written in full before decide reads them.
-  const tiles0=this.ownership.layout.tiles.length,pyramid=(HEADER+this.words+6*tiles0)*4,prefix=(HEADER+this.words+6*BOUND_BLOCKS*tiles0)*4;
-  encoder.clearBuffer(this.work,0,pyramid);encoder.clearBuffer(this.work,prefix);
+  // Cube levels up to the one decide can reach are written in full before
+  // decide reads them; the census is cleared whole.
+  encoder.clearBuffer(this.work);
   const tiles=this.ownership.layout.tiles.length,x=this.ownership.dispatchX,t=this.ownership.layout.lattice.dimensions.map(n=>n/4+1);
-  for(const [label,entries] of [["classify",["classify","classifyCoarse"]],["prefix",["prefix0","prefix1","prefix2","pyramid0","pyramid1","pyramid2"]],["decide",this.solid?["decide","solidActive","solidPromote"]:["decide"]]] as const){
+  const cubeStarts=t.reduce((n,k)=>n*(k-1+CUBE_PAD),1);
+  for(const [label,entries] of [["classify",["classify","classifyCoarse"]],["prefix",["prefix0","prefix1","prefix2",...Array.from({length:CUBE_LEVELS},(_,j)=>`cube${j+1}`)]],["decide",this.solid?["decide","solidActive","solidPromote"]:["decide"]]] as const){
    const pass=encoder.beginComputePass({label:`Uniform dynamic ownership census ${label}`});
    pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group);
    for(const entry of entries){
     const lines=entry.startsWith("prefix")?[0,1,2].filter(k=>k!==Number(entry.at(-1))).reduce((n,k)=>n*t[k]!,1):tiles;
-    const l=this.ownership.layout,groups=entry==="classify"?l.fineTiles.length:entry==="classifyCoarse"?Math.ceil(l.coarseTiles.length/64):entry.startsWith("pyramid")?Math.ceil(tiles*(BOUND_RADII.length-1)/64):Math.ceil(lines/64);
+    const l=this.ownership.layout,groups=entry==="classify"?l.fineTiles.length:entry==="classifyCoarse"?Math.ceil(l.coarseTiles.length/64):entry.startsWith("cube")?Math.ceil(cubeStarts/64):Math.ceil(lines/64);
     if(!groups)continue;
     pass.setPipeline(this.pipelines.get(entry)!);pass.dispatchWorkgroups(Math.min(groups,x),Math.ceil(groups/x));
    }
@@ -610,5 +646,5 @@ fn umBit(base:u32,t:u32)->bool{return (atomicLoad(&census[base+t/32u])&(1u<<(t%3
   coarsePartialVolume:words[6]!,coarsePhiCrossing:words[7]!,coarseDryLiquidPhi:words[3]!,
   interiorDeficit:[f[8]!,f[9]!],airVolume:[f[10]!,f[11]!]};
  }
- destroy():void{this.solidTiles.destroy();this.work.destroy();this.readback.destroy();this.params.destroy();}
+ destroy():void{this.solidTiles.destroy();this.work.destroy();this.bounds.destroy();this.readback.destroy();this.params.destroy();}
 }

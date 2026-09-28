@@ -276,7 +276,7 @@ function mixedSurfaceThetaFragment(fragment: string): string {
 
 /** CM11a entries the mixed 4h continuation's v/full plans dispatch. */
 const UNIFORM_MIXED_CONTINUATION_ENTRIES = ["mgDownsampleTopology", "mgExtrapolatePhiOneCell", "mgBakeCoefficients",
-  "mgBuildSmoothTiles", "mgPublishSmoothTiles", "mgSmoothTilesJacobi", "mgResidual", "mgRestrictResidual",
+  "mgBuildSmoothTiles", "mgSmoothTilesJacobi", "mgResidual", "mgRestrictResidual",
   "mgProlongateAdd", "mgProlongateAssign", "mgDownsampleSubtract", "mgDownsampleMinimum", "mgSmoothColour",
   "mgSmoothVisitLocalInPlace", "mgCopyPressure", "mgClearPressure", "mgSolveCoarsest"] as const;
 

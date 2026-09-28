@@ -2,7 +2,7 @@ import { UNIFORM_MIXED_HANGING_RECORD } from "./uniform-mixed-velocity-sampling.
 import type { UniformMixedLayout } from "./uniform-mixed-layout";
 import { UNIFORM_MIXED_FUSED_REGULAR_TILES } from "./uniform-mixed-topology.wgsl";
 
-type OwnershipUploadTarget="topology"|"counts"|"support"|"certifiedDispatch";
+type OwnershipUploadTarget="topology"|"counts"|"support";
 interface OwnershipDerivation{
   readonly dispatchX:number;
   /** Every upload of one ownership generation, in encode order. */
@@ -40,23 +40,14 @@ function deriveOwnership(layout:UniformMixedLayout,dispatchX:number):OwnershipDe
       if(distance[key]!>next){distance[key]=next;queue[tail++]=key;}
     }
   }
+  // 4n: the certificate header (speed, regular and general h counts; every
+  // h tile is general until the frame plan certifies).
   const header=new Uint32Array(16);header[2]=layout.fineTiles.length;
-  header.set([Math.min(layout.fineTiles.length,dispatchX),Math.ceil(layout.fineTiles.length/dispatchX),1],8);
   const regular=(tile:number)=>(layout.stencils[2*tile]!>>>27)===(layout.stencils[2*tile+1]!>>>27);
   const seamLists=[layout.fineTiles,layout.coarseTiles].map(tiles=>[...tiles].filter(tile=>!regular(tile)));
   // Regular 4h tiles run one lane per owner, 64 owners per merged job.
   const regularCoarse=[...layout.coarseTiles].filter(regular);
-  // Merged jobs: general h, the seam 4h tiles, packed owners.
-  const merged=layout.fineTiles.length+seamLists[1]!.length+Math.ceil(regularCoarse.length/64);
-  header.set([Math.min(merged,dispatchX),Math.ceil(merged/dispatchX),1],12);
   writes.push(["support",n*16,header]);
-  writes.push(["certifiedDispatch",0,header.slice(4,16)]);
-  // The same merged launch with its seam 4h tiles packed four per job
-  // (uniformMixedFaceTileDispatchWGSL quads): the frame plan's publishWork
-  // rewrites both at every certificate.
-  const quad=quadMergedArgs(layout.fineTiles.length,seamLists[1]!.length,regularCoarse.length,dispatchX);
-  writes.push(["support",(9*n+24)*4,quad]);
-  writes.push(["certifiedDispatch",48,quad]);
   writes.push(["support",(4*n+16)*4,distance]);
   writes.push(["support",(6*n+16)*4,Uint32Array.from(layout.fineTiles)]);
   const seamCounts=seamLists.map(list=>list.length);
@@ -71,12 +62,12 @@ function deriveOwnership(layout:UniformMixedLayout,dispatchX:number):OwnershipDe
   return derivation;
 }
 
-/** Indirect args of the quad-packed merged launch: general h tiles, then
- * ceil(s4/4) seam 4h quad jobs, then packed regular 4h owner jobs. */
-function quadMergedArgs(general:number,seamFour:number,regularFour:number,dispatchX:number):Uint32Array<ArrayBuffer>{
-  const jobs=general+Math.ceil(seamFour/4)+Math.ceil(regularFour/64);
-  return new Uint32Array([Math.min(jobs,dispatchX),Math.ceil(jobs/dispatchX),1,0]);
-}
+/** Workgroups of a certified launch at most (grid-stride over its jobs). A
+ * launch covers its bound: surplus workgroups exit at once, while a capped
+ * grid chains jobs of uneven trace cost through one workgroup and loses the
+ * hardware's balancing (f7 advect, momentum, traceCells 13.6 -> 12.2 ms at
+ * 1024). The WebGPU per-dimension limit. */
+const CERTIFIED_GRID=65535;
 
 /** Ownership tiers: 0 = h (width 1), 1 = 4h (width 4). */
 export type UniformMixedTier=0|1;
@@ -113,7 +104,7 @@ export class UniformMixedOwnership {
     if(!this.sampled)throw new Error("This ownership samples no velocity: it has no hanging tap cache");
     return this.hangingGroupCurrent;
   }
-  get allocatedBytes(): number { return this.topology.size + this.counts.size + this.support.size+this.speeds.size+this.certifiedDispatch.size+(this.hanging?.size??0)+(this.records?.size??0); }
+  get allocatedBytes(): number { return this.topology.size + this.counts.size + this.support.size+this.speeds.size+(this.hanging?.size??0); }
   readonly dispatchX: number;
   private readonly topology: GPUBuffer;
   /** Stable read-only view for consumers of the accepted ownership generation. */
@@ -123,16 +114,11 @@ export class UniformMixedOwnership {
   readonly support: GPUBuffer;
   /** Per-tile extended speed and its box maximum (frame plan certificate). */
   readonly speeds: GPUBuffer;
-  readonly certifiedDispatch:GPUBuffer;
   /** Per-frame velocity tap cache (uniformMixedHangingTapWGSL): every seam
    * tile owns a slot. */
   private hanging?:GPUBuffer;
   /** Slots in the hanging tap cache, filled one workgroup each. */
   hangingSlots=0;
-  /** Pressure seam records (uniform-mixed-pressure-records.wgsl), allocated
-   * only for the level whose residual and measure use them. */
-  private records?:GPUBuffer;
-  private recordGroupCurrent?:GPUBindGroup;
   private seamCounts=[0,0];
 
   private frameHeld=false;
@@ -155,10 +141,10 @@ export class UniformMixedOwnership {
     this.presentation={buffer:this.topology,size:this.topology.size};
     this.counts = device.createBuffer({ label: "Uniform mixed work counts", size: 16,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.UNIFORM });
-    // 9n+24..9n+28: the quad-packed merged launch args (frame plan publishWork).
+    // 9n+24: the mixed pressure schedule's slot gate (umSlotClosed), zero
+    // except on a pressure level inside a closed slot. Builders stop at 9n+24.
     this.support = device.createBuffer({label:"Uniform shared frame support and certified work",size:(layout.tiles.length*9+28)*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
     this.speeds = device.createBuffer({label:"Uniform local speed certificate",size:layout.tiles.length*8,usage:GPUBufferUsage.STORAGE});
-    this.certifiedDispatch=device.createBuffer({label:"Uniform certified fine dispatch",size:64,usage:GPUBufferUsage.INDIRECT|GPUBufferUsage.COPY_DST});
     this.update(layout);
     this.bindGroup = device.createBindGroup({ layout: this.bindLayout, entries: [
       { binding: 0, resource: { buffer: this.topology } }, { binding: 1, resource: { buffer: this.counts } },
@@ -200,11 +186,6 @@ export class UniformMixedOwnership {
     encoder.copyBufferToBuffer(s.counts.buffer,s.counts.offset,this.counts,0,16);
     encoder.copyBufferToBuffer(s.support,0,this.support,0,(5*n+16)*4);
     encoder.copyBufferToBuffer(s.support,(6*n+16)*4,this.support,(6*n+16)*4,(3*n+8)*4);
-    encoder.copyBufferToBuffer(s.support,(4*n+4)*4,this.certifiedDispatch,0,48);
-    // The builder's support ends at 9n+24; its generation's static quad args
-    // stand until the next certificate, as update()'s do.
-    const quad=quadMergedArgs(layout.fineTiles.length,built.seamCounts[1]!,layout.coarseTiles.length-built.seamCounts[1]!,this.dispatchX);
-    this.device.queue.writeBuffer(this.support,(9*n+24)*4,quad);this.device.queue.writeBuffer(this.certifiedDispatch,48,quad);
     this.seamCounts=[...built.seamCounts];
     this.hangingSlots=built.hangingSlots;
     if(this.sampled){this.reserveHanging(n,built.hangingSlots);encoder.copyBufferToBuffer(s.slots,0,this.hanging!,0,2*n*4);}
@@ -236,11 +217,14 @@ export class UniformMixedOwnership {
   /** Fine work is split by a conservative whole-characteristic certificate.
    * Both lists use the same state, ownership generation and numerical stage.
    * tileGroups gives expensive face/vertex kernels one workgroup per tile. */
-  /** quad: the merged pipeline packs seam 4h tiles four per job
-   * (uniformMixedFaceTileDispatchWGSL); size it by the quad-packed count. */
-  dispatchCertified(pass:GPUComputePassEncoder,merged:GPUComputePipeline,regular:GPUComputePipeline,quad=false):void{
-    pass.setPipeline(regular);pass.dispatchWorkgroupsIndirect(this.certifiedDispatch,0);
-    pass.setPipeline(merged);pass.dispatchWorkgroupsIndirect(this.certifiedDispatch,quad?48:32);
+  /** Both pipelines are uniformMixedCertifiedEntriesWGSL entries (regular:
+   * umCertifiedJobs 1; merged: 2, or 3 when it packs seam 4h tiles four per
+   * job); each strides a fixed grid over the jobs the frame plan certified,
+   * bounded by this layout's tiles. */
+  dispatchCertified(pass:GPUComputePassEncoder,merged:GPUComputePipeline,regular:GPUComputePipeline):void{
+    const layout=this.currentLayout;
+    pass.setPipeline(regular);pass.dispatchWorkgroups(Math.min(CERTIFIED_GRID,layout.fineTiles.length));
+    pass.setPipeline(merged);pass.dispatchWorkgroups(Math.max(1,Math.min(CERTIFIED_GRID,layout.tiles.length)));
   }
 
   /** Frozen interface work is shared by pressure and face stages. */
@@ -320,15 +304,5 @@ export class UniformMixedOwnership {
     pass.dispatchWorkgroups(Math.min(groups, this.dispatchX), Math.ceil(groups / this.dispatchX));
   }
 
-  /** A storage group (hangingLayout) holding at least `bytes` of records. */
-  /** Refresh the list prefix once per solve; records follow it in the same binding. */
-  recordGroup(bytes:number):GPUBindGroup{
-    if(!this.records||this.records.size<bytes){
-      this.records?.destroy();
-      this.records=this.device.createBuffer({label:"Uniform mixed pressure seam records",size:Math.max(16,Math.ceil(bytes*1.5/4)*4),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
-      this.recordGroupCurrent=this.device.createBindGroup({layout:this.hangingLayout,entries:[{binding:0,resource:{buffer:this.records}}]});
-    }
-    return this.recordGroupCurrent!;
-  }
-  destroy(): void { this.topology.destroy(); this.counts.destroy(); this.support.destroy();this.speeds.destroy();this.certifiedDispatch.destroy();this.hanging?.destroy();this.records?.destroy(); }
+  destroy(): void { this.topology.destroy(); this.counts.destroy(); this.support.destroy();this.speeds.destroy();this.hanging?.destroy(); }
 }

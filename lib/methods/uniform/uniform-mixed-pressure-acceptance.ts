@@ -46,7 +46,8 @@ export class UniformMixedPressureAcceptance {
 ${uniformMixedPressureBoundaryIndexWGSL(l)}
 var<workgroup> maxima:array<u32,64>;
 @compute @workgroup_size(64) fn reduce(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
- let o=umAllOwner(gid);var norm=0.0;
+ // A closed slot reduces nothing: no early return ahead of the barriers.
+ var o=umAllOwner(gid);if(umSlotClosed()){o=UMOwner();}var norm=0.0;
  if(o.width!=0u){norm=residual[o.index];${uniformMixedPressureBoundaryLoop("norm=max(norm,residual[halo]);")}norm*=f32(o.width);}
  maxima[lane]=select(bitcast<u32>(norm*params.x),0x7f800000u,norm>=3.402823e38);workgroupBarrier();
  for(var stride=32u;stride>0u;stride/=2u){if(lane<stride){maxima[lane]=max(maxima[lane],maxima[lane+stride]);}workgroupBarrier();}
@@ -69,9 +70,9 @@ fn umCheck(initial:bool){
 }
 // clearBuffer of the candidate (a cycle) or the whole receipt (initial), in the pass.
 @compute @workgroup_size(1) fn resetInitial(){for(var i=0u;i<8u;i++){atomicStore(&state[i],0u);}}
-@compute @workgroup_size(1) fn resetCycle(){atomicStore(&state[0],0u);}
+@compute @workgroup_size(1) fn resetCycle(){if(umSlotClosed()){return;}atomicStore(&state[0],0u);}
 @compute @workgroup_size(1) fn initial(){umCheck(true);}
-@compute @workgroup_size(1) fn cycle(){umCheck(false);}
+@compute @workgroup_size(1) fn cycle(){if(umSlotClosed()){return;}umCheck(false);}
 
 `});
   const info=await module.getCompilationInfo(),errors=info.messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));

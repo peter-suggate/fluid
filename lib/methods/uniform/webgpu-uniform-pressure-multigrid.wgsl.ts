@@ -83,15 +83,12 @@ const MG_RESTORE_REJECTED_GATE = `  if(mg.control.w==0u){
  * `dims` names the uniform whose lattice the dispatch addresses -- levelDims
  * for an operator that writes its own level, coarseDims for prolongation,
  * which is planned coarse-to-fine and therefore writes the *destination*
- * lattice. The list is 4^3 tiles of that lattice, one workgroup each.
+ * lattice. The list is 4^3 tiles of that lattice, one workgroup per tile,
+ * walked grid-stride from a fixed direct launch: the live count is read here.
  */
 const mgTiledKernel = (name: string, dims: "levelDims" | "coarseDims",
   gate: string, body: string, haloBody?: string) => haloBody !== undefined && wallHalo ? /* wgsl */ `
-@compute @workgroup_size(64)
-fn ${name}Tiles(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
-${gate}
-  let at=group.x+65535u*group.y;
-  let tiles=atomicLoad(&mgCycleDispatch[0]);
+fn ${name}TileAt(at:u32,tiles:u32,lane:u32){
   if(at>=tiles){
     let id=mgHaloCell(at-tiles,lane,mg.${dims}.xyz);
     if(!mgValid(id,mg.${dims}.xyz)){return;}
@@ -104,18 +101,26 @@ ${haloBody}
   let id=vec3i(origin+vec3u(lane%4u,(lane/4u)%4u,lane/16u));
   if(!mgValid(id,mg.${dims}.xyz)){return;}
 ${body}
-}` : /* wgsl */ `
+}
 @compute @workgroup_size(64)
-fn ${name}Tiles(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+fn ${name}Tiles(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
 ${gate}
-  let at=group.x+65535u*group.y;
-  if(at>=atomicLoad(&mgCycleDispatch[0])){return;}
+  let tiles=atomicLoad(&mgCycleDispatch[0]);let jobs=mgHaloJobs(mg.${dims}.xyz,tiles);
+  for(var at=group.x;at<jobs;at+=groups.x){${name}TileAt(at,tiles,lane);}
+}` : /* wgsl */ `
+fn ${name}TileAt(at:u32,lane:u32){
   let d=(mg.${dims}.xyz+vec3u(3))/4u;
   let tile=atomicLoad(&mgCycleDispatch[4u+at]);
   let origin=4u*vec3u(tile%d.x,(tile/d.x)%d.y,tile/(d.x*d.y));
   let id=vec3i(origin+vec3u(lane%4u,(lane/4u)%4u,lane/16u));
   if(!mgValid(id,mg.${dims}.xyz)){return;}
 ${body}
+}
+@compute @workgroup_size(64)
+fn ${name}Tiles(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+${gate}
+  let jobs=atomicLoad(&mgCycleDispatch[0]);
+  for(var at=group.x;at<jobs;at+=groups.x){${name}TileAt(at,lane);}
 }`;
 
 /**
@@ -196,14 +201,11 @@ fn mgBuildCycleTiles(@builtin(global_invocation_id) gid:vec3u){
   let slot=atomicAdd(&mgCycleTiles[0],1u);
   atomicStore(&mgCycleTiles[4u+slot],at);
 }
-// The launch record: every tile, then the halo entries four to a workgroup.
-@compute @workgroup_size(1)
-fn mgPublishSmoothCycleTiles(){
-  let d=(mg.levelDims.xyz+vec3u(3))/4u;let n=d.x*d.y*d.z;
-  let count=atomicLoad(&mgCycleDispatch[0])+(atomicLoad(&mgCycleDispatch[4u+n])+3u)/4u;
-  atomicStore(&mgCycleDispatch[1],min(count,65535u));
-  atomicStore(&mgCycleDispatch[2],(count+65534u)/65535u);
-  atomicStore(&mgCycleDispatch[3],1u);
+// Grid-stride jobs of the cycle list: every tile, then the halo entries four
+// to a job (n = tiles of the lattice the list covers).
+fn mgHaloJobs(dims:vec3u,tiles:u32)->u32{
+  let d=(dims+vec3u(3))/4u;let n=d.x*d.y*d.z;
+  return tiles+(atomicLoad(&mgCycleDispatch[4u+n])+3u)/4u;
 }`;
 
 /**
@@ -345,24 +347,18 @@ fn mgBuildCycleTiles(@builtin(global_invocation_id) gid:vec3u){
   }
 }
 `}
-@compute @workgroup_size(1)
-fn mgPublishSmoothTiles(){
-  let count=atomicLoad(&mgCycleDispatch[0]);
-  atomicStore(&mgCycleDispatch[1],min(count,65535u));
-  atomicStore(&mgCycleDispatch[2],(count+65534u)/65535u);
-  atomicStore(&mgCycleDispatch[3],1u);
-}
 @compute @workgroup_size(32)
-fn mgSmoothTilesInPlace(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+fn mgSmoothTilesInPlace(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
   if(mgSkipCycle()){return;}
-  let at=group.x+65535u*group.y;
-  if(at>=atomicLoad(&mgCycleDispatch[0])){return;}
-  let tile=atomicLoad(&mgCycleDispatch[4u+at]);
+  let jobs=atomicLoad(&mgCycleDispatch[0]);
   let d=(mg.levelDims.xyz+vec3u(3))/4u;
-  let origin=4u*vec3u(tile%d.x,(tile/d.x)%d.y,tile/(d.x*d.y));
-  let y=origin.y+(lane/2u)%4u;let z=origin.z+lane/8u;
-  let id=vec3i(i32(origin.x+2u*(lane%2u)+((mg.control.z+y+z)&1u)),i32(y),i32(z));
-  if(mgValid(id,mg.levelDims.xyz)){mgSmoothCellInPlace(id);}
+  for(var at=group.x;at<jobs;at+=groups.x){
+    let tile=atomicLoad(&mgCycleDispatch[4u+at]);
+    let origin=4u*vec3u(tile%d.x,(tile/d.x)%d.y,tile/(d.x*d.y));
+    let y=origin.y+(lane/2u)%4u;let z=origin.z+lane/8u;
+    let id=vec3i(i32(origin.x+2u*(lane%2u)+((mg.control.z+y+z)&1u)),i32(y),i32(z));
+    if(mgValid(id,mg.levelDims.xyz)){mgSmoothCellInPlace(id);}
+  }
 }
 // One thread per run of MG_ROW_SEGMENT same-colour cells along x. Same update,
 // same colour separation; a launch whose cycle gate is closed spawns 1/SEGMENT
@@ -525,7 +521,14 @@ ${uniformPressureStateWGSL}
 
 @group(1) @binding(17) var<uniform> mgTolerance:vec4f;
 var<workgroup> mgCycleStopped:u32;
+// The mixed pressure schedule's slot gate (0 open): a closed slot's launches
+// return at once. Only a mixed continuation build (MG_SLOT_GATED) reads it;
+// there word 17 (completed Full-Cycles, counted by mgCheckCycleConvergence,
+// which that build never compiles) is the mixed schedule gate's alone.
+override MG_SLOT_GATED:bool=false;
+const MG_SLOT_GATE:u32=17u;
 fn mgSkipCycle()->bool{
+  if(MG_SLOT_GATED&&atomicLoad(&mgState.convergence[MG_SLOT_GATE])!=0u){return true;}
   if(mg.levelDims.w==0u){return false;}
   if(atomicLoad(&mgState.convergence[16])!=0u){return true;}
   let recovery=atomicLoad(&mgState.convergence[22])!=0u;
@@ -1016,21 +1019,21 @@ fn mgSmoothColour(@builtin(global_invocation_id) gid:vec3u){
   // newly updated colour before the opposite colour consumes it.
   textureStore(mgPressureOut,id,vec4f(max(select(p,mix(old,p,MG_JACOBI_WEIGHT),MG_SIMULTANEOUS),textureLoad(mgMinimumIn,id,0).x)));
 }
-@compute @workgroup_size(64)
-fn mgSmoothTilesJacobi(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
-  if(mgSkipCycle()){return;}
-  let at=group.x+65535u*group.y;if(at>=atomicLoad(&mgCycleDispatch[0])){return;}
+fn mgSmoothTilesJacobiAt(at:u32,lane:u32){
   let d=(mg.levelDims.xyz+vec3u(3))/4u;let tile=atomicLoad(&mgCycleDispatch[4u+at]);
   let origin=4u*vec3u(tile%d.x,(tile/d.x)%d.y,tile/(d.x*d.y));
   let id=vec3i(origin+vec3u(lane%4u,(lane/4u)%4u,lane/16u));
   if(!mgValid(id,mg.levelDims.xyz)){return;}
 ${MG_JACOBI_TILE_BODY}}
+@compute @workgroup_size(64)
+fn mgSmoothTilesJacobi(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+  if(mgSkipCycle()){return;}
+  let jobs=atomicLoad(&mgCycleDispatch[0]);
+  for(var at=group.x;at<jobs;at+=groups.x){mgSmoothTilesJacobiAt(at,lane);}
+}
 ${wallHalo ? `
 // The first sweep of a visit, from the cycle list with its wall-halo entries.
-@compute @workgroup_size(64)
-fn mgSmoothTilesJacobiCycle(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
-  if(mgSkipCycle()){return;}
-  let at=group.x+65535u*group.y;let tiles=atomicLoad(&mgCycleDispatch[0]);
+fn mgSmoothTilesJacobiCycleAt(at:u32,tiles:u32,lane:u32){
   if(at>=tiles){
     // A halo entry's cells are certified air rows (no liquid in the tile's
     // neighbourhood), so the update is the pass-through projection alone and
@@ -1043,7 +1046,13 @@ fn mgSmoothTilesJacobiCycle(@builtin(workgroup_id) group:vec3u,@builtin(local_in
   let origin=4u*vec3u(tile%d.x,(tile/d.x)%d.y,tile/(d.x*d.y));
   let id=vec3i(origin+vec3u(lane%4u,(lane/4u)%4u,lane/16u));
   if(!mgValid(id,mg.levelDims.xyz)){return;}
-${MG_JACOBI_TILE_BODY}}` : ""}
+${MG_JACOBI_TILE_BODY}}
+@compute @workgroup_size(64)
+fn mgSmoothTilesJacobiCycle(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+  if(mgSkipCycle()){return;}
+  let tiles=atomicLoad(&mgCycleDispatch[0]);let jobs=mgHaloJobs(mg.levelDims.xyz,tiles);
+  for(var at=group.x;at<jobs;at+=groups.x){mgSmoothTilesJacobiCycleAt(at,tiles,lane);}
+}` : ""}
 
 ${uniformCoarseSolverWGSL}
 

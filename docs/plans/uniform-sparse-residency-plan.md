@@ -13,7 +13,7 @@ Standing rules this design must obey:
 - Fail fast: overflow is a loud fatal error, never growth or a fallback.
 - Layout-general: everything survives dynamic coarsening, with no scene special cases.
 - Structural cuts before cheaper launches.
-- Launch count fixed and small: empty indirect dispatches cost about 12 µs each on Dawn/Metal.
+- Launch count fixed and small, and no indirect launches: every list-shaped pass is a fixed-size direct dispatch that grid-strides over a GPU-compacted list and reads the live count on the GPU (the band multigrid pattern). Each dispatch costs about 12 µs on Dawn/Metal, even an empty indirect one.
 
 ## 2. Where the memory and time go today
 
@@ -201,7 +201,7 @@ The compact owner index (`UMOwner.index`) stays as it is for owner-indexed buffe
 - **Departure certificate (R6):** extend the plan certificate (`encodeCertificate(dt)`) so that every departure footprint and every extension or redistance stencil lies inside the resident set. Violation is fatal and names the tile.
 - **Pressure:** absent tiles are Dirichlet air, and the halo guarantees no liquid owner neighbours an absent tile. Enclosed dry cavities are fine, because absent means "air at p=0", which is exactly what a vented dry region is. A *sealed* cavity is not vented, but it cannot hold liquid without being resident.
 - **Phi at the boundary:** redistance clamps resident vertices bordering absent tiles to +far, consistent with the absent reading, so the band never sees a false gradient.
-- **Launches:** fixed count, dispatched indirectly over the resident-h, resident-4h and band lists. Pressure level 0 runs over resident 4h tiles only.
+- **Launches:** fixed count, all direct: fixed-size grids that grid-stride over the resident-h, resident-4h and band lists, with each live count read on the GPU. No indirect launches, no readback. Pressure level 0 runs over resident 4h tiles only.
 
 ### 5.6 Readers outside the solver (R7)
 
@@ -286,7 +286,7 @@ Every phase is layout-general, measured on one target scene, and gated by the Un
   2. The census residency closure plus halo decides the resident set.
   3. Extend the departure/extension certificate to cover residency.
   4. Clamp phi at the resident boundary.
-  5. Pressure level 0 runs over resident 4h tiles only, with indirect launches over the resident lists.
+  5. Pressure level 0 runs over resident 4h tiles only, with fixed-size direct launches that grid-stride over the resident lists (counts read on the GPU, no indirect launches).
 - **Expected:** memory and time flat in container size.
 - **Measure:** garden-wide at 1×, 2× and 4× container with flat frame time and flat allocation; a forced overflow and a forced departure violation each fail loudly within the WP2 K-frame bound.
 

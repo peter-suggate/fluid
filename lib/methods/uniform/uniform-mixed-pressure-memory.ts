@@ -1,32 +1,24 @@
 import type {UniformMixedLayout} from "./uniform-mixed-layout";
-import {uniformMixedAllCoarseLayout} from "./uniform-mixed-layout";
 import {uniformMixedPressureStorage} from "./uniform-mixed-pressure-boundary.wgsl";
 
 export interface UniformMixedMemoryRange {offset:number;size:number}
-/** Pressure lifetimes: slopes, frozen RHS and residuals are recomputed after
- * returning from a child solve, so both levels share those three workspaces.
- * All live pressure/RHS/minimum/phi fields remain disjoint. Level 0's phi uses
- * the idle native conditioning buffer; the native 4h hierarchy stays intact.
- * Both levels are all-4h. Level 0 keeps the capacity of the simulation
- * layout (its phi range also carries the static solid record); the frame
- * presents only its live all-4h words. With static solids, level 1 also carries one
- * vec4 (open, V+) record per owner and halo slot. */
-export function planUniformMixedPressureMemory(layout:UniformMixedLayout,arenaPrefixBytes:number,conditioningBytes:number,solid=false){
- const layouts=[layout,uniformMixedAllCoarseLayout(layout)];
+/** The all-4h pressure root's arena fields: pressure, the RHS and a
+ * Full-Cycle's correction RHS, the bound and its shifted copy, the residual
+ * the acceptance reduces, and the Full-Cycle backup. The frozen workspace
+ * is borrowed by authority. Every correction level
+ * lives in the native hierarchy (n/4 and below). Phi uses the idle native
+ * conditioning buffer; with static solids its range also carries the all-4h
+ * solid record. Capacity follows the simulation layout; the frame presents
+ * only the live all-4h words. */
+export function planUniformMixedPressureMemory(layout:UniformMixedLayout,arenaPrefixBytes:number,conditioningBytes:number){
  let cursor=0;
  const allocate=(size:number):UniformMixedMemoryRange=>{cursor=Math.ceil(cursor/256)*256;const range={offset:cursor,size};cursor+=size;return range;};
- const rootCount=uniformMixedPressureStorage(layout).count;
- const slopes=allocate(layout.cellCount*16),frozen=allocate(rootCount*4),residual=allocate(rootCount*4);
- const levels=layouts.map((l,i)=>{
-  const count=uniformMixedPressureStorage(l).count;
-  return {pressure:allocate(count*4),rhs:[allocate(count*4),allocate(count*4)] as const,
-   minimum:Array.from({length:i===0?2:1},()=>allocate(count*4)),
-   phi:i===0?{offset:0,size:layout.cellCount*4}:allocate(l.cellCount*4),
-   slopes:{...slopes,size:l.cellCount*16},frozen:{...frozen,size:count*4},residual:{...residual,size:count*4},
-   topology:solid&&i>0?allocate(count*16):undefined};
- });
- const backup=allocate(rootCount*4);
- if(levels[0]!.phi.size>conditioningBytes||cursor>arenaPrefixBytes)
-  throw new Error(`Unified pressure scratch exceeds borrowed fields: ${cursor}/${arenaPrefixBytes} arena bytes, ${levels[0]!.phi.size}/${conditioningBytes} conditioning bytes`);
- return {layouts,levels,backup,bytes:cursor};
+ const count=uniformMixedPressureStorage(layout).count;
+ const frozen=allocate(count*4),residual=allocate(count*4);
+ const root={pressure:allocate(count*4),rhs:[allocate(count*4),allocate(count*4)] as const,minimum:[allocate(count*4),allocate(count*4)] as const,
+  phi:{offset:0,size:layout.cellCount*4},frozen,residual};
+ const backup=allocate(count*4);
+ if(root.phi.size>conditioningBytes||cursor>arenaPrefixBytes)
+  throw new Error(`Unified pressure scratch exceeds borrowed fields: ${cursor}/${arenaPrefixBytes} arena bytes, ${root.phi.size}/${conditioningBytes} conditioning bytes`);
+ return {root,backup,bytes:cursor};
 }

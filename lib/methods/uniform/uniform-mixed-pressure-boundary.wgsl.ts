@@ -3,10 +3,17 @@ import { mixedCellWidth, type UniformMixedLayout } from "./uniform-mixed-layout"
 /** Sparse canonical slots in six boundary planes, following the native
  * one-cell pressure halo. Edge/corner halo cells have no fluid incident face
  * and hence no pressure coupling. No connectivity buffer is needed. */
+/** Layouts are immutable (their worklists are derived once, too): the
+ * per-tile scan runs once per layout, not on every encode that asks. */
+const pressureStorage=new WeakMap<UniformMixedLayout,{readonly width:number;readonly count:number}>();
 export function uniformMixedPressureStorage(layout:UniformMixedLayout){
-  const width=layout.tiles.reduce((width,word)=>Math.min(width,mixedCellWidth(word)),4);
-  const d=layout.lattice.dimensions.map(n=>n/width);
-  return {width, count:layout.cellCount+2*(d[0]!*d[1]!+d[0]!*d[2]!+d[1]!*d[2]!)};
+  let storage=pressureStorage.get(layout);
+  if(!storage){
+    const width=layout.tiles.reduce((width,word)=>Math.min(width,mixedCellWidth(word)),4);
+    const d=layout.lattice.dimensions.map(n=>n/width);
+    storage={width, count:layout.cellCount+2*(d[0]!*d[1]!+d[0]!*d[2]!+d[1]!*d[2]!)};pressureStorage.set(layout,storage);
+  }
+  return storage;
 }
 
 /** With `solid`, the caller defines umPressureWallV(o,axis,sign): the wall's

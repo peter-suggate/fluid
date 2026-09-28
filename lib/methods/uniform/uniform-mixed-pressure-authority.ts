@@ -124,17 +124,30 @@ fn umOpenVote(values:array<f32,8>,opens:array<f32,8>)->f32{
  return select(sum/8.0,umSum8(positive)/max(positiveCount,1.0),positiveCount>0.0&&umSum8(negativeFlags)>0.0);
 }
 const UM_CUT_BASE=${1+this.groups+this.chunks}u;
-var<workgroup> cutTile:u32;
+var<workgroup> cutCount:atomic<u32>;
+var<workgroup> cutListed:u32;
+var<workgroup> cutTiles:array<u32,64>;
 var<workgroup> cutValues:array<f32,64>;
 var<workgroup> cutOpens:array<f32,64>;
 var<workgroup> cutMid:array<f32,8>;
 var<workgroup> cutMidOpen:array<f32,8>;
-// A cut owner's phi: h pressurePhi voted to 2h, then to 4h. One workgroup
-// per tile; lane 8k+j is h cell j of 2h block k.
-@compute @workgroup_size(64) fn cut(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) l:u32){
- let t=group.x+umDispatchX*group.y;
- if(l==0u){cutTile=select(0u,1u,t<UM_TILES&&umSolidCut(min(t,UM_TILES-1u)));}
- if(workgroupUniformLoad(&cutTile)==0u){return;}
+// A cut owner's phi: h pressurePhi voted to 2h, then to 4h. A fixed grid of
+// workgroups strides over the lattice 64 tiles at a time: each lane tests one
+// tile, the cut ones are compacted, then each is one workgroup job (lane
+// 8k+j is h cell j of 2h block k). Uncut tiles cost one lane test.
+@compute @workgroup_size(64) fn cut(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) l:u32){
+ for(var start=64u*group.x;start<UM_TILES;start+=64u*groups.x){
+  if(l==0u){atomicStore(&cutCount,0u);}
+  workgroupBarrier();
+  let t=start+l;
+  if(t<UM_TILES&&umSolidCut(t)){cutTiles[atomicAdd(&cutCount,1u)]=t;}
+  workgroupBarrier();
+  if(l==0u){cutListed=atomicLoad(&cutCount);}
+  let count=workgroupUniformLoad(&cutListed);
+  for(var i=0u;i<count;i++){cutTile(cutTiles[i],l);workgroupBarrier();}
+ }
+}
+fn cutTile(t:u32,l:u32){
  let origin=vec3i(4u*umTileCoord(t));let k=l>>3u;let j=l&7u;
  let p=origin+2*vec3i(vec3u(k&1u,(k>>1u)&1u,k>>2u))+vec3i(vec3u(j&1u,(j>>1u)&1u,j>>2u));
  cutValues[l]=umFinePressurePhiCell(p);cutOpens[l]=umCellOpen(p);
@@ -216,7 +229,7 @@ fn umReduce(l:u32){workgroupBarrier();for(var stride=32u;stride>0u;stride/=2u){i
  encode(encoder:GPUCommandEncoder,group:GPUBindGroup,balance=true):void{
   if(this.pipelines.size!==(this.coarse?6:5))throw new Error("Mixed pressure authority is not initialized");
   const pass=encoder.beginComputePass({label:balance?"Uniform mixed pressure authority and volume correction":"Uniform mixed pressure authority phase"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.coarse?this.solid.coarse!.bindGroup:this.solid.bindGroup);
-  if(this.coarse){const tiles=this.ownership.layout.tiles.length,x=this.ownership.dispatchX;pass.setPipeline(this.pipelines.get("cut")!);pass.dispatchWorkgroups(Math.min(tiles,x),Math.ceil(tiles/x));}
+  if(this.coarse){pass.setPipeline(this.pipelines.get("cut")!);pass.dispatchWorkgroups(Math.max(1,Math.min(1024,Math.ceil(this.ownership.layout.tiles.length/64))));}
   if(!balance){this.ownership.dispatchAll(pass,this.pipelines.get("phase")!);pass.end();return;}
   for(const entry of ["build","chunks","reduce","resolve"]){const pipeline=this.pipelines.get(entry)!;pass.setPipeline(pipeline);
    if(entry==="chunks")pass.dispatchWorkgroups(this.chunks);else if(entry==="reduce")pass.dispatchWorkgroups(1);else this.ownership.dispatchAll(pass,pipeline);

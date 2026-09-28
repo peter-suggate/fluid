@@ -4,6 +4,8 @@ import type { UniformScratchArena } from "./uniform-scratch-arena";
 import { UNIFORM_MIXED_TRANSPORT_LIVE_HEADER, uniformMixedTransportWGSL } from "./uniform-mixed-transport.wgsl";
 import type { UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 
+/** Workgroups per live-list transport launch at most. */
+const TRANSPORT_GRID = 2048;
 const entries = ["clear", "build", "decodeSampled", "decode", "rowsFallback", "rowsDivide", "gather", "restrictVolume", "copyVolume"] as const;
 type Entry = typeof entries[number];
 /** Owner lists of the transport live set: rows are built for receivers, limbs
@@ -27,9 +29,11 @@ export class UniformMixedTransportStage {
   private readonly transportGroup: GPUBindGroup;
   private readonly sampling: GPUBuffer;
   private readonly live: GPUBuffer;
-  private readonly liveDispatch: GPUBuffer;
   private readonly livePipelines: GPUComputePipeline[] = [];
   private readonly coarseRows=new Map<Entry,GPUComputePipeline>();
+  /** Workgroups of the h and 4h live-list launches, and of the coarse rows. */
+  private readonly liveGrid: readonly [number, number];
+  private readonly coarseRowGrid: number;
   private readonly cells: number;
 
   get layout(): UniformMixedLayout { return this.ownership.layout; }
@@ -47,10 +51,11 @@ export class UniformMixedTransportStage {
     const tiles = layout.tiles.length;
     this.live = device.createBuffer({ label: "Uniform mixed transport live set", size: (UNIFORM_MIXED_TRANSPORT_LIVE_HEADER + 7 * tiles) * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
-    // Dawn rejects indirect and writable storage use of one buffer in a scope.
-    this.liveDispatch = device.createBuffer({ label: "Uniform mixed transport live dispatch", size: (parallelCoarseRows?15:12) * 4,
-      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST });
-    this.workBytes = this.sampling.size + this.live.size + this.liveDispatch.size;
+    this.workBytes = this.sampling.size + this.live.size;
+    // Live-list launches are fixed grid-stride grids: the layout's bound
+    // (every tile listed), capped where the GPU is saturated.
+    this.liveGrid = [Math.min(TRANSPORT_GRID, tiles), Math.max(1, Math.min(TRANSPORT_GRID, Math.ceil(tiles / 64)))];
+    this.coarseRowGrid = Math.min(TRANSPORT_GRID, tiles);
     this.resourcesLayout = device.createBindGroupLayout({ entries: [
       ...[0, 1, 2, 3].map(binding => ({ binding, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" as const } })),
       { binding: 4, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
@@ -89,7 +94,7 @@ export class UniformMixedTransportStage {
     const chain: [string, number, number][] = [["liveGather", S, R1], ["liveScatter", R1, D2], ["liveGather", D2, Q2], ["liveScatter", Q2, D1],
       ["liveGather", D1, Q1], ["liveGather", Q1, Q0], ["liveScatter", S | Q1 | Q0, DONOR]];
     this.livePipelines.push(...await Promise.all([tile("liveSeed"), ...chain.map(([entry, tpFrom, tpInto]) => tile(entry, { tpFrom, tpInto })),
-      tile("liveCompact"), tile("livePublish")]));
+      tile("liveCompact")]));
   }
 
   /** Reused by the native trace pipeline so every stage visits the same owners. */
@@ -104,33 +109,34 @@ export class UniformMixedTransportStage {
     return pass;
   }
 
-  private run(encoder: GPUCommandEncoder, entry: Entry): void {
+  /** shared: a pass already bound to the transport group (encodeTransport). */
+  private run(encoder: GPUCommandEncoder, entry: Entry, shared?: GPUComputePassEncoder): void {
     const pipelines = this.pipelines.get(entry);
     if (!pipelines) throw new Error("Mixed transport has not been initialized");
-    const pass = this.begin(encoder, entry, entry === "restrictVolume" || entry === "copyVolume" ? this.restrictGroup : this.transportGroup);
+    const restrict = entry === "restrictVolume" || entry === "copyVolume";
+    if (shared && restrict) throw new Error("Mixed transport restriction binds its own group");
+    const pass = shared ?? this.begin(encoder, entry, restrict ? this.restrictGroup : this.transportGroup);
     const list = liveList[entry];
-    // One indirect launch per tier (0 = h, 1 = 4h) of the live list.
+    // One direct grid-stride launch per tier (0 = h, 1 = 4h) of the live list.
     if (list) for (const tier of [0, 1] as const) {
       const coarse=tier===1?this.coarseRows.get(entry):undefined;
-      pass.setPipeline(coarse??pipelines[tier]!);pass.dispatchWorkgroupsIndirect(this.liveDispatch,coarse?12*4:((list-1)*2+tier)*12);
+      pass.setPipeline(coarse??pipelines[tier]!);pass.dispatchWorkgroups(coarse?this.coarseRowGrid:this.liveGrid[tier]);
     }
     else this.dispatch(pass, pipelines);
-    pass.end();
+    if (!shared) pass.end();
   }
 
   /** Rows and donors whose restricted transport equals the dense one, from
    * this frame's departures and volume (per-tile reach dependency chain). */
   private encodeLiveSet(encoder: GPUCommandEncoder): void {
-    const seed = this.livePipelines[0], publish = this.livePipelines.at(-1);
-    if (!seed || !publish) throw new Error("Mixed transport has not been initialized");
+    const seed = this.livePipelines[0];
+    if (!seed) throw new Error("Mixed transport has not been initialized");
     const tiles = this.layout.tiles.length, groups = Math.ceil(tiles / 64);
     encoder.clearBuffer(this.live, 0, UNIFORM_MIXED_TRANSPORT_LIVE_HEADER * 4);
     const pass = this.begin(encoder, "transport live set", this.transportGroup);
     pass.setPipeline(seed!); pass.dispatchWorkgroups(Math.min(tiles, this.dispatchX), Math.ceil(tiles / this.dispatchX));
-    for (const pipeline of this.livePipelines.slice(1, -1)) { pass.setPipeline(pipeline); pass.dispatchWorkgroups(Math.min(groups, this.dispatchX), Math.ceil(groups / this.dispatchX)); }
-    pass.setPipeline(publish); pass.dispatchWorkgroups(1); pass.end();
-    encoder.copyBufferToBuffer(this.live, 0, this.liveDispatch, 0, 12 * 4);
-    if(this.parallelCoarseRows)encoder.copyBufferToBuffer(this.live,16*4,this.liveDispatch,12*4,12);
+    for (const pipeline of this.livePipelines.slice(1)) { pass.setPipeline(pipeline); pass.dispatchWorkgroups(Math.min(groups, this.dispatchX), Math.ceil(groups / this.dispatchX)); }
+    pass.end();
   }
 
   encodeCopy(encoder: GPUCommandEncoder): void { this.run(encoder, "copyVolume"); }
@@ -140,12 +146,15 @@ export class UniformMixedTransportStage {
   /** Call only after tracing: extension shares the edge/donor backing. */
   encodeTransport(encoder: GPUCommandEncoder): void {
     this.encodeLiveSet(encoder);
-    this.run(encoder, "clear"); this.run(encoder, "build"); this.run(encoder, "decodeSampled");
+    // One pass: a dispatch is its own usage scope, and every entry here binds the transport group.
+    const pass = this.begin(encoder, "transport", this.transportGroup);
+    this.run(encoder, "clear", pass); this.run(encoder, "build", pass); this.run(encoder, "decodeSampled", pass);
     for (let round = 0; round < 3; round++) {
-      this.run(encoder, round === 0 ? "rowsFallback" : "rowsDivide"); this.run(encoder, "decode");
+      this.run(encoder, round === 0 ? "rowsFallback" : "rowsDivide", pass); this.run(encoder, "decode", pass);
     }
-    this.run(encoder, "gather");
+    this.run(encoder, "gather", pass);
+    pass.end();
   }
 
-  destroy(): void { this.ownership.destroy(); this.sampling.destroy(); this.live.destroy(); this.liveDispatch.destroy(); }
+  destroy(): void { this.ownership.destroy(); this.sampling.destroy(); this.live.destroy(); }
 }
