@@ -640,10 +640,10 @@ export type SvoDryShadingPath = "inline" | "split";
  * the renderer default.
  */
 export interface SvoDryOptimizationExperiments {
-  /** Compile a guarded opaque, single-directional-light cone closure alongside the generic closure. */
+  /** Compile a guarded opaque cone-only closure alongside the generic closure. */
   readonly specializedDeferredLighting?: boolean;
-  /** Internal shader variant; selected only with a matching publication and ready cone hierarchy. */
-  readonly opaqueDirectionalCones?: boolean;
+  /** Internal shader variant for any light set; selected only with a matching publication and ready cone hierarchy. */
+  readonly opaqueConeLighting?: boolean;
   /** Resolve current-frame radiance and exact fallbacks in one draw; false retains the A/B reference. */
   readonly singlePassReconstruction?: boolean;
   /** Cached opaque voxel boundary triangles; unavailable publications fail closed. */
@@ -850,6 +850,14 @@ export interface SvoDryOptimizationExperiments {
    * stays, it bounds the sun cones of every dense world.
    */
   readonly backdropTerrainAbsent?: boolean;
+  /**
+   * The frame has no rigid bodies. The body loops (nearest-body hits and the
+   * shadow and contact blockers) are uniform-count loops Dawn cannot prove
+   * empty, so every deferred pixel carries them in its register budget. The
+   * split-bundle cache keys on body presence and compiles them out here; the
+   * renderer refuses to present a bodied frame with this variant.
+   */
+  readonly rigidBodiesAbsent?: boolean;
   /**
    * Run the analytic candidate-BVH walk of `traceStatic` first and unbounded,
    * as it historically did, instead of seeding it with the voxel-resolved hit.
@@ -1305,7 +1313,7 @@ fn drySceneFractionOfVoxel(voxel:u32)->f32{
     leafPayloadMode === "dense"
       ? `let identity=sceneIdentityOf(identitySource,${index});if(sceneIdentitySolid(identity)){${onSolid}}`
       : `if(sceneIdentitySolidAt(${index})){let identity=sceneIdentityAt(${index});${onSolid}}`;
-  const fastDeferred = split && experiments.opaqueDirectionalCones === true;
+  const fastDeferred = split && experiments.opaqueConeLighting === true;
   const voxelLightCache = split && experiments.voxelLightCache !== false;
   const edgeReceiverRecovery = reduced && experiments.edgeReceiverRecovery !== false;
   const latticeVisibility = experiments.latticeVisibility === true;
@@ -2325,10 +2333,9 @@ fn dryPrepassUnpackHit(geometry:vec4f,identity:u32)->DryHit{
   return DryHit(geometry.x,dryPrepassDecodeNormal(geometry.yz),identity&0xffffu,owner,metadata&15u,field,(metadata>>8u)&3u,(metadata>>10u)&1u,0.0,vec3u(0u,receiver,0u));
 }
 fn dryPrepassChannel(index:u32)->f32{
-  ${fastDeferred ? "return dryPrepassData0.y;" : `
   if(index<4u){return dryPrepassData0[index];}
   if(index<8u){return dryPrepassData1[index-4u];}
-  return dryPrepassData2[min(index-8u,3u)];`}
+  return dryPrepassData2[min(index-8u,3u)];
 }
 fn dryPrepassReceiverCompatible(identity:u32,metadata:u32,hit:DryHit)->bool{
   let materialMatches=(identity&0xffffu)==(hit.materialId&0xffffu);
@@ -2656,7 +2663,7 @@ fn dryVoxelLightReject(pageIndex:u32,local:vec3u){
   const prepassContactShortcutWGSL = reduced
     ? /* wgsl */ `if(dryPrepassState==1u){let prepassRadius=dryContactVisibilityRadius();if(prepassRadius<=0.0){return vec3f(1.0);}let prepassCell=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let prepassOrigin=position+normalize(geometricNormal)*prepassCell*.2;let prepassSamples=max(dry.tuningCounts1.z,dry.tuningCounts1.y);var prepassUnblocked=0.0;for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES}u;sampleIndex+=1u){if(sampleIndex>=prepassSamples){break;}let direction=dryContactVisibilityDirection(geometricNormal,featureId,sampleIndex&1u);let rotated=select(direction,normalize(direction+cross(normalize(geometricNormal),direction)*.7),sampleIndex>=2u);let prepassRigidBlocked=anyBodyBlockerIgnoring(prepassOrigin,rotated,ownerId,prepassRadius);prepassUnblocked+=select(1.0,0.0,prepassRigidBlocked);}let raw=clamp(dryPrepassData0.x*(prepassUnblocked/f32(prepassSamples)),0.0,1.0);return vec3f(mix(1.0,raw,dry.tuningRays0.w));}`
     : "";
-  const prepassBodyBlockerWGSL = reduced ? /* wgsl */ `fn anyBodyBlockerIgnoring(ro:vec3f,rd:vec3f,ignoredOwner:u32,tMax:f32)->bool {
+  const prepassBodyBlockerWGSL = reduced ? /* wgsl */ `fn anyBodyBlockerIgnoring(ro:vec3f,rd:vec3f,ignoredOwner:u32,tMax:f32)->bool {${experiments.rigidBodiesAbsent ? "\n  return false;" : ""}
   // Every shaded pixel calls this once per light and once per contact sample, so
   // at 1500x1500 the body loop runs tens of millions of times a frame and its
   // per-iteration read of bodies[] dominates. One sphere enclosing the whole set
@@ -3608,18 +3615,20 @@ ${reduced ? `@fragment fn dryReconstructedLightingMain(input:VertexOut)->@locati
   // Never denser than the reduced prepass pitch it replaces, so the prepass
   // texel count bounds the distinct keys of a frame.
   const latticeSpacingPixels = Math.max(SVO_LATTICE_VISIBILITY_CONTRACT.minimumSpacingPixels, 1 / coneLightingScale);
-  // Every corner's first bucket is loaded before any is searched, so the common
-  // hit is one round of independent tag loads and one record compare.
-  const latticeCornerLoadWGSL = (corner: number): string => `let key${corner}=svoLatticeCorner(cell.key,${corner}u);let hash${corner}=svoLatticeHash(key${corner});let bucket${corner}=svoLatticeBucket(hash${corner},buckets,0u);let low${corner}=dryLatticeBucketsRead[4u*bucket${corner}];let high${corner}=dryLatticeBucketsRead[4u*bucket${corner}+1u];`;
-  const latticeCornerAccumulateWGSL = (corner: number): string => `let corner${corner}=dryLatticeFind(key${corner},hash${corner},bucket${corner},low${corner},high${corner},buckets,stamp);
-  if(corner${corner}.z!=0u){let packed=vec4u(corner${corner}.xy,0u,0u);latticeVisibility0+=dryPrepassUnpack0(packed)*weights[${corner}];latticeVisibility1+=dryPrepassUnpack1(packed)*weights[${corner}];latticeVisibility2+=dryPrepassUnpack2(packed)*weights[${corner}];latticeWeight+=weights[${corner}];}`;
+  // The four records are independent loads; a corner the key pass could not
+  // place, or whose march is not current, drops out.
+  const latticeCornerAccumulateWGSL = (corner: number): string => `if(slots[${corner}]!=DRY_LATTICE_CORNER_ABSENT){let corner${corner}=dryLatticeRecordsRead[2u*slots[${corner}]+1u];
+  if(corner${corner}.z==stamp){let packed=vec4u(corner${corner}.xy,0u,0u);latticeVisibility0+=dryPrepassUnpack0(packed)*weights[${corner}];latticeVisibility1+=dryPrepassUnpack1(packed)*weights[${corner}];latticeVisibility2+=dryPrepassUnpack2(packed)*weights[${corner}];latticeWeight+=weights[${corner}];}}`;
   const latticeVisibilityWGSL = latticeVisibility ? /* wgsl */ `${svoLatticeKeyWGSL}
 @group(1) @binding(${latticeKey.buckets}) var<storage,read_write> dryLatticeBuckets:array<atomic<u32>>;
 @group(1) @binding(${latticeKey.records}) var<storage,read_write> dryLatticeRecords:array<vec4u>;
 @group(1) @binding(${latticeKey.control}) var<storage,read_write> dryLatticeControl:array<atomic<u32>>;
-@group(${splitGroup}) @binding(${latticeLookup.buckets}) var<storage,read> dryLatticeBucketsRead:array<vec4u>;
+@group(1) @binding(${latticeKey.corners}) var<storage,read_write> dryLatticeCorners:array<vec4u>;
+@group(${splitGroup}) @binding(${latticeLookup.corners}) var<storage,read> dryLatticeCornersRead:array<vec4u>;
 @group(${splitGroup}) @binding(${latticeLookup.records}) var<storage,read> dryLatticeRecordsRead:array<vec4u>;
+const DRY_LATTICE_CORNER_ABSENT:u32=${latticeContract.cornerAbsent}u;
 var<workgroup> dryLatticeTile:array<vec4u,${latticeRow * (latticeTileHeight + 1)}>;
+var<workgroup> dryLatticeTileSlots:array<vec4u,${latticeTileWidth * latticeTileHeight}>;
 fn dryLatticeReceiverHit(coordinate:vec2i)->DryHit{
   var geometry=drySplitGeometryAt(coordinate);var opaqueIdentity=drySplitIdentityAt(coordinate);if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.silhouetteRefinement}u)!=0u){let seam=dryPrimarySeamSample(coordinate);if(seam.valid!=0u){geometry=seam.geometry;opaqueIdentity=vec4u(seam.identity,0u,0u);}}
   let opaqueMaterial=opaqueIdentity.x;if(!(geometry.w<DRY_MISS)){return missHit();}
@@ -3644,10 +3653,17 @@ fn dryLatticePixelCell(coordinate:vec2u,hit:DryHit)->SvoLatticeCell{
   loop{if(level>=${SVO_LATTICE_VISIBILITY_CONTRACT.maximumLevel}u||spacing>=${latticeSpacingPixels.toFixed(1)}){break;}spacing*=2.0;level+=1u;}
   return svoLatticeCell(ray[0]+ray[1]*hit.t,normal,hit.featureId&15u,level,dry.mapping.worldOrigin,dry.mapping.cellSize);
 }
-fn dryLatticePixelKey(coordinate:vec2i,dimensions:vec2u)->vec4u{
-  if(any(coordinate<vec2i(0))||any(coordinate>=vec2i(dimensions))){return vec4u(0u);}
-  let hit=dryLatticeReceiverHit(coordinate);if(!dryLatticeEligible(hit)){return vec4u(0u);}
-  return dryLatticePixelCell(vec2u(coordinate),hit).key;
+fn dryLatticePixelCellAt(coordinate:vec2i,dimensions:vec2u)->SvoLatticeCell{
+  if(any(coordinate<vec2i(0))||any(coordinate>=vec2i(dimensions))){return SvoLatticeCell(vec4u(0u),vec2f(0.0));}
+  let hit=dryLatticeReceiverHit(coordinate);if(!dryLatticeEligible(hit)){return SvoLatticeCell(vec4u(0u),vec2f(0.0));}
+  return dryLatticePixelCell(vec2u(coordinate),hit);
+}
+// Four 24-bit slots across three words: slot c occupies bits 24c..24c+23.
+fn dryLatticePackSlots(slots:vec4u)->vec3u{
+  return vec3u(slots.x|(slots.y<<24u),(slots.y>>8u)|(slots.z<<16u),(slots.z>>16u)|(slots.w<<8u));
+}
+fn dryLatticeUnpackSlots(words:vec3u)->vec4u{
+  return vec4u(words.x&0xffffffu,(words.x>>24u)|((words.y&0xffffu)<<8u),(words.y>>16u)|((words.z&0xffu)<<16u),words.z>>8u);
 }
 // Slot s lives in bucket s/8: its tag at word 16(s/8) + s%8, its use word eight later.
 fn dryLatticeTagWord(slot:u32)->u32{return 2u*slot-(slot&7u);}
@@ -3667,7 +3683,7 @@ fn dryLatticeAppend(slot:u32){
 // twice, which the store ages out; a pair full of this frame's keys, or a
 // request that keeps losing its claims, counts as overflow, which the host
 // reports as fatal.
-fn dryLatticeRequest(key:vec4u,frame:u32,stamp:u32){
+fn dryLatticeRequest(key:vec4u,frame:u32,stamp:u32)->u32{
   let hash=svoLatticeHash(key);let tag=svoLatticeTag(hash);let tagBits=(tag>>1u)&127u;let current=(frame<<8u)|tagBits;
   let buckets=arrayLength(&dryLatticeBuckets)/${SVO_LATTICE_VISIBILITY_CONTRACT.bucketWords}u;
   let first=svoLatticeBucket(hash,buckets,0u);let second=svoLatticeBucket(hash,buckets,1u);
@@ -3677,9 +3693,9 @@ fn dryLatticeRequest(key:vec4u,frame:u32,stamp:u32){
       let slot=select(second,first,way<${SVO_LATTICE_VISIBILITY_CONTRACT.bucketWays}u)*${SVO_LATTICE_VISIBILITY_CONTRACT.bucketWays}u+(way&7u);let word=dryLatticeTagWord(slot);
       let stamped=atomicLoad(&dryLatticeBuckets[word+8u]);let useFrame=stamped>>8u;
       if(atomicLoad(&dryLatticeBuckets[word])==tag&&all(dryLatticeRecords[2u*slot]==key)){
-        if(useFrame==frame){if((stamped&127u)==tagBits){return;}continue;}
+        if(useFrame==frame){if((stamped&127u)==tagBits){return slot;}continue;}
         let claim=atomicCompareExchangeWeak(&dryLatticeBuckets[word+8u],stamped,current);
-        if(claim.exchanged){if(dryLatticeRecords[2u*slot+1u].z!=stamp){dryLatticeRecords[2u*slot+1u].z=0u;dryLatticeAppend(slot);}return;}
+        if(claim.exchanged){if(dryLatticeRecords[2u*slot+1u].z!=stamp){dryLatticeRecords[2u*slot+1u].z=0u;dryLatticeAppend(slot);}return slot;}
         contended=true;break;
       }
       // Empty slots are the oldest; ties keep the first bucket.
@@ -3689,10 +3705,14 @@ fn dryLatticeRequest(key:vec4u,frame:u32,stamp:u32){
     if(victim==0xffffffffu){break;}
     let word=dryLatticeTagWord(victim);
     let claim=atomicCompareExchangeWeak(&dryLatticeBuckets[word+8u],victimUse,current|128u);
-    if(claim.exchanged){dryLatticeRecords[2u*victim]=key;dryLatticeRecords[2u*victim+1u]=vec4u(0u);atomicStore(&dryLatticeBuckets[word],tag);dryLatticeAppend(victim);return;}
-    if((claim.old_value>>8u)==frame&&(claim.old_value&127u)==tagBits){return;}
+    if(claim.exchanged){dryLatticeRecords[2u*victim]=key;dryLatticeRecords[2u*victim+1u]=vec4u(0u);atomicStore(&dryLatticeBuckets[word],tag);dryLatticeAppend(victim);return victim;}
+    // Another request claimed this victim this frame under the same tag bits:
+    // almost surely this key, but seven bits cannot prove it, and the corner
+    // record is read without a key check, so this pixel drops the corner.
+    if((claim.old_value>>8u)==frame&&(claim.old_value&127u)==tagBits){return DRY_LATTICE_CORNER_ABSENT;}
   }
   atomicAdd(&dryLatticeControl[${latticeContract.overflowWord}],1u);
+  return DRY_LATTICE_CORNER_ABSENT;
 }
 // Only the first pixel of a run within its tile, leftward or upward, requests
 // its cell's four corners. The minimum-row, minimum-column pixel of any key in
@@ -3701,42 +3721,50 @@ fn dryLatticeRequest(key:vec4u,frame:u32,stamp:u32){
 // tile's edge: that apron made the edge threads of every SIMD group derive two
 // or three keys, and a key straddling tiles is only requested again, which the
 // use word dedupes.
+//
+// Every pixel then records its corners' slots for the lighting pass. A pixel
+// that did not request walks back to the one that did: left while the left
+// key is its own, else up while the up key is, which is exactly the rule that
+// withheld its request, so the walk ends on a requester in the same tile.
 @compute @workgroup_size(${latticeTileWidth},${latticeTileHeight}) fn dryLatticeKeysMain(@builtin(global_invocation_id) globalId:vec3u,@builtin(local_invocation_id) localId:vec3u){
   let dimensions=textureDimensions(drySplitGeometryRead);let coordinate=vec2i(globalId.xy);
   // The stamp the lookup accepts is the one this pass requested under.
   if(all(globalId.xy==vec2u(0u))){dryLatticeRecords[arrayLength(&dryLatticeRecords)-1u]=vec4u(svoLatticeStamp(atomicLoad(&dryLatticeControl[${latticeContract.generationWord}]),uniforms.container.xyz),0u,0u,0u);}
-  let key=dryLatticePixelKey(coordinate,dimensions);dryLatticeTile[(localId.y+1u)*${latticeRow}u+localId.x+1u]=key;
+  let cell=dryLatticePixelCellAt(coordinate,dimensions);let key=cell.key;dryLatticeTile[(localId.y+1u)*${latticeRow}u+localId.x+1u]=key;
   if(localId.x==0u){dryLatticeTile[(localId.y+1u)*${latticeRow}u]=vec4u(0u);}
   if(localId.y==0u){dryLatticeTile[localId.x+1u]=vec4u(0u);}
   workgroupBarrier();
-  if(key.x==0u||all(dryLatticeTile[(localId.y+1u)*${latticeRow}u+localId.x]==key)||all(dryLatticeTile[localId.y*${latticeRow}u+localId.x+1u]==key)){return;}
-  // The worker advances the frame word after this pass; one is added so no frame is zero.
-  let frame=atomicLoad(&dryLatticeControl[${latticeContract.frameWord}])+1u;
-  let stamp=svoLatticeStamp(atomicLoad(&dryLatticeControl[${latticeContract.generationWord}]),uniforms.container.xyz);
-  for(var corner=0u;corner<4u;corner+=1u){dryLatticeRequest(svoLatticeCorner(key,corner),frame,stamp);}
-}
-fn dryLatticeBucketFind(key:vec4u,tag:u32,bucket:u32,low:vec4u,high:vec4u)->vec4u{
-  for(var way=0u;way<${SVO_LATTICE_VISIBILITY_CONTRACT.bucketWays}u;way+=1u){
-    if(select(high,low,way<4u)[way&3u]==tag){let slot=${SVO_LATTICE_VISIBILITY_CONTRACT.bucketWays}u*bucket+way;if(all(dryLatticeRecordsRead[2u*slot]==key)){return dryLatticeRecordsRead[2u*slot+1u];}}
+  let tileIndex=localId.y*${latticeTileWidth}u+localId.x;
+  if(key.x!=0u&&!all(dryLatticeTile[(localId.y+1u)*${latticeRow}u+localId.x]==key)&&!all(dryLatticeTile[localId.y*${latticeRow}u+localId.x+1u]==key)){
+    // The worker advances the frame word after this pass; one is added so no frame is zero.
+    let frame=atomicLoad(&dryLatticeControl[${latticeContract.frameWord}])+1u;
+    let stamp=svoLatticeStamp(atomicLoad(&dryLatticeControl[${latticeContract.generationWord}]),uniforms.container.xyz);
+    var slots=vec4u(0u);
+    for(var corner=0u;corner<4u;corner+=1u){slots[corner]=dryLatticeRequest(svoLatticeCorner(key,corner),frame,stamp);}
+    dryLatticeTileSlots[tileIndex]=vec4u(dryLatticePackSlots(slots),0u);
   }
-  return vec4u(0u);
+  workgroupBarrier();
+  if(key.x==0u||any(coordinate>=vec2i(dimensions))){return;}
+  var x=localId.x;var y=localId.y;
+  for(var walk=0u;walk<${latticeTileWidth + latticeTileHeight}u;walk+=1u){
+    if(all(dryLatticeTile[(y+1u)*${latticeRow}u+x]==key)){x-=1u;continue;}
+    if(all(dryLatticeTile[y*${latticeRow}u+x+1u]==key)){y-=1u;continue;}
+    break;
+  }
+  dryLatticeCorners[u32(coordinate.y)*dimensions.x+u32(coordinate.x)]=vec4u(dryLatticeTileSlots[y*${latticeTileWidth}u+x].xyz,pack2x16unorm(cell.fraction));
 }
-// A record counts only when it carries the current stamp, which the key pass
-// publishes after the records and which is never zero. A stale or invalid
-// record (the key pass zeroes a stale one before its march, an invalid march
-// stores zero) and one left from an earlier input generation all read as absent.
-fn dryLatticeFind(key:vec4u,hash:u32,first:u32,low:vec4u,high:vec4u,buckets:u32,stamp:u32)->vec4u{
-  let tag=svoLatticeTag(hash);let found=dryLatticeBucketFind(key,tag,first,low,high);if(found.z==stamp){return found;}
-  let second=svoLatticeBucket(hash,buckets,1u);let other=dryLatticeBucketFind(key,tag,second,dryLatticeBucketsRead[4u*second],dryLatticeBucketsRead[4u*second+1u]);
-  return select(vec4u(0u),other,other.z==stamp);
-}
-// Bilinear over the pixel's four lattice corners. A missing, overflowed or
+// Bilinear over the pixel's four lattice corners, read from the slots the key
+// pass recorded for this pixel this frame. A record counts only when it
+// carries the current stamp, which the key pass publishes after the records
+// and which is never zero: a stale or invalid record (the key pass zeroes a
+// stale one before its march, an invalid march stores zero) and one left from
+// an earlier input generation all read as absent. A missing, overflowed or
 // invalid corner drops out and the rest renormalise; with too little left,
 // the pixel takes the existing exact edge tier and its live cone closures.
 fn dryLatticeResolve(coordinate:vec2u,hit:DryHit){
-  let cell=dryLatticePixelCell(coordinate,hit);let buckets=arrayLength(&dryLatticeBucketsRead)/${SVO_LATTICE_VISIBILITY_CONTRACT.bucketWords / 4}u;let stamp=dryLatticeRecordsRead[arrayLength(&dryLatticeRecordsRead)-1u].x;
-  ${[0, 1, 2, 3].map(latticeCornerLoadWGSL).join("\n  ")}
-  let fraction=cell.fraction;let weights=vec4f((1.0-fraction.x)*(1.0-fraction.y),fraction.x*(1.0-fraction.y),(1.0-fraction.x)*fraction.y,fraction.x*fraction.y);
+  let dimensions=textureDimensions(drySplitGeometryRead);let corners=dryLatticeCornersRead[coordinate.y*dimensions.x+coordinate.x];
+  let slots=dryLatticeUnpackSlots(corners.xyz);let stamp=dryLatticeRecordsRead[arrayLength(&dryLatticeRecordsRead)-1u].x;
+  let fraction=unpack2x16unorm(corners.w);let weights=vec4f((1.0-fraction.x)*(1.0-fraction.y),fraction.x*(1.0-fraction.y),(1.0-fraction.x)*fraction.y,fraction.x*fraction.y);
   var latticeVisibility0=vec4f(0.0);var latticeVisibility1=vec4f(0.0);var latticeVisibility2=vec4f(0.0);var latticeWeight=0.0;
   ${[0, 1, 2, 3].map(latticeCornerAccumulateWGSL).join("\n  ")}
   if(latticeWeight<${SVO_DRY_CONE_PREPASS_CONTRACT.minimumReconstructionWeight}){dryPrepassExactEdgeState=1u;return;}
@@ -3906,7 +3934,7 @@ fn dryWorldGiInsert(key:DryWorldGiCacheKey,slot:u32,claimState:u32,value:DryGlob
 }
 fn dryWorldGiBodyInfluence(position:vec3f,ignoredBodyOwner:u32)->DryWorldGiBodyInfluence{
   let minimumVoxel=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));
-  let bodyCount=min(u32(round(max(uniforms.options.z,0.0))),12u);
+  let bodyCount=${experiments.rigidBodiesAbsent ? "0u" : "min(u32(round(max(uniforms.options.z,0.0))),12u)"};
   var bodyMask=0u;var movingMask=0u;var signature=0x4f1bbcdcu;
   for(var bodyIndex=0u;bodyIndex<12u;bodyIndex+=1u){
     if(bodyIndex>=bodyCount){break;}if(bodyIndex==ignoredBodyOwner){continue;}let body=bodies[bodyIndex];
@@ -3926,7 +3954,7 @@ fn dryWorldGiBodyInfluence(position:vec3f,ignoredBodyOwner:u32)->DryWorldGiBodyI
 ` : "";
   const worldGiCacheEntryWGSL = reduced && split ? /* wgsl */ `
 @compute @workgroup_size(1) fn dryWorldGiFrameMain(){
-  let bodyCount=min(u32(round(max(uniforms.options.z,0.0))),12u);
+  let bodyCount=${experiments.rigidBodiesAbsent ? "0u" : "min(u32(round(max(uniforms.options.z,0.0))),12u)"};
   var signature=dryWorldGiHashAdd(0x27d4eb2du,bodyCount);var movingBodyCount=0u;
   for(var bodyIndex=0u;bodyIndex<12u;bodyIndex+=1u){
     if(bodyIndex>=bodyCount){break;}let body=bodies[bodyIndex];let motion=rigidMotion[bodyIndex];
@@ -4557,7 +4585,7 @@ fn bodyBoundingSphereVisible(ro:vec3f,rd:vec3f,body:BodyGPU,tMin:f32,tMax:f32)->
 }
 
 fn nearestBodyMaskIgnoring(ro:vec3f,rd:vec3f,ignoredOwner:u32,bodyMask:u32)->DryHit {
-  var best=missHit(); for(var index=0u;index<12u;index+=1u){if(index>=u32(round(uniforms.options.z))){break;}if(index==ignoredOwner||(bodyMask&(1u<<index))==0u){continue;}let body=bodies[index];if(!bodyBoundingSphereVisible(ro,rd,body,0.0,best.t)){continue;}let shape=i32(round(body.halfSizeShape.w));if(shape>=2&&!bodyCandidateVisible(ro,rd,body,0.0,best.t)){continue;}let hit=bodyHit(ro,rd,body);if(hit.t<best.t){best=hit;best.materialId=0x80000000u|index;best.ownerId=index;}} return best;
+  ${experiments.rigidBodiesAbsent ? "return missHit();" : ""}var best=missHit(); for(var index=0u;index<12u;index+=1u){if(index>=u32(round(uniforms.options.z))){break;}if(index==ignoredOwner||(bodyMask&(1u<<index))==0u){continue;}let body=bodies[index];if(!bodyBoundingSphereVisible(ro,rd,body,0.0,best.t)){continue;}let shape=i32(round(body.halfSizeShape.w));if(shape>=2&&!bodyCandidateVisible(ro,rd,body,0.0,best.t)){continue;}let hit=bodyHit(ro,rd,body);if(hit.t<best.t){best=hit;best.materialId=0x80000000u|index;best.ownerId=index;}} return best;
 }
 fn nearestBodyIgnoring(ro:vec3f,rd:vec3f,ignoredOwner:u32)->DryHit{return nearestBodyMaskIgnoring(ro,rd,ignoredOwner,0xffffffffu);}
 ${prepassBodyBlockerWGSL}
@@ -4963,7 +4991,7 @@ fn svoVisibilityNext(ray:SvoVisibilityRay,tMin_m:f32,remaining:SvoVisibilityBudg
   if(dryPublicationWord(0u)==0u||(dryPublicationWord(1u)&REQUIRED_FIELDS)!=REQUIRED_FIELDS){dryVisibilityStepInvalidReason=1u;return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,0u,DRY_MISS);}
   var nodeVisits=0u;var leafVisits=0u;var workItems=0u;var bestT=ray.tMax_m;var found=false;
 
-  let bodyCount=min(u32(round(max(uniforms.options.z,0.0))),12u);
+  let bodyCount=${experiments.rigidBodiesAbsent ? "0u" : "min(u32(round(max(uniforms.options.z,0.0))),12u)"};
   for(var bodyIndex=0u;bodyIndex<12u;bodyIndex+=1u){
     if(bodyIndex>=bodyCount){break;}if(bodyIndex==dryVisibilityIgnoredBody){continue;}if(workItems>=remaining.workItems){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,nodeVisits,leafVisits,workItems,DRY_MISS);}workItems+=1u;
     let body=bodies[bodyIndex];if(!bodyBoundingSphereVisible(ray.origin_m,ray.direction,body,tMin_m,bestT)){continue;}let shape=i32(round(body.halfSizeShape.w));if(shape>=2&&!bodyCandidateVisible(ray.origin_m,ray.direction,body,tMin_m,bestT)){continue;}let candidate=bodyHit(ray.origin_m,ray.direction,body);if(candidate.t>=tMin_m&&candidate.t<bestT){bestT=candidate.t;found=true;}
@@ -5406,8 +5434,8 @@ fn shadeDryOpaque(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f {
   // configured emitters, while the sample-count selection below still limits
   // GLOBAL shading to one exact visibility sample per light.
   let lightCount=min(dryLighting.metadata.x,min(dry.tuningCounts0.z,${SVO_LIGHT_MAXIMUM_RECORDS}u));
-  for(var lightIndex=0u;lightIndex<${fastDeferred ? 1 : SVO_DRY_SCENE_MAX_SHADED_LIGHTS}u;lightIndex+=1u){
-    if(lightIndex>=lightCount||sampleBudget>=dry.tuningCounts0.z){break;}${prepassLightSlotWGSL}${fastDeferred ? "var light=dryLighting.lights[lightIndex];light.identity.x=SVO_LIGHT_DIRECTIONAL;" : "let light=dryLighting.lights[lightIndex];"}if(light.identity.w!=dryLighting.metadata.y){continue;}let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA||light.identity.x==SVO_LIGHT_SPOT;let sampleCount=${fastDeferred ? "1u" : "select(select(1u,max(dry.tuningCounts1.x,dry.tuningCounts0.w),area),1u,globalIllumination)"};
+  for(var lightIndex=0u;lightIndex<${SVO_DRY_SCENE_MAX_SHADED_LIGHTS}u;lightIndex+=1u){
+    if(lightIndex>=lightCount||sampleBudget>=dry.tuningCounts0.z){break;}${prepassLightSlotWGSL}let light=dryLighting.lights[lightIndex];if(light.identity.w!=dryLighting.metadata.y){continue;}let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA||light.identity.x==SVO_LIGHT_SPOT;let sampleCount=select(select(1u,max(dry.tuningCounts1.x,dry.tuningCounts0.w),area),1u,globalIllumination);
     for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u;sampleIndex+=1u){if(sampleIndex>=sampleCount||sampleBudget>=dry.tuningCounts0.z){break;}sampleBudget+=1u;let sample=dryLightSample(light,sampleIndex,position);if(sample.valid==0u||dot(hit.normal,sample.towardLight)<=0.0){continue;}let visibility=dryLightVisibility(position,geometricNormal,hit.ownerId,sample.towardLight,sample.finiteDistance_m);let lighting=unifiedLightingInputWithGeometry(hit.normal,hit.normal,-rd,sample.towardLight,sample.radiance*visibility/f32(sampleCount));direct+=shadeUnifiedSurface(directClosure,lighting);}
   }
   let viewDirection=normalize(-rd);let reflected=reflect(rd,hit.normal);let diffuseColor=surface.baseColor*(1.0-surface.metallic);let f0=mix(surface.specularF0*surface.specularWeight,surface.baseColor,surface.metallic);let environmentBrdf=unifiedEnvironmentBrdf(max(dot(hit.normal,viewDirection),0.0),surface.roughness,f0);let diffuseEnergy=max(vec3f(0.0),vec3f(1.0)-environmentBrdf);let contactVisibility=dryContactVisibility(position,geometricNormal,hit.featureId,hit.ownerId);let ignoredBodyOwner=select(DRY_OWNER_NONE,hit.ownerId,hit.motionKind==DRY_GBUFFER_MOTION_RIGID);let gi=dryGlobalIlluminationFaced(position,hit.normal,geometricNormal,ignoredBodyOwner);let diffuseVisibility=dryDiffuseMultiBounceVisibility(gi.visibility,diffuseColor);let diffuseEnvironmentScale=select(1.0,dry.giLighting.z,globalIllumination);let directScale=dry.giLighting.w;let diffuseEnvironment=diffuseColor*diffuseEnergy*svoEnvironmentDiffuseIrradiance(dryLighting.environment,hit.normal)*contactVisibility*diffuseVisibility*diffuseEnvironmentScale/UNIFIED_PI;let specularEnvironment=dryEnvironment(reflected,surface.roughness)*environmentBrdf;let indirectDiffuse=diffuseColor*gi.radiance;

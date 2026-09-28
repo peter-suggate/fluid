@@ -1,4 +1,4 @@
-import { canUseOpaqueDirectionalCones } from "../features/shading/deferred-specialization";
+import { canUseOpaqueConeLighting } from "../features/shading/deferred-specialization";
 import type { SceneDescription } from "../../core/model";
 import {
 PLANAR_BOUNDARY_PATCH_BYTES
@@ -1002,6 +1002,8 @@ interface SvoDrySplitPipelineBundle {
   readonly lattice: boolean;
   /** Whether the backdrop terrain hooks were compiled in (false only for a world without one). */
   readonly backdropTerrain: boolean;
+  /** Whether the rigid-body loops were compiled in (false only for a frame without bodies). */
+  readonly rigidBodies: boolean;
   readonly latticeKeys?: GPUComputePipeline;
 }
 
@@ -1044,6 +1046,8 @@ export class SparseVoxelDrySceneRenderer {
   private disabledStages: DisabledRenderStages = NO_DISABLED_RENDER_STAGES;
   /** Last body count the host published; picking reads identity only when it is nonzero. */
   private rigidBodyCount = 0;
+  /** Until the host publishes a count the body-capable kernel is the one requested. */
+  private rigidBodyCountPublished = false;
   /** Whether an inspection overlay reads this frame's packed-surface and identity-media planes. */
   private identityPlanesInspected = false;
   private voxelLightDemandPipeline?: GPUComputePipeline;
@@ -1088,6 +1092,8 @@ export class SparseVoxelDrySceneRenderer {
   private latticeKeySplitBindGroup?: GPUBindGroup;
   private latticeWorkerBindGroup?: GPUBindGroup;
   private latticeBuckets?: GPUBuffer;
+  /** This frame's corner slots per full-resolution pixel, written by the key pass. */
+  private latticeCorners?: GPUBuffer;
   private latticeRecords?: GPUBuffer;
   private latticeControl?: GPUBuffer;
   private latticePlaceholder?: GPUBuffer;
@@ -1110,6 +1116,8 @@ export class SparseVoxelDrySceneRenderer {
   private splitPipelineLattice = false;
   /** Whether the active split bundle compiled the backdrop terrain hooks; see backdropTerrainRequested. */
   private splitPipelineBackdropTerrain = true;
+  /** Whether the active split bundle compiled the rigid-body loops; see rigidBodiesRequested. */
+  private splitPipelineRigidBodies = true;
   private splitPipelineScale?: SvoConeLightingScale;
   /**
    * Keyed by scale AND global-illumination capability: the GI-off kernel is a
@@ -1712,6 +1720,7 @@ export class SparseVoxelDrySceneRenderer {
     this.latticeKeyPipeline = bundle.latticeKeys;
     this.splitPipelineLattice = bundle.lattice;
     this.splitPipelineBackdropTerrain = bundle.backdropTerrain;
+    this.splitPipelineRigidBodies = bundle.rigidBodies;
     this.splitPipelineScale = scale;
     if (this.requestedBundleFailure?.scale === scale) this.requestedBundleFailure = undefined;
     this.requestedBundleResourceFailure = undefined;
@@ -1730,7 +1739,10 @@ export class SparseVoxelDrySceneRenderer {
    * for body stacks. Body motion never changes this choice or recompiles WGSL.
    */
   setRigidBodyCount(bodyCount: number, bounds?: SvoDryRigidBounds): void {
+    const rigidBodiesBefore = this.rigidBodiesRequested();
     this.rigidBodyCount = bodyCount;
+    this.rigidBodyCountPublished = true;
+    if (this.shadingPath === "split" && rigidBodiesBefore !== this.rigidBodiesRequested()) this.requestSpecializedSplitVariant();
     // Shadow and contact rays consult one sphere around the whole set before
     // they read a body, so it is republished whenever bodies move even though
     // the count has not changed. An empty scene publishes a negative radius,
@@ -3269,21 +3281,26 @@ export class SparseVoxelDrySceneRenderer {
     const globalIlluminationCapable = this.lightingOptions.globalIlluminationEnabled === true;
     const lattice = this.latticeVisibilityRequested(scale, globalIlluminationCapable);
     const backdropTerrain = this.backdropTerrainRequested();
-    const variantKey = this.splitVariantKey(scale, globalIlluminationCapable, lattice, backdropTerrain);
+    const rigidBodies = this.rigidBodiesRequested();
+    const variantKey = this.splitVariantKey(scale, globalIlluminationCapable, lattice, backdropTerrain, rigidBodies);
     const variantCurrent = () => scale === this.coneScale
       && globalIlluminationCapable === (this.lightingOptions.globalIlluminationEnabled === true)
       && lattice === this.latticeVisibilityRequested(scale, globalIlluminationCapable)
-      && backdropTerrain === this.backdropTerrainRequested();
+      && backdropTerrain === this.backdropTerrainRequested()
+      && rigidBodies === this.rigidBodiesRequested();
     const cached = this.splitPipelineBundles.get(variantKey);
     if (cached) {
       if (variantCurrent()) this.activateSplitPipelineBundle(scale, cached);
       return;
     }
-    // The hooked kernel shades a backdrop-free world exactly, so while the
-    // hookless one compiles it presents in its place (status stays compiling).
-    const hooked = backdropTerrain ? undefined
-      : this.splitPipelineBundles.get(this.splitVariantKey(scale, globalIlluminationCapable, lattice, true));
-    if (hooked && variantCurrent()) this.activateSplitPipelineBundle(scale, hooked);
+    // A kernel with the hooks or body loops compiled in shades a world without
+    // them exactly, so while the specialised one compiles the nearest such
+    // superset presents in its place (status stays compiling).
+    const superset = [[backdropTerrain, true], [true, rigidBodies], [true, true]]
+      .filter(([backdrop, bodies]) => backdrop !== backdropTerrain || bodies !== rigidBodies)
+      .map(([backdrop, bodies]) => this.splitPipelineBundles.get(this.splitVariantKey(scale, globalIlluminationCapable, lattice, backdrop, bodies)))
+      .find((bundle) => bundle !== undefined);
+    if (superset && variantCurrent()) this.activateSplitPipelineBundle(scale, superset);
     const pending = this.splitPipelineCompiles.get(variantKey);
     if (pending) {
       const bundle = await pending;
@@ -3420,9 +3437,14 @@ export class SparseVoxelDrySceneRenderer {
     // And a world without backdrop terrain compiles the terrain hooks out:
     // dense payloads always carry the table, so gating on payload mode alone
     // priced them into every floor-only scene.
-    const shaderExperimentsSpecialized = backdropTerrain
+    const shaderExperimentsBackdrop = backdropTerrain
       ? shaderExperimentsGi
       : { ...shaderExperimentsGi, backdropTerrainAbsent: true };
+    // And a frame without rigid bodies compiles their loops out: the body
+    // count is a uniform, so the loops priced every deferred pixel's registers.
+    const shaderExperimentsSpecialized = rigidBodies
+      ? shaderExperimentsBackdrop
+      : { ...shaderExperimentsBackdrop, rigidBodiesAbsent: true };
     // Likewise a lookup variant, not a branch: the lattice arm is priced
     // without the screen resolve and its edge-recovery rings compiled in.
     const shaderExperiments = lattice
@@ -3802,12 +3824,12 @@ export class SparseVoxelDrySceneRenderer {
       // the same draw, with no asynchronous capability transition.
       let optimizedLighting: GPURenderPipeline | undefined;
       if (scale !== 1 && !globalIlluminationCapable && this.experiments.specializedDeferredLighting) {
-        const optimizedModule = await checkedModule(this.device, "Opaque directional cone deferred lighting",
+        const optimizedModule = await checkedModule(this.device, "Opaque cone deferred lighting",
           createSvoDrySceneFragmentWGSL(scale, this.traversalMode, this.brickOccupancyMode, "split",
             this.screenSpaceTerminationPixels, false, false,
-            this.coneFanout, { ...shaderExperiments, opaqueDirectionalCones: true }));
+            this.coneFanout, { ...shaderExperiments, opaqueConeLighting: true }));
         optimizedLighting = await this.device.createRenderPipelineAsync({
-          label: "Opaque directional cone deferred lighting",
+          label: "Opaque cone deferred lighting",
           layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout, ...middleLayouts, this.splitLightingLayout!, ...cacheConsumerLayouts] }),
           vertex: { module: vertexModule, entryPoint: "vertexMain" },
           fragment: { module: optimizedModule, entryPoint: "dryLightingMain", targets: [{ format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.externalRadianceDepthFormat }] },
@@ -3827,7 +3849,7 @@ export class SparseVoxelDrySceneRenderer {
         brickBackground, brickRaster, brickCoverage, brickCoverageResolve, brickLodResolve, brickExactResolve,
         brickCoverageOverflow, scenePrimitiveRaster,
         scenePrimitiveCoverage, scenePrimitiveLodResolve, scenePrimitiveComputeArgs, scenePrimitiveComputeResolve, scenePrimitiveDepthBridge,
-        scenePrimitiveCoverageResolve, scenePrimitiveCoverageOverflow, lattice, backdropTerrain, latticeKeys };
+        scenePrimitiveCoverageResolve, scenePrimitiveCoverageOverflow, lattice, backdropTerrain, rigidBodies, latticeKeys };
       this.splitPipelineBundles.set(variantKey, bundle);
       return bundle;
     })();
@@ -3842,15 +3864,16 @@ export class SparseVoxelDrySceneRenderer {
     }
   }
 
-  /** The split-bundle cache key: cone scale plus the GI, visibility-source and backdrop variants the kernel was compiled with. */
-  private splitVariantKey(scale: SvoConeLightingScale, globalIlluminationCapable: boolean, lattice: boolean, backdropTerrain: boolean): string {
-    return `${scale}|${globalIlluminationCapable ? "gi" : "no-gi"}|${lattice ? "lattice" : "screen"}|${backdropTerrain ? "backdrop" : "no-backdrop"}`;
+  /** The split-bundle cache key: cone scale plus the GI, visibility-source, backdrop and rigid-body variants the kernel was compiled with. */
+  private splitVariantKey(scale: SvoConeLightingScale, globalIlluminationCapable: boolean, lattice: boolean, backdropTerrain: boolean,
+    rigidBodies: boolean): string {
+    return `${scale}|${globalIlluminationCapable ? "gi" : "no-gi"}|${lattice ? "lattice" : "screen"}|${backdropTerrain ? "backdrop" : "no-backdrop"}|${rigidBodies ? "bodies" : "no-bodies"}`;
   }
 
   private currentSplitVariantKey(scale: SvoConeLightingScale): string {
     const globalIlluminationCapable = this.lightingOptions.globalIlluminationEnabled === true;
     return this.splitVariantKey(scale, globalIlluminationCapable, this.latticeVisibilityRequested(scale, globalIlluminationCapable),
-      this.backdropTerrainRequested());
+      this.backdropTerrainRequested(), this.rigidBodiesRequested());
   }
 
   /**
@@ -3864,8 +3887,17 @@ export class SparseVoxelDrySceneRenderer {
     return !this.scene || this.scene.groundPlane?.backdropContentRadius_m !== undefined;
   }
 
-  /** A published scene gained or lost its backdrop: activate or compile the matching split variant. */
-  private requestBackdropSplitVariant(): void {
+  /**
+   * Whether the split kernel must carry the rigid-body loops: until the host
+   * publishes a count, and whenever that count is nonzero. The body-capable
+   * kernel is correct for every frame, the bodiless one only without bodies.
+   */
+  private rigidBodiesRequested(): boolean {
+    return !this.rigidBodyCountPublished || this.rigidBodyCount > 0;
+  }
+
+  /** A published scene gained or lost its backdrop, or the frame its bodies: activate or compile the matching split variant. */
+  private requestSpecializedSplitVariant(): void {
     if (!this.layout || !this.vertexModule) return;
     const scale = this.coneScale;
     const cached = this.splitPipelineBundles.get(this.currentSplitVariantKey(scale));
@@ -4063,7 +4095,7 @@ export class SparseVoxelDrySceneRenderer {
       { binding: 5, resource: this.splitOpaqueIdentityView },
       ...(this.rasterPrimary ? [{ binding: 6, resource: this.splitLodKeyView! }] : []),
     ];
-    const lookup = (buckets?: GPUBuffer, records?: GPUBuffer): GPUBindGroupEntry[] => {
+    const lookup = (corners?: GPUBuffer, records?: GPUBuffer): GPUBindGroupEntry[] => {
       if (!this.latticeCapable) return [];
       this.latticePlaceholder ??= this.device.createBuffer({
         label: "Sparse voxel lattice visibility placeholder",
@@ -4072,14 +4104,14 @@ export class SparseVoxelDrySceneRenderer {
       });
       const bindings = SVO_LATTICE_VISIBILITY_CONTRACT.lookupBindings;
       return [
-        { binding: bindings.buckets, resource: { buffer: buckets ?? this.latticePlaceholder } },
+        { binding: bindings.corners, resource: { buffer: corners ?? this.latticePlaceholder } },
         { binding: bindings.records, resource: { buffer: records ?? this.latticePlaceholder } },
       ];
     };
     this.splitLightingBindGroup = this.device.createBindGroup({
       label: "Sparse voxel split lighting input bindings",
       layout: this.splitLightingLayout,
-      entries: [...inputs, ...lookup(this.latticeBuckets, this.latticeRecords)],
+      entries: [...inputs, ...lookup(this.latticeCorners, this.latticeRecords)],
     });
     this.latticeKeySplitBindGroup = this.latticeCapable ? this.device.createBindGroup({
       label: "Sparse voxel lattice visibility key inputs",
@@ -4093,16 +4125,29 @@ export class SparseVoxelDrySceneRenderer {
    * from the reduced prepass texel count that bounds one frame's keys. A new
    * store starts cold: zeroed buckets are empty and zeroed records unstamped.
    * It survives everything but a prepass resize or leaving the lattice bundle.
+   * The per-pixel corners are frame-transient and follow the target size alone.
    */
   private ensureLatticeTargets(): void {
-    if (!this.splitPipelineLattice || !this.conePrepassWidth || !this.conePrepassHeight
+    if (!this.splitPipelineLattice || !this.conePrepassWidth || !this.conePrepassHeight || !this.targetWidth || !this.targetHeight
       || !this.coneFanoutFrameBuffer || !this.latticeKeyLayout || !this.latticeWorkerLayout) return;
     const contract = SVO_LATTICE_VISIBILITY_CONTRACT;
     const { buckets, slots } = svoLatticeVisibilitySizing(this.conePrepassWidth * this.conePrepassHeight,
       Math.min(this.device.limits.maxStorageBufferBindingSize, this.device.limits.maxBufferSize));
     const bucketBytes = 4 * contract.bucketWords * buckets;
-    if (this.latticeBuckets?.size === bucketBytes && this.latticeRecords && this.latticeControl) return;
+    const cornerBytes = contract.cornerBytes * this.targetWidth * this.targetHeight;
+    if (cornerBytes > Math.min(this.device.limits.maxStorageBufferBindingSize, this.device.limits.maxBufferSize)) {
+      throw new RangeError("Lattice visibility corners exceed the storage-binding limit");
+    }
+    if (this.latticeBuckets?.size === bucketBytes && this.latticeRecords && this.latticeControl
+      && this.latticeCorners?.size === cornerBytes) return;
+    if (this.latticeBuckets?.size === bucketBytes && this.latticeRecords && this.latticeControl) {
+      this.latticeCorners?.destroy();
+      this.latticeCorners = this.device.createBuffer({ label: "Sparse voxel lattice visibility corners", size: cornerBytes, usage: GPUBufferUsage.STORAGE });
+      this.rebuildLatticeStoreBindGroups();
+      return;
+    }
     this.releaseLatticeBuffers();
+    this.latticeCorners = this.device.createBuffer({ label: "Sparse voxel lattice visibility corners", size: cornerBytes, usage: GPUBufferUsage.STORAGE });
     this.latticeBuckets = this.device.createBuffer({
       label: "Sparse voxel lattice visibility buckets",
       size: bucketBytes,
@@ -4125,15 +4170,6 @@ export class SparseVoxelDrySceneRenderer {
     });
     this.latticeGenerationWritten = 0;
     this.latticeStoreFailure = undefined;
-    this.latticeKeyBindGroup = this.device.createBindGroup({
-      label: "Sparse voxel lattice visibility store",
-      layout: this.latticeKeyLayout,
-      entries: [
-        { binding: contract.keyBindings.buckets, resource: { buffer: this.latticeBuckets } },
-        { binding: contract.keyBindings.records, resource: { buffer: this.latticeRecords } },
-        { binding: contract.keyBindings.control, resource: { buffer: this.latticeControl } },
-      ],
-    });
     this.latticeWorkerBindGroup = this.device.createBindGroup({
       label: "Sparse voxel lattice visibility worker resources",
       layout: this.latticeWorkerLayout,
@@ -4143,16 +4179,34 @@ export class SparseVoxelDrySceneRenderer {
         { binding: 5, resource: { buffer: this.latticeControl } },
       ],
     });
+    this.rebuildLatticeStoreBindGroups();
+  }
+
+  /** The key pass's store group and the lighting lookup, both of which name the corners. */
+  private rebuildLatticeStoreBindGroups(): void {
+    const contract = SVO_LATTICE_VISIBILITY_CONTRACT;
+    this.latticeKeyBindGroup = this.device.createBindGroup({
+      label: "Sparse voxel lattice visibility store",
+      layout: this.latticeKeyLayout!,
+      entries: [
+        { binding: contract.keyBindings.buckets, resource: { buffer: this.latticeBuckets! } },
+        { binding: contract.keyBindings.records, resource: { buffer: this.latticeRecords! } },
+        { binding: contract.keyBindings.control, resource: { buffer: this.latticeControl! } },
+        { binding: contract.keyBindings.corners, resource: { buffer: this.latticeCorners! } },
+      ],
+    });
     this.rebuildSplitLightingBindGroups();
   }
 
   private releaseLatticeBuffers(): void {
     this.latticeBuckets?.destroy();
+    this.latticeCorners?.destroy();
     this.latticeRecords?.destroy();
     this.latticeControl?.destroy();
     // A pending map on the staging buffer rejects on destroy; its handler only clears the flag.
     this.latticeOverflowStaging?.destroy();
     this.latticeBuckets = undefined;
+    this.latticeCorners = undefined;
     this.latticeRecords = undefined;
     this.latticeControl = undefined;
     this.latticeOverflowStaging = undefined;
@@ -4282,6 +4336,9 @@ export class SparseVoxelDrySceneRenderer {
     const status = this.requestedBundleStatus();
     if (status.state === "ready" && this.shadingPath === "split" && this.splitPipelineBackdropTerrain !== this.backdropTerrainRequested()) {
       return { state: "compiling", detail: `Compiling the ${this.backdropTerrainRequested() ? "backdrop" : "backdrop-free"} SVO split bundle` };
+    }
+    if (status.state === "ready" && this.shadingPath === "split" && this.splitPipelineRigidBodies !== this.rigidBodiesRequested()) {
+      return { state: "compiling", detail: `Compiling the ${this.rigidBodiesRequested() ? "rigid-body" : "body-free"} SVO split bundle` };
     }
     return status;
   }
@@ -4836,7 +4893,7 @@ export class SparseVoxelDrySceneRenderer {
     const backdropTerrainBefore = this.backdropTerrainRequested();
     this.scene = scene;
     this.primitiveCount = primitiveArena.primitiveCount;
-    if (this.shadingPath === "split" && backdropTerrainBefore !== this.backdropTerrainRequested()) this.requestBackdropSplitVariant();
+    if (this.shadingPath === "split" && backdropTerrainBefore !== this.backdropTerrainRequested()) this.requestSpecializedSplitVariant();
     this.writeScenePrimitiveOverflowPublication();
     this.primitiveCandidateArena = primitiveArena;
     this.ensureVoxelLightCache(source, scene);
@@ -5558,6 +5615,7 @@ export class SparseVoxelDrySceneRenderer {
     this.targetHeight = height;
     this.ensureConePrepassTargets();
     this.ensureSplitTargets();
+    if (this.splitPipelineLattice) this.ensureLatticeTargets();
   }
 
   /** Heatmap counters are invocation-private, so diagnostics intentionally retain the inline path. */
@@ -5980,6 +6038,8 @@ export class SparseVoxelDrySceneRenderer {
     // only slower, so it keeps presenting while the hookless one compiles; the
     // reverse would drop the terrain, so that frame is rejected.
     if (this.shadingPath === "split" && !this.splitPipelineBackdropTerrain && this.backdropTerrainRequested()) return false;
+    // Likewise a bodiless kernel would drop the bodies' shadows and contact.
+    if (this.shadingPath === "split" && !this.splitPipelineRigidBodies && this.rigidBodiesRequested()) return false;
     const usePrepass = this.coneScale !== 1 && this.conePipelineScale === this.coneScale
       && Boolean(this.conePrepassGeometryPipeline && this.conePrepassVisibilityPipeline
         && this.conePrepassShadePipeline && this.coneReducedPipeline
@@ -6032,7 +6092,7 @@ export class SparseVoxelDrySceneRenderer {
           // The active bundle's kernels read the store, so a lattice bundle
           // without its passes and table fails closed like any missing input.
           && (!this.splitPipelineLattice || (this.latticeKeyPipeline && this.latticeWorkerPipeline
-            && this.latticeBuckets && this.latticeControl
+            && this.latticeBuckets && this.latticeCorners && this.latticeControl
             && this.latticeKeyBindGroup && this.latticeKeySplitBindGroup && this.latticeWorkerBindGroup))))
         && (!this.rasterPrimary || (this.splitLodKeyView && this.splitLodDepthView))
         && (!this.rasterRigidActive || (this.rasterRigidPipeline && this.rasterRigidBridgePipeline
@@ -6428,7 +6488,7 @@ export class SparseVoxelDrySceneRenderer {
           lighting.draw(3);
         }
         lighting.setPipeline(this.splitOptimizedLightingPipeline && usePrepass
-          && canUseOpaqueDirectionalCones(this.scene, {
+          && canUseOpaqueConeLighting(this.scene, {
             coneMode: this.lightingOptions.coneTracingMode ?? "cones",
             hierarchyReady: this.derivedLightingReady(),
             globalIllumination: this.lightingOptions.globalIlluminationEnabled === true,

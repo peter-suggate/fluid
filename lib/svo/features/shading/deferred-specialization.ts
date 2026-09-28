@@ -4,7 +4,6 @@ import { materialIdForRigidShape, VOXEL_MATERIAL_IDS } from "../../../core/voxel
 import type { SparseVoxelDrySceneData } from "../../contracts/scene-publication";
 import { SVO_MATERIAL_FLAGS, SVO_MATERIAL_RECORD_WORDS } from "../../contracts/svo-material-abi";
 import { SVO_PRIMITIVE_RECORD_STRIDE_BYTES } from "../../contracts/svo-primitive-abi";
-import { SVO_LIGHT_KINDS, SVO_LIGHT_RECORD_STRIDE_BYTES } from "../../contracts/svo-light-abi";
 
 const solidMaterials = new WeakMap<SolidWorld, ReadonlySet<number>>();
 
@@ -40,14 +39,14 @@ export function publishOpaqueSurfaceCapability(
 }
 
 /** Evaluated at draw time: a previously compiled specialized pipeline is never
- * evidence that a newly published scene or currently available hierarchy fits. */
-export function canUseOpaqueDirectionalCones(
+ * evidence that a newly published scene or currently available hierarchy fits.
+ * The kernel is layout-general over lights: it keeps the generic light loop and
+ * compiles out only the exact-trace escape, which cone mode never takes. */
+export function canUseOpaqueConeLighting(
   scene: SparseVoxelDrySceneData | undefined,
   options: { coneMode: string; hierarchyReady: boolean; globalIllumination: boolean; reconstruction: string },
 ): boolean {
   return scene?.opaqueSurfaceOnly === true
-    && scene.lightRecords?.byteLength === SVO_LIGHT_RECORD_STRIDE_BYTES
-    && scene.lightRecords[24] === SVO_LIGHT_KINDS.directional
     && options.coneMode === "cones" && options.hierarchyReady
     && !options.globalIllumination && options.reconstruction === "full-res-relight";
 }

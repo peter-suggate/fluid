@@ -93,6 +93,15 @@ export const SVO_LATTICE_VISIBILITY_CONTRACT = Object.freeze({
   recordBytes: 32,
   /** One trailing vec4u after the records: (current stamp, 0, 0, 0), written by the key pass. */
   recordHeaderBytes: 16,
+  /**
+   * Per-pixel corners, one vec4u per full-resolution pixel, written by the key
+   * pass for this frame: the four corner slots as 24-bit fields packed across
+   * x, y and z, then the bilinear fraction as two 16-bit unorms. The lighting
+   * lookup loads the four records directly and never hashes.
+   */
+  cornerBytes: 16,
+  /** A corner the key pass could not place; never a slot, since slots stay below 1 << 23. */
+  cornerAbsent: 0xffffff,
   /** Tag, use, record and miss-list words. */
   slotBytes: 4 + 4 + 32 + 4,
   keyWorkgroupSize: Object.freeze([16, 16, 1] as const),
@@ -100,9 +109,9 @@ export const SVO_LATTICE_VISIBILITY_CONTRACT = Object.freeze({
   /** Fixed direct grid: the worker strides over however many misses the key pass appended. */
   marchWorkgroups: 1024,
   /** Main-module group 1, used by the key entry alone. */
-  keyBindings: Object.freeze({ buckets: 14, records: 15, control: 16 } as const),
+  keyBindings: Object.freeze({ buckets: 14, records: 15, control: 16, corners: 17 } as const),
   /** Split lighting group, read by the deferred lighting fragment. */
-  lookupBindings: Object.freeze({ buckets: 20, records: 21 } as const),
+  lookupBindings: Object.freeze({ corners: 20, records: 21 } as const),
 } as const);
 
 export interface SvoLatticeVisibilitySizing {
@@ -281,18 +290,18 @@ export function svoConeFanoutReducerBindGroupLayoutEntries(): GPUBindGroupLayout
   ];
 }
 
-/** Key-pass store: buckets, key/visibility records, then the control header and miss list. */
+/** Key-pass store: buckets, key/visibility records, the control header and miss list, then the per-pixel corners. */
 export function svoLatticeKeyBindGroupLayoutEntries(): GPUBindGroupLayoutEntry[] {
-  const { buckets, records, control } = SVO_LATTICE_VISIBILITY_CONTRACT.keyBindings;
-  return [buckets, records, control].map((binding) => ({
+  const { buckets, records, control, corners } = SVO_LATTICE_VISIBILITY_CONTRACT.keyBindings;
+  return [buckets, records, control, corners].map((binding) => ({
     binding, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" as const },
   }));
 }
 
-/** Read-only store view appended to the split lighting group. */
+/** Read-only corners and records appended to the split lighting group. */
 export function svoLatticeLookupBindGroupLayoutEntries(): GPUBindGroupLayoutEntry[] {
-  const { buckets, records } = SVO_LATTICE_VISIBILITY_CONTRACT.lookupBindings;
-  return [buckets, records].map((binding) => ({
+  const { corners, records } = SVO_LATTICE_VISIBILITY_CONTRACT.lookupBindings;
+  return [corners, records].map((binding) => ({
     binding, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage" as const },
   }));
 }

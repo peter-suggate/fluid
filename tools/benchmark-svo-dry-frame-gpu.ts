@@ -1000,10 +1000,10 @@ if (radianceFeedbackEnabled && radianceFeedbackFrames >= LIVE_SVO_RADIANCE_FEEDB
     "a static live scene must stop encoding feedback after its convergence window");
 }
 const worldBuild_ms = performance.now() - worldBuildStarted_ms;
-const publishedSource = solver.sparseVoxelSceneSource;
-const source = globalIlluminationEnabled || !publishedSource
-  ? publishedSource
-  : { ...publishedSource, tetrahedralRadiance: undefined };
+// The published source as the app attaches it. Withholding the radiance atlas
+// when GI is off failed `derivedLightingReady` and measured the exact-visibility
+// fallback instead of the cone path the app renders.
+const source = solver.sparseVoxelSceneSource;
 assert.ok(source?.structural, "live SVO scene did not publish a structural scene source");
 const contourLanes = source.structural.scenePayloadLanes;
 const cellContourCensus = process.env.FLUID_SVO_DRY_FRAME_MESH_CONTOURS === "1" && contourLanes.geometryPacked
