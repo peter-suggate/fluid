@@ -184,8 +184,8 @@ function draw(
         const phi = (v.phi[a]! + v.phi[a + 1]! + v.phi[a + v.nx + 1]! + v.phi[a + v.nx + 2]!) / 4;
         const paint = scalarLayerPaint("phi", phi / Math.min(...v.cellSize));
         g.fillStyle = `rgb(${paint.color.join(",")})`; g.globalAlpha *= paint.alpha; g.fillRect(x, y, 1, 1);
-      } else if (["density", "tiles", "volume", "pressure", "velocity"].includes(lens)) {
-        const value = lens === "density" ? v.volume[i]! : lens === "tiles" ? (v.tiles[Math.floor(x / 4) + tc * Math.floor(y / 4)] ?? 0) : lens === "volume" ? v.volume[i]! / Math.max(v.capacity[i]!, 1e-6) : lens === "pressure" ? v.pressure[i]! : Math.hypot(v.velocity[2 * i]!, v.velocity[2 * i + 1]!);
+      } else if (["tiles", "volume", "pressure", "velocity"].includes(lens)) {
+        const value = lens === "tiles" ? (v.tiles[Math.floor(x / 4) + tc * Math.floor(y / 4)] ?? 0) : lens === "volume" ? v.volume[i]! / Math.max(v.capacity[i]!, 1e-6) : lens === "pressure" ? v.pressure[i]! : Math.hypot(v.velocity[2 * i]!, v.velocity[2 * i + 1]!);
         const paint = scalarLayerPaint(lens, value);
         g.fillStyle = `rgb(${paint.color.join(",")})`; g.globalAlpha *= paint.alpha; g.fillRect(x, y, 1, 1);
         if (lens === "volume" && value > 1.0001) {
@@ -297,7 +297,7 @@ export function UniformLab() {
 }
 function UniformRun({ session }: { session: PaneSession }) {
   const [store] = useState(() => createUniformLabStore(location.search));
-  const { sceneId, dt, layers, totalSurfaceVolume, surfaceDeficitBalancing, phiCubicAdvection, phiDrain, airborneMomentum, isolatedBodyVolume, phiSeedCells, sliceDepth_m, sliceView: camera } = useStore(store);
+  const { sceneId, dt, layers, totalSurfaceVolume, surfaceDeficitBalancing, phiCubicAdvection, phiDrain, sliceDepth_m, sliceView: camera } = useStore(store);
   const scene = useStore(session.scene, (state) => state.scene);
   const nz = sceneLatticeDimensions(scene, Number.MAX_SAFE_INTEGER)[2];
   const slice = uniformLabSlice(scene, nz, sliceDepth_m);
@@ -376,7 +376,7 @@ function UniformRun({ session }: { session: PaneSession }) {
           return;
         }
         controller.current = owner;
-        const initial = await owner.load(scene, { totalSurfaceVolume, surfaceDeficitBalancing, phiCubicAdvection, phiDrain, airborneMomentum, isolatedBodyVolume, phiSeedCells }, sliceDepth_m);
+        const initial = await owner.load(scene, { totalSurfaceVolume, surfaceDeficitBalancing, phiCubicAdvection, phiDrain }, sliceDepth_m);
         if (alive) {
           setView(initial);
           setLoading(false);
@@ -394,7 +394,7 @@ function UniformRun({ session }: { session: PaneSession }) {
       if (controller.current === owner) controller.current = undefined;
       if (owner) void owner.destroy().catch(() => {});
     };
-  }, [sceneId, totalSurfaceVolume, surfaceDeficitBalancing, phiCubicAdvection, phiDrain, airborneMomentum, isolatedBodyVolume, phiSeedCells, sliceDepth_m, restart, session.scene]);
+  }, [sceneId, totalSurfaceVolume, surfaceDeficitBalancing, phiCubicAdvection, phiDrain, sliceDepth_m, restart, session.scene]);
   const edit = (
     operation: (owner: UniformLabController) => Promise<UniformView>,
   ) => {
@@ -505,12 +505,9 @@ function UniformRun({ session }: { session: PaneSession }) {
     surfaceDeficitBalancing: surfaceDeficitBalancing ? "on" : "off",
     phiCubicAdvection: phiCubicAdvection ? "on" : "off",
     phiDrain: phiDrain ? "on" : "off",
-    airborneMomentum: airborneMomentum ? "on" : "off",
-    isolatedBodyVolume: isolatedBodyVolume ? "on" : "off",
-    phiSeedCells: phiSeedCells ? "on" : "off",
   };
   const parameters = UNIFORM_GEOMETRIC_PARAMS.filter(
-    (p) => keys.has(p.key) && p.key in values && p.key !== "sharpeningWorkMap",
+    (p) => keys.has(p.key) && p.key in values,
   );
   const total = view?.volume.reduce((a, b) => a + b, 0) ?? 0,
     initial =
@@ -988,7 +985,7 @@ function UniformRun({ session }: { session: PaneSession }) {
             Preserves overfill expansion and balances it with contraction in underfilled liquid to reduce persistent sloshing.
             {" "}Both are on in 3D; changing either resets and pauses the scene.
           </p>
-          {(["phiCubicAdvection", "phiDrain", "airborneMomentum", "isolatedBodyVolume", "phiSeedCells"] as const).map((key) => {
+          {(["phiCubicAdvection", "phiDrain"] as const).map((key) => {
             const spec = UNIFORM_GEOMETRIC_PARAMS.find((p) => p.key === key)!;
             return <div className={css.option} key={key}>
               <Switch ariaLabel={spec.label} label={spec.label} checked={store.getState()[key]}

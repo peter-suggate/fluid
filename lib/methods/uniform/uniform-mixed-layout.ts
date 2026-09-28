@@ -2,21 +2,24 @@ import type { FluidRefinementRegion } from "../../core/model";
 import { refinementRegionCellBounds, type RefinementRegionLattice } from "../../core/refinement-regions";
 
 export const MIXED_FINE_TILE = 0x80000000;
+/** The retired 2h tile flag: no layout may carry it. */
 const MIXED_TWO_TILE = 0x40000000;
 export const MIXED_CELL_MASK = 0x3fffffff;
-export function mixedCellWidth(word: number): 1 | 2 | 4 {
-  return word & MIXED_FINE_TILE ? 1 : word & MIXED_TWO_TILE ? 2 : 4;
+/** Owner width of a tile word: h or 4h. Ownership is ungraded; a 2h word is fatal. */
+export function mixedCellWidth(word: number): 1 | 4 {
+  if (word & MIXED_TWO_TILE) throw new Error("Mixed ownership is h/4h: a 2h tile word is invalid");
+  return word & MIXED_FINE_TILE ? 1 : 4;
 }
 type Triple = readonly [number, number, number];
 export interface UniformMixedLayout {
   readonly lattice: RefinementRegionLattice;
   readonly tileDimensions: Triple;
-  /** Upper bits: h/2h/4h owner width. Remaining bits: first active cell. */
+  /** Upper bit: h (set) or 4h owner width. Remaining bits: first active cell. */
   readonly tiles: Uint32Array<ArrayBuffer>;
   readonly fineTiles: Uint32Array<ArrayBuffer>;
   readonly coarseTiles: Uint32Array<ArrayBuffer>;
-  readonly transitionTiles: Uint32Array<ArrayBuffer>;
-  /** Per tile: 27-bit h/2h neighborhood masks; high bits hold maximum/minimum widths. */
+  /** Per tile: the 27-bit h neighbourhood mask with the maximum width in its
+   * high bits, then a word holding only the minimum width in its high bits. */
   readonly stencils: Uint32Array<ArrayBuffer>;
   readonly cellCount: number;
   readonly metadataBytes: number;
@@ -24,15 +27,12 @@ export interface UniformMixedLayout {
   readonly regions: readonly { id: string; min: Triple; max: Triple }[];
 }
 
-/** Manual Uniform ownership, fine outside regions and strongly graded across faces/edges/corners.
- * An explicit coarse background is available for endpoint/numerical QA fixtures.
- * Without grading the layout is h/4h only: the simulation layout of the
- * pressure-only transition mode, whose pressure runs on uniformMixedPressureLayout. */
+/** Manual Uniform ownership: h/4h, ungraded. Tiles outside regions take the
+ * background width (h unless a coarse background is requested). */
 export function createUniformMixedLayout(
-  lattice: RefinementRegionLattice, regions: readonly FluidRefinementRegion[], stronglyBalanced = true, backgroundWidth: 1 | 4 = 1,
+  lattice: RefinementRegionLattice, regions: readonly FluidRefinementRegion[], backgroundWidth: 1 | 4 = 1,
   /** Tiles that must be h, from uniformMixedSolidTiles. Solids override
-   * region cell-size bounds: forced tiles are h whatever a region says, and
-   * a 4h-only region tile beside one is graded to 2h. */
+   * region cell-size bounds: forced tiles are h whatever a region says. */
   forcedFine?: Uint8Array,
 ): UniformMixedLayout {
   const axes = ["x", "y", "z"] as const;
@@ -82,21 +82,6 @@ export function createUniformMixedLayout(
     snapped.push({ id: r.id, min, max });
   }
   const widths = Uint8Array.from(allowed, mask => mask === 1 ? 1 : mask === 2 ? 4 : backgroundWidth);
-  if (stronglyBalanced) {
-    // Include edges and corners: face balance alone does not cover a box stencil.
-    for (let key = 0; key < count; key++) if (widths[key] === 1) {
-      const t = [key % dimensions[0], Math.floor(key / dimensions[0]) % dimensions[1], Math.floor(key / (dimensions[0] * dimensions[1]))];
-      for (let z = -1; z <= 1; z++) for (let y = -1; y <= 1; y++) for (let x = -1; x <= 1; x++) {
-        const q = [t[0]! + x, t[1]! + y, t[2]! + z];
-        if (q.some((v, a) => v < 0 || v >= dimensions[a]!)) continue;
-        const neighbor = q[0]! + dimensions[0] * (q[1]! + dimensions[1] * q[2]!);
-        if (widths[neighbor] !== 4 || widths[key] !== 1) continue;
-        if (allowed[neighbor] !== 2 || forcedFine?.[key]) widths[neighbor] = 2;
-        else if (allowed[key] !== 1) widths[key] = 2;
-        else throw new Error(`Forced 4h tile ${q} conflicts with 2:1 grading around ${t}`);
-      }
-    }
-  }
   return packUniformMixedLayout(lattice, widths, snapped);
 }
 
@@ -105,7 +90,7 @@ export function createUniformMixedLayout(
  * a cell within one cell (26-neighbourhood) of a cut cell is solid-coupled;
  * those and their 26 neighbour tiles are forced to h. Fine-owner stencils of
  * one cell (faces, dual cells, phi contact, pressure continuation) therefore
- * never meet solid in a 2h/4h owner or in an interface (seam) tile. The box
+ * never meet solid in a 4h owner or in an interface (seam) tile. The box
  * shell lives in the mask's halo; domain walls are owned by every width. */
 export function uniformMixedSolidTiles(dimensions: Triple, mask: Uint32Array, maskHeaderWords: number,
   terrainCells?: Float32Array): { forced: Uint8Array; coupled: Uint8Array; cutCells: number } {
@@ -151,7 +136,7 @@ export function uniformMixedSolidTiles(dimensions: Triple, mask: Uint32Array, ma
   return { forced, coupled, cutCells };
 }
 
-/** Loud ownership certificate: no 2h/4h owner may cover a promoted tile. */
+/** Loud ownership certificate: no 4h owner may cover a promoted tile. */
 export function assertUniformMixedSolidPromotion(layout: UniformMixedLayout, forced: Uint8Array): void {
   if (forced.length !== layout.tiles.length) throw new Error("Solid promotion mask does not match the ownership layout");
   for (let key = 0; key < forced.length; key++) if (forced[key] && mixedCellWidth(layout.tiles[key]!) !== 1) {
@@ -160,33 +145,11 @@ export function assertUniformMixedSolidPromotion(layout: UniformMixedLayout, for
   }
 }
 
-/** The two mixed multigrid levels keep existing coarse owners intact while
- * coarsening smaller owners. At 4h the lattice is uniform again. This is
- * pressure hierarchy geometry, not a change to manual enforcement regions. */
-export function uniformMixedPressureLevel(layout: UniformMixedLayout, minimumWidth: 2 | 4): UniformMixedLayout {
-  if (minimumWidth !== 2 && minimumWidth !== 4) throw new Error("Invalid mixed pressure level width");
-  const widths = Uint8Array.from(layout.tiles, word => Math.max(minimumWidth, mixedCellWidth(word)));
-  if (widths.every((width, tile) => width === mixedCellWidth(layout.tiles[tile]!))) return layout;
-  return packUniformMixedLayout(layout.lattice, widths, layout.regions);
-}
-
-/** The pressure layout of an ungraded h/4h simulation layout: every 4h tile
- * touching an h tile (26-neighbourhood) becomes 2h. It only refines, so the
- * projected field restricts back onto the simulation owners flux-exactly:
- * a 4h owner's faces are sums of its 2h owners' faces. Returns the layout
- * itself when it is already graded. */
-export function uniformMixedPressureLayout(layout: UniformMixedLayout): UniformMixedLayout {
-  const d = layout.tileDimensions, widths = Uint8Array.from(layout.tiles, mixedCellWidth);
-  let changed = false;
-  for (let key = 0; key < widths.length; key++) {
-    if (widths[key] !== 4) continue;
-    const t = [key % d[0], Math.floor(key / d[0]) % d[1], Math.floor(key / (d[0] * d[1]))];
-    search: for (let z = Math.max(0, t[2]! - 1); z <= Math.min(d[2] - 1, t[2]! + 1); z++)
-      for (let y = Math.max(0, t[1]! - 1); y <= Math.min(d[1] - 1, t[1]! + 1); y++)
-        for (let x = Math.max(0, t[0]! - 1); x <= Math.min(d[0] - 1, t[0]! + 1); x++)
-          if (mixedCellWidth(layout.tiles[x + d[0] * (y + d[1] * z)]!) === 1) { widths[key] = 2; changed = true; break search; }
-  }
-  return changed ? packUniformMixedLayout(layout.lattice, widths, layout.regions) : layout;
+/** The all-4h layout on the same lattice: every pressure level's ownership.
+ * Returns the layout itself when it is already all-4h. */
+export function uniformMixedAllCoarseLayout(layout: UniformMixedLayout): UniformMixedLayout {
+  if (layout.tiles.every(word => mixedCellWidth(word) === 4)) return layout;
+  return packUniformMixedLayout(layout.lattice, new Uint8Array(layout.tiles.length).fill(4), layout.regions);
 }
 
 function packUniformMixedLayout(lattice: RefinementRegionLattice, widths: Uint8Array,
@@ -194,19 +157,20 @@ function packUniformMixedLayout(lattice: RefinementRegionLattice, widths: Uint8A
   const count = widths.length;
   const dimensions = lattice.dimensions.map(n => n / 4) as unknown as Triple;
   const tiles = new Uint32Array(count);
-  const fine: number[] = [], transition: number[] = [], coarse: number[] = [];
+  const fine: number[] = [], coarse: number[] = [];
   const fineCount = widths.reduce((n, width) => n + (width === 1 ? 1 : 0), 0);
   const cellCount = widths.reduce((n, width) => n + (4 / width) ** 3, 0);
   let fineBase = 0, coarseBase = fineCount * 64;
   for (let key = 0; key < count; key++) {
     const isFine = widths[key] === 1;
-    tiles[key] = ((isFine ? fineBase : coarseBase) | (isFine ? MIXED_FINE_TILE : widths[key] === 2 ? MIXED_TWO_TILE : 0)) >>> 0;
-    (isFine ? fine : widths[key] === 2 ? transition : coarse).push(key);
-    if (isFine) fineBase += 64; else coarseBase += (4 / widths[key]!) ** 3;
+    if (!isFine && widths[key] !== 4) throw new Error("Mixed ownership is h/4h");
+    tiles[key] = ((isFine ? fineBase : coarseBase) | (isFine ? MIXED_FINE_TILE : 0)) >>> 0;
+    (isFine ? fine : coarse).push(key);
+    if (isFine) fineBase += 64; else coarseBase += 1;
   }
   const stencils = mixedStencils(dimensions, widths);
   return { lattice, tileDimensions: dimensions, tiles, stencils, fineTiles: Uint32Array.from(fine),
-    coarseTiles: Uint32Array.from(coarse), transitionTiles: Uint32Array.from(transition), cellCount, metadataBytes: count * 16, regions };
+    coarseTiles: Uint32Array.from(coarse), cellCount, metadataBytes: count * 16, regions };
 }
 
 /** Freeze geometric stencil decisions with ownership. Physics stages reuse
@@ -221,7 +185,7 @@ function mixedStencils(dimensions: Triple, widths: Uint8Array): Uint32Array<Arra
       if (qx < 0 || qy < 0 || qz < 0 || qx >= dimensions[0] || qy >= dimensions[1] || qz >= dimensions[2]) continue;
       const width = widths[qx + dimensions[0] * (qy + dimensions[1] * qz)]!;
       maximum = Math.max(maximum, width);minimum = Math.min(minimum, width);
-      if (width < 4) stencils[2 * key + (width === 1 ? 0 : 1)]! |= 1 << ((x + 1) + 3 * ((y + 1) + 3 * (z + 1)));
+      if (width === 1) stencils[2 * key]! |= 1 << ((x + 1) + 3 * ((y + 1) + 3 * (z + 1)));
     }
     stencils[2 * key]! |= maximum << 27;
     stencils[2 * key + 1]! |= minimum << 27;
@@ -238,26 +202,24 @@ export function uniformMixedLayoutFromTiles(lattice: RefinementRegionLattice, ti
   const dimensions = lattice.dimensions.map(n => n / 4) as unknown as Triple;
   const count = dimensions[0] * dimensions[1] * dimensions[2];
   if (tiles.length !== count) throw new Error("Mixed tile words do not match the lattice");
-  let fine = 0, transition = 0, coarse = 0;
-  for (const word of tiles) { const width = mixedCellWidth(word); if (width === 1) fine++; else if (width === 2) transition++; else coarse++; }
-  let lists: { fine: Uint32Array<ArrayBuffer>; transition: Uint32Array<ArrayBuffer>; coarse: Uint32Array<ArrayBuffer> } | undefined;
+  let fine = 0, coarse = 0;
+  for (const word of tiles) { if (mixedCellWidth(word) === 1) fine++; else coarse++; }
+  let lists: { fine: Uint32Array<ArrayBuffer>; coarse: Uint32Array<ArrayBuffer> } | undefined;
   let stencils: Uint32Array<ArrayBuffer> | undefined;
   const list = () => {
     if (!lists) {
-      lists = { fine: new Uint32Array(fine), transition: new Uint32Array(transition), coarse: new Uint32Array(coarse) };
-      let f = 0, t = 0, c = 0;
+      lists = { fine: new Uint32Array(fine), coarse: new Uint32Array(coarse) };
+      let f = 0, c = 0;
       for (let key = 0; key < count; key++) {
-        const width = mixedCellWidth(tiles[key]!);
-        if (width === 1) lists.fine[f++] = key; else if (width === 2) lists.transition[t++] = key; else lists.coarse[c++] = key;
+        if (mixedCellWidth(tiles[key]!) === 1) lists.fine[f++] = key; else lists.coarse[c++] = key;
       }
     }
     return lists;
   };
   return {
     lattice, tileDimensions: dimensions, tiles, regions, metadataBytes: count * 16,
-    cellCount: fine * 64 + transition * 8 + coarse,
+    cellCount: fine * 64 + coarse,
     get fineTiles() { return list().fine; },
-    get transitionTiles() { return list().transition; },
     get coarseTiles() { return list().coarse; },
     get stencils() { return stencils ??= mixedStencils(dimensions, Uint8Array.from(tiles, mixedCellWidth)); },
   };

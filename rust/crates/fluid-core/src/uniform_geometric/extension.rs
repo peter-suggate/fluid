@@ -15,37 +15,34 @@ pub const SOLID: u8 = 8;
 const SOLID_WORD: i32 = 4096;
 const TILE_FAR: i32 = 63;
 
-/// Host gates and reaches (webgpu-uniform-reference.ts writeParams).
+/// Host gates and reaches (webgpu-uniform-reference.ts writeParams): the
+/// tiled extension, tiled advection and E3 transport map run whenever the
+/// grid admits the 4h table; the reaches are the fixed 3D defaults.
 #[derive(Clone, Copy, Debug)]
 pub struct TwoLevel {
     /// physical.z >= 0: the sampler reads the 4h table outside FINE.
     pub enabled: bool,
     pub fine_reach: i32,
     pub shell_reach: i32,
-    pub tiled_extension: bool,
-    pub advection_tiles: bool,
     pub transport_tiles: bool,
     /// twoLevel.w: transport reach biased by eight, or -1 with E3 off.
     pub transport_w: i32,
 }
+const FINE_REACH: i32 = 2;
+const SHELL_REACH: i32 = 1;
+const TRANSPORT_REACH: i32 = 1;
 impl TwoLevel {
     pub fn new(dims: [usize; 2], o: &UniformGeometricOptions) -> Self {
         let tiles = dims[0].div_ceil(4) * dims[1].div_ceil(4);
-        let enabled = o.two_level_velocity == "on"
-            && dims.iter().all(|n| n % 4 == 0)
-            && 6 * tiles + 3 <= dims[0] * dims[1];
-        let round = |v: f32, lo: f32, hi: f32| v.clamp(lo, hi).round() as i32;
-        let transport_tiles =
-            enabled && o.transport_work_map != "dense" && o.volume_dust_threshold > 0.0;
+        let enabled = dims.iter().all(|n| n % 4 == 0) && 6 * tiles + 3 <= dims[0] * dims[1];
+        let transport_tiles = enabled && o.volume_dust_threshold > 0.0;
         Self {
             enabled,
-            fine_reach: round(o.two_level_fine_reach, 0.0, 8.0),
-            shell_reach: round(o.two_level_shell_reach, 0.0, 8.0),
-            tiled_extension: enabled && o.two_level_extension != "dense",
-            advection_tiles: enabled && o.two_level_advection != "dense",
+            fine_reach: FINE_REACH,
+            shell_reach: SHELL_REACH,
             transport_tiles,
             transport_w: if transport_tiles {
-                round(o.transport_reach, -8.0, 8.0) + 8
+                TRANSPORT_REACH + 8
             } else {
                 -1
             },
@@ -94,8 +91,6 @@ pub struct Extension {
     coarse: Vec<[f32; 2]>,
     /// lean.x: no cut cell anywhere, so the trace walk cannot stop early.
     pub solid_free: bool,
-    /// E3's domain maximum displacement D, in cells.
-    pub displacement: f32,
 }
 
 struct Tiles {
@@ -458,29 +453,7 @@ impl Extension {
             dt,
             &Sources::default(),
             vec![[0.0; 2]; g.volume.len()],
-            None,
         )
-    }
-    /// MacCormack prediction: the same work map, rebuilt on the predicted field.
-    pub fn build_prediction(
-        g: &Grid,
-        o: &UniformGeometricOptions,
-        dt: f32,
-        original: &Self,
-    ) -> Self {
-        Self::build_with(
-            g,
-            o,
-            dt,
-            &Sources::default(),
-            original.values.clone(),
-            Some(original),
-        )
-    }
-    pub fn with_coarse_from(&self, other: &Self) -> Self {
-        let mut result = self.clone();
-        result.coarse.clone_from(&other.coarse);
-        result
     }
     pub fn build_with(
         g: &Grid,
@@ -488,23 +461,18 @@ impl Extension {
         dt: f32,
         sources: &Sources,
         mut packed: Vec<[f32; 2]>,
-        workmap: Option<&Self>,
     ) -> Self {
         let dims = g.dims;
         let cd = dims.map(|n| n.div_ceil(4));
         let t = TwoLevel::new(dims, o);
-        let tiles = match workmap {
-            Some(w) => Tiles {
-                classes: w.classes.clone(),
-                distance: Vec::new(),
-                displacement: w.displacement,
-            },
-            None if t.enabled => seed_and_dilate(g, o, &t, dt, sources),
-            None => Tiles {
+        let tiles = if t.enabled {
+            seed_and_dilate(g, o, &t, dt, sources)
+        } else {
+            Tiles {
                 classes: vec![7; cd[0] * cd[1]],
                 distance: Vec::new(),
                 displacement: 0.0,
-            },
+            }
         };
         let n = g.volume.len();
         let spread = |tile: &[bool]| -> Vec<bool> {
@@ -519,13 +487,13 @@ impl Extension {
             &tiles
                 .classes
                 .iter()
-                .map(|&c| !t.tiled_extension || c & SHELL != 0)
+                .map(|&c| !t.enabled || c & SHELL != 0)
                 .collect::<Vec<_>>(),
         );
         let minh = g.h[0].min(g.h[1]);
         // Face openness and liquid density are read at SHELL cells and their
         // axis neighbours; evaluate them on SHELL tiles grown by one tile.
-        let near: Vec<bool> = if t.tiled_extension {
+        let near: Vec<bool> = if t.enabled {
             let mut grown = vec![false; cd[0] * cd[1]];
             for ty in 0..cd[1] {
                 for tx in 0..cd[0] {
@@ -554,8 +522,7 @@ impl Extension {
                     open[i] |= 1 << a;
                 }
             }
-            liquid[i] = 0.5 - g.pressure_phi(p, &o.volume_pressure_rows) / minh > 0.5
-                || g.airborne(p, o.airborne_momentum == "on", o.volume_dust_threshold);
+            liquid[i] = 0.5 - g.pressure_phi(p) / minh > 0.5;
         }
         let index = |p: [i32; 2]| -> Option<usize> {
             (p[0] >= 0 && p[1] >= 0 && p[0] < dims[0] as i32 && p[1] < dims[1] as i32)
@@ -934,7 +901,7 @@ impl Extension {
         }
         let mut classes = tiles.classes;
         // E7: narrow TRANSPORT by each tile's own post-extension reach.
-        if t.transport_tiles && workmap.is_none() {
+        if t.transport_tiles {
             let cap = tiles.displacement.max(0.0).ceil().clamp(0.0, 63.0) as i32;
             let mut speed = vec![[0.0_f32; 2]; cd[0] * cd[1]];
             for y in 0..dims[1] {
@@ -997,7 +964,6 @@ impl Extension {
             classes,
             coarse,
             solid_free,
-            displacement: tiles.displacement,
         }
     }
     fn tile_of(&self, p: [f32; 2]) -> usize {
@@ -1138,9 +1104,7 @@ mod tests {
             for i in 0..g.volume.len() {
                 let p = g.point(i);
                 g.volume[i] = g.target(p);
-                if p[1] > 25
-                    && (g.pressure_phi(p, "off") < 0.0
-                        || g.pressure_phi([p[0], p[1] + 1], "off") < 0.0)
+                if p[1] > 25 && (g.pressure_phi(p) < 0.0 || g.pressure_phi([p[0], p[1] + 1]) < 0.0)
                 {
                     g.velocity[i][1] = -4.0;
                 }
@@ -1168,7 +1132,7 @@ mod tests {
                     let mut q = p;
                     q[a] += 1;
                     if g.pressure_face(p, a) > 1e-5
-                        && (g.pressure_phi(p, "off") < 0.0 || g.pressure_phi(q, "off") < 0.0)
+                        && (g.pressure_phi(p) < 0.0 || g.pressure_phi(q) < 0.0)
                     {
                         assert!(
                             (e.values[i][a] - g.velocity[i][a]).abs() < 1e-5,

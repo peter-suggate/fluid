@@ -100,7 +100,7 @@ fn umNativeMixedIndex(p:vec3u)->vec2u {
   this.upload=await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"upload"}});
   this.download=await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"download"}});
  }
- encode(encoder:GPUCommandEncoder,group:GPUBindGroup,uniformGroup:GPUBindGroup,kind:"v"|"full"="v",initializeTopology=true):void{
+ encode(encoder:GPUCommandEncoder,group:GPUBindGroup,uniformGroup:GPUBindGroup,kind:"v"|"full"="v",initializeTopology:boolean|"setup"=true):void{
   if(!this.upload||!this.download)throw new Error("Mixed pressure continuation is not initialized");
   // Upload, the native cycle and download share one pass; only the native
   // setup's tile-list copies (first cycle of a solve) end it.
@@ -109,6 +109,7 @@ fn umNativeMixedIndex(p:vec3u)->vec2u {
    const pass=passes.pass;pass.setPipeline(pipeline);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);
    pass.dispatchWorkgroups(...this.native.phi.dimensions.map(n=>Math.ceil(n/4)) as [number,number,number]);
   };
-  dispatch(this.upload);this.native.encode(encoder,uniformGroup,kind,initializeTopology,passes);dispatch(this.download);passes.end();
+  // Setup reads only the uploaded phi/topology; each cycle uploads again.
+  dispatch(this.upload);this.native.encode(encoder,uniformGroup,kind,initializeTopology,passes);if(initializeTopology!=="setup")dispatch(this.download);passes.end();
  }
 }

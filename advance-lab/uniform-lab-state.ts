@@ -19,16 +19,13 @@ export interface UniformLabState {
   surfaceDeficitBalancing: boolean;
   phiCubicAdvection: boolean;
   phiDrain: boolean;
-  airborneMomentum: boolean;
-  isolatedBodyVolume: boolean;
-  phiSeedCells: boolean;
   dt: number;
   layers: VisualLayerState;
   sliceView: SliceViewFraction;
   sliceDepth_m?: number;
 }
 /** Defaults match the shared 3D Uniform Geometric parameter schema. */
-type Toggle = "totalSurfaceVolume" | "surfaceDeficitBalancing" | "phiCubicAdvection" | "phiDrain" | "airborneMomentum" | "isolatedBodyVolume" | "phiSeedCells";
+type Toggle = "totalSurfaceVolume" | "surfaceDeficitBalancing" | "phiCubicAdvection" | "phiDrain";
 function toggleQuery(key: Toggle, defaultValue: boolean) {
   return {
     keys: [key],
@@ -58,9 +55,6 @@ export const uniformLabQuery = combineQueryCodecs<UniformLabState>([
   toggleQuery("surfaceDeficitBalancing", true),
   toggleQuery("phiCubicAdvection", true),
   toggleQuery("phiDrain", true),
-  toggleQuery("airborneMomentum", false),
-  toggleQuery("isolatedBodyVolume", false),
-  toggleQuery("phiSeedCells", false),
   {
     keys: ["layers", "field", "grid"],
     read: (query: URLSearchParams) => ({
@@ -105,9 +99,6 @@ export function startUniformLabQuerySync(
           next.surfaceDeficitBalancing !== store.getState().surfaceDeficitBalancing ||
           next.phiCubicAdvection !== store.getState().phiCubicAdvection ||
           next.phiDrain !== store.getState().phiDrain ||
-          next.airborneMomentum !== store.getState().airborneMomentum ||
-          next.isolatedBodyVolume !== store.getState().isolatedBodyVolume ||
-          next.phiSeedCells !== store.getState().phiSeedCells ||
           JSON.stringify(parsed.scene) !==
             JSON.stringify(session.scene.getState().scene))
       )

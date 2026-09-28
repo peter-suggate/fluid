@@ -61,30 +61,71 @@ var<workgroup> ${entry}Components:array<vec2f,192>;
  // Merged jobs past the tile jobs pack 64 regular coarse owners: one lane
  // per owner and axis. Their faces are single patches and no two positive
  // faces of a width-2/4 lattice share an anchor texel.
- let job=group.x+umDispatchX*group.y;let packed=umMergedTiles&&!umFusedJobs&&job>=umMergedTileJobs();
- let firstOwner=umOwner(vec3u(select(job*cells,job*64u+cell,packed),0,0));
- var owner=firstOwner;var anchor=vec3i(0);var result=vec2f(0);
- if(firstOwner.width!=0u){
-  var negative=false;var positive=UMFace();
-  if(packed){
-   let origin=umOrigin(owner);negative=origin[axis]==0u;
-   positive=umFace(owner,axis,1,0u);anchor=positive.anchor;
-  }else{
-   // Merged launches (umCellWidth 1, 64 slots per job) carry a runtime width.
-   let width=select(umCellWidth,firstOwner.width,umMergedTiles);let q=local/width;let side=4u/width;
-   owner.lane=q.x+side*(q.y+side*q.z);owner.index+=owner.lane;
-   anchor=vec3i(umTileCoord(owner.tile)*4u+local);
-   let origin=umOrigin(owner);negative=origin[axis]==0u&&all(vec3u(anchor)==origin);
-   positive=umPositiveFaceAtAnchor(owner,axis,anchor);
+ // Seam 4h jobs of merged launches pack four tiles: 48 lanes per tile, one
+ // per (patch, axis). A 4h owner has at most 16 patches per positive face, so
+ // one tile per group left 144+ of 192 lanes idle behind a serial sampler.
+ // ceil(s4/4) quad jobs replace the s4 seam 4h jobs of the tile job order
+ // (umMergedTileJob; fused: umFusedOwner); later jobs shift down by the
+ // difference. Size merged launches by dispatchCertified(...,true) (the
+ // frame plan's quad-packed count) and fused ones by dispatchFused(...,true,true).
+ let header=7u*UM_TILES+16u;let fours=umSupport[header+2u];let quads=(fours+3u)/4u;
+ let seamFour=select(umSupport[4u*UM_TILES+2u],umSupport[header],umFusedJobs)+umSupport[header+1u];
+ let job=group.x+umDispatchX*group.y;
+ let quad=umMergedTiles&&job>=seamFour&&job<seamFour+quads;
+ let tileJob=select(job,job+fours-quads,umMergedTiles&&job>=seamFour+quads);
+ let packed=umMergedTiles&&!umFusedJobs&&tileJob>=umMergedTileJobs();
+ let slot=lane/48u;let part=(lane%48u)/3u;let faceAxis=lane%3u;
+ var owner=UMOwner();var anchor=vec3i(0);var result=vec2f(0);
+ if(quad){
+  let index=4u*(job-seamFour)+slot;
+  if(index<fours){
+   let tile=umSupport[header+4u+umSupport[header]+umSupport[header+1u]+index];
+   owner=UMOwner(tile,0u,4u,umTopology[tile]&0x3fffffffu);
+   let origin=umOrigin(owner);
+   if(part==0u&&origin[faceAxis]==0u){
+    let face=umFace(owner,faceAxis,-1,0u);boundary[umNegativeBoundaryIndex(origin,faceAxis)]=${evaluate};
+   }
+   let face=umFace(owner,faceAxis,1,part);
+   if(face.width!=0u){anchor=face.anchor;result=vec2f(${evaluate},1);}
   }
-  if(negative){
-   let face=umFace(owner,axis,-1,0u);boundary[umNegativeBoundaryIndex(umOrigin(owner),axis)]=${evaluate};
+ }else{
+  let firstOwner=umOwner(vec3u(select(tileJob*cells,tileJob*64u+cell,packed),0,0));owner=firstOwner;
+  if(firstOwner.width!=0u){
+   var negative=false;var positive=UMFace();
+   if(packed){
+    let origin=umOrigin(owner);negative=origin[axis]==0u;
+    positive=umFace(owner,axis,1,0u);anchor=positive.anchor;
+   }else{
+    // Merged launches (umCellWidth 1, 64 slots per job) carry a runtime width.
+    let width=select(umCellWidth,firstOwner.width,umMergedTiles);let q=local/width;let side=4u/width;
+    owner.lane=q.x+side*(q.y+side*q.z);owner.index+=owner.lane;
+    anchor=vec3i(umTileCoord(owner.tile)*4u+local);
+    let origin=umOrigin(owner);negative=origin[axis]==0u&&all(vec3u(anchor)==origin);
+    positive=umPositiveFaceAtAnchor(owner,axis,anchor);
+   }
+   if(negative){
+    let face=umFace(owner,axis,-1,0u);boundary[umNegativeBoundaryIndex(umOrigin(owner),axis)]=${evaluate};
+   }
+   let face=positive;
+   if(face.width!=0u){result=vec2f(${evaluate},1);}
   }
-  let face=positive;
-  if(face.width!=0u){result=vec2f(${evaluate},1);}
  }
  ${entry}Components[lane]=result;workgroupBarrier();
- if(packed){
+ if(quad){
+  if(result.y>0.0){
+   // One writer per RGBA texel: the lowest axis with a patch at this anchor.
+   let offset=anchor-vec3i(umOrigin(owner));var value=vec4f(0);var writer=true;
+   for(var other=0u;other<3u;other++){
+    if(other==faceAxis){value[other]=result.x;continue;}
+    let face=umPositiveFaceAtAnchor(owner,other,anchor);if(face.width==0u){continue;}
+    if(other<faceAxis){writer=false;}
+    let u=(other+1u)%3u;let v=(other+2u)%3u;let side=4u/face.width;
+    let otherPart=u32(offset[u])/face.width+side*(u32(offset[v])/face.width);
+    value[other]=${entry}Components[48u*slot+3u*otherPart+other].x;
+   }
+   if(writer){textureStore(output,anchor,value);}
+  }
+ }else if(packed){
   if(result.y>0.0){var value=vec4f(0);value[axis]=result.x;textureStore(output,anchor,value);}
  }else if(lane<64u){
   let x=${entry}Components[cell];let y=${entry}Components[cell+64u];let z=${entry}Components[cell+128u];

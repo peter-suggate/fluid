@@ -1,4 +1,4 @@
-import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
+import { compileMixedTiers, type UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedVertexSamplingWGSL } from "./uniform-mixed-vertex-sampling.wgsl";
 
@@ -52,11 +52,11 @@ ${uniformMixedVertexSamplingWGSL}
     const errors = (await module.getCompilationInfo()).messages.filter(m => m.type === "error");
     if (errors.length) throw new Error(errors.map(m => `${m.lineNum}: ${m.message}`).join("\n"));
     const layout = this.device.createPipelineLayout({ bindGroupLayouts: [this.ownership.bindLayout, this.resources] });
-    this.pipelines = await Promise.all((this.direction === "restrict" ? [1, 2, 4] : [1]).map(umCellWidth =>
-      this.device.createComputePipelineAsync({ layout, compute: { module,
+    const compile = (umCellWidth: number) => this.device.createComputePipelineAsync({ layout, compute: { module,
         entryPoint: this.direction === "restrict" ? "restrictVertices" : "prolongVertices",
         constants: { umCellWidth, umDispatchX: this.ownership.dispatchX },
-      } })));
+      } });
+    this.pipelines = this.direction === "restrict" ? await compileMixedTiers(compile) : [await compile(1)];
   }
 
   encode(encoder: GPUCommandEncoder): void {

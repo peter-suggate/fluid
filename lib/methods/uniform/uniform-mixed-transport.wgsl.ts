@@ -44,14 +44,15 @@ fn umRowOrigin(r:Row)->vec3u{return umTileCoord(r.tile)*4u+corner(r.lane,4u/r.wi
 fn umRowCapacity(r:Row)->f32{if(r.width==1u){return umCellOpen(vec3i(umRowOrigin(r)));}return f32(r.width*r.width*r.width);}
 struct Donor {index:u32,capacity:f32,origin:vec3u}
 // The row's first donor cell in grain units, packed 10 bits per axis with a
-// bias of 2: a box starting past a low wall has base >= -2 (the departure is
-// clamped to the lattice and the box is at most 4 wide). Decoded once per row.
+// bias of 4: a partially intersecting 4h box sampled at h can start at -4.
+// Fully out-of-domain rows have no positive donor weights; clamp their unused
+// address so it cannot overflow into the next packed coordinate. Decoded once per row.
 // Only nonzero-weight donors, all in the lattice, are resolved from it; u32
 // wrap-around makes base+corner exact for them.
-fn packRowBase(base:vec3i)->u32{let b=vec3u(base+vec3i(2));return b.x|(b.y<<10u)|(b.z<<20u);}
+fn packRowBase(base:vec3i)->u32{let b=vec3u(clamp(base,vec3i(-4),vec3i(D)-vec3i(1))+vec3i(4));return b.x|(b.y<<10u)|(b.z<<20u);}
 fn rowBase(r:Row)->vec3u{
  let word=edges[r.address];
- return (vec3u(word&1023u,(word>>10u)&1023u,word>>20u)-vec3u(2u))*r.grain;
+ return (vec3u(word&1023u,(word>>10u)&1023u,word>>20u)-vec3u(4u))*r.grain;
 }
 // umOwnerAt and umOrigin for an in-lattice cell, by shifts: owners are
 // aligned to their width inside their tile.
@@ -134,6 +135,33 @@ fn normalizeRow(r:Row,divide:bool){
 @compute @workgroup_size(64) fn rowsDivide(@builtin(global_invocation_id) gid:vec3u){
  let r=rowAt(gid);if(r.width==0u){return;}normalizeRow(r,true);
 }
+// One coarse row per workgroup: distribute up to 125 donor overlaps,
+// retaining the scalar row's summation order and exact integer donor sums.
+var<workgroup> coarseWeights:array<f32,126>;
+var<workgroup> coarseDonors:array<u32,126>;
+var<workgroup> coarseScale:f32;
+fn normalizeCoarseRow(group:vec3u,lane:u32,divide:bool){
+ let job=group.x+umDispatchX*group.y;
+ let r=rowAt(vec3u(job,0u,0u));let base=rowBase(r);
+ for(var k=lane;k<126u;k+=64u){if(r.width!=0u&&k<r.count){
+  let donor=donorFrom(r,base,k);var weight=bitcast<f32>(edges[r.address+1u+k]);
+  if(divide){weight=weight*donor.capacity/max(sums[donor.index],1e-20);}
+  else if(k==r.count-1u&&sums[r.index]==0.0){weight=f32(r.width*r.width*r.width);}
+  coarseWeights[k]=weight;coarseDonors[k]=donor.index;
+ }}
+ workgroupBarrier();
+ if(lane==0u&&r.width!=0u){
+  var sum=0.0;for(var k=0u;k<r.count;k++){sum+=coarseWeights[k];}
+  coarseScale=umRowCapacity(r)/max(sum,1e-20);
+ }
+ workgroupBarrier();
+ for(var k=lane;k<126u;k+=64u){if(r.width!=0u&&k<r.count){
+  let weight=coarseWeights[k]*coarseScale;
+  edges[r.address+1u+k]=bitcast<u32>(weight);uvAddDonor(coarseDonors[k],weight);
+ }}
+}
+@compute @workgroup_size(64) fn rowsFallbackCoarse(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){normalizeCoarseRow(group,lane,false);}
+@compute @workgroup_size(64) fn rowsDivideCoarse(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){normalizeCoarseRow(group,lane,true);}
 @compute @workgroup_size(64) fn gather(@builtin(global_invocation_id) gid:vec3u){
  let r=rowAt(gid);if(r.width==0u){return;}var value=0.0;
  ${solid?`// A sealed cell's V is an unplaceable reservoir; preserve it.
@@ -275,6 +303,8 @@ fn tpBox(tile:u32)->array<vec3i,2>{
  }
 }
 @compute @workgroup_size(1) fn livePublish(){
+ let coarse=atomicLoad(&live[20u]);
+ atomicStore(&live[24u],min(coarse,umDispatchX));atomicStore(&live[25u],(coarse+umDispatchX-1u)/umDispatchX);atomicStore(&live[26u],1u);
  for(var k=0u;k<6u;k++){
   let tier=k%3u;let owners=atomicLoad(&live[18u+k])*(64u>>(3u*tier));let groups=(owners+63u)/64u;
   atomicStore(&live[3u*k],min(groups,umDispatchX));atomicStore(&live[3u*k+1u],(groups+umDispatchX-1u)/umDispatchX);atomicStore(&live[3u*k+2u],1u);

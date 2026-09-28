@@ -25,7 +25,7 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
     raw = await adapter.requestDevice({ requiredLimits: requiredFluidDeviceLimits(adapter.limits) });
     const errors: string[] = [];
     raw.addEventListener("uncapturederror", event => { event.preventDefault(); errors.push(event.error.message); });
-    for (const mode of ["native", "fine", "air"] as const) {
+    for (const mode of ["fine", "air"] as const) {
       const snapshots: { fields: Float32Array[]; residual: number | undefined }[] = [];
       let redirected = 0;
       for (const reference of [true, false]) {
@@ -77,7 +77,7 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
             maximumCellSize_cells: 4, min_m: corner(8), max_m: corner(4) }];
         }
         solver = await WebGPUUniformReferenceSolver.createAsync(device, scene, "balanced", undefined,
-          { ...uniformGeometricSolverOptions({}, scene), mixedOwnership: mode !== "native" }, () => {});
+          uniformGeometricSolverOptions({}, scene), () => {});
         for (let step = 1; step <= 4; step++) {
           assert.ok(solver.advanceTo(step / 30, [])); await solver.awaitFrameCompletion();
         }

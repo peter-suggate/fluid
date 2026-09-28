@@ -1,7 +1,7 @@
 import "../lib/methods";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { VISUAL_LAYERS, visualLayers, readVisualLayers, writeVisualLayers, legacyVisualLayers, toggleVisualLayer, scalarLayerPaint } from "../lib/core/visual-layers";
+import { VISUAL_LAYERS, visualLayers, readVisualLayers, writeVisualLayers, legacyVisualLayers, toggleVisualLayer } from "../lib/core/visual-layers";
 import { uniformLabQuery } from "../advance-lab/uniform-lab-state";
 import { createUIStore } from "../lib/core/stores/ui-store";
 import { parseQueryState, serializeQueryState } from "../lib/core/url-state";
@@ -29,13 +29,6 @@ test("3D links roundtrip combined layers and opacity", () => {
   const query = serializeQueryState("", { presetId: state.presetId, scene: state.scene }, state, state.ui);
   assert.deepEqual(parseQueryState(query).ui.visualLayers, state.ui.visualLayers);
 });
-test("shared scalar semantics distinguish volume, density, signed pressure and empty air", () => {
-  assert.equal(scalarLayerPaint("density", 0).alpha, 0);
-  assert.equal(scalarLayerPaint("volume", 0.5).alpha, 0.5);
-  assert.notDeepEqual(scalarLayerPaint("pressure", 5000).color, scalarLayerPaint("pressure", -5000).color);
-  assert.equal(scalarLayerPaint("pressure", 5000).alpha, 0.5);
-});
-
 test("legacy controls hide composed layers and explicit mode picks replace them", () => {
   const store = createUIStore();
   store.setState({ visualLayers: visualLayers(["volume", "grid"]) });

@@ -22,68 +22,24 @@ pub struct UniformGeometricOptions {
     pub density_sharpening: String,
     #[serde(rename = "rigidCoupling")]
     pub rigid_coupling: String,
-    #[serde(rename = "velocityTransport")]
-    pub velocity_transport: String,
-    #[serde(rename = "liquidOnlyVelocityAdvection")]
-    pub liquid_only_velocity_advection: String,
     #[serde(rename = "timeStep")]
     pub time_step: String,
     #[serde(rename = "pressureResidualTolerance")]
     pub pressure_residual_tolerance: f32,
     #[serde(rename = "extensionFrontSweeps")]
     pub extension_front_sweeps: f32,
-    #[serde(rename = "sharpeningStrength")]
-    pub sharpening_strength: f32,
-    #[serde(rename = "sharpeningDistance")]
-    pub sharpening_distance: f32,
     #[serde(rename = "pressureFullCycles")]
     pub pressure_full_cycles: f32,
     #[serde(rename = "pressureVCycles")]
     pub pressure_v_cycles: f32,
     #[serde(rename = "pressureSweeps")]
     pub pressure_sweeps: f32,
-    #[serde(rename = "redistance")]
-    pub redistance: String,
-    #[serde(rename = "sharpeningWorkMap")]
-    pub sharpening_work_map: String,
     #[serde(rename = "volumeDustThreshold")]
     pub volume_dust_threshold: f32,
-    #[serde(rename = "twoLevelVelocity")]
-    pub two_level_velocity: String,
-    #[serde(rename = "twoLevelFineReach")]
-    pub two_level_fine_reach: f32,
-    #[serde(rename = "twoLevelExtension")]
-    pub two_level_extension: String,
-    #[serde(rename = "twoLevelShellReach")]
-    pub two_level_shell_reach: f32,
-    #[serde(rename = "twoLevelAdvection")]
-    pub two_level_advection: String,
-    #[serde(rename = "transportWorkMap")]
-    pub transport_work_map: String,
-    #[serde(rename = "transportReach")]
-    pub transport_reach: f32,
-    #[serde(rename = "volumePressureRows")]
-    pub volume_pressure_rows: String,
-    #[serde(rename = "volumeCompaction")]
-    pub volume_compaction: String,
-    #[serde(rename = "phiSeedFromVolume")]
-    pub phi_seed_from_volume: String,
-    #[serde(rename = "phiAgreement")]
-    pub phi_agreement: String,
-    #[serde(rename = "phiAgreementGain")]
-    pub phi_agreement_gain: f32,
-    #[serde(rename = "phiAgreementClamp")]
-    pub phi_agreement_clamp: f32,
     #[serde(rename = "phiCubicAdvection")]
     pub phi_cubic_advection: String,
-    #[serde(rename = "isolatedBodyVolume")]
-    pub isolated_body_volume: String,
-    #[serde(rename = "phiSeedCells")]
-    pub phi_seed_cells: String,
     #[serde(rename = "phiDrain")]
     pub phi_drain: String,
-    #[serde(rename = "airborneMomentum")]
-    pub airborne_momentum: String,
     #[serde(rename = "totalSurfaceVolume")]
     pub total_surface_volume: String,
     #[serde(rename = "surfaceDeficitBalancing")]
@@ -94,37 +50,15 @@ impl Default for UniformGeometricOptions {
         Self {
             density_sharpening: "on".into(),
             rigid_coupling: "on".into(),
-            velocity_transport: "semi-lagrangian".into(),
-            liquid_only_velocity_advection: "off".into(),
             time_step: "paper".into(),
             pressure_residual_tolerance: 5_f32,
             extension_front_sweeps: 2_f32,
-            sharpening_strength: 1_f32,
-            sharpening_distance: 2.1_f32,
             pressure_full_cycles: 3_f32,
             pressure_v_cycles: 4_f32,
             pressure_sweeps: 6_f32,
-            redistance: "on".into(),
-            sharpening_work_map: "on".into(),
             volume_dust_threshold: 0.001_f32,
-            two_level_velocity: "on".into(),
-            two_level_fine_reach: 2_f32,
-            two_level_extension: "tiles".into(),
-            two_level_shell_reach: 1_f32,
-            two_level_advection: "tiles".into(),
-            transport_work_map: "tiles".into(),
-            transport_reach: 1_f32,
-            volume_pressure_rows: "off".into(),
-            volume_compaction: "off".into(),
-            phi_seed_from_volume: "off".into(),
-            phi_agreement: "off".into(),
-            phi_agreement_gain: 0.05_f32,
-            phi_agreement_clamp: 0.02_f32,
             phi_cubic_advection: "on".into(),
-            isolated_body_volume: "off".into(),
-            phi_seed_cells: "off".into(),
             phi_drain: "on".into(),
-            airborne_momentum: "off".into(),
             total_surface_volume: "on".into(),
             surface_deficit_balancing: "on".into(),
         }
@@ -140,16 +74,6 @@ impl UniformGeometricOptions {
         if !["on", "off"].contains(&self.rigid_coupling.as_str()) {
             return Err(ValidationError(
                 "Invalid uniform parameter rigidCoupling".into(),
-            ));
-        }
-        if !["semi-lagrangian", "maccormack"].contains(&self.velocity_transport.as_str()) {
-            return Err(ValidationError(
-                "Invalid uniform parameter velocityTransport".into(),
-            ));
-        }
-        if !["off", "on"].contains(&self.liquid_only_velocity_advection.as_str()) {
-            return Err(ValidationError(
-                "Invalid uniform parameter liquidOnlyVelocityAdvection".into(),
             ));
         }
         if !["paper", "scene"].contains(&self.time_step.as_str()) {
@@ -168,20 +92,6 @@ impl UniformGeometricOptions {
         {
             return Err(ValidationError(
                 "Invalid uniform parameter extensionFrontSweeps".into(),
-            ));
-        }
-        if !self.sharpening_strength.is_finite()
-            || !((0_f32)..=(1_f32)).contains(&self.sharpening_strength)
-        {
-            return Err(ValidationError(
-                "Invalid uniform parameter sharpeningStrength".into(),
-            ));
-        }
-        if !self.sharpening_distance.is_finite()
-            || !((0.1_f32)..=(3.1_f32)).contains(&self.sharpening_distance)
-        {
-            return Err(ValidationError(
-                "Invalid uniform parameter sharpeningDistance".into(),
             ));
         }
         if !self.pressure_full_cycles.is_finite()
@@ -208,16 +118,6 @@ impl UniformGeometricOptions {
                 "Invalid uniform parameter pressureSweeps".into(),
             ));
         }
-        if !["on", "off"].contains(&self.redistance.as_str()) {
-            return Err(ValidationError(
-                "Invalid uniform parameter redistance".into(),
-            ));
-        }
-        if !["on", "off"].contains(&self.sharpening_work_map.as_str()) {
-            return Err(ValidationError(
-                "Invalid uniform parameter sharpeningWorkMap".into(),
-            ));
-        }
         if !self.volume_dust_threshold.is_finite()
             || !((0_f32)..=(0.001_f32)).contains(&self.volume_dust_threshold)
         {
@@ -225,106 +125,13 @@ impl UniformGeometricOptions {
                 "Invalid uniform parameter volumeDustThreshold".into(),
             ));
         }
-        if !["on", "off"].contains(&self.two_level_velocity.as_str()) {
-            return Err(ValidationError(
-                "Invalid uniform parameter twoLevelVelocity".into(),
-            ));
-        }
-        if !self.two_level_fine_reach.is_finite()
-            || !((0_f32)..=(8_f32)).contains(&self.two_level_fine_reach)
-            || self.two_level_fine_reach.fract() != 0.0
-        {
-            return Err(ValidationError(
-                "Invalid uniform parameter twoLevelFineReach".into(),
-            ));
-        }
-        if !["tiles", "dense"].contains(&self.two_level_extension.as_str()) {
-            return Err(ValidationError(
-                "Invalid uniform parameter twoLevelExtension".into(),
-            ));
-        }
-        if !self.two_level_shell_reach.is_finite()
-            || !((0_f32)..=(8_f32)).contains(&self.two_level_shell_reach)
-            || self.two_level_shell_reach.fract() != 0.0
-        {
-            return Err(ValidationError(
-                "Invalid uniform parameter twoLevelShellReach".into(),
-            ));
-        }
-        if !["tiles", "dense"].contains(&self.two_level_advection.as_str()) {
-            return Err(ValidationError(
-                "Invalid uniform parameter twoLevelAdvection".into(),
-            ));
-        }
-        if !["tiles", "dense"].contains(&self.transport_work_map.as_str()) {
-            return Err(ValidationError(
-                "Invalid uniform parameter transportWorkMap".into(),
-            ));
-        }
-        if !self.transport_reach.is_finite()
-            || !((0_f32)..=(8_f32)).contains(&self.transport_reach)
-            || self.transport_reach.fract() != 0.0
-        {
-            return Err(ValidationError(
-                "Invalid uniform parameter transportReach".into(),
-            ));
-        }
-        if !["abandoned", "all", "off"].contains(&self.volume_pressure_rows.as_str()) {
-            return Err(ValidationError(
-                "Invalid uniform parameter volumePressureRows".into(),
-            ));
-        }
-        if !["on", "off"].contains(&self.volume_compaction.as_str()) {
-            return Err(ValidationError(
-                "Invalid uniform parameter volumeCompaction".into(),
-            ));
-        }
-        if !["on", "off"].contains(&self.phi_seed_from_volume.as_str()) {
-            return Err(ValidationError(
-                "Invalid uniform parameter phiSeedFromVolume".into(),
-            ));
-        }
-        if !["on", "off"].contains(&self.phi_agreement.as_str()) {
-            return Err(ValidationError(
-                "Invalid uniform parameter phiAgreement".into(),
-            ));
-        }
-        if !self.phi_agreement_gain.is_finite()
-            || !((0_f32)..=(1_f32)).contains(&self.phi_agreement_gain)
-        {
-            return Err(ValidationError(
-                "Invalid uniform parameter phiAgreementGain".into(),
-            ));
-        }
-        if !self.phi_agreement_clamp.is_finite()
-            || !((0_f32)..=(0.5_f32)).contains(&self.phi_agreement_clamp)
-        {
-            return Err(ValidationError(
-                "Invalid uniform parameter phiAgreementClamp".into(),
-            ));
-        }
         if !["on", "off"].contains(&self.phi_cubic_advection.as_str()) {
             return Err(ValidationError(
                 "Invalid uniform parameter phiCubicAdvection".into(),
             ));
         }
-        if !["on", "off"].contains(&self.isolated_body_volume.as_str()) {
-            return Err(ValidationError(
-                "Invalid uniform parameter isolatedBodyVolume".into(),
-            ));
-        }
-        if !["on", "off"].contains(&self.phi_seed_cells.as_str()) {
-            return Err(ValidationError(
-                "Invalid uniform parameter phiSeedCells".into(),
-            ));
-        }
         if !["on", "off"].contains(&self.phi_drain.as_str()) {
             return Err(ValidationError("Invalid uniform parameter phiDrain".into()));
-        }
-        if !["on", "off"].contains(&self.airborne_momentum.as_str()) {
-            return Err(ValidationError(
-                "Invalid uniform parameter airborneMomentum".into(),
-            ));
         }
         if !["off", "on"].contains(&self.total_surface_volume.as_str()) {
             return Err(ValidationError(

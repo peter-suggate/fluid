@@ -5,7 +5,7 @@
  * One build writes them; every sweep then gathers instead of re-walking
  * canonical patches, ghost thetas and wall coefficients.
  *
- * Buffer: one chunk per fused job. Word 0 holds the job's cell width (0 for
+ * Buffer: liquid-list prefix (16 + tile count words), then one chunk per fused job. Each chunk's word 0 holds the job's cell width (0 for
  * an idle job); rows start at word 64 with stride UM_REC_ROWS/cells. A row:
  *  0 flags (bit0 slope, bit1 liquid, bits 8.. core, 16.. correction, 24.. halo counts)
  *  1 owner index, 2 diagonal, 3 slope count,
@@ -23,6 +23,9 @@ export function uniformMixedPressureRecordsSource(surface: boolean, boundary: bo
   return /* wgsl */ `
 @group(2) @binding(0) var<storage,read_write> records:array<u32>;
 const UM_REC_ROWS:u32=${UNIFORM_MIXED_PRESSURE_RECORD_ROWS}u;
+// A once-per-solve copy of the liquid tile list precedes the seam records.
+// Fused sweeps read both through this binding, without another storage buffer.
+const UM_REC_PREFIX:u32=16u+UM_TILES;
 const UM_REC_CHUNK:u32=${UNIFORM_MIXED_PRESSURE_RECORD_CHUNK}u;
 fn umRecEntries(width:u32)->u32{return select(24u,6u,width==1u);}
 fn umRecStore(at:u32,value:f32){records[at]=bitcast<u32>(value);}
@@ -31,10 +34,10 @@ fn umRecStore3(at:u32,value:vec3f){umRecStore(at,value.x);umRecStore(at+1u,value
 fn umRecLoad3(at:u32)->vec3f{return vec3f(umRecLoad(at),umRecLoad(at+1u),umRecLoad(at+2u));}
 // Row base for (job, lane), or 0xffffffff for an idle lane.
 fn umRecRow(group:vec3u,lane:u32)->vec2u {
- let job=group.x+umDispatchX*group.y;if((job+1u)*UM_REC_CHUNK>arrayLength(&records)){return vec2u(0xffffffffu);}
- let width=records[job*UM_REC_CHUNK];if(width==0u){return vec2u(0xffffffffu);}
+ let job=group.x+umDispatchX*group.y;if(UM_REC_PREFIX+(job+1u)*UM_REC_CHUNK>arrayLength(&records)){return vec2u(0xffffffffu);}
+ let width=records[UM_REC_PREFIX+job*UM_REC_CHUNK];if(width==0u){return vec2u(0xffffffffu);}
  let cells=64u/(width*width*width);if(lane>=cells){return vec2u(0xffffffffu);}
- return vec2u(job*UM_REC_CHUNK+64u+lane*(UM_REC_ROWS/cells),width);
+ return vec2u(UM_REC_PREFIX+job*UM_REC_CHUNK+64u+lane*(UM_REC_ROWS/cells),width);
 }
 fn umCellCenter(o:UMOwner)->vec3f{return vec3f(umOrigin(o))+vec3f(0.5*f32(o.width));}
 // Row r of the fused job set as (job, lane): jobs keep umFusedOwner's order
@@ -50,15 +53,20 @@ fn umFusedRow(row:u32)->vec2u {
  }
  return vec2u(0xffffffffu);
 }
+fn umFusedRowCount()->u32 {
+ let header=7u*UM_TILES+16u;var rows=0u;
+ for(var tier=0u;tier<3u;tier++){rows+=(umSupport[header+tier]+select(0u,umCounts[tier],umFusedRegularTier(tier)))*(64u>>(3u*tier));}
+ return rows;
+}
 // One lane per record row (UniformMixedOwnership.fusedRows), so coarse jobs
 // do not hold a 64-lane workgroup for one or eight rows.
 @compute @workgroup_size(64) fn buildRecords(@builtin(global_invocation_id) gid:vec3u){
  let at=umFusedRow(gid.x+umDispatchX*64u*gid.y);let job=at.x;let lane=at.y;
- if(job==0xffffffffu||(job+1u)*UM_REC_CHUNK>arrayLength(&records)){return;}
+ if(job==0xffffffffu||UM_REC_PREFIX+(job+1u)*UM_REC_CHUNK>arrayLength(&records)){return;}
  let o=umFusedOwner(vec3u(job,0u,0u),lane,true);
- if(lane==0u){records[job*UM_REC_CHUNK]=o.width;}
+ if(lane==0u){records[UM_REC_PREFIX+job*UM_REC_CHUNK]=o.width;}
  if(o.width==0u){return;}
- let cells=64u/(o.width*o.width*o.width);let row=job*UM_REC_CHUNK+64u+lane*(UM_REC_ROWS/cells);let E=umRecEntries(o.width);
+ let cells=64u/(o.width*o.width*o.width);let row=UM_REC_PREFIX+job*UM_REC_CHUNK+64u+lane*(UM_REC_ROWS/cells);let E=umRecEntries(o.width);
  let coreAt=row+4u;let slopeOwnAt=coreAt+2u*E;let slopeAt=slopeOwnAt+3u;let correctionOwnAt=slopeAt+4u*E;let correctionAt=correctionOwnAt+3u;let haloAt=correctionAt+5u*E;
  let liquid=${liquid("o")};let regular=umPressureRegular(o);
  var diagonal=0.0;var core=0u;var halos=0u;
@@ -164,7 +172,7 @@ fn umRecSlope(row:u32,E:u32)->vec3f {
  }
  return slope;
 }
-fn umRecRowEntries(row:u32)->u32{return umRecEntries(records[(row/UM_REC_CHUNK)*UM_REC_CHUNK]);}
+fn umRecRowEntries(row:u32)->u32{return umRecEntries(records[UM_REC_PREFIX+((row-UM_REC_PREFIX)/UM_REC_CHUNK)*UM_REC_CHUNK]);}
 @compute @workgroup_size(64) fn reconstructRecords(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let r=umRecRow(group,lane);if(r.x==0xffffffffu){return;}let row=r.x;let E=umRecEntries(r.y);
  slopes[records[row+1u]]=vec4f(umRecSlope(row,E),0.0);

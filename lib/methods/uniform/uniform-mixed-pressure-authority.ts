@@ -1,6 +1,7 @@
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformVolumeCorrectionWGSL } from "./uniform-volume-correction.wgsl";
+import { uniformMixedDetachedMassWGSL } from "./uniform-mixed-detached-mass.wgsl";
 import { uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 
 export interface UniformMixedPressureAuthorityFields {
@@ -10,15 +11,24 @@ export interface UniformMixedPressureAuthorityFields {
  phase:GPUTexture;
  correction:GPUTexture;
  scratch:GPUBufferBinding;
- /** dt, density fallback (-1/no deficit balance, 0/off, 1/isolated, 2/all), airborne, dust threshold. */
+ /** dt, deficit balance (0 on, -1 off), unused, dust threshold. */
  params:GPUBuffer;
+ /** Coarse mode only: the h centre phi and volume in simulation ownership,
+  * where every cut tile is h (promotion certificate). */
+ fine?:{centerPhi:GPUTexture;volume:GPUTexture};
 }
 /** One pressure interface for RHS, projection, momentum support and extension.
  * Excess/deficit balance uses physical cell mass; coarse cells are not counted
  * as one fine cell. All fields and reduction scratch are caller-owned.
  * With static solids, fine owners follow native pressurePhi exactly: rho'=V/open
  * claims rows, closed cells continue the open liquid interface (CM11a's one
- * layer of solid unknowns), and balance counts open liquid capacity only. */
+ * layer of solid unknowns), and balance counts open liquid capacity only.
+ * Coarse mode (band pressure's all-4h owners) reads the static all-4h solid
+ * record the same way: capacity is the owner's mean open fraction, a closed
+ * owner continues its open liquid neighbours, and deficits are of target*cap.
+ * A cut 4h owner's phi is native mgDownsampleTopology's open-child vote
+ * (h to 2h to 4h, positive preferred) of the h pressurePhi: its 4h centre
+ * phi samples vertices buried in the solid, which are not state. */
 export class UniformMixedPressureAuthority {
  readonly allocatedBytes=0;
  readonly scratchBytes:number;
@@ -26,7 +36,8 @@ export class UniformMixedPressureAuthority {
  private readonly chunks:number;
  private readonly resources:GPUBindGroupLayout;
  private readonly pipelines=new Map<string,GPUComputePipeline>();
- constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid?:UniformMixedSolid){
+ constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid?:UniformMixedSolid,private readonly coarse=false){
+  if(coarse&&(!solid?.coarse||ownership.layout.tiles.some(word=>(word&0xc0000000)!==0)))throw new Error("Coarse mixed pressure authority requires the all-4h solid record and all-4h ownership");
   this.groups=Math.ceil(ownership.layout.cellCount/64);this.chunks=Math.ceil(this.groups/1024);
   this.scratchBytes=8*(1+this.groups+this.chunks);
   this.resources=device.createBindGroupLayout({entries:[
@@ -34,6 +45,7 @@ export class UniformMixedPressureAuthority {
    ...[3,6].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),
    ...[4,5].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only" as const,format:"r32float" as const,viewDimension:"3d" as const}})),
    {binding:7,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
+   ...(coarse?[8,9].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})):[]),
   ]});
  }
  bind(f:UniformMixedPressureAuthorityFields):GPUBindGroup{
@@ -41,11 +53,14 @@ export class UniformMixedPressureAuthority {
   const d=this.ownership.layout.lattice.dimensions;
   for(const t of [f.centerPhi,f.volume,f.targetFill,f.phase,f.correction])if(t.format!=="r32float"||[t.width,t.height,t.depthOrArrayLayers].some((v,a)=>v!==d[a]))throw new Error("Mixed pressure authority requires native scalar fields");
   if([f.centerPhi,f.volume,f.targetFill].some(t=>t===f.phase||t===f.correction)||f.phase===f.correction)throw new Error("Mixed pressure authority outputs must be disjoint");
+  if(!!f.fine!==this.coarse)throw new Error("Coarse mixed pressure authority needs the h simulation centre phi and volume, and only it");
+  if(f.fine)for(const t of [f.fine.centerPhi,f.fine.volume])if(t.format!=="r32float"||[t.width,t.height,t.depthOrArrayLayers].some((v,a)=>v!==d[a])||t===f.phase||t===f.correction)throw new Error("Coarse mixed pressure authority h fields must be native scalar inputs");
   return this.device.createBindGroup({layout:this.resources,entries:[
    ...[f.centerPhi,f.volume,f.targetFill].map((t,binding)=>({binding,resource:t.createView()})),
    {binding:3,resource:{...f.phi,size:4*this.ownership.layout.cellCount}},
    {binding:4,resource:f.phase.createView()},{binding:5,resource:f.correction.createView()},
    {binding:6,resource:{...f.scratch,size:this.scratchBytes}},{binding:7,resource:{buffer:f.params,size:16}},
+   ...(f.fine?[f.fine.centerPhi,f.fine.volume].map((t,i)=>({binding:8+i,resource:t.createView()})):[]),
   ]});
  }
  async initialize():Promise<void>{
@@ -59,20 +74,10 @@ export class UniformMixedPressureAuthority {
 @group(1) @binding(6) var<storage,read_write> balance:array<vec2f>;
 @group(1) @binding(7) var<uniform> params:vec4f;
 ${uniformVolumeCorrectionWGSL}
-${uniformMixedSolidWGSL(this.solid?2:undefined)}
+${uniformMixedSolidWGSL(this.solid?2:undefined,this.coarse?this.solid!.coarse!.count:undefined)}
 const UM_HMIN=${Math.min(...this.ownership.layout.lattice.cellSize_m)};
-// pressureSurfacePhi for one fine cell (solid scenes only).
-fn umSurfacePhiCell(p:vec3i)->f32{
- let h=UM_HMIN;let v=textureLoad(volume,p,0).x;var distance=textureLoad(centerPhi,p,0).x;
- if(params.z>0.5){distance=min(distance,max(h*(1.0-v),-0.5*h));}
- if(params.y<0.5){return distance;}
- let open=umCellOpen(p);if(open<=1e-5){return distance;}
- let volumePhi=h*(0.5-v/open);if(params.y>1.5){return min(distance,volumePhi);}
- if(distance<0.0||volumePhi>=0.0){return distance;}
- for(var axis=0u;axis<3u;axis++){for(var side=-1;side<=1;side+=2){
-  var n=p;n[axis]+=side;if(umSolidValid(n)&&textureLoad(centerPhi,n,0).x<0.0){return distance;}}}
- return max(volumePhi,-0.5*h);
-}
+// pressureSurfacePhi for one fine cell (solid scenes only): centre phi.
+fn umSurfacePhiCell(p:vec3i)->f32{return textureLoad(centerPhi,p,0).x;}
 // pressurePhi: a closed cell continues its open liquid neighbours.
 fn umPressurePhiCell(p:vec3i)->f32{
  if(umCellOpen(p)>1e-5){return umSurfacePhiCell(p);}
@@ -84,33 +89,70 @@ fn umPressurePhiCell(p:vec3i)->f32{
  let sum=((terms[0]+terms[1])+(terms[4]+terms[5]))+(terms[2]+terms[3]);
  return select(0.5*UM_HMIN,sum/max(weight,1e-9),weight>0.0);
 }
-fn umCapacity(o:UMOwner)->f32{return select(1.0,umCellOpen(vec3i(umOrigin(o))),umSolidEnabled()&&o.width==1u);}
+fn umCapacity(o:UMOwner)->f32{${this.coarse?"return umSolidCoarse(o.index).x;":"return select(1.0,umCellOpen(vec3i(umOrigin(o))),umSolidEnabled()&&o.width==1u);"}}
+${uniformMixedDetachedMassWGSL(o=>`textureLoad(centerPhi,vec3i(umOrigin(${o})),0).x<0.0`,o=>`textureLoad(volume,vec3i(umOrigin(${o})),0).x`,"params.w")}
+// Surface phi of an owner: its centre phi.
+fn umOwnerSurfacePhi(o:UMOwner,v:f32,cap:f32)->f32{return textureLoad(centerPhi,vec3i(umOrigin(o)),0).x;}
+${this.coarse?`@group(1) @binding(8) var fineCenterPhi:texture_3d<f32>;
+@group(1) @binding(9) var fineVolume:texture_3d<f32>;
+// umSurfacePhiCell on the h simulation fields.
+fn umFineSurfacePhiCell(p:vec3i)->f32{return textureLoad(fineCenterPhi,p,0).x;}
+// umPressurePhiCell on the h simulation fields.
+fn umFinePressurePhiCell(p:vec3i)->f32{
+ if(umCellOpen(p)>1e-5){return umFineSurfacePhiCell(p);}
+ var terms:array<f32,6>;var weights:array<f32,6>;
+ for(var i=0u;i<6u;i++){var q=p;q[i/2u]+=select(-1,1,(i&1u)!=0u);let open=umCellOpen(q);
+  terms[i]=0.0;weights[i]=0.0;if(open<=1e-5){continue;}
+  let phi=umFineSurfacePhiCell(q);if(phi<0.0){terms[i]=open*phi;weights[i]=open;}}
+ let weight=((weights[0]+weights[1])+(weights[4]+weights[5]))+(weights[2]+weights[3]);
+ let sum=((terms[0]+terms[1])+(terms[4]+terms[5]))+(terms[2]+terms[3]);
+ return select(0.5*UM_HMIN,sum/max(weight,1e-9),weight>0.0);
+}
+fn umSum8(v:array<f32,8>)->f32{return ((v[0]+v[5])+(v[1]+v[4]))+((v[2]+v[7])+(v[3]+v[6]));}
+// Native restrictSurfacePhi on a split owner (umPreferPositivePhi on).
+fn umOpenVote(values:array<f32,8>,opens:array<f32,8>)->f32{
+ var open:array<f32,8>;var flags:array<f32,8>;var positive:array<f32,8>;var positiveFlags:array<f32,8>;var negativeFlags:array<f32,8>;
+ for(var k=0u;k<8u;k++){let isOpen=opens[k]>1e-5;let value=values[k];
+  open[k]=select(0.0,value,isOpen);flags[k]=select(0.0,1.0,isOpen);
+  positive[k]=select(0.0,value,value>=0.0&&isOpen);positiveFlags[k]=select(0.0,1.0,value>=0.0&&isOpen);negativeFlags[k]=select(0.0,1.0,value<0.0&&isOpen);}
+ let openCount=umSum8(flags);let positiveCount=umSum8(positiveFlags);
+ let sum=select(umSum8(values),umSum8(open)*8.0/max(openCount,1.0),openCount>0.0);
+ return select(sum/8.0,umSum8(positive)/max(positiveCount,1.0),positiveCount>0.0&&umSum8(negativeFlags)>0.0);
+}
+// A cut owner's phi: h pressurePhi voted to 2h, then to 4h.
+fn umCutPhi(o:UMOwner)->f32{
+ let origin=vec3i(umOrigin(o));var mid:array<f32,8>;var midOpen:array<f32,8>;
+ for(var k=0u;k<8u;k++){
+  let base=origin+2*vec3i(vec3u(k&1u,(k>>1u)&1u,k>>2u));var values:array<f32,8>;var opens:array<f32,8>;
+  for(var j=0u;j<8u;j++){let p=base+vec3i(vec3u(j&1u,(j>>1u)&1u,j>>2u));values[j]=umFinePressurePhiCell(p);opens[j]=umCellOpen(p);}
+  mid[k]=umOpenVote(values,opens);midOpen[k]=umSum8(opens)/8.0;
+ }
+ return umOpenVote(mid,midOpen);
+}
+// An open owner's phi: cut owners vote their h cells.
+fn umOpenOwnerPhi(o:UMOwner,v:f32,cap:f32)->f32{
+ if(umSolidCut(umTileAt(umOrigin(o)/4u))){return umCutPhi(o);}
+ return umOwnerSurfacePhi(o,v,cap);
+}`:""}
 fn umAuthority(o:UMOwner,v:f32)->f32{
- if(umSolidEnabled()&&o.width==1u){return umPressurePhiCell(vec3i(umOrigin(o)));}
- let h=${Math.min(...this.ownership.layout.lattice.cellSize_m)}*f32(o.width);
- var distance=textureLoad(centerPhi,vec3i(umOrigin(o)),0).x;
- if(params.z>0.5){distance=min(distance,max(h*(1.0-v),-0.5*h));}
- if(params.y<0.5){return distance;}
- let volumePhi=h*(0.5-v);if(params.y>1.5){return min(distance,volumePhi);}
- if(distance<0.0||volumePhi>=0.0){return distance;}
- for(var axis=0u;axis<3u;axis++){for(var side=0u;side<2u;side++){
-  let sign=select(-1,1,side==1u);let first=umFace(o,axis,sign,0u);
-  for(var part=0u;part<first.count;part++){let neighbor=umFace(o,axis,sign,part).neighbor;
-   if(neighbor.width!=0u&&textureLoad(centerPhi,vec3i(umOrigin(neighbor)),0).x<0.0){return distance;}}
- }}
- return max(volumePhi,-0.5*h);
+ ${this.coarse?`let cap=umCapacity(o);if(cap>1e-5){return umOpenOwnerPhi(o,v,cap);}
+ // A closed owner continues its open liquid neighbours, capacity-weighted.
+ var terms:array<f32,6>;var weights:array<f32,6>;
+ for(var i=0u;i<6u;i++){
+  terms[i]=0.0;weights[i]=0.0;var q=vec3i(umOrigin(o));q[i/2u]+=select(-i32(o.width),i32(o.width),(i&1u)!=0u);
+  if(any(q<vec3i(0))||any(q>=vec3i(UM_D))){continue;}
+  let n=umOwnerAt(q);let open=umCapacity(n);if(n.width==0u||open<=1e-5){continue;}
+  let phi=umOpenOwnerPhi(n,textureLoad(volume,q,0).x,open);if(phi<0.0){terms[i]=open*phi;weights[i]=open;}
+ }
+ let weight=((weights[0]+weights[1])+(weights[4]+weights[5]))+(weights[2]+weights[3]);
+ let sum=((terms[0]+terms[1])+(terms[4]+terms[5]))+(terms[2]+terms[3]);
+ return select(0.5*UM_HMIN*f32(o.width),sum/max(weight,1e-9),weight>0.0);`:`if(umSolidEnabled()&&o.width==1u){return umPressurePhiCell(vec3i(umOrigin(o)));}
+ return umOwnerSurfacePhi(o,v,1.0);`}
 }
 fn umDeficit(o:UMOwner,v:f32,distance:f32)->f32{
  let cap=umCapacity(o);
  if(cap<=1e-5||v>cap||distance>=0.0){return 0.0;}
- return max(0.0,textureLoad(targetFill,vec3i(umOrigin(o)),0).x-v);
-}
-// uvAirborneCell's uncut 5^3 neighbourhood (fine owners in solid scenes).
-fn umAirborneOpen(o:UMOwner)->bool{
- if(!umSolidEnabled()||o.width!=1u){return true;}
- for(var z=-2;z<=2;z++){for(var y=-2;y<=2;y++){for(var x=-2;x<=2;x++){
-  if(umCellOpen(vec3i(umOrigin(o))+vec3i(x,y,z))<0.99999){return false;}}}}
- return true;
+ return max(0.0,textureLoad(targetFill,vec3i(umOrigin(o)),0).x${this.coarse?"*cap":""}-v);
 }
 // false: the phase-only build (phi and phase; no balance reduction).
 override umAuthorityBalance:bool=true;
@@ -120,9 +162,7 @@ fn umReduce(l:u32){workgroupBarrier();for(var stride=32u;stride>0u;stride/=2u){i
  let o=umAllOwner(gid);var values=vec2f(0);
  if(o.width!=0u){let origin=vec3i(umOrigin(o));let v=textureLoad(volume,origin,0).x;let distance=umAuthority(o,v);
   phi[o.index]=distance;
-  let airborne=params.z>0.5&&v>max(params.w,0.05)&&textureLoad(centerPhi,origin,0).x>${1.5*Math.min(...this.ownership.layout.lattice.cellSize_m)}*f32(o.width)
-   &&all(origin>=vec3i(i32(2u*o.width)))&&all(origin+vec3i(i32(3u*o.width))<=vec3i(UM_D))&&umAirborneOpen(o);
-  textureStore(phase,origin,vec4f(select(0.0,1.0,distance<0.0||airborne)));
+  textureStore(phase,origin,vec4f(select(0.0,1.0,distance<0.0||umDetachedMass(o))));
   if(umAuthorityBalance){
   let cap=umCapacity(o);
   values=vec2f(uvVolumeCorrectionAmountAt(v,cap,params.x),umDeficit(o,v,distance))*f32(o.width*o.width*o.width);
@@ -149,7 +189,7 @@ fn umReduce(l:u32){workgroupBarrier();for(var stride=32u;stride>0u;stride/=2u){i
 }
 `});
   const info=await module.getCompilationInfo(),errors=info.messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
-  const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.bindLayout]:[])]});
+  const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.coarse?this.solid.coarse!.bindLayout:this.solid.bindLayout]:[])]});
   for(const entryPoint of ["build","chunks","reduce","resolve"])this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX}}}));
   this.pipelines.set("phase",await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"build",constants:{umDispatchX:this.ownership.dispatchX,umAuthorityBalance:0}}}));
  }
@@ -158,7 +198,7 @@ fn umReduce(l:u32){workgroupBarrier();for(var stride=32u;stride>0u;stride/=2u){i
   * correction and its balance scratch before the RHS, their only reader. */
  encode(encoder:GPUCommandEncoder,group:GPUBindGroup,balance=true):void{
   if(this.pipelines.size!==5)throw new Error("Mixed pressure authority is not initialized");
-  const pass=encoder.beginComputePass({label:balance?"Uniform mixed pressure authority and volume correction":"Uniform mixed pressure authority phase"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);
+  const pass=encoder.beginComputePass({label:balance?"Uniform mixed pressure authority and volume correction":"Uniform mixed pressure authority phase"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.coarse?this.solid.coarse!.bindGroup:this.solid.bindGroup);
   if(!balance){this.ownership.dispatchAll(pass,this.pipelines.get("phase")!);pass.end();return;}
   for(const entry of ["build","chunks","reduce","resolve"]){const pipeline=this.pipelines.get(entry)!;pass.setPipeline(pipeline);
    if(entry==="chunks")pass.dispatchWorkgroups(this.chunks);else if(entry==="reduce")pass.dispatchWorkgroups(1);else this.ownership.dispatchAll(pass,pipeline);

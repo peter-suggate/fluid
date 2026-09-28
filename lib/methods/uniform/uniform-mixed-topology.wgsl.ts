@@ -5,6 +5,10 @@ import type { UniformMixedLayout } from "./uniform-mixed-layout";
 
 /** Regular tiers with at most this many tiles join the fused interface launch. */
 export const UNIFORM_MIXED_FUSED_REGULAR_TILES=64;
+/** Regular 2h/4h tiers with at most this many owners (256 groups) are
+ * launch-bound: they ride another launch as packed lanes (umRegularCoarseOwner)
+ * instead of a width-specialized launch of their own. */
+export const UNIFORM_MIXED_PACKED_REGULAR_OWNERS=16384;
 
 /** One packed topology buffer: tile records, h/2h/4h worklists, then frozen stencil masks.
  * Ownership and tracing share this ABI. A 64-lane group visits one h tile,
@@ -91,6 +95,11 @@ fn umOwner(gid:vec3u)->UMOwner {
 // its runtime width, so a single launch replaces the tiny per-tier launches.
 fn umFusedRegularTier(tier:u32)->bool{
  let count=umCounts[tier];return count>umSupport[7u*UM_TILES+16u+tier]&&count<=${UNIFORM_MIXED_FUSED_REGULAR_TILES}u;
+}
+// tier 1 or 2, not a small fused tier: see UNIFORM_MIXED_PACKED_REGULAR_OWNERS.
+fn umPackedRegularTier(tier:u32)->bool{
+ let owners=(umCounts[tier]-umSupport[7u*UM_TILES+16u+tier])*(64u>>(3u*tier));
+ return !umFusedRegularTier(tier)&&owners<=${UNIFORM_MIXED_PACKED_REGULAR_OWNERS}u;
 }
 fn umFusedOwner(group:vec3u,lane:u32,regular:bool)->UMOwner {
  let header=7u*UM_TILES+16u;var job=group.x+umDispatchX*group.y;

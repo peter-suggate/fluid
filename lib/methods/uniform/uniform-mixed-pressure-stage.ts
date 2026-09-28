@@ -3,7 +3,6 @@ import { uniformMixedPressureBoundaryIndexWGSL, uniformMixedPressureBoundaryWGSL
 import { uniformMixedPressureSurfaceWGSL } from "./uniform-mixed-pressure-surface.wgsl";
 import { uniformMixedPressureBoundsWGSL } from "./uniform-mixed-pressure-bounds.wgsl";
 import { UniformMixedOwnership } from "./uniform-mixed-ownership";
-import { mixedCellWidth } from "./uniform-mixed-layout";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedPressureReconstructionSource } from "./uniform-mixed-pressure-reconstruction.wgsl";
 import { uniformMixedPressureOperatorSource } from "./uniform-mixed-pressure-operator.wgsl";
@@ -13,9 +12,9 @@ import { UNIFORM_MIXED_PRESSURE_RECORD_CHUNK, uniformMixedPressureRecordsSource 
 
 const recordEntries = ["buildRecords", "linkRecords", "reconstructRecords", "freezeRecords", "residualRecords", "measureRecords"] as const;
 type RecordEntry = typeof recordEntries[number];
-const entries = ["reconstruct", "freezeRhs", "residual", "addBackup", "saveBackup", "measure", "clearPressure"] as const;
+const entries = ["addBackup", "saveBackup"] as const;
 export type UniformMixedPressureEntry = typeof entries[number];
-export type UniformMixedPressureTransferEntry = "restrictValues" | "restrictSurfacePhi" | "prolongAssign" | "prolongAdd" | "extrapolateSurfacePhi";
+export type UniformMixedPressureTransferEntry = "restrictValues" | "restrictSurfacePhi" | "prolongAssign" | "prolongAdd";
 export interface UniformMixedPressureFields {
   pressure: GPUBufferBinding;
   slopes: GPUBufferBinding;
@@ -76,15 +75,21 @@ function views(fields: readonly GPUBufferBinding[], sizes: readonly number[]): G
   return result;
 }
 
+/** Every mixed pressure level is all-4h: stages compile the 4h tier alone. */
+function assertAllCoarse(owner: UniformMixedOwnership): void {
+  if (owner.layout.coarseTiles.length !== owner.layout.tiles.length) throw new Error("Mixed pressure levels must be all-4h");
+}
+/** Pipelines indexed by tier (ownership.dispatch): only the 4h tier exists.
+ * The empty h and 2h tiers never launch (dispatchTier returns on a zero count). */
+function coarseTier(pipeline: GPUComputePipeline): GPUComputePipeline[] {
+  const tiers: GPUComputePipeline[] = []; tiers[2] = pipeline; return tiers;
+}
 function validatePressureLevels(fine: UniformMixedOwnership, coarse: UniformMixedOwnership): void {
   if (fine.layout.lattice.dimensions.some((n, a) => n !== coarse.layout.lattice.dimensions[a])
     || fine.layout.lattice.cellSize_m.some((n, a) => n !== coarse.layout.lattice.cellSize_m[a])
     || (["x", "y", "z"] as const).some(a => fine.layout.lattice.origin_m[a] !== coarse.layout.lattice.origin_m[a]))
     throw new Error("Mixed pressure transfer lattices differ");
-  if (fine.layout.tiles.some((word, i) => {
-    const f = mixedCellWidth(word), c = mixedCellWidth(coarse.layout.tiles[i]!);
-    return c !== f && c !== 2 * f;
-  })) throw new Error("Mixed pressure transfers require adjacent nested levels");
+  assertAllCoarse(fine); assertAllCoarse(coarse);
 }
 
 /** GPU stage binding, not another pressure solver. The caller supplies shared
@@ -105,7 +110,8 @@ export class UniformMixedPressureLevelStage {
   private recordGroup?:GPUBindGroup;
   /** Surface levels: per-tier lists of the regular tiles holding a liquid
    * owner (phi<0), rebuilt with the records from this solve's phi. Words 0-2
-   * count each tier, 4-12 its indirect launch, then from word 16 each tier's
+   * count each tier, 4-12 its indirect launch, 13-15 the fused fine/record
+   * launch, then from word 16 each tier's
    * tiles at that tier's worklist offset. After a visit's first dense sweep
    * an air owner is a fixed point (max(p,p_min), halo included), so later
    * sweeps revisit only these tiles. */
@@ -119,13 +125,12 @@ export class UniformMixedPressureLevelStage {
   private recordsFor?:object;
   constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership, private readonly constrained = false, private readonly surface = false, private readonly boundary?: {openTop:boolean},
     /** Embedded static solids: face V from a per-level topology record. */
-    private readonly topology?: "texture"|"buffer") {
+    private readonly topology?: "buffer") {
     if(boundary&&!constrained)throw new Error("Separating walls require pressure minimum fields");
     if(topology&&(!surface||!boundary))throw new Error("Solid pressure topology requires surface rows and separating walls");
+    assertAllCoarse(ownership);
     this.resources = device.createBindGroupLayout({ entries: [...[0, 1, 2, 3, 4, ...(constrained ? [5] : []), ...(surface ? [6] : [])].map(binding => ({ binding,
-      visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" as const } })),
-      ...(topology==="texture"?[{binding:7,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}}]
-        :[])] });
+      visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" as const } }))] });
   }
   async initialize(): Promise<void> {
     const owner = this.ownership, h = owner.layout.lattice.cellSize_m;
@@ -150,10 +155,6 @@ ${this.topology ? uniformMixedPressureTopologyWGSL(this.topology,1,7,"",this.top
 ${this.boundary ? uniformMixedPressureBoundaryWGSL(owner.layout,this.boundary.openTop,this.surface,!!this.topology) : ""}
 ${uniformMixedPressureOperatorSource(this.surface,!!this.boundary,!!this.topology)}
 ${uniformMixedPressureRecordsSource(this.surface,!!this.boundary,!!this.topology,this.constrained)}
-fn umReconstructOwner(o:UMOwner){if(o.width!=0u){slopes[o.index]=vec4f(umReconstructPressureSlope(o),0.0);}}
-fn umFreezeOwner(o:UMOwner){if(o.width!=0u){frozen[o.index]=umPressureCorrectedRhs(o,rhs[o.index]);${halo("frozen[halo]=rhs[halo];")}}}
-@compute @workgroup_size(64) fn reconstruct(@builtin(global_invocation_id) gid:vec3u){umReconstructOwner(umOwner(gid));}
-@compute @workgroup_size(64) fn freezeRhs(@builtin(global_invocation_id) gid:vec3u){umFreezeOwner(umOwner(gid));}
 @compute @workgroup_size(64) fn residual(@builtin(global_invocation_id) gid:vec3u){
  let o=umOwner(gid);if(o.width!=0u){result[o.index]=${this.surface ? "select(0.0,rhs[o.index]-umPressureApply(o),umPressureLiquid(o))" : "rhs[o.index]-umPressureApply(o)"};${halo("let coefficient=select(umBoundaryCoefficient(o,axis,sign),0.0,umBoundaryOpen(axis,sign));result[halo]=rhs[halo]-coefficient*(pressures[halo]-umPressure(o));")}}
 }
@@ -190,8 +191,10 @@ ${this.surface ? ` if(!umPressureLiquid(o)){
 }
 // A sweep half: regular owners per tier with the width a compile-time
 // constant (register-light, as throughput-bound grids need), then the fused
-// record rows; the first half's record launch also freezes the right-hand
-// side. All read the same iterate.
+// record rows followed by the packed small regular 2h/4h tiers
+// (umPackedRegularTier) in one launch: a launch each would only add
+// dependent latency. The first half's record rows also freeze the
+// right-hand side. All read the same iterate.
 override umSweepFreeze:bool=false;
 @compute @workgroup_size(64) fn smoothJacobi(@builtin(global_invocation_id) gid:vec3u){umSmoothOwner(umOwner(gid));}
 ${this.surface?`// Liquid tile list (encodeRecords), bound in place of the records at group 2.
@@ -203,31 +206,34 @@ fn umLiquidOwner(gid:vec3u)->UMOwner {
  return UMOwner(tile,lane,umCellWidth,(umTopology[tile]&0x3fffffffu)+lane);
 }
 @compute @workgroup_size(64) fn smoothJacobiLiquid(@builtin(global_invocation_id) gid:vec3u){umSmoothOwner(umLiquidOwner(gid));}`:""}
-@compute @workgroup_size(64) fn sweepRecords(@builtin(global_invocation_id) gid:vec3u){
- let at=umFusedRow(gid.x+umDispatchX*64u*gid.y);if(at.x==0xffffffffu){return;}
+fn sweepRecordRow(row:u32){let rows=umFusedRowCount();
+ if(row>=rows){
+  let twos=umSupport[8u*UM_TILES+20u];
+  let o=umRegularCoarseOwner(row-rows+select(8u*twos,0u,umPackedRegularTier(1u)));
+  if(o.width!=0u&&umPackedRegularTier(o.width/2u)){umSmoothOwner(o);}
+  return;
+ }
+ let at=umFusedRow(row);if(at.x==0xffffffffu){return;}
  let r=umRecRow(vec3u(at.x,0u,0u),at.y);if(r.x==0xffffffffu){return;}
  umRecSmooth(r.x,umRecEntries(r.y),umSweepFreeze);
 }
+@compute @workgroup_size(64) fn sweepRecords(@builtin(global_invocation_id) gid:vec3u){sweepRecordRow(gid.x+umDispatchX*64u*gid.y);}
 @compute @workgroup_size(64) fn saveBackup(@builtin(global_invocation_id) gid:vec3u){
  let o=umOwner(gid);if(o.width!=0u){result[o.index]=pressures[o.index];${halo("result[halo]=pressures[halo];")}}
-}
-// clearBuffer of every slot an owner reads (its own and its halo slots), inside a pass.
-@compute @workgroup_size(64) fn clearPressure(@builtin(global_invocation_id) gid:vec3u){
- let o=umOwner(gid);if(o.width!=0u){pressures[o.index]=0.0;${halo("pressures[halo]=0.0;")}}
 }
 @compute @workgroup_size(64) fn addBackup(@builtin(global_invocation_id) gid:vec3u){
  let o=umOwner(gid);if(o.width!=0u){pressures[o.index]+=rhs[o.index];${halo("pressures[halo]+=rhs[halo];")}}
 }
 ` );
     const layout = this.device.createPipelineLayout({ bindGroupLayouts: [owner.bindLayout, this.resources] });
-    const compile = (entryPoint: string, width: number, seams = false, regular = false) => this.device.createComputePipelineAsync({ layout,
-      compute: { module, entryPoint, constants: { umCellWidth: width, umDispatchX: owner.dispatchX, umInterfaceTiles:+seams,umRegularTiles:+regular } } });
-    for (const entry of entries) this.pipelines.set(entry, await Promise.all([1, 2, 4].map(w => compile(entry, w))));
-    for(const entry of ["residual","measure"] as const)this.regularPipelines.set(entry,await Promise.all([1,2,4].map(width=>compile(entry,width,false,true))));
+    const compile = async (entryPoint: string, regular = false) => coarseTier(await this.device.createComputePipelineAsync({ layout,
+      compute: { module, entryPoint, constants: { umCellWidth: 4, umDispatchX: owner.dispatchX, umRegularTiles:+regular } } }));
+    for (const entry of entries) this.pipelines.set(entry, await compile(entry));
+    for(const entry of ["residual","measure"] as const)this.regularPipelines.set(entry,await compile(entry,true));
     const recordLayout=this.device.createPipelineLayout({bindGroupLayouts:[owner.bindLayout,this.resources,owner.hangingLayout]});
     for(const entryPoint of recordEntries)this.recordPipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout:recordLayout,
       compute:{module,entryPoint,constants:{umDispatchX:owner.dispatchX}}}));
-    this.regularSmoothPipelines=await Promise.all([1,2,4].map(width=>compile("smoothJacobi",width,false,true)));
+    this.regularSmoothPipelines=await compile("smoothJacobi",true);
     this.sweepRecordPipelines=await Promise.all([true,false].map(freeze=>this.device.createComputePipelineAsync({layout:recordLayout,
       compute:{module,entryPoint:"sweepRecords",constants:{umDispatchX:owner.dispatchX,umSweepFreeze:+freeze}}})));
     if(this.surface)await this.initializeLiquid(module,recordLayout);
@@ -250,6 +256,12 @@ fn umLiquidOwner(gid:vec3u)->UMOwner {
 }
 // Owners per group as ownership.dispatchTier: 64 h, eight 2h tiles, 64 4h tiles.
 @compute @workgroup_size(1) fn publish(){
+ let header=7u*UM_TILES+16u;var rows=0u;
+ for(var tier=0u;tier<3u;tier++){rows+=(umSupport[header+tier]+select(0u,umCounts[tier],umFusedRegularTier(tier)))*(64u>>(3u*tier));}
+ let base=8u*UM_TILES+20u;
+ rows+=select(0u,8u*umSupport[base],umPackedRegularTier(1u))+select(0u,umSupport[base+1u],umPackedRegularTier(2u));
+ let groups=atomicLoad(&liquid[0])+(rows+63u)/64u;
+ atomicStore(&liquid[13],min(groups,umDispatchX));atomicStore(&liquid[14],(groups+umDispatchX-1u)/umDispatchX);atomicStore(&liquid[15],1u);
  for(var tier=0u;tier<3u;tier++){
   let tiles=atomicLoad(&liquid[tier]);let groups=select(select(tiles,(tiles+7u)/8u,tier==1u),(tiles+63u)/64u,tier==2u);
   atomicStore(&liquid[4u+3u*tier],min(groups,umDispatchX));atomicStore(&liquid[5u+3u*tier],(groups+umDispatchX-1u)/umDispatchX);atomicStore(&liquid[6u+3u*tier],1u);
@@ -258,12 +270,11 @@ fn umLiquidOwner(gid:vec3u)->UMOwner {
     const classifyLayout=this.device.createPipelineLayout({bindGroupLayouts:[owner.bindLayout,layout]});
     const [reset,build,publish]=await Promise.all(["reset","build","publish"].map(entryPoint=>this.device.createComputePipelineAsync({layout:classifyLayout,
       compute:{module:classify,entryPoint,constants:{umDispatchX:owner.dispatchX}}})));
-    const list=this.device.createBuffer({label:"Uniform mixed pressure liquid tiles",size:(16+n)*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
-    const dispatch=this.device.createBuffer({label:"Uniform mixed pressure liquid dispatch",size:36,usage:GPUBufferUsage.INDIRECT|GPUBufferUsage.COPY_DST});
+    const {list,dispatch}=owner.pressureWorklists();
     // The list sweep binds the list where the sweep binds its records (group 2).
     const group=this.device.createBindGroup({layout:owner.hangingLayout,entries:[{binding:0,resource:{buffer:list}}]});
-    const smooth=await Promise.all([1,2,4].map(width=>this.device.createComputePipelineAsync({layout:recordLayout,
-      compute:{module,entryPoint:"smoothJacobiLiquid",constants:{umCellWidth:width,umDispatchX:owner.dispatchX,umRegularTiles:1}}})));
+    const smooth=coarseTier(await this.device.createComputePipelineAsync({layout:recordLayout,
+      compute:{module,entryPoint:"smoothJacobiLiquid",constants:{umCellWidth:4,umDispatchX:owner.dispatchX,umRegularTiles:1}}}));
     this.liquid={list,dispatch,group,layout,reset:reset!,build:build!,publish:publish!,smooth};
   }
   bind(fields: UniformMixedPressureFields): GPUBindGroup {
@@ -273,7 +284,7 @@ fn umLiquidOwner(gid:vec3u)->UMOwner {
     const bindings = [fields.pressure, fields.slopes, fields.rhs, fields.frozen, fields.result], sizes = [4*count, 16*n, 4*count, 4*count, 4*count];
     if (fields.minimum) { bindings.push(fields.minimum); sizes.push(4*count); }
     if (fields.phi) {
-      if (fields.topology && "buffer" in fields.topology) {
+      if (fields.topology) {
         const phi=fields.phi,topology=fields.topology.buffer,base=this.topologyBase!,records=16*uniformMixedPressureStorage(this.ownership.layout).count;
         if (topology.buffer!==phi.buffer || (topology.offset??0)!==(phi.offset??0)+4*base || (topology.size??records)<records)
           throw new Error("Mixed coarse pressure topology must directly follow its level's phi range");
@@ -281,15 +292,16 @@ fn umLiquidOwner(gid:vec3u)->UMOwner {
       } else { bindings.push(fields.phi); sizes.push(4*n); }
     }
     const resources = views(bindings, sizes);
-    if (!!this.topology !== !!fields.topology || (fields.topology && ("texture" in fields.topology) !== (this.topology === "texture")))
+    if (!!this.topology !== !!fields.topology)
       throw new Error("Mixed pressure topology binding does not match stage mode");
     const entries:GPUBindGroupEntry[]=resources.map((resource,index)=>({binding:index===resources.length-1&&this.surface?6:index,resource}));
-    if (fields.topology && "texture" in fields.topology) entries.push({binding:7,resource:fields.topology.texture.createView()});
     const group=this.device.createBindGroup({layout:this.resources,entries});
     const swapped=entries.map(entry=>({...entry,resource:entry.binding===0?resources[4]!:entry.binding===4?resources[0]!:entry.resource}));
     this.jacobiGroups.set(group,this.device.createBindGroup({layout:this.resources,entries:swapped}));
+    // Cached classifiers survive refinement. Preserve the reserved phi range,
+    // just as the sweep binding does, so newly added owners remain readable.
     if(this.liquid)this.liquidGroups.set(group,this.device.createBindGroup({layout:this.liquid.layout,entries:[
-      {binding:0,resource:{buffer:fields.phi!.buffer,offset:fields.phi!.offset??0,size:4*n}},{binding:1,resource:{buffer:this.liquid.list}}]}));
+      {binding:0,resource:views([fields.phi!],[4*n])[0]!},{binding:1,resource:{buffer:this.liquid.list}}]}));
     return group;
   }
   encode(target: UniformMixedPressureTarget, entry: UniformMixedPressureEntry, group: GPUBindGroup): void {
@@ -303,7 +315,7 @@ fn umLiquidOwner(gid:vec3u)->UMOwner {
    * for a new ownership generation. */
   encodeRecords(target: UniformMixedPressureTarget, group: GPUBindGroup): void {
     const build=this.recordPipelines.get("buildRecords");if(!build)throw new Error("Mixed pressure stage is not initialized");
-    this.recordGroup=this.ownership.recordGroup(this.ownership.fusedJobs(true)*UNIFORM_MIXED_PRESSURE_RECORD_CHUNK*4);
+    this.recordGroup=this.ownership.recordGroup(this.ownership.fusedJobs(true)*UNIFORM_MIXED_PRESSURE_RECORD_CHUNK*4+(16+this.ownership.layout.tiles.length)*4);
     const {pass,end}=beginPass(target,"Uniform mixed pressure records");
     pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);pass.setBindGroup(2,this.recordGroup!);
     this.ownership.dispatchFusedRows(pass,build);this.ownership.dispatchFusedRows(pass,this.recordPipelines.get("linkRecords")!);
@@ -316,7 +328,11 @@ fn umLiquidOwner(gid:vec3u)->UMOwner {
       pass.setPipeline(l.publish);pass.dispatchWorkgroups(1);
     }
     end();
-    if(this.liquid)commandsOf(target).copyBufferToBuffer(this.liquid.list,16,this.liquid.dispatch,0,36);
+    if(this.liquid){
+      const e=commandsOf(target);
+      e.copyBufferToBuffer(this.liquid.list,16,this.liquid.dispatch,0,48);
+      if(this.ownership.fusedRows()>0)this.ownership.copyPressureList(e,this.liquid.list);
+    }
     this.recordsFor=this.ownership.layout;
   }
   /** residual or measure: regular tiles through the regular operator, seam
@@ -349,14 +365,16 @@ fn umLiquidOwner(gid:vec3u)->UMOwner {
     const dispatchX=this.ownership.dispatchX;
     const launch=(pipeline:GPUComputePipeline,lanes:number)=>{const groups=Math.ceil(lanes/64);if(!groups)return;
       pass.setPipeline(pipeline);pass.dispatchWorkgroups(Math.min(groups,dispatchX),Math.ceil(groups/dispatchX));};
+    // All-4h: the regular 4h tier, unless packed into the record launch.
+    const unpacked=([2] as const).filter(tier=>!this.ownership.packedRegularTier(tier));
     for(const half of [0,1]){
       if(half)pass.setBindGroup(1,this.jacobiGroups.get(group)!);
       if(liquidOnly){
         pass.setBindGroup(2,this.liquid!.group);
-        this.ownership.dispatchRegularIndirect(pass,this.liquid!.smooth,this.liquid!.dispatch,true);
+        this.ownership.dispatchRegularIndirect(pass,this.liquid!.smooth,this.liquid!.dispatch,true,unpacked);
         pass.setBindGroup(2,this.recordGroup!);
-      }else this.ownership.dispatchRegular(pass,this.regularSmoothPipelines,true);
-      launch(this.sweepRecordPipelines[half]!,this.ownership.fusedRows());
+      }else this.ownership.dispatchRegular(pass,this.regularSmoothPipelines,true,unpacked);
+      launch(this.sweepRecordPipelines[half]!,this.ownership.fusedRows()+this.ownership.regularCoarseOwners());
     }
     end();
   }
@@ -374,17 +392,15 @@ export class UniformMixedPressureTransferStage {
   private readonly topologyResources?: GPUBindGroupLayout;
   private readonly pipelines = new Map<UniformMixedPressureTransferEntry, GPUComputePipeline[]>();
   constructor(private readonly device: GPUDevice, readonly fine: UniformMixedOwnership, readonly coarse: UniformMixedOwnership, private readonly preferPositivePhi = false, private readonly boundary = false,
-    private readonly topology?: "texture"|"buffer") {
+    private readonly topology?: "buffer") {
     validatePressureLevels(fine, coarse);
     if (topology && !boundary) throw new Error("Solid pressure topology requires separating walls");
     this.resources = device.createBindGroupLayout({ entries: [0, 1].map(binding => ({ binding,
       visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" as const } })) });
-    if (topology) this.topologyResources = device.createBindGroupLayout({ entries: [
-      topology === "texture" ? { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float" as const, viewDimension: "3d" as const } }
-        : { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" as const } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" as const } }] });
+    if (topology) this.topologyResources = device.createBindGroupLayout({ entries: [0, 1].map(binding => ({ binding,
+      visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" as const } })) });
   }
-  private get solidEntries(): UniformMixedPressureTransferEntry[] { return this.topology ? ["restrictSurfacePhi", "extrapolateSurfacePhi"] : []; }
+  private get solidEntries(): UniformMixedPressureTransferEntry[] { return this.topology ? ["restrictSurfacePhi"] : []; }
   async initialize(): Promise<void> {
     const fine = this.fine, coarse = this.coarse;
     const halo=(body:string,prefix:string)=>this.boundary?uniformMixedPressureBoundaryLoop(body,prefix):"";
@@ -392,41 +408,13 @@ export class UniformMixedPressureTransferStage {
     const solid = this.topology ? /* wgsl */ `
 ${uniformMixedPressureTopologyWGSL(this.topology, 3, 0, "fine")}
 @group(3) @binding(1) var<storage,read_write> topologyOut:array<vec4f>;
-fn umSum8Vec4(v:array<vec4f,8>)->vec4f{return ((v[0]+v[5])+(v[1]+v[4]))+((v[2]+v[7])+(v[3]+v[6]));}
+// Both levels are all-4h: each coarse owner copies its same-width fine twin.
 @compute @workgroup_size(64) fn restrictSurfacePhi(@builtin(global_invocation_id) gid:vec3u){
  let o=coarseumOwner(gid);if(o.width==0u){return;}
- let origin=coarseumOrigin(o);let first=fineumOwnerAt(vec3i(origin));
- var topology=fineumTopo(first);var phi=source[first.index];
- if(first.width!=o.width){
-  var terms:array<vec4f,8>;var faces:array<vec4f,8>;var values:array<f32,8>;var open:array<f32,8>;var openFlags:array<f32,8>;
-  var positive:array<f32,8>;var positiveFlags:array<f32,8>;var negativeFlags:array<f32,8>;
-  for(var k=0u;k<8u;k++){
-   let bit=vec3u(k&1u,(k>>1u)&1u,k>>2u);let child=fineumOwnerAt(vec3i(origin+bit*(o.width/2u)));
-   let t=fineumTopo(child);let value=source[child.index];let isOpen=t.x>1e-5;
-   terms[k]=t;faces[k]=vec4f(0.0,select(0.0,2.0*t.y,bit.x==1u),select(0.0,2.0*t.z,bit.y==1u),select(0.0,2.0*t.w,bit.z==1u));
-   values[k]=value;open[k]=select(0.0,value,isOpen);openFlags[k]=select(0.0,1.0,isOpen);
-   positive[k]=select(0.0,value,value>=0.0&&isOpen);positiveFlags[k]=select(0.0,1.0,value>=0.0&&isOpen);negativeFlags[k]=select(0.0,1.0,value<0.0&&isOpen);
-  }
-  let v=umSum8Vec4(terms);let fv=umSum8Vec4(faces);topology=vec4f(v.x,fv.y,fv.z,fv.w)/8.0;
-  let openCount=umPhiSum8(openFlags);let positiveCount=umPhiSum8(positiveFlags);
-  let sum=select(umPhiSum8(values),umPhiSum8(open)*8.0/max(openCount,1.0),openCount>0.0);
-  phi=select(sum/8.0,umPhiSum8(positive)/max(positiveCount,1.0),umPreferPositivePhi&&positiveCount>0.0&&umPhiSum8(negativeFlags)>0.0);
- }
- destination[o.index]=phi;topologyOut[o.index]=topology;
+ let first=fineumOwnerAt(vec3i(coarseumOrigin(o)));
+ destination[o.index]=source[first.index];topologyOut[o.index]=fineumTopo(first);
  ${halo(`var walls:array<f32,8>;for(var k=0u;k<8u;k++){walls[k]=fineumPressureWallV(umBoundaryChild(o,axis,sign,k),axis,sign);}
  topologyOut[halo]=vec4f(umPhiSum8(walls)/8.0,0.0,0.0,0.0);`,"coarse")}
-}
-@compute @workgroup_size(64) fn extrapolateSurfacePhi(@builtin(global_invocation_id) gid:vec3u){
- let o=coarseumOwner(gid);if(o.width==0u||topologyOut[o.index].x>1e-5){return;}
- let origin=vec3i(coarseumOrigin(o));var terms:array<f32,6>;var weights:array<f32,6>;
- for(var n=0u;n<6u;n++){
-  var q=origin;q[n/2u]+=select(-i32(o.width),i32(o.width),(n&1u)==1u);
-  let other=coarseumOwnerAt(q);if(other.width==0u){continue;}
-  let v=topologyOut[other.index].x;let value=destination[other.index];
-  if(v>1e-5&&value<0.0){terms[n]=v*value;weights[n]=v;}
- }
- let sum=((terms[0]+terms[1])+(terms[4]+terms[5]))+(terms[2]+terms[3]);let weight=((weights[0]+weights[1])+(weights[4]+weights[5]))+(weights[2]+weights[3]);
- if(weight>0.0){destination[o.index]=sum/max(weight,1e-9);}
 }` : /* wgsl */ `
 @compute @workgroup_size(64) fn restrictSurfacePhi(@builtin(global_invocation_id) gid:vec3u){
  let o=coarseumOwner(gid);if(o.width!=0u){destination[o.index]=umRestrictSurfacePhi(o);}
@@ -453,25 +441,22 @@ ${solid}
 ` );
     const layout = this.device.createPipelineLayout({ bindGroupLayouts: [fine.bindLayout, coarse.bindLayout, this.resources] });
     const solidLayout = this.topologyResources ? this.device.createPipelineLayout({ bindGroupLayouts: [fine.bindLayout, coarse.bindLayout, this.resources, this.topologyResources] }) : layout;
-    for (const entryPoint of ["restrictValues", "restrictSurfacePhi", "prolongAssign", "prolongAdd", ...(this.topology ? ["extrapolateSurfacePhi"] as const : [])] as const) this.pipelines.set(entryPoint,
-      await Promise.all([1, 2, 4].map(width => this.device.createComputePipelineAsync({ layout: this.solidEntries.includes(entryPoint) ? solidLayout : layout, compute: { module, entryPoint,
-        constants: { umPreferPositivePhi: Number(this.preferPositivePhi), fineumCellWidth: width, coarseumCellWidth: width, fineumDispatchX: fine.dispatchX, coarseumDispatchX: coarse.dispatchX } } }))));
+    for (const entryPoint of ["restrictValues", "restrictSurfacePhi", "prolongAssign", "prolongAdd"] as const) this.pipelines.set(entryPoint,
+      coarseTier(await this.device.createComputePipelineAsync({ layout: this.solidEntries.includes(entryPoint) ? solidLayout : layout, compute: { module, entryPoint,
+        constants: { umPreferPositivePhi: Number(this.preferPositivePhi), fineumCellWidth: 4, coarseumCellWidth: 4, fineumDispatchX: fine.dispatchX, coarseumDispatchX: coarse.dispatchX } } })));
   }
   bind(entry: UniformMixedPressureTransferEntry, source: GPUBufferBinding, destination: GPUBufferBinding): GPUBindGroup {
-    const counts = [this.fine, this.coarse].map(o=>this.boundary&&entry!=="restrictSurfacePhi"&&entry!=="extrapolateSurfacePhi"?uniformMixedPressureStorage(o.layout).count:o.layout.cellCount);
-    if (entry !== "restrictValues" && entry !== "restrictSurfacePhi" && entry !== "extrapolateSurfacePhi") counts.reverse();
+    const counts = [this.fine, this.coarse].map(o=>this.boundary&&entry!=="restrictSurfacePhi"?uniformMixedPressureStorage(o.layout).count:o.layout.cellCount);
+    if (entry !== "restrictValues" && entry !== "restrictSurfacePhi") counts.reverse();
     const resources = views([source, destination], counts.map(n => n * 4));
     return this.device.createBindGroup({ layout: this.resources, entries: resources.map((resource, binding) => ({ binding, resource })) });
   }
-  /** Fine-level record (texture at L0, arena vec4 buffer above) and the
-   * coarse level's arena record, both sized for owners plus halo slots. */
+  /** Both levels' arena topology records, sized for owners plus halo slots. */
   bindTopology(source: UniformMixedPressureTopology, destination: GPUBufferBinding): GPUBindGroup {
-    if (!this.topologyResources || ("texture" in source) !== (this.topology === "texture")) throw new Error("Mixed pressure transfer topology does not match stage mode");
+    if (!this.topologyResources) throw new Error("Mixed pressure transfer topology does not match stage mode");
     const [fine, coarse] = [this.fine, this.coarse].map(o => 16 * uniformMixedPressureStorage(o.layout).count);
-    const out = views([destination], [coarse!])[0]!;
-    if ("buffer" in source) { const input = views([source.buffer, destination], [fine!, coarse!]);
-      return this.device.createBindGroup({ layout: this.topologyResources, entries: input.map((resource, binding) => ({ binding, resource })) }); }
-    return this.device.createBindGroup({ layout: this.topologyResources, entries: [{ binding: 0, resource: source.texture.createView() }, { binding: 1, resource: out }] });
+    const input = views([source.buffer, destination], [fine!, coarse!]);
+    return this.device.createBindGroup({ layout: this.topologyResources, entries: input.map((resource, binding) => ({ binding, resource })) });
   }
   encode(target: UniformMixedPressureTarget, entry: UniformMixedPressureTransferEntry, group: GPUBindGroup, topology?: GPUBindGroup): void {
     const pipelines = this.pipelines.get(entry);
@@ -479,7 +464,7 @@ ${solid}
     if (this.solidEntries.includes(entry) !== !!topology) throw new Error(`Mixed pressure ${entry} topology binding does not match stage mode`);
     const { pass, end } = beginPass(target, `Uniform mixed pressure ${entry}`);
     pass.setBindGroup(0, this.fine.bindGroup); pass.setBindGroup(1, this.coarse.bindGroup); pass.setBindGroup(2, group); if (topology) pass.setBindGroup(3, topology);
-    ((entry === "restrictValues" || entry === "restrictSurfacePhi" || entry === "extrapolateSurfacePhi") ? this.coarse : this.fine).dispatch(pass, pipelines); end();
+    ((entry === "restrictValues" || entry === "restrictSurfacePhi") ? this.coarse : this.fine).dispatch(pass, pipelines); end();
   }
 }
 
@@ -519,8 +504,8 @@ ${uniformMixedPressureBoundsWGSL}
 `);
     const layout = this.device.createPipelineLayout({ bindGroupLayouts: [fine.bindLayout, coarse.bindLayout, this.resources] });
     for (const entryPoint of ["shiftMinimum", "downsampleMinimum", "downsampleSubtract"] as const) this.pipelines.set(entryPoint,
-      await Promise.all([1, 2, 4].map(width => this.device.createComputePipelineAsync({ layout, compute: { module, entryPoint,
-        constants: { fineumCellWidth: width, coarseumCellWidth: width, fineumDispatchX: fine.dispatchX, coarseumDispatchX: coarse.dispatchX } } }))));
+      coarseTier(await this.device.createComputePipelineAsync({ layout, compute: { module, entryPoint,
+        constants: { fineumCellWidth: 4, coarseumCellWidth: 4, fineumDispatchX: fine.dispatchX, coarseumDispatchX: coarse.dispatchX } } })));
   }
   bind(entry: UniformMixedPressureBoundsEntry, minimum: GPUBufferBinding, pressure: GPUBufferBinding, destination: GPUBufferBinding): GPUBindGroup {
     const count=(o:UniformMixedOwnership)=>this.boundary?uniformMixedPressureStorage(o.layout).count:o.layout.cellCount;

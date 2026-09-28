@@ -15,35 +15,6 @@ pub mod velocity;
 pub mod world;
 pub use options::UniformGeometricOptions;
 
-/// The generated contract admits every 3D choice; 2D implements the 3D
-/// default algorithm only, so any other choice is refused before a step runs.
-pub fn validate_supported(
-    options: &UniformGeometricOptions,
-) -> Result<(), crate::types::ValidationError> {
-    let unsupported = |key: &str| {
-        Err(crate::types::ValidationError(format!(
-            "Uniform 2D implements only the default {key}"
-        )))
-    };
-    if options.velocity_transport != "semi-lagrangian" {
-        return unsupported("velocityTransport");
-    }
-    if options.liquid_only_velocity_advection != "off" {
-        return unsupported("liquidOnlyVelocityAdvection");
-    }
-    // Rust-only phi/V coupling experiments with no 3D counterpart; retired.
-    if options.volume_compaction != "off" {
-        return unsupported("volumeCompaction");
-    }
-    if options.phi_seed_from_volume != "off" {
-        return unsupported("phiSeedFromVolume");
-    }
-    if options.phi_agreement != "off" {
-        return unsupported("phiAgreement");
-    }
-    Ok(())
-}
-
 pub mod physical;
 
 mod inflow;

@@ -1,5 +1,5 @@
 import { uniformMixedFaceAddressWGSL, uniformMixedFaceDispatchWGSL } from "./uniform-mixed-face-dispatch.wgsl";
-import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
+import { compileMixedTiers, type UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 
 /** One-time fine-to-mixed MAC restriction into a borrowed native velocity
@@ -40,10 +40,10 @@ ${uniformMixedFaceDispatchWGSL("restrictVelocity", "umRestrictedFace(face)")}
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
     if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]});
-    this.pipelines=await Promise.all([1,2,4].map(umCellWidth=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"restrictVelocity",constants:{umCellWidth,umDispatchX:this.ownership.dispatchX}}})));
+    this.pipelines=await compileMixedTiers(umCellWidth=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"restrictVelocity",constants:{umCellWidth,umDispatchX:this.ownership.dispatchX}}}));
   }
   encode(encoder:GPUCommandEncoder):void{
-    if(this.pipelines.length!==3)throw new Error("Mixed velocity restriction is not initialized");
+    if(this.pipelines.length===0)throw new Error("Mixed velocity restriction is not initialized");
     const pass=encoder.beginComputePass({label:"Uniform mixed MAC restriction"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group);this.ownership.dispatch(pass,this.pipelines);pass.end();
   }
 }

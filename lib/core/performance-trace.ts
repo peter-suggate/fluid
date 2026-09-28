@@ -786,15 +786,26 @@ export class DynamicGPUPerformanceTraceRecorder {
  * Stage boundaries carried by the frame's own passes.
  *
  * The recorders above buy each boundary with a whole extra compute pass. This
- * one buys it with nothing: the boundary is *armed* by `completePhase` and then
- * spliced into the `timestampWrites` of the next real pass the frame encodes,
- * through a proxy over the command encoder. A traced advance therefore adds one
- * marker pass in total — for the closing boundary, which by definition has no
- * following work — instead of one per stage, and adds no queue fence at all.
+ * one buys it with nothing: through a proxy over the command encoder, every
+ * compute pass carries an end-of-pass counter, and `completePhase` closes the
+ * stage at the end of the last pass it encoded. The frame's first pass opens
+ * the chain with its beginning counter.
  *
- * Stages that encode no pass share their successor's boundary slot and close at
- * exactly zero, so the partition stays complete and the reported source remains
- * genuine hardware execution time.
+ * A stage closes at its own last pass's end, never at its successor's first
+ * pass's beginning: Metal starts a pass with no dependency on the work before
+ * it early (mixed Uniform's `copyVolume` began up to 5 ms ahead of the level
+ * set passes encoded before it), so a beginning counter can precede the
+ * boundary before it and the whole sample was rejected. A stage's last pass
+ * waits on that stage's own work, so its end is where the stage finished.
+ *
+ * Boundaries that no compute pass can close (the frame's first, a stage ending
+ * on a render pass or another recorder's pass) are armed and spliced into the
+ * next pass's beginning, as is the final boundary of a chain whose last stage
+ * encoded no compute pass (one marker pass).
+ *
+ * Stages that encode no pass share their predecessor's boundary slot and close
+ * at exactly zero, so the partition stays complete and the reported source
+ * remains genuine hardware execution time.
  */
 export class GPUStageTimestampRecorder {
   private readonly querySet: GPUQuerySet;
@@ -810,6 +821,8 @@ export class GPUStageTimestampRecorder {
   private readonly phases: GPUTimestampPhase[] = [];
   /** Query slot each boundary landed on; repeats mark an empty stage. */
   private readonly boundarySlots: number[] = [];
+  /** End counter of the most recent pass, when it was an instrumented compute pass. */
+  private lastComputeEnd?: number;
   private armedBoundaries = 0;
   private queryCount = 0;
   private finalPhaseClosesOnNextPass = false;
@@ -846,7 +859,7 @@ export class GPUStageTimestampRecorder {
     private readonly sampleId: number,
     private readonly lane: "physics" | "presentation",
     private readonly context: string,
-    private readonly capacity = 256,
+    private readonly capacity = 2048,
   ) {
     this.querySet = device.createQuerySet({ type: "timestamp", count: capacity });
     this.resolveBuffer = device.createBuffer({
@@ -882,12 +895,13 @@ export class GPUStageTimestampRecorder {
    * keys off encoder identity.
    */
   instrument(encoder: GPUCommandEncoder): GPUCommandEncoder {
-    const claimBoundary = (target: GPUCommandEncoder, occupied: boolean) => this.claimBoundary(target, occupied);
+    const claimBoundary = (target: GPUCommandEncoder, occupied: boolean, compute = false) =>
+      this.claimBoundary(target, occupied, compute);
     return new Proxy(encoder, {
       get(target, property) {
         if (property === "beginComputePass") {
           return (descriptor?: GPUComputePassDescriptor) => {
-            const writes = claimBoundary(target, descriptor?.timestampWrites !== undefined);
+            const writes = claimBoundary(target, descriptor?.timestampWrites !== undefined, true);
             return target.beginComputePass(writes ? { ...descriptor, timestampWrites: writes } : descriptor);
           };
         }
@@ -919,7 +933,8 @@ export class GPUStageTimestampRecorder {
     if (!this.started) throw new Error("GPU stage trace has not started");
     if (this.phases.length + 1 >= this.capacity) { this.overflowed = true; return; }
     this.phases.push(phase);
-    this.armedBoundaries += 1;
+    if (this.armedBoundaries === 0 && this.lastComputeEnd !== undefined) this.boundarySlots.push(this.lastComputeEnd);
+    else this.armedBoundaries += 1;
   }
 
   /**
@@ -951,30 +966,38 @@ export class GPUStageTimestampRecorder {
   }
 
   /**
-   * Assign every armed boundary to the pass about to begin. A descriptor that
-   * already carries timestamp writes belongs to another recorder and is never
-   * displaced; its boundaries stay armed for the pass after it.
+   * Give the pass about to begin its counters: every armed boundary on its
+   * beginning, and an end counter on every compute pass (a stage completed
+   * after it closes there). A descriptor that already carries timestamp writes
+   * belongs to another recorder and is never displaced; armed boundaries stay
+   * armed for the pass after it.
    */
-  private claimBoundary(encoder: GPUCommandEncoder, occupied: boolean) {
-    if (this.armedBoundaries === 0 || this.disposed || this.overflowed || occupied) return undefined;
-    const querySlots = this.finalPhaseClosesOnNextPass ? 2 : 1;
+  private claimBoundary(encoder: GPUCommandEncoder, occupied: boolean, compute: boolean) {
+    if (!this.started || this.resolved || this.disposed || this.overflowed) return undefined;
+    if (occupied || (!compute && this.armedBoundaries === 0)) { this.lastComputeEnd = undefined; return undefined; }
+    const opens = this.armedBoundaries > 0, closes = compute || this.finalPhaseClosesOnNextPass;
+    const querySlots = (opens ? 1 : 0) + (closes ? 1 : 0);
     if (this.queryCount + querySlots > this.capacity) { this.overflowed = true; return undefined; }
-    const beginningOfPassWriteIndex = this.queryCount;
-    this.queryCount += querySlots;
-    for (let boundary = 0; boundary < this.armedBoundaries; boundary += 1) {
-      this.boundarySlots.push(beginningOfPassWriteIndex);
+    const beginningOfPassWriteIndex = opens ? this.queryCount : undefined;
+    if (opens) {
+      this.queryCount += 1;
+      for (let boundary = 0; boundary < this.armedBoundaries; boundary += 1) {
+        this.boundarySlots.push(beginningOfPassWriteIndex!);
+      }
+      this.armedBoundaries = 0;
     }
-    this.armedBoundaries = 0;
-    const endOfPassWriteIndex = this.finalPhaseClosesOnNextPass
-      ? beginningOfPassWriteIndex + 1 : undefined;
-    if (endOfPassWriteIndex !== undefined) {
-      this.boundarySlots.push(endOfPassWriteIndex);
+    const endOfPassWriteIndex = closes ? this.queryCount : undefined;
+    if (closes) this.queryCount += 1;
+    if (this.finalPhaseClosesOnNextPass) {
+      this.boundarySlots.push(endOfPassWriteIndex!);
       this.finalPhaseClosesOnNextPass = false;
     }
+    this.lastComputeEnd = compute ? endOfPassWriteIndex : undefined;
+    // Every counter-carrying pass starts its own encoder, or folding drops it.
     encoder.copyBufferToBuffer(this.encoderBreakSource, 0, this.encoderBreakTarget, 0, 4);
     return {
       querySet: this.querySet,
-      beginningOfPassWriteIndex,
+      ...(beginningOfPassWriteIndex === undefined ? {} : { beginningOfPassWriteIndex }),
       ...(endOfPassWriteIndex === undefined ? {} : { endOfPassWriteIndex }),
     };
   }

@@ -1,16 +1,18 @@
 import type {UniformMixedLayout} from "./uniform-mixed-layout";
-import {uniformMixedPressureLevel} from "./uniform-mixed-layout";
+import {uniformMixedAllCoarseLayout} from "./uniform-mixed-layout";
 import {uniformMixedPressureStorage} from "./uniform-mixed-pressure-boundary.wgsl";
 
 export interface UniformMixedMemoryRange {offset:number;size:number}
 /** Pressure lifetimes: slopes, frozen RHS and residuals are recomputed after
- * returning from a child solve, so every level shares those three workspaces.
- * All live pressure/RHS/minimum/phi fields remain disjoint. Finest phi uses
- * the idle native conditioning buffer; the native 4h hierarchy stays intact. */
-/** With static solids, 2h and 4h also carry one vec4 (open, V+) record per
- * owner and halo slot: the coarsened native pressure topology. */
+ * returning from a child solve, so both levels share those three workspaces.
+ * All live pressure/RHS/minimum/phi fields remain disjoint. Level 0's phi uses
+ * the idle native conditioning buffer; the native 4h hierarchy stays intact.
+ * Both levels are all-4h. Level 0 keeps the capacity of the simulation
+ * layout (its phi range also carries the static solid record and the frame's
+ * presentation reads it whole). With static solids, level 1 also carries one
+ * vec4 (open, V+) record per owner and halo slot. */
 export function planUniformMixedPressureMemory(layout:UniformMixedLayout,arenaPrefixBytes:number,conditioningBytes:number,solid=false){
- const layouts=[layout,uniformMixedPressureLevel(layout,2),uniformMixedPressureLevel(layout,4)];
+ const layouts=[layout,uniformMixedAllCoarseLayout(layout)];
  let cursor=0;
  const allocate=(size:number):UniformMixedMemoryRange=>{cursor=Math.ceil(cursor/256)*256;const range={offset:cursor,size};cursor+=size;return range;};
  const rootCount=uniformMixedPressureStorage(layout).count;

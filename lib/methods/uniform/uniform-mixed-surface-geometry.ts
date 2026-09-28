@@ -1,6 +1,6 @@
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
-import { uniformMixedVertexSamplingWGSL } from "./uniform-mixed-vertex-sampling.wgsl";
+import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-sampling.wgsl";
 import { uniformVolumeTargetWGSL } from "./uniform-volume.wgsl";
 import { geometricPlaneBoxWGSL } from "../../core/geometric-plane-box.wgsl";
 import { uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
@@ -12,7 +12,8 @@ export class UniformMixedSurfaceGeometry {
   readonly allocatedBytes=0;
   private pipeline?:GPUComputePipeline;
   private readonly resources:GPUBindGroupLayout;
-  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid?:UniformMixedSolid){
+  /** resolved: phi's hanging texels hold umVertexValue (UniformMixedPhiResolve). */
+  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid?:UniformMixedSolid,private readonly resolved=false){
     this.resources=device.createBindGroupLayout({entries:[
       {binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
       ...[1,2].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only" as const,format:"r32float" as const,viewDimension:"3d" as const}})),
@@ -31,7 +32,7 @@ export class UniformMixedSurfaceGeometry {
 @group(1) @binding(1) var targetFill:texture_storage_3d<r32float,write>;
 @group(1) @binding(2) var centerPhi:texture_storage_3d<r32float,write>;
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
-${uniformMixedVertexSamplingWGSL}
+${uniformMixedVertexSamplingSource("",this.resolved)}
 ${geometricPlaneBoxWGSL}
 fn uvCorner(k:u32)->vec3i{return vec3i(umCorner(k,2u));}
 fn d4Sum8(v:array<f32,8>)->f32{return ((v[0]+v[5])+(v[1]+v[4]))+((v[2]+v[7])+(v[3]+v[6]));}

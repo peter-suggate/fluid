@@ -1,4 +1,4 @@
-import { resolveUniformGeometricValues } from "./uniform-geometric-parameters";
+import { resolveUniformGeometricValues, UNIFORM_GEOMETRIC_SHARPENING_DISTANCE, UNIFORM_GEOMETRIC_SHARPENING_STRENGTH } from "./uniform-geometric-parameters";
 import { uniformReferenceSolverOptions } from "./uniform-options";
 import type { WebGPUUniformReferenceOptions } from "./webgpu-uniform-reference";
 import type { MethodParamValues } from "../../core/method-contract";
@@ -7,49 +7,22 @@ import type { SceneDescription } from "../../core/model";
 /** Backend-neutral parameter resolution; GPU names are confined to this adapter. */
 export function uniformGeometricSolverOptions(overrides: MethodParamValues = {}, scene?: Pick<SceneDescription,"sceneId">): WebGPUUniformReferenceOptions {
   const values=resolveUniformGeometricValues(overrides);
-  // Plans are prebuilt; only the encoded prefix follows asynchronous residual
-  // evidence. Start at one cycle and reserve no speculative tail.
   return {
-
       retainStageDiagnosticsForQA: overrides.retainStageDiagnosticsForQA === true,
-      ...uniformReferenceSolverOptions(values, scene), geometricVolume: true, pageDomain:true, adaptivePressure:true, pressureCycleBudget:"lagged", pressureBudgetHeadroom:0,
-      volumePages: values.pageSize === "16" ? 16 : 32,
-      sharpeningStrength: Number(values.sharpeningStrength),
-      velocityTransport: values.velocityTransport === "maccormack" ? "maccormack" : "semi-lagrangian",
+      ...uniformReferenceSolverOptions(values, scene), geometricVolume: true, pressureCycleBudget:"lagged", pressureBudgetHeadroom:0,
+      sharpeningStrength: UNIFORM_GEOMETRIC_SHARPENING_STRENGTH,
+      sharpeningDistance: UNIFORM_GEOMETRIC_SHARPENING_DISTANCE,
+      velocityTransport: "semi-lagrangian",
+      liquidOnlyVelocityAdvection: false,
       surfaceDeficitBalancing: values.surfaceDeficitBalancing === "on",
       totalSurfaceVolume: values.totalSurfaceVolume === "on",
-      geometricRedistance: values.redistance !== "off",
-      geometricTileWork: values.sharpeningWorkMap !== "off",
       volumeDustThreshold: Number(values.volumeDustThreshold),
       orphanDustThreshold: Number(values.orphanDustThreshold),
-      twoLevelVelocity: values.twoLevelVelocity === "on",
-      twoLevelFineReach: Number(values.twoLevelFineReach),
-      twoLevelExtensionTiles: values.twoLevelExtension !== "dense",
-      twoLevelShellReach: Number(values.twoLevelShellReach),
-      mixedCoarsening: values.coarsening === "dynamic" ? "dynamic" : "regions",
-      mixedCoarseningReach: Number(values.coarseningReach),
-      mixedCoarseningHysteresis: Number(values.coarseningHysteresis),
-      mixedCoarseningSurfaceTolerance: Number(values.coarseningSurfaceTolerance),
-      mixedCoarseningFastTravel: Number(values.coarseningFastTravel),
+      mixedCoarsening: values.coarsening === "regions" ? "regions" : "dynamic",
       mixedCoarseningBoundaryTravel: Number(values.coarseningBoundaryTravel),
-      twoLevelAdvectionTiles: values.twoLevelAdvection !== "dense",
-      transportTiles: values.transportWorkMap !== "dense",
-      transportReach: Number(values.transportReach),
-      volumePressureRows: values.volumePressureRows === "all" ? "all" : values.volumePressureRows === "abandoned" ? "abandoned" : "off",
-      volumeCompaction: values.volumeCompaction === "on",
-      phiSeedFromVolume: values.phiSeedFromVolume === "on",
-      phiAgreementGain: values.phiAgreement === "on" ? Number(values.phiAgreementGain) : 0,
-      phiAgreementClamp: Number(values.phiAgreementClamp),
-      redistanceSurface: values.redistanceSurface === "preserve" ? "preserve" : values.redistanceSurface === "sparse" ? "sparse" : values.redistanceSurface === "rebuild" ? "rebuild" : "auto",
       phiCubicAdvection: values.phiCubicAdvection === "on",
-      orphanVolume: values.orphanVolume === "local" ? "local" : values.orphanVolume === "compact" ? "compact" : "relay",
-      orphanVolumeRender: values.orphanVolumeRender === "density" ? "density" : values.orphanVolumeRender === "spheres" ? "spheres" : "off",
-      isolatedBodyVolume: values.isolatedBodyVolume === "on",
-      phiSeedCells: values.phiSeedCells === "on",
       phiDrain: values.phiDrain === "on",
-      airborneMomentum: values.airborneMomentum === "on",
       activeRegion:false,
-      pressureWindow:false,
       gammaDiffusionIterations: 0, densityPostProcessing: false,
       solidExcessCorrection: false,
   };

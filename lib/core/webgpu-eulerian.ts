@@ -15,11 +15,10 @@ export interface GPUFieldLocation {
 export interface GPUEulerianInfo {
   uniformMixedGeneration?: number;
   uniformMixedFineTiles?: number;
+  /** Completed dynamic ownership changes, including their field remap. */
+  uniformMixedDynamicRelayouts?: number;
   uniformMixedRegularTiles?: number;
   uniformMixedGeneralTiles?: number;
-  uniformMixedTransitionTiles?: number;
-  /** 2h tiles of the pressure layout; with pressure-only transitions the simulation has none. */
-  uniformMixedPressureTransitionTiles?: number;
   uniformMixedCoarseTiles?: number;
   uniformMixedOwners?: number;
   uniformCoarsePrepared?: boolean;

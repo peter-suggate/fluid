@@ -126,13 +126,10 @@ pub fn measure(g: &Grid, dt: f32, slices: usize) -> Metrics {
 /// the production one-step replay is included to expose that difference.
 pub fn trace_replays(g: &Grid, options: &UniformGeometricOptions, dt: f32) -> serde_json::Value {
     let mut result = Vec::new();
-    for variant in ["default", "front16", "fine", "fine-front16"] {
+    for variant in ["default", "front16"] {
         let mut o = options.clone();
-        if variant.contains("front16") {
+        if variant == "front16" {
             o.extension_front_sweeps = 16.0;
-        }
-        if variant.contains("fine") {
-            o.two_level_velocity = "off".into();
         }
         let e = Extension::build(g, &o, dt);
         let flux = liquid_divergence(g, &e);
@@ -348,7 +345,7 @@ mod tests {
         for i in 0..grid.volume.len() {
             grid.volume[i] = grid.target(grid.point(i));
         }
-        let mut options = UniformGeometricOptions::default();
+        let options = UniformGeometricOptions::default();
         let mut normal = World::from_grid(
             grid.clone(),
             options.clone(),

@@ -24,6 +24,14 @@ export const UNIFORM_CM11A_COARSE_SWEEP_CAP = 4096;
 // the total-surface-volume constraint then painted onto drained walls as
 // phi-only sheets. 5 s^-1 (three cycles) holds that tank to ~1%.
 export const UNIFORM_PRESSURE_RESIDUAL_TOLERANCE = 5;
+// Every mixed solve starts from p=0, so its initial residual IS the RHS. An
+// absolute bound alone accepts that zero iterate whenever the unprojected
+// divergence is below it: a resting pool's gravity is g dt/h (3.3 s^-1 at
+// h=0.1, dt=1/30), so a coarse or small-step scene published p=0, fell
+// g dt for a frame and rang into corner jets. A checkpoint must also reduce
+// the initial residual tenfold; the floor is the GPU single-precision
+// tolerance above, so an already-divergence-free field still accepts.
+export const UNIFORM_PRESSURE_RELATIVE_REDUCTION = 0.1;
 
 export interface UniformCM11aSchedule {
   readonly fullCycles: number;

@@ -46,7 +46,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
         if(kind==="embedded-ceiling")scene.solidVoxels.push({operation:"fill",minimum:[0,16,0],maximumExclusive:[24,17,24]});
         if(side)scene.solidVoxels.push({operation:"fill",minimum:[low?7:16,0,0],maximumExclusive:[low?8:17,24,24]});
         const solver=await WebGPUUniformReferenceSolver.createAsync(device!,scene,"balanced",undefined,{
-          geometricVolume:true,pageDomain:true,densitySharpening:false,solidExcessCorrection:false,velocityTransport:"semi-lagrangian",
+          geometricVolume:true,densitySharpening:false,solidExcessCorrection:false,velocityTransport:"semi-lagrangian",
           pressureSchedule:{fullCycles:3,vCycles:4,preSweeps:6,postSweeps:6,residualTolerance:1e-6},
         },()=>{});
         try {
@@ -55,7 +55,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
           if(side){const velocity=new Float32Array(nx*ny*nz*4);for(let i=0;i<nx*ny*nz;i++)velocity[4*i]=low?0.5:-0.5;solver.initializeVelocityForQA(velocity);}
           let firstVelocity:Float32Array|undefined;
           for(let frame=1;frame<=3;frame++){
-            assert.ok(solver.advanceTo(frame/30));
+            assert.ok(solver.advanceTo(frame/30));await solver.awaitFrameCompletion();
             if(frame===1)firstVelocity=await read(device!,solver.velocityTexture);
           }
           await device!.queue.onSubmittedWorkDone();
@@ -84,7 +84,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
       scene.voxelDomain.finestCellSize_m=scene.container.width_m/32;
       scene.solidVoxels=[...solidVoxelShellForScene(scene)];
       const solver=await WebGPUUniformReferenceSolver.createAsync(device!,scene,"balanced",undefined,{
-        geometricVolume:true,pageDomain:true,densitySharpening:true,solidExcessCorrection:false,velocityTransport:"semi-lagrangian",
+        geometricVolume:true,densitySharpening:true,solidExcessCorrection:false,velocityTransport:"semi-lagrangian",
       },()=>{});
       try {
         const {nx,ny,nz}=solver.info;const world=solidWorldForScene(scene);
@@ -100,7 +100,7 @@ const modulePath=process.env.WEBGPU_NODE_MODULE;
         const initialPhi=await read(device!,solver.vertexPhiTexture!);
         const initialV=await read(device!,solver.volumeTexture);const mass=initialV.reduce((a,b)=>a+b,0);
         const initialWet=wallVertices.filter(i=>initialPhi[i]!<0).length;
-        for(let frame=1;frame<=30;frame++)assert.ok(solver.advanceTo(frame/30));
+        for(let frame=1;frame<=30;frame++){assert.ok(solver.advanceTo(frame/30));await solver.awaitFrameCompletion();}
         const phi=await read(device!,solver.vertexPhiTexture!);const volume=await read(device!,solver.volumeTexture);
         const finalWet=wallVertices.filter(i=>initialPhi[i]!<0&&phi[i]!<0).length;
         console.log(JSON.stringify({kind:"figure-8",initialWet,finalWet,mass,finalMass:volume.reduce((a,b)=>a+b,0)}));

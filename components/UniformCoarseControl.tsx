@@ -18,7 +18,7 @@ export function UniformCoarseControl() {
       <span>{!ready ? "Initializing resolution" : coarse ? "Mixed resolution" : "Fine resolution"}</span>
     </Field>
     <FieldNote>{ready
-      ? `${info.uniformMixedFineTiles ?? 0} fine tiles · ${info.uniformMixedTransitionTiles || info.uniformMixedPressureTransitionTiles || 0} ${info.uniformMixedTransitionTiles ? "" : "pressure "}transition tiles · ${coarse} coarse tiles`
+      ? `${info.uniformMixedFineTiles ?? 0} fine tiles · ${coarse} coarse tiles`
       : "Resolution status appears when the simulation is ready."}</FieldNote>
     <FieldNote>{regions
       ? "Move, resize or remove regions to change resolution. Edits take effect after the current simulation step."

@@ -45,33 +45,3 @@ test("geometric pages use the evidence budget independently of legacy saved cont
  // from an older build must keep loading.
  assert.equal(resolveUniformGeometricValues({retiredControl:"on"}).retiredControl,undefined);
 });
-
-test("every geometric scene uses pages regardless of saved dense storage",async()=>{
- const {uniformGeometricSolverOptions}=await import("../lib/methods/uniform/uniform-geometric-options");
- const {UNIFORM_GEOMETRIC_PARAMS,resolveUniformGeometricValues}=await import("../lib/methods/uniform/uniform-geometric-parameters");
- for(const volumeStorage of ["auto","dense","pages16","pages32"]){
-  const options=uniformGeometricSolverOptions({volumeStorage,pressureWindow:"window"});
-  assert.throws(()=>uniformGeometricSolverOptions({volumeStorage,activeRegion:"on"}),/activeRegion/);
-  assert.equal(options.pageDomain,true);assert.equal(options.volumePages,32);
-  assert.equal(options.activeRegion,false);assert.equal(options.pressureWindow,false);
-  assert.equal(resolveUniformGeometricValues({volumeStorage}).volumeStorage,undefined);
- }
- assert.equal(UNIFORM_GEOMETRIC_PARAMS.some(p=>p.key==="volumeStorage"),false);
-});
-
-
-test("page-size selection controls both domain and transport and requires rebuild",async()=>{
- const {uniformGeometricSolverOptions}=await import("../lib/methods/uniform/uniform-geometric-options");
- const {UNIFORM_GEOMETRIC_PARAMS,resolveUniformGeometricValues}=await import("../lib/methods/uniform/uniform-geometric-parameters");
- const param=UNIFORM_GEOMETRIC_PARAMS.find(p=>p.key==="pageSize");
- assert.ok(param);assert.equal(param.update,"solver");
- const {uniformVolumeMethod}=await import("../lib/methods/uniform/uniform-volume-method");
- const {methodConfigurationImpact}=await import("../lib/core/method-lifecycle");
- assert.equal(methodConfigurationImpact(uniformVolumeMethod,"balanced",{pageSize:"32"},{pageSize:"16"}),"rebuild");
- for(const pageSize of ["16","32"]){
-  assert.equal(resolveUniformGeometricValues({pageSize}).pageSize,pageSize);
-  assert.equal(uniformGeometricSolverOptions({pageSize}).volumePages,Number(pageSize));
- }
- assert.equal(resolveUniformGeometricValues({pageSize:"8"}).pageSize,"32");
- assert.equal(uniformGeometricSolverOptions().volumePages,32);
-});

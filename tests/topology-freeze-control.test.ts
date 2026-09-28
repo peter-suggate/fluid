@@ -5,7 +5,6 @@ import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-volume/webgpu-
 import type { AdaptiveMassSolverOptions } from "../lib/methods/adaptive-volume/method";
 import { createRuntimeStore } from "../lib/core/stores/runtime-store";
 import { createMinimalPowerDamBreak64Scene } from "../lib/core/scenes";
-import { FluidLabRenderer, gpuSceneSolverKey, gpuSceneUniformKey, type SimulationRunConfig } from "../lib/core/webgpu-renderer";
 
 test("topology freeze is pane-local, reversible, and cleared on a new timeline", () => {
   const a = createRuntimeStore();
@@ -27,33 +26,6 @@ test("topology freeze is pane-local, reversible, and cleared on a new timeline",
   assert.equal(a.getState().simulationEpoch, 1);
   assert.equal(a.getState().simulationTime, 0);
 });
-
-test("renderer applies freeze transitions to the retained solver without rebuilding", () => {
-  const scene = createMinimalPowerDamBreak64Scene();
-  const config: SimulationRunConfig = { methodId: "adaptive-volume", quality: "balanced", values: {} };
-  const key = gpuSceneSolverKey(scene, config);
-  assert.equal(gpuSceneSolverKey(scene, { ...config, topologyFrozen: true }), key);
-  const calls: boolean[] = [];
-  const solver = { setTopologyFrozen: (frozen: boolean) => calls.push(frozen) };
-  const renderer = Object.assign(Object.create(FluidLabRenderer.prototype), {
-    device: {}, gpuFluid: solver, gpuFluidKey: key,
-    solverKey: () => key,
-    appliedSceneUniformKey: gpuSceneUniformKey(scene),
-  }) as {
-    gpuFluid: typeof solver;
-    currentGPUFluid: (document: typeof scene, config: SimulationRunConfig, mode: "full-scene") => unknown;
-  };
-  assert.equal(renderer.currentGPUFluid(scene, config, "full-scene"), solver);
-  renderer.currentGPUFluid(scene, { ...config, topologyFrozen: true }, "full-scene");
-  renderer.currentGPUFluid(scene, { ...config, topologyFrozen: true }, "full-scene");
-  renderer.currentGPUFluid(scene, config, "full-scene");
-  assert.deepEqual(calls, [false, true, false], "repeated frames do not cancel preparation again");
-  renderer.gpuFluid = { setTopologyFrozen: (frozen) => calls.push(frozen) };
-  renderer.currentGPUFluid(scene, config, "full-scene");
-  assert.deepEqual(calls, [false, true, false, false], "a replacement solver receives current state");
-});
-
-
 
 test("a second paused drop supersedes the support receipt before either dose is applied", async () => {
   let revision = 0, pending = 0, checks = 0;

@@ -1,6 +1,6 @@
 import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
 import {uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
-import {uniformMixedVertexSamplingWGSL} from "./uniform-mixed-vertex-sampling.wgsl";
+import {uniformMixedVertexSamplingSource} from "./uniform-mixed-vertex-sampling.wgsl";
 
 /** On-demand native diagnostic receipts over canonical owners. All storage is
  * borrowed; inactive fine texels never contribute mass, front or velocity. */
@@ -27,7 +27,7 @@ export class UniformMixedDiagnostics {
 @group(1) @binding(2) var phi:texture_3d<f32>;
 @group(1) @binding(3) var<storage,read_write> totals:array<atomic<u32>>;
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
-${uniformMixedVertexSamplingWGSL}
+${uniformMixedVertexSamplingSource("",false)}
 var<workgroup> lanes:array<vec4u,64>;
 @compute @workgroup_size(64) fn diagnostics(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
  let owner=umAllOwner(gid);var receipt=vec4u(0);

@@ -7,7 +7,6 @@ import {createProcessRetainedDawnGPU} from "../lib/harness/node-dawn-provider";
 import {acquireWebGPUExclusiveLock,releaseWebGPUExclusiveLock} from "../lib/harness/webgpu-smoke-isolation";
 import {sceneDocument} from "../lib/core/scene-definition";
 import {getSceneDefinition} from "../lib/core/scenes";
-import {solidVoxelShellForScene} from "../lib/core/scene-lattice";
 import type {FluidRefinementRegion,SceneDescription} from "../lib/core/model";
 import {WebGPUUniformReferenceSolver} from "../lib/methods/uniform/webgpu-uniform-reference";
 import {uniformGeometricSolverOptions} from "../lib/methods/uniform/uniform-geometric-options";
@@ -15,12 +14,10 @@ import {readMixedTexture} from "./helpers/uniform-mixed-native-fields";
 const modulePath=process.env.WEBGPU_NODE_MODULE;
 const only=process.env.FLUID_SOLID_PARITY_CASE;
 
-/** Parity cases run all-fine mixed ownership against the native oracle for one
- * frame: the dam wets the solids at once, and frame 2 is already chaotic (the
- * plain box drifts to V 0.02 from last-bit pressure differences). `region`
- * cases coarsen the whole domain; promotion must keep every tile near a cut
- * cell fine, conserve mass and converge. `throws` cases must refuse loudly. */
-type Case={id:string;frames:number;scene:(s:SceneDescription)=>void;region?:boolean;throws?:RegExp;pressureTolerance?:number};
+/** Mixed ownership with embedded solids. `region` cases coarsen the whole
+ * domain; promotion must keep every tile near a cut cell fine, conserve mass
+ * and converge. `throws` cases must refuse loudly. */
+type Case={id:string;frames:number;scene:(s:SceneDescription)=>void;throws?:RegExp;pressureTolerance?:number};
 const base=():SceneDescription=>{
  const s=structuredClone(sceneDocument(getSceneDefinition("minimal-power-dam-break-32")));
  s.container.width_m=s.container.height_m=s.container.depth_m=.8;s.voxelDomain.finestCellSize_m=.025;
@@ -33,70 +30,63 @@ const blocks=(s:SceneDescription)=>{s.solidVoxels.push({operation:"fill",minimum
 const terrain=(s:SceneDescription)=>{s.terrain={baseHeight_m:.03,features:[{kind:"mound",center_m:{x:.05,z:0},radius_m:{x:.2,z:.25},amount_m:.11,flat:.2}]};};
 const coarse:FluidRefinementRegion={id:"coarse",rule:"minimum-cell-size",minimumCellSize_cells:4,maximumCellSize_cells:4,min_m:{x:-.4,y:0,z:-.4},max_m:{x:.4,y:.8,z:.4}};
 const cases:Case[]=[
- {id:"box",frames:1,scene:()=>{}},
- {id:"voxel",frames:1,scene:blocks},
- {id:"terrain",frames:1,scene:terrain},
- // Converged: at the default tolerance both accept after one Full-Cycle whose
- // iterates differ by 2.2e-3 m/s (residual 0.556 native, 0.460 mixed). The
- // restricted phi/V pyramid matches native exactly; the one-cycle gap is open.
- {id:"sphere",frames:1,pressureTolerance:1e-3,scene:s=>{s.container.shape="sphere";s.solidVoxels=[...solidVoxelShellForScene(s)];}},
- // Solid-free controls: an all-4h box conserves; a 4h floor band under h
- // liquid (y-normal seam) already fails conservation without any solid.
- {id:"box-coarse",frames:4,scene:()=>{},region:true},
- {id:"box-floor-coarse",frames:4,scene:s=>{s.fluid.refinementRegions=[{...coarse,max_m:{x:.4,y:.2,z:.4}}];},region:true},
- {id:"voxel-coarse",frames:4,scene:blocks,region:true},
- {id:"terrain-coarse",frames:4,scene:terrain,region:true},
+ {id:"box-coarse",frames:4,scene:()=>{}},
+ {id:"box-floor-coarse",frames:4,scene:s=>{s.fluid.refinementRegions=[{...coarse,max_m:{x:.4,y:.2,z:.4}}];}},
+ {id:"voxel-coarse",frames:4,scene:blocks},
+ {id:"terrain-coarse",frames:4,scene:terrain},
  {id:"rigid",frames:1,throws:/rigid bodies/,scene:s=>{s.rigidBodies=[{id:"crate",name:"Crate",shape:"box",dimensions_m:{x:.1,y:.1,z:.1},density_kg_m3:500,
   position_m:{x:.1,y:.1,z:0},orientation:{x:0,y:0,z:0,w:1},linearVelocity_m_s:{x:0,y:0,z:0},angularVelocity_rad_s:{x:0,y:0,z:0},restitution:.2,friction:.5,motion:"static"}];}},
 ];
-// FP32 reassociation only: owner-driven sums and the h/2h/4h traversal order
-// differ from the dense native kernels. The plain box shows V 0, u 7e-7 m/s,
-// phi 3e-8 m after one frame; an unported solid term is O(1e-2) or larger.
-const TOLERANCE={volume:1e-4,velocity:1e-4,phi:1e-5};
-
-async function run(device:GPUDevice,scene:SceneDescription,mixed:boolean,frames:number,pressureTolerance?:number){
- const solver=await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,{...uniformGeometricSolverOptions({},scene),mixedOwnership:mixed},()=>{});
+async function run(device:GPUDevice,scene:SceneDescription,frames:number,pressureTolerance?:number){
+ const solver=await WebGPUUniformReferenceSolver.createAsync(device,scene,"balanced",undefined,uniformGeometricSolverOptions({},scene),()=>{});
  try{
+  const initial=await ownerMass(device,solver);
   if(pressureTolerance!==undefined)solver.applyRuntimeValues({pressureResidualTolerance:pressureTolerance});
   const residuals:number[]=[];
   for(let i=1;i<=frames;i++){assert.ok(solver.advanceTo(i/30),`advance ${i}`);await solver.awaitFrameCompletion();residuals.push((await solver.readStats()).uniformPressureAcceptedResidual!);}
   const info=solver.info;
-  return {volume:await readMixedTexture(device,solver.volumeTexture),velocity:await readMixedTexture(device,solver.velocityTexture),phi:await readMixedTexture(device,solver.vertexPhiTexture!),residuals,
-   tiles:{fine:info.uniformMixedFineTiles,transition:info.uniformMixedTransitionTiles,coarse:info.uniformMixedCoarseTiles}};
+  return {initial,volume:await ownerMass(device,solver),residuals,
+   tiles:{fine:info.uniformMixedFineTiles,coarse:info.uniformMixedCoarseTiles}};
  }finally{solver.destroy();}
 }
-const maxDiff=(a:Float32Array,b:Float32Array,stride=1,components=stride)=>{let m=0,at=-1;for(let i=0;i<a.length;i++){if(i%stride>=components)continue;const d=Math.abs(a[i]!-b[i]!);if(!(d<=m)){m=d;at=i;}}return {max:m,at:Math.floor(at/stride)};};
-const mass=(v:Float32Array)=>v.reduce((a,b)=>a+b,0);
+/** Liquid volume in h cells. A mixed owner's V lives at its origin texel and
+ * covers width^3 cells; its other texels are not state (transport, cleanup and
+ * sharpening write the origin only), so a plain texture sum counts stale
+ * values wherever a tile is 4h. This is the same owner sum as the solver's
+ * volumeCellSum, unquantized. */
+async function ownerMass(device:GPUDevice,solver:WebGPUUniformReferenceSolver):Promise<number>{
+ const texture=solver.volumeTexture,volume=await readMixedTexture(device,texture);
+ const tiles=(solver as unknown as {mixedFrame:{ownership:{layout:{tiles:Uint32Array}}}}).mixedFrame.ownership.layout.tiles;
+ const [nx,ny,nz]=[texture.width,texture.height,texture.depthOrArrayLayers];let sum=0;
+ for(let z=0;z<nz;z++)for(let y=0;y<ny;y++)for(let x=0;x<nx;x++){
+  const word=tiles[(x>>2)+(nx>>2)*((y>>2)+(ny>>2)*(z>>2))]!,width=word&0x80000000?1:word&0x40000000?2:4;
+  if(x%width===0&&y%width===0&&z%width===0)sum+=volume[x+nx*(y+ny*z)]!*width**3;
+ }
+ return sum;
+}
 
-const lane=(name:string,region:boolean)=>(modulePath?test:test.skip)(name,{timeout:1800000},async()=>{
- await acquireWebGPUExclusiveLock("dawn-test",`Uniform mixed solid ${region?"regions":"parity"}`);let device:GPUDevice|undefined;
+(modulePath?test:test.skip)("coarse regions promote solid neighbourhoods to h and conserve mass",{timeout:1800000},async()=>{
+ await acquireWebGPUExclusiveLock("dawn-test","Uniform mixed solid regions");let device:GPUDevice|undefined;
  try{
   const dawn=await import(pathToFileURL(modulePath!).href);Object.assign(globalThis,dawn.globals);
   const gpu=createProcessRetainedDawnGPU(dawn,["backend=metal"]),adapter=await gpu.requestAdapter();assert.ok(adapter);
   device=managedGPUDevice(await adapter.requestDevice({requiredLimits:requiredFluidDeviceLimits(adapter.limits)}),{requireWorkerRealm:false});
   const errors:string[]=[];device.addEventListener("uncapturederror",e=>{e.preventDefault();errors.push(e.error.message);});
   const failures:string[]=[];
-  for(const c of cases.filter(c=>!!c.region===region&&(!only||only.split(",").includes(c.id)))){
-   const scene=base();if(c.region)scene.fluid.refinementRegions=[coarse];c.scene(scene);
+  for(const c of cases.filter(c=>!only||only.split(",").includes(c.id))){
+   const scene=base();scene.fluid.refinementRegions=[coarse];c.scene(scene);
    const frames=Number(process.env.FLUID_SOLID_PARITY_FRAMES??c.frames);
    if(c.throws){
-    await assert.rejects(run(device,scene,true,frames),c.throws);console.log(JSON.stringify({case:c.id,refused:true}));continue;
+    await assert.rejects(run(device,scene,frames),c.throws);console.log(JSON.stringify({case:c.id,refused:true}));continue;
    }
-   const native=await run(device,scene,false,frames,c.pressureTolerance),mixed=await run(device,scene,true,frames,c.pressureTolerance);
-   const report={case:c.id,frames,massNative:mass(native.volume),massMixed:mass(mixed.volume),volume:maxDiff(native.volume,mixed.volume),
-    velocity:maxDiff(native.velocity,mixed.velocity,4,3),phi:maxDiff(native.phi,mixed.phi),residualNative:native.residuals,residualMixed:mixed.residuals,tiles:mixed.tiles};
+   const mixed=await run(device,scene,frames,c.pressureTolerance);
+   const report={case:c.id,frames,massInitial:mixed.initial,massMixed:mixed.volume,residualMixed:mixed.residuals,tiles:mixed.tiles};
    console.log(JSON.stringify(report));
-   if(c.region){
-    // Promotion: coarse ownership exists, and the solid neighbourhood is fine.
-    if(!(mixed.tiles.coarse!>0&&(c.id.startsWith("box")||mixed.tiles.fine!>0)))failures.push(`${c.id}: promotion produced ${JSON.stringify(mixed.tiles)}`);
-    // Conservation against native (both remove only dust; 1e-3 of the dam).
-    if(!(Math.abs(report.massMixed-report.massNative)<=1e-3*report.massNative))failures.push(`${c.id}: mass ${report.massMixed} vs native ${report.massNative}`);
-   }else{
-    for(const key of ["volume","velocity","phi"] as const)if(!(report[key].max<=TOLERANCE[key]))failures.push(`${c.id}: ${key} ${report[key].max} at ${report[key].at}`);
-   }
+   // Promotion: coarse ownership exists, and the solid neighbourhood is fine.
+   if(!(mixed.tiles.coarse!>0&&(c.id.startsWith("box")||mixed.tiles.fine!>0)))failures.push(`${c.id}: promotion produced ${JSON.stringify(mixed.tiles)}`);
+   // Conservation (only dust is removed; 1e-3 of the dam).
+   if(!(Math.abs(report.massMixed-report.massInitial)<=1e-3*report.massInitial))failures.push(`${c.id}: mass ${report.massMixed} vs initial ${report.massInitial}`);
   }
   assert.deepEqual(errors,[]);assert.deepEqual(failures,[]);
  }finally{device?.destroy();await releaseWebGPUExclusiveLock();}
 });
-lane("mixed all-fine ownership reproduces native Uniform with embedded solids",false);
-lane("coarse regions promote solid neighbourhoods to h and conserve mass",true);

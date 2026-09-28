@@ -3,33 +3,10 @@ import { UNIFORM_FLUID_PIPELINE } from "./uniform-pipeline";
 import { UNIFORM_VOLUME_PHASE as P } from "./uniform-volume-stages";
 import { UNIFORM_GEOMETRIC_SPLASH_HINTS } from "./uniform-geometric-parameters";
 
-/** The solver's published tile-map counts, when the map ran and diagnostics arrived. */
-const workMap = (context: FluidPipelineContext) => {
-  const info = context.info as unknown as
-    { uniformSharpenWorkMap?: boolean; uniformSharpenTilesActive?: number; uniformSharpenTilesTotal?: number } | null;
-  if (context.values.sharpeningWorkMap === "off" || info?.uniformSharpenWorkMap === false) return undefined;
-  const active = info?.uniformSharpenTilesActive, total = info?.uniformSharpenTilesTotal;
-  if (active === undefined || total === undefined || total <= 0) return undefined;
-  return {active,total,percent:Math.round(100*active/total)};
-};
-const sharpenChip = (context: FluidPipelineContext) => {
-  if (context.values.sharpeningWorkMap === "off") return "page domain";
-  const map = workMap(context);
-  return map ? `4h work map · ${map.percent}% tiles` : "4h work map";
-};
 type VolumeInfo = {
-  uniformVolumePageTransportReceiptMs?: number; uniformVolumePageSharpenReceiptMs?: number;
-  uniformVolumeTransportWorkgroups?: number; uniformVolumeSharpenWorkgroups?: number;
-  uniformVolumePageEdge?: number; uniformVolumePagesActive?: number; uniformVolumePagesTotal?: number;
-  uniformVolumePageBytes?: number; uniformVolumePageStage?: string;
   uniformVolumeDustCells?: number; uniformVolumeDustMass_cells?: number;
-  uniformTwoLevelVelocity?: boolean; uniformTwoLevelFineTiles?: number; uniformTwoLevelTilesTotal?: number;
+  uniformTwoLevelFineTiles?: number; uniformTwoLevelTilesTotal?: number;
   uniformTwoLevelShellTiles?: number; uniformTwoLevelShellReach?: number;
-  uniformTwoLevelExtensionTiles?: boolean; uniformTwoLevelAdvectionTiles?: boolean;
-  uniformTransportWorkMap?: boolean; uniformTransportTiles?: number;
-  uniformTransportTilesTotal?: number; uniformTransportReachTiles?: number;
-  uniformTransportReachMargin?: number;
-  uniformTransportRequiredReachTiles?: number; uniformTransportMaxDisplacement_cells?: number;
 } | null;
 const volumeInfo = (context: FluidPipelineContext) => context.info as unknown as VolumeInfo;
 /** The authored floor, in cell volumes; zero and absent both read as off. */
@@ -39,12 +16,11 @@ const dustThreshold = (context: FluidPipelineContext) => {
 };
 const dustChip = (context: FluidPipelineContext) => {
   const threshold = dustThreshold(context);
-  return threshold > 0 ? `dust floor ${threshold.toExponential(0)}` : "page domain";
+  return threshold > 0 ? `dust floor ${threshold.toExponential(0)}` : "dust floor off";
 };
-/** The E1 fine map's share of the 4h tile grid, when the experiment ran. */
+/** The mixed frame's fine tiles as a share of the 4h tile grid. */
 const fineMap = (context: FluidPipelineContext) => {
   const info = volumeInfo(context);
-  if (context.values.twoLevelVelocity !== "on" || info?.uniformTwoLevelVelocity === false) return undefined;
   const fine = info?.uniformTwoLevelFineTiles, total = info?.uniformTwoLevelTilesTotal;
   if (fine === undefined || total === undefined || total <= 0) return undefined;
   return {fine,total,percent:Math.round(100*fine/total)};
@@ -52,36 +28,15 @@ const fineMap = (context: FluidPipelineContext) => {
 /** Shell tiles: the set the extension's finest passes still run on. */
 const shellMap = (context: FluidPipelineContext) => {
   const info = volumeInfo(context);
-  if (context.values.twoLevelVelocity !== "on" || info?.uniformTwoLevelVelocity === false) return undefined;
   const shell = info?.uniformTwoLevelShellTiles, total = info?.uniformTwoLevelTilesTotal;
   if (shell === undefined || total === undefined || total <= 0) return undefined;
   return {shell,total,percent:Math.round(100*shell/total)};
 };
 const twoLevelChip = (context: FluidPipelineContext) => {
-  if (context.values.twoLevelVelocity !== "on") return undefined;
-  if (context.values.twoLevelExtension === "dense") {
-    const fine = fineMap(context);
-    return fine ? `two-level · dense · ${fine.percent}% fine` : "two-level · dense";
-  }
   const shell = shellMap(context);
   return shell ? `two-level · tiles ${shell.percent}%` : "two-level · tiles";
 };
 const twoLevelControls = [
-  {kind:"param-choice" as const,param:"twoLevelVelocity",label:"Sampler",
-    options:[{value:"off",label:"All fine",hint:"Every velocity sample reads the finest lattice."},
-      {value:"on",label:"Two-level",hint:"Outside the fine tile map, sample the 4h face table the extension hierarchy's own ceil(n/4) level publishes."}]},
-  {kind:"param-choice" as const,param:"twoLevelExtension",label:"Extension work",
-    options:[{value:"tiles",label:"Shell tiles",hint:"Seed, FIM sweeps, resolve, the finest prolong and the transport pack run only in the shell tiles. Restricts and every level at or below 4h stay dense."},
-      {value:"dense",label:"Dense",hint:"The full-lattice extension, retained so the shrink can be measured on its own."}],
-    enabled:(context: FluidPipelineContext)=>context.values.twoLevelVelocity === "on"},
-  {kind:"param-range" as const,param:"twoLevelFineReach",label:"Fine reach",unit:"tiles",
-    min:0,max:8,step:1,digits:0,
-    hint:"Chebyshev dilation of the seed tiles. It must cover a step's backward trace plus the stencils that read beyond it.",
-    enabled:(context: FluidPipelineContext)=>context.values.twoLevelVelocity === "on"},
-  {kind:"param-range" as const,param:"twoLevelShellReach",label:"Shell reach",unit:"tiles",
-    min:0,max:8,step:1,digits:0,
-    hint:"Extra tiles the extension's working set adds past the fine set. Raise it first if far-air velocity looks wrong near the fine boundary.",
-    enabled:(context: FluidPipelineContext)=>context.values.twoLevelVelocity === "on" && context.values.twoLevelExtension !== "dense"},
   {kind:"readout" as const,label:"Fine tiles",
     hint:"4×4×4 tiles sampling the finest lattice, in the latest diagnostics sample. The rest read the 4h face table.",
     value:(context: FluidPipelineContext)=>{const map=fineMap(context);return map?`${map.fine} / ${map.total} (${map.percent}%)`:"—";}},
@@ -90,170 +45,36 @@ const twoLevelControls = [
     value:(context: FluidPipelineContext)=>{const map=shellMap(context);const reach=volumeInfo(context)?.uniformTwoLevelShellReach;
       return map?`${map.shell} / ${map.total} (${map.percent}%)${reach?` · +${reach}`:""}`:"—";}},
 ];
-/** E2b's control and readout, shown on the two stages it shrinks. */
-const advectionControls = [
-  {kind:"param-choice" as const,param:"twoLevelAdvection",label:"Far-air work",
-    options:[{value:"tiles",label:"Fine tiles",hint:"Outside the fine tiles, take the far-air arm directly: no backward traces, no face data, no pressure taps."},
-      {value:"dense",label:"Dense",hint:"The full-lattice schedule, retained so the shrink can be measured on its own."}],
-    enabled:(context: FluidPipelineContext)=>context.values.twoLevelVelocity === "on"},
-  {kind:"readout" as const,label:"Fine tiles",
-    hint:"4×4×4 tiles carrying liquid, a rigid body or a source within the fine reach. Dry static solids and terrain do not count. Only these run the full advection and projection.",
-    value:(context: FluidPipelineContext)=>{const map=fineMap(context);return map?`${map.fine} / ${map.total} (${map.percent}%)`:"—";}},
-];
-const advectionChip = (context: FluidPipelineContext) => {
-  if (context.values.twoLevelVelocity !== "on" || context.values.twoLevelAdvection === "dense") return undefined;
-  const fine = fineMap(context);
-  return fine ? `far air skipped · ${fine.percent}% tiles` : "far air skipped";
-};
-/**
- * E3. The restriction needs the class map the two-level sampler builds, and it
- * needs the dust floor, which is the only reason "V is zero outside the live
- * set" — the predicate it is exactly conservative under — holds. Either one off
- * means the solver has forced the dense schedule, so say which.
- */
-const transportForcedDense = (context: FluidPipelineContext): string | undefined => {
-  if (context.values.transportWorkMap === "dense") return "transport dense";
-  if (context.values.twoLevelVelocity !== "on") return "transport dense · no tile map";
-  if (dustThreshold(context) <= 0) return "transport dense · dust floor off";
-  return undefined;
-};
-const transportMap = (context: FluidPipelineContext) => {
-  const info = volumeInfo(context);
-  if (transportForcedDense(context) || info?.uniformTransportWorkMap === false) return undefined;
-  const live = info?.uniformTransportTiles, total = info?.uniformTransportTilesTotal;
-  if (live === undefined || total === undefined || total <= 0) return undefined;
-  return {live,total,percent:Math.round(100*live/total)};
-};
-/** The reach the dilation used against the reach the step's displacement required. */
-const transportReach = (context: FluidPipelineContext) => {
-  const info = volumeInfo(context);
-  const used = info?.uniformTransportReachTiles;
-  const required = info?.uniformTransportRequiredReachTiles;
-  if (used === undefined || required === undefined) return undefined;
-  return {used,required,short:used<required,
-    displacement:info?.uniformTransportMaxDisplacement_cells ?? 0};
-};
-const volumePressureRowsControl = {kind:"param-choice" as const,param:"volumePressureRows",label:"Volume pressure rows",
-  options:[{value:"abandoned",label:"Abandoned",hint:"A cell holding at least half its open capacity in V owns a pressure row where centre phi is positive AND no face neighbour is phi-liquid: exactly the cells whose faces the projection would zero. Thin films keep incompressibility; beside a phi surface, phi alone places the free surface."},
-    {value:"all",label:"All",hint:"V claims the row, and sets the ghost distance, wherever it implies more liquid than phi. V sits in a patchy one-cell layer over a phi surface, so random columns read a cell taller than their neighbours and the surface bubbles. Kept for comparison."},
-    {value:"off",label:"Off",hint:"Rows from centre phi alone: the control. A film under half a cell has no pressure, and with no liquid centre left the solve stops."}]};
-/**
- * The CM11a lattice the hierarchy is planned for.
- *
- * It belongs on the system-build stage because that is where the plan is
- * spent: the topology and RHS pyramid, and every level's dimensions, come
- * from the capacity this control picks. The cliff it exists for is the
- * planner's, not the launches': a domain whose shortest axis will not divide
- * the level count falls out of lockstep coarsening into semi-coarsening, and
- * pays half again the levels and twice the passes for the same liquid.
- */
-const transportControls = [
-  {kind:"readout" as const,label:"Field storage",value:()=>"Compiled resident fields",
-    hint:"Complete rectangular resident domains use native textures; transport records use the selected domain page size."},
-  {kind:"readout" as const,label:"Resident volume pages",
-    hint:"Actual last-stage active page count and total reserved arena capacity for the 80-byte records. Reservation is currently domain-sized; compute work follows active tiles.",
-    value:(context: FluidPipelineContext)=>{const info=volumeInfo(context);
-      return info?.uniformVolumePageEdge ? `${info.uniformVolumePagesActive ?? 0} / ${info.uniformVolumePagesTotal ?? 0} · ${((info.uniformVolumePageBytes ?? 0)/1048576).toFixed(1)} MiB reserved · ${info.uniformVolumePageStage ?? "initial"}` : "Initializing pages";}},
-  {kind:"readout" as const,label:"Scheduled volume tiles",
-    hint:"Actual 4³ workgroups dispatched for transport / sharpening. Sharpening reuses its list and cached geometry across eight sweeps. Domain capacity is shown for comparison.",
-    value:(context:FluidPipelineContext)=>{const info=volumeInfo(context);
-      if(info?.uniformVolumeTransportWorkgroups===undefined)return info ? "Page-domain schedule" : "Initializing pages";
-      const d=context.info;
-      const capacity=d?Math.ceil(d.nx/4)*Math.ceil(d.ny/4)*Math.ceil(d.nz/4):0;
-      return `${info.uniformVolumeTransportWorkgroups} / ${info.uniformVolumeSharpenWorkgroups??0} · domain ${capacity}`;}},
-  {kind:"readout" as const,label:"Page scheduling",
-    hint:"GPU page compaction and indirect tile dispatches stay in one command buffer. No CPU page-demand readback, arena allocation, or frame continuation.",
-    value:(context:FluidPipelineContext)=>volumeInfo(context)?.uniformVolumePageEdge?"GPU only · one submission":"Initializing pages"},
-  {kind:"param-choice" as const,param:"transportWorkMap",label:"Transport work",
-    options:[{value:"tiles",label:"Live tiles",hint:"Build edges, sum and normalise donors and gather only in the 4h tiles that can hold or receive liquid this step. Outside them the gather stores V=0 and gamma=0 without evaluating either."},
-      {value:"dense",label:"Dense",hint:"The full-lattice schedule, retained so the shrink can be measured on its own."}],
-    enabled:(context: FluidPipelineContext)=>context.values.twoLevelVelocity === "on" && dustThreshold(context) > 0},
-  {kind:"param-range" as const,param:"transportReach",label:"Transport margin",unit:"tiles",
-    min:0,max:8,step:1,digits:0,
-    hint:"Extra tiles added to the reach this step's measured maximum displacement requires. The set already tracks the flow, so this is headroom; zero is the exact predicate.",
-    enabled:(context: FluidPipelineContext)=>context.values.twoLevelVelocity === "on" && dustThreshold(context) > 0},
-  {kind:"readout" as const,label:"Live tiles",
-    hint:"4×4×4 tiles the twelve transport passes ran on, in the latest diagnostics sample. The rest are known to hold V=0 and are skipped whole-workgroup.",
-    value:(context: FluidPipelineContext)=>{const map=transportMap(context);
-      return map?`${map.live} / ${map.total} (${map.percent}%)`:"—";}},
-  {kind:"readout" as const,label:"Reach",
-    hint:"Tiles the seed was dilated by, against the tiles this step's largest measured backward displacement required. Used is required plus the margin unless the shader's sixteen-tile cap bit, which is the only way it can read SHORT.",
-    value:(context: FluidPipelineContext)=>{const reach=transportReach(context);
-      if(!reach)return "—";
-      return `${reach.used} used · ${reach.required} required${reach.short?" · SHORT":""}`
-        + ` (${reach.displacement.toFixed(1)} cells)`;}},
-];
-const transportChip = (context: FluidPipelineContext) => {
-  const forced = transportForcedDense(context);
-  if (forced) return forced;
-  const reach = transportReach(context);
-  const map = transportMap(context);
-  const short = reach?.short ? " · reach SHORT" : "";
-  return map ? `live tiles ${map.percent}%${short}` : `live tiles${short}`;
-};
-/**
- * The floor's chip and the live set's, in that order. With the floor off the
- * set cannot run at all and the floor's own "page domain" already
- * says so, so the stage does not repeat it.
- */
-const couplingChip = (context: FluidPipelineContext) =>
-  dustThreshold(context) > 0 ? `${dustChip(context)} · ${transportChip(context)}` : dustChip(context);
 const onOff=[{value:"on",label:"On"},{value:"off",label:"Off"}];
 /** The two stages that write V into phi sit on the level set they write. */
-const phiAgreementControls = [
+const phiControls = [
   {kind:"param-choice" as const,param:"totalSurfaceVolume",label:"Total surface volume",options:onOff,
     hint:"One bounded global normal shift to match the surface volume to V. No regional correction or cellwise reconstruction."},
-  {kind:"param-choice" as const,param:"phiSeedFromVolume",label:"Seed from V",options:onOff,
-    hint:"Where no cell centre nearby is phi-liquid but the cells around a vertex average over a quarter full, write V's implied depth into phi. A film under half a cell then owns ordinary pressure rows and renders; beside an existing phi surface it never fires."},
-  {kind:"param-choice" as const,param:"phiAgreement",label:"Follow V",options:onOff,
-    hint:"Shift band phi along its normal by V minus phi's fill, gathered over the 8x8x8 cells around each vertex with tent weights. Per cell that residual is noise; as a patch integral it is phi's transport drift. Wants compaction on, or the residual has the wrong sign."},
-  {kind:"param-range" as const,param:"phiAgreementGain",label:"Gain",unit:"cells",
-    min:0,max:1,step:0.01,digits:2,hint:"Cells of shift per unit patch residual. 0.25 roughened the dam break threefold; 0.05 is inside baseline noise.",
-    enabled:(context: FluidPipelineContext)=>context.values.phiAgreement === "on"},
-  {kind:"param-range" as const,param:"phiAgreementClamp",label:"Clamp",unit:"cells / step",
-    min:0,max:0.5,step:0.005,digits:3,hint:"Largest shift in one step. The dam break is indifferent from 0.01 to 0.05 at gain 0.05; the thin film needs at least 0.02 to keep up with its own erosion.",
-    enabled:(context: FluidPipelineContext)=>context.values.phiAgreement === "on"},
-  // Splash survival (docs/uniform-geometric-splash-dissipation-plan.md).
-  {kind:"param-choice" as const,param:"redistanceSurface",label:"Redistance surface",
-    options:[{value:"auto",label:"Automatic",hint:"Preserve the surface with airborne momentum on; retain Rebuild with it off."},
-      {value:"rebuild",label:"Rebuild",hint:"Re-measure every band vertex against the trilinear contour each step."},
-      {value:"preserve",label:"Preserve",hint:"Keep every vertex of a crossed cell at its advected value (CM11b Sec. 3.4)."},
-      {value:"sparse",label:"Every 10th",hint:"Preserve, and redistance only one step in ten."}],
-    hint:"Rebuilding moves a curved surface inward by up to h²/4r every step, even at rest; flat pools do not notice, drops do.",
-    enabled:(context: FluidPipelineContext)=>context.values.redistance !== "off"},
   {kind:"param-choice" as const,param:"phiCubicAdvection",label:"Cubic advection",options:onOff,
     hint:UNIFORM_GEOMETRIC_SPLASH_HINTS.phiCubicAdvection},
-  {kind:"param-choice" as const,param:"isolatedBodyVolume",label:"Isolated volume",options:onOff,
-    hint:"A body wholly inside a vertex's 12³ window shifts phi toward its own V, at most a quarter cell a step. Pools never qualify. Replaces Follow V while on."},
-  {kind:"param-choice" as const,param:"phiSeedCells",label:"Seed from V cells",options:onOff,
-    hint:"Seed from the fullest incident cell over half full, read at the departure point, so a single compacted cell owns a liquid centre."},
   {kind:"param-choice" as const,param:"phiDrain",label:"Drain ghost phi",options:onOff,
     hint:UNIFORM_GEOMETRIC_SPLASH_HINTS.phiDrain},
 ];
 const phiChip = (context: FluidPipelineContext) => {
-  const parts=[context.values.totalSurfaceVolume === "on" ? "total volume constrained" : "",context.values.phiSeedFromVolume === "on" ? "seeded from V" : "",
-    context.values.phiAgreement === "on" ? "follows V" : "",
-    context.values.redistanceSurface === "preserve" || context.values.redistanceSurface === "sparse"
-      || (context.values.redistanceSurface === "auto" && context.values.airborneMomentum === "on") ? "surface preserved" : "",
-    context.values.phiCubicAdvection === "on" ? "cubic" : "", context.values.isolatedBodyVolume === "on" ? "isolated V" : "",
-    context.values.phiSeedCells === "on" ? "cell seed" : "", context.values.phiDrain === "on" ? "drained" : ""].filter(Boolean);
-  return parts.length ? `page domain · ${parts.join(" · ")}` : "page domain";
+  const parts=[context.values.totalSurfaceVolume === "on" ? "total volume constrained" : "",
+    context.values.phiCubicAdvection === "on" ? "cubic" : "", context.values.phiDrain === "on" ? "drained" : ""].filter(Boolean);
+  return parts.length ? parts.join(" · ") : "trilinear";
 };
 const volumeStages: FluidPipelineStage[] = [
   ["phi", "Vertex level set", "RK2 characteristics and bounded closest-point redistancing. The optional global volume constraint runs after conservative gather."],
   ["coupling", "Conservative volume transport", "Eight box-overlap donors plus an identity fallback; three receiver/donor balancing rounds."],
   ["gather", "Conservative volume gather", "Gather donor-normalized liquid volume, optionally constrain total surface volume, and cache corrected phi capacity for sharpening."],
-  ["sharpen", "Volume sharpening", "Eight symmetric face-transfer sweeps with aggregate donor and receiver budgets; phi is immutable across them, so the 4h work map skips whole tiles with no cell in the admission band bit-identically to the dense schedule."],
+  ["sharpen", "Volume sharpening", "Eight symmetric face-transfer sweeps with aggregate donor and receiver budgets; phi is immutable across them, so only tiles with a cell in the admission band run."],
 ].map(([id,label,summary]) => ({
   id: `uniform-volume-${id}`, band:"surface", side:"left", label:label!,
   phaseLabels:[P[id as "phi"|"coupling"|"gather"|"sharpen"].label],
   tip:{summary:summary!}, state: context => (id === "sharpen" && context.values.densitySharpening === "off") ? "off" : "on",
   chip:context=>id === "gather"
     ? "conservative gather"
-    : id === "sharpen" ? sharpenChip(context)
-    : id === "coupling" ? couplingChip(context)
+    : id === "sharpen" ? "2.1h band · 8 sweeps"
+    : id === "coupling" ? dustChip(context)
     : phiChip(context),
-  ...(id === "phi" ? { controls: phiAgreementControls } : {}),
+  ...(id === "phi" ? { controls: phiControls } : {}),
   ...(id === "coupling" ? {
     controls:[{kind:"param-range" as const,param:"volumeDustThreshold",label:"Dust floor",unit:"cell volumes",
       min:0,max:1e-3,step:1e-7,digits:7,
@@ -266,27 +87,10 @@ const volumeStages: FluidPipelineStage[] = [
       value:(context: FluidPipelineContext)=>{
         const info=volumeInfo(context);const cells=info?.uniformVolumeDustCells;
         if(dustThreshold(context)<=0||cells===undefined)return "—";
-        return `${cells.toLocaleString()} cells · ${(info?.uniformVolumeDustMass_cells ?? 0).toExponential(2)} cell volumes`;}},
-      ...transportControls],
+        return `${cells.toLocaleString()} cells · ${(info?.uniformVolumeDustMass_cells ?? 0).toExponential(2)} cell volumes`;}}],
   } : {}),
   ...(id === "sharpen" ? {
     toggle:{param:"densitySharpening",on:"on",off:"off"},
-    controls:[{kind:"param-choice" as const,param:"sharpeningWorkMap",label:"Work map",
-      options:[{value:"on",label:"4h tiles",hint:"Skip prepare/propose/limit in tiles where no cell can be admitted; V is still copied on commit."},
-        {value:"off",label:"Dense",hint:"The dense reference schedule, retained for comparison."}],
-      enabled:(context: FluidPipelineContext)=>context.values.densitySharpening !== "off"},
-      {kind:"param-choice" as const,param:"volumeCompaction",label:"Compaction",options:onOff,
-      hint:"A liquid cell may pour all of its V into a deeper liquid neighbour, at any depth, so voids inside the liquid refill. Off, only the 2.1h band is admitted and only surplus over phi's fill moves. The work map admits the extra tiles only while they are under-full.",
-      enabled:(context: FluidPipelineContext)=>context.values.densitySharpening !== "off"},
-      {kind:"param-choice" as const,param:"orphanVolume",label:"Orphan V",
-      options:[{value:"relay",label:"Relay",hint:"Pour lost V down phi's gradient into the nearest surface within 2.1h."},
-        {value:"local",label:"Local",hint:"An air cell receives only if it holds V or is within a cell of the surface."},
-        {value:"compact",label:"Compact",hint:"Local, and V far from any surface gathers up its own gradient into full cells."}],
-      hint:"What sharpening does with V phi no longer carries. Relay is the MMTD07 transfer CM12 Fig. 3 criticises: a drop phi has lost pours into the pool beside it.",
-      enabled:(context: FluidPipelineContext)=>context.values.densitySharpening !== "off"},
-      {kind:"readout" as const,label:"Active tiles",
-      hint:"4×4×4 tiles holding a cell inside the admission band, in the latest diagnostics sample. Phi is fixed across the eight sweeps, so one classification schedules them all.",
-      value:context=>{const map=workMap(context);return map?`${map.active} / ${map.total} (${map.percent}%)`:"—";}}],
   } : {}),
 }));
 export const UNIFORM_VOLUME_PIPELINE: FluidPipelineGraph = {
@@ -297,40 +101,29 @@ export const UNIFORM_VOLUME_PIPELINE: FluidPipelineGraph = {
     if(["gamma-diffusion","interface-sharpening","sharpening-mass-correction","solid-excess"].includes(stage.id))return [];
     if(stage.id==="density-post-process")return [{...stage,label:"Phi surface publication",phaseLabels:[P.surface.label],spendsNoFrameTime:true,
       toggle:undefined,state:()=>"on" as const,
-      controls:[{kind:"param-choice" as const,param:"orphanVolumeRender",label:"Show orphan V",
-        options:[{value:"off",label:"Off",hint:"Publish phi only."},
-          {value:"density",label:"Density",hint:"CM12 Sec. 3.8: rho over its 3³ gamma, so sparse V is amplified to a visible size."},
-          {value:"spheres",label:"Spheres",hint:"Each 3³ cluster drawn as a sphere of its own volume."}],
-        hint:"Draw V lying more than 1.5 cells from any phi surface. Presentation only; the solver never reads it."}],
-      chip:context=>context.values.orphanVolumeRender === "density" ? "phi = 0 · orphan V density"
-        : context.values.orphanVolumeRender === "spheres" ? "phi = 0 · orphan V spheres" : "phi = 0",
+      chip:()=>"phi = 0",
       tip:{summary:"The renderer reads canonical level-set vertices through the accepted ownership generation. Publication switches the accepted view after the step completes; no dense expansion pass is required."}}];
     const mapped={...stage,phaseLabels:[...(stage.phaseLabels??[]),
       ...(stage.id==="pressure-projection"?["Pressure projection + surface publication"]:
         stage.id==="rigid-coupling"?["Rigid coupling + surface publication"]:[])],controls:stage.controls?.filter(control=>!("param" in control &&
-      ["pressureCycleBudget","pressureBudgetHeadroom","volumeStorage"].includes(control.param))),tip:{...stage.tip,
+      ["pressureCycleBudget","pressureBudgetHeadroom","volumeStorage","velocityTransport"].includes(control.param))),tip:{...stage.tip,
       summary:stage.tip.summary.replaceAll("surface density","level-set geometry"),
       reads:stage.tip.reads?.replaceAll("surface density","vertex phi and V")}};
     // The two-level sampler reads this stage's own hierarchy, and the shell
-    // tiles are what this stage's finest passes now run on, so both controls
-    // belong beside the sweep budget that produced the field they sample.
+    // tiles are what this stage's finest passes run on, so both readouts sit
+    // beside the sweep budget that produced the field they sample.
     if(stage.id==="velocity-extension")return [{...mapped,
       tip:{...mapped.tip,summary:"Extend nearby velocities with the narrow-band front, then fill missing air velocities from the nearest original source carried through the hierarchy. Keeps distant stationary liquid from slowing falling drops. The final 3D fill also packs the transport field."},
-      controls:[{kind:"param-choice" as const,param:"pageSize",label:"Page size",
-        options:[{value:"16",label:"16³",hint:"16 cells per edge. Rebuilds the solver and resets to time zero."},
-          {value:"32",label:"32³",hint:"32 cells per edge. Rebuilds the solver and resets to time zero."}]},
-        {kind:"readout" as const,label:"Air fallback",value:()=>"Nearest source",
-        hint:"Enabled by default. Carries original source locations through coarse levels; the front sweep budget is unchanged."},{kind:"readout" as const,label:"Domain authority",value:(context:FluidPipelineContext)=>`Resident pages · ${context.info?.uniformDomainPages??"—"} pages`},
-        {kind:"readout" as const,label:"Page coverage",value:(context:FluidPipelineContext)=>context.info?.uniformDomainMigration?.startsWith("Native")?"Compiled complete coverage":context.info?.uniformPageMissingReads===undefined?"Pause to sample":`${context.info.uniformPageMissingReads} · fields 0x${(context.info.uniformPageMissingReadFields??0).toString(16)}`,hint:"Complete rectangular residency is validated before compiling native kernels. The paged QA path instead counts actual texture reads outside accepted membership, sampled on pause."},
-        {kind:"readout" as const,label:"Migration status",value:(context:FluidPipelineContext)=>context.info?.uniformDomainMigration??"Initializing page domain",hint:"Complete rectangular residency compiles to native execution fields. Every authored page remains resident; fluid-driven allocation and retirement remain unfinished."},
+      controls:[
         ...(mapped.controls ?? []).filter(control=>
           !(control.kind === "param-choice" && control.param === "activeRegion")
-          && !(control.kind === "readout" && control.label === "Work box")),
-        ...twoLevelControls,
-        {kind:"param-choice" as const,param:"airborneMomentum",label:"Airborne momentum",options:onOff,
-        hint:UNIFORM_GEOMETRIC_SPLASH_HINTS.airborneMomentum}],
-      chip:context=>{const extra=["page domain",twoLevelChip(context)].filter(Boolean).join(" · ");
-        return `shared support · hierarchy fill${extra?` · ${extra}`:""}`;}}];
+          && !(control.kind === "readout" && (control.label === "Work box" || control.label === "Sweeps with work"))),
+        ...twoLevelControls],
+      chip:context=>`shared support · hierarchy fill · ${twoLevelChip(context)}`}];
+    // MacCormack stays a dense-comparison option; Geometric runs one SL pass.
+    if(stage.id==="velocity-advection")return [{...mapped,
+      tip:{...mapped.tip,summary:"Algorithm 1 step 3: one semi-Lagrangian backward-trace velocity transport, followed by gravity, viscosity, and surface tension.",reads:"extended MAC velocity"},
+      chip:()=>"one backward-trace pass"}];
     if(stage.id==="pressure-cycles")return [{...mapped,
       tip:{...mapped.tip,summary:"One coupled pressure solve across page seams. Repeat V-cycles with loose inner accuracy while residual reduction is good. Switch to Full-Cycles when progress stalls or the V-cycle budget runs out. Publish only when the fine residual meets tolerance within the configured cycle budget. A nonfinite or worsening solve stops the frame before projection. Projected Jacobi updates preserve reflection symmetry."},
       controls:[...(mapped.controls ?? []).filter(control=>control.kind!=="readout").map(control => control.kind === "param-range" && control.param === "pressureSweeps"
@@ -348,17 +141,9 @@ export const UNIFORM_VOLUME_PIPELINE: FluidPipelineGraph = {
     if(stage.id==="pressure-finish")return [{...mapped,
       tip:{...mapped.tip,summary:"Reconstruct pressure gradients from the converged coupled iterate before projection. A failed solve stops before this stage.",writes:"pressure reconstruction and residual diagnostics"},
       chip:()=>"converged gradient reconstruction"}];
-    // Which cells own a pressure row is decided where the topology and RHS
-    // are built, so the V claim sits on that stage.
     if(stage.id==="pressure-system")return [{...mapped,
       chip:()=>"shared ownership · coupled RHS pyramid",
-      controls:[...(mapped.controls ?? []),volumePressureRowsControl,{kind:"param-choice" as const,param:"surfaceDeficitBalancing",label:"Surface-deficit balancing",options:onOff,hint:"Preserve overfill expansion and balance it globally with contraction in underfilled liquid. Reduces persistent sloshing."},{kind:"readout" as const,label:"Pressure backing",value:()=>"Native coupled hierarchy"}]}];
-    // E2b shrinks both of these, off the same fine map, so the one control sits
-    // on both stages rather than in a shelf away from the work it prices.
-    if(stage.id==="velocity-advection"||stage.id==="pressure-projection")return [{...mapped,
-      controls:[...(mapped.controls ?? []),...advectionControls],
-      chip:context=>{const extra=advectionChip(context);const base=mapped.chip?.(context);
-        return extra?(base?`${base} · ${extra}`:extra):base;}}];
+      controls:[...(mapped.controls ?? []),{kind:"param-choice" as const,param:"surfaceDeficitBalancing",label:"Surface-deficit balancing",options:onOff,hint:"Preserve overfill expansion and balance it globally with contraction in underfilled liquid. Reduces persistent sloshing."}]}];
     return [mapped];
   }),
 };

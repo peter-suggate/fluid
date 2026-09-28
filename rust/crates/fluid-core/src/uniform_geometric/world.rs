@@ -81,7 +81,6 @@ impl World {
         sigma: f32,
     ) -> Result<Self, ValidationError> {
         options.validate()?;
-        super::validate_supported(&options)?;
         if grid.h.iter().any(|h| !h.is_finite() || *h <= 0.0) || !rho.is_finite() || rho <= 0.0 {
             return Err(ValidationError("invalid uniform physical scale".into()));
         }
@@ -289,7 +288,6 @@ impl World {
             dt,
             &sources,
             std::mem::take(&mut self.packed),
-            None,
         );
         self.packed.clone_from(&extension.values);
         self.tile_classes.clone_from(&extension.classes);
@@ -314,11 +312,7 @@ impl World {
             audit.clone_from(&self.grid.phi);
         }
         std::mem::swap(&mut self.grid.phi, &mut self.advected);
-        if self.options.redistance == "on" {
-            surface::redistance_window(&mut self.grid, &self.advected, window);
-        } else {
-            self.grid.phi.copy_from_slice(&self.advected);
-        }
+        surface::redistance_window(&mut self.grid, &self.advected, window);
         observe("redistanced", &self.grid);
         self.receipt.transport = self.transport.advance(
             self.grid.dims,
@@ -463,14 +457,14 @@ impl World {
         observe: &mut impl FnMut(&str, &Grid),
     ) {
         let mut next = std::mem::take(&mut self.pressure.scratch.velocity);
-        super::velocity::advect(&self.grid, e, &self.options, dt, &mut next);
+        super::velocity::advect(&self.grid, e, dt, &mut next);
         std::mem::swap(&mut self.grid.velocity, &mut next);
         observe("velocityAdvected", &self.grid);
         std::mem::swap(&mut self.grid.velocity, &mut next);
         let g = &self.grid;
         let molecular = self.viscosity / self.rho;
         let sigma_over_rho = self.sigma / self.rho;
-        super::velocity::for_each_fine(g, e, &self.options, |i, p| {
+        super::velocity::for_each_fine(g, e, |i, p| {
             let v = &mut next[i];
             // reference.wgsl applyVelocityForces. The walls are free-slip.
             let occupancy = self.occupancy(p);
@@ -491,19 +485,7 @@ impl World {
                 }
             }
             let above = [p[0], p[1] + 1];
-            if occupancy > 1e-5
-                || self.occupancy(above) > 1e-5
-                || g.airborne(
-                    p,
-                    self.options.airborne_momentum == "on",
-                    self.options.volume_dust_threshold,
-                )
-                || g.airborne(
-                    above,
-                    self.options.airborne_momentum == "on",
-                    self.options.volume_dust_threshold,
-                )
-            {
+            if occupancy > 1e-5 || self.occupancy(above) > 1e-5 {
                 v[1] += self.gravity[1] * dt;
             }
             if sigma_over_rho > 0.0 {
@@ -547,7 +529,6 @@ impl World {
     ) {
         let mut s = std::mem::take(&mut self.pressure.scratch);
         let g = &self.grid;
-        let rows = self.options.volume_pressure_rows.as_str();
         let dims = self.pressure.levels[0].dims;
         let halo = |p: [i32; 2]| (p[0] + 1) as usize + dims[0] * (p[1] + 1) as usize;
         // Pressure phi once per haloed cell, and uvTarget once per open
@@ -555,7 +536,7 @@ impl World {
         s.pressure_phi.clear();
         for y in 0..dims[1] as i32 {
             for x in 0..dims[0] as i32 {
-                s.pressure_phi.push(g.pressure_phi([x - 1, y - 1], rows));
+                s.pressure_phi.push(g.pressure_phi([x - 1, y - 1]));
             }
         }
         s.target.clear();
@@ -649,19 +630,7 @@ impl World {
             let pa = pressure_phi[halo(p)];
             let pb = pressure_phi[halo(q)];
             if pa >= 0.0 && pb >= 0.0 {
-                return if g.airborne(
-                    p,
-                    self.options.airborne_momentum == "on",
-                    self.options.volume_dust_threshold,
-                ) || g.airborne(
-                    q,
-                    self.options.airborne_momentum == "on",
-                    self.options.volume_dust_threshold,
-                ) {
-                    v
-                } else {
-                    0.0
-                };
+                return 0.0;
             }
             v - dt / self.rho * (pressure(q) - pressure(p)) / (g.h[a] * theta(pa, pb))
         };
@@ -679,7 +648,7 @@ impl World {
         low_y.resize(g.dims[0], 0.0);
         released.clear();
         released.resize(n, 0);
-        super::velocity::for_each_fine(g, e, &self.options, |i, p| {
+        super::velocity::for_each_fine(g, e, |i, p| {
             for a in 0..2 {
                 let v = project(p, a, g.velocity[i][a]);
                 velocities[i][a] = v;

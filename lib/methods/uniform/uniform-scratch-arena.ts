@@ -15,10 +15,8 @@ export class UniformScratchLayout {
   readonly donorBytes: number;
   readonly sharpenBaseWords: number;
   readonly conditioningBytes: number;
-  /** Word offset of the finest pressure tiles' clean/FAR flags, when enabled. */
-  readonly farTileOffset?: number;
   private readonly offsets = new Map<string, number>();
-  constructor(readonly dims: readonly [number,number,number], edgeBytes: number, retainDiagnostics=false, farTiles=uniformAbOn("fartiles")) {
+  constructor(readonly dims: readonly [number,number,number], edgeBytes: number, retainDiagnostics=false) {
     if (!dims.every(d => Number.isSafeInteger(d) && d > 0))
       throw new RangeError("Uniform scratch dimensions must be positive safe integers");
     if (!Number.isSafeInteger(edgeBytes) || edgeBytes < 0 || edgeBytes % 4 !== 0)
@@ -56,20 +54,15 @@ export class UniformScratchLayout {
         this.offsets.set(`Uniform CM11a L${index+1} ${name}`,pressureWords);pressureWords+=cells*count;
       }
     });
-    const extensionEnd=words*4;
+    // The mixed extension binds its four FIM ranges rounded up to 256 words.
+    const extensionEnd=Math.ceil(words*4/256)*256;
     this.offsets.set("Uniform Sec. 3.3 resolved FIM distances",2*words);
     this.offsets.set("Total surface volume corrected phi",0);
     if(retainDiagnostics)this.offsets.delete("Uniform Sec. 3.3 resolved FIM distances");
     this.edgeBytes=edgeBytes;
     this.donorOffset=Math.ceil(edgeBytes/256)*256;
     this.donorBytes=uniformDonorSliceWords(dims)*4;
-    // Pressure far-tile certificate: one clean and one FAR word per finest
-    // 4^3 pressure tile, written and read inside the pressure stage only. It
-    // sits past every other range so no stage's live data can overlap it.
-    const end=Math.max(extensionEnd*4,pressureWords*4,this.donorOffset+this.donorBytes);
-    const pressureTiles=dims.reduce((n,d)=>n*Math.ceil((d+2)/4),1);
-    this.farTileOffset=farTiles?Math.ceil(end/16)*4:undefined;
-    this.byteLength=this.farTileOffset===undefined?end:4*this.farTileOffset+12*pressureTiles+16;
+    this.byteLength=Math.max(extensionEnd*4,pressureWords*4,this.donorOffset+this.donorBytes);
     if (!Number.isSafeInteger(this.byteLength))
       throw new RangeError("Uniform scratch layout exceeds safe integer addressing");
   }

@@ -65,7 +65,7 @@ fn mgCoarseCoefficient(id:vec3i,q:vec3i,axis:u32)->f32{
   let d=vec3i(mg.levelDims.xyz);
   if(any(q<vec3i(0))||any(q>=d)){
     if(axis==1u&&id.y==d.y-1&&q.y==d.y&&params.boundary.w>0.5){
-      let phi=mgState.rows[ci].phi;let theta=cm12GhostFluidTheta(phi,0.5*h,1e-9);
+      let phi=mgState.rows[ci].phi;let theta=mgSurfaceTheta(phi,0.5*h);
       return mgState.rows[ci].topology.z/(h*h*theta);
     }
     return 0.0;
@@ -73,7 +73,7 @@ fn mgCoarseCoefficient(id:vec3i,q:vec3i,axis:u32)->f32{
   let qi=mgCoarseIndex(q);let positive=q[axis]>id[axis];
   let vf=select(mgState.rows[qi].topology[axis+1u],mgState.rows[ci].topology[axis+1u],positive);
   if(vf<=1e-6){return 0.0;}let qPhi=mgState.rows[qi].phi;var theta=1.0;
-  if(qPhi>=0.0){let phi=mgState.rows[ci].phi;theta=cm12GhostFluidTheta(phi,qPhi,1e-9);}
+  if(qPhi>=0.0){let phi=mgState.rows[ci].phi;theta=mgSurfaceTheta(phi,qPhi);}
   return vf/(h*h*theta);
 }
 

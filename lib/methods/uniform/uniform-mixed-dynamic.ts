@@ -1,7 +1,7 @@
 import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
 import type {UniformMixedBandBits} from "./uniform-mixed-layout-builder";
 import {uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
-import {uniformMixedVertexSamplingWGSL} from "./uniform-mixed-vertex-sampling.wgsl";
+import {uniformMixedVertexSamplingSource} from "./uniform-mixed-vertex-sampling.wgsl";
 
 /** Largest tile radius the census gathers velocity bounds over, and the
  * largest reach/hysteresis. A tile whose RK2 midpoints may leave that radius
@@ -14,16 +14,18 @@ export const UNIFORM_MIXED_DYNAMIC_DISTANCE_CAP=16;
 export const UNIFORM_MIXED_DYNAMIC_FULL_TOLERANCE=0.25;
 /** Default UniformMixedDynamicPolicy.surfaceTolerance, in h. */
 export const UNIFORM_MIXED_DYNAMIC_SURFACE_TOLERANCE=0.5;
-/** Default UniformMixedDynamicPolicy.fastTravel, in h per step: one 4h cell. */
+/** Fast moving bulk uses 4h; independent h phi and pressure retain surface samples. */
 export const UNIFORM_MIXED_DYNAMIC_FAST_TRAVEL=4;
 /** Default UniformMixedDynamicPolicy.boundaryTravel, in h per step. */
 export const UNIFORM_MIXED_DYNAMIC_BOUNDARY_TRAVEL=1;
+/** Census header words: counters 0-17, 18 = largest tile travel (f32 bits). */
 const HEADER=20;
 /** Velocity-bound pyramid: box min/max over radius 0 (the tile) up to 16
- * tiles, built by separable filters, plus two filter temporaries. Small radii
- * are dense: a radius rounded up widens every box the census tests. */
+ * tiles, each filtered separably from the tile level, plus one temporary per
+ * level above it. Small radii are dense: a radius rounded up widens every box
+ * the census tests. */
 const BOUND_RADII=[0,1,2,3,4,5,6,8,10,12,16] as const;
-const BOUND_BLOCKS=BOUND_RADII.length+2;
+const BOUND_BLOCKS=2*BOUND_RADII.length-1;
 
 export interface UniformMixedDynamicPolicy {
  /** The step the next frame will take; with the tile speed it bounds travel. */
@@ -141,8 +143,10 @@ export class UniformMixedDynamicClassifier {
 struct DynamicPolicy {step:vec4f,reach:vec4u,surface:vec4f}
 @group(1) @binding(4) var<uniform> policy:DynamicPolicy;
 @group(1) @binding(5) var<storage,read> solidTiles:array<u32>;
+// The census tail follows the frame's last phi resolve: hanging texels hold
+// umVertexValue, so vertex reads are direct loads.
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
-${uniformMixedVertexSamplingWGSL}
+${uniformMixedVertexSamplingSource("",true)}
 const CAP:u32=${cap}u;
 // Largest travel, in h per step, boundary tiles dilate by (a 4-tile radius).
 const BOUNDARY_TRAVEL_CAP:u32=16u;
@@ -165,14 +169,19 @@ fn gapIndex(t:u32)->u32{return prefixIndex(vec3u(0u))+PX*PY*PZ+t;}
 fn travelIndex(t:u32)->u32{return gapIndex(UM_TILES)+t;}
 fn orderKey(x:f32)->u32{let b=bitcast<u32>(x);return select(b|0x80000000u,~b,(b&0x80000000u)!=0u);}
 fn orderValue(k:u32)->f32{return bitcast<f32>(select(~k,k&0x7fffffffu,(k&0x80000000u)!=0u));}
+// One tile's classification: ordered velocity keys, nibble distances from
+// each face to the nearest crossing owner (gap) and surface owner (reach),
+// flags (bit 0 surface owner, bit 1 phi sign change) and 4h surface error.
+struct TileClass{low:array<u32,3>,high:array<u32,3>,gap:array<u32,6>,reach:array<u32,6>,flags:u32,error:u32}
+fn umEmptyClass()->TileClass{return TileClass(array<u32,3>(0xffffffffu,0xffffffffu,0xffffffffu),array<u32,3>(0u,0u,0u),array<u32,6>(15u,15u,15u,15u,15u,15u),array<u32,6>(15u,15u,15u,15u,15u,15u),0u,0u);}
 var<workgroup> mixedTile:atomic<u32>;
 var<workgroup> tileLow:array<atomic<u32>,3>;
 var<workgroup> tileHigh:array<atomic<u32>,3>;
 var<workgroup> tileGap:array<atomic<u32>,6>;
-// The same over every surface owner (partial V too): where a boundary rule's liquid lies.
 var<workgroup> tileReach:array<atomic<u32>,6>;
 var<workgroup> tileError:atomic<u32>;
 const UM_H:f32=${Math.min(...h)};
+const MAX_H:f32=${Math.max(...h)};
 // Surface error of the tile at 4h, in h (non-negative, ordered as bits).
 fn umResolutionError(tile:u32,lane:u32,width:u32)->f32{
  let origin=umTileCoord(tile)*4u;var worst=0.0;
@@ -205,17 +214,17 @@ fn umSolidTile(p:vec3u)->bool{let t=umTileAt(p);return ((solidTiles[t/32u]>>(t%3
 // Boundary rules (UniformMixedDynamicPolicy.boundaryTravel), from the tile's
 // own velocity bounds and the cells between its faces and its surface owners.
 // Travel thresholds halve for an h tile (hysteresis) and its margin doubles.
-fn umDirectionTravel(k:u32)->f32{
+fn umDirectionTravel(c:TileClass,k:u32)->f32{
  let a=k%3u;
- if(k<3u){return max(-orderValue(atomicLoad(&tileLow[a])),0.0)*policy.step.x/H[a];}
- return max(orderValue(atomicLoad(&tileHigh[a])),0.0)*policy.step.x/H[a];
+ if(k<3u){return max(-orderValue(c.low[a]),0.0)*policy.step.x/H[a];}
+ return max(orderValue(c.high[a]),0.0)*policy.step.x/H[a];
 }
-fn umBoundaryRequired(p:vec3u,width:u32)->bool{
+fn umBoundaryRequired(p:vec3u,width:u32,c:TileClass)->bool{
  let threshold=policy.surface.y*select(1.0,0.5,width==1u);
  if(threshold<=0.0){return false;}
  let margin=4.0*select(1.0,2.0,width==1u);
  var travel:array<f32,6>;
- for(var k=0u;k<6u;k++){travel[k]=umDirectionTravel(k);}
+ for(var k=0u;k<6u;k++){travel[k]=umDirectionTravel(c,k);}
  // Impact: surface liquid within the margin of a closed wall or solid tile,
  // moving toward it faster than along it. A run-out skimming the floor, or a
  // front passing a wall, is not redirected by it. Contact, not predicted
@@ -225,7 +234,7 @@ fn umBoundaryRequired(p:vec3u,width:u32)->bool{
   let a=k%3u;let high=k>=3u;
   let along=max(max(travel[(a+1u)%3u],travel[3u+(a+1u)%3u]),max(travel[(a+2u)%3u],travel[3u+(a+2u)%3u]));
   if(travel[k]<max(threshold,along)){continue;}
-  let reach=margin-f32(atomicLoad(&tileReach[k]));
+  let reach=margin-f32(c.reach[k]);
   if(reach<0.0){continue;}
   let beyond=select(p[a],UM_T[a]-1u-p[a],high);
   if(((policy.reach.z>>k)&1u)!=0u&&4.0*f32(beyond)<=reach){return true;}
@@ -249,90 +258,120 @@ fn umBoundaryRequired(p:vec3u,width:u32)->bool{
 // Interface: an owner whose corner phi changes sign. V/phi disagreement
 // without one is counted, not refined: 4h V error is at or below fine on the
 // same cells (plan, same-cell A/B).
+fn umClassifyOwner(tile:u32,width:u32,lane:u32,c:ptr<function,TileClass>){
+ let side=4u/width;
+ let origin=umTileCoord(tile)*4u+umCorner(lane,side)*width;
+ let owner=umOwnerAt(vec3i(origin));
+ let v=textureLoad(volume,vec3i(origin),0).x;
+ var inside=0u;var deep=0u;
+ for(var k=0u;k<8u;k++){
+  let value=umVertexValue(origin+umCorner(k,2u)*width);
+  if(value<0.0){inside++;}
+  if(value< -2.0*MAX_H*f32(width)){deep++;}
+ }
+ // Signed bounds of the extended face velocities the next trace samples.
+ for(var axis=0u;axis<3u;axis++){
+  var low=3.0e38;var high=-3.0e38;
+  for(var sign=-1;sign<=1;sign+=2){
+   let first=umFace(owner,axis,sign,0u);
+   for(var part=0u;part<first.count;part++){
+    let face=umFace(owner,axis,sign,part);if(face.anchor[axis]<0){continue;}
+    let u=textureLoad(velocity,face.anchor,0)[axis];
+    // A non-finite speed bounds nothing: saturate both ends.
+    let finite=abs(u)<=3.0e38;
+    low=min(low,select(-3.0e38,u,finite));high=max(high,select(3.0e38,u,finite));
+   }
+  }
+  (*c).low[axis]=min((*c).low[axis],orderKey(low));(*c).high[axis]=max((*c).high[axis],orderKey(high));
+ }
+ // Largest interior deficit and largest air volume, per fine/coarse width.
+ let coarse=select(0u,1u,width!=1u);
+ if(deep==8u){atomicMax(&census[8u+coarse],bitcast<u32>(max(1.0-v,0.0)));}
+ if(inside==0u){atomicMax(&census[10u+coarse],bitcast<u32>(max(v,0.0)));}
+ let local=umCorner(lane,side)*width;
+ if(inside!=0u&&inside!=8u){
+  for(var a=0u;a<3u;a++){(*c).gap[a]=min((*c).gap[a],local[a]);(*c).gap[3u+a]=min((*c).gap[3u+a],4u-width-local[a]);}
+ }
+ let interior=inside==8u&&v>=1.0-policy.step.z;
+ let air=inside==0u&&v<=policy.step.w;
+ if(!interior&&!air){
+  for(var a=0u;a<3u;a++){(*c).reach[a]=min((*c).reach[a],local[a]);(*c).reach[3u+a]=min((*c).reach[3u+a],4u-width-local[a]);}
+  // Bit 2: the geometric surface itself (a phi sign change) is in this owner.
+  (*c).flags|=select(1u,3u,inside!=0u&&inside!=8u);
+  // Why a coarse owner is interface: V between the tolerances, or a phi sign change.
+  if(width!=1u){
+   if(v>policy.step.w&&v<1.0-policy.step.z){atomicAdd(&census[6],1u);}
+   if(inside!=0u&&inside!=8u){atomicAdd(&census[7],1u);}
+   if(inside==8u&&v<=policy.step.w){atomicAdd(&census[3],1u);}
+  }
+ }
+}
+fn umFinishTile(tile:u32,width:u32,c:TileClass){
+ let crossing=(c.flags&2u)!=0u;
+ // Travel of the tile's own extended faces over one step, in h.
+ var speed=0.0;
+ for(var a=0u;a<3u;a++){speed=max(speed,max(abs(orderValue(c.low[a])),abs(orderValue(c.high[a])))*policy.step.x/H[a]);}
+ // Largest travel any pyramid box can hold, in decide's own arithmetic, so
+ // the pyramid builds only the levels decide can reach.
+ var reach=0.0;let scale=policy.step.x/H;
+ for(var a=0u;a<3u;a++){
+  if(c.low[a]!=0xffffffffu){reach=max(reach,abs(orderValue(c.low[a])*scale[a]));}
+  if(c.high[a]!=0u){reach=max(reach,abs(orderValue(c.high[a])*scale[a]));}
+ }
+ atomicMax(&census[18],bitcast<u32>(reach));
+ // Hysteresis: a 4h tile returns to h only below half the travel.
+ let fast=policy.surface.x>0.0&&speed>=policy.surface.x*select(0.5,1.0,width==1u);
+ let shaped=crossing&&!fast&&!(policy.step.y>0.0&&bitcast<f32>(c.error)<=policy.step.y);
+ // A boundary rule holds a phi surface whatever its speed. Partial V alone
+ // does not qualify: airborne spray refined at the wall falls under the
+ // dust threshold and is discarded (128³ dam: 9 cells in three steps).
+ let bounded=!shaped&&crossing&&umBoundaryRequired(umTileCoord(tile),width,c);
+ let required=shaped||bounded;
+ atomicStore(&census[prefixIndex(umTileCoord(tile)+vec3u(1u))],select(0u,1u,required));
+ if(required){atomicAdd(&census[12],1u);}
+ if(bounded){atomicAdd(&census[16],1u);atomicMax(&census[17],u32(ceil(speed)));}
+ var gap=0xffffffffu;
+ if(required){gap=min(u32(ceil(speed)),255u)<<24u;for(var k=0u;k<6u;k++){gap|=c.gap[k]<<(4u*k);}}
+ atomicStore(&census[gapIndex(tile)],gap);
+ var directed=0xffffffffu;
+ if(bounded){directed=0u;for(var k=0u;k<6u;k++){directed|=min(u32(ceil(umDirectionTravel(c,k))),31u)<<(5u*k);}}
+ atomicStore(&census[travelIndex(tile)],directed);
+ for(var a=0u;a<3u;a++){atomicStore(&census[boundIndex(tile,a)],c.low[a]);atomicStore(&census[boundIndex(tile,3u+a)],c.high[a]);}
+ if(crossing){atomicAdd(&census[0],1u);}
+ // A 4h surface the lattice cannot resolve: refined by this census.
+ if(required&&width!=1u){let slot=atomicAdd(&census[1],1u);if(slot<3u){atomicStore(&census[13u+slot],tile);}}
+}
+// Tiles with several owners (h, 2h): one workgroup per tile, one lane per owner.
 @compute @workgroup_size(64) fn classify(@builtin(workgroup_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
- let tile=gid.x+umDispatchX*gid.y;if(tile>=UM_TILES){return;}
+ let job=gid.x+umDispatchX*gid.y;if(job>=umCounts.x+umCounts.y){return;}
+ let tile=umTopology[UM_TILES+job];
  if(lane==0u){atomicStore(&mixedTile,0u);for(var a=0u;a<3u;a++){atomicStore(&tileLow[a],0xffffffffu);atomicStore(&tileHigh[a],0u);atomicStore(&tileGap[a],15u);atomicStore(&tileGap[3u+a],15u);atomicStore(&tileReach[a],15u);atomicStore(&tileReach[3u+a],15u);}atomicStore(&tileError,0u);}workgroupBarrier();
  let width=umTileWidth(tile);let side=4u/width;
  if(lane<side*side*side){
-  let origin=umTileCoord(tile)*4u+umCorner(lane,side)*width;
-  let owner=umOwnerAt(vec3i(origin));
-  let v=textureLoad(volume,vec3i(origin),0).x;
-  var inside=0u;var deep=0u;
-  for(var k=0u;k<8u;k++){
-   let value=umVertexValue(origin+umCorner(k,2u)*width);
-   if(value<0.0){inside++;}
-   if(value< -2.0*${Math.max(...h)}*f32(width)){deep++;}
-  }
-  // Signed bounds of the extended face velocities the next trace samples.
-  {
-   var low=vec3f(3.0e38);var high=vec3f(-3.0e38);
-   for(var axis=0u;axis<3u;axis++){
-    for(var sign=-1;sign<=1;sign+=2){
-     let first=umFace(owner,axis,sign,0u);
-     for(var part=0u;part<first.count;part++){
-      let face=umFace(owner,axis,sign,part);if(face.anchor[axis]<0){continue;}
-      let u=textureLoad(velocity,face.anchor,0)[axis];
-      // A non-finite speed bounds nothing: saturate both ends.
-      let finite=abs(u)<=3.0e38;
-      low[axis]=min(low[axis],select(-3.0e38,u,finite));high[axis]=max(high[axis],select(3.0e38,u,finite));
-     }
-    }
-    atomicMin(&tileLow[axis],orderKey(low[axis]));atomicMax(&tileHigh[axis],orderKey(high[axis]));
-   }
-  }
-  // Largest interior deficit and largest air volume, per fine/coarse width.
-  let coarse=select(0u,1u,width!=1u);
-  if(deep==8u){atomicMax(&census[8u+coarse],bitcast<u32>(max(1.0-v,0.0)));}
-  if(inside==0u){atomicMax(&census[10u+coarse],bitcast<u32>(max(v,0.0)));}
-  if(inside!=0u&&inside!=8u){
-   let local=umCorner(lane,side)*width;
-   for(var a=0u;a<3u;a++){atomicMin(&tileGap[a],local[a]);atomicMin(&tileGap[3u+a],4u-width-local[a]);}
-  }
-  let interior=inside==8u&&v>=1.0-policy.step.z;
-  let air=inside==0u&&v<=policy.step.w;
-  if(!interior&&!air){
-   let local=umCorner(lane,side)*width;
-   for(var a=0u;a<3u;a++){atomicMin(&tileReach[a],local[a]);atomicMin(&tileReach[3u+a],4u-width-local[a]);}
-   // Bit 2: the geometric surface itself (a phi sign change) is in this owner.
-   atomicOr(&mixedTile,select(1u,3u,inside!=0u&&inside!=8u));
-   // Why a coarse owner is interface: V between the tolerances, or a phi sign change.
-   if(width!=1u){
-    if(v>policy.step.w&&v<1.0-policy.step.z){atomicAdd(&census[6],1u);}
-    if(inside!=0u&&inside!=8u){atomicAdd(&census[7],1u);}
-    if(inside==8u&&v<=policy.step.w){atomicAdd(&census[3],1u);}
-   }
-  }
+  var c=umEmptyClass();umClassifyOwner(tile,width,lane,&c);
+  for(var a=0u;a<3u;a++){atomicMin(&tileLow[a],c.low[a]);atomicMax(&tileHigh[a],c.high[a]);}
+  for(var k=0u;k<6u;k++){atomicMin(&tileGap[k],c.gap[k]);atomicMin(&tileReach[k],c.reach[k]);}
+  atomicOr(&mixedTile,c.flags);
  }
  workgroupBarrier();
  if((atomicLoad(&mixedTile)&2u)!=0u&&policy.step.y>0.0){atomicMax(&tileError,bitcast<u32>(umResolutionError(tile,lane,width)));}
  workgroupBarrier();
  if(lane==0u){
-  let flags=atomicLoad(&mixedTile);let crossing=(flags&2u)!=0u;
-  // Travel of the tile's own extended faces over one step, in h.
-  var speed=0.0;
-  for(var a=0u;a<3u;a++){speed=max(speed,max(abs(orderValue(atomicLoad(&tileLow[a]))),abs(orderValue(atomicLoad(&tileHigh[a]))))*policy.step.x/H[a]);}
-  // Hysteresis: a 4h tile returns to h only below half the travel.
-  let fast=policy.surface.x>0.0&&speed>=policy.surface.x*select(0.5,1.0,width==1u);
-  let shaped=crossing&&!fast&&!(policy.step.y>0.0&&bitcast<f32>(atomicLoad(&tileError))<=policy.step.y);
-  // A boundary rule holds a phi surface whatever its speed. Partial V alone
-  // does not qualify: airborne spray refined at the wall falls under the
-  // dust threshold and is discarded (128³ dam: 9 cells in three steps).
-  let bounded=!shaped&&crossing&&umBoundaryRequired(umTileCoord(tile),width);
-  let required=shaped||bounded;
-  atomicStore(&census[prefixIndex(umTileCoord(tile)+vec3u(1u))],select(0u,1u,required));
-  if(required){atomicAdd(&census[12],1u);}
-  if(bounded){atomicAdd(&census[16],1u);atomicMax(&census[17],u32(ceil(speed)));}
-  var gap=0xffffffffu;
-  if(required){gap=min(u32(ceil(speed)),255u)<<24u;for(var k=0u;k<6u;k++){gap|=atomicLoad(&tileGap[k])<<(4u*k);}}
-  atomicStore(&census[gapIndex(tile)],gap);
-  var directed=0xffffffffu;
-  if(bounded){directed=0u;for(var k=0u;k<6u;k++){directed|=min(u32(ceil(umDirectionTravel(k))),31u)<<(5u*k);}}
-  atomicStore(&census[travelIndex(tile)],directed);
-  for(var a=0u;a<3u;a++){atomicStore(&census[boundIndex(tile,a)],atomicLoad(&tileLow[a]));atomicStore(&census[boundIndex(tile,3u+a)],atomicLoad(&tileHigh[a]));}
-  if(crossing){atomicAdd(&census[0],1u);}
-  // A 4h surface the lattice cannot resolve: refined by this census.
-  if(required&&width!=1u){let slot=atomicAdd(&census[1],1u);if(slot<3u){atomicStore(&census[13u+slot],tile);}}
+  var c=umEmptyClass();
+  for(var a=0u;a<3u;a++){c.low[a]=atomicLoad(&tileLow[a]);c.high[a]=atomicLoad(&tileHigh[a]);}
+  for(var k=0u;k<6u;k++){c.gap[k]=atomicLoad(&tileGap[k]);c.reach[k]=atomicLoad(&tileReach[k]);}
+  c.flags=atomicLoad(&mixedTile);c.error=atomicLoad(&tileError);
+  umFinishTile(tile,width,c);
  }
+}
+// Single-owner (4h) tiles: one lane per tile. A workgroup per tile left 63
+// of its 64 lanes idle over most of the domain.
+@compute @workgroup_size(64) fn classifyCoarse(@builtin(global_invocation_id) gid:vec3u){
+ let index=gid.x+umDispatchX*64u*gid.y;if(index>=umCounts.z){return;}
+ let tile=umTopology[UM_TILES+umCounts.x+umCounts.y+index];
+ var c=umEmptyClass();umClassifyOwner(tile,4u,0u,&c);
+ if((c.flags&2u)!=0u&&policy.step.y>0.0){var error=0.0;for(var l=0u;l<8u;l++){error=max(error,umResolutionError(tile,l,4u));}c.error=bitcast<u32>(error);}
+ umFinishTile(tile,4u,c);
 }
 // Separable inclusive prefix sum: one lane per line of the (T+1)³ table.
 ${[0,1,2].map(axis=>{const [a,b]=[0,1,2].filter(k=>k!==axis);return /* wgsl */`
@@ -342,17 +381,32 @@ ${[0,1,2].map(axis=>{const [a,b]=[0,1,2].filter(k=>k!==axis);return /* wgsl */`
  var p=vec3u(0u);p[${a}]=line%extent[${a}];p[${b}]=line/extent[${a}];var sum=0u;
  for(var i=1u;i<extent[${axis}];i++){p[${axis}]=i;sum+=atomicLoad(&census[prefixIndex(p)]);atomicStore(&census[prefixIndex(p)],sum);}
 }`;}).join("\n")}
-// One separable pass of the bound pyramid: box min (low keys) and max (high
-// keys) along one axis. Dry tiles hold the identity keys and drop out.
-override filterSource:u32=0u;override filterTarget:u32=0u;override filterRadius:i32=1;override filterAxis:u32=0u;
-@compute @workgroup_size(64) fn boundBox(@builtin(global_invocation_id) gid:vec3u){
- let tile=gid.x+umDispatchX*64u*gid.y;if(tile>=UM_TILES){return;}
+// One axis of the bound pyramid for every level at once: box min (low keys)
+// and max (high keys) of radius r_k. Clamped boxes compose exactly, so level
+// k filters level 0 directly: x from level 0 into k, y from k into its
+// temporary, z back into k. Dry tiles hold the identity keys and drop out.
+override pyramidAxis:u32=0u;
+const LEVELS:u32=${BOUND_RADII.length}u;
+// decide climbs from level 1 until the radius covers its tile's travel; no
+// box exceeds the largest tile travel (census[18]), so no tile climbs past
+// the level that covers it.
+fn topLevel()->u32{
+ let need=1+i32(ceil(0.5*bitcast<f32>(atomicLoad(&census[18]))/4.0));
+ var level=1u;loop{if(need<=RADII[level]||level+1u>=LEVELS){break;}level++;}
+ return level;
+}
+@compute @workgroup_size(64) fn boundPyramid(@builtin(global_invocation_id) gid:vec3u){
+ let job=gid.x+umDispatchX*64u*gid.y;if(job>=UM_TILES*(LEVELS-1u)){return;}
+ let tile=job%UM_TILES;let level=1u+job/UM_TILES;let temporary=LEVELS-1u+level;
+ if(level>topLevel()){return;}
+ let source=select(select(temporary,level,pyramidAxis==1u),0u,pyramidAxis==0u);
+ let written=select(level,temporary,pyramidAxis==1u);let radius=RADII[level];
  let p=vec3i(umTileCoord(tile));var keys=array<u32,6>(0xffffffffu,0xffffffffu,0xffffffffu,0u,0u,0u);
- for(var d=max(p[filterAxis]-filterRadius,0);d<=min(p[filterAxis]+filterRadius,i32(UM_T[filterAxis])-1);d++){
-  var q=p;q[filterAxis]=d;let at=umTileAt(vec3u(q));
-  for(var k=0u;k<3u;k++){keys[k]=min(keys[k],atomicLoad(&census[levelIndex(filterSource,at,k)]));keys[3u+k]=max(keys[3u+k],atomicLoad(&census[levelIndex(filterSource,at,3u+k)]));}
+ for(var d=max(p[pyramidAxis]-radius,0);d<=min(p[pyramidAxis]+radius,i32(UM_T[pyramidAxis])-1);d++){
+  var q=p;q[pyramidAxis]=d;let at=umTileAt(vec3u(q));
+  for(var k=0u;k<3u;k++){keys[k]=min(keys[k],atomicLoad(&census[levelIndex(source,at,k)]));keys[3u+k]=max(keys[3u+k],atomicLoad(&census[levelIndex(source,at,3u+k)]));}
  }
- for(var k=0u;k<6u;k++){atomicStore(&census[levelIndex(filterTarget,tile,k)],keys[k]);}
+ for(var k=0u;k<6u;k++){atomicStore(&census[levelIndex(written,tile,k)],keys[k]);}
 }
 fn interfaceTilesIn(low:vec3i,high:vec3i)->u32 {
  let a=vec3u(clamp(low,vec3i(0),vec3i(UM_T)));let b=vec3u(clamp(high+vec3i(1),vec3i(0),vec3i(UM_T)));
@@ -451,15 +505,10 @@ fn forwardFine(p:vec3i,margin:i32)->bool{
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
   if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]});
-  for(const entryPoint of ["classify","prefix0","prefix1","prefix2","decide"])
+  for(const entryPoint of ["classify","classifyCoarse","prefix0","prefix1","prefix2","decide"])
    this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX}}}));
-  // Level k = box(level k-1, radius r_k - r_{k-1}) through x, y, z temporaries.
-  const temp=[BOUND_RADII.length,BOUND_RADII.length+1];
-  for(let level=1;level<BOUND_RADII.length;level++)for(let axis=0;axis<3;axis++){
-   const source=axis===0?level-1:temp[axis-1]!,target=axis===2?level:temp[axis]!;
-   this.pipelines.set(`filter${level}.${axis}`,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"boundBox",
-    constants:{umDispatchX:this.ownership.dispatchX,filterSource:source,filterTarget:target,filterRadius:BOUND_RADII[level]!-BOUND_RADII[level-1]!,filterAxis:axis}}}));
-  }
+  for(let axis=0;axis<3;axis++)
+   this.pipelines.set(`pyramid${axis}`,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"boundPyramid",constants:{umDispatchX:this.ownership.dispatchX,pyramidAxis:axis}}}));
  }
  /** Solid-coupled tiles (uniformMixedSolidTiles().coupled), for the impact rule. */
  setSolid(coupled:Uint8Array):void{
@@ -472,7 +521,7 @@ fn forwardFine(p:vec3i,margin:i32)->bool{
  /** Encode after a completed frame, while its ownership and the local speed
   * velocity (the one the next frame advects with) are still in place. */
  encode(encoder:GPUCommandEncoder,policy:UniformMixedDynamicPolicy):void{
-  if(this.pipelines.size!==5+3*(BOUND_RADII.length-1))throw new Error("Dynamic ownership census is not initialized");
+  if(this.pipelines.size!==9)throw new Error("Dynamic ownership census is not initialized");
   for(const [name,value] of Object.entries({dt:policy.dt,fullTolerance:policy.fullTolerance,emptyTolerance:policy.emptyTolerance}))
    if(!Number.isFinite(value)||value<0)throw new Error(`Dynamic ownership ${name} must be finite and non-negative: ${value}`);
   for(const [name,value] of Object.entries({reach:policy.reach,hysteresis:policy.hysteresis}))
@@ -485,15 +534,17 @@ fn forwardFine(p:vec3i,margin:i32)->bool{
   for(const [name,value] of Object.entries({fastTravel:policy.fastTravel,boundaryTravel:policy.boundaryTravel}))
    if(!Number.isFinite(value)||value<0)throw new Error(`Dynamic ownership ${name} must be finite and non-negative: ${value}`);
   this.device.queue.writeBuffer(this.params,32,new Float32Array([policy.fastTravel,policy.boundaryTravel,0,0]));
-  encoder.clearBuffer(this.work);
+  // Levels 1.. of the pyramid are written in full before decide reads them.
+  const tiles0=this.ownership.layout.tiles.length,pyramid=(HEADER+this.words+6*tiles0)*4,prefix=(HEADER+this.words+6*BOUND_BLOCKS*tiles0)*4;
+  encoder.clearBuffer(this.work,0,pyramid);encoder.clearBuffer(this.work,prefix);
   const tiles=this.ownership.layout.tiles.length,x=this.ownership.dispatchX,t=this.ownership.layout.lattice.dimensions.map(n=>n/4+1);
-  const filters=Array.from({length:BOUND_RADII.length-1},(_,l)=>[0,1,2].map(a=>`filter${l+1}.${a}`)).flat();
-  for(const [label,entries] of [["classify",["classify"]],["prefix",["prefix0","prefix1","prefix2",...filters]],["decide",["decide"]]] as const){
+  for(const [label,entries] of [["classify",["classify","classifyCoarse"]],["prefix",["prefix0","prefix1","prefix2","pyramid0","pyramid1","pyramid2"]],["decide",["decide"]]] as const){
    const pass=encoder.beginComputePass({label:`Uniform dynamic ownership census ${label}`});
    pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group);
    for(const entry of entries){
     const lines=entry.startsWith("prefix")?[0,1,2].filter(k=>k!==Number(entry.at(-1))).reduce((n,k)=>n*t[k]!,1):tiles;
-    const groups=entry==="classify"?tiles:Math.ceil(lines/64);
+    const l=this.ownership.layout,groups=entry==="classify"?l.fineTiles.length:entry==="classifyCoarse"?Math.ceil(l.coarseTiles.length/64):entry.startsWith("pyramid")?Math.ceil(tiles*(BOUND_RADII.length-1)/64):Math.ceil(lines/64);
+    if(!groups)continue;
     pass.setPipeline(this.pipelines.get(entry)!);pass.dispatchWorkgroups(Math.min(groups,x),Math.ceil(groups/x));
    }
    pass.end();

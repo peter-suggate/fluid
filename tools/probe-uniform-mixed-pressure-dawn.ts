@@ -11,8 +11,6 @@ import {sceneDocument} from "../lib/core/scene-definition";
 import {getSceneDefinition} from "../lib/core/scenes";
 import {refinementRegionLattice} from "../lib/core/refinement-regions";
 import {uniformVolumeMethod} from "../lib/methods/uniform/uniform-volume-method";
-import {uniformGeometricSolverOptions} from "../lib/methods/uniform/uniform-geometric-options";
-import {WebGPUUniformReferenceSolver} from "../lib/methods/uniform/webgpu-uniform-reference";
 import {usePerformanceInstrumentationStore} from "../lib/core/stores/performance-instrumentation-store";
 import {GPUPassTimestampRecorder} from "../lib/core/performance-trace";
 import type {GPUSolverInstance} from "../lib/core/method-contract";
@@ -20,9 +18,10 @@ const arg=(key:string,fallback:string)=>process.argv.find(a=>a.startsWith(`--${k
 const arm=arg("arm","mixed"),steps=Number(arg("steps","12")),tolerance=Number(arg("tolerance","0.001"));
 const sceneId=arg("scene","water-box-dam-break");
 const splitDispatches=process.argv.includes("--split-dispatches");
+const transportCounts=process.argv.includes("--transport-counts");
 const stageTiming=arg("timing","passes")==="stages";
 if(stageTiming)usePerformanceInstrumentationStore.getState().setEnabled(true);
-assert.ok(["native","fine","mixed","live"].includes(arm));
+assert.ok(["fine","mixed","live","dynamic"].includes(arm));
 await acquireWebGPUExclusiveLock("dawn-benchmark",`Water box pressure ${arm}`);
 let device:GPUDevice|undefined,solver:GPUSolverInstance|undefined,recorder:GPUPassTimestampRecorder|undefined;
 try{
@@ -63,8 +62,8 @@ try{
   min_m:Object.fromEntries(axes.map((a,i)=>[a,l.origin_m[a]+(regionPercent.length?regionPercent[i]!/100:i===0?2/3:0)*l.dimensions[i]!*l.cellSize_m[i]!])) as {x:number;y:number;z:number},
   max_m:Object.fromEntries(axes.map((a,i)=>[a,l.origin_m[a]+(regionPercent.length?regionPercent[i+3]!/100:i===0?1:.5)*l.dimensions[i]!*l.cellSize_m[i]!])) as {x:number;y:number;z:number}};
  scene.fluid.refinementRegions=arm==="mixed"?[region]:[];
- const values={pressureResidualTolerance:tolerance};
- solver=arm==="native"?await WebGPUUniformReferenceSolver.createAsync(measured,scene,"balanced",undefined,uniformGeometricSolverOptions(values,scene),()=>{}):await uniformVolumeMethod.createSolverAsync!(measured,scene,"balanced",values,undefined,()=>{});
+ const values={pressureResidualTolerance:tolerance,coarsening:arm==="dynamic"?"dynamic":"regions"};
+ solver=await uniformVolumeMethod.createSolverAsync!(measured,scene,"balanced",values,undefined,()=>{});
  console.log(JSON.stringify({arm,sceneId,tolerance,dimensions:l.dimensions,region:scene.fluid.refinementRegions,bytes:solver.info.allocatedBytes}));
  for(let step=1;step<=steps;step++){
   if(arm==="live"&&step===4){scene.fluid.refinementRegions=[region];solver.applySceneUniforms?.(scene);await solver.awaitFrameCompletion?.();}
@@ -73,12 +72,22 @@ try{
   const captured=recorder;recorder=undefined;let reading;
   if(captured){const e=device.createCommandEncoder();captured.resolve(e);device.queue.submit([e.finish()]);reading=await captured.read();}
   if(!failure){await solver.readStats();}
+  // Diagnostic readback is outside the timed frame and pass recorder.
+  let transportLive:readonly number[]|undefined;
+  if(transportCounts){
+   const source=(solver as unknown as {mixedFrame?:{transport:{live:GPUBuffer}}}).mixedFrame?.transport.live;
+   assert.ok(source,"Transport counts require the mixed frame");
+   const read=device.createBuffer({size:24,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+   try{const e=device.createCommandEncoder();e.copyBufferToBuffer(source,18*4,read,0,24);device.queue.submit([e.finish()]);await read.mapAsync(GPUMapMode.READ);transportLive=Array.from(new Uint32Array(read.getMappedRange()));}
+   finally{if(read.mapState==="mapped")read.unmap();read.destroy();}
+  }
   const groups=new Map<string,{ms:number;passes:number;unsampled:number}>();
   for(const p of reading?.passes??[]){const row=groups.get(p.label)??{ms:0,passes:0,unsampled:0};row.ms+=p.duration_ms;row.passes++;row.unsampled+=+!p.sampled;groups.set(p.label,row);}
   console.log(JSON.stringify({arm,step,wall_ms,cycles:solver.info.uniformPressureCyclesExecuted,residual:solver.info.uniformPressureAcceptedResidual,error:failure??solver.info.simulationPipelineError,
-   fineTiles:solver.info.uniformMixedFineTiles,transitionTiles:solver.info.uniformMixedTransitionTiles,coarseTiles:solver.info.uniformMixedCoarseTiles,regularTiles:solver.info.uniformMixedRegularTiles,generalTiles:solver.info.uniformMixedGeneralTiles,
-   passSum_ms:reading?.sum_ms,span_ms:reading?.span_ms,...(stageTiming?{trace:solver.info.physicsTrace,timingUnavailable:solver.info.physicsTraceUnavailable}:{}),groups:[...groups].sort((a,b)=>b[1].ms-a[1].ms)}));
-  if(failure||solver.info.simulationPipelineError)break;
+   fineTiles:solver.info.uniformMixedFineTiles,coarseTiles:solver.info.uniformMixedCoarseTiles,regularTiles:solver.info.uniformMixedRegularTiles,generalTiles:solver.info.uniformMixedGeneralTiles,
+   relayouts:solver.info.uniformMixedDynamicRelayouts,volumeDrift:solver.info.volumeDrift,
+   transportLive,passSum_ms:reading?.sum_ms,span_ms:reading?.span_ms,...(stageTiming?{trace:solver.info.physicsTrace,timingUnavailable:solver.info.physicsTraceUnavailable}:{}),groups:[...groups].sort((a,b)=>b[1].ms-a[1].ms)}));
+  if(failure||solver.info.simulationPipelineError)throw new Error(String(failure??solver.info.simulationPipelineError));
  }
  assert.deepEqual(errors,[]);
 }finally{recorder?.destroy();solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();}

@@ -23,7 +23,7 @@ export const uniformVolumeMethod: SimulationMethod = {
   badge: "UNIFORM GEOMETRIC",
   supportedFieldModes: [...uniformMethod.supportedFieldModes!.filter(mode=>mode!=="solve-window"), "volume-levelset", "fine-tiles"],
   description: "Vertex level set and conservative liquid volume with live resolution regions.",
-  detail: "One coupled simulation uses fine cells outside manual coarse regions, with graded interfaces and conservative live remapping.",
+  detail: "One coupled simulation uses fine cells outside manual coarse regions, with direct h/4h interfaces and conservative live remapping.",
   resource: { ...uniformMethod.resource!, id: "fluid.uniform-volume", label: "Uniform Geometric fluid" },
   params,
   normalizeValues: resolveUniformGeometricValues,
@@ -37,5 +37,5 @@ export const uniformVolumeMethod: SimulationMethod = {
   harness: async () => ({ ...(await import("./harness")).uniformHarnessPlugin, methodId: "uniform-volume" }),
   createSolverAsync: (device, scene, quality, values, loads, progress, signal) =>
     WebGPUUniformReferenceSolver.createAsync(device, scene, quality, loads,
-      {...uniformGeometricSolverOptions(values, scene),mixedOwnership:true}, progress, signal),
+      uniformGeometricSolverOptions(values, scene), progress, signal),
 };

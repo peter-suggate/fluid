@@ -16,8 +16,7 @@ import type {GPUSolverInstance} from "../lib/core/method-contract";
 // The simulation layout is h/4h only (2h exists in pressure alone), ownership
 // must actually follow the flow, volume must be conserved, and a relayout
 // must not compile anything or grow memory past the band's high-water mark.
-// A surface may sit in 4h owners: the census keeps h only for slow surface
-// detail 4h cannot resolve.
+// The default keeps the moving surface at h; regular bulk and air use 4h.
 const STEPS=Number(process.env.UNIFORM_DYNAMIC_LANE_STEPS??30);
 const modulePath=process.env.WEBGPU_NODE_MODULE;
 (modulePath?test:test.skip)("dynamic coarsening follows the 128³ dam break on h/4h ownership without drift or recompilation",{timeout:1200000},async t=>{

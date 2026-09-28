@@ -13,30 +13,22 @@ export interface UniformMixedBandBits {readonly buffer:GPUBuffer;readonly wordOf
 export interface UniformMixedBuiltLevel extends UniformMixedBuiltOwnership {
  /** Tiles whose width differs from the ownership this level was built against. */
  readonly changedTiles:number;
- /** h, 2h and 4h tile counts from the receipt. */
+ /** h, 2h and 4h tile counts from the receipt (2h is always zero). */
  readonly tierCounts:readonly [number,number,number];
 }
 
-/** One built level: the ownership it replaces, its width floor, and whether
- * a 4h tile touching an h tile is graded to 2h. */
-export interface UniformMixedBuilderLevel {readonly ownership:UniformMixedOwnership;readonly minimumWidth:1|2;readonly graded:boolean}
-
 interface Level {
  readonly current:UniformMixedOwnership;
- readonly minimumWidth:1|2;
  readonly topology:GPUBuffer;readonly support:GPUBuffer;readonly slots:GPUBuffer;readonly work:GPUBuffer;
  readonly params:GPUBuffer;readonly group:GPUBindGroup;
 }
 
 /** GPU ownership builder for dynamic coarsening (docs/plans/uniform-dynamic-coarsening.md,
  * phase 4). From the band bits and a static fine mask (solids and fine-only
- * regions), it writes, per level, exactly the buffers UniformMixedOwnership.update
- * uploads for createUniformMixedLayout(lattice, regions, graded, 4, static ∪ band),
- * with the level's width floor (the 2h pressure level). The host reads back a 16-word receipt and the tile
- * words; UniformMixedOwnership.adopt copies the rest on the GPU.
- *
- * Grading needs no host decision here: every fine tile is forced, so a 4h
- * tile touching one becomes 2h, as the CPU layout grades forced tiles. */
+ * regions), it writes exactly the buffers UniformMixedOwnership.update
+ * uploads for the ungraded h/4h createUniformMixedLayout(lattice, regions,
+ * 4, static ∪ band). The host reads back a 16-word receipt and the tile
+ * words; UniformMixedOwnership.adopt copies the rest on the GPU. */
 export class UniformMixedLayoutBuilder {
  readonly allocatedBytes:number;
  private readonly tiles:number;
@@ -44,54 +36,52 @@ export class UniformMixedLayoutBuilder {
  private readonly statics:GPUBuffer;
  private readonly readback:GPUBuffer;
  private readonly resources:GPUBindGroupLayout;
- private readonly levels:Level[];
+ private readonly level:Level;
  private readonly pipelines=new Map<string,GPUComputePipeline>();
  private regions:UniformMixedLayout["regions"]=[];
  private staticReady=false;
  private encoded=false;
- /** levels: the frame's ownerships in UniformMixedFrame.builderLevels order. */
- constructor(private readonly device:GPUDevice,private readonly band:UniformMixedBandBits,current:readonly UniformMixedBuilderLevel[]){
-  const layout=current[0]!.ownership.layout,n=layout.tiles.length;
+ /** ownership: the simulation ownership the built generation replaces. */
+ constructor(private readonly device:GPUDevice,band:UniformMixedBandBits,ownership:UniformMixedOwnership){
+  const n=ownership.layout.tiles.length;
   this.tiles=n;this.blocks=Math.ceil(n/BLOCK);
   if(this.blocks>device.limits.maxComputeWorkgroupsPerDimension)throw new Error("Mixed layout builder tile count exceeds one dispatch dimension");
-  if(current.some(l=>l.ownership.layout.tiles.length!==n))throw new Error("Mixed layout builder levels must share the tile lattice");
   const storage=(label:string,words:number)=>device.createBuffer({label,size:words*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
-  this.statics=storage("Uniform layout builder static fine mask",Math.ceil(n/32));
-  this.readback=device.createBuffer({label:"Uniform layout builder receipt",size:current.length*(RECEIPT+n)*4,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+  // Static fine words, then static coarse words (coarse-only regions mask the band).
+  this.statics=storage("Uniform layout builder static masks",2*Math.ceil(n/32));
+  this.readback=device.createBuffer({label:"Uniform layout builder receipt",size:(RECEIPT+n)*4,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
   this.resources=device.createBindGroupLayout({entries:[
    ...[0,1,2].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage" as const}})),
    {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
    ...[4,5,6,7].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),
   ]});
   let bytes=this.statics.size+this.readback.size;
-  this.levels=current.map(({ownership,minimumWidth,graded},i)=>{
-   const topology=storage(`Uniform layout builder topology L${i}`,4*n);
-   const support=storage(`Uniform layout builder support L${i}`,9*n+24);
-   const slots=storage(`Uniform layout builder slots L${i}`,2*n);
-   const work=storage(`Uniform layout builder work L${i}`,RECEIPT+n+CATEGORIES*this.blocks+2*n);
-   const params=device.createBuffer({label:`Uniform layout builder params L${i}`,size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
-   device.queue.writeBuffer(params,0,new Uint32Array([minimumWidth,band.wordOffset,+graded,0]));
-   // Standalone stages visit everything until a frame census: support[0,4n) = 3.
-   device.queue.writeBuffer(support,0,new Uint32Array(4*n).fill(3));
-   const group=device.createBindGroup({layout:this.resources,entries:[
-    {binding:0,resource:{buffer:band.buffer}},{binding:1,resource:{buffer:this.statics}},{binding:2,resource:ownership.presentation},
-    {binding:3,resource:{buffer:params}},{binding:4,resource:{buffer:work}},{binding:5,resource:{buffer:topology}},
-    {binding:6,resource:{buffer:support}},{binding:7,resource:{buffer:slots}},
-   ]});
-   bytes+=topology.size+support.size+slots.size+work.size+params.size;
-   return {current:ownership,minimumWidth,topology,support,slots,work,params,group};
-  });
+  const topology=storage("Uniform layout builder topology",4*n);
+  const support=storage("Uniform layout builder support",9*n+24);
+  const slots=storage("Uniform layout builder slots",2*n);
+  const work=storage("Uniform layout builder work",RECEIPT+n+CATEGORIES*this.blocks+2*n);
+  const params=device.createBuffer({label:"Uniform layout builder params",size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+  device.queue.writeBuffer(params,0,new Uint32Array([band.wordOffset,0,0,0]));
+  // Standalone stages visit everything until a frame census: support[0,4n) = 3.
+  device.queue.writeBuffer(support,0,new Uint32Array(4*n).fill(3));
+  const group=device.createBindGroup({layout:this.resources,entries:[
+   {binding:0,resource:{buffer:band.buffer}},{binding:1,resource:{buffer:this.statics}},{binding:2,resource:ownership.presentation},
+   {binding:3,resource:{buffer:params}},{binding:4,resource:{buffer:work}},{binding:5,resource:{buffer:topology}},
+   {binding:6,resource:{buffer:support}},{binding:7,resource:{buffer:slots}},
+  ]});
+  bytes+=topology.size+support.size+slots.size+work.size+params.size;
+  this.level={current:ownership,topology,support,slots,work,params,group};
   this.allocatedBytes=bytes;
  }
  async initialize():Promise<void>{
-  const lattice=this.levels[0]!.current.layout.lattice,n=this.tiles,x=this.levels[0]!.current.dispatchX;
+  const lattice=this.level.current.layout.lattice,n=this.tiles,x=this.level.current.dispatchX;
   const T=lattice.dimensions.map(d=>d/4);
   const flags=RECEIPT,totals=RECEIPT+n,distanceA=totals+CATEGORIES*this.blocks,distanceB=distanceA+n;
   const module=this.device.createShaderModule({label:"Uniform mixed layout builder",code:/* wgsl */`
 @group(0) @binding(0) var<storage,read> band:array<u32>;
 @group(0) @binding(1) var<storage,read> statics:array<u32>;
 @group(0) @binding(2) var<storage,read> current:array<u32>;
-struct Params {minimumWidth:u32,bandOffset:u32,graded:u32}
+struct Params {bandOffset:u32}
 @group(0) @binding(3) var<uniform> params:Params;
 @group(0) @binding(4) var<storage,read_write> work:array<atomic<u32>>;
 @group(0) @binding(5) var<storage,read_write> topology:array<u32>;
@@ -103,21 +93,14 @@ const FLAGS:u32=${flags}u;const TOTALS:u32=${totals}u;const DA:u32=${distanceA}u
 fn coord(t:u32)->vec3u{return vec3u(t%T.x,(t/T.x)%T.y,t/(T.x*T.y));}
 fn key(p:vec3u)->u32{return p.x+T.x*(p.y+T.y*p.z);}
 fn inside(q:vec3i)->bool{return all(q>=vec3i(0))&&all(q<vec3i(T));}
-fn fineAt(t:u32)->bool{return (((band[params.bandOffset+t/32u]|statics[t/32u])>>(t%32u))&1u)!=0u;}
+const WORDS:u32=${Math.ceil(n/32)}u;
+fn fineAt(t:u32)->bool{return ((((band[params.bandOffset+t/32u]&~statics[WORDS+t/32u])|statics[t/32u])>>(t%32u))&1u)!=0u;}
 fn wordWidth(word:u32)->u32{if((word&0x80000000u)!=0u){return 1u;}if((word&0x40000000u)!=0u){return 2u;}return 4u;}
 fn widthAt(t:u32)->u32{return atomicLoad(&work[FLAGS+t])&7u;}
-// Width: h for the band and static tiles, 2h beside one when graded, else
-// 4h; then the level floor.
+// Width: h for the band and static tiles, else 4h (ungraded).
 @compute @workgroup_size(64) fn widths(@builtin(global_invocation_id) gid:vec3u){
  let t=gid.x;if(t>=N){return;}
- var w=4u;
- if(fineAt(t)){w=1u;}else if(params.graded!=0u){
-  let p=vec3i(coord(t));
-  for(var z=-1;z<=1;z++){for(var y=-1;y<=1;y++){for(var x=-1;x<=1;x++){
-   let q=p+vec3i(x,y,z);if(inside(q)&&fineAt(key(vec3u(q)))){w=2u;}
-  }}}
- }
- w=max(w,params.minimumWidth);
+ let w=select(4u,1u,fineAt(t));
  atomicStore(&work[FLAGS+t],w);
  if(w!=wordWidth(current[t])){atomicAdd(&work[0],1u);}
 }
@@ -242,50 +225,49 @@ fn scanPartial(lane:u32){
    this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint}}));
  }
  /** Static fine tiles (solid promotion and fine-only regions), one byte per
-  * tile, and the snapped regions the built layouts report. */
- setStatic(fine:Uint8Array,regions:UniformMixedLayout["regions"]):void{
-  if(fine.length!==this.tiles)throw new Error("Static fine mask does not match the tile lattice");
-  const words=new Uint32Array(Math.ceil(this.tiles/32));
-  for(let t=0;t<fine.length;t++)if(fine[t])words[t>>5]!|=1<<(t&31);
+  * tile, and the snapped regions the built layouts report. coarse: tiles a
+  * coarse-only region holds at 4h; band bits there are dropped. A tile in
+  * both masks is fine (solid promotion wins). */
+ setStatic(fine:Uint8Array,regions:UniformMixedLayout["regions"],coarse?:Uint8Array):void{
+  if(fine.length!==this.tiles||(coarse&&coarse.length!==this.tiles))throw new Error("Static masks do not match the tile lattice");
+  const count=Math.ceil(this.tiles/32),words=new Uint32Array(2*count);
+  for(let t=0;t<fine.length;t++){if(fine[t])words[t>>5]!|=1<<(t&31);if(coarse?.[t])words[count+(t>>5)]!|=1<<(t&31);}
   this.device.queue.writeBuffer(this.statics,0,words);
   this.regions=regions;this.staticReady=true;
  }
- /** Encode after the band bits are written, while each level's ownership is
-  * still the generation to compare against. Builds both levels. */
+ /** Encode after the band bits are written, while the ownership is still
+  * the generation to compare against. */
  encode(encoder:GPUCommandEncoder):void{
   if(this.pipelines.size!==7)throw new Error("Mixed layout builder is not initialized");
   if(!this.staticReady)throw new Error("Mixed layout builder has no static fine mask");
   const n=this.tiles,groups64=Math.ceil(n/64);
-  this.levels.forEach((level,i)=>{
-   encoder.clearBuffer(level.work,0,RECEIPT*4);
-   const pass=encoder.beginComputePass({label:`Uniform mixed layout build L${i}`});pass.setBindGroup(0,level.group);
-   for(const [entry,groups] of [["widths",groups64],["classify",this.blocks],["scan",1],["scatter",this.blocks],["distance0",groups64],["distance1",groups64],["distance2",groups64]] as const){
-    pass.setPipeline(this.pipelines.get(entry)!);pass.dispatchWorkgroups(groups);
-   }
-   pass.end();
-   encoder.copyBufferToBuffer(level.work,0,this.readback,i*(RECEIPT+n)*4,RECEIPT*4);
-   encoder.copyBufferToBuffer(level.topology,0,this.readback,(i*(RECEIPT+n)+RECEIPT)*4,n*4);
-  });
+  const level=this.level;
+  encoder.clearBuffer(level.work,0,RECEIPT*4);
+  const pass=encoder.beginComputePass({label:"Uniform mixed layout build"});pass.setBindGroup(0,level.group);
+  for(const [entry,groups] of [["widths",groups64],["classify",this.blocks],["scan",1],["scatter",this.blocks],["distance0",groups64],["distance1",groups64],["distance2",groups64]] as const){
+   pass.setPipeline(this.pipelines.get(entry)!);pass.dispatchWorkgroups(groups);
+  }
+  pass.end();
+  encoder.copyBufferToBuffer(level.work,0,this.readback,0,RECEIPT*4);
+  encoder.copyBufferToBuffer(level.topology,0,this.readback,RECEIPT*4,n*4);
   this.encoded=true;
  }
- /** Map the levels built by the last submitted encode(). */
- async read():Promise<readonly UniformMixedBuiltLevel[]>{
+ /** Map the generation built by the last submitted encode(). */
+ async read():Promise<UniformMixedBuiltLevel>{
   if(!this.encoded)throw new Error("Mixed layout builder was not encoded");
   this.encoded=false;
   await this.readback.mapAsync(GPUMapMode.READ);
   const words=new Uint32Array(this.readback.getMappedRange()).slice();this.readback.unmap();
-  const n=this.tiles,lattice=this.levels[0]!.current.layout.lattice;
-  return this.levels.map((level,i)=>{
-   const r=words.subarray(i*(RECEIPT+n),i*(RECEIPT+n)+RECEIPT),tiles=words.slice(i*(RECEIPT+n)+RECEIPT,(i+1)*(RECEIPT+n));
-   if(r[1]!+r[2]!+r[3]!!==n||r[4]!!==8*r[2]!+r[3]!)throw new Error(`Mixed layout builder L${i} receipt is inconsistent: ${[...r]}`);
-   const layout=uniformMixedLayoutFromTiles(lattice,tiles,this.regions);
-   if(layout.cellCount!==64*r[1]!+8*r[2]!+r[3]!)throw new Error(`Mixed layout builder L${i} tile words disagree with its receipt`);
-   return {changedTiles:r[0]!,tierCounts:[r[1]!,r[2]!,r[3]!],layout,seamCounts:[r[5]!,r[6]!,r[7]!],hangingSlots:r[2]!+r[5]!+r[7]!,
-    source:{topology:level.topology,support:level.support,slots:level.slots,counts:{buffer:level.work,offset:48}}};
-  });
+  const n=this.tiles,level=this.level,lattice=level.current.layout.lattice;
+  const r=words.subarray(0,RECEIPT),tiles=words.slice(RECEIPT,RECEIPT+n);
+  if(r[1]!+r[2]!+r[3]!!==n||r[2]!!==0||r[4]!!==r[3]!)throw new Error(`Mixed layout builder receipt is inconsistent: ${[...r]}`);
+  const layout=uniformMixedLayoutFromTiles(lattice,tiles,this.regions);
+  if(layout.cellCount!==64*r[1]!+r[3]!)throw new Error("Mixed layout builder tile words disagree with its receipt");
+  return {changedTiles:r[0]!,tierCounts:[r[1]!,r[2]!,r[3]!],layout,seamCounts:[r[5]!,r[6]!,r[7]!],hangingSlots:r[5]!+r[7]!,
+   source:{topology:level.topology,support:level.support,slots:level.slots,counts:{buffer:level.work,offset:48}}};
  }
  destroy():void{
   this.statics.destroy();this.readback.destroy();
-  for(const l of this.levels){l.topology.destroy();l.support.destroy();l.slots.destroy();l.work.destroy();l.params.destroy();}
+  const l=this.level;l.topology.destroy();l.support.destroy();l.slots.destroy();l.work.destroy();l.params.destroy();
  }
 }

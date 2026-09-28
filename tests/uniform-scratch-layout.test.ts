@@ -3,23 +3,19 @@ import test from "node:test";
 import { UniformScratchArena, UniformScratchLayout } from "../lib/methods/uniform/uniform-scratch-arena";
 
 test("scratch layout preserves fine storage sizes and stage aliases", () => {
-  for (const [dims, bytes, donorOffset, donorBytes] of [
-    [[4,4,4],14720,2560,1792],
-    [[32,32,32],2515456,1310720,917504],
-    [[128,64,32],18670080,10485760,7340032],
+  for (const [dims, donorOffset, donorBytes] of [
+    [[4,4,4],2560,1792],
+    [[32,32,32],1310720,917504],
+    [[128,64,32],10485760,7340032],
   ] as const) {
-    const p=new UniformScratchLayout(dims,dims.reduce((a,b)=>a*b,1)*40,false,false);
-    assert.equal(p.byteLength,bytes);
+    const p=new UniformScratchLayout(dims,dims.reduce((a,b)=>a*b,1)*40,false);
     assert.equal(p.donorOffset,donorOffset);
     assert.equal(p.donorBytes,donorBytes);
     assert.equal(p.offset("Uniform Sec. 3.3 resolved FIM values"),p.offset("Uniform Sec. 3.3 FIM values A"));
     assert.equal(p.offset("Uniform CM11a Full-Cycle p_tmp"),p.offset("Uniform CM11a L0 phi A"));
     assert.equal(p.offset("Uniform CM11a accepted pressure"),p.offset("Uniform CM11a L0 phi B"));
     assert.ok(p.byteLength>=p.donorOffset+p.donorBytes);
-    const far=new UniformScratchLayout(dims,p.edgeBytes,false,true);
-    assert.ok(far.farTileOffset!*4>=p.byteLength);
-    assert.equal(far.farTileOffset!%4,0);
-    const diagnostic=new UniformScratchLayout(dims,p.edgeBytes,true,false);
+    const diagnostic=new UniformScratchLayout(dims,p.edgeBytes,true);
     assert.equal(diagnostic.offset("Uniform Sec. 3.3 resolved FIM distances"),undefined);
     assert.equal(diagnostic.byteLength,p.byteLength);
   }

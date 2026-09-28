@@ -1,4 +1,4 @@
-import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
+import { compileMixedTiers, type UniformMixedOwnership } from "./uniform-mixed-ownership";
 import type { WebGPUUniformVelocityExtrapolator } from "./webgpu-uniform-velocity-extrapolation";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedFaceAddressWGSL,uniformMixedFaceDispatchWGSL } from "./uniform-mixed-face-dispatch.wgsl";
@@ -30,17 +30,19 @@ function farValueWGSL(name:string,state:string,lower:string,upper:string):string
 }
 `;
 }
-/** Two-cell Godunov/upwind extension on canonical MAC patches, followed by the
- * existing nearest-source 4h-and-below hierarchy. No fine field is expanded.
- * Four transient RGBA arrays borrow the native FIM arena. */
+/** Regular-bulk mode restricts physical source faces directly to the 4h
+ * nearest-source hierarchy, then retains supported h faces on publication.
+ * The legacy mode first performs Godunov sweeps on canonical mixed patches;
+ * its four transient RGBA arrays borrow the native FIM arena. */
 export class UniformMixedExtension {
  readonly allocatedBytes=0;
  readonly scratchBytes:number;
  private readonly resources:GPUBindGroupLayout;
- private readonly pipelines=new Map<string,GPUComputePipeline[]>();
  private readonly regularPipelines=new Map<string,GPUComputePipeline[]>();
+ /** Seam tiers: h per owner, 4h one tile group per seam tile (…Coarse entries). */
+ private readonly seamPipelines=new Map<string,GPUComputePipeline[]>();
  private restrictPipeline?:GPUComputePipeline;
- constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,readonly hierarchy:Hierarchy){
+ constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,readonly hierarchy:Hierarchy,private readonly regularBulk=false,private readonly directRestriction=false){
   this.scratchBytes=4*Math.ceil(16*ownership.layout.lattice.dimensions.reduce((n,d)=>n*(d+2),1)/256)*256;
   this.resources=device.createBindGroupLayout({entries:[
    ...[0,1,2,3].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),
@@ -95,8 +97,9 @@ fn umLoadMixedFace(p:vec3i,axis:u32)->f32{return valuesIn[umSlot(p)][axis];}
 // value beside an infinite distance is never consumed.
 fn umSlotState(anchor:vec3i,axis:u32)->vec2f{
  let tile=umTileAt(vec3u(clamp(anchor,vec3i(0),vec3i(UM_D)-vec3i(1)))/4u);
- if((umTileSupport(tile)&2u)==0u){return vec2f(0.0,UM_INF);}
- let at=umSlot(anchor);return vec2f(valuesIn[at][axis],distancesIn[at][axis]);
+ // Branch-free: the support word and both slot words load together.
+ let at=umSlot(clamp(anchor,vec3i(-1),vec3i(UM_D)));let value=valuesIn[at][axis];let distance=distancesIn[at][axis];
+ return select(vec2f(0.0,UM_INF),vec2f(value,distance),(umTileSupport(tile)&2u)!=0u);
 }
 ${uniformMixedVelocitySamplingSource()}
 fn umSource(face:UMFace,owner:UMOwner)->bool{
@@ -111,23 +114,27 @@ struct UMNeighbor {value:f32,distance:f32,spacing:f32}
 fn umNeighbor(point:vec3f,center:vec3f,component:u32,step:u32,width:u32)->UMNeighbor{
  if(any(point<vec3f(0))||any(point>vec3f(UM_D))){return UMNeighbor(0,UM_INF,1);}
  let tile=umTileAt(min(vec3u(point),UM_D-vec3u(1))/4u);
- if(umRegularFine||umTileMaximumWidth(tile)==1u){
-  var offset=vec3f(0.5);offset[component]=1.0;
-  let slot=umSlotState(vec3i(round(point-offset)),component);
-  return UMNeighbor(slot.x,slot.y,h[step]);
- }
+ // Both direct cases read the width-w patch slot below the plane (w is 1 on
+ // the all-h stencil path). Its anchor needs no topology, so the slot,
+ // support and width words issue together instead of as a dependent chain.
+ var offset=vec3f(0.5*f32(width));offset[component]=1.0;
+ let direct=umSlotState(vec3i(round(point-offset)),component);
+ // A unit request whose plane is interior to a unit tile has unit cells on
+ // both sides: the case below with lowWidth = highWidth = 1, one load.
+ let interior=width==1u&&(u32(round(point[component]))&3u)!=0u&&umTileWidth(tile)==1u;
+ if(umRegularFine||interior||umTileMaximumWidth(tile)==1u){return UMNeighbor(direct.x,direct.y,h[step]);}
  // The point is a width-w lattice patch centre (the requesting face has
- // width w). When the owner below its plane has width w and the one above is
- // no finer (or the plane is a domain wall), that owner's positive face is
- // one canonical patch centred here: the search below selects exactly it.
+ // width w). When the owners on both sides of its plane are no finer than w
+ // and one of them has width w (or the plane is a domain wall and the inner
+ // owner has width w), the lower owner's positive face has patches of width
+ // min(low, high) = w, one of them centred here: the search below selects
+ // exactly it.
  var below=vec3i(floor(point));let plane=i32(round(point[component]));below[component]=plane-1;
  var above=below;above[component]=plane;
  let lowWidth=select(0u,umTileWidth(umTileAt(vec3u(max(below,vec3i(0)))/4u)),plane>0);
  let highWidth=select(0u,umTileWidth(umTileAt(min(vec3u(above),UM_D-vec3u(1))/4u)),plane<i32(UM_D[component]));
- if(select(lowWidth==width&&(highWidth==0u||highWidth>=width),highWidth==width,lowWidth==0u)){
-  var offset=vec3f(0.5*f32(width));offset[component]=1.0;
-  let slot=umSlotState(vec3i(round(point-offset)),component);let delta=(point-center)*h.xyz;
-  return UMNeighbor(slot.x,slot.y,sqrt(dot(delta,delta)));
+ if(select((lowWidth==width&&(highWidth==0u||highWidth>=width))||(highWidth==width&&lowWidth>width),highWidth==width,lowWidth==0u)){
+  let delta=(point-center)*h.xyz;return UMNeighbor(direct.x,direct.y,sqrt(dot(delta,delta)));
  }
  let site=umVelocitySite(point,component);
  var best=UMNeighbor(0,UM_INF,1);var nearest=UM_INF;
@@ -219,6 +226,39 @@ ${["seed","sweep"].map(entry=>/* wgsl */`
   }
  }
 }`).join("\n")}
+// Coarse seam owners: one group per tile, one lane per anchor and component.
+// A 4h owner beside h tiles has sixteen patches per face; evaluating them
+// serially in one lane made the coarse seam tier a latency chain.
+fn umSeamTileOwner(group:vec3u,local:vec3u)->UMOwner{
+ var owner=umTileJobOwner(group);if(owner.width==0u||(umTileSupport(owner.tile)&2u)==0u){return UMOwner();}
+ let q=local/owner.width;let side=4u/owner.width;owner.lane=q.x+side*(q.y+side*q.z);owner.index+=owner.lane;return owner;
+}
+// 4h seam tiles hold one owner whose positive faces meet at most 48 anchor
+// cells (sixteen per axis). One lane per such (axis, cell): a (cell, axis)
+// grid would idle three lanes in four, and occupancy bounds this tier.
+fn umCoarseCell(local:vec3u)->u32{return local.x+4u*(local.y+4u*local.z);}
+${["seed","sweep"].map(entry=>/* wgsl */`
+var<workgroup> ${entry}CoarseState:array<vec3f,192>;
+@compute @workgroup_size(64) fn ${entry}Coarse(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ for(var i=lane;i<192u;i+=64u){${entry}CoarseState[i]=vec3f(0,UM_INF,0);}
+ workgroupBarrier();
+ let owner=umSeamTileOwner(group,vec3u(0));
+ if(owner.width!=0u){
+  let origin=umOrigin(owner);
+  if(lane<48u){
+   let axis=lane/16u;let part=lane%16u;var local=vec3u(0);local[axis]=3u;local[(axis+1u)%3u]=part%4u;local[(axis+2u)%3u]=part/4u;
+   let face=umPositiveFaceAtAnchor(owner,axis,vec3i(origin+local));
+   if(face.width!=0u){${entry==="seed"?`${entry}CoarseState[umCoarseCell(local)+64u*axis]=select(vec3f(0,UM_INF,1),vec3f(umPhysical(face),0,1),umSource(face,owner));`:`${entry}CoarseState[umCoarseCell(local)+64u*axis]=vec3f(umExtended(face,owner),1);`}}
+  }else if(lane<51u){
+   let axis=lane-48u;
+   if(origin[axis]==0u){let face=umFace(owner,axis,-1,0u);var value=vec4f(0);var distance=vec4f(UM_INF);
+    value[axis]=umPhysical(face);distance[axis]=select(UM_INF,0.0,umSource(face,owner));valuesOut[umSlot(face.anchor)]=value;distancesOut[umSlot(face.anchor)]=distance;}
+  }
+ }
+ workgroupBarrier();
+ let x=${entry}CoarseState[lane];let y=${entry}CoarseState[lane+64u];let z=${entry}CoarseState[lane+128u];
+ if(owner.width!=0u&&x.z+y.z+z.z>0.0){let anchor=vec3i(umOrigin(owner)+umCorner(lane,4u));valuesOut[umSlot(anchor)]=vec4f(x.x,y.x,z.x,0);distancesOut[umSlot(anchor)]=vec4f(x.y,y.y,z.y,UM_INF);}
+}`).join("\n")}
 fn umSourceIndex(p:vec3i)->u32{return u32(p.x+i32(UM_D.x)*(p.y+i32(UM_D.y)*p.z))+1u;}
 fn umSourcePoint(i:u32)->vec3i{let at=i-1u;return vec3i(vec3u(at%UM_D.x,(at/UM_D.x)%UM_D.y,at/(UM_D.x*UM_D.y)));}
 @compute @workgroup_size(4,4,4) fn restrictBand(@builtin(global_invocation_id) gid:vec3u){
@@ -233,16 +273,23 @@ fn umSourcePoint(i:u32)->vec3i{let at=i-1u;return vec3i(vec3u(at%UM_D.x,(at/UM_D
   // Restrict real MAC patches, with the native vertical footprint fallback.
   for(var fallback=0u;fallback<select(1u,2u,component==1u);fallback++){
    if(count>0.0){break;}
-   for(var z=0u;z<4u;z++){for(var y=0u;y<4u;y++){for(var x=0u;x<4u;x++){
-    let p=origin+vec3i(vec3u(x,y,z));if(fallback==0u&&p[component]!=origin[component]+3){continue;}
-    let o=umOwnerAt(p);let face=umPositiveFaceAtAnchor(o,component,p);if(face.width==0u){continue;}
-    let at=umSlot(face.anchor);if(distancesIn[at][component]>=0.5*UM_INF){continue;}
+   ${this.directRestriction?`// Preserve z/y/x order among the 16 face-plane anchors.
+   for(var k=0u;k<select(16u,64u,fallback!=0u);k++){
+    var local=umCorner(k,4u);
+    if(fallback==0u){local=vec3u(k%4u,k/4u,3u);if(component==0u){local=vec3u(3u,k%4u,k/4u);}else if(component==1u){local=vec3u(k%4u,3u,k/4u);}}
+    let p=origin+vec3i(local);`:`for(var z=0u;z<4u;z++){for(var y=0u;y<4u;y++){for(var x=0u;x<4u;x++){
+    let p=origin+vec3i(vec3u(x,y,z));if(fallback==0u&&p[component]!=origin[component]+3){continue;}`}
+    ${this.directRestriction&&!this.regularBulk?`// An h owner always has one unit patch at its positive anchor,
+    // even beside a coarse neighbour. No neighbour lookup is needed here.
+    var face=UMFace();if(umTileWidth(umTileAt(gid))==1u){face=UMFace(UMOwner(),p,1u,1u,component,1);}
+    else{face=umPositiveFaceAtAnchor(umOwnerAt(p),component,p);}`:`let o=umOwnerAt(p);let face=umPositiveFaceAtAnchor(o,component,p);`}if(face.width==0u){continue;}
+    let at=umSlot(face.anchor);${this.regularBulk?"if(!umSource(face,o)){continue;}":"if(distancesIn[at][component]>=0.5*UM_INF){continue;}"}
     let delta=(umFaceCenter(face)-location)*h.xyz;let distance=dot(delta,delta);let epsilon=1e-6*max(1.0,distance);
     if(distance<best-epsilon){best=distance;sum=0.0;count=0.0;lo=vec3i(UM_D);hi=vec3i(-1);}
-    if(abs(distance-best)<=epsilon){sum+=valuesIn[at][component];count+=1.0;
+    if(abs(distance-best)<=epsilon){sum+=${this.regularBulk?"umPhysical(face)":"valuesIn[at][component]"};count+=1.0;
      // The whole tangential patch contributes its original support bounds.
      var end=face.anchor+vec3i(i32(face.width)-1);end[component]=face.anchor[component];lo=min(lo,face.anchor);hi=max(hi,end);}
-   }}}
+   ${this.directRestriction?"}":"}}}"}
   }
   if(count>0.0){values[component]=sum/count;mask|=1u<<component;lower[component]=umSourceIndex(lo);upper[component]=umSourceIndex(hi);}
  }
@@ -295,7 +342,7 @@ fn umFarValueUniform(face:UMFace,value:f32,valid:bool)->f32{
 }
 fn umPublished(face:UMFace)->f32{
  if(face.anchor[face.axis]<0){return umPhysical(face);}
- let slot=umSlotState(face.anchor,face.axis);if(slot.y<0.5*UM_INF){return slot.x;}
+ ${this.regularBulk?"if(umSource(face,umOwnerAt(face.anchor))){return umPhysical(face);}":"let slot=umSlotState(face.anchor,face.axis);if(slot.y<0.5*UM_INF){return slot.x;}"}
  return umFarValue(face);
 }
 @compute @workgroup_size(64) fn publishFine(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
@@ -333,12 +380,28 @@ fn umPublished(face:UMFace)->f32{
  let origin=umOrigin(owner);var value=vec4f(0);
  for(var axis=0u;axis<3u;axis++){
   if(origin[axis]==0u){let face=umUnitExtensionFace(owner,axis,-1);boundary[umNegativeBoundaryIndex(origin,axis)]=umPhysical(face);}
-  let face=umUnitExtensionFace(owner,axis,1);let slot=umSlotState(face.anchor,axis);
+  let face=umUnitExtensionFace(owner,axis,1);${this.regularBulk?"let slot=select(vec2f(0,UM_INF),vec2f(umPhysical(face),0),umSource(face,owner));":"let slot=umSlotState(face.anchor,axis);"}
   if(slot.y<0.5*UM_INF){value[axis]=slot.x;}
   else if((mixed&(1u<<axis))==0u){value[axis]=umFarValueUniform(face,farState[13u][axis],farLo[39u+axis].w>=0.0);}
   else{value[axis]=umFarValueStaged(face);}
  }
  value.w=textureLoad(physical,vec3i(origin),0).w;textureStore(output,vec3i(origin),value);
+}
+var<workgroup> publishCoarseState:array<vec2f,192>;
+@compute @workgroup_size(64) fn publishCoarse(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ for(var i=lane;i<192u;i+=64u){publishCoarseState[i]=vec2f(0);}
+ workgroupBarrier();
+ let owner=umSeamTileOwner(group,vec3u(0));
+ if(owner.width!=0u){
+  let origin=umOrigin(owner);
+  if(lane<48u){
+   let axis=lane/16u;let part=lane%16u;var local=vec3u(0);local[axis]=3u;local[(axis+1u)%3u]=part%4u;local[(axis+2u)%3u]=part/4u;
+   let face=umPositiveFaceAtAnchor(owner,axis,vec3i(origin+local));if(face.width!=0u){publishCoarseState[umCoarseCell(local)+64u*axis]=vec2f(umPublished(face),1);}
+  }else if(lane<51u){let axis=lane-48u;if(origin[axis]==0u){boundary[umNegativeBoundaryIndex(origin,axis)]=umPublished(umFace(owner,axis,-1,0u));}}
+ }
+ workgroupBarrier();
+ let x=publishCoarseState[lane];let y=publishCoarseState[lane+64u];let z=publishCoarseState[lane+128u];
+ if(owner.width!=0u&&x.y+y.y+z.y>0.0){let anchor=vec3i(umOrigin(owner)+umCorner(lane,4u));textureStore(output,anchor,vec4f(x.x,y.x,z.x,textureLoad(physical,anchor,0).w));}
 }
 ${uniformMixedFaceDispatchWGSL("publish","umPublished(face)",false,"value.w=textureLoad(physical,ownedFace.anchor,0).w;").replace(" let origin=umOrigin(owner);",` let origin=umOrigin(owner);
  // A unit owner's faces are the unit patches whatever its neighbours.
@@ -354,22 +417,24 @@ ${uniformMixedFaceDispatchWGSL("publish","umPublished(face)",false,"value.w=text
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]});
   this.restrictPipeline=await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"restrictBand",constants:{umDispatchX:this.ownership.dispatchX}}});
-  for(const entryPoint of ["seed","sweep","publish"]){
+  for(const entryPoint of this.regularBulk?["publish"]:["seed","sweep","publish"]){
    const compile=(width:number,regular:boolean,name=entryPoint)=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:name,constants:{umDispatchX:this.ownership.dispatchX,umCellWidth:width,umRegularTiles:+regular,umInterfaceTiles:+!regular,umRegularFine:+(regular&&width===1)}}});
-   this.pipelines.set(entryPoint,await Promise.all([1,2,4].map(w=>compile(w,false))));
-   this.regularPipelines.set(entryPoint,await Promise.all([1,2,4].map(w=>compile(w,true,entryPoint==="publish"&&w===1?"publishFine":entryPoint))));
+   this.regularPipelines.set(entryPoint,await compileMixedTiers(w=>compile(w,true,entryPoint==="publish"&&w===1?"publishFine":entryPoint)));
+   this.seamPipelines.set(entryPoint,await compileMixedTiers(w=>w===1?compile(1,false):compile(4,false,`${entryPoint}Coarse`)));
   }
  }
  encode(encoder:GPUCommandEncoder,groups:readonly [GPUBindGroup,GPUBindGroup],sweeps=2):void{
-  if(this.pipelines.size!==3||!this.restrictPipeline)throw new Error("Mixed extension is not initialized");
+  if(this.seamPipelines.size!==(this.regularBulk?1:3)||!this.restrictPipeline)throw new Error("Mixed extension is not initialized");
   const run=(entry:string,group:GPUBindGroup)=>{
    const pass=encoder.beginComputePass({label:`Uniform mixed extension ${entry}`});
    pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);
    if(entry==="restrictBand"){pass.setPipeline(this.restrictPipeline!);pass.dispatchWorkgroups(...this.ownership.layout.tileDimensions.map(n=>Math.ceil(n/4)) as [number,number,number]);}
-   else {this.ownership.dispatchRegular(pass,this.regularPipelines.get(entry)!);this.ownership.dispatchSeams(pass,this.pipelines.get(entry)!);}pass.end();
+   else {this.ownership.dispatchRegular(pass,this.regularPipelines.get(entry)!);this.ownership.dispatchSeams(pass,this.seamPipelines.get(entry)!,[false,true,true]);}pass.end();
   };
   if(!Number.isSafeInteger(sweeps)||sweeps<0)throw new Error("Invalid mixed extension sweep count");
-  run("seed",groups[1]);for(let i=0;i<sweeps;i++)run("sweep",groups[i%2]!);
+  // Bulk extension uses only the regular hierarchy. Its restriction reads
+  // physical supported faces directly, and publication preserves them at h.
+  if(!this.regularBulk){run("seed",groups[1]);for(let i=0;i<sweeps;i++)run("sweep",groups[i%2]!);}
   const final=groups[sweeps%2]!;run("restrictBand",final);
   this.hierarchy.encode(encoder);run("publish",final);
  }

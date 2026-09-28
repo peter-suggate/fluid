@@ -14,11 +14,13 @@ export interface UniformMixedSurfaceFields {
   volume: GPUTexture;
   negative: GPUBuffer;
   departures: GPUTexture;
-  /** h.xyz, dt; openTop, cubic, drain, loop bound (=4). */
+  /** h.xyz, dt; flags (bit 0 openTop), cubic, drain, loop bound (=4). */
   params: GPUBuffer;
   /** One temporary surface-evidence word per tile, six wall words (plus two
    * pad), then with solids two words per tile (closed, clear); dead before transport. */
   evidence: GPUBufferBinding;
+  /** UniformMixedHangingTaps.unitVelocity of `velocity`; with hanging taps only. */
+  unitVelocity?: GPUTexture;
 }
 
 /** Native RK2 vertex/volume characteristics and surface rebuilding on canonical
@@ -35,7 +37,7 @@ export class UniformMixedSurface {
   private readonly deferredPipelines:GPUComputePipeline[]=[];
   private readonly deferredDispatch:GPUBuffer;
   private readonly deferredHeaders=new WeakMap<GPUBindGroup,{buffer:GPUBuffer;offset:number}>();
-  constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly hanging=false) {
+  constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly hanging=false,private readonly resolved=false) {
     this.resources = device.createBindGroupLayout({entries:[
       ...[0,2,3,4].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
       {binding:1,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"r32float",viewDimension:"3d"}},
@@ -45,9 +47,12 @@ export class UniformMixedSurface {
       {binding:8,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
       ...(sourceParams?[{binding:9,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}]:[]),
       {binding:10,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
+      ...(hanging?[{binding:11,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}}]:[]),
     ]});
     this.deferredDispatch=device.createBuffer({label:"Uniform mixed surface deferred advect dispatch",size:12,usage:GPUBufferUsage.INDIRECT|GPUBufferUsage.COPY_DST});
   }
+  /** Resolved phi (UniformMixedPhiResolve) makes every texel a vertex value. */
+  private get vertexCache():boolean{return this.hanging&&!this.resolved;}
   bind(f: UniformMixedSurfaceFields): GPUBindGroup {
     const d=this.ownership.layout.lattice.dimensions;
     for(const [i,t] of [f.phi,f.outputPhi,f.velocity,f.coarseVelocity,f.volume,f.departures].entries()){
@@ -56,6 +61,7 @@ export class UniformMixedSurface {
         throw new Error("Mixed surface requires native vertex/cell fields and a 4h velocity cache");
     }
     if(f.phi===f.outputPhi||f.departures===f.velocity||f.departures===f.coarseVelocity)throw new Error("Mixed surface outputs overlap inputs");
+    if(this.hanging!==(f.unitVelocity!==undefined))throw new Error("Mixed surface hanging taps require their unit velocity texture");
     // Per-tile retirement evidence, the six wallReach plane words, then the
     // solid closed/clear tile words.
     const evidenceBytes=this.ownership.layout.tiles.length*(this.solid?12:4)+32;
@@ -71,11 +77,13 @@ export class UniformMixedSurface {
       {binding:8,resource:{...f.evidence,size:evidenceBytes}},
       {binding:10,resource:{buffer:f.evidence.buffer,offset:deferredOffset,size:deferredBytes}},
       ...(this.sourceParams?[{binding:9,resource:{buffer:this.sourceParams,size:176}}]:[]),
+      ...(f.unitVelocity?[{binding:11,resource:f.unitVelocity.createView()}]:[]),
     ]});
     this.deferredHeaders.set(group,{buffer:f.evidence.buffer,offset:deferredOffset});
     return group;
   }
   async initialize(): Promise<void> {
+    const velocitySampling=uniformMixedVelocitySamplingSource(false,true,undefined,this.hanging?(this.solid?3:2):undefined,this.hanging?"unitVelocity":undefined);
     const module=this.device.createShaderModule({code:uniformMixedTopologyWGSL(this.ownership.layout,0)+/* wgsl */`
 @group(1) @binding(0) var phi:texture_3d<f32>;
 @group(1) @binding(1) var outputPhi:texture_storage_3d<r32float,write>;
@@ -92,16 +100,17 @@ struct Params {hDt:vec4f,flags:vec4u}
 ${this.sourceParams?uniformMixedSourceWGSL(9):""}
 ${uniformMixedFaceAddressWGSL}
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
-${this.hanging?/* wgsl */`// vertexCache fills each slotted tile's reconstructed vertices once per
+${this.vertexCache?/* wgsl */`// vertexCache fills each slotted tile's reconstructed vertices once per
 // vertex pass from this pass's phi; every other entry reads them back.
 override umVertexCacheFill:bool=false;`:""}
-${uniformMixedVertexSamplingSource(this.hanging?/* wgsl */`if(!umVertexCacheFill){let slot=umHanging[tile];if(slot!=UM_NO_SLOT){return bitcast<f32>(umHanging[umHangingVertexAddress(slot,p-umTileCoord(tile)*4u)]);}}`:"")}
+${uniformMixedVertexSamplingSource(this.vertexCache?/* wgsl */`if(!umVertexCacheFill){let slot=umHanging[tile];if(slot!=UM_NO_SLOT){return bitcast<f32>(umHanging[umHangingVertexAddress(slot,p-umTileCoord(tile)*4u)]);}}`:"",this.resolved)}
 fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32{
  if(anchor[axis]<0){return negative[umNegativeBoundaryIndex(vec3u(max(anchor,vec3i(0))),axis)];}
  return textureLoad(velocity,anchor,0)[axis];
 }
 fn umLoadCoarseFace(index:vec3i,axis:u32)->f32{return textureLoad(coarseVelocity,index+vec3i(1),0)[axis];}
-${uniformMixedVelocitySamplingSource(false,true,undefined,this.hanging?(this.solid?3:2):undefined)}
+${this.hanging?"@group(1) @binding(11) var unitVelocity:texture_3d<f32>;":""}
+${velocitySampling}
 fn umSurfaceTrace(p:vec3f)->vec3f{
  let h=params.hDt.xyz;let dt=params.hDt.w;
  let mid=clamp(p-0.5*dt*umSampleVelocity(p)/h,vec3f(0),vec3f(UM_D));
@@ -196,14 +205,18 @@ fn umCatmull(t:f32)->vec4f{
 }
 fn umCubicPhi(q:vec3f)->f32{
  let owner=umOwnerAt(min(vec3i(floor(q)),vec3i(UM_D)-vec3i(1)));
- let width=select(i32(owner.width),1,umRegularFine);let base=select(vec3i(umOrigin(owner)),min(vec3i(floor(q)),vec3i(UM_D)-1),umRegularFine);let fraction=(q-vec3f(base))/f32(width);
+ let finePhi=umRegularFine;let width=select(i32(owner.width),1,finePhi);let base=select(vec3i(umOrigin(owner)),min(vec3i(floor(q)),vec3i(UM_D)-1),finePhi);let fraction=(q-vec3f(base))/f32(width);
  let wx=umCatmull(fraction.x);let wy=umCatmull(fraction.y);let wz=umCatmull(fraction.z);
- let regularFine=umRegularFine||umTileMaximumWidth(owner.tile)==1u;
+ // Resolved: every tap is a width-aligned vertex within one tile of the
+ // owner's tile (4h taps are 4-aligned, stored everywhere), so it is stored
+ // or resolved. The 64 direct loads then unroll with a constant bound.
+ let regularFine=${this.resolved?"true":"umRegularFine||umTileMaximumWidth(owner.tile)==1u"};
  ${this.solid?"let tapsClear=(umRegularFine||owner.width==1u)&&umSolidClear(base);":""}
  var value=0.0;var low=1e30;var high=-1e30;
- for(var z=0u;z<params.flags.w;z++){var plane=0.0;
-  for(var y=0u;y<params.flags.w;y++){var row=0.0;
-   for(var x=0u;x<params.flags.w;x++){
+ let taps=${this.resolved?"4u":"params.flags.w"};
+ for(var z=0u;z<taps;z++){var plane=0.0;
+  for(var y=0u;y<taps;y++){var row=0.0;
+   for(var x=0u;x<taps;x++){
     let offset=vec3i(vec3u(x,y,z))-vec3i(1);let vertex=clamp(base+offset*width,vec3i(0),vec3i(UM_D));
     // Cubic taps lie on lattice vertices. Most are stored directly; asking
     // the trilinear sampler to reconstruct these integer taps repeats the
@@ -220,10 +233,11 @@ fn umDrain(q:vec3f,value:f32,width:u32)->f32{
  let h=f32(width)*min(params.hDt.x,min(params.hDt.y,params.hDt.z));if(value>=0.5*h){return value;}
  let centre=vec3i(floor(q/f32(width)+vec3f(0.5)))*i32(width);
  let low=max(vec3i(0),centre-vec3i(2*i32(width)));let high=min(vec3i(UM_D),centre+vec3i(2*i32(width)));
- // Deep liquid: the departure cell itself is a stored unit owner in the box,
- // one of the loop's own probes, so test it before walking the box.
+ // Deep liquid: the owner of the departure cell, when that cell is in the
+ // box, intersects it and is one of the loop's own probes (its origin is a
+ // width step of its tile), so test it before walking the box.
  let at=clamp(vec3i(floor(q)),vec3i(0),vec3i(UM_D)-vec3i(1));
- if(all(at>=low)&&all(at<high)&&umTileWidth(umTileAt(vec3u(at)/4u))==1u&&textureLoad(volume,at,0).x>0.05){return value;}
+ if(all(at>=low)&&all(at<high)){let w=i32(umTileWidth(umTileAt(vec3u(at)/4u)));if(textureLoad(volume,(at/w)*w,0).x>0.05){return value;}}
  // Visit intersecting owners once per tile. This is exactly the native 4^3
  // evidence box at either uniform endpoint, and never skips a fine droplet.
  let first=low/4;let last=(high+vec3i(3))/4;
@@ -240,7 +254,7 @@ fn umWallContact(p:vec3f,value:f32,width:u32)->f32{
  if(params.hDt.w<=0.0){return value;}var interior=p;var contact=false;
  for(var axis=0u;axis<3u;axis++){for(var side=0u;side<2u;side++){
   let upper=side==1u;let inward=select(1.0,-1.0,upper);let plane=select(0.0,f32(UM_D[axis]),upper);
-  if(abs(p[axis]-plane)>1e-5||(axis==1u&&upper&&params.flags.x!=0u)){continue;}
+  if(abs(p[axis]-plane)>1e-5||(axis==1u&&upper&&(params.flags.x&1u)!=0u)){continue;}
   var probe=p;probe[axis]+=inward*f32(width);
   if(value>=0.0&&inward*umSampleVelocity(probe)[axis]>=-1e-6){continue;}
   interior[axis]+=inward*f32(width);contact=true;
@@ -252,7 +266,7 @@ fn umReleasedWalls(p:vec3f,value:f32)->f32{
  var result=value;let h=params.hDt.xyz;let dt=params.hDt.w;
  for(var axis=0u;axis<3u;axis++){for(var side=0u;side<2u;side++){
   let upper=side==1u;let inward=select(1.0,-1.0,upper);let plane=select(0.0,f32(UM_D[axis]),upper);
-  let ambient=axis==1u&&upper&&params.flags.x!=0u;
+  let ambient=axis==1u&&upper&&(params.flags.x&1u)!=0u;
   // wallReach stored this plane's largest contributing dt*away, zero when
   // no face on it is released or ambient. If even that cannot raise phi
   // here, none of the four probes can. The rounding margin keeps this a work
@@ -287,7 +301,7 @@ fn umAdvected(p:vec3f,width:u32)->f32{
 fn umWallPlane(p:vec3u)->u32{
  for(var k=0u;k<6u;k++){
   let axis=k/2u;let upper=(k&1u)==1u;
-  if(p[axis]==select(0u,UM_D[axis],upper)&&!(axis==1u&&upper&&params.flags.x!=0u)){return k;}
+  if(p[axis]==select(0u,UM_D[axis],upper)&&!(axis==1u&&upper&&(params.flags.x&1u)!=0u)){return k;}
  }return 6u;
 }
 // Whether umReleasedWalls can change value at p: a plane's reach clears its
@@ -332,21 +346,40 @@ fn umAdvectStore(vertex:vec3u,width:u32){
   textureStore(outputPhi,vec3i(vertex),vec4f(umAdvected(vec3f(vertex),select(1u<<code,1u,code==3u))));
  }
 }
-// Canonical vertices of the non-ambient domain walls, one plane per z group,
-// each on the first plane through it, with its authority's width.
-@compute @workgroup_size(8,8) fn advectWalls(@builtin(global_invocation_id) gid:vec3u){
- let k=gid.z;let axis=k/2u;let u=(axis+1u)%3u;let v=(axis+2u)%3u;
- if(gid.x>UM_D[u]||gid.y>UM_D[v]){return;}
- var vertex=vec3u(0);vertex[axis]=select(0u,UM_D[axis],(k&1u)==1u);vertex[u]=gid.x;vertex[v]=gid.y;
+// Canonical vertices of the non-ambient domain walls, each on the first
+// plane through it, with its authority's width. One lane per plane vertex:
+// the six planes' vertex grids concatenated (2*axis+side order).
+@compute @workgroup_size(64) fn advectWalls(@builtin(global_invocation_id) gid:vec3u){
+ var i=gid.x+umDispatchX*64u*gid.y;var k=0u;
+ for(;k<6u;k++){let a=k/2u;let area=(UM_D[(a+1u)%3u]+1u)*(UM_D[(a+2u)%3u]+1u);if(i<area){break;}i-=area;}
+ if(k==6u){return;}
+ let axis=k/2u;let u=(axis+1u)%3u;let v=(axis+2u)%3u;
+ var vertex=vec3u(0);vertex[axis]=select(0u,UM_D[axis],(k&1u)==1u);vertex[u]=i%(UM_D[u]+1u);vertex[v]=i/(UM_D[u]+1u);
  if(umWallPlane(vertex)!=k){return;}
- let owner=umVertexAuthority(vertex);if(!umVertexIsCanonical(vertex,owner)){return;}
- textureStore(outputPhi,vec3i(vertex),vec4f(umAdvected(vec3f(vertex),owner.width)));
+ // The authority is the widest incident owner and every tile has one width,
+ // so its width is the widest incident tile: independent topology loads
+ // instead of umVertexAuthority's dependent owner chain. Owner origins are
+ // multiples of their width, so canonical is alignment to it.
+ var width=1u;
+ if(!umRegularFine){
+  let stencil=umTileStencil(umTileAt(min(vertex,UM_D-vec3u(1))/4u));width=stencil.x>>27u;
+  if(width!=(stencil.y>>27u)){
+   width=0u;
+   for(var c=0u;c<8u;c++){
+    let cell=vec3i(vertex)+vec3i(umCorner(c,2u))-vec3i(1);
+    if(all(cell>=vec3i(0))&&all(cell<vec3i(UM_D))){width=max(width,umTileWidth(umTileAt(vec3u(cell)/4u)));}
+   }
+  }
+ }
+ if(any(vertex%width!=vec3u(0))){return;}
+ textureStore(outputPhi,vec3i(vertex),vec4f(umAdvected(vec3f(vertex),width)));
 }
 // Six samples through one sampler call site: low then high per axis. The
-// uniform bound (umCounts.w-2 = 6) keeps Metal from cloning the general sampler.
+// uniform bound (umCounts.w-2 = 6) keeps Metal from cloning the general
+// sampler; the resolved sampler is eight loads, so its six samples unroll.
 fn umSurfaceGradient(p:vec3f,width:f32)->vec3f{
  var g=vec3f(0);var lowValue=0.0;
- for(var k=0u;k<select(umCounts.w-2u,6u,umRegularFine);k++){
+ for(var k=0u;k<${this.resolved?"6u":"select(umCounts.w-2u,6u,umRegularFine)"};k++){
   let axis=k/2u;var delta=vec3f(0);delta[axis]=0.25*width;
   let low=clamp(p-delta,vec3f(0),vec3f(UM_D));let high=clamp(p+delta,vec3f(0),vec3f(UM_D));
   let value=umSampleVertex(select(low,high,(k&1u)!=0u));
@@ -361,7 +394,7 @@ var<workgroup> wallReachBits:atomic<u32>;
 @compute @workgroup_size(256) fn wallReach(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let axis=group.x/2u;let side=group.x%2u;let upper=side==1u;let inward=select(1.0,-1.0,upper);
  let u=(axis+1u)%3u;let v=(axis+2u)%3u;let h=params.hDt.xyz;let dt=params.hDt.w;
- let ambient=axis==1u&&upper&&params.flags.x!=0u;
+ let ambient=axis==1u&&upper&&(params.flags.x&1u)!=0u;
  if(lane==0u){atomicStore(&wallReachBits,0u);}
  if(group.x==0u&&lane==0u){atomicStore(&deferred[0],0u);atomicStore(&deferred[1],0u);atomicStore(&deferred[2],1u);atomicStore(&deferred[3],1u);}
  workgroupBarrier();
@@ -398,7 +431,7 @@ var<workgroup> solidClosedFlag:atomic<u32>;
 var<workgroup> evidencePositive:atomic<u32>;
 @compute @workgroup_size(128) fn retirementEvidence(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let tile=group.x+umDispatchX*group.y;if(tile>=UM_TILES){return;}
- if(params.flags.z==0u){if(lane==0u){evidence[tile]=1u;}return;}
+ if(params.flags.z==0u){if(lane==0u){evidence[tile]=UM_EVIDENCE_FAR;}return;}
  if(lane==0u){atomicStore(&evidencePositive,1u);}workgroupBarrier();
  let local=umCorner(lane,5u);let width=umTileWidth(tile);
  if(lane<125u&&all(local%width==vec3u(0))){
@@ -407,7 +440,26 @@ var<workgroup> evidencePositive:atomic<u32>;
   let value=select(umVertexValue(vertex),umLoadVertex(vertex),umTileMaximumWidth(tile)==1u);
   if(!(value>0.0)){atomicStore(&evidencePositive,0u);}
  }
- workgroupBarrier();if(lane==0u){evidence[tile]=atomicLoad(&evidencePositive);}
+ workgroupBarrier();if(lane==0u){evidence[tile]=select(0u,UM_EVIDENCE_FAR,atomicLoad(&evidencePositive)!=0u);}
+}
+// evidenceDistance turns the positive flags into the Chebyshev distance in
+// tiles to the nearest tile that may hold a zero (0: this one), capped at
+// UM_EVIDENCE_FAR: d=min_j max(|i-j|,d_j) along x, then y, then z, one
+// workgroup per line in place.
+const UM_EVIDENCE_FAR=15u;
+override umEvidenceAxis:u32=0u;
+var<workgroup> evidenceLine:array<u32,256>;
+@compute @workgroup_size(64) fn evidenceDistance(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ let axis=umEvidenceAxis;let u=(axis+1u)%3u;let v=(axis+2u)%3u;
+ let line=group.x+umDispatchX*group.y;if(line>=UM_T[u]*UM_T[v]){return;}
+ var start=vec3u(0);start[u]=line%UM_T[u];start[v]=line/UM_T[u];let n=UM_T[axis];
+ for(var i=lane;i<n;i+=64u){var q=start;q[axis]=i;evidenceLine[i]=evidence[umTileAt(q)];}
+ workgroupBarrier();
+ for(var i=lane;i<n;i+=64u){
+  var best=evidenceLine[i];
+  for(var j=max(i,UM_EVIDENCE_FAR)-UM_EVIDENCE_FAR;j<min(n,i+UM_EVIDENCE_FAR+1u);j++){best=min(best,max(select(j-i,i-j,i>j),evidenceLine[j]));}
+  var q=start;q[axis]=i;evidence[umTileAt(q)]=best;
+ }
 }
 // A failed Newton search cannot certify distance. Retire a drained positive
 // plateau only after checking all owner polynomials meeting the physical band.
@@ -416,19 +468,34 @@ fn umNoNearbySurface(p:vec3f,band:f32)->bool{
  let reach=vec3i(ceil(vec3f(band)/params.hDt.xyz));
  let low=max(vec3i(0),vec3i(p)-reach);let high=min(vec3i(UM_D),vec3i(p)+reach);
  let first=max(vec3i(0),(low-vec3i(1))/4);let last=min(vec3i(UM_T)-1,high/4);
+ // Every tile of the box lies within its Chebyshev radius of p's tile, and
+ // every in-domain tile within inner of it lies wholly inside the box, where
+ // an evidence-free tile answers false below.
+ let own=clamp(vec3i(p)/4,vec3i(0),vec3i(UM_T)-1);let radius=max(own-first,last-own);
+ let reachLow=select((4*own-low)/4,vec3i(64),low==vec3i(0));let reachHigh=select((high-4*own-vec3i(4))/4,vec3i(64),high==vec3i(UM_D));
+ let inner=min(reachLow,reachHigh);let nearest=i32(evidence[umTileAt(vec3u(own))]);
+ if(nearest>max(radius.x,max(radius.y,radius.z))){return true;}
+ if(nearest<=min(inner.x,min(inner.y,inner.z))){return false;}
  for(var z=first.z;z<=last.z;z++){for(var y=first.y;y<=last.y;y++){for(var x=first.x;x<=last.x;x++){
   let tile=vec3i(x,y,z);let width=i32(umTileWidth(umTileAt(vec3u(tile))));
   // An all-positive tile cannot contain a zero of any of its reconstructed
   // owner polynomials. Only clipped tiles with evidence need the exact scan.
-  if(evidence[umTileAt(vec3u(tile))]!=0u){continue;}
+  // A tile d from the nearest evidence-free one has d-1 positive successors.
+  let distance=i32(evidence[umTileAt(vec3u(tile))]);if(distance!=0){x+=distance-1;continue;}
   if(all(tile*4>=low)&&all(tile*4+vec3i(4)<=high)){return false;}
+  if(width==1){
+   // Unit owners' in-box corners are the tile closure's in-box vertices.
+   let lo=max(tile*4,low);let hi=min(tile*4+vec3i(4),high);
+   for(var vz=lo.z;vz<=hi.z;vz++){for(var vy=lo.y;vy<=hi.y;vy++){for(var vx=lo.x;vx<=hi.x;vx++){
+    if(!(umVertexValue(vec3u(vec3i(vx,vy,vz)))>0.0)){return false;}
+   }}}
+   continue;
+  }
   for(var dz=0;dz<4;dz+=width){for(var dy=0;dy<4;dy+=width){for(var dx=0;dx<4;dx+=width){
    let origin=tile*4+vec3i(dx,dy,dz);
    if(any(origin>high)||any(origin+vec3i(width)<low)){continue;}
    for(var k=0u;k<select(umCounts.w,8u,umRegularFine);k++){
-    let vertex=origin+vec3i(umCorner(k,2u))*width;
-    if(width==1&&(any(vertex<low)||any(vertex>high))){continue;}
-    if(!(umVertexValue(vec3u(vertex))>0.0)){return false;}
+    if(!(umVertexValue(vec3u(origin+vec3i(umCorner(k,2u))*width))>0.0)){return false;}
    }
   }}}
  }}}return true;
@@ -465,8 +532,15 @@ ${["advect","redistance"].map(entry=>/* wgsl */`
  if(!packed){
   let tileOwner=umTileJobOwner(group);if(tileOwner.width==0u){return;}
   let local=umCorner(lane,5u);if(any(local%tileOwner.width!=vec3u(0))){return;}
-  tileVertex=umTileCoord(tileOwner.tile)*4u+local;let authority=umVertexAuthority(tileVertex);
-  if(authority.tile!=tileOwner.tile||!umVertexIsCanonical(tileVertex,authority)){return;}
+  tileVertex=umTileCoord(tileOwner.tile)*4u+local;
+  if(umTileMaximumWidth(tileOwner.tile)==1u){
+   // Unit stencil: the authority is clamp(p-1)'s unit owner, in this tile
+   // exactly when every local coordinate is positive or on the lower wall.
+   if(any((local==vec3u(0))&(tileVertex!=vec3u(0)))){return;}
+  }else{
+   let authority=umVertexAuthority(tileVertex);
+   if(authority.tile!=tileOwner.tile||!umVertexIsCanonical(tileVertex,authority)){return;}
+  }
   owner=tileOwner;
  }else{
   if(lane>=64u){return;}owner=umRegularCoarseOwner((job-tiles)*64u+lane);if(owner.width==0u){return;}
@@ -501,7 +575,7 @@ ${["advect","redistance"].map(entry=>/* wgsl */`
   if(owned){${entry==="advect"?"umAdvectStore(vertex,owner.width);":"textureStore(outputPhi,vec3i(vertex),vec4f(umRebuilt(vec3f(vertex),owner.width)));"}}
  }
 }`).join("\n")}
-${this.hanging?/* wgsl */`
+${this.vertexCache?/* wgsl */`
 @compute @workgroup_size(125) fn vertexCache(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let slot=group.x+umDispatchX*group.y;if(slot>=UM_TILES){return;}
  let tile=umHanging[UM_TILES+slot];if(tile==UM_NO_SLOT){return;}
@@ -520,9 +594,10 @@ fn umTraceCell(owner:UMOwner){
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
     if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.bindLayout]:[]),...(this.hanging?[this.ownership.hangingLayout]:[])]});
-    if(this.hanging)this.pipelines.set("vertexCache",await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"vertexCache",constants:{umVertexCacheFill:1,umDispatchX:this.ownership.dispatchX}}}));
+    if(this.vertexCache)this.pipelines.set("vertexCache",await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"vertexCache",constants:{umVertexCacheFill:1,umDispatchX:this.ownership.dispatchX}}}));
     if(this.solid)for(const entryPoint of ["solidClosed","solidClear"])this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX}}}));
     this.pipelines.set("wallReach",await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"wallReach",constants:{umDispatchX:this.ownership.dispatchX}}}));
+    for(const axis of [0,1,2])this.pipelines.set(`evidenceDistance${axis}`,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"evidenceDistance",constants:{umDispatchX:this.ownership.dispatchX,umEvidenceAxis:axis}}}));
     this.pipelines.set("retirementEvidence",await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"retirementEvidence",constants:{umDispatchX:this.ownership.dispatchX}}}));
     for(const entry of ["advect","redistance","traceCells"])
       this.pipelines.set(entry,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:entry,constants:{umMergedTiles:1,umDispatchX:this.ownership.dispatchX}}}));
@@ -535,7 +610,7 @@ fn umTraceCell(owner:UMOwner){
     const pipeline=this.pipelines.get(entry);if(!pipeline)throw new Error("Mixed surface stage is not initialized");
     const pass=encoder.beginComputePass({label:`Uniform mixed surface ${entry}`});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);if(this.hanging)pass.setBindGroup(this.solid?3:2,this.ownership.hangingGroup);
     const slots=this.ownership.hangingSlots;
-    if(this.hanging&&entry!=="traceCells"&&slots){
+    if(this.vertexCache&&entry!=="traceCells"&&slots){
       pass.setPipeline(this.pipelines.get("vertexCache")!);
       pass.dispatchWorkgroups(Math.min(slots,this.ownership.dispatchX),Math.ceil(slots/this.ownership.dispatchX));
     }
@@ -551,11 +626,18 @@ fn umTraceCell(owner:UMOwner){
       const groups=this.ownership.layout.tiles.length;
       pass.setPipeline(this.pipelines.get("retirementEvidence")!);
       pass.dispatchWorkgroups(Math.min(groups,this.ownership.dispatchX),Math.ceil(groups/this.ownership.dispatchX));
+      const t=this.ownership.layout.lattice.dimensions.map(n=>n/4);
+      for(const axis of [0,1,2]){
+        const lines=t[(axis+1)%3]!*t[(axis+2)%3]!;
+        pass.setPipeline(this.pipelines.get(`evidenceDistance${axis}`)!);
+        pass.dispatchWorkgroups(Math.min(lines,this.ownership.dispatchX),Math.ceil(lines/this.ownership.dispatchX));
+      }
     }
     this.ownership.dispatchCertified(pass,pipeline,this.regularPipelines.get(entry)!);
     if(entry==="advect"){
-      const d=this.ownership.layout.lattice.dimensions,span=Math.max(...d)+1;
-      pass.setPipeline(this.deferredPipelines[0]!);pass.dispatchWorkgroups(Math.ceil(span/8),Math.ceil(span/8),6);
+      const d=this.ownership.layout.lattice.dimensions.map(n=>n+1),x=this.ownership.dispatchX;
+      const groups=Math.ceil(2*(d[1]!*d[2]!+d[2]!*d[0]!+d[0]!*d[1]!)/64);
+      pass.setPipeline(this.deferredPipelines[0]!);pass.dispatchWorkgroups(Math.min(groups,x),Math.ceil(groups/x));
     }
     pass.end();
     if(entry==="advect"){

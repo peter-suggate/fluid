@@ -29,6 +29,7 @@ fn umPresentationLoopBound()->u32{return min(arrayLength(&umTopology),8u);}
 fn umTileWidth(t:u32)->u32{let word=umTopology[t];return select(select(4u,2u,(word&0x40000000u)!=0u),1u,(word&0x80000000u)!=0u);}
 fn umTileStencil(t:u32)->vec2u{return vec2u(umTopology[2u*umTileCount()+2u*t],umTopology[2u*umTileCount()+2u*t+1u]);}
 fn umTileMaximumWidth(t:u32)->u32{return umTileStencil(t).x>>27u;}
+fn umTileMinimumWidth(t:u32)->u32{return umTileStencil(t).y>>27u;}
 fn umTileAt(p:vec3u)->u32{let d=umTileDimensions();return p.x+d.x*(p.y+d.y*p.z);}
 fn umTileCoord(t:u32)->vec3u{let d=umTileDimensions();return vec3u(t%d.x,(t/d.x)%d.y,t/(d.x*d.y));}
 fn umCorner(k:u32,side:u32)->vec3u{return vec3u(k%side,(k/side)%side,k/(side*side));}

@@ -1,15 +1,14 @@
 /** Shared semantic catalog. Order is the composition order, never click order. */
 export const VISUAL_LAYERS = [
-  { id: "phi", requires: ["phi"], label: "Signed distance", color: "#ed7829", opacity: 0.65, mode: 3, description: "Signed distance in cell widths: blue liquid, white interface, orange air." },
-  { id: "density", requires: ["volume"], label: "Surface density", color: "#23a186", opacity: 0.65, mode: 10, description: "Transported volume per cell volume, including dilute residue and overfull cells." },
-  { id: "volume", requires: ["volume", "capacity"], label: "Conserved volume", color: "#4f9ae0", opacity: 0.7, mode: 21, description: "Conserved volume divided by open cell capacity; amber marks overcapacity." },
-  { id: "pressure", requires: ["pressure"], label: "Pressure", color: "#7e9ee5", opacity: 0.65, mode: 5, description: "Signed pressure: blue positive, amber negative; full intensity at 10 kPa." },
+  { id: "phi", requires: ["phi"], label: "Signed distance", color: "#ed7829", opacity: 0.65, mode: 3, description: "Signed distance in cell widths: blue liquid, white interface, orange air. Mixed Uniform keeps it at owner resolution: h vertices in h tiles, 4h corners under 4h owners (interpolated between), as in an all-4h run." },
+  { id: "volume", requires: ["volume"], label: "Liquid volume", color: "#4f9ae0", opacity: 0.7, mode: 21, description: "Transported volume over the open capacity of each cell (the cell volume where no capacity is published): dilute residue on a log ramp from purple to green, liquid blue, overfull cells red. Opacity follows fullness with a floor so residue stays visible. Mixed Uniform draws the h and 4h bulk cells the volume lives on, with orange resolution seams." },
+  { id: "pressure", requires: ["pressure"], label: "Pressure", color: "#7e9ee5", opacity: 0.65, mode: 5, description: "Signed pressure (blue positive, amber negative; full intensity at 10 kPa) on the exact cells the last solve ran on. Mixed Uniform draws each pressure cell at its own size: h cells (graded h cells, or the two-stage h band re-solved over the 4h solve, with the band's own pressure) are tinted green, 2h transition cells pale green, 4h cells untinted, with resolution seams in lilac. Tiles where the level set crosses zero are outlined in yellow, so a yellow tile without green is surface the solve kept at 4h." },
   { id: "tiles", requires: ["tiles"], label: "Work tiles", color: "#3fae8f", opacity: 0.45, mode: 22, description: "Fine velocity tiles, extension shell, and transport reach where published. Mixed Uniform also draws each tile's live h, 2h or 4h cells." },
   { id: "pages", requires: ["pages"], label: "Domain pages", color: "#b39bea", opacity: 0.65, mode: 27, description: "Page states from the last step: teal = transport active; amber = sharpening only; faint purple = resident without volume work. Absent pages are hidden. Residency can include pressure/interface support; authored pages currently remain allocated." },
   { id: "window", requires: ["window"], label: "Working window", color: "#5fb4e6", opacity: 0.8, mode: 23, description: "Actual dispatched window, seed box, launch slack and clipping. Dense scheduling uses the whole domain." },
-  { id: "surface", requires: ["phi"], label: "Liquid surface · φ = 0", color: "#ef9f35", opacity: 0.9, mode: 24, description: "Reconstructed liquid and its zero level-set interface." },
-  { id: "grid", requires: ["dimensions"], label: "Grid", color: "#a8c7d8", opacity: 0.7, mode: 0, description: "Represented cell boundaries, independently of field fills. Mixed Uniform draws its live h, 2h and 4h owners." },
-  { id: "velocity", requires: ["velocity"], label: "Velocity", color: "#dce9ee", opacity: 0.9, mode: 26, description: "Cell velocity magnitude and in-plane direction; full scale at 1 m/s." },
+  { id: "surface", requires: ["phi"], label: "Liquid surface · φ = 0", color: "#ef9f35", opacity: 0.9, mode: 24, description: "Reconstructed liquid and its zero level-set interface. Mixed Uniform colours the interface by the velocity that advected it: teal where all three components were h velocity (h bulk, or retained and extended projected h velocity), amber where the 4h bulk sampler moved it, blended where only some components were h." },
+  { id: "grid", requires: ["dimensions"], label: "Grid", color: "#a8c7d8", opacity: 0.7, mode: 0, description: "Represented cell boundaries, independently of field fills. Mixed Uniform draws its live h and 4h bulk owners with orange resolution seams, and hatches tiles the census re-laid out after the last transport ran." },
+  { id: "velocity", requires: ["velocity"], label: "Velocity", color: "#dce9ee", opacity: 0.9, mode: 26, description: "Cell velocity magnitude and in-plane direction; full scale at 1 m/s. Mixed Uniform draws one arrow per h or 4h bulk owner, the grid momentum is advected on." },
   { id: "release", requires: ["releasedFaces"], label: "Released faces", color: "#f5be52", opacity: 1, mode: 25, description: "Solid faces released by the pressure projection." },
 ] as const;
 export type VisualLayerId = typeof VISUAL_LAYERS[number]["id"];
@@ -33,6 +32,8 @@ export function legacyVisualLayers(mode: string, grid = false): VisualLayerState
     structure: ["surface"], "volume-levelset": ["volume", "surface"],
     "fine-tiles": ["tiles", "surface"], "solve-window": ["window", "surface"],
     speed: ["velocity"], "face-velocity": ["velocity"], release: ["surface", "release"],
+    // Surface density and conserved volume are one liquid volume layer.
+    density: ["volume"],
   };
   return visualLayers([...((Object.hasOwn(aliases, mode) ? aliases[mode] : undefined) ?? VISUAL_LAYERS.filter(l => l.id === mode).map(l => l.id)), ...(grid ? ["grid" as const] : [])]);
 }
@@ -57,6 +58,7 @@ export const LAYER_PALETTE = {
   liquid: [79, 154, 224], empty: [245, 245, 230], positive: [126, 158, 229], negative: [221, 153, 85],
   phiLiquid: [26, 115, 235], phiAir: [237, 120, 41], residue: [70, 50, 126], dilute: [35, 161, 134],
   densityLiquid: [126, 163, 193], excess: [201, 86, 63], fine: [63, 174, 143], shell: [166, 216, 198], transport: [136, 100, 46],
+  surfaceBand: [245, 226, 122], overlayValid: [63, 193, 201], overlayFallback: [214, 132, 44],
 } as const;
 export const LAYER_PRESSURE_SCALE = 10_000;
 export const LAYER_SPEED_SCALE = 1;
@@ -66,8 +68,7 @@ export function scalarLayerPaint(id: VisualLayerId, value: number): { color: rea
   switch (id) {
     case "phi": return { color: mix(p.empty, value < 0 ? p.phiLiquid : p.phiAir, Math.abs(value) / 4), alpha: 0.8 };
     case "pressure": return { color: value < 0 ? p.negative : p.positive, alpha: Math.min(1, Math.abs(value) / LAYER_PRESSURE_SCALE) };
-    case "density": return { color: value > 1 ? p.excess : value >= 0.5 ? p.densityLiquid : mix(p.residue, p.dilute, (Math.log10(Math.max(value, 1e-6)) + 6) / Math.log10(500000)), alpha: value > 1e-6 ? 0.85 : 0 };
-    case "volume": return { color: p.liquid, alpha: Math.max(0, Math.min(1, value)) };
+    case "volume": return { color: value > 1 ? p.excess : value >= 0.5 ? p.densityLiquid : mix(p.residue, p.dilute, (Math.log10(Math.max(value, 1e-6)) + 6) / Math.log10(500000)), alpha: value > 1e-6 ? Math.max(0.35, Math.min(1, value)) : 0 };
     case "tiles": return { color: value & 1 ? p.fine : value & 2 ? p.shell : p.transport, alpha: value & 1 ? 0.66 : value & 2 ? 0.3 : value & 4 ? 0.35 : 0 };
     case "velocity": return { color: p.liquid, alpha: Math.min(1, Math.max(0, value) / LAYER_SPEED_SCALE) * 0.25 };
     default: return { color: p.liquid, alpha: 1 };
@@ -78,8 +79,7 @@ ${Object.entries(LAYER_PALETTE).map(([key, rgb]) => `const LP_${key}:vec3f=vec3f
 fn scalarLayerPaint(mode:i32,value:f32)->vec4f {
   if(mode==3){return vec4f(mix(LP_empty,select(LP_phiAir,LP_phiLiquid,value<0.0),clamp(abs(value)/4.0,0.0,1.0)),0.8);}
   if(mode==5){return vec4f(select(LP_positive,LP_negative,value<0.0),min(1.0,abs(value)/${LAYER_PRESSURE_SCALE}.0));}
-  if(mode==10){let dilute=mix(LP_residue,LP_dilute,clamp((log2(max(value,1e-6))/log2(10.0)+6.0)/log2(500000.0)*log2(10.0),0.0,1.0));return vec4f(select(select(dilute,LP_densityLiquid,value>=0.5),LP_excess,value>1.0),select(0.0,0.85,value>1e-6));}
-  if(mode==21){return vec4f(LP_liquid,clamp(value,0.0,1.0));}
+  if(mode==21){let dilute=mix(LP_residue,LP_dilute,clamp((log2(max(value,1e-6))/log2(10.0)+6.0)/log2(500000.0)*log2(10.0),0.0,1.0));return vec4f(select(select(dilute,LP_densityLiquid,value>=0.5),LP_excess,value>1.0),select(0.0,clamp(value,0.35,1.0),value>1e-6));}
   if(mode==22){let bits=u32(value);return vec4f(select(select(LP_transport,LP_shell,(bits&2u)!=0u),LP_fine,(bits&1u)!=0u),select(select(select(0.0,0.35,(bits&4u)!=0u),0.3,(bits&2u)!=0u),0.66,(bits&1u)!=0u));}
   return vec4f(LP_liquid,min(1.0,max(0.0,value)/${LAYER_SPEED_SCALE}.0)*0.25);
 }

@@ -1,7 +1,6 @@
-/** Canonical MAC patches for the mixed Uniform grid, graded or not. A
+/** Canonical MAC patches for the ungraded h/4h mixed Uniform grid. A
  * geometric face has one patch at equal/coarser neighbours and
- * (owner/neighbour width)^2 at a finer one: four beside a 2h pressure
- * transition, sixteen where an ungraded 4h simulation owner meets h.
+ * (owner/neighbour width)^2 at a finer one: sixteen where a 4h owner meets h.
  * Both incident cells derive the same anchor; no incidence buffer is needed.
  * Coordinates use native positive-MAC indexing (normal coordinate plane-1).
  * The negative domain boundary continues to use the native boundary planes.

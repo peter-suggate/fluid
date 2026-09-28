@@ -2,7 +2,6 @@
 use super::{
     extension::{Extension, FINE},
     grid::Grid,
-    options::UniformGeometricOptions,
 };
 
 /// Static solid voxel occupancy with the one-cell halo the GPU packs. The 2D
@@ -85,14 +84,9 @@ fn departure(g: &Grid, e: &Extension, start: [f32; 2], dt: f32) -> [f32; 2] {
 
 /// E2b's work set: every cell, or with tiled advection only the cells of FINE
 /// tiles (uvTwoLevelFineAt), in raster order within each row.
-pub(super) fn for_each_fine(
-    g: &Grid,
-    e: &Extension,
-    o: &UniformGeometricOptions,
-    mut f: impl FnMut(usize, [i32; 2]),
-) {
+pub(super) fn for_each_fine(g: &Grid, e: &Extension, mut f: impl FnMut(usize, [i32; 2])) {
     let [nx, ny] = g.dims;
-    if !(o.two_level_advection == "tiles" && e.two_level.enabled) {
+    if !e.two_level.enabled {
         for i in 0..nx * ny {
             f(i, [(i % nx) as i32, (i / nx) as i32]);
         }
@@ -114,16 +108,10 @@ pub(super) fn for_each_fine(
 /// Writes the advected field into `out`. The caller applies body forces
 /// exactly once. E2b: a cell outside the fine tiles carries zero velocity and
 /// no forces.
-pub fn advect(
-    g: &Grid,
-    e: &Extension,
-    o: &UniformGeometricOptions,
-    dt: f32,
-    out: &mut Vec<[f32; 2]>,
-) {
+pub fn advect(g: &Grid, e: &Extension, dt: f32, out: &mut Vec<[f32; 2]>) {
     out.clear();
     out.resize(g.volume.len(), [0.0; 2]);
-    for_each_fine(g, e, o, |i, p| {
+    for_each_fine(g, e, |i, p| {
         out[i] = std::array::from_fn(|a| {
             let mut start = p.map(|v| v as f32 + 0.5);
             start[a] += 0.5;

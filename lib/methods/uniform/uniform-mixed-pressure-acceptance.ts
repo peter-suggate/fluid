@@ -6,12 +6,18 @@ export interface UniformMixedPressureAcceptanceFields {
  residual:GPUBufferBinding;
  /** Eight u32 words; reset once before the initial checkpoint. */
  state:GPUBuffer;
- /** dt/rho, absolute divergence tolerance, unused, unused. */
+ /** dt/rho, h-equivalent divergence tolerance (1/s), relative reduction of
+  * the initial residual, absolute floor of the relative bound (1/s). */
  params:GPUBuffer;
 }
 /** GPU-only convergence gate. A nonfinite or worsening iterate latches a
  * terminal failure. This stage cannot mutate pressure or launch repair work.
- * Root residuals include the projected wall constraints. */
+ * Root residuals include the projected wall constraints.
+ *
+ * The norm is h-equivalent: an owner's divergence times its width. A face
+ * velocity error du is a divergence du/(w h), so an absolute divergence bound
+ * lets a width-w owner keep w times the velocity error of an h cell (an
+ * all-4h solve accepted a resting pool's uncancelled gravity for 3 frames). */
 export class UniformMixedPressureAcceptance {
  readonly allocatedBytes=0;
  private readonly resources:GPUBindGroupLayout;
@@ -41,7 +47,7 @@ ${uniformMixedPressureBoundaryIndexWGSL(l)}
 var<workgroup> maxima:array<u32,64>;
 @compute @workgroup_size(64) fn reduce(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
  let o=umAllOwner(gid);var norm=0.0;
- if(o.width!=0u){norm=residual[o.index];${uniformMixedPressureBoundaryLoop("norm=max(norm,residual[halo]);")}}
+ if(o.width!=0u){norm=residual[o.index];${uniformMixedPressureBoundaryLoop("norm=max(norm,residual[halo]);")}norm*=f32(o.width);}
  maxima[lane]=select(bitcast<u32>(norm*params.x),0x7f800000u,norm>=3.402823e38);workgroupBarrier();
  for(var stride=32u;stride>0u;stride/=2u){if(lane<stride){maxima[lane]=max(maxima[lane],maxima[lane+stride]);}workgroupBarrier();}
  // state[0] >= 0u: a zero group maximum (all-air groups) is a no-op max.
@@ -56,7 +62,10 @@ fn umCheck(initial:bool){
  atomicStore(&state[3],select(1u,0u,good));
  if(!good){atomicStore(&state[4],1u);atomicStore(&state[5],0u);atomicAdd(&state[6],1u);return;}
  atomicStore(&state[1],candidate);
- atomicStore(&state[5],select(0u,1u,params.y>0.0&&bitcast<f32>(candidate)<=params.y));
+ // state[2] is the initial (p=0, so RHS) norm: the absolute tolerance and a
+ // relative reduction of it must both hold, so p=0 is never the answer.
+ let bound=min(params.y,max(params.z*bitcast<f32>(atomicLoad(&state[2])),params.w));
+ atomicStore(&state[5],select(0u,1u,params.y>0.0&&bitcast<f32>(candidate)<=bound));
 }
 // clearBuffer of the candidate (a cycle) or the whole receipt (initial), in the pass.
 @compute @workgroup_size(1) fn resetInitial(){for(var i=0u;i<8u;i++){atomicStore(&state[i],0u);}}

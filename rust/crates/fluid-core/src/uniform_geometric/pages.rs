@@ -179,7 +179,7 @@ impl Window {
         let fine_tiles = fine_reach.unwrap_or(0).max(0) as u32;
         let shell_tiles = fine_tiles + shell_reach.max(1) as u32;
         let standing = (4 * shell_tiles).max(8);
-        let stencil = 6.max(o.sharpening_distance.ceil() as u32 + 1);
+        let stencil = 6.max(super::surface::SHARPENING_DISTANCE.ceil() as u32 + 1);
         let mut current = self.current;
         let observed = (0..2).all(|a| observed_max[a] > observed_min[a]);
         for a in 0..2 {

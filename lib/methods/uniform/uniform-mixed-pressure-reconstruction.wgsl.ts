@@ -1,5 +1,5 @@
-/** Pressure reconstruction on canonical Uniform faces of the graded pressure
- * layout (uniformMixedPressureLayout).
+/** Pressure reconstruction on canonical Uniform faces of a mixed pressure
+ * layout.
  * The caller supplies physical spacing UM_H, umPressure(owner), and
  * umPressureSlope(owner). Slopes are frozen before a pressure-core solve;
  * they must not be read while being overwritten by the same dispatch.

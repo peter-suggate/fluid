@@ -159,31 +159,6 @@ impl Grid {
         }
         value.clamp(lo, hi)
     }
-    /// Ballistic V has neither a phi pressure row nor a nearby solid or wall.
-    pub fn airborne(&self, p: [i32; 2], enabled: bool, dust: f32) -> bool {
-        if !enabled
-            || self
-                .index(p)
-                .is_none_or(|i| self.volume[i] <= dust.max(0.05))
-        {
-            return false;
-        }
-        let h = self.h[0].min(self.h[1]);
-        if self.phi_at([p[0] as f32 + 0.5, p[1] as f32 + 0.5]) <= 1.5 * h {
-            return false;
-        }
-        for y in p[1] - 2..=p[1] + 2 {
-            for x in p[0] - 2..=p[0] + 2 {
-                if self
-                    .index([x, y])
-                    .is_none_or(|i| self.capacity[i] < 0.99999)
-                {
-                    return false;
-                }
-            }
-        }
-        true
-    }
     /// uvPhi(cell + 0.5) as Metal compiles it into the pressure build: the
     /// depth-symmetric corners k and k+4 are one plane vertex, and each
     /// x row's four eighths are summed in sequence. Verified bitwise against
@@ -206,29 +181,10 @@ impl Grid {
             (self.scalar(field, hi) - self.scalar(field, lo)) / (hi[a] - lo[a]).max(1e-6)
         })
     }
-    pub fn pressure_phi(&self, p: [i32; 2], rows: &str) -> f32 {
+    pub fn pressure_phi(&self, p: [i32; 2]) -> f32 {
         let h = self.h[0].min(self.h[1]);
-        if let Some(i) = self.index(p).filter(|&i| self.capacity[i] > 1e-5) {
-            let phi = self.phi_centre(p);
-            if rows == "off" {
-                return phi;
-            }
-            let volume_phi = h * (0.5 - self.volume[i] / self.capacity[i]);
-            if rows == "all" {
-                return phi.min(volume_phi);
-            }
-            if phi < 0.0 || volume_phi >= 0.0 {
-                return phi;
-            }
-            let isolated = OFFSETS.iter().all(|e| {
-                let q = [p[0] + e[0], p[1] + e[1]];
-                self.index(q).is_none() || self.phi_centre(q) >= 0.0
-            });
-            return if isolated {
-                volume_phi.max(-0.5 * h)
-            } else {
-                phi
-            };
+        if self.index(p).is_some_and(|i| self.capacity[i] > 1e-5) {
+            return self.phi_centre(p);
         }
         if self.open_top && p[1] == self.dims[1] as i32 && p[0] >= 0 && p[0] < self.dims[0] as i32 {
             return 0.5 * h;
@@ -241,9 +197,8 @@ impl Grid {
             if open <= 1e-5 {
                 continue;
             }
-            // q is open, so this takes only the surface branch above. Solid
-            // continuation must include any enabled volume-supported row.
-            let phi = self.pressure_phi(q, rows);
+            // q is open, so this takes only the surface branch above.
+            let phi = self.pressure_phi(q);
             if phi < 0.0 {
                 terms[i] = open * phi;
                 weights[i] = open;

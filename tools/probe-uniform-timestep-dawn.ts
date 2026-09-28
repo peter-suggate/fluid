@@ -23,8 +23,7 @@ import { usePerformanceInstrumentationStore } from "../lib/core/stores/performan
 import { createProcessRetainedDawnGPU, type NodeDawnProvider } from "../lib/harness/node-dawn-provider";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { uniformVolumeMethod } from "../lib/methods/uniform/uniform-volume-method";
-import { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
-import { uniformGeometricSolverOptions } from "../lib/methods/uniform/uniform-geometric-options";
+import type { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
 import { auditUniformGPUAllocations } from "./uniform-gpu-allocation-audit";
 const arg = (key: string, fallback: string) => process.argv.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3) ?? fallback;
 const sceneId = arg("scene", "cm12-figure-7-256");
@@ -49,7 +48,6 @@ const stats = (values: number[]) => {
 const rows: { frame: number; time_s: number; wall_ms: number; trace: NonNullable<WebGPUUniformReferenceSolver["info"]["physicsTrace"]>; cpuTrace: unknown; quality: Record<string,unknown>; work: Record<string,unknown> }[] = [];
 await acquireWebGPUExclusiveLock("dawn-probe", `Uniform Geometric stage profile: ${sceneId}`);
 let device: GPUDevice | undefined, solver: WebGPUUniformReferenceSolver | undefined;
-let surfaceWorkReadback: GPUBuffer | undefined;
 let pressureWorkReadback: GPUBuffer | undefined;
 let allocationAudit: ReturnType<typeof auditUniformGPUAllocations> | undefined;
 try {
@@ -91,12 +89,7 @@ try {
       return originalModule.call(this,{...descriptor,code});
     };
   }
-  solver = arg("scratch-storage", "shared") === "separate" || arg("pressure-mode", "adaptive") === "legacy"
-    ? await WebGPUUniformReferenceSolver.createAsync(device, scene, "balanced", undefined,
-      { ...uniformGeometricSolverOptions(values, scene),
-        scratchStorageForQA: arg("scratch-storage", "shared") === "separate" ? "separate" : undefined,
-        adaptivePressure: arg("pressure-mode", "adaptive") !== "legacy" }, () => {})
-    : await uniformVolumeMethod.createSolverAsync!(device, scene, "balanced", values, undefined, () => {}) as WebGPUUniformReferenceSolver;
+  solver = await uniformVolumeMethod.createSolverAsync!(device, scene, "balanced", values, undefined, () => {}) as WebGPUUniformReferenceSolver;
   compiler.createShaderModule=originalModule;device.createBuffer=originalBuffer;
   unsubscribe();
   if(process.argv.includes("--split-stages")){
@@ -117,9 +110,6 @@ try {
   }
   const pressureWork=solver.pressureSmoothingWorkSourceForQA;
   if(pressureWork.length)pressureWorkReadback=device.createBuffer({label:"Pressure tile profile readback",size:4*pressureWork.length,
-    usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
-  const surfaceWork=solver.surfaceCorrectionWorkSourceForQA;
-  if(surfaceWork)surfaceWorkReadback=device.createBuffer({label:"Surface window profile readback",size:surfaceWork.size,
     usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
   await device.queue.onSubmittedWorkDone();
   const setup_ms = performance.now()-start;
@@ -172,13 +162,6 @@ try {
       work.uniformPressureSmoothingTiles=Array.from(new Uint32Array(pressureWorkReadback.getMappedRange()),(active,i)=>({level:pressureWork[i]!.level,list:pressureWork[i]!.list,active,capacity:pressureWork[i]!.capacity}));
       pressureWorkReadback.unmap();
     }
-    if(surfaceWorkReadback && surfaceWork){
-      const encoder=device.createCommandEncoder();encoder.copyBufferToBuffer(surfaceWork,0,surfaceWorkReadback,0,surfaceWork.size);
-      device.queue.submit([encoder.finish()]);await surfaceWorkReadback.mapAsync(GPUMapMode.READ);
-      const words=new Uint32Array(surfaceWorkReadback.getMappedRange());
-      work.uniformSurfaceCorrectionWork={origin:Array.from(words.slice(8,11)),dimensions:Array.from(words.slice(12,15)),cells:words[11],vertices:words[15]};
-      surfaceWorkReadback.unmap();
-    }
     rows.push({frame,time_s:warmupFrames*warmupDt+frame*dt,wall_ms,trace,cpuTrace:info.physicsCPUTrace,work,
       quality:{volumeCellSum:info.volumeCellSum,volumeDrift:info.volumeDrift,representedVolumeDrift:info.representedVolumeDrift,pressureConverged:info.uniformCM11aConverged}});
     assert.deepEqual(errors,[]);
@@ -195,10 +178,10 @@ try {
     splitStages:process.argv.includes("--split-stages"),
     redistanceCensus:process.argv.includes("--redistance-census"),
     correctionDtFloor:process.argv.includes("--correction-dt-floor")};
-  const report={experiment,pressureMode:arg("pressure-mode","adaptive"),abOff:process.env.FLUID_UNIFORM_AB_OFF ?? "",capturedAt:new Date().toISOString(),sceneId,method:uniformVolumeMethod.id,backend:"Dawn/Metal",adapter:{vendor:adapter.info.vendor,architecture:adapter.info.architecture,device:adapter.info.device,description:adapter.info.description},traceGapMs,reapplyValues:process.argv.includes("--reapply-values"),scope:"Instrumented, queue-fenced simulation. Rendering, configured trace-cadence gaps, stats and work-count readbacks excluded from wall timings. First four frames excluded from summaries. GPU stages are seam intervals, not isolated kernel durations.",lattice,setup_ms,values,scene,windows,rows,validationErrors:errors};
+  const report={experiment,abOff:process.env.FLUID_UNIFORM_AB_OFF ?? "",capturedAt:new Date().toISOString(),sceneId,method:uniformVolumeMethod.id,backend:"Dawn/Metal",adapter:{vendor:adapter.info.vendor,architecture:adapter.info.architecture,device:adapter.info.device,description:adapter.info.description},traceGapMs,reapplyValues:process.argv.includes("--reapply-values"),scope:"Instrumented, queue-fenced simulation. Rendering, configured trace-cadence gaps, stats and work-count readbacks excluded from wall timings. First four frames excluded from summaries. GPU stages are seam intervals, not isolated kernel durations.",lattice,setup_ms,values,scene,windows,rows,validationErrors:errors};
   const allocationSnapshot=allocationAudit?.snapshot();
   writeFileSync(out,JSON.stringify({...report,allocationAudit:allocationSnapshot},null,2)+"\n");
   if(maxGPUBytes>0)assert.ok(allocationSnapshot!.peakBytes<=maxGPUBytes,
     `Peak live GPU resources ${allocationSnapshot!.peakBytes} exceed budget ${maxGPUBytes}`);
   console.log(JSON.stringify({out,windows},null,2));
-} finally { surfaceWorkReadback?.destroy(); pressureWorkReadback?.destroy(); solver?.destroy(); device?.destroy(); await releaseWebGPUExclusiveLock(); }
+} finally { pressureWorkReadback?.destroy(); solver?.destroy(); device?.destroy(); await releaseWebGPUExclusiveLock(); }

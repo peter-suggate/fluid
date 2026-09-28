@@ -1,4 +1,5 @@
 import {uniformMixedPresentationVelocityWGSL} from "../methods/uniform/uniform-mixed-presentation.wgsl";
+import { uniformStageGridsWGSL } from "../methods/uniform/uniform-stage-grids";
 import { VISUAL_LAYERS, visualLayerPaintWGSL, layerOpacity, type VisualLayerState } from "./visual-layers";
 /**
  * Solver-grid cross-section rendered as an independent presentation layer.
@@ -25,9 +26,16 @@ import {
  * Readers of binding 23, one per method view. Each view's layout is the one
  * documented on its source type in `method-view-records`.
  */
+/** Four layer opacities per vec4 of the layer uniform. */
+const LAYER_OPACITY_VEC4S = Math.ceil(VISUAL_LAYERS.length / 4);
+/** Float offsets in the layer uniform after the opacities. */
+const LAYER_PRESSURE_ORIGIN = 4 + 4 * LAYER_OPACITY_VEC4S;
+const LAYER_PAGE_ACTIVITY = LAYER_PRESSURE_ORIGIN + 4;
+const LAYER_UNIFORM_FLOATS = LAYER_PAGE_ACTIVITY + 4;
+
 export const gridOverlayViewRecordsWGSL = /* wgsl */ `
 ${visualLayerPaintWGSL}
-struct LayerUniforms { control:vec4f, opacity:array<vec4f,3>, pressureOrigin:vec4f, pageActivity:vec4f, }
+struct LayerUniforms { control:vec4f, opacity:array<vec4f,${LAYER_OPACITY_VEC4S}>, pressureOrigin:vec4f, pageActivity:vec4f, }
 @group(0) @binding(24) var<uniform> layers:LayerUniforms;
 fn pageActivityAt(cell:vec3i,base:u32)->bool {
   if(base==0u || arrayLength(&viewRecords)<base+8u){return false;}
@@ -138,6 +146,7 @@ struct SparseOverlayParams { worldDirectory:vec4u, dynamicCells:vec4u, rungOffse
 @group(0) @binding(18) var<uniform> sparseOverlayP: SparseOverlayParams;
 @group(0) @binding(19) var<storage,read> sparseFramePlan: array<u32>;
 ${createGridOverlayLevelSetVolumeWGSL(true)}
+${uniformStageGridsWGSL("sparseActivity")}
 ${gridOverlayViewRecordsWGSL}
 struct VertexOutput { @builtin(position) position: vec4f, @location(0) uv: vec2f }
 @vertex fn vertexMain(@builtin(vertex_index) index: u32) -> VertexOutput {
@@ -855,7 +864,9 @@ fn densitySample(cell: vec3i) -> f32 {
 
 fn hasLiquidPressureDof(cell: vec3i) -> bool {
   if(sliceLsvP.global.x==2u&&umPresentationEnabled()){
-   let owner=umOwnerAt(cell);return owner.width!=0u&&bitcast<f32>(sparseActivity[owner.index])<0.0;
+   let base=umStageBase();let band=umStageBandCell(base,cell);
+   if(band!=0u){return umStageBandPressure(base,band-1u)!=0.0;}
+   let owner=umStageOwner(base,UM_STAGE_PRESSURE,cell);return owner.width!=0u&&bitcast<f32>(sparseActivity[owner.index])<0.0;
   }
   if(sparseGridEnabled()){let owner=sparseOwner(cell);return owner.x!=SPARSE_INVALID
     &&sparseState[sparseP.stateOffsets2.w+owner.x]>0.5;}
@@ -965,8 +976,13 @@ fn divergenceSample(cell:vec3i)->f32{
 }
 // phi is the caller's levelSetSample(cell).
 fn mappedPressureSample(cell:vec3i,phi:f32)->f32{
+  // Mixed pressure is published on the pressure owners the solve ran on,
+  // which the stage grids name; bulk ownership may since have moved.
   if(sliceLsvP.global.x==2u&&umPresentationEnabled()){
-   let owner=umOwnerAt(cell);if(owner.width==0u||bitcast<f32>(sparseActivity[owner.index])>=0.0){return 0.0;}
+   let base=umStageBase();let band=umStageBandCell(base,cell);
+   if(band!=0u){return umStageBandPressure(base,band-1u);}
+   let owner=umStageOwner(base,UM_STAGE_PRESSURE,cell);
+   if(owner.width==0u||bitcast<f32>(sparseActivity[owner.index])>=0.0){return 0.0;}
    return sparseState[owner.index];
   }
   if(layers.control.x>0.5){
@@ -1141,6 +1157,13 @@ ${fractionReadoutShaderLibrary}
 // transport.
 const DENSITY_FLOOR: f32 = FRACTION_FLOOR;
 
+// h velocity components (0-3) the surface advection sampled at a cell: all
+// three in h bulk tiles; none in 4h bulk tiles, whose surface samples the 4h
+// velocity (the h surface velocity extension is retired).
+fn umSurfaceVelocityComponents(stage:u32,cell:vec3i)->u32{
+  return select(0u,3u,umStageTileWidth(stage,UM_STAGE_TRANSPORT,cell/4)==1u);
+}
+
 fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
   dims:vec3i, axis: i32, footprint: f32) -> GridSample {
   let local3 = clamp((point - boundsMin) / size, vec3f(0.0), vec3f(0.99999)) * vec3f(dims);
@@ -1165,30 +1188,70 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
   }
   let derivative = max(cellPerPixel, vec2f(1e-5));
   let pixelsPerCell = 1.0 / max(derivative.x, derivative.y);
-  // The represented cell. Mixed Uniform owns h, 2h or 4h cells per 4^3 tile,
-  // from whichever ownership is live, so the lattice, sample dots and level
-  // bars are drawn per owner; everywhere else the represented cell is the
-  // fine cell.
-  let mixedLattice = sliceLsvP.global.x == 2u && umPresentationEnabled();
-  var latticeFraction = fract(samplePosition);
-  var latticeWidth = 1.0;
-  if (mixedLattice) {
-    let owner = umOwnerAt(cell);
-    let ownerOrigin = vec3f(umOrigin(owner));
-    latticeWidth = f32(max(owner.width, 1u));
-    let planePoint = samplePosition + vec2f(f32(fineOrigin[firstPlaneAxis]), f32(fineOrigin[secondPlaneAxis]));
-    latticeFraction = clamp((planePoint - vec2f(ownerOrigin[firstPlaneAxis], ownerOrigin[secondPlaneAxis])) / latticeWidth,
-      vec2f(0.0), vec2f(1.0));
-  }
-  let latticeDerivative = derivative / latticeWidth;
-  let pixelsPerLatticeCell = pixelsPerCell * latticeWidth;
-  let dotFade = smoothstep(9.0, 18.0, pixelsPerLatticeCell);
   let adaptiveGrid = u.debug.z > 0.5;
   let fieldMode = select(i32(round(u.debug.w)),layerMode,layers.control.x>0.5);
   // Structure is the one view whose subject is the lattice, so it holds its
   // lines further into the distance than the field views, where the grid is
   // only a reference frame and a bolder one would eat the content.
   let structureView = fieldMode == 0;
+  // The represented cell. Mixed Uniform owns h, 2h or 4h cells per 4^3 tile,
+  // and each layer draws the cells of the stage that computed it: pressure
+  // on the graded layout the last solve ran on (the stage grids' snapshot),
+  // the level set and the surface velocity on the h lattice every vertex
+  // lives on, and everything transported on the live bulk ownership the
+  // fields are stored in. Everywhere else the represented cell is the fine cell.
+  let mixedLattice = sliceLsvP.global.x == 2u && umPresentationEnabled();
+  let stage = select(0xffffffffu, umStageBase(), mixedLattice);
+  let pressureGrid = mixedLattice && stage != 0xffffffffu && fieldMode == 5;
+  let hGrid = mixedLattice && fieldMode == 3;
+  let planePoint = samplePosition + vec2f(f32(fineOrigin[firstPlaneAxis]), f32(fineOrigin[secondPlaneAxis]));
+  var latticeFraction = fract(samplePosition);
+  var latticeWidth = 1.0;
+  if (mixedLattice && !hGrid) {
+    var owner = umOwnerAt(cell);
+    if (pressureGrid) { owner = umStageOwner(stage, UM_STAGE_PRESSURE, cell); }
+    let ownerOrigin = vec3f(umOrigin(owner));
+    latticeWidth = f32(max(owner.width, 1u));
+    latticeFraction = clamp((planePoint - vec2f(ownerOrigin[firstPlaneAxis], ownerOrigin[secondPlaneAxis])) / latticeWidth,
+      vec2f(0.0), vec2f(1.0));
+  }
+  let latticeDerivative = derivative / latticeWidth;
+  let pixelsPerLatticeCell = pixelsPerCell * latticeWidth;
+  let dotFade = smoothstep(9.0, 18.0, pixelsPerLatticeCell);
+  // Resolution seams are tile faces, not every coarse cell edge: compare the
+  // layer's own tile widths on both sides of the tile. Bulk seams are orange,
+  // pressure seams lilac, so the two read apart when both layers are on.
+  let seamLayer = fieldMode == 0 || fieldMode == 10 || fieldMode == 21 || pressureGrid;
+  var resolutionSeam = 0.0;
+  var resolutionSeamCasing = 0.0;
+  var relaidOut = false;
+  if (mixedLattice && seamLayer) {
+    let tile = vec3i(cell) / 4;
+    let tileStage = select(UM_STAGE_TRANSPORT, UM_STAGE_PRESSURE, pressureGrid);
+    var width = umTileWidth(umTileAt(vec3u(tile)));
+    if (pressureGrid) { width = umStageTileWidth(stage, tileStage, tile); }
+    // The census may re-lay out bulk tiles between the transport that wrote
+    // the fields and this draw; the fields were remapped onto the live tiles.
+    relaidOut = structureView && stage != 0xffffffffu && umStageTileWidth(stage, UM_STAGE_TRANSPORT, tile) != width;
+    let tileFraction = fract(planePoint / 4.0);
+    let seamWidth = select(0.9, 1.25, structureView);
+    for (var planeAxis = 0u; planeAxis < 2u; planeAxis++) {
+      let worldAxis = u32(select(firstPlaneAxis, secondPlaneAxis, planeAxis == 1u));
+      for (var side = 0u; side < 2u; side++) {
+        var neighbor = tile;
+        neighbor[worldAxis] += select(-1, 1, side == 1u);
+        if (any(neighbor < vec3i(0)) || any(neighbor >= vec3i(umTileDimensions()))) { continue; }
+        var neighborWidth = umTileWidth(umTileAt(vec3u(neighbor)));
+        if (pressureGrid) { neighborWidth = umStageTileWidth(stage, tileStage, neighbor); }
+        if (neighborWidth == width) { continue; }
+        let distance = select(tileFraction[planeAxis], 1.0 - tileFraction[planeAxis], side == 1u)
+          * 4.0 / derivative[planeAxis];
+        resolutionSeam = max(resolutionSeam, gridLinePaint(distance, seamWidth));
+        resolutionSeamCasing = max(resolutionSeamCasing, gridLinePaint(distance, 2.0 * seamWidth));
+      }
+    }
+  }
+  let seamColor = select(vec3f(3.0, 1.35, 0.12), vec3f(1.7, 1.15, 3.0), pressureGrid);
   // Each field is sampled at exactly one site, and only for the modes that
   // read it. Metal inlines every call, and the mixed-ownership samplers are
   // large: repeating a sample per branch made this pipeline too big to
@@ -1582,18 +1645,55 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
     var scalar=0.0;
     if(fieldMode==3){scalar=cellPhi/max(min(size.x/f32(dims.x),min(size.y/f32(dims.y),size.z/f32(dims.z))),1e-9);}
     if(fieldMode==5){scalar=mappedPressureSample(cell,cellPhi);}
-    if(fieldMode==10){scalar=densitySample(cell);}
-    if(fieldMode==21){scalar=sliceVolumeFill(cell).x;}
+    if(fieldMode==21){
+      // Liquid volume over open capacity where the method publishes capacity,
+      // else over the cell volume.
+      let fill=sliceVolumeFill(cell);scalar=select(densitySample(cell),fill.x,fill.y>0.0);
+    }
     if(fieldMode==22){scalar=f32(tileClassAt(cell,dims));}
-    if(fieldMode==3||fieldMode==5||fieldMode==10||fieldMode==21||fieldMode==22){let paint=scalarLayerPaint(fieldMode,scalar);fill=sceneColor(paint.rgb);alpha=paint.a;}
+    if(fieldMode==3||fieldMode==5||fieldMode==21||fieldMode==22){let paint=scalarLayerPaint(fieldMode,scalar);fill=sceneColor(paint.rgb);alpha=paint.a;}
 
-    line=select(0.0,max(firstGridLine,secondGridLine),fieldMode==0||(fieldMode==22&&mixedLattice));
+    // Each layer draws the lattice of the stage that computed it (see
+    // mixedLattice above); on a dense lattice only the grid layer and the two
+    // layout layers, whose subject is the lattice, draw it.
+    let cellLines=max(firstGridLine,secondGridLine);
+    line=select(0.0,cellLines,fieldMode==0||(fieldMode==22&&mixedLattice)
+      ||(mixedLattice&&(fieldMode==3||fieldMode==5||fieldMode==21||fieldMode==26)));
+    lineStrength=select(1.0,0.4,fieldMode!=0);
     if(fieldMode==0){fill=vec3f(0.55,0.72,0.8);alpha=0.0;}
+    if(pressureGrid){
+      // The last solve's own cells: a resolution tint (the tile layer's fine
+      // and shell colours) under the signed pressure, lines at each cell's
+      // size, and the h surface census tiles outlined.
+      let owner=umStageOwner(stage,UM_STAGE_PRESSURE,cell);
+      let tint=select(sceneColor(LP_shell),sceneColor(LP_fine),owner.width==1u);
+      let tintAlpha=select(select(0.0,0.14,owner.width==2u),0.26,owner.width==1u);
+      let pressureAlpha=alpha;
+      alpha=pressureAlpha+tintAlpha*(1.0-pressureAlpha);
+      fill=select(fill,(fill*pressureAlpha+tint*tintAlpha*(1.0-pressureAlpha))/max(alpha,1e-6),alpha>0.0);
+      lineStrength=select(select(0.3,0.4,owner.width==2u),0.55,owner.width==1u);
+      if(umStageBand(stage,owner.tile)){
+        let tileFraction=fract(planePoint/4.0);
+        let tileDistance=min(min(tileFraction.x,1.0-tileFraction.x)*4.0/derivative.x,
+          min(tileFraction.y,1.0-tileFraction.y)*4.0/derivative.y);
+        let edge=gridLinePaint(abs(tileDistance-1.5),0.9);
+        fill=mix(fill,sceneColor(LP_surfaceBand),edge);alpha=max(alpha,edge);
+      }
+    }
     if(fieldMode==24){
       let contour=zeroContour;
-      fill=mix(sceneColor(FRACTION_LIQUID_DISPLAY),sceneColor(FRACTION_EXCESS_DISPLAY),contour);
+      var stroke=sceneColor(FRACTION_EXCESS_DISPLAY);
+      if(mixedLattice&&stage!=0xffffffffu&&contour>0.0){
+        // Mixed Uniform colours the interface by what moved it: teal where
+        // all three components came from h velocity, amber where the 4h bulk
+        // sampler did, blended by the h component count between.
+        let components=f32(umSurfaceVelocityComponents(stage,cell))/3.0;
+        stroke=mix(sceneColor(LP_overlayFallback),sceneColor(LP_overlayValid),components);
+      }
+      fill=mix(sceneColor(FRACTION_LIQUID_DISPLAY),stroke,contour);
       alpha=max(select(0.0,0.22,cellPhi<0.0),contour);
     }
+    if(fieldMode==3){lineStrength=min(lineStrength,0.3);}
     if(fieldMode==25){
       var bits=u32(round(textureLoad(velocityField,cell,0).w));
       var width=1.0;var f=fract(samplePosition);
@@ -1663,13 +1763,23 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
     alpha = max(alpha, max(liquidContour, excessHatch));
   }
   alpha = max(alpha, max(opticalBoundary, max(line, sampleDot * 0.92)));
+  if (!gridBody.occupied) {
+    // A tile the census re-laid out after the transport: the fields drawn
+    // there were remapped, and the next frame's transport runs on these cells.
+    let relaid = select(0.0, 0.55 * sliceScreenHatch(samplePosition, derivative, footprint), relaidOut);
+    color = mix(color, seamColor, relaid);
+    alpha = max(alpha, relaid);
+    color = mix(color, vec3f(0.025, 0.035, 0.045), resolutionSeamCasing);
+    color = mix(color, seamColor, resolutionSeam);
+    alpha = max(alpha, resolutionSeamCasing);
+  }
   // What the slice path refuses to thin. Only the structure view claims its
   // lines: there the lattice is the subject, and thinning it with the fill is
   // what dissolved the view at a distance. A field view's grid stays a thinned
   // reference frame beneath its own content, and sample dots stay with the
   // fill in either — they are read close up, where nothing is thin. The
   // method views claim their own structure for the same reason.
-  let lattice = max(max(select(0.0, line, structureView), opticalBoundary),
+  let lattice = max(max(max(select(0.0, line, structureView), resolutionSeamCasing), opticalBoundary),
     select(0.0, max(max(liquidContour, excessHatch), max(max(viewBoundary, viewCasing), viewAccent)), contoured));
   return GridSample(color, alpha, lattice, gridBody.occupied);
 }
@@ -1921,7 +2031,7 @@ export class GridOverlayPipeline {
     private readonly uniformBuffer: GPUBuffer,
     private readonly bodyBuffer: GPUBuffer
   ) {
-    this.layerUniform = device.createBuffer({ label: "Visual layer selection", size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.layerUniform = device.createBuffer({ label: "Visual layer selection", size: 4 * LAYER_UNIFORM_FLOATS, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.sparseDummyParams = device.createBuffer({
       label: "Grid overlay empty sparse parameters",
       size: 256,
@@ -2007,8 +2117,8 @@ export class GridOverlayPipeline {
   }
 
   setLayers(state: VisualLayerState | undefined, tiles?: GPUFluidViewRecords, window?: GPUFluidViewRecords, pressureOrigin?: readonly [number, number, number], boundary?: GPUBufferBinding, pages?: GPUFluidVolumePageSource) {
-    const values = new Float32Array(24);
-    if (pressureOrigin) values.set(pressureOrigin, 16);
+    const values = new Float32Array(LAYER_UNIFORM_FLOATS);
+    if (pressureOrigin) values.set(pressureOrigin, LAYER_PRESSURE_ORIGIN);
     if (state) {
       tiles = state.visible && state.enabled.includes("tiles") ? tiles : undefined;
       window = state.visible && state.enabled.includes("window") ? window : undefined;
@@ -2019,7 +2129,7 @@ export class GridOverlayPipeline {
       const tileBytes = tiles ? (tiles.records.size ?? tiles.records.buffer.size - (tiles.records.offset ?? 0)) : 0;
       const boundaryOffset = 1024 + tileBytes;
       const boundaryBytes = boundary ? (boundary.size ?? boundary.buffer.size - (boundary.offset ?? 0)) : 0;
-      values[2] = boundary ? boundaryOffset / 4 : 0; values[19] = tiles ? 1 : 0;
+      values[2] = boundary ? boundaryOffset / 4 : 0; values[LAYER_PRESSURE_ORIGIN + 3] = tiles ? 1 : 0;
       const pageOffset = boundaryOffset + boundaryBytes;
       const pageBytes = pages ? (pages.records.size ?? pages.records.buffer.size - (pages.records.offset ?? 0)) : 0;
       values[3] = pages ? pageOffset / 4 : 0;
@@ -2028,8 +2138,8 @@ export class GridOverlayPipeline {
       const transportBytes = transport ? (transport.size ?? transport.buffer.size - (transport.offset ?? 0)) : 0;
       const workOffset = transportOffset + transportBytes;
       const workBytes = work ? (work.size ?? work.buffer.size - (work.offset ?? 0)) : 0;
-      values[20] = transport ? transportOffset / 4 : 0;
-      values[21] = work ? workOffset / 4 : 0;
+      values[LAYER_PAGE_ACTIVITY] = transport ? transportOffset / 4 : 0;
+      values[LAYER_PAGE_ACTIVITY + 1] = work ? workOffset / 4 : 0;
       const bytes = workOffset + workBytes;
       if (!this.layerRecords || this.layerRecords.size < bytes) {
         this.layerRecords?.destroy();

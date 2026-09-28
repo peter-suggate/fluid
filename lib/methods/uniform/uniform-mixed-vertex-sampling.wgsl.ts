@@ -8,8 +8,12 @@
 // fine work still compiles to the ordinary eight direct loads.
 /** cacheLookup: WGSL run in umVertexValue once p is known to need
  * reconstruction, with p and its tile in scope; it may return the memoized
- * value of this same function. */
-export const uniformMixedVertexSamplingSource = (cacheLookup = "") => /* wgsl */ `
+ * value of this same function. resolved: umLoadVertex reads a field that
+ * UniformMixedPhiResolve completed, where every texel of a tile with a mixed
+ * stencil already holds umVertexValue. Fine trilinear interpolation of those
+ * texels reproduces the field, so umVertexValue there is one load and a unit
+ * seam owner's sample is eight. */
+export const uniformMixedVertexSamplingSource = (cacheLookup = "", resolved = false) => /* wgsl */ `
 fn umVertexSum8(v:array<f32,8>)->f32{return ((v[0]+v[5])+(v[1]+v[4]))+((v[2]+v[7])+(v[3]+v[6]));}
 fn umVertexAuthority(p:vec3u)->UMOwner {
  if(umRegularFine){return umOwnerAt(clamp(vec3i(p)-vec3i(1),vec3i(0),vec3i(UM_D)-vec3i(1)));}
@@ -50,6 +54,10 @@ fn umVertexValue(p:vec3u)->f32 {
  // Avoid constructing eight full owners for ordinary stored vertices.
  let tile=umTileAt(min(p,UM_D-vec3u(1))/4u);
  if(umTileMaximumWidth(tile)==1u){return umLoadVertex(p);}
+ // Every owner incident to p lies in its tile's stencil. A uniform stencil
+ // stores exactly its aligned vertices; a resolved mixed one stores all.
+ let widest=umTileMaximumWidth(tile);let uniform=umTileMinimumWidth(tile)==widest;
+ if((uniform&&all(p%widest==vec3u(0)))||(${resolved}&&!uniform)){return umLoadVertex(p);}
  let local=p%4u;
  if(all(local==vec3u(0))){return umLoadVertex(p);}
  ${cacheLookup}
@@ -80,6 +88,18 @@ fn umSampleVertex(p:vec3f)->f32 {
   for(var k=0u;k<select(umCounts.w,8u,umRegularFine);k++){let corner=umCorner(k,2u);let w=select(vec3f(1)-f,f,corner!=vec3u(0));taps[k]=umLoadVertex(base+corner)*w.x*w.y*w.z;}
   return umVertexSum8(taps);
  }
+ ${resolved?`// Resolved: the owner's corners are width-aligned vertices of its tile
+ // closure, each stored (uniform or unit stencil) or resolved (mixed). The
+ // tile width is the owner width; eight independent loads, no authority.
+ {
+  let cell=vec3u(min(vec3i(floor(q)),vec3i(UM_D)-vec3i(1)));let width=umTileWidth(umTileAt(cell/4u));
+  let origin=(cell/width)*width;let t=(q-vec3f(origin))/f32(width);var values:array<f32,8>;
+  for(var k=0u;k<8u;k++){
+   let corner=umCorner(k,2u);let w=select(vec3f(1)-t,t,corner!=vec3u(0));
+   values[k]=umLoadVertex(origin+corner*width)*w.x*w.y*w.z;
+  }
+  return umVertexSum8(values);
+ }`:""}
  let owner=umOwnerAt(min(vec3i(floor(q)),vec3i(UM_D)-vec3i(1)));
  let origin=umOrigin(owner);let t=(q-vec3f(origin))/f32(owner.width);var values:array<f32,8>;
  let regular=owner.width>=umTileMaximumWidth(owner.tile);
@@ -91,6 +111,13 @@ fn umSampleVertex(p:vec3f)->f32 {
    let corner=umCorner(k,2u);let w=select(vec3f(1)-t,t,corner!=vec3u(0));
    values[k]=umLoadVertex(origin+corner*owner.width)*w.x*w.y*w.z;
   }
+  return umVertexSum8(values);
+ }
+ // A narrower-than-stencil unit owner's corners lie in tiles whose stencils
+ // hold it: mixed (resolved) or uniformly fine (stored).
+ if(${resolved}&&owner.width==1u){
+  let base=min(vec3u(floor(q)),UM_D-vec3u(1));let f=q-vec3f(base);
+  for(var k=0u;k<8u;k++){let corner=umCorner(k,2u);let w=select(vec3f(1)-f,f,corner!=vec3u(0));values[k]=umLoadVertex(base+corner)*w.x*w.y*w.z;}
   return umVertexSum8(values);
  }
  for(var k=0u;k<select(umCounts.w,8u,umRegularFine);k++){

@@ -29,19 +29,7 @@ const arms = [
   { id: "dt30-eight", dt: 1 / 30, rounds: 8, options: {} },
   { id: "dt120-eight", dt: 1 / 120, rounds: 8, options: {} },
   { id: "dt30-thirtytwo", dt: 1 / 30, rounds: 32, options: {} },
-  {
-    id: "dt30-no-redistance",
-    dt: 1 / 30,
-    rounds: 8,
-    options: { redistance: "off" },
-  },
   { id: "dt30-no-sharpen", dt: 1 / 30, rounds: 0, options: {} },
-  {
-    id: "dt30-fine-extension",
-    dt: 1 / 30,
-    rounds: 8,
-    options: { twoLevelVelocity: "off", extensionFrontSweeps: 16 },
-  },
   {
     id: "dt30-front16",
     dt: 1 / 30,

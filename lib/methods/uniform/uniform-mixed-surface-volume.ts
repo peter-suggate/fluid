@@ -1,6 +1,6 @@
 import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
 import {uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
-import {uniformMixedVertexSamplingWGSL} from "./uniform-mixed-vertex-sampling.wgsl";
+import {uniformMixedVertexSamplingSource} from "./uniform-mixed-vertex-sampling.wgsl";
 import {uniformSurfaceFillWGSL} from "./uniform-surface-volume.wgsl";
 import {uniformMixedSolidWGSL,type UniformMixedSolid} from "./uniform-mixed-solid.wgsl";
 
@@ -35,7 +35,10 @@ export class UniformMixedSurfaceVolume {
  private readonly inPlaceResources:GPUBindGroupLayout;
  private readonly applyGroups=new WeakMap<GPUBindGroup,{group:GPUBindGroup;inPlace:boolean}>();
  private readonly pipelines=new Map<string,GPUComputePipeline>();
- constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid?:UniformMixedSolid){
+ /** resolved: the caller runs UniformMixedPhiResolve on phi before encode.
+  * Every owner corner is then a stored or resolved texel; resolveScale
+  * completes the corner scales the same way after metric. */
+ constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid?:UniformMixedSolid,private readonly resolved=false){
   this.cells=ownership.layout.lattice.dimensions.reduce((n,d)=>n*d,1);
   this.vertices=ownership.layout.lattice.dimensions.reduce((n,d)=>n*(d+1),1);
   this.groups=Math.ceil(this.cells/64);this.chunks=Math.ceil(this.groups/64);
@@ -62,9 +65,9 @@ export class UniformMixedSurfaceVolume {
  async initialize():Promise<void>{
   const N=this.cells,V=this.vertices,P=2*N+V,R=P+20*this.groups,S=R+20*this.chunks,T=this.tiles;
   const topology=uniformMixedTopologyWGSL(this.ownership.layout,0);
-  const shared=/* wgsl */`
+  const shared=(sampling:string)=>/* wgsl */`
 const UM_H=vec3f(${this.ownership.layout.lattice.cellSize_m.join(",")});
-${uniformMixedVertexSamplingWGSL}
+${sampling}
 fn umVertexIndex(p:vec3u)->u32{let d=UM_D+vec3u(1);return p.x+d.x*(p.y+d.y*p.z);}
 // Band tiles, visited tiles, measured tiles.
 const SV_BAND:u32=${S+8}u;const SV_VISIT:u32=${S+8+T}u;const SV_MEASURE:u32=${S+8+2*T}u;
@@ -73,6 +76,9 @@ fn svVisited(o:UMOwner)->bool{return scratch[SV_VISIT+o.tile]!=0.0;}
 // corners are stored, and a corner belongs to the lowest incident cell, so
 // the owner holds its positive corner and its corners on negative walls.
 fn svUnit(o:UMOwner)->bool{return umTileMaximumWidth(o.tile)==1u;}
+// An owner's corners are width-aligned vertices of its tile closure: stored
+// (uniform or unit stencil) or, when resolved, completed in place (mixed).
+fn svDirect(o:UMOwner)->bool{return ${this.resolved}||svUnit(o);}
 fn svAuthority(o:UMOwner,k:u32)->bool{
  let corner=umCorner(k,2u);
  if(svUnit(o)){return all((corner!=vec3u(0))|(umOrigin(o)==vec3u(0)));}
@@ -81,7 +87,7 @@ fn svAuthority(o:UMOwner,k:u32)->bool{
 // Tile of a unit-stencil owner's corner authority, clamp(p-1)'s owner.
 fn svUnitAuthorityTile(p:vec3u)->u32{return umTileAt(vec3u(clamp(vec3i(p)-vec3i(1),vec3i(0),vec3i(UM_D)-vec3i(1)))/4u);}
 fn svMeasured(t:u32)->bool{return scratch[SV_MEASURE+t]!=0.0;}`;
-  const sourceScale=uniformMixedVertexSamplingWGSL.replace(/\bum(Vertex\w*|SampleVertex|LoadVertex)\b/g,name=>name.replace("um","umScale"));
+  const sourceScale=uniformMixedVertexSamplingSource("",false).replace(/\bum(Vertex\w*|SampleVertex|LoadVertex)\b/g,name=>name.replace("um","umScale"));
   const module=this.device.createShaderModule({code:topology+/* wgsl */`
 @group(1) @binding(0) var phi:texture_3d<f32>;
 @group(1) @binding(1) var volume:texture_3d<f32>;
@@ -89,13 +95,14 @@ fn svMeasured(t:u32)->bool{return scratch[SV_MEASURE+t]!=0.0;}`;
 override parity:u32=0u;
 override svMeasureReach:bool=false;
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
-${shared}
+${shared(uniformMixedVertexSamplingSource("",this.resolved))}
 fn umScaleLoadVertex(p:vec3u)->f32{return scratch[${2*N}u+umVertexIndex(p)];}
 ${sourceScale}
 ${uniformSurfaceFillWGSL}
 ${uniformMixedSolidWGSL(this.solid?2:undefined)}
 fn umCapacity(o:UMOwner)->f32{return select(1.0,umCellOpen(vec3i(umOrigin(o))),umSolidEnabled()&&o.width==1u);}
 fn umLiveCells()->u32{return umCounts.x*64u+umCounts.y*8u+umCounts.z;}
+fn svVolume(origin:vec3u)->f32{return textureLoad(volume,vec3i(origin),0).x;}
 fn umShiftLimit()->f32{return min(UM_H.x,min(UM_H.y,UM_H.z))*f32(select(select(4u,2u,umCounts.y>0u),1u,umCounts.x>0u));}
 var<workgroup> sums:array<vec4f,320>;
 var<workgroup> measureLive:atomic<u32>;
@@ -120,7 +127,7 @@ fn storePartial(l:u32,group:vec3u){
 // One owner's corner (general owners reconstruct hanging corners).
 fn svCorner(o:UMOwner,k:u32)->f32{
  let vertex=umOrigin(o)+umCorner(k,2u)*o.width;
- if(svUnit(o)){return umLoadVertex(vertex);}
+ if(svDirect(o)){return umLoadVertex(vertex);}
  return umVertexValue(vertex);
 }
 // A seed workgroup that is one unit-stencil fine tile stages its 5^3 stored
@@ -139,7 +146,8 @@ var<workgroup> seedCorners:array<f32,125>;
     let local=umCorner(o.lane,4u);
     for(var k=0u;k<8u;k++){let c=local+umCorner(k,2u);let v=seedCorners[c.x+5u*(c.y+5u*c.z)];low=min(low,v);high=max(high,v);}
    }else{
-   for(var k=0u;k<umCounts.w;k++){let v=svCorner(o,k);low=min(low,v);high=max(high,v);}
+   if(svDirect(o)){for(var k=0u;k<8u;k++){let v=umLoadVertex(umOrigin(o)+umCorner(k,2u)*o.width);low=min(low,v);high=max(high,v);}}
+   else{for(var k=0u;k<umCounts.w;k++){let v=svCorner(o,k);low=min(low,v);high=max(high,v);}}
    }
    seeded=low<=0.0&&high>=0.0;inside=high<0.0;
   }
@@ -153,7 +161,7 @@ var<workgroup> seedCorners:array<f32,125>;
  if(workgroupUniformLoad(&measureBand)!=0u){return;}
  var row=vec2f(0);
  if(o.width!=0u){
-  let mass=f32(o.width*o.width*o.width)*umCapacity(o);row=vec2f(select(0.0,mass,inside),textureLoad(volume,vec3i(umOrigin(o)),0).x*f32(o.width*o.width*o.width));
+  let mass=f32(o.width*o.width*o.width)*umCapacity(o);row=vec2f(select(0.0,mass,inside),svVolume(umOrigin(o))*f32(o.width*o.width*o.width));
  }
  seedSums[l]=row;
  if(any(row!=vec2f(0))){atomicOr(&measureLive,1u);}
@@ -164,9 +172,11 @@ var<workgroup> seedCorners:array<f32,125>;
  // The partial's rows: four of (s,s,s,s), then (s, volume, 0, 0).
  if(l<20u){scratch[at+l]=select(select(0.0,total.y,l==17u),total.x,l<17u);}
 }
-// Visited: tiles within one tile of band. With svMeasureReach, measured:
-// visited tiles and every tile whose stencil holds a wider owner (hanging
-// corners interpolate coarse corners; those tiles are never skipped).
+// Visited: tiles within one tile of band. Every corner scale of an owner
+// outside them is zero. With svMeasureReach, measured (metric's set): the
+// visited tiles plus every tile with a wider owner in its stencil within two
+// tiles of band. A visited tile's hanging corners interpolate the corners of
+// an adjacent wider owner, whose authorities lie one tile farther.
 @compute @workgroup_size(64) fn grow(@builtin(global_invocation_id) gid:vec3u){
  let t=gid.x+umDispatchX*64u*gid.y;if(t>=UM_TILES){return;}
  let centre=vec3i(umTileCoord(t));var visit=0.0;
@@ -174,14 +184,30 @@ var<workgroup> seedCorners:array<f32,125>;
   let q=centre+vec3i(x,y,z);if(any(q<vec3i(0))||any(q>=vec3i(UM_T))){continue;}
   if(scratch[SV_BAND+umTileAt(vec3u(q))]!=0.0){visit=1.0;}
  }}}
- scratch[SV_VISIT+t]=visit;if(svMeasureReach){scratch[SV_MEASURE+t]=select(visit,1.0,umTileMaximumWidth(t)>1u);}
+ scratch[SV_VISIT+t]=visit;
+ if(svMeasureReach){
+  var measured=visit;
+  if(measured==0.0&&umTileMaximumWidth(t)>1u){
+   for(var z=-2;z<=2;z++){for(var y=-2;y<=2;y++){for(var x=-2;x<=2;x++){
+    let q=centre+vec3i(x,y,z);if(any(q<vec3i(0))||any(q>=vec3i(UM_T))){continue;}
+    if(scratch[SV_BAND+umTileAt(vec3u(q))]!=0.0){measured=1.0;}
+   }}}
+  }
+  scratch[SV_MEASURE+t]=measured;
+ }
 }
 @compute @workgroup_size(64) fn dilate(@builtin(global_invocation_id) gid:vec3u){
  let o=umAllOwner(gid);if(o.width==0u||!svVisited(o)){return;}let input=parity*${N}u;let out=(parity^1u)*${N}u;var band=scratch[input+o.index];
  if(o.width==1u){
   // A unit owner's every face is one unit patch onto the adjacent owner.
-  let origin=vec3i(umOrigin(o));
-  for(var k=0u;k<6u;k++){var q=origin;q[k/2u]+=select(-1,1,(k&1u)==1u);let other=umOwnerAt(q);if(other.width!=0u){band=max(band,scratch[input+other.index]-1.0);}}
+  // Inside its own tile that owner is lane +-1, +-4 or +-16 (umOwnerAt's
+  // index); only tile-face neighbours look ownership up.
+  let origin=vec3i(umOrigin(o));let local=umCorner(o.lane,4u);
+  for(var k=0u;k<6u;k++){
+   let axis=k/2u;let up=(k&1u)==1u;let stride=select(select(16u,4u,axis==1u),1u,axis==0u);
+   if(select(local[axis]>0u,local[axis]<3u,up)){band=max(band,scratch[input+select(o.index-stride,o.index+stride,up)]-1.0);continue;}
+   var q=origin;q[axis]+=select(-1,1,up);let other=umOwnerAt(q);if(other.width!=0u){band=max(band,scratch[input+other.index]-1.0);}
+  }
  }else{
  for(var axis=0u;axis<3u;axis++){for(var side=0u;side<2u;side++){
   let sign=select(-1,1,side==1u);let first=umFace(o,axis,sign,0u);
@@ -218,7 +244,37 @@ var<workgroup> seedCorners:array<f32,125>;
   }}scratch[${2*N}u+umVertexIndex(p)]=band*0.2*max(0.1,length(gradient));
  }
 }
-// Corner values (raw, then scale) of a general owner; runtime-bounded so
+${this.resolved?`// Completes the unstored scale texels of mixed-stencil tiles after metric,
+// as UniformMixedPhiResolve does for phi (one group per seam tile, incident
+// tile words and 4h lattice staged): reconstruction reads only stored scales
+// and this writes only unstored ones.
+var<workgroup> svResolveWords:array<u32,8>;var<workgroup> svResolveLattice:array<f32,27>;
+@compute @workgroup_size(125) fn resolveScale(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ let header=7u*UM_TILES+16u;let job=group.x+umDispatchX*group.y;
+ let valid=job<umSupport[header]+umSupport[header+2u];
+ let tile=select(0u,umSupport[header+4u+select(0u,job,valid)],valid);let base=vec3i(umTileCoord(tile));
+ if(valid&&lane<8u){let t=base+vec3i(umCorner(lane,2u))-vec3i(1);svResolveWords[lane]=select(0x80000000u,umTopology[umTileAt(vec3u(max(t,vec3i(0))))],all(t>=vec3i(0)));}
+ else if(valid&&lane>=8u&&lane<35u){let v=(base+vec3i(umCorner(lane-8u,3u))-vec3i(1))*4;if(all(v>=vec3i(0))){svResolveLattice[lane-8u]=umScaleLoadVertex(vec3u(v));}}
+ workgroupBarrier();
+ if(!valid){return;}
+ let local=umCorner(lane,5u);let p=vec3u(base)*4u+local;
+ if(any((local==vec3u(4u))&(p!=UM_D))||all(p%4u==vec3u(0))){return;}
+ var best=0xffffffffu;var at=vec3u(0);
+ for(var k=0u;k<8u;k++){
+  let c=umCorner(k,2u);let word=svResolveWords[k];
+  if(any((c==vec3u(0))&(local!=vec3u(0)))||(word&0xc0000000u)!=0u){continue;}
+  if((word&0x3fffffffu)<best){best=word&0x3fffffffu;at=c;}
+ }
+ if(best==0xffffffffu){return;}
+ let t=vec3f(local+(vec3u(1)-at)*4u)/4.0;var values:array<f32,8>;
+ for(var k=0u;k<8u;k++){
+  let corner=umCorner(k,2u);let weight=umScaleVertexWeight(t,corner);let m=at+corner;
+  if(weight>0.0){values[k]=weight*svResolveLattice[m.x+3u*(m.y+3u*m.z)];}
+ }
+ let value=umScaleVertexSum8(values);let at2=${2*N}u+umVertexIndex(p);
+ if(bitcast<u32>(value)!=bitcast<u32>(scratch[at2])){scratch[at2]=value;}
+}
+`:""}// Corner values (raw, then scale) of a general owner; runtime-bounded so
 // the reconstruction is not expanded eight times.
 fn umMeasureCorners(o:UMOwner)->array<f32,16>{
  var corners:array<f32,16>;
@@ -226,26 +282,27 @@ fn umMeasureCorners(o:UMOwner)->array<f32,16>{
  return corners;
 }
 // Each lane writes its 17 fractions and volume into its own workgroup row;
-// per-lane arrays stay statically indexed. A group with no measured tile
-// keeps the constant partial its seed wrote.
+// per-lane arrays stay statically indexed. A group with no visited tile
+// keeps the constant partial its seed wrote. An unvisited lane's scales are
+// zero: its texels may hold an earlier frame's scales or interpolate them.
 @compute @workgroup_size(64) fn measure(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) l:u32,@builtin(workgroup_id) group:vec3u){
  let o=umAllOwner(gid);
  if(l==0u){atomicStore(&measureLive,0u);atomicStore(&measureBand,0u);}
  workgroupBarrier();
- if(o.width!=0u&&scratch[SV_MEASURE+o.tile]!=0.0){atomicOr(&measureBand,1u);}
+ if(o.width!=0u&&svVisited(o)){atomicOr(&measureBand,1u);}
  if(workgroupUniformLoad(&measureBand)==0u){return;}
  for(var k=0u;k<5u;k++){sums[5u*l+k]=vec4f(0);}
  if(o.width!=0u){
-  let origin=umOrigin(o);let mass=f32(o.width*o.width*o.width)*umCapacity(o);sums[5u*l+4u].y=textureLoad(volume,vec3i(origin),0).x*f32(o.width*o.width*o.width);
+  let origin=umOrigin(o);let mass=f32(o.width*o.width*o.width)*umCapacity(o);sums[5u*l+4u].y=svVolume(origin)*f32(o.width*o.width*o.width);
   var raw:array<f32,8>;var scale:array<f32,8>;var low=1e30;var high=-1e30;
   let centre=scratch[${S}u];let radius=scratch[${S+1}u];
-  if(svUnit(o)){
-   // Every corner of a unit owner whose tile stencil is all unit width is a
-   // stored vertex: the same values with eight direct loads.
-   for(var k=0u;k<8u;k++){let vertex=origin+umCorner(k,2u);raw[k]=umLoadVertex(vertex);scale[k]=umScaleLoadVertex(vertex);}
+  if(svDirect(o)){
+   // Every corner is a stored (or resolved) vertex: eight direct loads.
+   for(var k=0u;k<8u;k++){let vertex=origin+umCorner(k,2u)*o.width;raw[k]=umLoadVertex(vertex);scale[k]=umScaleLoadVertex(vertex);}
   }else{
    let corners=umMeasureCorners(o);for(var k=0u;k<8u;k++){raw[k]=corners[k];scale[k]=corners[k+8u];}
   }
+  if(!svVisited(o)){scale=array<f32,8>();}
   for(var k=0u;k<8u;k++){low=min(low,raw[k]-(centre+radius)*scale[k]);high=max(high,raw[k]-(centre-radius)*scale[k]);}
   // An owner inside or outside the surface at every trial shift has a
   // constant fraction; only cut owners evaluate the 17 shifted fills.
@@ -287,7 +344,7 @@ fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p)).x;}`:`@group(1) @
 @group(1) @binding(2) var output:texture_storage_3d<r32float,write>;
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}`}
 @group(1) @binding(3) var<storage,read_write> scratch:array<f32>;
-${shared}
+${shared(uniformMixedVertexSamplingSource("",false))}
 @compute @workgroup_size(64) fn apply(@builtin(global_invocation_id) gid:vec3u){
  let o=umAllOwner(gid);if(o.width==0u${inPlace?"||!svVisited(o)":""}){return;}let visited=svVisited(o);
  for(var k=0u;k<umCounts.w;k++){if(!svAuthority(o,k)){continue;}let p=umOrigin(o)+umCorner(k,2u)*o.width;
@@ -302,7 +359,7 @@ ${shared}
   const constants={umDispatchX:this.ownership.dispatchX};
   const create=(key:string,entryPoint:string,extra:Record<string,number>={})=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{...constants,...extra}}}).then(p=>{this.pipelines.set(key,p);});
   await Promise.all([
-   ...["begin","clearBand","seed","metric","measure","reduce","solve"].map(entry=>create(entry,entry)),
+   ...["begin","clearBand","seed","metric","measure","reduce","solve",...(this.resolved?["resolveScale"]:[])].map(entry=>create(entry,entry)),
    create("dilate0","dilate",{parity:0}),create("dilate1","dilate",{parity:1}),
    create("grow","grow"),create("growMeasure","grow",{svMeasureReach:1}),
    ...([["applyInPlace",1,this.inPlaceResources],["applyCopy",2,this.copyResources]] as const).map(([key,m,resources])=>
@@ -310,15 +367,16 @@ ${shared}
   ]);
  }
  encode(encoder:GPUCommandEncoder,group:GPUBindGroup):void{
-  if(this.pipelines.size!==13)throw new Error("Mixed surface constraint is not initialized");
+  if(this.pipelines.size!==(this.resolved?14:13))throw new Error("Mixed surface constraint is not initialized");
   const apply=this.applyGroups.get(group);if(!apply)throw new Error("Mixed surface constraint group was not bound by this stage");
   const pass=encoder.beginComputePass({label:"Uniform mixed global surface volume"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group);if(this.solid)pass.setBindGroup(2,this.solid.bindGroup);
   const run=(entry:string)=>{const pipeline=this.pipelines.get(entry)!;pass.setPipeline(pipeline);
    if(entry==="begin"||entry==="solve")pass.dispatchWorkgroups(1);
    else if(entry==="reduce")pass.dispatchWorkgroups(Math.ceil(this.ownership.layout.cellCount/4096));
+   else if(entry==="resolveScale")this.ownership.dispatchFused(pass,pipeline);
    else if(entry==="grow"||entry==="growMeasure"||entry==="clearBand"){const groups=Math.ceil(this.tiles/64);pass.dispatchWorkgroups(Math.min(groups,this.ownership.dispatchX),Math.ceil(groups/this.ownership.dispatchX));}
    else this.ownership.dispatchAll(pass,pipeline);};
-  run("begin");run("clearBand");run("seed");for(let i=0;i<4;i++){run("grow");run(`dilate${i%2}`);}run("growMeasure");run("metric");
+  run("begin");run("clearBand");run("seed");for(let i=0;i<4;i++){run("grow");run(`dilate${i%2}`);}run("growMeasure");run("metric");if(this.resolved)run("resolveScale");
   for(let i=0;i<2;i++){run("measure");run("reduce");run("solve");}
   pass.setBindGroup(1,apply.group);run(apply.inPlace?"applyInPlace":"applyCopy");pass.end();
  }
