@@ -88,3 +88,28 @@ WP1 (hours) → WP2 (about a day) → WP3a (small) → decide on WP3b and WP4 fr
 - **GPU busy:** about 13.3 of stages, plus about 1.5–2 of census tail (extension, census, builder), plus the relayout. The GPU idles **about 4 ms per 20 ms frame**. Most of that is the 3 ms CPU encode, which cannot overlap anything while the next advance waits for the receipt. The rest is map latency plus the relayout step.
 - **Verdict:** WP2 is worth doing (about 20% of frame time). Separately, a 3 ms CPU encode per frame is itself a lead.
 - **Sequencing:** WP2 edits are held until fluid-d1's pressure-path perf round ends, because the receipt, `encodePlanCopy` and `framePending` sit in its blast radius.
+
+## WP2 + WP3a result (fluid-a1, 28 September 2026, base 8ac34390)
+
+- **Frame side (`UniformMixedFrame.advance`):**
+  - Encodes and submits synchronously, then returns the frame's receipt promise.
+  - Receipts use a ring of `UNIFORM_MIXED_RECEIPT_RING` = 2 map buffers. Encoding a third frame while two receipts are unchecked throws.
+  - A failed receipt rejects as `Uniform mixed frame N: …` and fails the frame.
+  - The lagged cycle plan (WP3a) comes from the newest resolved receipt.
+- **Reference side:**
+  - `framePending` means the pipeline is full: 2 unchecked receipts, a frame already queued on a layout that an unadopted census replaces, or a deferred edit draining the pipeline.
+  - Scene, value and body edits defer while any frame is in flight. The pipeline drains to apply them.
+  - `applyRuntimeValues` returns before deferring when the values are identical, so the renderer's per-frame call never drains the pipeline.
+- **Dynamic coarsening:**
+  - One census is in flight at a time: an alternating census frame, then a no-census frame that extends its own velocity for the relayout to remap.
+  - The census plans with a 3-step travel horizon (`UNIFORM_MIXED_CENSUS_HORIZON`). The layout it builds serves up to 3 steps after the census state.
+- **Measured:** one Dawn run per arm on sparse-cm12-long-dam-break, dynamic, steps 30–90. The probe advances whenever the solver admits a frame and polls with setTimeout(1).
+
+  | Arm | ms/frame | h tiles (mean) | Relayouts |
+  |---|---|---|---|
+  | Base | 16.97 | 1033 | 90 |
+  | WP2 | **13.54** | 1505 | 46 |
+
+  A setImmediate busy poll distorts the base arm (30.75 ms) and barely moves WP2 (13.08 ms).
+- **Fail-fast:** setting the tolerance to 1e-12 at step 50 drains the pipeline for the edit. Frame 51 fails and names itself, and no frame after 51 is submitted.
+- **Lead:** the 3-step horizon widens the h band by about 46%. A smaller band needs host-free relayout (WP4), which brings the horizon back to 1 step.

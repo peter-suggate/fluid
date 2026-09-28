@@ -81,6 +81,9 @@ export interface UniformMixedFrameParameters {
 /** Plan support, phase and extension are dt-free (the certificate takes dt),
  * so a census extension serves the next frame whatever its step. */
 const extensionKey=(p:UniformMixedFrameParameters)=>JSON.stringify({...p,dt:0});
+/** Frames whose receipts may be unchecked at once: the host's frames-ahead cap. */
+export const UNIFORM_MIXED_RECEIPT_RING=2;
+export interface UniformMixedFrameReceipt{cycles:number;encoded:number;residual:number;converged:boolean;dustOwners:number;dustMass_cells:number;orphanDustOwners:number;orphanDustMass_cells:number}
 export class UniformMixedFrame {
  readonly transport:UniformMixedTransportStage;
  get ownership(){return this.transport.ownership;}
@@ -157,7 +160,13 @@ export class UniformMixedFrame {
  private readonly acceptanceGroup:GPUBindGroup;
  private readonly params:Record<"extension"|"surface"|"momentum"|"forces"|"authority"|"sharpen"|"projection"|"acceptance",GPUBuffer>;
  private readonly state:GPUBuffer;
- private readonly readback:GPUBuffer;
+ /** Receipt ring: a frame's receipt maps while later frames encode. */
+ private readonly readbacks:readonly GPUBuffer[];
+ /** Ring slots whose frame's receipt has not been checked yet. */
+ private readonly unchecked=new Set<GPUBuffer>();
+ private frameIndex=0;
+ /** The newest frame whose planner set pressurePlan. */
+ private planFrame=0;
  private readonly reductions:GPUBuffer;
  private readonly continuationGroups:readonly GPUBindGroup[];
  private pressureSchedule!:UniformMixedPressureSchedule;
@@ -177,7 +186,7 @@ export class UniformMixedFrame {
   this.params={extension:uniform("extension",16),surface:uniform("surface",32),momentum:uniform("momentum",32),forces:uniform("forces",48),authority:uniform("authority",16),sharpen:uniform("sharpen",32),projection:uniform("projection",32),acceptance:uniform("acceptance",16)};
   this.state=buffer("Uniform pressure acceptance",32,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST);
   this.pressurePlan={vCycles:schedule.vCycles,fullCycles:schedule.fullCycles};
-  this.readback=buffer("Uniform pressure receipt and mass accounting",120,GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ);
+  this.readbacks=Array.from({length:UNIFORM_MIXED_RECEIPT_RING},(_,i)=>buffer(`Uniform pressure receipt and mass accounting ${i}`,120,GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ));
   this.reductions=buffer("Uniform dust accounting",48,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC);
   const caches=Array.from({length:1},(_,i)=>{const t=device.createTexture({label:`Uniform 4h sampling cache ${i}`,size:layout.lattice.dimensions.map(n=>n/4+2),dimension:"3d",format:"rgba32float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING});this.owned.push(t);return t;});
   const coarseLayout=uniformMixedAllCoarseLayout(layout);
@@ -341,19 +350,23 @@ export class UniformMixedFrame {
   const at=this.stageGridWord+UNIFORM_STAGE_GRID_HEADER_WORDS+(range==="transport"?0:range==="pressure"?n:2*n);
   encoder.copyBufferToBuffer(source,0,this.presentation.phi.buffer,4*at,4*words);
  }
- private async receipt(encoder:GPUCommandEncoder,trace?:UniformMixedFrameTrace):Promise<Uint32Array>{
-  encoder.copyBufferToBuffer(this.state,0,this.readback,0,32);trace?.submit(encoder,this.state);this.device.queue.submit([encoder.finish()]);
-  await this.readback.mapAsync(GPUMapMode.READ);const state=new Uint32Array(this.readback.getMappedRange(),0,8).slice();this.readback.unmap();return state;
- }
  /** Discarded mass uses native sixty-fourths-of-threshold counters, weighted
   * by owner volume. It is a quantized lower bound; counts name owners, not
   * fine cells. Counters are reset once per frame, before transport cleanup. */
  /** census: the dynamic classifier and layout builder, encoded after this
   * frame's extension into its last submission, so their readback shares the
-  * frame's final map instead of costing the host a second round trip. */
- async advance(p:UniformMixedFrameParameters,trace?:UniformMixedFrameTrace,census?:(encoder:GPUCommandEncoder)=>(()=>void)):Promise<{cycles:number;encoded:number;residual:number;converged:boolean;dustOwners:number;dustMass_cells:number;orphanDustOwners:number;orphanDustMass_cells:number}>{
+  * frame's final map instead of costing the host a second round trip.
+  * extendTail: extend this frame's final velocity for the next advance
+  * even without a census (a frame encoded while an earlier census is still
+  * mapping: the relayout that census adopts remaps it).
+  * Encodes and submits synchronously; the promise is the frame's receipt,
+  * checked when its map resolves while later frames encode. A failed receipt
+  * rejects naming its frame and fails the frame for every later advance. */
+ advance(p:UniformMixedFrameParameters,trace?:UniformMixedFrameTrace,census?:(encoder:GPUCommandEncoder)=>(()=>void),extendTail=census!==undefined):Promise<UniformMixedFrameReceipt>{
   if(!this.ready||this.busy||this.failed)throw new Error("Unified frame is not ready for an advance");
-  this.busy=true;
+  const readback=this.readbacks.find(b=>!this.unchecked.has(b));
+  if(!readback)throw new Error(`Uniform mixed frame has ${this.readbacks.length} unchecked receipts; the host must check one before encoding frame ${this.frameIndex+1}`);
+  this.busy=true;const frame=++this.frameIndex;
   const releases:(()=>void)[]=[];
   try{
    for(const ownership of new Set([this.ownership,...this.levels.map(l=>l.ownership)]))releases.push(ownership.acquireFrame());
@@ -447,12 +460,25 @@ export class UniformMixedFrame {
     else encoder.clearBuffer(this.presentation.phi.buffer,at,4*n);
    }
    trace?.phase(encoder,A.pressureProjection);
-   encoder.copyBufferToBuffer(this.state,0,this.readback,0,32);encoder.copyBufferToBuffer(this.reductions,0,this.readback,32,48);schedule.encodePlanCopy(encoder,this.readback,80);
-   if(split)this.band.encodeReceipt(encoder,this.readback,88);else encoder.clearBuffer(this.readback,88,32);
-   let submitted:(()=>void)|undefined;if(census){this.encodeExtensionOf(encoder,p);submitted=census(encoder);}
+   encoder.copyBufferToBuffer(this.state,0,readback,0,32);encoder.copyBufferToBuffer(this.reductions,0,readback,32,48);schedule.encodePlanCopy(encoder,readback,80);
+   if(split)this.band.encodeReceipt(encoder,readback,88);else encoder.clearBuffer(readback,88,32);
+   if(extendTail)this.encodeExtensionOf(encoder,p);
+   const submitted=census?.(encoder);
    // The census maps alongside the receipt: one wait for both.
-   trace?.submit(encoder,this.fields.negative);this.device.queue.submit([encoder.finish()]);trace?.submitted();submitted?.();await this.readback.mapAsync(GPUMapMode.READ);
-   const mapped=new Uint32Array(this.readback.getMappedRange(),0,30).slice(),state=mapped.slice(0,8),accounting=mapped.slice(8,20);this.readback.unmap();
+   trace?.submit(encoder,this.fields.negative);this.device.queue.submit([encoder.finish()]);trace?.submitted();submitted?.();
+   this.unchecked.add(readback);
+   return this.check(readback,frame,p,plan.vCycles+plan.fullCycles);
+  }catch(error){trace?.abort();this.failed=true;throw error;}finally{for(const release of releases)release();this.busy=false;}
+ }
+ /** Frame `frame`'s receipt: fail fast on a rejected or unconverged solve. */
+ private async check(readback:GPUBuffer,frame:number,p:UniformMixedFrameParameters,encoded:number):Promise<UniformMixedFrameReceipt>{
+  let mapped:Uint32Array;
+  try{
+   await readback.mapAsync(GPUMapMode.READ);
+   mapped=new Uint32Array(readback.getMappedRange(),0,30).slice();readback.unmap();
+  }catch(error){this.failed=true;throw error;}finally{this.unchecked.delete(readback);}
+  try{
+   const state=mapped.slice(0,8),accounting=mapped.slice(8,20);
    const residual=new Float32Array(state.buffer)[1]!,count=state[7]!;
    if(state[4]!==0||state[5]===0||!Number.isFinite(residual)||residual<0||residual>p.pressureTolerance){
     throw new Error(`Uniform mixed pressure ${state[4]!==0?"rejected a non-improving cycle":"did not converge"}: candidate ${new Float32Array(state.buffer)[0]}, accepted ${residual}, tolerance ${p.pressureTolerance}, ${count} cycles; projection withheld${typeof process!=="undefined"&&process.env.FLUID_MIXED_HOST_DIAGNOSTICS?`; params ${JSON.stringify(p)}; receipt ${[...state]}`:""}`);
@@ -460,14 +486,15 @@ export class UniformMixedFrame {
    if(mapped[23]!==0)throw new Error(`Uniform pressure band needs ${mapped[22]} tiles, over its capacity; projection is incomplete`);
    if(mapped[25]!==0)throw new Error(`Uniform pressure band solid certificate failed (${mapped[25]&1?"a cut tile is coarse in the simulation":""}${mapped[25]===3?"; ":""}${mapped[25]&2?"a Neumann face is cut, V<1":""}); projection is incomplete`);
    this.bandTiles=mapped[22]!;this.bandResidual=new Float32Array(mapped.buffer)[24]!;
-   // Only an accepted solve plans; a failed one threw above.
-   this.pressurePlan={vCycles:mapped[20]!,fullCycles:mapped[21]!};
+   // Only an accepted solve plans; a failed one threw above. Receipts may
+   // resolve late: the newest frame's plan wins.
+   if(frame>this.planFrame){this.planFrame=frame;this.pressurePlan={vCycles:mapped[20]!,fullCycles:mapped[21]!};}
    const cells=this.ownership.layout.lattice.dimensions.reduce((n,d)=>n*d,1);
    const orphanDustMass_cells=uniformMixedDustMass(accounting,10,p.orphanDust??0,cells);
-   return {cycles:count,encoded:plan.vCycles+plan.fullCycles,residual,converged:true,
+   return {cycles:count,encoded,residual,converged:true,
     dustOwners:accounting[5]!+accounting[10]!,dustMass_cells:uniformMixedDustMass(accounting,5,p.dust,cells)+orphanDustMass_cells,
     orphanDustOwners:accounting[10]!,orphanDustMass_cells};
-  }catch(error){trace?.abort();this.failed=true;throw error;}finally{for(const release of releases)release();this.busy=false;}
+  }catch(error){this.failed=true;throw new Error(`Uniform mixed frame ${frame}: ${error instanceof Error?error.message:String(error)}`,{cause:error});}
  }
  private copyWhole(encoder:GPUCommandEncoder,from:GPUTexture,to:GPUTexture):void{
   encoder.copyTextureToTexture({texture:from},{texture:to},[from.width,from.height,from.depthOrArrayLayers]);

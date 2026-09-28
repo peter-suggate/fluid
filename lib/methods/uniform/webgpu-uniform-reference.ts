@@ -1,5 +1,5 @@
 import {UniformMixedDiagnostics} from "./uniform-mixed-diagnostics";
-import { UniformMixedFrame, type UniformMixedFrameTrace } from "./uniform-mixed-frame";
+import { UNIFORM_MIXED_RECEIPT_RING, UniformMixedFrame, type UniformMixedFrameReceipt, type UniformMixedFrameTrace } from "./uniform-mixed-frame";
 import { assertUniformMixedOptions } from "./uniform-mixed-options";
 import { assertUniformMixedSolidPromotion, createUniformMixedLayout, mixedCellWidth, uniformMixedSolidTiles } from "./uniform-mixed-layout";
 import { UniformMixedLayoutBuilder, type UniformMixedBuiltLevel } from "./uniform-mixed-layout-builder";
@@ -410,6 +410,11 @@ const UNIFORM_PRESSURE_STAGE_PHASE: Readonly<Record<UniformCM11aPlanStage, GPUTi
  * branch. Its allocations, pipelines, step graph, and diagnostics are owned
  * entirely by the `uniform` method plugin.
  */
+/** Steps a dynamic census plans for: the frame after it runs on the old
+ * layout while the census maps, then its own layout serves two frames
+ * before the next census (encoded after the adopt) replaces it. */
+const UNIFORM_MIXED_CENSUS_HORIZON = 3;
+
 export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly executionInfo: GPUEulerianInfo;
   get info(): GPUEulerianInfo { this.refreshMixedAllocation();return this.executionInfo; }
@@ -618,7 +623,14 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private solidExcessCorrection: boolean;
   private rigidCoupling: boolean;
   private readonly pressureSchedule: UniformCM11aSchedule;
-  private pendingFrame?: Promise<void>;
+  /** Mixed frames submitted whose receipt (and census adoption) is unhandled. */
+  private mixedFramesInFlight = 0;
+  /** Settles once every mixed frame submitted so far is checked and adopted. */
+  private mixedFrameChain: Promise<void> = Promise.resolve();
+  /** A submitted census whose layout is not adopted yet, and the frames
+   * encoded on the old layout since. The next census waits for it. */
+  private mixedCensusPending = false;
+  private mixedFramesAfterCensus = 0;
   private pressureFrameFailure?: Error;
   private deferredFrameScene?: SceneDescription;
   private deferredFrameValues?: MethodParamValues;
@@ -1403,10 +1415,17 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       return ()=>{const read=Promise.all([dynamic.read(),builder?.read()]);read.catch(()=>{});this.mixedCensusRead=read;};
     };
   }
+  /** A frame's encode or receipt failed: fatal for the solver. */
+  private failMixedFrame(error:unknown):void{
+    if(this.disposed||this.pressureFrameFailure)return;
+    this.pressureFrameFailure=error instanceof Error?error:new Error(String(error));
+    this.executionInfo.simulationPipelineError=this.pressureFrameFailure.message;
+  }
   /** Reads of the last frame's census tail that updateMixedDynamic has not consumed. */
   private mixedCensusRead:Promise<[UniformMixedDynamicCensus,UniformMixedBuiltLevel|undefined]>|undefined;
-  /** Adopt the census tail's band if it moved. Runs between frames, inside
-   * the pending frame, so the next advance waits. */
+  /** Adopt the census tail's band if it moved, when its read resolves. Later
+   * frames may already be queued on the old layout; the adopt submits after
+   * them, and the next census waits for it (framePending). */
   private async updateMixedDynamic():Promise<void>{
     const censusOnly=this.mixedCensusOnly;
     const read=this.mixedCensusRead;this.mixedCensusRead=undefined;
@@ -1638,15 +1657,15 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * work immediately, so reconstruct the current density once for display.
    */
   applyRuntimeValues(values: MethodParamValues): void {
-    if (this.framePending) { this.deferredFrameValues = {...values}; return; }
     // The renderer calls this every frame. Identical controls must not retire
     // geometry/support caches, the census extension, or rewrite the pressure
-    // hierarchy's uniforms.
-    const previous=this.appliedRuntimeValues, keys=Object.keys(values);
+    // hierarchy's uniforms, nor drain the frame pipeline to apply nothing.
+    const previous=this.deferredFrameValues??this.appliedRuntimeValues, keys=Object.keys(values);
     if(previous && keys.length===Object.keys(previous).length
       && keys.every(key=>Object.hasOwn(previous,key)&&Object.is(previous[key],values[key]))) {
       return;
     }
+    if (this.mixedFrameInFlight) { this.deferredFrameValues = {...values}; return; }
     this.mixedFrame?.invalidateExtension();
     this.faceAuthorityStored = false;
     // The renderer reapplies the latest values before the next advance.
@@ -2200,14 +2219,27 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
 
   get pressureSmoothingWorkSourceForQA(): WebGPUUniformPressureMultigrid["smoothingWorkSource"] { return this.pressureMultigrid.smoothingWorkSource; }
 
-  get framePending(): boolean { return this.pendingFrame !== undefined; }
+  /** Mixed frames run ahead of their receipts: the pipeline admits another
+   * frame unless UNIFORM_MIXED_RECEIPT_RING receipts are unchecked, a frame
+   * already ran on the layout an unadopted census replaces, or a deferred
+   * edit is draining the pipeline. */
+  get framePending(): boolean {
+    return this.mixedFramesInFlight >= UNIFORM_MIXED_RECEIPT_RING
+      || (this.mixedCensusPending && this.mixedFramesAfterCensus > 0)
+      || (this.mixedFrameInFlight && this.deferredFrameEdit);
+  }
+  /** Scene, value and body edits wait for every submitted frame. */
+  private get mixedFrameInFlight(): boolean { return this.mixedFramesInFlight > 0 || this.mixedCensusPending; }
+  private get deferredFrameEdit(): boolean {
+    return this.deferredFrameScene !== undefined || this.deferredFrameValues !== undefined || this.deferredFrameBodies !== undefined;
+  }
   get deferredFramePublication(): boolean {
     return !!this.mixedFrame;
   }
   get presentationPending(): boolean { return this.framePending || this.pressureFrameFailure !== undefined; }
   async awaitFrameCompletion(): Promise<void> {
    
-    await this.pendingFrame;
+    await this.mixedFrameChain;
     if (this.pressureFrameFailure) throw this.pressureFrameFailure;
     await this.device.queue.onSubmittedWorkDone();
   }
@@ -2292,7 +2324,14 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.writeParams(dt, activeBodies.length, strength, drop);
     if(this.mixedFrame){
       const frame=this.mixedFrame;
-      this.pendingFrame=frame.advance({dt,gravity:this.scene.fluid.gravity_m_s2.y,density:this.scene.fluid.density_kg_m3,
+      // Dynamic coarsening runs one census at a time: a frame encoded while
+      // a census maps runs on the old layout and extends its own velocity for
+      // the relayout to remap. The census plans for the frames until its
+      // layout's successor is adopted: up to UNIFORM_MIXED_CENSUS_HORIZON steps.
+      const census=this.mixedCensusPending?undefined:this.mixedCensusTail(dt*UNIFORM_MIXED_CENSUS_HORIZON);
+      let receipt:Promise<UniformMixedFrameReceipt>;
+      try{
+        receipt=frame.advance({dt,gravity:this.scene.fluid.gravity_m_s2.y,density:this.scene.fluid.density_kg_m3,
         viscosity:this.scene.fluid.dynamicViscosity_Pa_s,surfaceTension:this.scene.fluid.surfaceTension_N_m,
         openTop:this.scene.container.top==="open",noSlip:this.scene.container.fluidWallMode==="no-slip",cubic:this.phiCubicAdvection,drain:this.phiDrain,
         dust:this.volumeDustThreshold,orphanDust:this.orphanDustThreshold,sharpeningStrength:this.densitySharpening?this.sharpeningStrength:0,
@@ -2300,21 +2339,26 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         totalSurfaceVolume:this.totalSurfaceVolume,redistance:this.geometricRedistance,sharpening:this.densitySharpening,
         surfaceDeficitBalancing:this.surfaceDeficitBalancing,extensionSweeps:this.velocityExtrapolator.frontPasses,
         supportPolicy:{fineReach:UNIFORM_TWO_LEVEL_FINE_REACH,shellReach:this.twoLevelShellReach,twoLevel:this.twoLevelEnabled,shellOnly:this.twoLevelEnabled},
-      },this.mixedFrameTrace(),this.mixedCensusTail(dt)).then(receipt=>{
+      },this.mixedFrameTrace(),census,census!==undefined||this.mixedCensusPending);
+      }catch(error){this.failMixedFrame(error);return true;}
+      this.mixedFramesInFlight++;
+      if(census){this.mixedCensusPending=true;this.mixedFramesAfterCensus=0;}else if(this.mixedCensusPending)this.mixedFramesAfterCensus++;
+      const handled=receipt.then(receipt=>{
         if(this.disposed)return;
         Object.assign(this.executionInfo,{simulatedTime_s:advance.nextTime_s,completedTime_s:advance.nextTime_s,
           uniformPressureAcceptedResidual:receipt.residual,uniformPressureCyclesExecuted:receipt.cycles,uniformPressureCyclesConverged:true,
           uniformPressureCyclesEncoded:receipt.encoded,uniformPressureCyclesConfigured:this.pressureSchedule.fullCycles+this.pressureSchedule.vCycles,
           uniformVolumeDustCells:receipt.dustOwners,uniformVolumeDustMass_cells:receipt.dustMass_cells,
           uniformVolumeOrphanDustCells:receipt.orphanDustOwners,uniformVolumeOrphanDustMass_cells:receipt.orphanDustMass_cells});
-        return this.updateMixedDynamic();
-      }).then(()=>{
-        if(this.disposed)return;
-        this.pendingFrame=undefined;
+        if(census)return this.updateMixedDynamic().then(()=>{this.mixedCensusPending=false;});
+      }).catch(error=>this.failMixedFrame(error)).finally(()=>{
+        this.mixedFramesInFlight--;
+        if(this.disposed||this.pressureFrameFailure||this.mixedFrameInFlight)return;
         const scene=this.deferredFrameScene,values=this.deferredFrameValues,bodies=this.deferredFrameBodies;
         this.deferredFrameScene=undefined;this.deferredFrameValues=undefined;this.deferredFrameBodies=undefined;
         if(scene)this.applySceneUniforms(scene);if(values)this.applyRuntimeValues(values);if(bodies)this.syncRigidBodies(bodies);
-      }).catch(error=>{if(!this.disposed){this.pressureFrameFailure=error instanceof Error?error:new Error(String(error));this.executionInfo.simulationPipelineError=this.pressureFrameFailure.message;}}).finally(()=>{this.pendingFrame=undefined;});
+      });
+      this.mixedFrameChain=Promise.all([this.mixedFrameChain,handled]).then(()=>undefined);
       return true;
     }
 
@@ -2783,7 +2827,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   applySceneUniforms(scene: SceneDescription): void {
     this.mixedFrame?.invalidateExtension();
     this.appliedRuntimeValues = undefined;
-    if (this.framePending) { this.deferredFrameScene = scene; return; }
+    if (this.mixedFrameInFlight) { this.deferredFrameScene = scene; return; }
     this.scene = scene;
     this.faceAuthorityStored = false;
     const dirty = this.solidMask.update(solidWorldForScene(scene));
@@ -2801,7 +2845,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
 
   syncRigidBodies(bodies: readonly RigidBodyState[]): void {
     this.mixedFrame?.invalidateExtension();
-    if (this.framePending) { this.deferredFrameBodies = structuredClone([...bodies]); return; }
+    if (this.mixedFrameInFlight) { this.deferredFrameBodies = structuredClone([...bodies]); return; }
     this.rigidSystem.syncBodies(bodies);
   }
   get rigidRenderBuffer(): GPUBuffer { return this.rigidSystem.renderBuffer; }
