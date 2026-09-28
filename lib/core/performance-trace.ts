@@ -791,12 +791,13 @@ export class DynamicGPUPerformanceTraceRecorder {
  * stage at the end of the last pass it encoded. The frame's first pass opens
  * the chain with its beginning counter.
  *
- * A stage closes at its own last pass's end, never at its successor's first
- * pass's beginning: Metal starts a pass with no dependency on the work before
- * it early (mixed Uniform's `copyVolume` began up to 5 ms ahead of the level
- * set passes encoded before it), so a beginning counter can precede the
- * boundary before it and the whole sample was rejected. A stage's last pass
- * waits on that stage's own work, so its end is where the stage finished.
+ * A stage closes at the completion frontier of the passes encoded so far (see
+ * `read`), never at its successor's first pass's beginning: Metal starts a
+ * pass with no dependency on the work before it early (mixed Uniform's
+ * `copyVolume` began up to 5 ms ahead of the level set passes encoded before
+ * it), and overlaps independent stages (the extension hierarchy finished
+ * before the authority encoded ahead of it), so single-pass counters are not
+ * ordered and ~60% of mixed Uniform samples were rejected.
  *
  * Boundaries that no compute pass can close (the frame's first, a stage ending
  * on a render pass or another recorder's pass) are armed and spliced into the
@@ -823,6 +824,8 @@ export class GPUStageTimestampRecorder {
   private readonly boundarySlots: number[] = [];
   /** End counter of the most recent pass, when it was an instrumented compute pass. */
   private lastComputeEnd?: number;
+  /** A stage closed on the last pass's end counter: the next pass must not fold into its encoder. */
+  private closedOnLastPass = false;
   private armedBoundaries = 0;
   private queryCount = 0;
   private finalPhaseClosesOnNextPass = false;
@@ -933,8 +936,10 @@ export class GPUStageTimestampRecorder {
     if (!this.started) throw new Error("GPU stage trace has not started");
     if (this.phases.length + 1 >= this.capacity) { this.overflowed = true; return; }
     this.phases.push(phase);
-    if (this.armedBoundaries === 0 && this.lastComputeEnd !== undefined) this.boundarySlots.push(this.lastComputeEnd);
-    else this.armedBoundaries += 1;
+    if (this.armedBoundaries === 0 && this.lastComputeEnd !== undefined) {
+      this.boundarySlots.push(this.lastComputeEnd);
+      this.closedOnLastPass = true;
+    } else this.armedBoundaries += 1;
   }
 
   /**
@@ -974,6 +979,9 @@ export class GPUStageTimestampRecorder {
    */
   private claimBoundary(encoder: GPUCommandEncoder, occupied: boolean, compute: boolean) {
     if (!this.started || this.resolved || this.disposed || this.overflowed) return undefined;
+    const breaks = this.closedOnLastPass;
+    this.closedOnLastPass = false;
+    if (breaks) encoder.copyBufferToBuffer(this.encoderBreakSource, 0, this.encoderBreakTarget, 0, 4);
     if (occupied || (!compute && this.armedBoundaries === 0)) { this.lastComputeEnd = undefined; return undefined; }
     const opens = this.armedBoundaries > 0, closes = compute || this.finalPhaseClosesOnNextPass;
     const querySlots = (opens ? 1 : 0) + (closes ? 1 : 0);
@@ -993,8 +1001,9 @@ export class GPUStageTimestampRecorder {
       this.finalPhaseClosesOnNextPass = false;
     }
     this.lastComputeEnd = compute ? endOfPassWriteIndex : undefined;
-    // Every counter-carrying pass starts its own encoder, or folding drops it.
-    encoder.copyBufferToBuffer(this.encoderBreakSource, 0, this.encoderBreakTarget, 0, 4);
+    // A beginning counter needs its own encoder, or folding drops it; a
+    // stage-closing end counter gets its break when the next pass begins.
+    if (opens && !breaks) encoder.copyBufferToBuffer(this.encoderBreakSource, 0, this.encoderBreakTarget, 0, 4);
     return {
       querySet: this.querySet,
       ...(beginningOfPassWriteIndex === undefined ? {} : { beginningOfPassWriteIndex }),
@@ -1054,6 +1063,18 @@ export class GPUStageTimestampRecorder {
       const bytes = this.queryCount * 8;
       await this.readBuffer.mapAsync(GPUMapMode.READ, 0, bytes);
       const resolved = new BigUint64Array(this.readBuffer.getMappedRange(0, bytes).slice(0));
+      // A boundary is the frontier: the latest counter among all passes
+      // encoded up to it (slots are allocated in encode order). Metal overlaps
+      // independent passes, so neither a stage's first beginning nor its last
+      // end is ordered against its predecessor's; the frontier is, and each
+      // stage is charged the time it extended the frame's completion. Serial
+      // execution decodes exactly as before. An unsampled boundary stays zero
+      // and rejects the sample.
+      const frontier = new BigUint64Array(resolved.length);
+      for (let slot = 0, latest = 0n; slot < resolved.length; slot += 1) {
+        if (resolved[slot]! > latest) latest = resolved[slot]!;
+        frontier[slot] = resolved[slot] === 0n ? 0n : latest;
+      }
       if ((globalThis as { process?: { env?: Record<string, string | undefined> } })
         .process?.env?.FLUID_TRACE_DEBUG === "1") {
         console.warn(JSON.stringify({
@@ -1068,7 +1089,7 @@ export class GPUStageTimestampRecorder {
         lane: this.lane,
         context: this.context,
         capturedAt_ms: performance.now(),
-        timestamps: this.boundarySlots.map((slot) => resolved[slot] ?? 0n),
+        timestamps: this.boundarySlots.map((slot) => frontier[slot] ?? 0n),
         phases: this.phases,
       });
     } finally {
