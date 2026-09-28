@@ -119,6 +119,8 @@ export class UniformMixedFrame {
  /** Largest band row residual of the last accepted advance, 1/s. */
  bandResidual?:number;
  private readonly solid?:UniformMixedSolid;
+ /** The solid record's simulation widths predate the live layout. */
+ private solidWidthsStale=true;
  /** Band pressure with solids: level 0's topology view (the all-4h record). */
  private readonly solidTopology?:GPUBufferBinding;
  private readonly owned:(GPUTexture|GPUBuffer)[]=[];
@@ -375,6 +377,8 @@ export class UniformMixedFrame {
    encoder.clearBuffer(this.reductions);
    // Static: built once, before the band's tile list reads its cut flags.
    this.solid?.encodeCoarse(encoder);
+   // Which cut tiles the simulation holds at h: the all-4h levels read their h texels.
+   if(this.solidWidthsStale){this.solid?.encodeSimulation(encoder,this.ownership.presentation);this.solidWidthsStale=false;}
    this.recordStageGrid(encoder,this.ownership.presentation.buffer,"transport");
    // The census already planned and extended this exact state: geometry and
    // centre phi are the last frame's (phi is unchanged since), phase is the
@@ -484,7 +488,7 @@ export class UniformMixedFrame {
     throw new Error(`Uniform mixed pressure ${state[4]!==0?"rejected a non-improving cycle":"did not converge"}: candidate ${new Float32Array(state.buffer)[0]}, accepted ${residual}, tolerance ${p.pressureTolerance}, ${count} cycles; projection withheld${typeof process!=="undefined"&&process.env.FLUID_MIXED_HOST_DIAGNOSTICS?`; params ${JSON.stringify(p)}; receipt ${[...state]}`:""}`);
    }
    if(mapped[23]!==0)throw new Error(`Uniform pressure band needs ${mapped[22]} tiles, over its capacity; projection is incomplete`);
-   if(mapped[25]!==0)throw new Error(`Uniform pressure band solid certificate failed (${mapped[25]&1?"a cut tile is coarse in the simulation":""}${mapped[25]===3?"; ":""}${mapped[25]&2?"a Neumann face is cut, V<1":""}); projection is incomplete`);
+   if(mapped[25]!==0)throw new Error(`Uniform pressure band solid certificate failed (${mapped[25]&1?"a cut tile the simulation holds at 4h has a liquid row":""}${mapped[25]===3?"; ":""}${mapped[25]&2?"a Neumann face is cut, V<1":""}); projection is incomplete`);
    this.bandTiles=mapped[22]!;this.bandResidual=new Float32Array(mapped.buffer)[24]!;
    // Only an accepted solve plans; a failed one threw above. Receipts may
    // resolve late: the newest frame's plan wins.
@@ -502,7 +506,7 @@ export class UniformMixedFrame {
  /** Takes the ungraded h/4h simulation layout; pressure stays all-4h. */
  updateLayout(layout:UniformMixedLayout):void{
   if(!this.ready||this.busy||this.failed)throw new Error("Ownership edits require a completed frame");
-  this.reusableExtension=undefined;this.geometryCurrent=false;
+  this.reusableExtension=undefined;this.geometryCurrent=false;this.solidWidthsStale=true;
   this.remap.apply(layout);
   {const e=this.device.createCommandEncoder({label:"Uniform resolve remapped phi"});this.phiResolve.encode(e,this.phiResolveGroups.phi);this.device.queue.submit([e.finish()]);}
   // Every pressure level is the fixed all-4h layout.
@@ -514,7 +518,7 @@ export class UniformMixedFrame {
   if(!this.ready||this.busy||this.failed)throw new Error("Ownership edits require a completed frame");
   if(!fine.changedTiles)return;
   // A census extension survives the relayout remapped, like velocity.
-  const keep=this.reusableExtension!==undefined;this.extensionRemapped=keep;this.geometryCurrent=false;
+  const keep=this.reusableExtension!==undefined;this.extensionRemapped=keep;this.geometryCurrent=false;this.solidWidthsStale=true;
   const encoder=this.device.createCommandEncoder({label:"Uniform adopt built ownership"});
   this.remap.applyBuilt(encoder,fine,keep);this.phiResolve.encode(encoder,this.phiResolveGroups.phi);
   this.pressureMatchesSimulation=fine.layout.tiles.every(word=>mixedCellWidth(word)===4);

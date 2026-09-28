@@ -1,7 +1,7 @@
 import {UniformMixedDiagnostics} from "./uniform-mixed-diagnostics";
 import { UNIFORM_MIXED_RECEIPT_RING, UniformMixedFrame, type UniformMixedFrameReceipt, type UniformMixedFrameTrace } from "./uniform-mixed-frame";
 import { assertUniformMixedOptions } from "./uniform-mixed-options";
-import { assertUniformMixedSolidPromotion, createUniformMixedLayout, mixedCellWidth, uniformMixedSolidTiles } from "./uniform-mixed-layout";
+import { assertUniformMixedSolidPromotion, createUniformMixedLayout, mixedCellWidth, uniformMixedLiquidSolidPromotion, uniformMixedSolidTiles } from "./uniform-mixed-layout";
 import { UniformMixedLayoutBuilder, type UniformMixedBuiltLevel } from "./uniform-mixed-layout-builder";
 import { UniformMixedDynamicClassifier, UNIFORM_MIXED_DYNAMIC_FULL_TOLERANCE, UNIFORM_MIXED_DYNAMIC_BOUNDARY_TRAVEL, type UniformMixedDynamicCensus } from "./uniform-mixed-dynamic";
 import type { FluidRefinementRegion } from "../../core/model";
@@ -1345,14 +1345,16 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const solid=this.mixedSolidPromotion();
     // Solid kernels are compiled with the frame; a live voxel edit is refused
     // loudly at the next advance (solidEditPending).
-    // Dynamic: the surface band is forced h like a solid, everything else
-    // prefers 4h. Authored regions bound it: a coarse-only region keeps its
-    // tiles 4h whatever the band says; only solid promotion overrides that.
+    // Dynamic: the census band is forced h, everything else prefers 4h. It
+    // carries liquid-conditional solid promotion (solids near liquid only;
+    // the band certificate fails a liquid row in a 4h cut tile). Authored
+    // regions bound it: a coarse-only region keeps its tiles 4h whatever the
+    // band says; only solid promotion overrides that.
     const coarse=dynamic?this.mixedCoarseOnlyTiles(regions,solid.forced):undefined;
-    const forced=dynamic?solid.forced.map((f,t)=>f|(dynamic[t]!&~coarse![t]!)):solid.forced;
+    const forced=dynamic?dynamic.map((f,t)=>f&~coarse![t]!):solid.forced;
     // The simulation layout is h/4h; pressure is the frame's fixed all-4h solve plus its h band.
     const layout=createUniformMixedLayout(refinementRegionLattice(this.scene),regions,dynamic?4:1,forced);
-    assertUniformMixedSolidPromotion(layout,solid.forced);
+    if(!dynamic)assertUniformMixedSolidPromotion(layout,solid.forced);
     const built=performance.now();
     this.mixedFrame.updateLayout(layout);this.mixedRegionKey=key;this.mixedGeneration++;
     if(dynamic)this.mixedDynamicRelayouts++;
@@ -1375,9 +1377,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const half=[drop.radius_m,drop.radius_m,drop.halfHeight_m??drop.radius_m];
     const tile=(axis:number,offset:number)=>Math.min(n[axis]!-1,Math.max(0,Math.floor(((centre[axis]!+offset)/cellSize_m[axis]!+Math.sign(offset))/4)));
     const lo=[0,1,2].map(a=>tile(a,-half[a]!)),hi=[0,1,2].map(a=>tile(a,half[a]!));
-    const fine=this.mixedDynamicFine.slice();
-    for(let z=lo[2]!;z<=hi[2]!;z++)for(let y=lo[1]!;y<=hi[1]!;y++)for(let x=lo[0]!;x<=hi[0]!;x++)fine[x+n[0]!*(y+n[1]!*z)]=1;
-    this.mixedDynamicFine=fine;
+    const fine=this.mixedDynamicFine.slice(),ball=new Uint8Array(fine.length);
+    for(let z=lo[2]!;z<=hi[2]!;z++)for(let y=lo[1]!;y<=hi[1]!;y++)for(let x=lo[0]!;x<=hi[0]!;x++)fine[x+n[0]!*(y+n[1]!*z)]=ball[x+n[0]!*(y+n[1]!*z)]=1;
+    // Solids the ball can meet are h before it lands, as the census would make them.
+    const solid=uniformMixedLiquidSolidPromotion(n as [number,number,number],this.mixedSolidPromotion().coupled,ball);
+    this.mixedDynamicFine=fine.map((f,t)=>f|solid[t]!);
     this.updateMixedRegions();
   }
   /** FLUID_MIXED_DYNAMIC_CENSUS: census authored-region layouts too, adopting nothing. */
@@ -1393,11 +1397,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const regions=this.scene.fluid.refinementRegions??[];
     const staticKey=`${this.mixedSolidMaskStamp}:${JSON.stringify(regions)}`;
     if(builder&&staticKey!==this.mixedBuilderStaticKey){
-      // Static h tiles: solid promotion and fine-only regions. With a 4h
-      // background nothing else is h; region conflicts throw here, on the CPU.
-      // Static 4h tiles: coarse-only regions, which mask the census band.
+      // Static h tiles: fine-only regions. With a 4h background nothing else
+      // is h; region conflicts throw here, on the CPU. Solid promotion is
+      // liquid-conditional, in the census band (solidActive/solidPromote).
+      // Static 4h tiles: coarse-only regions, which mask the census band
+      // except where a solid could be promoted.
       const solid=this.mixedSolidPromotion();
-      const staticLayout=createUniformMixedLayout(refinementRegionLattice(this.scene),regions,4,solid.forced);
+      const staticLayout=createUniformMixedLayout(refinementRegionLattice(this.scene),regions,4);
       builder.setStatic(Uint8Array.from(staticLayout.tiles,word=>mixedCellWidth(word)===1?1:0),staticLayout.regions,this.mixedCoarseOnlyTiles(regions,solid.forced));
       this.mixedDynamic.setSolid(solid.coupled);
       this.mixedBuilderStaticKey=staticKey;
@@ -1434,7 +1440,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const [census,built]=await read;
     if(this.disposed)return;
     Object.assign(this.executionInfo,{uniformMixedDynamicInterfaceTiles:census.interfaceTiles,uniformMixedDynamicBandTiles:census.fineTiles,
-      uniformMixedDynamicRefined:census.refined,uniformMixedDynamicCoarsened:census.coarsened,uniformMixedDynamicRequiredTiles:census.requiredTiles,uniformMixedDynamicBoundaryTiles:census.boundaryTiles,uniformMixedDynamicUnresolvedCoarse:census.unresolvedCoarse,
+      uniformMixedDynamicRefined:census.refined,uniformMixedDynamicCoarsened:census.coarsened,uniformMixedDynamicRequiredTiles:census.requiredTiles,uniformMixedDynamicBoundaryTiles:census.boundaryTiles,uniformMixedDynamicSolidTiles:census.solidTiles,uniformMixedDynamicUnresolvedCoarse:census.unresolvedCoarse,
       uniformMixedDynamicCoarsePartialVolume:census.coarsePartialVolume,uniformMixedDynamicCoarsePhiCrossing:census.coarsePhiCrossing,uniformMixedDynamicCoarseDryLiquidPhi:census.coarseDryLiquidPhi,
       uniformMixedDynamicInteriorDeficit:census.interiorDeficit,uniformMixedDynamicAirVolume:census.airVolume});
     if(censusOnly||!built)return;

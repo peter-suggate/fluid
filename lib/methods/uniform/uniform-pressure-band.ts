@@ -87,8 +87,9 @@ export interface UniformPressureBandFields {
  * inside a solid are p_min=0 rows, and positive faces take the native
  * embedded contact release. Every cut tile with a liquid row is a band tile,
  * so every Neumann face is uncut (V=1): the receipt's fatal word (header 3)
- * reports a Neumann face with V<1 (2) or a cut tile the simulation holds
- * coarse (1), both certificate violations the frame throws on. */
+ * reports a Neumann face with V<1 (2) or a liquid row in a cut tile the
+ * simulation holds coarse (1), both certificate violations the frame throws
+ * on. Solid promotion is liquid-conditional, so a dry cut tile may be 4h. */
 export class UniformPressureBand {
  readonly allocatedBytes:number;
  /** Header (see HEADER), then the tile list and a per-tile slot+1 map. */
@@ -373,8 +374,12 @@ var<workgroup> member:atomic<u32>;
    if(slot<CAP){atomicStore(&index[LIST+slot],t);atomicStore(&index[SLOTS+t],slot+1u);}else{atomicStore(&index[1],1u);}
   }
  }${S?`
- // A cut tile the simulation holds at 4h breaks the uncut-Neumann certificate.
- for(var j=group.x*64u+lane;j<umCounts.y;j+=${LIST_GROUPS*64}u){if(umSolidCut(umTopology[UM_TILES+umCounts.x+j])){atomicOr(&index[3],1u);}}`:""}
+ // A cut tile the simulation holds at 4h carries no solid terms: promotion
+ // keeps it dry. A liquid row there breaks the uncut-Neumann certificate.
+ for(var j=group.x*64u+lane;j<umCounts.y;j+=${LIST_GROUPS*64}u){
+  let t=umTopology[UM_TILES+umCounts.x+j];
+  if(umSolidStaticCut(t)&&phi[umOwnerAt(vec3i(umTileCoord(t)*4u)).index]<0.0){atomicOr(&index[3],1u);}
+ }`:""}
 }`,
    prep:header+indexed(false)+theta+surface+/* wgsl */`
 @group(1) @binding(9) var<storage,read_write> rows:array<f32>;

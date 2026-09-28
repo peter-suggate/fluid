@@ -220,10 +220,11 @@ fn scanPartial(lane:u32){
   for(const entryPoint of ["widths","classify","scan","scatter","distance0","distance1","distance2"])
    this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint}}));
  }
- /** Static fine tiles (solid promotion and fine-only regions), one byte per
-  * tile, and the snapped regions the built layouts report. coarse: tiles a
-  * coarse-only region holds at 4h; band bits there are dropped. A tile in
-  * both masks is fine (solid promotion wins). */
+ /** Static fine tiles (fine-only regions), one byte per tile, and the
+  * snapped regions the built layouts report. coarse: tiles a coarse-only
+  * region holds at 4h; band bits there are dropped. Liquid-conditional solid
+  * promotion arrives in the band bits, so the host leaves every tile a solid
+  * could promote out of `coarse`. A tile in both masks is fine. */
  setStatic(fine:Uint8Array,regions:UniformMixedLayout["regions"],coarse?:Uint8Array):void{
   if(fine.length!==this.tiles||(coarse&&coarse.length!==this.tiles))throw new Error("Static masks do not match the tile lattice");
   const count=Math.ceil(this.tiles/32),words=new Uint32Array(2*count);

@@ -247,6 +247,18 @@ Every phase is layout-general, measured on one target scene, and gated by the Un
 - **Expected:** garden h tiles 6,992 → about 1.1–1.5 k, i.e. about 350 k fewer owners in every all-owner pass.
 - **Measure:** builder `tierCounts` at t=0 and through a hose fill; per-phase GPU ms (physicsTrace) on the hose; mass drift; the solid-parity and trough Dawn lanes.
 - **Risk:** promotion must land before liquid touches a solid. It relies on the reach bound, which is already what dynamic coarsening trusts. Refinement near solids must rebuild the stencils exactly (the remap-follows-phi rule).
+- **Landed 2026-09-28.** Rule, computed on the GPU in the census after `decide`:
+  - A coupled tile is *active* when a wet tile (any non-air owner) or a band tile lies within one tile of it. `solidActive` computes this.
+  - Every active tile and its 26 neighbours join the band bits. `solidPromote` does this.
+  - The builder's static mask now holds only fine-only regions. The CPU path (`updateMixedRegions` in dynamic mode, and `promoteMixedDrop` through `uniformMixedLiquidSolidPromotion`) mirrors the rule.
+  - A dry cut tile may therefore run 4h, and its h texels go stale. The solid record's per-tile `y` flag ("simulated at h") is rewritten by a widths pass after every relayout, and `umSolidCut` means cut ∧ h. The all-4h cut vote and cut-face flux treat a 4h cut tile as uncut.
+  - The band certificate bit 1 is now "a liquid row (pressure-authority phi < 0) in a cut tile held at 4h".
+- **Result (hero-garden-hose, dynamic, 90 pipelined steps, setTimeout(1) polling, one Dawn run per arm):**
+  - Mean h tiles: 7,125 → 2,258. Solid promotion accounts for 1,404 of them.
+  - Frame time: 18.63 → 15.80 ms.
+  - Relayouts, certificate failures and GPU errors: 46 relayouts in both arms; no certificate failures; no GPU errors.
+  - Dust: 1,163 → 1,381 cells, with mass 0.56 → 0.62 cells.
+  - Uniform Dawn files: 10/14 pass, the same four reds as HEAD (long-dam-front, pond-rest, trough-contact, volume). trough-contact now trips its wall-phi assertion at frame 90 instead of 30.
 
 ### Phase 3: dense coarse + h brick pool, approach H (large; about 25 files; high risk)
 

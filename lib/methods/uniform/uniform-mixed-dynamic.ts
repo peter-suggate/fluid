@@ -18,7 +18,8 @@ export const UNIFORM_MIXED_DYNAMIC_SURFACE_TOLERANCE=0.5;
 export const UNIFORM_MIXED_DYNAMIC_FAST_TRAVEL=4;
 /** Default UniformMixedDynamicPolicy.boundaryTravel, in h per step. */
 export const UNIFORM_MIXED_DYNAMIC_BOUNDARY_TRAVEL=1;
-/** Census header words: counters 0-17, 18 = largest tile travel (f32 bits). */
+/** Census header words: counters 0-17, 18 = largest tile travel (f32 bits),
+ * 19 = tiles liquid-conditional solid promotion added to the band. */
 const HEADER=20;
 /** Velocity-bound pyramid: box min/max over radius 0 (the tile) up to 16
  * tiles, each filtered separably from the tile level, plus one temporary per
@@ -62,7 +63,8 @@ export interface UniformMixedDynamicPolicy {
 }
 
 export interface UniformMixedDynamicCensus {
- /** One byte per tile: the band requires h ownership. */
+ /** One byte per tile: the band, or liquid-conditional solid promotion,
+  * requires h ownership. */
  readonly fine:Uint8Array;
  readonly fineTiles:number;
  /** Tiles holding a phi sign change. */
@@ -84,6 +86,8 @@ export interface UniformMixedDynamicCensus {
  readonly airVolume:readonly [number,number];
  readonly refined:number;
  readonly coarsened:number;
+ /** Tiles in `fine` only for solid promotion. */
+ readonly solidTiles:number;
 }
 
 /** State-driven ownership census (docs/plans/uniform-dynamic-coarsening.md).
@@ -108,6 +112,8 @@ export class UniformMixedDynamicClassifier {
  private readonly group:GPUBindGroup;
  private readonly pipelines=new Map<string,GPUComputePipeline>();
  private readonly words:number;
+ /** setSolid marked a coupled tile: the promotion passes run. */
+ private solid=false;
  private encoded=false;
  /** The band decided by the last encode, for the GPU layout builder. */
  get bandBits():UniformMixedBandBits{return {buffer:this.work,wordOffset:HEADER};}
@@ -115,7 +121,7 @@ export class UniformMixedDynamicClassifier {
   const tiles=ownership.layout.tiles.length;
   this.words=Math.ceil(tiles/32);
   const t=ownership.layout.lattice.dimensions.map(n=>n/4);
-  const workBytes=(HEADER+this.words+6*BOUND_BLOCKS*tiles+(t[0]!+1)*(t[1]!+1)*(t[2]!+1)+2*tiles)*4,readBytes=(HEADER+this.words)*4;
+  const workBytes=(HEADER+this.words+6*BOUND_BLOCKS*tiles+(t[0]!+1)*(t[1]!+1)*(t[2]!+1)+2*tiles+2*this.words)*4,readBytes=(HEADER+this.words)*4;
   this.work=device.createBuffer({label:"Uniform dynamic ownership census",size:workBytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
   this.readback=device.createBuffer({label:"Uniform dynamic ownership readback",size:readBytes,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
   this.params=device.createBuffer({label:"Uniform dynamic ownership policy",size:48,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
@@ -167,6 +173,10 @@ fn gapIndex(t:u32)->u32{return prefixIndex(vec3u(0u))+PX*PY*PZ+t;}
 // +x,+y,+z), five bits each; all ones for any other tile. Its dilation
 // follows the flow, not a sphere: a climbing sheet refines the tiles above.
 fn travelIndex(t:u32)->u32{return gapIndex(UM_TILES)+t;}
+// One bit per tile: liquid, a non-air owner (wet); then solid-coupled tiles
+// within one tile of liquid or of the decided band (active).
+fn wetIndex(w:u32)->u32{return travelIndex(UM_TILES)+w;}
+fn activeIndex(w:u32)->u32{return wetIndex(WORDS)+w;}
 fn orderKey(x:f32)->u32{let b=bitcast<u32>(x);return select(b|0x80000000u,~b,(b&0x80000000u)!=0u);}
 fn orderValue(k:u32)->f32{return bitcast<f32>(select(~k,k&0x7fffffffu,(k&0x80000000u)!=0u));}
 // One tile's classification: ordered velocity keys, nibble distances from
@@ -294,6 +304,8 @@ fn umClassifyOwner(tile:u32,width:u32,lane:u32,c:ptr<function,TileClass>){
  }
  let interior=inside==8u&&v>=1.0-policy.step.z;
  let air=inside==0u&&v<=policy.step.w;
+ // Flag 4: liquid (any owner that is not air).
+ if(!air){(*c).flags|=4u;}
  if(!interior&&!air){
   for(var a=0u;a<3u;a++){(*c).reach[a]=min((*c).reach[a],local[a]);(*c).reach[3u+a]=min((*c).reach[3u+a],4u-width-local[a]);}
   // Bit 2: the geometric surface itself (a phi sign change) is in this owner.
@@ -338,6 +350,7 @@ fn umFinishTile(tile:u32,width:u32,c:TileClass){
  atomicStore(&census[travelIndex(tile)],directed);
  for(var a=0u;a<3u;a++){atomicStore(&census[boundIndex(tile,a)],c.low[a]);atomicStore(&census[boundIndex(tile,3u+a)],c.high[a]);}
  if(crossing){atomicAdd(&census[0],1u);}
+ if((c.flags&4u)!=0u){atomicOr(&census[wetIndex(tile/32u)],1u<<(tile%32u));}
  // A 4h surface the lattice cannot resolve: refined by this census.
  if(required&&width!=1u){let slot=atomicAdd(&census[1],1u);if(slot<3u){atomicStore(&census[13u+slot],tile);}}
 }
@@ -501,11 +514,42 @@ fn forwardFine(p:vec3i,margin:i32)->bool{
  atomicAdd(&census[2],1u);if(width!=1u){atomicAdd(&census[4],1u);}
  atomicOr(&census[${HEADER}u+tile/32u],1u<<(tile%32u));
 }
+// Liquid-conditional solid promotion. Fine-owner solid terms need a cut
+// tile, and each neighbour of it, at h wherever liquid can meet it; a dry cut
+// tile far from liquid runs 4h without them. Liquid reaches a coupled tile
+// only from a wet tile or a band tile (the surface this census predicts over
+// its horizon) within one tile of it: that tile is active, and it and its
+// 26 neighbours join the band. The band certificate fails a liquid row in
+// a cut tile the simulation holds at 4h.
+fn umBit(base:u32,t:u32)->bool{return (atomicLoad(&census[base+t/32u])&(1u<<(t%32u)))!=0u;}
+@compute @workgroup_size(64) fn solidActive(@builtin(global_invocation_id) gid:vec3u){
+ let tile=gid.x+umDispatchX*64u*gid.y;if(tile>=UM_TILES){return;}
+ if(((solidTiles[tile/32u]>>(tile%32u))&1u)==0u){return;}
+ let p=vec3i(umTileCoord(tile));
+ let a=max(p-vec3i(1),vec3i(0));let b=min(p+vec3i(1),vec3i(UM_T)-vec3i(1));
+ for(var z=a.z;z<=b.z;z++){for(var y=a.y;y<=b.y;y++){for(var x=a.x;x<=b.x;x++){
+  let q=umTileAt(vec3u(vec3i(x,y,z)));
+  if(umBit(wetIndex(0u),q)||umBit(${HEADER}u,q)){atomicOr(&census[activeIndex(tile/32u)],1u<<(tile%32u));return;}
+ }}}
+}
+@compute @workgroup_size(64) fn solidPromote(@builtin(global_invocation_id) gid:vec3u){
+ let tile=gid.x+umDispatchX*64u*gid.y;if(tile>=UM_TILES){return;}
+ if(umBit(${HEADER}u,tile)){return;}
+ let p=vec3i(umTileCoord(tile));
+ let a=max(p-vec3i(1),vec3i(0));let b=min(p+vec3i(1),vec3i(UM_T)-vec3i(1));
+ for(var z=a.z;z<=b.z;z++){for(var y=a.y;y<=b.y;y++){for(var x=a.x;x<=b.x;x++){
+  if(!umBit(activeIndex(0u),umTileAt(vec3u(vec3i(x,y,z))))){continue;}
+  atomicOr(&census[${HEADER}u+tile/32u],1u<<(tile%32u));
+  atomicAdd(&census[2],1u);atomicAdd(&census[19],1u);
+  if(umTileWidth(tile)==1u){atomicSub(&census[5],1u);}else{atomicAdd(&census[4],1u);}
+  return;
+ }}}
+}
 `});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
   if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]});
-  for(const entryPoint of ["classify","classifyCoarse","prefix0","prefix1","prefix2","decide"])
+  for(const entryPoint of ["classify","classifyCoarse","prefix0","prefix1","prefix2","decide","solidActive","solidPromote"])
    this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX}}}));
   for(let axis=0;axis<3;axis++)
    this.pipelines.set(`pyramid${axis}`,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint:"boundPyramid",constants:{umDispatchX:this.ownership.dispatchX,pyramidAxis:axis}}}));
@@ -517,11 +561,12 @@ fn forwardFine(p:vec3i,margin:i32)->bool{
   const bits=new Uint32Array(this.words);
   for(let t=0;t<tiles;t++)if(coupled[t])bits[t>>5]!|=1<<(t&31);
   this.device.queue.writeBuffer(this.solidTiles,0,bits);
+  this.solid=coupled.some(c=>c!==0);
  }
  /** Encode after a completed frame, while its ownership and the local speed
   * velocity (the one the next frame advects with) are still in place. */
  encode(encoder:GPUCommandEncoder,policy:UniformMixedDynamicPolicy):void{
-  if(this.pipelines.size!==9)throw new Error("Dynamic ownership census is not initialized");
+  if(this.pipelines.size!==11)throw new Error("Dynamic ownership census is not initialized");
   for(const [name,value] of Object.entries({dt:policy.dt,fullTolerance:policy.fullTolerance,emptyTolerance:policy.emptyTolerance}))
    if(!Number.isFinite(value)||value<0)throw new Error(`Dynamic ownership ${name} must be finite and non-negative: ${value}`);
   for(const [name,value] of Object.entries({reach:policy.reach,hysteresis:policy.hysteresis}))
@@ -538,7 +583,7 @@ fn forwardFine(p:vec3i,margin:i32)->bool{
   const tiles0=this.ownership.layout.tiles.length,pyramid=(HEADER+this.words+6*tiles0)*4,prefix=(HEADER+this.words+6*BOUND_BLOCKS*tiles0)*4;
   encoder.clearBuffer(this.work,0,pyramid);encoder.clearBuffer(this.work,prefix);
   const tiles=this.ownership.layout.tiles.length,x=this.ownership.dispatchX,t=this.ownership.layout.lattice.dimensions.map(n=>n/4+1);
-  for(const [label,entries] of [["classify",["classify","classifyCoarse"]],["prefix",["prefix0","prefix1","prefix2","pyramid0","pyramid1","pyramid2"]],["decide",["decide"]]] as const){
+  for(const [label,entries] of [["classify",["classify","classifyCoarse"]],["prefix",["prefix0","prefix1","prefix2","pyramid0","pyramid1","pyramid2"]],["decide",this.solid?["decide","solidActive","solidPromote"]:["decide"]]] as const){
    const pass=encoder.beginComputePass({label:`Uniform dynamic ownership census ${label}`});
    pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group);
    for(const entry of entries){
@@ -561,7 +606,7 @@ fn forwardFine(p:vec3i,margin:i32)->bool{
   const f=new Float32Array(words.buffer);
   const tiles=this.ownership.layout.tiles.length,fine=new Uint8Array(tiles);
   for(let t=0;t<tiles;t++)fine[t]=(words[HEADER+(t>>5)]!>>>(t&31))&1;
-  return {fine,interfaceTiles:words[0]!,requiredTiles:words[12]!,unresolvedCoarse:words[1]!,unresolvedTiles:Array.from(words.subarray(13,13+Math.min(3,words[1]!))),boundaryTiles:words[16]!,fineTiles:words[2]!,refined:words[4]!,coarsened:words[5]!,
+  return {fine,interfaceTiles:words[0]!,requiredTiles:words[12]!,unresolvedCoarse:words[1]!,unresolvedTiles:Array.from(words.subarray(13,13+Math.min(3,words[1]!))),boundaryTiles:words[16]!,fineTiles:words[2]!,refined:words[4]!,coarsened:words[5]!,solidTiles:words[19]!,
   coarsePartialVolume:words[6]!,coarsePhiCrossing:words[7]!,coarseDryLiquidPhi:words[3]!,
   interiorDeficit:[f[8]!,f[9]!],airVolume:[f[10]!,f[11]!]};
  }

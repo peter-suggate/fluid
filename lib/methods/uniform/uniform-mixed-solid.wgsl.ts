@@ -6,8 +6,9 @@
  * A frame compiles this library only for a scene with cut cells; otherwise
  * stages get inert stubs and keep their solid-free code, bit-identical.
  * Coarse (4h) simulation owners never reach these helpers: promotion keeps
- * them one full tile away from any cut cell. Band pressure's all-4h levels
- * read the static coarse record instead (see UniformMixedSolid.coarse). */
+ * liquid one full tile away from any cut cell a 4h owner holds (a dry cut
+ * tile may run 4h, without solid terms). Band pressure's all-4h levels read
+ * the static coarse record instead (see UniformMixedSolid.coarse). */
 import {uniformMixedPressureStorage} from "./uniform-mixed-pressure-boundary.wgsl";
 import type {UniformMixedLayout} from "./uniform-mixed-layout";
 
@@ -25,7 +26,11 @@ export interface UniformMixedSolidResources {
  * slot (umBoundaryIndex order) whose x is that wall's mean h V: together the
  * level-0 topology of band pressure. Then one vec4 per tile whose x is 1 when
  * the tile is cut: an h cell of it or of its one-cell ring has open < 1 (the
- * host's coupled promotion, so a cut tile is always h in the simulation). */
+ * host's coupled tiles), and whose y is 1 when the simulation holds it at h
+ * (encodeSimulation, per relayout). Promotion is liquid-conditional: a dry
+ * cut tile may be 4h, and its h texels are then stale, so the all-4h levels
+ * treat it as uncut (umSolidCut); the band certificate fails any such tile
+ * holding a liquid row. */
 export interface UniformMixedSolidCoarse {
  readonly bindLayout:GPUBindGroupLayout;readonly bindGroup:GPUBindGroup;readonly record:GPUBuffer;
  /** Owners plus halo slots: the level-0 topology record's vec4 count. */
@@ -39,6 +44,7 @@ export class UniformMixedSolid {
  /** The all-4h record for band pressure (constructed with its all-4h layout). */
  readonly coarse?:UniformMixedSolidCoarse;
  private builder?:{pipeline:GPUComputePipeline;group:GPUBindGroup};
+ private simulation?:{pipeline:GPUComputePipeline;layout:GPUBindGroupLayout;group?:GPUBindGroup;topology?:GPUBuffer};
  private built=false;
  constructor(private readonly device:GPUDevice,resources:UniformMixedSolidResources,private readonly coarseLayout?:UniformMixedLayout){
   if(resources.params.size<272||resources.terrain.format!=="r32float")throw new Error("Mixed solids require the native parameter block and terrain heightfield");
@@ -115,6 +121,19 @@ fn umSolidHalo(t:vec3u,axis:u32,side:u32)->u32{
   const output=this.device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]});
   const pipeline=await this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[this.bindLayout,output]}),compute:{module,entryPoint:"build",constants:{umDispatchX:dispatchX}}});
   this.builder={pipeline,group:this.device.createBindGroup({layout:output,entries:[{binding:0,resource:{buffer:coarse.record}}]})};
+  const flagModule=this.device.createShaderModule({label:"Uniform mixed solid simulation widths",code:/* wgsl */`
+const UM_TILES:u32=${layout.tiles.length}u;const UM_SOLID_COUNT:u32=${coarse.count}u;
+override umDispatchX:u32=65535u;
+@group(0) @binding(0) var<storage,read_write> record:array<vec4f>;
+@group(0) @binding(1) var<storage,read> topology:array<u32>;
+// y of each tile's cut record: the simulation tile word is h.
+@compute @workgroup_size(64) fn widths(@builtin(global_invocation_id) g:vec3u){
+ let t=g.x+umDispatchX*64u*g.y;if(t>=UM_TILES){return;}
+ record[UM_SOLID_COUNT+t].y=select(0.0,1.0,(topology[t]&0x80000000u)!=0u);
+}`});
+  const flagErrors=(await flagModule.getCompilationInfo()).messages.filter(m=>m.type==="error");if(flagErrors.length)throw new Error(flagErrors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
+  const flagLayout=this.device.createBindGroupLayout({label:"Uniform mixed solid simulation widths",entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},{binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}}]});
+  this.simulation={layout:flagLayout,pipeline:await this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[flagLayout]}),compute:{module:flagModule,entryPoint:"widths",constants:{umDispatchX:dispatchX}}})};
  }
  /** Builds the static all-4h record once, from the solids the native host has
   * published by the first advance (its parameter block and voxel mask). */
@@ -126,13 +145,24 @@ fn umSolidHalo(t:vec3u,axis:u32,side:u32)->u32{
   pass.setPipeline(this.builder.pipeline);pass.setBindGroup(0,this.bindGroup);pass.setBindGroup(1,this.builder.group);pass.dispatchWorkgroups(x,Math.ceil(tiles/x));pass.end();
   this.built=true;
  }
+ /** Records which tiles the simulation holds at h (the record's y), from
+  * its tile words. Encode after encodeCoarse and after every relayout,
+  * before the all-4h levels read umSolidCut. */
+ encodeSimulation(encoder:GPUCommandEncoder,topology:GPUBufferBinding):void{
+  const layout=this.coarseLayout,coarse=this.coarse,s=this.simulation;if(!layout||!coarse)return;
+  if(!s)throw new Error("The coarse solid record is not initialized");
+  if(s.topology!==topology.buffer){s.topology=topology.buffer;s.group=this.device.createBindGroup({layout:s.layout,entries:[{binding:0,resource:{buffer:coarse.record}},{binding:1,resource:topology}]});}
+  const groups=Math.ceil(layout.tiles.length/64),x=Math.min(groups,this.device.limits.maxComputeWorkgroupsPerDimension);
+  const pass=encoder.beginComputePass({label:"Uniform mixed solid simulation widths"});
+  pass.setPipeline(s.pipeline);pass.setBindGroup(0,s.group!);pass.dispatchWorkgroups(x,Math.ceil(groups/x));pass.end();
+ }
  destroy():void{this.coarse?.record.destroy();}
 }
 
 /** Requires UM_D. `group` undefined emits inert stubs with the same ABI.
  * `coarse` (the record's owner/halo count) binds the all-4h record: the
- * group is then UniformMixedSolid.coarse.bindLayout, and umSolidCoarse(i) and
- * umSolidCut(tile) read it. */
+ * group is then UniformMixedSolid.coarse.bindLayout, and umSolidCoarse(i),
+ * umSolidCut(tile) (cut and simulated at h) and umSolidStaticCut(tile) read it. */
 export function uniformMixedSolidWGSL(group?:number,coarse?:number):string{
  if(group===undefined)return /* wgsl */ `
 fn umSolidEnabled()->bool{return false;}
@@ -156,7 +186,9 @@ struct UMSolidParams {
 fn umSolidEnabled()->bool{return true;}
 ${coarse===undefined?"":`@group(${group}) @binding(3) var<storage,read> umSolidRecord:array<vec4f>;
 fn umSolidCoarse(i:u32)->vec4f{return umSolidRecord[i];}
-fn umSolidCut(t:u32)->bool{return umSolidRecord[${coarse}u+t].x>0.5;}`}
+fn umSolidStaticCut(t:u32)->bool{return umSolidRecord[${coarse}u+t].x>0.5;}
+// A cut tile whose h texels are live: the simulation holds it at h.
+fn umSolidCut(t:u32)->bool{let r=umSolidRecord[${coarse}u+t];return r.x>0.5&&r.y>0.5;}`}
 fn umSolidValid(p:vec3i)->bool{return all(p>=vec3i(0))&&all(p<vec3i(UM_D));}
 // staticSolidVoxelOccupied: lattice plus a one-cell halo (the box shell).
 fn umSolidVoxel(p:vec3i)->bool{
